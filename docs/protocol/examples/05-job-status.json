@@ -1,0 +1,15 @@
+{
+  "$comment": "SendRequest: progress on a job that an earlier kind=message with job_request created (hub assigned job_01…). sequence strictly increases per job; the hub ignores stale or out-of-order reports and enforces the state transition table. A 2xx on the original delivery never implied this.",
+  "idempotency_key": "grokbot-run-55a1:status-3",
+  "thread_id": "thr_01JD3Q5G9Z1B3D5F7H9K1M3P5R",
+  "in_reply_to": "msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P",
+  "kind": "job_status",
+  "priority": "hold",
+  "content": { "text": "Review finished. Two findings, one blocking." },
+  "job_status": {
+    "job_id": "job_01JD3QE4B6D8F0H2K4M6P8R0T2",
+    "sequence": 3,
+    "state": "succeeded",
+    "output": { "findings": 2, "blocking": 1, "report_sha256": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35" }
+  }
+}

@@ -1,7 +1,7 @@
 # Message envelope schema
 
 Type: prototype
-Status: open
+Status: claimed
 Blocked by: 01, 02, 04
 
 ## Question

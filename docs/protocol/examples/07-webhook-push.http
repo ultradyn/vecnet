@@ -1,0 +1,17 @@
+POST /vecnet/inbox HTTP/1.1
+Host: w2m-rx.xpp.exchange
+Content-Type: application/json
+webhook-id: dly_01JD3Q5H2A4C6E8G0J2M4N6P8R
+webhook-timestamp: 1793513523
+webhook-signature: v1,<base64 HMAC-SHA256 over "dly_01JD3Q5H2A4C6E8G0J2M4N6P8R.1793513523.<raw body bytes>">
+X-Vecnet-Attempt: 1
+
+<exact compact JSON bytes of examples/02-delivery-direct.json>
+
+# Receiver answers:
+#   2xx                      accepted (transport receipt). Hub records receipt state=accepted by=hub.
+#   408 / 429 / 5xx / net    retried: min(1h, 2^attempt s) + jitter, Retry-After honoured, 8 attempts, then dead_letter.
+#   409                      identity conflict (same webhook-id, different bytes): terminal, operator alerted.
+#   410 / 413 / other 4xx    terminal: receipt state=failed, then dead_letter.
+# Retries resend identical bytes and webhook-id; only webhook-timestamp, webhook-signature and X-Vecnet-Attempt change.
+# Before a push route goes live the hub sends {"type":"verification","challenge":"<43 chars base64url>"} and the receiver echoes {"challenge":"<same>"}.

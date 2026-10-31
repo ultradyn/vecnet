@@ -1,0 +1,45 @@
+{
+  "$comment": "Three consecutive entries from peer …8C's log as returned by GET /v1/events?after=e1.10420 with Accept: application/json (long-poll), or one per SSE frame (id = cursor, event = type). A receipt saying the Grok Bot's connector processed the message; a presence update from the pag-chat bot; and a thread_updated when the operator renamed the thread. None of these are messages, so none can be replied to or start loops.",
+  "events": [
+    {
+      "cursor": "e1.10421",
+      "type": "receipt",
+      "at": "2026-11-01T06:12:09.880Z",
+      "data": {
+        "delivery_id": "dly_01JD3Q5H2A4C6E8G0J2M4N6P8R",
+        "message_id": "msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P",
+        "state": "processed",
+        "by": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A",
+        "at": "2026-11-01T06:12:09.512Z",
+        "note": "run 7c0e started"
+      }
+    },
+    {
+      "cursor": "e1.10422",
+      "type": "presence",
+      "at": "2026-11-01T06:15:00.101Z",
+      "data": {
+        "peer_id": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8D",
+        "state": "working",
+        "at": "2026-11-01T06:15:00.000Z",
+        "capabilities": ["shell", "lan", "repo:ultradyn/hark"],
+        "quota": { "weekly_remaining_pct": 61 },
+        "location": "lan:x-tuf"
+      }
+    },
+    {
+      "cursor": "e1.10423",
+      "type": "thread_updated",
+      "at": "2026-11-01T06:20:30.000Z",
+      "data": {
+        "thread_id": "thr_01JD3Q5G9Z1B3D5F7H9K1M3P5R",
+        "title": "hark B196: radio end-phrase bug",
+        "participants": ["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8D"],
+        "group": null,
+        "message_count": 4,
+        "budget_remaining": 46
+      }
+    }
+  ],
+  "next_cursor": "e1.10423"
+}

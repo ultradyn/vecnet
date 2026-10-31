@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vecnet:envelope:1",
+  "title": "vecnet wire objects, schema version 1 (PROTOTYPE, ticket 08)",
+  "description": "Everything a peer sends to or receives from the hub. Entry points: SendRequest (peer -> hub), Event (hub -> peer, one per stream frame or push), Delivery, Receipt, Presence, ThreadSummary. Sizes in bytes are enforced by the hub; JSON Schema maxLength counts characters and is only a backstop.",
+  "$defs": {
+    "ulid": { "type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$" },
+    "peerId": { "type": "string", "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$", "description": "Enrolled peer. Display names are never an address." },
+    "groupId": { "type": "string", "pattern": "^(team|grp)_[0-9A-HJKMNP-TV-Z]{26}$", "description": "team_ = operator-managed team; grp_ = ad hoc group created by a peer." },
+    "messageId": { "type": "string", "pattern": "^msg_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "deliveryId": { "type": "string", "pattern": "^dly_[0-9A-HJKMNP-TV-Z]{26}$", "description": "One message to one recipient peer. Equals webhook-id on push. The dedupe key." },
+    "threadId": { "type": "string", "pattern": "^thr_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "jobId": { "type": "string", "pattern": "^job_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "approvalId": { "type": "string", "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "sourceId": { "type": "string", "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$", "description": "Inbound webhook source (e.g. a GitHub repo hook). Not a peer." },
+    "cursor": { "type": "string", "pattern": "^e[0-9]+\\.[0-9]+$", "description": "Opaque per-peer log position <epoch>.<seq>. Used as SSE id, Last-Event-ID, ?after=, next_cursor and in acks." },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "recipient": {
+      "description": "A peer id or a group id. Groups fan out to one Delivery per member at send time.",
+      "anyOf": [{ "$ref": "#/$defs/peerId" }, { "$ref": "#/$defs/groupId" }]
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["wake", "hold"],
+      "description": "wake: push to the recipient now (webhook, MCP event, SSE). hold: park in the recipient's log; it is delivered when the recipient next pulls or holds a stream open. Costs quota on providers that bill per wake."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["message", "approval_request", "approval_response", "job_status"],
+      "description": "message: ordinary content, may carry job_request. approval_request/approval_response: yes/no with expiry. job_status: progress report on a job. Presence and receipts are NOT messages; they are their own Event types."
+    },
+    "attachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "size", "media_type"],
+      "properties": {
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "size": { "type": "integer", "minimum": 0, "maximum": 26214400, "description": "Bytes. Hub cap 25 MiB." },
+        "media_type": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 255 },
+        "origin_url": { "type": "string", "format": "uri", "maxLength": 2048, "description": "Where the sender got it, if anywhere. Informational." },
+        "blob_url": { "type": "string", "format": "uri", "maxLength": 2048, "description": "Set by the hub on Delivery only: a read URL carrying a token scoped to this recipient and expiring. Absent if the bytes are not hosted." }
+      }
+    },
+    "loop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hops", "max_hops", "expires_at", "sender_chain"],
+      "properties": {
+        "hops": { "type": "integer", "minimum": 0, "description": "Set by the hub: 0 for a fresh message; a reply inherits parent.hops + 1." },
+        "max_hops": { "type": "integer", "minimum": 1, "maximum": 64, "description": "Hub rejects a reply whose hops would exceed this. Default 16, inherited down a reply chain, may be lowered by any sender." },
+        "expires_at": { "$ref": "#/$defs/timestamp", "description": "TTL as wall-clock. Undelivered after this: dead-letter, not retried." },
+        "sender_chain": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/peerId" }, "description": "Most recent 32 senders along the reply chain, oldest first. Lets a recipient detect A-B-A-B ping-pong in code." }
+      }
+    },
+    "jobRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "job_key", "operation", "instructions", "input"],
+      "properties": {
+        "version": { "const": 1 },
+        "job_key": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$", "description": "Immutable within the thread. Same key + same intent returns the existing job (hub assigns job_id)." },
+        "operation": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$" },
+        "instructions": { "type": "string", "minLength": 1, "maxLength": 16384 },
+        "input": {}
+      }
+    },
+    "jobStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "sequence", "state"],
+      "properties": {
+        "job_id": { "$ref": "#/$defs/jobId" },
+        "sequence": { "type": "integer", "minimum": 1, "description": "Strictly increasing per job. Stale or equal sequence is ignored." },
+        "state": { "type": "string", "enum": ["accepted", "running", "succeeded", "failed", "cancelled"] },
+        "output": {}
+      }
+    },
+    "approvalRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approval_id", "question", "options", "expires_at"],
+      "properties": {
+        "approval_id": { "$ref": "#/$defs/approvalId" },
+        "question": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "options": { "type": "array", "minItems": 2, "maxItems": 8, "items": { "type": "string", "maxLength": 64 }, "default": ["yes", "no"] },
+        "expires_at": { "$ref": "#/$defs/timestamp" },
+        "escalate_to_operator": { "type": "boolean", "default": true, "description": "If no response by expires_at minus a grace window, the hub notifies the operator." }
+      }
+    },
+    "approvalResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approval_id", "decision"],
+      "properties": {
+        "approval_id": { "$ref": "#/$defs/approvalId" },
+        "decision": { "type": "string", "maxLength": 64, "description": "One of the request's options, or \"expired\" when the hub closes it." },
+        "reason": { "type": "string", "maxLength": 2048 }
+      }
+    },
+    "message": {
+      "type": "object",
+      "description": "The logical message. Identical across every Delivery of it. Fields the hub fills: message_id, thread_id (if new), sender, created_at, loop, original_thread_id (bridged ingress only).",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_id", "thread_id", "in_reply_to", "original_thread_id", "kind", "sender", "recipients", "priority", "created_at", "content", "attachments", "metadata", "loop"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "message_id": { "$ref": "#/$defs/messageId" },
+        "thread_id": { "$ref": "#/$defs/threadId" },
+        "in_reply_to": { "anyOf": [{ "$ref": "#/$defs/messageId" }, { "type": "null" }] },
+        "original_thread_id": { "type": ["string", "null"], "maxLength": 192, "description": "The external conversation id when the message entered via a bridged transport (grokbot run, GitHub thread, dot chat). Null for native traffic. Echoed back by connectors so replies land in the right external thread." },
+        "kind": { "$ref": "#/$defs/kind" },
+        "sender": {
+          "anyOf": [{ "$ref": "#/$defs/peerId" }, { "$ref": "#/$defs/sourceId" }],
+          "description": "The enrolled peer, or the inbound webhook source, that originated it. Set by the hub from the authenticated caller, never from the body."
+        },
+        "recipients": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/recipient" }, "description": "As addressed by the sender (peers and/or groups). Deliveries are fanned out from this." },
+        "priority": { "$ref": "#/$defs/priority" },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "content": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["text"],
+          "properties": {
+            "text": { "type": "string", "maxLength": 4096, "description": "Markdown. Hub enforces 4096 UTF-8 BYTES. Larger text goes in an attachment of media_type text/markdown and text holds a preview." },
+            "truncated": { "type": "boolean", "default": false, "description": "True when text is a preview of an attachment." }
+          }
+        },
+        "attachments": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/attachment" } },
+        "metadata": { "type": "object", "maxProperties": 32, "description": "Free-form, sender-owned, <= 8 KiB serialised. Keys starting with \"vecnet.\" are reserved for the hub." },
+        "loop": { "$ref": "#/$defs/loop" },
+        "job_request": { "$ref": "#/$defs/jobRequest" },
+        "job_status": { "$ref": "#/$defs/jobStatus" },
+        "approval_request": { "$ref": "#/$defs/approvalRequest" },
+        "approval_response": { "$ref": "#/$defs/approvalResponse" }
+      },
+      "allOf": [
+        { "if": { "properties": { "kind": { "const": "job_status" } } }, "then": { "required": ["job_status"] } },
+        { "if": { "properties": { "kind": { "const": "approval_request" } } }, "then": { "required": ["approval_request"] } },
+        { "if": { "properties": { "kind": { "const": "approval_response" } } }, "then": { "required": ["approval_response"] } },
+        { "if": { "properties": { "kind": { "const": "message" } }, "required": ["kind"] }, "then": { "not": { "anyOf": [{ "required": ["job_status"] }, { "required": ["approval_request"] }, { "required": ["approval_response"] }] } } }
+      ]
+    },
+    "threadSummary": {
+      "type": "object",
+      "description": "Context the hub attaches to every Delivery so the recipient need not fetch the thread.",
+      "additionalProperties": false,
+      "required": ["thread_id", "title", "participants", "message_count", "budget_remaining"],
+      "properties": {
+        "thread_id": { "$ref": "#/$defs/threadId" },
+        "title": { "type": ["string", "null"], "maxLength": 200 },
+        "participants": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/peerId" } },
+        "group": { "anyOf": [{ "$ref": "#/$defs/groupId" }, { "type": "null" }], "description": "Set when the thread belongs to a team or ad hoc group." },
+        "message_count": { "type": "integer", "minimum": 1 },
+        "budget_remaining": { "type": ["integer", "null"], "minimum": 0, "description": "Messages left before the hub stops accepting sends to this thread. Null = unlimited. Hint for recipients; enforced by the hub." }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "description": "What one recipient peer actually receives. Pushed as the webhook body, carried as the data of an Event, or returned by the MCP inbox tool.",
+      "additionalProperties": false,
+      "required": ["schema_version", "delivery_id", "recipient", "via", "attempt", "ingress", "thread", "message"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "delivery_id": { "$ref": "#/$defs/deliveryId" },
+        "recipient": { "$ref": "#/$defs/peerId", "description": "Always a single peer. Connectors check it equals their own id." },
+        "via": { "anyOf": [{ "$ref": "#/$defs/groupId" }, { "type": "null" }], "description": "The group that resolved to this recipient, or null for a direct address." },
+        "attempt": { "type": "integer", "minimum": 1, "description": "Push attempt number. Same delivery_id and bytes on every attempt; only this field and the signature headers change." },
+        "ingress": {
+          "type": "string",
+          "enum": ["http_send", "mcp_tool", "inbound_webhook", "connector", "operator_ui", "hub"],
+          "description": "How the message entered the hub. Provenance only; conveys no authority. Recipients treat every body as untrusted content."
+        },
+        "thread": { "$ref": "#/$defs/threadSummary" },
+        "message": { "$ref": "#/$defs/message" }
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "description": "Progress of one Delivery. accepted = transport took the bytes durably (hub records this itself for pull transports on ack; for push on a 2xx). processed = recipient acted on it (recipient sends). read = a human saw it (optional). failed = recipient rejected it (terminal). Receipts are events, never messages, so they cannot start loops.",
+      "additionalProperties": false,
+      "required": ["delivery_id", "message_id", "state", "by", "at"],
+      "properties": {
+        "delivery_id": { "$ref": "#/$defs/deliveryId" },
+        "message_id": { "$ref": "#/$defs/messageId" },
+        "state": { "type": "string", "enum": ["accepted", "processed", "read", "failed", "dead_letter"] },
+        "by": { "anyOf": [{ "$ref": "#/$defs/peerId" }, { "const": "hub" }] },
+        "at": { "$ref": "#/$defs/timestamp" },
+        "note": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "presence": {
+      "type": "object",
+      "description": "Self-reported by a peer. The hub stores it in the directory and emits it as an Event to peers that subscribe to presence. Never verified by the hub.",
+      "additionalProperties": false,
+      "required": ["peer_id", "state", "at"],
+      "properties": {
+        "peer_id": { "$ref": "#/$defs/peerId" },
+        "state": { "type": "string", "enum": ["idle", "working", "blocked", "offline"] },
+        "at": { "$ref": "#/$defs/timestamp" },
+        "capabilities": { "type": "array", "maxItems": 64, "items": { "type": "string", "maxLength": 64 } },
+        "quota": { "type": "object", "maxProperties": 16, "description": "Free-form, e.g. {\"weekly_remaining_pct\": 42}." },
+        "location": { "type": "string", "maxLength": 64 },
+        "note": { "type": "string", "maxLength": 512 }
+      }
+    },
+    "event": {
+      "type": "object",
+      "description": "One entry in a peer's durable log. SSE: id = cursor, event = type, data = this object. Long-poll and MCP vecnet_inbox return arrays of these.",
+      "additionalProperties": false,
+      "required": ["cursor", "type", "at", "data"],
+      "properties": {
+        "cursor": { "$ref": "#/$defs/cursor" },
+        "type": { "type": "string", "enum": ["delivery", "receipt", "presence", "thread_updated", "directory_updated", "approval_expired"] },
+        "at": { "$ref": "#/$defs/timestamp" },
+        "data": {
+          "anyOf": [
+            { "$ref": "#/$defs/delivery" },
+            { "$ref": "#/$defs/receipt" },
+            { "$ref": "#/$defs/presence" },
+            { "$ref": "#/$defs/threadSummary" },
+            { "type": "object", "description": "directory_updated: {peer_id, change}. approval_expired: {approval_id, thread_id}." }
+          ]
+        }
+      }
+    },
+    "sendRequest": {
+      "type": "object",
+      "description": "POST /v1/messages body (also the arguments of the MCP vecnet_send tool). The hub derives message_id, thread_id (when new), sender, created_at and loop.",
+      "additionalProperties": false,
+      "required": ["idempotency_key", "priority", "content"],
+      "properties": {
+        "idempotency_key": { "$ref": "#/$defs/idempotencyKey", "description": "Per sender. Same key within 24 h returns the original message_id without re-sending." },
+        "thread_id": { "$ref": "#/$defs/threadId", "description": "Omit to start a new thread. If present, recipients defaults to the thread's participants." },
+        "thread_title": { "type": "string", "maxLength": 200, "description": "Only when starting a thread." },
+        "in_reply_to": { "$ref": "#/$defs/messageId" },
+        "original_thread_id": { "type": "string", "maxLength": 192, "description": "Connectors only: the external conversation this came from." },
+        "recipients": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/recipient" } },
+        "kind": { "$ref": "#/$defs/kind", "default": "message" },
+        "priority": { "$ref": "#/$defs/priority" },
+        "content": { "$ref": "#/$defs/message/properties/content" },
+        "attachments": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/attachment" }, "description": "Hosted bytes must be uploaded first (PUT /v1/blobs); the hub rejects unknown hashes unless origin_url is set." },
+        "metadata": { "type": "object", "maxProperties": 32 },
+        "max_hops": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "expires_at": { "$ref": "#/$defs/timestamp" },
+        "job_request": { "$ref": "#/$defs/jobRequest" },
+        "job_status": { "$ref": "#/$defs/jobStatus" },
+        "approval_request": { "$ref": "#/$defs/approvalRequest" },
+        "approval_response": { "$ref": "#/$defs/approvalResponse" }
+      },
+      "anyOf": [{ "required": ["thread_id"] }, { "required": ["recipients"] }]
+    }
+  }
+}

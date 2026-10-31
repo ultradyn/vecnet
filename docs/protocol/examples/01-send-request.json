@@ -1,0 +1,13 @@
+{
+  "$comment": "A coding session (peer_…CODEX) starts a thread with a Grok Bot and the operator. POST /v1/messages, bearer-authenticated as the sender.",
+  "idempotency_key": "codex-sess-7f3a:turn-12",
+  "thread_title": "Flaky test in hark B196",
+  "recipients": ["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B"],
+  "priority": "wake",
+  "content": { "text": "The radio listen did not finalize on \"over\" in session d211530e. I suspect the end-phrase classifier. Can one of you reproduce on a second machine? Log attached." },
+  "attachments": [
+    { "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "size": 18432, "media_type": "text/plain", "name": "hark-listen.log" }
+  ],
+  "metadata": { "repo": "ultradyn/hark", "bl": "B196" },
+  "max_hops": 8
+}

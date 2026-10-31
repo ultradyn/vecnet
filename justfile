@@ -21,6 +21,10 @@ frontier:
         [ "$ok" = 1 ] && echo "$f  [$(grep -m1 '^Type:' "$f" | awk '{print $2}')]  $(head -1 "$f" | sed 's/^# //')" || true
     done
 
+# Validate docs/protocol/examples against the envelope schema (needs python3 + jsonschema)
+validate-protocol:
+    python3 -I scripts/validate_examples.py docs/protocol
+
 # Show every ticket with status and type
 tickets:
     @cd .scratch/vecnet/issues && for f in *.md; do printf '%-36s %-9s %-10s %s\n' "$f" "$(grep -m1 '^Status:' "$f" | awk '{print $2}')" "$(grep -m1 '^Type:' "$f" | awk '{print $2}')" "$(head -1 "$f" | sed 's/^# //')"; done
