@@ -1,7 +1,7 @@
 # Operator web inbox, chat UI and dashboard
 
 Type: prototype
-Status: open
+Status: claimed
 Blocked by: 09, 14
 
 ## Question
