@@ -1,0 +1,232 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+
+	"github.com/BurntSushi/toml"
+)
+
+// Profile is one [profiles.<name>] table of the config file: a hub origin
+// and the long-lived credential (peer, principal or operator) used there.
+type Profile struct {
+	Hub    string `toml:"hub"`
+	Secret string `toml:"secret"`
+	PeerID string `toml:"peer_id,omitempty"`
+}
+
+// Config is the TOML config file:
+//
+//	default = "home"
+//	[profiles.home]
+//	hub = "https://…"
+//	secret = "vn_peer_…"
+type Config struct {
+	Default  string             `toml:"default,omitempty"`
+	Profiles map[string]Profile `toml:"profiles"`
+}
+
+// configPath resolves the config file: $VECNET_CONFIG, else
+// $XDG_CONFIG_HOME/vecnet/config.toml, else $HOME/.config/vecnet/config.toml.
+// Everything goes through getenv so tests never touch the real home.
+func configPath(getenv func(string) string) (string, error) {
+	if p := getenv("VECNET_CONFIG"); p != "" {
+		return p, nil
+	}
+	if d := getenv("XDG_CONFIG_HOME"); d != "" {
+		return filepath.Join(d, "vecnet", "config.toml"), nil
+	}
+	if h := getenv("HOME"); h != "" {
+		return filepath.Join(h, ".config", "vecnet", "config.toml"), nil
+	}
+	return "", usageErr("cannot locate the config file: set VECNET_CONFIG, XDG_CONFIG_HOME or HOME")
+}
+
+// cacheDir resolves $XDG_CACHE_HOME/vecnet, else $HOME/.cache/vecnet.
+func cacheDir(getenv func(string) string) (string, error) {
+	if d := getenv("XDG_CACHE_HOME"); d != "" {
+		return filepath.Join(d, "vecnet"), nil
+	}
+	if h := getenv("HOME"); h != "" {
+		return filepath.Join(h, ".cache", "vecnet"), nil
+	}
+	return "", errors.New("cannot locate the cache dir: set XDG_CACHE_HOME or HOME")
+}
+
+// loadConfig reads path; a missing file is an empty Config.
+func loadConfig(path string) (Config, error) {
+	var c Config
+	if _, err := toml.DecodeFile(path, &c); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return Config{Profiles: map[string]Profile{}}, nil
+		}
+		return Config{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	if c.Profiles == nil {
+		c.Profiles = map[string]Profile{}
+	}
+	return c, nil
+}
+
+// saveConfig writes c to path (mode 0600, directory 0700) atomically.
+func saveConfig(path string, c Config) error {
+	var b bytes.Buffer
+	if err := toml.NewEncoder(&b).Encode(c); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	return writeFileAtomic(path, b.Bytes())
+}
+
+// profile picks the profile named by --net, else the file's default, else
+// the only profile there is.
+func (c Config) profile(name string) (string, Profile, error) {
+	if name == "" {
+		name = c.Default
+	}
+	if name == "" && len(c.Profiles) == 1 {
+		for n := range c.Profiles {
+			name = n
+		}
+	}
+	if name == "" {
+		if len(c.Profiles) == 0 {
+			return "", Profile{}, usageErr("no profile configured; run `vecnet enrol --hub URL --token T --profile NAME`")
+		}
+		return "", Profile{}, usageErr("several profiles and no default; pass --net <profile>")
+	}
+	p, ok := c.Profiles[name]
+	if !ok {
+		return "", Profile{}, usageErr(fmt.Sprintf("no profile %q in the config file", name))
+	}
+	if p.Hub == "" || p.Secret == "" {
+		return "", Profile{}, usageErr(fmt.Sprintf("profile %q needs hub and secret", name))
+	}
+	return name, p, nil
+}
+
+// writeFileAtomic writes data to a temp file beside path and renames it
+// over path, so a reader never sees a half-written file. Mode 0600.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmp, 0o600)
+	}
+	if werr == nil {
+		werr = os.Rename(tmp, path)
+	}
+	if werr != nil {
+		os.Remove(tmp)
+	}
+	return werr
+}
+
+// cache is the CLI's local state under the cache dir: messages.json maps
+// message_id → thread_id (filled from inbox, watch and thread output, read
+// by reply) and cursors.json maps a stream key (profile, plus the --as peer)
+// to its last acked cursor (PROTOCOL §13.1: persisted, advanced only after
+// an ack succeeded).
+type cache struct {
+	dir string // "" disables the cache
+}
+
+// maxCachedMessages bounds messages.json; the oldest ids (ULIDs sort by
+// time) are dropped first.
+const maxCachedMessages = 10000
+
+func (c cache) readJSON(name string) map[string]string {
+	m := map[string]string{}
+	if c.dir == "" {
+		return m
+	}
+	raw, err := os.ReadFile(filepath.Join(c.dir, name))
+	if err != nil {
+		return m
+	}
+	if json.Unmarshal(raw, &m) != nil || m == nil {
+		return map[string]string{}
+	}
+	return m
+}
+
+func (c cache) writeJSON(name string, m map[string]string) error {
+	if c.dir == "" {
+		return errors.New("no cache dir")
+	}
+	raw, err := json.MarshalIndent(m, "", " ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(filepath.Join(c.dir, name), raw)
+}
+
+// threadOf returns the cached thread of messageID.
+func (c cache) threadOf(messageID string) (string, bool) {
+	t, ok := c.readJSON("messages.json")[messageID]
+	return t, ok && t != ""
+}
+
+// rememberMessages records message_id → thread_id pairs.
+func (c cache) rememberMessages(pairs map[string]string) error {
+	if len(pairs) == 0 || c.dir == "" {
+		return nil
+	}
+	m := c.readJSON("messages.json")
+	changed := false
+	for id, thr := range pairs {
+		if id != "" && thr != "" && m[id] != thr {
+			m[id] = thr
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if len(m) > maxCachedMessages {
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys[:len(m)-maxCachedMessages] {
+			delete(m, k)
+		}
+	}
+	return c.writeJSON("messages.json", m)
+}
+
+// cursor returns the last acked cursor stored for key.
+func (c cache) cursor(key string) string {
+	return c.readJSON("cursors.json")[key]
+}
+
+// setCursor stores cur as key's acked cursor.
+func (c cache) setCursor(key, cur string) error {
+	if c.dir == "" {
+		return nil
+	}
+	m := c.readJSON("cursors.json")
+	if m[key] == cur {
+		return nil
+	}
+	m[key] = cur
+	return c.writeJSON("cursors.json", m)
+}
