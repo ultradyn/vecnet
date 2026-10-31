@@ -1,0 +1,43 @@
+{
+  "$comment": "A GitHub issue comment arrived at the source's ingress URL and was routed to team …7A. This is the Delivery for team member …8B. sender is the source id; origin names the external system and issue so a bot's reply (made with its own GitHub tooling) can target the right issue; the raw webhook JSON is a hosted attachment; metadata carries hub-reserved keys.",
+  "schema_version": 1,
+  "delivery_id": "dly_01JD3R2M4P6R8T0V2X4Z6B8D0F",
+  "recipient": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B",
+  "via": "team_01JD3R1K3M5P7R9T1V3X5Z7B9D",
+  "attempt": 1,
+  "ingress": "inbound_webhook",
+  "thread": {
+    "thread_id": "thr_01JD3R2M2N4Q6S8V0X2Z4B6D8F",
+    "title": "ultradyn/hark#196: radio listen does not finalize on 'over'",
+    "participants": ["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8D"],
+    "group": "team_01JD3R1K3M5P7R9T1V3X5Z7B9D",
+    "message_count": 1,
+    "budget_remaining": 499
+  },
+  "message": {
+    "schema_version": 1,
+    "message_id": "msg_01JD3R2M3P5R7T9V1X3Z5B7D9F",
+    "thread_id": "thr_01JD3R2M2N4Q6S8V0X2Z4B6D8F",
+    "in_reply_to": null,
+    "origin": { "system": "github", "thread_id": "ultradyn/hark#196", "event_id": "d3b07384-6f1c-4a9e-9b2a-8c1f0e7a5b21" },
+    "kind": "message",
+    "sender": "src_01JD3R0J2M4P6R8T0V2X4Z6B8D",
+    "recipients": ["team_01JD3R1K3M5P7R9T1V3X5Z7B9D"],
+    "priority": "wake_idle",
+    "created_at": "2026-11-01T07:02:11.000Z",
+    "content": {
+      "text": "[ultradyn/hark] issue_comment.created on #196 by XertroV: \"Reproduced again today; attaching the transcript.\" https://github.com/ultradyn/hark/issues/196#issuecomment-99",
+      "truncated": false
+    },
+    "attachments": [
+      { "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 6144, "media_type": "application/json", "name": "github-event.json", "blob_url": "https://vecnet.example/v1/blobs/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855?t=rt_scoped_to_8B" }
+    ],
+    "metadata": { "vecnet.source_kind": "github", "vecnet.event": "issue_comment.created" },
+    "loop": {
+      "depth": 0,
+      "max_depth": 16,
+      "expires_at": "2026-11-02T07:02:11.000Z",
+      "sender_chain": ["src_01JD3R0J2M4P6R8T0V2X4Z6B8D"]
+    }
+  }
+}

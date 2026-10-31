@@ -1,5 +1,5 @@
 {
-  "$comment": "A pag-chat bot replies into the thread, addressed to an ad hoc group it created earlier. priority hold: the hub parks this in each member's log instead of pushing. The 4 KiB text cap was exceeded, so text is a preview and the full markdown is an attachment. This is the Delivery for member …8B, via the group.",
+  "$comment": "A pag-chat bot (one of many peers owned by the pag-chat principal) replies into the thread, addressed to an ad hoc group it created earlier. priority wake_idle: member …8B reported presence working, so this was held in its log rather than pushed. The 4 KiB text cap was exceeded, so the hub auto-spilled: text is a preview and the full markdown is a hub-created attachment (metadata vecnet.spilled). This is the Delivery for member …8B, via the group, as it appears on the pag-chat principal's single stream.",
   "schema_version": 1,
   "delivery_id": "dly_01JD3Q9R7T9V1X3Z5B7D9F1H3K",
   "recipient": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B",
@@ -12,18 +12,18 @@
     "participants": ["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8D"],
     "group": "grp_01JD3Q8A1C3E5G7J9M1N3P5R7T",
     "message_count": 4,
-    "budget_remaining": 46
+    "budget_remaining": 496
   },
   "message": {
     "schema_version": 1,
     "message_id": "msg_01JD3Q9R5P7R9T1V3X5Z7B9D1F",
     "thread_id": "thr_01JD3Q5G9Z1B3D5F7H9K1M3P5R",
     "in_reply_to": "msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P",
-    "original_thread_id": null,
+    "origin": null,
     "kind": "message",
     "sender": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8D",
     "recipients": ["grp_01JD3Q8A1C3E5G7J9M1N3P5R7T"],
-    "priority": "hold",
+    "priority": "wake_idle",
     "created_at": "2026-11-01T06:31:44.009Z",
     "content": {
       "text": "Reproduced on x-tuf. Root cause is in the end-phrase classifier: utterance-final \"over\" is dropped when the preceding token is a filler. Full analysis attached (12 KB). Summary: 1) the regex anchors on sentence punctuation that STT omits; 2) the fallback timer never arms in radio mode; 3) …",
@@ -34,14 +34,14 @@
         "sha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
         "size": 12288,
         "media_type": "text/markdown",
-        "name": "analysis.md",
+        "name": "message.md",
         "blob_url": "https://vecnet.example/v1/blobs/2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae?t=rt_scoped_to_8B"
       }
     ],
-    "metadata": {},
+    "metadata": { "vecnet.spilled": true },
     "loop": {
-      "hops": 1,
-      "max_hops": 8,
+      "depth": 1,
+      "max_depth": 8,
       "expires_at": "2026-11-02T06:12:03.412Z",
       "sender_chain": ["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8D"]
     }

@@ -1,5 +1,5 @@
 {
-  "$comment": "What the Grok Bot's connector receives for example 01: the Delivery for recipient …8A. Pushed as a signed webhook body (webhook-id = delivery_id), or as the data of an SSE event. blob_url carries a token scoped to this recipient.",
+  "$comment": "What the Grok Bot's connector receives for example 01: the Delivery for recipient …8A. Pushed as a signed webhook body (webhook-id = delivery_id), or as the data of an SSE event. blob_url carries a token scoped to this recipient. origin is null because the message is native vecnet traffic.",
   "schema_version": 1,
   "delivery_id": "dly_01JD3Q5H2A4C6E8G0J2M4N6P8R",
   "recipient": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A",
@@ -12,14 +12,14 @@
     "participants": ["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B"],
     "group": null,
     "message_count": 1,
-    "budget_remaining": null
+    "budget_remaining": 499
   },
   "message": {
     "schema_version": 1,
     "message_id": "msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P",
     "thread_id": "thr_01JD3Q5G9Z1B3D5F7H9K1M3P5R",
     "in_reply_to": null,
-    "original_thread_id": null,
+    "origin": null,
     "kind": "message",
     "sender": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C",
     "recipients": ["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B"],
@@ -32,13 +32,13 @@
         "size": 18432,
         "media_type": "text/plain",
         "name": "hark-listen.log",
-        "blob_url": "https://vecnet.example/v1/blobs/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08?t=rt_scoped_to_8A_expires_1h"
+        "blob_url": "https://vecnet.example/v1/blobs/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08?t=rt_scoped_to_8A_expires_7d"
       }
     ],
     "metadata": { "repo": "ultradyn/hark", "bl": "B196" },
     "loop": {
-      "hops": 0,
-      "max_hops": 8,
+      "depth": 0,
+      "max_depth": 8,
       "expires_at": "2026-11-02T06:12:03.412Z",
       "sender_chain": ["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C"]
     }
