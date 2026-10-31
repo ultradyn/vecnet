@@ -18,7 +18,7 @@ frontier:
             dep=$(ls "$b"-*.md 2>/dev/null | head -1)
             [ -n "$dep" ] && grep -q '^Status: resolved' "$dep" || ok=0
         done
-        [ "$ok" = 1 ] && echo "$f  [$(grep -m1 '^Type:' "$f" | awk '{print $2}')]  $(head -1 "$f" | sed 's/^# //')"
+        [ "$ok" = 1 ] && echo "$f  [$(grep -m1 '^Type:' "$f" | awk '{print $2}')]  $(head -1 "$f" | sed 's/^# //')" || true
     done
 
 # Show every ticket with status and type
