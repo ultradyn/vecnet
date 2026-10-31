@@ -665,7 +665,7 @@
         "attempt": {
           "type": "integer",
           "minimum": 1,
-          "description": "Push attempt number. Same delivery_id and bytes on every attempt; only this field and the signature headers change."
+          "description": "Always 1 in the body: a Delivery keeps the same delivery_id and bytes for its whole life. The live push attempt number travels in the X-Vecnet-Attempt header, which changes per attempt with the signature headers."
         },
         "ingress": {
           "type": "string",

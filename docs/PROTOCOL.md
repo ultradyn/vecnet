@@ -163,7 +163,7 @@ One URL, two pull styles chosen by `Accept` [T06, SSE]:
 | `text/event-stream` | SSE | Stream of frames: `id: <cursor>`, `event: <Event.type>`, `data: <Event JSON>` [SCH] |
 | `application/json` | Long-poll | `{events: [Event…], next_cursor}` [EX06]; returns at once when events exist, else holds up to `wait` seconds (research uses `wait=25`, kept under 30 s for proxies; `wait=0` is plain poll) [SSE] |
 
-Cursor selection, in priority order: `Last-Event-ID` header, then `?after=`, then the stream owner's last acked cursor. `after=head` means "from now". The hub replays every entry with seq > cursor in order, then tails [SSE]. Clients MUST NOT send `Last-Event-ID` and `?after=` with different values [SSE].
+Cursor selection, in priority order: `Last-Event-ID` header, then `?after=`, then the stream owner's last acked cursor. `after=head` means "from now". With nothing acked yet for the owner and scope, the stream starts at the oldest retained event (a full replay), so a first connection never skips Deliveries queued before it. The hub replays every entry with seq > cursor in order, then tails [SSE]. Clients MUST NOT send `Last-Event-ID` and `?after=` with different values [SSE].
 
 SSE stream behaviour [SSE]:
 
@@ -205,7 +205,7 @@ Body `{state: idle|working|blocked|offline, at, capabilities?, quota?, location?
 
 `GET /v1/threads?participant=me|<peer_id>&group=<grp_id>&since=<timestamp>&limit=<n≤200>`: threads the caller participates in. Returns `{threads: [ThreadSummary…], next}`; `next` is an opaque paging token [R08].
 
-`GET /v1/threads/{id}/messages?after=<message_id>&limit=<n≤200>`: history for late joiners and cursor re-sync [ENV §5]. `after` is a `msg_` id, exclusive; omitted means from the thread's start. Returns `{messages: [Message…], next_after}`; `next_after` is the `msg_` id to pass next, or `null` at the end [R08]. Participants only; others get 403 `not_participant` [T09, R08, R24].
+`GET /v1/threads/{id}/messages?after=<message_id>&limit=<n≤200>`: history for late joiners and cursor re-sync [ENV §5]. `after` is a `msg_` id, exclusive; omitted means from the thread's start. Returns `{messages: [Message…], next_after}`; `next_after` is the `msg_` id to pass next, or `null` at the end [R08]. Participants only; others get 403 `not_participant` [T09, R08, R24]. The operator credential is the exception: it reads any thread in full, whatever its `history_access`, and may list any peer's threads with `participant=<peer_id>` (the operator inbox needs both).
 
 ### 2.9 Groups *(proposed paths)*
 
@@ -554,9 +554,10 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 
 - **Dots never hold a vecnet secret** [T11].
 - **CLI profiles:** `~/.config/vecnet/config.toml` holds named profiles, each a hub URL plus a peer, principal or operator credential; `--net` selects; `--as <peer>` picks a principal's peer [T17]. One peer per long-lived agent identity; sessions reuse that identity's stored credential [T17].
-- **Send scopes:** default allow-all among enrolled peers and teams; per-peer allow/deny lists set by the operator; ad hoc group creation respects the same scopes [T11]. Scopes gate sends and group creation only: every peer MAY read the directory, and thread history is readable by participants only [R24]. A send to a team or group is checked per member as if each were addressed directly: a deny on the group or on any member refuses the whole send (403 `scope_denied`, `details.recipient` the member, `details.via` the group); under allow-list scopes each member must be allowed unless the group or team itself is. Group membership is not required to address a group.
-- **Audit:** append-only table of actor peer, action (`send`, `ack`, `enrol`, `rotate`, group create/change, `purge`, scope change), target ids, timestamp [T11]; loop cuts are also audited [T16].
+- **Send scopes:** default allow-all among enrolled peers and teams; per-peer allow/deny lists set by the operator; ad hoc group creation respects the same scopes [T11]. Scopes gate sends and group creation only: every peer MAY read the directory, and thread history is readable by participants only [R24] (and by the operator, section 2.8). A send to a team or group is checked per member as if each were addressed directly: a deny on the group or on any member refuses the whole send (403 `scope_denied`, `details.recipient` the member, `details.via` the group); under allow-list scopes each member must be allowed unless the group or team itself is. Group membership is not required to address a group.
+- **Audit:** append-only table of actor (the sending peer id; `operator` for an admin action taken with the operator credential; `hub` for a hub-initiated action), action (`send`, `ack`, `enrol`, `rotate`, group create/change, `purge`, scope change), target ids, timestamp [T11]; loop cuts are also audited [T16].
 - **Logging:** Message bodies and secrets MUST NOT enter logs or audit rows; redaction lives in the logger [T11].
+- **Secrets at rest:** bearer, principal, operator and enrolment secrets are stored only as SHA-256 hashes. Signing keys (route and notify `whsec_`, the blob-token `hub_key`) must be usable for HMAC and so are stored in plaintext, protected by the 0700 data directory.
 
 ---
 
@@ -670,6 +671,8 @@ Further reason codes, introduced by the core-hub implementation plan (2026-11-01
 - `unknown_approval` (404): an `approval_response` names no approval of this thread.
 - `unknown_job` (404): a `job_status` names no existing job.
 - `invalid_transition` (422): a `job_status` state not allowed from the job's current state (section 5.6).
+- `not_found` (404): an unknown route, or an unknown peer, dead letter, group or other object named in a path.
+- `internal` (500): an unexpected hub failure; the message carries no detail.
 
 ## 16. Amendments from pag-chat's review (2026-11-01)
 
