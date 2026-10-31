@@ -1,7 +1,7 @@
 # Escalation and approval requests
 
 Type: grilling
-Status: open
+Status: claimed
 Blocked by: 08, 14
 
 ## Question

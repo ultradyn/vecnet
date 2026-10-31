@@ -1,7 +1,7 @@
 # The vecnet CLI for coding sessions
 
 Type: grilling
-Status: open
+Status: claimed
 Blocked by: 06, 08
 
 ## Question
