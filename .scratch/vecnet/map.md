@@ -70,3 +70,9 @@ A handoff-ready **spec** for vecnet v1: `SPEC.md` (product + behaviour), `docs/P
 - Nested sub-threads.
 - All-peers broadcast (teams and ad hoc groups only).
 - Replacing c2c's local same-machine broker.
+
+## Build (Phase 1 core hub), started 2026-11-01
+
+- Plan: `docs/plans/2026-11-01-core-hub.md` (20 TDD tasks). Workflow: `docs/plans/vecnet-core-build.workflow.mjs`, synthesised from a coordinator draft and an Opus draft (Max's workflow-synthesis process); the Opus draft's hazard list was folded into the plan text.
+- Execution: worktree `.worktrees/core-hub`, branch `core-hub`; status files in `.scratch/vecnet/build/` (gitignored); run in chunks (tasks 1–5, 6–11, 12–17, 18–20 + branch review) so the coordinator stays in the loop between chunks.
+- Later plans: connectors (MCP/Events/OAuth, Grok Bot route, openclaw, GitHub ingress), operator UI (variant A + TUI), phase-2 behaviours.
