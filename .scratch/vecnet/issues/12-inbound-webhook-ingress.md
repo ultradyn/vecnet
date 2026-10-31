@@ -1,7 +1,7 @@
 # Inbound webhook sources and routing rules
 
 Type: grilling
-Status: open
+Status: claimed
 Blocked by: 08
 
 ## Question

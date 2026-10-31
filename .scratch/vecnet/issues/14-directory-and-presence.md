@@ -1,7 +1,7 @@
 # Peer directory and presence
 
 Type: grilling
-Status: open
+Status: claimed
 Blocked by: 08
 
 ## Question

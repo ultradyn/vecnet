@@ -1,7 +1,7 @@
 # Attachment blob store
 
 Type: grilling
-Status: open
+Status: claimed
 Blocked by: 08
 
 ## Question
