@@ -430,9 +430,14 @@ func TestPrincipalStreamAndNarrow(t *testing.T) {
 		bc = append(bc, id)
 	}
 	b, c := bc[0], bc[1]
+	// Start after the setup: c's enrolment put a directory_updated Event in b's log.
+	start, err := env.Hub.Log.Current(ctx, bc)
+	if err != nil {
+		t.Fatal(err)
+	}
 	postSend(t, env, aSec, sendBody("p-1", b, c), http.StatusAccepted)
 
-	all := mustPoll(t, env, pSec, "?after="+zeroCursor(env)+"&wait=0")
+	all := mustPoll(t, env, pSec, "?after="+start.String()+"&wait=0")
 	if len(all.Events) != 2 {
 		t.Fatalf("principal stream = %d events, want 2", len(all.Events))
 	}
@@ -441,7 +446,7 @@ func TestPrincipalStreamAndNarrow(t *testing.T) {
 		t.Fatalf("principal stream recipients = %v, want %s and %s", got, b, c)
 	}
 
-	narrow := mustPoll(t, env, pSec, "?peer="+b+"&after="+zeroCursor(env)+"&wait=0")
+	narrow := mustPoll(t, env, pSec, "?peer="+b+"&after="+start.String()+"&wait=0")
 	if len(narrow.Events) != 1 || recipientOf(t, narrow.Events[0]) != b {
 		t.Fatalf("?peer=b = %+v, want one delivery to b", narrow.Events)
 	}

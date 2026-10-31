@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/audit"
@@ -33,6 +34,9 @@ type Config struct {
 	SendsPerMin     int           // per-peer send rate limit
 	ThreadsPerHour  int           // per-peer new-thread rate limit
 	BlobTokenTTL    time.Duration // lifetime of a blob URL token
+
+	PresenceTTL        time.Duration // presence staleness for every kind but session (PROTOCOL §8)
+	SessionPresenceTTL time.Duration // presence staleness for kind session
 }
 
 // DefaultConfig returns the plan's defaults; PublicURL and DataDir are empty.
@@ -45,6 +49,9 @@ func DefaultConfig() Config {
 		SendsPerMin:     60,
 		ThreadsPerHour:  20,
 		BlobTokenTTL:    7 * 24 * time.Hour,
+
+		PresenceTTL:        DefaultPresenceTTL,
+		SessionPresenceTTL: DefaultSessionPresenceTTL,
 	}
 }
 
@@ -56,6 +63,13 @@ type Hub struct {
 	Auth  *auth.Resolver
 	Cfg   Config
 	Now   func() time.Time
+
+	// IdleHook, when set, runs after a peer reports presence idle (Task 14
+	// wires the held wake_idle release here). nil means no hook.
+	IdleHook func(ctx context.Context, peerID string) error
+
+	reachMu sync.Mutex     // serialises reachability writes with streams
+	streams map[string]int // peer → open SSE streams
 }
 
 // New builds a Hub over an opened store; the blob store lives under
@@ -78,7 +92,13 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	if err != nil {
 		return nil, fmt.Errorf("hub: %w", err)
 	}
-	return &Hub{DB: db, Log: log, Blobs: blobs, Auth: &auth.Resolver{DB: db}, Cfg: cfg, Now: now}, nil
+	// No stream survives a restart: a stored "connected" is stale.
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE peers SET reachability = 'reachable' WHERE reachability = 'connected'`); err != nil {
+		return nil, fmt.Errorf("hub: reset reachability: %w", err)
+	}
+	return &Hub{DB: db, Log: log, Blobs: blobs, Auth: &auth.Resolver{DB: db}, Cfg: cfg, Now: now,
+		streams: map[string]int{}}, nil
 }
 
 // PeerKinds are the peers.kind values the hub accepts (core-hub plan Task 5).
@@ -120,10 +140,16 @@ func (h *Hub) EnsureOperator(ctx context.Context, name string) (peerID, secret s
 			return err
 		}
 		created = true
+		if err := h.DirectoryUpdated(ctx, tx, peerID, "enrolled", enrolledFields); err != nil {
+			return err
+		}
 		return audit.Record(ctx, tx, "operator", "operator_init", []string{prn, peerID}, nil)
 	})
 	if err != nil {
 		return "", "", false, err
+	}
+	if created {
+		h.notifyEnabled(ctx)
 	}
 	return peerID, secret, created, nil
 }
@@ -193,11 +219,17 @@ func (h *Hub) AddPeer(ctx context.Context, kind, name, prnID string) (peerID, en
 		if enrolToken, err = h.Auth.IssueEnrolToken(ctx, tx, peerID, 0); err != nil {
 			return err
 		}
+		// "peer add" is enrolment (PROTOCOL §2.12): the peer is in the
+		// directory from here on.
+		if err := h.DirectoryUpdated(ctx, tx, peerID, "enrolled", enrolledFields); err != nil {
+			return err
+		}
 		return audit.Record(ctx, tx, "operator", "peer_add", []string{peerID, prnID}, map[string]any{"kind": kind})
 	})
 	if err != nil {
 		return "", "", err
 	}
+	h.notifyEnabled(ctx)
 	return peerID, enrolToken, nil
 }
 

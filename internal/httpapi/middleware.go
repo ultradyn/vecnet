@@ -82,8 +82,10 @@ func bearer(r *http.Request) string {
 // authenticate resolves the bearer for every non-public path, stores the
 // Caller in the request context and enforces operator-only admin paths
 // (403 forbidden). A disabled peer's credential is 401 everywhere except
-// GET /v1/events, which answers 204.
-func authenticate(res *auth.Resolver, next http.Handler) http.Handler {
+// GET /v1/events, which answers 204. Every authenticated call by a
+// credential with its own peer is a reachability observation: touch(peer,
+// "reachable") sets last_seen (PROTOCOL §8); touch may be nil.
+func authenticate(res *auth.Resolver, touch func(ctx context.Context, peerID, value string), next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isPublic(r) {
 			next.ServeHTTP(w, r)
@@ -101,6 +103,9 @@ func authenticate(res *auth.Resolver, next http.Handler) http.Handler {
 		if isOperatorOnly(r.URL.Path) && c.Kind != "operator" {
 			writeError(w, hub.E(http.StatusForbidden, "forbidden", "operator credential required"))
 			return
+		}
+		if touch != nil && c.PeerID != "" {
+			touch(context.WithoutCancel(r.Context()), c.PeerID, "reachable")
 		}
 		next.ServeHTTP(w, r.WithContext(withCaller(r.Context(), c)))
 	})

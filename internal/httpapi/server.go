@@ -49,7 +49,7 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, hub.E(http.StatusNotFound, "not_found", "no such endpoint"))
 	})
-	return limitBody(authenticate(d.Hub.Auth, mux))
+	return limitBody(authenticate(d.Hub.Auth, d.Hub.TouchReachability, mux))
 }
 
 // routes registers the §2.1 endpoints implemented so far; later tasks add
@@ -60,4 +60,8 @@ func (s *server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/blobs/{sha}", s.getBlob)
 	mux.HandleFunc("GET /v1/events", s.getEvents)
 	mux.HandleFunc("POST /v1/ack", s.postAck)
+	mux.HandleFunc("POST /v1/receipts", s.postReceipts)
+	mux.HandleFunc("POST /v1/presence", s.postPresence)
+	mux.HandleFunc("GET /v1/peers", s.getPeers)
+	mux.HandleFunc("PATCH /v1/peers/me", s.patchPeersMe)
 }

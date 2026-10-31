@@ -213,6 +213,7 @@ func (s *server) longPoll(w http.ResponseWriter, r *http.Request, owners []strin
 func (s *server) streamSSE(w http.ResponseWriter, r *http.Request, owners []string, cur eventlog.Cursor, first []envelope.Event) {
 	activeStreams.Add(1)
 	defer activeStreams.Add(-1)
+	defer s.streamReach(owners)() // connected while open; runs before the counter drops
 	ctx := r.Context()
 	conn := startSSE(w, s.sseStall())
 	defer conn.close()
