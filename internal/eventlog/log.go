@@ -172,6 +172,16 @@ func oldestValid(ctx context.Context, q execer) (int64, error) {
 	return seq, nil
 }
 
+// Oldest returns the oldest valid cursor: reading after it yields every
+// retained event.
+func (l *Log) Oldest(ctx context.Context) (Cursor, error) {
+	seq, err := oldestValid(ctx, l.DB)
+	if err != nil {
+		return Cursor{}, err
+	}
+	return Cursor{Epoch: l.epoch, Seq: seq}, nil
+}
+
 // Read returns up to limit events of owners with seq > after.Seq, in global
 // seq order. A cursor from another epoch or below retention is
 // ErrCursorPurged; Head reads nothing (callers tail with Wait).

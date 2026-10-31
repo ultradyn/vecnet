@@ -115,8 +115,12 @@ func (s *server) getEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // startCursor picks the cursor (PROTOCOL §2.3): Last-Event-ID, else ?after=,
-// else the stream's acked cursor, else head; both given and different is
-// 400 cursor_mismatch. Head resolves to the owners' current cursor.
+// else the stream's acked cursor; both given and different is 400
+// cursor_mismatch. A stream that has never acked has acked nothing, so it
+// starts at the oldest retained event: a consumer's first read sees what
+// arrived before it connected (hold deliveries wait for exactly that), and
+// clients never need to build a cursor. after=head ("from now") resolves to
+// the owners' current cursor.
 func (s *server) startCursor(ctx context.Context, r *http.Request, owners []string, ackOwner, ackScope string) (eventlog.Cursor, error) {
 	lei := r.Header.Get("Last-Event-ID")
 	after := r.URL.Query().Get("after")
@@ -145,9 +149,12 @@ func (s *server) startCursor(ctx context.Context, r *http.Request, owners []stri
 		if err != nil {
 			return eventlog.Cursor{}, err
 		}
-		if ok {
-			cur = c
+		if !ok {
+			if c, err = s.Hub.Log.Oldest(ctx); err != nil {
+				return eventlog.Cursor{}, err
+			}
 		}
+		cur = c
 	}
 	if cur == eventlog.Head {
 		return s.Hub.Log.Current(ctx, owners)
