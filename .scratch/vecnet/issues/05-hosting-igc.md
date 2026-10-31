@@ -18,4 +18,5 @@ Full write-up: [`docs/research/hosting.md`](../../../docs/research/hosting.md). 
   - Fly is about USD 4.14/mo in `iad` for a `shared-cpu-1x` 512 MB machine and a 3 GB volume. Daily snapshots are included, and the `syd` price is unverified.
   - Hetzner CX23 with daily backups is EUR 7.19/mo before tax. On 2026-11-01 Hetzner's pages listed it as unavailable.
 - **Recommendation: Fly, always on.** It wins only if Max agrees to a tie-breaker goal the ticket does not state: no new provider account and no host OS to patch.
+- **Max confirmed Fly, always-on, by voice and text on 2026-11-01** ("sure let's do fly").
 - **Required with Fly.** Snapshot retention of 14–30 days, a nightly off-host copy of the DB and blobs (a Fly volume lives on one host), and SSE heartbeats every 15–30 s.

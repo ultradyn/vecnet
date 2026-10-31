@@ -1,9 +1,8 @@
 # ADR 0001: Tech stack for the hub, connectors and CLI
 
-- **Status:** Proposed
-- **Date:** 2026-11-01
-- **Deciders:** delegated to the agent by Max (ticket 07); Max may veto
-- **Research:** [`docs/research/stack.md`](../research/stack.md)
+- **Status:** Accepted (Go), 2026-11-01. Supersedes the same-day Proposed draft that chose Node/TypeScript.
+- **Deciders:** Max (language), agent (components). Max delegated the stack in ticket 07, then vetoed Node by voice.
+- **Research:** [`docs/research/stack.md`](../research/stack.md) (original matrix) and the addendum in ticket 07.
 
 ## Context
 
@@ -11,63 +10,53 @@ vecnet is one self-hosted hub that all of Max's agents message through. The hub 
 
 - push signed webhooks (Standard Webhooks) with retries and dead letters;
 - accept HTTP sends and serve resumable SSE subscriptions;
-- run an MCP Streamable HTTP server that includes **MCP Events**, the only way to reach OpenAI dots;
+- run an MCP Streamable HTTP server with **MCP Events**, the only way to reach OpenAI dots;
 - keep state in SQLite and attachments in a content-addressed blob store on disk;
-- ship a `vecnet` CLI for coding sessions, and later a web inbox and chat UI.
+- ship a `vecnet` CLI that runs inside coding sessions on several machines, and later a web inbox and chat UI.
 
-The constraints that shape the choice:
+Constraints that shape the choice:
 
-- **One operator.** Max runs it alone, and agents write the code.
-- **Small host.** Ticket 05 recommends one Fly `shared-cpu-1x` 512 MB machine with a volume.
-- **MCP Events has no SDK support.** The extension (SEP-3415) is an open draft that no official MCP SDK implements in any language, so Events must be hand-written whatever the stack.
-- **w2m is the prior art.** Max's webhook2mcp already implements MCP `2026-07-28` with Events, Standard Webhooks signing, retrying delivery and a `node:sqlite` migration runner. It is TypeScript on Node and live in production.
-- **pag-chat is TypeScript.** pag-chat, the first external consumer, plans a TypeScript server.
-- **No xsm-linked binaries.** Anything linked on xsm is stamped AVX-512 and must not be deployed.
+- **One operator.** Max runs it alone; agents write the code.
+- **Small host.** One always-on Fly `shared-cpu-1x` 512 MB machine with a volume (ticket 05, confirmed by Max).
+- **MCP Events has no SDK support.** SEP-3415 is an open draft no official SDK implements, so Events is hand-written in any stack.
+- **webhook2mcp is inspiration, not a constraint.** Max: vecnet borrows w2m's ideas (id separation, signing, receipt vs `job.status`, the Events profile) but is not obliged to reuse its TypeScript.
+- **Max wants a static binary and control.** He is not keen on Node's runtime and dependency profile, and the CLI must install on many hosts without a runtime.
+- **No xsm-linked C runtime in deployed binaries.** Anything that links glibc on xsm is stamped AVX-512 and dies elsewhere.
 - **Generated ports.** Dev server ports are generated, not framework defaults.
 
 ## Decision
 
-- **Language and runtime:** TypeScript (ESM) on **Node.js 26 LTS**, bundled with esbuild and pinned in the Dockerfile and `engines`.
-- **Web framework:** **Hono** on `@hono/node-server`. SSE uses `streamSSE` with event ids from a monotonic SQLite event log, `Last-Event-ID` resume and a heartbeat about every 15 s.
-- **SQLite:** built-in **`node:sqlite`**, configured with WAL, `synchronous=FULL`, `busy_timeout`, foreign keys and STRICT tables.
-  - Migrations reuse w2m's checksummed `NNNN_name.sql` runner.
-  - Queries are hand-written SQL in a typed repository module, with no ORM.
-  - Every `node:sqlite` import stays inside one storage module.
-- **MCP:** **`@modelcontextprotocol/server` v2** with the `@modelcontextprotocol/hono` helper handles discovery, tools and Streamable HTTP. **MCP Events is hand-rolled**, lifted from w2m and kept behind an interface so an SDK implementation can replace it later.
-- **Webhook push:** Standard Webhooks HMAC and the retry and receipt semantics are lifted from w2m.
-- **Shared types:** zod 4 schemas in an `@vecnet/protocol` workspace package. It also exports JSON Schema for peers that do not use TypeScript.
-- **Blob store:** files live at `/data/blobs/sha256/<aa>/<bb>/<hex>`.
-  - Each write goes to a temp file, is fsynced, then renamed into place.
-  - Metadata rows live in SQLite.
-  - Ticket 13 owns policy: upload rights, TTL and read tokens.
-- **Repo layout:** npm workspaces with `packages/protocol`, `apps/hub`, `apps/cli` and later `apps/web`, plus a `justfile`. Tests use vitest. Builds and tests on xsm run via `build2`.
-- **CLI distribution:** an **npm package** with a `vecnet` bin, bundled to one ESM file and requiring Node 22 or later.
-  - Install it with `npm i -g` from a tarball or git URL; no public registry is required.
-  - A Bun-compiled single binary is the fallback for any host without Node.
-- **Deploy:** one image built `FROM node:26-slim` and shipped with `fly deploy --remote-only`.
-- **Dev port:** the hub dev server uses **45752**, generated once and confirmed free on xsm. The web UI's dev server gets its own generated port when it is created.
+- **Language:** **Go** (current stable, 1.26 or later), one module, `cmd/vecnet-hub` and `cmd/vecnet` (the CLI). `CGO_ENABLED=0` everywhere.
+- **HTTP:** standard library `net/http` with the Go 1.22+ pattern mux. No framework. SSE is a hand-written handler: `text/event-stream`, flush per event, event ids from the per-peer SQLite event-log sequence, `Last-Event-ID` replay, a heartbeat comment about every 15 s (ticket 06).
+- **MCP:** the official **`github.com/modelcontextprotocol/go-sdk`** for discovery, tools and Streamable HTTP. **MCP Events is hand-rolled** (`events/list`, `events/subscribe`, verification challenge, signed webhook delivery, cursors), written from OpenAI's published profile with w2m's `src/worker.ts` as reference reading, and kept behind an interface so an SDK implementation can replace it later.
+- **SQLite:** **`modernc.org/sqlite`** (pure Go, keeps `CGO_ENABLED=0`), WAL, `synchronous=FULL`, `busy_timeout`, foreign keys, STRICT tables. Migrations are ordered `NNNN_name.sql` files embedded with `embed.FS`, checksummed on apply. Hand-written SQL behind a small repository package; no ORM. Switch to `mattn/go-sqlite3` only if a benchmark on the real workload forces it, and then the build moves to x-alpha.
+- **Webhook push:** Standard Webhooks HMAC-SHA256 (`webhook-id`, `webhook-timestamp`, `webhook-signature`), retry and receipt semantics as in ticket 10, verified in tests against an independent implementation.
+- **Wire contract:** JSON Schema files in `docs/protocol/` are the source of truth. Go types are hand-written to match and checked against the schema in tests. pag-chat and other TypeScript consumers generate their types from the same schema.
+- **Blob store:** files at `/data/blobs/sha256/<aa>/<bb>/<hex>`; write to a temp file in the same filesystem, fsync, rename. Metadata rows in SQLite. Ticket 13 owns policy.
+- **CLI distribution:** a **single static binary** per OS/arch from `go build`, published as GitHub release assets; `go install` also works. No runtime on the host.
+- **Deploy:** multi-stage Dockerfile, final stage `FROM scratch` (plus CA certs and tzdata), shipped with `fly deploy --remote-only`.
+- **Tests:** `go test` with a smoke test that boots the real server on a random port. On xsm run through `build2`, two threads.
+- **Dev port:** the hub dev server uses **45752** (generated once, confirmed free). The web UI gets its own generated port when ticket 18 creates it.
 
 ## Consequences
 
 **Good.**
 
-- **Production-proven code is reused.** The riskiest protocol code (Events, signing, delivery, migrations) is copied from w2m instead of re-implemented.
-- **One language end to end.** Hub, CLI, web UI and pag-chat share types and client code directly.
-- **No native addons and no host linking.** The AVX-512 hazard cannot reach production.
-- **It fits the host.** One process and one image fit a 512 MB Fly machine.
+- **Static binaries by construction.** Hub and CLI are single files; the CLI installs anywhere with a copy. No Node, no `node_modules`, no supply-chain surface beyond Go modules.
+- **AVX-512 hazard removed, not managed.** Pure-Go binaries link no glibc CRT, so a build on xsm carries no ISA stamp. Verify once with `readelf -n` and keep a CI check.
+- **Long-lived connections are cheap.** Goroutines per SSE stream fit the 512 MB host.
+- **Official MCP SDK.** Streamable HTTP and tools come from the maintained Go SDK.
 
 **Bad, and the mitigations.**
 
-- **`node:sqlite` is still a release candidate** (Stability 1.2). Mitigation: a single storage module, so `better-sqlite3` can be swapped in.
-- **Hand-rolled MCP Events can drift** from SEP-3415 or OpenAI's profile. Mitigation: follow OpenAI's published profile as w2m does, and keep it behind an interface.
-- **The CLI needs Node on each session host.** Node 22+ is present on xsm, x-tuf and x-tall. x-alpha is unverified.
-- **Lifting w2m code assumes Max permits reuse** from the private `xpp-tm` repo.
+- **MCP Events, signing and delivery are written fresh.** Mitigation: w2m is the reference, OpenAI's profile is the contract, and conformance tests use recorded w2m payloads from `docs/research/w2m-envelope.md`.
+- **No shared TypeScript types with pag-chat.** Mitigation: JSON Schema is the contract and pag-chat generates from it; schema changes are versioned.
+- **Pure-Go SQLite is slower than cgo SQLite.** Irrelevant at this scale; the escape hatch is `mattn/go-sqlite3` behind the repository package.
+- **Hand-written SSE.** Small, but it must get flushing, cancellation and heartbeat right. Mitigation: an integration test that drops and resumes a stream.
 
 ## Alternatives considered
 
-The full IGC matrix is in [`stack.md`](../research/stack.md) §2.
-
-- **Node + Fastify + `better-sqlite3`.** Rejected: it rewrites w2m's storage layer and adds a native addon. Fastify with `node:sqlite` also survives the matrix. Hono was picked over it as a minor, non-decisive preference: its fetch-native handlers match w2m.
-- **Bun + Hono.** Rejected because hot-path runtime caveats remain: quiet SSE streams close after 10 s by default, and `node:sqlite` has documented differences. It also moves off the runtime w2m was proven on.
-- **Rust (axum + sqlx + rmcp), Python (FastAPI + `mcp`), Go (go-sdk).** Each has a Tier 1 MCP SDK. All are rejected because they cannot share types with the TypeScript pag-chat, CLI and web UI without code generation. They would also re-implement MCP Events, signing and delivery from scratch.
-- **Node SEA for the CLI.** Rejected because the feature is Stability 1.1, active development.
+- **Node 26 + TypeScript + Hono + `node:sqlite`.** The agent's original pick; survived a matrix whose goals included reusing w2m code and sharing types without codegen. Max dropped both goals and added "static binary, no runtime", which Node fails. Rejected.
+- **Bun.** Fails the same goal and has hot-path caveats (quiet SSE streams close after 10 s by default). Rejected.
+- **Rust (axum + sqlx + rmcp).** Passes every revised goal. Rejected on Max's stated preference for Go (performance is not the constraint; iteration speed with AI coding agents is) and because Rust links the C runtime, so the x-alpha-only build rule would stay.
+- **Python (FastAPI + `mcp`).** Fails the static-binary goal. Rejected.
