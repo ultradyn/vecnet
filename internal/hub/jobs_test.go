@@ -201,3 +201,64 @@ func TestJobTransitionTable(t *testing.T) {
 		}
 	}
 }
+
+// A repeat of a job_request addressed to another peer is a different
+// request for the same (thread, job_key): 409 job_conflict, never the
+// existing job_id (whose recipient could not report on it).
+func TestJobDedupeRequiresSameRecipient(t *testing.T) {
+	env := testhub.Start(t)
+	a, aSec := env.NewPeer("session", "A")
+	b, _ := env.NewPeer("session", "B")
+	c, _ := env.NewPeer("session", "C")
+
+	sr := mustSend(t, env, aSec, jobReq("j1", "build-1", "build everything", b))
+	join := req("join", c)
+	join["thread_id"] = sr.ThreadID
+	mustSend(t, env, aSec, join)
+
+	toC := jobReq("j2", "build-1", "build everything", c)
+	toC["thread_id"] = sr.ThreadID
+	_, det := mustReject(t, env, aSec, toC, http.StatusConflict, "job_conflict")
+	if det["job_id"] != sr.JobID {
+		t.Fatalf("job_conflict details.job_id = %v, want %s", det["job_id"], sr.JobID)
+	}
+	if state, _, rq, rc := jobRow(t, env, sr.JobID); state != "requested" || rq != a || rc != b {
+		t.Fatalf("job row = %s %s %s; want requested A B", state, rq, rc)
+	}
+	if n := count(t, env, `SELECT count(*) FROM jobs`); n != 1 {
+		t.Fatalf("jobs rows = %d, want 1", n)
+	}
+}
+
+// The recipient's principal may report status as any of its peers; another
+// principal's peer may not (PROTOCOL §5.6, §15 item 1).
+func TestJobStatusFromRecipientPrincipal(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	prn, prnSec := env.NewPrincipal("bob")
+	b, _ := peerUnder(t, env, "session", "b", prn)
+	b2, _ := peerUnder(t, env, "session", "b2", prn)
+	eve, eveSec := env.NewPrincipal("eve")
+	e, _ := peerUnder(t, env, "session", "e", eve)
+
+	sr := mustSend(t, env, aSec, jobReq("j1", "deploy", "deploy it", b))
+	job, thr := sr.JobID, sr.ThreadID
+	join := req("join", b2, e)
+	join["thread_id"] = thr
+	mustSend(t, env, aSec, join)
+
+	as := func(body map[string]any, peer string) map[string]any {
+		body["as"] = peer
+		return body
+	}
+	// Bob's principal credential, sending as B's sibling b2, reports for B.
+	mustSend(t, env, prnSec, as(jobStatus("s1", thr, job, 1, "accepted"), b2))
+	if state, seq, _, _ := jobRow(t, env, job); state != "accepted" || seq != 1 {
+		t.Fatalf("after the principal's accepted seq1: %s %d, want accepted 1", state, seq)
+	}
+	// Eve's principal credential is not B's: 403, and the job is unchanged.
+	mustReject(t, env, eveSec, as(jobStatus("s2", thr, job, 2, "running"), e), http.StatusForbidden, "not_recipient")
+	if state, seq, _, _ := jobRow(t, env, job); state != "accepted" || seq != 1 {
+		t.Fatalf("after eve's rejected report: %s %d, want accepted 1", state, seq)
+	}
+}

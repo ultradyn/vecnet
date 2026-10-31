@@ -118,8 +118,9 @@ func (h *Hub) prepareKind(ctx context.Context, tx *sql.Tx, c auth.Caller, snd se
 // prepareJobRequest checks a job_request: it names exactly one peer
 // recipient (422 job_single_recipient); its (thread, job_key) either is
 // new (a job is created in state requested), or exists with the same
-// request body (the job_id is reused and the Message is still sent), or
-// exists with a different body (409 job_conflict).
+// request body and recipient (the job_id is reused and the Message is
+// still sent), or exists with a different body or recipient (409
+// job_conflict).
 func prepareJobRequest(ctx context.Context, tx *sql.Tx, snd sender, thr *threadRow, jr *envelope.JobRequest, addressed []string) (*kindEffect, error) {
 	if len(addressed) != 1 || !ids.Is(ids.Peer, addressed[0]) {
 		e := E(http.StatusUnprocessableEntity, "job_single_recipient", "a job_request must name exactly one peer recipient")
@@ -136,14 +137,14 @@ func prepareJobRequest(ctx context.Context, tx *sql.Tx, snd sender, thr *threadR
 		return nil, err
 	}
 	if !thr.isNew {
-		var jobID, prevSHA string
-		err := tx.QueryRowContext(ctx, `SELECT job_id, request_sha256 FROM jobs WHERE thr_id = ? AND job_key = ?`,
-			thr.ID, jr.JobKey).Scan(&jobID, &prevSHA)
+		var jobID, prevSHA, prevRecipient string
+		err := tx.QueryRowContext(ctx, `SELECT job_id, request_sha256, recipient FROM jobs WHERE thr_id = ? AND job_key = ?`,
+			thr.ID, jr.JobKey).Scan(&jobID, &prevSHA, &prevRecipient)
 		switch {
-		case err == nil && prevSHA == sha:
+		case err == nil && prevSHA == sha && prevRecipient == recipient:
 			return &kindEffect{jobID: jobID, jobRequest: true}, nil
 		case err == nil:
-			e := E(http.StatusConflict, "job_conflict", "job_key was already used in this thread with a different job_request")
+			e := E(http.StatusConflict, "job_conflict", "job_key was already used in this thread with a different job_request or recipient")
 			e.Details["job_key"] = jr.JobKey
 			e.Details["job_id"] = jobID
 			return nil, e

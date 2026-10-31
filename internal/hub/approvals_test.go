@@ -223,3 +223,52 @@ func TestApprovalCountsAgainstBudgetAndDepth(t *testing.T) {
 		t.Fatalf("budget after approval_response = %d, want %d", got, budget-2)
 	}
 }
+
+// The hub expiry message must not raise the thread's inherited
+// loop.expires_at (PROTOCOL §6): a thread whose loop TTL passed stays
+// closed after the sweep, yet the notice itself is still delivered.
+func TestApprovalExpiryDoesNotReviveExpiredThread(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	b, bSec := env.NewPeer("session", "B")
+	ctx := context.Background()
+
+	start := env.Now.Now()
+	apr := ids.New(ids.Apr)
+	q := approvalReq("q1", apr, start.Add(3*time.Hour), []string{"yes", "no"}, b)
+	loopExp := envelope.FormatTime(start.Add(time.Hour))
+	q["expires_at"] = loopExp
+	sr := mustSend(t, env, aSec, q)
+
+	reply := func(key string) map[string]any {
+		r := req(key)
+		r["thread_id"] = sr.ThreadID
+		return r
+	}
+	env.Now.Advance(2 * time.Hour)
+	mustReject(t, env, bSec, reply("before"), http.StatusUnprocessableEntity, "expired")
+
+	env.Now.Advance(2 * time.Hour)
+	if n, err := env.Hub.ExpireApprovals(ctx, env.Now.Now()); err != nil || n != 1 {
+		t.Fatalf("ExpireApprovals = %d, %v; want 1", n, err)
+	}
+	var hubMsg string
+	if err := env.Hub.DB.QueryRow(`SELECT msg_id FROM messages WHERE thr_id = ? AND sender = 'hub'`, sr.ThreadID).Scan(&hubMsg); err != nil {
+		t.Fatalf("hub message: %v", err)
+	}
+	if l := storedLoop(t, env, hubMsg); l.ExpiresAt != loopExp {
+		t.Fatalf("hub message loop.expires_at = %s, want the request's %s (never raised)", l.ExpiresAt, loopExp)
+	}
+	mustReject(t, env, bSec, reply("after"), http.StatusUnprocessableEntity, "expired")
+
+	// The notice is still deliverable: its deliveries outlive the sweep.
+	nowS := envelope.FormatTime(env.Now.Now())
+	if n := count(t, env, `SELECT count(*) FROM deliveries WHERE msg_id = ? AND expires_at > ?`, hubMsg, nowS); n != 2 {
+		t.Fatalf("live hub-message deliveries = %d, want 2", n)
+	}
+	if n, err := env.Hub.ExpireDeliveries(ctx, env.Now.Now()); err != nil {
+		t.Fatal(err)
+	} else if m := count(t, env, `SELECT count(*) FROM deliveries WHERE msg_id = ? AND state = 'expired'`, hubMsg); m != 0 {
+		t.Fatalf("ExpireDeliveries (%d) expired %d hub-message deliveries, want 0", n, m)
+	}
+}

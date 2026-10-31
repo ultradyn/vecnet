@@ -429,7 +429,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 	}
 
 	// One Delivery per recipient peer, each appended to that peer's log.
-	refs, notify, err := h.fanOut(ctx, tx, thr, &msg, msgJSON, targets, hosted, ingress, nowT)
+	refs, notify, err := h.fanOut(ctx, tx, thr, &msg, msgJSON, targets, hosted, ingress, msg.Loop.ExpiresAt, nowT)
 	if err != nil {
 		return nil, false, nil, err
 	}
@@ -494,10 +494,13 @@ func (h *Hub) insertMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg
 // fanOut writes one Delivery of msg (stored as msgJSON) per target: a
 // delivery Event in the target's log carrying thr's summary, and a
 // deliveries row queued for push. hosted holds the attachment hashes the
-// hub serves (per-recipient blob_urls); nil for none. It returns the
-// response refs and the peers to wake.
+// hub serves (per-recipient blob_urls); nil for none. dlyExpires is the
+// deliveries' expires_at: msg.Loop.ExpiresAt for a sent Message; a
+// hub-authored Message passes its own so it stays deliverable without
+// raising the thread's loop.expires_at. It returns the response refs and
+// the peers to wake.
 func (h *Hub) fanOut(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envelope.Message, msgJSON []byte,
-	targets []target, hosted map[string]bool, ingress string, nowT time.Time) ([]DeliveryRef, []string, error) {
+	targets []target, hosted map[string]bool, ingress, dlyExpires string, nowT time.Time) ([]DeliveryRef, []string, error) {
 	now := envelope.FormatTime(nowT)
 	threadJSON, err := json.Marshal(thr.summary())
 	if err != nil {
@@ -552,7 +555,7 @@ func (h *Hub) fanOut(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envel
 			                        attempts_left, route_id, held, expires_at, created_at, updated_at, event_seq, body_sha256)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			dly, msg.MessageID, thr.ID, t.peer, t.via, string(alsoVia), msg.Priority,
-			PushAttempts, route, held, msg.Loop.ExpiresAt, now, now, cur.Seq, hex.EncodeToString(sum[:])); err != nil {
+			PushAttempts, route, held, dlyExpires, now, now, cur.Seq, hex.EncodeToString(sum[:])); err != nil {
 			return nil, nil, fmt.Errorf("hub: insert delivery: %w", err)
 		}
 		refs = append(refs, DeliveryRef{DeliveryID: dly, Recipient: t.peer, Via: t.via, State: "queued"})

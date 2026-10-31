@@ -139,8 +139,9 @@ func prepareApprovalResponse(ctx context.Context, tx *sql.Tx, snd sender, thr *t
 // sender "hub", ingress "hub", priority hold, in reply to the request,
 // addressed to the thread's participants. That Message counts against
 // neither the thread budget nor depth (§6, R20): its loop keeps the
-// request's depth, max_depth and sender_chain ("hub" is not an originator
-// in the chain). It returns how many approvals expired.
+// request's depth, max_depth, sender_chain ("hub" is not an originator
+// in the chain) and expires_at, which is never raised; only its
+// deliveries get a fresh expiry. It returns how many approvals expired.
 func (h *Hub) ExpireApprovals(ctx context.Context, now time.Time) (n int, err error) {
 	nowS := envelope.FormatTime(now)
 	var notify []string
@@ -219,16 +220,19 @@ func (h *Hub) expireApproval(ctx context.Context, tx *sql.Tx, apr, thrID, reqMsg
 		return nil, fmt.Errorf("hub: approval %s: request message %s is missing", apr, reqMsg)
 	}
 	// Not a reply in the §6 sense: depth, max_depth and sender_chain stay the
-	// request's. expires_at keeps the request's when still in the future,
-	// else the default TTL, so the expiry notice is itself deliverable.
+	// request's. loop.expires_at stays the request's too, even when already
+	// past, so the notice never raises the thread's inherited TTL (§6). Its
+	// deliveries instead expire at max(loop.expires_at, now + DefaultTTL), so
+	// the notice itself is still deliverable.
 	loop := envelope.Loop{
 		Depth:       parent.Loop.Depth,
 		MaxDepth:    parent.Loop.MaxDepth,
 		ExpiresAt:   parent.Loop.ExpiresAt,
 		SenderChain: append([]string{}, parent.Loop.SenderChain...),
 	}
-	if pExp, err := envelope.ParseTime(parent.Loop.ExpiresAt); err != nil || !pExp.After(nowT) {
-		loop.ExpiresAt = envelope.FormatTime(nowT.Add(h.Cfg.DefaultTTL))
+	dlyExpires := envelope.FormatTime(nowT.Add(h.Cfg.DefaultTTL))
+	if pExp, err := envelope.ParseTime(parent.Loop.ExpiresAt); err == nil && pExp.After(nowT.Add(h.Cfg.DefaultTTL)) {
+		dlyExpires = parent.Loop.ExpiresAt
 	}
 	recipients := thr.participants
 	if len(recipients) > maxMessageRecipients {
@@ -262,7 +266,7 @@ func (h *Hub) expireApproval(ctx context.Context, tx *sql.Tx, apr, thrID, reqMsg
 	for i, p := range thr.participants {
 		targets[i] = target{peer: p}
 	}
-	if _, _, err := h.fanOut(ctx, tx, thr, &msg, msgJSON, targets, nil, "hub", nowT); err != nil {
+	if _, _, err := h.fanOut(ctx, tx, thr, &msg, msgJSON, targets, nil, "hub", dlyExpires, nowT); err != nil {
 		return nil, err
 	}
 	if err := audit.Record(ctx, tx, HubSender, "approval_expired", []string{apr, thrID, msg.MessageID}, nil); err != nil {
