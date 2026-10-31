@@ -625,7 +625,7 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 
 - [ ] Single static Go binary per OS/arch.
 - [ ] Commands: `send <peer|group> "text" [--thread] [--reply-to] [--wake|--wake-idle|--hold] [--attach FILE]`, `reply <message_id> "text"`, `inbox [--since CURSOR] [--ack]`, `ack <cursor>`, `watch [--for-monitor]`, `threads`, `thread <id> [--after MESSAGE_ID]`, `peers`, `groups create|add|list`, `presence set <state>`, `presence subscribe <all|teams|none>`; admin `principal add`, `peer add [--principal]|move|link|rotate|scope`, `source add`, `route add`, `dead-letters list|retry|discard` [R08, R10, R15, R22].
-- [ ] `watch --for-monitor` holds the SSE stream and prints one compact line per event.
+- [ ] `watch --for-monitor` holds the SSE stream and prints one compact line per event. It is exempt from the section 13.1 drop rule by default: it prints `receipt`, `presence` and other non-`delivery` Events too, because the agent reading the monitor decides what to act on and MUST NOT auto-reply to them; `--deliveries-only` applies the 13.1 drop.
 - [ ] MAY act as a stdio channel server for Claude Code, re-emitting `/v1/events` as `notifications/claude/channel` [SSE].
 
 ---
