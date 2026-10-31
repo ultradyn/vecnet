@@ -86,7 +86,7 @@ func (h *Hub) StreamOwners(ctx context.Context, c auth.Caller, peerFilter string
 // advances; every delivery of the stream's owners at or before cur that is
 // still queued or pushed becomes accepted (held cleared), and each such
 // change appends an accepted receipt Event, by the recipient, to the
-// sender's log. A cursor past the newest event is 422 invalid_value; one
+// sender's log (none for a hub-authored message, whose sender is no peer). A cursor past the newest event is 422 invalid_value; one
 // from another epoch is eventlog.ErrCursorPurged. Acking the same cursor
 // twice changes nothing the second time.
 func (h *Hub) Ack(ctx context.Context, c auth.Caller, peerFilter string, cur eventlog.Cursor) error {
@@ -122,6 +122,9 @@ func (h *Hub) Ack(ctx context.Context, c auth.Caller, peerFilter string, cur eve
 		nowT := h.Now()
 		at := envelope.FormatTime(nowT)
 		for _, d := range accepted {
+			if !d.senderIsPeer {
+				continue // a hub-authored message: no peer log to receive it
+			}
 			r := envelope.Receipt{
 				DeliveryID: d.dly, MessageID: d.msg, ThreadID: d.thr,
 				State: "accepted", By: d.recipient, At: at,
@@ -146,6 +149,7 @@ func (h *Hub) Ack(ctx context.Context, c auth.Caller, peerFilter string, cur eve
 // acceptedDelivery is one delivery an ack moved to accepted.
 type acceptedDelivery struct {
 	dly, msg, thr, recipient, sender string
+	senderIsPeer                     bool // false for hub-authored messages
 }
 
 // acceptDeliveries moves the owners' queued or pushed deliveries with
@@ -195,7 +199,9 @@ func acceptDeliveries(ctx context.Context, tx *sql.Tx, owners []string, seq int6
 	})
 	out := make([]acceptedDelivery, len(got))
 	for i, r := range got {
-		if err := tx.QueryRowContext(ctx, `SELECT sender FROM messages WHERE msg_id = ?`, r.d.msg).Scan(&r.d.sender); err != nil {
+		if err := tx.QueryRowContext(ctx,
+			`SELECT m.sender, EXISTS (SELECT 1 FROM peers s WHERE s.peer_id = m.sender) FROM messages m WHERE m.msg_id = ?`,
+			r.d.msg).Scan(&r.d.sender, &r.d.senderIsPeer); err != nil {
 			return nil, fmt.Errorf("hub: delivery sender: %w", err)
 		}
 		out[i] = r.d

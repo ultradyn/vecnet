@@ -6,11 +6,13 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/ids"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -171,4 +173,39 @@ func TestStreamOwners(t *testing.T) {
 func isAPIError(err error, status int, code string) bool {
 	var e *hub.APIError
 	return errors.As(err, &e) && e.Status == status && e.Code == code
+}
+
+// TestAckPastHubMessageWritesNoHubReceipt: acking past a hub-authored
+// Delivery (the approval-expiry notice) accepts it but appends no receipt
+// Event, since its sender "hub" is not a peer and owns no log reader
+// (PROTOCOL §2.4, §9).
+func TestAckPastHubMessageWritesNoHubReceipt(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	_, aSec := env.NewPeer("session", "A")
+	b, bSec := env.NewPeer("session", "B")
+	apr := ids.New(ids.Apr)
+	mustSend(t, env, aSec, approvalReq("q1", apr, env.Now.Now().Add(time.Hour), []string{"yes", "no"}, b))
+	env.Now.Advance(2 * time.Hour)
+	if n, err := env.Hub.ExpireApprovals(ctx, env.Now.Now()); err != nil || n != 1 {
+		t.Fatalf("ExpireApprovals = %d, %v; want 1", n, err)
+	}
+	cur, err := env.Hub.Log.Current(ctx, []string{b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bc, err := env.Hub.Auth.Resolve(ctx, bSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.Hub.Ack(ctx, bc, "", cur); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, env, `SELECT count(*) FROM deliveries d JOIN messages m ON m.msg_id = d.msg_id
+		WHERE m.sender = 'hub' AND d.recipient = ? AND d.state = 'accepted'`, b); n != 1 {
+		t.Fatalf("accepted hub-message deliveries to B = %d, want 1", n)
+	}
+	if got := receipts(t, env, hub.HubSender); len(got) != 0 {
+		t.Fatalf("receipt Events in the hub's log = %d, want 0", len(got))
+	}
 }
