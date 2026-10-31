@@ -26,6 +26,7 @@ A handoff-ready **spec** for vecnet v1: `SPEC.md` (product + behaviour), `docs/P
 <!-- one line per closed ticket; charting-session decisions are summarised in grilling-log.md -->
 
 - (charting) Destination is a spec, not code; single public hub; closed membership; pagchat delivery baseline (at-least-once, dedupe, bounded retry, dead letter, per-thread ordering, accepted-vs-processed receipts); loop control (hop, TTL, sender chain, thread budget); priority bit (wake-now vs hold); 4 KiB text bodies + hosted content-addressed attachments; inbound webhook ingress (GitHub first); flat first-class threads; named teams + ad hoc groups; operator is a peer with web inbox first then chat UI; presence/ack/read/approval events; four transports (signed webhook push, MCP events, SSE, HTTP send); id-only addressing; indefinite history; self-reported capability/quota; w2m-style job envelope; escalation to operator. See [`grilling-log.md`](grilling-log.md).
+- [webhook2mcp job envelope and signing, shown to Max](issues/04-w2m-envelope.md): borrow verbatim the Standard Webhooks signing, the separate message/delivery/thread/job ids with `delivery_id` as dedupe key, and the 2xx-receipt vs signed `job.status` split; adapt content to 4 KiB, fan groups out per member, add attachment hashes, priority, hop/ttl/sender_chain. Shapes in `docs/research/w2m-envelope.md`.
 
 ## Not yet specified
 
