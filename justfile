@@ -33,9 +33,11 @@ frontier:
         [ "$ok" = 1 ] && echo "$f  [$(grep -m1 '^Type:' "$f" | awk '{print $2}')]  $(head -1 "$f" | sed 's/^# //')" || true
     done
 
-# Validate docs/protocol/examples against the envelope schema (needs python3 + jsonschema)
+# Check the embedded schema copy has not drifted, then validate docs/protocol/examples
+# against the envelope schema (the example check needs python3 + jsonschema; skipped without it)
 validate-protocol:
-    python3 -I scripts/validate_examples.py docs/protocol
+    diff -u docs/protocol/envelope.schema.json internal/envelope/schema.json || { echo "internal/envelope/schema.json has drifted from docs/protocol/envelope.schema.json" >&2; exit 1; }
+    if python3 -I -c 'import jsonschema' 2>/dev/null; then python3 -I scripts/validate_examples.py docs/protocol; else echo "skip: python3 jsonschema not installed (examples are also checked by go test ./internal/envelope)"; fi
 
 # Show every ticket with status and type
 tickets:
