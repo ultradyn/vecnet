@@ -223,22 +223,24 @@ type Event struct {
 // SendRequest is the body of POST /v1/messages ($defs/sendRequest).
 // Optional fields are omitted when empty; the schema forbids null for them.
 type SendRequest struct {
-	IdempotencyKey   string            `json:"idempotency_key"`
-	As               string            `json:"as,omitempty"`
-	ThreadID         *string           `json:"thread_id,omitempty"`
-	ThreadTitle      string            `json:"thread_title,omitempty"`
-	InReplyTo        *string           `json:"in_reply_to,omitempty"`
-	Origin           *Origin           `json:"origin,omitempty"`
-	Recipients       []string          `json:"recipients,omitempty"`
-	Kind             string            `json:"kind,omitempty"` // schema default "message"
-	Priority         string            `json:"priority"`
-	Content          SendContent       `json:"content"`
-	Attachments      []Attachment      `json:"attachments,omitempty"`
-	Metadata         map[string]any    `json:"metadata,omitempty"`
-	MaxDepth         *int              `json:"max_depth,omitempty"`
-	ExpiresAt        string            `json:"expires_at,omitempty"`
-	JobRequest       *JobRequest       `json:"job_request,omitempty"`
-	JobStatus        *JobStatus        `json:"job_status,omitempty"`
-	ApprovalRequest  *ApprovalRequest  `json:"approval_request,omitempty"`
-	ApprovalResponse *ApprovalResponse `json:"approval_response,omitempty"`
+	IdempotencyKey     string            `json:"idempotency_key"`
+	As                 string            `json:"as,omitempty"`
+	ThreadID           *string           `json:"thread_id,omitempty"`
+	ThreadTitle        string            `json:"thread_title,omitempty"`
+	HistoryAccess      string            `json:"history_access,omitempty"`
+	LockedParticipants *bool             `json:"locked_participants,omitempty"`
+	InReplyTo          *string           `json:"in_reply_to,omitempty"`
+	Origin             *Origin           `json:"origin,omitempty"`
+	Recipients         []string          `json:"recipients,omitempty"`
+	Kind               string            `json:"kind,omitempty"` // schema default "message"
+	Priority           string            `json:"priority"`
+	Content            SendContent       `json:"content"`
+	Attachments        []Attachment      `json:"attachments,omitempty"`
+	Metadata           map[string]any    `json:"metadata,omitempty"`
+	MaxDepth           *int              `json:"max_depth,omitempty"`
+	ExpiresAt          string            `json:"expires_at,omitempty"`
+	JobRequest         *JobRequest       `json:"job_request,omitempty"`
+	JobStatus          *JobStatus        `json:"job_status,omitempty"`
+	ApprovalRequest    *ApprovalRequest  `json:"approval_request,omitempty"`
+	ApprovalResponse   *ApprovalResponse `json:"approval_response,omitempty"`
 }

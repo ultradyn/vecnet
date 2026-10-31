@@ -684,7 +684,7 @@ The hub MUST enforce per-peer limits on `POST /v1/messages` and the MCP send too
 
 ### 16.3 History access and participant locking [A3, supersedes §2.2 step 3, §7 and §11 in part]
 
-`ThreadSummary` gains `history_access` (`from_join` | `full`, default **`from_join`**) and `locked_participants` (boolean, default false), both settable by the thread creator at creation and by the operator at any time.
+`ThreadSummary` gains `history_access` (`from_join` | `full`, default **`from_join`**) and `locked_participants` (boolean, default false), both settable by the thread creator at creation (the `SendRequest` fields of the same names, honoured only on the send that creates the thread, like `thread_title`) and by the operator at any time.
 
 - Under `from_join`, a participant added after the thread was created MAY read only messages appended after its join (`GET /v1/threads/{id}/messages` and `vecnet_thread` filter accordingly), and MAY read a blob through its bearer only if a message visible to it references that blob. Per-recipient `blob_url` tokens on its own Deliveries are unaffected.
 - Under `full`, every participant reads the whole thread.

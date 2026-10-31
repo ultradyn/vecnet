@@ -250,6 +250,13 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 			title := req.ThreadTitle
 			thr.Title = &title
 		}
+		// §16.3: the creator sets both at creation; ignored afterwards.
+		if req.HistoryAccess != "" {
+			thr.HistoryAccess = req.HistoryAccess
+		}
+		if req.LockedParticipants != nil {
+			thr.Locked = *req.LockedParticipants
+		}
 		if ids.IsGroup(addressed[0]) {
 			g := addressed[0]
 			thr.Group = &g

@@ -871,6 +871,18 @@
           "maxLength": 200,
           "description": "Only when starting a thread."
         },
+        "history_access": {
+          "type": "string",
+          "enum": [
+            "from_join",
+            "full"
+          ],
+          "description": "Only when starting a thread: the new thread's history_access (default from_join). Ignored on a send into an existing thread; the operator changes it with PATCH /v1/admin/threads/{id}."
+        },
+        "locked_participants": {
+          "type": "boolean",
+          "description": "Only when starting a thread: the new thread's locked_participants (default false). Ignored on a send into an existing thread; the operator changes it with PATCH /v1/admin/threads/{id}."
+        },
         "in_reply_to": {
           "$ref": "#/$defs/messageId"
         },

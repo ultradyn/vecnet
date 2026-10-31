@@ -430,3 +430,54 @@ func TestThreadFullAcrossSends(t *testing.T) {
 		t.Fatalf("65th participant = %d %s, want 422 thread_full", status, raw)
 	}
 }
+
+// TestCreatorSetsHistoryAccessAndLock: a send that creates a thread may set
+// history_access and locked_participants (PROTOCOL §16.3); a later send
+// into the thread cannot change them.
+func TestCreatorSetsHistoryAccessAndLock(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	b, bSec := env.NewPeer("session", "B")
+	c, _ := env.NewPeer("session", "C")
+
+	threadFlags := func(thr string) (string, int) {
+		t.Helper()
+		var ha string
+		var locked int
+		if err := env.Hub.DB.QueryRow(`SELECT history_access, locked_participants FROM threads WHERE thr_id = ?`, thr).
+			Scan(&ha, &locked); err != nil {
+			t.Fatal(err)
+		}
+		return ha, locked
+	}
+
+	plain := mustSend(t, env, aSec, req("h0", b))
+	if ha, locked := threadFlags(plain.ThreadID); ha != "from_join" || locked != 0 {
+		t.Fatalf("default thread = %s locked %d, want from_join unlocked", ha, locked)
+	}
+
+	body := req("h1", b)
+	body["history_access"] = "full"
+	body["locked_participants"] = true
+	sr := mustSend(t, env, aSec, body)
+	if ha, locked := threadFlags(sr.ThreadID); ha != "full" || locked != 1 {
+		t.Fatalf("created thread = %s locked %d, want full locked", ha, locked)
+	}
+
+	// Ignored on a send into an existing thread.
+	again := req("h2")
+	again["thread_id"] = plain.ThreadID
+	again["history_access"] = "full"
+	again["locked_participants"] = true
+	mustSend(t, env, bSec, again)
+	if ha, locked := threadFlags(plain.ThreadID); ha != "from_join" || locked != 0 {
+		t.Fatalf("existing thread after send = %s locked %d, want unchanged", ha, locked)
+	}
+
+	// The lock holds: B, not the creator, cannot add C.
+	add := req("h3", c)
+	add["thread_id"] = sr.ThreadID
+	if status, _, raw := sendHTTP(t, env, bSec, add); status != http.StatusForbidden || !bytes.Contains(raw, []byte("participants_locked")) {
+		t.Fatalf("non-creator add to a locked thread = %d %s, want 403 participants_locked", status, raw)
+	}
+}
