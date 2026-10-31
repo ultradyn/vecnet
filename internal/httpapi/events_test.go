@@ -269,12 +269,30 @@ func TestLongPollWakesOnSend(t *testing.T) {
 	type result struct {
 		resp *http.Response
 		body []byte
+		err  error
 		at   time.Time
 	}
+	// The poll goroutine reports through done and never touches t, so it may
+	// outlive a failed test; cleanup cancels its request.
+	pctx, pcancel := context.WithCancel(context.Background())
+	t.Cleanup(pcancel)
 	done := make(chan result, 1)
 	go func() {
-		resp, body, _ := getEvents(t, env, bSec, "?after="+cur.String()+"&wait=10", nil)
-		done <- result{resp, body, time.Now()}
+		req, err := http.NewRequestWithContext(pctx, "GET", env.URL+"/v1/events?after="+cur.String()+"&wait=10", nil)
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Authorization", "Bearer "+bSec)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		done <- result{resp, body, err, time.Now()}
 	}()
 	time.Sleep(200 * time.Millisecond) // let the poll start waiting; not a sync point
 	postSend(t, env, aSec, sendBody("wake-1", b), http.StatusAccepted)
@@ -282,8 +300,11 @@ func TestLongPollWakesOnSend(t *testing.T) {
 
 	select {
 	case r := <-done:
-		if r.resp == nil || r.resp.StatusCode != http.StatusOK {
-			t.Fatalf("poll = %v; %s", r.resp, r.body)
+		if r.err != nil {
+			t.Fatalf("poll: %v", r.err)
+		}
+		if r.resp.StatusCode != http.StatusOK {
+			t.Fatalf("poll = %d; %s", r.resp.StatusCode, r.body)
 		}
 		var pr pollResp
 		if err := json.Unmarshal(r.body, &pr); err != nil {
@@ -459,6 +480,42 @@ func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
 	s.cancel()
 	s.resp.Body.Close()
 	waitStreams(t, 0)
+}
+
+// TestSSEReplaysLargeBacklogOnOneConnection: an actively reading client that
+// resumes over a backlog far larger than the per-connection frame queue gets
+// every event, in order, on one connection (PROTOCOL §2.3 replay; the queue
+// applies backpressure to a reading client instead of dropping it).
+func TestSSEReplaysLargeBacklogOnOneConnection(t *testing.T) {
+	env := testhub.Start(t)
+	a, aSec := env.NewPeer("grokbot", "a")
+	b, bSec := env.NewPeer("dot", "b")
+	env.SetLimits(a, 10000, 10000)
+	const n = 300
+	for i := 0; i < n; i++ {
+		body := sendBody(fmt.Sprintf("backlog-%d", i), b)
+		body["content"] = map[string]any{"text": "0123456789"}
+		resp, raw := env.Do(aSec, "POST", "/v1/messages", body)
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("send %d = %d; %s", i, resp.StatusCode, raw)
+		}
+	}
+	want, err := env.Hub.Log.Read(context.Background(), []string{b}, eventlog.Cursor{Epoch: env.Hub.Log.Epoch()}, 0)
+	if err != nil || len(want) != n {
+		t.Fatalf("Read = %d, %v; want %d", len(want), err, n)
+	}
+
+	s := openSSE(t, env, bSec, "?after="+zeroCursor(env), nil).start()
+	s.expectPreamble(t, zeroCursor(env))
+	for i := 0; i < n; i++ {
+		f := s.nextEvent(t, 10*time.Second)
+		if f.ID != want[i].Cursor || f.Event != "delivery" {
+			t.Fatalf("frame %d = id %q event %q, want id %q delivery", i, f.ID, f.Event, want[i].Cursor)
+		}
+	}
+	if got := httpapi.ActiveStreams(); got != 1 {
+		t.Fatalf("active SSE streams after replay = %d, want 1 (connection kept)", got)
+	}
 }
 
 // waitStreams waits until n SSE handlers are running.

@@ -21,6 +21,7 @@ type Deps struct {
 	DefaultWait time.Duration // long-poll hold without ?wait= (DefaultWait)
 	MaxWait     time.Duration // long-poll hold cap (MaxWait)
 	WaitUnit    time.Duration // length of one ?wait= second (time.Second)
+	SSEStall    time.Duration // SSE queue-full wait before dropping a stuck client (DefaultSSEStall)
 }
 
 // server carries Deps to the route handlers.

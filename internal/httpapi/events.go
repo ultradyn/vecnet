@@ -22,6 +22,7 @@ const (
 	DefaultHeartbeat = 15 * time.Second // SSE ": hb" interval while idle
 	DefaultWait      = 25 * time.Second // long-poll hold when ?wait= is absent
 	MaxWait          = 30 * time.Second // long-poll hold cap, kept under proxy timeouts
+	DefaultSSEStall  = 15 * time.Second // SSE queue-full wait before a stuck client is dropped
 )
 
 // eventsReadLimit is the batch size of one log read.
@@ -36,6 +37,13 @@ func (s *server) heartbeat() time.Duration {
 		return s.Heartbeat
 	}
 	return DefaultHeartbeat
+}
+
+func (s *server) sseStall() time.Duration {
+	if s.SSEStall > 0 {
+		return s.SSEStall
+	}
+	return DefaultSSEStall
 }
 
 // waitFor converts the ?wait= query (seconds) into a hold duration:
@@ -198,24 +206,25 @@ func (s *server) longPoll(w http.ResponseWriter, r *http.Request, owners []strin
 
 // streamSSE serves the SSE mode: retry and priming frames, replay from cur,
 // then tail with heartbeats. It exits when the client goes away, when a
-// write fails, or when the client falls sseBuffer frames behind. No database
-// transaction is open while frames are written: reads finish before their
-// frames are queued.
+// write fails, or when the frame queue stays full for the stall timeout. A
+// client that keeps reading gets backpressure, so a replay larger than the
+// queue completes on one connection. No database transaction is open while
+// frames are queued or written: reads finish before their frames are queued.
 func (s *server) streamSSE(w http.ResponseWriter, r *http.Request, owners []string, cur eventlog.Cursor, first []envelope.Event) {
 	activeStreams.Add(1)
 	defer activeStreams.Add(-1)
 	ctx := r.Context()
-	conn := startSSE(w)
+	conn := startSSE(w, s.sseStall())
 	defer conn.close()
 
-	if !conn.send([]byte("retry: 3000\n\n")) || !conn.send([]byte("id: "+cur.String()+"\ndata:\n\n")) {
+	if !conn.send(ctx, []byte("retry: 3000\n\n")) || !conn.send(ctx, []byte("id: "+cur.String()+"\ndata:\n\n")) {
 		return
 	}
 	// emit queues evs and advances cur; false means drop the connection.
 	emit := func(evs []envelope.Event) bool {
 		for _, ev := range evs {
 			f, err := sseFrame(ev)
-			if err != nil || !conn.send(f) {
+			if err != nil || !conn.send(ctx, f) {
 				return false
 			}
 			c, err := eventlog.ParseCursor(ev.Cursor)
@@ -266,7 +275,7 @@ func (s *server) sseTail(ctx context.Context, conn *sseConn, owners []string, cu
 	case <-woke:
 		return true
 	case <-tick:
-		return conn.send([]byte(": hb\n\n"))
+		return conn.send(ctx, []byte(": hb\n\n"))
 	}
 }
 

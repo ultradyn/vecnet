@@ -1,22 +1,27 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"sync"
 	"time"
 )
 
-// sseBuffer is the per-connection frame queue. When it is full the consumer
-// is not keeping up and the handler drops the connection; the client resumes
-// from its cursor (Review Focus 4).
+// sseBuffer is the per-connection frame queue (Review Focus 4). A full queue
+// holds the producer back while the writer drains it; only a queue that
+// stays full for the stall timeout drops the connection, and the client
+// resumes from its cursor.
 const sseBuffer = 64
 
 // sseConn owns the writing side of one SSE response. Frames go through a
-// buffered channel to a single writer goroutine, so the producer (the
-// handler reading the log) never blocks on a slow or vanished client.
+// buffered channel to a single writer goroutine. The producer (the handler
+// reading the log) waits at most stall for queue space, so a reading client
+// gets backpressure while a stuck or vanished one is dropped. The log is
+// pull-based: Notify never waits on any of this.
 type sseConn struct {
 	w      http.ResponseWriter
 	rc     *http.ResponseController
+	stall  time.Duration
 	frames chan []byte
 	stop   chan struct{} // closed by close
 	done   chan struct{} // closed when the writer goroutine exits
@@ -24,8 +29,9 @@ type sseConn struct {
 }
 
 // startSSE writes the SSE response headers (PROTOCOL §2.3) and starts the
-// writer goroutine. Call close before the handler returns.
-func startSSE(w http.ResponseWriter) *sseConn {
+// writer goroutine. stall bounds how long send waits for queue space. Call
+// close before the handler returns.
+func startSSE(w http.ResponseWriter, stall time.Duration) *sseConn {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-store")
@@ -35,6 +41,7 @@ func startSSE(w http.ResponseWriter) *sseConn {
 	c := &sseConn{
 		w:      w,
 		rc:     http.NewResponseController(w),
+		stall:  stall,
 		frames: make(chan []byte, sseBuffer),
 		stop:   make(chan struct{}),
 		done:   make(chan struct{}),
@@ -61,9 +68,10 @@ func (c *sseConn) writer() {
 	}
 }
 
-// send queues one frame without blocking. It reports false when the queue is
-// full or the writer has stopped: the handler must then drop the connection.
-func (c *sseConn) send(frame []byte) bool {
+// send queues one frame, waiting while the queue is full. It reports false
+// when the writer has stopped, ctx is done, or the queue made no room for
+// stall (the consumer is stuck): the handler must then drop the connection.
+func (c *sseConn) send(ctx context.Context, frame []byte) bool {
 	select {
 	case <-c.done:
 		return false
@@ -73,6 +81,17 @@ func (c *sseConn) send(frame []byte) bool {
 	case c.frames <- frame:
 		return true
 	default:
+	}
+	t := time.NewTimer(c.stall)
+	defer t.Stop()
+	select {
+	case c.frames <- frame:
+		return true
+	case <-c.done:
+		return false
+	case <-ctx.Done():
+		return false
+	case <-t.C:
 		return false
 	}
 }
