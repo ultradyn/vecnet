@@ -18,21 +18,28 @@ import (
 
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/push"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
-// Env is one running test hub. The push worker and tickers are not started
-// (Task 17 adds StartWorkers).
+// Env is one running test hub. Worker is the push worker on the fake clock;
+// it is wired to the handler (Deps.Kick, Deps.VerifyRoute) but runs only
+// when a test calls Worker.Step or StartWorkers.
 type Env struct {
 	T              *testing.T
 	URL            string
 	Hub            *hub.Hub
+	Worker         *push.Worker
 	OperatorSecret string
 	OperatorPeer   string
 	Now            *FakeClock
 
 	handler atomic.Pointer[http.Handler]
+	started bool
 }
+
+// WorkerInterval is the push worker poll and ticker period StartWorkers uses.
+const WorkerInterval = 50 * time.Millisecond
 
 // FakeClock is the hub's clock in tests; it only moves when Advance is called.
 type FakeClock struct {
@@ -83,6 +90,7 @@ func Start(t *testing.T) *Env {
 		t.Fatalf("testhub: hub.New: %v", err)
 	}
 	env.URL, env.Hub = srv.URL, h
+	env.Worker = &push.Worker{Hub: h, Now: clock.Now, Interval: WorkerInterval}
 	env.Configure(nil)
 	t.Cleanup(func() {
 		srv.Close()
@@ -101,7 +109,7 @@ func Start(t *testing.T) *Env {
 // non-nil) adjusts them, e.g. to shorten Deps.Heartbeat. Requests already in
 // flight keep the old handler; later ones use the new one.
 func (e *Env) Configure(f func(*httpapi.Deps)) {
-	d := httpapi.Deps{Hub: e.Hub}
+	d := httpapi.Deps{Hub: e.Hub, Kick: e.Worker.Kick, VerifyRoute: e.Worker.Verify}
 	if f != nil {
 		f(&d)
 	}
@@ -109,9 +117,31 @@ func (e *Env) Configure(f func(*httpapi.Deps)) {
 	e.handler.Store(&h)
 }
 
+// StartWorkers runs the push worker and the hub's tickers (Hub.RunTickers)
+// on the fake clock, both every WorkerInterval, until the test ends. Call it
+// at most once.
+func (e *Env) StartWorkers() {
+	e.T.Helper()
+	if e.started {
+		e.T.Fatal("testhub: StartWorkers called twice")
+	}
+	e.started = true
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Go(func() { e.Worker.Run(ctx) })
+	wg.Go(func() { e.Hub.RunTickers(ctx, WorkerInterval) })
+	// Registered after Start's cleanup, so it runs first: the workers stop
+	// before the store closes.
+	e.T.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+}
+
 // NewPeer creates a peer of kind under an implicit principal and enrols it,
 // returning its id and long-lived secret. It calls Hub.AddPeer and
-// Auth.Enrol directly; the HTTP admin and enrol routes arrive in Task 17.
+// Auth.Enrol directly, not the HTTP admin and enrol routes, so tests of
+// other features do not depend on them.
 func (e *Env) NewPeer(kind, name string) (peerID, secret string) {
 	e.T.Helper()
 	ctx := context.Background()

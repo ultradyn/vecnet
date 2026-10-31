@@ -15,11 +15,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/push"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
@@ -101,8 +103,8 @@ func runInit(dataDir, name string, w io.Writer) error {
 	return err
 }
 
-// serve runs the HTTP server until SIGINT or SIGTERM. The push worker and
-// tickers join here in Tasks 14 and 17.
+// serve runs the HTTP server, the push worker and the hub's tickers until
+// SIGINT or SIGTERM.
 func serve(listen, dataDir, publicURL string) error {
 	h, db, err := openHub(dataDir, publicURL)
 	if err != nil {
@@ -110,14 +112,25 @@ func serve(listen, dataDir, publicURL string) error {
 	}
 	defer db.Close()
 
+	worker := &push.Worker{Hub: h}
 	srv := &http.Server{
 		Addr:              listen,
-		Handler:           httpapi.New(httpapi.Deps{Hub: h}),
+		Handler:           httpapi.New(httpapi.Deps{Hub: h, Kick: worker.Kick, VerifyRoute: worker.Verify}),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Background work stops after the HTTP server, before the store closes.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	var bg sync.WaitGroup
+	defer func() {
+		bgCancel()
+		bg.Wait()
+	}()
+	bg.Go(func() { worker.Run(bgCtx) })
+	bg.Go(func() { h.RunTickers(bgCtx, hub.DefaultTickInterval) })
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()

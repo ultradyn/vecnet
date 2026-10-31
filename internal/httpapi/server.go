@@ -4,6 +4,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -14,6 +15,10 @@ import (
 type Deps struct {
 	Hub  *hub.Hub
 	Kick func() // push worker wakeup after a commit; may be nil
+	// VerifyRoute sends a push route its verification challenge
+	// (push.Worker.Verify, PROTOCOL §3.2); nil makes
+	// POST /v1/admin/routes/{id}/verify a 500.
+	VerifyRoute func(ctx context.Context, routeID string) error
 
 	// GET /v1/events timing; zero means the package default. Tests shorten
 	// them instead of sleeping.
@@ -69,4 +74,6 @@ func (s *server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/groups", s.postGroups)
 	mux.HandleFunc("POST /v1/groups/{id}/members", s.postGroupMembers)
 	mux.HandleFunc("GET /v1/groups", s.getGroups)
+	mux.HandleFunc("POST /v1/enrol", s.postEnrol)
+	s.adminRoutes(mux)
 }

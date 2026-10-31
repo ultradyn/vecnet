@@ -165,6 +165,10 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 	if cut != nil {
 		return nil, false, cut
 	}
+	if !replayed && resp != nil {
+		// Operator notification webhooks (PROTOCOL §5.2, T15): fire and forget.
+		h.notifyOperatorDeliveries(ctx, resp.MessageID)
+	}
 	return resp, replayed, nil
 }
 

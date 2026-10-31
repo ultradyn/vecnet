@@ -125,9 +125,16 @@ func TestPublicPathsSkipAuth(t *testing.T) {
 			t.Fatalf("GET %s = 401 without a bearer; body %s", p, body)
 		}
 	}
-	resp, body := env.Do("", "POST", "/v1/enrol", map[string]any{"token": "x"})
-	if resp.StatusCode == http.StatusUnauthorized {
-		t.Fatalf("POST /v1/enrol demanded a bearer before its route exists: %s", body)
+	// /v1/enrol authenticates by its one-time token, never a bearer: a valid
+	// token without an Authorization header succeeds (a bad token is 401,
+	// TestEnrolFlow).
+	_, tok, err := env.Hub.AddPeer(context.Background(), "session", "enrollee", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, body := env.Do("", "POST", "/v1/enrol", map[string]any{"token": tok})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /v1/enrol without a bearer = %d, want 200: %s", resp.StatusCode, body)
 	}
 	// A blob read without ?t= still needs a bearer.
 	resp, body = env.Do("", "GET", "/v1/blobs/abc", nil)

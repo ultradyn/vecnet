@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -204,9 +205,10 @@ func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAf
 		lastErr = "HTTP " + strconv.Itoa(status)
 	}
 	var notify string
+	var alert *envelope.Event // dead_letter / push_conflict receipt for the operator's notify routes
 	applied := false
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		notify, applied = "", false
+		notify, applied, alert = "", false, nil
 		var state, msgID, thr, sender string
 		var attempt, left int
 		var senderIsPeer bool
@@ -227,14 +229,32 @@ func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAf
 		applied = true
 		receipt := func(state, note string) error {
 			if !senderIsPeer {
+				if state == "dead_letter" || outcome == pushConflict {
+					// No sender log to append to: the operator still hears of it.
+					r := envelope.Receipt{DeliveryID: d.DeliveryID, MessageID: msgID, ThreadID: thr,
+						State: state, By: "hub", At: nowS, Note: note}
+					data, err := json.Marshal(r)
+					if err != nil {
+						return fmt.Errorf("hub: encode receipt: %w", err)
+					}
+					alert = &envelope.Event{Type: "receipt", At: nowS, Data: data}
+				}
 				return nil
 			}
 			r := envelope.Receipt{DeliveryID: d.DeliveryID, MessageID: msgID, ThreadID: thr,
 				State: state, By: "hub", At: nowS, Note: note}
-			if _, err := h.Log.Append(ctx, tx, sender, "receipt", now, r); err != nil {
+			cur, err := h.Log.Append(ctx, tx, sender, "receipt", now, r)
+			if err != nil {
 				return err
 			}
 			notify = sender
+			if state == "dead_letter" || outcome == pushConflict {
+				data, err := json.Marshal(r)
+				if err != nil {
+					return fmt.Errorf("hub: encode receipt: %w", err)
+				}
+				alert = &envelope.Event{Cursor: cur.String(), Type: "receipt", At: nowS, Data: data}
+			}
 			return nil
 		}
 		set := func(state string, left int, next any) error {
@@ -295,6 +315,9 @@ func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAf
 	}
 	if notify != "" {
 		h.Log.Notify(notify)
+	}
+	if alert != nil {
+		h.Notify(ctx, *alert, NotifyDeadLetters)
 	}
 	h.ObservePush(ctx, d.Recipient, outcome == pushAccepted)
 	return nil

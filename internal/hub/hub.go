@@ -69,8 +69,18 @@ type Hub struct {
 	// best-effort: SetPresence logs its error and still succeeds.
 	IdleHook func(ctx context.Context, peerID string) error
 
+	// NotifyClient posts operator notification webhooks; nil means a
+	// client that never follows redirects, with NotifyTimeout.
+	NotifyClient *http.Client
+	// NotifyRetry is the wait before each retry of a failed notification;
+	// nil means DefaultNotifyRetry (3 retries over 30 s).
+	NotifyRetry []time.Duration
+
 	reachMu sync.Mutex     // serialises reachability writes with streams
 	streams map[string]int // peer → open SSE streams
+
+	notifySem chan struct{}  // bounds notification goroutines (MaxNotifyInFlight)
+	notifyWG  sync.WaitGroup // notification goroutines in flight
 }
 
 // New builds a Hub over an opened store; the blob store lives under
@@ -101,7 +111,7 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 		return nil, fmt.Errorf("hub: reset reachability: %w", err)
 	}
 	h := &Hub{DB: db, Log: log, Blobs: blobs, Auth: &auth.Resolver{DB: db}, Cfg: cfg, Now: now,
-		streams: map[string]int{}}
+		streams: map[string]int{}, notifySem: make(chan struct{}, MaxNotifyInFlight)}
 	h.IdleHook = h.OnIdle // release held wake_idle deliveries (PROTOCOL §5.2)
 	return h, nil
 }
