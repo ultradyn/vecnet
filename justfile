@@ -13,9 +13,10 @@ build:
 test:
     build2 go test -p 2 ./...
 
-# Run the dev hub on the generated port
-run:
-    CGO_ENABLED=0 build2 go run ./cmd/vecnet-hub --listen 127.0.0.1:45752 --data-dir .data --public-url http://127.0.0.1:45752
+# Run the dev hub on the generated port; extra flags pass through
+# (e.g. `just run --dev-ui-dir internal/ui/static` serves the operator UI from disk)
+run *ARGS:
+    CGO_ENABLED=0 build2 go run ./cmd/vecnet-hub --listen 127.0.0.1:45752 --data-dir .data --public-url http://127.0.0.1:45752 {{ARGS}}
 
 # Show the wayfinder frontier: open, unblocked, unclaimed tickets
 frontier:
