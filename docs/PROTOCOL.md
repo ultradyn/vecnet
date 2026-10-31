@@ -464,6 +464,7 @@ The hub fills `loop` on every Message [ENV]:
 - **Ad hoc groups** (`grp_`) are created by any peer with members it may message; members may add others under the same scopes; the operator sees every group; a group auto-archives after 30 days idle [T09].
 - Neither a team nor a group implies a thread: a message to a group starts or continues a thread like any recipient set [T09].
 - **External mapping.** Connectors own the external-conversation ↔ `thread_id` mapping. The hub stores `origin` on the Message and echoes it on Deliveries, nothing more [T09, ENV §6]. Inbound sources are the exception: the hub owns their mapping (section 10) [R09].
+- **Group scopes.** Addressing a team or group never widens the sender's scopes; each member is checked (section 12).
 - **Archived groups.** A send naming an archived group gets 410 `group_archived`; the operator can unarchive it [R21].
 - **`ThreadSummary.group`** is the group named as the first recipient when the thread was created, else `null` [R21].
 - **Participant cap.** A thread holds at most 64 participants; a send that would exceed it gets 422 `thread_full` [R21].
@@ -553,7 +554,7 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 
 - **Dots never hold a vecnet secret** [T11].
 - **CLI profiles:** `~/.config/vecnet/config.toml` holds named profiles, each a hub URL plus a peer, principal or operator credential; `--net` selects; `--as <peer>` picks a principal's peer [T17]. One peer per long-lived agent identity; sessions reuse that identity's stored credential [T17].
-- **Send scopes:** default allow-all among enrolled peers and teams; per-peer allow/deny lists set by the operator; ad hoc group creation respects the same scopes [T11]. Scopes gate sends and group creation only: every peer MAY read the directory, and thread history is readable by participants only [R24].
+- **Send scopes:** default allow-all among enrolled peers and teams; per-peer allow/deny lists set by the operator; ad hoc group creation respects the same scopes [T11]. Scopes gate sends and group creation only: every peer MAY read the directory, and thread history is readable by participants only [R24]. A send to a team or group is checked per member as if each were addressed directly: a deny on the group or on any member refuses the whole send (403 `scope_denied`, `details.recipient` the member, `details.via` the group); under allow-list scopes each member must be allowed unless the group or team itself is. Group membership is not required to address a group.
 - **Audit:** append-only table of actor peer, action (`send`, `ack`, `enrol`, `rotate`, group create/change, `purge`, scope change), target ids, timestamp [T11]; loop cuts are also audited [T16].
 - **Logging:** Message bodies and secrets MUST NOT enter logs or audit rows; redaction lives in the logger [T11].
 

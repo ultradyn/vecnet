@@ -264,39 +264,64 @@ func insertCredential(ctx context.Context, tx *sql.Tx, kind, subject, now string
 	return plain, nil
 }
 
-// MaySend applies fromPeer's send scopes to toID (a peer, team or group id):
-// no scope rows → true; a deny row for toID → false; otherwise, if any allow
-// rows exist, true only when one names toID. A nil tx reads from r.DB.
-func (r *Resolver) MaySend(ctx context.Context, tx *sql.Tx, fromPeer, toID string) (bool, error) {
+// Scopes is one peer's send scopes: explicit deny and allow targets (peer,
+// team or group ids).
+type Scopes struct {
+	deny, allow map[string]bool
+}
+
+// Denied reports an explicit deny row for id.
+func (s Scopes) Denied(id string) bool { return s.deny[id] }
+
+// AllowListed reports whether any allow row exists (allow-list mode).
+func (s Scopes) AllowListed() bool { return len(s.allow) > 0 }
+
+// Allows applies the scopes to id: a deny row for id → false; otherwise, if
+// any allow rows exist, true only when one names id; no rows → true.
+func (s Scopes) Allows(id string) bool {
+	if s.deny[id] {
+		return false
+	}
+	return len(s.allow) == 0 || s.allow[id]
+}
+
+// LoadScopes reads fromPeer's send scopes. A nil tx reads from r.DB.
+func (r *Resolver) LoadScopes(ctx context.Context, tx *sql.Tx, fromPeer string) (Scopes, error) {
 	var q querier = r.DB
 	if tx != nil {
 		q = tx
 	}
 	rows, err := q.QueryContext(ctx, `SELECT mode, target_id FROM scopes WHERE peer_id = ?`, fromPeer)
 	if err != nil {
-		return false, fmt.Errorf("auth: scopes: %w", err)
+		return Scopes{}, fmt.Errorf("auth: scopes: %w", err)
 	}
 	defer rows.Close()
-	var anyAllow, allowed bool
+	s := Scopes{deny: map[string]bool{}, allow: map[string]bool{}}
 	for rows.Next() {
 		var mode, target string
 		if err := rows.Scan(&mode, &target); err != nil {
-			return false, fmt.Errorf("auth: scopes: %w", err)
+			return Scopes{}, fmt.Errorf("auth: scopes: %w", err)
 		}
 		switch mode {
 		case "deny":
-			if target == toID {
-				return false, nil
-			}
+			s.deny[target] = true
 		case "allow":
-			anyAllow = true
-			if target == toID {
-				allowed = true
-			}
+			s.allow[target] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("auth: scopes: %w", err)
+		return Scopes{}, fmt.Errorf("auth: scopes: %w", err)
 	}
-	return !anyAllow || allowed, nil
+	return s, nil
+}
+
+// MaySend applies fromPeer's send scopes to toID (a peer, team or group id):
+// no scope rows → true; a deny row for toID → false; otherwise, if any allow
+// rows exist, true only when one names toID. A nil tx reads from r.DB.
+func (r *Resolver) MaySend(ctx context.Context, tx *sql.Tx, fromPeer, toID string) (bool, error) {
+	s, err := r.LoadScopes(ctx, tx, fromPeer)
+	if err != nil {
+		return false, err
+	}
+	return s.Allows(toID), nil
 }

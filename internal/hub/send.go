@@ -654,7 +654,8 @@ func (h *Hub) idempotencyLookup(ctx context.Context, tx *sql.Tx, sender, key, bo
 // resolveTargets fans the addressed ids out to recipient peers: one target
 // per distinct peer, in address order; via is the first group that reached
 // it and alsoVia the rest (PROTOCOL §5.3, R17). The sender is skipped when a
-// group reaches it. Every addressed id is checked against the sender's scopes.
+// group reaches it. Every addressed id, and every member a group reaches, is
+// checked against the sender's scopes.
 func (h *Hub) resolveTargets(ctx context.Context, tx *sql.Tx, snd sender, addressed []string) ([]target, error) {
 	var out []target
 	index := map[string]int{}
@@ -676,6 +677,10 @@ func (h *Hub) resolveTargets(ctx context.Context, tx *sql.Tx, snd sender, addres
 		}
 		t.alsoVia = append(t.alsoVia, *via)
 	}
+	scopes, err := h.Auth.LoadScopes(ctx, tx, snd.peer)
+	if err != nil {
+		return nil, err
+	}
 	done := map[string]bool{}
 	for _, r := range addressed {
 		if done[r] {
@@ -692,8 +697,8 @@ func (h *Hub) resolveTargets(ctx context.Context, tx *sql.Tx, snd sender, addres
 			if err != nil {
 				return nil, fmt.Errorf("hub: find recipient: %w", err)
 			}
-			if err := h.mustMaySend(ctx, tx, snd.peer, r); err != nil {
-				return nil, err
+			if !scopes.Allows(r) {
+				return nil, scopeDenied(r, "")
 			}
 			add(r, nil)
 		case ids.IsGroup(r):
@@ -701,20 +706,40 @@ func (h *Hub) resolveTargets(ctx context.Context, tx *sql.Tx, snd sender, addres
 			if err != nil {
 				return nil, err
 			}
-			if err := h.mustMaySend(ctx, tx, snd.peer, r); err != nil {
-				return nil, err
+			// A group is checked per member, as if each were addressed
+			// directly (PROTOCOL §7, §12): a deny on the group or any member
+			// refuses the send; under allow-list scopes each member must be
+			// allowed, unless the group itself is.
+			if scopes.Denied(r) {
+				return nil, scopeDenied(r, "")
 			}
+			groupAllowed := !scopes.AllowListed() || scopes.Allows(r)
 			g := r
 			for _, m := range members {
-				if m != snd.peer {
-					add(m, &g)
+				if m == snd.peer {
+					continue
 				}
+				if scopes.Denied(m) || (!groupAllowed && !scopes.Allows(m)) {
+					return nil, scopeDenied(m, r)
+				}
+				add(m, &g)
 			}
 		default:
 			return nil, unknownRecipient(r)
 		}
 	}
 	return out, nil
+}
+
+// scopeDenied is 403 scope_denied for recipient, reached via group when
+// group is not "".
+func scopeDenied(recipient, group string) *APIError {
+	e := E(http.StatusForbidden, "scope_denied", "send scopes forbid this recipient")
+	e.Details["recipient"] = recipient
+	if group != "" {
+		e.Details["via"] = group
+	}
+	return e
 }
 
 func (h *Hub) mustMaySend(ctx context.Context, tx *sql.Tx, from, to string) error {

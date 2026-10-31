@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/hub"
@@ -511,5 +512,70 @@ func TestDefaultedRecipientsCappedAt32(t *testing.T) {
 		if err := envelope.Validate("delivery", d); err != nil {
 			t.Fatalf("delivery to %s is schema-invalid: %v", p, err)
 		}
+	}
+}
+
+// TestGroupFanOutAppliesMemberScopes: a group or team address is checked
+// per member as if each were addressed directly (PROTOCOL §7, §12): a deny
+// on a member refuses the send (403 scope_denied naming the member), and
+// allow-list scopes admit a group whose members are all allowed, or a
+// group or team that is itself allowed.
+func TestGroupFanOutAppliesMemberScopes(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	a, aSec := env.NewPeer("session", "A")
+	b, _ := env.NewPeer("session", "B")
+	x, _ := env.NewPeer("session", "X")
+	y, _ := env.NewPeer("session", "Y")
+	opCaller := auth.Caller{Kind: "operator", PeerID: env.OperatorPeer}
+	if err := env.Hub.DB.QueryRow(`SELECT prn_id FROM peers WHERE peer_id = ?`, env.OperatorPeer).Scan(&opCaller.PrincipalID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The operator builds a group {A, X, B}; A is denied X.
+	grp, err := env.Hub.CreateGroup(ctx, opCaller, "", []string{a, x, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.Hub.SetScopes(ctx, a, nil, []string{x}); err != nil {
+		t.Fatal(err)
+	}
+	status, _, raw := sendHTTP(t, env, aSec, req("gs1", grp))
+	if status != http.StatusForbidden || !bytes.Contains(raw, []byte("scope_denied")) || !bytes.Contains(raw, []byte(x)) {
+		t.Fatalf("send to a group holding a denied peer = %d %s, want 403 scope_denied naming %s", status, raw, x)
+	}
+	if n := count(t, env, `SELECT count(*) FROM deliveries WHERE recipient = ?`, x); n != 0 {
+		t.Fatalf("deliveries to the denied peer = %d, want 0", n)
+	}
+
+	// Allow-list scopes: A may message X and Y only. A group of exactly
+	// those is sendable; adding B (not allowed) makes it refused.
+	if err := env.Hub.SetScopes(ctx, a, []string{x, y}, nil); err != nil {
+		t.Fatal(err)
+	}
+	aCaller := auth.Caller{Kind: "peer", PeerID: a}
+	if err := env.Hub.DB.QueryRow(`SELECT prn_id FROM peers WHERE peer_id = ?`, a).Scan(&aCaller.PrincipalID); err != nil {
+		t.Fatal(err)
+	}
+	g2, err := env.Hub.CreateGroup(ctx, aCaller, "", []string{x, y})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sr := mustSend(t, env, aSec, req("gs2", g2)); len(sr.Deliveries) != 2 {
+		t.Fatalf("send to an all-allowed group = %d deliveries, want 2", len(sr.Deliveries))
+	}
+	if err := env.Hub.AddGroupMembers(ctx, opCaller, "", g2, []string{b}); err != nil {
+		t.Fatal(err)
+	}
+	status, _, raw = sendHTTP(t, env, aSec, req("gs3", g2))
+	if status != http.StatusForbidden || !bytes.Contains(raw, []byte(b)) {
+		t.Fatalf("send to a group with a non-allowed member = %d %s, want 403 scope_denied naming %s", status, raw, b)
+	}
+	// Allowing the group itself admits its members (except explicit denies).
+	if err := env.Hub.SetScopes(ctx, a, []string{x, y, g2}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if sr := mustSend(t, env, aSec, req("gs4", g2)); len(sr.Deliveries) != 3 {
+		t.Fatalf("send to an allowed group = %d deliveries, want 3", len(sr.Deliveries))
 	}
 }
