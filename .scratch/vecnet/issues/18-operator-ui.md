@@ -42,3 +42,14 @@ Prototype by agent `proto-18-ui`, 2026-11-01. Awaiting Max's pick of a variant; 
 **Recommendation:** ship variant **A** as the v1 shell for inbox and chat, because it is the most legible for long threads and the cheapest to build, and use **B's tiles for the dashboard**, where packed heterogeneous status is the point. Borrow two pieces: B's approval countdown and C's keyboard layer (`j`/`k`, `a` then a digit, `r`/`x`) as shortcuts over A. Keep inbox and chat separate but linked. Defer to after v1: enrolment and scope editing in the UI (the CLI covers them), budget raising, escalation (phase 2 per ticket 15), and C's full command line.
 
 **Found while building:** example `04-approval-request.json` addresses the operator as `peer_…8C`. In examples 01, 02 and 06, `…8C` is the codex session and `…8B` is the operator. The prototype uses `…8B`. Example 04 should be corrected.
+
+### Max's verdict (voice, 2026-11-01)
+
+- **Variant A is the base**: A's inbox and A's chat ship. B's inbox is "a bit of a mess"; nothing from B is better as a whole.
+- **The TUI (variant C) is wanted as its own thing too**, alongside the web UI, not instead of it.
+- **Dashboard**: B's packed tiles take too much space; Max wants a cleaner dashboard and will redo it later. Treat the dashboard as provisional, read-only.
+- **Chat**: start from A's vertical chat but borrow B's better use of horizontal space in the right-hand side panel. The delivery matrix is useful but as an **extra view** one opens, not always-on. The side panel for a thread should also show that thread's files/attachments alongside participants.
+- Inbox and chat stay separate but linked (Q2 accepted).
+- Max also accepted, in the same round: the history_access reversal (from_join default), wake_idle re-push on idle, loop accounting and per-peer rate limits, the one-tap presence toggle, read-only dashboard, and moving to build planning.
+
+Live copy for review: `http://xsm:10435/vecnet-proto/operator-ui/index.html?variant=a` (synced from `docs/prototypes/operator-ui/`).

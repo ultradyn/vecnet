@@ -6,6 +6,8 @@ Tracker: local markdown (`.scratch/vecnet/`), per the mattpocock-skills `issue-t
 
 ## Destination
 
+**Reached 2026-11-01.** All 19 tickets resolved; frontier empty. Deliverables: `SPEC.md`, `docs/PROTOCOL.md` (+ `docs/protocol/OPEN-ITEMS-RESOLVED.md`), `docs/protocol/envelope.schema.json` + examples + `ENVELOPE.md`, `GLOSSARY.md`, `docs/adr/0001-tech-stack.md`. Next effort: implementation (plan in `docs/plans/`).
+
 A handoff-ready **spec** for vecnet v1: `SPEC.md` (product + behaviour), `docs/PROTOCOL.md` (envelope, transports, delivery, auth), `GLOSSARY.md`, and ADRs for the hard-to-reverse choices, such that implementation agents can build the hub, the connectors and the `vecnet` CLI without further decisions from Max.
 
 ## Notes
@@ -47,6 +49,8 @@ A handoff-ready **spec** for vecnet v1: `SPEC.md` (product + behaviour), `docs/P
 - [The vecnet CLI for coding sessions](issues/17-vecnet-cli.md): one hub = one network, CLI profiles of hub + credential, operator credential for admin commands; one peer per long-lived agent identity; `vecnet watch --for-monitor` wakes sessions like `c2c monitor`; single static binary.
 - (amendment to 08 and 11, from pag-chat's review 2026-11-01) **Principals**: every peer belongs to a `prn_` credential holder that may send `as` any of its peers and hold one stream or push route for all of them; `priority` gains `wake_idle`; structured `origin` replaces `original_thread_id`; receipts carry `thread_id`; hub auto-spills long text into an attachment; `job_key` scope is (`thread_id`, `job_key`). Disposition table in `docs/protocol/ENVELOPE.md`.
 - (amendments from pag-chat's PROTOCOL.md review, 2026-11-01) operator replies reset `depth`, default `max_depth` 32; per-peer rate limits (60 sends/min, 20 threads/h, 429); `history_access` default `from_join` + `locked_participants` + visibility-gated blob reads (**changes Max's round-3 "late joiners get full history" default; flagged for his veto**). PROTOCOL.md §16.
+- [Operator web inbox, chat UI and dashboard](issues/18-operator-ui.md): three-variant prototype in `docs/prototypes/operator-ui/` (shots in `shots/`). Max: **variant A is the base** (inbox + chat), **a TUI is wanted as its own thing**, dashboard to be redone cleaner later (B's tiles too busy), chat borrows B's side-panel use of horizontal space with the delivery matrix as an extra view and thread files in the side panel. Inbox and chat separate but linked; one-tap operator presence toggle; dashboard read-only.
+- (Max, final voice round 2026-11-01) accepted the pag-chat amendments including the `history_access` default reversal, `wake_idle` re-push on idle, loop accounting with operator depth reset, per-peer rate limits, and **go to build planning**.
 - [Live test: a real dot receives an MCP event](issues/19-dots-live-test.md): resolved by Max: a dot already talks to Grok Bots through webhook2mcp, so custom MCP plugins, Events push and unattended tool replies all work. UI landing spot and confirmation prompts remain unrecorded, non-blocking.
 
 ## Not yet specified
