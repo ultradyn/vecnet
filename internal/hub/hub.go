@@ -103,7 +103,7 @@ func (h *Hub) EnsureOperator(ctx context.Context, name string) (peerID, secret s
 			return err
 		}
 		peerID = ids.New(ids.Peer)
-		if err := insertPeer(ctx, tx, peerID, prn, name, "operator", now); err != nil {
+		if err := h.insertPeer(ctx, tx, peerID, prn, name, "operator", now); err != nil {
 			return err
 		}
 		if secret, err = insertCredential(ctx, tx, "operator", prn, now); err != nil {
@@ -176,7 +176,7 @@ func (h *Hub) AddPeer(ctx context.Context, kind, name, prnID string) (peerID, en
 			}
 		}
 		peerID = ids.New(ids.Peer)
-		if err := insertPeer(ctx, tx, peerID, prnID, name, kind, now); err != nil {
+		if err := h.insertPeer(ctx, tx, peerID, prnID, name, kind, now); err != nil {
 			return err
 		}
 		var err error
@@ -199,10 +199,20 @@ func insertPrincipal(ctx context.Context, tx *sql.Tx, prn, name, now string) err
 	return nil
 }
 
-func insertPeer(ctx context.Context, tx *sql.Tx, peer, prn, name, kind, now string) error {
+// insertPeer inserts a peer row whose rate limits are Cfg.SendsPerMin and
+// Cfg.ThreadsPerHour (the column defaults, 60 and 20, when those are unset).
+func (h *Hub) insertPeer(ctx context.Context, tx *sql.Tx, peer, prn, name, kind, now string) error {
+	perMin, perHour := h.Cfg.SendsPerMin, h.Cfg.ThreadsPerHour
+	if perMin <= 0 {
+		perMin = 60
+	}
+	if perHour <= 0 {
+		perHour = 20
+	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO peers(peer_id, prn_id, name, kind, enrolled_at) VALUES (?, ?, ?, ?, ?)`,
-		peer, prn, name, kind, now); err != nil {
+		`INSERT INTO peers(peer_id, prn_id, name, kind, enrolled_at, sends_per_min, threads_per_hour)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		peer, prn, name, kind, now, perMin, perHour); err != nil {
 		return fmt.Errorf("hub: insert peer: %w", err)
 	}
 	return nil

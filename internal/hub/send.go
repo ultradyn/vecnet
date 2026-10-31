@@ -110,14 +110,22 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 	}
 
 	var notify []string
+	var cut *APIError
 	// BEGIN IMMEDIATE (store DSN) serialises the idempotency lookup and
 	// insert; the (sender, key) primary key is the backstop, and a send that
 	// loses on it re-runs once to replay the winner's response.
 	for attempt := 0; ; attempt++ {
-		notify = nil
+		notify, cut = nil, nil
 		err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
 			var e error
 			resp, replayed, notify, e = h.sendTx(ctx, tx, c, req, bodySHA, ingress)
+			var ce *cutError
+			if errors.As(e, &ce) {
+				// Commit the cut's counter, audit row and events; the send
+				// itself wrote nothing.
+				cut = ce.api
+				return nil
+			}
 			return e
 		})
 		if err != nil && attempt == 0 && isIdempotencyConflict(err) {
@@ -130,6 +138,9 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 	}
 	if len(notify) > 0 {
 		h.Log.Notify(notify...)
+	}
+	if cut != nil {
+		return nil, false, cut
 	}
 	return resp, replayed, nil
 }
@@ -151,6 +162,17 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 	// Idempotency (PROTOCOL §2.2, R03).
 	if prev, ok, err := h.idempotencyLookup(ctx, tx, snd.peer, req.IdempotencyKey, bodySHA, nowT); err != nil || ok {
 		return prev, ok, nil, err
+	}
+
+	// Per-peer rate limits (PROTOCOL §16.2), before anything is written.
+	if apiErr, err := h.checkRate(ctx, tx, snd.peer, req.ThreadID == nil, nowT); err != nil {
+		return nil, false, nil, err
+	} else if apiErr != nil {
+		detail := map[string]any{"reason": apiErr.Details["limit"], "retry_after_seconds": apiErr.Details["retry_after_seconds"]}
+		if err := h.countCut(ctx, tx, CounterRateLimited, snd.peer, []string{snd.peer}, detail); err != nil {
+			return nil, false, nil, err
+		}
+		return nil, false, nil, &cutError{apiErr}
 	}
 
 	// Thread: load an existing one, or prepare a new one.
@@ -259,6 +281,27 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 		}
 	}
 
+	// Loop control (PROTOCOL §2.2 step 5, §6, §16.1): depth, max_depth and
+	// expiry, then the thread budget. A cut is counted, audited and
+	// committed; the send writes nothing else.
+	loop, apiErr := h.buildLoop(parent, snd.peer, snd.kind, req, nowT)
+	var cutNotify []string
+	if apiErr == nil {
+		if apiErr, err = h.checkBudget(ctx, tx, thr, nowT); err != nil {
+			return nil, false, nil, err
+		}
+		if apiErr != nil {
+			cutNotify = thr.participants
+		}
+	}
+	if apiErr != nil {
+		if err := h.countCut(ctx, tx, CounterLoopCut, snd.peer, []string{thr.ID},
+			map[string]any{"reason": apiErr.Code}); err != nil {
+			return nil, false, nil, err
+		}
+		return nil, false, cutNotify, &cutError{apiErr}
+	}
+
 	// Build and serialise the Message once.
 	kind := req.Kind
 	if kind == "" {
@@ -277,7 +320,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 		Content:          envelope.Content{Text: req.Content.Text},
 		Attachments:      stripBlobURLs(req.Attachments),
 		Metadata:         req.Metadata,
-		Loop:             h.sendLoop(parent, snd.peer, req, nowT),
+		Loop:             loop,
 		JobRequest:       req.JobRequest,
 		JobStatus:        req.JobStatus,
 		ApprovalRequest:  req.ApprovalRequest,
@@ -559,28 +602,6 @@ func routeFor(ctx context.Context, tx *sql.Tx, peer string) (any, error) {
 		return nil, nil
 	}
 	return route.String, nil
-}
-
-// sendLoop fills Message.loop. This is the plain inheritance rule; Task 8
-// replaces it with buildLoop, which also enforces max_depth and expiry.
-func (h *Hub) sendLoop(parent *envelope.Message, senderID string, req *envelope.SendRequest, now time.Time) envelope.Loop {
-	l := envelope.Loop{MaxDepth: h.Cfg.DefaultMaxDepth, ExpiresAt: envelope.FormatTime(now.Add(h.Cfg.DefaultTTL))}
-	if parent != nil {
-		l.Depth = parent.Loop.Depth + 1
-		l.MaxDepth = parent.Loop.MaxDepth
-		l.SenderChain = append(l.SenderChain, parent.Loop.SenderChain...)
-	}
-	if req.MaxDepth != nil {
-		l.MaxDepth = *req.MaxDepth
-	}
-	if req.ExpiresAt != "" {
-		l.ExpiresAt = req.ExpiresAt
-	}
-	l.SenderChain = append(l.SenderChain, senderID)
-	if n := len(l.SenderChain); n > 32 {
-		l.SenderChain = l.SenderChain[n-32:]
-	}
-	return l
 }
 
 // checkRecipientNames rejects a recipient string that is not a vecnet id

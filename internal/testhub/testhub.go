@@ -165,3 +165,17 @@ func (e *Env) Do(secret, method, path string, body any) (*http.Response, []byte)
 	}
 	return resp, out
 }
+
+// SetLimits sets peerID's per-peer rate limits (PROTOCOL §16.2) by updating
+// its peers row; tests that send in bulk raise them with it.
+func (e *Env) SetLimits(peerID string, sendsPerMin, threadsPerHour int) {
+	e.T.Helper()
+	res, err := e.Hub.DB.Exec(`UPDATE peers SET sends_per_min = ?, threads_per_hour = ? WHERE peer_id = ?`,
+		sendsPerMin, threadsPerHour, peerID)
+	if err != nil {
+		e.T.Fatalf("testhub: SetLimits(%s): %v", peerID, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		e.T.Fatalf("testhub: SetLimits(%s): %d rows, %v; want 1", peerID, n, err)
+	}
+}
