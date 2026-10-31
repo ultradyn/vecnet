@@ -43,6 +43,8 @@ func New(d Deps) http.Handler {
 	return limitBody(authenticate(d.Hub.Auth, mux))
 }
 
-// routes registers the §2.1 endpoints implemented so far (none yet: later
-// tasks add /v1/messages, /v1/events, /v1/peers, ... here).
-func (s *server) routes(mux *http.ServeMux) {}
+// routes registers the §2.1 endpoints implemented so far; later tasks add
+// /v1/events, /v1/peers, ... here.
+func (s *server) routes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /v1/messages", s.postMessages)
+}

@@ -1,0 +1,182 @@
+package hub
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+
+	"github.com/XertroV/vecnet/internal/envelope"
+)
+
+// MaxParticipants caps a thread's participants (PROTOCOL §2.2 step 3, R21).
+const MaxParticipants = 64
+
+// threadRow is one row of the threads table.
+type threadRow struct {
+	ID            string
+	Title         *string
+	Group         *string
+	CreatedBy     string
+	MessageCount  int
+	Budget        *int // nil = unlimited
+	HistoryAccess string
+	Locked        bool
+	participants  []string        // in join order
+	isParticipant map[string]bool // over participants
+	isNew         bool            // created by this send
+}
+
+// loadThread reads thread id and its participants inside tx. A missing
+// thread is 404 unknown_thread.
+func loadThread(ctx context.Context, tx *sql.Tx, id string) (*threadRow, error) {
+	t := &threadRow{ID: id}
+	var title, group sql.NullString
+	var budget sql.NullInt64
+	var locked int
+	err := tx.QueryRowContext(ctx,
+		`SELECT title, group_id, created_by, message_count, budget_remaining, history_access, locked_participants
+		 FROM threads WHERE thr_id = ?`, id).
+		Scan(&title, &group, &t.CreatedBy, &t.MessageCount, &budget, &t.HistoryAccess, &locked)
+	if errors.Is(err, sql.ErrNoRows) {
+		e := E(http.StatusNotFound, "unknown_thread", "no such thread")
+		e.Details["thread_id"] = id
+		return nil, e
+	}
+	if err != nil {
+		return nil, fmt.Errorf("hub: load thread: %w", err)
+	}
+	if title.Valid {
+		t.Title = &title.String
+	}
+	if group.Valid {
+		t.Group = &group.String
+	}
+	if budget.Valid {
+		b := int(budget.Int64)
+		t.Budget = &b
+	}
+	t.Locked = locked != 0
+	if t.participants, err = threadParticipants(ctx, tx, id); err != nil {
+		return nil, err
+	}
+	t.isParticipant = make(map[string]bool, len(t.participants))
+	for _, p := range t.participants {
+		t.isParticipant[p] = true
+	}
+	return t, nil
+}
+
+// threadParticipants returns the peers of thread id in join order.
+func threadParticipants(ctx context.Context, tx *sql.Tx, id string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT peer_id FROM thread_participants WHERE thr_id = ? ORDER BY rowid`, id)
+	if err != nil {
+		return nil, fmt.Errorf("hub: thread participants: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("hub: thread participants: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hub: thread participants: %w", err)
+	}
+	return out, nil
+}
+
+// insertThread creates the row for t (MessageCount 0) inside tx.
+func insertThread(ctx context.Context, tx *sql.Tx, t *threadRow, now string) error {
+	var budget any
+	if t.Budget != nil {
+		budget = *t.Budget
+	}
+	locked := 0
+	if t.Locked {
+		locked = 1
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO threads(thr_id, title, group_id, created_by, created_at, message_count, budget_remaining,
+		                     history_access, locked_participants, last_message_at)
+		 VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+		t.ID, t.Title, t.Group, t.CreatedBy, now, budget, t.HistoryAccess, locked, now); err != nil {
+		return fmt.Errorf("hub: insert thread: %w", err)
+	}
+	return nil
+}
+
+// addParticipants inserts peers as participants of thread thr who see
+// messages with seq > joinedAfterSeq (PROTOCOL §16.3).
+func addParticipants(ctx context.Context, tx *sql.Tx, thr string, peers []string, joinedAfterSeq int, now string) error {
+	for _, p := range peers {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO thread_participants(thr_id, peer_id, joined_at, joined_after_seq) VALUES (?, ?, ?, ?)`,
+			thr, p, now, joinedAfterSeq); err != nil {
+			return fmt.Errorf("hub: add participant: %w", err)
+		}
+	}
+	return nil
+}
+
+// summary renders t as the ThreadSummary every Delivery carries.
+func (t *threadRow) summary() envelope.ThreadSummary {
+	return envelope.ThreadSummary{
+		ThreadID:           t.ID,
+		Title:              t.Title,
+		Participants:       append([]string(nil), t.participants...),
+		Group:              t.Group,
+		MessageCount:       t.MessageCount,
+		BudgetRemaining:    t.Budget,
+		HistoryAccess:      t.HistoryAccess,
+		LockedParticipants: t.Locked,
+	}
+}
+
+// loadMessage returns the stored Message msgID and its thread, or found false.
+func loadMessage(ctx context.Context, tx *sql.Tx, msgID string) (msg *envelope.Message, thr string, found bool, err error) {
+	var body string
+	err = tx.QueryRowContext(ctx, `SELECT thr_id, body FROM messages WHERE msg_id = ?`, msgID).Scan(&thr, &body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", false, nil
+	}
+	if err != nil {
+		return nil, "", false, fmt.Errorf("hub: load message: %w", err)
+	}
+	var m envelope.Message
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		return nil, "", false, fmt.Errorf("hub: decode stored message %s: %w", msgID, err)
+	}
+	return &m, thr, true, nil
+}
+
+// latestMessage returns the newest Message of thread thr, or nil.
+func latestMessage(ctx context.Context, tx *sql.Tx, thr string) (*envelope.Message, error) {
+	var id string
+	err := tx.QueryRowContext(ctx, `SELECT msg_id FROM messages WHERE thr_id = ? ORDER BY seq DESC LIMIT 1`, thr).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("hub: latest message: %w", err)
+	}
+	m, _, _, err := loadMessage(ctx, tx, id)
+	return m, err
+}
+
+// isParticipant reports whether peer participates in thread thr.
+func isParticipant(ctx context.Context, tx *sql.Tx, thr, peer string) (bool, error) {
+	var one int
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM thread_participants WHERE thr_id = ? AND peer_id = ?`, thr, peer).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("hub: participant check: %w", err)
+	}
+	return true, nil
+}

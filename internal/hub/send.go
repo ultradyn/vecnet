@@ -1,0 +1,658 @@
+package hub
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/XertroV/vecnet/internal/audit"
+	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/ids"
+)
+
+// SendResponse is the body of a 202 (or replayed 200) POST /v1/messages
+// (PROTOCOL §2.2 Response, R04).
+type SendResponse struct {
+	MessageID  string        `json:"message_id"`
+	ThreadID   string        `json:"thread_id"`
+	Deliveries []DeliveryRef `json:"deliveries"`
+	JobID      string        `json:"job_id,omitempty"`
+	Spilled    bool          `json:"spilled"`
+}
+
+// DeliveryRef is one entry of SendResponse.deliveries.
+type DeliveryRef struct {
+	DeliveryID string  `json:"delivery_id"`
+	Recipient  string  `json:"recipient"`
+	Via        *string `json:"via"`
+	State      string  `json:"state"`
+}
+
+// IdempotencyWindow is how long an idempotency_key is remembered per sender
+// (PROTOCOL §2.2, R03).
+const IdempotencyWindow = 24 * time.Hour
+
+// PushAttempts is the attempt budget of a new Delivery (PROTOCOL §3.3).
+const PushAttempts = 8
+
+// ingresses are the Delivery.ingress values [SCH].
+var ingresses = map[string]bool{
+	"http_send": true, "mcp_tool": true, "inbound_webhook": true,
+	"connector": true, "operator_ui": true, "hub": true,
+}
+
+// deliveryWire is a Delivery as it is appended to the recipient's log and
+// pushed: the thread summary and the Message are embedded as pre-serialised
+// bytes, so every Delivery of a Message carries byte-identical message JSON.
+type deliveryWire struct {
+	SchemaVersion int             `json:"schema_version"`
+	DeliveryID    string          `json:"delivery_id"`
+	Recipient     string          `json:"recipient"`
+	Via           *string         `json:"via"`
+	AlsoVia       []string        `json:"also_via,omitempty"`
+	Attempt       int             `json:"attempt"`
+	Ingress       string          `json:"ingress"`
+	Thread        json.RawMessage `json:"thread"`
+	Message       json.RawMessage `json:"message"`
+}
+
+// target is one recipient peer of a send after group fan-out.
+type target struct {
+	peer    string
+	via     *string  // first group that resolved it; nil for a direct address
+	alsoVia []string // further groups
+}
+
+// sender is the resolved originating peer.
+type sender struct {
+	peer, prn, kind string
+}
+
+// Send runs the send pipeline of PROTOCOL §2.2 for caller c over the raw
+// SendRequest body, inside one transaction. ingress is the Delivery.ingress
+// value ("http_send", "operator_ui", "connector", ...). replayed is true
+// when the (sender, idempotency_key) pair was already used with the same
+// body: the original response is returned and nothing is sent. After commit
+// it wakes the recipients' log readers; callers kick the push worker.
+func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress string) (resp *SendResponse, replayed bool, err error) {
+	if !ingresses[ingress] {
+		return nil, false, fmt.Errorf("hub: send: unknown ingress %q", ingress)
+	}
+	if err := checkRecipientNames(raw); err != nil {
+		return nil, false, err
+	}
+	if err := envelope.Validate("sendRequest", raw); err != nil {
+		return nil, false, err
+	}
+	req, err := decodeSendRequest(raw)
+	if err != nil {
+		return nil, false, err
+	}
+	for k := range req.Metadata {
+		if strings.HasPrefix(k, "vecnet.") {
+			e := E(http.StatusUnprocessableEntity, "reserved_metadata", "metadata keys starting with \"vecnet.\" belong to the hub")
+			e.Details["key"] = k
+			return nil, false, e
+		}
+	}
+	bodySHA, err := canonicalSHA256(raw)
+	if err != nil {
+		return nil, false, err
+	}
+
+	var notify []string
+	// BEGIN IMMEDIATE (store DSN) serialises the idempotency lookup and
+	// insert; the (sender, key) primary key is the backstop, and a send that
+	// loses on it re-runs once to replay the winner's response.
+	for attempt := 0; ; attempt++ {
+		notify = nil
+		err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
+			var e error
+			resp, replayed, notify, e = h.sendTx(ctx, tx, c, req, bodySHA, ingress)
+			return e
+		})
+		if err != nil && attempt == 0 && isIdempotencyConflict(err) {
+			continue
+		}
+		break
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if len(notify) > 0 {
+		h.Log.Notify(notify...)
+	}
+	return resp, replayed, nil
+}
+
+func isIdempotencyConflict(err error) bool {
+	return strings.Contains(err.Error(), "UNIQUE constraint failed: idempotency.")
+}
+
+// sendTx is the transactional body of Send.
+func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelope.SendRequest, bodySHA, ingress string) (*SendResponse, bool, []string, error) {
+	nowT := h.Now()
+	now := envelope.FormatTime(nowT)
+
+	snd, err := resolveSender(ctx, tx, c, req.As)
+	if err != nil {
+		return nil, false, nil, err
+	}
+
+	// Idempotency (PROTOCOL §2.2, R03).
+	if prev, ok, err := h.idempotencyLookup(ctx, tx, snd.peer, req.IdempotencyKey, bodySHA, nowT); err != nil || ok {
+		return prev, ok, nil, err
+	}
+
+	// Thread: load an existing one, or prepare a new one.
+	var thr *threadRow
+	if req.ThreadID != nil {
+		if thr, err = loadThread(ctx, tx, *req.ThreadID); err != nil {
+			return nil, false, nil, err
+		}
+		if !thr.isParticipant[snd.peer] && snd.kind != "operator" {
+			e := E(http.StatusForbidden, "not_participant", "the sender is not a participant of this thread")
+			e.Details["thread_id"] = thr.ID
+			return nil, false, nil, e
+		}
+	}
+
+	// Recipients: as addressed, or the thread's participants minus the sender.
+	addressed := req.Recipients
+	if addressed == nil {
+		for _, p := range thr.participants {
+			if p != snd.peer {
+				addressed = append(addressed, p)
+			}
+		}
+		if len(addressed) == 0 {
+			e := E(http.StatusUnprocessableEntity, "unknown_recipient", "the thread has no participants besides the sender")
+			e.Details["thread_id"] = thr.ID
+			return nil, false, nil, e
+		}
+	}
+	targets, err := h.resolveTargets(ctx, tx, snd, addressed)
+	if err != nil {
+		return nil, false, nil, err
+	}
+	if len(targets) == 0 {
+		return nil, false, nil, E(http.StatusUnprocessableEntity, "unknown_recipient", "the recipients resolve to no peer besides the sender")
+	}
+
+	// Participants: who joins with this send.
+	var joiners []string
+	if thr == nil {
+		thr = &threadRow{
+			ID:            ids.New(ids.Thr),
+			CreatedBy:     snd.peer,
+			HistoryAccess: "from_join",
+			isParticipant: map[string]bool{},
+		}
+		if req.ThreadTitle != "" {
+			title := req.ThreadTitle
+			thr.Title = &title
+		}
+		if ids.IsGroup(addressed[0]) {
+			g := addressed[0]
+			thr.Group = &g
+		}
+		if h.Cfg.ThreadBudget > 0 {
+			b := h.Cfg.ThreadBudget
+			thr.Budget = &b
+		}
+		thr.isNew = true
+	}
+	if !thr.isParticipant[snd.peer] {
+		joiners = append(joiners, snd.peer)
+		thr.isParticipant[snd.peer] = true
+	}
+	for _, t := range targets {
+		if !thr.isParticipant[t.peer] {
+			joiners = append(joiners, t.peer)
+			thr.isParticipant[t.peer] = true
+		}
+	}
+	if !thr.isNew && len(joiners) > 0 && thr.Locked && snd.peer != thr.CreatedBy && snd.kind != "operator" {
+		e := E(http.StatusForbidden, "participants_locked", "only the thread creator or the operator may add participants")
+		e.Details["thread_id"] = thr.ID
+		return nil, false, nil, e
+	}
+	if len(thr.participants)+len(joiners) > MaxParticipants {
+		e := E(http.StatusUnprocessableEntity, "thread_full", "a thread holds at most 64 participants")
+		e.Details["limit"] = MaxParticipants
+		return nil, false, nil, e
+	}
+
+	// in_reply_to and the loop parent.
+	var parent *envelope.Message
+	if req.InReplyTo != nil {
+		m, mThr, found, err := loadMessage(ctx, tx, *req.InReplyTo)
+		if err != nil {
+			return nil, false, nil, err
+		}
+		ok := found && mThr == thr.ID
+		if found && thr.isNew {
+			// A new thread may point at a message in another thread the
+			// sender can see (PROTOCOL §7).
+			if ok, err = isParticipant(ctx, tx, mThr, snd.peer); err != nil {
+				return nil, false, nil, err
+			}
+		}
+		if !ok {
+			e := E(http.StatusUnprocessableEntity, "not_in_thread", "in_reply_to is not a message of this thread")
+			e.Details["in_reply_to"] = *req.InReplyTo
+			return nil, false, nil, e
+		}
+		parent = m
+	} else if !thr.isNew {
+		if parent, err = latestMessage(ctx, tx, thr.ID); err != nil {
+			return nil, false, nil, err
+		}
+	}
+
+	// Build and serialise the Message once.
+	kind := req.Kind
+	if kind == "" {
+		kind = "message"
+	}
+	msg := envelope.Message{
+		SchemaVersion:    envelope.SchemaVersion,
+		MessageID:        ids.New(ids.Msg),
+		ThreadID:         thr.ID,
+		InReplyTo:        req.InReplyTo,
+		Kind:             kind,
+		Sender:           snd.peer,
+		Recipients:       addressed,
+		Priority:         req.Priority,
+		CreatedAt:        now,
+		Content:          envelope.Content{Text: req.Content.Text},
+		Attachments:      stripBlobURLs(req.Attachments),
+		Metadata:         req.Metadata,
+		Loop:             h.sendLoop(parent, snd.peer, req, nowT),
+		JobRequest:       req.JobRequest,
+		JobStatus:        req.JobStatus,
+		ApprovalRequest:  req.ApprovalRequest,
+		ApprovalResponse: req.ApprovalResponse,
+	}
+	if ingress == "connector" {
+		msg.Origin = req.Origin // honoured only for connectors (§2.2 step 8)
+	}
+	msgJSON, err := json.Marshal(msg)
+	if err != nil {
+		return nil, false, nil, fmt.Errorf("hub: encode message: %w", err)
+	}
+
+	// Thread row, sequence, participants.
+	if thr.isNew {
+		if err := insertThread(ctx, tx, thr, now); err != nil {
+			return nil, false, nil, err
+		}
+	}
+	var seq int
+	if err := tx.QueryRowContext(ctx, `SELECT coalesce(max(seq), 0) + 1 FROM messages WHERE thr_id = ?`, thr.ID).Scan(&seq); err != nil {
+		return nil, false, nil, fmt.Errorf("hub: next seq: %w", err)
+	}
+	if err := addParticipants(ctx, tx, thr.ID, joiners, seq-1, now); err != nil {
+		return nil, false, nil, err
+	}
+	thr.participants = append(thr.participants, joiners...)
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO messages(msg_id, thr_id, seq, sender, kind, created_at, body) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		msg.MessageID, thr.ID, seq, snd.peer, kind, now, string(msgJSON)); err != nil {
+		return nil, false, nil, fmt.Errorf("hub: insert message: %w", err)
+	}
+	thr.MessageCount++
+	if thr.Budget != nil && *thr.Budget > 0 {
+		b := *thr.Budget - 1
+		thr.Budget = &b
+	}
+	var budget any
+	if thr.Budget != nil {
+		budget = *thr.Budget
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE threads SET message_count = ?, budget_remaining = ?, last_message_at = ? WHERE thr_id = ?`,
+		thr.MessageCount, budget, now, thr.ID); err != nil {
+		return nil, false, nil, fmt.Errorf("hub: update thread: %w", err)
+	}
+	for _, r := range addressed {
+		if err := touchGroup(ctx, tx, r, now); err != nil {
+			return nil, false, nil, err
+		}
+	}
+	threadJSON, err := json.Marshal(thr.summary())
+	if err != nil {
+		return nil, false, nil, fmt.Errorf("hub: encode thread summary: %w", err)
+	}
+
+	// One Delivery per recipient peer, each appended to that peer's log.
+	resp := &SendResponse{MessageID: msg.MessageID, ThreadID: thr.ID, Deliveries: []DeliveryRef{}}
+	notify := make([]string, 0, len(targets))
+	for _, t := range targets {
+		dly := ids.New(ids.Dly)
+		data, err := json.Marshal(deliveryWire{
+			SchemaVersion: envelope.SchemaVersion,
+			DeliveryID:    dly,
+			Recipient:     t.peer,
+			Via:           t.via,
+			AlsoVia:       t.alsoVia,
+			Attempt:       1,
+			Ingress:       ingress,
+			Thread:        threadJSON,
+			Message:       msgJSON,
+		})
+		if err != nil {
+			return nil, false, nil, fmt.Errorf("hub: encode delivery: %w", err)
+		}
+		route, err := routeFor(ctx, tx, t.peer)
+		if err != nil {
+			return nil, false, nil, err
+		}
+		cur, err := h.Log.Append(ctx, tx, t.peer, "delivery", nowT, json.RawMessage(data))
+		if err != nil {
+			return nil, false, nil, err
+		}
+		alsoVia, _ := json.Marshal(append([]string{}, t.alsoVia...))
+		sum := sha256.Sum256(data)
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO deliveries(dly_id, msg_id, thr_id, recipient, via, also_via, priority, state, attempt,
+			                        attempts_left, route_id, expires_at, created_at, updated_at, event_seq, body_sha256)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?)`,
+			dly, msg.MessageID, thr.ID, t.peer, t.via, string(alsoVia), req.Priority,
+			PushAttempts, route, msg.Loop.ExpiresAt, now, now, cur.Seq, hex.EncodeToString(sum[:])); err != nil {
+			return nil, false, nil, fmt.Errorf("hub: insert delivery: %w", err)
+		}
+		resp.Deliveries = append(resp.Deliveries, DeliveryRef{DeliveryID: dly, Recipient: t.peer, Via: t.via, State: "queued"})
+		notify = append(notify, t.peer)
+	}
+
+	respJSON, err := json.Marshal(resp)
+	if err != nil {
+		return nil, false, nil, fmt.Errorf("hub: encode response: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO idempotency(sender, key, body_sha256, response, created_at) VALUES (?, ?, ?, ?, ?)`,
+		snd.peer, req.IdempotencyKey, bodySHA, string(respJSON), now); err != nil {
+		return nil, false, nil, fmt.Errorf("hub: store idempotency: %w", err)
+	}
+	if err := audit.Record(ctx, tx, snd.peer, "send", []string{msg.MessageID, thr.ID},
+		map[string]any{"ingress": ingress, "deliveries": len(targets), "new_thread": thr.isNew}); err != nil {
+		return nil, false, nil, err
+	}
+	return resp, false, notify, nil
+}
+
+// resolveSender derives the sending peer from the credential and `as`
+// (PROTOCOL §2.2 step 1, §14.3).
+func resolveSender(ctx context.Context, tx *sql.Tx, c auth.Caller, as string) (sender, error) {
+	forbidden := func() error {
+		e := E(http.StatusForbidden, "forbidden", "as must name a peer of the caller's principal")
+		e.Details["as"] = as
+		return e
+	}
+	var peer string
+	switch c.Kind {
+	case "peer":
+		if as != "" && as != c.PeerID {
+			return sender{}, forbidden()
+		}
+		peer = c.PeerID
+	case "principal", "operator":
+		peer = as
+		if peer == "" {
+			peer = c.PeerID // the operator's own peer; "" for a principal
+		}
+		if peer == "" {
+			return sender{}, E(http.StatusUnprocessableEntity, "as_required", "a principal credential must name the sending peer with as")
+		}
+	default:
+		return sender{}, E(http.StatusForbidden, "forbidden", "this credential cannot send")
+	}
+	s := sender{peer: peer}
+	var disabled int
+	err := tx.QueryRowContext(ctx, `SELECT prn_id, kind, disabled FROM peers WHERE peer_id = ?`, peer).Scan(&s.prn, &s.kind, &disabled)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (disabled != 0 || s.prn != c.PrincipalID)) {
+		return sender{}, forbidden()
+	}
+	if err != nil {
+		return sender{}, fmt.Errorf("hub: resolve sender: %w", err)
+	}
+	return s, nil
+}
+
+// idempotencyLookup returns the stored response for (sender, key) when the
+// body matches (ok true), 409 idempotency_conflict when it differs, and
+// (nil, false, nil) when the key is unused or its row is older than the
+// window (the stale row is removed).
+func (h *Hub) idempotencyLookup(ctx context.Context, tx *sql.Tx, sender, key, bodySHA string, now time.Time) (*SendResponse, bool, error) {
+	var sha, respJSON, created string
+	err := tx.QueryRowContext(ctx, `SELECT body_sha256, response, created_at FROM idempotency WHERE sender = ? AND key = ?`,
+		sender, key).Scan(&sha, &respJSON, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("hub: idempotency lookup: %w", err)
+	}
+	if at, perr := envelope.ParseTime(created); perr != nil || now.Sub(at) >= IdempotencyWindow {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM idempotency WHERE sender = ? AND key = ?`, sender, key); err != nil {
+			return nil, false, fmt.Errorf("hub: idempotency expire: %w", err)
+		}
+		return nil, false, nil
+	}
+	if sha != bodySHA {
+		e := E(http.StatusConflict, "idempotency_conflict", "idempotency_key was already used with a different body")
+		e.Details["idempotency_key"] = key
+		return nil, false, e
+	}
+	var resp SendResponse
+	if err := json.Unmarshal([]byte(respJSON), &resp); err != nil {
+		return nil, false, fmt.Errorf("hub: decode stored response: %w", err)
+	}
+	return &resp, true, nil
+}
+
+// resolveTargets fans the addressed ids out to recipient peers: one target
+// per distinct peer, in address order; via is the first group that reached
+// it and alsoVia the rest (PROTOCOL §5.3, R17). The sender is skipped when a
+// group reaches it. Every addressed id is checked against the sender's scopes.
+func (h *Hub) resolveTargets(ctx context.Context, tx *sql.Tx, snd sender, addressed []string) ([]target, error) {
+	var out []target
+	index := map[string]int{}
+	add := func(peer string, via *string) {
+		i, seen := index[peer]
+		if !seen {
+			index[peer] = len(out)
+			out = append(out, target{peer: peer, via: via})
+			return
+		}
+		t := &out[i]
+		if via == nil || (t.via != nil && *t.via == *via) {
+			return
+		}
+		for _, g := range t.alsoVia {
+			if g == *via {
+				return
+			}
+		}
+		t.alsoVia = append(t.alsoVia, *via)
+	}
+	done := map[string]bool{}
+	for _, r := range addressed {
+		if done[r] {
+			continue
+		}
+		done[r] = true
+		switch {
+		case ids.Is(ids.Peer, r):
+			var one int
+			err := tx.QueryRowContext(ctx, `SELECT 1 FROM peers WHERE peer_id = ?`, r).Scan(&one)
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, unknownRecipient(r)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("hub: find recipient: %w", err)
+			}
+			if err := h.mustMaySend(ctx, tx, snd.peer, r); err != nil {
+				return nil, err
+			}
+			add(r, nil)
+		case ids.IsGroup(r):
+			members, err := groupMembers(ctx, tx, r)
+			if err != nil {
+				return nil, err
+			}
+			if err := h.mustMaySend(ctx, tx, snd.peer, r); err != nil {
+				return nil, err
+			}
+			g := r
+			for _, m := range members {
+				if m != snd.peer {
+					add(m, &g)
+				}
+			}
+		default:
+			return nil, unknownRecipient(r)
+		}
+	}
+	return out, nil
+}
+
+func (h *Hub) mustMaySend(ctx context.Context, tx *sql.Tx, from, to string) error {
+	ok, err := h.Auth.MaySend(ctx, tx, from, to)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		e := E(http.StatusForbidden, "scope_denied", "send scopes forbid this recipient")
+		e.Details["recipient"] = to
+		return e
+	}
+	return nil
+}
+
+// routeFor returns the push route of peer: its own route, else its
+// principal's, else nil (pull only).
+func routeFor(ctx context.Context, tx *sql.Tx, peer string) (any, error) {
+	var route sql.NullString
+	err := tx.QueryRowContext(ctx,
+		`SELECT coalesce(p.route_id,
+		   (SELECT route_id FROM routes WHERE owner_kind = 'peer' AND owner_id = p.peer_id ORDER BY created_at, route_id LIMIT 1),
+		   (SELECT route_id FROM routes WHERE owner_kind = 'principal' AND owner_id = p.prn_id ORDER BY created_at, route_id LIMIT 1))
+		 FROM peers p WHERE p.peer_id = ?`, peer).Scan(&route)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, unknownRecipient(peer)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("hub: route for %s: %w", peer, err)
+	}
+	if !route.Valid {
+		return nil, nil
+	}
+	return route.String, nil
+}
+
+// sendLoop fills Message.loop. This is the plain inheritance rule; Task 8
+// replaces it with buildLoop, which also enforces max_depth and expiry.
+func (h *Hub) sendLoop(parent *envelope.Message, senderID string, req *envelope.SendRequest, now time.Time) envelope.Loop {
+	l := envelope.Loop{MaxDepth: h.Cfg.DefaultMaxDepth, ExpiresAt: envelope.FormatTime(now.Add(h.Cfg.DefaultTTL))}
+	if parent != nil {
+		l.Depth = parent.Loop.Depth + 1
+		l.MaxDepth = parent.Loop.MaxDepth
+		l.SenderChain = append(l.SenderChain, parent.Loop.SenderChain...)
+	}
+	if req.MaxDepth != nil {
+		l.MaxDepth = *req.MaxDepth
+	}
+	if req.ExpiresAt != "" {
+		l.ExpiresAt = req.ExpiresAt
+	}
+	l.SenderChain = append(l.SenderChain, senderID)
+	if n := len(l.SenderChain); n > 32 {
+		l.SenderChain = l.SenderChain[n-32:]
+	}
+	return l
+}
+
+// checkRecipientNames rejects a recipient string that is not a vecnet id
+// with 422 name_not_an_address (PROTOCOL §2.2 step 2, §14.4). It runs before
+// schema validation, which would otherwise report the same string as a
+// pattern violation (400 invalid_body). Anything it cannot read is left to
+// the schema.
+func checkRecipientNames(raw []byte) error {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(raw, &top) != nil {
+		return nil
+	}
+	var rs []json.RawMessage
+	if json.Unmarshal(top["recipients"], &rs) != nil {
+		return nil
+	}
+	for i, r := range rs {
+		var s string
+		if json.Unmarshal(r, &s) != nil {
+			continue
+		}
+		if _, _, err := ids.Parse(s); err != nil {
+			e := E(http.StatusUnprocessableEntity, "name_not_an_address",
+				"recipients are peer_, team_ or grp_ ids; a display name is never an address")
+			e.Details["path"] = fmt.Sprintf("/recipients/%d", i)
+			return e
+		}
+	}
+	return nil
+}
+
+// decodeSendRequest decodes a schema-valid body. Numbers in free-form
+// objects stay json.Number so metadata round-trips without float rounding.
+func decodeSendRequest(raw []byte) (*envelope.SendRequest, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	dec.DisallowUnknownFields()
+	var req envelope.SendRequest
+	if err := dec.Decode(&req); err != nil {
+		return nil, &envelope.SchemaError{Path: "", Message: "invalid body: " + err.Error()}
+	}
+	return &req, nil
+}
+
+// canonicalSHA256 hashes raw after canonical re-encoding (sorted keys, no
+// insignificant whitespace, numbers verbatim), so the idempotency check
+// compares bodies, not their formatting.
+func canonicalSHA256(raw []byte) (string, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return "", &envelope.SchemaError{Path: "", Message: "invalid JSON: " + err.Error()}
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", fmt.Errorf("hub: canonical body: %w", err)
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// stripBlobURLs copies atts without any sender-supplied blob_url: that field
+// is hub-set per Delivery (Task 10).
+func stripBlobURLs(atts []envelope.Attachment) []envelope.Attachment {
+	if len(atts) == 0 {
+		return nil
+	}
+	out := make([]envelope.Attachment, len(atts))
+	for i, a := range atts {
+		a.BlobURL = ""
+		out[i] = a
+	}
+	return out
+}

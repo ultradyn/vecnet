@@ -652,6 +652,24 @@ Residual questions, decided 2026-11-01 (same delegation):
 3. An ingress event dropped by the source's event allowlist is 202 `{"dropped": true, "reason": "event_filtered"}`, so the provider does not redeliver it.
 4. `GET /v1/threads` paginates with `?cursor=<next>`, passing back the `next` token verbatim.
 
+Further reason codes, introduced by the core-hub implementation plan (2026-11-01):
+
+- `invalid_body` (400): the body is not JSON or violates the schema (unknown field, wrong type, missing required field); `details.path` is the JSON pointer of the first violation.
+- `unauthenticated` (401): missing, unknown or revoked bearer credential.
+- `forbidden` (403): the credential may not do this, e.g. a non-operator on `/v1/admin/...`, or `as` naming a peer outside the caller's principal.
+- `as_required` (422): a principal credential sent without `as`.
+- `not_in_thread` (422): `in_reply_to` names a message outside the addressed thread.
+- `attachment_size_mismatch` (422): an attachment's declared `size` differs from the stored blob's size.
+- `cursor_mismatch` (400): `Last-Event-ID` and `?after=` are both given and differ.
+- `not_your_peer` (403): `?peer=` names a peer the principal does not own.
+- `invalid_state` (422): a receipt state other than `processed`, `read` or `failed`.
+- `invalid_value` (422): a field value outside its allowed set or range (e.g. `subscribe_presence`).
+- `unknown_thread` (404): the named thread does not exist.
+- `not_member` (403): a non-member tried to change an ad hoc group.
+- `unknown_approval` (404): an `approval_response` names no approval of this thread.
+- `unknown_job` (404): a `job_status` names no existing job.
+- `invalid_transition` (422): a `job_status` state not allowed from the job's current state (section 5.6).
+
 ## 16. Amendments from pag-chat's review (2026-11-01)
 
 These three rules supersede the sections they cite. Each answers a decisive error pag-chat identified; the coordinating agent accepted them under Max's delegation and flagged amendment 3 to Max as a product-default change.

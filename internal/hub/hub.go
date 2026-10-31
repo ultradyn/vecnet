@@ -14,6 +14,7 @@ import (
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/ids"
 	"github.com/XertroV/vecnet/internal/store"
 )
@@ -45,10 +46,11 @@ func DefaultConfig() Config {
 	}
 }
 
-// Hub is the service. The event log (Task 6) and blob store (Task 9) join
-// this struct when their packages exist.
+// Hub is the service. The blob store (Task 9) joins this struct when its
+// package exists.
 type Hub struct {
 	DB   *store.DB
+	Log  *eventlog.Log
 	Auth *auth.Resolver
 	Cfg  Config
 	Now  func() time.Time
@@ -62,7 +64,11 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Hub{DB: db, Auth: &auth.Resolver{DB: db}, Cfg: cfg, Now: now}, nil
+	log, err := eventlog.New(db)
+	if err != nil {
+		return nil, fmt.Errorf("hub: %w", err)
+	}
+	return &Hub{DB: db, Log: log, Auth: &auth.Resolver{DB: db}, Cfg: cfg, Now: now}, nil
 }
 
 // PeerKinds are the peers.kind values the hub accepts (core-hub plan Task 5).
