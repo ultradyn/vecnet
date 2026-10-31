@@ -90,6 +90,9 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 	if err := checkRecipientNames(raw); err != nil {
 		return nil, false, err
 	}
+	if err := checkPayloadCaps(raw); err != nil {
+		return nil, false, err
+	}
 	if err := envelope.Validate("sendRequest", raw); err != nil {
 		return nil, false, err
 	}
@@ -113,8 +116,11 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 	var cut *APIError
 	// BEGIN IMMEDIATE (store DSN) serialises the idempotency lookup and
 	// insert; the (sender, key) primary key is the backstop, and a send that
-	// loses on it re-runs once to replay the winner's response.
-	for attempt := 0; ; attempt++ {
+	// loses on it re-runs once to replay the winner's response. A send that
+	// must auto-spill text not yet in the blob store rolls back, stores it
+	// (the blob store writes in its own transaction) and re-runs once.
+	idemRetried, spillStored := false, false
+	for {
 		notify, cut = nil, nil
 		err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
 			var e error
@@ -128,7 +134,16 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 			}
 			return e
 		})
-		if err != nil && attempt == 0 && isIdempotencyConflict(err) {
+		var ns *needSpillError
+		if errors.As(err, &ns) && !spillStored {
+			spillStored = true
+			if err = h.putSpill(ctx, ns.text); err != nil {
+				return nil, false, err
+			}
+			continue
+		}
+		if err != nil && !idemRetried && isIdempotencyConflict(err) {
+			idemRetried = true
 			continue
 		}
 		break
@@ -329,6 +344,19 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 	if ingress == "connector" {
 		msg.Origin = req.Origin // honoured only for connectors (§2.2 step 8)
 	}
+	// Attachments (§2.2 step 7) and auto-spill (step 6). hosted holds every
+	// hash whose bytes the hub serves: those are pinned and linked per
+	// Delivery.
+	hosted, err := h.checkAttachments(ctx, tx, msg.Attachments)
+	if err != nil {
+		return nil, false, nil, err
+	}
+	if err := h.applySpill(ctx, tx, &msg, req.Content.Text); err != nil {
+		return nil, false, nil, err
+	}
+	if msg.Content.Truncated {
+		hosted[msg.Attachments[len(msg.Attachments)-1].SHA256] = true
+	}
 	msgJSON, err := json.Marshal(msg)
 	if err != nil {
 		return nil, false, nil, fmt.Errorf("hub: encode message: %w", err)
@@ -352,6 +380,11 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 		`INSERT INTO messages(msg_id, thr_id, seq, sender, kind, created_at, body) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		msg.MessageID, thr.ID, seq, snd.peer, kind, now, string(msgJSON)); err != nil {
 		return nil, false, nil, fmt.Errorf("hub: insert message: %w", err)
+	}
+	for sha := range hosted {
+		if err := h.Blobs.Pin(ctx, tx, sha, msg.MessageID); err != nil {
+			return nil, false, nil, err
+		}
 	}
 	thr.MessageCount++
 	if thr.Budget != nil && *thr.Budget > 0 {
@@ -378,10 +411,18 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 	}
 
 	// One Delivery per recipient peer, each appended to that peer's log.
-	resp := &SendResponse{MessageID: msg.MessageID, ThreadID: thr.ID, Deliveries: []DeliveryRef{}}
+	resp := &SendResponse{MessageID: msg.MessageID, ThreadID: thr.ID, Deliveries: []DeliveryRef{}, Spilled: msg.Content.Truncated}
 	notify := make([]string, 0, len(targets))
 	for _, t := range targets {
 		dly := ids.New(ids.Dly)
+		// The stored Message bytes, plus per-recipient blob_urls when the
+		// hub hosts any attachment.
+		dlyMsg := json.RawMessage(msgJSON)
+		if len(hosted) > 0 {
+			if dlyMsg, err = json.Marshal(h.deliveryBlobURLs(msg, t.peer, hosted)); err != nil {
+				return nil, false, nil, fmt.Errorf("hub: encode delivery message: %w", err)
+			}
+		}
 		data, err := json.Marshal(deliveryWire{
 			SchemaVersion: envelope.SchemaVersion,
 			DeliveryID:    dly,
@@ -391,7 +432,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 			Attempt:       1,
 			Ingress:       ingress,
 			Thread:        threadJSON,
-			Message:       msgJSON,
+			Message:       dlyMsg,
 		})
 		if err != nil {
 			return nil, false, nil, fmt.Errorf("hub: encode delivery: %w", err)
@@ -665,7 +706,7 @@ func canonicalSHA256(raw []byte) (string, error) {
 }
 
 // stripBlobURLs copies atts without any sender-supplied blob_url: that field
-// is hub-set per Delivery (Task 10).
+// is hub-set per Delivery (deliveryBlobURLs) and never stored.
 func stripBlobURLs(atts []envelope.Attachment) []envelope.Attachment {
 	if len(atts) == 0 {
 		return nil
