@@ -174,6 +174,9 @@ func TestRejections(t *testing.T) {
 	}
 	other := postSend(t, env, aSec, sendBody("other-1", c), http.StatusAccepted)
 
+	// A group whose only member is A: fan-out skips the sender.
+	selfGroup := createGroup(t, env, aSec, a)
+
 	with := func(b map[string]any, kv ...any) map[string]any {
 		for i := 0; i < len(kv); i += 2 {
 			b[kv[i].(string)] = kv[i+1]
@@ -191,6 +194,7 @@ func TestRejections(t *testing.T) {
 		{"display name among ids", aSec, sendBody("r1b", b, "max"), 422, "name_not_an_address"},
 		{"unenrolled peer", aSec, sendBody("r2", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8Z"), 404, "unknown_recipient"},
 		{"unknown group", aSec, sendBody("r2b", "grp_01JD3Q2K8M4N6P8R0T2V4X6Z8Z"), 404, "unknown_recipient"},
+		{"group of only the sender", aSec, sendBody("r2c", selfGroup), 422, "no_recipients"},
 		{"scope deny", aSec, sendBody("r3", denied), 403, "scope_denied"},
 		{"reserved metadata", aSec, with(sendBody("r4", b), "metadata", map[string]any{"vecnet.x": 1}), 422, "reserved_metadata"},
 		{"principal without as", prnSec, sendBody("r6", b), 422, "as_required"},

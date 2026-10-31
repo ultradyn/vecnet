@@ -671,6 +671,7 @@ Further reason codes, introduced by the core-hub implementation plan (2026-11-01
 - `unknown_approval` (404): an `approval_response` names no approval of this thread.
 - `unknown_job` (404): a `job_status` names no existing job.
 - `invalid_transition` (422): a `job_status` state not allowed from the job's current state (section 5.6).
+- `no_recipients` (422): the recipients (or a thread's defaulted participants) resolve to no peer besides the sender.
 - `not_found` (404): an unknown route, or an unknown peer, dead letter, group or other object named in a path.
 - `internal` (500): an unexpected hub failure; the message carries no detail.
 

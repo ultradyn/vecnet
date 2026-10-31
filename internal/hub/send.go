@@ -224,7 +224,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 			}
 		}
 		if len(addressed) == 0 {
-			e := E(http.StatusUnprocessableEntity, "unknown_recipient", "the thread has no participants besides the sender")
+			e := E(http.StatusUnprocessableEntity, "no_recipients", "the thread has no participants besides the sender")
 			e.Details["thread_id"] = thr.ID
 			return nil, false, nil, e
 		}
@@ -234,7 +234,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 		return nil, false, nil, err
 	}
 	if len(targets) == 0 {
-		return nil, false, nil, E(http.StatusUnprocessableEntity, "unknown_recipient", "the recipients resolve to no peer besides the sender")
+		return nil, false, nil, E(http.StatusUnprocessableEntity, "no_recipients", "the recipients resolve to no peer besides the sender")
 	}
 
 	// Participants: who joins with this send.
