@@ -168,13 +168,20 @@ const TASKS = [
 ]
 
 // ---------------------------------------------------------------- shared prompt text
-const RULES = `RULES (apply to every command you run):
-- Work only in the worktree ${WT} on branch ${BRANCH}. Your shell cwd resets between calls, so start every Bash command with \`cd ${WT} && \`.
+const GROUPS = Array.isArray(A.parallelGroups) ? A.parallelGroups : [[18, 19]] // tasks that may run side by side in their own worktrees, merged afterwards
+const taskWT = n => `${REPO}/.worktrees/core-hub-t${nn(n)}`
+const taskBranch = n => `core-hub-t${nn(n)}`
+
+function rules(wt, branch) {
+  return `RULES (apply to every command you run):
+- Work only in the worktree ${wt} on branch ${branch}. Your shell cwd resets between calls, so start every Bash command with \`cd ${wt} && \`.
 - Builds via build2, two threads: \`build2 go test -p 2 ...\`, \`CGO_ENABLED=0 build2 go build -p 2 ...\`, \`build2 go vet ./...\`. Never a bare \`go test\` or \`go build\`.
 - Never use attn. You report only through your return value and the status files.
 - Never run destructive git (reset --hard, checkout -- ., restore on others' files, clean, stash drop, rebase, push, branch -D) and never modify the main checkout at ${REPO} except files under ${STATUS}.
 - Network: only \`go get\` / \`go mod download\` of modules the plan names. No docker, no fly, no other downloads.
 - Commits: \`git -c commit.gpgsign=false commit -m "<msg>" --trailer "Plan-Task: <NN>"\`. Stage files explicitly (no \`git add -A\` of unknown files); after committing, \`git status --porcelain\` must be empty.`
+}
+const RULES = rules(WT, BRANCH)
 
 const STATUS_DOC = `STATUS FILES (directory ${STATUS}, create it with mkdir -p if missing):
 - Write your step file (named below) with the full JSON you return.
@@ -334,19 +341,19 @@ function halt(n, reason, extra) {
 }
 
 // ---------------------------------------------------------------- prompts
-function implPrompt(n) {
+function implPrompt(n, wt = WT, branch = BRANCH) {
   const N = nn(n)
   return `You are implementing Task ${n} ("${TASKS[n].title}") of the vecnet core-hub plan, test-first.
 
-${RULES}
+${rules(wt, branch)}
 
 ${readTaskCmds(n)}
 
 ${hazardText(n)}
 
 PROCEDURE
-0. Resume check. Run \`cd ${WT} && git rev-parse --abbrev-ref HEAD && git status --porcelain && git log --format='%H %s' --grep='^Plan-Task: ${N}$'\`.
-   - Branch must be ${BRANCH}; otherwise return status "blocked".
+0. Resume check. Run \`cd ${wt} && git rev-parse --abbrev-ref HEAD && git status --porcelain && git log --format='%H %s' --grep='^Plan-Task: ${N}$'\`.
+   - Branch must be ${branch}; otherwise return status "blocked".
    - If a Plan-Task: ${N} commit already exists and the tree is clean, verify the full suite passes and return status "already_done" with base_sha = parent of the first such commit.
    - If the tree is dirty, it is partial work from an interrupted attempt at THIS task: inspect it and continue from it. Do not discard it.
    - Record base_sha = HEAD before you change anything.
@@ -364,7 +371,7 @@ ${STATUS_DOC}
 Return the JSON described by the output schema.`
 }
 
-function reviewPrompt(n, impl, round, history) {
+function reviewPrompt(n, impl, round, history, wt = WT, branch = BRANCH) {
   const N = nn(n)
   const final = round >= MAX_FIX_ROUNDS
   const prior = history.length
@@ -373,14 +380,14 @@ ${JSON.stringify(history, null, 1)}`
     : 'This is the first review of this task.'
   return `You are an independent reviewer for Task ${n} ("${TASKS[n].title}") of the vecnet core-hub plan. Review round ${round}. You did not write this code; assume nothing the implementer claimed.
 
-${RULES}
+${rules(wt, branch)}
 - You are READ-ONLY on the worktree: do not edit, stage, commit or format any file there. You write only your status files.
 
 ${readTaskCmds(n)}
 
 ${hazardText(n)}
 
-The work under review is \`git -C ${WT} diff ${impl.base_sha}..HEAD\` (commits with trailer Plan-Task: ${N}). The implementer reported these deviations: ${JSON.stringify(impl.deviations || [])}
+The work under review is \`git -C ${wt} diff ${impl.base_sha}..HEAD\` (commits with trailer Plan-Task: ${N}). The implementer reported these deviations: ${JSON.stringify(impl.deviations || [])}
 
 CHECKS
 1. Run, yourself, and record each command in commands_run:
@@ -406,19 +413,19 @@ ${prior}
 Return the JSON described by the output schema.`
 }
 
-function fixPrompt(n, impl, round, review, history) {
+function fixPrompt(n, impl, round, review, history, wt = WT, branch = BRANCH) {
   const N = nn(n)
   const serious = review.findings.filter(isSerious)
   const minors = review.findings.filter(f => !isSerious(f))
   return `You are fixing review findings for Task ${n} ("${TASKS[n].title}") of the vecnet core-hub plan. Fix round ${round} of at most ${MAX_FIX_ROUNDS}.
 
-${RULES}
+${rules(wt, branch)}
 
 ${readTaskCmds(n)}
 
 ${hazardText(n)}
 
-The task's work is \`git -C ${WT} diff ${impl.base_sha}..HEAD\`.
+The task's work is \`git -C ${wt} diff ${impl.base_sha}..HEAD\`.
 
 MUST ADDRESS (blocker and major):
 ${JSON.stringify(serious, null, 1)}
@@ -471,24 +478,23 @@ if (!pre.ok) {
 const passedBefore = new Set((pre.passed_tasks || []).filter(t => t >= START && t <= END))
 if (passedBefore.size) log(`Skipping tasks already passed: ${[...passedBefore].sort((a, b) => a - b).join(', ')}`)
 
-// ---------------------------------------------------------------- Tasks (sequential: each consumes the previous task's interfaces)
-for (let n = START; n <= END; n++) {
+// ---------------------------------------------------------------- Tasks
+// Tasks chain on each other's interfaces, so they run in order, except the groups in GROUPS (default [[18, 19]]):
+// those run side by side, each in its own worktree branched from the main worktree's HEAD, and a merge agent folds them back.
+async function runTask(n, wt, branch) {
   const N = nn(n)
   const P = `Task ${N}`
-  phase(P)
-  if (passedBefore.has(n)) { results.push({ task: n, status: 'skipped_already_passed' }); continue }
-
-  const impl = await call(implPrompt(n), { label: `T${N} implement`, phase: P, schema: IMPL_SCHEMA })
-  if (!impl) { halt(n, 'implementer returned no result twice'); break }
-  if (impl.status === 'blocked') { halt(n, `implementer blocked: ${impl.blocker || 'no reason given'}`, { deviations: impl.deviations }); break }
-  if (impl.status === 'done' && (!impl.commits || impl.commits.length === 0)) { halt(n, 'implementer reported done without a commit'); break }
+  const impl = await call(implPrompt(n, wt, branch), { label: `T${N} implement`, phase: P, schema: IMPL_SCHEMA })
+  if (!impl) return halt(n, 'implementer returned no result twice')
+  if (impl.status === 'blocked') return halt(n, `implementer blocked: ${impl.blocker || 'no reason given'}`, { deviations: impl.deviations })
+  if (impl.status === 'done' && (!impl.commits || impl.commits.length === 0)) return halt(n, 'implementer reported done without a commit')
   if ((impl.deviations || []).length) log(`T${N} deviations: ${impl.deviations.map(d => d.what).join(' | ')}`)
 
   const history = []
   let review = null
   let passed = false
   for (let round = 0; round <= MAX_FIX_ROUNDS; round++) {
-    review = await call(reviewPrompt(n, impl, round, history), {
+    review = await call(reviewPrompt(n, impl, round, history, wt, branch), {
       label: `T${N} review r${round}`, phase: P, schema: REVIEW_SCHEMA, effort: 'high', model: REVIEW_MODEL,
     })
     if (!review) break
@@ -498,7 +504,7 @@ for (let n = START; n <= END; n++) {
     if (review.verdict === 'pass') log(`T${N} r${round}: reviewer said pass but evidence fields disagree; treating as fail`)
     if (round === MAX_FIX_ROUNDS) break
 
-    const fix = await call(fixPrompt(n, impl, round + 1, review, history), { label: `T${N} fix r${round + 1}`, phase: P, schema: FIX_SCHEMA })
+    const fix = await call(fixPrompt(n, impl, round + 1, review, history, wt, branch), { label: `T${N} fix r${round + 1}`, phase: P, schema: FIX_SCHEMA })
     if (!fix) { review = null; break }
     if (fix.status === 'blocked') log(`T${N} fixer blocked; one more review will judge the state`)
     history.push({
@@ -510,14 +516,61 @@ for (let n = START; n <= END; n++) {
     })
   }
 
-  if (!review) { halt(n, 'reviewer or fixer returned no result twice; task state unverified'); break }
-  if (!passed) {
-    halt(n, `still failing after ${MAX_FIX_ROUNDS} fix rounds`, { findings: review.findings.filter(isSerious), checks: { tests_passed: review.tests_passed, repeat_runs_passed: review.repeat_runs_passed, vet_clean: review.vet_clean, gofmt_clean: review.gofmt_clean } })
-    break
-  }
+  if (!review) return halt(n, 'reviewer or fixer returned no result twice; task state unverified')
+  if (!passed) return halt(n, `still failing after ${MAX_FIX_ROUNDS} fix rounds`, { findings: review.findings.filter(isSerious), checks: { tests_passed: review.tests_passed, repeat_runs_passed: review.repeat_runs_passed, vet_clean: review.vet_clean, gofmt_clean: review.gofmt_clean } })
   const minors = review.findings.filter(f => !isSerious(f))
   minors.forEach(f => deferredMinors.push({ task: n, ...f }))
   results.push({ task: n, status: 'passed', rounds: history.length, deviations: impl.deviations, minors: minors.length })
+  return null
+}
+
+const MERGE_SCHEMA = {
+  type: 'object',
+  properties: {
+    ok: { type: 'boolean' },
+    head_sha: { type: 'string' },
+    merged: { type: 'array', items: { type: 'integer' } },
+    conflicts_resolved: { type: 'array', items: { type: 'string' } },
+    tests_passed: { type: 'boolean' },
+    notes: { type: 'string' },
+  },
+  required: ['ok', 'head_sha', 'merged', 'conflicts_resolved', 'tests_passed', 'notes'],
+}
+
+// Build the ordered list of units: a single task, or a parallel group whose members are all in range and not yet passed.
+const units = []
+for (let n = START; n <= END; n++) {
+  if (passedBefore.has(n)) { results.push({ task: n, status: 'skipped_already_passed' }); continue }
+  const g = GROUPS.find(g => g.includes(n) && g.every(m => m >= START && m <= END && !passedBefore.has(m)))
+  if (g) { if (!units.some(u => Array.isArray(u) && u.includes(n))) units.push([...g].sort((a, b) => a - b)) }
+  else units.push(n)
+}
+
+for (const unit of units) {
+  if (!Array.isArray(unit)) {
+    phase(`Task ${nn(unit)}`)
+    if (await runTask(unit, WT, BRANCH)) break
+    continue
+  }
+  const label = unit.map(nn).join('+')
+  phase(`Task ${nn(unit[0])}`)
+  const fork = await call(`Create one worktree per task for the parallel group ${label} of the vecnet core-hub build.
+${RULES}
+For each task number NN in [${unit.map(nn).join(', ')}]: if ${REPO}/.worktrees/core-hub-tNN does not exist, run \`git -C ${REPO} worktree add -b core-hub-tNN ${REPO}/.worktrees/core-hub-tNN ${BRANCH}\` (if the branch already exists from an interrupted run, \`worktree add\` without -b). Confirm each worktree's HEAD equals ${BRANCH}'s HEAD or is a descendant of it. Do not build or test. Return {ok, notes}.`,
+    { label: `fork ${label}`, phase: `Task ${nn(unit[0])}`, effort: 'low', schema: { type: 'object', properties: { ok: { type: 'boolean' }, notes: { type: 'string' } }, required: ['ok', 'notes'] } })
+  if (!fork || !fork.ok) { halt(unit[0], `could not create worktrees for group ${label}: ${fork ? fork.notes : 'no result'}`); break }
+
+  const outcomes = await parallel(unit.map(n => () => runTask(n, taskWT(n), taskBranch(n))))
+  if (outcomes.some(Boolean) || halted.length) break // a halt record is truthy; the first halt is already recorded
+
+  const merge = await call(`Merge the parallel group ${label} back into ${BRANCH} for the vecnet core-hub build.
+${RULES}
+Branches to merge, in this order: ${unit.map(taskBranch).join(', ')} (worktrees ${unit.map(taskWT).join(', ')}).
+Procedure: cd ${WT}; for each branch run \`git merge --no-ff <branch>\`; resolve any conflict by keeping BOTH tasks' behaviour (typical conflicts: route registration in internal/httpapi/server.go, justfile recipes, go.mod/go.sum, README). Never drop a test or an endpoint to make a merge clean. After all merges run \`build2 go test -p 2 -count=1 ./...\`, \`build2 go vet ./...\`, \`gofmt -l .\`; fix merge-induced failures with a follow-up commit carrying trailer "Plan-Task: merge". Then, only after \`git -C <path> status --porcelain\` is empty, remove each task worktree with \`git -C ${REPO} worktree remove <path>\`. Leave the task branches in place; the coordinator deletes them.
+Return {ok, head_sha, merged:[task numbers], conflicts_resolved:[files], tests_passed, notes}. ok is true only when every branch merged and the suite passed.`,
+    { label: `merge ${label}`, phase: `Task ${nn(unit[unit.length - 1])}`, schema: MERGE_SCHEMA })
+  if (!merge || !merge.ok || !merge.tests_passed) { halt(unit[unit.length - 1], `merge of group ${label} failed: ${merge ? merge.notes : 'no result'}`); break }
+  log(`merged group ${label} at ${merge.head_sha}; conflicts resolved: ${merge.conflicts_resolved.length}`)
 }
 
 if (halted.length) {
