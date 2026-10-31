@@ -1,0 +1,919 @@
+<!DOCTYPE html>
+<!--
+  PROTOTYPE (throwaway, ticket 18). Three radically different variants of the vecnet
+  operator UI (inbox, chat, dashboard), switchable via ?variant=a|b|c and the floating
+  bottom bar. Mock data lives in memory and is derived from docs/protocol/examples/.
+  No build, no persistence. Reload resets everything.
+  URL params: variant=a|b|c  tab=inbox|chat|dash  thread=T1..T6
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PROTOTYPE: vecnet operator UI (ticket 18)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0b0f19;--panel:#10162a;--panel2:#151c33;--line:#222b45;--line2:#2c3756;
+  --text:#f3f4f6;--muted:#9aa4b8;--dim:#5f6a84;
+  --grad:linear-gradient(135deg,#6366f1 0%,#a855f7 100%);
+  --wake:#fbbf24;--widle:#38bdf8;--hold:#8391ad;--ok:#34d399;--bad:#fb7185;--violet:#a5b4fc;
+  --sans:'Inter',system-ui,sans-serif;--mono:'JetBrains Mono',ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--sans);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;cursor:pointer}
+a{color:inherit}
+:focus-visible{outline:2px solid #a855f7;outline-offset:2px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+#hazard{position:fixed;top:0;left:0;right:0;height:3px;z-index:60;background:repeating-linear-gradient(135deg,#fbbf24 0 10px,#0b0f19 10px 20px)}
+.mono{font-family:var(--mono)}
+/* shared chips */
+.prio{font:500 10.5px/1 var(--mono);padding:3px 6px;border-radius:4px;border:1px solid;white-space:nowrap}
+.prio.wake{color:var(--wake);border-color:#fbbf2450;background:#fbbf2412}
+.prio.wake_idle{color:var(--widle);border-color:#38bdf850;background:#38bdf812}
+.prio.hold{color:var(--hold);border-color:#8391ad50;background:#8391ad12}
+.att{display:inline-flex;align-items:center;gap:6px;font:500 12px var(--mono);padding:4px 8px;border-radius:6px;border:1px solid var(--line2);background:#0d1325;color:#cbd5e1;text-decoration:none}
+.att .sz{color:var(--dim)}
+.att.spill{border-style:dashed;border-color:#a855f780}
+.att svg{flex:none}
+.st-queued{--c:#64748b}.st-pushed{--c:#38bdf8}.st-accepted{--c:#818cf8}.st-processed{--c:#34d399}.st-read{--c:#e2e8f0}
+.st-failed,.st-dead_letter{--c:#fb7185}.st-expired{--c:#a1a1aa}
+#toast{position:fixed;top:18px;left:50%;transform:translateX(-50%) translateY(-80px);z-index:70;background:#1e2640;border:1px solid var(--line2);color:var(--text);padding:9px 14px;border-radius:8px;font-size:13px;transition:transform .25s ease;box-shadow:0 10px 30px #0008}
+#toast.on{transform:translateX(-50%) translateY(0)}
+/* floating prototype bar: deliberately NOT part of any design */
+#proto{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:80;display:flex;align-items:center;gap:10px;background:#f3f4f6;color:#0b0f19;border-radius:999px;padding:5px 8px 5px 5px;font:500 12.5px var(--sans);box-shadow:0 12px 40px #000c,0 0 0 1px #0004;white-space:nowrap}
+#proto .tag{font:700 11px var(--mono);letter-spacing:.06em;padding:6px 10px;border-radius:999px;background:repeating-linear-gradient(135deg,#fbbf24 0 8px,#f59e0b 8px 16px);color:#111827}
+#proto button{border:0;background:#0b0f19;color:#f3f4f6;border-radius:999px;width:28px;height:28px;font-size:15px;line-height:1}
+#proto button.txt{width:auto;padding:0 10px;font-size:12px}
+#proto .lbl{min-width:190px;text-align:center;font-weight:600}
+#proto .sep{width:1px;height:20px;background:#0b0f1930}
+#proto .credit{color:#374151;font-size:11.5px}
+#proto .credit a{color:#4f46e5;font-weight:600}
+#proto .clk{font:600 12px var(--mono)}
+
+/* ===================== VARIANT A: modest, Cursor-like ===================== */
+.va{display:grid;grid-template-columns:240px minmax(0,1fr) 300px;height:100vh}
+.va .side{border-right:1px solid var(--line);padding:20px 10px 90px;overflow:auto;background:#0c1120}
+.va .brand{display:flex;align-items:center;gap:9px;font-weight:600;font-size:14.5px;padding:2px 8px 18px}
+.va .logo{width:18px;height:18px;border-radius:5px;background:var(--grad)}
+.va .brand .hub{margin-left:auto;font:400 11px var(--mono);color:var(--dim)}
+.va .nav a{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:6px 9px;border-radius:6px;color:var(--muted);text-decoration:none;font-size:13.5px;cursor:pointer}
+.va .nav a:hover{background:#141a2e;color:var(--text)}
+.va .nav a.on{background:#1a2139;color:var(--text)}
+.va .nav .tt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.va .nav .cnt{font:500 11px var(--mono);color:var(--dim);flex:none}
+.va .nav .cnt.hot{color:#0b0f19;background:var(--wake);border-radius:9px;padding:1px 6px}
+.va .grp{font-size:12px;color:var(--dim);padding:20px 9px 6px}
+.va .me{display:flex;align-items:center;gap:8px;padding:6px 9px;font-size:13px;color:var(--muted)}
+.va main{overflow:auto;padding:40px 48px 110px}
+.va .col{max-width:740px;margin:0 auto}
+.va h1{font-size:23px;font-weight:600;letter-spacing:-.015em;margin:0 0 8px}
+.va .lede{color:var(--muted);font-size:14px;line-height:1.65;margin:0 0 8px;max-width:64ch}
+.va h2{font-size:14.5px;font-weight:600;margin:36px 0 12px;display:flex;gap:8px;align-items:baseline}
+.va h2 .n{color:var(--dim);font-weight:400;font-size:13px}
+.va .item{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:12px;padding:13px 14px;border:1px solid var(--line);border-radius:9px;margin-bottom:8px;background:#0e1426}
+.va .item.done{opacity:.5}
+.va .item .who{font-size:13.5px;font-weight:600}
+.va .item .meta{font-size:12px;color:var(--dim);margin-top:2px}
+.va .item .ex{font-size:13.5px;color:#cbd5e1;line-height:1.55;margin-top:6px}
+.va .item .side-r{display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+.va .av{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;font:600 12.5px var(--sans);color:#0b0f19;background:var(--k)}
+.va .apr{border:1px solid transparent;background:linear-gradient(#0e1426,#0e1426) padding-box,var(--grad) border-box}
+.va .q{font-size:15px;font-weight:600;margin:6px 0 10px;line-height:1.45}
+.va .opts{display:flex;gap:8px;flex-wrap:wrap}
+.va .btn{border:1px solid var(--line2);background:#151c33;border-radius:7px;padding:6px 12px;font-size:13px}
+.va .btn:hover{border-color:#6366f1}
+.va .btn.pri{background:var(--grad);border-color:transparent;color:#fff}
+.va .btn.ghost{background:none}
+.va .exp{font:500 12px var(--mono);color:var(--wake)}
+.va .muted{color:var(--muted)}
+.va .dl{border-color:#fb718540}
+.va .dl .code{font:500 12px var(--mono);color:var(--bad)}
+.va .resolved{font-size:12.5px;color:var(--ok)}
+.va aside{border-left:1px solid var(--line);padding:40px 22px 110px;overflow:auto;font-size:13px;color:var(--muted);line-height:1.6}
+.va aside h3{font-size:12px;font-weight:600;color:var(--text);margin:24px 0 8px}
+.va aside h3:first-child{margin-top:0}
+.va aside .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12.5px}
+.va aside .kv dt{color:var(--dim)} .va aside .kv dd{margin:0;color:#cbd5e1;overflow-wrap:anywhere}
+.va aside a{color:var(--violet);text-decoration:none;cursor:pointer;display:block;padding:2px 0}
+/* A chat */
+.va .thead{border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:8px}
+.va .thead .ids{font:400 12px var(--mono);color:var(--dim)}
+.va .msg{display:grid;grid-template-columns:28px minmax(0,1fr);gap:12px;padding:16px 0;border-bottom:1px solid #161d33}
+.va .msg.hl{background:#6366f112;box-shadow:-12px 0 0 #6366f112,12px 0 0 #6366f112}
+.va .msg header{display:flex;align-items:center;gap:8px;font-size:13px;flex-wrap:wrap}
+.va .msg header b{font-weight:600}
+.va .msg .kind,.va .msg .t,.va .msg .via{color:var(--dim);font-size:12px}
+.va .msg .txt{font-size:14px;line-height:1.65;color:#dfe3ea;margin-top:6px;max-width:68ch}
+.va .msg .txt code{font:12.5px var(--mono);background:#171f37;padding:1px 5px;border-radius:4px}
+.va .reply{display:inline-flex;gap:6px;font-size:12px;color:var(--violet);margin-top:4px;cursor:pointer;text-decoration:none}
+.va .reply span{color:var(--dim);max-width:44ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.va .trunc{display:block;font-size:12px;color:#c4b5fd;margin-top:6px}
+.va .atts{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.va .rc{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;font-size:11.5px;color:var(--dim)}
+.va .rc span{display:inline-flex;align-items:center;gap:5px}
+.va .rc i{width:7px;height:7px;border-radius:50%;background:var(--c)}
+.va .rc i.ring{background:none;border:1.5px solid var(--c)}
+.va .box{border:1px solid var(--line2);border-radius:8px;padding:10px 12px;margin-top:8px;background:#0e1426;font-size:13px}
+.va .sys{font-size:12.5px;color:var(--dim);padding:12px 0 12px 40px;border-bottom:1px solid #161d33}
+.va .composer{position:sticky;bottom:72px;margin-top:22px;border:1px solid var(--line2);border-radius:10px;background:#0f1529;padding:10px;box-shadow:0 -20px 30px var(--bg)}
+.va .composer textarea{width:100%;background:none;border:0;color:var(--text);font:14px/1.5 var(--sans);resize:none;height:44px;outline:none}
+.va .composer .bar{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim)}
+.va .seg{display:inline-flex;border:1px solid var(--line2);border-radius:7px;overflow:hidden}
+.va .seg button{border:0;background:none;padding:4px 9px;font:500 11.5px var(--mono);color:var(--muted)}
+.va .seg button.on{background:#1e2745;color:var(--text)}
+.va .composer .bar .sp{flex:1}
+/* A dash */
+.va table{width:100%;border-collapse:collapse;font-size:13px}
+.va th{text-align:left;font-weight:500;color:var(--dim);font-size:12px;padding:6px 10px 6px 0;border-bottom:1px solid var(--line)}
+.va td{padding:9px 10px 9px 0;border-bottom:1px solid #161d33;vertical-align:top}
+.va td .sub{display:block;font:400 11px var(--mono);color:var(--dim)}
+.va .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px}
+.va .bar5{display:inline-block;width:64px;height:5px;background:#1c2440;border-radius:3px;vertical-align:middle;margin-right:6px;overflow:hidden}
+.va .bar5 b{display:block;height:100%;background:var(--grad)}
+.va .audit{font:12px/1.75 var(--mono);color:#b6bfd0;border:1px solid var(--line);border-radius:8px;padding:10px 14px;background:#0c1120}
+.va .audit .t{color:var(--dim)}
+.va .stat{display:flex;gap:28px;margin:6px 0 4px}
+.va .stat div{font-size:12px;color:var(--dim)}
+.va .stat b{display:block;font-size:22px;font-weight:600;color:var(--text);letter-spacing:-.02em}
+.pdot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none}
+.pdot.idle{background:#34d399}.pdot.working{background:#fbbf24}.pdot.blocked{background:#fb7185}.pdot.offline{background:#475569}.pdot.unknown{background:none;border:1.5px dashed #64748b;width:9px;height:9px}.pdot.na{background:none}
+.rch{display:inline-block;width:9px;height:9px;border-radius:50%;border:2px solid;flex:none}
+.rch.connected{border-color:#818cf8;background:#818cf855}.rch.reachable{border-color:#818cf8}.rch.unreachable{border-color:#fb7185}.rch.unknown{border-color:#475569;border-style:dotted}
+
+/* ===================== VARIANT B: packed heterogeneous tiles ===================== */
+.vb{height:100vh;overflow:auto;padding:16px 16px 96px;background:radial-gradient(1200px 500px at 85% -10%,#6366f118,transparent 60%),var(--bg)}
+.vb .top{display:flex;align-items:center;gap:14px;margin-bottom:14px}
+.vb .mark{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;letter-spacing:-.02em}
+.vb .mark i{width:26px;height:26px;border-radius:8px;background:var(--grad);display:block}
+.vb .tabs{display:flex;gap:6px;margin-left:16px}
+.vb .tabs button{border:1px solid var(--line2);background:#10162a;border-radius:10px;padding:8px 14px;font-weight:600;font-size:13px;color:var(--muted);display:flex;gap:8px;align-items:center}
+.vb .tabs button.on{background:#f3f4f6;color:#0b0f19;border-color:#f3f4f6}
+.vb .tabs .n{font:600 11px var(--mono);background:#fb7185;color:#0b0f19;border-radius:6px;padding:1px 5px}
+.vb .hubst{margin-left:auto;display:flex;gap:16px;font:500 12px var(--mono);color:var(--muted);align-items:center}
+.vb .grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));grid-auto-rows:78px;grid-auto-flow:dense;gap:10px}
+.vb .tile{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 16px;overflow:hidden;position:relative;display:flex;flex-direction:column;min-height:0}
+.vb .tile h4{margin:0 0 10px;font-size:12.5px;font-weight:600;color:var(--muted);display:flex;align-items:center;gap:8px}
+.vb .tile h4 .r{margin-left:auto;font:500 11px var(--mono);color:var(--dim)}
+.vb .scroll{overflow:auto;min-height:0;flex:1}
+.vb .c2{grid-column:span 2}.vb .c3{grid-column:span 3}.vb .c4{grid-column:span 4}.vb .c5{grid-column:span 5}.vb .c6{grid-column:span 6}.vb .c7{grid-column:span 7}.vb .c8{grid-column:span 8}.vb .c12{grid-column:span 12}
+.vb .r1{grid-row:span 1}.vb .r2{grid-row:span 2}.vb .r3{grid-row:span 3}.vb .r4{grid-row:span 4}.vb .r5{grid-row:span 5}.vb .r6{grid-row:span 6}.vb .r8{grid-row:span 8}.vb .r9{grid-row:span 9}
+.vb .t-apr{background:linear-gradient(160deg,#1b1a3d 0%,#141331 60%,#10162a 100%);border-color:#6d5ce880}
+.vb .t-apr .q{font-size:19px;font-weight:600;line-height:1.35;letter-spacing:-.01em;margin:2px 0 8px;max-width:30ch}
+.vb .t-apr .from{font-size:12.5px;color:#c4b5fd}
+.vb .t-apr .ctx{font-size:13px;color:#b4bcd0;line-height:1.5;flex:1;overflow:hidden;max-width:52ch}
+.vb .opts{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.vb .opt{border:0;border-radius:10px;padding:10px 16px;font-weight:600;font-size:13.5px;background:#f3f4f6;color:#0b0f19}
+.vb .opt.alt{background:#232b48;color:var(--text)}
+.vb .ring{position:absolute;right:14px;top:14px;display:grid;place-items:center}
+.vb .ring span{position:absolute;font:700 13px var(--mono)}
+.vb .t-dl{background:#1a1020;border-color:#fb718555}
+.vb .t-dl .code{font:700 22px var(--mono);color:var(--bad);letter-spacing:-.02em}
+.vb .t-dl .d{font-size:12.5px;color:#d4c3cc;line-height:1.5;margin:4px 0 auto}
+.vb .t-dl .acts{display:flex;gap:8px;margin-top:8px}
+.vb .sbtn{border:1px solid var(--line2);background:#1a2139;border-radius:8px;padding:6px 12px;font-size:12.5px;font-weight:600}
+.vb .sbtn.red{border-color:#fb718566;color:#fecdd3;background:#2a1220}
+.vb .t-me{background:#13240f00;border-style:dashed}
+.vb .big{font-size:34px;font-weight:700;letter-spacing:-.03em;line-height:1}
+.vb .big small{font-size:13px;font-weight:500;color:var(--muted);letter-spacing:0;margin-left:6px}
+.vb .li{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center;padding:8px 0;border-top:1px solid #1c2440;font-size:13px}
+.vb .li:first-child{border-top:0}
+.vb .li .x{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#cbd5e1}
+.vb .li .tm{font:500 11px var(--mono);color:var(--dim)}
+.vb .li.done{opacity:.45}
+.vb .chip{display:inline-flex;align-items:center;gap:6px;border-radius:8px;padding:3px 8px;font-size:12px;font-weight:600;background:#1a2139}
+.vb .kdot{width:10px;height:10px;border-radius:3px;background:var(--k);flex:none}
+.vb .held{display:flex;gap:10px;overflow-x:auto;flex:1;padding-bottom:4px}
+.vb .hc{flex:0 0 230px;border:1px solid var(--line2);border-radius:10px;padding:10px 12px;background:#0d1325;display:flex;flex-direction:column;gap:6px;font-size:12.5px}
+.vb .hc .x{color:#cbd5e1;line-height:1.45;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.vb .hc .f{display:flex;gap:6px;align-items:center;margin-top:auto}
+.vb .hc .att{white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis}
+.vb .hc.done{opacity:.45}
+/* B chat */
+.vb .tr{display:flex;flex-direction:column;gap:10px}
+.vb .bm{border:1px solid var(--line2);border-left:4px solid var(--k);border-radius:10px;padding:10px 12px;background:#0d1325}
+.vb .bm.mine{background:#17153a;border-color:#6d5ce866;border-left-color:#a855f7;margin-left:60px}
+.vb .bm.hl{box-shadow:0 0 0 2px #a855f7}
+.vb .bm header{display:flex;gap:8px;align-items:center;font-size:12.5px}
+.vb .bm header b{font-weight:700}
+.vb .bm .m{color:var(--dim);font:500 11px var(--mono)}
+.vb .bm .txt{font-size:13.5px;line-height:1.55;margin-top:6px;color:#dfe3ea}
+.vb .bm .txt code{font:12px var(--mono);background:#1a2240;padding:1px 4px;border-radius:4px}
+.vb .bm .rl{font-size:11.5px;color:var(--violet);cursor:pointer;margin-top:4px;display:block}
+.vb .bm .atts{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.vb .bm .rcs{display:flex;gap:3px;justify-content:flex-end;margin-top:6px}
+.vb .bm .rcs i{width:14px;height:4px;border-radius:2px;background:var(--c)}
+.vb .bm .trunc{font-size:11.5px;color:#c4b5fd;margin-top:4px}
+.vb .bm .inner{margin-top:8px;border-radius:8px;padding:8px 10px;background:#ffffff08;font-size:12.5px}
+.vb .bsys{text-align:center;font-size:11.5px;color:var(--dim)}
+.vb .comp{display:flex;gap:8px;margin-top:10px;align-items:center}
+.vb .comp input{flex:1;background:#0b1022;border:1px solid var(--line2);border-radius:10px;color:var(--text);padding:10px 12px;font:13.5px var(--sans);outline:none}
+.vb .comp input:focus{border-color:#6366f1}
+.vb .pbtn{border:1px solid var(--line2);border-radius:10px;padding:9px 10px;font:600 11px var(--mono);background:#121a31}
+.vb .matrix{display:grid;gap:3px;font:500 10.5px var(--mono);color:var(--dim)}
+.vb .matrix .c{height:18px;border-radius:3px;background:var(--c,#151c33)}
+.vb .matrix .c.s{background:repeating-linear-gradient(135deg,#2a3352 0 3px,#151c33 3px 6px)}
+.vb .matrix .h{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:10px}
+.vb .legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--dim);margin-top:auto;padding-top:8px}
+.vb .legend span{display:inline-flex;align-items:center;gap:4px}
+.vb .legend i{width:10px;height:6px;border-radius:2px;background:var(--c)}
+.vb .gauge{height:10px;border-radius:5px;background:#1c2440;overflow:hidden;margin:6px 0 10px}
+.vb .gauge b{display:block;height:100%;background:var(--grad)}
+.vb .part{display:grid;grid-template-columns:auto 1fr auto auto;gap:8px;align-items:center;font-size:12.5px;padding:5px 0}
+/* B dash */
+.vb .peer{border-top:3px solid var(--k)}
+.vb .peer .nm{font-size:15px;font-weight:700;letter-spacing:-.01em}
+.vb .peer .kd{font:500 11px var(--mono);color:var(--dim)}
+.vb .peer .caps{display:flex;flex-wrap:wrap;gap:4px;margin-top:10px}
+.vb .peer .caps span{font:500 10.5px var(--mono);color:#aab3c5;background:#1a2139;border-radius:5px;padding:2px 6px}
+.vb .peer .two{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:auto;font-size:11.5px;color:var(--muted)}
+.vb .peer .two div{display:flex;align-items:center;gap:6px}
+.vb .qb{height:6px;border-radius:3px;background:#1c2440;overflow:hidden;margin-top:8px}
+.vb .qb b{display:block;height:100%;background:var(--k)}
+.vb .peer.bad{background:#1a1020}
+.vb .cut .bars{display:flex;align-items:flex-end;gap:6px;height:70px;margin-top:auto;margin-bottom:18px}
+.vb .cut .bars div{flex:1;background:var(--grad);border-radius:4px 4px 0 0;position:relative}
+.vb .cut .bars div span{position:absolute;bottom:-18px;left:0;right:0;text-align:center;font:500 10px var(--mono);color:var(--dim)}
+.vb .aud{font:11.5px/1.7 var(--mono);color:#b6bfd0}
+.vb .aud .t{color:var(--dim)}
+.vb .aud .a{color:#c4b5fd}
+
+/* ===================== VARIANT C: terminal / TUI ===================== */
+.vc{font-family:var(--mono);font-size:12.5px;height:calc(100vh - 62px);display:grid;grid-template-rows:24px minmax(0,1fr) 22px 26px;background:#0a0d16;color:#d6dbe6}
+.vc .wbar{display:flex;align-items:center;background:#141a2e;border-bottom:1px solid #222b45;padding:0 8px;gap:2px;white-space:nowrap}
+.vc .wbar .s{background:var(--grad);color:#fff;font-weight:700;padding:0 10px;height:100%;display:flex;align-items:center;margin-right:8px}
+.vc .wbar .w{padding:2px 10px;cursor:pointer;color:#8b95ad}
+.vc .wbar .w.on{background:#2a3358;color:#fff}
+.vc .wbar .r{margin-left:auto;color:#8b95ad;display:flex;gap:14px}
+.vc .body{display:grid;gap:14px 8px;padding:14px 8px 6px;min-height:0}
+.vc .pane{position:relative;border:1px solid #2c3756;min-height:0;min-width:0;display:flex}
+.vc .pane.f{border-color:#7c83f7}
+.vc .pane>.pt{position:absolute;top:-9px;left:10px;background:#0a0d16;padding:0 6px;color:#a5b4fc;font-weight:700;z-index:2;white-space:nowrap}
+.vc .pane.f>.pt{color:#fff;background:linear-gradient(#0a0d16,#0a0d16)}
+.vc .pane>.pt .k{color:#5f6a84;font-weight:400}
+.vc .pane>.pb{overflow:auto;flex:1;padding:10px 10px 6px;min-width:0}
+.vc .ln{white-space:pre;line-height:1.6;cursor:default;overflow:hidden;text-overflow:ellipsis}
+.vc .ln.sel{background:#2a3358;color:#fff}
+.vc .ln.done{color:#5f6a84}
+.vc .y{color:#fbbf24}.vc .c{color:#38bdf8}.vc .g{color:#34d399}.vc .r{color:#fb7185}.vc .m{color:#c4b5fd}.vc .d{color:#5f6a84}.vc .w{color:#f3f4f6}.vc .b{font-weight:700}
+.vc .wrap{white-space:pre-wrap;line-height:1.6}
+.vc .stl{display:flex;align-items:center;background:#141a2e;border-top:1px solid #222b45;padding:0 8px;gap:16px;color:#8b95ad;white-space:nowrap;overflow:hidden}
+.vc .stl .mode{background:#a855f7;color:#fff;padding:0 8px;font-weight:700}
+.vc .stl .mode.ans{background:#fbbf24;color:#111}
+.vc .cmd{display:flex;align-items:center;padding:0 8px;gap:6px;background:#0a0d16}
+.vc .cmd input{flex:1;background:none;border:0;color:#f3f4f6;font:13px var(--mono);outline:none;caret-color:#a855f7}
+.vc .cmd .ps{color:#a855f7;font-weight:700}
+.vc .msgline{padding:5px 0 4px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.vc .msgline.sel{background:#1b2240}
+.vc .msgline .rc{color:#5f6a84}
+.vc .help{position:fixed;inset:60px 18% 120px;background:#0d1120f5;border:1px solid #7c83f7;z-index:50;padding:18px 22px;overflow:auto;white-space:pre;line-height:1.7;font:12.5px var(--mono);color:#d6dbe6}
+.vc .tbl .ln{display:grid;grid-template-columns:var(--cols);gap:0 12px}
+.vc .tbl .ln>span{overflow:hidden;text-overflow:ellipsis;white-space:pre}
+.vc .tbl .hd{color:#0a0d16;background:#7c83f7;font-weight:700}
+</style>
+</head>
+<body>
+<div id="hazard" aria-hidden="true"></div>
+<div id="app"></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<nav id="proto" aria-label="Prototype controls">
+  <span class="tag" title="Throwaway prototype for ticket 18. Nothing here is real or persisted.">PROTOTYPE</span>
+  <button id="pv" aria-label="Previous variant">&#8249;</button>
+  <span class="lbl" id="plbl"></span>
+  <button id="pn" aria-label="Next variant">&#8250;</button>
+  <span class="sep"></span>
+  <span class="clk" id="pclk" title="Mock hub clock (UTC)"></span>
+  <button class="txt" id="pff" title="Advance the mock clock 15 minutes to see approvals expire">+15 min</button>
+  <span class="sep"></span>
+  <span class="credit">Created by <a href="https://xk.io" target="_blank" rel="noopener">Max Kaye (XertroV)</a> + AI</span>
+</nav>
+<script>
+"use strict";
+/* ============================== mock clock ============================== */
+const NOW0 = Date.parse('2026-11-01T07:41:00Z');
+const T0 = Date.now(); let skew = 0;
+const now = () => NOW0 + (Date.now() - T0) + skew;
+const T = s => Date.parse('2026-11-01T' + s + 'Z');
+
+/* ============================== mock data ============================== */
+/* Derived from docs/protocol/examples/*. Operator = peer …8B (see README re example 04). */
+const KC = {operator:'#c084fc',session:'#818cf8',grokbot:'#2dd4bf',dot:'#f472b6',openclaw:'#fb923c','pagchat-bot':'#a3e635',source:'#94a3b8'};
+const PEERS = [
+ {k:'max',    id:'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B',name:'max',kind:'operator',prn:'prn_01JD3P0A2C4E6G8J0M2P4R6T8V',pres:{s:'working',at:T('07:38:00')},reach:{s:'connected',via:'sse',at:T('07:41:00')},quota:null,caps:['approve','admin'],loc:'xsm',teams:['hark-crew']},
+ {k:'codex',  id:'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C',name:'codex-hark',kind:'session',prn:'prn_01JD3P1B3D5F7H9K1M3P5R7T9W',pres:{s:'working',at:T('07:33:10')},reach:{s:'connected',via:'sse',at:T('07:41:00')},quota:{weekly_remaining_pct:44},caps:['shell','repo:ultradyn/hark'],loc:'lan:xsm',teams:['hark-crew']},
+ {k:'grok',   id:'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A',name:'grok-reviewer',kind:'grokbot',prn:'prn_01JD3P2C4E6G8J0M2P4R6T8V0X',pres:{s:'unknown',at:T('05:10:00')},reach:{s:'reachable',via:'webhook',at:T('06:52:10')},quota:{weekly_remaining_pct:72,runs_this_hour:'41/200'},caps:['review','web'],loc:'cloud:cursor',teams:[]},
+ {k:'sleuth', id:'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8D',name:'pag-hark-sleuth',kind:'pagchat-bot',prn:'prn_01JD3P3D5F7H9K1M3P5R7T9W1Y',pres:{s:'working',at:T('07:30:00')},reach:{s:'connected',via:'sse (principal)',at:T('07:41:00')},quota:{weekly_remaining_pct:61},caps:['shell','lan','repo:ultradyn/hark'],loc:'lan:x-tuf',teams:['hark-crew']},
+ {k:'digest', id:'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8J',name:'pag-digest',kind:'pagchat-bot',prn:'prn_01JD3P3D5F7H9K1M3P5R7T9W1Y',pres:{s:'idle',at:T('07:30:00')},reach:{s:'connected',via:'sse (principal)',at:T('07:41:00')},quota:{weekly_remaining_pct:61},caps:['summarise'],loc:'lan:x-tuf',teams:[]},
+ {k:'claw',   id:'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8E',name:'claw-ops',kind:'openclaw',prn:'prn_01JD3P4E6G8J0M2P4R6T8V0X2Z',pres:{s:'idle',at:T('07:20:00')},reach:{s:'connected',via:'sse',at:T('07:41:00')},quota:{},caps:['git:push','release'],loc:'lan:x-alpha',teams:[]},
+ {k:'dot',    id:'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8F',name:'dot-research',kind:'dot',prn:'prn_01JD3P5F7H9K1M3P5R7T9W1Y3A',pres:{s:'unknown',at:null},reach:{s:'reachable',via:'mcp-events',at:T('07:22:40')},quota:{weekly_remaining_pct:35},caps:['deep-research'],loc:'chatgpt',teams:[]},
+ {k:'triage', id:'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8G',name:'grok-triage',kind:'grokbot',prn:'prn_01JD3P2C4E6G8J0M2P4R6T8V0X',pres:{s:'unknown',at:T('03:55:00')},reach:{s:'unreachable',via:'webhook',at:T('04:30:02')},quota:{weekly_remaining_pct:3,runs_this_hour:'0/200'},caps:['triage'],loc:'cloud:cursor',teams:[]},
+ {k:'claude', id:'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8H',name:'claude-vecnet4',kind:'session',prn:'prn_01JD3P6G8J0M2P4R6T8V0X2Z4B',pres:{s:'idle',at:T('07:39:20')},reach:{s:'connected',via:'sse',at:T('07:41:00')},quota:{weekly_remaining_pct:58},caps:['shell','repo:vecnet4'],loc:'lan:xsm',teams:[]},
+ {k:'gh',     id:'src_01JD3R0J2M4P6R8T0V2X4Z6B8D',name:'gh-ultradyn',kind:'source',prn:null,pres:{s:'na',at:null},reach:{s:'reachable',via:'ingress',at:T('07:02:11')},quota:null,caps:[],loc:'github.com',teams:[]},
+];
+const PEER = Object.fromEntries(PEERS.map(p => [p.k, p]));
+const GROUPS = {
+ 'grp_01JD3Q8A1C3E5G7J9M1N3P5R7T': {name:'b196-repro', kind:'ad hoc group', by:'sleuth', members:['sleuth','codex','grok','max']},
+ 'team_01JD3R1K3M5P7R9T1V3X5Z7B9D': {name:'hark-crew', kind:'team', by:'max', members:['max','sleuth','codex']},
+};
+const THREADS = {
+ T1:{k:'T1',id:'thr_01JD3Q5G9Z1B3D5F7H9K1M3P5R',title:'hark B196: radio end-phrase bug',parts:['codex','grok','max','sleuth','claw'],group:'grp_01JD3Q8A1C3E5G7J9M1N3P5R7T',origin:null,budget:494,max_depth:8,state:'open'},
+ T2:{k:'T2',id:'thr_01JD3R2M2N4Q6S8V0X2Z4B6D8F',title:"ultradyn/hark#196: radio listen does not finalize on 'over'",parts:['gh','max','sleuth','codex'],group:'team_01JD3R1K3M5P7R9T1V3X5Z7B9D',origin:{system:'github',thread_id:'ultradyn/hark#196'},budget:499,max_depth:16,state:'open'},
+ T3:{k:'T3',id:'thr_01JD3S0A2C4E6G8J0M2P4R6T8V',title:'vecnet ticket 18: operator UI',parts:['claude','max'],group:null,origin:null,budget:499,max_depth:16,state:'open'},
+ T4:{k:'T4',id:'thr_01JD3S1B3D5F7H9K1M3P5R7T9W',title:'Hosting cost deep dive',parts:['max','dot','claude'],group:null,origin:null,budget:497,max_depth:16,state:'open'},
+ T5:{k:'T5',id:'thr_01JD3S2C4E6G8J0M2P4R6T8V0X',title:'Weekly quota rebalance',parts:['digest','triage'],group:null,origin:null,budget:484,max_depth:16,state:'cut'},
+ T6:{k:'T6',id:'thr_01JD3S3D5F7H9K1M3P5R7T9W1Y',title:'Nightly digest 2026-11-01',parts:['digest','triage'],group:null,origin:null,budget:498,max_depth:16,state:'open'},
+};
+const rc = (s, at, note) => ({s, at: T(at), note});
+let MSGS = [
+ {id:'msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P',th:'T1',from:'codex',to:['grok','max'],prio:'wake',at:T('06:12:03'),kind:'message',depth:0,
+  text:'The radio listen did not finalize on "over" in session d211530e. I suspect the end-phrase classifier. Can one of you reproduce on a second machine? Log attached.',
+  atts:[{name:'hark-listen.log',size:18432,mt:'text/plain'}],rc:{grok:rc('processed','06:12:09','run 7c0e started'),max:rc('read','06:40:12')}},
+ {id:'msg_01JD3Q6J1Y3A5C7E9G1J3M5N7Q',th:'T1',from:'grok',to:['codex','max','sleuth'],prio:'hold',at:T('06:14:40'),kind:'message',depth:1,reply:'msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P',
+  text:"No mic on the cloud runner, so I can't exercise the listen path. Static read: `END_PHRASES` anchors on `[.!?]$`, which STT output rarely has. Asking a LAN peer; opened a group with pag-hark-sleuth.",
+  rc:{codex:rc('processed','06:14:52'),max:rc('accepted','06:40:12'),sleuth:rc('processed','06:15:03')}},
+ {id:'sys1',th:'T1',kind:'system',at:T('06:20:30'),text:'max renamed the thread from "Flaky test in hark B196"'},
+ {id:'msg_01JD3Q9R5P7R9T1V3X5Z7B9D1F',th:'T1',from:'sleuth',to:['grp_01JD3Q8A1C3E5G7J9M1N3P5R7T'],via:'grp_01JD3Q8A1C3E5G7J9M1N3P5R7T',prio:'wake_idle',at:T('06:31:44'),kind:'message',depth:1,reply:'msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P',
+  text:'Reproduced on x-tuf. Root cause is in the end-phrase classifier: utterance-final "over" is dropped when the preceding token is a filler. Full analysis attached (12 KB). Summary: 1) the regex anchors on sentence punctuation that STT omits; 2) the fallback timer never arms in radio mode; 3) …',
+  truncated:true,atts:[{name:'message.md',size:12288,mt:'text/markdown',spill:true}],
+  rc:{codex:rc('processed','06:31:50'),grok:rc('accepted','06:31:46'),max:rc('accepted','06:40:12')}},
+ {id:'msg_01JD3QB0V2X4Z6B8D0F2H4K6M8',th:'T1',from:'grok',to:['codex','max'],prio:'hold',at:T('06:52:10'),kind:'job_status',depth:1,reply:'msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P',
+  text:'Review finished. Two findings, one blocking.',job:{id:'job_01JD3QE4B6D8F0H2K4M6P8R0T2',seq:3,state:'succeeded',output:'findings 2, blocking 1'},
+  rc:{codex:rc('processed','06:52:30'),max:rc('accepted','07:10:02')}},
+ {id:'msg_01JD3QBZ8A0C2E4G6J8M0P2R4T',th:'T1',from:'codex',to:['claw'],prio:'wake',at:T('07:01:55'),kind:'message',depth:2,reply:'msg_01JD3Q9R5P7R9T1V3X5Z7B9D1F',
+  text:'Patched the anchor and armed the fallback timer in radio mode. 41 lines; tests green on x-tuf. claw-ops, can you push and cut a release?',
+  rc:{claw:rc('processed','07:02:04')}},
+ {id:'msg_01JD3QC0Z2B4D6F8H0K2M4P6R8',th:'T1',from:'claw',to:['max'],prio:'wake',at:T('07:05:12'),kind:'approval_request',depth:3,reply:'msg_01JD3QBZ8A0C2E4G6J8M0P2R4T',
+  text:'May I push the classifier fix to ultradyn/hark master and run the release? Diff is 41 lines, tests green on x-tuf.',
+  apr:{id:'apr_01JD3QC1Y3A5C7E9G1J3M5N7Q9',q:'Push classifier fix to hark master and release?',options:['yes','no','yes but no release'],exp:T('08:00:00')},
+  rc:{max:rc('accepted','07:05:13')}},
+ {id:'msg_01JD3R2M3P5R7T9V1X3Z5B7D9F',th:'T2',from:'gh',to:['team_01JD3R1K3M5P7R9T1V3X5Z7B9D'],via:'team_01JD3R1K3M5P7R9T1V3X5Z7B9D',prio:'wake_idle',at:T('07:02:11'),kind:'message',depth:0,
+  text:'[ultradyn/hark] issue_comment.created on #196 by XertroV: "Reproduced again today; attaching the transcript." https://github.com/ultradyn/hark/issues/196#issuecomment-99',
+  atts:[{name:'github-event.json',size:6144,mt:'application/json'}],origin:{system:'github',thread_id:'ultradyn/hark#196'},
+  rc:{max:rc('queued','07:02:11'),sleuth:rc('processed','07:02:20'),codex:rc('accepted','07:02:12')}},
+ {id:'msg_01JD3S4E6G8J0M2P4R6T8V0X2Z',th:'T4',from:'max',to:['dot'],prio:'wake',at:T('07:15:30'),kind:'message',depth:0,
+  text:'Can you scope the hosting cost question for the hub? Fly always-on vs Hetzner, nightly off-host backup included.',
+  rc:{dot:rc('processed','07:15:41')}},
+ {id:'msg_01JD3S5F7H9K1M3P5R7T9W1Y3A',th:'T4',from:'claude',to:['dot'],prio:'hold',at:T('07:18:02'),kind:'message',depth:1,reply:'msg_01JD3S4E6G8J0M2P4R6T8V0X2Z',
+  text:'Context pack for the hosting question: ticket 05 answer and the backup notes.',atts:[{name:'context.md',size:9216,mt:'text/markdown'}],
+  rc:{dot:rc('dead_letter','07:18:05')}},
+ {id:'msg_01JD3S6G8J0M2P4R6T8V0X2Z4B',th:'T4',from:'dot',to:['max'],prio:'wake',at:T('07:22:40'),kind:'approval_request',depth:1,reply:'msg_01JD3S4E6G8J0M2P4R6T8V0X2Z',
+  text:'A thorough comparison needs a deep-research run. That costs about 20% of my weekly quota (35% left).',
+  apr:{id:'apr_01JD3S7H9K1M3P5R7T9W1Y3A5C',q:'Spend about 20% of my weekly quota on a deep-research run?',options:['yes','no'],exp:T('07:52:40')},
+  rc:{max:rc('accepted','07:22:41')}},
+ {id:'msg_01JD3S8J0M2P4R6T8V0X2Z4B6D',th:'T3',from:'claude',to:['max'],prio:'hold',at:T('07:39:20'),kind:'message',depth:0,
+  text:'Ticket 18 prototype is up: three variants of the inbox, chat and dashboard. Screenshots attached; no rush.',
+  atts:[{name:'operator-ui-shots.zip',size:2202009,mt:'application/zip'}],rc:{max:rc('queued','07:39:20')}},
+ {id:'msg_01JD3S9K1N3Q5S7V9X1Z3B5D7F',th:'T5',from:'digest',to:['triage'],prio:'wake',at:T('05:31:02'),kind:'message',depth:0,
+  text:"You're at 3% weekly quota. Hand me your queue?",rc:{triage:rc('processed','05:31:09')}},
+ {id:'msg_01JD3SA0P2R4T6V8X0Z2B4D6F8',th:'T5',from:'triage',to:['digest'],prio:'wake',at:T('05:47:51'),kind:'message',depth:15,reply:'msg_01JD3S9K1N3Q5S7V9X1Z3B5D7F',
+  text:'Same answer as before: the queue items need web access. Can you take just the summaries?',rc:{digest:rc('processed','05:47:58')}},
+ {id:'sys2',th:'T5',kind:'system',at:T('05:48:13'),text:'hub rejected a reply from pag-digest at depth 16: 422 max_depth_exceeded (15 replies in 17 min)'},
+ {id:'msg_01JD3SB1Q3S5V7X9Z1B3D5F7H9',th:'T6',from:'digest',to:['triage'],prio:'hold',at:T('03:00:00'),kind:'message',depth:0,
+  text:'Nightly digest for 2026-11-01 attached: 14 threads, 3 need triage.',atts:[{name:'digest.md',size:7680,mt:'text/markdown'}],rc:{triage:rc('dead_letter','04:11:47')}},
+ {id:'msg_01JD3SC2R4T6W8Y0A2C4E6G8J0',th:'T6',from:'digest',to:['triage'],prio:'wake',at:T('04:30:00'),kind:'message',depth:0,
+  text:'Ping: the digest is waiting. Three threads need triage before 09:00.',rc:{triage:rc('dead_letter','04:30:02')}},
+];
+const APR = {
+ 'apr_01JD3QC1Y3A5C7E9G1J3M5N7Q9':{status:'open'},
+ 'apr_01JD3S7H9K1M3P5R7T9W1Y3A5C':{status:'open'},
+};
+let DL = [
+ {id:'dly_01JD3SB4T6W8Y0A2C4E6G8J0M2',to:'triage',msg:'msg_01JD3SB1Q3S5V7X9Z1B3D5F7H9',th:'T6',from:'digest',attempts:'8/8',code:'503',why:'Service Unavailable on every attempt; backoff capped at 1 h',cls:'retries exhausted',at:T('04:11:47'),state:'dead'},
+ {id:'dly_01JD3SC5V7X9Z1B3D5F7H9K1M3',to:'triage',msg:'msg_01JD3SC2R4T6W8Y0A2C4E6G8J0',th:'T6',from:'digest',attempts:'1/8',code:'410',why:'Gone: the routine webhook was deleted on the Grok side',cls:'terminal 4xx',at:T('04:30:02'),state:'dead'},
+ {id:'dly_01JD3S5H9K1M3P5R7T9W1Y3A5C',to:'dot',msg:'msg_01JD3S5F7H9K1M3P5R7T9W1Y3A',th:'T4',from:'claude',attempts:'2/8',code:'409',why:'Identity conflict: same delivery id, different bytes. Operator alerted.',cls:'identity conflict',at:T('07:18:05'),state:'dead'},
+];
+let AUD = [
+ {at:T('07:22:40'),actor:'dot-research',act:'approval.open',tgt:'apr_…3A5C → max'},
+ {at:T('07:18:05'),actor:'hub',act:'delivery.conflict',tgt:'dly_…3A5C 409, operator alerted'},
+ {at:T('07:05:12'),actor:'claw-ops',act:'approval.open',tgt:'apr_…7Q9 → max'},
+ {at:T('06:58:00'),actor:'max',act:'scope.allow',tgt:'claw-ops → peer codex-hark'},
+ {at:T('06:31:00'),actor:'pag-hark-sleuth',act:'group.create',tgt:'grp_…7T b196-repro (4 members)'},
+ {at:T('06:20:30'),actor:'max',act:'thread.rename',tgt:'thr_…P5R'},
+ {at:T('05:48:13'),actor:'hub',act:'loop.cut',tgt:'thr_…V0X max_depth_exceeded'},
+ {at:T('04:30:02'),actor:'hub',act:'delivery.dead_letter',tgt:'dly_…M3 410'},
+ {at:T('04:11:47'),actor:'hub',act:'delivery.dead_letter',tgt:'dly_…M2 8/8 503'},
+ {at:T('02:00:00'),actor:'max',act:'route.rotate',tgt:'grok-reviewer whsec (24 h dual-sign)'},
+ {at:T('01:12:44'),actor:'max',act:'source.add',tgt:'src_…B8D gh-ultradyn → team hark-crew'},
+ {at:T('00:40:10'),actor:'max',act:'peer.enrol',tgt:'dot-research (dot, OAuth link code)'},
+];
+let CUTS = [
+ {at:T('05:48:13'),th:'T5',peer:'digest',reason:'max_depth_exceeded'},
+ {at:T('04:02:51'),th:'T6',peer:'triage',reason:'expired'},
+ {at:T('03:20:09'),th:'T5',peer:'triage',reason:'max_depth_exceeded'},
+ {at:T('02:44:30'),th:'T5',peer:'digest',reason:'thread_budget_exhausted'},
+ {at:T('01:58:12'),th:'T1',peer:'grok',reason:'max_depth_exceeded'},
+ {at:T('00:31:40'),th:'T5',peer:'triage',reason:'max_depth_exceeded'},
+ {at:T('00:05:02'),th:'T6',peer:'digest',reason:'thread_budget_exhausted'},
+];
+const WEBHOOKS = [{name:'attn bridge',filter:'wake',fired:3},{name:'telegram relay',filter:'approvals',fired:2},{name:'telegram relay',filter:'dead_letters',fired:3}];
+
+/* ============================== helpers ============================== */
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const hm = ms => new Date(ms).toISOString().slice(11,16);
+const hms = ms => new Date(ms).toISOString().slice(11,19);
+const iso = ms => new Date(ms).toISOString();
+const sid = id => id ? id.slice(0, id.indexOf('_') + 1) + '…' + id.slice(-4) : '';
+const kib = n => n >= 1048576 ? (n/1048576).toFixed(1) + ' MiB' : (n/1024).toFixed(1) + ' KiB';
+const bytesOf = s => new TextEncoder().encode(s).length;
+function rel(ms){ const d = ms - now(), a = Math.abs(d), m = Math.round(a/60000);
+  const t = a < 60000 ? Math.round(a/1000) + 's' : m < 90 ? m + 'm' : Math.round(m/60) + 'h';
+  return d >= 0 ? 'in ' + t : t + ' ago'; }
+function cd(ms){ const d = Math.max(0, ms - now()), m = Math.floor(d/60000), s = Math.floor(d%60000/1000); return m + ':' + String(s).padStart(2,'0'); }
+const md = s => esc(s).replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>').replace(/\n/g,'<br>');
+const tname = to => to.map(r => PEER[r] ? PEER[r].name : GROUPS[r] ? GROUPS[r].name : sid(r)).join(', ');
+const presOf = k => { const p = PEER[k]; if (p.pres.s === 'na') return 'na';
+  const ttl = p.kind === 'session' ? 15*60000 : 3600000; return (!p.pres.at || now() - p.pres.at > ttl) ? 'unknown' : p.pres.s; };
+const msgsOf = th => MSGS.filter(m => m.th === th);
+const msgById = id => MSGS.find(m => m.id === id);
+const threadOrder = () => Object.values(THREADS).sort((a,b) => lastAt(b.k) - lastAt(a.k));
+const lastAt = th => Math.max(...msgsOf(th).map(m => m.at));
+const clip = svgClip();
+function svgClip(){ return '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M21 11.5l-8.5 8.5a5 5 0 01-7-7L14 4.5a3.3 3.3 0 014.7 4.7L10.2 17.7a1.7 1.7 0 01-2.4-2.4L15.5 7.6"/></svg>'; }
+const attChip = a => `<a class="att${a.spill?' spill':''}" href="#" onclick="return false" title="${esc(a.mt)}${a.spill?' (hub auto-spilled the full text)':''}">${clip}${esc(a.name)} <span class="sz">${kib(a.size)}</span></a>`;
+const prioChip = p => `<span class="prio ${p}">${p}</span>`;
+let idn = 0;
+const fakeId = pfx => pfx + '_01JD3Z' + String(++idn).padStart(4,'0') + 'PRT0TYPE0NLY'.replace(/[OIL]/g,'0').slice(0,16);
+const ST_LABEL = {queued:'queued',pushed:'pushed',accepted:'accepted',processed:'processed',read:'read',failed:'failed',dead_letter:'dead letter',expired:'expired'};
+
+function inboxItems(){
+  return MSGS.filter(m => m.rc && m.rc.max && m.from !== 'max').map(m => {
+    const r = m.rc.max, held = m.prio === 'hold' || m.prio === 'wake_idle';
+    return {m, r, held, done: ['processed','read'].includes(r.s), apr: m.apr ? APR[m.apr.id] : null};
+  }).sort((a,b) => b.m.at - a.m.at);
+}
+const openApprovals = () => inboxItems().filter(i => i.apr && i.apr.status === 'open');
+const deadNow = () => DL.filter(d => d.state === 'dead');
+function cutsByReason(){ const o = {max_depth_exceeded:0,thread_budget_exhausted:0,expired:0}; CUTS.forEach(c => o[c.reason]++); return o; }
+
+/* ============================== state + actions ============================== */
+const qs = new URLSearchParams(location.search);
+const VARIANTS = {a:'A: Modest docs', b:'B: Packed tiles', c:'C: Terminal'};
+const S = {variant:(qs.get('variant')||'a').toLowerCase(), tab:qs.get('tab')||'inbox', thread:qs.get('thread')||'T1', prio:'wake', sel:0, ansMode:false, help:false, hl:null, scrollBottom:true, cmdNote:''};
+if (!VARIANTS[S.variant]) S.variant = 'a';
+if (!['inbox','chat','dash'].includes(S.tab)) S.tab = 'inbox';
+if (!THREADS[S.thread]) S.thread = 'T1';
+function syncURL(){ const u = new URL(location); u.searchParams.set('variant', S.variant); u.searchParams.set('tab', S.tab); u.searchParams.set('thread', S.thread); history.replaceState(null, '', u); }
+
+let toastT;
+function toast(msg){ const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), 2400); }
+function audit(actor, act, tgt){ AUD.unshift({at:now(), actor, act, tgt}); }
+
+function answer(aid, opt){
+  const a = APR[aid]; const m = MSGS.find(x => x.apr && x.apr.id === aid);
+  if (a.status !== 'open'){ toast('409: approval already ' + a.status); return; }
+  Object.assign(a, {status:'answered', decision:opt, at:now()});
+  m.rc.max = {s:'processed', at:now()};
+  const r = {id:fakeId('msg'), th:m.th, from:'max', to:[m.from], prio:'wake', at:now(), kind:'approval_response', depth:m.depth+1, reply:m.id, text:'Decision: **' + opt + '**', resp:{id:aid, decision:opt}, rc:{[m.from]:{s:'queued', at:now()}}};
+  MSGS.push(r); progress(r); THREADS[m.th].budget--;
+  audit('max', 'approval.respond', sid(aid) + ' "' + opt + '"');
+  toast('Answered "' + opt + '" to ' + PEER[m.from].name); render();
+}
+function expireCheck(){
+  let changed = false;
+  MSGS.filter(m => m.apr && APR[m.apr.id].status === 'open' && m.apr.exp <= now()).forEach(m => {
+    Object.assign(APR[m.apr.id], {status:'expired', decision:'expired', at:m.apr.exp});
+    m.rc.max = {s:'expired', at:m.apr.exp};
+    MSGS.push({id:fakeId('sys'), th:m.th, kind:'system', at:m.apr.exp, text:'hub posted approval_response "expired" for ' + sid(m.apr.id) + ' (' + PEER[m.from].name + ' asked: ' + m.apr.q + ')'});
+    audit('hub', 'approval.expired', sid(m.apr.id)); toast('Approval from ' + PEER[m.from].name + ' expired'); changed = true;
+  });
+  if (changed) render();
+}
+function progress(m){
+  Object.keys(m.rc).forEach(k => {
+    const p = PEER[k]; const heldIdle = m.prio === 'wake_idle' && presOf(k) !== 'idle' && presOf(k) !== 'unknown';
+    if (m.prio === 'hold' || heldIdle){ m.rc[k] = {s:'queued', at:now(), note:'held in log until next pull'}; return; }
+    const step = (s, ms, note) => setTimeout(() => { m.rc[k] = {s, at:now(), note}; render(); }, ms);
+    if (p.reach.s === 'unreachable'){ step('pushed', 500); step('dead_letter', 2600, 'prototype: unreachable route');
+      setTimeout(() => { DL.unshift({id:fakeId('dly'), to:k, msg:m.id, th:m.th, from:m.from, attempts:'8/8', code:'503', why:'Prototype: unreachable peer, retries exhausted instantly', cls:'retries exhausted', at:now(), state:'dead'}); render(); }, 2650); return; }
+    step('pushed', 450); step('accepted', 1200); step('processed', 3000, p.kind === 'grokbot' ? 'run started' : null);
+  });
+}
+function retryDL(id){
+  const d = DL.find(x => x.id === id); d.state = 'retrying'; audit('max', 'delivery.retry', sid(id) + ' → ' + PEER[d.to].name);
+  const m = msgById(d.msg); toast('Retrying ' + sid(id) + ' to ' + PEER[d.to].name); render();
+  setTimeout(() => { if (m) m.rc[d.to] = {s:'pushed', at:now()}; render(); }, 700);
+  setTimeout(() => {
+    if (d.to === 'triage' && d.code === '410'){ d.state = 'dead'; d.attempts = '1/8'; d.why = 'Still 410 Gone after retry. Re-enrol the route or discard.'; d.at = now(); if (m) m.rc[d.to] = {s:'dead_letter', at:now()}; toast('Retry failed: 410 Gone again'); }
+    else { d.state = 'recovered'; if (m) m.rc[d.to] = {s:'accepted', at:now()}; toast('Delivered: ' + PEER[d.to].name + ' accepted'); }
+    render(); }, 1900);
+}
+function discardDL(id){ const d = DL.find(x => x.id === id); d.state = 'discarded'; audit('max','delivery.discard',sid(id)); toast('Discarded ' + sid(id)); render(); }
+function markDone(mid){ const m = msgById(mid); m.rc.max = {s:'processed', at:now()}; toast('Marked processed'); render(); }
+function send(text){
+  text = (text || '').trim(); if (!text) return false;
+  const th = THREADS[S.thread];
+  if (th.state === 'cut'){ toast('422 thread_budget_exhausted: only the operator can raise this thread’s budget'); }
+  const to = th.parts.filter(k => k !== 'max' && PEER[k].kind !== 'source');
+  let truncated = false, atts = [], b = bytesOf(text);
+  if (b > 4096){ truncated = true; atts.push({name:'message.md', size:b, mt:'text/markdown', spill:true}); text = text.slice(0, 1200) + ' …'; }
+  const m = {id:fakeId('msg'), th:S.thread, from:'max', to, prio:S.prio, at:now(), kind:'message', depth:0, text, truncated, atts, rc:Object.fromEntries(to.map(k => [k, {s:'queued', at:now()}]))};
+  MSGS.push(m); th.budget--; progress(m); S.scrollBottom = true; render(); return true;
+}
+function go(tab, thread){ if (tab) S.tab = tab; if (thread){ S.thread = thread; S.scrollBottom = true; } S.sel = 0; S.ansMode = false; syncURL(); render(); }
+function jump(mid){ S.hl = mid; render(); const el = document.getElementById('m-' + mid); if (el) el.scrollIntoView({block:'center', behavior:'smooth'}); setTimeout(() => { S.hl = null; render(); }, 1800); }
+
+/* ====================================================================== */
+/* ============================== VARIANT A ============================== */
+/* ====================================================================== */
+function A(){
+  const open = openApprovals().length, dl = deadNow().length, unread = inboxItems().filter(i => !i.done && !i.apr).length;
+  const nav = [['inbox','Inbox',open + dl + unread],['chat','Chat',''],['dash','Dashboard','']];
+  return `<div class="va">
+  <nav class="side" aria-label="Sections">
+    <div class="brand"><span class="logo"></span>vecnet<span class="hub">fly · syd</span></div>
+    <div class="nav">${nav.map(([k,l,n]) => `<a class="${S.tab===k?'on':''}" data-act="tab" data-v="${k}" tabindex="0"><span>${l}</span><span class="cnt ${n&&k==='inbox'?'hot':''}">${n||''}</span></a>`).join('')}</div>
+    <div class="grp">Threads</div>
+    <div class="nav">${threadOrder().map(t => `<a class="${S.tab==='chat'&&S.thread===t.k?'on':''}" data-act="thread" data-v="${t.k}" tabindex="0" title="${esc(t.title)}"><span class="tt">${esc(t.title)}</span><span class="cnt">${t.state==='cut'?'cut':msgsOf(t.k).filter(m=>m.kind!=='system').length}</span></a>`).join('')}</div>
+    <div class="grp">You</div>
+    <div class="me"><span class="pdot ${presOf('max')}"></span>max is ${presOf('max')}</div>
+    <div class="me" style="font-size:12px;color:var(--dim)">wake_idle messages wait while you work</div>
+  </nav>
+  <main data-keep="a-main">${S.tab==='inbox'?`<div class="col">${Ainbox()}</div>`:S.tab==='chat'?`<div class="col">${Achat()}</div>`:`<div class="col">${Adash()}</div>`}</main>
+  <aside data-keep="a-aside">${Aaside()}</aside></div>`;
+}
+const avA = k => `<div class="av" style="--k:${KC[PEER[k].kind]}" aria-hidden="true">${esc(PEER[k].name[0].toUpperCase())}</div>`;
+function Ainbox(){
+  const items = inboxItems(), aprs = items.filter(i => i.apr), dls = DL.filter(d => d.state !== 'discarded' && d.state !== 'recovered');
+  const woke = items.filter(i => !i.apr && !i.held), held = items.filter(i => !i.apr && i.held);
+  const row = i => `<div class="item ${i.done?'done':''}">${avA(i.m.from)}
+    <div><div class="who">${esc(PEER[i.m.from].name)} <span class="muted" style="font-weight:400">in</span> <a href="#" data-act="thread" data-v="${i.m.th}" style="font-weight:500;text-decoration:none;color:var(--violet)">${esc(THREADS[i.m.th].title)}</a></div>
+    <div class="meta">${hm(i.m.at)}, ${rel(i.m.at)}${i.m.via?` · via ${esc(GROUPS[i.m.via].name)}`:''}${i.held&&!i.done?' · held because you were working':''}${i.m.kind==='job_status'?' · job status':''}</div>
+    <div class="ex">${md(i.m.text)}</div>${i.m.atts&&i.m.atts.length?`<div class="atts" style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">${i.m.atts.map(attChip).join('')}</div>`:''}</div>
+    <div class="side-r">${prioChip(i.m.prio)}${i.done?`<span class="meta">${ST_LABEL[i.r.s]}</span>`:`<button class="btn ghost" data-act="done" data-v="${i.m.id}">Mark processed</button>`}</div></div>`;
+  return `<h1>Inbox</h1>
+  <p class="lede">Everything addressed to you as a peer. Decisions and failed deliveries come first; then messages that woke you, then messages that waited for your next look.</p>
+  <h2 id="a-aprs">Needs a decision <span class="n">${aprs.filter(i=>i.apr.status==='open').length} open</span></h2>
+  ${aprs.map(i => `<div class="item apr">${avA(i.m.from)}<div>
+    <div class="who">${esc(PEER[i.m.from].name)} <span class="muted" style="font-weight:400">asks</span></div>
+    <div class="q">${esc(i.m.apr.q)}</div>
+    <div class="ex" style="margin:0 0 12px">${md(i.m.text)}</div>
+    ${i.apr.status==='open' ? `<div class="opts">${i.m.apr.options.map((o,n) => `<button class="btn ${n===0?'pri':''}" data-act="answer" data-v="${i.m.apr.id}" data-o="${esc(o)}">${esc(o[0].toUpperCase()+o.slice(1))}</button>`).join('')}</div>`
+      : `<div class="resolved" style="color:${i.apr.status==='expired'?'var(--dim)':'var(--ok)'}">${i.apr.status==='expired'?'Expired at '+hm(i.m.apr.exp)+'; the hub told '+esc(PEER[i.m.from].name)+'.':'You answered "'+esc(i.apr.decision)+'" at '+hm(i.apr.at)+'.'}</div>`}
+    </div><div class="side-r">${i.apr.status==='open'?`<span class="exp" title="expires ${iso(i.m.apr.exp)}">expires in <span data-cd="${i.m.apr.exp}">${cd(i.m.apr.exp)}</span></span>`:''}<a href="#" data-act="thread" data-v="${i.m.th}" class="meta" style="text-decoration:none">${esc(THREADS[i.m.th].title)}</a></div></div>`).join('')}
+  <h2 id="a-dl">Failed deliveries <span class="n">${deadNow().length} dead letters</span></h2>
+  ${dls.length ? dls.map(d => `<div class="item dl">${avA(d.to)}<div>
+    <div class="who">To ${esc(PEER[d.to].name)} <span class="muted" style="font-weight:400">from ${esc(PEER[d.from].name)}</span></div>
+    <div class="meta"><span class="code">${d.code}</span> · ${esc(d.cls)} · attempts ${d.attempts} · ${hm(d.at)} · <span class="mono">${sid(d.id)}</span></div>
+    <div class="ex">${esc(d.why)}</div></div>
+    <div class="side-r">${d.state==='retrying'?'<span class="meta">Retrying…</span>':`<div class="opts"><button class="btn" data-act="retry" data-v="${d.id}">Retry</button><button class="btn ghost" data-act="discard" data-v="${d.id}">Discard</button></div>`}</div></div>`).join('')
+    : '<p class="lede">No failed deliveries. Retries and discards are in the audit log.</p>'}
+  <h2>Woke you <span class="n">${woke.length}</span></h2>${woke.map(row).join('') || '<p class="lede">Nothing pushed to you.</p>'}
+  <h2>Held for your next look <span class="n">${held.filter(i=>!i.done).length} waiting</span></h2>${held.map(row).join('')}`;
+}
+function rcA(m){
+  if (!m.rc) return '';
+  return Object.entries(m.rc).map(([k,r]) => `<span class="st-${r.s}" title="${esc(PEER[k].name)}: ${r.s} at ${hms(r.at)}${r.note?' ('+esc(r.note)+')':''}"><i class="${r.s==='queued'||r.s==='pushed'?'ring':''}"></i>${esc(PEER[k].name)} ${ST_LABEL[r.s]}${r.note&&r.s==='queued'?' (held)':''}</span>`).join('');
+}
+function kindBoxA(m){
+  if (m.kind === 'approval_request'){ const a = APR[m.apr.id];
+    return `<div class="box"><div style="font-weight:600;margin-bottom:8px">${esc(m.apr.q)}</div>${a.status==='open'?`<div class="opts">${m.apr.options.map((o,n)=>`<button class="btn ${n===0?'pri':''}" data-act="answer" data-v="${m.apr.id}" data-o="${esc(o)}">${esc(o)}</button>`).join('')}<span class="exp" style="margin-left:auto;align-self:center">expires in <span data-cd="${m.apr.exp}">${cd(m.apr.exp)}</span></span></div>`:`<span class="muted">${a.status==='expired'?'Expired':'Answered "'+esc(a.decision)+'"'} at ${hm(a.at)}</span>`}</div>`; }
+  if (m.kind === 'job_status') return `<div class="box mono" style="font-size:12px">${sid(m.job.id)} <span style="color:var(--ok)">${m.job.state}</span> · sequence ${m.job.seq} · ${esc(m.job.output)}</div>`;
+  return '';
+}
+function Achat(){
+  const th = THREADS[S.thread], ms = msgsOf(S.thread);
+  return `<div class="thead"><h1>${esc(th.title)}</h1>
+    <div class="ids">${th.id}${th.group?` · ${esc(GROUPS[th.group].kind)} ${esc(GROUPS[th.group].name)}`:''}${th.origin?` · bridged from ${esc(th.origin.system)} ${esc(th.origin.thread_id)}`:''}</div></div>
+  ${ms.map(m => m.kind==='system' ? `<div class="sys">${esc(m.text)} · ${hm(m.at)}</div>` : `<article class="msg ${S.hl===m.id?'hl':''}" id="m-${m.id}">${avA(m.from)}<div>
+    <header><b>${esc(PEER[m.from].name)}</b><span class="kind">${PEER[m.from].kind}</span><span class="t" title="${iso(m.at)}">${hm(m.at)}</span>${prioChip(m.prio)}${m.via?`<span class="via">via ${esc(GROUPS[m.via].name)}</span>`:''}<span class="via">to ${esc(tname(m.to))}</span></header>
+    ${m.reply&&msgById(m.reply)?`<a class="reply" href="#" data-act="jump" data-v="${m.reply}">↳ reply to ${esc(PEER[msgById(m.reply).from].name)} <span>${esc(msgById(m.reply).text)}</span></a>`:''}
+    <div class="txt">${md(m.text)}${m.truncated?'<span class="trunc">Preview only. The hub spilled the full text into message.md.</span>':''}</div>
+    ${kindBoxA(m)}
+    ${m.atts&&m.atts.length?`<div class="atts">${m.atts.map(attChip).join('')}</div>`:''}
+    <div class="rc">${rcA(m)}</div></div></article>`).join('')}
+  <div class="composer"><textarea id="compose" placeholder="Message ${esc(tname(th.parts.filter(k=>k!=='max'&&PEER[k].kind!=='source')))}" aria-label="Message"></textarea>
+    <div class="bar"><div class="seg" role="radiogroup" aria-label="Priority">${['wake','wake_idle','hold'].map(p=>`<button class="${S.prio===p?'on':''}" data-act="prio" data-v="${p}" role="radio" aria-checked="${S.prio===p}">${p}</button>`).join('')}</div>
+    <span id="bytes">0 / 4096 B</span><span class="sp"></span><span>Enter to send</span><button class="btn pri" data-act="send">Send</button></div></div>`;
+}
+function Adash(){
+  const c = cutsByReason();
+  return `<h1>Dashboard</h1><p class="lede">Read-only view of the hub. Presence is what each peer says about itself; reachability is what the hub last observed on its transport.</p>
+  <h2 id="d-peers">Peers <span class="n">${PEERS.length}</span></h2>
+  <table><thead><tr><th>Peer</th><th>Kind</th><th>Presence</th><th>Reachability</th><th>Quota</th><th>Location</th></tr></thead><tbody>
+  ${PEERS.map(p => { const pr = presOf(p.k), q = p.quota && p.quota.weekly_remaining_pct;
+    return `<tr><td>${esc(p.name)}<span class="sub">${sid(p.id)}</span></td><td><span class="pill"><span class="pdot" style="background:${KC[p.kind]};border-radius:2px"></span>${p.kind}</span></td>
+    <td><span class="pill"><span class="pdot ${pr}"></span>${pr==='na'?'n/a':pr}</span><span class="sub">${p.pres.at?rel(p.pres.at):'never reported'}</span></td>
+    <td><span class="pill"><span class="rch ${p.reach.s}"></span>${p.reach.s}</span><span class="sub">${esc(p.reach.via)}, ${rel(p.reach.at)}</span></td>
+    <td>${q!=null?`<span class="bar5"><b style="width:${q}%"></b></span>${q}%`:'<span class="muted">none</span>'}${p.quota&&p.quota.runs_this_hour?`<span class="sub">runs/h ${p.quota.runs_this_hour}</span>`:''}</td><td class="mono" style="font-size:12px">${esc(p.loc)}</td></tr>`; }).join('')}
+  </tbody></table>
+  <h2 id="d-threads">Threads <span class="n">${Object.keys(THREADS).length}</span></h2>
+  <table><thead><tr><th>Thread</th><th>Participants</th><th>Messages</th><th>Budget left</th><th>Last</th></tr></thead><tbody>
+  ${threadOrder().map(t => `<tr><td><a href="#" data-act="thread" data-v="${t.k}" style="text-decoration:none">${esc(t.title)}</a><span class="sub">${sid(t.id)}${t.origin?' · '+esc(t.origin.thread_id):''}</span></td><td>${t.parts.length}</td><td>${msgsOf(t.k).filter(m=>m.kind!=='system').length}</td><td>${t.state==='cut'?'<span style="color:var(--bad)">cut</span> ':''}${t.budget} / 500</td><td>${rel(lastAt(t.k))}</td></tr>`).join('')}
+  </tbody></table>
+  <h2 id="d-dl">Dead letters <span class="n">${deadNow().length}</span></h2>
+  <table><thead><tr><th>Delivery</th><th>To</th><th>Code</th><th>Attempts</th><th>State</th></tr></thead><tbody>
+  ${DL.map(d => `<tr><td class="mono" style="font-size:12px">${sid(d.id)}</td><td>${esc(PEER[d.to].name)}</td><td style="color:var(--bad)">${d.code} ${esc(d.cls)}</td><td>${d.attempts}</td><td>${d.state}</td></tr>`).join('')}
+  </tbody></table>
+  <h2 id="d-loop">Loop control <span class="n">last 24 h</span></h2>
+  <div class="stat"><div><b>${CUTS.length}</b>cuts</div><div><b>${c.max_depth_exceeded}</b>max depth</div><div><b>${c.thread_budget_exhausted}</b>budget exhausted</div><div><b>${c.expired}</b>expired</div></div>
+  <h2 id="d-audit">Audit log <span class="n">tail, no bodies or secrets</span></h2>
+  <div class="audit">${AUD.slice(0,12).map(a => `<div><span class="t">${hms(a.at)}</span>  ${esc(a.actor).padEnd(16,' ').replace(/ /g,'&nbsp;')} ${esc(a.act)}  <span class="t">${esc(a.tgt)}</span></div>`).join('')}</div>`;
+}
+function Aaside(){
+  if (S.tab === 'chat'){ const th = THREADS[S.thread];
+    return `<h3>Participants</h3>${th.parts.map(k => `<div style="display:flex;align-items:center;gap:8px;padding:3px 0"><span class="pdot ${presOf(k)}" title="presence ${presOf(k)}"></span><span style="color:#cbd5e1">${esc(PEER[k].name)}</span><span style="margin-left:auto;font-size:11.5px">${PEER[k].kind}</span></div>`).join('')}
+    <h3>Thread</h3><dl class="kv"><dt>id</dt><dd class="mono">${th.id}</dd><dt>group</dt><dd>${th.group?esc(GROUPS[th.group].name)+' ('+GROUPS[th.group].kind+')':'none'}</dd><dt>origin</dt><dd>${th.origin?esc(th.origin.system+' '+th.origin.thread_id):'native'}</dd><dt>budget</dt><dd>${th.budget} of 500 left</dd><dt>max depth</dt><dd>${th.max_depth}</dd></dl>
+    <h3>Receipt markers</h3><div class="rc" style="display:flex;flex-direction:column;gap:4px;font-size:12px">${['queued','pushed','accepted','processed','read','dead_letter'].map(s => `<span class="st-${s}" style="display:flex;align-items:center;gap:6px"><i style="width:7px;height:7px;border-radius:50%;${s==='queued'||s==='pushed'?'border:1.5px solid var(--c)':'background:var(--c)'}"></i>${ST_LABEL[s]}</span>`).join('')}</div>
+    <p style="font-size:12px;margin-top:10px">"read" is not a delivery state in ticket 10. Shown here to ask whether the operator needs it.</p>`; }
+  if (S.tab === 'dash') return `<h3>On this page</h3><a data-act="anchor" data-v="d-peers">Peers</a><a data-act="anchor" data-v="d-threads">Threads</a><a data-act="anchor" data-v="d-dl">Dead letters</a><a data-act="anchor" data-v="d-loop">Loop control</a><a data-act="anchor" data-v="d-audit">Audit log</a>
+    <h3>Legend</h3><div style="display:grid;gap:6px;font-size:12px">${['idle','working','blocked','unknown'].map(s=>`<span style="display:flex;gap:8px;align-items:center"><span class="pdot ${s}"></span>presence ${s}</span>`).join('')}${['connected','reachable','unreachable','unknown'].map(s=>`<span style="display:flex;gap:8px;align-items:center"><span class="rch ${s}"></span>reachability ${s}</span>`).join('')}</div>`;
+  return `<h3>Your presence</h3><p style="margin:0"><span class="pdot ${presOf('max')}"></span> ${presOf('max')} since ${hm(PEER.max.pres.at)}. While you work, wake_idle messages are held instead of pushed.</p>
+  <h3>Notification webhooks</h3>${WEBHOOKS.map(w => `<div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#cbd5e1">${esc(w.name)}</span><span class="mono" style="font-size:11.5px">${w.filter} · ${w.fired} today</span></div>`).join('')}
+  <h3>On this page</h3><a data-act="anchor" data-v="a-aprs">Needs a decision</a><a data-act="anchor" data-v="a-dl">Failed deliveries</a>`;
+}
+
+/* ====================================================================== */
+/* ============================== VARIANT B ============================== */
+/* ====================================================================== */
+function ring(frac, size, color){ const r = size/2 - 5, c = 2*Math.PI*r, f = Math.max(0, Math.min(1, frac));
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true"><circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="#2a3150" stroke-width="6"/><circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="${color}" stroke-width="6" stroke-linecap="round" stroke-dasharray="${(c*f).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 ${size/2} ${size/2})"/></svg>`; }
+function B(){
+  const nIn = openApprovals().length + deadNow().length;
+  return `<div class="vb" data-keep="b-root"><div class="top"><div class="mark"><i></i>vecnet</div>
+   <div class="tabs" role="tablist">${[['inbox','Inbox',nIn],['chat','Chat',0],['dash','Dashboard',0]].map(([k,l,n]) => `<button role="tab" aria-selected="${S.tab===k}" class="${S.tab===k?'on':''}" data-act="tab" data-v="${k}">${l}${n?`<span class="n">${n}</span>`:''}</button>`).join('')}</div>
+   <div class="hubst"><span><span class="rch connected"></span> hub fly.io syd</span><span>${PEERS.filter(p=>p.reach.s==='connected').length} streams open</span><span>${PEERS.length} peers</span></div></div>
+   <div class="grid">${S.tab==='inbox'?Binbox():S.tab==='chat'?Bchat():Bdash()}</div></div>`;
+}
+function Binbox(){
+  const items = inboxItems(), aprs = items.filter(i => i.apr), woke = items.filter(i => !i.apr && !i.held), held = items.filter(i => !i.apr && i.held);
+  const aprTile = (i, big) => { const a = i.apr, frac = (i.m.apr.exp - now()) / (i.m.apr.exp - i.m.at), urgent = i.m.apr.exp - now() < 15*60000;
+    return `<div class="tile t-apr ${big?'c5 r3':'c4 r3'}">
+     <div class="ring">${ring(a.status==='open'?frac:0, 72, urgent?'#fbbf24':'#a855f7')}<span data-cd="${i.m.apr.exp}">${a.status==='open'?cd(i.m.apr.exp):'--'}</span></div>
+     <div class="from"><span class="kdot" style="--k:${KC[PEER[i.m.from].kind]};display:inline-block;margin-right:6px"></span>${esc(PEER[i.m.from].name)} needs a decision</div>
+     <div class="q">${esc(i.m.apr.q)}</div><div class="ctx">${md(i.m.text)}</div>
+     ${a.status==='open'?`<div class="opts">${i.m.apr.options.map((o,n)=>`<button class="opt ${n?'alt':''}" data-act="answer" data-v="${i.m.apr.id}" data-o="${esc(o)}">${esc(o)}</button>`).join('')}</div>`
+       :`<div class="opts"><span class="chip" style="color:${a.status==='expired'?'var(--dim)':'var(--ok)'}">${a.status==='expired'?'expired '+hm(i.m.apr.exp):'answered "'+esc(a.decision)+'"'}</span></div>`}</div>`; };
+  const dls = DL.filter(d => d.state !== 'discarded' && d.state !== 'recovered');
+  return `${aprs.map((i,n) => aprTile(i, n===0)).join('')}
+  <div class="tile c3 r2 t-me"><h4>You right now</h4><div class="big" style="font-size:24px"><span class="pdot ${presOf('max')}" style="width:12px;height:12px"></span> ${presOf('max')}</div><div style="font-size:12px;color:var(--muted);margin-top:auto;display:flex;align-items:center;gap:8px">wake_idle waits while you work.<button class="sbtn" style="margin-left:auto" data-act="presence" data-v="${presOf('max')==='working'?'idle':'working'}">Set ${presOf('max')==='working'?'idle':'working'}</button></div></div>
+  <div class="tile c3 r2"><h4>Pinged you today</h4>${WEBHOOKS.map(w=>`<div style="display:flex;justify-content:space-between;font-size:12.5px;padding:2px 0"><span>${esc(w.name)} <span style="color:var(--dim)">${w.filter}</span></span><b class="mono">${w.fired}</b></div>`).join('')}</div>
+  ${dls.map(d => `<div class="tile t-dl c4 r2"><h4 style="color:#fda4af">Dead letter to ${esc(PEER[d.to].name)}<span class="r">${d.attempts}</span></h4>
+    <div style="display:flex;gap:12px;align-items:baseline"><div class="code">${d.code}</div><div class="d">${esc(d.why)}</div></div>
+    <div class="acts">${d.state==='retrying'?'<span class="chip">retrying…</span>':`<button class="sbtn" data-act="retry" data-v="${d.id}">Retry</button><button class="sbtn red" data-act="discard" data-v="${d.id}">Discard</button>`}<span style="margin-left:auto;font:500 11px var(--mono);color:var(--dim);align-self:center">${hm(d.at)} · ${esc(THREADS[d.th].title)}</span></div></div>`).join('')}
+  ${!dls.length?'<div class="tile c4 r2"><h4>Dead letters</h4><div class="big">0</div></div>':''}
+  <div class="tile c4 r3"><h4>Woke you<span class="r">${woke.length}</span></h4><div class="scroll">${woke.map(i => `<div class="li ${i.done?'done':''}"><span class="kdot" style="--k:${KC[PEER[i.m.from].kind]}"></span><span class="x"><b>${esc(PEER[i.m.from].name)}</b> ${esc(i.m.text)}</span><span class="tm">${hm(i.m.at)}</span></div>`).join('')}</div></div>
+  <div class="tile c8 r3"><h4>Held for your next look<span class="r">${held.filter(i=>!i.done).length} waiting</span></h4><div class="held">${held.map(i => `<div class="hc ${i.done?'done':''}">
+    <div style="display:flex;gap:6px;align-items:center"><span class="kdot" style="--k:${KC[PEER[i.m.from].kind]}"></span><b>${esc(PEER[i.m.from].name)}</b><span style="margin-left:auto">${prioChip(i.m.prio)}</span></div>
+    <div class="x">${md(i.m.text)}</div>
+    <div class="f">${i.m.atts&&i.m.atts.length?attChip(i.m.atts[0]):''}<span style="margin-left:auto"></span>${i.done?'<span class="tm" style="font:500 11px var(--mono);color:var(--dim)">done</span>':`<button class="sbtn" data-act="open" data-v="${i.m.th}">Open</button><button class="sbtn" data-act="done" data-v="${i.m.id}">Done</button>`}</div></div>`).join('')}</div></div>`;
+}
+function Bchat(){
+  const th = THREADS[S.thread], ms = msgsOf(S.thread), real = ms.filter(m => m.kind !== 'system');
+  const cols = th.parts.filter(k => PEER[k].kind !== 'source');
+  const allAtts = real.flatMap(m => (m.atts||[]).map(a => ({a, m})));
+  return `<div class="tile c7 r9"><h4>${esc(th.title)}<span class="r">${sid(th.id)}</span></h4>
+   <div class="tr scroll" data-keep="b-tr" data-bottom="1">${ms.map(m => m.kind==='system' ? `<div class="bsys">${esc(m.text)} · ${hm(m.at)}</div>` : `<div class="bm ${m.from==='max'?'mine':''} ${S.hl===m.id?'hl':''}" id="m-${m.id}" style="--k:${KC[PEER[m.from].kind]}">
+     <header><b>${esc(PEER[m.from].name)}</b><span class="m">${PEER[m.from].kind}</span><span class="m">${hm(m.at)}</span><span style="margin-left:auto">${prioChip(m.prio)}</span></header>
+     ${m.reply&&msgById(m.reply)?`<span class="rl" data-act="jump" data-v="${m.reply}">↳ ${esc(PEER[msgById(m.reply).from].name)}: ${esc(msgById(m.reply).text.slice(0,70))}…</span>`:''}
+     <div class="txt">${md(m.text)}</div>${m.truncated?'<div class="trunc">truncated preview · full text in message.md</div>':''}
+     ${m.kind==='approval_request'?`<div class="inner"><b>${esc(m.apr.q)}</b> ${APR[m.apr.id].status==='open'?`<div class="opts" style="margin-top:6px">${m.apr.options.map((o,n)=>`<button class="opt ${n?'alt':''}" style="padding:6px 10px;font-size:12px" data-act="answer" data-v="${m.apr.id}" data-o="${esc(o)}">${esc(o)}</button>`).join('')}</div>`:`<span style="color:var(--muted)"> ${APR[m.apr.id].status}</span>`}</div>`:''}
+     ${m.kind==='job_status'?`<div class="inner mono" style="font-size:11.5px">${sid(m.job.id)} → <span style="color:var(--ok)">${m.job.state}</span> (seq ${m.job.seq})</div>`:''}
+     ${m.atts&&m.atts.length?`<div class="atts">${m.atts.map(attChip).join('')}</div>`:''}
+     <div class="rcs" title="${esc(Object.entries(m.rc||{}).map(([k,r])=>PEER[k].name+': '+r.s).join(', '))}">${Object.entries(m.rc||{}).map(([k,r])=>`<i class="st-${r.s}"></i>`).join('')}</div></div>`).join('')}</div>
+   <div class="comp"><input id="compose" placeholder="Reply in thread" aria-label="Message"><button class="pbtn" data-act="cycleprio" title="Priority: click to cycle">${S.prio}</button><button class="opt" data-act="send">Send</button></div></div>
+  <div class="tile c5 r3"><h4>Who is here<span class="r">${th.parts.length}</span></h4><div class="scroll">${th.parts.map(k => `<div class="part"><span class="kdot" style="--k:${KC[PEER[k].kind]}"></span><span>${esc(PEER[k].name)}</span><span class="pdot ${presOf(k)}" title="presence ${presOf(k)}"></span><span class="rch ${PEER[k].reach.s}" title="reachability ${PEER[k].reach.s}"></span></div>`).join('')}</div></div>
+  <div class="tile c5 r4"><h4>Delivery matrix<span class="r">message × recipient</span></h4>
+   <div class="matrix scroll" style="grid-template-columns:52px repeat(${cols.length},minmax(0,1fr))"><span></span>${cols.map(k=>`<span class="h" title="${esc(PEER[k].name)}">${esc(PEER[k].name.slice(0,7))}</span>`).join('')}
+   ${real.map(m => `<span>${hm(m.at)}</span>${cols.map(k => k===m.from?'<span class="c s" title="sender"></span>':m.rc&&m.rc[k]?`<span class="c st-${m.rc[k].s}" style="background:var(--c)" title="${esc(PEER[k].name)}: ${m.rc[k].s}"></span>`:'<span class="c"></span>').join('')}`).join('')}</div>
+   <div class="legend">${['queued','pushed','accepted','processed','read','dead_letter'].map(s=>`<span class="st-${s}"><i></i>${ST_LABEL[s]}</span>`).join('')}</div></div>
+  <div class="tile c3 r2"><h4>Files<span class="r">${allAtts.length}</span></h4><div class="scroll" style="display:flex;flex-wrap:wrap;gap:6px;align-content:flex-start">${allAtts.map(x=>attChip(x.a)).join('')||'<span style="color:var(--dim);font-size:12px">none</span>'}</div></div>
+  <div class="tile c2 r2"><h4>Budget</h4><div class="big" style="font-size:24px">${th.budget}</div><div class="gauge"><b style="width:${th.budget/5}%"></b></div><div style="font-size:11px;color:var(--dim)">max depth ${th.max_depth}</div></div>`;
+}
+function Bdash(){
+  const c = cutsByReason(), mx = Math.max(1, ...Object.values(c));
+  const size = p => p.kind==='operator'||p.kind==='source' ? 'c2 r2' : p.reach.s==='unreachable' ? 'c3 r2' : 'c2 r2';
+  return `${PEERS.map(p => { const q = p.quota && p.quota.weekly_remaining_pct, pr = presOf(p.k);
+    return `<div class="tile peer ${size(p)} ${p.reach.s==='unreachable'?'bad':''}" style="--k:${KC[p.kind]}">
+     <div class="nm">${esc(p.name)}</div><div class="kd">${p.kind} · ${esc(p.loc)}</div>
+     ${q!=null?`<div class="qb" title="weekly quota ${q}%"><b style="width:${q}%"></b></div>`:''}
+     <div class="caps">${p.caps.slice(0,3).map(c=>`<span>${esc(c)}</span>`).join('')}${q!=null?`<span>${q}% week</span>`:''}</div>
+     <div class="two"><div title="presence (self-reported)"><span class="pdot ${pr}"></span>${pr==='na'?'n/a':pr}</div><div title="reachability (hub-observed)"><span class="rch ${p.reach.s}"></span>${p.reach.s}</div></div></div>`; }).join('')}
+  <div class="tile c3 r3 cut"><h4>Loop cuts<span class="r">24 h</span></h4><div class="big">${CUTS.length}<small>sends rejected</small></div>
+   <div class="bars">${Object.entries(c).map(([k,v])=>`<div style="height:${v/mx*100}%" title="${k}: ${v}"><span>${k.split('_')[0]} ${v}</span></div>`).join('')}</div></div>
+  <div class="tile c4 r3"><h4>Dead letters<span class="r">${deadNow().length} open</span></h4><div class="scroll">${DL.map(d=>`<div class="li"><span class="mono" style="color:var(--bad);font-weight:700">${d.code}</span><span class="x">${esc(PEER[d.to].name)} · ${esc(d.cls)}</span><span class="tm">${d.state}</span></div>`).join('')}</div></div>
+  <div class="tile c5 r3"><h4>Threads<span class="r">by last activity</span></h4><div class="scroll">${threadOrder().map(t=>`<div class="li" data-act="thread" data-v="${t.k}" style="cursor:pointer"><span class="chip" style="font-size:11px;${t.state==='cut'?'color:var(--bad)':''}">${t.state==='cut'?'cut':msgsOf(t.k).filter(m=>m.kind!=='system').length}</span><span class="x">${esc(t.title)}</span><span class="tm">${rel(lastAt(t.k))}</span></div>`).join('')}</div></div>
+  <div class="tile c12 r3"><h4>Audit log<span class="r">append-only, no bodies</span></h4><div class="aud scroll" style="columns:2;column-gap:32px">${AUD.slice(0,14).map(a=>`<div><span class="t">${hms(a.at)}</span> <span class="a">${esc(a.act)}</span> ${esc(a.actor)} <span class="t">${esc(a.tgt)}</span></div>`).join('')}</div></div>`;
+}
+
+/* ====================================================================== */
+/* ============================== VARIANT C ============================== */
+/* ====================================================================== */
+const pad = (s, n) => { s = String(s); return s.length > n ? s.slice(0, n-1) + '…' : s.padEnd(n, ' '); };
+const RC_GLYPH = {queued:'·',pushed:'›',accepted:'✓',processed:'✓✓',read:'◉',failed:'✗',dead_letter:'✗',expired:'⌛'};
+const RC_CLS = {queued:'d',pushed:'c',accepted:'m',processed:'g',read:'w',failed:'r',dead_letter:'r',expired:'d'};
+const PR_CLS = {wake:'y',wake_idle:'c',hold:'d'};
+function cInbox(){
+  const items = inboxItems(), L = [];
+  items.filter(i => i.apr).forEach(i => L.push({t:'APR', i}));
+  DL.filter(d => d.state !== 'discarded' && d.state !== 'recovered').forEach(d => L.push({t:'DLQ', d}));
+  items.filter(i => !i.apr && !i.held).forEach(i => L.push({t:'WAKE', i}));
+  items.filter(i => !i.apr && i.held).forEach(i => L.push({t:'HOLD', i}));
+  return L;
+}
+function cList(){ return S.tab === 'inbox' ? cInbox() : S.tab === 'chat' ? msgsOf(S.thread).filter(m => m.kind !== 'system') : PEERS; }
+function C(){
+  const L = cList(); S.sel = Math.max(0, Math.min(S.sel, L.length - 1));
+  const tabs = [['inbox','1:inbox'],['chat','2:chat'],['dash','3:dash']];
+  const body = S.tab === 'inbox' ? Cinbox(L) : S.tab === 'chat' ? Cchat(L) : Cdash();
+  const hints = S.tab === 'inbox' ? 'j/k move  a answer  r retry  x discard  p processed  enter open  ? help'
+    : S.tab === 'chat' ? 'type to send  [ ] thread  j/k select  g jump to parent  w priority  ? help' : 'j/k peer  enter peer threads  : command  ? help';
+  return `<div class="vc"><div class="wbar"><span class="s">vecnet</span>${tabs.map(([k,l]) => `<span class="w ${S.tab===k?'on':''}" data-act="tab" data-v="${k}">${l}${S.tab===k?'*':''}</span>`).join('')}
+   <span class="r"><span>hub fly:syd</span><span class="g">sse ●</span><span class="${openApprovals().length?'y':'d'}">apr ${openApprovals().length}</span><span class="${deadNow().length?'r':'d'}">dlq ${deadNow().length}</span><span class="m">cuts/24h ${CUTS.length}</span><span id="cclk">${hms(now())}Z</span></span></div>
+   ${body}
+   <div class="stl"><span class="mode ${S.ansMode?'ans':''}">${S.ansMode?'ANSWER':'NORMAL'}</span><span>${S.cmdNote?esc(S.cmdNote):hints}</span><span style="margin-left:auto">max@vecnet · ${presOf('max')} · prio ${S.prio}</span></div>
+   <div class="cmd"><span class="ps">${S.tab==='chat'?esc(THREADS[S.thread].title.slice(0,24))+' ›':':'}</span><input id="cmd" autocomplete="off" spellcheck="false" placeholder="${S.tab==='chat'?'message the thread, or :command':'command, e.g. retry all, ff 15, thread 2, help'}" aria-label="Command line"></div>
+   ${S.help?`<div class="help">${esc(HELP)}</div>`:''}</div>`;
+}
+const HELP = `vecnet operator console (prototype)                        ? or esc to close
+
+windows      1 inbox   2 chat   3 dash          ← → switch prototype variant
+move         j / k     enter = open thread of selection
+inbox        a then 1..n  answer the selected approval
+             r retry dead letter    x discard dead letter    p mark processed
+chat         i or just type into the command line to send to the thread
+             [ ]  previous / next thread     g  jump to the parent message
+             w    cycle priority wake → wake_idle → hold
+commands     :retry all   :ff 15   :thread 3   :prio hold   :presence idle   :help
+
+receipts     · queued   › pushed   ✓ accepted   ✓✓ processed   ◉ read   ✗ dead letter
+presence vs reachability: presence is what a peer says; reach is what the hub saw.`;
+function Cinbox(L){
+  const cur = L[S.sel];
+  const line = (e, n) => { const sel = n === S.sel ? 'sel' : '';
+    if (e.t === 'DLQ') return `<div class="ln ${sel}" data-act="csel" data-v="${n}"><span class="r b">DLQ </span> ${hm(e.d.at)}  ${pad(PEER[e.d.to].name,16)} <span class="r">${e.d.code}</span> ${pad(e.d.cls,18)} ${e.d.state==='retrying'?'<span class="c">retrying…</span>':'<span class="d">'+e.d.attempts+'</span>'}</div>`;
+    const i = e.i, tag = e.t === 'APR' ? '<span class="m b">APR </span>' : e.t === 'WAKE' ? '<span class="y b">WAKE</span>' : '<span class="d b">HOLD</span>';
+    const tail = e.t === 'APR' ? (i.apr.status === 'open' ? `<span class="y">exp <span data-cd="${i.m.apr.exp}">${cd(i.m.apr.exp)}</span></span>` : `<span class="d">${i.apr.status}</span>`) : `<span class="${RC_CLS[i.r.s]}">${RC_GLYPH[i.r.s]}</span>`;
+    return `<div class="ln ${sel} ${i.done&&e.t!=='APR'?'done':''}" data-act="csel" data-v="${n}">${tag}  ${hm(i.m.at)}  ${pad(PEER[i.m.from].name,16)} ${pad(e.t==='APR'?i.m.apr.q:i.m.text,46)} ${tail}</div>`; };
+  let det = '';
+  if (cur && cur.t === 'DLQ'){ const d = cur.d;
+    det = `<div class="wrap"><span class="r b">dead letter</span>  ${d.id}\n\n<span class="d">to       </span>${esc(PEER[d.to].name)} <span class="d">(${PEER[d.to].kind}, reach ${PEER[d.to].reach.s})</span>\n<span class="d">from     </span>${esc(PEER[d.from].name)}\n<span class="d">thread   </span>${esc(THREADS[d.th].title)}\n<span class="d">code     </span><span class="r">${d.code}</span> ${esc(d.cls)}\n<span class="d">attempts </span>${d.attempts}\n<span class="d">at       </span>${iso(d.at)}\n\n${esc(d.why)}\n\n<span class="m">[r]</span> retry   <span class="m">[x]</span> discard   <span class="m">[enter]</span> open thread</div>`; }
+  else if (cur){ const i = cur.i, m = i.m;
+    det = `<div class="wrap"><span class="b ${cur.t==='APR'?'m':cur.t==='WAKE'?'y':'d'}">${m.kind}</span>  <span class="${PR_CLS[m.prio]}">${m.prio}</span>${i.held?' <span class="d">(held: you were working)</span>':''}\n\n<span class="d">from     </span>${esc(PEER[m.from].name)} <span class="d">${PEER[m.from].kind}</span>\n<span class="d">thread   </span>${esc(THREADS[m.th].title)}\n<span class="d">message  </span>${m.id}\n<span class="d">depth    </span>${m.depth}/${THREADS[m.th].max_depth}${m.via?`\n<span class="d">via      </span>${esc(GROUPS[m.via].name)}`:''}\n<span class="d">receipt  </span><span class="${RC_CLS[i.r.s]}">${RC_GLYPH[i.r.s]} ${i.r.s}</span>\n\n<span class="w">${esc(m.text)}</span>${m.truncated?'\n<span class="m">[+ spilled to message.md]</span>':''}${(m.atts||[]).map(a=>`\n<span class="c">⎘ ${esc(a.name)}</span> <span class="d">${kib(a.size)} ${a.mt}</span>`).join('')}`;
+    if (cur.t === 'APR'){ const a = i.apr;
+      det += a.status === 'open' ? `\n\n<span class="m b">? ${esc(m.apr.q)}</span>\n${m.apr.options.map((o,n)=>`  <span class="${S.ansMode?'y b':'m'}">[${n+1}]</span> ${esc(o)}`).join('\n')}\n\n<span class="d">expires ${hm(m.apr.exp)}Z, in </span><span class="y" data-cd="${m.apr.exp}">${cd(m.apr.exp)}</span>\n${S.ansMode?'<span class="y">press 1..'+m.apr.options.length+' to answer, esc to cancel</span>':'<span class="d">press a to answer</span>'}`
+        : `\n\n<span class="${a.status==='expired'?'d':'g'}">${a.status==='expired'?'expired':'answered "'+esc(a.decision)+'"'} at ${hm(a.at)}</span>`; }
+    det += '</div>'; }
+  return `<div class="body" style="grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);grid-template-rows:minmax(0,1.3fr) minmax(0,1fr)">
+   <div class="pane f"><span class="pt">inbox <span class="k">${L.length} items · apr ${openApprovals().length} · dlq ${deadNow().length}</span></span><div class="pb" data-keep="c-list">${L.map(line).join('')}</div></div>
+   <div class="pane" style="grid-column:1;grid-row:2"><span class="pt">your event log <span class="k">GET /v1/events -f · not messages, never replied to</span></span><div class="pb" data-keep="c-ev" data-bottom="1">${opEvents().map(e => `<div class="ln"><span class="d">${e.cur}</span> <span class="d">${hms(e.at)}</span> <span class="${e.type==='receipt'?'g':e.type==='presence'?'y':'m'}">${pad(e.type,15)}</span>${e.txt}</div>`).join('')}</div></div>
+   <div class="pane" style="grid-column:2;grid-row:1 / span 2"><span class="pt">detail</span><div class="pb">${det||'<span class="d">nothing selected</span>'}</div></div></div>`;
+}
+function opEvents(){
+  const ev = [
+    {at:T('06:15:00'),type:'presence',txt:'pag-hark-sleuth <span class="y">working</span> <span class="d">lan:x-tuf quota 61%</span>'},
+    {at:T('06:20:30'),type:'thread_updated',txt:'thr_…P5R title "hark B196: radio end-phrase bug" <span class="d">budget 496</span>'},
+    {at:T('06:31:00'),type:'group_updated',txt:'grp_…7T b196-repro created by pag-hark-sleuth <span class="d">4 members</span>'},
+    {at:T('07:30:00'),type:'presence',txt:'pag-hark-sleuth <span class="y">working</span> <span class="d">quota 61%</span>'},
+    {at:T('07:33:10'),type:'presence',txt:'codex-hark <span class="y">working</span> <span class="d">lan:xsm</span>'},
+  ];
+  MSGS.filter(m => m.from === 'max' && m.rc).forEach(m => Object.entries(m.rc).forEach(([k,r]) => {
+    if (r.s !== 'queued') ev.push({at:r.at, type:'receipt', txt:`${sid(m.id)} → ${esc(PEER[k].name)} <span class="${RC_CLS[r.s]}">${RC_GLYPH[r.s]} ${r.s}</span>${r.note?' <span class="d">'+esc(r.note)+'</span>':''}`}); }));
+  MSGS.filter(m => m.kind === 'system' && m.text.startsWith('hub posted')).forEach(m => ev.push({at:m.at, type:'approval_expired', txt:esc(m.text.replace('hub posted ',''))}));
+  return ev.sort((a,b) => a.at - b.at).map((e,n) => Object.assign(e, {cur:'e1.' + (10401 + n)}));
+}
+function Cchat(L){
+  const th = THREADS[S.thread], ms = msgsOf(S.thread), cur = L[S.sel];
+  const tlist = Object.values(THREADS).map((t,n) => `<div class="ln ${t.k===S.thread?'sel':''}" data-act="thread" data-v="${t.k}"><span class="d">${n+1}</span> ${pad(t.title,26)}${t.state==='cut'?' <span class="r">cut</span>':''}</div>`).join('');
+  const log = ms.map(m => { if (m.kind === 'system') return `<div class="msgline d">-- ${hm(m.at)} ${esc(m.text)}</div>`;
+    const p = PEER[m.from], sel = cur && cur.id === m.id ? 'sel' : '';
+    const rcs = Object.entries(m.rc||{}).map(([k,r]) => `<span class="${RC_CLS[r.s]}">${esc(PEER[k].name.split('-')[0])}${RC_GLYPH[r.s]}</span>`).join(' ');
+    let x = '';
+    const re = m.reply && msgById(m.reply) ? `<span class="d">↳${esc(PEER[msgById(m.reply).from].name.split('-')[0])}@${hm(msgById(m.reply).at)}</span> ` : '';
+    x += `<span class="d">${hm(m.at)}</span> <span class="${PR_CLS[m.prio]}">${m.prio==='wake'?'!':m.prio==='wake_idle'?'~':' '}</span><span style="color:${KC[p.kind]}" class="b">&lt;${esc(p.name)}&gt;</span> ${re}${md(m.text)}`;
+    if (m.truncated) x += ` <span class="m">[+${kib(m.atts[0].size)} spilled → message.md]</span>`;
+    (m.atts||[]).filter(a => !a.spill).forEach(a => x += `\n       <span class="c">⎘ ${esc(a.name)}</span> <span class="d">${kib(a.size)}</span>`);
+    if (m.kind === 'approval_request'){ const a = APR[m.apr.id]; x += `\n       <span class="m b">? ${esc(m.apr.q)}</span> ${a.status==='open'?m.apr.options.map((o,n)=>`<span class="m">[${n+1}]${esc(o)}</span>`).join(' ')+` <span class="y">exp <span data-cd="${m.apr.exp}">${cd(m.apr.exp)}</span></span>`:`<span class="d">${a.status}</span>`}`; }
+    if (m.kind === 'job_status') x += `\n       <span class="g">job ${sid(m.job.id)} ${m.job.state} seq ${m.job.seq}</span> <span class="d">${esc(m.job.output)}</span>`;
+    x += `\n       <span class="rc">${rcs}</span>`;
+    return `<div class="msgline ${sel} ${S.hl===m.id?'sel':''}" id="m-${m.id}">${x}</div>`; }).join('');
+  return `<div class="body" style="grid-template-columns:250px minmax(0,1fr) 230px">
+   <div class="pane"><span class="pt">threads <span class="k">[ ]</span></span><div class="pb">${tlist}</div></div>
+   <div class="pane f"><span class="pt">${esc(th.title)} <span class="k">${sid(th.id)} · budget ${th.budget}</span></span><div class="pb" data-keep="c-log" data-bottom="1">${log}</div></div>
+   <div class="pane"><span class="pt">who</span><div class="pb">${th.parts.map(k => `<div class="ln"><span style="color:${KC[PEER[k].kind]}">■</span> ${pad(PEER[k].name,15)} <span class="${presOf(k)==='idle'?'g':presOf(k)==='working'?'y':'d'}">${presOf(k)==='na'?'n/a':presOf(k).slice(0,4)}</span></div>`).join('')}
+   <div class="ln d" style="margin-top:10px">${th.group?esc(GROUPS[th.group].kind)+':':''}</div>${th.group?`<div class="ln">${esc(GROUPS[th.group].name)}</div>`:''}
+   ${th.origin?`<div class="ln d" style="margin-top:10px">origin:</div><div class="ln c">${esc(th.origin.system)} ${esc(th.origin.thread_id)}</div>`:''}
+   <div class="ln d" style="margin-top:10px">receipts:</div><div class="wrap d">· queued  › pushed\n<span class="m">✓ accepted</span>\n<span class="g">✓✓ processed</span>\n<span class="w">◉ read</span>  <span class="r">✗ dead</span></div>
+   <div class="ln d" style="margin-top:10px">priority:</div><div class="wrap"><span class="y">! wake</span>  <span class="c">~ wake_idle</span>\n<span class="d">  hold</span></div></div></div></div>`;
+}
+function Cdash(){
+  const c = cutsByReason();
+  const bar = (pct, w) => pct == null ? pad('', w + 2) : '[' + '|'.repeat(Math.round(pct/100*w)).padEnd(w, ' ') + ']';
+  const cols = '18ch 11ch 9ch 12ch 18ch 14ch minmax(0,1fr)';
+  return `<div class="body" style="grid-template-columns:minmax(0,1.1fr) minmax(0,1fr) minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)">
+   <div class="pane f" style="grid-column:1 / -1"><span class="pt">peers <span class="k">${PEERS.length} · presence is self-reported, reach is hub-observed</span></span><div class="pb tbl" style="--cols:${cols}">
+    <div class="ln hd" style="--cols:${cols}"><span>PEER</span><span>KIND</span><span>PRESENCE</span><span>REACH</span><span>QUOTA (WEEK)</span><span>LOCATION</span><span>LAST SEEN / CAPS</span></div>
+    ${PEERS.map((p,n) => { const pr = presOf(p.k), q = p.quota && p.quota.weekly_remaining_pct;
+      return `<div class="ln ${n===S.sel?'sel':''}" style="--cols:${cols}" data-act="csel" data-v="${n}"><span style="color:${KC[p.kind]}">${esc(p.name)}</span><span class="d">${p.kind}</span><span class="${pr==='idle'?'g':pr==='working'?'y':pr==='blocked'?'r':'d'}">${pr==='na'?'-':pr}</span><span class="${p.reach.s==='unreachable'?'r':p.reach.s==='connected'?'m':'c'}">${p.reach.s}</span><span class="${q!=null&&q<10?'r':'g'}">${q!=null?bar(q,10)+' '+String(q).padStart(3)+'%':'-'}</span><span class="d">${esc(p.loc)}</span><span class="d">${rel(p.reach.at)} ${esc(p.caps.join(','))}</span></div>`; }).join('')}</div></div>
+   <div class="pane"><span class="pt">threads</span><div class="pb">${threadOrder().map(t => `<div class="ln" data-act="thread" data-v="${t.k}">${pad(t.title,30)} <span class="d">${String(msgsOf(t.k).filter(m=>m.kind!=='system').length).padStart(2)}m</span> <span class="${t.state==='cut'?'r':'g'}">${t.state==='cut'?'cut ':''}${t.budget}</span></div>`).join('')}</div></div>
+   <div class="pane"><span class="pt">dead letters <span class="k">${deadNow().length} open</span></span><div class="pb">${DL.map(d => `<div class="ln"><span class="r">${d.code}</span> ${pad(PEER[d.to].name,13)} ${pad(d.cls,18)} <span class="${d.state==='dead'?'r':'d'}">${d.state}</span></div>`).join('')}
+    <div class="ln d" style="margin-top:12px">loop cuts / 24h: <span class="m b">${CUTS.length}</span></div><div class="ln d">  max_depth_exceeded     <span class="w">${c.max_depth_exceeded}</span></div><div class="ln d">  thread_budget_exhausted <span class="w">${c.thread_budget_exhausted}</span></div><div class="ln d">  expired                <span class="w">${c.expired}</span></div></div></div>
+   <div class="pane"><span class="pt">audit tail <span class="k">-f</span></span><div class="pb">${AUD.slice(0,16).map(a => `<div class="ln"><span class="d">${hms(a.at)}</span> <span class="m">${pad(a.act,19)}</span> ${esc(a.actor)} <span class="d">${esc(a.tgt)}</span></div>`).join('')}</div></div></div>`;
+}
+function cAct(key){
+  const L = cList(), cur = L[S.sel];
+  if (S.tab === 'inbox' && cur){
+    if (S.ansMode && cur.t === 'APR' && /^[1-9]$/.test(key)){ const o = cur.i.m.apr.options[+key - 1]; if (o){ S.ansMode = false; answer(cur.i.m.apr.id, o); } return true; }
+    if (key === 'a' && cur.t === 'APR' && cur.i.apr.status === 'open'){ S.ansMode = true; render(); return true; }
+    if (key === 'r' && cur.t === 'DLQ'){ retryDL(cur.d.id); return true; }
+    if (key === 'x' && cur.t === 'DLQ'){ discardDL(cur.d.id); return true; }
+    if (key === 'p' && cur.i){ markDone(cur.i.m.id); return true; }
+    if (key === 'Enter'){ go('chat', cur.i ? cur.i.m.th : cur.d.th); return true; }
+  }
+  if (S.tab === 'chat'){
+    const keys = Object.keys(THREADS), ix = keys.indexOf(S.thread);
+    if (key === '[' || key === ']'){ go(null, keys[(ix + (key === ']' ? 1 : keys.length - 1)) % keys.length]); return true; }
+    if (key === 'g' && cur && cur.reply){ jump(cur.reply); return true; }
+    if (key === 'w'){ cyclePrio(); return true; }
+    if (key === 'i'){ document.getElementById('cmd').focus(); return true; }
+  }
+  if (S.tab === 'dash' && key === 'Enter' && cur){ const t = threadOrder().find(t => t.parts.includes(cur.k)); if (t) go('chat', t.k); return true; }
+  return false;
+}
+function runCmd(raw){
+  const v = raw.trim(); if (!v) return;
+  if (S.tab === 'chat' && !v.startsWith(':')){ send(v); S.cmdNote = 'sent with priority ' + S.prio; return; }
+  const [c, ...rest] = v.replace(/^:/, '').split(/\s+/), arg = rest.join(' ');
+  if (c === 'help'){ S.help = true; }
+  else if (c === 'retry' && arg === 'all'){ deadNow().forEach(d => retryDL(d.id)); S.cmdNote = 'retrying all dead letters'; }
+  else if (c === 'ff'){ skew += (+arg || 15) * 60000; S.cmdNote = 'clock +' + (+arg || 15) + ' min'; expireCheck(); }
+  else if (c === 'thread'){ const t = Object.keys(THREADS)[+arg - 1]; if (t) go('chat', t); }
+  else if (c === 'prio' && ['wake','wake_idle','hold'].includes(arg)){ S.prio = arg; }
+  else if (c === 'presence' && ['idle','working','blocked'].includes(arg)){ PEER.max.pres = {s:arg, at:now()}; S.cmdNote = 'presence ' + arg; }
+  else if (c === 'send'){ send(arg); }
+  else S.cmdNote = 'unknown command: ' + c + ' (try :help)';
+  render();
+}
+function cyclePrio(){ const p = ['wake','wake_idle','hold']; S.prio = p[(p.indexOf(S.prio) + 1) % 3]; render(); }
+
+/* ============================== render loop ============================== */
+const VIEW = {a:A, b:B, c:C};
+function render(){
+  const ae = document.activeElement, fid = ae && ae.id, val = {}, sel = {};
+  ['compose','cmd'].forEach(id => { const e = document.getElementById(id); if (e){ val[id] = e.value; sel[id] = [e.selectionStart, e.selectionEnd]; } });
+  const scr = {}; document.querySelectorAll('[data-keep]').forEach(e => scr[e.dataset.keep] = e.scrollTop);
+  document.getElementById('app').innerHTML = VIEW[S.variant]();
+  document.querySelectorAll('[data-keep]').forEach(e => {
+    if (S.scrollBottom && e.dataset.bottom) e.scrollTop = e.scrollHeight;
+    else if (scr[e.dataset.keep] != null) e.scrollTop = scr[e.dataset.keep];
+    if (S.scrollBottom && S.tab === 'chat' && S.variant === 'a' && e.dataset.keep === 'a-main') e.scrollTop = e.scrollHeight; });
+  S.scrollBottom = false;
+  Object.keys(val).forEach(id => { const e = document.getElementById(id); if (e){ e.value = val[id]; if (fid === id){ e.focus(); try { e.setSelectionRange(...sel[id]); } catch(_){} } } });
+  updBytes();
+  document.getElementById('plbl').textContent = VARIANTS[S.variant];
+  document.getElementById('pclk').textContent = hm(now()) + 'Z';
+}
+function updBytes(){ const e = document.getElementById('compose'), b = document.getElementById('bytes'); if (e && b){ const n = bytesOf(e.value); b.textContent = n + ' / 4096 B' + (n > 4096 ? ', will auto-spill' : ''); b.style.color = n > 4096 ? '#c4b5fd' : ''; } }
+function cycleVariant(d){ const k = Object.keys(VARIANTS); S.variant = k[(k.indexOf(S.variant) + d + k.length) % k.length]; S.sel = 0; S.ansMode = false; S.help = false; S.scrollBottom = true; syncURL(); render(); }
+
+document.addEventListener('click', e => {
+  const t = e.target.closest('[data-act]'); if (!t) return;
+  const a = t.dataset.act, v = t.dataset.v; if (t.tagName === 'A') e.preventDefault();
+  if (a === 'tab') go(v);
+  else if (a === 'thread' || a === 'open') go('chat', v);
+  else if (a === 'answer') answer(v, t.dataset.o);
+  else if (a === 'retry') retryDL(v);
+  else if (a === 'discard') discardDL(v);
+  else if (a === 'done') markDone(v);
+  else if (a === 'jump') jump(v);
+  else if (a === 'prio'){ S.prio = v; render(); }
+  else if (a === 'cycleprio') cyclePrio();
+  else if (a === 'send'){ const c = document.getElementById('compose'); if (send(c.value)) document.getElementById('compose').value = ''; updBytes(); }
+  else if (a === 'anchor'){ const el = document.getElementById(v); if (el) el.scrollIntoView({behavior:'smooth', block:'start'}); }
+  else if (a === 'presence'){ PEER.max.pres = {s:v, at:now()}; toast('Presence set to ' + v + (v==='idle'?': wake_idle messages will now push':'')); render(); }
+  else if (a === 'csel'){ S.sel = +v; S.ansMode = false; render(); }
+});
+document.addEventListener('input', e => { if (e.target.id === 'compose') updBytes(); });
+document.addEventListener('keydown', e => {
+  const typing = e.target.matches && e.target.matches('input,textarea,[contenteditable]');
+  if (e.target.id === 'compose' && e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); if (send(e.target.value)) document.getElementById('compose').value = ''; updBytes(); return; }
+  if (e.target.id === 'cmd'){ if (e.key === 'Enter'){ const v = e.target.value; e.target.value = ''; runCmd(v); document.getElementById('cmd').focus(); } else if (e.key === 'Escape') e.target.blur(); return; }
+  if (typing) return;
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight'){ e.preventDefault(); cycleVariant(e.key === 'ArrowLeft' ? -1 : 1); return; }
+  if (S.variant !== 'c' || e.ctrlKey || e.metaKey || e.altKey) return;
+  S.cmdNote = '';
+  if (e.key === '?'){ S.help = !S.help; render(); return; }
+  if (e.key === 'Escape'){ S.help = false; S.ansMode = false; render(); return; }
+  if (S.ansMode && cAct(e.key)){ e.preventDefault(); return; }
+  if (['1','2','3'].includes(e.key)){ go(['inbox','chat','dash'][+e.key - 1]); return; }
+  if (e.key === 'j' || e.key === 'k'){ const n = cList().length; S.sel = Math.max(0, Math.min(n - 1, S.sel + (e.key === 'j' ? 1 : -1))); render();
+    const s = document.querySelector('.vc .sel'); if (s) s.scrollIntoView({block:'nearest'}); return; }
+  if (e.key === ':'){ e.preventDefault(); const c = document.getElementById('cmd'); c.value = ':'; c.focus(); return; }
+  if (cAct(e.key)) e.preventDefault();
+});
+document.getElementById('pv').onclick = () => cycleVariant(-1);
+document.getElementById('pn').onclick = () => cycleVariant(1);
+document.getElementById('pff').onclick = () => { skew += 15*60000; toast('Mock clock advanced 15 minutes'); expireCheck(); render(); };
+setInterval(() => {
+  document.querySelectorAll('[data-cd]').forEach(e => e.textContent = cd(+e.dataset.cd));
+  const k = document.getElementById('cclk'); if (k) k.textContent = hms(now()) + 'Z';
+  document.getElementById('pclk').textContent = hm(now()) + 'Z';
+  expireCheck();
+}, 1000);
+syncURL(); render();
+document.fonts.ready.then(() => { S.scrollBottom = true; render(); });
+</script>
+</body>
+</html>

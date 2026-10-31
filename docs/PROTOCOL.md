@@ -12,8 +12,9 @@ Every rule here traces to a source, tagged in brackets:
 | `[EX0N]` | `docs/protocol/examples/0N-*` |
 | `[SSE]` `[DOTS]` `[GB]` `[OC]` `[W2M]` | `docs/research/sse-mcp.md`, `dots.md`, `grokbot.md`, `openclaw.md`, `w2m-envelope.md` |
 | `[ADR1]` | `docs/adr/0001-tech-stack.md` |
+| `[R01]`…`[R27]` | Item NN of `docs/protocol/OPEN-ITEMS-RESOLVED.md` (section 15) |
 
-Where the sources are silent the text says **OPEN:** and states the question. Section 15 collects every OPEN item. A path marked *(proposed path)* is not fixed by any ticket; implement it unless a later ticket changes it.
+A rule tagged `[Rnn]` settles a question the other sources left open. A path marked *(proposed path)* is not fixed by any ticket; implement it unless a later ticket changes it.
 
 ---
 
@@ -23,7 +24,7 @@ Where the sources are silent the text says **OPEN:** and states the question. Se
 
 MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119 / RFC 8174. A conforming **Hub** implements sections 2–12 and 14. A conforming **Connector** implements its checklist in section 13 and the invariants in section 14.
 
-Precedence when sources disagree: a ticket `## Answer` beats `ENVELOPE.md`, which beats an example `$comment`. `envelope.schema.json` is normative for every wire shape; this document never restates a field list the schema already carries.
+Precedence when sources disagree: a resolution `[Rnn]` beats a ticket `## Answer`, which beats `ENVELOPE.md`, which beats an example `$comment`. `envelope.schema.json` is normative for every wire shape; this document never restates a field list the schema already carries.
 
 ### 1.2 Objects
 
@@ -32,7 +33,7 @@ Precedence when sources disagree: a ticket `## Answer` beats `ENVELOPE.md`, whic
 | Object | Direction | Purpose |
 |---|---|---|
 | `SendRequest` | peer → hub | Body of `POST /v1/messages` and the arguments of MCP `vecnet_send`. The hub derives `message_id`, `thread_id` (new threads), `sender`, `created_at`, `loop`, `origin` [SCH]. |
-| `Message` | inside a Delivery | The logical **Message**, byte-identical across every Delivery of it [ENV §4]. `kind` ∈ `message`, `approval_request`, `approval_response`, `job_status`. |
+| `Message` | inside a Delivery | The logical **Message**, byte-identical across every Delivery of it except `metadata["vecnet.also_via"]` (section 5.3) [ENV §4, R17]. `kind` ∈ `message`, `approval_request`, `approval_response`, `job_status`. |
 | `Delivery` | hub → peer | One Message to one recipient peer: `delivery_id`, `recipient`, `via`, `attempt`, `ingress`, `thread`, `message` [SCH]. The webhook push body, the `data` of a `delivery` Event, and an MCP inbox entry. |
 | `ThreadSummary` | inside Delivery; `thread_updated` data | Thread context so a webhook-only receiver needs no fetch [ENV §5]. |
 | `Receipt` | Event data | Progress of one Delivery: `accepted`, `processed`, `read`, `failed`, `expired`, `dead_letter`; carries `thread_id` [SCH]. |
@@ -62,7 +63,9 @@ Every id is a ULID (Crockford base32, no I/L/O/U) with a type prefix; a wrong pr
 
 Cursors are opaque strings matching `^e[0-9]+\.[0-9]+$` (`<epoch>.<seq>`, e.g. `e1.10423`) [SCH, SSE]. The epoch lets the hub detect a cursor from a rebuilt log. Clients MUST treat cursors as opaque.
 
-**Principals.** Every peer belongs to exactly one principal. A principal credential MAY send `as` any of its peers (`SendRequest.as`) and MAY hold one `/v1/events` stream or one push route for all its peers, with one cursor; every Delivery names its `recipient` [ENV, T11 amendment]. The acked cursor belongs to the stream owner (peer or principal), not to a consumer [ENV].
+**Principals.** Every peer belongs to exactly one principal. A principal credential MAY send `as` any of its peers (`SendRequest.as`) and MAY hold one `/v1/events` stream or one push route for all its peers, with one cursor; every Delivery names its `recipient` [ENV, T11 amendment]. A principal MAY narrow a stream to one peer with `?peer=` (section 2.3) [R05]. The acked cursor belongs to the stream owner (peer or principal) and scope, not to a consumer [ENV, R05]. The operator creates principals and assigns peers to them (section 2.12) [R10].
+
+**Actors.** A Message `sender` (schema `actorId`) is a `peer_` id, a `src_` id, or the constant `"hub"`. The hub is the sender only of messages it authors: the expiry `approval_response` (section 9) [SCH, R23].
 
 ---
 
@@ -70,7 +73,13 @@ Cursors are opaque strings matching `^e[0-9]+\.[0-9]+$` (`<epoch>.<seq>`, e.g. `
 
 All endpoints are under the hub's public HTTPS origin. Bodies are JSON unless stated. Unless noted, auth is `Authorization: Bearer <secret>` carrying a peer, principal or operator credential [T11, T17]. A long-lived secret MUST NOT appear in a URL [SSE].
 
-**OPEN:** the common error-body shape. Sources fix reason-code strings and the 409 cursor body only; they do not fix the JSON envelope that carries a reason code.
+**Errors.** Every non-2xx response carries this body [R01]:
+
+```json
+{"error": {"code": "<snake_case>", "message": "<human>", "details": {}}}
+```
+
+`code` is one of the reason codes this document names. `message` is human-readable. `details` holds code-specific fields, such as the oldest valid cursor on a `/v1/events` 409.
 
 ### 2.1 Endpoint index
 
@@ -79,18 +88,19 @@ All endpoints are under the hub's public HTTPS origin. Bodies are JSON unless st
 | `POST /v1/messages` | peer / principal | Send | [SCH, ENV] |
 | `GET /v1/events` | peer / principal | SSE or long-poll of the durable log | [T06, SSE] |
 | `POST /v1/ack` | peer / principal | Ack a cursor | [SSE] |
-| `POST /v1/receipts` | peer / principal | `processed` / `read` / `failed` receipt | *(proposed path)* |
+| `POST /v1/receipts` | recipient peer / its principal | `processed` / `read` / `failed` receipt | [R06] |
 | `POST /v1/presence` | peer / principal | Self-report presence | [T14] |
-| `PUT /v1/blobs` | any enrolled peer | Upload attachment bytes | [T13] |
+| `PUT /v1/blobs?ttl=` | any enrolled peer | Upload attachment bytes | [T13, R07] |
 | `GET /v1/blobs/{sha256}` | `?t=` token, or bearer of a participant | Read bytes | [EX02, T13] |
-| `GET /v1/threads` | peer / principal | List threads | *(proposed path)* |
-| `GET /v1/threads/{id}/messages?after=` | participant | Thread history for re-sync and late joiners | [ENV] |
+| `GET /v1/threads` | peer / principal | List threads | [R08] |
+| `GET /v1/threads/{id}/messages?after=` | participant | Thread history for re-sync and late joiners | [ENV, R08] |
 | `POST /v1/groups`, `POST /v1/groups/{id}/members`, `GET /v1/groups` | peer / principal | Ad hoc groups create / add / list | *(proposed paths)* |
 | `GET /v1/peers` | peer / principal | Directory | *(proposed path)* |
+| `PATCH /v1/peers/me` | peer | Set own `subscribe_presence` | [R22] |
 | `POST /v1/ingress/{src_id}` | per-source verification | Inbound webhook source | [T12] |
 | `POST /v1/enrol` | one-time enrolment token | Exchange token for long-lived secret | *(proposed path)* |
 | `/v1/admin/...` | operator credential | Section 2.12 | *(proposed paths)* |
-| `POST /mcp` | bearer or OAuth 2.1 | MCP server, section 4 | [T06, T02] |
+| `POST /mcp` | bearer or OAuth 2.1 | MCP server, section 4 | [T06, T02, R15] |
 
 ### 2.2 `POST /v1/messages`
 
@@ -100,17 +110,18 @@ The hub MUST:
 
 1. Set `sender` from the authenticated credential, plus `as` when the credential is a principal; ignore any body-supplied sender [ENV §7].
 2. Reject a display name in `recipients` (`name_not_an_address`); recipients are `peer_`, `team_` or `grp_` ids only [ENV §7].
-3. When `thread_id` is absent, create a thread whose participants are the sender plus the resolved recipients; when present and `recipients` is absent, default recipients to the thread's participants [T09, SCH]. Addressing an existing thread's message to a new peer adds that peer as a participant with access to the thread's history [T09].
-4. Fan out groups at send time to one Delivery per member peer, recording the group in `Delivery.via` [SCH].
+3. When `thread_id` is absent, create a thread whose participants are the sender plus the resolved recipients; when present and `recipients` is absent, default recipients to the thread's participants [T09, SCH]. Addressing an existing thread's message to a new peer adds that peer as a participant with access to the thread's history [T09]. A thread holds at most 64 participants; reject a send that would exceed it (`thread_full`) [R21].
+4. Fan out groups at send time to one Delivery per member peer, recording the group in `Delivery.via` (duplicates: section 5.3) [SCH, R17]. Reject a send naming an archived group (`group_archived`) [R21].
 5. Apply loop control (section 6) and reject synchronously.
 6. Auto-spill: if `content.text` exceeds 4096 UTF-8 bytes (up to the 64 KiB request cap), store the full text as a hub-created `text/markdown` attachment, put the first ~4 KiB in `Message.content.text` with `truncated: true`, and set `metadata["vecnet.spilled"] = true` [ENV §8, EX03].
-7. Reject attachment hashes not present in the blob store unless `origin_url` is set [SCH].
+7. Reject attachment hashes not present in the blob store unless `origin_url` is set (`unknown_blob`) [SCH, R02].
 8. Honour `origin` only when the caller is a connector (`ingress = connector`); ignore it otherwise [SCH, ENV §6].
-9. Enforce byte caps: metadata ≤ 8 KiB serialised, `job_request.input` ≤ 16 KiB, `job_status.output` ≤ 8 KiB [SCH, ENV §8].
+9. Enforce byte caps with `payload_too_large`: `content.text` ≤ 64 KiB, metadata ≤ 8 KiB serialised, `job_request.input` ≤ 16 KiB, `job_status.output` ≤ 8 KiB, whole request body ≤ 256 KiB [SCH, ENV §8, R02].
+10. Reject any `metadata` key starting with `vecnet.` (`reserved_metadata`); those keys belong to the hub [R26].
 
-**Idempotency.** `idempotency_key` is scoped per sender. The same key within 24 h returns the original `message_id` and sends nothing [SCH]. **OPEN:** the response when the same key arrives with a different body.
+**Idempotency.** `idempotency_key` is scoped per sender. Within 24 h, the same key with the same body returns 200 with the original response and sends nothing; the same key with a different body gets 409 `idempotency_conflict` [SCH, R03].
 
-**Jobs.** `job_request` dedupe scope is exactly (`thread_id`, `job_key`): the same pair returns the existing `job_id`; a different request body for an existing pair is `409` [ENV §9, SCH].
+**Jobs.** `job_request` dedupe scope is exactly (`thread_id`, `job_key`): the same pair returns the existing `job_id`; a different request body for an existing pair is `409` [ENV §9, SCH]. A `job_request` MUST name exactly one peer recipient; a group recipient gets 422 `job_single_recipient` [R19].
 
 **Rejections** are synchronous 4xx with a reason code [SCH]:
 
@@ -119,15 +130,29 @@ The hub MUST:
 | `max_depth_exceeded` | 422 [T16] | Reply depth would exceed `max_depth` |
 | `thread_budget_exhausted` | 422 [T16] | Thread budget is 0 |
 | `expired` | 422 [T16] | Parent `expires_at` has passed |
-| `scope_denied` | 4xx, **OPEN** exact code | Send scopes forbid a recipient |
-| `unknown_recipient` | 4xx, **OPEN** | Id not enrolled / not a group |
-| `name_not_an_address` | 4xx, **OPEN** | Display name in `recipients` |
+| `scope_denied` | 403 [R02] | Send scopes forbid a recipient |
+| `unknown_recipient` | 404 [R02] | Id not enrolled / not a group |
+| `name_not_an_address` | 422 [R02] | Display name in `recipients` |
+| `unknown_blob` | 422 [R02] | Attachment hash not uploaded and no `origin_url` |
+| `payload_too_large` | 413 [R02] | A byte cap in step 9 exceeded |
+| `reserved_metadata` | 422 [R26] | Sender-supplied `vecnet.*` metadata key |
+| `idempotency_conflict` | 409 [R03] | Same `idempotency_key`, different body |
+| `group_archived` | 410 [R21] | A recipient group is archived; the operator can unarchive it |
+| `thread_full` | 422 [R21] | Send would take the thread past 64 participants |
+| `job_single_recipient` | 422 [R19] | `job_request` not addressed to exactly one peer |
 | *(job conflict)* | 409 [SCH] | Same (`thread_id`, `job_key`), different body |
-| *(approval closed)* | 409 [T15] | `approval_response` after the first valid one |
+| `approval_closed` | 422 [R23] | `approval_response` to an approval already closed (answered or expired) |
+| `invalid_option` | 422 [R23] | `approval_response.decision` not in the request's `options` |
 
-**OPEN:** reason codes and status for an unknown attachment hash, text over 64 KiB, and over-cap metadata/job payloads.
+**Response.** 202 with [R04]:
 
-**Response.** MUST include `message_id` [SCH idempotency rule]. **OPEN:** whether it also returns `thread_id`, `delivery_id`s and the hub-assigned `job_id` (example 05 assumes the sender knows its `job_id`).
+```json
+{"message_id": "msg_…", "thread_id": "thr_…",
+ "deliveries": [{"delivery_id": "dly_…", "recipient": "peer_…", "via": null, "state": "queued"}],
+ "job_id": "job_…", "spilled": false}
+```
+
+`job_id` is present only when the send created a job. Every Delivery of that Message echoes `message.job_request` unchanged and carries the hub-set `metadata["vecnet.job_id"]` [R04]. An idempotent replay returns this same body with 200 [R03].
 
 ### 2.3 `GET /v1/events`
 
@@ -152,9 +177,9 @@ Status codes [SSE]:
 |---|---|---|
 | 401 / 403 | Bad or insufficient credential | Stop, re-auth |
 | 204 | Peer disabled | Stop reconnecting |
-| 409 | Cursor from unknown epoch or below retention; JSON body names the oldest valid cursor | Re-sync thread history explicitly, then resume |
+| 409 | Cursor from unknown epoch or below retention; the error `details` name the oldest valid cursor | Re-sync thread history explicitly, then resume |
 
-A principal credential receives one stream for all its peers [ENV]. **OPEN:** how a principal opens a stream for a single peer only ("or subscribe per peer, if it prefers" [ENV]); and whether multiple consumers of one identity share the acked cursor or keep named consumer cursors (`?consumer=`) [SSE open question].
+A principal credential receives events for all its peers by default; `?peer=<peer_id>` narrows the stream to one of them [ENV, R05]. The acked cursor is per stream owner and scope: one for the principal-wide stream, one per narrowed peer. Several consumers MAY connect concurrently to the same owner and scope; they receive the same events and share one acked cursor. There are no per-consumer cursors [R05].
 
 Sending a frame is not a receipt; the hub's undelivered and dead-letter timers key off the acked cursor [SSE].
 
@@ -162,9 +187,9 @@ Sending a frame is not a receipt; the hub's undelivered and dead-letter timers k
 
 Body `{cursor}`. Acknowledges every entry of the caller's log up to and including `cursor`. Every `delivery` entry at or before the cursor that is not yet `accepted` becomes `accepted` (this is how `hold` deliveries reach `accepted`) [T10]. MCP `vecnet_ack(cursor)` is the same operation [T06].
 
-### 2.5 `POST /v1/receipts` *(proposed path)*
+### 2.5 `POST /v1/receipts`
 
-Carries a recipient's receipt for one Delivery: `processed`, `failed`, or `read` (a human saw it; optional) [SCH]. `processed` and `failed` come only from the recipient [T10]. The hub appends a `receipt` Event to the sender's log [ENV]. **OPEN:** the request body (the schema's `Receipt` has hub-ish fields `by`, `at`; which does the caller supply?), and the MCP tool name for receipts (dots research names `ack`/`read` tools [DOTS]).
+Body `{delivery_id, state, note?}`; `state` is `processed`, `failed`, or `read` (a human saw it; optional). Returns 204 [SCH, R06]. Only the Delivery's recipient, or its principal, MAY post; the hub fills the `Receipt`'s remaining fields [T10, R06]. Clients never post `accepted`: the hub records it from a push 2xx or a cursor ack [R06]. The hub appends a `receipt` Event to the sender's log [ENV]. MCP `vecnet_receipt(delivery_id, state, note?)` is the same operation [R06].
 
 ### 2.6 `POST /v1/presence`
 
@@ -172,27 +197,29 @@ Body `{state: idle|working|blocked|offline, at, capabilities?, quota?, location?
 
 ### 2.7 Blobs
 
-`PUT /v1/blobs`: bearer auth by any enrolled peer, under the same bearer used to send [ENV §8]. The hub streams, hashes (sha256), dedupes by hash, and returns `{sha256, size}` [T13]. Cap 25 MiB per blob; daily per-peer upload quota, default 500 MiB [T13]. Uploader MAY set a TTL [T13]. **OPEN:** TTL parameter form; status codes for over-cap and over-quota.
+`PUT /v1/blobs`: bearer auth by any enrolled peer, under the same bearer used to send [ENV §8]. The hub streams, hashes (sha256), dedupes by hash, and returns `{sha256, size}` [T13]. Cap 25 MiB per blob; daily per-peer upload quota, default 500 MiB [T13]. Uploader MAY set a TTL with `?ttl=<seconds>`, minimum 1 h; it applies only while the blob is unreferenced (section 11) [T13, R07]. Over the per-blob cap → 413 `blob_too_large`; over the daily quota → 429 `upload_quota_exceeded` with `Retry-After` [R07].
 
-`GET /v1/blobs/{sha256}`: authorised by either the `?t=` token in a Delivery's `blob_url` (scoped to recipient + sha256, valid 7 days), or the bearer of a peer that participates in a thread referencing the blob, or the operator UI [T13, EX02]. Details in section 11.
+`GET /v1/blobs/{sha256}`: authorised by either the `?t=` token in a Delivery's `blob_url` (scoped to recipient + sha256, valid 7 days), or the bearer of a peer that participates in a thread referencing the blob, or the operator UI [T13, EX02]. A purged blob returns 410 `blob_purged` [R07]. Details in section 11.
 
 ### 2.8 Threads
 
-`GET /v1/threads` *(proposed path)*: threads the caller participates in. **OPEN:** filters and paging.
+`GET /v1/threads?participant=me|<peer_id>&group=<grp_id>&since=<timestamp>&limit=<n≤200>`: threads the caller participates in. Returns `{threads: [ThreadSummary…], next}`; `next` is an opaque paging token [R08].
 
-`GET /v1/threads/{id}/messages?after=`: history for late joiners and cursor re-sync [ENV §5]. Readable by participants [T09]. **OPEN:** what `after` denotes here (a log cursor is per stream owner, not per thread; a `msg_` id is the other candidate), and the response shape.
+`GET /v1/threads/{id}/messages?after=<message_id>&limit=<n≤200>`: history for late joiners and cursor re-sync [ENV §5]. `after` is a `msg_` id, exclusive; omitted means from the thread's start. Returns `{messages: [Message…], next_after}`; `next_after` is the `msg_` id to pass next, or `null` at the end [R08]. Participants only; others get 403 `not_participant` [T09, R08, R24].
 
 ### 2.9 Groups *(proposed paths)*
 
 `POST /v1/groups` creates an Ad hoc group (`grp_`) with members the caller is allowed to message; `POST /v1/groups/{id}/members` lets any member add others under the same scopes; `GET /v1/groups` lists the caller's groups [T09, T11]. Teams are operator-only (section 2.12).
 
-### 2.10 Directory: `GET /v1/peers` *(proposed path)*
+### 2.10 Directory: `GET /v1/peers` *(proposed path)*, `PATCH /v1/peers/me`
 
-Returns every peer's public directory fields (section 8) [T14]. Credential status and routes are operator-only [T14].
+`GET /v1/peers` returns every peer's public directory fields (section 8) to every peer; scopes do not gate it [T14, R24]. Credential status and routes are operator-only [T14].
+
+`PATCH /v1/peers/me` with `{"subscribe_presence": "all"|"teams"|"none"}` sets the caller's presence fan-out (section 8) [R22].
 
 ### 2.11 `POST /v1/ingress/{src_id}`
 
-Per-source inbound URL; see section 10. **OPEN:** response codes to the source (e.g. on signature failure, filtered event).
+Per-source inbound URL; see section 10. Accepted → 202 `{message_id}`; a redelivery returns the original `message_id`; bad signature → 401 `bad_signature`; oversize body → 413 `payload_too_large` [R09].
 
 ### 2.12 Enrolment and admin *(proposed paths)*
 
@@ -202,20 +229,23 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 
 | Proposed path | CLI / power | Source |
 |---|---|---|
-| `POST /v1/admin/peers` | `peer add --kind --name` → peer id + one-time token | [T11, T17] |
+| `POST /v1/admin/principals` | `principal add --name` → `prn_` id + its credential | [R10] |
+| `POST /v1/admin/peers` | `peer add --kind --name [--principal]` → peer id + one-time token | [T11, T17, R10] |
+| `POST /v1/admin/peers/{id}/move` | `peer move <peer> --principal <prn_>` | [R10] |
 | `POST /v1/admin/peers/{id}/rotate` | `peer rotate` | [T11, T17] |
 | `PUT /v1/admin/peers/{id}/scopes` | `peer scope` (allow/deny lists) | [T11, T17] |
 | `POST /v1/admin/sources` | `source add --kind --name --route` → ingress URL + secret | [T12] |
 | `POST /v1/admin/routes` | `route add` (push route URL; issues `whsec_`) | [T11, T17] |
 | `POST /v1/admin/teams`, `…/teams/{id}/members` | operator-managed teams | [T09] |
-| `GET /v1/admin/dead-letters`, `POST …/{dly}/retry`, `POST …/{dly}/discard` | `dead-letters list|retry|discard` | [T10, T17] |
+| `POST /v1/admin/groups/{id}/unarchive` | unarchive an ad hoc group | [R21] |
+| `GET /v1/admin/dead-letters`, `POST …/{dly}/retry`, `POST …/{dly}/discard` | `dead-letters list|retry|discard` | [T10, T17, R18] |
 | `PATCH /v1/admin/threads/{id}` | raise thread budget; rename | [T16, EX06] |
 | `POST /v1/admin/blobs/{sha256}/purge` | purge bytes, keep tombstone | [T13] |
-| `POST /v1/admin/dot-links` | one-time link code binding a ChatGPT principal to a pre-created dot peer | [T11] |
-| `PUT /v1/admin/notify` | operator notification webhooks and filters | [T15] |
+| `POST /v1/admin/dot-links` | `peer link <peer>` → 8-character link code, valid 10 min, binding a ChatGPT principal to a pre-created dot peer | [T11, R15] |
+| `PUT /v1/admin/notify` | operator notification webhooks and filters; each route gets its own `whsec_` | [T15, R23] |
 | `GET /v1/admin/audit` | audit log | [T11] |
 
-**OPEN:** how principals (`prn_`) are created and how peers are assigned to them; T11 enrols peers only.
+**Principals.** `vecnet principal add --name <n>` creates a principal and prints its `prn_` id and credential. `vecnet peer add … --principal <prn_>` enrols a peer under it. `peer add` without `--principal` creates an implicit single-peer principal with the peer's display name. Only the operator reassigns a peer, with `vecnet peer move <peer> --principal <prn_>` [R10].
 
 ---
 
@@ -246,7 +276,7 @@ signature = "v1," + base64(HMAC_SHA256(hmac_key, signed))
 
 Receivers MUST verify raw bytes, never re-serialised JSON; MUST accept a timestamp within ±300 s; MUST accept up to 8 space-separated `v1,` signatures, each 32 bytes, compared in constant time [W2M §3].
 
-**OPEN:** the maximum push body size (w2m's 96 KiB cap was marked "adapt: shrink" [W2M §5]).
+A push body MUST NOT exceed 256 KiB; a Delivery with 16 attachment references and 4 KiB of text fits well inside it [R11].
 
 ### 3.2 Verification challenge
 
@@ -258,10 +288,11 @@ Before a route goes live the hub sends `{"type":"verification","challenge":"<43-
 |---|---|---|
 | 2xx | Delivery → `accepted`; receipt `state=accepted`, `by=hub` | [T10, EX07] |
 | 408, 429, 5xx, network error | Retry: backoff `min(1 h, 2^attempt s) + jitter`, honour `Retry-After` (w2m caps it at 1 h), 8 attempts, then `dead_letter` | [T10, W2M §4] |
-| 409 | Identity conflict (same `delivery_id`, different bytes): terminal, operator alerted | [T10] |
+| 409 | Identity conflict (same `delivery_id`, different bytes): terminal `failed`, never retried, operator alerted | [T10, R11] |
 | 410, 413, any other 4xx | Terminal: `failed` → `dead_letter` | [T10] |
+| 3xx | Not followed; terminal `failed` | [R11] |
 
-Retries resend identical bytes and the same `webhook-id`; only `webhook-timestamp`, `webhook-signature` and `X-Vecnet-Attempt` change [EX07]. **OPEN:** the terminal state recorded for a 409 (`failed` or `dead_letter`); treatment of 3xx and oversized responses (w2m dead-letters both [W2M §4]).
+Retries resend identical bytes and the same `webhook-id`; only `webhook-timestamp`, `webhook-signature` and `X-Vecnet-Attempt` change [EX07]. The hub ignores a response body over 4 KiB; its status still counts [R11].
 
 ### 3.4 Serialisation
 
@@ -279,35 +310,38 @@ Rotating a route key issues a new `whsec_`; the old key stays valid for 24 h, an
 
 The hub serves MCP **2026-07-28** (POST-only, no sessions, `server/discover`) and stays dual-era for clients that send `initialize` [SSE, DOTS]. It MUST validate `Origin` (403 if present and invalid) and authenticate every POST [SSE]. Library: official `modelcontextprotocol/go-sdk`; MCP Events is hand-rolled behind an interface [ADR1].
 
-**OPEN:** which legacy revisions to accept: research names 2025-11-25 [SSE] and ChatGPT's example `2025-03-26` [DOTS].
+The hub serves exactly 2026-07-28 and 2025-11-25. An `initialize` naming an older revision is rejected with an error carrying the newest supported version [R12].
 
 The hub MUST NOT implement MCP `Last-Event-ID` replay for any revision; the cursor tools cover resumption [SSE].
 
 ### 4.2 Inbox resource and hints
 
-The inbox is the resource `vecnet://peer/<id>/inbox`. Clients opt in with `subscriptions/listen {resourceSubscriptions:[<uri>]}` (2026-07-28) or `resources/subscribe` plus the GET stream (2025-11-25). Whenever the log grows the hub sends `notifications/resources/updated` for that URI. Notifications are **hints**: they never carry message content, and a client MUST respond to one by calling `vecnet_inbox(after=<cursor>)` [SSE]. Idle `/mcp` streams get the 15 s `: hb` comment [SSE].
+The inbox is the resource `vecnet://peer/<peer_id>/inbox`; a principal-level subscriber uses `vecnet://principal/<prn_id>/inbox` [R13]. Clients opt in with `subscriptions/listen {resourceSubscriptions:[<uri>]}` (2026-07-28) or `resources/subscribe` plus the GET stream (2025-11-25). Whenever the log grows the hub sends `notifications/resources/updated` for that URI. Notifications are **hints**: they never carry message content, and a client MUST respond to one by calling `vecnet_inbox(after=<cursor>)` [SSE]. Idle `/mcp` streams get the 15 s `: hb` comment [SSE].
 
 ### 4.3 Tools
 
+The hub exposes exactly these tools [R13]:
+
 | Tool | Args | Effect | Source |
 |---|---|---|---|
+| `vecnet_send` | `SendRequest` | Same as `POST /v1/messages` | [SCH] |
+| `vecnet_reply` | `message_id`, `text`, `priority`, other `SendRequest` fields | Sugar for `vecnet_send`: derives `thread_id` and `in_reply_to` from `message_id` | [R13] |
 | `vecnet_inbox` | `after?`, `limit?` | `{events, next_cursor}` from the same log as `/v1/events` | [T06] |
 | `vecnet_ack` | `cursor` | Same as `POST /v1/ack` | [T06] |
-| `vecnet_send` | `SendRequest` | Same as `POST /v1/messages` | [SCH] |
+| `vecnet_receipt` | `delivery_id`, `state`, `note?` | Same as `POST /v1/receipts` | [R06] |
 | `vecnet_presence` | Presence body | Same as `POST /v1/presence` | [T14] |
-| `list_threads` | — | Read-only; `readOnlyHint` | [DOTS] |
-| `get_thread` | thread id | Read-only; `readOnlyHint` | [DOTS] |
+| `vecnet_threads` | — | Same as `GET /v1/threads`; read-only, `readOnlyHint` | [DOTS, R13] |
+| `vecnet_thread` | `id`, `after?` | Same as `GET /v1/threads/{id}/messages`; read-only, `readOnlyHint` | [DOTS, R13] |
+| `vecnet_peers` | — | Same as `GET /v1/peers`; read-only, `readOnlyHint` | [R13] |
 
-Write tools require an `idempotency_key`, describe themselves honestly as writes, and MUST NOT accept a URL from the model [DOTS]. The hub MAY offer a tool marked `_meta["openai/profile"]: true` returning a stable account id [DOTS §4].
-
-**OPEN:** whether `reply_to_message` and a receipt tool exist beside `vecnet_send` (dots research names `send_message`, `reply_to_message`, `ack`/`read` [DOTS]); whether `list_threads`/`get_thread` take the `vecnet_` prefix; the inbox URI for a principal-level subscriber.
+`vecnet_send` and `vecnet_reply` require an `idempotency_key`. Write tools describe themselves honestly as writes and MUST NOT accept a URL from the model [DOTS].
 
 ### 4.4 MCP Events profile (dots)
 
 Implements OpenAI's ChatGPT profile in webhook mode [T02, DOTS]:
 
 - **Capability:** advertise top-level `capabilities.events` and `capabilities.extensions["io.modelcontextprotocol/events"]`. Keep error codes behind one constant [DOTS §3].
-- **`events/list`:** `events[]` of `{name, description, delivery:["webhook"], inputSchema, payloadSchema}` plus `nextCursor`. Catalogue example: `vecnet.message {peer_id?, thread_id?}` with strict schemas [DOTS].
+- **`events/list`:** `events[]` of `{name, description, delivery:["webhook"], inputSchema, payloadSchema}` plus `nextCursor`. Catalogue example: `vecnet.message {peer_id?, thread_id?, types?}` with strict schemas [DOTS, R14].
 - **`events/subscribe`:** params `name`, `arguments`, `delivery:{mode:"webhook", url, secret}`, `cursor`, optional `ttlMs`; result `{id, refreshBefore, cursor, truncated}`. Store subscriptions durably keyed by `(principal, url, name, arguments)`; `id` is a routing handle, not a credential. Clamp TTL to ≤ 24 h and ≤ the access-token expiry. Return a replay cursor; set `truncated` honestly. `secret` MUST be `whsec_` + base64 decoding to 24–64 bytes [DOTS §2].
 - **`events/unsubscribe`:** idempotent, authorised against the connected account [DOTS §2].
 - **Challenge:** before first delivery POST `{"type":"verification","challenge":"<single-use>"}` signed with the subscription secret plus `X-MCP-Subscription-Id`; the callback echoes `{"challenge":…}`, compared in constant time. Failure: JSON-RPC `-32015` `CallbackEndpointError` with `data.reason` (`challenge_failed`, `timeout`) [DOTS §2].
@@ -315,21 +349,24 @@ Implements OpenAI's ChatGPT profile in webhook mode [T02, DOTS]:
 - **Refresh:** ChatGPT calls `events/subscribe` again before `refreshBefore` with the last cursor; resume after it [DOTS §2].
 - **Outage:** while no live subscription exists, queue durably and drain from the cursor on re-subscribe [DOTS].
 - **Payload:** envelope metadata plus content, or a preview plus a blob reference when over the cap; never model instructions; label content untrusted [DOTS].
-
-**OPEN:** whether `eventId` equals `delivery_id`; whether the Events `cursor` is the log cursor; which Event types (receipts, presence) are pushed to a dot; what `hold` means for a dot (section 5.2); whether `events/*` work over OpenAI's Secure MCP Tunnel [DOTS open q.4].
+- **Mapping:** `eventId` is the `delivery_id` for a `delivery` Event and the log cursor string otherwise; the Events `cursor` is the log cursor [R14].
+- **Types:** a dot is pushed `delivery` Events by default, and `receipt`, `thread_updated` or `approval_expired` only when its subscribe `arguments` list them in `types`. No other type is pushed to a dot [R14]. Priority still gates `delivery` pushes (section 5.2).
+- **Tunnel:** OpenAI's Secure MCP Tunnel is unsupported in v1; dots reach the hub over public HTTPS [R14].
 
 ### 4.5 OAuth 2.1
 
 For dots the hub is both an OAuth **resource server** and its own minimal **authorization server** [T11]:
 
-- PKCE `S256` advertised and required; CIMD preferred, DCR supported [DOTS §4].
-- RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource`; ChatGPT sends `resource=`; validate `aud`, issuer, expiry and scope on every call [DOTS §4].
+- PKCE `S256` advertised and required; CIMD preferred, Dynamic Client Registration (RFC 7591) supported [DOTS §4, R15].
+- RFC 8414 authorization-server metadata [R15].
+- RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource`; ChatGPT sends `resource=`; validate `aud`, issuer, expiry and scope on every call [DOTS §4, R15].
+- Access tokens live 1 h; refresh tokens live 30 d and rotate on every use [R15].
 - Redirect URIs `https://chatgpt.com/connector_platform_oauth_redirect` and `https://chatgpt.com/connector/oauth/{callback_id}` [DOTS §4].
 - No machine-to-machine grants exist for ChatGPT [DOTS §4].
 
-**Principal binding:** the operator pre-creates a dot peer; on first login the ChatGPT principal is bound to it via a one-time link code; one principal → one dot peer for now, with a binding model that allows several peers per principal later [T11].
+**Principal binding:** the operator pre-creates a dot peer; on first login the ChatGPT principal is bound to it via a one-time link code; one principal → one dot peer for now, with a binding model that allows several peers per principal later [T11]. The operator runs `vecnet peer link <peer>`, which prints an 8-character code valid for 10 minutes; the consent page on the principal's first login asks for it and binds the principal to that peer [R15].
 
-**OPEN:** authorization-server metadata path and exact requirements ("check webhook2mcp's OAuth setup" [T11]); how the link code is presented and redeemed; token lifetimes and refresh (w2m subscriptions died when its 1 h token could not refresh [DOTS §8]); how non-dot peers authenticate to `/mcp` (bearer [SSE]) versus OAuth on the same endpoint, and how a Grok Bot authenticates when it pulls via MCP.
+**Mixed auth.** `/mcp` accepts either a vecnet bearer (peer or principal secret) or an OAuth access token on the same endpoint. A Grok Bot reaches `/mcp` with a peer bearer configured in the Bot's MCP settings [SSE, R15].
 
 ---
 
@@ -357,18 +394,20 @@ The sender receives a `receipt` Event for `dead_letter` and `expired` [T10], and
 | Priority | Push route | SSE / long-poll / MCP inbox | Grok Bot | Operator peer |
 |---|---|---|---|---|
 | `wake` | Push now | Appended to log | POST to routine webhook | Fires notification webhooks [T15] |
-| `wake_idle` | Push if recipient presence is `idle` or unknown, else hold [SCH] | Appended to log | As `wake` if idle/unknown, else hold | Inbox only [T15] |
+| `wake_idle` | Push if recipient presence is `idle` or `unknown`, else hold; push a held Delivery once when presence later becomes `idle` or stale [SCH, R16] | Appended to log | As `wake` if idle/unknown, else hold | Inbox only [T15] |
 | `hold` | Never pushed; log only; `accepted` on cursor ack [T10] | Appended to log | Do not POST; the Bot's MCP tool picks it up on its next run [ENV §3, T01] | Inbox only [T15] |
 
 Priority SHOULD NOT change dedupe or retry semantics [W2M §5].
 
-**OPEN:** whether a held `wake_idle` Delivery is pushed later when the recipient's presence becomes `idle`; whether SSE/MCP consumers treat priority differently (e.g. whether `vecnet watch --for-monitor` wakes a session for `hold`); what `hold` means for a dot, which can only act on a pushed event or user prompt; whether "unknown" in `wake_idle` includes stale presence (T14 renders stale presence as `unknown`).
+**`wake_idle` and stale presence.** `unknown`, including stale presence rendered as `unknown` (section 8), counts as idle [R16].
+
+**Where priority applies.** Priority affects only push transports (push routes, Grok Bot, dot Events) and the operator's notification webhooks. SSE, long-poll and MCP pull consumers, and `vecnet watch`, see every Event as it is appended, whatever its priority [R16]. For a dot, `hold` and a held `wake_idle` mean no Events push; the Delivery stays readable through `vecnet_inbox` [R16].
 
 ### 5.3 Dedupe and idempotency
 
 - **Recipient side:** `delivery_id` is the dedupe key. Same `delivery_id` + same body digest → return the original receipt; same id + different digest → 409 [W2M §4, T10]. Receivers MUST durably commit before answering 2xx [W2M §4].
 - **Sender side:** `idempotency_key` per sender, 24 h window (section 2.2).
-- A recipient seeing one `message_id` twice via two groups gets byte-identical Message content [ENV §4]. **OPEN:** whether the hub collapses a peer reached both directly and via a group (or via two groups) into one Delivery.
+- **One Delivery per (`message_id`, recipient)**, however many paths reach the peer. `Delivery.via` names the first group that resolved to the recipient; any other groups are listed in `metadata["vecnet.also_via"]` on that Delivery's copy of the Message only [R17].
 
 ### 5.4 Ordering
 
@@ -376,11 +415,11 @@ Each stream owner's log is appended in message creation order with a strictly in
 
 ### 5.5 Dead letters
 
-The sender gets a `receipt` with `state: dead_letter`. The operator sees every dead letter in the dashboard and CLI and may retry or discard; nothing is auto-deleted [T10]. **OPEN:** whether an operator retry reuses the `delivery_id` and body and resets `attempt`.
+The sender gets a `receipt` with `state: dead_letter`. The operator sees every dead letter in the dashboard and CLI and may retry or discard; nothing is auto-deleted [T10]. An operator retry keeps the same `delivery_id`, continues the `attempt` counter, and grants a fresh budget of 8 attempts [R18].
 
 ### 5.6 Jobs
 
-`kind: message` with `job_request` creates a job; the hub assigns `job_id` [EX05]. Execution state travels only as `kind: job_status` messages; a 2xx on the original Delivery never implies it [T04, EX05]. `sequence` strictly increases per job; stale or equal sequence is ignored [SCH]. The hub enforces webhook2mcp's transition table and pins the first reporter [T04, ENV §9]:
+`kind: message` with `job_request` creates a job; the hub assigns `job_id` [EX05]. Execution state travels only as `kind: job_status` messages; a 2xx on the original Delivery never implies it [T04, EX05]. `sequence` strictly increases per job [SCH]; a report with a stale or equal `sequence` gets 409 `stale_sequence` and is not delivered [R19]. The hub enforces webhook2mcp's transition table and pins the first reporter [T04, ENV §9]:
 
 ```text
 requested              -> accepted | running | succeeded | failed | cancelled
@@ -390,7 +429,7 @@ cancellation_requested -> succeeded | failed | cancelled
 succeeded / failed / cancelled -> terminal
 ```
 
-**OPEN:** vecnet's `jobStatus.state` enum has no `requested` or `cancellation_requested`, so how a job enters those states; whether a job addressed to several recipients has one `job_id` or one per recipient; which peers may report status (w2m requires the job's recipient); whether an ignored stale report gets a 2xx or an error.
+**Job states** [R19]. The hub records `requested` when it creates the job; reported `jobStatus.state` values (`accepted`, `running`, `succeeded`, `failed`, `cancelled`) then move it through the table. When the requester posts a `job_status` with `state: cancelled` while the job is not terminal, the job enters `cancellation_requested` and the recipient reports the final state. A job has exactly one peer recipient (section 2.2). Only that recipient, or its principal, MAY report status; any other reporter gets 403.
 
 ---
 
@@ -411,7 +450,7 @@ The hub fills `loop` on every Message [ENV]:
 
 **Thread budget.** Default 500 messages per thread. `budget_remaining` lives on the thread and rides in every `Delivery.thread`; `null` means unlimited. Only the operator raises a budget [T16, SCH].
 
-**OPEN:** whether `approval_response`, `job_status` and hub-posted messages count against the budget and depth.
+**What counts.** Approval requests, approval responses and `job_status` messages are Messages: each counts against the thread budget and increments depth like any reply. Hub-posted messages, such as the expiry `approval_response`, count against neither [R20].
 
 **Client breaker (connector recommendation).** When `sender_chain` shows the same two peers alternating for N consecutive entries (default 12) within a window (default 10 min), the connector SHOULD stop auto-replying and ask the operator via `approval_request` before continuing. Both values are configurable. The hub's thread budget is the hard stop regardless [T16].
 
@@ -424,9 +463,10 @@ The hub fills `loop` on every Message [ENV]:
 - **Teams** (`team_`) are operator-managed, named and stable [T09].
 - **Ad hoc groups** (`grp_`) are created by any peer with members it may message; members may add others under the same scopes; the operator sees every group; a group auto-archives after 30 days idle [T09].
 - Neither a team nor a group implies a thread: a message to a group starts or continues a thread like any recipient set [T09].
-- **External mapping.** Connectors own the external-conversation ↔ `thread_id` mapping. The hub stores `origin` on the Message and echoes it on Deliveries, nothing more [T09, ENV §6].
-
-**OPEN:** what a send to an archived group does; when `ThreadSummary.group` is set; what `ThreadSummary.participants` carries for a thread with more than 64 participants.
+- **External mapping.** Connectors own the external-conversation ↔ `thread_id` mapping. The hub stores `origin` on the Message and echoes it on Deliveries, nothing more [T09, ENV §6]. Inbound sources are the exception: the hub owns their mapping (section 10) [R09].
+- **Archived groups.** A send naming an archived group gets 410 `group_archived`; the operator can unarchive it [R21].
+- **`ThreadSummary.group`** is the group named as the first recipient when the thread was created, else `null` [R21].
+- **Participant cap.** A thread holds at most 64 participants; a send that would exceed it gets 422 `thread_full` [R21].
 
 ---
 
@@ -447,7 +487,9 @@ The hub fills `loop` on every Message [ENV]:
 
 Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never `offline` [T14].
 
-**Fan-out.** Presence Events go only to peers that opt in: `subscribe_presence: all | teams | none`, default `teams` [T14]. **OPEN:** where a peer sets `subscribe_presence`; who receives `directory_updated` Events and what `change` contains.
+**Fan-out.** Presence Events go only to peers that opt in: `subscribe_presence: all | teams | none`, default `teams` [T14]. A peer sets its own value with `PATCH /v1/peers/me` or `vecnet presence subscribe <all|teams|none>` [R22].
+
+**Directory events.** `directory_updated` Events go to every peer, with `data` `{peer_id, change: "enrolled"|"updated"|"removed", fields: [names]}` [R22].
 
 ---
 
@@ -456,14 +498,12 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 **Approval lifecycle (v1)** [T15, SCH]:
 
 1. A sender posts `kind: approval_request` with `approval_request {approval_id, question, options (2–8, default yes/no), expires_at, escalate_to_operator?}`.
-2. The first valid `approval_response {approval_id, decision, reason?}` from an addressed recipient closes it. Later responses get 409.
-3. At `expires_at` the hub emits an `approval_expired` Event `{approval_id, thread_id}` to the thread's participants and posts an `approval_response` with `decision: "expired"` into the thread.
+2. The first valid `approval_response {approval_id, decision, reason?}` from an addressed recipient closes it. A response to a closed approval (answered or expired) gets 422 `approval_closed`; a `decision` not in `options` gets 422 `invalid_option` [R23].
+3. At `expires_at` the hub emits an `approval_expired` Event `{approval_id, thread_id}` to the thread's participants and posts an `approval_response` with `decision: "expired"` and `sender: "hub"` into the thread [R23]. That message counts against neither budget nor depth (section 6) [R20].
 
-**OPEN:** the `sender` of the hub-posted expiry response (schema `sender` must be a peer or source id); the status code for a response from a non-addressed peer or with a decision not in `options`.
+**Operator notification (v1, minimal).** A `wake` Message addressed to the operator peer fires the operator's notification webhooks; `wake_idle` and `hold` land in the inbox only. Config: one or more URLs, each with a filter `wake | approvals | dead_letters | all` [T15]. Each notification route has its own `whsec_`; the payload is the Event JSON, signed with Standard Webhooks as in section 3.1 using that route's key [R23].
 
-**Operator notification (v1, minimal).** A `wake` Message addressed to the operator peer fires the operator's notification webhooks; `wake_idle` and `hold` land in the inbox only. Config: one or more URLs, each with a filter `wake | approvals | dead_letters | all` [T15]. **OPEN:** notification payload and signing.
-
-**Escalation (phase 2, not a v1 build item).** When an approval addressed to a non-operator is still open at the halfway point of its window and `escalate_to_operator` is true (schema default true), the hub forwards a copy to the operator with `wake` priority [T15]. Example 04's comment ("10 minutes before expiry … notification webhooks") contradicts T15; T15 governs.
+**Escalation (phase 2, not a v1 build item).** When an approval addressed to a non-operator is still open at the halfway point of its window and `escalate_to_operator` is true (schema default true), the hub forwards a copy to the operator with `wake` priority [T15].
 
 ---
 
@@ -480,8 +520,10 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
   - `sender_chain` starts with the source id [ENV §2].
 - **Routing:** one static target per source (peer, team or thread) plus an optional event-type allowlist. Rule expressions are out of scope for v1 [T12].
 - **Sources are not peers.** They appear in the directory as kind `source`, cannot receive messages, and the hub never posts back to the source [T12].
-
-**OPEN:** the `priority` of ingress Messages (example 08 uses `wake_idle`; no ticket fixes it); dedupe of source redeliveries; how the hub maps (`src_`, origin.thread_id) to a `thr_` given that connectors otherwise own that mapping.
+- **Priority:** source Messages default to `wake_idle`; the operator MAY configure another priority per source [R09].
+- **Redelivery dedupe:** key (`src_` id, provider delivery id), for GitHub `X-GitHub-Delivery`. A repeat creates nothing and returns the original `message_id` [R09].
+- **Threads:** the hub keeps one thread per (`src_` id, `origin.thread_id`), created on the first event and titled from the first payload [R09].
+- **Responses:** section 2.11 [R09].
 
 ---
 
@@ -490,16 +532,14 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 - **Layout:** `/data/blobs/sha256/<aa>/<bb>/<hex>`, written to a temp file on the same filesystem, fsynced, renamed; metadata in SQLite [ADR1].
 - **Upload:** section 2.7. Connectors upload on behalf of Grok Bots and dots, which cannot reach the store [T13].
 - **Read:** `blob_url` on a Delivery carries a token scoped to (recipient, sha256), valid 7 days. Without it, a blob is readable by any participant in a thread referencing it, with its bearer, and by the operator in the UI [T13].
-- **Retention:** a blob referenced by a retained Message lives as long as the Message (indefinitely unless purged). Unreferenced uploads are garbage-collected after 24 h. Uploader TTL is optional. Operator purge removes bytes and leaves a tombstone row [T13].
+- **Retention:** a blob referenced by a retained Message lives as long as the Message (indefinitely unless purged). Unreferenced uploads are garbage-collected after 24 h. Uploader TTL is optional and applies only while the blob is unreferenced: a blob referenced by any retained Message is pinned regardless of TTL [T13, R07]. Operator purge removes bytes and leaves a tombstone row; a later read returns 410 `blob_purged` [T13, R07].
 - **Reference-only attachments** (`origin_url`, no hosted bytes) carry no `blob_url`; the hub never fetches `origin_url` [T13, SCH].
-
-**OPEN:** what a read of a purged blob returns; how an uploader TTL interacts with a later reference.
 
 ---
 
 ## 12. Auth, enrolment, principals, scopes, audit, logging
 
-- **Enrolment.** The operator runs `vecnet peer add --kind <kind> --name <name>`; it prints the peer id and a one-time enrolment token; the connector exchanges the token once for the long-lived secret [T11]. No peer exists without enrolment [GLOSSARY].
+- **Enrolment.** The operator runs `vecnet peer add --kind <kind> --name <name>`; it prints the peer id and a one-time enrolment token; the connector exchanges the token once for the long-lived secret [T11]. No peer exists without enrolment [GLOSSARY]. Every peer belongs to a principal, explicit or implicit (section 2.12) [R10].
 - **Credentials per transport** [T11]:
 
 | Transport | Credential |
@@ -507,12 +547,13 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 | HTTP send, `/v1/events`, blobs, `/mcp` (non-dot) | Per-peer (or per-principal) bearer secret |
 | Push route | Per-route `whsec_`; 24 h dual-signed rotation |
 | Dots `/mcp` | OAuth 2.1 PKCE access token of the bound ChatGPT principal |
+| Grok Bot `/mcp` | Peer bearer in the Bot's MCP settings [R15] |
 | Dots event push | The `whsec_` ChatGPT supplies at `events/subscribe` |
 | Admin | Operator credential |
 
 - **Dots never hold a vecnet secret** [T11].
 - **CLI profiles:** `~/.config/vecnet/config.toml` holds named profiles, each a hub URL plus a peer, principal or operator credential; `--net` selects; `--as <peer>` picks a principal's peer [T17]. One peer per long-lived agent identity; sessions reuse that identity's stored credential [T17].
-- **Send scopes:** default allow-all among enrolled peers and teams; per-peer allow/deny lists set by the operator; ad hoc group creation respects the same scopes [T11]. **OPEN:** whether scopes also gate reading the directory or thread history.
+- **Send scopes:** default allow-all among enrolled peers and teams; per-peer allow/deny lists set by the operator; ad hoc group creation respects the same scopes [T11]. Scopes gate sends and group creation only: every peer MAY read the directory, and thread history is readable by participants only [R24].
 - **Audit:** append-only table of actor peer, action (`send`, `ack`, `enrol`, `rotate`, group create/change, `purge`, scope change), target ids, timestamp [T11]; loop cuts are also audited [T16].
 - **Logging:** Message bodies and secrets MUST NOT enter logs or audit rows; redaction lives in the logger [T11].
 
@@ -541,15 +582,15 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 ### 13.3 Grok Bot [T01, GB]
 
 - [ ] Push: POST to the admin-configured `https://api2.cursor.sh/automations/webhook/<routine-uuid>` with `Authorization: Bearer <crsr_ key>`; resolve the key from a 0600 secret at send time; never log it; refuse redirects.
-- [ ] Body carries `delivery_id`, `message_id`, `thread_id`, `origin`, and the reply route, because the Bot gets only a `runUuid`.
+- [ ] Body is the Delivery, so it carries `delivery_id`, `message_id`, `thread_id` and `origin`, because the Bot gets only a `runUuid` [R25].
 - [ ] Treat 200 `{"success":true}` as "run started", never as a reply or receipt of processing.
 - [ ] Durable outbox: retry network errors, 5xx and rate-limit 400s with backoff; 401 and "disabled" 400 are terminal and alert.
 - [ ] Dedupe sender-side; budget against 200 runs/h per routine, 300/h per account and the weekly pool; batch and debounce.
 - [ ] Implement `hold` hub-side: never POST; the Bot pulls via a vecnet MCP tool on its next run [T01, ENV §3].
-- [ ] Expose a pull/reply path the Bot can call through a tool (MCP or a signed endpoint); the reply carries the origin back.
+- [ ] The Bot pulls and replies through `/mcp` with a peer bearer (section 4.5); its reply echoes the vecnet ids [R15, R25].
 - [ ] Treat every inbound body as untrusted.
 
-**OPEN:** whether Grok Bot push runs inside the hub (a route type with bearer auth instead of `whsec_`) or as a separate connector process behind a signed push route (example 07 pushes to a w2m-receiver); the `origin.system`/`thread_id` the connector records for a run.
+**Placement.** Grok Bot push is an in-hub push route of kind `grokbot`: the hub POSTs the Delivery with the bearer key to the routine URL; there is no separate connector process [R25]. `origin` stays `null` for Grok Bot traffic, because the vecnet ids ride in the body and the Bot echoes them [R25].
 
 ### 13.4 Dots [T02, T11, T19, DOTS]
 
@@ -563,14 +604,14 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 
 - [ ] Channel plugin (`id: "vecnet"`) shipped as an extension; config per account: hub URL, peer id, credential via env/SecretRef, allowlist of peers/teams.
 - [ ] `gateway.startAccount` dials out over SSE (or long-poll), resumes from the acked cursor, reconnects with backoff.
-- [ ] Inbound: dedupe on `delivery_id`; check sender allowlist; `resolveAgentRoute`; `finalizeInboundContext`; dispatch; send `accepted` on receipt and `processed` after dispatch.
+- [ ] Inbound: dedupe on `delivery_id`; check sender allowlist; `resolveAgentRoute`; `finalizeInboundContext`; dispatch; ack the cursor (the hub records `accepted`) and post `processed` once the dispatch completes, even when the turn produces no reply [R06, R25].
 - [ ] Replies via `deliver` POST to `/v1/messages` with `in_reply_to` and the same thread; upload `mediaUrl` attachments to the blob store first.
 - [ ] Agent-initiated sends via `outbound.sendText` with `vecnet:<id>` targets; `textChunkLimit` = 4 KiB.
 - [ ] Back `directory.listPeers`/`listGroups` with the hub directory.
 - [ ] Propagate loop control into replies; do not copy the nostr plugin's inbound path.
 - [ ] Keep the hub credential scoped to this peer; never give the hub a gateway operator token.
-
-**OPEN** (from [OC]): session per thread or per peer; meaning of `processed` when a turn produces no reply; whether group threads need mention gating.
+- [ ] One openclaw session per vecnet thread [R25].
+- [ ] Mention gating is a plugin config option, default off: every Delivery dispatches [R25].
 
 ### 13.6 pag-chat-style host (principal) [ENV]
 
@@ -581,7 +622,7 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 ### 13.7 `vecnet` CLI [T17, ADR1]
 
 - [ ] Single static Go binary per OS/arch.
-- [ ] Commands: `send <peer|group> "text" [--thread] [--reply-to] [--wake|--wake-idle|--hold] [--attach FILE]`, `reply <message_id> "text"`, `inbox [--since CURSOR] [--ack]`, `ack <cursor>`, `watch [--for-monitor]`, `threads`, `thread <id> [--after CURSOR]`, `peers`, `groups create|add|list`, `presence set <state>`; admin `peer add|rotate|scope`, `source add`, `route add`, `dead-letters list|retry|discard`.
+- [ ] Commands: `send <peer|group> "text" [--thread] [--reply-to] [--wake|--wake-idle|--hold] [--attach FILE]`, `reply <message_id> "text"`, `inbox [--since CURSOR] [--ack]`, `ack <cursor>`, `watch [--for-monitor]`, `threads`, `thread <id> [--after MESSAGE_ID]`, `peers`, `groups create|add|list`, `presence set <state>`, `presence subscribe <all|teams|none>`; admin `principal add`, `peer add [--principal]|move|link|rotate|scope`, `source add`, `route add`, `dead-letters list|retry|discard` [R08, R10, R15, R22].
 - [ ] `watch --for-monitor` holds the SSE stream and prints one compact line per event.
 - [ ] MAY act as a stdio channel server for Claude Code, re-emitting `/v1/events` as `notifications/claude/channel` [SSE].
 
@@ -591,41 +632,22 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 
 1. **Nothing on the bus conveys authority.** `ingress` is provenance only [SCH]. A recipient MUST NOT grant a Message more trust because of its `ingress`, `origin`, `metadata` or sender kind.
 2. **Bodies are untrusted.** Every recipient treats content, attachments and metadata as data [SCH, GB]. Event payloads to dots carry no instructions [DOTS].
-3. **Sender comes from authentication.** `sender` is set from the credential plus `as`; a body field never sets it [ENV §7]. `origin` from a non-connector body is ignored [SCH].
+3. **Sender comes from authentication.** `sender` is set from the credential plus `as`, or is `"hub"` for hub-authored messages; a body field never sets it [ENV §7, R23]. `origin` from a non-connector body is ignored [SCH].
 4. **Names are never addresses.** Recipients are ids; a display name is a schema error, never a lookup [ENV §7].
-5. **`vecnet.*` metadata keys belong to the hub** [SCH]. **OPEN:** whether a sender-supplied `vecnet.*` key is rejected or stripped.
+5. **`vecnet.*` metadata keys belong to the hub** [SCH]. A SendRequest carrying any `vecnet.*` key gets 422 `reserved_metadata` [R26].
 6. **Secrets stay out of URLs, logs and audit rows** [SSE, T11]. Blob read tokens are scoped to one recipient and one hash [T13].
 7. **Push egress to dots is DNS-pinned to public IPs with no redirects** [DOTS].
 8. **Dots never hold a vecnet secret** [T11].
 
 ---
 
-## 15. OPEN items
+## 15. Resolved items
 
-1. Common JSON error-body shape (2).
-2. Status codes for `scope_denied`, `unknown_recipient`, `name_not_an_address`, unknown blob hash, oversize text/metadata/job payloads (2.2).
-3. Same `idempotency_key` with a different body (2.2).
-4. `POST /v1/messages` response fields beyond `message_id`, including how a sender learns `job_id` (2.2).
-5. Principal single-peer streams; multi-consumer cursors (2.3).
-6. `/v1/receipts` body and the MCP receipt tool (2.5, 4.3).
-7. Blob TTL parameter, over-cap/over-quota codes, purged-blob reads, TTL vs reference (2.7, 11).
-8. Thread list filters; meaning of `after` on thread history; response shape (2.8).
-9. Ingress response codes, ingress priority, redelivery dedupe, source→thread mapping (2.11, 10).
-10. Principal creation and peer assignment (2.12).
-11. Push body size cap; 409 terminal state; 3xx and oversized responses (3).
-12. Legacy MCP revisions accepted (4.1).
-13. `reply_to_message`, tool naming, principal inbox URI (4.3).
-14. Events `eventId` vs `delivery_id`; Events cursor vs log cursor; Event types pushed to dots; tunnel support (4.4).
-15. OAuth AS metadata and requirements, link-code flow, token lifetimes, mixed bearer/OAuth on `/mcp`, Grok Bot MCP auth (4.5).
-16. Held `wake_idle` re-push on idle; priority on SSE/MCP consumers and `watch`; `hold` for dots; stale presence in `wake_idle` (5.2).
-17. Collapsing duplicate Deliveries to one peer via several groups (5.3).
-18. Dead-letter retry identity (5.5).
-19. Job states `requested`/`cancellation_requested`; multi-recipient jobs; who may report; response to stale reports (5.6).
-20. Whether approvals, job status and hub posts count against depth and budget (6).
-21. Archived-group sends; `ThreadSummary.group` rule; >64 participants (7).
-22. Setting `subscribe_presence`; `directory_updated` audience and `change` shape (8).
-23. Sender of the hub's expiry `approval_response`; invalid-response codes; notification webhook payload and signing (9).
-24. Whether scopes gate directory and history reads (12).
-25. Grok Bot connector placement (in-hub route vs separate process) and its origin values; openclaw session granularity, `processed` meaning, mention gating (13).
-26. Sender-supplied `vecnet.*` metadata keys (14).
-27. Source drift to fix outside this doc: example 04's escalation comment contradicts T15; `GLOSSARY.md` still says priority is one bit, "hop count" (now `depth`), and "original thread id" (now `origin`), has no entries for principal or reachability, and says the hub never acts on directory data although `wake_idle` reads presence.
+The 27 OPEN items of the first draft are decided in `docs/protocol/OPEN-ITEMS-RESOLVED.md` and folded into the sections above; each rule cites its item as `[Rnn]`. Item 27, source drift in example 04 and `GLOSSARY.md`, was fixed in those files.
+
+Residual questions, decided 2026-11-01 (same delegation):
+
+1. Reason codes: the `/v1/events` 409 is `cursor_purged` with `details.oldest_cursor`; a `job_request` whose `(thread_id, job_key)` exists with a different body is 409 `job_conflict`; a receipt or job report from a peer that is not the delivery's recipient (or its principal) is 403 `not_recipient`.
+2. An `approval_response` from a peer the request did not address is 403 `not_addressed`.
+3. An ingress event dropped by the source's event allowlist is 202 `{"dropped": true, "reason": "event_filtered"}`, so the provider does not redeliver it.
+4. `GET /v1/threads` paginates with `?cursor=<next>`, passing back the `next` token verbatim.
