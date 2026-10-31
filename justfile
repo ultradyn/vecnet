@@ -5,6 +5,18 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     @just --list
 
+# Build both binaries into bin/
+build:
+    CGO_ENABLED=0 build2 go build -p 2 -o bin/ ./cmd/...
+
+# Run the test suite (two threads, via build2)
+test:
+    build2 go test -p 2 ./...
+
+# Run the dev hub on the generated port
+run:
+    CGO_ENABLED=0 build2 go run ./cmd/vecnet-hub --listen 127.0.0.1:45752 --data-dir .data --public-url http://127.0.0.1:45752
+
 # Show the wayfinder frontier: open, unblocked, unclaimed tickets
 frontier:
     #!/usr/bin/env bash
