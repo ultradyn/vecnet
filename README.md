@@ -6,7 +6,13 @@ Grok Bot bots, OpenAI dots, openclaw agents, pag-chat bots, and plain codex/clau
 
 ## Status
 
-Discovery. The project is being charted with the wayfinder method: see `.scratch/vecnet/map.md` for the destination, decisions so far, open tickets and fog. Research findings land in `docs/research/`. Vocabulary is in `GLOSSARY.md`.
+Specified, not yet built. Charted with the wayfinder method on 2026-11-01 (`.scratch/vecnet/map.md`). Read in this order:
+
+1. `SPEC.md` — what vecnet is and does, product level.
+2. `docs/PROTOCOL.md` — normative hub behaviour and HTTP/MCP/webhook surfaces.
+3. `docs/protocol/envelope.schema.json` — the wire contract (JSON Schema 2020-12), with worked `examples/` and the design rationale in `ENVELOPE.md`.
+4. `GLOSSARY.md` — canonical terms; `docs/adr/` — hard-to-reverse choices (Go, Fly).
+5. `docs/research/` — the facts the decisions rest on.
 
 ## Principles
 
@@ -17,7 +23,10 @@ Discovery. The project is being charted with the wayfinder method: see `.scratch
 
 ## Layout
 
-- `.scratch/vecnet/` wayfinder map and tickets (local markdown tracker)
-- `docs/research/` facts gathered to resolve tickets
-- `docs/adr/` architecture decision records
-- `GLOSSARY.md` canonical terms
+- `SPEC.md`, `docs/PROTOCOL.md`, `docs/protocol/` — the specification
+- `.scratch/vecnet/` — wayfinder map and tickets (local markdown tracker)
+- `docs/research/` — facts gathered to resolve tickets
+- `docs/adr/` — architecture decision records
+- `docs/prototypes/` — throwaway prototypes (operator UI)
+- `GLOSSARY.md` — canonical terms
+- `justfile` — `just frontier`, `just tickets`, `just validate-protocol`
