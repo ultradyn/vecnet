@@ -54,6 +54,8 @@ func decodePresence(raw []byte) (hub.PresenceReport, error) {
 	if rep.Location, err = stringField(top, "location"); err != nil {
 		return rep, err
 	}
+	_, hasLoc := top["location"]
+	rep.ClearLocation = hasLoc && rep.Location == ""
 	if rep.Note, err = stringField(top, "note"); err != nil {
 		return rep, err
 	}

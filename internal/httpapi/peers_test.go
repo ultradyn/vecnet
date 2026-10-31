@@ -280,7 +280,14 @@ func TestDirectoryUpdatedOnEnrol(t *testing.T) {
 		}
 		done <- result{pr, dur}
 	}()
-	time.Sleep(100 * time.Millisecond)
+	// Enrol only once the long-poll is parked on A's log, so the wake path
+	// (not an immediate read) is what returns the Event.
+	for deadline := time.Now().Add(10 * time.Second); env.Hub.Log.Waiters(a) == 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("long-poll never parked on A's log")
+		}
+		time.Sleep(time.Millisecond)
+	}
 
 	n, _ := env.NewPeer("session", "newbie")
 

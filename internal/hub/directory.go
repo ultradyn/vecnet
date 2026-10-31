@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/envelope"
 )
 
 // DirectoryEntry is one peer's public directory fields (PROTOCOL §8). It
@@ -32,11 +34,36 @@ type DirectoryEntry struct {
 // Reachability values (PROTOCOL §8).
 var reachabilities = map[string]bool{"connected": true, "reachable": true, "unreachable": true, "unknown": true}
 
+// ReachabilityCallWindow is how long an inbound call (or a closed stream)
+// keeps a peer "reachable" (PROTOCOL §8: "last inbound call within 24 h").
+// Reachability from an accepted push has no window.
+const ReachabilityCallWindow = 24 * time.Hour
+
+// EffectiveReachability is the reachability the hub shows at now for a
+// stored value set by the observation via ("call", "push", or nil for none
+// or a pre-reach_via row, read as "call"): a call-based "reachable" whose
+// last_seen is more than ReachabilityCallWindow before now (or missing) is
+// "unknown"; every other value is shown as stored (PROTOCOL §8).
+func EffectiveReachability(stored string, via, lastSeen *string, now time.Time) string {
+	if stored != "reachable" || (via != nil && *via == "push") {
+		return stored
+	}
+	if lastSeen == nil {
+		return "unknown"
+	}
+	at, err := envelope.ParseTime(*lastSeen)
+	if err != nil || now.Sub(at) > ReachabilityCallWindow {
+		return "unknown"
+	}
+	return stored
+}
+
 // enrolledFields are the fields a directory_updated "enrolled" Event names.
 var enrolledFields = []string{"name", "kind", "enrolled_at"}
 
 // Directory returns every enabled peer's public entry, ordered by peer id,
-// with presence rendered through EffectivePresence (PROTOCOL §2.10, §8).
+// with presence rendered through EffectivePresence and reachability through
+// EffectiveReachability (PROTOCOL §2.10, §8).
 func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
 	teams := map[string][]string{}
 	rows, err := h.DB.QueryContext(ctx, `SELECT peer_id, team_id FROM team_members ORDER BY peer_id, team_id`)
@@ -60,7 +87,7 @@ func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
 
 	rows, err = h.DB.QueryContext(ctx,
 		`SELECT peer_id, name, kind, capabilities, quota, location, presence_state, presence_at,
-		        reachability, last_seen, enrolled_at
+		        reachability, reach_via, last_seen, enrolled_at
 		 FROM peers WHERE disabled = 0 ORDER BY peer_id`)
 	if err != nil {
 		return nil, fmt.Errorf("hub: directory: %w", err)
@@ -70,12 +97,12 @@ func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
 	out := []DirectoryEntry{}
 	for rows.Next() {
 		var (
-			e                        DirectoryEntry
-			caps, quota, enrolled    string
-			loc, state, at, lastSeen sql.NullString
+			e                             DirectoryEntry
+			caps, quota, enrolled, reach  string
+			loc, state, at, via, lastSeen sql.NullString
 		)
 		if err := rows.Scan(&e.PeerID, &e.Name, &e.Kind, &caps, &quota, &loc, &state, &at,
-			&e.Reachability, &lastSeen, &enrolled); err != nil {
+			&reach, &via, &lastSeen, &enrolled); err != nil {
 			return nil, fmt.Errorf("hub: directory: %w", err)
 		}
 		if err := json.Unmarshal([]byte(caps), &e.Capabilities); err != nil || e.Capabilities == nil {
@@ -88,6 +115,7 @@ func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
 		}
 		e.Location = nullable(loc)
 		e.LastSeen = nullable(lastSeen)
+		e.Reachability = EffectiveReachability(reach, nullable(via), e.LastSeen, now)
 		e.EnrolledAt = &enrolled
 		e.Presence = h.EffectivePresence(PresenceRow{Kind: e.Kind, State: nullable(state), At: nullable(at)}, now)
 		e.Teams = teams[e.PeerID]
@@ -198,10 +226,13 @@ func (h *Hub) notifyEnabled(ctx context.Context) {
 	}
 }
 
-// TouchReachability records a hub observation of peerID (PROTOCOL §8):
-// "reachable" (an authenticated inbound call, or an accepted push),
+// TouchReachability records a hub observation of peerID from an inbound
+// connection (PROTOCOL §8): "reachable" (an authenticated inbound call),
 // "connected" (a stream opened), "unreachable" (a failed or dead-lettered
-// push) or "unknown". While the peer has an open stream it stays
+// push) or "unknown". Push results should use ObservePush instead, so that
+// an accepted push is recorded without the call window: a "reachable" from
+// here decays to "unknown" ReachabilityCallWindow after last_seen
+// (EffectiveReachability). While the peer has an open stream it stays
 // "connected" whatever else is observed. "reachable" and "connected" also
 // set last_seen. Failures are logged, never returned: an observation must
 // not fail the request that made it.
@@ -210,22 +241,48 @@ func (h *Hub) TouchReachability(ctx context.Context, peerID, value string) {
 		slog.Error("hub: bad reachability observation", "peer", peerID, "value", value)
 		return
 	}
+	via := "call"
+	switch value {
+	case "unreachable":
+		via = "push"
+	case "unknown":
+		via = ""
+	}
 	h.reachMu.Lock()
 	defer h.reachMu.Unlock()
-	h.touchLocked(ctx, peerID, value)
+	h.touchLocked(ctx, peerID, value, via)
 }
 
-// touchLocked writes the observation; h.reachMu held.
-func (h *Hub) touchLocked(ctx context.Context, peerID, value string) {
+// ObservePush records a push result for peerID (PROTOCOL §8): accepted
+// (2xx) is "reachable" with no time window; otherwise (failed or
+// dead-lettered) "unreachable". An open stream still wins ("connected").
+func (h *Hub) ObservePush(ctx context.Context, peerID string, accepted bool) {
+	if peerID == "" {
+		slog.Error("hub: push observation without a peer")
+		return
+	}
+	value := "unreachable"
+	if accepted {
+		value = "reachable"
+	}
+	h.reachMu.Lock()
+	defer h.reachMu.Unlock()
+	h.touchLocked(ctx, peerID, value, "push")
+}
+
+// touchLocked writes the observation and the kind of observation that made
+// it (via: "call", "push", or "" for none); h.reachMu held.
+func (h *Hub) touchLocked(ctx context.Context, peerID, value, via string) {
 	if h.streams[peerID] > 0 {
-		value = "connected"
+		value, via = "connected", "call"
 	}
 	var err error
 	if value == "connected" || value == "reachable" {
-		_, err = h.DB.ExecContext(ctx, `UPDATE peers SET reachability = ?, last_seen = ? WHERE peer_id = ?`,
-			value, h.nowStr(), peerID)
+		_, err = h.DB.ExecContext(ctx, `UPDATE peers SET reachability = ?, reach_via = ?, last_seen = ? WHERE peer_id = ?`,
+			value, nullIfEmpty(via), h.nowStr(), peerID)
 	} else {
-		_, err = h.DB.ExecContext(ctx, `UPDATE peers SET reachability = ? WHERE peer_id = ?`, value, peerID)
+		_, err = h.DB.ExecContext(ctx, `UPDATE peers SET reachability = ?, reach_via = ? WHERE peer_id = ?`,
+			value, nullIfEmpty(via), peerID)
 	}
 	if err != nil {
 		slog.Error("hub: touch reachability", "peer", peerID, "err", err)
@@ -241,11 +298,12 @@ func (h *Hub) StreamOpened(ctx context.Context, peerID string) {
 		h.streams = map[string]int{}
 	}
 	h.streams[peerID]++
-	h.touchLocked(ctx, peerID, "connected")
+	h.touchLocked(ctx, peerID, "connected", "call")
 }
 
 // StreamClosed ends one stream of peerID; when it was the last, the peer
-// falls back to reachable.
+// falls back to reachable, as from an inbound call (it decays after
+// ReachabilityCallWindow).
 func (h *Hub) StreamClosed(ctx context.Context, peerID string) {
 	h.reachMu.Lock()
 	defer h.reachMu.Unlock()
@@ -254,5 +312,5 @@ func (h *Hub) StreamClosed(ctx context.Context, peerID string) {
 	} else {
 		h.streams[peerID]--
 	}
-	h.touchLocked(ctx, peerID, "reachable")
+	h.touchLocked(ctx, peerID, "reachable", "call")
 }

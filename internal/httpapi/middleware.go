@@ -84,7 +84,9 @@ func bearer(r *http.Request) string {
 // (403 forbidden). A disabled peer's credential is 401 everywhere except
 // GET /v1/events, which answers 204. Every authenticated call by a
 // credential with its own peer is a reachability observation: touch(peer,
-// "reachable") sets last_seen (PROTOCOL §8); touch may be nil.
+// "reachable") sets last_seen (PROTOCOL §8); touch may be nil. A principal
+// acting for a peer with "as" is observed by the hub once "as" is
+// authorised (Send, SetPresence).
 func authenticate(res *auth.Resolver, touch func(ctx context.Context, peerID, value string), next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isPublic(r) {

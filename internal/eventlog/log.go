@@ -305,6 +305,14 @@ func (l *Log) Wait(ctx context.Context, owners []string) <-chan struct{} {
 	return w.ch
 }
 
+// Waiters reports how many pending Wait calls touch owner. Tests use it to
+// know a long-poll or stream is parked before they append.
+func (l *Log) Waiters(owner string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.waiters[owner])
+}
+
 // fireLocked closes w.ch once and unregisters w from every owner. l.mu held.
 func (l *Log) fireLocked(w *waiter) {
 	if w.fired {

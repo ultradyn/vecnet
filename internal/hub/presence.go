@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"slices"
 	"time"
 
@@ -21,16 +22,18 @@ const (
 )
 
 // PresenceReport is one self-reported presence (PROTOCOL §2.6). A nil
-// Capabilities or Quota, or an empty Location, keeps the stored value; Note
-// is replaced by every report. A zero At, or one in the future, is the hub's
-// now.
+// Capabilities or Quota, or an empty Location, keeps the stored value;
+// ClearLocation (an explicit "location": "" in the body) with an empty
+// Location clears it. Note is replaced by every report. A zero At, or one in
+// the future, is the hub's now.
 type PresenceReport struct {
-	State        string
-	At           time.Time
-	Capabilities []string
-	Quota        map[string]any
-	Location     string
-	Note         string
+	State         string
+	At            time.Time
+	Capabilities  []string
+	Quota         map[string]any
+	Location      string
+	ClearLocation bool
+	Note          string
 }
 
 // PresenceRow is the part of a peers row EffectivePresence reads: the peer's
@@ -77,7 +80,8 @@ func (h *Hub) EffectivePresence(p PresenceRow, now time.Time) string {
 // §2.6, §8). A change to capabilities, quota or location also emits
 // directory_updated "updated". The report is validated against
 // $defs/presence (400 invalid_body). After commit, an idle report calls
-// IdleHook when one is set (Task 14's held wake_idle release).
+// IdleHook when one is set (Task 14's held wake_idle release); the hook is
+// best-effort, and its error is logged, not returned.
 func (h *Hub) SetPresence(ctx context.Context, c auth.Caller, asPeer string, p PresenceReport) error {
 	var notify []string
 	var peer string
@@ -110,7 +114,7 @@ func (h *Hub) SetPresence(ctx context.Context, c auth.Caller, asPeer string, p P
 			}
 		}
 		location := p.Location
-		if location == "" && loc.Valid {
+		if location == "" && loc.Valid && !p.ClearLocation {
 			location = loc.String
 		}
 		nowT := h.Now()
@@ -178,8 +182,17 @@ func (h *Hub) SetPresence(ctx context.Context, c auth.Caller, asPeer string, p P
 	if dirChanged {
 		h.notifyEnabled(ctx)
 	}
+	if peer != c.PeerID {
+		// A principal acting with ?as= is an inbound call by that peer
+		// (PROTOCOL §8, §13.6); the middleware only sees the credential.
+		h.TouchReachability(ctx, peer, "reachable")
+	}
 	if p.State == "idle" && h.IdleHook != nil {
-		return h.IdleHook(ctx, peer)
+		// Best-effort: the report has taken effect, so a hook failure must
+		// not turn it into an error the client would retry.
+		if err := h.IdleHook(ctx, peer); err != nil {
+			slog.Error("hub: idle hook", "peer", peer, "err", err)
+		}
 	}
 	return nil
 }

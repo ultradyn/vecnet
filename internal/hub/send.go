@@ -154,6 +154,11 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 	if len(notify) > 0 {
 		h.Log.Notify(notify...)
 	}
+	if req.As != "" && req.As != c.PeerID {
+		// The send was authorised for req.As: a principal acting for a peer
+		// is an inbound call by that peer (PROTOCOL §8, §13.6).
+		h.TouchReachability(ctx, req.As, "reachable")
+	}
 	if cut != nil {
 		return nil, false, cut
 	}

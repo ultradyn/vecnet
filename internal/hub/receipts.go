@@ -19,7 +19,8 @@ var receiptStates = map[string]bool{"processed": true, "read": true, "failed": t
 
 // receiptFrom lists the delivery states a receipt state moves from. read
 // never changes the delivery; failed, expired and dead_letter are terminal
-// (PROTOCOL §5.1).
+// (PROTOCOL §5.1). processed is not terminal in §5.1, so a later failed
+// (e.g. a job that fails after processing began) may still move it.
 var receiptFrom = map[string]string{
 	"processed": `'queued', 'pushed', 'accepted'`,
 	"failed":    `'queued', 'pushed', 'accepted', 'processed'`,
@@ -34,8 +35,12 @@ const MaxReceiptNote = 1024
 // the recipient's principal, may post; anyone else, and an unknown
 // delivery, is 403 not_recipient. processed and failed move the delivery's
 // state (from a non-terminal state); read leaves it. A receipt Event, by the
-// recipient, is appended to the sender's log, and the receipt is audited
-// (without its note).
+// recipient, is appended to the sender's log when the sender is a peer
+// (hub-authored and source messages have no log to receive it), and the
+// receipt is audited (without its note). A processed or failed receipt that
+// moves nothing (the delivery is terminal, or already in that state) is a
+// no-op: 204, no Event and no audit row, so a retried POST is harmless and
+// the sender never sees, say, expired then processed.
 func (h *Hub) Receipt(ctx context.Context, c auth.Caller, deliveryID, state, note string) error {
 	if !receiptStates[state] {
 		e := E(http.StatusUnprocessableEntity, "invalid_state", "receipt state must be processed, read or failed")
@@ -46,12 +51,16 @@ func (h *Hub) Receipt(ctx context.Context, c auth.Caller, deliveryID, state, not
 		return &envelope.SchemaError{Path: "/note", Message: fmt.Sprintf("note exceeds %d characters", MaxReceiptNote)}
 	}
 	var sender string
+	notify := false
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		notify = false
 		var msg, thr, recipient, prn string
+		var senderIsPeer bool
 		err := tx.QueryRowContext(ctx,
-			`SELECT d.msg_id, d.thr_id, d.recipient, p.prn_id, m.sender
+			`SELECT d.msg_id, d.thr_id, d.recipient, p.prn_id, m.sender,
+			        EXISTS (SELECT 1 FROM peers s WHERE s.peer_id = m.sender)
 			 FROM deliveries d JOIN peers p ON p.peer_id = d.recipient JOIN messages m ON m.msg_id = d.msg_id
-			 WHERE d.dly_id = ?`, deliveryID).Scan(&msg, &thr, &recipient, &prn, &sender)
+			 WHERE d.dly_id = ?`, deliveryID).Scan(&msg, &thr, &recipient, &prn, &sender, &senderIsPeer)
 		if errors.Is(err, sql.ErrNoRows) {
 			return notRecipient(deliveryID)
 		}
@@ -64,18 +73,29 @@ func (h *Hub) Receipt(ctx context.Context, c auth.Caller, deliveryID, state, not
 		nowT := h.Now()
 		now := envelope.FormatTime(nowT)
 		if from, ok := receiptFrom[state]; ok {
-			if _, err := tx.ExecContext(ctx,
+			res, err := tx.ExecContext(ctx,
 				`UPDATE deliveries SET state = ?, held = 0, updated_at = ? WHERE dly_id = ? AND state IN (`+from+`)`,
-				state, now, deliveryID); err != nil {
+				state, now, deliveryID)
+			if err != nil {
 				return fmt.Errorf("hub: receipt state: %w", err)
 			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("hub: receipt state: %w", err)
+			}
+			if n == 0 {
+				return nil // terminal or repeated: nothing to report
+			}
 		}
-		r := envelope.Receipt{
-			DeliveryID: deliveryID, MessageID: msg, ThreadID: thr,
-			State: state, By: recipient, At: now, Note: note,
-		}
-		if _, err := h.Log.Append(ctx, tx, sender, "receipt", nowT, r); err != nil {
-			return err
+		if senderIsPeer {
+			r := envelope.Receipt{
+				DeliveryID: deliveryID, MessageID: msg, ThreadID: thr,
+				State: state, By: recipient, At: now, Note: note,
+			}
+			if _, err := h.Log.Append(ctx, tx, sender, "receipt", nowT, r); err != nil {
+				return err
+			}
+			notify = true
 		}
 		return audit.Record(ctx, tx, callerID(c), "receipt", []string{deliveryID, msg},
 			map[string]any{"state": state, "by": recipient})
@@ -83,7 +103,9 @@ func (h *Hub) Receipt(ctx context.Context, c auth.Caller, deliveryID, state, not
 	if err != nil {
 		return err
 	}
-	h.Log.Notify(sender)
+	if notify {
+		h.Log.Notify(sender)
+	}
 	return nil
 }
 

@@ -65,7 +65,8 @@ type Hub struct {
 	Now   func() time.Time
 
 	// IdleHook, when set, runs after a peer reports presence idle (Task 14
-	// wires the held wake_idle release here). nil means no hook.
+	// wires the held wake_idle release here). nil means no hook. It is
+	// best-effort: SetPresence logs its error and still succeeds.
 	IdleHook func(ctx context.Context, peerID string) error
 
 	reachMu sync.Mutex     // serialises reachability writes with streams
@@ -92,9 +93,11 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	if err != nil {
 		return nil, fmt.Errorf("hub: %w", err)
 	}
-	// No stream survives a restart: a stored "connected" is stale.
+	// No stream survives a restart: a stored "connected" is stale. It falls
+	// back to reachable as from an inbound call, so it decays 24 h after the
+	// last_seen the stream recorded (EffectiveReachability).
 	if _, err := db.ExecContext(context.Background(),
-		`UPDATE peers SET reachability = 'reachable' WHERE reachability = 'connected'`); err != nil {
+		`UPDATE peers SET reachability = 'reachable', reach_via = 'call' WHERE reachability = 'connected'`); err != nil {
 		return nil, fmt.Errorf("hub: reset reachability: %w", err)
 	}
 	return &Hub{DB: db, Log: log, Blobs: blobs, Auth: &auth.Resolver{DB: db}, Cfg: cfg, Now: now,
