@@ -1,6 +1,6 @@
 // Command vecnet-hub runs the vecnet hub, or initialises its operator.
 //
-//	vecnet-hub [--listen 127.0.0.1:45752] [--data-dir /data] [--public-url URL]
+//	vecnet-hub [--listen 127.0.0.1:45752] [--data-dir /data] [--public-url URL] [--dev-ui-dir DIR]
 //	vecnet-hub init [--data-dir /data] --operator-name <name>
 package main
 
@@ -38,6 +38,7 @@ func run(args []string, stdout io.Writer) error {
 	listen := fs.String("listen", "127.0.0.1:45752", "address to listen on")
 	dataDir := fs.String("data-dir", "/data", "directory holding hub.db and blobs/")
 	publicURL := fs.String("public-url", "", "externally visible origin (default http://<listen>)")
+	devUIDir := fs.String("dev-ui-dir", "", "serve the operator UI from this directory instead of the embedded copy (development)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -59,7 +60,7 @@ func run(args []string, stdout io.Writer) error {
 	if *publicURL == "" {
 		*publicURL = "http://" + *listen
 	}
-	return serve(*listen, *dataDir, *publicURL)
+	return serve(*listen, *dataDir, *publicURL, *devUIDir)
 }
 
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
@@ -104,8 +105,8 @@ func runInit(dataDir, name string, w io.Writer) error {
 }
 
 // serve runs the HTTP server, the push worker and the hub's tickers until
-// SIGINT or SIGTERM.
-func serve(listen, dataDir, publicURL string) error {
+// SIGINT or SIGTERM. devUIDir "" serves the embedded operator UI.
+func serve(listen, dataDir, publicURL, devUIDir string) error {
 	h, db, err := openHub(dataDir, publicURL)
 	if err != nil {
 		return err
@@ -115,7 +116,7 @@ func serve(listen, dataDir, publicURL string) error {
 	worker := &push.Worker{Hub: h}
 	srv := &http.Server{
 		Addr:              listen,
-		Handler:           httpapi.New(httpapi.Deps{Hub: h, Kick: worker.Kick, VerifyRoute: worker.Verify}),
+		Handler:           httpapi.New(httpapi.Deps{Hub: h, Kick: worker.Kick, VerifyRoute: worker.Verify, UIDir: devUIDir}),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

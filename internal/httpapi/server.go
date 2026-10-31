@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/ui"
 )
 
 // Deps are the handler's collaborators.
@@ -27,6 +28,11 @@ type Deps struct {
 	MaxWait     time.Duration // long-poll hold cap (MaxWait)
 	WaitUnit    time.Duration // length of one ?wait= second (time.Second)
 	SSEStall    time.Duration // SSE queue-full wait before dropping a stuck client (DefaultSSEStall)
+
+	// UIDir, when set, serves the operator UI under /ui/ from this directory
+	// on disk instead of the embedded copy (vecnet-hub --dev-ui-dir), so an
+	// edit shows on refresh without a rebuild.
+	UIDir string
 }
 
 // server carries Deps to the route handlers.
@@ -51,6 +57,9 @@ func New(d Deps) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
 	s.routes(mux)
+	uiHandler := ui.Handler(d.UIDir) // operator inbox; public (isPublic)
+	mux.Handle("GET /ui", uiHandler)
+	mux.Handle("GET /ui/", uiHandler)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, hub.E(http.StatusNotFound, "not_found", "no such endpoint"))
 	})
