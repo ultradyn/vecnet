@@ -439,7 +439,7 @@ The hub fills `loop` on every Message [ENV]:
 
 | Field | Rule | Default |
 |---|---|---|
-| `depth` | 0 for a fresh message; a reply is parent.depth + 1 | — |
+| `depth` | 0 for a fresh message; a reply is parent.depth + 1. Only `in_reply_to` makes a send a reply: a send into an existing thread without it is fresh (depth 0, its own `expires_at`, `sender_chain` = [sender]) | — |
 | `max_depth` | Inherited down a reply chain; any sender MAY lower it for its own message; a reply MUST NOT raise it; range 1–64 | 16 |
 | `expires_at` | Wall-clock TTL; sender MAY lower it; a reply MUST NOT raise an inherited value | now + 24 h |
 | `sender_chain` | Last 32 originators (peers or sources), oldest first: parent's chain + sender | — |

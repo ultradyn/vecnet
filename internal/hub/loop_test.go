@@ -11,6 +11,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
+	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -281,8 +282,8 @@ func TestRateLimits(t *testing.T) {
 	b, _ := env.NewPeer("session", "B")
 	c, cSec := env.NewPeer("session", "C")
 
-	// 60 sends a minute: one new thread plus 59 replies, all at one instant.
-	// max_depth 64 keeps the 61-deep reply chain clear of loop control.
+	// 60 sends a minute: one new thread plus 59 sends into it, all at one
+	// instant (without in_reply_to each is fresh, depth 0).
 	s0 := req("s0", b)
 	s0["max_depth"] = 64
 	first := mustSend(t, env, aSec, s0)
@@ -331,4 +332,43 @@ func TestRateLimits(t *testing.T) {
 	// The per-peer limits are adjustable.
 	env.SetLimits(c, 1000, 1000)
 	mustSend(t, env, cSec, req("t21", b))
+}
+
+// TestThreadSendWithoutInReplyToIsFresh: a send into an existing thread
+// that names no in_reply_to is a fresh message (PROTOCOL §6): depth 0, a
+// fresh expires_at and sender_chain [sender]. Thread position therefore
+// never trips max_depth, and a thread stays usable after its first
+// message's expiry; the thread budget is the hard stop (§16.1).
+func TestThreadSendWithoutInReplyToIsFresh(t *testing.T) {
+	env := testhub.Start(t)
+	a, aSec := env.NewPeer("session", "A")
+	b, bSec := env.NewPeer("session", "B")
+	env.SetLimits(a, 10000, 10000)
+	env.SetLimits(b, 10000, 10000)
+
+	first := mustSend(t, env, aSec, req("f0", b))
+	var last hub.SendResponse
+	for i := 1; i <= 40; i++ {
+		sec, who := aSec, a
+		if i%2 == 1 {
+			sec, who = bSec, b
+		}
+		last = mustSend(t, env, sec, replyReq(fmt.Sprintf("f%d", i), first.ThreadID, ""))
+		if l := storedLoop(t, env, last.MessageID); l.Depth != 0 || !chainEq(l.SenderChain, []string{who}) {
+			t.Fatalf("thread send %d loop = %+v, want depth 0 chain [%s]", i, l, who)
+		}
+	}
+
+	env.Now.Advance(25 * time.Hour)
+	m := mustSend(t, env, bSec, replyReq("f-late", first.ThreadID, ""))
+	l := storedLoop(t, env, m.MessageID)
+	exp, err := envelope.ParseTime(l.ExpiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := env.Now.Now().Add(24 * time.Hour); !exp.Equal(want) {
+		t.Fatalf("expires_at = %s, want a fresh now+24h %s", l.ExpiresAt, envelope.FormatTime(want))
+	}
+	// A reply to an expired message is still refused.
+	mustReject(t, env, aSec, replyReq("f-expired", first.ThreadID, last.MessageID), http.StatusUnprocessableEntity, "expired")
 }
