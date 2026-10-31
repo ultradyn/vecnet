@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,8 @@ type Env struct {
 	OperatorSecret string
 	OperatorPeer   string
 	Now            *FakeClock
+
+	handler atomic.Pointer[http.Handler]
 }
 
 // FakeClock is the hub's clock in tests; it only moves when Advance is called.
@@ -65,9 +68,9 @@ func Start(t *testing.T) *Env {
 
 	// The handler is installed after the server exists so Config.PublicURL
 	// can carry the server's real URL; no request arrives before then.
-	var handler http.Handler
+	env := &Env{T: t, Now: clock}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handler.ServeHTTP(w, r)
+		(*env.handler.Load()).ServeHTTP(w, r)
 	}))
 
 	cfg := hub.DefaultConfig()
@@ -79,7 +82,8 @@ func Start(t *testing.T) *Env {
 		db.Close()
 		t.Fatalf("testhub: hub.New: %v", err)
 	}
-	handler = httpapi.New(httpapi.Deps{Hub: h})
+	env.URL, env.Hub = srv.URL, h
+	env.Configure(nil)
 	t.Cleanup(func() {
 		srv.Close()
 		db.Close()
@@ -89,7 +93,20 @@ func Start(t *testing.T) *Env {
 	if err != nil {
 		t.Fatalf("testhub: EnsureOperator: %v", err)
 	}
-	return &Env{T: t, URL: srv.URL, Hub: h, OperatorSecret: secret, OperatorPeer: peer, Now: clock}
+	env.OperatorSecret, env.OperatorPeer = secret, peer
+	return env
+}
+
+// Configure rebuilds the HTTP handler from Deps{Hub: e.Hub} after f (when
+// non-nil) adjusts them, e.g. to shorten Deps.Heartbeat. Requests already in
+// flight keep the old handler; later ones use the new one.
+func (e *Env) Configure(f func(*httpapi.Deps)) {
+	d := httpapi.Deps{Hub: e.Hub}
+	if f != nil {
+		f(&d)
+	}
+	h := httpapi.New(d)
+	e.handler.Store(&h)
 }
 
 // NewPeer creates a peer of kind under an implicit principal and enrols it,

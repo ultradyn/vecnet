@@ -39,6 +39,11 @@ type Caller struct {
 // or one whose peer is disabled.
 var ErrUnauthenticated = errors.New("unauthenticated")
 
+// ErrPeerDisabled is the ErrUnauthenticated that Resolve returns for a valid
+// peer credential whose peer is disabled; errors.Is(err, ErrUnauthenticated)
+// holds for it. GET /v1/events answers it with 204 (PROTOCOL §2.3).
+var ErrPeerDisabled = fmt.Errorf("%w: peer disabled", ErrUnauthenticated)
+
 // ErrUnknownSubject reports a Rotate of a peer or principal that does not exist.
 var ErrUnknownSubject = errors.New("auth: unknown subject")
 
@@ -105,7 +110,7 @@ func (r *Resolver) Resolve(ctx context.Context, bearer string) (Caller, error) {
 			return Caller{}, fmt.Errorf("auth: resolve peer: %w", err)
 		}
 		if disabled != 0 {
-			return Caller{}, ErrUnauthenticated
+			return Caller{}, ErrPeerDisabled
 		}
 		return Caller{Kind: "peer", PrincipalID: prn, PeerID: subject, PeerKind: peerKind}, nil
 

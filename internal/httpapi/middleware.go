@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -80,7 +81,8 @@ func bearer(r *http.Request) string {
 
 // authenticate resolves the bearer for every non-public path, stores the
 // Caller in the request context and enforces operator-only admin paths
-// (403 forbidden).
+// (403 forbidden). A disabled peer's credential is 401 everywhere except
+// GET /v1/events, which answers 204.
 func authenticate(res *auth.Resolver, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isPublic(r) {
@@ -88,6 +90,10 @@ func authenticate(res *auth.Resolver, next http.Handler) http.Handler {
 			return
 		}
 		c, err := res.Resolve(r.Context(), bearer(r))
+		if errors.Is(err, auth.ErrPeerDisabled) && r.Method == http.MethodGet && r.URL.Path == "/v1/events" {
+			w.WriteHeader(http.StatusNoContent) // peer disabled: stop reconnecting (PROTOCOL §2.3)
+			return
+		}
 		if err != nil {
 			writeError(w, err)
 			return

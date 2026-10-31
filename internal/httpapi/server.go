@@ -5,6 +5,7 @@ package httpapi
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/hub"
 )
@@ -13,6 +14,13 @@ import (
 type Deps struct {
 	Hub  *hub.Hub
 	Kick func() // push worker wakeup after a commit; may be nil
+
+	// GET /v1/events timing; zero means the package default. Tests shorten
+	// them instead of sleeping.
+	Heartbeat   time.Duration // SSE ": hb" interval (DefaultHeartbeat)
+	DefaultWait time.Duration // long-poll hold without ?wait= (DefaultWait)
+	MaxWait     time.Duration // long-poll hold cap (MaxWait)
+	WaitUnit    time.Duration // length of one ?wait= second (time.Second)
 }
 
 // server carries Deps to the route handlers.
@@ -49,4 +57,6 @@ func (s *server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/messages", s.postMessages)
 	mux.HandleFunc("PUT /v1/blobs", s.putBlob)
 	mux.HandleFunc("GET /v1/blobs/{sha}", s.getBlob)
+	mux.HandleFunc("GET /v1/events", s.getEvents)
+	mux.HandleFunc("POST /v1/ack", s.postAck)
 }

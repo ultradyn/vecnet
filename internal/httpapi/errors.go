@@ -9,6 +9,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/hub"
 )
 
@@ -43,6 +44,7 @@ func writeErr(w http.ResponseWriter, status int, code, msg string, details map[s
 
 // writeError maps err onto the wire: *hub.APIError → its status and body,
 // plus Retry-After when details carry retry_after_seconds;
+// eventlog.ErrCursorPurged → 409 cursor_purged with details.oldest_cursor;
 // *envelope.SchemaError → 400 invalid_body with details.path;
 // auth.ErrUnauthenticated → 401 unauthenticated; *http.MaxBytesError → 413
 // payload_too_large; anything else → 500 internal, logged, with a body that
@@ -51,12 +53,16 @@ func writeError(w http.ResponseWriter, err error) {
 	var apiErr *hub.APIError
 	var schemaErr *envelope.SchemaError
 	var maxErr *http.MaxBytesError
+	var purged eventlog.ErrCursorPurged
 	switch {
 	case errors.As(err, &apiErr):
 		if secs, ok := apiErr.Details["retry_after_seconds"].(int); ok && secs > 0 {
 			w.Header().Set("Retry-After", strconv.Itoa(secs)) // 429 rate_limited (PROTOCOL §16.2)
 		}
 		writeErr(w, apiErr.Status, apiErr.Code, apiErr.Message, apiErr.Details)
+	case errors.As(err, &purged):
+		writeErr(w, http.StatusConflict, "cursor_purged", "cursor is from another epoch or below retention",
+			map[string]any{"oldest_cursor": purged.Oldest.String()})
 	case errors.As(err, &schemaErr):
 		writeErr(w, http.StatusBadRequest, "invalid_body", schemaErr.Message, map[string]any{"path": schemaErr.Path})
 	case errors.Is(err, auth.ErrUnauthenticated):
