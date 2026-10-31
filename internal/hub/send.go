@@ -345,7 +345,13 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 		return nil, false, cutNotify, &cutError{apiErr}
 	}
 
-	// Build and serialise the Message once.
+	// Build and serialise the Message once. Recipients defaulted from a
+	// large thread's participants may exceed $defs/message's 32: every
+	// target still gets a Delivery, but the Message lists the first 32.
+	msgRecipients := addressed
+	if len(msgRecipients) > maxMessageRecipients {
+		msgRecipients = msgRecipients[:maxMessageRecipients]
+	}
 	kind := req.Kind
 	if kind == "" {
 		kind = "message"
@@ -357,7 +363,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 		InReplyTo:        req.InReplyTo,
 		Kind:             kind,
 		Sender:           snd.peer,
-		Recipients:       addressed,
+		Recipients:       msgRecipients,
 		Priority:         req.Priority,
 		CreatedAt:        now,
 		Content:          envelope.Content{Text: req.Content.Text},

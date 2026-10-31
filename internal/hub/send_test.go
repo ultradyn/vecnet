@@ -481,3 +481,35 @@ func TestCreatorSetsHistoryAccessAndLock(t *testing.T) {
 		t.Fatalf("non-creator add to a locked thread = %d %s, want 403 participants_locked", status, raw)
 	}
 }
+
+// TestDefaultedRecipientsCappedAt32: a reply-all in a thread of more than
+// 33 participants delivers to every participant, but Message.recipients
+// stays within $defs/message's 32, so every Delivery is schema-valid.
+func TestDefaultedRecipientsCappedAt32(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	var peers []string
+	for i := 0; i < 39; i++ {
+		p, _ := env.NewPeer("session", fmt.Sprintf("p%d", i))
+		peers = append(peers, p)
+	}
+	first := mustSend(t, env, aSec, req("cap0", peers[:32]...))
+	more := req("cap1", peers[32:]...)
+	more["thread_id"] = first.ThreadID
+	mustSend(t, env, aSec, more)
+
+	// A reply-all from A defaults to the 39 other participants.
+	all := req("cap2")
+	all["thread_id"] = first.ThreadID
+	sr := mustSend(t, env, aSec, all)
+	if len(sr.Deliveries) != 39 {
+		t.Fatalf("reply-all deliveries = %d, want 39", len(sr.Deliveries))
+	}
+	for _, p := range peers {
+		evs := deliveryEvents(t, env, p)
+		d := evs[len(evs)-1]
+		if err := envelope.Validate("delivery", d); err != nil {
+			t.Fatalf("delivery to %s is schema-invalid: %v", p, err)
+		}
+	}
+}
