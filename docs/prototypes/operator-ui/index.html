@@ -107,7 +107,7 @@ a{color:inherit}
 .va .msg header{display:flex;align-items:center;gap:8px;font-size:13px;flex-wrap:wrap}
 .va .msg header b{font-weight:600}
 .va .msg .kind,.va .msg .t,.va .msg .via{color:var(--dim);font-size:12px}
-.va .msg .txt{font-size:14px;line-height:1.65;color:#dfe3ea;margin-top:6px;max-width:68ch}
+.va .msg .txt{font-size:14px;line-height:1.65;color:#dfe3ea;margin-top:6px;max-width:68ch;overflow-wrap:anywhere}
 .va .msg .txt code{font:12.5px var(--mono);background:#171f37;padding:1px 5px;border-radius:4px}
 .va .reply{display:inline-flex;gap:6px;font-size:12px;color:var(--violet);margin-top:4px;cursor:pointer;text-decoration:none}
 .va .reply span{color:var(--dim);max-width:44ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -200,7 +200,7 @@ a{color:inherit}
 .vb .bm header{display:flex;gap:8px;align-items:center;font-size:12.5px}
 .vb .bm header b{font-weight:700}
 .vb .bm .m{color:var(--dim);font:500 11px var(--mono)}
-.vb .bm .txt{font-size:13.5px;line-height:1.55;margin-top:6px;color:#dfe3ea}
+.vb .bm .txt{font-size:13.5px;line-height:1.55;margin-top:6px;color:#dfe3ea;overflow-wrap:anywhere}
 .vb .bm .txt code{font:12px var(--mono);background:#1a2240;padding:1px 4px;border-radius:4px}
 .vb .bm .rl{font-size:11.5px;color:var(--violet);cursor:pointer;margin-top:4px;display:block}
 .vb .bm .atts{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
@@ -648,7 +648,7 @@ function Binbox(){
        :`<div class="opts"><span class="chip" style="color:${a.status==='expired'?'var(--dim)':'var(--ok)'}">${a.status==='expired'?'expired '+hm(i.m.apr.exp):'answered "'+esc(a.decision)+'"'}</span></div>`}</div>`; };
   const dls = DL.filter(d => d.state !== 'discarded' && d.state !== 'recovered');
   return `${aprs.map((i,n) => aprTile(i, n===0)).join('')}
-  <div class="tile c3 r2 t-me"><h4>You right now</h4><div class="big" style="font-size:24px"><span class="pdot ${presOf('max')}" style="width:12px;height:12px"></span> ${presOf('max')}</div><div style="font-size:12px;color:var(--muted);margin-top:auto;display:flex;align-items:center;gap:8px">wake_idle waits while you work.<button class="sbtn" style="margin-left:auto" data-act="presence" data-v="${presOf('max')==='working'?'idle':'working'}">Set ${presOf('max')==='working'?'idle':'working'}</button></div></div>
+  <div class="tile c3 r1 t-me" style="flex-direction:row;align-items:center;gap:10px" title="While you work, wake_idle messages are held instead of pushed"><span class="pdot ${presOf('max')}" style="width:12px;height:12px"></span><div><div style="font-size:11.5px;color:var(--muted)">You are</div><div style="font-size:18px;font-weight:700">${presOf('max')}</div></div><button class="sbtn" style="margin-left:auto" data-act="presence" data-v="${presOf('max')==='working'?'idle':'working'}">Set ${presOf('max')==='working'?'idle':'working'}</button></div>
   <div class="tile c3 r2"><h4>Pinged you today</h4>${WEBHOOKS.map(w=>`<div style="display:flex;justify-content:space-between;font-size:12.5px;padding:2px 0"><span>${esc(w.name)} <span style="color:var(--dim)">${w.filter}</span></span><b class="mono">${w.fired}</b></div>`).join('')}</div>
   ${dls.map(d => `<div class="tile t-dl c4 r2"><h4 style="color:#fda4af">Dead letter to ${esc(PEER[d.to].name)}<span class="r">${d.attempts}</span></h4>
     <div style="display:flex;gap:12px;align-items:baseline"><div class="code">${d.code}</div><div class="d">${esc(d.why)}</div></div>

@@ -33,7 +33,7 @@ Precedence when sources disagree: a resolution `[Rnn]` beats a ticket `## Answer
 | Object | Direction | Purpose |
 |---|---|---|
 | `SendRequest` | peer → hub | Body of `POST /v1/messages` and the arguments of MCP `vecnet_send`. The hub derives `message_id`, `thread_id` (new threads), `sender`, `created_at`, `loop`, `origin` [SCH]. |
-| `Message` | inside a Delivery | The logical **Message**, byte-identical across every Delivery of it except `metadata["vecnet.also_via"]` (section 5.3) [ENV §4, R17]. `kind` ∈ `message`, `approval_request`, `approval_response`, `job_status`. |
+| `Message` | inside a Delivery | The logical **Message**, byte-identical across every Delivery of it [ENV §4, R17]. `kind` ∈ `message`, `approval_request`, `approval_response`, `job_status`. |
 | `Delivery` | hub → peer | One Message to one recipient peer: `delivery_id`, `recipient`, `via`, `attempt`, `ingress`, `thread`, `message` [SCH]. The webhook push body, the `data` of a `delivery` Event, and an MCP inbox entry. |
 | `ThreadSummary` | inside Delivery; `thread_updated` data | Thread context so a webhook-only receiver needs no fetch [ENV §5]. |
 | `Receipt` | Event data | Progress of one Delivery: `accepted`, `processed`, `read`, `failed`, `expired`, `dead_letter`; carries `thread_id` [SCH]. |
@@ -407,7 +407,7 @@ Priority SHOULD NOT change dedupe or retry semantics [W2M §5].
 
 - **Recipient side:** `delivery_id` is the dedupe key. Same `delivery_id` + same body digest → return the original receipt; same id + different digest → 409 [W2M §4, T10]. Receivers MUST durably commit before answering 2xx [W2M §4].
 - **Sender side:** `idempotency_key` per sender, 24 h window (section 2.2).
-- **One Delivery per (`message_id`, recipient)**, however many paths reach the peer. `Delivery.via` names the first group that resolved to the recipient; any other groups are listed in `metadata["vecnet.also_via"]` on that Delivery's copy of the Message only [R17].
+- **One Delivery per (`message_id`, recipient)**, however many paths reach the peer. `Delivery.via` names the first group that resolved to the recipient; any other groups are listed in `Delivery.also_via` (a Delivery-level field, so the Message stays byte-identical) [R17].
 
 ### 5.4 Ordering
 

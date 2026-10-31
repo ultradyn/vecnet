@@ -639,6 +639,14 @@
           ],
           "description": "The group that resolved to this recipient, or null for a direct address."
         },
+        "also_via": {
+          "type": "array",
+          "maxItems": 31,
+          "items": {
+            "$ref": "#/$defs/groupId"
+          },
+          "description": "Other groups that also resolved to this recipient, when a message reached it by several paths. Absent or empty for a single path."
+        },
         "attempt": {
           "type": "integer",
           "minimum": 1,
