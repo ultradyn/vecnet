@@ -2,6 +2,9 @@
 //
 //	vecnet-hub [--listen 127.0.0.1:45752] [--data-dir /data] [--public-url URL] [--dev-ui-dir DIR]
 //	vecnet-hub init [--data-dir /data] --operator-name <name>
+//
+// VECNET_LISTEN, VECNET_DATA_DIR and VECNET_PUBLIC_URL, when set, replace
+// the defaults of --listen, --data-dir and --public-url; flags still win.
 package main
 
 import (
@@ -11,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,18 +30,31 @@ import (
 )
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err := run(ctx, os.Args[1:], os.Stdout, os.Getenv)
+	stop()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "vecnet-hub:", err)
 		os.Exit(1)
 	}
 }
 
-// run parses flags and dispatches to the server or the init subcommand.
-func run(args []string, stdout io.Writer) error {
+// envOr returns getenv(key), or def when it is unset or empty.
+func envOr(getenv func(string) string, key, def string) string {
+	if v := getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// run parses flags and dispatches to the server or the init subcommand. The
+// server runs until ctx is cancelled; getenv supplies the VECNET_* flag
+// defaults.
+func run(ctx context.Context, args []string, stdout io.Writer, getenv func(string) string) error {
 	fs := flag.NewFlagSet("vecnet-hub", flag.ContinueOnError)
-	listen := fs.String("listen", "127.0.0.1:45752", "address to listen on")
-	dataDir := fs.String("data-dir", "/data", "directory holding hub.db and blobs/")
-	publicURL := fs.String("public-url", "", "externally visible origin (default http://<listen>)")
+	listen := fs.String("listen", envOr(getenv, "VECNET_LISTEN", "127.0.0.1:45752"), "address to listen on ($VECNET_LISTEN)")
+	dataDir := fs.String("data-dir", envOr(getenv, "VECNET_DATA_DIR", "/data"), "directory holding hub.db and blobs/ ($VECNET_DATA_DIR)")
+	publicURL := fs.String("public-url", getenv("VECNET_PUBLIC_URL"), "externally visible origin ($VECNET_PUBLIC_URL; default http://<listen address>)")
 	devUIDir := fs.String("dev-ui-dir", "", "serve the operator UI from this directory instead of the embedded copy (development)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -57,10 +74,7 @@ func run(args []string, stdout io.Writer) error {
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unknown subcommand %q", fs.Arg(0))
 	}
-	if *publicURL == "" {
-		*publicURL = "http://" + *listen
-	}
-	return serve(*listen, *dataDir, *publicURL, *devUIDir)
+	return serve(ctx, *listen, *dataDir, *publicURL, *devUIDir, stdout)
 }
 
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
@@ -105,23 +119,32 @@ func runInit(dataDir, name string, w io.Writer) error {
 }
 
 // serve runs the HTTP server, the push worker and the hub's tickers until
-// SIGINT or SIGTERM. devUIDir "" serves the embedded operator UI.
-func serve(listen, dataDir, publicURL, devUIDir string) error {
+// ctx is cancelled. It binds listen first, so ":0" picks a free port, and
+// writes "vecnet-hub listening on http://<addr> (public url <url>)" to
+// stdout once accepting. publicURL "" means http://<bound address>.
+// devUIDir "" serves the embedded operator UI.
+func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, stdout io.Writer) error {
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		return err
+	}
+	addr := ln.Addr().String()
+	if publicURL == "" {
+		publicURL = "http://" + addr
+	}
 	h, db, err := openHub(dataDir, publicURL)
 	if err != nil {
+		ln.Close()
 		return err
 	}
 	defer db.Close()
 
 	worker := &push.Worker{Hub: h}
 	srv := &http.Server{
-		Addr:              listen,
 		Handler:           httpapi.New(httpapi.Deps{Hub: h, Kick: worker.Kick, VerifyRoute: worker.Verify, UIDir: devUIDir}),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// Background work stops after the HTTP server, before the store closes.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -134,8 +157,9 @@ func serve(listen, dataDir, publicURL, devUIDir string) error {
 	bg.Go(func() { h.RunTickers(bgCtx, hub.DefaultTickInterval) })
 
 	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
-	slog.Info("vecnet-hub listening", "addr", listen, "public_url", publicURL)
+	go func() { errc <- srv.Serve(ln) }()
+	slog.Info("vecnet-hub listening", "addr", addr, "public_url", publicURL)
+	fmt.Fprintf(stdout, "vecnet-hub listening on http://%s (public url %s)\n", addr, publicURL)
 
 	select {
 	case err := <-errc:
@@ -144,5 +168,10 @@ func serve(listen, dataDir, publicURL, devUIDir string) error {
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		// Long-lived streams (SSE, long polls) outlasted the grace period.
+		srv.Close()
+		return err
+	}
+	return nil
 }

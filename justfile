@@ -18,6 +18,27 @@ test:
 run *ARGS:
     CGO_ENABLED=0 build2 go run ./cmd/vecnet-hub --listen 127.0.0.1:45752 --data-dir .data --public-url http://127.0.0.1:45752 {{ARGS}}
 
+# Check built binaries carry no x86 ISA-needed stamp (must print 0 for each; see docs/DEPLOY.md)
+isa-check: build
+    for b in bin/vecnet-hub bin/vecnet; do n=$(readelf -n "$b" | grep -c 'x86 ISA needed' || true); echo "$b: $n"; [ "$n" = 0 ]; done
+
+# Initialise a local dev hub's operator in .data/ (prints the secret once)
+hub-init NAME="Max":
+    CGO_ENABLED=0 build2 go run ./cmd/vecnet-hub init --data-dir .data --operator-name {{NAME}}
+
+# Deploy to Fly (builds the image remotely from Dockerfile; Max runs this, tests never do)
+fly-deploy:
+    fly deploy --remote-only
+
+# Create the operator on the deployed hub (prints the secret once)
+fly-init:
+    fly ssh console -C "/vecnet-hub init --data-dir /data --operator-name Max"
+
+# Copy the live hub.db off the Fly volume to backups/ (manual; nightly copy: docs/DEPLOY.md)
+fly-backup:
+    mkdir -p backups
+    fly ssh sftp get /data/hub.db "backups/hub-$(date -u +%Y%m%dT%H%M%SZ).db"
+
 # Show the wayfinder frontier: open, unblocked, unclaimed tickets
 frontier:
     #!/usr/bin/env bash
