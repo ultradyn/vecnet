@@ -209,7 +209,7 @@ Body `{state: idle|working|blocked|offline, at, capabilities?, quota?, location?
 
 ### 2.9 Groups *(proposed paths)*
 
-`POST /v1/groups` creates an Ad hoc group (`grp_`) with members the caller is allowed to message; `POST /v1/groups/{id}/members` lets any member add others under the same scopes; `GET /v1/groups` lists the caller's groups [T09, T11]. Teams are operator-only (section 2.12).
+`POST /v1/groups` creates an Ad hoc group (`grp_`) with members the caller is allowed to message; `POST /v1/groups/{id}/members` lets any member add others under the same scopes; `GET /v1/groups` lists the caller's groups [T09, T11]. A principal credential names the acting peer with `?as=<peer_id>` on the two `POST`s, as on `POST /v1/presence`; without it the hub answers 422 `as_required`. Teams are operator-only (section 2.12).
 
 ### 2.10 Directory: `GET /v1/peers` *(proposed path)*, `PATCH /v1/peers/me`
 

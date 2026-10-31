@@ -104,14 +104,17 @@ func unknownRecipient(id string) *APIError {
 	return e
 }
 
-// groupActor is the peer that creates or edits an ad hoc group for c: a
-// peer's own id, or the operator's peer. A principal credential has no peer
-// of its own and is 403 forbidden.
-func groupActor(c auth.Caller) (string, error) {
-	if (c.Kind == "peer" || c.Kind == "operator") && c.PeerID != "" {
-		return c.PeerID, nil
+// groupActor is the peer that creates or edits an ad hoc group for c,
+// resolved inside tx like a sender (PROTOCOL §2.1 "peer / principal"): a
+// peer's own id, the operator's peer, or for a principal the peer named by
+// as (422 as_required without it; 403 forbidden for a peer outside the
+// principal or a disabled one).
+func groupActor(ctx context.Context, tx *sql.Tx, c auth.Caller, as string) (string, error) {
+	snd, err := resolveSender(ctx, tx, c, as)
+	if err != nil {
+		return "", err
 	}
-	return "", E(http.StatusForbidden, "forbidden", "this credential has no peer of its own")
+	return snd.peer, nil
 }
 
 // checkMembers validates a members list: every entry a peer_ id (422
@@ -151,15 +154,15 @@ func (h *Hub) checkMembers(ctx context.Context, tx *sql.Tx, actor string, member
 }
 
 // CreateGroup creates an ad hoc group (PROTOCOL §2.9, §7) of the caller's
-// peer plus members, each of which the creator's send scopes must allow
+// peer (for a principal, the peer named by as) plus members, each of which the creator's send scopes must allow
 // (403 scope_denied). The creator is always a member. Audited.
-func (h *Hub) CreateGroup(ctx context.Context, c auth.Caller, members []string) (string, error) {
-	creator, err := groupActor(c)
-	if err != nil {
-		return "", err
-	}
+func (h *Hub) CreateGroup(ctx context.Context, c auth.Caller, as string, members []string) (string, error) {
 	grp := ids.New(ids.Grp)
-	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		creator, err := groupActor(ctx, tx, c, as)
+		if err != nil {
+			return err
+		}
 		ms, err := h.checkMembers(ctx, tx, creator, members)
 		if err != nil {
 			return err
@@ -182,19 +185,19 @@ func (h *Hub) CreateGroup(ctx context.Context, c auth.Caller, members []string) 
 }
 
 // AddGroupMembers adds members to ad hoc group grpID (PROTOCOL §2.9). The
-// caller's peer must be a member (403 not_member; the operator may edit any
+// caller's peer (for a principal, the peer named by as) must be a member (403 not_member; the operator may edit any
 // group) and its send scopes must allow each new member (403 scope_denied).
 // An unknown group is 404 unknown_recipient; an archived one is 410
 // group_archived. Existing members are ignored. Adding counts as activity
 // for the idle auto-archive. Audited.
-func (h *Hub) AddGroupMembers(ctx context.Context, c auth.Caller, grpID string, members []string) error {
-	actor, err := groupActor(c)
-	if err != nil {
-		return err
-	}
+func (h *Hub) AddGroupMembers(ctx context.Context, c auth.Caller, as, grpID string, members []string) error {
 	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		actor, err := groupActor(ctx, tx, c, as)
+		if err != nil {
+			return err
+		}
 		var archived sql.NullString
-		err := tx.QueryRowContext(ctx, `SELECT archived_at FROM groups WHERE grp_id = ?`, grpID).Scan(&archived)
+		err = tx.QueryRowContext(ctx, `SELECT archived_at FROM groups WHERE grp_id = ?`, grpID).Scan(&archived)
 		if errors.Is(err, sql.ErrNoRows) {
 			return unknownRecipient(grpID)
 		}

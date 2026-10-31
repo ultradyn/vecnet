@@ -27,15 +27,15 @@ func decodeMembers(r *http.Request) ([]string, error) {
 	return members, nil
 }
 
-// postGroups is POST /v1/groups {"members": […]} (PROTOCOL §2.9): 201
-// {"group_id"}.
+// postGroups is POST /v1/groups[?as=<peer>] {"members": […]} (PROTOCOL
+// §2.9): 201 {"group_id"}. A principal names its acting peer with ?as=.
 func (s *server) postGroups(w http.ResponseWriter, r *http.Request) {
 	members, err := decodeMembers(r)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	g, err := s.Hub.CreateGroup(r.Context(), callerFrom(r.Context()), members)
+	g, err := s.Hub.CreateGroup(r.Context(), callerFrom(r.Context()), r.URL.Query().Get("as"), members)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -43,15 +43,15 @@ func (s *server) postGroups(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"group_id": g})
 }
 
-// postGroupMembers is POST /v1/groups/{id}/members {"members": […]}
-// (PROTOCOL §2.9): 204.
+// postGroupMembers is POST /v1/groups/{id}/members[?as=<peer>]
+// {"members": […]} (PROTOCOL §2.9): 204.
 func (s *server) postGroupMembers(w http.ResponseWriter, r *http.Request) {
 	members, err := decodeMembers(r)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	if err := s.Hub.AddGroupMembers(r.Context(), callerFrom(r.Context()), r.PathValue("id"), members); err != nil {
+	if err := s.Hub.AddGroupMembers(r.Context(), callerFrom(r.Context()), r.URL.Query().Get("as"), r.PathValue("id"), members); err != nil {
 		writeError(w, err)
 		return
 	}

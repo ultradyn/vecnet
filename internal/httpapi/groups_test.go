@@ -188,3 +188,53 @@ func TestTeamsOperatorOnly(t *testing.T) {
 		t.Fatalf("team send to %v, want %v", got, sorted(b, c))
 	}
 }
+
+// TestPrincipalGroupsWithAs: a principal creates and extends ad hoc groups
+// for one of its peers via ?as= (PROTOCOL §2.1 "peer / principal", §13.6).
+func TestPrincipalGroupsWithAs(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	b, _ := env.NewPeer("session", "b")
+	c, _ := env.NewPeer("session", "c")
+	other, _ := env.NewPeer("session", "other")
+	prn, pSec := env.NewPrincipal("p")
+	p1, _, err := env.Hub.AddPeer(ctx, "pagchat-bot", "p1", prn)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, raw := env.Do(pSec, "POST", "/v1/groups", map[string]any{"members": []string{b}})
+	mustErr(t, resp, raw, http.StatusUnprocessableEntity, "as_required")
+	resp, raw = env.Do(pSec, "POST", "/v1/groups?as="+other, map[string]any{"members": []string{b}})
+	mustErr(t, resp, raw, http.StatusForbidden, "forbidden")
+
+	resp, raw = env.Do(pSec, "POST", "/v1/groups?as="+p1, map[string]any{"members": []string{b}})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("principal POST /v1/groups?as= = %d; %s", resp.StatusCode, raw)
+	}
+	var keys map[string]string
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatal(err)
+	}
+	grp := keys["group_id"]
+	resp, raw = env.Do(pSec, "POST", "/v1/groups/"+grp+"/members?as="+p1, map[string]any{"members": []string{c}})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("principal add members = %d; %s", resp.StatusCode, raw)
+	}
+	g := listGroups(t, env, pSec)[grp]
+	if g.CreatedBy != p1 || !equalStrings(g.Members, sorted(p1, b, c)) {
+		t.Fatalf("group = %+v, want created by %s with members %v", g, p1, sorted(p1, b, c))
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

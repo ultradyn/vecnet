@@ -922,10 +922,15 @@ func (a *app) cmdGroups(args []string) error {
 	if len(o.pos) > 0 {
 		sub = o.pos[0]
 	}
+	// A principal profile acts for the peer named by --as (PROTOCOL §2.1).
+	var asQ url.Values
+	if a.as != "" {
+		asQ = url.Values{"as": {a.as}}
+	}
 	switch {
 	case sub == "create" && len(o.pos) >= 2:
 		var out map[string]string
-		if err := a.call(http.MethodPost, "/v1/groups", map[string][]string{"members": o.pos[1:]}, &out); err != nil {
+		if err := a.callQuery(http.MethodPost, "/v1/groups", asQ, map[string][]string{"members": o.pos[1:]}, &out); err != nil {
 			return err
 		}
 		if a.json {
@@ -934,7 +939,7 @@ func (a *app) cmdGroups(args []string) error {
 		fmt.Fprintln(a.stdout, out["group_id"])
 		return nil
 	case sub == "add" && len(o.pos) >= 3:
-		if err := a.call(http.MethodPost, "/v1/groups/"+pathEscape(o.pos[1])+"/members", map[string][]string{"members": o.pos[2:]}, nil); err != nil {
+		if err := a.callQuery(http.MethodPost, "/v1/groups/"+pathEscape(o.pos[1])+"/members", asQ, map[string][]string{"members": o.pos[2:]}, nil); err != nil {
 			return err
 		}
 		return a.ok("ok")
