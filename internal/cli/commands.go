@@ -282,15 +282,6 @@ func (a *app) connect() (*client, string, cache, error) {
 	return newClient(p.Hub, p.Secret), name, cache{dir: dir}, nil
 }
 
-// streamKey names one event stream in cursors.json: the profile, narrowed
-// by --as when set.
-func (a *app) streamKey(profile string) string {
-	if a.as != "" {
-		return profile + "/" + a.as
-	}
-	return profile
-}
-
 // peerQuery narrows a principal's stream or ack to --as (PROTOCOL §2.3).
 func (a *app) peerQuery() url.Values {
 	q := url.Values{}
@@ -635,23 +626,21 @@ func (a *app) upload(c *client, path string) (envelope.Attachment, error) {
 
 // --- inbox / ack ---
 
-// startCursor asks for the stream from its first retained event. A fresh
-// stream with nothing acked would otherwise start at head (PROTOCOL §2.3)
-// and miss what arrived before the first read. Epoch 0 is either the live
-// epoch (read from the start) or an unknown one, which the hub answers with
-// 409 cursor_purged naming the oldest valid cursor; the CLI resumes there.
-const startCursor = "e0.0"
-
 // pollBody is the long-poll response of GET /v1/events.
 type pollBody struct {
 	Events     []envelope.Event `json:"events"`
 	NextCursor string           `json:"next_cursor"`
 }
 
-// poll reads the stream once (wait seconds) after cursor.
+// poll reads the stream once (wait seconds) after cursor. An empty cursor
+// leaves out ?after=, so the hub starts at the stream's shared acked cursor
+// (or its oldest retained event when nothing was acked) [PROTOCOL §2.3];
+// the CLI never builds a cursor of its own (§1.3: cursors are opaque).
 func (a *app) poll(c *client, after string, wait int) (pollBody, error) {
 	q := a.peerQuery()
-	q.Set("after", after)
+	if after != "" {
+		q.Set("after", after)
+	}
 	q.Set("wait", strconv.Itoa(wait))
 	var body pollBody
 	ctx, cancel := context.WithTimeout(a.ctx, requestTimeout+time.Duration(wait)*time.Second)
@@ -684,24 +673,15 @@ func (a *app) cmdInbox(args []string) error {
 			return usageErr("inbox: --limit must be a positive whole number")
 		}
 	}
-	c, profile, ch, err := a.connect()
+	c, _, ch, err := a.connect()
 	if err != nil {
 		return err
 	}
-	key := a.streamKey(profile)
 	after, explicit := o.str("since"), o.has("since")
-	if !explicit {
-		after = ch.cursor(key)
-	}
-	fromCache := after != "" && !explicit
-	if after == "" {
-		after = startCursor
-	}
 	body, err := a.poll(c, after, 0)
 	if oldest, ok := oldestCursor(err); ok && !explicit {
-		if fromCache {
-			a.warn("stored cursor %s is no longer valid; reading from %s (re-sync threads with `vecnet thread`)", after, oldest)
-		}
+		// The hub's acked cursor is below retention or from a rebuilt log.
+		a.warn("acked cursor is no longer valid; reading from %s (re-sync threads with `vecnet thread`)", oldest)
 		body, err = a.poll(c, oldest, 0)
 	}
 	if err != nil {
@@ -725,7 +705,7 @@ func (a *app) cmdInbox(args []string) error {
 		}
 	}
 	if o.has("ack") && len(evs) > 0 {
-		if err := a.ack(c, ch, key, next); err != nil {
+		if err := a.ack(c, next); err != nil {
 			return err
 		}
 		fmt.Fprintf(a.stderr, "acked %s\n", next)
@@ -733,16 +713,10 @@ func (a *app) cmdInbox(args []string) error {
 	return nil
 }
 
-// ack posts cur to /v1/ack and, once the hub took it, stores it as the
-// stream's cursor.
-func (a *app) ack(c *client, ch cache, key, cur string) error {
-	if err := c.do(a.ctx, http.MethodPost, "/v1/ack", a.peerQuery(), map[string]string{"cursor": cur}, nil); err != nil {
-		return err
-	}
-	if err := ch.setCursor(key, cur); err != nil {
-		a.warn("cursor cache: %v", err)
-	}
-	return nil
+// ack posts cur to /v1/ack. The acked cursor is kept by the hub, per stream
+// owner and scope, and shared by every consumer (PROTOCOL §2.3).
+func (a *app) ack(c *client, cur string) error {
+	return c.do(a.ctx, http.MethodPost, "/v1/ack", a.peerQuery(), map[string]string{"cursor": cur}, nil)
 }
 
 func (a *app) cmdAck(args []string) error {
@@ -753,11 +727,11 @@ func (a *app) cmdAck(args []string) error {
 	if len(o.pos) != 1 {
 		return usageErr("usage: vecnet ack <cursor>")
 	}
-	c, profile, ch, err := a.connect()
+	c, _, _, err := a.connect()
 	if err != nil {
 		return err
 	}
-	if err := a.ack(c, ch, a.streamKey(profile), o.pos[0]); err != nil {
+	if err := a.ack(c, o.pos[0]); err != nil {
 		return err
 	}
 	if a.json {
@@ -995,11 +969,16 @@ func (a *app) cmdGroups(args []string) error {
 
 // call sends one request with the profile's credential.
 func (a *app) call(method, path string, body, out any) error {
+	return a.callQuery(method, path, nil, body, out)
+}
+
+// callQuery is call with query parameters.
+func (a *app) callQuery(method, path string, q url.Values, body, out any) error {
 	c, _, _, err := a.connect()
 	if err != nil {
 		return err
 	}
-	return c.do(a.ctx, method, path, nil, body, out)
+	return c.do(a.ctx, method, path, q, body, out)
 }
 
 // --- presence / receipt ---
@@ -1015,7 +994,12 @@ func (a *app) cmdPresence(args []string) error {
 		if o.has("note") {
 			body["note"] = o.str("note")
 		}
-		if err := a.call(http.MethodPost, "/v1/presence", body, nil); err != nil {
+		// A principal names the peer it reports for with ?as= (PROTOCOL §2.6).
+		var q url.Values
+		if a.as != "" {
+			q = url.Values{"as": {a.as}}
+		}
+		if err := a.callQuery(http.MethodPost, "/v1/presence", q, body, nil); err != nil {
 			return err
 		}
 		return a.ok("presence " + o.pos[1])

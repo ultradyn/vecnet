@@ -143,38 +143,32 @@ func (a *app) cmdWatch(args []string) error {
 	if len(o.pos) != 0 {
 		return usageErr("usage: vecnet watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]")
 	}
-	c, profile, ch, err := a.connect()
+	c, _, ch, err := a.connect()
 	if err != nil {
 		return err
 	}
 	w := &watcher{
-		a: a, c: c, ch: ch, key: a.streamKey(profile),
+		a: a, c: c, ch: ch,
 		forMonitor: o.has("for-monitor"), autoAck: o.has("auto-ack"), deliveriesOnly: o.has("deliveries-only"),
 		retry: watchDefaultRetry, seen: newDedupe(dedupeWindow),
 	}
+	// Without --since the first connect leaves out ?after=, so the hub
+	// starts at the stream's shared acked cursor (PROTOCOL §2.3).
 	w.cursor = o.str("since")
-	if !o.has("since") {
-		w.cursor = ch.cursor(w.key)
-	}
-	if w.cursor == "" {
-		w.cursor, w.quietPurge = startCursor, true
-	}
 	return w.run()
 }
 
 // watcher holds one `watch` session: an SSE stream that reconnects per
 // PROTOCOL §13.1, falling back to long-poll after repeated SSE failures.
 type watcher struct {
-	a   *app
-	c   *client
-	ch  cache
-	key string
+	a  *app
+	c  *client
+	ch cache
 
 	forMonitor, autoAck, deliveriesOnly bool
 
-	cursor     string        // last event id handled (or the start cursor)
+	cursor     string        // last event id seen ("" until the hub names one: start at the acked cursor)
 	connected  bool          // a stream was open before: resume with Last-Event-ID, not ?after=
-	quietPurge bool          // cursor is startCursor, so a 409 is expected
 	retry      time.Duration // the hub's "retry:" value
 	seen       *dedupe
 	pendingAck string
@@ -217,10 +211,8 @@ func (w *watcher) run() error {
 			return nil
 		}
 		if oldest, ok := oldestCursor(err); ok && purges < 2 {
-			if !w.quietPurge {
-				fmt.Fprintf(w.a.stderr, "cursor_purged: resuming from %s; re-sync threads with `vecnet thread <id>`\n", oldest)
-			}
-			w.cursor, w.connected, w.quietPurge = oldest, false, false
+			fmt.Fprintf(w.a.stderr, "cursor_purged: resuming from %s; re-sync threads with `vecnet thread <id>`\n", oldest)
+			w.cursor, w.connected = oldest, false
 			purges++
 			continue
 		}
@@ -328,8 +320,10 @@ func (w *watcher) stream() error {
 			}
 			idle.Reset(watchSilence)
 			if line == "" { // dispatch
-				if hasData {
-					w.handle(evType, strings.Join(data, "\n"))
+				// Empty data (the hub's priming event) only moves the
+				// cursor; it is not an event (PROTOCOL §13.1).
+				if joined := strings.Join(data, "\n"); hasData && joined != "" {
+					w.handle(evType, joined)
 				}
 				w.cursor = idBuf
 				data, hasData, evType = nil, false, ""
@@ -408,11 +402,7 @@ func splitSSELines(data []byte, atEOF bool) (int, []byte, error) {
 
 // longPoll is the fallback after repeated SSE failures: one long-poll read.
 func (w *watcher) longPoll() error {
-	after := w.cursor
-	if after == "" {
-		after = "head"
-	}
-	body, err := w.a.poll(w.c, after, watchPollWait)
+	body, err := w.a.poll(w.c, w.cursor, watchPollWait)
 	if err != nil {
 		return err
 	}
@@ -472,7 +462,7 @@ func (w *watcher) flushAck() {
 		return
 	}
 	cur := w.pendingAck
-	if err := w.a.ack(w.c, w.ch, w.key, cur); err != nil {
+	if err := w.a.ack(w.c, cur); err != nil {
 		if w.a.ctx.Err() == nil {
 			fmt.Fprintf(w.a.stderr, "vecnet: watch: ack %s: %v\n", cur, err)
 		}

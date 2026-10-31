@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -420,6 +421,87 @@ func TestWatchForMonitor(t *testing.T) {
 	if n := strings.Count(out.String(), " hello watcher"); n != 1 {
 		t.Fatalf("delivery printed %d times:\n%s", n, out.String())
 	}
+	// The hub's priming event (id, empty data) is not an event: nothing is
+	// reported for it (PROTOCOL §13.1).
+	if s := errb.String(); s != "" {
+		t.Fatalf("watch stderr = %q, want empty", s)
+	}
+}
+
+// TestFreshCacheUsesHubAckedCursor: the acked cursor lives on the hub and is
+// shared by every consumer (PROTOCOL §2.3), so a second install of the same
+// peer with an empty cache sees nothing already acked elsewhere.
+func TestFreshCacheUsesHubAckedCursor(t *testing.T) {
+	env := testhub.Start(t)
+	aID, aSec := env.NewPeer("session", "A")
+	bID, bSec := env.NewPeer("session", "B")
+	a := profileUser(t, env.URL, aSec)
+	b := profileUser(t, env.URL, bSec)
+
+	a.send(bID, "one", "--hold")
+	if lines := nonEmptyLines(b.mustRun("inbox", "--ack")); len(lines) != 1 {
+		t.Fatalf("inbox --ack = %q, want one line", lines)
+	}
+
+	b2 := profileUser(t, env.URL, bSec) // same peer, another machine
+	if out := b2.mustRun("inbox"); strings.TrimSpace(out) != "" {
+		t.Fatalf("fresh-cache inbox after an ack elsewhere = %q, want empty", out)
+	}
+
+	// watch on a fresh cache resumes at the hub's acked cursor too: the
+	// first line is the new message, not the acked one.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var out, errb syncBuffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.RunContext(ctx, []string{"watch", "--for-monitor"}, strings.NewReader(""), &out, &errb, profileUser(t, env.URL, bSec).getenv)
+	}()
+	sent := a.send(bID, "two", "--wake")
+	re := regexp.MustCompile(`^e\d+\.\d+ delivery ` + regexp.QuoteMeta(sent.ThreadID) + ` ` + regexp.QuoteMeta(aID) + ` two$`)
+	waitLine(t, &out, re, 10*time.Second)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("watch did not return after its context was cancelled")
+	}
+	if strings.Contains(out.String(), " one") {
+		t.Fatalf("watch replayed an acked delivery:\n%s", out.String())
+	}
+}
+
+// TestPresenceSetAsPrincipal: a principal names the peer it sets presence for
+// with --as (?as= on POST /v1/presence).
+func TestPresenceSetAsPrincipal(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	prn, pSec := env.NewPrincipal("P")
+	x, _, err := env.Hub.AddPeer(context.Background(), "session", "X", prn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := profileUser(t, env.URL, pSec)
+	p.mustRun("--as", x, "presence", "set", "working", "--note", "busy")
+
+	a := profileUser(t, env.URL, aSec)
+	var peers []struct {
+		PeerID   string `json:"peer_id"`
+		Presence string `json:"presence"`
+	}
+	out := a.mustRun("--json", "peers")
+	if err := json.Unmarshal([]byte(out), &peers); err != nil {
+		t.Fatalf("peers --json %q: %v", out, err)
+	}
+	for _, pr := range peers {
+		if pr.PeerID == x {
+			if pr.Presence != "working" {
+				t.Fatalf("presence of %s = %q, want working", x, pr.Presence)
+			}
+			return
+		}
+	}
+	t.Fatalf("directory lacks %s: %s", x, out)
 }
 
 func TestAttachUploads(t *testing.T) {
@@ -524,8 +606,15 @@ func TestHubErrorExitCode(t *testing.T) {
 }
 
 func TestNetworkErrorExitCode(t *testing.T) {
-	// Port 1 on loopback refuses connections; nothing leaves the host.
-	a := profileUser(t, "http://127.0.0.1:1", "vn_peer_x")
+	// A listener bound to a random loopback port and closed again refuses
+	// connections; nothing leaves the host.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := "http://" + ln.Addr().String()
+	ln.Close()
+	a := profileUser(t, dead, "vn_peer_x")
 	if code, _, errs := a.run("peers"); code != 3 || errs == "" {
 		t.Fatalf("peers against a dead hub = %d %q, want 3", code, errs)
 	}

@@ -141,9 +141,8 @@ func writeFileAtomic(path string, data []byte) error {
 
 // cache is the CLI's local state under the cache dir: messages.json maps
 // message_id → thread_id (filled from inbox, watch and thread output, read
-// by reply) and cursors.json maps a stream key (profile, plus the --as peer)
-// to its last acked cursor (PROTOCOL §13.1: persisted, advanced only after
-// an ack succeeded).
+// by reply). No cursor is cached: the durable cursor is the hub's acked
+// cursor, shared by every consumer of a stream (PROTOCOL §2.3).
 type cache struct {
 	dir string // "" disables the cache
 }
@@ -211,22 +210,4 @@ func (c cache) rememberMessages(pairs map[string]string) error {
 		}
 	}
 	return c.writeJSON("messages.json", m)
-}
-
-// cursor returns the last acked cursor stored for key.
-func (c cache) cursor(key string) string {
-	return c.readJSON("cursors.json")[key]
-}
-
-// setCursor stores cur as key's acked cursor.
-func (c cache) setCursor(key, cur string) error {
-	if c.dir == "" {
-		return nil
-	}
-	m := c.readJSON("cursors.json")
-	if m[key] == cur {
-		return nil
-	}
-	m[key] = cur
-	return c.writeJSON("cursors.json", m)
 }

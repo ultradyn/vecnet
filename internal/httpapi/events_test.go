@@ -257,6 +257,33 @@ func TestLongPollReturnsImmediatelyAndThenWaits(t *testing.T) {
 	}
 }
 
+// TestNeverAckedStartsAtOldest: with no Last-Event-ID, no ?after= and nothing
+// acked, a stream starts at the oldest retained event, so a first read sees
+// what arrived before it; once acked, the shared acked cursor is used, and
+// after=head still means "from now" (PROTOCOL §2.3).
+func TestNeverAckedStartsAtOldest(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("grokbot", "a")
+	b, bSec := env.NewPeer("dot", "b")
+	sr := postSend(t, env, aSec, sendBody("first-read", b), http.StatusAccepted)
+
+	pr := mustPoll(t, env, bSec, "?wait=0")
+	if len(pr.Events) != 1 || pr.Events[0].Type != "delivery" || recipientOf(t, pr.Events[0]) != b {
+		t.Fatalf("never-acked poll = %+v, want the delivery sent before the first read", pr.Events)
+	}
+	if head := mustPoll(t, env, bSec, "?after=head&wait=0"); len(head.Events) != 0 {
+		t.Fatalf("after=head = %+v, want none", head.Events)
+	}
+	resp, body := env.Do(bSec, "POST", "/v1/ack", map[string]string{"cursor": pr.Events[0].Cursor})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("ack = %d; %s", resp.StatusCode, body)
+	}
+	if again := mustPoll(t, env, bSec, "?wait=0"); len(again.Events) != 0 || again.NextCursor != pr.Events[0].Cursor {
+		t.Fatalf("poll after ack = %+v next %q, want none from the acked cursor %q (delivery %s)",
+			again.Events, again.NextCursor, pr.Events[0].Cursor, sr.Deliveries[0].DeliveryID)
+	}
+}
+
 func TestLongPollWakesOnSend(t *testing.T) {
 	env := testhub.Start(t)
 	_, aSec := env.NewPeer("grokbot", "a")
@@ -326,7 +353,7 @@ func TestSSEFramesAndHeartbeat(t *testing.T) {
 	env.Configure(func(d *httpapi.Deps) { d.Heartbeat = 100 * time.Millisecond })
 	_, aSec := env.NewPeer("grokbot", "a")
 	b, bSec := env.NewPeer("dot", "b")
-	cur, err := env.Hub.Log.Current(context.Background(), []string{b})
+	cur, err := env.Hub.Log.Oldest(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +367,7 @@ func TestSSEFramesAndHeartbeat(t *testing.T) {
 		t.Fatalf("headers = %v", h)
 	}
 	s.start()
-	s.expectPreamble(t, cur.String()) // no cursor, nothing acked → head
+	s.expectPreamble(t, cur.String()) // no cursor, nothing acked → oldest retained
 
 	postSend(t, env, aSec, sendBody("sse-1", b), http.StatusAccepted)
 	f := s.nextEvent(t, 10*time.Second)
