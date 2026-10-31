@@ -1,7 +1,7 @@
 # Thread and group lifecycle
 
 Type: grilling
-Status: open
+Status: claimed
 Blocked by: 08
 
 ## Question

@@ -1,7 +1,7 @@
 # Delivery state machine
 
 Type: grilling
-Status: open
+Status: claimed
 Blocked by: 08
 
 ## Question
