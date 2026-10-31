@@ -195,7 +195,8 @@ func (h *Hub) AddPrincipal(ctx context.Context, name string) (prnID, secret stri
 // AddPeer creates a peer of kind under prnID and returns its id and a
 // one-time enrolment token. prnID "" creates an implicit single-peer
 // principal named like the peer (PROTOCOL §2.12). An unknown kind or
-// principal is a 422 invalid_value.
+// principal is a 422 invalid_value, and so is kind "operator" under any
+// principal but the operator's.
 func (h *Hub) AddPeer(ctx context.Context, kind, name, prnID string) (peerID, enrolToken string, err error) {
 	if !PeerKinds[kind] {
 		e := E(http.StatusUnprocessableEntity, "invalid_value", "unknown peer kind")
@@ -224,6 +225,22 @@ func (h *Hub) AddPeer(ctx context.Context, kind, name, prnID string) (peerID, en
 			}
 			if err != nil {
 				return fmt.Errorf("hub: find principal: %w", err)
+			}
+		}
+		if kind == "operator" {
+			// Operator powers key on peers.kind (PROTOCOL §16.1, §16.3), so
+			// the kind is reserved to the operator principal: the one holding
+			// an operator credential.
+			var one int
+			err := tx.QueryRowContext(ctx,
+				`SELECT 1 FROM credentials WHERE subject_id = ? AND kind = 'operator' LIMIT 1`, prnID).Scan(&one)
+			if errors.Is(err, sql.ErrNoRows) {
+				e := E(http.StatusUnprocessableEntity, "invalid_value", "kind operator is reserved to the operator principal")
+				e.Details["field"] = "kind"
+				return e
+			}
+			if err != nil {
+				return fmt.Errorf("hub: find operator credential: %w", err)
 			}
 		}
 		peerID = ids.New(ids.Peer)

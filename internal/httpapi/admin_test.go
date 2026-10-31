@@ -528,3 +528,24 @@ func mustCursor(t *testing.T, s string) eventlog.Cursor {
 	}
 	return c
 }
+
+// TestOperatorKindReserved: operator powers key on peers.kind, so kind
+// "operator" is only accepted under the operator principal; any other
+// principal (or an implicit one) is 422 invalid_value (PROTOCOL §16.1,
+// §14 inv. 3).
+func TestOperatorKindReserved(t *testing.T) {
+	env := testhub.Start(t)
+	prn, _ := env.NewPrincipal("p")
+	for _, body := range []map[string]any{
+		{"kind": "operator", "name": "x"},
+		{"kind": "operator", "name": "y", "principal_id": prn},
+	} {
+		resp, raw := env.Do(env.OperatorSecret, "POST", "/v1/admin/peers", body)
+		mustErr(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
+	}
+	var opPrn string
+	if err := env.Hub.DB.QueryRow(`SELECT prn_id FROM peers WHERE peer_id = ?`, env.OperatorPeer).Scan(&opPrn); err != nil {
+		t.Fatal(err)
+	}
+	adminAddPeer(t, env, map[string]any{"kind": "operator", "name": "op2", "principal_id": opPrn})
+}

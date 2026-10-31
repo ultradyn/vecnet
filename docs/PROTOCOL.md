@@ -245,7 +245,7 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `PUT /v1/admin/notify` | operator notification webhooks and filters; each route gets its own `whsec_` | [T15, R23] |
 | `GET /v1/admin/audit` | audit log | [T11] |
 
-**Principals.** `vecnet principal add --name <n>` creates a principal and prints its `prn_` id and credential. `vecnet peer add … --principal <prn_>` enrols a peer under it. `peer add` without `--principal` creates an implicit single-peer principal with the peer's display name. Only the operator reassigns a peer, with `vecnet peer move <peer> --principal <prn_>` [R10].
+**Principals.** `vecnet principal add --name <n>` creates a principal and prints its `prn_` id and credential. `vecnet peer add … --principal <prn_>` enrols a peer under it. `peer add` without `--principal` creates an implicit single-peer principal with the peer's display name. Only the operator reassigns a peer, with `vecnet peer move <peer> --principal <prn_>` [R10]. Kind `operator` carries the operator powers of section 16, so `peer add --kind operator` is accepted only under the operator principal (otherwise 422 `invalid_value`).
 
 ---
 
