@@ -76,12 +76,12 @@ Sources: <https://developers.cloudflare.com/tunnel/>, <https://developers.cloudf
 
 ## IGC matrix
 
-| Idea | All | G1 | G2 | G3 | G4 | G5 | G6 | G7* |
-|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| A. Fly `shared-cpu-1x` 512 MB + 3 GB volume, always on | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
-| B. Fly, same, with auto-stop | ✘ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
-| C. Hetzner CX23 + backups | ✔ (✘ with G7) | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ |
-| D. NAS + Cloudflare Tunnel | ✘ | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | ✔ |
+| Idea | All | G1 | G2 | G3 | G4 | G5 | G6 | G7 | G8* |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| A. Fly `shared-cpu-1x` 512 MB + 3 GB volume, always on | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| B. Fly, same, with auto-stop | ✘ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | ✔ |
+| C. Hetzner CX23 + daily backups | ✘ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ |
+| D. NAS + Cloudflare Tunnel | ✘ | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | ✔ | ✔ |
 
 - **G1** public HTTPS with no inbound port open at home
 - **G2** persistent disk for SQLite + blobs (1–3 GB)
@@ -89,13 +89,13 @@ Sources: <https://developers.cloudflare.com/tunnel/>, <https://developers.cloudf
 - **G4** backups are possible
 - **G5** Max can operate it
 - **G6** survives a home power or ISP outage
-- **G7\*** no new provider account and no host OS to patch. *Not in the ticket.* Proposed as the tie-breaker; it counts only if Max actually holds it.
-- Row B's All is ✘ because of an extra goal implied by the ticket context, **G8: held-open SSE streams are not dropped by the platform**. B fails it or saves nothing (see below). A, C and D pass G8.
+- **G7** held-open SSE streams are not dropped by the platform. This is implied by the ticket context (agents hold SSE), not listed in it.
+- **G8\*** no new provider account and no host OS to patch. *Not in the ticket.* Proposed as the tie-breaker between A and C. It counts only if Max actually holds it; without it, A and C are both All-✔.
 
 **Why the ✘s.**
 - **D fails G6.** The NAS shares home power and the ISP link. A blackout or ISP outage takes the hub, its webhook ingress and every agent stream down together. Cloudflare cannot queue inbound webhooks for an unreachable origin. A UPS would cover short blackouts but not ISP outages or long blackouts.
-- **B fails G8.** Either an open SSE connection keeps the machine up, so auto-stop never saves money, or the proxy stops it and drops every agent stream. The docs do not say which. Max's `openclaw` config already turns auto-stop off for this reason.
-- **C fails G7.** It needs a new Hetzner account and billing, and Max must patch and secure Ubuntu (or similar) himself. Fly runs the host and Max's account already exists.
+- **B fails G7.** Either an open SSE connection keeps the machine up, so auto-stop never saves money, or the proxy stops it and drops every agent stream. The docs do not say which. Max's `openclaw` config already turns auto-stop off for this reason.
+- **C fails G8.** It needs a new Hetzner account and billing, and the server OS must be patched and secured by Max. Fly runs the host and Max's account already exists.
 
 **Contested ✔s and open items.**
 - **A on G3** holds in `iad` (about USD 4.14). In `syd` the price is unverified. 512 MB should still fit; a 1 GB machine might approach the limit.
@@ -117,7 +117,7 @@ Sources: <https://developers.cloudflare.com/tunnel/>, <https://developers.cloudf
 
 ## What Max must decide
 
-1. **Accept G7 as a real goal?** If yes, Fly wins outright. If no, Fly and Hetzner tie and either is fine. Hetzner gives 4 GB RAM and 40 GB disk for about twice the price.
+1. **Accept G8 as a real goal?** If yes, Fly wins outright. If no, Fly and Hetzner tie and either is fine. Hetzner gives 4 GB RAM and 40 GB disk for about twice the price.
 2. **Region:** `syd` (latency) or `iad` (cheapest). Check the `syd` price first.
 3. **Off-host backup target:** the NAS (free, already snapshotted) or object storage.
 4. **Is NAS-only acceptable after all?** Only if an outage of hours is acceptable for agent comms. The NAS stays useful as the backup target either way.
