@@ -119,7 +119,10 @@ a{color:inherit}
 .va .rc i.ring{background:none;border:1.5px solid var(--c)}
 .va .box{border:1px solid var(--line2);border-radius:8px;padding:10px 12px;margin-top:8px;background:#0e1426;font-size:13px}
 .va .sys{font-size:12.5px;color:var(--dim);padding:12px 0 12px 40px;border-bottom:1px solid #161d33}
-.va .composer{position:sticky;bottom:72px;margin-top:22px;border:1px solid var(--line2);border-radius:10px;background:#0f1529;padding:10px;box-shadow:0 -20px 30px var(--bg)}
+.va main.chat{display:flex;flex-direction:column;padding:0;overflow:hidden}
+.va main.chat .log{flex:1;overflow:auto;padding:40px 48px 16px}
+.va main.chat .cwrap{padding:12px 48px 76px;border-top:1px solid var(--line);background:#0b0f19}
+.va .composer{border:1px solid var(--line2);border-radius:10px;background:#0f1529;padding:10px}
 .va .composer textarea{width:100%;background:none;border:0;color:var(--text);font:14px/1.5 var(--sans);resize:none;height:44px;outline:none}
 .va .composer .bar{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim)}
 .va .seg{display:inline-flex;border:1px solid var(--line2);border-radius:7px;overflow:hidden}
@@ -505,7 +508,7 @@ function markDone(mid){ const m = msgById(mid); m.rc.max = {s:'processed', at:no
 function send(text){
   text = (text || '').trim(); if (!text) return false;
   const th = THREADS[S.thread];
-  if (th.state === 'cut'){ toast('422 thread_budget_exhausted: only the operator can raise this thread’s budget'); }
+  if (th.state === 'cut'){ toast('422: this thread was cut by loop control. Raise its budget first (operator only).'); return false; }
   const to = th.parts.filter(k => k !== 'max' && PEER[k].kind !== 'source');
   let truncated = false, atts = [], b = bytesOf(text);
   if (b > 4096){ truncated = true; atts.push({name:'message.md', size:b, mt:'text/markdown', spill:true}); text = text.slice(0, 1200) + ' …'; }
@@ -531,7 +534,8 @@ function A(){
     <div class="me"><span class="pdot ${presOf('max')}"></span>max is ${presOf('max')}</div>
     <div class="me" style="font-size:12px;color:var(--dim)">wake_idle messages wait while you work</div>
   </nav>
-  <main data-keep="a-main">${S.tab==='inbox'?`<div class="col">${Ainbox()}</div>`:S.tab==='chat'?`<div class="col">${Achat()}</div>`:`<div class="col">${Adash()}</div>`}</main>
+  ${S.tab==='chat' ? (([log, comp]) => `<main class="chat"><div class="log" data-keep="a-log" data-bottom="1"><div class="col">${log}</div></div><div class="cwrap"><div class="col">${comp}</div></div></main>`)(Achat().split('<!--SPLIT-->'))
+    : `<main data-keep="a-main"><div class="col">${S.tab==='inbox'?Ainbox():Adash()}</div></main>`}
   <aside data-keep="a-aside">${Aaside()}</aside></div>`;
 }
 const avA = k => `<div class="av" style="--k:${KC[PEER[k].kind]}" aria-hidden="true">${esc(PEER[k].name[0].toUpperCase())}</div>`;
@@ -584,7 +588,7 @@ function Achat(){
     ${kindBoxA(m)}
     ${m.atts&&m.atts.length?`<div class="atts">${m.atts.map(attChip).join('')}</div>`:''}
     <div class="rc">${rcA(m)}</div></div></article>`).join('')}
-  <div class="composer"><textarea id="compose" placeholder="Message ${esc(tname(th.parts.filter(k=>k!=='max'&&PEER[k].kind!=='source')))}" aria-label="Message"></textarea>
+  <!--SPLIT--><div class="composer"><textarea id="compose" placeholder="Message ${esc(tname(th.parts.filter(k=>k!=='max'&&PEER[k].kind!=='source')))}" aria-label="Message"></textarea>
     <div class="bar"><div class="seg" role="radiogroup" aria-label="Priority">${['wake','wake_idle','hold'].map(p=>`<button class="${S.prio===p?'on':''}" data-act="prio" data-v="${p}" role="radio" aria-checked="${S.prio===p}">${p}</button>`).join('')}</div>
     <span id="bytes">0 / 4096 B</span><span class="sp"></span><span>Enter to send</span><button class="btn pri" data-act="send">Send</button></div></div>`;
 }
@@ -857,8 +861,7 @@ function render(){
   document.getElementById('app').innerHTML = VIEW[S.variant]();
   document.querySelectorAll('[data-keep]').forEach(e => {
     if (S.scrollBottom && e.dataset.bottom) e.scrollTop = e.scrollHeight;
-    else if (scr[e.dataset.keep] != null) e.scrollTop = scr[e.dataset.keep];
-    if (S.scrollBottom && S.tab === 'chat' && S.variant === 'a' && e.dataset.keep === 'a-main') e.scrollTop = e.scrollHeight; });
+    else if (scr[e.dataset.keep] != null) e.scrollTop = scr[e.dataset.keep]; });
   S.scrollBottom = false;
   Object.keys(val).forEach(id => { const e = document.getElementById(id); if (e){ e.value = val[id]; if (fid === id){ e.focus(); try { e.setSelectionRange(...sel[id]); } catch(_){} } } });
   updBytes();

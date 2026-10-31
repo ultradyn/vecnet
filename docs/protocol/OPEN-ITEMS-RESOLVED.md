@@ -29,3 +29,9 @@ Decided by the coordinating agent under Max's delegation of technical choices (m
 25. **Connector placement.** The Grok Bot push is an in-hub push route of kind `grokbot` (bearer POST of the Delivery to the routine URL); no separate process. `origin` stays null for Grok Bot traffic because the vecnet ids ride in the body and are echoed. openclaw: one openclaw session per vecnet thread; `processed` = the dispatch completed; mention gating is a plugin config option (default off: every delivery dispatches).
 26. **Reserved metadata.** A SendRequest containing any `metadata` key starting with `vecnet.` → 422 `reserved_metadata`.
 27. **Source drift fixed in this commit.** Example 04's comment now says escalation at the halfway point and that it is phase 2. `GLOSSARY.md` was already rewritten for principals, three priorities, depth, origin and reachability; its directory entry now says the hub reads presence only for `wake_idle` and never verifies it.
+
+## Amendments from pag-chat's PROTOCOL.md review (2026-11-01)
+
+28. **Operator replies reset depth; default `max_depth` 32.** Decisive error in R20 as written: a human and a bot in one thread were cut off after 16 exchanges. See PROTOCOL.md §16.1.
+29. **Per-peer rate limits** (60 sends/min, 20 new threads/hour, 429 `rate_limited`, operator-adjustable, audited). Decisive error: the thread budget bounded one thread but a runaway bot could open unbounded threads. §16.2.
+30. **`history_access` default `from_join`, `locked_participants` flag, blob reads gated by message visibility.** Decisive error: any participant could leak a whole thread plus blobs by addressing one new peer. This changes Max's round-3 default (late joiners get full history); flagged to Max for veto. §16.3.

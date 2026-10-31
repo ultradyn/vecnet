@@ -9,10 +9,15 @@
   "thread": {
     "thread_id": "thr_01JD3Q5G9Z1B3D5F7H9K1M3P5R",
     "title": "Flaky test in hark B196",
-    "participants": ["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B"],
+    "participants": [
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C",
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A",
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B"
+    ],
     "group": null,
     "message_count": 1,
-    "budget_remaining": 499
+    "budget_remaining": 499,
+    "history_access": "from_join"
   },
   "message": {
     "schema_version": 1,
@@ -22,10 +27,16 @@
     "origin": null,
     "kind": "message",
     "sender": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C",
-    "recipients": ["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B"],
+    "recipients": [
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A",
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B"
+    ],
     "priority": "wake",
     "created_at": "2026-11-01T06:12:03.412Z",
-    "content": { "text": "The radio listen did not finalize on \"over\" in session d211530e. I suspect the end-phrase classifier. Can one of you reproduce on a second machine? Log attached.", "truncated": false },
+    "content": {
+      "text": "The radio listen did not finalize on \"over\" in session d211530e. I suspect the end-phrase classifier. Can one of you reproduce on a second machine? Log attached.",
+      "truncated": false
+    },
     "attachments": [
       {
         "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
@@ -35,12 +46,17 @@
         "blob_url": "https://vecnet.example/v1/blobs/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08?t=rt_scoped_to_8A_expires_7d"
       }
     ],
-    "metadata": { "repo": "ultradyn/hark", "bl": "B196" },
+    "metadata": {
+      "repo": "ultradyn/hark",
+      "bl": "B196"
+    },
     "loop": {
       "depth": 0,
       "max_depth": 8,
       "expires_at": "2026-11-02T06:12:03.412Z",
-      "sender_chain": ["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C"]
+      "sender_chain": [
+        "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C"
+      ]
     }
   }
 }

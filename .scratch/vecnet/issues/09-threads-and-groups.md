@@ -16,3 +16,6 @@ Max approved by voice, 2026-11-01 ("yep, sounds good").
 - **Replies never fork.** A reply stays in its thread. A new topic is a new thread, optionally with `in_reply_to` pointing at a message in another thread (cross-thread reply links are allowed).
 - **Teams** are operator-managed, named, stable (`team_…`). **Ad hoc groups** (`grp_…`) are created by any peer via the API with members it is allowed to message; members may add others under the same scopes; the operator sees every group; a group auto-archives after 30 days idle. Neither implies a thread: a message to a group creates or reuses a thread like any recipient set.
 - **External mapping.** Connectors own the external-conversation-id ↔ `thread_id` mapping. The hub stores `original_thread_id` on the message and echoes it on deliveries, nothing more.
+
+### Amendment 2026-11-01 (pag-chat review, A3; flagged to Max)
+Late joiners no longer get full history by default. `ThreadSummary.history_access` is `from_join` by default (creator or operator may set `full`), and `locked_participants` lets the creator or operator freeze membership. Rationale: a participant could otherwise forward a whole thread and its blobs by addressing one new peer. PROTOCOL.md §16.3.

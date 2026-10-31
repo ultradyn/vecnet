@@ -651,3 +651,28 @@ Residual questions, decided 2026-11-01 (same delegation):
 2. An `approval_response` from a peer the request did not address is 403 `not_addressed`.
 3. An ingress event dropped by the source's event allowlist is 202 `{"dropped": true, "reason": "event_filtered"}`, so the provider does not redeliver it.
 4. `GET /v1/threads` paginates with `?cursor=<next>`, passing back the `next` token verbatim.
+
+## 16. Amendments from pag-chat's review (2026-11-01)
+
+These three rules supersede the sections they cite. Each answers a decisive error pag-chat identified; the coordinating agent accepted them under Max's delegation and flagged amendment 3 to Max as a product-default change.
+
+### 16.1 Operator replies reset depth [A1, supersedes §6 and R20 in part]
+
+Depth exists to stop unsupervised bot-to-bot loops. A reply sent by a peer of kind `operator` MUST set `depth` to 0 for its subtree; replies below it count from 0 again. `sender_chain` MUST keep recording every originator regardless. The default `max_depth` is **32** (was 16). The thread budget (default 500) remains the hard stop and is unaffected by sender kind. Approval requests, approval responses and job status messages still count against depth and budget as in R20, except where the sender is the operator.
+
+### 16.2 Per-peer rate limits [A2, extends §2.2, §6 and §12]
+
+The hub MUST enforce per-peer limits on `POST /v1/messages` and the MCP send tools: default **60 sends per minute** and **20 new threads per hour** per peer (a principal's peers are limited individually). Exceeding either returns **429 `rate_limited`** with `Retry-After`. Limits are operator-adjustable per peer (`vecnet peer limits <peer> --sends-per-min N --threads-per-hour N`), and every rejection is an audit entry and a dashboard counter like a loop cut. Inbound webhook sources have their own per-source limit with the same defaults.
+
+### 16.3 History access and participant locking [A3, supersedes §2.2 step 3, §7 and §11 in part]
+
+`ThreadSummary` gains `history_access` (`from_join` | `full`, default **`from_join`**) and `locked_participants` (boolean, default false), both settable by the thread creator at creation and by the operator at any time.
+
+- Under `from_join`, a participant added after the thread was created MAY read only messages appended after its join (`GET /v1/threads/{id}/messages` and `vecnet_thread` filter accordingly), and MAY read a blob through its bearer only if a message visible to it references that blob. Per-recipient `blob_url` tokens on its own Deliveries are unaffected.
+- Under `full`, every participant reads the whole thread.
+- When `locked_participants` is true, a send whose recipients would add a participant is rejected **403 `participants_locked`** unless the sender is the creator or the operator.
+- Scopes (§12) continue to govern who may message whom; this amendment governs what history travels with an add.
+
+### 16.4 Operator note [no rule change]
+
+The dashboard SHOULD show, per peer, any thread whose push queue is blocked on a delivery under retry ("thread blocked on delivery N"), since per-(peer, thread) serialisation can hold a thread for hours while others flow.

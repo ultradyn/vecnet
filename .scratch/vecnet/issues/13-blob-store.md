@@ -16,3 +16,6 @@ Max approved by voice, 2026-11-01 ("that's the way to go").
 - **Read:** the per-delivery `blob_url` carries a token scoped to (recipient, sha256), valid 7 days. Without it, a blob is readable by any peer that is a participant in a thread referencing it, with its bearer, and by the operator in the UI.
 - **Retention:** a blob referenced by a retained message lives as long as the message (indefinitely unless the operator purges). Unreferenced uploads are garbage-collected after 24 h. Uploaders may set an optional TTL at upload. Operator purge removes bytes and leaves a tombstone row.
 - **Reference-only attachments** (`origin_url`, no hosted bytes) carry no `blob_url`; the hub does not fetch them.
+
+### Amendment 2026-11-01 (pag-chat review, A3)
+Bearer-based blob reads require that a message visible to the reader under the thread's `history_access` rule references the blob. Per-recipient `blob_url` tokens are unaffected. PROTOCOL.md §16.3.

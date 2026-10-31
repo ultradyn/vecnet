@@ -16,3 +16,6 @@ Max approved by voice, 2026-11-01, with two changes: "hop" sounded like hub-to-h
 - **Defaults:** `max_depth` 16, `expires_at` now + 24 h, thread budget 500 messages. Any sender may lower `max_depth`/`expires_at` for its own message; inherited values are never raised by a reply. Only the operator raises a thread budget.
 - **`sender_chain`:** last 32 originators (peers or sources) along the reply chain, oldest first, maintained by the hub; informational for recipients.
 - **Client-side breaker (connector recommendation, configurable):** when `sender_chain` shows the same two peers alternating for N consecutive entries (default N = 12) within the breaker window (default 10 min), the connector stops auto-replying and asks the operator via `approval_request` before continuing. The hub's thread budget is the hard stop regardless.
+
+### Amendment 2026-11-01 (pag-chat review, A1 + A2)
+A reply from a peer of kind `operator` resets `depth` to 0 for its subtree; default `max_depth` is now 32. Per-peer rate limits added: 60 sends/min and 20 new threads/hour, 429 `rate_limited`, operator-adjustable, audited. PROTOCOL.md §16.1–16.2.

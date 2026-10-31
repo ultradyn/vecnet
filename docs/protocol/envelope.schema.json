@@ -199,13 +199,13 @@
         "depth": {
           "type": "integer",
           "minimum": 0,
-          "description": "Reply-chain depth, set by the hub: 0 for a fresh message; a reply inherits parent.depth + 1. (Named depth, not hops: it is not hub-to-hub.)"
+          "description": "Reply-chain depth, set by the hub: 0 for a fresh message; a reply inherits parent.depth + 1, EXCEPT that a reply sent by a peer of kind operator resets depth to 0 for its subtree (a human reply is evidence the loop is supervised). sender_chain keeps recording regardless. (Named depth, not hops: it is not hub-to-hub.)"
         },
         "max_depth": {
           "type": "integer",
           "minimum": 1,
           "maximum": 64,
-          "description": "Hub rejects (422 max_depth_exceeded) a reply whose depth would exceed this. Default 16, inherited down a reply chain, may be lowered by any sender, never raised by a reply."
+          "description": "Hub rejects (422 max_depth_exceeded) a reply whose depth would exceed this. Default 32, inherited down a reply chain, may be lowered by any sender, never raised by a reply."
         },
         "expires_at": {
           "$ref": "#/$defs/timestamp",
@@ -558,7 +558,8 @@
         "title",
         "participants",
         "message_count",
-        "budget_remaining"
+        "budget_remaining",
+        "history_access"
       ],
       "properties": {
         "thread_id": {
@@ -600,6 +601,20 @@
           ],
           "minimum": 0,
           "description": "Messages left before the hub rejects sends to this thread (422 thread_budget_exhausted). Null = unlimited. Default budget 500; only the operator raises it."
+        },
+        "history_access": {
+          "type": "string",
+          "enum": [
+            "from_join",
+            "full"
+          ],
+          "default": "from_join",
+          "description": "Set by the thread creator (or operator). from_join: a late-joining participant can read only messages appended after it joined, and only blobs those messages reference. full: the whole thread. Default from_join (pag-chat review: forwarding a whole finance thread by addressing one new peer is the leak class to prevent)."
+        },
+        "locked_participants": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true only the thread creator or the operator may add participants; a send that would add one is 403 participants_locked."
         }
       }
     },
@@ -831,7 +846,7 @@
     },
     "sendRequest": {
       "type": "object",
-      "description": "POST /v1/messages body (also the arguments of the MCP vecnet_send tool). The hub derives message_id, thread_id (when new), sender, created_at, loop and origin. Rejections are synchronous 4xx with a reason code: max_depth_exceeded, thread_budget_exhausted, expired, scope_denied, unknown_recipient, name_not_an_address.",
+      "description": "POST /v1/messages body (also the arguments of the MCP vecnet_send tool). The hub derives message_id, thread_id (when new), sender, created_at, loop and origin. Rejections are synchronous 4xx with a reason code: max_depth_exceeded, thread_budget_exhausted, expired, scope_denied, unknown_recipient, name_not_an_address. Per-peer rate limits (default 60 sends/min, 20 new threads/hour) return 429 rate_limited with Retry-After.",
       "additionalProperties": false,
       "required": [
         "idempotency_key",

@@ -9,10 +9,16 @@
   "thread": {
     "thread_id": "thr_01JD3Q5G9Z1B3D5F7H9K1M3P5R",
     "title": "Flaky test in hark B196",
-    "participants": ["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8D"],
+    "participants": [
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C",
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A",
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B",
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8D"
+    ],
     "group": "grp_01JD3Q8A1C3E5G7J9M1N3P5R7T",
     "message_count": 4,
-    "budget_remaining": 496
+    "budget_remaining": 496,
+    "history_access": "from_join"
   },
   "message": {
     "schema_version": 1,
@@ -22,7 +28,9 @@
     "origin": null,
     "kind": "message",
     "sender": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8D",
-    "recipients": ["grp_01JD3Q8A1C3E5G7J9M1N3P5R7T"],
+    "recipients": [
+      "grp_01JD3Q8A1C3E5G7J9M1N3P5R7T"
+    ],
     "priority": "wake_idle",
     "created_at": "2026-11-01T06:31:44.009Z",
     "content": {
@@ -38,12 +46,17 @@
         "blob_url": "https://vecnet.example/v1/blobs/2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae?t=rt_scoped_to_8B"
       }
     ],
-    "metadata": { "vecnet.spilled": true },
+    "metadata": {
+      "vecnet.spilled": true
+    },
     "loop": {
       "depth": 1,
       "max_depth": 8,
       "expires_at": "2026-11-02T06:12:03.412Z",
-      "sender_chain": ["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C", "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8D"]
+      "sender_chain": [
+        "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C",
+        "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8D"
+      ]
     }
   }
 }
