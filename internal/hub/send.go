@@ -452,12 +452,20 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 		}
 		alsoVia, _ := json.Marshal(append([]string{}, t.alsoVia...))
 		sum := sha256.Sum256(data)
+		gate := delivery{recipient: t.peer, priority: req.Priority}
+		if err := h.GateWakeIdle(ctx, tx, &gate); err != nil {
+			return nil, false, nil, err
+		}
+		held := 0
+		if gate.held {
+			held = 1
+		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO deliveries(dly_id, msg_id, thr_id, recipient, via, also_via, priority, state, attempt,
-			                        attempts_left, route_id, expires_at, created_at, updated_at, event_seq, body_sha256)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?)`,
+			                        attempts_left, route_id, held, expires_at, created_at, updated_at, event_seq, body_sha256)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			dly, msg.MessageID, thr.ID, t.peer, t.via, string(alsoVia), req.Priority,
-			PushAttempts, route, msg.Loop.ExpiresAt, now, now, cur.Seq, hex.EncodeToString(sum[:])); err != nil {
+			PushAttempts, route, held, msg.Loop.ExpiresAt, now, now, cur.Seq, hex.EncodeToString(sum[:])); err != nil {
 			return nil, false, nil, fmt.Errorf("hub: insert delivery: %w", err)
 		}
 		resp.Deliveries = append(resp.Deliveries, DeliveryRef{DeliveryID: dly, Recipient: t.peer, Via: t.via, State: "queued"})

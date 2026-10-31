@@ -80,7 +80,7 @@ func (h *Hub) EffectivePresence(p PresenceRow, now time.Time) string {
 // §2.6, §8). A change to capabilities, quota or location also emits
 // directory_updated "updated". The report is validated against
 // $defs/presence (400 invalid_body). After commit, an idle report calls
-// IdleHook when one is set (Task 14's held wake_idle release); the hook is
+// IdleHook when one is set (by default OnIdle, the held wake_idle release); the hook is
 // best-effort, and its error is logged, not returned.
 func (h *Hub) SetPresence(ctx context.Context, c auth.Caller, asPeer string, p PresenceReport) error {
 	var notify []string

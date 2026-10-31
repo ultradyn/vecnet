@@ -64,8 +64,8 @@ type Hub struct {
 	Cfg   Config
 	Now   func() time.Time
 
-	// IdleHook, when set, runs after a peer reports presence idle (Task 14
-	// wires the held wake_idle release here). nil means no hook. It is
+	// IdleHook, when set, runs after a peer reports presence idle. New sets
+	// it to OnIdle (the held wake_idle release); nil means no hook. It is
 	// best-effort: SetPresence logs its error and still succeeds.
 	IdleHook func(ctx context.Context, peerID string) error
 
@@ -100,8 +100,10 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 		`UPDATE peers SET reachability = 'reachable', reach_via = 'call' WHERE reachability = 'connected'`); err != nil {
 		return nil, fmt.Errorf("hub: reset reachability: %w", err)
 	}
-	return &Hub{DB: db, Log: log, Blobs: blobs, Auth: &auth.Resolver{DB: db}, Cfg: cfg, Now: now,
-		streams: map[string]int{}}, nil
+	h := &Hub{DB: db, Log: log, Blobs: blobs, Auth: &auth.Resolver{DB: db}, Cfg: cfg, Now: now,
+		streams: map[string]int{}}
+	h.IdleHook = h.OnIdle // release held wake_idle deliveries (PROTOCOL §5.2)
+	return h, nil
 }
 
 // PeerKinds are the peers.kind values the hub accepts (core-hub plan Task 5).
