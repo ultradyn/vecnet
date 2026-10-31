@@ -72,7 +72,7 @@ The hub's act of turning text longer than the body cap into a hosted markdown at
 The hub's content-addressed storage for attachment bytes, with size caps, retention, and per-recipient scoped read access.
 
 ## Directory
-The hub's listing of peers and what each self-reports (capabilities, quota, location, **Presence**) together with what the hub observes (**Reachability**). The hub stores and serves this; it does not verify self-reports or act on them.
+The hub's listing of peers and what each self-reports (capabilities, quota, location, **Presence**) together with what the hub observes (**Reachability**). The hub stores and serves this and never verifies self-reports; the only thing it reads from them is presence, to decide whether a wake-idle message is pushed or held.
 
 ## Presence
 A peer's self-reported state (idle, working, blocked, offline) with a freshness timestamp. Goes stale, shown as unknown, after a per-kind timeout. Never inferred by the hub.

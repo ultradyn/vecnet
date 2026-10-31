@@ -1,16 +1,24 @@
 {
-  "$comment": "SendRequest: a bot asks the operator peer for a yes/no before pushing a fix. If unanswered 10 minutes before expiry the hub escalates to the operator's notification webhooks; at expiry the hub emits an approval_response with decision \"expired\".",
+  "$comment": "SendRequest: a bot asks the operator peer for a decision before pushing a fix. The first valid approval_response closes it; at expiry the hub posts an approval_response with decision \"expired\" (sender \"hub\"). Escalation (phase 2): if addressed to a non-operator and still open at the halfway point of the window, the hub forwards a copy to the operator with wake priority.",
   "idempotency_key": "openclaw-run-9921:approve-push",
   "thread_id": "thr_01JD3Q5G9Z1B3D5F7H9K1M3P5R",
   "in_reply_to": "msg_01JD3Q9R5P7R9T1V3X5Z7B9D1F",
-  "recipients": ["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C"],
+  "recipients": [
+    "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C"
+  ],
   "kind": "approval_request",
   "priority": "wake",
-  "content": { "text": "May I push the classifier fix to ultradyn/hark master and run the release? Diff is 41 lines, tests green on x-tuf." },
+  "content": {
+    "text": "May I push the classifier fix to ultradyn/hark master and run the release? Diff is 41 lines, tests green on x-tuf."
+  },
   "approval_request": {
     "approval_id": "apr_01JD3QC1Y3A5C7E9G1J3M5N7Q9",
     "question": "Push classifier fix to hark master and release?",
-    "options": ["yes", "no", "yes but no release"],
+    "options": [
+      "yes",
+      "no",
+      "yes but no release"
+    ],
     "expires_at": "2026-11-01T08:00:00.000Z",
     "escalate_to_operator": true
   }
