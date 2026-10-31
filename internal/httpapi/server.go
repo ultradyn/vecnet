@@ -64,4 +64,9 @@ func (s *server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/presence", s.postPresence)
 	mux.HandleFunc("GET /v1/peers", s.getPeers)
 	mux.HandleFunc("PATCH /v1/peers/me", s.patchPeersMe)
+	mux.HandleFunc("GET /v1/threads", s.getThreads)
+	mux.HandleFunc("GET /v1/threads/{id}/messages", s.getThreadMessages)
+	mux.HandleFunc("POST /v1/groups", s.postGroups)
+	mux.HandleFunc("POST /v1/groups/{id}/members", s.postGroupMembers)
+	mux.HandleFunc("GET /v1/groups", s.getGroups)
 }

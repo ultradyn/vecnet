@@ -3,7 +3,6 @@ package hub
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"math"
 	"mime"
@@ -102,30 +101,18 @@ func (h *Hub) ReadBlob(ctx context.Context, c *auth.Caller, token, sha string) (
 	return f, m, nil
 }
 
-// canSeeBlob reports bearer read access: the operator always; otherwise c's
-// peer (or, for a principal credential, any of its principal's peers) must
-// participate in a thread with a message referencing sha that is visible to
-// it: history_access 'full', or the message was appended after it joined.
+// canSeeBlob reports bearer read access: the operator always; a peer
+// credential through CanSeeBlob; a principal credential when any of its
+// peers passes the same check.
 func (h *Hub) canSeeBlob(ctx context.Context, c auth.Caller, sha string) (bool, error) {
-	if c.Kind == "operator" {
+	switch c.Kind {
+	case "operator":
 		return true, nil
+	case "principal":
+		return h.blobVisible(ctx, c.PeerID, c.PrincipalID, sha)
 	}
-	prn := ""
-	if c.Kind == "principal" {
-		prn = c.PrincipalID
+	if c.PeerID == "" {
+		return false, nil
 	}
-	var n int
-	err := h.DB.QueryRowContext(ctx,
-		`SELECT count(*) FROM blob_refs br
-		 JOIN messages m ON m.msg_id = br.msg_id
-		 JOIN threads t ON t.thr_id = m.thr_id
-		 JOIN thread_participants tp ON tp.thr_id = m.thr_id
-		 WHERE br.sha256 = ?1
-		   AND tp.peer_id IN (SELECT peer_id FROM peers WHERE (?2 != '' AND peer_id = ?2) OR (?3 != '' AND prn_id = ?3))
-		   AND (t.history_access = 'full' OR m.seq > tp.joined_after_seq)`,
-		sha, c.PeerID, prn).Scan(&n)
-	if err != nil {
-		return false, fmt.Errorf("hub: blob visibility: %w", err)
-	}
-	return n > 0, nil
+	return h.CanSeeBlob(ctx, c.PeerID, sha)
 }
