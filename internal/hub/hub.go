@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/blob"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/ids"
@@ -46,20 +48,24 @@ func DefaultConfig() Config {
 	}
 }
 
-// Hub is the service. The blob store (Task 9) joins this struct when its
-// package exists.
+// Hub is the service.
 type Hub struct {
-	DB   *store.DB
-	Log  *eventlog.Log
-	Auth *auth.Resolver
-	Cfg  Config
-	Now  func() time.Time
+	DB    *store.DB
+	Log   *eventlog.Log
+	Blobs *blob.Store
+	Auth  *auth.Resolver
+	Cfg   Config
+	Now   func() time.Time
 }
 
-// New builds a Hub over an opened store. A nil now means time.Now.
+// New builds a Hub over an opened store; the blob store lives under
+// Cfg.DataDir/blobs, so DataDir is required. A nil now means time.Now.
 func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	if db == nil {
 		return nil, errors.New("hub: nil store")
+	}
+	if cfg.DataDir == "" {
+		return nil, errors.New("hub: Config.DataDir is required")
 	}
 	if now == nil {
 		now = time.Now
@@ -68,7 +74,11 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	if err != nil {
 		return nil, fmt.Errorf("hub: %w", err)
 	}
-	return &Hub{DB: db, Log: log, Auth: &auth.Resolver{DB: db}, Cfg: cfg, Now: now}, nil
+	blobs, err := blob.Open(filepath.Join(cfg.DataDir, "blobs"), db, now)
+	if err != nil {
+		return nil, fmt.Errorf("hub: %w", err)
+	}
+	return &Hub{DB: db, Log: log, Blobs: blobs, Auth: &auth.Resolver{DB: db}, Cfg: cfg, Now: now}, nil
 }
 
 // PeerKinds are the peers.kind values the hub accepts (core-hub plan Task 5).

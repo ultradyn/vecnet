@@ -47,4 +47,6 @@ func New(d Deps) http.Handler {
 // /v1/events, /v1/peers, ... here.
 func (s *server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/messages", s.postMessages)
+	mux.HandleFunc("PUT /v1/blobs", s.putBlob)
+	mux.HandleFunc("GET /v1/blobs/{sha}", s.getBlob)
 }
