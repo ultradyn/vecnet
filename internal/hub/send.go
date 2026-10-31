@@ -100,6 +100,9 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 	if err != nil {
 		return nil, false, err
 	}
+	if err := checkKindPayload(req); err != nil {
+		return nil, false, err
+	}
 	for k := range req.Metadata {
 		if strings.HasPrefix(k, "vecnet.") {
 			e := E(http.StatusUnprocessableEntity, "reserved_metadata", "metadata keys starting with \"vecnet.\" belong to the hub")
@@ -301,6 +304,15 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 		}
 	}
 
+	// Kind-specific checks: jobs (§2.2 Jobs, §5.6) and approvals (§9).
+	effect, err := h.prepareKind(ctx, tx, c, snd, thr, req, addressed, nowT)
+	if err != nil {
+		return nil, false, nil, err
+	}
+	if effect == nil {
+		effect = &kindEffect{}
+	}
+
 	// Loop control (PROTOCOL §2.2 step 5, §6, §16.1): depth, max_depth and
 	// expiry, then the thread budget. A cut is counted, audited and
 	// committed; the send writes nothing else.
@@ -349,6 +361,22 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 	if ingress == "connector" {
 		msg.Origin = req.Origin // honoured only for connectors (§2.2 step 8)
 	}
+	if effect.jobRequest {
+		// Every Delivery carries the hub-set job id (§2.2 Response, R04).
+		if len(msg.Metadata) >= maxMetadataKeys {
+			e := E(http.StatusRequestEntityTooLarge, "payload_too_large",
+				"metadata has no room for the hub-set "+JobIDMetadataKey)
+			e.Details["field"] = "metadata"
+			e.Details["limit"] = maxMetadataKeys - 1
+			return nil, false, nil, e
+		}
+		md := make(map[string]any, len(msg.Metadata)+1)
+		for k, v := range msg.Metadata {
+			md[k] = v
+		}
+		md[JobIDMetadataKey] = effect.jobID
+		msg.Metadata = md
+	}
 	// Attachments (§2.2 step 7) and auto-spill (step 6). hosted holds every
 	// hash whose bytes the hub serves: those are pinned and linked per
 	// Delivery.
@@ -373,103 +401,41 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 			return nil, false, nil, err
 		}
 	}
-	var seq int
-	if err := tx.QueryRowContext(ctx, `SELECT coalesce(max(seq), 0) + 1 FROM messages WHERE thr_id = ?`, thr.ID).Scan(&seq); err != nil {
-		return nil, false, nil, fmt.Errorf("hub: next seq: %w", err)
+	var lastSeq int
+	if err := tx.QueryRowContext(ctx, `SELECT coalesce(max(seq), 0) FROM messages WHERE thr_id = ?`, thr.ID).Scan(&lastSeq); err != nil {
+		return nil, false, nil, fmt.Errorf("hub: last seq: %w", err)
 	}
-	if err := addParticipants(ctx, tx, thr.ID, joiners, seq-1, now); err != nil {
+	if err := addParticipants(ctx, tx, thr.ID, joiners, lastSeq, now); err != nil {
 		return nil, false, nil, err
 	}
 	thr.participants = append(thr.participants, joiners...)
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO messages(msg_id, thr_id, seq, sender, kind, created_at, body) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		msg.MessageID, thr.ID, seq, snd.peer, kind, now, string(msgJSON)); err != nil {
-		return nil, false, nil, fmt.Errorf("hub: insert message: %w", err)
+	if err := h.insertMessage(ctx, tx, thr, &msg, msgJSON, effect.jobID, effect.approvalID, true); err != nil {
+		return nil, false, nil, err
+	}
+	if effect.apply != nil {
+		if err := effect.apply(ctx, tx, msg.MessageID, now); err != nil {
+			return nil, false, nil, err
+		}
 	}
 	for sha := range hosted {
 		if err := h.Blobs.Pin(ctx, tx, sha, msg.MessageID); err != nil {
 			return nil, false, nil, err
 		}
 	}
-	thr.MessageCount++
-	if thr.Budget != nil && *thr.Budget > 0 {
-		b := *thr.Budget - 1
-		thr.Budget = &b
-	}
-	var budget any
-	if thr.Budget != nil {
-		budget = *thr.Budget
-	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE threads SET message_count = ?, budget_remaining = ?, last_message_at = ? WHERE thr_id = ?`,
-		thr.MessageCount, budget, now, thr.ID); err != nil {
-		return nil, false, nil, fmt.Errorf("hub: update thread: %w", err)
-	}
 	for _, r := range addressed {
 		if err := touchGroup(ctx, tx, r, now); err != nil {
 			return nil, false, nil, err
 		}
 	}
-	threadJSON, err := json.Marshal(thr.summary())
-	if err != nil {
-		return nil, false, nil, fmt.Errorf("hub: encode thread summary: %w", err)
-	}
 
 	// One Delivery per recipient peer, each appended to that peer's log.
-	resp := &SendResponse{MessageID: msg.MessageID, ThreadID: thr.ID, Deliveries: []DeliveryRef{}, Spilled: msg.Content.Truncated}
-	notify := make([]string, 0, len(targets))
-	for _, t := range targets {
-		dly := ids.New(ids.Dly)
-		// The stored Message bytes, plus per-recipient blob_urls when the
-		// hub hosts any attachment.
-		dlyMsg := json.RawMessage(msgJSON)
-		if len(hosted) > 0 {
-			if dlyMsg, err = json.Marshal(h.deliveryBlobURLs(msg, t.peer, hosted)); err != nil {
-				return nil, false, nil, fmt.Errorf("hub: encode delivery message: %w", err)
-			}
-		}
-		data, err := json.Marshal(deliveryWire{
-			SchemaVersion: envelope.SchemaVersion,
-			DeliveryID:    dly,
-			Recipient:     t.peer,
-			Via:           t.via,
-			AlsoVia:       t.alsoVia,
-			Attempt:       1,
-			Ingress:       ingress,
-			Thread:        threadJSON,
-			Message:       dlyMsg,
-		})
-		if err != nil {
-			return nil, false, nil, fmt.Errorf("hub: encode delivery: %w", err)
-		}
-		route, err := routeFor(ctx, tx, t.peer)
-		if err != nil {
-			return nil, false, nil, err
-		}
-		cur, err := h.Log.Append(ctx, tx, t.peer, "delivery", nowT, json.RawMessage(data))
-		if err != nil {
-			return nil, false, nil, err
-		}
-		alsoVia, _ := json.Marshal(append([]string{}, t.alsoVia...))
-		sum := sha256.Sum256(data)
-		gate := delivery{recipient: t.peer, priority: req.Priority}
-		if err := h.GateWakeIdle(ctx, tx, &gate); err != nil {
-			return nil, false, nil, err
-		}
-		held := 0
-		if gate.held {
-			held = 1
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO deliveries(dly_id, msg_id, thr_id, recipient, via, also_via, priority, state, attempt,
-			                        attempts_left, route_id, held, expires_at, created_at, updated_at, event_seq, body_sha256)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			dly, msg.MessageID, thr.ID, t.peer, t.via, string(alsoVia), req.Priority,
-			PushAttempts, route, held, msg.Loop.ExpiresAt, now, now, cur.Seq, hex.EncodeToString(sum[:])); err != nil {
-			return nil, false, nil, fmt.Errorf("hub: insert delivery: %w", err)
-		}
-		resp.Deliveries = append(resp.Deliveries, DeliveryRef{DeliveryID: dly, Recipient: t.peer, Via: t.via, State: "queued"})
-		notify = append(notify, t.peer)
+	refs, notify, err := h.fanOut(ctx, tx, thr, &msg, msgJSON, targets, hosted, ingress, nowT)
+	if err != nil {
+		return nil, false, nil, err
+	}
+	resp := &SendResponse{MessageID: msg.MessageID, ThreadID: thr.ID, Deliveries: refs, Spilled: msg.Content.Truncated}
+	if effect.jobRequest {
+		resp.JobID = effect.jobID
 	}
 
 	respJSON, err := json.Marshal(resp)
@@ -486,6 +452,113 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 		return nil, false, nil, err
 	}
 	return resp, false, notify, nil
+}
+
+// maxMessageRecipients is $defs/message's cap on recipients.
+const maxMessageRecipients = 32
+
+// insertMessage stores msg (serialised as msgJSON) as the next message of
+// thr, with its job and approval ids ("" for none), and updates the
+// thread's message_count, last_message_at and, when countBudget, its
+// budget_remaining (hub-authored messages count against no budget, R20).
+// thr's counters are updated in place so its summary reflects the message.
+func (h *Hub) insertMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envelope.Message, msgJSON []byte, jobID, aprID string, countBudget bool) error {
+	var seq int
+	if err := tx.QueryRowContext(ctx, `SELECT coalesce(max(seq), 0) + 1 FROM messages WHERE thr_id = ?`, thr.ID).Scan(&seq); err != nil {
+		return fmt.Errorf("hub: next seq: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO messages(msg_id, thr_id, seq, sender, kind, created_at, body, job_id, approval_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.MessageID, thr.ID, seq, msg.Sender, msg.Kind, msg.CreatedAt, string(msgJSON),
+		nullIfEmpty(jobID), nullIfEmpty(aprID)); err != nil {
+		return fmt.Errorf("hub: insert message: %w", err)
+	}
+	thr.MessageCount++
+	if countBudget && thr.Budget != nil && *thr.Budget > 0 {
+		b := *thr.Budget - 1
+		thr.Budget = &b
+	}
+	var budget any
+	if thr.Budget != nil {
+		budget = *thr.Budget
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE threads SET message_count = ?, budget_remaining = ?, last_message_at = ? WHERE thr_id = ?`,
+		thr.MessageCount, budget, msg.CreatedAt, thr.ID); err != nil {
+		return fmt.Errorf("hub: update thread: %w", err)
+	}
+	return nil
+}
+
+// fanOut writes one Delivery of msg (stored as msgJSON) per target: a
+// delivery Event in the target's log carrying thr's summary, and a
+// deliveries row queued for push. hosted holds the attachment hashes the
+// hub serves (per-recipient blob_urls); nil for none. It returns the
+// response refs and the peers to wake.
+func (h *Hub) fanOut(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envelope.Message, msgJSON []byte,
+	targets []target, hosted map[string]bool, ingress string, nowT time.Time) ([]DeliveryRef, []string, error) {
+	now := envelope.FormatTime(nowT)
+	threadJSON, err := json.Marshal(thr.summary())
+	if err != nil {
+		return nil, nil, fmt.Errorf("hub: encode thread summary: %w", err)
+	}
+	refs := []DeliveryRef{}
+	notify := make([]string, 0, len(targets))
+	for _, t := range targets {
+		dly := ids.New(ids.Dly)
+		// The stored Message bytes, plus per-recipient blob_urls when the
+		// hub hosts any attachment.
+		dlyMsg := json.RawMessage(msgJSON)
+		if len(hosted) > 0 {
+			if dlyMsg, err = json.Marshal(h.deliveryBlobURLs(*msg, t.peer, hosted)); err != nil {
+				return nil, nil, fmt.Errorf("hub: encode delivery message: %w", err)
+			}
+		}
+		data, err := json.Marshal(deliveryWire{
+			SchemaVersion: envelope.SchemaVersion,
+			DeliveryID:    dly,
+			Recipient:     t.peer,
+			Via:           t.via,
+			AlsoVia:       t.alsoVia,
+			Attempt:       1,
+			Ingress:       ingress,
+			Thread:        threadJSON,
+			Message:       dlyMsg,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("hub: encode delivery: %w", err)
+		}
+		route, err := routeFor(ctx, tx, t.peer)
+		if err != nil {
+			return nil, nil, err
+		}
+		cur, err := h.Log.Append(ctx, tx, t.peer, "delivery", nowT, json.RawMessage(data))
+		if err != nil {
+			return nil, nil, err
+		}
+		alsoVia, _ := json.Marshal(append([]string{}, t.alsoVia...))
+		sum := sha256.Sum256(data)
+		gate := delivery{recipient: t.peer, priority: msg.Priority}
+		if err := h.GateWakeIdle(ctx, tx, &gate); err != nil {
+			return nil, nil, err
+		}
+		held := 0
+		if gate.held {
+			held = 1
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO deliveries(dly_id, msg_id, thr_id, recipient, via, also_via, priority, state, attempt,
+			                        attempts_left, route_id, held, expires_at, created_at, updated_at, event_seq, body_sha256)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			dly, msg.MessageID, thr.ID, t.peer, t.via, string(alsoVia), msg.Priority,
+			PushAttempts, route, held, msg.Loop.ExpiresAt, now, now, cur.Seq, hex.EncodeToString(sum[:])); err != nil {
+			return nil, nil, fmt.Errorf("hub: insert delivery: %w", err)
+		}
+		refs = append(refs, DeliveryRef{DeliveryID: dly, Recipient: t.peer, Via: t.via, State: "queued"})
+		notify = append(notify, t.peer)
+	}
+	return refs, notify, nil
 }
 
 // resolveSender derives the sending peer from the credential and `as`
