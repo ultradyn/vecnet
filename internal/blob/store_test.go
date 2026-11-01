@@ -483,7 +483,9 @@ func TestPurgeTombstone(t *testing.T) {
 	}
 	mustNoTmp(t, s)
 
-	tok := s.Token("peer_B", m.SHA256, env.Now.Now().Add(time.Hour))
+	// A token's recipient must be an enabled peer for it to be honoured.
+	peerB, _ := env.NewPeer("session", "B")
+	tok := s.Token(peerB, m.SHA256, env.Now.Now().Add(time.Hour))
 	resp, body := env.Do("", "GET", "/v1/blobs/"+m.SHA256+"?t="+tok, nil)
 	mustCode(t, resp, body, http.StatusGone, "blob_purged")
 	resp, body = env.Do(env.OperatorSecret, "GET", "/v1/blobs/"+m.SHA256, nil)
