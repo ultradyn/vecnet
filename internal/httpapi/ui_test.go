@@ -177,3 +177,16 @@ func contains(xs []string, s string) bool {
 	}
 	return false
 }
+
+// TestUINotFoundIsErrorEnvelope: a missing file, subdirectory or dotfile
+// under /ui/ answers 404 with the §2 error envelope (R01), not plain text.
+func TestUINotFoundIsErrorEnvelope(t *testing.T) {
+	env := testhub.Start(t)
+	for _, p := range []string{"/ui/nope.js", "/ui/sub/app.js", "/ui/.hidden"} {
+		resp, raw := env.Do("", "GET", p, nil)
+		mustErr(t, resp, raw, http.StatusNotFound, "not_found")
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			t.Fatalf("GET %s Content-Type = %q, want application/json", p, ct)
+		}
+	}
+}

@@ -31,6 +31,15 @@ func Files() fs.FS {
 	return sub
 }
 
+// notFound writes 404 with the §2 error envelope. The body is fixed, so it
+// is written directly (httpapi, which owns writeError, imports this package).
+func notFound(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"no such file","details":{}}}` + "\n"))
+}
+
 // Handler serves the UI for requests whose path starts with /ui/. devDir ""
 // serves the embedded files; otherwise files are read from devDir on every
 // request, so edits show on refresh. Every response carries the CSP and
@@ -51,10 +60,20 @@ func Handler(devDir string) http.Handler {
 			http.Redirect(w, r, "/ui/", http.StatusMovedPermanently)
 			return
 		}
-		// Only the page and its flat assets: no subdirectories, no listings.
+		// Only the page and its flat assets: no subdirectories, no listings,
+		// no dotfiles. Anything else, or a name with no file, is the §2
+		// error envelope (R01) like every other non-2xx.
 		rest := strings.TrimPrefix(r.URL.Path, "/ui/")
+		name := rest
+		if name == "" {
+			name = "index.html"
+		}
 		if strings.Contains(rest, "/") || strings.HasPrefix(rest, ".") {
-			http.NotFound(w, r)
+			notFound(w)
+			return
+		}
+		if st, err := fs.Stat(files, name); err != nil || st.IsDir() {
+			notFound(w)
 			return
 		}
 		if strings.HasSuffix(rest, ".js") {
