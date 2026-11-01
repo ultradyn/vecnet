@@ -86,9 +86,11 @@ type Session struct {
 	res      *sessionResources // nil until the first resources/subscribe; guarded by Server.mu
 }
 
-// sseConn is a session's open GET stream.
+// sseConn is a session's open GET stream. live re-checks the credential that
+// opened it.
 type sseConn struct {
-	st *Streamer
+	st   *Streamer
+	live func() bool
 }
 
 // Handler serves one method. err may be an *RPCError; any other error is
@@ -131,6 +133,7 @@ type Server struct {
 
 	mu       sync.Mutex
 	sessions map[string]*Session
+	listens  map[string]int // open subscriptions/listen streams per credential
 }
 
 // New returns a Server for the hub h whose public URL is publicURL
@@ -147,6 +150,7 @@ func New(h *hub.Hub, a Authenticator, publicURL string) *Server {
 		methods:      map[string]Handler{},
 		capabilities: staticCapabilities,
 		sessions:     map[string]*Session{},
+		listens:      map[string]int{},
 	}
 	if h != nil {
 		s.Now = h.Now
@@ -489,7 +493,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, p Principal) {
 		slog.Warn("mcp: stream owners", "err", err) // the stream works without it
 	}
 	defer s.streamReach(owners)()
-	conn := &sseConn{st: st}
+	conn := &sseConn{st: st, live: func() bool { return s.credentialLive(r) }}
 	s.mu.Lock()
 	old := sess.stream
 	sess.stream = conn
@@ -497,11 +501,23 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, p Principal) {
 	if old != nil {
 		old.st.Close()
 	}
-	s.flushHints(sess)
-	select {
-	case <-r.Context().Done():
-	case <-st.Done():
-	case <-s.Stop: // nil (never) unless shutting down
+	s.flushHints(r.Context(), sess)
+	recheck := time.NewTicker(s.heartbeat())
+	defer recheck.Stop()
+wait:
+	for {
+		select {
+		case <-r.Context().Done():
+			break wait
+		case <-st.Done():
+			break wait
+		case <-s.Stop: // nil (never) unless shutting down
+			break wait
+		case <-recheck.C:
+			if !conn.live() {
+				break wait
+			}
+		}
 	}
 	st.Close()
 	s.mu.Lock()
@@ -510,6 +526,27 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, p Principal) {
 		sess.lastUsed = s.now()
 	}
 	s.mu.Unlock()
+}
+
+// credentialLive repeats the authentication of r, a stream's own request: a
+// stream carries no call of its own for PROTOCOL §4.5's check on every call,
+// so its wakes and heartbeats stand in for them. A token past its expiry or
+// revoked, or a rotated bearer, ends the stream without a final result and
+// the client reconnects with a live credential. A disabled peer is not an
+// end: its stream parks, as subscriptionsListen says. A store failure says
+// nothing about the credential, so the next check decides.
+func (s *Server) credentialLive(r *http.Request) bool {
+	_, err := s.Auth.Authenticate(r.Context(), r)
+	switch {
+	case err == nil, errors.Is(err, auth.ErrPeerDisabled):
+		return true
+	case errors.Is(err, auth.ErrUnauthenticated):
+		return false
+	}
+	if r.Context().Err() == nil {
+		slog.Warn("mcp: stream credential check", "err", err)
+	}
+	return true
 }
 
 // delete ends a 2025-11-25 session.

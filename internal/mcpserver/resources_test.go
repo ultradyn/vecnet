@@ -1425,3 +1425,95 @@ func TestNotifyWithoutGrowthSendsNoHint(t *testing.T) {
 		t.Fatal("no hint for a send after the empty Notify")
 	}
 }
+
+// A rotated bearer's listen stream ends, with no final result, on the wake the
+// rotation sends; its reachability goes with it.
+func TestListenEndsOnRotation(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("session", "p")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, frames := listen(t, ctx, env, http.DefaultClient, secret, []string{peerURI(peer)})
+	if _, _, ok := nextMessage(t, frames, 5*time.Second); !ok {
+		t.Fatal("no acknowledgement")
+	}
+	if _, err := env.Hub.RotatePeer(context.Background(), peer); err != nil {
+		t.Fatal(err)
+	}
+	wantUnfinished(t, frames)
+	waitFor(t, 2*time.Second, "reachability to fall", func() bool { return reachability(t, env, peer) != "connected" })
+}
+
+// A heartbeat is enough: nothing has to wake the stream.
+func TestListenCredentialCheckedOnHeartbeat(t *testing.T) {
+	env := testhub.Start(t)
+	env.Configure(func(d *httpapi.Deps) { d.Heartbeat = 20 * time.Millisecond })
+	peer, secret := env.NewPeer("session", "p")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, frames := listen(t, ctx, env, http.DefaultClient, secret, []string{peerURI(peer)})
+	if _, _, ok := nextMessage(t, frames, 5*time.Second); !ok {
+		t.Fatal("no acknowledgement")
+	}
+	if _, err := env.Hub.Auth.Rotate(context.Background(), "peer", peer); err != nil { // no Notify
+		t.Fatal(err)
+	}
+	wantUnfinished(t, frames)
+}
+
+// A rotated bearer's GET stream ends and its hints wait for a live one.
+func TestGetStreamEndsOnRotation(t *testing.T) {
+	env := testhub.Start(t)
+	env.Configure(func(d *httpapi.Deps) { d.Heartbeat = 20 * time.Millisecond })
+	peer, secret := env.NewPeer("session", "p")
+	sid := legacySession(t, env, secret)
+	legacySubscribe(t, env, secret, sid, peerURI(peer))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, frames := getStream(t, ctx, env, secret, sid)
+	if _, err := env.Hub.RotatePeer(context.Background(), peer); err != nil {
+		t.Fatal(err)
+	}
+	wantUnfinished(t, frames)
+}
+
+// A hint held before access was lost is not delivered while it stays lost.
+func TestHeldHintWaitsForAccess(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	prn, secret := env.NewPrincipal("pc")
+	peer, _ := peerUnder(t, env, prn, "p")
+	other, _ := peerUnder(t, env, prn, "q")
+	_, sender := env.NewPeer("session", "s")
+	sid := legacySession(t, env, secret)
+	legacySubscribe(t, env, secret, sid, peerURI(peer))
+	legacySubscribe(t, env, secret, sid, peerURI(other))
+	sendTo(t, env, sender, peer, "held")
+	time.Sleep(300 * time.Millisecond) // the watcher wakes and holds the hint
+	if err := env.Hub.SetPeerDisabled(ctx, peer, true); err != nil {
+		t.Fatal(err)
+	}
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	_, frames := getStream(t, sctx, env, secret, sid)
+	noHintFor(t, frames, peerURI(peer))
+}
+
+func TestListenStreamsCappedPerCredential(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("session", "p")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for range 16 {
+		_, frames := listen(t, ctx, env, http.DefaultClient, secret, []string{peerURI(peer)})
+		if _, _, ok := nextMessage(t, frames, 5*time.Second); !ok {
+			t.Fatal("no acknowledgement")
+		}
+	}
+	r := rpc2026(t, env, secret, "subscriptions/listen", map[string]any{
+		"notifications": map[string]any{"resourceSubscriptions": []string{peerURI(peer)}},
+	})
+	if r.Error == nil || errReason(t, r) != "too_many" {
+		t.Fatalf("listen past the cap = %+v / %s", r.Error, r.Result)
+	}
+}

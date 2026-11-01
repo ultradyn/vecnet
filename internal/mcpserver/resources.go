@@ -25,6 +25,9 @@ const (
 	inboxTailSize = 50
 	// maxListenURIs bounds one subscriptions/listen filter.
 	maxListenURIs = 256
+	// maxListenStreams bounds one credential's open subscriptions/listen
+	// streams; each holds a request and a watcher per URI.
+	maxListenStreams = 16
 	// tailRetries bounds resources/read's retries against a racing purge.
 	tailRetries = 3
 
@@ -374,6 +377,13 @@ func (s *Server) hintSession(sess *Session, uri string) {
 			return
 		}
 		s.mu.Unlock()
+		if !conn.live() { // the GET handler sees the close and clears the stream
+			conn.st.Close()
+			s.mu.Lock()
+			sess.holdHintLocked(uri)
+			s.mu.Unlock()
+			return
+		}
 		if conn.st.Send("", eventMessage, updatedNotification(uri, nil)) == nil {
 			return
 		}
@@ -399,18 +409,27 @@ func (sess *Session) holdHintLocked(uri string) {
 }
 
 // flushHints delivers the hints held for sess; get calls it once the new
-// stream is attached, so a hint held before that is always seen here.
-func (s *Server) flushHints(sess *Session) {
+// stream is attached, so a hint held before that is always seen here. A URI
+// the session may not read now keeps its hint for a stream that opens after
+// access returns: a hint held before the loss says nothing to this one.
+func (s *Server) flushHints(ctx context.Context, sess *Session) {
 	s.mu.Lock()
 	var uris []string
 	if sess.res != nil {
 		for uri := range sess.res.pending {
 			uris = append(uris, uri)
 		}
-		clear(sess.res.pending)
 	}
 	s.mu.Unlock()
 	for _, uri := range uris {
+		if _, err := s.subscribeOwners(ctx, sess.Principal, uri); err != nil {
+			continue
+		}
+		s.mu.Lock()
+		if sess.res != nil {
+			delete(sess.res.pending, uri)
+		}
+		s.mu.Unlock()
 		s.hintSession(sess, uri)
 	}
 }
@@ -458,8 +477,10 @@ func listenURIs(req *Request) ([]string, error) {
 // response stream that opens with the acknowledgement, then carries at most
 // one notifications/resources/updated per URI per hintCoalesce whenever the
 // log behind a URI grows. It stays open until the client goes, the stream
-// fails, every URI's access is gone at once, or the hub shuts down, and no
-// database transaction is open while it writes. A URI whose access is gone
+// fails, every URI's access is gone at once, the credential ends (expiry,
+// revocation or rotation, checked on each wake and heartbeat, credentialLive),
+// or the hub shuts down, and no database transaction is open while it writes.
+// A URI whose access is gone
 // is parked until it returns: ending the stream for it would not help, since
 // a reconnect naming that URI is refused and takes the live URIs down too.
 // Only an empty filter, with nothing to wait for, gets the final result: any
@@ -476,6 +497,12 @@ func (s *Server) subscriptionsListen(ctx context.Context, sess *Session, req *Re
 	if err != nil {
 		return nil, err
 	}
+	release, ok := s.acquireListen(sess.Principal)
+	if !ok {
+		return nil, &RPCError{Code: ErrInvalidParams, Message: "too many open listen streams",
+			Data: map[string]any{"reason": "too_many", "limit": maxListenStreams}}
+	}
+	defer release()
 	lctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// Armed before the acknowledgement: any append the client could cause
@@ -489,6 +516,16 @@ func (s *Server) subscriptionsListen(ctx context.Context, sess *Session, req *Re
 	w, r, ok := HTTPFromContext(ctx)
 	if !ok {
 		return nil, errors.New("mcpserver: subscriptions/listen outside a dispatched request")
+	}
+	live := func() bool {
+		if s.credentialLive(r) {
+			return true
+		}
+		cancel() // the watchers return, and with them this stream
+		return false
+	}
+	for _, wt := range watches {
+		wt.live = live
 	}
 	st, err := s.Stream(w, r)
 	if err != nil {
@@ -535,15 +572,53 @@ func (s *Server) subscriptionsListen(ctx context.Context, sess *Session, req *Re
 		wg.Wait()
 		close(watchersDone)
 	}()
-	select {
-	case <-ctx.Done():
-	case <-st.Done():
-	case <-s.Stop: // nil (never) unless shutting down
-	case <-watchersDone:
+	recheck := time.NewTicker(s.heartbeat())
+	defer recheck.Stop()
+wait:
+	for {
+		select {
+		case <-ctx.Done():
+			break wait
+		case <-st.Done():
+			break wait
+		case <-s.Stop: // nil (never) unless shutting down
+			break wait
+		case <-watchersDone:
+			break wait
+		case <-recheck.C:
+			live()
+		}
 	}
 	cancel()
 	<-watchersDone
 	return nil, nil
+}
+
+// credentialKey names p's credential for the per-credential limits.
+func credentialKey(p Principal) string {
+	if p.OAuth != nil {
+		return "oauth:" + p.OAuth.PrincipalID
+	}
+	return p.Caller.Kind + ":" + p.Caller.PrincipalID + ":" + p.Caller.PeerID
+}
+
+// acquireListen takes one of p's maxListenStreams; ok is false when none is
+// free. Call release once the stream ends.
+func (s *Server) acquireListen(p Principal) (release func(), ok bool) {
+	key := credentialKey(p)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listens[key] >= maxListenStreams {
+		return nil, false
+	}
+	s.listens[key]++
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.listens[key]--; s.listens[key] <= 0 {
+			delete(s.listens, key)
+		}
+	}, true
 }
 
 // streamReach marks owners connected until the returned func runs (PROTOCOL
@@ -571,6 +646,10 @@ type watch struct {
 	owners []string
 	woke   <-chan struct{}
 	last   int64 // the newest seq already hinted
+	// live, when set, runs on every wake; false ends run. A legacy watcher has
+	// none: the session outlives any one credential check, and its hints pass
+	// through the GET stream's own.
+	live func() bool
 }
 
 // armWatch resolves uri for p and registers the log waiter before reading
@@ -615,7 +694,7 @@ func (w *watch) rearm() error {
 }
 
 // run calls emit each time the log grows, at most once per hintCoalesce,
-// until ctx is done, the hub stops, or emit returns false. Each wake
+// until ctx is done, the hub stops, live fails, or emit returns false. Each wake
 // re-resolves the owners, so a principal's URI picks up a peer added after
 // the subscription started, even from no peers at all, when no log exists to
 // wake it. Appends during the coalescing pause close the waiter armed before
@@ -637,7 +716,7 @@ func (w *watch) run(emit func() bool, access func(denied bool)) {
 		case <-w.s.Stop:
 			return
 		}
-		if w.ctx.Err() != nil {
+		if w.ctx.Err() != nil || (w.live != nil && !w.live()) {
 			return
 		}
 		err := w.rearm()
