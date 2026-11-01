@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"slices"
 	"strconv"
 	"time"
@@ -71,8 +70,9 @@ type NotifyRoute struct {
 // SetNotifyRoutes replaces the operator's notification routes with specs
 // and returns them in order. A URL that already had a route keeps its id
 // and whsec_ (only its filter changes); every other URL gets a fresh id and
-// whsec_. A filter outside wake|approvals|dead_letters|all, a URL that is
-// not absolute http(s), or the same URL twice is 422 invalid_value.
+// whsec_. A filter outside wake|approvals|dead_letters|all or the same URL
+// twice is 422 invalid_value; a URL the egress guard refuses
+// (egress.Policy.CheckURL) is 422 invalid_url.
 func (h *Hub) SetNotifyRoutes(ctx context.Context, specs []NotifyRouteSpec) ([]NotifyRoute, error) {
 	seen := map[string]bool{}
 	for i, s := range specs {
@@ -84,9 +84,8 @@ func (h *Hub) SetNotifyRoutes(ctx context.Context, specs []NotifyRouteSpec) ([]N
 		if !notifyFilters[s.Filter] {
 			return nil, invalid("filter", "filter is one of wake, approvals, dead_letters, all")
 		}
-		u, err := url.Parse(s.URL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
-			return nil, invalid("url", "a notify URL is an absolute http(s) URL without credentials")
+		if _, err := h.EgressPolicy().CheckURL(s.URL); err != nil {
+			return nil, invalidURL("routes/"+strconv.Itoa(i)+"/url", err)
 		}
 		if seen[s.URL] {
 			return nil, invalid("url", "each notify URL appears once")
@@ -214,7 +213,8 @@ func (h *Hub) postNotify(ctx context.Context, r NotifyRoute, id string, body []b
 	}
 	client := h.NotifyClient
 	if client == nil {
-		client = defaultNotifyClient
+		h.notifyClientOnce.Do(func() { h.notifyClient = h.EgressPolicy().Client(NotifyTimeout) })
+		client = h.notifyClient
 	}
 	var lastErr error
 	for attempt := 0; attempt <= len(delays); attempt++ {
@@ -258,14 +258,6 @@ func (h *Hub) postNotifyOnce(ctx context.Context, client *http.Client, r NotifyR
 		return errors.New("HTTP " + strconv.Itoa(resp.StatusCode))
 	}
 	return nil
-}
-
-// defaultNotifyClient never follows redirects and times out per request.
-var defaultNotifyClient = &http.Client{
-	Timeout: NotifyTimeout,
-	CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
 }
 
 // notifyOperatorDeliveries fires the operator notifications for message

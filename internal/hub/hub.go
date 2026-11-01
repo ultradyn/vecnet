@@ -16,6 +16,7 @@ import (
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/blob"
+	"github.com/XertroV/vecnet/internal/egress"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/ids"
@@ -37,6 +38,12 @@ type Config struct {
 
 	PresenceTTL        time.Duration // presence staleness for every kind but session (PROTOCOL §8)
 	SessionPresenceTTL time.Duration // presence staleness for kind session
+
+	// AllowPrivateEgress is the dev override (--allow-private-egress,
+	// VECNET_ALLOW_PRIVATE_EGRESS=1): push, notify and other outbound URLs
+	// may be http and may reach private and loopback addresses. Production
+	// leaves it false (PROTOCOL §14.7).
+	AllowPrivateEgress bool
 }
 
 // DefaultConfig returns the plan's defaults; PublicURL and DataDir are empty.
@@ -69,8 +76,9 @@ type Hub struct {
 	// best-effort: SetPresence logs its error and still succeeds.
 	IdleHook func(ctx context.Context, peerID string) error
 
-	// NotifyClient posts operator notification webhooks; nil means a
-	// client that never follows redirects, with NotifyTimeout.
+	// NotifyClient posts operator notification webhooks; nil means
+	// EgressPolicy().Client(NotifyTimeout): public-IP-only, pinned, never
+	// following redirects.
 	NotifyClient *http.Client
 	// NotifyRetry is the wait before each retry of a failed notification;
 	// nil means DefaultNotifyRetry (3 retries over 30 s).
@@ -81,6 +89,25 @@ type Hub struct {
 
 	notifySem chan struct{}  // bounds notification goroutines (MaxNotifyInFlight)
 	notifyWG  sync.WaitGroup // notification goroutines in flight
+
+	notifyClientOnce sync.Once
+	notifyClient     *http.Client // the default NotifyClient, built once
+}
+
+// EgressPolicy is the outbound-request guard every hub-initiated POST to a
+// configured URL uses (PROTOCOL §14.7); Cfg.AllowPrivateEgress relaxes it.
+func (h *Hub) EgressPolicy() egress.Policy {
+	return egress.Policy{AllowPrivate: h.Cfg.AllowPrivateEgress}
+}
+
+// invalidURL is the 422 invalid_url for a configured URL the egress guard
+// refuses; err comes from egress.Policy.CheckURL and never quotes the URL.
+func invalidURL(field string, err error) *APIError {
+	e := E(http.StatusUnprocessableEntity, "invalid_url",
+		"the URL must be https, without credentials or fragment, to a public host")
+	e.Details["field"] = field
+	e.Details["reason"] = err.Error()
+	return e
 }
 
 // New builds a Hub over an opened store; the blob store lives under

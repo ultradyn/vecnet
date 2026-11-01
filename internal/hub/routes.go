@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/audit"
@@ -32,8 +31,9 @@ const routePrefix ids.Prefix = "route"
 //
 // The route is not live until Worker.Verify has answered its verification
 // challenge (MarkRouteVerified): ClaimDue skips unverified routes (§3.2).
-// An unknown owner, an unknown ownerKind or a URL that is not absolute
-// http(s) is 422 invalid_value.
+// An unknown owner or an unknown ownerKind is 422 invalid_value; a URL the
+// egress guard refuses (egress.Policy.CheckURL: https only unless
+// Cfg.AllowPrivateEgress, no userinfo, public host) is 422 invalid_url.
 func (h *Hub) AddRoute(ctx context.Context, ownerKind, ownerID, rawURL string) (routeID, whsec string, err error) {
 	invalid := func(field, msg string) error {
 		e := E(http.StatusUnprocessableEntity, "invalid_value", msg)
@@ -43,9 +43,8 @@ func (h *Hub) AddRoute(ctx context.Context, ownerKind, ownerID, rawURL string) (
 	if ownerKind != "peer" && ownerKind != "principal" {
 		return "", "", invalid("owner_kind", "a route is owned by a peer or a principal")
 	}
-	u, perr := url.Parse(rawURL)
-	if perr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
-		return "", "", invalid("url", "a route URL is an absolute http(s) URL without credentials")
+	if _, uerr := h.EgressPolicy().CheckURL(rawURL); uerr != nil {
+		return "", "", invalidURL("url", uerr)
 	}
 	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		var one int

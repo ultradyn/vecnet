@@ -64,7 +64,16 @@ func (c *FakeClock) Advance(d time.Duration) {
 // Start opens a store in t.TempDir(), builds the hub on a FakeClock (starting
 // at the real current time, millisecond-truncated), serves httpapi on a random
 // loopback port and creates the operator. Everything is closed at test end.
+// The hub runs with Config.AllowPrivateEgress = true, since every test
+// receiver is an httptest server on 127.0.0.1.
 func Start(t *testing.T) *Env {
+	t.Helper()
+	return StartWith(t, nil)
+}
+
+// StartWith is Start with cfgFn (when non-nil) adjusting the hub Config
+// after the testhub defaults are set and before the hub is built.
+func StartWith(t *testing.T, cfgFn func(*hub.Config)) *Env {
 	t.Helper()
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "hub.db"))
@@ -83,6 +92,10 @@ func Start(t *testing.T) *Env {
 	cfg := hub.DefaultConfig()
 	cfg.PublicURL = srv.URL
 	cfg.DataDir = dir
+	cfg.AllowPrivateEgress = true
+	if cfgFn != nil {
+		cfgFn(&cfg)
+	}
 	h, err := hub.New(db, cfg, clock.Now)
 	if err != nil {
 		srv.Close()
