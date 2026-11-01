@@ -107,6 +107,9 @@ type Server struct {
 	Touch func(ctx context.Context, peerID, value string)
 	// Stop, when non-nil, is closed at shutdown and ends open GET streams.
 	Stop <-chan struct{}
+	// Kick, when non-nil, wakes the push worker after a tool send, as
+	// POST /v1/messages does.
+	Kick func()
 
 	methods      map[string]Handler
 	capabilities func(proto string) map[string]any
@@ -116,7 +119,8 @@ type Server struct {
 }
 
 // New returns a Server for the hub h whose public URL is publicURL
-// (Cfg.PublicURL). ping is registered; Tasks 3–5 Register the rest.
+// (Cfg.PublicURL). ping and the tools are registered; Tasks 4–5 Register the
+// rest.
 func New(h *hub.Hub, a Authenticator, publicURL string) *Server {
 	s := &Server{
 		Hub:          h,
@@ -136,6 +140,7 @@ func New(h *hub.Hub, a Authenticator, publicURL string) *Server {
 	s.Register("ping", func(context.Context, *Session, *Request) (any, error) {
 		return map[string]any{}, nil
 	})
+	s.registerTools()
 	return s
 }
 
