@@ -439,7 +439,7 @@ The hub fills `loop` on every Message [ENV]:
 
 | Field | Rule | Default |
 |---|---|---|
-| `depth` | 0 for a fresh message; a reply is parent.depth + 1. Only `in_reply_to` makes a send a reply: a send into an existing thread without it is fresh (depth 0, its own `expires_at`, `sender_chain` = [sender]) | — |
+| `depth` | 0 for a fresh message (one that starts a thread); a reply is parent.depth + 1. The parent is the `in_reply_to` message, or, for a send into an existing thread without `in_reply_to`, the thread's latest message: leaving `in_reply_to` out never resets `depth`, `max_depth`, `expires_at` or `sender_chain` | — |
 | `max_depth` | Inherited down a reply chain; any sender MAY lower it for its own message; a reply MUST NOT raise it; range 1–64 | 16 |
 | `expires_at` | Wall-clock TTL; sender MAY lower it; a reply MUST NOT raise an inherited value | now + 24 h |
 | `sender_chain` | Last 32 originators (peers or sources), oldest first: parent's chain + sender | — |
@@ -682,7 +682,7 @@ These three rules supersede the sections they cite. Each answers a decisive erro
 
 ### 16.1 Operator replies reset depth [A1, supersedes §6 and R20 in part]
 
-Depth exists to stop unsupervised bot-to-bot loops. A reply sent by a peer of kind `operator` MUST set `depth` to 0 for its subtree; replies below it count from 0 again. `sender_chain` MUST keep recording every originator regardless. The default `max_depth` is **32** (was 16). The thread budget (default 500) remains the hard stop and is unaffected by sender kind. Approval requests, approval responses and job status messages still count against depth and budget as in R20, except where the sender is the operator.
+Depth exists to stop unsupervised bot-to-bot loops. A reply sent by a peer of kind `operator` MUST set `depth` to 0 for its subtree; replies below it count from 0 again. The operator resets the loop TTL the same way: its reply is never cut as `expired` and takes a fresh `expires_at` (its own value if it sets one, else now + 24 h) that its subtree inherits, so the operator can always revive a thread whose TTL has passed. `sender_chain` MUST keep recording every originator regardless. The default `max_depth` is **32** (was 16). The thread budget (default 500) remains the hard stop and is unaffected by sender kind. Approval requests, approval responses and job status messages still count against depth and budget as in R20, except where the sender is the operator.
 
 ### 16.2 Per-peer rate limits [A2, extends §2.2, §6 and §12]
 

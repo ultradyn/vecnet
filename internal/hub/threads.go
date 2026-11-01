@@ -154,6 +154,22 @@ func loadMessage(ctx context.Context, tx *sql.Tx, msgID string) (msg *envelope.M
 	return &m, thr, true, nil
 }
 
+// latestMessage returns the newest Message of thread thr, or nil. It is
+// the implicit loop parent of a send into thr that names no in_reply_to
+// (PROTOCOL §6).
+func latestMessage(ctx context.Context, tx *sql.Tx, thr string) (*envelope.Message, error) {
+	var id string
+	err := tx.QueryRowContext(ctx, `SELECT msg_id FROM messages WHERE thr_id = ? ORDER BY seq DESC LIMIT 1`, thr).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("hub: latest message: %w", err)
+	}
+	m, _, _, err := loadMessage(ctx, tx, id)
+	return m, err
+}
+
 // isParticipant reports whether peer participates in thread thr.
 func isParticipant(ctx context.Context, tx *sql.Tx, thr, peer string) (bool, error) {
 	var one int

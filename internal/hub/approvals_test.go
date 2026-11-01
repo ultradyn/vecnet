@@ -224,10 +224,11 @@ func TestApprovalCountsAgainstBudgetAndDepth(t *testing.T) {
 	}
 }
 
-// The hub expiry message must not raise the reply chain's inherited
-// loop.expires_at (PROTOCOL §6): a chain whose loop TTL passed stays
-// closed after the sweep (a reply to the notice is still expired), yet the
-// notice itself is still delivered.
+// The hub expiry message must not raise the thread's inherited
+// loop.expires_at (PROTOCOL §6): a thread whose loop TTL passed stays
+// closed after the sweep, whether a send names in_reply_to or continues
+// the thread from its latest message, yet the notice itself is still
+// delivered.
 func TestApprovalExpiryDoesNotReviveExpiredThread(t *testing.T) {
 	env := testhub.Start(t)
 	_, aSec := env.NewPeer("session", "A")
@@ -241,16 +242,19 @@ func TestApprovalExpiryDoesNotReviveExpiredThread(t *testing.T) {
 	q["expires_at"] = loopExp
 	sr := mustSend(t, env, aSec, q)
 
-	// Only in_reply_to makes a send a reply (PROTOCOL §6); a fresh send
-	// into the thread carries its own loop TTL.
+	// parent "" is a plain send into the thread: its loop parent is the
+	// thread's latest message (PROTOCOL §6), so it is refused as well.
 	reply := func(key, parent string) map[string]any {
 		r := req(key)
 		r["thread_id"] = sr.ThreadID
-		r["in_reply_to"] = parent
+		if parent != "" {
+			r["in_reply_to"] = parent
+		}
 		return r
 	}
 	env.Now.Advance(2 * time.Hour)
-	mustReject(t, env, bSec, reply("before", sr.MessageID), http.StatusUnprocessableEntity, "expired")
+	mustReject(t, env, bSec, reply("before", ""), http.StatusUnprocessableEntity, "expired")
+	mustReject(t, env, bSec, reply("before-r", sr.MessageID), http.StatusUnprocessableEntity, "expired")
 
 	env.Now.Advance(2 * time.Hour)
 	if n, err := env.Hub.ExpireApprovals(ctx, env.Now.Now()); err != nil || n != 1 {
@@ -263,7 +267,8 @@ func TestApprovalExpiryDoesNotReviveExpiredThread(t *testing.T) {
 	if l := storedLoop(t, env, hubMsg); l.ExpiresAt != loopExp {
 		t.Fatalf("hub message loop.expires_at = %s, want the request's %s (never raised)", l.ExpiresAt, loopExp)
 	}
-	mustReject(t, env, bSec, reply("after", hubMsg), http.StatusUnprocessableEntity, "expired")
+	mustReject(t, env, bSec, reply("after", ""), http.StatusUnprocessableEntity, "expired")
+	mustReject(t, env, bSec, reply("after-r", hubMsg), http.StatusUnprocessableEntity, "expired")
 
 	// The notice is still deliverable: its deliveries outlive the sweep.
 	nowS := envelope.FormatTime(env.Now.Now())

@@ -288,11 +288,12 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 		return nil, false, nil, e
 	}
 
-	// in_reply_to and the loop parent. Only in_reply_to makes a send a
-	// reply: a send into a thread without it is a fresh message (depth 0,
-	// a fresh expires_at, sender_chain [sender]; PROTOCOL §6), so thread
-	// position never counts as reply depth and the thread budget stays the
-	// hard stop (§16.1).
+	// in_reply_to and the loop parent. A send into an existing thread that
+	// names no in_reply_to continues the thread's loop from its latest
+	// message (PROTOCOL §6): omitting in_reply_to must not reset depth,
+	// expires_at or sender_chain, or two bots could loop forever by
+	// leaving it out. Only a new thread starts fresh; the operator resets
+	// depth and expiry for its own subtree (§16.1, buildLoop).
 	var parent *envelope.Message
 	if req.InReplyTo != nil {
 		m, mThr, found, err := loadMessage(ctx, tx, *req.InReplyTo)
@@ -313,6 +314,10 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 			return nil, false, nil, e
 		}
 		parent = m
+	} else if !thr.isNew {
+		if parent, err = latestMessage(ctx, tx, thr.ID); err != nil {
+			return nil, false, nil, err
+		}
 	}
 
 	// Kind-specific checks: jobs (§2.2 Jobs, §5.6) and approvals (§9).

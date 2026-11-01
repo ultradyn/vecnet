@@ -40,21 +40,29 @@ func (c *cutError) Unwrap() error { return c.api }
 //     a reply never raises the parent's value (clamped down).
 //   - expires_at: req.ExpiresAt, else min(parent's, now+DefaultTTL) for a
 //     reply, now+DefaultTTL fresh; a reply never raises the parent's value.
-//   - sender_chain: the parent's chain + senderID, last 32 kept.
+//     An operator reply resets the TTL like depth: it is not bound by the
+//     parent's expires_at, passed or not, and its subtree inherits the
+//     operator's.
+//   - sender_chain: the parent's chain + senderID, last 32 kept (the
+//     operator's included).
 //
-// It returns 422 expired when the parent's expires_at has passed (or the
-// resulting expires_at is not in the future), and 422 max_depth_exceeded
-// when depth would exceed max_depth.
+// The parent is the in_reply_to message, or the thread's latest message
+// when a send into an existing thread names none (PROTOCOL §6).
+//
+// It returns 422 expired when the parent's expires_at has passed and the
+// sender is not the operator (or the resulting expires_at is not in the
+// future), and 422 max_depth_exceeded when depth would exceed max_depth.
 func (h *Hub) buildLoop(parent *envelope.Message, senderID, senderKind string, req *envelope.SendRequest, now time.Time) (envelope.Loop, *APIError) {
 	ttl := now.Add(h.Cfg.DefaultTTL)
 	expires := ttl
 	l := envelope.Loop{MaxDepth: h.Cfg.DefaultMaxDepth}
+	operator := senderKind == "operator"
 	if parent != nil {
 		pExp, err := envelope.ParseTime(parent.Loop.ExpiresAt)
 		if err != nil {
 			pExp = now // an unreadable stored expiry is treated as passed
 		}
-		if !pExp.After(now) {
+		if !operator && !pExp.After(now) {
 			e := E(http.StatusUnprocessableEntity, "expired", "the parent message's expires_at has passed")
 			e.Details["expires_at"] = parent.Loop.ExpiresAt
 			e.Details["in_reply_to"] = parent.MessageID
@@ -62,12 +70,12 @@ func (h *Hub) buildLoop(parent *envelope.Message, senderID, senderKind string, r
 		}
 		l.Depth = parent.Loop.Depth + 1
 		l.MaxDepth = parent.Loop.MaxDepth
-		if pExp.Before(expires) {
+		if !operator && pExp.Before(expires) {
 			expires = pExp
 		}
 		l.SenderChain = append(l.SenderChain, parent.Loop.SenderChain...)
 	}
-	if senderKind == "operator" {
+	if operator {
 		l.Depth = 0 // §16.1: operator replies reset depth for their subtree
 	}
 	if req.MaxDepth != nil && (parent == nil || *req.MaxDepth < l.MaxDepth) {
@@ -80,7 +88,7 @@ func (h *Hub) buildLoop(parent *envelope.Message, senderID, senderKind string, r
 			e.Details["field"] = "expires_at"
 			return envelope.Loop{}, e
 		}
-		if parent == nil || asked.Before(expires) {
+		if parent == nil || operator || asked.Before(expires) {
 			expires = asked
 		}
 	}

@@ -495,50 +495,63 @@ func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
 	env := testhub.Start(t)
 	// A stuck stream is only dropped after SSEStall; at an hour, any send
 	// whose append waited on the stream would hang, and the per-send
-	// timeout below would catch it. The bound is per send, not aggregate,
-	// so a loaded -race run cannot trip it while a regression still does.
+	// timeout below catches it. A send merely slowed by the stuck stream is
+	// caught by interleaving each send to b (stuck stream) with the same
+	// send to c (no stream) and comparing the totals: both halves see the
+	// same load and database size, so a loaded -race run slows them alike
+	// instead of tripping a fixed wall-clock budget.
 	env.Configure(func(d *httpapi.Deps) { d.SSEStall = time.Hour })
 	a, aSec := env.NewPeer("grokbot", "a")
 	b, bSec := env.NewPeer("dot", "b")
+	c, _ := env.NewPeer("dot", "c")
 	env.SetLimits(a, 10000, 10000)
 
 	// Open a stream and never read from it.
 	s := openSSE(t, env, bSec, "", nil)
 	waitStreams(t, 1)
 
-	const perSend = 5 * time.Second
-	start := time.Now()
-	for i := 0; i < 200; i++ {
-		body := sendBody(fmt.Sprintf("slow-%d", i), b)
+	const n, perSend = 200, 5 * time.Second
+	send := func(key, to string) time.Duration {
+		t.Helper()
+		body := sendBody(key, to)
 		body["content"] = map[string]any{"text": strings.Repeat("x", 4000)}
 		j, err := json.Marshal(body)
 		if err != nil {
 			t.Fatal(err)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), perSend)
+		defer cancel()
 		req, err := http.NewRequestWithContext(ctx, "POST", env.URL+"/v1/messages", strings.NewReader(string(j)))
 		if err != nil {
-			cancel()
 			t.Fatal(err)
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+aSec)
+		start := time.Now()
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			cancel()
-			t.Fatalf("send %d with a stuck SSE consumer did not finish within %v: %v", i, perSend, err)
+			t.Fatalf("send %s did not finish within %v: %v", key, perSend, err)
 		}
 		raw, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		cancel()
+		took := time.Since(start)
 		if err != nil {
-			t.Fatalf("send %d: read body: %v", i, err)
+			t.Fatalf("send %s: read body: %v", key, err)
 		}
 		if resp.StatusCode != http.StatusAccepted {
-			t.Fatalf("send %d = %d; %s", i, resp.StatusCode, raw)
+			t.Fatalf("send %s = %d; %s", key, resp.StatusCode, raw)
 		}
+		return took
 	}
-	t.Logf("200 sends took %v", time.Since(start))
+	var stuck, free time.Duration
+	for i := 0; i < n; i++ {
+		free += send(fmt.Sprintf("free-%d", i), c)
+		stuck += send(fmt.Sprintf("slow-%d", i), b)
+	}
+	t.Logf("%d sends took %v to the stuck-stream peer, %v to a peer with no stream", n, stuck, free)
+	if limit := 2*free + time.Second; stuck > limit {
+		t.Fatalf("%d sends to a stuck SSE consumer took %v, want <= %v (2x the %v of the same sends to a peer with no stream, + 1s)", n, stuck, limit, free)
+	}
 
 	// The handler goroutine exits once the client goes away.
 	s.cancel()

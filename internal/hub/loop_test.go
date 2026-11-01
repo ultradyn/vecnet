@@ -11,7 +11,6 @@ import (
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
-	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -283,7 +282,9 @@ func TestRateLimits(t *testing.T) {
 	c, cSec := env.NewPeer("session", "C")
 
 	// 60 sends a minute: one new thread plus 59 sends into it, all at one
-	// instant (without in_reply_to each is fresh, depth 0).
+	// instant. Each continues the thread's loop from its latest message
+	// (PROTOCOL §6); max_depth 64 keeps the 60-deep chain clear of loop
+	// control.
 	s0 := req("s0", b)
 	s0["max_depth"] = 64
 	first := mustSend(t, env, aSec, s0)
@@ -334,41 +335,76 @@ func TestRateLimits(t *testing.T) {
 	mustSend(t, env, cSec, req("t21", b))
 }
 
-// TestThreadSendWithoutInReplyToIsFresh: a send into an existing thread
-// that names no in_reply_to is a fresh message (PROTOCOL §6): depth 0, a
-// fresh expires_at and sender_chain [sender]. Thread position therefore
-// never trips max_depth, and a thread stays usable after its first
-// message's expiry; the thread budget is the hard stop (§16.1).
-func TestThreadSendWithoutInReplyToIsFresh(t *testing.T) {
+// TestThreadSendWithoutInReplyToContinuesLoop: a send into an existing
+// thread that names no in_reply_to takes the thread's latest message as its
+// loop parent (PROTOCOL §6), so leaving in_reply_to out never escapes
+// max_depth, expires_at or sender_chain. The operator resets both depth and
+// the TTL for its subtree (§16.1), so a human can always revive a thread.
+func TestThreadSendWithoutInReplyToContinuesLoop(t *testing.T) {
 	env := testhub.Start(t)
 	a, aSec := env.NewPeer("session", "A")
 	b, bSec := env.NewPeer("session", "B")
+	op := env.OperatorPeer
 	env.SetLimits(a, 10000, 10000)
 	env.SetLimits(b, 10000, 10000)
 
-	first := mustSend(t, env, aSec, req("f0", b))
-	var last hub.SendResponse
-	for i := 1; i <= 40; i++ {
+	f0 := req("f0", b)
+	f0["max_depth"] = 4
+	first := mustSend(t, env, aSec, f0)
+	thr := first.ThreadID
+	firstExp := storedLoop(t, env, first.MessageID).ExpiresAt
+	chain := []string{a}
+	for i := 1; i <= 4; i++ {
 		sec, who := aSec, a
 		if i%2 == 1 {
 			sec, who = bSec, b
 		}
-		last = mustSend(t, env, sec, replyReq(fmt.Sprintf("f%d", i), first.ThreadID, ""))
-		if l := storedLoop(t, env, last.MessageID); l.Depth != 0 || !chainEq(l.SenderChain, []string{who}) {
-			t.Fatalf("thread send %d loop = %+v, want depth 0 chain [%s]", i, l, who)
+		m := mustSend(t, env, sec, replyReq(fmt.Sprintf("f%d", i), thr, ""))
+		chain = append(chain, who)
+		l := storedLoop(t, env, m.MessageID)
+		if l.Depth != i || l.MaxDepth != 4 || l.ExpiresAt != firstExp || !chainEq(l.SenderChain, chain) {
+			t.Fatalf("plain thread send %d loop = %+v, want depth %d max_depth 4 expires_at %s chain %v", i, l, i, firstExp, chain)
 		}
 	}
+	// A larger max_depth on a plain send is clamped like any reply.
+	over := replyReq("f5", thr, "")
+	over["max_depth"] = 64
+	mustReject(t, env, bSec, over, http.StatusUnprocessableEntity, "max_depth_exceeded")
+	mustReject(t, env, bSec, replyReq("f5b", thr, ""), http.StatusUnprocessableEntity, "max_depth_exceeded")
 
+	// The operator resets depth; bots continue below it.
+	o1 := mustSend(t, env, env.OperatorSecret, replyReq("o1", thr, ""))
+	chain = append(chain, op)
+	if l := storedLoop(t, env, o1.MessageID); l.Depth != 0 || !chainEq(l.SenderChain, chain) {
+		t.Fatalf("operator plain send loop = %+v, want depth 0 chain %v", l, chain)
+	}
+	b1 := mustSend(t, env, bSec, replyReq("b1", thr, ""))
+	chain = append(chain, b)
+	if l := storedLoop(t, env, b1.MessageID); l.Depth != 1 || !chainEq(l.SenderChain, chain) {
+		t.Fatalf("bot send after operator loop = %+v, want depth 1 chain %v", l, chain)
+	}
+
+	// Past the thread's TTL, bots are cut with or without in_reply_to.
 	env.Now.Advance(25 * time.Hour)
-	m := mustSend(t, env, bSec, replyReq("f-late", first.ThreadID, ""))
-	l := storedLoop(t, env, m.MessageID)
+	mustReject(t, env, aSec, replyReq("late", thr, ""), http.StatusUnprocessableEntity, "expired")
+	mustReject(t, env, aSec, replyReq("late-r", thr, b1.MessageID), http.StatusUnprocessableEntity, "expired")
+
+	// The operator revives it: a fresh TTL that its subtree inherits.
+	o2 := mustSend(t, env, env.OperatorSecret, replyReq("o2", thr, ""))
+	l := storedLoop(t, env, o2.MessageID)
 	exp, err := envelope.ParseTime(l.ExpiresAt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := env.Now.Now().Add(24 * time.Hour); !exp.Equal(want) {
-		t.Fatalf("expires_at = %s, want a fresh now+24h %s", l.ExpiresAt, envelope.FormatTime(want))
+	if want := env.Now.Now().Add(24 * time.Hour); !exp.Equal(want) || l.Depth != 0 {
+		t.Fatalf("operator send into expired thread loop = %+v, want depth 0 expires_at %s", l, envelope.FormatTime(want))
 	}
-	// A reply to an expired message is still refused.
-	mustReject(t, env, aSec, replyReq("f-expired", first.ThreadID, last.MessageID), http.StatusUnprocessableEntity, "expired")
+	a2 := mustSend(t, env, aSec, replyReq("a2", thr, ""))
+	if la := storedLoop(t, env, a2.MessageID); la.Depth != 1 || la.ExpiresAt != l.ExpiresAt {
+		t.Fatalf("bot send after operator revival loop = %+v, want depth 1 expires_at %s", la, l.ExpiresAt)
+	}
+	// An operator reply naming an expired message is not cut either.
+	mustSend(t, env, env.OperatorSecret, replyReq("o3", thr, b1.MessageID))
+	// The bot reply chain under the expired message stays closed.
+	mustReject(t, env, bSec, replyReq("b-old", thr, b1.MessageID), http.StatusUnprocessableEntity, "expired")
 }
