@@ -48,6 +48,7 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/audit", s.adminAudit)
 	mux.HandleFunc("GET /v1/admin/counters", s.adminCounters)
 	mux.HandleFunc("GET /v1/admin/subscriptions", s.adminListSubscriptions)
+	mux.HandleFunc("POST /v1/admin/subscriptions/{id}/pause", s.adminPauseSubscription)
 	mux.HandleFunc("POST /v1/admin/subscriptions/{id}/resume", s.adminResumeSubscription)
 }
 
@@ -148,7 +149,8 @@ func (s *server) adminRotatePrincipal(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminAddPeer is POST /v1/admin/peers {"kind", "name", "principal_id"?}:
-// 201 {"peer_id", "enrol_token", "principal_id"}. Without principal_id the
+// 201 {"peer_id", "enrol_token", "principal_id"}; a dot's enrol_token is "",
+// since it links with `vecnet peer link` instead. Without principal_id the
 // peer gets an implicit principal named like it.
 func (s *server) adminAddPeer(w http.ResponseWriter, r *http.Request) {
 	top, err := readObject(r, []string{"kind", "name", "principal_id"}, []string{"kind", "name"})

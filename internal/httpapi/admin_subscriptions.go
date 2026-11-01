@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
@@ -21,6 +22,7 @@ type subscriptionRow struct {
 	ExpiresAt      *string `json:"expires_at"`
 	VerifiedAt     *string `json:"verified_at"`
 	PausedReason   *string `json:"paused_reason"`
+	LastRefreshAt  *string `json:"last_refresh_at"`
 	LastDeliveryAt *string `json:"last_delivery_at"`
 	LastStatus     *int    `json:"last_status"`
 	Attempts       int     `json:"attempts"`
@@ -44,20 +46,31 @@ func (s *server) adminListSubscriptions(w http.ResponseWriter, r *http.Request) 
 			SubID: h.ID, Principal: h.PrincipalKind + ":" + h.PrincipalID, PeerID: h.PeerID,
 			URL: host, Name: h.Name, Cursor: h.Cursor.String(),
 			ExpiresAt: h.ExpiresAt, VerifiedAt: h.VerifiedAt, PausedReason: h.PausedReason,
-			LastDeliveryAt: h.LastDeliveryAt, LastStatus: h.LastStatus, Attempts: h.Attempts,
+			LastRefreshAt: h.LastRefreshAt, LastDeliveryAt: h.LastDeliveryAt, LastStatus: h.LastStatus, Attempts: h.Attempts,
 		}
 	}
 	writeJSON(w, http.StatusOK, rows)
 }
 
+// adminPauseSubscription is POST /v1/admin/subscriptions/{id}/pause: 204; the
+// operator's stop for one subscription, which a re-subscribe does not lift. An
+// unknown id is 404 not_found.
+func (s *server) adminPauseSubscription(w http.ResponseWriter, r *http.Request) {
+	s.subscriptionAction(w, r, events.NewStore(s.Hub).Pause)
+}
+
 // adminResumeSubscription is POST /v1/admin/subscriptions/{id}/resume: 204;
 // paused_reason is cleared. An unknown id is 404 not_found.
 func (s *server) adminResumeSubscription(w http.ResponseWriter, r *http.Request) {
+	s.subscriptionAction(w, r, events.NewStore(s.Hub).Resume)
+}
+
+func (s *server) subscriptionAction(w http.ResponseWriter, r *http.Request, do func(ctx context.Context, id string) error) {
 	if err := readNoBody(r); err != nil {
 		writeError(w, err)
 		return
 	}
-	err := events.NewStore(s.Hub).Resume(r.Context(), r.PathValue("id"))
+	err := do(r.Context(), r.PathValue("id"))
 	if errors.Is(err, events.ErrNotFound) {
 		writeError(w, hub.E(http.StatusNotFound, "not_found", "no such subscription"))
 		return

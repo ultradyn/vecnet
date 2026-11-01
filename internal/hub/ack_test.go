@@ -59,7 +59,7 @@ func TestAckMarksHoldAccepted(t *testing.T) {
 	env := testhub.Start(t)
 	ctx := context.Background()
 	a, aSec := env.NewPeer("grokbot", "a")
-	b, bSec := env.NewPeer("dot", "b")
+	b, bSec := env.NewPeer("session", "b")
 
 	first := mustSend(t, env, aSec, holdReq("hold-1", b))
 	second := mustSend(t, env, aSec, holdReq("hold-2", b))

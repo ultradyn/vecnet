@@ -167,13 +167,18 @@ func (e *Env) StartWorkers() {
 // NewPeer creates a peer of kind under an implicit principal and enrols it,
 // returning its id and long-lived secret. It calls Hub.AddPeer and
 // Auth.Enrol directly, not the HTTP admin and enrol routes, so tests of
-// other features do not depend on them.
+// other features do not depend on them. A dot has no secret, so its is "": a
+// test that needs a dot's credential logs in through OAuth, and one that only
+// needs a bearer on /mcp uses another kind.
 func (e *Env) NewPeer(kind, name string) (peerID, secret string) {
 	e.T.Helper()
 	ctx := context.Background()
 	id, tok, err := e.Hub.AddPeer(ctx, kind, name, "")
 	if err != nil {
 		e.T.Fatalf("testhub: AddPeer(%s, %s): %v", kind, name, err)
+	}
+	if kind == "dot" {
+		return id, ""
 	}
 	got, secret, err := e.Hub.Auth.Enrol(ctx, tok)
 	if err != nil {

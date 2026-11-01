@@ -135,7 +135,7 @@ func setup(t *testing.T, respond func(int, hit) reply) *fixture {
 	env := testhub.Start(t)
 	f := &fixture{env: env, ctx: context.Background(), t: t}
 	f.a, f.aSec = env.NewPeer("grokbot", "a")
-	f.b, f.bSec = env.NewPeer("dot", "b")
+	f.b, f.bSec = env.NewPeer("session", "b")
 	env.SetLimits(f.a, 10000, 10000)
 	f.w = &push.Worker{Hub: env.Hub, Now: env.Now.Now}
 	if respond != nil {

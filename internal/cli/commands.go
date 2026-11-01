@@ -73,7 +73,7 @@ admin (operator credential):
   source add --kind github --name N --route ID [--events A,B] [--priority P]
        prints the ingress URL and the secret, once
   source list
-  subscriptions list | subscriptions resume <id>
+  subscriptions list | subscriptions pause <id> | subscriptions resume <id>
   team add --name N [--members IDS]
   dead-letters list | dead-letters retry <dly> | dead-letters discard <dly>
   notify set --url URL --filter F [--url URL --filter F]…
@@ -1115,6 +1115,16 @@ func (a *app) cmdPeer(args []string) error {
 		var out map[string]any
 		if err := a.call(http.MethodPost, "/v1/admin/peers", body, &out); err != nil {
 			return err
+		}
+		if out["enrol_token"] == "" { // a dot: it holds no vecnet secret
+			delete(out, "enrol_token")
+			if err := a.emitObject(out, "peer_id", "principal_id"); err != nil {
+				return err
+			}
+			if !a.json {
+				fmt.Fprintf(a.stdout, "dots have no enrolment token; run `vecnet peer link %v` to connect it\n", out["peer_id"])
+			}
+			return nil
 		}
 		return a.emitObject(out, "peer_id", "enrol_token", "principal_id")
 	case sub == "move" && len(o.pos) == 2 && o.str("principal") != "":

@@ -17,6 +17,7 @@ type OAuthInfo struct {
 	ClientID    string
 	Scopes      []string
 	Expires     time.Time
+	TokenHash   string // of this access token, never the token: revoking it stops what it subscribed
 }
 
 // Principal is who an /mcp request acts as. Caller is the same identity the
@@ -49,17 +50,22 @@ func (b *BearerAuth) Authenticate(ctx context.Context, r *http.Request) (Princip
 }
 
 // Chain tries each Authenticator in order; the first success wins. When all
-// fail the result is auth.ErrUnauthenticated, unless one failed for another
-// reason (a store error), which is returned instead so it surfaces as 500.
+// fail the result is auth.ErrUnauthenticated (auth.ErrPeerDisabled if that is
+// what one said, which still means 401), unless one failed for another reason
+// (a store error), which is returned instead so it surfaces as 500.
 type Chain []Authenticator
 
 // Authenticate implements Authenticator.
 func (c Chain) Authenticate(ctx context.Context, r *http.Request) (Principal, error) {
 	var other error
+	refused := auth.ErrUnauthenticated
 	for _, a := range c {
 		p, err := a.Authenticate(ctx, r)
 		if err == nil {
 			return p, nil
+		}
+		if errors.Is(err, auth.ErrPeerDisabled) {
+			refused = err
 		}
 		if !errors.Is(err, auth.ErrUnauthenticated) && other == nil {
 			other = err
@@ -68,7 +74,7 @@ func (c Chain) Authenticate(ctx context.Context, r *http.Request) (Principal, er
 	if other != nil {
 		return Principal{}, other
 	}
-	return Principal{}, auth.ErrUnauthenticated
+	return Principal{}, refused
 }
 
 // BearerToken extracts the token from "Authorization: Bearer <token>".

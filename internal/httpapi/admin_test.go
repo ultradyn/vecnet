@@ -2,6 +2,7 @@ package httpapi_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -67,7 +68,7 @@ func enrol(t *testing.T, env *testhub.Env, token string) enrolResp {
 
 func TestEnrolFlow(t *testing.T) {
 	env := testhub.Start(t)
-	p := adminAddPeer(t, env, map[string]any{"kind": "dot", "name": "alice"})
+	p := adminAddPeer(t, env, map[string]any{"kind": "session", "name": "alice"})
 
 	got := enrol(t, env, p.EnrolToken)
 	if got.PeerID != p.PeerID || got.Secret == "" {
@@ -97,7 +98,7 @@ func TestImplicitAndExplicitPrincipal(t *testing.T) {
 	_, aSec := env.NewPeer("grokbot", "sender")
 
 	// Without principal_id: an implicit principal named like the peer.
-	imp := adminAddPeer(t, env, map[string]any{"kind": "dot", "name": "bob"})
+	imp := adminAddPeer(t, env, map[string]any{"kind": "session", "name": "bob"})
 	var name string
 	if err := env.Hub.DB.QueryRow(`SELECT name FROM principals WHERE prn_id = ?`, imp.PrincipalID).Scan(&name); err != nil {
 		t.Fatal(err)
@@ -150,7 +151,7 @@ func TestImplicitAndExplicitPrincipal(t *testing.T) {
 
 func TestRotateInvalidatesOld(t *testing.T) {
 	env := testhub.Start(t)
-	peer, old := env.NewPeer("dot", "carol")
+	peer, old := env.NewPeer("session", "carol")
 	if resp, raw := env.Do(old, "GET", "/v1/peers", nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /v1/peers before rotate = %d; %s", resp.StatusCode, raw)
 	}
@@ -400,7 +401,7 @@ func TestThreadPatchEmitsUpdate(t *testing.T) {
 func TestAuditHasNoBodies(t *testing.T) {
 	env := testhub.Start(t)
 	_, aSec := env.NewPeer("grokbot", "a")
-	b, bSec := env.NewPeer("dot", "b")
+	b, bSec := env.NewPeer("session", "b")
 	const secretText = "zebra-crossing-7731 body text"
 	body := sendBody("audit-1", b)
 	body["content"] = map[string]any{"text": secretText}
@@ -562,5 +563,57 @@ func TestEnrolTokenExpiresOnHubClock(t *testing.T) {
 	resp, raw := env.Do("", "POST", "/v1/enrol", map[string]string{"token": late.EnrolToken})
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("enrol 25 h after issue = %d %s, want 401", resp.StatusCode, raw)
+	}
+}
+
+// Invariant 8: a dot gets no enrolment token, no rotation mints it a bearer,
+// and a leftover token buys nothing. A bearer from before this was enforced
+// ends with the first link code.
+func TestDotHoldsNoBearer(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	raw := adminDo(t, env, "POST", "/v1/admin/peers", map[string]any{"kind": "dot", "name": "mira"}, http.StatusCreated)
+	var p addPeerResp
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("decode: %v; %s", err, raw)
+	}
+	if !strings.HasPrefix(p.PeerID, "peer_") || p.EnrolToken != "" {
+		t.Fatalf("dot add = %s, want a peer and no enrol_token", raw)
+	}
+	resp, raw := env.Do(env.OperatorSecret, "POST", "/v1/admin/peers/"+p.PeerID+"/rotate", nil)
+	mustErr(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
+
+	// A token issued before dots lost them, as an older hub stored it.
+	var tok string
+	if err := env.Hub.DB.Tx(ctx, func(tx *sql.Tx) error {
+		var err error
+		tok, err = env.Hub.Auth.IssueEnrolToken(ctx, tx, p.PeerID, 0)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp, raw = env.Do("", "POST", "/v1/enrol", map[string]string{"token": tok})
+	mustErr(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
+
+	// A credential left from then stops at the link.
+	secret, err := env.Hub.Auth.Rotate(ctx, "peer", p.PeerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, raw = env.Do(secret, "GET", "/v1/peers", nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("left-over bearer before the link: %d %s", resp.StatusCode, raw)
+	}
+	if err := env.Hub.DB.Tx(ctx, func(tx *sql.Tx) error {
+		_, err := env.Hub.BindDotPrincipalTx(ctx, tx, p.PeerID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if resp, raw = env.Do(secret, "GET", "/v1/peers", nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("left-over bearer after the link: %d %s", resp.StatusCode, raw)
+	}
+	var unspent int
+	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM enrol_tokens WHERE peer_id = ? AND used_at IS NULL`, p.PeerID).Scan(&unspent); err != nil || unspent != 0 {
+		t.Fatalf("unspent enrol tokens = %d, %v", unspent, err)
 	}
 }

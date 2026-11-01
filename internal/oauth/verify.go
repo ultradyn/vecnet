@@ -53,13 +53,14 @@ func (a *TokenAuth) Authenticate(ctx context.Context, r *http.Request) (mcpserve
 	}
 	s := a.S
 	var clientID, prn, peer, peerKind, scope, resource, expires string
+	hash := auth.HashSecret(tok)
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT t.client_id, o.prn_id, o.peer_id, p.kind, t.scope, t.resource, t.expires_at
 		 FROM oauth_tokens t
 		 JOIN oauth_principals o ON o.prn_id = t.principal_id
 		 JOIN peers p ON p.peer_id = o.peer_id
 		 WHERE t.token_hash = ? AND t.kind = 'access' AND t.revoked_at IS NULL
-		   AND p.disabled = 0 AND p.prn_id = o.prn_id`, auth.HashSecret(tok)).
+		   AND p.disabled = 0 AND p.prn_id = o.prn_id`, hash).
 		Scan(&clientID, &prn, &peer, &peerKind, &scope, &resource, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return mcpserver.Principal{}, auth.ErrUnauthenticated
@@ -77,6 +78,6 @@ func (a *TokenAuth) Authenticate(ctx context.Context, r *http.Request) (mcpserve
 	}
 	return mcpserver.Principal{
 		Caller: auth.Caller{Kind: "principal", PrincipalID: prn, PeerID: peer, PeerKind: peerKind},
-		OAuth:  &mcpserver.OAuthInfo{PrincipalID: prn, ClientID: clientID, Scopes: scopes, Expires: exp},
+		OAuth:  &mcpserver.OAuthInfo{PrincipalID: prn, ClientID: clientID, Scopes: scopes, Expires: exp, TokenHash: hash},
 	}, nil
 }

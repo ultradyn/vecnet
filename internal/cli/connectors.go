@@ -172,14 +172,18 @@ func (a *app) cmdSubscriptions(args []string) error {
 				Cursor       string  `json:"cursor"`
 				ExpiresAt    *string `json:"expires_at"`
 				PausedReason *string `json:"paused_reason"`
+				LastRefresh  *string `json:"last_refresh_at"`
 				LastStatus   *int    `json:"last_status"`
 			}
 			if json.Unmarshal(it, &s) != nil {
 				continue
 			}
-			expires, paused, status := "-", "-", "-"
+			expires, paused, refreshed, status := "-", "-", "-", "-"
 			if s.ExpiresAt != nil {
 				expires = flatten(*s.ExpiresAt)
+			}
+			if s.LastRefresh != nil {
+				refreshed = flatten(*s.LastRefresh)
 			}
 			if s.PausedReason != nil {
 				paused = flatten(*s.PausedReason)
@@ -187,15 +191,20 @@ func (a *app) cmdSubscriptions(args []string) error {
 			if s.LastStatus != nil {
 				status = strconv.Itoa(*s.LastStatus)
 			}
-			fmt.Fprintf(a.stdout, "%s %s %s cursor=%s expires=%s paused=%s last_status=%s\n",
-				s.SubID, s.PeerID, flatten(s.Host), s.Cursor, expires, paused, status)
+			fmt.Fprintf(a.stdout, "%s %s %s cursor=%s expires=%s paused=%s last_refresh=%s last_status=%s\n",
+				s.SubID, s.PeerID, flatten(s.Host), s.Cursor, expires, paused, refreshed, status)
 		}
 		return nil
+	case len(o.pos) == 2 && o.pos[0] == "pause":
+		if err := a.call(http.MethodPost, "/v1/admin/subscriptions/"+pathEscape(o.pos[1])+"/pause", nil, nil); err != nil {
+			return err
+		}
+		return a.ok("paused " + o.pos[1])
 	case len(o.pos) == 2 && o.pos[0] == "resume":
 		if err := a.call(http.MethodPost, "/v1/admin/subscriptions/"+pathEscape(o.pos[1])+"/resume", nil, nil); err != nil {
 			return err
 		}
 		return a.ok("resumed " + o.pos[1])
 	}
-	return usageErr("usage: vecnet subscriptions list | subscriptions resume <id>")
+	return usageErr("usage: vecnet subscriptions list | subscriptions pause <id> | subscriptions resume <id>")
 }

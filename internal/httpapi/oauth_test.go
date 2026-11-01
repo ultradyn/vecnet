@@ -19,8 +19,8 @@ var dotLinkCode = regexp.MustCompile(`^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$`)
 
 func TestAdminDotLinks(t *testing.T) {
 	env := testhub.Start(t)
-	dot, dotSecret := env.NewPeer("dot", "my-dot")
-	sess, _ := env.NewPeer("session", "s1")
+	dot, _ := env.NewPeer("dot", "my-dot")
+	sess, sessSecret := env.NewPeer("session", "s1")
 
 	resp, body := env.Do(env.OperatorSecret, "POST", "/v1/admin/dot-links", map[string]string{"peer_id": dot})
 	if resp.StatusCode != http.StatusCreated {
@@ -58,7 +58,7 @@ func TestAdminDotLinks(t *testing.T) {
 		status int
 		code   string
 	}{
-		"not operator": {dotSecret, map[string]string{"peer_id": dot}, http.StatusForbidden, "forbidden"},
+		"not operator": {sessSecret, map[string]string{"peer_id": dot}, http.StatusForbidden, "forbidden"},
 		"no bearer":    {"", map[string]string{"peer_id": dot}, http.StatusUnauthorized, "unauthenticated"},
 		"not a dot":    {env.OperatorSecret, map[string]string{"peer_id": sess}, http.StatusUnprocessableEntity, "invalid_value"},
 		"unknown peer": {env.OperatorSecret, map[string]string{"peer_id": "peer_01ARZ3NDEKTSV4RRFFQ69G5FAV"}, http.StatusNotFound, "not_found"},

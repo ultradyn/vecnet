@@ -254,8 +254,8 @@ func (h *Hub) ConsumeDotLinkTx(ctx context.Context, tx *sql.Tx, code string) (st
 
 // BindDotPrincipalTx moves dot peer peerID under a new principal named "dot:"
 // + the peer's name, inside tx, on the authority of the operator's link code
-// (PROTOCOL §2.12, §4.5). It returns the principal. After commit, wake readers
-// with Log.Notify(peerID, prnID).
+// (PROTOCOL §2.12, §4.5), and ends any bearer left on it. It returns the
+// principal. After commit, wake readers with Log.Notify(peerID, prnID).
 func (h *Hub) BindDotPrincipalTx(ctx context.Context, tx *sql.Tx, peerID string) (string, error) {
 	var name string
 	err := tx.QueryRowContext(ctx, `SELECT name FROM peers WHERE peer_id = ?`, peerID).Scan(&name)
@@ -272,39 +272,92 @@ func (h *Hub) BindDotPrincipalTx(ctx context.Context, tx *sql.Tx, peerID string)
 	if err := h.movePeer(ctx, tx, peerID, prnID, "hub"); err != nil {
 		return "", err
 	}
+	// A link code cuts off whoever had this dot, and a bearer from before dots
+	// lost them would survive it.
+	if err := h.Auth.RevokePeerCredentialsTx(ctx, tx, peerID); err != nil {
+		return "", err
+	}
 	return prnID, nil
 }
 
-// RotatePeer revokes peerID's peer credentials and returns a new secret,
-// once (PROTOCOL §2.12, §12). 404 not_found for an unknown peer.
-func (h *Hub) RotatePeer(ctx context.Context, peerID string) (string, error) {
-	s, err := h.Auth.Rotate(ctx, "peer", peerID)
-	if errors.Is(err, auth.ErrUnknownSubject) {
-		return "", unknownPeer(peerID)
+// PausedCredentialRotated is the paused_reason of an MCP Events subscription
+// whose bearer was rotated. Rotation answers a leaked credential, and the
+// subscription is what that credential chose: it stops in the same
+// transaction, and the holder of the new credential subscribes again.
+const PausedCredentialRotated = "credential_rotated"
+
+// pauseBearerSubscriptions stops the Events subscriptions the credential of
+// subject made (subject is a peer or principal id). An operator's pause stays
+// the operator's. Paused subscriptions keep their cursor, so nothing is lost.
+func (h *Hub) pauseBearerSubscriptions(ctx context.Context, tx *sql.Tx, subject string) error {
+	now := h.nowStr()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE event_subscriptions SET paused_reason = ?, updated_at = ?
+		 WHERE principal_kind = 'vecnet' AND principal_id = ? AND coalesce(paused_reason, '') != 'operator'`,
+		PausedCredentialRotated, now, subject); err != nil {
+		return fmt.Errorf("hub: pause subscriptions: %w", err)
 	}
-	return s, err
+	return nil
+}
+
+// RotatePeer revokes peerID's peer credentials and returns a new secret, once
+// (PROTOCOL §2.12, §12), and pauses the Events subscriptions the old one made.
+// A dot has no bearer to rotate: 422 invalid_value. 404 not_found for an
+// unknown peer. Open streams on the old credential end (they wake here).
+func (h *Hub) RotatePeer(ctx context.Context, peerID string) (string, error) {
+	var secret string
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		_, kind, _, err := peerRow(ctx, tx, peerID)
+		if err != nil {
+			return err
+		}
+		if kind == "dot" {
+			return invalidValue("peer_id", "a dot holds no vecnet secret; issue a link code instead")
+		}
+		if secret, err = h.Auth.RotateTx(ctx, tx, "peer", peerID); err != nil {
+			return err
+		}
+		return h.pauseBearerSubscriptions(ctx, tx, peerID)
+	})
+	if err != nil {
+		return "", err
+	}
+	h.Log.Notify(peerID)
+	return secret, nil
 }
 
 // RotatePrincipal revokes principal prnID's credential and returns a new
-// one, once. The operator principal's credential stays an operator
-// credential. 404 not_found for an unknown principal.
+// one, once, and pauses the Events subscriptions the old one made. The
+// operator principal's credential stays an operator credential. 404
+// not_found for an unknown principal. Open streams on the old credential end.
 func (h *Hub) RotatePrincipal(ctx context.Context, prnID string) (string, error) {
-	kind := "principal"
-	var isOp bool
-	if err := h.DB.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM credentials WHERE subject_id = ? AND kind = 'operator')`, prnID).Scan(&isOp); err != nil {
-		return "", fmt.Errorf("hub: rotate principal: %w", err)
-	}
-	if isOp {
-		kind = "operator"
-	}
-	s, err := h.Auth.Rotate(ctx, kind, prnID)
+	var secret string
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		kind := "principal"
+		var isOp bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM credentials WHERE subject_id = ? AND kind = 'operator')`, prnID).Scan(&isOp); err != nil {
+			return fmt.Errorf("hub: rotate principal: %w", err)
+		}
+		if isOp {
+			kind = "operator"
+		}
+		var err error
+		if secret, err = h.Auth.RotateTx(ctx, tx, kind, prnID); err != nil {
+			return err
+		}
+		return h.pauseBearerSubscriptions(ctx, tx, prnID)
+	})
 	if errors.Is(err, auth.ErrUnknownSubject) {
 		e := E(http.StatusNotFound, "not_found", "no such principal")
 		e.Details["principal_id"] = prnID
 		return "", e
 	}
-	return s, err
+	if err != nil {
+		return "", err
+	}
+	h.Log.Notify(prnID)
+	return secret, nil
 }
 
 // SetScopes replaces peerID's send scopes with allow and deny lists of

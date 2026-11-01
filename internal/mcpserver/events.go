@@ -3,15 +3,18 @@ package mcpserver
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sync"
 	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/events"
@@ -226,7 +229,10 @@ func (s *Server) requestedCursor(ctx context.Context, raw *string) (*eventlog.Cu
 
 // eventsSubscribe creates or refreshes a subscription. The checks run in
 // order and none writes: nothing is stored for a request that fails them. A
-// failed challenge removes the row it was for, which by then is unverified.
+// failed challenge removes a row it just created. A row that already existed
+// keeps its cursor and queue, unverified, so the worker leaves it alone and a
+// later subscribe that passes resumes it: a callback down for the moment must
+// not cost the client its place.
 func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) (any, error) {
 	if req.IsNotification() {
 		return nil, nil // a write with no way to report its outcome is not run
@@ -276,8 +282,9 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 		return nil, err
 	}
 	var tokenExp time.Time
+	var tokenHash string
 	if principal.OAuth != nil {
-		tokenExp = principal.OAuth.Expires
+		tokenExp, tokenHash = principal.OAuth.Expires, principal.OAuth.TokenHash
 	}
 	var types []string
 	if list, ok := args["types"].([]any); ok {
@@ -292,18 +299,24 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 	if err != nil {
 		return nil, err
 	}
-	sub, _, err := s.Events.Upsert(ctx, events.Subscription{
+	sub, created, err := s.Events.Upsert(ctx, events.Subscription{
 		PrincipalKind: kind, PrincipalID: id, PeerID: peer, Name: p.Name, URL: p.Delivery.URL,
-		Arguments: args, Types: types, Cursor: head,
+		Arguments: args, Types: types, Cursor: head, TokenHash: tokenHash,
 	}, p.Delivery.Secret, ttl, tokenExp)
+	if errors.Is(err, events.ErrTooMany) {
+		return nil, &RPCError{Code: ErrInvalidParams, Message: "too many live subscriptions",
+			Data: map[string]any{"reason": "too_many", "limit": events.MaxPerPrincipal}}
+	}
 	if err != nil {
 		return nil, err
 	}
 	verify := !sub.Verified
 	if verify {
-		if err := events.Challenge(ctx, s.EventsClient, sub, p.Delivery.Secret); err != nil {
-			if err := s.Events.Delete(context.WithoutCancel(ctx), kind, id, p.Delivery.URL, p.Name, args); err != nil {
-				slog.Error("mcp: drop unverified subscription", "subscription", sub.ID, "err", err)
+		if err := events.Challenge(ctx, s.EventsClient, sub, p.Delivery.Secret, s.now()); err != nil {
+			if created {
+				if err := s.Events.Delete(context.WithoutCancel(ctx), kind, id, p.Delivery.URL, p.Name, args); err != nil {
+					slog.Error("mcp: drop unverified subscription", "subscription", sub.ID, "err", err)
+				}
 			}
 			var failed events.ErrChallenge
 			if errors.As(err, &failed) {
@@ -314,15 +327,14 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 	}
 
 	// A given cursor always wins (ChatGPT passes its last saved one). Absent,
-	// a first subscribe starts at the head and a refresh stays put.
+	// a first subscribe starts at the head, where Upsert put it, and a refresh
+	// or a new challenge stays put.
 	cur, move, clientHas := sub.Cursor, false, want != nil
 	switch {
 	case want != nil && *want == eventlog.Head:
 		cur, move = head, true
 	case want != nil:
 		cur, move = *want, true
-	case verify:
-		cur, move = head, true
 	}
 	truncated := sub.Truncated
 	if _, err := s.Hub.Log.Read(ctx, owners, cur, 1); err != nil {
@@ -347,6 +359,11 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 			return nil, err
 		}
 	}
+	if created {
+		if err := s.auditSubscribe(ctx, sub); err != nil {
+			return nil, err
+		}
+	}
 
 	replay, err := s.Events.ReplayCursor(ctx, sub.ID, cur)
 	if err != nil {
@@ -362,6 +379,19 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 		"cursor":        replay.String(),
 		"truncated":     truncated,
 	}, nil
+}
+
+// auditSubscribe records a new subscription, which is a new place for message
+// content to go. Only the host is kept: a callback path can carry a credential.
+func (s *Server) auditSubscribe(ctx context.Context, sub events.Subscription) error {
+	u, err := url.Parse(sub.URL)
+	if err != nil {
+		return fmt.Errorf("mcp: stored callback URL: %w", err)
+	}
+	return s.Hub.DB.Tx(ctx, func(tx *sql.Tx) error {
+		return audit.Record(ctx, tx, sub.PeerID, "event_subscribe", []string{sub.ID, sub.PeerID},
+			map[string]any{"host": u.Hostname()})
+	})
 }
 
 // eventsUnsubscribe deletes the caller's subscription with this key; the key

@@ -125,7 +125,7 @@ func eventsFront(t *testing.T, env *testhub.Env, a mcpserver.Authenticator, muta
 
 func TestEventsListShape(t *testing.T) {
 	env := testhub.Start(t)
-	_, secret := env.NewPeer("dot", "d")
+	_, secret := env.NewPeer("session", "d")
 	r := rpc2026(t, env, secret, "events/list", nil)
 	if r.Error != nil {
 		t.Fatalf("events/list: %+v", r.Error)
@@ -244,7 +244,7 @@ func (d *schemaDoc) UnmarshalJSON(b []byte) error {
 
 func TestSubscribeChallengeAndDeliver(t *testing.T) {
 	env := testhub.Start(t)
-	dot, dotSecret := env.NewPeer("dot", "d")
+	dot, dotSecret := env.NewPeer("session", "d")
 	_, sender := env.NewPeer("session", "s")
 	cb := testhub.NewCallback(t)
 	whsec := webhook.NewSecret()
@@ -277,7 +277,7 @@ func TestSubscribeChallengeAndDeliver(t *testing.T) {
 	if chs[0].Subscription != res.ID || !strings.HasPrefix(chs[0].ID, "vrf_") {
 		t.Fatalf("challenge headers = %+v", chs[0])
 	}
-	if err := webhook.Verify([]string{whsec}, chs[0].ID, chs[0].Timestamp, chs[0].Signature, chs[0].Body, time.Now()); err != nil {
+	if err := webhook.Verify([]string{whsec}, chs[0].ID, chs[0].Timestamp, chs[0].Signature, chs[0].Body, env.Now.Now()); err != nil {
 		t.Fatalf("challenge signature: %v", err)
 	}
 
@@ -335,7 +335,7 @@ func TestSubscribeChallengeAndDeliver(t *testing.T) {
 
 func TestSubscribeRejectsBadUrlAndSecret(t *testing.T) {
 	env := testhub.StartWith(t, func(c *hub.Config) { c.AllowPrivateEgress = false })
-	_, secret := env.NewPeer("dot", "d")
+	_, secret := env.NewPeer("session", "d")
 	cb := testhub.NewCallback(t)
 	_, port, err := net.SplitHostPort(strings.TrimPrefix(strings.SplitN(cb.URL, "/hook", 2)[0], "http://"))
 	if err != nil {
@@ -402,7 +402,7 @@ func TestSubscribeRejectsBadUrlAndSecret(t *testing.T) {
 
 func TestChallengeFailure(t *testing.T) {
 	env := testhub.Start(t)
-	_, secret := env.NewPeer("dot", "d")
+	_, secret := env.NewPeer("session", "d")
 
 	cb := testhub.NewCallback(t)
 	cb.OnChallenge(func(_ string, w http.ResponseWriter, _ *http.Request) {
@@ -461,7 +461,7 @@ func TestChallengeFailure(t *testing.T) {
 
 func TestRefreshKeepsCursorRotatesSecret(t *testing.T) {
 	env := testhub.Start(t)
-	dot, dotSecret := env.NewPeer("dot", "d")
+	dot, dotSecret := env.NewPeer("session", "d")
 	_, sender := env.NewPeer("session", "s")
 	cb := testhub.NewCallback(t)
 	oldKey, newKey := webhook.NewSecret(), webhook.NewSecret()
@@ -532,8 +532,8 @@ func TestRefreshKeepsCursorRotatesSecret(t *testing.T) {
 
 func TestUnsubscribeIdempotent(t *testing.T) {
 	env := testhub.Start(t)
-	dot, dotSecret := env.NewPeer("dot", "d")
-	_, otherSecret := env.NewPeer("dot", "other")
+	dot, dotSecret := env.NewPeer("session", "d")
+	_, otherSecret := env.NewPeer("session", "other")
 	_, sender := env.NewPeer("session", "s")
 	cb := testhub.NewCallback(t)
 	subscribeOK(t, env, dotSecret, subParams(cb.URL, webhook.NewSecret(), nil))
@@ -567,7 +567,7 @@ func TestUnsubscribeIdempotent(t *testing.T) {
 
 func TestAdminSubscriptions(t *testing.T) {
 	env := testhub.Start(t)
-	dot, dotSecret := env.NewPeer("dot", "d")
+	dot, dotSecret := env.NewPeer("session", "d")
 	cb := testhub.NewCallback(t)
 	whsec := webhook.NewSecret()
 	res := subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, nil))
@@ -649,7 +649,7 @@ func (f fakeOAuth) Authenticate(context.Context, *http.Request) (mcpserver.Princ
 
 func TestSubscribeOAuthPrincipal(t *testing.T) {
 	env := testhub.Start(t)
-	dot, _ := env.NewPeer("dot", "d")
+	dot, _ := env.NewPeer("session", "d")
 	other, _ := env.NewPeer("dot", "other")
 	prn, err := env.Hub.PeerPrincipal(context.Background(), dot)
 	if err != nil {
@@ -706,7 +706,7 @@ func TestSubscribeOAuthPrincipal(t *testing.T) {
 
 func TestSubscribeTtlClamp(t *testing.T) {
 	env := testhub.Start(t)
-	_, secret := env.NewPeer("dot", "d")
+	_, secret := env.NewPeer("session", "d")
 	now := env.Now.Now()
 	for _, c := range []struct {
 		name string
@@ -743,7 +743,7 @@ func TestSubscribeTtlClamp(t *testing.T) {
 
 func TestSubscribeParamsStrict(t *testing.T) {
 	env := testhub.Start(t)
-	_, secret := env.NewPeer("dot", "d")
+	_, secret := env.NewPeer("session", "d")
 	cb := testhub.NewCallback(t)
 	whsec := webhook.NewSecret()
 	for name, params := range map[string]map[string]any{
@@ -798,7 +798,7 @@ func TestSubscribeForeignPeer(t *testing.T) {
 
 func TestSubscribeCursorTruncated(t *testing.T) {
 	env := testhub.Start(t)
-	dot, dotSecret := env.NewPeer("dot", "d")
+	dot, dotSecret := env.NewPeer("session", "d")
 	_, sender := env.NewPeer("session", "s")
 	cb := testhub.NewCallback(t)
 	whsec := webhook.NewSecret()
@@ -836,7 +836,7 @@ func TestSubscribeCursorTruncated(t *testing.T) {
 
 func TestEventsOnLegacySession(t *testing.T) {
 	env := testhub.Start(t)
-	dot, secret := env.NewPeer("dot", "d")
+	dot, secret := env.NewPeer("session", "d")
 	_, sender := env.NewPeer("session", "s")
 	cb := testhub.NewCallback(t)
 	sid := legacySession(t, env, secret)
@@ -883,7 +883,7 @@ func answerFirst(status int) func(int, http.ResponseWriter) {
 // it and passes it back loses nothing still queued (PROTOCOL §4.4).
 func TestQueuedRowSurvivesTwoRefreshes(t *testing.T) {
 	env := testhub.Start(t)
-	dot, dotSecret := env.NewPeer("dot", "d")
+	dot, dotSecret := env.NewPeer("session", "d")
 	_, sender := env.NewPeer("session", "s")
 	cb := testhub.NewCallback(t)
 	whsec := webhook.NewSecret()
@@ -922,7 +922,7 @@ func TestQueuedRowSurvivesTwoRefreshes(t *testing.T) {
 // what is queued still goes out.
 func TestPurgedCursorKeepsQueuedRow(t *testing.T) {
 	env := testhub.Start(t)
-	dot, dotSecret := env.NewPeer("dot", "d")
+	dot, dotSecret := env.NewPeer("session", "d")
 	_, sender := env.NewPeer("session", "s")
 	cb := testhub.NewCallback(t)
 	whsec := webhook.NewSecret()
@@ -950,7 +950,7 @@ func TestTerminalRowSurvivesRewind(t *testing.T) {
 	for _, code := range []int{http.StatusGone, http.StatusRequestEntityTooLarge} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			env := testhub.Start(t)
-			dot, dotSecret := env.NewPeer("dot", "d")
+			dot, dotSecret := env.NewPeer("session", "d")
 			_, sender := env.NewPeer("session", "s")
 			cb := testhub.NewCallback(t)
 			whsec := webhook.NewSecret()
@@ -989,7 +989,7 @@ func TestTerminalRowSurvivesRewind(t *testing.T) {
 // drains it (PROTOCOL §4.4 Outage).
 func TestExhaustedRowReplaysFromCursor(t *testing.T) {
 	env := testhub.Start(t)
-	dot, dotSecret := env.NewPeer("dot", "d")
+	dot, dotSecret := env.NewPeer("session", "d")
 	_, sender := env.NewPeer("session", "s")
 	cb := testhub.NewCallback(t)
 	whsec := webhook.NewSecret()
@@ -1032,7 +1032,7 @@ func TestTokenExpiryResumesThroughSubscribe(t *testing.T) {
 	}{{"no cursor", false}, {"saved cursor", true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := testhub.Start(t)
-			dot, _ := env.NewPeer("dot", "d")
+			dot, _ := env.NewPeer("session", "d")
 			_, sender := env.NewPeer("session", "s")
 			prn, err := env.Hub.PeerPrincipal(context.Background(), dot)
 			if err != nil {
@@ -1089,7 +1089,7 @@ func TestTokenExpiryResumesThroughSubscribe(t *testing.T) {
 // A purge the worker met is reported once, on the next events/subscribe.
 func TestSubscribeReportsWorkerTruncation(t *testing.T) {
 	env := testhub.Start(t)
-	dot, dotSecret := env.NewPeer("dot", "d")
+	dot, dotSecret := env.NewPeer("session", "d")
 	_, sender := env.NewPeer("session", "s")
 	cb := testhub.NewCallback(t)
 	whsec := webhook.NewSecret()
@@ -1114,7 +1114,7 @@ func TestSubscribeReportsWorkerTruncation(t *testing.T) {
 // URL through (a name that re-resolves between the check and the dial).
 func TestDefaultChallengeClientRefusesLoopback(t *testing.T) {
 	env := testhub.StartWith(t, func(c *hub.Config) { c.AllowPrivateEgress = false })
-	_, secret := env.NewPeer("dot", "d")
+	_, secret := env.NewPeer("session", "d")
 	cb := testhub.NewCallback(t)
 	front := eventsFront(t, env, nil, func(m *mcpserver.Server) { m.Egress.AllowPrivate = true })
 	r := rpc2026(t, front, secret, "events/subscribe", subParams(cb.URL, webhook.NewSecret(), nil))
@@ -1123,5 +1123,243 @@ func TestDefaultChallengeClientRefusesLoopback(t *testing.T) {
 	}
 	if n := cb.Requests(); n != 0 {
 		t.Fatalf("strict hub's default challenge client reached a loopback callback: %d requests", n)
+	}
+}
+
+// A passed challenge stands for ChallengeMaxAge. Past it a re-subscribe sends a
+// signed challenge, and failing that keeps the row, its cursor and its queue
+// while delivering nothing. A new secret alone needs no challenge.
+func TestChallengeAgesOut(t *testing.T) {
+	env := testhub.Start(t)
+	dot, dotSecret := env.NewPeer("session", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	key := webhook.NewSecret()
+	first := subscribeOK(t, env, dotSecret, subParams(cb.URL, key, nil))
+	sendPriority(t, env, sender, dot, "one", "wake")
+	stepEvents(t, env)
+	seen := decodeEvent(t, cb.Posts()[0].Body).Cursor
+
+	// Inside the bound: a refresh with a new secret, no challenge.
+	env.Now.Advance(events.ChallengeMaxAge - time.Hour)
+	key = webhook.NewSecret()
+	subscribeOK(t, env, dotSecret, subParams(cb.URL, key, nil))
+	if n := len(cb.Challenges()); n != 1 {
+		t.Fatalf("challenges inside the bound = %d, want 1", n)
+	}
+
+	// Past it, against a callback that no longer answers.
+	env.Now.Advance(2 * time.Hour)
+	cb.OnChallenge(func(_ string, w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) })
+	r := rpc2026(t, env, dotSecret, "events/subscribe", subParams(cb.URL, key, nil))
+	if r.Error == nil || r.Error.Code != mcpserver.ErrCodeCallback || errReason(t, r) != "challenge_failed" {
+		t.Fatalf("re-subscribe past the bound = %+v / %s, want -32015 challenge_failed", r.Error, r.Result)
+	}
+	chs := cb.Challenges()
+	if len(chs) != 2 {
+		t.Fatalf("challenges past the bound = %d, want 2", len(chs))
+	}
+	if err := webhook.Verify([]string{key}, chs[1].ID, chs[1].Timestamp, chs[1].Signature, chs[1].Body, env.Now.Now()); err != nil {
+		t.Fatalf("challenge signature: %v", err)
+	}
+	store := events.NewStore(env.Hub)
+	kept, err := store.Get(context.Background(), first.ID)
+	if err != nil {
+		t.Fatalf("a failed re-challenge lost the row: %v", err)
+	}
+	if kept.Verified || kept.Cursor.String() != seen {
+		t.Fatalf("after the failure: %+v, want unverified at %s", kept, seen)
+	}
+	queued := sendPriority(t, env, sender, dot, "two", "wake")
+	stepEvents(t, env)
+	if n := len(cb.Posts()); n != 1 {
+		t.Fatalf("POSTs while unverified = %d, want none new", n)
+	}
+
+	// A later subscribe that passes resumes from the stored cursor.
+	cb.OnChallenge(nil)
+	back := subscribeOK(t, env, dotSecret, subParams(cb.URL, key, nil))
+	if back.ID != first.ID || back.Cursor != seen || len(cb.Challenges()) != 3 {
+		t.Fatalf("resume = %+v, %d challenges; want %s at %s, 3 challenges", back, len(cb.Challenges()), first.ID, seen)
+	}
+	got, err := store.Get(context.Background(), first.ID)
+	if err != nil || got.VerifiedAt == nil || !got.VerifiedAt.Equal(env.Now.Now()) {
+		t.Fatalf("verified at %v, %v; want now", got.VerifiedAt, err)
+	}
+	stepEvents(t, env)
+	if posts := cb.Posts(); len(posts) != 2 || posts[1].ID != queued {
+		t.Fatalf("POSTs = %+v, want %s to arrive", posts, queued)
+	}
+}
+
+// A row that lapsed proves itself again however recent its last pass was, and
+// the worker sends nothing while that challenge is outstanding.
+func TestLapsedSubscriptionChallengesAgain(t *testing.T) {
+	env := testhub.Start(t)
+	dot, dotSecret := env.NewPeer("session", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	key := webhook.NewSecret()
+	subscribeOK(t, env, dotSecret, subParams(cb.URL, key, map[string]any{"ttlMs": 60000}))
+	env.Now.Advance(2 * time.Minute)
+	sendPriority(t, env, sender, dot, "during", "wake")
+	cb.OnChallenge(func(c string, w http.ResponseWriter, _ *http.Request) {
+		stepEvents(t, env) // a Step that lands mid-challenge
+		if n := len(cb.Posts()); n != 0 {
+			t.Errorf("POSTs during the challenge = %d, want 0", n)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"challenge": c})
+	})
+	subscribeOK(t, env, dotSecret, subParams(cb.URL, key, nil))
+	if n := len(cb.Challenges()); n != 2 {
+		t.Fatalf("challenges = %d, want 2", n)
+	}
+	stepEvents(t, env)
+	if n := len(cb.Posts()); n != 1 {
+		t.Fatalf("POSTs after the challenge = %d, want 1", n)
+	}
+}
+
+// Rotation answers a leaked bearer: what that bearer subscribed stops in the
+// same transaction, keeps its place, and the new holder takes it up.
+func TestRotationPausesSubscriptions(t *testing.T) {
+	ctx := context.Background()
+	t.Run("peer", func(t *testing.T) {
+		env := testhub.Start(t)
+		peer, secret := env.NewPeer("session", "p")
+		_, sender := env.NewPeer("session", "s")
+		cb := testhub.NewCallback(t)
+		key := webhook.NewSecret()
+		res := subscribeOK(t, env, secret, subParams(cb.URL, key, nil))
+		fresh, err := env.Hub.RotatePeer(ctx, peer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sendPriority(t, env, sender, peer, "after-rotate", "wake")
+		stepEvents(t, env)
+		if n := len(cb.Posts()); n != 0 {
+			t.Fatalf("POSTs after rotation = %d, want 0", n)
+		}
+		got, err := events.NewStore(env.Hub).Get(ctx, res.ID)
+		if err != nil || got.PausedReason != events.PausedCredentialRotated {
+			t.Fatalf("subscription = %+v, %v", got, err)
+		}
+		subscribeOK(t, env, fresh, subParams(cb.URL, key, nil))
+		stepEvents(t, env)
+		if n := len(cb.Posts()); n != 1 {
+			t.Fatalf("POSTs after the new bearer subscribed = %d, want 1", n)
+		}
+	})
+	t.Run("principal", func(t *testing.T) {
+		env := testhub.Start(t)
+		prn, secret := env.NewPrincipal("pc")
+		peer, peerSecret := peerUnder(t, env, prn, "p")
+		other := testhub.NewCallback(t)
+		byPeer := subscribeOK(t, env, peerSecret, subParams(other.URL, webhook.NewSecret(), nil))
+		cb := testhub.NewCallback(t)
+		res := subscribeOK(t, env, secret, subParams(cb.URL, webhook.NewSecret(), map[string]any{"arguments": map[string]any{"peer_id": peer}}))
+		if _, err := env.Hub.RotatePrincipal(ctx, prn); err != nil {
+			t.Fatal(err)
+		}
+		store := events.NewStore(env.Hub)
+		if got, err := store.Get(ctx, res.ID); err != nil || got.PausedReason != events.PausedCredentialRotated {
+			t.Fatalf("principal's subscription = %+v, %v", got, err)
+		}
+		if got, err := store.Get(ctx, byPeer.ID); err != nil || got.PausedReason != "" {
+			t.Fatalf("the peer's own credential was not rotated: %+v, %v", got, err)
+		}
+	})
+}
+
+// The operator can stop one subscription, and a re-subscribe does not undo it.
+func TestAdminPauseSubscription(t *testing.T) {
+	env := testhub.Start(t)
+	dot, dotSecret := env.NewPeer("session", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	key := webhook.NewSecret()
+	res := subscribeOK(t, env, dotSecret, subParams(cb.URL, key, nil))
+
+	resp, body := env.Do(env.OperatorSecret, "POST", "/v1/admin/subscriptions/"+res.ID+"/pause", nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("pause: %d %s", resp.StatusCode, body)
+	}
+	if resp, _ = env.Do(env.OperatorSecret, "POST", "/v1/admin/subscriptions/sub_NOPE/pause", nil); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("pause unknown: %d", resp.StatusCode)
+	}
+	if resp, _ = env.Do(dotSecret, "POST", "/v1/admin/subscriptions/"+res.ID+"/pause", nil); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("pause by a peer: %d", resp.StatusCode)
+	}
+	subscribeOK(t, env, dotSecret, subParams(cb.URL, key, nil))
+	sendPriority(t, env, sender, dot, "one", "wake")
+	stepEvents(t, env)
+	if n := len(cb.Posts()); n != 0 {
+		t.Fatalf("POSTs while paused = %d, want 0", n)
+	}
+	resp, body = env.Do(env.OperatorSecret, "GET", "/v1/admin/audit?limit=5", nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "subscription_pause") {
+		t.Fatalf("audit: %d %s", resp.StatusCode, body)
+	}
+	if resp, body = env.Do(env.OperatorSecret, "POST", "/v1/admin/subscriptions/"+res.ID+"/resume", nil); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("resume: %d %s", resp.StatusCode, body)
+	}
+	stepEvents(t, env)
+	if n := len(cb.Posts()); n != 1 {
+		t.Fatalf("POSTs after resume = %d, want 1", n)
+	}
+}
+
+// Operators see the last refresh apart from every other write to the row, and
+// a new subscription leaves an audit row naming the host only.
+func TestSubscriptionHealthAndAudit(t *testing.T) {
+	env := testhub.Start(t)
+	dot, dotSecret := env.NewPeer("session", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	key := webhook.NewSecret()
+	subscribeOK(t, env, dotSecret, subParams(cb.URL, key, nil))
+	lastRefresh := func() *string {
+		t.Helper()
+		resp, body := env.Do(env.OperatorSecret, "GET", "/v1/admin/subscriptions", nil)
+		var rows []struct {
+			LastRefreshAt *string `json:"last_refresh_at"`
+		}
+		if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &rows) != nil || len(rows) != 1 {
+			t.Fatalf("subscriptions: %d %s", resp.StatusCode, body)
+		}
+		return rows[0].LastRefreshAt
+	}
+	if at := lastRefresh(); at != nil {
+		t.Fatalf("last_refresh_at before any refresh = %s", *at)
+	}
+	env.Now.Advance(time.Minute)
+	subscribeOK(t, env, dotSecret, subParams(cb.URL, key, nil))
+	want := venv.FormatTime(env.Now.Now())
+	env.Now.Advance(time.Minute)
+	sendPriority(t, env, sender, dot, "one", "wake")
+	stepEvents(t, env) // moves the cursor, which writes updated_at
+	if at := lastRefresh(); at == nil || *at != want {
+		t.Fatalf("last_refresh_at = %v, want %s", at, want)
+	}
+
+	resp, body := env.Do(env.OperatorSecret, "GET", "/v1/admin/audit?limit=50", nil)
+	if resp.StatusCode != http.StatusOK || strings.Count(string(body), `"event_subscribe"`) != 1 {
+		t.Fatalf("audit should hold one event_subscribe: %d %s", resp.StatusCode, body)
+	}
+	if strings.Contains(string(body), "path-with-token") {
+		t.Fatalf("audit keeps the callback path: %s", body)
+	}
+}
+
+func TestSubscribeCapAnswersTooMany(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "d")
+	cb := testhub.NewCallback(t)
+	for i := range events.MaxPerPrincipal {
+		subscribeOK(t, env, secret, subParams(fmt.Sprintf("%s/%d", cb.URL, i), webhook.NewSecret(), nil))
+	}
+	r := rpc2026(t, env, secret, "events/subscribe", subParams(cb.URL+"/over", webhook.NewSecret(), nil))
+	if r.Error == nil || r.Error.Code != mcpserver.ErrInvalidParams || errReason(t, r) != "too_many" {
+		t.Fatalf("over the cap = %+v / %s", r.Error, r.Result)
 	}
 }

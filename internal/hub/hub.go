@@ -274,9 +274,13 @@ func (h *Hub) AddPeer(ctx context.Context, kind, name, prnID string) (peerID, en
 		if err := h.insertPeer(ctx, tx, peerID, prnID, name, kind, now); err != nil {
 			return err
 		}
-		var err error
-		if enrolToken, err = h.Auth.IssueEnrolToken(ctx, tx, peerID, 0); err != nil {
-			return err
+		// A dot authenticates by OAuth after a link code and never holds a
+		// vecnet secret (PROTOCOL §12), so it gets nothing to enrol with.
+		if kind != "dot" {
+			var err error
+			if enrolToken, err = h.Auth.IssueEnrolToken(ctx, tx, peerID, 0); err != nil {
+				return err
+			}
 		}
 		// "peer add" is enrolment (PROTOCOL §2.12): the peer is in the
 		// directory from here on.

@@ -358,27 +358,64 @@ func (h *Hub) recordPush(ctx context.Context, d DueDelivery, outcome pushOutcome
 	return nil
 }
 
-// DeliveryGate reports whether a dot may be pushed the Delivery Event of
-// deliveryID (PROTOCOL §5.2): not for hold, not for a held wake_idle, not for
-// a delivery in a terminal state (§5.1: failed, expired or dead_letter, whose
-// sender may already have been told), and not for an id with no delivery row.
+// PushGate is what priority and state say about pushing a Delivery to a dot.
+type PushGate int
+
+const (
+	// GateNever: hold, a terminal state, or no such delivery.
+	GateNever PushGate = iota
+	// GatePush: it may go now.
+	GatePush
+	// GateHeld: a held wake_idle, which goes once when released.
+	GateHeld
+)
+
+// DeliveryPushGate decides whether a dot may be pushed the Delivery Event of
+// deliveryID (PROTOCOL §5.2): never for hold, for a delivery in a terminal
+// state (§5.1: failed, expired or dead_letter, whose sender may already have
+// been told), or for an id with no delivery row; not yet for a held wake_idle.
 // The Delivery stays readable through vecnet_inbox either way.
-func (h *Hub) DeliveryGate(ctx context.Context, deliveryID string) (push bool, err error) {
+func (h *Hub) DeliveryPushGate(ctx context.Context, deliveryID string) (PushGate, error) {
 	var priority, state string
 	var held bool
-	err = h.DB.QueryRowContext(ctx, `SELECT priority, held, state FROM deliveries WHERE dly_id = ?`, deliveryID).
+	err := h.DB.QueryRowContext(ctx, `SELECT priority, held, state FROM deliveries WHERE dly_id = ?`, deliveryID).
 		Scan(&priority, &held, &state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return GateNever, nil
+	}
+	if err != nil {
+		return GateNever, fmt.Errorf("hub: delivery gate: %w", err)
+	}
+	switch {
+	case state == "failed", state == "expired", state == "dead_letter", priority == "hold":
+		return GateNever, nil
+	case held:
+		return GateHeld, nil
+	}
+	return GatePush, nil
+}
+
+// DeliveryGate reports whether a dot may be pushed the Delivery Event of
+// deliveryID right now (DeliveryPushGate).
+func (h *Hub) DeliveryGate(ctx context.Context, deliveryID string) (push bool, err error) {
+	gate, err := h.DeliveryPushGate(ctx, deliveryID)
+	return gate == GatePush, err
+}
+
+// DeliveryUnread reports whether a released delivery still needs its one push
+// (PROTOCOL §5.2): not held, and nothing has accepted it yet. An ack, a
+// receipt or a push through another subscription means it needs none.
+func (h *Hub) DeliveryUnread(ctx context.Context, deliveryID string) (bool, error) {
+	var due bool
+	err := h.DB.QueryRowContext(ctx,
+		`SELECT state IN ('queued', 'pushed') AND held = 0 FROM deliveries WHERE dly_id = ?`, deliveryID).Scan(&due)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("hub: delivery gate: %w", err)
+		return false, fmt.Errorf("hub: delivery unread: %w", err)
 	}
-	switch state {
-	case "failed", "expired", "dead_letter":
-		return false, nil
-	}
-	return priority != "hold" && !held, nil
+	return due, nil
 }
 
 // AcceptEventPush records a 2xx from a dot's Events callback for deliveryID:
@@ -465,8 +502,10 @@ func (h *Hub) GateWakeIdle(ctx context.Context, tx *sql.Tx, d *delivery) error {
 }
 
 // OnIdle releases peerID's held wake_idle deliveries so each is pushed
-// once (PROTOCOL §5.2). New wires it as the IdleHook of an idle presence
-// report; the staleness ticker calls it when a presence turns unknown.
+// once (PROTOCOL §5.2): the push worker sees the flag clear, and the Events
+// worker its parked outbox row become due. New wires it as the IdleHook of an
+// idle presence report; the staleness ticker calls it when a presence turns
+// unknown.
 func (h *Hub) OnIdle(ctx context.Context, peerID string) error {
 	if _, err := h.DB.ExecContext(ctx,
 		`UPDATE deliveries SET held = 0, updated_at = ? WHERE recipient = ? AND held = 1 AND state = 'queued'`,

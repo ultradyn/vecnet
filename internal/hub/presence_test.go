@@ -95,7 +95,7 @@ func TestPresenceFanOutRespectsSubscription(t *testing.T) {
 	env := testhub.Start(t)
 	a, _ := env.NewPeer("grokbot", "a")
 	b, bSec := env.NewPeer("session", "b")
-	c, cSec := env.NewPeer("dot", "c")
+	c, cSec := env.NewPeer("session", "c")
 	d, dSec := env.NewPeer("openclaw", "d")
 	addTeam(t, env, a, b)
 	setSubscribe(t, env, cSec, "all")

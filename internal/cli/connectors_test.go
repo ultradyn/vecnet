@@ -343,7 +343,7 @@ func TestSubscriptionsList(t *testing.T) {
 		t.Fatalf("empty subscriptions list --json = %q, want []", out)
 	}
 
-	dot, dotSecret := env.NewPeer("dot", "d")
+	dot, dotSecret := env.NewPeer("session", "d")
 	cb := testhub.NewCallback(t)
 	sub := subscribe(t, env, dotSecret, cb.URL)
 	u, err := url.Parse(cb.URL)

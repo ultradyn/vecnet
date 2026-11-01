@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
 )
@@ -117,7 +118,7 @@ func (s *Server) exchangeCode(ctx context.Context, form url.Values) (*tokenRespo
 		now := s.now()
 		if used.Valid {
 			refused = badGrant("this code was already used")
-			return s.revokeFamily(ctx, tx, hash, now)
+			return s.reuseDetected(ctx, tx, hash, prn, wantClient, now)
 		}
 		exp, err := envelope.ParseTime(expires)
 		switch {
@@ -191,7 +192,7 @@ func (s *Server) refresh(ctx context.Context, form url.Values) (*tokenResponse, 
 		now := s.now()
 		if revoked.Valid {
 			refused = badGrant("this refresh token was already used")
-			return s.revokeFamily(ctx, tx, hash, now)
+			return s.reuseDetected(ctx, tx, hash, prn, wantClient, now)
 		}
 		exp, err := envelope.ParseTime(expires)
 		if err != nil {
@@ -242,6 +243,18 @@ func (s *Server) mintPair(ctx context.Context, tx *sql.Tx, clientID, prn, scope,
 		AccessToken: access, TokenType: "Bearer", ExpiresIn: int(s.AccessTTL.Seconds()),
 		RefreshToken: refresh, Scope: scope,
 	}, nil
+}
+
+// reuseDetected answers a spent code or refresh token presented again: two
+// parties hold the family, so all of it goes, and the operator hears of it. The
+// audit row names who, never the token. Events subscriptions the family's
+// access tokens made stop at the worker's next authorisation check.
+func (s *Server) reuseDetected(ctx context.Context, tx *sql.Tx, hash, prn, clientID string, now time.Time) error {
+	slog.Warn("oauth: token reuse: revoking the family", "principal", prn, "client", clientID)
+	if err := audit.Record(ctx, tx, "hub", "oauth_token_reuse", []string{prn, clientID}, nil); err != nil {
+		return err
+	}
+	return s.revokeFamily(ctx, tx, hash, now)
 }
 
 // revokeFamily revokes every live token sharing an ancestor with hash, a token

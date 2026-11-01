@@ -63,8 +63,8 @@ type Worker struct {
 
 	// ResolveDotPeer is the same seam as mcpserver.Server.ResolveDotPeer: it
 	// names the peer an OAuth principal is bound to ("" when unbound), for
-	// the authorisation re-check before each send. nil skips the binding
-	// check; the peer must still be enabled and the token unexpired.
+	// the authorisation re-check before each send. While nil, every OAuth
+	// subscription fails that check, as it does at events/subscribe.
 	ResolveDotPeer func(ctx context.Context, principalID string) (peerID string, err error)
 
 	once sync.Once
@@ -162,7 +162,9 @@ func (w *Worker) Step(ctx context.Context) (int, error) {
 }
 
 // tail moves the next batch of s's log into the outbox. The cursor advances
-// past every event read, pushed or filtered.
+// past every event read, pushed or filtered. A held wake_idle goes in parked:
+// the release only clears a flag, so the row is what gets it pushed, once, with
+// the original seq (PROTOCOL §5.2).
 func (w *Worker) tail(ctx context.Context, s Subscription) error {
 	evs, err := w.Log.Read(ctx, []string{s.PeerID}, s.Cursor, tailBatch)
 	var purged eventlog.ErrCursorPurged
@@ -193,14 +195,16 @@ func (w *Worker) tail(ctx context.Context, s Subscription) error {
 		if thread != "" && f.threadID() != thread {
 			continue
 		}
+		parked := false
 		if e.Type == "delivery" {
-			ok, err := w.Hub.DeliveryGate(ctx, f.DeliveryID)
+			gate, err := w.Hub.DeliveryPushGate(ctx, f.DeliveryID)
 			if err != nil {
 				return err
 			}
-			if !ok {
+			if gate == hub.GateNever {
 				continue
 			}
+			parked = gate == hub.GateHeld
 		}
 		id := e.Cursor
 		if e.Type == "delivery" {
@@ -210,7 +214,7 @@ func (w *Worker) tail(ctx context.Context, s Subscription) error {
 		if err != nil {
 			return err
 		}
-		rows = append(rows, outboxRow{eventID: id, seq: to.Seq, body: string(body)})
+		rows = append(rows, outboxRow{eventID: id, seq: to.Seq, body: string(body), parked: parked})
 	}
 	return w.Store.enqueue(ctx, s.ID, s.Cursor, to, rows, w.now())
 }
@@ -317,7 +321,10 @@ func clip(s string, n int) string {
 // spends one row's attempts rather than every row's. A terminal answer closes
 // only its row, as does a delivery the gate no longer passes. Each send first
 // re-checks the subscription, its authorisation and the gate as they stand
-// then: a POST can take 30 s, and much can change over a batch of them.
+// then: a POST can take 30 s, and much can change over a batch of them. A
+// released parked row has a stricter gate than a read one: an ack or a push
+// through another subscription has already put the message in front of the
+// dot, and the point of the row was to do that.
 func (w *Worker) drain(ctx context.Context, sub Subscription) (int, error) {
 	rows, err := w.Store.pending(ctx, sub.ID, drainBatch)
 	if err != nil {
@@ -338,7 +345,11 @@ func (w *Worker) drain(ctx context.Context, sub Subscription) (int, error) {
 			break
 		}
 		if strings.HasPrefix(r.eventID, deliveryPrefix) {
-			ok, err := w.Hub.DeliveryGate(ctx, r.eventID)
+			gate := w.Hub.DeliveryGate
+			if r.parked {
+				gate = w.Hub.DeliveryUnread
+			}
+			ok, err := gate(ctx, r.eventID)
 			if err != nil {
 				return sent, err
 			}
@@ -369,9 +380,10 @@ func (w *Worker) drain(ctx context.Context, sub Subscription) (int, error) {
 
 // current re-reads a subscription and reports whether it may send at now
 // (PROTOCOL §4.4), pausing it if authorisation has gone. Nothing is dropped
-// and the cursor stays. An unsubscribed or lapsed one simply stops, as it
-// would for Active. Reading the row afresh means a refresh during the drain
-// counts: its new token is not paused as the old one's expiry.
+// and the cursor stays. An unsubscribed, lapsed, paused or unverified one
+// simply stops, as it would for Step. Reading the row afresh means a refresh
+// during the drain counts: its new token is not paused as the old one's
+// expiry, and a pause or a challenge falling due mid-batch stops the batch.
 func (w *Worker) current(ctx context.Context, id string, now time.Time) (Subscription, bool, error) {
 	s, err := w.Store.Get(ctx, id)
 	if errors.Is(err, ErrNotFound) {
@@ -383,7 +395,7 @@ func (w *Worker) current(ctx context.Context, id string, now time.Time) (Subscri
 	if s.TokenExpires != nil && !s.TokenExpires.After(now) {
 		return s, false, w.Store.pause(ctx, id, PausedTokenExpired, now)
 	}
-	if s.Expires != nil && !s.Expires.After(now) {
+	if (s.Expires != nil && !s.Expires.After(now)) || s.PausedReason != "" || !s.Verified {
 		return s, false, nil
 	}
 	ok, err := w.authorised(ctx, s)
@@ -403,8 +415,11 @@ func (w *Worker) authorised(ctx context.Context, s Subscription) (bool, error) {
 	if err != nil || !ok {
 		return false, err
 	}
-	if s.PrincipalKind != KindOAuth || w.ResolveDotPeer == nil {
+	if s.PrincipalKind != KindOAuth {
 		return true, nil
+	}
+	if w.ResolveDotPeer == nil {
+		return false, nil
 	}
 	bound, err := w.ResolveDotPeer(ctx, s.PrincipalID)
 	if err != nil {

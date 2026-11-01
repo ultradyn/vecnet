@@ -82,7 +82,7 @@ func waitReachability(t *testing.T, env *testhub.Env, secret, peer, want string)
 func TestDirectoryVisibleToAll(t *testing.T) {
 	env := testhub.Start(t)
 	a, aSec := env.NewPeer("grokbot", "alpha")
-	b, bSec := env.NewPeer("dot", "bravo")
+	b, bSec := env.NewPeer("session", "bravo")
 	c, cSec := env.NewPeer("session", "charlie")
 	_, prnSec := env.NewPrincipal("pc")
 
@@ -148,8 +148,8 @@ func TestDirectoryVisibleToAll(t *testing.T) {
 	if n := str(t, dir[a]["name"]); n != "alpha" {
 		t.Fatalf("a name = %q, want alpha", n)
 	}
-	if k := str(t, dir[b]["kind"]); k != "dot" {
-		t.Fatalf("b kind = %q, want dot", k)
+	if k := str(t, dir[b]["kind"]); k != "session" {
+		t.Fatalf("b kind = %q, want session", k)
 	}
 	if s := str(t, dir[a]["enrolled_at"]); s != now {
 		t.Fatalf("a enrolled_at = %q, want %q", s, now)

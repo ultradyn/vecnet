@@ -117,7 +117,8 @@ func outbox(t *testing.T, env *testhub.Env, sub, event string) (attempts int, do
 	return attempts, doneAt != nil, terminal
 }
 
-// refresh repeats a subscription's Upsert as a re-subscribe does.
+// refresh repeats a subscription's Upsert and a passed challenge, as a
+// re-subscribe to a working callback does.
 func refresh(t *testing.T, env *testhub.Env, sub events.Subscription, tokenExp time.Time) events.Subscription {
 	t.Helper()
 	again, created, err := env.Events.Store.Upsert(context.Background(), events.Subscription{
@@ -126,6 +127,12 @@ func refresh(t *testing.T, env *testhub.Env, sub events.Subscription, tokenExp t
 	}, webhook.NewSecret(), 0, tokenExp)
 	if err != nil || created || again.ID != sub.ID {
 		t.Fatalf("refresh = %+v, created %v, %v", again, created, err)
+	}
+	if !again.Verified {
+		if err := env.Events.Store.MarkVerified(context.Background(), again.ID); err != nil {
+			t.Fatalf("MarkVerified: %v", err)
+		}
+		again = get(t, env, again.ID)
 	}
 	return again
 }
@@ -371,7 +378,7 @@ func TestTypesFilter(t *testing.T) {
 
 func TestPriorityGate(t *testing.T) {
 	env := testhub.Start(t)
-	dot, dotSecret := env.NewPeer("dot", "d")
+	dot, dotSecret := env.NewPeer("session", "d")
 	_, sender := env.NewPeer("session", "s")
 	cb := testhub.NewCallback(t)
 	subscribe(t, env, cb, dot, nil, time.Time{})
@@ -691,6 +698,10 @@ func TestRefreshMidDrainKeepsSending(t *testing.T) {
 		}, webhook.NewSecret(), 0, env.Now.Now().Add(time.Hour)); err != nil {
 			t.Error(err)
 		}
+		// The token had lapsed, so this refresh owes a challenge, and passes it.
+		if err := env.Events.Store.MarkVerified(context.Background(), sub.ID); err != nil {
+			t.Error(err)
+		}
 	})
 	send(t, env, sender, dot, "one", "wake", "a")
 	send(t, env, sender, dot, "two", "wake", "b")
@@ -932,7 +943,7 @@ func TestChallengeRefusedByGuard(t *testing.T) {
 		return []net.IP{net.ParseIP("10.0.0.1")}, nil
 	}}
 	err := events.Challenge(context.Background(), policy.Client(2*time.Second),
-		events.Subscription{ID: "sub_X", URL: "https://rebind.example/hook"}, webhook.NewSecret())
+		events.Subscription{ID: "sub_X", URL: "https://rebind.example/hook"}, webhook.NewSecret(), time.Now())
 	var failed events.ErrChallenge
 	if !errors.As(err, &failed) || failed.Reason != "invalid_url" {
 		t.Fatalf("Challenge = %v, want invalid_url", err)
@@ -1057,5 +1068,218 @@ func TestDefaultEventsClientRefusesLoopback(t *testing.T) {
 	}
 	if n := cb.Requests(); n != 0 {
 		t.Fatalf("strict hub's default events client reached a loopback callback: %d requests", n)
+	}
+}
+
+// report sets the peer's presence as a client would.
+func report(t *testing.T, env *testhub.Env, secret, state string) {
+	t.Helper()
+	resp, out := env.Do(secret, "POST", "/v1/presence", map[string]any{"state": state, "at": venv.FormatTime(env.Now.Now())})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("presence %s: %d %s", state, resp.StatusCode, out)
+	}
+}
+
+// PROTOCOL §5.2, R16: a held wake_idle is pushed once when presence later
+// becomes idle or stale, however many Steps follow.
+func TestHeldPushedOnceOnRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		release func(t *testing.T, env *testhub.Env, dotSecret string)
+	}{
+		{"idle report", func(t *testing.T, env *testhub.Env, dotSecret string) { report(t, env, dotSecret, "idle") }},
+		{"stale presence", func(t *testing.T, env *testhub.Env, _ string) {
+			env.Now.Advance(hub.DefaultSessionPresenceTTL + time.Minute)
+			env.Hub.Tick(context.Background(), false)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testhub.Start(t)
+			dot, dotSecret := env.NewPeer("session", "d")
+			_, sender := env.NewPeer("session", "s")
+			cb := testhub.NewCallback(t)
+			sub := subscribe(t, env, cb, dot, nil, time.Time{})
+
+			report(t, env, dotSecret, "working")
+			held := send(t, env, sender, dot, "held", "wake_idle", "held while working")
+			after := send(t, env, sender, dot, "after", "wake", "not waiting behind it")
+			step(t, env)
+			if posts := wantPosts(t, cb, 1); posts[0].ID != after {
+				t.Fatalf("pushed %s, want only %s", posts[0].ID, after)
+			}
+			step(t, env)
+			wantPosts(t, cb, 1)
+
+			tc.release(t, env, dotSecret)
+			step(t, env)
+			posts := wantPosts(t, cb, 2)
+			if posts[1].ID != held {
+				t.Fatalf("pushed %s, want the released %s", posts[1].ID, held)
+			}
+			step(t, env)
+			wantPosts(t, cb, 2)
+			if _, done, term := outbox(t, env, sub.ID, held); !done || term != "" {
+				t.Fatalf("outbox row: done %v, terminal %q", done, term)
+			}
+		})
+	}
+}
+
+// A client that names a cursor past a parked row has not received it, and the
+// subscribe result never points back at it: parked rows sit outside the cursor.
+func TestParkedRowSurvivesClientCursor(t *testing.T) {
+	env := testhub.Start(t)
+	dot, dotSecret := env.NewPeer("session", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	sub := subscribe(t, env, cb, dot, nil, time.Time{})
+	report(t, env, dotSecret, "working")
+	held := send(t, env, sender, dot, "held", "wake_idle", "held")
+	send(t, env, sender, dot, "after", "wake", "after")
+	step(t, env)
+	last := get(t, env, sub.ID).Cursor
+	if got, err := env.Events.Store.ReplayCursor(context.Background(), sub.ID, last); err != nil || got != last {
+		t.Fatalf("ReplayCursor = %v, %v; a parked row must not hold it back from %v", got, err, last)
+	}
+	if err := env.Events.Store.SetCursor(context.Background(), sub.ID, last, true); err != nil {
+		t.Fatal(err)
+	}
+	report(t, env, dotSecret, "idle")
+	step(t, env)
+	if posts := wantPosts(t, cb, 2); posts[1].ID != held {
+		t.Fatalf("pushed %s, want %s", posts[1].ID, held)
+	}
+}
+
+// Held rows take no place in a drain batch, so they cannot starve what follows.
+func TestParkedRowsDoNotStarveTheBatch(t *testing.T) {
+	env := testhub.Start(t)
+	dot, dotSecret := env.NewPeer("session", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	subscribe(t, env, cb, dot, nil, time.Time{})
+	report(t, env, dotSecret, "working")
+	env.SetLimits(peerOf(t, env, sender), 1000, 1000)
+	for i := range 60 {
+		send(t, env, sender, dot, fmt.Sprintf("held-%d", i), "wake_idle", "held")
+	}
+	step(t, env)
+	wake := send(t, env, sender, dot, "wake", "wake", "goes now")
+	step(t, env)
+	step(t, env)
+	if posts := wantPosts(t, cb, 1); posts[0].ID != wake {
+		t.Fatalf("pushed %s, want %s", posts[0].ID, wake)
+	}
+}
+
+func peerOf(t *testing.T, env *testhub.Env, secret string) string {
+	t.Helper()
+	c, err := env.Hub.Auth.Resolve(context.Background(), secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c.PeerID
+}
+
+// A held delivery the dot has already acked, or that expired, needs no push.
+func TestParkedRowClosesWithoutPush(t *testing.T) {
+	env := testhub.Start(t)
+	dot, dotSecret := env.NewPeer("session", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	sub := subscribe(t, env, cb, dot, nil, time.Time{})
+	report(t, env, dotSecret, "working")
+	acked := send(t, env, sender, dot, "acked", "wake_idle", "read through the inbox")
+	lapsed := send(t, env, sender, dot, "lapsed", "wake_idle", "expires unread")
+	step(t, env)
+
+	cur, err := env.Hub.Log.Current(context.Background(), []string{dot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := cur
+	first.Seq-- // the acked delivery only
+	resp, out := env.Do(dotSecret, "POST", "/v1/ack", map[string]string{"cursor": first.String()})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("ack: %d %s", resp.StatusCode, out)
+	}
+	step(t, env)
+	wantPosts(t, cb, 0)
+	if _, done, term := outbox(t, env, sub.ID, acked); !done || term != "gated" {
+		t.Fatalf("acked row: done %v, terminal %q", done, term)
+	}
+
+	if _, err := env.Hub.ExpireDeliveries(context.Background(), env.Now.Now().Add(365*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	step(t, env)
+	wantPosts(t, cb, 0)
+	if _, done, term := outbox(t, env, sub.ID, lapsed); !done || term != "gated" {
+		t.Fatalf("expired row: done %v, terminal %q", done, term)
+	}
+}
+
+// A subscription paused while a drain runs stops at the next row, as does one
+// whose challenge fell due.
+func TestPausedMidDrainStops(t *testing.T) {
+	env := testhub.Start(t)
+	dot, _ := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	sub := subscribe(t, env, cb, dot, nil, time.Time{})
+	cb.OnPost(func(n int, _ http.ResponseWriter) {
+		if n == 1 {
+			if err := env.Events.Store.Pause(context.Background(), sub.ID); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	send(t, env, sender, dot, "one", "wake", "a")
+	send(t, env, sender, dot, "two", "wake", "b")
+	step(t, env)
+	wantPosts(t, cb, 1)
+}
+
+func TestSubscriptionCapPerPrincipal(t *testing.T) {
+	env := testhub.Start(t)
+	dot, _ := env.NewPeer("dot", "d")
+	cb := testhub.NewCallback(t)
+	upsert := func(path string, ttl time.Duration) error {
+		_, _, err := env.Events.Store.Upsert(context.Background(), events.Subscription{
+			PrincipalKind: "vecnet", PrincipalID: dot, PeerID: dot, Name: events.Name, URL: cb.URL + path,
+		}, webhook.NewSecret(), ttl, time.Time{})
+		return err
+	}
+	for i := range events.MaxPerPrincipal {
+		if err := upsert(fmt.Sprintf("/%d", i), time.Hour); err != nil {
+			t.Fatalf("subscription %d: %v", i, err)
+		}
+	}
+	if err := upsert("/over", time.Hour); !errors.Is(err, events.ErrTooMany) {
+		t.Fatalf("one past the cap = %v, want ErrTooMany", err)
+	}
+	if err := upsert("/0", time.Hour); err != nil { // a refresh adds nothing
+		t.Fatalf("refresh at the cap: %v", err)
+	}
+	env.Now.Advance(2 * time.Hour) // lapsed rows do not count
+	if err := upsert("/over", time.Hour); err != nil {
+		t.Fatalf("after the others lapsed: %v", err)
+	}
+}
+
+// An OAuth subscription needs the binding seam: without it the worker cannot
+// tell who holds the dot now, so it sends nothing.
+func TestOAuthSubscriptionFailsClosedWithoutSeam(t *testing.T) {
+	env := testhub.Start(t)
+	dot, _ := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	sub := subscribe(t, env, cb, dot, nil, env.Now.Now().Add(time.Hour))
+	env.Events.ResolveDotPeer = nil
+	send(t, env, sender, dot, "one", "wake", "a")
+	step(t, env)
+	wantPosts(t, cb, 0)
+	if got := get(t, env, sub.ID); got.PausedReason != events.PausedUnauthorized {
+		t.Fatalf("paused = %q, want %q", got.PausedReason, events.PausedUnauthorized)
 	}
 }

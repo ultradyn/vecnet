@@ -43,8 +43,9 @@ func (e ErrChallenge) Error() string { return "events: challenge: " + e.Reason }
 // {"type":"verification","challenge":<32 random bytes, base64url>} signed with
 // secret and carrying X-MCP-Subscription-Id, and wants a 2xx echoing
 // {"challenge":<same>}. client must be an egress.Policy client, which refuses
-// redirects. Any failure is an ErrChallenge.
-func Challenge(ctx context.Context, client *http.Client, s Subscription, secret string) error {
+// redirects; now is the hub's clock, for the signature. Any failure is an
+// ErrChallenge.
+func Challenge(ctx context.Context, client *http.Client, s Subscription, secret string, now time.Time) error {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return fmt.Errorf("events: challenge: %w", err)
@@ -55,7 +56,6 @@ func Challenge(ctx context.Context, client *http.Client, s Subscription, secret 
 		return fmt.Errorf("events: challenge: %w", err)
 	}
 	id := ids.New(verifyPrefix)
-	now := time.Now()
 	sig, err := webhook.Sign(secret, id, now, body)
 	if err != nil {
 		return fmt.Errorf("events: challenge: %w", err)
