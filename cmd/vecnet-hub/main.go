@@ -118,6 +118,10 @@ func runInit(dataDir, name string, w io.Writer) error {
 	return err
 }
 
+// ShutdownGrace bounds http.Server.Shutdown; it must stay below fly.toml's
+// kill_timeout so the store closes before the platform kills the process.
+const ShutdownGrace = 10 * time.Second
+
 // serve runs the HTTP server, the push worker and the hub's tickers until
 // ctx is cancelled. It binds listen first, so ":0" picks a free port, and
 // writes "vecnet-hub listening on http://<addr> (public url <url>)" to
@@ -140,11 +144,19 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, std
 	defer db.Close()
 
 	worker := &push.Worker{Hub: h}
+	// Shutdown does not cancel request contexts, so long-lived SSE streams
+	// and long-polls watch stop instead; closing it on shutdown lets them
+	// end at once rather than hold the whole grace period.
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	closeStop := func() { stopOnce.Do(func() { close(stop) }) }
+	defer closeStop()
 	srv := &http.Server{
-		Handler:           httpapi.New(httpapi.Deps{Hub: h, Kick: worker.Kick, VerifyRoute: worker.Verify, UIDir: devUIDir}),
+		Handler:           httpapi.New(httpapi.Deps{Hub: h, Kick: worker.Kick, VerifyRoute: worker.Verify, UIDir: devUIDir, Stop: stop}),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	srv.RegisterOnShutdown(closeStop)
 
 	// Background work stops after the HTTP server, before the store closes.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -166,7 +178,8 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, std
 		return err
 	case <-ctx.Done():
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// The grace period stays under Fly's kill_timeout (fly.toml).
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownGrace)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		// Long-lived streams (SSE, long polls) outlasted the grace period.

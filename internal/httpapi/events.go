@@ -201,6 +201,9 @@ func (s *server) longPoll(w http.ResponseWriter, r *http.Request, owners []strin
 			case <-timer.C:
 				cancel()
 				break hold
+			case <-s.Stop: // nil (never) unless the server is shutting down
+				cancel()
+				break hold
 			}
 		}
 	}
@@ -212,8 +215,8 @@ func (s *server) longPoll(w http.ResponseWriter, r *http.Request, owners []strin
 }
 
 // streamSSE serves the SSE mode: retry and priming frames, replay from cur,
-// then tail with heartbeats. It exits when the client goes away, when a
-// write fails, or when the frame queue stays full for the stall timeout. A
+// then tail with heartbeats. It exits when the client goes away, when the
+// server shuts down (Deps.Stop), when a write fails, or when the frame queue stays full for the stall timeout. A
 // client that keeps reading gets backpressure, so a replay larger than the
 // queue completes on one connection. No database transaction is open while
 // frames are queued or written: reads finish before their frames are queued.
@@ -221,7 +224,18 @@ func (s *server) streamSSE(w http.ResponseWriter, r *http.Request, owners []stri
 	activeStreams.Add(1)
 	defer activeStreams.Add(-1)
 	defer s.streamReach(owners)() // connected while open; runs before the counter drops
-	ctx := r.Context()
+	// The stream ends when the client goes away or the server shuts down.
+	ctx, stop := context.WithCancel(r.Context())
+	defer stop()
+	if s.Stop != nil {
+		go func() {
+			select {
+			case <-s.Stop:
+				stop()
+			case <-ctx.Done():
+			}
+		}()
+	}
 	conn := startSSE(w, s.sseStall())
 	defer conn.close()
 

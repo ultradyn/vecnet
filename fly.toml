@@ -2,6 +2,9 @@
 # (ADR 0001, ticket 05). Deploy with `just fly-deploy`; see docs/DEPLOY.md.
 app = "vecnet"
 primary_region = "syd"
+# Above vecnet-hub's 10 s shutdown grace (cmd/vecnet-hub ShutdownGrace), so
+# the store closes cleanly before Fly sends SIGKILL (default 5 s).
+kill_timeout = 15
 
 [build]
   dockerfile = "Dockerfile"

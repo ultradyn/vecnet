@@ -29,6 +29,12 @@ type Deps struct {
 	WaitUnit    time.Duration // length of one ?wait= second (time.Second)
 	SSEStall    time.Duration // SSE queue-full wait before dropping a stuck client (DefaultSSEStall)
 
+	// Stop, when non-nil, is closed when the server begins shutting down:
+	// open SSE streams end and parked long-polls answer at once (empty), so
+	// http.Server.Shutdown is not held for its whole grace period by
+	// long-lived requests.
+	Stop <-chan struct{}
+
 	// UIDir, when set, serves the operator UI under /ui/ from this directory
 	// on disk instead of the embedded copy (vecnet-hub --dev-ui-dir), so an
 	// edit shows on refresh without a rebuild.

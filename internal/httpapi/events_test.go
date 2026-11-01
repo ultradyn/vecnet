@@ -620,3 +620,47 @@ func TestDisabledPeer204(t *testing.T) {
 	resp, body = env.Do(bSec, "POST", "/v1/ack", map[string]string{"cursor": zeroCursor(env)})
 	mustErr(t, resp, body, http.StatusUnauthorized, "unauthenticated")
 }
+
+// TestStopEndsLongPollAndSSE: closing Deps.Stop (server shutdown) answers a
+// parked long-poll at once with no events and ends an open SSE stream, so
+// neither holds http.Server.Shutdown for its grace period.
+func TestStopEndsLongPollAndSSE(t *testing.T) {
+	env := testhub.Start(t)
+	stop := make(chan struct{})
+	env.Configure(func(d *httpapi.Deps) { d.Stop = stop })
+	b, bSec := env.NewPeer("dot", "b")
+
+	s := openSSE(t, env, bSec, "", nil)
+	defer s.cancel()
+	waitStreams(t, 1)
+
+	type result struct {
+		resp *http.Response
+		body []byte
+	}
+	done := make(chan result, 1)
+	go func() {
+		resp, body, _ := getEvents(t, env, bSec, "?after=head&wait=30", nil)
+		done <- result{resp, body}
+	}()
+	for deadline := time.Now().Add(10 * time.Second); env.Hub.Log.Waiters(b) < 2; {
+		if time.Now().After(deadline) {
+			t.Fatal("long-poll never parked")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(stop)
+	select {
+	case r := <-done:
+		if r.resp == nil || r.resp.StatusCode != http.StatusOK {
+			t.Fatalf("long-poll after stop = %v %s, want 200", r.resp, r.body)
+		}
+		var pr pollResp
+		if err := json.Unmarshal(r.body, &pr); err != nil || len(pr.Events) != 0 || pr.NextCursor == "" {
+			t.Fatalf("long-poll after stop body %s, want no events and a next_cursor", r.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("long-poll still parked 5 s after stop")
+	}
+	waitStreams(t, 0)
+}

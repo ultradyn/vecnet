@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -66,7 +68,60 @@ func (u *cliUser) mustRun(args ...string) string {
 	return out.String()
 }
 
-var listenLine = regexp.MustCompile(`listening on (http://127\.0\.0\.1:[0-9]+)`)
+var listenLine = regexp.MustCompile(`listening on (http://127\.0\.0\.[0-9]+:([0-9]+))`)
+
+// bootedHub is a hub run in a goroutine by bootHub.
+type bootedHub struct {
+	base, port string
+	out        *lockedBuffer
+	stop       func() error // cancel and wait (≤ 2 s); later calls return the first result
+}
+
+// bootHub runs run(ctx, args, getenv) in a goroutine and waits for its
+// listening line. A t.Cleanup, registered at once (so it runs before the
+// caller's earlier t.TempDir removal), stops the hub and waits for it, so no
+// failure path leaks a serving hub that holds the data dir.
+func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	out := &lockedBuffer{}
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, args, out, getenv) }()
+	var once sync.Once
+	var stopErr error
+	stop := func() error {
+		once.Do(func() {
+			cancel()
+			select {
+			case stopErr = <-done:
+			case <-time.After(2 * time.Second):
+				stopErr = errors.New("run did not return within 2 s of ctx cancel")
+			}
+		})
+		return stopErr
+	}
+	t.Cleanup(func() {
+		if err := stop(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("hub stop: %v", err)
+		}
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if m := listenLine.FindStringSubmatch(out.String()); m != nil {
+			return &bootedHub{base: m[1], port: m[2], out: out, stop: stop}
+		}
+		select {
+		case err := <-done:
+			done <- err // let stop see it
+			t.Fatalf("run returned before listening: %v\n%s", err, out.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no listening line within 5 s; output:\n%s", out.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
 
 func TestSmokeBootSendReceive(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "data")
@@ -82,30 +137,8 @@ func TestSmokeBootSendReceive(t *testing.T) {
 	}
 
 	// Boot the real server on a random loopback port.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var serveOut lockedBuffer
-	done := make(chan error, 1)
-	go func() {
-		done <- run(ctx, []string{"--listen", "127.0.0.1:0", "--data-dir", dataDir}, &serveOut, noEnv)
-	}()
-	var base string
-	deadline := time.Now().Add(5 * time.Second)
-	for base == "" {
-		if m := listenLine.FindStringSubmatch(serveOut.String()); m != nil {
-			base = m[1]
-			break
-		}
-		select {
-		case err := <-done:
-			t.Fatalf("run returned before listening: %v\n%s", err, serveOut.String())
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("no listening line within 5 s; output:\n%s", serveOut.String())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	hb := bootHub(t, []string{"--listen", "127.0.0.1:0", "--data-dir", dataDir}, noEnv)
+	base := hb.base
 
 	// /healthz answers 200 without credentials.
 	resp, err := http.Get(base + "/healthz")
@@ -180,22 +213,52 @@ func TestSmokeBootSendReceive(t *testing.T) {
 		t.Fatalf("B's inbox lacks message %s from %s:\n%s", sent.MessageID, aID, out)
 	}
 
-	// Cancelling ctx shuts the hub down within 2 s, cleanly.
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Fatalf("run after cancel = %v, want nil", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("run did not return within 2 s of ctx cancel")
+	// An open SSE stream must not hold shutdown: the hub ends it at once.
+	streamCtx, streamCancel := context.WithCancel(context.Background())
+	defer streamCancel()
+	bSecret := regexp.MustCompile(`vn_peer_\S+?"`).FindString(readFile(t, b.env["VECNET_CONFIG"]))
+	req, err := http.NewRequestWithContext(streamCtx, "GET", base+"/v1/events", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSuffix(bSecret, `"`))
+	stream, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("open /v1/events: %v", err)
+	}
+	defer stream.Body.Close()
+	if stream.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/events = %d, want 200", stream.StatusCode)
+	}
+	if _, err := bufio.NewReader(stream.Body).ReadString('\n'); err != nil {
+		t.Fatalf("read the stream preamble: %v", err)
+	}
+
+	// Cancelling ctx shuts the hub down within 2 s, cleanly, stream and all.
+	if err := hb.stop(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("run after cancel = %v, want nil", err)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 func TestFlagDefaultsFromEnv(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "envdata")
+	listen, wantHost := "127.0.0.1:0", ""
+	if ln, err := net.Listen("tcp", "127.0.0.2:0"); err == nil {
+		ln.Close()
+		listen, wantHost = "127.0.0.2:0", "127.0.0.2"
+	}
 	env := map[string]string{
-		"VECNET_LISTEN":     "127.0.0.1:0",
+		"VECNET_LISTEN":     listen,
 		"VECNET_DATA_DIR":   dataDir,
 		"VECNET_PUBLIC_URL": "https://vecnet.example",
 	}
@@ -210,28 +273,28 @@ func TestFlagDefaultsFromEnv(t *testing.T) {
 		t.Fatalf("init did not create hub.db under VECNET_DATA_DIR: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	var out lockedBuffer
-	done := make(chan error, 1)
-	go func() { done <- run(ctx, nil, &out, getenv) }()
-	deadline := time.Now().Add(5 * time.Second)
-	for !listenLine.MatchString(out.String()) {
-		if time.Now().After(deadline) {
-			cancel()
-			t.Fatalf("no listening line on VECNET_LISTEN within 5 s; output:\n%s", out.String())
-		}
-		time.Sleep(10 * time.Millisecond)
+	// VECNET_LISTEN is honoured: on a distinctive loopback address when the
+	// host has one, else at least not the default dev port.
+	hb := bootHub(t, nil, getenv)
+	if wantHost != "" && !strings.Contains(hb.base, "//"+wantHost+":") {
+		t.Fatalf("hub listens on %s, want VECNET_LISTEN's host %s", hb.base, wantHost)
 	}
-	if !strings.Contains(out.String(), "public url https://vecnet.example") {
-		t.Fatalf("output %q does not report VECNET_PUBLIC_URL", out.String())
+	if hb.port == "45752" {
+		t.Fatalf("hub listens on the default port %s, want VECNET_LISTEN's :0", hb.port)
 	}
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("run after cancel = %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("run did not return within 2 s of ctx cancel")
+	if !strings.Contains(hb.out.String(), "public url https://vecnet.example") {
+		t.Fatalf("output %q does not report VECNET_PUBLIC_URL", hb.out.String())
+	}
+	if err := hb.stop(); err != nil {
+		t.Fatalf("run after cancel = %v", err)
+	}
+
+	// A flag beats its environment default.
+	hb = bootHub(t, []string{"--listen", "127.0.0.1:0", "--public-url", "https://flag.example"}, getenv)
+	if !strings.Contains(hb.out.String(), "public url https://flag.example") {
+		t.Fatalf("output %q: --public-url did not override VECNET_PUBLIC_URL", hb.out.String())
+	}
+	if err := hb.stop(); err != nil {
+		t.Fatalf("run after cancel = %v", err)
 	}
 }
