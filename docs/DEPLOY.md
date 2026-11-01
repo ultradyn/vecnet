@@ -19,6 +19,7 @@ The hub runs as one always-on Fly.io machine (`shared-cpu-1x`, 512 MB) with a vo
 | `--listen` | `VECNET_LISTEN` | `127.0.0.1:45752` |
 | `--data-dir` | `VECNET_DATA_DIR` | `/data` |
 | `--public-url` | `VECNET_PUBLIC_URL` | `http://<bound listen address>` |
+| `--allow-private-egress` | `VECNET_ALLOW_PRIVATE_EGRESS=1` | off; development only, see [Connectors](#connectors) |
 
 The public URL is the origin the hub writes into attachment `blob_url` links, so on Fly it must be the `https://` address clients use. The image's entrypoint sets `--listen` and `--data-dir`; `fly.toml` sets `VECNET_PUBLIC_URL`. On start the hub prints `vecnet-hub listening on http://<addr> (public url <url>)`.
 
@@ -41,6 +42,16 @@ The public URL is the origin the hub writes into attachment `blob_url` links, so
 5. Check: `curl -fsS https://vecnet.fly.dev/healthz`, then `vecnet peer add --kind session --name <name>` and `vecnet enrol` on the peer's host.
 
 Later deploys are `just fly-deploy` only. The hub migrates its database on start.
+
+## Connectors
+
+**Public HTTPS is required for dots.** ChatGPT reaches `/mcp`, the OAuth endpoints and the metadata documents over the public internet, and OpenAI's Secure MCP Tunnel is not supported. Fly's `https://vecnet.fly.dev` is enough. Grok Bots (for `/mcp`) and GitHub webhooks (for `/v1/ingress/…`) need the same public origin.
+
+**`VECNET_PUBLIC_URL` must be that exact origin.** It is more than a link prefix here: it is the OAuth issuer, it sets the `/mcp` token audience, and a request carrying any other `Origin` header gets 403.
+
+**`VECNET_ALLOW_PRIVATE_EGRESS` is dev-only.** By default every outbound POST (push routes, notification routes, Events callbacks, Grok Bot routines, CIMD fetches) is https, resolved once to a public unicast address, pinned to it, and never follows a redirect. `--allow-private-egress`, or the variable set to `1`, lets those URLs be http and reach private or loopback addresses so LAN receivers work on xsm. It also lifts the port 443 rule on Events callbacks. It removes the hub's protection against being pointed at internal services, so never set it on Fly; `fly.toml` does not.
+
+Connector setup is in [`docs/connectors/`](connectors/): [dots](connectors/dots.md), [Grok Bot](connectors/grokbot.md) and [GitHub](connectors/github.md).
 
 ## Backups
 

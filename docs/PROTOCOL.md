@@ -308,7 +308,7 @@ Rotating a route key issues a new `whsec_`; the old key stays valid for 24 h, an
 
 ### 4.1 Revisions and HTTP
 
-The hub serves MCP **2026-07-28** (POST-only, no sessions, `server/discover`) and stays dual-era for clients that send `initialize` [SSE, DOTS]. It MUST validate `Origin` (403 if present and invalid) and authenticate every POST [SSE]. Library: official `modelcontextprotocol/go-sdk`; MCP Events is hand-rolled behind an interface [ADR1].
+The hub serves MCP **2026-07-28** (POST-only, no sessions, `server/discover`) and stays dual-era for clients that send `initialize` [SSE, DOTS]. It MUST validate `Origin` (403 if present and invalid) and authenticate every POST [SSE]. `/mcp` is hand-rolled JSON-RPC 2.0 on `net/http`, MCP Events included, because the go-sdk server cannot host MCP Events; the SDK stays as a test client and for wire types ([ADR 0001, MCP amendment](adr/0001-tech-stack.md)) [ADR1].
 
 The hub serves exactly 2026-07-28 and 2025-11-25. An `initialize` naming an older revision is rejected with an error carrying the newest supported version [R12].
 
@@ -677,6 +677,34 @@ Further reason codes, introduced by the core-hub implementation plan (2026-11-01
 - `no_recipients` (422): the recipients (or a thread's defaulted participants) resolve to no peer besides the sender.
 - `not_found` (404): an unknown route, or an unknown peer, dead letter, group or other object named in a path.
 - `internal` (500): an unexpected hub failure; the message carries no detail.
+
+Further reason codes, introduced by the connectors implementation plan (2026-11-01).
+
+HTTP status on `/mcp`, in the section 2 error body:
+
+- `bad_request` (400): a transport fault: an unreadable body, or an `MCP-Protocol-Version` that is missing, unsupported or disagrees with `params._meta` or the session. A fault inside a readable request is a JSON-RPC error instead.
+- `session_not_found` (404): an `Mcp-Session-Id` naming no live 2025-11-25 session of this caller.
+- `method_not_allowed` (405): a method other than POST, GET or DELETE, or a GET or DELETE outside a 2025-11-25 session.
+- `not_acceptable` (406): `Accept` omits what the request needs (`application/json`, and `text/event-stream` where the revision requires both).
+- `unsupported_media_type` (415): a POST whose `Content-Type` is not `application/json`.
+
+HTTP status on the admin API:
+
+- `invalid_url` (422): a configured URL the egress rules refuse (section 14.7), or a `grokbot` route URL off the routine pattern (section 13.3); `details.field` names it and `details.reason` says why.
+- `invalid_key` (422): a `grokbot` routine key that is not printable ASCII starting `crsr_`; `details.field` is `key`.
+
+JSON-RPC `data.reason` on `/mcp`, returned as a JSON-RPC error in an HTTP 200:
+
+- `invalid_url` (`-32015`, `events/subscribe`): the callback URL is refused before any connection, alongside `challenge_failed` and `timeout` (section 4.4).
+- `not_linked` (`-32602`, `events/subscribe`): the OAuth account is bound to no dot peer.
+- `peer_required` (`-32602`, `events/subscribe`): a principal credential did not name `arguments.peer_id`.
+- `peer_disabled` (`-32602`, `events/subscribe`): the peer to subscribe for is disabled.
+- `not_subscribable` (`-32602`, `resources/subscribe`, `subscriptions/listen`): the URI is not an inbox this caller may read.
+- `too_many` (`-32602`, `subscriptions/listen`): more resource URIs than `data.limit`.
+
+`bad_signature` stays as section 2.11 defines it.
+
+`push_auth_failed` is a counter on `GET /v1/admin/counters` and an audit action, not a reason code: it counts Grok Bot pushes answered 401 or a "disabled" 400, each of which dead-letters (section 13.3).
 
 ## 16. Amendments from pag-chat's review (2026-11-01)
 
