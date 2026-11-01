@@ -245,7 +245,7 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `PUT /v1/admin/notify` | operator notification webhooks and filters; each route gets its own `whsec_` | [T15, R23] |
 | `GET /v1/admin/audit` | audit log | [T11] |
 
-**Principals.** `vecnet principal add --name <n>` creates a principal and prints its `prn_` id and credential. `vecnet peer add … --principal <prn_>` enrols a peer under it. `peer add` without `--principal` creates an implicit single-peer principal with the peer's display name. Only the operator reassigns a peer, with `vecnet peer move <peer> --principal <prn_>` [R10]. Kind `operator` carries the operator powers of section 16, so `peer add --kind operator` is accepted only under the operator principal (otherwise 422 `invalid_value`).
+**Principals.** `vecnet principal add --name <n>` creates a principal and prints its `prn_` id and credential. `vecnet peer add … --principal <prn_>` enrols a peer under it. `peer add` without `--principal` creates an implicit single-peer principal with the peer's display name. Only the operator reassigns a peer, with `vecnet peer move <peer> --principal <prn_>` [R10] or, for a dot, by issuing the link code whose consumption moves it (section 4.5). Kind `operator` carries the operator powers of section 16, so `peer add --kind operator` is accepted only under the operator principal (otherwise 422 `invalid_value`).
 
 ---
 
@@ -364,7 +364,7 @@ For dots the hub is both an OAuth **resource server** and its own minimal **auth
 - Redirect URIs `https://chatgpt.com/connector_platform_oauth_redirect` and `https://chatgpt.com/connector/oauth/{callback_id}` [DOTS §4].
 - No machine-to-machine grants exist for ChatGPT [DOTS §4].
 
-**Principal binding:** the operator pre-creates a dot peer; on first login the ChatGPT principal is bound to it via a one-time link code; one principal → one dot peer for now, with a binding model that allows several peers per principal later [T11]. The operator runs `vecnet peer link <peer>`, which prints an 8-character code valid for 10 minutes; the consent page on the principal's first login asks for it and binds the principal to that peer [R15].
+**Principal binding:** the operator pre-creates a dot peer; on first login the ChatGPT principal is bound to it via a one-time link code; one principal → one dot peer for now, with a binding model that allows several peers per principal later [T11]. The operator runs `vecnet peer link <peer>`, which prints an 8-character code valid for 10 minutes; the consent page on the principal's first login asks for it and binds the principal to that peer [R15]. Consuming a link code moves the dot peer under a new `dot:<name>` principal. Nothing about a ChatGPT login reaches the hub, so a code cannot show that its holder is the account already bound to that peer: each code starts a new account, and any principal bound to that peer before loses its binding, tokens, unspent codes and consent cookie in the same transaction. A returning principal needs no code; its consent cookie identifies it.
 
 **Mixed auth.** `/mcp` accepts either a vecnet bearer (peer or principal secret) or an OAuth access token on the same endpoint. A Grok Bot reaches `/mcp` with a peer bearer configured in the Bot's MCP settings [SSE, R15].
 

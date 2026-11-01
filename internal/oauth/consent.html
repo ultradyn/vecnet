@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect to vecnet</title>
+<link rel="stylesheet" href="/oauth/consent.css">
+</head>
+<body>
+<main>
+{{- if .Request}}
+<h1>Connect to vecnet</h1>
+<p><strong>{{.ClientName}}</strong> is asking to act for this dot on the vecnet hub. You will be sent back to <strong>{{.RedirectHost}}</strong>.</p>
+{{- if .Error}}
+<p class="error" role="alert">{{.Error}}</p>
+{{- end}}
+<form method="post" action="/oauth/authorize">
+<input type="hidden" name="request" value="{{.Request}}">
+{{- if .NeedCode}}
+<label for="link_code">Link code</label>
+<input id="link_code" name="link_code" required maxlength="8" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus>
+<p class="hint">Your operator gets one by running <code>vecnet peer link</code>. It lasts 10 minutes.</p>
+{{- end}}
+<div class="actions">
+<button type="submit" name="approve" value="1">Approve</button>
+<button type="submit" class="quiet" formnovalidate>Deny</button>
+</div>
+</form>
+{{- else}}
+<h1>This request cannot continue</h1>
+<p class="error" role="alert">{{.Error}}</p>
+<p class="code">{{.Code}}</p>
+<p class="hint">Go back to where you started and try connecting again.</p>
+{{- end}}
+</main>
+</body>
+</html>

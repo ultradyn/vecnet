@@ -24,7 +24,9 @@ import (
 // Caller is the authenticated identity behind a request.
 //
 // Kind "peer": PeerID is the credential's peer, PrincipalID its principal.
-// Kind "principal": PrincipalID only; the request names a peer with `as`.
+// Kind "principal": PrincipalID; the request names a peer with `as`. An OAuth
+// principal (PROTOCOL §4.5) also has PeerID, its bound dot peer, used when
+// `as` is absent.
 // Kind "operator": PrincipalID is the operator principal and PeerID its
 // operator peer (peers.kind = 'operator'), so the operator is addressable
 // like any peer; PeerID is "" when no operator peer exists yet.
