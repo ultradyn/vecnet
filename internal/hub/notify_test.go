@@ -84,10 +84,11 @@ func putNotify(t *testing.T, env *testhub.Env, routes ...map[string]string) map[
 
 // verifyNotify checks h is signed by whsec with webhook-id = the Event's
 // cursor (or, for an Event with no cursor, any id) and returns the Event.
-func verifyNotify(t *testing.T, h notifyHit, whsec string) envelope.Event {
+// now is the hub's (fake) clock, which signed it.
+func verifyNotify(t *testing.T, h notifyHit, whsec string, now time.Time) envelope.Event {
 	t.Helper()
 	if err := webhook.Verify([]string{whsec}, h.Header.Get(webhook.HeaderID), h.Header.Get(webhook.HeaderTimestamp),
-		h.Header.Get(webhook.HeaderSignature), h.Body, time.Now()); err != nil {
+		h.Header.Get(webhook.HeaderSignature), h.Body, now); err != nil {
 		t.Fatalf("notification signature does not verify with its route's whsec: %v", err)
 	}
 	var ev envelope.Event
@@ -120,13 +121,13 @@ func TestNotifyRoutesFilter(t *testing.T) {
 		t.Fatalf("after a wake send to the operator: wake route %d hits, dead_letters route %d; want 1 and 0",
 			len(hits), len(dlRcv.Hits()))
 	}
-	ev := verifyNotify(t, hits[0], routes[wakeRcv.srv.URL].Whsec)
+	ev := verifyNotify(t, hits[0], routes[wakeRcv.srv.URL].Whsec, env.Now.Now())
 	if ev.Type != "delivery" || ev.Cursor == "" || !strings.Contains(string(ev.Data), sr.MessageID) {
 		t.Fatalf("wake notification Event = %+v, want the operator's delivery of %s", ev, sr.MessageID)
 	}
 	// It is not signed with the other route's key.
 	if err := webhook.Verify([]string{routes[dlRcv.srv.URL].Whsec}, hits[0].Header.Get(webhook.HeaderID),
-		hits[0].Header.Get(webhook.HeaderTimestamp), hits[0].Header.Get(webhook.HeaderSignature), hits[0].Body, time.Now()); err == nil {
+		hits[0].Header.Get(webhook.HeaderTimestamp), hits[0].Header.Get(webhook.HeaderSignature), hits[0].Body, env.Now.Now()); err == nil {
 		t.Fatal("wake notification also verifies with the dead_letters route's key")
 	}
 
@@ -170,7 +171,7 @@ func TestNotifyRoutesFilter(t *testing.T) {
 	if len(wakeRcv.Hits()) != 1 || len(dlRcv.Hits()) != 1 {
 		t.Fatalf("after a dead letter: %d and %d hits, want 1 and 1", len(wakeRcv.Hits()), len(dlRcv.Hits()))
 	}
-	ev = verifyNotify(t, dlRcv.Hits()[0], routes[dlRcv.srv.URL].Whsec)
+	ev = verifyNotify(t, dlRcv.Hits()[0], routes[dlRcv.srv.URL].Whsec, env.Now.Now())
 	var rc envelope.Receipt
 	if err := json.Unmarshal(ev.Data, &rc); err != nil {
 		t.Fatal(err)
