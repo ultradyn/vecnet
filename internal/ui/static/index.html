@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>vecnet · operator inbox</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<noscript><p class="nojs">The vecnet operator inbox needs JavaScript.</p></noscript>
+
+<section id="login" class="login" hidden>
+  <form id="login-form" class="card" autocomplete="off">
+    <div class="brand"><span class="logo"></span>vecnet</div>
+    <h1>Operator inbox</h1>
+    <p class="lede">Paste your operator secret. It stays in this browser and is sent to this hub only as a bearer header.</p>
+    <label for="secret">Operator secret</label>
+    <input id="secret" type="password" spellcheck="false" placeholder="vn_operator_…" required>
+    <button type="submit" class="btn pri">Sign in</button>
+    <p id="login-err" class="err" role="alert"></p>
+  </form>
+</section>
+
+<div id="app" class="va" hidden>
+  <nav class="side" aria-label="Inbox and threads">
+    <div class="brand"><span class="logo"></span>vecnet<span id="hubname" class="hub"></span></div>
+    <div class="nav">
+      <a id="nav-inbox" href="#inbox"><span class="tt">Inbox</span><span id="inbox-count" class="cnt"></span></a>
+    </div>
+    <div class="grp">Threads</div>
+    <div id="threads" class="nav"></div>
+    <div class="grp">You</div>
+    <div id="me" class="me"></div>
+    <div id="conn" class="conn"><i></i><span>connecting</span></div>
+    <button id="signout" type="button" class="linkbtn">Sign out</button>
+  </nav>
+  <main id="main"><div id="view" class="col"></div></main>
+  <aside id="aside" aria-label="Details"></aside>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

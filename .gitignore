@@ -12,3 +12,4 @@ build/
 .scratch/vecnet/build/
 bin/
 .data/
+backups/

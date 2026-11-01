@@ -163,7 +163,7 @@ One URL, two pull styles chosen by `Accept` [T06, SSE]:
 | `text/event-stream` | SSE | Stream of frames: `id: <cursor>`, `event: <Event.type>`, `data: <Event JSON>` [SCH] |
 | `application/json` | Long-poll | `{events: [Event…], next_cursor}` [EX06]; returns at once when events exist, else holds up to `wait` seconds (research uses `wait=25`, kept under 30 s for proxies; `wait=0` is plain poll) [SSE] |
 
-Cursor selection, in priority order: `Last-Event-ID` header, then `?after=`, then the stream owner's last acked cursor. `after=head` means "from now". The hub replays every entry with seq > cursor in order, then tails [SSE]. Clients MUST NOT send `Last-Event-ID` and `?after=` with different values [SSE].
+Cursor selection, in priority order: `Last-Event-ID` header, then `?after=`, then the stream owner's last acked cursor. `after=head` means "from now". With nothing acked yet for the owner and scope, the stream starts at the oldest retained event (a full replay), so a first connection never skips Deliveries queued before it. The hub replays every entry with seq > cursor in order, then tails [SSE]. Clients MUST NOT send `Last-Event-ID` and `?after=` with different values [SSE].
 
 SSE stream behaviour [SSE]:
 
@@ -189,7 +189,7 @@ Body `{cursor}`. Acknowledges every entry of the caller's log up to and includin
 
 ### 2.5 `POST /v1/receipts`
 
-Body `{delivery_id, state, note?}`; `state` is `processed`, `failed`, or `read` (a human saw it; optional). Returns 204 [SCH, R06]. Only the Delivery's recipient, or its principal, MAY post; the hub fills the `Receipt`'s remaining fields [T10, R06]. Clients never post `accepted`: the hub records it from a push 2xx or a cursor ack [R06]. The hub appends a `receipt` Event to the sender's log [ENV]. MCP `vecnet_receipt(delivery_id, state, note?)` is the same operation [R06].
+Body `{delivery_id, state, note?}`; `state` is `processed`, `failed`, or `read` (a human saw it; optional). Returns 204 [SCH, R06]. Only the Delivery's recipient, or its principal, MAY post; the hub fills the `Receipt`'s remaining fields [T10, R06]. A repeated `read` for the same Delivery is a no-op (204, no second receipt). Clients never post `accepted`: the hub records it from a push 2xx or a cursor ack [R06]. The hub appends a `receipt` Event to the sender's log [ENV]. MCP `vecnet_receipt(delivery_id, state, note?)` is the same operation [R06].
 
 ### 2.6 `POST /v1/presence`
 
@@ -205,11 +205,11 @@ Body `{state: idle|working|blocked|offline, at, capabilities?, quota?, location?
 
 `GET /v1/threads?participant=me|<peer_id>&group=<grp_id>&since=<timestamp>&limit=<n≤200>`: threads the caller participates in. Returns `{threads: [ThreadSummary…], next}`; `next` is an opaque paging token [R08].
 
-`GET /v1/threads/{id}/messages?after=<message_id>&limit=<n≤200>`: history for late joiners and cursor re-sync [ENV §5]. `after` is a `msg_` id, exclusive; omitted means from the thread's start. Returns `{messages: [Message…], next_after}`; `next_after` is the `msg_` id to pass next, or `null` at the end [R08]. Participants only; others get 403 `not_participant` [T09, R08, R24].
+`GET /v1/threads/{id}/messages?after=<message_id>&limit=<n≤200>`: history for late joiners and cursor re-sync [ENV §5]. `after` is a `msg_` id, exclusive; omitted means from the thread's start. Returns `{messages: [Message…], next_after}`; `next_after` is the `msg_` id to pass next, or `null` at the end [R08]. Participants only; others get 403 `not_participant` [T09, R08, R24]. The operator credential is the exception: it reads any thread in full, whatever its `history_access`, and may list any peer's threads with `participant=<peer_id>` (the operator inbox needs both).
 
 ### 2.9 Groups *(proposed paths)*
 
-`POST /v1/groups` creates an Ad hoc group (`grp_`) with members the caller is allowed to message; `POST /v1/groups/{id}/members` lets any member add others under the same scopes; `GET /v1/groups` lists the caller's groups [T09, T11]. Teams are operator-only (section 2.12).
+`POST /v1/groups` creates an Ad hoc group (`grp_`) with members the caller is allowed to message; `POST /v1/groups/{id}/members` lets any member add others under the same scopes; `GET /v1/groups` lists the caller's groups [T09, T11]. A principal credential names the acting peer with `?as=<peer_id>` on the two `POST`s, as on `POST /v1/presence`; without it the hub answers 422 `as_required`. Teams are operator-only (section 2.12).
 
 ### 2.10 Directory: `GET /v1/peers` *(proposed path)*, `PATCH /v1/peers/me`
 
@@ -245,7 +245,7 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `PUT /v1/admin/notify` | operator notification webhooks and filters; each route gets its own `whsec_` | [T15, R23] |
 | `GET /v1/admin/audit` | audit log | [T11] |
 
-**Principals.** `vecnet principal add --name <n>` creates a principal and prints its `prn_` id and credential. `vecnet peer add … --principal <prn_>` enrols a peer under it. `peer add` without `--principal` creates an implicit single-peer principal with the peer's display name. Only the operator reassigns a peer, with `vecnet peer move <peer> --principal <prn_>` [R10].
+**Principals.** `vecnet principal add --name <n>` creates a principal and prints its `prn_` id and credential. `vecnet peer add … --principal <prn_>` enrols a peer under it. `peer add` without `--principal` creates an implicit single-peer principal with the peer's display name. Only the operator reassigns a peer, with `vecnet peer move <peer> --principal <prn_>` [R10]. Kind `operator` carries the operator powers of section 16, so `peer add --kind operator` is accepted only under the operator principal (otherwise 422 `invalid_value`).
 
 ---
 
@@ -439,7 +439,7 @@ The hub fills `loop` on every Message [ENV]:
 
 | Field | Rule | Default |
 |---|---|---|
-| `depth` | 0 for a fresh message; a reply is parent.depth + 1 | — |
+| `depth` | 0 for a fresh message (one that starts a thread); a reply is parent.depth + 1. The parent is the `in_reply_to` message, or, for a send into an existing thread without `in_reply_to`, the thread's latest message: leaving `in_reply_to` out never resets `depth`, `max_depth`, `expires_at` or `sender_chain` | — |
 | `max_depth` | Inherited down a reply chain; any sender MAY lower it for its own message; a reply MUST NOT raise it; range 1–64 | 16 |
 | `expires_at` | Wall-clock TTL; sender MAY lower it; a reply MUST NOT raise an inherited value | now + 24 h |
 | `sender_chain` | Last 32 originators (peers or sources), oldest first: parent's chain + sender | — |
@@ -464,6 +464,7 @@ The hub fills `loop` on every Message [ENV]:
 - **Ad hoc groups** (`grp_`) are created by any peer with members it may message; members may add others under the same scopes; the operator sees every group; a group auto-archives after 30 days idle [T09].
 - Neither a team nor a group implies a thread: a message to a group starts or continues a thread like any recipient set [T09].
 - **External mapping.** Connectors own the external-conversation ↔ `thread_id` mapping. The hub stores `origin` on the Message and echoes it on Deliveries, nothing more [T09, ENV §6]. Inbound sources are the exception: the hub owns their mapping (section 10) [R09].
+- **Group scopes.** Addressing a team or group never widens the sender's scopes; each member is checked (section 12).
 - **Archived groups.** A send naming an archived group gets 410 `group_archived`; the operator can unarchive it [R21].
 - **`ThreadSummary.group`** is the group named as the first recipient when the thread was created, else `null` [R21].
 - **Participant cap.** A thread holds at most 64 participants; a send that would exceed it gets 422 `thread_full` [R21].
@@ -533,6 +534,7 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 - **Upload:** section 2.7. Connectors upload on behalf of Grok Bots and dots, which cannot reach the store [T13].
 - **Read:** `blob_url` on a Delivery carries a token scoped to (recipient, sha256), valid 7 days. Without it, a blob is readable by any participant in a thread referencing it, with its bearer, and by the operator in the UI [T13].
 - **Retention:** a blob referenced by a retained Message lives as long as the Message (indefinitely unless purged). Unreferenced uploads are garbage-collected after 24 h. Uploader TTL is optional and applies only while the blob is unreferenced: a blob referenced by any retained Message is pinned regardless of TTL [T13, R07]. Operator purge removes bytes and leaves a tombstone row; a later read returns 410 `blob_purged` [T13, R07].
+- **Attaching stored bytes:** a hash is not a read capability. A sender may attach a stored hash only if it (or its principal) uploaded those bytes, or a message referencing them is visible to it (section 16.3); otherwise the hash is treated as not stored (`unknown_blob`, or reference-only with `origin_url`), and no error reveals the stored size.
 - **Reference-only attachments** (`origin_url`, no hosted bytes) carry no `blob_url`; the hub never fetches `origin_url` [T13, SCH].
 
 ---
@@ -553,9 +555,10 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 
 - **Dots never hold a vecnet secret** [T11].
 - **CLI profiles:** `~/.config/vecnet/config.toml` holds named profiles, each a hub URL plus a peer, principal or operator credential; `--net` selects; `--as <peer>` picks a principal's peer [T17]. One peer per long-lived agent identity; sessions reuse that identity's stored credential [T17].
-- **Send scopes:** default allow-all among enrolled peers and teams; per-peer allow/deny lists set by the operator; ad hoc group creation respects the same scopes [T11]. Scopes gate sends and group creation only: every peer MAY read the directory, and thread history is readable by participants only [R24].
-- **Audit:** append-only table of actor peer, action (`send`, `ack`, `enrol`, `rotate`, group create/change, `purge`, scope change), target ids, timestamp [T11]; loop cuts are also audited [T16].
+- **Send scopes:** default allow-all among enrolled peers and teams; per-peer allow/deny lists set by the operator; ad hoc group creation respects the same scopes [T11]. Scopes gate sends and group creation only: every peer MAY read the directory, and thread history is readable by participants only [R24] (and by the operator, section 2.8). A send to a team or group is checked per member as if each were addressed directly: a deny on the group or on any member refuses the whole send (403 `scope_denied`, `details.recipient` the member, `details.via` the group); under allow-list scopes each member must be allowed unless the group or team itself is. Group membership is not required to address a group.
+- **Audit:** append-only table of actor (the sending peer id; `operator` for an admin action taken with the operator credential; `hub` for a hub-initiated action), action (`send`, `ack`, `enrol`, `rotate`, group create/change, `purge`, scope change), target ids, timestamp [T11]; loop cuts are also audited [T16].
 - **Logging:** Message bodies and secrets MUST NOT enter logs or audit rows; redaction lives in the logger [T11].
+- **Secrets at rest:** bearer, principal, operator and enrolment secrets are stored only as SHA-256 hashes. Signing keys (route and notify `whsec_`, the blob-token `hub_key`) must be usable for HMAC and so are stored in plaintext, protected by the 0700 data directory.
 
 ---
 
@@ -623,7 +626,7 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 
 - [ ] Single static Go binary per OS/arch.
 - [ ] Commands: `send <peer|group> "text" [--thread] [--reply-to] [--wake|--wake-idle|--hold] [--attach FILE]`, `reply <message_id> "text"`, `inbox [--since CURSOR] [--ack]`, `ack <cursor>`, `watch [--for-monitor]`, `threads`, `thread <id> [--after MESSAGE_ID]`, `peers`, `groups create|add|list`, `presence set <state>`, `presence subscribe <all|teams|none>`; admin `principal add`, `peer add [--principal]|move|link|rotate|scope`, `source add`, `route add`, `dead-letters list|retry|discard` [R08, R10, R15, R22].
-- [ ] `watch --for-monitor` holds the SSE stream and prints one compact line per event.
+- [ ] `watch --for-monitor` holds the SSE stream and prints one compact line per event. It is exempt from the section 13.1 drop rule by default: it prints `receipt`, `presence` and other non-`delivery` Events too, because the agent reading the monitor decides what to act on and MUST NOT auto-reply to them; `--deliveries-only` applies the 13.1 drop.
 - [ ] MAY act as a stdio channel server for Claude Code, re-emitting `/v1/events` as `notifications/claude/channel` [SSE].
 
 ---
@@ -652,13 +655,34 @@ Residual questions, decided 2026-11-01 (same delegation):
 3. An ingress event dropped by the source's event allowlist is 202 `{"dropped": true, "reason": "event_filtered"}`, so the provider does not redeliver it.
 4. `GET /v1/threads` paginates with `?cursor=<next>`, passing back the `next` token verbatim.
 
+Further reason codes, introduced by the core-hub implementation plan (2026-11-01):
+
+- `invalid_body` (400): the body is not JSON or violates the schema (unknown field, wrong type, missing required field); `details.path` is the JSON pointer of the first violation.
+- `unauthenticated` (401): missing, unknown or revoked bearer credential.
+- `forbidden` (403): the credential may not do this, e.g. a non-operator on `/v1/admin/...`, or `as` naming a peer outside the caller's principal.
+- `as_required` (422): a principal credential sent without `as`.
+- `not_in_thread` (422): `in_reply_to` names a message outside the addressed thread.
+- `attachment_size_mismatch` (422): an attachment's declared `size` differs from the stored blob's size.
+- `cursor_mismatch` (400): `Last-Event-ID` and `?after=` are both given and differ.
+- `not_your_peer` (403): `?peer=` names a peer the principal does not own.
+- `invalid_state` (422): a receipt state other than `processed`, `read` or `failed`.
+- `invalid_value` (422): a field value outside its allowed set or range (e.g. `subscribe_presence`).
+- `unknown_thread` (404): the named thread does not exist.
+- `not_member` (403): a non-member tried to change an ad hoc group.
+- `unknown_approval` (404): an `approval_response` names no approval of this thread.
+- `unknown_job` (404): a `job_status` names no existing job.
+- `invalid_transition` (422): a `job_status` state not allowed from the job's current state (section 5.6).
+- `no_recipients` (422): the recipients (or a thread's defaulted participants) resolve to no peer besides the sender.
+- `not_found` (404): an unknown route, or an unknown peer, dead letter, group or other object named in a path.
+- `internal` (500): an unexpected hub failure; the message carries no detail.
+
 ## 16. Amendments from pag-chat's review (2026-11-01)
 
 These three rules supersede the sections they cite. Each answers a decisive error pag-chat identified; the coordinating agent accepted them under Max's delegation and flagged amendment 3 to Max as a product-default change.
 
 ### 16.1 Operator replies reset depth [A1, supersedes §6 and R20 in part]
 
-Depth exists to stop unsupervised bot-to-bot loops. A reply sent by a peer of kind `operator` MUST set `depth` to 0 for its subtree; replies below it count from 0 again. `sender_chain` MUST keep recording every originator regardless. The default `max_depth` is **32** (was 16). The thread budget (default 500) remains the hard stop and is unaffected by sender kind. Approval requests, approval responses and job status messages still count against depth and budget as in R20, except where the sender is the operator.
+Depth exists to stop unsupervised bot-to-bot loops. A reply sent by a peer of kind `operator` MUST set `depth` to 0 for its subtree; replies below it count from 0 again. The operator resets the loop TTL the same way: its reply is never cut as `expired` and takes a fresh `expires_at` (its own value if it sets one, else now + 24 h) that its subtree inherits, so the operator can always revive a thread whose TTL has passed. `sender_chain` MUST keep recording every originator regardless. The default `max_depth` is **32** (was 16). The thread budget (default 500) remains the hard stop and is unaffected by sender kind. Approval requests, approval responses and job status messages still count against depth and budget as in R20, except where the sender is the operator.
 
 ### 16.2 Per-peer rate limits [A2, extends §2.2, §6 and §12]
 
@@ -666,7 +690,7 @@ The hub MUST enforce per-peer limits on `POST /v1/messages` and the MCP send too
 
 ### 16.3 History access and participant locking [A3, supersedes §2.2 step 3, §7 and §11 in part]
 
-`ThreadSummary` gains `history_access` (`from_join` | `full`, default **`from_join`**) and `locked_participants` (boolean, default false), both settable by the thread creator at creation and by the operator at any time.
+`ThreadSummary` gains `history_access` (`from_join` | `full`, default **`from_join`**) and `locked_participants` (boolean, default false), both settable by the thread creator at creation (the `SendRequest` fields of the same names, honoured only on the send that creates the thread, like `thread_title`) and by the operator at any time.
 
 - Under `from_join`, a participant added after the thread was created MAY read only messages appended after its join (`GET /v1/threads/{id}/messages` and `vecnet_thread` filter accordingly), and MAY read a blob through its bearer only if a message visible to it references that blob. Per-recipient `blob_url` tokens on its own Deliveries are unaffected.
 - Under `full`, every participant reads the whole thread.

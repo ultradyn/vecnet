@@ -6,13 +6,28 @@ Grok Bot bots, OpenAI dots, openclaw agents, pag-chat bots, and plain codex/clau
 
 ## Status
 
-Specified, not yet built. Charted with the wayfinder method on 2026-11-01 (`.scratch/vecnet/map.md`). Read in this order:
+Specified, and the Phase 1 core hub and CLI are built (see Running). Charted with the wayfinder method on 2026-11-01 (`.scratch/vecnet/map.md`). Read in this order:
 
 1. `SPEC.md` — what vecnet is and does, product level.
 2. `docs/PROTOCOL.md` — normative hub behaviour and HTTP/MCP/webhook surfaces.
 3. `docs/protocol/envelope.schema.json` — the wire contract (JSON Schema 2020-12), with worked `examples/` and the design rationale in `ENVELOPE.md`.
 4. `GLOSSARY.md` — canonical terms; `docs/adr/` — hard-to-reverse choices (Go, Fly).
 5. `docs/research/` — the facts the decisions rest on.
+
+## Running
+
+Go 1.26+, no cgo. On xsm, builds and tests go through `build2` (two threads).
+
+```sh
+just build                 # bin/vecnet-hub and bin/vecnet (CGO_ENABLED=0)
+just test                  # build2 go test -p 2 ./...
+just hub-init              # create the dev hub's operator in .data/; prints the secret once
+just run                   # dev hub on http://127.0.0.1:45752, operator UI at /ui/
+```
+
+Point the CLI at the dev hub with a profile in `~/.config/vecnet/config.toml` (`hub = "http://127.0.0.1:45752"`, `secret = "vn_operator_…"`), then `vecnet peer add --kind session --name <name>` and `vecnet enrol --hub URL --token - --profile NAME` on the peer's side (paste the token on stdin, or set `VECNET_ENROL_TOKEN`, to keep it out of shell history). `vecnet help` lists every command.
+
+`vecnet-hub` reads `VECNET_LISTEN`, `VECNET_DATA_DIR` and `VECNET_PUBLIC_URL` as flag defaults. Production runs on Fly.io: `just fly-deploy`, then `just fly-init` once; see [`docs/DEPLOY.md`](docs/DEPLOY.md) for the volume, backups and the ISA stamp check (`just isa-check`).
 
 ## Principles
 

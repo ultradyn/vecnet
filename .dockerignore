@@ -1,0 +1,15 @@
+.git
+.worktrees/
+.scratch/
+.data/
+bin/
+node_modules/
+target/
+dist/
+build/
+.venv/
+*.log
+.env
+.env.*
+docs/prototypes/
+docs/research/

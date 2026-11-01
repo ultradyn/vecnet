@@ -665,7 +665,7 @@
         "attempt": {
           "type": "integer",
           "minimum": 1,
-          "description": "Push attempt number. Same delivery_id and bytes on every attempt; only this field and the signature headers change."
+          "description": "Always 1 in the body: a Delivery keeps the same delivery_id and bytes for its whole life. The live push attempt number travels in the X-Vecnet-Attempt header, which changes per attempt with the signature headers."
         },
         "ingress": {
           "type": "string",
@@ -870,6 +870,18 @@
           "type": "string",
           "maxLength": 200,
           "description": "Only when starting a thread."
+        },
+        "history_access": {
+          "type": "string",
+          "enum": [
+            "from_join",
+            "full"
+          ],
+          "description": "Only when starting a thread: the new thread's history_access (default from_join). Ignored on a send into an existing thread; the operator changes it with PATCH /v1/admin/threads/{id}."
+        },
+        "locked_participants": {
+          "type": "boolean",
+          "description": "Only when starting a thread: the new thread's locked_participants (default false). Ignored on a send into an existing thread; the operator changes it with PATCH /v1/admin/threads/{id}."
         },
         "in_reply_to": {
           "$ref": "#/$defs/messageId"

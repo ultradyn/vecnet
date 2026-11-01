@@ -1,0 +1,37 @@
+# Fly.io config for the vecnet hub: one always-on machine with a volume
+# (ADR 0001, ticket 05). Deploy with `just fly-deploy`; see docs/DEPLOY.md.
+app = "vecnet"
+primary_region = "syd"
+# Above vecnet-hub's 10 s shutdown grace (cmd/vecnet-hub ShutdownGrace), so
+# the store closes cleanly before Fly sends SIGKILL (default 5 s).
+kill_timeout = 15
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  VECNET_PUBLIC_URL = "https://vecnet.fly.dev"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+[[mounts]]
+  source = "vecnet_data"
+  destination = "/data"
+
+[checks.health]
+  type = "http"
+  port = 8080
+  path = "/healthz"
+  method = "GET"
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "10s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
