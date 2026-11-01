@@ -13,3 +13,4 @@ build/
 bin/
 .data/
 backups/
+.scratch/vecnet/build-connectors/
