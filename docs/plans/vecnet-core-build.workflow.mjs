@@ -39,23 +39,23 @@ const BASE_REF = A.baseRef || 'master'
 const STATUS = A.statusDir || `${REPO}/.scratch/vecnet/build` // gitignored via `build/`; lives in the main checkout so it survives worktree removal
 const STAMP = A.runStamp || 'unstamped'
 const START = Number.isInteger(A.startTask) ? A.startTask : 1
-const END = Number.isInteger(A.endTask) ? A.endTask : 20
+const END = Number.isInteger(A.endTask) ? A.endTask : (Array.isArray(A.tasks) ? A.tasks.length : 20)
 const MAX_FIX_ROUNDS = Number.isInteger(A.maxFixRounds) ? A.maxFixRounds : 2
 const OPEN_BROWSER = A.openBrowser !== false
-const FINAL = typeof A.finalReview === 'boolean' ? A.finalReview : END === 20
-const PLAN = `${WT}/docs/plans/2026-11-01-core-hub.md`
+const FINAL = typeof A.finalReview === 'boolean' ? A.finalReview : END === (Array.isArray(A.tasks) ? A.tasks.length : 20)
+const PLAN = `${WT}/${A.plan || 'docs/plans/2026-11-01-core-hub.md'}` // repo-relative plan path
 const PROTO = `${WT}/docs/PROTOCOL.md`
 const MODEL = 'opus' // Max: Claude Code workflows pass opus explicitly
 const REVIEW_MODEL = A.reviewModel || MODEL // independent reviewers/lenses/gate may run on a different model (synthesis of the two drafts)
 
-if (START < 1 || END > 20 || START > END) throw new Error(`bad task range ${START}..${END}`)
+if (START < 1 || START > END) throw new Error(`bad task range ${START}..${END}`)
 
 const nn = n => String(n).padStart(2, '0')
 
 // ---------------------------------------------------------------- per-task data
 // refs: PROTOCOL.md sections the reviewer must check against. race: reviewer also runs -race on the task's packages.
 // hazards: plan gaps or traps found while drafting this workflow; given to implementer, reviewer and fixer.
-const TASKS = [
+const CORE_TASKS = [
   null,
   { title: 'Module skeleton and prefixed ULIDs', refs: '§1.3', race: false,
     hazards: [
@@ -166,6 +166,10 @@ const TASKS = [
       'Run the readelf ISA check honestly. If it prints a non-zero count, report it as a deviation; do not edit DEPLOY.md to match a check you did not see pass.',
     ] },
 ]
+// args.tasks lets the same workflow run another plan: [{title, refs, race, hazards}] in task order.
+const TASKS = Array.isArray(A.tasks) ? [null, ...A.tasks.map(t => ({ title: t.title, refs: t.refs || '', race: !!t.race, hazards: Array.isArray(t.hazards) ? t.hazards : [] }))] : CORE_TASKS
+const NTASKS = TASKS.length - 1
+if (END > NTASKS) throw new Error(`endTask ${END} exceeds ${NTASKS} tasks`)
 
 // ---------------------------------------------------------------- shared prompt text
 const GROUPS = Array.isArray(A.parallelGroups) ? A.parallelGroups : [[18, 19]] // tasks that may run side by side in their own worktrees, merged afterwards
@@ -578,11 +582,12 @@ if (halted.length) {
 }
 
 if (!FINAL) {
-  log(`Tasks ${START}..${END} passed; branch review skipped (finalReview=false or endTask<20)`)
+  log(`Tasks ${START}..${END} passed; branch review skipped (finalReview=false or endTask<${NTASKS})`)
   return { status: 'tasks_passed', runStamp: STAMP, completed: results, deferredMinors }
 }
 
 // ---------------------------------------------------------------- Branch review (parallel lenses; barrier is needed: the fixer sees all findings at once to dedupe)
+const LENS_EXTRA = (A.lensFocus && typeof A.lensFocus === 'object') ? A.lensFocus : {} // {spec, security, tests}: extra focus text per lens for another plan
 const LENSES = [
   { key: 'spec', title: 'Spec conformance',
     focus: `Conformance of the whole branch to ${PROTO} (all of sections 1-3, 5-9, 11-12, 13.1, 13.2, 13.6, 13.7, 15, 16) and docs/protocol/envelope.schema.json: endpoints and methods, status codes, reason codes and details fields, defaults and caps, the delivery state machine and receipts, loop control, history_access, presence staleness, push headers and retry rules. Also check each task's Interfaces block in ${PLAN} against the code, and cross-task seams (hooks left nil, testhub.NewPeer, CanSeeBlob, OnIdle) are actually wired. Do not run the test suite (another lens does); read code and use go doc.` },
@@ -601,7 +606,7 @@ ${RULES}
 Scope: \`git -C ${WT} diff ${BASE_REF}...HEAD\` (the full core-hub branch), plus the plan ${PLAN} and ${PROTO}.
 
 FOCUS
-${L.focus}
+${L.focus}${LENS_EXTRA[L.key] ? `\n\nADDITIONAL FOCUS FOR THIS PLAN:\n${LENS_EXTRA[L.key]}` : ''}
 
 SEVERITY: blocker = broken behaviour, failing or flaky test, or a broken security invariant. major = spec deviation, missing authz, unpinned Review Focus item. minor = clarity, naming, docs. Report only what you can evidence; cite file and line.
 
@@ -669,7 +674,7 @@ Run each check yourself and record it in checks:
 5. \`CGO_ENABLED=0 build2 go build -p 2 -o bin/ ./cmd/...\` then \`readelf -n bin/vecnet-hub | grep -c 'x86 ISA needed'\` prints 0
 6. \`just validate-protocol\` (if python jsonschema is missing, mark ok only when the schema-drift diff part passed, and say so)
 7. \`git status --porcelain\` is empty apart from gitignored files
-8. Every task 1-20 has a Plan-Task commit: \`git log --format=%B ${BASE_REF}..HEAD | grep -c '^Plan-Task: '\` and list any missing number.
+8. Every task 1-${NTASKS} has a Plan-Task commit: \`git log --format=%B ${BASE_REF}..HEAD | grep -c '^Plan-Task: '\` and list any missing number.
 Also read the diff of commits with trailer "Plan-Task: review" and list in fix_diff_concerns anything that weakens a test, removes an assertion, or loosens a security check.
 
 pass = every check ok and fix_diff_concerns empty.
