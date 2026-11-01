@@ -72,7 +72,20 @@ func HashSecret(plain string) string {
 }
 
 // Resolver turns bearers into Callers and manages credentials.
-type Resolver struct{ DB *store.DB }
+type Resolver struct {
+	DB *store.DB
+	// Now is the clock for enrolment-token expiry and credential
+	// timestamps; nil means time.Now. The hub wires its own clock, so a
+	// test's fake clock drives token expiry.
+	Now func() time.Time
+}
+
+func (r *Resolver) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
 
 // querier is the subset of *sql.DB / *sql.Tx the helpers need.
 type querier interface {
@@ -150,7 +163,7 @@ func (r *Resolver) IssueEnrolToken(ctx context.Context, tx *sql.Tx, peerID strin
 	plain, hash := NewSecret("enrol")
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO enrol_tokens(token_hash, peer_id, expires_at) VALUES (?, ?, ?)`,
-		hash, peerID, envelope.FormatTime(time.Now().Add(ttl))); err != nil {
+		hash, peerID, envelope.FormatTime(r.now().Add(ttl))); err != nil {
 		return "", fmt.Errorf("auth: issue enrol token: %w", err)
 	}
 	return plain, nil
@@ -181,7 +194,7 @@ func (r *Resolver) Enrol(ctx context.Context, token string) (peerID, secret stri
 			return ErrUnauthenticated
 		}
 		exp, err := envelope.ParseTime(expires)
-		if err != nil || !time.Now().Before(exp) {
+		if err != nil || !r.now().Before(exp) {
 			return ErrUnauthenticated
 		}
 		var disabled int
@@ -192,7 +205,7 @@ func (r *Resolver) Enrol(ctx context.Context, token string) (peerID, secret stri
 		if err != nil {
 			return fmt.Errorf("auth: enrol peer: %w", err)
 		}
-		now := envelope.FormatTime(time.Now())
+		now := envelope.FormatTime(r.now())
 		res, err := tx.ExecContext(ctx,
 			`UPDATE enrol_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL`, now, hash)
 		if err != nil {
@@ -234,7 +247,7 @@ func (r *Resolver) Rotate(ctx context.Context, kind, subjectID string) (secret s
 		if err != nil {
 			return fmt.Errorf("auth: rotate: %w", err)
 		}
-		now := envelope.FormatTime(time.Now())
+		now := envelope.FormatTime(r.now())
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE credentials SET revoked_at = ? WHERE kind = ? AND subject_id = ? AND revoked_at IS NULL`,
 			now, kind, subjectID); err != nil {

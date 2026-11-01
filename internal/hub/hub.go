@@ -110,7 +110,7 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 		`UPDATE peers SET reachability = 'reachable', reach_via = 'call' WHERE reachability = 'connected'`); err != nil {
 		return nil, fmt.Errorf("hub: reset reachability: %w", err)
 	}
-	h := &Hub{DB: db, Log: log, Blobs: blobs, Auth: &auth.Resolver{DB: db}, Cfg: cfg, Now: now,
+	h := &Hub{DB: db, Log: log, Blobs: blobs, Auth: &auth.Resolver{DB: db, Now: now}, Cfg: cfg, Now: now,
 		streams: map[string]int{}, notifySem: make(chan struct{}, MaxNotifyInFlight)}
 	h.IdleHook = h.OnIdle // release held wake_idle deliveries (PROTOCOL §5.2)
 	return h, nil

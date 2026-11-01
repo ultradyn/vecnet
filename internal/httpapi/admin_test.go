@@ -549,3 +549,18 @@ func TestOperatorKindReserved(t *testing.T) {
 	}
 	adminAddPeer(t, env, map[string]any{"kind": "operator", "name": "op2", "principal_id": opPrn})
 }
+
+// TestEnrolTokenExpiresOnHubClock: the one-time enrolment token expires 24 h
+// after issue on the hub's clock (PROTOCOL §12), so the fake clock drives it.
+func TestEnrolTokenExpiresOnHubClock(t *testing.T) {
+	env := testhub.Start(t)
+	ok := adminAddPeer(t, env, map[string]any{"kind": "session", "name": "fresh"})
+	late := adminAddPeer(t, env, map[string]any{"kind": "session", "name": "late"})
+	env.Now.Advance(23 * time.Hour)
+	enrol(t, env, ok.EnrolToken)
+	env.Now.Advance(2 * time.Hour)
+	resp, raw := env.Do("", "POST", "/v1/enrol", map[string]string{"token": late.EnrolToken})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("enrol 25 h after issue = %d %s, want 401", resp.StatusCode, raw)
+	}
+}
