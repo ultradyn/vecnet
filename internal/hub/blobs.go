@@ -29,6 +29,12 @@ func (h *Hub) PutBlob(ctx context.Context, c auth.Caller, r io.Reader, mediaType
 	if uploader == "" {
 		return blob.Meta{}, E(http.StatusForbidden, "forbidden", "no peer or principal to charge the upload to")
 	}
+	return h.putBlobAs(ctx, uploader, r, mediaType, ttl)
+}
+
+// putBlobAs is PutBlob for an uploader the caller has already derived: a
+// peer, a principal, or a source (IngestSource).
+func (h *Hub) putBlobAs(ctx context.Context, uploader string, r io.Reader, mediaType string, ttl time.Duration) (blob.Meta, error) {
 	if mediaType != "" {
 		mt, params, err := mime.ParseMediaType(mediaType)
 		if err == nil {

@@ -72,9 +72,19 @@ type target struct {
 	alsoVia []string // further groups
 }
 
-// sender is the resolved originating peer.
+// sender is the resolved originating actor: a peer, or for a source send
+// its src_ id with prn "" and kind "source". Authority must key on
+// actor.src, never on this kind: peers.kind accepts "source" too.
 type sender struct {
 	peer, prn, kind string
+}
+
+// actor is who a send runs as. Exactly one field is set. A credential is
+// resolved to its peer inside the send transaction; a source is its own
+// sender, joins no thread and answers to its own limits (PROTOCOL §10).
+type actor struct {
+	caller *auth.Caller
+	src    *sourceActor
 }
 
 // Send runs the send pipeline of PROTOCOL §2.2 for caller c over the raw
@@ -111,7 +121,15 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 	if err != nil {
 		return nil, false, err
 	}
+	return h.sendAs(ctx, actor{caller: &c}, ingress, req, bodySHA)
+}
 
+// sendAs runs the transactional send of req for act and, after commit,
+// wakes the recipients' log readers and fires the operator notification
+// webhooks. Send has validated req; IngestSource builds it. bodySHA keys the
+// idempotency check of a credential; a source dedupes on its provider
+// delivery id instead and passes "".
+func (h *Hub) sendAs(ctx context.Context, act actor, ingress string, req *envelope.SendRequest, bodySHA string) (resp *SendResponse, replayed bool, err error) {
 	var notify []string
 	var cut *APIError
 	// BEGIN IMMEDIATE (store DSN) serialises the idempotency lookup and
@@ -124,7 +142,7 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 		notify, cut = nil, nil
 		err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
 			var e error
-			resp, replayed, notify, e = h.sendTx(ctx, tx, c, req, bodySHA, ingress)
+			resp, replayed, notify, e = h.sendTx(ctx, tx, act, req, bodySHA, ingress)
 			var ce *cutError
 			if errors.As(e, &ce) {
 				// Commit the cut's counter, audit row and events; the send
@@ -154,7 +172,7 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 	if len(notify) > 0 {
 		h.Log.Notify(notify...)
 	}
-	if req.As != "" && req.As != c.PeerID {
+	if act.caller != nil && req.As != "" && req.As != act.caller.PeerID {
 		// The send was authorised for req.As: a principal acting for a peer
 		// is an inbound call by that peer (PROTOCOL §8, §13.6).
 		h.TouchReachability(ctx, req.As, "reachable")
@@ -185,31 +203,42 @@ func isIdempotencyConflict(err error) bool {
 	return strings.Contains(err.Error(), "UNIQUE constraint failed: idempotency.")
 }
 
-// sendTx is the transactional body of Send.
-func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelope.SendRequest, bodySHA, ingress string) (*SendResponse, bool, []string, error) {
+// sendTx is the transactional body of sendAs.
+func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.SendRequest, bodySHA, ingress string) (*SendResponse, bool, []string, error) {
 	nowT := h.Now()
 	now := envelope.FormatTime(nowT)
 
-	snd, err := resolveSender(ctx, tx, c, req.As)
-	if err != nil {
-		return nil, false, nil, err
-	}
-
-	// Idempotency (PROTOCOL §2.2, R03).
-	if prev, ok, err := h.idempotencyLookup(ctx, tx, snd.peer, req.IdempotencyKey, bodySHA, nowT); err != nil || ok {
-		return prev, ok, nil, err
-	}
-
-	// Per-peer rate limits (PROTOCOL §16.2), before anything is written.
-	if apiErr, err := h.checkRate(ctx, tx, snd.peer, req.ThreadID == nil, nowT); err != nil {
-		return nil, false, nil, err
-	} else if apiErr != nil {
-		detail := map[string]any{"reason": apiErr.Details["limit"], "retry_after_seconds": apiErr.Details["retry_after_seconds"]}
-		if err := h.countCut(ctx, tx, CounterRateLimited, snd.peer, []string{snd.peer}, detail); err != nil {
+	var snd sender
+	var c auth.Caller // zero for a source: it reaches no job_status check
+	if act.src != nil {
+		var prev *SendResponse
+		var err error
+		if snd, req, prev, err = h.sourceSendStart(ctx, tx, act.src, req, nowT); err != nil || prev != nil {
+			return prev, prev != nil, nil, err
+		}
+	} else {
+		c = *act.caller
+		var err error
+		if snd, err = resolveSender(ctx, tx, c, req.As); err != nil {
 			return nil, false, nil, err
 		}
-		return nil, false, nil, &cutError{apiErr}
+
+		// Idempotency (PROTOCOL §2.2, R03).
+		if prev, ok, err := h.idempotencyLookup(ctx, tx, snd.peer, req.IdempotencyKey, bodySHA, nowT); err != nil || ok {
+			return prev, ok, nil, err
+		}
+
+		// Per-peer rate limits (PROTOCOL §16.2), before anything is written.
+		if apiErr, err := h.checkRate(ctx, tx, snd.peer, req.ThreadID == nil, nowT); err != nil {
+			return nil, false, nil, err
+		} else if apiErr != nil {
+			if err := h.countRateCut(ctx, tx, snd.peer, apiErr); err != nil {
+				return nil, false, nil, err
+			}
+			return nil, false, nil, &cutError{apiErr}
+		}
 	}
+	var err error
 
 	// Thread: load an existing one, or prepare a new one.
 	var thr *threadRow
@@ -217,7 +246,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 		if thr, err = loadThread(ctx, tx, *req.ThreadID); err != nil {
 			return nil, false, nil, err
 		}
-		if !thr.isParticipant[snd.peer] && snd.kind != "operator" {
+		if act.src == nil && !thr.isParticipant[snd.peer] && snd.kind != "operator" {
 			e := E(http.StatusForbidden, "not_participant", "the sender is not a participant of this thread")
 			e.Details["thread_id"] = thr.ID
 			return nil, false, nil, e
@@ -276,8 +305,8 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 		}
 		thr.isNew = true
 	}
-	if !thr.isParticipant[snd.peer] {
-		joiners = append(joiners, snd.peer)
+	if act.src == nil && !thr.isParticipant[snd.peer] {
+		joiners = append(joiners, snd.peer) // a source is never a participant (§10)
 		thr.isParticipant[snd.peer] = true
 	}
 	for _, t := range targets {
@@ -302,7 +331,9 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 	// message (PROTOCOL §6): omitting in_reply_to must not reset depth,
 	// expires_at or sender_chain, or two bots could loop forever by
 	// leaving it out. Only a new thread starts fresh; the operator resets
-	// depth and expiry for its own subtree (§16.1, buildLoop).
+	// depth and expiry for its own subtree (§16.1, buildLoop); and every
+	// event of a source starts a loop of its own (§10), whatever came before
+	// it in the issue's thread.
 	var parent *envelope.Message
 	if req.InReplyTo != nil {
 		m, mThr, found, err := loadMessage(ctx, tx, *req.InReplyTo)
@@ -323,7 +354,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 			return nil, false, nil, e
 		}
 		parent = m
-	} else if !thr.isNew {
+	} else if !thr.isNew && act.src == nil {
 		if parent, err = latestMessage(ctx, tx, thr.ID); err != nil {
 			return nil, false, nil, err
 		}
@@ -389,8 +420,8 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 		ApprovalRequest:  req.ApprovalRequest,
 		ApprovalResponse: req.ApprovalResponse,
 	}
-	if ingress == "connector" {
-		msg.Origin = req.Origin // honoured only for connectors (§2.2 step 8)
+	if ingress == "connector" || act.src != nil {
+		msg.Origin = req.Origin // honoured only for connectors (§2.2 step 8); a source's is hub-built (§10)
 	}
 	if effect.jobRequest {
 		// Every Delivery carries the hub-set job id (§2.2 Response, R04).
@@ -473,7 +504,11 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 	if err != nil {
 		return nil, false, nil, fmt.Errorf("hub: encode response: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
+	if act.src != nil {
+		if err := recordSourceSend(ctx, tx, act.src, thr, msg.MessageID, now); err != nil {
+			return nil, false, nil, err
+		}
+	} else if _, err := tx.ExecContext(ctx,
 		`INSERT INTO idempotency(sender, key, body_sha256, response, created_at) VALUES (?, ?, ?, ?, ?)`,
 		snd.peer, req.IdempotencyKey, bodySHA, string(respJSON), now); err != nil {
 		return nil, false, nil, fmt.Errorf("hub: store idempotency: %w", err)
@@ -791,10 +826,10 @@ func routeFor(ctx context.Context, tx *sql.Tx, peer string) (any, error) {
 }
 
 // checkRecipientNames rejects a recipient string that is not a vecnet id
-// with 422 name_not_an_address (PROTOCOL §2.2 step 2, §14.4). It runs before
-// schema validation, which would otherwise report the same string as a
-// pattern violation (400 invalid_body). Anything it cannot read is left to
-// the schema.
+// with 422 name_not_an_address (PROTOCOL §2.2 step 2, §14.4), and a source id
+// with 404 unknown_recipient (§10). It runs before schema validation, which
+// would otherwise report the same strings as pattern violations (400
+// invalid_body). Anything it cannot read is left to the schema.
 func checkRecipientNames(raw []byte) error {
 	var top map[string]json.RawMessage
 	if json.Unmarshal(raw, &top) != nil {
@@ -809,11 +844,15 @@ func checkRecipientNames(raw []byte) error {
 		if json.Unmarshal(r, &s) != nil {
 			continue
 		}
-		if _, _, err := ids.Parse(s); err != nil {
+		prefix, _, err := ids.Parse(s)
+		if err != nil {
 			e := E(http.StatusUnprocessableEntity, "name_not_an_address",
 				"recipients are peer_, team_ or grp_ ids; a display name is never an address")
 			e.Details["path"] = fmt.Sprintf("/recipients/%d", i)
 			return e
+		}
+		if prefix == ids.Src {
+			return unknownRecipient(s) // sources cannot receive messages (§10)
 		}
 	}
 	return nil

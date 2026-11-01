@@ -1,0 +1,72 @@
+{
+  "action": "created",
+  "issue": {
+    "url": "https://api.github.com/repos/o/r/issues/196",
+    "repository_url": "https://api.github.com/repos/o/r",
+    "html_url": "https://github.com/o/r/issues/196",
+    "id": 2914003311,
+    "node_id": "I_kwDOLq8xNc6tsFxv",
+    "number": 196,
+    "title": "radio listen does not finalize on 'over'",
+    "user": {
+      "login": "XertroV",
+      "id": 1331264,
+      "type": "User",
+      "site_admin": false
+    },
+    "labels": [
+      {
+        "id": 6817240013,
+        "name": "bug",
+        "color": "d73a4a",
+        "default": true
+      }
+    ],
+    "state": "open",
+    "locked": false,
+    "comments": 3,
+    "created_at": "2026-10-30T02:11:09Z",
+    "updated_at": "2026-11-01T07:02:10Z",
+    "closed_at": null,
+    "author_association": "OWNER",
+    "body": "Say 'over' during a radio listen and the turn never finalizes."
+  },
+  "comment": {
+    "url": "https://api.github.com/repos/o/r/issues/comments/2450117799",
+    "html_url": "https://github.com/o/r/issues/196#issuecomment-2450117799",
+    "issue_url": "https://api.github.com/repos/o/r/issues/196",
+    "id": 2450117799,
+    "node_id": "IC_kwDOLq8xNc6SCwyn",
+    "user": {
+      "login": "alice",
+      "id": 58214,
+      "type": "User",
+      "site_admin": false
+    },
+    "created_at": "2026-11-01T07:02:10Z",
+    "updated_at": "2026-11-01T07:02:10Z",
+    "author_association": "COLLABORATOR",
+    "body": "Reproduced again today; attaching the transcript."
+  },
+  "repository": {
+    "id": 781204133,
+    "node_id": "R_kgDOLq8xNQ",
+    "name": "r",
+    "full_name": "o/r",
+    "private": false,
+    "owner": {
+      "login": "o",
+      "id": 90211,
+      "type": "Organization",
+      "site_admin": false
+    },
+    "html_url": "https://github.com/o/r",
+    "default_branch": "main"
+  },
+  "sender": {
+    "login": "alice",
+    "id": 58214,
+    "type": "User",
+    "site_admin": false
+  }
+}
