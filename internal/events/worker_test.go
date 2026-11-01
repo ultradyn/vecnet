@@ -1040,3 +1040,22 @@ func TestRunDelivers(t *testing.T) {
 		t.Fatal("StartWorkers did not deliver")
 	}
 }
+
+// A subscription stored while private egress was allowed is never reached by
+// a default Worker on a strict hub.
+func TestDefaultEventsClientRefusesLoopback(t *testing.T) {
+	env := testhub.Start(t)
+	dot, _ := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	subscribe(t, env, cb, dot, nil, time.Time{})
+	env.Hub.Cfg.AllowPrivateEgress = false
+	w := &events.Worker{Hub: env.Hub, Now: env.Now.Now}
+	send(t, env, sender, dot, "one", "wake", "x")
+	if _, err := w.Step(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := cb.Requests(); n != 0 {
+		t.Fatalf("strict hub's default events client reached a loopback callback: %d requests", n)
+	}
+}

@@ -197,3 +197,23 @@ func TestNotifyRoutesFilter(t *testing.T) {
 		t.Fatalf("PUT unknown filter = %d, want 422; %s", resp.StatusCode, raw)
 	}
 }
+
+// A notification route stored while private egress was allowed is never
+// reached by the default notify client on a strict hub.
+func TestDefaultNotifyClientRefusesLoopback(t *testing.T) {
+	env := testhub.Start(t)
+	a, aSec := env.NewPeer("grokbot", "a")
+	env.SetLimits(a, 1000, 1000)
+	rcv := newNotifyReceiver(t)
+	putNotify(t, env, map[string]string{"url": rcv.srv.URL, "filter": "wake"})
+	env.Hub.NotifyRetry = []time.Duration{}
+	env.Hub.Cfg.AllowPrivateEgress = false
+	mustSend(t, env, aSec, map[string]any{
+		"idempotency_key": "n-1", "priority": "wake",
+		"recipients": []string{env.OperatorPeer}, "content": map[string]any{"text": "x"},
+	})
+	env.Hub.WaitNotifies()
+	if n := len(rcv.Hits()); n != 0 {
+		t.Fatalf("strict hub's default notify client reached a loopback receiver: %d hits", n)
+	}
+}

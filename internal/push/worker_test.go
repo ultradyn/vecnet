@@ -996,3 +996,21 @@ func TestWorkerRun(t *testing.T) {
 		t.Fatalf("Run did not return after cancel")
 	}
 }
+
+// A route stored while private egress was allowed (or before the guard) is
+// never reached by a default Worker on a strict hub.
+func TestDefaultWorkerClientRefusesLoopback(t *testing.T) {
+	f := setup(t, always(http.StatusOK))
+	f.env.Hub.Cfg.AllowPrivateEgress = false
+	w := &push.Worker{Hub: f.env.Hub, Now: f.env.Now.Now}
+	dly := f.send(f.aSec, f.msg("wake")).Deliveries[0].DeliveryID
+	if _, err := w.Step(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.rcv.Hits()); n != 0 {
+		t.Fatalf("strict hub's default push client reached a loopback receiver: %d hits", n)
+	}
+	if r := f.row(dly); r.State != "queued" {
+		t.Fatalf("delivery = %+v, want queued for a retry", r)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/testhub"
@@ -98,5 +99,46 @@ func TestSubscriptionFollowsBinding(t *testing.T) {
 				t.Fatalf("paused = %q, want %q", s.PausedReason, events.PausedUnauthorized)
 			}
 		})
+	}
+}
+
+// Review Focus 3 through a real access token: the subscription pauses when
+// the token expires, nothing is lost, and a refreshed token resumes it.
+func TestRealTokenExpiryPausesSubscription(t *testing.T) {
+	env := testhub.Start(t)
+	b, peer, tok := login(t, env)
+	_, sender := env.NewPeer("session", "sender")
+	cb := testhub.NewCallback(t)
+	id := subscribeDot(t, env, tok.AccessToken, cb)
+	wakeDot(t, env, sender, peer, "live")
+	if n := len(cb.Posts()); n != 1 {
+		t.Fatalf("live: %d posts, want 1", n)
+	}
+
+	env.Now.Advance(2 * time.Hour)
+	wakeDot(t, env, sender, peer, "expired")
+	if n := len(cb.Posts()); n != 1 {
+		t.Fatalf("after the token expired: %d posts, want 1", n)
+	}
+	s, err := events.NewStore(env.Hub).Get(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.PausedReason != events.PausedTokenExpired {
+		t.Fatalf("paused = %q, want %q", s.PausedReason, events.PausedTokenExpired)
+	}
+
+	fresh := b.refresh(tok.RefreshToken)
+	if fresh.status != http.StatusOK {
+		t.Fatalf("refresh: %d %s", fresh.status, fresh.Error)
+	}
+	if got := subscribeDot(t, env, fresh.AccessToken, cb); got != id {
+		t.Fatalf("resubscribe id = %s, want %s", got, id)
+	}
+	if _, err := env.Events.Step(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(cb.Posts()); n != 2 {
+		t.Fatalf("after resubscribing: %d posts, want 2", n)
 	}
 }

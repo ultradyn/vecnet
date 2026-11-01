@@ -1538,3 +1538,38 @@ func TestSealedValuesKeepTheirPurpose(t *testing.T) {
 	resp, page := b.consent(b.cookie.Value, "")
 	wantDeadEnd(t, resp, page, "invalid_request")
 }
+
+var (
+	formTag   = regexp.MustCompile(`<form\b[^>]*>`)
+	buttonTag = regexp.MustCompile(`(?s)<button\b([^>]*)>([^<]*)</button>`)
+)
+
+// The page a browser renders does what the tests' direct POSTs assume.
+func TestConsentPageControls(t *testing.T) {
+	env := testhub.Start(t)
+	b := newBrowser(t, env)
+	resp, page := b.authorize(b.query(verifierA))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("authorize: %d", resp.StatusCode)
+	}
+	if h := resp.Header; h.Get("X-Content-Type-Options") != "nosniff" || h.Get("X-Frame-Options") != "DENY" {
+		t.Errorf("headers: %v", h)
+	}
+	form := formTag.FindString(page)
+	if !strings.Contains(form, `method="post"`) || !strings.Contains(form, `action="/oauth/authorize"`) {
+		t.Errorf("form tag = %q", form)
+	}
+	if !strings.Contains(page, "<strong>chatgpt.com</strong>") {
+		t.Errorf("page does not name the redirect host:\n%s", page)
+	}
+	seen := map[string]string{}
+	for _, m := range buttonTag.FindAllStringSubmatch(page, -1) {
+		seen[strings.TrimSpace(m[2])] = m[1]
+	}
+	if a := seen["Approve"]; !strings.Contains(a, `name="approve"`) || !strings.Contains(a, `value="1"`) {
+		t.Errorf("Approve button = %q", a)
+	}
+	if d, ok := seen["Deny"]; !ok || strings.Contains(d, "approve") || !strings.Contains(d, "formnovalidate") {
+		t.Errorf("Deny button = %q (present %v); it must not submit approve", d, ok)
+	}
+}

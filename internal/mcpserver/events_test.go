@@ -1109,3 +1109,19 @@ func TestSubscribeReportsWorkerTruncation(t *testing.T) {
 		t.Fatalf("second refresh = %+v, want the report once", res)
 	}
 }
+
+// The challenge goes out on the guarded client even if the pre-check lets a
+// URL through (a name that re-resolves between the check and the dial).
+func TestDefaultChallengeClientRefusesLoopback(t *testing.T) {
+	env := testhub.StartWith(t, func(c *hub.Config) { c.AllowPrivateEgress = false })
+	_, secret := env.NewPeer("dot", "d")
+	cb := testhub.NewCallback(t)
+	front := eventsFront(t, env, nil, func(m *mcpserver.Server) { m.Egress.AllowPrivate = true })
+	r := rpc2026(t, front, secret, "events/subscribe", subParams(cb.URL, webhook.NewSecret(), nil))
+	if r.Error == nil || r.Error.Code != mcpserver.ErrCodeCallback {
+		t.Fatalf("challenge on a strict hub = %+v / %s, want -32015", r.Error, r.Result)
+	}
+	if n := cb.Requests(); n != 0 {
+		t.Fatalf("strict hub's default challenge client reached a loopback callback: %d requests", n)
+	}
+}

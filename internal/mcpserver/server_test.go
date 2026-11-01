@@ -569,3 +569,31 @@ func TestUnknownMethod(t *testing.T) {
 		t.Fatalf("legacy unknown method: %d %s", resp.StatusCode, out)
 	}
 }
+
+// A session answers only the credential that minted it, and DELETE is 204.
+func TestSessionBelongsToItsCredential(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "a1")
+	_, bSecret := env.NewPeer("session", "b1")
+	sid := legacySession(t, env, aSecret)
+	headers := map[string]string{
+		"Mcp-Session-Id": sid, "MCP-Protocol-Version": mcpserver.ProtoLegacy,
+		"Accept": "application/json, text/event-stream",
+	}
+	ping := map[string]any{"jsonrpc": "2.0", "id": 2, "method": "ping"}
+	resp, body := do(t, env, call{secret: bSecret, body: ping, headers: headers})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("another credential's session: %d %s, want 404", resp.StatusCode, body)
+	}
+	if e := decodeEnvelope(t, body); e.Error.Code != "session_not_found" {
+		t.Fatalf("code = %q", e.Error.Code)
+	}
+	resp, body = do(t, env, call{method: http.MethodDelete, secret: bSecret, headers: headers})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("DELETE by another credential: %d %s, want 404", resp.StatusCode, body)
+	}
+	resp, body = do(t, env, call{method: http.MethodDelete, secret: aSecret, headers: headers})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE: %d %s, want 204", resp.StatusCode, body)
+	}
+}
