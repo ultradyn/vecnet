@@ -90,5 +90,6 @@ func (s *server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/groups/{id}/members", s.postGroupMembers)
 	mux.HandleFunc("GET /v1/groups", s.getGroups)
 	mux.HandleFunc("POST /v1/enrol", s.postEnrol)
+	mux.Handle("/mcp", newMCP(s.Deps)) // every method; mcpserver answers 405 itself
 	s.adminRoutes(mux)
 }
