@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/egress"
@@ -147,34 +148,56 @@ func TestCheckURL(t *testing.T) {
 	}
 }
 
-// countingListener is a 127.0.0.1 listener that counts accepted
-// connections; it serves nothing.
-func countingListener(t *testing.T) (port string, conns *atomic.Int64) {
+// countingListener is a 127.0.0.1 listener that serves nothing. strays
+// reports how many connections it has taken: it opens a barrier connection
+// of its own and reads the accept order up to that barrier, so every dial
+// that connected first is counted, with no sleep and no race against the
+// accept goroutine.
+func countingListener(t *testing.T) (port string, strays func() int) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	conns = new(atomic.Int64)
+	accepted := make(chan string, 64)
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			conns.Add(1)
+			accepted <- c.RemoteAddr().String()
 			c.Close()
 		}
 	}()
+	strays = func() int {
+		t.Helper()
+		barrier, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatalf("barrier dial: %v", err)
+		}
+		defer barrier.Close()
+		timeout := time.After(5 * time.Second)
+		for n := 0; ; n++ {
+			select {
+			case addr := <-accepted:
+				if addr == barrier.LocalAddr().String() {
+					return n
+				}
+			case <-timeout:
+				t.Fatalf("the listener never accepted the barrier connection (%d before it)", n)
+			}
+		}
+	}
 	_, port, _ = net.SplitHostPort(ln.Addr().String())
-	return port, conns
+	return port, strays
 }
 
 // TestClientRefusesPrivateResolution: a hostname resolving only to
 // private addresses is refused at dial time, before any TCP connection.
 func TestClientRefusesPrivateResolution(t *testing.T) {
-	port, conns := countingListener(t)
+	port, strays := countingListener(t)
 	for _, tc := range []struct {
 		name string
 		ips  []net.IP
@@ -185,32 +208,37 @@ func TestClientRefusesPrivateResolution(t *testing.T) {
 		{"literal loopback", nil, "https://127.0.0.1:" + port + "/hook"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var asked atomic.Int64
-			p := egress.Policy{Resolver: func(ctx context.Context, host string) ([]net.IP, error) {
-				asked.Add(1)
-				if host != "evil.example" {
-					t.Errorf("resolver asked for %q, want evil.example", host)
+			// synctest.Test returns only when every goroutine started inside
+			// it has exited, so a dial launched alongside the refusal has
+			// finished before strays reads the listener.
+			synctest.Test(t, func(t *testing.T) {
+				var asked atomic.Int64
+				p := egress.Policy{Resolver: func(ctx context.Context, host string) ([]net.IP, error) {
+					asked.Add(1)
+					if host != "evil.example" {
+						t.Errorf("resolver asked for %q, want evil.example", host)
+					}
+					return tc.ips, nil
+				}}
+				req, err := http.NewRequest(http.MethodPost, tc.url, strings.NewReader("{}"))
+				if err != nil {
+					t.Fatal(err)
 				}
-				return tc.ips, nil
-			}}
-			req, err := http.NewRequest(http.MethodPost, tc.url, strings.NewReader("{}"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			resp, err := p.Client(5 * time.Second).Do(req)
-			if err == nil {
-				resp.Body.Close()
-				t.Fatalf("Do succeeded with status %d, want ErrPrivateAddress", resp.StatusCode)
-			}
-			if !errors.Is(err, egress.ErrPrivateAddress) {
-				t.Fatalf("Do error = %v, want ErrPrivateAddress", err)
-			}
-			if tc.ips != nil && asked.Load() == 0 {
-				t.Fatalf("the resolver was never asked")
-			}
+				resp, err := p.Client(5 * time.Second).Do(req)
+				if err == nil {
+					resp.Body.Close()
+					t.Fatalf("Do succeeded with status %d, want ErrPrivateAddress", resp.StatusCode)
+				}
+				if !errors.Is(err, egress.ErrPrivateAddress) {
+					t.Fatalf("Do error = %v, want ErrPrivateAddress", err)
+				}
+				if tc.ips != nil && asked.Load() == 0 {
+					t.Fatalf("the resolver was never asked")
+				}
+			})
 		})
 	}
-	if n := conns.Load(); n != 0 {
+	if n := strays(); n != 0 {
 		t.Fatalf("listener on 127.0.0.1 got %d connections, want 0", n)
 	}
 }
