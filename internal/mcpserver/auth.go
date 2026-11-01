@@ -41,7 +41,7 @@ type BearerAuth struct {
 
 // Authenticate resolves "Authorization: Bearer <secret>".
 func (b *BearerAuth) Authenticate(ctx context.Context, r *http.Request) (Principal, error) {
-	c, err := b.Resolver.Resolve(ctx, bearerToken(r))
+	c, err := b.Resolver.Resolve(ctx, BearerToken(r))
 	if err != nil {
 		return Principal{}, err
 	}
@@ -71,8 +71,8 @@ func (c Chain) Authenticate(ctx context.Context, r *http.Request) (Principal, er
 	return Principal{}, auth.ErrUnauthenticated
 }
 
-// bearerToken extracts the token from "Authorization: Bearer <token>".
-func bearerToken(r *http.Request) string {
+// BearerToken extracts the token from "Authorization: Bearer <token>".
+func BearerToken(r *http.Request) string {
 	scheme, tok, ok := strings.Cut(r.Header.Get("Authorization"), " ")
 	if !ok || !strings.EqualFold(scheme, "Bearer") {
 		return ""

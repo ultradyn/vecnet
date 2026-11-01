@@ -53,7 +53,8 @@ func invalidValue(field, msg string) *APIError {
 // participant selects whose threads: "" or "me" is the caller's own peer; a
 // principal credential has no peer of its own and must name one of its
 // peers (422 as_required for "me", 403 forbidden for another principal's
-// peer); the operator may name any peer. A peer credential naming another
+// peer), except an OAuth principal, whose own peer is its bound dot; the
+// operator may name any peer. A peer credential naming another
 // peer lists the caller's threads that peer also participates in. group (a
 // team_ or grp_ id, "" for any) keeps threads whose ThreadSummary.group it
 // is; a non-zero since keeps threads active at or after it. limit ≤ 0 is 50
@@ -149,6 +150,9 @@ func threadViewer(ctx context.Context, tx *sql.Tx, c auth.Caller, participant st
 		}
 		return participant, "", nil
 	case "principal":
+		if me && c.PeerID != "" {
+			return c.PeerID, "", nil // an OAuth principal acts as its bound dot peer
+		}
 		if me {
 			return "", "", E(http.StatusUnprocessableEntity, "as_required",
 				"a principal credential must name one of its peers with participant")

@@ -28,6 +28,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/oauth"
 	"github.com/XertroV/vecnet/internal/push"
 	"github.com/XertroV/vecnet/internal/store"
 )
@@ -162,7 +163,7 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 	closeStop := func() { stopOnce.Do(func() { close(stop) }) }
 	defer closeStop()
 	srv := &http.Server{
-		Handler:           httpapi.New(httpapi.Deps{Hub: h, Kick: worker.Kick, VerifyRoute: worker.Verify, UIDir: devUIDir, Stop: stop}),
+		Handler:           httpapi.New(httpapi.Deps{Hub: h, Kick: worker.Kick, VerifyRoute: worker.Verify, OAuth: oauth.New(h), UIDir: devUIDir, Stop: stop}),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

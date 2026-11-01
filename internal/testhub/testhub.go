@@ -18,18 +18,22 @@ import (
 
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/oauth"
 	"github.com/XertroV/vecnet/internal/push"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
 // Env is one running test hub. Worker is the push worker on the fake clock;
 // it is wired to the handler (Deps.Kick, Deps.VerifyRoute) but runs only
-// when a test calls Worker.Step or StartWorkers.
+// when a test calls Worker.Step or StartWorkers. OAuth is the handler's OAuth
+// server, also on the fake clock; a test may change its fields between
+// requests.
 type Env struct {
 	T              *testing.T
 	URL            string
 	Hub            *hub.Hub
 	Worker         *push.Worker
+	OAuth          *oauth.Server
 	OperatorSecret string
 	OperatorPeer   string
 	Now            *FakeClock
@@ -104,6 +108,8 @@ func StartWith(t *testing.T, cfgFn func(*hub.Config)) *Env {
 	}
 	env.URL, env.Hub = srv.URL, h
 	env.Worker = &push.Worker{Hub: h, Now: clock.Now, Interval: WorkerInterval}
+	env.OAuth = oauth.New(h)
+	env.OAuth.AllowedRedirects = append(env.OAuth.AllowedRedirects, "http://127.0.0.1:*")
 	env.Configure(nil)
 	t.Cleanup(func() {
 		srv.Close()
@@ -122,7 +128,7 @@ func StartWith(t *testing.T, cfgFn func(*hub.Config)) *Env {
 // non-nil) adjusts them, e.g. to shorten Deps.Heartbeat. Requests already in
 // flight keep the old handler; later ones use the new one.
 func (e *Env) Configure(f func(*httpapi.Deps)) {
-	d := httpapi.Deps{Hub: e.Hub, Kick: e.Worker.Kick, VerifyRoute: e.Worker.Verify}
+	d := httpapi.Deps{Hub: e.Hub, Kick: e.Worker.Kick, VerifyRoute: e.Worker.Verify, OAuth: e.OAuth}
 	if f != nil {
 		f(&d)
 	}

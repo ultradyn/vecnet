@@ -17,6 +17,7 @@ package egress
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -62,6 +63,9 @@ type Policy struct {
 	// Resolver looks up a host name's addresses; nil means
 	// net.DefaultResolver.LookupIP(ctx, "ip", host).
 	Resolver func(ctx context.Context, host string) ([]net.IP, error)
+	// RootCAs replaces the system roots in Client, for a test talking TLS to
+	// an httptest server; nil means the system roots.
+	RootCAs *x509.CertPool
 }
 
 // blocked are the non-public ranges netip's predicates do not already
@@ -344,7 +348,7 @@ func (p Policy) Client(timeout time.Duration) *http.Client {
 		Proxy:                  nil, // a proxy would dial on our behalf, unpinned
 		DialContext:            p.dialContext(d),
 		ForceAttemptHTTP2:      true,
-		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: p.RootCAs},
 		TLSHandshakeTimeout:    10 * time.Second,
 		ResponseHeaderTimeout:  timeout,
 		ExpectContinueTimeout:  time.Second,

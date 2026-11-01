@@ -648,7 +648,7 @@ func resolveSender(ctx context.Context, tx *sql.Tx, c auth.Caller, as string) (s
 	case "principal", "operator":
 		peer = as
 		if peer == "" {
-			peer = c.PeerID // the operator's own peer; "" for a principal
+			peer = c.PeerID // the operator's or an OAuth principal's peer; else ""
 		}
 		if peer == "" {
 			return sender{}, E(http.StatusUnprocessableEntity, "as_required", "a principal credential must name the sending peer with as")
