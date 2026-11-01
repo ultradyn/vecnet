@@ -252,25 +252,22 @@ func (h *Hub) ConsumeDotLinkTx(ctx context.Context, tx *sql.Tx, code string) (st
 	return peerID, nil
 }
 
-// BindDotPrincipalTx makes the ChatGPT principal the owner of dot peer
-// peerID, inside tx, on the authority of the operator's link code. prnID ""
-// creates a principal named "dot:" + the peer's name; otherwise peerID moves
-// back under prnID if the operator has moved it since. It returns the
-// principal. After commit, wake readers with Log.Notify(peerID, prnID).
-func (h *Hub) BindDotPrincipalTx(ctx context.Context, tx *sql.Tx, peerID, prnID string) (string, error) {
-	if prnID == "" {
-		var name string
-		err := tx.QueryRowContext(ctx, `SELECT name FROM peers WHERE peer_id = ?`, peerID).Scan(&name)
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", unknownPeer(peerID)
-		}
-		if err != nil {
-			return "", fmt.Errorf("hub: find peer: %w", err)
-		}
-		prnID = ids.New(ids.Prn)
-		if err := insertPrincipal(ctx, tx, prnID, "dot:"+name, h.nowStr()); err != nil {
-			return "", err
-		}
+// BindDotPrincipalTx moves dot peer peerID under a new principal named "dot:"
+// + the peer's name, inside tx, on the authority of the operator's link code
+// (PROTOCOL §2.12, §4.5). It returns the principal. After commit, wake readers
+// with Log.Notify(peerID, prnID).
+func (h *Hub) BindDotPrincipalTx(ctx context.Context, tx *sql.Tx, peerID string) (string, error) {
+	var name string
+	err := tx.QueryRowContext(ctx, `SELECT name FROM peers WHERE peer_id = ?`, peerID).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", unknownPeer(peerID)
+	}
+	if err != nil {
+		return "", fmt.Errorf("hub: find peer: %w", err)
+	}
+	prnID := ids.New(ids.Prn)
+	if err := insertPrincipal(ctx, tx, prnID, "dot:"+name, h.nowStr()); err != nil {
+		return "", err
 	}
 	if err := h.movePeer(ctx, tx, peerID, prnID, "hub"); err != nil {
 		return "", err

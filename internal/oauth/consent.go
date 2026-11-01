@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
 )
@@ -129,10 +130,15 @@ type principal struct {
 	PrnID, Subject string
 }
 
-// cookiePrincipal resolves the consent cookie to a principal whose peer is
-// still enabled and still its own. Anything else is no principal: the page
-// asks for a link code.
-func (s *Server) cookiePrincipal(ctx context.Context, r *http.Request) (*principal, error) {
+// querier is the store or a transaction.
+type querier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// cookiePrincipal resolves the consent cookie to a principal that is still
+// bound, to a peer still enabled and still its own. Anything else is no
+// principal: the page asks for a link code.
+func (s *Server) cookiePrincipal(ctx context.Context, q querier, r *http.Request) (*principal, error) {
 	c, err := r.Cookie(cookieName)
 	if err != nil {
 		return nil, nil
@@ -146,7 +152,7 @@ func (s *Server) cookiePrincipal(ctx context.Context, r *http.Request) (*princip
 		return nil, nil
 	}
 	p := principal{Subject: sub.Subject}
-	err = s.DB.QueryRowContext(ctx,
+	err = q.QueryRowContext(ctx,
 		`SELECT o.prn_id FROM oauth_principals o JOIN peers p ON p.peer_id = o.peer_id
 		 WHERE o.subject = ? AND p.disabled = 0 AND p.prn_id = o.prn_id`, sub.Subject).Scan(&p.PrnID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -257,7 +263,7 @@ func (s *Server) getAuthorize(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
-	p, err := s.cookiePrincipal(r.Context(), r)
+	p, err := s.cookiePrincipal(r.Context(), s.DB, r)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -269,7 +275,9 @@ func (s *Server) getAuthorize(w http.ResponseWriter, r *http.Request) {
 
 // postAuthorize is the consent form: deny, approve as a returning principal,
 // or spend a link code. A link code, its principal and the authorization code
-// commit together, so a failure leaves the link code unspent.
+// commit together, so a failure leaves the link code unspent. The cookie is
+// read in the same transaction, so a link code committing first leaves its
+// account's cookie unable to mint another code.
 func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil || repeated(r.PostForm) {
 		deadEnd(w, "invalid_request", "The form could not be read.")
@@ -286,21 +294,19 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	p, err := s.cookiePrincipal(ctx, r)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
+	var p *principal
 	var code string
 	var bound string // the peer a link code just bound, to wake its readers
-	err = s.DB.Tx(ctx, func(tx *sql.Tx) error {
+	err := s.DB.Tx(ctx, func(tx *sql.Tx) error {
+		var err error
+		if p, err = s.cookiePrincipal(ctx, tx, r); err != nil {
+			return err
+		}
 		if p == nil {
-			var err error
 			if p, bound, err = s.bindLink(ctx, tx, req.ClientID, r.PostForm.Get("link_code")); err != nil {
 				return err
 			}
 		}
-		var err error
 		code, err = s.mintCode(ctx, tx, req, p.PrnID)
 		return err
 	})
@@ -335,36 +341,55 @@ func (s *Server) retryPage(w http.ResponseWriter, r *http.Request, req authReque
 	}, req.RedirectURI)
 }
 
-// bindLink spends a link code and returns the principal it binds, and the
-// peer: the principal already bound to that peer, so a lost cookie or a second
-// browser stays the same account, or a new one.
+// bindLink spends a link code and binds its peer to a new principal, which it
+// returns with the peer. Nothing about a ChatGPT login reaches the hub, so a
+// code cannot show that its holder is the account already bound to the peer:
+// each code starts a new account and ends the one before it (retirePrincipal).
+// That is also how an operator re-homes a dot or cuts an account off. A
+// returning account never gets here, its cookie answers for it.
 func (s *Server) bindLink(ctx context.Context, tx *sql.Tx, clientID, linkCode string) (*principal, string, error) {
 	peer, err := s.Hub.ConsumeDotLinkTx(ctx, tx, linkCode)
 	if err != nil {
 		return nil, "", err
 	}
-	var p principal
-	err = tx.QueryRowContext(ctx, `SELECT prn_id, subject FROM oauth_principals WHERE peer_id = ?`, peer).
-		Scan(&p.PrnID, &p.Subject)
-	switch {
-	case err == nil:
-		if _, err := s.Hub.BindDotPrincipalTx(ctx, tx, peer, p.PrnID); err != nil {
-			return nil, "", err
-		}
-		return &p, peer, nil
-	case !errors.Is(err, sql.ErrNoRows):
-		return nil, "", fmt.Errorf("oauth: find principal: %w", err)
-	}
-	if p.PrnID, err = s.Hub.BindDotPrincipalTx(ctx, tx, peer, ""); err != nil {
+	if err := s.retirePrincipal(ctx, tx, peer); err != nil {
 		return nil, "", err
 	}
-	p.Subject = "oauth:" + clientID + ":" + randomID("")
+	p := principal{Subject: "oauth:" + clientID + ":" + randomID("")}
+	if p.PrnID, err = s.Hub.BindDotPrincipalTx(ctx, tx, peer); err != nil {
+		return nil, "", err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO oauth_principals(prn_id, subject, peer_id, created_at) VALUES (?, ?, ?, ?)`,
 		p.PrnID, p.Subject, peer, envelope.FormatTime(s.now())); err != nil {
 		return nil, "", fmt.Errorf("oauth: insert principal: %w", err)
 	}
 	return &p, peer, nil
+}
+
+// retirePrincipal ends the grant of the principal bound to peer, if any: its
+// tokens and unspent codes end here, and its row stays, unbound, which is what
+// stops its consent cookie.
+func (s *Server) retirePrincipal(ctx context.Context, tx *sql.Tx, peer string) error {
+	var prn string
+	err := tx.QueryRowContext(ctx, `SELECT prn_id FROM oauth_principals WHERE peer_id = ?`, peer).Scan(&prn)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("oauth: find principal: %w", err)
+	}
+	now := envelope.FormatTime(s.now())
+	for _, step := range []struct{ query, name string }{
+		{`UPDATE oauth_principals SET peer_id = NULL WHERE prn_id = ?2`, "unbind principal"},
+		{`UPDATE oauth_tokens SET revoked_at = ?1 WHERE principal_id = ?2 AND revoked_at IS NULL`, "revoke tokens"},
+		{`UPDATE oauth_codes SET used_at = ?1 WHERE principal_id = ?2 AND used_at IS NULL`, "spend codes"},
+	} {
+		if _, err := tx.ExecContext(ctx, step.query, now, prn); err != nil {
+			return fmt.Errorf("oauth: %s: %w", step.name, err)
+		}
+	}
+	return audit.Record(ctx, tx, "hub", "oauth_principal_retire", []string{peer, prn}, nil)
 }
 
 // mintCode stores a single-use code for req and returns it, once.

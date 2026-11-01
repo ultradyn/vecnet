@@ -55,6 +55,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "a parameter was given twice")
 		return
 	}
+	// resource is optional (RFC 8707 §2): the token is bound to /mcp either way.
 	if res := form.Get("resource"); res != "" && res != s.resource() {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_target", "resource is not this hub's /mcp")
 		return

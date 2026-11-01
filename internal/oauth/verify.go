@@ -16,8 +16,8 @@ import (
 
 // TokenAuth is the resource server: mcpserver.Authenticator for OAuth access
 // tokens on /mcp. Every call checks expiry, revocation, the audience
-// (resource), the scope and the binding (PROTOCOL §4.5): a disabled peer, or
-// one the operator has moved away, ends access at once.
+// (resource), the scope and the binding (PROTOCOL §4.5): a disabled peer, one
+// the operator has moved away, or a later link code ends access at once.
 type TokenAuth struct {
 	S *Server
 }

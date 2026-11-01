@@ -23,14 +23,16 @@ import (
 )
 
 // Limits on client registration, which anyone may attempt. maxClients is the
-// durable bound: past it DCR and new CIMD clients are refused, while clients
-// already stored, and every issued token, keep working.
+// durable bound: at it, clients nothing has used for clientIdleAge give way
+// (storeClient), and with none left DCR and new CIMD clients are refused, while
+// clients already stored, and every issued token, keep working.
 const (
 	maxClients      = 10000
 	maxClientBytes  = 16 << 10 // a registration body or CIMD document
 	maxRedirectURIs = 16
 	maxClientName   = 200
 	cimdTimeout     = 30 * time.Second // the egress total [Global Constraints]
+	clientIdleAge   = time.Hour        // far longer than a consent form lasts
 )
 
 var (
@@ -191,8 +193,29 @@ func randomID(prefix string) string {
 	return prefix + base64.RawURLEncoding.EncodeToString(b[:])
 }
 
+// evictIdleClients deletes DCR and CIMD rows older than clientIdleAge that no
+// code or token names, so filling the table locks nobody out for good: such a
+// client has done nothing, and it can register, or be fetched, again. It
+// returns how many went.
+func (s *Server) evictIdleClients(ctx context.Context, tx *sql.Tx) (int, error) {
+	res, err := tx.ExecContext(ctx,
+		`DELETE FROM oauth_clients WHERE kind IN ('dcr', 'cimd') AND created_at < ?
+		   AND client_id NOT IN (SELECT client_id FROM oauth_codes)
+		   AND client_id NOT IN (SELECT client_id FROM oauth_tokens)`,
+		envelope.FormatTime(s.now().Add(-clientIdleAge)))
+	if err != nil {
+		return 0, fmt.Errorf("oauth: evict clients: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("oauth: evict clients: %w", err)
+	}
+	return int(n), nil
+}
+
 // storeClient writes m, replacing a CIMD row already cached under its id. A
-// new row past maxClients is errTooManyClients.
+// new row at maxClients evicts idle clients, and is errTooManyClients if that
+// makes no room.
 func (s *Server) storeClient(ctx context.Context, kind string, m *registration) error {
 	meta, err := json.Marshal(m)
 	if err != nil {
@@ -211,7 +234,13 @@ func (s *Server) storeClient(ctx context.Context, kind string, m *registration) 
 			return fmt.Errorf("oauth: count clients: %w", err)
 		}
 		if !exists && n >= maxClients {
-			return errTooManyClients
+			gone, err := s.evictIdleClients(ctx, tx)
+			if err != nil {
+				return err
+			}
+			if n-gone >= maxClients {
+				return errTooManyClients
+			}
 		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO oauth_clients(client_id, kind, metadata, redirect_uris, created_at) VALUES (?, ?, ?, ?, ?)

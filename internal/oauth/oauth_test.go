@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/egress"
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/mcpserver"
 	"github.com/XertroV/vecnet/internal/oauth"
 	"github.com/XertroV/vecnet/internal/testhub"
@@ -140,7 +141,7 @@ func (b *browser) query(verifier string) url.Values {
 	return url.Values{
 		"response_type": {"code"}, "client_id": {b.client}, "redirect_uri": {b.redirect},
 		"code_challenge": {challenge(verifier)}, "code_challenge_method": {"S256"},
-		"state": {"st-123"}, "resource": {b.env.URL + "/mcp"}, "scope": {"vecnet"},
+		"state": {"st-123"}, "resource": {b.env.OAuth.Issuer + "/mcp"}, "scope": {"vecnet"},
 	}
 }
 
@@ -687,23 +688,7 @@ func TestReturningPrincipalSkipsLinkCode(t *testing.T) {
 		}
 	}
 
-	// A new link code for the bound peer loads the same principal (a lost
-	// cookie, another browser), and the old cookie expires after 30 days.
-	var prn string
-	if err := env.Hub.DB.QueryRow(`SELECT prn_id FROM oauth_principals`).Scan(&prn); err != nil {
-		t.Fatal(err)
-	}
-	fresh := newBrowser(t, env)
-	if got := fresh.exchange(fresh.code(verifierA, linkCode(t, env, peer)), verifierA); got.status != http.StatusOK {
-		t.Fatalf("relink exchange: %d %s", got.status, got.Error)
-	}
-	var again string
-	if err := env.Hub.DB.QueryRow(`SELECT prn_id FROM peers WHERE peer_id = ?`, peer).Scan(&again); err != nil || again != prn {
-		t.Fatalf("relink moved the peer to %s (%v), want %s", again, err, prn)
-	}
-	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM oauth_principals`).Scan(&principals); err != nil || principals != 1 {
-		t.Fatalf("oauth_principals after relink = %d (%v)", principals, err)
-	}
+	// The cookie lasts 30 days.
 	env.Now.Advance(30*24*time.Hour + time.Minute)
 	if _, page := b.authorize(b.query(verifierA)); !strings.Contains(page, `name="link_code"`) {
 		t.Fatalf("expired cookie still recognised:\n%s", page)
@@ -1206,13 +1191,17 @@ func TestPeerStateEndsAccess(t *testing.T) {
 	}
 	wantLinkCode("moved peer")
 
-	// A fresh link code is the operator binding it back, to the same principal.
+	// A fresh link code binds it again, to a new account (see
+	// TestLinkCodeEndsPreviousAccount): the token from before the move is dead.
 	again := b.exchange(b.code(verifierB, linkCode(t, env, peer)), verifierB)
 	if again.status != http.StatusOK {
 		t.Fatalf("relink exchange: %d %s", again.status, again.Error)
 	}
 	if resp, body := discover(t, env, again.AccessToken); resp.StatusCode != http.StatusOK {
 		t.Fatalf("relinked peer: %d %s", resp.StatusCode, body)
+	}
+	if resp, body := discover(t, env, got.AccessToken); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("token from before the move: %d %s", resp.StatusCode, body)
 	}
 }
 
@@ -1253,4 +1242,299 @@ func TestTokenEndpointRejectsMalformed(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "invalid_request") {
 		t.Fatalf("query params: %d %s", resp.StatusCode, body)
 	}
+}
+
+// Nothing about a ChatGPT login reaches the hub, so a link code cannot tell the
+// account already bound to its peer from another one. It always starts a new
+// account, and the one before it loses everything it held.
+func TestLinkCodeEndsPreviousAccount(t *testing.T) {
+	for name, moved := range map[string]bool{"still bound": false, "operator moved the peer first": true} {
+		t.Run(name, func(t *testing.T) {
+			env := testhub.Start(t)
+			ctx := context.Background()
+			a, peer, old := login(t, env)
+			other, _ := env.NewPeer("session", "other")
+			unspent := a.code(verifierB, "") // approved, not yet exchanged
+			var oldPrn string
+			if err := env.Hub.DB.QueryRow(`SELECT prn_id FROM oauth_principals`).Scan(&oldPrn); err != nil {
+				t.Fatal(err)
+			}
+			if moved {
+				prn, _ := env.NewPrincipal("elsewhere")
+				if err := env.Hub.MovePeer(ctx, peer, prn); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			b := newBrowser(t, env)
+			fresh := b.exchange(b.code(verifierA, linkCode(t, env, peer)), verifierA)
+			if fresh.status != http.StatusOK {
+				t.Fatalf("exchange: %d %s", fresh.status, fresh.Error)
+			}
+
+			if resp, body := discover(t, env, old.AccessToken); resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("old access token: %d %s", resp.StatusCode, body)
+			}
+			wantError(t, a.refresh(old.RefreshToken), "invalid_grant")
+			wantError(t, a.exchange(unspent, verifierB), "invalid_grant")
+			resp, page := a.authorize(a.query(verifierB))
+			if resp.StatusCode != http.StatusOK || !strings.Contains(page, `name="link_code"`) {
+				t.Fatalf("old cookie: %d\n%s", resp.StatusCode, page)
+			}
+			if resp, body := a.consent(sealedRequest(t, page), ""); resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("old cookie: approve without link code: %d %s", resp.StatusCode, body)
+			}
+
+			// The new account is whole, and none of that touched its tokens.
+			if s := senderOf(t, env, sendAs(t, env, fresh.AccessToken, "k1", other)); s != peer {
+				t.Fatalf("sender = %s, want %s", s, peer)
+			}
+			rotated := b.refresh(fresh.RefreshToken)
+			if rotated.status != http.StatusOK {
+				t.Fatalf("new account refresh: %d %s", rotated.status, rotated.Error)
+			}
+			if resp, body := discover(t, env, rotated.AccessToken); resp.StatusCode != http.StatusOK {
+				t.Fatalf("new account: %d %s", resp.StatusCode, body)
+			}
+
+			// One row per account: the old one stays, unbound, and owns nothing.
+			var rows, oldPeers, audited int
+			var newPrn string
+			if err := env.Hub.DB.QueryRow(
+				`SELECT (SELECT count(*) FROM oauth_principals),
+				        (SELECT prn_id FROM oauth_principals WHERE peer_id = ?),
+				        (SELECT count(*) FROM peers WHERE prn_id = ?),
+				        (SELECT count(*) FROM audit WHERE action = 'oauth_principal_retire')`,
+				peer, oldPrn).Scan(&rows, &newPrn, &oldPeers, &audited); err != nil {
+				t.Fatal(err)
+			}
+			if rows != 2 || newPrn == oldPrn || oldPeers != 0 || audited != 1 {
+				t.Fatalf("rows=%d new=%s old=%s oldPeers=%d audited=%d", rows, newPrn, oldPrn, oldPeers, audited)
+			}
+			var owner string
+			if err := env.Hub.DB.QueryRow(`SELECT prn_id FROM peers WHERE peer_id = ?`, peer).Scan(&owner); err != nil || owner != newPrn {
+				t.Fatalf("peer principal = %s (%v), want %s", owner, err, newPrn)
+			}
+		})
+	}
+}
+
+// A token whose row lacks the scope is refused on every call, whatever else
+// about it is good (PROTOCOL §4.5).
+func TestScopeCheckedOnEveryCall(t *testing.T) {
+	env := testhub.Start(t)
+	_, _, got := login(t, env)
+	if resp, body := discover(t, env, got.AccessToken); resp.StatusCode != http.StatusOK {
+		t.Fatalf("discover: %d %s", resp.StatusCode, body)
+	}
+	if _, err := env.Hub.DB.Exec(`UPDATE oauth_tokens SET scope = 'other' WHERE kind = 'access'`); err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := discover(t, env, got.AccessToken); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("token without the scope: %d %s", resp.StatusCode, body)
+	}
+}
+
+// resource is optional at both endpoints (RFC 8707 §2): a request without one
+// gets a token bound to /mcp just the same.
+func TestResourceOptional(t *testing.T) {
+	env := testhub.Start(t)
+	b := newBrowser(t, env)
+	peer := newDot(t, env, "no-resource")
+	q := b.query(verifierA)
+	q.Del("resource")
+	resp, page := b.authorize(q)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("authorize: %d %s", resp.StatusCode, page)
+	}
+	resp, body := b.consent(sealedRequest(t, page), linkCode(t, env, peer))
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("consent: %d %s", resp.StatusCode, body)
+	}
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := token(t, env, url.Values{
+		"grant_type": {"authorization_code"}, "code": {loc.Query().Get("code")}, "redirect_uri": {b.redirect},
+		"client_id": {b.client}, "code_verifier": {verifierA},
+	})
+	if got.status != http.StatusOK {
+		t.Fatalf("exchange: %d %s", got.status, got.Error)
+	}
+	again := token(t, env, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {got.RefreshToken}})
+	if again.status != http.StatusOK {
+		t.Fatalf("refresh: %d %s", again.status, again.Error)
+	}
+	if resp, body := discover(t, env, again.AccessToken); resp.StatusCode != http.StatusOK {
+		t.Fatalf("discover: %d %s", resp.StatusCode, body)
+	}
+	var unbound int
+	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM oauth_tokens WHERE resource != ?`, env.OAuth.Issuer+"/mcp").Scan(&unbound); err != nil || unbound != 0 {
+		t.Fatalf("tokens for another resource: %d (%v)", unbound, err)
+	}
+}
+
+// wantDeadEnd requires the 400 page, naming code, and no redirect anywhere.
+func wantDeadEnd(t *testing.T, resp *http.Response, page, code string) {
+	t.Helper()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(page, code) {
+		t.Fatalf("%d, want a 400 page naming %s:\n%s", resp.StatusCode, code, page)
+	}
+	if resp.Header.Get("Location") != "" {
+		t.Fatalf("redirected: %v", resp.Header)
+	}
+}
+
+// A CIMD document is attacker-written: what it says of itself is not enough.
+func TestCIMDRefusals(t *testing.T) {
+	env := testhub.Start(t)
+	const evil = "https://evil.example/cb"
+	listing := func(extra, redirect string) string {
+		return `{"client_id":"{self}",` + extra + `"redirect_uris":["` + redirect + `"]}`
+	}
+	srv, hits := cimdServer(t, env, map[string]string{
+		"/evil.json":      listing(``, evil),
+		"/m2m.json":       listing(`"grant_types":["client_credentials"],`, chatgptRedirect),
+		"/big.json":       listing(``, chatgptRedirect) + strings.Repeat(" ", 17<<10),
+		"/":               listing(``, chatgptRedirect),
+		"/a/../good.json": listing(``, chatgptRedirect),
+		"/./good.json":    listing(``, chatgptRedirect),
+	})
+
+	// Listed by the document, and still not an address the hub redirects to.
+	x := &browser{t: t, env: env, client: srv.URL + "/evil.json", redirect: evil}
+	resp, page := x.authorize(x.query(verifierA))
+	wantDeadEnd(t, resp, page, "invalid_request")
+
+	for _, path := range []string{"/m2m.json", "/big.json"} {
+		x := &browser{t: t, env: env, client: srv.URL + path, redirect: chatgptRedirect}
+		resp, page := x.authorize(x.query(verifierA))
+		wantDeadEnd(t, resp, page, "invalid_request")
+	}
+
+	// A path that is not plain is refused before anything is fetched.
+	before := hits.Load()
+	for _, id := range []string{srv.URL, srv.URL + "/", srv.URL + "/a/../good.json", srv.URL + "/./good.json"} {
+		x := &browser{t: t, env: env, client: id, redirect: chatgptRedirect}
+		resp, page := x.authorize(x.query(verifierA))
+		wantDeadEnd(t, resp, page, "invalid_request")
+	}
+	if hits.Load() != before {
+		t.Fatalf("fetched %d unplain client ids", hits.Load()-before)
+	}
+}
+
+// fillClients stores n DCR rows nothing has ever used, made now.
+func fillClients(t *testing.T, env *testhub.Env, n int) {
+	t.Helper()
+	if _, err := env.Hub.DB.Exec(
+		`WITH RECURSIVE i(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM i WHERE n < ?)
+		 INSERT INTO oauth_clients(client_id, kind, metadata, redirect_uris, created_at)
+		 SELECT 'dcr_fill_' || n, 'dcr', '{}', '[]', ? FROM i`,
+		n, envelope.FormatTime(env.Now.Now())); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func registerStatus(t *testing.T, env *testhub.Env) int {
+	t.Helper()
+	resp, _ := env.Do("", "POST", "/oauth/register", map[string]any{"redirect_uris": []string{chatgptRedirect}})
+	return resp.StatusCode
+}
+
+// Anyone may register, so the cap can be reached by anyone. It refuses new
+// clients while the rows are young, then gives up the ones nothing ever used.
+func TestClientCap(t *testing.T) {
+	env := testhub.Start(t)
+	a, _, got := login(t, env)
+	pending := newBrowser(t, env)
+	pending.code(verifierA, linkCode(t, env, newDot(t, env, "pending-dot")))
+	srv, _ := cimdServer(t, env, map[string]string{
+		"/c.json": `{"client_id":"{self}","redirect_uris":["` + chatgptRedirect + `"]}`,
+	})
+	if _, err := env.Hub.DB.Exec(
+		`INSERT INTO oauth_clients(client_id, kind, metadata, redirect_uris, created_at) VALUES ('static_x', 'static', '{}', '[]', ?)`,
+		envelope.FormatTime(env.Now.Now())); err != nil {
+		t.Fatal(err)
+	}
+	var have int
+	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM oauth_clients`).Scan(&have); err != nil {
+		t.Fatal(err)
+	}
+	fillClients(t, env, oauth.MaxClients-have)
+
+	if code := registerStatus(t, env); code != http.StatusServiceUnavailable {
+		t.Fatalf("register at the cap: %d", code)
+	}
+	x := &browser{t: t, env: env, client: srv.URL + "/c.json", redirect: chatgptRedirect}
+	resp, page := x.authorize(x.query(verifierA))
+	wantDeadEnd(t, resp, page, "temporarily_unavailable")
+
+	// Clients already stored, and their tokens, carry on.
+	if resp, page := a.authorize(a.query(verifierB)); resp.StatusCode != http.StatusOK {
+		t.Fatalf("stored client at the cap: %d\n%s", resp.StatusCode, page)
+	}
+	if resp, body := discover(t, env, got.AccessToken); resp.StatusCode != http.StatusOK {
+		t.Fatalf("token at the cap: %d %s", resp.StatusCode, body)
+	}
+
+	// A client with a code or a token keeps its row however old it gets.
+	env.Now.Advance(oauth.ClientIdleAge + time.Minute)
+	if _, err := env.Hub.DB.Exec(`DELETE FROM oauth_codes WHERE client_id = ?`, a.client); err != nil { // as mintCode prunes
+		t.Fatal(err)
+	}
+	if code := registerStatus(t, env); code != http.StatusCreated {
+		t.Fatalf("register after the idle age: %d", code)
+	}
+	var idle, used, static int
+	if err := env.Hub.DB.QueryRow(
+		`SELECT (SELECT count(*) FROM oauth_clients WHERE client_id LIKE 'dcr_fill_%'),
+		        (SELECT count(*) FROM oauth_clients WHERE client_id IN (?, ?)),
+		        (SELECT count(*) FROM oauth_clients WHERE client_id = 'static_x')`,
+		a.client, pending.client).Scan(&idle, &used, &static); err != nil {
+		t.Fatal(err)
+	}
+	if idle != 0 || used != 2 || static != 1 {
+		t.Fatalf("after eviction: idle=%d used=%d static=%d", idle, used, static)
+	}
+	if resp, page := x.authorize(x.query(verifierA)); resp.StatusCode != http.StatusOK {
+		t.Fatalf("new CIMD client after eviction: %d\n%s", resp.StatusCode, page)
+	}
+}
+
+// The consent cookie is Secure exactly when the hub is served over https.
+func TestConsentCookieSecure(t *testing.T) {
+	for issuer, want := range map[string]bool{"": false, "https://hub.example": true} {
+		t.Run(fmt.Sprint(want), func(t *testing.T) {
+			env := testhub.Start(t)
+			if issuer != "" {
+				env.OAuth.Issuer = issuer
+			}
+			b := newBrowser(t, env)
+			b.code(verifierA, linkCode(t, env, newDot(t, env, "secure-dot")))
+			if b.cookie == nil || b.cookie.Secure != want || !b.cookie.HttpOnly {
+				t.Fatalf("cookie = %+v, want Secure %v and HttpOnly", b.cookie, want)
+			}
+		})
+	}
+}
+
+// The two kinds of sealed value share a key. The fields of a sealed request
+// line up with a cookie's (its scope falls where the subject goes), and a page
+// hands one to anybody, so only the purpose tells them apart.
+func TestSealedValuesKeepTheirPurpose(t *testing.T) {
+	env := testhub.Start(t)
+	b, _, _ := login(t, env)
+	_, page := b.authorize(b.query(verifierB))
+	sealed := sealedRequest(t, page)
+	if _, err := env.Hub.DB.Exec(`UPDATE oauth_principals SET subject = ?`, oauth.Scope); err != nil {
+		t.Fatal(err)
+	}
+	x := &browser{t: t, env: env, client: b.client, redirect: b.redirect, cookie: &http.Cookie{Name: cookieName, Value: sealed}}
+	if resp, page := x.authorize(x.query(verifierA)); resp.StatusCode != http.StatusOK || !strings.Contains(page, `name="link_code"`) {
+		t.Fatalf("a request used as the cookie: %d\n%s", resp.StatusCode, page)
+	}
+	resp, page := b.consent(b.cookie.Value, "")
+	wantDeadEnd(t, resp, page, "invalid_request")
 }

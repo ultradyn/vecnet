@@ -16,7 +16,8 @@ CREATE TABLE oauth_clients (
 
 -- One row per ChatGPT account. prn_id is a vecnet principal; subject is
 -- "oauth:" + first client_id + ":" + a random stable id issued at first
--- consent; peer_id is the bound dot peer. A peer has one OAuth principal.
+-- consent; peer_id is the bound dot peer. A peer has one OAuth principal: a
+-- link code starts a new row, and NULL marks the one it replaced.
 CREATE TABLE oauth_principals (
 	prn_id     TEXT PRIMARY KEY REFERENCES principals(prn_id),
 	subject    TEXT NOT NULL UNIQUE,
