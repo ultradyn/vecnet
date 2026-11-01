@@ -63,10 +63,17 @@ admin (operator credential):
   principal add --name N
   peer add --kind K --name N [--principal PRN]
   peer move <peer> --principal PRN
+  peer link <peer>                                    prints a dot's 8-character link code
   peer rotate <peer>
   peer scope <peer> [--allow IDS] [--deny IDS]        IDS: comma-separated or repeated
   peer limits <peer> --sends-per-min N --threads-per-hour N
   route add --owner ID --url URL | route verify <route_id>
+  route add --owner ID --kind grokbot --url URL --key-file PATH
+       the crsr_ key is read only from a file, 0600, never from argv
+  source add --kind github --name N --route ID [--events A,B] [--priority P]
+       prints the ingress URL and the secret, once
+  source list
+  subscriptions list | subscriptions resume <id>
   team add --name N [--members IDS]
   dead-letters list | dead-letters retry <dly> | dead-letters discard <dly>
   notify set --url URL --filter F [--url URL --filter F]…
@@ -371,6 +378,10 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdPeer(args)
 	case "route":
 		return a.cmdRoute(args)
+	case "source":
+		return a.cmdSource(args)
+	case "subscriptions":
+		return a.cmdSubscriptions(args)
 	case "team":
 		return a.cmdTeam(args)
 	case "dead-letters":
@@ -1112,6 +1123,8 @@ func (a *app) cmdPeer(args []string) error {
 			return err
 		}
 		return a.ok("moved " + o.pos[1] + " to " + o.str("principal"))
+	case sub == "link" && len(o.pos) == 2:
+		return a.peerLink(o.pos[1])
 	case sub == "rotate" && len(o.pos) == 2:
 		var out map[string]any
 		if err := a.call(http.MethodPost, "/v1/admin/peers/"+pathEscape(o.pos[1])+"/rotate", nil, &out); err != nil {
@@ -1137,18 +1150,22 @@ func (a *app) cmdPeer(args []string) error {
 		return a.ok("limits set for " + o.pos[1])
 	}
 	return usageErr("usage: vecnet peer add --kind K --name N [--principal PRN] | peer move <peer> --principal PRN | " +
-		"peer rotate <peer> | peer scope <peer> [--allow IDS] [--deny IDS] | peer limits <peer> --sends-per-min N --threads-per-hour N")
+		"peer link <peer> | peer rotate <peer> | peer scope <peer> [--allow IDS] [--deny IDS] | peer limits <peer> --sends-per-min N --threads-per-hour N")
 }
 
 func (a *app) cmdRoute(args []string) error {
-	o, err := parseFlags("route", args, map[string]flagKind{"owner": strFlag, "url": strFlag})
+	o, err := parseFlags("route", args, map[string]flagKind{"owner": strFlag, "url": strFlag, "kind": strFlag, "key-file": strFlag})
 	if err != nil {
 		return err
 	}
 	switch {
 	case len(o.pos) == 1 && o.pos[0] == "add" && o.str("owner") != "" && o.str("url") != "":
+		body, err := a.routeAddBody(o)
+		if err != nil {
+			return err
+		}
 		var out map[string]any
-		if err := a.call(http.MethodPost, "/v1/admin/routes", map[string]string{"owner": o.str("owner"), "url": o.str("url")}, &out); err != nil {
+		if err := a.call(http.MethodPost, "/v1/admin/routes", body, &out); err != nil {
 			return err
 		}
 		return a.emitObject(out, "route_id", "whsec")
@@ -1158,7 +1175,8 @@ func (a *app) cmdRoute(args []string) error {
 		}
 		return a.ok("verified " + o.pos[1])
 	}
-	return usageErr("usage: vecnet route add --owner ID --url URL | route verify <route_id>")
+	return usageErr("usage: vecnet route add --owner ID --url URL | " +
+		"route add --owner ID --kind grokbot --url URL --key-file PATH | route verify <route_id>")
 }
 
 func (a *app) cmdTeam(args []string) error {
