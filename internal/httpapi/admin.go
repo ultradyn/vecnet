@@ -32,6 +32,7 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/sources", s.adminListSources)
 	mux.HandleFunc("POST /v1/admin/sources/{id}/disable", s.adminDisableSource)
 	mux.HandleFunc("POST /v1/admin/routes", s.adminAddRoute)
+	mux.HandleFunc("GET /v1/admin/routes", s.adminListRoutes)
 	mux.HandleFunc("POST /v1/admin/routes/{id}/rotate", s.adminRotateRoute)
 	mux.HandleFunc("POST /v1/admin/routes/{id}/verify", s.adminVerifyRoute)
 	mux.HandleFunc("POST /v1/admin/teams", s.adminAddTeam)
@@ -275,10 +276,12 @@ func (s *server) adminDisable(disabled bool) http.HandlerFunc {
 	}
 }
 
-// adminAddRoute is POST /v1/admin/routes {"owner": "peer_…"|"prn_…", "url"}:
-// 201 {"route_id", "whsec"}. The route pushes nothing until verified.
+// adminAddRoute is POST /v1/admin/routes {"owner": "peer_…"|"prn_…", "url",
+// "kind"?, "key"?}. Kind http (the default) is 201 {"route_id", "whsec"} and
+// pushes nothing until verified. Kind grokbot takes the routine's crsr_ key
+// and is 201 {"route_id"}: live at once, and the key is never returned.
 func (s *server) adminAddRoute(w http.ResponseWriter, r *http.Request) {
-	top, err := readObject(r, []string{"owner", "url"}, []string{"owner", "url"})
+	top, err := readObject(r, []string{"owner", "url", "kind", "key"}, []string{"owner", "url"})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -289,6 +292,16 @@ func (s *server) adminAddRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := stringField(top, "url")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	routeKind, err := stringField(top, "kind")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	key, err := stringField(top, "key")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -305,13 +318,46 @@ func (s *server) adminAddRoute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, e)
 		return
 	}
-	id, whsec, err := s.Hub.AddRoute(r.Context(), kind, owner, u)
+	invalid := func(field, msg string) {
+		e := hub.E(http.StatusUnprocessableEntity, "invalid_value", msg)
+		e.Details["field"] = field
+		writeError(w, e)
+	}
+	switch routeKind {
+	case "", hub.RouteKindHTTP:
+		if _, has := top["key"]; has {
+			invalid("key", "only a grokbot route takes a key")
+			return
+		}
+		id, whsec, err := s.Hub.AddRoute(r.Context(), kind, owner, u)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusCreated, map[string]string{"route_id": id, "whsec": whsec})
+	case hub.RouteKindGrokbot:
+		id, err := s.Hub.AddGrokbotRoute(r.Context(), kind, owner, u, key)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		s.kick() // verified at once: queued deliveries may be due now
+		writeJSON(w, http.StatusCreated, map[string]string{"route_id": id})
+	default:
+		invalid("kind", "kind is http or grokbot")
+	}
+}
+
+// adminListRoutes is GET /v1/admin/routes: 200 {"routes": [RouteInfo]}. No
+// key of any kind is returned.
+func (s *server) adminListRoutes(w http.ResponseWriter, r *http.Request) {
+	routes, err := s.Hub.ListRoutes(r.Context())
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusCreated, map[string]string{"route_id": id, "whsec": whsec})
+	writeJSON(w, http.StatusOK, map[string]any{"routes": routes})
 }
 
 // adminRotateRoute is POST /v1/admin/routes/{id}/rotate: 200 {"whsec"}; the

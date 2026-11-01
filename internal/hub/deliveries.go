@@ -34,6 +34,9 @@ const (
 const (
 	CounterDeadLetters   = "dead_letters"
 	CounterPushConflicts = "push_conflicts"
+	// CounterPushAuthFailed counts routine POSTs refused for a dead key or
+	// a disabled routine (PROTOCOL §13.3).
+	CounterPushAuthFailed = "push_auth_failed"
 )
 
 // PushBackoff is the retry delay after attempt failed (PROTOCOL §3.3):
@@ -59,14 +62,15 @@ func PushBackoff(attempt int, retryAfter time.Duration, rnd func() float64) time
 	return base + time.Duration(j*float64(base)/10)
 }
 
-// DueDelivery is one claimed push: the route to push through, its active
-// keys (newest first) and the exact bytes of the Delivery Event, which every
-// attempt resends unchanged (§3.3).
+// DueDelivery is one claimed push: the route to push through (Kind is its
+// routes.kind), its active keys (newest first; none on a grokbot route) and
+// the exact bytes of the Delivery Event, which every attempt resends
+// unchanged (§3.3).
 type DueDelivery struct {
-	DeliveryID, Recipient, ThreadID, RouteID, URL string
-	Keys                                          []string
-	Attempt                                       int    // this attempt's number, 1-based
-	Body                                          []byte // the Delivery JSON (with per-recipient blob_url), as appended to the log
+	DeliveryID, Recipient, ThreadID, RouteID, URL, Kind string
+	Keys                                                []string
+	Attempt                                             int    // this attempt's number, 1-based
+	Body                                                []byte // the Delivery JSON (with per-recipient blob_url), as appended to the log
 }
 
 // ClaimDue claims up to limit deliveries due for a push at now and marks
@@ -85,7 +89,7 @@ func (h *Hub) ClaimDue(ctx context.Context, now time.Time, limit int) ([]DueDeli
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		out = nil
 		rows, err := tx.QueryContext(ctx,
-			`SELECT d.dly_id, d.recipient, d.thr_id, d.route_id, r.url, d.attempt, e.data
+			`SELECT d.dly_id, d.recipient, d.thr_id, d.route_id, r.url, r.kind, d.attempt, e.data
 			 FROM deliveries d
 			 JOIN routes r ON r.route_id = d.route_id
 			 JOIN events e ON e.seq = d.event_seq
@@ -106,7 +110,7 @@ func (h *Hub) ClaimDue(ctx context.Context, now time.Time, limit int) ([]DueDeli
 		for rows.Next() {
 			var d DueDelivery
 			var body string
-			if err := rows.Scan(&d.DeliveryID, &d.Recipient, &d.ThreadID, &d.RouteID, &d.URL, &d.Attempt, &body); err != nil {
+			if err := rows.Scan(&d.DeliveryID, &d.Recipient, &d.ThreadID, &d.RouteID, &d.URL, &d.Kind, &d.Attempt, &body); err != nil {
 				rows.Close()
 				return fmt.Errorf("hub: claim due: %w", err)
 			}
@@ -146,6 +150,20 @@ func (h *Hub) ClaimDue(ctx context.Context, now time.Time, limit int) ([]DueDeli
 	return out, nil
 }
 
+// DeferPush gives back a claim that was not attempted: the delivery is
+// queued again until next with its attempt and attempts_left as they were
+// before ClaimDue. It stays in line, so §3.4 keeps its thread's later
+// deliveries behind it. A delivery that moved on meanwhile is left alone.
+func (h *Hub) DeferPush(ctx context.Context, d DueDelivery, next time.Time) error {
+	if _, err := h.DB.ExecContext(ctx,
+		`UPDATE deliveries SET state = 'queued', attempt = attempt - 1, next_attempt_at = ?, updated_at = ?
+		 WHERE dly_id = ? AND state = 'pushed' AND attempt = ?`,
+		envelope.FormatTime(next), h.nowStr(), d.DeliveryID, d.Attempt); err != nil {
+		return fmt.Errorf("hub: defer push: %w", err)
+	}
+	return nil
+}
+
 // pushOutcome classifies a push result (§3.3).
 type pushOutcome int
 
@@ -154,6 +172,7 @@ const (
 	pushRetry
 	pushConflict
 	pushTerminal
+	pushAuthFailed // grokbot only: terminal failed, alerted (§13.3)
 )
 
 func classifyPush(status int, netErr error) pushOutcome {
@@ -188,7 +207,11 @@ func classifyPush(status int, netErr error) pushOutcome {
 // unreachable. A result for a delivery that is no longer pushed at
 // d.Attempt (acked, expired or re-claimed meanwhile) is ignored.
 func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAfter time.Duration, netErr error, now time.Time) error {
-	outcome := classifyPush(status, netErr)
+	return h.recordPush(ctx, d, classifyPush(status, netErr), status, retryAfter, netErr, now)
+}
+
+// recordPush applies outcome; see PushResult and GrokbotPushResult.
+func (h *Hub) recordPush(ctx context.Context, d DueDelivery, outcome pushOutcome, status int, retryAfter time.Duration, netErr error, now time.Time) error {
 	nowS := envelope.FormatTime(now)
 	var lastStatus any
 	if netErr == nil {
@@ -227,9 +250,12 @@ func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAf
 			return nil // stale: the delivery moved on without this result
 		}
 		applied = true
+		alerts := func(state string) bool {
+			return state == "dead_letter" || outcome == pushConflict || outcome == pushAuthFailed
+		}
 		receipt := func(state, note string) error {
 			if !senderIsPeer {
-				if state == "dead_letter" || outcome == pushConflict {
+				if alerts(state) {
 					// No sender log to append to: the operator still hears of it.
 					r := envelope.Receipt{DeliveryID: d.DeliveryID, MessageID: msgID, ThreadID: thr,
 						State: state, By: "hub", At: nowS, Note: note}
@@ -248,7 +274,7 @@ func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAf
 				return err
 			}
 			notify = sender
-			if state == "dead_letter" || outcome == pushConflict {
+			if alerts(state) {
 				data, err := json.Marshal(r)
 				if err != nil {
 					return fmt.Errorf("hub: encode receipt: %w", err)
@@ -303,6 +329,18 @@ func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAf
 			}
 			return audit.Record(ctx, tx, "hub", "push_conflict", []string{d.DeliveryID, msgID, d.Recipient},
 				map[string]any{"attempt": d.Attempt})
+		case pushAuthFailed:
+			if err := set("failed", left-1, nil); err != nil {
+				return err
+			}
+			if err := receipt("failed", "push_auth_failed: the routine refused its key or is disabled: HTTP "+strconv.Itoa(status)); err != nil {
+				return err
+			}
+			if err := bumpCounter(ctx, tx, CounterPushAuthFailed); err != nil {
+				return err
+			}
+			return audit.Record(ctx, tx, "hub", "push_auth_failed", []string{d.DeliveryID, msgID, d.Recipient},
+				map[string]any{"attempt": d.Attempt, "status": status})
 		default:
 			return deadLetter(left-1, "push rejected: HTTP "+strconv.Itoa(status))
 		}

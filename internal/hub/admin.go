@@ -539,7 +539,7 @@ func (h *Hub) AuditPage(ctx context.Context, limit int, before int64) ([]AuditEn
 }
 
 // AdminCounters are the dashboard counters of GET /v1/admin/counters.
-var AdminCounters = []string{CounterLoopCut, CounterRateLimited, CounterDeadLetters, CounterPushConflicts}
+var AdminCounters = []string{CounterLoopCut, CounterRateLimited, CounterDeadLetters, CounterPushConflicts, CounterPushAuthFailed}
 
 // Counters returns every AdminCounters value (0 when never bumped).
 func (h *Hub) Counters(ctx context.Context) (map[string]int, error) {
