@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1571,5 +1574,124 @@ func TestConsentPageControls(t *testing.T) {
 	}
 	if d, ok := seen["Deny"]; !ok || strings.Contains(d, "approve") || !strings.Contains(d, "formnovalidate") {
 		t.Errorf("Deny button = %q (present %v); it must not submit approve", d, ok)
+	}
+}
+
+// The default https port only, outside the dev override: no DNS, no fetch.
+func TestCIMDPortRule(t *testing.T) {
+	env := testhub.Start(t)
+	var lookups atomic.Int32
+	env.OAuth.Egress = egress.Policy{Resolver: func(context.Context, string) ([]net.IP, error) {
+		lookups.Add(1)
+		return nil, errors.New("no such host")
+	}}
+	x := &browser{t: t, env: env, client: "https://client.example:8443/c.json", redirect: chatgptRedirect}
+	resp, page := x.authorize(x.query(verifierA))
+	wantDeadEnd(t, resp, page, "invalid_request")
+	if n := lookups.Load(); n != 0 {
+		t.Fatalf("resolved a refused port %d times", n)
+	}
+	x = &browser{t: t, env: env, client: "https://client.example:443/c.json", redirect: chatgptRedirect}
+	resp, page = x.authorize(x.query(verifierA))
+	wantDeadEnd(t, resp, page, "invalid_request")
+	if n := lookups.Load(); n != 1 {
+		t.Fatalf("port 443 resolved %d times, want it tried", n)
+	}
+}
+
+// A URL that failed is not fetched again for a while.
+func TestCIMDFailureRemembered(t *testing.T) {
+	env := testhub.Start(t)
+	srv, hits := cimdServer(t, env, map[string]string{})
+	x := &browser{t: t, env: env, client: srv.URL + "/gone.json", redirect: chatgptRedirect}
+	for range 3 {
+		resp, page := x.authorize(x.query(verifierA))
+		wantDeadEnd(t, resp, page, "invalid_request")
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("fetches = %d, want 1", n)
+	}
+	env.Now.Advance(2 * time.Minute)
+	x.authorize(x.query(verifierA))
+	if n := hits.Load(); n != 2 {
+		t.Fatalf("fetches after the wait = %d, want 2", n)
+	}
+}
+
+func TestCIMDFetchesCapped(t *testing.T) {
+	var g oauth.CIMDGate
+	now := time.Now()
+	for i := range oauth.CIMDMaxFetches {
+		if !g.Enter(fmt.Sprint("u", i), now) {
+			t.Fatalf("fetch %d refused", i)
+		}
+	}
+	if g.Enter("over", now) {
+		t.Fatal("a fetch past the cap ran")
+	}
+	g.Leave("u0", true, now)
+	if !g.Enter("over", now) {
+		t.Fatal("a slot freed and the fetch was still refused")
+	}
+}
+
+// A returning principal's cookie approves any client, and the client's name
+// is its own, so the page warns when the client is not the one it approved.
+func TestReturningPrincipalWarnedOfNewClient(t *testing.T) {
+	const warning = "You have not approved this application"
+	env := testhub.Start(t)
+	b, _, _ := login(t, env)
+	if _, page := b.authorize(b.query(verifierB)); strings.Contains(page, warning) {
+		t.Fatalf("warned on the client it approved:\n%s", page)
+	}
+	c := &browser{t: t, env: env, client: register(t, env, chatgptRedirect), redirect: chatgptRedirect, cookie: b.cookie}
+	if _, page := c.authorize(c.query(verifierB)); !strings.Contains(page, warning) {
+		t.Fatalf("no warning for another client:\n%s", page)
+	}
+	n := newBrowser(t, env)
+	if _, page := n.authorize(n.query(verifierB)); strings.Contains(page, warning) {
+		t.Fatalf("warned at a first login:\n%s", page)
+	}
+}
+
+// A guess costs a read, not the store's write lock: it is refused with the same
+// reusable form without opening a transaction, which a held lock would stall.
+func TestLinkGuessTakesNoWriteLock(t *testing.T) {
+	env := testhub.Start(t)
+	b := newBrowser(t, env)
+	_, page := b.authorize(b.query(verifierA))
+	request := sealedRequest(t, page)
+
+	unlock := make(chan struct{})
+	locked := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- env.Hub.DB.Tx(context.Background(), func(*sql.Tx) error {
+			close(locked)
+			<-unlock
+			return nil
+		})
+	}()
+	<-locked
+	defer func() {
+		close(unlock)
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	for _, guess := range []string{"", "short", "ABCDEFGH", "ILO01ILO"} {
+		finished := make(chan int, 1)
+		go func() {
+			resp, _ := b.consent(request, guess)
+			finished <- resp.StatusCode
+		}()
+		select {
+		case status := <-finished:
+			if status != http.StatusBadRequest {
+				t.Fatalf("guess %q = %d, want 400", guess, status)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("guess %q waited on the write lock", guess)
+		}
 	}
 }

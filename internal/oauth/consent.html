@@ -11,6 +11,9 @@
 {{- if .Request}}
 <h1>Connect to vecnet</h1>
 <p><strong>{{.ClientName}}</strong> is asking to act for this dot on the vecnet hub. You will be sent back to <strong>{{.RedirectHost}}</strong>.</p>
+{{- if .NewClient}}
+<p class="error" role="alert">You have not approved this application in this browser before, and its name is its own to choose. Approve only if you started this connection just now.</p>
+{{- end}}
 {{- if .Error}}
 <p class="error" role="alert">{{.Error}}</p>
 {{- end}}

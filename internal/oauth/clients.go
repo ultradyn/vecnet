@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
@@ -33,6 +34,12 @@ const (
 	maxClientName   = 200
 	cimdTimeout     = 30 * time.Second // the egress total [Global Constraints]
 	clientIdleAge   = time.Hour        // far longer than a consent form lasts
+
+	// GET /oauth/authorize is public and names the URL it fetches, so these
+	// keep a stranger from driving the hub's egress.
+	cimdMaxFetches  = 8           // running at once
+	cimdFailureTTL  = time.Minute // how long a failed URL is not tried again
+	cimdMaxFailures = 1024        // remembered URLs; a flood costs only this memory
 )
 
 var (
@@ -283,9 +290,43 @@ func (s *Server) storedClient(ctx context.Context, id string) (*client, error) {
 // isCIMD reports a client_id that is a metadata document URL.
 func isCIMD(id string) bool { return strings.HasPrefix(id, "https://") }
 
+// cimdGate limits fetches: cimdMaxFetches at a time, and none of a URL that
+// failed within cimdFailureTTL. Its zero value is ready.
+type cimdGate struct {
+	mu       sync.Mutex
+	inFlight int
+	failed   map[string]time.Time // url → retry time
+}
+
+// enter reports whether id may be fetched now; if so, call leave after.
+func (g *cimdGate) enter(id string, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if until, ok := g.failed[id]; (ok && now.Before(until)) || g.inFlight >= cimdMaxFetches {
+		return false
+	}
+	g.inFlight++
+	return true
+}
+
+func (g *cimdGate) leave(id string, ok bool, now time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.inFlight--
+	if ok {
+		delete(g.failed, id)
+		return
+	}
+	if g.failed == nil || len(g.failed) >= cimdMaxFailures {
+		g.failed = map[string]time.Time{}
+	}
+	g.failed[id] = now.Add(cimdFailureTTL)
+}
+
 // loadClient resolves client_id at authorize. A URL is a Client ID Metadata
 // Document: served from its cached row for an hour, then fetched again. Any
-// failure to get a usable document is errUnknownClient.
+// failure to get a usable document is errUnknownClient, as is a fetch cimdGate
+// refuses.
 func (s *Server) loadClient(ctx context.Context, id string) (*client, error) {
 	c, err := s.storedClient(ctx, id)
 	switch {
@@ -294,7 +335,11 @@ func (s *Server) loadClient(ctx context.Context, id string) (*client, error) {
 	case err != nil && !(errors.Is(err, errUnknownClient) && isCIMD(id)):
 		return nil, err
 	}
+	if !s.cimd.enter(id, s.now()) {
+		return nil, errUnknownClient
+	}
 	m, err := s.fetchCIMD(ctx, id)
+	s.cimd.leave(id, err == nil, s.now())
 	if err != nil {
 		// The URL is attacker-chosen and may carry a credential: never logged.
 		slog.Warn("oauth: client metadata document refused", "err", hub.EgressErr(err))
@@ -308,11 +353,17 @@ func (s *Server) loadClient(ctx context.Context, id string) (*client, error) {
 
 // fetchCIMD gets and validates the document at id through the egress guard:
 // public addresses only, pinned, redirects refused, size capped. The document
-// must name itself as client_id and be a public client of the code flow.
+// must name itself as client_id and be a public client of the code flow. As
+// with Events callbacks, only the default https port will do, so this is no
+// probe of a host's other ports; the dev override waives that for local
+// servers.
 func (s *Server) fetchCIMD(ctx context.Context, id string) (*registration, error) {
 	u, err := s.Egress.CheckURL(id)
 	if err != nil {
 		return nil, err
+	}
+	if port := u.Port(); !s.Egress.AllowPrivate && port != "" && port != "443" {
+		return nil, errors.New("oauth: client metadata URL must use the default https port")
 	}
 	if u.Path == "" || u.Path == "/" || slices.ContainsFunc(strings.Split(u.Path, "/"), func(seg string) bool {
 		return seg == "." || seg == ".."

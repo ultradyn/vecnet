@@ -55,6 +55,8 @@ type Server struct {
 	RefreshTTL       time.Duration // 30 d
 	AllowedRedirects []string      // see DefaultRedirects
 	Egress           egress.Policy // CIMD fetches
+
+	cimd cimdGate
 }
 
 // New returns a Server for h with the production defaults.

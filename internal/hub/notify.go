@@ -45,8 +45,9 @@ const (
 	// that finds them all busy is dropped (logged), never queued, so the
 	// caller never blocks.
 	MaxNotifyInFlight = 32
-	// NotifyTimeout is the per-request timeout of a notification POST.
-	NotifyTimeout = 10 * time.Second
+	// NotifyTimeout is the per-request timeout of a notification POST, the
+	// egress total every other outbound path has.
+	NotifyTimeout = 30 * time.Second
 )
 
 // DefaultNotifyRetry is the wait before each of the 3 retries of a

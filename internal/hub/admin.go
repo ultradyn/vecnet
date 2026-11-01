@@ -209,12 +209,41 @@ func (h *Hub) ConsumeDotLink(ctx context.Context, code string) (string, error) {
 	return peerID, nil
 }
 
-// ConsumeDotLinkTx is ConsumeDotLink inside tx, so a failed bind leaves the
-// code unspent. People type these codes, so case and surrounding space are
-// forgiven. Audited as "dot_link_consume" by "hub".
-func (h *Hub) ConsumeDotLinkTx(ctx context.Context, tx *sql.Tx, code string) (string, error) {
+// normDotLink is code as stored, ok false when it cannot be one. People type
+// these codes, so case and surrounding space are forgiven.
+func normDotLink(code string) (string, bool) {
 	code = strings.ToUpper(strings.TrimSpace(code))
-	if len(code) != dotLinkLen {
+	if len(code) != dotLinkLen || strings.Trim(code, dotLinkAlphabet) != "" {
+		return "", false
+	}
+	return code, true
+}
+
+// DotLinkLive reports, by a read alone, whether code could be spent now. It
+// cheaply turns away a guess; ConsumeDotLinkTx still decides.
+func (h *Hub) DotLinkLive(ctx context.Context, code string) (bool, error) {
+	code, ok := normDotLink(code)
+	if !ok {
+		return false, nil
+	}
+	var live bool
+	err := h.DB.QueryRowContext(ctx,
+		`SELECT used_at IS NULL AND expires_at > ? FROM dot_links WHERE code_hash = ?`,
+		h.nowStr(), auth.HashSecret(code)).Scan(&live)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("hub: check link code: %w", err)
+	}
+	return live, nil
+}
+
+// ConsumeDotLinkTx is ConsumeDotLink inside tx, so a failed bind leaves the
+// code unspent. Audited as "dot_link_consume" by "hub".
+func (h *Hub) ConsumeDotLinkTx(ctx context.Context, tx *sql.Tx, code string) (string, error) {
+	code, ok := normDotLink(code)
+	if !ok {
 		return "", ErrDotLink
 	}
 	hash := auth.HashSecret(code)

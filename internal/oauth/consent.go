@@ -43,6 +43,7 @@ type page struct {
 	ClientName, RedirectHost string
 	Request                  string
 	NeedCode                 bool
+	NewClient                bool // a returning principal, and a client it has not approved here
 	Error, Code              string
 }
 
@@ -128,6 +129,16 @@ func (s *Server) openRequest(sealed string) (req authRequest, ok bool) {
 // principal is a bound OAuth principal.
 type principal struct {
 	PrnID, Subject string
+}
+
+// subjectFor is the subject of a principal first approved through clientID.
+func subjectFor(clientID, random string) string { return "oauth:" + clientID + ":" + random }
+
+// approved reports whether clientID is the client this principal first
+// approved. A client's name is its own to choose, so one link could dress
+// another client as a familiar one; the page says so when they differ.
+func (p *principal) approved(clientID string) bool {
+	return strings.HasPrefix(p.Subject, subjectFor(clientID, ""))
 }
 
 // querier is the store or a transaction.
@@ -270,6 +281,7 @@ func (s *Server) getAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	writePage(w, http.StatusOK, page{
 		ClientName: clientLabel(c), RedirectHost: redirectHost(redirectURI), Request: sealed, NeedCode: p == nil,
+		NewClient: p != nil && !p.approved(clientID),
 	}, redirectURI)
 }
 
@@ -297,6 +309,13 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 	var p *principal
 	var code string
 	var bound string // the peer a link code just bound, to wake its readers
+	if live, err := s.linkCodeWorth(ctx, r); err != nil {
+		serverError(w, err)
+		return
+	} else if !live {
+		s.retryPage(w, r, req, sealed)
+		return
+	}
 	err := s.DB.Tx(ctx, func(tx *sql.Tx) error {
 		var err error
 		if p, err = s.cookiePrincipal(ctx, tx, r); err != nil {
@@ -328,6 +347,17 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 	redirectWith(w, r, req.RedirectURI, map[string]string{"code": code, "state": req.State})
 }
 
+// linkCodeWorth reports whether this request can get anywhere in a write
+// transaction: it has a good cookie or a code that could be spent. This form is
+// public, so a stream of guesses must not take the store's one write lock.
+func (s *Server) linkCodeWorth(ctx context.Context, r *http.Request) (bool, error) {
+	p, err := s.cookiePrincipal(ctx, s.DB, r)
+	if err != nil || p != nil {
+		return p != nil, err
+	}
+	return s.Hub.DotLinkLive(ctx, r.PostForm.Get("link_code"))
+}
+
 // retryPage is the 400 for a link code that was refused: the same form again.
 func (s *Server) retryPage(w http.ResponseWriter, r *http.Request, req authRequest, sealed string) {
 	c, err := s.storedClient(r.Context(), req.ClientID)
@@ -355,7 +385,7 @@ func (s *Server) bindLink(ctx context.Context, tx *sql.Tx, clientID, linkCode st
 	if err := s.retirePrincipal(ctx, tx, peer); err != nil {
 		return nil, "", err
 	}
-	p := principal{Subject: "oauth:" + clientID + ":" + randomID("")}
+	p := principal{Subject: subjectFor(clientID, randomID(""))}
 	if p.PrnID, err = s.Hub.BindDotPrincipalTx(ctx, tx, peer); err != nil {
 		return nil, "", err
 	}
