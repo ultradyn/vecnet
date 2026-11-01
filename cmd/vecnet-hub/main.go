@@ -1,10 +1,13 @@
 // Command vecnet-hub runs the vecnet hub, or initialises its operator.
 //
-//	vecnet-hub [--listen 127.0.0.1:45752] [--data-dir /data] [--public-url URL] [--dev-ui-dir DIR]
+//	vecnet-hub [--listen 127.0.0.1:45752] [--data-dir /data] [--public-url URL] [--dev-ui-dir DIR] [--allow-private-egress]
 //	vecnet-hub init [--data-dir /data] --operator-name <name>
 //
 // VECNET_LISTEN, VECNET_DATA_DIR and VECNET_PUBLIC_URL, when set, replace
 // the defaults of --listen, --data-dir and --public-url; flags still win.
+// VECNET_ALLOW_PRIVATE_EGRESS=1 is the default of --allow-private-egress,
+// a development-only override that lets push and notify URLs be http and
+// reach private or loopback addresses (PROTOCOL §14.7).
 package main
 
 import (
@@ -56,6 +59,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	dataDir := fs.String("data-dir", envOr(getenv, "VECNET_DATA_DIR", "/data"), "directory holding hub.db and blobs/ ($VECNET_DATA_DIR)")
 	publicURL := fs.String("public-url", getenv("VECNET_PUBLIC_URL"), "externally visible origin ($VECNET_PUBLIC_URL; default http://<listen address>)")
 	devUIDir := fs.String("dev-ui-dir", "", "serve the operator UI from this directory instead of the embedded copy (development)")
+	allowPrivate := fs.Bool("allow-private-egress", getenv("VECNET_ALLOW_PRIVATE_EGRESS") == "1",
+		"development only: let outbound URLs be http and reach private/loopback addresses ($VECNET_ALLOW_PRIVATE_EGRESS=1)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -74,11 +79,11 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unknown subcommand %q", fs.Arg(0))
 	}
-	return serve(ctx, *listen, *dataDir, *publicURL, *devUIDir, stdout)
+	return serve(ctx, *listen, *dataDir, *publicURL, *devUIDir, *allowPrivate, stdout)
 }
 
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
-func openHub(dataDir, publicURL string) (*hub.Hub, *store.DB, error) {
+func openHub(dataDir, publicURL string, allowPrivateEgress bool) (*hub.Hub, *store.DB, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, nil, fmt.Errorf("create data dir: %w", err)
 	}
@@ -89,6 +94,7 @@ func openHub(dataDir, publicURL string) (*hub.Hub, *store.DB, error) {
 	cfg := hub.DefaultConfig()
 	cfg.DataDir = dataDir
 	cfg.PublicURL = publicURL
+	cfg.AllowPrivateEgress = allowPrivateEgress
 	h, err := hub.New(db, cfg, nil)
 	if err != nil {
 		db.Close()
@@ -101,7 +107,7 @@ func openHub(dataDir, publicURL string) (*hub.Hub, *store.DB, error) {
 // later run prints "already initialised" and the existing peer id, never a
 // secret.
 func runInit(dataDir, name string, w io.Writer) error {
-	h, db, err := openHub(dataDir, "")
+	h, db, err := openHub(dataDir, "", false)
 	if err != nil {
 		return err
 	}
@@ -126,8 +132,9 @@ const ShutdownGrace = 10 * time.Second
 // ctx is cancelled. It binds listen first, so ":0" picks a free port, and
 // writes "vecnet-hub listening on http://<addr> (public url <url>)" to
 // stdout once accepting. publicURL "" means http://<bound address>.
-// devUIDir "" serves the embedded operator UI.
-func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, stdout io.Writer) error {
+// devUIDir "" serves the embedded operator UI. allowPrivateEgress is the
+// development-only egress override (hub.Config.AllowPrivateEgress).
+func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, allowPrivateEgress bool, stdout io.Writer) error {
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return err
@@ -136,13 +143,16 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, std
 	if publicURL == "" {
 		publicURL = "http://" + addr
 	}
-	h, db, err := openHub(dataDir, publicURL)
+	h, db, err := openHub(dataDir, publicURL, allowPrivateEgress)
 	if err != nil {
 		ln.Close()
 		return err
 	}
 	defer db.Close()
 
+	if allowPrivateEgress {
+		slog.Warn("vecnet-hub: private egress allowed (development only): outbound URLs may be http and reach private addresses")
+	}
 	worker := &push.Worker{Hub: h}
 	// Shutdown does not cancel request contexts, so long-lived SSE streams
 	// and long-polls watch stop instead; closing it on shutdown lets them

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/egress"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/ids"
 	"github.com/XertroV/vecnet/internal/webhook"
@@ -33,20 +34,16 @@ const (
 // answer with 2xx and the same challenge (PROTOCOL §3.2).
 var ErrChallenge = errors.New("push: route did not echo the verification challenge")
 
-// NewClient returns the push HTTP client: it never follows a redirect (a
-// 3xx is a terminal result, §3.3, §14.7) and times out after 30 s.
-func NewClient() *http.Client {
-	return &http.Client{
-		Timeout: ClientTimeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+// NewClient returns the push HTTP client for policy p: public-IP-only and
+// DNS-pinned unless p.AllowPrivate, never following a redirect (a 3xx is a
+// terminal result, §3.3, §14.7), timing out after 30 s.
+func NewClient(p egress.Policy) *http.Client {
+	return p.Client(ClientTimeout)
 }
 
 // Worker pushes due deliveries. Zero fields take defaults: Client
-// NewClient(), Now Hub.Now, Interval DefaultInterval. A caller-supplied
-// Client must not follow redirects.
+// NewClient(Hub.EgressPolicy()), Now Hub.Now, Interval DefaultInterval. A
+// caller-supplied Client must not follow redirects.
 type Worker struct {
 	Hub      *hub.Hub
 	Client   *http.Client
@@ -63,7 +60,7 @@ func (w *Worker) init() {
 		w.kick = make(chan struct{}, 1)
 		w.client = w.Client
 		if w.client == nil {
-			w.client = NewClient()
+			w.client = NewClient(w.Hub.EgressPolicy())
 		}
 	})
 }
@@ -193,6 +190,11 @@ func (w *Worker) post(ctx context.Context, url, id string, keys []string, body [
 	}
 	resp, err := w.client.Do(req)
 	if err != nil {
+		if resp != nil && errors.Is(err, egress.ErrRedirect) {
+			// The redirect was refused, not followed; its status is the
+			// result (§3.3: 3xx is terminal). The body is already closed.
+			return resp.StatusCode, 0, nil
+		}
 		return 0, 0, err
 	}
 	defer resp.Body.Close()
