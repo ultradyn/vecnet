@@ -41,6 +41,8 @@ type Env struct {
 	OperatorPeer   string
 	Now            *FakeClock
 
+	stack   *httpapi.Stack
+	stop    chan struct{}
 	handler atomic.Pointer[http.Handler]
 	started bool
 }
@@ -110,13 +112,18 @@ func StartWith(t *testing.T, cfgFn func(*hub.Config)) *Env {
 		t.Fatalf("testhub: hub.New: %v", err)
 	}
 	env.URL, env.Hub = srv.URL, h
-	env.Worker = &push.Worker{Hub: h, Now: clock.Now, Interval: WorkerInterval}
-	env.Events = &events.Worker{Hub: h, Store: events.NewStore(h), Log: h.Log, Now: clock.Now, Interval: WorkerInterval}
-	env.OAuth = oauth.New(h)
+	// The production wiring, with the fake clock and short intervals on top.
+	env.stack = httpapi.NewStack(h)
+	env.stack.TickEvery = WorkerInterval
+	env.Worker, env.Events, env.OAuth = env.stack.Push, env.stack.Events, env.stack.OAuth
+	env.Worker.Now, env.Worker.Interval = clock.Now, WorkerInterval
+	env.Events.Store, env.Events.Log = events.NewStore(h), h.Log
+	env.Events.Now, env.Events.Interval = clock.Now, WorkerInterval
 	env.OAuth.AllowedRedirects = append(env.OAuth.AllowedRedirects, "http://127.0.0.1:*")
-	env.Events.ResolveDotPeer = env.OAuth.ResolveDotPeer
+	env.stop = make(chan struct{})
 	env.Configure(nil)
 	t.Cleanup(func() {
+		close(env.stop) // ends session watchers and open streams
 		srv.Close()
 		db.Close()
 	})
@@ -133,7 +140,8 @@ func StartWith(t *testing.T, cfgFn func(*hub.Config)) *Env {
 // non-nil) adjusts them, e.g. to shorten Deps.Heartbeat. Requests already in
 // flight keep the old handler; later ones use the new one.
 func (e *Env) Configure(f func(*httpapi.Deps)) {
-	d := httpapi.Deps{Hub: e.Hub, Kick: e.Worker.Kick, VerifyRoute: e.Worker.Verify, OAuth: e.OAuth}
+	d := e.stack.Deps()
+	d.Stop = e.stop
 	if f != nil {
 		f(&d)
 	}
@@ -153,9 +161,7 @@ func (e *Env) StartWorkers() {
 	e.started = true
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	wg.Go(func() { e.Worker.Run(ctx) })
-	wg.Go(func() { e.Events.Run(ctx) })
-	wg.Go(func() { e.Hub.RunTickers(ctx, WorkerInterval) })
+	wg.Go(func() { e.stack.Run(ctx) })
 	// Registered after Start's cleanup, so it runs first: the workers stop
 	// before the store closes.
 	e.T.Cleanup(func() {

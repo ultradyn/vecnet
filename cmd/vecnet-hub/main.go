@@ -26,15 +26,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
-	"github.com/XertroV/vecnet/internal/oauth"
-	"github.com/XertroV/vecnet/internal/push"
+	"github.com/XertroV/vecnet/internal/logging"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
 func main() {
+	slog.SetDefault(slog.New(logging.NewHandler(os.Stderr, slog.LevelInfo)))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err := run(ctx, os.Args[1:], os.Stdout, os.Getenv)
 	stop()
@@ -155,7 +154,7 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 	if allowPrivateEgress {
 		slog.Warn("vecnet-hub: private egress allowed (development only): outbound URLs may be http and reach private addresses")
 	}
-	worker := &push.Worker{Hub: h}
+	stack := httpapi.NewStack(h)
 	// Shutdown does not cancel request contexts, so long-lived SSE streams
 	// and long-polls watch stop instead; closing it on shutdown lets them
 	// end at once rather than hold the whole grace period.
@@ -163,9 +162,10 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 	var stopOnce sync.Once
 	closeStop := func() { stopOnce.Do(func() { close(stop) }) }
 	defer closeStop()
-	oauthServer := oauth.New(h)
+	deps := stack.Deps()
+	deps.UIDir, deps.Stop = devUIDir, stop
 	srv := &http.Server{
-		Handler:           httpapi.New(httpapi.Deps{Hub: h, Kick: worker.Kick, VerifyRoute: worker.Verify, OAuth: oauthServer, UIDir: devUIDir, Stop: stop}),
+		Handler:           httpapi.New(deps),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -178,9 +178,7 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 		bgCancel()
 		bg.Wait()
 	}()
-	bg.Go(func() { worker.Run(bgCtx) })
-	bg.Go(func() { (&events.Worker{Hub: h, ResolveDotPeer: oauthServer.ResolveDotPeer}).Run(bgCtx) })
-	bg.Go(func() { h.RunTickers(bgCtx, hub.DefaultTickInterval) })
+	bg.Go(func() { stack.Run(bgCtx) })
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
