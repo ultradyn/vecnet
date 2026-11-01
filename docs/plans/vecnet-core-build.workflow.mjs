@@ -1,5 +1,5 @@
 export const meta = {
-  name: 'vecnet-core-hub-build',
+  name: 'vecnet-plan-build',
   description: 'Execute the vecnet core-hub plan task by task: implement (TDD), independent review, bounded fix loop, then whole-branch review and a final gate',
   whenToUse: 'Run docs/plans/2026-11-01-core-hub.md in the .worktrees/core-hub worktree; resumable by task range',
   phases: [
@@ -173,8 +173,10 @@ if (END > NTASKS) throw new Error(`endTask ${END} exceeds ${NTASKS} tasks`)
 
 // ---------------------------------------------------------------- shared prompt text
 const GROUPS = Array.isArray(A.parallelGroups) ? A.parallelGroups : [[18, 19]] // tasks that may run side by side in their own worktrees, merged afterwards
-const taskWT = n => `${REPO}/.worktrees/core-hub-t${nn(n)}`
-const taskBranch = n => `core-hub-t${nn(n)}`
+const PREFIX = typeof A.taskPrefix === 'string' && A.taskPrefix ? A.taskPrefix : 'core-hub' // per-plan, so a later plan never reuses another plan's task branches
+const taskWT = n => `${REPO}/.worktrees/${PREFIX}-t${nn(n)}`
+const taskBranch = n => `${PREFIX}-t${nn(n)}`
+const DEPS = (A.deps && typeof A.deps === 'object') ? A.deps : null // {"5":[1,2,4]}: each task starts the moment its dependencies are merged; replaces parallelGroups
 
 function rules(wt, branch) {
   return `RULES (apply to every command you run):
@@ -545,9 +547,63 @@ const MERGE_SCHEMA = {
 const units = []
 for (let n = START; n <= END; n++) {
   if (passedBefore.has(n)) { results.push({ task: n, status: 'skipped_already_passed' }); continue }
+  if (DEPS) continue
   const g = GROUPS.find(g => g.includes(n) && g.every(m => m >= START && m <= END && !passedBefore.has(m)))
   if (g) { if (!units.some(u => Array.isArray(u) && u.includes(n))) units.push([...g].sort((a, b) => a - b)) }
   else units.push(n)
+}
+
+async function forkUnit(unit) {
+  const label = unit.map(nn).join('+')
+  const fork = await call(`Create one worktree per task for the parallel group ${label} of the vecnet core-hub build.
+${RULES}
+For each task number NN in [${unit.map(nn).join(', ')}]: if ${REPO}/.worktrees/${PREFIX}-tNN does not exist, run \`git -C ${REPO} worktree add -b ${PREFIX}-tNN ${REPO}/.worktrees/${PREFIX}-tNN ${BRANCH}\` (if the branch already exists from an interrupted run, \`worktree add\` without -b). Confirm each worktree's HEAD equals ${BRANCH}'s HEAD or is a descendant of it. Do not build or test. Return {ok, notes}.`,
+    { label: `fork ${label}`, phase: `Task ${nn(unit[0])}`, effort: 'low', schema: { type: 'object', properties: { ok: { type: 'boolean' }, notes: { type: 'string' } }, required: ['ok', 'notes'] } })
+  if (!fork || !fork.ok) { halt(unit[0], `could not create worktrees for ${label}: ${fork ? fork.notes : 'no result'}`); return false }
+  return true
+}
+
+async function mergeUnit(unit) {
+  const label = unit.map(nn).join('+')
+  const merge = await call(`Merge the parallel group ${label} back into ${BRANCH} for the vecnet core-hub build.
+${RULES}
+Branches to merge, in this order: ${unit.map(taskBranch).join(', ')} (worktrees ${unit.map(taskWT).join(', ')}).
+Procedure: cd ${WT}; for each branch run \`git merge --no-ff <branch>\`; resolve any conflict by keeping BOTH tasks' behaviour (typical conflicts: route registration in internal/httpapi/server.go, justfile recipes, go.mod/go.sum, README). Never drop a test or an endpoint to make a merge clean. After all merges run \`build2 go test -p 2 -count=1 ./...\`, \`build2 go vet ./...\`, \`gofmt -l .\`; fix merge-induced failures with a follow-up commit carrying trailer "Plan-Task: merge". Then, only after \`git -C <path> status --porcelain\` is empty, remove each task worktree with \`git -C ${REPO} worktree remove <path>\`. Leave the task branches in place; the coordinator deletes them.
+Return {ok, head_sha, merged:[task numbers], conflicts_resolved:[files], tests_passed, notes}. ok is true only when every branch merged and the suite passed.`,
+    { label: `merge ${label}`, phase: `Task ${nn(unit[unit.length - 1])}`, schema: MERGE_SCHEMA })
+  if (!merge || !merge.ok || !merge.tests_passed) { halt(unit[unit.length - 1], `merge of ${label} failed: ${merge ? merge.notes : 'no result'}`); return false }
+  log(`merged ${label} at ${merge.head_sha}; conflicts resolved: ${merge.conflicts_resolved.length}`)
+  return true
+}
+
+if (DEPS) {
+  // Dependency-driven: no levels, so no task waits for an unrelated slow sibling. Fork and merge touch the branch, so they run one at a time.
+  // A dependency outside START..END counts as merged: earlier chunks and preflight cover it.
+  const done = new Set(passedBefore)
+  const started = new Set()
+  const running = new Map()
+  const ready = n => (DEPS[n] || []).every(d => d < START || d > END || done.has(d))
+  let lock = Promise.resolve()
+  const exclusive = f => { const r = lock.then(f, f); lock = r.then(() => {}, () => {}); return r }
+  const one = async n => {
+    if (!(await exclusive(() => forkUnit([n])))) return
+    if (await runTask(n, taskWT(n), taskBranch(n))) return
+    if (await exclusive(() => mergeUnit([n]))) done.add(n)
+  }
+  for (;;) {
+    if (!halted.length) {
+      for (let n = START; n <= END; n++) {
+        if (done.has(n) || started.has(n) || !ready(n)) continue
+        started.add(n)
+        running.set(n, one(n).catch(e => { halt(n, `scheduler error: ${e && e.message}`) }).then(() => n))
+      }
+    }
+    if (!running.size) break
+    running.delete(await Promise.race(running.values())) // on a halt, in-flight tasks finish and nothing new starts
+  }
+  const stuck = []
+  for (let n = START; n <= END; n++) if (!done.has(n)) stuck.push(n)
+  if (stuck.length && !halted.length) halt(stuck[0], `dependencies never satisfied for tasks ${stuck.join(', ')}`)
 }
 
 for (const unit of units) {
@@ -556,25 +612,11 @@ for (const unit of units) {
     if (await runTask(unit, WT, BRANCH)) break
     continue
   }
-  const label = unit.map(nn).join('+')
   phase(`Task ${nn(unit[0])}`)
-  const fork = await call(`Create one worktree per task for the parallel group ${label} of the vecnet core-hub build.
-${RULES}
-For each task number NN in [${unit.map(nn).join(', ')}]: if ${REPO}/.worktrees/core-hub-tNN does not exist, run \`git -C ${REPO} worktree add -b core-hub-tNN ${REPO}/.worktrees/core-hub-tNN ${BRANCH}\` (if the branch already exists from an interrupted run, \`worktree add\` without -b). Confirm each worktree's HEAD equals ${BRANCH}'s HEAD or is a descendant of it. Do not build or test. Return {ok, notes}.`,
-    { label: `fork ${label}`, phase: `Task ${nn(unit[0])}`, effort: 'low', schema: { type: 'object', properties: { ok: { type: 'boolean' }, notes: { type: 'string' } }, required: ['ok', 'notes'] } })
-  if (!fork || !fork.ok) { halt(unit[0], `could not create worktrees for group ${label}: ${fork ? fork.notes : 'no result'}`); break }
-
+  if (!(await forkUnit(unit))) break
   const outcomes = await parallel(unit.map(n => () => runTask(n, taskWT(n), taskBranch(n))))
   if (outcomes.some(Boolean) || halted.length) break // a halt record is truthy; the first halt is already recorded
-
-  const merge = await call(`Merge the parallel group ${label} back into ${BRANCH} for the vecnet core-hub build.
-${RULES}
-Branches to merge, in this order: ${unit.map(taskBranch).join(', ')} (worktrees ${unit.map(taskWT).join(', ')}).
-Procedure: cd ${WT}; for each branch run \`git merge --no-ff <branch>\`; resolve any conflict by keeping BOTH tasks' behaviour (typical conflicts: route registration in internal/httpapi/server.go, justfile recipes, go.mod/go.sum, README). Never drop a test or an endpoint to make a merge clean. After all merges run \`build2 go test -p 2 -count=1 ./...\`, \`build2 go vet ./...\`, \`gofmt -l .\`; fix merge-induced failures with a follow-up commit carrying trailer "Plan-Task: merge". Then, only after \`git -C <path> status --porcelain\` is empty, remove each task worktree with \`git -C ${REPO} worktree remove <path>\`. Leave the task branches in place; the coordinator deletes them.
-Return {ok, head_sha, merged:[task numbers], conflicts_resolved:[files], tests_passed, notes}. ok is true only when every branch merged and the suite passed.`,
-    { label: `merge ${label}`, phase: `Task ${nn(unit[unit.length - 1])}`, schema: MERGE_SCHEMA })
-  if (!merge || !merge.ok || !merge.tests_passed) { halt(unit[unit.length - 1], `merge of group ${label} failed: ${merge ? merge.notes : 'no result'}`); break }
-  log(`merged group ${label} at ${merge.head_sha}; conflicts resolved: ${merge.conflicts_resolved.length}`)
+  if (!(await mergeUnit(unit))) break
 }
 
 if (halted.length) {

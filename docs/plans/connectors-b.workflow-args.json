@@ -1,0 +1,137 @@
+{
+  "runStamp": "20261101T14-connectors-B",
+  "plan": "docs/plans/2026-11-01-connectors.md",
+  "worktree": "/home/xertrov/src/vecnet4/.worktrees/connectors",
+  "branch": "connectors",
+  "baseRef": "master",
+  "statusDir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-connectors",
+  "startTask": 9,
+  "endTask": 10,
+  "finalReview": true,
+  "openBrowser": false,
+  "lensFocus": {
+    "spec": "This branch implements docs/plans/2026-11-01-connectors.md. Check PROTOCOL.md \u00a74.1\u20134.5 (MCP core, tools, resources/hints, Events profile, OAuth), \u00a72.11 + \u00a710 (ingress), \u00a713.3 (Grok Bot hub side), \u00a714.7 (egress) and the ChatGPT Events profile facts in docs/research/dots.md \u00a72 and \u00a74 (method names, result fields, header names, -32015 reasons, TTL clamps, 410/413 never retried, dual signing on secret refresh).",
+    "security": "Every outbound http.Client (push, notify, events callbacks, grokbot, CIMD fetch) must come from egress.Policy.Client; no redirect following anywhere; OAuth: PKCE S256 enforced, codes and refresh tokens single-use with reuse detection, tokens stored hashed, resource/audience checked, consent cookie signed with hub_key, redirect URIs allowlisted; Grok Bot key sealed and never returned or logged; ingress signature constant-time over raw bytes and body cap before parsing; /mcp Origin check and 401 WWW-Authenticate; subscription secrets sealed; admin endpoints operator-only.",
+    "tests": "Watch for tests that reach the network (none may), tests that depend on the real DNS resolver, consent-page HTML asserted too loosely, FakeClock not used for token/TTL expiry, and goroutine leaks from listen streams and the events worker."
+  },
+  "tasks": [
+    {
+      "title": "Egress guard and Seal/Unseal",
+      "refs": "\u00a714.7, \u00a73.1, \u00a712",
+      "race": false,
+      "hazards": [
+        "testhub must set Config.AllowPrivateEgress = true or every existing push/notify test breaks (they use 127.0.0.1 receivers). Production default is false.",
+        "When dialing the pinned IP, keep TLS ServerName and the Host header equal to the original hostname.",
+        "internal/hub/seal.go (Seal/Unseal, AES-256-GCM under meta.hub_key) is created here because Tasks 5, 6 and 7 all consume it in parallel worktrees."
+      ]
+    },
+    {
+      "title": "MCP JSON-RPC server core (dual-era)",
+      "refs": "\u00a74.1, \u00a74.2 (revisions), R12; docs/research/sse-mcp.md 'MCP, current revision' and 'MCP 2025-11-25'",
+      "race": true,
+      "hazards": [
+        "Do NOT use github.com/modelcontextprotocol/go-sdk/mcp.Server or NewStreamableHTTPHandler: its dispatch rejects unknown methods before middleware and ServerCapabilities has no top-level events key. Use the SDK only for wire types (mcp.Tool, mcp.Resource, mcp.CallToolResult, mcp.InitializeResult) and as the 2025-era client in tests (mcp.NewClient + mcp.NewStreamableClientTransport with an http.Client whose RoundTripper adds the bearer). Record the amendment in docs/adr/0001-tech-stack.md.",
+        "/mcp must be exempt from httpapi's bearer middleware (it authenticates itself, so OAuth tokens can be added in Task 6) but must keep the 256 KiB body limit and must still return the hub's JSON error envelope for non-JSON-RPC failures (403/404/405/400).",
+        "PublicOrigin comes from Cfg.PublicURL; tests set PublicURL to the httptest server URL so Origin checks are exercised with a real value.",
+        "Keep the 2025 session store in memory (map + idle TTL); no persistence is required by PROTOCOL."
+      ]
+    },
+    {
+      "title": "vecnet MCP tools",
+      "refs": "\u00a74.3, \u00a72.2\u2013\u00a72.6, \u00a72.8, \u00a72.10",
+      "race": false,
+      "hazards": [
+        "Extract $defs/sendRequest from internal/envelope/schema.json for vecnet_send's inputSchema instead of hand-writing it; validate tool arguments with jsonschema/v6 compiled once.",
+        "Hub.Send takes the raw JSON body: marshal the validated arguments back to bytes and pass ingress \"mcp_tool\".",
+        "Hub errors (*hub.APIError) become tool-level errors (IsError true), never JSON-RPC errors."
+      ]
+    },
+    {
+      "title": "Inbox resources, subscriptions/listen, legacy subscribe, hints",
+      "refs": "\u00a74.2; docs/research/sse-mcp.md 'subscriptions/listen filter is closed', 'Acknowledgement first', 'No broadcast'",
+      "race": true,
+      "hazards": [
+        "The listen stream must exit on r.Context().Done() and must never hold a DB transaction while writing; use eventlog.Log.Wait for wakeups and coalesce to one notification per URI per 250 ms.",
+        "2025 sessions: one GET stream per session; a second GET replaces the first; notifications go to exactly one stream (no broadcast).",
+        "Task 3 runs in parallel and also registers methods from New(): register via s.Register in a registerResources() function called from New; a small conflict in New's call list is expected at merge."
+      ]
+    },
+    {
+      "title": "MCP Events profile (dots)",
+      "refs": "\u00a74.4, R14, R16; docs/research/dots.md \u00a72 (methods, challenge, delivery, refresh), \u00a75 (egress)",
+      "race": true,
+      "hazards": [
+        "Needs a hub method to gate delivery events by priority: add Hub.DeliveryGate(ctx, deliveryID) (push bool, err error) reading deliveries.priority and held; hold \u2192 false, held wake_idle \u2192 false.",
+        "Use Hub.Seal/Unseal (Task 1) for subscription secrets; use egress.Policy.Client for the callback client; the challenge POST goes through the same client.",
+        "Drive the worker with Step(ctx) and the FakeClock in tests; no sleeps. Backoff via hub.PushBackoff.",
+        "Resolve the OAuth principal's bound peer through an interface or a hub method that Task 6 will fill (for now vecnet bearers only; leave a seam `s.ResolveDotPeer func(ctx, principalID string) (peerID string, err error)` defaulting to a lookup in oauth_principals if the table exists, else not_linked)."
+      ]
+    },
+    {
+      "title": "OAuth 2.1 authorization + resource server, dot linking",
+      "refs": "\u00a74.5, R15; docs/research/dots.md \u00a74 (PKCE S256, CIMD/DCR, redirect URIs, resource param, no M2M)",
+      "race": false,
+      "hazards": [
+        "Consent page: embedded HTML with CSP default-src 'self', no inline script or style (same rule as the operator UI); form POST only.",
+        "Store only sha256 hashes of codes, access and refresh tokens; return plaintext once. Refresh reuse detection revokes the whole family.",
+        "Link code alphabet ABCDEFGHJKMNPQRSTUVWXYZ23456789, 8 chars, 10 min, single use; the consent cookie is HMAC-signed with meta.hub_key (Hub.Seal is fine too).",
+        "TokenAuth implements mcpserver.Authenticator; mcpserver.New's Chain is {BearerAuth, TokenAuth} \u2014 wire it in cmd/vecnet-hub and testhub."
+      ]
+    },
+    {
+      "title": "Grok Bot route kind",
+      "refs": "\u00a713.3, R25, \u00a73.3; docs/research/grokbot.md \u00a71a, \u00a72, \u00a73",
+      "race": true,
+      "hazards": [
+        "SQLite cannot ALTER a CHECK constraint: migration 0007 recreates routes (copy rows) with kind IN ('http','grokbot') and the new columns, inside the migration file, preserving existing route ids and keys.",
+        "Expose a package-level var hub.GrokbotURLPattern (*regexp.Regexp) so tests can point routes at an httptest server; production keeps the api2.cursor.sh pattern.",
+        "Classify 400 bodies by substring: 'rate limit' \u2192 retry, 'disabled' \u2192 terminal_alert; everything else 4xx terminal. 401 \u2192 terminal_alert.",
+        "Use Hub.Seal/Unseal for the key; a log capture test must prove the key never appears in slog output."
+      ]
+    },
+    {
+      "title": "GitHub inbound webhook sources",
+      "refs": "\u00a72.11, \u00a710, R09, \u00a715 item 3; .scratch/vecnet/issues/12-inbound-webhook-ingress.md Answer",
+      "race": false,
+      "hazards": [
+        "Hub.Send takes an auth.Caller; do not fake a Caller for a source. Refactor the inside of Send into an internal sendAs(ctx, actorID, actorKind, ingress, req) used by both Send and IngestSource, so the source actor (src_ id, sender_chain [src_], depth 0) is first-class.",
+        "Verify the signature and enforce the 256 KiB cap BEFORE json.Unmarshal; read X-GitHub-Delivery for dedupe; 'ping' returns 200 without creating anything.",
+        "Fixtures: put realistic issue_comment.created and pull_request.opened payloads under internal/ingress/testdata/ (trimmed but with real field names).",
+        "Sources are listed by Hub.Directory as kind source with reachability unknown and never appear as valid recipients."
+      ]
+    },
+    {
+      "title": "CLI and admin additions",
+      "refs": "\u00a713.7; plan Task 9",
+      "race": false,
+      "hazards": [
+        "The Grok Bot key is read from --key-file only; there is no argv flag for it, and a 0644 key file warns on stderr but is accepted.",
+        "Listings never show secrets; subscriptions list shows the callback host only."
+      ]
+    },
+    {
+      "title": "Docs and connector guides",
+      "refs": "plan Task 10; \u00a74.1, \u00a715",
+      "race": false,
+      "hazards": [
+        "Docs only. Task 9 runs alongside this one, so take CLI commands and flags from the plan's Task 9 Interfaces and from the merged code, and do not change Go files.",
+        "The dots live test stays an operator step: say so in docs/connectors/dots.md rather than implying it has been run."
+      ]
+    }
+  ],
+  "taskPrefix": "connectors",
+  "deps": {
+    "9": [
+      5,
+      6,
+      7,
+      8
+    ],
+    "10": [
+      5,
+      6,
+      7,
+      8
+    ]
+  }
+}
