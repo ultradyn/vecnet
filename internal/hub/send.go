@@ -87,10 +87,7 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 	if !ingresses[ingress] {
 		return nil, false, fmt.Errorf("hub: send: unknown ingress %q", ingress)
 	}
-	if err := checkRecipientNames(raw); err != nil {
-		return nil, false, err
-	}
-	if err := checkPayloadCaps(raw); err != nil {
+	if err := PrecheckSend(raw); err != nil {
 		return nil, false, err
 	}
 	if err := envelope.Validate("sendRequest", raw); err != nil {
@@ -170,6 +167,18 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 		h.notifyOperatorDeliveries(ctx, resp.MessageID)
 	}
 	return resp, replayed, nil
+}
+
+// PrecheckSend runs the checks of Send that come before schema validation,
+// so a caller that validates a SendRequest itself reaches the same reason
+// codes in the same order: a display name in recipients is
+// name_not_an_address and an oversize field is payload_too_large, not a
+// schema violation (PROTOCOL §2.2).
+func PrecheckSend(raw []byte) error {
+	if err := checkRecipientNames(raw); err != nil {
+		return err
+	}
+	return checkPayloadCaps(raw)
 }
 
 func isIdempotencyConflict(err error) bool {

@@ -78,7 +78,18 @@ func Validate(def string, raw []byte) error {
 	if err != nil {
 		return &SchemaError{Path: "", Message: "invalid JSON: " + err.Error()}
 	}
-	err = sch.Validate(v)
+	return ValidateValue(sch, v)
+}
+
+// SchemaJSON returns a copy of the embedded envelope schema document, for
+// callers that publish parts of it (the MCP tool inputSchemas).
+func SchemaJSON() []byte { return bytes.Clone(schemaJSON) }
+
+// ValidateValue checks v, a document decoded with jsonschema.UnmarshalJSON,
+// against sch. A violation is a *SchemaError naming the same deterministic
+// first violation Validate reports.
+func ValidateValue(sch *jsonschema.Schema, v any) error {
+	err := sch.Validate(v)
 	if err == nil {
 		return nil
 	}
