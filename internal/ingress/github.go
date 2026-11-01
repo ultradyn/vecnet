@@ -26,13 +26,16 @@ var newMAC = hmac.New
 
 // GitHubEvent is the part of a webhook payload a Message needs. Number is
 // the issue or PR number, 0 when the event has none. Ref is set on push.
-// Delivery comes from the X-GitHub-Delivery header, not from the body.
+// Excerpt is the first line of a comment or review, which says what this
+// event added when Title only names the issue or PR. Delivery comes from the
+// X-GitHub-Delivery header, not from the body.
 type GitHubEvent struct {
 	Delivery, Event, Action string
 	Repo                    string
 	Number                  int
 	Ref                     string
 	Title, Actor, URL       string
+	Excerpt                 string
 }
 
 // VerifyGitHub reports whether sigHeader, an X-Hub-Signature-256 value, is
@@ -71,6 +74,9 @@ func ParseGitHub(event string, body []byte) (GitHubEvent, error) {
 		if e.URL = str(top, urlKey, "html_url"); e.URL == "" {
 			e.URL = str(top, key, "html_url")
 		}
+		if urlKey != key {
+			e.Excerpt = firstLine(str(top, urlKey, "body"))
+		}
 	}
 	switch event {
 	case "issues":
@@ -97,6 +103,12 @@ func ParseGitHub(event string, body []byte) (GitHubEvent, error) {
 		e.URL = str(top, "workflow_run", "html_url")
 	}
 	return e, nil
+}
+
+// firstLine is the first line of s that is not blank, trimmed.
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
+	return strings.TrimSpace(line)
 }
 
 // str walks path through nested objects and returns the string there, or "".
@@ -148,8 +160,9 @@ func (e GitHubEvent) OriginThread() string {
 }
 
 // SummaryGitHub renders content.text: `[repo] event.action on #N by actor:
-// "title" url`, in at most SummaryMax bytes. An oversize title is shortened
-// first, so the URL survives; every cut lands on a rune boundary.
+// "title" url`, in at most SummaryMax bytes. The quoted part is the Excerpt
+// when there is one (PROTOCOL EX08). An oversize quote is shortened first, so
+// the URL survives; every cut lands on a rune boundary.
 func SummaryGitHub(e GitHubEvent) string {
 	var head strings.Builder
 	head.WriteString("[" + e.Repo + "] " + e.Name())
@@ -166,7 +179,11 @@ func SummaryGitHub(e GitHubEvent) string {
 	if e.URL != "" {
 		tail = " " + e.URL
 	}
-	if e.Title == "" {
+	quote := e.Title
+	if e.Excerpt != "" {
+		quote = e.Excerpt
+	}
+	if quote == "" {
 		return cut(head.String()+tail, SummaryMax)
 	}
 	const open, closing = `: "`, `"`
@@ -174,7 +191,7 @@ func SummaryGitHub(e GitHubEvent) string {
 	if room < 0 {
 		room = 0
 	}
-	return cut(head.String()+open+cut(e.Title, room)+closing+tail, SummaryMax)
+	return cut(head.String()+open+cut(quote, room)+closing+tail, SummaryMax)
 }
 
 // cut shortens s to at most n bytes without splitting a rune.

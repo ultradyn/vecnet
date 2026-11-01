@@ -344,7 +344,8 @@ func (s *sourceRow) allows(event string) bool {
 // returns dropped true. Otherwise the raw payload is stored as a hosted
 // attachment and the Message goes to the source's target in the thread of
 // (source, OriginThreadID), which the first event creates. A source over its
-// own limits gets 429 rate_limited (PROTOCOL §16.2). The caller kicks the
+// own limits gets 429 rate_limited (PROTOCOL §16.2), and an event over a
+// byte cap of §2.2 step 9 gets 413 payload_too_large. The caller kicks the
 // push worker.
 func (h *Hub) IngestSource(ctx context.Context, m SourceMessage) (msgID string, dropped bool, err error) {
 	src, err := h.loadSource(ctx, m.SrcID)
@@ -356,6 +357,24 @@ func (h *Hub) IngestSource(ctx context.Context, m SourceMessage) (msgID string, 
 	}
 	if !src.allows(m.EventName) {
 		return "", true, nil
+	}
+	req := &envelope.SendRequest{
+		ThreadTitle: m.Title,
+		Priority:    src.priority,
+		Content:     envelope.SendContent{Text: m.Summary},
+		Origin:      &envelope.Origin{System: src.kind, ThreadID: m.OriginThreadID, EventID: m.OriginEventID},
+		Metadata: map[string]any{
+			"vecnet.source_kind": src.kind,
+			"vecnet.event":       m.EventName,
+		},
+	}
+	// The payload chooses EventName, and this request skips Send's checks.
+	raw, err := json.Marshal(req)
+	if err != nil {
+		return "", false, fmt.Errorf("hub: encode source message: %w", err)
+	}
+	if err := checkPayloadCaps(raw); err != nil {
+		return "", false, err
 	}
 
 	// Answer redeliveries and rate-limited events before storing a blob they
@@ -389,19 +408,9 @@ func (h *Hub) IngestSource(ctx context.Context, m SourceMessage) (msgID string, 
 	if err != nil {
 		return "", false, err
 	}
-	req := &envelope.SendRequest{
-		ThreadTitle: m.Title,
-		Priority:    src.priority,
-		Content:     envelope.SendContent{Text: m.Summary},
-		Attachments: []envelope.Attachment{{
-			SHA256: meta.SHA256, Size: meta.Size, MediaType: media, Name: src.kind + "-event.json",
-		}},
-		Origin: &envelope.Origin{System: src.kind, ThreadID: m.OriginThreadID, EventID: m.OriginEventID},
-		Metadata: map[string]any{
-			"vecnet.source_kind": src.kind,
-			"vecnet.event":       m.EventName,
-		},
-	}
+	req.Attachments = []envelope.Attachment{{
+		SHA256: meta.SHA256, Size: meta.Size, MediaType: media, Name: src.kind + "-event.json",
+	}}
 	resp, _, err := h.sendAs(ctx, actor{src: &sourceActor{
 		id: src.id, target: src.target, providerID: m.ProviderDeliveryID, origin: m.OriginThreadID,
 	}}, "inbound_webhook", req, "")

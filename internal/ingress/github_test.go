@@ -91,7 +91,8 @@ func TestParseGitHubFixtures(t *testing.T) {
 	want := GitHubEvent{
 		Event: "issue_comment", Action: "created", Repo: "o/r", Number: 196,
 		Title: "radio listen does not finalize on 'over'", Actor: "alice",
-		URL: "https://github.com/o/r/issues/196#issuecomment-2450117799",
+		Excerpt: "Reproduced again today; attaching the transcript.",
+		URL:     "https://github.com/o/r/issues/196#issuecomment-2450117799",
 	}
 	if e != want {
 		t.Fatalf("issue_comment = %+v, want %+v", e, want)
@@ -138,8 +139,8 @@ func TestParseGitHubKinds(t *testing.T) {
 		},
 		{
 			"pull_request_review_comment",
-			`{"action":"created","comment":{"html_url":"https://x/c"},"pull_request":{"number":9,"title":"p","html_url":"https://x/9"},` + repo + `}`,
-			GitHubEvent{Event: "pull_request_review_comment", Action: "created", Repo: "o/r", Number: 9, Title: "p", Actor: "bob", URL: "https://x/c"},
+			`{"action":"created","comment":{"body":"\r\n first line\r\nsecond","html_url":"https://x/c"},"pull_request":{"number":9,"title":"p","html_url":"https://x/9"},` + repo + `}`,
+			GitHubEvent{Event: "pull_request_review_comment", Action: "created", Repo: "o/r", Number: 9, Title: "p", Excerpt: "first line", Actor: "bob", URL: "https://x/c"},
 			"o/r#9",
 		},
 		{
@@ -196,6 +197,13 @@ func TestSummaryGitHub(t *testing.T) {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
 
+	// A comment quotes what was said; the title stays the thread's.
+	e.Excerpt = "Reproduced again today."
+	want = `[o/r] issue_comment.created on #196 by alice: "Reproduced again today." https://x/196`
+	if got := SummaryGitHub(e); got != want {
+		t.Fatalf("comment summary = %q, want %q", got, want)
+	}
+
 	e = GitHubEvent{Event: "push", Repo: "o/r", Ref: "refs/heads/main", Title: "fix", Actor: "bob", URL: "https://x/c"}
 	want = `[o/r] push on refs/heads/main by bob: "fix" https://x/c`
 	if got := SummaryGitHub(e); got != want {
@@ -217,6 +225,10 @@ func TestSummaryGitHub(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, `" https://x/c`) {
 		t.Fatalf("an oversize title cost the URL: ...%q", got[len(got)-40:])
+	}
+	e.Title, e.Excerpt = "t", strings.Repeat("😀", 2000)
+	if got := SummaryGitHub(e); len(got) > SummaryMax || !strings.HasSuffix(got, `" https://x/c`) {
+		t.Fatalf("oversize excerpt: %d bytes, ...%q", len(got), got[len(got)-40:])
 	}
 }
 

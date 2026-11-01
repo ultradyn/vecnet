@@ -13,6 +13,11 @@ import (
 // provider's delivery id.
 const maxProviderID = 192
 
+// maxEventHeader bounds X-GitHub-Event, which the signature does not cover
+// and which reaches metadata and the summary. GitHub's longest event names
+// are about 30 bytes.
+const maxEventHeader = 64
+
 // postIngress is POST /v1/ingress/{src_id} (PROTOCOL §2.11, §10). It takes
 // no bearer: the source's own verification authenticates it. limitBody has
 // capped the body, and nothing parses it before the signature has passed.
@@ -50,11 +55,16 @@ func (s *server) ingestGitHub(w http.ResponseWriter, r *http.Request, srcID, sec
 		}
 	}
 	delivery, event := hdr["X-GitHub-Delivery"], hdr["X-GitHub-Event"]
-	if len(delivery) > maxProviderID {
-		e := hub.E(http.StatusBadRequest, "invalid_body", "the delivery id is too long")
-		e.Details["header"] = "X-GitHub-Delivery"
-		writeError(w, e)
-		return
+	for _, h := range []struct {
+		name string
+		max  int
+	}{{"X-GitHub-Delivery", maxProviderID}, {"X-GitHub-Event", maxEventHeader}} {
+		if len(hdr[h.name]) > h.max {
+			e := hub.E(http.StatusBadRequest, "invalid_body", "a webhook header is too long")
+			e.Details["header"] = h.name
+			writeError(w, e)
+			return
+		}
 	}
 	if !ingress.VerifyGitHub(secret, hdr["X-Hub-Signature-256"], raw) {
 		writeError(w, hub.E(http.StatusUnauthorized, "bad_signature", "the webhook signature does not verify"))

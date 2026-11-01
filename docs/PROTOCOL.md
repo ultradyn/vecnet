@@ -439,7 +439,7 @@ The hub fills `loop` on every Message [ENV]:
 
 | Field | Rule | Default |
 |---|---|---|
-| `depth` | 0 for a fresh message (one that starts a thread); a reply is parent.depth + 1. The parent is the `in_reply_to` message, or, for a send into an existing thread without `in_reply_to`, the thread's latest message: leaving `in_reply_to` out never resets `depth`, `max_depth`, `expires_at` or `sender_chain` | — |
+| `depth` | 0 for a fresh message (one that starts a thread); a reply is parent.depth + 1. The parent is the `in_reply_to` message, or, for a send into an existing thread without `in_reply_to`, the thread's latest message: leaving `in_reply_to` out never resets `depth`, `max_depth`, `expires_at` or `sender_chain`, except for a source event (section 10) | — |
 | `max_depth` | Inherited down a reply chain; any sender MAY lower it for its own message; a reply MUST NOT raise it; range 1–64 | 16 |
 | `expires_at` | Wall-clock TTL; sender MAY lower it; a reply MUST NOT raise an inherited value | now + 24 h |
 | `sender_chain` | Last 32 originators (peers or sources), oldest first: parent's chain + sender | — |
@@ -514,11 +514,12 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 - **Verification:** GitHub by `X-Hub-Signature-256` HMAC; other kinds by Standard Webhooks or a shared header token [T12].
 - **Mapping to a Message** [T12, EX08]:
   - `sender` = the `src_` id; `ingress = inbound_webhook`.
-  - `content.text` = per-kind summary ≤ 4 KiB (GitHub: repo, event, title, actor, URL).
+  - `content.text` = per-kind summary ≤ 4 KiB (GitHub: repo, event, title or comment excerpt, actor, URL).
   - Raw JSON = hosted `application/json` attachment.
   - `origin = {system: "github", thread_id: <repo>#<n>, event_id}`; each issue/PR threads separately.
   - `metadata["vecnet.source_kind"]` and `["vecnet.event"]` set by the hub.
   - `sender_chain` starts with the source id [ENV §2].
+  - A source event is not a reply: it starts a new loop in its thread (`depth` 0, fresh `expires_at`, `sender_chain` = the source id), so a long-lived issue is not cut by the TTL or `max_depth`. A feedback loop through the external system is stopped by the thread budget and the source's rate limits.
 - **Routing:** one static target per source (peer, team or thread) plus an optional event-type allowlist. Rule expressions are out of scope for v1 [T12].
 - **Sources are not peers.** They appear in the directory as kind `source`, cannot receive messages, and the hub never posts back to the source [T12].
 - **Priority:** source Messages default to `wake_idle`; the operator MAY configure another priority per source [R09].

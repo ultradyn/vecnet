@@ -203,7 +203,7 @@ func TestIngressHappyPath(t *testing.T) {
 		if m.Priority != "wake_idle" {
 			t.Fatalf("priority = %q", m.Priority)
 		}
-		wantText := `[o/r] issue_comment.created on #196 by alice: "radio listen does not finalize on 'over'" https://github.com/o/r/issues/196#issuecomment-2450117799`
+		wantText := `[o/r] issue_comment.created on #196 by alice: "Reproduced again today; attaching the transcript." https://github.com/o/r/issues/196#issuecomment-2450117799`
 		if m.Content.Text != wantText {
 			t.Fatalf("text = %q", m.Content.Text)
 		}
@@ -301,6 +301,50 @@ func TestIngressDedupeAndOversize(t *testing.T) {
 
 	if n := rowCount(t, env, `SELECT count(*) FROM messages WHERE sender = ?`, s.SourceID); n != 1 {
 		t.Fatalf("oversize bodies wrote messages: %d rows", n)
+	}
+}
+
+// No delivery can put more than the 8 KiB metadata cap of PROTOCOL §2.2 step
+// 9 on a Message: the event header is bounded, and the signed body's action
+// is refused rather than sent.
+func TestIngressEventNameBounded(t *testing.T) {
+	env := testhub.Start(t)
+	p, pSec := env.NewPeer("session", "P")
+	s := addSource(t, env, p, nil)
+
+	event := strings.Repeat("e", 64)
+	ghDeliver(t, env, s, event, "b-1", ghFixture(t, "issue_comment.created.json"))
+	if d := lastDelivery(t, env, pSec); d.Message.Metadata["vecnet.event"] != event+".created" {
+		t.Fatalf("metadata = %v", d.Message.Metadata)
+	}
+	messages := rowCount(t, env, `SELECT count(*) FROM messages`)
+	blobs := rowCount(t, env, `SELECT count(*) FROM blobs`)
+
+	for i, size := range []int{9 << 10, 100 << 10} {
+		var v map[string]any
+		if err := json.Unmarshal(ghFixture(t, "issue_comment.created.json"), &v); err != nil {
+			t.Fatal(err)
+		}
+		v["action"] = strings.Repeat("a", size)
+		body, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		delivery := "b-big-" + strconv.Itoa(i)
+		resp, raw := ghPost(t, env, s.SourceID, ghHeaders(s.Secret, "issue_comment", delivery, body), body, nil)
+		e := mustErr(t, resp, raw, http.StatusRequestEntityTooLarge, "payload_too_large")
+		if e.Error.Details["field"] != "metadata" {
+			t.Fatalf("details = %v, want field metadata", e.Error.Details)
+		}
+	}
+	if n := rowCount(t, env, `SELECT count(*) FROM messages`); n != messages {
+		t.Fatalf("a refused event wrote messages: %d rows, was %d", n, messages)
+	}
+	if n := rowCount(t, env, `SELECT count(*) FROM blobs`); n != blobs {
+		t.Fatalf("a refused event left a blob: %d rows, was %d", n, blobs)
+	}
+	if n := rowCount(t, env, `SELECT count(*) FROM source_deliveries WHERE provider_id LIKE 'b-big-%'`); n != 0 {
+		t.Fatalf("a refused event was recorded as delivered: %d rows", n)
 	}
 }
 
@@ -426,6 +470,25 @@ func TestIngressFilterAndSignature(t *testing.T) {
 		resp, raw = ghPost(t, env, s.SourceID, hdr, pr, nil)
 		mustErr(t, resp, raw, http.StatusBadRequest, "invalid_body")
 	}
+
+	// A header value no real delivery has is refused and writes nothing. The
+	// signature covers neither header, so verification would not help.
+	written := rowCount(t, env, `SELECT count(*) FROM messages`)
+	for _, c := range []struct{ event, delivery, header string }{
+		{"pull_request", strings.Repeat("d", 193), "X-GitHub-Delivery"},
+		{strings.Repeat("e", 65), "f-10", "X-GitHub-Event"},
+		{strings.Repeat("e", 900<<10), "f-11", "X-GitHub-Event"},
+	} {
+		resp, raw = ghPost(t, env, s.SourceID, ghHeaders(s.Secret, c.event, c.delivery, pr), pr, nil)
+		e := mustErr(t, resp, raw, http.StatusBadRequest, "invalid_body")
+		if e.Error.Details["header"] != c.header {
+			t.Fatalf("details = %v, want header %s", e.Error.Details, c.header)
+		}
+	}
+	if n := rowCount(t, env, `SELECT count(*) FROM messages`); n != written {
+		t.Fatalf("over-long headers wrote messages: %d rows, was %d", n, written)
+	}
+	ghDeliver(t, env, s, "pull_request", strings.Repeat("d", 192), pr)
 
 	// ping: 200, nothing created, whatever the allowlist says.
 	before := rowCount(t, env, `SELECT count(*) FROM messages`)
