@@ -991,7 +991,7 @@ func TestListenEndsOnStop(t *testing.T) {
 }
 
 // TestListenEndsWhenPeerDisabled: a disabled peer's own stream stops hinting
-// and ends, as it does for a principal losing access to a URI.
+// and ends, as any listen stream does once every URI is lost.
 func TestListenEndsWhenPeerDisabled(t *testing.T) {
 	env := testhub.Start(t)
 	b, bSecret := env.NewPeer("session", "b1")
@@ -1116,5 +1116,312 @@ func waitFor(t *testing.T, within time.Duration, what string, cond func() bool) 
 			t.Fatalf("timed out waiting for %s", what)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// hintFor waits for a hint on uri, skipping hints on other URIs. It reports
+// false when none comes in time or the stream ends.
+func hintFor(t *testing.T, frames <-chan frame, uri string, within time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		n, raw, ok := nextMessage(t, frames, time.Until(deadline))
+		if !ok {
+			return false
+		}
+		if n.Method != "notifications/resources/updated" {
+			t.Fatalf("unexpected message %s", raw)
+		}
+		if n.Params["uri"] == uri {
+			return true
+		}
+	}
+}
+
+// noHintFor fails on a hint for uri during the next 300 ms, which lets a
+// watcher that is due one get past the coalescing window and send it.
+func noHintFor(t *testing.T, frames <-chan frame, uri string) {
+	t.Helper()
+	if hintFor(t, frames, uri, 300*time.Millisecond) {
+		t.Fatalf("hint for %s while its access is lost", uri)
+	}
+}
+
+// growLog appends to peer's log and wakes its watchers, with no message: a
+// disabled peer takes no deliveries.
+func growLog(t *testing.T, env *testhub.Env, peer string) {
+	t.Helper()
+	if _, err := env.Hub.Log.Append(context.Background(), nil, peer, "test", env.Now.Now(), map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	env.Hub.Log.Notify(peer)
+}
+
+// accessChanges are the two ways a principal loses a peer and gets it back.
+var accessChanges = []struct {
+	name          string
+	lose, restore func(ctx context.Context, env *testhub.Env, peer, prn, elsewhere string) error
+}{
+	{"disable",
+		func(ctx context.Context, env *testhub.Env, peer, _, _ string) error {
+			return env.Hub.SetPeerDisabled(ctx, peer, true)
+		},
+		func(ctx context.Context, env *testhub.Env, peer, _, _ string) error {
+			return env.Hub.SetPeerDisabled(ctx, peer, false)
+		}},
+	{"move",
+		func(ctx context.Context, env *testhub.Env, peer, _, elsewhere string) error {
+			return env.Hub.MovePeer(ctx, peer, elsewhere)
+		},
+		func(ctx context.Context, env *testhub.Env, peer, prn, _ string) error {
+			return env.Hub.MovePeer(ctx, peer, prn)
+		}},
+}
+
+// TestLegacySubscriptionSurvivesAccessLoss: a legacy GET stream outlives its
+// URIs, so losing access must not end the subscription for good. It stays
+// silent while access is gone and hints again once access is back, for what
+// grew meanwhile and for what comes later (PROTOCOL §4.2).
+func TestLegacySubscriptionSurvivesAccessLoss(t *testing.T) {
+	run := func(t *testing.T, peerCredential bool, lose, restore func(context.Context, *testhub.Env, string, string, string) error) {
+		env := testhub.Start(t)
+		_, aSecret := env.NewPeer("session", "a1")
+		prn, secret := env.NewPrincipal("max")
+		elsewhere, _ := env.NewPrincipal("elsewhere")
+		p, pSecret := peerUnder(t, env, prn, "one")
+		if peerCredential {
+			secret = pSecret
+		}
+		uri := peerURI(p)
+		sid := legacySession(t, env, secret)
+		legacySubscribe(t, env, secret, sid, uri)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		resp, frames := getStream(t, ctx, env, secret, sid)
+		defer resp.Body.Close()
+		sendTo(t, env, aSecret, p, "s1")
+		if !hintFor(t, frames, uri, time.Second) {
+			t.Fatal("no baseline hint")
+		}
+
+		if err := lose(ctx, env, p, prn, elsewhere); err != nil {
+			t.Fatal(err)
+		}
+		noHintFor(t, frames, uri) // long enough to see the loss, past any pause
+		growLog(t, env, p)
+		noHintFor(t, frames, uri)
+
+		if err := restore(ctx, env, p, prn, elsewhere); err != nil {
+			t.Fatal(err)
+		}
+		if !hintFor(t, frames, uri, time.Second) {
+			t.Fatal("no hint for the growth during the loss")
+		}
+		time.Sleep(300 * time.Millisecond) // past the coalescing window
+		sendTo(t, env, aSecret, p, "s2")
+		if !hintFor(t, frames, uri, time.Second) {
+			t.Fatal("no hint for a send after access came back")
+		}
+	}
+	for _, tc := range accessChanges {
+		t.Run("principal "+tc.name, func(t *testing.T) { run(t, false, tc.lose, tc.restore) })
+	}
+	t.Run("peer credential disable", func(t *testing.T) {
+		run(t, true, accessChanges[0].lose, accessChanges[0].restore)
+	})
+}
+
+// TestListenSurvivesPartialAccessLoss: one lost URI of a listen stream goes
+// quiet and comes back without ending the stream. The stream could not just
+// end instead: a reconnect naming the lost URI is refused, and that would
+// cost the client its other URIs too. A URI that came back counts as live, so
+// losing another one later leaves the stream open.
+func TestListenSurvivesPartialAccessLoss(t *testing.T) {
+	for _, tc := range accessChanges {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testhub.Start(t)
+			_, aSecret := env.NewPeer("session", "a1")
+			prn, prnSecret := env.NewPrincipal("max")
+			elsewhere, _ := env.NewPrincipal("elsewhere")
+			p1, _ := peerUnder(t, env, prn, "one")
+			p2, _ := peerUnder(t, env, prn, "two")
+			uri1 := peerURI(p1)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			resp, frames := listen(t, ctx, env, http.DefaultClient, prnSecret, []string{uri1, peerURI(p2)})
+			defer resp.Body.Close()
+			if _, _, ok := nextMessage(t, frames, 2*time.Second); !ok {
+				t.Fatal("no acknowledgement")
+			}
+
+			if err := tc.lose(ctx, env, p1, prn, elsewhere); err != nil {
+				t.Fatal(err)
+			}
+			noHintFor(t, frames, uri1)
+			growLog(t, env, p1)
+			noHintFor(t, frames, uri1)
+
+			if err := tc.restore(ctx, env, p1, prn, elsewhere); err != nil {
+				t.Fatal(err)
+			}
+			if !hintFor(t, frames, uri1, time.Second) {
+				t.Fatal("no hint for the growth during the loss")
+			}
+			time.Sleep(300 * time.Millisecond) // past the coalescing window
+			sendTo(t, env, aSecret, p1, "s1")
+			if !hintFor(t, frames, uri1, time.Second) {
+				t.Fatal("no hint for a send after access came back")
+			}
+
+			if err := tc.lose(ctx, env, p2, prn, elsewhere); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(300 * time.Millisecond)
+			sendTo(t, env, aSecret, p1, "s2")
+			if !hintFor(t, frames, uri1, time.Second) {
+				t.Fatal("stream ended with one URI still live")
+			}
+		})
+	}
+}
+
+// TestListenEndsWhenEveryURILost: with nothing left to hint the stream ends
+// unfinished, so the client finds out rather than keep a silent stream.
+func TestListenEndsWhenEveryURILost(t *testing.T) {
+	for _, tc := range accessChanges {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testhub.Start(t)
+			prn, prnSecret := env.NewPrincipal("max")
+			elsewhere, _ := env.NewPrincipal("elsewhere")
+			p1, _ := peerUnder(t, env, prn, "one")
+			p2, _ := peerUnder(t, env, prn, "two")
+
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			resp, frames := listen(t, ctx, env, http.DefaultClient, prnSecret, []string{peerURI(p1), peerURI(p2)})
+			defer resp.Body.Close()
+			if _, _, ok := nextMessage(t, frames, 2*time.Second); !ok {
+				t.Fatal("no acknowledgement")
+			}
+			for _, p := range []string{p1, p2} {
+				if err := tc.lose(ctx, env, p, prn, elsewhere); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for deadline := time.After(2 * time.Second); ; {
+				select {
+				case f, open := <-frames:
+					if !open {
+						return
+					}
+					if strings.Contains(string(f.data), `"result"`) {
+						t.Fatalf("final result on a stream that lost its URIs: %s", f.data)
+					}
+				case <-deadline:
+					t.Fatal("stream still open with every URI lost")
+				}
+			}
+		})
+	}
+}
+
+// TestSessionEndStopsWatchers: each way a 2025 session ends stops its
+// subscription watchers, which would otherwise wait on the log for good.
+func TestSessionEndStopsWatchers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  func(t *testing.T, env *testhub.Env, secret, sid string)
+	}{
+		{"delete", func(t *testing.T, env *testhub.Env, secret, sid string) {
+			resp, out := do(t, env, call{method: http.MethodDelete, secret: secret,
+				headers: map[string]string{"Mcp-Session-Id": sid}})
+			if resp.StatusCode >= 300 {
+				t.Fatalf("DELETE: %d %s", resp.StatusCode, out)
+			}
+		}},
+		{"idle sweep", func(t *testing.T, env *testhub.Env, secret, _ string) {
+			env.Now.Advance(mcpserver.DefaultSessionTTL + time.Minute)
+			legacySession(t, env, secret) // minting sweeps
+		}},
+		{"evicted by the session cap", func(t *testing.T, env *testhub.Env, secret, _ string) {
+			for range 64 {
+				env.Now.Advance(time.Second) // keeps the subscribed session the oldest
+				legacySession(t, env, secret)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testhub.Start(t)
+			b, bSecret := env.NewPeer("session", "b1")
+			sid := legacySession(t, env, bSecret)
+			legacySubscribe(t, env, bSecret, sid, peerURI(b))
+			if env.Hub.Log.Waiters(b) == 0 {
+				t.Fatal("subscription is not waiting on the peer's log")
+			}
+			tc.end(t, env, bSecret, sid)
+			waitFor(t, 2*time.Second, "watcher to stop", func() bool { return env.Hub.Log.Waiters(b) == 0 })
+		})
+	}
+}
+
+// TestSubscribeMethodsAreEraBound: each era has one way to subscribe, and the
+// other era's methods do not exist for it.
+func TestSubscribeMethodsAreEraBound(t *testing.T) {
+	env := testhub.Start(t)
+	b, bSecret := env.NewPeer("session", "b1")
+	uri := peerURI(b)
+	for _, method := range []string{"resources/subscribe", "resources/unsubscribe"} {
+		if r := rpc2026(t, env, bSecret, method, map[string]any{"uri": uri}); r.Error == nil || r.Error.Code != -32601 {
+			t.Fatalf("%s on 2026-07-28: %+v, want -32601", method, r.Error)
+		}
+	}
+	sid := legacySession(t, env, bSecret)
+	_, out := do(t, env, call{secret: bSecret, client: &http.Client{Timeout: 5 * time.Second}, // a stream would never end
+		headers: map[string]string{"Mcp-Session-Id": sid, "Accept": "application/json, text/event-stream"},
+		body: map[string]any{"jsonrpc": "2.0", "id": 2, "method": "subscriptions/listen",
+			"params": map[string]any{"resourceSubscriptions": []string{uri}}}})
+	if r := decodeRPC(t, out); r.Error == nil || r.Error.Code != -32601 {
+		t.Fatalf("subscriptions/listen on 2025-11-25: %s, want -32601", out)
+	}
+}
+
+// TestListenFilterCapped: a filter over 256 URIs is refused before any stream
+// starts.
+func TestListenFilterCapped(t *testing.T) {
+	env := testhub.Start(t)
+	b, bSecret := env.NewPeer("session", "b1")
+	uris := make([]string, 257)
+	for i := range uris {
+		uris[i] = peerURI(b) + "?" + strconv.Itoa(i)
+	}
+	r := rpc2026(t, env, bSecret, "subscriptions/listen", map[string]any{"resourceSubscriptions": uris})
+	if r.Error == nil || r.Error.Code != -32602 || errReason(t, r) != "too_many" {
+		t.Fatalf("257 URIs: %+v, want -32602 too_many", r.Error)
+	}
+}
+
+// TestNotifyWithoutGrowthSendsNoHint: the log wakes watchers for more than
+// appends, and a hint means the log grew.
+func TestNotifyWithoutGrowthSendsNoHint(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "a1")
+	b, bSecret := env.NewPeer("session", "b1")
+	uri := peerURI(b)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, frames := listen(t, ctx, env, http.DefaultClient, bSecret, []string{uri})
+	defer resp.Body.Close()
+	if _, _, ok := nextMessage(t, frames, 2*time.Second); !ok {
+		t.Fatal("no acknowledgement")
+	}
+	env.Hub.Log.Notify(b)
+	if _, raw, ok := nextMessage(t, frames, 300*time.Millisecond); ok {
+		t.Fatalf("message after a Notify with no append: %s", raw)
+	}
+	sendTo(t, env, aSecret, b, "n1")
+	if !hintFor(t, frames, uri, time.Second) {
+		t.Fatal("no hint for a send after the empty Notify")
 	}
 }

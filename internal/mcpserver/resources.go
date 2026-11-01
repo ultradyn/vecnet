@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
@@ -329,7 +330,7 @@ func (s *Server) resourcesSubscribe(ctx context.Context, sess *Session, req *Req
 		w.run(func() bool {
 			s.hintSession(sess, uri)
 			return true
-		})
+		}, func(bool) {})
 	}()
 	return map[string]any{}, nil
 }
@@ -457,10 +458,13 @@ func listenURIs(req *Request) ([]string, error) {
 // response stream that opens with the acknowledgement, then carries at most
 // one notifications/resources/updated per URI per hintCoalesce whenever the
 // log behind a URI grows. It stays open until the client goes, the stream
-// fails, every URI's access is gone, or the hub shuts down, and no database
-// transaction is open while it writes. Only an empty filter, with nothing
-// to wait for, gets the final result: any other close is left unfinished so
-// that the client treats it as a reason to reconnect [M3].
+// fails, every URI's access is gone at once, or the hub shuts down, and no
+// database transaction is open while it writes. A URI whose access is gone
+// is parked until it returns: ending the stream for it would not help, since
+// a reconnect naming that URI is refused and takes the live URIs down too.
+// Only an empty filter, with nothing to wait for, gets the final result: any
+// other close is left unfinished so that the client treats it as a reason to
+// reconnect [M3].
 func (s *Server) subscriptionsListen(ctx context.Context, sess *Session, req *Request) (any, error) {
 	if sess.Proto != ProtoCurrent {
 		return nil, methodNotInEra(req.Method) // 2025-11-25: resources/subscribe
@@ -511,11 +515,18 @@ func (s *Server) subscriptionsListen(ctx context.Context, sess *Session, req *Re
 		_ = st.Send("", eventMessage, resultResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"_meta": meta}})
 		return nil, nil
 	}
+	var lost atomic.Int64
 	var wg sync.WaitGroup
 	for i, uri := range uris {
 		wg.Go(func() {
 			watches[i].run(func() bool {
 				return st.Send("", eventMessage, updatedNotification(uri, meta)) == nil
+			}, func(denied bool) {
+				if !denied {
+					lost.Add(-1)
+				} else if lost.Add(1) == int64(len(uris)) {
+					cancel() // the watchers return, and with them this stream
+				}
 			})
 		})
 	}
@@ -604,13 +615,20 @@ func (w *watch) rearm() error {
 }
 
 // run calls emit each time the log grows, at most once per hintCoalesce,
-// until ctx is done, the hub stops, emit returns false, or p may no longer
-// read the URI. Each wake re-resolves the owners, so a principal's URI picks
-// up a peer added after the subscription started, even from no peers at all,
-// when no log exists to wake it. Appends during the coalescing pause close
-// the waiter armed before it, so the pause delays a hint and never loses one.
-func (w *watch) run(emit func() bool) {
+// until ctx is done, the hub stops, or emit returns false. Each wake
+// re-resolves the owners, so a principal's URI picks up a peer added after
+// the subscription started, even from no peers at all, when no log exists to
+// wake it. Appends during the coalescing pause close the waiter armed before
+// it, so the pause delays a hint and never loses one.
+//
+// While p may not read the URI, run stays parked on the last known owners and
+// emits nothing. Everything that restores access (SetPeerDisabled, MovePeer)
+// notifies the peer, so the next wake resumes, and w.last, untouched by the
+// loss, makes that wake hint for anything appended meanwhile. access reports
+// each change, denied or not; run calls it from its own goroutine.
+func (w *watch) run(emit func() bool, access func(denied bool)) {
 	log := w.s.Hub.Log
+	denied := false
 	for {
 		select {
 		case <-w.woke:
@@ -626,12 +644,22 @@ func (w *watch) run(emit func() bool) {
 		var re *RPCError
 		switch {
 		case errors.As(err, &re):
-			return
+			if !denied {
+				denied = true
+				access(true)
+			}
+			continue
 		case err != nil:
 			if w.ctx.Err() != nil {
 				return
 			}
 			slog.Warn("mcp: inbox owners", "err", err) // keep the last known owners
+			if denied {
+				continue // not known to be back; the next wake asks again
+			}
+		case denied:
+			denied = false
+			access(false)
 		}
 		cur, err := log.Current(w.ctx, w.owners)
 		if err != nil {
