@@ -2,7 +2,10 @@ package mcpserver_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -25,6 +28,30 @@ func rpc(t *testing.T, env *testhub.Env, secret, method string, params any) (int
 	}
 	resp, out := do(t, env, call{secret: secret, headers: modern(), body: body})
 	return resp.StatusCode, decodeRPC(t, out)
+}
+
+// rpcVerbatim runs tools/call with args spliced into the request as written.
+// A test needs it for what json.Marshal would change on the client side: it
+// escapes < > & and U+2028/9, drops a repeated key, and renders 5.0 as 5.
+func rpcVerbatim(t *testing.T, env *testhub.Env, secret, name, args string) (int, rpcResp) {
+	t.Helper()
+	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":%q,"arguments":%s}}`, name, args)
+	resp, out := do(t, env, call{secret: secret, headers: modern(), body: body})
+	return resp.StatusCode, decodeRPC(t, out)
+}
+
+// verbatimResult runs rpcVerbatim for a call that must reach the tool.
+func verbatimResult(t *testing.T, env *testhub.Env, secret, name, args string) toolResult {
+	t.Helper()
+	status, r := rpcVerbatim(t, env, secret, name, args)
+	if status != http.StatusOK || r.Error != nil {
+		t.Fatalf("%s: HTTP %d, JSON-RPC error %+v", name, status, r.Error)
+	}
+	var res toolResult
+	if err := json.Unmarshal(r.Result, &res); err != nil {
+		t.Fatalf("%s: decode result %s: %v", name, r.Result, err)
+	}
+	return res
 }
 
 // toolResult is a tools/call result as it appears on the wire.
@@ -167,6 +194,24 @@ func propertyNames(v any, into map[string]bool) {
 	}
 }
 
+// uriFormats collects every "format" keyword naming a URI-like format,
+// anywhere in a JSON Schema document.
+func uriFormats(v any, into map[string]bool) {
+	switch n := v.(type) {
+	case map[string]any:
+		if f, ok := n["format"].(string); ok && (strings.Contains(f, "uri") || strings.Contains(f, "iri")) {
+			into[f] = true
+		}
+		for _, c := range n {
+			uriFormats(c, into)
+		}
+	case []any:
+		for _, c := range n {
+			uriFormats(c, into)
+		}
+	}
+}
+
 type listedTool struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
@@ -221,8 +266,15 @@ func TestToolsListNamesAndHints(t *testing.T) {
 		}
 		names := map[string]bool{}
 		propertyNames(tool.InputSchema, names)
-		if names["url"] {
-			t.Errorf("%s: inputSchema has a property named url", tool.Name)
+		for name := range names {
+			if strings.Contains(strings.ToLower(name), "url") {
+				t.Errorf("%s: inputSchema has a property named %s", tool.Name, name)
+			}
+		}
+		formats := map[string]bool{}
+		uriFormats(tool.InputSchema, formats)
+		if len(formats) != 0 {
+			t.Errorf("%s: inputSchema has URI formats %v", tool.Name, formats)
 		}
 	}
 	slices.Sort(got)
@@ -263,11 +315,18 @@ type inboxEvent struct {
 	Data   struct {
 		DeliveryID string `json:"delivery_id"`
 		Recipient  string `json:"recipient"`
+		Ingress    string `json:"ingress"`
 		Message    struct {
-			MessageID string  `json:"message_id"`
-			ThreadID  string  `json:"thread_id"`
-			InReplyTo *string `json:"in_reply_to"`
-			Sender    string  `json:"sender"`
+			MessageID   string         `json:"message_id"`
+			ThreadID    string         `json:"thread_id"`
+			InReplyTo   *string        `json:"in_reply_to"`
+			Sender      string         `json:"sender"`
+			Metadata    map[string]any `json:"metadata"`
+			Attachments []struct {
+				SHA256    string `json:"sha256"`
+				OriginURL string `json:"origin_url"`
+				BlobURL   string `json:"blob_url"`
+			} `json:"attachments"`
 		} `json:"message"`
 	} `json:"data"`
 }
@@ -320,6 +379,9 @@ func TestSendReplyInboxAckRoundTrip(t *testing.T) {
 	if ds[0].Data.Message.MessageID != sent.MessageID || ds[0].Data.DeliveryID != sent.Deliveries[0].DeliveryID {
 		t.Fatalf("delivery = %+v, want message %s", ds[0], sent.MessageID)
 	}
+	if ds[0].Data.Ingress != "mcp_tool" {
+		t.Fatalf("ingress = %q, want mcp_tool", ds[0].Data.Ingress)
+	}
 	if inbox.NextCursor != inbox.Events[len(inbox.Events)-1].Cursor {
 		t.Fatalf("next_cursor = %q, want the last event's cursor", inbox.NextCursor)
 	}
@@ -354,6 +416,9 @@ func TestSendReplyInboxAckRoundTrip(t *testing.T) {
 	}
 	if ads[0].Data.Recipient != a {
 		t.Fatalf("recipient = %s, want %s", ads[0].Data.Recipient, a)
+	}
+	if ads[0].Data.Ingress != "mcp_tool" {
+		t.Fatalf("reply ingress = %q, want mcp_tool", ads[0].Data.Ingress)
 	}
 
 	toolOK(t, env, bSecret, "vecnet_ack", map[string]any{"cursor": inbox.NextCursor}, nil)
@@ -449,6 +514,12 @@ func TestPrincipalAs(t *testing.T) {
 
 	// A peer outside the principal cannot be named.
 	toolFails(t, env, secret, "vecnet_inbox", map[string]any{"peer": x}, "not_your_peer")
+
+	// Narrowing to a disabled peer is the 403 of GET /v1/events, as a tool error.
+	if err := env.Hub.SetPeerDisabled(ctx, p2, true); err != nil {
+		t.Fatal(err)
+	}
+	toolFails(t, env, secret, "vecnet_inbox", map[string]any{"peer": p2}, "forbidden")
 }
 
 func TestSchemaValidationPath(t *testing.T) {
@@ -498,6 +569,219 @@ func TestReplyTargetIsChecked(t *testing.T) {
 	}); p != "/idempotency_key" {
 		t.Fatalf("data.path = %q, want /idempotency_key", p)
 	}
+	if p := invalidPath(t, env, aSecret, "vecnet_reply", map[string]any{
+		"message_id": sent.MessageID, "priority": "hold", "idempotency_key": "r2",
+	}); p != "/text" {
+		t.Fatalf("data.path = %q, want /text", p)
+	}
+}
+
+// The operator may reply into a thread it does not participate in, so
+// ReplyThread must not hide the message from it.
+func TestOperatorReplyOutsideThread(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "a1")
+	b, bSecret := env.NewPeer("session", "b1")
+
+	var sent, replied sendResult
+	toolOK(t, env, aSecret, "vecnet_send", map[string]any{
+		"idempotency_key": "k1", "recipients": []string{b}, "priority": "hold",
+		"content": map[string]any{"text": "hello"},
+	}, &sent)
+	toolOK(t, env, env.OperatorSecret, "vecnet_reply", map[string]any{
+		"message_id": sent.MessageID, "text": "noted", "priority": "hold", "idempotency_key": "r1",
+	}, &replied)
+	if replied.ThreadID != sent.ThreadID {
+		t.Fatalf("reply thread = %s, want %s", replied.ThreadID, sent.ThreadID)
+	}
+	var inbox inboxResult
+	toolOK(t, env, bSecret, "vecnet_inbox", map[string]any{}, &inbox)
+	ds := inbox.deliveries()
+	if len(ds) != 2 || ds[1].Data.Message.Sender != env.OperatorPeer {
+		t.Fatalf("B's deliveries = %+v, want a second one from %s", ds, env.OperatorPeer)
+	}
+}
+
+// PROTOCOL §4.3: write tools MUST NOT accept a URL from the model, and an
+// attachment's origin_url would otherwise reach the recipient and excuse an
+// unknown hash.
+func TestAttachmentURLsRejected(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "a1")
+	b, bSecret := env.NewPeer("session", "b1")
+
+	var sent sendResult
+	toolOK(t, env, aSecret, "vecnet_send", map[string]any{
+		"idempotency_key": "k1", "recipients": []string{b}, "priority": "hold",
+		"content": map[string]any{"text": "hello"},
+	}, &sent)
+
+	unknown := strings.Repeat("ab", 32)
+	att := func(extra ...string) map[string]any {
+		m := map[string]any{"sha256": unknown, "size": 1, "media_type": "text/plain"}
+		for _, k := range extra {
+			m[k] = "https://evil.example/x"
+		}
+		return m
+	}
+	send := func(key string, atts ...map[string]any) map[string]any {
+		return map[string]any{
+			"idempotency_key": key, "recipients": []string{b}, "priority": "hold",
+			"content": map[string]any{"text": "x"}, "attachments": atts,
+		}
+	}
+	reply := func(key string, atts ...map[string]any) map[string]any {
+		return map[string]any{
+			"message_id": sent.MessageID, "text": "x", "priority": "hold",
+			"idempotency_key": key, "attachments": atts,
+		}
+	}
+	for _, field := range []string{"origin_url", "blob_url"} {
+		want := "/attachments/0/" + field
+		if p := invalidPath(t, env, aSecret, "vecnet_send", send("s-"+field, att(field))); p != want {
+			t.Errorf("vecnet_send %s: data.path = %q, want %q", field, p, want)
+		}
+		if p := invalidPath(t, env, bSecret, "vecnet_reply", reply("r-"+field, att(field))); p != want {
+			t.Errorf("vecnet_reply %s: data.path = %q, want %q", field, p, want)
+		}
+	}
+
+	// With no way to name a URL, an unknown hash is always unknown_blob.
+	toolFails(t, env, aSecret, "vecnet_send", send("k2", att()), "unknown_blob")
+	toolFails(t, env, bSecret, "vecnet_reply", reply("r2", att()), "unknown_blob")
+
+	// A repeated key is validated by its last value, and a struct decoder
+	// would merge the earlier one in: the URL must not survive that way.
+	hosted := []byte("hosted bytes")
+	sum := sha256.Sum256(hosted)
+	sha := hex.EncodeToString(sum[:])
+	if resp, body := env.Do(aSecret, http.MethodPut, "/v1/blobs", hosted); resp.StatusCode/100 != 2 {
+		t.Fatalf("PUT /v1/blobs: %d %s", resp.StatusCode, body)
+	}
+	smuggled := fmt.Sprintf(`{"idempotency_key":"k3","recipients":[%q],"priority":"hold","content":{"text":"x"},`+
+		`"attachments":[{"sha256":%[2]q,"size":%[3]d,"media_type":"text/plain","origin_url":"https://evil.example/x"}],`+
+		`"attachments":[{"sha256":%[2]q,"size":%[3]d,"media_type":"text/plain"}]}`, b, sha, len(hosted))
+	if res := verbatimResult(t, env, aSecret, "vecnet_send", smuggled); res.IsError {
+		t.Fatalf("repeated attachments: %s", res.StructuredContent)
+	}
+
+	// A hash the sender uploaded is still sent, and the hub sets blob_url.
+	var inbox inboxResult
+	toolOK(t, env, bSecret, "vecnet_inbox", map[string]any{}, &inbox)
+	ds := inbox.deliveries()
+	if len(ds) != 2 {
+		t.Fatalf("B has %d deliveries, want 2", len(ds))
+	}
+	got := ds[1].Data.Message.Attachments
+	if len(got) != 1 || got[0].SHA256 != sha || got[0].OriginURL != "" || got[0].BlobURL == "" {
+		t.Fatalf("delivered attachments = %+v, want %s with only a hub blob_url", got, sha)
+	}
+}
+
+// §2.2 step 9 caps the body the client sent. Escaping a value on the way to
+// the hub must not make it bigger than POST /v1/messages would see.
+func TestCapsCountTheBodyAsSent(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "a1")
+	b, bSecret := env.NewPeer("session", "b1")
+
+	var first sendResult
+	toolOK(t, env, aSecret, "vecnet_send", map[string]any{
+		"idempotency_key": "k0", "recipients": []string{b}, "priority": "hold",
+		"content": map[string]any{"text": "hello"},
+	}, &first)
+
+	n := 0
+	key := func() string { n++; return fmt.Sprintf("k%d", n) }
+	for _, tc := range []struct {
+		name, s string
+		count   int
+	}{
+		{"lt", "<", 3000}, {"gt", ">", 3000}, {"amp", "&", 3000},
+		{"line separator", "\u2028", 2000}, {"paragraph separator", "\u2029", 2000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value := strings.Repeat(tc.s, tc.count)
+			meta := fmt.Sprintf(`{"k":"%s"}`, value)
+			body := func(k string) string {
+				return fmt.Sprintf(`{"idempotency_key":%q,"recipients":[%q],"priority":"hold","content":{"text":"x"},"metadata":%s}`, k, b, meta)
+			}
+			if resp, out := env.Do(aSecret, http.MethodPost, "/v1/messages", body(key())); resp.StatusCode != http.StatusAccepted {
+				t.Fatalf("POST /v1/messages: %d %s", resp.StatusCode, out)
+			}
+			if res := verbatimResult(t, env, aSecret, "vecnet_send", body(key())); res.IsError {
+				t.Fatalf("vecnet_send: %s", res.StructuredContent)
+			}
+			reply := fmt.Sprintf(`{"message_id":%q,"text":"x","priority":"hold","idempotency_key":%q,"metadata":%s}`, first.MessageID, key(), meta)
+			if res := verbatimResult(t, env, bSecret, "vecnet_reply", reply); res.IsError {
+				t.Fatalf("vecnet_reply: %s", res.StructuredContent)
+			}
+		})
+	}
+
+	// The value arrives intact, not merely undersized.
+	want := "\u2028<" + strings.Repeat("&", 100)
+	args := fmt.Sprintf(`{"idempotency_key":"keep","recipients":[%q],"priority":"hold","content":{"text":"x"},"metadata":{"k":"%s"}}`, b, want)
+	if res := verbatimResult(t, env, aSecret, "vecnet_send", args); res.IsError {
+		t.Fatalf("vecnet_send: %s", res.StructuredContent)
+	}
+	var inbox inboxResult
+	toolOK(t, env, bSecret, "vecnet_inbox", map[string]any{"limit": 200}, &inbox)
+	ds := inbox.deliveries()
+	if got := ds[len(ds)-1].Data.Message.Metadata["k"]; got != want {
+		t.Fatalf("metadata k = %q, want %q", got, want)
+	}
+
+	// job_request.input has its own cap and the same exposure.
+	job := fmt.Sprintf(`{"idempotency_key":"j1","recipients":[%q],"priority":"hold","content":{"text":"x"},`+
+		`"job_request":{"version":1,"job_key":"j1","operation":"build.run","instructions":"go","input":{"k":"%s"}}}`, b, strings.Repeat("<", 6000))
+	if res := verbatimResult(t, env, aSecret, "vecnet_send", job); res.IsError {
+		t.Fatalf("job_request: %s", res.StructuredContent)
+	}
+}
+
+// vecnet_reply is sugar for vecnet_send (PROTOCOL §4.3): the same oversize
+// fields give the same tool error, whatever the encoding of the text.
+func TestReplyOversizeIsPayloadTooLarge(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "a1")
+	b, bSecret := env.NewPeer("session", "b1")
+
+	var sent sendResult
+	toolOK(t, env, aSecret, "vecnet_send", map[string]any{
+		"idempotency_key": "k1", "recipients": []string{b}, "priority": "hold",
+		"content": map[string]any{"text": "hello"},
+	}, &sent)
+
+	bigMeta := map[string]any{}
+	for i := range 40 {
+		bigMeta[fmt.Sprintf("k%d", i)] = strings.Repeat("v", 300)
+	}
+	for _, tc := range []struct {
+		name, field string
+		limit       float64
+		extra       map[string]any
+	}{
+		{"ascii text", "content.text", 65536, map[string]any{"text": strings.Repeat("a", 70000)}},
+		{"multi-byte text", "content.text", 65536, map[string]any{"text": strings.Repeat("\u20ac", 30000)}},
+		{"metadata past maxProperties", "metadata", 8192, map[string]any{"metadata": bigMeta}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := map[string]any{"message_id": sent.MessageID, "text": "x", "priority": "hold", "idempotency_key": "r1"}
+			for k, v := range tc.extra {
+				args[k] = v
+			}
+			e := toolFails(t, env, bSecret, "vecnet_reply", args, "payload_too_large")
+			if e.Error.Details["field"] != tc.field || e.Error.Details["limit"] != tc.limit {
+				t.Fatalf("details = %v, want field %s limit %v", e.Error.Details, tc.field, tc.limit)
+			}
+		})
+	}
+
+	// Text at the cap is a normal reply.
+	toolOK(t, env, bSecret, "vecnet_reply", map[string]any{
+		"message_id": sent.MessageID, "text": strings.Repeat("a", 65536), "priority": "hold", "idempotency_key": "r2",
+	}, nil)
 }
 
 func TestIdempotentReplay(t *testing.T) {
@@ -635,6 +919,35 @@ func TestInboxCursors(t *testing.T) {
 	e := toolFails(t, env, bSecret, "vecnet_inbox", map[string]any{"after": "e999999.1"}, "cursor_purged")
 	if e.Error.Details["oldest_cursor"] == "" || e.Error.Details["oldest_cursor"] == nil {
 		t.Fatalf("details = %v, want oldest_cursor", e.Error.Details)
+	}
+}
+
+// JSON Schema's integer admits 5.0 and 1e1, so the tools must too.
+func TestLimitAcceptsIntegralNumbers(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "a1")
+	b, bSecret := env.NewPeer("session", "b1")
+
+	var sent sendResult
+	toolOK(t, env, aSecret, "vecnet_send", map[string]any{
+		"idempotency_key": "k1", "recipients": []string{b}, "priority": "hold",
+		"content": map[string]any{"text": "hello"},
+	}, &sent)
+
+	for _, limit := range []string{"5.0", "1e1"} {
+		for _, c := range []struct{ name, args string }{
+			{"vecnet_inbox", `{"limit":` + limit + `}`},
+			{"vecnet_threads", `{"limit":` + limit + `}`},
+			{"vecnet_thread", `{"id":"` + sent.ThreadID + `","limit":` + limit + `}`},
+		} {
+			if res := verbatimResult(t, env, bSecret, c.name, c.args); res.IsError {
+				t.Errorf("%s limit %s: %s", c.name, limit, res.StructuredContent)
+			}
+		}
+	}
+	status, r := rpcVerbatim(t, env, bSecret, "vecnet_inbox", `{"limit":1.5}`)
+	if status != http.StatusOK || r.Error == nil || r.Error.Code != mcpserver.ErrInvalidParams {
+		t.Fatalf("limit 1.5: %d %+v", status, r.Error)
 	}
 }
 
