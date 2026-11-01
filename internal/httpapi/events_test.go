@@ -208,7 +208,7 @@ func (s *sseStream) expectPreamble(t *testing.T, wantID string) {
 func TestLongPollReturnsImmediatelyAndThenWaits(t *testing.T) {
 	env := testhub.Start(t)
 	_, aSec := env.NewPeer("grokbot", "a")
-	b, bSec := env.NewPeer("dot", "b")
+	b, bSec := env.NewPeer("session", "b")
 	sr := postSend(t, env, aSec, sendBody("lp-1", b), http.StatusAccepted)
 
 	resp, body, took := getEvents(t, env, bSec, "?after="+zeroCursor(env)+"&wait=20", nil)
@@ -264,7 +264,7 @@ func TestLongPollReturnsImmediatelyAndThenWaits(t *testing.T) {
 func TestNeverAckedStartsAtOldest(t *testing.T) {
 	env := testhub.Start(t)
 	_, aSec := env.NewPeer("grokbot", "a")
-	b, bSec := env.NewPeer("dot", "b")
+	b, bSec := env.NewPeer("session", "b")
 	sr := postSend(t, env, aSec, sendBody("first-read", b), http.StatusAccepted)
 
 	pr := mustPoll(t, env, bSec, "?wait=0")
@@ -287,7 +287,7 @@ func TestNeverAckedStartsAtOldest(t *testing.T) {
 func TestLongPollWakesOnSend(t *testing.T) {
 	env := testhub.Start(t)
 	_, aSec := env.NewPeer("grokbot", "a")
-	b, bSec := env.NewPeer("dot", "b")
+	b, bSec := env.NewPeer("session", "b")
 	cur, err := env.Hub.Log.Current(context.Background(), []string{b})
 	if err != nil {
 		t.Fatal(err)
@@ -359,7 +359,7 @@ func TestSSEFramesAndHeartbeat(t *testing.T) {
 	env := testhub.Start(t)
 	env.Configure(func(d *httpapi.Deps) { d.Heartbeat = 100 * time.Millisecond })
 	_, aSec := env.NewPeer("grokbot", "a")
-	b, bSec := env.NewPeer("dot", "b")
+	b, bSec := env.NewPeer("session", "b")
 	cur, err := env.Hub.Log.Oldest(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -404,7 +404,7 @@ func TestSSEFramesAndHeartbeat(t *testing.T) {
 func TestSSEResumeFromLastEventID(t *testing.T) {
 	env := testhub.Start(t)
 	_, aSec := env.NewPeer("grokbot", "a")
-	b, bSec := env.NewPeer("dot", "b")
+	b, bSec := env.NewPeer("session", "b")
 	postSend(t, env, aSec, sendBody("r-1", b), http.StatusAccepted)
 	postSend(t, env, aSec, sendBody("r-2", b), http.StatusAccepted)
 	evs, err := env.Hub.Log.Read(context.Background(), []string{b}, eventlog.Cursor{Epoch: env.Hub.Log.Epoch()}, 0)
@@ -429,7 +429,7 @@ func TestSSEResumeFromLastEventID(t *testing.T) {
 
 func TestCursorMismatch400AndPurged409(t *testing.T) {
 	env := testhub.Start(t)
-	_, bSec := env.NewPeer("dot", "b")
+	_, bSec := env.NewPeer("session", "b")
 
 	resp, body, _ := getEvents(t, env, bSec, "?after=e1.2", map[string]string{"Last-Event-ID": "e1.1"})
 	mustErr(t, resp, body, http.StatusBadRequest, "cursor_mismatch")
@@ -502,7 +502,7 @@ func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
 	// instead of tripping a fixed wall-clock budget.
 	env.Configure(func(d *httpapi.Deps) { d.SSEStall = time.Hour })
 	a, aSec := env.NewPeer("grokbot", "a")
-	b, bSec := env.NewPeer("dot", "b")
+	b, bSec := env.NewPeer("session", "b")
 	c, _ := env.NewPeer("dot", "c")
 	env.SetLimits(a, 10000, 10000)
 
@@ -566,7 +566,7 @@ func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
 func TestSSEReplaysLargeBacklogOnOneConnection(t *testing.T) {
 	env := testhub.Start(t)
 	a, aSec := env.NewPeer("grokbot", "a")
-	b, bSec := env.NewPeer("dot", "b")
+	b, bSec := env.NewPeer("session", "b")
 	env.SetLimits(a, 10000, 10000)
 	const n = 300
 	for i := 0; i < n; i++ {
@@ -610,7 +610,7 @@ func waitStreams(t *testing.T, n int64) {
 func TestDisabledPeer204(t *testing.T) {
 	env := testhub.Start(t)
 	ctx := context.Background()
-	b, bSec := env.NewPeer("dot", "b")
+	b, bSec := env.NewPeer("session", "b")
 	prn, pSec := env.NewPrincipal("p")
 	c, _, err := env.Hub.AddPeer(ctx, "session", "c", prn)
 	if err != nil {
@@ -641,7 +641,7 @@ func TestStopEndsLongPollAndSSE(t *testing.T) {
 	env := testhub.Start(t)
 	stop := make(chan struct{})
 	env.Configure(func(d *httpapi.Deps) { d.Stop = stop })
-	b, bSec := env.NewPeer("dot", "b")
+	b, bSec := env.NewPeer("session", "b")
 
 	s := openSSE(t, env, bSec, "", nil)
 	defer s.cancel()
@@ -676,4 +676,132 @@ func TestStopEndsLongPollAndSSE(t *testing.T) {
 		t.Fatal("long-poll still parked 5 s after stop")
 	}
 	waitStreams(t, 0)
+}
+
+// wantStreamEnds reads s until it closes, failing on any event first: an open
+// stream outlives the check that admitted it, and ends with what changed.
+func wantStreamEnds(t *testing.T, s *sseStream) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case f, open := <-s.frames:
+			if !open {
+				return
+			}
+			if f.Event != "" {
+				t.Fatalf("event on a stream whose credential or owners changed: %+v", f)
+			}
+		case <-deadline:
+			t.Fatal("stream still open")
+		}
+	}
+}
+
+func TestSSEEndsOnRotation(t *testing.T) {
+	ctx := context.Background()
+	t.Run("peer", func(t *testing.T) {
+		env := testhub.Start(t)
+		_, aSec := env.NewPeer("grokbot", "a")
+		b, bSec := env.NewPeer("session", "b")
+		s := openSSE(t, env, bSec, "", nil).start()
+		cur, _ := env.Hub.Log.Oldest(ctx)
+		s.expectPreamble(t, cur.String())
+		if _, err := env.Hub.RotatePeer(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+		postSend(t, env, aSec, sendBody("after-rotate", b), http.StatusAccepted)
+		wantStreamEnds(t, s)
+	})
+	t.Run("principal", func(t *testing.T) {
+		env := testhub.Start(t)
+		prn, secret := env.NewPrincipal("pc")
+		adminAddPeer(t, env, map[string]any{"kind": "session", "name": "b", "principal_id": prn})
+		s := openSSE(t, env, secret, "", nil).start()
+		cur, _ := env.Hub.Log.Oldest(ctx)
+		s.expectPreamble(t, cur.String())
+		if _, err := env.Hub.RotatePrincipal(ctx, prn); err != nil {
+			t.Fatal(err)
+		}
+		wantStreamEnds(t, s)
+	})
+}
+
+// With no wake at all, the heartbeat finds the rotation.
+func TestSSECredentialCheckedOnHeartbeat(t *testing.T) {
+	env := testhub.Start(t)
+	env.Configure(func(d *httpapi.Deps) { d.Heartbeat = 20 * time.Millisecond })
+	b, bSec := env.NewPeer("session", "b")
+	s := openSSE(t, env, bSec, "", nil).start()
+	if _, err := env.Hub.Auth.Rotate(context.Background(), "peer", b); err != nil { // no Notify
+		t.Fatal(err)
+	}
+	wantStreamEnds(t, s)
+}
+
+// The old principal's stream ends when its peer moves away: it no longer reads
+// that log. The peer's own stream carries on, since its owners are the same.
+func TestSSEEndsForOldPrincipalOnMove(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	_, aSec := env.NewPeer("grokbot", "a")
+	prn, secret := env.NewPrincipal("old")
+	newPrn, _ := env.NewPrincipal("new")
+	added := adminAddPeer(t, env, map[string]any{"kind": "session", "name": "b", "principal_id": prn})
+	b := added.PeerID
+	got := enrol(t, env, added.EnrolToken)
+
+	mine := openSSE(t, env, got.Secret, "", nil).start()
+	cur, _ := env.Hub.Log.Oldest(ctx)
+	mine.expectPreamble(t, cur.String())
+	old := openSSE(t, env, secret, "", nil).start()
+	old.expectPreamble(t, cur.String())
+	if err := env.Hub.MovePeer(ctx, b, newPrn); err != nil {
+		t.Fatal(err)
+	}
+	postSend(t, env, aSec, sendBody("after-move", b), http.StatusAccepted)
+	wantStreamEnds(t, old)
+	if f := mine.nextEvent(t, 5*time.Second); f.Event != "delivery" {
+		t.Fatalf("the peer's own stream = %+v, want its delivery", f)
+	}
+}
+
+func TestSSEEndsOnDisable(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	_, aSec := env.NewPeer("grokbot", "a")
+	b, bSec := env.NewPeer("session", "b")
+	s := openSSE(t, env, bSec, "", nil).start()
+	cur, _ := env.Hub.Log.Oldest(ctx)
+	s.expectPreamble(t, cur.String())
+	if err := env.Hub.SetPeerDisabled(ctx, b, true); err != nil {
+		t.Fatal(err)
+	}
+	postSend(t, env, aSec, sendBody("after-disable", b), http.StatusAccepted)
+	wantStreamEnds(t, s)
+}
+
+// A parked long-poll answers empty once its credential is gone, and the next
+// poll meets the 401.
+func TestLongPollEndsOnRotation(t *testing.T) {
+	env := testhub.Start(t)
+	b, bSec := env.NewPeer("session", "b")
+	done := make(chan []byte, 1)
+	go func() {
+		_, body, _ := getEvents(t, env, bSec, "?after=head&wait=25", nil)
+		done <- body
+	}()
+	time.Sleep(100 * time.Millisecond) // parked in its hold
+	if _, err := env.Hub.RotatePeer(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case body := <-done:
+		var p pollResp
+		if err := json.Unmarshal(body, &p); err != nil || len(p.Events) != 0 {
+			t.Fatalf("poll = %s, %v", body, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("long-poll still parked")
+	}
 }
