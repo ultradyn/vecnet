@@ -325,9 +325,9 @@ func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAf
 
 // DeliveryGate reports whether a dot may be pushed the Delivery Event of
 // deliveryID (PROTOCOL §5.2): not for hold, not for a held wake_idle, not for
-// a delivery already expired (§5.1: not retried; its sender was told), and
-// not for an id with no delivery row. The Delivery stays readable through
-// vecnet_inbox either way.
+// a delivery in a terminal state (§5.1: failed, expired or dead_letter, whose
+// sender may already have been told), and not for an id with no delivery row.
+// The Delivery stays readable through vecnet_inbox either way.
 func (h *Hub) DeliveryGate(ctx context.Context, deliveryID string) (push bool, err error) {
 	var priority, state string
 	var held bool
@@ -339,7 +339,11 @@ func (h *Hub) DeliveryGate(ctx context.Context, deliveryID string) (push bool, e
 	if err != nil {
 		return false, fmt.Errorf("hub: delivery gate: %w", err)
 	}
-	return priority != "hold" && !held && state != "expired", nil
+	switch state {
+	case "failed", "expired", "dead_letter":
+		return false, nil
+	}
+	return priority != "hold" && !held, nil
 }
 
 // AcceptEventPush records a 2xx from a dot's Events callback for deliveryID:

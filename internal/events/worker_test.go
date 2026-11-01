@@ -554,6 +554,218 @@ func TestThreadFilter(t *testing.T) {
 	}
 }
 
+// A delivery that expires with its row in the outbox is not pushed: its sender
+// has been told it expired (PROTOCOL §5.1). The row closes and the next one
+// goes out.
+func TestExpiredRowNotPosted(t *testing.T) {
+	env := testhub.Start(t)
+	dot, _ := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	sub := subscribe(t, env, cb, dot, nil, time.Time{})
+	cb.OnPost(func(n int, w http.ResponseWriter) {
+		if n == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	})
+	doomed := send(t, env, sender, dot, "doomed", "wake", "a")
+	step(t, env)
+	wantPosts(t, cb, 1)
+	if _, err := env.Hub.DB.Exec(`UPDATE deliveries SET expires_at = ? WHERE dly_id = ?`,
+		venv.FormatTime(env.Now.Now().Add(-time.Hour)), doomed); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := env.Hub.ExpireDeliveries(context.Background(), env.Now.Now()); err != nil || n != 1 {
+		t.Fatalf("ExpireDeliveries = %d, %v", n, err)
+	}
+	next := send(t, env, sender, dot, "next", "wake", "b")
+	env.Now.Advance(time.Hour)
+	step(t, env)
+	if posts := wantPosts(t, cb, 2); posts[1].ID != next {
+		t.Fatalf("POST %s, want %s; the expired delivery must not go out", posts[1].ID, next)
+	}
+	if _, done, terminal := outbox(t, env, sub.ID, doomed); !done || terminal != "gated" {
+		t.Fatalf("outbox done %v terminal %q, want gated", done, terminal)
+	}
+	got, err := env.Hub.DeliveryGate(context.Background(), doomed)
+	if err != nil || got {
+		t.Fatalf("DeliveryGate(expired) = %v, %v", got, err)
+	}
+}
+
+// Expiry while a subscription is paused is caught the same way on resume.
+func TestExpiredWhilePausedNotPosted(t *testing.T) {
+	env := testhub.Start(t)
+	dot, _ := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	sub := subscribe(t, env, cb, dot, nil, env.Now.Now().Add(time.Hour))
+	cb.OnPost(func(n int, w http.ResponseWriter) {
+		if n == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	})
+	doomed := send(t, env, sender, dot, "doomed", "wake", "a")
+	step(t, env)
+	wantPosts(t, cb, 1)
+	env.Now.Advance(2 * time.Hour)
+	step(t, env)
+	if _, err := env.Hub.DB.Exec(`UPDATE deliveries SET state = 'expired' WHERE dly_id = ?`, doomed); err != nil {
+		t.Fatal(err)
+	}
+	refresh(t, env, sub, env.Now.Now().Add(time.Hour))
+	step(t, env)
+	wantPosts(t, cb, 1)
+}
+
+func TestGateRefusesTerminalStates(t *testing.T) {
+	env := testhub.Start(t)
+	dot, _ := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	dly := send(t, env, sender, dot, "one", "wake", "a")
+	ctx := context.Background()
+	for state, want := range map[string]bool{
+		"queued": true, "pushed": true, "accepted": true, "processed": true,
+		"expired": false, "dead_letter": false, "failed": false,
+	} {
+		if _, err := env.Hub.DB.Exec(`UPDATE deliveries SET state = ? WHERE dly_id = ?`, state, dly); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := env.Hub.DeliveryGate(ctx, dly); err != nil || got != want {
+			t.Fatalf("DeliveryGate(%s) = %v, %v; want %v", state, got, err, want)
+		}
+	}
+}
+
+// The token can expire during a drain: each send re-checks it against the
+// current time (PROTOCOL §4.4), and what is left stays queued.
+func TestTokenExpiresMidDrain(t *testing.T) {
+	env := testhub.Start(t)
+	dot, _ := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	sub := subscribe(t, env, cb, dot, nil, env.Now.Now().Add(time.Hour))
+	cb.OnPost(func(n int, _ http.ResponseWriter) {
+		if n == 1 {
+			env.Now.Advance(2 * time.Hour)
+		}
+	})
+	send(t, env, sender, dot, "one", "wake", "a")
+	second := send(t, env, sender, dot, "two", "wake", "b")
+	step(t, env)
+	wantPosts(t, cb, 1)
+	if got := get(t, env, sub.ID); got.PausedReason != "token_expired" {
+		t.Fatalf("paused = %q, want token_expired", got.PausedReason)
+	}
+	if _, done, _ := outbox(t, env, sub.ID, second); done {
+		t.Fatal("the unsent event was settled")
+	}
+	refresh(t, env, sub, env.Now.Now().Add(time.Hour))
+	step(t, env)
+	if posts := wantPosts(t, cb, 2); posts[1].ID != second {
+		t.Fatalf("resumed with %s, want %s", posts[1].ID, second)
+	}
+}
+
+// A refresh during a drain counts: the fresh token is not paused for the old
+// one's expiry, and the drain carries on.
+func TestRefreshMidDrainKeepsSending(t *testing.T) {
+	env := testhub.Start(t)
+	dot, _ := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	sub := subscribe(t, env, cb, dot, nil, env.Now.Now().Add(5*time.Second))
+	cb.OnPost(func(n int, _ http.ResponseWriter) {
+		if n != 1 {
+			return
+		}
+		env.Now.Advance(10 * time.Second)
+		if _, _, err := env.Events.Store.Upsert(context.Background(), events.Subscription{
+			PrincipalKind: sub.PrincipalKind, PrincipalID: sub.PrincipalID, PeerID: sub.PeerID, Name: sub.Name,
+			URL: sub.URL, Arguments: sub.Arguments, Types: sub.Types,
+		}, webhook.NewSecret(), 0, env.Now.Now().Add(time.Hour)); err != nil {
+			t.Error(err)
+		}
+	})
+	send(t, env, sender, dot, "one", "wake", "a")
+	send(t, env, sender, dot, "two", "wake", "b")
+	step(t, env)
+	wantPosts(t, cb, 2)
+	if got := get(t, env, sub.ID); got.PausedReason != "" {
+		t.Fatalf("paused = %q, want none", got.PausedReason)
+	}
+}
+
+// So can the subscription itself lapse: it stops sending, as Active would
+// have it, without a pause reason, and a refresh picks up the rest.
+func TestSubscriptionLapsesMidDrain(t *testing.T) {
+	env := testhub.Start(t)
+	dot, _ := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	sub := subscribe(t, env, cb, dot, nil, time.Time{})
+	if _, err := env.Hub.DB.Exec(`UPDATE event_subscriptions SET expires_at = ? WHERE sub_id = ?`,
+		venv.FormatTime(env.Now.Now().Add(5*time.Second)), sub.ID); err != nil {
+		t.Fatal(err)
+	}
+	cb.OnPost(func(n int, _ http.ResponseWriter) {
+		if n == 1 {
+			env.Now.Advance(10 * time.Second) // inside the drain budget
+		}
+	})
+	send(t, env, sender, dot, "one", "wake", "a")
+	second := send(t, env, sender, dot, "two", "wake", "b")
+	step(t, env)
+	wantPosts(t, cb, 1)
+	if got := get(t, env, sub.ID); got.PausedReason != "" {
+		t.Fatalf("paused = %q, want none", got.PausedReason)
+	}
+	refresh(t, env, sub, time.Time{})
+	step(t, env)
+	if posts := wantPosts(t, cb, 2); posts[1].ID != second {
+		t.Fatalf("resumed with %s, want %s", posts[1].ID, second)
+	}
+}
+
+// An unsubscribe during a drain stops it.
+func TestUnsubscribeMidDrain(t *testing.T) {
+	env := testhub.Start(t)
+	dot, _ := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	sub := subscribe(t, env, cb, dot, nil, time.Time{})
+	cb.OnPost(func(n int, _ http.ResponseWriter) {
+		if n == 1 {
+			if err := env.Events.Store.Delete(context.Background(), sub.PrincipalKind, sub.PrincipalID, sub.URL, sub.Name, sub.Arguments); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	send(t, env, sender, dot, "one", "wake", "a")
+	send(t, env, sender, dot, "two", "wake", "b")
+	step(t, env)
+	wantPosts(t, cb, 1)
+}
+
+// One subscription may not hold a Step for its whole batch: a callback that
+// answers slowly yields after the budget, and the rest wait for the next Step.
+func TestDrainBudget(t *testing.T) {
+	env := testhub.Start(t)
+	dot, _ := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	subscribe(t, env, cb, dot, nil, time.Time{})
+	cb.OnPost(func(int, http.ResponseWriter) { env.Now.Advance(events.ClientTimeout) })
+	send(t, env, sender, dot, "one", "wake", "a")
+	send(t, env, sender, dot, "two", "wake", "b")
+	if n := step(t, env); n != 1 {
+		t.Fatalf("first Step sent %d, want 1", n)
+	}
+	wantPosts(t, cb, 1)
+	step(t, env)
+	wantPosts(t, cb, 2)
+}
+
 func TestAuthorisationRecheckedBeforeSend(t *testing.T) {
 	env := testhub.Start(t)
 	dot, _ := env.NewPeer("dot", "d")
@@ -744,7 +956,7 @@ func TestSetCursorDropsWhatTheClientHas(t *testing.T) {
 	if err := env.Hub.DB.QueryRow(`SELECT event_seq FROM deliveries WHERE dly_id = ?`, first).Scan(&seq); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.Events.Store.SetCursor(context.Background(), sub.ID, eventlog.Cursor{Epoch: env.Hub.Log.Epoch(), Seq: seq}); err != nil {
+	if err := env.Events.Store.SetCursor(context.Background(), sub.ID, eventlog.Cursor{Epoch: env.Hub.Log.Epoch(), Seq: seq}, true); err != nil {
 		t.Fatal(err)
 	}
 	step(t, env)

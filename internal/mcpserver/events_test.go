@@ -855,3 +855,256 @@ func TestEventsOnLegacySession(t *testing.T) {
 		t.Fatalf("POSTs = %d, want 1", n)
 	}
 }
+
+// eventSeq is the log seq of the event one POST carried.
+func eventSeq(t *testing.T, p testhub.CallbackPost) int64 {
+	t.Helper()
+	return cursorSeq(t, decodeEvent(t, p.Body).Cursor)
+}
+
+func cursorSeq(t *testing.T, raw string) int64 {
+	t.Helper()
+	c, err := eventlog.ParseCursor(raw)
+	if err != nil {
+		t.Fatalf("cursor %q: %v", raw, err)
+	}
+	return c.Seq
+}
+
+func answerFirst(status int) func(int, http.ResponseWriter) {
+	return func(n int, w http.ResponseWriter) {
+		if n == 1 {
+			w.WriteHeader(status)
+		}
+	}
+}
+
+// The cursor a refresh reports is a true replay position: a client that saves
+// it and passes it back loses nothing still queued (PROTOCOL §4.4).
+func TestQueuedRowSurvivesTwoRefreshes(t *testing.T) {
+	env := testhub.Start(t)
+	dot, dotSecret := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	whsec := webhook.NewSecret()
+	subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, nil))
+	cb.OnPost(answerFirst(http.StatusServiceUnavailable))
+	queued := sendPriority(t, env, sender, dot, "queued", "wake")
+	stepEvents(t, env)
+	posts := cb.Posts()
+	if len(posts) != 1 {
+		t.Fatalf("POSTs = %d", len(posts))
+	}
+	seq := eventSeq(t, posts[0])
+
+	first := subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, nil))
+	if got := cursorSeq(t, first.Cursor); got >= seq || first.Truncated {
+		t.Fatalf("refresh = %+v, want a cursor before the queued event at seq %d", first, seq)
+	}
+	second := subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, map[string]any{"cursor": first.Cursor}))
+	if second.Cursor != first.Cursor || second.Truncated {
+		t.Fatalf("second refresh = %+v, want %s", second, first.Cursor)
+	}
+	stepEvents(t, env)
+	posts = cb.Posts()
+	if len(posts) != 2 || posts[1].ID != queued {
+		t.Fatalf("POSTs = %+v, want %s redelivered", posts, queued)
+	}
+
+	// Delivered, the row no longer holds the position back.
+	settled := subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, nil))
+	if got := cursorSeq(t, settled.Cursor); got != seq {
+		t.Fatalf("after delivery cursor seq = %d, want %d", got, seq)
+	}
+}
+
+// A cursor below retention says nothing about what the client holds, so
+// what is queued still goes out.
+func TestPurgedCursorKeepsQueuedRow(t *testing.T) {
+	env := testhub.Start(t)
+	dot, dotSecret := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	whsec := webhook.NewSecret()
+	first := subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, nil))
+	cb.OnPost(answerFirst(http.StatusServiceUnavailable))
+	queued := sendPriority(t, env, sender, dot, "queued", "wake")
+	stepEvents(t, env)
+	if _, err := env.Hub.DB.Exec(`DELETE FROM events`); err != nil {
+		t.Fatal(err)
+	}
+	res := subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, map[string]any{"cursor": first.Cursor}))
+	if !res.Truncated {
+		t.Fatalf("refresh = %+v, want truncated", res)
+	}
+	stepEvents(t, env)
+	if posts := cb.Posts(); len(posts) != 2 || posts[1].ID != queued {
+		t.Fatalf("POSTs = %+v, want %s redelivered", posts, queued)
+	}
+}
+
+// 410 and 413 are never retried, and a rewind is not an exception, even past
+// the day settled rows are kept: ChatGPT's saved cursor stays before an event
+// the callback refused until a later one arrives.
+func TestTerminalRowSurvivesRewind(t *testing.T) {
+	for _, code := range []int{http.StatusGone, http.StatusRequestEntityTooLarge} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			env := testhub.Start(t)
+			dot, dotSecret := env.NewPeer("dot", "d")
+			_, sender := env.NewPeer("session", "s")
+			cb := testhub.NewCallback(t)
+			whsec := webhook.NewSecret()
+			first := subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, nil))
+			saved := map[string]any{"cursor": first.Cursor}
+			cb.OnPost(answerFirst(code))
+			sendPriority(t, env, sender, dot, "refused", "wake")
+			stepEvents(t, env)
+
+			subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, saved))
+			stepEvents(t, env)
+			if n := len(cb.Posts()); n != 1 {
+				t.Fatalf("POSTs after a rewind = %d, want the refused event left alone", n)
+			}
+
+			env.Now.Advance(25 * time.Hour)
+			stepEvents(t, env) // prunes settled rows
+			subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, saved))
+			stepEvents(t, env)
+			if n := len(cb.Posts()); n != 1 {
+				t.Fatalf("POSTs after a rewind past retention = %d, want the refused event left alone", n)
+			}
+
+			// What follows the refused event still goes out.
+			later := sendPriority(t, env, sender, dot, "later", "wake")
+			stepEvents(t, env)
+			if posts := cb.Posts(); len(posts) != 2 || posts[1].ID != later {
+				t.Fatalf("POSTs = %+v, want %s", posts, later)
+			}
+		})
+	}
+}
+
+// Giving up after 8 attempts is not "never retry": the client never got the
+// event, so the reported cursor stays before it and a re-subscribe from there
+// drains it (PROTOCOL §4.4 Outage).
+func TestExhaustedRowReplaysFromCursor(t *testing.T) {
+	env := testhub.Start(t)
+	dot, dotSecret := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	whsec := webhook.NewSecret()
+	subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, nil))
+	cb.OnPost(func(_ int, w http.ResponseWriter) { w.WriteHeader(http.StatusServiceUnavailable) })
+	dly := sendPriority(t, env, sender, dot, "doomed", "wake")
+	for i := 1; i <= 8; i++ {
+		stepEvents(t, env)
+		if i < 8 {
+			subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, nil)) // clears the backoff
+		}
+	}
+	posts := cb.Posts()
+	if len(posts) != 8 {
+		t.Fatalf("POSTs = %d, want 8", len(posts))
+	}
+	cb.OnPost(nil)
+	res := subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, nil))
+	if got := cursorSeq(t, res.Cursor); got >= eventSeq(t, posts[0]) || res.Truncated {
+		t.Fatalf("refresh = %+v, want a cursor before the given-up event", res)
+	}
+	stepEvents(t, env)
+	if n := len(cb.Posts()); n != 8 {
+		t.Fatalf("POSTs = %d; a refresh with no cursor stays put", n)
+	}
+	subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, map[string]any{"cursor": res.Cursor}))
+	stepEvents(t, env)
+	if posts := cb.Posts(); len(posts) != 9 || posts[8].ID != dly {
+		t.Fatalf("POSTs = %d, want %s replayed", len(posts), dly)
+	}
+}
+
+// Review Focus 3 through the method the plan names: the token expires with a
+// row in backoff and a later event waiting, and a fresh token's
+// events/subscribe delivers both, whether or not it passes a cursor.
+func TestTokenExpiryResumesThroughSubscribe(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		saved bool
+	}{{"no cursor", false}, {"saved cursor", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testhub.Start(t)
+			dot, _ := env.NewPeer("dot", "d")
+			_, sender := env.NewPeer("session", "s")
+			prn, err := env.Hub.PeerPrincipal(context.Background(), dot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cb := testhub.NewCallback(t)
+			whsec := webhook.NewSecret()
+			expiry := env.Now.Now().Add(time.Hour)
+			front := eventsFront(t, env, fakeOAuth{prn: prn, expires: func() time.Time { return expiry }}, func(m *mcpserver.Server) {
+				m.ResolveDotPeer = func(context.Context, string) (string, error) { return dot, nil }
+			})
+			first := subscribeOK(t, front, "any", subParams(cb.URL, whsec, nil))
+
+			cb.OnPost(answerFirst(http.StatusServiceUnavailable))
+			queued := sendPriority(t, env, sender, dot, "queued", "wake")
+			stepEvents(t, env)
+			if n := len(cb.Posts()); n != 1 {
+				t.Fatalf("POSTs = %d", n)
+			}
+
+			env.Now.Advance(2 * time.Hour)
+			later := sendPriority(t, env, sender, dot, "later", "wake")
+			stepEvents(t, env)
+			if n := len(cb.Posts()); n != 1 {
+				t.Fatalf("POSTs after expiry = %d, want none new", n)
+			}
+			paused, err := events.NewStore(env.Hub).Get(context.Background(), first.ID)
+			if err != nil || paused.PausedReason != "token_expired" {
+				t.Fatalf("subscription = %+v, %v; want paused token_expired", paused, err)
+			}
+
+			expiry = env.Now.Now().Add(time.Hour)
+			extra := map[string]any{}
+			if tc.saved {
+				extra["cursor"] = first.Cursor
+			}
+			res := subscribeOK(t, front, "any", subParams(cb.URL, whsec, extra))
+			if res.ID != first.ID || res.Truncated {
+				t.Fatalf("resume = %+v", res)
+			}
+			if got := cursorSeq(t, res.Cursor); got >= eventSeq(t, cb.Posts()[0]) {
+				t.Fatalf("resume cursor %s is past the queued event", res.Cursor)
+			}
+			stepEvents(t, env)
+			posts := cb.Posts()
+			if len(posts) != 3 || posts[1].ID != queued || posts[2].ID != later {
+				t.Fatalf("POSTs = %+v, want %s then %s", posts, queued, later)
+			}
+		})
+	}
+}
+
+// A purge the worker met is reported once, on the next events/subscribe.
+func TestSubscribeReportsWorkerTruncation(t *testing.T) {
+	env := testhub.Start(t)
+	dot, dotSecret := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	whsec := webhook.NewSecret()
+	subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, nil))
+	sendPriority(t, env, sender, dot, "lost", "wake")
+	if _, err := env.Hub.DB.Exec(`DELETE FROM events`); err != nil {
+		t.Fatal(err)
+	}
+	stepEvents(t, env)
+	if n := len(cb.Posts()); n != 0 {
+		t.Fatalf("POSTs = %d, want none", n)
+	}
+	if res := subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, nil)); !res.Truncated {
+		t.Fatalf("first refresh = %+v, want truncated", res)
+	}
+	if res := subscribeOK(t, env, dotSecret, subParams(cb.URL, whsec, nil)); res.Truncated {
+		t.Fatalf("second refresh = %+v, want the report once", res)
+	}
+}

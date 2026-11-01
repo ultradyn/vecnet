@@ -21,6 +21,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/ids"
 	"github.com/XertroV/vecnet/internal/push"
 	"github.com/XertroV/vecnet/internal/webhook"
 )
@@ -31,10 +32,19 @@ const (
 	ClientTimeout   = 30 * time.Second
 	tailBatch       = 50 // log events read per subscription per Step
 	drainBatch      = 50 // outbox rows considered per subscription per Step
-	stepParallel    = 8  // subscriptions served at once, so one dead callback stalls no other
+	stepParallel    = 8  // subscriptions served at once; a Step waits for all of them
 	previewBytes    = 1 << 10
 	doneRetention   = 24 * time.Hour // how long settled outbox rows are kept
+	// drainBudget stops a subscription starting a POST once it has held a Step
+	// this long. A dead callback's 30 s timeout still slows the Step it is in,
+	// but a slow one cannot hold it for a whole batch.
+	drainBudget = ClientTimeout
+
+	terminalGated = "gated" // the delivery may no longer be pushed
 )
+
+// deliveryPrefix marks an outbox row carrying a delivery Event.
+const deliveryPrefix = string(ids.Dly) + "_"
 
 // pushable are the only Event types a dot is ever pushed [R14].
 var pushable = []string{"delivery", "receipt", "thread_updated", "approval_expired"}
@@ -141,7 +151,11 @@ func (w *Worker) Step(ctx context.Context) (int, error) {
 		})
 	}
 	wg.Wait()
-	if err := w.Store.pruneDone(ctx, now.Add(-doneRetention)); err != nil {
+	oldest, err := w.Log.Oldest(ctx)
+	if err != nil {
+		return int(sent.Load()), err
+	}
+	if err := w.Store.pruneDone(ctx, now.Add(-doneRetention), oldest); err != nil {
 		return int(sent.Load()), err
 	}
 	return int(sent.Load()), errors.Join(errs...)
@@ -301,24 +315,39 @@ func clip(s string, n int) string {
 // drain POSTs s's due rows, oldest first, stopping at the first row that is
 // not due or fails: a callback in backoff waits as a whole, so an outage
 // spends one row's attempts rather than every row's. A terminal answer closes
-// only its row.
-func (w *Worker) drain(ctx context.Context, s Subscription) (int, error) {
-	rows, err := w.Store.pending(ctx, s.ID, drainBatch)
+// only its row, as does a delivery the gate no longer passes. Each send first
+// re-checks the subscription, its authorisation and the gate as they stand
+// then: a POST can take 30 s, and much can change over a batch of them.
+func (w *Worker) drain(ctx context.Context, sub Subscription) (int, error) {
+	rows, err := w.Store.pending(ctx, sub.ID, drainBatch)
 	if err != nil {
 		return 0, err
 	}
 	sent := 0
+	started := w.now()
 	for _, r := range rows {
 		now := w.now()
 		if r.next != nil && *r.next > envelope.FormatTime(now) {
 			break
 		}
-		ok, err := w.authorised(ctx, s)
-		if err != nil {
+		s, live, err := w.current(ctx, sub.ID, now)
+		if err != nil || !live {
 			return sent, err
 		}
-		if !ok {
-			return sent, w.Store.pause(ctx, s.ID, PausedUnauthorized, now)
+		if now.Sub(started) >= drainBudget {
+			break
+		}
+		if strings.HasPrefix(r.eventID, deliveryPrefix) {
+			ok, err := w.Hub.DeliveryGate(ctx, r.eventID)
+			if err != nil {
+				return sent, err
+			}
+			if !ok {
+				if err := w.Store.withdraw(ctx, s.ID, r.eventID, now); err != nil {
+					return sent, err
+				}
+				continue
+			}
 		}
 		status, retryAfter, netErr := w.post(ctx, s, r)
 		if netErr != nil && ctx.Err() != nil {
@@ -338,7 +367,37 @@ func (w *Worker) drain(ctx context.Context, s Subscription) (int, error) {
 	return sent, nil
 }
 
-// authorised is the re-check before each send (PROTOCOL §4.4).
+// current re-reads a subscription and reports whether it may send at now
+// (PROTOCOL §4.4), pausing it if authorisation has gone. Nothing is dropped
+// and the cursor stays. An unsubscribed or lapsed one simply stops, as it
+// would for Active. Reading the row afresh means a refresh during the drain
+// counts: its new token is not paused as the old one's expiry.
+func (w *Worker) current(ctx context.Context, id string, now time.Time) (Subscription, bool, error) {
+	s, err := w.Store.Get(ctx, id)
+	if errors.Is(err, ErrNotFound) {
+		return Subscription{}, false, nil
+	}
+	if err != nil {
+		return Subscription{}, false, err
+	}
+	if s.TokenExpires != nil && !s.TokenExpires.After(now) {
+		return s, false, w.Store.pause(ctx, id, PausedTokenExpired, now)
+	}
+	if s.Expires != nil && !s.Expires.After(now) {
+		return s, false, nil
+	}
+	ok, err := w.authorised(ctx, s)
+	if err != nil {
+		return s, false, err
+	}
+	if !ok {
+		return s, false, w.Store.pause(ctx, id, PausedUnauthorized, now)
+	}
+	return s, true, nil
+}
+
+// authorised reports whether s's peer may still be pushed to on its
+// principal's behalf.
 func (w *Worker) authorised(ctx context.Context, s Subscription) (bool, error) {
 	ok, err := w.Store.peerAuthorised(ctx, s)
 	if err != nil || !ok {
@@ -389,7 +448,10 @@ func (w *Worker) post(ctx context.Context, s Subscription, r outboxRow) (status 
 
 // record applies one POST's outcome: 2xx delivers; 410 and 413 are terminal;
 // anything else uses an attempt, and the last attempt gives the row up and
-// pauses the subscription.
+// pauses the subscription. Only a 2xx changes the Delivery: a failure is one
+// subscription's, the Delivery stays readable through vecnet_inbox, and a
+// re-subscribe from the cursor still replays an exhausted row, which a
+// dead_letter would gate. If nothing reaches it, it expires (PROTOCOL §5.1).
 func (w *Worker) record(ctx context.Context, s Subscription, r outboxRow, status int, retryAfter time.Duration, netErr error) (delivered, stop bool, err error) {
 	now := w.now()
 	w.Hub.ObservePush(ctx, s.PeerID, netErr == nil && status >= 200 && status < 300)
@@ -398,7 +460,7 @@ func (w *Worker) record(ctx context.Context, s Subscription, r outboxRow, status
 		if err := w.Store.settle(ctx, s.ID, r.eventID, "", status, now); err != nil {
 			return false, true, err
 		}
-		if strings.HasPrefix(r.eventID, "dly_") {
+		if strings.HasPrefix(r.eventID, deliveryPrefix) {
 			if err := w.Hub.AcceptEventPush(ctx, r.eventID, now); err != nil {
 				return true, true, err
 			}

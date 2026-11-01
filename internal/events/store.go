@@ -2,7 +2,7 @@
 // subscriptions, the verification challenge, and the worker that tails each
 // subscription's peer log into signed POSTs. A subscription's cursor is a
 // position in that log, so replay and outage queueing need no second queue;
-// event_outbox holds only what was read and not yet settled.
+// event_outbox holds what was read, with its body until it settles.
 package events
 
 import (
@@ -105,6 +105,16 @@ func canonicalArgs(args map[string]any) (string, error) {
 	}
 	return string(b), nil
 }
+
+// Outbox predicates. terminal holds "http_410" or "http_413" for a callback's
+// final refusal, "exhausted" when attempts ran out and "gated" when the
+// delivery may no longer be pushed.
+const (
+	// neverRetried rows stay settled through a rewind (PROTOCOL §4.4).
+	neverRetried = `coalesce(terminal, '') IN ('http_410', 'http_413')`
+	// undelivered rows are events the client has not been given.
+	undelivered = `(done_at IS NULL OR terminal = 'exhausted')`
+)
 
 // Upsert creates or refreshes the subscription keyed by (principal, url,
 // name, arguments). A refresh keeps the cursor and the verification, rotates
@@ -325,15 +335,23 @@ func (st *Store) MarkVerified(ctx context.Context, id string) error {
 	return nil
 }
 
-// SetCursor moves a subscription to cur, which the caller vouches is
-// retained: the client's saved position always wins (PROTOCOL §4.4). The
-// worker re-reads everything after cur, so outbox rows past it go; unsettled
-// rows at or before it go too, since the client has those. The truncated
-// flag, now reported, is cleared.
-func (st *Store) SetCursor(ctx context.Context, id string, cur eventlog.Cursor) error {
+// SetCursor moves a subscription to cur, which the caller vouches is retained,
+// and clears the truncated flag, now reported. The worker reads everything
+// after cur again, so outbox rows past it go, keeping order, except the ones
+// the callback refused for good: those stay settled, so reading them again
+// changes nothing and a rewind never retries a 410 or 413 (PROTOCOL §4.4).
+//
+// clientHas says the client named cur as the position it holds, which wins
+// (ChatGPT passes its last saved cursor): undelivered rows at or before it go
+// too. Hub-reported cursors never pass an undelivered row (ReplayCursor), so
+// such a row is one the client got and the hub did not hear about. Without
+// clientHas, as when a purged cursor is replaced, those rows stay queued.
+func (st *Store) SetCursor(ctx context.Context, id string, cur eventlog.Cursor, clientHas bool) error {
 	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM event_outbox WHERE sub_id = ? AND (seq > ? OR done_at IS NULL)`, id, cur.Seq); err != nil {
+			`DELETE FROM event_outbox WHERE sub_id = ?1 AND (
+			   (seq > ?2 AND NOT `+neverRetried+`) OR (?3 AND seq <= ?2 AND `+undelivered+`))`,
+			id, cur.Seq, clientHas); err != nil {
 			return fmt.Errorf("events: rewind outbox: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -343,6 +361,22 @@ func (st *Store) SetCursor(ctx context.Context, id string, cur eventlog.Cursor) 
 		}
 		return nil
 	})
+}
+
+// ReplayCursor is the position to report to a client when the subscription
+// stands at cur: cur, or just before the oldest undelivered row if that comes
+// first. The tail cursor alone would pass rows that are queued or given up on,
+// and a client that later passed it back would be saying it holds them.
+func (st *Store) ReplayCursor(ctx context.Context, id string, cur eventlog.Cursor) (eventlog.Cursor, error) {
+	var oldest *int64
+	if err := st.DB.QueryRowContext(ctx,
+		`SELECT min(seq) FROM event_outbox WHERE sub_id = ? AND `+undelivered, id).Scan(&oldest); err != nil {
+		return eventlog.Cursor{}, fmt.Errorf("events: replay cursor: %w", err)
+	}
+	if oldest != nil && *oldest-1 < cur.Seq {
+		cur.Seq = *oldest - 1
+	}
+	return cur, nil
 }
 
 // ClearTruncated marks the truncated flag reported to the client.
@@ -536,7 +570,8 @@ func (st *Store) pending(ctx context.Context, id string, limit int) ([]outboxRow
 }
 
 // settle closes a row (terminal "" for a delivery) and records the response.
-// status 0 is a network failure and leaves last_status NULL.
+// status 0 is a network failure and leaves last_status NULL. A settled row's
+// body is never sent again, so it is cleared: a replay reads the log.
 func (st *Store) settle(ctx context.Context, id, eventID, terminal string, status int, now time.Time) error {
 	nowS := envelope.FormatTime(now)
 	var term any
@@ -545,11 +580,30 @@ func (st *Store) settle(ctx context.Context, id, eventID, terminal string, statu
 	}
 	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE event_outbox SET done_at = ?, terminal = ?, next_attempt_at = NULL WHERE sub_id = ? AND event_id = ?`,
+			`UPDATE event_outbox SET done_at = ?, terminal = ?, next_attempt_at = NULL, body = '' WHERE sub_id = ? AND event_id = ?`,
 			nowS, term, id, eventID); err != nil {
 			return fmt.Errorf("events: settle: %w", err)
 		}
 		return recordResult(ctx, tx, id, status, 0, nil, nowS)
+	})
+}
+
+// withdraw closes a row the delivery gate no longer passes. No POST was made,
+// so the last response stands; the operator's attempt count moves on.
+func (st *Store) withdraw(ctx context.Context, id, eventID string, now time.Time) error {
+	nowS := envelope.FormatTime(now)
+	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE event_outbox SET done_at = ?, terminal = ?, next_attempt_at = NULL, body = '' WHERE sub_id = ? AND event_id = ?`,
+			nowS, terminalGated, id, eventID); err != nil {
+			return fmt.Errorf("events: withdraw: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE event_subscriptions SET attempts = 0, next_attempt_at = NULL, updated_at = ? WHERE sub_id = ?`,
+			nowS, id); err != nil {
+			return fmt.Errorf("events: withdraw: %w", err)
+		}
+		return nil
 	})
 }
 
@@ -579,11 +633,13 @@ func recordResult(ctx context.Context, tx *sql.Tx, id string, status, attempts i
 	return nil
 }
 
-// pruneDone forgets rows settled before cutoff. Past the cursor nothing reads
-// them, and each one holds a whole body.
-func (st *Store) pruneDone(ctx context.Context, cutoff time.Time) error {
+// pruneDone forgets rows settled before cutoff. A row refused for good lasts
+// until the log has purged its event: a rewind can still read it again until
+// then, however old it is, and only this row stops it being retried.
+func (st *Store) pruneDone(ctx context.Context, cutoff time.Time, oldest eventlog.Cursor) error {
 	if _, err := st.DB.ExecContext(ctx,
-		`DELETE FROM event_outbox WHERE done_at IS NOT NULL AND done_at < ?`, envelope.FormatTime(cutoff)); err != nil {
+		`DELETE FROM event_outbox WHERE done_at IS NOT NULL AND done_at < ? AND (NOT `+neverRetried+` OR seq <= ?)`,
+		envelope.FormatTime(cutoff), oldest.Seq); err != nil {
 		return fmt.Errorf("events: prune outbox: %w", err)
 	}
 	return nil

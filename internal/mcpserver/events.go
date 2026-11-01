@@ -315,7 +315,7 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 
 	// A given cursor always wins (ChatGPT passes its last saved one). Absent,
 	// a first subscribe starts at the head and a refresh stays put.
-	cur, move := sub.Cursor, false
+	cur, move, clientHas := sub.Cursor, false, want != nil
 	switch {
 	case want != nil && *want == eventlog.Head:
 		cur, move = head, true
@@ -330,10 +330,11 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 		if !errors.As(err, &purged) {
 			return nil, err
 		}
-		cur, move, truncated = purged.Oldest, true, true
+		// Below retention, the position says nothing about what the client has.
+		cur, move, clientHas, truncated = purged.Oldest, true, false, true
 	}
 	if move {
-		if err := s.Events.SetCursor(ctx, sub.ID, cur); err != nil {
+		if err := s.Events.SetCursor(ctx, sub.ID, cur, clientHas); err != nil {
 			return nil, err
 		}
 	} else if sub.Truncated {
@@ -347,6 +348,10 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 		}
 	}
 
+	replay, err := s.Events.ReplayCursor(ctx, sub.ID, cur)
+	if err != nil {
+		return nil, err
+	}
 	refresh := sub.Expires.Add(-refreshMargin)
 	if now := s.now(); refresh.Before(now) {
 		refresh = now
@@ -354,7 +359,7 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 	return map[string]any{
 		"id":            sub.ID,
 		"refreshBefore": envelope.FormatTime(refresh),
-		"cursor":        cur.String(),
+		"cursor":        replay.String(),
 		"truncated":     truncated,
 	}, nil
 }

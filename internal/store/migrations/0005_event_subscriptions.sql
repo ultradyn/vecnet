@@ -1,6 +1,6 @@
 -- MCP Events subscriptions (PROTOCOL §4.4). A subscription tails its peer's
 -- event log from its cursor; the log is the durable queue, and event_outbox
--- holds only what was read and not yet settled, with its exact body bytes.
+-- holds what was read, with its exact body bytes until it settles.
 -- principal_id: the OAuth principal; the peer of a peer credential; the
 -- principal of a principal or operator credential.
 -- secret_enc, prev_secret_enc: whsec_ secrets sealed under meta.hub_key.
@@ -37,7 +37,7 @@ CREATE TABLE event_subscriptions (
 -- event_id: delivery_id for a delivery Event, else the log cursor string
 -- [R14]; unique per subscription, since two subscriptions may tail one peer.
 -- seq: the Event's log seq, the drain order. terminal: why a row was given up
--- on ('http_410', 'http_413', 'exhausted'); NULL for a delivered one.
+-- on ('http_410', 'http_413', 'exhausted', 'gated'); NULL for a delivered one.
 CREATE TABLE event_outbox (
 	sub_id          TEXT NOT NULL,
 	event_id        TEXT NOT NULL,
