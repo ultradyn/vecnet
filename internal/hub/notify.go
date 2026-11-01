@@ -231,7 +231,7 @@ func (h *Hub) postNotify(ctx context.Context, r NotifyRoute, id string, body []b
 			return
 		}
 	}
-	slog.Warn("hub: notification failed", "route", r.ID, "err", lastErr)
+	slog.Warn("hub: notification failed", "route", r.ID, "err", EgressErr(lastErr))
 }
 
 func (h *Hub) postNotifyOnce(ctx context.Context, client *http.Client, r NotifyRoute, id string, body []byte) error {

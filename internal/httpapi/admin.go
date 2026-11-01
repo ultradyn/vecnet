@@ -349,7 +349,7 @@ func (s *server) adminVerifyRoute(w http.ResponseWriter, r *http.Request) {
 		e := hub.E(http.StatusUnprocessableEntity, "invalid_value", "the route did not answer its verification challenge")
 		e.Details["field"] = "url"
 		e.Details["route_id"] = id
-		e.Details["reason"] = err.Error()
+		e.Details["reason"] = hub.EgressErr(err)
 		writeError(w, e)
 		return
 	}

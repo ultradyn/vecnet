@@ -196,7 +196,7 @@ func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAf
 	}
 	var lastErr any
 	if netErr != nil {
-		msg := netErr.Error()
+		msg := EgressErr(netErr)
 		if len(msg) > 512 {
 			msg = msg[:512]
 		}
