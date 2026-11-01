@@ -87,6 +87,18 @@ func (h *Hub) Receipt(ctx context.Context, c auth.Caller, deliveryID, state, not
 				return nil // terminal or repeated: nothing to report
 			}
 		}
+		if state == "read" {
+			res, err := tx.ExecContext(ctx,
+				`UPDATE deliveries SET read_at = ? WHERE dly_id = ? AND read_at IS NULL`, now, deliveryID)
+			if err != nil {
+				return fmt.Errorf("hub: receipt read: %w", err)
+			}
+			if n, err := res.RowsAffected(); err != nil {
+				return fmt.Errorf("hub: receipt read: %w", err)
+			} else if n == 0 {
+				return nil // already read: one read receipt per delivery
+			}
+		}
 		if senderIsPeer {
 			r := envelope.Receipt{
 				DeliveryID: deliveryID, MessageID: msg, ThreadID: thr,

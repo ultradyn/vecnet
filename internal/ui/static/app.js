@@ -217,7 +217,12 @@
         j = await api('GET', '/v1/events?after=' + encodeURIComponent(cur) + '&wait=' + wait);
       } catch (e) {
         if (gen !== S.gen) return;
-        if (e.code === 'cursor_purged' && e.details.oldest_cursor) { cur = e.details.oldest_cursor; continue; }
+        if (e.code === 'cursor_purged' && e.details.oldest_cursor) {
+          // Mid-session, events were purged while we were away: re-sync
+          // thread history explicitly before resuming (PROTOCOL §2.3).
+          if (cur !== 'e0.0') { loadThreads(); if (S.thread) loadThread(S.thread); }
+          cur = e.details.oldest_cursor; continue;
+        }
         if (e.status === 401) return;
         if (e.status === 403) { setConn('off', 'forbidden: ' + e.code); return; }
         setConn('off', 'offline, retrying'); await sleep(backoff); backoff = Math.min(backoff * 2, 30000); continue;

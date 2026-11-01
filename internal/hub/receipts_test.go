@@ -98,6 +98,15 @@ func TestReceiptProcessedReachesSender(t *testing.T) {
 	if s, _ := deliveryState(t, env, dly); s != "processed" {
 		t.Fatalf("delivery state after read = %q, want processed", s)
 	}
+	// A repeated read (a second browser, cleared UI state) is a no-op:
+	// still 204, no second receipt for the sender.
+	resp, body = postReceipt(t, env, bSec, map[string]any{"delivery_id": dly, "state": "read"})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("repeat POST /v1/receipts read = %d; %s", resp.StatusCode, body)
+	}
+	if got := findReceipt(t, env, a, dly, "read"); len(got) != 1 {
+		t.Fatalf("read receipts after a repeat = %d, want 1", len(got))
+	}
 
 	// failed moves the state.
 	sr2 := mustSend(t, env, aSec, req("rcpt-2", b))

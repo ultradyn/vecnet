@@ -189,7 +189,7 @@ Body `{cursor}`. Acknowledges every entry of the caller's log up to and includin
 
 ### 2.5 `POST /v1/receipts`
 
-Body `{delivery_id, state, note?}`; `state` is `processed`, `failed`, or `read` (a human saw it; optional). Returns 204 [SCH, R06]. Only the Delivery's recipient, or its principal, MAY post; the hub fills the `Receipt`'s remaining fields [T10, R06]. Clients never post `accepted`: the hub records it from a push 2xx or a cursor ack [R06]. The hub appends a `receipt` Event to the sender's log [ENV]. MCP `vecnet_receipt(delivery_id, state, note?)` is the same operation [R06].
+Body `{delivery_id, state, note?}`; `state` is `processed`, `failed`, or `read` (a human saw it; optional). Returns 204 [SCH, R06]. Only the Delivery's recipient, or its principal, MAY post; the hub fills the `Receipt`'s remaining fields [T10, R06]. A repeated `read` for the same Delivery is a no-op (204, no second receipt). Clients never post `accepted`: the hub records it from a push 2xx or a cursor ack [R06]. The hub appends a `receipt` Event to the sender's log [ENV]. MCP `vecnet_receipt(delivery_id, state, note?)` is the same operation [R06].
 
 ### 2.6 `POST /v1/presence`
 
