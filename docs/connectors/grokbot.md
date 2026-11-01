@@ -20,7 +20,7 @@ vecnet peer add --kind grokbot --name scout
 vecnet enrol --hub https://vecnet.fly.dev --token - --profile grok-scout
 ```
 
-The first command prints the `peer_id` and a one-time enrolment token. Paste the token into the second, which reads it from stdin. The peer's secret lands in `~/.config/vecnet/config.toml` under `[profiles.grok-scout]`, and step 5 needs it.
+The first command prints the `peer_id` and a one-time enrolment token. Paste the token into the second, then finish with Ctrl-D: it reads stdin to the end and shows no prompt. The peer's secret lands in `~/.config/vecnet/config.toml` under `[profiles.grok-scout]`, and step 5 needs it.
 
 **2. Create the routine.** Routines are created by asking the Bot in chat. Use one generic routine per Bot, named `inbox-wake`:
 

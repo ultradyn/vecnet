@@ -54,7 +54,7 @@
     },
     "loop": {
       "depth": 0,
-      "max_depth": 16,
+      "max_depth": 32,
       "expires_at": "2026-11-02T07:02:11.000Z",
       "sender_chain": [
         "src_01JD3R0J2M4P6R8T0V2X4Z6B8D"

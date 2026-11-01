@@ -234,7 +234,7 @@ func TestHintsStopOnDisconnect(t *testing.T) { /* cancel the listen request; gor
   type Worker struct{ Hub *hub.Hub; Store *Store; Log *eventlog.Log; Client *http.Client /* egress.Policy.Client */; Now func() time.Time; Interval time.Duration }
   func (w *Worker) Step(ctx) (sent int, err error)
   // for each Active subscription with verified_at set and paused_reason NULL and token_expires_at > now:
-  //   read Log.Read([peer_id], cursor, 50); for each Event e: skip unless e.type ∈ types (default ["delivery"]); for delivery events skip when the delivery's priority is hold or it is a held wake_idle (hub.DeliveryGate(ctx, dlyID) → push|skip); build {eventId, name, timestamp, data: e, cursor: e.cursor} (≤ 256 KiB else data replaced by {delivery_id, message_id, thread_id, preview: first 1 KiB text, blob_url}); enqueue in event_outbox if absent; advance cursor_seq after enqueue
+  //   read Log.Read([peer_id], cursor, 50); for each Event e: skip unless e.type ∈ types (default ["delivery"]); for delivery events skip when the delivery's priority is hold; a held wake_idle goes into the outbox parked and is pushed once on release (whole-branch review, PROTOCOL §5.2); build {eventId, name, timestamp, data: e, cursor: e.cursor} (≤ 256 KiB else data replaced by {delivery_id, message_id, thread_id, preview: first 1 KiB text, blob_url}); enqueue in event_outbox if absent; advance cursor_seq after enqueue
   //   drain outbox rows due: POST with webhook-id = eventId, webhook-timestamp, webhook-signature (dual-signed while prev_secret_until > now), X-MCP-Subscription-Id; 2xx → done; 410/413 → terminal, done_at set, terminal reason; other non-2xx/net error → attempts+1, next_attempt_at = now + hub.PushBackoff(attempts, retryAfter), after 8 → terminal "exhausted" and subscription paused_reason "delivery_failed"
   //   token_expires_at <= now → paused_reason "token_expired" (nothing dropped; cursor stays)
   func (w *Worker) Run(ctx) error
@@ -245,7 +245,7 @@ func TestHintsStopOnDisconnect(t *testing.T) { /* cancel the listen request; gor
   // events/subscribe {name, arguments, delivery:{mode:"webhook", url, secret}, cursor?, ttlMs?} →
   //   name must be vecnet.message (-32602); delivery.mode webhook; secret whsec_+base64 decoding to 24..64 bytes (-32602); egress.Policy.CheckURL(url) else -32015 {reason:"invalid_url"};
   //   peer_id: OAuth principal → its bound dot peer (Task 6; -32602 "not_linked" when unbound); vecnet bearer → caller's peer or arguments.peer_id (must belong to the principal); ttlMs clamp (null → 24 h);
-  //   Upsert; if not verified (new or url changed) run Challenge → on failure -32015 {reason}; cursor param: ParseCursor else -32602; "head"/absent on create → Log.Current; on refresh → stored cursor unless a param is given and ≥ stored? No: a given cursor always wins (ChatGPT passes its last saved one); if the cursor is below retention → truncated:true and cursor = oldest
+  //   Upsert; if not verified (new, url changed, lapsed, or the pass is over 24 h old) run Challenge → on failure -32015 {reason}, keeping an existing row and its cursor; cursor param: ParseCursor else -32602; "head"/absent on create → Log.Current; on refresh → stored cursor unless a param is given and ≥ stored? No: a given cursor always wins (ChatGPT passes its last saved one); if the cursor is below retention → truncated:true and cursor = oldest
   //   result {id: sub_id, refreshBefore: expires_at - 10 min (ISO), cursor: <string>, truncated}
   // events/unsubscribe {name, arguments, delivery:{mode,url}} → Delete → {}
   ```

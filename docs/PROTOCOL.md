@@ -170,6 +170,7 @@ SSE stream behaviour [SSE]:
 - Open with `retry: 3000` and a priming event: `id: <current cursor>` with empty `data:`.
 - Send `: hb` comment every 15 s while idle.
 - Send `Cache-Control: no-store`, `X-Accel-Buffering: no`; disable compression and buffering.
+- Re-check on every wake and heartbeat. A rotated credential, a disabled peer, or a change in the peers the stream reads ends the stream, and a parked long-poll answers empty, so the client's reconnect meets the new state. `peer rotate`, `peer move` and disabling a peer wake a stream at once; the heartbeat bounds anything else at 15 s.
 
 Status codes [SSE]:
 
@@ -223,7 +224,7 @@ Per-source inbound URL; see section 10. Accepted → 202 `{message_id}`; a redel
 
 ### 2.12 Enrolment and admin *(proposed paths)*
 
-`POST /v1/enrol`: body carries the one-time enrolment token printed by `vecnet peer add`; returns the peer's long-lived secret, once [T11].
+`POST /v1/enrol`: body carries the one-time enrolment token printed by `vecnet peer add`; returns the peer's long-lived secret, once [T11]. A dot never holds a secret (section 12): `peer add --kind dot` returns an empty `enrol_token`, and enrolling or rotating a dot is 422 `invalid_value`. It connects with a link code (section 4.5).
 
 Admin endpoints require the operator credential [T17]. Each mirrors a CLI command [T17] or an operator power stated in a ticket:
 
@@ -234,7 +235,7 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `POST /v1/admin/peers/{id}/move` | `peer move <peer> --principal <prn_>` | [R10] |
 | `POST /v1/admin/peers/{id}/rotate` | `peer rotate` | [T11, T17] |
 | `PUT /v1/admin/peers/{id}/scopes` | `peer scope` (allow/deny lists) | [T11, T17] |
-| `POST /v1/admin/sources` | `source add --kind --name --route` → ingress URL + secret | [T12] |
+| `POST /v1/admin/sources`, `GET /v1/admin/sources` | `source add --kind --name --route` → ingress URL + secret; `source list` (never returns a secret) | [T12] |
 | `POST /v1/admin/routes`, `GET /v1/admin/routes`, `POST …/routes/{id}/rotate` | `route add` (kind `http`: push route URL, issues `whsec_`; kind `grokbot`: routine URL and `crsr_` key, live at once); list routes (never returns a key); rotate (`http`: section 3.5; `grokbot`: body `{"key"}` replaces the routine key, 204) | [T11, T17, R25] |
 | `POST /v1/admin/teams`, `…/teams/{id}/members` | operator-managed teams | [T09] |
 | `POST /v1/admin/groups/{id}/unarchive` | unarchive an ad hoc group | [R21] |
@@ -244,6 +245,8 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `POST /v1/admin/dot-links` | `peer link <peer>` → 8-character link code, valid 10 min, binding a ChatGPT principal to a pre-created dot peer | [T11, R15] |
 | `PUT /v1/admin/notify` | operator notification webhooks and filters; each route gets its own `whsec_` | [T15, R23] |
 | `GET /v1/admin/audit` | audit log | [T11] |
+| `GET /v1/admin/counters` | delivery and loop counters | [T17] |
+| `GET /v1/admin/subscriptions`, `POST …/{id}/pause`, `POST …/{id}/resume` | `subscriptions list\|pause\|resume`: dot subscription health (section 13.4); pause stops one subscription until resume, and a re-subscribe does not lift it | [T02, T19] |
 
 **Principals.** `vecnet principal add --name <n>` creates a principal and prints its `prn_` id and credential. `vecnet peer add … --principal <prn_>` enrols a peer under it. `peer add` without `--principal` creates an implicit single-peer principal with the peer's display name. Only the operator reassigns a peer, with `vecnet peer move <peer> --principal <prn_>` [R10] or, for a dot, by issuing the link code whose consumption moves it (section 4.5). Kind `operator` carries the operator powers of section 16, so `peer add --kind operator` is accepted only under the operator principal (otherwise 422 `invalid_value`).
 
@@ -316,7 +319,7 @@ The hub MUST NOT implement MCP `Last-Event-ID` replay for any revision; the curs
 
 ### 4.2 Inbox resource and hints
 
-The inbox is the resource `vecnet://peer/<peer_id>/inbox`; a principal-level subscriber uses `vecnet://principal/<prn_id>/inbox` [R13]. Clients opt in with `subscriptions/listen {resourceSubscriptions:[<uri>]}` (2026-07-28) or `resources/subscribe` plus the GET stream (2025-11-25). Whenever the log grows the hub sends `notifications/resources/updated` for that URI. Notifications are **hints**: they never carry message content, and a client MUST respond to one by calling `vecnet_inbox(after=<cursor>)` [SSE]. Idle `/mcp` streams get the 15 s `: hb` comment [SSE].
+The inbox is the resource `vecnet://peer/<peer_id>/inbox`; a principal-level subscriber uses `vecnet://principal/<prn_id>/inbox` [R13]. Clients opt in with `subscriptions/listen {resourceSubscriptions:[<uri>]}` (2026-07-28) or `resources/subscribe` plus the GET stream (2025-11-25). Whenever the log grows the hub sends `notifications/resources/updated` for that URI. Notifications are **hints**: they never carry message content, and a client MUST respond to one by calling `vecnet_inbox(after=<cursor>)` [SSE]. Idle `/mcp` streams get the 15 s `: hb` comment [SSE]. A stream's credential is checked on each wake and heartbeat, as if each were a call (section 4.5): a token past expiry, a revoked token and a rotated bearer all end the stream with no final result, so the client reconnects with a live one. A disabled peer's URI parks instead, until it is enabled or every URI is lost. One credential holds at most 16 `subscriptions/listen` streams.
 
 ### 4.3 Tools
 
@@ -344,23 +347,24 @@ Implements OpenAI's ChatGPT profile in webhook mode [T02, DOTS]:
 - **`events/list`:** `events[]` of `{name, description, delivery:["webhook"], inputSchema, payloadSchema}` plus `nextCursor`. Catalogue example: `vecnet.message {peer_id?, thread_id?, types?}` with strict schemas [DOTS, R14].
 - **`events/subscribe`:** params `name`, `arguments`, `delivery:{mode:"webhook", url, secret}`, `cursor`, optional `ttlMs`; result `{id, refreshBefore, cursor, truncated}`. Store subscriptions durably keyed by `(principal, url, name, arguments)`; `id` is a routing handle, not a credential. Clamp TTL to ≤ 24 h and ≤ the access-token expiry. Return a replay cursor; set `truncated` honestly. `secret` MUST be `whsec_` + base64 decoding to 24–64 bytes [DOTS §2].
 - **`events/unsubscribe`:** idempotent, authorised against the connected account [DOTS §2].
-- **Challenge:** before first delivery POST `{"type":"verification","challenge":"<single-use>"}` signed with the subscription secret plus `X-MCP-Subscription-Id`; the callback echoes `{"challenge":…}`, compared in constant time. Failure: JSON-RPC `-32015` `CallbackEndpointError` with `data.reason` (`challenge_failed`, `timeout`) [DOTS §2].
-- **Push:** one event per POST, ≤ 256 KiB: `{eventId, name, timestamp, data, cursor}`; headers `webhook-id` (= `eventId`), `webhook-timestamp`, `webhook-signature`, `X-MCP-Subscription-Id`. Egress MUST resolve and pin DNS to public IPs only and MUST NOT follow redirects, including for challenges. Re-check authorisation before each send. Retry with backoff keeping `eventId`; never retry 410 or 413. On secret refresh, dual-sign for a short window [DOTS §2, §5].
+- **Challenge:** before first delivery POST `{"type":"verification","challenge":"<single-use>"}` signed with the subscription secret plus `X-MCP-Subscription-Id`; the callback echoes `{"challenge":…}`, compared in constant time. Failure: JSON-RPC `-32015` `CallbackEndpointError` with `data.reason` (`challenge_failed`, `timeout`) [DOTS §2]. A pass stands for 24 h, and ends early if the subscription lapses; a re-subscribe past that is challenged again with the secret it supplies, and nothing is sent until it passes. A new secret alone needs no challenge inside the bound: a pass is per principal and URL. Failing a first challenge removes the new row; failing a later one keeps the row, its cursor and its queue, unverified, for the next subscribe.
+- **Push:** one event per POST, ≤ 256 KiB: `{eventId, name, timestamp, data, cursor}`; headers `webhook-id` (= `eventId`), `webhook-timestamp`, `webhook-signature`, `X-MCP-Subscription-Id`. Egress MUST resolve and pin DNS to public IPs only and MUST NOT follow redirects, including for challenges. Re-check authorisation before each send: the subscription is live, verified and unpaused, its peer is enabled and bound as it was, and the access token that subscribed stands unrevoked. Rotating a bearer pauses what it subscribed in the same transaction (`paused_reason: credential_rotated`), since rotation answers a leak; the holder of the new bearer subscribes again. Retry with backoff keeping `eventId`; never retry 410 or 413. On secret refresh, dual-sign for a short window [DOTS §2, §5].
 - **Refresh:** ChatGPT calls `events/subscribe` again before `refreshBefore` with the last cursor; resume after it [DOTS §2].
 - **Outage:** while no live subscription exists, queue durably and drain from the cursor on re-subscribe [DOTS].
-- **Payload:** envelope metadata plus content, or a preview plus a blob reference when over the cap; never model instructions; label content untrusted [DOTS].
+- **Payload:** envelope metadata plus content, or a preview plus a blob reference when over the cap; never model instructions; label content untrusted [DOTS]. The label is in the `events/list` description and `payloadSchema`: each POST keeps the profile's five fields.
 - **Mapping:** `eventId` is the `delivery_id` for a `delivery` Event and the log cursor string otherwise; the Events `cursor` is the log cursor [R14].
 - **Types:** a dot is pushed `delivery` Events by default, and `receipt`, `thread_updated` or `approval_expired` only when its subscribe `arguments` list them in `types`. No other type is pushed to a dot [R14]. Priority still gates `delivery` pushes (section 5.2).
+- **Limits:** one principal holds at most 16 live subscriptions; another subscribe is `-32602` with `data.reason: too_many`.
 - **Tunnel:** OpenAI's Secure MCP Tunnel is unsupported in v1; dots reach the hub over public HTTPS [R14].
 
 ### 4.5 OAuth 2.1
 
 For dots the hub is both an OAuth **resource server** and its own minimal **authorization server** [T11]:
 
-- PKCE `S256` advertised and required; CIMD preferred, Dynamic Client Registration (RFC 7591) supported [DOTS §4, R15].
+- PKCE `S256` advertised and required; CIMD preferred, Dynamic Client Registration (RFC 7591) supported [DOTS §4, R15]. A CIMD URL must use the default https port. Outside the dev override it obeys the egress rules (section 14, invariant 7); the hub runs at most 8 fetches at once and does not retry a failed URL for a minute.
 - RFC 8414 authorization-server metadata [R15].
-- RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource`; ChatGPT sends `resource=`; validate `aud`, issuer, expiry and scope on every call [DOTS §4, R15].
-- Access tokens live 1 h; refresh tokens live 30 d and rotate on every use [R15].
+- RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource`; ChatGPT sends `resource=`; validate `aud`, issuer, expiry and scope on every call, and on each wake and heartbeat of a stream, which has no calls of its own (section 4.2) [DOTS §4, R15].
+- Access tokens live 1 h; refresh tokens live 30 d and rotate on every use [R15]. Presenting a spent refresh token or code revokes its whole family, is audited as `oauth_token_reuse`, and stops the Events subscriptions that family's access tokens made.
 - Redirect URIs `https://chatgpt.com/connector_platform_oauth_redirect` and `https://chatgpt.com/connector/oauth/{callback_id}` [DOTS §4].
 - No machine-to-machine grants exist for ChatGPT [DOTS §4].
 
@@ -401,7 +405,7 @@ Priority SHOULD NOT change dedupe or retry semantics [W2M §5].
 
 **`wake_idle` and stale presence.** `unknown`, including stale presence rendered as `unknown` (section 8), counts as idle [R16].
 
-**Where priority applies.** Priority affects only push transports (push routes, Grok Bot, dot Events) and the operator's notification webhooks. SSE, long-poll and MCP pull consumers, and `vecnet watch`, see every Event as it is appended, whatever its priority [R16]. For a dot, `hold` and a held `wake_idle` mean no Events push; the Delivery stays readable through `vecnet_inbox` [R16].
+**Where priority applies.** Priority affects only push transports (push routes, Grok Bot, dot Events) and the operator's notification webhooks. SSE, long-poll and MCP pull consumers, and `vecnet watch`, see every Event as it is appended, whatever its priority [R16]. For a dot, `hold` and a held `wake_idle` mean no Events push; the Delivery stays readable through `vecnet_inbox` [R16]. On release a held `wake_idle` is pushed once to each subscription that read it while held, with its original `eventId` and cursor, unless something has accepted it meanwhile (an ack, say, or another subscription's push). Its cursor can then be older than one the client already has, which at worst replays events it will dedupe by `eventId`.
 
 ### 5.3 Dedupe and idempotency
 
@@ -511,7 +515,7 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 ## 10. Inbound webhook sources
 
 - **Registration:** `vecnet source add --kind github --name <name> --route <peer|team|thread id>` prints `https://<hub>/v1/ingress/src_…` and a verification secret [T12].
-- **Verification:** GitHub by `X-Hub-Signature-256` HMAC; other kinds by Standard Webhooks or a shared header token [T12].
+- **Verification:** GitHub by `X-Hub-Signature-256` HMAC; other kinds by Standard Webhooks or a shared header token [T12]. Only `github` is implemented: `standard_webhooks` and `token` are reserved, and `source add` refuses them with 422 `invalid_value` until they exist.
 - **Mapping to a Message** [T12, EX08]:
   - `sender` = the `src_` id; `ingress = inbound_webhook`.
   - `content.text` = per-kind summary ≤ 4 KiB (GitHub: repo, event, title or comment excerpt, actor, URL).
@@ -554,10 +558,10 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 | Dots event push | The `whsec_` ChatGPT supplies at `events/subscribe` |
 | Admin | Operator credential |
 
-- **Dots never hold a vecnet secret** [T11].
+- **Dots never hold a vecnet secret** [T11]. The hub enforces this (section 2.12), and a link code revokes any peer credential or enrolment token left on the dot from before it did.
 - **CLI profiles:** `~/.config/vecnet/config.toml` holds named profiles, each a hub URL plus a peer, principal or operator credential; `--net` selects; `--as <peer>` picks a principal's peer [T17]. One peer per long-lived agent identity; sessions reuse that identity's stored credential [T17].
 - **Send scopes:** default allow-all among enrolled peers and teams; per-peer allow/deny lists set by the operator; ad hoc group creation respects the same scopes [T11]. Scopes gate sends and group creation only: every peer MAY read the directory, and thread history is readable by participants only [R24] (and by the operator, section 2.8). A send to a team or group is checked per member as if each were addressed directly: a deny on the group or on any member refuses the whole send (403 `scope_denied`, `details.recipient` the member, `details.via` the group); under allow-list scopes each member must be allowed unless the group or team itself is. Group membership is not required to address a group.
-- **Audit:** append-only table of actor (the sending peer id; `operator` for an admin action taken with the operator credential; `hub` for a hub-initiated action), action (`send`, `ack`, `enrol`, `rotate`, group create/change, `purge`, scope change), target ids, timestamp [T11]; loop cuts are also audited [T16].
+- **Audit:** append-only table of actor (the sending peer id; `operator` for an admin action taken with the operator credential; `hub` for a hub-initiated action), action (`send`, `ack`, `enrol`, `rotate`, group create/change, `purge`, scope change, `event_subscribe` with the callback host only, `subscription_pause`, `oauth_token_reuse`), target ids, timestamp [T11]; loop cuts are also audited [T16].
 - **Logging:** Message bodies and secrets MUST NOT enter logs or audit rows; redaction lives in the logger [T11].
 - **Secrets at rest:** bearer, principal, operator and enrolment secrets are stored only as SHA-256 hashes. Signing keys (route and notify `whsec_`, the blob-token `hub_key`) must be usable for HMAC and so are stored in plaintext, protected by the 0700 data directory.
 
@@ -641,8 +645,8 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 4. **Names are never addresses.** Recipients are ids; a display name is a schema error, never a lookup [ENV §7].
 5. **`vecnet.*` metadata keys belong to the hub** [SCH]. A SendRequest carrying any `vecnet.*` key gets 422 `reserved_metadata` [R26].
 6. **Secrets stay out of URLs, logs and audit rows** [SSE, T11]. Blob read tokens are scoped to one recipient and one hash [T13].
-7. **Push egress to dots is DNS-pinned to public IPs with no redirects** [DOTS].
-8. **Dots never hold a vecnet secret** [T11].
+7. **Every hub-initiated request to a configured URL is guarded** [DOTS]: push routes, notification routes, Events callbacks and challenges, Grok Bot routines and CIMD fetches. The URL is https, DNS is resolved once and pinned to public unicast addresses, redirects are never followed, and a request gets 30 s in all. The development-only `--allow-private-egress` (`VECNET_ALLOW_PRIVATE_EGRESS=1`) lets these URLs be http and reach private or loopback addresses; it is for LAN receivers and is never set in production.
+8. **Dots never hold a vecnet secret** [T11]. Enforced at enrolment, rotation and linking (section 2.12).
 
 ---
 
@@ -685,7 +689,7 @@ HTTP status on `/mcp`, in the section 2 error body:
 - `bad_request` (400): a transport fault: an unreadable body, or an `MCP-Protocol-Version` that is missing, unsupported or disagrees with `params._meta` or the session. A fault inside a readable request is a JSON-RPC error instead.
 - `session_not_found` (404): an `Mcp-Session-Id` naming no live 2025-11-25 session of this caller.
 - `method_not_allowed` (405): a method other than POST, GET or DELETE, or a GET or DELETE outside a 2025-11-25 session.
-- `not_acceptable` (406): `Accept` omits what the request needs (`application/json`, and `text/event-stream` where the revision requires both).
+- `not_acceptable` (406): `Accept` omits what the request needs: `application/json`, `text/event-stream` where the revision requires both, or `text/event-stream` alone for a GET stream.
 - `unsupported_media_type` (415): a POST whose `Content-Type` is not `application/json`.
 
 HTTP status on the admin API:
@@ -699,8 +703,11 @@ JSON-RPC `data.reason` on `/mcp`, returned as a JSON-RPC error in an HTTP 200:
 - `not_linked` (`-32602`, `events/subscribe`): the OAuth account is bound to no dot peer.
 - `peer_required` (`-32602`, `events/subscribe`): a principal credential did not name `arguments.peer_id`.
 - `peer_disabled` (`-32602`, `events/subscribe`): the peer to subscribe for is disabled.
+- `not_your_peer` (`-32602`, `events/subscribe`): `arguments.peer_id` names a peer this account or credential may not subscribe for. `events/subscribe` reports any other refusal of the peer the same way, under the hub's code for it.
+- `forbidden` (`-32602`, `resources/read`): the URI is an inbox this caller may not read.
+- `not_found` (`-32602`, `resources/read`): the URI is not an inbox.
 - `not_subscribable` (`-32602`, `resources/subscribe`, `subscriptions/listen`): the URI is not an inbox this caller may read.
-- `too_many` (`-32602`, `subscriptions/listen`): more resource URIs than `data.limit`.
+- `too_many` (`-32602`, `subscriptions/listen`, `events/subscribe`): more resource URIs in one filter, open listen streams on one credential, or live subscriptions on one principal than `data.limit`.
 
 `bad_signature` stays as section 2.11 defines it.
 

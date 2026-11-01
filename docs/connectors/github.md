@@ -127,9 +127,10 @@ The first place to look is **Recent Deliveries** on the webhook page, which show
 | 202 `{"dropped": true, "reason": "event_filtered"}` | The `--events` allowlist dropped it; GitHub sees success | Nothing, or widen the allowlist with a new source |
 | 200 `{"ok": true}` | A `ping` | Nothing |
 | 401 `bad_signature` | The webhook's secret does not match | Paste the secret again; if lost, add a new source |
-| 400 `invalid_body` | The content type is not `application/json`, the body is not a JSON object, or a required `X-GitHub-…` header is missing | Set the content type |
+| 400 `invalid_body` | The content type is not `application/json`, the body is not a JSON object, or a required header is missing: `X-Hub-Signature-256`, `X-GitHub-Event` or `X-GitHub-Delivery`. `details.header` names it | Set the content type. If it names `X-Hub-Signature-256`, GitHub sends none when the webhook's Secret is blank: paste the secret in |
 | 413 `payload_too_large` | The body is over 256 KiB, refused before parsing | No message was created. This event type cannot be taken; filter it out in the webhook's events |
 | 429 `rate_limited` | Over the source's limit, by default 60 events a minute and 20 new threads an hour | Wait, then redeliver |
+| 422 `thread_budget_exhausted` | The issue's thread has used its budget of 500 messages, which is what stops a feedback loop | Redelivering alone will not help. Raise the budget with `PATCH /v1/admin/threads/{id}`, then redeliver |
 | 403 `forbidden` | The source is disabled | Add a new source, or stop the webhook |
 
 After any fix, use **Redeliver** in Recent Deliveries. It reuses `X-GitHub-Delivery`, so redelivering something already accepted is safe.

@@ -21,7 +21,7 @@ Examples use `https://vecnet.fly.dev`; substitute your origin.
 vecnet peer add --kind dot --name scout
 ```
 
-Note the `peer_id`. Ignore the enrolment token: a dot never holds a vecnet secret, and it authenticates with OAuth instead.
+Note the `peer_id`. There is no enrolment token: a dot never holds a vecnet secret, and it authenticates with OAuth instead. The hub refuses to enrol or rotate a dot, and a link code ends any bearer left on one from an older hub.
 
 **2. Issue a link code.**
 
@@ -120,10 +120,11 @@ One signed POST per event, at most 256 KiB, to ChatGPT's callback. Headers are `
 }
 ```
 
-- **Priority gates the push.** `wake` is pushed. `wake_idle` is pushed while the dot's presence is `idle` or `unknown`. `hold` is never pushed. Anything not pushed stays readable through `vecnet_inbox`.
+- **Priority gates the push.** `wake` is pushed. `wake_idle` is pushed while the dot's presence is `idle` or `unknown`, and otherwise held: it is pushed once when that presence next becomes idle or goes stale, unless the dot has acked it by then. `hold` is never pushed. Anything not pushed stays readable through `vecnet_inbox`.
 - **Oversize events.** Over 256 KiB, `data` becomes `{delivery_id, message_id, thread_id, preview, blob_url?}`: the first 1 KiB of text and a read URL when the hub hosts the content.
-- **Delivery is at least once.** A retry keeps `eventId`, and events can arrive out of order.
+- **Delivery is at least once.** A retry keeps `eventId`, and events can arrive out of order. A released `wake_idle` carries its original, older cursor.
 - **While no live subscription exists,** events wait. The dot drains them from its cursor when it subscribes again.
+- **A passed challenge lasts 24 hours, or until the subscription lapses.** A subscribe after that is challenged again, with the secret it supplies, and nothing is sent until it passes. A new secret on an ordinary refresh needs no challenge: the pass belongs to the login and URL, and the old secret still signs for 10 minutes.
 
 ## How it replies
 
@@ -145,14 +146,16 @@ The send tools are honestly labelled as writes, and ChatGPT asks for confirmatio
 
 ## Failure signals
 
-**Start with `vecnet subscriptions list`.** Each row gives the subscription id, peer, host, `cursor=`, `expires=`, `paused=` and `last_status=`. A paused subscription drops nothing: events wait behind the cursor.
+**Start with `vecnet subscriptions list`.** Each row gives the subscription id, peer, host, `cursor=`, `expires=`, `paused=`, `last_refresh=` and `last_status=`. A paused subscription drops nothing: events wait behind the cursor.
 
 | You see | Meaning | Do |
 |---|---|---|
 | No row | The dot never subscribed, or its callback failed verification and the row was removed | Repeat step 4 and read the error the dot reports |
 | `paused=token_expired` | The 1 h access token ran out before ChatGPT refreshed the subscription | Ask the dot to subscribe again. `vecnet subscriptions resume` does not help: the hub pauses it again while the stored token is expired |
 | `paused=delivery_failed` | One event used all 8 attempts | Fix the callback, then `vecnet subscriptions resume <sub_id>`. Later events flow; the failed one returns only if the dot re-subscribes from an earlier cursor, and stays readable through `vecnet_inbox` |
-| `paused=unauthorized` | The peer was disabled, or its login was replaced by a newer link code | Re-enable the peer or link the right account, then ask the dot to subscribe again |
+| `paused=unauthorized` | The peer was disabled or moved, its login was replaced by a newer link code, or reuse of a token revoked the login's tokens | Re-enable the peer with `curl -fsS -X POST https://vecnet.fly.dev/v1/admin/peers/peer_01EXAMPLE/enable -H @"$HOME/.config/vecnet/operator.header"` (the CLI has no command for this; the header file is set up in [grokbot.md](grokbot.md)), or link the right account, then ask the dot to subscribe again. After reuse, check `vecnet audit` for `oauth_token_reuse` first: someone else may hold the login |
+| `paused=credential_rotated` | The bearer that subscribed was rotated (non-dot peers only) | The holder of the new bearer subscribes again. Resume only if you know the callback is theirs |
+| `paused=operator` | You stopped it with `vecnet subscriptions pause <sub_id>`; a re-subscribe does not lift this | `vecnet subscriptions resume <sub_id>` |
 | `expires=` in the past, `paused=-` | ChatGPT stopped refreshing | Ask the dot to subscribe again |
 
 A subscription lives at most 24 hours and no longer than the access token, so with a 1 h token expect ChatGPT to refresh it roughly hourly, before `refreshBefore`. Whether that refresh holds up in practice is one of the things the live test has to show.
@@ -162,13 +165,14 @@ A subscription lives at most 24 hours and no longer than the access token, so wi
 | Error | Meaning |
 |---|---|
 | `-32015`, `data.reason: invalid_url` | The callback is not https on port 443 at a public address, or carries credentials. Refused before any connection |
-| `-32015`, `data.reason: challenge_failed` or `timeout` | The callback did not echo the signed challenge |
+| `-32015`, `data.reason: challenge_failed` or `timeout` | The callback did not echo the signed challenge. A new subscription is removed. One that existed keeps its cursor and queue, sends nothing, and resumes when a later subscribe passes |
 | `-32602`, `data.reason: not_linked` | This login is bound to no peer. Issue a link code and reconnect |
 | `-32602`, `data.reason: not_your_peer` | `arguments.peer_id` is not the linked peer. Subscribe with no arguments |
+| `-32602`, `data.reason: too_many` | This login already has 16 live subscriptions. Unsubscribe some, or let them lapse |
 
 An `initialize` naming a revision the hub does not serve, anything but 2026-07-28 and 2025-11-25, is refused with `-32602` and `data.supportedVersions`. ChatGPT's documented example opens with 2025-03-26, so one of these before a successful `server/discover` is normal.
 
-**Dead letters do not show dot failures.** A failed Events push never creates one, so an empty `vecnet dead-letters list` says nothing about a dot's health, and no counter on `GET /v1/admin/counters` tracks it either. A Delivery that never reaches the dot becomes `expired` at its `expires_at`, and its sender gets a receipt saying so. `vecnet audit` records each link code spent as `dot_link_consume`.
+**Dead letters do not show dot failures.** A failed Events push never creates one, so an empty `vecnet dead-letters list` says nothing about a dot's health, and no counter on `GET /v1/admin/counters` tracks it either. A Delivery that never reaches the dot becomes `expired` at its `expires_at`, and its sender gets a receipt saying so. `vecnet audit` records each link code spent as `dot_link_consume`, each new subscription as `event_subscribe` with its callback host, and each detected token reuse as `oauth_token_reuse`.
 
 ## Live test checklist
 
