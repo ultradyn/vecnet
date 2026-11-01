@@ -78,3 +78,14 @@ A handoff-ready **spec** for vecnet v1: `SPEC.md` (product + behaviour), `docs/P
 - Later plans: connectors (MCP/Events/OAuth, Grok Bot route, openclaw, GitHub ingress), operator UI (variant A + TUI), phase-2 behaviours.
 - **Done 2026-11-01:** all 20 tasks merged to master (044fabd). 61 workflow agents over four chunks (~4 h wall clock, ~7.4M subagent tokens); fix rounds on tasks 11, 12, 16, 18; branch review found 7 serious + 21 minor, 36 fixed; the gate caught and reverted a loop-control relaxation in the fix pass (sends without `in_reply_to` now continue the loop; operator sends reset the TTL, PROTOCOL §6/§16.1). Deferred to the connectors plan: SSRF-guarded egress dialer for push/notify URLs (operator-only today). Dev hub: `just run --dev-ui-dir internal/ui/static`, UI at http://127.0.0.1:45752/ui/, operator secret in `.data/operator-secret.txt`.
 - Leftover merged branches `core-hub`, `core-hub-t18`, `core-hub-t19`: deleting branch refs is reserved for Max.
+
+## Build (Phase 2 connectors), done 2026-11-01
+
+- Plan `docs/plans/2026-11-01-connectors.md`; merged to master at eb5d197 (10 tasks, 53 workflow agents, about 9.2M subagent tokens, 11:35 to 16:20).
+- Branch review found 14 major and 24 minor; all fixed except tests-14 (rejected: no flake reproduced). Theme: access outliving its credential (Events subscriptions, listen streams, /v1/events SSE), dots able to get a bearer, held wake_idle never pushed to a dot.
+- The fixer amended PROTOCOL §2.3, §2.12, §4.2, §4.4, §4.5, §5.2, §10, §12, §14 inv. 7 and 8, §15. Reviewed: these tighten behaviour, with one relaxation: the "untrusted" label on dot payloads lives in the events/list description and payloadSchema, not on each POST, to keep the profile's five fields.
+- Not done: no live ChatGPT dot test yet (issue 19), which is an operator step. The first real Grok Bot routine and GitHub webhook have not been tried either. Link-code guessing has no failure limiter (39.6 bits, 10 min life).
+- `vecnet-build.mjs` now schedules by `deps` with a per-plan `taskPrefix`. First real use was tasks 9 and 10.
+- Next plans written and committed: `docs/plans/2026-11-01-openclaw-plugin.md` (21 tasks), `docs/plans/2026-11-01-operator-ui.md` (23 tasks). Neither build has started.
+- Leftover branches for Max to delete: connectors, connectors-t09, connectors-t10, core-hub, core-hub-t01..08, core-hub-t18, core-hub-t19.
+- Dev hub data backup from before migrations 0005-0009: `.scratch/vecnet/build-connectors/data-backup-phase1`.
