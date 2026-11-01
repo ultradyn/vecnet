@@ -360,11 +360,34 @@ func (s *server) adminListRoutes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"routes": routes})
 }
 
-// adminRotateRoute is POST /v1/admin/routes/{id}/rotate: 200 {"whsec"}; the
-// old key stays valid for 24 h (PROTOCOL §3.5).
+// adminRotateRoute is POST /v1/admin/routes/{id}/rotate. An http route takes
+// no body and is 200 {"whsec"}; the old key stays valid for 24 h (PROTOCOL
+// §3.5). A grokbot route takes {"key": "crsr_…"} and is 204: the new key
+// applies at once and is never returned.
 func (s *server) adminRotateRoute(w http.ResponseWriter, r *http.Request) {
-	if err := readNoBody(r); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeError(w, err)
+		return
+	}
+	var top map[string]json.RawMessage
+	if len(bytes.TrimSpace(raw)) > 0 {
+		if top, err = decodeObject(raw, []string{"key"}, nil); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	if _, has := top["key"]; has {
+		key, err := stringField(top, "key")
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if err := s.Hub.RotateGrokbotKey(r.Context(), r.PathValue("id"), key); err != nil {
+			writeError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	whsec, err := s.Hub.RotateRoute(r.Context(), r.PathValue("id"))
@@ -657,7 +680,7 @@ func (s *server) adminAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminCounters is GET /v1/admin/counters: {"loop_cut", "rate_limited",
-// "dead_letters", "push_conflicts"}.
+// "dead_letters", "push_conflicts", "push_auth_failed"}.
 func (s *server) adminCounters(w http.ResponseWriter, r *http.Request) {
 	c, err := s.Hub.Counters(r.Context())
 	if err != nil {

@@ -603,6 +603,10 @@ func TestRetryAfterHonoured(t *testing.T) {
 	within("Retry-After: 99999", time.Hour)
 	f.step()
 	within("Retry-After: garbage", 8*time.Second) // computed: 2^3 s
+	// An HTTP-date has whole seconds, so the clock must too, or the date falls
+	// up to 1 s short of 300 s and only the jitter hides it.
+	now := f.env.Now.Now()
+	f.env.Now.Advance(now.Truncate(time.Second).Add(time.Second).Sub(now))
 	date = f.env.Now.Now().Add(300 * time.Second).UTC().Format(http.TimeFormat)
 	f.step()
 	within("Retry-After: HTTP-date", 300*time.Second)

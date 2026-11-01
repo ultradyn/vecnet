@@ -66,6 +66,36 @@ func (f *fixture) routeRuns() int {
 	return n
 }
 
+// wantDeadLetter asserts the operator's dead-letter list shows dly.
+func (f *fixture) wantDeadLetter(dly string) {
+	f.t.Helper()
+	resp, raw := f.env.Do(f.env.OperatorSecret, "GET", "/v1/admin/dead-letters", nil)
+	if resp.StatusCode != http.StatusOK || !bytes.Contains(raw, []byte(dly)) {
+		f.t.Fatalf("GET /v1/admin/dead-letters = %d, want %s listed; %s", resp.StatusCode, dly, raw)
+	}
+}
+
+func (f *fixture) retryDeadLetter(dly string) {
+	f.t.Helper()
+	resp, raw := f.env.Do(f.env.OperatorSecret, "POST", "/v1/admin/dead-letters/"+dly+"/retry", nil)
+	if resp.StatusCode != http.StatusNoContent {
+		f.t.Fatalf("retry dead letter = %d; %s", resp.StatusCode, raw)
+	}
+}
+
+// seedRuns records n routine runs on a route that no delivery uses, the
+// oldest at the given age and the rest newer.
+func (f *fixture) seedRuns(n int, oldest time.Duration) {
+	f.t.Helper()
+	now := f.env.Now.Now()
+	for i := range n {
+		at := envelope.FormatTime(now.Add(-oldest + time.Duration(i)*time.Second))
+		if _, err := f.env.Hub.DB.Exec(`INSERT INTO route_runs(route_id, at) VALUES ('route_seeded', ?)`, at); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+}
+
 // wantCode asserts an error envelope.
 func wantCode(t *testing.T, resp *http.Response, raw []byte, status int, code string) {
 	t.Helper()
@@ -321,19 +351,21 @@ func TestGrokbotClassification(t *testing.T) {
 		{"503", 503, ``, hub.GrokbotRetry},
 		{"200 not success", 200, `{"success":false}`, hub.GrokbotTerminal},
 		{"200 no json", 200, `ok`, hub.GrokbotTerminal},
+		{"200 over the read cap", 200, `{"success":true,"pad":"` + strings.Repeat("x", hub.PushResponseCap), hub.GrokbotStarted},
+		{"200 small but cut off", 200, `{"success":true,"pad":"`, hub.GrokbotTerminal},
 		{"302", 302, ``, hub.GrokbotTerminal},
 		{"403 mentioning disabled", 403, `disabled`, hub.GrokbotTerminal},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if got := hub.ClassifyGrokbot(c.status, []byte(c.body)); got != c.want {
-				t.Fatalf("ClassifyGrokbot(%d, %q) = %q, want %q", c.status, c.body, got, c.want)
+				t.Fatalf("ClassifyGrokbot(%d, %.80q) = %q, want %q", c.status, c.body, got, c.want)
 			}
 		})
 	}
 }
 
 // Review Focus 5: end to end, a rate-limit 400 retries while 401 and
-// "disabled" fail and alert, and other 4xx dead letter.
+// "disabled" dead letter and alert, and other 4xx dead letter.
 func TestGrokbotOutcomes(t *testing.T) {
 	t.Run("rate limit 400 retries then lands", func(t *testing.T) {
 		f := setup(t, nil)
@@ -402,7 +434,7 @@ func TestGrokbotOutcomes(t *testing.T) {
 		"401":          {Status: http.StatusUnauthorized, Body: invalidKey},
 		"disabled 400": {Status: http.StatusBadRequest, Body: disabledMsg},
 	} {
-		t.Run(name+" fails and alerts", func(t *testing.T) {
+		t.Run(name+" dead letters and alerts", func(t *testing.T) {
 			f := setup(t, nil)
 			f.addGrokbot(func(int, hit) reply { return rep })
 			alerts := newReceiver(t, nil)
@@ -415,18 +447,18 @@ func TestGrokbotOutcomes(t *testing.T) {
 			if n := f.step(); n != 1 {
 				t.Fatalf("Step pushed %d, want 1", n)
 			}
-			if r := f.row(dly); r.State != "failed" || r.Attempt != 1 || r.LastStatus == nil || *r.LastStatus != rep.Status {
-				t.Fatalf("delivery = %+v, want failed at attempt 1", r)
+			if r := f.row(dly); r.State != "dead_letter" || r.Attempt != 1 || r.LastStatus == nil || *r.LastStatus != rep.Status {
+				t.Fatalf("delivery = %+v, want dead_letter at attempt 1", r)
 			}
 			if got := f.counter("push_auth_failed"); got != 1 {
 				t.Fatalf("push_auth_failed = %d, want 1", got)
 			}
-			if got := f.counter("dead_letters"); got != 0 {
-				t.Fatalf("dead_letters = %d, want 0", got)
+			if got := f.counter("dead_letters"); got != 1 {
+				t.Fatalf("dead_letters = %d, want 1", got)
 			}
 			rs := f.receiptsFor(f.a, dly)
-			if len(rs) != 1 || rs[0].State != "failed" || rs[0].By != "hub" {
-				t.Fatalf("A's receipts = %+v, want one failed by hub", rs)
+			if len(rs) != 1 || rs[0].State != "dead_letter" || rs[0].By != "hub" {
+				t.Fatalf("A's receipts = %+v, want one dead_letter by hub", rs)
 			}
 			var audits int
 			if err := f.env.Hub.DB.QueryRow(`SELECT count(*) FROM audit WHERE action = 'push_auth_failed' AND target_ids LIKE ?`,
@@ -460,7 +492,7 @@ func TestGrokbotOutcomes(t *testing.T) {
 			if err := json.Unmarshal(got[0].Body, &ev); err != nil {
 				t.Fatalf("decode notification: %v; %s", err, got[0].Body)
 			}
-			if ev.Type != "receipt" || ev.Data.DeliveryID != dly || ev.Data.State != "failed" {
+			if ev.Type != "receipt" || ev.Data.DeliveryID != dly || ev.Data.State != "dead_letter" {
 				t.Fatalf("notification = %s", got[0].Body)
 			}
 
@@ -471,6 +503,100 @@ func TestGrokbotOutcomes(t *testing.T) {
 			}
 		})
 	}
+	t.Run("paused routine recovers by operator retry", func(t *testing.T) {
+		var mu sync.Mutex
+		paused := true
+		f := setup(t, nil)
+		f.addGrokbot(func(n int, h hit) reply {
+			mu.Lock()
+			defer mu.Unlock()
+			if paused {
+				return reply{Status: http.StatusBadRequest, Body: disabledMsg}
+			}
+			return started(n, h)
+		})
+		dly := f.send(f.aSec, f.msg("wake")).Deliveries[0].DeliveryID
+		f.step()
+		f.wantDeadLetter(dly)
+		mu.Lock()
+		paused = false
+		mu.Unlock()
+		f.retryDeadLetter(dly)
+		if n := f.step(); n != 1 {
+			t.Fatalf("Step after retry pushed %d, want 1", n)
+		}
+		if r := f.row(dly); r.State != "accepted" || r.Attempt != 2 {
+			t.Fatalf("delivery = %+v, want accepted at attempt 2", r)
+		}
+		if hits := f.rcv.Hits(); len(hits) != 2 || !bytes.Equal(hits[0].Body, hits[1].Body) {
+			t.Fatalf("a retry must resend identical bytes (%d hits)", len(hits))
+		}
+	})
+	t.Run("stale key recovers by replacing it and retrying", func(t *testing.T) {
+		const fresh = "crsr_ffeeddccbbaa99887766554433221100"
+		f := setup(t, nil)
+		f.addGrokbot(func(n int, h hit) reply {
+			if h.Header.Get("Authorization") != "Bearer "+fresh {
+				return reply{Status: http.StatusUnauthorized, Body: invalidKey}
+			}
+			return started(n, h)
+		})
+		dly := f.send(f.aSec, f.msg("wake")).Deliveries[0].DeliveryID
+		f.step()
+		f.wantDeadLetter(dly)
+
+		path := "/v1/admin/routes/" + f.route + "/rotate"
+		resp, raw := f.env.Do(f.env.OperatorSecret, "POST", path, map[string]any{"key": "sk_wrong"})
+		wantCode(t, resp, raw, http.StatusUnprocessableEntity, "invalid_key")
+		if bytes.Contains(raw, []byte("sk_wrong")) {
+			t.Fatalf("the error echoes the key: %s", raw)
+		}
+		resp, raw = f.env.Do(f.env.OperatorSecret, "POST", path, map[string]any{"key": fresh})
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("replace key = %d; %s", resp.StatusCode, raw)
+		}
+		if bytes.Contains(raw, []byte(fresh)) {
+			t.Fatalf("the answer carries the key: %s", raw)
+		}
+		var sealed string
+		if err := f.env.Hub.DB.QueryRow(`SELECT key_enc FROM routes WHERE route_id = ?`, f.route).Scan(&sealed); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(sealed, fresh) {
+			t.Fatalf("the new key is stored in the clear")
+		}
+		var leaks int
+		if err := f.env.Hub.DB.QueryRow(`SELECT count(*) FROM audit WHERE detail LIKE ?`, "%"+fresh+"%").Scan(&leaks); err != nil || leaks != 0 {
+			t.Fatalf("audit rows carrying the key = %d, %v", leaks, err)
+		}
+
+		f.retryDeadLetter(dly)
+		if n := f.step(); n != 1 {
+			t.Fatalf("Step after retry pushed %d, want 1", n)
+		}
+		if r := f.row(dly); r.State != "accepted" {
+			t.Fatalf("delivery = %+v, want accepted", r)
+		}
+	})
+	t.Run("only a grokbot route takes a replacement key", func(t *testing.T) {
+		f := setup(t, always(http.StatusOK))
+		resp, raw := f.env.Do(f.env.OperatorSecret, "POST", "/v1/admin/routes/"+f.route+"/rotate", map[string]any{"key": grokKey})
+		wantCode(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
+		resp, raw = f.env.Do(f.env.OperatorSecret, "POST", "/v1/admin/routes/route_nope/rotate", map[string]any{"key": grokKey})
+		wantCode(t, resp, raw, http.StatusNotFound, "not_found")
+	})
+	t.Run("200 too long to read is still a started run", func(t *testing.T) {
+		f := setup(t, nil)
+		f.addGrokbot(answer(http.StatusOK, `{"success":true,"runUuid":"x","pad":"`+strings.Repeat("x", 5<<10)+`"}`))
+		dly := f.send(f.aSec, f.msg("wake")).Deliveries[0].DeliveryID
+		f.step()
+		if r := f.row(dly); r.State != "accepted" {
+			t.Fatalf("delivery = %+v, want accepted (PROTOCOL 3.3: the status counts)", r)
+		}
+		if got := f.routeRuns(); got != 1 {
+			t.Fatalf("route_runs = %d, want 1", got)
+		}
+	})
 	t.Run("404 dead letters", func(t *testing.T) {
 		f := setup(t, nil)
 		f.addGrokbot(always(http.StatusNotFound))
@@ -612,6 +738,81 @@ func TestGrokbotBudgetWindowSlides(t *testing.T) {
 	}
 }
 
+// grokbot.md §3: an account gets 300 runs an hour across its routines.
+// Routes carry no account identity, so the cap is hub-wide.
+func TestGrokbotAccountBudget(t *testing.T) {
+	t.Run("two routines share 300 runs", func(t *testing.T) {
+		f := setup(t, nil)
+		f.addGrokbot(started)
+		first := f.route
+		second, err := f.env.Hub.AddGrokbotRoute(f.ctx, "peer", f.a, f.rcv.srv.URL, grokKey)
+		if err != nil {
+			t.Fatalf("AddGrokbotRoute: %v", err)
+		}
+		now := f.env.Now.Now()
+		runs := 0
+		for _, route := range []string{first, second} {
+			for range 200 {
+				if ok, _ := f.env.Hub.GrokbotBudgetOK(f.ctx, route, now); ok {
+					runs++
+				}
+			}
+		}
+		if runs != hub.GrokbotAccountRunsPerHour {
+			t.Fatalf("runs taken in one hour across two routines = %d, want %d", runs, hub.GrokbotAccountRunsPerHour)
+		}
+		ok, wait := f.env.Hub.GrokbotBudgetOK(f.ctx, second, now)
+		if ok || wait != time.Hour {
+			t.Fatalf("over the account cap: %v, %v; want false, 1h", ok, wait)
+		}
+		if ok, _ := f.env.Hub.GrokbotBudgetOK(f.ctx, second, now.Add(time.Hour)); !ok {
+			t.Fatalf("the account budget did not refill after an hour")
+		}
+	})
+	t.Run("a delivery over the cap waits without an attempt", func(t *testing.T) {
+		f := setup(t, nil)
+		f.addGrokbot(started)
+		f.seedRuns(hub.GrokbotAccountRunsPerHour-1, 20*time.Minute)
+		first := f.send(f.aSec, f.msg("wake")).Deliveries[0].DeliveryID
+		f.step()
+		if r := f.row(first); r.State != "accepted" {
+			t.Fatalf("delivery = %+v, want accepted (one run left)", r)
+		}
+		dly := f.send(f.aSec, f.msg("wake")).Deliveries[0].DeliveryID
+		left := f.row(dly).AttemptsLeft
+		f.step()
+		if r := f.row(dly); r.State != "queued" || r.Attempt != 0 || r.AttemptsLeft != left {
+			t.Fatalf("delivery = %+v, want queued at attempt 0 with %d left", r, left)
+		}
+		if got := f.untilNext(dly); got != 40*time.Minute {
+			t.Fatalf("next attempt in %v, want 40m (when the oldest run leaves the window)", got)
+		}
+		if got := len(f.rcv.Hits()); got != 1 {
+			t.Fatalf("routine got %d POSTs, want 1", got)
+		}
+		f.env.Now.Advance(40 * time.Minute)
+		f.step()
+		if r := f.row(dly); r.State != "accepted" {
+			t.Fatalf("delivery = %+v, want accepted", r)
+		}
+	})
+	t.Run("the later of the two limits sets the wait", func(t *testing.T) {
+		f := setup(t, nil)
+		f.addGrokbot(started)
+		f.setRunsPerHour(1)
+		f.seedRuns(hub.GrokbotAccountRunsPerHour-1, 20*time.Minute)
+		f.send(f.aSec, f.msg("wake"))
+		f.step()
+		f.env.Now.Advance(10 * time.Minute)
+		// The route frees up in 50 m; the account, 30 m after its oldest run.
+		dly := f.send(f.aSec, f.msg("wake")).Deliveries[0].DeliveryID
+		f.step()
+		if got := f.untilNext(dly); got != 50*time.Minute {
+			t.Fatalf("next attempt in %v, want 50m", got)
+		}
+	})
+}
+
 // grokbot.md §2: any non-200 means no run started, so it spends no budget;
 // a network error may have started one, so it does.
 func TestGrokbotBudgetCountsRunsNotAttempts(t *testing.T) {
@@ -702,8 +903,8 @@ func TestGrokbotKeyNeverLogged(t *testing.T) {
 	f.step() // 400 rate limit
 	f.env.Now.Advance(f.untilNext(dly))
 	f.step() // 401
-	if r := f.row(dly); r.State != "failed" {
-		t.Fatalf("delivery = %+v, want failed", r)
+	if r := f.row(dly); r.State != "dead_letter" {
+		t.Fatalf("delivery = %+v, want dead_letter", r)
 	}
 
 	// A sealed value that no longer opens must not produce a log carrying it.

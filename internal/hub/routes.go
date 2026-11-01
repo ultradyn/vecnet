@@ -168,7 +168,7 @@ func (h *Hub) ListRoutes(ctx context.Context) ([]RouteInfo, error) {
 // RotateRoute issues a new key for routeID and retires every active older
 // key RouteKeyOverlap from now (PROTOCOL §3.5). An unknown route is 404
 // not_found; a grokbot route, which has no whsec_ to rotate, is 422
-// invalid_value.
+// invalid_value (its routine key changes through RotateGrokbotKey).
 func (h *Hub) RotateRoute(ctx context.Context, routeID string) (newWhsec string, err error) {
 	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		kind, err := routeKind(ctx, tx, routeID)

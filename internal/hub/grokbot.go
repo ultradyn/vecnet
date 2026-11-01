@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/envelope"
 )
 
@@ -31,13 +32,18 @@ const grokbotKeyPrefix = "crsr_"
 const (
 	GrokbotStarted       = "started"        // a run began; not a reply, not a receipt of processing
 	GrokbotRetry         = "retry"          // transient: back off like a 503
-	GrokbotTerminalAlert = "terminal_alert" // the key or the routine is dead: fail and alert
+	GrokbotTerminalAlert = "terminal_alert" // the key or the routine is dead: dead letter and alert
 	GrokbotTerminal      = "terminal"       // anything else: dead letter
 )
 
 const (
-	// GrokbotBudgetWindow is the trailing window of runs_per_hour.
+	// GrokbotBudgetWindow is the trailing window of both run budgets.
 	GrokbotBudgetWindow = time.Hour
+	// GrokbotAccountRunsPerHour caps runs across every grokbot route, the
+	// per-account limit of grokbot.md §3. Routes carry no account identity,
+	// so the cap is hub-wide: never too high, and too low only for a hub
+	// whose routines belong to several accounts.
+	GrokbotAccountRunsPerHour = 300
 	// grokbotBudgetErrWait is how long a delivery waits when the budget could
 	// not be read: fail closed, without spending an attempt.
 	grokbotBudgetErrWait = time.Minute
@@ -60,9 +66,7 @@ func (h *Hub) AddGrokbotRoute(ctx context.Context, ownerKind, ownerID, routineUR
 		return "", invalidURL("url", uerr)
 	}
 	if !validGrokbotKey(key) {
-		e := E(http.StatusUnprocessableEntity, "invalid_key", "a routine key is printable ASCII starting crsr_")
-		e.Details["field"] = "key"
-		return "", e
+		return "", invalidGrokbotKey()
 	}
 	sealed, err := h.Seal([]byte(key))
 	if err != nil {
@@ -81,6 +85,12 @@ func (h *Hub) AddGrokbotRoute(ctx context.Context, ownerKind, ownerID, routineUR
 	return routeID, nil
 }
 
+func invalidGrokbotKey() *APIError {
+	e := E(http.StatusUnprocessableEntity, "invalid_key", "a routine key is printable ASCII starting crsr_")
+	e.Details["field"] = "key"
+	return e
+}
+
 // validGrokbotKey accepts crsr_ plus at least one visible ASCII character,
 // so a key can never split the header it is sent in.
 func validGrokbotKey(key string) bool {
@@ -94,6 +104,34 @@ func validGrokbotKey(key string) bool {
 		}
 	}
 	return true
+}
+
+// RotateGrokbotKey replaces routeID's routine key, for a key that went
+// stale: every later push sends the new one, and a dead-lettered delivery
+// reaches it through an operator retry. key is checked like AddGrokbotRoute's
+// (422 invalid_key, never echoed). An unknown route is 404 not_found; an http
+// route, which has no routine key, is 422 invalid_value.
+func (h *Hub) RotateGrokbotKey(ctx context.Context, routeID, key string) error {
+	if !validGrokbotKey(key) {
+		return invalidGrokbotKey()
+	}
+	sealed, err := h.Seal([]byte(key))
+	if err != nil {
+		return err
+	}
+	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		kind, err := routeKind(ctx, tx, routeID)
+		if err != nil {
+			return err
+		}
+		if kind != RouteKindGrokbot {
+			return invalidRouteField("key", "only a grokbot route takes a key")
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE routes SET key_enc = ? WHERE route_id = ?`, sealed, routeID); err != nil {
+			return fmt.Errorf("hub: replace routine key: %w", err)
+		}
+		return audit.Record(ctx, tx, "operator", "route_rotate", []string{routeID}, nil)
+	})
 }
 
 // GrokbotKey unseals routeID's routine key at send time. Callers must never
@@ -115,29 +153,33 @@ func (h *Hub) GrokbotKey(ctx context.Context, routeID string) (string, error) {
 	return string(plain), nil
 }
 
-// GrokbotBudgetOK takes one run from routeID's budget if fewer than
-// runs_per_hour runs fall in the hour before now, and returns true. Taking
-// the run in the same transaction as the count is what holds the budget
-// when a batch of pushes checks it concurrently; a push that turns out not
-// to start a run gives it back with ReleaseGrokbotRun.
+// GrokbotBudgetOK takes one run if fewer than routeID's runs_per_hour runs,
+// and fewer than GrokbotAccountRunsPerHour runs across every route, fall in
+// the hour before now, and returns true. Taking the run in the same
+// transaction as the count is what holds the budget when a batch of pushes
+// checks it concurrently; a push that turns out not to start a run gives it
+// back with ReleaseGrokbotRun.
 //
-// Over budget it returns false and the wait until a run leaves the window.
-// A database failure is also false, with a short wait.
+// Over budget it returns false and the wait until a run leaves the window
+// (the later of the two, when both limits are reached). A database failure
+// is also false, with a short wait.
 func (h *Hub) GrokbotBudgetOK(ctx context.Context, routeID string, now time.Time) (bool, time.Duration) {
 	ok, wait := false, time.Duration(0)
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		ok, wait = false, 0
-		if _, err := tx.ExecContext(ctx, `DELETE FROM route_runs WHERE route_id = ? AND at <= ?`,
-			routeID, envelope.FormatTime(now.Add(-GrokbotBudgetWindow))); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM route_runs WHERE at <= ?`,
+			envelope.FormatTime(now.Add(-GrokbotBudgetWindow))); err != nil {
 			return fmt.Errorf("hub: prune route runs: %w", err)
 		}
-		var limit, used int
+		var limit, used, total int
 		if err := tx.QueryRowContext(ctx,
-			`SELECT r.runs_per_hour, (SELECT count(*) FROM route_runs u WHERE u.route_id = r.route_id)
-			 FROM routes r WHERE r.route_id = ?`, routeID).Scan(&limit, &used); err != nil {
+			`SELECT r.runs_per_hour,
+			        (SELECT count(*) FROM route_runs u WHERE u.route_id = r.route_id),
+			        (SELECT count(*) FROM route_runs)
+			 FROM routes r WHERE r.route_id = ?`, routeID).Scan(&limit, &used, &total); err != nil {
 			return fmt.Errorf("hub: route budget: %w", err)
 		}
-		if used < limit {
+		if used < limit && total < GrokbotAccountRunsPerHour {
 			ok = true
 			if _, err := tx.ExecContext(ctx, `INSERT INTO route_runs(route_id, at) VALUES (?, ?)`,
 				routeID, envelope.FormatTime(now)); err != nil {
@@ -145,22 +187,20 @@ func (h *Hub) GrokbotBudgetOK(ctx context.Context, routeID string, now time.Time
 			}
 			return nil
 		}
-		// The run whose departure brings used below limit.
-		var at string
-		err := tx.QueryRowContext(ctx,
-			`SELECT at FROM route_runs WHERE route_id = ? ORDER BY at LIMIT 1 OFFSET ?`, routeID, max(used-limit, 0)).Scan(&at)
-		if errors.Is(err, sql.ErrNoRows) {
-			wait = GrokbotBudgetWindow // limit <= 0: nothing to wait for but the operator
-			return nil
+		if used >= limit {
+			w, err := grokbotRunWait(ctx, tx, routeID, used-limit, now)
+			if err != nil {
+				return err
+			}
+			wait = max(wait, w)
 		}
-		if err != nil {
-			return fmt.Errorf("hub: route budget: %w", err)
+		if total >= GrokbotAccountRunsPerHour {
+			w, err := grokbotRunWait(ctx, tx, "", total-GrokbotAccountRunsPerHour, now)
+			if err != nil {
+				return err
+			}
+			wait = max(wait, w)
 		}
-		t, err := envelope.ParseTime(at)
-		if err != nil {
-			return fmt.Errorf("hub: route budget: %w", err)
-		}
-		wait = t.Add(GrokbotBudgetWindow).Sub(now)
 		return nil
 	})
 	if err != nil {
@@ -168,6 +208,27 @@ func (h *Hub) GrokbotBudgetOK(ctx context.Context, routeID string, now time.Time
 		return false, grokbotBudgetErrWait
 	}
 	return ok, wait
+}
+
+// grokbotRunWait is the time until the run at index offset, oldest first,
+// leaves the window; that is the run whose departure brings a count back
+// under its limit. routeID "" means the runs of every route.
+func grokbotRunWait(ctx context.Context, tx *sql.Tx, routeID string, offset int, now time.Time) (time.Duration, error) {
+	var at string
+	err := tx.QueryRowContext(ctx,
+		`SELECT at FROM route_runs WHERE ?1 = '' OR route_id = ?1 ORDER BY at LIMIT 1 OFFSET ?2`,
+		routeID, offset).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return GrokbotBudgetWindow, nil // limit <= 0: nothing to wait for but the operator
+	}
+	if err != nil {
+		return 0, fmt.Errorf("hub: route budget: %w", err)
+	}
+	t, err := envelope.ParseTime(at)
+	if err != nil {
+		return 0, fmt.Errorf("hub: route budget: %w", err)
+	}
+	return t.Add(GrokbotBudgetWindow).Sub(now), nil
 }
 
 // ReleaseGrokbotRun gives back the run GrokbotBudgetOK took at at: the POST
@@ -184,14 +245,16 @@ func (h *Hub) ReleaseGrokbotRun(ctx context.Context, routeID string, at time.Tim
 
 // ClassifyGrokbot reads a routine's answer (PROTOCOL §13.3, grokbot.md §2).
 // Rate limits arrive as a 400, so a 400 is told apart by its body, in lower
-// case. A 200 without "success":true is not a started run.
+// case. A 200 without "success":true is not a started run, unless the answer
+// was too long to read whole: then it is ignored and the status counts (§3.3).
 func ClassifyGrokbot(status int, body []byte) (outcome string) {
 	switch {
 	case status == http.StatusOK:
 		var r struct {
 			Success bool `json:"success"`
 		}
-		if json.Unmarshal(body, &r) == nil && r.Success {
+		err := json.Unmarshal(body, &r)
+		if (err == nil && r.Success) || (err != nil && len(body) >= PushResponseCap) {
 			return GrokbotStarted
 		}
 		return GrokbotTerminal
@@ -215,9 +278,10 @@ func ClassifyGrokbot(status int, body []byte) (outcome string) {
 
 // GrokbotPushResult is PushResult for a routine POST, whose outcome depends
 // on the response body: started is accepted, retry is as a 503 (a network
-// error too), terminal_alert is failed with counter push_auth_failed and a
-// dead_letters notification, and terminal is dead_letter. body is the
-// response body and is never stored.
+// error too), terminal is dead_letter, and terminal_alert is dead_letter
+// plus counter push_auth_failed, so the operator can retry once the routine
+// is back or its key replaced (§3.3, §5.5). body is the response body and is
+// never stored.
 func (h *Hub) GrokbotPushResult(ctx context.Context, d DueDelivery, status int, body []byte, retryAfter time.Duration, netErr error, now time.Time) error {
 	outcome := pushRetry
 	if netErr == nil {

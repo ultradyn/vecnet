@@ -172,7 +172,7 @@ const (
 	pushRetry
 	pushConflict
 	pushTerminal
-	pushAuthFailed // grokbot only: terminal failed, alerted (§13.3)
+	pushAuthFailed // grokbot only: dead letter, counted apart (§13.3)
 )
 
 func classifyPush(status int, netErr error) pushOutcome {
@@ -251,7 +251,7 @@ func (h *Hub) recordPush(ctx context.Context, d DueDelivery, outcome pushOutcome
 		}
 		applied = true
 		alerts := func(state string) bool {
-			return state == "dead_letter" || outcome == pushConflict || outcome == pushAuthFailed
+			return state == "dead_letter" || outcome == pushConflict
 		}
 		receipt := func(state, note string) error {
 			if !senderIsPeer {
@@ -330,10 +330,7 @@ func (h *Hub) recordPush(ctx context.Context, d DueDelivery, outcome pushOutcome
 			return audit.Record(ctx, tx, "hub", "push_conflict", []string{d.DeliveryID, msgID, d.Recipient},
 				map[string]any{"attempt": d.Attempt})
 		case pushAuthFailed:
-			if err := set("failed", left-1, nil); err != nil {
-				return err
-			}
-			if err := receipt("failed", "push_auth_failed: the routine refused its key or is disabled: HTTP "+strconv.Itoa(status)); err != nil {
+			if err := deadLetter(left-1, "push_auth_failed: the routine refused its key or is disabled: HTTP "+strconv.Itoa(status)); err != nil {
 				return err
 			}
 			if err := bumpCounter(ctx, tx, CounterPushAuthFailed); err != nil {
