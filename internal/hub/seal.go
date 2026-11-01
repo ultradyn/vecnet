@@ -27,12 +27,13 @@ var ErrUnseal = errors.New("hub: sealed value does not open")
 // (blob read tokens are HMACs under the raw key).
 const sealInfo = "vecnet seal v1"
 
-// sealAEAD returns AES-256-GCM keyed by HMAC-SHA256(meta.hub_key, sealInfo).
-func (h *Hub) sealAEAD() (cipher.AEAD, error) {
-	if h.Blobs == nil || len(h.Blobs.Key) < 32 {
+// sealAEAD returns AES-256-GCM keyed by HMAC-SHA256(key, sealInfo), key being
+// meta.hub_key.
+func sealAEAD(key []byte) (cipher.AEAD, error) {
+	if len(key) < 32 {
 		return nil, errors.New("hub: meta.hub_key is not loaded")
 	}
-	mac := hmac.New(sha256.New, h.Blobs.Key)
+	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(sealInfo))
 	block, err := aes.NewCipher(mac.Sum(nil)) // 32 bytes: AES-256
 	if err != nil {
@@ -45,7 +46,25 @@ func (h *Hub) sealAEAD() (cipher.AEAD, error) {
 // 12-byte nonce, returning "v1:" + base64(nonce|ciphertext). The result is
 // safe to store; it never needs to appear in a log.
 func (h *Hub) Seal(plaintext []byte) (string, error) {
-	aead, err := h.sealAEAD()
+	return SealWith(h.hubKey(), plaintext)
+}
+
+// Unseal reverses Seal. Anything that fails to authenticate is ErrUnseal.
+func (h *Hub) Unseal(sealed string) ([]byte, error) {
+	return UnsealWith(h.hubKey(), sealed)
+}
+
+func (h *Hub) hubKey() []byte {
+	if h.Blobs == nil {
+		return nil
+	}
+	return h.Blobs.Key
+}
+
+// SealWith is Hub.Seal for a holder of meta.hub_key that has no Hub, such as
+// events.Store; the two share one format and one derived key.
+func SealWith(key, plaintext []byte) (string, error) {
+	aead, err := sealAEAD(key)
 	if err != nil {
 		return "", err
 	}
@@ -57,9 +76,9 @@ func (h *Hub) Seal(plaintext []byte) (string, error) {
 	return sealPrefix + base64.StdEncoding.EncodeToString(out), nil
 }
 
-// Unseal reverses Seal. Anything that fails to authenticate is ErrUnseal.
-func (h *Hub) Unseal(sealed string) ([]byte, error) {
-	aead, err := h.sealAEAD()
+// UnsealWith is Hub.Unseal for a holder of meta.hub_key.
+func UnsealWith(key []byte, sealed string) ([]byte, error) {
+	aead, err := sealAEAD(key)
 	if err != nil {
 		return nil, err
 	}

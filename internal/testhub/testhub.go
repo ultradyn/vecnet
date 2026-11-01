@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/push"
@@ -24,12 +25,14 @@ import (
 
 // Env is one running test hub. Worker is the push worker on the fake clock;
 // it is wired to the handler (Deps.Kick, Deps.VerifyRoute) but runs only
-// when a test calls Worker.Step or StartWorkers.
+// when a test calls Worker.Step or StartWorkers. Events, the MCP Events
+// worker, is the same: it runs on Events.Step or StartWorkers.
 type Env struct {
 	T              *testing.T
 	URL            string
 	Hub            *hub.Hub
 	Worker         *push.Worker
+	Events         *events.Worker
 	OperatorSecret string
 	OperatorPeer   string
 	Now            *FakeClock
@@ -104,6 +107,7 @@ func StartWith(t *testing.T, cfgFn func(*hub.Config)) *Env {
 	}
 	env.URL, env.Hub = srv.URL, h
 	env.Worker = &push.Worker{Hub: h, Now: clock.Now, Interval: WorkerInterval}
+	env.Events = &events.Worker{Hub: h, Store: events.NewStore(h), Log: h.Log, Now: clock.Now, Interval: WorkerInterval}
 	env.Configure(nil)
 	t.Cleanup(func() {
 		srv.Close()
@@ -130,8 +134,9 @@ func (e *Env) Configure(f func(*httpapi.Deps)) {
 	e.handler.Store(&h)
 }
 
-// StartWorkers runs the push worker and the hub's tickers (Hub.RunTickers)
-// on the fake clock, both every WorkerInterval, until the test ends. Call it
+// StartWorkers runs the push worker, the Events worker and the hub's tickers
+// (Hub.RunTickers) on the fake clock, each every WorkerInterval, until the
+// test ends. Call it
 // at most once.
 func (e *Env) StartWorkers() {
 	e.T.Helper()
@@ -142,6 +147,7 @@ func (e *Env) StartWorkers() {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Go(func() { e.Worker.Run(ctx) })
+	wg.Go(func() { e.Events.Run(ctx) })
 	wg.Go(func() { e.Hub.RunTickers(ctx, WorkerInterval) })
 	// Registered after Start's cleanup, so it runs first: the workers stop
 	// before the store closes.
