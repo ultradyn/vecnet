@@ -57,9 +57,9 @@ const (
 	// PausedCredentialRotated is set when the bearer that subscribed is
 	// rotated; the holder of the new one subscribes again.
 	PausedCredentialRotated = hub.PausedCredentialRotated
-	// PausedOperator is the operator's stop. Only the operator lifts it: a
-	// re-subscribe, which clears every other reason, leaves it in place.
-	PausedOperator = "operator"
+	// PausedOperator is the operator's stop. A re-subscribe, which clears every
+	// other reason, leaves it in place.
+	PausedOperator = hub.PausedOperator
 )
 
 var (

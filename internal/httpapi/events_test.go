@@ -713,6 +713,17 @@ func TestSSEEndsOnRotation(t *testing.T) {
 		postSend(t, env, aSec, sendBody("after-rotate", b), http.StatusAccepted)
 		wantStreamEnds(t, s)
 	})
+	t.Run("an idle stream wakes for it", func(t *testing.T) {
+		env := testhub.Start(t)
+		b, bSec := env.NewPeer("session", "b")
+		s := openSSE(t, env, bSec, "", nil).start()
+		cur, _ := env.Hub.Log.Oldest(ctx)
+		s.expectPreamble(t, cur.String())
+		if _, err := env.Hub.RotatePeer(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+		wantStreamEnds(t, s)
+	})
 	t.Run("principal", func(t *testing.T) {
 		env := testhub.Start(t)
 		prn, secret := env.NewPrincipal("pc")

@@ -315,6 +315,10 @@ func (h *Hub) BindDotPrincipalTx(ctx context.Context, tx *sql.Tx, peerID string)
 // transaction, and the holder of the new credential subscribes again.
 const PausedCredentialRotated = "credential_rotated"
 
+// PausedOperator is the paused_reason of the operator's own stop. Only the
+// operator lifts it: neither a re-subscribe nor a rotation replaces it.
+const PausedOperator = "operator"
+
 // pauseBearerSubscriptions stops the Events subscriptions the credential of
 // subject made (subject is a peer or principal id). An operator's pause stays
 // the operator's. Paused subscriptions keep their cursor, so nothing is lost.
@@ -322,8 +326,8 @@ func (h *Hub) pauseBearerSubscriptions(ctx context.Context, tx *sql.Tx, subject 
 	now := h.nowStr()
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE event_subscriptions SET paused_reason = ?, updated_at = ?
-		 WHERE principal_kind = 'vecnet' AND principal_id = ? AND coalesce(paused_reason, '') != 'operator'`,
-		PausedCredentialRotated, now, subject); err != nil {
+		 WHERE principal_kind = 'vecnet' AND principal_id = ? AND coalesce(paused_reason, '') != ?`,
+		PausedCredentialRotated, now, subject, PausedOperator); err != nil {
 		return fmt.Errorf("hub: pause subscriptions: %w", err)
 	}
 	return nil

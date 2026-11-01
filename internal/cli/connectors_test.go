@@ -84,6 +84,25 @@ func TestPeerLinkPrintsCode(t *testing.T) {
 	}
 }
 
+// A dot gets no enrolment token, and the CLI says what to do instead.
+func TestPeerAddDot(t *testing.T) {
+	env := testhub.Start(t)
+	op := profileUser(t, env.URL, env.OperatorSecret)
+	out := op.mustRun("peer", "add", "--kind", "dot", "--name", "mira")
+	peer := field(t, out, "peer_id")
+	if strings.Contains(out, "enrol_token") || !strings.Contains(out, "vecnet peer link "+peer) {
+		t.Fatalf("peer add = %q, want no token and the link command", out)
+	}
+	raw := op.mustRun("--json", "peer", "add", "--kind", "dot", "--name", "nova")
+	var added map[string]any
+	if err := json.Unmarshal([]byte(raw), &added); err != nil {
+		t.Fatalf("peer add --json output %q: %v", raw, err)
+	}
+	if _, has := added["enrol_token"]; has || added["peer_id"] == nil {
+		t.Fatalf("peer add --json = %q", raw)
+	}
+}
+
 func TestSourceAddPrintsURLAndSecret(t *testing.T) {
 	env := testhub.Start(t)
 	op := profileUser(t, env.URL, env.OperatorSecret)
@@ -423,6 +442,18 @@ func TestSubscriptionsList(t *testing.T) {
 		t.Fatalf("subscriptions resume --json = %q", out)
 	}
 
+	// Pause is the operator's stop, and the row says so.
+	if out := op.mustRun("subscriptions", "pause", sub); !strings.Contains(out, sub) {
+		t.Fatalf("subscriptions pause = %q", out)
+	}
+	if row := op.mustRun("subscriptions", "list"); !strings.Contains(row, "paused=operator") || !strings.Contains(row, "last_refresh=-") {
+		t.Fatalf("paused row = %q", row)
+	}
+	op.mustRun("subscriptions", "resume", sub)
+
+	if code, _, errs := op.run("subscriptions", "pause", "sub_NOPE"); code != 2 || !strings.HasPrefix(errs, "not_found") {
+		t.Fatalf("pause unknown = %d %q", code, errs)
+	}
 	if code, _, errs := op.run("subscriptions", "resume", "sub_NOPE"); code != 2 || !strings.HasPrefix(errs, "not_found: ") {
 		t.Fatalf("resume unknown = %d %q, want 2 not_found", code, errs)
 	}

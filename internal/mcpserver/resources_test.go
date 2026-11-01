@@ -689,10 +689,7 @@ func TestLegacyHintHeldUntilGetOpens(t *testing.T) {
 	b, bSecret := env.NewPeer("session", "b1")
 	uri := peerURI(b)
 
-	srv := mcpserver.New(env.Hub, mcpserver.Chain{&mcpserver.BearerAuth{Resolver: env.Hub.Auth}}, env.URL)
-	ts := httptest.NewServer(srv)
-	defer ts.Close()
-	own := &testhub.Env{T: t, URL: ts.URL, Hub: env.Hub}
+	srv, own := ownFront(t, env)
 
 	sid := legacySession(t, own, bSecret)
 	legacySubscribe(t, own, bSecret, sid, uri)
@@ -1477,14 +1474,26 @@ func TestGetStreamEndsOnRotation(t *testing.T) {
 	wantUnfinished(t, frames)
 }
 
+// ownFront serves a bare mcpserver of env's hub, for what the handler hides.
+// Its session watchers end with the test.
+func ownFront(t *testing.T, env *testhub.Env) (*mcpserver.Server, *testhub.Env) {
+	t.Helper()
+	srv := mcpserver.New(env.Hub, mcpserver.Chain{&mcpserver.BearerAuth{Resolver: env.Hub.Auth}}, env.URL)
+	stop := make(chan struct{})
+	srv.Stop = stop
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		close(stop)
+		ts.Close()
+	})
+	return srv, &testhub.Env{T: t, URL: ts.URL, Hub: env.Hub}
+}
+
 // heldHintFront serves its own mcpserver with hints held for a subscribed
 // session, for tests that open the GET stream afterwards.
 func heldHintFront(t *testing.T, env *testhub.Env, secret, uri, send, to string) (*mcpserver.Server, *testhub.Env, string) {
 	t.Helper()
-	srv := mcpserver.New(env.Hub, mcpserver.Chain{&mcpserver.BearerAuth{Resolver: env.Hub.Auth}}, env.URL)
-	ts := httptest.NewServer(srv)
-	t.Cleanup(ts.Close)
-	own := &testhub.Env{T: t, URL: ts.URL, Hub: env.Hub}
+	srv, own := ownFront(t, env)
 	sid := legacySession(t, own, secret)
 	legacySubscribe(t, own, secret, sid, uri)
 	sendTo(t, env, send, to, "held")
