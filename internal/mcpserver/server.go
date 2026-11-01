@@ -29,6 +29,8 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/egress"
+	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/hub"
 )
 
@@ -112,6 +114,18 @@ type Server struct {
 	// POST /v1/messages does.
 	Kick func()
 
+	// Events is the subscription store, Egress the guard every callback URL
+	// passes, and EventsClient (an Egress client, which never follows a
+	// redirect) carries the verification challenge. New sets all three from
+	// the hub.
+	Events       *events.Store
+	Egress       egress.Policy
+	EventsClient *http.Client
+	// ResolveDotPeer names the peer an OAuth principal is bound to, "" when
+	// it has none (Task 6 fills it). While nil, every OAuth principal is
+	// not_linked at events/subscribe.
+	ResolveDotPeer func(ctx context.Context, principalID string) (peerID string, err error)
+
 	methods      map[string]Handler
 	capabilities func(proto string) map[string]any
 
@@ -120,8 +134,8 @@ type Server struct {
 }
 
 // New returns a Server for the hub h whose public URL is publicURL
-// (Cfg.PublicURL). ping, the tools and the resources are registered; Task 5
-// Registers the rest.
+// (Cfg.PublicURL). ping, the tools, the resources and MCP Events are
+// registered.
 func New(h *hub.Hub, a Authenticator, publicURL string) *Server {
 	s := &Server{
 		Hub:          h,
@@ -137,12 +151,16 @@ func New(h *hub.Hub, a Authenticator, publicURL string) *Server {
 	if h != nil {
 		s.Now = h.Now
 		s.Touch = h.TouchReachability
+		s.Events = events.NewStore(h)
+		s.Egress = h.EgressPolicy()
+		s.EventsClient = s.Egress.Client(events.ClientTimeout)
 	}
 	s.Register("ping", func(context.Context, *Session, *Request) (any, error) {
 		return map[string]any{}, nil
 	})
 	s.registerTools()
 	s.registerResources()
+	s.registerEvents()
 	return s
 }
 

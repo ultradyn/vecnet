@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/push"
@@ -128,8 +129,8 @@ func runInit(dataDir, name string, w io.Writer) error {
 // kill_timeout so the store closes before the platform kills the process.
 const ShutdownGrace = 10 * time.Second
 
-// serve runs the HTTP server, the push worker and the hub's tickers until
-// ctx is cancelled. It binds listen first, so ":0" picks a free port, and
+// serve runs the HTTP server, the push and Events workers and the hub's
+// tickers until ctx is cancelled. It binds listen first, so ":0" picks a free port, and
 // writes "vecnet-hub listening on http://<addr> (public url <url>)" to
 // stdout once accepting. publicURL "" means http://<bound address>.
 // devUIDir "" serves the embedded operator UI. allowPrivateEgress is the
@@ -176,6 +177,7 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 		bg.Wait()
 	}()
 	bg.Go(func() { worker.Run(bgCtx) })
+	bg.Go(func() { (&events.Worker{Hub: h}).Run(bgCtx) })
 	bg.Go(func() { h.RunTickers(bgCtx, hub.DefaultTickInterval) })
 
 	errc := make(chan error, 1)

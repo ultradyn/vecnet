@@ -1,0 +1,609 @@
+// Package events is the MCP Events webhook profile (PROTOCOL §4.4): durable
+// subscriptions, the verification challenge, and the worker that tails each
+// subscription's peer log into signed POSTs. A subscription's cursor is a
+// position in that log, so replay and outage queueing need no second queue;
+// event_outbox holds only what was read and not yet settled.
+package events
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/eventlog"
+	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/ids"
+	"github.com/XertroV/vecnet/internal/store"
+)
+
+// Name is the one event in the catalogue.
+const Name = "vecnet.message"
+
+const (
+	// MaxTTL caps a subscription's lifetime (PROTOCOL §4.4).
+	MaxTTL = 24 * time.Hour
+	// SecretOverlap is how long the previous secret keeps signing after a
+	// refresh supplies a new one.
+	SecretOverlap = 10 * time.Minute
+)
+
+// subPrefix tags a subscription id.
+const subPrefix ids.Prefix = "sub"
+
+// Principal kinds.
+const (
+	KindOAuth  = "oauth"
+	KindVecnet = "vecnet"
+)
+
+// Paused reasons.
+const (
+	PausedTokenExpired   = "token_expired"
+	PausedDeliveryFailed = "delivery_failed"
+	PausedUnauthorized   = "unauthorized"
+)
+
+// ErrNotFound reports a subscription id with no row.
+var ErrNotFound = errors.New("events: no such subscription")
+
+// DefaultTypes is what a subscription receives when its arguments list none
+// (PROTOCOL §4.4).
+var DefaultTypes = []string{"delivery"}
+
+// Subscription is one row of event_subscriptions. The id is a routing
+// handle, not a credential.
+type Subscription struct {
+	ID, PrincipalKind, PrincipalID, PeerID, Name, URL string
+	Arguments                                         map[string]any
+	Types                                             []string
+	Cursor                                            eventlog.Cursor
+	Expires                                           *time.Time
+	Verified                                          bool
+	PausedReason                                      string
+
+	TokenExpires *time.Time // nil for a vecnet bearer, whose credential has no expiry
+	Truncated    bool       // events were skipped as purged since the last events/subscribe
+}
+
+// Store is the subscription table. Key is meta.hub_key, under which the
+// secrets are sealed; a nil Now means time.Now.
+type Store struct {
+	DB  *store.DB
+	Key []byte
+	Now func() time.Time
+}
+
+// NewStore returns the Store of hub h.
+func NewStore(h *hub.Hub) *Store {
+	s := &Store{DB: h.DB, Now: h.Now}
+	if h.Blobs != nil {
+		s.Key = h.Blobs.Key
+	}
+	return s
+}
+
+func (st *Store) now() time.Time {
+	if st.Now != nil {
+		return st.Now()
+	}
+	return time.Now()
+}
+
+// canonicalArgs is the stored and compared form of arguments: encoding/json
+// sorts map keys, so equal arguments are equal strings.
+func canonicalArgs(args map[string]any) (string, error) {
+	if args == nil {
+		return "{}", nil
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return "", fmt.Errorf("events: encode arguments: %w", err)
+	}
+	return string(b), nil
+}
+
+// Upsert creates or refreshes the subscription keyed by (principal, url,
+// name, arguments). A refresh keeps the cursor and the verification, rotates
+// the secret (the old one signs too for SecretOverlap), clears paused_reason
+// and any backoff, and moves peer_id, types and the expiries to s's. Either
+// way expires is now+ttl, clamped to MaxTTL (ttl <= 0 means MaxTTL) and to
+// tokenExp; a zero tokenExp is a credential that does not expire. s.Cursor
+// applies only to a new row.
+func (st *Store) Upsert(ctx context.Context, s Subscription, secret string, ttl time.Duration, tokenExp time.Time) (Subscription, bool, error) {
+	args, err := canonicalArgs(s.Arguments)
+	if err != nil {
+		return Subscription{}, false, err
+	}
+	types := s.Types
+	if len(types) == 0 {
+		types = DefaultTypes
+	}
+	typesJSON, err := json.Marshal(types)
+	if err != nil {
+		return Subscription{}, false, fmt.Errorf("events: encode types: %w", err)
+	}
+	sealed, err := hub.SealWith(st.Key, []byte(secret))
+	if err != nil {
+		return Subscription{}, false, err
+	}
+	now := st.now()
+	if ttl <= 0 || ttl > MaxTTL {
+		ttl = MaxTTL
+	}
+	expires := now.Add(ttl)
+	var tokenExpires any
+	if !tokenExp.IsZero() {
+		tokenExpires = envelope.FormatTime(tokenExp)
+		if tokenExp.Before(expires) {
+			expires = tokenExp
+		}
+	}
+	nowS, expiresS := envelope.FormatTime(now), envelope.FormatTime(expires)
+
+	var id string
+	var created bool
+	err = st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		id, created = "", false
+		var oldSealed string
+		err := tx.QueryRowContext(ctx,
+			`SELECT sub_id, secret_enc FROM event_subscriptions
+			 WHERE principal_kind = ? AND principal_id = ? AND url = ? AND name = ? AND arguments = ?`,
+			s.PrincipalKind, s.PrincipalID, s.URL, s.Name, args).Scan(&id, &oldSealed)
+		if errors.Is(err, sql.ErrNoRows) {
+			id, created = ids.New(subPrefix), true
+			_, err = tx.ExecContext(ctx,
+				`INSERT INTO event_subscriptions(sub_id, principal_kind, principal_id, peer_id, name, arguments, url,
+				                                 secret_enc, cursor_epoch, cursor_seq, types, expires_at,
+				                                 token_expires_at, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				id, s.PrincipalKind, s.PrincipalID, s.PeerID, s.Name, args, s.URL,
+				sealed, s.Cursor.Epoch, s.Cursor.Seq, string(typesJSON), expiresS, tokenExpires, nowS, nowS)
+			if err != nil {
+				return fmt.Errorf("events: create subscription: %w", err)
+			}
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("events: find subscription: %w", err)
+		}
+		old, err := hub.UnsealWith(st.Key, oldSealed)
+		if err != nil {
+			return fmt.Errorf("events: open old secret: %w", err)
+		}
+		if string(old) != secret {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE event_subscriptions SET prev_secret_enc = ?, prev_secret_until = ? WHERE sub_id = ?`,
+				oldSealed, envelope.FormatTime(now.Add(SecretOverlap)), id); err != nil {
+				return fmt.Errorf("events: rotate secret: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE event_subscriptions SET peer_id = ?, secret_enc = ?, types = ?, expires_at = ?, token_expires_at = ?,
+			                                paused_reason = NULL, attempts = 0, next_attempt_at = NULL, updated_at = ?
+			 WHERE sub_id = ?`,
+			s.PeerID, sealed, string(typesJSON), expiresS, tokenExpires, nowS, id); err != nil {
+			return fmt.Errorf("events: refresh subscription: %w", err)
+		}
+		return clearBackoff(ctx, tx, id)
+	})
+	if err != nil {
+		return Subscription{}, false, err
+	}
+	got, err := st.Get(ctx, id)
+	return got, created, err
+}
+
+// clearBackoff makes every unsettled outbox row of sub due now.
+func clearBackoff(ctx context.Context, tx *sql.Tx, sub string) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE event_outbox SET next_attempt_at = NULL WHERE sub_id = ? AND done_at IS NULL`, sub); err != nil {
+		return fmt.Errorf("events: clear backoff: %w", err)
+	}
+	return nil
+}
+
+// Delete removes the subscription with this key and its outbox; no such
+// subscription is success.
+func (st *Store) Delete(ctx context.Context, principalKind, principalID, url, name string, args map[string]any) error {
+	canon, err := canonicalArgs(args)
+	if err != nil {
+		return err
+	}
+	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM event_outbox WHERE sub_id IN (
+			   SELECT sub_id FROM event_subscriptions
+			   WHERE principal_kind = ? AND principal_id = ? AND url = ? AND name = ? AND arguments = ?)`,
+			principalKind, principalID, url, name, canon); err != nil {
+			return fmt.Errorf("events: delete outbox: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM event_subscriptions
+			 WHERE principal_kind = ? AND principal_id = ? AND url = ? AND name = ? AND arguments = ?`,
+			principalKind, principalID, url, name, canon); err != nil {
+			return fmt.Errorf("events: delete subscription: %w", err)
+		}
+		return nil
+	})
+}
+
+const subColumns = `sub_id, principal_kind, principal_id, peer_id, name, arguments, url, cursor_epoch, cursor_seq,
+	truncated, types, expires_at, verified_at, paused_reason, token_expires_at`
+
+func scanSub(row interface{ Scan(...any) error }) (Subscription, error) {
+	var s Subscription
+	var args, types string
+	var expires, verified, paused, token *string
+	if err := row.Scan(&s.ID, &s.PrincipalKind, &s.PrincipalID, &s.PeerID, &s.Name, &args, &s.URL,
+		&s.Cursor.Epoch, &s.Cursor.Seq, &s.Truncated, &types, &expires, &verified, &paused, &token); err != nil {
+		return Subscription{}, err
+	}
+	if err := json.Unmarshal([]byte(args), &s.Arguments); err != nil {
+		return Subscription{}, fmt.Errorf("events: stored arguments: %w", err)
+	}
+	if err := json.Unmarshal([]byte(types), &s.Types); err != nil {
+		return Subscription{}, fmt.Errorf("events: stored types: %w", err)
+	}
+	var err error
+	if s.Expires, err = parseOptTime(expires); err != nil {
+		return Subscription{}, err
+	}
+	if s.TokenExpires, err = parseOptTime(token); err != nil {
+		return Subscription{}, err
+	}
+	s.Verified = verified != nil
+	if paused != nil {
+		s.PausedReason = *paused
+	}
+	return s, nil
+}
+
+func parseOptTime(s *string) (*time.Time, error) {
+	if s == nil {
+		return nil, nil
+	}
+	t, err := envelope.ParseTime(*s)
+	if err != nil {
+		return nil, fmt.Errorf("events: stored time: %w", err)
+	}
+	return &t, nil
+}
+
+// Get returns one subscription, or ErrNotFound.
+func (st *Store) Get(ctx context.Context, id string) (Subscription, error) {
+	s, err := scanSub(st.DB.QueryRowContext(ctx, `SELECT `+subColumns+` FROM event_subscriptions WHERE sub_id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Subscription{}, ErrNotFound
+	}
+	if err != nil {
+		return Subscription{}, fmt.Errorf("events: get subscription: %w", err)
+	}
+	return s, nil
+}
+
+func (st *Store) list(ctx context.Context, where string, args ...any) ([]Subscription, error) {
+	rows, err := st.DB.QueryContext(ctx, `SELECT `+subColumns+` FROM event_subscriptions `+where+` ORDER BY sub_id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("events: list subscriptions: %w", err)
+	}
+	defer rows.Close()
+	out := []Subscription{}
+	for rows.Next() {
+		s, err := scanSub(rows)
+		if err != nil {
+			return nil, fmt.Errorf("events: list subscriptions: %w", err)
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("events: list subscriptions: %w", err)
+	}
+	return out, nil
+}
+
+// ListForPrincipal returns one principal's subscriptions.
+func (st *Store) ListForPrincipal(ctx context.Context, principalKind, principalID string) ([]Subscription, error) {
+	return st.list(ctx, `WHERE principal_kind = ? AND principal_id = ?`, principalKind, principalID)
+}
+
+// Active returns the subscriptions unexpired at now, paused or not.
+func (st *Store) Active(ctx context.Context, now time.Time) ([]Subscription, error) {
+	return st.list(ctx, `WHERE expires_at IS NULL OR expires_at > ?`, envelope.FormatTime(now))
+}
+
+// MarkVerified records a passed challenge.
+func (st *Store) MarkVerified(ctx context.Context, id string) error {
+	now := envelope.FormatTime(st.now())
+	if _, err := st.DB.ExecContext(ctx,
+		`UPDATE event_subscriptions SET verified_at = ?, updated_at = ? WHERE sub_id = ?`, now, now, id); err != nil {
+		return fmt.Errorf("events: mark verified: %w", err)
+	}
+	return nil
+}
+
+// SetCursor moves a subscription to cur, which the caller vouches is
+// retained: the client's saved position always wins (PROTOCOL §4.4). The
+// worker re-reads everything after cur, so outbox rows past it go; unsettled
+// rows at or before it go too, since the client has those. The truncated
+// flag, now reported, is cleared.
+func (st *Store) SetCursor(ctx context.Context, id string, cur eventlog.Cursor) error {
+	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM event_outbox WHERE sub_id = ? AND (seq > ? OR done_at IS NULL)`, id, cur.Seq); err != nil {
+			return fmt.Errorf("events: rewind outbox: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE event_subscriptions SET cursor_epoch = ?, cursor_seq = ?, truncated = 0, updated_at = ? WHERE sub_id = ?`,
+			cur.Epoch, cur.Seq, envelope.FormatTime(st.now()), id); err != nil {
+			return fmt.Errorf("events: set cursor: %w", err)
+		}
+		return nil
+	})
+}
+
+// ClearTruncated marks the truncated flag reported to the client.
+func (st *Store) ClearTruncated(ctx context.Context, id string) error {
+	if _, err := st.DB.ExecContext(ctx, `UPDATE event_subscriptions SET truncated = 0 WHERE sub_id = ?`, id); err != nil {
+		return fmt.Errorf("events: clear truncated: %w", err)
+	}
+	return nil
+}
+
+// Resume clears paused_reason and any backoff, the operator's nudge;
+// ErrNotFound when id has no row.
+func (st *Store) Resume(ctx context.Context, id string) error {
+	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE event_subscriptions SET paused_reason = NULL, attempts = 0, next_attempt_at = NULL, updated_at = ?
+			 WHERE sub_id = ?`, envelope.FormatTime(st.now()), id)
+		if err != nil {
+			return fmt.Errorf("events: resume: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return fmt.Errorf("events: resume: %w", err)
+		} else if n == 0 {
+			return ErrNotFound
+		}
+		return clearBackoff(ctx, tx, id)
+	})
+}
+
+// Health is a subscription's row as the operator sees it. A callback path can
+// carry a credential: whoever displays URL shows its host only.
+type Health struct {
+	ID, PrincipalKind, PrincipalID, PeerID, URL, Name string
+	Cursor                                            eventlog.Cursor
+	ExpiresAt, VerifiedAt, PausedReason               *string
+	LastDeliveryAt                                    *string
+	LastStatus                                        *int
+	Attempts                                          int
+}
+
+// ListHealth returns every subscription for the operator.
+func (st *Store) ListHealth(ctx context.Context) ([]Health, error) {
+	rows, err := st.DB.QueryContext(ctx,
+		`SELECT sub_id, principal_kind, principal_id, peer_id, url, name, cursor_epoch, cursor_seq,
+		        expires_at, verified_at, paused_reason, last_delivery_at, last_status, attempts
+		 FROM event_subscriptions ORDER BY sub_id`)
+	if err != nil {
+		return nil, fmt.Errorf("events: list health: %w", err)
+	}
+	defer rows.Close()
+	out := []Health{}
+	for rows.Next() {
+		var h Health
+		if err := rows.Scan(&h.ID, &h.PrincipalKind, &h.PrincipalID, &h.PeerID, &h.URL, &h.Name,
+			&h.Cursor.Epoch, &h.Cursor.Seq, &h.ExpiresAt, &h.VerifiedAt, &h.PausedReason,
+			&h.LastDeliveryAt, &h.LastStatus, &h.Attempts); err != nil {
+			return nil, fmt.Errorf("events: list health: %w", err)
+		}
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("events: list health: %w", err)
+	}
+	return out, nil
+}
+
+// secrets returns the keys to sign with at now: the current one, then the
+// previous one inside its overlap.
+func (st *Store) secrets(ctx context.Context, id string, now time.Time) ([]string, error) {
+	var cur string
+	var prev, until *string
+	err := st.DB.QueryRowContext(ctx,
+		`SELECT secret_enc, prev_secret_enc, prev_secret_until FROM event_subscriptions WHERE sub_id = ?`, id).
+		Scan(&cur, &prev, &until)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("events: secrets: %w", err)
+	}
+	plain, err := hub.UnsealWith(st.Key, cur)
+	if err != nil {
+		return nil, fmt.Errorf("events: open secret: %w", err)
+	}
+	out := []string{string(plain)}
+	if prev != nil && until != nil && *until > envelope.FormatTime(now) {
+		old, err := hub.UnsealWith(st.Key, *prev)
+		if err != nil {
+			return nil, fmt.Errorf("events: open previous secret: %w", err)
+		}
+		out = append(out, string(old))
+	}
+	return out, nil
+}
+
+// pauseExpiredTokens sets paused_reason on every unpaused subscription whose
+// token has expired. Nothing is dropped and the cursor stays.
+func (st *Store) pauseExpiredTokens(ctx context.Context, now time.Time) error {
+	nowS := envelope.FormatTime(now)
+	if _, err := st.DB.ExecContext(ctx,
+		`UPDATE event_subscriptions SET paused_reason = ?, updated_at = ?
+		 WHERE paused_reason IS NULL AND token_expires_at IS NOT NULL AND token_expires_at <= ?`,
+		PausedTokenExpired, nowS, nowS); err != nil {
+		return fmt.Errorf("events: pause expired tokens: %w", err)
+	}
+	return nil
+}
+
+func (st *Store) pause(ctx context.Context, id, reason string, now time.Time) error {
+	if _, err := st.DB.ExecContext(ctx,
+		`UPDATE event_subscriptions SET paused_reason = ?, updated_at = ? WHERE sub_id = ?`,
+		reason, envelope.FormatTime(now), id); err != nil {
+		return fmt.Errorf("events: pause: %w", err)
+	}
+	return nil
+}
+
+// outboxRow is one unsettled event.
+type outboxRow struct {
+	eventID  string
+	seq      int64
+	body     string
+	attempts int
+	next     *string
+}
+
+// enqueue inserts rows and advances the cursor from `from` to `to` in one
+// transaction. A cursor no longer at `from` means a refresh moved it during
+// the read: the batch is stale, and nothing is written.
+func (st *Store) enqueue(ctx context.Context, id string, from, to eventlog.Cursor, rows []outboxRow, now time.Time) error {
+	nowS := envelope.FormatTime(now)
+	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE event_subscriptions SET cursor_epoch = ?, cursor_seq = ?, updated_at = ?
+			 WHERE sub_id = ? AND cursor_epoch = ? AND cursor_seq = ?`,
+			to.Epoch, to.Seq, nowS, id, from.Epoch, from.Seq)
+		if err != nil {
+			return fmt.Errorf("events: advance cursor: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return fmt.Errorf("events: advance cursor: %w", err)
+		} else if n == 0 {
+			return nil
+		}
+		for _, r := range rows {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO event_outbox(sub_id, event_id, seq, body, created_at) VALUES (?, ?, ?, ?, ?)
+				 ON CONFLICT(sub_id, event_id) DO NOTHING`,
+				id, r.eventID, r.seq, r.body, nowS); err != nil {
+				return fmt.Errorf("events: enqueue: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+// skipPurged moves a subscription whose cursor fell below retention to
+// oldest and flags the loss for its next events/subscribe, if it is still
+// at `from`.
+func (st *Store) skipPurged(ctx context.Context, id string, from, oldest eventlog.Cursor, now time.Time) error {
+	if _, err := st.DB.ExecContext(ctx,
+		`UPDATE event_subscriptions SET cursor_epoch = ?, cursor_seq = ?, truncated = 1, updated_at = ?
+		 WHERE sub_id = ? AND cursor_epoch = ? AND cursor_seq = ?`,
+		oldest.Epoch, oldest.Seq, envelope.FormatTime(now), id, from.Epoch, from.Seq); err != nil {
+		return fmt.Errorf("events: skip purged: %w", err)
+	}
+	return nil
+}
+
+// pending returns up to limit unsettled rows of sub, oldest first.
+func (st *Store) pending(ctx context.Context, id string, limit int) ([]outboxRow, error) {
+	rows, err := st.DB.QueryContext(ctx,
+		`SELECT event_id, seq, body, attempts, next_attempt_at FROM event_outbox
+		 WHERE sub_id = ? AND done_at IS NULL ORDER BY seq LIMIT ?`, id, limit)
+	if err != nil {
+		return nil, fmt.Errorf("events: pending: %w", err)
+	}
+	defer rows.Close()
+	var out []outboxRow
+	for rows.Next() {
+		var r outboxRow
+		if err := rows.Scan(&r.eventID, &r.seq, &r.body, &r.attempts, &r.next); err != nil {
+			return nil, fmt.Errorf("events: pending: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("events: pending: %w", err)
+	}
+	return out, nil
+}
+
+// settle closes a row (terminal "" for a delivery) and records the response.
+// status 0 is a network failure and leaves last_status NULL.
+func (st *Store) settle(ctx context.Context, id, eventID, terminal string, status int, now time.Time) error {
+	nowS := envelope.FormatTime(now)
+	var term any
+	if terminal != "" {
+		term = terminal
+	}
+	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE event_outbox SET done_at = ?, terminal = ?, next_attempt_at = NULL WHERE sub_id = ? AND event_id = ?`,
+			nowS, term, id, eventID); err != nil {
+			return fmt.Errorf("events: settle: %w", err)
+		}
+		return recordResult(ctx, tx, id, status, 0, nil, nowS)
+	})
+}
+
+// retryLater records a failed attempt of a row.
+func (st *Store) retryLater(ctx context.Context, id, eventID string, attempts, status int, next, now time.Time) error {
+	nextS := envelope.FormatTime(next)
+	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE event_outbox SET attempts = ?, next_attempt_at = ? WHERE sub_id = ? AND event_id = ?`,
+			attempts, nextS, id, eventID); err != nil {
+			return fmt.Errorf("events: retry: %w", err)
+		}
+		return recordResult(ctx, tx, id, status, attempts, nextS, envelope.FormatTime(now))
+	})
+}
+
+func recordResult(ctx context.Context, tx *sql.Tx, id string, status, attempts int, next any, now string) error {
+	var last any
+	if status != 0 {
+		last = status
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE event_subscriptions SET last_delivery_at = ?, last_status = ?, attempts = ?, next_attempt_at = ?, updated_at = ?
+		 WHERE sub_id = ?`, now, last, attempts, next, now, id); err != nil {
+		return fmt.Errorf("events: record result: %w", err)
+	}
+	return nil
+}
+
+// pruneDone forgets rows settled before cutoff. Past the cursor nothing reads
+// them, and each one holds a whole body.
+func (st *Store) pruneDone(ctx context.Context, cutoff time.Time) error {
+	if _, err := st.DB.ExecContext(ctx,
+		`DELETE FROM event_outbox WHERE done_at IS NOT NULL AND done_at < ?`, envelope.FormatTime(cutoff)); err != nil {
+		return fmt.Errorf("events: prune outbox: %w", err)
+	}
+	return nil
+}
+
+// peerAuthorised reports whether the subscription's peer exists, is enabled
+// and, for a vecnet bearer's subscription, still belongs to its principal: a
+// peer credential's own peer, or a peer of the principal credential.
+func (st *Store) peerAuthorised(ctx context.Context, s Subscription) (bool, error) {
+	var prn string
+	var disabled bool
+	err := st.DB.QueryRowContext(ctx, `SELECT prn_id, disabled FROM peers WHERE peer_id = ?`, s.PeerID).Scan(&prn, &disabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("events: peer: %w", err)
+	}
+	if disabled {
+		return false, nil
+	}
+	return s.PrincipalKind != KindVecnet || s.PrincipalID == s.PeerID || s.PrincipalID == prn, nil
+}

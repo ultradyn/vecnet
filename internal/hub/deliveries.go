@@ -323,6 +323,70 @@ func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAf
 	return nil
 }
 
+// DeliveryGate reports whether a dot may be pushed the Delivery Event of
+// deliveryID (PROTOCOL §5.2): not for hold, not for a held wake_idle, not for
+// a delivery already expired (§5.1: not retried; its sender was told), and
+// not for an id with no delivery row. The Delivery stays readable through
+// vecnet_inbox either way.
+func (h *Hub) DeliveryGate(ctx context.Context, deliveryID string) (push bool, err error) {
+	var priority, state string
+	var held bool
+	err = h.DB.QueryRowContext(ctx, `SELECT priority, held, state FROM deliveries WHERE dly_id = ?`, deliveryID).
+		Scan(&priority, &held, &state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("hub: delivery gate: %w", err)
+	}
+	return priority != "hold" && !held && state != "expired", nil
+}
+
+// AcceptEventPush records a 2xx from a dot's Events callback for deliveryID:
+// accepted = 2xx on push (PROTOCOL §5.1), with the receipt by hub of §3.3. A
+// delivery past queued or pushed (a second subscription's 2xx, an ack, an
+// expiry) is left alone.
+func (h *Hub) AcceptEventPush(ctx context.Context, deliveryID string, now time.Time) error {
+	var notify string
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		notify = ""
+		var msgID, thr, sender string
+		var senderIsPeer bool
+		err := tx.QueryRowContext(ctx,
+			`UPDATE deliveries SET state = 'accepted', held = 0, next_attempt_at = NULL, updated_at = ?
+			 WHERE dly_id = ? AND state IN ('queued', 'pushed') RETURNING msg_id, thr_id`,
+			envelope.FormatTime(now), deliveryID).Scan(&msgID, &thr)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("hub: accept event push: %w", err)
+		}
+		if err := tx.QueryRowContext(ctx,
+			`SELECT m.sender, EXISTS (SELECT 1 FROM peers s WHERE s.peer_id = m.sender) FROM messages m WHERE m.msg_id = ?`,
+			msgID).Scan(&sender, &senderIsPeer); err != nil {
+			return fmt.Errorf("hub: delivery sender: %w", err)
+		}
+		if !senderIsPeer {
+			return nil // a hub-authored message: no peer log to receive it
+		}
+		r := envelope.Receipt{DeliveryID: deliveryID, MessageID: msgID, ThreadID: thr,
+			State: "accepted", By: "hub", At: envelope.FormatTime(now)}
+		if _, err := h.Log.Append(ctx, tx, sender, "receipt", now, r); err != nil {
+			return err
+		}
+		notify = sender
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if notify != "" {
+		h.Log.Notify(notify)
+	}
+	return nil
+}
+
 // bumpCounter adds one to the dashboard counter name inside tx.
 func bumpCounter(ctx context.Context, tx *sql.Tx, name string) error {
 	if _, err := tx.ExecContext(ctx,
