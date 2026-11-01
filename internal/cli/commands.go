@@ -56,7 +56,8 @@ messaging:
   presence set <idle|working|blocked|offline> [--note T]
   presence subscribe <all|teams|none>
   receipt <delivery_id> <processed|read|failed> [--note T]
-  enrol --hub URL --token T --profile NAME
+  enrol --hub URL --token (T|-) --profile NAME      "-" reads the token from stdin
+       (preferred: keeps it out of shell history and ps); else $VECNET_ENROL_TOKEN
 
 admin (operator credential):
   principal add --name N
@@ -70,6 +71,9 @@ admin (operator credential):
   dead-letters list | dead-letters retry <dly> | dead-letters discard <dly>
   notify set --url URL --filter F [--url URL --filter F]…
   audit [--limit N]
+
+flags may appear anywhere; "--" ends flag parsing, so text that looks like a
+flag is sent as is: vecnet send PEER --wake -- -h
 
 config: $VECNET_CONFIG, else $XDG_CONFIG_HOME/vecnet/config.toml, else ~/.config/vecnet/config.toml
 cache:  $XDG_CACHE_HOME/vecnet/, else ~/.cache/vecnet/
@@ -389,8 +393,20 @@ func (a *app) cmdEnrol(args []string) error {
 		return err
 	}
 	hubURL, tok, name := o.str("hub"), o.str("token"), o.str("profile")
+	// The one-time token is best kept off the command line (shell history,
+	// ps): "--token -" reads it from stdin, and VECNET_ENROL_TOKEN is the
+	// fallback when --token is absent.
+	switch tok {
+	case "-":
+		if tok, err = a.readText("-"); err != nil {
+			return err
+		}
+		tok = strings.TrimSpace(tok)
+	case "":
+		tok = strings.TrimSpace(a.getenv("VECNET_ENROL_TOKEN"))
+	}
 	if hubURL == "" || tok == "" || name == "" || len(o.pos) != 0 {
-		return usageErr("usage: vecnet enrol --hub URL --token T --profile NAME")
+		return usageErr("usage: vecnet enrol --hub URL --token (T|-) --profile NAME  (or $VECNET_ENROL_TOKEN)")
 	}
 	path, err := configPath(a.getenv)
 	if err != nil {

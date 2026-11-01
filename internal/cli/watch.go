@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/XertroV/vecnet/internal/envelope"
 )
@@ -85,10 +86,18 @@ func eventFieldsOf(ev envelope.Event) eventFields {
 	return f
 }
 
-// flatten puts s on one line: CR, LF, CRLF and tabs become one space each.
+// flatten puts untrusted text on one safe terminal line: CRLF and every
+// control character (C0 including ESC, DEL, C1) and the Unicode line and
+// paragraph separators become one space each, so a sender cannot inject
+// ANSI/OSC escapes or fake lines (PROTOCOL §14 inv. 2).
 func flatten(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", " ")
-	return strings.NewReplacer("\r", " ", "\n", " ", "\t", " ").Replace(s)
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // firstRunes returns the first n characters of s.

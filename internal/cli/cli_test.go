@@ -624,3 +624,70 @@ func TestNetworkErrorExitCode(t *testing.T) {
 		t.Fatalf("peers without a config = %d %q, want 1", code, errs)
 	}
 }
+
+// TestInboxStripsTerminalControls: untrusted message text cannot inject
+// ANSI/OSC escapes or fake lines into the terminal (PROTOCOL §14 inv. 2).
+func TestInboxStripsTerminalControls(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	bID, bSec := env.NewPeer("session", "B")
+	a := profileUser(t, env.URL, aSec)
+	b := profileUser(t, env.URL, bSec)
+	a.send(bID, "hi\x1b]52;c;cHduZWQ=\x07there\x1b[2K fake\x9bline", "--hold")
+	out := b.mustRun("inbox")
+	for _, bad := range []string{"\x1b", "\x07", " ", "\x9b"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("inbox output %q carries control %q", out, bad)
+		}
+	}
+	if lines := nonEmptyLines(out); len(lines) != 1 || !strings.Contains(lines[0], "there") {
+		t.Fatalf("inbox lines = %q, want one line with the text", lines)
+	}
+}
+
+// TestDoubleDashSendsFlagLikeText: "--" ends flag parsing, so "-h" after it
+// is message text, not a help request.
+func TestDoubleDashSendsFlagLikeText(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	bID, bSec := env.NewPeer("session", "B")
+	a := profileUser(t, env.URL, aSec)
+	b := profileUser(t, env.URL, bSec)
+	a.send(bID, "--hold", "--", "-h")
+	if lines := nonEmptyLines(b.mustRun("inbox")); len(lines) != 1 || !strings.HasSuffix(lines[0], "-h") {
+		t.Fatalf("inbox = %q, want one message whose text is -h", lines)
+	}
+}
+
+// TestEnrolTokenFromStdinOrEnv: the one-time token can stay off the command
+// line, read from stdin ("--token -") or from VECNET_ENROL_TOKEN.
+func TestEnrolTokenFromStdinOrEnv(t *testing.T) {
+	env := testhub.Start(t)
+	op := profileUser(t, env.URL, env.OperatorSecret)
+	add := func(name string) (peer, tok string) {
+		t.Helper()
+		var added struct {
+			PeerID     string `json:"peer_id"`
+			EnrolToken string `json:"enrol_token"`
+		}
+		if err := json.Unmarshal([]byte(op.mustRun("--json", "peer", "add", "--kind", "session", "--name", name)), &added); err != nil {
+			t.Fatal(err)
+		}
+		return added.PeerID, added.EnrolToken
+	}
+
+	p1, tok1 := add("S")
+	u := newUser(t)
+	var out, errb bytes.Buffer
+	if code := cli.Run([]string{"enrol", "--hub", env.URL, "--token", "-", "--profile", "p"},
+		strings.NewReader(tok1+"\n"), &out, &errb, u.getenv); code != 0 || !strings.Contains(out.String(), p1) {
+		t.Fatalf("enrol --token - = %d %q %q, want 0 naming %s", code, out.String(), errb.String(), p1)
+	}
+
+	p2, tok2 := add("E")
+	u2 := newUser(t)
+	u2.env["VECNET_ENROL_TOKEN"] = tok2
+	if out := u2.mustRun("enrol", "--hub", env.URL, "--profile", "p"); !strings.Contains(out, p2) {
+		t.Fatalf("enrol via VECNET_ENROL_TOKEN = %q, want %s", out, p2)
+	}
+}
