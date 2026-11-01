@@ -454,8 +454,9 @@ func TestFreshCacheUsesHubAckedCursor(t *testing.T) {
 	defer cancel()
 	var out, errb syncBuffer
 	done := make(chan int, 1)
+	b3 := profileUser(t, env.URL, bSec) // built here: it may t.Fatal
 	go func() {
-		done <- cli.RunContext(ctx, []string{"watch", "--for-monitor"}, strings.NewReader(""), &out, &errb, profileUser(t, env.URL, bSec).getenv)
+		done <- cli.RunContext(ctx, []string{"watch", "--for-monitor"}, strings.NewReader(""), &out, &errb, b3.getenv)
 	}()
 	sent := a.send(bID, "two", "--wake")
 	re := regexp.MustCompile(`^e\d+\.\d+ delivery ` + regexp.QuoteMeta(sent.ThreadID) + ` ` + regexp.QuoteMeta(aID) + ` two$`)

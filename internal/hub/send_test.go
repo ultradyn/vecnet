@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"testing"
@@ -335,16 +336,41 @@ func TestIdempotencyRace(t *testing.T) {
 		status int
 		sr     hub.SendResponse
 		raw    []byte
+		err    error
 	}
 	results := make([]result, n)
 	start := make(chan struct{})
+	// The goroutines never touch t (FailNow is only valid on the test
+	// goroutine): they report through results and the test goroutine
+	// asserts.
+	post := func() result {
+		req, err := http.NewRequest("POST", env.URL+"/v1/messages", bytes.NewReader(body))
+		if err != nil {
+			return result{err: err}
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+aSec)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return result{err: err}
+		}
+		defer resp.Body.Close()
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return result{err: err}
+		}
+		r := result{status: resp.StatusCode, raw: raw}
+		if r.status/100 == 2 {
+			r.err = json.Unmarshal(raw, &r.sr)
+		}
+		return r
+	}
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			s, sr, raw := sendHTTP(t, env, aSec, body)
-			results[i] = result{s, sr, raw}
+			results[i] = post()
 		}(i)
 	}
 	close(start)
@@ -352,6 +378,9 @@ func TestIdempotencyRace(t *testing.T) {
 
 	accepted := 0
 	for i, r := range results {
+		if r.err != nil {
+			t.Fatalf("send %d: %v", i, r.err)
+		}
 		if r.status != http.StatusAccepted && r.status != http.StatusOK {
 			t.Fatalf("send %d = %d, want 2xx; %s", i, r.status, r.raw)
 		}
