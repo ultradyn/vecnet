@@ -81,6 +81,7 @@ type Session struct {
 	stream   *sseConn
 	created  time.Time
 	lastUsed time.Time
+	res      *sessionResources // nil until the first resources/subscribe; guarded by Server.mu
 }
 
 // sseConn is a session's open GET stream.
@@ -136,6 +137,7 @@ func New(h *hub.Hub, a Authenticator, publicURL string) *Server {
 	s.Register("ping", func(context.Context, *Session, *Request) (any, error) {
 		return map[string]any{}, nil
 	})
+	s.registerResources()
 	return s
 }
 
@@ -467,6 +469,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, p Principal) {
 	if old != nil {
 		old.st.Close()
 	}
+	s.flushHints(sess)
 	select {
 	case <-r.Context().Done():
 	case <-st.Done():
@@ -496,6 +499,7 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request, p Principal) {
 	}
 	s.mu.Lock()
 	delete(s.sessions, sess.ID)
+	sess.dropResources()
 	conn := sess.stream
 	sess.stream = nil
 	s.mu.Unlock()
@@ -522,6 +526,7 @@ func (s *Server) mint(p Principal, proto string) *Session {
 		slices.SortFunc(mine, func(a, b *Session) int { return a.lastUsed.Compare(b.lastUsed) })
 		for _, o := range mine[:len(mine)-maxSessionsPerCaller+1] {
 			delete(s.sessions, o.ID)
+			o.dropResources()
 			if o.stream != nil {
 				closing = append(closing, o.stream)
 				o.stream = nil
@@ -558,6 +563,7 @@ func (s *Server) sweepLocked(now time.Time) {
 	for id, o := range s.sessions {
 		if o.stream == nil && now.Sub(o.lastUsed) > ttl {
 			delete(s.sessions, id)
+			o.dropResources()
 		}
 	}
 }
