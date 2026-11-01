@@ -63,8 +63,14 @@ var enrolledFields = []string{"name", "kind", "enrolled_at"}
 
 // Directory returns every enabled peer's public entry, ordered by peer id,
 // with presence rendered through EffectivePresence and reachability through
-// EffectiveReachability (PROTOCOL §2.10, §8).
+// EffectiveReachability, then every enabled source's as kind "source",
+// ordered by source id (PROTOCOL §2.10, §8, §10). A source reports no
+// presence and the hub observes no transport for it, so both are "unknown".
 func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
+	sources, err := h.directorySources(ctx)
+	if err != nil {
+		return nil, err
+	}
 	teams := map[string][]string{}
 	rows, err := h.DB.QueryContext(ctx, `SELECT peer_id, team_id FROM team_members ORDER BY peer_id, team_id`)
 	if err != nil {
@@ -127,7 +133,7 @@ func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("hub: directory: %w", err)
 	}
-	return out, nil
+	return append(out, sources...), nil
 }
 
 func nullable(s sql.NullString) *string {
