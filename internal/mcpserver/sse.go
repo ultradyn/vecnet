@@ -126,14 +126,18 @@ func (st *Streamer) Comment(text string) error {
 // Done is closed when the stream is closed or a write failed.
 func (st *Streamer) Done() <-chan struct{} { return st.dead }
 
-// Close stops the heartbeat; later writes fail with ErrStreamClosed. The
-// handler returning ends the HTTP response.
+// Close stops the heartbeat and waits out any Send already writing; later
+// writes fail with ErrStreamClosed. The handler returning ends the HTTP
+// response, so it must call Close first: net/http may not be finishing the
+// response while another goroutine writes to it.
 func (st *Streamer) Close() {
 	st.once.Do(func() {
 		close(st.stop)
 		st.dOnce.Do(func() { close(st.dead) })
 	})
 	<-st.hbDone
+	st.mu.Lock() // write checks stop under mu, so none starts after this
+	defer st.mu.Unlock()
 }
 
 func oneLine(s string) string {

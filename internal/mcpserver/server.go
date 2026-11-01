@@ -81,6 +81,7 @@ type Session struct {
 	stream   *sseConn
 	created  time.Time
 	lastUsed time.Time
+	res      *sessionResources // nil until the first resources/subscribe; guarded by Server.mu
 }
 
 // sseConn is a session's open GET stream.
@@ -119,8 +120,8 @@ type Server struct {
 }
 
 // New returns a Server for the hub h whose public URL is publicURL
-// (Cfg.PublicURL). ping and the tools are registered; Tasks 4–5 Register the
-// rest.
+// (Cfg.PublicURL). ping, the tools and the resources are registered; Task 5
+// Registers the rest.
 func New(h *hub.Hub, a Authenticator, publicURL string) *Server {
 	s := &Server{
 		Hub:          h,
@@ -141,6 +142,7 @@ func New(h *hub.Hub, a Authenticator, publicURL string) *Server {
 		return map[string]any{}, nil
 	})
 	s.registerTools()
+	s.registerResources()
 	return s
 }
 
@@ -464,6 +466,11 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, p Principal) {
 	if err != nil {
 		return
 	}
+	owners, _, _, err := s.Hub.StreamOwners(r.Context(), p.Caller, "")
+	if err != nil {
+		slog.Warn("mcp: stream owners", "err", err) // the stream works without it
+	}
+	defer s.streamReach(owners)()
 	conn := &sseConn{st: st}
 	s.mu.Lock()
 	old := sess.stream
@@ -472,6 +479,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, p Principal) {
 	if old != nil {
 		old.st.Close()
 	}
+	s.flushHints(sess)
 	select {
 	case <-r.Context().Done():
 	case <-st.Done():
@@ -501,6 +509,7 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request, p Principal) {
 	}
 	s.mu.Lock()
 	delete(s.sessions, sess.ID)
+	sess.dropResources()
 	conn := sess.stream
 	sess.stream = nil
 	s.mu.Unlock()
@@ -527,6 +536,7 @@ func (s *Server) mint(p Principal, proto string) *Session {
 		slices.SortFunc(mine, func(a, b *Session) int { return a.lastUsed.Compare(b.lastUsed) })
 		for _, o := range mine[:len(mine)-maxSessionsPerCaller+1] {
 			delete(s.sessions, o.ID)
+			o.dropResources()
 			if o.stream != nil {
 				closing = append(closing, o.stream)
 				o.stream = nil
@@ -563,6 +573,7 @@ func (s *Server) sweepLocked(now time.Time) {
 	for id, o := range s.sessions {
 		if o.stream == nil && now.Sub(o.lastUsed) > ttl {
 			delete(s.sessions, id)
+			o.dropResources()
 		}
 	}
 }
