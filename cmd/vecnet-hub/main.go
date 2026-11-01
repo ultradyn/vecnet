@@ -163,8 +163,9 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 	var stopOnce sync.Once
 	closeStop := func() { stopOnce.Do(func() { close(stop) }) }
 	defer closeStop()
+	oauthServer := oauth.New(h)
 	srv := &http.Server{
-		Handler:           httpapi.New(httpapi.Deps{Hub: h, Kick: worker.Kick, VerifyRoute: worker.Verify, OAuth: oauth.New(h), UIDir: devUIDir, Stop: stop}),
+		Handler:           httpapi.New(httpapi.Deps{Hub: h, Kick: worker.Kick, VerifyRoute: worker.Verify, OAuth: oauthServer, UIDir: devUIDir, Stop: stop}),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -178,7 +179,7 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 		bg.Wait()
 	}()
 	bg.Go(func() { worker.Run(bgCtx) })
-	bg.Go(func() { (&events.Worker{Hub: h}).Run(bgCtx) })
+	bg.Go(func() { (&events.Worker{Hub: h, ResolveDotPeer: oauthServer.ResolveDotPeer}).Run(bgCtx) })
 	bg.Go(func() { h.RunTickers(bgCtx, hub.DefaultTickInterval) })
 
 	errc := make(chan error, 1)

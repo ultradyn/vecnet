@@ -32,6 +32,11 @@ func subscribe(t *testing.T, env *testhub.Env, cb *testhub.Callback, peer string
 	kind := "vecnet"
 	if !tokenExp.IsZero() {
 		kind = "oauth"
+		// No login stands behind this subscription, so no oauth_principals
+		// row does: bind its principal, the peer itself, here.
+		env.Events.ResolveDotPeer = func(_ context.Context, principalID string) (string, error) {
+			return principalID, nil
+		}
 	}
 	var types []string
 	if v, ok := args["types"].([]string); ok {

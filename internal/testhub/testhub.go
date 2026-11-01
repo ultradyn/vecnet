@@ -114,6 +114,7 @@ func StartWith(t *testing.T, cfgFn func(*hub.Config)) *Env {
 	env.Events = &events.Worker{Hub: h, Store: events.NewStore(h), Log: h.Log, Now: clock.Now, Interval: WorkerInterval}
 	env.OAuth = oauth.New(h)
 	env.OAuth.AllowedRedirects = append(env.OAuth.AllowedRedirects, "http://127.0.0.1:*")
+	env.Events.ResolveDotPeer = env.OAuth.ResolveDotPeer
 	env.Configure(nil)
 	t.Cleanup(func() {
 		srv.Close()

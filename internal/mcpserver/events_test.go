@@ -1041,6 +1041,7 @@ func TestTokenExpiryResumesThroughSubscribe(t *testing.T) {
 			cb := testhub.NewCallback(t)
 			whsec := webhook.NewSecret()
 			expiry := env.Now.Now().Add(time.Hour)
+			env.Events.ResolveDotPeer = func(context.Context, string) (string, error) { return dot, nil }
 			front := eventsFront(t, env, fakeOAuth{prn: prn, expires: func() time.Time { return expiry }}, func(m *mcpserver.Server) {
 				m.ResolveDotPeer = func(context.Context, string) (string, error) { return dot, nil }
 			})

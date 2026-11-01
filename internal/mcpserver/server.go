@@ -122,8 +122,8 @@ type Server struct {
 	Egress       egress.Policy
 	EventsClient *http.Client
 	// ResolveDotPeer names the peer an OAuth principal is bound to, "" when
-	// it has none (Task 6 fills it). While nil, every OAuth principal is
-	// not_linked at events/subscribe.
+	// it has none (oauth.Server.ResolveDotPeer). While nil, every OAuth
+	// principal is not_linked at events/subscribe.
 	ResolveDotPeer func(ctx context.Context, principalID string) (peerID string, err error)
 
 	methods      map[string]Handler

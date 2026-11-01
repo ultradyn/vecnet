@@ -14,6 +14,27 @@ import (
 	"github.com/XertroV/vecnet/internal/mcpserver"
 )
 
+// ResolveDotPeer names the dot peer principalID is bound to, "" when it has
+// none. It is the seam mcpserver.Server and events.Worker read the binding
+// through, and it applies the rule TokenAuth does: a principal retired by a
+// later link code, or whose peer the operator has moved away, is bound to
+// nothing, which stops its Events subscriptions (PROTOCOL §4.4, §4.5). A
+// disabled peer is left to the caller; TokenAuth and the worker both refuse it.
+func (s *Server) ResolveDotPeer(ctx context.Context, principalID string) (string, error) {
+	var peer string
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT o.peer_id FROM oauth_principals o
+		 JOIN peers p ON p.peer_id = o.peer_id
+		 WHERE o.prn_id = ? AND p.prn_id = o.prn_id`, principalID).Scan(&peer)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("oauth: resolve dot peer: %w", err)
+	}
+	return peer, nil
+}
+
 // TokenAuth is the resource server: mcpserver.Authenticator for OAuth access
 // tokens on /mcp. Every call checks expiry, revocation, the audience
 // (resource), the scope and the binding (PROTOCOL §4.5): a disabled peer, one
