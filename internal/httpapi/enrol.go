@@ -1,14 +1,19 @@
 package httpapi
 
 import (
+	"errors"
 	"io"
 	"net/http"
+
+	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/hub"
 )
 
 // postEnrol is POST /v1/enrol {"token"} (PROTOCOL §2.12, §12), with no
 // bearer: it exchanges a one-time enrolment token for the peer's long-lived
 // secret, returned once, as 200 {"peer_id", "secret"}. An unknown, used or
-// expired token is 401 unauthenticated.
+// expired token is 401 unauthenticated; a dot's is 422 invalid_value, since a
+// dot never holds a vecnet secret.
 func (s *server) postEnrol(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -26,6 +31,12 @@ func (s *server) postEnrol(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	peer, secret, err := s.Hub.Auth.Enrol(r.Context(), tok)
+	if errors.Is(err, auth.ErrDotBearer) {
+		e := hub.E(http.StatusUnprocessableEntity, "invalid_value", "a dot holds no vecnet secret; run `vecnet peer link` for it")
+		e.Details["field"] = "token"
+		writeError(w, e)
+		return
+	}
 	if err != nil {
 		writeError(w, err)
 		return

@@ -47,7 +47,7 @@ func findReceipt(t *testing.T, env *testhub.Env, peer, dly, state string) []enve
 func TestReceiptProcessedReachesSender(t *testing.T) {
 	env := testhub.Start(t)
 	a, aSec := env.NewPeer("grokbot", "a")
-	b, bSec := env.NewPeer("dot", "b")
+	b, bSec := env.NewPeer("session", "b")
 
 	sr := mustSend(t, env, aSec, req("rcpt-1", b))
 	dly := sr.Deliveries[0].DeliveryID
@@ -127,7 +127,7 @@ func TestReceiptAuthz(t *testing.T) {
 	a, aSec := env.NewPeer("grokbot", "a")
 	prn, prnSec := env.NewPrincipal("bob")
 	b, bSec := peerUnder(t, env, "session", "b", prn)
-	_, cSec := env.NewPeer("dot", "c")
+	_, cSec := env.NewPeer("session", "c")
 
 	sr := mustSend(t, env, aSec, req("authz-1", b))
 	dly := sr.Deliveries[0].DeliveryID

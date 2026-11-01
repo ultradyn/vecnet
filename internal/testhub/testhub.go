@@ -16,24 +16,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/oauth"
 	"github.com/XertroV/vecnet/internal/push"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
 // Env is one running test hub. Worker is the push worker on the fake clock;
 // it is wired to the handler (Deps.Kick, Deps.VerifyRoute) but runs only
-// when a test calls Worker.Step or StartWorkers.
+// when a test calls Worker.Step or StartWorkers. Events, the MCP Events
+// worker, is the same: it runs on Events.Step or StartWorkers. OAuth is the
+// handler's OAuth server, also on the fake clock; a test may change its fields
+// between requests.
 type Env struct {
 	T              *testing.T
 	URL            string
 	Hub            *hub.Hub
 	Worker         *push.Worker
+	Events         *events.Worker
+	OAuth          *oauth.Server
 	OperatorSecret string
 	OperatorPeer   string
 	Now            *FakeClock
 
+	stack   *httpapi.Stack
+	stop    chan struct{}
 	handler atomic.Pointer[http.Handler]
 	started bool
 }
@@ -64,7 +73,16 @@ func (c *FakeClock) Advance(d time.Duration) {
 // Start opens a store in t.TempDir(), builds the hub on a FakeClock (starting
 // at the real current time, millisecond-truncated), serves httpapi on a random
 // loopback port and creates the operator. Everything is closed at test end.
+// The hub runs with Config.AllowPrivateEgress = true, since every test
+// receiver is an httptest server on 127.0.0.1.
 func Start(t *testing.T) *Env {
+	t.Helper()
+	return StartWith(t, nil)
+}
+
+// StartWith is Start with cfgFn (when non-nil) adjusting the hub Config
+// after the testhub defaults are set and before the hub is built.
+func StartWith(t *testing.T, cfgFn func(*hub.Config)) *Env {
 	t.Helper()
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "hub.db"))
@@ -83,6 +101,10 @@ func Start(t *testing.T) *Env {
 	cfg := hub.DefaultConfig()
 	cfg.PublicURL = srv.URL
 	cfg.DataDir = dir
+	cfg.AllowPrivateEgress = true
+	if cfgFn != nil {
+		cfgFn(&cfg)
+	}
 	h, err := hub.New(db, cfg, clock.Now)
 	if err != nil {
 		srv.Close()
@@ -90,9 +112,18 @@ func Start(t *testing.T) *Env {
 		t.Fatalf("testhub: hub.New: %v", err)
 	}
 	env.URL, env.Hub = srv.URL, h
-	env.Worker = &push.Worker{Hub: h, Now: clock.Now, Interval: WorkerInterval}
+	// The production wiring, with the fake clock and short intervals on top.
+	env.stack = httpapi.NewStack(h)
+	env.stack.TickEvery = WorkerInterval
+	env.Worker, env.Events, env.OAuth = env.stack.Push, env.stack.Events, env.stack.OAuth
+	env.Worker.Now, env.Worker.Interval = clock.Now, WorkerInterval
+	env.Events.Store, env.Events.Log = events.NewStore(h), h.Log
+	env.Events.Now, env.Events.Interval = clock.Now, WorkerInterval
+	env.OAuth.AllowedRedirects = append(env.OAuth.AllowedRedirects, "http://127.0.0.1:*")
+	env.stop = make(chan struct{})
 	env.Configure(nil)
 	t.Cleanup(func() {
+		close(env.stop) // ends session watchers and open streams
 		srv.Close()
 		db.Close()
 	})
@@ -109,7 +140,8 @@ func Start(t *testing.T) *Env {
 // non-nil) adjusts them, e.g. to shorten Deps.Heartbeat. Requests already in
 // flight keep the old handler; later ones use the new one.
 func (e *Env) Configure(f func(*httpapi.Deps)) {
-	d := httpapi.Deps{Hub: e.Hub, Kick: e.Worker.Kick, VerifyRoute: e.Worker.Verify}
+	d := e.stack.Deps()
+	d.Stop = e.stop
 	if f != nil {
 		f(&d)
 	}
@@ -117,8 +149,9 @@ func (e *Env) Configure(f func(*httpapi.Deps)) {
 	e.handler.Store(&h)
 }
 
-// StartWorkers runs the push worker and the hub's tickers (Hub.RunTickers)
-// on the fake clock, both every WorkerInterval, until the test ends. Call it
+// StartWorkers runs the push worker, the Events worker and the hub's tickers
+// (Hub.RunTickers) on the fake clock, each every WorkerInterval, until the
+// test ends. Call it
 // at most once.
 func (e *Env) StartWorkers() {
 	e.T.Helper()
@@ -128,8 +161,7 @@ func (e *Env) StartWorkers() {
 	e.started = true
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	wg.Go(func() { e.Worker.Run(ctx) })
-	wg.Go(func() { e.Hub.RunTickers(ctx, WorkerInterval) })
+	wg.Go(func() { e.stack.Run(ctx) })
 	// Registered after Start's cleanup, so it runs first: the workers stop
 	// before the store closes.
 	e.T.Cleanup(func() {
@@ -141,13 +173,18 @@ func (e *Env) StartWorkers() {
 // NewPeer creates a peer of kind under an implicit principal and enrols it,
 // returning its id and long-lived secret. It calls Hub.AddPeer and
 // Auth.Enrol directly, not the HTTP admin and enrol routes, so tests of
-// other features do not depend on them.
+// other features do not depend on them. A dot has no secret, so its is "": a
+// test that needs a dot's credential logs in through OAuth, and one that only
+// needs a bearer on /mcp uses another kind.
 func (e *Env) NewPeer(kind, name string) (peerID, secret string) {
 	e.T.Helper()
 	ctx := context.Background()
 	id, tok, err := e.Hub.AddPeer(ctx, kind, name, "")
 	if err != nil {
 		e.T.Fatalf("testhub: AddPeer(%s, %s): %v", kind, name, err)
+	}
+	if kind == "dot" {
+		return id, ""
 	}
 	got, secret, err := e.Hub.Auth.Enrol(ctx, tok)
 	if err != nil {

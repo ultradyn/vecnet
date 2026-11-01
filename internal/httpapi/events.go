@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -107,11 +108,21 @@ func (s *server) getEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// A stream outlives the check that let it in, so it repeats that check.
+	peer, token := r.URL.Query().Get("peer"), bearer(r)
+	alive := func(ctx context.Context) bool {
+		c, err := s.Hub.Auth.Resolve(ctx, token)
+		if err != nil {
+			return false
+		}
+		now, _, _, err := s.Hub.StreamOwners(ctx, c, peer)
+		return err == nil && slices.Equal(now, owners)
+	}
 	if sse {
-		s.streamSSE(w, r, owners, cur, first)
+		s.streamSSE(w, r, c.PrincipalID, owners, cur, first, alive)
 		return
 	}
-	s.longPoll(w, r, owners, cur, first, wait)
+	s.longPoll(w, r, c.PrincipalID, owners, cur, first, wait, alive)
 }
 
 // startCursor picks the cursor (PROTOCOL §2.3): Last-Event-ID, else ?after=,
@@ -169,8 +180,9 @@ type pollBody struct {
 }
 
 // longPoll answers at once when first has events, else holds until an
-// append for the owners or wait elapses.
-func (s *server) longPoll(w http.ResponseWriter, r *http.Request, owners []string, cur eventlog.Cursor, first []envelope.Event, wait time.Duration) {
+// append for the owners, a change to the credential or wait elapses; once
+// alive reports false it answers empty, and the next poll meets the new state.
+func (s *server) longPoll(w http.ResponseWriter, r *http.Request, prn string, owners []string, cur eventlog.Cursor, first []envelope.Event, wait time.Duration, alive func(context.Context) bool) {
 	ctx := r.Context()
 	evs := first
 	if len(evs) == 0 && wait > 0 {
@@ -179,7 +191,12 @@ func (s *server) longPoll(w http.ResponseWriter, r *http.Request, owners []strin
 	hold:
 		for {
 			wctx, cancel := context.WithCancel(ctx)
-			woke := s.Hub.Log.Wait(wctx, owners)
+			woke := s.Hub.Log.Wait(wctx, waitKeys(prn, owners))
+			if !alive(ctx) {
+				cancel()
+				evs = nil
+				break hold
+			}
 			// Re-read after registering, so an append that landed between
 			// the first read and Wait is not missed.
 			var err error
@@ -214,13 +231,22 @@ func (s *server) longPoll(w http.ResponseWriter, r *http.Request, owners []strin
 	writeJSON(w, http.StatusOK, pollBody{Events: evs, NextCursor: next})
 }
 
+// waitKeys are what a stream waits on: its owners' logs, and the principal,
+// which is notified when its credential or peer set changes.
+func waitKeys(prn string, owners []string) []string {
+	return slices.Concat([]string{prn}, owners)
+}
+
 // streamSSE serves the SSE mode: retry and priming frames, replay from cur,
 // then tail with heartbeats. It exits when the client goes away, when the
-// server shuts down (Deps.Stop), when a write fails, or when the frame queue stays full for the stall timeout. A
-// client that keeps reading gets backpressure, so a replay larger than the
-// queue completes on one connection. No database transaction is open while
-// frames are queued or written: reads finish before their frames are queued.
-func (s *server) streamSSE(w http.ResponseWriter, r *http.Request, owners []string, cur eventlog.Cursor, first []envelope.Event) {
+// server shuts down (Deps.Stop), when a write fails, when the frame queue stays
+// full for the stall timeout, or when alive reports the credential gone or the
+// owners changed: rotation, a move and disabling all reach an open stream that
+// way, and the client's reconnect meets the new state. A client that keeps
+// reading gets backpressure, so a replay larger than the queue completes on one
+// connection. No database transaction is open while frames are queued or
+// written: reads finish before their frames are queued.
+func (s *server) streamSSE(w http.ResponseWriter, r *http.Request, prn string, owners []string, cur eventlog.Cursor, first []envelope.Event, alive func(context.Context) bool) {
 	activeStreams.Add(1)
 	defer activeStreams.Add(-1)
 	defer s.streamReach(owners)() // connected while open; runs before the counter drops
@@ -263,20 +289,25 @@ func (s *server) streamSSE(w http.ResponseWriter, r *http.Request, owners []stri
 	hb := time.NewTicker(s.heartbeat())
 	defer hb.Stop()
 	for {
-		if !s.sseTail(ctx, conn, owners, &cur, hb.C, emit) {
+		if !s.sseTail(ctx, conn, prn, owners, &cur, hb.C, emit, alive) {
 			return
 		}
 	}
 }
 
-// sseTail registers a wakeup, replays everything after *cur (the read runs
-// after the registration, so no append is missed), then waits for an append,
-// a heartbeat tick, the client leaving or the writer failing. It reports
-// false when the stream must end.
-func (s *server) sseTail(ctx context.Context, conn *sseConn, owners []string, cur *eventlog.Cursor, tick <-chan time.Time, emit func([]envelope.Event) bool) bool {
+// sseTail registers a wakeup, checks the stream may go on, replays everything
+// after *cur (the read runs after the registration, so no append is missed),
+// then waits for an append, a heartbeat tick, the client leaving or the writer
+// failing. Every wake and every tick comes back through here, so no frame is
+// read for a credential or an owner set that has gone. It reports false when
+// the stream must end.
+func (s *server) sseTail(ctx context.Context, conn *sseConn, prn string, owners []string, cur *eventlog.Cursor, tick <-chan time.Time, emit func([]envelope.Event) bool, alive func(context.Context) bool) bool {
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel() // unregisters the waiter
-	woke := s.Hub.Log.Wait(wctx, owners)
+	woke := s.Hub.Log.Wait(wctx, waitKeys(prn, owners))
+	if !alive(ctx) {
+		return false
+	}
 	for {
 		evs, err := s.Hub.Log.Read(ctx, owners, *cur, eventsReadLimit)
 		if err != nil {

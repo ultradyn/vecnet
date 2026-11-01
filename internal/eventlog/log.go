@@ -182,6 +182,18 @@ func (l *Log) Oldest(ctx context.Context) (Cursor, error) {
 	return Cursor{Epoch: l.epoch, Seq: seq}, nil
 }
 
+// HighWater returns the cursor of the newest event ever appended, purged or
+// not. A cursor past it names an event that does not exist yet.
+func (l *Log) HighWater(ctx context.Context) (Cursor, error) {
+	var seq int64
+	err := l.DB.QueryRowContext(ctx,
+		`SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'events'), 0)`).Scan(&seq)
+	if err != nil {
+		return Cursor{}, fmt.Errorf("eventlog: high water: %w", err)
+	}
+	return Cursor{Epoch: l.epoch, Seq: seq}, nil
+}
+
 // Read returns up to limit events of owners with seq > after.Seq, in global
 // seq order. A cursor from another epoch or below retention is
 // ErrCursorPurged; Head reads nothing (callers tail with Wait).
@@ -275,7 +287,8 @@ func (l *Log) Current(ctx context.Context, owners []string) (Cursor, error) {
 
 // Notify wakes every Wait touching any of owners. Call it after the
 // appending transaction commits. It never blocks: waiters are woken by
-// closing their channels.
+// closing their channels. A principal id is a wake key too, though it owns no
+// events: the hub notifies it when the principal's peer set changes.
 func (l *Log) Notify(owners ...string) {
 	var fired []*waiter
 	l.mu.Lock()

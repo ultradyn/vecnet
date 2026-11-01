@@ -2,16 +2,22 @@ package hub
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/blob"
+	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/ids"
 )
 
 // Operator powers behind /v1/admin/... (PROTOCOL §2.12, §5.5, §12). The HTTP
@@ -58,97 +64,333 @@ func (h *Hub) PeerPrincipal(ctx context.Context, peerID string) (string, error) 
 // invalid_value; an unknown peer 404 not_found.
 func (h *Hub) MovePeer(ctx context.Context, peerID, prnID string) error {
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		oldPrn, kind, _, err := peerRow(ctx, tx, peerID)
-		if err != nil {
-			return err
-		}
-		if kind == "operator" {
-			return invalidValue("peer_id", "the operator peer cannot move")
-		}
-		var one int
-		err = tx.QueryRowContext(ctx, `SELECT 1 FROM principals WHERE prn_id = ?`, prnID).Scan(&one)
-		if errors.Is(err, sql.ErrNoRows) {
-			return invalidValue("principal_id", "unknown principal")
-		}
-		if err != nil {
-			return fmt.Errorf("hub: find principal: %w", err)
-		}
-		if oldPrn == prnID {
-			return nil
-		}
-		now := h.nowStr()
-		if _, err := tx.ExecContext(ctx, `UPDATE peers SET prn_id = ? WHERE peer_id = ?`, prnID, peerID); err != nil {
-			return fmt.Errorf("hub: move peer: %w", err)
-		}
-		// A route inherited from the old principal follows the principal.
-		var viaOld bool
-		if err := tx.QueryRowContext(ctx,
-			`SELECT EXISTS (SELECT 1 FROM peers p JOIN routes r ON r.route_id = p.route_id
-			                WHERE p.peer_id = ? AND r.owner_kind = 'principal' AND r.owner_id = ?)`,
-			peerID, oldPrn).Scan(&viaOld); err != nil {
-			return fmt.Errorf("hub: move peer route: %w", err)
-		}
-		if viaOld {
-			var newRoute any
-			var r string
-			err := tx.QueryRowContext(ctx,
-				`SELECT route_id FROM routes WHERE owner_kind = 'principal' AND owner_id = ? ORDER BY created_at DESC, route_id DESC LIMIT 1`,
-				prnID).Scan(&r)
-			switch {
-			case err == nil:
-				newRoute = r
-			case !errors.Is(err, sql.ErrNoRows):
-				return fmt.Errorf("hub: move peer route: %w", err)
-			}
-			if _, err := tx.ExecContext(ctx, `UPDATE peers SET route_id = ? WHERE peer_id = ?`, newRoute, peerID); err != nil {
-				return fmt.Errorf("hub: move peer route: %w", err)
-			}
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE deliveries SET route_id = ?, updated_at = ? WHERE recipient = ? AND state = 'queued'`,
-				newRoute, now, peerID); err != nil {
-				return fmt.Errorf("hub: move peer deliveries: %w", err)
-			}
-		}
-		return audit.Record(ctx, tx, "operator", "peer_move", []string{peerID, oldPrn, prnID}, nil)
+		return h.movePeer(ctx, tx, peerID, prnID, "operator")
 	})
 	if err != nil {
 		return err
 	}
-	// Wake whoever now reads this peer's log.
-	h.Log.Notify(peerID)
+	// Wake whoever now reads this peer's log, and whoever follows the new
+	// principal's peer set: nothing else tells them it has grown.
+	h.Log.Notify(peerID, prnID)
 	return nil
 }
 
-// RotatePeer revokes peerID's peer credentials and returns a new secret,
-// once (PROTOCOL §2.12, §12). 404 not_found for an unknown peer.
-func (h *Hub) RotatePeer(ctx context.Context, peerID string) (string, error) {
-	s, err := h.Auth.Rotate(ctx, "peer", peerID)
-	if errors.Is(err, auth.ErrUnknownSubject) {
+// movePeer is MovePeer's work inside tx, audited with actor.
+func (h *Hub) movePeer(ctx context.Context, tx *sql.Tx, peerID, prnID, actor string) error {
+	oldPrn, kind, _, err := peerRow(ctx, tx, peerID)
+	if err != nil {
+		return err
+	}
+	if kind == "operator" {
+		return invalidValue("peer_id", "the operator peer cannot move")
+	}
+	var one int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM principals WHERE prn_id = ?`, prnID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return invalidValue("principal_id", "unknown principal")
+	}
+	if err != nil {
+		return fmt.Errorf("hub: find principal: %w", err)
+	}
+	if oldPrn == prnID {
+		return nil
+	}
+	now := h.nowStr()
+	if _, err := tx.ExecContext(ctx, `UPDATE peers SET prn_id = ? WHERE peer_id = ?`, prnID, peerID); err != nil {
+		return fmt.Errorf("hub: move peer: %w", err)
+	}
+	// A route inherited from the old principal follows the principal.
+	var viaOld bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM peers p JOIN routes r ON r.route_id = p.route_id
+		                WHERE p.peer_id = ? AND r.owner_kind = 'principal' AND r.owner_id = ?)`,
+		peerID, oldPrn).Scan(&viaOld); err != nil {
+		return fmt.Errorf("hub: move peer route: %w", err)
+	}
+	if viaOld {
+		var newRoute any
+		var r string
+		err := tx.QueryRowContext(ctx,
+			`SELECT route_id FROM routes WHERE owner_kind = 'principal' AND owner_id = ? ORDER BY created_at DESC, route_id DESC LIMIT 1`,
+			prnID).Scan(&r)
+		switch {
+		case err == nil:
+			newRoute = r
+		case !errors.Is(err, sql.ErrNoRows):
+			return fmt.Errorf("hub: move peer route: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE peers SET route_id = ? WHERE peer_id = ?`, newRoute, peerID); err != nil {
+			return fmt.Errorf("hub: move peer route: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE deliveries SET route_id = ?, updated_at = ? WHERE recipient = ? AND state = 'queued'`,
+			newRoute, now, peerID); err != nil {
+			return fmt.Errorf("hub: move peer deliveries: %w", err)
+		}
+	}
+	return audit.Record(ctx, tx, actor, "peer_move", []string{peerID, oldPrn, prnID}, nil)
+}
+
+// DotLinkTTL is how long a link code stays valid (PROTOCOL §4.5, R15).
+const DotLinkTTL = 10 * time.Minute
+
+const (
+	dotLinkAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789" // no I, L, O, 0 or 1
+	dotLinkLen      = 8
+)
+
+// ErrDotLink is every refused link code: unknown, used, expired, or naming a
+// peer that is no longer an enabled dot. The cases are not told apart.
+var ErrDotLink = errors.New("hub: invalid link code")
+
+// newDotLinkCode draws dotLinkLen uniform characters from the alphabet.
+func newDotLinkCode() (string, error) {
+	limit := big.NewInt(int64(len(dotLinkAlphabet)))
+	b := make([]byte, dotLinkLen)
+	for i := range b {
+		n, err := rand.Int(rand.Reader, limit)
+		if err != nil {
+			return "", fmt.Errorf("hub: link code: %w", err)
+		}
+		b[i] = dotLinkAlphabet[n.Int64()]
+	}
+	return string(b), nil
+}
+
+// DotLink mints the one-time code that binds a ChatGPT principal to dot peer
+// peerID on first login (PROTOCOL §4.5, R15). The code is returned once and
+// only its hash is stored; it lasts DotLinkTTL. A peer of another kind, or a
+// disabled one, is 422 invalid_value; an unknown peer 404 not_found. Audited
+// as "dot_link".
+func (h *Hub) DotLink(ctx context.Context, peerID string) (string, error) {
+	code, err := newDotLinkCode()
+	if err != nil {
+		return "", err
+	}
+	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		_, kind, disabled, err := peerRow(ctx, tx, peerID)
+		if err != nil {
+			return err
+		}
+		if kind != "dot" {
+			return invalidValue("peer_id", "only a dot peer can be linked")
+		}
+		if disabled {
+			return invalidValue("peer_id", "the peer is disabled")
+		}
+		now := h.Now()
+		if _, err := tx.ExecContext(ctx, `DELETE FROM dot_links WHERE expires_at <= ?`, envelope.FormatTime(now)); err != nil {
+			return fmt.Errorf("hub: prune link codes: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO dot_links(code_hash, peer_id, expires_at) VALUES (?, ?, ?)`,
+			auth.HashSecret(code), peerID, envelope.FormatTime(now.Add(DotLinkTTL))); err != nil {
+			return fmt.Errorf("hub: insert link code: %w", err)
+		}
+		return audit.Record(ctx, tx, "operator", "dot_link", []string{peerID}, nil)
+	})
+	if err != nil {
+		return "", err
+	}
+	return code, nil
+}
+
+// ConsumeDotLink spends code and returns the peer it names. Any code that
+// cannot be spent is ErrDotLink.
+func (h *Hub) ConsumeDotLink(ctx context.Context, code string) (string, error) {
+	var peerID string
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		var err error
+		peerID, err = h.ConsumeDotLinkTx(ctx, tx, code)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	return peerID, nil
+}
+
+// normDotLink is code as stored, ok false when it cannot be one. People type
+// these codes, so case and surrounding space are forgiven.
+func normDotLink(code string) (string, bool) {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if len(code) != dotLinkLen || strings.Trim(code, dotLinkAlphabet) != "" {
+		return "", false
+	}
+	return code, true
+}
+
+// DotLinkLive reports, by a read alone, whether code could be spent now. It
+// cheaply turns away a guess; ConsumeDotLinkTx still decides.
+func (h *Hub) DotLinkLive(ctx context.Context, code string) (bool, error) {
+	code, ok := normDotLink(code)
+	if !ok {
+		return false, nil
+	}
+	var live bool
+	err := h.DB.QueryRowContext(ctx,
+		`SELECT used_at IS NULL AND expires_at > ? FROM dot_links WHERE code_hash = ?`,
+		h.nowStr(), auth.HashSecret(code)).Scan(&live)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("hub: check link code: %w", err)
+	}
+	return live, nil
+}
+
+// ConsumeDotLinkTx is ConsumeDotLink inside tx, so a failed bind leaves the
+// code unspent. Audited as "dot_link_consume" by "hub".
+func (h *Hub) ConsumeDotLinkTx(ctx context.Context, tx *sql.Tx, code string) (string, error) {
+	code, ok := normDotLink(code)
+	if !ok {
+		return "", ErrDotLink
+	}
+	hash := auth.HashSecret(code)
+	var peerID, expires string
+	var used sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT peer_id, expires_at, used_at FROM dot_links WHERE code_hash = ?`, hash).
+		Scan(&peerID, &expires, &used)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrDotLink
+	}
+	if err != nil {
+		return "", fmt.Errorf("hub: find link code: %w", err)
+	}
+	exp, err := envelope.ParseTime(expires)
+	if err != nil || used.Valid || !h.Now().Before(exp) {
+		return "", ErrDotLink
+	}
+	_, kind, disabled, err := peerRow(ctx, tx, peerID)
+	if err != nil {
+		return "", err
+	}
+	if kind != "dot" || disabled {
+		return "", ErrDotLink
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE dot_links SET used_at = ? WHERE code_hash = ? AND used_at IS NULL`, h.nowStr(), hash)
+	if err != nil {
+		return "", fmt.Errorf("hub: spend link code: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return "", ErrDotLink
+	}
+	if err := audit.Record(ctx, tx, "hub", "dot_link_consume", []string{peerID}, nil); err != nil {
+		return "", err
+	}
+	return peerID, nil
+}
+
+// BindDotPrincipalTx moves dot peer peerID under a new principal named "dot:"
+// + the peer's name, inside tx, on the authority of the operator's link code
+// (PROTOCOL §2.12, §4.5), and ends any bearer left on it. It returns the
+// principal. After commit, wake readers with Log.Notify(peerID, prnID).
+func (h *Hub) BindDotPrincipalTx(ctx context.Context, tx *sql.Tx, peerID string) (string, error) {
+	var name string
+	err := tx.QueryRowContext(ctx, `SELECT name FROM peers WHERE peer_id = ?`, peerID).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", unknownPeer(peerID)
 	}
-	return s, err
+	if err != nil {
+		return "", fmt.Errorf("hub: find peer: %w", err)
+	}
+	prnID := ids.New(ids.Prn)
+	if err := insertPrincipal(ctx, tx, prnID, "dot:"+name, h.nowStr()); err != nil {
+		return "", err
+	}
+	if err := h.movePeer(ctx, tx, peerID, prnID, "hub"); err != nil {
+		return "", err
+	}
+	// A link code cuts off whoever had this dot, and a bearer from before dots
+	// lost them would survive it.
+	if err := h.Auth.RevokePeerCredentialsTx(ctx, tx, peerID); err != nil {
+		return "", err
+	}
+	return prnID, nil
+}
+
+// PausedCredentialRotated is the paused_reason of an MCP Events subscription
+// whose bearer was rotated. Rotation answers a leaked credential, and the
+// subscription is what that credential chose: it stops in the same
+// transaction, and the holder of the new credential subscribes again.
+const PausedCredentialRotated = "credential_rotated"
+
+// PausedOperator is the paused_reason of the operator's own stop. Only the
+// operator lifts it: neither a re-subscribe nor a rotation replaces it.
+const PausedOperator = "operator"
+
+// pauseBearerSubscriptions stops the Events subscriptions the credential of
+// subject made (subject is a peer or principal id). An operator's pause stays
+// the operator's. Paused subscriptions keep their cursor, so nothing is lost.
+func (h *Hub) pauseBearerSubscriptions(ctx context.Context, tx *sql.Tx, subject string) error {
+	now := h.nowStr()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE event_subscriptions SET paused_reason = ?, updated_at = ?
+		 WHERE principal_kind = 'vecnet' AND principal_id = ? AND coalesce(paused_reason, '') != ?`,
+		PausedCredentialRotated, now, subject, PausedOperator); err != nil {
+		return fmt.Errorf("hub: pause subscriptions: %w", err)
+	}
+	return nil
+}
+
+// RotatePeer revokes peerID's peer credentials and returns a new secret, once
+// (PROTOCOL §2.12, §12), and pauses the Events subscriptions the old one made.
+// A dot has no bearer to rotate: 422 invalid_value. 404 not_found for an
+// unknown peer. Open streams on the old credential end (they wake here).
+func (h *Hub) RotatePeer(ctx context.Context, peerID string) (string, error) {
+	var secret string
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		_, kind, _, err := peerRow(ctx, tx, peerID)
+		if err != nil {
+			return err
+		}
+		if kind == "dot" {
+			return invalidValue("peer_id", "a dot holds no vecnet secret; issue a link code instead")
+		}
+		if secret, err = h.Auth.RotateTx(ctx, tx, "peer", peerID); err != nil {
+			return err
+		}
+		return h.pauseBearerSubscriptions(ctx, tx, peerID)
+	})
+	if err != nil {
+		return "", err
+	}
+	h.Log.Notify(peerID)
+	return secret, nil
 }
 
 // RotatePrincipal revokes principal prnID's credential and returns a new
-// one, once. The operator principal's credential stays an operator
-// credential. 404 not_found for an unknown principal.
+// one, once, and pauses the Events subscriptions the old one made. The
+// operator principal's credential stays an operator credential. 404
+// not_found for an unknown principal. Open streams on the old credential end.
 func (h *Hub) RotatePrincipal(ctx context.Context, prnID string) (string, error) {
-	kind := "principal"
-	var isOp bool
-	if err := h.DB.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM credentials WHERE subject_id = ? AND kind = 'operator')`, prnID).Scan(&isOp); err != nil {
-		return "", fmt.Errorf("hub: rotate principal: %w", err)
-	}
-	if isOp {
-		kind = "operator"
-	}
-	s, err := h.Auth.Rotate(ctx, kind, prnID)
+	var secret string
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		kind := "principal"
+		var isOp bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM credentials WHERE subject_id = ? AND kind = 'operator')`, prnID).Scan(&isOp); err != nil {
+			return fmt.Errorf("hub: rotate principal: %w", err)
+		}
+		if isOp {
+			kind = "operator"
+		}
+		var err error
+		if secret, err = h.Auth.RotateTx(ctx, tx, kind, prnID); err != nil {
+			return err
+		}
+		return h.pauseBearerSubscriptions(ctx, tx, prnID)
+	})
 	if errors.Is(err, auth.ErrUnknownSubject) {
 		e := E(http.StatusNotFound, "not_found", "no such principal")
 		e.Details["principal_id"] = prnID
 		return "", e
 	}
-	return s, err
+	if err != nil {
+		return "", err
+	}
+	h.Log.Notify(prnID)
+	return secret, nil
 }
 
 // SetScopes replaces peerID's send scopes with allow and deny lists of
@@ -538,7 +780,7 @@ func (h *Hub) AuditPage(ctx context.Context, limit int, before int64) ([]AuditEn
 }
 
 // AdminCounters are the dashboard counters of GET /v1/admin/counters.
-var AdminCounters = []string{CounterLoopCut, CounterRateLimited, CounterDeadLetters, CounterPushConflicts}
+var AdminCounters = []string{CounterLoopCut, CounterRateLimited, CounterDeadLetters, CounterPushConflicts, CounterPushAuthFailed}
 
 // Counters returns every AdminCounters value (0 when never bumped).
 func (h *Hub) Counters(ctx context.Context) (map[string]int, error) {

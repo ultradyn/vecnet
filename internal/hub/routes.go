@@ -6,13 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/ids"
 	"github.com/XertroV/vecnet/internal/webhook"
+)
+
+// Route kinds (routes.kind).
+const (
+	RouteKindHTTP    = "http"    // signed webhooks (PROTOCOL §3)
+	RouteKindGrokbot = "grokbot" // Grok Bot routine (PROTOCOL §13.3)
 )
 
 // RouteKeyOverlap is how long a rotated-out route key stays valid; pushes
@@ -32,63 +37,29 @@ const routePrefix ids.Prefix = "route"
 //
 // The route is not live until Worker.Verify has answered its verification
 // challenge (MarkRouteVerified): ClaimDue skips unverified routes (§3.2).
-// An unknown owner, an unknown ownerKind or a URL that is not absolute
-// http(s) is 422 invalid_value.
+// An unknown owner or an unknown ownerKind is 422 invalid_value; a URL the
+// egress guard refuses (egress.Policy.CheckURL: https only unless
+// Cfg.AllowPrivateEgress, no userinfo, public host) is 422 invalid_url.
 func (h *Hub) AddRoute(ctx context.Context, ownerKind, ownerID, rawURL string) (routeID, whsec string, err error) {
-	invalid := func(field, msg string) error {
-		e := E(http.StatusUnprocessableEntity, "invalid_value", msg)
-		e.Details["field"] = field
-		return e
-	}
 	if ownerKind != "peer" && ownerKind != "principal" {
-		return "", "", invalid("owner_kind", "a route is owned by a peer or a principal")
+		return "", "", invalidRouteField("owner_kind", "a route is owned by a peer or a principal")
 	}
-	u, perr := url.Parse(rawURL)
-	if perr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
-		return "", "", invalid("url", "a route URL is an absolute http(s) URL without credentials")
+	if _, uerr := h.EgressPolicy().CheckURL(rawURL); uerr != nil {
+		return "", "", invalidURL("url", uerr)
 	}
 	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		var one int
-		q := `SELECT 1 FROM peers WHERE peer_id = ?`
-		if ownerKind == "principal" {
-			q = `SELECT 1 FROM principals WHERE prn_id = ?`
-		}
-		err := tx.QueryRowContext(ctx, q, ownerID).Scan(&one)
-		if errors.Is(err, sql.ErrNoRows) {
-			return invalid("owner", "unknown route owner")
-		}
+		var now string
+		var err error
+		routeID, now, err = h.insertRoute(ctx, tx, newRoute{ownerKind: ownerKind, ownerID: ownerID, kind: RouteKindHTTP, url: rawURL})
 		if err != nil {
-			return fmt.Errorf("hub: route owner: %w", err)
+			return err
 		}
-		now := h.nowStr()
-		routeID = ids.New(routePrefix)
 		whsec = webhook.NewSecret()
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO routes(route_id, owner_kind, owner_id, url, created_at) VALUES (?, ?, ?, ?, ?)`,
-			routeID, ownerKind, ownerID, rawURL, now); err != nil {
-			return fmt.Errorf("hub: insert route: %w", err)
-		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO route_keys(route_id, whsec, created_at) VALUES (?, ?, ?)`, routeID, whsec, now); err != nil {
 			return fmt.Errorf("hub: insert route key: %w", err)
 		}
-		if ownerKind == "peer" {
-			_, err = tx.ExecContext(ctx, `UPDATE peers SET route_id = ? WHERE peer_id = ?`, routeID, ownerID)
-		} else {
-			_, err = tx.ExecContext(ctx, `UPDATE peers SET route_id = ? WHERE prn_id = ? AND route_id IS NULL`, routeID, ownerID)
-		}
-		if err != nil {
-			return fmt.Errorf("hub: assign route: %w", err)
-		}
-		// Backfill: queued deliveries resolved at send time to no route
-		// (pull only) now push through the peer's route.
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE deliveries SET route_id = (SELECT p.route_id FROM peers p WHERE p.peer_id = deliveries.recipient), updated_at = ?
-			 WHERE route_id IS NULL AND state = 'queued'
-			   AND recipient IN (SELECT peer_id FROM peers WHERE route_id = ?)`, now, routeID); err != nil {
-			return fmt.Errorf("hub: backfill route: %w", err)
-		}
-		return audit.Record(ctx, tx, "operator", "route_add", []string{routeID, ownerID}, map[string]any{"owner_kind": ownerKind})
+		return nil
 	})
 	if err != nil {
 		return "", "", err
@@ -96,13 +67,116 @@ func (h *Hub) AddRoute(ctx context.Context, ownerKind, ownerID, rawURL string) (
 	return routeID, whsec, nil
 }
 
+// newRoute is a route being created. keyEnc is a sealed routine key
+// (grokbot routes only); verified marks it live at once.
+type newRoute struct {
+	ownerKind, ownerID, kind, url string
+	keyEnc                        string
+	verified                      bool
+}
+
+// insertRoute inserts r for an existing owner, makes it its peer's route (a
+// principal route: of every peer of the principal that has none), and hands
+// it the queued deliveries of those peers that have no route yet. An unknown
+// owner is 422 invalid_value. It returns the new id and its creation time.
+func (h *Hub) insertRoute(ctx context.Context, tx *sql.Tx, r newRoute) (routeID, now string, err error) {
+	var one int
+	q := `SELECT 1 FROM peers WHERE peer_id = ?`
+	if r.ownerKind == "principal" {
+		q = `SELECT 1 FROM principals WHERE prn_id = ?`
+	}
+	err = tx.QueryRowContext(ctx, q, r.ownerID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", invalidRouteField("owner", "unknown route owner")
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("hub: route owner: %w", err)
+	}
+	now = h.nowStr()
+	routeID = ids.New(routePrefix)
+	var verifiedAt, keyEnc any
+	if r.verified {
+		verifiedAt = now
+	}
+	if r.keyEnc != "" {
+		keyEnc = r.keyEnc
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO routes(route_id, owner_kind, owner_id, kind, url, verified_at, created_at, key_enc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		routeID, r.ownerKind, r.ownerID, r.kind, r.url, verifiedAt, now, keyEnc); err != nil {
+		return "", "", fmt.Errorf("hub: insert route: %w", err)
+	}
+	if r.ownerKind == "peer" {
+		_, err = tx.ExecContext(ctx, `UPDATE peers SET route_id = ? WHERE peer_id = ?`, routeID, r.ownerID)
+	} else {
+		_, err = tx.ExecContext(ctx, `UPDATE peers SET route_id = ? WHERE prn_id = ? AND route_id IS NULL`, routeID, r.ownerID)
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("hub: assign route: %w", err)
+	}
+	// Backfill: queued deliveries resolved at send time to no route
+	// (pull only) now push through the peer's route.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE deliveries SET route_id = (SELECT p.route_id FROM peers p WHERE p.peer_id = deliveries.recipient), updated_at = ?
+		 WHERE route_id IS NULL AND state = 'queued'
+		   AND recipient IN (SELECT peer_id FROM peers WHERE route_id = ?)`, now, routeID); err != nil {
+		return "", "", fmt.Errorf("hub: backfill route: %w", err)
+	}
+	if err := audit.Record(ctx, tx, "operator", "route_add", []string{routeID, r.ownerID},
+		map[string]any{"owner_kind": r.ownerKind, "kind": r.kind}); err != nil {
+		return "", "", err
+	}
+	return routeID, now, nil
+}
+
+// RouteInfo is one route as the operator sees it (GET /v1/admin/routes). It
+// never carries a key: not a whsec_, not a routine key, sealed or otherwise.
+type RouteInfo struct {
+	RouteID     string  `json:"route_id"`
+	OwnerKind   string  `json:"owner_kind"`
+	OwnerID     string  `json:"owner_id"`
+	Kind        string  `json:"kind"`
+	URL         string  `json:"url"`
+	VerifiedAt  *string `json:"verified_at"`
+	CreatedAt   string  `json:"created_at"`
+	RunsPerHour int     `json:"runs_per_hour"`
+}
+
+// ListRoutes returns every push route, oldest first.
+func (h *Hub) ListRoutes(ctx context.Context) ([]RouteInfo, error) {
+	rows, err := h.DB.QueryContext(ctx,
+		`SELECT route_id, owner_kind, owner_id, kind, url, verified_at, created_at, runs_per_hour
+		 FROM routes ORDER BY created_at, route_id`)
+	if err != nil {
+		return nil, fmt.Errorf("hub: list routes: %w", err)
+	}
+	defer rows.Close()
+	out := []RouteInfo{}
+	for rows.Next() {
+		var r RouteInfo
+		if err := rows.Scan(&r.RouteID, &r.OwnerKind, &r.OwnerID, &r.Kind, &r.URL, &r.VerifiedAt, &r.CreatedAt, &r.RunsPerHour); err != nil {
+			return nil, fmt.Errorf("hub: list routes: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hub: list routes: %w", err)
+	}
+	return out, nil
+}
+
 // RotateRoute issues a new key for routeID and retires every active older
 // key RouteKeyOverlap from now (PROTOCOL §3.5). An unknown route is 404
-// not_found.
+// not_found; a grokbot route, which has no whsec_ to rotate, is 422
+// invalid_value (its routine key changes through RotateGrokbotKey).
 func (h *Hub) RotateRoute(ctx context.Context, routeID string) (newWhsec string, err error) {
 	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		if err := routeExists(ctx, tx, routeID); err != nil {
+		kind, err := routeKind(ctx, tx, routeID)
+		if err != nil {
 			return err
+		}
+		if kind != RouteKindHTTP {
+			return invalidRouteField("route_id", "only an http route has a whsec_ key to rotate")
 		}
 		nowT := h.Now()
 		now := envelope.FormatTime(nowT)
@@ -186,16 +260,22 @@ func (h *Hub) MarkRouteVerified(ctx context.Context, routeID string) error {
 	})
 }
 
-func routeExists(ctx context.Context, tx *sql.Tx, routeID string) error {
-	var one int
-	err := tx.QueryRowContext(ctx, `SELECT 1 FROM routes WHERE route_id = ?`, routeID).Scan(&one)
+func routeKind(ctx context.Context, tx *sql.Tx, routeID string) (string, error) {
+	var kind string
+	err := tx.QueryRowContext(ctx, `SELECT kind FROM routes WHERE route_id = ?`, routeID).Scan(&kind)
 	if errors.Is(err, sql.ErrNoRows) {
-		return unknownRoute(routeID)
+		return "", unknownRoute(routeID)
 	}
 	if err != nil {
-		return fmt.Errorf("hub: find route: %w", err)
+		return "", fmt.Errorf("hub: find route: %w", err)
 	}
-	return nil
+	return kind, nil
+}
+
+func invalidRouteField(field, msg string) *APIError {
+	e := E(http.StatusUnprocessableEntity, "invalid_value", msg)
+	e.Details["field"] = field
+	return e
 }
 
 func unknownRoute(routeID string) *APIError {

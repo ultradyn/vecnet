@@ -235,3 +235,78 @@ func TestTxRollsBackOnErrorAndPanic(t *testing.T) {
 		t.Fatalf("%d rows survived rolled-back transactions, want 0", n)
 	}
 }
+
+// Migration 0007 recreates routes (SQLite cannot alter a CHECK): it must
+// keep every existing route id and key, and it must accept kind grokbot.
+func TestMigration0007KeepsRoutes(t *testing.T) {
+	ctx := context.Background()
+	db := openTemp(t)
+
+	// Put the schema back to before 0007, with a live route in it.
+	for _, q := range []string{
+		`DROP TABLE route_runs`,
+		`DROP TABLE routes`,
+		`CREATE TABLE routes (
+			route_id    TEXT PRIMARY KEY,
+			owner_kind  TEXT NOT NULL CHECK (owner_kind IN ('peer', 'principal')),
+			owner_id    TEXT NOT NULL,
+			kind        TEXT NOT NULL DEFAULT 'http' CHECK (kind IN ('http')),
+			url         TEXT NOT NULL,
+			verified_at TEXT,
+			created_at  TEXT NOT NULL
+		) STRICT`,
+		`CREATE INDEX routes_owner ON routes(owner_kind, owner_id)`,
+		`DELETE FROM schema_migrations WHERE name = '0007_grokbot_routes.sql'`,
+		`INSERT INTO routes(route_id, owner_kind, owner_id, url, verified_at, created_at)
+		 VALUES ('route_a', 'peer', 'peer_a', 'https://a.example/hook', '2026-11-01T00:00:00.000Z', '2026-10-31T00:00:00.000Z'),
+		        ('route_b', 'principal', 'prn_b', 'https://b.example/hook', NULL, '2026-10-31T00:00:01.000Z')`,
+		`INSERT INTO route_keys(route_id, whsec, created_at) VALUES ('route_a', 'whsec_a', '2026-10-31T00:00:00.000Z')`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	applied, err := store.Migrate(ctx, db.DB)
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if len(applied) != 1 || applied[0] != "0007_grokbot_routes.sql" {
+		t.Fatalf("Migrate applied %v, want 0007 alone", applied)
+	}
+
+	var ownerKind, ownerID, kind, url, verified, created string
+	var keyEnc *string
+	var perHour int
+	if err := db.QueryRowContext(ctx,
+		`SELECT owner_kind, owner_id, kind, url, verified_at, created_at, key_enc, runs_per_hour FROM routes WHERE route_id = 'route_a'`).
+		Scan(&ownerKind, &ownerID, &kind, &url, &verified, &created, &keyEnc, &perHour); err != nil {
+		t.Fatalf("route_a: %v", err)
+	}
+	if ownerKind != "peer" || ownerID != "peer_a" || kind != "http" || url != "https://a.example/hook" ||
+		verified != "2026-11-01T00:00:00.000Z" || created != "2026-10-31T00:00:00.000Z" || keyEnc != nil || perHour != 200 {
+		t.Fatalf("route_a changed: %s %s %s %s %s %s %v %d", ownerKind, ownerID, kind, url, verified, created, keyEnc, perHour)
+	}
+	var n int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM routes WHERE route_id = 'route_b' AND verified_at IS NULL`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("route_b: %d, %v", n, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM route_keys WHERE route_id = 'route_a' AND whsec = 'whsec_a'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("route_keys: %d, %v", n, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'routes_owner'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("routes_owner index: %d, %v", n, err)
+	}
+
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO routes(route_id, owner_kind, owner_id, kind, url, key_enc, created_at) VALUES ('route_g', 'peer', 'peer_g', 'grokbot', 'u', 'v1:x', 'now')`); err != nil {
+		t.Fatalf("kind grokbot refused: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO routes(route_id, owner_kind, owner_id, kind, url, created_at) VALUES ('route_x', 'peer', 'peer_g', 'smtp', 'u', 'now')`); err == nil {
+		t.Fatalf("kind smtp accepted")
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO route_runs(route_id, at) VALUES ('route_g', '2026-11-01T00:00:00.000Z')`); err != nil {
+		t.Fatalf("route_runs: %v", err)
+	}
+}

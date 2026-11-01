@@ -98,6 +98,13 @@ Hub-side scheduling or routing by capability, quota, location or latency. Multi-
 3. **Operator surface**: chat UI, dashboard, dead-letter actions, admin UI.
 4. **Phase 2 behaviours**: escalation, presence fan-out tuning, c2c connector decision, peer id namespacing.
 
+**Status (2026-11-01):**
+
+- Phase 1 is built.
+- Phase 2 is built for Grok Bot, dots, GitHub ingress and notification webhooks. A dot has not yet been run live against this hub (`docs/connectors/dots.md`). The openclaw channel plugin is planned, not built (`docs/plans/2026-11-01-openclaw-plugin.md`).
+- Phase 3 is planned (`docs/plans/2026-11-01-operator-ui.md`).
+- Phase 4 has not started.
+
 ## 17. Source tickets
 
 See `.scratch/vecnet/map.md` for the index. Tickets 01–07 and 19 are research and facts; 08 is the envelope; 09–17 are the behaviour decisions; 18 is the operator UI prototype.

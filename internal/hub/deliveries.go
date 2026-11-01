@@ -34,6 +34,9 @@ const (
 const (
 	CounterDeadLetters   = "dead_letters"
 	CounterPushConflicts = "push_conflicts"
+	// CounterPushAuthFailed counts routine POSTs refused for a dead key or
+	// a disabled routine (PROTOCOL §13.3).
+	CounterPushAuthFailed = "push_auth_failed"
 )
 
 // PushBackoff is the retry delay after attempt failed (PROTOCOL §3.3):
@@ -59,14 +62,15 @@ func PushBackoff(attempt int, retryAfter time.Duration, rnd func() float64) time
 	return base + time.Duration(j*float64(base)/10)
 }
 
-// DueDelivery is one claimed push: the route to push through, its active
-// keys (newest first) and the exact bytes of the Delivery Event, which every
-// attempt resends unchanged (§3.3).
+// DueDelivery is one claimed push: the route to push through (Kind is its
+// routes.kind), its active keys (newest first; none on a grokbot route) and
+// the exact bytes of the Delivery Event, which every attempt resends
+// unchanged (§3.3).
 type DueDelivery struct {
-	DeliveryID, Recipient, ThreadID, RouteID, URL string
-	Keys                                          []string
-	Attempt                                       int    // this attempt's number, 1-based
-	Body                                          []byte // the Delivery JSON (with per-recipient blob_url), as appended to the log
+	DeliveryID, Recipient, ThreadID, RouteID, URL, Kind string
+	Keys                                                []string
+	Attempt                                             int    // this attempt's number, 1-based
+	Body                                                []byte // the Delivery JSON (with per-recipient blob_url), as appended to the log
 }
 
 // ClaimDue claims up to limit deliveries due for a push at now and marks
@@ -85,7 +89,7 @@ func (h *Hub) ClaimDue(ctx context.Context, now time.Time, limit int) ([]DueDeli
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		out = nil
 		rows, err := tx.QueryContext(ctx,
-			`SELECT d.dly_id, d.recipient, d.thr_id, d.route_id, r.url, d.attempt, e.data
+			`SELECT d.dly_id, d.recipient, d.thr_id, d.route_id, r.url, r.kind, d.attempt, e.data
 			 FROM deliveries d
 			 JOIN routes r ON r.route_id = d.route_id
 			 JOIN events e ON e.seq = d.event_seq
@@ -106,7 +110,7 @@ func (h *Hub) ClaimDue(ctx context.Context, now time.Time, limit int) ([]DueDeli
 		for rows.Next() {
 			var d DueDelivery
 			var body string
-			if err := rows.Scan(&d.DeliveryID, &d.Recipient, &d.ThreadID, &d.RouteID, &d.URL, &d.Attempt, &body); err != nil {
+			if err := rows.Scan(&d.DeliveryID, &d.Recipient, &d.ThreadID, &d.RouteID, &d.URL, &d.Kind, &d.Attempt, &body); err != nil {
 				rows.Close()
 				return fmt.Errorf("hub: claim due: %w", err)
 			}
@@ -146,6 +150,20 @@ func (h *Hub) ClaimDue(ctx context.Context, now time.Time, limit int) ([]DueDeli
 	return out, nil
 }
 
+// DeferPush gives back a claim that was not attempted: the delivery is
+// queued again until next with its attempt and attempts_left as they were
+// before ClaimDue. It stays in line, so §3.4 keeps its thread's later
+// deliveries behind it. A delivery that moved on meanwhile is left alone.
+func (h *Hub) DeferPush(ctx context.Context, d DueDelivery, next time.Time) error {
+	if _, err := h.DB.ExecContext(ctx,
+		`UPDATE deliveries SET state = 'queued', attempt = attempt - 1, next_attempt_at = ?, updated_at = ?
+		 WHERE dly_id = ? AND state = 'pushed' AND attempt = ?`,
+		envelope.FormatTime(next), h.nowStr(), d.DeliveryID, d.Attempt); err != nil {
+		return fmt.Errorf("hub: defer push: %w", err)
+	}
+	return nil
+}
+
 // pushOutcome classifies a push result (§3.3).
 type pushOutcome int
 
@@ -154,6 +172,7 @@ const (
 	pushRetry
 	pushConflict
 	pushTerminal
+	pushAuthFailed // grokbot only: dead letter, counted apart (§13.3)
 )
 
 func classifyPush(status int, netErr error) pushOutcome {
@@ -188,7 +207,11 @@ func classifyPush(status int, netErr error) pushOutcome {
 // unreachable. A result for a delivery that is no longer pushed at
 // d.Attempt (acked, expired or re-claimed meanwhile) is ignored.
 func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAfter time.Duration, netErr error, now time.Time) error {
-	outcome := classifyPush(status, netErr)
+	return h.recordPush(ctx, d, classifyPush(status, netErr), status, retryAfter, netErr, now)
+}
+
+// recordPush applies outcome; see PushResult and GrokbotPushResult.
+func (h *Hub) recordPush(ctx context.Context, d DueDelivery, outcome pushOutcome, status int, retryAfter time.Duration, netErr error, now time.Time) error {
 	nowS := envelope.FormatTime(now)
 	var lastStatus any
 	if netErr == nil {
@@ -227,9 +250,12 @@ func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAf
 			return nil // stale: the delivery moved on without this result
 		}
 		applied = true
+		alerts := func(state string) bool {
+			return state == "dead_letter" || outcome == pushConflict
+		}
 		receipt := func(state, note string) error {
 			if !senderIsPeer {
-				if state == "dead_letter" || outcome == pushConflict {
+				if alerts(state) {
 					// No sender log to append to: the operator still hears of it.
 					r := envelope.Receipt{DeliveryID: d.DeliveryID, MessageID: msgID, ThreadID: thr,
 						State: state, By: "hub", At: nowS, Note: note}
@@ -248,7 +274,7 @@ func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAf
 				return err
 			}
 			notify = sender
-			if state == "dead_letter" || outcome == pushConflict {
+			if alerts(state) {
 				data, err := json.Marshal(r)
 				if err != nil {
 					return fmt.Errorf("hub: encode receipt: %w", err)
@@ -303,6 +329,15 @@ func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAf
 			}
 			return audit.Record(ctx, tx, "hub", "push_conflict", []string{d.DeliveryID, msgID, d.Recipient},
 				map[string]any{"attempt": d.Attempt})
+		case pushAuthFailed:
+			if err := deadLetter(left-1, "push_auth_failed: the routine refused its key or is disabled: HTTP "+strconv.Itoa(status)); err != nil {
+				return err
+			}
+			if err := bumpCounter(ctx, tx, CounterPushAuthFailed); err != nil {
+				return err
+			}
+			return audit.Record(ctx, tx, "hub", "push_auth_failed", []string{d.DeliveryID, msgID, d.Recipient},
+				map[string]any{"attempt": d.Attempt, "status": status})
 		default:
 			return deadLetter(left-1, "push rejected: HTTP "+strconv.Itoa(status))
 		}
@@ -320,6 +355,111 @@ func (h *Hub) PushResult(ctx context.Context, d DueDelivery, status int, retryAf
 		h.Notify(ctx, *alert, NotifyDeadLetters)
 	}
 	h.ObservePush(ctx, d.Recipient, outcome == pushAccepted)
+	return nil
+}
+
+// PushGate is what priority and state say about pushing a Delivery to a dot.
+type PushGate int
+
+const (
+	// GateNever: hold, a terminal state, or no such delivery.
+	GateNever PushGate = iota
+	// GatePush: it may go now.
+	GatePush
+	// GateHeld: a held wake_idle, which goes once when released.
+	GateHeld
+)
+
+// DeliveryPushGate decides whether a dot may be pushed the Delivery Event of
+// deliveryID (PROTOCOL §5.2): never for hold, for a delivery in a terminal
+// state (§5.1: failed, expired or dead_letter, whose sender may already have
+// been told), or for an id with no delivery row; not yet for a held wake_idle.
+// The Delivery stays readable through vecnet_inbox either way.
+func (h *Hub) DeliveryPushGate(ctx context.Context, deliveryID string) (PushGate, error) {
+	var priority, state string
+	var held bool
+	err := h.DB.QueryRowContext(ctx, `SELECT priority, held, state FROM deliveries WHERE dly_id = ?`, deliveryID).
+		Scan(&priority, &held, &state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return GateNever, nil
+	}
+	if err != nil {
+		return GateNever, fmt.Errorf("hub: delivery gate: %w", err)
+	}
+	switch {
+	case state == "failed", state == "expired", state == "dead_letter", priority == "hold":
+		return GateNever, nil
+	case held:
+		return GateHeld, nil
+	}
+	return GatePush, nil
+}
+
+// DeliveryGate reports whether a dot may be pushed the Delivery Event of
+// deliveryID right now (DeliveryPushGate).
+func (h *Hub) DeliveryGate(ctx context.Context, deliveryID string) (push bool, err error) {
+	gate, err := h.DeliveryPushGate(ctx, deliveryID)
+	return gate == GatePush, err
+}
+
+// DeliveryUnread reports whether a released delivery still needs its one push
+// (PROTOCOL §5.2): not held, and nothing has accepted it yet. An ack, a
+// receipt or a push through another subscription means it needs none.
+func (h *Hub) DeliveryUnread(ctx context.Context, deliveryID string) (bool, error) {
+	var due bool
+	err := h.DB.QueryRowContext(ctx,
+		`SELECT state IN ('queued', 'pushed') AND held = 0 FROM deliveries WHERE dly_id = ?`, deliveryID).Scan(&due)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("hub: delivery unread: %w", err)
+	}
+	return due, nil
+}
+
+// AcceptEventPush records a 2xx from a dot's Events callback for deliveryID:
+// accepted = 2xx on push (PROTOCOL §5.1), with the receipt by hub of §3.3. A
+// delivery past queued or pushed (a second subscription's 2xx, an ack, an
+// expiry) is left alone.
+func (h *Hub) AcceptEventPush(ctx context.Context, deliveryID string, now time.Time) error {
+	var notify string
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		notify = ""
+		var msgID, thr, sender string
+		var senderIsPeer bool
+		err := tx.QueryRowContext(ctx,
+			`UPDATE deliveries SET state = 'accepted', held = 0, next_attempt_at = NULL, updated_at = ?
+			 WHERE dly_id = ? AND state IN ('queued', 'pushed') RETURNING msg_id, thr_id`,
+			envelope.FormatTime(now), deliveryID).Scan(&msgID, &thr)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("hub: accept event push: %w", err)
+		}
+		if err := tx.QueryRowContext(ctx,
+			`SELECT m.sender, EXISTS (SELECT 1 FROM peers s WHERE s.peer_id = m.sender) FROM messages m WHERE m.msg_id = ?`,
+			msgID).Scan(&sender, &senderIsPeer); err != nil {
+			return fmt.Errorf("hub: delivery sender: %w", err)
+		}
+		if !senderIsPeer {
+			return nil // a hub-authored message: no peer log to receive it
+		}
+		r := envelope.Receipt{DeliveryID: deliveryID, MessageID: msgID, ThreadID: thr,
+			State: "accepted", By: "hub", At: envelope.FormatTime(now)}
+		if _, err := h.Log.Append(ctx, tx, sender, "receipt", now, r); err != nil {
+			return err
+		}
+		notify = sender
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if notify != "" {
+		h.Log.Notify(notify)
+	}
 	return nil
 }
 
@@ -362,8 +502,10 @@ func (h *Hub) GateWakeIdle(ctx context.Context, tx *sql.Tx, d *delivery) error {
 }
 
 // OnIdle releases peerID's held wake_idle deliveries so each is pushed
-// once (PROTOCOL §5.2). New wires it as the IdleHook of an idle presence
-// report; the staleness ticker calls it when a presence turns unknown.
+// once (PROTOCOL §5.2): the push worker sees the flag clear, and the Events
+// worker its parked outbox row become due. New wires it as the IdleHook of an
+// idle presence report; the staleness ticker calls it when a presence turns
+// unknown.
 func (h *Hub) OnIdle(ctx context.Context, peerID string) error {
 	if _, err := h.DB.ExecContext(ctx,
 		`UPDATE deliveries SET held = 0, updated_at = ? WHERE recipient = ? AND held = 1 AND state = 'queued'`,

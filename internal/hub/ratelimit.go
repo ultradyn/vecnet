@@ -32,9 +32,17 @@ func (h *Hub) checkRate(ctx context.Context, tx *sql.Tx, peerID string, newThrea
 	if err != nil {
 		return nil, fmt.Errorf("hub: rate limits of %s: %w", peerID, err)
 	}
+	return rateVerdict(ctx, tx, "per-peer", peerID, perMin, perHour, newThread, now)
+}
+
+// rateVerdict runs the two windows of PROTOCOL §16.2 for actor, a peer or a
+// source, against its limits: messages in the last 60 s, then, when the send
+// would create a thread, threads created in the last hour. what names the
+// limit in the error message.
+func rateVerdict(ctx context.Context, tx *sql.Tx, what, actor string, perMin, perHour int, newThread bool, now time.Time) (*APIError, error) {
 	retry, err := windowRetry(ctx, tx,
 		`SELECT created_at FROM messages WHERE sender = ? AND created_at > ? ORDER BY created_at`,
-		peerID, perMin, sendWindow, now)
+		actor, perMin, sendWindow, now)
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +50,7 @@ func (h *Hub) checkRate(ctx context.Context, tx *sql.Tx, peerID string, newThrea
 	if retry == 0 && newThread {
 		retry, err = windowRetry(ctx, tx,
 			`SELECT created_at FROM threads WHERE created_by = ? AND created_at > ? ORDER BY created_at`,
-			peerID, perHour, threadWindow, now)
+			actor, perHour, threadWindow, now)
 		if err != nil {
 			return nil, err
 		}
@@ -51,11 +59,18 @@ func (h *Hub) checkRate(ctx context.Context, tx *sql.Tx, peerID string, newThrea
 	if retry == 0 {
 		return nil, nil
 	}
-	e := E(http.StatusTooManyRequests, "rate_limited", "per-peer rate limit exceeded")
+	e := E(http.StatusTooManyRequests, "rate_limited", what+" rate limit exceeded")
 	e.Details["limit"] = limit
 	e.Details["max"] = window
 	e.Details["retry_after_seconds"] = retry
 	return e, nil
+}
+
+// countRateCut records a rate-limit rejection of actor: a dashboard counter
+// and an audit row (PROTOCOL §16.2).
+func (h *Hub) countRateCut(ctx context.Context, tx *sql.Tx, actor string, apiErr *APIError) error {
+	detail := map[string]any{"reason": apiErr.Details["limit"], "retry_after_seconds": apiErr.Details["retry_after_seconds"]}
+	return h.countCut(ctx, tx, CounterRateLimited, actor, []string{actor}, detail)
 }
 
 // windowRetry counts the rows q returns for (peer, now-window) — their

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/oauth"
 	"github.com/XertroV/vecnet/internal/ui"
 )
 
@@ -20,6 +21,9 @@ type Deps struct {
 	// (push.Worker.Verify, PROTOCOL §3.2); nil makes
 	// POST /v1/admin/routes/{id}/verify a 500.
 	VerifyRoute func(ctx context.Context, routeID string) error
+	// OAuth, when non-nil, serves the OAuth endpoints and accepts its access
+	// tokens on /mcp (PROTOCOL §4.5).
+	OAuth *oauth.Server
 
 	// GET /v1/events timing; zero means the package default. Tests shorten
 	// them instead of sleeping.
@@ -90,5 +94,8 @@ func (s *server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/groups/{id}/members", s.postGroupMembers)
 	mux.HandleFunc("GET /v1/groups", s.getGroups)
 	mux.HandleFunc("POST /v1/enrol", s.postEnrol)
+	mux.HandleFunc("POST /v1/ingress/{src_id}", s.postIngress)
+	mux.Handle("/mcp", newMCP(s.Deps)) // every method; mcpserver answers 405 itself
+	s.oauthRoutes(mux)
 	s.adminRoutes(mux)
 }

@@ -24,7 +24,9 @@ import (
 // Caller is the authenticated identity behind a request.
 //
 // Kind "peer": PeerID is the credential's peer, PrincipalID its principal.
-// Kind "principal": PrincipalID only; the request names a peer with `as`.
+// Kind "principal": PrincipalID; the request names a peer with `as`. An OAuth
+// principal (PROTOCOL §4.5) also has PeerID, its bound dot peer, used when
+// `as` is absent.
 // Kind "operator": PrincipalID is the operator principal and PeerID its
 // operator peer (peers.kind = 'operator'), so the operator is addressable
 // like any peer; PeerID is "" when no operator peer exists yet.
@@ -43,6 +45,9 @@ var ErrUnauthenticated = errors.New("unauthenticated")
 // peer credential whose peer is disabled; errors.Is(err, ErrUnauthenticated)
 // holds for it. GET /v1/events answers it with 204 (PROTOCOL §2.3).
 var ErrPeerDisabled = fmt.Errorf("%w: peer disabled", ErrUnauthenticated)
+
+// ErrDotBearer reports an attempt to enrol a dot: its token buys no secret.
+var ErrDotBearer = errors.New("auth: a dot holds no vecnet secret")
 
 // ErrUnknownSubject reports a Rotate of a peer or principal that does not exist.
 var ErrUnknownSubject = errors.New("auth: unknown subject")
@@ -172,7 +177,8 @@ func (r *Resolver) IssueEnrolToken(ctx context.Context, tx *sql.Tx, peerID strin
 // Enrol exchanges a one-time token for the peer's long-lived secret
 // ("vn_peer_…"), returned once. The token is marked used in the same
 // transaction; an unknown, used or expired token, or a missing or disabled
-// peer, is ErrUnauthenticated. The exchange is audited as "enrol".
+// peer, is ErrUnauthenticated. A dot's token is ErrDotBearer: dots never hold
+// a vecnet secret (PROTOCOL §12). The exchange is audited as "enrol".
 func (r *Resolver) Enrol(ctx context.Context, token string) (peerID, secret string, err error) {
 	if token == "" {
 		return "", "", ErrUnauthenticated
@@ -198,12 +204,16 @@ func (r *Resolver) Enrol(ctx context.Context, token string) (peerID, secret stri
 			return ErrUnauthenticated
 		}
 		var disabled int
-		err = tx.QueryRowContext(ctx, `SELECT disabled FROM peers WHERE peer_id = ?`, peerID).Scan(&disabled)
+		var kind string
+		err = tx.QueryRowContext(ctx, `SELECT disabled, kind FROM peers WHERE peer_id = ?`, peerID).Scan(&disabled, &kind)
 		if errors.Is(err, sql.ErrNoRows) || (err == nil && disabled != 0) {
 			return ErrUnauthenticated
 		}
 		if err != nil {
 			return fmt.Errorf("auth: enrol peer: %w", err)
+		}
+		if kind == "dot" {
+			return ErrDotBearer
 		}
 		now := envelope.FormatTime(r.now())
 		res, err := tx.ExecContext(ctx,
@@ -231,38 +241,61 @@ func (r *Resolver) Enrol(ctx context.Context, token string) (peerID, secret stri
 // once. The rotation is audited as "rotate" with actor "operator": only the
 // operator rotates credentials (PROTOCOL §2.12).
 func (r *Resolver) Rotate(ctx context.Context, kind, subjectID string) (secret string, err error) {
-	if !credKinds[kind] {
-		return "", fmt.Errorf("auth: rotate: unknown credential kind %q", kind)
-	}
 	err = r.DB.Tx(ctx, func(tx *sql.Tx) error {
-		q := `SELECT 1 FROM principals WHERE prn_id = ?`
-		if kind == "peer" {
-			q = `SELECT 1 FROM peers WHERE peer_id = ?`
-		}
-		var one int
-		err := tx.QueryRowContext(ctx, q, subjectID).Scan(&one)
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w: %s %s", ErrUnknownSubject, kind, subjectID)
-		}
-		if err != nil {
-			return fmt.Errorf("auth: rotate: %w", err)
-		}
-		now := envelope.FormatTime(r.now())
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE credentials SET revoked_at = ? WHERE kind = ? AND subject_id = ? AND revoked_at IS NULL`,
-			now, kind, subjectID); err != nil {
-			return fmt.Errorf("auth: rotate revoke: %w", err)
-		}
-		secret, err = insertCredential(ctx, tx, kind, subjectID, now)
-		if err != nil {
-			return err
-		}
-		return audit.Record(ctx, tx, "operator", "rotate", []string{subjectID}, map[string]any{"kind": kind})
+		var err error
+		secret, err = r.RotateTx(ctx, tx, kind, subjectID)
+		return err
 	})
 	if err != nil {
 		return "", err
 	}
 	return secret, nil
+}
+
+// RotateTx is Rotate inside tx, so what follows a rotation commits with it.
+func (r *Resolver) RotateTx(ctx context.Context, tx *sql.Tx, kind, subjectID string) (string, error) {
+	if !credKinds[kind] {
+		return "", fmt.Errorf("auth: rotate: unknown credential kind %q", kind)
+	}
+	q := `SELECT 1 FROM principals WHERE prn_id = ?`
+	if kind == "peer" {
+		q = `SELECT 1 FROM peers WHERE peer_id = ?`
+	}
+	var one int
+	err := tx.QueryRowContext(ctx, q, subjectID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("%w: %s %s", ErrUnknownSubject, kind, subjectID)
+	}
+	if err != nil {
+		return "", fmt.Errorf("auth: rotate: %w", err)
+	}
+	now := envelope.FormatTime(r.now())
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE credentials SET revoked_at = ? WHERE kind = ? AND subject_id = ? AND revoked_at IS NULL`,
+		now, kind, subjectID); err != nil {
+		return "", fmt.Errorf("auth: rotate revoke: %w", err)
+	}
+	secret, err := insertCredential(ctx, tx, kind, subjectID, now)
+	if err != nil {
+		return "", err
+	}
+	return secret, audit.Record(ctx, tx, "operator", "rotate", []string{subjectID}, map[string]any{"kind": kind})
+}
+
+// RevokePeerCredentialsTx ends every bearer and unspent enrolment token of
+// peerID, inside tx. A dot holds neither (PROTOCOL §12); this clears any left
+// from before that was enforced.
+func (r *Resolver) RevokePeerCredentialsTx(ctx context.Context, tx *sql.Tx, peerID string) error {
+	now := envelope.FormatTime(r.now())
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE credentials SET revoked_at = ? WHERE kind = 'peer' AND subject_id = ? AND revoked_at IS NULL`, now, peerID); err != nil {
+		return fmt.Errorf("auth: revoke peer credentials: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE enrol_tokens SET used_at = ? WHERE peer_id = ? AND used_at IS NULL`, now, peerID); err != nil {
+		return fmt.Errorf("auth: spend enrol tokens: %w", err)
+	}
+	return nil
 }
 
 // insertCredential mints a secret of kind for subject, stores its hash and

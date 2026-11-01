@@ -135,7 +135,7 @@ func setup(t *testing.T, respond func(int, hit) reply) *fixture {
 	env := testhub.Start(t)
 	f := &fixture{env: env, ctx: context.Background(), t: t}
 	f.a, f.aSec = env.NewPeer("grokbot", "a")
-	f.b, f.bSec = env.NewPeer("dot", "b")
+	f.b, f.bSec = env.NewPeer("session", "b")
 	env.SetLimits(f.a, 10000, 10000)
 	f.w = &push.Worker{Hub: env.Hub, Now: env.Now.Now}
 	if respond != nil {
@@ -603,6 +603,10 @@ func TestRetryAfterHonoured(t *testing.T) {
 	within("Retry-After: 99999", time.Hour)
 	f.step()
 	within("Retry-After: garbage", 8*time.Second) // computed: 2^3 s
+	// An HTTP-date has whole seconds, so the clock must too, or the date falls
+	// up to 1 s short of 300 s and only the jitter hides it.
+	now := f.env.Now.Now()
+	f.env.Now.Advance(now.Truncate(time.Second).Add(time.Second).Sub(now))
 	date = f.env.Now.Now().Add(300 * time.Second).UTC().Format(http.TimeFormat)
 	f.step()
 	within("Retry-After: HTTP-date", 300*time.Second)
@@ -990,5 +994,23 @@ func TestWorkerRun(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatalf("Run did not return after cancel")
+	}
+}
+
+// A route stored while private egress was allowed (or before the guard) is
+// never reached by a default Worker on a strict hub.
+func TestDefaultWorkerClientRefusesLoopback(t *testing.T) {
+	f := setup(t, always(http.StatusOK))
+	f.env.Hub.Cfg.AllowPrivateEgress = false
+	w := &push.Worker{Hub: f.env.Hub, Now: f.env.Now.Now}
+	dly := f.send(f.aSec, f.msg("wake")).Deliveries[0].DeliveryID
+	if _, err := w.Step(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.rcv.Hits()); n != 0 {
+		t.Fatalf("strict hub's default push client reached a loopback receiver: %d hits", n)
+	}
+	if r := f.row(dly); r.State != "queued" {
+		t.Fatalf("delivery = %+v, want queued for a retry", r)
 	}
 }

@@ -41,7 +41,7 @@ func wantReach(t *testing.T, env *testhub.Env, peer, want, when string) {
 func TestReachabilityFromCallsDecaysAfter24h(t *testing.T) {
 	env := testhub.Start(t)
 	ctx := context.Background()
-	b, bSec := env.NewPeer("dot", "b")
+	b, bSec := env.NewPeer("session", "b")
 
 	env.Do(bSec, "GET", "/v1/peers", nil)
 	seen := envelope.FormatTime(env.Now.Now())
@@ -116,7 +116,7 @@ func TestPrincipalActingForPeerMarksItReachable(t *testing.T) {
 func TestReceiptNoOpsEmitNothing(t *testing.T) {
 	env := testhub.Start(t)
 	a, aSec := env.NewPeer("grokbot", "a")
-	b, bSec := env.NewPeer("dot", "b")
+	b, bSec := env.NewPeer("session", "b")
 
 	sr := mustSend(t, env, aSec, req("noop-1", b))
 	dly := sr.Deliveries[0].DeliveryID

@@ -28,7 +28,11 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /v1/admin/peers/{id}/limits", s.adminSetLimits)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/disable", s.adminDisable(true))
 	mux.HandleFunc("POST /v1/admin/peers/{id}/enable", s.adminDisable(false))
+	mux.HandleFunc("POST /v1/admin/sources", s.adminAddSource)
+	mux.HandleFunc("GET /v1/admin/sources", s.adminListSources)
+	mux.HandleFunc("POST /v1/admin/sources/{id}/disable", s.adminDisableSource)
 	mux.HandleFunc("POST /v1/admin/routes", s.adminAddRoute)
+	mux.HandleFunc("GET /v1/admin/routes", s.adminListRoutes)
 	mux.HandleFunc("POST /v1/admin/routes/{id}/rotate", s.adminRotateRoute)
 	mux.HandleFunc("POST /v1/admin/routes/{id}/verify", s.adminVerifyRoute)
 	mux.HandleFunc("POST /v1/admin/teams", s.adminAddTeam)
@@ -43,6 +47,9 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /v1/admin/notify", s.adminSetNotify)
 	mux.HandleFunc("GET /v1/admin/audit", s.adminAudit)
 	mux.HandleFunc("GET /v1/admin/counters", s.adminCounters)
+	mux.HandleFunc("GET /v1/admin/subscriptions", s.adminListSubscriptions)
+	mux.HandleFunc("POST /v1/admin/subscriptions/{id}/pause", s.adminPauseSubscription)
+	mux.HandleFunc("POST /v1/admin/subscriptions/{id}/resume", s.adminResumeSubscription)
 }
 
 // readObject reads the body as a JSON object restricted to allowed keys
@@ -142,7 +149,8 @@ func (s *server) adminRotatePrincipal(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminAddPeer is POST /v1/admin/peers {"kind", "name", "principal_id"?}:
-// 201 {"peer_id", "enrol_token", "principal_id"}. Without principal_id the
+// 201 {"peer_id", "enrol_token", "principal_id"}; a dot's enrol_token is "",
+// since it links with `vecnet peer link` instead. Without principal_id the
 // peer gets an implicit principal named like it.
 func (s *server) adminAddPeer(w http.ResponseWriter, r *http.Request) {
 	top, err := readObject(r, []string{"kind", "name", "principal_id"}, []string{"kind", "name"})
@@ -272,10 +280,12 @@ func (s *server) adminDisable(disabled bool) http.HandlerFunc {
 	}
 }
 
-// adminAddRoute is POST /v1/admin/routes {"owner": "peer_…"|"prn_…", "url"}:
-// 201 {"route_id", "whsec"}. The route pushes nothing until verified.
+// adminAddRoute is POST /v1/admin/routes {"owner": "peer_…"|"prn_…", "url",
+// "kind"?, "key"?}. Kind http (the default) is 201 {"route_id", "whsec"} and
+// pushes nothing until verified. Kind grokbot takes the routine's crsr_ key
+// and is 201 {"route_id"}: live at once, and the key is never returned.
 func (s *server) adminAddRoute(w http.ResponseWriter, r *http.Request) {
-	top, err := readObject(r, []string{"owner", "url"}, []string{"owner", "url"})
+	top, err := readObject(r, []string{"owner", "url", "kind", "key"}, []string{"owner", "url"})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -286,6 +296,16 @@ func (s *server) adminAddRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := stringField(top, "url")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	routeKind, err := stringField(top, "kind")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	key, err := stringField(top, "key")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -302,20 +322,76 @@ func (s *server) adminAddRoute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, e)
 		return
 	}
-	id, whsec, err := s.Hub.AddRoute(r.Context(), kind, owner, u)
+	invalid := func(field, msg string) {
+		e := hub.E(http.StatusUnprocessableEntity, "invalid_value", msg)
+		e.Details["field"] = field
+		writeError(w, e)
+	}
+	switch routeKind {
+	case "", hub.RouteKindHTTP:
+		if _, has := top["key"]; has {
+			invalid("key", "only a grokbot route takes a key")
+			return
+		}
+		id, whsec, err := s.Hub.AddRoute(r.Context(), kind, owner, u)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusCreated, map[string]string{"route_id": id, "whsec": whsec})
+	case hub.RouteKindGrokbot:
+		id, err := s.Hub.AddGrokbotRoute(r.Context(), kind, owner, u, key)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		s.kick() // verified at once: queued deliveries may be due now
+		writeJSON(w, http.StatusCreated, map[string]string{"route_id": id})
+	default:
+		invalid("kind", "kind is http or grokbot")
+	}
+}
+
+// adminListRoutes is GET /v1/admin/routes: 200 {"routes": [RouteInfo]}. No
+// key of any kind is returned.
+func (s *server) adminListRoutes(w http.ResponseWriter, r *http.Request) {
+	routes, err := s.Hub.ListRoutes(r.Context())
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusCreated, map[string]string{"route_id": id, "whsec": whsec})
+	writeJSON(w, http.StatusOK, map[string]any{"routes": routes})
 }
 
-// adminRotateRoute is POST /v1/admin/routes/{id}/rotate: 200 {"whsec"}; the
-// old key stays valid for 24 h (PROTOCOL §3.5).
+// adminRotateRoute is POST /v1/admin/routes/{id}/rotate. An http route takes
+// no body and is 200 {"whsec"}; the old key stays valid for 24 h (PROTOCOL
+// §3.5). A grokbot route takes {"key": "crsr_…"} and is 204: the new key
+// applies at once and is never returned.
 func (s *server) adminRotateRoute(w http.ResponseWriter, r *http.Request) {
-	if err := readNoBody(r); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeError(w, err)
+		return
+	}
+	var top map[string]json.RawMessage
+	if len(bytes.TrimSpace(raw)) > 0 {
+		if top, err = decodeObject(raw, []string{"key"}, nil); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	if _, has := top["key"]; has {
+		key, err := stringField(top, "key")
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if err := s.Hub.RotateGrokbotKey(r.Context(), r.PathValue("id"), key); err != nil {
+			writeError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	whsec, err := s.Hub.RotateRoute(r.Context(), r.PathValue("id"))
@@ -608,7 +684,7 @@ func (s *server) adminAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminCounters is GET /v1/admin/counters: {"loop_cut", "rate_limited",
-// "dead_letters", "push_conflicts"}.
+// "dead_letters", "push_conflicts", "push_auth_failed"}.
 func (s *server) adminCounters(w http.ResponseWriter, r *http.Request) {
 	c, err := s.Hub.Counters(r.Context())
 	if err != nil {

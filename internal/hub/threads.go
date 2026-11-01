@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
 )
 
@@ -152,6 +153,40 @@ func loadMessage(ctx context.Context, tx *sql.Tx, msgID string) (msg *envelope.M
 		return nil, "", false, fmt.Errorf("hub: decode stored message %s: %w", msgID, err)
 	}
 	return &m, thr, true, nil
+}
+
+// ReplyThread returns the thread of message msgID, for a reply by caller c
+// acting as `as` (the vecnet_reply lookup, PROTOCOL §4.3). The sender is
+// resolved as Send resolves it (as_required, forbidden). A message that does
+// not exist, or whose thread the sender does not participate in, is 404
+// not_found, so an outsider learns nothing about it; an operator peer may
+// reply in any thread, as it may send into any.
+func (h *Hub) ReplyThread(ctx context.Context, c auth.Caller, as, msgID string) (string, error) {
+	var thr string
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		snd, err := resolveSender(ctx, tx, c, as)
+		if err != nil {
+			return err
+		}
+		_, mThr, found, err := loadMessage(ctx, tx, msgID)
+		if err != nil {
+			return err
+		}
+		visible := found && snd.kind == "operator"
+		if found && !visible {
+			if visible, err = isParticipant(ctx, tx, mThr, snd.peer); err != nil {
+				return err
+			}
+		}
+		if !visible {
+			e := E(http.StatusNotFound, "not_found", "no such message")
+			e.Details["message_id"] = msgID
+			return e
+		}
+		thr = mThr
+		return nil
+	})
+	return thr, err
 }
 
 // latestMessage returns the newest Message of thread thr, or nil. It is
