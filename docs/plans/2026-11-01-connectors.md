@@ -64,7 +64,7 @@ Dependency order: 1 (egress) and 2 (mcp core) are independent; 3, 4 need 2; 8 ne
 ### Task 1: Egress guard
 
 **Files:**
-- Create: `internal/egress/dialer.go`; Modify: `internal/push/worker.go` (client construction), `internal/hub/notify.go` (`defaultNotifyClient`), `cmd/vecnet-hub/main.go` (flag), `internal/hub/hub.go` (`Config.AllowPrivateEgress bool`)
+- Create: `internal/egress/dialer.go`, `internal/hub/seal.go`; Modify: `internal/push/worker.go` (client construction), `internal/hub/notify.go` (`defaultNotifyClient`), `cmd/vecnet-hub/main.go` (flag), `internal/hub/hub.go` (`Config.AllowPrivateEgress bool`)
 - Test: `internal/egress/dialer_test.go`
 
 **Interfaces:**
@@ -77,6 +77,13 @@ Dependency order: 1 (egress) and 2 (mcp core) are independent; 3, 4 need 2; 8 ne
   func (p Policy) IsPublic(ip net.IP) bool                 // rejects loopback, link-local, private (RFC1918, fc00::/7), multicast, unspecified, 100.64/10, 169.254/16, 0.0.0.0/8, 192.0.0.0/24, 198.18/15, broadcast
   func (p Policy) Client(timeout time.Duration) *http.Client // Transport.DialContext resolves host, filters IPs, dials the first public one (pinned), TLS ServerName = host; CheckRedirect returns ErrRedirect; MaxResponseHeaderBytes 64 KiB
   ```
+  Also (shared by Tasks 5, 6 and 7, so it lives here to avoid parallel-merge conflicts):
+  ```go
+  // internal/hub/seal.go
+  func (h *Hub) Seal(plaintext []byte) (string, error)   // AES-256-GCM under meta.hub_key, random 12-byte nonce, output "v1:" + base64(nonce|ciphertext)
+  func (h *Hub) Unseal(sealed string) ([]byte, error)
+  ```
+  with tests `TestSealRoundTrip` and `TestUnsealTamperFails` in `internal/hub/seal_test.go`.
   `hub.Config.AllowPrivateEgress` feeds `egress.Policy{AllowPrivate}`; `push.NewClient` and `hub.Notify` use `Policy.Client(30*time.Second)`. `AddRoute`/`SetNotifyRoutes` call `CheckURL` and return 422 `invalid_url` on failure.
 
 - [ ] **Step 1: Write the failing tests**
