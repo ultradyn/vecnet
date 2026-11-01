@@ -102,18 +102,17 @@ func (s *Server) inboxOwners(ctx context.Context, p Principal, uri string) ([]st
 	c := p.Caller
 	forbidden := uriError("forbidden", uri)
 	if id, ok := uriID(uri, prefixPeerURI); ok {
-		if c.Kind == "peer" {
-			if id != c.PeerID {
-				return nil, forbidden
-			}
-			return []string{id}, nil
-		}
-		if c.Kind != "principal" && c.Kind != "operator" {
+		// A peer's own inbox has no principal check: the Principal of an open
+		// stream is the one it started with, and a peer can move under it.
+		q, args := `SELECT disabled = 0 FROM peers WHERE peer_id = ? AND prn_id = ?`, []any{id, c.PrincipalID}
+		switch {
+		case c.Kind == "peer" && id == c.PeerID:
+			q, args = `SELECT disabled = 0 FROM peers WHERE peer_id = ?`, []any{id}
+		case c.Kind != "principal" && c.Kind != "operator":
 			return nil, forbidden
 		}
 		var enabled bool
-		err := s.Hub.DB.QueryRowContext(ctx,
-			`SELECT disabled = 0 FROM peers WHERE peer_id = ? AND prn_id = ?`, id, c.PrincipalID).Scan(&enabled)
+		err := s.Hub.DB.QueryRowContext(ctx, q, args...).Scan(&enabled)
 		if errors.Is(err, sql.ErrNoRows) || (err == nil && !enabled) {
 			return nil, forbidden
 		}
@@ -492,6 +491,12 @@ func (s *Server) subscriptionsListen(ctx context.Context, sess *Session, req *Re
 		return nil, err
 	}
 	defer st.Close()
+	var owners []string
+	for _, wt := range watches {
+		owners = append(owners, wt.owners...)
+	}
+	slices.Sort(owners)
+	defer s.streamReach(slices.Compact(owners))()
 
 	meta := map[string]any{metaSubscriptionID: req.ID, metaSubscriptionIDPlain: req.ID}
 	honoured := map[string]any{}
@@ -530,6 +535,20 @@ func (s *Server) subscriptionsListen(ctx context.Context, sess *Session, req *Re
 	return nil, nil
 }
 
+// streamReach marks owners connected until the returned func runs (PROTOCOL
+// §8), as httpapi does for /v1/events.
+func (s *Server) streamReach(owners []string) func() {
+	ctx := context.Background() // the closing write must outlive the request
+	for _, o := range owners {
+		s.Hub.StreamOpened(ctx, o)
+	}
+	return func() {
+		for _, o := range owners {
+			s.Hub.StreamClosed(ctx, o)
+		}
+	}
+}
+
 // watch tails the log behind one URI. armWatch fixes its starting point; run
 // reports growth past it.
 type watch struct {
@@ -537,6 +556,7 @@ type watch struct {
 	ctx    context.Context
 	p      Principal
 	uri    string
+	prn    []string // a principal URI's wake key, for changes to its peer set
 	owners []string
 	woke   <-chan struct{}
 	last   int64 // the newest seq already hinted
@@ -550,8 +570,14 @@ func (s *Server) armWatch(ctx context.Context, p Principal, uri string) (*watch,
 	if err != nil {
 		return nil, err
 	}
-	w := &watch{s: s, ctx: ctx, p: p, uri: uri, owners: owners, woke: s.Hub.Log.Wait(ctx, owners)}
-	cur, err := s.Hub.Log.Current(ctx, owners)
+	w := &watch{s: s, ctx: ctx, p: p, uri: uri, owners: owners}
+	if id, ok := uriID(uri, prefixPrincipalURI); ok {
+		w.prn = []string{id}
+	}
+	if err := w.rearm(); err != nil {
+		return nil, err
+	}
+	cur, err := s.Hub.Log.Current(ctx, w.owners)
 	if err != nil {
 		return nil, err
 	}
@@ -559,12 +585,30 @@ func (s *Server) armWatch(ctx context.Context, p Principal, uri string) (*watch,
 	return w, nil
 }
 
+// rearm registers the next waiter, then resolves the owners. The waiter
+// comes first: the hub notifies a principal's id after its peer set changes,
+// so a change the resolve misses fires this waiter. When the resolve finds
+// new owners the waiter does not cover them, so it arms again, and the
+// abandoned waiter lasts until the next notify of any of its keys or ctx. An
+// error leaves the last known owners armed.
+func (w *watch) rearm() error {
+	for {
+		woke := w.s.Hub.Log.Wait(w.ctx, slices.Concat(w.prn, w.owners))
+		owners, err := w.s.subscribeOwners(w.ctx, w.p, w.uri)
+		if err != nil || slices.Equal(owners, w.owners) {
+			w.woke = woke
+			return err
+		}
+		w.owners = owners
+	}
+}
+
 // run calls emit each time the log grows, at most once per hintCoalesce,
 // until ctx is done, the hub stops, emit returns false, or p may no longer
 // read the URI. Each wake re-resolves the owners, so a principal's URI picks
-// up a peer enrolled after the subscription started (enrolling appends to
-// every peer's log). Appends during the coalescing pause close the waiter
-// armed before it, so the pause delays a hint and never loses one.
+// up a peer added after the subscription started, even from no peers at all,
+// when no log exists to wake it. Appends during the coalescing pause close
+// the waiter armed before it, so the pause delays a hint and never loses one.
 func (w *watch) run(emit func() bool) {
 	log := w.s.Hub.Log
 	for {
@@ -578,7 +622,7 @@ func (w *watch) run(emit func() bool) {
 		if w.ctx.Err() != nil {
 			return
 		}
-		owners, err := w.s.subscribeOwners(w.ctx, w.p, w.uri)
+		err := w.rearm()
 		var re *RPCError
 		switch {
 		case errors.As(err, &re):
@@ -588,10 +632,7 @@ func (w *watch) run(emit func() bool) {
 				return
 			}
 			slog.Warn("mcp: inbox owners", "err", err) // keep the last known owners
-		default:
-			w.owners = owners
 		}
-		w.woke = log.Wait(w.ctx, w.owners)
 		cur, err := log.Current(w.ctx, w.owners)
 		if err != nil {
 			if w.ctx.Err() != nil {

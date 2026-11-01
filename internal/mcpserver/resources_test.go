@@ -429,8 +429,8 @@ func TestLegacySubscribeHintsOnGetStream(t *testing.T) {
 
 	if err := cs.Subscribe(ctx, &mcp.SubscribeParams{URI: peerURI(c)}); err == nil {
 		t.Fatal("subscribe to another peer's inbox succeeded")
-	} else if !strings.Contains(err.Error(), "not_subscribable") && !strings.Contains(err.Error(), "-32602") {
-		t.Fatalf("subscribe to another peer's inbox: %v, want -32602 not_subscribable", err)
+	} else if !strings.Contains(err.Error(), "not_subscribable") {
+		t.Fatalf("subscribe to another peer's inbox: %v, want not_subscribable", err)
 	}
 	if err := cs.Subscribe(ctx, &mcp.SubscribeParams{URI: uri}); err != nil {
 		t.Fatalf("Subscribe: %v", err)
@@ -681,24 +681,34 @@ func legacySubscribe(t *testing.T, env *testhub.Env, secret, sid, uri string) {
 }
 
 // TestLegacyHintHeldUntilGetOpens: a hint due while no GET stream is open
-// arrives when one opens.
+// arrives when one opens. It runs a Server of its own so that it can see the
+// hint held, rather than hope the watcher fired before the GET.
 func TestLegacyHintHeldUntilGetOpens(t *testing.T) {
 	env := testhub.Start(t)
 	_, aSecret := env.NewPeer("session", "a1")
 	b, bSecret := env.NewPeer("session", "b1")
 	uri := peerURI(b)
-	sid := legacySession(t, env, bSecret)
-	legacySubscribe(t, env, bSecret, sid, uri)
+
+	srv := mcpserver.New(env.Hub, mcpserver.Chain{&mcpserver.BearerAuth{Resolver: env.Hub.Auth}}, env.URL)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	own := &testhub.Env{T: t, URL: ts.URL, Hub: env.Hub}
+
+	sid := legacySession(t, own, bSecret)
+	legacySubscribe(t, own, bSecret, sid, uri)
 	sendTo(t, env, aSecret, b, "g1")
-	time.Sleep(100 * time.Millisecond) // the watcher has fired with no stream open
+	waitFor(t, 2*time.Second, "the hint to be held", func() bool { return srv.HeldHints(sid) == 1 })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	resp, frames := getStream(t, ctx, env, bSecret, sid)
+	resp, frames := getStream(t, ctx, own, bSecret, sid)
 	defer resp.Body.Close()
 	up, raw, ok := nextMessage(t, frames, 2*time.Second)
 	if !ok || up.Method != "notifications/resources/updated" || up.Params["uri"] != uri {
 		t.Fatalf("no held hint on the GET stream: %s", raw)
+	}
+	if n := srv.HeldHints(sid); n != 0 {
+		t.Fatalf("%d hints still held after the GET opened", n)
 	}
 }
 
@@ -735,6 +745,313 @@ func TestLegacyHintsGoToOneStream(t *testing.T) {
 	if !ok || up.Method != "notifications/resources/updated" || up.Params["uri"] != uri {
 		t.Fatalf("no hint on the second stream: %s", raw)
 	}
+}
+
+// TestPrincipalListenFromZeroPeers: a principal's URI has no owners until its
+// first peer exists, and must still hint for that peer. A stream parked on
+// no owners stays silent for good while its keep-alives hide that from the
+// client (PROTOCOL §4.2).
+func TestPrincipalListenFromZeroPeers(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "a1")
+	prn, prnSecret := env.NewPrincipal("max")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, frames := listen(t, ctx, env, http.DefaultClient, prnSecret, []string{prnURI(prn)})
+	defer resp.Body.Close()
+	if _, _, ok := nextMessage(t, frames, 2*time.Second); !ok {
+		t.Fatal("no acknowledgement")
+	}
+
+	p1, _ := peerUnder(t, env, prn, "one")
+	sendTo(t, env, aSecret, p1, "z1")
+	up, raw, ok := nextMessage(t, frames, time.Second)
+	if !ok || up.Method != "notifications/resources/updated" || up.Params["uri"] != prnURI(prn) {
+		t.Fatalf("no hint for a principal subscribed with zero peers: %s", raw)
+	}
+}
+
+// TestLegacyPrincipalSubscribeFromZeroPeers is the same on a 2025 session.
+func TestLegacyPrincipalSubscribeFromZeroPeers(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "a1")
+	prn, prnSecret := env.NewPrincipal("max")
+	sid := legacySession(t, env, prnSecret)
+	legacySubscribe(t, env, prnSecret, sid, prnURI(prn))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, frames := getStream(t, ctx, env, prnSecret, sid)
+	defer resp.Body.Close()
+
+	p1, _ := peerUnder(t, env, prn, "one")
+	sendTo(t, env, aSecret, p1, "z2")
+	up, raw, ok := nextMessage(t, frames, time.Second)
+	if !ok || up.Method != "notifications/resources/updated" || up.Params["uri"] != prnURI(prn) {
+		t.Fatalf("no hint for a principal subscribed with zero peers: %s", raw)
+	}
+}
+
+// TestPrincipalListenCoversMovedPeer: a peer moved in from another principal
+// joins the URI's owners, with or without peers already there.
+func TestPrincipalListenCoversMovedPeer(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		peers int
+	}{{"zero peers", 0}, {"one peer", 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testhub.Start(t)
+			_, aSecret := env.NewPeer("session", "a1")
+			moved, _ := env.NewPeer("session", "moved")
+			prn, prnSecret := env.NewPrincipal("max")
+			for range tc.peers {
+				peerUnder(t, env, prn, "one")
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			resp, frames := listen(t, ctx, env, http.DefaultClient, prnSecret, []string{prnURI(prn)})
+			defer resp.Body.Close()
+			if _, _, ok := nextMessage(t, frames, 2*time.Second); !ok {
+				t.Fatal("no acknowledgement")
+			}
+
+			if err := env.Hub.MovePeer(ctx, moved, prn); err != nil {
+				t.Fatalf("MovePeer: %v", err)
+			}
+			sendTo(t, env, aSecret, moved, "m1")
+			up, raw, ok := nextMessage(t, frames, time.Second)
+			if !ok || up.Method != "notifications/resources/updated" || up.Params["uri"] != prnURI(prn) {
+				t.Fatalf("no hint for a peer moved under the principal: %s", raw)
+			}
+		})
+	}
+}
+
+// TestListenBurstCoalesced pins the rate: at most one hint per URI per 250 ms
+// however fast the log grows.
+func TestListenBurstCoalesced(t *testing.T) {
+	env := testhub.Start(t)
+	a, aSecret := env.NewPeer("session", "a1")
+	b, bSecret := env.NewPeer("session", "b1")
+	env.SetLimits(a, 1000, 1000)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, frames := listen(t, ctx, env, http.DefaultClient, bSecret, []string{peerURI(b)})
+	defer resp.Body.Close()
+	if _, _, ok := nextMessage(t, frames, 2*time.Second); !ok {
+		t.Fatal("no acknowledgement")
+	}
+
+	const sends = 20
+	start := time.Now()
+	for i := range sends {
+		sendTo(t, env, aSecret, b, "b"+strconv.Itoa(i))
+	}
+	n := 0
+	deadline := time.After(400 * time.Millisecond)
+collect:
+	for {
+		select {
+		case f, ok := <-frames:
+			if !ok {
+				t.Fatal("listen stream ended")
+			}
+			if f.data != nil {
+				n++
+			}
+		case <-deadline:
+			break collect
+		}
+	}
+	elapsed := time.Since(start)
+	if most := 3 + int(elapsed/(250*time.Millisecond)); n < 1 || n > most {
+		t.Fatalf("%d sends in %v gave %d hints, want 1 to %d", sends, elapsed, n, most)
+	}
+}
+
+// TestNotSubscribableReason: the legacy paths refuse every URI the caller may
+// not read with -32602 not_subscribable, whatever the reason beneath.
+func TestNotSubscribableReason(t *testing.T) {
+	env := testhub.Start(t)
+	_, bSecret := env.NewPeer("session", "b1")
+	c, _ := env.NewPeer("session", "c1")
+	prn, _ := env.NewPrincipal("max")
+	sid := legacySession(t, env, bSecret)
+
+	for _, method := range []string{"resources/subscribe", "resources/unsubscribe"} {
+		for _, uri := range []string{peerURI(c), prnURI(prn), "vecnet://nonsense", "https://example.com/inbox"} {
+			_, out := do(t, env, call{secret: bSecret,
+				headers: map[string]string{"Mcp-Session-Id": sid, "Accept": "application/json, text/event-stream"},
+				body: map[string]any{"jsonrpc": "2.0", "id": 2, "method": method,
+					"params": map[string]any{"uri": uri}}})
+			r := decodeRPC(t, out)
+			if r.Error == nil || r.Error.Code != -32602 || errReason(t, r) != "not_subscribable" {
+				t.Fatalf("%s %s: %s, want -32602 not_subscribable", method, uri, out)
+			}
+		}
+	}
+}
+
+// inboxText reads uri with secret and returns the resource's text.
+func inboxText(t *testing.T, env *testhub.Env, secret, uri string) string {
+	t.Helper()
+	r := rpc2026(t, env, secret, "resources/read", map[string]any{"uri": uri})
+	if r.Error != nil {
+		t.Fatalf("resources/read %s: %+v", uri, r.Error)
+	}
+	var res struct {
+		Contents []struct {
+			Text string `json:"text"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(r.Result, &res); err != nil || len(res.Contents) != 1 {
+		t.Fatalf("result %s: %v", r.Result, err)
+	}
+	return res.Contents[0].Text
+}
+
+// TestResourcesReadPrincipal: a principal reads its URI and its own peers',
+// and nobody else's.
+func TestResourcesReadPrincipal(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "a1")
+	prn, prnSecret := env.NewPrincipal("max")
+	p1, p1Secret := peerUnder(t, env, prn, "one")
+	p2, _ := peerUnder(t, env, prn, "two")
+	other, _ := env.NewPrincipal("other")
+	stranger, _ := peerUnder(t, env, other, "stranger")
+	t1 := sendTo(t, env, aSecret, p1, "p1")
+	t2 := sendTo(t, env, aSecret, p2, "p2")
+
+	all := inboxText(t, env, prnSecret, prnURI(prn))
+	if !strings.Contains(all, t1) || !strings.Contains(all, t2) {
+		t.Fatalf("principal URI lacks a peer's delivery: %s", all)
+	}
+	one := inboxText(t, env, prnSecret, peerURI(p2))
+	if !strings.Contains(one, t2) || strings.Contains(one, t1) {
+		t.Fatalf("peer URI read by its principal: %s", one)
+	}
+
+	if err := env.Hub.SetPeerDisabled(context.Background(), p2, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, secret, uri string
+	}{
+		{"another principal's URI", prnSecret, prnURI(other)},
+		{"another principal's peer", prnSecret, peerURI(stranger)},
+		{"its own disabled peer", prnSecret, peerURI(p2)},
+		{"a principal URI with a peer credential", p1Secret, prnURI(prn)},
+		{"a sibling peer", p1Secret, peerURI(p2)},
+	} {
+		r := rpc2026(t, env, tc.secret, "resources/read", map[string]any{"uri": tc.uri})
+		if r.Error == nil || r.Error.Code != -32602 || errReason(t, r) != "forbidden" {
+			t.Fatalf("%s: error %+v, want -32602 forbidden", tc.name, r.Error)
+		}
+	}
+}
+
+// wantUnfinished checks the stream ends within a second with no further
+// message: a final result would tell the client not to reconnect.
+func wantUnfinished(t *testing.T, frames <-chan frame) {
+	t.Helper()
+	for deadline := time.After(time.Second); ; {
+		select {
+		case f, open := <-frames:
+			if !open {
+				return
+			}
+			if f.data != nil {
+				t.Fatalf("message on an ending stream: %s", f.data)
+			}
+		case <-deadline:
+			t.Fatal("stream still open")
+		}
+	}
+}
+
+// TestListenEndsOnStop: hub shutdown leaves the stream unfinished.
+func TestListenEndsOnStop(t *testing.T) {
+	env := testhub.Start(t)
+	stop := make(chan struct{})
+	env.Configure(func(d *httpapi.Deps) { d.Stop = stop })
+	b, bSecret := env.NewPeer("session", "b1")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, frames := listen(t, ctx, env, http.DefaultClient, bSecret, []string{peerURI(b)})
+	defer resp.Body.Close()
+	if _, _, ok := nextMessage(t, frames, 2*time.Second); !ok {
+		t.Fatal("no acknowledgement")
+	}
+	close(stop)
+	wantUnfinished(t, frames)
+}
+
+// TestListenEndsWhenPeerDisabled: a disabled peer's own stream stops hinting
+// and ends, as it does for a principal losing access to a URI.
+func TestListenEndsWhenPeerDisabled(t *testing.T) {
+	env := testhub.Start(t)
+	b, bSecret := env.NewPeer("session", "b1")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, frames := listen(t, ctx, env, http.DefaultClient, bSecret, []string{peerURI(b)})
+	defer resp.Body.Close()
+	if _, _, ok := nextMessage(t, frames, 2*time.Second); !ok {
+		t.Fatal("no acknowledgement")
+	}
+	if err := env.Hub.SetPeerDisabled(ctx, b, true); err != nil {
+		t.Fatal(err)
+	}
+	wantUnfinished(t, frames)
+}
+
+// reachability returns peerID's directory reachability.
+func reachability(t *testing.T, env *testhub.Env, peerID string) string {
+	t.Helper()
+	dir, err := env.Hub.Directory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range dir {
+		if e.PeerID == peerID {
+			return e.Reachability
+		}
+	}
+	t.Fatalf("peer %s not in the directory", peerID)
+	return ""
+}
+
+// TestStreamsMarkConnected: an open listen or GET stream makes its peer
+// connected, as an open /v1/events stream does (PROTOCOL §8).
+func TestStreamsMarkConnected(t *testing.T) {
+	env := testhub.Start(t)
+	b, bSecret := env.NewPeer("session", "b1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	lctx, lcancel := context.WithCancel(ctx)
+	resp, frames := listen(t, lctx, env, http.DefaultClient, bSecret, []string{peerURI(b)})
+	defer resp.Body.Close()
+	if _, _, ok := nextMessage(t, frames, 2*time.Second); !ok {
+		t.Fatal("no acknowledgement")
+	}
+	if got := reachability(t, env, b); got != "connected" {
+		t.Fatalf("with a listen stream open: %s, want connected", got)
+	}
+	lcancel()
+	waitFor(t, 2*time.Second, "listen close to end connected", func() bool { return reachability(t, env, b) == "reachable" })
+
+	sid := legacySession(t, env, bSecret)
+	gctx, gcancel := context.WithCancel(ctx)
+	defer gcancel()
+	get, _ := getStream(t, gctx, env, bSecret, sid)
+	defer get.Body.Close()
+	waitFor(t, 2*time.Second, "GET stream to mark connected", func() bool { return reachability(t, env, b) == "connected" })
+	gcancel()
+	waitFor(t, 2*time.Second, "GET close to end connected", func() bool { return reachability(t, env, b) == "reachable" })
 }
 
 // blockingWriter is a ResponseWriter whose Write parks on release, after the

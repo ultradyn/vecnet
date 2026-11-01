@@ -275,7 +275,8 @@ func (l *Log) Current(ctx context.Context, owners []string) (Cursor, error) {
 
 // Notify wakes every Wait touching any of owners. Call it after the
 // appending transaction commits. It never blocks: waiters are woken by
-// closing their channels.
+// closing their channels. A principal id is a wake key too, though it owns no
+// events: the hub notifies it when the principal's peer set changes.
 func (l *Log) Notify(owners ...string) {
 	var fired []*waiter
 	l.mu.Lock()

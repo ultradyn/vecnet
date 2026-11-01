@@ -461,6 +461,11 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, p Principal) {
 	if err != nil {
 		return
 	}
+	owners, _, _, err := s.Hub.StreamOwners(r.Context(), p.Caller, "")
+	if err != nil {
+		slog.Warn("mcp: stream owners", "err", err) // the stream works without it
+	}
+	defer s.streamReach(owners)()
 	conn := &sseConn{st: st}
 	s.mu.Lock()
 	old := sess.stream

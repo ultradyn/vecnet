@@ -289,6 +289,7 @@ func (h *Hub) AddPeer(ctx context.Context, kind, name, prnID string) (peerID, en
 		return "", "", err
 	}
 	h.notifyEnabled(ctx)
+	h.Log.Notify(prnID) // the principal's peer set changed; the new peer's log is empty
 	return peerID, enrolToken, nil
 }
 

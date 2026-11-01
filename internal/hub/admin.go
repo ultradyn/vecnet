@@ -114,8 +114,9 @@ func (h *Hub) MovePeer(ctx context.Context, peerID, prnID string) error {
 	if err != nil {
 		return err
 	}
-	// Wake whoever now reads this peer's log.
-	h.Log.Notify(peerID)
+	// Wake whoever now reads this peer's log, and whoever follows the new
+	// principal's peer set: nothing else tells them it has grown.
+	h.Log.Notify(peerID, prnID)
 	return nil
 }
 
