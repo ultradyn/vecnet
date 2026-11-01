@@ -2,7 +2,9 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"mime"
@@ -66,7 +68,8 @@ func secondsToUTCMidnight(now time.Time) int {
 }
 
 // ReadBlob authorises and opens sha (PROTOCOL §2.7, §11, §16.3). Access is
-// granted by a token valid for sha, by the operator credential, or by c being
+// granted by a token valid for sha whose recipient peer still exists and is
+// enabled, by the operator credential, or by c being
 // (a peer of a principal) a participant of a thread holding a message that
 // references sha and that the participant may see under the thread's
 // history_access. c nil means no bearer was presented. A malformed hash is
@@ -78,7 +81,17 @@ func (h *Hub) ReadBlob(ctx context.Context, c *auth.Caller, token, sha string) (
 	}
 	allowed := false
 	if token != "" {
-		_, allowed = h.Blobs.VerifyToken(token, sha, h.Now())
+		var recipient string
+		if recipient, allowed = h.Blobs.VerifyToken(token, sha, h.Now()); allowed {
+			// The token dies with its recipient: a disabled or removed
+			// peer's links are revoked (PROTOCOL §14 inv. 6).
+			var disabled int
+			err := h.DB.QueryRowContext(ctx, `SELECT disabled FROM peers WHERE peer_id = ?`, recipient).Scan(&disabled)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return nil, blob.Meta{}, fmt.Errorf("hub: blob token recipient: %w", err)
+			}
+			allowed = err == nil && disabled == 0
+		}
 	}
 	if !allowed && c != nil {
 		var err error

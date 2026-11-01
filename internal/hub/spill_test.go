@@ -1,6 +1,7 @@
 package hub_test
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -422,4 +423,28 @@ func TestAttachingAHashNeedsTheBytesOrSight(t *testing.T) {
 	c3 := req("c3", d)
 	c3["attachments"] = att(len(secret))
 	mustSend(t, env, cSec, c3)
+}
+
+// TestBlobTokenDiesWithItsRecipient: a blob_url token is honoured only
+// while the peer it was issued to exists and is enabled (PROTOCOL §14 inv.
+// 6): disabling the peer revokes the links it holds.
+func TestBlobTokenDiesWithItsRecipient(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	b, _ := env.NewPeer("session", "B")
+	content := "bytes for B"
+	sha := putBlob(t, env, aSec, content)
+	body := req("k1", b)
+	body["attachments"] = []any{map[string]any{"sha256": sha, "size": len(content), "media_type": "text/plain"}}
+	mustSend(t, env, aSec, body)
+	u := strings.TrimPrefix(onlyDelivery(t, env, b).Attachments[0].BlobURL, env.URL)
+	if resp, _ := env.Do("", "GET", u, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET blob_url = %d, want 200", resp.StatusCode)
+	}
+	if err := env.Hub.SetPeerDisabled(context.Background(), b, true); err != nil {
+		t.Fatal(err)
+	}
+	if resp, raw := env.Do("", "GET", u, nil); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("GET blob_url after disabling its recipient = %d %s, want 403", resp.StatusCode, raw)
+	}
 }
