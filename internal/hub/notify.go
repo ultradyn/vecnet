@@ -29,7 +29,7 @@ import (
 const (
 	NotifyWake        = "wake"         // a wake delivery to the operator peer
 	NotifyApprovals   = "approvals"    // an approval_request addressed to the operator
-	NotifyDeadLetters = "dead_letters" // a dead_letter or push_conflict receipt
+	NotifyDeadLetters = "dead_letters" // a dead_letter or push_conflict receipt (a push_auth_failed is a dead_letter)
 )
 
 // notifyFilters are the notify_routes.filter values.

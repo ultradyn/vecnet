@@ -235,7 +235,7 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `POST /v1/admin/peers/{id}/rotate` | `peer rotate` | [T11, T17] |
 | `PUT /v1/admin/peers/{id}/scopes` | `peer scope` (allow/deny lists) | [T11, T17] |
 | `POST /v1/admin/sources` | `source add --kind --name --route` → ingress URL + secret | [T12] |
-| `POST /v1/admin/routes` | `route add` (push route URL; issues `whsec_`) | [T11, T17] |
+| `POST /v1/admin/routes`, `GET /v1/admin/routes`, `POST …/routes/{id}/rotate` | `route add` (kind `http`: push route URL, issues `whsec_`; kind `grokbot`: routine URL and `crsr_` key, live at once); list routes (never returns a key); rotate (`http`: section 3.5; `grokbot`: body `{"key"}` replaces the routine key, 204) | [T11, T17, R25] |
 | `POST /v1/admin/teams`, `…/teams/{id}/members` | operator-managed teams | [T09] |
 | `POST /v1/admin/groups/{id}/unarchive` | unarchive an ad hoc group | [R21] |
 | `GET /v1/admin/dead-letters`, `POST …/{dly}/retry`, `POST …/{dly}/discard` | `dead-letters list|retry|discard` | [T10, T17, R18] |
@@ -585,11 +585,12 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 
 ### 13.3 Grok Bot [T01, GB]
 
-- [ ] Push: POST to the admin-configured `https://api2.cursor.sh/automations/webhook/<routine-uuid>` with `Authorization: Bearer <crsr_ key>`; resolve the key from a 0600 secret at send time; never log it; refuse redirects.
+- [ ] Push: POST to the admin-configured `https://api2.cursor.sh/automations/webhook/<routine-uuid>` with `Authorization: Bearer <crsr_ key>`; keep the key sealed under `meta.hub_key` in the hub database and unseal it at send time; never log it; refuse redirects.
 - [ ] Body is the Delivery, so it carries `delivery_id`, `message_id`, `thread_id` and `origin`, because the Bot gets only a `runUuid` [R25].
 - [ ] Treat 200 `{"success":true}` as "run started", never as a reply or receipt of processing.
-- [ ] Durable outbox: retry network errors, 5xx and rate-limit 400s with backoff; 401 and "disabled" 400 are terminal and alert.
-- [ ] Dedupe sender-side; budget against 200 runs/h per routine, 300/h per account and the weekly pool; batch and debounce.
+- [ ] Durable outbox: retry network errors, 5xx and rate-limit 400s with backoff; 401 and "disabled" 400 are terminal and alert: `dead_letter` (section 3.3), counter `push_auth_failed`, so the operator can retry after re-enabling the routine or replacing its key (section 5.5).
+- [ ] Dedupe sender-side; budget against 200 runs/h per routine and 300/h per account. Routes carry no account identity, so the hub applies the 300/h across all `grokbot` routes.
+- Deferred, no owner yet: budgeting against the weekly pool, and batching and debouncing. Until then a run the weekly pool or the platform-wide limit refuses retries as a rate-limit 400 and can reach `dead_letter`, where the operator may retry it.
 - [ ] Implement `hold` hub-side: never POST; the Bot pulls via a vecnet MCP tool on its next run [T01, ENV §3].
 - [ ] The Bot pulls and replies through `/mcp` with a peer bearer (section 4.5); its reply echoes the vecnet ids [R15, R25].
 - [ ] Treat every inbound body as untrusted.

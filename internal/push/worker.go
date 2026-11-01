@@ -152,6 +152,10 @@ func (w *Worker) Step(ctx context.Context) (int, error) {
 // unblock the next delivery of the thread (§3.4).
 func (w *Worker) Push(ctx context.Context, d hub.DueDelivery) {
 	w.init()
+	if d.Kind == hub.RouteKindGrokbot {
+		w.pushGrokbot(ctx, d)
+		return
+	}
 	status, retryAfter, netErr := w.post(ctx, d.URL, d.DeliveryID, d.Keys, d.Body, d.Attempt, nil)
 	if ctx.Err() != nil && netErr != nil {
 		// Shutting down: leave the lease to lapse rather than burn an attempt.
@@ -188,6 +192,12 @@ func (w *Worker) post(ctx context.Context, url, id string, keys []string, body [
 	if attempt > 0 {
 		req.Header.Set(HeaderAttempt, strconv.Itoa(attempt))
 	}
+	return w.do(req, sink)
+}
+
+// do sends req on the egress client. When sink is non-nil the response body
+// (≤ 4 KiB) is copied into it; otherwise it is discarded.
+func (w *Worker) do(req *http.Request, sink *bytes.Buffer) (status int, retryAfter time.Duration, err error) {
 	resp, err := w.client.Do(req)
 	if err != nil {
 		if resp != nil && errors.Is(err, egress.ErrRedirect) {
