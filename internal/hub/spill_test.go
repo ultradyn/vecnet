@@ -375,3 +375,51 @@ func TestSpillNeedsRoomAndReplays(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", n)
 	}
 }
+
+// TestAttachingAHashNeedsTheBytesOrSight: a stored hash is not a read
+// capability (PROTOCOL §11, §16.3). Attaching it needs the sender (or its
+// principal) to have uploaded the bytes or to see a message that references
+// them; otherwise it is 422 unknown_blob, and no error reveals the size.
+func TestAttachingAHashNeedsTheBytesOrSight(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	b, bSec := env.NewPeer("session", "B")
+	_, cSec := env.NewPeer("session", "C")
+	d, _ := env.NewPeer("session", "D")
+	const secret = "A's private report"
+	sha := putBlob(t, env, aSec, secret)
+	att := func(size int) []any {
+		return []any{map[string]any{"sha256": sha, "size": size, "media_type": "text/plain"}}
+	}
+	a1 := req("a1", b)
+	a1["attachments"] = att(len(secret))
+	mustSend(t, env, aSec, a1)
+
+	// C has neither the bytes nor sight of them.
+	c1 := req("c1", d)
+	c1["attachments"] = att(len(secret))
+	mustReject(t, env, cSec, c1, http.StatusUnprocessableEntity, "unknown_blob")
+	c2 := req("c2", d)
+	c2["attachments"] = att(1)
+	_, details := mustReject(t, env, cSec, c2, http.StatusUnprocessableEntity, "unknown_blob")
+	if _, ok := details["size"]; ok {
+		t.Fatalf("rejection details %v reveal the stored size", details)
+	}
+
+	// B sees it through A's message, so B may forward it.
+	b1 := req("b1", d)
+	b1["attachments"] = att(len(secret))
+	mustSend(t, env, bSec, b1)
+	b2 := req("b2", d)
+	b2["attachments"] = att(1)
+	_, details = mustReject(t, env, bSec, b2, http.StatusUnprocessableEntity, "attachment_size_mismatch")
+	if _, ok := details["size"]; ok {
+		t.Fatalf("size mismatch details %v include the stored size", details)
+	}
+
+	// C uploading the same bytes proves possession: then it may attach.
+	putBlob(t, env, cSec, secret)
+	c3 := req("c3", d)
+	c3["attachments"] = att(len(secret))
+	mustSend(t, env, cSec, c3)
+}

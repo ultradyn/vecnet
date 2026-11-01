@@ -534,6 +534,7 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 - **Upload:** section 2.7. Connectors upload on behalf of Grok Bots and dots, which cannot reach the store [T13].
 - **Read:** `blob_url` on a Delivery carries a token scoped to (recipient, sha256), valid 7 days. Without it, a blob is readable by any participant in a thread referencing it, with its bearer, and by the operator in the UI [T13].
 - **Retention:** a blob referenced by a retained Message lives as long as the Message (indefinitely unless purged). Unreferenced uploads are garbage-collected after 24 h. Uploader TTL is optional and applies only while the blob is unreferenced: a blob referenced by any retained Message is pinned regardless of TTL [T13, R07]. Operator purge removes bytes and leaves a tombstone row; a later read returns 410 `blob_purged` [T13, R07].
+- **Attaching stored bytes:** a hash is not a read capability. A sender may attach a stored hash only if it (or its principal) uploaded those bytes, or a message referencing them is visible to it (section 16.3); otherwise the hash is treated as not stored (`unknown_blob`, or reference-only with `origin_url`), and no error reveals the stored size.
 - **Reference-only attachments** (`origin_url`, no hosted bytes) carry no `blob_url`; the hub never fetches `origin_url` [T13, SCH].
 
 ---

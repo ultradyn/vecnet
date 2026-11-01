@@ -168,11 +168,24 @@ func (h *Hub) putSpill(ctx context.Context, text string) error {
 // attachment_size_mismatch). An attachment whose bytes are not stored is
 // reference-only when it names an origin_url and 422 unknown_blob
 // otherwise. Hosted bytes that also name an origin_url stay hosted.
-func (h *Hub) checkAttachments(ctx context.Context, tx *sql.Tx, atts []envelope.Attachment) (hosted map[string]bool, err error) {
+//
+// A stored hash is not a read capability (PROTOCOL §11, §16.3): the sender
+// may attach stored bytes only when it or its principal uploaded them, or
+// a message referencing them is visible to it. Otherwise the hash is
+// treated as not stored, and no error reveals the stored size.
+func (h *Hub) checkAttachments(ctx context.Context, tx *sql.Tx, snd sender, atts []envelope.Attachment) (hosted map[string]bool, err error) {
 	hosted = map[string]bool{}
 	for i, a := range atts {
 		var size int64
-		qerr := tx.QueryRowContext(ctx, `SELECT size FROM blobs WHERE sha256 = ? AND purged_at IS NULL`, a.SHA256).Scan(&size)
+		qerr := tx.QueryRowContext(ctx,
+			`SELECT b.size FROM blobs b WHERE b.sha256 = ?1 AND b.purged_at IS NULL
+			   AND (EXISTS (SELECT 1 FROM blob_uploaders u WHERE u.sha256 = b.sha256 AND u.uploader IN (?2, ?3))
+			        OR EXISTS (SELECT 1 FROM blob_refs br
+			                   JOIN messages m ON m.msg_id = br.msg_id
+			                   JOIN threads t ON t.thr_id = m.thr_id
+			                   JOIN thread_participants tp ON tp.thr_id = m.thr_id
+			                   WHERE br.sha256 = b.sha256 AND tp.peer_id = ?2 AND `+visibleSQL+`))`,
+			a.SHA256, snd.peer, snd.prn).Scan(&size)
 		switch {
 		case errors.Is(qerr, sql.ErrNoRows):
 			if a.OriginURL != "" {
@@ -189,7 +202,6 @@ func (h *Hub) checkAttachments(ctx context.Context, tx *sql.Tx, atts []envelope.
 			e := E(http.StatusUnprocessableEntity, "attachment_size_mismatch", "attachment size differs from the stored blob")
 			e.Details["path"] = fmt.Sprintf("/attachments/%d/size", i)
 			e.Details["sha256"] = a.SHA256
-			e.Details["size"] = size
 			return nil, e
 		}
 		hosted[a.SHA256] = true

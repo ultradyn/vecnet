@@ -397,7 +397,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req *envelo
 	// Attachments (§2.2 step 7) and auto-spill (step 6). hosted holds every
 	// hash whose bytes the hub serves: those are pinned and linked per
 	// Delivery.
-	hosted, err := h.checkAttachments(ctx, tx, msg.Attachments)
+	hosted, err := h.checkAttachments(ctx, tx, snd, msg.Attachments)
 	if err != nil {
 		return nil, false, nil, err
 	}

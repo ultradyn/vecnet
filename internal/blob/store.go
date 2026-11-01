@@ -282,6 +282,10 @@ func (s *Store) Put(ctx context.Context, uploader string, r io.Reader, mediaType
 			}
 		}
 		if _, err := tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO blob_uploaders(sha256, uploader) VALUES (?, ?)`, m.SHA256, uploader); err != nil {
+			return fmt.Errorf("blob: record uploader: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO blob_quota(peer_id, day, bytes) VALUES (?, ?, ?)
 			 ON CONFLICT(peer_id, day) DO UPDATE SET bytes = bytes + excluded.bytes`,
 			uploader, day, n); err != nil {
@@ -408,7 +412,15 @@ func (s *Store) GC(ctx context.Context) (removed int, err error) {
 			}
 			shas = append(shas, sha)
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		rows.Close()
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM blob_uploaders WHERE NOT EXISTS (SELECT 1 FROM blobs b WHERE b.sha256 = blob_uploaders.sha256)`); err != nil {
+			return fmt.Errorf("blob: gc uploaders: %w", err)
+		}
+		return nil
 	})
 	if err != nil {
 		return 0, err
