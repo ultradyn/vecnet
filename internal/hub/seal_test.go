@@ -3,9 +3,11 @@ package hub_test
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -84,13 +86,13 @@ func TestUnsealTamperFails(t *testing.T) {
 		"",
 	)
 	for _, s := range bad {
-		if got, err := env.Hub.Unseal(s); err == nil {
-			t.Errorf("Unseal(%q) = %q, nil; want an error", s, got)
+		if got, err := env.Hub.Unseal(s); !errors.Is(err, hub.ErrUnseal) {
+			t.Errorf("Unseal(%q) = %q, %v; want ErrUnseal", s, got, err)
 		}
 	}
 
 	other := testhub.Start(t) // a fresh store has its own meta.hub_key
-	if got, err := other.Hub.Unseal(sealed); err == nil {
-		t.Fatalf("another hub unsealed %q to %q; want an error", sealed, got)
+	if got, err := other.Hub.Unseal(sealed); !errors.Is(err, hub.ErrUnseal) {
+		t.Fatalf("another hub unsealed %q to %q, %v; want ErrUnseal", sealed, got, err)
 	}
 }

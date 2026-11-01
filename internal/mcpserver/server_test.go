@@ -459,8 +459,10 @@ func TestNotificationIs202(t *testing.T) {
 func TestGetStreamLegacyHeartbeat(t *testing.T) {
 	env := testhub.Start(t)
 	env.Configure(func(d *httpapi.Deps) { d.Heartbeat = 50 * time.Millisecond })
-	_, secret := env.NewPeer("session", "a1")
+	peer, secret := env.NewPeer("session", "a1")
+	_, sender := env.NewPeer("session", "s")
 	sid := legacySession(t, env, secret)
+	sendTo(t, env, sender, peer, "already-in-the-log") // so replay would have something to send
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -1477,25 +1477,69 @@ func TestGetStreamEndsOnRotation(t *testing.T) {
 	wantUnfinished(t, frames)
 }
 
-// A hint held before access was lost is not delivered while it stays lost.
+// heldHintFront serves its own mcpserver with hints held for a subscribed
+// session, for tests that open the GET stream afterwards.
+func heldHintFront(t *testing.T, env *testhub.Env, secret, uri, send, to string) (*mcpserver.Server, *testhub.Env, string) {
+	t.Helper()
+	srv := mcpserver.New(env.Hub, mcpserver.Chain{&mcpserver.BearerAuth{Resolver: env.Hub.Auth}}, env.URL)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	own := &testhub.Env{T: t, URL: ts.URL, Hub: env.Hub}
+	sid := legacySession(t, own, secret)
+	legacySubscribe(t, own, secret, sid, uri)
+	sendTo(t, env, send, to, "held")
+	waitFor(t, 2*time.Second, "the hint to be held", func() bool { return srv.HeldHints(sid) == 1 })
+	return srv, own, sid
+}
+
+// A hint held before access was lost is not delivered while it stays lost; it
+// waits, since a stream that opens once access is back is entitled to it.
 func TestHeldHintWaitsForAccess(t *testing.T) {
 	env := testhub.Start(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 	prn, secret := env.NewPrincipal("pc")
 	peer, _ := peerUnder(t, env, prn, "p")
-	other, _ := peerUnder(t, env, prn, "q")
 	_, sender := env.NewPeer("session", "s")
-	sid := legacySession(t, env, secret)
-	legacySubscribe(t, env, secret, sid, peerURI(peer))
-	legacySubscribe(t, env, secret, sid, peerURI(other))
-	sendTo(t, env, sender, peer, "held")
-	time.Sleep(300 * time.Millisecond) // the watcher wakes and holds the hint
+	srv, own, sid := heldHintFront(t, env, secret, peerURI(peer), sender, peer)
 	if err := env.Hub.SetPeerDisabled(ctx, peer, true); err != nil {
 		t.Fatal(err)
 	}
-	sctx, cancel := context.WithCancel(ctx)
+	resp, frames := getStream(t, ctx, own, secret, sid)
+	noHintFor(t, frames, peerURI(peer))
+	resp.Body.Close()
+	if n := srv.HeldHints(sid); n != 1 {
+		t.Fatalf("held hints = %d, want the one kept for later", n)
+	}
+	if err := env.Hub.SetPeerDisabled(ctx, peer, false); err != nil {
+		t.Fatal(err)
+	}
+	resp, frames = getStream(t, ctx, own, secret, sid)
+	defer resp.Body.Close()
+	if !hintFor(t, frames, peerURI(peer), 2*time.Second) {
+		t.Fatal("no hint once access returned")
+	}
+}
+
+// Unsubscribing drops a held hint: the client asked to hear no more of it.
+func TestUnsubscribeDropsHeldHint(t *testing.T) {
+	env := testhub.Start(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	_, frames := getStream(t, sctx, env, secret, sid)
+	peer, secret := env.NewPeer("session", "p")
+	_, sender := env.NewPeer("session", "s")
+	srv, own, sid := heldHintFront(t, env, secret, peerURI(peer), sender, peer)
+	resp, body := do(t, own, call{secret: secret, body: map[string]any{
+		"jsonrpc": "2.0", "id": 3, "method": "resources/unsubscribe", "params": map[string]any{"uri": peerURI(peer)},
+	}, headers: map[string]string{"Mcp-Session-Id": sid, "Accept": "application/json, text/event-stream"}})
+	if resp.StatusCode != http.StatusOK || decodeRPC(t, body).Error != nil {
+		t.Fatalf("unsubscribe: %d %s", resp.StatusCode, body)
+	}
+	if n := srv.HeldHints(sid); n != 0 {
+		t.Fatalf("held hints after unsubscribe = %d", n)
+	}
+	stream, frames := getStream(t, ctx, own, secret, sid)
+	defer stream.Body.Close()
 	noHintFor(t, frames, peerURI(peer))
 }
 

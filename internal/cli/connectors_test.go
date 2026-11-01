@@ -130,6 +130,18 @@ func TestSourceAddPrintsURLAndSecret(t *testing.T) {
 	if len(lines) != 2 || !strings.Contains(human, id) || !strings.Contains(human, added.SourceID) {
 		t.Fatalf("source list = %q, want a line per source", human)
 	}
+	for _, want := range []string{"target=" + target, "events=push,issues", "priority=hold"} {
+		if !strings.Contains(human, want) {
+			t.Fatalf("source list = %q, want %s", human, want)
+		}
+	}
+	// A name is the operator's text, and a row stays one line whatever it holds.
+	if _, err := env.Hub.DB.Exec(`UPDATE sources SET name = 'two' || char(10) || 'lines' WHERE src_id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if rows := nonEmptyLines(op.mustRun("source", "list")); len(rows) != 2 {
+		t.Fatalf("a newline in a name split the row: %q", rows)
+	}
 	var list []struct {
 		SourceID   string   `json:"source_id"`
 		Target     string   `json:"target"`
@@ -204,8 +216,12 @@ func TestRouteAddGrokbotKeyFile(t *testing.T) {
 	if code != 0 || errs != "" {
 		t.Fatalf("route add = %d, stdout %q, stderr %q; want 0 and a quiet stderr", code, out, errs)
 	}
-	if id := field(t, out, "route_id"); !strings.HasPrefix(id, "route_") {
+	id := field(t, out, "route_id")
+	if !strings.HasPrefix(id, "route_") {
 		t.Fatalf("route_id = %q, want route_…", id)
+	}
+	if stored, err := env.Hub.GrokbotKey(context.Background(), id); err != nil || stored != key {
+		t.Fatalf("stored key = %q, %v; want the file's, without its newline", stored, err)
 	}
 	if strings.Contains(out, key) || strings.Contains(out, "whsec") {
 		t.Fatalf("route add output %q carries a key", out)

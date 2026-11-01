@@ -210,8 +210,6 @@ func TestClientRefusesPrivateResolution(t *testing.T) {
 			}
 		})
 	}
-	// Give a stray dial a moment to land before counting.
-	time.Sleep(50 * time.Millisecond)
 	if n := conns.Load(); n != 0 {
 		t.Fatalf("listener on 127.0.0.1 got %d connections, want 0", n)
 	}
@@ -259,7 +257,9 @@ func TestClientPinsIP(t *testing.T) {
 	defer srv.Close()
 	su, _ := url.Parse(srv.URL)
 
+	var lookups atomic.Int32
 	p := egress.Policy{AllowPrivate: true, Resolver: func(ctx context.Context, host string) ([]net.IP, error) {
+		lookups.Add(1)
 		if host != "evil.example" {
 			t.Errorf("resolver asked for %q, want evil.example", host)
 		}
@@ -281,6 +281,9 @@ func TestClientPinsIP(t *testing.T) {
 	}
 	if h, _ := gotHost.Load().(string); h != "evil.example:"+su.Port() {
 		t.Fatalf("Host header = %q, want evil.example:%s", h, su.Port())
+	}
+	if n := lookups.Load(); n != 1 {
+		t.Fatalf("resolved %d times, want once: a second answer could differ from the first", n)
 	}
 }
 

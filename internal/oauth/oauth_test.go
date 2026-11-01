@@ -1090,8 +1090,8 @@ func TestConsentPageHardening(t *testing.T) {
 		t.Fatal(err)
 	}
 	x := &browser{t: t, env: env, client: reg.ClientID, redirect: chatgptRedirect}
-	if _, p := x.authorize(x.query(verifierA)); strings.Contains(p, "<img") {
-		t.Fatalf("client_name not escaped:\n%s", p)
+	if resp, p := x.authorize(x.query(verifierA)); resp.StatusCode != http.StatusOK || strings.Contains(p, "<img") || !strings.Contains(p, "&lt;img") {
+		t.Fatalf("client_name not shown escaped: %d\n%s", resp.StatusCode, p)
 	}
 }
 
@@ -1693,5 +1693,32 @@ func TestLinkGuessTakesNoWriteLock(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Fatalf("guess %q waited on the write lock", guess)
 		}
+	}
+}
+
+// A parameter given twice has no one meaning, at either end of the flow.
+func TestAuthorizeRefusesRepeatedParameters(t *testing.T) {
+	env := testhub.Start(t)
+	b := newBrowser(t, env)
+	q := b.query(verifierA)
+	q["state"] = []string{"one", "two"}
+	resp, page := b.authorize(q)
+	wantDeadEnd(t, resp, page, "invalid_request")
+
+	_, page = b.authorize(b.query(verifierA))
+	resp, page = postForm(t, env, "/oauth/authorize", url.Values{
+		"request": {sealedRequest(t, page)}, "approve": {"1"}, "link_code": {"ABCDEFGH", "HGFEDCBA"},
+	}, nil)
+	wantDeadEnd(t, resp, page, "invalid_request")
+}
+
+func TestRefreshRefusesAnotherScope(t *testing.T) {
+	env := testhub.Start(t)
+	b, _, tok := login(t, env)
+	got := token(t, env, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {tok.RefreshToken}, "scope": {"admin"}})
+	wantError(t, got, "invalid_scope")
+	// Refused before it could spend the token.
+	if fresh := b.refresh(tok.RefreshToken); fresh.status != http.StatusOK {
+		t.Fatalf("refresh after the refusal: %d %s", fresh.status, fresh.Error)
 	}
 }

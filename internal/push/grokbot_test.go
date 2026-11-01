@@ -2,7 +2,9 @@ package push_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -646,6 +648,75 @@ func TestGrokbotOutcomes(t *testing.T) {
 		f.step()
 		if r := f.row(dly); r.State != "queued" || r.Attempt != 1 || r.LastStatus != nil {
 			t.Fatalf("delivery = %+v, want queued at attempt 1", r)
+		}
+	})
+}
+
+// What surrounds the POST: the routine's own wait, a run nothing used, a
+// shutdown mid-request, and the wait on a route already over its limit.
+func TestGrokbotEdges(t *testing.T) {
+	t.Run("Retry-After sets the retry", func(t *testing.T) {
+		f := setup(t, nil)
+		f.addGrokbot(func(int, hit) reply {
+			return reply{Status: http.StatusServiceUnavailable, Header: map[string]string{"Retry-After": "600"}}
+		})
+		dly := f.send(f.aSec, f.msg("wake")).Deliveries[0].DeliveryID
+		f.step()
+		if wait := f.untilNext(dly); wait < 10*time.Minute || wait > 15*time.Minute {
+			t.Fatalf("next attempt in %v, want the routine's 10m, jitter aside", wait)
+		}
+	})
+	t.Run("a key that will not unseal gives the run back", func(t *testing.T) {
+		f := setup(t, nil)
+		f.addGrokbot(started)
+		if _, err := f.env.Hub.DB.Exec(`UPDATE routes SET key_enc = 'v1:AAAA' WHERE route_id = ?`, f.route); err != nil {
+			t.Fatal(err)
+		}
+		f.send(f.aSec, f.msg("wake"))
+		f.step()
+		if got := len(f.rcv.Hits()); got != 0 {
+			t.Fatalf("routine got %d POSTs", got)
+		}
+		if n := f.routeRuns(); n != 0 {
+			t.Fatalf("route_runs = %d, want the run given back", n)
+		}
+	})
+	t.Run("shutdown mid-POST leaves the attempt", func(t *testing.T) {
+		f := setup(t, nil)
+		ctx, cancel := context.WithCancel(f.ctx)
+		defer cancel()
+		f.ctx = ctx
+		stuck := make(chan struct{})
+		defer close(stuck)
+		f.addGrokbot(func(int, hit) reply {
+			cancel()
+			<-stuck
+			return reply{Status: http.StatusOK}
+		})
+		dly := f.send(f.aSec, f.msg("wake")).Deliveries[0].DeliveryID
+		if _, err := f.w.Step(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+		// Claimed, and its lease left to lapse: no result was recorded.
+		if r := f.row(dly); r.State != "pushed" || r.LastStatus != nil {
+			t.Fatalf("delivery = %+v, want pushed under its lease with no result", r)
+		}
+	})
+	t.Run("a route over its limit waits for the excess to leave", func(t *testing.T) {
+		f := setup(t, nil)
+		f.addGrokbot(started)
+		f.setRunsPerHour(1)
+		now := f.env.Now.Now()
+		for _, age := range []time.Duration{50 * time.Minute, 40 * time.Minute, 30 * time.Minute} {
+			if _, err := f.env.Hub.DB.Exec(`INSERT INTO route_runs(route_id, at) VALUES (?, ?)`,
+				f.route, envelope.FormatTime(now.Add(-age))); err != nil {
+				f.t.Fatal(err)
+			}
+		}
+		dly := f.send(f.aSec, f.msg("wake")).Deliveries[0].DeliveryID
+		f.step()
+		if wait := f.untilNext(dly); wait != 30*time.Minute {
+			t.Fatalf("next attempt in %v, want 30m: the third-oldest run has to leave", wait)
 		}
 	})
 }
