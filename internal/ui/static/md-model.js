@@ -6,7 +6,7 @@
 // Blocks: paragraph (lines kept as hard breaks), heading (# to ###), fenced
 // code, bullet and numbered lists (one level), quote. Inline: `code`,
 // **bold**, *italic* / _italic_, [text](url), ![alt](url) as a link, bare
-// http(s) URLs, and backslash escapes. Anything else stays literal text.
+// http(s) URLs and <url> autolinks, and backslash escapes. Anything else stays literal text.
 
 export const MD_LIMIT = 64 * 1024; // chars rendered as markdown; the rest is plain text
 const SPAN = 2000; // longest emphasis or code span, in chars
@@ -153,6 +153,12 @@ export function inline(s, depth = 0) {
       }
       buf += tick; i += n; continue;
     }
+    if (c === '<') {
+      // <https://…> and <mailto:…> autolinks; anything else stays literal text.
+      const j = find('>', i + 1);
+      const ok = j !== -1 && j - i <= HREF + 1 ? safeHref(s.slice(i + 1, j)) : null;
+      if (ok) { flush(); out.push({ t: 'a', href: ok.href, host: ok.host, auto: true, kids: [{ t: 'text', v: s.slice(i + 1, j) }] }); i = j + 1; continue; }
+    }
     if (c === '!' && s[i + 1] === '[') {
       const l = link(s, i + 1, find);
       if (l) { flush(); out.push({ ...l.node, image: true }); i = l.end; continue; }
@@ -192,7 +198,7 @@ function link(s, i, find) {
   if (close === -1 || close - i > LABEL) return null;
   const label = s.slice(i + 1, close);
   if (label.includes('[')) return null;
-  const end = s.indexOf(')', close + 2);
+  const end = find(')', close + 2);
   if (end === -1 || end - close > HREF + 2) return null;
   let target = s.slice(close + 2, end).trim();
   if (target.startsWith('<') && target.endsWith('>')) target = target.slice(1, -1);

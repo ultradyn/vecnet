@@ -25,6 +25,28 @@ export function ago(iso, nowMs = Date.now()) {
   return Math.floor(s / 86400) + 'd ago';
 }
 
+// deltaLabel is how long after prevIso a message came: +3.8s, +42s, +4m 12s,
+// +2h 5m, +3d. Empty for the first message, a bad time or an earlier one.
+export function deltaLabel(prevIso, iso) {
+  const a = Date.parse(prevIso), b = Date.parse(iso);
+  if (Number.isNaN(a) || Number.isNaN(b) || b < a) return '';
+  const ms = b - a;
+  if (ms < 9950) return '+' + (ms / 1000).toFixed(1) + 's';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return '+' + s + 's';
+  if (s < 3600) return '+' + Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  if (s < 86400) return '+' + Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+  return '+' + Math.floor(s / 86400) + 'd';
+}
+
+// PRIORITY_HELP explains each priority (PROTOCOL §5.2) for the hover and
+// focus tips on the priority buttons (issue 21).
+export const PRIORITY_HELP = {
+  wake: 'Interrupt now. Pushed to the recipient straight away (push routes, Grok Bot routines, dots); pull clients see it at once.',
+  wake_idle: 'Interrupt only if the recipient is idle or its presence is unknown. Otherwise it waits, and is pushed once when the recipient goes idle.',
+  hold: 'Never pushed. It waits in the recipient\'s inbox until it next checks; pull clients still see it as it arrives.',
+};
+
 export function bytes(n) {
   if (n < 1024) return n + ' B';
   return n < 1 << 20 ? (n / 1024).toFixed(1) + ' KiB' : (n / 1048576).toFixed(1) + ' MiB';

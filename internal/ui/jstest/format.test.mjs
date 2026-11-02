@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ago, bytes, clean, plural, quotaLabel, short, title, when } from '../static/format.js';
+import { PRIORITY_HELP, ago, bytes, clean, deltaLabel, plural, quotaLabel, short, title, when } from '../static/format.js';
 
 test('when is 24-hour local today, with the date on other days, and survives midnight', () => {
   const noon = new Date(2026, 10, 2, 14, 5, 0).getTime();
@@ -75,4 +75,26 @@ test('plural counts its noun', () => {
   assert.equal(plural(1, 'message'), '1 message');
   assert.equal(plural(0, 'message'), '0 messages');
   assert.equal(plural(2, 'recipient'), '2 recipients');
+});
+
+test('deltaLabel is the gap since the previous message', () => {
+  const t = ms => new Date(Date.UTC(2026, 10, 3) + ms).toISOString();
+  assert.equal(deltaLabel(t(0), t(0)), '+0.0s');
+  assert.equal(deltaLabel(t(0), t(3800)), '+3.8s');
+  assert.equal(deltaLabel(t(0), t(9940)), '+9.9s');
+  assert.equal(deltaLabel(t(0), t(10_000)), '+10s');
+  assert.equal(deltaLabel(t(0), t(59_000)), '+59s');
+  assert.equal(deltaLabel(t(0), t(60_000)), '+1m 0s');
+  assert.equal(deltaLabel(t(0), t(252_000)), '+4m 12s');
+  assert.equal(deltaLabel(t(0), t(3_600_000)), '+1h 0m');
+  assert.equal(deltaLabel(t(0), t(7_500_000)), '+2h 5m');
+  assert.equal(deltaLabel(t(0), t(3 * 86_400_000)), '+3d');
+  assert.equal(deltaLabel(t(5000), t(0)), '', 'out of order shows nothing');
+  assert.equal(deltaLabel(null, t(0)), '');
+  assert.equal(deltaLabel(t(0), 'nope'), '');
+});
+
+test('PRIORITY_HELP covers every priority', () => {
+  assert.deepEqual(Object.keys(PRIORITY_HELP).sort(), ['hold', 'wake', 'wake_idle']);
+  for (const v of Object.values(PRIORITY_HELP)) assert.ok(v.length > 20 && !/[<>]/.test(v));
 });

@@ -91,10 +91,18 @@ test('past MD_LIMIT the rest is plain text', () => {
 });
 
 test('pathological input stays fast', () => {
-  for (const s of ['*'.repeat(1 << 20), '[' .repeat(1 << 20), '*a '.repeat(1 << 18), '[a](' .repeat(1 << 18), '`'.repeat(1 << 20), 'http'.repeat(1 << 18), '_a'.repeat(1 << 19)]) {
+  for (const s of ['<'.repeat(1 << 20), '<a '.repeat(1 << 18) + '>', '*'.repeat(1 << 20), '[' .repeat(1 << 20), '*a '.repeat(1 << 18), '[a](' .repeat(1 << 18), '`'.repeat(1 << 20), 'http'.repeat(1 << 18), '_a'.repeat(1 << 19)]) {
     const t0 = performance.now();
     parse(s);
     const ms = performance.now() - t0;
     assert.ok(ms < 200, `${JSON.stringify(s.slice(0, 6))}… took ${ms.toFixed(0)} ms`);
   }
+});
+
+test('angle-bracket autolinks', () => {
+  const out = inline('test: <https://xsm.hornbill-boa.ts.net:29044> and <mailto:a@b.co> but <b>bold</b> and <javascript:x>');
+  const links = out.filter(k => k.t === 'a');
+  assert.deepEqual(links.map(l => l.href), ['https://xsm.hornbill-boa.ts.net:29044/', 'mailto:a@b.co']);
+  assert.equal(links[0].kids[0].v, 'https://xsm.hornbill-boa.ts.net:29044');
+  assert.ok(out.some(k => k.t === 'text' && k.v.includes('<b>bold</b> and <javascript:x>')));
 });
