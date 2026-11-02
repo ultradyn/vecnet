@@ -5,8 +5,16 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>vecnet · operator inbox</title>
-<link rel="stylesheet" href="app.css">
-<script src="app.js" defer></script>
+<link rel="stylesheet" href="base.css">
+<link rel="stylesheet" href="inbox.css">
+<link rel="stylesheet" href="thread.css">
+<link rel="stylesheet" href="aside.css">
+<link rel="stylesheet" href="matrix.css">
+<link rel="stylesheet" href="dash.css">
+<link rel="stylesheet" href="subs.css">
+<link rel="stylesheet" href="presence.css">
+<link rel="stylesheet" href="compose.css">
+<script type="module" src="app.js"></script>
 </head>
 <body>
 <noscript><p class="nojs">The vecnet operator inbox needs JavaScript.</p></noscript>
@@ -28,6 +36,8 @@
     <div class="brand"><span class="logo"></span>vecnet<span id="hubname" class="hub"></span></div>
     <div class="nav">
       <a id="nav-inbox" href="#inbox"><span class="tt">Inbox</span><span id="inbox-count" class="cnt"></span></a>
+      <a id="nav-new" href="#new"><span class="tt">New message</span></a>
+      <a id="nav-dash" href="#dash"><span class="tt">Dashboard</span></a>
     </div>
     <div class="grp">Threads</div>
     <div id="threads" class="nav"></div>

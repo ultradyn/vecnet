@@ -617,3 +617,26 @@ func TestDotHoldsNoBearer(t *testing.T) {
 		t.Fatalf("unspent enrol tokens = %d, %v", unspent, err)
 	}
 }
+
+// GET /v1/admin/routes shows each route's host only: a path or query can hold
+// a callback credential (PROTOCOL §2.12).
+func TestListRoutesHostOnly(t *testing.T) {
+	env := testhub.Start(t)
+	b, _ := env.NewPeer("dot", "b")
+	rcv := newScriptedReceiver(t, func(int) int { return http.StatusOK })
+	adminDo(t, env, "POST", "/v1/admin/routes", map[string]any{"owner": b, "url": rcv.srv.URL + "/private-callback?token=secret"}, http.StatusCreated)
+	raw := adminDo(t, env, "GET", "/v1/admin/routes", nil, http.StatusOK)
+	for _, leak := range []string{"private-callback", "token", "secret", `"url"`} {
+		if strings.Contains(string(raw), leak) {
+			t.Fatalf("routes list leaks %q: %s", leak, raw)
+		}
+	}
+	var body struct {
+		Routes []struct {
+			Host string `json:"host"`
+		} `json:"routes"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil || len(body.Routes) != 1 || body.Routes[0].Host != strings.TrimPrefix(rcv.srv.URL, "http://") {
+		t.Fatalf("routes %s: %v", raw, err)
+	}
+}

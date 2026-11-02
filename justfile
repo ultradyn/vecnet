@@ -64,3 +64,23 @@ validate-protocol:
 # Show every ticket with status and type
 tickets:
     @cd .scratch/vecnet/issues && for f in *.md; do printf '%-36s %-9s %-10s %s\n' "$f" "$(grep -m1 '^Status:' "$f" | awk '{print $2}')" "$(grep -m1 '^Type:' "$f" | awk '{print $2}')" "$(head -1 "$f" | sed 's/^# //')"; done
+
+# Independent demo, seeded once; --reset starts a fresh scenario.
+ui-demo *ARGS:
+    CGO_ENABLED=0 build2 go run -p 2 ./internal/opseed/demo --listen 127.0.0.1:49575 --data-dir .demo-data --dev-ui-dir internal/ui/static {{ARGS}}
+
+# Pure UI model tests.
+test-ui:
+    build2 node --test --test-concurrency=2 internal/ui/jstest/
+
+# Screen scripts run serially; helpers are not executable checks.
+ui-shots:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for script in scripts/ui/*.mjs; do
+        case "$script" in */lib.mjs|*/tmux.mjs|*/ansi.mjs|*.test.mjs) continue ;; esac
+        build2 node "$script"
+    done
+
+tui *ARGS:
+    CGO_ENABLED=0 build2 go run -p 2 ./cmd/vecnet tui {{ARGS}}

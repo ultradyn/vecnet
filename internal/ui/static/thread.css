@@ -1,0 +1,66 @@
+/* thread: the reading column fills nav to side panel, up to a 980 px measure (ticket 18) */
+body[data-route=thread] .va .col,body[data-route=matrix] .va .col{max-width:980px}
+.va .thead{border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:8px}
+.va .thead .ids{font:400 12px var(--mono);color:var(--dim);overflow-wrap:anywhere}
+.va .msg{display:grid;grid-template-columns:28px minmax(0,1fr);gap:12px;padding:16px 0;border-bottom:1px solid #161d33}
+.va .msg.target{background:#6366f112;box-shadow:-12px 0 0 #6366f112,12px 0 0 #6366f112}
+.va .msg header{display:flex;align-items:center;gap:8px;font-size:13px;flex-wrap:wrap}
+.va .msg header b{font-weight:600}
+.va .msg .kind,.va .msg .t,.va .msg .via{color:var(--dim);font-size:12px}
+.va .msg .acts{margin-left:auto}
+.va .msg .acts button{border:0;background:none;color:var(--dim);font-size:12px;padding:0}
+.va .msg .acts button:hover{color:var(--violet)}
+.va .msg .txt{font-size:14px;line-height:1.65;color:#dfe3ea;margin-top:6px;max-width:84ch;overflow-wrap:anywhere;white-space:pre-wrap}
+.va .msg .txt.clamp{max-height:calc(14px*1.65*6);overflow:hidden;-webkit-mask-image:linear-gradient(#000 55%,transparent);mask-image:linear-gradient(#000 55%,transparent)}
+.va .reply{display:flex;gap:6px;font-size:12px;color:var(--violet);margin-top:4px;text-decoration:none;min-width:0;cursor:pointer;width:fit-content;max-width:100%}
+.va .reply:hover b{text-decoration:underline}
+.va .reply.far{cursor:default;color:var(--muted)}
+.va .reply.far:hover b{text-decoration:none}
+.va .reply b{font-weight:400;flex:none;white-space:nowrap}
+.va .reply span{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.va .trunc{display:block;font-size:12px;color:#c4b5fd;margin-top:6px}
+.va .atts{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.va .rc{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;font-size:11.5px;color:var(--dim)}
+.va .rc span{display:inline-flex;align-items:center;gap:5px}
+.va .rc i{width:7px;height:7px;border-radius:50%;background:var(--c)}
+.va .box{border:1px solid var(--line2);border-radius:8px;padding:10px 12px;margin-top:8px;background:#0e1426;font-size:13px;overflow-wrap:anywhere}
+.va .box .k{font:500 12px var(--mono);color:var(--violet)}
+.va .loading{color:var(--dim);font-size:13px;padding:24px 0}
+.va .msg.flash{animation:flash 1.5s ease-out}
+@keyframes flash{0%,25%{background:#a855f733;box-shadow:-12px 0 0 #a855f733,12px 0 0 #a855f733}100%{background:transparent;box-shadow:none}}
+.va .sys{display:flex;align-items:center;gap:10px;justify-content:center;padding:10px 0;border-bottom:1px solid #161d33;font-size:12px;color:var(--dim);min-width:0}
+.va .sys .of{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:50%}
+.va .sys.flash{animation:flash 1.5s ease-out}
+.va .js.succeeded{color:var(--ok)}.va .js.failed{color:var(--bad)}
+.va .showfull{font-size:12px;color:var(--violet);padding:4px 2px}
+.va .showfull:disabled{color:var(--dim);cursor:default}
+.va pre.full{margin:10px 0 0;padding:12px 14px;border:1px dashed #a855f780;border-radius:8px;background:#0b1020;font:400 12.5px/1.6 var(--mono);color:#dfe3ea;white-space:pre-wrap;overflow-wrap:anywhere;max-height:60vh;overflow:auto}
+.va .full-err{margin-top:8px;font-size:12px;color:var(--bad)}
+.va .apr{border:1px solid var(--line2);border-radius:9px;padding:12px 14px;margin-top:10px;background:#0e1426}
+.va .apr.act{border-color:#6366f180}
+.va .apr .q{font-size:13.5px;font-weight:600;overflow-wrap:anywhere}
+.va .apr .opts{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}
+.va .apr .opts .chip.on{color:var(--text);border-color:#6366f1}
+.va .apr .cd{margin-left:auto;font:500 12px var(--mono);color:var(--wake)}
+.va .apr .cd.urgent{color:var(--bad)}
+.va .apr .st{margin-left:auto;font:500 12px var(--mono);color:var(--dim)}
+.va .apr .ro{font-size:12px;color:var(--dim)}
+.va .apr.shut .q{color:var(--muted)}
+
+/* composer */
+.composer{position:sticky;bottom:0;margin-top:20px;padding:14px 0 6px;background:linear-gradient(transparent,var(--bg) 22px)}
+.composer .wrap{border:1px solid var(--line2);border-radius:10px;background:#0e1426;padding:10px 12px}
+.composer .wrap:focus-within{border-color:#6366f1}
+.composer .cbanner{border:1px solid #fb718580;background:#fb718514;color:#fecdd3;border-radius:9px;padding:9px 12px;margin-bottom:8px;font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+.composer .cbanner.budget{border-color:#fbbf2480;background:#fbbf2412;color:#fde68a}
+.composer .join{font-size:12px;color:#c4b5fd;margin-bottom:6px}
+.composer .to{font-size:12px;color:var(--violet);display:flex;gap:8px;align-items:center;margin-bottom:6px}
+.composer .to button{border:0;background:none;color:var(--dim);padding:0 2px}
+.composer textarea{width:100%;min-height:58px;max-height:40vh;resize:vertical;border:0;background:none;outline:none;font-size:14px;line-height:1.55}
+.composer .bar{display:flex;align-items:center;gap:10px;margin-top:6px;flex-wrap:wrap}
+.seg{display:inline-flex;border:1px solid var(--line2);border-radius:7px;overflow:hidden}
+.seg button{border:0;background:none;font:500 11.5px var(--mono);padding:5px 9px;color:var(--muted)}
+.seg button.on{background:#1a2139;color:var(--text)}
+.composer .bytes{font:400 11.5px var(--mono);color:var(--dim)}
+.composer .bytes.spill{color:#c4b5fd}.composer .bytes.over{color:var(--bad)}
+.composer .hint{margin-left:auto;font-size:11.5px;color:var(--dim)}

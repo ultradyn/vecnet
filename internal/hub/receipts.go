@@ -42,25 +42,36 @@ const MaxReceiptNote = 1024
 // no-op: 204, no Event and no audit row, so a retried POST is harmless and
 // the sender never sees, say, expired then processed.
 func (h *Hub) Receipt(ctx context.Context, c auth.Caller, deliveryID, state, note string) error {
+	_, err := h.ReceiptChanged(ctx, c, deliveryID, state, note)
+	return err
+}
+
+// ReceiptChanged records a receipt with the same authorization, deduplication,
+// events and audit as Receipt. It reports true only when the transaction commits
+// a delivery change; a repeated receipt is false, nil. Errors report false even
+// if a change was attempted, since the transaction did not commit.
+func (h *Hub) ReceiptChanged(ctx context.Context, c auth.Caller, deliveryID, state, note string) (bool, error) {
 	if !receiptStates[state] {
 		e := E(http.StatusUnprocessableEntity, "invalid_state", "receipt state must be processed, read or failed")
 		e.Details["state"] = state
-		return e
+		return false, e
 	}
 	if utf8.RuneCountInString(note) > MaxReceiptNote {
-		return &envelope.SchemaError{Path: "/note", Message: fmt.Sprintf("note exceeds %d characters", MaxReceiptNote)}
+		return false, &envelope.SchemaError{Path: "/note", Message: fmt.Sprintf("note exceeds %d characters", MaxReceiptNote)}
 	}
 	var sender string
+	var operators []string
 	notify := false
+	changed := false
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		notify = false
-		var msg, thr, recipient, prn string
+		notify, operators = false, nil
+		var msg, thr, recipient, prn, recipientKind string
 		var senderIsPeer bool
 		err := tx.QueryRowContext(ctx,
-			`SELECT d.msg_id, d.thr_id, d.recipient, p.prn_id, m.sender,
+			`SELECT d.msg_id, d.thr_id, d.recipient, p.prn_id, p.kind, m.sender,
 			        EXISTS (SELECT 1 FROM peers s WHERE s.peer_id = m.sender)
 			 FROM deliveries d JOIN peers p ON p.peer_id = d.recipient JOIN messages m ON m.msg_id = d.msg_id
-			 WHERE d.dly_id = ?`, deliveryID).Scan(&msg, &thr, &recipient, &prn, &sender, &senderIsPeer)
+			 WHERE d.dly_id = ?`, deliveryID).Scan(&msg, &thr, &recipient, &prn, &recipientKind, &sender, &senderIsPeer)
 		if errors.Is(err, sql.ErrNoRows) {
 			return notRecipient(deliveryID)
 		}
@@ -99,6 +110,12 @@ func (h *Hub) Receipt(ctx context.Context, c auth.Caller, deliveryID, state, not
 				return nil // already read: one read receipt per delivery
 			}
 		}
+		if state == "read" && recipientKind == "operator" {
+			operators, err = h.noteOperatorView(ctx, tx, "read", thr)
+			if err != nil {
+				return err
+			}
+		}
 		if senderIsPeer {
 			r := envelope.Receipt{
 				DeliveryID: deliveryID, MessageID: msg, ThreadID: thr,
@@ -109,16 +126,23 @@ func (h *Hub) Receipt(ctx context.Context, c auth.Caller, deliveryID, state, not
 			}
 			notify = true
 		}
-		return audit.Record(ctx, tx, callerID(c), "receipt", []string{deliveryID, msg},
-			map[string]any{"state": state, "by": recipient})
+		if err := audit.Record(ctx, tx, callerID(c), "receipt", []string{deliveryID, msg},
+			map[string]any{"state": state, "by": recipient}); err != nil {
+			return err
+		}
+		changed = true
+		return nil
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 	if notify {
 		h.Log.Notify(sender)
 	}
-	return nil
+	if len(operators) > 0 {
+		h.Log.Notify(operators...)
+	}
+	return changed, nil
 }
 
 // mayActFor reports whether c is the peer itself or a principal/operator

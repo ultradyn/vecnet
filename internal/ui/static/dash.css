@@ -1,0 +1,48 @@
+/* Provisional read-only dashboard (operator UI Task 12): plain stacked tables. */
+body[data-route=dash] .va .col{max-width:1120px}
+.dash .dash-counters{font-size:12px;color:var(--muted);margin:4px 0 0;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#0c1120}
+.dash .dash-counters.bad{border-color:#fb718580;color:var(--bad)}
+.dash .dash-sec{margin-top:8px}
+.dash h3{font-size:13px;font-weight:600;color:#cbd5e1;margin:18px 0 6px}
+.dash h3 .n{color:var(--dim);font-weight:400;font-size:12px}
+.dash .loading{color:var(--dim);font-size:13px;padding:10px 0}
+.dash .none{color:var(--dim);font-size:13px;margin:6px 0}
+.dash .note{color:var(--muted);font-size:12.5px;margin:0 0 8px}
+.dash .note a,.dash a{color:var(--violet);text-decoration:none}
+.dash a:hover{text-decoration:underline}
+.dash .empty{margin-top:0;margin-bottom:10px;padding:14px 18px}
+.dash table{width:100%;border-collapse:collapse;font-size:13px}
+.dash th{text-align:left;font-weight:500;color:var(--dim);font-size:12px;padding:6px 10px 6px 0;border-bottom:1px solid var(--line);white-space:nowrap}
+.dash td{padding:9px 10px 9px 0;border-bottom:1px solid #161d33;vertical-align:top;overflow-wrap:anywhere}
+.dash td .sub,.dash li .sub{display:block;font-size:11px;color:var(--dim)}
+.dash td .sub.mono,.dash .sm{font-family:var(--mono)}
+.dash .sm{font-size:12px}
+.dash .bad{color:var(--bad)}
+.dash tr.off td{opacity:.45}
+.dash .pill{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;white-space:nowrap}
+.dash .kd{width:8px;height:8px;border-radius:2px;background:#64748b;flex:none}
+.dash .kd.k-operator{background:#a855f7}.dash .kd.k-session{background:#818cf8}.dash .kd.k-grokbot{background:#2dd4bf}
+.dash .kd.k-pagchat-bot{background:#a3e635}.dash .kd.k-openclaw{background:#fb923c}.dash .kd.k-dot{background:#f472b6}.dash .kd.k-source{background:#94a3b8}
+.dash .pd{width:8px;height:8px;border-radius:50%;flex:none;background:#475569}
+.dash .pd.idle{background:var(--ok)}.dash .pd.working{background:var(--wake)}.dash .pd.blocked{background:var(--bad)}
+.dash .pd.offline{background:none;border:1.5px solid #64748b}
+.dash .pd.unknown{background:none;border:1.5px dashed #64748b;width:9px;height:9px}
+.dash .pd.na{background:none}
+.dash .rch{width:9px;height:9px;border-radius:50%;border:2px solid #475569;flex:none;box-sizing:border-box}
+.dash .rch.connected{border-color:#818cf8;background:#818cf855}.dash .rch.reachable{border-color:#818cf8}
+.dash .rch.unreachable{border-color:var(--bad)}.dash .rch.unknown{border-style:dotted}
+.dash .cred{font:12px var(--mono);color:var(--muted)}
+.dash .cred.active{color:var(--ok)}.dash .cred.revoked{color:var(--bad)}
+.dash .tl{color:var(--text)}
+.dash ul.blocked{list-style:none;margin:0;padding:0}
+.dash ul.blocked li{padding:8px 0;border-bottom:1px solid #161d33;font-size:13px;color:var(--wake);overflow-wrap:anywhere}
+.dash ul.blocked li .sub{color:var(--dim)}
+.dash .total{font-size:13px;color:var(--muted);margin:0 0 8px}
+.dash .total b{color:var(--text);font-size:15px}
+.dash .audit{font-size:12px;line-height:1.75;color:#b6bfd0;border:1px solid var(--line);border-radius:8px;padding:10px 14px;background:#0c1120}
+.dash .audit .ln{display:grid;grid-template-columns:110px 170px 160px minmax(0,1fr);gap:10px}
+.dash .audit .ln>*{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dash .audit .t{color:var(--dim)}
+.dash .audit .tg+.tg::before{content:', '}
+.dash .older{margin-top:10px}
+.dash .err{margin-top:8px}

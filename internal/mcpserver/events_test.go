@@ -718,6 +718,7 @@ func TestSubscribeTtlClamp(t *testing.T) {
 		{"over", 48 * 3600 * 1000, 24 * time.Hour},
 		{"huge", 1e300, 24 * time.Hour},
 		{"short", 3600 * 1000, time.Hour},
+		{"under the margin", 5 * 60 * 1000, 5 * time.Minute}, // refreshBefore clamps to now, never the past
 	} {
 		cb := testhub.NewCallback(t)
 		extra := map[string]any{"ttlMs": c.ttl}
@@ -728,7 +729,11 @@ func TestSubscribeTtlClamp(t *testing.T) {
 		if res.RefreshBefore == nil {
 			t.Fatalf("%s: refreshBefore is null", c.name)
 		}
-		if rb, err := venv.ParseTime(*res.RefreshBefore); err != nil || !rb.Equal(now.Add(c.want-10*time.Minute)) {
+		want := now.Add(c.want - 10*time.Minute)
+		if want.Before(now) {
+			want = now
+		}
+		if rb, err := venv.ParseTime(*res.RefreshBefore); err != nil || !rb.Equal(want) {
 			t.Fatalf("%s: refreshBefore = %v, %v", c.name, rb, err)
 		}
 	}

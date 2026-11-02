@@ -19,6 +19,7 @@ import (
 
 // adminRoutes registers the /v1/admin/... endpoints.
 func (s *server) adminRoutes(mux *http.ServeMux) {
+	s.opRoutes(mux)
 	mux.HandleFunc("POST /v1/admin/principals", s.adminAddPrincipal)
 	mux.HandleFunc("POST /v1/admin/principals/{id}/rotate", s.adminRotatePrincipal)
 	mux.HandleFunc("POST /v1/admin/peers", s.adminAddPeer)

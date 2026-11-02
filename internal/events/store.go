@@ -27,6 +27,9 @@ const Name = "vecnet.message"
 const (
 	// MaxTTL caps a subscription's lifetime (PROTOCOL §4.4).
 	MaxTTL = 24 * time.Hour
+	// RefreshMargin is how long before expiry ChatGPT should re-subscribe.
+	// The operator snapshot and events/subscribe use the same deadline.
+	RefreshMargin = 10 * time.Minute
 	// SecretOverlap is how long the previous secret keeps signing after a
 	// refresh supplies a new one.
 	SecretOverlap = 10 * time.Minute
@@ -93,6 +96,7 @@ type Subscription struct {
 // Store is the subscription table. Key is meta.hub_key, under which the
 // secrets are sealed; a nil Now means time.Now.
 type Store struct {
+	hub *hub.Hub // non-nil for the live hub; owns operator invalidations
 	DB  *store.DB
 	Key []byte
 	Now func() time.Time
@@ -100,7 +104,7 @@ type Store struct {
 
 // NewStore returns the Store of hub h.
 func NewStore(h *hub.Hub) *Store {
-	s := &Store{DB: h.DB, Now: h.Now}
+	s := &Store{DB: h.DB, Now: h.Now, hub: h}
 	if h.Blobs != nil {
 		s.Key = h.Blobs.Key
 	}
@@ -445,7 +449,16 @@ func (st *Store) ClearTruncated(ctx context.Context, id string) error {
 // Pause is the operator's stop for one subscription: nothing more is sent,
 // the cursor stays, and only Resume lifts it. ErrNotFound when id has no row.
 func (st *Store) Pause(ctx context.Context, id string) error {
-	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+	var notify []string
+	err := st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		var paused sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT paused_reason FROM event_subscriptions WHERE sub_id = ?`, id).Scan(&paused); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+
 		res, err := tx.ExecContext(ctx,
 			`UPDATE event_subscriptions SET paused_reason = ?, updated_at = ? WHERE sub_id = ?`,
 			PausedOperator, envelope.FormatTime(st.now()), id)
@@ -457,14 +470,40 @@ func (st *Store) Pause(ctx context.Context, id string) error {
 		} else if n == 0 {
 			return ErrNotFound
 		}
-		return audit.Record(ctx, tx, "operator", "subscription_pause", []string{id}, nil)
+		if err := audit.Record(ctx, tx, "operator", "subscription_pause", []string{id}, nil); err != nil {
+			return err
+		}
+		if st.hub != nil && paused.String != PausedOperator {
+			notify, err = st.hub.NoteOperatorSubscription(ctx, tx)
+			return err
+		}
+		return nil
 	})
+	if err == nil && len(notify) > 0 {
+		st.hub.Log.Notify(notify...)
+	}
+	return err
 }
 
 // Resume clears paused_reason and any backoff, the operator's nudge;
 // ErrNotFound when id has no row.
 func (st *Store) Resume(ctx context.Context, id string) error {
-	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+	var notify []string
+	err := st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		var paused sql.NullString
+		var attempts int
+		var next sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT paused_reason, attempts, next_attempt_at FROM event_subscriptions WHERE sub_id = ?`, id).Scan(&paused, &attempts, &next); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+
+		var pending bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM event_outbox WHERE sub_id = ? AND done_at IS NULL AND next_attempt_at IS NOT NULL)`, id).Scan(&pending); err != nil {
+			return err
+		}
 		res, err := tx.ExecContext(ctx,
 			`UPDATE event_subscriptions SET paused_reason = NULL, attempts = 0, next_attempt_at = NULL, updated_at = ?
 			 WHERE sub_id = ?`, envelope.FormatTime(st.now()), id)
@@ -476,8 +515,19 @@ func (st *Store) Resume(ctx context.Context, id string) error {
 		} else if n == 0 {
 			return ErrNotFound
 		}
-		return clearBackoff(ctx, tx, id)
+		if err := clearBackoff(ctx, tx, id); err != nil {
+			return err
+		}
+		if st.hub != nil && (paused.Valid || attempts != 0 || next.Valid || pending) {
+			notify, err = st.hub.NoteOperatorSubscription(ctx, tx)
+			return err
+		}
+		return nil
 	})
+	if err == nil && len(notify) > 0 {
+		st.hub.Log.Notify(notify...)
+	}
+	return err
 }
 
 // Health is a subscription's row as the operator sees it. A callback path can

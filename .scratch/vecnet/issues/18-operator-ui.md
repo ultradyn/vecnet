@@ -53,3 +53,7 @@ Prototype by agent `proto-18-ui`, 2026-11-01. Awaiting Max's pick of a variant; 
 - Max also accepted, in the same round: the history_access reversal (from_join default), wake_idle re-push on idle, loop accounting and per-peer rate limits, the one-tap presence toggle, read-only dashboard, and moving to build planning.
 
 Live copy for review: `http://xsm:10435/vecnet-proto/operator-ui/index.html?variant=a` (synced from `docs/prototypes/operator-ui/`).
+
+### Build follow-through (2026-11-02)
+
+The [operator UI plan](../../../docs/plans/2026-11-01-operator-ui.md) implements the chosen web shell and standalone TUI. The [operator guide](../../../docs/OPERATOR.md) explains the actual clients; [screenshots](../../../docs/plans/shots/oui/README.md) index the state checks. The prototype decision remains resolved. Task 24 adds durable operator-view invalidations; Task 23's shared-hub journey verifies approval answers, reads, wake delivery, presence and both heartbeats, expiry history, and browser credential rejection across the built web and terminal clients. Task 25 repairs the integrated screen checks. The full screenshot gate and two-client journey now pass, completing Phase 3's operator surface.

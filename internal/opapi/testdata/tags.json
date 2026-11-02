@@ -1,0 +1,9 @@
+[
+ {"event":{"type":"delivery","data":{"message":{"thread_id":"thr_delivery"}}},"tags":["inbox","threads","thread:thr_delivery"]},
+ {"event":{"type":"receipt","data":{"thread_id":"thr_receipt"}},"tags":["inbox","thread:thr_receipt"]},
+ {"event":{"type":"thread_updated","data":{"thread_id":"thr_updated"}},"tags":["threads","thread:thr_updated"]},
+ {"event":{"type":"presence","data":{"peer_id":"peer_presence","state":"idle"}},"tags":["peers"]},
+ {"event":{"type":"directory_updated","data":{"peer_id":"peer_directory","change":"updated"}},"tags":["peers"]},
+ {"event":{"type":"approval_expired","data":{"approval_id":"apr_example","thread_id":"thr_expired"}},"tags":["inbox","thread:thr_expired"]},
+ {"event":{"type":"future_event","data":{}},"tags":[]}
+]

@@ -1,0 +1,57 @@
+/* delivery matrix dialog (matrix.js). Cell colours come from the st-* tokens
+   in base.css, as in shots/b-chat.png. */
+dialog.mx{width:min(1240px,calc(100vw - 48px));max-width:none;max-height:calc(100vh - 48px);padding:0;border:1px solid var(--line2);border-radius:12px;background:#0e1426;color:var(--text);box-shadow:0 24px 80px #000a;overflow:hidden}
+dialog.mx[open]{display:flex;flex-direction:column}
+dialog.mx::backdrop{background:#05070dcc}
+.mx-top{display:flex;align-items:baseline;gap:12px;padding:16px 18px 12px;border-bottom:1px solid var(--line);flex:none}
+.mx-top h2{margin:0;font-size:14.5px;font-weight:600;display:flex;gap:10px;align-items:baseline;min-width:0}
+.mx-thr{font-weight:400;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:48ch}
+.mx-sub{margin-left:auto;font:400 11.5px var(--mono);color:var(--dim);white-space:nowrap}
+.mx-x{border:1px solid var(--line2);background:#151c33;border-radius:7px;width:28px;height:28px;line-height:1;font-size:16px;color:var(--muted);flex:none;align-self:center}
+.mx-x:hover{color:var(--text);border-color:#6366f1}
+
+.mx-scroll{flex:1 1 auto;min-height:0;overflow:auto;padding:0 18px 4px;overscroll-behavior:contain}
+.mx-grid{display:grid;grid-template-columns:minmax(220px,280px) repeat(var(--cols,1),minmax(76px,1fr));width:max-content;min-width:100%}
+.mx-tr{display:contents}
+.mx-corner,.mx-h{position:sticky;top:0;z-index:2;background:#0e1426;font:400 11px var(--mono);color:var(--dim);padding:12px 6px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid var(--line)}
+.mx-corner{left:0;z-index:3;padding-left:0}
+.mx-m{position:sticky;left:0;z-index:1;background:#0e1426;display:flex;align-items:baseline;gap:8px;min-width:0;padding:10px 12px 10px 0;font-size:12.5px;border-bottom:1px solid #161d33}
+.mx-m .mx-t{font:400 11px var(--mono);color:var(--dim);flex:none}
+.mx-m b{font-weight:600;flex:none;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mx-m .mx-ex{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.mx-c{display:flex;align-items:center;padding:0 3px;border-bottom:1px solid #161d33}
+.mx-b{display:block;width:100%;height:16px;border:0;border-radius:3px;padding:0;background:var(--c,#151c33)}
+button.mx-b:hover{filter:brightness(1.18)}
+button.mx-b.on{outline:2px solid #a855f7;outline-offset:2px}
+.mx-b.st-none{background:#151c33}
+.mx-b.st-self{background:repeating-linear-gradient(135deg,#3a4566 0 3px,#151c33 3px 7px)}
+
+.mx-loading{color:var(--dim);font-size:12.5px;padding:14px 0 8px}
+.mx-sk{display:grid;grid-template-columns:minmax(220px,280px) repeat(var(--cols),minmax(76px,1fr));gap:22px 6px;padding:6px 0 16px}
+.mx-sk .sk{height:16px;border-radius:3px;background:linear-gradient(90deg,#151c33 0%,#1d2643 50%,#151c33 100%);background-size:200% 100%;animation:mx-shimmer 1.4s linear infinite}
+.mx-sk .sk-m{width:70%}
+@keyframes mx-shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
+.mx-scroll .empty{margin:18px 0}
+.mx-scroll .empty span{display:block;font:400 12.5px var(--mono);color:var(--muted);overflow-wrap:anywhere}
+.mx-scroll .empty .btn{margin-top:12px}
+
+.mx-detail{flex:none;border-top:1px solid var(--line);padding:10px 18px;font-size:12.5px;color:var(--muted);min-height:42px;display:flex;gap:18px;align-items:baseline;flex-wrap:wrap}
+.mx-detail:empty{display:none}
+.mx-who{display:flex;gap:8px;align-items:baseline;min-width:0;max-width:40ch}
+.mx-who b{color:var(--text);font-weight:600;flex:none}
+.mx-who span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mx-detail dl{display:flex;flex-wrap:wrap;gap:4px 14px;margin:0}
+.mx-detail dt{color:var(--dim)}
+.mx-detail dt::after{content:':'}
+.mx-detail dd{margin:0 0 0 -10px;font-family:var(--mono);color:#cbd5e1;overflow-wrap:anywhere}
+.mx-hint{color:var(--dim)}
+
+.mx-foot{flex:none;display:flex;align-items:center;gap:14px;padding:10px 18px 14px;border-top:1px solid var(--line);flex-wrap:wrap}
+.mx-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--muted)}
+.mx-legend span{display:inline-flex;align-items:center;gap:5px}
+.mx-legend i{width:12px;height:7px;border-radius:2px;background:var(--c)}
+.mx-legend .st-none i{background:#151c33;outline:1px solid var(--line2)}
+.mx-legend .st-self i{background:repeating-linear-gradient(135deg,#3a4566 0 2px,#151c33 2px 4px)}
+.mx-status{margin-left:auto;font:400 11.5px var(--mono);color:var(--dim)}
+.mx-status .bad{color:var(--bad)}
+.mx-more{flex:none}

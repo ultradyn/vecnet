@@ -1,0 +1,68 @@
+/* aside */
+.va aside h3{display:flex;align-items:baseline;gap:8px;font-size:12px;font-weight:600;color:var(--text);margin:24px 0 8px}
+.va aside h3 .n{margin-left:auto;font:400 11.5px var(--mono);color:var(--dim)}
+.va aside h3:first-child,.va aside .aside-body>h3:first-child{margin-top:0}
+.va aside .kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;font-size:12.5px;margin:0}
+.va aside .kv dt{color:var(--dim)}
+.va aside .kv dd{margin:0;color:#cbd5e1;overflow-wrap:anywhere}
+.va aside .kv .mono{font-size:11.5px}
+.va aside .none{font-size:12.5px;color:var(--dim)}
+.va aside .loading{color:var(--dim);font-size:13px}
+
+/* thread side panel: participants (presence dot inside a reachability ring) */
+.va aside .pps{display:flex;flex-direction:column;gap:2px}
+.va aside .pp{display:flex;align-items:center;gap:10px;padding:3px 0;min-width:0}
+.va aside .pp .who{display:flex;flex-direction:column;min-width:0;line-height:1.35}
+.va aside .pp .nm{color:#dfe3ea;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.va aside .pp .sub{font:400 11px var(--mono);color:var(--dim)}
+.va aside .pp .k{margin-left:auto;font-size:11.5px;color:var(--dim);flex:none}
+.va aside .pp .chip.bad{color:var(--bad);border-color:#fb718560}
+.sig{--r:#64748b;width:15px;height:15px;border-radius:50%;border:1.5px dashed var(--r);display:inline-grid;place-items:center;flex:none}
+.sig.r-connected{--r:var(--ok);border-style:solid}
+.sig.r-reachable{--r:#818cf8;border-style:solid}
+.sig.r-unreachable{--r:var(--bad);border-style:solid}
+
+/* files: spilled dashed, purged struck and disabled */
+.va aside .files{display:flex;flex-direction:column;gap:6px}
+.va aside .file{display:flex;flex-direction:column;gap:2px;width:100%;text-align:left;border:1px solid var(--line2);border-radius:7px;background:#0d1325;padding:7px 10px;min-width:0}
+.va aside .file:hover:not(:disabled){border-color:#6366f1}
+.va aside .file.spill{border-style:dashed;border-color:#a855f780}
+.va aside .file .top{display:flex;align-items:baseline;gap:8px;min-width:0}
+.va aside .file .nm{font:500 12px var(--mono);color:#cbd5e1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.va aside .file .sz{margin-left:auto;font:400 11.5px var(--mono);color:var(--dim);flex:none}
+.va aside .file .meta{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--dim);min-width:0}
+.va aside .file .meta>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.va aside .file .tag{font:500 10.5px/1 var(--mono);padding:2px 5px;border-radius:4px;border:1px solid var(--line2);margin-left:auto;flex:none}
+.va aside .file .tag.spilled{color:#c4b5fd;border-color:#a855f760}
+.va aside .file .tag.purged{color:var(--bad);border-color:#fb718560}
+.va aside .file.purged{cursor:not-allowed;opacity:.7}
+.va aside .file.purged .nm{text-decoration:line-through;color:var(--dim)}
+.va aside .file.busy{border-color:#6366f1;cursor:progress;animation:aside-pulse 1.2s ease-in-out infinite}
+.va aside .file.busy .sz{color:var(--violet)}
+@keyframes aside-pulse{50%{border-color:#a855f7;background:#151c33}}
+
+/* budget bar */
+.va aside .budget{display:flex;flex-direction:column;gap:5px}
+.va aside .bar{display:block;height:5px;border-radius:3px;background:#1a2139;overflow:hidden}
+.va aside .bar i{display:block;height:100%;width:calc(var(--f,0) * 100%);background:var(--grad);border-radius:3px}
+.va aside .bar.low i{background:var(--wake)}
+.va aside .bar.bad i{background:var(--bad)}
+.va aside .matrix-btn{margin-top:24px;width:100%}
+.va aside .aside-toggle{display:none}
+
+/* B's horizontal use inside A's frame: a wider panel and a wider chat column. */
+@media (min-width:1280px){
+  body[data-route=thread] .va,body[data-route=matrix] .va{grid-template-columns:240px minmax(0,1fr) 380px}
+  /* Narrower gutters keep the reading column past 760 px at 1440 wide; thread.css owns the 980 px measure. */
+  body[data-route=thread] .va main,body[data-route=matrix] .va main{padding-left:24px;padding-right:24px}
+}
+
+/* Below 1100 px the panel sits behind a toggle at the top right. */
+@media (max-width:1100px){
+  body[data-route=thread] .va main,body[data-route=matrix] .va main{padding-top:64px}
+  body[data-route=thread] .va aside,body[data-route=matrix] .va aside{display:block;position:fixed;top:14px;right:16px;z-index:40;padding:0;border:0;overflow:visible;background:none}
+  body[data-route=thread] .va aside .aside-toggle,body[data-route=matrix] .va aside .aside-toggle{display:inline-block;position:relative;z-index:1}
+  body[data-route=thread] .va aside:not(.open) .aside-body,body[data-route=matrix] .va aside:not(.open) .aside-body{display:none}
+  body[data-route=thread] .va aside.open,body[data-route=matrix] .va aside.open{top:0;right:0;bottom:0;width:min(380px,100vw);padding:64px 22px 24px;overflow:auto;background:var(--panel);border-left:1px solid var(--line);box-shadow:-20px 0 40px #0009}
+  body[data-route=thread] .va aside.open .aside-toggle,body[data-route=matrix] .va aside.open .aside-toggle{position:absolute;top:14px;right:16px}
+}

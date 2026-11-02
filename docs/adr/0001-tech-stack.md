@@ -34,10 +34,11 @@ Constraints that shape the choice:
 - **Webhook push:** Standard Webhooks HMAC-SHA256 (`webhook-id`, `webhook-timestamp`, `webhook-signature`), retry and receipt semantics as in ticket 10, verified in tests against an independent implementation.
 - **Wire contract:** JSON Schema files in `docs/protocol/` are the source of truth. Go types are hand-written to match and checked against the schema in tests. pag-chat and other TypeScript consumers generate their types from the same schema.
 - **Blob store:** files at `/data/blobs/sha256/<aa>/<bb>/<hex>`; write to a temp file in the same filesystem, fsync, rename. Metadata rows in SQLite. Ticket 13 owns policy.
+- **TUI amendment (2026-11-02, operator UI plan Task 17):** `vecnet tui` uses **Bubble Tea v2** and **lipgloss v2**: pure Go, linked into `vecnet` only, never into the hub.
 - **CLI distribution:** a **single static binary** per OS/arch from `go build`, published as GitHub release assets; `go install` also works. No runtime on the host.
 - **Deploy:** multi-stage Dockerfile, final stage `FROM scratch` (plus CA certs and tzdata), shipped with `fly deploy --remote-only`.
 - **Tests:** `go test` with a smoke test that boots the real server on a random port. On xsm run through `build2`, two threads.
-- **Dev port:** the hub dev server uses **45752** (generated once, confirmed free). The web UI gets its own generated port when ticket 18 creates it.
+- **Dev port:** the hub dev server uses **45752** (generated once, confirmed free). The UI stays hub-served; the demo preview uses generated port **49575**.
 
 ## Consequences
 

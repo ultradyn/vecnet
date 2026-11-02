@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -218,7 +219,7 @@ func TestGrokbotRouteValidation(t *testing.T) {
 		Routes []struct {
 			RouteID    string  `json:"route_id"`
 			Kind       string  `json:"kind"`
-			URL        string  `json:"url"`
+			Host       string  `json:"host"` // host only: never the routine path (PROTOCOL §2.12)
 			VerifiedAt *string `json:"verified_at"`
 		} `json:"routes"`
 	}
@@ -226,7 +227,7 @@ func TestGrokbotRouteValidation(t *testing.T) {
 		t.Fatalf("decode: %v; %s", err, raw)
 	}
 	if len(list.Routes) != 1 || list.Routes[0].RouteID != created.RouteID || list.Routes[0].Kind != "grokbot" ||
-		list.Routes[0].URL != routineURL || list.Routes[0].VerifiedAt == nil {
+		list.Routes[0].Host != mustHost(t, routineURL) || strings.Contains(string(raw), routineURL) || list.Routes[0].VerifiedAt == nil {
 		t.Fatalf("GET /v1/admin/routes = %s", raw)
 	}
 	if resp, raw := env.Do(f.bSec, "GET", "/v1/admin/routes", nil); resp.StatusCode != http.StatusForbidden {
@@ -1018,4 +1019,13 @@ func TestGrokbotKeyNeverLogged(t *testing.T) {
 			t.Fatalf("%s holds the key in the clear", p)
 		}
 	}
+}
+
+func mustHost(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Host
 }
