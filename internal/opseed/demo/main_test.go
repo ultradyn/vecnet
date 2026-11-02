@@ -272,7 +272,7 @@ func TestDemoReopensWithStableCredentials(t *testing.T) {
 	}
 	var routes struct {
 		Routes []struct {
-			URL string `json:"url"`
+			Host string `json:"host"` // the list shows hosts only (PROTOCOL §2.12)
 		} `json:"routes"`
 	}
 	err = json.NewDecoder(response.Body).Decode(&routes)
@@ -280,7 +280,7 @@ func TestDemoReopensWithStableCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != 200 || len(routes.Routes) != 1 || routes.Routes[0].URL != second.URL+"/__demo/sink/push" {
+	if response.StatusCode != 200 || len(routes.Routes) != 1 || routes.Routes[0].Host != strings.TrimPrefix(second.URL, "http://") {
 		t.Fatal("saved push route does not point to the reopened demo")
 	}
 	stop()
