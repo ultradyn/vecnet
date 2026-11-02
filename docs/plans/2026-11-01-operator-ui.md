@@ -8,9 +8,9 @@
 
 **Tech Stack:** Go 1.26 (`CGO_ENABLED=0`), stdlib `net/http`, `database/sql`; `charm.land/bubbletea/v2` v2.1.1 and `charm.land/lipgloss/v2` v2.0.6 (TUI only, both checked pure Go and `go 1.26`-compatible); vanilla ES modules with no bundler and no npm dependency; `node --test` (Node 22) for pure JS; Playwright and Chromium from the existing `headless-browser-screenshots` skill install for screen scripts; `tmux` for TUI screenshots.
 
-**Spec:** `.scratch/vecnet/issues/18-operator-ui.md` (Max's verdict there is binding), `docs/prototypes/operator-ui/` (variant A for web, variant C for TUI; shots in `shots/`), `SPEC.md` §13, §16; `docs/PROTOCOL.md` §2.3, §2.8, §2.12, §5.2, §5.5, §8, §9, §13.4, §14, §15, §16; `docs/plans/2026-11-01-connectors.md` Task 5 (subscription table and admin endpoint). Out of scope: enrolment and scope editing in the UI (CLI covers them), budget raising, escalation, attachment upload from the UI, team or group addressing from the UI, a light theme, the web keyboard layer (decided below).
+**Spec:** `.scratch/vecnet/issues/18-operator-ui.md` (Max's verdict there is binding), `docs/prototypes/operator-ui/` (variant A for web, variant C for TUI; shots in `shots/`), `SPEC.md` §13, §16; `docs/PROTOCOL.md` §2.3, §2.8, §2.12, §5.2, §5.5, §8, §9, §13.4, §14, §15, §16; `docs/plans/2026-11-01-connectors.md` Task 5 (subscription table and admin endpoint). Out of scope: enrolment, scope editing and pausing a subscription in the UI (the CLI covers them), budget raising, escalation, attachment upload from the UI, team or group addressing from the UI, a light theme, the web keyboard layer (decided below).
 
-**Precondition:** the `connectors` branch is merged to `master` before Task 1 starts. Tasks 2 and 6 read `event_subscriptions` and `internal/httpapi/admin_subscriptions.go`; Tasks 1–5 need no connector code but share the branch base. Before starting, confirm `internal/store/migrations/0005_event_subscriptions.sql` through `0008_sources.sql` exist and `GET /v1/admin/subscriptions` is registered. This plan assumes that endpoint's bare-array body from connectors Task 5; if the merged handler wraps it, Task 7's `api.js` and Task 16's `opclient` decode the wrapped shape and nothing else changes.
+**Precondition (met 2026-11-02):** `connectors` is merged to `master` at `eb5d197`, and this plan was reconciled against that merge. `GET /v1/admin/subscriptions` stays a bare array, `POST …/{id}/pause` and `POST …/{id}/resume` exist, `event_subscriptions.last_refresh_at` exists (migration 0009), and `paused_reason` has five values, not two (Task 6).
 
 ## Dependency map
 
@@ -44,7 +44,6 @@ Build settings: `taskPrefix: "oui"`, worktree `.worktrees/operator-ui`, branch `
 
 | Resource | Owner |
 |---|---|
-| Migration `0009_subscription_refreshed.sql` | Task 6 |
 | Migration `0010_audit_action_index.sql` | Task 5 |
 | Migration `0011_inbox_indexes.sql` | Task 3 |
 | `GET /v1/admin/inbox`, `POST /v1/admin/threads/{id}/read` | Task 1 (handler), Task 3 (query) |
@@ -79,7 +78,7 @@ Stub files exist from Tasks 1, 7 and 17 so that later tasks edit only files they
 2. **An approval that closes under the operator's finger** (answered from the other client, expired mid-click, or double-clicked): exactly one response is sent; a late click gets 422 `approval_closed`, the card shows closed and never retries, and the operator is not told the answer landed. Pinned in Tasks 8, 18.
 3. **Client clock wrong by minutes** (xsm has a recorded NTP skew): countdowns still match the hub, because a client that trusts its own clock shows an open approval as expired, or the reverse. Pinned in Tasks 3, 7, 18.
 4. **A long-lived log and a rotated secret**: a browser opening after months must not replay from `e0.0`, a 409 `cursor_purged` resumes at `oldest_cursor` and refetches everything, 401 stops the loop and returns to sign-in with no retry storm, and two clients open at once share read state and do not fight over presence. Pinned in Tasks 7, 14, 16, 23.
-5. **A paused dot subscription read as a broken button**: `token_expired` needs ChatGPT to re-subscribe, so offering Resume there would be a lie (the worker re-pauses it); only `delivery_failed` offers Resume, and a dot with `unknown` presence never reads as offline. Pinned in Tasks 6, 10, 13, 18, 20.
+5. **A paused subscription read as healthy, or as a broken button**: every `paused_reason` must show as paused, and Resume is offered only where it works. `token_expired` needs ChatGPT to re-subscribe (the worker re-pauses it), `unauthorized` needs the peer enabled or relinked (the worker re-pauses it), and `credential_rotated` must not be resumed from a button because the callback may no longer be the holder's. Only `delivery_failed` and `operator` offer Resume. A dot with `unknown` presence never reads as offline. Pinned in Tasks 6, 10, 13, 18, 20.
 
 ---
 
@@ -131,7 +130,7 @@ Tasks name a recipe rather than repeating its steps.
 
 **Files:**
 - Create: `internal/opapi/types.go`, `internal/opapi/tags.go`, `internal/opapi/testdata/tags.json`, `internal/opview/reader.go`, `internal/opview/inbox.go`, `internal/opview/threads.go`, `internal/opview/dash.go`, `internal/opview/subs.go`, `internal/httpapi/op.go`
-- Modify: `internal/httpapi/server.go` (`server.op *opview.Reader`, built in `New`), `internal/httpapi/admin.go` (one line in `adminRoutes`: `s.opRoutes(mux)`), `docs/PROTOCOL.md` (§2.1 row, new §2.13 listing the routes below; the temporary `not_implemented` stub error stays undocumented, since Task 23 removes it)
+- Modify: `internal/httpapi/server.go` (`server.op *opview.Reader`, built in `New`), `internal/httpapi/admin.go` (one line in `adminRoutes`: `s.opRoutes(mux)`), `docs/PROTOCOL.md` (§2.1 row, new §2.13 listing the routes below and the additive `health`, `health_note` and `refresh_before` fields of `GET /v1/admin/subscriptions`, whose values Task 6 fills; the temporary `not_implemented` stub error stays undocumented, since Task 23 removes it)
 - Test: `internal/httpapi/op_test.go`, `internal/opapi/tags_test.go`
 
 **Interfaces:**
@@ -167,7 +166,7 @@ Tasks name a recipe rather than repeating its steps.
   type FailedDelivery struct{ DeliveryID, Recipient, ThreadID, UpdatedAt string; LastStatus *int; LastError *string }
   type DeliveryHealth struct{ Blocked []BlockedThread; Failed []FailedDelivery }
 
-  const ( HealthOK = "ok"; HealthFailing = "failing"; HealthLate = "late"; HealthExpired = "expired"; HealthPausedToken = "paused_token"; HealthPausedFailed = "paused_failed"; HealthUnverified = "unverified" )
+  const ( HealthOK = "ok"; HealthFailing = "failing"; HealthLate = "late"; HealthExpired = "expired"; HealthPausedToken = "paused_token"; HealthPausedFailed = "paused_failed"; HealthPausedAuth = "paused_auth"; HealthPausedOperator = "paused_operator"; HealthUnverified = "unverified" )
   type Subscription struct{ SubID, Principal, PeerID, URL, Name, Cursor, Health, HealthNote string; ExpiresAt, RefreshBefore, LastRefreshAt, VerifiedAt, PausedReason, LastDeliveryAt *string; LastStatus *int; Attempts int }
 
   type AuditEntry struct{ /* same JSON as hub.AuditEntry */ }; type AuditPage struct{ Entries []AuditEntry; Next *string }
@@ -229,22 +228,22 @@ func TestThreadRowJSONKeepsSiblings(t *testing.T) { /* marshal ThreadRow: has th
   type Scenario struct{ OperatorPeer string; Peers map[string]string /* name→peer_id */; Secrets map[string]string /* name→peer secret */; Threads map[string]string /* key→thr_id */; Approvals, DeadLetters, Subscriptions []string }
   func Seed(ctx context.Context, h *hub.Hub, opCaller auth.Caller, o Options) (Scenario, error)
   ```
-  Peers, sends, approvals and presence go through real `hub` methods; dead letters, one `failed` delivery, one blocked thread, loop-cut audit rows and `event_subscriptions` rows are direct SQL, since this is a fixture. Contents, mirroring `docs/protocol/examples/` and the prototype's mock: ten peers of every kind, including a `dot` with `reachable` + `unknown` and an `unreachable` grokbot; thread keys `hark` (spill, job status, attachment, an open three-option approval, a closed approval, a hub `expired` line), `hosting` (open two-option approval), `ticket18`, `digest` (hold), `quota` (budget exhausted), `hostile` (message body `<img src=x onerror=alert(1)>` plus `\x1b]52;c;aGk=\x07\x1b[2Jpwn‮`, a peer named with the same escapes, an attachment named `..\x1b[31m.txt`); three dead letters (503 8/8, 410, network); one `failed` 409; one thread blocked on a retrying delivery; loop cuts of three reasons; four subscriptions, one healthy, one past `refreshBefore`, one `token_expired`, one `delivery_failed`; operator presence `working`.
-- Demo hub: `go run ./internal/opseed/demo --listen 127.0.0.1:0 [--data-dir D] [--dev-ui-dir D] [--scale] [--reset]`. Same wiring as `cmd/vecnet-hub/main.go` with egress `AllowPrivate`, push and events workers and tickers running on an offset clock (real time plus an adjustable offset). Prints one JSON line `{url, operator_secret, operator_peer, peers:{name:{id,secret}}, threads:{key:id}, approvals:[…], dead_letters:[…]}`. Reusing a data dir reprints the saved line from `<dir>/demo.json` so the secret is stable. Only this binary serves the test controls: `POST /__demo/advance {"by":"15m"}`, `POST /__demo/stall {"for":"3s"}` (delays `/v1/*` responses) and `POST /__demo/fail {"prefix":"/v1/admin/delivery-health","status":500,"for":"10s"}`, which give the TUI scripts the in-progress and error states Playwright gets from route interception.
+  Peers, sends, approvals and presence go through real `hub` methods; dead letters, one `failed` delivery, one blocked thread, loop-cut audit rows and `event_subscriptions` rows are direct SQL, since this is a fixture. Contents, mirroring `docs/protocol/examples/` and the prototype's mock: ten peers of every kind, including a `dot` with `reachable` + `unknown` and an `unreachable` grokbot; thread keys `hark` (spill, job status, attachment, an open three-option approval, a closed approval, a hub `expired` line), `hosting` (open two-option approval), `ticket18`, `digest` (hold), `quota` (budget exhausted), `hostile` (message body `<img src=x onerror=alert(1)>` plus `\x1b]52;c;aGk=\x07\x1b[2Jpwn‮`, a peer named with the same escapes, an attachment named `..\x1b[31m.txt`); three dead letters (503 8/8, 410, network); one `failed` 409; one thread blocked on a retrying delivery; loop cuts of three reasons; six subscriptions, one healthy, one past `refreshBefore`, one `token_expired`, one `delivery_failed`, one `unauthorized`, one `operator`; operator presence `working`.
+- Demo hub: `go run ./internal/opseed/demo --listen 127.0.0.1:0 [--data-dir D] [--dev-ui-dir D] [--scale] [--reset]`. Wired through `httpapi.NewStack(h)` and `Stack.Run`, as `cmd/vecnet-hub/main.go` and `testhub` are, never by hand, with `hub.Config.AllowPrivateEgress` true and the hub on an offset clock (real time plus an adjustable offset). Prints one JSON line `{url, operator_secret, operator_peer, peers:{name:{id,secret}}, threads:{key:id}, approvals:[…], dead_letters:[…]}`. Reusing a data dir reprints the saved line from `<dir>/demo.json` so the secret is stable. Only this binary serves the test controls: `POST /__demo/advance {"by":"15m"}`, `POST /__demo/stall {"for":"3s"}` (delays `/v1/*` responses) and `POST /__demo/fail {"prefix":"/v1/admin/delivery-health","status":500,"for":"10s"}`, which give the TUI scripts the in-progress and error states Playwright gets from route interception.
 - `justfile` adds: `ui-demo` (`--listen 127.0.0.1:49575 --data-dir .demo-data --dev-ui-dir internal/ui/static`), `test-ui` (`build2 node --test --test-concurrency=2 internal/ui/jstest/`), `ui-shots` (runs every `scripts/ui/*.mjs` except libs, serially), `tui` (`build2 go run ./cmd/vecnet tui`).
 - `scripts/ui/lib.mjs` (loads Playwright by dynamic import from `$HOME/.llm-general/skills/headless-browser-screenshots/node_modules/playwright/index.mjs`, overridable by `PLAYWRIGHT_MODULE`; `PLAYWRIGHT_BROWSERS_PATH` defaults to `$HOME/.cache/ms-playwright`; no `package.json` in the repo):
   ```js
-  export async function withDemo({ scale = false, signedIn = true }, fn) // builds the demo once per worktree into a temp dir, boots on port 0, opens Chromium 1440×900, seeds localStorage, calls fn(ctx), always kills hub and browser, throws on any console error or CSP violation not listed in ctx.allowConsole
+  export async function withDemo({ scale = false, signedIn = true }, fn) // builds the demo once per worktree into a temp dir, boots on port 0, opens Chromium 1440×900, seeds localStorage, sets `page.setDefaultTimeout(60000)` because every script shares the two-core `build2` slice, calls fn(ctx), always kills hub and browser, throws on any console error or CSP violation not listed in ctx.allowConsole
   // ctx: { page, demo, shot(name), hold(glob) → release(), fail(glob, status, code, message), advance(by), asPeer(name, method, path, body) /* name "operator" uses the operator secret */, countRequests(filter), allowConsole(regex) }
   export function assert(cond, msg)
   ```
-  `shot('08-inbox-initial')` writes `docs/plans/shots/oui/08-inbox-initial.png`.
+  `shot('08-inbox-initial')` writes `08-inbox-initial.png` to `$SHOTS_DIR`, default `docs/plans/shots/oui/`. Reviewers and the final gate set `SHOTS_DIR` so a check run never rewrites a committed PNG; `withTui`'s `shot` honours it too.
 - `scripts/ui/tmux.mjs`: `withTui({ scale }, fn)` boots the demo, writes a temp `VECNET_CONFIG` profile holding the operator secret, starts `bin` built from `./cmd/vecnet` in a private tmux server (`tmux -L oui-<pid>`, size 140×42, so Max's tmux is never touched), and gives fn `{ keys(...k), waitFor(text), shot(name), demo, advance, stall(for), fail(prefix, status, for), asPeer }`. `scripts/ui/ansi.mjs` turns `capture-pane -e -p` output (SGR 0,1,2,4,7,22,39,49, 38/48;5 and 38/48;2) into an HTML page rendered to PNG with a fixed monospace font.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```go
-func TestSeedScenario(t *testing.T) { /* on a testhub: 10 peers covering every kind; 2 open approvals addressed to the operator; 3 dead_letter + 1 failed deliveries; hostile thread body stored byte-exact; budget_remaining 0 on quota; 4 subscription rows */ }
+func TestSeedScenario(t *testing.T) { /* on a testhub: 10 peers covering every kind; 2 open approvals addressed to the operator; 3 dead_letter + 1 failed deliveries; hostile thread body stored byte-exact; budget_remaining 0 on quota; 6 subscription rows, one per seeded health */ }
 func TestSeedIsRepeatableOnFreshDB(t *testing.T) { /* two fresh hubs → same counts */ }
 ```
 
@@ -344,26 +343,35 @@ func TestFailedWindow(t *testing.T) { /* 409 → listed; FakeClock +8 d → abse
 **Depends:** 1
 
 **Files:**
-- Modify: `internal/opview/subs.go`, `internal/events/store.go` (`Upsert` sets `refreshed_at`), `internal/httpapi/admin_subscriptions.go` (handler uses `Reader.Subscriptions`)
-- Create: `internal/opview/subs_test.go`, `internal/store/migrations/0009_subscription_refreshed.sql` (`ALTER TABLE event_subscriptions ADD COLUMN refreshed_at TEXT;`)
+- Modify: `internal/opview/subs.go`, `internal/httpapi/admin_subscriptions.go` (handler uses `Reader.Subscriptions`), `internal/events/store.go` and `internal/mcpserver/events.go` (export the margin below)
+- Create: `internal/opview/subs_test.go`
 
 **Interfaces:**
-- Consumes: connectors Task 5's `event_subscriptions` table and admin handler. Read the merged handler first; its existing JSON fields stay byte-compatible (`vecnet subscriptions list` depends on them) and this task only adds `health`, `health_note`, `refresh_before`, `last_refresh_at`.
-- §13.4 requires "expiry, last refresh, last delivery status"; connectors exposes no last refresh, hence the column. `last_refresh_at` is `coalesce(refreshed_at, created_at)`, which also keeps rows seeded without the column valid. `refresh_before` is `expires_at − 10 min`, the same value `events/subscribe` returned.
-- `Health`, first match wins at `hub.Now()`: `paused_reason = token_expired` → `paused_token`; `paused_reason = delivery_failed` → `paused_failed`; `verified_at` null → `unverified`; `expires_at ≤ now` → `expired`; `now ≥ refresh_before` → `late`; `attempts > 0` or last status not 2xx → `failing`; else `ok`. Null `expires_at` skips the two time rules. `HealthNote` is fixed copy per value, for instance `paused_token` → `"Waiting for ChatGPT to re-subscribe with a fresh token. Nothing is lost; delivery resumes from the cursor."`
-- `Attention`: one entry per subscription in `paused_token`, `paused_failed`, `expired`, `late` or `failing`; `Action` is `"resume"` for `paused_failed` only; `Summary` is `<peer name> · <note>`; worst health first.
+- Consumes: `events.NewStore(h).ListHealth` and `GET /v1/admin/subscriptions`. No migration: `last_refresh_at` already exists. Its existing JSON fields stay byte-compatible (`vecnet subscriptions list` and `docs/connectors/dots.md` depend on them) and this task only adds `health`, `health_note`, `refresh_before`. `last_refresh_at` stays as stored: null until the first re-subscribe, which the clients show as `never`.
+- `refresh_before` is `expires_at − 10 min`. Move `mcpserver.refreshMargin` to exported `events.RefreshMargin` and use it in both places, so the snapshot and `events/subscribe` cannot disagree.
+- `Health`, first match wins at `hub.Now()`: `paused_reason` `token_expired` → `paused_token`; `delivery_failed` → `paused_failed`; `operator` → `paused_operator`; any other non-null reason, including `unauthorized` and `credential_rotated` → `paused_auth`, so a reason added later can never read as healthy; `verified_at` null → `unverified`; `expires_at ≤ now` → `expired`; `now ≥ refresh_before` → `late`; `attempts > 0` or last status not 2xx → `failing`; else `ok`. Null `expires_at` skips the two time rules.
+- `HealthNote` is fixed copy per `paused_reason` or health, matching the operator actions in `docs/connectors/dots.md`:
+  - `token_expired`: `"Waiting for ChatGPT to re-subscribe with a fresh token. Nothing is lost; delivery resumes from the cursor."`
+  - `delivery_failed`: `"One event used all 8 attempts. Fix the callback, then resume. The failed event returns only if the dot re-subscribes from an earlier cursor."`
+  - `unauthorized`: `"The peer was disabled or moved, or its login was replaced or revoked. Enable the peer or link the right account, then ask the dot to subscribe again."`
+  - `credential_rotated`: `"The bearer that subscribed was rotated. The holder of the new bearer must subscribe again."`
+  - `operator`: `"You paused this subscription. A re-subscribe does not lift it."`
+  - any other reason: `"Paused: <reason>."`
+  - `unverified`, `expired`, `late`, `failing`: one line each, naming what the operator should expect next.
+- `Attention`: one entry per subscription in `paused_token`, `paused_failed`, `paused_auth`, `paused_operator`, `expired`, `late` or `failing`; `Action` is `"resume"` for `paused_failed` and `paused_operator` only; `Summary` is `<peer name> · <note>`; worst health first, with `paused_operator` last because it is the operator's own choice.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```go
-func TestHealthTable(t *testing.T) { /* one row per value, FakeClock boundaries: refresh_before exactly → late; expires_at exactly → expired; paused wins over expired */ }
-func TestRefreshedAtOnResubscribe(t *testing.T) { /* Upsert, Advance 1 h, Upsert → last_refresh_at moves; a delivery does not move it */ }
-func TestAdminSubscriptionsAdditive(t *testing.T) { /* connectors fields unchanged, host only, no secret; new fields present */ }
-func TestAttentionActions(t *testing.T) { /* paused_failed → action resume; paused_token → action ""; ok absent (Review Focus 5) */ }
+func TestHealthTable(t *testing.T) { /* one row per value, FakeClock boundaries: refresh_before exactly → late; expires_at exactly → expired; paused wins over expired; all five stored reasons plus an invented one map as stated, and none reads ok */ }
+func TestRefreshBeforeMatchesSubscribe(t *testing.T) { /* refresh_before equals expires_at minus events.RefreshMargin, the value events/subscribe returns */ }
+func TestLastRefreshOnResubscribe(t *testing.T) { /* first Upsert → last_refresh_at null; Advance 1 h, Upsert → set; a delivery does not move it */ }
+func TestAdminSubscriptionsAdditive(t *testing.T) { /* connectors fields unchanged, host only, no secret; new fields present; body still a bare array */ }
+func TestAttentionActions(t *testing.T) { /* paused_failed, paused_operator → action resume; paused_token, paused_auth → action ""; ok absent; paused_operator sorts last (Review Focus 5) */ }
 func TestInboxCarriesAttention(t *testing.T) { /* GET /v1/admin/inbox lists it */ }
 ```
 
-- [ ] **Step 2–5:** Backend recipe → commit `feat: subscription health for the operator`
+- [ ] **Step 2–5:** Backend recipe, adding `./internal/events/ ./internal/mcpserver/` to the test command → commit `feat: subscription health for the operator`
 
 ---
 
@@ -598,7 +606,7 @@ Named assertions: `no POST, PUT, PATCH or DELETE leaves the page in a full dashb
 **Interfaces:**
 - Consumes: `api.subscriptions`, `api.resumeSubscription`, `opapi.Subscription` and `opapi.Attention` JSON; Task 3 puts `attention` into the inbox snapshot, Task 7's slots call this module.
 - Produces: `renderSection(el, ctx)` for the dashboard: table of peer, host, health chip, expires in (hub clock), last refresh, last delivery status and time, attempts, cursor, with `health_note` as the row's tooltip and visible under any non-ok row; no actions. `renderAttention(el, items, ctx)` for the inbox: section "Subscriptions" listing each item's summary, and a Resume button only when `action === "resume"`. After resume, `invalidate('inbox')`.
-- `subs-model.js` (pure): `chip(health)` → `{ label, tone }` for all seven health values, `expiresIn(iso, hubNowMs)`.
+- `subs-model.js` (pure): `chip(health)` → `{ label, tone }` for all nine health values, `expiresIn(iso, hubNowMs)`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -606,9 +614,9 @@ Named assertions: `no POST, PUT, PATCH or DELETE leaves the page in a full dashb
 test('chip covers every opapi health value; unknown value falls back to neutral')
 test('expiresIn uses hub clock; past → "expired 3m ago"')
 ```
-Named assertions: `paused_token row has no Resume button anywhere` (Review Focus 5); `paused_failed Resume clears it from the inbox`; `dashboard section has no buttons`.
+Named assertions: `paused_token and paused_auth rows have no Resume button anywhere` (Review Focus 5); `paused_failed Resume clears it from the inbox`; `paused_operator Resume clears it from the inbox`; `dashboard section has no buttons`.
 
-**Shots:** `13-subs-initial` dashboard section in four health states; `13-subs-progress` Resume held; `13-subs-success` item gone; `13-subs-error` resume failed, button re-enabled.
+**Shots:** `13-subs-initial` dashboard section with all six seeded health states; `13-subs-progress` Resume held; `13-subs-success` item gone; `13-subs-error` resume failed, button re-enabled.
 
 - [ ] **Step 2–6:** Web recipe → commit `feat: dots subscription health in dashboard and inbox`
 
@@ -810,7 +818,7 @@ func TestAnswerFlow(t *testing.T) { /* a,1 → one Answer(option 0); a,9 on a tw
 func TestAnswerClosed(t *testing.T) { /* fake approval_closed → toast, reload, no second Answer (Review Focus 2) */ }
 func TestCountdownHubClock(t *testing.T) { /* client clock 5 min off, same text; past expiry → key refused */ }
 func TestDiscardNeedsConfirm(t *testing.T) { /* x alone → no call; x,y → one call */ }
-func TestResumeOnlyWithAction(t *testing.T) { /* r on paused_token SUB → nothing and a hint; on paused_failed → Resume */ }
+func TestResumeOnlyWithAction(t *testing.T) { /* r on paused_token or paused_auth SUB → nothing and a hint; on paused_failed or paused_operator → Resume */ }
 func TestInboxHostile(t *testing.T) { /* hostile sender, body and title: rendered output has no ESC except lipgloss SGR, no OSC, no U+202E (Review Focus 1) */ }
 func TestPresenceToggle(t *testing.T) { /* p → SetPresence; status bar updates after reload */ }
 ```
@@ -896,7 +904,7 @@ func TestUnknownPresenceNotOffline(t *testing.T) { /* dot row reads unknown + re
 - [ ] **Step 1: Write the failing tests**
 
 ```go
-func TestSubsGolden(t *testing.T) { /* all seven health values */ }
+func TestSubsGolden(t *testing.T) { /* all nine health values */ }
 func TestSubsExpiresHubClock(t *testing.T) { /* client clock off; past → expired */ }
 func TestSubsNoWrites(t *testing.T) { /* every key: zero write calls */ }
 func TestTopBarSubsCount(t *testing.T) { /* two non-ok → subs 2; all ok → absent */ }
@@ -971,7 +979,7 @@ just validate-protocol
 build2 go list -deps ./cmd/vecnet | grep -c 'modernc.org/sqlite'
 build2 go list -deps ./cmd/vecnet-hub | grep -c 'charm.land'
 grep -rn 'not_implemented' internal/ docs/PROTOCOL.md
-just ui-shots
+SHOTS_DIR=.scratch/vecnet/build-operator-ui/gate-shots SHOTS_DIR=.scratch/vecnet/build-operator-ui/gate-shots SHOTS_DIR=.scratch/vecnet/build-operator-ui/gate-shots just ui-shots
 build2 node scripts/ui/journey.mjs
 ```
 Expected: suites `ok`, `gofmt` silent, `isa-check` prints 0 for both, both `grep -c` print 0, the `not_implemented` grep prints nothing, every PNG listed in the README exists.
@@ -994,15 +1002,15 @@ Plan assumes the first entry of each and proceeds; none blocks the build.
 - **Ticket coverage.** Variant A inbox: Task 8. A's chat with B's side-panel width: Tasks 9, 10. Thread files in the panel: Task 10. Matrix as an extra view: Tasks 11, 19. Dashboard provisional and read-only: Tasks 12, 20. TUI as its own thing: Tasks 17–22. One-tap presence: Tasks 14, 18. Reasons a message is held beside presence: Tasks 8, 14. Approval countdown: Tasks 7, 8, 18. Reply links and spill chip: Task 9. Loop cuts and cut state: Tasks 4, 5, 12, 20. §16.4 blocked threads: Tasks 5, 12, 20. §13.4 subscription health including last refresh: Tasks 6, 13, 21.
 - **Boundary choices.** Tasks 3–6 fill stubs so `opclient` and the web shell can merge first. `subs.js`, `presence.js` and the `#matrix/<id>` route sit behind slots and stubs from Task 7, so inbox, side panel and dashboard do not wait for them, and those modules do not wait for the screens. TUI screens read one shared `Data`, so they do not depend on each other.
 - **Type consistency.** `opapi` is the only definition of wire shapes; JS relies on the same JSON. `approvals.js` and `opclient.Answer` build the same body with different key prefixes, so one client's retry replays while the other client's attempt reaches `approval_closed`. `Tags` is pinned by one fixture read from both languages.
-- **Known risk.** Tasks 2 and 6 are written against connectors Task 5's plan, because that task had not merged when this was written. Its column and field names are taken from the plan text; Task 6 reads the merged handler first, as stated.
+- **Reconciled against master (2026-11-02).** Task 6 no longer adds a column, Task 2 uses `httpapi.NewStack`, and the health table covers all five `paused_reason` values.
 
 --- SUMMARY ---
 
 - **What this builds:** the phase 3 operator surface: variant A web inbox and chat, a wider thread side panel with participants and files, an openable delivery matrix, a provisional read-only dashboard, dots subscription health, one-tap presence, starting a new thread, and `vecnet tui` as a full keyboard client with inbox, chat, dashboard, subscriptions and a command line.
 - **Key design:** hub-owned snapshots at `/v1/admin/*` and **snapshot + invalidate** on both clients; events only name what to refetch, and the ack follows the refetch. No `e0.0` replay.
 - **Shared layer:** leaf `internal/opapi` (wire types, event→tag table with a fixture read by Go and JS), `internal/opview` (queries), `internal/opclient` (Go client), `api.js`/`store.js` (web). `opapi` being a leaf keeps SQLite and the hub out of the CLI binary.
-- **Parallelism:** 23 tasks; each starts when its named dependencies merge. Four backend reads, then eight web screens and five TUI screens fan out, one file set per task, with stubs from Tasks 1, 7 and 17 to prevent conflicts. Migrations are pre-numbered 0009–0011.
+- **Parallelism:** 23 tasks; each starts when its named dependencies merge. Four backend reads, then eight web screens and five TUI screens fan out, one file set per task, with stubs from Tasks 1, 7 and 17 to prevent conflicts. Migrations are pre-numbered 0010 and 0011.
 - **Visual proof:** a demo hub with a seeded scenario (Task 2) lets every UI task produce four dark PNGs (initial, in-progress, success, error) from real runs: Playwright for web, the real binary in a private tmux for the TUI. Task 23 adds a two-client journey over one hub.
 - **Safety:** web bans HTML sinks by test; TUI strips terminal escapes from all peer text; dashboard writes are tested to be zero; countdowns use the hub's clock; Resume is offered only where it can work.
-- **Precondition:** `connectors` merged to `master` first.
+- **Precondition:** met; `connectors` merged at `eb5d197`.
 - **Open for Max:** whether presence should gate operator notifications (plan ships truthful copy, protocol unchanged). Web keyboard layer deferred, TUI in the CLI binary on Bubble Tea v2, and read state moving to the hub are stated decisions, reversible.

@@ -46,6 +46,15 @@ const FINAL = typeof A.finalReview === 'boolean' ? A.finalReview : END === (Arra
 const PLAN = `${WT}/${A.plan || 'docs/plans/2026-11-01-core-hub.md'}` // repo-relative plan path
 const PROTO = `${WT}/docs/PROTOCOL.md`
 const MODEL = 'opus' // Max: Claude Code workflows pass opus explicitly
+const PLAN_NAME = A.planName || 'core-hub'
+const EXTRA_RULES = Array.isArray(A.extraRules) ? A.extraRules : [] // extra lines for every agent's RULES
+const MERGE_CHECKS = Array.isArray(A.mergeChecks) ? A.mergeChecks : [] // commands a merge runs after the Go suite
+const GATE_CHECKS = Array.isArray(A.gateChecks) ? A.gateChecks : [] // extra numbered checks for the final gate
+// Model routing (skill claude-workflow-mostly-codex): taste and UI roles stay on Opus; technical roles go to Codex
+// gpt-6.1-sol through a Haiku 5.5 relay and ccc, because Sol is not a native subagent model in this harness.
+// {run, wait, dir}: helper paths and the assignment directory. Absent means every role runs on MODEL.
+const SOL = (A.solRelay && typeof A.solRelay === 'object') ? A.solRelay : null
+const RELAY_MODEL = 'claude-haiku-5-5'
 const REVIEW_MODEL = A.reviewModel || MODEL // independent reviewers/lenses/gate may run on a different model (synthesis of the two drafts)
 
 if (START < 1 || START > END) throw new Error(`bad task range ${START}..${END}`)
@@ -167,9 +176,12 @@ const CORE_TASKS = [
     ] },
 ]
 // args.tasks lets the same workflow run another plan: [{title, refs, race, hazards}] in task order.
-const TASKS = Array.isArray(A.tasks) ? [null, ...A.tasks.map(t => ({ title: t.title, refs: t.refs || '', race: !!t.race, hazards: Array.isArray(t.hazards) ? t.hazards : [] }))] : CORE_TASKS
+const TASKS = Array.isArray(A.tasks) ? [null, ...A.tasks.map(t => ({ title: t.title, refs: t.refs || '', race: !!t.race, hazards: Array.isArray(t.hazards) ? t.hazards : [], suite: t.suite || './...', checks: Array.isArray(t.checks) ? t.checks : [], reviewChecks: Array.isArray(t.reviewChecks) ? t.reviewChecks : (Array.isArray(t.checks) ? t.checks : []), shots: t.shots || null, route: t.route || 'opus' }))] : CORE_TASKS.map(t => t && ({ ...t, suite: './...', checks: [], reviewChecks: [], shots: null, route: 'opus' }))
 const NTASKS = TASKS.length - 1
 if (END > NTASKS) throw new Error(`endTask ${END} exceeds ${NTASKS} tasks`)
+const routed = (n, preset) => (TASKS[n].route === 'sol' ? preset : undefined)
+const checkList = cmds => cmds.map(c => `\`${c}\``).join(', ')
+const suiteCmds = n => `\`build2 go test -p 2 -count=1 ${TASKS[n].suite}\`${TASKS[n].checks.length ? `, ${checkList(TASKS[n].checks)}` : ''}`
 
 // ---------------------------------------------------------------- shared prompt text
 const GROUPS = Array.isArray(A.parallelGroups) ? A.parallelGroups : [[18, 19]] // tasks that may run side by side in their own worktrees, merged afterwards
@@ -185,7 +197,7 @@ function rules(wt, branch) {
 - Never use attn. You report only through your return value and the status files.
 - Never run destructive git (reset --hard, checkout -- ., restore on others' files, clean, stash drop, rebase, push, branch -D) and never modify the main checkout at ${REPO} except files under ${STATUS}.
 - Network: only \`go get\` / \`go mod download\` of modules the plan names. No docker, no fly, no other downloads.
-- Commits: \`git -c commit.gpgsign=false commit -m "<msg>" --trailer "Plan-Task: <NN>"\`. Stage files explicitly (no \`git add -A\` of unknown files); after committing, \`git status --porcelain\` must be empty.`
+- Commits: \`git -c commit.gpgsign=false commit -m "<msg>" --trailer "Plan-Task: <NN>"\`. Stage files explicitly (no \`git add -A\` of unknown files); after committing, \`git status --porcelain\` must be empty.${EXTRA_RULES.map(r => `\n- ${r}`).join('')}`
 }
 const RULES = rules(WT, BRANCH)
 
@@ -317,10 +329,39 @@ const GATE_SCHEMA = {
 
 // ---------------------------------------------------------------- helpers
 // agent() returns null on transient failure or user skip. Retry once, then give up loudly; never treat null as success.
-async function call(prompt, opts) {
+function utf8Bytes(t) {
+  let n = 0
+  for (const ch of t) { const c = ch.codePointAt(0); n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4 }
+  return n
+}
+
+function relayPrompt(prompt, schema, cwd, preset, base) {
+  const assignment = `${prompt}
+
+RESULT FILE. Your final output is a file, not your reply. Wherever these instructions say to return JSON, write exactly one JSON object satisfying this JSON Schema to ${base}.result.json:
+${JSON.stringify(schema)}
+Write any step and status files these instructions name as well. You are running under a coordinator with no human present: do not ask questions.`
+  return `You are a thin relay to Codex, not a worker. Do not solve, implement, review or judge anything yourself, and do not read the code. Never use attn. Your first action is step 1.
+
+1. Use the Write tool to write the ASSIGNMENT below, byte for byte, to ${base}.md. Then run \`wc -c ${base}.md\`: it must print ${utf8Bytes(assignment)}, or one more for a trailing newline. If not, write the file again.
+2. Run with Bash: \`${SOL.run} ${preset} ${cwd} ${base}\`. It returns at once.
+3. Run with Bash, passing timeout 600000: \`${SOL.wait} ${base}\`. It prints RUNNING, or DONE <exit> <verdict>. Repeat this step while it prints RUNNING. A long wait is normal; some runs take more than an hour. Do not start a second run while one is going.
+4. On DONE 0 RESULT_OK: read ${base}.result.json and return that object through StructuredOutput with every value unchanged.
+5. On any other DONE line: run step 2 and step 3 once more. If the second run also fails, stop and reply with the DONE line and the last 20 lines of ${base}.log. Do not call StructuredOutput and do not invent a result.
+
+ASSIGNMENT
+${assignment}`
+}
+
+const slug = t => t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+
+async function call(prompt, rawOpts) {
+  const { sol, cwd, ...opts } = rawOpts
   for (let attempt = 1; attempt <= 2; attempt++) {
     const label = attempt === 1 ? opts.label : `${opts.label} (retry)`
-    const r = await agent(prompt, { model: MODEL, ...opts, label })
+    const r = (SOL && sol)
+      ? await agent(relayPrompt(prompt, opts.schema, cwd || WT, sol, `${SOL.dir}/${STAMP}-${slug(label)}`), { ...opts, label, model: RELAY_MODEL, effort: 'low' })
+      : await agent(prompt, { model: MODEL, ...opts, label })
     if (r) return r
     log(`${opts.label}: no result on attempt ${attempt}`)
   }
@@ -349,7 +390,7 @@ function halt(n, reason, extra) {
 // ---------------------------------------------------------------- prompts
 function implPrompt(n, wt = WT, branch = BRANCH) {
   const N = nn(n)
-  return `You are implementing Task ${n} ("${TASKS[n].title}") of the vecnet core-hub plan, test-first.
+  return `You are implementing Task ${n} ("${TASKS[n].title}") of the vecnet ${PLAN_NAME} plan, test-first.
 
 ${rules(wt, branch)}
 
@@ -366,7 +407,7 @@ PROCEDURE
 1. Write the tests listed in the task's Step 1. The plan writes many test bodies as /* comments */: turn every one into real assertions of exactly the behaviour the comment states. No t.Skip, no empty bodies, no assertion weaker than the comment. Same test names as the plan.
 2. Run the task's package tests with build2 and confirm they FAIL for the reason the plan expects. Record the failing line(s) as red_evidence.
 3. Implement the Interfaces block exactly: same package, names, signatures, error values and reason codes. Where a signature is ambiguous, pick the reading that matches PROTOCOL.md and record a deviation. Where your task names a later task's hook, leave a nil-able seam; do not build the later task.
-4. Run the task's package tests until they pass, then the full suite \`build2 go test -p 2 -count=1 ./...\`, \`build2 go vet ./...\` and \`gofmt -l .\` (must print nothing). Earlier tasks' tests must still pass.
+4. Run the task's package tests until they pass, then ${suiteCmds(n)}, \`build2 go vet ./...\` and \`gofmt -l .\` (must print nothing). Earlier tasks' tests must still pass; the merge runs the full suite.
 5. Commit with the plan's commit message for this task and the trailer Plan-Task: ${N}.
 6. Step file: task-${N}.impl.json. Status for task-${N}.json: "implemented" (or "blocked").
 
@@ -384,7 +425,7 @@ function reviewPrompt(n, impl, round, history, wt = WT, branch = BRANCH) {
     ? `PREVIOUS ROUNDS (verify each serious finding is now resolved and fill prior_resolved; for each item the fixer disputed, decide on the merits and drop the finding if the dispute is right):
 ${JSON.stringify(history, null, 1)}`
     : 'This is the first review of this task.'
-  return `You are an independent reviewer for Task ${n} ("${TASKS[n].title}") of the vecnet core-hub plan. Review round ${round}. You did not write this code; assume nothing the implementer claimed.
+  return `You are an independent reviewer for Task ${n} ("${TASKS[n].title}") of the vecnet ${PLAN_NAME} plan. Review round ${round}. You did not write this code; assume nothing the implementer claimed.
 
 ${rules(wt, branch)}
 - You are READ-ONLY on the worktree: do not edit, stage, commit or format any file there. You write only your status files.
@@ -397,14 +438,14 @@ The work under review is \`git -C ${wt} diff ${impl.base_sha}..HEAD\` (commits w
 
 CHECKS
 1. Run, yourself, and record each command in commands_run:
-   - \`build2 go test -p 2 -count=1 ./...\` (tests_passed)
-   - \`build2 go test -p 2 -count=3 <packages with changed _test.go files>\`${TASKS[n].race ? ' and `CGO_ENABLED=1 CC=/usr/bin/gcc build2 go test -race -p 2 <same packages>` (if cgo is unavailable, say so in test_output_tail and judge repeat_runs_passed on -count=3 alone)' : ''} (repeat_runs_passed)
+   - \`build2 go test -p 2 -count=1 ${TASKS[n].suite}\`${TASKS[n].reviewChecks.length ? `, ${checkList(TASKS[n].reviewChecks)}` : ''} (tests_passed: every one must pass)
+${TASKS[n].reviewChecks.length ? `   - Run the last of those commands a second time; a failure on the second run sets repeat_runs_passed false.\n` : ''}   - \`build2 go test -p 2 -count=3 <packages with changed _test.go files>\` (if no _test.go changed, skip this command)${TASKS[n].race ? ' and `CGO_ENABLED=1 CC=/usr/bin/gcc build2 go test -race -p 2 <same packages>` (if cgo is unavailable, say so in test_output_tail and judge repeat_runs_passed on -count=3 alone)' : ''} (repeat_runs_passed)
    - \`build2 go vet ./...\` (vet_clean) and \`gofmt -l .\` (gofmt_clean: prints nothing)
 2. Interfaces: every item in the task's Interfaces block exists with the stated package, name, signature, status code and reason code. Use \`go doc -all ./internal/<pkg>\` and the source.
 3. Tests: every test named in Step 1 exists under that name, is not a stub, and asserts the full behaviour its plan comment describes. Flag sleeps used as synchronisation, real clocks where the FakeClock is meant, fixed ports, writes outside t.TempDir(), and goroutine leaks.
 4. Spec: behaviour matches the cited PROTOCOL.md sections (${TASKS[n].refs}) and envelope.schema.json; the Global Constraints hold (byte caps, defaults, error envelope, id and time formats, CGO_ENABLED=0, secrets never in logs, URLs or audit).
 5. Review Focus items this task pins are genuinely pinned by a test that would fail without the fix.
-6. Hygiene: Plan-Task: ${N} trailer present, tree clean, go.mod/go.sum tidy (\`build2 go mod tidy -diff\` prints nothing; if your go lacks -diff, skip and say so), no unrelated changes.
+6. Hygiene: Plan-Task: ${N} trailer present, tree clean, go.mod/go.sum tidy (\`build2 go mod tidy -diff\` prints nothing; if your go lacks -diff, skip and say so), no unrelated changes.${TASKS[n].shots ? `\n7. Visual: Read every committed PNG matching docs/plans/shots/oui/${TASKS[n].shots}-*.png with the Read tool and compare it with the prototype shot the task names. A missing or blank state, clipped or overlapping text, a light background, or a shot that does not show the state its name claims is major.` : ''}
 
 SEVERITY: blocker = does not build, a test fails, an Interfaces item is missing or wrong, or a §14 security invariant is broken. major = spec or constraint deviation, a Step 1 test missing or stubbed, a flaky test, or an unpinned Review Focus item. minor = naming, docs, small clarity issues. Only report what you can evidence.
 
@@ -423,7 +464,7 @@ function fixPrompt(n, impl, round, review, history, wt = WT, branch = BRANCH) {
   const N = nn(n)
   const serious = review.findings.filter(isSerious)
   const minors = review.findings.filter(f => !isSerious(f))
-  return `You are fixing review findings for Task ${n} ("${TASKS[n].title}") of the vecnet core-hub plan. Fix round ${round} of at most ${MAX_FIX_ROUNDS}.
+  return `You are fixing review findings for Task ${n} ("${TASKS[n].title}") of the vecnet ${PLAN_NAME} plan. Fix round ${round} of at most ${MAX_FIX_ROUNDS}.
 
 ${rules(wt, branch)}
 
@@ -447,7 +488,7 @@ ${history.length ? `Earlier rounds, for context:\n${JSON.stringify(history, null
 PROCEDURE
 1. For each finding, first confirm it is real. For behaviour bugs, write or tighten a test that fails, then fix. If a finding is wrong, do not change code for it: put it in disputed with evidence (spec quote, command output).
 2. Fix every failing check the reviewer reported, even ones not phrased as findings.
-3. Run \`build2 go test -p 2 -count=1 ./...\`, \`build2 go vet ./...\`, \`gofmt -l .\`.
+3. Run ${suiteCmds(n)}, \`build2 go vet ./...\`, \`gofmt -l .\`.
 4. Commit "fix(task ${N}): address review round ${round}" with trailer Plan-Task: ${N}.
 5. Step file: task-${N}.fix-r${round}.json. Status for task-${N}.json: "fixed_pending_review".
 
@@ -458,7 +499,7 @@ Return the JSON described by the output schema.`
 
 // ---------------------------------------------------------------- Preflight
 phase('Preflight')
-const pre = await call(`Preflight check before running Tasks ${START}..${END} of the vecnet core-hub plan.
+const pre = await call(`Preflight check before running Tasks ${START}..${END} of the vecnet ${PLAN_NAME} plan.
 
 ${RULES}
 - You are READ-ONLY on the worktree. Do not fix anything you find; report it.
@@ -472,7 +513,7 @@ Check and report:
 6. Baseline: if go.mod exists, run \`build2 go test -p 2 -count=1 ./...\`. Failure sets ok=false (never build on a red base). If go.mod does not exist, report "no-module-yet" (only valid when ${START} == 1).
 
 Write the JSON you return to ${STATUS}/preflight-${STAMP}.json (mkdir -p first).
-Return the JSON described by the output schema.`, { label: 'Preflight', phase: 'Preflight', schema: PREFLIGHT_SCHEMA, effort: 'low' })
+Return the JSON described by the output schema.`, { label: 'Preflight', phase: 'Preflight', schema: PREFLIGHT_SCHEMA, effort: 'low', sol: 'sol-coder' })
 
 if (!pre) {
   return { status: 'halted', reason: 'preflight returned no result twice', runStamp: STAMP }
@@ -490,7 +531,7 @@ if (passedBefore.size) log(`Skipping tasks already passed: ${[...passedBefore].s
 async function runTask(n, wt, branch) {
   const N = nn(n)
   const P = `Task ${N}`
-  const impl = await call(implPrompt(n, wt, branch), { label: `T${N} implement`, phase: P, schema: IMPL_SCHEMA })
+  const impl = await call(implPrompt(n, wt, branch), { label: `T${N} implement`, phase: P, schema: IMPL_SCHEMA, sol: routed(n, 'sol-coder'), cwd: wt })
   if (!impl) return halt(n, 'implementer returned no result twice')
   if (impl.status === 'blocked') return halt(n, `implementer blocked: ${impl.blocker || 'no reason given'}`, { deviations: impl.deviations })
   if (impl.status === 'done' && (!impl.commits || impl.commits.length === 0)) return halt(n, 'implementer reported done without a commit')
@@ -501,7 +542,7 @@ async function runTask(n, wt, branch) {
   let passed = false
   for (let round = 0; round <= MAX_FIX_ROUNDS; round++) {
     review = await call(reviewPrompt(n, impl, round, history, wt, branch), {
-      label: `T${N} review r${round}`, phase: P, schema: REVIEW_SCHEMA, effort: 'high', model: REVIEW_MODEL,
+      label: `T${N} review r${round}`, phase: P, schema: REVIEW_SCHEMA, effort: 'high', model: REVIEW_MODEL, sol: routed(n, 'sol-reviewer'), cwd: wt,
     })
     if (!review) break
     const serious = review.findings.filter(isSerious)
@@ -510,7 +551,7 @@ async function runTask(n, wt, branch) {
     if (review.verdict === 'pass') log(`T${N} r${round}: reviewer said pass but evidence fields disagree; treating as fail`)
     if (round === MAX_FIX_ROUNDS) break
 
-    const fix = await call(fixPrompt(n, impl, round + 1, review, history, wt, branch), { label: `T${N} fix r${round + 1}`, phase: P, schema: FIX_SCHEMA })
+    const fix = await call(fixPrompt(n, impl, round + 1, review, history, wt, branch), { label: `T${N} fix r${round + 1}`, phase: P, schema: FIX_SCHEMA, sol: routed(n, 'sol-coder'), cwd: wt })
     if (!fix) { review = null; break }
     if (fix.status === 'blocked') log(`T${N} fixer blocked; one more review will judge the state`)
     history.push({
@@ -555,22 +596,22 @@ for (let n = START; n <= END; n++) {
 
 async function forkUnit(unit) {
   const label = unit.map(nn).join('+')
-  const fork = await call(`Create one worktree per task for the parallel group ${label} of the vecnet core-hub build.
+  const fork = await call(`Create one worktree per task for the parallel group ${label} of the vecnet ${PLAN_NAME} build.
 ${RULES}
 For each task number NN in [${unit.map(nn).join(', ')}]: if ${REPO}/.worktrees/${PREFIX}-tNN does not exist, run \`git -C ${REPO} worktree add -b ${PREFIX}-tNN ${REPO}/.worktrees/${PREFIX}-tNN ${BRANCH}\` (if the branch already exists from an interrupted run, \`worktree add\` without -b). Confirm each worktree's HEAD equals ${BRANCH}'s HEAD or is a descendant of it. Do not build or test. Return {ok, notes}.`,
-    { label: `fork ${label}`, phase: `Task ${nn(unit[0])}`, effort: 'low', schema: { type: 'object', properties: { ok: { type: 'boolean' }, notes: { type: 'string' } }, required: ['ok', 'notes'] } })
+    { label: `fork ${label}`, phase: `Task ${nn(unit[0])}`, effort: 'low', sol: 'sol-coder', schema: { type: 'object', properties: { ok: { type: 'boolean' }, notes: { type: 'string' } }, required: ['ok', 'notes'] } })
   if (!fork || !fork.ok) { halt(unit[0], `could not create worktrees for ${label}: ${fork ? fork.notes : 'no result'}`); return false }
   return true
 }
 
 async function mergeUnit(unit) {
   const label = unit.map(nn).join('+')
-  const merge = await call(`Merge the parallel group ${label} back into ${BRANCH} for the vecnet core-hub build.
+  const merge = await call(`Merge the parallel group ${label} back into ${BRANCH} for the vecnet ${PLAN_NAME} build.
 ${RULES}
 Branches to merge, in this order: ${unit.map(taskBranch).join(', ')} (worktrees ${unit.map(taskWT).join(', ')}).
-Procedure: cd ${WT}; for each branch run \`git merge --no-ff <branch>\`; resolve any conflict by keeping BOTH tasks' behaviour (typical conflicts: route registration in internal/httpapi/server.go, justfile recipes, go.mod/go.sum, README). Never drop a test or an endpoint to make a merge clean. After all merges run \`build2 go test -p 2 -count=1 ./...\`, \`build2 go vet ./...\`, \`gofmt -l .\`; fix merge-induced failures with a follow-up commit carrying trailer "Plan-Task: merge". Then, only after \`git -C <path> status --porcelain\` is empty, remove each task worktree with \`git -C ${REPO} worktree remove <path>\`. Leave the task branches in place; the coordinator deletes them.
+Procedure: cd ${WT}; for each branch run \`git merge --no-ff <branch>\`; resolve any conflict by keeping BOTH tasks' behaviour (typical conflicts: route registration in internal/httpapi/server.go, justfile recipes, go.mod/go.sum, README). Never drop a test or an endpoint to make a merge clean. After all merges run \`build2 go test -p 2 -count=1 ./...\`, \`build2 go vet ./...\`, \`gofmt -l .\`${MERGE_CHECKS.length ? `, ${checkList(MERGE_CHECKS)}` : ''}; fix merge-induced failures with a follow-up commit carrying trailer "Plan-Task: merge". Then, only after \`git -C <path> status --porcelain\` is empty, remove each task worktree with \`git -C ${REPO} worktree remove <path>\`. Leave the task branches in place; the coordinator deletes them.
 Return {ok, head_sha, merged:[task numbers], conflicts_resolved:[files], tests_passed, notes}. ok is true only when every branch merged and the suite passed.`,
-    { label: `merge ${label}`, phase: `Task ${nn(unit[unit.length - 1])}`, schema: MERGE_SCHEMA })
+    { label: `merge ${label}`, phase: `Task ${nn(unit[unit.length - 1])}`, schema: MERGE_SCHEMA, sol: 'sol-coder' })
   if (!merge || !merge.ok || !merge.tests_passed) { halt(unit[unit.length - 1], `merge of ${label} failed: ${merge ? merge.notes : 'no result'}`); return false }
   log(`merged ${label} at ${merge.head_sha}; conflicts resolved: ${merge.conflicts_resolved.length}`)
   return true
@@ -638,14 +679,15 @@ const LENSES = [
   { key: 'tests', title: 'Test quality and flakiness',
     focus: `Test quality across the branch. Run \`build2 go test -p 2 -count=2 ./...\` and \`CGO_ENABLED=1 CC=/usr/bin/gcc build2 go test -race -p 2 ./...\` (report if cgo is unavailable). Find: plan tests left as stubs or asserting less than their plan comment; sleeps used as synchronisation; real clocks where the FakeClock is meant; fixed ports; writes outside t.TempDir(), especially the CLI touching ~/.config or ~/.cache; goroutine or server leaks; tests that pass vacuously. Confirm Review Focus 1-5 in ${PLAN} are each pinned by a test that would fail if the behaviour regressed (reason it through or mutate locally WITHOUT saving: you are read-only).` },
 ]
+if (Array.isArray(A.extraLenses)) LENSES.push(...A.extraLenses) // {key, title, focus, taste}: taste lenses stay on Opus
 
 phase('Branch review')
-const lensResults = (await parallel(LENSES.map(L => () => call(`Whole-branch review of the vecnet core hub, lens: ${L.title}.
+const lensResults = (await parallel(LENSES.map(L => () => call(`Whole-branch review of the vecnet ${PLAN_NAME} branch, lens: ${L.title}.
 
 ${RULES}
 - You are READ-ONLY on the worktree: do not edit, stage or commit anything.
 
-Scope: \`git -C ${WT} diff ${BASE_REF}...HEAD\` (the full core-hub branch), plus the plan ${PLAN} and ${PROTO}.
+Scope: \`git -C ${WT} diff ${BASE_REF}...HEAD\` (the full ${BRANCH} branch), plus the plan ${PLAN} and ${PROTO}.
 
 FOCUS
 ${L.focus}${LENS_EXTRA[L.key] ? `\n\nADDITIONAL FOCUS FOR THIS PLAN:\n${LENS_EXTRA[L.key]}` : ''}
@@ -653,7 +695,7 @@ ${L.focus}${LENS_EXTRA[L.key] ? `\n\nADDITIONAL FOCUS FOR THIS PLAN:\n${LENS_EXT
 SEVERITY: blocker = broken behaviour, failing or flaky test, or a broken security invariant. major = spec deviation, missing authz, unpinned Review Focus item. minor = clarity, naming, docs. Report only what you can evidence; cite file and line.
 
 Write the JSON you return to ${STATUS}/branch-review-${L.key}.json.
-Return the JSON described by the output schema.`, { label: `Lens: ${L.title}`, phase: 'Branch review', schema: LENS_SCHEMA, effort: 'high', model: REVIEW_MODEL })
+Return the JSON described by the output schema.`, { label: `Lens: ${L.title}`, phase: 'Branch review', schema: LENS_SCHEMA, effort: 'high', model: REVIEW_MODEL, sol: L.taste ? undefined : 'sol-reviewer' })
   .then(r => (r ? { key: L.key, ...r } : null))))).filter(Boolean) // tag with the lens key before filtering so ids stay stable when a lens is null
 
 const missingLenses = LENSES.map(L => L.key).filter(k => !lensResults.some(r => r.key === k))
@@ -671,7 +713,7 @@ let unaccounted = []
 if (seriousBranch.length || minorBranch.length || deferredMinors.length) {
   phase('Branch fix')
   const deferredWithIds = deferredMinors.map((f, i) => ({ id: `task${nn(f.task)}-minor-${i + 1}`, ...f }))
-  branchFix = await call(`One fix pass over the whole-branch review of the vecnet core hub.
+  branchFix = await call(`One fix pass over the whole-branch review of the vecnet ${PLAN_NAME} branch.
 
 ${RULES}
 
@@ -703,7 +745,7 @@ Return the JSON described by the output schema.`, { label: 'Branch fix', phase: 
 
 // ---------------------------------------------------------------- Final gate (one repair attempt)
 function gatePrompt(attempt) {
-  return `Final gate for the vecnet core-hub branch (attempt ${attempt}).
+  return `Final gate for the vecnet ${PLAN_NAME} branch (attempt ${attempt}).
 
 ${RULES}
 - You are READ-ONLY on the worktree: do not edit, stage or commit anything.
@@ -717,7 +759,7 @@ Run each check yourself and record it in checks:
 6. \`just validate-protocol\` (if python jsonschema is missing, mark ok only when the schema-drift diff part passed, and say so)
 7. \`git status --porcelain\` is empty apart from gitignored files
 8. Every task 1-${NTASKS} has a Plan-Task commit: \`git log --format=%B ${BASE_REF}..HEAD | grep -c '^Plan-Task: '\` and list any missing number.
-Also read the diff of commits with trailer "Plan-Task: review" and list in fix_diff_concerns anything that weakens a test, removes an assertion, or loosens a security check.
+${GATE_CHECKS.map((c, i) => `${9 + i}. ${c}\n`).join('')}Also read the diff of commits with trailer "Plan-Task: review" and list in fix_diff_concerns anything that weakens a test, removes an assertion, or loosens a security check.
 
 pass = every check ok and fix_diff_concerns empty.
 Write the JSON you return to ${STATUS}/gate-${STAMP}-a${attempt}.json.
@@ -725,11 +767,11 @@ Return the JSON described by the output schema.`
 }
 
 phase('Final gate')
-let gate = await call(gatePrompt(1), { label: 'Gate', phase: 'Final gate', schema: GATE_SCHEMA, model: REVIEW_MODEL })
+let gate = await call(gatePrompt(1), { label: 'Gate', phase: 'Final gate', schema: GATE_SCHEMA, model: REVIEW_MODEL, sol: 'sol-reviewer' })
 if (gate && !gate.pass) {
   const failing = gate.checks.filter(c => !c.ok)
   log(`Gate failed: ${failing.map(c => c.name).join(', ')}${gate.fix_diff_concerns.length ? ' + fix-diff concerns' : ''}; one repair attempt`)
-  const repair = await call(`Repair the failing final-gate checks on the vecnet core-hub branch.
+  const repair = await call(`Repair the failing final-gate checks on the vecnet ${PLAN_NAME} branch.
 
 ${RULES}
 
@@ -739,8 +781,8 @@ Concerns about the branch-fix diff:
 ${JSON.stringify(gate.fix_diff_concerns, null, 1)}
 
 Fix root causes; never weaken or delete a test to make it pass, and never edit docs to match a check you did not see pass. Run the full suite, vet and gofmt, then commit with trailer "Plan-Task: gate". Write a short JSON {commits, notes} to ${STATUS}/gate-repair-${STAMP}.json.
-Return the JSON described by the output schema.`, { label: 'Gate repair', phase: 'Final gate', schema: { type: 'object', properties: { commits: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' } }, required: ['commits', 'notes'] } })
-  if (repair) gate = await call(gatePrompt(2), { label: 'Gate (re-run)', phase: 'Final gate', schema: GATE_SCHEMA, model: REVIEW_MODEL })
+Return the JSON described by the output schema.`, { label: 'Gate repair', phase: 'Final gate', sol: 'sol-coder', schema: { type: 'object', properties: { commits: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' } }, required: ['commits', 'notes'] } })
+  if (repair) gate = await call(gatePrompt(2), { label: 'Gate (re-run)', phase: 'Final gate', schema: GATE_SCHEMA, model: REVIEW_MODEL, sol: 'sol-reviewer' })
   else gate = { ...gate, pass: false }
 }
 

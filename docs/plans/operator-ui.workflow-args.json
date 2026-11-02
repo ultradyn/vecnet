@@ -1,0 +1,560 @@
+{
+ "runStamp": "20261102T11-operator-ui",
+ "planName": "operator UI",
+ "plan": "docs/plans/2026-11-01-operator-ui.md",
+ "worktree": "/home/xertrov/src/vecnet4/.worktrees/operator-ui",
+ "branch": "operator-ui",
+ "baseRef": "master",
+ "statusDir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui",
+ "taskPrefix": "oui",
+ "startTask": 1,
+ "endTask": 23,
+ "finalReview": true,
+ "openBrowser": false,
+ "deps": {
+  "1": [],
+  "2": [],
+  "3": [
+   1
+  ],
+  "4": [
+   1
+  ],
+  "5": [
+   1
+  ],
+  "6": [
+   1
+  ],
+  "7": [
+   1,
+   2
+  ],
+  "8": [
+   3,
+   7
+  ],
+  "9": [
+   4,
+   7
+  ],
+  "10": [
+   4,
+   7
+  ],
+  "11": [
+   4,
+   7
+  ],
+  "12": [
+   4,
+   5,
+   7
+  ],
+  "13": [
+   3,
+   6,
+   7
+  ],
+  "14": [
+   3,
+   7
+  ],
+  "15": [
+   7
+  ],
+  "16": [
+   1
+  ],
+  "17": [
+   2,
+   16
+  ],
+  "18": [
+   3,
+   17
+  ],
+  "19": [
+   4,
+   17
+  ],
+  "20": [
+   4,
+   5,
+   17
+  ],
+  "21": [
+   6,
+   17
+  ],
+  "22": [
+   17
+  ],
+  "23": [
+   8,
+   9,
+   10,
+   11,
+   12,
+   13,
+   14,
+   15,
+   18,
+   19,
+   20,
+   21,
+   22
+  ]
+ },
+ "tasks": [
+  {
+   "title": "Operator API contract",
+   "refs": "\u00a72.1, \u00a72.3, \u00a72.8, \u00a72.12, \u00a78, \u00a713.4",
+   "race": false,
+   "suite": "./internal/opapi/ ./internal/opview/ ./internal/httpapi/",
+   "route": "sol",
+   "hazards": [
+    "opapi imports only envelope, so Peer, AuditEntry and SendResult are redeclared there. Add a test in internal/httpapi that marshals the hub type and the opapi type from one value and compares the JSON, so the copies cannot drift.",
+    "This is the only task that edits docs/PROTOCOL.md. \u00a72.13 does not exist yet and goes directly after \u00a72.12.",
+    "The health constants include paused_auth and paused_operator, added when this plan was reconciled with master."
+   ]
+  },
+  {
+   "title": "Demo hub, seed scenario, visual harness",
+   "refs": "\u00a72.3, \u00a75.2, \u00a78, \u00a713.4, \u00a716.4",
+   "race": false,
+   "suite": "./internal/opseed/...",
+   "route": "sol",
+   "checks": [
+    "build2 node scripts/ui/smoke.mjs"
+   ],
+   "reviewChecks": [
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/02 build2 node scripts/ui/smoke.mjs"
+   ],
+   "hazards": [
+    ".gitignore already lists .scratch/vecnet/build-operator-ui/; add only .demo-data/.",
+    "The demo hub reuses httpapi.NewStack and Stack.Run. Read cmd/vecnet-hub/main.go and internal/testhub/testhub.go first; do not re-wire workers or OAuth by hand.",
+    "Direct SQL into event_subscriptions must fill the NOT NULL columns and the columns added by migration 0009 (token_hash, last_refresh_at). arguments and types must be valid JSON, secret_enc must come from Hub.Seal, and principal_kind is oauth or vecnet.",
+    "peer add --kind dot issues no bearer, so the dot in the seed has no entry in Scenario.Secrets.",
+    "The demo hub listens on port 0 in scripts. Port 49575 is the coordinator's live preview and 45752 is the dev hub; a script must never bind either.",
+    "Every string a peer supplies is hostile by design in the hostile thread: when you inspect tmux captures or message bodies, pipe them through cat -v."
+   ]
+  },
+  {
+   "title": "Inbox read model",
+   "refs": "\u00a72.3, \u00a72.8, \u00a75.2, \u00a78, \u00a79",
+   "race": false,
+   "suite": "./internal/opview/ ./internal/httpapi/ ./internal/store/...",
+   "route": "sol",
+   "hazards": [
+    "Migration number 0011 is this task's and 0010 is Task 5's. Keep them; do not renumber to close a gap while Task 5 is in flight.",
+    "hub.Receipt takes the recipient's auth.Caller, a delivery id, a state and a note. Read internal/hub/receipts.go before calling it, and keep repeat calls harmless.",
+    "hub.EffectivePresence takes a PresenceRow and a time; hub.Now is the injected clock."
+   ]
+  },
+  {
+   "title": "Thread read models",
+   "refs": "\u00a72.8, \u00a75.5, \u00a76, \u00a79, \u00a716.4",
+   "race": false,
+   "suite": "./internal/opview/ ./internal/httpapi/",
+   "route": "sol",
+   "hazards": [
+    "envelope.ThreadSummary has its own MarshalJSON, which is why ThreadRow uses a named Thread field. Never embed it."
+   ]
+  },
+  {
+   "title": "Dashboard reads",
+   "refs": "\u00a72.12, \u00a78, \u00a79, \u00a713.4, \u00a716.4",
+   "race": false,
+   "suite": "./internal/opview/ ./internal/httpapi/ ./internal/store/...",
+   "route": "sol",
+   "hazards": [
+    "Migration number 0010 is this task's and 0011 is Task 3's. Keep them.",
+    "Blocked must match what ClaimDue really serialises on: read internal/hub/deliveries.go:83 and mirror its predicates; do not write the rule from the plan's prose alone.",
+    "EffectiveReachability is a package function (stored, via, lastSeen, now). Grokbot routes carry a sealed key: RouteInfo exposes host only, and a test must prove no key, path or whsec reaches the JSON."
+   ]
+  },
+  {
+   "title": "Subscription health",
+   "refs": "\u00a74.4, \u00a713.4; docs/connectors/dots.md \"Failure signals\"",
+   "race": true,
+   "suite": "./internal/opview/ ./internal/httpapi/ ./internal/events/ ./internal/mcpserver/ ./internal/cli/",
+   "route": "sol",
+   "hazards": [
+    "No migration in this task: last_refresh_at exists. Do not add refreshed_at.",
+    "A fifth paused_reason exists on master that the original plan did not know about; the health rules in the task now cover all five plus unknown values. A paused subscription must never read as ok.",
+    "vecnet subscriptions list decodes this endpoint, so existing field names and null behaviour stay byte-compatible and the body stays a bare array."
+   ]
+  },
+  {
+   "title": "Web shell, API client, store",
+   "refs": "\u00a72, \u00a72.5, \u00a72.6, \u00a77, \u00a714.2",
+   "race": false,
+   "suite": "./internal/httpapi/ ./internal/ui/...",
+   "route": "opus",
+   "shots": "07",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "build2 node scripts/ui/shell.mjs"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/07 build2 node scripts/ui/shell.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Every export in the Interfaces block is a contract for eight parallel screen tasks. Ship every stub file and export it names, even empty, because later tasks may not touch this task's files.",
+    "internal/ui.Handler refuses subdirectories, so nothing goes in a subfolder of static/. jstest lives in internal/ui/jstest, outside static/, so it is not embedded or served."
+   ]
+  },
+  {
+   "title": "Web inbox",
+   "refs": "\u00a72.5, \u00a72.6, \u00a75.2, \u00a77, \u00a714.2; Review Focus 1, 2, 3",
+   "race": false,
+   "suite": "./internal/httpapi/ ./internal/ui/...",
+   "route": "opus",
+   "shots": "08",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/inbox.test.mjs",
+    "build2 node scripts/ui/inbox.mjs"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/inbox.test.mjs",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/08 build2 node scripts/ui/inbox.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Edit only the files this task owns in the Shared resources table. Call a neighbour through its stub export; never edit its file.",
+    "Compare the first shot with docs/prototypes/operator-ui/shots/a-inbox.png."
+   ]
+  },
+  {
+   "title": "Web thread view",
+   "refs": "\u00a72.3, \u00a72.7, \u00a72.8, \u00a76, \u00a77, \u00a714.2",
+   "race": false,
+   "suite": "./internal/httpapi/ ./internal/ui/...",
+   "route": "opus",
+   "shots": "09",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/thread.test.mjs",
+    "build2 node scripts/ui/thread.mjs"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/thread.test.mjs",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/09 build2 node scripts/ui/thread.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Edit only the files this task owns in the Shared resources table. Call a neighbour through its stub export; never edit its file.",
+    "The reading column is 980 px wide at most, wider than the prototype, by Max's verdict in ticket 18."
+   ]
+  },
+  {
+   "title": "Web thread side panel",
+   "refs": "\u00a72.7, \u00a72.8, \u00a78",
+   "race": false,
+   "suite": "./internal/httpapi/ ./internal/ui/...",
+   "route": "opus",
+   "shots": "10",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/aside.test.mjs",
+    "build2 node scripts/ui/aside.mjs"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/aside.test.mjs",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/10 build2 node scripts/ui/aside.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Edit only the files this task owns in the Shared resources table. Call a neighbour through its stub export; never edit its file."
+   ]
+  },
+  {
+   "title": "Web delivery matrix",
+   "refs": "\u00a72.5, \u00a76, \u00a77",
+   "race": false,
+   "suite": "./internal/httpapi/ ./internal/ui/...",
+   "route": "opus",
+   "shots": "11",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/matrix.test.mjs",
+    "build2 node scripts/ui/matrix.mjs"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/matrix.test.mjs",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/11 build2 node scripts/ui/matrix.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Edit only the files this task owns in the Shared resources table. Call a neighbour through its stub export; never edit its file."
+   ]
+  },
+  {
+   "title": "Web dashboard (provisional)",
+   "refs": "\u00a72.12, \u00a78, \u00a79, \u00a716.4",
+   "race": false,
+   "suite": "./internal/httpapi/ ./internal/ui/...",
+   "route": "opus",
+   "shots": "12",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/dash.test.mjs",
+    "build2 node scripts/ui/dash.mjs"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/dash.test.mjs",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/12 build2 node scripts/ui/dash.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Edit only the files this task owns in the Shared resources table. Call a neighbour through its stub export; never edit its file.",
+    "The dashboard performs no writes. Max will redo it later, so keep it plain."
+   ]
+  },
+  {
+   "title": "Web subscription health",
+   "refs": "\u00a74.4, \u00a713.4; Review Focus 5",
+   "race": false,
+   "suite": "./internal/httpapi/ ./internal/ui/...",
+   "route": "opus",
+   "shots": "13",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/subs.test.mjs",
+    "build2 node scripts/ui/subs.mjs"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/subs.test.mjs",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/13 build2 node scripts/ui/subs.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Edit only the files this task owns in the Shared resources table. Call a neighbour through its stub export; never edit its file.",
+    "There are nine health values, not seven. Resume appears only for action \"resume\"."
+   ]
+  },
+  {
+   "title": "Web presence toggle",
+   "refs": "\u00a72.4, \u00a75.2, \u00a78; Review Focus 4",
+   "race": false,
+   "suite": "./internal/httpapi/ ./internal/ui/...",
+   "route": "opus",
+   "shots": "14",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/presence.test.mjs",
+    "build2 node scripts/ui/presence.mjs"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/presence.test.mjs",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/14 build2 node scripts/ui/presence.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Edit only the files this task owns in the Shared resources table. Call a neighbour through its stub export; never edit its file.",
+    "Use the truthful copy in the task, not the prototype's."
+   ]
+  },
+  {
+   "title": "Web new message",
+   "refs": "\u00a72.3, \u00a714.4",
+   "race": false,
+   "suite": "./internal/httpapi/ ./internal/ui/...",
+   "route": "opus",
+   "shots": "15",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/compose.test.mjs",
+    "build2 node scripts/ui/compose.mjs"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/compose.test.mjs",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/15 build2 node scripts/ui/compose.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Edit only the files this task owns in the Shared resources table. Call a neighbour through its stub export; never edit its file."
+   ]
+  },
+  {
+   "title": "Go operator client",
+   "refs": "\u00a72.5, \u00a72.6, \u00a77; Review Focus 4",
+   "race": true,
+   "suite": "./internal/opclient/",
+   "route": "sol",
+   "hazards": [
+    "opclient imports opapi, envelope and stdlib only. testhub is allowed in _test files only; prove it with the go list check in the task."
+   ]
+  },
+  {
+   "title": "TUI shell",
+   "refs": "\u00a77, \u00a714.2; Review Focus 1, 3",
+   "race": true,
+   "suite": "./internal/tui/ ./internal/cli/",
+   "route": "opus",
+   "shots": "17",
+   "checks": [
+    "build2 node scripts/ui/tui-shell.mjs"
+   ],
+   "reviewChecks": [
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/17 build2 node scripts/ui/tui-shell.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Every string a peer supplies is hostile by design in the hostile thread: when you inspect tmux captures or message bodies, pipe them through cat -v.",
+    "Only go get charm.land/bubbletea/v2@v2.1.1 and charm.land/lipgloss/v2@v2.0.6. Verify the APIs you use with go doc after fetching; the plan was written from their docs.",
+    "Later TUI tasks may not edit this task's files, so ship every stub constructor the Interfaces block names."
+   ]
+  },
+  {
+   "title": "TUI inbox and event log",
+   "refs": "\u00a72.5, \u00a72.6, \u00a75.2; Review Focus 1, 2, 3, 5",
+   "race": false,
+   "suite": "./internal/tui/",
+   "route": "opus",
+   "shots": "18",
+   "checks": [
+    "build2 node scripts/ui/tui-inbox.mjs"
+   ],
+   "reviewChecks": [
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/18 build2 node scripts/ui/tui-inbox.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Every string a peer supplies is hostile by design in the hostile thread: when you inspect tmux captures or message bodies, pipe them through cat -v.",
+    "Edit only the files this task owns in the Shared resources table."
+   ]
+  },
+  {
+   "title": "TUI chat",
+   "refs": "\u00a72.3, \u00a72.7, \u00a76, \u00a77; Review Focus 1",
+   "race": false,
+   "suite": "./internal/tui/",
+   "route": "opus",
+   "shots": "19",
+   "checks": [
+    "build2 node scripts/ui/tui-chat.mjs"
+   ],
+   "reviewChecks": [
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/19 build2 node scripts/ui/tui-chat.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Every string a peer supplies is hostile by design in the hostile thread: when you inspect tmux captures or message bodies, pipe them through cat -v.",
+    "Edit only the files this task owns in the Shared resources table."
+   ]
+  },
+  {
+   "title": "TUI dashboard",
+   "refs": "\u00a78, \u00a79, \u00a716.4",
+   "race": false,
+   "suite": "./internal/tui/",
+   "route": "opus",
+   "shots": "20",
+   "checks": [
+    "build2 node scripts/ui/tui-dash.mjs"
+   ],
+   "reviewChecks": [
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/20 build2 node scripts/ui/tui-dash.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Every string a peer supplies is hostile by design in the hostile thread: when you inspect tmux captures or message bodies, pipe them through cat -v.",
+    "Edit only the files this task owns in the Shared resources table.",
+    "Dashboard screens perform no writes."
+   ]
+  },
+  {
+   "title": "TUI subscription health",
+   "refs": "\u00a713.4; Review Focus 5",
+   "race": false,
+   "suite": "./internal/tui/",
+   "route": "opus",
+   "shots": "21",
+   "checks": [
+    "build2 node scripts/ui/tui-subs.mjs"
+   ],
+   "reviewChecks": [
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/21 build2 node scripts/ui/tui-subs.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Every string a peer supplies is hostile by design in the hostile thread: when you inspect tmux captures or message bodies, pipe them through cat -v.",
+    "Edit only the files this task owns in the Shared resources table.",
+    "There are nine health values, not seven."
+   ]
+  },
+  {
+   "title": "TUI command line and help",
+   "refs": "\u00a72.6",
+   "race": false,
+   "suite": "./internal/tui/",
+   "route": "opus",
+   "shots": "22",
+   "checks": [
+    "build2 node scripts/ui/tui-cmd.mjs"
+   ],
+   "reviewChecks": [
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/22 build2 node scripts/ui/tui-cmd.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Every string a peer supplies is hostile by design in the hostile thread: when you inspect tmux captures or message bodies, pipe them through cat -v.",
+    "Edit only the files this task owns in the Shared resources table."
+   ]
+  },
+  {
+   "title": "Two-client journey, docs, final gate",
+   "refs": "\u00a77, \u00a78, \u00a713.4; Review Focus 4",
+   "race": false,
+   "suite": "./...",
+   "route": "sol",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "build2 node scripts/ui/journey.mjs"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "build2 node scripts/ui/journey.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    ".scratch/vecnet/map.md and .scratch/vecnet/issues are in the main repo's tracked tree only if git says so: check with git ls-files inside your worktree, and edit the worktree copy.",
+    "Removing the not_implemented stub helper must leave grep -rn not_implemented internal/ docs/PROTOCOL.md printing nothing."
+   ]
+  }
+ ],
+ "solRelay": {
+  "run": "/home/xertrov/src/vecnet4/scripts/wf/sol-run.sh",
+  "wait": "/home/xertrov/src/vecnet4/scripts/wf/sol-wait.sh",
+  "dir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/ccc"
+ },
+ "extraRules": [
+  "No npm install. Playwright comes from the existing skill install through scripts/ui/lib.mjs.",
+  "Node and browser checks run through build2 too: `build2 node ...`. Chromium stays headless. Never run xdg-open or open a window.",
+  "Never touch the dev hub on 45752, the coordinator's preview on 49575, `.data/` or `.demo-data/`. Tmux only through the private `-L oui-<pid>` server, never Max's.",
+  "Read-only reviewers run screen scripts with the SHOTS_DIR their command gives, so committed PNGs stay unchanged."
+ ],
+ "mergeChecks": [
+  "build2 node --test --test-concurrency=2 internal/ui/jstest/ (only once that directory exists)"
+ ],
+ "gateChecks": [
+  "`build2 node --test --test-concurrency=2 internal/ui/jstest/`",
+  "`just isa-check` prints 0 for both binaries",
+  "`build2 go list -deps ./cmd/vecnet | grep -c 'modernc.org/sqlite'` prints 0",
+  "`build2 go list -deps ./cmd/vecnet-hub | grep -c 'charm.land'` prints 0",
+  "`grep -rn 'not_implemented' internal/ docs/PROTOCOL.md` prints nothing",
+  "`SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/gate-shots just ui-shots` exits 0",
+  "`build2 node scripts/ui/journey.mjs` exits 0",
+  "Every PNG listed in docs/plans/shots/oui/README.md exists, and every PNG in that directory is listed"
+ ],
+ "lensFocus": {
+  "spec": "This branch implements docs/plans/2026-11-01-operator-ui.md. Check new \u00a72.13 against the handlers and opapi JSON, Max's verdict in .scratch/vecnet/issues/18-operator-ui.md, that the dashboard performs no writes, that presence and reachability stay two signals with unknown never shown as offline, and \u00a716.4 Blocked against ClaimDue. Every paused_reason must map to a paused health, and Resume must appear only for delivery_failed and operator.",
+  "security": "Bodies, names, titles, options and file names are untrusted. Web: no HTML sink anywhere, no inline script or style, CSP unchanged, the secret only in Authorization and localStorage, never in a URL or a blob link. TUI: every peer string passes Clean or CleanBody before lipgloss; file saves stay inside the working directory and never overwrite. Admin reads are operator-only and return route and callback hosts only, no key, path or whsec. The demo controls (/__demo/*) exist only in internal/opseed/demo and can never reach the vecnet-hub binary.",
+  "tests": "Check that Playwright and tmux scripts wait on state rather than time, that they always kill their hub and browser, that they never bind 45752 or 49575, that SHOTS_DIR is honoured, that goldens were read and not blindly regenerated, that the Go and JS tag tests really load one fixture, and that each named assertion in the plan exists."
+ },
+ "extraLenses": [
+  {
+   "key": "design",
+   "title": "Visual and interaction design",
+   "taste": true,
+   "focus": "You judge what it looks and feels like as one product, because thirteen separate agents built its screens. Read every PNG in docs/plans/shots/oui/ with the Read tool, beside docs/prototypes/operator-ui/shots/ (a-*.png for web, b-chat.png for the side panel and matrix, c-*.png for the TUI) and Max's verdict in .scratch/vecnet/issues/18-operator-ui.md. Find inconsistency across screens: spacing, type scale, colours for the same state, button and chip styles, empty and error states, and copy tone. Find clipped, overlapping or misaligned text, weak hierarchy, and anything that fights the Global Constraints palette. For the TUI, check alignment, colour use and legibility. Boot the demo with scripts/ui/lib.mjs if a shot leaves a question open, writing any screenshot to a SHOTS_DIR under the status directory. A defect a person would notice on first use is major; a preference is minor. Name file and selector or screen for every finding."
+  }
+ ]
+}
