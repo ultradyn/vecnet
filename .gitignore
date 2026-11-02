@@ -18,5 +18,6 @@ backups/
 .scratch/vecnet/build-attachments/
 .scratch/vecnet/build-openclaw/
 .scratch/vecnet/build-reactions/
+.scratch/vecnet/build-cli22/
 
 .demo-data/
