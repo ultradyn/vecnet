@@ -47,6 +47,8 @@ func TestClean(t *testing.T) {
 		{"newline", "a\nb", "a b", "a\nb"},
 		{"crlf", "a\r\nb", "a b", "a\nb"},
 		{"tab", "a\tb", "a b", "a\tb"},
+		{"line separator u2028", "a\u2028b", "a b", "a\nb"},
+		{"paragraph separator u2029", "a\u2029b", "a b", "a\nb"},
 		{"plain", "plain text, with: punctuation!", "plain text, with: punctuation!", "plain text, with: punctuation!"},
 		{"cjk", "日本語のメッセージ", "日本語のメッセージ", "日本語のメッセージ"},
 		{"accents and emoji", "café 🚀 ✓", "café 🚀 ✓", "café 🚀 ✓"},

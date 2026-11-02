@@ -70,7 +70,7 @@ func (c *cleaner) run(body bool) string {
 		i = next
 		switch {
 		case invalid:
-		case r == '\n', r == ' ', r == ' ':
+		case r == '\n', r == '\u2028', r == '\u2029': // line and paragraph separators
 			if body {
 				b.WriteByte('\n')
 			} else {
@@ -83,7 +83,7 @@ func (c *cleaner) run(body bool) string {
 				b.WriteByte(' ')
 			}
 		case r < 0x20, r >= 0x7f && r <= 0x9f:
-		case r >= '‪' && r <= '‮', r >= '⁦' && r <= '⁩':
+		case r >= '\u202a' && r <= '\u202e', r >= '\u2066' && r <= '\u2069': // bidi embeddings, overrides, isolates
 		default:
 			b.WriteString(c.s[i-n : i])
 		}
