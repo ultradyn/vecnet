@@ -1,0 +1,38 @@
+/* thread */
+.va .thead{border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:8px}
+.va .thead .ids{font:400 12px var(--mono);color:var(--dim);overflow-wrap:anywhere}
+.va .msg{display:grid;grid-template-columns:28px minmax(0,1fr);gap:12px;padding:16px 0;border-bottom:1px solid #161d33}
+.va .msg.target{background:#6366f112;box-shadow:-12px 0 0 #6366f112,12px 0 0 #6366f112}
+.va .msg header{display:flex;align-items:center;gap:8px;font-size:13px;flex-wrap:wrap}
+.va .msg header b{font-weight:600}
+.va .msg .kind,.va .msg .t,.va .msg .via{color:var(--dim);font-size:12px}
+.va .msg .acts{margin-left:auto}
+.va .msg .acts button{border:0;background:none;color:var(--dim);font-size:12px;padding:0}
+.va .msg .acts button:hover{color:var(--violet)}
+.va .msg .txt{font-size:14px;line-height:1.65;color:#dfe3ea;margin-top:6px;max-width:68ch;overflow-wrap:anywhere;white-space:pre-wrap}
+.va .reply{display:flex;gap:6px;font-size:12px;color:var(--violet);margin-top:4px;text-decoration:none;min-width:0}
+.va .reply b{font-weight:400;flex:none;white-space:nowrap}
+.va .reply span{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.va .trunc{display:block;font-size:12px;color:#c4b5fd;margin-top:6px}
+.va .atts{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.va .rc{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;font-size:11.5px;color:var(--dim)}
+.va .rc span{display:inline-flex;align-items:center;gap:5px}
+.va .rc i{width:7px;height:7px;border-radius:50%;background:var(--c)}
+.va .box{border:1px solid var(--line2);border-radius:8px;padding:10px 12px;margin-top:8px;background:#0e1426;font-size:13px;overflow-wrap:anywhere}
+.va .box .k{font:500 12px var(--mono);color:var(--violet)}
+.va .loading{color:var(--dim);font-size:13px;padding:24px 0}
+
+/* composer */
+.composer{position:sticky;bottom:0;margin-top:20px;padding:14px 0 6px;background:linear-gradient(transparent,var(--bg) 22px)}
+.composer .wrap{border:1px solid var(--line2);border-radius:10px;background:#0e1426;padding:10px 12px}
+.composer .wrap:focus-within{border-color:#6366f1}
+.composer .to{font-size:12px;color:var(--violet);display:flex;gap:8px;align-items:center;margin-bottom:6px}
+.composer .to button{border:0;background:none;color:var(--dim);padding:0 2px}
+.composer textarea{width:100%;min-height:58px;max-height:40vh;resize:vertical;border:0;background:none;outline:none;font-size:14px;line-height:1.55}
+.composer .bar{display:flex;align-items:center;gap:10px;margin-top:6px;flex-wrap:wrap}
+.seg{display:inline-flex;border:1px solid var(--line2);border-radius:7px;overflow:hidden}
+.seg button{border:0;background:none;font:500 11.5px var(--mono);padding:5px 9px;color:var(--muted)}
+.seg button.on{background:#1a2139;color:var(--text)}
+.composer .bytes{font:400 11.5px var(--mono);color:var(--dim)}
+.composer .bytes.spill{color:#c4b5fd}.composer .bytes.over{color:var(--bad)}
+.composer .hint{margin-left:auto;font-size:11.5px;color:var(--dim)}

@@ -1,0 +1,10 @@
+/* inbox items */
+.va .item{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:12px;padding:13px 14px;border:1px solid var(--line);border-radius:9px;margin-bottom:8px;background:#0e1426;text-decoration:none}
+.va .item:hover{border-color:var(--line2);background:#111833}
+.va .item.read{opacity:.62}
+.va .item .who{font-size:13.5px;font-weight:600}
+.va .item .meta{font-size:12px;color:var(--dim);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.va .item .ex{font-size:13.5px;color:#cbd5e1;line-height:1.55;margin-top:6px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere}
+.va .item .rs{display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+.va .item .new{width:8px;height:8px;border-radius:50%;background:var(--grad)}
+

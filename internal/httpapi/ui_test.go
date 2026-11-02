@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -10,11 +11,12 @@ import (
 
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/testhub"
+	"github.com/XertroV/vecnet/internal/ui"
 )
 
-// uiMaxBytes is the page budget (plan Task 19): the HTML and every asset it
-// loads, with no build step.
-const uiMaxBytes = 60 << 10
+// uiMaxBytes caps the sum of every file in the UI, which ships with no build
+// step (raised from 60 KiB by operator UI Task 7).
+const uiMaxBytes = 256 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
@@ -23,6 +25,14 @@ var (
 	styleAttr   = regexp.MustCompile(`(?i)<[^>]+\sstyle\s*=`)
 	handlerAttr = regexp.MustCompile(`(?i)<[^>]+\son[a-z]+\s*=`)
 	stylesheet  = regexp.MustCompile(`(?i)<link\b[^>]*\bhref\s*=\s*"([^"]+)"`)
+	moduleType  = regexp.MustCompile(`(?i)\btype\s*=\s*"module"`)
+	// Bodies are untrusted (PROTOCOL §14.2), so nothing may parse a string into
+	// markup or code.
+	htmlSinks = []*regexp.Regexp{
+		regexp.MustCompile(`\binnerHTML\b`), regexp.MustCompile(`\bouterHTML\b`),
+		regexp.MustCompile(`\binsertAdjacentHTML\b`), regexp.MustCompile(`\bdocument\s*\.\s*write`),
+		regexp.MustCompile(`\beval\s*\(`), regexp.MustCompile(`\bnew\s+Function\b`),
+	}
 )
 
 // mustCSP fails unless resp carries a Content-Security-Policy that confines
@@ -92,14 +102,13 @@ func TestUIServedAndCSPNoInline(t *testing.T) {
 		assets = append(assets, m[1])
 	}
 
-	// Every asset is same-origin, served under /ui/ without auth, carries the
-	// CSP, and the whole page (HTML + assets) stays under 60 KB.
-	total := len(body)
+	// Every asset is same-origin, served under /ui/ without auth, and carries
+	// the CSP.
 	for _, a := range assets {
 		if strings.Contains(a, "//") || strings.HasPrefix(a, "/") {
 			t.Fatalf("asset %q is not relative to /ui/", a)
 		}
-		resp, b := env.Do("", "GET", "/ui/"+a, nil)
+		resp, _ := env.Do("", "GET", "/ui/"+a, nil)
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("GET /ui/%s = %d, want 200", a, resp.StatusCode)
 		}
@@ -114,17 +123,13 @@ func TestUIServedAndCSPNoInline(t *testing.T) {
 			t.Fatalf("GET /ui/%s lacks X-Content-Type-Options: nosniff", a)
 		}
 		mustCSP(t, resp, "GET /ui/"+a)
-		total += len(b)
-	}
-	if total >= uiMaxBytes {
-		t.Fatalf("UI is %d bytes (HTML + %v), want < %d", total, assets, uiMaxBytes)
 	}
 
-	// The operator UI never takes a secret in the URL: app.js sends it only
+	// The operator UI never takes a secret in the URL: api.js sends it only
 	// as a bearer header (PROTOCOL §2: a secret MUST NOT appear in a URL).
-	_, js := env.Do("", "GET", "/ui/app.js", nil)
+	_, js := env.Do("", "GET", "/ui/api.js", nil)
 	if !strings.Contains(string(js), "Authorization") || !strings.Contains(string(js), "X-Vecnet-Ingress") {
-		t.Fatal("app.js does not send Authorization and X-Vecnet-Ingress headers")
+		t.Fatal("api.js does not send Authorization and X-Vecnet-Ingress headers")
 	}
 
 	// /ui without the slash redirects to the page.
@@ -188,5 +193,116 @@ func TestUINotFoundIsErrorEnvelope(t *testing.T) {
 		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 			t.Fatalf("GET %s Content-Type = %q, want application/json", p, ct)
 		}
+	}
+}
+
+// staticFiles returns every embedded UI file by name.
+func staticFiles(t *testing.T) map[string][]byte {
+	t.Helper()
+	files := map[string][]byte{}
+	err := fs.WalkDir(ui.Files(), ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := fs.ReadFile(ui.Files(), p)
+		files[p] = b
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no embedded UI files")
+	}
+	return files
+}
+
+// TestUIStaticNoHTMLSinks: a peer-supplied string can only reach the page as
+// text, because no module holds a way to turn a string into markup or code.
+func TestUIStaticNoHTMLSinks(t *testing.T) {
+	seen := 0
+	for name, b := range staticFiles(t) {
+		if !strings.HasSuffix(name, ".js") {
+			continue
+		}
+		seen++
+		for _, re := range htmlSinks {
+			if loc := re.FindIndex(b); loc != nil {
+				t.Errorf("%s holds %q: %.80s", name, b[loc[0]:loc[1]], b[loc[0]:])
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no .js files checked")
+	}
+}
+
+// TestUIStaticNoInline: the page holds no markup the CSP would block, its one
+// script is an ES module loaded by src, and each target is served with the
+// right type.
+func TestUIStaticNoInline(t *testing.T) {
+	env := testhub.Start(t)
+	page := string(staticFiles(t)["index.html"])
+	if page == "" {
+		t.Fatal("index.html is empty or missing")
+	}
+	for _, re := range []*regexp.Regexp{styleTag, styleAttr, handlerAttr} {
+		if loc := re.FindStringIndex(page); loc != nil {
+			t.Fatalf("inline markup the CSP blocks (%s): %.120s", re, page[loc[0]:])
+		}
+	}
+	scripts := scriptTag.FindAllStringSubmatch(page, -1)
+	if len(scripts) != 1 {
+		t.Fatalf("index.html has %d scripts, want one entry module", len(scripts))
+	}
+	m := srcAttr.FindStringSubmatch(scripts[0][1])
+	if m == nil || m[1] != "app.js" {
+		t.Fatalf("script %q does not load app.js by src", scripts[0][0])
+	}
+	if !moduleType.MatchString(scripts[0][1]) {
+		t.Fatalf("script %q is not type=module", scripts[0][0])
+	}
+	if strings.TrimSpace(scripts[0][2]) != "" {
+		t.Fatalf("script %q has an inline body", scripts[0][0])
+	}
+	sheets := stylesheet.FindAllStringSubmatch(page, -1)
+	if len(sheets) == 0 {
+		t.Fatal("index.html links no stylesheet")
+	}
+	targets := map[string]string{"app.js": "text/javascript"}
+	for _, s := range sheets {
+		targets[s[1]] = "text/css"
+	}
+	// A module is only reachable through an import, so check all of them too:
+	// a browser refuses a module served with the wrong type.
+	for name := range staticFiles(t) {
+		switch {
+		case strings.HasSuffix(name, ".js"):
+			targets[name] = "text/javascript"
+		case strings.HasSuffix(name, ".css"):
+			if _, linked := targets[name]; !linked {
+				t.Errorf("%s is not linked from index.html", name)
+			}
+		}
+	}
+	for target, want := range targets {
+		resp, _ := env.Do("", "GET", "/ui/"+target, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET /ui/%s = %d, want 200", target, resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, want) {
+			t.Errorf("GET /ui/%s Content-Type = %q, want %s", target, ct, want)
+		}
+	}
+}
+
+// TestUIUnderSizeCap sums every file, not just what the page links.
+func TestUIUnderSizeCap(t *testing.T) {
+	total := 0
+	for _, b := range staticFiles(t) {
+		total += len(b)
+	}
+	if total > uiMaxBytes {
+		t.Fatalf("UI is %d bytes, want at most %d", total, uiMaxBytes)
 	}
 }

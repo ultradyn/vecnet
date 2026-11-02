@@ -16,7 +16,7 @@ import (
 var static embed.FS
 
 // CSP confines the page to the hub's own origin and forbids inline script
-// and style, so every script lives in app.js and every rule in app.css.
+// and style, so every script and stylesheet is a file under static/.
 const CSP = "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; " +
 	"img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; " +
 	"form-action 'self'; frame-ancestors 'none'"
