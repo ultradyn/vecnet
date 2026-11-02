@@ -159,15 +159,15 @@ type chatScreen struct {
 	top     int    // first message drawn
 	fileIdx int    // which of the selected message's files s saves
 
-	drafts  map[string]*chatDraft
-	readTo  map[string]string // newest message each thread was marked read at, once the hub said so
+	drafts map[string]*chatDraft
+	readTo map[string]string // newest message each thread was marked read at, once the hub said so
 	// readAsk is the mark in flight per thread, and readFailed the newest
 	// message of a mark that failed. A failed mark waits for the thread to be
 	// opened or loaded again, not the next tick, so a hub that keeps failing
 	// sees one POST per reload rather than a storm.
 	readAsk, readFailed map[string]string
-	answers map[string]chatAnswerState
-	prompt  *opapi.OpenApproval // the approval waiting for its digit
+	answers             map[string]chatAnswerState
+	prompt              *opapi.OpenApproval // the approval waiting for its digit
 
 	overlay          chatOverlay
 	matrixX, matrixY int
