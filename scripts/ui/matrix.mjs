@@ -75,6 +75,18 @@ try {
       const st = await page.locator(`dialog.mx .mx-b[data-dly="${c.delivery_id}"]`).getAttribute('data-state');
       assert(st === c.display, `cell ${c.delivery_id} shows ${st}, hub says ${c.display}`);
     }
+    // The attribute is not the colour: each state's cell paints its st-* token.
+    const paints = await page.evaluate(states => states.map(state => {
+      const cell = document.querySelector(`dialog.mx button.mx-b[data-state="${state}"]`);
+      const probe = document.createElement('i');
+      probe.className = 'st-' + state;
+      probe.style.background = 'var(--c)';
+      document.body.append(probe);
+      const want = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return { state, got: getComputedStyle(cell).backgroundColor, want };
+    }), [...new Set(cells.map(c => c.display))]);
+    for (const p of paints) assert(p.got === p.want && p.want !== 'rgba(0, 0, 0, 0)', `${p.state} cell paints ${p.got}, token is ${p.want}`);
     const selfCells = before.rows.reduce((n, r) => n + (before.recipients.includes(r.sender) ? 1 : 0), 0);
     assert(selfCells > 0 && await page.locator('dialog.mx .mx-b.st-self').count() === selfCells, 'sender cells are not hatched');
     for (const label of ['queued', 'pushed', 'accepted', 'read', 'processed', 'dead letter', 'sender']) {
@@ -134,6 +146,28 @@ try {
     assert(await page.locator('img').count() === 0, 'an excerpt became an element');
     await page.keyboard.press('Escape');
     await page.locator('dialog.mx').waitFor({ state: 'detached' });
+
+    // Review Focus 4: a 401 on another request signs the shell out. The matrix
+    // must go with it, not stay modal over an inert sign-in card.
+    allowConsole(/status of 401/);
+    await page.evaluate(id => { location.hash = '#matrix/' + id; }, hark);
+    await page.locator('dialog.mx[open] .mx-grid').waitFor();
+    await fail('**/v1/events*', 401, 'unauthenticated', 'Secret rotated');
+    const wake = await asPeer('codex', 'POST', '/v1/messages', { idempotency_key: 'mx-401', thread_id: hark, priority: 'wake', content: { text: 'after rotation' } });
+    assert(wake.ok, `wake send failed: ${wake.status}`);
+    await page.locator('#login').waitFor({ state: 'visible' });
+    await page.locator('dialog.mx').waitFor({ state: 'detached' });
+    const login = await page.evaluate(() => {
+      const s = document.getElementById('secret'), r = s.getBoundingClientRect();
+      return {
+        modal: !!document.querySelector('dialog[open]'),
+        focused: document.activeElement === s,
+        hit: document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === s,
+      };
+    });
+    assert(!login.modal && login.hit && login.focused, `sign-in card is not usable after a 401: ${JSON.stringify(login)}`);
+    await page.locator('#secret').fill('vn_operator_typed');
+    ok('a 401 elsewhere closes the matrix and leaves sign-in usable');
   });
 
   await withScaleDemo(async ctx => {

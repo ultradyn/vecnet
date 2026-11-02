@@ -66,6 +66,18 @@ export function openMatrix(threadId, ctx) {
     if (focus && opener && opener.isConnected && typeof opener.focus === 'function') opener.focus();
   }
   const self = { threadId, finish };
+  // The shell signing out (a 401 on any request, or Sign out) hides #app and
+  // aborts the pump, so nothing would ever reload this matrix. The modal sits
+  // on <body>, outside #app, and would stay over an inert sign-in card; close
+  // it and hand focus to the field the sign-in card tried to focus.
+  function endSession() {
+    finish({ nav: false, focus: false });
+    const login = document.getElementById('login');
+    const input = login && !login.hidden && login.querySelector('input');
+    if (input) input.focus();
+  }
+  const shell = document.getElementById('app');
+  const signedOut = () => !!shell && shell.hidden;
   const onHash = () => { if (location.hash !== route) finish({ nav: false, focus: true }); };
 
   function cellLabel(id) { return nameOf(id) + ' · ' + id; }
@@ -147,7 +159,7 @@ export function openMatrix(threadId, ctx) {
     heading.replaceChildren('Delivery matrix', h('span', { class: 'mx-thr', text: summary ? title(summary, ctx.me, nameOf) : short(threadId), title: threadId }));
     const value = res.get(), err = res.error(), loading = res.loading();
     // A rotated secret signs the shell out; the dialog must not linger over it.
-    if (err && err.status === 401) { finish({ nav: false, focus: false }); return; }
+    if (signedOut() || (err && err.status === 401)) { endSession(); return; }
     if (value) {
       if (value !== shown) { shown = value; renderGrid(value); }
     } else if (err) {
@@ -184,6 +196,11 @@ export function openMatrix(threadId, ctx) {
   if (ctx.threads) subs.push(ctx.threads.subscribe(render));
   // A renamed peer redraws its column and rows.
   if (ctx.peers) subs.push(ctx.peers.subscribe(() => { shown = undefined; render(); }));
+  if (shell) {
+    const watch = new MutationObserver(() => { if (signedOut()) endSession(); });
+    watch.observe(shell, { attributes: true, attributeFilter: ['hidden'] });
+    subs.push(() => watch.disconnect());
+  }
   if (done) return;
   dialog.showModal();
   closeBtn.focus();
