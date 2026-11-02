@@ -38,6 +38,11 @@ try {
     };
     const chipCount = n => page.waitForFunction(n => document.querySelectorAll('.compose .up-chip').length === n, n);
     const doneCount = n => page.waitForFunction(n => document.querySelectorAll('.compose .up-chip.up-done').length === n, n);
+    const inlineImage = async name => {
+      const img = page.locator('.msg button.thumb').getByRole('img', { name, exact: true });
+      await img.waitFor();
+      assert(await img.evaluate(async img => { await img.decode(); return img.naturalWidth > 0; }), `${name} did not decode inline`);
+    };
     // attempt clicks Send and waits until that request is answered or fails
     // and the form is editable again.
     const attempt = async () => {
@@ -142,8 +147,9 @@ try {
     assert(req.attachments.map(a => a.name).join('|') === names.concat('dashboard.png').join('|'), `attachment order was ${req.attachments.map(a => a.name)}`);
     assert(req.attachments.every(a => /^[0-9a-f]{64}$/.test(a.sha256) && a.size > 0 && a.media_type), 'an attachment lacked its hash, size or type');
     await page.locator('.msg .txt', { hasText: body }).waitFor();
-    for (const name of ['deploy-log.txt', 'dashboard.png']) await page.locator('.msg .att', { hasText: name }).waitFor();
-    await page.locator('.msg .att', { hasText: /^pasted-/ }).waitFor();
+    await page.locator('.msg .att', { hasText: 'deploy-log.txt' }).waitFor();
+    await inlineImage('dashboard.png');
+    await inlineImage(names[1]);
     await shot('att03-compose-success');
 
     // Error: one chip's upload refused with a faked 413 blob_too_large.
@@ -222,7 +228,7 @@ try {
     assert(r1.status === 202 && r2.status === 200, `the lost send and its retry answered ${r1.status} then ${r2.status}, not 202 then a 200 replay`);
     assert(r2.body.message_id === r1.body.message_id && r2.body.thread_id === r1.body.thread_id, 'the retry under the same key made a second message');
     assert(r3.status === 202 && r3.body.message_id !== r1.body.message_id, 'the body without the removed chip did not make a new message');
-    await page.locator('.msg .att', { hasText: 'trimmed.png' }).waitFor();
+    await inlineImage('trimmed.png');
     const thr = (await page.evaluate(() => location.hash)).slice('#thread/'.length);
     assert(thr === r3.body.thread_id, `the landed send opened ${thr}, not the replayed ${r3.body.thread_id}`);
     const messagesIn = async t => {
