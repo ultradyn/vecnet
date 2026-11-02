@@ -46,3 +46,14 @@ Working name **launcher** (peer kind `launcher`, a `launch` job). "Source" is al
 - i. A launched agent's main comms are its parent (the requester), in its own thread.
 - j. Approval relays: pagd only.
 - k. Launcher users on build boxes get their own outbound firewall rule.
+
+## Max's answers to the design note's open questions (2026-11-03)
+1. xsm ceiling: allow `full-access` or `auto` for any requester, to keep things simple at this stage.
+2. Build-box T3: under Max's user for now too, like xsm.
+3. Model auth: **not** per-uid logins. Route model traffic through **LLMP**, or **CLIProxyAPI** for Claude only. Focus on the non-Claude harnesses first.
+4. Launched-peer cap: disabled peers must **not** count toward the cap unless they can be deleted. Running ~200 launches a day must be fine; what's bounded is how many run at once. (This changes issue 28.)
+5. Cap fresh `expires_at` at 7 days: yes.
+6. Locked-thread exception for the bound session peer: rec.
+7. Home: `connectors/launcher/` in vecnet4, sharing the openclaw hub client: rec.
+8. Idle defaults (park 30 min; settle 2 h opaque / 24 h observable; wrap-up turn opt-in): rec.
+9. Fix the failed Paseo units and the paseo-bot setting before P2: rec.
