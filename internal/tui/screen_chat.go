@@ -86,8 +86,8 @@ const (
 // chatAttempt is what was last offered to the hub. While the composer still
 // holds exactly this, a retry reuses the key: the hub replays a send it already
 // took, and a changed body under one key would be idempotency_conflict.
-// shas is the attachments' sha256s joined with ",", in order, so a changed
-// attachment list is a new request too (PROTOCOL §5.3).
+// shas is chatShas of the chips: each attachment's wire fields, in order, so a
+// changed attachment list is a new request too (PROTOCOL §5.3).
 type chatAttempt struct{ text, prio, reply, shas string }
 
 // chatDraft is one thread's composer.
@@ -607,12 +607,15 @@ func (s *chatScreen) send(m *Model, d *chatDraft) tea.Cmd {
 	}
 }
 
-// chatShas is the attempt's view of the chips. A chip still uploading stands
-// in by its id, so adding one during a send is a change, though it has no hash.
+// chatShas is the attempt's view of the chips: every wire field of each done
+// chip, in order, so the same bytes under another name or media type are a
+// new request and mint a new key (PROTOCOL §5.3). A chip still uploading
+// stands in by its id, so adding one during a send is a change, though it
+// has no hash. Quoting keeps one chip's fields from running into the next.
 func chatShas(atts []chatAtt) string {
 	parts := make([]string, len(atts))
 	for i, att := range atts {
-		parts[i] = att.sha
+		parts[i] = fmt.Sprintf("%s %d %q %q", att.sha, att.size, att.media, att.name)
 		if att.state != chatAttDone {
 			parts[i] = "chip:" + strconv.Itoa(att.id)
 		}
@@ -880,7 +883,9 @@ func (s *chatScreen) onUploaded(msg chatUploadedMsg, m *Model) {
 		if isStatus(msg.err, 401) {
 			m.reject(msg.err)
 		}
-		att.state, att.err = chatAttFailed, chatUploadWhy(m, msg.err)
+		// The hub's (or a proxy's) error text is untrusted: cleaned before
+		// it reaches lipgloss.
+		att.state, att.err = chatAttFailed, Clean(chatUploadWhy(m, msg.err))
 		m.Toast(fmt.Sprintf("upload of %s failed: %s; :detach %d removes it", att.name, att.err, i+1), true)
 		return
 	}

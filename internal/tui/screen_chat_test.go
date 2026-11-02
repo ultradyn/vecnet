@@ -2392,3 +2392,70 @@ func TestAttachTooLargeFromHub(t *testing.T) {
 		})
 	}
 }
+
+// A chip replaced by the same bytes under another name (and so another media
+// type) is a different request body: after a lost answer the next send must
+// mint a new key, or the hub refuses it as 409 idempotency_conflict.
+func TestReattachSameBytesNewNameMintsNewKey(t *testing.T) {
+	a, m, p := chatOpen(t)
+	chatAttach(p, chatAttFile(t, "a.txt", "same"))
+	chatAttsSettled(t, p, m, 1)
+	a.fail("Send", errors.New("connection refused"))
+	d := chatOf(m).draft(chatHark)
+	settled := func(n int) {
+		t.Helper()
+		p.until(fmt.Sprintf("send %d", n), func() bool { return len(a.sends()) == n && !d.sending })
+	}
+	p.press("i", "enter")
+	settled(1)
+	p.press("esc")
+	submit(p, "detach 1")
+	chatAttach(p, chatAttFile(t, "b.txt", "same"))
+	chatAttsSettled(t, p, m, 1)
+	p.press("i", "enter")
+	settled(2)
+	p.press("esc")
+	submit(p, "detach 1")
+	chatAttach(p, chatAttFile(t, "b.bin", "same"))
+	chatAttsSettled(t, p, m, 1)
+	p.press("i", "enter")
+	settled(3)
+	p.press("enter") // unchanged: the same request
+	settled(4)
+	sent := a.sends()
+	if sent[0].Attachments[0].SHA256 != sent[2].Attachments[0].SHA256 || sent[1].Attachments[0].Name != "b.txt" || sent[2].Attachments[0].MediaType != "application/octet-stream" {
+		t.Fatalf("attachments %+v, %+v, %+v", sent[0].Attachments, sent[1].Attachments, sent[2].Attachments)
+	}
+	if sent[1].IdempotencyKey == sent[0].IdempotencyKey {
+		t.Fatal("a new name on the same bytes kept the key")
+	}
+	if sent[2].IdempotencyKey == sent[1].IdempotencyKey {
+		t.Fatal("a new media type on the same bytes kept the key")
+	}
+	if sent[3].IdempotencyKey != sent[2].IdempotencyKey {
+		t.Fatal("an unchanged retry minted a new key")
+	}
+}
+
+// A hub or proxy error is untrusted: the failed chip shows it cleaned, with no
+// escape sequence, bidi control or line break reaching the frame.
+func TestAttachHostileUploadErrorCleaned(t *testing.T) {
+	a, m, p := chatOpen(t)
+	hostile := "evil\x1b]8;;http://x.example/\x07link\x1b]8;;\x07 \x1b[31mred\x1b[0m ‮desrever‬\nsecond line"
+	a.fail("Upload", &opclient.Error{Status: 500, Code: "boom\x1b[2J", Message: hostile})
+	chatAttach(p, chatAttFile(t, "x.bin", "bytes"))
+	chatAttsSettled(t, p, m, 1)
+	att := chatAttsOf(m)[0]
+	if att.state != chatAttFailed {
+		t.Fatalf("chip %+v", att)
+	}
+	for _, bad := range []string{"\x1b", "\x07", "‮", "‬", "\n"} {
+		if strings.Contains(att.err, bad) || strings.Contains(att.chip(chatAttNameMax), bad) {
+			t.Fatalf("chip error keeps %q: %q", bad, att.err)
+		}
+	}
+	if !strings.Contains(att.err, "evil") || !strings.Contains(att.err, "second line") {
+		t.Fatalf("chip error lost its text: %q", att.err)
+	}
+	wantFrame(t, chatFrame(t, m), "[x] x.bin: boom")
+}
