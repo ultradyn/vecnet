@@ -176,6 +176,8 @@ try {
     // The quota thread's budget is exhausted: a banner names it, the text stays.
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, quota);
     await page.locator('.msg .txt', { hasText: 'exhausted its message budget' }).waitFor();
+    // The snapshot already says the budget is spent: the banner shows before a send.
+    await page.locator('.composer .cbanner.budget', { hasText: 'you raise the budget' }).waitFor();
     const ask = 'Can we raise the budget on this one?';
     await ta.fill(ask);
     await ta.press('Enter');

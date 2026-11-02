@@ -95,6 +95,21 @@ export function items(messages, matrix, openApprovals) {
   });
 }
 
+// budgetBanner is the composer's notice for a thread with no budget left. It
+// speaks to the operator, who is the one able to raise it, and names how.
+export function budgetBanner() {
+  return {
+    kind: 'budget',
+    text: 'Thread budget exhausted: 0 messages left. The hub refuses new messages here until you raise the budget with the admin thread PATCH (PROTOCOL §2.12), or start a new thread.',
+  };
+}
+
+// budgetOut is whether a thread summary says its budget is spent, so the
+// banner shows before a send is refused, not only after.
+export function budgetOut(t) {
+  return !!t && t.budget_remaining === 0;
+}
+
 // sendError says what the composer shows for a failed send, and whether the
 // next attempt keeps the idempotency key: a lost or throttled send might have
 // landed, so it must be retried under the same key; a definite rejection will
@@ -104,12 +119,7 @@ export function items(messages, matrix, openApprovals) {
 export function sendError(e) {
   const status = e && e.status, code = (e && e.code) || 'error', message = (e && e.message) || '';
   const keepKey = !status || status >= 500 || status === 429;
-  if (code === 'thread_budget_exhausted') {
-    return {
-      kind: 'budget', keepKey,
-      text: 'Thread budget exhausted: 0 messages left in this thread’s budget. The hub refuses new messages here until the operator raises the budget.',
-    };
-  }
+  if (code === 'thread_budget_exhausted') return { ...budgetBanner(), keepKey };
   let text = code + ': ' + message;
   const retry = e && e.details && e.details.retry_after_seconds;
   if (code === 'rate_limited' && Number.isFinite(retry)) text += ' (retry after ' + retry + ' s)';

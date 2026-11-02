@@ -4,7 +4,7 @@
 import { answerBody, countdown } from './approvals.js';
 import { avatar, h } from './dom.js';
 import { bytes, clean, plural, short, title, when } from './format.js';
-import { canShowFull, excerpt, FULL_TEXT_CAP, items, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, excerpt, FULL_TEXT_CAP, items, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
 
 const PAGE = 200, MAX_PAGES = 50, PIN_SLACK = 80;
 const enc = new TextEncoder();
@@ -351,9 +351,10 @@ export function mount(root, ctx) {
     tick();
 
     const banner = comp.querySelector('.cbanner');
-    banner.hidden = !S.banner;
-    banner.className = 'cbanner' + (S.banner ? ' ' + S.banner.kind : '');
-    banner.textContent = S.banner ? S.banner.text : '';
+    const shown = S.banner || (budgetOut(t) ? budgetBanner() : null);
+    banner.hidden = !shown;
+    banner.className = 'cbanner' + (shown ? ' ' + shown.kind : '');
+    banner.textContent = shown ? shown.text : '';
     const participants = t && t.participants;
     comp.querySelector('.join').hidden = !participants || participants.includes(me);
     const to = comp.querySelector('.to'), target = all.find(m => m.message_id === S.replyTo);

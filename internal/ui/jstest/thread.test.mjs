@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { canShowFull, FULL_TEXT_CAP, items, sendError, spillOf } from '../static/thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, FULL_TEXT_CAP, items, sendError, spillOf } from '../static/thread-model.js';
 
 const OP = 'peer_op', CODEX = 'peer_codex', SLEUTH = 'peer_sleuth', GROK = 'peer_grok';
 
@@ -175,4 +175,16 @@ test('sendError names the budget, keeps code: message, and adds Retry-After', ()
   assert.equal(sendError(err(429, 'rate_limited', 'x')).keepKey, true);
   assert.equal(sendError(err(422, 'thread_budget_exhausted', 'x')).keepKey, false);
   assert.equal(sendError(err(403, 'scope_denied', 'x')).keepKey, false);
+});
+
+test('the budget banner speaks to the operator and shows before a refused send', () => {
+  const b = budgetBanner();
+  assert.equal(b.kind, 'budget');
+  assert.match(b.text, /0 messages left/);
+  assert.match(b.text, /you raise the budget/);
+  assert.doesNotMatch(b.text, /the operator/);
+  assert.equal(budgetOut({ budget_remaining: 0 }), true);
+  assert.equal(budgetOut({ budget_remaining: 3 }), false);
+  assert.equal(budgetOut({ budget_remaining: null }), false);
+  assert.equal(budgetOut(null), false);
 });
