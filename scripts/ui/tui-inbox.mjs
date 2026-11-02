@@ -75,23 +75,23 @@ try {
     await shot('18-tui-inbox-success');
     assert(!(await inbox()).approvals.some(a => a.approval_id === first.approval_id), 'the hub still holds the approval open');
 
-    // Another client answers the second approval. Nothing tells this client, so
-    // its row is still live under the operator's finger (Review Focus 2).
+    // Another client answers while this client's prompt is open. Its
+    // operator_view refresh must close the prompt without sending an answer
+    // (Review Focus 2). Go tests also pin the late-send 422 race.
+    await waitFor('Proceed with the hosting plan?');
+    await keys('a');
+    await waitFor('any other key cancels');
     const other = await asPeer('operator', 'POST', '/v1/messages', {
       idempotency_key: 'other-client', thread_id: second.thread_id, in_reply_to: second.message_id, recipients: [second.requester],
       kind: 'approval_response', priority: 'wake', content: { text: 'no' },
       approval_response: { approval_id: second.approval_id, decision: 'no' },
     });
     assert(other.ok, `other client: ${other.status}`);
-    await waitFor('Proceed with the hosting plan?');
-    await keys('a');
-    await waitFor('any other key cancels');
-    await keys('1');
-    await waitFor('approval already closed');
+    await waitFor('approval closed before you answered: nothing sent');
     await shot('18-tui-inbox-error');
     await waitFor('apr 0');
     await noApr('Proceed with the hosting plan?');
-    assert(!(await screen()).includes('answered:'), 'the operator was told a closed approval landed');
+    assert(!(await screen()).includes('answered: ' + second.options[0]), 'the operator was told a closed approval landed');
 
     await keys('p');
     await waitFor('max@vecnet · idle');

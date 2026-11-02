@@ -260,7 +260,7 @@ func TestInboxGolden(t *testing.T) {
 	frame := plainAt(t, m, 140, 42)
 	assertFrame(t, frame, 140, 42)
 	for _, want := range []string{
-		"inbox 12 items · apr 2 · dlq 3", "your event log", "detail",
+		fmt.Sprintf("inbox 12 items · %d unread · apr 2 · dlq 3", m.Data.Inbox.Unread), "your event log", "detail",
 		"APR", "DLQ", "SUB", "WAKE", "HOLD", "exp 11:39", "exp 18:59",
 		"dot-research", "503", "paused_token", "e1.10401", "presence", "receipt", "✓✓ processed", "codex-hark updated location, quota",
 		"Spend about 20% of my weekly quota", "[1] yes", "[2] no", "press a to answer",
@@ -1513,6 +1513,33 @@ func TestInboxActionsStopWhenRejected(t *testing.T) {
 	for _, name := range []string{"SetPresence", "Answer", "RetryDeadLetter", "DiscardDeadLetter", "ReadThread"} {
 		if f.count(name) != 0 {
 			t.Errorf("%s reached the hub", name)
+		}
+	}
+}
+
+func TestInboxUnread(t *testing.T) {
+	for _, unread := range []int{3, 0} {
+		frame := inboxAt(t, func(in *opapi.Inbox) { in.Unread = unread }, 0, 140, 42)
+		header := strings.Split(frame, "\n")[1]
+		if want := fmt.Sprintf("%d unread", unread); !strings.Contains(header, want) {
+			t.Errorf("header %q lacks %q", header, want)
+		}
+	}
+}
+
+func TestInboxOperatorViewLog(t *testing.T) {
+	m, _ := inboxLoaded(t, inboxSeed(), newClock())
+	for _, tc := range []struct {
+		thread any
+		want   string
+	}{
+		{"thr_01JD3S6G8J0M2P4R6T8V0XP5R", "read thr_…XP5R"},
+		{nil, "read"},
+	} {
+		m.Data.Events = []envelope.Event{event(t, "e1.123", "operator_view", map[string]any{"reason": "read", "thread_id": tc.thread})}
+		frame := plainAt(t, m, 140, 42)
+		if !strings.Contains(frame, "operator_view") || !strings.Contains(frame, tc.want) {
+			t.Errorf("missing operator_view %q:\n%s", tc.want, frame)
 		}
 	}
 }

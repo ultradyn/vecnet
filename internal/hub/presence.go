@@ -95,8 +95,9 @@ func (h *Hub) SetPresence(ctx context.Context, c auth.Caller, asPeer string, p P
 		peer = snd.peer
 		var capsRaw, quotaRaw string
 		var loc sql.NullString
-		if err := tx.QueryRowContext(ctx, `SELECT capabilities, quota, location FROM peers WHERE peer_id = ?`, peer).
-			Scan(&capsRaw, &quotaRaw, &loc); err != nil {
+		var oldState, oldAt *string
+		if err := tx.QueryRowContext(ctx, `SELECT capabilities, quota, location, presence_state, presence_at FROM peers WHERE peer_id = ?`, peer).
+			Scan(&capsRaw, &quotaRaw, &loc, &oldState, &oldAt); err != nil {
 			return fmt.Errorf("hub: presence peer: %w", err)
 		}
 		caps := p.Capabilities
@@ -167,6 +168,15 @@ func (h *Hub) SetPresence(ctx context.Context, c auth.Caller, asPeer string, p P
 			}
 		}
 		notify = subs
+		if snd.kind == "operator" &&
+			h.EffectivePresence(PresenceRow{Kind: snd.kind, State: oldState, At: oldAt}, nowT) !=
+				h.EffectivePresence(PresenceRow{Kind: snd.kind, State: &p.State, At: &pres.At}, nowT) {
+			operators, err := h.noteOperatorView(ctx, tx, "presence", "")
+			if err != nil {
+				return err
+			}
+			notify = append(notify, operators...)
+		}
 		if len(changed) > 0 {
 			dirChanged = true
 			return h.DirectoryUpdated(ctx, tx, peer, "updated", changed)

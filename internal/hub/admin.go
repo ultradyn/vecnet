@@ -590,7 +590,8 @@ func unknownDeadLetter(dly string) *APIError {
 // of PushAttempts attempts. A delivery that is not a dead letter is 404
 // not_found. Callers kick the push worker.
 func (h *Hub) RetryDeadLetter(ctx context.Context, dly string) error {
-	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
+	var notify []string
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		now := h.nowStr()
 		res, err := tx.ExecContext(ctx,
 			`UPDATE deliveries SET state = 'queued', attempts_left = ?, next_attempt_at = ?, held = 0, updated_at = ?
@@ -601,14 +602,27 @@ func (h *Hub) RetryDeadLetter(ctx context.Context, dly string) error {
 		if n, _ := res.RowsAffected(); n != 1 {
 			return unknownDeadLetter(dly)
 		}
-		return audit.Record(ctx, tx, "operator", "dead_letter_retry", []string{dly}, nil)
+		if err := audit.Record(ctx, tx, "operator", "dead_letter_retry", []string{dly}, nil); err != nil {
+			return err
+		}
+		var thread string
+		if err := tx.QueryRowContext(ctx, `SELECT thr_id FROM deliveries WHERE dly_id = ?`, dly).Scan(&thread); err != nil {
+			return err
+		}
+		notify, err = h.noteOperatorView(ctx, tx, "dead_letter", thread)
+		return err
 	})
+	if err == nil && len(notify) > 0 {
+		h.Log.Notify(notify...)
+	}
+	return err
 }
 
 // DiscardDeadLetter moves dead letter dly to the terminal state discarded;
 // it is no longer listed. Not a dead letter: 404 not_found. Audited.
 func (h *Hub) DiscardDeadLetter(ctx context.Context, dly string) error {
-	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
+	var notify []string
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE deliveries SET state = 'discarded', next_attempt_at = NULL, updated_at = ?
 			 WHERE dly_id = ? AND state = 'dead_letter'`, h.nowStr(), dly)
@@ -618,8 +632,20 @@ func (h *Hub) DiscardDeadLetter(ctx context.Context, dly string) error {
 		if n, _ := res.RowsAffected(); n != 1 {
 			return unknownDeadLetter(dly)
 		}
-		return audit.Record(ctx, tx, "operator", "dead_letter_discard", []string{dly}, nil)
+		if err := audit.Record(ctx, tx, "operator", "dead_letter_discard", []string{dly}, nil); err != nil {
+			return err
+		}
+		var thread string
+		if err := tx.QueryRowContext(ctx, `SELECT thr_id FROM deliveries WHERE dly_id = ?`, dly).Scan(&thread); err != nil {
+			return err
+		}
+		notify, err = h.noteOperatorView(ctx, tx, "dead_letter", thread)
+		return err
 	})
+	if err == nil && len(notify) > 0 {
+		h.Log.Notify(notify...)
+	}
+	return err
 }
 
 // ThreadPatch is a PATCH /v1/admin/threads/{id} body. A *Set flag means
