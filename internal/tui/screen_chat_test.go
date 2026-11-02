@@ -371,11 +371,7 @@ func assertChatInert(t *testing.T, raw string) {
 	}
 }
 
-func typeText(p *pump, text string) {
-	for _, r := range text {
-		p.send(tea.KeyPressMsg{Code: r, Text: string(r)})
-	}
-}
+// typeText is shared with cmdline_test.go (Task 22), which declares it.
 
 func pressTab(p *pump) { p.send(tea.KeyPressMsg{Code: tea.KeyTab}) }
 
