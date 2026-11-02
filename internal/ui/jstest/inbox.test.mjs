@@ -89,17 +89,19 @@ test('heldWhy explains hold vs wake_idle', () => {
 // and next_before names the last row of a full page.
 function fakeHub(n) {
   const id = i => 'dly_' + String(i).padStart(3, '0');
+  const read = new Set();
   let top = n;
   const all = () => Array.from({ length: top }, (_, i) => id(top - i));
   return {
     all,
     deliver: (count = 1) => { top += count; },
+    read: dly => read.add(dly),
     page: (limit, before) => {
       let rows = all();
       if (before) rows = rows.slice(rows.indexOf(before) + 1);
       const more = rows.length > limit;
       rows = rows.slice(0, limit);
-      return { approvals: [], dead_letters: [], attention: [], deliveries: rows.map(r => delivery(r, 'held', 'hold')), next_before: more ? rows[limit - 1] : null };
+      return { approvals: [], dead_letters: [], attention: [], deliveries: rows.map(r => ({ ...delivery(r, 'held', 'hold'), read_at: read.has(r) ? '2026-11-02T00:00:00.000Z' : null })), next_before: more ? rows[limit - 1] : null };
     },
   };
 }
@@ -182,4 +184,23 @@ test('withOlder keeps the first copy of a row two pages share', () => {
   assert.deepEqual(ids(merged), ['dly_9', 'dly_8', 'dly_7']);
   assert.equal(merged.deliveries[1].read_at, '2026-11-02T01:10:00.000Z');
   assert.equal(merged.next_before, null);
+});
+
+test('a refresh re-reads every loaded page even when the chain still joins, so read state is not stale', async () => {
+  const hub = fakeHub(120);
+  const head = hub.page(50);
+  const pages = [{ ...hub.page(50, head.next_before), before: head.next_before }];
+  // Another client reads a delivery on the second page: no cursor moves.
+  hub.read('dly_060');
+  const head2 = hub.page(50);
+  assert.equal(chainBreak(head2, pages), -1);
+  const reads = [];
+  const fetchPage = before => { reads.push(before); return hub.page(50, before); };
+  const plain = await follow(head2, pages, fetchPage);
+  assert.equal(plain.pages, pages, 'a joined chain is kept as is without refresh');
+  const { pages: fresh, error } = await follow(head2, pages, fetchPage, { refresh: true });
+  assert.equal(error, null);
+  assert.deepEqual(reads, [head2.next_before]);
+  const row = withOlder(head2, fresh).deliveries.find(d => d.delivery_id === 'dly_060');
+  assert.ok(row && row.read_at, 'the second page still shows dly_060 unread');
 });

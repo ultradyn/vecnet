@@ -249,6 +249,19 @@ try {
       await page.locator('#view a.item', { hasText: 'Newest note' }).waitFor();
       await matchHub(await hubRows(), 'rows out of order after the head moved');
       console.log('ok - load older keeps every row while new deliveries shift the head');
+
+      // Reading an older-page delivery from another client moves no cursor,
+      // yet its row must stop showing unread without a reload (§2.13).
+      const deep = page.locator('#view a.item:not(.read)', { hasText: /^.*Older note \d+/ }).last();
+      const deepId = await deep.getAttribute('data-id');
+      const hubDeep = (await (await asPeer('operator', 'GET', '/v1/admin/inbox?limit=200')).json()).deliveries.find(d => d.delivery_id === deepId);
+      assert(hubDeep && !hubDeep.read_at, 'the older-page row is not unread on the hub');
+      const headIds = (await (await asPeer('operator', 'GET', '/v1/admin/inbox?limit=50')).json()).deliveries.map(d => d.delivery_id);
+      assert(!headIds.includes(deepId), 'the check wants a row below the head page');
+      const marked = await asPeer('operator', 'POST', `/v1/admin/threads/${hubDeep.thread_id}/read`);
+      assert(marked.ok, `mark read: ${marked.status}`);
+      await page.locator(`#view a.item.read[data-id="${deepId}"]`).waitFor();
+      console.log('ok - a read in another client reaches a loaded older page');
     }
   });
   console.log('Inbox passed: one POST per answer, closed approvals, expiry, dead-letter actions, hostile text, load older, no CSP violations');

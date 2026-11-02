@@ -5,7 +5,7 @@
 import { answerBody, countdown } from './approvals.js';
 import { avatar, confirmButton, h } from './dom.js';
 import { ago, short, when } from './format.js';
-import { chainBreak, deadLetterParts, follow, heldWhy, sections, withOlder } from './inbox-model.js';
+import { deadLetterParts, follow, heldWhy, sections, withOlder } from './inbox-model.js';
 import * as presence from './presence.js';
 import * as subs from './subs.js';
 
@@ -34,7 +34,9 @@ export function mount(root, ctx) {
   // "Load older" pages, each with the cursor it was read with. They follow
   // the head: a reload that shifts it re-reads them before the page redraws.
   let older = [];
-  let olderBusy = false, following = null, shown = {}, alive = true;
+  // followed is the head the older pages were last read under. Every new head
+  // re-reads them, because a read elsewhere changes read_at, not the cursors.
+  let olderBusy = false, following = null, followed = null, shown = {}, alive = true;
 
   const attention = h('div', { class: 'attention', id: sectionId('attention') });
   const banner = h('div', { class: 'banner error', role: 'alert', hidden: true });
@@ -195,7 +197,7 @@ export function mount(root, ctx) {
       // A head reload meanwhile may have moved the tail; the redraw offers
       // "Load older" again from wherever it is now.
       const tail = older.length ? older[older.length - 1].next_before : (inbox.get() || {}).next_before;
-      if (!following && tail === before) older = [...older, { ...page, before }];
+      if (!following && tail === before) { older = [...older, { ...page, before }]; followed = inbox.get(); }
       render(true);
     } catch (e) {
       btn.disabled = false;
@@ -203,10 +205,10 @@ export function mount(root, ctx) {
     } finally { olderBusy = false; }
   }
 
-  // The head reloaded and the older pages no longer join it: read them again
-  // from its tail, then redraw once, so no row goes missing between them and
-  // the page does not shrink and regrow meanwhile. A newer head cancels this
-  // pass and starts its own.
+  // The head reloaded: read the older pages again from its tail, then redraw
+  // once, so no row goes missing between them, their read state is current,
+  // and the page does not shrink and regrow meanwhile. A newer head cancels
+  // this pass and starts its own.
   async function followHead(value) {
     if (following === value) return;
     following = value;
@@ -214,9 +216,10 @@ export function mount(root, ctx) {
     const { pages, error } = await follow(value, older, async before => {
       if (stale()) throw stale;
       return api.inbox({ limit: PAGE, before });
-    });
+    }, { refresh: true });
     if (stale()) return;
     following = null;
+    followed = value;
     older = pages;
     if (error) ctx.toast(describe(error), true);
     render(true);
@@ -250,7 +253,7 @@ export function mount(root, ctx) {
       return;
     }
 
-    if (chainBreak(value, older) >= 0) { followHead(value); return; }
+    if (older.length && followed !== value) { followHead(value); return; }
     following = null;
     const data = withOlder(value, older), nowMs = store.hubNow();
     const byKey = new Map(sections(data).map(s => [s.key, s]));

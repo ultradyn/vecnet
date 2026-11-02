@@ -103,8 +103,12 @@ export function withOlder(inbox, pages) {
 // read again from the right cursor with fetchPage(before). A failed read
 // keeps what joined so far and reports the error; nothing older than the
 // head's tail is ever dropped silently, because withOlder pages on from there.
-export async function follow(inbox, pages, fetchPage) {
-  const k = chainBreak(inbox, pages);
+//
+// With refresh, every loaded page is read again from the head's tail even when
+// the chain still joins: a read in another client changes read_at, not the
+// cursors, and the older pages must show it too.
+export async function follow(inbox, pages, fetchPage, { refresh = false } = {}) {
+  const k = refresh && pages.length ? 0 : chainBreak(inbox, pages);
   if (k < 0) return { pages, error: null };
   const next = pages.slice(0, k);
   let before = k ? next[k - 1].next_before ?? null : inbox.next_before ?? null;
