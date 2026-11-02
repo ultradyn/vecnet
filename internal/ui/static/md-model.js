@@ -117,13 +117,16 @@ function inlineLines(lines) {
 // Next-occurrence cache: for each delimiter, the next index at or after a
 // position. Every opener asks it instead of rescanning, so a line of a
 // thousand unmatched asterisks costs one scan, not a thousand.
+// ok, when given, is a test on the match position alone (never on the
+// opener), so a cached answer stays right for every later opener.
 function finder(s) {
   const memo = new Map();
-  return (needle, from) => {
-    const c = memo.get(needle);
+  return (needle, from, ok, key = needle) => {
+    const c = memo.get(key);
     if (c !== undefined && (c === -1 || c >= from)) return c;
-    const j = s.indexOf(needle, from);
-    memo.set(needle, j);
+    let j = s.indexOf(needle, from);
+    while (ok && j !== -1 && !ok(j)) j = s.indexOf(needle, j + 1);
+    memo.set(key, j);
     return j;
   };
 }
@@ -141,8 +144,7 @@ export function inline(s, depth = 0) {
       let n = 1;
       while (s[i + n] === '`') n++;
       const tick = '`'.repeat(n);
-      let j = find(tick, i + n);
-      while (j !== -1 && j - i <= SPAN && (s[j + n] === '`' || s[j - 1] === '`')) j = s.indexOf(tick, j + 1);
+      const j = find(tick, i + n, k => s[k + n] !== '`' && s[k - 1] !== '`', 'close' + tick);
       if (j !== -1 && j - i <= SPAN) {
         flush();
         let v = s.slice(i + n, j);
@@ -174,8 +176,7 @@ export function inline(s, depth = 0) {
       const before = i > 0 ? s[i - 1] : ' ';
       // Opens only before a non-space; _ never opens inside a word (snake_case).
       if (after && after !== ' ' && after !== c && !(c === '_' && /\w/.test(before))) {
-        let j = find(mark, i + mark.length);
-        while (j !== -1 && j - i <= SPAN && (s[j - 1] === ' ' || (!dbl && s[j + 1] === c) || (c === '_' && /\w/.test(s[j + mark.length] || '')))) j = s.indexOf(mark, j + 1);
+        const j = find(mark, i + mark.length, k => s[k - 1] !== ' ' && (dbl || s[k + 1] !== c) && !(c === '_' && /\w/.test(s[k + mark.length] || '')), 'close' + mark);
         if (j !== -1 && j - i <= SPAN && j > i + mark.length) {
           flush();
           out.push({ t: dbl ? 'b' : 'i', kids: inline(s.slice(i + mark.length, j), depth + 1) });
