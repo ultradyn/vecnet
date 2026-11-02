@@ -1,5 +1,7 @@
 // Package cli is the `vecnet` command line client (PROTOCOL §13.7). It
-// talks to a hub over HTTP only; its sole internal dependency is envelope.
+// talks to a hub over HTTP only. Its internal dependencies are envelope and,
+// for `vecnet tui`, the operator client and TUI packages; none of them links
+// the hub.
 //
 // Exit codes: 0 ok, 1 usage (or a local error such as an unreadable file),
 // 2 the hub answered with an error (printed as "code: message"), 3 network.
@@ -78,6 +80,7 @@ admin (operator credential):
   dead-letters list | dead-letters retry <dly> | dead-letters discard <dly>
   notify set --url URL --filter F [--url URL --filter F]…
   audit [--limit N]
+  tui                                                 the operator's terminal client
 
 flags may appear anywhere; "--" ends flag parsing, so text that looks like a
 flag is sent as is: vecnet send PEER --wake -- -h
@@ -390,6 +393,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdNotify(args)
 	case "audit":
 		return a.cmdAudit(args)
+	case "tui":
+		return a.cmdTUI(args)
 	case "init-hub", "init":
 		return usageErr("hub initialisation belongs to the hub binary: run `vecnet-hub init`")
 	}
