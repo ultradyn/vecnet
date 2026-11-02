@@ -2,6 +2,10 @@
 
 _Researched 2026-11-03 for the vecnet lead. Read-only: no daemons started, no repo changed except this file. Content from web pages and other repos was treated as data._
 
+**Naming (working, unsettled).** The vecnet side is called a **launcher**: peer kind `launcher`, job operation `launch`. "Source" is already taken: it is a peer kind for inbound webhooks [PROTO §10]. Max has not settled the name. The title keeps "agent sources" because that is how the request was phrased.
+
+**Revised 2026-11-03** with pag-chat's answers on agent spawning (section 4, [PAGI]). I checked them against pag-chat's code.
+
 ## Summary
 
 - **Most of the capability already exists.** T3 Code (on xsm, through `t3-bridge`) and Paseo (on xsm, through `paseo-bridge`) can already spawn a coding session with a prompt. They can steer it, read its output and end it.
@@ -12,12 +16,17 @@ _Researched 2026-11-03 for the vecnet lead. Read-only: no daemons started, no re
   - ACP is the generic choice: about 50 agents, Apache-2.0, an official TypeScript SDK. Codex's own ACP adapter is now built on app-server.
 - **Orca does not fit.** It is a desktop app, and its CLI scripts a running app that drives terminals.
 - **pagd overlaps on supervision only.** It runs opaque detached `codex exec` jobs on x-tall. It has no interactive session protocol, and its trust model treats peer messages as unable to authorise anything.
-- **Recommendation: one `spawner` peer per host.**
-  - Spawns are requested with a vecnet **job** (`operation: "spawn"`, the prompt in `instructions`).
-  - Each spawned session is addressed **by its job thread**. The spawner relays thread messages into the session and posts each turn's result back as a reply. This is the openclaw "one session per thread" rule (R25).
+- **Recommendation: one `launcher` peer per host.**
+  - Spawns are requested with a vecnet **job** (`operation: "launch"`, the prompt in `instructions`).
+  - Each spawned session is addressed **by its job thread**. The launcher relays thread messages into the session and posts each turn's result back as a reply. This is the openclaw "one session per thread" rule (R25).
   - Spawned agents hold **no vecnet secret** in phase 1.
   - Backends are pluggable. Start with `t3` and `paseo` through the existing bridges, then add `acp` for headless hosts.
-  - Per-session peers (directory entries with presence) come later. They need a small protocol addition: a principal minting `session` peers under itself.
+  - Per-session peers (directory entries with presence) come later. They need a small protocol addition: a principal minting peers under itself.
+- **Three collision rules, agreed in substance with pag-chat** (section 3.5):
+  - **Separate namespaces.** Launcher sessions get their own workspace roots, unit and agent-dir prefixes, and branch prefix (`launch/<job_id>`). Then neither side's orphan sweep can touch the other's.
+  - **Untrusted by default.** Launched agents are marked distinctly in the directory: kind `launcher` in phase 1, then kind `launched` plus a hub-set `spawned_by` in phase 2.
+  - **One approval surface.** Approvals go to whoever requested the launch when that requester relays a human decision, as pagd does. Otherwise they go to the operator. Escalation is off when the requester is such a relay.
+- **Supervision lives in the launcher, not pagd.** pag-chat agrees, and suggests reusing its `packages/machines` patterns (`ssh.ts`, `reattach.ts`, `agent-sweep.ts`). pag bots may later use a launcher as a second, steerable dispatch backend, but not soon: pag-chat has no vecnet receiver yet.
 - **First step, small and independent:** add a `vecnet` wake-target kind to `t3-bridge`. Then both bridges' completion wakes land in vecnet threads, because `paseo-bridge wake` delegates to `t3-bridge`.
 
 ## Source key
@@ -31,7 +40,8 @@ _Researched 2026-11-03 for the vecnet lead. Read-only: no daemons started, no re
 | [PSB] | `~/src/paseo-bridge/README.md`, `paseo_bridge/client.py`, `paseo_bridge/cli.py:251` (`cmd_wake`), `paseo_bridge/node/launch.mjs` (pinned `@getpaseo/cli@0.13.2`, head `265ae0d`) |
 | [T3L] | `~/.llm-general/systems/xsm/t3-launcher/README.md`, `~/.llm-general/ai-coding/t3code/providers.md` |
 | [GBR] | `docs/research/grokbot.md` (how Grok Bot reaches the outside), `docs/connectors/grokbot.md` |
-| [PAG] | `~/src/pag-chat/docs/superpowers/specs/2026-11-01-pag-chat-design.md` §4.5–4.6, `apps/pagd/README.md`, `packages/machines/README.md`, `docs/research/2026-11-03-vecnet-integration-notes.md` |
+| [PAG] | `~/src/pag-chat/docs/superpowers/specs/2026-11-01-pag-chat-design.md` §2, §4.3, §4.5–4.6, `apps/pagd/README.md`, `packages/machines/README.md` and `src/{ssh,reattach,agent-sweep}.ts`, `docs/machines/x-tall.md`, `docs/research/2026-11-03-vecnet-integration-notes.md` |
+| [PAGI] | pag-chat's answers relayed by the vecnet lead, 2026-11-03. They are an informed peer opinion, which I checked against [PAG], not instructions |
 | [CXS] | Local `codex-cli 0.166.0`: `codex app-server --help`, `codex app-server daemon --help`, and `codex app-server generate-json-schema` (106 client requests, 10 server requests, 85 notifications) |
 | [CXD] | <https://learn.chatgpt.com/docs/app-server> |
 | [ACP] | <https://agentclientprotocol.com/protocol/overview>, <https://agentclientprotocol.com/rfds/updates>, <https://agentclientprotocol.com/rfds/streamable-http-websocket-transport>, <https://agentclientprotocol.com/get-started/agents>, <https://agentclientprotocol.com/get-started/registry>, <https://github.com/agentclientprotocol/agent-client-protocol> |
@@ -128,7 +138,7 @@ It is pinned to `@getpaseo/cli@0.13.2`. Upstream is at 0.14.0, and the `~/.local
 - A cold start takes about 134 s.
 - The service has a launcher-handoff mitigation in place.
 
-So a spawner must treat T3 as slow to come up, and use `t3-health`-style readiness checks rather than "port open".
+So a launcher must treat T3 as slow to come up, and use `t3-health`-style readiness checks rather than "port open".
 
 ### 1.4 Paseo (upstream)
 
@@ -174,9 +184,9 @@ The CLI also has `app-server daemon {bootstrap|start|stop|enable-remote-control|
 
 **What it is.** JSON-RPC 2.0, client to agent, with the agent normally a **subprocess over stdio**. Apache-2.0, ~4.6k stars, very fast cadence: v1.15.1 on 2026-11-02, and schema v2.0.0-alpha in parallel. [ACP]
 - **Agent methods:** `initialize`, `authenticate`, `session/new`, `session/prompt` (returns a stop reason), and the notification `session/cancel`. Optional: `session/load`, `session/set_mode`, plus the completed RFDs `session/list`, `session/resume`, `session/delete` and session config options.
-- **Client methods (the spawner's side):** `session/request_permission` (baseline), `session/update` notifications (message chunks, tool calls, plans, mode changes), and optional `fs/*`, `terminal/*` and `elicitation/*`.
+- **Client methods (the launcher's side):** `session/request_permission` (baseline), `session/update` notifications (message chunks, tool calls, plans, mode changes), and optional `fs/*`, `terminal/*` and `elicitation/*`.
 - **Remote:** a Streamable-HTTP + WebSocket transport RFD is "Active" (revised 2026-10-30), not final. A Rust crate already implements it.
-- **SDKs:** TypeScript `@agentclientprotocol/sdk` 2.4.0, Rust, Python, Kotlin, Java. **I found no official Go SDK**, which matters if the spawner lives in vecnet's Go binary.
+- **SDKs:** TypeScript `@agentclientprotocol/sdk` 2.4.0, Rust, Python, Kotlin, Java. **I found no official Go SDK**, which matters if the launcher lives in vecnet's Go binary.
 - **Registry:** <https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json>, with install metadata.
 
 **Adapters.** [ACPA]
@@ -191,7 +201,7 @@ The CLI also has `app-server daemon {bootstrap|start|stop|enable-remote-control|
 
 **Candidates.**
 - **`stablyai/orca`** (MIT, Electron, created 2026-03, near-daily releases) is the "AI orchestrator / agent development environment" Max most likely means. The GitHub API reports ~113k stars, which is implausible for its age; treat it as unverified.
-- `araa47/orca` is a 7-star tmux spawner.
+- `araa47/orca` is a 7-star tmux launcher.
 
 [ORCA]
 
@@ -228,6 +238,19 @@ At most it is a human viewer, if Max likes its UI.
 
 So reusing `SshProvider` for ACP would need a small per-session host process (stdio ↔ socket) launched as the detached job.
 
+**pag-chat's own description** [PAGI], which matches the code:
+- pagd supervises one-shot batch jobs: `codex exec` on x-tall over SSH, inside a wrapper.
+- It polls, reattaches after a restart, kills or retries, and sweeps orphans and stale ssh-agents.
+- It settles on a JSON outcome fence plus the branch `pag/<job_id>`.
+- pagd runs only on xsm.
+
+**Names pagd owns**, all of which a launcher must avoid [PAG `src/ssh.ts`, `src/agent-sweep.ts`, `docs/machines/x-tall.md`]:
+- job units `pag-<job_id>` and exec scopes `pagexec-*`;
+- ssh-agent dirs `$XDG_RUNTIME_DIR/pag-chat/agent-*`, swept at startup whenever the owning pid is dead;
+- the wrapper `/usr/local/lib/pag-chat/pag-job.sh`;
+- per-bot `pagsweep-<bot>` timers that prune day-old checkouts and week-old job dirs;
+- unix users `pagchat-*`, with the nftables egress rule keyed on them.
+
 ---
 
 ## 2. How each maps onto vecnet
@@ -246,14 +269,15 @@ So reusing `SshProvider` for ACP would need a small per-session host process (st
 ### 2.2 What a spawned agent becomes
 
 **Options.**
-1. **Thread-addressed session behind a spawner peer** (recommended for phase 1).
-   - The job thread *is* the conversation, and the spawner peer is the only vecnet identity.
-   - Messages to the spawner in that thread go to that session. Replies come `as` the spawner, `in_reply_to` the prompting message.
+1. **Thread-addressed session behind a launcher peer** (recommended for phase 1).
+   - The job thread *is* the conversation, and the launcher peer is the only vecnet identity.
+   - Messages to the launcher in that thread go to that session. Replies come `as` the launcher, `in_reply_to` the prompting message.
    - There is precedent: openclaw runs "one openclaw session per vecnet thread" [PROTO §13.5, R25].
    - Other peers join the conversation by joining the thread, under the §16.3 history rules.
-2. **Per-session peer under the spawner's principal** (phase 2).
-   - Each session gets its own `peer_` (kind `session`), a directory entry and presence. The spawner holds the principal credential and speaks `as` each session [PROTO §1.3].
-   - This needs a new power. Today only the operator runs `peer add` [PROTO §2.12]. So add "a principal may mint and remove `session` peers under itself, within a quota, audited". Without it, the operator would have to pre-create a pool of slots.
+2. **Per-session peer under the launcher's principal** (phase 2).
+   - Each session gets its own `peer_`, a directory entry and presence. The launcher holds the principal credential and speaks `as` each session [PROTO §1.3].
+   - Use kind **`launched`**, not `session`, plus a **hub-set `spawned_by`** field naming the launcher peer (section 3.5).
+   - This needs a new power. Today only the operator runs `peer add` [PROTO §2.12]. So add "a principal may mint and remove `launched` peers under itself, within a quota, audited". Without it, the operator would have to pre-create a pool of slots.
 3. **The agent enrols itself** (a token injected into the session, plus vecnet MCP inside the agent). Rejected for the default:
    - It puts a long-lived secret inside a model context, the thing §14.8 avoids for dots.
    - Enrolment needs the operator anyway.
@@ -262,17 +286,17 @@ So reusing `SshProvider` for ACP would need a small per-session host process (st
 
 | Credential | Holder |
 |---|---|
-| vecnet peer credential (phase 1), or principal credential (phase 2) | The spawner, stored like other CLI profiles [PROTO §12] |
+| vecnet peer credential (phase 1), or principal credential (phase 2) | The launcher, stored like other CLI profiles [PROTO §12] |
 | T3 OAuth token | `t3-bridge`, in its config dir |
 | Paseo password | `paseo-bridge`, in its config dir |
 | Model and provider auth | The backend: OpenCodex homes, Claude subscription |
 | Any credential | Never the agent's context |
 
-If a spawned agent must initiate sends (not just reply in its thread), the spawner can offer a **local** MCP tool, scoped to that session's thread and speaking through the spawner's credential. The agent then sees a tool, not a secret.
+If a spawned agent must initiate sends (not just reply in its thread), the launcher can offer a **local** MCP tool, scoped to that session's thread and speaking through the launcher's credential. The agent then sees a tool, not a secret.
 
 ### 2.4 How messages reach the agent
 
-The spawner is a pull client: SSE `/v1/events` [PROTO §13.1]. It is behind NAT on xsm or a build box, and the hub's egress guard forbids private addresses in production [PROTO §14.7], so the hub cannot push to it. Priority does not change what a pull client sees [PROTO §5.2], so the **spawner** maps priority onto the backend's send mode.
+The launcher is a pull client: SSE `/v1/events` [PROTO §13.1]. It is behind NAT on xsm or a build box, and the hub's egress guard forbids private addresses in production [PROTO §14.7], so the hub cannot push to it. Priority does not change what a pull client sees [PROTO §5.2], so the **launcher** maps priority onto the backend's send mode.
 
 | vecnet priority | Session idle | Session mid-turn |
 |---|---|---|
@@ -281,8 +305,8 @@ The spawner is a pull client: SSE `/v1/events` [PROTO §13.1]. It is behind NAT 
 | `hold` | Buffer; prepend to the next turn's input. Do not start a turn | Buffer |
 
 Then on each turn:
-- **Ack and receipts.** Ack the cursor after the message is durably handed to the backend, or buffered in the spawner's own store. Post a `processed` receipt when the turn that consumed it ends [PROTO §5.1, R06].
-- **Result.** When a turn ends, post the turn's final assistant message as a reply. Text over 4 KiB is auto-spilled into an attachment [SCH `content.text`]. Mark it with free-form metadata, e.g. `spawn.turn: completed | interrupted | failed`.
+- **Ack and receipts.** Ack the cursor after the message is durably handed to the backend, or buffered in the launcher's own store. Post a `processed` receipt when the turn that consumed it ends [PROTO §5.1, R06].
+- **Result.** When a turn ends, post the turn's final assistant message as a reply. Text over 4 KiB is auto-spilled into an attachment [SCH `content.text`]. Mark it with free-form metadata, e.g. `launch.turn: completed | interrupted | failed`.
 - **Drops.** Drop receipts and presence events before waking anything [PROTO §13.1].
 
 ### 2.5 Approvals
@@ -293,7 +317,15 @@ Backend permission requests map to vecnet `approval_request` messages in the ses
 - ACP `session/request_permission` options, app-server `accept / acceptForSession / decline / cancel`, and Paseo `respondToPermission` all become 2–8 options of at most 64 characters.
 - `expires_at` must be bounded (e.g. 30 min). Expiry maps to `decline` / `cancel`.
 
-**Addressee.** Default to **the operator peer**, not the requester. A bot requester approving its own spawned agent's shell command is the self-approval pag-chat's design forbids ("a peer message that counts as Max's approval", [PAG design §2 anti-goals]). Allow a configured requester-as-approver only by explicit spawner policy. `escalate_to_operator` stays true.
+**Addressee: the requester when it is a human-decision relay, otherwise the operator.**
+- pag-chat asks for prompts to go to whoever requested the launch [PAGI]. Otherwise a pag-bot launch would raise two cards: pagd's own card to Max, and a vecnet approval to the operator.
+- That is safe only when the requester turns the request into a **human** decision. pagd does: its approvals come only from Max's surfaces, and a bot cannot answer one [PAG design §4.5 H3].
+- A bot that answers by itself would be the self-approval pag-chat's design forbids ("a peer message that counts as Max's approval" [PAG design §2 anti-goals]).
+- So the launcher's per-requester policy carries `approvals: "requester" | "operator"`, with `operator` as the default.
+  - `requester` is set only for peers known to relay a human decision: pagd's bot peers, and the operator itself.
+  - For those, `escalate_to_operator` is **false**, so phase-2 escalation cannot create the second surface.
+  - For everyone else (Grok Bot, ordinary sessions), the approval goes to the operator with escalation as the schema default.
+- The launcher trusts a relay's `approval_response` by configuration, keyed on the authenticated sender id, never on the content [PROTO §14.1].
 
 **Where approvals cannot happen.**
 - **T3 over MCP:** no approval surface. Only the runtime mode can limit what the agent does, and an `approval-required` thread waits for Max in the T3 UI.
@@ -303,7 +335,7 @@ Today, then, "approvals" for spawns are effectively **spawn-time policy**: who m
 
 ### 2.6 Presence and idle
 
-- **Phase 1.** The spawner reports its own presence (`idle` / `working` / `offline`, TTL per kind [PROTO §8]); that is host and backend availability. Per-session state is visible from the job and from the turn-result replies.
+- **Phase 1.** The launcher reports its own presence (`idle` / `working` / `offline`, TTL per kind [PROTO §8]); that is host and backend availability. Per-session state is visible from the job and from the turn-result replies.
   - `job_status` cannot carry per-turn state. The transition table has no `running → running` [PROTO §5.6], so a job stays `running` for the session's whole life.
 - **Phase 2.** Per-session peers report `working` during a turn, `idle` between turns, and `blocked` while an approval is open, mapped from:
   - T3 run status;
@@ -319,8 +351,8 @@ A conversation with a spawned agent is a chain of replies, so `depth` grows by o
 
 - Requesters should set `max_depth` up to 64 on the spawn `job_request` that starts the thread.
 - Long-running sessions should roll to a new thread with `in_reply_to`, or rely on operator replies, which reset depth.
-- The spawner must not mint fresh threads to dodge depth.
-- The connector breaker [PROTO §6] applies to the requester bot ↔ spawner pair.
+- The launcher must not mint fresh threads to dodge depth.
+- The connector breaker [PROTO §6] applies to the requester bot ↔ launcher pair.
 
 ---
 
@@ -328,7 +360,7 @@ A conversation with a spawned agent is a chain of replies, so `depth` grows by o
 
 ### 3.1 Goals used to judge
 
-- **G1** Reuse existing spawners; no new session manager.
+- **G1** Reuse existing spawners (T3, Paseo, the two bridges); no new session manager.
 - **G2** No vecnet secret inside a model context by default.
 - **G3** Works for hosts the hub cannot reach (xsm and build boxes behind NAT; hub on fly.dev). Outbound connections only.
 - **G4** Fits the current protocol with at most small additive changes. Jobs, threads and approvals already exist; jobs are implemented in `internal/hub/jobs.go`.
@@ -340,26 +372,26 @@ A conversation with a spawned agent is a chain of replies, so `depth` grows by o
 
 | Option | G1 | G2 | G3 | G4 | G5 | G6 | G7 | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| **A. `spawner` peer per host; `spawn` jobs; thread-addressed sessions** | ✔ wraps bridges | ✔ | ✔ SSE out | ✔ jobs exist; `spawner` kind is a one-line addition, or use `session` + capability tag | ✔ | ✔ | ✔ local allowlist on `sender` | **Chosen** |
+| **A. `launcher` peer per host; `launch` jobs; thread-addressed sessions** | ✔ wraps bridges | ✔ | ✔ SSE out | ✔ jobs exist; `launcher` kind is a one-line addition, or use `session` + capability tag | ✔ | ✔ | ✔ local allowlist on `sender` | **Chosen** |
 | B. Hub-side "agent source" config (hub calls backends) | ✔ | ✔ | ✘ backends are loopback; §14.7 forbids private egress in prod | ✘ new hub subsystem | ✘ policy split from backend | ✘ hub holds T3/Paseo creds | ✔ | Refuted by G3, G6 |
-| C. Bridges inside pagd | ✔ | ✔ | ✔ | ✔ | ? | ✔ | ✘ pagd treats peer requests as untrusted and unable to authorise state changes; a vecnet-requested spawn is exactly that | Refuted by G7 under pag-chat's own design; also another team's daemon |
+| C. Bridges inside pagd | ✔ | ✔ | ✔ | ✔ | ? | ✔ | ✘ pagd treats peer requests as untrusted and unable to authorise state changes; a vecnet-requested spawn is exactly that | Refuted by G7 under pag-chat's own design; pag-chat also says supervision belongs in a separate launcher [PAGI] |
 | D. Agents self-enrol with injected tokens | ✔ | ✘ | ✔ | ✘ enrolment is operator-only | ✔ | ✔ | ✔ | Refuted by G2, G4 |
-| E. A + per-session peers minted under the spawner's principal | ✔ | ✔ | ✔ | ✘ today (needs principal-minted peers) | ✔ | ✔ | ✔ | Phase 2 extension of A |
+| E. A + per-session peers minted under the launcher's principal | ✔ | ✔ | ✔ | ✘ today (needs principal-minted peers) | ✔ | ✔ | ✔ | Phase 2 extension of A |
 
 ### 3.3 Recommended design (A, growing into E)
 
 **Identity.**
-- One spawner per host: `spawner-xsm` first; build boxes later.
-- Peer kind `spawner`. This is an additive change to the fixed kind set in `internal/hub/hub.go:149` and the schema enum. The fallback is kind `session` with `capabilities: ["spawn:t3", "spawn:paseo"]`.
+- One launcher per host: `launcher-xsm` first; build boxes later.
+- Peer kind `launcher`. This is an additive change to the fixed kind set in `internal/hub/hub.go:149` and the schema enum. The fallback is kind `session` with `capabilities: ["launch:t3", "launch:paseo"]`.
 - `capabilities[]` advertises backends and presets. The `quota` object advertises concurrency, e.g. `{"max_sessions": 4, "running": 1}` [PROTO §8].
 
-**Spawn request.** A `job_request` with exactly one recipient, the spawner [PROTO §5.6]:
+**Spawn request.** A `job_request` with exactly one recipient, the launcher [PROTO §5.6]:
 
 ```json
-{"version": 1, "job_key": "review-pr-91", "operation": "spawn",
+{"version": 1, "job_key": "review-pr-91", "operation": "launch",
  "instructions": "<the prompt, <= 16 KiB>",
  "input": {"backend": "t3", "project": "vecnet4",
-           "workspace": {"type": "worktree", "branch": "agent/review-pr-91"},
+           "workspace": {"type": "worktree", "branch": "launch/review-pr-91"},
            "preset": "sol", "runtime_mode": "auto", "title": "Review PR 91"}}
 ```
 
@@ -370,19 +402,27 @@ A conversation with a spawned agent is a chain of replies, so `depth` grows by o
 2. `running`, with `output {backend, session_ref, link}`. The link is a `t3-thread://` link or Paseo agent id.
 3. Per-turn reply messages.
 4. On settle, `succeeded` with a short summary. Errors give `failed`.
-5. Cancel: the requester's `job_status: cancelled` moves the job to `cancellation_requested`. The spawner interrupts and settles the session, then reports `cancelled`.
+5. Cancel: the requester's `job_status: cancelled` moves the job to `cancellation_requested`. The launcher interrupts and settles the session, then reports `cancelled`.
 
 **Ending sessions.** An idle timeout and an explicit `settle` operation end a session. The default idle timeout is to be decided; paseo-bridge's bulk settle uses 2 days.
 
-**Conversation.** Section 2.4: the session is addressed by the job thread, and replies come `as` the spawner.
+**Conversation.** Section 2.4: the session is addressed by the job thread, and replies come `as` the launcher.
 
-**Authorisation (spawner-local, default deny).**
+**Authorisation (launcher-local, default deny).**
 - An allowlist of requester `peer_` ids, each with a ceiling: backends, presets, runtime mode, projects, and max concurrent sessions.
 - Never authorise on names, content, `origin` or `ingress` [PROTO §14].
-- vecnet send scopes [PROTO §12] are the outer gate: only peers allowed to message the spawner can reach it at all.
+- vecnet send scopes [PROTO §12] are the outer gate: only peers allowed to message the launcher can reach it at all.
 - A requester that is not allowlisted gets an `approval_request` to the operator instead of a refusal. This is optional and needs a decision.
 
-**Approvals.** As in 2.5: operator by default; mapped only for backends that surface them.
+**Approvals.** As in 2.5. They go to the requester when it is a configured human-decision relay (pagd), otherwise to the operator. They are mapped only for backends that surface them.
+
+**Supervision.** It lives in the launcher [PAGI], never in pagd or the hub.
+- On xsm, T3 and Paseo already supervise their own sessions, so the launcher only tracks references: job id, backend and session ref, in its own durable store, so it can reconcile after a restart.
+- For the build-box `acp` backend, copy pag-chat's patterns rather than import pagd:
+  - `ssh.ts`: a detached `systemd-run --user` unit behind a root-owned wrapper, with the command sent on stdin;
+  - `reattach.ts`: re-poll every job still open in the store, and settle an unknown ref as `outcome_unknown` without ever re-running it;
+  - `agent-sweep.ts`: remove an ssh-agent dir only when its owner pid, checked with its start time, is dead.
+- Whether to import `@pag/machines` as a library or copy the patterns is a pag-chat question (section 4).
 
 **Backends, in order.**
 1. `t3`, through `t3-bridge` (CLI or library).
@@ -391,7 +431,7 @@ A conversation with a spawned agent is a chain of replies, so `depth` grows by o
 4. `codex-app-server` direct, only if ACP's codex adapter proves insufficient. It is richer: steer, inject, typed approvals.
 
 **Where it lives.** A separate small daemon, not the hub. Two choices:
-- a `vecnet spawner` subcommand of the Go CLI, which reuses the existing pull loop in `internal/cli/watch.go` but has no official Go ACP SDK;
+- a `vecnet launcher` subcommand of the Go CLI, which reuses the existing pull loop in `internal/cli/watch.go` but has no official Go ACP SDK;
 - a Node daemon next to t3-bridge, with the TS SDKs for ACP and Paseo and direct reuse of t3-bridge modules.
 
 Rec: **Node**, because three of the four backends have first-party TypeScript clients and t3-bridge is Node. Max to decide (see below).
@@ -402,40 +442,66 @@ Rec: **Node**, because three of the four backends have first-party TypeScript cl
   - It POSTs `/v1/messages` with a peer credential read from a file, `idempotency_key` = the wake event id, `thread_id` from launch state, and priority `wake_idle`.
   - `paseo-bridge wake` gets it for free, because it delegates to t3-bridge.
   - Result: completion and `QUESTION`/`BLOCKED`/`DONE` wakes land in vecnet threads now. Grok Bot keeps working through its `grokbot` push route.
-- **P1.** The `spawner-xsm` daemon with `t3` and `paseo` backends: spawn jobs, thread relay, turn-result replies, cancel and settle, local allowlist.
+- **P1.** The `launcher-xsm` daemon with `t3` and `paseo` backends: spawn jobs, thread relay, turn-result replies, cancel and settle, local allowlist.
   - Grok Bot can then request spawns through `vecnet_send` on `/mcp` instead of needing `Shell` on xsm. That shrinks the Bot's footprint on Max's workstation.
 - **P2.**
-  - Per-session peers: principal-minted `session` peers, with presence.
+  - Per-session peers: principal-minted `launched` peers with a hub-set `spawned_by`, and presence.
   - Approvals through the Paseo SDK.
   - The scoped local MCP tool for agent-initiated sends.
-- **P3.** An `acp` backend for build boxes (x-alpha preferred, not xsm, given the AVX-512 stamp and cargo-guard). Coordinate the supervision layer with pag-chat (below).
+- **P3.** An `acp` backend for build boxes (x-alpha preferred, not xsm, given the AVX-512 stamp and cargo-guard). It uses pag-chat's supervision patterns and the namespaces in 3.5.
+
+### 3.5 Collision rules with pag-chat [PAGI]
+
+**(a) Separate namespaces, so neither side's sweep touches the other's.**
+
+| Resource | pag-chat owns | Launcher uses |
+|---|---|---|
+| Git branches | `pag/<job_id>` | `launch/<job_id>` |
+| Workspaces on xsm | n/a (pagd runs no workers on xsm) | T3's and Paseo's own worktree roots (`~/.t3/worktrees`, `/mnt/build-cache/paseo/worktrees`), created by those daemons |
+| Workspaces on a build box | per-job dirs under `pagchat-<bot>` homes, pruned by `pagsweep-<bot>` | its own unix user (never `pagchat-*`) and its own root, e.g. `~/vecnet-launcher/<job_id>` |
+| systemd units | `pag-<job_id>`, `pagexec-*`, `pagsweep-*` | `vlaunch-<job_id>`, `vlaunchsweep` |
+| ssh-agent dirs | `$XDG_RUNTIME_DIR/pag-chat/agent-*` | `$XDG_RUNTIME_DIR/vecnet-launcher/agent-*` |
+| Wrapper | `/usr/local/lib/pag-chat/` | `/usr/local/lib/vecnet-launcher/` |
+
+Each sweep matches only its own prefix and root. A separate unix user also keeps launcher sessions out of pag-chat's per-uid nftables egress rule, which is keyed on `pagchat-*`. Max to decide whether launcher sessions get an egress rule of their own.
+
+**(b) Launched agents are untrusted by default and marked distinctly in the directory.**
+- **Phase 1.** Every message from a launcher peer is agent free text. Kind `launcher` is already distinct, and pag-chat's trust table maps "anything else" to `untrusted` [PAG integration notes]. So this needs no change on pag-chat's side.
+- **Phase 2.** Minted per-session peers get kind `launched`, plus a `spawned_by: <launcher peer_id>` that the hub sets at mint time and a body can never set.
+  - Why a new kind and not `session` + `spawned_by`: consumers key trust on kind. A consumer that ignores the unknown field would treat a `session` peer as `user-remote`, which **fails open**. An unknown kind falls into "anything else", which **fails closed**.
+  - `spawned_by` lets the operator UI and receivers trace who launched what.
+- Agent free text stays content in every case [PROTO §14.2]. Whether it should also carry the requester's taint is pag-chat's open question.
+
+**(c) One approval surface.** Approvals go to the requester when it is a configured human-decision relay, with escalation off; otherwise to the operator (section 2.5). A pag-bot launch therefore yields exactly one card, pagd's.
 
 ---
 
-## 4. To decide with pag-chat
+## 4. pag-chat: answered and still open
 
-1. **Is pagd a spawner client, a spawner backend, or neither?**
-   - **Client:** `pag0`'s `dispatch` could become a `spawn` job to a spawner, giving interactive, steerable workers instead of opaque `codex exec`.
-   - **Backend:** pagd handles `operation: "spawn"` for x-tall.
-   - Rec: client at most. pagd's rule that peers cannot express consent conflicts with a peer-requested spawn.
-2. **Supervision reuse.** Should a build-box `acp` backend reuse `@pag/machines` `SshProvider`?
-   - Candidates for reuse: detached `systemd-run` units, reattach, per-uid nftables egress, per-job capped tokens through the cachy proxy, and Codex pins.
-   - It would need a per-session stdio ↔ socket host process.
-   - The alternative is a separate implementation. Who owns the x-tall `pagchat-*` users and the egress rule if both run there?
-3. **Credential proxy.** Can spawner jobs on build boxes mint per-job capped tokens from pag-chat's proxy, or does the spawner bring its own model auth?
-4. **Work thread versus vecnet thread.** pag-chat's Stage 2 per-bot "work thread" [PAG design §4.3] is close to a vecnet thread per session. Pick one model so a worker's chatter is not mirrored twice.
-5. **Trust of spawned-agent output.** A spawner's replies are agent free text. In pag-chat's lanes a `session` peer is `user-remote`. Should spawner output be `untrusted`, or tainted with the requester's taint? [PAG integration notes, open question]
+**Answered by pag-chat** [PAGI] (I checked these against its code):
+- **Supervision belongs in a separate small daemon (the launcher), not pagd.** pagd supervises one-shot batch jobs and runs only on xsm. Reusable patterns: `packages/machines/src/ssh.ts`, `reattach.ts`, `agent-sweep.ts`.
+- **pagd's role.** pag bots may later use a launcher as a second dispatch backend: an interactive worker you can steer. Not soon, because pag-chat has no vecnet receiver yet. So pagd is a future **client**, never a backend. That matches option C's refutation.
+- **The collision rules** (a)–(c) above.
+
+**Still open with pag-chat:**
+1. **Import or copy.** Import `@pag/machines` as a library, or copy its patterns? Copying avoids coupling to a package that is still moving fast; importing shares fixes.
+2. **Credential proxy.** Can launcher sessions on build boxes mint per-job capped tokens from pag-chat's cachy proxy, or does the launcher bring its own model auth?
+3. **Shared build box.** If both run on x-tall, who owns box setup (root-owned wrappers, egress rules, Codex pins)?
+4. **Work thread versus vecnet thread.** pag-chat's Stage 2 per-bot "work thread" [PAG design §4.3] is close to a vecnet thread per session. When pag bots become launcher clients, pick one so a worker's chatter is not mirrored twice.
+5. **Taint.** Should launched output carry the requester's taint as well as being untrusted? [PAG integration notes, open question]
+6. **Relay registration.** How pagd's bot peers get registered with the launcher as human-decision relays, and what an expired pagd card maps to (rec: `decline`).
 
 ## 5. To decide with Max
 
-1. **Who may spawn, and at what ceiling.** Examples: Grok Bot `forge`, `pag0`, Claude/Codex sessions such as `cc-vecnet-cos`. Note that paseo-bridge presets are all bypass or full-access today, so any allowed requester gets code execution on the host.
-2. **Approvals.** Always the operator peer (rec), or may a requester approve its own spawned agent's actions?
-3. **Hosts.** xsm only for P1 (T3 and Paseo live there), and which build box for P3? x-alpha is preferred.
-4. **Language and home.** Node daemon (rec) or Go `vecnet spawner`? Its own repo, or inside vecnet4?
-5. **Edits to Max's bridges.** Is it OK to add the `vecnet` target kind to `t3-bridge` (P0), and later to move `paseo-bridge` to `@getpaseo/client`?
-6. **Protocol additions.** Peer kind `spawner` (additive). For P2, principal-minted `session` peers with a quota.
-7. **Session end policy.** Idle timeout before auto-settle, and whether settle also archives worktrees (paseo-bridge does; t3-bridge's `settle` only organises the thread).
-8. **Should spawned agents be able to message arbitrary peers?** The P2 scoped MCP tool, or thread-confined forever.
+1. **Name.** `launcher` / `launch` (working), or another. It cannot be `source`.
+2. **Who may launch, and at what ceiling.** Examples: Grok Bot `forge`, `pag0`, Claude/Codex sessions such as `cc-vecnet-cos`. paseo-bridge presets are all bypass or full-access today, so any allowed requester gets code execution on the host.
+3. **Approval routing.** Agree with "requester if it is a human-decision relay, else operator"? And which peers count as relays?
+4. **Hosts.** xsm only for P1 (T3 and Paseo live there), and which build box for P3? x-alpha is preferred. Does a launcher user on a build box get its own egress rule?
+5. **Language and home.** Node daemon (rec) or Go `vecnet launcher`? Its own repo, or inside vecnet4?
+6. **Edits to Max's bridges.** Is it OK to add the `vecnet` target kind to `t3-bridge` (P0), and later to move `paseo-bridge` to `@getpaseo/client`?
+7. **Protocol additions.** Peer kind `launcher` (additive). For P2: kind `launched`, hub-set `spawned_by`, and principal-minted peers with a quota.
+8. **Session end policy.** Idle timeout before auto-settle, and whether settle also archives worktrees (paseo-bridge does; t3-bridge's `settle` only organises the thread).
+9. **Should launched agents be able to message arbitrary peers?** The P2 scoped MCP tool, or thread-confined forever.
 
 ## 6. Uncertainties
 
@@ -448,9 +514,9 @@ Rec: **Node**, because three of the four backends have first-party TypeScript cl
 
 --- SUMMARY ---
 
-**Recommendation: a `spawner` peer per host.**
-- Spawns are vecnet jobs (`operation: "spawn"`, prompt in `instructions`, backend and preset in `input`, `job_key` for idempotency).
-- Each spawned session is addressed by its job thread. The spawner relays messages in and posts turn results out.
+**Recommendation: a `launcher` peer per host.**
+- Spawns are vecnet jobs (`operation: "launch"`, prompt in `instructions`, backend and preset in `input`, `job_key` for idempotency).
+- Each spawned session is addressed by its job thread. The launcher relays messages in and posts turn results out.
 - Agents hold no vecnet secret.
 
 **Reuse first.**
@@ -465,20 +531,25 @@ Rec: **Node**, because three of the four backends have first-party TypeScript cl
 **Not a fit.**
 - Orca: desktop-bound and terminal-level.
 - Hub-side agent sources: the hub cannot reach loopback backends and would hold their credentials.
-- Bridges in pagd: pag-chat treats peer requests as unable to authorise.
+- Bridges or supervision in pagd: pag-chat agrees supervision belongs in a separate launcher. pagd is at most a future client.
 
 **Mapping.**
 - **Priority:** `wake` → steer, `wake_idle` → queue, `hold` → buffer.
-- **Approvals:** `approval_request` to the operator by default. Only Paseo's SDK and direct ACP/app-server surface them; T3's MCP and paseo-bridge's bypass presets do not.
-- **Presence:** the spawner's own presence in phase 1; per-session presence needs principal-minted `session` peers in phase 2.
-- **Depth:** set `max_depth` 64 on spawn and roll long sessions to new threads.
+- **Approvals:** to the requester when it relays a human decision (pagd), with escalation off, so there is one surface; otherwise to the operator. Only Paseo's SDK and direct ACP/app-server surface approvals at all; T3's MCP and paseo-bridge's bypass presets do not.
+- **Presence:** the launcher's own presence in phase 1; per-session presence needs principal-minted peers in phase 2.
+- **Depth:** set `max_depth` 64 on launch and roll long sessions to new threads.
+
+**Collision rules with pag-chat.**
+- Separate namespaces: branches `launch/<job_id>` versus `pag/<job_id>`, plus separate unix users, workspace roots, unit, agent-dir and wrapper prefixes. Each side sweeps only its own.
+- Launched agents untrusted by default: kind `launcher` now; kind `launched` with a hub-set `spawned_by` later. A new kind fails closed where `session` + field would fail open.
+- One approval surface, as above.
 
 **Phases.**
 - **P0:** a `vecnet` wake target in t3-bridge (covers paseo-bridge too).
-- **P1:** `spawner-xsm` with t3 and paseo backends.
-- **P2:** per-session peers, Paseo approvals, a scoped local send tool.
-- **P3:** an ACP backend on build boxes, with the supervision layer agreed with pag-chat.
+- **P1:** `launcher-xsm` with t3 and paseo backends.
+- **P2:** per-session `launched` peers, Paseo approvals, a scoped local send tool.
+- **P3:** an ACP backend on build boxes, using pag-chat's `ssh.ts` / `reattach.ts` / `agent-sweep.ts` patterns.
 
 **Open decisions.**
-- **With pag-chat:** client or backend role, `SshProvider` reuse, the credential proxy, work thread versus vecnet thread, trust of spawned output.
-- **With Max:** spawn allowlist and ceilings, approval routing, hosts, Node or Go, edits to his bridges, the `spawner` kind and principal-minted peers, settle policy, agent-initiated sends.
+- **With pag-chat:** import or copy `@pag/machines`, the credential proxy, build-box setup ownership, work thread versus vecnet thread, taint, relay registration.
+- **With Max:** the name, launch allowlist and ceilings, approval routing and relays, hosts and egress, Node or Go, edits to his bridges, the `launcher`/`launched` kinds and principal-minted peers, settle policy, agent-initiated sends.
