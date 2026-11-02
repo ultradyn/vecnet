@@ -32,17 +32,19 @@ func (e *Error) Error() string {
 // Client may be shared by callers. Its credential is sent only as a bearer.
 type Client struct {
 	base, secret string
-	hc           *http.Client
+	hc, uploadHC *http.Client
 	// sleep is a clock seam for backoff tests; nil uses a context-aware timer.
 	sleep func(context.Context, time.Duration) error
 }
 
 func New(base, secret string) *Client {
-	return &Client{base: strings.TrimRight(base, "/"), secret: secret, hc: &http.Client{
-		Timeout: 35 * time.Second,
-		// Do not redirect authenticated operator operations to another endpoint.
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}}
+	// Do not redirect authenticated operator operations to another endpoint.
+	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &Client{
+		base: strings.TrimRight(base, "/"), secret: secret,
+		hc:       &http.Client{Timeout: 35 * time.Second, CheckRedirect: noRedirect},
+		uploadHC: &http.Client{Timeout: 0, CheckRedirect: noRedirect},
+	}
 }
 
 func (c *Client) request(ctx context.Context, method, path string, body any) (*http.Response, error) {
@@ -70,6 +72,12 @@ func (c *Client) request(ctx context.Context, method, path string, body any) (*h
 	if err != nil {
 		return nil, err
 	}
+	return checkedResponse(resp)
+}
+
+// checkedResponse preserves the hub's structured errors for both JSON requests
+// and raw uploads, and closes error responses before returning them.
+func checkedResponse(resp *http.Response) (*http.Response, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
 		var wire struct {
@@ -217,6 +225,45 @@ func (c *Client) Ack(ctx context.Context, cursor string) error {
 	return c.do(ctx, "POST", "/v1/ack", struct {
 		Cursor string `json:"cursor"`
 	}{cursor}, nil)
+}
+
+// Upload streams bytes under the caller's context, without the short timeout
+// used for JSON requests. Unreferenced uploads expire after one day.
+func (c *Client) Upload(ctx context.Context, r io.Reader, size int64, mediaType, name string) (envelope.Attachment, error) {
+	if size < 0 {
+		return envelope.Attachment{}, fmt.Errorf("upload size must be nonnegative")
+	}
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
+	if size == 0 {
+		r = http.NoBody // An empty upload must also have an exact Content-Length.
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.base+"/v1/blobs?ttl=86400", r)
+	if err != nil {
+		return envelope.Attachment{}, err
+	}
+	req.ContentLength = size
+	req.Header.Set("Authorization", "Bearer "+c.secret)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", mediaType)
+	resp, err := c.uploadHC.Do(req)
+	if err != nil {
+		return envelope.Attachment{}, err
+	}
+	resp, err = checkedResponse(resp)
+	if err != nil {
+		return envelope.Attachment{}, err
+	}
+	defer resp.Body.Close()
+	var uploaded struct {
+		SHA256 string `json:"sha256"`
+		Size   int64  `json:"size"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&uploaded); err != nil {
+		return envelope.Attachment{}, err
+	}
+	return envelope.Attachment{SHA256: uploaded.SHA256, Size: uploaded.Size, MediaType: mediaType, Name: name}, nil
 }
 
 // Blob enforces max even when the server sends a chunked response or lies
