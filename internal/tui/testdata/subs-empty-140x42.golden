@@ -38,5 +38,5 @@
 │                                                                                                                                          │
 │                                                                                                                                          │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- NORMAL   j/k move  read-only: resume in inbox                                                             max@vecnet · working · prio wake 
+ NORMAL   j/k move  read-only                                                                              max@vecnet · working · prio wake 
 : command  ? help                                                                                                                           

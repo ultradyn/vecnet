@@ -1,15 +1,15 @@
  vecnet | 1:inbox 2:chat 3:dash 4:subs 8                                     hub hub.example:8443  live  apr 2  dlq 3  cuts/24h 7  07:41:00 
 ┌─ subs · 9 rows ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│  peer                host                           health           expires in       last refresh  last status  attempts  cursor        │
-│  fine-dot            fine.chatgpt.example           ok               1h 0m            02/11 07:36   200          0         e0.42         │
-│  failing-dot         failing.chatgpt.example        failing          1h 0m            02/11 07:36   503          3         e0.42         │
-│  late-dot            late.chatgpt.example           late             4m               02/11 07:36   200          0         e0.42         │
-│  expired-dot         expired.chatgpt.example        expired          expired 3m ago   02/11 07:36   200          0         e0.42         │
-│  token-dot           token.chatgpt.example          paused_token     expired 1m ago   02/11 07:36   200          0         e0.42         │
-│  failed-dot          failed.chatgpt.example         paused_failed    1h 0m            02/11 07:36   500          8         e0.42         │
-│> auth-dot            auth.chatgpt.example           paused_auth      1h 0m            never         200          0         e0.42         │
-│  operator-dot        operator.chatgpt.example       paused_operator  1h 0m            02/11 07:36   200          0         e0.42         │
-│  unverified-dot      unverified.chatgpt.example     unverified       -                never         -            0         e0.42         │
+│  peer               host                        health           expires in           last refresh  last status  attempts  cursor        │
+│  fine-dot           fine.chatgpt.example        ok               1h 0m                02/11 07:36   200          0         e0.42         │
+│  failing-dot        failing.chatgpt.example     failing          1h 0m                02/11 07:36   503          3         e0.42         │
+│  late-dot           late.chatgpt.example        late             4m                   02/11 07:36   200          0         e0.42         │
+│  expired-dot        expired.chatgpt.example     expired          expired 2h 5m ago    02/11 07:36   200          0         e0.42         │
+│  token-dot          token.chatgpt.example       paused_token     expired 1m ago       02/11 07:36   200          0         e0.42         │
+│  failed-dot         failed.chatgpt.example      paused_failed    1h 0m                02/11 07:36   500          8         e0.42         │
+│> auth-dot           auth.chatgpt.example        paused_auth      1h 0m                never         200          0         e0.42         │
+│  operator-dot       operator.chatgpt.example    paused_operator  1h 0m                02/11 07:36   200          0         e0.42         │
+│  unverified-dot     unverified.chatgpt.example  unverified       -                    never         -            0         e0.42         │
 │                                                                                                                                          │
 │                                                                                                                                          │
 │                                                                                                                                          │
@@ -30,13 +30,13 @@
 │                                                                                                                                          │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌─ auth-dot · paused_auth ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│The peer was disabled or moved, or its login was replaced or revoked. Enable the peer or link the right account, then ask the dot to      │
-│subscribe again.                                                                                                                          │
+│The bearer that subscribed was rotated. The holder of the new bearer must subscribe again.                                                │
 │paused: credential_rotated                                                                                                                │
 │status 200  attempts 0  cursor e0.42                                                                                                      │
 │sub sub_auth  host auth.chatgpt.example  name vecnet.message                                                                              │
 │expires 02/11/2026 08:41:00  refresh before 02/11/2026 08:31:00                                                                           │
 │verified 02/11/2026 06:41:00  last delivery 02/11/2026 07:40:00                                                                           │
+│                                                                                                                                          │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- NORMAL   j/k move  read-only: resume in inbox                                                             max@vecnet · working · prio wake 
+ NORMAL   j/k move  read-only                                                                              max@vecnet · working · prio wake 
 : command  ? help                                                                                                                           

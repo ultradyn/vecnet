@@ -47,7 +47,7 @@ var subsCols = []struct {
 	subsColPeer:     {"peer", 10},
 	subsColHost:     {"host", 12},
 	subsColHealth:   {"health", 15},
-	subsColExpires:  {"expires in", 15},
+	subsColExpires:  {"expires in", 19}, // "expired 125d ago" and "expired 2h 5m ago" fit
 	subsColRefresh:  {"last refresh", 12},
 	subsColStatus:   {"last status", 11},
 	subsColAttempts: {"attempts", 8},
@@ -79,7 +79,9 @@ func (s *subsScreen) Title() string {
 	return "subs"
 }
 
-func (s *subsScreen) Hints() string { return "j/k move  read-only: resume in inbox" }
+// Hints names no action: resume works only for some paused rows, and the
+// selected row's note says what to do.
+func (s *subsScreen) Hints() string { return "j/k move  read-only" }
 
 func (s *subsScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 	switch msg := msg.(type) {
@@ -137,10 +139,14 @@ func (s *subsScreen) View(m *Model, w, h int) string {
 // viewTable is the header and as many rows as fit, keeping the selection in view.
 func (s *subsScreen) viewTable(m *Model, w, h int) string {
 	var lines []string
+	rows := m.Data.Subs
 	if err := m.Data.Errs[subsResource]; err != nil {
+		if rows == nil { // a load that succeeded, even empty, leaves a non-nil slice
+			// Nothing ever loaded: there is no last data, and no count to give.
+			return styleBad.Render("load failed: " + Clean(err.Error()))
+		}
 		lines = append(lines, styleBad.Render("load failed: "+Clean(err.Error())+"; showing the last data"))
 	}
-	rows := m.Data.Subs
 	if len(rows) == 0 {
 		return strings.Join(append(lines, styleMuted.Render("no subscriptions")), "\n")
 	}

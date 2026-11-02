@@ -38,7 +38,7 @@ try {
     await waitFor(`4:subs ${notOk}`);
     for (const { health } of rows) await waitFor(health);
     await waitFor('expires in');
-    await waitFor('read-only: resume in inbox');
+    await waitFor('j/k move  read-only');
     await shot('21-tui-subs-initial');
 
     // Paused rows name their reason, and every row's note reaches the detail pane.

@@ -45,13 +45,13 @@ func subsNine() []opapi.Subscription {
 		subsRow("expired", "peer_expired", opapi.HealthExpired, "The subscription expired. Ask the dot to subscribe again; queued events resume from its cursor."),
 		subsRow("token", "peer_token", opapi.HealthPausedToken, "Waiting for ChatGPT to re-subscribe with a fresh token. Nothing is lost; delivery resumes from the cursor."),
 		subsRow("failed", "peer_failed", opapi.HealthPausedFailed, "One event used all 8 attempts. Fix the callback, then resume. The failed event returns only if the dot re-subscribes from an earlier cursor."),
-		subsRow("auth", "peer_auth", opapi.HealthPausedAuth, "The peer was disabled or moved, or its login was replaced or revoked. Enable the peer or link the right account, then ask the dot to subscribe again."),
+		subsRow("auth", "peer_auth", opapi.HealthPausedAuth, "The bearer that subscribed was rotated. The holder of the new bearer must subscribe again."),
 		subsRow("operator", "peer_operator", opapi.HealthPausedOperator, "You paused this subscription. A re-subscribe does not lift it."),
 		subsRow("unverified", "peer_unverified", opapi.HealthUnverified, "Waiting for callback verification. No events are sent until a subscribe challenge succeeds."),
 	}
 	rows[1].LastStatus, rows[1].Attempts = subsInt(503), 3
 	rows[2].ExpiresAt = subsTime(4 * time.Minute)
-	rows[3].ExpiresAt = subsTime(-3 * time.Minute)
+	rows[3].ExpiresAt = subsTime(-(2*time.Hour + 5*time.Minute)) // the longest "expired … ago" a column must hold
 	rows[4].ExpiresAt, rows[4].PausedReason = subsTime(-time.Minute), subsText("token_expired")
 	rows[5].PausedReason, rows[5].LastStatus, rows[5].Attempts = subsText("delivery_failed"), subsInt(500), 8
 	rows[6].PausedReason, rows[6].LastRefreshAt = subsText("credential_rotated"), nil
@@ -545,5 +545,22 @@ func TestTabCommandSubsWithCount(t *testing.T) {
 	}
 	if line := strings.Split(plainAt(t, m, 140, 42), "\n")[0]; !strings.Contains(line, "subs 1") {
 		t.Fatalf("top bar lost the count: %q", line)
+	}
+}
+
+// A first load that fails claims no data: no "last data", no "no subscriptions".
+func TestSubsFirstLoadFails(t *testing.T) {
+	f := subsFake(nil)
+	f.subs = nil
+	f.fail("Subscriptions", fmt.Errorf("boom"))
+	m, _ := subsLoaded(t, f, newClock())
+	frame := plainAt(t, m, 140, 42)
+	if !strings.Contains(frame, "load failed: boom") {
+		t.Fatalf("no failure:\n%s", frame)
+	}
+	for _, lie := range []string{"showing the last data", "no subscriptions"} {
+		if strings.Contains(frame, lie) {
+			t.Errorf("frame claims %q:\n%s", lie, frame)
+		}
 	}
 }
