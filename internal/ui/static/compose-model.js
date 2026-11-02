@@ -1,5 +1,8 @@
 // New message, pure part: who can be addressed, the SendRequest a form makes,
 // and the composer's byte counter and idempotency-key rule. No DOM.
+// attach-model.js imports SPILL from here; both sides use the other's
+// bindings only inside functions, so the import cycle is safe.
+import { MAX_ATTACHMENTS, SPILL_SLOT, sendRefusal as spillRefusal } from './attach-model.js';
 import { bytes } from './format.js';
 
 export const SPILL = 4096, TEXT_CAP = 65536;
@@ -28,8 +31,26 @@ export function matches(peer, query) {
 
 const textBytes = text => enc.encode(text || '').length;
 
+const attachmentsOf = form => (Array.isArray(form.attachments) ? form.attachments : []);
+const hasText = form => String(form.text || '').trim() !== '';
+
+// sendRefusal is why a form that is otherwise complete cannot go: a refusal
+// the caller set, else the spill rule (text over 4096 bytes needs one of the
+// 16 attachment slots for its message.md). '' when nothing refuses it.
+export function sendRefusal(form) {
+  if (form.sendRefusal) return String(form.sendRefusal);
+  return spillRefusal(attachmentsOf(form).map(a => ({ ...a, state: 'done' })), form.text);
+}
+
+// canSend: a recipient, text or at least one attachment, every upload done
+// (uploadsReady; a form without the field has no uploads), text under the
+// cap, and no refusal.
 export function canSend(form) {
-  return (form.recipients || []).length > 0 && String(form.text || '').trim() !== '' && textBytes(form.text) <= TEXT_CAP;
+  return (form.recipients || []).length > 0
+    && (hasText(form) || attachmentsOf(form).length > 0)
+    && form.uploadsReady !== false
+    && textBytes(form.text) <= TEXT_CAP
+    && sendRefusal(form) === '';
 }
 
 // buildSend is the POST /v1/messages body for form under key. It throws on a
@@ -41,11 +62,14 @@ export function buildSend(form, key) {
   if (!recipients.length) throw new Error('at least one recipient is required');
   const name = recipients.find(r => !ID.test(String(r)));
   if (name !== undefined) throw new Error('recipients are ids, not names: ' + name);
-  if (!String(form.text || '').trim()) throw new Error('text is required');
+  const attachments = attachmentsOf(form);
+  if (!hasText(form) && !attachments.length) throw new Error('text or at least one attachment is required');
+  if (attachments.length > MAX_ATTACHMENTS) throw new Error('at most ' + MAX_ATTACHMENTS + ' attachments a message');
   const history = form.historyAccess || 'from_join';
   if (!HISTORY.includes(history)) throw new Error('history_access must be from_join or full');
 
-  const body = { idempotency_key: key, recipients, priority: form.priority, content: { text: form.text } };
+  const body = { idempotency_key: key, recipients, priority: form.priority, content: { text: form.text || '' } };
+  if (attachments.length) body.attachments = attachments.map(({ sha256, size, media_type, name }) => ({ sha256, size, media_type, name }));
   const title = String(form.title || '').trim();
   if (title) body.thread_title = title;
   if (history !== 'from_join') body.history_access = history;
@@ -63,7 +87,7 @@ export function counter(text) {
 }
 
 // signature is what the hub compares under one idempotency key: the body
-// without the key.
+// without the key, attachments included (their sha256s, in order).
 function signature(form) {
   try { return JSON.stringify(buildSend(form, '-')); } catch { return ''; }
 }
@@ -89,6 +113,8 @@ export function keepKey(err) {
 // string for textContent.
 export function errorText(err, nameOf, nowMs = Date.now()) {
   const d = err.details || {};
+  // The hub's own spill-slot refusal reads as the form's (internal/hub/spill.go).
+  if (err.status === 413 && err.code === 'payload_too_large' && d.field === 'attachments') return SPILL_SLOT;
   if (err.code === 'scope_denied' && d.recipient) {
     return 'Your send scopes do not allow messages to ' + nameOf(d.recipient) + (d.via ? ' (via ' + nameOf(d.via) + ')' : '') + '.';
   }

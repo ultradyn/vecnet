@@ -52,8 +52,9 @@
 .compose .check{display:flex;gap:9px;align-items:center;font-size:13px;color:var(--muted)}
 .compose .check input{accent-color:#6366f1;margin:0}
 
-.compose .err{margin:16px 0 0;min-height:0}
+.compose .err{margin:0;min-height:0}
 .compose .err:empty{display:none}
 .compose .err:not(:empty){border:1px solid #fb718555;background:#fb718512;border-radius:8px;padding:9px 12px}
-.compose .actions{display:flex;justify-content:flex-end;margin-top:16px}
+.compose .wrap .up{margin-top:8px}
+.compose .actions{display:flex;justify-content:flex-end;gap:8px}
 .compose .actions .btn{padding:8px 18px;min-width:96px}
