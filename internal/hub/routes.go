@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/audit"
@@ -131,12 +132,14 @@ func (h *Hub) insertRoute(ctx context.Context, tx *sql.Tx, r newRoute) (routeID,
 
 // RouteInfo is one route as the operator sees it (GET /v1/admin/routes). It
 // never carries a key: not a whsec_, not a routine key, sealed or otherwise.
+// Nor the URL's path or query, which can hold a callback credential: only its
+// host, as every operator read shows routes (PROTOCOL §2.12, §2.13).
 type RouteInfo struct {
 	RouteID     string  `json:"route_id"`
 	OwnerKind   string  `json:"owner_kind"`
 	OwnerID     string  `json:"owner_id"`
 	Kind        string  `json:"kind"`
-	URL         string  `json:"url"`
+	Host        string  `json:"host"`
 	VerifiedAt  *string `json:"verified_at"`
 	CreatedAt   string  `json:"created_at"`
 	RunsPerHour int     `json:"runs_per_hour"`
@@ -154,8 +157,13 @@ func (h *Hub) ListRoutes(ctx context.Context) ([]RouteInfo, error) {
 	out := []RouteInfo{}
 	for rows.Next() {
 		var r RouteInfo
-		if err := rows.Scan(&r.RouteID, &r.OwnerKind, &r.OwnerID, &r.Kind, &r.URL, &r.VerifiedAt, &r.CreatedAt, &r.RunsPerHour); err != nil {
+		var rawURL string
+		if err := rows.Scan(&r.RouteID, &r.OwnerKind, &r.OwnerID, &r.Kind, &rawURL, &r.VerifiedAt, &r.CreatedAt, &r.RunsPerHour); err != nil {
 			return nil, fmt.Errorf("hub: list routes: %w", err)
+		}
+		// A malformed legacy URL shows no host, and is never echoed.
+		if parsed, err := url.Parse(rawURL); err == nil {
+			r.Host = parsed.Host
 		}
 		out = append(out, r)
 	}

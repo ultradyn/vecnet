@@ -236,7 +236,7 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `POST /v1/admin/peers/{id}/rotate` | `peer rotate` | [T11, T17] |
 | `PUT /v1/admin/peers/{id}/scopes` | `peer scope` (allow/deny lists) | [T11, T17] |
 | `POST /v1/admin/sources`, `GET /v1/admin/sources` | `source add --kind --name --route` → ingress URL + secret; `source list` (never returns a secret) | [T12] |
-| `POST /v1/admin/routes`, `GET /v1/admin/routes`, `POST …/routes/{id}/rotate` | `route add` (kind `http`: push route URL, issues `whsec_`; kind `grokbot`: routine URL and `crsr_` key, live at once); list routes (never returns a key); rotate (`http`: section 3.5; `grokbot`: body `{"key"}` replaces the routine key, 204) | [T11, T17, R25] |
+| `POST /v1/admin/routes`, `GET /v1/admin/routes`, `POST …/routes/{id}/rotate` | `route add` (kind `http`: push route URL, issues `whsec_`; kind `grokbot`: routine URL and `crsr_` key, live at once); list routes (never returns a key, and shows each URL as its `host` only, never its path or query); rotate (`http`: section 3.5; `grokbot`: body `{"key"}` replaces the routine key, 204) | [T11, T17, R25] |
 | `POST /v1/admin/teams`, `…/teams/{id}/members` | operator-managed teams | [T09] |
 | `POST /v1/admin/groups/{id}/unarchive` | unarchive an ad hoc group | [R21] |
 | `GET /v1/admin/dead-letters`, `POST …/{dly}/retry`, `POST …/{dly}/discard` | `dead-letters list|retry|discard` | [T10, T17, R18] |
