@@ -1,36 +1,144 @@
 // The side panel beside a thread. ctx.threadId names the thread (see app.js).
+// Sections: Participants, Files, Thread, and the delivery matrix button.
+// Presence and reachability stay two signals (PROTOCOL §8). Downloads go
+// through api.blob, so the bearer never enters a URL (§2, §2.7).
+import { budgetBar, fileRows, presenceLabel, reachLabel, THREAD_BUDGET } from './aside-model.js';
 import { h } from './dom.js';
+import { when } from './format.js';
 
-const RECEIPT_STATES = ['queued', 'accepted', 'read', 'processed', 'failed', 'dead_letter', 'expired'];
+// Long enough for the browser to take the object URL into its download.
+const REVOKE_AFTER = 1000;
 
 function dl(rows) {
-  return h('dl', { class: 'kv' }, rows.flatMap(([k, v]) => [h('dt', { text: k }), h('dd', { text: v })]));
+  return h('dl', { class: 'kv' }, rows.flatMap(([k, v]) => [h('dt', { text: k }), h('dd', {}, v)]));
 }
 
 export function mountAside(root, ctx) {
-  const render = () => {
-    const t = ((ctx.threads.get() || {}).threads || []).find(x => x.thread_id === ctx.threadId);
-    const peers = (ctx.peers.get() || {}).peers || [];
-    const kids = [];
-    if (t) {
-      kids.push(h('h3', { text: 'Participants' }));
-      for (const p of t.participants || []) {
-        const e = peers.find(x => x.peer_id === p);
-        kids.push(h('div', { class: 'pp' },
-          h('span', { class: 'dot ' + (e ? e.presence : ''), title: e ? e.presence : 'unknown' }),
-          h('span', { text: ctx.nameOf(p) + (p === ctx.me ? ' (you)' : '') }),
-          h('span', { class: 'k', text: ctx.kindOf(p) })));
+  const { api, store, threadId, nameOf, kindOf, me, toast } = ctx;
+  const detail = store.resource('thread:' + threadId, () => api.thread(threadId));
+  const admin = store.resource('peers', () => api.adminPeers());
+  const S = { busy: new Set(), open: false };
+  const urls = new Set();
+  let gone = false;
+
+  const toggle = h('button', { type: 'button', class: 'aside-toggle btn', 'aria-expanded': 'false', 'aria-controls': 'aside-body', text: 'Details' });
+  const body = h('div', { class: 'aside-body', id: 'aside-body' });
+  toggle.addEventListener('click', () => {
+    S.open = !S.open;
+    root.classList.toggle('open', S.open);
+    toggle.setAttribute('aria-expanded', String(S.open));
+  });
+  root.replaceChildren(toggle, body);
+
+  function entryOf(id) {
+    const row = ((admin.get() || {}).peers || []).find(r => r.peer && r.peer.peer_id === id);
+    if (row) return { peer: row.peer, disabled: row.disabled };
+    const dir = ((ctx.peers.get() || {}).peers || []).find(p => p.peer_id === id);
+    return dir ? { peer: dir, disabled: false } : null;
+  }
+
+  function participant(id) {
+    const e = entryOf(id);
+    const pres = presenceLabel(e && e.peer.presence), reach = reachLabel(e && e.peer.reachability);
+    return h('div', { class: 'pp', 'data-peer': id },
+      h('span', { class: 'sig r-' + reach, title: 'reachability: ' + reach },
+        h('span', { class: 'dot ' + pres, title: 'presence: ' + pres })),
+      h('span', { class: 'who' },
+        h('span', { class: 'nm', text: nameOf(id) + (id === me ? ' (you)' : '') }),
+        h('span', { class: 'sub', text: pres + ' · ' + reach })),
+      e && e.disabled ? h('span', { class: 'chip bad', text: 'disabled' }) : null,
+      h('span', { class: 'k', text: kindOf(id) }));
+  }
+
+  async function download(f) {
+    if (S.busy.has(f.sha256) || f.disabled) return;
+    S.busy.add(f.sha256);
+    render();
+    try {
+      const blob = await api.blob(f.sha256);
+      if (gone) return;
+      const url = URL.createObjectURL(blob);
+      urls.add(url);
+      const a = h('a', { href: url, download: f.download, hidden: true });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => { if (urls.delete(url)) URL.revokeObjectURL(url); }, REVOKE_AFTER);
+      toast('Downloaded ' + f.label);
+    } catch (e) {
+      if (e.status === 401 || gone) return;
+      if (e.status === 410 || e.code === 'blob_purged') {
+        // The list was stale: the hub purged the blob since it loaded.
+        toast(f.label + ' was purged from the hub', true);
+        detail.reload();
+      } else {
+        toast('Download failed: ' + e.code + ': ' + e.message, true);
       }
+    } finally {
+      S.busy.delete(f.sha256);
+      render();
+    }
+  }
+
+  function file(f) {
+    const busy = S.busy.has(f.sha256);
+    const cls = 'file' + (f.spilled ? ' spill' : '') + (f.purged ? ' purged' : '') + (busy ? ' busy' : '');
+    return h('button', {
+      type: 'button', class: cls, title: f.sha256, disabled: f.disabled || busy,
+      'aria-busy': busy ? 'true' : null, 'data-sha': f.sha256, onclick: () => download(f),
+    },
+      h('span', { class: 'top' },
+        h('span', { class: 'nm', text: f.label }),
+        h('span', { class: 'sz', text: busy ? 'downloading…' : f.size })),
+      h('span', { class: 'meta' },
+        h('span', { text: nameOf(f.sender) + ' · ' + when(f.at) }),
+        f.note ? h('span', { class: 'tag ' + f.note, text: f.note }) : null));
+  }
+
+  function budget(row) {
+    const b = budgetBar(row, THREAD_BUDGET);
+    const bar = h('span', { class: 'bar ' + b.tone });
+    if (b.fraction !== null) {
+      const fill = h('i');
+      fill.style.setProperty('--f', String(b.fraction));
+      bar.append(fill);
+    }
+    return h('span', { class: 'budget' }, h('span', { class: 'bt', text: b.text }), b.fraction === null ? null : bar);
+  }
+
+  function render() {
+    if (gone) return;
+    const d = detail.get();
+    const kids = [];
+    if (!d) {
+      kids.push(detail.error()
+        ? h('div', { class: 'empty error' }, h('b', { text: 'Details unavailable' }), detail.error().message)
+        : h('div', { class: 'loading', text: 'Loading details…' }));
+    } else {
+      const t = d.row.thread, files = fileRows(d.files);
+      kids.push(h('h3', { text: 'Participants' }), h('div', { class: 'pps' }, (t.participants || []).map(participant)));
+      kids.push(h('h3', {}, 'Files', h('span', { class: 'n', text: String(files.length) })),
+        files.length ? h('div', { class: 'files' }, files.map(file)) : h('div', { class: 'none', text: 'No files in this thread.' }));
       kids.push(h('h3', { text: 'Thread' }), dl([
-        ['id', t.thread_id], ['group', t.group || '—'], ['messages', String(t.message_count)],
-        ['budget', t.budget_remaining === null || t.budget_remaining === undefined ? 'unlimited' : t.budget_remaining + ' left'],
-        ['history', t.history_access || 'from_join'], ['locked', t.locked_participants ? 'yes' : 'no'],
+        ['id', h('span', { class: 'mono', text: t.thread_id })],
+        ['group', t.group || '—'],
+        ['budget', budget(d.row)],
+        ['history', t.history_access || 'from_join'],
+        ['locked', t.locked_participants ? 'yes' : 'no'],
+        ['cut', d.row.cut ? d.row.cut.reason + ' · ' + when(d.row.cut.at) : 'no'],
       ]));
     }
-    kids.push(h('h3', { text: 'Receipts' }), ...RECEIPT_STATES.map(s => h('div', { class: 'lg st-' + s }, h('i'), s)));
-    root.replaceChildren(...kids);
-  };
+    kids.push(h('button', { type: 'button', class: 'btn matrix-btn', text: 'Delivery matrix', onclick: () => ctx.nav('#matrix/' + threadId) }));
+    body.replaceChildren(...kids);
+  }
+
   render();
-  const off = [ctx.threads.subscribe(render), ctx.peers.subscribe(render)];
-  return () => off.forEach(fn => fn());
+  const off = [detail.subscribe(render), admin.subscribe(render), ctx.peers.subscribe(render)];
+  return () => {
+    gone = true;
+    off.forEach(fn => fn());
+    for (const url of urls) URL.revokeObjectURL(url);
+    urls.clear();
+    root.classList.remove('open');
+  };
 }
