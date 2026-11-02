@@ -1,11 +1,269 @@
-// Placeholder dashboard (operator UI Task 12 builds it). The dashboard never
-// writes; the subscription slot is here so Task 13 can test through it.
-import { h } from './dom.js';
+// Provisional read-only dashboard (operator UI Task 12). It performs no writes:
+// dead-letter retry and discard and subscription resume live in the inbox.
+// Each section loads and fails on its own. The page reloads on the `peers` tag
+// and every 30 s while mounted. Ages use the hub clock, never the client's.
+import { blockedLine, cutSummary, peerRows } from './dash-model.js';
+import { chip, h } from './dom.js';
+import { ago, short, title as threadTitle, when } from './format.js';
 import * as subs from './subs.js';
 
+const RELOAD_MS = 30000;
+const AUDIT_PAGE = 50;
+const THREAD_PAGE = 200, THREAD_PAGES = 10;
+const COUNTERS = ['loop_cut', 'rate_limited', 'dead_letters', 'push_conflicts', 'push_auth_failed'];
+
+const errText = e => (e && e.message) || String(e);
+
+// A full id lives in the title; the cell shows the short form.
+function idCell(id) {
+  return h('span', { class: 'sub mono', text: short(id), title: id });
+}
+
+function table(heads, rows) {
+  return h('table', null,
+    h('thead', null, h('tr', null, heads.map(t => h('th', { text: t })))),
+    h('tbody', null, rows));
+}
+
+function loading() { return h('div', { class: 'loading', text: 'Loading…' }); }
+
+function failure(label, err) {
+  return h('div', { class: 'empty error' }, h('b', { text: label + ' unavailable' }), errText(err));
+}
+
+function none(text) { return h('p', { class: 'none', text }); }
+
 export function mount(root, ctx) {
-  const section = h('section', { class: 'subs' });
-  root.replaceChildren(h('h1', { text: 'Dashboard' }), section);
-  subs.renderSection(section, ctx);
-  return () => {};
+  const { api, store } = ctx;
+  const nowMs = () => store.hubNow();
+  const age = iso => ago(iso, nowMs());
+  const time = iso => h('time', { text: when(iso, nowMs()), title: iso || '' });
+
+  async function allThreads() {
+    let page = await api.threads({ limit: THREAD_PAGE });
+    const threads = [...(page.threads || [])];
+    for (let n = 1; page.next && n < THREAD_PAGES; n++) {
+      page = await api.threads({ limit: THREAD_PAGE, cursor: page.next });
+      threads.push(...(page.threads || []));
+    }
+    return { threads, more: !!page.next };
+  }
+
+  const res = {
+    counters: store.resource('peers', () => api.counters()),
+    peers: store.resource('peers', () => api.adminPeers()),
+    threads: store.resource('threads', allThreads),
+    health: store.resource('peers', () => api.deliveryHealth()),
+    dead: store.resource('peers', () => api.deadLetters()),
+    cuts: store.resource('peers', () => api.loopCuts(24)),
+    audit: store.resource('peers', () => api.audit({ limit: AUDIT_PAGE })),
+  };
+
+  // Names come from the admin directory, which also lists disabled peers and
+  // sources, and fall back to the shell's directory.
+  const peerName = id => {
+    const row = ((res.peers.get() || {}).peers || []).find(r => r.peer && r.peer.peer_id === id);
+    return row ? row.peer.name : ctx.nameOf(id);
+  };
+  const threadName = id => {
+    const row = ((res.threads.get() || {}).threads || []).find(r => r.thread && r.thread.thread_id === id);
+    return row ? threadTitle(row.thread, ctx.me, peerName) : short(id);
+  };
+  const threadLink = id => h('a', { href: '#thread/' + id, text: threadName(id), title: id });
+
+  // The audit tail keeps every entry it has shown, so "Load older" pages on
+  // from the oldest one and a reload of the head does not drop them.
+  const audit = { seen: new Map(), olderNext: undefined, busy: false, err: null, alive: true };
+
+  const sections = {};
+  function section(key, id, heading) {
+    const count = h('span', { class: 'n' });
+    const body = h('div', { class: 'body' });
+    const el = h('section', { class: 'dash-sec dash-' + key, id }, h('h2', null, heading + ' ', count), body);
+    sections[key] = { el, count, body };
+    return el;
+  }
+
+  const counterLine = h('p', { class: 'dash-counters mono' });
+  const subsSlot = h('div', { class: 'subs' });
+  root.replaceChildren(
+    h('div', { class: 'dash' },
+      h('h1', { text: 'Dashboard' }),
+      h('p', { class: 'lede', text: 'Read-only view of the hub. Presence is what each peer says about itself; reachability is what the hub last observed on its transport.' }),
+      counterLine,
+      section('peers', 'd-peers', 'Peers'),
+      section('threads', 'd-threads', 'Threads'),
+      section('health', 'd-health', 'Delivery health'),
+      section('dead', 'd-dead', 'Dead letters'),
+      section('loop', 'd-loop', 'Loop control'),
+      h('section', { class: 'dash-sec dash-subs', id: 'd-subs' }, h('h2', { text: 'Subscriptions' }), subsSlot),
+      section('audit', 'd-audit', 'Audit tail')));
+  subs.renderSection(subsSlot, ctx);
+
+  // fill renders one section from its resource: its own error, then whatever
+  // it last loaded, or a loading line before the first answer.
+  function fill(key, r, label, draw) {
+    const s = sections[key], value = r.get(), err = r.error();
+    const kids = [];
+    if (err) kids.push(failure(label, err));
+    if (value) kids.push(...draw(value, s));
+    else if (!err) { kids.push(loading()); s.count.textContent = ''; }
+    s.body.replaceChildren(...kids);
+  }
+
+  function renderCounters() {
+    const value = res.counters.get(), err = res.counters.error();
+    if (!value) {
+      counterLine.className = 'dash-counters mono' + (err ? ' bad' : '');
+      counterLine.textContent = err ? 'Counters unavailable: ' + errText(err) : 'Loading counters…';
+      return;
+    }
+    const keys = [...COUNTERS.filter(k => Object.hasOwn(value, k)), ...Object.keys(value).filter(k => !COUNTERS.includes(k)).sort()];
+    counterLine.className = 'dash-counters mono' + (err ? ' bad' : '');
+    counterLine.textContent = keys.map(k => k.replace(/_/g, ' ') + ' ' + value[k]).join(' · ') + (err ? ' · stale: ' + errText(err) : '');
+  }
+
+  function drawPeers(value, s) {
+    const rows = peerRows(value.peers);
+    s.count.textContent = String(rows.length);
+    if (!rows.length) return [none('No peers enrolled.')];
+    return [table(['Peer', 'Kind', 'Presence', 'Reachability', 'Credential', 'Routes', 'Quota', 'Location'], rows.map(p => {
+      const presenceAge = p.presence === 'n/a' ? '' : p.presenceAt ? age(p.presenceAt) : 'never reported';
+      const reachSub = [p.via, p.seen ? age(p.seen) : ''].filter(Boolean).join(', ');
+      return h('tr', { class: p.disabled ? 'off' : null },
+        h('td', null, h('span', { text: p.name }), p.disabled ? [' ', chip('disabled', 'bad')] : null, idCell(p.id)),
+        h('td', null, h('span', { class: 'pill' }, h('i', { class: 'kd k-' + p.kind }), p.kind)),
+        h('td', null, h('span', { class: 'pill' }, h('i', { class: 'pd ' + p.presence.replace('/', '') }), p.presence),
+          h('span', { class: 'sub mono', text: presenceAge })),
+        h('td', null, h('span', { class: 'pill' }, h('i', { class: 'rch ' + p.reach }), p.reach),
+          h('span', { class: 'sub mono', text: reachSub })),
+        h('td', { class: 'cred ' + p.credential, text: p.credential }),
+        h('td', { class: 'mono sm', text: p.hosts.length ? p.hosts.join(', ') : 'none' }),
+        h('td', { class: 'mono sm', text: p.quota }),
+        h('td', { class: 'mono sm', text: p.location }));
+    }))];
+  }
+
+  function drawThreads(value, s) {
+    const rows = value.threads || [];
+    s.count.textContent = String(rows.length) + (value.more ? '+' : '');
+    if (!rows.length) return [none('No threads yet.')];
+    return [table(['Thread', 'Participants', 'Messages', 'Budget left', 'Last activity', 'Cut'], rows.map(r => {
+      const t = r.thread || {}, parts = t.participants || [];
+      return h('tr', null,
+        h('td', null, h('a', { href: '#thread/' + t.thread_id, class: 'tl', text: threadTitle(t, ctx.me, peerName) }), idCell(t.thread_id)),
+        h('td', null, h('span', { text: String(parts.length) }), h('span', { class: 'sub', text: parts.map(peerName).join(', ') })),
+        h('td', { text: String(t.message_count ?? 0) }),
+        h('td', { text: t.budget_remaining === null || t.budget_remaining === undefined ? 'unlimited' : String(t.budget_remaining), class: t.budget_remaining === 0 ? 'bad' : null }),
+        h('td', { text: age(r.last_message_at), title: r.last_message_at || '' }),
+        h('td', null, r.cut ? h('span', { class: 'bad', text: r.cut.reason, title: r.cut.at }) : ''));
+    }))];
+  }
+
+  function drawHealth(value, s) {
+    const blocked = value.blocked || [], failed = value.failed || [];
+    s.count.textContent = String(blocked.length + failed.length);
+    if (!blocked.length && !failed.length) return [none('No blocked or failed deliveries.')];
+    const names = { peer: peerName, thread: threadName };
+    return [
+      h('h3', null, 'Blocked on delivery ', h('span', { class: 'n', text: String(blocked.length) })),
+      h('p', { class: 'note', text: 'A peer’s queue for a thread waits behind a delivery under retry, while its other threads flow (PROTOCOL §16.4).' }),
+      blocked.length
+        ? h('ul', { class: 'blocked' }, blocked.map(b => h('li', null,
+          h('span', { text: blockedLine(b, names) }),
+          b.next_attempt_at ? h('span', { class: 'sub mono', text: 'next attempt ' + when(b.next_attempt_at, nowMs()), title: b.next_attempt_at }) : null,
+          h('a', { class: 'sub', href: '#thread/' + b.thread_id, text: 'open thread' }))))
+        : none('Nothing blocked.'),
+      h('h3', null, 'Failed ', h('span', { class: 'n', text: String(failed.length) })),
+      h('p', { class: 'note', text: 'Failed deliveries are final: the protocol does not retry them.' }),
+      failed.length
+        ? table(['Delivery', 'To', 'Thread', 'Status', 'Error', 'When'], failed.map(f => h('tr', null,
+          h('td', null, idCell(f.delivery_id)),
+          h('td', { text: peerName(f.recipient) }),
+          h('td', null, threadLink(f.thread_id)),
+          h('td', { class: 'bad mono', text: f.last_status === null || f.last_status === undefined ? '—' : String(f.last_status) }),
+          h('td', { class: 'sm', text: f.last_error || '' }),
+          h('td', null, time(f.updated_at)))))
+        : none('Nothing failed.'),
+    ];
+  }
+
+  function drawDead(value, s) {
+    const rows = value.dead_letters || [];
+    s.count.textContent = String(rows.length);
+    const note = h('p', { class: 'note' }, 'Read-only here. ', h('a', { href: '#inbox', text: 'Act on these in Inbox' }), '.');
+    if (!rows.length) return [note, none('No dead letters.')];
+    return [note, table(['Delivery', 'To', 'Thread', 'Attempts', 'Status', 'Error', 'When'], rows.map(d => h('tr', null,
+      h('td', null, idCell(d.delivery_id)),
+      h('td', { text: peerName(d.recipient) }),
+      h('td', null, threadLink(d.thread_id)),
+      h('td', { text: String(d.attempt ?? 0) }),
+      h('td', { class: 'bad mono', text: d.last_status === null || d.last_status === undefined ? '—' : String(d.last_status) }),
+      h('td', { class: 'sm', text: d.last_error || '' }),
+      h('td', null, time(d.updated_at)))))];
+  }
+
+  function drawLoop(value, s) {
+    const c = cutSummary(value);
+    s.count.textContent = 'last ' + c.hours + ' h';
+    const total = h('p', { class: 'total' }, h('b', { text: String(c.total) }), ' cut' + (c.total === 1 ? '' : 's') + ' in the last ' + c.hours + ' h');
+    if (!c.reasons.length) return [total];
+    return [total, table(['Reason', 'Cuts'], c.reasons.map(r => h('tr', null, h('td', { class: 'mono sm', text: r.reason }), h('td', { text: String(r.count) }))))];
+  }
+
+  function drawAudit(value, s) {
+    for (const e of value.entries || []) audit.seen.set(e.id, e);
+    const entries = [...audit.seen.values()].sort((a, b) => b.id - a.id);
+    const next = audit.olderNext === undefined ? value.next : audit.olderNext;
+    s.count.textContent = entries.length + ' newest, no bodies or secrets';
+    const out = [];
+    out.push(entries.length
+      ? h('div', { class: 'audit mono' }, entries.map(e => h('div', { class: 'ln' },
+        h('time', { class: 't', text: when(e.at, nowMs()), title: e.at }),
+        h('span', { class: 'actor', text: peerName(e.actor), title: e.actor }),
+        h('span', { class: 'act', text: e.action }),
+        h('span', { class: 't' }, (e.target_ids || []).map(id => h('span', { class: 'tg', text: short(id), title: id }))))))
+      : none('No audit entries.'));
+    if (audit.err) out.push(h('p', { class: 'err', text: 'Could not load older entries: ' + errText(audit.err) }));
+    if (next) out.push(h('button', { type: 'button', class: 'btn older', disabled: audit.busy, text: audit.busy ? 'Loading…' : 'Load older', onclick: loadOlder }));
+    return out;
+  }
+
+  async function loadOlder() {
+    if (audit.busy) return;
+    const ids = [...audit.seen.keys()];
+    if (!ids.length) return;
+    audit.busy = true;
+    audit.err = null;
+    render();
+    try {
+      const page = await api.audit({ limit: AUDIT_PAGE, before: Math.min(...ids) });
+      for (const e of page.entries || []) audit.seen.set(e.id, e);
+      audit.olderNext = page.next || null;
+    } catch (e) {
+      audit.err = e;
+    } finally {
+      audit.busy = false;
+      if (audit.alive) render();
+    }
+  }
+
+  function render() {
+    renderCounters();
+    fill('peers', res.peers, 'Peers', drawPeers);
+    fill('threads', res.threads, 'Threads', drawThreads);
+    fill('health', res.health, 'Delivery health', drawHealth);
+    fill('dead', res.dead, 'Dead letters', drawDead);
+    fill('loop', res.cuts, 'Loop control', drawLoop);
+    fill('audit', res.audit, 'Audit tail', drawAudit);
+  }
+
+  render();
+  const offs = Object.values(res).map(r => r.subscribe(render));
+  const timer = setInterval(() => { for (const r of Object.values(res)) r.reload(); }, RELOAD_MS);
+  return () => {
+    audit.alive = false;
+    clearInterval(timer);
+    for (const off of offs) off();
+  };
 }
