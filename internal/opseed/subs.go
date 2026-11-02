@@ -57,7 +57,8 @@ func (b *builder) subscriptions() error {
 		if _, err := b.h.DB.ExecContext(b.ctx, `INSERT INTO oauth_tokens(token_hash,kind,client_id,principal_id,scope,resource,expires_at,revoked_at,created_at) VALUES(?,'access','demo',?,'vecnet',?,?,?,?)`, tokenHash, prn, b.h.Cfg.PublicURL+"/mcp", envelope.FormatTime(expiry), revoked, now); err != nil {
 			return err
 		}
-		_, err = b.h.DB.ExecContext(b.ctx, `INSERT INTO event_subscriptions(sub_id,principal_kind,principal_id,peer_id,name,arguments,url,secret_enc,cursor_epoch,cursor_seq,types,expires_at,verified_at,paused_reason,token_expires_at,last_delivery_at,last_status,created_at,updated_at,token_hash,last_refresh_at) VALUES(?,'oauth',?,?,'vecnet.message',?,?,?,?,?,'["delivery"]',?,?,?,?,?,200,?,?,?,?)`, id, prn, b.s.Peers["dot"], string(args), b.h.Cfg.PublicURL+"/__demo/sink/"+id, sealed, epoch, seq, envelope.FormatTime(b.h.Now().Add(24*time.Hour)), now, paused, envelope.FormatTime(expiry), now, now, now, tokenHash, now)
+		// Match Store.Upsert: subscription expiry cannot outlive the OAuth token.
+		_, err = b.h.DB.ExecContext(b.ctx, `INSERT INTO event_subscriptions(sub_id,principal_kind,principal_id,peer_id,name,arguments,url,secret_enc,cursor_epoch,cursor_seq,types,expires_at,verified_at,paused_reason,token_expires_at,last_delivery_at,last_status,created_at,updated_at,token_hash,last_refresh_at) VALUES(?,'oauth',?,?,'vecnet.message',?,?,?,?,?,'["delivery"]',?,?,?,?,?,200,?,?,?,?)`, id, prn, b.s.Peers["dot"], string(args), b.h.Cfg.PublicURL+"/__demo/sink/"+id, sealed, epoch, seq, envelope.FormatTime(expiry), now, paused, envelope.FormatTime(expiry), now, now, now, tokenHash, now)
 		if err != nil {
 			return err
 		}

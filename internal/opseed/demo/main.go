@@ -40,15 +40,49 @@ type manifest struct {
 }
 
 type controls struct {
-	offset     atomic.Int64
-	mu         sync.Mutex
-	stallUntil time.Time
-	failUntil  time.Time
-	failPrefix string
-	failStatus int
+	// wallNow and wait are injectable so control tests never race wall time.
+	wallNow      func() time.Time
+	wait         func(context.Context, time.Duration, <-chan struct{})
+	offset       atomic.Int64
+	mu           sync.Mutex
+	stallUntil   time.Time
+	stallRelease chan struct{}
+	stalled      int
+	failUntil    time.Time
+	failPrefix   string
+	failStatus   int
 }
 
-func (c *controls) now() time.Time { return time.Now().Add(time.Duration(c.offset.Load())) }
+func (c *controls) realNow() time.Time {
+	if c.wallNow != nil {
+		return c.wallNow()
+	}
+	return time.Now()
+}
+func (c *controls) now() time.Time { return c.realNow().Add(time.Duration(c.offset.Load())) }
+
+func (c *controls) waitForRelease(ctx context.Context, d time.Duration, release <-chan struct{}) {
+	if c.wait != nil {
+		c.wait(ctx, d, release)
+		return
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-release:
+	case <-ctx.Done():
+	}
+}
+
+// clearStall is called with mu held; it releases requests already waiting.
+func (c *controls) clearStall() {
+	c.stallUntil = time.Time{}
+	if c.stallRelease != nil {
+		close(c.stallRelease)
+		c.stallRelease = nil
+	}
+}
 func (c *controls) handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/__demo/sink/") && r.Method == http.MethodPost {
@@ -62,13 +96,37 @@ func (c *controls) handler(next http.Handler) http.Handler {
 				return
 			}
 			var in struct {
-				By     string `json:"by"`
-				For    string `json:"for"`
-				Prefix string `json:"prefix"`
-				Status int    `json:"status"`
+				By      string `json:"by"`
+				For     string `json:"for"`
+				Prefix  string `json:"prefix"`
+				Status  int    `json:"status"`
+				Control string `json:"control"`
 			}
 			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in); err != nil {
 				http.Error(w, "invalid control body", 400)
+				return
+			}
+			if r.URL.Path == "/__demo/status" {
+				c.mu.Lock()
+				stalled := c.stalled
+				c.mu.Unlock()
+				_ = json.NewEncoder(w).Encode(map[string]int{"stalled_requests": stalled})
+				return
+			}
+			if r.URL.Path == "/__demo/clear" {
+				c.mu.Lock()
+				switch in.Control {
+				case "stall":
+					c.clearStall()
+				case "fail":
+					c.failUntil = time.Time{}
+				default:
+					c.mu.Unlock()
+					http.Error(w, "invalid control", 400)
+					return
+				}
+				c.mu.Unlock()
+				_ = json.NewEncoder(w).Encode(map[string]bool{"cleared": true})
 				return
 			}
 			text := in.For
@@ -85,7 +143,9 @@ func (c *controls) handler(next http.Handler) http.Handler {
 				c.offset.Add(int64(d))
 			case "/__demo/stall":
 				c.mu.Lock()
-				c.stallUntil = time.Now().Add(d)
+				c.clearStall()
+				c.stallRelease = make(chan struct{})
+				c.stallUntil = c.realNow().Add(d)
 				c.mu.Unlock()
 			case "/__demo/fail":
 				if !strings.HasPrefix(in.Prefix, "/v1/") || in.Status < 400 || in.Status > 599 {
@@ -95,7 +155,7 @@ func (c *controls) handler(next http.Handler) http.Handler {
 				c.mu.Lock()
 				c.failPrefix = in.Prefix
 				c.failStatus = in.Status
-				c.failUntil = time.Now().Add(d)
+				c.failUntil = c.realNow().Add(d)
 				c.mu.Unlock()
 			default:
 				http.NotFound(w, r)
@@ -106,18 +166,25 @@ func (c *controls) handler(next http.Handler) http.Handler {
 		}
 		if strings.HasPrefix(r.URL.Path, "/v1/") {
 			c.mu.Lock()
-			until, failUntil, prefix, status := c.stallUntil, c.failUntil, c.failPrefix, c.failStatus
+			d := c.stallUntil.Sub(c.realNow())
+			release := c.stallRelease
+			if d > 0 {
+				c.stalled++
+			}
 			c.mu.Unlock()
-			if d := time.Until(until); d > 0 {
-				timer := time.NewTimer(d)
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-				case <-r.Context().Done():
+			if d > 0 {
+				c.waitForRelease(r.Context(), d, release)
+				c.mu.Lock()
+				c.stalled--
+				c.mu.Unlock()
+				if r.Context().Err() != nil {
 					return
 				}
 			}
-			if time.Now().Before(failUntil) && strings.HasPrefix(r.URL.Path, prefix) {
+			c.mu.Lock()
+			failUntil, prefix, status := c.failUntil, c.failPrefix, c.failStatus
+			c.mu.Unlock()
+			if c.realNow().Before(failUntil) && strings.HasPrefix(r.URL.Path, prefix) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
 				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "demo_failure", "message": "Demo failure", "details": map[string]any{}}})
@@ -233,8 +300,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	} else {
 		old := m.URL
 		m.URL = url
-		if _, err := db.ExecContext(ctx, `UPDATE event_subscriptions SET url=? || substr(url,?) WHERE url LIKE ?`, url, len(old)+1, old+"/__demo/sink/%"); err != nil {
-			return err
+		// Port 0 changes the origin on restart. Repoint both kinds of local sinks.
+		for _, table := range []string{"event_subscriptions", "routes"} {
+			if _, err := db.ExecContext(ctx, `UPDATE `+table+` SET url=? || substr(url,?) WHERE url LIKE ?`, url, len(old)+1, old+"/__demo/sink/%"); err != nil {
+				return err
+			}
 		}
 	}
 	raw, err = json.Marshal(m)

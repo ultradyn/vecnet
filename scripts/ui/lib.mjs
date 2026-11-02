@@ -85,7 +85,7 @@ export async function bootDemo({ scale = false } = {}) {
       assert(secret, `no bearer for peer ${name}`);
       return fetch(demo.url + path, { method, headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json', 'X-Vecnet-Ingress': 'operator_ui' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     };
-    return { demo, dir, close, asPeer, advance: by => control('advance', { by }), stall: duration => control('stall', { for: duration }), fail: (prefix, status, duration) => control('fail', { prefix, status, for: duration }) };
+    return { demo, dir, close, asPeer, advance: by => control('advance', { by }), stall: duration => control('stall', { for: duration }), clear: name => control('clear', { control: name }), controlStatus: () => control('status', {}), fail: (prefix, status, duration) => control('fail', { prefix, status, for: duration }) };
   } catch (error) { await close(); throw error; }
   finally { clearTimeout(timer); lines.close(); child.stdout.resume(); }
 }

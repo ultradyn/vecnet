@@ -214,11 +214,20 @@ func (b *builder) messages() error {
 }
 
 func (b *builder) deliveryStates() error {
+	// This local receiver is supplied by the demo binary. The fixture records
+	// verification directly, just as it records the historical push outcomes.
+	route, _, err := b.h.AddRoute(b.ctx, "peer", b.s.Peers["triage"], b.h.Cfg.PublicURL+"/__demo/sink/push")
+	if err != nil {
+		return err
+	}
+	if err := b.h.MarkRouteVerified(b.ctx, route); err != nil {
+		return err
+	}
 	for i, p := range []struct {
 		state           string
 		status, attempt int
 		message         string
-	}{{"dead_letter", 503, 8, "HTTP 503 after 8/8 attempts"}, {"dead_letter", 410, 1, "HTTP 410 Gone"}, {"dead_letter", 0, 8, "network connection refused"}, {"failed", 409, 1, "HTTP 409 Conflict"}, {"pending", 503, 2, "retry pending"}} {
+	}{{"dead_letter", 503, 8, "HTTP 503 after 8/8 attempts"}, {"dead_letter", 410, 1, "HTTP 410 Gone"}, {"dead_letter", 0, 8, "network connection refused"}, {"failed", 409, 1, "HTTP 409 Conflict"}, {"queued", 503, 2, "retry pending"}} {
 		resp, err := b.send("operator", fmt.Sprintf("delivery-%d", i), fmt.Sprintf("Delivery health %d", i+1), p.message, func(r *envelope.SendRequest) { r.Priority = "wake"; r.Recipients = []string{b.s.Peers["triage"]} })
 		if err != nil {
 			return err
@@ -230,7 +239,7 @@ func (b *builder) deliveryStates() error {
 		}
 		var next any
 		left := 0
-		if p.state == "pending" {
+		if p.state == "queued" {
 			next = envelope.FormatTime(b.h.Now().Add(time.Hour))
 			left = 6
 		}
@@ -240,7 +249,7 @@ func (b *builder) deliveryStates() error {
 		if p.state == "dead_letter" {
 			b.s.DeadLetters = append(b.s.DeadLetters, id)
 		}
-		if p.state == "pending" {
+		if p.state == "queued" {
 			if _, err = b.send("operator", fmt.Sprintf("delivery-%d", i), "", "Queued behind the retrying delivery.", func(r *envelope.SendRequest) { r.Priority = "wake"; r.Recipients = []string{b.s.Peers["triage"]} }); err != nil {
 				return err
 			}
@@ -253,7 +262,7 @@ func (b *builder) deliveryStates() error {
 			return err
 		}
 	}
-	_, err := b.h.DB.ExecContext(b.ctx, `INSERT INTO counters(name,value) VALUES('loop_cut',3)`)
+	_, err = b.h.DB.ExecContext(b.ctx, `INSERT INTO counters(name,value) VALUES('loop_cut',3)`)
 	return err
 }
 

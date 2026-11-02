@@ -76,6 +76,7 @@ test-ui:
 # Screen scripts run serially; helpers are not executable checks.
 ui-shots:
     #!/usr/bin/env bash
+    set -euo pipefail
     for script in scripts/ui/*.mjs; do
         case "$script" in */lib.mjs|*/tmux.mjs|*/ansi.mjs|*.test.mjs) continue ;; esac
         build2 node "$script"

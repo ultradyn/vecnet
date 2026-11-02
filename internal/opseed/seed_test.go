@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/opseed"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
@@ -140,9 +141,6 @@ func TestSeedScenario(t *testing.T) {
 	if count(t, e, "SELECT count(*) FROM audit WHERE action='loop_cut'") != 3 {
 		t.Fatal("want three loop cut reasons")
 	}
-	if count(t, e, "SELECT count(*) FROM deliveries WHERE state='pending' AND attempt>0 AND next_attempt_at IS NOT NULL") == 0 {
-		t.Fatal("missing retry-blocked thread")
-	}
 }
 
 func TestSeedIsRepeatableOnFreshDB(t *testing.T) {
@@ -164,5 +162,76 @@ func TestSeedScale(t *testing.T) {
 	}
 	if count(t, e, "SELECT count(*) FROM messages WHERE thr_id=?", s.Threads["long"]) != 500 {
 		t.Fatal("want 500 messages")
+	}
+}
+
+func TestSeedSubscriptionRefreshWindow(t *testing.T) {
+	e, s := seed(t, false)
+	store := &events.Store{DB: e.Hub.DB, Now: e.Now.Now}
+	for i, id := range s.Subscriptions {
+		sub, err := store.Get(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sub.Expires == nil || sub.TokenExpires == nil || sub.Expires.After(*sub.TokenExpires) {
+			t.Fatalf("subscription %d expiry must be bounded by its token", i)
+		}
+		if i < 2 {
+			if !sub.Expires.After(e.Now.Now()) {
+				t.Fatalf("subscription %d already expired", i)
+			}
+			// This is the same deadline used by events/subscribe (ten-minute margin).
+			refreshBefore := sub.Expires.Add(-10 * time.Minute)
+			if due := !refreshBefore.After(e.Now.Now()); due != (i == 1) {
+				t.Fatalf("subscription %d refresh due = %v", i, due)
+			}
+		}
+	}
+}
+
+func TestSeedRetryBlocksFollowingDelivery(t *testing.T) {
+	e, s := seed(t, false)
+	ctx := context.Background()
+	var retryID, nextID, retryAt string
+	err := e.Hub.DB.QueryRow(`SELECT d.dly_id,d.next_attempt_at FROM deliveries d JOIN routes r ON r.route_id=d.route_id
+  WHERE d.thr_id=? AND d.state IN ('queued','pushed') AND d.attempt>0 AND r.verified_at IS NOT NULL`, s.Threads["delivery-4"]).Scan(&retryID, &retryAt)
+	if err != nil {
+		t.Fatalf("missing verified retrying push: %v", err)
+	}
+	if err := e.Hub.DB.QueryRow(`SELECT dly_id FROM deliveries WHERE thr_id=? AND attempt=0 AND state='queued' AND route_id IS NOT NULL`, s.Threads["delivery-4"]).Scan(&nextID); err != nil {
+		t.Fatal(err)
+	}
+	now := e.Now.Now()
+	if retryAt <= envelope.FormatTime(now) {
+		t.Fatal("retry is not deferred")
+	}
+	due, err := e.Hub.ClaimDue(ctx, now, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("following delivery escaped retry blocker: %d claims", len(due))
+	}
+	at, err := time.Parse(time.RFC3339Nano, retryAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Now.Advance(at.Sub(now))
+	due, err = e.Hub.ClaimDue(ctx, e.Now.Now(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 || due[0].DeliveryID != retryID {
+		t.Fatalf("expected only the retry to be claimed: %+v", due)
+	}
+	if err := e.Hub.PushResult(ctx, due[0], 204, 0, nil, e.Now.Now()); err != nil {
+		t.Fatal(err)
+	}
+	due, err = e.Hub.ClaimDue(ctx, e.Now.Now(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 || due[0].DeliveryID != nextID {
+		t.Fatalf("following delivery did not unblock: %+v", due)
 	}
 }
