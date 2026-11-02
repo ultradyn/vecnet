@@ -56,7 +56,7 @@ export function mount(root, ctx) {
   const matrix = store.resource(tag, () => loadMatrix(api, threadId));
   const scroller = root.closest('main') || root;
   const S = {
-    replyTo: '',
+    replyTo: null,          // null picks a default; '' is an explicit thread-level reply
     prio: 'wake',
     pending: null,          // unsent reply: keeps its idempotency_key across retries
     sending: false,
@@ -115,7 +115,7 @@ export function mount(root, ctx) {
       S.pending = null;
       ta.value = '';
       counter(ta);
-      S.replyTo = '';
+      S.replyTo = null;
       S.pinned = true;
       toast(r.spilled ? 'Sent (spilled into message.md)' : 'Sent');
       store.invalidate(tag, 'threads', 'inbox');
@@ -368,9 +368,9 @@ export function mount(root, ctx) {
 
   const onScroll = () => { S.pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < PIN_SLACK; };
 
-  // The default reply target is picked per load, not per render, or dismissing
-  // it with × would bring it straight back. A load that brings another peer's
-  // message marks the thread read again.
+  // Pick a default on first load or if a selected message disappears. An
+  // explicit dismissal ('') survives reloads as well as renders. A load that
+  // brings another peer's message marks the thread read again.
   let loaded, seen = null;
   const onHistory = () => {
     if (history.get() !== loaded) {
@@ -379,7 +379,7 @@ export function mount(root, ctx) {
       // An unsent reply keeps the target it was sent with: a load (often the
       // event for that very send, which landed though its answer was lost)
       // must not re-pick it, or the retry would mint a new idempotency key.
-      if (!S.pending && (!S.replyTo || !list.some(m => m.message_id === S.replyTo))) S.replyTo = lastFromOther(list);
+      if (!S.pending && (S.replyTo === null || (S.replyTo && !list.some(m => m.message_id === S.replyTo)))) S.replyTo = lastFromOther(list) || null;
       if (seen && list.some(m => !seen.has(m.message_id) && m.sender !== me)) markRead();
       if (loaded) seen = new Set(list.map(m => m.message_id));
     }

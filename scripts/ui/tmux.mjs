@@ -34,10 +34,10 @@ export async function withTui({ scale = false, command, env: shared } = {}, fn) 
         while (Date.now() < until) {
           const output = await capture();
           const plain = output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
-          if (plain.includes(text)) return;
+          if (text instanceof RegExp ? text.test(plain) : plain.includes(text)) return;
           await new Promise(resolve => setTimeout(resolve, 100));
         }
-        throw new Error(`tmux text did not appear (length ${text.length})`);
+        throw new Error(`tmux text did not appear (length ${String(text).length})`);
       },
       // must, when given, is text the captured frame has to hold: a state that
       // lasts only a moment fails the run instead of saving the next state

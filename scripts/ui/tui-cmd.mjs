@@ -33,6 +33,8 @@ try {
     await keys('C-c');
 
     await keys(':presence blocked', 'Enter');
+    // A whole toast line cannot match the command input's leading colon.
+    await waitFor(/(?:^|\n)\s*presence blocked\s*(?:\n|$)/);
     await waitFor('max@vecnet · blocked');
 
     await keys(':no-such-command', 'Enter');

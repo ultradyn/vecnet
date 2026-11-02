@@ -1469,6 +1469,9 @@ func TestPresenceHeartbeat(t *testing.T) {
 			// The minute refresh reloads the inbox too; the beat's own read is the second.
 			p.until("the heartbeat's read", func() bool { return f.count("Inbox") >= 2 })
 			p.idle()
+			if got := f.count("Inbox"); got != 2 {
+				t.Fatalf("%d inbox reads, want exactly 2 (refresh and heartbeat)", got)
+			}
 			if got := f.calls(&f.presence); len(got) != 0 {
 				t.Fatalf("presence %q", got)
 			}

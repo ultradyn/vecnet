@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/store"
 )
 
 func TestDemoControls(t *testing.T) {
@@ -284,6 +285,24 @@ func TestDemoReopensWithStableCredentials(t *testing.T) {
 		t.Fatal("saved push route does not point to the reopened demo")
 	}
 	stop()
+	// The API deliberately redacts paths; inspect the stored callback after
+	// shutdown so a correct host cannot hide a missing or changed sink path.
+	db, err := store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var callbackURL string
+	err = db.QueryRow(`SELECT url FROM routes`).Scan(&callbackURL)
+	closeErr := db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if want := second.URL + "/__demo/sink/push"; callbackURL != want {
+		t.Fatalf("saved push callback = %q, want %q", callbackURL, want)
+	}
 	if first.OperatorPeer != second.OperatorPeer || first.OperatorSecret != second.OperatorSecret || first.Threads["hark"] != second.Threads["hark"] {
 		t.Fatal("saved scenario was regenerated")
 	}

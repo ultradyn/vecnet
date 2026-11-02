@@ -98,8 +98,25 @@ try {
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, demo.threads.hark);
     await page.locator('.msg', { hasText: 'Classifier checks passed.' }).waitFor();
     await page.locator('.composer .to').waitFor();
-    await page.locator('.composer .to button').click();
-    await page.locator('.composer .to').waitFor({ state: 'hidden' });
+    // Hold an event-driven history reload across dismissal. Its fresh snapshot
+    // must not silently select the default target again after the click.
+    const historyURL = `**/v1/threads/${demo.threads.hark}/messages?*`;
+    let releaseHistory;
+    const historyGate = new Promise(resolve => { releaseHistory = resolve; });
+    await page.route(historyURL, async route => { await historyGate; await route.continue(); });
+    const reloading = page.waitForRequest(req => req.url().includes(`/v1/threads/${demo.threads.hark}/messages?`));
+    const freshText = 'History reload across reply dismissal.';
+    const fresh = await asPeer('codex', 'POST', '/v1/messages', { idempotency_key: 'shell-dismiss-reload', thread_id: demo.threads.hark, priority: 'hold', content: { text: freshText } });
+    assert(fresh.ok, `reload trigger failed: ${fresh.status}`);
+    await reloading;
+    try {
+      await page.locator('.composer .to button').click();
+      await page.locator('.composer .to').waitFor({ state: 'hidden' });
+    } finally { releaseHistory(); }
+    await page.locator('.msg .txt', { hasText: freshText }).waitFor();
+    await page.unroute(historyURL);
+    assert(await page.locator('.composer .to').isHidden(), 'history reload restored the dismissed reply target');
+    await shot('07-shell-dismissed');
     await page.locator('.msg', { hasText: 'Classifier checks passed.' }).getByRole('button', { name: 'reply' }).click();
     await page.locator('.composer .to', { hasText: 'Classifier checks passed.' }).waitFor();
     const reply = 'Thanks, shipping the shell.';
