@@ -22,6 +22,7 @@ try {
     const releases = {};
     for (const [key, glob] of Object.entries({
       peers: '**/v1/admin/peers', threads: '**/v1/admin/threads*', health: '**/v1/admin/delivery-health',
+      subs: '**/v1/admin/subscriptions',
       dead: '**/v1/admin/dead-letters', cuts: '**/v1/admin/loop-cuts*', counters: '**/v1/admin/counters', audit: '**/v1/admin/audit*',
     })) releases[key] = await hold(glob);
 
@@ -31,6 +32,10 @@ try {
     for (const name of ['Peers', 'Threads', 'Delivery health', 'Dead letters', 'Loop control', 'Subscriptions', 'Audit tail']) {
       await dash.locator(':scope > section > h2', { hasText: name }).waitFor();
     }
+    // Keep subscriptions pending to exercise a slow response alongside the six held sections.
+    await sec('subs').locator('.loading').waitFor();
+    await releases.subs();
+    await sec('subs').locator('.subs-table').waitFor();
     assert(await dash.locator('.loading').count() === 6, 'every section should be loading while its read is held');
     assert((await page.locator('.dash-counters').textContent()).includes('Loading counters'), 'counter line not loading');
     await shot('12-dash-initial');
@@ -110,6 +115,7 @@ try {
     await sec('loop').locator('.total').waitFor();
     await sec('audit').locator('.audit .ln').first().waitFor();
     await page.locator('.dash-counters', { hasText: 'loop cut' }).waitFor();
+    await sec('subs').locator('.subs-table').waitFor();
     assert(await dash.locator('.empty.error').count() === 1, 'the failure spread beyond its section');
     assert(await dash.locator('.loading').count() === 0, 'a section is stuck loading');
     await sec('threads').locator('h2').scrollIntoViewIfNeeded();
