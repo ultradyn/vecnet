@@ -1,0 +1,42 @@
+ vecnet | 1:inbox 2:chat 3:dash 4:subs                                       hub hub.example:8443  live  apr 0  dlq 0  cuts/24h 7  07:41:00 
+┌─ peers · 7 · presence is self-reported, reach is hub-observed ───────────────────────────────────────────────────────────────────────────┐
+│  PEER               KIND         PRESENCE  REACH        QUOTA                LOCATION       LAST SEEN CAPS                               │
+│> max                operator     working   connected    none                 xsm            0s ago    approve,admin                      │
+│  codex-hark         session      working   connected    [||||      ]  44%    lan:xsm        0s ago    shell,repo:ultradyn/hark           │
+│  dot-research       dot          unknown   reachable    [||||      ]  35%    chatgpt        18m ago   deep-research                      │
+│  grok-triage        grokbot      unknown   unreachable  [          ]   3%    cloud:cursor   3h ago    triage                             │
+│  claw-ops           openclaw     idle      connected    plan=pro tokens=1200 lan:x-alpha    0s ago    git:push                           │
+│  gh-ultradyn        source       n/a       reachable    none                 github.com     39m ago                                      │
+│  old-bot   disabled session      idle      unknown      none                 lan:xsm        30h ago                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌─ threads · 4 ───────────────────────────────┐┌─ delivery health ───────────────────────────┐┌─ audit tail -f ────────────────────────────┐
+│  vecnet ticket 18: operator UI  1m   499    ││grok-triage · Weekly quota rebalance         ││07:22:00 approval.open      dot-research ap…│
+│  Hosting cost deep dive         3m   497    ││  thread blocked on delivery dly_…3A5C       ││07:18:00 delivery.conflict  hub dly_…3A5C s…│
+│  Weekly quota rebalance         2m   cut 484││  attempt 3 · 2 waiting · next 5m · 503      ││05:48:00 thread.rename      max thr_quota   │
+│  Nightly digest 2026-11-01      2h   0      ││409 dot-research HTTP 409 Conflict           ││                                            │
+│                                             ││                                             ││                                            │
+│                                             ││loop cuts / 24h: 7                           ││                                            │
+│                                             ││  max_depth_exceeded        4                ││                                            │
+│                                             ││  thread_budget_exhausted   2                ││                                            │
+│                                             ││  expired                   1                ││                                            │
+│                                             ││                                             ││                                            │
+│                                             ││counters                                     ││                                            │
+│                                             ││  loop_cut                  7                ││                                            │
+│                                             ││  dead_letters              3                ││                                            │
+│                                             ││  rate_limited              2                ││                                            │
+│                                             ││                                             ││                                            │
+│                                             ││                                             ││                                            │
+│                                             ││                                             ││                                            │
+│                                             ││                                             ││                                            │
+│                                             ││                                             ││                                            │
+│                                             ││                                             ││                                            │
+│                                             ││                                             ││                                            │
+│                                             ││                                             ││                                            │
+│                                             ││                                             ││                                            │
+│                                             ││                                             ││                                            │
+│                                             ││                                             ││                                            │
+│                                             ││                                             ││                                            │
+│                                             ││                                             ││                                            │
+└─────────────────────────────────────────────┘└─────────────────────────────────────────────┘└────────────────────────────────────────────┘
+ NORMAL   j/k peer  enter threads  tab pane                                                                max@vecnet · working · prio wake 
+: command  ? help                                                                                                                           

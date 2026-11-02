@@ -1,0 +1,24 @@
+ vecnet | 1:inbox 2:chat 3:dash 4:subs live  apr 0  dlq 0  cuts/24h 7  07:41:00 
+┌─ peers · 7 · presence is self-reported, reach is hub-observed ───────────────┐
+│  PEER                   PRESENCE  REACH        QUOTA                LAST SEEN│
+│> max                    working   connected    none                 0s ago   │
+│  codex-hark             working   connected    [||||      ]  44%    0s ago   │
+│  dot-research           unknown   reachable    [||||      ]  35%    18m ago  │
+│  grok-triage            unknown   unreachable  [          ]   3%    3h ago   │
+│  claw-ops               idle      connected    plan=pro tokens=1200 0s ago   │
+│  gh-ultradyn            n/a       reachable    none                 39m ago  │
+│  old-bot       disabled idle      unknown      none                 30h ago  │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌─ threads · 4 ───────────┐┌─ delivery health ───────┐┌─ audit tail -f ────────┐
+│  vecnet ticket … 499    ││grok-triage · Weekly quot││07:22:00 approval.open  │
+│  Hosting cost d… 497    ││  blocked on dly_…3A5C   ││07:18:00 delivery.confl…│
+│  Weekly quota r… cut 484││  attempt 3 · 2 waiting ·││05:48:00 thread.rename  │
+│  Nightly digest… 0      ││409 dot-research HTTP 409││                        │
+│                         ││                         ││                        │
+│                         ││loop cuts / 24h: 7       ││                        │
+│                         ││  max_depth_exceeded 4   ││                        │
+│                         ││  thread_budget_exh… 2   ││                        │
+│                         ││  expired            1   ││                        │
+└─────────────────────────┘└─────────────────────────┘└────────────────────────┘
+ NORMAL   j/k peer  enter threads  tab pane    max@vecnet · working · prio wake 
+: command  ? help                                                               
