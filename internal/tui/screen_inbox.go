@@ -25,6 +25,11 @@ const (
 	inboxTimeW     = 5
 	inboxTailW     = 11
 	inboxPresence  = "presence" // the lock key for the operator's own presence
+	// inboxAskLines is the most of a question the detail shows, so the question
+	// a peer writes cannot take the room the prompt needs.
+	inboxAskLines = 4
+	// inboxHintsW is the width from which the status line holds every key.
+	inboxHintsW = 120
 )
 
 var inboxSelBg = lipgloss.Color("#1e293b")
@@ -74,6 +79,7 @@ type inboxBeatMsg struct {
 type inboxScreen struct {
 	sel      string // the selected row's key
 	at, top  int    // its index, kept for when it leaves, and the first row shown
+	compact  bool   // the last frame was too narrow for the full hints
 	prompt   *inboxPrompt
 	locks    map[string]*inboxLock
 	nextBeat time.Time
@@ -85,6 +91,8 @@ func (s *inboxScreen) Title() string { return "inbox" }
 
 func (s *inboxScreen) Hints() string {
 	switch {
+	case s.prompt == nil && s.compact:
+		return "a answer  r retry  x drop  p status"
 	case s.prompt == nil:
 		return "j/k move  a answer  r retry  x discard  p presence  enter open  ? help"
 	case s.prompt.answer != nil:
@@ -323,7 +331,9 @@ func inboxNoResume(health string) string {
 	case opapi.HealthPausedToken:
 		return "no resume here: ChatGPT must re-subscribe"
 	case opapi.HealthPausedAuth:
-		return "no resume here: enable or relink the peer, then subscribe again"
+		// The hub reports several causes as this one, and only its note in the
+		// detail says which.
+		return "no resume here: the detail says what it needs"
 	}
 	return "no resume here: it would not help this subscription"
 }
@@ -347,7 +357,7 @@ func (s *inboxScreen) open(row inboxRow, m *Model) tea.Cmd {
 		return opened
 	}
 	api := m.API
-	action := inboxAction{key: "read:" + thread, verb: "mark read", tags: []string{"inbox"}}
+	action := inboxAction{key: "read:" + thread, verb: "mark read", tags: []string{"inbox", threadPrefix + thread}}
 	return tea.Batch(opened, s.start(action, m, func(ctx context.Context) error {
 		_, err := api.ReadThread(ctx, thread)
 		return err
@@ -549,6 +559,7 @@ func (p inboxPeers) kind(id string) string { return Clean(p[id].Kind) }
 // View lays the tab out as shots/c-inbox.png: list over event log, detail on
 // the right. Everything a peer supplied is cleaned before it reaches a style.
 func (s *inboxScreen) View(m *Model, w, h int) string {
+	s.compact = w < inboxHintsW
 	rows := s.rows(m)
 	at := s.cursor(rows)
 	peers := newInboxPeers(m)
@@ -565,7 +576,7 @@ func (s *inboxScreen) View(m *Model, w, h int) string {
 	if at < len(rows) {
 		row = &rows[at]
 	}
-	detail := Pane("detail", w-leftW, h, false, s.viewDetail(row, peers, m, w-leftW-4))
+	detail := Pane("detail", w-leftW, h, false, s.viewDetail(row, peers, m, w-leftW-4, h-2))
 	return lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.JoinVertical(lipgloss.Left, list, events), detail)
 }
 
@@ -619,7 +630,7 @@ func (s *inboxScreen) viewRow(row inboxRow, selected bool, peers inboxPeers, m *
 			status = fmt.Sprint(*d.LastStatus)
 		}
 		text = []inboxCell{{styleBad, status, 3}, {styleMuted, inboxClass(d.Class), textW - 4}}
-		tail.text = fmt.Sprintf("%d tries", d.Attempt)
+		tail.text = inboxTries(d.Attempt)
 	case row.sub != nil:
 		a := row.sub
 		tagStyle = styleWarn
@@ -672,6 +683,13 @@ func inboxQuestion(a opapi.OpenApproval) string {
 		return a.Question
 	}
 	return a.Text
+}
+
+func inboxTries(n int) string {
+	if n == 1 {
+		return "1 try"
+	}
+	return fmt.Sprintf("%d tries", n)
 }
 
 func inboxClass(class string) string {
@@ -737,19 +755,63 @@ func inboxPara(st lipgloss.Style, text string, w int) []string {
 	return lines
 }
 
-func (s *inboxScreen) viewDetail(row *inboxRow, peers inboxPeers, m *Model, w int) string {
+// inboxQuote is peer text behind a rule, so no line of it can pass for one of
+// the screen's own.
+func inboxQuote(st lipgloss.Style, text string, w int) []string {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	lines := inboxPara(st, text, w-2)
+	for i, line := range lines {
+		lines[i] = styleBorder.Render("│ ") + line
+	}
+	return lines
+}
+
+// inboxFold is cleaned text as one paragraph of at most n lines, marking a cut.
+// A peer's line breaks and padding do not survive it, so they cannot set out a
+// fake option.
+func inboxFold(text string, w, n int) (lines []string, cut bool) {
+	lines = strings.Split(ansi.Wrap(strings.Join(strings.Fields(text), " "), max(w, 1), " "), "\n")
+	if len(lines) > n {
+		lines, cut = lines[:n], true
+		lines[n-1] = ansi.Truncate(lines[n-1], max(w-1, 0), "") + "…"
+	}
+	return lines, cut
+}
+
+// inboxDetail sets out h lines of detail. fixed is what the operator acts on and
+// always shows whole; body, a peer's text, comes after it and gets what is left,
+// so nothing a peer writes can move the prompt or push it off the pane.
+func inboxDetail(fixed, body []string, h int) []string {
+	left := h - len(fixed)
+	if len(body) == 0 || left <= 0 {
+		return fixed
+	}
+	if left > 1 {
+		fixed = append(fixed, "")
+		left--
+	}
+	if len(body) > left {
+		more := styleMuted.Render(fmt.Sprintf("… %d more lines", len(body)-left+1))
+		body = append(body[:left-1:left-1], more)
+	}
+	return append(fixed, body...)
+}
+
+func (s *inboxScreen) viewDetail(row *inboxRow, peers inboxPeers, m *Model, w, h int) string {
 	var lines []string
 	switch {
 	case row == nil:
 		lines = []string{styleMuted.Render("nothing waiting on you")}
 	case row.apr != nil:
-		lines = s.viewApproval(*row.apr, peers, m, w)
+		lines = s.viewApproval(*row.apr, peers, m, w, h)
 	case row.dlq != nil:
-		lines = s.viewDeadLetter(*row.dlq, peers, m, w)
+		lines = s.viewDeadLetter(*row.dlq, peers, m, w, h)
 	case row.sub != nil:
-		lines = viewInboxSub(*row.sub, peers, m, w)
+		lines = viewInboxSub(*row.sub, peers, m, w, h)
 	case row.dly != nil:
-		lines = viewInboxDelivery(*row.dly, peers, m, w)
+		lines = viewInboxDelivery(*row.dly, peers, m, w, h)
 	}
 	for i, line := range lines {
 		lines[i] = " " + line
@@ -757,8 +819,8 @@ func (s *inboxScreen) viewDetail(row *inboxRow, peers inboxPeers, m *Model, w in
 	return strings.Join(lines, "\n")
 }
 
-func (s *inboxScreen) viewApproval(a opapi.OpenApproval, peers inboxPeers, m *Model, w int) []string {
-	lines := []string{
+func (s *inboxScreen) viewApproval(a opapi.OpenApproval, peers inboxPeers, m *Model, w, h int) []string {
+	head := []string{
 		styleAccent.Render("approval_request") + "  " + styleWarn.Render("wake"),
 		"",
 		inboxField("from", peers.name(a.Requester)+" ") + styleMuted.Render(peers.kind(a.Requester)),
@@ -766,32 +828,47 @@ func (s *inboxScreen) viewApproval(a opapi.OpenApproval, peers inboxPeers, m *Mo
 		inboxField("message", Clean(a.MessageID)),
 		"",
 	}
-	question := CleanBody(inboxQuestion(a))
-	if text := CleanBody(a.Text); text != "" && text != question {
-		lines = append(append(lines, inboxPara(styleText, text, w)...), "")
-	}
-	lines = append(lines, inboxPara(styleAccent, "? "+question, w)...)
-	for i, option := range a.Options {
-		lines = append(lines, "  "+styleAccent.Render(fmt.Sprintf("[%d]", i+1))+" "+styleText.Render(Clean(option)))
-	}
-	lines = append(lines, "")
 	left, gone := inboxLeft(a, m)
 	when := inboxClock(a.ExpiresAt, "15:04", m)
+	expires := styleMuted.Render("expires "+when+", in ") + styleWarn.Render(left)
+	var foot []string
 	switch {
 	case gone:
-		lines = append(lines, styleMuted.Render("expired at "+when), styleBad.Render("expired"))
+		foot = []string{styleMuted.Render("expired at " + when), styleBad.Render("expired")}
 	case s.locks["apr:"+a.ApprovalID] != nil:
-		lines = append(lines, styleMuted.Render("expires "+when+", in ")+styleWarn.Render(left), styleAccent.Render("sending your answer"))
+		foot = []string{expires, styleAccent.Render("sending your answer")}
 	case s.prompt != nil && s.prompt.answer != nil:
-		lines = append(lines, styleMuted.Render("expires "+when+", in ")+styleWarn.Render(left),
-			styleAccent.Render(fmt.Sprintf("answer with 1-%d, any other key cancels", len(a.Options))))
+		foot = append([]string{expires}, inboxPara(styleAccent, fmt.Sprintf("answer with 1-%d, any other key cancels", len(a.Options)), w)...)
 	default:
-		lines = append(lines, styleMuted.Render("expires "+when+", in ")+styleWarn.Render(left), styleMuted.Render("press a to answer"))
+		foot = []string{expires, styleMuted.Render("press a to answer")}
 	}
-	return lines
+	// Every option gets an equal share of the lines the rest leaves, which the
+	// protocol's eight options and the 80x24 floor keep at one or more.
+	share := (h - len(head) - 1 - 1 - len(foot)) / max(len(a.Options), 1)
+	var options []string
+	for i, option := range a.Options {
+		text, _ := inboxFold(Clean(option), w-6, max(share, 1))
+		for j, line := range text {
+			label := "    "
+			if j == 0 {
+				label = styleAccent.Render(fmt.Sprintf("[%d]", i+1)) + " "
+			}
+			options = append(options, "  "+label+styleText.Render(line))
+		}
+	}
+	question := inboxQuestion(a)
+	ask, cut := inboxFold(Clean(question), w-2, max(min(h-len(head)-len(options)-1-len(foot), inboxAskLines), 1))
+	for i, line := range ask {
+		ask[i] = styleAccent.Render("? " + line)
+	}
+	var body []string
+	if a.Text != question || cut {
+		body = inboxQuote(styleText, CleanBody(a.Text), w)
+	}
+	return inboxDetail(slices.Concat(head, ask, options, []string{""}, foot), body, h)
 }
 
-func (s *inboxScreen) viewDeadLetter(d opapi.DeadLetter, peers inboxPeers, m *Model, w int) []string {
+func (s *inboxScreen) viewDeadLetter(d opapi.DeadLetter, peers inboxPeers, m *Model, w, h int) []string {
 	status := "none"
 	if d.LastStatus != nil {
 		status = fmt.Sprint(*d.LastStatus)
@@ -809,20 +886,26 @@ func (s *inboxScreen) viewDeadLetter(d opapi.DeadLetter, peers inboxPeers, m *Mo
 		inboxField("updated", inboxClock(d.UpdatedAt, "15:04:05", m)),
 		"",
 	}
-	if d.LastError != nil {
-		lines = append(append(lines, inboxPara(styleBad, CleanBody(*d.LastError), w)...), "")
-	}
-	lines = append(append(lines, inboxPara(styleText, CleanBody(d.Excerpt), w)...), "")
 	switch {
 	case s.locks["dlq:"+d.DeliveryID] != nil:
-		return append(lines, styleAccent.Render("sending"))
+		lines = append(lines, styleAccent.Render("sending"))
 	case s.prompt != nil && s.prompt.discard != nil:
-		return append(lines, styleAccent.Render("press y to discard, any other key cancels"))
+		lines = append(lines, inboxPara(styleAccent, "press y to discard, any other key cancels", w)...)
+	default:
+		lines = append(lines, inboxPara(styleMuted, "press r to retry, x to discard", w)...)
 	}
-	return append(lines, styleMuted.Render("press r to retry, x to discard"))
+	var body []string
+	if d.LastError != nil {
+		body = inboxQuote(styleBad, CleanBody(*d.LastError), w)
+	}
+	excerpt := inboxQuote(styleText, CleanBody(d.Excerpt), w)
+	if len(body) > 0 && len(excerpt) > 0 {
+		body = append(body, styleBorder.Render("│"))
+	}
+	return inboxDetail(lines, append(body, excerpt...), h)
 }
 
-func viewInboxSub(a opapi.Attention, peers inboxPeers, m *Model, w int) []string {
+func viewInboxSub(a opapi.Attention, peers inboxPeers, m *Model, w, h int) []string {
 	lines := []string{
 		styleWarn.Render("subscription") + "  " + styleWarn.Render(Clean(a.Health)),
 		"",
@@ -831,14 +914,15 @@ func viewInboxSub(a opapi.Attention, peers inboxPeers, m *Model, w int) []string
 		inboxField("seen", inboxClock(a.At, "15:04:05", m)),
 		"",
 	}
-	lines = append(append(lines, inboxPara(styleText, CleanBody(a.Summary), w)...), "")
 	if a.Action == "resume" {
-		return append(lines, styleMuted.Render("press r to resume"))
+		lines = append(lines, styleMuted.Render("press r to resume"))
+	} else {
+		lines = append(lines, styleMuted.Render("resume would not help here"))
 	}
-	return append(lines, styleMuted.Render("resume would not help here"))
+	return inboxDetail(lines, inboxQuote(styleText, CleanBody(a.Summary), w), h)
 }
 
-func viewInboxDelivery(d opapi.InboxDelivery, peers inboxPeers, m *Model, w int) []string {
+func viewInboxDelivery(d opapi.InboxDelivery, peers inboxPeers, m *Model, w, h int) []string {
 	state := inboxState(d)
 	lines := []string{
 		styleAccent.Render(Clean(d.Kind)) + "  " + styleWarn.Render(Clean(d.Priority)),
@@ -852,8 +936,8 @@ func viewInboxDelivery(d opapi.InboxDelivery, peers inboxPeers, m *Model, w int)
 	if d.Attachments > 0 {
 		lines = append(lines, inboxField("files", fmt.Sprintf("⎘ %d", d.Attachments)))
 	}
-	lines = append(append(lines, ""), inboxPara(styleText, CleanBody(d.Excerpt), w)...)
-	return append(lines, "", styleMuted.Render("press enter to open the thread"))
+	lines = append(append(lines, ""), inboxPara(styleMuted, "press enter to open the thread", w)...)
+	return inboxDetail(lines, inboxQuote(styleText, CleanBody(d.Excerpt), w), h)
 }
 
 // viewInboxLog is the newest events that fit, oldest first. Deliveries are

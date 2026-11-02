@@ -3,22 +3,22 @@
 │ APR  07:52 dot-rese… Spend about 2… exp 11:39  ││ approval_request  wake     │
 │ APR  07:59 claw-ops  Push classifi… exp 18:59  ││                            │
 │ DLQ  04:11 grok-tri… 503 retries e… 8 tries    ││ from     dot-research dot  │
-│ DLQ  04:30 grok-tri… 410 terminal … 1 tries    ││ thread   Hosting cost deep │
+│ DLQ  04:30 grok-tri… 410 terminal … 1 try      ││ thread   Hosting cost deep │
 │ DLQ  07:18 dot-rese… --- network    8 tries    ││ message  msg_01JD3S6G8J0M2P│
 │ SUB  07:40 dot-rese… paused_auth               ││                            │
-│ SUB  07:40 dot-rese… paused_token              ││ A thorough comparison      │
-│ SUB  07:40 dot-rese… paused_failed  r resume   ││ needs a deep-research run. │
-│ SUB  07:40 dot-rese… paused_operat… r resume   ││ That costs about 20% of my │
-└────────────────────────────────────────────────┘│ weekly quota (35% left).   │
-┌─ your event log  GET /v1/events -f · not messag┐│                            │
-│ e1.10401  07:41:00 presence          pag-hark-…││ ? Spend about 20% of my    │
-│ e1.10403  07:41:00 thread_updated    thr_…XP5R…││ weekly quota on a deep-    │
-│ e1.10404  07:41:00 receipt           msg_…0X2Z…││ research run?              │
-│ e1.10405  07:41:00 approval_expired  apr_…0X7H…││   [1] yes                  │
-│ e1.10406  07:41:00 group_updated     {"group_i…││   [2] no                   │
-│ e1.10407  07:41:00 directory_updated codex-har…││                            │
-│                                                ││ expires 07:52, in 11:39    │
-│                                                ││ press a to answer          │
+│ SUB  07:40 dot-rese… paused_token              ││ ? Spend about 20% of my    │
+│ SUB  07:40 dot-rese… paused_failed  r resume   ││ ? weekly quota on a deep-  │
+│ SUB  07:40 dot-rese… paused_operat… r resume   ││ ? research run?            │
+└────────────────────────────────────────────────┘│   [1] yes                  │
+┌─ your event log  GET /v1/events -f · not messag┐│   [2] no                   │
+│ e1.10401  07:41:00 presence          pag-hark-…││                            │
+│ e1.10403  07:41:00 thread_updated    thr_…XP5R…││ expires 07:52, in 11:39    │
+│ e1.10404  07:41:00 receipt           msg_…0X2Z…││ press a to answer          │
+│ e1.10405  07:41:00 approval_expired  apr_…0X7H…││                            │
+│ e1.10406  07:41:00 group_updated     {"group_i…││ │ A thorough comparison    │
+│ e1.10407  07:41:00 directory_updated codex-har…││ │ needs a deep-research    │
+│                                                ││ │ run. That costs about    │
+│                                                ││ … 2 more lines             │
 └────────────────────────────────────────────────┘└────────────────────────────┘
- NORMAL   j/k move  a answer  r retry  x discarmax@vecnet · working · prio wake 
+ NORMAL   a answer  r retry  x drop  p status  max@vecnet · working · prio wake 
 : command  ? help                                                               

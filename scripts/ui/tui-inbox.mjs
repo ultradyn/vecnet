@@ -21,6 +21,8 @@ const noApr = text => until(`the APR row to go: ${text}`, async () => !(await sc
 
 try {
   await withTui({}, async ({ keys, waitFor, shot, asPeer }) => {
+    // Taken before anything a test sends can reach the screen.
+    const title = await paneTitle();
     const inbox = async () => {
       const response = await asPeer('operator', 'GET', '/v1/admin/inbox');
       assert(response.ok, `inbox: ${response.status}`);
@@ -65,8 +67,9 @@ try {
     await waitFor('[3] yes but no release');
     await shot('18-tui-inbox-progress');
 
+    // The toast is gone in seconds, and a loaded slice can miss it, so what is
+    // waited on is the state that lasts. Go tests pin the toast.
     await keys('1');
-    await waitFor('answered: yes');
     await waitFor('apr 1');
     await noApr('Push classifier fix');
     await shot('18-tui-inbox-success');
@@ -93,7 +96,6 @@ try {
     await keys('p');
     await waitFor('max@vecnet · idle');
 
-    const title = await paneTitle();
     // The list starts on the third line of the pane, and the cursor is on its
     // first row, so the row's line gives the number of presses.
     const row = (await screen()).split('\n').findIndex(line => line.includes('HOLD') && line.includes('onerror=alert(1)>pwn'));
@@ -104,6 +106,17 @@ try {
     await until('the chat tab', async () => !(await screen()).includes('your event log'));
     await keys('1');
     await waitFor('your event log');
+
+    // The seed's hostile text sets no title, so one that does arrives here. A
+    // stronger seed is Task 2's to change.
+    const probe = await asPeer('hostile', 'POST', '/v1/messages', {
+      idempotency_key: 'title-probe', recipients: [opening.me.peer_id], priority: 'hold', thread_title: 'Title probe',
+      content: { text: 'title-probe\x1b]0;pwned\x07\x1b]2;pwned\x07 ends' },
+    });
+    assert(probe.ok, `title probe: ${probe.status}`);
+    await waitFor('title-probe ends');
+    assert((await inbox()).deliveries.some(d => d.excerpt.includes('\x1b]0;pwned')), 'the title sequence did not reach this client');
+    assert(!(await screen()).includes('pwned'), 'a title sequence was drawn as text');
 
     assert(await paneTitle() === title, 'a peer changed the pane title');
     const lines = (await screen()).split('\n');

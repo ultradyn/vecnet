@@ -3,19 +3,19 @@
 │ APR  07:52 dot-research    Spend about 20% of my weekly quota… exp 11:39  ││ approval_request  wake                                      │
 │ APR  07:59 claw-ops        Push classifier fix to hark master… exp 18:59  ││                                                             │
 │ DLQ  04:11 grok-triage     503 retries exhausted               8 tries    ││ from     dot-research dot                                   │
-│ DLQ  04:30 grok-triage     410 terminal 4xx                    1 tries    ││ thread   Hosting cost deep dive                             │
+│ DLQ  04:30 grok-triage     410 terminal 4xx                    1 try      ││ thread   Hosting cost deep dive                             │
 │ DLQ  07:18 dot-research    --- network                         8 tries    ││ message  msg_01JD3S6G8J0M2P4R6T8V0X2Z4B                     │
 │ SUB  07:40 dot-research    paused_auth     dot-research · The…            ││                                                             │
-│ SUB  07:40 dot-research    paused_token    dot-research · Wai…            ││ A thorough comparison needs a deep-research run. That costs │
-│ SUB  07:40 dot-research    paused_failed   dot-research · Fix… r resume   ││ about 20% of my weekly quota (35% left).                    │
-│ SUB  07:40 dot-research    paused_operator dot-research · You… r resume   ││                                                             │
-│ WAKE 06:12 codex-hark      The radio listen did not finalize … ◉          ││ ? Spend about 20% of my weekly quota on a deep-research     │
-│ HOLD 07:39 codex-hark      Ticket 18 prototype is up: three v… ›          ││ run?                                                        │
-│ HOLD 06:31 pag-hark-sleuth Reproduced on x-tuf. Root cause is… ✓          ││   [1] yes                                                   │
-│                                                                           ││   [2] no                                                    │
-│                                                                           ││                                                             │
-│                                                                           ││ expires 07:52, in 11:39                                     │
+│ SUB  07:40 dot-research    paused_token    dot-research · Wai…            ││ ? Spend about 20% of my weekly quota on a deep-research     │
+│ SUB  07:40 dot-research    paused_failed   dot-research · Fix… r resume   ││ ? run?                                                      │
+│ SUB  07:40 dot-research    paused_operator dot-research · You… r resume   ││   [1] yes                                                   │
+│ WAKE 06:12 codex-hark      The radio listen did not finalize … ◉          ││   [2] no                                                    │
+│ HOLD 07:39 codex-hark      Ticket 18 prototype is up: three v… ›          ││                                                             │
+│ HOLD 06:31 pag-hark-sleuth Reproduced on x-tuf. Root cause is… ✓          ││ expires 07:52, in 11:39                                     │
 │                                                                           ││ press a to answer                                           │
+│                                                                           ││                                                             │
+│                                                                           ││ │ A thorough comparison needs a deep-research run. That     │
+│                                                                           ││ │ costs about 20% of my weekly quota (35% left).            │
 │                                                                           ││                                                             │
 │                                                                           ││                                                             │
 │                                                                           ││                                                             │

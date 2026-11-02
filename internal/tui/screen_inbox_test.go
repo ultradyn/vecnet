@@ -33,6 +33,9 @@ type inboxAPI struct {
 	// onAnswer and onPresence change the hub's state as the real write would.
 	onAnswer   func(id string)
 	onPresence func(state string)
+	// readEarly makes a held load return what the hub held when it started, as
+	// a request the network holds does, rather than what it holds on release.
+	readEarly bool
 }
 
 func (f *inboxAPI) note(list *[]string, value string) {
@@ -48,12 +51,19 @@ func (f *inboxAPI) calls(list *[]string) []string {
 }
 
 // Inbox waits on its gate before it reads, so a held load returns what the hub
-// holds on release rather than what it held when the request started.
+// holds on release, unless readEarly is set.
 func (f *inboxAPI) Inbox(ctx context.Context, _ opapi.InboxQuery) (opapi.Inbox, error) {
+	read := func() opapi.Inbox {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.inbox
+	}
+	if f.readEarly {
+		snapshot := read()
+		return snapshot, f.hit(ctx, "Inbox")
+	}
 	err := f.hit(ctx, "Inbox")
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.inbox, err
+	return read(), err
 }
 
 func (f *inboxAPI) setInbox(change func(*opapi.Inbox)) {
@@ -404,6 +414,61 @@ func TestAnswerFlow(t *testing.T) {
 			t.Fatalf("answers %q", got)
 		}
 	})
+	t.Run("a load from before the answer cannot bring the row back", func(t *testing.T) {
+		f := inboxSeed()
+		f.readEarly = true
+		f.setInbox(func(in *opapi.Inbox) { in.Approvals = in.Approvals[:1] })
+		f.onAnswer = f.dropApproval
+		m, p := inboxLoaded(t, f, newClock())
+		gone := func() bool { return !strings.Contains(plainAt(t, m, 140, 42), "weekly quota") }
+		f.reset()
+		stale := f.hold("Inbox")
+		p.press("ctrl+l")
+		p.until("the stale load", func() bool { return f.count("Inbox") == 1 })
+		p.press("a", "1")
+		p.until("the answer to land", gone)
+		// Nothing starts until the stale load lands, so this gate holds the next.
+		stale()
+		fresh := f.hold("Inbox")
+		p.until("the next load", func() bool { return f.count("Inbox") == 2 })
+		if !gone() {
+			t.Fatalf("a stale snapshot brought the answered approval back:\n%s", plainAt(t, m, 140, 42))
+		}
+		p.press("k", "a")
+		if m.Mode != ModeNormal {
+			t.Fatalf("answered approval reopened from a stale snapshot: Mode = %v", m.Mode)
+		}
+		fresh()
+		p.idle()
+		if got := f.calls(&f.answered); !slices.Equal(got, []string{"apr_1/0"}) {
+			t.Fatalf("answers %q", got)
+		}
+		if !gone() {
+			t.Fatal("the row came back with the fresh snapshot")
+		}
+	})
+	t.Run("the reload is owed before anything else can land", func(t *testing.T) {
+		f := inboxSeed()
+		f.setInbox(func(in *opapi.Inbox) { in.Approvals = in.Approvals[:1] })
+		m, p := inboxLoaded(t, f, newClock())
+		s := m.screens[tabInbox].(*inboxScreen)
+		stale := m.Data.Inbox
+		const key = "apr:apr_1"
+		s.locks[key] = &inboxLock{}
+		m.inflight["inbox"] = true // the load the answer overtook
+		f.dropApproval("apr_1")
+		// In this order, with no turn of the pump between: a Reload here would
+		// leave the load unclaimed when the stale snapshot lands.
+		p.send(inboxDoneMsg{inboxAction: inboxAction{key: key, verb: "answer", hide: true, tags: []string{"inbox"}}})
+		p.send(loadMsg{key: "inbox", apply: func(m *Model) { m.Data.Inbox = stale }})
+		if s.locks[key] == nil || strings.Contains(plainAt(t, m, 140, 42), "weekly quota") {
+			t.Fatalf("the stale snapshot released the claim: %v\n%s", s.locks, plainAt(t, m, 140, 42))
+		}
+		p.idle()
+		if len(s.locks) != 0 {
+			t.Fatalf("the load after the answer did not release it: %v", s.locks)
+		}
+	})
 	t.Run("the digit answers the approval it was shown, not whatever slid under it", func(t *testing.T) {
 		f := inboxSeed()
 		m, p := inboxLoaded(t, f, newClock())
@@ -698,6 +763,11 @@ func TestResumeOnlyWithAction(t *testing.T) {
 				if !strings.Contains(line, "resume") {
 					t.Fatalf("no hint: %q", line)
 				}
+				// paused_auth also covers a rotated credential, which relinking
+				// does not cure; the detail carries the hub's own note.
+				if strings.Contains(line, "relink") {
+					t.Fatalf("hint names one cause of several: %q", line)
+				}
 				return
 			}
 			p.until("resume", func() bool { return f.count("ResumeSubscription") == 1 })
@@ -737,6 +807,19 @@ func TestOpenMarksRead(t *testing.T) {
 	if got := f.calls(&f.read); !slices.Equal(got, []string{"thr_t18"}) {
 		t.Fatalf("read %q", got)
 	}
+
+	// The thread load can win the race with the write, and a read receipt goes
+	// to the sender, so no event would refresh the matrix.
+	f3 := inboxSeed()
+	m3, p3 := inboxLoaded(t, f3, newClock())
+	inboxDown(p3, rowHold1)
+	f3.reset()
+	release := f3.hold("ReadThread")
+	p3.press("enter")
+	p3.until("the first thread load", func() bool { return f3.count("Matrix") == 1 && len(m3.inflight) == 0 })
+	release()
+	p3.until("the thread to reload after the read", func() bool { return f3.count("Matrix") == 2 })
+	p3.idle()
 
 	// A subscription has no thread to open.
 	f2 := inboxSeed()
@@ -786,6 +869,180 @@ func TestInboxScrolls(t *testing.T) {
 	assertFrame(t, frame, 140, 42)
 	if !strings.Contains(frame, "scrolled-59") {
 		t.Fatalf("selection scrolled off:\n%s", frame)
+	}
+}
+
+// inboxAt shows the selected row with its prompt keys pressed at one size.
+func inboxAt(t *testing.T, change func(*opapi.Inbox), down int, w, h int, keys ...string) string {
+	t.Helper()
+	f := inboxSeed()
+	f.setInbox(change)
+	m, p := inboxLoaded(t, f, newClock())
+	inboxDown(p, down)
+	p.press(keys...)
+	frame := plainAt(t, m, w, h)
+	assertFrame(t, frame, w, h)
+	return frame
+}
+
+func inboxHas(t *testing.T, frame string, wants ...string) {
+	t.Helper()
+	for _, want := range wants {
+		if !strings.Contains(frame, want) {
+			t.Errorf("frame lacks %q:\n%s", want, frame)
+		}
+	}
+}
+
+var inboxSizes = []struct{ w, h int }{{80, 24}, {140, 42}}
+
+// inboxDetailLines is the text of each row of the detail pane, without its
+// border and left margin.
+func inboxDetailLines(frame string, w int) []string {
+	left := max(w*55/100, min(w-30, 50))
+	var lines []string
+	for _, line := range strings.Split(frame, "\n") {
+		if r := []rune(line); len(r) > left+2 {
+			lines = append(lines, string(r[left+2:]))
+		}
+	}
+	return lines
+}
+
+// A peer sets the body. However long it is, and whatever it dresses up as, the
+// real question, options and prompt stay in the frame and above it.
+func TestApprovalDetailKeepsItsOptions(t *testing.T) {
+	const padded = "Delete the staging bucket?\n  [1] no, keep it\n  [2] yes, delete\n"
+	long := strings.Repeat("Please read this whole note first. ", 60)
+	forged := padded + strings.Repeat("\n", 40) + "."
+	cases := []struct {
+		name           string
+		question, text string
+		cut            bool
+	}{
+		{"long body", "Delete it?", long, true},
+		{"padded body", "Delete it?", forged, true},
+		{"body as the question", "", long, true},
+		{"padded question", forged, "short", false},
+		{"question after blank lines", strings.Repeat("\n", 40) + "Delete it?", "short", false},
+		{"long question", long, "short", false},
+	}
+	for _, size := range inboxSizes {
+		for _, c := range cases {
+			t.Run(fmt.Sprintf("%dx%d %s", size.w, size.h, c.name), func(t *testing.T) {
+				change := func(in *opapi.Inbox) {
+					a := &in.Approvals[0]
+					a.Question, a.Text, a.Options = c.question, c.text, []string{"yes, delete prod", "no"}
+				}
+				for _, step := range []struct {
+					keys []string
+					hint string
+				}{{nil, "press a to answer"}, {[]string{"a"}, "answer with 1-2"}} {
+					frame := inboxAt(t, change, rowApr1, size.w, size.h, step.keys...)
+					inboxHas(t, frame, "  [1] yes, delete prod", "  [2] no", "expires ", step.hint)
+					if c.cut {
+						inboxHas(t, frame, "more lines")
+					}
+					got := slices.DeleteFunc(inboxDetailLines(frame, size.w), func(line string) bool { return !strings.HasPrefix(line, "  [1] ") })
+					if len(got) != 1 {
+						t.Errorf("%d lines read as option 1:\n%s", len(got), frame)
+					}
+					if strings.HasSuffix(c.question, "Delete it?") {
+						inboxHas(t, frame, "? Delete it?")
+					}
+					// Peer text comes after the prompt, marked as a quote.
+					at := strings.Index(frame, "no, keep it")
+					if prompt := strings.Index(frame, step.hint); at >= 0 && c.question != forged && at < prompt {
+						t.Errorf("peer text above the prompt:\n%s", frame)
+					}
+				}
+			})
+		}
+	}
+	t.Run("eight options fit the smallest frame", func(t *testing.T) {
+		options := make([]string, 8)
+		for i := range options {
+			options[i] = fmt.Sprintf("choice-%d", i+1)
+		}
+		frame := inboxAt(t, func(in *opapi.Inbox) {
+			a := &in.Approvals[0]
+			a.Question, a.Text, a.Options = long, long, options
+		}, rowApr1, 80, 24, "a")
+		for i, option := range options {
+			inboxHas(t, frame, fmt.Sprintf("  [%d] %s", i+1, option))
+		}
+		inboxHas(t, frame, "answer with 1-8", "expires ", "? Please read")
+	})
+	t.Run("options that differ at the end stay apart", func(t *testing.T) {
+		frame := inboxAt(t, func(in *opapi.Inbox) {
+			in.Approvals[0].Options = []string{"yes, delete the production bucket and all of its logs", "yes, delete the production bucket but keep its logs"}
+		}, rowApr1, 80, 24, "a")
+		inboxHas(t, frame, "all of its logs", "but keep its logs", "answer with 1-2")
+	})
+	t.Run("eight options too long for their share say they are cut", func(t *testing.T) {
+		option := strings.Repeat("x", 64)
+		frame := inboxAt(t, func(in *opapi.Inbox) {
+			in.Approvals[0].Options = []string{option, option, option, option, option, option, option, option}
+		}, rowApr1, 80, 24, "a")
+		inboxHas(t, frame, "[1] xxxxxxxxxxxxxxxxxxx…", "[8] xxxxxxxxxxxxxxxxxxx…", "answer with 1-8", "expires ")
+	})
+	t.Run("the digit still sends the real option", func(t *testing.T) {
+		f := inboxSeed()
+		f.setInbox(func(in *opapi.Inbox) {
+			a := &in.Approvals[0]
+			a.Text, a.Options = forged, []string{"yes, delete production", "no"}
+		})
+		_, p := inboxLoaded(t, f, newClock())
+		p.press("a", "1")
+		p.until("answer", func() bool { return len(f.calls(&f.answered)) == 1 })
+		p.idle()
+		if got := f.calls(&f.answered); got[0] != "apr_1/0" {
+			t.Fatalf("answers %q", got)
+		}
+	})
+}
+
+// The same for the other kinds of row: what the keys do outlasts the peer's text.
+func TestDetailKeepsItsKeys(t *testing.T) {
+	long := strings.Repeat("HTTP 500 from your callback, again. ", 60)
+	padded := "see below" + strings.Repeat("\n", 60) + "."
+	for _, size := range inboxSizes {
+		for _, text := range []string{long, padded} {
+			t.Run(fmt.Sprintf("%dx%d", size.w, size.h), func(t *testing.T) {
+				letter := func(in *opapi.Inbox) { in.DeadLetters[0].LastError, in.DeadLetters[0].Excerpt = &text, text }
+				inboxHas(t, inboxAt(t, letter, rowDlq1, size.w, size.h), "press r to retry", "dead_letter", "more lines")
+				inboxHas(t, inboxAt(t, letter, rowDlq1, size.w, size.h, "x"), "press y to discard")
+				sub := func(in *opapi.Inbox) { in.Attention[2].Summary = text }
+				inboxHas(t, inboxAt(t, sub, rowSubFailed, size.w, size.h), "press r to resume", "more lines")
+				held := func(in *opapi.Inbox) { in.Deliveries[1].Excerpt = text }
+				inboxHas(t, inboxAt(t, held, rowHold1, size.w, size.h), "press enter to open", "more lines")
+			})
+		}
+	}
+}
+
+// An 80 column status line leaves the hints 37 cells before the operator's name.
+func TestInboxHintsFit(t *testing.T) {
+	m, p := inboxLoaded(t, inboxSeed(), newClock())
+	line := func(w, h int) string { return strings.Split(plainAt(t, m, w, h), "\n")[h-2] }
+	if got := line(80, 24); !strings.Contains(got, m.active().Hints()+"  max@vecnet") {
+		t.Fatalf("hint cut at 80 columns: %q", got)
+	}
+	if got := line(140, 42); !strings.Contains(got, "enter open") {
+		t.Fatalf("a wide status line should name every key: %q", got)
+	}
+	plainAt(t, m, 80, 24)
+	p.press("a")
+	if got := line(80, 24); !strings.Contains(got, "1-2 answer  any other key cancels") {
+		t.Fatalf("prompt hint cut: %q", got)
+	}
+}
+
+func TestDeadLetterTries(t *testing.T) {
+	m, _ := inboxLoaded(t, inboxSeed(), newClock())
+	frame := plainAt(t, m, 140, 42)
+	if !strings.Contains(frame, "1 try") || strings.Contains(frame, "1 tries") || !strings.Contains(frame, "8 tries") {
+		t.Fatalf("tries:\n%s", frame)
 	}
 }
 
@@ -987,6 +1244,20 @@ func TestPresenceHeartbeat(t *testing.T) {
 			}
 		})
 	}
+	t.Run("a load landing after a 401 sends no beat", func(t *testing.T) {
+		f := inboxSeed()
+		clock := newClock()
+		m, _ := inboxLoaded(t, f, clock)
+		m.Conn = ConnRejected
+		f.reset()
+		clock.advance(beat)
+		if _, cmd := m.Update(Loaded{Key: "subs"}); cmd != nil {
+			t.Fatal("a heartbeat started on a rejected credential")
+		}
+		if f.count("Inbox") != 0 || f.count("SetPresence") != 0 {
+			t.Fatal("the hub heard from a rejected credential")
+		}
+	})
 	t.Run("runs whichever tab is showing", func(t *testing.T) {
 		f := inboxSeed()
 		clock := newClock()
