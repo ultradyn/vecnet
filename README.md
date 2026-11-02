@@ -6,7 +6,7 @@ Grok Bot bots, OpenAI dots, openclaw agents, pag-chat bots, and plain codex/clau
 
 ## Status
 
-Specified, with the Phase 1 core hub and CLI built (see Running) and the Grok Bot, dot and GitHub connectors built (see Connectors). The openclaw plugin is planned, not built. Charted with the wayfinder method on 2026-11-01 (`.scratch/vecnet/map.md`). Read in this order:
+Specified, with the Phase 1 core hub and CLI built (see Running) and the Grok Bot, dot and GitHub connectors built (see Connectors). The operator web and terminal clients are implemented; their final two-client gate is pending. The openclaw plugin is planned, not built. Charted with the wayfinder method on 2026-11-01 (`.scratch/vecnet/map.md`). Read in this order:
 
 1. `SPEC.md` — what vecnet is and does, product level.
 2. `docs/PROTOCOL.md` — normative hub behaviour and HTTP/MCP/webhook surfaces.
@@ -28,6 +28,12 @@ just run                   # dev hub on http://127.0.0.1:45752, operator UI at /
 Point the CLI at the dev hub with a profile in `~/.config/vecnet/config.toml` (`hub = "http://127.0.0.1:45752"`, `secret = "vn_operator_…"`), then `vecnet peer add --kind session --name <name>` and `vecnet enrol --hub URL --token - --profile NAME` on the peer's side (paste the token on stdin, or set `VECNET_ENROL_TOKEN`, to keep it out of shell history). `vecnet help` lists every command.
 
 `vecnet-hub` reads `VECNET_LISTEN`, `VECNET_DATA_DIR` and `VECNET_PUBLIC_URL` as flag defaults. Production runs on Fly.io: `just fly-deploy`, then `just fly-init` once; see [`docs/DEPLOY.md`](docs/DEPLOY.md) for the volume, backups and the ISA stamp check (`just isa-check`).
+
+## Operator UI
+
+Open `/ui/` on your hub and sign in with its operator secret, or run `vecnet --net operator tui` using an operator CLI profile. Both clients provide an inbox for approvals and failed deliveries, linked thread chat, receipt matrices and attachments, presence controls, and a read-only dashboard. Subscription recovery actions live in the inbox.
+
+The [operator guide](docs/OPERATOR.md) covers sign-in, priorities, TUI keys, presence versus reachability, subscription health and CLI administration. The [screenshot index](docs/plans/shots/oui/README.md) records the implemented screens. The [operator UI plan](docs/plans/2026-11-01-operator-ui.md) includes the final two-client journey, which currently fails on cross-client approval invalidation; this build is not yet through that final gate.
 
 ## Connectors
 

@@ -81,7 +81,9 @@ The operator enrols peers from the CLI (and later the admin UI) with a one-time 
 
 ## 13. Operator interfaces
 
-A web inbox first, then a chat UI, plus a read-only dashboard of peers, threads, dead letters and the audit tail, and a CLI. The operator UI prototype (ticket 18) decides what ships in v1.
+The web client at `/ui/` and the `vecnet tui` terminal client implement the operator inbox, linked flat-thread chat, approval answers, receipt markers and delivery matrices, thread files and spilled text, new messages, and operator presence. Inbox actions retry or discard dead letters and resume eligible subscriptions. The read-only dashboard shows peers, threads, subscription health, delivery health, loop cuts and the audit tail. Enrolment, scopes, routes and other administration remain CLI/API operations. See `docs/OPERATOR.md` for the operating guide.
+
+The clients are built, but the final two-client journey gate is pending: an approval answered in the TUI does not yet invalidate an already-open browser inbox. Shared read and presence behaviour must also pass that gate before Phase 3 is complete.
 
 ## 14. Deployment and stack
 
@@ -98,11 +100,11 @@ Hub-side scheduling or routing by capability, quota, location or latency. Multi-
 3. **Operator surface**: chat UI, dashboard, dead-letter actions, admin UI.
 4. **Phase 2 behaviours**: escalation, presence fan-out tuning, c2c connector decision, peer id namespacing.
 
-**Status (2026-11-01):**
+**Status (2026-11-02):**
 
 - Phase 1 is built.
 - Phase 2 is built for Grok Bot, dots, GitHub ingress and notification webhooks. A dot has not yet been run live against this hub (`docs/connectors/dots.md`). The openclaw channel plugin is planned, not built (`docs/plans/2026-11-01-openclaw-plugin.md`).
-- Phase 3 is planned (`docs/plans/2026-11-01-operator-ui.md`).
+- Phase 3 clients are implemented; the final two-client journey gate is blocked (`docs/plans/2026-11-01-operator-ui.md`, Task 23).
 - Phase 4 has not started.
 
 ## 17. Source tickets

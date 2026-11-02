@@ -266,7 +266,7 @@ test('a poll reloads only what failed, and a resource that keeps failing costs o
   const h = hub([poll, poll, poll]);
   const loads = { good: 0, bad: 0 };
   const good = h.store.resource('peers', async () => ++loads.good);
-  const bad = h.store.resource('inbox', async () => { loads.bad++; throw new APIError(501, 'not_implemented', 'later'); });
+  const bad = h.store.resource('inbox', async () => { loads.bad++; throw new APIError(503, 'unavailable', 'hub down'); });
   await good.reload();
   await bad.reload();
   await h.run();

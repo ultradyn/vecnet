@@ -89,3 +89,10 @@ A handoff-ready **spec** for vecnet v1: `SPEC.md` (product + behaviour), `docs/P
 - Next plans written and committed: `docs/plans/2026-11-01-openclaw-plugin.md` (21 tasks), `docs/plans/2026-11-01-operator-ui.md` (23 tasks). Neither build has started.
 - Leftover branches for Max to delete: connectors, connectors-t09, connectors-t10, core-hub, core-hub-t01..08, core-hub-t18, core-hub-t19.
 - Dev hub data backup from before migrations 0005-0009: `.scratch/vecnet/build-connectors/data-backup-phase1`.
+
+## Build (Phase 3 operator UI), final gate pending 2026-11-02
+
+- Plan: `docs/plans/2026-11-01-operator-ui.md` (23 tasks); operator guide: `docs/OPERATOR.md`; screenshot index: `docs/plans/shots/oui/README.md`.
+- Implemented: operator read models, seeded demo and screen harness, web inbox/chat/aside/matrix/dashboard/subscriptions/presence/compose, typed client and terminal inbox/chat/dashboard/subscriptions/command line.
+- Task 23 adds the shared-hub two-client journey and final verification. Its integration assertions fail: answering in the TUI leaves the browser approval card stale, the TUI exposes no shared unread count, and web presence changes leave the TUI status bar stale. Own approval/read/presence changes do not emit invalidations to the other operator session. The screenshot gate also fails on Task 12's ambiguous Subscriptions heading locator. Final gate results are in `.scratch/vecnet/build-operator-ui/task-23.impl.json` (coordinator scratch, not release evidence). Phase 3 is not marked complete until that journey passes.
+- Dashboard remains read-only; subscription recovery and failed-delivery actions live in the inbox. Openclaw and later-phase behaviours are separate plans.
