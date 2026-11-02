@@ -37,7 +37,7 @@ Working name **launcher** (peer kind `launcher`, a `launch` job). "Source" is al
 ## Max's decisions (2026-11-03)
 - a. Name: **launcher**.
 - b. Who may launch: **any agent** at this stage. Per-launcher concurrency caps stay as a safety bound.
-- c. Approvals: the rec (to Max by default). Max asked what they're for; explained, see the design note.
+- c. Approvals, **revised by Max**: a launched agent's questions *and* its permission prompts go to the **parent bot** (the requester) by default. Max: "assume the parent bot is honest and can recognize and detect/correct a bad command." The parent can escalate to Max (escalate_to_operator), and a policy can route permission prompts to the operator. This supersedes the research doc's operator default.
 - d. Hosts: xsm first, **and set up whatever we use on the other hosts too** (build boxes).
 - e. Language: Node, **written in TypeScript**. Look at Matt Pocock's sandcastle and other libraries.
 - f. **Don't edit t3-bridge.** Make the launcher extensible instead: backends as plugins (t3-bridge, paseo-bridge, Codex app-server, ACP, …) that use each bridge's existing API.
