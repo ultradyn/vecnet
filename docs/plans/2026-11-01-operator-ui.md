@@ -979,7 +979,7 @@ just validate-protocol
 build2 go list -deps ./cmd/vecnet | grep -c 'modernc.org/sqlite'
 build2 go list -deps ./cmd/vecnet-hub | grep -c 'charm.land'
 grep -rn 'not_implemented' internal/ docs/PROTOCOL.md
-SHOTS_DIR=.scratch/vecnet/build-operator-ui/gate-shots SHOTS_DIR=.scratch/vecnet/build-operator-ui/gate-shots SHOTS_DIR=.scratch/vecnet/build-operator-ui/gate-shots just ui-shots
+SHOTS_DIR=.scratch/vecnet/build-operator-ui/gate-shots SHOTS_DIR=.scratch/vecnet/build-operator-ui/gate-shots SHOTS_DIR=.scratch/vecnet/build-operator-ui/gate-shots SHOTS_DIR=.scratch/vecnet/build-operator-ui/gate-shots SHOTS_DIR=.scratch/vecnet/build-operator-ui/gate-shots just ui-shots
 build2 node scripts/ui/journey.mjs
 ```
 Expected: suites `ok`, `gofmt` silent, `isa-check` prints 0 for both, both `grep -c` print 0, the `not_implemented` grep prints nothing, every PNG listed in the README exists.

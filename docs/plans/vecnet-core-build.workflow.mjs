@@ -329,40 +329,53 @@ const GATE_SCHEMA = {
 
 // ---------------------------------------------------------------- helpers
 // agent() returns null on transient failure or user skip. Retry once, then give up loudly; never treat null as success.
-function utf8Bytes(t) {
-  let n = 0
-  for (const ch of t) { const c = ch.codePointAt(0); n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4 }
-  return n
+// RELAY-START
+// Relay roles exist because Sol is not a native subagent model here. The relay copies nothing by hand: sol-run.sh reads the
+// assignment out of the relay's own transcript, and the result comes back with a checksum this script recomputes.
+const canon = v => Array.isArray(v) ? `[${v.map(canon).join(',')}]`
+  : (v && typeof v === 'object') ? `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}`
+  : JSON.stringify(v)
+
+function fnv1a(t) {
+  let h = 0x811c9dc5
+  for (const ch of t) {
+    const c = ch.codePointAt(0)
+    const bytes = c < 0x80 ? [c] : c < 0x800 ? [0xc0 | c >> 6, 0x80 | c & 63]
+      : c < 0x10000 ? [0xe0 | c >> 12, 0x80 | c >> 6 & 63, 0x80 | c & 63]
+      : [0xf0 | c >> 18, 0x80 | c >> 12 & 63, 0x80 | c >> 6 & 63, 0x80 | c & 63]
+    for (const b of bytes) h = Math.imul(h ^ b, 0x01000193) >>> 0
+  }
+  return h.toString(16)
 }
 
 function relayPrompt(prompt, schema, cwd, preset, base) {
-  const assignment = `${prompt}
+  return `You are a thin relay to Codex, not a worker. Do not solve, implement, review or judge anything yourself, do not read the code, and do not copy the assignment anywhere: the helper below reads it from your transcript. Never use attn. Your first action is step 1.
+
+1. Run with Bash: \`${SOL.run} ${preset} ${cwd} ${base} '${SOL.transcripts}'\`. It returns at once. A failure here is a relay failure: go to step 4.
+2. Run with Bash, passing timeout 600000: \`${SOL.wait} ${base}\`. It prints RUNNING, or a line starting DONE. Repeat this step while it prints RUNNING. A long wait is normal; some runs take more than an hour. Never start a second run while one is going.
+3. If the line is DONE 0 RESULT_OK <sum>: read ${base}.result.json and return {relay_ok: true, detail: "", check: "<sum>", result: <that object, every value exactly as in the file>}.
+4. On any other outcome: run step 1 and step 2 once more. If that also fails, return {relay_ok: false, detail: <the DONE line or error, and the last 20 lines of ${base}.log>} with no result field. Never invent or fill in a result. A wrong result is far worse than relay_ok false.
+
+ASSIGNMENT-BEGIN ${base}
+${prompt}
 
 RESULT FILE. Your final output is a file, not your reply. Wherever these instructions say to return JSON, write exactly one JSON object satisfying this JSON Schema to ${base}.result.json:
 ${JSON.stringify(schema)}
-Write any step and status files these instructions name as well. You are running under a coordinator with no human present: do not ask questions.`
-  return `You are a thin relay to Codex, not a worker. Do not solve, implement, review or judge anything yourself, and do not read the code. Never use attn. Your first action is step 1.
-
-1. Use the Write tool to write the ASSIGNMENT below, byte for byte, to ${base}.md. Then run \`wc -c ${base}.md\`: it must print ${utf8Bytes(assignment)}, or one more for a trailing newline. If not, write the file again.
-2. Run with Bash: \`${SOL.run} ${preset} ${cwd} ${base}\`. It returns at once.
-3. Run with Bash, passing timeout 600000: \`${SOL.wait} ${base}\`. It prints RUNNING, or DONE <exit> <verdict>. Repeat this step while it prints RUNNING. A long wait is normal; some runs take more than an hour. Do not start a second run while one is going.
-4. On DONE 0 RESULT_OK: read ${base}.result.json and return {relay_ok: true, detail: "", result: <that object, every value unchanged>}.
-5. On any other DONE line, or if a step fails: run step 2 and step 3 once more. If that fails too, return {relay_ok: false, detail: <the DONE line or error, and the last 20 lines of ${base}.log>} with no result field. Never invent or fill in a result: an empty or guessed result is worse than relay_ok false.
-
-ASSIGNMENT
-${assignment}`
+Keep each string in that object under 1500 characters: full evidence belongs in the step file, and a coordinator must be able to act on the summary. Write any step and status files these instructions name as well. You are running under a coordinator with no human present: do not ask questions.
+ASSIGNMENT-END ${base}`
 }
 
-// A schema-forced agent returns something even when it failed, so failure is a field: relay_ok false, or no result, is no result.
+// A schema-forced agent returns something even when it failed, so failure is a field, and the checksum proves the copy.
 async function relayed(prompt, opts, cwd, preset, label) {
-  const schema = { type: 'object', properties: { relay_ok: { type: 'boolean' }, detail: { type: 'string' }, result: opts.schema }, required: ['relay_ok', 'detail'] }
+  const schema = { type: 'object', properties: { relay_ok: { type: 'boolean' }, detail: { type: 'string' }, check: { type: 'string' }, result: opts.schema }, required: ['relay_ok', 'detail'] }
   const r = await agent(relayPrompt(prompt, opts.schema, cwd, preset, `${SOL.dir}/${STAMP}-${slug(label)}`), { ...opts, label, schema, model: RELAY_MODEL, effort: 'low' })
-  if (r && r.relay_ok && r.result) return r.result
-  log(`${label}: relay failed: ${r ? r.detail : 'no result'}`)
-  return null
+  if (!r || !r.relay_ok || !r.result) { log(`${label}: relay failed: ${r ? r.detail : 'no result'}`); return null }
+  if (fnv1a(canon(r.result)) !== r.check) { log(`${label}: relay result failed its checksum; treating as no result`); return null }
+  return r.result
 }
 
 const slug = t => t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+// RELAY-END
 
 async function call(prompt, rawOpts) {
   const { sol, cwd, ...opts } = rawOpts

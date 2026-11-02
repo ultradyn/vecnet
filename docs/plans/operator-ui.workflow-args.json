@@ -523,7 +523,8 @@
  "solRelay": {
   "run": "/home/xertrov/src/vecnet4/scripts/wf/sol-run.sh",
   "wait": "/home/xertrov/src/vecnet4/scripts/wf/sol-wait.sh",
-  "dir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/ccc"
+  "dir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/ccc",
+  "transcripts": "/home/xertrov/.claude-q/projects/-home-xertrov-src-vecnet4/*/subagents/workflows/*/agent-*.jsonl"
  },
  "extraRules": [
   "No npm install. Playwright comes from the existing skill install through scripts/ui/lib.mjs.",
