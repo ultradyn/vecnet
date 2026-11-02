@@ -10,6 +10,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/oauth"
+	"github.com/XertroV/vecnet/internal/opview"
 	"github.com/XertroV/vecnet/internal/ui"
 )
 
@@ -48,6 +49,7 @@ type Deps struct {
 // server carries Deps to the route handlers.
 type server struct {
 	Deps
+	op *opview.Reader
 }
 
 // kick wakes the push worker when one is wired.
@@ -61,7 +63,7 @@ func (s *server) kick() {
 // by task; the body limit and auth middleware wrap the whole mux, so they
 // apply to routes that do not exist yet.
 func New(d Deps) http.Handler {
-	s := &server{Deps: d}
+	s := &server{Deps: d, op: opview.New(d.Hub)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

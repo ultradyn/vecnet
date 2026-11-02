@@ -99,7 +99,7 @@ All endpoints are under the hub's public HTTPS origin. Bodies are JSON unless st
 | `PATCH /v1/peers/me` | peer | Set own `subscribe_presence` | [R22] |
 | `POST /v1/ingress/{src_id}` | per-source verification | Inbound webhook source | [T12] |
 | `POST /v1/enrol` | one-time enrolment token | Exchange token for long-lived secret | *(proposed path)* |
-| `/v1/admin/...` | operator credential | Section 2.12 | *(proposed paths)* |
+| `/v1/admin/...` | operator credential | Administration and operator views, sections 2.12–2.13 | [T17], operator UI |
 | `POST /mcp` | bearer or OAuth 2.1 | MCP server, section 4 | [T06, T02, R15] |
 
 ### 2.2 `POST /v1/messages`
@@ -249,6 +249,91 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `GET /v1/admin/subscriptions`, `POST …/{id}/pause`, `POST …/{id}/resume` | `subscriptions list\|pause\|resume`: dot subscription health (section 13.4); pause stops one subscription until resume, and a re-subscribe does not lift it | [T02, T19] |
 
 **Principals.** `vecnet principal add --name <n>` creates a principal and prints its `prn_` id and credential. `vecnet peer add … --principal <prn_>` enrols a peer under it. `peer add` without `--principal` creates an implicit single-peer principal with the peer's display name. Only the operator reassigns a peer, with `vecnet peer move <peer> --principal <prn_>` [R10] or, for a dot, by issuing the link code whose consumption moves it (section 4.5). Kind `operator` carries the operator powers of section 16, so `peer add --kind operator` is accepted only under the operator principal (otherwise 422 `invalid_value`).
+
+### 2.13 Operator views
+
+These endpoints require the operator credential, including the read-only views.
+A missing or invalid bearer is 401 `unauthenticated`; a peer or other principal
+credential is 403 `forbidden`. The existing `PATCH /v1/admin/threads/{id}` power
+in section 2.12 is unchanged.
+
+| Method and path | Query parameters | Response |
+|---|---|---|
+| `GET /v1/admin/inbox` | `limit`, `before=<dly_id>`, `unread=1` | `{now, me, approvals, dead_letters, attention, deliveries, unread, next_before}` |
+| `POST /v1/admin/threads/{id}/read` | none; no request body | `{marked}`: number of deliveries marked read for the operator |
+| `GET /v1/admin/threads` | `participant=<peer_id>`, `limit`, `cursor` | `{threads: [ThreadRow…], next}` |
+| `GET /v1/admin/threads/{id}` | none | `{now, row: ThreadRow, files, open_approvals}` |
+| `GET /v1/admin/threads/{id}/deliveries` | `after=<msg_id>`, `limit` | `{recipients, rows, next_after}`: the per-message delivery matrix |
+| `GET /v1/admin/peers` | none | `{peers: [PeerRow…]}` |
+| `GET /v1/admin/loop-cuts` | `hours` | `{since, hours, total, by_reason, recent}` |
+| `GET /v1/admin/delivery-health` | none | `{blocked, failed}` |
+
+`limit` is a positive integer (default 50, capped at 200). `before` is an
+exclusive `dly_` id and `participant` is a `peer_` id; if supplied, each must be
+a well-formed id of that type. `cursor` is an opaque thread-list paging token;
+`next` is the token for the next page or `null`. `next_before` and `next_after`
+are the delivery and message ids for the next page, respectively, or `null` at
+the end. `hours` is an integer from 1 through 168, default 24. Invalid `limit`,
+`before`, `participant` or `hours` returns 422 `invalid_value` with
+`details.field` naming the parameter, before the view is read.
+
+Wire fields use snake_case. List fields are arrays even when empty, never
+`null`; nullable scalar and object fields are explicit `null`. `now` is the
+hub's current timestamp, which clients use as the reference for expiry
+countdowns. View types are defined in `internal/opapi`:
+
+- `me` carries `peer_id`, `name`, `presence`, and nullable `presence_at`.
+  Inbox `approvals` carry the approval, thread, message and requester ids,
+  thread title, question, text, options, and expiry. `dead_letters` carry
+  delivery, message and thread ids, recipient, sender, excerpt, update time,
+  attempt count, nullable last status/error, and `class`:
+  `retries_exhausted`, `terminal`, or `network`.
+- Inbox `attention` entries carry `kind` (`subscription`), `id`, `peer_id`,
+  `health`, `summary`, `action` (`resume` or empty), and `at`. Inbox deliveries
+  carry their delivery/message/thread ids, thread title, sender, kind,
+  priority, `section` (`woke` or `held`), state, creation time, excerpt,
+  nullable `read_at`, and an attachment count. `unread` is the unread count.
+- `ThreadRow` keeps the section 2.8 `ThreadSummary` under the named `thread`
+  field, alongside `created_by`, `created_at`, `last_message_at`, and nullable
+  `cut` (`reason`, `at`). A detail's files carry `sha256`, name, media type,
+  message id, sender, creation time, size, and spilled/purged flags. Its open
+  approvals carry approval/message ids, expiry, options, and `addressed_to_me`.
+- Matrix rows carry `message_id`, `created_at`, sender, excerpt and `cells`.
+  Each cell carries recipient, delivery id, state, display, update time,
+  attempt count, nullable last status and read time. `display` is `read` when
+  state is `accepted` or `pushed` and `read_at` is set; otherwise it is state.
+- `PeerRow` carries the section 8 directory entry under `peer`, plus
+  `principal_id`, `credential` (`active`, `revoked`, `none`), `disabled`,
+  nullable `presence_at` and `reach_via`, and `routes`. Each route carries
+  `route_id`, kind, host, and nullable `verified_at`; host never contains a
+  path, key or secret. Presence and reachability remain distinct (section 8).
+- Loop-cut `recent` entries carry `at`, `thread_id`, actor and reason;
+  `by_reason` maps reason codes to counts. Delivery-health `blocked` entries
+  carry recipient, thread/delivery ids, attempt and waiting counts, nullable
+  next-attempt time, last status and last error. `failed` entries carry
+  delivery id, recipient, thread id, update time, nullable last status/error.
+
+`GET /v1/admin/subscriptions` retains its array response and existing fields
+(section 2.12), adding `health`, `health_note`, and nullable `refresh_before`.
+`health` is one of `ok`, `failing`, `late`, `expired`, `paused_token`,
+`paused_failed`, `paused_auth`, `paused_operator`, or `unverified`;
+`health_note` explains that state. `refresh_before` is the recommended refresh
+time on the hub's clock. Callback `url` is host-only. Subscription health does
+not change presence or reachability. Resume is offered only for
+`paused_reason` of `delivery_failed` or `operator`; `token_expired` requires
+re-subscription, `unauthorized` requires the peer to be enabled or relinked,
+and `credential_rotated` requires a new callback association.
+
+Clients invalidate cached views from section 2.3 Events using this table;
+unknown event types or undecodable data invalidate nothing:
+
+| Event type | Invalidation tags |
+|---|---|
+| `delivery` | `inbox`, `threads`, `thread:<message.thread_id>` |
+| `receipt` | `inbox`, `thread:<thread_id>` |
+| `thread_updated` | `threads`, `thread:<thread_id>` |
+| `presence`, `directory_updated` | `peers` |
+| `approval_expired` | `inbox`, `thread:<thread_id>` |
 
 ---
 
