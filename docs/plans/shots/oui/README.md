@@ -70,3 +70,18 @@ Task 23 runs both clients against one disposable hub. Its assertions verify cros
 - [23-journey-initial.png](23-journey-initial.png) — Both clients connected to the shared demo hub; web inbox.
 - [23-journey-progress.png](23-journey-progress.png) — Approval option prompt in the real TUI.
 - [23-journey-success.png](23-journey-success.png) — Hub-authored expired approval shown in the web thread.
+
+Attachment screens cover web compose, thread replies and inline images, and the TUI composer. `scripts/ui/att-journey.mjs` checks both clients against one hub without taking screenshots. See [Attachments](../../../OPERATOR.md#attachments).
+
+- [att03-compose-initial.png](att03-compose-initial.png) — New message with an uploaded file and draft text.
+- [att03-compose-progress.png](att03-compose-progress.png) — Upload in progress with Send disabled.
+- [att03-compose-success.png](att03-compose-success.png) — Sent attachments shown in the new thread.
+- [att03-compose-error.png](att03-compose-error.png) — Upload failure with Retry and Remove; draft preserved.
+- [att04-thread-initial.png](att04-thread-initial.png) — Inline PNG beside SVG, fake PNG and cleaned hostile-name file chips.
+- [att04-thread-progress.png](att04-thread-progress.png) — Pasted screenshot uploading in a thread reply.
+- [att04-thread-success.png](att04-thread-success.png) — Sent screenshot opened in the full-size image viewer.
+- [att04-thread-error.png](att04-thread-error.png) — Daily quota failure gives a local retry time and keeps the reply draft.
+- [att05-tui-initial.png](att05-tui-initial.png) — TUI draft with an uploaded attachment chip.
+- [att05-tui-progress.png](att05-tui-progress.png) — TUI upload in progress while the hub is stalled.
+- [att05-tui-success.png](att05-tui-success.png) — TUI message sent with an attachment file row.
+- [att05-tui-error.png](att05-tui-error.png) — Missing file refused with the TUI draft preserved.
