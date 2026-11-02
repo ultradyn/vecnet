@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
@@ -300,8 +301,45 @@ func TestDashPartialError(t *testing.T) {
 					t.Errorf("%s failed, and %s no longer renders:\n%s", tc.key, key, frame)
 				}
 			}
+			// A short pane cuts its data, never a failure. The message wraps here.
+			for _, size := range [][2]int{{80, 24}, {120, 24}} {
+				dashHas(t, plainAt(t, m, size[0], size[1]), tc.pane+" load", "failed")
+			}
 		})
 	}
+
+	t.Run("a long failure leaves the loop-cut total on a short pane", func(t *testing.T) {
+		f := seededDash()
+		m, p := openDash(t, f, newClock())
+		f.fail("Counters", errors.New("Get http://127.0.0.1:45752/v1/admin/counters: dial tcp: connect: connection refused"))
+		f.reset()
+		p.press("ctrl+l")
+		p.loaded(f.fakeAPI, "Counters")
+		for _, size := range [][2]int{{80, 24}, {120, 24}} {
+			dashHas(t, plainAt(t, m, size[0], size[1]), "counters load failed", "loop cuts / 24h: 7", "blocked on")
+		}
+	})
+
+	t.Run("failures share a short pane", func(t *testing.T) {
+		long := errors.New("Get http://127.0.0.1:45752/v1/admin: dial tcp: connect: connection refused")
+		f := seededDash()
+		blocked := f.health.Blocked[0]
+		for range 40 { // the failures must hold against a long list as well
+			f.health.Blocked = append(f.health.Blocked, blocked)
+		}
+		m, p := openDash(t, f, newClock())
+		for _, method := range []string{"DeliveryHealth", "LoopCuts", "Counters"} {
+			f.fail(method, long)
+		}
+		f.reset()
+		p.press("ctrl+l")
+		p.loaded(f.fakeAPI, "DeliveryHealth", "LoopCuts", "Counters")
+		for _, size := range [][2]int{{80, 24}, {120, 24}, {140, 30}} {
+			frame := plainAt(t, m, size[0], size[1])
+			assertFrame(t, frame, size[0], size[1])
+			dashHas(t, frame, "delivery health load", "loop cuts load failed", "counters load failed")
+		}
+	})
 
 	t.Run("a failed reload keeps the last data under the error", func(t *testing.T) {
 		f := seededDash()
@@ -386,6 +424,26 @@ func TestDashBlockedOnDelivery(t *testing.T) {
 			dashHas(t, plainAt(t, m, size[0], size[1]), "loop cuts / 24h: 7", "more")
 		}
 	})
+}
+
+// A prn_ may own many peers (PROTOCOL §1.3), so it names a peer only when it owns
+// exactly one. A blank id is nobody, whatever a source's blank PrincipalID says.
+func TestDashAuditActors(t *testing.T) {
+	const shared = "prn_01ABCDEFGHJK7777"
+	f := seededDash()
+	f.peers[1].PrincipalID, f.peers[4].PrincipalID = shared, shared
+	m, _ := openDash(t, f, newClock())
+	names := newDashNames(m)
+	line := func(actor string) string {
+		return ansi.Strip(dashAuditLine(m, names, opapi.AuditEntry{At: *dashBefore(time.Minute), Actor: actor, Action: "ack"}, 44))
+	}
+
+	got := line(shared)
+	dashHas(t, got, "prn_…7777")
+	dashLacks(t, got, "codex-hark", "claw-ops")
+	dashHas(t, line("prn_dot"), "dot-research")
+	dashHas(t, line("peer_claw"), "claw-ops")
+	dashLacks(t, line(""), "old-bot", "gh-ultradyn")
 }
 
 func TestDashLoopCutsOrderedByCount(t *testing.T) {

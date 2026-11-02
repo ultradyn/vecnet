@@ -221,9 +221,17 @@ type dashNames struct {
 
 func newDashNames(m *Model) dashNames {
 	names := dashNames{peers: map[string]string{}, threads: map[string]string{}}
+	owned := map[string]int{}
 	for _, row := range m.Data.Peers {
 		names.peers[row.Peer.PeerID] = Clean(row.Peer.Name)
-		names.peers[row.PrincipalID] = Clean(row.Peer.Name) // audit actors
+		owned[row.PrincipalID]++
+	}
+	// An audit actor can be a principal, which may own many peers (PROTOCOL §1.3).
+	// Only a principal's sole peer can stand for it; a source has no principal.
+	for _, row := range m.Data.Peers {
+		if row.PrincipalID != "" && owned[row.PrincipalID] == 1 {
+			names.peers[row.PrincipalID] = Clean(row.Peer.Name)
+		}
 	}
 	for _, row := range m.Data.Threads.Threads {
 		names.threads[row.Thread.ThreadID] = names.thread(row, m.Data.Inbox.Me.PeerID)
@@ -284,17 +292,22 @@ func dashTitle(m *Model, title string, keys ...string) string {
 	return title
 }
 
-// dashFailure is a pane's error, then a label over the old data it kept.
-func dashFailure(label string, err error, w int, kept bool) []string {
+// dashFailure is a pane's error in at most limit lines, then, if that is its
+// full room, a label over the old data it kept.
+func dashFailure(label string, err error, w, limit int, kept bool) []string {
 	if err == nil {
 		return nil
 	}
-	wrapped := strings.Split(ansi.Wrap(label+" load failed: "+Clean(err.Error()), w, " "), "\n")
+	text := label + " load failed: " + Clean(err.Error())
+	if limit == 1 { // a wrap could end before the word failed
+		return []string{styleBad.Render(ansi.Truncate(text, w, "…"))}
+	}
+	wrapped := strings.Split(ansi.Wrap(text, w, " "), "\n")
 	var lines []string
-	for _, line := range wrapped[:min(len(wrapped), dashErrLines)] {
+	for _, line := range wrapped[:min(len(wrapped), limit)] {
 		lines = append(lines, styleBad.Render(line))
 	}
-	if kept {
+	if kept && limit == dashErrLines {
 		lines = append(lines, styleMuted.Render("last good data:"))
 	}
 	return lines
@@ -570,7 +583,7 @@ func dashShort(id string) string {
 func (d *dashScreen) viewPeers(m *Model, w, h int) (string, int) {
 	inner := w - 2
 	peers := m.Data.Peers
-	failure := dashFailure("peers", m.Data.Errs["peers"], inner, len(peers) > 0)
+	failure := dashFailure("peers", m.Data.Errs["peers"], inner, dashErrLines, len(peers) > 0)
 	height := min(len(failure)+1+max(len(peers), 1)+2, h*3/5)
 	title := dashTitle(m, fmt.Sprintf("peers · %d", len(peers)), "peers") + " · presence is self-reported, reach is hub-observed"
 	lines := slices.Clone(failure)
@@ -620,7 +633,7 @@ func (d *dashScreen) viewThreads(m *Model, names dashNames, w, h int) string {
 	}
 	page := d.threadPage(m)
 	rows := page.Threads
-	failure := dashFailure("threads", err, inner, len(rows) > 0)
+	failure := dashFailure("threads", err, inner, dashErrLines, len(rows) > 0)
 	title := label + " · " + fmt.Sprint(len(rows))
 	if page.Next != nil {
 		title += "+"
@@ -669,22 +682,48 @@ func (d *dashScreen) threadLine(m *Model, names dashNames, row opapi.ThreadRow, 
 	return paint.gutter() + paint.cell(styleText, names.thread(row, m.Data.Inbox.Me.PeerID), title) + gap + age + paint.cell(style, state, stateCells)
 }
 
+// viewDashHealth holds three resources, so a failure here competes with the
+// others' data. Failures share half of this pane, and dashStack keeps them and
+// the loop-cut total, so each still shows on the smallest screen.
 func viewDashHealth(m *Model, names dashNames, w, h int) string {
-	inner := w - 2
-	head := dashHealthLines(m, names, inner)
-	tail := append(dashCutLines(m, inner), "")
-	tail = append(tail, dashCounterLines(m, inner)...)
+	inner, rows := w-2, h-2
+	cuts, counters := m.Data.Cuts, m.Data.Counters
+	cutsErr, countersErr := m.Data.Errs["cuts"], m.Data.Errs["counters"]
+	limit := dashErrLines
+	if n := dashFailed(m.Data.Errs["health"], cutsErr, countersErr); n > 0 {
+		limit = min(limit, max(rows/2/n, 1))
+	}
+	head := dashHealthLines(m, names, inner, limit)
+	cutsFailure := dashFailure("loop cuts", cutsErr, inner, limit, len(cuts.ByReason) > 0)
+	countersFailure := dashFailure("counters", countersErr, inner, limit, len(counters) > 0)
+	cutLines, counterLines := dashCutLines(m, inner), dashCounterLines(m, inner)
+	tail := slices.Concat(cutsFailure, cutLines, []string{""}, countersFailure, counterLines)
+	if len(head)+1+len(tail) > rows {
+		tail = slices.Concat(cutsFailure, countersFailure, cutLines, []string{""}, counterLines)
+	}
 	title := dashTitle(m, "delivery health", "health", "cuts", "counters")
-	return Pane(title, w, h, false, strings.Join(dashStack(head, tail, h-2), "\n"))
+	keep := len(cutsFailure) + len(countersFailure) + 1
+	return Pane(title, w, h, false, strings.Join(dashStack(head, tail, keep, rows), "\n"))
 }
 
-// dashStack fits head above tail in h lines. A long head gives way first, so a
-// hub with many blocked threads still shows its loop cuts.
-func dashStack(head, tail []string, h int) []string {
+func dashFailed(errs ...error) int {
+	n := 0
+	for _, err := range errs {
+		if err != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// dashStack fits head above tail in h lines, keeping tail's first keep lines. A
+// long head gives way first, so a hub with many blocked threads still shows its
+// loop cuts.
+func dashStack(head, tail []string, keep, h int) []string {
 	if len(head)+1+len(tail) <= h {
 		return append(append(head, ""), tail...)
 	}
-	tail = tail[:min(len(tail), max(h/2, 1))]
+	tail = tail[:min(len(tail), max(h/2, keep, 1))]
 	room := max(h-len(tail)-1, 1)
 	if len(head) > room {
 		hidden := len(head) - room + 1
@@ -695,10 +734,10 @@ func dashStack(head, tail []string, h int) []string {
 
 // dashHealthLines is delivery health. A blocked thread names its peer: per-peer
 // serialisation can hold one thread for hours while others flow (PROTOCOL §16.4).
-func dashHealthLines(m *Model, names dashNames, inner int) []string {
+func dashHealthLines(m *Model, names dashNames, inner, limit int) []string {
 	health := m.Data.Health
 	kept := len(health.Blocked)+len(health.Failed) > 0
-	lines := dashFailure("delivery health", m.Data.Errs["health"], inner, kept)
+	lines := dashFailure("delivery health", m.Data.Errs["health"], inner, limit, kept)
 	if !kept && lines == nil {
 		return []string{styleMuted.Render("no blocked or failed deliveries")}
 	}
@@ -746,17 +785,15 @@ func dashCutLines(m *Model, inner int) []string {
 	if hours == 0 {
 		hours = 24
 	}
-	lines := dashFailure("loop cuts", m.Data.Errs["cuts"], inner, len(cuts.ByReason) > 0)
-	lines = append(lines, styleMuted.Render(fmt.Sprintf("loop cuts / %dh: ", hours))+styleAccent.Render(fmt.Sprint(cuts.Total)))
-	return append(lines, dashCounts(cuts.ByReason, inner)...)
+	total := styleMuted.Render(fmt.Sprintf("loop cuts / %dh: ", hours)) + styleAccent.Render(fmt.Sprint(cuts.Total))
+	return append([]string{total}, dashCounts(cuts.ByReason, inner)...)
 }
 
 func dashCounterLines(m *Model, inner int) []string {
-	lines := dashFailure("counters", m.Data.Errs["counters"], inner, len(m.Data.Counters) > 0)
-	if len(m.Data.Counters) > 0 {
-		lines = append(lines, styleMuted.Render("counters"))
+	if len(m.Data.Counters) == 0 {
+		return nil
 	}
-	return append(lines, dashCounts(m.Data.Counters, inner)...)
+	return append([]string{styleMuted.Render("counters")}, dashCounts(m.Data.Counters, inner)...)
 }
 
 // dashCounts is one line per key, highest count first, then by name.
@@ -779,7 +816,7 @@ func dashCounts(counts map[string]int, inner int) []string {
 func viewDashAudit(m *Model, names dashNames, w, h int) string {
 	inner := w - 2
 	entries := m.Data.Audit.Entries
-	lines := dashFailure("audit tail", m.Data.Errs["audit"], inner, len(entries) > 0)
+	lines := dashFailure("audit tail", m.Data.Errs["audit"], inner, dashErrLines, len(entries) > 0)
 	if len(entries) == 0 && lines == nil {
 		lines = []string{styleMuted.Render("no audit entries")}
 	}

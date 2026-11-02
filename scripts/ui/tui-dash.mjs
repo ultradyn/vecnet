@@ -3,11 +3,13 @@ import { assert, cleanBuild } from './lib.mjs';
 import { withTui } from './tmux.mjs';
 
 // The seed reports no quota, so these peers report theirs as any peer would.
+// grok-triage stays silent: an inbound call would mark the seeded unreachable
+// grokbot reachable. grok-reviewer is already reachable.
 const reports = [
   ['codex', 'working', { weekly_remaining_pct: 44 }],
   ['sleuth', 'working', { weekly_remaining_pct: 61 }],
   ['digest', 'idle', { weekly_remaining_pct: 58 }],
-  ['triage', 'blocked', { weekly_remaining_pct: 3 }],
+  ['grok', 'blocked', { weekly_remaining_pct: 3 }],
   ['claw', 'idle', { plan: 'pro' }],
 ];
 
@@ -38,6 +40,7 @@ try {
       assert(response.ok, `presence for ${name}: ${response.status}`);
     }
     await waitFor('[||||||    ]  58%');
+    await waitFor('[          ]   3%');
 
     // The shell holds the body until the first load ends, so panes load on a reload.
     await stall('1h');
@@ -72,6 +75,7 @@ try {
     await waitFor(`threads · ${all} `);
     await keys('k');
     await waitFor('> max');
+    await waitFor('unreachable');
     await waitFor('thread blocked on delivery');
     await waitFor('loop cuts / 24h');
     await waitFor('counters');
