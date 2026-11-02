@@ -44,13 +44,31 @@ func Excerpt(m envelope.Message) string {
 func Tags(ev envelope.Event) []string {
 	empty := []string{}
 	switch ev.Type {
-	case "delivery", "receipt", "thread_updated", "presence", "directory_updated", "approval_expired":
+	case "delivery", "receipt", "thread_updated", "presence", "directory_updated", "approval_expired", "operator_view":
 	default:
 		return empty
 	}
 	raw := bytes.TrimSpace(ev.Data)
 	if len(raw) == 0 || raw[0] != '{' {
 		return empty
+	}
+	if ev.Type == "operator_view" {
+		var data struct {
+			Reason   *string         `json:"reason"`
+			ThreadID json.RawMessage `json:"thread_id"`
+		}
+		if json.Unmarshal(raw, &data) != nil || data.Reason == nil || len(data.ThreadID) == 0 {
+			return empty
+		}
+		var thread *string
+		if json.Unmarshal(data.ThreadID, &thread) != nil {
+			return empty
+		}
+		tags := []string{"inbox", "threads", "peers"}
+		if thread != nil && *thread != "" {
+			tags = append(tags, "thread:"+*thread)
+		}
+		return tags
 	}
 	var data struct {
 		ThreadID string `json:"thread_id"`

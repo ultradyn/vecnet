@@ -334,6 +334,18 @@ unknown event types or undecodable data invalidate nothing:
 | `thread_updated` | `threads`, `thread:<thread_id>` |
 | `presence`, `directory_updated` | `peers` |
 | `approval_expired` | `inbox`, `thread:<thread_id>` |
+| `operator_view` | `inbox`, `threads`, `peers`, plus `thread:<thread_id>` when non-empty |
+
+`operator_view` is appended only to enabled operator peers, in the transaction
+that changes a view. Its data is `{reason, thread_id}`: `reason` is `sent`,
+`read`, `presence`, `dead_letter`, or `subscription`; `thread_id` is a `thr_`
+id or `null`. It fires for a new operator send (including approval responses),
+a newly read operator delivery, a changed effective operator presence, a
+dead-letter retry or discard, or a subscription pause or resume. Idempotent
+sends, repeated reads, unchanged presence heartbeats, and unchanged
+subscriptions emit none. It is not pushed to agents or MCP Events. Data that
+is not an object, a non-string `reason`, or a `thread_id` that is neither a
+string nor null invalidates nothing.
 
 ---
 

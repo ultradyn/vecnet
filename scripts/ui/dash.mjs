@@ -29,7 +29,7 @@ try {
     await page.evaluate(() => { location.hash = '#dash'; });
     await page.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor();
     for (const name of ['Peers', 'Threads', 'Delivery health', 'Dead letters', 'Loop control', 'Subscriptions', 'Audit tail']) {
-      await dash.locator('h2', { hasText: name }).waitFor();
+      await dash.locator(':scope > section > h2', { hasText: name }).waitFor();
     }
     assert(await dash.locator('.loading').count() === 6, 'every section should be loading while its read is held');
     assert((await page.locator('.dash-counters').textContent()).includes('Loading counters'), 'counter line not loading');

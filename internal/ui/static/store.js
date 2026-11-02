@@ -16,6 +16,11 @@ function stringOrAbsent(v) { return v === undefined || v === null || typeof v ==
 // would not decode invalidates nothing, whichever field is the wrong type.
 export function tagsFor(ev) {
   const type = ev && ev.type, data = ev && ev.data;
+  if (type === 'operator_view') {
+    if (!isObject(data) || typeof data.reason !== 'string' || !(data.thread_id === null || typeof data.thread_id === 'string')) return [];
+    const tags = ['inbox', 'threads', 'peers'];
+    return data.thread_id ? [...tags, 'thread:' + data.thread_id] : tags;
+  }
   const known = type === 'presence' || type === 'directory_updated' || Object.hasOwn(THREAD_TAGS, type);
   if (!known || !isObject(data)) return [];
   const message = data.message;

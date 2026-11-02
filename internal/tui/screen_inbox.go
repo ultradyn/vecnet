@@ -566,7 +566,7 @@ func (s *inboxScreen) View(m *Model, w, h int) string {
 	for _, row := range rows {
 		counts[row.tag]++
 	}
-	title := fmt.Sprintf("inbox %d items · apr %d · dlq %d", len(rows), counts["APR"], counts["DLQ"])
+	title := fmt.Sprintf("inbox %d items · %d unread · apr %d · dlq %d", len(rows), m.Data.Inbox.Unread, counts["APR"], counts["DLQ"])
 	list := Pane(title, leftW, listH, true, s.viewRows(rows, at, peers, m, leftW-2, listH-2))
 	events := Pane("your event log  GET /v1/events -f · not messages, never replied to", leftW, h-listH, false, viewInboxLog(peers, m, leftW-2, h-listH-2))
 	var row *inboxRow
@@ -990,6 +990,19 @@ func viewInboxLog(peers inboxPeers, m *Model, w, h int) string {
 func inboxEventText(ev envelope.Event, peers inboxPeers) string {
 	raw := Clean(string(ev.Data))
 	switch ev.Type {
+	case "operator_view":
+		var data struct {
+			Reason   string `json:"reason"`
+			ThreadID string `json:"thread_id"`
+		}
+		if json.Unmarshal(ev.Data, &data) != nil {
+			return raw
+		}
+		text := Clean(data.Reason)
+		if data.ThreadID != "" {
+			text += " " + inboxShort(data.ThreadID)
+		}
+		return text
 	case "presence":
 		var p envelope.Presence
 		if json.Unmarshal(ev.Data, &p) != nil {
