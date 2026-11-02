@@ -15,6 +15,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
@@ -1544,5 +1545,22 @@ func TestInboxOperatorViewLog(t *testing.T) {
 		if !strings.Contains(frame, "operator_view") || !strings.Contains(frame, tc.want) {
 			t.Errorf("missing operator_view %q:\n%s", tc.want, frame)
 		}
+	}
+}
+
+// A SUB row's health takes the subs tab's colour: paused_auth reads as broken,
+// not as a warning (one colour per health across screens).
+func TestInboxSubHealthColour(t *testing.T) {
+	m, _ := inboxLoaded(t, inboxSeed(), newClock())
+	m.Update(tea.WindowSizeMsg{Width: 140, Height: 42})
+	frame := m.View().Content
+	sgr := func(st lipgloss.Style) string { r := st.Render("X"); return r[:strings.Index(r, "X")] }
+	for health, st := range map[string]lipgloss.Style{"paused_auth": styleBad, "paused_token": styleBad, "paused_failed": styleBad, "paused_operator": styleWarn} {
+		if !strings.Contains(frame, sgr(st)+health) {
+			t.Errorf("%s is not drawn in its subs colour", health)
+		}
+	}
+	if plain := plainAt(t, m, 140, 42); strings.Contains(plain, "dot-research · The peer") {
+		t.Error("the SUB row repeats the peer name in its summary")
 	}
 }

@@ -635,12 +635,16 @@ func (s *inboxScreen) viewRow(row inboxRow, selected bool, peers inboxPeers, m *
 		tail.text = inboxTries(d.Attempt)
 	case row.sub != nil:
 		a := row.sub
-		tagStyle = styleWarn
+		// One colour per health in every screen: the subs tab's.
+		healthStyle := subsHealthStyle(a.Health)
+		tagStyle = healthStyle
 		when, name = inboxClock(a.At, "15:04", m), peers.name(a.PeerID)
 		health := Clean(a.Health)
-		text = []inboxCell{{styleWarn, health, textW}}
+		text = []inboxCell{{healthStyle, health, textW}}
 		if textW > 16 {
-			text = []inboxCell{{styleWarn, health, 15}, {styleMuted, Clean(a.Summary), textW - 16}}
+			// The name column already says whose it is.
+			summary := strings.TrimPrefix(Clean(a.Summary), name+" · ")
+			text = []inboxCell{{healthStyle, health, 15}, {styleMuted, summary, textW - 16}}
 		}
 		if a.Action == "resume" {
 			tail = inboxCell{style: styleAccent, text: "r resume"}
@@ -902,7 +906,7 @@ func (s *inboxScreen) viewDeadLetter(d opapi.DeadLetter, peers inboxPeers, m *Mo
 		"",
 		inboxField("from", peers.name(d.Sender)),
 		inboxField("to", peers.name(d.Recipient)+" ") + styleMuted.Render(peers.kind(d.Recipient)),
-		inboxField("thread", Clean(d.ThreadID)),
+		inboxField("thread", inboxThreadTitle(m, d.ThreadID)),
 		inboxField("message", Clean(d.MessageID)),
 		inboxField("delivery", Clean(d.DeliveryID)),
 		inboxField("attempts", fmt.Sprint(d.Attempt)),
@@ -918,20 +922,39 @@ func (s *inboxScreen) viewDeadLetter(d opapi.DeadLetter, peers inboxPeers, m *Mo
 	default:
 		lines = append(lines, inboxPara(styleMuted, "press r to retry, x to discard", w)...)
 	}
+	// Two labelled blocks, the hub's error then the message; the message is
+	// left out when it only repeats the error.
 	var body []string
+	lastErr := ""
 	if d.LastError != nil {
-		body = inboxQuote(styleBad, CleanBody(*d.LastError), w)
+		lastErr = CleanBody(*d.LastError)
 	}
-	excerpt := inboxQuote(styleText, CleanBody(d.Excerpt), w)
-	if len(body) > 0 && len(excerpt) > 0 {
-		body = append(body, styleBorder.Render("│"))
+	if quoted := inboxQuote(styleBad, lastErr, w); len(quoted) > 0 {
+		body = append(append(body, styleMuted.Render("error")), quoted...)
 	}
-	return inboxDetail(lines, append(body, excerpt...), h, "")
+	if text := CleanBody(d.Excerpt); strings.TrimSpace(text) != strings.TrimSpace(lastErr) {
+		if quoted := inboxQuote(styleText, text, w); len(quoted) > 0 {
+			if len(body) > 0 {
+				body = append(body, "")
+			}
+			body = append(append(body, styleMuted.Render("message")), quoted...)
+		}
+	}
+	return inboxDetail(lines, body, h, "")
+}
+
+// inboxThreadTitle is the thread's title, as the web shows it, with the id
+// when the title is not loaded.
+func inboxThreadTitle(m *Model, id string) string {
+	if row := chatRowOf(m, id); row != nil {
+		return chatTitleOf(row.Thread)
+	}
+	return Clean(id)
 }
 
 func viewInboxSub(a opapi.Attention, peers inboxPeers, m *Model, w, h int) []string {
 	lines := []string{
-		styleWarn.Render("subscription") + "  " + styleWarn.Render(Clean(a.Health)),
+		styleWarn.Render("subscription") + "  " + subsHealthStyle(a.Health).Render(Clean(a.Health)),
 		"",
 		inboxField("peer", peers.name(a.PeerID)+" ") + styleMuted.Render(peers.kind(a.PeerID)),
 		inboxField("id", Clean(a.ID)),
