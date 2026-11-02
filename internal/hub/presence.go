@@ -85,9 +85,9 @@ func (h *Hub) EffectivePresence(p PresenceRow, now time.Time) string {
 func (h *Hub) SetPresence(ctx context.Context, c auth.Caller, asPeer string, p PresenceReport) error {
 	var notify []string
 	var peer string
-	dirChanged := false
+	dirChanged, stale := false, false
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		notify, dirChanged = nil, false
+		notify, dirChanged, stale = nil, false, false
 		snd, err := resolveSender(ctx, tx, c, asPeer)
 		if err != nil {
 			return err
@@ -122,6 +122,16 @@ func (h *Hub) SetPresence(ctx context.Context, c auth.Caller, asPeer string, p P
 		at := p.At
 		if at.IsZero() || at.After(nowT) {
 			at = nowT
+		}
+		// The operator may have two clients open, each with a heartbeat that
+		// re-posts the state it last read. A report older than the stored one
+		// was overtaken by a newer choice from the other client, so it changes
+		// nothing (PROTOCOL §2.6). Both clients date reports on the hub's clock.
+		if snd.kind == "operator" && oldAt != nil {
+			if prev, err := envelope.ParseTime(*oldAt); err == nil && at.Before(prev) {
+				stale = true
+				return nil
+			}
 		}
 		pres := envelope.Presence{
 			PeerID: peer, State: p.State, At: envelope.FormatTime(at),
@@ -185,6 +195,9 @@ func (h *Hub) SetPresence(ctx context.Context, c auth.Caller, asPeer string, p P
 	})
 	if err != nil {
 		return err
+	}
+	if stale {
+		return nil
 	}
 	if len(notify) > 0 {
 		h.Log.Notify(notify...)

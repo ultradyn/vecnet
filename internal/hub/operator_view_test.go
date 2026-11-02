@@ -272,3 +272,37 @@ func TestOperatorViewAppendFailureRollsBackRead(t *testing.T) {
 	}
 	wantViews(t, env, operatorView{"read", &sent.ThreadID})
 }
+
+// Two operator clients do not fight over presence: a heartbeat built before a
+// manual change in the other client, and landing after it, leaves the manual
+// state (Review Focus 4).
+func TestOperatorPresenceStaleReportLoses(t *testing.T) {
+	env := testhub.Start(t)
+	t0 := env.Now.Now()
+	post := func(state string, at time.Time) {
+		operatorPost(t, env, "/v1/presence", map[string]any{"state": state, "at": envelope.FormatTime(at)})
+	}
+	stored := func() (string, string) {
+		var state, at string
+		if err := env.Hub.DB.QueryRow(`SELECT presence_state, presence_at FROM peers WHERE peer_id = ?`, env.OperatorPeer).Scan(&state, &at); err != nil {
+			t.Fatal(err)
+		}
+		return state, at
+	}
+	post("working", t0)
+	env.Now.Advance(2 * time.Second)
+	post("idle", t0.Add(2*time.Second)) // the second client's manual change
+	views := operatorViews(t, env, env.OperatorPeer)
+	post("working", t0.Add(time.Second)) // the held heartbeat, read before it
+	if state, at := stored(); state != "idle" || at != envelope.FormatTime(t0.Add(2*time.Second)) {
+		t.Fatalf("stale heartbeat overwrote the manual change: %s at %s", state, at)
+	}
+	if after := operatorViews(t, env, env.OperatorPeer); !reflect.DeepEqual(after, views) {
+		t.Fatalf("stale report emitted events: %v -> %v", views, after)
+	}
+	// A report at the same instant or later still lands.
+	post("working", t0.Add(2*time.Second))
+	if state, _ := stored(); state != "working" {
+		t.Fatalf("equal at did not land: %s", state)
+	}
+}

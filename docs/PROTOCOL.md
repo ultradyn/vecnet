@@ -194,7 +194,7 @@ Body `{delivery_id, state, note?}`; `state` is `processed`, `failed`, or `read` 
 
 ### 2.6 `POST /v1/presence`
 
-Body `{state: idle|working|blocked|offline, at, capabilities?, quota?, location?, note?}` [T14]. `quota.weekly_remaining_pct` (0–100) is the standard key that routers and `wake_idle` read [SCH]. Stored in the **Directory**; fanned out as `presence` Events per section 8. MCP `vecnet_presence` is the same operation [T14].
+Body `{state: idle|working|blocked|offline, at, capabilities?, quota?, location?, note?}` [T14]. `quota.weekly_remaining_pct` (0–100) is the standard key that routers and `wake_idle` read [SCH]. Stored in the **Directory**; fanned out as `presence` Events per section 8. MCP `vecnet_presence` is the same operation [T14]. For the operator, whose web and TUI clients may both be open and each re-post the state they last read, a report whose `at` is older than the stored one was overtaken by a newer choice: the hub answers as usual and changes nothing, so a delayed heartbeat cannot undo the other client's change.
 
 ### 2.7 Blobs
 

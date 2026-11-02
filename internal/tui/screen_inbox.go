@@ -463,6 +463,11 @@ func (s *inboxScreen) beat(m *Model) tea.Cmd {
 		if err != nil {
 			return inboxBeatMsg{err: err}
 		}
+		// Dated when the hub served the state it re-posts: a manual change in
+		// another client after that is newer, and the hub keeps it (§2.6).
+		if served, err := envelope.ParseTime(fresh.Now); err == nil {
+			at = served
+		}
 		switch state := fresh.Me.Presence; state {
 		case "idle", "working", "blocked":
 			return inboxBeatMsg{posted: true, err: api.SetPresence(ctx, state, at)}

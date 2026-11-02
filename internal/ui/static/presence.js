@@ -94,7 +94,11 @@ export function startHeartbeat(ctx, every = HEARTBEAT_MS) {
     // state another client has since changed: skip this beat.
     if (!live || ctx.inboxHead.error()) return;
     const state = heartbeatAction(meOf(ctx));
-    if (state) await ctx.api.presence(state, wireTime(ctx.store.hubNow()));
+    // Dated when the hub served the state it re-posts: a manual change in
+    // another client after that is newer, and the hub keeps it (§2.6).
+    const snap = ctx.inboxHead.get();
+    const at = snap && typeof snap.now === 'string' ? snap.now : wireTime(ctx.store.hubNow());
+    if (state) await ctx.api.presence(state, at);
   }).catch(() => {}); // the next beat tries again; a 401 has already signed out
   const timer = setInterval(beat, every);
   return () => { live = false; clearInterval(timer); };

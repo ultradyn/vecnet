@@ -1411,7 +1411,10 @@ func TestPresenceHeartbeat(t *testing.T) {
 		if m.Data.Inbox.Me.Presence != "working" {
 			t.Fatal("test needs a stale snapshot")
 		}
-		f.setInbox(func(in *opapi.Inbox) { in.Now = envelope.FormatTime(fixedNow.Add(beat)) })
+		// The beat is dated when the hub served that state, so a manual change
+		// landing after the read is newer and the hub keeps it (§2.6).
+		served := fixedNow.Add(beat - 2*time.Second)
+		f.setInbox(func(in *opapi.Inbox) { in.Now = envelope.FormatTime(served) })
 		clock.advance(beat)
 		p.send(tickMsg{})
 		p.until("heartbeat", func() bool { return f.count("SetPresence") == 1 })
@@ -1423,7 +1426,7 @@ func TestPresenceHeartbeat(t *testing.T) {
 		f.writes.Lock()
 		at := f.presenceAt[0]
 		f.writes.Unlock()
-		if want := fixedNow.Add(beat); !at.Equal(want) {
+		if want := served; !at.Equal(want) {
 			t.Fatalf("at = %v, want %v", at, want)
 		}
 		// One beat per interval.

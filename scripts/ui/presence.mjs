@@ -75,6 +75,26 @@ try {
       await label.filter({ hasText: /^max is working$/ }).waitFor();
       assert(await hubState() === 'working', 'heartbeat overwrote the second tab\'s choice');
       assert(await tab2.locator('#me .who').textContent() === 'max is working', 'second tab changed');
+
+      // A heartbeat that has read working and is still in flight when the
+      // second tab sets idle must not undo that newer choice when it lands.
+      const releaseBeat = await hold('**/v1/presence');
+      const heldBeat = page.waitForRequest(isPresencePost);
+      await page.clock.fastForward('20:00');
+      const heldBody = (await heldBeat).postDataJSON();
+      assert(heldBody.state === 'working', `held heartbeat re-posted ${heldBody.state}`);
+      await tab2.locator('#me button.ptog', { hasText: 'Set idle' }).click();
+      await tab2.locator('#me .who', { hasText: /^max is idle$/ }).waitFor();
+      assert(await hubState() === 'idle', 'second tab did not set idle');
+      const landed = page.waitForResponse(res => isPresencePost(res.request()));
+      await releaseBeat();
+      assert((await landed).ok(), 'held heartbeat failed');
+      assert(await hubState() === 'idle', 'a held heartbeat overwrote the second tab\'s newer choice');
+      await label.filter({ hasText: /^max is idle$/ }).waitFor();
+
+      // Back to working for the failure check below.
+      await tab2.locator('#me button.ptog', { hasText: 'Set working' }).click();
+      await label.filter({ hasText: /^max is working$/ }).waitFor();
     } finally { await other.close(); }
 
     // failure leaves the old state with a toast.
