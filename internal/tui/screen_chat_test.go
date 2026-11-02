@@ -717,7 +717,107 @@ func (w *wireSend) Send(ctx context.Context, r envelope.SendRequest) (opapi.Send
 	return w.client.Send(ctx, r)
 }
 
+// chatDanger closes the seed's approval and adds a closed lint card, filler
+// messages, then one open approval far from the top: the case where what the
+// operator is looking at and what a digit would answer can differ.
+func chatDanger(a *chatAPI, filler int) {
+	card := func(id, approval, question, expires string) envelope.Message {
+		msg := chatMsg(id, chatClaw, "wake", chatAt(7, 10), question)
+		msg.Kind = "approval_request"
+		msg.ApprovalRequest = &envelope.ApprovalRequest{ApprovalID: approval, Question: question, Options: []string{"yes", "no"}, ExpiresAt: expires}
+		return msg
+	}
+	a.add(chatHark, card("msg_01lint", "apr_lint", "Run the harmless lint?", chatAt(7, 20)))
+	for i := range filler {
+		a.add(chatHark, chatMsg(fmt.Sprintf("msg_fill%02d", i), chatCodex, "hold", chatAt(7, 12), "filler"))
+	}
+	a.add(chatHark, card("msg_01drop", "apr_drop", "Delete the production database?", chatAt(8, 10)))
+	a.byID[chatHark].detail.OpenApprovals = []opapi.ThreadApproval{{ApprovalID: "apr_drop", MessageID: "msg_01drop", ExpiresAt: chatAt(8, 10), Options: []string{"yes", "no"}, AddressedToMe: true}}
+}
+
+func chatOf(m *Model) *chatScreen { return m.screens[tabChat].(*chatScreen) }
+
 func TestChatAnswer(t *testing.T) {
+	const (
+		dropPrompt = "answer: Delete the production database?  1 yes  2 no"
+		dropCard   = "? Delete the production database? [1]yes [2]no"
+	)
+	t.Run("a closed card selected: the digit's target is named and selected", func(t *testing.T) {
+		a := chatSeed()
+		chatDanger(a, 0)
+		m, p := chatModel(t, a, newClock())
+		p.press("k")
+		wantFrame(t, chatFrame(t, m), "Run the harmless lint?")
+		if got := chatOf(m).sel; got != "msg_01lint" {
+			t.Fatalf("selection %q", got)
+		}
+		p.press("a")
+		wantFrame(t, chatFrame(t, m), dropPrompt, dropCard)
+		if got := chatOf(m).sel; got != "msg_01drop" {
+			t.Fatalf("the prompt answers msg_01drop, the selection is on %q", got)
+		}
+		p.press("1")
+		p.until("answer", func() bool { return len(a.answered()) == 1 })
+		if got := a.answered()[0]; got.approval.ApprovalID != "apr_drop" || got.option != 0 {
+			t.Fatalf("answer %+v", got)
+		}
+	})
+	t.Run("an off-screen approval comes on screen before the digit", func(t *testing.T) {
+		a := chatSeed()
+		chatDanger(a, 40)
+		m, p := chatModel(t, a, newClock())
+		for range 60 {
+			p.press("k")
+		}
+		refuseFrame(t, chatFrame(t, m), "Delete the production database?")
+		p.press("a")
+		wantFrame(t, chatFrame(t, m), dropPrompt, dropCard)
+		p.press("x") // cancelled: nothing went, and the card stays where it was put
+		p.idle()
+		if len(a.answered()) != 0 {
+			t.Fatalf("answers %+v", a.answered())
+		}
+		wantFrame(t, chatFrame(t, m), dropCard)
+		refuseFrame(t, chatFrame(t, m), "answer:")
+	})
+	t.Run("a message landing under the prompt leaves the card selected", func(t *testing.T) {
+		a := chatSeed()
+		chatDanger(a, 0)
+		m, p := chatModel(t, a, newClock())
+		p.press("a")
+		s := chatOf(m)
+		a.add(chatHark, chatMsg("msg_01late", chatCodex, "wake", chatAt(7, 40), "Landed under the prompt."))
+		p.send(reloadMsg{tags: []string{threadPrefix + chatHark}})
+		p.until("delivery", func() bool { return len(m.Data.Thread[chatHark].Messages) == 10 })
+		if got := s.selected(m.Data.Thread[chatHark]).MessageID; got != "msg_01drop" {
+			t.Fatalf("selection moved to %q under the prompt", got)
+		}
+		p.press("esc") // back to riding the newest message, as before a
+		if got := s.selected(m.Data.Thread[chatHark]).MessageID; got != "msg_01late" {
+			t.Fatalf("selection stuck on %q", got)
+		}
+	})
+	t.Run("a long question is cut, the options stay", func(t *testing.T) {
+		a := chatSeed()
+		long := strings.Repeat("Should this really go ahead? ", 20)
+		a.byID[chatHark].messages[6].ApprovalRequest.Question = long
+		m, p := chatModel(t, a, newClock())
+		p.press("a")
+		frame := plainAt(t, m, 80, 24)
+		assertFrame(t, frame, 80, 24)
+		wantFrame(t, frame, "answer: Should this really go ahead?", "…  1 yes  2 no")
+	})
+	t.Run("options too long for the line still leave the question", func(t *testing.T) {
+		a := chatSeed()
+		options := []string{strings.Repeat("first ", 10), strings.Repeat("second ", 10), "no"}
+		a.byID[chatHark].messages[6].ApprovalRequest.Options = options
+		a.byID[chatHark].detail.OpenApprovals[0].Options = options
+		m, p := chatModel(t, a, newClock())
+		p.press("a")
+		frame := plainAt(t, m, 80, 24)
+		assertFrame(t, frame, 80, 24)
+		wantFrame(t, frame, "answer: Push classifier fix to", "1 first")
+	})
 	t.Run("digit answers once", func(t *testing.T) {
 		a, m, p := chatOpen(t)
 		release := a.hold("Answer")
@@ -835,6 +935,29 @@ func TestMatrixOverlay(t *testing.T) {
 		wantFrame(t, frame, "The radio listen")
 		if m.Mode != ModeNormal {
 			t.Fatalf("Mode = %v", m.Mode)
+		}
+	})
+	t.Run("read shows by display, whatever the state", func(t *testing.T) {
+		a := chatSeed()
+		// §2.13: display is read when state is accepted or pushed and read_at is set.
+		at := chatAt(6, 20)
+		a.byID[chatHark].matrix.Rows = []opapi.MatrixRow{{MessageID: "msg_01root", CreatedAt: chatAt(6, 12), Sender: chatCodex, Cells: []opapi.MatrixCell{
+			{Recipient: chatGrok, State: "accepted", Display: "read", ReadAt: &at},
+			{Recipient: chatOp, State: "pushed", Display: "read", ReadAt: &at},
+		}}}
+		m, p := chatModel(t, a, newClock())
+		frame := chatFrame(t, m)
+		wantFrame(t, frame, "grok● max●")
+		refuseFrame(t, frame, "grok✓", "max›")
+		p.press("m")
+		frame = chatFrame(t, m)
+		i := strings.Index(frame, "06:12")
+		if i < 0 {
+			t.Fatalf("no row for the first message:\n%s", frame)
+		}
+		row, _, _ := strings.Cut(frame[i:], "\n")
+		if strings.Count(row, "read") != 2 || strings.Contains(row, "accepted") || strings.Contains(row, "pushed") {
+			t.Fatalf("matrix row %q", row)
 		}
 	})
 	t.Run("64 recipients scroll", func(t *testing.T) {
@@ -1127,11 +1250,19 @@ func TestMsgCommand(t *testing.T) {
 		}
 		p.run(cmd.Run(m, args))
 	}
+	// kept waits for the failed line to come back, with its reason on screen:
+	// the open command line covers the toast.
+	kept := func(t *testing.T, p *pump, m *Model, input string, reason ...string) {
+		t.Helper()
+		p.until("the line to reopen", func() bool { return m.Mode == ModeCommand && m.Input == input })
+		frame := chatFrame(t, m)
+		wantFrame(t, frame, ":"+input)
+		wantFrame(t, frame, reason...)
+	}
 	t.Run("ambiguous prefix", func(t *testing.T) {
 		a, m, p := chatOpen(t)
 		run(t, m, p, "grok", "hello", "there")
-		waitToast(t, p, m, "ambiguous")
-		wantFrame(t, chatFrame(t, m), "grok-reviewer", "grok-triage")
+		kept(t, p, m, "msg grok hello there", "ambiguous prefix grok: grok-reviewer, grok-triage")
 		if a.count("Send") != 0 {
 			t.Fatal("sent on an ambiguous prefix")
 		}
@@ -1139,7 +1270,7 @@ func TestMsgCommand(t *testing.T) {
 	t.Run("no match", func(t *testing.T) {
 		a, m, p := chatOpen(t)
 		run(t, m, p, "zzz", "hello")
-		waitToast(t, p, m, "no peer")
+		kept(t, p, m, "msg zzz hello", "no peer matches zzz")
 		if a.count("Send") != 0 {
 			t.Fatal("sent with no peer")
 		}
@@ -1147,10 +1278,48 @@ func TestMsgCommand(t *testing.T) {
 	t.Run("missing text", func(t *testing.T) {
 		a, m, p := chatOpen(t)
 		run(t, m, p, "codex")
-		waitToast(t, p, m, "msg <peer-prefix> <text>")
+		kept(t, p, m, "msg codex", "usage: msg <peer-prefix> <text>")
 		if a.count("Send") != 0 {
 			t.Fatal("sent nothing to say")
 		}
+	})
+	t.Run("the shell closing the line after Run does not lose the text", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		m.Mode, m.Input = ModeCommand, "msg zzz hello"
+		cmd := m.Commands["msg"].Run(m, []string{"zzz", "hello"})
+		m.Mode, m.Input = ModeNormal, ""
+		p.run(cmd)
+		kept(t, p, m, "msg zzz hello", "no peer matches zzz")
+		if a.count("Send") != 0 {
+			t.Fatal("sent with no peer")
+		}
+	})
+	t.Run("from another tab the reason still shows", func(t *testing.T) {
+		_, m, p := chatOpen(t)
+		p.press("1")
+		run(t, m, p, "zzz", "hello")
+		kept(t, p, m, "msg zzz hello", "no peer matches zzz")
+		if m.Tab != tabChat {
+			t.Fatalf("tab %d", m.Tab)
+		}
+	})
+	t.Run("an overlay gives way to the reason", func(t *testing.T) {
+		_, m, p := chatOpen(t)
+		p.press("m")
+		run(t, m, p, "zzz", "hello")
+		kept(t, p, m, "msg zzz hello", "no peer matches zzz")
+		refuseFrame(t, chatFrame(t, m), "delivery matrix")
+	})
+	t.Run("the reason goes with the line", func(t *testing.T) {
+		_, m, p := chatOpen(t)
+		run(t, m, p, "zzz", "hello")
+		kept(t, p, m, "msg zzz hello", "no peer matches zzz")
+		m.toast = toast{}
+		p.press("esc")
+		p.until("the reason to clear", func() bool { return chatOf(m).msgErr == "" })
+		refuseFrame(t, chatFrame(t, m), "no peer matches")
+		p.press(":")
+		refuseFrame(t, chatFrame(t, m), "no peer matches")
 	})
 	t.Run("unique prefix sends by peer id", func(t *testing.T) {
 		a, m, p := chatOpen(t)
@@ -1176,10 +1345,7 @@ func TestMsgCommand(t *testing.T) {
 		a, m, p := chatOpen(t)
 		a.fail("Send", errors.New("connection refused"))
 		run(t, m, p, "claw", "keep", "this")
-		waitToast(t, p, m, "connection refused")
-		if m.Mode != ModeCommand || m.Input != "msg claw keep this" {
-			t.Fatalf("mode %v input %q", m.Mode, m.Input)
-		}
+		kept(t, p, m, "msg claw keep this", "connection refused")
 		m.Mode, m.Input = ModeNormal, ""
 		a.fail("Send", nil)
 		run(t, m, p, "claw", "keep", "this")
@@ -1213,12 +1379,19 @@ func TestChatHostile(t *testing.T) {
 	spill.Metadata = map[string]any{"vecnet.spilled": true}
 	spill.Attachments = []envelope.Attachment{{SHA256: "sha-spillbad", Size: 40, MediaType: "text/plain", Name: "message.md"}}
 	a.blobs["sha-spillbad"] = chatBlob{[]byte(hostile), "text/plain"}
+	// A closed card: the decision is an option string the requester chose.
+	closed := chatMsg("msg_bad4", "peer_bad", "hold", chatAt(6, 58), "closed one")
+	closed.Kind = "approval_request"
+	closed.ApprovalRequest = &envelope.ApprovalRequest{ApprovalID: "apr_shut", Question: "closed one", Options: []string{hostile, "no"}, ExpiresAt: chatAt(8, 0)}
+	answer := chatMsg("msg_bad5", chatOp, "hold", chatAt(6, 59), "")
+	answer.Kind = "approval_response"
+	answer.ApprovalResponse = &envelope.ApprovalResponse{ApprovalID: "apr_shut", Decision: hostile}
 	a.byID[chatHark] = &chatThread{
 		detail: opapi.ThreadDetail{Now: envelope.FormatTime(fixedNow), Row: row,
 			Files:         []opapi.ThreadFile{{SHA256: "sha-bad", Name: hostile, MediaType: hostile, MessageID: "msg_bad0", Size: 10}},
 			OpenApprovals: []opapi.ThreadApproval{{ApprovalID: "apr_bad", MessageID: "msg_bad2", ExpiresAt: chatAt(8, 0), Options: []string{hostile, "no"}, AddressedToMe: true}},
 		},
-		messages: []envelope.Message{bad, job, req, spill},
+		messages: []envelope.Message{closed, answer, bad, job, req, spill},
 		matrix: opapi.Matrix{Recipients: []string{"peer_bad", hostile}, Rows: []opapi.MatrixRow{
 			{MessageID: "msg_bad0", CreatedAt: chatAt(7, 0), Sender: hostile, Cells: []opapi.MatrixCell{{Recipient: hostile, State: hostile, Display: hostile}}},
 		}},
@@ -1234,7 +1407,7 @@ func TestChatHostile(t *testing.T) {
 		m.Update(tea.WindowSizeMsg{Width: 140, Height: 42})
 	}
 	t.Run("log", func(t *testing.T) {
-		wantFrame(t, chatFrame(t, m), "pwn", "<img src=x onerror=alert(1)>")
+		wantFrame(t, chatFrame(t, m), "pwn", "<img src=x onerror=alert(1)>", "answered: <img src=x")
 		check(t)
 	})
 	t.Run("prompt", func(t *testing.T) {
@@ -1253,6 +1426,17 @@ func TestChatHostile(t *testing.T) {
 		p.idle()
 		check(t)
 		p.press("esc")
+	})
+	t.Run("pager on a whole message", func(t *testing.T) {
+		p.press("k", "k", "k", "e") // the spilled message, its job, the approval, then bad
+		frame := chatFrame(t, m)
+		wantFrame(t, frame, "message · ", "pwn")
+		refuseFrame(t, frame, "message.md")
+		if a.count("Blob") != 1 {
+			t.Fatal("a whole message fetched a blob")
+		}
+		check(t)
+		p.press("esc", "j", "j", "j")
 	})
 	t.Run("composer", func(t *testing.T) {
 		p.press("i")

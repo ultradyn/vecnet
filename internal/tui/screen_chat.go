@@ -42,6 +42,7 @@ const (
 	chatMatrixDay = 6         // width of the matrix's time column
 	chatMatrixWho = 15        // width of its sender column
 	chatMatrixBox = 14        // width of one recipient's column
+	chatHintsWide = 137       // width at which every word of the hints still fits
 )
 
 var (
@@ -114,6 +115,7 @@ type (
 		result opapi.SendResult
 		err    error
 	}
+	chatRefusedMsg  struct{ args []string }
 	chatAnsweredMsg struct {
 		approval opapi.OpenApproval
 		option   int
@@ -138,7 +140,7 @@ type (
 
 // chatScreen is the chat tab: thread list, log, who-and-files, composer.
 type chatScreen struct {
-	ticking, registered, insert bool
+	ticking, registered, insert, narrow bool
 
 	thread  string // the thread the selection below belongs to
 	sel     string // selected message id, unless follow
@@ -156,6 +158,7 @@ type chatScreen struct {
 	reader           chatReader
 	lastNew          chatNewAttempt
 	lastNewKey       string
+	msgErr           string // why the :msg back on the command line failed
 }
 
 func newChatScreen() Screen {
@@ -167,13 +170,16 @@ func (s *chatScreen) Title() string { return "chat" }
 func (s *chatScreen) Hints() string {
 	switch {
 	case s.prompt != nil:
-		return "digit answers  any other key cancels"
+		return "digit answers  other keys cancel"
 	case s.insert:
 		return "enter send  tab priority  esc leave"
 	case s.overlay == chatMatrix:
 		return "j/k rows  h/l recipients  esc close"
 	case s.overlay == chatPager:
 		return "j/k scroll  pgup/pgdn page  esc close"
+	}
+	if s.narrow {
+		return "i [ ] j/k R a e m s f"
 	}
 	return "i write  [ ] thread  j/k select  R reply  a answer  e expand  m matrix  s save  f file"
 }
@@ -183,6 +189,9 @@ func (s *chatScreen) Hints() string {
 func (s *chatScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 	s.register(m)
 	s.track(m)
+	if m.Mode != ModeCommand {
+		s.msgErr = ""
+	}
 	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
@@ -197,6 +206,8 @@ func (s *chatScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 		cmd = s.onSent(msg, m)
 	case chatStartedMsg:
 		cmd = s.onStarted(msg, m)
+	case chatRefusedMsg:
+		s.keepMsg(m, msg.args)
 	case chatAnsweredMsg:
 		cmd = s.onAnswered(msg, m)
 	case chatBlobMsg:
@@ -282,13 +293,17 @@ func (s *chatScreen) draft(id string) *chatDraft {
 	return d
 }
 
+// following is whether the selection rides the newest message. An open prompt
+// holds it on the card the digit would answer.
+func (s *chatScreen) following() bool { return s.follow && s.prompt == nil }
+
 // index is the selected message's place in st, or -1 in an empty thread.
 func (s *chatScreen) index(st *ThreadState) int {
 	if st == nil {
 		return -1
 	}
 	last := len(st.Messages) - 1
-	if s.follow {
+	if s.following() {
 		return last
 	}
 	if i := slices.IndexFunc(st.Messages, func(msg envelope.Message) bool { return msg.MessageID == s.sel }); i >= 0 {
@@ -525,8 +540,7 @@ func chatSendError(m *Model, id string, err error) string {
 // case-insensitively, or its id; the send names the peer by id (§2.2 step 2).
 func (s *chatScreen) commandMsg(m *Model, args []string) tea.Cmd {
 	if len(args) < 2 {
-		m.Toast("usage: msg <peer-prefix> <text>", true)
-		return nil
+		return s.refuseMsg(m, args, "usage: msg <peer-prefix> <text>")
 	}
 	prefix := strings.ToLower(args[0])
 	var ids, names []string
@@ -538,12 +552,10 @@ func (s *chatScreen) commandMsg(m *Model, args []string) tea.Cmd {
 	}
 	switch len(ids) {
 	case 0:
-		m.Toast("no peer matches "+args[0], true)
-		return nil
+		return s.refuseMsg(m, args, "no peer matches "+args[0])
 	case 1:
 	default:
-		m.Toast(fmt.Sprintf("ambiguous prefix %s: %s", args[0], strings.Join(names, ", ")), true)
-		return nil
+		return s.refuseMsg(m, args, fmt.Sprintf("ambiguous prefix %s: %s", args[0], strings.Join(names, ", ")))
 	}
 	attempt := chatNewAttempt{peer: ids[0], text: strings.Join(args[1:], " "), prio: m.Prio}
 	if s.lastNewKey == "" || s.lastNew != attempt {
@@ -558,12 +570,29 @@ func (s *chatScreen) commandMsg(m *Model, args []string) tea.Cmd {
 	}
 }
 
+// refuseMsg is a :msg stopped here. The line comes back through a message, so
+// the shell has finished closing it by then, whichever way round it does that.
+func (s *chatScreen) refuseMsg(m *Model, args []string, why string) tea.Cmd {
+	m.Toast(why, true)
+	return func() tea.Msg { return chatRefusedMsg{args: args} }
+}
+
+// keepMsg reopens the command line on a :msg that did not go, after the toast
+// has its reason. The open line covers that toast, so the reason moves to the
+// composer row, which only the chat tab shows; :msg lands there either way.
+func (s *chatScreen) keepMsg(m *Model, args []string) {
+	if m.Mode == ModeNormal { // a command line in use keeps what it holds
+		m.Mode, m.Input = ModeCommand, strings.TrimSpace("msg "+strings.Join(args, " "))
+	}
+	if m.Mode == ModeCommand {
+		m.Tab, s.msgErr, s.overlay = tabChat, m.toast.text, chatNoOverlay
+	}
+}
+
 func (s *chatScreen) onStarted(msg chatStartedMsg, m *Model) tea.Cmd {
 	if msg.err != nil {
 		s.sendFailed(m, "", msg.err)
-		if m.Mode == ModeNormal { // a command line in use keeps what it holds
-			m.Mode, m.Input = ModeCommand, "msg "+strings.Join(msg.args, " ")
-		}
+		s.keepMsg(m, msg.args)
 		return nil
 	}
 	s.lastNewKey = ""
@@ -599,12 +628,19 @@ func (s *chatScreen) startAnswer(m *Model, st *ThreadState) {
 		m.Toast("that approval's message has not loaded yet", true)
 		return
 	}
-	s.prompt = &opapi.OpenApproval{ApprovalID: a.ApprovalID, ThreadID: m.CurrentThread, MessageID: a.MessageID, Requester: st.Messages[i].Sender, ExpiresAt: a.ExpiresAt, Options: a.Options}
+	s.move(st, i-s.index(st)) // the card is on screen before the digit is taken
+	card := &st.Messages[i]
+	question := card.Content.Text
+	if card.ApprovalRequest != nil {
+		question = card.ApprovalRequest.Question
+	}
+	s.prompt = &opapi.OpenApproval{ApprovalID: a.ApprovalID, ThreadID: m.CurrentThread, MessageID: a.MessageID, Requester: card.Sender, Question: question, ExpiresAt: a.ExpiresAt, Options: a.Options}
 	m.Mode = ModeInsert
 }
 
 // pickApproval is the selected message's approval, else the newest one here
-// that waits on the operator. A card addressed to someone else is read-only.
+// that waits on the operator, which startAnswer then selects. A card addressed
+// to someone else is read-only.
 func (s *chatScreen) pickApproval(st *ThreadState) *opapi.ThreadApproval {
 	if st == nil {
 		return nil
@@ -810,7 +846,7 @@ func chatWrite(base string, data []byte) (string, error) {
 // View draws the three panes above the composer, or an overlay.
 func (s *chatScreen) View(m *Model, w, h int) string {
 	s.track(m)
-	s.insert = m.Mode == ModeInsert
+	s.insert, s.narrow = m.Mode == ModeInsert, w < chatHintsWide
 	st := m.Data.Thread[m.CurrentThread]
 	switch {
 	case s.overlay == chatMatrix && st != nil:
@@ -1255,7 +1291,7 @@ func (s *chatScreen) window(n, picked, h int, height func(int) int) int {
 		}
 		return i
 	}
-	if s.follow {
+	if s.following() {
 		return backFrom(n - 1)
 	}
 	top := min(s.top, picked)
@@ -1407,15 +1443,14 @@ func (s *chatScreen) viewWho(m *Model, st *ThreadState, w, h int) string {
 	return strings.Join(lines, "\n")
 }
 
-// viewComposer is the last body row: the answer prompt, or the thread's label
-// and the draft, with a byte counter once there is one.
+// viewComposer is the last body row: the answer prompt, why a :msg failed, or
+// the thread's label and the draft, with a byte counter once there is one.
 func (s *chatScreen) viewComposer(m *Model, st *ThreadState, w int) string {
 	if s.prompt != nil {
-		options := make([]string, len(s.prompt.Options))
-		for i, option := range s.prompt.Options {
-			options[i] = fmt.Sprintf("%d %s", i+1, Clean(option))
-		}
-		return fit(styleWarn.Render("answer: ")+styleText.Render(strings.Join(options, "  "))+styleMuted.Render("  any other key cancels"), w)
+		return s.viewPrompt(w)
+	}
+	if s.msgErr != "" && m.Mode == ModeCommand {
+		return fit(styleBad.Render(s.msgErr), w)
 	}
 	id := m.CurrentThread
 	if id == "" {
@@ -1457,6 +1492,20 @@ func (s *chatScreen) viewComposer(m *Model, st *ThreadState, w int) string {
 		body = styleMuted.Render(ansi.Truncate("i to write, or :msg <peer> <text>", room, "…"))
 	}
 	return fit(fit(label+body, w-lipgloss.Width(status)-1)+" "+styleMuted.Render(status), w)
+}
+
+// viewPrompt names what the digit answers. The question gives way to the
+// options, but never entirely: they mean nothing without it.
+func (s *chatScreen) viewPrompt(w int) string {
+	const head, gap = "answer: ", "  "
+	options := make([]string, len(s.prompt.Options))
+	for i, option := range s.prompt.Options {
+		options[i] = fmt.Sprintf("%d %s", i+1, Clean(option))
+	}
+	listed := strings.Join(options, gap)
+	room := max(w-len(head)-len(gap)-lipgloss.Width(listed), w/3)
+	question := ansi.Truncate(Clean(s.prompt.Question), room, "…")
+	return fit(styleWarn.Render(head)+styleText.Render(question+gap+listed), w)
 }
 
 // viewMatrix is one row per message and one column per recipient, showing each

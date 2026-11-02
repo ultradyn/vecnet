@@ -15,8 +15,8 @@ try {
     // The list and the thread may reorder between looks, so this goes to the
     // top, walks down by the list's own order, and checks where it landed.
     async function openThread(id, header) {
-      const deadline = Date.now() + 60000;
-      for (;;) {
+      for (let walk = 0; ; walk++) {
+        assert(walk < 20, 'thread did not open');
         const listed = await asPeer('operator', 'GET', '/v1/admin/threads?limit=200');
         assert(listed.ok, `thread list ${listed.status}`);
         const { threads } = await listed.json();
@@ -30,7 +30,6 @@ try {
           if ((await pane()).includes(header)) return;
           await new Promise(resolve => setTimeout(resolve, 100));
         }
-        assert(Date.now() < deadline, 'thread did not open');
       }
     }
 
@@ -104,7 +103,8 @@ try {
     await waitFor(`${refused}█`);
     // A toast lasts seconds, and a loaded box can take longer than that to draw:
     // it counts only if it is still up after the shot, so resend until it is.
-    for (let shown = false; !shown;) {
+    for (let shown = false, tries = 0; !shown; tries++) {
+      assert(tries < 10, 'the budget toast never lasted through a shot');
       await keys('Enter');
       await waitFor('thread budget exhausted');
       await shot('19-tui-chat-error');
