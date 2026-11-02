@@ -159,6 +159,17 @@ export function mount(root, ctx) {
   });
   for (const el of [search, titleIn, text]) el.addEventListener('input', render);
   for (const el of [history, locked]) el.addEventListener('change', render);
+  // The drop target is the form, outside the fieldset that disables while a
+  // send is in flight, so drags are refused here (capture, before attach.js):
+  // a file added mid-send would miss the body and be cleared on success.
+  for (const type of ['dragenter', 'dragover', 'drop']) {
+    form.addEventListener(type, e => {
+      if (!S.sending) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+      e.stopImmediatePropagation();
+    }, true);
+  }
   att.wire(form, text, attachBtn);
 
   render();

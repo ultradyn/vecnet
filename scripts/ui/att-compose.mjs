@@ -14,6 +14,7 @@ try {
     allowConsole(/status of 413/);
     allowConsole(/ERR_FAILED/);
     allowConsole(/status of 501/);
+    allowConsole(/ERR_CONNECTION_RESET/);
     const sends = [], blobs = [];
     page.on('request', req => {
       if (isSend(req)) sends.push(req.postDataJSON());
@@ -64,6 +65,18 @@ try {
       const dataTransfer = await transfer(bytes, name, type);
       for (const ev of ['dragenter', 'dragover', 'drop']) await target.dispatchEvent(ev, { dataTransfer });
     };
+    // cancelled fires cancelable drag events carrying one file at the element
+    // selector names and reports, per event, whether a listener cancelled it.
+    // A synthetic event never runs the browser's default (open the file), so
+    // the guard is proven by the cancel, not by the page staying put.
+    const cancelled = (selector, bytes, name, type) => page.evaluate(([selector, bytes, name, type]) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array(bytes)], name, { type }));
+      const target = document.querySelector(selector);
+      const out = {};
+      for (const ev of ['dragenter', 'dragover', 'drop']) out[ev] = !target.dispatchEvent(new DragEvent(ev, { dataTransfer: dt, bubbles: true, cancelable: true }));
+      return out;
+    }, [selector, [...bytes], name, type]);
 
     await open();
     await pick(id('codex'));
@@ -87,7 +100,8 @@ try {
     await shot('att03-compose-initial');
 
     // A near-miss drop outside the form must not open the file or lose the draft.
-    await drop(page.locator('.compose h1'), PNG, 'near-miss.png', 'image/png');
+    const nearMiss = await cancelled('.compose h1', PNG, 'near-miss.png', 'image/png');
+    assert(nearMiss.dragover && nearMiss.drop, `a near-miss drag was not cancelled, so the browser would open the file: ${JSON.stringify(nearMiss)}`);
     assert(await chips.count() === 2, 'a drop outside the form added a chip');
     assert(await text.inputValue() === body && await page.evaluate(() => location.hash) === '#new', 'a near-miss drop lost the draft');
 
@@ -96,18 +110,30 @@ try {
     // interception on so the held request is continued by the handler.
     await page.route('**/__keep-interception__', route => route.continue());
     const release = await hold('**/v1/blobs*');
+    // A held upload reports no progress, so its bar is indeterminate; reduced
+    // motion draws that bar full width instead of mid-slide, off the chip.
+    await page.emulateMedia({ reducedMotion: 'reduce' });
     await drop(view.locator('form'), PNG, 'dashboard.png', 'image/png');
     await chip('dashboard.png').and(view.locator('.up-uploading')).waitFor();
     await chip('dashboard.png').locator('.up-bar').waitFor();
     assert(await send.isDisabled(), 'Send enabled while a chip uploads');
     assert(await view.locator('form.up-drop').count() === 0, 'the drop state stayed on after the drop');
     await shot('att03-compose-progress');
+    await page.emulateMedia({ reducedMotion: null });
     await release();
     await doneCount(3);
     assert(await send.isEnabled(), 'Send stayed disabled after the upload finished');
 
     // Success: the send carries the three hashes in order and opens the thread.
+    // A file dropped while the send is in flight is refused, not silently
+    // added and then cleared with the sent chips.
+    const releaseSend = await hold('**/v1/messages');
     await send.click();
+    await page.waitForFunction(() => document.querySelector('.compose fieldset').disabled);
+    const late = await cancelled('.compose .wrap', PNG, 'late.png', 'image/png');
+    assert(late.drop, `a drop during the send was not cancelled: ${JSON.stringify(late)}`);
+    assert(await chips.count() === 3, 'a drop during the send added a chip');
+    await releaseSend();
     await page.waitForFunction(() => location.hash.startsWith('#thread/thr_'));
     const req = sends.at(-1);
     assert(sends.length === 1, `expected one send, saw ${sends.length}`);
@@ -142,7 +168,26 @@ try {
     await shot('att03-compose-error');
     await page.unroute('**/v1/blobs*');
 
+    // A dropped connection fails only its own chip; Retry then uploads it.
+    await page.route('**/v1/blobs*', route => route.abort('connectionreset'));
+    await pickFiles({ name: 'trace.txt', mimeType: 'text/plain', buffer: Buffer.from('trace: connect reset at step 4\n') });
+    const reset = chip('trace.txt');
+    await reset.and(view.locator('.up-failed')).waitFor();
+    await reset.locator('.up-err', { hasText: 'Upload failed: the hub could not be reached.' }).waitFor();
+    await reset.getByRole('button', { name: 'Remove' }).waitFor();
+    assert(await chip('trimmed.png').and(view.locator('.up-done')).count() === 1, 'a dropped connection unsettled the done chip');
+    assert(await failed.and(view.locator('.up-failed')).count() === 1, 'a dropped connection changed the 413 chip');
+    assert(await send.isDisabled(), 'Send enabled with two failed chips');
+    assert(await text.inputValue() === draft, 'the draft was lost after a dropped connection');
+    await page.unroute('**/v1/blobs*');
+    await reset.getByRole('button', { name: 'Retry' }).click();
+    await reset.and(view.locator('.up-done')).waitFor();
+    await reset.getByRole('button', { name: 'Remove trace.txt' }).click();
+    await chipCount(2);
+
     // Review Focus 1: a lost reply keeps the key; a removed chip mints a new one.
+    // Each lost attempt reaches the hub and only its reply is dropped, so the
+    // retry under the same key must be the hub's idempotent replay.
     await failed.getByRole('button', { name: 'Remove' }).click();
     await chipCount(1);
     await paste(PNG, 'image/png');
@@ -150,7 +195,12 @@ try {
     await text.fill('');
     assert(await send.isEnabled(), 'Send disabled for attachments with empty text');
     const before = sends.length;
-    await page.route('**/v1/messages', route => route.abort('failed'));
+    const replies = [];
+    await page.route('**/v1/messages', async route => {
+      const r = await route.fetch();
+      replies.push({ status: r.status(), body: await r.json() });
+      await route.abort('failed');
+    });
     await attempt();
     await view.locator('.err', { hasText: 'network' }).waitFor();
     await attempt();
@@ -167,13 +217,24 @@ try {
     assert(removed.idempotency_key !== lost2.idempotency_key, 'a removed chip kept the key');
     assert(landed.idempotency_key === removed.idempotency_key, 'the key changed across an unchanged retry');
     assert(landed.content.text === '' && landed.attachments[0].name === 'trimmed.png', `landed body was ${JSON.stringify(landed)}`);
+    assert(replies.length === 3, `expected three hub replies behind the lost attempts, saw ${replies.length}`);
+    const [r1, r2, r3] = replies;
+    assert(r1.status === 202 && r2.status === 200, `the lost send and its retry answered ${r1.status} then ${r2.status}, not 202 then a 200 replay`);
+    assert(r2.body.message_id === r1.body.message_id && r2.body.thread_id === r1.body.thread_id, 'the retry under the same key made a second message');
+    assert(r3.status === 202 && r3.body.message_id !== r1.body.message_id, 'the body without the removed chip did not make a new message');
     await page.locator('.msg .att', { hasText: 'trimmed.png' }).waitFor();
     const thr = (await page.evaluate(() => location.hash)).slice('#thread/'.length);
-    const res = await asPeer('operator', 'GET', `/v1/threads/${thr}/messages?limit=50`);
-    assert(res.ok, `thread messages answered ${res.status}`);
-    const listed = await res.json();
-    assert(Array.isArray(listed.messages) && listed.messages.length === 1, `the thread holds ${listed.messages?.length} messages, not one`);
-    assert(listed.messages[0].attachments.length === 1 && listed.messages[0].attachments[0].sha256 === landed.attachments[0].sha256, 'the hub message lost its attachment');
+    assert(thr === r3.body.thread_id, `the landed send opened ${thr}, not the replayed ${r3.body.thread_id}`);
+    const messagesIn = async t => {
+      const res = await asPeer('operator', 'GET', `/v1/threads/${t}/messages?limit=50`);
+      assert(res.ok, `thread messages answered ${res.status}`);
+      return (await res.json()).messages;
+    };
+    const first = await messagesIn(r1.body.thread_id);
+    assert(Array.isArray(first) && first.length === 1 && first[0].attachments.length === 2, `the twice-sent thread holds ${first?.length} messages, not one with two attachments`);
+    const listed = await messagesIn(thr);
+    assert(Array.isArray(listed) && listed.length === 1, `the thread holds ${listed?.length} messages, not one`);
+    assert(listed[0].attachments.length === 1 && listed[0].attachments[0].sha256 === landed.attachments[0].sha256, 'the hub message lost its attachment');
   });
-  console.log('Attachments compose passed: picked and pasted chips upload with ttl and declared type, near-miss drop keeps the draft, held upload disables Send, send carries hashes in order and opens the thread, 413 chip error keeps the text, lost reply keeps the key, removed chip mints a new one');
+  console.log('Attachments compose passed: picked and pasted chips upload with ttl and declared type, near-miss drop keeps the draft, held upload disables Send, send carries hashes in order and opens the thread, drop during a send is refused, 413 and dropped-connection chip errors keep the text, a lost reply keeps the key and the hub replays it, removed chip mints a new one');
 } finally { await cleanBuild(); }
