@@ -6,8 +6,11 @@
 #   DONE <exit> RESULT_OK <sum>  <base>.result.json parsed, and its head_sha, if any, is the real HEAD
 #   DONE <exit> RESULT_MISSING | RESULT_INVALID | RESULT_HEAD_MISMATCH <detail>
 #   DONE 99 NOT_STARTED         sol-run.sh never started a run for this base
-# <sum> is FNV-1a over the canonical JSON. The workflow recomputes it from what
-# the relay returns, so a copy that lost or changed anything is caught.
+# On RESULT_OK this also writes <base>.slim.json, the result without the log fields
+# the workflow never reads. Those fields are most of the bytes, and long strings of
+# paths are what a relay model rewrites. <sum> is FNV-1a over the slim canonical JSON.
+# The workflow recomputes it from what the relay returns, so a copy that lost or
+# changed anything is caught.
 set -u
 base=$1
 limit=${2:-540}
@@ -46,6 +49,11 @@ if sha:
     if not head.startswith(sha) and not sha.startswith(head):
         print('RESULT_HEAD_MISMATCH', 'reported', sha, 'actual', head)
         sys.exit()
+for key, empty in (('commands_run', []), ('files_changed', []), ('test_output_tail', ''), ('red_evidence', ''), ('green_evidence', '')):
+    if key in r:
+        r[key] = empty
+with open(base + '.slim.json', 'w') as f:
+    json.dump(r, f, ensure_ascii=False, indent=1)
 h = 0x811c9dc5
 for b in json.dumps(r, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode():
     h = ((h ^ b) * 0x01000193) & 0xffffffff

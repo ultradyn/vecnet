@@ -1,5 +1,6 @@
 {
- "runStamp": "20261102T12-operator-ui",
+ "runStamp": "20261102T16-operator-ui",
+ "maxFixRounds": 3,
  "planName": "operator UI",
  "plan": "docs/plans/2026-11-01-operator-ui.md",
  "worktree": "/home/xertrov/src/vecnet4/.worktrees/operator-ui",
@@ -133,6 +134,7 @@
    ],
    "hazards": [
     ".gitignore already lists .scratch/vecnet/build-operator-ui/; add only .demo-data/.",
+    "internal/opseed/demo is a test fixture that never ships. Hold it to three things: it behaves correctly, it is deterministic, and it cannot reach the vecnet-hub binary. Findings about the strictness of its own control API, such as JSON key case or error body shape, are minor.",
     "The demo hub reuses httpapi.NewStack and Stack.Run. Read cmd/vecnet-hub/main.go and internal/testhub/testhub.go first; do not re-wire workers or OAuth by hand.",
     "Direct SQL into event_subscriptions must fill the NOT NULL columns and the columns added by migration 0009 (token_hash, last_refresh_at). arguments and types must be valid JSON, secret_enc must come from Hub.Seal, and principal_kind is oauth or vecnet.",
     "peer add --kind dot issues no bearer, so the dot in the seed has no entry in Scenario.Secrets.",
@@ -524,7 +526,7 @@
   "run": "/home/xertrov/src/vecnet4/scripts/wf/sol-run.sh",
   "wait": "/home/xertrov/src/vecnet4/scripts/wf/sol-wait.sh",
   "dir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/ccc",
-  "transcripts": "/home/xertrov/.claude-q/projects/-home-xertrov-src-vecnet4/*/subagents/workflows/*/agent-*.jsonl"
+  "transcripts": "/home/xertrov/.claude-p/projects/-home-xertrov-src-vecnet4/*/subagents/workflows/*/agent-*.jsonl"
  },
  "extraRules": [
   "No npm install. Playwright comes from the existing skill install through scripts/ui/lib.mjs.",
