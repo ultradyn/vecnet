@@ -35,9 +35,9 @@ try {
       await keys('Enter');
       await until('the first request to reach the stall', async () => (await controlStatus()).stalled_requests > 0);
       await waitFor('connecting to');
-      await shot('17-tui-initial');
+      await shot('17-tui-initial', 'connecting to');
       await waitFor('first load: waiting on inbox');
-      await shot('17-tui-progress');
+      await shot('17-tui-progress', 'first load: waiting on inbox');
     } finally { await clear('stall'); }
 
     await waitFor(' live ');

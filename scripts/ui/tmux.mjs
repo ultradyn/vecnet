@@ -39,8 +39,13 @@ export async function withTui({ scale = false, command, env: shared } = {}, fn) 
         }
         throw new Error(`tmux text did not appear (length ${text.length})`);
       },
-      shot: async name => {
-        await page.setContent(ansiHTML(await capture()), { waitUntil: 'load' });
+      // must, when given, is text the captured frame has to hold: a state that
+      // lasts only a moment fails the run instead of saving the next state
+      // under its name.
+      shot: async (name, must) => {
+        const output = await capture();
+        if (must) assert(output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').includes(must), `${name}: the frame no longer shows ${JSON.stringify(must)}`);
+        await page.setContent(ansiHTML(output), { waitUntil: 'load' });
         await page.evaluate(() => document.fonts.ready);
         const size = await page.locator('pre').boundingBox();
         assert(size, 'missing terminal raster');
