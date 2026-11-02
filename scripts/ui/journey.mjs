@@ -98,7 +98,10 @@ try {
         await page.clock.fastForward('20:00');
         assert((await beat).postDataJSON().state === 'idle', 'web heartbeat overwrote idle');
         await posted;
-        await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now())));
+        // pauseAt advances to its target. Keep that target ahead of the
+        // running clock while Playwright transports the command, or a busy
+        // build slice can turn an exact-now target into a past timestamp.
+        await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now() + 60000)));
         const afterWeb = await inbox();
         assert(afterWeb.me.presence === 'idle', 'web heartbeat did not preserve idle');
 

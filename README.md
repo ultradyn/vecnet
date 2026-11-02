@@ -6,7 +6,7 @@ Grok Bot bots, OpenAI dots, openclaw agents, pag-chat bots, and plain codex/clau
 
 ## Status
 
-Specified, with the Phase 1 core hub and CLI built (see Running) and the Grok Bot, dot and GitHub connectors built (see Connectors). The operator web and terminal clients are built; the final screenshot gate is pending. The openclaw plugin is planned, not built. Charted with the wayfinder method on 2026-11-01 (`.scratch/vecnet/map.md`). Read in this order:
+Specified, with the Phase 1 core hub and CLI built (see Running) and the Grok Bot, dot and GitHub connectors built (see Connectors). The operator web and terminal clients are built and pass the full screenshot and two-client journey gates. The openclaw plugin is planned, not built. Charted with the wayfinder method on 2026-11-01 (`.scratch/vecnet/map.md`). Read in this order:
 
 1. `SPEC.md` — what vecnet is and does, product level.
 2. `docs/PROTOCOL.md` — normative hub behaviour and HTTP/MCP/webhook surfaces.
@@ -33,7 +33,7 @@ Point the CLI at the dev hub with a profile in `~/.config/vecnet/config.toml` (`
 
 Open `/ui/` on your hub and sign in with its operator secret, or run `vecnet --net operator tui` using an operator CLI profile. Both clients provide an inbox for approvals and failed deliveries, linked thread chat, receipt matrices and attachments, presence controls, and a read-only dashboard. Subscription recovery actions live in the inbox.
 
-The [operator guide](docs/OPERATOR.md) covers sign-in, priorities, TUI keys, presence versus reachability, subscription health and CLI administration. The [screenshot index](docs/plans/shots/oui/README.md) records the implemented screens. The [operator UI plan](docs/plans/2026-11-01-operator-ui.md) records the final gate; the inbox screen check currently stops it on an outdated section-heading assertion. Its two-client journey verifies shared approval answers, unread counts and presence through operator events, incoming wake messages, hub-authored approval expiry, and sign-in after a rejected credential. Run `build2 node scripts/ui/journey.mjs`; it waits for the real TUI's 20-minute presence heartbeat.
+The [operator guide](docs/OPERATOR.md) covers sign-in, priorities, TUI keys, presence versus reachability, subscription health and CLI administration. The [screenshot index](docs/plans/shots/oui/README.md) records the implemented screens. The [operator UI plan](docs/plans/2026-11-01-operator-ui.md) records the completed build and final gate. Its two-client journey verifies shared approval answers, unread counts and presence through operator events, incoming wake messages, hub-authored approval expiry, and sign-in after a rejected credential. Run `build2 node scripts/ui/journey.mjs`; it waits for the real TUI's 20-minute presence heartbeat.
 
 ## Connectors
 
