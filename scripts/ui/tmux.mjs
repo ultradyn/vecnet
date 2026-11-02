@@ -1,4 +1,4 @@
-import { writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ansiHTML, LINE } from './ansi.mjs';
 import { assert, bootDemo, buildCLI, chromium, run, shotPath } from './lib.mjs';
@@ -55,7 +55,11 @@ export async function withTui({ scale = false, command, env: shared } = {}, fn) 
     });
   } finally {
     try { await browser?.close(); } finally {
-      try { if (started) await tmux('kill-server'); } finally { if (!shared) await env.close(); }
+      try { if (started) await tmux('kill-server'); } finally {
+        // tmux leaves the socket file behind after kill-server; remove ours so runs do not pile up in the tmux dir.
+        await rm(join(process.env.TMUX_TMPDIR || '/tmp', `tmux-${process.getuid()}`, socket), { force: true }).catch(() => {});
+        if (!shared) await env.close();
+      }
     }
   }
 }
