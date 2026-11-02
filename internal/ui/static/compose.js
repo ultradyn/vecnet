@@ -1,9 +1,12 @@
 // New message (#new): pick peers by name, send to their ids (PROTOCOL
 // §14.4), and open the thread the hub creates. compose-model.js holds the
 // rules; this file only draws them. Every peer string goes through h().
+// Attachments (picker, drop onto the form, paste into the text) are
+// attach.js's chip row; the send carries their hashes once all are uploaded.
+import { createAttachments } from './attach.js';
 import { avatar, h } from './dom.js';
 import { short } from './format.js';
-import { buildSend, canSend, counter, eligible, errorText, keepKey, keyFor, matches } from './compose-model.js';
+import { buildSend, canSend, counter, eligible, errorText, keepKey, keyFor, matches, sendRefusal } from './compose-model.js';
 
 function randKey() {
   const b = crypto.getRandomValues(new Uint8Array(16));
@@ -21,6 +24,7 @@ export function mount(root, ctx) {
     denied: '',      // recipient named by the last scope_denied
   };
   let gone = false;
+  const att = createAttachments({ api, onChange: () => render() });
 
   const search = h('input', { type: 'search', id: 'c-search', 'aria-label': 'Search peers', placeholder: 'Search peers by name', autocomplete: 'off', spellcheck: 'false' });
   const picked = h('div', { class: 'picked', 'aria-live': 'polite' });
@@ -36,6 +40,7 @@ export function mount(root, ctx) {
   const locked = h('input', { type: 'checkbox', id: 'c-locked' });
   const err = h('p', { class: 'err', role: 'alert' });
   const send = h('button', { type: 'submit', class: 'btn pri', text: 'Send' });
+  const attachBtn = h('button', { type: 'button', class: 'btn', text: 'Attach', title: 'Attach files (or drop them on the form, or paste a screenshot into the message)' });
   const fields = h('fieldset', {},
     h('div', { class: 'field' },
       h('label', { for: 'c-search', text: 'To' }),
@@ -46,12 +51,15 @@ export function mount(root, ctx) {
       h('div', { class: 'field' }, h('span', { class: 'lbl', text: 'Priority' }), seg)),
     h('div', { class: 'field' },
       h('label', { for: 'c-text', text: 'Message' }),
-      h('div', { class: 'wrap' }, text, h('div', { class: 'bar' }, count, h('span', { class: 'hint', text: 'Ctrl+Enter to send' })))),
+      h('div', { class: 'wrap' }, text, att.el, h('div', { class: 'bar' }, count, h('span', { class: 'hint', text: 'Drop or paste files · Ctrl+Enter to send' })))),
     h('details', { class: 'adv' },
       h('summary', { text: 'Advanced' }),
       h('div', { class: 'field' }, h('label', { for: 'c-history', text: 'History access' }), history),
-      h('label', { class: 'check', for: 'c-locked' }, locked, h('span', { text: 'Lock participants: only you can add people later' }))));
-  const form = h('form', { class: 'cform', novalidate: true, autocomplete: 'off' }, fields, err, h('div', { class: 'actions' }, send));
+      h('label', { class: 'check', for: 'c-locked' }, locked, h('span', { text: 'Lock participants: only you can add people later' }))),
+    // Inside the fieldset, so Attach disables while a send is in flight.
+    err,
+    h('div', { class: 'actions' }, attachBtn, send));
+  const form = h('form', { class: 'cform', novalidate: true, autocomplete: 'off' }, fields);
 
   root.replaceChildren(h('div', { class: 'compose' },
     h('h1', { text: 'New message' }),
@@ -61,6 +69,7 @@ export function mount(root, ctx) {
   const formValue = () => ({
     recipients: S.recipients, title: titleIn.value, priority: S.priority, text: text.value,
     historyAccess: history.value, lockedParticipants: locked.checked,
+    attachments: att.toAttachments(), uploadsReady: att.ready(),
   });
 
   function toggle(id) {
@@ -102,9 +111,10 @@ export function mount(root, ctx) {
     const c = counter(text.value);
     count.textContent = c.label;
     count.className = 'bytes' + (c.tone ? ' ' + c.tone : '');
-    err.textContent = S.error;
+    const f = formValue();
+    err.textContent = S.error || sendRefusal(f);
     fields.disabled = S.sending;
-    send.disabled = S.sending || !canSend(formValue());
+    send.disabled = S.sending || !canSend(f);
     send.textContent = S.sending ? 'Sending…' : 'Send';
   }
 
@@ -120,6 +130,7 @@ export function mount(root, ctx) {
     try {
       const r = await api.send(body);
       S.pending = null;
+      att.clear();
       store.invalidate('threads');
       if (gone) { toast('Sent'); return; }
       nav('#thread/' + r.thread_id);
@@ -148,6 +159,18 @@ export function mount(root, ctx) {
   });
   for (const el of [search, titleIn, text]) el.addEventListener('input', render);
   for (const el of [history, locked]) el.addEventListener('change', render);
+  // The drop target is the form, outside the fieldset that disables while a
+  // send is in flight, so drags are refused here (capture, before attach.js):
+  // a file added mid-send would miss the body and be cleared on success.
+  for (const type of ['dragenter', 'dragover', 'drop']) {
+    form.addEventListener(type, e => {
+      if (!S.sending) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+      e.stopImmediatePropagation();
+    }, true);
+  }
+  att.wire(form, text, attachBtn);
 
   render();
   search.focus();
@@ -155,5 +178,6 @@ export function mount(root, ctx) {
   return () => {
     gone = true;
     off();
+    att.destroy();
   };
 }

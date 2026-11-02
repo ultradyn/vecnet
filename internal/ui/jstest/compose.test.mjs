@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SPILL, TEXT_CAP, buildSend, canSend, counter, eligible, errorText, keepKey, keyFor, matches } from '../static/compose-model.js';
+import { SPILL, TEXT_CAP, buildSend, canSend, counter, eligible, errorText, keepKey, keyFor, matches, sendRefusal } from '../static/compose-model.js';
+import { SPILL_SLOT } from '../static/attach-model.js';
 
 const peers = [
   { peer_id: 'peer_op', name: 'max', kind: 'operator' },
@@ -141,4 +142,72 @@ test('errorText names the denied recipient and shows the retry time', () => {
 
   assert.equal(errorText({ status: 0, code: 'network', message: 'hub unreachable', details: {} }, nameOf), 'network: hub unreachable');
   assert.equal(errorText({ status: 422, code: 'name_not_an_address', message: 'display name', details: {} }, nameOf), 'name_not_an_address: display name');
+  // The hub's 413 for a 17th attachment (the spilled message.md) reads as the form's own refusal.
+  assert.equal(errorText({ status: 413, code: 'payload_too_large', message: 'too many attachments', details: { field: 'attachments', limit: 15 } }, nameOf), SPILL_SLOT);
+  assert.equal(errorText({ status: 413, code: 'payload_too_large', message: 'body too large', details: { field: 'content.text' } }, nameOf), 'payload_too_large: body too large');
+});
+
+const att = n => ({ sha256: String(n).padStart(64, '0'), size: 100 + n, media_type: 'image/png', name: 'shot-' + n + '.png' });
+const atts = n => Array.from({ length: n }, (_, i) => att(i + 1));
+
+test('buildSend with only attachments → content.text "" and attachments', () => {
+  const two = atts(2);
+  const body = buildSend({ recipients: ['peer_c'], priority: 'wake', text: '', attachments: two }, 'ui-a1');
+  assert.deepEqual(body, { idempotency_key: 'ui-a1', recipients: ['peer_c'], priority: 'wake', content: { text: '' }, attachments: two });
+  assert.notEqual(body.attachments, two, 'the form array is copied, not shared');
+  // Missing text reads as empty when there is an attachment.
+  assert.equal(buildSend({ recipients: ['peer_c'], priority: 'wake', attachments: two }, 'k').content.text, '');
+  // Text and attachments travel together; order is kept.
+  const both = buildSend({ recipients: ['peer_c'], priority: 'wake', text: 'see attached', attachments: [two[1], two[0]] }, 'k');
+  assert.equal(both.content.text, 'see attached');
+  assert.deepEqual(both.attachments.map(a => a.sha256), [two[1].sha256, two[0].sha256]);
+  // No attachments: the key is omitted entirely.
+  assert.ok(!('attachments' in buildSend({ recipients: ['peer_c'], priority: 'wake', text: 'x', attachments: [] }, 'k')));
+  // Neither text nor attachments: refused with the new message.
+  assert.throws(() => buildSend({ recipients: ['peer_c'], priority: 'wake', text: '  ', attachments: [] }, 'k'), /text or at least one attachment is required/);
+  assert.throws(() => buildSend({ recipients: ['peer_c'], priority: 'wake', text: '' }, 'k'), /text or at least one attachment is required/);
+  // More than the hub's 16 is refused before it is sent.
+  assert.throws(() => buildSend({ recipients: ['peer_c'], priority: 'wake', text: '', attachments: atts(17) }, 'k'), /16/);
+});
+
+test('canSend false while uploads are not ready', () => {
+  const ok = { recipients: ['peer_c'], priority: 'wake', text: '', attachments: atts(1), uploadsReady: true };
+  assert.equal(canSend(ok), true, 'attachments alone may be sent');
+  assert.equal(canSend({ ...ok, uploadsReady: false }), false, 'a chip still uploading or failed');
+  assert.equal(canSend({ ...ok, text: 'hi', uploadsReady: false }), false, 'text does not override unready uploads');
+  assert.equal(canSend({ ...ok, attachments: [], uploadsReady: false }), false, 'a failed chip with nothing done');
+  assert.equal(canSend({ ...ok, attachments: [] }), false, 'neither text nor attachments');
+  assert.equal(canSend({ ...ok, recipients: [] }), false, 'no recipient');
+  // A form from before attachments (no uploadsReady field) keeps today's rule.
+  assert.equal(canSend({ recipients: ['peer_c'], priority: 'wake', text: 'hi' }), true);
+  // A refusal set by the caller blocks the send.
+  assert.equal(canSend({ ...ok, sendRefusal: 'no' }), false);
+});
+
+test('canSend false with 16 attachments and 5000-byte text', () => {
+  const form = { recipients: ['peer_c'], priority: 'wake', text: 'x'.repeat(5000), attachments: atts(16), uploadsReady: true };
+  assert.equal(canSend(form), false);
+  assert.equal(sendRefusal(form), SPILL_SLOT, 'the spill-slot message explains why');
+  // One fewer, or text at the spill threshold, fits.
+  assert.equal(canSend({ ...form, attachments: atts(15) }), true);
+  assert.equal(sendRefusal({ ...form, attachments: atts(15) }), '');
+  assert.equal(canSend({ ...form, text: 'x'.repeat(SPILL) }), true);
+  assert.equal(sendRefusal({ ...form, text: 'x'.repeat(SPILL) }), '');
+  // The threshold is in UTF-8 bytes: 2049 × é is 4098 bytes.
+  assert.equal(canSend({ ...form, text: 'é'.repeat(2049) }), false);
+});
+
+test('keyFor: same text, different attachments → new key', () => {
+  let n = 0;
+  const mint = () => 'ui-' + (++n);
+  const form = { recipients: ['peer_c'], title: '', priority: 'wake', text: 'see attached', attachments: atts(2), uploadsReady: true };
+  const a = keyFor(null, form, mint);
+  assert.equal(a.key, 'ui-1');
+  assert.equal(keyFor(a, { ...form, attachments: atts(2) }, mint), a, 'unchanged attachments keep the key');
+  assert.equal(keyFor(a, { ...form, attachments: atts(1) }, mint).key, 'ui-2', 'a removed chip mints a new key');
+  assert.equal(keyFor(a, { ...form, attachments: [att(2), att(1)] }, mint).key, 'ui-3', 'reordered chips mint a new key');
+  assert.equal(keyFor(a, { ...form, attachments: [att(1), att(3)] }, mint).key, 'ui-4', 'a different file mints a new key');
+  assert.equal(keyFor(a, { ...form, attachments: [] }, mint).key, 'ui-5', 'dropping every attachment mints a new key');
+  // uploadsReady is not part of the body.
+  assert.equal(keyFor(a, { ...form, uploadsReady: false }, mint), a);
 });
