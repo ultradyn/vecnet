@@ -1,0 +1,856 @@
+package tui
+
+import (
+	"encoding/json"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/opapi"
+)
+
+// This screen only reads. Dead-letter retry and discard and
+// subscription resume live in the inbox, on purpose.
+
+const (
+	dashGutter = 2 // the cursor column of the peer table and the thread list
+	// Below this inner width a bottom pane switches to its short row.
+	dashWidePane = 36
+	dashCapsMin  = 10
+	dashErrLines = 3
+	dashLowPct   = 10
+	dashWarnPct  = 25
+	dashBarCells = 10
+)
+
+var (
+	styleDashHead      = lipgloss.NewStyle().Foreground(colorBg).Background(lipgloss.Color("#818cf8")).Bold(true)
+	styleDashConnected = lipgloss.NewStyle().Foreground(lipgloss.Color("#c4b5fd"))
+	styleDashReachable = lipgloss.NewStyle().Foreground(lipgloss.Color("#22d3ee"))
+	colorDashCursor    = lipgloss.Color("#1f2937")
+	// Peer names take their kind's colour, so a table reads at a glance.
+	styleDashKinds = map[string]lipgloss.Style{
+		"operator":    lipgloss.NewStyle().Foreground(colorAccent2),
+		"session":     lipgloss.NewStyle().Foreground(lipgloss.Color("#818cf8")),
+		"grokbot":     lipgloss.NewStyle().Foreground(lipgloss.Color("#2dd4bf")),
+		"pagchat-bot": lipgloss.NewStyle().Foreground(lipgloss.Color("#a3e635")),
+		"openclaw":    lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")),
+		"dot":         lipgloss.NewStyle().Foreground(lipgloss.Color("#f472b6")),
+		"source":      lipgloss.NewStyle().Foreground(lipgloss.Color("#d1d5db")),
+	}
+)
+
+type dashFocus int
+
+const (
+	dashOnPeers dashFocus = iota
+	dashOnThreads
+)
+
+// dashScreen keeps the selection by id, so the cursor follows its row through a
+// reload that reorders the table.
+type dashScreen struct {
+	focus        dashFocus
+	peer, thread string
+	narrow       *dashNarrow
+}
+
+// dashNarrow is the thread pane narrowed to one peer. The shell's Data.Threads
+// is the whole hub, so the screen holds this query's page itself.
+type dashNarrow struct {
+	peer       string
+	page       opapi.ThreadPage
+	err        error
+	done       bool
+	busy, more bool // one request at a time; more asks for one after it
+}
+
+// dashThreadsMsg is one narrowed load. A narrow the operator has left is no
+// longer d.narrow, so its answer drops.
+type dashThreadsMsg struct {
+	narrow *dashNarrow
+	page   opapi.ThreadPage
+	err    error
+}
+
+func newDashScreen() Screen { return &dashScreen{} }
+
+func (d *dashScreen) Title() string { return "dash" }
+
+func (d *dashScreen) Hints() string {
+	if d.focus == dashOnThreads {
+		return "j/k thread  enter open  esc peers"
+	}
+	return "j/k peer  enter threads  tab pane"
+}
+
+func (d *dashScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		return d.onKey(msg.String(), m)
+	case Loaded:
+		if msg.Key == "threads" && msg.Err == nil {
+			return d.loadNarrow(m)
+		}
+	case dashThreadsMsg:
+		return d.onNarrow(msg, m)
+	}
+	return nil
+}
+
+func (d *dashScreen) onKey(key string, m *Model) tea.Cmd {
+	switch key {
+	case "j", "down":
+		d.move(m, 1)
+	case "k", "up":
+		d.move(m, -1)
+	case "tab", "shift+tab":
+		if d.focus == dashOnPeers {
+			d.focus = dashOnThreads
+		} else {
+			d.focus = dashOnPeers
+		}
+	case "esc":
+		d.narrow = nil
+		d.focus = dashOnPeers
+	case "enter":
+		if d.focus == dashOnThreads {
+			rows := d.threadRows(m)
+			if len(rows) == 0 {
+				return nil
+			}
+			return m.OpenThread(rows[d.threadIndex(rows)].Thread.ThreadID)
+		}
+		if len(m.Data.Peers) == 0 {
+			return nil
+		}
+		row := m.Data.Peers[d.peerIndex(m)].Peer
+		if row.Kind == "source" { // never a recipient; the hub refuses a src_ participant
+			m.Toast(row.Name+" is a source and has no threads", false)
+			return nil
+		}
+		d.peer, d.thread, d.focus = row.PeerID, "", dashOnThreads
+		d.narrow = &dashNarrow{peer: row.PeerID}
+		return d.loadNarrow(m)
+	}
+	return nil
+}
+
+func (d *dashScreen) move(m *Model, by int) {
+	if d.focus == dashOnThreads {
+		if rows := d.threadRows(m); len(rows) > 0 {
+			d.thread = rows[min(max(d.threadIndex(rows)+by, 0), len(rows)-1)].Thread.ThreadID
+		}
+		return
+	}
+	if peers := m.Data.Peers; len(peers) > 0 {
+		d.peer = peers[min(max(d.peerIndex(m)+by, 0), len(peers)-1)].Peer.PeerID
+	}
+}
+
+func (d *dashScreen) peerIndex(m *Model) int {
+	return max(slices.IndexFunc(m.Data.Peers, func(r opapi.PeerRow) bool { return r.Peer.PeerID == d.peer }), 0)
+}
+
+func (d *dashScreen) threadIndex(rows []opapi.ThreadRow) int {
+	return max(slices.IndexFunc(rows, func(r opapi.ThreadRow) bool { return r.Thread.ThreadID == d.thread }), 0)
+}
+
+// threadPage is what the thread pane lists.
+func (d *dashScreen) threadPage(m *Model) opapi.ThreadPage {
+	if d.narrow != nil {
+		return d.narrow.page
+	}
+	return m.Data.Threads
+}
+
+func (d *dashScreen) threadRows(m *Model) []opapi.ThreadRow { return d.threadPage(m).Threads }
+
+// loadNarrow fetches the narrowed page. Calls made during a request fold into
+// one more request after it, as the shell's own loads do.
+func (d *dashScreen) loadNarrow(m *Model) tea.Cmd {
+	n := d.narrow
+	if n == nil || m.stopped() {
+		return nil
+	}
+	if n.busy {
+		n.more = true
+		return nil
+	}
+	n.busy = true
+	api, ctx, peer := m.API, m.ctx, n.peer
+	return func() tea.Msg {
+		page, err := api.Threads(ctx, opapi.ThreadQuery{Participant: peer, Limit: pageLimit})
+		return dashThreadsMsg{narrow: n, page: page, err: err}
+	}
+}
+
+func (d *dashScreen) onNarrow(msg dashThreadsMsg, m *Model) tea.Cmd {
+	n := msg.narrow
+	if n != d.narrow {
+		return nil
+	}
+	n.busy = false
+	if isStatus(msg.err, 401) {
+		m.reject(msg.err)
+		return nil
+	}
+	if msg.err == nil {
+		n.page, n.done = msg.page, true
+	}
+	n.err = msg.err
+	if n.more {
+		n.more = false
+		return d.loadNarrow(m)
+	}
+	return nil
+}
+
+// dashNames resolves the ids a frame shows. It is built once per frame, from
+// cleaned text only.
+type dashNames struct {
+	peers, threads map[string]string
+}
+
+func newDashNames(m *Model) dashNames {
+	names := dashNames{peers: map[string]string{}, threads: map[string]string{}}
+	owned := map[string]int{}
+	for _, row := range m.Data.Peers {
+		names.peers[row.Peer.PeerID] = Clean(row.Peer.Name)
+		owned[row.PrincipalID]++
+	}
+	// An audit actor can be a principal, which may own many peers (PROTOCOL §1.3).
+	// Only a principal's sole peer can stand for it; a source has no principal.
+	for _, row := range m.Data.Peers {
+		if row.PrincipalID != "" && owned[row.PrincipalID] == 1 {
+			names.peers[row.PrincipalID] = Clean(row.Peer.Name)
+		}
+	}
+	for _, row := range m.Data.Threads.Threads {
+		names.threads[row.Thread.ThreadID] = names.thread(row, m.Data.Inbox.Me.PeerID)
+	}
+	return names
+}
+
+func (n dashNames) peer(id string) string {
+	if name, ok := n.peers[id]; ok && name != "" {
+		return name
+	}
+	return dashShort(id)
+}
+
+// thread is a thread's title, or who else is in it.
+func (n dashNames) thread(row opapi.ThreadRow, me string) string {
+	if t := row.Thread.Title; t != nil && Clean(*t) != "" {
+		return Clean(*t)
+	}
+	var others []string
+	for _, id := range row.Thread.Participants {
+		if id != me {
+			others = append(others, n.peer(id))
+		}
+	}
+	if len(others) > 0 {
+		return strings.Join(others, ", ")
+	}
+	return dashShort(row.Thread.ThreadID)
+}
+
+func (n dashNames) threadByID(id string) string {
+	if name, ok := n.threads[id]; ok {
+		return name
+	}
+	return dashShort(id)
+}
+
+// View is the peer table above three panes. It never shows a pane's failure in
+// another: each resource keeps its own error and its last good data.
+func (d *dashScreen) View(m *Model, w, h int) string {
+	names := newDashNames(m)
+	top, topH := d.viewPeers(m, w, h)
+	bottomH := h - topH
+	threadsW, healthW, auditW := (w+2)/3, (w+1)/3, w/3
+	return top + "\n" + lipgloss.JoinHorizontal(lipgloss.Top,
+		d.viewThreads(m, names, threadsW, bottomH),
+		viewDashHealth(m, names, healthW, bottomH),
+		viewDashAudit(m, names, auditW, bottomH),
+	)
+}
+
+// dashTitle tags a pane title while one of its resources is loading.
+func dashTitle(m *Model, title string, keys ...string) string {
+	if slices.ContainsFunc(keys, func(key string) bool { return m.inflight[key] }) {
+		return title + " · loading"
+	}
+	return title
+}
+
+// dashFailure is a pane's error in at most limit lines, then, if that is its
+// full room, a label over the old data it kept.
+func dashFailure(label string, err error, w, limit int, kept bool) []string {
+	if err == nil {
+		return nil
+	}
+	text := label + " load failed: " + Clean(err.Error())
+	if limit == 1 { // a wrap could end before the word failed
+		return []string{styleBad.Render(ansi.Truncate(text, w, "…"))}
+	}
+	wrapped := strings.Split(ansi.Wrap(text, w, " "), "\n")
+	var lines []string
+	for _, line := range wrapped[:min(len(wrapped), limit)] {
+		lines = append(lines, styleBad.Render(line))
+	}
+	if kept && limit == dashErrLines {
+		lines = append(lines, styleMuted.Render("last good data:"))
+	}
+	return lines
+}
+
+// dashPad makes clean plain text exactly w cells.
+func dashPad(s string, w int) string {
+	if lipgloss.Width(s) > w {
+		s = ansi.Truncate(s, w, "…")
+	}
+	return s + strings.Repeat(" ", max(w-lipgloss.Width(s), 0))
+}
+
+// dashRowPaint styles one row: the cursor's background, or a disabled peer's dim.
+type dashRowPaint struct{ cursor, dim bool }
+
+func (p dashRowPaint) style(s lipgloss.Style) lipgloss.Style {
+	if p.dim {
+		s = styleMuted
+	}
+	if p.cursor {
+		s = s.Background(colorDashCursor)
+	}
+	return s
+}
+
+func (p dashRowPaint) cell(s lipgloss.Style, text string, w int) string {
+	return p.style(s).Render(dashPad(text, w))
+}
+
+func (p dashRowPaint) gutter() string {
+	if p.cursor {
+		return p.style(styleAccent).Render(dashPad(">", dashGutter))
+	}
+	return strings.Repeat(" ", dashGutter)
+}
+
+// dashWindow is the first visible index of n rows in a window of size, holding
+// the cursor in view.
+func dashWindow(cursor, n, size int) int {
+	return max(min(cursor-size/2, n-size), 0)
+}
+
+// dashCol is one peer-table column; cell returns exactly w cells.
+type dashCol struct {
+	title string
+	width int
+	cell  func(m *Model, r opapi.PeerRow, p dashRowPaint, w int) string
+}
+
+// dashPeerCols lists the columns left to right. dashDropOrder is the fixed order
+// they leave in as the table narrows: PEER, PRESENCE and REACH always stay,
+// because presence and reachability are the two signals this table exists for.
+var (
+	dashPeerCols = []dashCol{
+		{"PEER", 18, dashCellPeer},
+		{"KIND", 12, dashCellKind},
+		{"PRESENCE", 9, dashCellPresence},
+		{"REACH", 12, dashCellReach},
+		{"QUOTA", 20, dashCellQuota},
+		{"LOCATION", 14, dashCellLocation},
+		{"LAST SEEN", 9, dashCellSeen},
+		{"CAPS", dashCapsMin, dashCellCaps},
+	}
+	dashDropOrder = []string{"CAPS", "LOCATION", "KIND", "LAST SEEN", "QUOTA"}
+)
+
+func dashColsWidth(cols []dashCol) int {
+	width := dashGutter + len(cols) - 1
+	for _, c := range cols {
+		width += c.width
+	}
+	return width
+}
+
+// dashColsFor drops columns until the table fits inner cells, then hands the
+// slack to CAPS if it survived, else to PEER, the first column.
+func dashColsFor(inner int) []dashCol {
+	cols := slices.Clone(dashPeerCols)
+	for _, drop := range dashDropOrder {
+		if dashColsWidth(cols) <= inner {
+			break
+		}
+		cols = slices.DeleteFunc(cols, func(c dashCol) bool { return c.title == drop })
+	}
+	wide := 0
+	if last := len(cols) - 1; cols[last].title == "CAPS" {
+		wide = last
+	}
+	cols[wide].width += max(inner-dashColsWidth(cols), 0)
+	return cols
+}
+
+func dashCellPeer(_ *Model, r opapi.PeerRow, p dashRowPaint, w int) string {
+	style, ok := styleDashKinds[r.Peer.Kind]
+	if !ok {
+		style = styleText
+	}
+	tag := ""
+	switch {
+	case r.Disabled:
+		tag = "disabled"
+	case r.Credential == "revoked":
+		tag = "revoked"
+	}
+	if tag == "" {
+		return p.cell(style, Clean(r.Peer.Name), w)
+	}
+	room := max(w-len(tag)-1, 0)
+	return p.cell(style, dashPad(Clean(r.Peer.Name), room)+" "+tag, w)
+}
+
+func dashCellKind(_ *Model, r opapi.PeerRow, p dashRowPaint, w int) string {
+	return p.cell(styleMuted, Clean(r.Peer.Kind), w)
+}
+
+// dashCellPresence shows what the hub reports and invents nothing: an unknown
+// presence reads unknown, never offline (PROTOCOL §8).
+func dashCellPresence(_ *Model, r opapi.PeerRow, p dashRowPaint, w int) string {
+	presence := Clean(r.Peer.Presence)
+	if presence == "" {
+		presence = "unknown"
+	}
+	style := styleMuted
+	switch presence {
+	case "working":
+		style = styleWarn
+	case "idle":
+		style = styleGood
+	case "blocked":
+		style = styleBad
+	}
+	if r.Peer.Kind == "source" { // a source only pushes in; it reports no state
+		presence, style = "n/a", styleMuted
+	}
+	return p.cell(style, presence, w)
+}
+
+func dashCellReach(_ *Model, r opapi.PeerRow, p dashRowPaint, w int) string {
+	reach := Clean(r.Peer.Reachability)
+	if reach == "" {
+		reach = "unknown"
+	}
+	style := styleMuted
+	switch reach {
+	case "connected":
+		style = styleDashConnected
+	case "reachable":
+		style = styleDashReachable
+	case "unreachable":
+		style = styleBad
+	}
+	return p.cell(style, reach, w)
+}
+
+// dashCellQuota follows format.js quotaLabel: a *_pct value reads 61%, here
+// beside a bar; an empty quota reads none; anything else is compact k=v.
+func dashCellQuota(_ *Model, r opapi.PeerRow, p dashRowPaint, w int) string {
+	key, pct, ok := dashQuotaPct(r.Peer.Quota)
+	if !ok {
+		if len(r.Peer.Quota) == 0 {
+			return p.cell(styleMuted, "none", w)
+		}
+		return p.cell(styleText, dashCompact(r.Peer.Quota), w)
+	}
+	style := styleText
+	if strings.Contains(key, "remaining") {
+		switch {
+		case pct < dashLowPct:
+			style = styleBad
+		case pct < dashWarnPct:
+			style = styleWarn
+		default:
+			style = styleGood
+		}
+	}
+	cells := int(min(max(pct, 0), 100)*dashBarCells/100 + 0.5)
+	bar := "[" + strings.Repeat("|", cells) + strings.Repeat(" ", dashBarCells-cells) + "]"
+	return p.cell(style, fmt.Sprintf("%s %3.0f%%", bar, pct), w)
+}
+
+// dashQuotaPct finds the quota's percentage: the standard key if it is a number
+// (PROTOCOL §2.6), else the first *_pct key that is.
+func dashQuotaPct(quota map[string]any) (string, float64, bool) {
+	const standard = "weekly_remaining_pct"
+	keys := slices.Sorted(maps.Keys(quota))
+	for _, key := range append([]string{standard}, keys...) {
+		if v, ok := quota[key].(float64); ok && strings.HasSuffix(key, "_pct") {
+			return key, v, true
+		}
+	}
+	return "", 0, false
+}
+
+// dashCompact is a free-form object as sorted k=v pairs.
+func dashCompact(values map[string]any) string {
+	pairs := make([]string, 0, len(values))
+	for _, key := range slices.Sorted(maps.Keys(values)) {
+		value, ok := values[key].(string)
+		if !ok {
+			raw, err := json.Marshal(values[key])
+			if err != nil {
+				continue
+			}
+			value = string(raw)
+		}
+		pairs = append(pairs, Clean(key)+"="+Clean(value))
+	}
+	return strings.Join(pairs, " ")
+}
+
+func dashCellLocation(_ *Model, r opapi.PeerRow, p dashRowPaint, w int) string {
+	location := "-"
+	if r.Peer.Location != nil && *r.Peer.Location != "" {
+		location = Clean(*r.Peer.Location)
+	}
+	return p.cell(styleMuted, location, w)
+}
+
+func dashCellSeen(m *Model, r opapi.PeerRow, p dashRowPaint, w int) string {
+	seen := "-"
+	if r.Peer.LastSeen != nil {
+		if age := dashAge(m, *r.Peer.LastSeen); age != "" {
+			seen = age + " ago"
+		}
+	}
+	return p.cell(styleMuted, seen, w)
+}
+
+func dashCellCaps(_ *Model, r opapi.PeerRow, p dashRowPaint, w int) string {
+	caps := make([]string, 0, len(r.Peer.Capabilities))
+	for _, c := range r.Peer.Capabilities {
+		caps = append(caps, Clean(c))
+	}
+	return p.cell(styleMuted, strings.Join(caps, ","), w)
+}
+
+// dashAge is how long ago ts was on the hub's clock, empty if it does not parse.
+func dashAge(m *Model, ts string) string {
+	t, err := envelope.ParseTime(ts)
+	if err != nil {
+		return ""
+	}
+	return dashSpan(m.HubNow().Sub(t))
+}
+
+// dashSpan is a duration in its largest whole unit. A negative one is 0s.
+func dashSpan(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(max(d, 0).Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+// dashShort is prefix_…last4 for a long id, such as dly_…3A5C.
+func dashShort(id string) string {
+	const keep = 4
+	clean := []rune(Clean(id))
+	cut := slices.Index(clean, '_')
+	if cut < 0 || len(clean) <= cut+2*keep+1 {
+		return string(clean)
+	}
+	return string(clean[:cut+1]) + "…" + string(clean[len(clean)-keep:])
+}
+
+// viewPeers returns the peer pane and its height: its rows, up to three fifths
+// of the body, so the panes below keep their room on a large hub.
+func (d *dashScreen) viewPeers(m *Model, w, h int) (string, int) {
+	inner := w - 2
+	peers := m.Data.Peers
+	failure := dashFailure("peers", m.Data.Errs["peers"], inner, dashErrLines, len(peers) > 0)
+	height := min(len(failure)+1+max(len(peers), 1)+2, h*3/5)
+	title := dashTitle(m, fmt.Sprintf("peers · %d", len(peers)), "peers") + " · presence is self-reported, reach is hub-observed"
+	lines := slices.Clone(failure)
+	switch {
+	case len(peers) > 0:
+		cols := dashColsFor(inner)
+		lines = append(lines, dashPeerHeader(cols))
+		size := max(height-2-len(lines), 1)
+		cursor := d.peerIndex(m)
+		start := dashWindow(cursor, len(peers), size)
+		for i := start; i < min(start+size, len(peers)); i++ {
+			lines = append(lines, dashPeerLine(m, cols, peers[i], i == cursor))
+		}
+	case failure == nil:
+		lines = append(lines, styleMuted.Render("no peers"))
+	}
+	return Pane(title, w, height, d.focus == dashOnPeers, strings.Join(lines, "\n")), height
+}
+
+func dashPeerHeader(cols []dashCol) string {
+	cells := make([]string, 0, len(cols))
+	for _, c := range cols {
+		cells = append(cells, dashPad(c.title, c.width))
+	}
+	return styleDashHead.Render(strings.Repeat(" ", dashGutter) + strings.Join(cells, " "))
+}
+
+func dashPeerLine(m *Model, cols []dashCol, row opapi.PeerRow, cursor bool) string {
+	paint := dashRowPaint{cursor: cursor, dim: row.Disabled}
+	var line strings.Builder
+	line.WriteString(paint.gutter())
+	for i, c := range cols {
+		if i > 0 {
+			line.WriteString(paint.cell(styleMuted, " ", 1))
+		}
+		line.WriteString(c.cell(m, row, paint, c.width))
+	}
+	return line.String()
+}
+
+func (d *dashScreen) viewThreads(m *Model, names dashNames, w, h int) string {
+	inner := w - 2
+	label, loading, err, done := "threads", m.inflight["threads"], m.Data.Errs["threads"], true
+	if n := d.narrow; n != nil {
+		label += " · " + names.peer(n.peer)
+		loading, err, done = n.busy, n.err, n.done
+	}
+	page := d.threadPage(m)
+	rows := page.Threads
+	failure := dashFailure("threads", err, inner, dashErrLines, len(rows) > 0)
+	title := label + " · " + fmt.Sprint(len(rows))
+	if page.Next != nil {
+		title += "+"
+	}
+	if loading {
+		title = label + " · loading"
+	}
+	lines := slices.Clone(failure)
+	switch {
+	case len(rows) > 0:
+		size := max(h-2-len(lines), 1)
+		cursor := d.threadIndex(rows)
+		start := dashWindow(cursor, len(rows), size)
+		for i := start; i < min(start+size, len(rows)); i++ {
+			lines = append(lines, d.threadLine(m, names, rows[i], inner, d.focus == dashOnThreads && i == cursor))
+		}
+	case !done && failure == nil:
+		lines = append(lines, styleMuted.Render("loading threads for "+names.peer(d.narrow.peer)))
+	case failure == nil:
+		lines = append(lines, styleMuted.Render("no threads"))
+	}
+	return Pane(title, w, h, d.focus == dashOnThreads, strings.Join(lines, "\n"))
+}
+
+// threadLine is title, age and budget; the age leaves first as the pane narrows.
+func (d *dashScreen) threadLine(m *Model, names dashNames, row opapi.ThreadRow, inner int, cursor bool) string {
+	const ageCells, stateCells = 4, 7
+	paint := dashRowPaint{cursor: cursor}
+	state, style := "-", styleMuted
+	if b := row.Thread.BudgetRemaining; b != nil {
+		state, style = fmt.Sprint(*b), styleGood
+		if *b == 0 {
+			style = styleBad
+		}
+	}
+	if row.Cut != nil {
+		state, style = "cut "+state, styleBad
+	}
+	gap := paint.cell(styleMuted, " ", 1)
+	title := inner - dashGutter - stateCells - 1
+	age := ""
+	if inner >= dashWidePane {
+		title -= ageCells + 1
+		age = paint.cell(styleMuted, dashAge(m, row.LastMessageAt), ageCells) + gap
+	}
+	return paint.gutter() + paint.cell(styleText, names.thread(row, m.Data.Inbox.Me.PeerID), title) + gap + age + paint.cell(style, state, stateCells)
+}
+
+// viewDashHealth holds three resources, so a failure here competes with the
+// others' data. Failures share half of this pane, and dashStack keeps them and
+// the loop-cut total, so each still shows on the smallest screen.
+func viewDashHealth(m *Model, names dashNames, w, h int) string {
+	inner, rows := w-2, h-2
+	cuts, counters := m.Data.Cuts, m.Data.Counters
+	cutsErr, countersErr := m.Data.Errs["cuts"], m.Data.Errs["counters"]
+	limit := dashErrLines
+	if n := dashFailed(m.Data.Errs["health"], cutsErr, countersErr); n > 0 {
+		limit = min(limit, max(rows/2/n, 1))
+	}
+	head := dashHealthLines(m, names, inner, limit)
+	cutsFailure := dashFailure("loop cuts", cutsErr, inner, limit, len(cuts.ByReason) > 0)
+	countersFailure := dashFailure("counters", countersErr, inner, limit, len(counters) > 0)
+	cutLines, counterLines := dashCutLines(m, inner), dashCounterLines(m, inner)
+	tail := slices.Concat(cutsFailure, cutLines, []string{""}, countersFailure, counterLines)
+	if len(head)+1+len(tail) > rows {
+		tail = slices.Concat(cutsFailure, countersFailure, cutLines, []string{""}, counterLines)
+	}
+	title := dashTitle(m, "delivery health", "health", "cuts", "counters")
+	keep := len(cutsFailure) + len(countersFailure) + 1
+	return Pane(title, w, h, false, strings.Join(dashStack(head, tail, keep, rows), "\n"))
+}
+
+func dashFailed(errs ...error) int {
+	n := 0
+	for _, err := range errs {
+		if err != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// dashStack fits head above tail in h lines, keeping tail's first keep lines. A
+// long head gives way first, so a hub with many blocked threads still shows its
+// loop cuts.
+func dashStack(head, tail []string, keep, h int) []string {
+	if len(head)+1+len(tail) <= h {
+		return append(append(head, ""), tail...)
+	}
+	tail = tail[:min(len(tail), max(h/2, keep, 1))]
+	room := max(h-len(tail)-1, 1)
+	if len(head) > room {
+		hidden := len(head) - room + 1
+		head = append(head[:room-1], styleMuted.Render(fmt.Sprintf("+%d more lines", hidden)))
+	}
+	return append(append(head, ""), tail...)
+}
+
+// dashHealthLines is delivery health. A blocked thread names its peer: per-peer
+// serialisation can hold one thread for hours while others flow (PROTOCOL §16.4).
+func dashHealthLines(m *Model, names dashNames, inner, limit int) []string {
+	health := m.Data.Health
+	kept := len(health.Blocked)+len(health.Failed) > 0
+	lines := dashFailure("delivery health", m.Data.Errs["health"], inner, limit, kept)
+	if !kept && lines == nil {
+		return []string{styleMuted.Render("no blocked or failed deliveries")}
+	}
+	lead := "thread blocked on delivery "
+	if inner < dashWidePane {
+		lead = "blocked on "
+	}
+	for _, b := range health.Blocked {
+		lines = append(lines,
+			styleText.Render(names.peer(b.Recipient)+" · "+names.threadByID(b.ThreadID)),
+			styleWarn.Render("  "+lead+dashShort(b.DeliveryID)),
+			styleMuted.Render("  "+dashBlockedNote(m, b)),
+		)
+	}
+	for _, f := range health.Failed {
+		status, reason := "---", names.threadByID(f.ThreadID)
+		if f.LastStatus != nil {
+			status = fmt.Sprint(*f.LastStatus)
+		}
+		if f.LastError != nil && *f.LastError != "" {
+			reason = Clean(*f.LastError)
+		}
+		lines = append(lines, styleBad.Render(status)+" "+styleText.Render(names.peer(f.Recipient))+" "+styleMuted.Render(reason))
+	}
+	return lines
+}
+
+func dashBlockedNote(m *Model, b opapi.BlockedThread) string {
+	note := []string{fmt.Sprintf("attempt %d", b.Attempt), fmt.Sprintf("%d waiting", b.Waiting)}
+	if b.NextAttemptAt != nil {
+		if t, err := envelope.ParseTime(*b.NextAttemptAt); err == nil {
+			note = append(note, "next "+dashSpan(t.Sub(m.HubNow())))
+		}
+	}
+	if b.LastStatus != nil {
+		note = append(note, fmt.Sprint(*b.LastStatus))
+	}
+	return strings.Join(note, " · ")
+}
+
+// dashCutLines is the loop-cut total, then its reasons by count.
+func dashCutLines(m *Model, inner int) []string {
+	cuts := m.Data.Cuts
+	hours := cuts.Hours
+	if hours == 0 {
+		hours = 24
+	}
+	total := styleMuted.Render(fmt.Sprintf("loop cuts / %dh: ", hours)) + styleAccent.Render(fmt.Sprint(cuts.Total))
+	return append([]string{total}, dashCounts(cuts.ByReason, inner)...)
+}
+
+func dashCounterLines(m *Model, inner int) []string {
+	if len(m.Data.Counters) == 0 {
+		return nil
+	}
+	return append([]string{styleMuted.Render("counters")}, dashCounts(m.Data.Counters, inner)...)
+}
+
+// dashCounts is one line per key, highest count first, then by name.
+func dashCounts(counts map[string]int, inner int) []string {
+	const indent, countCells = "  ", 5
+	nameCells := min(25, inner-len(indent)-countCells)
+	keys := slices.SortedFunc(maps.Keys(counts), func(a, b string) int {
+		if counts[a] != counts[b] {
+			return counts[b] - counts[a]
+		}
+		return strings.Compare(a, b)
+	})
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, styleMuted.Render(indent+dashPad(Clean(key), nameCells))+" "+styleText.Render(fmt.Sprint(counts[key])))
+	}
+	return lines
+}
+
+func viewDashAudit(m *Model, names dashNames, w, h int) string {
+	inner := w - 2
+	entries := m.Data.Audit.Entries
+	lines := dashFailure("audit tail", m.Data.Errs["audit"], inner, dashErrLines, len(entries) > 0)
+	if len(entries) == 0 && lines == nil {
+		lines = []string{styleMuted.Render("no audit entries")}
+	}
+	for _, entry := range entries {
+		lines = append(lines, dashAuditLine(m, names, entry, inner))
+	}
+	return Pane(dashTitle(m, "audit tail -f", "audit"), w, h, false, strings.Join(lines, "\n"))
+}
+
+// dashAuditLine is time, action, then who and on what; that last column leaves
+// first as the pane narrows.
+func dashAuditLine(m *Model, names dashNames, e opapi.AuditEntry, inner int) string {
+	const clockCells, actionCells = 8, 18
+	clock := Clean(e.At)
+	if t, err := envelope.ParseTime(e.At); err == nil {
+		clock = t.In(m.loc).Format("15:04:05")
+	}
+	line := styleMuted.Render(dashPad(clock, clockCells)) + " "
+	if inner < dashWidePane {
+		return line + styleDashConnected.Render(dashPad(Clean(e.Action), inner-clockCells-1))
+	}
+	actor := names.peer(e.Actor)
+	rest := make([]string, 0, len(e.Targets)+1)
+	for _, target := range e.Targets {
+		rest = append(rest, names.peer(target))
+	}
+	if detail := dashCompact(e.Detail); detail != "" {
+		rest = append(rest, detail)
+	}
+	room := inner - clockCells - 1 - actionCells - 1
+	actor = dashPad(actor, min(lipgloss.Width(actor), room))
+	line += styleDashConnected.Render(dashPad(Clean(e.Action), actionCells)) + " " + styleText.Render(actor)
+	if left := room - lipgloss.Width(actor) - 1; left > 0 {
+		line += " " + styleMuted.Render(dashPad(strings.Join(rest, " "), left))
+	}
+	return line
+}
