@@ -29,7 +29,10 @@ const (
 	dedupeWindow      = 1024
 	maxSSELine        = 4 << 20
 	monitorTextRunes  = 120
+	peerNameRunes     = 32
 )
+
+const inboxHeader = "CURSOR TYPE THREAD FROM MSG DELIVERY TEXT"
 
 // --- event lines ---
 
@@ -119,25 +122,39 @@ func dash(s string) string {
 	return s
 }
 
+// peerName makes an untrusted display name safe for one output column.
+func peerName(name string) string {
+	return firstRunes(strings.ReplaceAll(flatten(name), " ", "_"), peerNameRunes)
+}
+
 // monitorLine is the `watch --for-monitor` line (PROTOCOL §13.7):
-// "<cursor> <type> <thread_id> <sender> <first 120 chars>".
-func monitorLine(ev envelope.Event) string {
+// "<cursor> <type> <thread_id> <sender> <text>", with an optional name
+// prefix in text. The prefix and text together are capped at 120 runes.
+func monitorLine(ev envelope.Event, names map[string]string) string {
 	f := eventFieldsOf(ev)
-	text := firstRunes(flatten(f.text), monitorTextRunes)
+	text := flatten(f.text)
+	if name := names[f.sender]; name != "" {
+		text = peerName(name) + ": " + text
+	}
+	text = firstRunes(text, monitorTextRunes)
 	return strings.TrimRight(fmt.Sprintf("%s %s %s %s %s", ev.Cursor, ev.Type, dash(f.thread), dash(f.sender), text), " ")
 }
 
 // inboxLine is the human line of `inbox` and plain `watch`:
-// "<cursor> <type> <thread_id> <sender> <message_id> <delivery_id> <text>",
-// with the whole text on one line.
-func inboxLine(ev envelope.Event) string {
+// "<cursor> <type> <thread_id> <from> <message_id> <delivery_id> <text>",
+// with from rendered as name(peer_id) when known and text on one line.
+func inboxLine(ev envelope.Event, names map[string]string) string {
 	f := eventFieldsOf(ev)
+	from := f.sender
+	if name := names[f.sender]; name != "" {
+		from = peerName(name) + "(" + f.sender + ")"
+	}
 	text := flatten(f.text)
 	if f.attachments > 0 {
 		text += fmt.Sprintf(" [+%d attachment(s)]", f.attachments)
 	}
-	return strings.TrimRight(fmt.Sprintf("%s %s %s %s %s %s %s", ev.Cursor, ev.Type, dash(f.thread), dash(f.sender),
-		dash(f.messageID), dash(f.deliveryID), text), " ")
+	return fmt.Sprintf("%s %s %s %s %s %s %s", ev.Cursor, ev.Type, dash(f.thread), dash(from),
+		dash(f.messageID), dash(f.deliveryID), dash(text))
 }
 
 // --- watch ---
@@ -158,6 +175,7 @@ func (a *app) cmdWatch(args []string) error {
 	}
 	w := &watcher{
 		a: a, c: c, ch: ch,
+		names:      ch.peerNames(),
 		forMonitor: o.has("for-monitor"), autoAck: o.has("auto-ack"), deliveriesOnly: o.has("deliveries-only"),
 		retry: watchDefaultRetry, seen: newDedupe(dedupeWindow),
 	}
@@ -170,9 +188,10 @@ func (a *app) cmdWatch(args []string) error {
 // watcher holds one `watch` session: an SSE stream that reconnects per
 // PROTOCOL §13.1, falling back to long-poll after repeated SSE failures.
 type watcher struct {
-	a  *app
-	c  *client
-	ch cache
+	a     *app
+	c     *client
+	ch    cache
+	names map[string]string
 
 	forMonitor, autoAck, deliveriesOnly bool
 
@@ -204,6 +223,10 @@ func terminal(err error) bool {
 
 func (w *watcher) run() error {
 	ctx := w.a.ctx
+	if !w.forMonitor && !w.a.json {
+		fmt.Fprintln(w.a.stdout, inboxHeader)
+	}
+	w.refreshNames()
 	failures, purges := 0, 0
 	for {
 		if ctx.Err() != nil {
@@ -240,6 +263,32 @@ func (w *watcher) run() error {
 			if !sleepCtx(ctx, w.backoff(failures)) {
 				return nil
 			}
+		}
+	}
+}
+
+// refreshNames keeps the previous directory if fetching or decoding fails.
+// Display names are optional: a directory outage must never end the watch.
+func (w *watcher) refreshNames() {
+	var body struct {
+		Peers []struct {
+			PeerID string `json:"peer_id"`
+			Name   string `json:"name"`
+		} `json:"peers"`
+	}
+	if err := w.c.do(w.a.ctx, http.MethodGet, "/v1/peers", nil, nil, &body); err != nil {
+		return
+	}
+	names := make(map[string]string, len(body.Peers))
+	for _, p := range body.Peers {
+		if p.PeerID != "" {
+			names[p.PeerID] = peerName(p.Name)
+		}
+	}
+	w.names = names
+	if w.ch.dir != "" {
+		if err := w.ch.writeJSON("peers.json", names); err != nil {
+			w.a.warn("could not cache peer names: %v", err)
 		}
 	}
 }
@@ -440,6 +489,9 @@ func (w *watcher) handle(evType, data string) {
 	if ev.Type == "" {
 		ev.Type = evType
 	}
+	if ev.Type == "directory_updated" {
+		w.refreshNames()
+	}
 	if w.autoAck && ev.Cursor != "" {
 		w.pendingAck = ev.Cursor
 	}
@@ -459,9 +511,9 @@ func (w *watcher) handle(evType, data string) {
 			w.a.stdout.Write(append(raw, '\n'))
 		}
 	case w.forMonitor:
-		fmt.Fprintln(w.a.stdout, monitorLine(ev))
+		fmt.Fprintln(w.a.stdout, monitorLine(ev, w.names))
 	default:
-		fmt.Fprintln(w.a.stdout, inboxLine(ev))
+		fmt.Fprintln(w.a.stdout, inboxLine(ev, w.names))
 	}
 }
 

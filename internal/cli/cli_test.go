@@ -243,21 +243,21 @@ func TestSendInboxAckRoundTrip(t *testing.T) {
 	}
 
 	lines := nonEmptyLines(b.mustRun("inbox"))
-	if len(lines) != 1 {
-		t.Fatalf("inbox lines = %q, want 1", lines)
+	if len(lines) != 2 || lines[0] != "CURSOR TYPE THREAD FROM MSG DELIVERY TEXT" {
+		t.Fatalf("inbox lines = %q, want header and one event", lines)
 	}
 	for _, want := range []string{sent.ThreadID, aID, sent.MessageID, "hello B"} {
-		if !strings.Contains(lines[0], want) {
-			t.Fatalf("inbox line %q lacks %q", lines[0], want)
+		if !strings.Contains(lines[1], want) {
+			t.Fatalf("inbox line %q lacks %q", lines[1], want)
 		}
 	}
 	// Reading is not acking: the inbox shows the same event again.
-	if again := nonEmptyLines(b.mustRun("inbox")); len(again) != 1 || again[0] != lines[0] {
-		t.Fatalf("second inbox = %q, want %q", again, lines[0])
+	if again := nonEmptyLines(b.mustRun("inbox")); len(again) != 2 || again[1] != lines[1] {
+		t.Fatalf("second inbox = %q, want %q", again, lines)
 	}
 
 	ackOut := nonEmptyLines(b.mustRun("inbox", "--ack"))
-	if len(ackOut) != 1 || ackOut[0] != lines[0] {
+	if len(ackOut) != 2 || ackOut[1] != lines[1] {
 		t.Fatalf("inbox --ack = %q, want the same line", ackOut)
 	}
 	var state string
@@ -267,8 +267,8 @@ func TestSendInboxAckRoundTrip(t *testing.T) {
 	if state != "accepted" {
 		t.Fatalf("delivery state after inbox --ack = %q, want accepted", state)
 	}
-	if out := b.mustRun("inbox"); strings.TrimSpace(out) != "" {
-		t.Fatalf("inbox after ack = %q, want empty", out)
+	if out := b.mustRun("inbox"); strings.TrimSpace(out) != "CURSOR TYPE THREAD FROM MSG DELIVERY TEXT" {
+		t.Fatalf("inbox after ack = %q, want header only", out)
 	}
 	// The ack reached the hub: A got the accepted receipt.
 	var receipt bool
@@ -392,20 +392,20 @@ func TestWatchForMonitor(t *testing.T) {
 	}()
 
 	sent := b.send(aID, "hello watcher", "--wake")
-	re := regexp.MustCompile(`^e\d+\.\d+ delivery ` + regexp.QuoteMeta(sent.ThreadID) + ` ` + regexp.QuoteMeta(bID) + ` hello watcher$`)
+	re := regexp.MustCompile(`^e\d+\.\d+ delivery ` + regexp.QuoteMeta(sent.ThreadID) + ` ` + regexp.QuoteMeta(bID) + ` B: hello watcher$`)
 	waitLine(t, &out, re, 10*time.Second)
 
 	// Text is cut to its first 120 characters and kept on one line.
 	long := strings.Repeat("é", 100) + "\n" + strings.Repeat("x", 100)
 	sent2 := b.send(aID, long, "--wake")
-	want := strings.Repeat("é", 100) + " " + strings.Repeat("x", 19)
+	want := "B: " + strings.Repeat("é", 100) + " " + strings.Repeat("x", 16)
 	re2 := regexp.MustCompile(`^e\d+\.\d+ delivery ` + regexp.QuoteMeta(sent2.ThreadID) + ` ` + regexp.QuoteMeta(bID) + ` ` + regexp.QuoteMeta(want) + `$`)
 	waitLine(t, &out, re2, 10*time.Second)
 
 	// A receipt for A's own message is printed too; the agent decides.
 	mine := a.send(bID, "for B", "--hold")
 	b.mustRun("inbox", "--ack")
-	re3 := regexp.MustCompile(`^e\d+\.\d+ receipt ` + regexp.QuoteMeta(mine.ThreadID) + ` ` + regexp.QuoteMeta(bID) + ` accepted$`)
+	re3 := regexp.MustCompile(`^e\d+\.\d+ receipt ` + regexp.QuoteMeta(mine.ThreadID) + ` ` + regexp.QuoteMeta(bID) + ` B: accepted$`)
 	waitLine(t, &out, re3, 10*time.Second)
 
 	cancel()
@@ -439,13 +439,13 @@ func TestFreshCacheUsesHubAckedCursor(t *testing.T) {
 	b := profileUser(t, env.URL, bSec)
 
 	a.send(bID, "one", "--hold")
-	if lines := nonEmptyLines(b.mustRun("inbox", "--ack")); len(lines) != 1 {
-		t.Fatalf("inbox --ack = %q, want one line", lines)
+	if lines := nonEmptyLines(b.mustRun("inbox", "--ack")); len(lines) != 2 {
+		t.Fatalf("inbox --ack = %q, want header and one event", lines)
 	}
 
 	b2 := profileUser(t, env.URL, bSec) // same peer, another machine
-	if out := b2.mustRun("inbox"); strings.TrimSpace(out) != "" {
-		t.Fatalf("fresh-cache inbox after an ack elsewhere = %q, want empty", out)
+	if out := b2.mustRun("inbox"); strings.TrimSpace(out) != "CURSOR TYPE THREAD FROM MSG DELIVERY TEXT" {
+		t.Fatalf("fresh-cache inbox after an ack elsewhere = %q, want header only", out)
 	}
 
 	// watch on a fresh cache resumes at the hub's acked cursor too: the
@@ -459,7 +459,7 @@ func TestFreshCacheUsesHubAckedCursor(t *testing.T) {
 		done <- cli.RunContext(ctx, []string{"watch", "--for-monitor"}, strings.NewReader(""), &out, &errb, b3.getenv)
 	}()
 	sent := a.send(bID, "two", "--wake")
-	re := regexp.MustCompile(`^e\d+\.\d+ delivery ` + regexp.QuoteMeta(sent.ThreadID) + ` ` + regexp.QuoteMeta(aID) + ` two$`)
+	re := regexp.MustCompile(`^e\d+\.\d+ delivery ` + regexp.QuoteMeta(sent.ThreadID) + ` ` + regexp.QuoteMeta(aID) + ` A: two$`)
 	waitLine(t, &out, re, 10*time.Second)
 	cancel()
 	select {
@@ -641,8 +641,8 @@ func TestInboxStripsTerminalControls(t *testing.T) {
 			t.Fatalf("inbox output %q carries control %q", out, bad)
 		}
 	}
-	if lines := nonEmptyLines(out); len(lines) != 1 || !strings.Contains(lines[0], "there") {
-		t.Fatalf("inbox lines = %q, want one line with the text", lines)
+	if lines := nonEmptyLines(out); len(lines) != 2 || !strings.Contains(lines[1], "there") {
+		t.Fatalf("inbox lines = %q, want header and one event with the text", lines)
 	}
 }
 
@@ -655,8 +655,8 @@ func TestDoubleDashSendsFlagLikeText(t *testing.T) {
 	a := profileUser(t, env.URL, aSec)
 	b := profileUser(t, env.URL, bSec)
 	a.send(bID, "--hold", "--", "-h")
-	if lines := nonEmptyLines(b.mustRun("inbox")); len(lines) != 1 || !strings.HasSuffix(lines[0], "-h") {
-		t.Fatalf("inbox = %q, want one message whose text is -h", lines)
+	if lines := nonEmptyLines(b.mustRun("inbox")); len(lines) != 2 || !strings.HasSuffix(lines[1], "-h") {
+		t.Fatalf("inbox = %q, want header and one message whose text is -h", lines)
 	}
 }
 

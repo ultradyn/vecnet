@@ -47,10 +47,13 @@ const usageText = `usage: vecnet [--net PROFILE] [--as PEER_ID] [--json] <comman
 messaging:
   send <recipient…> "text" (--wake|--wake-idle|--hold) [--thread ID] [--reply-to MSG]
        [--attach FILE]… [--title T] [--idempotency-key K]       text "-" reads stdin
+       recipients are peer ids (or group/team ids); names are refused
   reply <message_id> "text" (--wake|--wake-idle|--hold) [--thread ID] [--attach FILE]…
   inbox [--since CURSOR] [--ack] [--limit N]
   ack <cursor>
   watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]
+       does not ack; use --auto-ack or vecnet ack <cursor> to avoid replaying
+       the log after a restart
   threads [--limit N]
   thread <id> [--after MESSAGE_ID] [--limit N]
   peers
@@ -732,8 +735,10 @@ func (a *app) cmdInbox(args []string) error {
 			return err
 		}
 	} else {
+		fmt.Fprintln(a.stdout, inboxHeader)
+		names := ch.peerNames()
 		for _, ev := range evs {
-			fmt.Fprintln(a.stdout, inboxLine(ev))
+			fmt.Fprintln(a.stdout, inboxLine(ev, names))
 		}
 	}
 	if o.has("ack") && len(evs) > 0 {

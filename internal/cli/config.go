@@ -141,7 +141,8 @@ func writeFileAtomic(path string, data []byte) error {
 
 // cache is the CLI's local state under the cache dir: messages.json maps
 // message_id → thread_id (filled from inbox, watch and thread output, read
-// by reply). No cursor is cached: the durable cursor is the hub's acked
+// by reply). peers.json maps peer_id → display name (filled by watch,
+// read by inbox). No cursor is cached: the durable cursor is the hub's acked
 // cursor, shared by every consumer of a stream (PROTOCOL §2.3).
 type cache struct {
 	dir string // "" disables the cache
@@ -175,6 +176,15 @@ func (c cache) writeJSON(name string, m map[string]string) error {
 		return err
 	}
 	return writeFileAtomic(filepath.Join(c.dir, name), raw)
+}
+
+// peerNames reads the last known directory, sanitizing cached values too.
+func (c cache) peerNames() map[string]string {
+	names := c.readJSON("peers.json")
+	for id, name := range names {
+		names[id] = peerName(name)
+	}
+	return names
 }
 
 // threadOf returns the cached thread of messageID.
