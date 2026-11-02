@@ -57,3 +57,17 @@ export function fileRows(files) {
     note: f.purged ? 'purged' : f.spilled ? 'spilled' : '',
   }));
 }
+
+// participantEntry is what the panel shows for one participant. Presence and
+// reachability come from the public directory whenever it lists the peer: the
+// shell reloads it every minute, so presence that crossed its TTL reads
+// unknown there (PROTOCOL §8), while nothing reloads the admin snapshot for a
+// quiet peer. The admin row adds only what is admin-only (disabled), and
+// stands in for a peer the directory does not list.
+export function participantEntry(adminRows, dirPeers, id) {
+  const row = (adminRows || []).find(r => r && r.peer && r.peer.peer_id === id);
+  const dir = (dirPeers || []).find(p => p && p.peer_id === id);
+  if (!row && !dir) return null;
+  const peer = dir ? { ...(row ? row.peer : {}), ...dir } : row.peer;
+  return { peer, disabled: !!(row && row.disabled) };
+}

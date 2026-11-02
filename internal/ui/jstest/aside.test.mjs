@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { budgetBar, fileRows, presenceLabel, reachLabel } from '../static/aside-model.js';
+import { budgetBar, fileRows, participantEntry, presenceLabel, reachLabel } from '../static/aside-model.js';
 
 test('unknown presence with reachable reads unknown, never offline', () => {
   // A push-only peer (a dot, a Grok Bot) never reports presence: the hub
@@ -98,4 +98,18 @@ test('fileRows marks spilled and purged', () => {
 
   assert.deepEqual(fileRows(undefined), []);
   assert.deepEqual(fileRows([]), []);
+});
+
+test('participantEntry: the refreshed directory decides presence; admin adds only disabled', () => {
+  // The admin snapshot loaded while the session was fresh; the directory,
+  // reloaded after its TTL, says unknown.
+  const admin = [{ peer: { peer_id: 'peer_s', name: 's', presence: 'working', reachability: 'connected' }, disabled: false },
+    { peer: { peer_id: 'peer_off', name: 'off', presence: 'idle', reachability: 'unknown' }, disabled: true }];
+  const dir = [{ peer_id: 'peer_s', name: 's', presence: 'unknown', reachability: 'connected' }];
+  assert.equal(participantEntry(admin, dir, 'peer_s').peer.presence, 'unknown');
+  assert.equal(participantEntry(admin, dir, 'peer_s').disabled, false);
+  // A peer only the admin view lists keeps its admin row.
+  assert.deepEqual(participantEntry(admin, dir, 'peer_off'), { peer: admin[1].peer, disabled: true });
+  assert.equal(participantEntry(admin, dir, 'peer_none'), null);
+  assert.equal(participantEntry(null, dir, 'peer_s').peer.presence, 'unknown');
 });

@@ -157,6 +157,15 @@ try {
     await shot('10-aside-error');
     assert(await page.locator('#toast.on.bad').count() === 1, 'error toast left during the shot');
     assert(countRequests(req => req.url().includes(demo.operator_secret)) === 0, 'a request carried the secret in its URL');
+
+    // A quiet participant's presence crosses its TTL with the thread open: no
+    // event says so, and the shell's minute directory reload must show it as
+    // unknown (PROTOCOL §8), not the admin snapshot's fresh-looking state.
+    const fresh = aside.locator('.pp').filter({ has: page.locator('.dot.idle, .dot.working, .dot.blocked') }).first();
+    const freshId = await fresh.getAttribute('data-peer');
+    assert(freshId, 'the demo has no participant with a fresh presence');
+    await ctx.advance('2h');
+    await aside.locator(`.pp[data-peer="${freshId}"] .dot.unknown`).waitFor({ timeout: 90000 });
   });
   console.log('Aside passed: download without the secret in a URL, ≥ 360 px panel and wider chat at 1440, toggle at 1000, matrix button, purged 410');
 } finally { await cleanBuild(); }

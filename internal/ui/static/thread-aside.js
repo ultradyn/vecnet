@@ -2,7 +2,7 @@
 // Sections: Participants, Files, Thread, and the delivery matrix button.
 // Presence and reachability stay two signals (PROTOCOL §8). Downloads go
 // through api.blob, so the bearer never enters a URL (§2, §2.7).
-import { budgetBar, fileRows, presenceLabel, reachLabel, THREAD_BUDGET } from './aside-model.js';
+import { budgetBar, fileRows, participantEntry, presenceLabel, reachLabel, THREAD_BUDGET } from './aside-model.js';
 import { h } from './dom.js';
 import { when } from './format.js';
 
@@ -36,12 +36,7 @@ export function mountAside(root, ctx) {
   const matrixBtn = h('button', { type: 'button', class: 'btn matrix-btn', text: 'Delivery matrix', onclick: () => ctx.nav('#matrix/' + threadId) });
   body.replaceChildren(content, matrixBtn);
 
-  function entryOf(id) {
-    const row = ((admin.get() || {}).peers || []).find(r => r.peer && r.peer.peer_id === id);
-    if (row) return { peer: row.peer, disabled: row.disabled };
-    const dir = ((ctx.peers.get() || {}).peers || []).find(p => p.peer_id === id);
-    return dir ? { peer: dir, disabled: false } : null;
-  }
+  const entryOf = id => participantEntry((admin.get() || {}).peers, (ctx.peers.get() || {}).peers, id);
 
   function participant(id) {
     const e = entryOf(id);
