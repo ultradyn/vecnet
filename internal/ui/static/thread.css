@@ -64,3 +64,22 @@ body[data-route=thread] .va .col,body[data-route=matrix] .va .col{max-width:980p
 .composer .bytes{font:400 11.5px var(--mono);color:var(--dim)}
 .composer .bytes.spill{color:#c4b5fd}.composer .bytes.over{color:var(--bad)}
 .composer .hint{margin-left:auto;font-size:11.5px;color:var(--dim)}
+.composer .attach{padding:5px 10px;font-size:12.5px}
+
+/* inline image thumbnails (thumbs.js): a fixed box, so loading never moves the column */
+.va .msg .atts{align-items:flex-start}
+.va .att .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px;min-width:0}
+.va .thumb{display:inline-flex;align-items:center;justify-content:center;width:240px;height:180px;max-width:100%;padding:0;border:1px solid var(--line2);border-radius:8px;background:#0b1020;overflow:hidden;cursor:zoom-in;flex:none}
+.va .thumb img{display:block;width:100%;height:100%;object-fit:contain}
+.va .thumb:hover,.va .thumb:focus-visible{border-color:#6366f1}
+.va .thumb.wait{cursor:default;background:linear-gradient(110deg,#0b1020 30%,#151c33 50%,#0b1020 70%) 0 0/300% 100%;animation:thumb-wait 1.4s linear infinite}
+@keyframes thumb-wait{to{background-position:-150% 0}}
+@media (prefers-reduced-motion:reduce){.va .thumb.wait{animation:none}}
+dialog.viewer{max-width:none;max-height:none;width:100vw;height:100vh;margin:0;padding:0;border:0;background:transparent;color:var(--text)}
+dialog.viewer::backdrop{background:#05070dd9}
+dialog.viewer figure{margin:0;width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:48px 24px 24px;box-sizing:border-box}
+dialog.viewer img{max-width:100%;max-height:calc(100% - 32px);object-fit:contain;border-radius:6px;box-shadow:0 20px 60px #000a;background:#0b1020}
+dialog.viewer figcaption{display:flex;gap:10px;font:500 12px var(--mono);color:#cbd5e1;max-width:100%}
+dialog.viewer figcaption .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+dialog.viewer figcaption .sz{color:var(--dim)}
+dialog.viewer .vx{position:absolute;top:12px;right:16px;border:1px solid var(--line2);background:#151c33;color:var(--text);border-radius:7px;width:34px;height:34px;font-size:18px;line-height:1}

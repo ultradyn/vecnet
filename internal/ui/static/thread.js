@@ -2,9 +2,12 @@
 // the reply composer. ctx.threadId names the thread (see app.js). The pure
 // rules live in thread-model.js.
 import { answerBody, countdown } from './approvals.js';
+import { createAttachments } from './attach.js';
+import { sendRefusal } from './attach-model.js';
 import { avatar, h } from './dom.js';
 import { bytes, clean, plural, short, title, when } from './format.js';
-import { budgetBanner, budgetOut, canShowFull, excerpt, FULL_TEXT_CAP, items, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, excerpt, FULL_TEXT_CAP, items, replyKey, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
+import { createThumbs } from './thumbs.js';
 
 const PAGE = 200, MAX_PAGES = 50, PIN_SLACK = 80;
 const enc = new TextEncoder();
@@ -70,6 +73,10 @@ export function mount(root, ctx) {
     pinned: true,
   };
   let gone = false, ticks = [];
+  // Reply attachments, and the thread's inline thumbnails: a settled fetch or
+  // an upload's change draws again.
+  const atts = createAttachments({ api, onChange: () => render() });
+  const thumbs = createThumbs({ api, onReady: () => render() });
 
   const summary = () => ((ctx.threads.get() || {}).threads || []).find(t => t.thread_id === threadId);
   const thread = () => { const d = detail.get(); return (d && d.row && d.row.thread) || summary() || null; };
@@ -92,20 +99,26 @@ export function mount(root, ctx) {
   const onVisible = () => { if (owedRead && document.visibilityState === 'visible') markRead(); };
 
   async function send(ta, btn) {
-    if (S.sending) return;
-    const text = ta.value;
-    if (!text.trim()) return;
+    if (S.sending || !atts.ready()) return;
+    const files = atts.toAttachments();
+    // Empty text sends when attachments carry the message.
+    const text = (ta.value.trim() || !files.length) ? ta.value : '';
+    if (!text.trim() && !files.length) return;
     if (enc.encode(text).length > TEXT_CAP) {
       S.banner = { kind: 'error', text: 'payload_too_large: the message is over 64 KiB' };
       render();
       return;
     }
-    const p = S.pending;
-    if (!p || p.text !== text || p.prio !== S.prio || p.replyTo !== S.replyTo) {
-      S.pending = { key: randKey(), text, prio: S.prio, replyTo: S.replyTo };
+    const refusal = sendRefusal(atts.items(), text);
+    if (refusal) {
+      S.banner = { kind: 'error', text: refusal };
+      render();
+      return;
     }
+    S.pending = replyKey(S.pending, { text, prio: S.prio, replyTo: S.replyTo, sig: atts.signature() }, randKey);
     const body = { idempotency_key: S.pending.key, thread_id: threadId, priority: S.prio, content: { text } };
     if (S.replyTo) body.in_reply_to = S.replyTo;
+    if (files.length) body.attachments = files;
     S.sending = true;
     S.banner = null;
     btn.disabled = true;
@@ -114,6 +127,7 @@ export function mount(root, ctx) {
       const r = await api.send(body);
       S.pending = null;
       ta.value = '';
+      atts.clear();
       counter(ta);
       S.replyTo = null;
       S.pinned = true;
@@ -123,7 +137,7 @@ export function mount(root, ctx) {
       if (e.status === 401) return;
       const err = sendError(e);
       if (!err.keepKey) S.pending = null;
-      S.banner = err; // the text stays in the box on every failure
+      S.banner = err; // the text and the chips stay on every failure
       if (err.kind === 'budget') store.invalidate(tag, 'threads'); // refresh the stale budget
     } finally {
       S.sending = false;
@@ -198,21 +212,31 @@ export function mount(root, ctx) {
     el.className = 'bytes' + (n > TEXT_CAP ? ' over' : n > SPILL_BYTES ? ' spill' : '');
   }
 
+  // gate: Send waits for every upload, and for a spill slot when the text is long.
+  function gate() {
+    const ta = comp.querySelector('textarea'), refusal = sendRefusal(atts.items(), ta.value);
+    const btn = comp.querySelector('.send');
+    btn.disabled = S.sending || !atts.ready() || !!refusal;
+    btn.title = refusal || (!atts.ready() ? 'Waiting for attachments to finish or be removed' : '');
+  }
+
   function composer() {
     const ta = h('textarea', { 'aria-label': 'Reply', rows: '3' });
     const btn = h('button', { type: 'button', class: 'btn pri send', text: 'Send' });
+    const pick = h('button', { type: 'button', class: 'btn attach', text: 'Attach', title: 'Attach files (or drop or paste them here)' });
     btn.addEventListener('click', () => send(ta, btn));
     ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(ta, btn); } });
-    ta.addEventListener('input', () => counter(ta));
+    ta.addEventListener('input', () => { counter(ta); gate(); });
     const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Priority' },
       ['wake', 'wake_idle', 'hold'].map(p => h('button', { type: 'button', value: p, text: p, onclick: () => { S.prio = p; render(); } })));
-    return h('div', { class: 'composer' },
-      h('div', { class: 'cbanner', role: 'alert', hidden: true }),
-      h('div', { class: 'wrap' },
-        h('div', { class: 'join', hidden: true, text: 'You are not a participant in this thread. Sending adds you to it.' }),
-        h('div', { class: 'to', hidden: true }, h('span'), h('button', { type: 'button', title: 'Reply to the thread instead', text: '×', onclick: () => { S.replyTo = ''; render(); } })),
-        ta,
-        h('div', { class: 'bar' }, seg, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint', text: 'Enter to send · Shift+Enter for a new line' }), btn)));
+    const wrap = h('div', { class: 'wrap' },
+      h('div', { class: 'join', hidden: true, text: 'You are not a participant in this thread. Sending adds you to it.' }),
+      h('div', { class: 'to', hidden: true }, h('span'), h('button', { type: 'button', title: 'Reply to the thread instead', text: '×', onclick: () => { S.replyTo = ''; render(); } })),
+      ta,
+      atts.el,
+      h('div', { class: 'bar' }, seg, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint', text: 'Enter to send · Shift+Enter for a new line' }), pick, btn));
+    atts.wire(wrap, ta, pick);
+    return h('div', { class: 'composer' }, h('div', { class: 'cbanner', role: 'alert', hidden: true }), wrap);
   }
 
   function approvalCard(a) {
@@ -309,8 +333,8 @@ export function mount(root, ctx) {
     const m = it.message;
     if (it.system) return systemLine(it);
     const others = (m.recipients || []).map(nameOf).join(', ');
-    const atts = (m.attachments || []).filter(a => a !== it.spill).map(a => h('span', { class: 'att', title: a.sha256 },
-      a.name || a.media_type, h('span', { class: 'sz', text: bytes(a.size) })));
+    // Images show inline from the thumbnail cache; everything else is a chip.
+    const files = (m.attachments || []).filter(a => a !== it.spill).map(a => thumbs.render(a));
     const full = S.full.get(m.message_id), showTxt = m.content && m.content.text && !(full && full.state === 'ok');
     const cls = 'msg' + (m.message_id === S.replyTo ? ' target' : '') + (m.message_id === S.flash ? ' flash' : '');
     return h('div', { class: cls, id: 'm-' + m.message_id, onanimationend: e => { if (e.animationName === 'flash') { S.flash = ''; e.currentTarget.classList.remove('flash'); } } },
@@ -328,7 +352,7 @@ export function mount(root, ctx) {
         showTxt ? h('div', { class: 'txt' + (it.spill ? ' clamp' : ''), text: m.content.text }) : null,
         it.spill ? spillBlock(m, it.spill) : (m.content && m.content.truncated ? h('span', { class: 'trunc', text: 'Preview only. The hub truncated this text.' }) : null),
         it.approval ? approvalCard(it.approval) : jobBox(m),
-        atts.length ? h('div', { class: 'atts' }, atts) : null,
+        files.length ? h('div', { class: 'atts' }, files) : null,
         it.receipts.length ? h('div', { class: 'rc' }, it.receipts.map(r => h('span', { class: 'st-' + r.display, title: r.delivery_id + ' · ' + r.state }, h('i'), nameOf(r.recipient) + ' ' + r.display))) : null));
   }
 
@@ -346,7 +370,12 @@ export function mount(root, ctx) {
     } else if (history.loading() && !all.length) {
       list.replaceChildren(h('div', { class: 'loading', text: 'Loading thread…' }));
     } else {
+      // A rebuild replaces every node: a focused thumbnail keeps its focus.
+      const f = document.activeElement, keep = f && list.contains(f) && f.matches('button.thumb') && f.closest('.msg');
       list.replaceChildren(...items(all, matrix.get() || null, (d && d.open_approvals) || []).map(message));
+      const again = keep && document.getElementById(keep.id);
+      const thumb = again && again.querySelector('button.thumb[data-sha="' + f.dataset.sha + '"]');
+      if (thumb) thumb.focus({ preventScroll: true });
     }
     tick();
 
@@ -361,7 +390,7 @@ export function mount(root, ctx) {
     to.hidden = !target;
     if (target) to.firstElementChild.textContent = clean('↳ replying to ' + nameOf(target.sender) + ': ' + excerpt(target).slice(0, 60));
     comp.querySelector('textarea').placeholder = 'Message ' + (participants ? participants.filter(p => p !== me).map(nameOf).join(', ') : 'this thread');
-    comp.querySelector('.send').disabled = S.sending;
+    gate();
     for (const b of comp.querySelectorAll('.seg button')) b.className = b.value === S.prio ? 'on' : '';
     if (S.pinned) scroller.scrollTop = scroller.scrollHeight;
   }
@@ -397,5 +426,7 @@ export function mount(root, ctx) {
     scroller.removeEventListener('scroll', onScroll);
     document.removeEventListener('visibilitychange', onVisible);
     off.forEach(fn => fn());
+    atts.destroy();
+    thumbs.release();
   };
 }
