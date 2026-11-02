@@ -522,6 +522,54 @@ func TestAnswerFlow(t *testing.T) {
 			t.Fatalf("answers %q", got)
 		}
 	})
+	// A failed reload is not a snapshot from after the answer: the claim must
+	// outlive it, or the stale snapshot brings the row back and a,1 answers twice.
+	t.Run("a failed reload keeps the answered approval claimed", func(t *testing.T) {
+		f := inboxSeed()
+		f.setInbox(func(in *opapi.Inbox) { in.Approvals = in.Approvals[:1] })
+		f.onAnswer = f.dropApproval
+		m, p := inboxLoaded(t, f, newClock())
+		f.reset()
+		f.fail("Inbox", &opclient.Error{Status: 500, Code: "internal", Message: "boom"})
+		p.press("a", "1")
+		p.until("answer", func() bool { return f.count("Answer") == 1 })
+		p.until("the failed reload", func() bool { return m.Data.Errs["inbox"] != nil })
+		p.idle()
+		if frame := plainAt(t, m, 140, 42); strings.Contains(frame, "weekly quota") {
+			t.Fatalf("failed reload brought the answered row back:\n%s", frame)
+		}
+		p.press("a")
+		if m.Mode != ModeNormal {
+			t.Fatalf("answered approval reopened after failed reload: Mode = %v", m.Mode)
+		}
+		p.press("1")
+		p.idle()
+		if got := f.calls(&f.answered); !slices.Equal(got, []string{"apr_1/0"}) {
+			t.Fatalf("answers %q", got)
+		}
+	})
+	// Only a finished action is released by a load: one that lands while the
+	// answer is still on the wire (an event, ctrl+l, a reconnect) keeps the claim.
+	t.Run("a load during an answer in flight keeps the claim", func(t *testing.T) {
+		f := inboxSeed()
+		f.setInbox(func(in *opapi.Inbox) { in.Approvals = in.Approvals[:1] })
+		f.onAnswer = f.dropApproval
+		m, p := inboxLoaded(t, f, newClock())
+		release := f.hold("Answer")
+		p.press("a", "1")
+		p.until("answer", func() bool { return f.count("Answer") == 1 })
+		inboxReload(p, f)
+		p.press("a")
+		if m.Mode != ModeNormal {
+			t.Fatalf("a load released the claim of an answer still in flight: Mode = %v", m.Mode)
+		}
+		release()
+		p.until("the answered toast", func() bool { return strings.Contains(plainAt(t, m, 140, 42), "answered:") })
+		p.idle()
+		if got := f.calls(&f.answered); !slices.Equal(got, []string{"apr_1/0"}) {
+			t.Fatalf("second Answer sent: %q", got)
+		}
+	})
 	t.Run("a failure toasts, keeps the row and does not retry", func(t *testing.T) {
 		f := inboxSeed()
 		f.fail("Answer", &opclient.Error{Status: 500, Code: "internal", Message: "boom"})
