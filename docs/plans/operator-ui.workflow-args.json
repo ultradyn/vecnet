@@ -1,5 +1,5 @@
 {
- "runStamp": "20261102T18-operator-ui",
+ "runStamp": "20261102T20-operator-ui",
  "maxFixRounds": 3,
  "priorMinors": [
   {
@@ -216,7 +216,7 @@
  "statusDir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui",
  "taskPrefix": "oui",
  "startTask": 1,
- "endTask": 24,
+ "endTask": 25,
  "finalReview": true,
  "openBrowser": false,
  "deps": {
@@ -312,12 +312,29 @@
    20,
    21,
    22,
-   24
+   24,
+   25
   ],
   "24": [
    7,
    12,
    18
+  ],
+  "25": [
+   8,
+   9,
+   10,
+   11,
+   12,
+   13,
+   14,
+   15,
+   18,
+   19,
+   20,
+   21,
+   22,
+   24
   ]
  },
  "tasks": [
@@ -758,6 +775,26 @@
     "Every Event append happens inside the transaction that makes the change, and Log.Notify runs only after commit, as the existing fan-out in hub/send.go and hub/receipts.go does.",
     "docs/protocol/envelope.schema.json and internal/envelope/schema.json must stay byte-identical; just validate-protocol diffs them.",
     "An operator_view must never land in an agent peer's log, and a presence heartbeat that re-posts the same state must not emit one: both are tested."
+   ]
+  },
+  {
+   "title": "Integrated screen gate",
+   "refs": "\u00a77, \u00a714.2; Review Focus 1-5",
+   "race": false,
+   "suite": "./internal/ui/... ./internal/httpapi/",
+   "route": "opus",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/impl-shots/25 just ui-shots"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/25 just ui-shots"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "This task exists because each web task passed in isolation against stubs and the merged branch did not. Fix required behaviour in code; change a script only when its expectation predates a neighbour's real content. Never relax an assertion to pass.",
+    "The halted Task 23 attempt sits uncommitted in .worktrees/oui-t23. Do not touch that worktree."
    ]
   }
  ],
