@@ -4,10 +4,10 @@ Requested by cc-pagchat-cos for pag-chat Plan 8, 2026-11-03 (msg_01M6F1QSVQPMRC8
 
 ## Shape (vecnet's answer)
 - **No per-peer secret.** A principal already receives every event for its peers on one stream and sends as any of them with `as` (§2.3, §2.2). Peers a principal creates get no credential of their own, so nothing secret is returned, stored or leaked. (If a peer later needs its own credential, the operator can `peer rotate` it.)
-- **Create:** `POST /v1/peers {kind, name, idempotency_key}` with a principal credential → `201 {peer}`. Retrying the same `idempotency_key` within 24 h returns the original peer (200), or 409 if the body differs. This follows §2.2's send idempotency.
+- **Create:** `POST /v1/peers {kind, name, idempotency_key}` with a principal credential → `201 {peer, idempotency_key}` (the key echoed back, for pag-chat's logs). Retrying the same `idempotency_key` within 24 h returns the original peer (200), or 409 if the body differs. This follows §2.2's send idempotency.
 - **Operator-set policy per principal:** `vecnet principal limits <prn> --max-peers N --kinds pagchat-bot[,…]`. The default is 0 peers and no kinds, so the feature is off until Max enables it for a principal.
   - Kinds outside the allowlist get 403 `kind_not_allowed`. `operator`, `source` and `session` are never allowed.
-  - Hitting the cap gets 429 `peer_cap_reached`, with `details.limit`.
+  - Hitting the cap gets 429 `peer_cap_reached`, with `details: {limit, active, disabled}`. pag-chat asked for this so it can tell the User that retired bots are what reached the cap.
 - **Disable and enable own peers:** `PATCH /v1/peers/{id} {disabled: true|false}` works only for peers the principal owns (otherwise 404). Disabled peers count toward the cap until the operator deletes them; that is deliberate, so a create/disable loop is bounded.
 - **Marked:** the directory shows `created_by: <prn>` on such peers, which receivers use for trust (issue 26's `spawned_by` generalises this).
 - **Audit and events:** an audit row for every create, disable, enable and refusal, plus `directory_updated`, as for admin creates. The operator dashboard counts peers per principal.
@@ -23,3 +23,6 @@ Requested by cc-pagchat-cos for pag-chat Plan 8, 2026-11-03 (msg_01M6F1QSVQPMRC8
 
 ## Order
 Plan with, or right after, the reactions build. pag-chat Plan 8 and issue 26 phase 3 depend on it.
+
+## Contract freeze
+pag-chat builds against a fake hub using exactly this API (msg_01M6F1S4R4WZQVRDFXG0A4BZ80). Any change to these shapes must be agreed with pag-chat first.
