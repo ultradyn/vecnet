@@ -11,6 +11,10 @@ const RELOAD_MS = 30000;
 const AUDIT_PAGE = 50;
 const THREAD_PAGE = 200, THREAD_PAGES = 10;
 const COUNTERS = ['loop_cut', 'rate_limited', 'dead_letters', 'push_conflicts', 'push_auth_failed'];
+// The hub's counters are running totals kept in its database, not the current
+// state: dead_letters counts deliveries ever dead-lettered, while the Dead
+// letters section lists the ones still waiting.
+const COUNTER_LABELS = { dead_letters: 'dead-lettered' };
 
 const errText = e => (e && e.message) || String(e);
 
@@ -122,7 +126,7 @@ export function mount(root, ctx) {
     }
     const keys = [...COUNTERS.filter(k => Object.hasOwn(value, k)), ...Object.keys(value).filter(k => !COUNTERS.includes(k)).sort()];
     counterLine.className = 'dash-counters mono' + (err ? ' bad' : '');
-    counterLine.textContent = keys.map(k => k.replace(/_/g, ' ') + ' ' + value[k]).join(' · ') + (err ? ' · stale: ' + errText(err) : '');
+    counterLine.textContent = 'All-time totals: ' + keys.map(k => (COUNTER_LABELS[k] || k.replace(/_/g, ' ')) + ' ' + value[k]).join(' · ') + (err ? ' · stale: ' + errText(err) : '');
   }
 
   function drawPeers(value, s) {

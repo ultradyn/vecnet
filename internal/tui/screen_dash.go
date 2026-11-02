@@ -793,7 +793,9 @@ func dashCounterLines(m *Model, inner int) []string {
 	if len(m.Data.Counters) == 0 {
 		return nil
 	}
-	return append([]string{styleMuted.Render("counters")}, dashCounts(m.Data.Counters, inner)...)
+	// Running totals in the hub's database, not current state: the top bar's
+	// dlq is what waits now, dead-lettered is every one ever.
+	return append([]string{styleMuted.Render("counters (all-time totals)")}, dashCounts(m.Data.Counters, inner)...)
 }
 
 // dashCounts is one line per key, highest count first, then by name.
@@ -808,7 +810,11 @@ func dashCounts(counts map[string]int, inner int) []string {
 	})
 	lines := make([]string, 0, len(keys))
 	for _, key := range keys {
-		lines = append(lines, styleMuted.Render(indent+dashPad(Clean(key), nameCells))+" "+styleText.Render(fmt.Sprint(counts[key])))
+		label := Clean(key)
+		if key == "dead_letters" {
+			label = "dead-lettered"
+		}
+		lines = append(lines, styleMuted.Render(indent+dashPad(label, nameCells))+" "+styleText.Render(fmt.Sprint(counts[key])))
 	}
 	return lines
 }

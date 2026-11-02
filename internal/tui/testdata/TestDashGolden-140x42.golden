@@ -20,9 +20,9 @@
 │                                             ││  thread_budget_exhausted   2                ││                                            │
 │                                             ││  expired                   1                ││                                            │
 │                                             ││                                             ││                                            │
-│                                             ││counters                                     ││                                            │
+│                                             ││counters (all-time totals)                   ││                                            │
 │                                             ││  loop_cut                  7                ││                                            │
-│                                             ││  dead_letters              3                ││                                            │
+│                                             ││  dead-lettered             3                ││                                            │
 │                                             ││  rate_limited              2                ││                                            │
 │                                             ││                                             ││                                            │
 │                                             ││                                             ││                                            │
