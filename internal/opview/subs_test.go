@@ -174,7 +174,13 @@ func TestRefreshBeforeMatchesSubscribe(t *testing.T) {
 		id, refresh := subscribeRPC(t, env, bearer, cb.URL, ttl)
 		got := subscription(t, env, id)
 		want := envelope.FormatTime(env.Now.Now().Add(ttl - events.RefreshMargin))
-		if got.RefreshBefore == nil || *got.RefreshBefore != want || refresh != want {
+		// Under the margin the subscribe reply clamps to now, so a dot is never
+		// handed a time already past; the operator view keeps the raw deadline.
+		wantReply := want
+		if ttl < events.RefreshMargin {
+			wantReply = envelope.FormatTime(env.Now.Now())
+		}
+		if got.RefreshBefore == nil || *got.RefreshBefore != want || refresh != wantReply {
 			t.Fatalf("ttl=%s snapshot=%v subscribe=%q want=%q", ttl, got.RefreshBefore, refresh, want)
 		}
 		if got.ExpiresAt == nil || *got.ExpiresAt != envelope.FormatTime(env.Now.Now().Add(ttl)) {
