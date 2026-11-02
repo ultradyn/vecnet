@@ -81,6 +81,12 @@ type chatDraft struct {
 	sending     bool
 }
 
+// chatHeldMsg is a :msg that did not go, waiting for the command line.
+type chatHeldMsg struct {
+	args []string
+	why  string // the reason to show with the line
+}
+
 // chatNewAttempt is chatAttempt for :msg, which has no composer to live in.
 type chatNewAttempt struct{ peer, text, prio string }
 
@@ -115,7 +121,10 @@ type (
 		result opapi.SendResult
 		err    error
 	}
-	chatRefusedMsg  struct{ args []string }
+	chatRefusedMsg struct {
+		args []string
+		why  string
+	}
 	chatAnsweredMsg struct {
 		approval opapi.OpenApproval
 		option   int
@@ -158,7 +167,8 @@ type chatScreen struct {
 	reader           chatReader
 	lastNew          chatNewAttempt
 	lastNewKey       string
-	msgErr           string // why the :msg back on the command line failed
+	msgErr           string        // why the :msg back on the command line failed
+	heldMsgs         []chatHeldMsg // oldest first
 }
 
 func newChatScreen() Screen {
@@ -176,6 +186,9 @@ func (s *chatScreen) Hints() string {
 	case s.overlay == chatMatrix:
 		return "j/k rows  h/l recipients  esc close"
 	case s.overlay == chatPager:
+		if s.narrow {
+			return "j/k pgup/pgdn esc"
+		}
 		return "j/k scroll  pgup/pgdn page  esc close"
 	}
 	if s.narrow {
@@ -207,7 +220,7 @@ func (s *chatScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 	case chatStartedMsg:
 		cmd = s.onStarted(msg, m)
 	case chatRefusedMsg:
-		s.keepMsg(m, msg.args)
+		s.holdMsg(m, msg.args, msg.why, msg.why)
 	case chatAnsweredMsg:
 		cmd = s.onAnswered(msg, m)
 	case chatBlobMsg:
@@ -217,6 +230,7 @@ func (s *chatScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 	case chatReadMsg:
 		cmd = s.onRead(msg, m)
 	}
+	s.reopenMsg(m)
 	return tea.Batch(cmd, s.arm(), s.sync(m))
 }
 
@@ -455,8 +469,7 @@ func (s *chatScreen) onReaderKey(key string) {
 	}
 }
 
-// chatKey is a fresh idempotency key. Underscores are outside the schema's
-// alphabet, so an id from package ids will not do.
+// chatKey is a fresh idempotency key.
 func chatKey() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b) // crypto/rand.Read does not fail
@@ -506,8 +519,8 @@ func (s *chatScreen) onSent(msg chatSentMsg, m *Model) tea.Cmd {
 	return m.Reload(threadPrefix+msg.thread, "threads") // a send of its own raises no event here
 }
 
-// sendFailed reports a refused send. The text stays in the composer, or on the
-// command line for :msg, whatever the reason.
+// sendFailed reports a refused composer send. The text stays in the composer,
+// whatever the reason.
 func (s *chatScreen) sendFailed(m *Model, id string, err error) {
 	if isStatus(err, 401) {
 		m.reject(err)
@@ -515,17 +528,28 @@ func (s *chatScreen) sendFailed(m *Model, id string, err error) {
 	m.Toast(chatSendError(m, id, err), true)
 }
 
+// chatSendError is the toast for a failed send, on a surface where enter sends
+// the same text again.
 func chatSendError(m *Model, id string, err error) string {
+	var e *opclient.Error
+	if !errors.As(err, &e) {
+		return "send failed, enter retries: " + chatSendWhy(m, id, err)
+	}
+	return chatSendWhy(m, id, err)
+}
+
+// chatSendWhy is what went wrong, with no promise about what a key does.
+func chatSendWhy(m *Model, id string, err error) string {
 	var e *opclient.Error
 	switch {
 	case !errors.As(err, &e):
-		return "send failed, enter retries: " + err.Error()
+		return err.Error()
 	case e.Code == "thread_budget_exhausted":
 		budget := 0
 		if row := chatRowOf(m, id); row != nil && row.Thread.BudgetRemaining != nil {
 			budget = *row.Thread.BudgetRemaining
 		}
-		return fmt.Sprintf("thread budget exhausted (budget %d): only the operator can raise it, your text is kept", budget)
+		return fmt.Sprintf("thread budget exhausted (budget %d), your text is kept", budget)
 	case e.Code == "rate_limited":
 		if after, ok := e.Details["retry_after_seconds"].(float64); ok {
 			return fmt.Sprintf("%s: %s (retry after %.0fs)", e.Code, e.Message, after)
@@ -574,25 +598,51 @@ func (s *chatScreen) commandMsg(m *Model, args []string) tea.Cmd {
 // the shell has finished closing it by then, whichever way round it does that.
 func (s *chatScreen) refuseMsg(m *Model, args []string, why string) tea.Cmd {
 	m.Toast(why, true)
-	return func() tea.Msg { return chatRefusedMsg{args: args} }
+	return func() tea.Msg { return chatRefusedMsg{args: args, why: why} }
 }
 
-// keepMsg reopens the command line on a :msg that did not go, after the toast
-// has its reason. The open line covers that toast, so the reason moves to the
-// composer row, which only the chat tab shows; :msg lands there either way.
-func (s *chatScreen) keepMsg(m *Model, args []string) {
-	if m.Mode == ModeNormal { // a command line in use keeps what it holds
-		m.Mode, m.Input = ModeCommand, strings.TrimSpace("msg "+strings.Join(args, " "))
+// chatLineFree is whether the command line can be taken without taking it from
+// the operator, who may have moved on while the send was out.
+func chatLineFree(m *Model) bool { return m.Mode == ModeNormal && !m.Help }
+
+// holdMsg keeps a :msg that did not go until the line is free, which Update
+// checks after every message. why goes with the line; reason says what happened
+// until then, because enter does not retry it yet.
+func (s *chatScreen) holdMsg(m *Model, args []string, why, reason string) {
+	s.heldMsgs = append(s.heldMsgs, chatHeldMsg{args, why})
+	if chatLineFree(m) {
+		return
 	}
+	m.Toast(":msg failed, returns to the command line when you finish: "+reason, true)
 	if m.Mode == ModeCommand {
-		m.Tab, s.msgErr, s.overlay = tabChat, m.toast.text, chatNoOverlay
+		s.showMsgErr(m)
 	}
+}
+
+// reopenMsg puts the oldest held :msg back on the command line.
+func (s *chatScreen) reopenMsg(m *Model) {
+	if len(s.heldMsgs) == 0 || !chatLineFree(m) {
+		return
+	}
+	held := s.heldMsgs[0]
+	s.heldMsgs = s.heldMsgs[1:]
+	m.Mode, m.Input = ModeCommand, strings.TrimSpace("msg "+strings.Join(held.args, " "))
+	m.Toast(held.why, true)
+	s.showMsgErr(m)
+}
+
+// showMsgErr moves the toast to the composer row, because an open command line
+// covers the toast. Only the chat tab shows that row; :msg lands there anyway.
+func (s *chatScreen) showMsgErr(m *Model) {
+	m.Tab, s.msgErr, s.overlay = tabChat, m.toast.text, chatNoOverlay
 }
 
 func (s *chatScreen) onStarted(msg chatStartedMsg, m *Model) tea.Cmd {
 	if msg.err != nil {
-		s.sendFailed(m, "", msg.err)
-		s.keepMsg(m, msg.args)
+		if isStatus(msg.err, 401) {
+			m.reject(msg.err)
+		}
+		s.holdMsg(m, msg.args, chatSendError(m, "", msg.err), chatSendWhy(m, "", msg.err))
 		return nil
 	}
 	s.lastNewKey = ""

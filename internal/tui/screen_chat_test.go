@@ -66,6 +66,7 @@ type chatAPI struct {
 	answers  []chatAnswer
 	sendBack opapi.SendResult
 	readIDs  []string
+	markNone bool // ReadThread finds nothing unread
 }
 
 func newChatAPI() *chatAPI {
@@ -130,8 +131,12 @@ func (a *chatAPI) Matrix(ctx context.Context, id, _ string, _ int) (opapi.Matrix
 func (a *chatAPI) ReadThread(ctx context.Context, id string) (opapi.ReadResult, error) {
 	a.cmu.Lock()
 	a.readIDs = append(a.readIDs, id)
+	marked := 1
+	if a.markNone {
+		marked = 0
+	}
 	a.cmu.Unlock()
-	return opapi.ReadResult{Marked: 1}, a.hit(ctx, "ReadThread")
+	return opapi.ReadResult{Marked: marked}, a.hit(ctx, "ReadThread")
 }
 
 func (a *chatAPI) Send(ctx context.Context, r envelope.SendRequest) (opapi.SendResult, error) {
@@ -486,7 +491,7 @@ func TestChatNavigation(t *testing.T) {
 }
 
 func TestChatMarksRead(t *testing.T) {
-	a, _, p := chatOpen(t)
+	a, m, p := chatOpen(t)
 	p.until("open marks read", func() bool { return len(a.reads()) == 1 })
 	if got := a.reads()[0]; got != chatHark {
 		t.Fatalf("read %s", got)
@@ -504,9 +509,13 @@ func TestChatMarksRead(t *testing.T) {
 	p.press("1")
 	a.add(chatHark, chatMsg("msg_01away", chatCodex, "wake", chatAt(7, 41), "Away from the tab."))
 	p.send(reloadMsg{tags: []string{threadPrefix + chatHark}})
-	p.idle()
-	if n := len(a.reads()); n != 2 {
-		t.Fatalf("read while the tab is hidden: %d", n)
+	p.until("the away delivery", func() bool {
+		msgs := m.Data.Thread[chatHark].Messages
+		return msgs[len(msgs)-1].MessageID == "msg_01away"
+	})
+	p.send(chatTickMsg{}) // sync records a read on this goroutine, before its POST
+	if got := chatOf(m).readTo[chatHark]; got == "msg_01away" {
+		t.Fatal("marked read while the tab is hidden")
 	}
 	p.press("2")
 	p.until("read on return", func() bool { return len(a.reads()) == 3 })
@@ -551,6 +560,19 @@ func TestSendFlow(t *testing.T) {
 		if m.Mode != ModeNormal {
 			t.Fatalf("esc: Mode = %v", m.Mode)
 		}
+	})
+
+	t.Run("text typed during a send stays a draft", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		release := a.hold("Send")
+		p.press("i")
+		typeText(p, "first")
+		p.press("enter")
+		p.until("send", func() bool { return a.count("Send") == 1 })
+		typeText(p, " and more")
+		release()
+		waitToast(t, p, m, "sent")
+		wantFrame(t, chatFrame(t, m), "first and more")
 	})
 
 	t.Run("empty text sends nothing", func(t *testing.T) {
@@ -639,7 +661,8 @@ func TestSendFlow(t *testing.T) {
 		p.press("enter")
 		waitToast(t, p, m, "budget")
 		frame := chatFrame(t, m)
-		wantFrame(t, frame, "over budget", "thread budget exhausted")
+		wantFrame(t, frame, "over budget", "thread budget exhausted (budget 494), your text is kept")
+		refuseFrame(t, frame, "only the operator")
 		if !m.toast.bad {
 			t.Fatal("a refused send is not a good toast")
 		}
@@ -761,6 +784,65 @@ func TestChatAnswer(t *testing.T) {
 		if got := a.answered()[0]; got.approval.ApprovalID != "apr_drop" || got.option != 0 {
 			t.Fatalf("answer %+v", got)
 		}
+	})
+	t.Run("the selected card is answered, not the newest", func(t *testing.T) {
+		a := chatSeed()
+		chatDanger(a, 0)
+		th := a.byID[chatHark]
+		th.detail.OpenApprovals = append([]opapi.ThreadApproval{{ApprovalID: "apr_lint", MessageID: "msg_01lint", ExpiresAt: chatAt(8, 5), Options: []string{"yes", "no"}, AddressedToMe: true}}, th.detail.OpenApprovals...)
+		m, p := chatModel(t, a, newClock())
+		p.press("k", "a")
+		wantFrame(t, chatFrame(t, m), "answer: Run the harmless lint?  1 yes  2 no")
+		p.press("2")
+		p.until("answer", func() bool { return len(a.answered()) == 1 })
+		if got := a.answered()[0]; got.approval.ApprovalID != "apr_lint" || got.option != 1 {
+			t.Fatalf("answer %+v", got)
+		}
+	})
+	t.Run("opening another thread drops the prompt", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		p.press("a")
+		p.run(m.OpenThread(chatOther))
+		p.until("the other thread", func() bool { return chatOf(m).thread == chatOther })
+		if chatOf(m).prompt != nil || m.Mode != ModeNormal {
+			t.Fatalf("prompt %+v, mode %v", chatOf(m).prompt, m.Mode)
+		}
+		p.press("1")
+		p.idle()
+		if len(a.answered()) != 0 {
+			t.Fatalf("answers %+v", a.answered())
+		}
+	})
+	t.Run("an approval expiring under the prompt takes no digit", func(t *testing.T) {
+		a := chatSeed()
+		clock := newClock()
+		m, p := chatModel(t, a, clock)
+		p.press("a")
+		clock.advance(time.Hour)
+		p.press("1")
+		waitToast(t, p, m, "expired")
+		p.idle()
+		if len(a.answered()) != 0 {
+			t.Fatalf("answers %+v", a.answered())
+		}
+	})
+	t.Run("a rejected credential stops the answer", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		a.fail("Answer", &opclient.Error{Status: 401, Code: "unauthenticated", Message: "revoked"})
+		p.press("a", "1")
+		p.until("rejected", func() bool { return m.Conn == ConnRejected })
+		wantFrame(t, chatFrame(t, m), "[1]yes")
+	})
+	t.Run("an answer reloads the thread", func(t *testing.T) {
+		a := chatSeed()
+		a.markNone = true // so that opening the thread leaves no reload about
+		m, p := chatModel(t, a, newClock())
+		p.until("open marks read", func() bool { return len(a.reads()) == 1 })
+		p.idle()
+		before := a.count("Thread")
+		p.press("a", "1")
+		waitToast(t, p, m, "answered")
+		p.until("the reload", func() bool { return a.count("Thread") > before })
 	})
 	t.Run("an off-screen approval comes on screen before the digit", func(t *testing.T) {
 		a := chatSeed()
@@ -1105,6 +1187,19 @@ func chatFile(a *chatAPI, name string, data string) {
 	a.blobs["sha-file"] = chatBlob{[]byte(data), "text/plain"}
 }
 
+func TestChatTallMessage(t *testing.T) {
+	a := chatSeed()
+	a.add(chatHark, chatMsg("msg_01tall", chatCodex, "hold", chatAt(7, 30), strings.Repeat("line\n", 60)+"the end"))
+	m, p := chatModel(t, a, newClock())
+	frame := plainAt(t, m, 140, 42)
+	if !regexp.MustCompile(`\[\+\d+ lines, e reads it all\]`).MatchString(frame) {
+		t.Fatalf("no hint under a cut message:\n%s", frame)
+	}
+	p.press("e")
+	refuseFrame(t, chatFrame(t, m), "e reads it all")
+	wantFrame(t, plainAt(t, m, 80, 24), "j/k pgup/pgdn esc  ")
+}
+
 func TestSaveFileNameSafe(t *testing.T) {
 	saved := func(t *testing.T, name string) (string, *Model, *pump) {
 		t.Helper()
@@ -1204,6 +1299,20 @@ func TestSaveFileNameSafe(t *testing.T) {
 			}
 		})
 	}
+	t.Run("a file over the reader's cap saves whole", func(t *testing.T) {
+		data := strings.Repeat("x", 2<<20)
+		dir, m, p := saved(t, "big.bin")
+		a := m.API.(*chatAPI)
+		a.cmu.Lock()
+		a.blobs["sha-file"] = chatBlob{[]byte(data), "application/octet-stream"}
+		a.cmu.Unlock()
+		p.press("s")
+		waitToast(t, p, m, "saved")
+		info, err := os.Stat(filepath.Join(dir, "big.bin"))
+		if err != nil || info.Size() != int64(len(data)) {
+			t.Fatalf("stat %v, %v", info, err)
+		}
+	})
 	t.Run("purged file is refused", func(t *testing.T) {
 		t.Chdir(t.TempDir())
 		a := chatSeed()
@@ -1321,6 +1430,120 @@ func TestMsgCommand(t *testing.T) {
 		p.press(":")
 		refuseFrame(t, chatFrame(t, m), "no peer matches")
 	})
+	// failing starts a :msg to claw that fails once release is called.
+	failing := func(t *testing.T, a *chatAPI, m *Model, p *pump) (release func()) {
+		t.Helper()
+		a.fail("Send", errors.New("connection refused"))
+		release = a.hold("Send")
+		run(t, m, p, "claw", "keep", "this")
+		p.until("send", func() bool { return a.count("Send") == 1 })
+		return release
+	}
+	const line, later = "msg claw keep this", "returns to the command line"
+	t.Run("a failure in Insert waits for the operator to leave it", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		release := failing(t, a, m, p)
+		p.press("i")
+		typeText(p, "a draft")
+		release()
+		waitToast(t, p, m, "connection refused")
+		frame := chatFrame(t, m)
+		wantFrame(t, frame, "a draft", later)
+		refuseFrame(t, frame, "enter retries")
+		if m.Mode != ModeInsert {
+			t.Fatalf("Mode = %v", m.Mode)
+		}
+		p.press("esc")
+		kept(t, p, m, line, "connection refused", "enter retries")
+		refuseFrame(t, chatFrame(t, m), later)
+		if d := chatOf(m).draft(chatHark); d.text != "a draft" {
+			t.Fatalf("draft %q", d.text)
+		}
+		p.press("esc")
+		p.send(chatTickMsg{})
+		if m.Mode != ModeNormal {
+			t.Fatalf("a kept line came back twice: %v", m.Mode)
+		}
+	})
+	t.Run("a failure under an answer prompt waits for the prompt", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		release := failing(t, a, m, p)
+		p.press("a")
+		release()
+		waitToast(t, p, m, "connection refused")
+		if m.Mode != ModeInsert || chatOf(m).prompt == nil {
+			t.Fatalf("Mode = %v, prompt %+v", m.Mode, chatOf(m).prompt)
+		}
+		p.press("x")
+		kept(t, p, m, line, "connection refused")
+	})
+	t.Run("a failure on an open line waits for that line", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		release := failing(t, a, m, p)
+		p.press(":")
+		typeText(p, "other")
+		release()
+		p.until("the failure", func() bool { return chatOf(m).msgErr != "" })
+		if m.Mode != ModeCommand || m.Input != "other" {
+			t.Fatalf("Mode %v, Input %q", m.Mode, m.Input)
+		}
+		wantFrame(t, chatFrame(t, m), ":other", "connection refused", later)
+		p.press("esc")
+		kept(t, p, m, line, "connection refused", "enter retries")
+		refuseFrame(t, chatFrame(t, m), later)
+	})
+	t.Run("a failure behind help waits for help", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		release := failing(t, a, m, p)
+		p.press("?")
+		release()
+		waitToast(t, p, m, later)
+		if m.Mode != ModeNormal || !m.Help {
+			t.Fatalf("Mode %v, Help %v", m.Mode, m.Help)
+		}
+		p.press("x")
+		kept(t, p, m, line, "connection refused")
+	})
+	t.Run("two failures come back one at a time", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		release := failing(t, a, m, p)
+		p.press("i")
+		release()
+		p.until("the first failure", func() bool { return len(chatOf(m).heldMsgs) == 1 })
+		run(t, m, p, "codex", "second")
+		p.until("the second failure", func() bool { return len(chatOf(m).heldMsgs) == 2 })
+		p.press("esc")
+		kept(t, p, m, line, "connection refused")
+		p.press("esc")
+		kept(t, p, m, "msg codex second", "connection refused")
+		p.press("esc")
+		p.send(chatTickMsg{})
+		if m.Mode != ModeNormal {
+			t.Fatalf("Mode = %v", m.Mode)
+		}
+	})
+	t.Run("a refusal in Insert waits too", func(t *testing.T) {
+		_, m, p := chatOpen(t)
+		p.press("i")
+		run(t, m, p, "zzz", "hello")
+		waitToast(t, p, m, later)
+		wantFrame(t, chatFrame(t, m), "no peer matches zzz")
+		p.press("esc")
+		kept(t, p, m, "msg zzz hello", "no peer matches zzz")
+	})
+	t.Run("an edited retry takes a new key", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		a.fail("Send", errors.New("connection refused"))
+		run(t, m, p, "claw", "keep", "this")
+		kept(t, p, m, line, "connection refused")
+		m.Mode, m.Input = ModeNormal, ""
+		run(t, m, p, "claw", "keep", "that")
+		p.until("edited retry", func() bool { return len(a.sends()) == 2 })
+		sent := a.sends()
+		if sent[0].IdempotencyKey == sent[1].IdempotencyKey {
+			t.Fatal("a changed body under one key is idempotency_conflict")
+		}
+	})
 	t.Run("unique prefix sends by peer id", func(t *testing.T) {
 		a, m, p := chatOpen(t)
 		a.sendBack = opapi.SendResult{MessageID: "msg_x", ThreadID: chatOther}
@@ -1370,7 +1593,7 @@ func TestChatHostile(t *testing.T) {
 	bad.Attachments = []envelope.Attachment{{SHA256: "sha-bad", Size: 10, MediaType: hostile, Name: "..\x1b[31m.txt" + hostile}}
 	job := chatMsg("msg_bad1", "peer_bad", "wake_idle", chatAt(7, 1), hostile)
 	job.InReplyTo, job.Kind = &parent, "job_status"
-	job.JobStatus = &envelope.JobStatus{JobID: hostile, Sequence: 1, State: hostile, Output: json.RawMessage(`"` + "\\u001b]52;c;aGk=\\u0007" + `"`)}
+	job.JobStatus = &envelope.JobStatus{JobID: hostile, Sequence: 1, State: hostile, Output: json.RawMessage("\"\u202e\u009b2Jpwn\"")}
 	req := chatMsg("msg_bad2", "peer_bad", "hold", chatAt(7, 2), hostile)
 	req.Kind = "approval_request"
 	req.JobRequest = &envelope.JobRequest{Operation: hostile, JobKey: hostile}
