@@ -27,6 +27,9 @@ const Name = "vecnet.message"
 const (
 	// MaxTTL caps a subscription's lifetime (PROTOCOL §4.4).
 	MaxTTL = 24 * time.Hour
+	// RefreshMargin is how long before expiry ChatGPT should re-subscribe.
+	// The operator snapshot and events/subscribe use the same deadline.
+	RefreshMargin = 10 * time.Minute
 	// SecretOverlap is how long the previous secret keeps signing after a
 	// refresh supplies a new one.
 	SecretOverlap = 10 * time.Minute
