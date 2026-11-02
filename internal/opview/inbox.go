@@ -44,8 +44,12 @@ func (r *Reader) Inbox(ctx context.Context, c auth.Caller, q opapi.InboxQuery) (
 	const visible = `d.recipient = ? AND NOT EXISTS (
   SELECT 1 FROM approvals a WHERE a.msg_id = d.msg_id
   AND a.closed_at IS NULL AND a.expires_at > ?)`
+	// An approval the recipient answered was read, whether or not a read
+	// receipt followed: answering must not raise the unread count.
+	const unread = ` AND d.read_at IS NULL AND NOT EXISTS (
+  SELECT 1 FROM approvals a WHERE a.msg_id = d.msg_id AND a.decided_by = d.recipient)`
 	if err := r.Hub.DB.QueryRowContext(ctx,
-		`SELECT count(*) FROM deliveries d WHERE `+visible+` AND d.read_at IS NULL`, c.PeerID, out.Now).
+		`SELECT count(*) FROM deliveries d WHERE `+visible+unread, c.PeerID, out.Now).
 		Scan(&out.Unread); err != nil {
 		return out, fmt.Errorf("opview: inbox unread: %w", err)
 	}
@@ -55,7 +59,9 @@ func (r *Reader) Inbox(ctx context.Context, c auth.Caller, q opapi.InboxQuery) (
 	}
 	limit = min(limit, 200)
 	query := `SELECT d.dly_id, d.msg_id, d.thr_id, coalesce(t.title, ''), m.sender,
-  m.kind, d.priority, d.state, m.created_at, d.read_at, m.body
+  m.kind, d.priority, d.state, m.created_at,
+  coalesce(d.read_at, (SELECT a.closed_at FROM approvals a WHERE a.msg_id = d.msg_id AND a.decided_by = d.recipient)),
+  m.body
   FROM deliveries d JOIN messages m ON m.msg_id = d.msg_id
   JOIN threads t ON t.thr_id = d.thr_id WHERE ` + visible
 	args := []any{c.PeerID, out.Now}
@@ -64,7 +70,7 @@ func (r *Reader) Inbox(ctx context.Context, c auth.Caller, q opapi.InboxQuery) (
 		args = append(args, q.Before)
 	}
 	if q.UnreadOnly {
-		query += ` AND d.read_at IS NULL`
+		query += unread
 	}
 	query += ` ORDER BY d.dly_id DESC LIMIT ?`
 	args = append(args, limit+1)

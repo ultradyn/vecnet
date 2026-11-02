@@ -131,10 +131,18 @@ func TestInboxApprovalLifecycle(t *testing.T) {
 	if len(got.Approvals) != 1 || got.Approvals[0].ApprovalID != soon || !reflect.DeepEqual(deliveryIDs(got.Deliveries), []string{l.Deliveries[0].DeliveryID}) {
 		t.Fatalf("after answer = %+v", got)
 	}
+	// An approval the operator answered was read: it never pads the unread
+	// count, and its row is not unread in either client.
+	if got.Unread != 0 || got.Deliveries[0].ReadAt == nil {
+		t.Fatalf("answered approval is unread: unread %d, read_at %v", got.Unread, got.Deliveries[0].ReadAt)
+	}
+	if only := inbox(t, env, opapi.InboxQuery{UnreadOnly: true}); len(only.Deliveries) != 0 {
+		t.Fatalf("unread filter lists the answered approval: %+v", only.Deliveries)
+	}
 	// Expiry must be respected even before a ticker has closed the row.
 	env.Now.Advance(time.Hour)
 	got = inbox(t, env, opapi.InboxQuery{})
-	if len(got.Approvals) != 0 || !reflect.DeepEqual(deliveryIDs(got.Deliveries), []string{s.Deliveries[0].DeliveryID, l.Deliveries[0].DeliveryID}) || got.Unread != 2 {
+	if len(got.Approvals) != 0 || !reflect.DeepEqual(deliveryIDs(got.Deliveries), []string{s.Deliveries[0].DeliveryID, l.Deliveries[0].DeliveryID}) || got.Unread != 1 {
 		t.Fatalf("at expiry = %+v", got)
 	}
 	if n, err := env.Hub.ExpireApprovals(context.Background(), env.Now.Now()); err != nil || n != 1 {

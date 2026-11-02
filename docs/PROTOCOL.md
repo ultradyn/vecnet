@@ -293,6 +293,8 @@ countdowns. View types are defined in `internal/opapi`:
   carry their delivery/message/thread ids, thread title, sender, kind,
   priority, `section` (`woke` or `held`), state, creation time, excerpt,
   nullable `read_at`, and an attachment count. `unread` is the unread count.
+  An approval request the operator answered counts as read: its `read_at` is
+  the answer's time unless a read receipt came first.
 - `ThreadRow` keeps the section 2.8 `ThreadSummary` under the named `thread`
   field, alongside `created_by`, `created_at`, `last_message_at`, and nullable
   `cut` (`reason`, `at`). A detail's files carry `sha256`, name, media type,
