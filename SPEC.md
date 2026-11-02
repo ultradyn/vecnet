@@ -83,7 +83,7 @@ The operator enrols peers from the CLI (and later the admin UI) with a one-time 
 
 The web client at `/ui/` and the `vecnet tui` terminal client implement the operator inbox, linked flat-thread chat, approval answers, receipt markers and delivery matrices, thread files and spilled text, new messages, and operator presence. Inbox actions retry or discard dead letters and resume eligible subscriptions. The read-only dashboard shows peers, threads, subscription health, delivery health, loop cuts and the audit tail. Enrolment, scopes, routes and other administration remain CLI/API operations. See `docs/OPERATOR.md` for the operating guide.
 
-The clients are built, but the final two-client journey gate is pending: an approval answered in the TUI does not yet invalidate an already-open browser inbox. Shared read and presence behaviour must also pass that gate before Phase 3 is complete.
+Both clients share the operator's read state, approval answers and presence through durable `operator_view` events. An approval answered in one client leaves the other client's inbox without a reload; reading a web thread lowers the terminal unread count. Each presence heartbeat reads and re-posts the hub's current state. The two-client journey also verifies wake delivery, hub-authored approval expiry, and a single rejected browser event request returning to sign-in without retries. The Go, browser-model, protocol and dependency gates pass. The final screenshot gate remains pending because the inbox screen check's section-heading assertion predates the subscription attention section; Phase 3 is not yet declared complete. See `docs/plans/2026-11-01-operator-ui.md`.
 
 ## 14. Deployment and stack
 
