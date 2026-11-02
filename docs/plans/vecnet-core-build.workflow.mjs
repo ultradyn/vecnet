@@ -415,7 +415,7 @@ function reviewPassed(r) {
 }
 
 const halted = []
-const deferredMinors = []
+const deferredMinors = Array.isArray(A.priorMinors) ? A.priorMinors.slice() : []
 const results = []
 
 function halt(n, reason, extra) {
@@ -636,7 +636,7 @@ async function forkUnit(unit) {
   const label = unit.map(nn).join('+')
   const fork = await call(`Create one worktree per task for the parallel group ${label} of the vecnet ${PLAN_NAME} build.
 ${RULES}
-For each task number NN in [${unit.map(nn).join(', ')}]: if ${REPO}/.worktrees/${PREFIX}-tNN does not exist, run \`git -C ${REPO} worktree add -b ${PREFIX}-tNN ${REPO}/.worktrees/${PREFIX}-tNN ${BRANCH}\` (if the branch already exists from an interrupted run, \`worktree add\` without -b). Confirm each worktree's HEAD equals ${BRANCH}'s HEAD or is a descendant of it. Do not build or test. Return {ok, notes}.`,
+For each task number NN in [${unit.map(nn).join(', ')}]: if ${REPO}/.worktrees/${PREFIX}-tNN does not exist, run \`git -C ${REPO} worktree add -b ${PREFIX}-tNN ${REPO}/.worktrees/${PREFIX}-tNN ${BRANCH}\` (if the branch already exists from an interrupted run, \`worktree add\` without -b). If a worktree already exists and its HEAD is neither ${BRANCH}'s HEAD nor a descendant of it: commit any uncommitted changes there with \`git -C <path> add -A && git -C <path> -c commit.gpgsign=false commit -m "wip(task NN): interrupted attempt"\` (no Plan-Task trailer), then \`git -C <path> merge --no-edit ${BRANCH}\`; on a conflict run \`git -C <path> merge --abort\` and return ok false naming the files. Confirm each worktree's HEAD equals ${BRANCH}'s HEAD or is a descendant of it. Do not build or test. Return {ok, notes}.`,
     { label: `fork ${label}`, phase: `Task ${nn(unit[0])}`, effort: 'low', model: RELAY_MODEL, schema: { type: 'object', properties: { ok: { type: 'boolean' }, notes: { type: 'string' } }, required: ['ok', 'notes'] } })
   if (!fork || !fork.ok) { halt(unit[0], `could not create worktrees for ${label}: ${fork ? fork.notes : 'no result'}`); return false }
   return true

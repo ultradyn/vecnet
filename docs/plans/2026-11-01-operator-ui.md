@@ -17,7 +17,7 @@
 Every task starts the moment its dependencies are merged. There are no levels or groups.
 
 ```json
-{"1":[],"2":[],"3":[1],"4":[1],"5":[1],"6":[1],"7":[1,2],"8":[3,7],"9":[4,7],"10":[4,7],"11":[4,7],"12":[4,5,7],"13":[3,6,7],"14":[3,7],"15":[7],"16":[1],"17":[2,16],"18":[3,17],"19":[4,17],"20":[4,5,17],"21":[6,17],"22":[17],"23":[8,9,10,11,12,13,14,15,18,19,20,21,22,24],"24":[7,12,18]}
+{"1":[],"2":[],"3":[1],"4":[1],"5":[1],"6":[1],"7":[1,2],"8":[3,7],"9":[4,7],"10":[4,7],"11":[4,7],"12":[4,5,7],"13":[3,6,7],"14":[3,7],"15":[7],"16":[1],"17":[2,16],"18":[3,17],"19":[4,17],"20":[4,5,17],"21":[6,17],"22":[17],"23":[8,9,10,11,12,13,14,15,18,19,20,21,22,24,25],"24":[7,12,18],"25":[8,9,10,11,12,13,14,15,18,19,20,21,22,24]}
 ```
 
 Build settings: `taskPrefix: "oui"`, worktree `.worktrees/operator-ui`, branch `operator-ui` off `master`, status files in `.scratch/vecnet/build-operator-ui/` (gitignored by Task 2's first commit; the coordinator adds the line first if it starts before Task 2).
@@ -947,7 +947,7 @@ func TestHelpGolden(t *testing.T) { /* overlay at 140x42 */ }
 
 ### Task 23: Two-client journey, docs, final gate
 
-**Depends:** 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20, 21, 22, 24
+**Depends:** 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20, 21, 22, 24, 25
 
 **Files:**
 - Create: `docs/OPERATOR.md`, `docs/plans/shots/oui/README.md`, `scripts/ui/journey.mjs`
@@ -1044,6 +1044,39 @@ Run: `build2 go test -p 2 ./...`, `build2 node --test --test-concurrency=2 inter
 Expected: all pass, `validate-protocol` prints no drift.
 
 - [ ] **Step 5: Commit** `feat: operator_view events keep a second operator client in step`
+
+---
+
+### Task 25: Integrated screen gate
+
+**Depends:** 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20, 21, 22, 24
+
+Added 2026-11-02 after Task 23's second attempt. Each web task passed its screen script in its own worktree against its neighbours' stubs. On the merged branch, `SHOTS_DIR=<dir> just ui-shots` fails in five scripts, reproduced on `operator-ui` without Task 23's changes:
+
+| Script | Failure | First suspect |
+|---|---|---|
+| `scripts/ui/inbox.mjs:47` | `section order Needs a decision\|Failed deliveries\|5\|Woke you\|Held` | Task 13's `subs.renderAttention` fills Task 8's attention slot with an `h2` whose first span is a count, not a title |
+| `scripts/ui/matrix.mjs:105` (and `:129`) | `focus did not return to the opener` | Task 11's matrix close path versus Task 9/10's thread mount |
+| `scripts/ui/shell.mjs:74` | `moving between #matrix and #thread remounted the view` (a draft is lost) | Task 7's router versus Task 11's `#matrix/<id>` route |
+| `scripts/ui/subs.mjs:31` | waitFor timeout: `section.subs` sixth row absent | seeded subscriptions versus Task 24's or Task 13's filtering |
+| `scripts/ui/thread.mjs:76` | `reading column is only 756px` (needs > 760 at 1440×900) | Task 10's aside width versus Task 9's 980 px column |
+
+**Files:** any of `internal/ui/static/*`, `internal/ui/jstest/*`, `scripts/ui/*.mjs` and `docs/plans/shots/oui/*.png` needed for the fixes above, and nothing else. This task runs alone after every owner has merged, so the Shared resources ownership no longer applies to these files.
+
+**Rules:**
+- For each failure, first decide against this plan which side is wrong. A behaviour the plan requires (focus returns to the opener, a draft survives `#matrix` ↔ `#thread`, the reading column is wider than 760 px at 1440×900, six seeded subscriptions) is fixed in the code, never by relaxing the script. A script expectation that predates a neighbour's real content (the attention slot was empty when Task 8 wrote its order check) is updated to the integrated truth. Record each decision in one line in the commit body.
+- The inbox attention block follows the inbox's own heading convention: a title span first, then the `.n` count. So the order check becomes `Needs a decision|Failed deliveries|Subscriptions|Woke you|Held`, or the attention block is not an `h2` section at all. Choose whichever matches `docs/prototypes/operator-ui/shots/a-inbox.png` more closely.
+- Do not widen a timeout or add a sleep. Wait on page state.
+- Re-shoot every PNG whose pixels change, and inspect each one with the Read tool.
+
+- [ ] **Step 1:** Run `SHOTS_DIR=.scratch/vecnet/build-operator-ui/t25-before just ui-shots` and record every failing script, including any not in the table.
+- [ ] **Step 2:** Fix each failure under the rules above, one at a time, re-running that script after each fix.
+- [ ] **Step 3: Verify**
+
+Run: `build2 node --test --test-concurrency=2 internal/ui/jstest/`, then `SHOTS_DIR=.scratch/vecnet/build-operator-ui/t25-after just ui-shots`, twice in a row.
+Expected: both pass every script, twice.
+
+- [ ] **Step 4: Commit** `fix: integrated screen gate passes on the merged branch`
 
 ---
 
