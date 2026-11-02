@@ -6,7 +6,7 @@ import { createAttachments } from './attach.js';
 import { sendRefusal } from './attach-model.js';
 import { avatar, h } from './dom.js';
 import { bytes, clean, plural, short, title, when } from './format.js';
-import { budgetBanner, budgetOut, canShowFull, excerpt, FULL_TEXT_CAP, items, replyKey, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, excerpt, FULL_TEXT_CAP, items, replyKey, replySig, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
 import { createThumbs } from './thumbs.js';
 
 const PAGE = 200, MAX_PAGES = 50, PIN_SLACK = 80;
@@ -17,16 +17,26 @@ function randKey() {
   return 'ui-' + [...b].map(x => x.toString(16).padStart(2, '0')).join('');
 }
 
+// loadMessages returns the thread's messages and, from the operator's pages'
+// hosted_blobs (PROTOCOL §2.8), message id -> the hashes the hub hosts for
+// it; hosted is null when a page did not say, so thumbnails keep the
+// declared-only rule.
 async function loadMessages(api, id) {
-  const all = [];
-  let after;
+  const messages = [];
+  let after, hosted = new Map();
   for (let i = 0; i < MAX_PAGES; i++) {
     const page = await api.messages(id, { limit: PAGE, after });
-    all.push(...(page.messages || []));
+    messages.push(...(page.messages || []));
+    const hb = page.hosted_blobs;
+    if (hb && typeof hb === 'object' && hosted) {
+      for (const [msgId, shas] of Object.entries(hb)) if (Array.isArray(shas)) hosted.set(msgId, new Set(shas));
+    } else {
+      hosted = null;
+    }
     if (!page.next_after || !(page.messages || []).length) break;
     after = page.next_after;
   }
-  return all;
+  return { messages, hosted };
 }
 
 async function loadMatrix(api, id) {
@@ -80,7 +90,13 @@ export function mount(root, ctx) {
 
   const summary = () => ((ctx.threads.get() || {}).threads || []).find(t => t.thread_id === threadId);
   const thread = () => { const d = detail.get(); return (d && d.row && d.row.thread) || summary() || null; };
-  const msgs = () => history.get() || [];
+  const msgs = () => (history.get() || {}).messages || [];
+  // hostedOf is the history page's word on one attachment: true, false, or
+  // undefined when the hub did not say.
+  const hostedOf = (msgId, sha) => {
+    const hosted = (history.get() || {}).hosted;
+    return hosted ? !!(hosted.get(msgId) || new Set()).has(sha) : undefined;
+  };
 
   function lastFromOther(list) {
     for (let i = list.length - 1; i >= 0; i--) if (list[i].sender !== me && list[i].sender !== 'hub') return list[i].message_id;
@@ -101,6 +117,9 @@ export function mount(root, ctx) {
   async function send(ta, btn) {
     if (S.sending || !atts.ready()) return;
     const files = atts.toAttachments();
+    // The chips this request carries: ready() means every chip is done, and a
+    // file added while it is in flight is not among them, so it stays.
+    const carried = atts.items().map(it => it.id);
     // Empty text sends when attachments carry the message.
     const text = (ta.value.trim() || !files.length) ? ta.value : '';
     if (!text.trim() && !files.length) return;
@@ -115,7 +134,7 @@ export function mount(root, ctx) {
       render();
       return;
     }
-    S.pending = replyKey(S.pending, { text, prio: S.prio, replyTo: S.replyTo, sig: atts.signature() }, randKey);
+    S.pending = replyKey(S.pending, { text, prio: S.prio, replyTo: S.replyTo, sig: replySig(files) }, randKey);
     const body = { idempotency_key: S.pending.key, thread_id: threadId, priority: S.prio, content: { text } };
     if (S.replyTo) body.in_reply_to = S.replyTo;
     if (files.length) body.attachments = files;
@@ -127,7 +146,7 @@ export function mount(root, ctx) {
       const r = await api.send(body);
       S.pending = null;
       ta.value = '';
-      atts.clear();
+      atts.clear(carried);
       counter(ta);
       S.replyTo = null;
       S.pinned = true;
@@ -234,7 +253,7 @@ export function mount(root, ctx) {
       h('div', { class: 'to', hidden: true }, h('span'), h('button', { type: 'button', title: 'Reply to the thread instead', text: '×', onclick: () => { S.replyTo = ''; render(); } })),
       ta,
       atts.el,
-      h('div', { class: 'bar' }, seg, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint', text: 'Enter to send · Shift+Enter for a new line' }), pick, btn));
+      h('div', { class: 'bar' }, seg, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint', text: 'Drop or paste files · Enter to send · Shift+Enter for a new line' }), pick, btn));
     atts.wire(wrap, ta, pick);
     return h('div', { class: 'composer' }, h('div', { class: 'cbanner', role: 'alert', hidden: true }), wrap);
   }
@@ -334,7 +353,7 @@ export function mount(root, ctx) {
     if (it.system) return systemLine(it);
     const others = (m.recipients || []).map(nameOf).join(', ');
     // Images show inline from the thumbnail cache; everything else is a chip.
-    const files = (m.attachments || []).filter(a => a !== it.spill).map(a => thumbs.render(a));
+    const files = (m.attachments || []).filter(a => a !== it.spill).map(a => thumbs.render(a, hostedOf(m.message_id, a.sha256)));
     const full = S.full.get(m.message_id), showTxt = m.content && m.content.text && !(full && full.state === 'ok');
     const cls = 'msg' + (m.message_id === S.replyTo ? ' target' : '') + (m.message_id === S.flash ? ' flash' : '');
     return h('div', { class: cls, id: 'm-' + m.message_id, onanimationend: e => { if (e.animationName === 'flash') { S.flash = ''; e.currentTarget.classList.remove('flash'); } } },

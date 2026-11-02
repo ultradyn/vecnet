@@ -13,13 +13,18 @@ const rasterType = t => THUMB_TYPES.includes(essence(t));
 const fits = n => Number.isFinite(n) && n >= 0 && n <= THUMB_MAX;
 const NONE = Object.freeze({ state: 'none', url: null });
 
-// eligible applies the declared checks. A stored Message never holds a
-// blob_url, so an origin_url without one may be reference-only bytes (§11),
-// which the hub does not host: no fetch.
-export function eligible(att) {
+// eligible applies the declared checks. hosted is what the operator's
+// history page says (its hosted_blobs, PROTOCOL §2.8): true when the hub
+// hosts this message's bytes, false when it does not (reference-only or
+// purged), undefined when the page did not say. A stored Message never holds
+// a blob_url, so without that word an origin_url may mean reference-only
+// bytes (§11), which the hub does not host: no fetch.
+export function eligible(att, hosted) {
   if (!att || typeof att.sha256 !== 'string' || !SHA.test(att.sha256)) return false;
   if (!rasterType(att.media_type) || !fits(att.size)) return false;
-  return !att.origin_url || !!att.blob_url;
+  if (att.blob_url) return true;
+  if (typeof hosted === 'boolean') return hosted;
+  return !att.origin_url;
 }
 
 // createThumbCache fetches each sha256 at most once while it lives, and calls
@@ -57,8 +62,8 @@ export function createThumbCache({ api, URL, onReady = () => {} }) {
     }).then(() => { if (!dead) onReady(); });
   }
 
-  function state(att) {
-    if (dead || !eligible(att)) return NONE;
+  function state(att, hosted) {
+    if (dead || !eligible(att, hosted)) return NONE;
     if (!entries.has(att.sha256)) fetchOne(att.sha256);
     const e = entries.get(att.sha256);
     return { state: e.state, url: e.state === 'ok' ? e.url : null };

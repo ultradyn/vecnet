@@ -129,6 +129,15 @@ export function sendError(e) {
   return { kind: 'error', keepKey, text };
 }
 
+// replySig is the attachments' part of a reply's signature: every wire field
+// of each attachment, in order. The sha256s alone (attach-model signature())
+// would keep the key when a chip is replaced by the same bytes under another
+// name or media type, and the hub refuses that changed body under the old key
+// as 409 idempotency_conflict (PROTOCOL §5.3).
+export function replySig(files) {
+  return JSON.stringify((files || []).map(a => [a.sha256, a.size, a.media_type, a.name ?? null]));
+}
+
 // replyKey is the reply's pending send: the same one, idempotency key and all,
 // while its text, priority, target and attachments' signature are unchanged
 // (PROTOCOL §5.3), else a new one under a fresh key from mint.

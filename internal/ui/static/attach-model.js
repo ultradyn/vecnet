@@ -3,7 +3,7 @@
 // 25 MiB a blob, 16 attachments a send, one fewer when the text spills into
 // message.md (internal/hub/spill.go).
 import { SPILL } from './compose-model.js';
-import { clean, when } from './format.js';
+import { bytes, clean, when } from './format.js';
 
 export const MAX_ATTACHMENTS = 16, MAX_BYTES = 25 << 20;
 export const SPILL_SLOT = 'Remove one attachment or shorten the text: the long text needs an attachment slot.';
@@ -82,13 +82,15 @@ export function sendRefusal(items, text) {
   return enc.encode(text || '').length > SPILL && toAttachments(items).length >= MAX_ATTACHMENTS ? SPILL_SLOT : '';
 }
 
-const mib = n => Math.round((n / (1 << 20)) * 10) / 10 + ' MiB';
+// limitText: a limit of a MiB or more in MiB (10 MiB, 25 MiB), a smaller one
+// as format.js bytes() shows sizes, never '0 MiB'.
+const limitText = n => n >= 1 << 20 ? Math.round((n / (1 << 20)) * 10) / 10 + ' MiB' : bytes(n);
 
 // errorText is one line for a failed upload or send.
 export function errorText(err, nowMs = Date.now()) {
   const e = err || {}, d = e.details || {};
   if (e.status === 413 && e.code === 'payload_too_large' && d.field === 'attachments') return SPILL_SLOT;
-  if (e.status === 413) return 'Too large: the hub takes at most ' + mib(d.limit > 0 ? d.limit : MAX_BYTES) + ' a file.';
+  if (e.status === 413 && e.code === 'blob_too_large') return 'Too large: the hub takes at most ' + limitText(d.limit > 0 ? d.limit : MAX_BYTES) + ' a file.';
   if (e.status === 429) {
     const what = e.code === 'upload_quota_exceeded' ? 'Daily upload quota reached' : 'Too many uploads';
     const secs = Number(d.retry_after_seconds);

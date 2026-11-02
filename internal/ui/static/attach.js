@@ -27,9 +27,13 @@ export function createAttachments({ api, onChange }) {
     const kids = [h('span', { class: 'up-nm', text: it.name, title: it.name }), h('span', { class: 'up-sz', text: bytes(it.size) })];
     if (it.state === 'done') kids.push(h('span', { class: 'up-ok', text: '✓', 'aria-label': 'uploaded' }));
     if (it.state !== 'failed') kids.push(h('button', { type: 'button', class: 'up-x', text: '×', 'aria-label': 'Remove ' + it.name, onclick: () => remove(it) }));
-    it.bar = null;
+    it.bar = it.label = null;
     if (it.state === 'uploading' || it.state === 'queued') {
+      // A still cue beside the bar: the indeterminate sliver can be off the
+      // chip in any one frame.
+      it.label = h('span', { class: 'up-st', text: it.state === 'queued' ? 'queued' : 'uploading…' });
       it.bar = h('span', { class: 'up-bar' + (it.progressed ? '' : ' up-ind'), role: 'progressbar', 'aria-label': 'Uploading ' + it.name });
+      kids.splice(2, 0, it.label);
       kids.push(it.bar);
       progress(it);
     }
@@ -49,6 +53,7 @@ export function createAttachments({ api, onChange }) {
     const pct = it.total > 0 ? Math.min(100, Math.round((it.loaded / it.total) * 100)) : 0;
     it.bar.style.setProperty('--p', pct + '%');
     it.bar.setAttribute('aria-valuenow', String(pct));
+    if (it.label) it.label.textContent = pct + '%';
   }
 
   function start(it) {
@@ -119,11 +124,18 @@ export function createAttachments({ api, onChange }) {
     return refused;
   }
 
-  function clear() {
-    for (const it of list) if (it.ctrl) it.ctrl.abort();
-    list = [];
-    chips.replaceChildren();
+  // clear removes every chip, or with ids only those chips (a sent reply
+  // clears what it carried; a file added while it was in flight stays).
+  function clear(ids) {
+    const gone = ids ? list.filter(it => ids.includes(it.id)) : list;
+    for (const it of gone) {
+      if (it.ctrl) it.ctrl.abort();
+      it.ctrl = null; // so its rejection is not mistaken for a live upload
+      it.node.remove();
+    }
+    list = list.filter(it => !gone.includes(it));
     note.textContent = '';
+    pump();
     changed();
   }
 

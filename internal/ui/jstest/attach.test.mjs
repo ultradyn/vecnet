@@ -258,7 +258,13 @@ test('errorText: 429 shows the en-AU time from retry_after_seconds; 413 without 
   const t413 = errorText(new APIError(413, 'blob_too_large', 'blob exceeds the per-blob cap', {}), nowMs);
   assert.ok(t413.includes('25 MiB'), t413);
   assert.ok(errorText(new APIError(413, 'blob_too_large', '', { limit: 10 * MiB }), nowMs).includes('10 MiB'));
+  assert.ok(errorText(new APIError(413, 'blob_too_large', '', { limit: 2048 }), nowMs).includes('at most 2.0 KiB a file'));
   assert.equal(errorText(new APIError(413, 'payload_too_large', 'too many', { field: 'attachments', limit: 15 }), nowMs), SPILL_SLOT);
+  // Only blob_too_large is a per-file size; other 413s say what the hub said.
+  const meta = errorText(new APIError(413, 'payload_too_large', 'metadata has no room', { field: 'metadata', limit: 31 }), nowMs);
+  assert.equal(meta, 'Upload failed: metadata has no room (413)');
+  const body = errorText(new APIError(413, 'payload_too_large', 'request body exceeds 256 KiB', { limit: 262144 }), nowMs);
+  assert.ok(!/MiB a file/.test(body) && body.includes('256 KiB'), body);
 
   const net = errorText(new APIError(0, 'network', 'hub unreachable'), nowMs);
   const abort = errorText(new APIError(0, 'aborted', 'request aborted'), nowMs);

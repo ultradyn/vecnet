@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { budgetBanner, budgetOut, canShowFull, FULL_TEXT_CAP, items, replyKey, sendError, spillOf } from '../static/thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, FULL_TEXT_CAP, items, replyKey, replySig, sendError, spillOf } from '../static/thread-model.js';
 import { SPILL_SLOT } from '../static/attach-model.js';
 
 const OP = 'peer_op', CODEX = 'peer_codex', SLEUTH = 'peer_sleuth', GROK = 'peer_grok';
@@ -226,4 +226,21 @@ test('sendError: the hub refusing a spill slot shows the attachment-slot text', 
   // Any other 413 keeps today's code: message.
   const other = Object.assign(new Error('the message is over 64 KiB'), { status: 413, code: 'payload_too_large', details: {} });
   assert.equal(sendError(other).text, 'payload_too_large: the message is over 64 KiB');
+});
+
+test('replySig covers every attachment wire field: same bytes under a new name or media type mint a new key; an unchanged retry keeps it', () => {
+  const sha = 'a'.repeat(64), other = 'b'.repeat(64);
+  const file = { sha256: sha, size: 3, media_type: 'image/png', name: 'pasted-20261103-040546.png' };
+  let n = 0;
+  const mint = () => 'k' + ++n;
+  const send = files => ({ text: '', prio: 'wake', replyTo: null, sig: replySig(files) });
+  const first = replyKey(null, send([file]), mint);
+  assert.equal(replyKey(first, send([{ ...file }]), mint), first, 'an unchanged retry kept the key');
+  for (const changed of [{ name: 'shot.png' }, { media_type: 'image/webp' }, { size: 4 }]) {
+    assert.notEqual(replyKey(first, send([{ ...file, ...changed }]), mint).key, first.key, JSON.stringify(changed));
+  }
+  const two = [file, { ...file, sha256: other }];
+  assert.notEqual(replySig(two), replySig([two[1], two[0]]), 'order is part of the signature');
+  assert.notEqual(replySig([file]), replySig([]));
+  assert.equal(replySig([]), replySig([]));
 });

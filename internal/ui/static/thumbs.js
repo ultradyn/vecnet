@@ -25,8 +25,10 @@ export function createThumbs({ api, onReady = () => {} }) {
     onReady();
   }
 
-  function render(att) {
-    const st = cache.state(att);
+  // render takes hosted as eligible() does: the history page's word on
+  // whether the hub hosts this message's bytes.
+  function render(att, hosted) {
+    const st = cache.state(att, hosted);
     const label = clean(att.name || 'image');
     if (st.state === 'loading') {
       return h('span', { class: 'thumb wait', role: 'img', 'aria-label': 'Loading ' + label, title: label });
@@ -34,7 +36,7 @@ export function createThumbs({ api, onReady = () => {} }) {
     if (st.state !== 'ok') return chip(att);
     const img = h('img', { src: st.url, alt: label, decoding: 'async', draggable: 'false' });
     img.addEventListener('error', () => broken(att.sha256), { once: true });
-    return h('button', { type: 'button', class: 'thumb', 'data-sha': att.sha256, title: label + ' · ' + bytes(att.size), 'aria-label': 'Open ' + label, onclick: e => open(att, e.currentTarget) }, img);
+    return h('button', { type: 'button', class: 'thumb', 'data-sha': att.sha256, title: label + ' · ' + bytes(att.size), 'aria-label': 'Open ' + label, onclick: e => open(att, e.currentTarget, hosted) }, img);
   }
 
   function close() {
@@ -44,8 +46,8 @@ export function createThumbs({ api, onReady = () => {} }) {
   // open shows the image full size in an in-page dialog. Escape and a click
   // outside the image close it; focus goes back to the thumbnail, or to the
   // same image's thumbnail when a redraw has replaced it meanwhile.
-  function open(att, opener) {
-    const st = cache.state(att);
+  function open(att, opener, hosted) {
+    const st = cache.state(att, hosted);
     if (dead || st.state !== 'ok') return;
     close();
     const host = opener && opener.closest && opener.closest('[id]'), msgId = host ? host.id : '';
@@ -54,7 +56,7 @@ export function createThumbs({ api, onReady = () => {} }) {
     img.addEventListener('error', () => { close(); broken(att.sha256); }, { once: true });
     const dlg = h('dialog', { class: 'viewer', 'aria-label': label },
       h('figure', {}, img, h('figcaption', {}, h('span', { class: 'nm', text: label }), h('span', { class: 'sz', text: bytes(att.size) }))),
-      h('button', { type: 'button', class: 'vx', 'aria-label': 'Close', text: '×', onclick: () => close() }));
+      h('button', { type: 'button', class: 'btn vx', 'aria-label': 'Close', text: '×', onclick: () => close() }));
     // The dialog box fills the viewport, so a click on it rather than on its
     // contents is a click outside the image.
     dlg.addEventListener('click', e => { if (e.target === dlg || e.target === dlg.firstElementChild) close(); });

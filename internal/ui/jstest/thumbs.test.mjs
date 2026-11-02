@@ -111,6 +111,25 @@ test('origin_url only → no fetch', async () => {
   assert.deepEqual(api.calls, []);
 });
 
+test('hosted, from the operator history page: hosted bytes with an origin_url fetch; the hub saying not hosted never fetches', async () => {
+  const { api, cache } = setup();
+  const origin = { origin_url: 'https://example.com/shot.png' };
+  // The page's hosted_blobs says these bytes are on the hub, origin_url or not.
+  assert.equal(cache.eligible(att('a', origin), true), true);
+  assert.deepEqual(cache.state(att('a', origin), true), { state: 'loading', url: null });
+  // Reference-only (or purged): listed nowhere on a page that has hosted_blobs.
+  assert.equal(cache.eligible(att('b', origin), false), false);
+  assert.equal(cache.eligible(att('c'), false), false);
+  assert.deepEqual(cache.state(att('c'), false), { state: 'none', url: null });
+  // A page without hosted_blobs leaves today's rule.
+  assert.equal(cache.eligible(att('d', origin), undefined), false);
+  assert.equal(cache.eligible(att('e'), undefined), true);
+  // The declared checks still apply to hosted bytes.
+  assert.equal(cache.eligible(att('f', { ...origin, media_type: 'image/svg+xml' }), true), false);
+  await tick();
+  assert.deepEqual(api.calls, [sha('a')]);
+});
+
 test('one fetch per sha256 across repeated state() calls', async () => {
   const { api, URL, cache, ready } = setup();
   // Two messages may attach the same bytes under different names.
