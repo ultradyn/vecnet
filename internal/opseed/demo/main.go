@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/opseed"
@@ -92,28 +94,27 @@ func (c *controls) handler(next http.Handler) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/__demo/") {
 			w.Header().Set("Content-Type", "application/json")
 			if r.Method != http.MethodPost {
-				w.WriteHeader(405)
+				w.Header().Set("Allow", http.MethodPost)
+				writeDemoError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST for demo controls")
 				return
 			}
-			var in struct {
-				By      string `json:"by"`
-				For     string `json:"for"`
-				Prefix  string `json:"prefix"`
-				Status  int    `json:"status"`
-				Control string `json:"control"`
-			}
-			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in); err != nil {
-				http.Error(w, "invalid control body", 400)
-				return
-			}
-			if r.URL.Path == "/__demo/status" {
+			switch r.URL.Path {
+			case "/__demo/status":
+				if !readControl(w, r, &struct{}{}) {
+					return
+				}
 				c.mu.Lock()
 				stalled := c.stalled
 				c.mu.Unlock()
 				_ = json.NewEncoder(w).Encode(map[string]int{"stalled_requests": stalled})
 				return
-			}
-			if r.URL.Path == "/__demo/clear" {
+			case "/__demo/clear":
+				var in struct {
+					Control string `json:"control"`
+				}
+				if !readControl(w, r, &in) {
+					return
+				}
 				c.mu.Lock()
 				switch in.Control {
 				case "stall":
@@ -122,34 +123,55 @@ func (c *controls) handler(next http.Handler) http.Handler {
 					c.failUntil = time.Time{}
 				default:
 					c.mu.Unlock()
-					http.Error(w, "invalid control", 400)
+					writeDemoError(w, http.StatusBadRequest, "invalid_body", "invalid control")
 					return
 				}
 				c.mu.Unlock()
 				_ = json.NewEncoder(w).Encode(map[string]bool{"cleared": true})
 				return
-			}
-			text := in.For
-			if r.URL.Path == "/__demo/advance" {
-				text = in.By
-			}
-			d, err := time.ParseDuration(text)
-			if err != nil || d <= 0 || d > 7*24*time.Hour {
-				http.Error(w, "invalid duration", 400)
-				return
-			}
-			switch r.URL.Path {
 			case "/__demo/advance":
+				var in struct {
+					By string `json:"by"`
+				}
+				if !readControl(w, r, &in) {
+					return
+				}
+				d, ok := controlDuration(w, in.By)
+				if !ok {
+					return
+				}
 				c.offset.Add(int64(d))
 			case "/__demo/stall":
+				var in struct {
+					For string `json:"for"`
+				}
+				if !readControl(w, r, &in) {
+					return
+				}
+				d, ok := controlDuration(w, in.For)
+				if !ok {
+					return
+				}
 				c.mu.Lock()
 				c.clearStall()
 				c.stallRelease = make(chan struct{})
 				c.stallUntil = c.realNow().Add(d)
 				c.mu.Unlock()
 			case "/__demo/fail":
+				var in struct {
+					For    string `json:"for"`
+					Prefix string `json:"prefix"`
+					Status int    `json:"status"`
+				}
+				if !readControl(w, r, &in) {
+					return
+				}
+				d, ok := controlDuration(w, in.For)
+				if !ok {
+					return
+				}
 				if !strings.HasPrefix(in.Prefix, "/v1/") || in.Status < 400 || in.Status > 599 {
-					http.Error(w, "invalid failure", 400)
+					writeDemoError(w, http.StatusBadRequest, "invalid_body", "invalid failure")
 					return
 				}
 				c.mu.Lock()
@@ -158,10 +180,10 @@ func (c *controls) handler(next http.Handler) http.Handler {
 				c.failUntil = c.realNow().Add(d)
 				c.mu.Unlock()
 			default:
-				http.NotFound(w, r)
+				writeDemoError(w, http.StatusNotFound, "not_found", "no such demo control")
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]string{"now": c.now().UTC().Format(time.RFC3339Nano)})
+			_ = json.NewEncoder(w).Encode(map[string]string{"now": envelope.FormatTime(c.now())})
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/v1/") {
@@ -185,14 +207,53 @@ func (c *controls) handler(next http.Handler) http.Handler {
 			failUntil, prefix, status := c.failUntil, c.failPrefix, c.failStatus
 			c.mu.Unlock()
 			if c.realNow().Before(failUntil) && strings.HasPrefix(r.URL.Path, prefix) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(status)
-				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "demo_failure", "message": "Demo failure", "details": map[string]any{}}})
+				writeDemoError(w, status, "demo_failure", "Demo failure")
 				return
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// writeDemoError uses the same error/code/message/details envelope as httpapi.
+// The production writer is package-private; these controls only exist here.
+func writeDemoError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+		"code": code, "message": message, "details": map[string]any{},
+	}})
+}
+
+// readControl accepts exactly one JSON object, with only this endpoint's fields.
+// Finish validation before callers can change any control state.
+func readControl(w http.ResponseWriter, r *http.Request, dst any) bool {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
+	raw = bytes.TrimSpace(raw)
+	if err != nil || len(raw) == 0 || raw[0] != '{' {
+		writeDemoError(w, http.StatusBadRequest, "invalid_body", "invalid control body")
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		writeDemoError(w, http.StatusBadRequest, "invalid_body", "invalid control body")
+		return false
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		writeDemoError(w, http.StatusBadRequest, "invalid_body", "invalid control body")
+		return false
+	}
+	return true
+}
+
+func controlDuration(w http.ResponseWriter, text string) (time.Duration, bool) {
+	d, err := time.ParseDuration(text)
+	if err != nil || d <= 0 || d > 7*24*time.Hour {
+		writeDemoError(w, http.StatusBadRequest, "invalid_body", "invalid duration")
+		return 0, false
+	}
+	return d, true
 }
 
 func main() {

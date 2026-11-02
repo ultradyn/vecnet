@@ -13,9 +13,94 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/envelope"
 )
 
 func TestDemoControls(t *testing.T) {
+	t.Run("wire contract", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, method, path, body, code string
+			status                         int
+		}{
+			{"method", "GET", "/__demo/advance", "", "method_not_allowed", 405},
+			{"unknown endpoint", "POST", "/__demo/missing", `{}`, "not_found", 404},
+			{"invalid duration", "POST", "/__demo/advance", `{"by":"invalid"}`, "invalid_body", 400},
+			{"zero duration", "POST", "/__demo/stall", `{"for":"0s"}`, "invalid_body", 400},
+			{"excessive duration", "POST", "/__demo/stall", `{"for":"169h"}`, "invalid_body", 400},
+			{"invalid prefix", "POST", "/__demo/fail", `{"prefix":"/ui/","status":500,"for":"1h"}`, "invalid_body", 400},
+			{"invalid status", "POST", "/__demo/fail", `{"prefix":"/v1/peers","status":200,"for":"1h"}`, "invalid_body", 400},
+			{"invalid clear", "POST", "/__demo/clear", `{"control":"unknown"}`, "invalid_body", 400},
+			{"unknown advance field", "POST", "/__demo/advance", `{"by":"1s","unexpected":true}`, "invalid_body", 400},
+			{"unknown stall field", "POST", "/__demo/stall", `{"for":"1s","unexpected":true}`, "invalid_body", 400},
+			{"unknown fail field", "POST", "/__demo/fail", `{"prefix":"/v1/peers","status":500,"for":"1h","unexpected":true}`, "invalid_body", 400},
+			{"unknown clear field", "POST", "/__demo/clear", `{"control":"stall","unexpected":true}`, "invalid_body", 400},
+			{"unknown status field", "POST", "/__demo/status", `{"unexpected":true}`, "invalid_body", 400},
+			{"wrong endpoint field", "POST", "/__demo/advance", `{"by":"1s","for":"1s"}`, "invalid_body", 400},
+			{"trailing object", "POST", "/__demo/advance", `{"by":"1s"} {}`, "invalid_body", 400},
+			{"trailing garbage", "POST", "/__demo/advance", `{"by":"1s"} garbage`, "invalid_body", 400},
+			{"malformed", "POST", "/__demo/status", `{`, "invalid_body", 400},
+			{"empty", "POST", "/__demo/status", ``, "invalid_body", 400},
+			{"null", "POST", "/__demo/status", `null`, "invalid_body", 400},
+			{"array", "POST", "/__demo/status", `[]`, "invalid_body", 400},
+			{"wrong type", "POST", "/__demo/advance", `{"by":123}`, "invalid_body", 400},
+			{"oversize", "POST", "/__demo/status", `{"padding":"` + strings.Repeat("x", 4096) + `"}`, "invalid_body", 400},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				c := &controls{}
+				handler := c.handler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("control reached next handler") }))
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
+				if w.Code != tc.status {
+					t.Errorf("status = %d, want %d", w.Code, tc.status)
+				}
+				if got := w.Header().Get("Content-Type"); got != "application/json" {
+					t.Errorf("Content-Type = %q, want application/json", got)
+				}
+				var body struct {
+					Error struct {
+						Code    string         `json:"code"`
+						Message string         `json:"message"`
+						Details map[string]any `json:"details"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+					t.Fatalf("invalid error JSON: %v", err)
+				}
+				if body.Error.Code != tc.code || body.Error.Message == "" || body.Error.Details == nil {
+					t.Errorf("incomplete error envelope: %+v", body.Error)
+				}
+				if c.offset.Load() != 0 || !c.stallUntil.IsZero() || !c.failUntil.IsZero() {
+					t.Error("rejected request changed control state")
+				}
+			})
+		}
+		for _, tc := range []struct{ path, body, want string }{
+			{"/__demo/advance", "{\"by\":\"1s\"} \n\t", "2026-11-02T01:00:01.123Z"},
+			{"/__demo/stall", `{"for":"1s"}`, "2026-11-02T01:00:00.123Z"},
+			{"/__demo/fail", `{"prefix":"/v1/peers","status":503,"for":"1h"}`, "2026-11-02T01:00:00.123Z"},
+		} {
+			t.Run(tc.path+" timestamp", func(t *testing.T) {
+				c := &controls{wallNow: func() time.Time {
+					return time.Date(2026, 11, 2, 12, 0, 0, 123456789, time.FixedZone("test", 11*60*60))
+				}}
+				w := httptest.NewRecorder()
+				c.handler(nil).ServeHTTP(w, httptest.NewRequest("POST", tc.path, strings.NewReader(tc.body)))
+				var body struct {
+					Now string `json:"now"`
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || w.Code != 200 {
+					t.Fatalf("invalid success response: status=%d, err=%v", w.Code, err)
+				}
+				if _, err := envelope.ParseTime(body.Now); err != nil {
+					t.Errorf("now is not a wire timestamp: %v", err)
+				}
+				if body.Now != tc.want {
+					t.Errorf("now = %q, want %q", body.Now, tc.want)
+				}
+			})
+		}
+	})
 	base := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	var elapsed atomic.Int64
 	type waiting struct {
