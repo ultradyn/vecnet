@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { APIError } from '../static/api.js';
+import { APIError, createApi } from '../static/api.js';
 import { createStore, tagsFor } from '../static/store.js';
 
 const fixture = JSON.parse(await readFile(new URL('../../opapi/testdata/tags.json', import.meta.url), 'utf8'));
@@ -193,6 +193,39 @@ test('401 stops the loop; 403 and 204 stop with conn stopped; no retry', async (
     assert.deepEqual(h.sleeps, []);
     assert.deepEqual(h.acks, []);
   }
+});
+
+test('a 200 with no readable body backs off and retries; only a real 204 stops', async () => {
+  const lost = () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"events":['));
+      controller.error(new TypeError('terminated'));
+    },
+  }), { status: 200 });
+  const replies = [
+    () => new Response('<html>proxy</html>', { status: 200 }),
+    () => new Response('', { status: 200 }),
+    () => new Response('{"events":[{"cur', { status: 200 }),
+    lost,
+    () => new Response('null', { status: 200 }),
+    () => new Response(JSON.stringify({ events: [], next_cursor: 'e1.1' }), { status: 200 }),
+    () => new Response(null, { status: 204 }),
+  ];
+  const urls = [], sleeps = [], conns = [];
+  const controller = new AbortController();
+  const fetch = async url => {
+    urls.push(url);
+    if (!replies.length) { controller.abort(); throw new DOMException('stopped', 'AbortError'); }
+    return replies.shift()();
+  };
+  const store = createStore({ api: createApi({ secret: 's', fetch }), sleep: async ms => { sleeps.push(ms); } });
+  store.onConn(state => conns.push(state));
+  await store.pump(controller.signal);
+  assert.deepEqual(sleeps, [1000, 2000, 4000, 8000, 16000]);
+  assert.equal(urls.length, 7);
+  for (const url of urls.slice(0, 6)) assert.equal(url, '/v1/events?wait=0');
+  assert.equal(urls[6], '/v1/events?after=e1.1&wait=25');
+  assert.deepEqual(conns, ['offline', 'live', 'stopped']);
 });
 
 test('5xx backs off 1,2,4…30 s with fake sleep; success resets', async () => {

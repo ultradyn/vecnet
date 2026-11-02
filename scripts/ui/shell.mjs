@@ -91,15 +91,22 @@ try {
     await page.locator('.composer .to', { hasText: 'Classifier checks passed.' }).waitFor();
     const reply = 'Thanks, shipping the shell.';
     await page.locator('.composer textarea').fill(reply);
-    await page.keyboard.press('Enter');
+    // The toast lasts 2.5 s from before the thread reloads, so it is awaited from
+    // before the press: a slow reload must not outlast it.
+    await Promise.all([
+      page.locator('#toast.on', { hasText: 'Sent' }).waitFor(),
+      page.keyboard.press('Enter'),
+    ]);
     await page.locator('.msg .txt', { hasText: reply }).waitFor();
-    await page.locator('#toast.on', { hasText: 'Sent' }).waitFor();
     const history = await (await asPeer('operator', 'GET', `/v1/threads/${demo.threads.hark}/messages?limit=200`)).json();
     const sent = history.messages.find(m => m.content.text === reply);
     assert(sent, 'reply did not reach the hub');
     assert(countRequests(req => req.method() === 'POST' && req.url().endsWith('/v1/messages') && req.headers()['x-vecnet-ingress'] === 'operator_ui') === 1, 'reply not marked operator_ui');
     assert(sent.in_reply_to, 'reply lost its target');
     await page.locator('.msg', { hasText: reply }).scrollIntoViewIfNeeded();
+    // The toast sits over the top message, so the shot waits for it to slide out.
+    await page.locator('#toast.on').waitFor({ state: 'hidden' });
+    await page.evaluate(() => Promise.all(document.getElementById('toast').getAnimations().map(a => a.finished)));
     await shot('07-shell-success');
 
     // A peer's message wakes the parked long-poll and reaches the open thread

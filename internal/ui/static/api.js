@@ -22,6 +22,12 @@ function query(params) {
 }
 
 const seg = encodeURIComponent;
+const UNREADABLE = 'unreadable reply from the hub';
+
+function transportError(e, message) {
+  if (e && e.name === 'AbortError') return new APIError(0, 'aborted', 'request aborted');
+  return new APIError(0, 'network', message);
+}
 
 // onUnauthorized fires at most once per client: every request parked when a
 // secret is rotated answers 401, and one sign-out is enough.
@@ -38,16 +44,25 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch (e) {
-      if (e && e.name === 'AbortError') throw new APIError(0, 'aborted', 'request aborted');
-      throw new APIError(0, 'network', 'hub unreachable');
+      throw transportError(e, 'hub unreachable');
     }
-    if (r.ok) {
-      if (r.status === 204) return null;
-      if (read === 'blob') return r.blob();
+    // null means 204 and nothing else: the pump reads it as "peer disabled".
+    if (r.status === 204) return null;
+    if (r.ok && read === 'blob') {
+      try { return await r.blob(); } catch (e) { throw transportError(e, UNREADABLE); }
     }
     let j = null;
-    try { j = await r.json(); } catch { /* a proxy's error page, or no body */ }
-    if (r.ok) return j;
+    try {
+      j = await r.json();
+    } catch (e) {
+      // A proxy's error page or no body: the status below still says what happened.
+      if (e && e.name === 'AbortError') throw transportError(e);
+    }
+    if (r.ok) {
+      // The reply was lost on the way, as a dropped connection is.
+      if (j === null) throw new APIError(0, 'network', UNREADABLE);
+      return j;
+    }
     const e = (j && j.error) || {};
     const err = new APIError(r.status, e.code || 'http_' + r.status, e.message || r.statusText, e.details);
     if (r.status === 401 && !unauthorized) { unauthorized = true; onUnauthorized(err); }

@@ -62,6 +62,49 @@ test('401 calls onUnauthorized exactly once; network failure → status 0', asyn
   assert.equal(unauthorized, 0);
 });
 
+// A body that starts and then dies, as a dropped connection does mid-read.
+const lostBody = (error, status = 200) => new Response(new ReadableStream({
+  start(controller) {
+    controller.enqueue(new TextEncoder().encode('{"events":['));
+    controller.error(error);
+  },
+}), { status });
+
+test('a 2xx with no readable JSON is a network failure, never the 204 null', async () => {
+  const replies = {
+    'html page': () => new Response('<html>Sign in to this network</html>', { status: 200 }),
+    'empty body': () => new Response('', { status: 200 }),
+    'truncated JSON': () => new Response('{"events":[{"cur', { status: 200 }),
+    'lost mid-read': () => lostBody(new TypeError('terminated')),
+    'JSON null': () => new Response('null', { status: 200 }),
+  };
+  for (const [name, reply] of Object.entries(replies)) {
+    let unauthorized = 0;
+    const { api } = harness(reply, { onUnauthorized: () => { unauthorized++; } });
+    const error = await api.events({ wait: 0 }).catch(e => e);
+    assert.ok(error instanceof APIError, name);
+    assert.equal(error.status, 0, name);
+    assert.equal(error.code, 'network', name);
+    assert.equal(unauthorized, 0, name);
+  }
+});
+
+test('a body read that is aborted is status 0, code aborted', async () => {
+  const { api } = harness(() => lostBody(new DOMException('stopped', 'AbortError')));
+  const error = await api.events({ wait: 25 }).catch(e => e);
+  assert.ok(error instanceof APIError);
+  assert.equal(error.status, 0);
+  assert.equal(error.code, 'aborted');
+});
+
+test('an error status keeps its status when its body is lost', async () => {
+  const { api } = harness(() => lostBody(new TypeError('terminated'), 503));
+  const error = await api.peers().catch(e => e);
+  assert.ok(error instanceof APIError);
+  assert.equal(error.status, 503);
+  assert.equal(error.code, 'http_503');
+});
+
 test('every method calls its route with the secret only in the header', async () => {
   const { api, calls } = harness();
   const table = [
@@ -140,6 +183,12 @@ test('blob resolves to a Blob and errors like every other call', async () => {
   const blob = await api.blob('abc');
   assert.ok(blob instanceof Blob);
   assert.equal(await blob.text(), 'bytes');
+
+  const lost = harness(() => lostBody(new TypeError('terminated')));
+  const dropped = await lost.api.blob('abc').catch(e => e);
+  assert.ok(dropped instanceof APIError);
+  assert.equal(dropped.status, 0);
+  assert.equal(dropped.code, 'network');
 
   const missing = harness(() => json(404, { error: { code: 'not_found', message: 'gone', details: {} } }));
   const error = await missing.api.blob('abc').catch(e => e);
