@@ -116,10 +116,11 @@ type (
 		err          error
 	}
 	chatStartedMsg struct {
-		args   []string
-		peer   string
-		result opapi.SendResult
-		err    error
+		args    []string
+		peer    string
+		attempt chatNewAttempt
+		result  opapi.SendResult
+		err     error
 	}
 	chatRefusedMsg struct {
 		args []string
@@ -165,14 +166,14 @@ type chatScreen struct {
 	overlay          chatOverlay
 	matrixX, matrixY int
 	reader           chatReader
-	lastNew          chatNewAttempt
-	lastNewKey       string
-	msgErr           string        // why the :msg back on the command line failed
-	heldMsgs         []chatHeldMsg // oldest first
+	newKeys          map[chatNewAttempt]string // :msg keys awaiting a retry, until that attempt lands
+	openNew          string                    // a :msg thread to open once the line is free
+	msgErr           string                    // why the :msg back on the command line failed
+	heldMsgs         []chatHeldMsg             // oldest first
 }
 
 func newChatScreen() Screen {
-	return &chatScreen{follow: true, drafts: map[string]*chatDraft{}, readTo: map[string]string{}, answers: map[string]chatAnswerState{}}
+	return &chatScreen{follow: true, drafts: map[string]*chatDraft{}, readTo: map[string]string{}, answers: map[string]chatAnswerState{}, newKeys: map[chatNewAttempt]string{}}
 }
 
 func (s *chatScreen) Title() string { return "chat" }
@@ -229,6 +230,10 @@ func (s *chatScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 		s.onSaved(msg, m)
 	case chatReadMsg:
 		cmd = s.onRead(msg, m)
+	}
+	if s.openNew != "" && chatLineFree(m) {
+		cmd = tea.Batch(cmd, m.OpenThread(s.openNew))
+		s.openNew = ""
 	}
 	s.reopenMsg(m)
 	return tea.Batch(cmd, s.arm(), s.sync(m))
@@ -525,6 +530,14 @@ func (s *chatScreen) sendFailed(m *Model, id string, err error) {
 	if isStatus(err, 401) {
 		m.reject(err)
 	}
+	if id != m.CurrentThread { // enter here would send this thread's draft, not that one
+		title := "untitled " + chatShort(id)
+		if row := chatRowOf(m, id); row != nil {
+			title = chatTitleOf(row.Thread)
+		}
+		m.Toast("send to "+title+" failed, its text is kept there: "+chatSendWhy(m, id, err), true)
+		return
+	}
 	m.Toast(chatSendError(m, id, err), true)
 }
 
@@ -582,15 +595,18 @@ func (s *chatScreen) commandMsg(m *Model, args []string) tea.Cmd {
 		return s.refuseMsg(m, args, fmt.Sprintf("ambiguous prefix %s: %s", args[0], strings.Join(names, ", ")))
 	}
 	attempt := chatNewAttempt{peer: ids[0], text: strings.Join(args[1:], " "), prio: m.Prio}
-	if s.lastNewKey == "" || s.lastNew != attempt {
-		s.lastNewKey = chatKey()
+	// Each attempt keeps its key until it lands, so an unchanged retry of any
+	// held line is the same request to the hub, however many are held.
+	key, ok := s.newKeys[attempt]
+	if !ok {
+		key = chatKey()
+		s.newKeys[attempt] = key
 	}
-	s.lastNew = attempt
-	req := envelope.SendRequest{IdempotencyKey: s.lastNewKey, Recipients: []string{attempt.peer}, Priority: attempt.prio, Content: envelope.SendContent{Text: attempt.text}}
+	req := envelope.SendRequest{IdempotencyKey: key, Recipients: []string{attempt.peer}, Priority: attempt.prio, Content: envelope.SendContent{Text: attempt.text}}
 	api, ctx, peer := m.API, m.ctx, names[0]
 	return func() tea.Msg {
 		r, err := api.Send(ctx, req)
-		return chatStartedMsg{args: args, peer: peer, result: r, err: err}
+		return chatStartedMsg{args: args, peer: peer, attempt: attempt, result: r, err: err}
 	}
 }
 
@@ -645,7 +661,16 @@ func (s *chatScreen) onStarted(msg chatStartedMsg, m *Model) tea.Cmd {
 		s.holdMsg(m, msg.args, chatSendError(m, "", msg.err), chatSendWhy(m, "", msg.err))
 		return nil
 	}
-	s.lastNewKey = ""
+	delete(s.newKeys, msg.attempt)
+	if !chatLineFree(m) {
+		// The operator is typing or reading: the new thread waits, so keys keep
+		// going where they went. Update opens it once the line is free.
+		if msg.result.ThreadID != "" {
+			s.openNew = msg.result.ThreadID
+		}
+		m.Toast("sent to "+msg.peer+", its thread opens when you finish", false)
+		return m.Reload("threads")
+	}
 	m.Toast("sent to "+msg.peer, false)
 	return tea.Batch(m.OpenThread(msg.result.ThreadID), m.Reload("threads"))
 }

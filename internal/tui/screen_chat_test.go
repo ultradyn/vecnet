@@ -518,6 +518,27 @@ func TestChatMarksRead(t *testing.T) {
 }
 
 func TestSendFlow(t *testing.T) {
+	t.Run("a failure after moving away names the thread that kept the text", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		a.fail("Send", errors.New("connection refused"))
+		release := a.hold("Send")
+		p.press("i")
+		typeText(p, "keep me")
+		p.press("enter")
+		p.until("send", func() bool { return a.count("Send") == 1 })
+		p.press("esc", "]")
+		if m.CurrentThread == chatHark {
+			t.Fatal("] did not move")
+		}
+		release()
+		waitToast(t, p, m, "connection refused")
+		if strings.Contains(m.toast.text, "enter retries") || !strings.Contains(m.toast.text, "kept there") {
+			t.Fatalf("toast %q", m.toast.text)
+		}
+		if d := chatOf(m).draft(chatHark); d.text != "keep me" {
+			t.Fatalf("draft %q", d.text)
+		}
+	})
 	t.Run("one send", func(t *testing.T) {
 		a, m, p := chatOpen(t)
 		release := a.hold("Send")
@@ -1551,6 +1572,94 @@ func TestMsgCommand(t *testing.T) {
 			t.Fatalf("request %+v", r)
 		}
 		p.until("opens the new thread", func() bool { return m.CurrentThread == chatOther })
+	})
+	t.Run("a success in Insert leaves the composer on its thread", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		a.sendBack = opapi.SendResult{MessageID: "msg_x", ThreadID: chatOther}
+		release := a.hold("Send")
+		run(t, m, p, "claw", "new", "topic")
+		p.until("send", func() bool { return a.count("Send") == 1 })
+		p.press("i")
+		typeText(p, "do not ship ")
+		release()
+		waitToast(t, p, m, "sent to claw")
+		typeText(p, "the build")
+		if m.Mode != ModeInsert || m.CurrentThread != chatHark {
+			t.Fatalf("Mode %v, thread %s", m.Mode, m.CurrentThread)
+		}
+		if got, other := chatOf(m).draft(chatHark).text, chatOf(m).draft(chatOther).text; got != "do not ship the build" || other != "" {
+			t.Fatalf("drafts %q / %q", got, other)
+		}
+		p.press("enter")
+		p.until("the composer send", func() bool { return len(a.sends()) == 2 })
+		if r := a.sends()[1]; r.ThreadID == nil || *r.ThreadID != chatHark || r.Content.Text != "do not ship the build" {
+			t.Fatalf("request %+v", r)
+		}
+		p.until("sent", func() bool { return m.toast.text == "sent" })
+		if m.CurrentThread != chatHark {
+			t.Fatalf("moved to %s while in Insert", m.CurrentThread)
+		}
+		p.press("esc")
+		p.until("the new thread to open", func() bool { return m.CurrentThread == chatOther })
+	})
+	t.Run("a success behind help opens once help closes", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		a.sendBack = opapi.SendResult{MessageID: "msg_x", ThreadID: chatOther}
+		release := a.hold("Send")
+		run(t, m, p, "claw", "new", "topic")
+		p.until("send", func() bool { return a.count("Send") == 1 })
+		p.press("?")
+		release()
+		waitToast(t, p, m, "sent to claw")
+		if m.CurrentThread != chatHark || !m.Help {
+			t.Fatalf("thread %s, Help %v", m.CurrentThread, m.Help)
+		}
+		p.press("x")
+		p.until("the new thread to open", func() bool { return m.CurrentThread == chatOther })
+	})
+	t.Run("each held line keeps its own key", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		a.fail("Send", errors.New("connection refused"))
+		p.press("i")
+		run(t, m, p, "claw", "first")
+		p.until("the first failure", func() bool { return len(chatOf(m).heldMsgs) == 1 })
+		run(t, m, p, "codex", "second")
+		p.until("the second failure", func() bool { return len(chatOf(m).heldMsgs) == 2 })
+		p.press("esc")
+		kept(t, p, m, "msg claw first", "connection refused")
+		m.Mode, m.Input = ModeNormal, ""
+		run(t, m, p, "claw", "first")
+		p.until("retry", func() bool { return len(a.sends()) == 3 })
+		sent := a.sends()
+		if sent[0].IdempotencyKey != sent[2].IdempotencyKey {
+			t.Fatalf("key changed: %q %q", sent[0].IdempotencyKey, sent[2].IdempotencyKey)
+		}
+		if sent[0].IdempotencyKey == sent[1].IdempotencyKey {
+			t.Fatal("two different lines share a key")
+		}
+	})
+	t.Run("a success between a failure and its retry keeps the key", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		a.fail("Send", errors.New("connection refused"))
+		run(t, m, p, "claw", "first")
+		kept(t, p, m, "msg claw first", "connection refused")
+		m.Mode, m.Input = ModeNormal, ""
+		a.fail("Send", nil)
+		run(t, m, p, "codex", "second")
+		p.until("the other send", func() bool { return len(a.sends()) == 2 })
+		p.until("sent", func() bool { return strings.Contains(m.toast.text, "sent to codex") })
+		run(t, m, p, "claw", "first")
+		p.until("retry", func() bool { return len(a.sends()) == 3 })
+		sent := a.sends()
+		if sent[0].IdempotencyKey != sent[2].IdempotencyKey {
+			t.Fatalf("key changed: %q %q", sent[0].IdempotencyKey, sent[2].IdempotencyKey)
+		}
+		p.until("sent", func() bool { return strings.Contains(m.toast.text, "sent to claw") })
+		run(t, m, p, "claw", "first")
+		p.until("a fresh send", func() bool { return len(a.sends()) == 4 })
+		if a.sends()[3].IdempotencyKey == sent[2].IdempotencyKey {
+			t.Fatal("a landed attempt kept its key, so the same words again would be dropped")
+		}
 	})
 	t.Run("peer id prefix", func(t *testing.T) {
 		a, m, p := chatOpen(t)
