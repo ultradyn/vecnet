@@ -59,9 +59,16 @@ function row(s, ctx, now) {
   return [tr, h('tr', { class: 'note', 'data-sub': s.sub_id, title: note }, h('td', { colspan: String(COLUMNS.length), text: note }))];
 }
 
+// The live unsubscribe per section element, so a second renderSection on the
+// same element replaces the first instead of stacking timers and listeners.
+const sections = new WeakMap();
+
 // renderSection fills el with the subscription table for the dashboard. It has
-// no buttons: the dashboard performs no writes. It returns an unsubscribe.
+// no buttons: the dashboard performs no writes. It returns an unsubscribe;
+// calling it again on the same element first stops the previous one.
 export function renderSection(el, ctx) {
+  const prev = sections.get(el);
+  if (prev) prev();
   const subs = subsResource(ctx);
   const draw = () => {
     if (!el.isConnected && el.childNodes.length) return;
@@ -89,7 +96,9 @@ export function renderSection(el, ctx) {
   function off() {
     clearInterval(tick);
     for (const fn of offs.splice(0)) fn();
+    if (sections.get(el) === off) sections.delete(el);
   }
+  sections.set(el, off);
   draw();
   subs.reload();
   return off;

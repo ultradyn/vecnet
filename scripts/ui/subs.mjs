@@ -1,5 +1,6 @@
 // Task 13: subscription health in the dashboard and the inbox, in a real browser.
 import { assert, cleanBuild, withDemo } from './lib.mjs';
+import { expiresIn } from '../../internal/ui/static/subs-model.js';
 
 const SEEDED = ['ok', 'late', 'paused_token', 'paused_failed', 'paused_auth', 'paused_operator'];
 const RESUME = '**/v1/admin/subscriptions/*/resume';
@@ -47,10 +48,31 @@ try {
     for (const col of ['Peer', 'Host', 'Health', 'Expires', 'Last refresh', 'Last delivery', 'Attempts', 'Cursor']) {
       assert(await section.locator('th', { hasText: col }).count() === 1, `no ${col} column`);
     }
+    // Expires is relative to the hub's clock, which runs in real time from the
+    // seed, so the expected text comes from hub data, not fixed windows: the
+    // cell must equal expiresIn(expires_at, t) for some hub instant t between
+    // a read just before and just after, widened by one 15 s redraw tick and
+    // a little clock-offset slack. This holds however slow the slice is.
+    const hubNowMs = async () => {
+      const r = await asPeer('operator', 'GET', '/v1/admin/inbox?limit=1');
+      assert(r.ok, `inbox: ${r.status}`);
+      const t = Date.parse((await r.json()).now);
+      assert(Number.isFinite(t), 'inbox has no now');
+      return t;
+    };
     const expTxt = async health => section.locator(`tr.sub[data-sub="${byHealth[health].sub_id}"] .exp`).textContent();
-    assert(/^expired \d+[sm] ago$/.test(await expTxt('paused_token')), `paused_token expires: ${await expTxt('paused_token')}`);
-    assert(/^in [12]m$/.test(await expTxt('late')), `late expires: ${await expTxt('late')}`);
-    assert(/^in (59m|1h 0m)$/.test(await expTxt('ok')), `ok expires: ${await expTxt('ok')}`);
+    const t0 = await hubNowMs();
+    const shown = {};
+    for (const health of ['ok', 'late', 'paused_token']) shown[health] = await expTxt(health);
+    const t1 = await hubNowMs();
+    for (const health of ['ok', 'late', 'paused_token']) {
+      const exp = byHealth[health].expires_at;
+      const want = new Set();
+      for (let t = t0 - 17000; t <= t1 + 2000; t += 500) want.add(expiresIn(exp, t));
+      assert(want.has(shown[health]), `${health} expires: ${shown[health]}, want one of ${[...want].join(' | ')}`);
+    }
+    // paused_token is seeded already expired, so it must read as expired.
+    assert(/^expired /.test(shown.paused_token), `paused_token expires: ${shown.paused_token}`);
     // Named assertion: dashboard section has no buttons.
     assert(await section.locator('button, [role=button], input, select, textarea').count() === 0, 'dashboard section has buttons');
     assert(await page.locator('#view button').count() === 0, 'dashboard has buttons');
