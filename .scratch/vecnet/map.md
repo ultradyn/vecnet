@@ -89,3 +89,10 @@ A handoff-ready **spec** for vecnet v1: `SPEC.md` (product + behaviour), `docs/P
 - Next plans written and committed: `docs/plans/2026-11-01-openclaw-plugin.md` (21 tasks), `docs/plans/2026-11-01-operator-ui.md` (23 tasks). Neither build has started.
 - Leftover branches for Max to delete: connectors, connectors-t09, connectors-t10, core-hub, core-hub-t01..08, core-hub-t18, core-hub-t19.
 - Dev hub data backup from before migrations 0005-0009: `.scratch/vecnet/build-connectors/data-backup-phase1`.
+
+## Build (Phase 3 operator UI), done 2026-11-02
+
+- Plan: `docs/plans/2026-11-01-operator-ui.md` (25 tasks, including cross-client synchronization and integrated screen gate fixes); operator guide: `docs/OPERATOR.md`; screenshot index: `docs/plans/shots/oui/README.md`.
+- Implemented: operator read models, seeded demo and screen harness, web inbox/chat/aside/matrix/dashboard/subscriptions/presence/compose, typed client and terminal inbox/chat/dashboard/subscriptions/command line.
+- Task 24 supplies durable `operator_view` invalidations and the shared unread header. Task 23 verifies TUI approval → web removal, web read → terminal unread drop, peer wake → both clients, web presence → terminal status, both clients' presence heartbeats, one browser events 401 → sign-in without retries, and hub-authored expiry → both clients' histories. Task 25 supplies the integrated screen fixes. The full Go/JS suites, vet, formatting, static binaries, ISA stamps, protocol examples, dependency boundaries, isolated screenshot gate and two-client journey pass. The journey waits for the real TUI heartbeat (20 minutes). Verification details: `.scratch/vecnet/build-operator-ui/task-23.impl.json`.
+- Dashboard remains read-only; subscription recovery and failed-delivery actions live in the inbox. Openclaw and later-phase behaviours are separate plans.

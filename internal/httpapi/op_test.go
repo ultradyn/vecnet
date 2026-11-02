@@ -30,12 +30,8 @@ func TestOpRoutesOperatorOnly(t *testing.T) {
 				mustErr(t, resp, body, 403, "forbidden")
 			}
 			resp, body = env.Do(env.OperatorSecret, path.method, path.path, nil)
-			// Later tasks fill these routes without weakening the auth boundary.
-			if resp.StatusCode != 200 && resp.StatusCode != 501 {
-				t.Fatalf("operator route = %d, want 200 or temporary 501: %s", resp.StatusCode, body)
-			}
-			if resp.StatusCode == 501 {
-				mustErr(t, resp, body, 501, "not_implemented")
+			if resp.StatusCode != 200 {
+				t.Fatalf("operator route = %d, want 200: %s", resp.StatusCode, body)
 			}
 		})
 	}
@@ -60,7 +56,7 @@ func TestOpParamValidation(t *testing.T) {
 	}
 	for _, path := range []string{"/v1/admin/loop-cuts?hours=1", "/v1/admin/loop-cuts?hours=168", "/v1/admin/inbox?before=dly_01J00000000000000000000000", "/v1/admin/threads?participant=" + env.OperatorPeer} {
 		resp, raw := env.Do(env.OperatorSecret, "GET", path, nil)
-		if resp.StatusCode != 200 && resp.StatusCode != 501 {
+		if resp.StatusCode != 200 {
 			t.Fatalf("valid parameters on %s = %d: %s", path, resp.StatusCode, raw)
 		}
 	}

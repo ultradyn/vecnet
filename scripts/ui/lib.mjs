@@ -108,7 +108,7 @@ export async function withDemo({ scale = false, signedIn = true } = {}, fn) {
     const requests = [];
     page.on('request', req => requests.push(req));
     const ctx = {
-      page, demo: env.demo, advance: env.advance, asPeer: env.asPeer,
+      page, dir: env.dir, demo: env.demo, advance: env.advance, asPeer: env.asPeer,
       allowConsole: regex => allowed.push(regex),
       countRequests: filter => requests.filter(req => typeof filter === 'function' ? filter(req) : filter instanceof RegExp ? filter.test(req.url()) : req.url().includes(filter)).length,
       shot: async name => { await page.evaluate(() => document.fonts.ready); await page.screenshot({ path: await shotPath(name) }); },

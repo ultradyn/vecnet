@@ -4,8 +4,8 @@ import { ansiHTML } from './ansi.mjs';
 import { assert, bootDemo, buildCLI, chromium, run, shotPath } from './lib.mjs';
 
 const quote = s => `'${s.replaceAll("'", "'\\''")}'`;
-export async function withTui({ scale = false, command } = {}, fn) {
-  const env = await bootDemo({ scale });
+export async function withTui({ scale = false, command, env: shared } = {}, fn) {
+  const env = shared || await bootDemo({ scale });
   const socket = `oui-${process.pid}`;
   const tmux = (...args) => run('tmux', ['-L', socket, ...args], { env: { ...process.env, TMUX: '' } });
   let browser, started = false;
@@ -48,7 +48,7 @@ export async function withTui({ scale = false, command } = {}, fn) {
     });
   } finally {
     try { await browser?.close(); } finally {
-      try { if (started) await tmux('kill-server'); } finally { await env.close(); }
+      try { if (started) await tmux('kill-server'); } finally { if (!shared) await env.close(); }
     }
   }
 }
