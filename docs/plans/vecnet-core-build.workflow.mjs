@@ -348,12 +348,22 @@ function fnv1a(t) {
   return h.toString(16)
 }
 
+const COPY_RULE = 'Copy every character of every string exactly as it is in the file, including anything that looks wrong, such as an odd path. Do not shorten, summarise, correct or reorder anything. Your copy is checksummed, and one that differs is thrown away.'
+
+function relayCopyPrompt(base) {
+  return `Codex has finished, and your only job is to copy its result. Do no other work. Never use attn.
+
+1. Run with Bash: \`${SOL.wait} ${base}\`. It prints a line starting DONE 0 RESULT_OK <sum>.
+2. Read ${base}.slim.json and return {relay_ok: true, detail: "", check: "<sum>", result: <that object>}. ${COPY_RULE}
+3. If step 1 prints anything else, return {relay_ok: false, detail: <that line>} with no result field.`
+}
+
 function relayPrompt(prompt, schema, cwd, preset, base) {
   return `You are a thin relay to Codex, not a worker. Do not solve, implement, review or judge anything yourself, do not read the code, and do not copy the assignment anywhere: the helper below reads it from your transcript. Never use attn. Your first action is step 1.
 
 1. Run with Bash: \`${SOL.run} ${preset} ${cwd} ${base} '${SOL.transcripts}'\`. It returns at once. A failure here is a relay failure: go to step 4.
 2. Run with Bash, passing timeout 600000: \`${SOL.wait} ${base}\`. It prints RUNNING, or a line starting DONE. Repeat this step while it prints RUNNING. A long wait is normal; some runs take more than an hour. Never start a second run while one is going.
-3. If the line is DONE 0 RESULT_OK <sum>: read ${base}.result.json and return {relay_ok: true, detail: "", check: "<sum>", result: <that object, every value exactly as in the file>}.
+3. If the line is DONE 0 RESULT_OK <sum>: read ${base}.slim.json and return {relay_ok: true, detail: "", check: "<sum>", result: <that object>}. ${COPY_RULE}
 4. On any other outcome: run step 1 and step 2 once more. If that also fails, return {relay_ok: false, detail: <the DONE line or error, and the last 20 lines of ${base}.log>} with no result field. Never invent or fill in a result. A wrong result is far worse than relay_ok false.
 
 ASSIGNMENT-BEGIN ${base}
@@ -368,10 +378,16 @@ ASSIGNMENT-END ${base}`
 // A schema-forced agent returns something even when it failed, so failure is a field, and the checksum proves the copy.
 async function relayed(prompt, opts, cwd, preset, label) {
   const schema = { type: 'object', properties: { relay_ok: { type: 'boolean' }, detail: { type: 'string' }, check: { type: 'string' }, result: opts.schema }, required: ['relay_ok', 'detail'] }
-  const r = await agent(relayPrompt(prompt, opts.schema, cwd, preset, `${SOL.dir}/${STAMP}-${slug(label)}`), { ...opts, label, schema, model: RELAY_MODEL, effort: 'low' })
-  if (!r || !r.relay_ok || !r.result) { log(`${label}: relay failed: ${r ? r.detail : 'no result'}`); return null }
-  if (fnv1a(canon(r.result)) !== r.check) { log(`${label}: relay result failed its checksum; treating as no result`); return null }
-  return r.result
+  const base = `${SOL.dir}/${STAMP}-${slug(label)}`
+  // A bad copy retries the copy, not the Codex run. The last attempt is on Opus: it does no work, and it copies reliably.
+  for (let copy = 0; copy < 3; copy++) {
+    const r = await agent(copy ? relayCopyPrompt(base) : relayPrompt(prompt, opts.schema, cwd, preset, base),
+      { ...opts, label: copy ? `${label} copy ${copy}` : label, schema, model: copy === 2 ? MODEL : RELAY_MODEL, effort: 'low' })
+    if (!r || !r.relay_ok || !r.result) { log(`${label}: relay failed: ${r ? r.detail : 'no result'}`); return null }
+    if (fnv1a(canon(r.result)) === r.check) return r.result
+    log(`${label}: copy ${copy + 1} failed its checksum`)
+  }
+  return null
 }
 
 const slug = t => t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
@@ -621,7 +637,7 @@ async function forkUnit(unit) {
   const fork = await call(`Create one worktree per task for the parallel group ${label} of the vecnet ${PLAN_NAME} build.
 ${RULES}
 For each task number NN in [${unit.map(nn).join(', ')}]: if ${REPO}/.worktrees/${PREFIX}-tNN does not exist, run \`git -C ${REPO} worktree add -b ${PREFIX}-tNN ${REPO}/.worktrees/${PREFIX}-tNN ${BRANCH}\` (if the branch already exists from an interrupted run, \`worktree add\` without -b). Confirm each worktree's HEAD equals ${BRANCH}'s HEAD or is a descendant of it. Do not build or test. Return {ok, notes}.`,
-    { label: `fork ${label}`, phase: `Task ${nn(unit[0])}`, effort: 'low', sol: 'sol-coder', schema: { type: 'object', properties: { ok: { type: 'boolean' }, notes: { type: 'string' } }, required: ['ok', 'notes'] } })
+    { label: `fork ${label}`, phase: `Task ${nn(unit[0])}`, effort: 'low', model: RELAY_MODEL, schema: { type: 'object', properties: { ok: { type: 'boolean' }, notes: { type: 'string' } }, required: ['ok', 'notes'] } })
   if (!fork || !fork.ok) { halt(unit[0], `could not create worktrees for ${label}: ${fork ? fork.notes : 'no result'}`); return false }
   return true
 }
