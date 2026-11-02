@@ -2,29 +2,8 @@
 // real browser. A peer's PNG shows inline; its SVG, an HTML file typed as PNG
 // and a bidi-named file stay chips. The operator pastes a screenshot, the
 // reply is lost and retried under the same key, and opens the image full size.
-import { crc32, deflateSync } from 'node:zlib';
-import { assert, cleanBuild, withDemo } from './lib.mjs';
+import { assert, cleanBuild, hex, png, withDemo } from './lib.mjs';
 
-// png encodes an RGB image whose pixel colours come from px(x, y).
-function png(w, h, px) {
-  const raw = Buffer.alloc((w * 3 + 1) * h);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) raw.set(px(x, y), y * (w * 3 + 1) + 1 + x * 3);
-  }
-  const chunk = (type, data) => {
-    const body = Buffer.concat([Buffer.from(type, 'latin1'), data]), len = Buffer.alloc(4), crc = Buffer.alloc(4);
-    len.writeUInt32BE(data.length);
-    crc.writeUInt32BE(crc32(body));
-    return Buffer.concat([len, body, crc]);
-  };
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(w, 0);
-  ihdr.writeUInt32BE(h, 4);
-  ihdr[8] = 8; ihdr[9] = 2; // 8-bit RGB
-  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
-}
-
-const hex = s => [parseInt(s.slice(1, 3), 16), parseInt(s.slice(3, 5), 16), parseInt(s.slice(5, 7), 16)];
 // A terminal window with coloured log lines: the peer's "failing run".
 const terminal = png(480, 300, (x, y) => {
   if (y < 26) {
@@ -272,7 +251,102 @@ try {
     await failed.getByRole('button', { name: 'Remove', exact: true }).click();
     await page.locator('.composer .send:enabled').waitFor();
     await page.unroute(isUpload, quota);
+
+    // Hosted bytes that also name an informational origin_url show inline: the
+    // operator's history page says which hashes the hub hosts. A reference-only
+    // PNG (origin_url, nothing uploaded) stays a chip and is never fetched.
+    const originUp = await upload(chart, 'image/png');
+    const REF_ONLY = 'f'.repeat(64);
+    const originText = 'The chart from the dashboard, and a link to the live one.';
+    const originMsg = await api('POST', '/v1/messages', {
+      idempotency_key: 'att-thread-origin', thread_id: thr, priority: 'hold', content: { text: originText },
+      attachments: [
+        { sha256: originUp.sha256, size: originUp.size, media_type: 'image/png', name: 'chart-hosted.png', origin_url: 'https://dash.example/chart.png' },
+        { sha256: REF_ONLY, size: 2048, media_type: 'image/png', name: 'chart-live.png', origin_url: 'https://dash.example/live.png' },
+      ],
+    }, 'codex');
+    const originEl = msgEl(originMsg.message_id);
+    await originEl.locator('.txt', { hasText: originText }).waitFor();
+    const originThumb = originEl.locator(`button.thumb[data-sha="${originUp.sha256}"] img`);
+    await originThumb.waitFor();
+    assert(await imgLoaded(originThumb), 'hosted bytes with an origin_url did not show inline');
+    await originEl.locator('.att', { hasText: 'chart-live.png' }).waitFor();
+    assert(await originEl.locator('button.thumb').count() === 1, 'the reference-only PNG rendered as an image');
+    assert(blobGets(REF_ONLY) === 0, 'the reference-only PNG was fetched');
+
+    // Review Focus 3: a file attached while a reply is in flight (picker, drop
+    // or paste) is not in that request, so the reply's success must leave it.
+    const heldText = 'Held reply with one log.';
+    await ta.fill(heldText);
+    {
+      const [ch] = await Promise.all([page.waitForEvent('filechooser'), page.locator('.composer .attach').click()]);
+      await ch.setFiles({ name: 'carried.log', mimeType: 'text/plain', buffer: Buffer.from('carried with the reply\n') });
+    }
+    await page.locator('.composer .up-chip.up-done', { hasText: 'carried.log' }).waitFor();
+    const heldPosts = [];
+    let releaseSend;
+    const sendGate = new Promise(resolve => { releaseSend = resolve; });
+    const holdSend = async route => { heldPosts.push(route.request().postDataJSON()); await sendGate; await route.continue(); };
+    await page.route('**/v1/messages', holdSend);
+    await page.locator('.composer .send').click();
+    await page.waitForFunction(() => document.querySelector('.composer .send').disabled);
+    while (!heldPosts.length) await new Promise(r => setTimeout(r, 20));
+    {
+      const [ch] = await Promise.all([page.waitForEvent('filechooser'), page.locator('.composer .attach').click()]);
+      await ch.setFiles({ name: 'picked-later.log', mimeType: 'text/plain', buffer: Buffer.from('picked while sending\n') });
+    }
+    const dt = await page.evaluateHandle(() => { const d = new DataTransfer(); d.items.add(new File(['dropped while sending\n'], 'dropped-later.log', { type: 'text/plain' })); return d; });
+    for (const ev of ['dragenter', 'dragover', 'drop']) await page.locator('.composer .wrap').dispatchEvent(ev, { dataTransfer: dt });
+    await page.evaluate(bytes => {
+      const d = new DataTransfer();
+      d.items.add(new File([new Uint8Array(bytes)], 'image.png', { type: 'image/png' }));
+      document.querySelector('.composer textarea').dispatchEvent(new ClipboardEvent('paste', { clipboardData: d, bubbles: true, cancelable: true }));
+    }, [...terminal]);
+    await page.waitForFunction(() => document.querySelectorAll('.composer .up-chip.up-done').length === 4);
+    releaseSend();
+    await page.locator('.msg .txt', { hasText: heldText }).waitFor();
+    await page.unroute('**/v1/messages', holdSend);
+    await page.locator('.composer .send:enabled').waitFor();
+    assert(heldPosts.length === 1 && heldPosts[0].attachments.map(a => a.name).join() === 'carried.log', `the held reply carried ${JSON.stringify(heldPosts.map(p => p.attachments))}`);
+    const left = await page.locator('.composer .up-chip .up-nm').allTextContents();
+    assert(left.length === 3 && left[0] === 'picked-later.log' && left[1] === 'dropped-later.log' && /^pasted-\d{8}-\d{6}\.png$/.test(left[2]), `after the held reply the draft holds ${JSON.stringify(left)}`);
+    assert(await page.locator('.composer .up-chip.up-done').count() === 3, 'a file added during the send lost its upload');
+    for (let n = 3; n > 0; n--) await page.locator('.composer .up-chip .up-x').first().click();
+    await page.waitForFunction(() => document.querySelectorAll('.composer .up-chip').length === 0);
+
+    // Same bytes under a new name after a lost reply: a different body, so a
+    // new key (the old one would be 409 idempotency_conflict); an unchanged
+    // retry keeps the key and is the hub's replay.
+    const sameBytes = Buffer.from('identical bytes, two names\n');
+    const pickAs = async name => {
+      const [ch] = await Promise.all([page.waitForEvent('filechooser'), page.locator('.composer .attach').click()]);
+      await ch.setFiles({ name, mimeType: 'text/plain', buffer: sameBytes });
+      await page.locator('.composer .up-chip.up-done', { hasText: name }).waitFor();
+    };
+    await ta.fill('');
+    await pickAs('first-name.log');
+    const renamePosts = [], renameReplies = [];
+    let lostOnce = false;
+    const loseFirst = async route => {
+      renamePosts.push(route.request().postDataJSON());
+      const r = await route.fetch();
+      renameReplies.push(r.status());
+      if (!lostOnce) { lostOnce = true; await route.abort('failed'); } else await route.fulfill({ response: r });
+    };
+    await page.route('**/v1/messages', loseFirst);
+    await page.locator('.composer .send').click();
+    await page.locator('.composer .cbanner', { hasText: 'network:' }).waitFor();
+    await page.locator('.composer .up-chip .up-x').first().click();
+    await pickAs('second-name.log');
+    await page.locator('#toast.on').waitFor({ state: 'hidden' }); // the held reply's toast
+    await Promise.all([page.locator('#toast.on', { hasText: 'Sent' }).waitFor(), page.locator('.composer .send').click()]);
+    await page.waitForFunction(() => document.querySelectorAll('.composer .up-chip').length === 0);
+    await page.unroute('**/v1/messages', loseFirst);
+    assert(renamePosts.length === 2 && renamePosts[1].attachments[0].name === 'second-name.log', `renamed posts ${JSON.stringify(renamePosts.map(p => p.attachments))}`);
+    assert(renamePosts[0].attachments[0].sha256 === renamePosts[1].attachments[0].sha256, 'the two names did not carry the same bytes');
+    assert(renamePosts[1].idempotency_key !== renamePosts[0].idempotency_key, 'the same bytes under a new name kept the key');
+    assert(renameReplies.join() === '202,202', `the hub answered ${renameReplies}, not two new messages`);
     assert(dialogs === 0, 'an attachment ran script');
   });
-  console.log('Attachments thread passed: inline PNG, hostile SVG/fake PNG/bidi name as chips, no refetch on redraw, URLs revoked on leave, near-miss drop, pasted reply sent once under one key, viewer, quota error');
+  console.log('Attachments thread passed: inline PNG, hostile SVG/fake PNG/bidi name as chips, no refetch on redraw, URLs revoked on leave, near-miss drop, pasted reply sent once under one key, viewer, quota error, hosted+origin_url inline and reference-only chip, files added during a held reply kept, same bytes renamed mint a new key');
 } finally { await cleanBuild(); }

@@ -1,9 +1,39 @@
 // Attachments Task 3: attach files to a new message (#new), in a real browser.
 // Fixtures are built here at run time: no binaries are committed.
-import { assert, cleanBuild, withDemo } from './lib.mjs';
+import { assert, cleanBuild, hex, png, withDemo } from './lib.mjs';
 
-// A 1×1 PNG, the bytes of every image fixture below.
+// A 1×1 PNG, the bytes of the image fixtures no shot shows.
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+// The two images the success shot shows inline, on the UI's dark palette.
+// A pasted screenshot: a dark editor with indigo and slate code lines.
+const SHOT = png(320, 200, (x, y) => {
+  if (y < 22) return x < 90 && y > 4 ? hex('#151c33') : hex('#0e1426');
+  const row = Math.floor((y - 32) / 16), inRow = (y - 32) % 16;
+  if (row >= 0 && row < 10 && inRow >= 4 && inRow < 10) {
+    const indent = [0, 16, 32, 32, 16, 32, 48, 32, 16, 0][row], width = 60 + ((row * 53) % 150);
+    const colour = row === 6 ? '#fb7185' : row % 3 === 0 ? '#a78bfa' : row % 3 === 1 ? '#6366f1' : '#64748b';
+    if (x >= 14 && x < 26) return hex('#334155');
+    if (x >= 36 + indent && x < 36 + indent + width) return hex(colour);
+  }
+  return hex('#0b1020');
+});
+// The dropped dashboard: four panels, a line of bars and two stat tiles.
+const DASH = png(360, 220, (x, y) => {
+  const panel = (x0, y0, x1, y1) => x >= x0 && x < x1 && y >= y0 && y < y1;
+  if (panel(12, 12, 170, 70) || panel(190, 12, 348, 70)) {
+    if (panel(24, 30, 90, 46) || panel(202, 30, 260, 46)) return panel(24, 30, 90, 46) ? hex('#34d399') : hex('#fbbf24');
+    return hex('#151c33');
+  }
+  if (panel(12, 84, 348, 208)) {
+    const bar = Math.floor((x - 28) / 26), inBar = (x - 28) % 26, heights = [40, 72, 58, 96, 80, 104, 66, 88, 52, 76, 98, 60];
+    if (bar >= 0 && bar < 12 && inBar < 16 && y > 196 - heights[bar] && y < 196) {
+      const t = (196 - y) / 104;
+      return [Math.round(99 + (168 - 99) * t), Math.round(102 + (85 - 102) * t), Math.round(241 + (247 - 241) * t)];
+    }
+    return y === 196 ? hex('#334155') : hex('#0e1426');
+  }
+  return hex('#0b1020');
+});
 const isSend = req => req.method() === 'POST' && new URL(req.url()).pathname === '/v1/messages';
 const isBlob = req => req.method() === 'PUT' && new URL(req.url()).pathname === '/v1/blobs';
 
@@ -91,7 +121,7 @@ try {
 
     // Initial: one picked file and one pasted screenshot, both uploaded.
     await pickFiles({ name: 'deploy-log.txt', mimeType: 'text/plain', buffer: Buffer.from('step 4/7: health check failed\n') });
-    await paste(PNG, 'image/png');
+    await paste(SHOT, 'image/png');
     await doneCount(2);
     const names = await view.locator('.up-chip .up-nm').allTextContents();
     assert(names[0] === 'deploy-log.txt', `picked name was ${names[0]}`);
@@ -118,7 +148,7 @@ try {
     // A held upload reports no progress, so its bar is indeterminate; reduced
     // motion draws that bar full width instead of mid-slide, off the chip.
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    await drop(view.locator('form'), PNG, 'dashboard.png', 'image/png');
+    await drop(view.locator('form'), DASH, 'dashboard.png', 'image/png');
     await chip('dashboard.png').and(view.locator('.up-uploading')).waitFor();
     await chip('dashboard.png').locator('.up-bar').waitFor();
     assert(await send.isDisabled(), 'Send enabled while a chip uploads');
@@ -161,11 +191,11 @@ try {
     await pickFiles({ name: 'trimmed.png', mimeType: 'image/png', buffer: PNG });
     await doneCount(1);
     await page.route('**/v1/blobs*', route => route.fulfill({ status: 413, contentType: 'application/json',
-      body: JSON.stringify({ error: { code: 'blob_too_large', message: 'blob exceeds the per-blob cap', details: { limit: 10 << 20 } } }) }));
+      body: JSON.stringify({ error: { code: 'blob_too_large', message: 'blob exceeds the per-blob cap', details: { limit: 2048 } } }) }));
     await pickFiles({ name: 'full-capture.mp4', mimeType: 'video/mp4', buffer: Buffer.alloc(4096, 7) });
     const failed = chip('full-capture.mp4');
     await failed.and(view.locator('.up-failed')).waitFor();
-    await failed.locator('.up-err', { hasText: 'Too large: the hub takes at most 10 MiB a file.' }).waitFor();
+    await failed.locator('.up-err', { hasText: 'Too large: the hub takes at most 2.0 KiB a file.' }).waitFor();
     await failed.getByRole('button', { name: 'Retry' }).waitFor();
     await failed.getByRole('button', { name: 'Remove' }).waitFor();
     assert(await chip('trimmed.png').and(view.locator('.up-done')).count() === 1, 'the other chip did not stay done');
