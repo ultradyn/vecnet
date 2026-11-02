@@ -1,6 +1,6 @@
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { ansiHTML } from './ansi.mjs';
+import { ansiHTML, LINE } from './ansi.mjs';
 import { assert, bootDemo, buildCLI, chromium, run, shotPath } from './lib.mjs';
 
 const quote = s => `'${s.replaceAll("'", "'\\''")}'`;
@@ -16,12 +16,14 @@ export async function withTui({ scale = false, command, env: shared } = {}, fn) 
     const argv = command || [bin, 'tui'];
     // An argv-based override lets the Task 2 smoke exercise tmux before TUI
     // lands in Task 17. Real screen scripts always use the default command.
-    const shell = `env VECNET_CONFIG=${quote(config)} XDG_CACHE_HOME=${quote(join(env.dir, 'cache'))} XDG_CONFIG_HOME=${quote(join(env.dir, 'config'))} TERM=xterm-256color ${argv.map(quote).join(' ')}`;
+    // Colour is forced on: a harness that exports NO_COLOR would otherwise
+    // strip it from every shot.
+    const shell = `env -u NO_COLOR COLORTERM=truecolor VECNET_CONFIG=${quote(config)} XDG_CACHE_HOME=${quote(join(env.dir, 'cache'))} XDG_CONFIG_HOME=${quote(join(env.dir, 'config'))} TERM=xterm-256color ${argv.map(quote).join(' ')}`;
     await tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'ui', '-x', '140', '-y', '42', shell);
     started = true;
     await tmux('set-option', '-g', 'status', 'off');
     browser = await (await chromium()).launch({ headless: true });
-    const page = await browser.newPage({ viewport: { width: 1240, height: 872 }, colorScheme: 'dark' });
+    const page = await browser.newPage({ viewport: { width: 1240, height: Math.ceil(42 * LINE) + 32 }, colorScheme: 'dark' });
     page.setDefaultTimeout(60000);
     const capture = () => tmux('capture-pane', '-t', 'ui:0.0', '-e', '-p', '-N');
     await fn({

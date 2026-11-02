@@ -8,6 +8,11 @@ function color(n) {
   const v = n - 16, cube = [0, 95, 135, 175, 215, 255];
   return `rgb(${cube[Math.floor(v / 36)]},${cube[Math.floor(v / 6) % 6]},${cube[v % 6]})`;
 }
+// LINE is one terminal row in px: JetBrains Mono's ascent plus descent at
+// 14px (1.32em), so box-drawing verticals meet the next row as they do in a
+// terminal instead of leaving a gap. tmux.mjs sizes its viewport from it.
+export const LINE = 18.5;
+
 export function ansiHTML(input, { columns = 140, rows = 42 } = {}) {
   const state = {};
   let output = '', pos = 0;
@@ -47,6 +52,6 @@ export function ansiHTML(input, { columns = 140, rows = 42 } = {}) {
     }
   }
   append(text.slice(pos));
-  return `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;background:#0b0f19;color:#f3f4f6;color-scheme:dark}pre{margin:0;padding:16px;width:${columns}ch;height:${rows * 20}px;font:14px/20px 'JetBrains Mono',ui-monospace,monospace;white-space:pre;overflow:hidden}</style><pre>${output}</pre>`;
+  return `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;background:#0b0f19;color:#f3f4f6;color-scheme:dark}pre{margin:0;padding:16px;width:${columns}ch;height:${rows * LINE}px;font:14px/${LINE}px 'JetBrains Mono',ui-monospace,monospace;white-space:pre;overflow:hidden}</style><pre>${output}</pre>`;
 }
 export default ansiHTML;
