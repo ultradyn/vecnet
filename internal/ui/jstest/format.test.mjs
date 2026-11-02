@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ago, bytes, clean, quotaLabel, short, title, when } from '../static/format.js';
+import { ago, bytes, clean, plural, quotaLabel, short, title, when } from '../static/format.js';
 
 test('when is 24-hour local today, with the date on other days, and survives midnight', () => {
   const noon = new Date(2026, 10, 2, 14, 5, 0).getTime();
@@ -69,4 +69,10 @@ test('clean drops controls and bidi overrides, like tui.Clean, and keeps newline
   assert.equal(clean('a\u2028b\u2029c'), 'a\nb\nc');
   assert.equal(clean('<img src=x onerror=alert(1)>'), '<img src=x onerror=alert(1)>');
   assert.equal(clean(42), '42');
+});
+
+test('plural counts its noun', () => {
+  assert.equal(plural(1, 'message'), '1 message');
+  assert.equal(plural(0, 'message'), '0 messages');
+  assert.equal(plural(2, 'recipient'), '2 recipients');
 });

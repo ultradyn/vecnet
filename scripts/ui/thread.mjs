@@ -144,6 +144,10 @@ try {
     await page.locator('.composer .cbanner', { hasText: 'network:' }).waitFor();
     assert(await ta.inputValue() === reply, 'the text was lost when the send failed');
     assert(await page.locator('.composer .send:disabled').count() === 0, 'Send stayed disabled after the failure');
+    // The first attempt did land: wait for its message (and the reload that
+    // re-picks the reply target) before retrying, so the same-key assertion
+    // below pins the kept target every run, not only when the event is early.
+    await page.locator('.msg .txt', { hasText: reply }).waitFor();
     await Promise.all([page.locator('#toast.on', { hasText: 'Sent' }).waitFor(), page.locator('.composer .send').click()]);
     await page.locator('.msg .txt', { hasText: reply }).waitFor();
     await page.unroute('**/v1/messages');

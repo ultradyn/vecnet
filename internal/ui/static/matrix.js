@@ -3,7 +3,7 @@
 // each cell coloured by the hub's `display` (PROTOCOL §2.13). It reloads on
 // the thread's tag while open and is removed from the page when it closes.
 import { h } from './dom.js';
-import { short, title, when } from './format.js';
+import { plural, short, title, when } from './format.js';
 import { grid, merge } from './matrix-model.js';
 
 const PAGE = 200;
@@ -95,8 +95,8 @@ export function openMatrix(threadId, ctx) {
       if (c.read_at) kv.push(['read', when(c.read_at, now), c.read_at]);
       detail.replaceChildren(
         h('div', { class: 'mx-who' },
-          h('b', { text: nameOf(recipients[i]), title: recipients[i] }),
-          h('span', { text: (row.excerpt || '(no text)'), title: row.message_id })),
+          h('b', { text: 'to ' + nameOf(recipients[i]), title: recipients[i] }),
+          h('span', { text: 'from ' + nameOf(row.sender) + ': ' + (row.excerpt || '(no text)'), title: row.message_id })),
         h('dl', {}, kv.flatMap(([k, v, t]) => [h('dt', { text: k }), h('dd', { text: v, title: t || null })])));
       return;
     }
@@ -179,7 +179,7 @@ export function openMatrix(threadId, ctx) {
       status.replaceChildren(h('span', { class: 'bad', text: 'Refresh failed: ' + err.message }), ' ',
         h('button', { type: 'button', class: 'linkbtn mx-retry', text: 'Retry', onclick: () => res.reload() }));
     } else {
-      status.textContent = value ? value.rows.length + ' messages · ' + (value.recipients || []).length + ' recipients' + (loading ? ' · refreshing' : '') : '';
+      status.textContent = value ? plural(value.rows.length, 'message') + ' · ' + plural((value.recipients || []).length, 'recipient') + (loading ? ' · refreshing' : '') : '';
     }
   }
 

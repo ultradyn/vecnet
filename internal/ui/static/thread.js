@@ -3,7 +3,7 @@
 // rules live in thread-model.js.
 import { answerBody, countdown } from './approvals.js';
 import { avatar, h } from './dom.js';
-import { bytes, clean, short, title, when } from './format.js';
+import { bytes, clean, plural, short, title, when } from './format.js';
 import { canShowFull, excerpt, FULL_TEXT_CAP, items, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
 
 const PAGE = 200, MAX_PAGES = 50, PIN_SLACK = 80;
@@ -324,7 +324,8 @@ export function mount(root, ctx) {
           others ? h('span', { class: 'via', text: 'to ' + others }) : null,
           h('span', { class: 'acts' }, h('button', { type: 'button', text: 'reply', onclick: () => { S.replyTo = m.message_id; render(); comp.querySelector('textarea').focus(); } }))),
         it.parent ? replyQuote(it.parent) : null,
-        showTxt ? h('div', { class: 'txt', text: m.content.text }) : null,
+        // A spilled preview is clamped to a few lines; Show full text opens it.
+        showTxt ? h('div', { class: 'txt' + (it.spill ? ' clamp' : ''), text: m.content.text }) : null,
         it.spill ? spillBlock(m, it.spill) : (m.content && m.content.truncated ? h('span', { class: 'trunc', text: 'Preview only. The hub truncated this text.' }) : null),
         it.approval ? approvalCard(it.approval) : jobBox(m),
         atts.length ? h('div', { class: 'atts' }, atts) : null,
@@ -338,7 +339,7 @@ export function mount(root, ctx) {
     if (gone) return;
     const t = thread(), all = msgs(), d = detail.get();
     head.replaceChildren(h('h1', { text: t ? title(t, me, nameOf) : short(threadId) }),
-      h('div', { class: 'ids', text: threadId + (t ? ' · ' + t.message_count + ' messages' : '') }));
+      h('div', { class: 'ids', text: threadId + (t ? ' · ' + plural(t.message_count, 'message') : '') }));
     ticks = [];
     if (history.error() && !history.get()) {
       list.replaceChildren(h('div', { class: 'empty error' }, h('b', { text: 'Thread unavailable' }), history.error().message));

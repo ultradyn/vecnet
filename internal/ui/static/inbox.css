@@ -37,5 +37,6 @@
 .va .btn.more{display:block;margin:8px auto 0}
 
 /* aside: on this page */
+.va aside .onpage h3:first-child{margin-top:24px}
 .va aside .onpage a{display:block;color:var(--violet);text-decoration:none;padding:2px 0}
 .va aside .onpage a:hover{color:var(--text)}

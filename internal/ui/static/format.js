@@ -64,3 +64,8 @@ const CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u
 export function clean(s) {
   return String(s).replace(/[\u2028\u2029]/g, '\n').replace(CONTROLS, '');
 }
+
+// plural is a count with its noun: 1 message, 2 messages.
+export function plural(n, noun) {
+  return n + ' ' + noun + (n === 1 ? '' : 's');
+}

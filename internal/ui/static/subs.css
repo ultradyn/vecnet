@@ -27,7 +27,7 @@
 /* inbox attention */
 .attn{margin:20px 0 8px}
 .va .attn h2{margin:0 0 10px}
-.attn-item{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:start;padding:12px 14px;border:1px solid var(--line);border-left:3px solid var(--line2);border-radius:9px;margin-bottom:8px;background:#0e1426}
+.attn-item{display:grid;grid-template-columns:9.5rem minmax(0,1fr) auto;gap:12px;align-items:start;padding:12px 14px;border:1px solid var(--line);border-left:3px solid var(--line2);border-radius:9px;margin-bottom:8px;background:#0e1426}
 .attn-item[data-health^=paused_],.attn-item[data-health=expired],.attn-item[data-health=failing]{border-left-color:#fb718599}
 .attn-item[data-health=paused_operator],.attn-item[data-health=late],.attn-item[data-health=unverified]{border-left-color:#fbbf2499}
 .attn-item .chip{margin-top:2px}

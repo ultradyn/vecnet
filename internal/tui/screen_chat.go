@@ -46,11 +46,14 @@ const (
 )
 
 var (
-	chatPrios   = []string{"wake", "wake_idle", "hold"}
-	colorCyan   = lipgloss.Color("#22d3ee")
-	colorPick   = lipgloss.Color("#1e2a4a")
-	styleCyan   = lipgloss.NewStyle().Foreground(colorCyan)
-	styleSender = []lipgloss.Style{
+	chatPrios = []string{"wake", "wake_idle", "hold"}
+	colorCyan = lipgloss.Color("#22d3ee")
+	colorPick = lipgloss.Color("#1e2a4a")
+	styleCyan = lipgloss.NewStyle().Foreground(colorCyan)
+	// styleAccepted is accepted's violet, as on the web and in a-chat.png, so
+	// accepted and processed differ by colour as well as by glyph.
+	styleAccepted = lipgloss.NewStyle().Foreground(lipgloss.Color("#818cf8"))
+	styleSender   = []lipgloss.Style{
 		lipgloss.NewStyle().Foreground(lipgloss.Color("#818cf8")).Bold(true),
 		lipgloss.NewStyle().Foreground(lipgloss.Color("#34d399")).Bold(true),
 		lipgloss.NewStyle().Foreground(lipgloss.Color("#a3e635")).Bold(true),
@@ -1141,7 +1144,7 @@ func chatReceipt(display string) (string, lipgloss.Style) {
 	case "pushed":
 		return "›", styleMuted
 	case "accepted":
-		return "✓", styleGood
+		return "✓", styleAccepted
 	case "processed":
 		return "✓✓", styleGood
 	case "read":
@@ -1549,7 +1552,7 @@ func (s *chatScreen) viewWho(m *Model, st *ThreadState, w, h int) string {
 		"",
 		styleMuted.Render("receipts:"),
 		styleMuted.Render("· queued  › pushed"),
-		styleGood.Render("✓ accepted"),
+		styleAccepted.Render("✓ accepted"),
 		styleGood.Render("✓✓ processed"),
 		styleText.Render("● read") + "  " + styleBad.Render("✗ dead"),
 		"",
