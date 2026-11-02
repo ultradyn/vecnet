@@ -5,9 +5,23 @@
 import { h } from './dom.js';
 import { needsHost, parse } from './md-model.js';
 
+// The thread rebuilds every message on each update, so parsed blocks (plain
+// data, never mutated here) are kept per body text, oldest dropped first.
+const memo = new Map(), MEMO = 1000;
+function blocksOf(text) {
+  const key = String(text == null ? '' : text);
+  let b = memo.get(key);
+  if (!b) {
+    b = parse(key);
+    memo.set(key, b);
+    if (memo.size > MEMO) memo.delete(memo.keys().next().value);
+  }
+  return b;
+}
+
 // markdown returns a div.md holding the rendered body.
 export function markdown(text) {
-  return h('div', { class: 'md' }, parse(text).map(block));
+  return h('div', { class: 'md' }, blocksOf(text).map(block));
 }
 
 function block(b) {

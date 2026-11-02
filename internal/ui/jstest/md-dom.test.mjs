@@ -46,3 +46,11 @@ test('hostile markup stays text and the root is div.md', () => {
   assert.equal(find(root, e => ['script', 'img', 'a'].includes(e.tag)).length, 0);
   assert.equal(root.textContent, '<script>alert(1)</script> <img src=x onerror=alert(2)>');
 });
+
+test('a repeated body renders the same nodes from the memoised parse', () => {
+  const src = '**a** [docs](https://evil.example/x)\n- one';
+  const one = markdown(src), two = markdown(src);
+  assert.notEqual(one, two);
+  assert.equal(two.textContent, one.textContent);
+  assert.equal(find(two, e => e.tag === 'a').length, 1);
+});
