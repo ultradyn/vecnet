@@ -33,3 +33,16 @@ Working name **launcher** (peer kind `launcher`, a `launch` job). "Source" is al
 - Credentials: the launcher brings its own model auth. pag-minted per-job tokens are only for pag-requested launches, and they need a secret channel (never a vecnet message body). Until that exists, pag-requested launches wait.
 - When pag launches through vecnet, the vecnet thread is the work thread; pag-chat stores only a pointer, receipts and the outcome summary.
 - Launcher-spawned peers are always untrusted: requester taint never raises them, and user-remote is only for sessions Max enrolled himself.
+
+## Max's decisions (2026-11-03)
+- a. Name: **launcher**.
+- b. Who may launch: **any agent** at this stage. Per-launcher concurrency caps stay as a safety bound.
+- c. Approvals: the rec (to Max by default). Max asked what they're for; explained, see the design note.
+- d. Hosts: xsm first, **and set up whatever we use on the other hosts too** (build boxes).
+- e. Language: Node, **written in TypeScript**. Look at Matt Pocock's sandcastle and other libraries.
+- f. **Don't edit t3-bridge.** Make the launcher extensible instead: backends as plugins (t3-bridge, paseo-bridge, Codex app-server, ACP, …) that use each bridge's existing API.
+- g. A new `launcher` peer kind now; `launched` session peers later. Expect special behaviour and handling.
+- h. 2 h idle wrap-up for now, **to revisit and make more rigorous**: coding agents don't come back after they stop unless they have background tasks.
+- i. A launched agent's main comms are its parent (the requester), in its own thread.
+- j. Approval relays: pagd only.
+- k. Launcher users on build boxes get their own outbound firewall rule.
