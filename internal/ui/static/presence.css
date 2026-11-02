@@ -1,1 +1,14 @@
-/* Empty until operator UI Task 14. */
+/* operator presence: nav toggle and inbox aside */
+.va .me .who{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.va .me .ptog{margin-left:auto;flex:none;font:500 11px var(--mono);padding:3px 8px;border-radius:6px;border:1px solid var(--line2);background:#151c33;color:var(--muted)}
+.va .me .ptog:hover{border-color:#6366f1;color:var(--text)}
+.va .me .ptog:disabled{cursor:default;border-color:var(--line2);color:var(--dim)}
+.va .me .ptog[aria-busy=true]{border-style:dashed}
+/* unknown is "no fresh report", drawn apart from offline's solid ring */
+.va .me .dot.unknown,.va aside .pres .dot.unknown{background:none;border:1.5px dashed #64748b;width:9px;height:9px}
+.va .me .dot.none{background:var(--line2)}
+.va aside .pres{display:flex;align-items:baseline;gap:8px;margin:0;color:#cbd5e1}
+.va aside .pres .dot{position:relative;top:-1px}
+.va aside .pres time{font-variant-numeric:tabular-nums}
+.va aside .pnote{margin:8px 0 0;font-size:12.5px;color:var(--muted)}
+.va aside .pnote code{font:500 11.5px var(--mono);color:var(--wake)}
