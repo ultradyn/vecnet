@@ -38,7 +38,7 @@ Precedence when sources disagree: a resolution `[Rnn]` beats a ticket `## Answer
 | `ThreadSummary` | inside Delivery; `thread_updated` data | Thread context so a webhook-only receiver needs no fetch [ENV §5]. |
 | `Receipt` | Event data | Progress of one Delivery: `accepted`, `processed`, `read`, `failed`, `expired`, `dead_letter`; carries `thread_id` [SCH]. |
 | `Presence` | peer → hub; Event data | Self-reported state; never verified [T14]. |
-| `Event` | hub → peer | One entry in a durable log: `cursor`, `type`, `at`, `data`. Types: `delivery`, `receipt`, `presence`, `thread_updated`, `directory_updated`, `approval_expired` [SCH]. |
+| `Event` | hub → peer | One entry in a durable log: `cursor`, `type`, `at`, `data`. Types: `delivery`, `receipt`, `presence`, `thread_updated`, `directory_updated`, `approval_expired` [SCH]; and, to the operator only, `operator_view` (section 2.13). |
 | `jobRequest` / `jobStatus` / `approvalRequest` / `approvalResponse` | sub-objects of SendRequest / Message | Job and approval payloads, shaped after webhook2mcp [T08]. |
 | `origin` | Message | Bridged-conversation reference `{system, thread_id, message_id?, event_id?}`; `null` for native traffic [ENV §6]. |
 | `attachment` | Message | Reference by `sha256`, `size`, `media_type`, optional `name`, `origin_url`, hub-set `blob_url` [SCH]. |

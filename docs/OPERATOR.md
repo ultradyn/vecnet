@@ -113,6 +113,8 @@ The dashboard observes peers, filtered threads, subscription health, loop cuts, 
 | Configure a route / source / team / notification | `vecnet route add`, `vecnet source add`, `vecnet team add`, `vecnet notify set`; see `vecnet help` for required flags |
 | Inspect the audit | `vecnet audit --limit N` |
 
+**Keep `--allow-private-egress` off outside isolated development.** Routes, notification targets and Events callbacks are URLs the hub will call. By default every such call is https to a pinned public address with no redirects ([PROTOCOL §14](PROTOCOL.md#14-security-invariants), item 7). The development-only `--allow-private-egress` (`VECNET_ALLOW_PRIVATE_EGRESS=1`) lifts that for every outbound client at once, including peer-supplied Events callbacks and CIMD fetches, so any enrolled peer could point the hub at private or loopback services. The hub logs a warning at startup while it is on. Use it only with trusted peers on a LAN, never on Fly ([DEPLOY](DEPLOY.md)).
+
 There is no dedicated CLI command for raising a thread budget, renaming a thread or disabling a peer. Those remain authenticated admin PATCH operations described in [PROTOCOL §2.12](PROTOCOL.md#212-enrolment-and-admin-proposed-paths); the dashboard cannot perform them. Automatic escalation is a later phase.
 
 ## Reconnect and credential changes

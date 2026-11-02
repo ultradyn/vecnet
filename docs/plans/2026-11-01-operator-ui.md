@@ -294,7 +294,7 @@ func TestMarkThreadRead(t *testing.T) { /* two unread → marked 2, sender log h
 - Consumes: Task 1 reader signatures, `opapi.Excerpt`, `opapi.DisplayState`; tables `threads`, `thread_participants`, `deliveries`, `messages`, `blob_refs`, `blobs`, `approvals`, `audit`.
 - `Threads`: every thread on the hub, newest activity first; `Participant` narrows to one peer; same opaque paging style as `hub.ListThreads`. `Cut` is the newest `loop_cut` audit row for the thread within 24 h, or `{thread_budget_exhausted, last_message_at}` when `budget_remaining` is 0.
 - `Thread`: `Files` from every attachment of the thread's messages, newest first, `Spilled` from `metadata["vecnet.spilled"]`, `Purged` from the blob tombstone; `OpenApprovals` lists open unexpired approvals, `AddressedToMe` from `deliveries` for the caller. Unknown id → 404 `unknown_thread`.
-- `Matrix`: one row per message from `after` (exclusive), default limit 200, max 200; `Cells` one per delivery (a sender has no cell for its own message); `Recipients` is the union in thread join order; `Display` from `opapi.DisplayState`. Hub-authored messages have zero cells and stay in `Rows`.
+- `Matrix`: one row per message from `after` (exclusive), default limit 50, max 200 (as PROTOCOL §2.13); `Cells` one per delivery (a sender has no cell for its own message); `Recipients` is the union in thread join order; `Display` from `opapi.DisplayState`. Hub-authored messages have zero cells and stay in `Rows`.
 
 - [ ] **Step 1: Write the failing tests**
 
