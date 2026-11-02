@@ -41,8 +41,16 @@ export function title(thread, me, nameOf) {
   return others.length ? others.join(', ') : short(thread.thread_id);
 }
 
-// weekly_remaining_pct is the one standard quota key (PROTOCOL §2.6).
+// quotaLabel is the quota rule the TUI dash shares (internal/tui dashCellQuota):
+// a numeric *_pct value reads 61%, the standard weekly_remaining_pct first
+// (PROTOCOL §2.6) and otherwise the first such key in sorted order; an empty
+// quota reads none; anything else is compact sorted k=v.
 export function quotaLabel(quota) {
-  const pct = quota && quota.weekly_remaining_pct;
-  return typeof pct === 'number' ? pct + '% weekly left' : '';
+  const keys = quota && typeof quota === 'object' ? Object.keys(quota).sort() : [];
+  if (!keys.length) return 'none';
+  for (const key of ['weekly_remaining_pct', ...keys]) {
+    const v = quota[key];
+    if (key.endsWith('_pct') && typeof v === 'number' && Number.isFinite(v)) return Math.round(v) + '%';
+  }
+  return keys.map(k => k + '=' + (typeof quota[k] === 'string' ? quota[k] : JSON.stringify(quota[k]))).join(' ');
 }

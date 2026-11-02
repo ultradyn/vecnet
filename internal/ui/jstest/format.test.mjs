@@ -46,11 +46,16 @@ test('title prefers the thread title, then the other participants, then the id',
   assert.equal(title(null, 'peer_me', nameOf), '');
 });
 
-test('quotaLabel shows the weekly figure and is empty without one', () => {
-  assert.equal(quotaLabel({ weekly_remaining_pct: 35 }), '35% weekly left');
-  assert.equal(quotaLabel({ weekly_remaining_pct: 0 }), '0% weekly left');
-  assert.equal(quotaLabel({ weekly_remaining_pct: 3, runs_this_hour: '0/200' }), '3% weekly left');
-  assert.equal(quotaLabel({}), '');
-  assert.equal(quotaLabel(null), '');
-  assert.equal(quotaLabel({ weekly_remaining_pct: 'lots' }), '');
+test('quotaLabel reads a *_pct value as a percentage, an empty quota as none, anything else as k=v', () => {
+  assert.equal(quotaLabel({ weekly_remaining_pct: 61 }), '61%');
+  assert.equal(quotaLabel({ weekly_remaining_pct: 0 }), '0%');
+  assert.equal(quotaLabel({ weekly_remaining_pct: 60.6 }), '61%');
+  assert.equal(quotaLabel({ weekly_remaining_pct: 3, runs_this_hour: '0/200' }), '3%');
+  assert.equal(quotaLabel({ daily_used_pct: 12, burst: 4 }), '12%');
+  assert.equal(quotaLabel({ a_pct: 9, weekly_remaining_pct: 40 }), '40%');
+  assert.equal(quotaLabel({}), 'none');
+  assert.equal(quotaLabel(null), 'none');
+  assert.equal(quotaLabel(undefined), 'none');
+  assert.equal(quotaLabel({ runs_this_hour: '0/200', tier: 2 }), 'runs_this_hour=0/200 tier=2');
+  assert.equal(quotaLabel({ weekly_remaining_pct: 'lots' }), 'weekly_remaining_pct=lots');
 });
