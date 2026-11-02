@@ -1,0 +1,137 @@
+// Shared local-only screen harness. No npm install or repository package.json.
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { rmSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createInterface } from 'node:readline';
+
+export const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+export function assert(cond, msg = 'assertion failed') { if (!cond) throw new Error(msg); }
+export async function run(command, args, options = {}) {
+  const child = spawn(command, args, { cwd: root, ...options, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '', stderr = '';
+  child.stdout.on('data', d => { stdout += d; });
+  child.stderr.on('data', d => { stderr += d; });
+  const [code] = await once(child, 'close');
+  if (code !== 0) throw new Error(`${command} exited ${code}: ${stderr}`);
+  return stdout;
+}
+export async function chromium() {
+  process.env.PLAYWRIGHT_BROWSERS_PATH ||= join(homedir(), '.cache/ms-playwright');
+  const module = process.env.PLAYWRIGHT_MODULE || join(homedir(), '.llm-general/skills/headless-browser-screenshots/node_modules/playwright/index.mjs');
+  return (await import(isAbsolute(module) ? pathToFileURL(module).href : module)).chromium;
+}
+export async function shotPath(name) {
+  assert(/^[a-zA-Z0-9_-]+$/.test(name), 'invalid shot name');
+  const dir = resolve(process.env.SHOTS_DIR || join(root, 'docs/plans/shots/oui'));
+  await mkdir(dir, { recursive: true });
+  return join(dir, `${name}.png`);
+}
+
+// Build cache lives for this script process; each invocation gets a fresh DB.
+let build;
+async function binaries() {
+  if (!build) build = (async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'vecnet-ui-build-'));
+    process.once('exit', () => rmSync(dir, { recursive: true, force: true }));
+    try {
+      await run('build2', ['go', 'build', '-p', '2', '-o', join(dir, 'demo'), './internal/opseed/demo'], { env: { ...process.env, CGO_ENABLED: '0' } });
+      return dir;
+    } catch (error) { await rm(dir, { recursive: true, force: true }); throw error; }
+  })();
+  return build;
+}
+export async function cleanBuild() {
+  if (build) { const pending = build; build = undefined; await rm(await pending, { recursive: true, force: true }); }
+}
+export async function buildCLI(dir) {
+  await run('build2', ['go', 'build', '-p', '2', '-o', join(dir, 'vecnet'), './cmd/vecnet'], { env: { ...process.env, CGO_ENABLED: '0' } });
+  return join(dir, 'vecnet');
+}
+export async function bootDemo({ scale = false } = {}) {
+  const binDir = await binaries();
+  const dir = await mkdtemp(join(tmpdir(), 'vecnet-ui-data-'));
+  const child = spawn(join(binDir, 'demo'), ['--listen', '127.0.0.1:0', '--data-dir', dir, ...(scale ? ['--scale'] : [])], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
+  // Consume logs, but never echo peer text or credentials into a terminal.
+  child.stderr.resume();
+  const closed = new Promise(resolve => child.once('close', resolve));
+  let stopped = false;
+  async function close() {
+    if (stopped) return;
+    stopped = true;
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    let timer;
+    await Promise.race([closed, new Promise(resolve => { timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 7000); })]);
+    clearTimeout(timer);
+    await closed;
+    await rm(dir, { recursive: true, force: true });
+  }
+  const lines = createInterface({ input: child.stdout });
+  let timer;
+  try {
+    const first = once(lines, 'line');
+    const line = await Promise.race([first.then(([line]) => line), closed.then(() => { throw new Error('demo exited before readiness'); }), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('demo startup timed out')), 60000); })]);
+    const demo = JSON.parse(line);
+    const control = async (name, body) => {
+      const response = await fetch(`${demo.url}/__demo/${name}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      assert(response.ok, `demo ${name}: ${response.status}`);
+      return response.json();
+    };
+    const asPeer = async (name, method, path, body) => {
+      const secret = name === 'operator' ? demo.operator_secret : demo.peers[name]?.secret;
+      assert(secret, `no bearer for peer ${name}`);
+      return fetch(demo.url + path, { method, headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json', 'X-Vecnet-Ingress': 'operator_ui' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    };
+    return { demo, dir, close, asPeer, advance: by => control('advance', { by }), stall: duration => control('stall', { for: duration }), clear: name => control('clear', { control: name }), controlStatus: () => control('status', {}), fail: (prefix, status, duration) => control('fail', { prefix, status, for: duration }) };
+  } catch (error) { await close(); throw error; }
+  finally { clearTimeout(timer); lines.close(); child.stdout.resume(); }
+}
+
+export async function withDemo({ scale = false, signedIn = true } = {}, fn) {
+  const env = await bootDemo({ scale });
+  let browser;
+  const errors = [], allowed = [], held = [];
+  try {
+    browser = await (await chromium()).launch({ headless: true });
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
+    const page = await context.newPage();
+    page.setDefaultTimeout(60000);
+    page.on('console', msg => { if (msg.type() === 'error') errors.push(msg.text()); });
+    page.on('pageerror', error => errors.push(error.message));
+    await page.addInitScript(({ secret }) => {
+      if (secret) localStorage.setItem('vecnet.ui.secret', secret);
+      addEventListener('securitypolicyviolation', event => console.error(`CSP violation: ${event.violatedDirective}`));
+    }, { secret: signedIn ? env.demo.operator_secret : '' });
+    const requests = [];
+    page.on('request', req => requests.push(req));
+    const ctx = {
+      page, demo: env.demo, advance: env.advance, asPeer: env.asPeer,
+      allowConsole: regex => allowed.push(regex),
+      countRequests: filter => requests.filter(req => typeof filter === 'function' ? filter(req) : filter instanceof RegExp ? filter.test(req.url()) : req.url().includes(filter)).length,
+      shot: async name => { await page.evaluate(() => document.fonts.ready); await page.screenshot({ path: await shotPath(name) }); },
+      hold: async glob => {
+        let release;
+        const gate = new Promise(resolve => { release = resolve; });
+        const handler = async route => { await gate; await route.continue(); };
+        await page.route(glob, handler);
+        let released = false;
+        const unblock = async () => { if (!released) { released = true; release(); await page.unroute(glob, handler); } };
+        held.push(unblock);
+        return unblock;
+      },
+      fail: async (glob, status = 500, code = 'demo_failure', message = 'Demo failure') => {
+        await page.route(glob, route => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify({ error: { code, message, details: {} } }) }));
+      },
+    };
+    await page.goto(`${env.demo.url}/ui/`, { waitUntil: 'load' });
+    await fn(ctx);
+    const unexpected = errors.filter(text => !allowed.some(regex => { regex.lastIndex = 0; return regex.test(text); }));
+    assert(!unexpected.length, `browser errors: ${unexpected.join('\n')}`);
+  } finally {
+    await Promise.allSettled(held.map(release => release()));
+    try { await browser?.close(); } finally { await env.close(); }
+  }
+}

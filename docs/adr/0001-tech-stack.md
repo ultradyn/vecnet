@@ -37,7 +37,7 @@ Constraints that shape the choice:
 - **CLI distribution:** a **single static binary** per OS/arch from `go build`, published as GitHub release assets; `go install` also works. No runtime on the host.
 - **Deploy:** multi-stage Dockerfile, final stage `FROM scratch` (plus CA certs and tzdata), shipped with `fly deploy --remote-only`.
 - **Tests:** `go test` with a smoke test that boots the real server on a random port. On xsm run through `build2`, two threads.
-- **Dev port:** the hub dev server uses **45752** (generated once, confirmed free). The web UI gets its own generated port when ticket 18 creates it.
+- **Dev port:** the hub dev server uses **45752** (generated once, confirmed free). The UI stays hub-served; the demo preview uses generated port **49575**.
 
 ## Consequences
 
