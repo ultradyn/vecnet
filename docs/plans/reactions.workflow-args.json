@@ -1,0 +1,212 @@
+{
+ "runStamp": "20261103T11-reactions",
+ "maxFixRounds": 3,
+ "planName": "reactions",
+ "plan": "docs/plans/2026-11-03-reactions.md",
+ "worktree": "/home/xertrov/src/vecnet4/.worktrees/reactions",
+ "branch": "reactions",
+ "baseRef": "master",
+ "statusDir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-reactions",
+ "taskPrefix": "rx",
+ "startTask": 1,
+ "endTask": 9,
+ "finalReview": true,
+ "openBrowser": false,
+ "deps": {
+  "1": [],
+  "2": [],
+  "3": [
+   1
+  ],
+  "4": [
+   3
+  ],
+  "5": [
+   4
+  ],
+  "6": [
+   4
+  ],
+  "7": [
+   3
+  ],
+  "8": [
+   3
+  ],
+  "9": [
+   2,
+   4,
+   5,
+   6,
+   7,
+   8
+  ]
+ },
+ "tasks": [
+  {
+   "title": "Shared contract: schema, reaction table, migration, invalidation tags",
+   "refs": "\u00a71.2, \u00a72.3, \u00a72.13; Review Focus",
+   "race": false,
+   "suite": "./internal/envelope/ ./internal/store/ ./internal/opapi/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Migration 0012 rebuilds messages to widen the kind CHECK, following 0007. Copy every row, index and default exactly; a test must prove an existing database migrates and keeps its data."
+   ]
+  },
+  {
+   "title": "PROTOCOL \u00a717 amendment, glossary, changelog",
+   "refs": "\u00a717 (new), \u00a71.2, \u00a76",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Docs only plus the CHANGELOG line; PROTOCOL text must match the plan exactly where it fixes copy."
+   ]
+  },
+  {
+   "title": "Hub event layer: `POST /v1/reactions`, storage, fan-out, history, rate share",
+   "refs": "\u00a717, \u00a716.2, \u00a716.3",
+   "race": true,
+   "suite": "./internal/hub/ ./internal/httpapi/ ./internal/opview/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Notify the event log after commit (eventlog/log.go Notify) and kick the push worker; visibility uses threads.history_access with the historyStart rule."
+   ]
+  },
+  {
+   "title": "Hub wake layer, loop rules and coalescing",
+   "refs": "\u00a717, \u00a75.1, \u00a75.2, \u00a76",
+   "race": true,
+   "suite": "./internal/hub/ ./internal/opview/ ./internal/push/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "superseded is an internal delivery state: never pushed, hidden from inbox counts and mark-read, no receipt. One wake per (reactor, target, emoji) ever, operator exempt."
+   ]
+  },
+  {
+   "title": "CLI `vecnet react`, reaction lines in watch, inbox and thread",
+   "refs": "\u00a717, \u00a713.7",
+   "race": false,
+   "suite": "./internal/cli/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "watch --for-monitor keeps its first four columns; reaction lines must stay one line, flattened."
+   ]
+  },
+  {
+   "title": "MCP `vecnet_react`",
+   "refs": "\u00a74.3, \u00a717",
+   "race": false,
+   "suite": "./internal/mcpserver/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations."
+   ]
+  },
+  {
+   "title": "TUI chips and `:react`, `opclient.React`",
+   "refs": "\u00a717; Review Focus",
+   "race": true,
+   "suite": "./internal/tui/ ./internal/opclient/",
+   "route": "opus",
+   "shots": "rx07",
+   "checks": [
+    "build2 node scripts/ui/rx-tui.mjs"
+   ],
+   "reviewChecks": [
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-reactions/review-shots/07 build2 node scripts/ui/rx-tui.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Every string a peer supplies is hostile by design: when you inspect tmux captures, message bodies or attachment names, pipe them through cat -v.",
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Chips are ASCII so cell widths stay exact; every peer string passes Clean."
+   ]
+  },
+  {
+   "title": "Web chips, react button and picker",
+   "refs": "\u00a717; Review Focus",
+   "race": false,
+   "suite": "./internal/httpapi/ ./internal/ui/...",
+   "route": "opus",
+   "shots": "rx08",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "build2 node scripts/ui/rx-thread.mjs"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-reactions/review-shots/08 build2 node scripts/ui/rx-thread.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "The picker and chips must look like the same product as the thread view (markdown, timing labels and priority tips merged just before this build). Reaction updates arrive by events without a reload."
+   ]
+  },
+  {
+   "title": "Journey, docs, gate",
+   "refs": "\u00a717; Review Focus",
+   "race": false,
+   "suite": "./...",
+   "route": "sol",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-reactions/gate-shots just ui-shots",
+    "build2 node scripts/ui/rx-journey.mjs"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-reactions/review-shots/09 just ui-shots",
+    "build2 node scripts/ui/rx-journey.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    ".scratch/vecnet/issues is tracked; edit the worktree copy."
+   ]
+  }
+ ],
+ "solRelay": {
+  "run": "/home/xertrov/src/vecnet4/scripts/wf/sol-run.sh",
+  "wait": "/home/xertrov/src/vecnet4/scripts/wf/sol-wait.sh",
+  "dir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-reactions/ccc",
+  "transcripts": "/home/xertrov/.claude-p/projects/-home-xertrov-src-vecnet4/*/subagents/workflows/*/agent-*.jsonl"
+ },
+ "extraRules": [
+  "No npm install. Playwright comes from the existing skill install through scripts/ui/lib.mjs.",
+  "Node and browser checks run through build2 too: `build2 node ...`. Chromium stays headless. Never run xdg-open or open a window.",
+  "Never touch the dev hub on 45752, the coordinator's preview on 49575, `.data/` or `.demo-data/`. Tmux only through the private `-L oui-<pid>` server, never Max's.",
+  "Read-only reviewers run screen scripts with the SHOTS_DIR their command gives, so committed PNGs stay unchanged."
+ ],
+ "mergeChecks": [
+  "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+  "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-reactions/merge-shots just ui-shots (the whole screen gate: a regression halts at the merge that caused it)"
+ ],
+ "gateChecks": [
+  "`build2 node --test --test-concurrency=2 internal/ui/jstest/`",
+  "`just isa-check` prints 0 for both binaries",
+  "`build2 go list -deps ./cmd/vecnet | grep -c 'modernc.org/sqlite'` prints 0",
+  "`build2 go list -deps ./cmd/vecnet-hub | grep -c 'charm.land'` prints 0",
+  "`SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-reactions/gate-shots just ui-shots` exits 0",
+  "`build2 node scripts/ui/rx-journey.mjs` exits 0",
+  "Every PNG listed in docs/plans/shots/oui/README.md exists, and every PNG in that directory is listed"
+ ],
+ "lensFocus": {
+  "spec": "This branch implements docs/plans/2026-11-03-reactions.md for issue .scratch/vecnet/issues/24-reactions.md. Check the fixed emoji set, per-emoji default priority, the opt-in wake layer, coalescing, one wake per (reactor, target, emoji) with operator exempt, no-op 200 changed:false before limits, the response shape (top-level superseded), and every surface (CLI, MCP, TUI, web).",
+  "security": "Reactions must never become a loop or a covert channel: depth target+1, sender_chain grows, max_depth/expires enforced, rate shared with sends, participants only (from_join), kind reaction refused on /v1/messages and vecnet_send, superseded never pushed. Peer strings inert in web and TUI.",
+  "tests": "Check screen scripts wait on state, honour SHOTS_DIR, never bind 45752 or 49575; each named plan test exists and fails without its fix; guard tests are marked."
+ },
+ "extraLenses": [
+  {
+   "key": "design",
+   "title": "Visual and interaction design",
+   "taste": true,
+   "focus": "Read every rx*.png in docs/plans/shots/oui/ with the Read tool beside the existing 08-*, att04-* and md-* shots. Chips, the react button and picker must look like the same product as the thread view: palette, spacing, type, focus rings. Flag anything that looks bolted on."
+  }
+ ]
+}
