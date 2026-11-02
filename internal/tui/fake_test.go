@@ -172,6 +172,11 @@ func (f *fakeAPI) Upload(ctx context.Context, r io.Reader, size int64, mediaType
 	if err := f.hit(ctx, "Upload"); err != nil {
 		return envelope.Attachment{}, err
 	}
+	// hit's select picks at random when the gate opens after a cancel: a
+	// cancelled upload never reads, whichever case won.
+	if err := ctx.Err(); err != nil {
+		return envelope.Attachment{}, err
+	}
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return envelope.Attachment{}, err
