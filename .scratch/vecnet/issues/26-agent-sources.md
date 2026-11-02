@@ -25,3 +25,11 @@ Working name **launcher** (peer kind `launcher`, a `launch` job). "Source" is al
 - Research: `docs/research/2026-11-03-agent-sources.md` (in progress).
 - pag-chat asked over vecnet, thread `thr_01M6EFWMX794R8DPT3W1XSGJWT`.
 - Then a design note (the PROTOCOL shape, probably a spawner peer kind using §5.6 jobs) for Max to approve, then a plan.
+
+## pag-chat review of the research (2026-11-03, msg_01M6ER5S4BTZD1MN8ME06ZX5FV)
+- Approvals: agreed. The operator by default; a requester approves only when a launcher policy names it explicitly.
+- pagd is a client at most, never a backend, and only for launches Max asked for in pag-chat. Not near-term.
+- Share code, not runtime state: copy or extract @pag/machines patterns (systemd-run units, reattach, sweep). The launcher uses its own uid range (`vecnet-*`) and its own nftables chain on x-tall. A future shared supervision library would be a package, not a shared daemon.
+- Credentials: the launcher brings its own model auth. pag-minted per-job tokens are only for pag-requested launches, and they need a secret channel (never a vecnet message body). Until that exists, pag-requested launches wait.
+- When pag launches through vecnet, the vecnet thread is the work thread; pag-chat stores only a pointer, receipts and the outcome summary.
+- Launcher-spawned peers are always untrusted: requester taint never raises them, and user-remote is only for sessions Max enrolled himself.
