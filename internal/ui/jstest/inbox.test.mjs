@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deadLetterLine, heldWhy, sections, withOlder } from '../static/inbox-model.js';
+import { chainBreak, deadLetterLine, follow, heldWhy, sections, withOlder } from '../static/inbox-model.js';
 
 const delivery = (id, section, priority, extra = {}) => ({
   delivery_id: id, message_id: 'msg_' + id, thread_id: 'thr_1', thread_title: 't', sender: 'peer_a',
@@ -85,17 +85,101 @@ test('heldWhy explains hold vs wake_idle', () => {
   assert.equal(heldWhy(null), '');
 });
 
-test('withOlder appends older pages once and pages on from the last one', () => {
-  const head = { approvals: [], dead_letters: [], attention: [], deliveries: [delivery('dly_9', 'woke', 'wake'), delivery('dly_8', 'held', 'hold')], next_before: 'dly_8' };
+// A hub that pages like opview/inbox.go: newest first, before is exclusive,
+// and next_before names the last row of a full page.
+function fakeHub(n) {
+  const id = i => 'dly_' + String(i).padStart(3, '0');
+  let top = n;
+  const all = () => Array.from({ length: top }, (_, i) => id(top - i));
+  return {
+    all,
+    deliver: (count = 1) => { top += count; },
+    page: (limit, before) => {
+      let rows = all();
+      if (before) rows = rows.slice(rows.indexOf(before) + 1);
+      const more = rows.length > limit;
+      rows = rows.slice(0, limit);
+      return { approvals: [], dead_letters: [], attention: [], deliveries: rows.map(r => delivery(r, 'held', 'hold')), next_before: more ? rows[limit - 1] : null };
+    },
+  };
+}
+const ids = inbox => inbox.deliveries.map(d => d.delivery_id);
+// Whatever the page shows must be the newest rows with none skipped.
+const assertNoGap = (hub, inbox) => assert.deepEqual(ids(inbox), hub.all().slice(0, inbox.deliveries.length));
+
+test('older pages follow the head as new deliveries shift it, and no row goes missing', async () => {
+  const hub = fakeHub(100);
+  const head = hub.page(50);
   assert.equal(withOlder(head, []), head);
-  // The head reloaded with a newer row since the older page was read, so the
-  // older page repeats dly_8; the head's copy wins.
-  const fresh = { ...head, deliveries: [delivery('dly_10', 'woke', 'wake'), delivery('dly_9', 'woke', 'wake'), delivery('dly_8', 'held', 'hold', { read_at: '2026-11-02T01:10:00.000Z' })], next_before: 'dly_8' };
-  const page = { deliveries: [delivery('dly_8', 'held', 'hold'), delivery('dly_7', 'woke', 'wake')], next_before: 'dly_7' };
-  const merged = withOlder(fresh, [page]);
-  assert.deepEqual(merged.deliveries.map(d => d.delivery_id), ['dly_10', 'dly_9', 'dly_8', 'dly_7']);
-  assert.equal(merged.deliveries[2].read_at, '2026-11-02T01:10:00.000Z');
-  assert.equal(merged.next_before, 'dly_7');
-  assert.equal(withOlder(fresh, [page, { deliveries: [], next_before: null }]).next_before, null);
-  assert.equal(withOlder(null, [page]), null);
+  const pages = [{ ...hub.page(50, head.next_before), before: head.next_before }];
+  assert.equal(chainBreak(head, pages), -1);
+  const merged = withOlder(head, pages);
+  assert.equal(merged.deliveries.length, 100);
+  assertNoGap(hub, merged);
+  assert.equal(merged.next_before, null);
+
+  // One delivery arrives and the head reloads: dly_051 dropped off the head
+  // and is not in the older page, which starts below it.
+  hub.deliver();
+  const head2 = hub.page(50);
+  assert.equal(chainBreak(head2, pages), 0);
+  // Until the pages follow, only the head shows, paging on from its tail.
+  const interim = withOlder(head2, pages);
+  assertNoGap(hub, interim);
+  assert.equal(interim.next_before, head2.next_before);
+
+  const reads = [];
+  const fetchPage = before => { reads.push(before); return hub.page(50, before); };
+  const { pages: followed, error } = await follow(head2, pages, fetchPage);
+  assert.equal(error, null);
+  assert.deepEqual(reads, ['dly_052']);
+  const after = withOlder(head2, followed);
+  assertNoGap(hub, after);
+  assert.ok(ids(after).includes('dly_051'), 'dly_051 went missing');
+  assert.equal(after.deliveries.length, 100);
+  assert.equal(after.next_before, 'dly_002');
+
+  // A burst longer than a page, with two older pages loaded.
+  const deep = [...followed, { ...hub.page(50, 'dly_002'), before: 'dly_002' }];
+  hub.deliver(60);
+  const head3 = hub.page(50);
+  const again = await follow(head3, deep, before => hub.page(50, before));
+  assert.equal(again.pages.length, 2);
+  assert.equal(chainBreak(head3, again.pages), -1);
+  const shown = withOlder(head3, again.pages);
+  assertNoGap(hub, shown);
+  assert.equal(shown.deliveries.length, 150);
+
+  // Pages that still follow are kept without a read.
+  const steady = await follow(head3, again.pages, () => { throw new Error('read a page that still follows'); });
+  assert.equal(steady.pages, again.pages);
+});
+
+test('follow keeps the pages that joined when a read fails', async () => {
+  const hub = fakeHub(200);
+  const head = hub.page(50);
+  const p1 = { ...hub.page(50, head.next_before), before: head.next_before };
+  const p2 = { ...hub.page(50, p1.next_before), before: p1.next_before };
+  hub.deliver();
+  const head2 = hub.page(50);
+  let n = 0;
+  const failing = before => { if (n++) throw Object.assign(new Error('hub down'), { code: 'unavailable' }); return hub.page(50, before); };
+  const { pages, error } = await follow(head2, [p1, p2], failing);
+  assert.equal(error.code, 'unavailable');
+  assert.equal(pages.length, 1);
+  const shown = withOlder(head2, pages);
+  assertNoGap(hub, shown);
+  assert.equal(shown.next_before, pages[0].next_before);
+  // A page that does not follow is never merged, whatever it holds.
+  assert.equal(withOlder(head2, [p1, p2]).deliveries.length, 50);
+  assert.equal(withOlder(null, [p1]), null);
+});
+
+test('withOlder keeps the first copy of a row two pages share', () => {
+  const head = { approvals: [], dead_letters: [], attention: [], deliveries: [delivery('dly_9', 'woke', 'wake'), delivery('dly_8', 'held', 'hold', { read_at: '2026-11-02T01:10:00.000Z' })], next_before: 'dly_8' };
+  const page = { before: 'dly_8', deliveries: [delivery('dly_8', 'held', 'hold'), delivery('dly_7', 'woke', 'wake')], next_before: null };
+  const merged = withOlder(head, [page]);
+  assert.deepEqual(ids(merged), ['dly_9', 'dly_8', 'dly_7']);
+  assert.equal(merged.deliveries[1].read_at, '2026-11-02T01:10:00.000Z');
+  assert.equal(merged.next_before, null);
 });

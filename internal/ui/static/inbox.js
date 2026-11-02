@@ -5,7 +5,7 @@
 import { answerBody, countdown } from './approvals.js';
 import { avatar, confirmButton, h } from './dom.js';
 import { ago, short, when } from './format.js';
-import { deadLetterParts, heldWhy, sections, withOlder } from './inbox-model.js';
+import { chainBreak, deadLetterParts, follow, heldWhy, sections, withOlder } from './inbox-model.js';
 import * as presence from './presence.js';
 import * as subs from './subs.js';
 
@@ -31,8 +31,10 @@ export function mount(root, ctx) {
   const cards = new Map();      // approval_id → { a, buttons, exp } as rendered
   const dlControls = new Map(); // delivery_id → { retry, discard }
   const dlBusy = new Set();
-  const older = [];
-  let olderBusy = false, shown = {}, alive = true;
+  // "Load older" pages, each with the cursor it was read with. They follow
+  // the head: a reload that shifts it re-reads them before the page redraws.
+  let older = [];
+  let olderBusy = false, following = null, shown = {}, alive = true;
 
   const attention = h('div', { class: 'attention', id: sectionId('attention') });
   const banner = h('div', { class: 'banner error', role: 'alert', hidden: true });
@@ -189,12 +191,35 @@ export function mount(root, ctx) {
     olderBusy = true;
     btn.disabled = true;
     try {
-      older.push(await api.inbox({ limit: PAGE, before }));
+      const page = await api.inbox({ limit: PAGE, before });
+      // A head reload meanwhile may have moved the tail; the redraw offers
+      // "Load older" again from wherever it is now.
+      const tail = older.length ? older[older.length - 1].next_before : (inbox.get() || {}).next_before;
+      if (!following && tail === before) older = [...older, { ...page, before }];
       render(true);
     } catch (e) {
       btn.disabled = false;
       ctx.toast(describe(e), true);
     } finally { olderBusy = false; }
+  }
+
+  // The head reloaded and the older pages no longer join it: read them again
+  // from its tail, then redraw once, so no row goes missing between them and
+  // the page does not shrink and regrow meanwhile. A newer head cancels this
+  // pass and starts its own.
+  async function followHead(value) {
+    if (following === value) return;
+    following = value;
+    const stale = () => !alive || following !== value;
+    const { pages, error } = await follow(value, older, async before => {
+      if (stale()) throw stale;
+      return api.inbox({ limit: PAGE, before });
+    });
+    if (stale()) return;
+    following = null;
+    older = pages;
+    if (error) ctx.toast(describe(error), true);
+    render(true);
   }
 
   // ---- page ----
@@ -225,6 +250,8 @@ export function mount(root, ctx) {
       return;
     }
 
+    if (chainBreak(value, older) >= 0) { followHead(value); return; }
+    following = null;
     const data = withOlder(value, older), nowMs = store.hubNow();
     const byKey = new Map(sections(data).map(s => [s.key, s]));
     const live = new Set((data.approvals || []).map(a => a.approval_id));

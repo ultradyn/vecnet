@@ -62,17 +62,60 @@ export function heldWhy(delivery) {
   return '';
 }
 
-// withOlder appends the "Load older" pages to the head snapshot. A row both
-// pages hold keeps the head's copy, which is the fresher of the two, and
-// paging continues from the last older page.
+// "Load older" pages carry the cursor they were read with: { before,
+// deliveries, next_before }. The hub's cursor is exclusive and names the last
+// row of a page (PROTOCOL §2.13), so a page joins the one above it only while
+// its before is that page's next_before. A new delivery shifts the head by a
+// row, and the old head's last row then sits in neither the head nor the
+// first older page.
+
+// chainBreak returns the index of the first page that no longer follows the
+// page above it (the head for index 0), or -1 when every page does.
+export function chainBreak(inbox, pages) {
+  let cursor = inbox ? inbox.next_before ?? null : null;
+  for (let i = 0; i < pages.length; i++) {
+    if (!cursor || pages[i].before !== cursor) return i;
+    cursor = pages[i].next_before ?? null;
+  }
+  return -1;
+}
+
+// withOlder appends the older pages that still follow the head, so a gap can
+// never show: past a break it pages on from the last page that joins. A row
+// two pages hold keeps the first copy, which is the fresher of the two.
 export function withOlder(inbox, pages) {
   if (!inbox || !pages.length) return inbox;
+  const k = chainBreak(inbox, pages);
+  const joined = k < 0 ? pages : pages.slice(0, k);
+  if (!joined.length) return inbox;
   const seen = new Set();
   const deliveries = [];
-  for (const d of [list(inbox.deliveries), ...pages.map(p => list(p.deliveries))].flat()) {
+  for (const d of [list(inbox.deliveries), ...joined.map(p => list(p.deliveries))].flat()) {
     if (seen.has(d.delivery_id)) continue;
     seen.add(d.delivery_id);
     deliveries.push(d);
   }
-  return { ...inbox, deliveries, next_before: pages[pages.length - 1].next_before ?? null };
+  return { ...inbox, deliveries, next_before: joined[joined.length - 1].next_before ?? null };
+}
+
+// follow re-chains pages under a reloaded head: the pages that still follow it
+// stay, and from the first that does not, as many pages as were loaded are
+// read again from the right cursor with fetchPage(before). A failed read
+// keeps what joined so far and reports the error; nothing older than the
+// head's tail is ever dropped silently, because withOlder pages on from there.
+export async function follow(inbox, pages, fetchPage) {
+  const k = chainBreak(inbox, pages);
+  if (k < 0) return { pages, error: null };
+  const next = pages.slice(0, k);
+  let before = k ? next[k - 1].next_before ?? null : inbox.next_before ?? null;
+  try {
+    while (next.length < pages.length && before) {
+      const page = await fetchPage(before);
+      next.push({ ...page, before });
+      before = page.next_before ?? null;
+    }
+  } catch (error) {
+    return { pages: next, error };
+  }
+  return { pages: next, error: null };
 }
