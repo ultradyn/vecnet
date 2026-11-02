@@ -276,19 +276,40 @@ test('a poll reloads only what failed, and a resource that keeps failing costs o
   assert.deepEqual(h.sleeps, []);
 });
 
-test('a load that fails during a batch is still acked, then retried by the next poll', async () => {
+test('a batch whose snapshot fails is not acked until the snapshot loads, then exactly once', async () => {
   const h = hub([{ events: [delivery('thr_1')], next_cursor: 'e1.5' }, { events: [], next_cursor: 'e1.5' }]);
   let loads = 0;
+  const ackedAt = [];
   const history = h.store.resource('thread:thr_1', async () => {
-    if (++loads === 1) throw new APIError(503, 'unavailable', 'blip');
+    if (++loads === 1) throw new APIError(503, 'unavailable', 'snapshot unavailable');
+    ackedAt.push(h.acks.length); // nothing acked while the snapshot is unshown
     return loads;
   });
   await h.run();
   await h.store.settled();
+  assert.deepEqual(ackedAt, [0]);
   assert.deepEqual(h.acks, ['e1.5']);
   assert.equal(loads, 2);
   assert.equal(history.get(), 2);
   assert.equal(history.error(), null);
+  assert.deepEqual(h.sleeps, [1000]);
+});
+
+test('a snapshot that keeps failing holds the cursor and backs off; the hub refusing it does not wedge', async () => {
+  for (const [err, wantAcks] of [
+    [new APIError(503, 'unavailable', 'down'), []],
+    [new APIError(0, 'network', 'unreachable'), []],
+    [new APIError(404, 'not_found', 'gone'), ['e1.5']],
+  ]) {
+    const h = hub([{ events: [delivery('thr_1')], next_cursor: 'e1.5' }, { events: [], next_cursor: 'e1.5' }]);
+    let loads = 0;
+    // Stop after a few retries: a retryable failure never acks. The fake sleep
+    // does not yield, so the loader stops the run itself.
+    h.store.resource('thread:thr_1', async () => { if (++loads >= 4) h.controller.abort(); throw err; });
+    await h.run();
+    assert.deepEqual(h.acks, wantAcks, err.message);
+    if (!wantAcks.length) assert.ok(h.sleeps.length >= 3, 'backs off');
+  }
 });
 
 test('5xx backs off 1,2,4…30 s with fake sleep; success resets', async () => {

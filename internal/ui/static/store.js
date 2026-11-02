@@ -141,28 +141,47 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
     };
   }
 
+  // Returns the resources it marked, so the pump can tell whether what a
+  // batch invalidated has been shown.
   function invalidate(...tags) {
-    for (const r of live) if (tags.includes(r.tag)) r.mark();
+    const marked = [];
+    for (const r of live) if (tags.includes(r.tag)) { r.mark(); marked.push(r); }
+    return marked;
   }
   function invalidateAll() {
     for (const r of live) r.mark();
   }
   // A hub that answers can serve what it could not before. Nothing else would
-  // ask again: the batch that prompted a failed load has been acked, and a
-  // first load that failed had no event behind it at all.
+  // ask again for a load no batch is waiting on: a first load that failed had
+  // no event behind it at all.
   function retryFailed() {
     for (const r of live) if (r.error()) r.mark();
   }
   // Resolves once nothing is queued or loading. A failed load counts: its
-  // error sits on the resource, and the pump's next poll retries it.
+  // error sits on the resource, and the pump decides whether to retry it.
   async function settled() {
     await null;
     while (flushQueued || inflight.size) await Promise.allSettled(inflight);
   }
 
+  // retryable is a load error the same request may get past later: the hub
+  // unreachable, 5xx, 429, or anything that is not a hub answer. A 4xx
+  // refusal will not change, so it must not wedge the ack.
+  function retryable(e) {
+    if (!e) return false;
+    if (typeof e.status !== 'number') return true;
+    return e.status === 0 || e.status === 429 || e.status >= 500;
+  }
+  function unshownError(rs) {
+    for (const r of rs) if (live.has(r) && retryable(r.error())) return r.error();
+    return null;
+  }
+
   // The loop behind the PROTOCOL §2.3 status table. An ack stays owed across
   // failures and is paid before the next poll, or a held delivery in the last
-  // batch would never reach accepted.
+  // batch would never reach accepted. A batch is acked only once every
+  // snapshot it invalidated has loaded ("accepted once shown"): a load that
+  // fails in a way that may pass holds the cursor, backs off and tries again.
   async function pump(signal) {
     const aborted = () => !!signal && signal.aborted;
     const interrupted = new Promise(resolve => {
@@ -171,8 +190,18 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
     });
     const resync = () => Promise.race([settled(), interrupted]);
     let after, first = true, owed, backoff = BACKOFF_FIRST;
+    let unshown; // { cursor, rs }: a batch whose snapshots have not all loaded
     while (!aborted()) {
       try {
+        if (unshown) {
+          for (const r of unshown.rs) if (r.error()) r.mark();
+          await resync();
+          if (aborted()) break;
+          const e = unshownError(unshown.rs);
+          if (e) throw e;
+          owed = unshown.cursor;
+          unshown = undefined;
+        }
         if (owed) { await api.ack(owed); owed = undefined; }
         const page = await api.events(first ? { wait: 0, signal } : { after, wait: WAIT, signal });
         if (aborted()) break;
@@ -184,9 +213,12 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
         after = page.next_cursor || after;
         const events = page.events || [];
         if (!events.length) continue;
-        invalidate(...events.flatMap(tagsFor));
+        const rs = invalidate(...events.flatMap(tagsFor));
         await resync();
-        if (!aborted()) owed = after;
+        if (aborted()) break;
+        const e = unshownError(rs);
+        if (e) { unshown = { cursor: after, rs }; throw e; }
+        owed = after;
       } catch (e) {
         if (aborted() || e.status === 401 || e.status === 403) break;
         const oldest = e.status === 409 && e.details && e.details.oldest_cursor;
@@ -200,7 +232,10 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
         }
         // A plain refusal of the ack will not change on retry.
         if (e.status >= 400 && e.status < 500 && e.status !== 429) owed = undefined;
-        setConn('offline');
+        // A snapshot that failed while the hub answers events is not the
+        // stream going offline: the resource shows its own error. It backs
+        // off all the same.
+        if (!unshown) setConn('offline');
         await sleep(backoff, signal);
         backoff = Math.min(backoff * 2, BACKOFF_MAX);
       }
