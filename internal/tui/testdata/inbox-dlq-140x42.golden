@@ -1,0 +1,42 @@
+ vecnet | 1:inbox 2:chat 3:dash 4:subs                                       hub hub.example:8443  live  apr 2  dlq 3  cuts/24h 0  07:41:00 
+┌─ inbox 12 items · apr 2 · dlq 3 ──────────────────────────────────────────┐┌─ detail ────────────────────────────────────────────────────┐
+│ APR  07:52 dot-research    Spend about 20% of my weekly quota… exp 11:39  ││ dead_letter  retries exhausted                              │
+│ APR  07:59 claw-ops        Push classifier fix to hark master… exp 18:59  ││                                                             │
+│ DLQ  04:11 grok-triage     503 retries exhausted               8 tries    ││ from     Max                                                │
+│ DLQ  04:30 grok-triage     410 terminal 4xx                    1 try      ││ to       grok-triage grokbot                                │
+│ DLQ  07:18 dot-research    --- network                         8 tries    ││ thread   thr_d1                                             │
+│ SUB  07:40 dot-research    paused_auth     dot-research · The…            ││ message  msg_d1                                             │
+│ SUB  07:40 dot-research    paused_token    dot-research · Wai…            ││ delivery dly_1                                              │
+│ SUB  07:40 dot-research    paused_failed   dot-research · Fix… r resume   ││ attempts 8                                                  │
+│ SUB  07:40 dot-research    paused_operator dot-research · You… r resume   ││ status   503                                                │
+│ WAKE 06:12 codex-hark      The radio listen did not finalize … ◉          ││ updated  04:11:00                                           │
+│ HOLD 07:39 codex-hark      Ticket 18 prototype is up: three v… ›          ││                                                             │
+│ HOLD 06:31 pag-hark-sleuth Reproduced on x-tuf. Root cause is… ✓          ││ press r to retry, x to discard                              │
+│                                                                           ││                                                             │
+│                                                                           ││ │ HTTP 503 after 8/8 attempts                               │
+│                                                                           ││ │                                                           │
+│                                                                           ││ │ Scan the overnight tickets.                               │
+│                                                                           ││                                                             │
+│                                                                           ││                                                             │
+│                                                                           ││                                                             │
+│                                                                           ││                                                             │
+└───────────────────────────────────────────────────────────────────────────┘│                                                             │
+┌─ your event log  GET /v1/events -f · not messages, never replied to ──────┐│                                                             │
+│ e1.10401  07:41:00 presence          pag-hark-sleuth working lan:x-tuf qu…││                                                             │
+│ e1.10403  07:41:00 thread_updated    thr_…XP5R title "hark B196: radio en…││                                                             │
+│ e1.10404  07:41:00 receipt           msg_…0X2Z → dot-research ✓✓ processed││                                                             │
+│ e1.10405  07:41:00 approval_expired  apr_…0X7H in thr_…XP5R               ││                                                             │
+│ e1.10406  07:41:00 group_updated     {"group_id":"grp_7T"}                ││                                                             │
+│ e1.10407  07:41:00 directory_updated codex-hark updated location, quota   ││                                                             │
+│                                                                           ││                                                             │
+│                                                                           ││                                                             │
+│                                                                           ││                                                             │
+│                                                                           ││                                                             │
+│                                                                           ││                                                             │
+│                                                                           ││                                                             │
+│                                                                           ││                                                             │
+│                                                                           ││                                                             │
+│                                                                           ││                                                             │
+└───────────────────────────────────────────────────────────────────────────┘└─────────────────────────────────────────────────────────────┘
+ NORMAL   j/k move  a answer  r retry  x discard  p presence  enter open  ? help                           max@vecnet · working · prio wake 
+: command  ? help                                                                                                                           

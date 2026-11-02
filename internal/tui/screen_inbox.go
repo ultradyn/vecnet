@@ -1,4 +1,1054 @@
 package tui
 
-// newInboxScreen is the inbox tab. Task 18 replaces this stub.
-func newInboxScreen() Screen { return stubScreen{title: "inbox"} }
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/opapi"
+	"github.com/XertroV/vecnet/internal/opclient"
+)
+
+const (
+	// inboxBeatEvery keeps presence inside its 1 h TTL.
+	inboxBeatEvery = 20 * time.Minute
+	inboxTagW      = 4
+	inboxTimeW     = 5
+	inboxTailW     = 11
+	inboxPresence  = "presence" // the lock key for the operator's own presence
+	// inboxHintsW is the width from which the status line holds every key.
+	inboxHintsW = 120
+)
+
+var inboxSelBg = lipgloss.Color("#1e293b")
+
+// inboxRow is one line of the typed list. Exactly one of apr, dlq, sub and dly
+// is set. key names the item across reloads.
+type inboxRow struct {
+	tag, key string
+	apr      *opapi.OpenApproval
+	dlq      *opapi.DeadLetter
+	sub      *opapi.Attention
+	dly      *opapi.InboxDelivery
+}
+
+// inboxPrompt is an open answer or discard prompt. It holds its own copy of the
+// item, so a reload that shifts the list cannot point the key at another row.
+type inboxPrompt struct {
+	key     string
+	answer  *opapi.OpenApproval
+	discard *opapi.DeadLetter
+}
+
+// inboxLock claims an item from the moment an action starts until a snapshot
+// taken after it finished lands, because until then the list may still offer a
+// row the hub has closed (Review Focus 2). hide takes the row off the list for
+// that time: the hub said it is gone, and the snapshot has not caught up.
+type inboxLock struct{ done, hide bool }
+
+type inboxAction struct {
+	key, verb, good string
+	hide            bool
+	tags            []string
+}
+
+type inboxDoneMsg struct {
+	inboxAction
+	err error
+}
+
+type inboxBeatMsg struct {
+	posted bool
+	err    error
+}
+
+// inboxScreen is the inbox tab: the typed list over the raw event log, with the
+// selected item's detail on the right.
+type inboxScreen struct {
+	sel      string // the selected row's key
+	at, top  int    // its index, kept for when it leaves, and the first row shown
+	compact  bool   // the last frame was too narrow for the full hints
+	prompt   *inboxPrompt
+	locks    map[string]*inboxLock
+	nextBeat time.Time
+}
+
+func newInboxScreen() Screen { return &inboxScreen{locks: map[string]*inboxLock{}} }
+
+func (s *inboxScreen) Title() string { return "inbox" }
+
+func (s *inboxScreen) Hints() string {
+	switch {
+	case s.prompt == nil && s.compact:
+		return "a answer  r retry  x drop  p status"
+	case s.prompt == nil:
+		return "j/k move  a answer  r retry  x discard  p presence  enter open  ? help"
+	case s.prompt.answer != nil:
+		return fmt.Sprintf("1-%d answer  any other key cancels", len(s.prompt.answer.Options))
+	}
+	return "y discard  any other key cancels"
+}
+
+func (s *inboxScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		return s.onKey(msg, m)
+	case Loaded:
+		return s.onLoaded(msg, m)
+	case inboxDoneMsg:
+		return s.onDone(msg, m)
+	case inboxBeatMsg:
+		if msg.posted && msg.err == nil {
+			return m.Reload("inbox", "peers")
+		}
+	}
+	return nil
+}
+
+// rows is the list in the prototype's order, without items an action removed.
+func (s *inboxScreen) rows(m *Model) []inboxRow {
+	in := &m.Data.Inbox
+	rows := make([]inboxRow, 0, len(in.Approvals)+len(in.DeadLetters)+len(in.Attention)+len(in.Deliveries))
+	add := func(row inboxRow) {
+		if l := s.locks[row.key]; l == nil || !l.hide {
+			rows = append(rows, row)
+		}
+	}
+	for i := range in.Approvals {
+		a := &in.Approvals[i]
+		add(inboxRow{tag: "APR", key: "apr:" + a.ApprovalID, apr: a})
+	}
+	for i := range in.DeadLetters {
+		d := &in.DeadLetters[i]
+		add(inboxRow{tag: "DLQ", key: "dlq:" + d.DeliveryID, dlq: d})
+	}
+	for i := range in.Attention {
+		a := &in.Attention[i]
+		add(inboxRow{tag: "SUB", key: "sub:" + a.ID, sub: a})
+	}
+	for _, section := range []struct{ name, tag string }{{"woke", "WAKE"}, {"held", "HOLD"}} {
+		for i := range in.Deliveries {
+			if d := &in.Deliveries[i]; d.Section == section.name {
+				add(inboxRow{tag: section.tag, key: "dly:" + d.DeliveryID, dly: d})
+			}
+		}
+	}
+	return rows
+}
+
+// cursor finds the selection in rows. An item that has gone leaves it on the
+// row now at the same index.
+func (s *inboxScreen) cursor(rows []inboxRow) int {
+	if i := slices.IndexFunc(rows, func(r inboxRow) bool { return r.key == s.sel }); i >= 0 {
+		s.at = i
+		return i
+	}
+	s.at = max(min(s.at, len(rows)-1), 0)
+	s.sel = ""
+	if len(rows) > 0 {
+		s.sel = rows[s.at].key
+	}
+	return s.at
+}
+
+func (s *inboxScreen) onKey(msg tea.KeyPressMsg, m *Model) tea.Cmd {
+	if s.prompt != nil {
+		return s.onPromptKey(msg.String(), m)
+	}
+	if m.firstLoading() {
+		return nil
+	}
+	key := msg.String()
+	rows := s.rows(m)
+	at := s.cursor(rows)
+	switch key {
+	case "j", "down":
+		s.moveTo(rows, at+1)
+		return nil
+	case "k", "up":
+		s.moveTo(rows, at-1)
+		return nil
+	case "p":
+		return s.togglePresence(m)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	row := rows[at]
+	switch key {
+	case "enter":
+		return s.open(row, m)
+	case "a":
+		s.askAnswer(row, m)
+	case "r":
+		return s.retry(row, m)
+	case "x":
+		s.askDiscard(row, m)
+	}
+	return nil
+}
+
+func (s *inboxScreen) moveTo(rows []inboxRow, at int) {
+	if at >= 0 && at < len(rows) {
+		s.at, s.sel = at, rows[at].key
+	}
+}
+
+// onPromptKey ends the prompt whatever the key is: every key but the one that
+// confirms is a cancel, and the prompt's Insert mode keeps it from the shell.
+func (s *inboxScreen) onPromptKey(key string, m *Model) tea.Cmd {
+	p := s.prompt
+	s.closePrompt(m)
+	switch {
+	case p.discard != nil && key == "y":
+		return s.discard(*p.discard, m)
+	case p.answer != nil && len(key) == 1 && key[0] >= '1' && key[0] <= '9':
+		if option := int(key[0] - '1'); option < len(p.answer.Options) {
+			return s.answer(*p.answer, option, m)
+		}
+	}
+	return nil
+}
+
+func (s *inboxScreen) openPrompt(p *inboxPrompt, m *Model) {
+	s.prompt = p
+	m.Mode = ModeInsert
+}
+
+func (s *inboxScreen) closePrompt(m *Model) {
+	s.prompt = nil
+	m.Mode = ModeNormal
+}
+
+// free reports whether an action may start on key, and says why not if it may
+// not. A rejected credential gets no more requests.
+func (s *inboxScreen) free(key string, m *Model) bool {
+	if m.stopped() {
+		m.Toast(m.Conn+": restart with a valid profile", true)
+		return false
+	}
+	if s.locks[key] != nil {
+		m.Toast("already in progress", true)
+		return false
+	}
+	return true
+}
+
+// start claims a.key and runs call. Its result reaches onDone on any tab.
+func (s *inboxScreen) start(a inboxAction, m *Model, call func(context.Context) error) tea.Cmd {
+	s.locks[a.key] = &inboxLock{}
+	ctx := m.ctx
+	return func() tea.Msg { return inboxDoneMsg{inboxAction: a, err: call(ctx)} }
+}
+
+func (s *inboxScreen) askAnswer(row inboxRow, m *Model) {
+	switch {
+	case row.apr == nil:
+		m.Toast("a answers an approval", true)
+	case inboxExpired(*row.apr, m.HubNow()):
+		m.Toast("approval expired: nothing sent", true)
+	case s.free(row.key, m):
+		a := *row.apr
+		s.openPrompt(&inboxPrompt{key: row.key, answer: &a}, m)
+	}
+}
+
+func (s *inboxScreen) answer(a opapi.OpenApproval, option int, m *Model) tea.Cmd {
+	key := "apr:" + a.ApprovalID
+	if inboxExpired(a, m.HubNow()) {
+		m.Toast("approval expired: nothing sent", true)
+		return nil
+	}
+	if !s.free(key, m) {
+		return nil
+	}
+	api := m.API
+	action := inboxAction{key: key, verb: "answer", good: "answered: " + a.Options[option], hide: true, tags: []string{"inbox", threadPrefix + a.ThreadID}}
+	return s.start(action, m, func(ctx context.Context) error { return api.Answer(ctx, a, option) })
+}
+
+func (s *inboxScreen) askDiscard(row inboxRow, m *Model) {
+	switch {
+	case row.dlq == nil:
+		m.Toast("x discards a dead letter", true)
+	case s.free(row.key, m):
+		d := *row.dlq
+		s.openPrompt(&inboxPrompt{key: row.key, discard: &d}, m)
+	}
+}
+
+func (s *inboxScreen) discard(d opapi.DeadLetter, m *Model) tea.Cmd {
+	key := "dlq:" + d.DeliveryID
+	if !s.free(key, m) {
+		return nil
+	}
+	api := m.API
+	action := inboxAction{key: key, verb: "discard", good: "discarded", hide: true, tags: []string{"inbox", "health", threadPrefix + d.ThreadID}}
+	return s.start(action, m, func(ctx context.Context) error { return api.DiscardDeadLetter(ctx, d.DeliveryID) })
+}
+
+// retry is r: a dead letter retries, and a SUB row resumes only if the hub
+// offers it. A paused_token or paused_auth subscription would only re-pause.
+func (s *inboxScreen) retry(row inboxRow, m *Model) tea.Cmd {
+	api := m.API
+	switch {
+	case row.dlq != nil:
+		if !s.free(row.key, m) {
+			return nil
+		}
+		id := row.dlq.DeliveryID
+		action := inboxAction{key: row.key, verb: "retry", good: "retrying", hide: true, tags: []string{"inbox", "health", threadPrefix + row.dlq.ThreadID}}
+		return s.start(action, m, func(ctx context.Context) error { return api.RetryDeadLetter(ctx, id) })
+	case row.sub != nil && row.sub.Action == "resume":
+		if !s.free(row.key, m) {
+			return nil
+		}
+		id := row.sub.ID
+		action := inboxAction{key: row.key, verb: "resume", good: "resumed", tags: []string{"inbox", "subs"}}
+		return s.start(action, m, func(ctx context.Context) error { return api.ResumeSubscription(ctx, id) })
+	case row.sub != nil:
+		m.Toast(inboxNoResume(row.sub.Health), true)
+	default:
+		m.Toast("r retries a dead letter or resumes a subscription", true)
+	}
+	return nil
+}
+
+func inboxNoResume(health string) string {
+	switch health {
+	case opapi.HealthPausedToken:
+		return "no resume here: ChatGPT must re-subscribe"
+	case opapi.HealthPausedAuth:
+		// The hub reports several causes as this one, and only its note in the
+		// detail says which.
+		return "no resume here: the detail says what it needs"
+	}
+	return "no resume here: it would not help this subscription"
+}
+
+// open shows the item's thread on the chat tab and marks it read.
+func (s *inboxScreen) open(row inboxRow, m *Model) tea.Cmd {
+	thread := ""
+	switch {
+	case row.apr != nil:
+		thread = row.apr.ThreadID
+	case row.dlq != nil:
+		thread = row.dlq.ThreadID
+	case row.dly != nil:
+		thread = row.dly.ThreadID
+	default:
+		m.Toast("a subscription has no thread to open", true)
+		return nil
+	}
+	opened := m.OpenThread(thread)
+	if m.stopped() {
+		return opened
+	}
+	api := m.API
+	action := inboxAction{key: "read:" + thread, verb: "mark read", tags: []string{"inbox", threadPrefix + thread}}
+	return tea.Batch(opened, s.start(action, m, func(ctx context.Context) error {
+		_, err := api.ReadThread(ctx, thread)
+		return err
+	}))
+}
+
+// toggleTarget is Task 14's rule: idle and working swap, and anything else,
+// including a stale unknown, goes to working.
+func toggleTarget(presence string) string {
+	if presence == "working" {
+		return "idle"
+	}
+	return "working"
+}
+
+// togglePresence changes nothing on screen by itself: the status bar moves
+// when the reload after the write brings the hub's state.
+func (s *inboxScreen) togglePresence(m *Model) tea.Cmd {
+	if !s.free(inboxPresence, m) {
+		return nil
+	}
+	api, at, target := m.API, m.HubNow(), toggleTarget(m.Data.Inbox.Me.Presence)
+	action := inboxAction{key: inboxPresence, verb: "presence", good: "presence: " + target, tags: []string{"inbox", "peers"}}
+	return s.start(action, m, func(ctx context.Context) error { return api.SetPresence(ctx, target, at) })
+}
+
+// onDone reports one action, once, and reloads either way: the snapshot is the
+// only account of what the hub now holds. startLoads, not Reload, so a load
+// that lands after this one was asked for cannot be the action's own.
+func (s *inboxScreen) onDone(msg inboxDoneMsg, m *Model) tea.Cmd {
+	closed := inboxClosed(msg.err)
+	switch {
+	case msg.err == nil:
+		if msg.good != "" {
+			m.Toast(msg.good, false)
+		}
+	case closed:
+		m.Toast("approval already closed: your answer did not land", true)
+	case !errors.Is(msg.err, context.Canceled):
+		m.Toast(msg.verb+" failed: "+msg.err.Error(), true)
+	}
+	if msg.err == nil || closed {
+		s.locks[msg.key] = &inboxLock{done: true, hide: msg.hide}
+	} else {
+		delete(s.locks, msg.key)
+	}
+	return m.startLoads(msg.tags, nil)
+}
+
+func inboxClosed(err error) bool {
+	var e *opclient.Error
+	return errors.As(err, &e) && e.Code == "approval_closed"
+}
+
+// onLoaded releases finished actions once a snapshot from after them has
+// landed: m.inflight means a later load is already on its way, and that one
+// may be it. It also closes a prompt whose item has gone.
+func (s *inboxScreen) onLoaded(msg Loaded, m *Model) tea.Cmd {
+	if msg.Err != nil {
+		return nil
+	}
+	if msg.Key == "inbox" {
+		if !m.inflight["inbox"] {
+			for key, lock := range s.locks {
+				if lock.done {
+					delete(s.locks, key)
+				}
+			}
+		}
+		s.checkPrompt(m)
+	}
+	return s.beat(m)
+}
+
+func (s *inboxScreen) checkPrompt(m *Model) {
+	p := s.prompt
+	if p == nil || slices.ContainsFunc(s.rows(m), func(r inboxRow) bool { return r.key == p.key }) {
+		return
+	}
+	s.closePrompt(m)
+	if p.answer != nil {
+		m.Toast("approval closed before you answered: nothing sent", true)
+	} else {
+		m.Toast("dead letter already handled: nothing sent", true)
+	}
+}
+
+// beat is the presence heartbeat, Task 14's rule. It asks the hub for the state
+// and re-posts that, never this client's idea of it, so two clients cannot
+// fight; unknown and offline are not re-asserted. The shell's slow refresh
+// supplies the Loaded that wakes it, every minute while the hub is up, so it
+// follows the model's clock on any tab.
+func (s *inboxScreen) beat(m *Model) tea.Cmd {
+	now := m.Now()
+	if s.nextBeat.IsZero() {
+		s.nextBeat = now.Add(inboxBeatEvery)
+		return nil
+	}
+	if now.Before(s.nextBeat) || m.Conn != ConnLive {
+		return nil
+	}
+	s.nextBeat = now.Add(inboxBeatEvery)
+	api, ctx, at := m.API, m.ctx, m.HubNow()
+	return func() tea.Msg {
+		fresh, err := api.Inbox(ctx, opapi.InboxQuery{Limit: 1})
+		if err != nil {
+			return inboxBeatMsg{err: err}
+		}
+		switch state := fresh.Me.Presence; state {
+		case "idle", "working", "blocked":
+			return inboxBeatMsg{posted: true, err: api.SetPresence(ctx, state, at)}
+		}
+		return inboxBeatMsg{}
+	}
+}
+
+// inboxExpired reads expiry on the hub's clock, as the hub does. An unreadable
+// time leaves the decision to the hub.
+func inboxExpired(a opapi.OpenApproval, hubNow time.Time) bool {
+	at, err := envelope.ParseTime(a.ExpiresAt)
+	return err == nil && !hubNow.Before(at)
+}
+
+// inboxCountdown is the time left as mm:ss, or h:mm:ss from an hour up. It
+// rounds up, so it reaches 00:00 only when the approval has expired.
+func inboxCountdown(left time.Duration) string {
+	sec := int((left + time.Second - 1) / time.Second)
+	if sec >= 3600 {
+		return fmt.Sprintf("%d:%02d:%02d", sec/3600, sec/60%60, sec%60)
+	}
+	return fmt.Sprintf("%02d:%02d", sec/60, sec%60)
+}
+
+// inboxLeft is what the row and the detail show about an approval's expiry.
+func inboxLeft(a opapi.OpenApproval, m *Model) (string, bool) {
+	at, err := envelope.ParseTime(a.ExpiresAt)
+	switch {
+	case err != nil:
+		return "unknown", false
+	case !m.HubNow().Before(at):
+		return "expired", true
+	}
+	return inboxCountdown(at.Sub(m.HubNow())), false
+}
+
+func inboxClock(ts, layout string, m *Model) string {
+	at, err := envelope.ParseTime(ts)
+	if err != nil {
+		return ""
+	}
+	return at.In(m.loc).Format(layout)
+}
+
+// inboxShort is a cleaned id as thr_…P5R.
+func inboxShort(id string) string {
+	r := []rune(Clean(id))
+	if len(r) <= 10 {
+		return string(r)
+	}
+	head := slices.Index(r, '_') + 1
+	if head == 0 || head > 6 {
+		head = 3
+	}
+	return string(r[:head]) + "…" + string(r[len(r)-4:])
+}
+
+// inboxCut makes cleaned text exactly w cells, marking a cut.
+func inboxCut(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) > w {
+		s = ansi.Truncate(s, w, "…")
+	}
+	return s + strings.Repeat(" ", max(w-lipgloss.Width(s), 0))
+}
+
+// inboxPeers looks peers up by id. Their names are peer-supplied; name and kind
+// clean them.
+type inboxPeers map[string]opapi.Peer
+
+func newInboxPeers(m *Model) inboxPeers {
+	peers := make(inboxPeers, len(m.Data.Peers))
+	for _, row := range m.Data.Peers {
+		peers[row.Peer.PeerID] = row.Peer
+	}
+	return peers
+}
+
+func (p inboxPeers) name(id string) string {
+	if name := Clean(p[id].Name); name != "" {
+		return name
+	}
+	return Clean(id)
+}
+
+func (p inboxPeers) kind(id string) string { return Clean(p[id].Kind) }
+
+// View lays the tab out as shots/c-inbox.png: list over event log, detail on
+// the right. Everything a peer supplied is cleaned before it reaches a style.
+func (s *inboxScreen) View(m *Model, w, h int) string {
+	s.compact = w < inboxHintsW
+	rows := s.rows(m)
+	at := s.cursor(rows)
+	peers := newInboxPeers(m)
+	leftW := max(w*55/100, min(w-30, 50))
+	listH := h * 57 / 100
+	counts := map[string]int{}
+	for _, row := range rows {
+		counts[row.tag]++
+	}
+	title := fmt.Sprintf("inbox %d items · apr %d · dlq %d", len(rows), counts["APR"], counts["DLQ"])
+	list := Pane(title, leftW, listH, true, s.viewRows(rows, at, peers, m, leftW-2, listH-2))
+	events := Pane("your event log  GET /v1/events -f · not messages, never replied to", leftW, h-listH, false, viewInboxLog(peers, m, leftW-2, h-listH-2))
+	var row *inboxRow
+	if at < len(rows) {
+		row = &rows[at]
+	}
+	detail := Pane("detail", w-leftW, h, false, s.viewDetail(row, peers, m, w-leftW-4, h-2))
+	return lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.JoinVertical(lipgloss.Left, list, events), detail)
+}
+
+func (s *inboxScreen) viewRows(rows []inboxRow, at int, peers inboxPeers, m *Model, w, h int) string {
+	if at < s.top {
+		s.top = at
+	}
+	if at >= s.top+h {
+		s.top = at - h + 1
+	}
+	s.top = max(min(s.top, len(rows)-h), 0)
+	lines := make([]string, 0, h)
+	for i := s.top; i < len(rows) && len(lines) < h; i++ {
+		lines = append(lines, s.viewRow(rows[i], i == at, peers, m, w))
+	}
+	return strings.Join(lines, "\n")
+}
+
+type inboxCell struct {
+	style lipgloss.Style
+	text  string
+	w     int
+}
+
+func (s *inboxScreen) viewRow(row inboxRow, selected bool, peers inboxPeers, m *Model, w int) string {
+	nameW := max(min(w/5, 15), 8)
+	textW := w - (1 + inboxTagW + 1 + inboxTimeW + 1 + nameW + 1 + 1 + inboxTailW)
+	tagStyle, textStyle := styleMuted, styleText
+	var when, name string
+	var text []inboxCell
+	tail := inboxCell{style: styleMuted}
+	sending := s.locks[row.key] != nil
+	switch {
+	case row.apr != nil:
+		a := row.apr
+		tagStyle = styleAccent
+		// An open approval carries no creation time; its expiry is the time it has.
+		when, name = inboxClock(a.ExpiresAt, "15:04", m), peers.name(a.Requester)
+		text = []inboxCell{{textStyle, Clean(inboxQuestion(*a)), textW}}
+		if left, gone := inboxLeft(*a, m); gone {
+			tail = inboxCell{style: styleBad, text: left}
+		} else {
+			tail = inboxCell{style: styleWarn, text: "exp " + left}
+		}
+	case row.dlq != nil:
+		d := row.dlq
+		tagStyle = styleBad
+		when, name = inboxClock(d.UpdatedAt, "15:04", m), peers.name(d.Recipient)
+		status := "---"
+		if d.LastStatus != nil {
+			status = fmt.Sprint(*d.LastStatus)
+		}
+		text = []inboxCell{{styleBad, status, 3}, {styleMuted, inboxClass(d.Class), textW - 4}}
+		tail.text = inboxTries(d.Attempt)
+	case row.sub != nil:
+		a := row.sub
+		tagStyle = styleWarn
+		when, name = inboxClock(a.At, "15:04", m), peers.name(a.PeerID)
+		health := Clean(a.Health)
+		text = []inboxCell{{styleWarn, health, textW}}
+		if textW > 16 {
+			text = []inboxCell{{styleWarn, health, 15}, {styleMuted, Clean(a.Summary), textW - 16}}
+		}
+		if a.Action == "resume" {
+			tail = inboxCell{style: styleAccent, text: "r resume"}
+		}
+	case row.dly != nil:
+		d := row.dly
+		if row.tag == "WAKE" {
+			tagStyle = styleWarn
+		}
+		if d.ReadAt != nil {
+			textStyle = styleMuted
+		}
+		when, name = inboxClock(d.CreatedAt, "15:04", m), peers.name(d.Sender)
+		text = []inboxCell{{textStyle, Clean(d.Excerpt), textW}}
+		tail = inboxCell{style: inboxReceiptStyle(inboxState(*d)), text: inboxGlyph(inboxState(*d))}
+	}
+	if sending {
+		tail = inboxCell{style: styleAccent, text: "sending"}
+	}
+	tail.w = inboxTailW
+	cells := append([]inboxCell{{tagStyle, row.tag, inboxTagW}, {styleMuted, when, inboxTimeW}, {styleText, name, nameW}}, text...)
+	cells = append(cells, tail)
+	paint := func(st lipgloss.Style, text string) string {
+		if selected {
+			st = st.Background(inboxSelBg)
+		}
+		return st.Render(text)
+	}
+	var b strings.Builder
+	b.WriteString(paint(lipgloss.NewStyle(), " "))
+	for i, cell := range cells {
+		if i > 0 {
+			b.WriteString(paint(lipgloss.NewStyle(), " "))
+		}
+		b.WriteString(paint(cell.style, inboxCut(cell.text, cell.w)))
+	}
+	return b.String()
+}
+
+func inboxQuestion(a opapi.OpenApproval) string {
+	if a.Question != "" {
+		return a.Question
+	}
+	return a.Text
+}
+
+func inboxTries(n int) string {
+	if n == 1 {
+		return "1 try"
+	}
+	return fmt.Sprintf("%d tries", n)
+}
+
+func inboxClass(class string) string {
+	switch class {
+	case "retries_exhausted":
+		return "retries exhausted"
+	case "terminal":
+		return "terminal 4xx"
+	}
+	return Clean(class)
+}
+
+// inboxState is a delivery's receipt state, read winning.
+func inboxState(d opapi.InboxDelivery) string {
+	if d.ReadAt != nil {
+		return "read"
+	}
+	return Clean(d.State)
+}
+
+func inboxGlyph(state string) string {
+	switch state {
+	case "queued":
+		return "·"
+	case "pushed":
+		return "›"
+	case "accepted":
+		return "✓"
+	case "processed":
+		return "✓✓"
+	case "read":
+		return "◉"
+	case "failed", "dead_letter":
+		return "✗"
+	}
+	return "?"
+}
+
+func inboxReceiptStyle(state string) lipgloss.Style {
+	switch state {
+	case "processed":
+		return styleGood
+	case "read":
+		return styleText
+	case "accepted":
+		return styleAccent
+	case "failed", "dead_letter":
+		return styleBad
+	}
+	return styleMuted
+}
+
+func inboxField(label, value string) string {
+	return styleMuted.Render(fmt.Sprintf("%-9s", label)) + styleText.Render(value)
+}
+
+// inboxPara wraps cleaned multi-line text to w, styling each line.
+func inboxPara(st lipgloss.Style, text string, w int) []string {
+	lines := strings.Split(ansi.Wrap(strings.TrimSpace(strings.ReplaceAll(text, "\t", "    ")), max(w, 1), " "), "\n")
+	for i, line := range lines {
+		lines[i] = st.Render(line)
+	}
+	return lines
+}
+
+// inboxQuote is peer text behind a rule, so no line of it can pass for one of
+// the screen's own.
+func inboxQuote(st lipgloss.Style, text string, w int) []string {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	lines := inboxPara(st, text, w-2)
+	for i, line := range lines {
+		lines[i] = styleBorder.Render("│ ") + line
+	}
+	return lines
+}
+
+// inboxFold is cleaned text as one paragraph. A peer's line breaks and padding
+// do not survive it, so they cannot set out a fake option.
+func inboxFold(text string, w int) []string {
+	return strings.Split(ansi.Wrap(strings.Join(strings.Fields(text), " "), max(w, 1), " "), "\n")
+}
+
+// inboxFit is the first n lines of w cells, marking a cut.
+func inboxFit(lines []string, w, n int) []string {
+	if len(lines) <= n {
+		return lines
+	}
+	lines = slices.Clone(lines[:n])
+	lines[n-1] = ansi.Truncate(lines[n-1], max(w-1, 0), "") + "…"
+	return lines
+}
+
+// inboxDetail sets out h lines of detail. fixed is what the operator acts on and
+// always shows whole; body, a peer's text, comes after it and gets what is left,
+// so nothing a peer writes can move the prompt or push it off the pane. where
+// finishes the marker on a cut.
+func inboxDetail(fixed, body []string, h int, where string) []string {
+	left := h - len(fixed)
+	if len(body) == 0 || left <= 0 {
+		return fixed
+	}
+	if left > 1 {
+		fixed = append(fixed, "")
+		left--
+	}
+	if len(body) > left {
+		more := styleMuted.Render(fmt.Sprintf("… %d more lines%s", len(body)-left+1, where))
+		body = append(body[:left-1:left-1], more)
+	}
+	return append(fixed, body...)
+}
+
+func (s *inboxScreen) viewDetail(row *inboxRow, peers inboxPeers, m *Model, w, h int) string {
+	var lines []string
+	switch {
+	case row == nil:
+		lines = []string{styleMuted.Render("nothing waiting on you")}
+	case row.apr != nil:
+		lines = s.viewApproval(*row.apr, peers, m, w, h)
+	case row.dlq != nil:
+		lines = s.viewDeadLetter(*row.dlq, peers, m, w, h)
+	case row.sub != nil:
+		lines = viewInboxSub(*row.sub, peers, m, w, h)
+	case row.dly != nil:
+		lines = viewInboxDelivery(*row.dly, peers, m, w, h)
+	}
+	for i, line := range lines {
+		lines[i] = " " + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (s *inboxScreen) viewApproval(a opapi.OpenApproval, peers inboxPeers, m *Model, w, h int) []string {
+	head := []string{
+		styleAccent.Render("approval_request") + "  " + styleWarn.Render("wake"),
+		"",
+		inboxField("from", peers.name(a.Requester)+" ") + styleMuted.Render(peers.kind(a.Requester)),
+		inboxField("thread", Clean(a.ThreadTitle)),
+		inboxField("message", Clean(a.MessageID)),
+		"",
+	}
+	left, gone := inboxLeft(a, m)
+	when := inboxClock(a.ExpiresAt, "15:04", m)
+	expires := styleMuted.Render("expires "+when+", in ") + styleWarn.Render(left)
+	var foot []string
+	switch {
+	case gone:
+		foot = []string{styleMuted.Render("expired at " + when), styleBad.Render("expired")}
+	case s.locks["apr:"+a.ApprovalID] != nil:
+		foot = []string{expires, styleAccent.Render("sending your answer")}
+	case s.prompt != nil && s.prompt.answer != nil:
+		foot = append([]string{expires}, inboxPara(styleAccent, fmt.Sprintf("answer with 1-%d, any other key cancels", len(a.Options)), w)...)
+	default:
+		foot = []string{expires, styleMuted.Render("press a to answer")}
+	}
+	// What a digit sends comes first. Every option gets an equal share of the
+	// lines left beyond one for the question and one for a marker, which the
+	// protocol's eight options and the 80x24 floor keep at one or more. A wrapped
+	// line carries a gutter, so it cannot pass for the next option's label.
+	room := h - len(head) - len(foot)
+	share := max((room-2)/max(len(a.Options), 1), 1)
+	var options []string
+	for i, option := range a.Options {
+		for j, line := range inboxFit(inboxFold(Clean(option), w-6), w-6, share) {
+			label := "  " + styleBorder.Render("│ ")
+			if j == 0 {
+				label = styleAccent.Render(fmt.Sprintf("[%d]", i+1)) + " "
+			}
+			options = append(options, "  "+label+styleText.Render(line))
+		}
+	}
+	room -= len(options)
+	gap := []string{""}
+	if room > 2 {
+		room--
+	} else {
+		gap = nil
+	}
+	question := inboxQuestion(a)
+	var body []string
+	if a.Text != question {
+		body = inboxQuote(styleText, CleanBody(a.Text), w)
+	}
+	// The question has what is left, ahead of the requester's text, less the
+	// line the marker needs if anything will not fit. The pane does not scroll,
+	// so the marker names where the rest is.
+	all := inboxFold(Clean(question), w-2)
+	shown := len(all)
+	if len(body) > 0 || shown > room {
+		shown = max(min(shown, room-1), 1)
+	}
+	ask := slices.Clone(inboxFit(all, w-2, shown))
+	for i, line := range ask {
+		ask[i] = styleAccent.Render("? " + line)
+	}
+	return inboxDetail(slices.Concat(head, ask, options, gap, foot), slices.Concat(all[shown:], body), h, " in thread")
+}
+
+func (s *inboxScreen) viewDeadLetter(d opapi.DeadLetter, peers inboxPeers, m *Model, w, h int) []string {
+	status := "none"
+	if d.LastStatus != nil {
+		status = fmt.Sprint(*d.LastStatus)
+	}
+	lines := []string{
+		styleBad.Render("dead_letter") + "  " + styleMuted.Render(inboxClass(d.Class)),
+		"",
+		inboxField("from", peers.name(d.Sender)),
+		inboxField("to", peers.name(d.Recipient)+" ") + styleMuted.Render(peers.kind(d.Recipient)),
+		inboxField("thread", Clean(d.ThreadID)),
+		inboxField("message", Clean(d.MessageID)),
+		inboxField("delivery", Clean(d.DeliveryID)),
+		inboxField("attempts", fmt.Sprint(d.Attempt)),
+		inboxField("status", status),
+		inboxField("updated", inboxClock(d.UpdatedAt, "15:04:05", m)),
+		"",
+	}
+	switch {
+	case s.locks["dlq:"+d.DeliveryID] != nil:
+		lines = append(lines, styleAccent.Render("sending"))
+	case s.prompt != nil && s.prompt.discard != nil:
+		lines = append(lines, inboxPara(styleAccent, "press y to discard, any other key cancels", w)...)
+	default:
+		lines = append(lines, inboxPara(styleMuted, "press r to retry, x to discard", w)...)
+	}
+	var body []string
+	if d.LastError != nil {
+		body = inboxQuote(styleBad, CleanBody(*d.LastError), w)
+	}
+	excerpt := inboxQuote(styleText, CleanBody(d.Excerpt), w)
+	if len(body) > 0 && len(excerpt) > 0 {
+		body = append(body, styleBorder.Render("│"))
+	}
+	return inboxDetail(lines, append(body, excerpt...), h, "")
+}
+
+func viewInboxSub(a opapi.Attention, peers inboxPeers, m *Model, w, h int) []string {
+	lines := []string{
+		styleWarn.Render("subscription") + "  " + styleWarn.Render(Clean(a.Health)),
+		"",
+		inboxField("peer", peers.name(a.PeerID)+" ") + styleMuted.Render(peers.kind(a.PeerID)),
+		inboxField("id", Clean(a.ID)),
+		inboxField("seen", inboxClock(a.At, "15:04:05", m)),
+		"",
+	}
+	if a.Action == "resume" {
+		lines = append(lines, styleMuted.Render("press r to resume"))
+	} else {
+		lines = append(lines, styleMuted.Render("resume would not help here"))
+	}
+	return inboxDetail(lines, inboxQuote(styleText, CleanBody(a.Summary), w), h, "")
+}
+
+func viewInboxDelivery(d opapi.InboxDelivery, peers inboxPeers, m *Model, w, h int) []string {
+	state := inboxState(d)
+	lines := []string{
+		styleAccent.Render(Clean(d.Kind)) + "  " + styleWarn.Render(Clean(d.Priority)),
+		"",
+		inboxField("from", peers.name(d.Sender)+" ") + styleMuted.Render(peers.kind(d.Sender)),
+		inboxField("thread", Clean(d.ThreadTitle)),
+		inboxField("message", Clean(d.MessageID)),
+		inboxField("at", inboxClock(d.CreatedAt, "15:04:05", m)),
+		inboxField("receipt", "") + inboxReceiptStyle(state).Render(inboxGlyph(state)+" "+state),
+	}
+	if d.Attachments > 0 {
+		lines = append(lines, inboxField("files", fmt.Sprintf("⎘ %d", d.Attachments)))
+	}
+	lines = append(append(lines, ""), inboxPara(styleMuted, "press enter to open the thread", w)...)
+	return inboxDetail(lines, inboxQuote(styleText, CleanBody(d.Excerpt), w), h, "")
+}
+
+// viewInboxLog is the newest events that fit, oldest first. Deliveries are
+// messages, which the list above already shows.
+func viewInboxLog(peers inboxPeers, m *Model, w, h int) string {
+	const cursorW, typeW = 9, 17
+	lines := make([]string, 0, h)
+	for i := len(m.Data.Events) - 1; i >= 0 && len(lines) < h; i-- {
+		ev := m.Data.Events[i]
+		if ev.Type == "delivery" {
+			continue
+		}
+		kind := styleAccent
+		switch ev.Type {
+		case "receipt":
+			kind = styleGood
+		case "presence":
+			kind = styleWarn
+		}
+		lines = append(lines, " "+styleMuted.Render(inboxCut(Clean(ev.Cursor), cursorW))+
+			" "+styleMuted.Render(inboxCut(inboxClock(ev.At, "15:04:05", m), 8))+
+			" "+kind.Render(inboxCut(Clean(ev.Type), typeW))+
+			" "+styleText.Render(inboxCut(inboxEventText(ev, peers), w-1-cursorW-1-8-1-typeW-1)))
+	}
+	slices.Reverse(lines)
+	return strings.Join(lines, "\n")
+}
+
+// inboxEventText is one event's payload on one line. A type it does not know,
+// or data that does not decode, shows as cleaned raw text.
+func inboxEventText(ev envelope.Event, peers inboxPeers) string {
+	raw := Clean(string(ev.Data))
+	switch ev.Type {
+	case "presence":
+		var p envelope.Presence
+		if json.Unmarshal(ev.Data, &p) != nil {
+			return raw
+		}
+		parts := []string{peers.name(p.PeerID), Clean(p.State)}
+		if p.Location != "" {
+			parts = append(parts, Clean(p.Location))
+		}
+		if pct, ok := p.Quota["weekly_remaining_pct"].(float64); ok {
+			parts = append(parts, fmt.Sprintf("quota %.0f%%", pct))
+		}
+		if p.Note != "" {
+			parts = append(parts, Clean(p.Note))
+		}
+		return strings.Join(parts, " ")
+	case "receipt":
+		var r envelope.Receipt
+		if json.Unmarshal(ev.Data, &r) != nil {
+			return raw
+		}
+		state := Clean(r.State)
+		text := fmt.Sprintf("%s → %s %s %s", inboxShort(r.MessageID), peers.name(r.By), inboxGlyph(state), state)
+		if r.Note != "" {
+			text += " " + Clean(r.Note)
+		}
+		return text
+	case "thread_updated":
+		var t envelope.ThreadSummary
+		if json.Unmarshal(ev.Data, &t) != nil {
+			return raw
+		}
+		text := inboxShort(t.ThreadID)
+		if t.Title != nil {
+			text += fmt.Sprintf(" title %q", Clean(*t.Title))
+		}
+		if t.BudgetRemaining != nil {
+			text += fmt.Sprintf(" budget %d", *t.BudgetRemaining)
+		}
+		return text
+	case "approval_expired":
+		var e struct {
+			ApprovalID string `json:"approval_id"`
+			ThreadID   string `json:"thread_id"`
+		}
+		if json.Unmarshal(ev.Data, &e) != nil {
+			return raw
+		}
+		return inboxShort(e.ApprovalID) + " in " + inboxShort(e.ThreadID)
+	case "directory_updated":
+		var d struct {
+			PeerID string   `json:"peer_id"`
+			Change string   `json:"change"`
+			Fields []string `json:"fields"`
+		}
+		if json.Unmarshal(ev.Data, &d) != nil {
+			return raw
+		}
+		return strings.TrimSpace(peers.name(d.PeerID) + " " + Clean(d.Change) + " " + Clean(strings.Join(d.Fields, ", ")))
+	}
+	return raw
+}
