@@ -1,4 +1,1519 @@
 package tui
 
-// newChatScreen is the chat tab. Task 19 replaces this stub.
-func newChatScreen() Screen { return stubScreen{title: "chat"} }
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"hash/fnv"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/opapi"
+	"github.com/XertroV/vecnet/internal/opclient"
+)
+
+const (
+	// chatPoll is how often the screen looks at the tab: a tab switch reaches
+	// no screen, and the thread it reveals still has to open and mark read.
+	chatPoll = 250 * time.Millisecond
+
+	chatExpandMax = 1 << 20  // the most spilled text e will show
+	chatBlobMax   = 25 << 20 // §2.7's cap on one blob, for s
+	chatSpillAt   = 4096     // bytes a message holds before the hub spills it
+	chatSaveTries = 1000
+
+	chatSpillMeta = "vecnet.spilled"
+	chatSpillName = "message.md"
+
+	chatIndent    = "       " // lines under a message start below its text
+	chatHold      = " "       // keeps the wrap off the styled head of a line
+	chatPreview   = 3         // wrapped lines a spilled preview shows
+	chatMatrixDay = 6         // width of the matrix's time column
+	chatMatrixWho = 15        // width of its sender column
+	chatMatrixBox = 14        // width of one recipient's column
+)
+
+var (
+	chatPrios   = []string{"wake", "wake_idle", "hold"}
+	colorCyan   = lipgloss.Color("#22d3ee")
+	colorPick   = lipgloss.Color("#1e2a4a")
+	styleCyan   = lipgloss.NewStyle().Foreground(colorCyan)
+	styleSender = []lipgloss.Style{
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#818cf8")).Bold(true),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#34d399")).Bold(true),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#a3e635")).Bold(true),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")).Bold(true),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#c084fc")).Bold(true),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#22d3ee")).Bold(true),
+	}
+)
+
+type chatOverlay int
+
+const (
+	chatNoOverlay chatOverlay = iota
+	chatMatrix
+	chatPager
+)
+
+// chatAttempt is what was last offered to the hub. While the composer still
+// holds exactly this, a retry reuses the key: the hub replays a send it already
+// took, and a changed body under one key would be idempotency_conflict.
+type chatAttempt struct{ text, prio, reply string }
+
+// chatDraft is one thread's composer.
+type chatDraft struct {
+	text, reply string
+	attempt     chatAttempt
+	key         string // the key of attempt; empty when nothing is awaiting retry
+	sending     bool
+}
+
+// chatNewAttempt is chatAttempt for :msg, which has no composer to live in.
+type chatNewAttempt struct{ peer, text, prio string }
+
+// chatAnswerState is an approval this client has acted on, kept so the key is
+// refused from the moment it lands rather than when the reload does.
+type chatAnswerState int
+
+const (
+	chatAnswering chatAnswerState = iota + 1
+	chatAnswered
+	chatClosed
+)
+
+// chatReader is the overlay that shows one message's full text.
+type chatReader struct {
+	message, title, body string
+	loading              bool
+	lines                []string
+	width, top, rows     int
+}
+
+type (
+	chatTickMsg struct{}
+	chatSentMsg struct {
+		thread, text string
+		result       opapi.SendResult
+		err          error
+	}
+	chatStartedMsg struct {
+		args   []string
+		peer   string
+		result opapi.SendResult
+		err    error
+	}
+	chatAnsweredMsg struct {
+		approval opapi.OpenApproval
+		option   int
+		err      error
+	}
+	chatBlobMsg struct {
+		message string
+		data    []byte
+		media   string
+		err     error
+	}
+	chatSavedMsg struct {
+		name string
+		err  error
+	}
+	chatReadMsg struct {
+		thread string
+		marked int
+		err    error
+	}
+)
+
+// chatScreen is the chat tab: thread list, log, who-and-files, composer.
+type chatScreen struct {
+	ticking, registered, insert bool
+
+	thread  string // the thread the selection below belongs to
+	sel     string // selected message id, unless follow
+	follow  bool   // the selection stays on the newest message
+	top     int    // first message drawn
+	fileIdx int    // which of the selected message's files s saves
+
+	drafts  map[string]*chatDraft
+	readTo  map[string]string // newest message each thread was marked read at
+	answers map[string]chatAnswerState
+	prompt  *opapi.OpenApproval // the approval waiting for its digit
+
+	overlay          chatOverlay
+	matrixX, matrixY int
+	reader           chatReader
+	lastNew          chatNewAttempt
+	lastNewKey       string
+}
+
+func newChatScreen() Screen {
+	return &chatScreen{follow: true, drafts: map[string]*chatDraft{}, readTo: map[string]string{}, answers: map[string]chatAnswerState{}}
+}
+
+func (s *chatScreen) Title() string { return "chat" }
+
+func (s *chatScreen) Hints() string {
+	switch {
+	case s.prompt != nil:
+		return "digit answers  any other key cancels"
+	case s.insert:
+		return "enter send  tab priority  esc leave"
+	case s.overlay == chatMatrix:
+		return "j/k rows  h/l recipients  esc close"
+	case s.overlay == chatPager:
+		return "j/k scroll  pgup/pgdn page  esc close"
+	}
+	return "i write  [ ] thread  j/k select  R reply  a answer  e expand  m matrix  s save  f file"
+}
+
+// Update also registers :msg: the first message is the first moment a screen
+// sees the model, which newChatScreen does not.
+func (s *chatScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
+	s.register(m)
+	s.track(m)
+	var cmd tea.Cmd
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		cmd = s.onKey(msg, m)
+	case tea.PasteMsg:
+		if s.prompt == nil {
+			s.draft(m.CurrentThread).text += CleanBody(msg.Content)
+		}
+	case chatTickMsg:
+		s.ticking = false
+	case chatSentMsg:
+		cmd = s.onSent(msg, m)
+	case chatStartedMsg:
+		cmd = s.onStarted(msg, m)
+	case chatAnsweredMsg:
+		cmd = s.onAnswered(msg, m)
+	case chatBlobMsg:
+		s.onBlob(msg, m)
+	case chatSavedMsg:
+		s.onSaved(msg, m)
+	case chatReadMsg:
+		cmd = s.onRead(msg, m)
+	}
+	return tea.Batch(cmd, s.arm(), s.sync(m))
+}
+
+func (s *chatScreen) register(m *Model) {
+	if s.registered {
+		return
+	}
+	s.registered = true
+	m.Commands["msg"] = Command{Help: "<peer-prefix> <text>  start a new thread with that peer", Run: s.commandMsg}
+}
+
+func (s *chatScreen) arm() tea.Cmd {
+	if s.ticking {
+		return nil
+	}
+	s.ticking = true
+	return tea.Tick(chatPoll, func(time.Time) tea.Msg { return chatTickMsg{} })
+}
+
+// track resets everything that belongs to one thread when another is opened,
+// whoever opened it.
+func (s *chatScreen) track(m *Model) {
+	if s.thread == m.CurrentThread {
+		return
+	}
+	s.thread, s.sel, s.follow, s.top, s.fileIdx, s.overlay = m.CurrentThread, "", true, 0, 0, chatNoOverlay
+	if s.prompt != nil {
+		s.prompt = nil
+		m.Mode = ModeNormal
+	}
+}
+
+// sync opens the first thread and marks the shown thread read, once the tab is
+// on screen.
+func (s *chatScreen) sync(m *Model) tea.Cmd {
+	if m.Tab != tabChat || m.Help || m.stopped() {
+		return nil
+	}
+	if rows := m.Data.Threads.Threads; m.CurrentThread == "" && len(rows) > 0 {
+		return m.OpenThread(rows[0].Thread.ThreadID)
+	}
+	st := m.Data.Thread[m.CurrentThread]
+	if st == nil || st.Loading || len(st.Messages) == 0 {
+		return nil
+	}
+	id, last := m.CurrentThread, st.Messages[len(st.Messages)-1].MessageID
+	if s.readTo[id] == last {
+		return nil
+	}
+	s.readTo[id] = last // a failure waits for the next message, not the next tick
+	api, ctx := m.API, m.ctx
+	return func() tea.Msg {
+		r, err := api.ReadThread(ctx, id)
+		return chatReadMsg{thread: id, marked: r.Marked, err: err}
+	}
+}
+
+func (s *chatScreen) onRead(msg chatReadMsg, m *Model) tea.Cmd {
+	switch {
+	case msg.err != nil:
+		m.Toast("mark read: "+msg.err.Error(), true)
+	case msg.marked > 0:
+		return m.Reload("inbox", threadPrefix+msg.thread)
+	}
+	return nil
+}
+
+func (s *chatScreen) draft(id string) *chatDraft {
+	d := s.drafts[id]
+	if d == nil {
+		d = &chatDraft{}
+		s.drafts[id] = d
+	}
+	return d
+}
+
+// index is the selected message's place in st, or -1 in an empty thread.
+func (s *chatScreen) index(st *ThreadState) int {
+	if st == nil {
+		return -1
+	}
+	last := len(st.Messages) - 1
+	if s.follow {
+		return last
+	}
+	if i := slices.IndexFunc(st.Messages, func(msg envelope.Message) bool { return msg.MessageID == s.sel }); i >= 0 {
+		return i
+	}
+	return last
+}
+
+func (s *chatScreen) selected(st *ThreadState) *envelope.Message {
+	if i := s.index(st); i >= 0 {
+		return &st.Messages[i]
+	}
+	return nil
+}
+
+func (s *chatScreen) move(st *ThreadState, by int) {
+	i := s.index(st)
+	if i < 0 {
+		return
+	}
+	last := len(st.Messages) - 1
+	i = min(max(i+by, 0), last)
+	s.sel, s.follow, s.fileIdx = st.Messages[i].MessageID, i == last, 0
+}
+
+// step opens the thread by places from the current one in the list.
+func (s *chatScreen) step(m *Model, by int) tea.Cmd {
+	rows := m.Data.Threads.Threads
+	i := slices.IndexFunc(rows, func(r opapi.ThreadRow) bool { return r.Thread.ThreadID == m.CurrentThread })
+	next := i + by
+	if next < 0 || next >= len(rows) {
+		return nil
+	}
+	cmd := m.OpenThread(rows[next].Thread.ThreadID)
+	s.track(m)
+	return cmd
+}
+
+func (s *chatScreen) onKey(msg tea.KeyPressMsg, m *Model) tea.Cmd {
+	key := msg.String()
+	if s.prompt != nil {
+		return s.onPromptKey(key, m)
+	}
+	if m.Mode == ModeInsert {
+		return s.onInsertKey(msg, m)
+	}
+	st := m.Data.Thread[m.CurrentThread]
+	switch s.overlay {
+	case chatMatrix:
+		s.onMatrixKey(key)
+		return nil
+	case chatPager:
+		s.onReaderKey(key)
+		return nil
+	}
+	switch key {
+	case "[":
+		return s.step(m, -1)
+	case "]":
+		return s.step(m, 1)
+	case "j", "down":
+		s.move(st, 1)
+	case "k", "up":
+		s.move(st, -1)
+	case "tab":
+		chatCyclePrio(m)
+	case "i":
+		if m.CurrentThread == "" {
+			m.Toast("no thread open: :msg <peer> <text> starts one", true)
+			return nil
+		}
+		m.Mode = ModeInsert
+	case "R":
+		if picked := s.selected(st); picked != nil {
+			s.draft(m.CurrentThread).reply = picked.MessageID
+			m.Mode = ModeInsert
+		}
+	case "a":
+		s.startAnswer(m, st)
+	case "e":
+		return s.expand(m, st)
+	case "m":
+		if st != nil {
+			s.overlay, s.matrixX, s.matrixY = chatMatrix, 0, 1<<30
+		}
+	case "f":
+		if picked := s.selected(st); picked != nil && len(picked.Attachments) > 0 {
+			s.fileIdx = (s.fileIdx + 1) % len(picked.Attachments)
+		}
+	case "s":
+		return s.save(m, st)
+	}
+	return nil
+}
+
+func chatCyclePrio(m *Model) {
+	m.Prio = chatPrios[(slices.Index(chatPrios, m.Prio)+1)%len(chatPrios)]
+}
+
+func (s *chatScreen) onInsertKey(msg tea.KeyPressMsg, m *Model) tea.Cmd {
+	d := s.draft(m.CurrentThread)
+	switch msg.String() {
+	case "esc":
+		m.Mode = ModeNormal
+		if d.text == "" {
+			d.reply = ""
+		}
+	case "enter":
+		return s.send(m, d)
+	case "tab":
+		chatCyclePrio(m)
+	case "backspace":
+		if _, n := utf8.DecodeLastRuneInString(d.text); n > 0 {
+			d.text = d.text[:len(d.text)-n]
+		}
+	default:
+		d.text += CleanBody(msg.Text)
+	}
+	return nil
+}
+
+func (s *chatScreen) onMatrixKey(key string) {
+	switch key {
+	case "esc", "m":
+		s.overlay = chatNoOverlay
+	case "j", "down":
+		s.matrixY++
+	case "k", "up":
+		s.matrixY--
+	case "l", "right":
+		s.matrixX++
+	case "h", "left":
+		s.matrixX--
+	}
+}
+
+func (s *chatScreen) onReaderKey(key string) {
+	switch key {
+	case "esc", "e":
+		s.overlay = chatNoOverlay
+	case "j", "down":
+		s.reader.top++
+	case "k", "up":
+		s.reader.top--
+	case "pgdown", "space":
+		s.reader.top += s.reader.rows
+	case "pgup":
+		s.reader.top -= s.reader.rows
+	}
+}
+
+// chatKey is a fresh idempotency key. Underscores are outside the schema's
+// alphabet, so an id from package ids will not do.
+func chatKey() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b) // crypto/rand.Read does not fail
+	return "tui-msg-" + hex.EncodeToString(b)
+}
+
+func (s *chatScreen) send(m *Model, d *chatDraft) tea.Cmd {
+	id := m.CurrentThread
+	if d.sending || strings.TrimSpace(d.text) == "" {
+		return nil
+	}
+	attempt := chatAttempt{text: d.text, prio: m.Prio, reply: d.reply}
+	if d.key == "" || d.attempt != attempt {
+		d.key = chatKey()
+	}
+	d.attempt, d.sending = attempt, true
+	req := envelope.SendRequest{IdempotencyKey: d.key, ThreadID: &id, Priority: attempt.prio, Content: envelope.SendContent{Text: attempt.text}}
+	if attempt.reply != "" {
+		req.InReplyTo = &attempt.reply
+	}
+	api, ctx := m.API, m.ctx
+	return func() tea.Msg {
+		r, err := api.Send(ctx, req)
+		return chatSentMsg{thread: id, text: attempt.text, result: r, err: err}
+	}
+}
+
+func (s *chatScreen) onSent(msg chatSentMsg, m *Model) tea.Cmd {
+	d := s.draft(msg.thread)
+	d.sending = false
+	if msg.err != nil {
+		s.sendFailed(m, msg.thread, msg.err)
+		return nil
+	}
+	d.key = ""
+	if d.text == msg.text { // what was typed meanwhile stays a draft
+		d.text, d.reply = "", ""
+	}
+	if msg.thread == m.CurrentThread {
+		s.follow = true
+	}
+	if msg.result.Spilled {
+		m.Toast("sent, the hub spilled the full text to "+chatSpillName, false)
+	} else {
+		m.Toast("sent", false)
+	}
+	return m.Reload(threadPrefix+msg.thread, "threads") // a send of its own raises no event here
+}
+
+// sendFailed reports a refused send. The text stays in the composer, or on the
+// command line for :msg, whatever the reason.
+func (s *chatScreen) sendFailed(m *Model, id string, err error) {
+	if isStatus(err, 401) {
+		m.reject(err)
+	}
+	m.Toast(chatSendError(m, id, err), true)
+}
+
+func chatSendError(m *Model, id string, err error) string {
+	var e *opclient.Error
+	switch {
+	case !errors.As(err, &e):
+		return "send failed, enter retries: " + err.Error()
+	case e.Code == "thread_budget_exhausted":
+		budget := 0
+		if row := chatRowOf(m, id); row != nil && row.Thread.BudgetRemaining != nil {
+			budget = *row.Thread.BudgetRemaining
+		}
+		return fmt.Sprintf("thread budget exhausted (budget %d): only the operator can raise it, your text is kept", budget)
+	case e.Code == "rate_limited":
+		if after, ok := e.Details["retry_after_seconds"].(float64); ok {
+			return fmt.Sprintf("%s: %s (retry after %.0fs)", e.Code, e.Message, after)
+		}
+	case e.Code == "":
+		return e.Error()
+	}
+	return e.Code + ": " + e.Message
+}
+
+// commandMsg is :msg <peer-prefix> <text>. The prefix matches a peer's name,
+// case-insensitively, or its id; the send names the peer by id (§2.2 step 2).
+func (s *chatScreen) commandMsg(m *Model, args []string) tea.Cmd {
+	if len(args) < 2 {
+		m.Toast("usage: msg <peer-prefix> <text>", true)
+		return nil
+	}
+	prefix := strings.ToLower(args[0])
+	var ids, names []string
+	for _, row := range m.Data.Peers {
+		name := Clean(row.Peer.Name)
+		if strings.HasPrefix(strings.ToLower(name), prefix) || strings.HasPrefix(row.Peer.PeerID, args[0]) {
+			ids, names = append(ids, row.Peer.PeerID), append(names, name)
+		}
+	}
+	switch len(ids) {
+	case 0:
+		m.Toast("no peer matches "+args[0], true)
+		return nil
+	case 1:
+	default:
+		m.Toast(fmt.Sprintf("ambiguous prefix %s: %s", args[0], strings.Join(names, ", ")), true)
+		return nil
+	}
+	attempt := chatNewAttempt{peer: ids[0], text: strings.Join(args[1:], " "), prio: m.Prio}
+	if s.lastNewKey == "" || s.lastNew != attempt {
+		s.lastNewKey = chatKey()
+	}
+	s.lastNew = attempt
+	req := envelope.SendRequest{IdempotencyKey: s.lastNewKey, Recipients: []string{attempt.peer}, Priority: attempt.prio, Content: envelope.SendContent{Text: attempt.text}}
+	api, ctx, peer := m.API, m.ctx, names[0]
+	return func() tea.Msg {
+		r, err := api.Send(ctx, req)
+		return chatStartedMsg{args: args, peer: peer, result: r, err: err}
+	}
+}
+
+func (s *chatScreen) onStarted(msg chatStartedMsg, m *Model) tea.Cmd {
+	if msg.err != nil {
+		s.sendFailed(m, "", msg.err)
+		if m.Mode == ModeNormal { // a command line in use keeps what it holds
+			m.Mode, m.Input = ModeCommand, "msg "+strings.Join(msg.args, " ")
+		}
+		return nil
+	}
+	s.lastNewKey = ""
+	m.Toast("sent to "+msg.peer, false)
+	return tea.Batch(m.OpenThread(msg.result.ThreadID), m.Reload("threads"))
+}
+
+// startAnswer opens the digit prompt. It is Insert mode, because the shell
+// keeps 1-4 for tabs otherwise.
+func (s *chatScreen) startAnswer(m *Model, st *ThreadState) {
+	a := s.pickApproval(st)
+	if a == nil {
+		m.Toast("no open approval addressed to you here", true)
+		return
+	}
+	switch s.answers[a.ApprovalID] {
+	case chatAnswering:
+		m.Toast("the answer is already on its way", true)
+		return
+	case chatAnswered:
+		m.Toast("already answered", true)
+		return
+	case chatClosed:
+		m.Toast("approval closed", true)
+		return
+	}
+	if chatExpired(m, a.ExpiresAt) {
+		m.Toast("approval expired", true)
+		return
+	}
+	i := slices.IndexFunc(st.Messages, func(msg envelope.Message) bool { return msg.MessageID == a.MessageID })
+	if i < 0 {
+		m.Toast("that approval's message has not loaded yet", true)
+		return
+	}
+	s.prompt = &opapi.OpenApproval{ApprovalID: a.ApprovalID, ThreadID: m.CurrentThread, MessageID: a.MessageID, Requester: st.Messages[i].Sender, ExpiresAt: a.ExpiresAt, Options: a.Options}
+	m.Mode = ModeInsert
+}
+
+// pickApproval is the selected message's approval, else the newest one here
+// that waits on the operator. A card addressed to someone else is read-only.
+func (s *chatScreen) pickApproval(st *ThreadState) *opapi.ThreadApproval {
+	if st == nil {
+		return nil
+	}
+	picked := s.selected(st)
+	var newest *opapi.ThreadApproval
+	for i := range st.Detail.OpenApprovals {
+		a := &st.Detail.OpenApprovals[i]
+		if !a.AddressedToMe {
+			continue
+		}
+		if picked != nil && a.MessageID == picked.MessageID {
+			return a
+		}
+		newest = a
+	}
+	return newest
+}
+
+func (s *chatScreen) onPromptKey(key string, m *Model) tea.Cmd {
+	a := *s.prompt
+	s.prompt = nil
+	m.Mode = ModeNormal
+	if len(key) != 1 || key[0] < '1' || int(key[0]-'1') >= len(a.Options) {
+		return nil
+	}
+	if chatExpired(m, a.ExpiresAt) { // it can pass while the prompt is open
+		m.Toast("approval expired", true)
+		return nil
+	}
+	option := int(key[0] - '1')
+	s.answers[a.ApprovalID] = chatAnswering
+	api, ctx := m.API, m.ctx
+	return func() tea.Msg { return chatAnsweredMsg{approval: a, option: option, err: api.Answer(ctx, a, option)} }
+}
+
+func (s *chatScreen) onAnswered(msg chatAnsweredMsg, m *Model) tea.Cmd {
+	id := msg.approval.ApprovalID
+	reload := m.Reload("inbox", threadPrefix+msg.approval.ThreadID)
+	var e *opclient.Error
+	switch {
+	case msg.err == nil:
+		s.answers[id] = chatAnswered
+		m.Toast("answered: "+msg.approval.Options[msg.option], false)
+	case errors.As(msg.err, &e) && e.Code == "approval_closed":
+		s.answers[id] = chatClosed
+		m.Toast("approval closed: it was answered or expired elsewhere", true)
+	default:
+		delete(s.answers, id) // only this client failed: the operator may try again
+		if isStatus(msg.err, 401) {
+			m.reject(msg.err)
+		}
+		m.Toast("answer not sent: "+msg.err.Error(), true)
+	}
+	return reload
+}
+
+// chatExpired reads the deadline against the hub's clock (Review Focus 3).
+func chatExpired(m *Model, at string) bool {
+	t, err := envelope.ParseTime(at)
+	return err == nil && !m.HubNow().Before(t)
+}
+
+// chatSpill is a spilled message's full-text attachment: the hub appends it
+// last, and a peer's own attachment may share the name.
+func chatSpill(msg *envelope.Message) (envelope.Attachment, bool) {
+	if spilled, _ := msg.Metadata[chatSpillMeta].(bool); !spilled {
+		return envelope.Attachment{}, false
+	}
+	for i := len(msg.Attachments) - 1; i >= 0; i-- {
+		if msg.Attachments[i].Name == chatSpillName {
+			return msg.Attachments[i], true
+		}
+	}
+	return envelope.Attachment{}, false
+}
+
+func chatIsText(media string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(media)), "text/")
+}
+
+// expand opens the reader. A spilled message fetches its full text, which must
+// be text/* and at most chatExpandMax; any other message is already whole, and
+// this is the way to read one too tall for the log.
+func (s *chatScreen) expand(m *Model, st *ThreadState) tea.Cmd {
+	picked := s.selected(st)
+	if picked == nil {
+		return nil
+	}
+	sender := chatNames(m).of(picked.Sender)
+	att, spilled := chatSpill(picked)
+	if !spilled {
+		s.reader = chatReader{message: picked.MessageID, title: "message · " + sender, body: CleanBody(picked.Content.Text)}
+		s.overlay = chatPager
+		return nil
+	}
+	if !chatIsText(att.MediaType) {
+		m.Toast("refused: "+att.MediaType+" is not text", true)
+		return nil
+	}
+	if att.Size > chatExpandMax {
+		m.Toast(fmt.Sprintf("refused: %s is over 1 MiB", chatSize(att.Size)), true)
+		return nil
+	}
+	s.reader = chatReader{message: picked.MessageID, title: chatSpillName + " · " + sender, loading: true}
+	s.overlay = chatPager
+	api, ctx, id, sha := m.API, m.ctx, picked.MessageID, att.SHA256
+	return func() tea.Msg {
+		data, media, err := api.Blob(ctx, sha, chatExpandMax)
+		return chatBlobMsg{message: id, data: data, media: media, err: err}
+	}
+}
+
+func (s *chatScreen) onBlob(msg chatBlobMsg, m *Model) {
+	if s.overlay != chatPager || s.reader.message != msg.message {
+		return // closed, or another message opened, while it was on its way
+	}
+	switch {
+	case msg.err != nil && strings.Contains(msg.err.Error(), "blob exceeds"):
+		m.Toast("refused: the text is over 1 MiB", true)
+	case msg.err != nil:
+		m.Toast("could not fetch the text: "+msg.err.Error(), true)
+	case !chatIsText(msg.media):
+		m.Toast("refused: "+msg.media+" is not text", true)
+	default:
+		s.reader.body, s.reader.loading = CleanBody(string(msg.data)), false
+		return
+	}
+	s.overlay = chatNoOverlay
+}
+
+// save writes the selected file into the working directory.
+func (s *chatScreen) save(m *Model, st *ThreadState) tea.Cmd {
+	picked := s.selected(st)
+	if picked == nil || len(picked.Attachments) == 0 {
+		m.Toast("no file on the selected message", true)
+		return nil
+	}
+	att := picked.Attachments[min(s.fileIdx, len(picked.Attachments)-1)]
+	if slices.ContainsFunc(st.Detail.Files, func(f opapi.ThreadFile) bool { return f.SHA256 == att.SHA256 && f.Purged }) {
+		m.Toast("refused: that file was purged", true)
+		return nil
+	}
+	api, ctx := m.API, m.ctx
+	return func() tea.Msg {
+		data, _, err := api.Blob(ctx, att.SHA256, chatBlobMax)
+		if err != nil {
+			return chatSavedMsg{err: err}
+		}
+		name, err := chatWrite(chatSaveName(att.Name, att.SHA256), data)
+		return chatSavedMsg{name: name, err: err}
+	}
+}
+
+func (s *chatScreen) onSaved(msg chatSavedMsg, m *Model) {
+	if msg.err != nil {
+		m.Toast("save failed: "+msg.err.Error(), true)
+		return
+	}
+	m.Toast("saved as "+msg.name, false)
+}
+
+// chatSaveName reduces a hostile name to one component of the working
+// directory. A name with nothing left in it falls back to the blob's hash.
+func chatSaveName(name, sha string) string {
+	base := filepath.Base(Clean(name))
+	if base == "." || base == ".." || base == string(filepath.Separator) {
+		return "blob-" + filepath.Base(Clean(sha[:min(len(sha), 16)]))
+	}
+	return base
+}
+
+// chatWrite creates base, or `base (n).ext` when that exists. O_EXCL makes
+// never-overwrite hold against a race and a planted link alike.
+func chatWrite(base string, data []byte) (string, error) {
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	if stem == "" {
+		stem, ext = base, ""
+	}
+	for n := range chatSaveTries {
+		name := base
+		if n > 0 {
+			name = fmt.Sprintf("%s (%d)%s", stem, n, ext)
+		}
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		_, err = f.Write(data)
+		if err = errors.Join(err, f.Close()); err != nil {
+			_ = os.Remove(name)
+			return "", err
+		}
+		return name, nil
+	}
+	return "", fmt.Errorf("every name for %s is taken", base)
+}
+
+// View draws the three panes above the composer, or an overlay.
+func (s *chatScreen) View(m *Model, w, h int) string {
+	s.track(m)
+	s.insert = m.Mode == ModeInsert
+	st := m.Data.Thread[m.CurrentThread]
+	switch {
+	case s.overlay == chatMatrix && st != nil:
+		return s.viewMatrix(m, st, w, h)
+	case s.overlay == chatPager:
+		return s.viewReader(w, h)
+	}
+	paneH := h - 1
+	listW := min(max(w*25/140, 14), 30)
+	whoW := min(max(w*30/140, 22), 34)
+	logW := w - listW - whoW
+	list := Pane("threads [ ]", listW, paneH, false, s.viewList(m, listW-2, paneH-2))
+	log := Pane(chatLogTitle(m, logW), logW, paneH, true, s.viewLog(m, st, logW-2, paneH-2))
+	who := Pane("who", whoW, paneH, false, s.viewWho(m, st, whoW-2, paneH-2))
+	return lipgloss.JoinHorizontal(lipgloss.Top, list, log, who) + "\n" + s.viewComposer(m, st, w)
+}
+
+// chatRowOf is the freshest row held for a thread.
+func chatRowOf(m *Model, id string) *opapi.ThreadRow {
+	if st := m.Data.Thread[id]; st != nil && st.Detail.Row.Thread.ThreadID == id {
+		return &st.Detail.Row
+	}
+	rows := m.Data.Threads.Threads
+	if i := slices.IndexFunc(rows, func(r opapi.ThreadRow) bool { return r.Thread.ThreadID == id }); i >= 0 {
+		return &rows[i]
+	}
+	return nil
+}
+
+func chatTitleOf(t envelope.ThreadSummary) string {
+	if t.Title != nil {
+		if title := Clean(*t.Title); title != "" {
+			return title
+		}
+	}
+	return "untitled " + chatShort(t.ThreadID)
+}
+
+// chatShort is an id with its middle gone: thr_…3P5R.
+func chatShort(id string) string {
+	r := []rune(Clean(id))
+	if len(r) <= 12 {
+		return string(r)
+	}
+	return string(r[:4]) + "…" + string(r[len(r)-4:])
+}
+
+// chatLogTitle fits a pane w wide: the title gives way, so the budget stays.
+func chatLogTitle(m *Model, w int) string {
+	row := chatRowOf(m, m.CurrentThread)
+	if row == nil {
+		return "chat"
+	}
+	budget := "unlimited"
+	if b := row.Thread.BudgetRemaining; b != nil {
+		budget = fmt.Sprint(*b)
+	}
+	facts := fmt.Sprintf("  %s · budget %s", chatShort(row.Thread.ThreadID), budget)
+	if row.Cut != nil {
+		facts += " · cut " + Clean(row.Cut.Reason)
+	}
+	return ansi.Truncate(chatTitleOf(row.Thread), max(w-5-lipgloss.Width(facts), 8), "…") + facts
+}
+
+func (s *chatScreen) viewList(m *Model, w, h int) string {
+	rows := m.Data.Threads.Threads
+	if len(rows) == 0 {
+		return styleMuted.Render("no threads yet")
+	}
+	current := max(slices.IndexFunc(rows, func(r opapi.ThreadRow) bool { return r.Thread.ThreadID == m.CurrentThread }), 0)
+	first := max(current-h+1, 0)
+	lines := make([]string, 0, h)
+	for i := first; i < len(rows) && i < first+h; i++ {
+		text := fmt.Sprintf("%d %s", i+1, chatTitleOf(rows[i].Thread))
+		text = fit(ansi.Truncate(text, w, "…"), w)
+		if rows[i].Thread.ThreadID == m.CurrentThread {
+			lines = append(lines, styleText.Background(colorPick).Render(text))
+		} else {
+			lines = append(lines, styleText.Render(text))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// chatSeg is a run of cleaned text in one style.
+type chatSeg struct {
+	text  string
+	style lipgloss.Style
+}
+
+// chatRow is one line of the log. Selection shades the whole line, so it has to
+// be applied per segment: a style's reset would end an outer background.
+type chatRow []chatSeg
+
+func (r chatRow) render(w int, selected bool) string {
+	var b strings.Builder
+	used := 0
+	for _, seg := range r {
+		style := seg.style
+		if selected {
+			style = style.Background(colorPick)
+		}
+		b.WriteString(style.Render(seg.text))
+		used += lipgloss.Width(seg.text)
+	}
+	if selected && used < w && len(r) > 0 { // a gap between messages stays unshaded
+		b.WriteString(lipgloss.NewStyle().Background(colorPick).Render(strings.Repeat(" ", w-used)))
+	}
+	return b.String()
+}
+
+// chatPeers maps peer ids to cleaned display names.
+type chatPeers map[string]string
+
+func chatNames(m *Model) chatPeers {
+	names := make(chatPeers, len(m.Data.Peers))
+	for _, row := range m.Data.Peers {
+		names[row.Peer.PeerID] = Clean(row.Peer.Name)
+	}
+	return names
+}
+
+func (p chatPeers) of(id string) string {
+	if name := p[id]; name != "" {
+		return name
+	}
+	return chatShort(id)
+}
+
+// short is the part of a name a receipt or reply marker has room for.
+func (p chatPeers) short(id string) string {
+	name, _, _ := strings.Cut(p.of(id), "-")
+	return ansi.Truncate(name, 8, "")
+}
+
+func chatSenderStyle(id string) lipgloss.Style {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(id))
+	return styleSender[h.Sum32()%uint32(len(styleSender))]
+}
+
+func chatSize(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
+}
+
+func chatClock(m *Model, at string) string {
+	t, err := envelope.ParseTime(at)
+	if err != nil {
+		return "--:--"
+	}
+	return t.In(m.loc).Format("15:04")
+}
+
+// chatWrap wraps text to width, the first line starting lead cells in.
+func chatWrap(text string, lead, width int) []string {
+	hold := strings.Repeat(chatHold, lead)
+	lines := strings.Split(ansi.Wrap(hold+text, width, ""), "\n")
+	lines[0] = strings.TrimPrefix(lines[0], hold)
+	return lines
+}
+
+func chatReceipt(display string) (string, lipgloss.Style) {
+	switch display {
+	case "queued":
+		return "·", styleMuted
+	case "pushed":
+		return "›", styleMuted
+	case "accepted":
+		return "✓", styleGood
+	case "processed":
+		return "✓✓", styleGood
+	case "read":
+		return "●", styleText
+	case "failed", "dead_letter", "expired":
+		return "✗", styleBad
+	}
+	return "?", styleMuted
+}
+
+// chatLog is what drawing the log needs, gathered once a frame.
+type chatLog struct {
+	s       *chatScreen
+	m       *Model
+	names   chatPeers
+	byID    map[string]*envelope.Message
+	cells   map[string][]opapi.MatrixCell
+	open    map[string]opapi.ThreadApproval
+	decided map[string]string
+	width   int
+	body    int // wrapped lines one message may fill
+	gap     bool
+}
+
+func (s *chatScreen) newChatLog(m *Model, st *ThreadState, w, h int) *chatLog {
+	l := &chatLog{s: s, m: m, names: chatNames(m), width: w, body: max(h-8, chatPreview), gap: h >= 30,
+		byID:    chatMessages(st),
+		cells:   make(map[string][]opapi.MatrixCell, len(st.Matrix.Rows)),
+		open:    make(map[string]opapi.ThreadApproval, len(st.Detail.OpenApprovals)),
+		decided: map[string]string{},
+	}
+	for i := range st.Messages {
+		if r := st.Messages[i].ApprovalResponse; r != nil {
+			l.decided[r.ApprovalID] = Clean(r.Decision)
+		}
+	}
+	for _, row := range st.Matrix.Rows {
+		l.cells[row.MessageID] = row.Cells
+	}
+	for _, a := range st.Detail.OpenApprovals {
+		l.open[a.MessageID] = a
+	}
+	return l
+}
+
+func chatMessages(st *ThreadState) map[string]*envelope.Message {
+	byID := make(map[string]*envelope.Message, len(st.Messages))
+	for i := range st.Messages {
+		byID[st.Messages[i].MessageID] = &st.Messages[i]
+	}
+	return byID
+}
+
+// item is one message's lines. The file marker shows on the selected message.
+func (l *chatLog) item(msg *envelope.Message, selected bool) []chatRow {
+	var rows []chatRow
+	if msg.Sender == "hub" {
+		rows = l.system(msg)
+	} else {
+		rows = l.head(msg)
+		rows = append(rows, l.files(msg, selected)...)
+		rows = append(rows, l.job(msg)...)
+		rows = append(rows, l.approval(msg)...)
+		if row := l.receipts(msg); row != nil {
+			rows = append(rows, row)
+		}
+	}
+	if l.gap {
+		rows = append(rows, chatRow{})
+	}
+	return rows
+}
+
+// system is a hub-authored message: one quiet line.
+func (l *chatLog) system(msg *envelope.Message) []chatRow {
+	text := CleanBody(msg.Content.Text)
+	if r := msg.ApprovalResponse; r != nil && r.Decision == "expired" {
+		text = "approval expired"
+	}
+	line := strings.ReplaceAll(fmt.Sprintf("-- %s %s", chatClock(l.m, msg.CreatedAt), text), "\n", " ")
+	return []chatRow{{{ansi.Truncate(line, l.width, "…"), styleMuted}}}
+}
+
+// head is the time, priority glyph, sender and reply marker, then the text.
+func (l *chatLog) head(msg *envelope.Message) []chatRow {
+	glyph := chatSeg{" ", styleMuted}
+	switch msg.Priority {
+	case "wake":
+		glyph = chatSeg{"!", styleWarn}
+	case "wake_idle":
+		glyph = chatSeg{"~", styleCyan}
+	}
+	name := ansi.Truncate(l.names.of(msg.Sender), min(20, l.width/3), "…")
+	segs := chatRow{{chatClock(l.m, msg.CreatedAt) + " ", styleMuted}, glyph, {"<" + name + ">", chatSenderStyle(msg.Sender)}}
+	if msg.InReplyTo != nil {
+		segs = append(segs, chatSeg{" " + chatReplyMark(l.m, l.names, l.byID, *msg.InReplyTo), styleMuted})
+	}
+	segs = append(segs, chatSeg{" ", styleText})
+	lead := 0
+	for _, seg := range segs {
+		lead += lipgloss.Width(seg.text)
+	}
+	lines := chatWrap(l.text(msg), lead, l.width)
+	_, spilled := chatSpill(msg)
+	limit := l.body
+	if spilled {
+		limit = chatPreview
+	}
+	hidden := len(lines) - limit
+	if hidden > 0 {
+		lines = lines[:limit]
+		lines[limit-1] = ansi.Truncate(lines[limit-1], l.width-1, "") + "…"
+	}
+	rows := []chatRow{append(segs, chatSeg{lines[0], styleText})}
+	for _, line := range lines[1:] {
+		rows = append(rows, chatRow{{line, styleText}})
+	}
+	if hidden > 0 && !spilled {
+		rows = append(rows, chatRow{{fmt.Sprintf("[+%d lines, e reads it all]", hidden), styleMuted}})
+	}
+	return rows
+}
+
+// chatReplyMark names a reply's parent, which may be outside the loaded page.
+func chatReplyMark(m *Model, names chatPeers, byID map[string]*envelope.Message, id string) string {
+	parent := byID[id]
+	if parent == nil {
+		return "↳" + chatShort(id)
+	}
+	return "↳" + names.short(parent.Sender) + "@" + chatClock(m, parent.CreatedAt)
+}
+
+func (l *chatLog) text(msg *envelope.Message) string {
+	if r := msg.ApprovalRequest; r != nil && r.Question == msg.Content.Text {
+		return "" // the card below says it
+	}
+	return strings.TrimRight(strings.ReplaceAll(CleanBody(msg.Content.Text), "\t", "    "), "\n")
+}
+
+func (l *chatLog) files(msg *envelope.Message, selected bool) []chatRow {
+	var rows []chatRow
+	spill, spilled := chatSpill(msg)
+	for i, att := range msg.Attachments {
+		mark := " "
+		if selected && i == min(l.s.fileIdx, len(msg.Attachments)-1) {
+			mark = ">"
+		}
+		name := Clean(att.Name)
+		if name == "" {
+			name = chatShort(att.SHA256)
+		}
+		if spilled && att.SHA256 == spill.SHA256 {
+			extra := max(att.Size-int64(len(msg.Content.Text)), 0)
+			rows = append(rows, chatRow{{chatIndent[1:] + mark, styleMuted}, {fmt.Sprintf("[+%s spilled → %s]", chatSize(extra), name), styleMuted}})
+			continue
+		}
+		rows = append(rows, chatRow{{chatIndent[1:] + mark, styleMuted}, {"file " + name, styleCyan}, {" " + chatSize(att.Size), styleMuted}})
+	}
+	return rows
+}
+
+func (l *chatLog) job(msg *envelope.Message) []chatRow {
+	var rows []chatRow
+	if r := msg.JobRequest; r != nil {
+		rows = append(rows, chatRow{{chatIndent, styleMuted}, {"job request " + Clean(r.Operation), styleGood}, {" key " + Clean(r.JobKey), styleMuted}})
+	}
+	if r := msg.JobStatus; r != nil {
+		row := chatRow{{chatIndent, styleMuted}, {fmt.Sprintf("job %s %s seq %d", chatShort(r.JobID), Clean(r.State), r.Sequence), styleGood}}
+		if len(r.Output) > 0 {
+			row = append(row, chatSeg{" " + Clean(string(r.Output)), styleMuted})
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// approval is the card under an approval request. Only a card that is open,
+// addressed to the operator and unexpired by the hub's clock offers digits.
+func (l *chatLog) approval(msg *envelope.Message) []chatRow {
+	req := msg.ApprovalRequest
+	if req == nil {
+		return nil
+	}
+	options := make([]string, len(req.Options))
+	for i, option := range req.Options {
+		options[i] = Clean(option)
+	}
+	text, tail := "? "+Clean(req.Question), ""
+	a, open := l.open[msg.MessageID]
+	state := l.s.answers[req.ApprovalID]
+	switch {
+	case state == chatAnswering:
+		tail = "answering"
+	case state == chatAnswered:
+		tail = "answered"
+	case state == chatClosed:
+		tail = "closed"
+	case !open && l.decided[req.ApprovalID] == "expired":
+		tail = "expired"
+	case !open && l.decided[req.ApprovalID] != "":
+		tail = "answered: " + l.decided[req.ApprovalID]
+	case !open:
+		tail = "closed"
+	case chatExpired(l.m, a.ExpiresAt):
+		tail = "expired"
+	case a.AddressedToMe:
+		for i, option := range options {
+			text += fmt.Sprintf(" [%d]%s", i+1, option)
+		}
+		tail = l.countdown(a.ExpiresAt)
+	default:
+		text += " " + strings.Join(options, " / ")
+		tail = "read-only " + l.countdown(a.ExpiresAt)
+	}
+	var rows []chatRow
+	for _, line := range chatWrap(text+" "+tail, 0, l.width-len(chatIndent)) {
+		rows = append(rows, chatRow{{chatIndent + line, styleAccent}})
+	}
+	return rows
+}
+
+// countdown uses the hub's clock; the local time beside it is only a label.
+func (l *chatLog) countdown(at string) string {
+	t, err := envelope.ParseTime(at)
+	if err != nil {
+		return ""
+	}
+	left := t.Sub(l.m.HubNow())
+	text := fmt.Sprintf("%dm", int(left.Minutes()))
+	if left >= time.Hour {
+		text = fmt.Sprintf("%dh%02dm", int(left.Hours()), int(left.Minutes())%60)
+	}
+	return "exp " + t.In(l.m.loc).Format("15:04") + " " + text
+}
+
+// receipts is one compact marker per recipient, cut with a count when it runs
+// past the line.
+func (l *chatLog) receipts(msg *envelope.Message) chatRow {
+	cells := l.cells[msg.MessageID]
+	if len(cells) == 0 {
+		return nil
+	}
+	row := chatRow{{chatIndent, styleMuted}}
+	used := len(chatIndent)
+	for i, cell := range cells {
+		glyph, style := chatReceipt(Clean(cell.Display))
+		text := l.names.short(cell.Recipient) + glyph + " "
+		if used+lipgloss.Width(text)+8 > l.width && i < len(cells)-1 {
+			return append(row, chatSeg{fmt.Sprintf("+%d more", len(cells)-i), styleMuted})
+		}
+		used += lipgloss.Width(text)
+		row = append(row, chatSeg{text, style})
+	}
+	return row
+}
+
+// window chooses the first message to draw: the newest screenful while
+// following, otherwise wherever the view already is if the selection fits
+// there. Working in whole messages draws only what shows, however long the
+// thread.
+func (s *chatScreen) window(n, picked, h int, height func(int) int) int {
+	backFrom := func(i int) int {
+		used := height(i)
+		for i > 0 && used+height(i-1) <= h {
+			i--
+			used += height(i)
+		}
+		return i
+	}
+	if s.follow {
+		return backFrom(n - 1)
+	}
+	top := min(s.top, picked)
+	used := 0
+	for i := top; i <= picked; i++ {
+		used += height(i)
+		if used > h {
+			return backFrom(picked)
+		}
+	}
+	return top
+}
+
+func (s *chatScreen) viewLog(m *Model, st *ThreadState, w, h int) string {
+	id := m.CurrentThread
+	switch {
+	case id == "" && len(m.Data.Threads.Threads) == 0:
+		return styleMuted.Render("no threads yet: :msg <peer> <text> starts one")
+	case st == nil || st.Loading:
+		return styleMuted.Render("loading")
+	}
+	if err := m.Data.Errs[threadPrefix+id]; err != nil && len(st.Messages) == 0 {
+		return styleBad.Render(ansi.Truncate(Clean("could not load: "+err.Error()), w, "…"))
+	}
+	if len(st.Messages) == 0 {
+		return styleMuted.Render("no messages yet")
+	}
+	l := s.newChatLog(m, st, w, h)
+	picked := s.index(st)
+	drawn := map[int][]chatRow{}
+	rowsOf := func(i int) []chatRow {
+		rows, ok := drawn[i]
+		if !ok {
+			rows = l.item(&st.Messages[i], i == picked)
+			drawn[i] = rows
+		}
+		return rows
+	}
+	s.top = s.window(len(st.Messages), picked, h, func(i int) int { return len(rowsOf(i)) })
+	lines := make([]string, 0, h)
+	for i := s.top; i < len(st.Messages) && len(lines) < h; i++ {
+		for _, row := range rowsOf(i) {
+			lines = append(lines, row.render(w, i == picked))
+		}
+	}
+	return strings.Join(lines[:min(len(lines), h)], "\n")
+}
+
+func chatPresence(state string) (string, lipgloss.Style) {
+	switch state {
+	case "working":
+		return "work", styleWarn
+	case "idle":
+		return "idle", styleGood
+	case "blocked":
+		return "blkd", styleBad
+	case "offline":
+		return "off", styleMuted
+	}
+	return "unkn", styleMuted // anything unrecognised, and never offline (§8)
+}
+
+func chatReach(state string) (string, lipgloss.Style) {
+	switch state {
+	case "connected":
+		return "conn", styleGood
+	case "reachable":
+		return "reach", styleGood
+	case "unreachable":
+		return "unrch", styleBad
+	}
+	return "unkn", styleMuted
+}
+
+// viewWho is the participants, the thread's files and, when there is room, the
+// legends. Presence and reachability are separate columns (§8).
+func (s *chatScreen) viewWho(m *Model, st *ThreadState, w, h int) string {
+	row := chatRowOf(m, m.CurrentThread)
+	if row == nil {
+		return ""
+	}
+	const presenceW, reachW = 4, 5
+	nameW := w - 2 - presenceW - 1 - reachW - 1
+	peers := make(map[string]opapi.Peer, len(m.Data.Peers))
+	for _, p := range m.Data.Peers {
+		peers[p.Peer.PeerID] = p.Peer
+	}
+	names := chatNames(m)
+
+	var files []opapi.ThreadFile
+	if st != nil {
+		files = st.Detail.Files
+	}
+	shownFiles := min(len(files), 6)
+	filesRows := 0
+	if shownFiles > 0 {
+		filesRows = shownFiles + 2
+	}
+	participants := row.Thread.Participants
+	room := max(h-1-filesRows, 1)
+	shownPeers := min(len(participants), room)
+	if shownPeers < len(participants) {
+		shownPeers = room - 1 // the last row says how many are left out
+	}
+
+	lines := []string{styleMuted.Render(fit("peer", 2+nameW) + " " + fit("pres", presenceW) + " reach")}
+	for _, id := range participants[:shownPeers] {
+		p := peers[id]
+		presence, presenceStyle := chatPresence(p.Presence)
+		reach, reachStyle := chatReach(p.Reachability)
+		name := fit(ansi.Truncate(names.of(id), nameW, "…"), nameW)
+		lines = append(lines, chatSenderStyle(id).Render("■")+" "+styleText.Render(name)+" "+presenceStyle.Render(fit(presence, presenceW))+" "+reachStyle.Render(reach))
+	}
+	if extra := len(participants) - shownPeers; extra > 0 {
+		lines = append(lines, styleMuted.Render(fmt.Sprintf("+%d more", extra)))
+	}
+	if shownFiles > 0 {
+		lines = append(lines, "", styleMuted.Render("files:"))
+		for _, f := range files[len(files)-shownFiles:] {
+			size := chatSize(f.Size)
+			if f.Purged {
+				size = "purged"
+			}
+			name := Clean(f.Name)
+			if name == "" {
+				name = chatShort(f.SHA256)
+			}
+			lines = append(lines, styleCyan.Render(ansi.Truncate(name, max(w-lipgloss.Width(size)-1, 1), "…"))+" "+styleMuted.Render(size))
+		}
+	}
+	if g := row.Thread.Group; g != nil {
+		lines = append(lines, "", styleMuted.Render("ad hoc group:"), styleText.Render(ansi.Truncate(Clean(*g), w, "…")))
+	}
+	legend := []string{
+		"",
+		styleMuted.Render("receipts:"),
+		styleMuted.Render("· queued  › pushed"),
+		styleGood.Render("✓ accepted"),
+		styleGood.Render("✓✓ processed"),
+		styleText.Render("● read") + "  " + styleBad.Render("✗ dead"),
+		"",
+		styleMuted.Render("priority:"),
+		styleWarn.Render("! wake") + "  " + styleCyan.Render("~ wake_idle"),
+		styleMuted.Render("  hold"),
+	}
+	if len(lines)+len(legend) <= h {
+		lines = append(lines, legend...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// viewComposer is the last body row: the answer prompt, or the thread's label
+// and the draft, with a byte counter once there is one.
+func (s *chatScreen) viewComposer(m *Model, st *ThreadState, w int) string {
+	if s.prompt != nil {
+		options := make([]string, len(s.prompt.Options))
+		for i, option := range s.prompt.Options {
+			options[i] = fmt.Sprintf("%d %s", i+1, Clean(option))
+		}
+		return fit(styleWarn.Render("answer: ")+styleText.Render(strings.Join(options, "  "))+styleMuted.Render("  any other key cancels"), w)
+	}
+	id := m.CurrentThread
+	if id == "" {
+		return fit(styleMuted.Render("no thread open"), w)
+	}
+	title := "thread"
+	if row := chatRowOf(m, id); row != nil {
+		title = chatTitleOf(row.Thread)
+	}
+	label := styleAccent.Render(ansi.Truncate(title, 24, "…")) + styleMuted.Render(" › ")
+	d := s.draft(id)
+	if d.reply != "" && st != nil {
+		label += styleMuted.Render(chatReplyMark(m, chatNames(m), chatMessages(st), d.reply) + " ")
+	}
+	status := ""
+	if n := len(d.text); n > 0 {
+		status = chatSize(int64(n))
+		if n > chatSpillAt {
+			status += ", spills"
+		}
+	}
+	if d.sending {
+		status = "sending"
+	}
+	room := w - lipgloss.Width(label) - lipgloss.Width(status) - 2
+	text := Clean(strings.ReplaceAll(d.text, "\n", "⏎"))
+	var body string
+	switch {
+	case s.insert:
+		if over := lipgloss.Width(text) + 1 - room; over > 0 { // the end being typed stays in view
+			text = ansi.TruncateLeft(text, over+1, "…")
+		}
+		body = styleText.Render(text) + styleAccent.Render("█")
+	case text != "":
+		body = styleText.Render(ansi.Truncate(text, room, "…"))
+	case st != nil && st.Detail.Row.Thread.ThreadID == id && !slices.Contains(st.Detail.Row.Thread.Participants, m.Data.Inbox.Me.PeerID):
+		body = styleMuted.Render(ansi.Truncate("i to write: sending joins you to this thread", room, "…"))
+	default:
+		body = styleMuted.Render(ansi.Truncate("i to write, or :msg <peer> <text>", room, "…"))
+	}
+	return fit(fit(label+body, w-lipgloss.Width(status)-1)+" "+styleMuted.Render(status), w)
+}
+
+// viewMatrix is one row per message and one column per recipient, showing each
+// cell's display. Both directions scroll, so 64 recipients stay reachable.
+func (s *chatScreen) viewMatrix(m *Model, st *ThreadState, w, h int) string {
+	mx := st.Matrix
+	names := chatNames(m)
+	columns := max((w-2-chatMatrixDay-chatMatrixWho)/chatMatrixBox, 1)
+	rows := max(h-3, 1)
+	s.matrixX = min(max(s.matrixX, 0), max(len(mx.Recipients)-columns, 0))
+	s.matrixY = min(max(s.matrixY, 0), max(len(mx.Rows)-rows, 0))
+	shown := mx.Recipients[s.matrixX:min(s.matrixX+columns, len(mx.Recipients))]
+
+	title := fmt.Sprintf("delivery matrix · recipients %d-%d of %d · rows %d-%d of %d",
+		min(s.matrixX+1, len(mx.Recipients)), s.matrixX+len(shown), len(mx.Recipients),
+		min(s.matrixY+1, len(mx.Rows)), min(s.matrixY+rows, len(mx.Rows)), len(mx.Rows))
+	if len(mx.Rows) == 0 {
+		return Pane(title, w, h, true, styleMuted.Render("no deliveries in this thread"))
+	}
+	var head strings.Builder
+	head.WriteString(fit("time", chatMatrixDay) + fit("sender", chatMatrixWho))
+	for _, id := range shown {
+		head.WriteString(fit(ansi.Truncate(names.of(id), chatMatrixBox-1, "…"), chatMatrixBox))
+	}
+	lines := []string{styleMuted.Render(head.String())}
+	for _, row := range mx.Rows[s.matrixY:min(s.matrixY+rows, len(mx.Rows))] {
+		var line strings.Builder
+		line.WriteString(styleMuted.Render(fit(chatClock(m, row.CreatedAt), chatMatrixDay)))
+		line.WriteString(chatSenderStyle(row.Sender).Render(fit(ansi.Truncate(names.of(row.Sender), chatMatrixWho-1, "…"), chatMatrixWho)))
+		for _, id := range shown {
+			text, style := "-", styleMuted
+			if i := slices.IndexFunc(row.Cells, func(c opapi.MatrixCell) bool { return c.Recipient == id }); i >= 0 {
+				text = Clean(row.Cells[i].Display)
+				_, style = chatReceipt(text)
+			}
+			line.WriteString(style.Render(fit(ansi.Truncate(text, chatMatrixBox-1, "…"), chatMatrixBox)))
+		}
+		lines = append(lines, line.String())
+	}
+	return Pane(title, w, h, true, strings.Join(lines, "\n"))
+}
+
+// viewReader shows a message's full text. The wrapped lines are kept, because
+// a body can be a mebibyte and frames are not.
+func (s *chatScreen) viewReader(w, h int) string {
+	r := &s.reader
+	if r.loading {
+		return Pane(r.title, w, h, true, styleMuted.Render("loading"))
+	}
+	inner := w - 2
+	if r.width != inner {
+		body := strings.ReplaceAll(r.body, "\t", "    ")
+		r.lines, r.width = strings.Split(ansi.Hardwrap(body, inner, true), "\n"), inner
+	}
+	r.rows = max(h-2, 1)
+	r.top = min(max(r.top, 0), max(len(r.lines)-r.rows, 0))
+	end := min(r.top+r.rows, len(r.lines))
+	title := fmt.Sprintf("%s · lines %d-%d of %d", r.title, r.top+1, end, len(r.lines))
+	return Pane(title, w, h, true, styleText.Render(strings.Join(r.lines[r.top:end], "\n")))
+}
