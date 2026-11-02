@@ -16,3 +16,5 @@ backups/
 .scratch/vecnet/build-connectors/
 .scratch/vecnet/build-operator-ui/
 .scratch/vecnet/build-openclaw/
+
+.demo-data/
