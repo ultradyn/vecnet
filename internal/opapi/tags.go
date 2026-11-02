@@ -53,15 +53,18 @@ func Tags(ev envelope.Event) []string {
 		return empty
 	}
 	if ev.Type == "operator_view" {
-		var data struct {
-			Reason   *string         `json:"reason"`
-			ThreadID json.RawMessage `json:"thread_id"`
+		// Match the web client's exact field names; struct decoding also accepts
+		// alternate casing, which can hide missing or malformed wire fields.
+		var data map[string]json.RawMessage
+		if json.Unmarshal(raw, &data) != nil {
+			return empty
 		}
-		if json.Unmarshal(raw, &data) != nil || data.Reason == nil || len(data.ThreadID) == 0 {
+		var reason *string
+		if json.Unmarshal(data["reason"], &reason) != nil || reason == nil {
 			return empty
 		}
 		var thread *string
-		if json.Unmarshal(data.ThreadID, &thread) != nil {
+		if json.Unmarshal(data["thread_id"], &thread) != nil {
 			return empty
 		}
 		tags := []string{"inbox", "threads", "peers"}
