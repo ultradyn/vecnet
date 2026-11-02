@@ -3,7 +3,7 @@
 // §2.6, §8). State shown is always the hub's: `me` from the inbox snapshot,
 // redrawn only after a POST answers 204 and the snapshot reloads.
 import { h } from './dom.js';
-import { when } from './format.js';
+import { clean, when } from './format.js';
 import { HEARTBEAT_MS, heartbeatAction, navLabel, toggleTarget, wireTime } from './presence-model.js';
 
 // Toggles and heartbeats in this tab run one at a time, so a beat that read
@@ -30,7 +30,7 @@ export function renderNav(el, ctx) {
     const state = me ? me.presence : '';
     dot.className = 'dot ' + (state || 'none');
     dot.title = state ? 'presence ' + state : '';
-    label.textContent = navLabel((me && me.name) || ctx.nameOf(ctx.me), state);
+    label.textContent = clean(navLabel((me && me.name) || ctx.nameOf(ctx.me), state));
     label.title = me && me.presence_at ? 'since ' + me.presence_at : '';
     btn.hidden = !me;
     btn.disabled = !!pending;

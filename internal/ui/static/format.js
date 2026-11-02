@@ -54,3 +54,13 @@ export function quotaLabel(quota) {
   }
   return keys.map(k => k + '=' + (typeof quota[k] === 'string' ? quota[k] : JSON.stringify(quota[k]))).join(' ');
 }
+
+// clean makes a peer-supplied string inert on the page, as tui.Clean does in
+// the terminal: C0 and C1 controls, DEL and the bidi embedding, override and
+// isolate controls (U+202A–202E, U+2066–2069) are dropped, so a name cannot
+// reverse the UI's own words beside it; line and paragraph separators become
+// \n. \n and \t stay, for bodies shown with white-space: pre-wrap.
+const CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
+export function clean(s) {
+  return String(s).replace(/[\u2028\u2029]/g, '\n').replace(CONTROLS, '');
+}

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ago, bytes, quotaLabel, short, title, when } from '../static/format.js';
+import { ago, bytes, clean, quotaLabel, short, title, when } from '../static/format.js';
 
 test('when is 24-hour local today, with the date on other days, and survives midnight', () => {
   const noon = new Date(2026, 10, 2, 14, 5, 0).getTime();
@@ -58,4 +58,15 @@ test('quotaLabel reads a *_pct value as a percentage, an empty quota as none, an
   assert.equal(quotaLabel(undefined), 'none');
   assert.equal(quotaLabel({ runs_this_hour: '0/200', tier: 2 }), 'runs_this_hour=0/200 tier=2');
   assert.equal(quotaLabel({ weekly_remaining_pct: 'lots' }), 'weekly_remaining_pct=lots');
+});
+
+test('clean drops controls and bidi overrides, like tui.Clean, and keeps newlines and tabs', () => {
+  assert.equal(clean('evil\u202Egnp.exe'), 'evilgnp.exe');
+  assert.equal(clean('\u2066a\u2069\u202Ab\u202C'), 'ab');
+  assert.equal(clean('a\u001b]52;c;aGk=\u0007b'), 'a]52;c;aGk=b');
+  assert.equal(clean('x\u0085y\u009bz\u007f'), 'xyz');
+  assert.equal(clean('line1\nline2\tend'), 'line1\nline2\tend');
+  assert.equal(clean('a\u2028b\u2029c'), 'a\nb\nc');
+  assert.equal(clean('<img src=x onerror=alert(1)>'), '<img src=x onerror=alert(1)>');
+  assert.equal(clean(42), '42');
 });

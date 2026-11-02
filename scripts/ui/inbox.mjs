@@ -184,6 +184,10 @@ try {
       assert((await row.locator('.ex').textContent()).includes(HOSTILE), 'hostile body is not literal');
       assert((await row.locator('.tl').textContent()).includes(HOSTILE), 'hostile title is not literal');
       assert((await row.locator('.who > span:first-child').textContent()).includes(HOSTILE), 'hostile name is not literal');
+      // design: a bidi override or control in the name cannot reorder the UI's
+      // own words (" in ") or draw tofu: clean() drops them, as tui.Clean does.
+      assert(!/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(await row.textContent()), 'a control or bidi override reached the page');
+      assert(await row.locator('.who .muted').textContent() === 'in', 'the UI word beside the name changed');
       assert(await page.locator('#view img, aside img').count() === 0, 'a body became an element');
       assert(dialogs === 0, `${dialogs} dialogs fired`);
       console.log('ok - hostile body renders as literal text and no dialog fires');

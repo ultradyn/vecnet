@@ -1,5 +1,8 @@
 // DOM helpers. Peer-supplied strings become text nodes and attribute values
-// here; nothing in the UI parses a string into markup (PROTOCOL §14.2).
+// here; nothing in the UI parses a string into markup (PROTOCOL §14.2). Text
+// and titles pass through clean(), so a control or bidi override in a peer's
+// name cannot reorder the words around it.
+import { clean } from './format.js';
 
 // attrs: `class`, `text` (textContent), on<event> listeners, or an attribute.
 // null, undefined and false leave an attribute off.
@@ -8,11 +11,15 @@ export function h(tag, attrs, ...kids) {
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v === undefined || v === null || v === false) continue;
     if (k === 'class') el.className = v;
-    else if (k === 'text') el.textContent = v;
+    else if (k === 'text') el.textContent = clean(v);
     else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'title' || k === 'aria-label') el.setAttribute(k, clean(v));
     else el.setAttribute(k, v === true ? '' : v);
   }
-  for (const c of kids.flat()) if (c !== null && c !== undefined && c !== false) el.append(c);
+  for (const c of kids.flat()) {
+    if (c === null || c === undefined || c === false) continue;
+    el.append(typeof c === 'string' ? clean(c) : c);
+  }
   return el;
 }
 
@@ -32,7 +39,7 @@ export function chip(text, tone) {
 let toastTimer = 0;
 export function toast(msg, bad) {
   const el = document.getElementById('toast');
-  el.textContent = msg;
+  el.textContent = clean(msg);
   el.className = 'on' + (bad ? ' bad' : '');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.className = bad ? 'bad' : ''; }, bad ? 6000 : 2500);

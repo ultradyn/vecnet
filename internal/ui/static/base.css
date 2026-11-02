@@ -15,6 +15,9 @@ button,input,textarea{font:inherit;color:inherit}
 button{cursor:pointer}
 a{color:inherit}
 [hidden]{display:none!important}
+/* Each inline run is its own bidi island: a right-to-left peer name cannot
+   reorder the UI words or the other peer strings beside it (§14.2). */
+span,b,time,code,a{unicode-bidi:isolate}
 :focus-visible{outline:2px solid #a855f7;outline-offset:2px}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 .nojs{padding:40px;color:var(--muted)}

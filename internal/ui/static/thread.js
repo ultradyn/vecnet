@@ -3,7 +3,7 @@
 // rules live in thread-model.js.
 import { answerBody, countdown } from './approvals.js';
 import { avatar, h } from './dom.js';
-import { bytes, short, title, when } from './format.js';
+import { bytes, clean, short, title, when } from './format.js';
 import { canShowFull, excerpt, FULL_TEXT_CAP, items, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
 
 const PAGE = 200, MAX_PAGES = 50, PIN_SLACK = 80;
@@ -357,7 +357,7 @@ export function mount(root, ctx) {
     comp.querySelector('.join').hidden = !participants || participants.includes(me);
     const to = comp.querySelector('.to'), target = all.find(m => m.message_id === S.replyTo);
     to.hidden = !target;
-    if (target) to.firstElementChild.textContent = '↳ replying to ' + nameOf(target.sender) + ': ' + excerpt(target).slice(0, 60);
+    if (target) to.firstElementChild.textContent = clean('↳ replying to ' + nameOf(target.sender) + ': ' + excerpt(target).slice(0, 60));
     comp.querySelector('textarea').placeholder = 'Message ' + (participants ? participants.filter(p => p !== me).map(nameOf).join(', ') : 'this thread');
     comp.querySelector('.send').disabled = S.sending;
     for (const b of comp.querySelectorAll('.seg button')) b.className = b.value === S.prio ? 'on' : '';
