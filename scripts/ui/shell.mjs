@@ -64,14 +64,26 @@ try {
     await page.evaluate(() => { location.hash = '#inbox'; });
     await page.getByRole('heading', { name: 'Inbox', exact: true }).waitFor();
 
-    // A thread reached through #matrix is the same mounted thread.
+    // A thread reached through #matrix is the same mounted thread. The real
+    // matrix (Task 11) is a modal <dialog>, so the thread under it is inert:
+    // the draft is typed on #thread and must survive #thread → #matrix → #thread.
     await page.evaluate(id => { location.hash = `#matrix/${id}`; }, demo.threads.hark);
     await page.locator('.composer textarea').waitFor();
+    await page.locator('dialog.mx[open]').waitFor();
     assert(await page.evaluate(() => document.body.dataset.route) === 'matrix', 'matrix route not on body');
-    await page.locator('.composer textarea').fill('kept across routes');
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, demo.threads.hark);
+    await page.locator('dialog.mx').waitFor({ state: 'detached' });
     await page.locator('.msg').first().waitFor();
-    assert(await page.locator('.composer textarea').inputValue() === 'kept across routes', 'moving between #matrix and #thread remounted the view');
+    await page.locator('.composer textarea').fill('kept across routes');
+    assert(await page.locator('.composer textarea').inputValue() === 'kept across routes', 'the draft did not take');
+    await page.evaluate(() => { document.querySelector('.composer textarea').dataset.mounted = 'once'; });
+    await page.evaluate(id => { location.hash = `#matrix/${id}`; }, demo.threads.hark);
+    await page.locator('dialog.mx[open]').waitFor();
+    assert(await page.locator('.composer textarea[data-mounted="once"]').inputValue() === 'kept across routes', 'moving from #thread to #matrix remounted the view');
+    await page.evaluate(id => { location.hash = `#thread/${id}`; }, demo.threads.hark);
+    await page.locator('dialog.mx').waitFor({ state: 'detached' });
+    await page.locator('.msg').first().waitFor();
+    assert(await page.locator('.composer textarea[data-mounted="once"]').inputValue() === 'kept across routes', 'moving between #matrix and #thread remounted the view');
     await page.locator('.composer textarea').fill('');
 
     // Bodies are untrusted: the hostile title is inert text wherever it lands.
@@ -104,7 +116,14 @@ try {
     assert(sent, 'reply did not reach the hub');
     assert(countRequests(req => req.method() === 'POST' && req.url().endsWith('/v1/messages') && req.headers()['x-vecnet-ingress'] === 'operator_ui') === 1, 'reply not marked operator_ui');
     assert(sent.in_reply_to, 'reply lost its target');
-    await page.locator('.msg', { hasText: reply }).scrollIntoViewIfNeeded();
+    // The thread redraws its whole list on each snapshot (the send's reload and
+    // then the pump's event), so find and scroll in one page-side step rather
+    // than through a locator handle the next redraw can detach.
+    await page.waitForFunction(text => {
+      const el = [...document.querySelectorAll('.msg')].find(m => m.textContent.includes(text));
+      if (el) el.scrollIntoView({ block: 'nearest' });
+      return !!el;
+    }, reply);
     // The toast sits over the top message, so the shot waits for it to slide out.
     await page.locator('#toast.on').waitFor({ state: 'hidden' });
     await page.evaluate(() => Promise.all(document.getElementById('toast').getAnimations().map(a => a.finished)));

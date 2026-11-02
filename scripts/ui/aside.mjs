@@ -46,7 +46,12 @@ try {
     assert(heads.map(t => t.replace(/\d+$/, '')).join() === 'Participants,Files,Thread', `sections ${heads}`);
     assert(await aside.locator('.matrix-btn').count() === 1, 'no delivery matrix button');
     // Spilled files are dashed; nothing is purged yet.
-    assert(await fileBtn('message.md').evaluate(el => el.classList.contains('spill') && getComputedStyle(el).borderTopStyle === 'dashed'), 'spilled message.md is not dashed');
+    // Found and measured in one page-side step: a redraw between resolving a
+    // handle and reading its style would measure a detached node.
+    assert(await aside.evaluate(root => {
+      const el = [...root.querySelectorAll('button.file')].find(b => b.textContent.includes('message.md'));
+      return !!el && el.classList.contains('spill') && getComputedStyle(el).borderTopStyle === 'dashed';
+    }), 'spilled message.md is not dashed');
     assert(await aside.locator('button.file.purged').count() === 0, 'a live file reads purged');
 
     // Presence and reachability are two signals; unknown presence never reads offline.
@@ -108,6 +113,9 @@ try {
     // Named: matrix button navigates to #matrix/<id>.
     await aside.locator('.matrix-btn').click();
     await page.waitForFunction(id => location.hash === `#matrix/${id}`, demo.threads.hark);
+    // The hash changes before its hashchange handler runs, so wait for the
+    // router to have handled it (the matrix dialog it opens) before reading the body.
+    await page.locator('dialog.mx[open]').waitFor();
     assert(await page.evaluate(() => document.body.dataset.route) === 'matrix', 'matrix route not on body');
     assert(await aside.evaluate(el => el.getBoundingClientRect().width) >= 360, 'panel narrowed on the matrix route');
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, demo.threads.hark);

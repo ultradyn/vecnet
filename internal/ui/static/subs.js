@@ -133,7 +133,8 @@ function draw(state) {
   const el = state.el, items = state.items;
   if (!items.length) { el.replaceChildren(); return; }
   el.replaceChildren(h('section', { class: 'attn', 'aria-label': 'Subscriptions' },
-    h('h2', {}, 'Subscriptions', h('span', { class: 'n', text: String(items.length) })),
+    // The inbox's heading convention: a title span first, then the .n count.
+    h('h2', {}, h('span', { text: 'Subscriptions' }), h('span', { class: 'n', text: String(items.length) })),
     items.map(item => attentionItem(item, state))));
 }
 
