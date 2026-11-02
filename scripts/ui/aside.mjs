@@ -75,6 +75,9 @@ try {
     // Named: file download fires a browser download and no request carries the
     // secret in a URL. Held at the blob first, for the progress shot.
     await page.evaluate(() => {
+      const create = URL.createObjectURL.bind(URL);
+      window.__downloadTypes = [];
+      URL.createObjectURL = blob => { window.__downloadTypes.push(blob.type); return create(blob); };
       const revoke = URL.revokeObjectURL.bind(URL);
       window.__revoked = [];
       URL.revokeObjectURL = url => { window.__revoked.push(url); revoke(url); };
@@ -90,6 +93,8 @@ try {
     assert(dl.suggestedFilename() === LOG, `saved as ${dl.suggestedFilename()}`);
     assert(dl.url().startsWith('blob:'), `download url ${dl.url()}`);
     assert(await readFile(await dl.path(), 'utf8') === LOG_BYTES, 'downloaded bytes differ from the blob');
+    const downloadTypes = await page.evaluate(() => window.__downloadTypes);
+    assert(downloadTypes.length === 1 && downloadTypes[0] === 'application/octet-stream', `Files-panel download MIME types: ${JSON.stringify(downloadTypes)}`);
     await aside.locator('button.file.busy').waitFor({ state: 'detached' });
     await page.waitForFunction(() => !document.querySelector('a[download]'));
     // The object URL is revoked afterwards.

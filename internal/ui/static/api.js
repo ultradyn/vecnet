@@ -1,5 +1,6 @@
 // The operator API client: one method per hub route. The secret travels only
 // in the Authorization header, never in a URL (PROTOCOL §2).
+import { mediaTypeOf } from './attach-model.js';
 
 export class APIError extends Error {
   // status 0 means the hub was never reached.
@@ -30,9 +31,19 @@ function transportError(e, message) {
 }
 
 // onUnauthorized fires at most once per client: every request parked when a
-// secret is rotated answers 401, and one sign-out is enough.
-export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = () => {} }) {
+// secret is rotated answers 401, and one sign-out is enough. XHR is only for
+// uploads, because fetch reports no upload progress.
+export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = () => {}, XHR = globalThis.XMLHttpRequest }) {
   let unauthorized = false;
+
+  // httpError turns a non-2xx reply (j is its parsed body or null) into an
+  // APIError, for fetch requests and uploads alike.
+  function httpError(status, statusText, j) {
+    const e = (j && j.error) || {};
+    const err = new APIError(status, e.code || 'http_' + status, e.message || statusText, e.details);
+    if (status === 401 && !unauthorized) { unauthorized = true; onUnauthorized(err); }
+    return err;
+  }
 
   async function request(method, path, { body, headers, signal, read = 'json' } = {}) {
     const hd = { Authorization: 'Bearer ' + secret, Accept: 'application/json', ...headers };
@@ -63,10 +74,36 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
       if (j === null) throw new APIError(0, 'network', UNREADABLE);
       return j;
     }
-    const e = (j && j.error) || {};
-    const err = new APIError(r.status, e.code || 'http_' + r.status, e.message || r.statusText, e.details);
-    if (r.status === 401 && !unauthorized) { unauthorized = true; onUnauthorized(err); }
-    throw err;
+    throw httpError(r.status, r.statusText, j);
+  }
+
+  // upload PUTs file as a blob that expires after a day unless a message
+  // references it (PROTOCOL §2.7). The File is the body, so the browser sends
+  // its exact Content-Length. onProgress(loaded, total) follows the upload.
+  function upload(file, { onProgress, signal } = {}) {
+    return new Promise((resolve, reject) => {
+      const aborted = () => new APIError(0, 'aborted', 'request aborted');
+      if (signal && signal.aborted) { reject(aborted()); return; }
+      const x = new XHR();
+      const stop = () => x.abort();
+      const settle = (fn, v) => { if (signal) signal.removeEventListener('abort', stop); fn(v); };
+      x.open('PUT', '/v1/blobs?ttl=86400');
+      x.setRequestHeader('Authorization', 'Bearer ' + secret);
+      x.setRequestHeader('Accept', 'application/json');
+      x.setRequestHeader('Content-Type', mediaTypeOf(file));
+      if (onProgress && x.upload) x.upload.onprogress = e => onProgress(e.loaded, e.lengthComputable ? e.total : file.size);
+      x.onabort = () => settle(reject, aborted());
+      x.onerror = x.ontimeout = () => settle(reject, new APIError(0, 'network', 'hub unreachable'));
+      x.onload = () => {
+        let j = null;
+        try { j = JSON.parse(x.responseText); } catch { /* the status below still says what happened */ }
+        if (x.status < 200 || x.status > 299) { settle(reject, httpError(x.status, x.statusText, j)); return; }
+        if (!j || typeof j.sha256 !== 'string') { settle(reject, new APIError(0, 'network', UNREADABLE)); return; }
+        settle(resolve, { sha256: j.sha256, size: j.size });
+      };
+      if (signal) signal.addEventListener('abort', stop, { once: true });
+      x.send(file);
+    });
   }
   const get = (path, options) => request('GET', path, options);
   const post = (path, options) => request('POST', path, options);
@@ -96,5 +133,6 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     audit: ({ limit, before } = {}) => get('/v1/admin/audit' + query({ limit, before })),
     counters: () => get('/v1/admin/counters'),
     blob: sha => get('/v1/blobs/' + seg(sha), { read: 'blob' }),
+    upload,
   };
 }

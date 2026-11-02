@@ -35,6 +35,8 @@ Open `/ui/` on your hub and sign in with its operator secret, or run `vecnet --n
 
 The [operator guide](docs/OPERATOR.md) covers sign-in, priorities, TUI keys, presence versus reachability, subscription health and CLI administration. The [screenshot index](docs/plans/shots/oui/README.md) records the implemented screens. The [operator UI plan](docs/plans/2026-11-01-operator-ui.md) records the completed build and final gate. Its two-client journey verifies shared approval answers, unread counts and presence through operator events, incoming wake messages, hub-authored approval expiry, and sign-in after a rejected credential. Run `build2 node scripts/ui/journey.mjs`; it waits for the real TUI's 20-minute presence heartbeat.
 
+Both clients can send [attachments](docs/OPERATOR.md#attachments): pick, drop or paste in the web UI, use `:attach` / `:detach` in the TUI, and view safe raster images inline on the web; `build2 node scripts/ui/att-journey.mjs` checks the exchange between clients.
+
 ## Connectors
 
 Each connects by what its platform offers, and each guide covers setup, what the bot receives, how it replies and how to tell when it has broken. All three run inside the hub, so none needs a separate process.

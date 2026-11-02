@@ -78,9 +78,10 @@ ui-shots:
     #!/usr/bin/env bash
     set -euo pipefail
     for script in scripts/ui/*.mjs; do
-        case "$script" in */lib.mjs|*/tmux.mjs|*/ansi.mjs|*.test.mjs) continue ;; esac
+        case "$script" in */lib.mjs|*/tmux.mjs|*/ansi.mjs|*/shots-index.mjs|*.test.mjs) continue ;; esac
         build2 node "$script"
     done
+    build2 node scripts/ui/shots-index.mjs
 
 tui *ARGS:
     CGO_ENABLED=0 build2 go run -p 2 ./cmd/vecnet tui {{ARGS}}

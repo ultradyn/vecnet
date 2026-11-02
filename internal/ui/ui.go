@@ -16,9 +16,10 @@ import (
 var static embed.FS
 
 // CSP confines the page to the hub's own origin and forbids inline script
-// and style, so every script and stylesheet is a file under static/.
+// and style, so every script and stylesheet is a file under static/. Image
+// thumbnails are fetched with the bearer and shown from blob object URLs.
 const CSP = "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; " +
-	"img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; " +
+	"img-src 'self' data: blob:; font-src 'self'; object-src 'none'; base-uri 'none'; " +
 	"form-action 'self'; frame-ancestors 'none'"
 
 // Files returns the embedded UI files, rooted at the directory holding

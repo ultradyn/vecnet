@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { budgetBanner, budgetOut, canShowFull, FULL_TEXT_CAP, items, sendError, spillOf } from '../static/thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, FULL_TEXT_CAP, items, replyKey, replySig, sendError, spillOf } from '../static/thread-model.js';
+import { SPILL_SLOT } from '../static/attach-model.js';
 
 const OP = 'peer_op', CODEX = 'peer_codex', SLEUTH = 'peer_sleuth', GROK = 'peer_grok';
 
@@ -187,4 +188,59 @@ test('the budget banner speaks to the operator and shows before a refused send',
   assert.equal(budgetOut({ budget_remaining: 3 }), false);
   assert.equal(budgetOut({ budget_remaining: null }), false);
   assert.equal(budgetOut(null), false);
+});
+
+test('replyKey keeps the key for unchanged text, prio, replyTo and sig; a changed sig mints a new one', () => {
+  let n = 0;
+  const mint = () => 'ui-key-' + ++n;
+  const sigA = 'a'.repeat(64), sigAB = sigA + ',' + 'b'.repeat(64);
+  const first = replyKey(null, { text: 'look at this', prio: 'wake', replyTo: 'msg_1', sig: sigA }, mint);
+  assert.deepEqual(first, { key: 'ui-key-1', text: 'look at this', prio: 'wake', replyTo: 'msg_1', sig: sigA });
+  // An unchanged retry (the reply was lost) keeps the very same pending send.
+  assert.equal(replyKey(first, { text: 'look at this', prio: 'wake', replyTo: 'msg_1', sig: sigA }, mint), first);
+  assert.equal(n, 1);
+  // Each of the four parts mints a new key when it changes.
+  const changed = [
+    { text: 'look at this!', prio: 'wake', replyTo: 'msg_1', sig: sigA },
+    { text: 'look at this', prio: 'hold', replyTo: 'msg_1', sig: sigA },
+    { text: 'look at this', prio: 'wake', replyTo: '', sig: sigA },
+    { text: 'look at this', prio: 'wake', replyTo: null, sig: sigA },
+    { text: 'look at this', prio: 'wake', replyTo: 'msg_1', sig: sigAB },
+    { text: 'look at this', prio: 'wake', replyTo: 'msg_1', sig: '' },
+  ];
+  for (const next of changed) {
+    const got = replyKey(first, next, mint);
+    assert.notEqual(got.key, first.key, JSON.stringify(next));
+    assert.deepEqual(got, { key: 'ui-key-' + n, ...next });
+  }
+  assert.equal(n, 1 + changed.length);
+  // Removing the chip (sig back to '') and sending again is a new send, not the old key.
+  const textOnly = replyKey(null, { text: 'x', prio: 'wake', replyTo: null, sig: '' }, mint);
+  assert.equal(replyKey(textOnly, { text: 'x', prio: 'wake', replyTo: null, sig: '' }, mint), textOnly);
+  assert.notEqual(replyKey(textOnly, { text: 'x', prio: 'wake', replyTo: null, sig: sigA }, mint).key, textOnly.key);
+});
+
+test('sendError: the hub refusing a spill slot shows the attachment-slot text', () => {
+  const e = Object.assign(new Error('too many attachments'), { status: 413, code: 'payload_too_large', details: { field: 'attachments', limit: 15 } });
+  assert.deepEqual(sendError(e), { kind: 'error', keepKey: false, text: SPILL_SLOT });
+  // Any other 413 keeps today's code: message.
+  const other = Object.assign(new Error('the message is over 64 KiB'), { status: 413, code: 'payload_too_large', details: {} });
+  assert.equal(sendError(other).text, 'payload_too_large: the message is over 64 KiB');
+});
+
+test('replySig covers every attachment wire field: same bytes under a new name or media type mint a new key; an unchanged retry keeps it', () => {
+  const sha = 'a'.repeat(64), other = 'b'.repeat(64);
+  const file = { sha256: sha, size: 3, media_type: 'image/png', name: 'pasted-20261103-040546.png' };
+  let n = 0;
+  const mint = () => 'k' + ++n;
+  const send = files => ({ text: '', prio: 'wake', replyTo: null, sig: replySig(files) });
+  const first = replyKey(null, send([file]), mint);
+  assert.equal(replyKey(first, send([{ ...file }]), mint), first, 'an unchanged retry kept the key');
+  for (const changed of [{ name: 'shot.png' }, { media_type: 'image/webp' }, { size: 4 }]) {
+    assert.notEqual(replyKey(first, send([{ ...file, ...changed }]), mint).key, first.key, JSON.stringify(changed));
+  }
+  const two = [file, { ...file, sha256: other }];
+  assert.notEqual(replySig(two), replySig([two[1], two[0]]), 'order is part of the signature');
+  assert.notEqual(replySig([file]), replySig([]));
+  assert.equal(replySig([]), replySig([]));
 });

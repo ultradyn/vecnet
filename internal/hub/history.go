@@ -309,6 +309,55 @@ func decodeStoredMessage(body string) (envelope.Message, error) {
 	return m, nil
 }
 
+// HostedAttachments returns, for each of msgs that has any, the sha256s of
+// its attachments whose bytes the hub hosts: a blob_refs row for that
+// message (written only for attachments hosted at send time) and bytes not
+// since purged (PROTOCOL §2.8, §11). Each list follows the message's
+// attachment order without repeats. A reference-only attachment (origin_url
+// and no hosted bytes) is never listed; hosted bytes that also name an
+// origin_url are. The stored Messages are not changed.
+func (h *Hub) HostedAttachments(ctx context.Context, msgs []envelope.Message) (map[string][]string, error) {
+	out := map[string][]string{}
+	var ids []any
+	for _, m := range msgs {
+		if len(m.Attachments) > 0 {
+			ids = append(ids, m.MessageID)
+		}
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := h.DB.QueryContext(ctx,
+		`SELECT br.msg_id, br.sha256 FROM blob_refs br
+		 JOIN blobs b ON b.sha256 = br.sha256
+		 WHERE b.purged_at IS NULL AND br.msg_id IN (?`+strings.Repeat(",?", len(ids)-1)+`)`, ids...)
+	if err != nil {
+		return nil, fmt.Errorf("hub: hosted attachments: %w", err)
+	}
+	defer rows.Close()
+	hosted := map[[2]string]bool{}
+	for rows.Next() {
+		var msgID, sha string
+		if err := rows.Scan(&msgID, &sha); err != nil {
+			return nil, fmt.Errorf("hub: hosted attachments: %w", err)
+		}
+		hosted[[2]string{msgID, sha}] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hub: hosted attachments: %w", err)
+	}
+	for _, m := range msgs {
+		for _, a := range m.Attachments {
+			k := [2]string{m.MessageID, a.SHA256}
+			if hosted[k] {
+				out[m.MessageID] = append(out[m.MessageID], a.SHA256)
+				delete(hosted, k) // listed once
+			}
+		}
+	}
+	return out, nil
+}
+
 // CanSeeBlob reports whether peerID may read blob sha through its bearer
 // (PROTOCOL §2.7, §16.3): some message referencing sha (blob_refs) must be
 // visible to peerID under the ThreadMessages rules. Per-recipient blob_url

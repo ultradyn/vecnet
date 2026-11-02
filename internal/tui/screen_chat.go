@@ -1,16 +1,21 @@
 package tui
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"io/fs"
+	"mime"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -35,6 +40,13 @@ const (
 
 	chatSpillMeta = "vecnet.spilled"
 	chatSpillName = "message.md"
+
+	chatAttMax      = 16  // attachments the hub takes on one send
+	chatAttNameMax  = 255 // characters an attachment's name keeps
+	chatChipNameMax = 32  // cells a chip gives a name
+	// chatSpillSlot is the refusal when a long text, which the hub spills into
+	// one more attachment, would make a 17th (internal/hub/spill.go).
+	chatSpillSlot = "Remove one attachment or shorten the text: the long text needs an attachment slot."
 
 	chatIndent    = "       " // lines under a message start below its text
 	chatHold      = " "       // keeps the wrap off the styled head of a line
@@ -74,14 +86,52 @@ const (
 // chatAttempt is what was last offered to the hub. While the composer still
 // holds exactly this, a retry reuses the key: the hub replays a send it already
 // took, and a changed body under one key would be idempotency_conflict.
-type chatAttempt struct{ text, prio, reply string }
+// shas is chatShas of the chips: each attachment's wire fields, in order, so a
+// changed attachment list is a new request too (PROTOCOL §5.3).
+type chatAttempt struct{ text, prio, reply, shas string }
 
 // chatDraft is one thread's composer.
 type chatDraft struct {
 	text, reply string
+	atts        []chatAtt
 	attempt     chatAttempt
 	key         string // the key of attempt; empty when nothing is awaiting retry
 	sending     bool
+}
+
+// chatAttState is where one chip's upload stands.
+type chatAttState int
+
+const (
+	chatAttUploading chatAttState = iota
+	chatAttDone
+	chatAttFailed
+)
+
+// chatAtt is one file on a draft, shown as a chip. An upload's completion finds
+// its chip by id, never by place: :detach moves the chips after it.
+type chatAtt struct {
+	id     int
+	name   string // cleaned, at most chatAttNameMax characters
+	size   int64
+	sha    string // set once the hub has the bytes
+	media  string
+	state  chatAttState
+	err    string             // why a failed upload failed
+	cancel context.CancelFunc // stops the upload
+	read   *atomic.Int64      // bytes the upload has read, for the progress the tick draws
+}
+
+// chatCounter counts what an upload reads, from the command's goroutine.
+type chatCounter struct {
+	r io.Reader
+	n *atomic.Int64
+}
+
+func (c *chatCounter) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
 }
 
 // chatHeldMsg is a :msg that did not go, waiting for the command line.
@@ -114,9 +164,15 @@ type chatReader struct {
 type (
 	chatTickMsg struct{}
 	chatSentMsg struct {
-		thread, text string
-		result       opapi.SendResult
-		err          error
+		thread, text, shas string
+		result             opapi.SendResult
+		err                error
+	}
+	chatUploadedMsg struct {
+		thread string
+		id     int // the chip, which may have moved or gone since
+		att    envelope.Attachment
+		err    error
 	}
 	chatStartedMsg struct {
 		args    []string
@@ -179,6 +235,7 @@ type chatScreen struct {
 	openNew          string                    // a :msg thread to open once the line is free
 	msgErr           string                    // why the :msg back on the command line failed
 	heldMsgs         []chatHeldMsg             // oldest first
+	nextAtt          int                       // the last chip id given out
 }
 
 func newChatScreen() Screen {
@@ -227,6 +284,8 @@ func (s *chatScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 		s.ticking = false
 	case chatSentMsg:
 		cmd = s.onSent(msg, m)
+	case chatUploadedMsg:
+		s.onUploaded(msg, m)
 	case chatStartedMsg:
 		cmd = s.onStarted(msg, m)
 	case chatRefusedMsg:
@@ -260,6 +319,8 @@ func (s *chatScreen) register(m *Model) {
 	}
 	s.registered = true
 	m.Commands["msg"] = Command{Help: "<peer-prefix> <text>  start a new thread with that peer", Run: s.commandMsg}
+	m.Commands["attach"] = Command{Help: "[path]  add a file to the draft; ~/ expands, a run of spaces reads as one; alone, lists them", Run: s.commandAttach}
+	m.Commands["detach"] = Command{Help: "[n]  remove the nth file from the draft, or every file", Run: s.commandDetach}
 }
 
 func (s *chatScreen) arm() tea.Cmd {
@@ -507,26 +568,59 @@ func chatKey() string {
 
 func (s *chatScreen) send(m *Model, d *chatDraft) tea.Cmd {
 	id := m.CurrentThread
-	if d.sending || strings.TrimSpace(d.text) == "" {
+	if d.sending || strings.TrimSpace(d.text) == "" && len(d.atts) == 0 {
 		return nil
 	}
 	if refuseStopped(m) { // the draft stays for after a restart
 		return nil
 	}
-	attempt := chatAttempt{text: d.text, prio: m.Prio, reply: d.reply}
+	for i, att := range d.atts {
+		switch att.state {
+		case chatAttUploading:
+			m.Toast("wait: "+att.name+" is still uploading", true)
+			return nil
+		case chatAttFailed:
+			m.Toast(fmt.Sprintf("%s did not upload: :detach %d removes it", att.name, i+1), true)
+			return nil
+		}
+	}
+	if len(d.atts) >= chatAttMax && len(d.text) > chatSpillAt {
+		m.Toast(chatSpillSlot, true)
+		return nil
+	}
+	attempt := chatAttempt{text: d.text, prio: m.Prio, reply: d.reply, shas: chatShas(d.atts)}
 	if d.key == "" || d.attempt != attempt {
 		d.key = chatKey()
 	}
 	d.attempt, d.sending = attempt, true
 	req := envelope.SendRequest{IdempotencyKey: d.key, ThreadID: &id, Priority: attempt.prio, Content: envelope.SendContent{Text: attempt.text}}
+	for _, att := range d.atts {
+		req.Attachments = append(req.Attachments, envelope.Attachment{SHA256: att.sha, Size: att.size, MediaType: att.media, Name: att.name})
+	}
 	if attempt.reply != "" {
 		req.InReplyTo = &attempt.reply
 	}
 	api, ctx := m.API, m.ctx
 	return func() tea.Msg {
 		r, err := api.Send(ctx, req)
-		return chatSentMsg{thread: id, text: attempt.text, result: r, err: err}
+		return chatSentMsg{thread: id, text: attempt.text, shas: attempt.shas, result: r, err: err}
 	}
+}
+
+// chatShas is the attempt's view of the chips: every wire field of each done
+// chip, in order, so the same bytes under another name or media type are a
+// new request and mint a new key (PROTOCOL §5.3). A chip still uploading
+// stands in by its id, so adding one during a send is a change, though it
+// has no hash. Quoting keeps one chip's fields from running into the next.
+func chatShas(atts []chatAtt) string {
+	parts := make([]string, len(atts))
+	for i, att := range atts {
+		parts[i] = fmt.Sprintf("%s %d %q %q", att.sha, att.size, att.media, att.name)
+		if att.state != chatAttDone {
+			parts[i] = "chip:" + strconv.Itoa(att.id)
+		}
+	}
+	return strings.Join(parts, ",")
 }
 
 func (s *chatScreen) onSent(msg chatSentMsg, m *Model) tea.Cmd {
@@ -539,6 +633,9 @@ func (s *chatScreen) onSent(msg chatSentMsg, m *Model) tea.Cmd {
 	d.key = ""
 	if d.text == msg.text { // what was typed meanwhile stays a draft
 		d.text, d.reply = "", ""
+	}
+	if chatShas(d.atts) == msg.shas { // so do files added or removed meanwhile
+		d.atts = nil
 	}
 	if msg.thread == m.CurrentThread {
 		s.follow = true
@@ -594,10 +691,242 @@ func chatSendWhy(m *Model, id string, err error) string {
 		if after, ok := e.Details["retry_after_seconds"].(float64); ok {
 			return fmt.Sprintf("%s: %s (retry after %.0fs)", e.Code, e.Message, after)
 		}
+	case e.Code == "payload_too_large" && e.Details["field"] == "attachments":
+		return chatSpillSlot
 	case e.Code == "":
 		return e.Error()
 	}
 	return e.Code + ": " + e.Message
+}
+
+// chatUploadWhy is what a chip says about a failed upload.
+func chatUploadWhy(m *Model, err error) string {
+	var e *opclient.Error
+	switch {
+	case !errors.As(err, &e):
+		return err.Error()
+	case e.Code == "blob_too_large":
+		limit := int64(chatBlobMax) // a hub that leaves out the limit has §2.7's
+		if v, ok := e.Details["limit"].(float64); ok && v > 0 {
+			limit = int64(v)
+		}
+		return "too large, the hub's limit is " + chatSize(limit)
+	case e.Code == "upload_quota_exceeded":
+		if after, ok := e.Details["retry_after_seconds"].(float64); ok {
+			at := m.Now().Add(time.Duration(after) * time.Second).In(m.loc).Format("15:04")
+			return fmt.Sprintf("%s: %s (retry after %.0fs, at %s)", e.Code, e.Message, after, at)
+		}
+	case e.Code == "":
+		return e.Error()
+	}
+	return e.Code + ": " + e.Message
+}
+
+// commandAttach is :attach PATH, which adds a chip to the open thread's draft
+// and uploads at once, or :attach alone, which lists the chips. The path is the
+// arguments joined by single spaces, since the command line splits on runs of
+// whitespace, with a leading ~/ expanded. Every refusal comes before any upload
+// and leaves the draft as it was.
+func (s *chatScreen) commandAttach(m *Model, args []string) tea.Cmd {
+	id := m.CurrentThread
+	if id == "" {
+		m.Toast("no thread open: open one, then :attach", true)
+		return nil
+	}
+	d := s.draft(id)
+	if len(args) == 0 {
+		m.Toast(chatAttList(d.atts), false)
+		return nil
+	}
+	if refuseStopped(m) {
+		return nil
+	}
+	if len(d.atts) >= chatAttMax {
+		m.Toast(fmt.Sprintf("attach: at most %d attachments per message", chatAttMax), true)
+		return nil
+	}
+	path := strings.Join(args, " ")
+	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			m.Toast("attach: cannot expand ~/: "+err.Error(), true)
+			return nil
+		}
+		path = filepath.Join(home, rest)
+	}
+	// Stat before open: opening a fifo would block the program's goroutine.
+	st, err := os.Stat(path)
+	if why := chatAttRefusal(path, st, err); why != "" {
+		m.Toast(why, true)
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		m.Toast("attach: "+err.Error(), true)
+		return nil
+	}
+	// The open file is what uploads, so it is what the checks see.
+	st, err = f.Stat()
+	if why := chatAttRefusal(path, st, err); why != "" {
+		_ = f.Close()
+		m.Toast(why, true)
+		return nil
+	}
+	s.nextAtt++
+	ctx, cancel := context.WithCancel(m.ctx)
+	att := chatAtt{id: s.nextAtt, name: chatAttName(path), size: st.Size(), media: chatMediaType(path), cancel: cancel, read: new(atomic.Int64)}
+	d.atts = append(d.atts, att)
+	api := m.API
+	return func() tea.Msg {
+		defer cancel()
+		defer f.Close()
+		up, err := api.Upload(ctx, &chatCounter{r: f, n: att.read}, att.size, att.media, att.name)
+		return chatUploadedMsg{thread: id, id: att.id, att: up, err: err}
+	}
+}
+
+// chatAttRefusal is why a path cannot be attached, or "" when it can.
+func chatAttRefusal(path string, st fs.FileInfo, err error) string {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "attach: no such file: " + path
+	case err != nil:
+		return "attach: " + err.Error()
+	case st.IsDir():
+		return "attach: " + path + " is a directory"
+	case !st.Mode().IsRegular():
+		return "attach: " + path + " is not a regular file"
+	case st.Size() > chatBlobMax:
+		return fmt.Sprintf("attach: %s is %s, over the 25 MiB limit", chatAttName(path), chatSize(st.Size()))
+	}
+	return ""
+}
+
+// chatAttName is the file's own name, cleaned and cut to chatAttNameMax
+// characters.
+func chatAttName(path string) string {
+	name := Clean(filepath.Base(path))
+	if r := []rune(name); len(r) > chatAttNameMax {
+		name = string(r[:chatAttNameMax])
+	}
+	if name == "" {
+		return "file"
+	}
+	return name
+}
+
+// chatMediaType is cli.mediaTypeOf's rule, which tui cannot import: the
+// extension's type without parameters, else application/octet-stream. The
+// content is never sniffed.
+func chatMediaType(path string) string {
+	mt := mime.TypeByExtension(filepath.Ext(path))
+	if mt == "" {
+		return "application/octet-stream"
+	}
+	if base, _, err := mime.ParseMediaType(mt); err == nil {
+		return base
+	}
+	return mt
+}
+
+// chatAttList is the toast :attach alone shows.
+func chatAttList(atts []chatAtt) string {
+	if len(atts) == 0 {
+		return "no attachments in this draft"
+	}
+	items := make([]string, len(atts))
+	for i := range atts {
+		items[i] = fmt.Sprintf("%d %s", i+1, atts[i].chip(chatAttNameMax))
+	}
+	return "attachments: " + strings.Join(items, ", ")
+}
+
+// chip is the chip's text, ASCII apart from the name, with the name cut to
+// nameMax cells.
+func (a *chatAtt) chip(nameMax int) string {
+	name := ansi.Truncate(a.name, nameMax, "...")
+	switch a.state {
+	case chatAttDone:
+		return "[+] " + name + " " + chatSize(a.size)
+	case chatAttFailed:
+		return "[x] " + name + ": " + a.err
+	}
+	pct := int64(0)
+	if a.size > 0 {
+		pct = min(a.read.Load()*100/a.size, 99) // 100 only once the hub has answered
+	}
+	return fmt.Sprintf("[..] %s %d%%", name, pct)
+}
+
+func (a *chatAtt) style() lipgloss.Style {
+	switch a.state {
+	case chatAttDone:
+		return styleGood
+	case chatAttFailed:
+		return styleBad
+	}
+	return styleWarn
+}
+
+// onUploaded lands an upload on its chip, if the chip is still there.
+func (s *chatScreen) onUploaded(msg chatUploadedMsg, m *Model) {
+	d := s.drafts[msg.thread]
+	if d == nil {
+		return
+	}
+	i := slices.IndexFunc(d.atts, func(a chatAtt) bool { return a.id == msg.id })
+	if i < 0 {
+		return // detached while it was on its way
+	}
+	att := &d.atts[i]
+	if msg.err != nil {
+		if isStatus(msg.err, 401) {
+			m.reject(msg.err)
+		}
+		// The hub's (or a proxy's) error text is untrusted: cleaned before
+		// it reaches lipgloss.
+		att.state, att.err = chatAttFailed, Clean(chatUploadWhy(m, msg.err))
+		m.Toast(fmt.Sprintf("upload of %s failed: %s; :detach %d removes it", att.name, att.err, i+1), true)
+		return
+	}
+	att.state, att.sha, att.size, att.media = chatAttDone, msg.att.SHA256, msg.att.Size, msg.att.MediaType
+}
+
+// commandDetach is :detach N, which removes the Nth chip (from 1) and stops its
+// upload, or :detach alone, which removes them all.
+func (s *chatScreen) commandDetach(m *Model, args []string) tea.Cmd {
+	id := m.CurrentThread
+	if id == "" {
+		m.Toast("no thread open", true)
+		return nil
+	}
+	d := s.draft(id)
+	if len(args) > 1 {
+		return usage(m, "detach")
+	}
+	if len(d.atts) == 0 {
+		m.Toast("the draft has no attachments", true)
+		return nil
+	}
+	if len(args) == 0 {
+		for _, att := range d.atts {
+			att.cancel()
+		}
+		n := len(d.atts)
+		d.atts = nil
+		m.Toast(fmt.Sprintf("detached %d attachments", n), false)
+		return nil
+	}
+	n, err := strconv.Atoi(args[0])
+	if err != nil || n < 1 || n > len(d.atts) {
+		m.Toast(fmt.Sprintf("no attachment %s: the draft has %d", args[0], len(d.atts)), true)
+		return nil
+	}
+	att := d.atts[n-1]
+	att.cancel()
+	d.atts = slices.Delete(d.atts, n-1, n)
+	m.Toast("detached "+att.name, false)
+	return nil
 }
 
 // commandMsg is :msg <peer-prefix> <text>. The prefix matches a peer's name,
@@ -963,13 +1292,54 @@ func (s *chatScreen) View(m *Model, w, h int) string {
 		return s.viewReader(w, h)
 	}
 	paneH := h - 1
+	chips := s.viewChips(m, w)
+	if chips != "" {
+		paneH-- // the panes give the chip row theirs
+	}
 	listW := min(max(w*25/140, 14), 30)
 	whoW := min(max(w*30/140, 22), 34)
 	logW := w - listW - whoW
 	list := Pane("threads [ ]", listW, paneH, false, s.viewList(m, listW-2, paneH-2))
 	log := Pane(chatLogTitle(m, logW), logW, paneH, true, s.viewLog(m, st, logW-2, paneH-2))
 	who := Pane("who", whoW, paneH, false, s.viewWho(m, st, whoW-2, paneH-2))
-	return lipgloss.JoinHorizontal(lipgloss.Top, list, log, who) + "\n" + s.viewComposer(m, st, w)
+	out := lipgloss.JoinHorizontal(lipgloss.Top, list, log, who) + "\n"
+	if chips != "" {
+		out += chips + "\n"
+	}
+	return out + s.viewComposer(m, st, w)
+}
+
+// viewChips is the row above the composer, while the draft has attachments.
+// Chips that do not fit give way to a count.
+func (s *chatScreen) viewChips(m *Model, w int) string {
+	d := s.drafts[m.CurrentThread]
+	if m.CurrentThread == "" || d == nil || len(d.atts) == 0 {
+		return ""
+	}
+	const gap = "  "
+	var b strings.Builder
+	used := 0
+	for i := range d.atts {
+		text := d.atts[i].chip(chatChipNameMax)
+		sep := ""
+		if i > 0 {
+			sep = gap
+		}
+		more := "" // the count the rest would need, should they not fit
+		if i < len(d.atts)-1 {
+			more = fmt.Sprintf("%s+%d more", gap, len(d.atts)-i-1)
+		}
+		if used+len(sep)+lipgloss.Width(text)+len(more) > w {
+			if i > 0 {
+				b.WriteString(styleMuted.Render(fmt.Sprintf("%s+%d more", gap, len(d.atts)-i)))
+				break
+			}
+			text = ansi.Truncate(text, max(w-len(more), 1), "...")
+		}
+		b.WriteString(sep + d.atts[i].style().Render(text))
+		used += len(sep) + lipgloss.Width(text)
+	}
+	return fit(b.String(), w)
 }
 
 // chatRowOf is the freshest row held for a thread.

@@ -1,4 +1,5 @@
 // Pure thread logic: what each message renders as. No DOM, no clock.
+import { SPILL_SLOT } from './attach-model.js';
 
 export const SPILL_BYTES = 4096, TEXT_CAP = 65536;
 // Show full text reads at most this much, and only text/* (PROTOCOL §2.7).
@@ -120,8 +121,27 @@ export function sendError(e) {
   const status = e && e.status, code = (e && e.code) || 'error', message = (e && e.message) || '';
   const keepKey = !status || status >= 500 || status === 429;
   if (code === 'thread_budget_exhausted') return { ...budgetBanner(), keepKey };
+  // The spilled message.md needs an attachment slot (internal/hub/spill.go).
+  if (status === 413 && code === 'payload_too_large' && e.details && e.details.field === 'attachments') return { kind: 'error', keepKey, text: SPILL_SLOT };
   let text = code + ': ' + message;
   const retry = e && e.details && e.details.retry_after_seconds;
   if (code === 'rate_limited' && Number.isFinite(retry)) text += ' (retry after ' + retry + ' s)';
   return { kind: 'error', keepKey, text };
+}
+
+// replySig is the attachments' part of a reply's signature: every wire field
+// of each attachment, in order. The sha256s alone (attach-model signature())
+// would keep the key when a chip is replaced by the same bytes under another
+// name or media type, and the hub refuses that changed body under the old key
+// as 409 idempotency_conflict (PROTOCOL §5.3).
+export function replySig(files) {
+  return JSON.stringify((files || []).map(a => [a.sha256, a.size, a.media_type, a.name ?? null]));
+}
+
+// replyKey is the reply's pending send: the same one, idempotency key and all,
+// while its text, priority, target and attachments' signature are unchanged
+// (PROTOCOL §5.3), else a new one under a fresh key from mint.
+export function replyKey(pending, { text, prio, replyTo, sig }, mint) {
+  if (pending && pending.text === text && pending.prio === prio && pending.replyTo === replyTo && pending.sig === sig) return pending;
+  return { key: mint(), text, prio, replyTo, sig };
 }

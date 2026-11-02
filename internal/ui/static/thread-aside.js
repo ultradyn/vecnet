@@ -58,7 +58,7 @@ export function mountAside(root, ctx) {
     try {
       const blob = await api.blob(f.sha256);
       if (gone) return;
-      const url = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(new Blob([blob], { type: 'application/octet-stream' }));
       urls.add(url);
       const a = h('a', { href: url, download: f.download, hidden: true });
       document.body.append(a);

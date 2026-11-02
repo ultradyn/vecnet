@@ -116,7 +116,6 @@ try {
     await page.locator('.msg .txt', { hasText: freshText }).waitFor();
     await page.unroute(historyURL);
     assert(await page.locator('.composer .to').isHidden(), 'history reload restored the dismissed reply target');
-    await shot('07-shell-dismissed');
     await page.locator('.msg', { hasText: 'Classifier checks passed.' }).getByRole('button', { name: 'reply' }).click();
     await page.locator('.composer .to', { hasText: 'Classifier checks passed.' }).waitFor();
     const reply = 'Thanks, shipping the shell.';

@@ -448,3 +448,67 @@ func TestBlobTokenDiesWithItsRecipient(t *testing.T) {
 		t.Fatalf("GET blob_url after disabling its recipient = %d %s, want 403", resp.StatusCode, raw)
 	}
 }
+
+func TestOperatorAttachmentOnlySend(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("session", "recipient")
+	// Establish a thread, then address the attachment-only send to that thread.
+	first := mustSend(t, env, secret, req("start-thread", env.OperatorPeer))
+	sha := putBlob(t, env, env.OperatorSecret, "abc")
+	body := req("attachment-only")
+	body["thread_id"] = first.ThreadID
+	delete(body, "recipients")
+	body["content"] = map[string]any{"text": ""}
+	body["attachments"] = []envelope.Attachment{{SHA256: sha, Size: 3, MediaType: "text/plain", Name: "note.txt"}}
+	sent := mustSend(t, env, env.OperatorSecret, body)
+	m := onlyDelivery(t, env, peer)
+	if m.MessageID != sent.MessageID || m.ThreadID != first.ThreadID || m.Content.Text != "" || m.Content.Truncated {
+		t.Fatalf("attachment-only message = %+v", m)
+	}
+	if len(m.Attachments) != 1 {
+		t.Fatalf("attachments = %+v, want one", m.Attachments)
+	}
+	att := m.Attachments[0]
+	if att.SHA256 != sha || att.Size != 3 || att.MediaType != "text/plain" || att.Name != "note.txt" {
+		t.Fatalf("attachment = %+v", att)
+	}
+	gotSHA, token := blobToken(t, env, att.BlobURL)
+	if gotSHA != sha || token == "" {
+		t.Fatalf("blob_url = %q, want uploaded hash and read token", att.BlobURL)
+	}
+	resp, raw := env.Do("", "GET", strings.TrimPrefix(att.BlobURL, env.URL), nil)
+	if resp.StatusCode != http.StatusOK || string(raw) != "abc" {
+		t.Fatalf("GET blob_url = %d %q, want 200 abc", resp.StatusCode, raw)
+	}
+}
+
+func TestFifteenAttachmentsPlusSpill(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "sender")
+	peer, _ := env.NewPeer("session", "recipient")
+	sha := putBlob(t, env, secret, "abc")
+	atts := make([]envelope.Attachment, 15)
+	for i := range atts {
+		atts[i] = envelope.Attachment{SHA256: sha, Size: 3, MediaType: "text/plain", Name: "note.txt"}
+	}
+	long := strings.Repeat("x", 5000)
+	body := req("fifteen-plus-spill", peer)
+	body["content"] = map[string]any{"text": long}
+	body["attachments"] = atts
+	if sent := mustSend(t, env, secret, body); !sent.Spilled {
+		t.Fatal("5000-byte text did not spill")
+	}
+	m := onlyDelivery(t, env, peer)
+	if len(m.Attachments) != 16 || !m.Content.Truncated {
+		t.Fatalf("got %d attachments, truncated=%v; want 16, true", len(m.Attachments), m.Content.Truncated)
+	}
+	for i, att := range m.Attachments[:15] {
+		if att.SHA256 != sha || att.Size != 3 || att.MediaType != "text/plain" || att.Name != "note.txt" || att.BlobURL == "" {
+			t.Fatalf("attachment %d = %+v", i, att)
+		}
+	}
+	spill := m.Attachments[15]
+	if spill.SHA256 != shaHex(long) || spill.Size != 5000 || spill.MediaType != "text/markdown" || spill.Name != "message.md" || spill.BlobURL == "" {
+		t.Fatalf("last attachment = %+v, want the spill", spill)
+	}
+}

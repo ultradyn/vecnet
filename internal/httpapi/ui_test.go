@@ -306,3 +306,18 @@ func TestUIUnderSizeCap(t *testing.T) {
 		t.Fatalf("UI is %d bytes, want at most %d", total, uiMaxBytes)
 	}
 }
+
+// Pin the complete policy: blob URLs are allowed only for image thumbnails.
+func TestCSPAllowsBlobImagesOnly(t *testing.T) {
+	env := testhub.Start(t)
+	resp, _ := env.Do("", "GET", "/ui/", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /ui/ = %d, want 200", resp.StatusCode)
+	}
+	const want = "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; " +
+		"img-src 'self' data: blob:; font-src 'self'; object-src 'none'; base-uri 'none'; " +
+		"form-action 'self'; frame-ancestors 'none'"
+	if got := resp.Header.Get("Content-Security-Policy"); got != want {
+		t.Fatalf("CSP = %q, want %q", got, want)
+	}
+}

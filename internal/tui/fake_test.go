@@ -2,7 +2,10 @@ package tui
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -39,9 +42,17 @@ type fakeAPI struct {
 	counters map[string]int
 	sent     []envelope.SendRequest
 	blob     []byte
+	uploads  []fakeUpload // uploads whose bytes the fake read in full
 
 	// tail replaces the default Tail, which reports live and blocks.
 	tail func(ctx context.Context, handle func(opclient.Batch) error, status func(string)) error
+}
+
+// fakeUpload is one upload the fake took, with the bytes it read.
+type fakeUpload struct {
+	name, media string
+	size        int64
+	data        []byte
 }
 
 func newFake() *fakeAPI {
@@ -154,6 +165,35 @@ func (f *fakeAPI) SetPresence(ctx context.Context, _ string, _ time.Time) error 
 func (f *fakeAPI) Blob(ctx context.Context, _ string, _ int64) ([]byte, string, error) {
 	return f.blob, "application/octet-stream", f.hit(ctx, "Blob")
 }
+
+// Upload waits on gate["Upload"] before reading, so a held upload has read
+// nothing, and answers with the sha256 of what it read.
+func (f *fakeAPI) Upload(ctx context.Context, r io.Reader, size int64, mediaType, name string) (envelope.Attachment, error) {
+	if err := f.hit(ctx, "Upload"); err != nil {
+		return envelope.Attachment{}, err
+	}
+	// hit's select picks at random when the gate opens after a cancel: a
+	// cancelled upload never reads, whichever case won.
+	if err := ctx.Err(); err != nil {
+		return envelope.Attachment{}, err
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return envelope.Attachment{}, err
+	}
+	f.mu.Lock()
+	f.uploads = append(f.uploads, fakeUpload{name: name, media: mediaType, size: size, data: data})
+	f.mu.Unlock()
+	sum := sha256.Sum256(data)
+	return envelope.Attachment{SHA256: hex.EncodeToString(sum[:]), Size: int64(len(data)), MediaType: mediaType, Name: name}, nil
+}
+
+func (f *fakeAPI) uploaded() []fakeUpload {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeUpload(nil), f.uploads...)
+}
+
 func (f *fakeAPI) Tail(ctx context.Context, handle func(opclient.Batch) error, status func(string)) error {
 	f.mu.Lock()
 	f.calls["Tail"]++
