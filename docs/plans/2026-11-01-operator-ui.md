@@ -17,7 +17,7 @@
 Every task starts the moment its dependencies are merged. There are no levels or groups.
 
 ```json
-{"1":[],"2":[],"3":[1],"4":[1],"5":[1],"6":[1],"7":[1,2],"8":[3,7],"9":[4,7],"10":[4,7],"11":[4,7],"12":[4,5,7],"13":[3,6,7],"14":[3,7],"15":[7],"16":[1],"17":[2,16],"18":[3,17],"19":[4,17],"20":[4,5,17],"21":[6,17],"22":[17],"23":[8,9,10,11,12,13,14,15,18,19,20,21,22]}
+{"1":[],"2":[],"3":[1],"4":[1],"5":[1],"6":[1],"7":[1,2],"8":[3,7],"9":[4,7],"10":[4,7],"11":[4,7],"12":[4,5,7],"13":[3,6,7],"14":[3,7],"15":[7],"16":[1],"17":[2,16],"18":[3,17],"19":[4,17],"20":[4,5,17],"21":[6,17],"22":[17],"23":[8,9,10,11,12,13,14,15,18,19,20,21,22,24],"24":[7,12,18]}
 ```
 
 Build settings: `taskPrefix: "oui"`, worktree `.worktrees/operator-ui`, branch `operator-ui` off `master`, status files in `.scratch/vecnet/build-operator-ui/` (gitignored by Task 2's first commit; the coordinator adds the line first if it starts before Task 2).
@@ -69,6 +69,7 @@ Build settings: `taskPrefix: "oui"`, worktree `.worktrees/operator-ui`, branch `
 | `internal/tui/screen_dash.go` | stub by 17, then Task 20 |
 | `internal/tui/screen_subs.go` | stub by 17, then Task 21 |
 | `internal/tui/cmdline.go` | stub by 17, then Task 22 |
+| Task 24 (after all its owners merged): `operator_view` across `internal/hub/`, `internal/opapi/tags.go`, `store.js` `tagsFor`, `docs/PROTOCOL.md` §2.13 row, both schema files, the TUI inbox header, `scripts/ui/dash.mjs:32` | Task 24 |
 
 Stub files exist from Tasks 1, 7 and 17 so that later tasks edit only files they own and worktrees merge without conflicts. A task that needs a neighbour calls its stub's agreed export; it does not edit the neighbour's file.
 
@@ -946,7 +947,7 @@ func TestHelpGolden(t *testing.T) { /* overlay at 140x42 */ }
 
 ### Task 23: Two-client journey, docs, final gate
 
-**Depends:** 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20, 21, 22
+**Depends:** 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20, 21, 22, 24
 
 **Files:**
 - Create: `docs/OPERATOR.md`, `docs/plans/shots/oui/README.md`, `scripts/ui/journey.mjs`
@@ -985,6 +986,64 @@ build2 node scripts/ui/journey.mjs
 Expected: suites `ok`, `gofmt` silent, `isa-check` prints 0 for both, both `grep -c` print 0, the `not_implemented` grep prints nothing, every PNG listed in the README exists.
 
 - [ ] **Step 3:** Commit `docs: operator guide, journey check, shot index`
+
+---
+
+### Task 24: Operator self-invalidation across clients
+
+**Depends:** 7, 12, 18
+
+Added 2026-11-02 after Task 23's journey failed. Hub fan-out reaches other peers, never the operator's own event log. So when one operator client answers an approval, reads a thread, sends, or changes presence, a second client signed in as the same operator never learns of it: approval answers go to the requester (`hub/send.go`), read receipts go to the sender (`hub/receipts.go`), and presence goes to subscribers other than the actor (`hub/presence.go` `presenceSubscribers`). The TUI also shows no unread total. This task adds one operator-only event type and the TUI unread total, so Task 23's journey can pass without polling, reloads or weakened assertions.
+
+**Files:**
+- Create: `internal/hub/operator_view.go`, `internal/hub/operator_view_test.go`
+- Modify: `internal/hub/send.go`, `internal/hub/receipts.go`, `internal/hub/presence.go`, the hub functions behind `POST /v1/admin/dead-letters/{dly}/retry|discard` and `POST /v1/admin/subscriptions/{id}/pause|resume`, `docs/PROTOCOL.md` (§2.3 event list if it enumerates types, §2.13 table), `docs/protocol/envelope.schema.json` and `internal/envelope/schema.json` (identical edit: add `operator_view` to the event `type` enum and to the `data` description), `internal/opapi/tags.go`, `internal/opapi/tags_test.go`, `internal/ui/static/store.js`, `internal/ui/jstest/store.test.mjs`, `internal/tui/screen_inbox.go` and its test (unread total, raw-log line), `scripts/ui/dash.mjs:32`
+- This task, like Task 1, edits `docs/PROTOCOL.md`; it touches only the lines named here.
+
+**Interfaces:**
+- Event `operator_view`, data `{reason, thread_id}`. `reason` is one of `sent`, `read`, `presence`, `dead_letter`, `subscription`. `thread_id` is a `thr_` id or `null`.
+- `func (h *Hub) noteOperatorView(ctx context.Context, tx *sql.Tx, reason string, threadID string) ([]string, error)` appends one `operator_view` Event to the log of every enabled peer of kind `operator` inside the caller's transaction (empty `threadID` → `null`). It returns those peer ids, so the caller calls `h.Log.Notify` for each one after commit, the way the existing fan-out does.
+- When it fires, in the same transaction as the change:
+  - `sent`: `Hub.Send` accepted a new message whose sender is an operator-kind peer. That includes `approval_response`. An idempotent replay does not fire.
+  - `read`: a `read` receipt changed `read_at` on a delivery whose recipient is an operator-kind peer. That covers both `POST /v1/receipts` and `POST /v1/admin/threads/{id}/read`, which uses the receipt path. An already-read delivery does not fire.
+  - `presence`: an operator-kind peer's effective presence changed. A heartbeat that re-posts the same state does not fire.
+  - `dead_letter`: retry or discard changed a delivery. `thread_id` is its thread.
+  - `subscription`: pause or resume changed a subscription. `thread_id` is `null`.
+- Invalidation, §2.13 table row and both clients: `operator_view` → `inbox`, `threads`, `peers`, plus `thread:<thread_id>` when `thread_id` is a non-empty string. As with the other types, if `data` is not an object, or `reason` is not a string, or `thread_id` is neither a string nor null, the event is inert. `opapi.Tags` (which the TUI uses through `internal/tui/data.go`) and `store.js` `tagsFor` stay mirror images.
+- Not pushable: `events/worker.go` `pushable` and the MCP events enum stay as they are. No agent peer's log ever holds an `operator_view`.
+- TUI: the inbox shows the snapshot's `unread` total in its header as `N unread` (`0 unread` when none), and the raw event log renders `operator_view` as `<reason>` plus the short thread id when there is one.
+- `scripts/ui/dash.mjs:32`: the `Subscriptions` locator matches more than one element once the journey's extra state exists. Scope it to the dashboard section's heading (`getByRole('heading', { name: 'Subscriptions', exact: true })` or within the section), with no other change to Task 12's script.
+
+- [ ] **Step 1: Write the failing tests**
+
+```go
+func TestOperatorViewOnOperatorSend(t *testing.T)            // operator sends approval_response → operator log gains {reason:"sent", thread_id}; replay of same idempotency key adds none
+func TestOperatorViewOnRead(t *testing.T)                    // MarkThreadRead with 2 unread → 2 "read" events on the operator log; repeat call → none
+func TestOperatorViewOnPresenceChangeOnly(t *testing.T)      // idle→working fires once; working→working (heartbeat) fires none
+func TestOperatorViewDeadLetterAndSubscription(t *testing.T) // retry and resume each fire once with the stated thread_id
+func TestOperatorViewNeverReachesAgents(t *testing.T)        // after all of the above, no agent peer's log holds operator_view
+func TestTagsOperatorView(t *testing.T)                      // {reason:"read",thread_id:"thr_x"} → inbox, threads, peers, thread:thr_x; thread_id null → first three; reason 7 → none; data "x" → none
+```
+
+```js
+test('tagsFor operator_view mirrors opapi.Tags')  // the same four cases as TestTagsOperatorView
+```
+
+TUI test: an inbox snapshot with `unread: 3` renders `3 unread` in the header; `unread: 0` renders `0 unread`.
+
+- [ ] **Step 2: Run them and see them fail**
+
+Run: `build2 go test -p 2 ./internal/hub/ ./internal/opapi/ ./internal/tui/ -run 'OperatorView|Tags|Unread'` and `build2 node --test --test-concurrency=2 internal/ui/jstest/store.test.mjs`
+Expected: FAIL (no `operator_view`, no unread header).
+
+- [ ] **Step 3: Implement** the helper, the five call sites, the table row in both clients, the schema enum in both files, the TUI header and log line, and the `dash.mjs` locator.
+
+- [ ] **Step 4: Verify**
+
+Run: `build2 go test -p 2 ./...`, `build2 node --test --test-concurrency=2 internal/ui/jstest/`, `just validate-protocol`, `build2 node scripts/ui/dash.mjs`, `build2 node scripts/ui/tui-inbox.mjs` (with `SHOTS_DIR` set to a scratch dir, so committed PNGs stay unchanged unless the header change is meant to show; if `18-*` shots change because of the unread header, re-shoot and inspect them).
+Expected: all pass, `validate-protocol` prints no drift.
+
+- [ ] **Step 5: Commit** `feat: operator_view events keep a second operator client in step`
 
 ---
 

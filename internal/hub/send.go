@@ -517,6 +517,13 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 		map[string]any{"ingress": ingress, "deliveries": len(targets), "new_thread": thr.isNew}); err != nil {
 		return nil, false, nil, err
 	}
+	if snd.kind == "operator" {
+		operators, err := h.noteOperatorView(ctx, tx, "sent", thr.ID)
+		if err != nil {
+			return nil, false, nil, err
+		}
+		notify = append(notify, operators...)
+	}
 	return resp, false, notify, nil
 }
 

@@ -44,13 +44,34 @@ func Excerpt(m envelope.Message) string {
 func Tags(ev envelope.Event) []string {
 	empty := []string{}
 	switch ev.Type {
-	case "delivery", "receipt", "thread_updated", "presence", "directory_updated", "approval_expired":
+	case "delivery", "receipt", "thread_updated", "presence", "directory_updated", "approval_expired", "operator_view":
 	default:
 		return empty
 	}
 	raw := bytes.TrimSpace(ev.Data)
 	if len(raw) == 0 || raw[0] != '{' {
 		return empty
+	}
+	if ev.Type == "operator_view" {
+		// Match the web client's exact field names; struct decoding also accepts
+		// alternate casing, which can hide missing or malformed wire fields.
+		var data map[string]json.RawMessage
+		if json.Unmarshal(raw, &data) != nil {
+			return empty
+		}
+		var reason *string
+		if json.Unmarshal(data["reason"], &reason) != nil || reason == nil {
+			return empty
+		}
+		var thread *string
+		if json.Unmarshal(data["thread_id"], &thread) != nil {
+			return empty
+		}
+		tags := []string{"inbox", "threads", "peers"}
+		if thread != nil && *thread != "" {
+			tags = append(tags, "thread:"+*thread)
+		}
+		return tags
 	}
 	var data struct {
 		ThreadID string `json:"thread_id"`

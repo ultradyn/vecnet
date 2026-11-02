@@ -520,3 +520,20 @@ test('a loaded snapshot that carries now moves the hub clock', async () => {
   await resource.reload();
   assert.equal(store.hubNow(), Date.parse('2026-11-02T10:00:00.000Z'));
 });
+
+test('tagsFor operator_view mirrors opapi.Tags', () => {
+  for (const [data, want] of [
+    [{ reason: 'read', thread_id: 'thr_x' }, ['inbox', 'threads', 'peers', 'thread:thr_x']],
+    [{ reason: 'presence', thread_id: null }, ['inbox', 'threads', 'peers']],
+    [{ reason: 'sent', thread_id: '' }, ['inbox', 'threads', 'peers']],
+    [{ reason: 7, thread_id: 'thr_x' }, []],
+    [{ reason: null, thread_id: null }, []],
+    [{ reason: null, Reason: 'read', thread_id: null }, []],
+    [{ Reason: 'read', thread_id: null }, []],
+    [{ reason: 'read', THREAD_ID: null }, []],
+    [{ thread_id: null }, []],
+    [{ reason: 'read' }, []],
+    [{ reason: 'read', thread_id: 7 }, []],
+    ['x', []],
+  ]) assert.deepEqual(tagsFor({ type: 'operator_view', data }), want, JSON.stringify(data));
+});

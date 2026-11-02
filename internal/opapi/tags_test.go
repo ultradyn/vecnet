@@ -128,3 +128,27 @@ func TestWireSlicesNeverNull(t *testing.T) {
 		}
 	}
 }
+
+func TestTagsOperatorView(t *testing.T) {
+	for _, tc := range []struct {
+		data string
+		want []string
+	}{
+		{`{"reason":"read","thread_id":"thr_x"}`, []string{"inbox", "threads", "peers", "thread:thr_x"}},
+		{`{"reason":"presence","thread_id":null}`, []string{"inbox", "threads", "peers"}},
+		{`{"reason":"sent","thread_id":""}`, []string{"inbox", "threads", "peers"}},
+		{`{"reason":7,"thread_id":"thr_x"}`, []string{}},
+		{`{"reason":null,"thread_id":null}`, []string{}},
+		{`{"reason":null,"Reason":"read","thread_id":null}`, []string{}},
+		{`{"Reason":"read","thread_id":null}`, []string{}},
+		{`{"reason":"read","THREAD_ID":null}`, []string{}},
+		{`{"thread_id":null}`, []string{}},
+		{`{"reason":"read"}`, []string{}},
+		{`{"reason":"read","thread_id":7}`, []string{}},
+		{`"x"`, []string{}},
+	} {
+		if got := opapi.Tags(envelope.Event{Type: "operator_view", Data: json.RawMessage(tc.data)}); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.data, got, tc.want)
+		}
+	}
+}
