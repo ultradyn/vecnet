@@ -18,7 +18,7 @@
 │ e1.10406  07:41:00 group_updated     {"group_i…││ │ A thorough comparison    │
 │ e1.10407  07:41:00 directory_updated codex-har…││ │ needs a deep-research    │
 │                                                ││ │ run. That costs about    │
-│                                                ││ … 2 more lines             │
+│                                                ││ … 2 more lines in thread   │
 └────────────────────────────────────────────────┘└────────────────────────────┘
  NORMAL   a answer  r retry  x drop  p status  max@vecnet · working · prio wake 
 : command  ? help                                                               

@@ -25,9 +25,6 @@ const (
 	inboxTimeW     = 5
 	inboxTailW     = 11
 	inboxPresence  = "presence" // the lock key for the operator's own presence
-	// inboxAskLines is the most of a question the detail shows, so the question
-	// a peer writes cannot take the room the prompt needs.
-	inboxAskLines = 4
 	// inboxHintsW is the width from which the status line holds every key.
 	inboxHintsW = 120
 )
@@ -768,22 +765,27 @@ func inboxQuote(st lipgloss.Style, text string, w int) []string {
 	return lines
 }
 
-// inboxFold is cleaned text as one paragraph of at most n lines, marking a cut.
-// A peer's line breaks and padding do not survive it, so they cannot set out a
-// fake option.
-func inboxFold(text string, w, n int) (lines []string, cut bool) {
-	lines = strings.Split(ansi.Wrap(strings.Join(strings.Fields(text), " "), max(w, 1), " "), "\n")
-	if len(lines) > n {
-		lines, cut = lines[:n], true
-		lines[n-1] = ansi.Truncate(lines[n-1], max(w-1, 0), "") + "…"
+// inboxFold is cleaned text as one paragraph. A peer's line breaks and padding
+// do not survive it, so they cannot set out a fake option.
+func inboxFold(text string, w int) []string {
+	return strings.Split(ansi.Wrap(strings.Join(strings.Fields(text), " "), max(w, 1), " "), "\n")
+}
+
+// inboxFit is the first n lines of w cells, marking a cut.
+func inboxFit(lines []string, w, n int) []string {
+	if len(lines) <= n {
+		return lines
 	}
-	return lines, cut
+	lines = slices.Clone(lines[:n])
+	lines[n-1] = ansi.Truncate(lines[n-1], max(w-1, 0), "") + "…"
+	return lines
 }
 
 // inboxDetail sets out h lines of detail. fixed is what the operator acts on and
 // always shows whole; body, a peer's text, comes after it and gets what is left,
-// so nothing a peer writes can move the prompt or push it off the pane.
-func inboxDetail(fixed, body []string, h int) []string {
+// so nothing a peer writes can move the prompt or push it off the pane. where
+// finishes the marker on a cut.
+func inboxDetail(fixed, body []string, h int, where string) []string {
 	left := h - len(fixed)
 	if len(body) == 0 || left <= 0 {
 		return fixed
@@ -793,7 +795,7 @@ func inboxDetail(fixed, body []string, h int) []string {
 		left--
 	}
 	if len(body) > left {
-		more := styleMuted.Render(fmt.Sprintf("… %d more lines", len(body)-left+1))
+		more := styleMuted.Render(fmt.Sprintf("… %d more lines%s", len(body)-left+1, where))
 		body = append(body[:left-1:left-1], more)
 	}
 	return append(fixed, body...)
@@ -842,30 +844,47 @@ func (s *inboxScreen) viewApproval(a opapi.OpenApproval, peers inboxPeers, m *Mo
 	default:
 		foot = []string{expires, styleMuted.Render("press a to answer")}
 	}
-	// Every option gets an equal share of the lines the rest leaves, which the
-	// protocol's eight options and the 80x24 floor keep at one or more.
-	share := (h - len(head) - 1 - 1 - len(foot)) / max(len(a.Options), 1)
+	// What a digit sends comes first. Every option gets an equal share of the
+	// lines left beyond one for the question and one for a marker, which the
+	// protocol's eight options and the 80x24 floor keep at one or more. A wrapped
+	// line carries a gutter, so it cannot pass for the next option's label.
+	room := h - len(head) - len(foot)
+	share := max((room-2)/max(len(a.Options), 1), 1)
 	var options []string
 	for i, option := range a.Options {
-		text, _ := inboxFold(Clean(option), w-6, max(share, 1))
-		for j, line := range text {
-			label := "    "
+		for j, line := range inboxFit(inboxFold(Clean(option), w-6), w-6, share) {
+			label := "  " + styleBorder.Render("│ ")
 			if j == 0 {
 				label = styleAccent.Render(fmt.Sprintf("[%d]", i+1)) + " "
 			}
 			options = append(options, "  "+label+styleText.Render(line))
 		}
 	}
+	room -= len(options)
+	gap := []string{""}
+	if room > 2 {
+		room--
+	} else {
+		gap = nil
+	}
 	question := inboxQuestion(a)
-	ask, cut := inboxFold(Clean(question), w-2, max(min(h-len(head)-len(options)-1-len(foot), inboxAskLines), 1))
+	var body []string
+	if a.Text != question {
+		body = inboxQuote(styleText, CleanBody(a.Text), w)
+	}
+	// The question has what is left, ahead of the requester's text, less the
+	// line the marker needs if anything will not fit. The pane does not scroll,
+	// so the marker names where the rest is.
+	all := inboxFold(Clean(question), w-2)
+	shown := len(all)
+	if len(body) > 0 || shown > room {
+		shown = max(min(shown, room-1), 1)
+	}
+	ask := slices.Clone(inboxFit(all, w-2, shown))
 	for i, line := range ask {
 		ask[i] = styleAccent.Render("? " + line)
 	}
-	var body []string
-	if a.Text != question || cut {
-		body = inboxQuote(styleText, CleanBody(a.Text), w)
-	}
-	return inboxDetail(slices.Concat(head, ask, options, []string{""}, foot), body, h)
+	return inboxDetail(slices.Concat(head, ask, options, gap, foot), slices.Concat(all[shown:], body), h, " in thread")
 }
 
 func (s *inboxScreen) viewDeadLetter(d opapi.DeadLetter, peers inboxPeers, m *Model, w, h int) []string {
@@ -902,7 +921,7 @@ func (s *inboxScreen) viewDeadLetter(d opapi.DeadLetter, peers inboxPeers, m *Mo
 	if len(body) > 0 && len(excerpt) > 0 {
 		body = append(body, styleBorder.Render("│"))
 	}
-	return inboxDetail(lines, append(body, excerpt...), h)
+	return inboxDetail(lines, append(body, excerpt...), h, "")
 }
 
 func viewInboxSub(a opapi.Attention, peers inboxPeers, m *Model, w, h int) []string {
@@ -919,7 +938,7 @@ func viewInboxSub(a opapi.Attention, peers inboxPeers, m *Model, w, h int) []str
 	} else {
 		lines = append(lines, styleMuted.Render("resume would not help here"))
 	}
-	return inboxDetail(lines, inboxQuote(styleText, CleanBody(a.Summary), w), h)
+	return inboxDetail(lines, inboxQuote(styleText, CleanBody(a.Summary), w), h, "")
 }
 
 func viewInboxDelivery(d opapi.InboxDelivery, peers inboxPeers, m *Model, w, h int) []string {
@@ -937,7 +956,7 @@ func viewInboxDelivery(d opapi.InboxDelivery, peers inboxPeers, m *Model, w, h i
 		lines = append(lines, inboxField("files", fmt.Sprintf("⎘ %d", d.Attachments)))
 	}
 	lines = append(append(lines, ""), inboxPara(styleMuted, "press enter to open the thread", w)...)
-	return inboxDetail(lines, inboxQuote(styleText, CleanBody(d.Excerpt), w), h)
+	return inboxDetail(lines, inboxQuote(styleText, CleanBody(d.Excerpt), w), h, "")
 }
 
 // viewInboxLog is the newest events that fit, oldest first. Deliveries are

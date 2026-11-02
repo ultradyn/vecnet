@@ -414,6 +414,26 @@ func TestAnswerFlow(t *testing.T) {
 			t.Fatalf("answers %q", got)
 		}
 	})
+	// The plan's key is "a then a digit answers the selected approval", and the
+	// cursor lands on the next row. Each approval gets one response, through a
+	// prompt that shows that approval: nothing is carried over from the first.
+	t.Run("a repeated a,1 reaches the next approval only through its own prompt", func(t *testing.T) {
+		f := inboxSeed()
+		f.onAnswer = f.dropApproval
+		m, p := inboxLoaded(t, f, newClock())
+		p.press("a", "1")
+		p.until("the row to clear", func() bool { return !strings.Contains(plainAt(t, m, 140, 42), "weekly quota") })
+		p.idle()
+		p.press("a")
+		frame := plainAt(t, m, 140, 42)
+		inboxHas(t, frame, "? Push classifier fix", "[3] yes but no release", "answer with 1-3")
+		p.press("1")
+		p.until("the second answer", func() bool { return len(f.calls(&f.answered)) == 2 })
+		p.idle()
+		if got := f.calls(&f.answered); !slices.Equal(got, []string{"apr_1/0", "apr_2/0"}) {
+			t.Fatalf("answers %q", got)
+		}
+	})
 	t.Run("a load from before the answer cannot bring the row back", func(t *testing.T) {
 		f := inboxSeed()
 		f.readEarly = true
@@ -573,10 +593,33 @@ func TestCountdownHubClock(t *testing.T) {
 	t.Run("a fast client still answers an open approval", func(t *testing.T) {
 		clock := newClock()
 		clock.advance(time.Hour)
-		m, p := inboxLoaded(t, inboxSeed(), clock)
+		f := inboxSeed()
+		m, p := inboxLoaded(t, f, clock)
 		p.press("a")
 		if m.Mode != ModeInsert {
 			t.Fatal("an open approval was refused on the client's clock")
+		}
+		p.press("1")
+		p.until("the answer", func() bool { return len(f.calls(&f.answered)) == 1 })
+		p.idle()
+		if got := f.calls(&f.answered); !slices.Equal(got, []string{"apr_1/0"}) {
+			t.Fatalf("answers %q", got)
+		}
+	})
+	t.Run("a slow client sends nothing past the hub's expiry", func(t *testing.T) {
+		f := inboxSeed()
+		clock := newClock()
+		clock.advance(-time.Hour)
+		m, p := inboxLoaded(t, f, clock)
+		p.press("a")
+		clock.advance(12 * time.Minute)
+		p.press("1")
+		inboxQuiet(t, m)
+		if got := f.calls(&f.answered); len(got) != 0 {
+			t.Fatalf("answers %q", got)
+		}
+		if frame := plainAt(t, m, 140, 42); !strings.Contains(strings.Split(frame, "\n")[41], "expired") {
+			t.Fatalf("no refusal:\n%s", frame)
 		}
 	})
 	t.Run("the countdown runs on the hub's clock", func(t *testing.T) {
@@ -629,6 +672,25 @@ func TestCountdownHubClock(t *testing.T) {
 			t.Fatalf("no refusal:\n%s", frame)
 		}
 	})
+}
+
+func TestInboxCountdown(t *testing.T) {
+	for _, c := range []struct {
+		left time.Duration
+		want string
+	}{
+		{time.Nanosecond, "00:01"},
+		{500 * time.Millisecond, "00:01"},
+		{time.Second, "00:01"},
+		{1500 * time.Millisecond, "00:02"},
+		{59*time.Second + 500*time.Millisecond, "01:00"},
+		{59*time.Minute + 59*time.Second + 500*time.Millisecond, "1:00:00"},
+		{time.Hour + 2*time.Minute + 3*time.Second, "1:02:03"},
+	} {
+		if got := inboxCountdown(c.left); got != c.want {
+			t.Errorf("inboxCountdown(%v) = %q, want %q", c.left, got, c.want)
+		}
+	}
 }
 
 func TestDiscardNeedsConfirm(t *testing.T) {
@@ -894,7 +956,11 @@ func inboxHas(t *testing.T, frame string, wants ...string) {
 	}
 }
 
-var inboxSizes = []struct{ w, h int }{{80, 24}, {140, 42}}
+var (
+	inboxSizes = []struct{ w, h int }{{80, 24}, {140, 42}}
+	// inboxLabel is what makes a detail line read as an option.
+	inboxLabel = regexp.MustCompile(`^\s*\[\d\] `)
+)
 
 // inboxDetailLines is the text of each row of the detail pane, without its
 // border and left margin.
@@ -925,7 +991,7 @@ func TestApprovalDetailKeepsItsOptions(t *testing.T) {
 		{"body as the question", "", long, true},
 		{"padded question", forged, "short", false},
 		{"question after blank lines", strings.Repeat("\n", 40) + "Delete it?", "short", false},
-		{"long question", long, "short", false},
+		{"long question", long, "short", true},
 	}
 	for _, size := range inboxSizes {
 		for _, c := range cases {
@@ -971,7 +1037,99 @@ func TestApprovalDetailKeepsItsOptions(t *testing.T) {
 		for i, option := range options {
 			inboxHas(t, frame, fmt.Sprintf("  [%d] %s", i+1, option))
 		}
-		inboxHas(t, frame, "answer with 1-8", "expires ", "? Please read")
+		inboxHas(t, frame, "answer with 1-8", "expires ", "? Please read", "more lines in thread")
+	})
+	t.Run("a long question reads to its end, or says it does not", func(t *testing.T) {
+		const tail = "DROPSPRODUCTION"
+		ask := strings.Repeat("Run it once it has finished and everything looks right to me. ", 5) + tail
+		change := func(in *opapi.Inbox) {
+			a := &in.Approvals[0]
+			a.Question, a.Text = ask, "See the question."
+		}
+		for _, keys := range [][]string{nil, {"a"}} {
+			wide := inboxAt(t, change, rowApr1, 140, 42, keys...)
+			inboxHas(t, wide, tail, "See the question.")
+			if strings.Contains(wide, "more lines") {
+				t.Errorf("nothing was cut:\n%s", wide)
+			}
+			small := inboxAt(t, change, rowApr1, 80, 24, keys...)
+			if strings.Contains(small, tail) {
+				t.Fatalf("test needs a question that does not fit:\n%s", small)
+			}
+			inboxHas(t, small, "… ", "more lines in thread")
+		}
+	})
+	t.Run("the question does not spend the line the marker needs", func(t *testing.T) {
+		for _, text := range []string{"", "short"} {
+			frame := inboxAt(t, func(in *opapi.Inbox) {
+				a := &in.Approvals[0]
+				a.Question, a.Text = long, text
+			}, rowApr1, 140, 42)
+			inboxHas(t, frame, "more lines in thread", "  [2] no", "press a to answer")
+		}
+	})
+	t.Run("the marker counts the question's lines and the text's", func(t *testing.T) {
+		// Each word fills a line of the question at 80 columns: thirty, of which
+		// seven fit, and one line of text.
+		frame := inboxAt(t, func(in *opapi.Inbox) {
+			a := &in.Approvals[0]
+			a.Question, a.Text = strings.Repeat(strings.Repeat("w", 23)+" ", 30), "short"
+		}, rowApr1, 80, 24)
+		inboxHas(t, frame, "… 24 more lines in thread")
+	})
+	t.Run("nothing leaves the frame unmarked, whatever the question's length", func(t *testing.T) {
+		// Each word fills a line of the question at 80 columns, so every length
+		// around the lines there are is tried, the exact fit among them.
+		for _, text := range []string{"", "lasttext"} {
+			for n := 1; n <= 12; n++ {
+				words := make([]string, n)
+				for i := range words {
+					words[i] = fmt.Sprintf("%02d%s", i+1, strings.Repeat("w", 21))
+				}
+				frame := inboxAt(t, func(in *opapi.Inbox) {
+					a := &in.Approvals[0]
+					a.Question, a.Text = strings.Join(words, " "), text
+				}, rowApr1, 80, 24)
+				cut := strings.Contains(frame, "more lines in thread")
+				whole := strings.Contains(frame, "? "+words[n-1]) && strings.Contains(frame, text)
+				if cut == whole {
+					t.Errorf("%d lines, text %q: cut %v, whole %v:\n%s", n, text, cut, whole, frame)
+				}
+			}
+		}
+	})
+	t.Run("a question that is the text shows once", func(t *testing.T) {
+		frame := inboxAt(t, func(*opapi.Inbox) {}, rowApr2, 140, 42)
+		inboxHas(t, frame, "? Push classifier fix")
+		if strings.Contains(frame, "│ Push classifier fix") {
+			t.Errorf("drawn twice:\n%s", frame)
+		}
+	})
+	t.Run("more options than the schema allows do not take the screen down", func(t *testing.T) {
+		frame := inboxAt(t, func(in *opapi.Inbox) {
+			in.Approvals[0].Options = slices.Repeat([]string{"choice"}, 20)
+		}, rowApr1, 80, 24)
+		inboxHas(t, frame, "? Spend about", "[1] choice")
+	})
+	t.Run("whatever the options take, what is cut is marked", func(t *testing.T) {
+		option := strings.Repeat("x", 64)
+		for n := 1; n <= 8; n++ {
+			frame := inboxAt(t, func(in *opapi.Inbox) {
+				a := &in.Approvals[0]
+				a.Question, a.Text, a.Options = long, long, slices.Repeat([]string{option}, n)
+			}, rowApr1, 80, 24, "a")
+			inboxHas(t, frame, fmt.Sprintf("[%d] xxx", n), fmt.Sprintf("answer with 1-%d", n), "expires ", "? Please read", "more lines in thread")
+		}
+	})
+	t.Run("a wrapped option cannot read as another option", func(t *testing.T) {
+		frame := inboxAt(t, func(in *opapi.Inbox) {
+			in.Approvals[0].Options = []string{"yes, go on and delete it as planned [2] no, keep it safe", "delete now"}
+		}, rowApr1, 80, 24)
+		inboxHas(t, frame, "[1] yes, go on and", "[2] delete now", "│ [2] no, keep it safe")
+		labels := slices.DeleteFunc(inboxDetailLines(frame, 80), func(line string) bool { return !inboxLabel.MatchString(line) })
+		if len(labels) != 2 {
+			t.Errorf("%d lines read as options, want 2:\n%s", len(labels), frame)
+		}
 	})
 	t.Run("options that differ at the end stay apart", func(t *testing.T) {
 		frame := inboxAt(t, func(in *opapi.Inbox) {
@@ -1055,7 +1213,8 @@ func TestInboxHostile(t *testing.T) {
 	f.setInbox(func(in *opapi.Inbox) {
 		for i := range in.Approvals {
 			a := &in.Approvals[i]
-			a.ThreadTitle, a.Question, a.Text = hostile, hostile, hostile
+			// They differ so the detail draws both.
+			a.ThreadTitle, a.Question, a.Text = hostile, hostile+" question", hostile
 			a.Options = []string{hostile, "no"}
 		}
 		for i := range in.DeadLetters {
@@ -1122,7 +1281,9 @@ func TestPresenceToggle(t *testing.T) {
 	t.Run("the status bar moves after the write and the reload", func(t *testing.T) {
 		f := inboxSeed()
 		f.onPresence = func(state string) { f.setInbox(func(in *opapi.Inbox) { in.Me.Presence = state }) }
-		m, p := inboxLoaded(t, f, newClock())
+		clock := newClock()
+		clock.advance(5 * time.Minute) // the client's clock is not the hub's
+		m, p := inboxLoaded(t, f, clock)
 		line := func() string { return strings.Split(plainAt(t, m, 140, 42), "\n")[40] }
 		if !strings.Contains(line(), "max@vecnet · working") {
 			t.Fatalf("status: %q", line())
@@ -1195,6 +1356,7 @@ func TestPresenceHeartbeat(t *testing.T) {
 	t.Run("re-posts the hub's state, not the last one seen", func(t *testing.T) {
 		f := inboxSeed()
 		clock := newClock()
+		clock.advance(5 * time.Minute) // the client's clock is not the hub's
 		m, p := inboxLoaded(t, f, clock)
 		// The other client went idle, and no event reloaded this inbox.
 		f.setInbox(func(in *opapi.Inbox) { in.Me.Presence = "idle" })
@@ -1228,6 +1390,21 @@ func TestPresenceHeartbeat(t *testing.T) {
 		p.until("next heartbeat", func() bool { return f.count("SetPresence") == 2 })
 		p.idle()
 	})
+	for _, state := range []string{"working", "blocked"} {
+		t.Run(state+" is re-posted", func(t *testing.T) {
+			f := inboxSeed()
+			f.setInbox(func(in *opapi.Inbox) { in.Me.Presence = state })
+			clock := newClock()
+			_, p := inboxLoaded(t, f, clock)
+			clock.advance(beat)
+			p.send(tickMsg{})
+			p.until("heartbeat", func() bool { return f.count("SetPresence") == 1 })
+			p.idle()
+			if got := f.calls(&f.presence); !slices.Equal(got, []string{state}) {
+				t.Fatalf("presence %q", got)
+			}
+		})
+	}
 	for _, state := range []string{"unknown", "offline"} {
 		t.Run(state+" is never re-asserted", func(t *testing.T) {
 			f := inboxSeed()
