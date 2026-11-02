@@ -136,6 +136,12 @@ func (d *dashScreen) onKey(key string, m *Model) tea.Cmd {
 			m.Toast(row.Name+" is a source and has no threads", false)
 			return nil
 		}
+		// A stopped client sends nothing, so a narrowed pane would wait forever
+		// on a request that never starts.
+		if m.stopped() {
+			m.Toast(m.Conn+": restart with a valid profile", true)
+			return nil
+		}
 		d.peer, d.thread, d.focus = row.PeerID, "", dashOnThreads
 		d.narrow = &dashNarrow{peer: row.PeerID}
 		return d.loadNarrow(m)
@@ -702,7 +708,7 @@ func viewDashHealth(m *Model, names dashNames, w, h int) string {
 		tail = slices.Concat(cutsFailure, countersFailure, cutLines, []string{""}, counterLines)
 	}
 	title := dashTitle(m, "delivery health", "health", "cuts", "counters")
-	keep := len(cutsFailure) + len(countersFailure) + 1
+	keep := len(cutsFailure) + len(countersFailure) + min(len(cutLines), 1)
 	return Pane(title, w, h, false, strings.Join(dashStack(head, tail, keep, rows), "\n"))
 }
 
@@ -781,6 +787,11 @@ func dashBlockedNote(m *Model, b opapi.BlockedThread) string {
 // dashCutLines is the loop-cut total, then its reasons by count.
 func dashCutLines(m *Model, inner int) []string {
 	cuts := m.Data.Cuts
+	// A load that failed before any landed leaves no total to report: zero
+	// would read as a fact the client never received.
+	if m.Data.Errs["cuts"] != nil && cuts.Since == "" && cuts.Hours == 0 && cuts.Total == 0 && len(cuts.ByReason) == 0 && len(cuts.Recent) == 0 {
+		return nil
+	}
 	hours := cuts.Hours
 	if hours == 0 {
 		hours = 24

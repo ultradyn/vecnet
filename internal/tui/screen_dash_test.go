@@ -294,6 +294,9 @@ func TestDashPartialError(t *testing.T) {
 			frame := plainAt(t, m, 140, 42)
 			dashHas(t, frame, tc.pane+" load failed: hub exploded")
 			dashLacks(t, m.View().Content, "\x1b[2J")
+			if tc.key == "cuts" {
+				dashLacks(t, frame, "loop cuts / 24h: 0") // never received, so never shown
+			}
 			want := map[string]string{"health": "thread blocked on delivery", "peers": "codex-hark", "threads": "Hosting cost deep dive", "audit": "thread.rename", "cuts": "max_depth_exceeded", "counters": "rate_limited"}
 			delete(want, tc.key)
 			for key, text := range want {
@@ -431,6 +434,13 @@ func TestDashBlockedOnDelivery(t *testing.T) {
 func TestDashAuditActors(t *testing.T) {
 	const shared = "prn_01ABCDEFGHJK7777"
 	f := seededDash()
+	// As on a real hub, every peer but the source has a principal, so exactly
+	// one row is blank and the empty-id guard is what keeps "" unnamed.
+	for i := range f.peers {
+		if f.peers[i].Peer.Kind != "source" && f.peers[i].PrincipalID == "" {
+			f.peers[i].PrincipalID = "prn_" + f.peers[i].Peer.PeerID
+		}
+	}
 	f.peers[1].PrincipalID, f.peers[4].PrincipalID = shared, shared
 	m, _ := openDash(t, f, newClock())
 	names := newDashNames(m)
@@ -537,6 +547,11 @@ func TestDashNarrowFailure(t *testing.T) {
 		if got := f.narrowed("peer_codex"); got != n {
 			t.Fatalf("%d more requests after a rejected credential", got-n)
 		}
+		// Back on the peers and onto another one: no narrow that can never load.
+		p.press("esc", "j", "enter")
+		frame := plainAt(t, m, 140, 42)
+		dashLacks(t, frame, "loading threads for")
+		dashHas(t, frame, "restart with a valid profile")
 	})
 }
 
@@ -683,5 +698,27 @@ func TestDashPeerStringsAreCleaned(t *testing.T) {
 		if focus == "peers" {
 			p.send(tea.KeyPressMsg{Code: tea.KeyTab})
 		}
+	}
+}
+
+// Reloads that arrive while a narrowed request runs fold into exactly one more
+// request after it, so the pane cannot stay stale until the next event.
+func TestDashNarrowFoldsReloads(t *testing.T) {
+	f := seededDash()
+	m, p := openDash(t, f, newClock())
+	release := f.hold("Threads:peer_codex")
+	p.press("j", "enter")
+	p.until("the first request", func() bool { return f.narrowed("peer_codex") == 1 })
+	p.send(Loaded{Key: "threads"})
+	p.send(Loaded{Key: "threads"})
+	if got := f.narrowed("peer_codex"); got != 1 {
+		t.Fatalf("%d requests while one was running", got)
+	}
+	release()
+	p.until("the folded request", func() bool { return f.narrowed("peer_codex") == 2 })
+	p.until("settled", func() bool { return !strings.Contains(plainAt(t, m, 140, 42), "loading threads for") })
+	p.idle()
+	if got := f.narrowed("peer_codex"); got != 2 {
+		t.Fatalf("%d requests, want 2: two reloads fold into one", got)
 	}
 }
