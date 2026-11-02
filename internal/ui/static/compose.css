@@ -1,1 +1,59 @@
-/* Empty until operator UI Task 15. */
+/* New message (#new). Scoped to .compose so neighbours' styles never leak in or out. */
+.compose{max-width:760px}
+.compose .lede{margin-bottom:22px}
+.compose .cform fieldset{border:0;margin:0;padding:0;min-width:0;display:flex;flex-direction:column;gap:18px}
+.compose .cform fieldset:disabled{opacity:.7}
+.compose .field{display:flex;flex-direction:column;gap:7px;min-width:0}
+.compose .field.grow{flex:1}
+.compose .field>label,.compose .field>.lbl{font-size:12px;color:var(--dim);letter-spacing:.02em}
+.compose .row{display:flex;gap:18px;align-items:flex-end;flex-wrap:wrap}
+.compose input[type=text],.compose input[type=search],.compose select{background:#0b1020;border:1px solid var(--line2);border-radius:7px;padding:8px 11px;font-size:13.5px;outline:none}
+.compose input:focus,.compose select:focus{border-color:#6366f1}
+.compose select{color:var(--text)}
+
+.compose .to{display:flex;flex-wrap:wrap;gap:6px;align-items:center;background:#0b1020;border:1px solid var(--line2);border-radius:7px;padding:5px 6px}
+.compose .to:focus-within{border-color:#6366f1}
+.compose .to input[type=search]{flex:1;min-width:180px;border:0;background:none;padding:4px 5px}
+.compose .picked{display:contents}
+.compose .pick{display:inline-flex;align-items:center;gap:4px;font-size:12.5px;padding:3px 4px 3px 9px;border-radius:6px;background:#1a2139;border:1px solid #6366f155;color:var(--text);max-width:280px}
+.compose .pick>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.compose .pick button{border:0;background:none;color:var(--dim);padding:0 4px;font-size:14px;line-height:1}
+.compose .pick button:hover{color:var(--text)}
+.compose .pick.denied{border-color:#fb718599;background:#fb71851a;color:#fecdd3}
+
+.compose .opts{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px;max-height:228px;overflow:auto;padding:2px}
+.compose .opt{display:grid;grid-template-columns:28px 1fr auto;grid-template-rows:auto auto;column-gap:9px;align-items:center;text-align:left;border:1px solid var(--line);background:#0e1426;border-radius:8px;padding:7px 9px;min-width:0}
+.compose .opt:hover{border-color:var(--line2);background:#121930}
+.compose .opt.on{border-color:#6366f1;background:#161d38}
+.compose .opt .av{grid-row:1/3}
+.compose .opt .nm{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.compose .opt .kd{font:500 10.5px var(--mono);color:var(--dim);grid-row:1/3;grid-column:3}
+.compose .opt.on .kd{color:var(--violet)}
+.compose .opt .id{font:400 10.5px var(--mono);color:var(--dim)}
+.compose .opts .none{font-size:12.5px;color:var(--dim);padding:6px 2px}
+.compose .opts .none.error{color:var(--bad)}
+
+.compose .seg{display:inline-flex;border:1px solid var(--line2);border-radius:7px;overflow:hidden}
+.compose .seg button{border:0;background:none;font:500 11.5px var(--mono);padding:9px 11px;color:var(--muted)}
+.compose .seg button.on{background:#1a2139;color:var(--text)}
+
+.compose .wrap{border:1px solid var(--line2);border-radius:10px;background:#0e1426;padding:10px 12px}
+.compose .wrap:focus-within{border-color:#6366f1}
+.compose textarea{width:100%;box-sizing:border-box;min-height:120px;max-height:50vh;resize:vertical;border:0;background:none;outline:none;font-size:14px;line-height:1.55}
+.compose .bar{display:flex;align-items:center;gap:10px;margin-top:6px}
+.compose .bytes{font:400 11.5px var(--mono);color:var(--dim)}
+.compose .bytes.spill{color:#c4b5fd}.compose .bytes.over{color:var(--bad)}
+.compose .hint{margin-left:auto;font-size:11.5px;color:var(--dim)}
+
+.compose .adv{border:1px solid var(--line);border-radius:9px;padding:9px 13px}
+.compose .adv summary{cursor:pointer;font-size:12.5px;color:var(--muted)}
+.compose .adv[open]{display:flex;flex-direction:column;gap:12px}
+.compose .adv[open] summary{margin-bottom:2px}
+.compose .check{display:flex;gap:9px;align-items:center;font-size:13px;color:var(--muted)}
+.compose .check input{accent-color:#6366f1;margin:0}
+
+.compose .err{margin:16px 0 0;min-height:0}
+.compose .err:empty{display:none}
+.compose .err:not(:empty){border:1px solid #fb718555;background:#fb718512;border-radius:8px;padding:9px 12px}
+.compose .actions{display:flex;justify-content:flex-end;margin-top:16px}
+.compose .actions .btn{padding:8px 18px;min-width:96px}

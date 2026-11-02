@@ -1,0 +1,144 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { SPILL, TEXT_CAP, buildSend, canSend, counter, eligible, errorText, keepKey, keyFor, matches } from '../static/compose-model.js';
+
+const peers = [
+  { peer_id: 'peer_op', name: 'max', kind: 'operator' },
+  { peer_id: 'peer_gh', name: 'gh-ultradyn', kind: 'source' },
+  { peer_id: 'peer_g', name: 'grok-reviewer', kind: 'grokbot' },
+  { peer_id: 'peer_c', name: 'Codex-hark', kind: 'session' },
+  { peer_id: 'peer_d', name: 'dot-research', kind: 'dot' },
+];
+
+test('eligible drops operator and source', () => {
+  const got = eligible(peers);
+  assert.deepEqual(got.map(p => p.peer_id), ['peer_c', 'peer_d', 'peer_g'], 'sorted by name, case-insensitive');
+  assert.ok(got.every(p => p.kind !== 'operator' && p.kind !== 'source'));
+  // The signed-in operator is excluded by id too, whatever kind the directory says.
+  assert.deepEqual(eligible([{ peer_id: 'peer_me', name: 'me', kind: 'session' }, ...peers], 'peer_me').map(p => p.peer_id), ['peer_c', 'peer_d', 'peer_g']);
+  // The directory response object is accepted as well as its array.
+  assert.deepEqual(eligible({ peers }).map(p => p.peer_id), ['peer_c', 'peer_d', 'peer_g']);
+  assert.deepEqual(eligible(undefined), []);
+  assert.deepEqual(eligible(null), []);
+  // The input is not reordered in place.
+  assert.equal(peers[0].peer_id, 'peer_op');
+});
+
+test('matches searches by name, case-insensitive, and an empty query matches all', () => {
+  assert.ok(matches(peers[3], 'codex'));
+  assert.ok(matches(peers[3], '  HARK '));
+  assert.ok(!matches(peers[3], 'grok'));
+  assert.ok(matches(peers[3], ''));
+  // Searching is by name only: an id is not a name.
+  assert.ok(!matches(peers[3], 'peer_c'));
+});
+
+test('buildSend uses ids, omits empty title and default advanced fields, requires priority', () => {
+  const form = { recipients: ['peer_c', 'peer_g'], title: '   ', priority: 'wake', text: 'Ship it.', historyAccess: 'from_join', lockedParticipants: false };
+  const body = buildSend(form, 'ui-k1');
+  assert.deepEqual(body, { idempotency_key: 'ui-k1', recipients: ['peer_c', 'peer_g'], priority: 'wake', content: { text: 'Ship it.' } });
+  assert.ok(!('thread_title' in body), 'empty title omitted');
+  assert.ok(!('history_access' in body), 'default history_access omitted');
+  assert.ok(!('locked_participants' in body), 'default locked_participants omitted');
+  assert.ok(!('thread_id' in body), 'a new message never names a thread');
+
+  // Missing advanced fields read as their defaults.
+  assert.deepEqual(buildSend({ recipients: ['peer_c'], priority: 'hold', text: 'x' }, 'ui-k2'),
+    { idempotency_key: 'ui-k2', recipients: ['peer_c'], priority: 'hold', content: { text: 'x' } });
+
+  // Non-default values travel, and the title is trimmed.
+  const full = buildSend({ ...form, title: '  Release  ', historyAccess: 'full', lockedParticipants: true, priority: 'wake_idle' }, 'ui-k3');
+  assert.equal(full.thread_title, 'Release');
+  assert.equal(full.history_access, 'full');
+  assert.equal(full.locked_participants, true);
+  assert.equal(full.priority, 'wake_idle');
+
+  // Duplicate picks collapse; order is kept. The form array is copied, not shared.
+  const dup = buildSend({ ...form, recipients: ['peer_g', 'peer_c', 'peer_g'] }, 'ui-k4');
+  assert.deepEqual(dup.recipients, ['peer_g', 'peer_c']);
+  assert.notEqual(body.recipients, form.recipients);
+
+  // Text is sent as typed, not trimmed.
+  assert.equal(buildSend({ ...form, text: '  indented\n' }, 'k').content.text, '  indented\n');
+
+  // Priority is required and must be one of the three.
+  assert.throws(() => buildSend({ ...form, priority: '' }, 'k'), /priority/);
+  assert.throws(() => buildSend({ ...form, priority: undefined }, 'k'), /priority/);
+  assert.throws(() => buildSend({ ...form, priority: 'urgent' }, 'k'), /priority/);
+
+  // Recipients are ids, never names (PROTOCOL §14.4), and at least one is required.
+  assert.throws(() => buildSend({ ...form, recipients: ['grok-reviewer'] }, 'k'), /id/);
+  assert.throws(() => buildSend({ ...form, recipients: [] }, 'k'), /recipient/);
+  assert.ok(buildSend({ ...form, recipients: ['team_x', 'grp_y'] }, 'k'));
+  // History access accepts only the protocol's two values; the key is required.
+  assert.throws(() => buildSend({ ...form, historyAccess: 'everything' }, 'k'), /history_access/);
+  assert.throws(() => buildSend(form, ''), /key/);
+  // Empty text cannot be sent.
+  assert.throws(() => buildSend({ ...form, text: '  ' }, 'k'), /text/);
+});
+
+test('canSend needs a recipient and non-blank text under the 64 KiB cap', () => {
+  const ok = { recipients: ['peer_c'], priority: 'wake', text: 'hi' };
+  assert.equal(canSend(ok), true);
+  assert.equal(canSend({ ...ok, recipients: [] }), false);
+  assert.equal(canSend({ ...ok, text: '' }), false);
+  assert.equal(canSend({ ...ok, text: ' \n\t' }), false);
+  assert.equal(canSend({ ...ok, text: 'x'.repeat(TEXT_CAP) }), true);
+  assert.equal(canSend({ ...ok, text: 'x'.repeat(TEXT_CAP + 1) }), false);
+  // The cap is in UTF-8 bytes, not characters.
+  assert.equal(canSend({ ...ok, text: 'é'.repeat(TEXT_CAP / 2 + 1) }), false);
+});
+
+test('counter is the composer byte counter', () => {
+  assert.deepEqual(counter(''), { label: '0 / 4096 B', tone: '' });
+  assert.deepEqual(counter('é'), { label: '2 / 4096 B', tone: '' });
+  assert.deepEqual(counter('x'.repeat(SPILL)), { label: '4096 / 4096 B', tone: '' });
+  assert.deepEqual(counter('x'.repeat(SPILL + 1)), { label: '4.0 KiB · spills to message.md', tone: 'spill' });
+  assert.deepEqual(counter('x'.repeat(TEXT_CAP + 1)), { label: '64.0 KiB · spills to message.md', tone: 'over' });
+});
+
+test('keyFor keeps the idempotency key while the body is unchanged and mints one when it changes', () => {
+  let n = 0;
+  const mint = () => 'ui-' + (++n);
+  const form = { recipients: ['peer_c'], title: '', priority: 'wake', text: 'hi', historyAccess: 'from_join', lockedParticipants: false };
+  const a = keyFor(null, form, mint);
+  assert.equal(a.key, 'ui-1');
+  assert.equal(keyFor(a, { ...form }, mint), a, 'same body, same pending key');
+  assert.equal(keyFor(a, { ...form, text: 'hi!' }, mint).key, 'ui-2');
+  assert.equal(keyFor(a, { ...form, priority: 'hold' }, mint).key, 'ui-3');
+  assert.equal(keyFor(a, { ...form, title: 'T' }, mint).key, 'ui-4');
+  assert.equal(keyFor(a, { ...form, recipients: ['peer_c', 'peer_g'] }, mint).key, 'ui-5');
+  assert.equal(keyFor(a, { ...form, historyAccess: 'full' }, mint).key, 'ui-6');
+  assert.equal(keyFor(a, { ...form, lockedParticipants: true }, mint).key, 'ui-7');
+  // A whitespace-only title change does not change the body, so the key stays.
+  assert.equal(keyFor(a, { ...form, title: '  ' }, mint), a);
+});
+
+test('keepKey keeps the key across a retryable failure and drops it after a definite rejection', () => {
+  assert.equal(keepKey({ status: 0 }), true, 'hub never reached');
+  assert.equal(keepKey({ status: 502 }), true);
+  assert.equal(keepKey({ status: 429 }), true, 'rate limited: the same send is retried');
+  assert.equal(keepKey({ status: 409 }), true);
+  assert.equal(keepKey({ status: 403 }), false, 'scope_denied will not change on retry');
+  assert.equal(keepKey({ status: 422 }), false);
+  assert.equal(keepKey({ status: 404 }), false);
+});
+
+test('errorText names the denied recipient and shows the retry time', () => {
+  const nameOf = id => ({ peer_g: 'grok-reviewer', team_t: 'reviewers' })[id] || id;
+  assert.equal(errorText({ status: 403, code: 'scope_denied', message: 'send scopes forbid this recipient', details: { recipient: 'peer_g' } }, nameOf),
+    'Your send scopes do not allow messages to grok-reviewer.');
+  assert.equal(errorText({ status: 403, code: 'scope_denied', message: 'm', details: { recipient: 'peer_g', via: 'team_t' } }, nameOf),
+    'Your send scopes do not allow messages to grok-reviewer (via reviewers).');
+  assert.equal(errorText({ status: 403, code: 'scope_denied', message: 'send scopes forbid this recipient', details: {} }, nameOf),
+    'scope_denied: send scopes forbid this recipient');
+
+  const now = new Date(2026, 10, 2, 14, 5, 0).getTime();
+  assert.equal(errorText({ status: 429, code: 'rate_limited', message: 'threads rate limit exceeded', details: { retry_after_seconds: 90 } }, nameOf, now),
+    'Rate limited. Try again at 14:06:30 (in 90 s).');
+  assert.equal(errorText({ status: 429, code: 'rate_limited', message: 'threads rate limit exceeded', details: {} }, nameOf, now),
+    'Rate limited. Try again shortly.');
+
+  assert.equal(errorText({ status: 0, code: 'network', message: 'hub unreachable', details: {} }, nameOf), 'network: hub unreachable');
+  assert.equal(errorText({ status: 422, code: 'name_not_an_address', message: 'display name', details: {} }, nameOf), 'name_not_an_address: display name');
+});
