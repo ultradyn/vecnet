@@ -22,10 +22,28 @@ try {
     const unreadIn = async thread => (await api('GET', '/v1/admin/inbox?unread=1&limit=200')).deliveries.filter(d => d.thread_id === thread).length;
     const isRead = req => req.method() === 'POST' && req.url().endsWith(`/v1/admin/threads/${hark}/read`);
     const msgEl = id => page.locator(`[id="m-${id}"]`);
-    const inView = async locator => page.evaluate(el => {
-      const r = el.getBoundingClientRect(), m = document.getElementById('main').getBoundingClientRect();
-      return r.top >= m.top - 1 && r.top < m.bottom;
-    }, await locator.elementHandle());
+    // Every resource notify replaces the .msg nodes, so measure the live node
+    // by id, and only once two frames apart agree: a detached node measures as
+    // all zeros and would read as on screen.
+    const inView = async id => {
+      const seen = await page.evaluate(async id => {
+        const at = () => {
+          const el = document.getElementById('m-' + id);
+          if (!el || !el.isConnected) return null;
+          const r = el.getBoundingClientRect(), m = document.getElementById('main').getBoundingClientRect();
+          return r.height > 0 && r.top >= m.top - 1 && r.top < m.bottom;
+        };
+        const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+        for (let i = 0; i < 600; i++) {
+          const a = at();
+          await frame(); await frame();
+          if (a !== null && a === at()) return a;
+        }
+        return null;
+      }, id);
+      assert(seen !== null, `message ${id} never settled in the DOM`);
+      return seen;
+    };
 
     await page.locator('#threads a', { hasText: 'hark B196' }).waitFor();
     await page.locator('#conn.live').waitFor();
@@ -73,10 +91,17 @@ try {
     assert(await unreadIn(hark) === 0, 'the live delivery stayed unread while the thread was open');
 
     // reply link jumps to parent
-    assert(!(await inView(msgEl(first.message_id))), 'the first message was already on screen');
+    assert(!(await inView(first.message_id)), 'the first message was already on screen');
+    // Hold back the jump's scroll event so a hub event re-renders the thread
+    // first: the jump must survive that render, not snap back to the bottom.
+    await page.evaluate(() => { window.__holdScroll = e => e.stopImmediatePropagation(); window.addEventListener('scroll', window.__holdScroll, true); });
     await msgEl(sentLive.message_id).locator('.reply').click();
     await page.locator(`[id="m-${first.message_id}"].flash`).waitFor();
-    assert(await inView(msgEl(first.message_id)), 'the reply link did not bring its parent into view');
+    const aside = 'Checking the finalize path now.';
+    await api('POST', '/v1/messages', { idempotency_key: 'thread-rerender', thread_id: hark, priority: 'hold', content: { text: aside } }, 'codex');
+    await page.locator('.msg .txt', { hasText: aside }).waitFor();
+    assert(await inView(first.message_id), 'the reply link did not bring its parent into view');
+    await page.evaluate(() => window.removeEventListener('scroll', window.__holdScroll, true));
 
     // Show full text renders the spilled body literally
     const hostileLong = Array.from({ length: 160 }, (_, i) => `<img src=x onerror=alert(${i})> line ${i}`).join('\n');
@@ -156,6 +181,49 @@ try {
     assert(await ta.inputValue() === ask, 'the text was lost on thread_budget_exhausted');
     assert(dialogs === 0, 'a body opened a dialog');
     await shot('09-thread-error');
+
+    // An open approval is answered inline with one POST (Task 8 rules).
+    const hosting = demo.threads.hosting;
+    const answersTo = id => posts.filter(p => p.approval_response && p.approval_response.approval_id === id).length;
+    const answersIn = thread => posts.filter(p => p.approval_response && p.thread_id === thread).length;
+    await page.evaluate(id => { location.hash = `#thread/${id}`; }, hosting);
+    const plan = page.locator('.apr', { hasText: 'Proceed with the hosting plan?' });
+    await plan.getByRole('button', { name: 'yes', exact: true }).waitFor();
+    assert(await page.locator('.composer .join').isHidden(), 'the join notice shows in a thread the operator is in');
+    // A local gate rather than ctx.hold: here hold()'s unroute raced its own
+    // handler's continue and failed with 'Route is already handled'.
+    let releaseAnswer;
+    const answerGate = new Promise(resolve => { releaseAnswer = resolve; });
+    await page.route('**/v1/messages', async route => { await answerGate; await route.continue(); });
+    await plan.getByRole('button', { name: 'yes', exact: true }).click();
+    await plan.locator('button.opt:disabled', { hasText: 'no' }).waitFor();
+    releaseAnswer();
+    await plan.locator('.st', { hasText: 'answered: yes' }).waitFor();
+    await page.unroute('**/v1/messages');
+    assert(answersIn(hosting) === 1, `answering inline sent ${answersIn(hosting)} responses`);
+
+    // An approval closed elsewhere answers 422 approval_closed: shown closed, not retried.
+    const closedId = 'apr_01JC00000000000000000000ZZ';
+    const rotate = 'Rotate the backup key tonight?';
+    await api('POST', '/v1/messages', { idempotency_key: 'thread-apr-closed', thread_id: hosting, kind: 'approval_request', priority: 'wake', recipients: [demo.operator_peer], content: { text: rotate },
+      approval_request: { approval_id: closedId, question: rotate, options: ['yes', 'no'], expires_at: new Date(Date.now() + 30 * 60000).toISOString() } }, 'codex');
+    const card = page.locator('.apr', { hasText: rotate });
+    await card.getByRole('button', { name: 'yes', exact: true }).waitFor();
+    await page.route('**/v1/messages', async route => {
+      await api('POST', '/v1/messages', { idempotency_key: 'thread-apr-elsewhere', thread_id: hosting, kind: 'approval_response', priority: 'wake', content: { text: 'no' }, approval_response: { approval_id: closedId, decision: 'no' } });
+      await route.continue();
+    }, { times: 1 });
+    await card.getByRole('button', { name: 'yes', exact: true }).click();
+    await page.locator('#toast.on', { hasText: 'Already closed' }).waitFor();
+    await card.locator('.st', { hasText: /^closed$/ }).waitFor();
+    assert(answersTo(closedId) === 1, `the closed approval was sent ${answersTo(closedId)} times`);
+    await page.unroute('**/v1/messages');
+
+    // A thread the operator is not in says that sending adds them.
+    const side = await api('POST', '/v1/messages', { idempotency_key: 'thread-side', recipients: [demo.peers.sleuth.id], thread_title: 'Side channel', priority: 'hold', content: { text: 'Sleuth, a quick side question.' } }, 'codex');
+    await page.evaluate(id => { location.hash = `#thread/${id}`; }, side.thread_id);
+    await page.locator('.msg .txt', { hasText: 'a quick side question' }).waitFor();
+    await page.locator('.composer .join', { hasText: 'Sending adds you' }).waitFor();
   });
-  console.log('Thread passed: read POST, receipts, live delivery, reply jump, literal full text, held retry key, budget banner');
+  console.log('Thread passed: read POST, receipts, live delivery, reply jump, literal full text, held retry key, budget banner, inline approvals, join notice');
 } finally { await cleanBuild(); }

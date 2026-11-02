@@ -157,10 +157,14 @@ test('approval is actionable only when in openApprovals with addressed_to_me', (
 
 test('sendError names the budget, keeps code: message, and adds Retry-After', () => {
   const err = (status, code, message, details = {}) => ({ status, code, message, details });
-  const budget = sendError(err(422, 'thread_budget_exhausted', 'thread budget is exhausted'), { budget_remaining: 0 });
+  const budget = sendError(err(422, 'thread_budget_exhausted', 'thread budget is exhausted'));
   assert.equal(budget.kind, 'budget');
   assert.match(budget.text, /budget/i);
   assert.match(budget.text, /0 messages left/);
+  // PROTOCOL §2.2: this rejection means the budget is 0, whatever a stale snapshot said.
+  const stale = sendError(err(422, 'thread_budget_exhausted', 'thread budget is exhausted'), { budget_remaining: 3 });
+  assert.match(stale.text, /0 messages left/);
+  assert.doesNotMatch(stale.text, /3/);
   assert.equal(sendError(err(403, 'participants_locked', 'participants are locked')).text, 'participants_locked: participants are locked');
   assert.equal(sendError(err(403, 'scope_denied', 'scope forbids peer_x')).text, 'scope_denied: scope forbids peer_x');
   assert.equal(sendError(err(429, 'rate_limited', 'send rate limit exceeded', { retry_after_seconds: 17 })).text, 'rate_limited: send rate limit exceeded (retry after 17 s)');

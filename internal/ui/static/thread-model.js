@@ -99,14 +99,15 @@ export function items(messages, matrix, openApprovals) {
 // next attempt keeps the idempotency key: a lost or throttled send might have
 // landed, so it must be retried under the same key; a definite rejection will
 // not change, so the next attempt is a new send.
-export function sendError(e, thread) {
+// thread_budget_exhausted means the budget is 0 (PROTOCOL §2.2), so the
+// banner says 0 rather than a possibly stale budget_remaining.
+export function sendError(e) {
   const status = e && e.status, code = (e && e.code) || 'error', message = (e && e.message) || '';
   const keepKey = !status || status >= 500 || status === 429;
   if (code === 'thread_budget_exhausted') {
-    const left = thread && thread.budget_remaining !== undefined && thread.budget_remaining !== null ? thread.budget_remaining : 0;
     return {
       kind: 'budget', keepKey,
-      text: 'Thread budget exhausted: ' + left + ' messages left in this thread’s budget. The hub refuses new messages here until the operator raises the budget.',
+      text: 'Thread budget exhausted: 0 messages left in this thread’s budget. The hub refuses new messages here until the operator raises the budget.',
     };
   }
   let text = code + ': ' + message;

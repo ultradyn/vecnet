@@ -121,9 +121,10 @@ export function mount(root, ctx) {
       store.invalidate(tag, 'threads', 'inbox');
     } catch (e) {
       if (e.status === 401) return;
-      const err = sendError(e, thread());
+      const err = sendError(e);
       if (!err.keepKey) S.pending = null;
       S.banner = err; // the text stays in the box on every failure
+      if (err.kind === 'budget') store.invalidate(tag, 'threads'); // refresh the stale budget
     } finally {
       S.sending = false;
       btn.disabled = false;
@@ -182,6 +183,9 @@ export function mount(root, ctx) {
     const el = document.getElementById('m-' + id);
     if (!el) return;
     S.flash = id;
+    // Unpin first: a render before the scroll event would snap back to the
+    // bottom. onScroll re-pins once the operator returns there.
+    S.pinned = false;
     el.classList.remove('flash');
     void el.offsetWidth; // restart the animation on a second click
     el.classList.add('flash');
