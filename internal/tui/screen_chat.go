@@ -1111,6 +1111,21 @@ func chatClock(m *Model, at string) string {
 	return t.In(m.loc).Format("15:04")
 }
 
+// chatHang wraps a message body under its head: the first line starts lead
+// cells in, and every later line sits in the chatIndent gutter with the file,
+// job and receipt rows, so the transcript keeps its left edge.
+func chatHang(text string, lead, width int) []string {
+	gutter := len(chatIndent)
+	if width <= 2*gutter || lead < gutter {
+		return chatWrap(text, lead, width)
+	}
+	lines := chatWrap(text, lead-gutter, width-gutter)
+	for i := 1; i < len(lines); i++ {
+		lines[i] = chatIndent + lines[i]
+	}
+	return lines
+}
+
 // chatWrap wraps text to width, the first line starting lead cells in.
 func chatWrap(text string, lead, width int) []string {
 	hold := strings.Repeat(chatHold, lead)
@@ -1229,7 +1244,7 @@ func (l *chatLog) head(msg *envelope.Message) []chatRow {
 	for _, seg := range segs {
 		lead += lipgloss.Width(seg.text)
 	}
-	lines := chatWrap(l.text(msg), lead, l.width)
+	lines := chatHang(l.text(msg), lead, l.width)
 	_, spilled := chatSpill(msg)
 	limit := l.body
 	if spilled {
