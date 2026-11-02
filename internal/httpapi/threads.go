@@ -19,6 +19,10 @@ type threadsBody struct {
 type historyBody struct {
 	Messages  []envelope.Message `json:"messages"`
 	NextAfter *string            `json:"next_after"`
+	// HostedBlobs is set for the operator only, as {} when nothing on the
+	// page is hosted: message id -> the sha256s of its attachments the hub
+	// hosts (Hub.HostedAttachments).
+	HostedBlobs *map[string][]string `json:"hosted_blobs,omitempty"`
 }
 
 // queryLimit parses ?limit= (PROTOCOL §2.8): absent → 0 (the hub's
@@ -84,5 +88,17 @@ func (s *server) getThreadMessages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, historyBody{Messages: msgs, NextAfter: next})
+	body := historyBody{Messages: msgs, NextAfter: next}
+	if c := callerFrom(r.Context()); c.Kind == "operator" {
+		// The operator UI shows hosted images inline: an attachment that
+		// also names an origin_url may still have hosted bytes, which a
+		// stored Message cannot say (it never holds a blob_url).
+		hosted, err := s.Hub.HostedAttachments(r.Context(), msgs)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		body.HostedBlobs = &hosted
+	}
+	writeJSON(w, http.StatusOK, body)
 }

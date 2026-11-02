@@ -42,7 +42,8 @@ func listThreads(t *testing.T, env *testhub.Env, secret, query string) threadsRe
 }
 
 // history is GET /v1/threads/{thr}/messages<query> expecting 200; it also
-// checks the body carries exactly {messages, next_after}.
+// checks the body carries exactly {messages, next_after}, plus hosted_blobs
+// for the operator (TestOperatorHistoryHostedBlobs).
 func history(t *testing.T, env *testhub.Env, secret, thr, query string) historyResp {
 	t.Helper()
 	resp, raw := env.Do(secret, "GET", "/v1/threads/"+thr+"/messages"+query, nil)
@@ -50,7 +51,11 @@ func history(t *testing.T, env *testhub.Env, secret, thr, query string) historyR
 		t.Fatalf("GET /v1/threads/%s/messages%s = %d; %s", thr, query, resp.StatusCode, raw)
 	}
 	var keys map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &keys); err != nil || len(keys) != 2 || keys["messages"] == nil || keys["next_after"] == nil {
+	want := 2
+	if secret == env.OperatorSecret {
+		want = 3
+	}
+	if err := json.Unmarshal(raw, &keys); err != nil || len(keys) != want || keys["messages"] == nil || keys["next_after"] == nil || want == 3 && keys["hosted_blobs"] == nil {
 		t.Fatalf("history body %s, want exactly {messages, next_after}", raw)
 	}
 	var hr historyResp
@@ -260,4 +265,64 @@ func TestNotParticipant403(t *testing.T) {
 	mustErr(t, resp, raw, http.StatusForbidden, "not_participant")
 	resp, raw = env.Do(dSec, "GET", "/v1/threads/thr_01ARZ3NDEKTSV4RRFFQ69G5FAV/messages", nil)
 	mustErr(t, resp, raw, http.StatusNotFound, "unknown_thread")
+}
+
+// TestOperatorHistoryHostedBlobs: the operator's history page names, per
+// message, the attachments whose bytes the hub hosts (a blob_refs row and
+// unpurged bytes), so the UI can tell hosted bytes that also carry an
+// informational origin_url from reference-only ones without a Delivery's
+// blob_url. Other callers' pages are unchanged.
+func TestOperatorHistoryHostedBlobs(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	b, _ := env.NewPeer("session", "B")
+	hosted := putOK(t, env, aSec, "image/png", "png bytes").SHA256
+	purged := putOK(t, env, aSec, "image/png", "soon gone").SHA256
+	const refOnly = "0000000000000000000000000000000000000000000000000000000000000001"
+	body := sendBody("hosted", b)
+	body["attachments"] = []any{
+		map[string]any{"sha256": hosted, "size": 9, "media_type": "image/png", "origin_url": "https://example.com/a.png"},
+		map[string]any{"sha256": refOnly, "size": 5, "media_type": "image/png", "origin_url": "https://example.com/b.png"},
+		map[string]any{"sha256": purged, "size": 9, "media_type": "image/png"},
+	}
+	sent := postSend(t, env, aSec, body, http.StatusAccepted)
+	postSend(t, env, aSec, inThread("plain", sent.ThreadID), http.StatusAccepted)
+
+	page := func(secret string) map[string]json.RawMessage {
+		t.Helper()
+		resp, raw := env.Do(secret, "GET", "/v1/threads/"+sent.ThreadID+"/messages", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("history = %d %s", resp.StatusCode, raw)
+		}
+		var top map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &top); err != nil {
+			t.Fatal(err)
+		}
+		return top
+	}
+	hostedOf := func() map[string][]string {
+		t.Helper()
+		raw, ok := page(env.OperatorSecret)["hosted_blobs"]
+		if !ok {
+			t.Fatal("the operator's history page has no hosted_blobs")
+		}
+		var got map[string][]string
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	got := hostedOf()
+	if len(got) != 1 || strings.Join(got[sent.MessageID], ",") != hosted+","+purged {
+		t.Fatalf("hosted_blobs = %v, want %s: [%s %s]", got, sent.MessageID, hosted, purged)
+	}
+	if err := env.Hub.PurgeBlob(t.Context(), purged); err != nil {
+		t.Fatal(err)
+	}
+	if got := hostedOf(); strings.Join(got[sent.MessageID], ",") != hosted {
+		t.Fatalf("after the purge hosted_blobs = %v, want only %s", got, hosted)
+	}
+	if _, ok := page(aSec)["hosted_blobs"]; ok {
+		t.Fatal("a peer's history page carries hosted_blobs")
+	}
 }
