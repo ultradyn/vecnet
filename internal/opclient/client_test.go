@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -359,5 +362,123 @@ func TestBlobLimit(t *testing.T) {
 		} else if err == nil || got != nil {
 			t.Fatalf("max=%d returned %q, %v", tt.max, got, err)
 		}
+	}
+}
+
+func TestUploadSendsBytesAndType(t *testing.T) {
+	for _, mediaType := range []string{"text/plain; charset=utf-8", ""} {
+		t.Run(mediaType, func(t *testing.T) {
+			env := testhub.Start(t)
+			target, err := url.Parse(env.URL)
+			mustOK(t, err)
+			proxy := httputil.NewSingleHostReverseProxy(target)
+			wantType := mediaType
+			if wantType == "" {
+				wantType = "application/octet-stream"
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "PUT" || r.URL.RequestURI() != "/v1/blobs?ttl=86400" {
+					t.Errorf("upload request = %s %s", r.Method, r.URL)
+				}
+				if r.ContentLength != 3 || r.Header.Get("Content-Length") != "3" || len(r.TransferEncoding) != 0 {
+					t.Errorf("upload length=%d header=%q transfer=%v", r.ContentLength, r.Header.Get("Content-Length"), r.TransferEncoding)
+				}
+				if r.Header.Get("Content-Type") != wantType || r.Header.Get("Authorization") != "Bearer "+env.OperatorSecret {
+					t.Error("upload content type or bearer does not match")
+				}
+				proxy.ServeHTTP(w, r)
+			}))
+			defer srv.Close()
+			// Hide the reader's length so the client must set ContentLength itself.
+			reader := struct{ io.Reader }{strings.NewReader("abc")}
+			client := New(srv.URL, env.OperatorSecret)
+			client.hc.Timeout = time.Nanosecond // Upload must not use the JSON client's timeout.
+			got, err := client.Upload(context.Background(), reader, 3, mediaType, "note.txt")
+			mustOK(t, err)
+			want := envelope.Attachment{SHA256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", Size: 3, MediaType: wantType, Name: "note.txt"}
+			if got != want {
+				t.Fatalf("Upload = %+v, want %+v", got, want)
+			}
+			resp, raw := env.Do(env.OperatorSecret, "GET", "/v1/blobs/"+got.SHA256, nil)
+			if resp.StatusCode != http.StatusOK || string(raw) != "abc" || resp.Header.Get("Content-Type") != wantType {
+				t.Fatalf("GET uploaded blob = %d %q type=%q", resp.StatusCode, raw, resp.Header.Get("Content-Type"))
+			}
+		})
+	}
+}
+
+func TestUploadTooLarge(t *testing.T) {
+	env := testhub.Start(t)
+	env.Hub.Blobs.MaxSize = 2
+	got, err := New(env.URL, env.OperatorSecret).Upload(context.Background(), strings.NewReader("abc"), 3, "text/plain", "note.txt")
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Status != 413 || apiErr.Code != "blob_too_large" || apiErr.Details["limit"] != float64(2) {
+		t.Fatalf("Upload error = %#v, want *Error 413 blob_too_large with limit 2", err)
+	}
+	if got != (envelope.Attachment{}) {
+		t.Fatalf("failed upload returned %+v", got)
+	}
+}
+
+func TestUploadEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength != 0 || r.Header.Get("Content-Length") != "0" || len(r.TransferEncoding) != 0 {
+			t.Errorf("empty upload length=%d header=%q transfer=%v", r.ContentLength, r.Header.Get("Content-Length"), r.TransferEncoding)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil || len(body) != 0 {
+			t.Errorf("empty upload body=%q, error=%v", body, err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","size":0}`)
+	}))
+	defer srv.Close()
+	got, err := New(srv.URL, "secret").Upload(context.Background(), struct{ io.Reader }{strings.NewReader("")}, 0, "", "empty.bin")
+	mustOK(t, err)
+	if got.Size != 0 || got.MediaType != "application/octet-stream" || got.Name != "empty.bin" || got.SHA256 != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+		t.Fatalf("empty upload = %+v", got)
+	}
+}
+
+func TestUploadContextCancellation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("a cancelled upload reached the server")
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := New(srv.URL, "secret").Upload(ctx, strings.NewReader("abc"), 3, "text/plain", "note.txt")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled upload error = %v, want context.Canceled", err)
+	}
+}
+
+func TestUploadDoesNotFollowRedirects(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/blobs" {
+			t.Error("upload followed an authenticated redirect")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, "/redirect-target", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	_, err := New(srv.URL, "secret").Upload(context.Background(), strings.NewReader("abc"), 3, "text/plain", "note.txt")
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusTemporaryRedirect || apiErr.Message != http.StatusText(http.StatusTemporaryRedirect) {
+		t.Fatalf("redirect upload error = %#v, want *Error 307 with fallback message", err)
+	}
+}
+
+func TestUploadQuotaError(t *testing.T) {
+	env := testhub.Start(t)
+	env.Hub.Blobs.DailyQuota = 2
+	_, err := New(env.URL, env.OperatorSecret).Upload(context.Background(), strings.NewReader("abc"), 3, "text/plain", "note.txt")
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusTooManyRequests || apiErr.Code != "upload_quota_exceeded" || apiErr.Details["limit"] != float64(2) {
+		t.Fatalf("quota upload error = %#v, want *Error 429 upload_quota_exceeded with limit 2", err)
+	}
+	if seconds, ok := apiErr.Details["retry_after_seconds"].(float64); !ok || seconds <= 0 || seconds > 86400 {
+		t.Fatalf("quota retry_after_seconds = %v, want seconds until the next UTC day", apiErr.Details["retry_after_seconds"])
 	}
 }
