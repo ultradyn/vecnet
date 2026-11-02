@@ -288,6 +288,10 @@ func (m *Model) onTick() tea.Cmd {
 	now := m.Now()
 	if m.toast.text != "" && !now.Before(m.toast.until) {
 		m.toast = toast{}
+		// Another toast during a long command must not lose its progress line.
+		if m.progress != "" && m.inflight[retryKey] {
+			m.toast = toast{text: m.progress, until: now.Add(retryShown)}
+		}
 	}
 	cmds := []tea.Cmd{tick()}
 	if now.Sub(m.lastSlow) >= slowEvery && m.Conn == ConnLive {

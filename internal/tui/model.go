@@ -99,6 +99,7 @@ type Model struct {
 	started     time.Time
 	lastSlow    time.Time
 	toast       toast
+	progress    string // a running command's line, which a passing toast gives back
 	confirmQuit bool
 	fatal       error
 

@@ -207,6 +207,12 @@ func TestRetryAll(t *testing.T) {
 		if line := bottomLine(t, m); line != "retry all is already running" {
 			t.Fatalf("second run: command line = %q", line)
 		}
+		// The refusal passes and the progress line comes back.
+		clock.advance(toastBad + time.Second)
+		p.send(tickMsg{})
+		if line := bottomLine(t, m); line != "retrying dead letters: 3" {
+			t.Fatalf("after the refusal: command line = %q", line)
+		}
 		release()
 		summary(p, m)
 		if got := len(api.attempts()); got != 3 {
@@ -253,6 +259,18 @@ func TestRetryAll(t *testing.T) {
 		}
 		if line := bottomLine(t, m); !strings.Contains(line, ConnRejected) {
 			t.Fatalf("command line = %q", line)
+		}
+	})
+	t.Run("a forbidden credential stops the run without rejecting it", func(t *testing.T) {
+		m, p, api := cmdModel(t, newClock())
+		api.failing["dly_1"] = &opclient.Error{Status: 403, Code: "forbidden", Message: "not the operator"}
+		submit(p, "retry all")
+		summary(p, m)
+		if got := api.attempts(); len(got) != 1 {
+			t.Fatalf("attempts after 403 = %v, want one", got)
+		}
+		if m.Conn != ConnLive {
+			t.Fatalf("Conn = %q: a 403 does not reject the credential", m.Conn)
 		}
 	})
 	t.Run("nothing listed", func(t *testing.T) {
@@ -568,6 +586,12 @@ func TestCommands(t *testing.T) {
 		submit(p, "presence idle")
 		p.until("the rejection", func() bool { return m.Conn == ConnRejected })
 		submit(p, "presence working")
+		// The refusal is synchronous; a send would show up only later, so wait
+		// for the refusal and the loads before counting.
+		if line := bottomLine(t, m); !strings.Contains(line, ConnRejected) {
+			t.Fatalf("command line = %q", line)
+		}
+		p.idle()
 		if api.count("SetPresence") != 1 {
 			t.Fatal("a stopped client reported presence")
 		}

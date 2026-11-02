@@ -269,7 +269,8 @@ func runRetry(m *Model, args []string) tea.Cmd {
 		return nil
 	}
 	m.inflight[retryKey] = true
-	m.Toast(fmt.Sprintf("retrying dead letters: %d", len(ids)), false)
+	m.progress = fmt.Sprintf("retrying dead letters: %d", len(ids))
+	m.Toast(m.progress, false)
 	m.toast.until = m.Now().Add(retryShown)
 	api, ctx := m.API, m.ctx
 	reload := m.Reload("inbox", "health")
@@ -288,6 +289,7 @@ func runRetry(m *Model, args []string) tea.Cmd {
 		}
 		failed := len(ids) - ok
 		summary := func(m *Model) {
+			m.progress = ""
 			if isStatus(refused, 401) {
 				m.reject(refused)
 			}

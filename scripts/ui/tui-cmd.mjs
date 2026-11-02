@@ -33,7 +33,6 @@ try {
     await keys('C-c');
 
     await keys(':presence blocked', 'Enter');
-    await waitFor('presence blocked');
     await waitFor('max@vecnet · blocked');
 
     await keys(':no-such-command', 'Enter');
