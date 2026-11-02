@@ -356,3 +356,82 @@ func TestMarkThreadRead(t *testing.T) {
 		t.Fatalf("foreign thread = %+v, %v", got, err)
 	}
 }
+
+func TestMarkThreadReadConcurrent(t *testing.T) {
+	env := testhub.Start(t)
+	sender, secret := env.NewPeer("session", "Sender")
+	const deliveries, clients = 32, 8
+	wantIDs := make(map[string]bool, deliveries)
+	var threadID string
+	for i := range deliveries {
+		b := body(fmt.Sprintf("concurrent-%d", i), "hold", env.OperatorPeer)
+		if threadID != "" {
+			b["thread_id"] = threadID
+		}
+		sent := send(t, env, secret, b)
+		threadID = sent.ThreadID
+		wantIDs[sent.Deliveries[0].DeliveryID] = true
+	}
+
+	c := caller(t, env)
+	start := make(chan struct{})
+	type result struct {
+		marked int
+		err    error
+	}
+	results := make(chan result, clients)
+	for range clients {
+		go func() {
+			<-start
+			got, err := opview.New(env.Hub).MarkThreadRead(context.Background(), c, threadID)
+			results <- result{got.Marked, err}
+		}()
+	}
+	close(start)
+	total := 0
+	for range clients {
+		got := <-results
+		if got.err != nil {
+			t.Errorf("concurrent MarkThreadRead: %v", got.err)
+		}
+		total += got.marked
+	}
+
+	var read int
+	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM deliveries WHERE thr_id = ? AND recipient = ? AND read_at IS NOT NULL`, threadID, env.OperatorPeer).Scan(&read); err != nil {
+		t.Fatal(err)
+	}
+	if read != deliveries {
+		t.Errorf("read deliveries = %d, want %d", read, deliveries)
+	}
+	events, err := env.Hub.Log.Read(context.Background(), []string{sender}, eventlog.Cursor{Epoch: env.Hub.Log.Epoch()}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Type != "receipt" {
+			continue
+		}
+		var receipt envelope.Receipt
+		if err := json.Unmarshal(e.Data, &receipt); err != nil {
+			t.Fatal(err)
+		}
+		if receipt.State != "read" {
+			continue
+		}
+		if !wantIDs[receipt.DeliveryID] || receipt.By != env.OperatorPeer || receipt.ThreadID != threadID {
+			t.Errorf("duplicate or unexpected read receipt: %+v", receipt)
+		}
+		delete(wantIDs, receipt.DeliveryID)
+	}
+	if len(wantIDs) != 0 {
+		t.Errorf("missing read receipts: %v", wantIDs)
+	}
+	if total != deliveries {
+		t.Errorf("total marked across %d overlapping calls = %d, want %d", clients, total, deliveries)
+	}
+	got, err := opview.New(env.Hub).MarkThreadRead(context.Background(), c, threadID)
+	if err != nil || got.Marked != 0 {
+		t.Errorf("repeat after concurrent reads = %+v, %v; want marked 0", got, err)
+	}
+}

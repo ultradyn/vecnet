@@ -200,7 +200,7 @@ func (r *Reader) MarkThreadRead(ctx context.Context, c auth.Caller, thrID string
 	if err != nil {
 		return out, fmt.Errorf("opview: unread thread deliveries: %w", err)
 	}
-	// Close the cursor before Receipt opens its write transaction.
+	// Close the cursor before ReceiptChanged opens its write transaction.
 	var unread []string
 	for rows.Next() {
 		var id string
@@ -219,10 +219,13 @@ func (r *Reader) MarkThreadRead(ctx context.Context, c auth.Caller, thrID string
 		return out, fmt.Errorf("opview: close unread deliveries: %w", closeErr)
 	}
 	for _, id := range unread {
-		if err := r.Hub.Receipt(ctx, c, id, "read", ""); err != nil {
+		changed, err := r.Hub.ReceiptChanged(ctx, c, id, "read", "")
+		if err != nil {
 			return out, err
 		}
-		out.Marked++
+		if changed {
+			out.Marked++
+		}
 	}
 	return out, nil
 }
