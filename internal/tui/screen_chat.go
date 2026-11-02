@@ -143,6 +143,7 @@ type (
 	}
 	chatReadMsg struct {
 		thread string
+		last   string // the newest message when the mark was asked for
 		marked int
 		err    error
 	}
@@ -159,7 +160,12 @@ type chatScreen struct {
 	fileIdx int    // which of the selected message's files s saves
 
 	drafts  map[string]*chatDraft
-	readTo  map[string]string // newest message each thread was marked read at
+	readTo  map[string]string // newest message each thread was marked read at, once the hub said so
+	// readAsk is the mark in flight per thread, and readFailed the newest
+	// message of a mark that failed. A failed mark waits for the thread to be
+	// opened or loaded again, not the next tick, so a hub that keeps failing
+	// sees one POST per reload rather than a storm.
+	readAsk, readFailed map[string]string
 	answers map[string]chatAnswerState
 	prompt  *opapi.OpenApproval // the approval waiting for its digit
 
@@ -173,7 +179,7 @@ type chatScreen struct {
 }
 
 func newChatScreen() Screen {
-	return &chatScreen{follow: true, drafts: map[string]*chatDraft{}, readTo: map[string]string{}, answers: map[string]chatAnswerState{}, newKeys: map[chatNewAttempt]string{}}
+	return &chatScreen{follow: true, drafts: map[string]*chatDraft{}, readTo: map[string]string{}, readAsk: map[string]string{}, readFailed: map[string]string{}, answers: map[string]chatAnswerState{}, newKeys: map[chatNewAttempt]string{}}
 }
 
 func (s *chatScreen) Title() string { return "chat" }
@@ -230,6 +236,12 @@ func (s *chatScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 		s.onSaved(msg, m)
 	case chatReadMsg:
 		cmd = s.onRead(msg, m)
+	case Loaded:
+		// A reload of the thread (refresh, reconnect, an event) retries a
+		// failed mark once.
+		if id, ok := strings.CutPrefix(msg.Key, threadPrefix); ok && msg.Err == nil {
+			delete(s.readFailed, id)
+		}
 	}
 	if s.openNew != "" && chatLineFree(m) {
 		cmd = tea.Batch(cmd, m.OpenThread(s.openNew))
@@ -262,6 +274,7 @@ func (s *chatScreen) track(m *Model) {
 		return
 	}
 	s.thread, s.sel, s.follow, s.top, s.fileIdx, s.overlay = m.CurrentThread, "", true, 0, 0, chatNoOverlay
+	delete(s.readFailed, m.CurrentThread) // reopening retries a failed mark
 	if s.prompt != nil {
 		s.prompt = nil
 		m.Mode = ModeNormal
@@ -282,22 +295,27 @@ func (s *chatScreen) sync(m *Model) tea.Cmd {
 		return nil
 	}
 	id, last := m.CurrentThread, st.Messages[len(st.Messages)-1].MessageID
-	if s.readTo[id] == last {
+	if s.readTo[id] == last || s.readAsk[id] != "" || s.readFailed[id] == last {
 		return nil
 	}
-	s.readTo[id] = last // a failure waits for the next message, not the next tick
+	s.readAsk[id] = last
 	api, ctx := m.API, m.ctx
 	return func() tea.Msg {
 		r, err := api.ReadThread(ctx, id)
-		return chatReadMsg{thread: id, marked: r.Marked, err: err}
+		return chatReadMsg{thread: id, last: last, marked: r.Marked, err: err}
 	}
 }
 
 func (s *chatScreen) onRead(msg chatReadMsg, m *Model) tea.Cmd {
-	switch {
-	case msg.err != nil:
+	delete(s.readAsk, msg.thread)
+	if msg.err != nil {
+		s.readFailed[msg.thread] = msg.last
 		m.Toast("mark read: "+msg.err.Error(), true)
-	case msg.marked > 0:
+		return nil
+	}
+	delete(s.readFailed, msg.thread)
+	s.readTo[msg.thread] = msg.last
+	if msg.marked > 0 {
 		return m.Reload("inbox", threadPrefix+msg.thread)
 	}
 	return nil
@@ -401,6 +419,9 @@ func (s *chatScreen) onKey(msg tea.KeyPressMsg, m *Model) tea.Cmd {
 			m.Mode = ModeInsert
 		}
 	case "a":
+		if refuseStopped(m) {
+			return nil
+		}
 		s.startAnswer(m, st)
 	case "e":
 		return s.expand(m, st)
@@ -484,6 +505,9 @@ func chatKey() string {
 func (s *chatScreen) send(m *Model, d *chatDraft) tea.Cmd {
 	id := m.CurrentThread
 	if d.sending || strings.TrimSpace(d.text) == "" {
+		return nil
+	}
+	if refuseStopped(m) { // the draft stays for after a restart
 		return nil
 	}
 	attempt := chatAttempt{text: d.text, prio: m.Prio, reply: d.reply}
@@ -578,6 +602,9 @@ func chatSendWhy(m *Model, id string, err error) string {
 func (s *chatScreen) commandMsg(m *Model, args []string) tea.Cmd {
 	if len(args) < 2 {
 		return s.refuseMsg(m, args, "usage: msg <peer-prefix> <text>")
+	}
+	if m.stopped() {
+		return s.refuseMsg(m, args, m.Conn+": restart with a valid profile")
 	}
 	prefix := strings.ToLower(args[0])
 	var ids, names []string
@@ -744,6 +771,9 @@ func (s *chatScreen) onPromptKey(key string, m *Model) tea.Cmd {
 	}
 	if chatExpired(m, a.ExpiresAt) { // it can pass while the prompt is open
 		m.Toast("approval expired", true)
+		return nil
+	}
+	if refuseStopped(m) { // the credential can be refused while the prompt is open
 		return nil
 	}
 	option := int(key[0] - '1')

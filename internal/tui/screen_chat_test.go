@@ -510,11 +510,57 @@ func TestChatMarksRead(t *testing.T) {
 		return msgs[len(msgs)-1].MessageID == "msg_01away"
 	})
 	p.send(chatTickMsg{}) // sync records a read on this goroutine, before its POST
-	if got := chatOf(m).readTo[chatHark]; got == "msg_01away" {
+	if got := chatOf(m).readAsk[chatHark]; got == "msg_01away" || chatOf(m).readTo[chatHark] == "msg_01away" {
 		t.Fatal("marked read while the tab is hidden")
 	}
 	p.press("2")
 	p.until("read on return", func() bool { return len(a.reads()) == 3 })
+}
+
+// A mark that fails does not stop the unchanged thread being marked later:
+// reopening it, or reloading it, asks again without a new message.
+func TestChatMarkReadRetries(t *testing.T) {
+	t.Run("reopen", func(t *testing.T) {
+		a := chatSeed()
+		a.fail("ReadThread", errors.New("hub restarting"))
+		m, p := chatModel(t, a, newClock())
+		p.until("first mark", func() bool { return len(a.reads()) == 1 })
+		waitToast(t, p, m, "hub restarting")
+		p.send(chatTickMsg{})
+		if n := len(a.reads()); n != 1 {
+			t.Fatalf("a failed mark retried on a tick: %d", n)
+		}
+		a.fail("ReadThread", nil)
+		p.press("]")
+		p.until("the other thread", func() bool { return m.CurrentThread != chatHark })
+		p.run(m.OpenThread(chatHark))
+		p.until("marked on reopen", func() bool {
+			for _, id := range a.reads()[1:] {
+				if id == chatHark {
+					return true
+				}
+			}
+			return false
+		})
+		p.until("recorded", func() bool { return chatOf(m).readTo[chatHark] != "" })
+	})
+	t.Run("reload", func(t *testing.T) {
+		a := chatSeed()
+		a.fail("ReadThread", errors.New("hub restarting"))
+		m, p := chatModel(t, a, newClock())
+		p.until("first mark", func() bool { return len(a.reads()) == 1 })
+		waitToast(t, p, m, "hub restarting")
+		p.idle()
+		a.fail("ReadThread", nil)
+		p.send(reloadMsg{tags: []string{threadPrefix + chatHark}})
+		p.until("marked after the reload", func() bool { return len(a.reads()) == 2 })
+		p.until("recorded", func() bool { return chatOf(m).readTo[chatHark] != "" })
+		p.idle()
+		p.send(Loaded{Key: threadPrefix + chatHark})
+		if n := len(a.reads()); n != 2 {
+			t.Fatalf("read again with nothing new: %d", n)
+		}
+	})
 }
 
 func TestSendFlow(t *testing.T) {
@@ -1776,5 +1822,80 @@ func TestChatHostile(t *testing.T) {
 		p.press("enter")
 		waitToast(t, p, m, "scope_denied")
 		check(t)
+	})
+}
+
+// A stopped client sends nothing more from the chat: not a retained draft, not
+// :msg, not an inline answer. The draft and line stay for after a restart.
+func TestChatStoppedSendsNothing(t *testing.T) {
+	const why = "restart with a valid profile"
+	revoked := &opclient.Error{Status: 401, Code: "unauthenticated", Message: "revoked"}
+	// halt stops the client the way each stop arrives: a 401 from the tail or
+	// a send, or the hub saying the operator is disabled.
+	halt := map[string]func(m *Model){
+		"rejected": func(m *Model) { m.reject(revoked) },
+		"disabled": func(m *Model) { m.onTailDone(opclient.ErrDisabled) },
+	}
+	for name, stop := range halt {
+		want := map[string]string{"rejected": ConnRejected, "disabled": ConnDisabled}[name]
+		t.Run(name+": retained draft enter", func(t *testing.T) {
+			a, m, p := chatOpen(t)
+			p.press("i")
+			typeText(p, "kept")
+			stop(m)
+			if m.Conn != want {
+				t.Fatalf("Conn = %q", m.Conn)
+			}
+			p.press("enter")
+			waitToast(t, p, m, why)
+			if got := a.count("Send"); got != 0 {
+				t.Fatalf("Send calls %d", got)
+			}
+			wantFrame(t, chatFrame(t, m), "kept")
+		})
+		t.Run(name+": :msg", func(t *testing.T) {
+			a, m, p := chatOpen(t)
+			stop(m)
+			p.run(m.Commands["msg"].Run(m, []string{"codex", "hello"}))
+			p.until("the line to reopen", func() bool { return m.Mode == ModeCommand && m.Input == "msg codex hello" })
+			wantFrame(t, chatFrame(t, m), why)
+			if got := a.count("Send"); got != 0 {
+				t.Fatalf("Send calls %d", got)
+			}
+		})
+		t.Run(name+": inline answer", func(t *testing.T) {
+			a, m, p := chatOpen(t)
+			p.press("a")
+			if chatOf(m).prompt == nil {
+				t.Fatal("no prompt")
+			}
+			stop(m)
+			p.press("1")
+			waitToast(t, p, m, why)
+			m.toast.text = ""
+			p.press("a")
+			waitToast(t, p, m, why)
+			if chatOf(m).prompt != nil {
+				t.Fatal("a stopped client opened the prompt")
+			}
+			if got := len(a.answered()); got != 0 {
+				t.Fatalf("answers %d", got)
+			}
+		})
+	}
+	// The send that finds the credential rejected stops the next enter too.
+	t.Run("a rejected send stops the retry", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		a.fail("Send", revoked)
+		p.press("i")
+		typeText(p, "kept")
+		p.press("enter")
+		p.until("rejected", func() bool { return m.Conn == ConnRejected })
+		p.until("send settles", func() bool { return !chatOf(m).draft(m.CurrentThread).sending })
+		p.press("enter")
+		waitToast(t, p, m, why)
+		if got := a.count("Send"); got != 1 {
+			t.Fatalf("Send calls %d", got)
+		}
 	})
 }
