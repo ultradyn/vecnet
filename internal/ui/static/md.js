@@ -12,13 +12,13 @@ export function markdown(text) {
 
 function block(b) {
   switch (b.t) {
-    case 'p': return h('p', {}, b.kids.map(span));
-    case 'h': return h('h' + (b.level + 2), { class: 'md-h' }, b.kids.map(span));
+    case 'p': return h('p', {}, b.kids.flatMap(span));
+    case 'h': return h('h' + (b.level + 2), { class: 'md-h' }, b.kids.flatMap(span));
     case 'code': return h('pre', { class: 'md-pre' }, h('code', { text: b.v }));
     case 'hr': return h('hr', {});
     case 'quote': return h('blockquote', {}, b.kids.map(block));
-    case 'ul': return h('ul', {}, b.items.map(kids => h('li', {}, kids.map(span))));
-    case 'ol': return h('ol', { start: b.start !== 1 ? String(b.start) : null }, b.items.map(kids => h('li', {}, kids.map(span))));
+    case 'ul': return h('ul', {}, b.items.map(kids => h('li', {}, kids.flatMap(span))));
+    case 'ol': return h('ol', { start: b.start !== 1 ? String(b.start) : null }, b.items.map(kids => h('li', {}, kids.flatMap(span))));
     case 'rest': return h('div', { class: 'md-rest', text: b.v });
     default: return null;
   }
@@ -29,10 +29,10 @@ function span(k) {
     case 'text': return k.v;
     case 'br': return h('br', {});
     case 'code': return h('code', { text: k.v });
-    case 'b': return h('strong', {}, k.kids.map(span));
-    case 'i': return h('em', {}, k.kids.map(span));
+    case 'b': return h('strong', {}, k.kids.flatMap(span));
+    case 'i': return h('em', {}, k.kids.flatMap(span));
     case 'a': {
-      const a = h('a', { href: k.href, target: '_blank', rel: 'noopener noreferrer nofollow', title: k.href, class: k.image ? 'md-img' : null }, k.kids.map(span));
+      const a = h('a', { href: k.href, target: '_blank', rel: 'noopener noreferrer nofollow', title: k.href, class: k.image ? 'md-img' : null }, k.kids.flatMap(span));
       return needsHost(k) ? [a, h('span', { class: 'md-host', text: ' (' + k.host + ')' })] : a;
     }
     default: return null;
