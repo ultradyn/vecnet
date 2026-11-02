@@ -346,11 +346,20 @@ Write any step and status files these instructions name as well. You are running
 1. Use the Write tool to write the ASSIGNMENT below, byte for byte, to ${base}.md. Then run \`wc -c ${base}.md\`: it must print ${utf8Bytes(assignment)}, or one more for a trailing newline. If not, write the file again.
 2. Run with Bash: \`${SOL.run} ${preset} ${cwd} ${base}\`. It returns at once.
 3. Run with Bash, passing timeout 600000: \`${SOL.wait} ${base}\`. It prints RUNNING, or DONE <exit> <verdict>. Repeat this step while it prints RUNNING. A long wait is normal; some runs take more than an hour. Do not start a second run while one is going.
-4. On DONE 0 RESULT_OK: read ${base}.result.json and return that object through StructuredOutput with every value unchanged.
-5. On any other DONE line: run step 2 and step 3 once more. If the second run also fails, stop and reply with the DONE line and the last 20 lines of ${base}.log. Do not call StructuredOutput and do not invent a result.
+4. On DONE 0 RESULT_OK: read ${base}.result.json and return {relay_ok: true, detail: "", result: <that object, every value unchanged>}.
+5. On any other DONE line, or if a step fails: run step 2 and step 3 once more. If that fails too, return {relay_ok: false, detail: <the DONE line or error, and the last 20 lines of ${base}.log>} with no result field. Never invent or fill in a result: an empty or guessed result is worse than relay_ok false.
 
 ASSIGNMENT
 ${assignment}`
+}
+
+// A schema-forced agent returns something even when it failed, so failure is a field: relay_ok false, or no result, is no result.
+async function relayed(prompt, opts, cwd, preset, label) {
+  const schema = { type: 'object', properties: { relay_ok: { type: 'boolean' }, detail: { type: 'string' }, result: opts.schema }, required: ['relay_ok', 'detail'] }
+  const r = await agent(relayPrompt(prompt, opts.schema, cwd, preset, `${SOL.dir}/${STAMP}-${slug(label)}`), { ...opts, label, schema, model: RELAY_MODEL, effort: 'low' })
+  if (r && r.relay_ok && r.result) return r.result
+  log(`${label}: relay failed: ${r ? r.detail : 'no result'}`)
+  return null
 }
 
 const slug = t => t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
@@ -360,7 +369,7 @@ async function call(prompt, rawOpts) {
   for (let attempt = 1; attempt <= 2; attempt++) {
     const label = attempt === 1 ? opts.label : `${opts.label} (retry)`
     const r = (SOL && sol)
-      ? await agent(relayPrompt(prompt, opts.schema, cwd || WT, sol, `${SOL.dir}/${STAMP}-${slug(label)}`), { ...opts, label, model: RELAY_MODEL, effort: 'low' })
+      ? await relayed(prompt, opts, cwd || WT, sol, label)
       : await agent(prompt, { model: MODEL, ...opts, label })
     if (r) return r
     log(`${opts.label}: no result on attempt ${attempt}`)
