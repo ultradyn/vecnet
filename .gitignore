@@ -15,6 +15,7 @@ bin/
 backups/
 .scratch/vecnet/build-connectors/
 .scratch/vecnet/build-operator-ui/
+.scratch/vecnet/build-attachments/
 .scratch/vecnet/build-openclaw/
 
 .demo-data/
