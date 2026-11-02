@@ -53,6 +53,10 @@ const (
 	tabSubs
 )
 
+// tabNames are the tabs' stable names, indexed like the tab constants. Titles
+// are for display and may carry counts.
+var tabNames = []string{"inbox", "chat", "dash", "subs"}
+
 // Command is one entry of the command line.
 type Command struct {
 	Help string

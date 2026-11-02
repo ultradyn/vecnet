@@ -527,3 +527,23 @@ func TestSubsLoadStates(t *testing.T) {
 		}
 	})
 }
+
+// :tab subs names the tab by its stable name, while its title carries the count.
+func TestTabCommandSubsWithCount(t *testing.T) {
+	rows := []opapi.Subscription{
+		subsRow("a", "peer_a", opapi.HealthOK, ""),
+		subsRow("b", "peer_b", opapi.HealthPausedOperator, "You paused this subscription."),
+	}
+	m, p := subsLoaded(t, subsFake(rows), newClock())
+	submit(p, "tab inbox")
+	if m.Tab != tabInbox {
+		t.Fatalf("tab inbox: Tab = %d", m.Tab)
+	}
+	submit(p, "tab subs")
+	if m.Tab != tabSubs {
+		t.Fatalf("tab subs: Tab = %d, command line %q", m.Tab, bottomLine(t, m))
+	}
+	if line := strings.Split(plainAt(t, m, 140, 42), "\n")[0]; !strings.Contains(line, "subs 1") {
+		t.Fatalf("top bar lost the count: %q", line)
+	}
+}

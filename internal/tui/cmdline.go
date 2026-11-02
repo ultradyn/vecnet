@@ -326,11 +326,11 @@ func runTab(m *Model, args []string) tea.Cmd {
 	if len(args) != 1 {
 		return usage(m, "tab")
 	}
-	for i, s := range m.screens {
-		if s.Title() == args[0] {
-			m.Tab = i
-			return nil
-		}
+	// Tabs are named by their stable names, never by display titles: the
+	// subs title becomes `subs n` while a subscription needs attention.
+	if i := slices.Index(tabNames, args[0]); i >= 0 && i < len(m.screens) {
+		m.Tab = i
+		return nil
 	}
 	m.Toast("unknown tab: "+args[0], true)
 	return nil
