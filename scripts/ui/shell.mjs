@@ -10,6 +10,7 @@ try {
     // this script provokes: the bad secret, and the views other tasks fill in.
     allowConsole(/status of 401/);
     allowConsole(/status of 501/);
+    allowConsole(/status of 503/);
 
     await page.getByRole('heading', OPERATOR_INBOX).waitFor();
     await shot('07-shell-initial');
@@ -137,6 +138,24 @@ try {
     assert(dom.labels.join() === 'Discard,Really?,Discard,Really?,Discard', `confirmButton labels ${dom.labels}`);
     assert(dom.children === 0, 'h text parsed markup');
 
+    // A hub restart across a page load. The log is fully acked first, so no
+    // event can prompt the refetch: recovery alone has to bring the views back.
+    await page.evaluate(() => { location.hash = '#inbox'; });
+    await page.getByRole('heading', { name: 'Inbox', exact: true }).waitFor();
+    await page.waitForFunction(async secret => {
+      const r = await fetch('/v1/events?wait=0', { headers: { Authorization: `Bearer ${secret}` } });
+      return (await r.json()).events.length === 0;
+    }, demo.operator_secret, { polling: 100 });
+    await fail('**/v1/**', 503, 'unavailable', 'Hub restarting');
+    await page.reload({ waitUntil: 'load' });
+    await page.locator('#conn.off').waitFor();
+    await page.locator('#threads .none', { hasText: 'Threads unavailable' }).waitFor();
+    await page.unroute('**/v1/**');
+    await page.locator('#conn.live').waitFor();
+    await page.locator('#threads a', { hasText: 'hark B196' }).waitFor();
+    await page.getByRole('heading', { name: 'Inbox', exact: true }).waitFor();
+    await page.locator('#view', { hasText: 'Hub restarting' }).waitFor({ state: 'hidden' });
+
     // Review Focus 4: a rotated secret returns to sign-in with no retry storm.
     await fail('**/v1/events*', 401, 'unauthenticated', 'Secret rotated');
     const wake = await asPeer('codex', 'POST', '/v1/messages', { idempotency_key: 'shell-401', thread_id: demo.threads.hark, priority: 'wake', content: { text: 'one more' } });
@@ -147,5 +166,5 @@ try {
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     assert(countRequests('/v1/events') === after401, 'event loop kept polling after 401');
   });
-  console.log('Shell passed: sign-in, routes, pump, reply, hostile text, 401 stop, no CSP violations');
+  console.log('Shell passed: sign-in, routes, pump, reply, hostile text, outage recovery, 401 stop, no CSP violations');
 } finally { await cleanBuild(); }

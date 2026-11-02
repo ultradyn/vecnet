@@ -9,7 +9,7 @@ const api401 = () => new APIError(401, 'unauthenticated', 'no');
 
 // A fake hub. `script` holds one entry per /v1/events call: a value is
 // returned, an Error is thrown, a function is called. When the script runs out
-// the pump is aborted, so a test can only hang on a real defect.
+// the pump is aborted, so a run ends without the test having to stop it.
 function hub(script, { onAck = () => {} } = {}) {
   const calls = [], acks = [], sleeps = [];
   const controller = new AbortController();
@@ -34,6 +34,13 @@ function deferred() {
   let resolve, reject;
   const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
+}
+const turn = () => new Promise(resolve => setImmediate(resolve));
+// Counts event-loop turns, not time, and fails the test that was waiting: these
+// loaders only ever need a few turns, and node --test has no default timeout.
+async function until(cond) {
+  for (let i = 0; i < 1000 && !cond(); i++) await turn();
+  assert.ok(cond(), 'never happened: ' + cond);
 }
 
 test('tagsFor matches internal/opapi/testdata/tags.json row for row', () => {
@@ -96,8 +103,8 @@ test('batch: invalidates, awaits reload, then acks; ack never precedes settled',
   });
   const running = h.run();
   // The load is parked on the gate: give the pump every chance to ack early.
-  while (!order.includes('load')) await new Promise(resolve => setImmediate(resolve));
-  for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+  await until(() => order.includes('load'));
+  for (let i = 0; i < 20; i++) await turn();
   assert.deepEqual(h.acks, []);
   assert.equal(resource.loading(), true);
   gate.resolve();
@@ -169,8 +176,8 @@ test('409 re-syncs before it resumes', async () => {
   let started = false;
   h.store.resource('inbox', async () => { started = true; await gate.promise; });
   const running = h.run();
-  while (!started) await new Promise(resolve => setImmediate(resolve));
-  for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+  await until(() => started);
+  for (let i = 0; i < 20; i++) await turn();
   assert.equal(h.calls.length, 1);
   gate.resolve();
   await running;
@@ -228,6 +235,62 @@ test('a 200 with no readable body backs off and retries; only a real 204 stops',
   assert.deepEqual(conns, ['offline', 'live', 'stopped']);
 });
 
+test('a poll that answers retries what failed, with no event to prompt it', async () => {
+  const quiet = { events: [], next_cursor: 'e1.1' };
+  for (const script of [
+    [new APIError(503, 'unavailable', 'restarting'), quiet, quiet], // a hub restart over a page load
+    [quiet, quiet],                                                  // back before the first poll
+  ]) {
+    const h = hub(script);
+    let fail = true, loads = 0;
+    const resource = h.store.resource('threads', async () => {
+      loads++;
+      if (fail) throw new Error('hub down');
+      return loads;
+    });
+    await resource.reload();
+    assert.equal(resource.error().message, 'hub down');
+    fail = false;
+    await h.run();
+    await h.store.settled();
+    assert.equal(resource.error(), null);
+    assert.equal(resource.get(), 2);
+    assert.equal(loads, 2);
+  }
+});
+
+test('a poll reloads only what failed, and a resource that keeps failing costs one load a poll', async () => {
+  const quiet = { events: [], next_cursor: 'e1.1' };
+  // Each poll answers once the last one's retry has finished, as a real long-poll would.
+  const poll = async () => { await h.store.settled(); return quiet; };
+  const h = hub([poll, poll, poll]);
+  const loads = { good: 0, bad: 0 };
+  const good = h.store.resource('peers', async () => ++loads.good);
+  const bad = h.store.resource('inbox', async () => { loads.bad++; throw new APIError(501, 'not_implemented', 'later'); });
+  await good.reload();
+  await bad.reload();
+  await h.run();
+  await h.store.settled();
+  assert.equal(loads.good, 1);
+  assert.equal(loads.bad, 4);
+  assert.deepEqual(h.sleeps, []);
+});
+
+test('a load that fails during a batch is still acked, then retried by the next poll', async () => {
+  const h = hub([{ events: [delivery('thr_1')], next_cursor: 'e1.5' }, { events: [], next_cursor: 'e1.5' }]);
+  let loads = 0;
+  const history = h.store.resource('thread:thr_1', async () => {
+    if (++loads === 1) throw new APIError(503, 'unavailable', 'blip');
+    return loads;
+  });
+  await h.run();
+  await h.store.settled();
+  assert.deepEqual(h.acks, ['e1.5']);
+  assert.equal(loads, 2);
+  assert.equal(history.get(), 2);
+  assert.equal(history.error(), null);
+});
+
 test('5xx backs off 1,2,4…30 s with fake sleep; success resets', async () => {
   const down = () => new APIError(503, 'unavailable', 'down');
   const states = [];
@@ -257,8 +320,8 @@ test('aborting stops the loop, parks nothing and does not ack', async () => {
   const h = hub([{ events: [delivery('thr_1')], next_cursor: 'e1.1' }]);
   h.store.resource('inbox', async () => { await gate.promise; });
   const running = h.run();
-  while (!h.calls.length) await new Promise(resolve => setImmediate(resolve));
-  for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  await until(() => h.calls.length > 0);
+  for (let i = 0; i < 5; i++) await turn();
   h.controller.abort();
   await running;
   assert.deepEqual(h.acks, []);
@@ -322,13 +385,13 @@ test('an invalidate during a load reloads once more, with no overlapping loads',
     return loads;
   });
   store.invalidate('peers');
-  while (!loads) await new Promise(resolve => setImmediate(resolve));
+  await until(() => loads > 0);
   store.invalidate('peers');
   store.invalidate('peers');
   let settled = false;
   const done = store.settled().then(() => { settled = true; });
   gates[0].resolve();
-  while (loads < 2) await new Promise(resolve => setImmediate(resolve));
+  await until(() => loads >= 2);
   assert.equal(settled, false);
   gates[1].resolve();
   await done;
@@ -401,6 +464,40 @@ test('a resource whose last subscriber left stops loading, and reloads when it r
   await store.settled();
   assert.equal(loads, 2);
   again();
+});
+
+test('a load that ends after the last subscriber left does not make the resource current', async () => {
+  const store = createStore({ api: {} });
+  const gate = deferred();
+  let loads = 0, version = 1;
+  const resource = store.resource('inbox', async () => {
+    const seen = version;
+    if (++loads === 1) await gate.promise;
+    return seen;
+  });
+  const off = resource.subscribe(() => {});
+  await until(() => loads === 1);
+  off();
+  version = 2;
+  store.invalidate('inbox');
+  gate.resolve();
+  await store.settled();
+  const again = resource.subscribe(() => {});
+  await store.settled();
+  assert.equal(loads, 2);
+  assert.equal(resource.get(), 2);
+  again();
+});
+
+test('a resource loaded before its first subscriber is not loaded again for it', async () => {
+  const store = createStore({ api: {} });
+  let loads = 0;
+  const resource = store.resource('inbox', async () => ++loads);
+  await resource.reload();
+  const off = resource.subscribe(() => {});
+  await store.settled();
+  assert.equal(loads, 1);
+  off();
 });
 
 test('hubNow applies the setHubNow offset with a client clock 5 min off', () => {

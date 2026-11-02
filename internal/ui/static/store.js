@@ -83,7 +83,9 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
         try {
           value = await loader();
           err = null;
-          stale = false;
+          // Invalidations do not reach a resource nobody is listening to, so a
+          // load that ends then may already be behind.
+          if (live.has(self)) stale = false;
           if (isObject(value) && typeof value.now === 'string') setHubNow(value.now);
         } catch (e) { err = e; }
         notify();
@@ -140,8 +142,14 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
   function invalidateAll() {
     for (const r of live) r.mark();
   }
+  // A hub that answers can serve what it could not before. Nothing else would
+  // ask again: the batch that prompted a failed load has been acked, and a
+  // first load that failed had no event behind it at all.
+  function retryFailed() {
+    for (const r of live) if (r.error()) r.mark();
+  }
   // Resolves once nothing is queued or loading. A failed load counts: its
-  // error sits on the resource, and a retry is not this caller's to wait for.
+  // error sits on the resource, and the pump's next poll retries it.
   async function settled() {
     await null;
     while (flushQueued || inflight.size) await Promise.allSettled(inflight);
@@ -167,6 +175,7 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
         first = false;
         backoff = BACKOFF_FIRST;
         setConn('live');
+        retryFailed();
         after = page.next_cursor || after;
         const events = page.events || [];
         if (!events.length) continue;

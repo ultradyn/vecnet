@@ -152,10 +152,7 @@ function start(secret) {
   $('view').replaceChildren(h('div', { class: 'loading', text: 'Connecting to the hub…' }));
   renderConn(store);
   s.offs.push(
-    store.onConn(state => {
-      renderConn(store);
-      if (state === 'live' && !peers.get()) peers.reload();
-    }),
+    store.onConn(() => renderConn(store)),
     threads.subscribe(redraw),
     inboxHead.subscribe(redraw),
     peers.subscribe(redraw),
@@ -166,6 +163,7 @@ function start(secret) {
 
   // The pump waits for the directory so conn stays "connecting" until the
   // shell can show something, and a rejected secret never reaches the loop.
+  // If the hub is down, the pump's first answered poll retries all three views.
   peers.reload().then(() => {
     if (session === s) store.pump(stop.signal);
   });
