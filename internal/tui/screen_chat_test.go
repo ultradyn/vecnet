@@ -3,6 +3,8 @@ package tui
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1898,4 +1900,495 @@ func TestChatStoppedSendsNothing(t *testing.T) {
 			t.Fatalf("Send calls %d", got)
 		}
 	})
+}
+
+// chatAttFile writes a file to attach and returns its path.
+func chatAttFile(t *testing.T, name, data string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func chatSum(data string) string {
+	sum := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(sum[:])
+}
+
+// chatAttsOf is the open thread's chips.
+func chatAttsOf(m *Model) []chatAtt { return chatOf(m).draft(m.CurrentThread).atts }
+
+// chatAttach runs :attach path from Normal mode.
+func chatAttach(p *pump, path string) {
+	p.t.Helper()
+	submit(p, "attach "+path)
+}
+
+// chatAttsSettled waits until the open thread has n chips, none uploading.
+func chatAttsSettled(t *testing.T, p *pump, m *Model, n int) {
+	t.Helper()
+	p.until(fmt.Sprintf("%d settled chips", n), func() bool {
+		atts := chatAttsOf(m)
+		if len(atts) != n {
+			return false
+		}
+		for _, att := range atts {
+			if att.state == chatAttUploading {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+// chatDraftKept types text, leaves Insert, and returns, so a refusal can be
+// checked against a draft that already holds something.
+func chatDraftKept(p *pump, text string) {
+	p.t.Helper()
+	p.press("i")
+	typeText(p, text)
+	p.press("esc")
+}
+
+// chatRefusedAttach checks a refusal before upload: a bad toast holding want,
+// no Upload call, no chip and the draft's text unchanged.
+func chatRefusedAttach(t *testing.T, a *chatAPI, m *Model, want, draft string) {
+	t.Helper()
+	if !strings.Contains(m.toast.text, want) || !m.toast.bad {
+		t.Fatalf("toast %q (bad %v), want %q", m.toast.text, m.toast.bad, want)
+	}
+	if got := a.count("Upload"); got != 0 {
+		t.Fatalf("Upload calls %d", got)
+	}
+	if got := len(chatAttsOf(m)); got != 0 {
+		t.Fatalf("%d chips", got)
+	}
+	if got := chatOf(m).draft(m.CurrentThread).text; got != draft {
+		t.Fatalf("draft %q, want %q", got, draft)
+	}
+	frame := chatFrame(t, m)
+	assertFrame(t, frame, 140, 42)
+	wantFrame(t, frame, draft)
+}
+
+func TestAttachMissingFile(t *testing.T) {
+	a, m, p := chatOpen(t)
+	chatDraftKept(p, "keep me")
+	missing := filepath.Join(t.TempDir(), "nope.txt")
+	chatAttach(p, missing)
+	chatRefusedAttach(t, a, m, "no such file", "keep me")
+	if !strings.Contains(m.toast.text, missing) {
+		t.Fatalf("toast %q does not name the path", m.toast.text)
+	}
+
+	t.Run("no open thread", func(t *testing.T) {
+		a := chatSeed()
+		a.threads = opapi.ThreadPage{}
+		m := newTestModel(t, a, newClock())
+		p := newPump(t, m)
+		p.send(tea.WindowSizeMsg{Width: 140, Height: 42})
+		p.run(m.Init())
+		p.until("first load", func() bool { return !m.firstLoading() })
+		p.idle()
+		p.press("2")
+		chatAttach(p, chatAttFile(t, "a.txt", "a"))
+		if !strings.Contains(m.toast.text, "no thread open") || a.count("Upload") != 0 {
+			t.Fatalf("toast %q, Upload calls %d", m.toast.text, a.count("Upload"))
+		}
+	})
+}
+
+func TestAttachDirectory(t *testing.T) {
+	a, m, p := chatOpen(t)
+	chatDraftKept(p, "keep me")
+	dir := t.TempDir()
+	chatAttach(p, dir)
+	chatRefusedAttach(t, a, m, "is a directory", "keep me")
+}
+
+func TestAttachTooLarge(t *testing.T) {
+	a, m, p := chatOpen(t)
+	chatDraftKept(p, "keep me")
+	path := filepath.Join(t.TempDir(), "huge.bin")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(25<<20 + 1); err != nil { // sparse: no 25 MiB written
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	chatAttach(p, path)
+	chatRefusedAttach(t, a, m, "over the 25 MiB limit", "keep me")
+	if got := len(a.uploaded()); got != 0 {
+		t.Fatalf("the fake saw %d uploads", got)
+	}
+
+	t.Run("exactly 25 MiB is allowed", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		release := a.hold("Upload") // the bytes are never read
+		defer release()
+		path := filepath.Join(t.TempDir(), "edge.bin")
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(path, 25<<20); err != nil {
+			t.Fatal(err)
+		}
+		chatAttach(p, path)
+		p.until("upload", func() bool { return a.count("Upload") == 1 })
+		if atts := chatAttsOf(m); len(atts) != 1 || atts[0].size != 25<<20 {
+			t.Fatalf("chips %+v", atts)
+		}
+	})
+}
+
+func TestAttachPathWithSpaceAndTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.Mkdir(filepath.Join(home, "my docs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "my docs", "q3 report.txt"), []byte("quarterly"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, m, p := chatOpen(t)
+	chatAttach(p, "~/my docs/q3 report.txt")
+	chatAttsSettled(t, p, m, 1)
+	atts := chatAttsOf(m)
+	if atts[0].state != chatAttDone || atts[0].name != "q3 report.txt" || atts[0].sha != chatSum("quarterly") {
+		t.Fatalf("chip %+v", atts[0])
+	}
+	ups := a.uploaded()
+	if len(ups) != 1 || ups[0].name != "q3 report.txt" || ups[0].media != "text/plain" || string(ups[0].data) != "quarterly" || ups[0].size != 9 {
+		t.Fatalf("uploads %+v", ups)
+	}
+	frame := chatFrame(t, m)
+	assertFrame(t, frame, 140, 42)
+	wantFrame(t, frame, "[+] q3 report.txt 9 B")
+
+	// The command line splits on whitespace, so a run of spaces in a path is
+	// one space: a typed double space still finds the file...
+	chatAttach(p, "~/my  docs/q3   report.txt")
+	chatAttsSettled(t, p, m, 2)
+	// ...and a name that holds a double space cannot be reached, as the help
+	// says.
+	if err := os.WriteFile(filepath.Join(home, "a  b.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.toast = toast{}
+	chatAttach(p, "~/a  b.txt")
+	if !strings.Contains(m.toast.text, "no such file") || a.count("Upload") != 2 || len(chatAttsOf(m)) != 2 {
+		t.Fatalf("toast %q, uploads %d, chips %d", m.toast.text, a.count("Upload"), len(chatAttsOf(m)))
+	}
+	help := m.Commands["attach"].Help
+	if !strings.Contains(help, "~/") || !strings.Contains(help, "spaces") {
+		t.Fatalf("help %q does not explain ~/ and spaces", help)
+	}
+	if _, ok := m.Commands["detach"]; !ok {
+		t.Fatal(":detach is not registered")
+	}
+
+	t.Run("attach alone lists the chips", func(t *testing.T) {
+		m.toast = toast{}
+		submit(p, "attach")
+		if !strings.Contains(m.toast.text, "1 [+] q3 report.txt 9 B") || !strings.Contains(m.toast.text, "2 [+] q3 report.txt") || m.toast.bad {
+			t.Fatalf("toast %q", m.toast.text)
+		}
+		submit(p, "detach")
+		m.toast = toast{}
+		submit(p, "attach")
+		if !strings.Contains(m.toast.text, "no attachments") {
+			t.Fatalf("toast %q", m.toast.text)
+		}
+	})
+}
+
+func TestAttachRetryKeepsKey(t *testing.T) {
+	a, m, p := chatOpen(t)
+	chatAttach(p, chatAttFile(t, "log.txt", "log line"))
+	chatAttsSettled(t, p, m, 1)
+	a.fail("Send", errors.New("dial tcp: connection refused"))
+	p.press("i")
+	typeText(p, "see attached")
+	d := chatOf(m).draft(chatHark)
+	settled := func(n int) {
+		t.Helper()
+		p.until(fmt.Sprintf("send %d", n), func() bool { return len(a.sends()) == n && !d.sending })
+	}
+	p.press("enter")
+	settled(1)
+	p.press("enter")
+	settled(2)
+	a.fail("Send", nil)
+	p.press("enter")
+	settled(3)
+	waitToast(t, p, m, "sent")
+	want := []envelope.Attachment{{SHA256: chatSum("log line"), Size: 8, MediaType: "text/plain", Name: "log.txt"}}
+	sent := a.sends()
+	for i, r := range sent {
+		if r.IdempotencyKey != sent[0].IdempotencyKey {
+			t.Fatalf("send %d key %q, want %q", i, r.IdempotencyKey, sent[0].IdempotencyKey)
+		}
+		if fmt.Sprint(r.Attachments) != fmt.Sprint(want) || r.Content.Text != "see attached" {
+			t.Fatalf("send %d: %+v", i, r)
+		}
+	}
+	if len(d.atts) != 0 || d.text != "" {
+		t.Fatalf("a landed send left chips %+v, text %q", d.atts, d.text)
+	}
+	refuseFrame(t, chatFrame(t, m), "[+] log.txt")
+	if got := a.count("Upload"); got != 1 {
+		t.Fatalf("a retry uploaded again: %d uploads", got)
+	}
+}
+
+func TestDetachMintsNewKey(t *testing.T) {
+	a, m, p := chatOpen(t)
+	chatAttach(p, chatAttFile(t, "a.txt", "aaa"))
+	chatAttach(p, chatAttFile(t, "b.txt", "bbb"))
+	chatAttsSettled(t, p, m, 2)
+	a.fail("Send", errors.New("connection refused"))
+	d := chatOf(m).draft(chatHark)
+	settled := func(n int) {
+		t.Helper()
+		p.until(fmt.Sprintf("send %d", n), func() bool { return len(a.sends()) == n && !d.sending })
+	}
+	p.press("i")
+	typeText(p, "two files")
+	p.press("enter")
+	settled(1)
+	p.press("esc")
+
+	submit(p, "detach 5")
+	if !strings.Contains(m.toast.text, "no attachment 5") || len(d.atts) != 2 {
+		t.Fatalf("toast %q, %d chips", m.toast.text, len(d.atts))
+	}
+	submit(p, "detach 1")
+	if len(d.atts) != 1 || d.atts[0].name != "b.txt" {
+		t.Fatalf("chips %+v", d.atts)
+	}
+	p.press("i", "enter")
+	settled(2)
+	sent := a.sends()
+	if sent[1].IdempotencyKey == sent[0].IdempotencyKey {
+		t.Fatal("removing a chip kept the key")
+	}
+	if len(sent[1].Attachments) != 1 || sent[1].Attachments[0].SHA256 != chatSum("bbb") || len(sent[0].Attachments) != 2 {
+		t.Fatalf("attachments %+v then %+v", sent[0].Attachments, sent[1].Attachments)
+	}
+	p.press("enter") // unchanged: the same request
+	settled(3)
+	if a.sends()[2].IdempotencyKey != sent[1].IdempotencyKey {
+		t.Fatal("an unchanged retry minted a key")
+	}
+
+	p.press("esc")
+	submit(p, "detach")
+	if len(d.atts) != 0 {
+		t.Fatalf("detach left %+v", d.atts)
+	}
+	p.press("i", "enter")
+	settled(4)
+	last := a.sends()[3]
+	if last.IdempotencyKey == sent[0].IdempotencyKey || last.IdempotencyKey == sent[1].IdempotencyKey || len(last.Attachments) != 0 || last.Content.Text != "two files" {
+		t.Fatalf("after detach all: %+v", last)
+	}
+}
+
+func TestDetachByIDAfterShift(t *testing.T) {
+	a, m, p := chatOpen(t)
+	release := a.hold("Upload")
+	chatAttach(p, chatAttFile(t, "one.txt", "one"))
+	chatAttach(p, chatAttFile(t, "two.txt", "two"))
+	p.until("both uploads", func() bool { return a.count("Upload") == 2 })
+	submit(p, "detach 1")
+	if atts := chatAttsOf(m); len(atts) != 1 || atts[0].name != "two.txt" {
+		t.Fatalf("chips %+v", atts)
+	}
+	release()
+	chatAttsSettled(t, p, m, 1)
+	p.idle()
+	atts := chatAttsOf(m)
+	if atts[0].name != "two.txt" || atts[0].state != chatAttDone || atts[0].sha != chatSum("two") || atts[0].err != "" {
+		t.Fatalf("chip %+v", atts[0])
+	}
+	if ups := a.uploaded(); len(ups) != 1 || ups[0].name != "two.txt" {
+		t.Fatalf("the detached upload went on: %+v", ups)
+	}
+	if m.toast.bad {
+		t.Fatalf("the cancelled upload reported: %q", m.toast.text)
+	}
+	wantFrame(t, chatFrame(t, m), "[+] two.txt 3 B")
+}
+
+func TestAttachmentOnlySend(t *testing.T) {
+	a, m, p := chatOpen(t)
+	chatAttach(p, chatAttFile(t, "shot.png", "\x89PNG"))
+	chatAttsSettled(t, p, m, 1)
+	p.press("i", "enter")
+	waitToast(t, p, m, "sent")
+	sent := a.sends()
+	if len(sent) != 1 {
+		t.Fatalf("%d sends", len(sent))
+	}
+	want := []envelope.Attachment{{SHA256: chatSum("\x89PNG"), Size: 4, MediaType: "image/png", Name: "shot.png"}}
+	if sent[0].Content.Text != "" || fmt.Sprint(sent[0].Attachments) != fmt.Sprint(want) {
+		t.Fatalf("request %+v", sent[0])
+	}
+	if got := chatAttsOf(m); len(got) != 0 {
+		t.Fatalf("chips left %+v", got)
+	}
+	p.press("enter") // nothing left to send
+	p.idle()
+	if got := len(a.sends()); got != 1 {
+		t.Fatalf("%d sends", got)
+	}
+}
+
+func TestSendRefusedWhileUploading(t *testing.T) {
+	a, m, p := chatOpen(t)
+	release := a.hold("Upload")
+	chatAttach(p, chatAttFile(t, "big.txt", "big"))
+	p.until("upload", func() bool { return a.count("Upload") == 1 })
+	frame := chatFrame(t, m)
+	assertFrame(t, frame, 140, 42)
+	wantFrame(t, frame, "[..] big.txt 0%")
+	p.press("i")
+	typeText(p, "with a file")
+	p.press("enter")
+	waitToast(t, p, m, "uploading")
+	if !m.toast.bad || a.count("Send") != 0 {
+		t.Fatalf("toast %q, Send calls %d", m.toast.text, a.count("Send"))
+	}
+	wantFrame(t, chatFrame(t, m), "with a file")
+	release()
+	chatAttsSettled(t, p, m, 1)
+	p.press("enter")
+	waitToast(t, p, m, "sent")
+	if sent := a.sends(); len(sent) != 1 || len(sent[0].Attachments) != 1 || sent[0].Content.Text != "with a file" {
+		t.Fatalf("sends %+v", sent)
+	}
+
+	t.Run("a failed chip refuses too", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		a.fail("Upload", errors.New("connection reset by peer"))
+		chatAttach(p, chatAttFile(t, "bad.txt", "bad"))
+		chatAttsSettled(t, p, m, 1)
+		frame := chatFrame(t, m)
+		assertFrame(t, frame, 140, 42)
+		wantFrame(t, frame, "[x] bad.txt: connection reset by peer")
+		p.press("i")
+		typeText(p, "kept")
+		p.press("enter")
+		waitToast(t, p, m, ":detach 1")
+		if a.count("Send") != 0 {
+			t.Fatal("sent with a failed chip")
+		}
+		p.press("esc")
+		submit(p, "detach 1")
+		p.press("i", "enter")
+		waitToast(t, p, m, "sent")
+		if sent := a.sends(); len(sent) != 1 || len(sent[0].Attachments) != 0 || sent[0].Content.Text != "kept" {
+			t.Fatalf("sends %+v", sent)
+		}
+	})
+}
+
+func TestSendRefusedSpillSlot(t *testing.T) {
+	const slot = "Remove one attachment or shorten the text: the long text needs an attachment slot."
+	a, m, p := chatOpen(t)
+	dir := t.TempDir()
+	for i := range 16 {
+		path := filepath.Join(dir, fmt.Sprintf("f%02d.txt", i))
+		if err := os.WriteFile(path, []byte(fmt.Sprint(i)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		chatAttach(p, path)
+	}
+	chatAttsSettled(t, p, m, 16)
+	frame := chatFrame(t, m)
+	assertFrame(t, frame, 140, 42)
+	wantFrame(t, frame, "[+] f00.txt", "more")
+
+	// A 17th is refused before upload, the draft intact.
+	chatAttach(p, chatAttFile(t, "f16.txt", "x"))
+	if !strings.Contains(m.toast.text, "at most 16") || a.count("Upload") != 16 || len(chatAttsOf(m)) != 16 {
+		t.Fatalf("toast %q, uploads %d, chips %d", m.toast.text, a.count("Upload"), len(chatAttsOf(m)))
+	}
+
+	long := strings.Repeat("a", 4097)
+	p.press("i")
+	p.send(tea.PasteMsg{Content: long})
+	p.press("enter")
+	waitToast(t, p, m, slot)
+	if a.count("Send") != 0 || chatOf(m).draft(chatHark).text != long || len(chatAttsOf(m)) != 16 {
+		t.Fatal("the spill refusal sent or changed the draft")
+	}
+	// Fifteen leave the slot free.
+	p.press("esc")
+	submit(p, "detach 16")
+	p.press("i", "enter")
+	waitToast(t, p, m, "sent")
+	if sent := a.sends(); len(sent) != 1 || len(sent[0].Attachments) != 15 {
+		t.Fatalf("sends %d", len(sent))
+	}
+
+	t.Run("the hub's 413 says the same", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		chatAttach(p, chatAttFile(t, "one.txt", "1"))
+		chatAttsSettled(t, p, m, 1)
+		a.fail("Send", &opclient.Error{Status: 413, Code: "payload_too_large", Message: "too many attachments", Details: map[string]any{"field": "attachments", "limit": float64(15)}})
+		p.press("i")
+		typeText(p, "kept")
+		p.press("enter")
+		waitToast(t, p, m, slot)
+		wantFrame(t, chatFrame(t, m), "kept", "[+] one.txt")
+	})
+}
+
+func TestAttachQuotaExceededShowsRetry(t *testing.T) {
+	a, m, p := chatOpen(t)
+	a.fail("Upload", &opclient.Error{Status: 429, Code: "upload_quota_exceeded", Message: "daily upload quota exceeded", Details: map[string]any{"limit": float64(500 << 20), "retry_after_seconds": float64(3600)}})
+	chatDraftKept(p, "keep me")
+	chatAttach(p, chatAttFile(t, "q.png", "png"))
+	chatAttsSettled(t, p, m, 1)
+	att := chatAttsOf(m)[0]
+	if att.state != chatAttFailed {
+		t.Fatalf("chip %+v", att)
+	}
+	// 07:41 on the test clock, in UTC, plus an hour.
+	frame := chatFrame(t, m)
+	assertFrame(t, frame, 140, 42)
+	wantFrame(t, frame, "[x] q.png: upload_quota_exceeded: daily upload quota exceeded (retry after 3600s, at 08:41)", "keep me")
+	if !m.toast.bad || !strings.Contains(m.toast.text, "08:41") {
+		t.Fatalf("toast %q", m.toast.text)
+	}
+}
+
+func TestAttachTooLargeFromHub(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		details map[string]any
+		want    string
+	}{
+		{"with the limit", map[string]any{"limit": float64(1 << 20)}, "[x] big.bin: too large, the hub's limit is 1.0 MiB"},
+		{"without it", map[string]any{}, "[x] big.bin: too large, the hub's limit is 25.0 MiB"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, m, p := chatOpen(t)
+			a.fail("Upload", &opclient.Error{Status: 413, Code: "blob_too_large", Message: "blob exceeds the per-blob cap", Details: tc.details})
+			chatDraftKept(p, "keep me")
+			chatAttach(p, chatAttFile(t, "big.bin", "bytes"))
+			chatAttsSettled(t, p, m, 1)
+			if chatAttsOf(m)[0].state != chatAttFailed {
+				t.Fatalf("chip %+v", chatAttsOf(m)[0])
+			}
+			wantFrame(t, chatFrame(t, m), tc.want, "keep me")
+		})
+	}
 }
