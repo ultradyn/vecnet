@@ -44,7 +44,7 @@ try {
     await card(dlNet).waitFor();
     await page.locator('#inbox-held').waitFor();
     const headings = await page.locator('#view h2 > span:first-child').allTextContents();
-    assert(headings.join('|') === 'Needs a decision|Failed deliveries|Woke you|Held', `section order ${headings.join('|')}`);
+    assert(headings.join('|') === 'Needs a decision|Failed deliveries|Subscriptions|Woke you|Held', `section order ${headings.join('|')}`);
     assert(await page.locator('#view .item.apr').count() === 2, 'two open approvals expected');
     assert(await page.locator('#inbox-approvals .n').textContent() === '2 open', 'approval count label');
     assert(await page.locator('#inbox-dead_letters .n').textContent() === '3 dead letters', 'dead letter count label');
@@ -215,6 +215,25 @@ try {
         return [...ids('woke'), ...ids('held')];
       };
       const shownRows = () => page.locator('#view a.item').evaluateAll(as => as.map(a => a.dataset.id));
+      // The hub's own workers add deliveries too (each clock move can expire
+      // something, and its notice arrives on the next sweep), so the page is
+      // compared with the hub once it has caught up with a hub snapshot that
+      // held still across the comparison. A row the page never shows fails.
+      const matchHub = async (rows, outOfOrder) => {
+        for (let round = 0; ; round++) {
+          assert(round < 5, 'the hub inbox never held still for the comparison');
+          try {
+            await page.waitForFunction(ids => ids.every(id => document.querySelector(`#view a.item[data-id="${id}"]`)), rows);
+          } catch {
+            const shownNow = await shownRows();
+            assert(false, `rows went missing after the head moved: ${rows.filter(id => !shownNow.includes(id)).join(', ')}`);
+          }
+          const shown = await shownRows(), now = await hubRows();
+          if (now.join() !== rows.join()) { rows = now; continue; }
+          assert(shown.join() === rows.join(), outOfOrder);
+          return rows;
+        }
+      };
       const more = page.getByRole('button', { name: 'Load older', exact: true });
       await page.locator('#view a.item', { hasText: 'Older note 59' }).waitFor();
       await more.waitFor();
@@ -223,17 +242,12 @@ try {
       await more.click();
       await more.waitFor({ state: 'detached' });
       await page.locator(`#view a.item[data-id="${before[before.length - 1]}"]`).waitFor();
-      assert((await shownRows()).join() === before.join(), 'older page did not join the head');
+      await matchHub(before, 'older page did not join the head');
 
       await advance('61m');
       await say('inbox-older-new', 'Newest note');
       await page.locator('#view a.item', { hasText: 'Newest note' }).waitFor();
-      const after = await hubRows();
-      await page.locator(`#view a.item[data-id="${after[after.length - 1]}"]`).waitFor();
-      const shown = await shownRows();
-      const missing = after.filter(id => !shown.includes(id));
-      assert(!missing.length, `rows went missing after the head moved: ${missing.join(', ')}`);
-      assert(shown.join() === after.join(), 'rows out of order after the head moved');
+      await matchHub(await hubRows(), 'rows out of order after the head moved');
       console.log('ok - load older keeps every row while new deliveries shift the head');
     }
   });

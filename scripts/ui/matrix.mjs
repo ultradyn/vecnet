@@ -49,7 +49,11 @@ try {
     await page.route('**/__keep-interception__', route => route.continue());
 
     const hark = demo.threads.hark;
+    // Opening the thread marks it read; the hub's answer settles the receipt
+    // states the matrix is checked against below.
+    const readDone = page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith(`/v1/admin/threads/${hark}/read`));
     await page.evaluate(id => { location.hash = '#thread/' + id; }, hark);
+    await readDone;
     await page.locator('.msg').first().waitFor();
     await page.locator('#conn.live').waitFor();
     const open = await opener(page, hark);
@@ -71,9 +75,17 @@ try {
     assert(await page.locator('dialog.mx .mx-m').count() === before.rows.length, 'one row per message');
     assert(await page.locator('dialog.mx .mx-grid').evaluate(el => el.style.getPropertyValue('--cols')) === String(before.recipients.length), '--cols is not the recipient count');
     const cells = before.rows.flatMap(r => r.cells);
+    // Opening the thread marks it read, so the hub can be a step ahead of the
+    // first grid; the open matrix reloads on the thread tag and must catch up.
     for (const c of cells) {
-      const st = await page.locator(`dialog.mx .mx-b[data-dly="${c.delivery_id}"]`).getAttribute('data-state');
-      assert(st === c.display, `cell ${c.delivery_id} shows ${st}, hub says ${c.display}`);
+      try {
+        await page.locator(`dialog.mx .mx-b[data-dly="${c.delivery_id}"][data-state="${c.display}"]`).waitFor();
+      } catch (e) {
+        // Say what each side holds now, so a mismatch names its cause.
+        const shown = await page.evaluate(id => document.querySelector(`dialog.mx .mx-b[data-dly="${id}"]`)?.dataset.state ?? 'absent', c.delivery_id);
+        const now = (await (await asPeer('operator', 'GET', `/v1/admin/threads/${hark}/deliveries`)).json()).rows.flatMap(r => r.cells).find(x => x.delivery_id === c.delivery_id);
+        throw new Error(`cell ${c.delivery_id} shows ${shown}, hub said ${c.display} and now says ${now && now.display}: ${e.message.split('\n')[0]}`);
+      }
     }
     // The attribute is not the colour: each state's cell paints its st-* token.
     const paints = await page.evaluate(states => states.map(state => {
@@ -195,11 +207,14 @@ try {
     assert(m.pw <= m.iw && m.ph <= m.ih, `page overflows: ${m.pw}x${m.ph} in ${m.iw}x${m.ih}`);
     assert(m.d[0] >= 0 && m.d[1] >= 0 && m.d[2] <= 1440 && m.d[3] <= 900, `dialog leaves the viewport: ${m.d}`);
     // Sticky first column: scrolled right, the message column stays put.
-    const left = () => page.locator('dialog.mx .mx-m').first().evaluate(el => el.getBoundingClientRect().left);
+    // Queried and measured in one page-side step: a reload redraws the grid,
+    // and a handle resolved just before it measures a detached node as 0.
+    const left = () => page.evaluate(() => document.querySelector('dialog.mx .mx-m').getBoundingClientRect().left);
     const x0 = await left();
     await page.locator('dialog.mx .mx-scroll').evaluate(el => { el.scrollLeft = el.scrollWidth; });
     await page.waitForFunction(() => document.querySelector('dialog.mx .mx-scroll').scrollLeft > 0);
-    assert(Math.abs(await left() - x0) < 1, 'first column scrolled away');
+    const x1 = await left();
+    assert(Math.abs(x1 - x0) < 1, `first column scrolled away: ${x0} → ${x1}`);
     assert(await page.locator('dialog.mx .mx-h').last().isVisible(), 'last column unreachable');
     ok('64 recipients scroll inside the dialog with no page overflow');
 
@@ -214,11 +229,12 @@ try {
     await page.waitForFunction(() => document.querySelectorAll('dialog.mx .mx-m').length === 500);
     await more.waitFor({ state: 'hidden' });
     // Sticky header: scrolled down, the recipient row stays at the top.
-    const top = () => page.locator('dialog.mx .mx-h').first().evaluate(el => el.getBoundingClientRect().top);
+    const top = () => page.evaluate(() => document.querySelector('dialog.mx .mx-h').getBoundingClientRect().top);
     const y0 = await top();
     await page.locator('dialog.mx .mx-scroll').evaluate(el => { el.scrollTop = el.scrollHeight; });
     await page.waitForFunction(() => document.querySelector('dialog.mx .mx-scroll').scrollTop > 0);
-    assert(Math.abs(await top() - y0) < 1, 'header row scrolled away');
+    const y1 = await top();
+    assert(Math.abs(y1 - y0) < 1, `header row scrolled away: ${y0} → ${y1}`);
     ok('Load more pages with next_after; header and first column are sticky');
   });
 } finally {

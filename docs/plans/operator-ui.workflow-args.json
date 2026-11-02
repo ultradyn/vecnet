@@ -1,6 +1,213 @@
 {
- "runStamp": "20261102T16-operator-ui",
+ "runStamp": "20261102T20-operator-ui",
  "maxFixRounds": 3,
+ "priorMinors": [
+  {
+   "task": 1,
+   "severity": "minor",
+   "category": "test-quality",
+   "file": "internal/opapi/tags_test.go",
+   "line": 67,
+   "issue": "The Unicode truncation test does not exercise a cut inside a multibyte rune, so it would still pass if Excerpt lost its rune-boundary adjustment. The current implementation is correct and the explicitly requested 300-byte case is present.",
+   "evidence": "TestExcerpt uses strings.Repeat(\"\ud83d\ude00\", 75), with each rune four bytes long. The 200-byte cap is divisible by four, so text[:200] alone passes its length, UTF-8 and prefix checks; the loop at internal/opapi/tags.go:34-36 is not needed for this fixture.",
+   "ref": "Task 1 Interfaces: Excerpt must cut on a rune boundary; Step 1 TestExcerpt",
+   "fix": "Add a case using \"x\" + strings.Repeat(\"\ud83d\ude00\", 75), asserting valid UTF-8 and the expected 197-byte prefix. Retain the existing 300-byte test."
+  },
+  {
+   "task": 17,
+   "severity": "minor",
+   "category": "correctness",
+   "file": "internal/tui/layout.go",
+   "line": 54,
+   "issue": "Pane returns 3 rows for h=2, and the frame at height 3 is 4 rows with no too-small line. block(body, w, 0) returns the empty string, and strings.Split or Join then counts that as one row.",
+   "evidence": "Overlay probe: Pane(\"t\",10,2,false,\"x\") gives rows=3 widths=10 2 10, against the doc comment 'exactly w by h cells'. plainAt at 79x3 and 80x3 gives rows=4 hasTooSmall=false; 79x4 and 79x2 are correct. render guards only 'small && h < 3' (layout.go:105).",
+   "fix": "In Pane, skip body rows when h-2 is 0. In render, change the guard to h < 4, or return no body row when bodyH is 0. Add both sizes to TestPane and TestTabsResizeTooSmall.",
+   "ref": "Task 17 Interfaces: Pane; 'Below 80x24 the body is terminal too small'"
+  },
+  {
+   "task": 17,
+   "severity": "minor",
+   "category": "test-quality",
+   "file": "internal/tui/clean.go",
+   "line": 73,
+   "issue": "clean.go holds raw invisible U+2028, U+2029 and bidi control characters (U+202A, U+202E, U+2066, U+2069) as rune literals, in the file that defends against them. The U+2028/U+2029 line-break mapping the implementer added has no test.",
+   "evidence": "cat -v shows line 73: r == 'M-bM-^@M-(', r == 'M-bM-^@M-)' and line 86: r >= 'M-bM-^@M-*' && r <= 'M-bM-^@M-.'. Plain display shows them as blanks. grep -c 'u2028\\|u2029' internal/tui/clean_test.go prints 0.",
+   "fix": "Write them as '\u2028', '\u2029', '\u202a', '\u202e', '\u2066', '\u2069', and add table cases for U+2028 and U+2029 in TestClean.",
+   "ref": "Review Focus 1; reported Clean deviation"
+  },
+  {
+   "task": 17,
+   "severity": "minor",
+   "category": "flaky",
+   "file": "scripts/ui/tui-shell.mjs",
+   "line": 37,
+   "issue": "The 'connecting to' body exists for only firstLoadPatience (2 s of wall time) after Init, so the script's waitFor and the following shot race that window. Missing it fails the script after 60 s. Crossing it between waitFor and capture silently saves the progress frame as 17-tui-initial.",
+   "evidence": "layout.go:18 firstLoadPatience = 2 * time.Second. tui-shell.mjs:37-38 waits and then re-captures without asserting. Scratch measurement: Enter to visible was 73 ms at load average about 13, so the margin is about 1.9 s. No failure was reproduced in two runs; this is a margin, not an observed flake.",
+   "fix": "Separate the initial and progress states by something other than elapsed time, or have the shot assert the captured text and retry the launch if the window was missed.",
+   "ref": "Known hazard: never wait on elapsed time"
+  },
+  {
+   "task": 17,
+   "severity": "minor",
+   "category": "correctness",
+   "file": "internal/tui/data.go",
+   "line": 61,
+   "issue": "Only inbox and thread loads refresh hubOffset, and neither is on the 60 s refresh. A client clock step during a quiet period therefore leaves HubNow off by the step until the next delivery or receipt. xsm steps its clock hourly.",
+   "evidence": "noteHubNow is called only for loads carrying hubNow (inbox, thread detail). slowKeys is subs, cuts, health, audit, counters. TestSlowRefresh asserts 'the event-tagged inbox has no timer'. HubNow is m.Now().Add(m.hubOffset) (model.go:193), which matches the plan's literal definition.",
+   "fix": "Add inbox to the slow refresh, and update TestSlowRefresh to match.",
+   "ref": "Review Focus 3"
+  },
+  {
+   "task": 17,
+   "severity": "minor",
+   "category": "test-quality",
+   "file": "internal/tui/data.go",
+   "line": 503,
+   "issue": "The ErrDisabled path to ConnDisabled has no test, including its stop of all further loads through stopped().",
+   "evidence": "grep for ConnDisabled and ErrDisabled in internal/tui/*_test.go finds nothing. TestStatusConn covers connecting, live, offline and rejected only.",
+   "fix": "Add a case where the tail returns opclient.ErrDisabled: assert the top bar shows 'operator disabled', last data stays, and ctrl+l loads nothing.",
+   "ref": "Task 17 Interfaces: Tail status handling"
+  },
+  {
+   "task": 21,
+   "severity": "minor",
+   "category": "spec",
+   "file": "internal/tui/screen_subs.go",
+   "line": 82,
+   "issue": "The status line says 'resume in inbox' on every row, including paused_token and paused_auth rows, which the inbox will not resume. It is minor because the plan's Interfaces say much the same, no button exists here, and the row's note gives the right action.",
+   "evidence": "Hints() returns the static string \"j/k move  read-only: resume in inbox\". 21-tui-subs-progress.png shows it with a paused_token row selected. opview Attention sets Action=resume only for paused_failed and paused_operator.",
+   "fix": "Use a neutral hint such as 'j/k move  read-only', or name resume only when the selected row's paused_reason is delivery_failed or operator. Update the waitFor in tui-subs.mjs to match.",
+   "ref": "Review Focus 5"
+  },
+  {
+   "task": 21,
+   "severity": "minor",
+   "category": "correctness",
+   "file": "internal/tui/screen_subs.go",
+   "line": 50,
+   "issue": "The 15-cell 'expires in' column clips the normal text for a subscription that expired over an hour ago, at every terminal width.",
+   "evidence": "Probe frame at 140x42: 'expired 2h 5m a' and 'expired 125d ag'. The goldens only cover 'expired 3m ago', so nothing pins this.",
+   "fix": "Widen the column to 19, which still fits 80 columns (77 of 78 used), and add a golden row expired by hours."
+  },
+  {
+   "task": 21,
+   "severity": "minor",
+   "category": "correctness",
+   "file": "internal/tui/screen_subs.go",
+   "line": 145,
+   "issue": "A failed first load claims both 'showing the last data' and 'no subscriptions', though no data was ever loaded and the true count is unknown. No test covers it. The red failure line sits directly above, so the operator is still told the load failed.",
+   "evidence": "Probe frame with Subscriptions failing from the start: 'subs \u00b7 0 rows', 'load failed: boom; showing the last data', 'no subscriptions'.",
+   "fix": "When Errs[subs] is set and no rows have loaded, show only 'load failed: <err>', and pin it with a test."
+  },
+  {
+   "task": 21,
+   "severity": "minor",
+   "category": "test-quality",
+   "file": "internal/tui/screen_subs_test.go",
+   "line": 57,
+   "issue": "The subsNine fixture pairs credential_rotated with the unauthorized note, so the subs-selected-140x42 golden pins a frame the hub cannot produce.",
+   "evidence": "Row 6 uses 'The peer was disabled or moved...' with PausedReason credential_rotated. opview/subs.go and Task 6 give credential_rotated 'The bearer that subscribed was rotated. The holder of the new bearer must subscribe again.'",
+   "fix": "Use the credential_rotated note on row 6 and regenerate the two goldens that show it, or set the reason to unauthorized and use credential_rotated in a separate subtest."
+  },
+  {
+   "task": 21,
+   "severity": "minor",
+   "category": "other",
+   "file": "internal/tui/layout.go",
+   "line": 135,
+   "issue": "The accepted `subs n` deviation has one cost: on other tabs the count renders muted, while apr and dlq go hot through countStyle. The count is present on every tab and never drops at 80 columns, so the deviation itself stands.",
+   "evidence": "viewTop draws inactive tabs with styleMuted.Render(label). apr and dlq use countStyle.",
+   "fix": "Task 17's owner can add a right-hand `subs n` part with countStyle(n, styleWarn) in layout.go. This task needs no change."
+  },
+  {
+   "task": 22,
+   "severity": "minor",
+   "category": "test-quality",
+   "file": "internal/tui/cmdline_test.go",
+   "line": 571,
+   "issue": "The assertion that a stopped client sends no presence cannot fail: it counts SetPresence straight after submit, but the send runs later on a command goroutine. refuseStopped in runPresence is therefore unpinned.",
+   "evidence": "Mutant removing refuseStopped from runPresence: TestCommands/presence_with_a_rejected_credential passed 30 of 30 with -count=30. The retry twin at line 250 is safe only because it also asserts the toast.",
+   "fix": "After the second submit, assert bottomLine contains ConnRejected, as the retry test does, then p.idle() before counting.",
+   "ref": "Review Focus 4 (not assigned to Task 22)"
+  },
+  {
+   "task": 22,
+   "severity": "minor",
+   "category": "test-quality",
+   "file": "internal/tui/cmdline.go",
+   "line": 284,
+   "issue": "The 403 and ctx.Err() stops in the :retry all loop are behaviour added by a reported deviation, and no test pins them. Only the 401 stop is tested.",
+   "evidence": "Mutants dropping isStatus(err, 403) and dropping ctx.Err() both SURVIVED the task's tests. The stop itself is sound: hub.RetryDeadLetter returns only 404 per letter, so a 403 is about the credential.",
+   "fix": "Add a 403 case to 'a rejected credential stops the run', asserting one attempt and Conn unchanged, since 403 does not reject.",
+   "ref": "Implementer deviation 3"
+  },
+  {
+   "task": 22,
+   "severity": "minor",
+   "category": "correctness",
+   "file": "internal/tui/cmdline.go",
+   "line": 260,
+   "issue": "Refusing a second :retry all replaces the progress toast and nothing restores it, so the line returns to the reminder after 6 s while the run continues. Any other toast during a run has the same effect.",
+   "evidence": "m.Toast overwrites m.toast with toastBad; the only thing that sets a long expiry is the runRetry start at retryShown. The test asserts the refusal text and then releases the hold, so it never observes this.",
+   "fix": "Show the refusal without losing progress, or have the toast expiry fall back to the progress text while m.inflight[retryKey] is set.",
+   "ref": "Plan shot 22-tui-cmd-progress"
+  },
+  {
+   "task": 22,
+   "severity": "minor",
+   "category": "test-quality",
+   "file": "scripts/ui/tui-cmd.mjs",
+   "line": 36,
+   "issue": "waitFor('presence blocked') proves nothing: it also matches the typed ':presence blocked' on the command line before Enter. If it does land on the toast, that is a 2.5 to 3.5 s window.",
+   "evidence": "Text comes from the same script line 35. Measured capture latency here was p50 6 ms, max 15 ms at load 12, and both script runs passed, so this is not a demonstrated flake. The implementer did report a 2.5 s toast as unreliable on this slice.",
+   "fix": "Delete the line. The next line, waitFor('max@vecnet \u00b7 blocked'), is the durable proof.",
+   "ref": "Known hazard: wait on state, never on elapsed time"
+  },
+  {
+   "task": 20,
+   "severity": "minor",
+   "category": "correctness",
+   "file": "internal/tui/screen_dash.go",
+   "line": 788,
+   "issue": "When the loop-cuts load has failed and no good data exists, the health pane prints a false total of zero under the error. A count the client never received reads as a fact.",
+   "evidence": "Probe: f.fail(\"LoopCuts\", errors.New(\"hub exploded\")) before the first load renders 'loop cuts load failed: hub exploded' followed by 'loop cuts / 24h: 0' at 140x42, while the seeded hub holds 7. dashCutLines always emits the total, defaulting hours to 24.",
+   "fix": "When Errs[\"cuts\"] is set and Cuts holds no data, omit the total line and its reasons. Assert in the TestDashPartialError cuts case that 'loop cuts / 24h: 0' is absent. dashStack's keep count must then match the lines actually present.",
+   "ref": "Task 20 TestDashPartialError; plan: that pane shows the error"
+  },
+  {
+   "task": 20,
+   "severity": "minor",
+   "category": "correctness",
+   "file": "internal/tui/screen_dash.go",
+   "line": 180,
+   "issue": "After a rejected credential, enter on a peer installs a narrow whose request never starts, so the pane shows a loading message that can never finish and contradicts its own title.",
+   "evidence": "Probe: reject the credential with a 401 on Peers, then press j, enter. Frame title reads 'threads \u00b7 codex-hark \u00b7 0' with body 'loading threads for codex-hark' indefinitely. loadNarrow returns nil on m.stopped() with done false, err nil and busy false, and the '!done && failure == nil' case at line 653 prints loading. No request was sent, so no retry storm.",
+   "fix": "In onKey, skip narrowing when m.stopped() and toast the same message reloadAll uses. Alternatively gate the loading line on n.busy so a stopped narrow reads 'no threads'. Extend the '401 stops everything' test to press tab, then enter on a peer.",
+   "ref": "Review Focus 4 (401 stops the loop), behaviour after the stop"
+  },
+  {
+   "task": 20,
+   "severity": "minor",
+   "category": "test-quality",
+   "file": "internal/tui/screen_dash_test.go",
+   "line": 446,
+   "issue": "The blank-actor assertion in TestDashAuditActors cannot fail, so the empty PrincipalID guard from the round 0 finding is unpinned. The fixture leaves five rows with a blank PrincipalID, and owned[\"\"] is then never 1.",
+   "evidence": "Mutant: screen_dash.go:232 changed to 'if owned[row.PrincipalID] == 1 {'. All of ./internal/tui passes, TestDashAuditActors included. In a fixture where only the source row is blank, that mutant gives names.peer(\"\") == \"gh-ultradyn\", the defect round 0 reported. The shipped code gives \"\".",
+   "fix": "In TestDashAuditActors give every peer row except the source a prn_ id, so exactly one row is blank, as on a real hub with one source, then keep the existing dashLacks assertion.",
+   "ref": "Round 0 finding on newDashNames; PROTOCOL 1.3"
+  },
+  {
+   "task": 20,
+   "severity": "minor",
+   "category": "test-quality",
+   "file": "internal/tui/screen_dash.go",
+   "line": 184,
+   "issue": "The folding of a reload that arrives during a narrowed request has no test, although the comment promises it. Losing it would leave a narrowed pane stale until the next threads event.",
+   "evidence": "Mutant: removing 'n.more = true' at line 184 leaves all of ./internal/tui passing. TestDashNarrowThreads only sends a reload while no narrowed request is running.",
+   "fix": "Add a case: hold Threads:<peer>, send reloadMsg{threads} and let the shell load finish, release, then assert exactly one further narrowed request. Send a second reload during the hold to pin that they fold into one.",
+   "ref": "loadNarrow comment; implementer deviation on the narrowed thread page"
+  }
+ ],
  "planName": "operator UI",
  "plan": "docs/plans/2026-11-01-operator-ui.md",
  "worktree": "/home/xertrov/src/vecnet4/.worktrees/operator-ui",
@@ -9,7 +216,7 @@
  "statusDir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui",
  "taskPrefix": "oui",
  "startTask": 1,
- "endTask": 23,
+ "endTask": 25,
  "finalReview": true,
  "openBrowser": false,
  "deps": {
@@ -104,7 +311,30 @@
    19,
    20,
    21,
-   22
+   22,
+   24,
+   25
+  ],
+  "24": [
+   7,
+   12,
+   18
+  ],
+  "25": [
+   8,
+   9,
+   10,
+   11,
+   12,
+   13,
+   14,
+   15,
+   18,
+   19,
+   20,
+   21,
+   22,
+   24
   ]
  },
  "tasks": [
@@ -518,7 +748,53 @@
    "hazards": [
     "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
     ".scratch/vecnet/map.md and .scratch/vecnet/issues are in the main repo's tracked tree only if git says so: check with git ls-files inside your worktree, and edit the worktree copy.",
-    "Removing the not_implemented stub helper must leave grep -rn not_implemented internal/ docs/PROTOCOL.md printing nothing."
+    "Removing the not_implemented stub helper must leave grep -rn not_implemented internal/ docs/PROTOCOL.md printing nothing.",
+    "The halted attempt of 20261102T16 is committed on this branch as a wip commit without a Plan-Task trailer: build on it. Task 24 has since merged the operator_view event, which is how a second operator client now learns of the first one's sends, reads, presence and approval answers. The journey must pass through it, with no polling, reload or weakened assertion."
+   ]
+  },
+  {
+   "title": "Operator self-invalidation across clients",
+   "refs": "\u00a72.3, \u00a72.4, \u00a72.5, \u00a72.6, \u00a72.13, \u00a75.2",
+   "race": true,
+   "suite": "./internal/hub/ ./internal/opapi/ ./internal/opview/ ./internal/tui/ ./internal/envelope/ ./internal/httpapi/",
+   "route": "sol",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/store.test.mjs",
+    "just validate-protocol",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/impl-shots/24 build2 node scripts/ui/dash.mjs",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/impl-shots/24 build2 node scripts/ui/tui-inbox.mjs"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "just validate-protocol",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/24 build2 node scripts/ui/dash.mjs",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/24 build2 node scripts/ui/tui-inbox.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "Every Event append happens inside the transaction that makes the change, and Log.Notify runs only after commit, as the existing fan-out in hub/send.go and hub/receipts.go does.",
+    "docs/protocol/envelope.schema.json and internal/envelope/schema.json must stay byte-identical; just validate-protocol diffs them.",
+    "An operator_view must never land in an agent peer's log, and a presence heartbeat that re-posts the same state must not emit one: both are tested."
+   ]
+  },
+  {
+   "title": "Integrated screen gate",
+   "refs": "\u00a77, \u00a714.2; Review Focus 1-5",
+   "race": false,
+   "suite": "./internal/ui/... ./internal/httpapi/",
+   "route": "opus",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/impl-shots/25 just ui-shots"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-operator-ui/review-shots/25 just ui-shots"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with up to a dozen other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+    "This task exists because each web task passed in isolation against stubs and the merged branch did not. Fix required behaviour in code; change a script only when its expectation predates a neighbour's real content. Never relax an assertion to pass.",
+    "The halted Task 23 attempt sits uncommitted in .worktrees/oui-t23. Do not touch that worktree."
    ]
   }
  ],

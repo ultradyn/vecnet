@@ -29,6 +29,12 @@ export function mountAside(root, ctx) {
     toggle.setAttribute('aria-expanded', String(S.open));
   });
   root.replaceChildren(toggle, body);
+  // One button for the life of the panel, outside the part that redraws: the
+  // matrix returns focus to the element that opened it, so a redraw must
+  // neither replace it nor move it (moving a focused node drops its focus).
+  const content = h('div', { class: 'aside-content' });
+  const matrixBtn = h('button', { type: 'button', class: 'btn matrix-btn', text: 'Delivery matrix', onclick: () => ctx.nav('#matrix/' + threadId) });
+  body.replaceChildren(content, matrixBtn);
 
   function entryOf(id) {
     const row = ((admin.get() || {}).peers || []).find(r => r.peer && r.peer.peer_id === id);
@@ -53,7 +59,7 @@ export function mountAside(root, ctx) {
   async function download(f) {
     if (S.busy.has(f.sha256) || f.disabled) return;
     S.busy.add(f.sha256);
-    render();
+    render(true);
     try {
       const blob = await api.blob(f.sha256);
       if (gone) return;
@@ -76,7 +82,7 @@ export function mountAside(root, ctx) {
       }
     } finally {
       S.busy.delete(f.sha256);
-      render();
+      render(true);
     }
   }
 
@@ -106,9 +112,14 @@ export function mountAside(root, ctx) {
     return h('span', { class: 'budget' }, h('span', { class: 'bt', text: b.text }), b.fraction === null ? null : bar);
   }
 
-  function render() {
+  // The store notifies on every load start and end; redraw only on news, so
+  // a focused file button is not replaced under the operator's keyboard.
+  let shown = {};
+  function render(force) {
     if (gone) return;
-    const d = detail.get();
+    const d = detail.get(), err = detail.error(), a = admin.get(), p = ctx.peers.get();
+    if (force !== true && d === shown.d && err === shown.err && a === shown.a && p === shown.p) return;
+    shown = { d, err, a, p };
     const kids = [];
     if (!d) {
       kids.push(detail.error()
@@ -128,12 +139,12 @@ export function mountAside(root, ctx) {
         ['cut', d.row.cut ? d.row.cut.reason + ' · ' + when(d.row.cut.at) : 'no'],
       ]));
     }
-    kids.push(h('button', { type: 'button', class: 'btn matrix-btn', text: 'Delivery matrix', onclick: () => ctx.nav('#matrix/' + threadId) }));
-    body.replaceChildren(...kids);
+    content.replaceChildren(...kids);
   }
 
-  render();
-  const off = [detail.subscribe(render), admin.subscribe(render), ctx.peers.subscribe(render)];
+  render(true);
+  const redraw = () => render();
+  const off = [detail.subscribe(redraw), admin.subscribe(redraw), ctx.peers.subscribe(redraw)];
   return () => {
     gone = true;
     off.forEach(fn => fn());

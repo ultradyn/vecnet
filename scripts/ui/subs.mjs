@@ -76,6 +76,8 @@ try {
     // Named assertion: dashboard section has no buttons.
     assert(await section.locator('button, [role=button], input, select, textarea').count() === 0, 'dashboard section has buttons');
     assert(await page.locator('#view button').count() === 0, 'dashboard has buttons');
+    // On the full dashboard the section sits below Peers and Threads; bring it into the shot.
+    await section.scrollIntoViewIfNeeded();
     await shot('13-subs-initial');
 
     // Inbox attention: Resume only where the hub offers it.

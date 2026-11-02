@@ -374,7 +374,10 @@ export function mount(root, ctx) {
     if (history.get() !== loaded) {
       loaded = history.get();
       const list = msgs();
-      if (!S.replyTo || !list.some(m => m.message_id === S.replyTo)) S.replyTo = lastFromOther(list);
+      // An unsent reply keeps the target it was sent with: a load (often the
+      // event for that very send, which landed though its answer was lost)
+      // must not re-pick it, or the retry would mint a new idempotency key.
+      if (!S.pending && (!S.replyTo || !list.some(m => m.message_id === S.replyTo))) S.replyTo = lastFromOther(list);
       if (seen && list.some(m => !seen.has(m.message_id) && m.sender !== me)) markRead();
       if (loaded) seen = new Set(list.map(m => m.message_id));
     }
