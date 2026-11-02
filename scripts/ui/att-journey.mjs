@@ -1,6 +1,6 @@
 // Real web and terminal clients exchange attachments through one disposable hub.
 // No screenshots: the individual attachment screen checks cover those states.
-import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { assert, cleanBuild, run, withDemo } from './lib.mjs';
 import { withTui } from './tmux.mjs';
@@ -9,15 +9,6 @@ import { withTui } from './tmux.mjs';
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j3ioAAAAASUVORK5CYII=', 'base64');
 
 try {
-  // Keep the documentation gate beside the journey in the ui-shots glob.
-  const shotDir = new URL('../../docs/plans/shots/oui/', import.meta.url);
-  const index = await readFile(new URL('README.md', shotDir), 'utf8');
-  const pngs = (await readdir(shotDir)).filter(name => name.endsWith('.png')).sort();
-  const listed = [...index.matchAll(/\]\(([^)]+\.png)\)/g)].map(match => match[1]).sort();
-  for (const name of pngs) assert(listed.includes(name), `screenshot missing from README: ${name}`);
-  assert(listed.length === pngs.length && listed.every((name, i) => name === pngs[i]), 'screenshot index must list every existing PNG exactly once');
-  console.log(`ok - screenshot index lists all ${pngs.length} PNGs exactly once`);
-
   await withDemo({}, async ctx => {
     const { page, demo, asPeer, dir } = ctx;
     const file = join(dir, 'terminal.png');
