@@ -6,6 +6,7 @@
 import { createAttachments } from './attach.js';
 import { avatar, h } from './dom.js';
 import { short } from './format.js';
+import { prioritySeg } from './prio.js';
 import { buildSend, canSend, counter, eligible, errorText, keepKey, keyFor, matches, sendRefusal } from './compose-model.js';
 
 function randKey() {
@@ -30,8 +31,7 @@ export function mount(root, ctx) {
   const picked = h('div', { class: 'picked', 'aria-live': 'polite' });
   const opts = h('div', { class: 'opts', role: 'group', 'aria-label': 'Peers' });
   const titleIn = h('input', { type: 'text', id: 'c-title', maxlength: '200', autocomplete: 'off', placeholder: 'Optional' });
-  const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Priority' },
-    ['wake', 'wake_idle', 'hold'].map(p => h('button', { type: 'button', value: p, text: p, onclick: () => { S.priority = p; render(); } })));
+  const prio = prioritySeg(p => { S.priority = p; render(); }), seg = prio.seg;
   const text = h('textarea', { id: 'c-text', rows: '6', placeholder: 'Write the first message' });
   const count = h('span', { class: 'bytes' });
   const history = h('select', { id: 'c-history' },
@@ -48,7 +48,7 @@ export function mount(root, ctx) {
       opts),
     h('div', { class: 'row' },
       h('div', { class: 'field grow' }, h('label', { for: 'c-title', text: 'Title' }), titleIn),
-      h('div', { class: 'field' }, h('span', { class: 'lbl', text: 'Priority' }), seg)),
+      h('div', { class: 'field' }, h('span', { class: 'lbl', text: 'Priority' }), prio.el)),
     h('div', { class: 'field' },
       h('label', { for: 'c-text', text: 'Message' }),
       h('div', { class: 'wrap' }, text, att.el, h('div', { class: 'bar' }, count, h('span', { class: 'hint', text: 'Drop or paste files · Ctrl+Enter to send' })))),

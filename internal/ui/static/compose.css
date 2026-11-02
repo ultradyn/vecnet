@@ -58,3 +58,6 @@
 .compose .wrap .up{margin-top:8px}
 .compose .actions{display:flex;justify-content:flex-end;gap:8px}
 .compose .actions .btn{padding:8px 18px;min-width:96px}
+
+/* priority tips (prio.js): the picker ends the row, so its tip opens leftward */
+.compose .ptip{left:auto;right:0}

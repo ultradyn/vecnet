@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PRIORITY_HELP, ago, bytes, clean, deltaLabel, plural, quotaLabel, short, title, when } from '../static/format.js';
+import { PRIORITY_HELP, ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, plural, quotaLabel, short, title, when } from '../static/format.js';
 
 test('when is 24-hour local today, with the date on other days, and survives midnight', () => {
   const noon = new Date(2026, 10, 2, 14, 5, 0).getTime();
@@ -92,6 +92,23 @@ test('deltaLabel is the gap since the previous message', () => {
   assert.equal(deltaLabel(t(5000), t(0)), '', 'out of order shows nothing');
   assert.equal(deltaLabel(null, t(0)), '');
   assert.equal(deltaLabel(t(0), 'nope'), '');
+});
+
+test('deltaTitle spells the gap out for a tooltip', () => {
+  const t = ms => new Date(Date.UTC(2026, 10, 3) + ms).toISOString();
+  assert.equal(deltaTitle(t(0), t(3800)), '3.8 s after the previous message');
+  assert.equal(deltaTitle(t(0), t(42_000)), '42 s after the previous message');
+  assert.equal(deltaTitle(t(0), t(252_000)), '4m 12s after the previous message');
+  assert.equal(deltaTitle(t(0), t(7_500_000)), '2h 5m after the previous message');
+  assert.equal(deltaTitle(t(5000), t(0)), '');
+  assert.equal(deltaTitle(undefined, t(0)), '');
+});
+
+test('fullWhen is the full local date and time', () => {
+  assert.equal(fullWhen(new Date(2026, 10, 3, 14, 5, 9).toISOString()), 'Tue, 3 Nov 2026, 14:05:09');
+  assert.equal(fullWhen(new Date(2026, 10, 3, 0, 7, 0).toISOString()), 'Tue, 3 Nov 2026, 00:07:00');
+  assert.equal(fullWhen('nope'), '');
+  assert.equal(fullWhen(''), '');
 });
 
 test('PRIORITY_HELP covers every priority', () => {

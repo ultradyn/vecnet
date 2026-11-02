@@ -39,6 +39,23 @@ export function deltaLabel(prevIso, iso) {
   return '+' + Math.floor(s / 86400) + 'd';
 }
 
+// deltaTitle is deltaLabel spelled out for a tooltip: "3.8 s after the
+// previous message", "4m 12s after the previous message". Empty when the
+// label is.
+export function deltaTitle(prevIso, iso) {
+  const d = deltaLabel(prevIso, iso);
+  return d ? d.slice(1).replace(/^([\d.]+)s$/, '$1 s') + ' after the previous message' : '';
+}
+
+// fullWhen is the full local date and time, for the title of a relative
+// time: "Tue, 3 Nov 2026, 14:05:09".
+const FULL = { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' };
+export function fullWhen(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('en-AU', FULL);
+}
+
 // PRIORITY_HELP explains each priority (PROTOCOL §5.2) for the hover and
 // focus tips on the priority buttons (issue 21).
 export const PRIORITY_HELP = {
