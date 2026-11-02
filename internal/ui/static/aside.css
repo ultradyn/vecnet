@@ -53,8 +53,8 @@
 /* B's horizontal use inside A's frame: a wider panel and a wider chat column. */
 @media (min-width:1280px){
   body[data-route=thread] .va,body[data-route=matrix] .va{grid-template-columns:240px minmax(0,1fr) 380px}
-  body[data-route=thread] .va main,body[data-route=matrix] .va main{padding-left:32px;padding-right:32px}
-  body[data-route=thread] .va .col,body[data-route=matrix] .va .col{max-width:960px}
+  /* Narrower gutters keep the reading column past 760 px at 1440 wide; thread.css owns the 980 px measure. */
+  body[data-route=thread] .va main,body[data-route=matrix] .va main{padding-left:24px;padding-right:24px}
 }
 
 /* Below 1100 px the panel sits behind a toggle at the top right. */

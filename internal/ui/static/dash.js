@@ -85,7 +85,9 @@ export function mount(root, ctx) {
   }
 
   const counterLine = h('p', { class: 'dash-counters mono' });
-  const subsSlot = h('div', { class: 'subs' });
+  // subs.js owns the whole section, heading and count included, so the
+  // dashboard shows one "Subscriptions" heading, not two.
+  const subsSlot = h('section', { class: 'dash-sec dash-subs subs', id: 'd-subs' });
   root.replaceChildren(
     h('div', { class: 'dash' },
       h('h1', { text: 'Dashboard' }),
@@ -96,7 +98,7 @@ export function mount(root, ctx) {
       section('health', 'd-health', 'Delivery health'),
       section('dead', 'd-dead', 'Dead letters'),
       section('loop', 'd-loop', 'Loop control'),
-      h('section', { class: 'dash-sec dash-subs', id: 'd-subs' }, h('h2', { text: 'Subscriptions' }), subsSlot),
+      subsSlot,
       section('audit', 'd-audit', 'Audit tail')));
   subs.renderSection(subsSlot, ctx);
 
