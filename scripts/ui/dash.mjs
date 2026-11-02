@@ -96,6 +96,19 @@ try {
     await peerRow('codex-hark').locator('td', { hasText: /^44%$/ }).waitFor();
     assert(countRequests('/v1/admin/peers') > peerReads, 'peers tag did not reload the dashboard');
 
+    // Subscription health follows another client's pause and resume while the
+    // dashboard stays mounted (operator_view "subscription" names peers).
+    const subsList = await (await asPeer('operator', 'GET', '/v1/admin/subscriptions')).json();
+    const okSub = subsList.find(x => x.health === 'ok');
+    assert(okSub, 'the seed has no ok subscription');
+    const subRow = sec('subs').locator(`tr.sub[data-sub="${okSub.sub_id}"]`);
+    await subRow.and(page.locator('[data-health="ok"]')).waitFor();
+    for (const [action, health] of [['pause', 'paused_operator'], ['resume', 'ok']]) {
+      const r = await asPeer('operator', 'POST', `/v1/admin/subscriptions/${okSub.sub_id}/${action}`);
+      assert(r.ok, `${action}: ${r.status}`);
+      await sec('subs').locator(`tr.sub[data-sub="${okSub.sub_id}"][data-health="${health}"]`).waitFor();
+    }
+
     // Load older appears only when the tail has more; it is a read.
     const older = sec('audit').getByRole('button', { name: 'Load older' });
     if (await older.count()) {

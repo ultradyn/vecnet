@@ -56,3 +56,18 @@ export function cutSummary(cuts) {
     .sort((a, b) => b.count - a.count || (a.reason < b.reason ? -1 : a.reason > b.reason ? 1 : 0));
   return { total: Number(c.total) || 0, hours: Number(c.hours) || 24, reasons };
 }
+
+// allThreads reads every thread page by page (PROTOCOL §2.13: `next` until it
+// is null), each request bounded by limit. The Threads section lists them all;
+// a cursor the hub hands back twice would loop, so it ends the walk.
+export async function allThreads(api, limit = 200) {
+  let page = await api.threads({ limit });
+  const threads = [...(page.threads || [])];
+  const seen = new Set();
+  while (page.next && !seen.has(page.next)) {
+    seen.add(page.next);
+    page = await api.threads({ limit, cursor: page.next });
+    threads.push(...(page.threads || []));
+  }
+  return { threads };
+}

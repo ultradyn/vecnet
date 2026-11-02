@@ -2,14 +2,14 @@
 // dead-letter retry and discard and subscription resume live in the inbox.
 // Each section loads and fails on its own. The page reloads on the `peers` tag
 // and every 30 s while mounted. Ages use the hub clock, never the client's.
-import { blockedLine, cutSummary, peerRows } from './dash-model.js';
+import { allThreads, blockedLine, cutSummary, peerRows } from './dash-model.js';
 import { chip, h } from './dom.js';
 import { ago, short, title as threadTitle, when } from './format.js';
 import * as subs from './subs.js';
 
 const RELOAD_MS = 30000;
 const AUDIT_PAGE = 50;
-const THREAD_PAGE = 200, THREAD_PAGES = 10;
+const THREAD_PAGE = 200;
 const COUNTERS = ['loop_cut', 'rate_limited', 'dead_letters', 'push_conflicts', 'push_auth_failed'];
 // The hub's counters are running totals kept in its database, not the current
 // state: dead_letters counts deliveries ever dead-lettered, while the Dead
@@ -43,24 +43,18 @@ export function mount(root, ctx) {
   const age = iso => ago(iso, nowMs());
   const time = iso => h('time', { text: when(iso, nowMs()), title: iso || '' });
 
-  async function allThreads() {
-    let page = await api.threads({ limit: THREAD_PAGE });
-    const threads = [...(page.threads || [])];
-    for (let n = 1; page.next && n < THREAD_PAGES; n++) {
-      page = await api.threads({ limit: THREAD_PAGE, cursor: page.next });
-      threads.push(...(page.threads || []));
-    }
-    return { threads, more: !!page.next };
-  }
-
   const res = {
     counters: store.resource('peers', () => api.counters()),
     peers: store.resource('peers', () => api.adminPeers()),
-    threads: store.resource('threads', allThreads),
+    threads: store.resource('threads', () => allThreads(api, THREAD_PAGE)),
     health: store.resource('peers', () => api.deliveryHealth()),
     dead: store.resource('peers', () => api.deadLetters()),
     cuts: store.resource('peers', () => api.loopCuts(24)),
     audit: store.resource('peers', () => api.audit({ limit: AUDIT_PAGE })),
+    // The subscriptions table is subs.js's, under its own `subs` tag. This
+    // `peers` resource reloads it whenever the rest of the page reloads: on
+    // the peers tag (operator_view "subscription" names it) and every 30 s.
+    subs: store.resource('peers', () => subs.reloadShared(ctx)),
   };
 
   // Names come from the admin directory, which also lists disabled peers and
@@ -152,7 +146,7 @@ export function mount(root, ctx) {
 
   function drawThreads(value, s) {
     const rows = value.threads || [];
-    s.count.textContent = String(rows.length) + (value.more ? '+' : '');
+    s.count.textContent = String(rows.length);
     if (!rows.length) return [none('No threads yet.')];
     return [table(['Thread', 'Participants', 'Messages', 'Budget left', 'Last activity', 'Cut'], rows.map(r => {
       const t = r.thread || {}, parts = t.participants || [];

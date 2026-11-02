@@ -20,6 +20,14 @@ function subsResource(ctx) {
   return r;
 }
 
+// reloadShared reloads the shared subscriptions view, for a page that also
+// shows it and refreshes on its own schedule (the dashboard).
+export async function reloadShared(ctx) {
+  const r = subsResource(ctx);
+  await r.reload();
+  return true;
+}
+
 const hubNow = ctx => (ctx.store && ctx.store.hubNow ? ctx.store.hubNow() : Date.now());
 const dash = text => text || '—';
 

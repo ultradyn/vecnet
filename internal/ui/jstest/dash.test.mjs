@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { blockedLine, cutSummary, peerRows } from '../static/dash-model.js';
+import { allThreads, blockedLine, cutSummary, peerRows } from '../static/dash-model.js';
 
 function row(peer, extra = {}) {
   return {
@@ -91,4 +91,24 @@ test('cutSummary orders reasons by count', () => {
   const empty = cutSummary({ total: 0, by_reason: {} });
   assert.deepEqual(empty, { total: 0, hours: 24, reasons: [] });
   assert.deepEqual(cutSummary(undefined), { total: 0, hours: 24, reasons: [] });
+});
+
+test('allThreads follows next to the end: a hub with more than ten pages shows every thread', async () => {
+  const total = 2345, calls = [];
+  const api = {
+    threads: async ({ limit, cursor }) => {
+      calls.push({ limit, cursor });
+      const from = cursor ? Number(cursor) : 0;
+      const threads = Array.from({ length: Math.min(limit, total - from) }, (_, i) => ({ thread: { thread_id: 'thr_' + (from + i) } }));
+      const next = from + limit < total ? String(from + limit) : null;
+      return { threads, next };
+    },
+  };
+  const { threads } = await allThreads(api, 200);
+  assert.equal(threads.length, total);
+  assert.equal(calls.length, 12);
+  assert.ok(calls.every(c => c.limit === 200), 'each request stays bounded');
+  // A cursor the hub repeats ends the walk instead of looping.
+  const stuck = { threads: async () => ({ threads: [{}], next: 'same' }) };
+  assert.equal((await allThreads(stuck, 200)).threads.length, 2);
 });
