@@ -77,8 +77,10 @@ func Pane(title string, w, h int, focused bool, body string) string {
 	}
 	rows = append(rows, top+heading.Render(label)+border.Render(rule+"┐"))
 	side := border.Render("│")
-	for _, line := range strings.Split(block(body, inner, h-2), "\n") {
-		rows = append(rows, side+line+side)
+	if h > 2 { // a 2-row pane is all border: block would still yield one empty row
+		for _, line := range strings.Split(block(body, inner, h-2), "\n") {
+			rows = append(rows, side+line+side)
+		}
 	}
 	rows = append(rows, border.Render("└"+strings.Repeat("─", inner)+"┘"))
 	return strings.Join(rows, "\n")
@@ -102,7 +104,9 @@ func (m *Model) render() string {
 		return ""
 	}
 	small := w < minW || h < minH
-	if small && h < 3 {
+	// Below four rows there is no body row between the bars, so the too-small
+	// line takes the whole frame.
+	if small && h < 4 {
 		return block(tooSmall, w, h)
 	}
 	bodyH := h - 3

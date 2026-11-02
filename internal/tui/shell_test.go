@@ -78,7 +78,7 @@ func TestTabsResizeTooSmall(t *testing.T) {
 	t.Run("140x42", func(t *testing.T) { assertFrame(t, renderAt(t, m, 140, 42), 140, 42) })
 	t.Run("80x24", func(t *testing.T) { assertFrame(t, renderAt(t, m, 80, 24), 80, 24) })
 
-	for _, size := range [][2]int{{79, 23}, {79, 24}, {80, 23}, {40, 10}} {
+	for _, size := range [][2]int{{79, 23}, {79, 24}, {80, 23}, {40, 10}, {79, 3}, {80, 3}, {79, 2}, {79, 4}} {
 		frame := plainAt(t, m, size[0], size[1])
 		if !strings.Contains(frame, "terminal too small: need 80x24") {
 			t.Errorf("%dx%d: no too-small line:\n%s", size[0], size[1], frame)
@@ -86,6 +86,7 @@ func TestTabsResizeTooSmall(t *testing.T) {
 		if strings.Contains(frame, "body of inbox") {
 			t.Errorf("%dx%d: body still drawn:\n%s", size[0], size[1], frame)
 		}
+		assertFrame(t, frame, size[0], size[1])
 	}
 	if frame := plainAt(t, m, 79, 2); !strings.Contains(frame, "terminal too small: need 80x24") {
 		t.Errorf("79x2: no too-small line: %q", frame)
@@ -283,6 +284,40 @@ func TestStatusConn(t *testing.T) {
 	p.idle()
 	if len(m.inflight) != 0 || f.count("Inbox") != 0 {
 		t.Fatalf("reload after rejection: %d", f.count("Inbox"))
+	}
+}
+
+// The hub disabling the operator stops the tail like a rejected credential:
+// the top bar says so, the last data stays, and ctrl+l loads nothing.
+func TestStatusConnDisabled(t *testing.T) {
+	f := seeded()
+	f.tail = func(ctx context.Context, _ func(opclient.Batch) error, status func(string)) error {
+		status("live")
+		return opclient.ErrDisabled
+	}
+	m := newTestModel(t, f, newClock())
+	m.screens = staticScreens()
+	p := newPump(t, m)
+	p.run(m.Init())
+	p.until("disabled", func() bool { return m.Conn == ConnDisabled })
+	p.until("first load", func() bool { return !m.firstLoading() })
+	p.idle()
+	for _, size := range [][2]int{{140, 42}, {80, 24}} {
+		if line := strings.Split(plainAt(t, m, size[0], size[1]), "\n")[0]; !strings.Contains(line, "operator disabled") {
+			t.Errorf("%dx%d top bar: %q", size[0], size[1], line)
+		}
+	}
+	if frame := plainAt(t, m, 140, 42); !strings.Contains(frame, "body of inbox") {
+		t.Fatalf("last data hidden:\n%s", frame)
+	}
+	f.reset()
+	p.press("ctrl+l")
+	p.idle()
+	if len(m.inflight) != 0 || f.count("Inbox") != 0 {
+		t.Fatalf("reload after disable: %d", f.count("Inbox"))
+	}
+	if !strings.Contains(m.toast.text, "restart with a valid profile") {
+		t.Fatalf("toast %q", m.toast.text)
 	}
 }
 
@@ -677,15 +712,12 @@ func TestSlowRefresh(t *testing.T) {
 	f.fail("Peers", nil)
 	f.reset()
 	p.send(tickMsg{})
-	names := []string{"Subscriptions", "LoopCuts", "DeliveryHealth", "Audit", "Counters", "Peers"}
+	names := []string{"Inbox", "Subscriptions", "LoopCuts", "DeliveryHealth", "Audit", "Counters", "Peers"}
 	p.loaded(f, names...)
 	for _, name := range names {
 		if f.count(name) != 1 {
 			t.Errorf("%s loaded %d times", name, f.count(name))
 		}
-	}
-	if f.count("Inbox") != 0 {
-		t.Error("the event-tagged inbox has no timer")
 	}
 	if m.Data.Errs["peers"] != nil {
 		t.Error("a resource that recovered keeps its error")
@@ -744,6 +776,8 @@ func TestPane(t *testing.T) {
 	}
 	assertFrame(t, Pane("a title much longer than its pane", 12, 3, false, strings.Repeat("wide 日本語 ", 10)), 12, 3)
 	assertFrame(t, Pane("t", 12, 4, false, "tab\there"), 12, 4)
+	assertFrame(t, Pane("t", 10, 2, false, "x"), 10, 2)
+	assertFrame(t, Pane("t", 10, 3, false, "x"), 10, 3)
 	if got := Pane("t", 1, 1, true, "x"); got != "" {
 		t.Fatalf("degenerate pane: %q", got)
 	}

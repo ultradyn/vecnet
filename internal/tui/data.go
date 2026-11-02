@@ -58,7 +58,10 @@ const (
 
 var (
 	allKeys  = []string{"inbox", "threads", "peers", "subs", "cuts", "health", "audit", "counters"}
-	slowKeys = []string{"subs", "cuts", "health", "audit", "counters"}
+	// The inbox is event-tagged, but its snapshot also carries the hub's
+	// clock: a minute's reload keeps HubNow right across a quiet spell in
+	// which this client's clock steps (Review Focus 3).
+	slowKeys = []string{"inbox", "subs", "cuts", "health", "audit", "counters"}
 )
 
 type (

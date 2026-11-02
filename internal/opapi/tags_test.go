@@ -69,6 +69,12 @@ func TestExcerpt(t *testing.T) {
 	if len(got) == 0 || len(got) > 200 || !utf8.ValidString(got) || !strings.HasPrefix(long, got) {
 		t.Fatalf("bad truncation: %q (%d bytes)", got, len(got))
 	}
+	// The 200-byte cap falls inside a rune here, so only the rune-boundary
+	// step keeps the cut valid: 1 + 49*4 = 197 bytes.
+	offset := "x" + long
+	if got := opapi.Excerpt(envelope.Message{Content: envelope.Content{Text: offset}}); len(got) != 197 || !utf8.ValidString(got) || !strings.HasPrefix(offset, got) {
+		t.Fatalf("cut inside a rune: %q (%d bytes)", got, len(got))
+	}
 	for _, tc := range []struct {
 		m    envelope.Message
 		want string
