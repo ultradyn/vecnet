@@ -1,1 +1,37 @@
-/* Empty until operator UI Task 13. */
+/* subscription health: dashboard table and inbox attention (Task 13) */
+.chip.health{display:inline-block}
+.chip.h-ok{color:var(--ok);border-color:#34d39950;background:#34d39912}
+.chip.h-warn{color:var(--wake);border-color:#fbbf2450;background:#fbbf2412}
+.chip.h-bad{color:var(--bad);border-color:#fb718550;background:#fb718512}
+.chip.h-neutral{color:var(--muted);border-color:var(--line2);background:#8391ad12}
+
+.subs-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:9px;background:#0e1426}
+.subs-table{width:100%;border-collapse:collapse;font-size:12.5px}
+.subs-table th{font:500 11px var(--sans);color:var(--dim);text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+.subs-table td{padding:9px 8px;border-top:1px solid var(--line);white-space:nowrap;color:#cbd5e1;vertical-align:middle}
+.subs-table tbody tr:first-child td{border-top:0}
+.subs-table td.mono{font-family:var(--mono);font-size:11.5px}
+.subs-table td.peer{color:var(--text);font-weight:600}
+.subs-table td.host{color:var(--muted);max-width:150px;overflow:hidden;text-overflow:ellipsis}
+.subs-table td.num{text-align:right}
+.subs-table td.cur{color:var(--dim);max-width:90px;overflow:hidden;text-overflow:ellipsis}
+.subs-table .dl .status{font-family:var(--mono);font-size:11.5px}
+.subs-table .dl .status.good{color:var(--ok)}
+.subs-table .dl .status.fail{color:var(--bad)}
+.subs-table .dl .when{color:var(--dim)}
+.subs-table tr.sub[data-health=expired] .exp,.subs-table tr.sub[data-health=paused_token] .exp{color:var(--bad)}
+.subs-table tr.sub[data-health=late] .exp{color:var(--wake)}
+.subs-table tr.sub.warn td{padding-bottom:3px}
+.subs-table tr.note td{border-top:0;padding:0 8px 10px;white-space:normal;color:var(--muted);font-size:12px;line-height:1.5;max-width:0}
+
+/* inbox attention */
+.attn{margin:20px 0 8px}
+.va .attn h2{margin:0 0 10px}
+.attn-item{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:start;padding:12px 14px;border:1px solid var(--line);border-left:3px solid var(--line2);border-radius:9px;margin-bottom:8px;background:#0e1426}
+.attn-item[data-health^=paused_],.attn-item[data-health=expired],.attn-item[data-health=failing]{border-left-color:#fb718599}
+.attn-item[data-health=paused_operator],.attn-item[data-health=late],.attn-item[data-health=unverified]{border-left-color:#fbbf2499}
+.attn-item .chip{margin-top:2px}
+.attn-item .sum{font-size:13.5px;color:#cbd5e1;line-height:1.55;overflow-wrap:anywhere}
+.attn-item .meta{font:400 11.5px var(--mono);color:var(--dim);margin-top:4px}
+.attn-item .err{margin:6px 0 0;font-size:12.5px;overflow-wrap:anywhere}
+.attn-item .btn.resume{white-space:nowrap}
