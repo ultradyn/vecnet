@@ -1,0 +1,358 @@
+package tui
+
+import (
+	"context"
+	"encoding/json"
+	"sync"
+	"testing"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/opapi"
+	"github.com/XertroV/vecnet/internal/opclient"
+)
+
+// The real client must satisfy the interface the TUI programs against.
+var _ API = (*opclient.Client)(nil)
+
+// fakeAPI is the scripted hub every TUI test talks to. Set the value fields to
+// choose responses, errs[method] to fail a method, and gate[method] to hold a
+// method until the channel closes.
+type fakeAPI struct {
+	mu    sync.Mutex
+	calls map[string]int
+	errs  map[string]error
+	gate  map[string]chan struct{}
+
+	inbox    opapi.Inbox
+	threads  opapi.ThreadPage
+	detail   opapi.ThreadDetail
+	history  opapi.History
+	matrix   opapi.Matrix
+	peers    []opapi.PeerRow
+	subs     []opapi.Subscription
+	cuts     opapi.LoopCuts
+	health   opapi.DeliveryHealth
+	audit    opapi.AuditPage
+	counters map[string]int
+	sent     []envelope.SendRequest
+	blob     []byte
+
+	// tail replaces the default Tail, which reports live and blocks.
+	tail func(ctx context.Context, handle func(opclient.Batch) error, status func(string)) error
+}
+
+func newFake() *fakeAPI {
+	return &fakeAPI{calls: map[string]int{}, errs: map[string]error{}, gate: map[string]chan struct{}{}, counters: map[string]int{}}
+}
+
+func (f *fakeAPI) hit(ctx context.Context, name string) error {
+	f.mu.Lock()
+	f.calls[name]++
+	gate, err := f.gate[name], f.errs[name]
+	f.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return err
+}
+
+func (f *fakeAPI) count(name string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls[name]
+}
+
+func (f *fakeAPI) reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = map[string]int{}
+}
+
+func (f *fakeAPI) fail(name string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.errs[name] = err
+}
+
+func (f *fakeAPI) hold(name string) (release func()) {
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.gate[name] = gate
+	f.mu.Unlock()
+	return func() {
+		f.mu.Lock()
+		delete(f.gate, name)
+		f.mu.Unlock()
+		close(gate)
+	}
+}
+
+func (f *fakeAPI) Inbox(ctx context.Context, _ opapi.InboxQuery) (opapi.Inbox, error) {
+	return f.inbox, f.hit(ctx, "Inbox")
+}
+func (f *fakeAPI) ReadThread(ctx context.Context, _ string) (opapi.ReadResult, error) {
+	return opapi.ReadResult{}, f.hit(ctx, "ReadThread")
+}
+func (f *fakeAPI) Threads(ctx context.Context, _ opapi.ThreadQuery) (opapi.ThreadPage, error) {
+	return f.threads, f.hit(ctx, "Threads")
+}
+func (f *fakeAPI) Thread(ctx context.Context, _ string) (opapi.ThreadDetail, error) {
+	return f.detail, f.hit(ctx, "Thread")
+}
+func (f *fakeAPI) History(ctx context.Context, _, _ string, _ int) (opapi.History, error) {
+	return f.history, f.hit(ctx, "History")
+}
+func (f *fakeAPI) Matrix(ctx context.Context, _, _ string, _ int) (opapi.Matrix, error) {
+	return f.matrix, f.hit(ctx, "Matrix")
+}
+func (f *fakeAPI) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
+	return f.peers, f.hit(ctx, "Peers")
+}
+func (f *fakeAPI) LoopCuts(ctx context.Context, _ int) (opapi.LoopCuts, error) {
+	return f.cuts, f.hit(ctx, "LoopCuts")
+}
+func (f *fakeAPI) DeliveryHealth(ctx context.Context) (opapi.DeliveryHealth, error) {
+	return f.health, f.hit(ctx, "DeliveryHealth")
+}
+func (f *fakeAPI) Subscriptions(ctx context.Context) ([]opapi.Subscription, error) {
+	return f.subs, f.hit(ctx, "Subscriptions")
+}
+func (f *fakeAPI) ResumeSubscription(ctx context.Context, _ string) error {
+	return f.hit(ctx, "ResumeSubscription")
+}
+func (f *fakeAPI) Audit(ctx context.Context, _ int, _ string) (opapi.AuditPage, error) {
+	return f.audit, f.hit(ctx, "Audit")
+}
+func (f *fakeAPI) Counters(ctx context.Context) (map[string]int, error) {
+	return f.counters, f.hit(ctx, "Counters")
+}
+func (f *fakeAPI) RetryDeadLetter(ctx context.Context, _ string) error {
+	return f.hit(ctx, "RetryDeadLetter")
+}
+func (f *fakeAPI) DiscardDeadLetter(ctx context.Context, _ string) error {
+	return f.hit(ctx, "DiscardDeadLetter")
+}
+func (f *fakeAPI) Send(ctx context.Context, r envelope.SendRequest) (opapi.SendResult, error) {
+	f.mu.Lock()
+	f.sent = append(f.sent, r)
+	f.mu.Unlock()
+	return opapi.SendResult{}, f.hit(ctx, "Send")
+}
+func (f *fakeAPI) Answer(ctx context.Context, _ opapi.OpenApproval, _ int) error {
+	return f.hit(ctx, "Answer")
+}
+func (f *fakeAPI) SetPresence(ctx context.Context, _ string, _ time.Time) error {
+	return f.hit(ctx, "SetPresence")
+}
+func (f *fakeAPI) Blob(ctx context.Context, _ string, _ int64) ([]byte, string, error) {
+	return f.blob, "application/octet-stream", f.hit(ctx, "Blob")
+}
+func (f *fakeAPI) Tail(ctx context.Context, handle func(opclient.Batch) error, status func(string)) error {
+	f.mu.Lock()
+	f.calls["Tail"]++
+	tail := f.tail
+	f.mu.Unlock()
+	if tail != nil {
+		return tail(ctx, handle, status)
+	}
+	status("live")
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// testClock is a client clock the test moves by hand.
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+var fixedNow = time.Date(2026, 11, 2, 7, 41, 0, 0, time.UTC)
+
+func newClock() *testClock { return &testClock{t: fixedNow} }
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+func (c *testClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+// newTestModel returns a model on a fixed clock in UTC, so goldens do not
+// depend on where the test runs.
+func newTestModel(t *testing.T, api API, clock *testClock) *Model {
+	t.Helper()
+	m := newModel(context.Background(), Options{API: api, Profile: "home", Hub: "https://hub.example:8443", Now: clock.Now})
+	m.loc = time.UTC
+	t.Cleanup(m.cancel)
+	return m
+}
+
+// pump is a small synchronous runtime: commands run on goroutines as they do
+// under tea.Program, and their messages reach Update only from the test
+// goroutine, so a test can wait on model state rather than on elapsed time.
+type pump struct {
+	t    *testing.T
+	m    *Model
+	msgs chan tea.Msg
+	done chan struct{}
+}
+
+func newPump(t *testing.T, m *Model) *pump {
+	t.Helper()
+	p := &pump{t: t, m: m, msgs: make(chan tea.Msg, 256), done: make(chan struct{})}
+	t.Cleanup(func() { close(p.done) })
+	return p
+}
+
+func (p *pump) run(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	go func() {
+		msg := cmd()
+		if msg == nil {
+			return
+		}
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, c := range batch {
+				p.run(c)
+			}
+			return
+		}
+		// Time moves only when a test sends tickMsg, after moving its clock.
+		if _, ok := msg.(tickMsg); ok {
+			return
+		}
+		select {
+		case p.msgs <- msg:
+		case <-p.done:
+		}
+	}()
+}
+
+// send delivers msg to the model as the program would.
+func (p *pump) send(msg tea.Msg) {
+	p.t.Helper()
+	_, cmd := p.m.Update(msg)
+	p.run(cmd)
+}
+
+// press delivers one key by its name.
+func (p *pump) press(keys ...string) {
+	p.t.Helper()
+	for _, key := range keys {
+		p.send(keyPress(key))
+	}
+}
+
+// until processes messages until cond holds.
+func (p *pump) until(what string, cond func() bool) {
+	p.t.Helper()
+	deadline := time.After(30 * time.Second)
+	recheck := time.NewTicker(time.Millisecond)
+	defer recheck.Stop()
+	for !cond() {
+		select {
+		case msg := <-p.msgs:
+			p.send(msg)
+		case <-recheck.C: // the fake's goroutines change state without a message
+		case <-deadline:
+			p.t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+}
+
+// idle waits until no resource is loading.
+func (p *pump) idle() {
+	p.t.Helper()
+	p.until("loads to finish", func() bool { return len(p.m.inflight) == 0 })
+}
+
+// loaded waits until each method has been called and its load has landed.
+func (p *pump) loaded(f *fakeAPI, names ...string) {
+	p.t.Helper()
+	p.until("requests", func() bool {
+		for _, name := range names {
+			if f.count(name) == 0 {
+				return false
+			}
+		}
+		return true
+	})
+	p.idle()
+}
+
+// keyPress builds a key message by the name String() reports.
+func keyPress(key string) tea.KeyPressMsg {
+	switch key {
+	case "esc":
+		return tea.KeyPressMsg{Code: tea.KeyEscape}
+	case "enter":
+		return tea.KeyPressMsg{Code: tea.KeyEnter}
+	case "ctrl+c":
+		return tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
+	case "ctrl+l":
+		return tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl}
+	case "ctrl+q":
+		return tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl}
+	}
+	r := []rune(key)[0]
+	return tea.KeyPressMsg{Code: r, Text: key}
+}
+
+// staticScreen stands in for a tab, so shell goldens stay put as Tasks 18–21
+// replace the real stubs.
+type staticScreen struct {
+	title, hints string
+	keys         []string
+}
+
+func (s *staticScreen) Title() string { return s.title }
+func (s *staticScreen) Hints() string { return s.hints }
+func (s *staticScreen) Update(msg tea.Msg, _ *Model) tea.Cmd {
+	if key, ok := msg.(tea.KeyPressMsg); ok {
+		s.keys = append(s.keys, key.String())
+	}
+	return nil
+}
+func (s *staticScreen) View(_ *Model, w, h int) string {
+	return Pane(s.title, w, h, true, "body of "+s.title)
+}
+
+func staticScreens() []Screen {
+	return []Screen{
+		&staticScreen{title: "inbox", hints: "j/k move  a answer"},
+		&staticScreen{title: "chat", hints: "i write"},
+		&staticScreen{title: "dash", hints: "enter open"},
+		&staticScreen{title: "subs", hints: "r resume"},
+	}
+}
+
+func event(t *testing.T, cursor, kind string, data any) envelope.Event {
+	t.Helper()
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return envelope.Event{Cursor: cursor, Type: kind, At: envelope.FormatTime(fixedNow), Data: raw}
+}
+
+func deliveryEvent(t *testing.T, cursor, thread string) envelope.Event {
+	t.Helper()
+	return event(t, cursor, "delivery", map[string]any{"message": map[string]any{"thread_id": thread}})
+}
+
+func presenceEvent(t *testing.T, cursor, peer string) envelope.Event {
+	t.Helper()
+	return event(t, cursor, "presence", map[string]any{"peer_id": peer, "state": "idle"})
+}
