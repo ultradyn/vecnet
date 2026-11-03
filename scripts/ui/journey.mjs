@@ -16,7 +16,8 @@ try {
   await withDemo({ signedIn: false }, async ctx => {
     const { page, demo, asPeer, advance, hold, fail, countRequests, allowConsole, shot } = ctx;
     // Install before signing in: no reload, and every application timer uses
-    // this clock. The TUI remains the real binary with its real 20-minute beat.
+    // this clock.
+    // The TUI remains the real binary with a real heartbeat, shortened to 5 s through withTui({ beatEvery }).
     await page.clock.install();
     await page.locator('#secret').fill(demo.operator_secret);
     await page.locator('#login-form button[type="submit"]').click();
@@ -24,7 +25,7 @@ try {
     const navigations = [];
     page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigations.push(frame.url()); });
 
-    await withTui({ env: ctx }, async tui => {
+    await withTui({ env: ctx, beatEvery: '5s' }, async tui => {
       assert(tui.demo.url === demo.url, 'journey clients must share the same demo hub');
       const { keys, waitFor } = tui;
       const json = async (peer, method, path, body) => {
@@ -109,15 +110,17 @@ try {
         // more test presence writes, its next operator report can only come
         // from the real TUI heartbeat. Long-poll the event log, never snapshots.
         await json('codex', 'PATCH', '/v1/peers/me', { subscribe_presence: 'all' });
-        const deadline = Date.now() + 21 * 60000;
+        const started = Date.now();
+        const deadline = started + 60000;
         let cursor = 'head', report;
-        console.log('waiting for the real TUI presence heartbeat (up to 21 minutes)');
+        console.log('waiting for the real TUI presence heartbeat (5 s beat, up to 60 s)');
         while (!report && Date.now() < deadline) {
           const batch = await json('codex', 'GET', `/v1/events?after=${encodeURIComponent(cursor)}&wait=25`);
           cursor = batch.next_cursor;
           report = batch.events.find(event => event.type === 'presence' && event.data.peer_id === demo.operator_peer);
         }
         assert(report, 'real TUI heartbeat did not arrive');
+        console.log(`heartbeat after ${(Date.now() - started) / 1000}s`);
         assert(report.data.state === 'idle', 'TUI heartbeat overwrote idle');
         assert(report.data.at !== afterWeb.me.presence_at, 'TUI heartbeat did not refresh its timestamp');
         assert((await inbox()).me.presence === 'idle', 'TUI heartbeat did not preserve the hub state');

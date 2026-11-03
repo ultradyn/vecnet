@@ -445,18 +445,18 @@ func (s *inboxScreen) checkPrompt(m *Model) {
 // beat is the presence heartbeat, Task 14's rule. It asks the hub for the state
 // and re-posts that, never this client's idea of it, so two clients cannot
 // fight; unknown and offline are not re-asserted. The shell's slow refresh
-// supplies the Loaded that wakes it, every minute while the hub is up, so it
+// supplies the Loaded that wakes it, at m.slowEvery while the hub is up, so it
 // follows the model's clock on any tab.
 func (s *inboxScreen) beat(m *Model) tea.Cmd {
 	now := m.Now()
 	if s.nextBeat.IsZero() {
-		s.nextBeat = now.Add(inboxBeatEvery)
+		s.nextBeat = now.Add(m.beatEvery)
 		return nil
 	}
 	if now.Before(s.nextBeat) || m.Conn != ConnLive {
 		return nil
 	}
-	s.nextBeat = now.Add(inboxBeatEvery)
+	s.nextBeat = now.Add(m.beatEvery)
 	api, ctx, at := m.API, m.ctx, m.HubNow()
 	return func() tea.Msg {
 		fresh, err := api.Inbox(ctx, opapi.InboxQuery{Limit: 1})

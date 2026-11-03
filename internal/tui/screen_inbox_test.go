@@ -1386,6 +1386,77 @@ func TestPresenceToggle(t *testing.T) {
 	})
 }
 
+func TestDefaultCadence(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	defer m.cancel()
+	if m.beatEvery != 20*time.Minute {
+		t.Fatalf("beatEvery = %v, want 20m", m.beatEvery)
+	}
+	if m.slowEvery != time.Minute {
+		t.Fatalf("slowEvery = %v, want 1m", m.slowEvery)
+	}
+}
+
+func TestPresenceHeartbeatOverride(t *testing.T) {
+	f := inboxSeed()
+	clock := newClock()
+	m := newModel(context.Background(), Options{API: f, Now: clock.Now, BeatEvery: 5 * time.Second})
+	t.Cleanup(m.cancel)
+	p := newPump(t, m)
+	p.run(m.Init())
+	p.until("first load", func() bool { return !m.firstLoading() && m.Conn == ConnLive })
+	p.idle()
+	f.reset()
+
+	clock.advance(4 * time.Second)
+	p.send(tickMsg{})
+	// A Loaded can wake beat even before the next slow refresh.
+	if _, cmd := m.Update(Loaded{Key: "subs"}); cmd != nil {
+		t.Fatal("heartbeat ran before five seconds")
+	}
+	if f.count("SetPresence") != 0 || f.count("Subscriptions") != 0 {
+		t.Fatal("heartbeat or slow refresh ran before five seconds")
+	}
+
+	served := fixedNow.Add(3 * time.Second)
+	f.setInbox(func(in *opapi.Inbox) {
+		in.Now = envelope.FormatTime(served)
+		in.Me.Presence = "idle"
+	})
+	clock.advance(time.Second)
+	p.send(tickMsg{})
+	p.loaded(f.fakeAPI, "Subscriptions")
+	p.until("five-second heartbeat", func() bool { return f.count("SetPresence") == 1 })
+	p.idle()
+	if got := f.calls(&f.presence); !slices.Equal(got, []string{"idle"}) {
+		t.Fatalf("presence = %q, want [idle]", got)
+	}
+	f.writes.Lock()
+	at := f.presenceAt[0]
+	f.writes.Unlock()
+	if !at.Equal(served) {
+		t.Fatalf("heartbeat at = %v, want served time %v", at, served)
+	}
+	if got := f.count("Subscriptions"); got != 1 {
+		t.Fatalf("slow refreshes = %d, want 1 at five seconds", got)
+	}
+	if _, cmd := m.Update(Loaded{Key: "subs"}); cmd != nil {
+		t.Fatal("another Loaded duplicated the heartbeat")
+	}
+
+	clock.advance(4 * time.Second)
+	p.send(tickMsg{})
+	if f.count("Subscriptions") != 1 || f.count("SetPresence") != 1 {
+		t.Fatal("next slow refresh or heartbeat ran early")
+	}
+	clock.advance(time.Second)
+	p.send(tickMsg{})
+	p.until("next five-second refresh", func() bool {
+		return f.count("Subscriptions") == 2 && f.count("SetPresence") == 2
+	})
+	p.idle()
+}
+
 // Task 14's rule: re-post what the hub says, never a local choice, so two
 // clients cannot fight, and never re-assert unknown or offline.
 func TestPresenceHeartbeat(t *testing.T) {
