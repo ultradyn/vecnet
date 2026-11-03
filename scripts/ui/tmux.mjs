@@ -4,7 +4,7 @@ import { ansiHTML, LINE } from './ansi.mjs';
 import { assert, bootDemo, buildCLI, chromium, run, shotPath } from './lib.mjs';
 
 const quote = s => `'${s.replaceAll("'", "'\\''")}'`;
-export async function withTui({ scale = false, command, env: shared } = {}, fn) {
+export async function withTui({ scale = false, command, env: shared, beatEvery } = {}, fn) {
   const env = shared || await bootDemo({ scale });
   const socket = `oui-${process.pid}`;
   const tmux = (...args) => run('tmux', ['-L', socket, ...args], { env: { ...process.env, TMUX: '' } });
@@ -18,7 +18,8 @@ export async function withTui({ scale = false, command, env: shared } = {}, fn) 
     // lands in Task 17. Real screen scripts always use the default command.
     // Colour is forced on: a harness that exports NO_COLOR would otherwise
     // strip it from every shot.
-    const shell = `env -u NO_COLOR COLORTERM=truecolor VECNET_CONFIG=${quote(config)} XDG_CACHE_HOME=${quote(join(env.dir, 'cache'))} XDG_CONFIG_HOME=${quote(join(env.dir, 'config'))} TERM=xterm-256color ${argv.map(quote).join(' ')}`;
+    const beat = beatEvery === undefined ? '' : ` VECNET_TEST_TUI_BEAT=${quote(beatEvery)}`;
+    const shell = `env -u NO_COLOR COLORTERM=truecolor VECNET_CONFIG=${quote(config)} XDG_CACHE_HOME=${quote(join(env.dir, 'cache'))} XDG_CONFIG_HOME=${quote(join(env.dir, 'config'))} TERM=xterm-256color${beat} ${argv.map(quote).join(' ')}`;
     await tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'ui', '-x', '140', '-y', '42', shell);
     started = true;
     await tmux('set-option', '-g', 'status', 'off');
