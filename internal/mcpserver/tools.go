@@ -216,7 +216,8 @@ func callReact(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, 
 	if emoji, ok := envelope.ParseReaction(req.Emoji); ok {
 		req.Emoji = emoji
 	}
-	if _, supplied := fields["priority"]; !supplied && req.Op == "add" {
+	_, req.PrioritySupplied = fields["priority"]
+	if !req.PrioritySupplied && req.Op == "add" {
 		req.Priority = envelope.DefaultReactionPriority(req.Emoji)
 	}
 	resp, err := s.Hub.React(ctx, c, req, mcpIngress)

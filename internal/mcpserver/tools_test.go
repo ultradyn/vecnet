@@ -1169,7 +1169,23 @@ func TestReactTool(t *testing.T) {
 
 func TestReactValidationParity(t *testing.T) {
 	env := testhub.Start(t)
-	_, secret := env.NewPeer("session", "reactor")
+	reactor, secret := env.NewPeer("session", "reactor")
+	_, senderSecret := env.NewPeer("session", "sender")
+	var sent sendResult
+	toolOK(t, env, senderSecret, "vecnet_send", map[string]any{
+		"idempotency_key": "validation-target", "recipients": []string{reactor},
+		"priority": "hold", "content": map[string]any{"text": "react to this"},
+	}, &sent)
+	writeCounts := func() [8]int {
+		t.Helper()
+		var counts [8]int
+		for i, table := range []string{"reactions", "reaction_ops", "reaction_wakes", "messages", "deliveries", "events", "audit", "counters"} {
+			if err := env.Hub.DB.QueryRow("SELECT count(*) FROM " + table).Scan(&counts[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return counts
+	}
 	for _, tc := range []struct {
 		name, emoji, op, priority, code, field string
 	}{
@@ -1179,28 +1195,43 @@ func TestReactValidationParity(t *testing.T) {
 		{"emoji before priority", "invalid", "add", "bad", "emoji_not_allowed", ""},
 		{"op before priority", "✅", "bad", "bad", "invalid_value", "op"},
 		{"empty op", "✅", "", "hold", "invalid_value", "op"},
+		{"empty priority", "✅", "add", "", "invalid_value", "priority"},
+		{"empty priority on remove", "✅", "remove", "", "invalid_value", "priority"},
+		{"emoji before empty priority", "invalid", "add", "", "emoji_not_allowed", ""},
+		{"op before empty priority", "✅", "bad", "", "invalid_value", "op"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			// A well-formed but unknown target also checks that semantic errors
-			// win over message lookup on both transports (§17.2).
-			args := map[string]any{"message_id": "msg_00000000000000000000000000", "emoji": tc.emoji, "op": tc.op, "priority": tc.priority}
-			resp, body := env.Do(secret, http.MethodPost, "/v1/reactions", args)
-			var httpErr toolErrorBody
-			if err := json.Unmarshal(body, &httpErr); err != nil {
-				t.Fatal(err)
-			}
-			var field any
-			if tc.field != "" {
-				field = tc.field
-			}
-			if resp.StatusCode != 422 || httpErr.Error.Code != tc.code || httpErr.Error.Details["field"] != field {
-				t.Fatalf("HTTP reaction: %d %s, want %s field %q", resp.StatusCode, body, tc.code, tc.field)
-			}
-			mcpErr := toolFails(t, env, secret, "vecnet_react", args, tc.code)
-			if mustJSON(t, mcpErr) != mustJSON(t, httpErr) {
-				t.Fatalf("MCP error %+v differs from HTTP %+v", mcpErr, httpErr)
-			}
-		})
+		for _, target := range []struct{ name, id string }{
+			{"valid target", sent.MessageID},
+			{"unknown target", "msg_00000000000000000000000000"},
+		} {
+			t.Run(tc.name+"/"+target.name, func(t *testing.T) {
+				before := writeCounts()
+				t.Cleanup(func() {
+					if after := writeCounts(); after != before {
+						t.Errorf("rejected reaction wrote state: counts %v -> %v", before, after)
+					}
+				})
+				// Semantic errors must win over target lookup on both transports
+				// and must not write reactions, wakes, events, rates or audit rows.
+				args := map[string]any{"message_id": target.id, "emoji": tc.emoji, "op": tc.op, "priority": tc.priority}
+				resp, body := env.Do(secret, http.MethodPost, "/v1/reactions", args)
+				var httpErr toolErrorBody
+				if err := json.Unmarshal(body, &httpErr); err != nil {
+					t.Fatal(err)
+				}
+				var field any
+				if tc.field != "" {
+					field = tc.field
+				}
+				if resp.StatusCode != 422 || httpErr.Error.Code != tc.code || httpErr.Error.Details["field"] != field {
+					t.Errorf("HTTP reaction: %d %s, want %s field %q", resp.StatusCode, body, tc.code, tc.field)
+				}
+				mcpErr := toolFails(t, env, secret, "vecnet_react", args, tc.code)
+				if mustJSON(t, mcpErr) != mustJSON(t, httpErr) {
+					t.Fatalf("MCP error %+v differs from HTTP %+v", mcpErr, httpErr)
+				}
+			})
+		}
 	}
 	for _, tc := range []struct {
 		name string

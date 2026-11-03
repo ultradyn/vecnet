@@ -29,6 +29,7 @@ func (s *server) postReactions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	_, req.PrioritySupplied = top["priority"]
 	c := callerFrom(r.Context())
 	ingress := "http_send"
 	if c.Kind == "operator" && r.Header.Get("X-Vecnet-Ingress") == "operator_ui" {
