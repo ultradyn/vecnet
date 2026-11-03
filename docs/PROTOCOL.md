@@ -33,17 +33,17 @@ Precedence when sources disagree: a resolution `[Rnn]` beats a ticket `## Answer
 | Object | Direction | Purpose |
 |---|---|---|
 | `SendRequest` | peer → hub | Body of `POST /v1/messages` and the arguments of MCP `vecnet_send`. The hub derives `message_id`, `thread_id` (new threads), `sender`, `created_at`, `loop`, `origin` [SCH]. |
-| `Message` | inside a Delivery | The logical **Message**, byte-identical across every Delivery of it [ENV §4, R17]. `kind` ∈ `message`, `approval_request`, `approval_response`, `job_status`. |
+| `Message` | inside a Delivery | The logical **Message**, byte-identical across every Delivery of it [ENV §4, R17]. `kind` ∈ `message`, `approval_request`, `approval_response`, `job_status`, `reaction` (§17.4). |
 | `Delivery` | hub → peer | One Message to one recipient peer: `delivery_id`, `recipient`, `via`, `attempt`, `ingress`, `thread`, `message` [SCH]. The webhook push body, the `data` of a `delivery` Event, and an MCP inbox entry. |
 | `ThreadSummary` | inside Delivery; `thread_updated` data | Thread context so a webhook-only receiver needs no fetch [ENV §5]. |
 | `Receipt` | Event data | Progress of one Delivery: `accepted`, `processed`, `read`, `failed`, `expired`, `dead_letter`; carries `thread_id` [SCH]. |
 | `Presence` | peer → hub; Event data | Self-reported state; never verified [T14]. |
-| `Event` | hub → peer | One entry in a durable log: `cursor`, `type`, `at`, `data`. Types: `delivery`, `receipt`, `presence`, `thread_updated`, `directory_updated`, `approval_expired` [SCH]; and, to the operator only, `operator_view` (section 2.13). |
+| `Event` | hub → peer | One entry in a durable log: `cursor`, `type`, `at`, `data`. Types: `delivery`, `receipt`, `presence`, `thread_updated`, `directory_updated`, `approval_expired`, `reaction` [SCH, §17.1]; and, to the operator only, `operator_view` (section 2.13). |
 | `jobRequest` / `jobStatus` / `approvalRequest` / `approvalResponse` | sub-objects of SendRequest / Message | Job and approval payloads, shaped after webhook2mcp [T08]. |
 | `origin` | Message | Bridged-conversation reference `{system, thread_id, message_id?, event_id?}`; `null` for native traffic [ENV §6]. |
 | `attachment` | Message | Reference by `sha256`, `size`, `media_type`, optional `name`, `origin_url`, hub-set `blob_url` [SCH]. |
 
-Receipts and presence are **Event types, never Message kinds**, so they cannot be replied to and cannot start loops [T08, ENV §1].
+Receipts and presence are **Event types, never Message kinds**, so they cannot be replied to and cannot start loops [T08, ENV §1]. A reaction is always an Event and, only when it wakes, also a `reaction` Message that cannot be replied to (§17). Peers MUST NOT author `kind: reaction` through `SendRequest`, `POST /v1/messages` or `vecnet_send`; the hub creates it only through §17.4.
 
 ### 1.3 Ids
 
@@ -86,6 +86,7 @@ All endpoints are under the hub's public HTTPS origin. Bodies are JSON unless st
 | Method and path | Auth | Purpose | Fixed by |
 |---|---|---|---|
 | `POST /v1/messages` | peer / principal | Send | [SCH, ENV] |
+| `POST /v1/reactions` | peer / principal | Add or remove a reaction, optionally waking the target sender | §17.2 |
 | `GET /v1/events` | peer / principal | SSE or long-poll of the durable log | [T06, SSE] |
 | `POST /v1/ack` | peer / principal | Ack a cursor | [SSE] |
 | `POST /v1/receipts` | recipient peer / its principal | `processed` / `read` / `failed` receipt | [R06] |
@@ -127,6 +128,7 @@ The hub MUST:
 
 | Reason code | Status | Cause |
 |---|---|---|
+| `not_replyable` | 422 [§17.4] | `in_reply_to` names a Message of kind `reaction` |
 | `max_depth_exceeded` | 422 [T16] | Reply depth would exceed `max_depth` |
 | `thread_budget_exhausted` | 422 [T16] | Thread budget is 0 |
 | `expired` | 422 [T16] | Parent `expires_at` has passed |
@@ -206,7 +208,7 @@ Body `{state: idle|working|blocked|offline, at, capabilities?, quota?, location?
 
 `GET /v1/threads?participant=me|<peer_id>&group=<grp_id>&since=<timestamp>&limit=<n≤200>`: threads the caller participates in. Returns `{threads: [ThreadSummary…], next}`; `next` is an opaque paging token [R08].
 
-`GET /v1/threads/{id}/messages?after=<message_id>&limit=<n≤200>`: history for late joiners and cursor re-sync [ENV §5]. `after` is a `msg_` id, exclusive; omitted means from the thread's start. Returns `{messages: [Message…], next_after}`; `next_after` is the `msg_` id to pass next, or `null` at the end [R08]. Participants only; others get 403 `not_participant` [T09, R08, R24]. The operator credential is the exception: it reads any thread in full, whatever its `history_access`, and may list any peer's threads with `participant=<peer_id>` (the operator inbox needs both). The operator's page also carries `hosted_blobs`: an object from `message_id` to the `sha256`s of that message's attachments whose bytes the hub hosts (referenced at send time and not purged), in attachment order; `{}` when none. A stored Message never holds a `blob_url`, so this is how the operator UI tells hosted bytes that also name an informational `origin_url` from reference-only ones (section 11). Other callers' pages are exactly `{messages, next_after}`.
+`GET /v1/threads/{id}/messages?after=<message_id>&limit=<n≤200>`: history for late joiners and cursor re-sync [ENV §5]. `after` is a `msg_` id, exclusive; omitted means from the thread's start. Returns `{messages: [Message…], next_after}`; `next_after` is the `msg_` id to pass next, or `null` at the end [R08]. Participants only; others get 403 `not_participant` [T09, R08, R24]. The operator credential is the exception: it reads any thread in full, whatever its `history_access`, and may list any peer's threads with `participant=<peer_id>` (the operator inbox needs both). The operator's page also carries `hosted_blobs`: an object from `message_id` to the `sha256`s of that message's attachments whose bytes the hub hosts (referenced at send time and not purged), in attachment order; `{}` when none. A stored Message never holds a `blob_url`, so this is how the operator UI tells hosted bytes that also name an informational `origin_url` from reference-only ones (section 11). Other callers' pages are exactly `{messages, next_after}`. Each Message MAY carry `reactions` as specified in §17.3; reaction Messages never appear in history (§17.3).
 
 ### 2.9 Groups *(proposed paths)*
 
@@ -333,6 +335,7 @@ unknown event types or undecodable data invalidate nothing:
 |---|---|
 | `delivery` | `inbox`, `threads`, `thread:<message.thread_id>` |
 | `receipt` | `inbox`, `thread:<thread_id>` |
+| `reaction` | `thread:<thread_id>` (§17.3) |
 | `thread_updated` | `threads`, `thread:<thread_id>` |
 | `presence`, `directory_updated` | `peers` |
 | `approval_expired` | `inbox`, `thread:<thread_id>` |
@@ -340,12 +343,12 @@ unknown event types or undecodable data invalidate nothing:
 
 `operator_view` is appended only to enabled operator peers, in the transaction
 that changes a view. Its data is `{reason, thread_id}`: `reason` is `sent`,
-`read`, `presence`, `dead_letter`, or `subscription`; `thread_id` is a `thr_`
+`read`, `presence`, `dead_letter`, `subscription`, or `reaction` (§17.3); `thread_id` is a `thr_`
 id or `null`. It fires for a new operator send (including approval responses),
 a newly read operator delivery, a changed effective operator presence, a
 dead-letter retry or discard, or a subscription pause or resume. Idempotent
 sends, repeated reads, unchanged presence heartbeats, and unchanged
-subscriptions emit none. It is not pushed to agents or MCP Events. Data that
+subscriptions emit none. For a changed reaction, it is sent to enabled operator peers that did not receive the `reaction` Event (§17.3). It is not pushed to agents or MCP Events. Data that
 is not an object, a non-string `reason`, or a `thread_id` that is neither a
 string nor null invalidates nothing.
 
@@ -422,12 +425,13 @@ The inbox is the resource `vecnet://peer/<peer_id>/inbox`; a principal-level sub
 
 ### 4.3 Tools
 
-The hub exposes exactly these tools [R13]:
+The hub exposes exactly these ten tools [R13, §17.2]:
 
 | Tool | Args | Effect | Source |
 |---|---|---|---|
 | `vecnet_send` | `SendRequest` | Same as `POST /v1/messages` | [SCH] |
 | `vecnet_reply` | `message_id`, `text`, `priority`, other `SendRequest` fields | Sugar for `vecnet_send`: derives `thread_id` and `in_reply_to` from `message_id` | [R13] |
+| `vecnet_react` | `message_id`, `emoji`, `op`, `priority?`, `as?` | Same as `POST /v1/reactions`; client defaults per §17.6 | §17.2 |
 | `vecnet_inbox` | `after?`, `limit?` | `{events, next_cursor}` from the same log as `/v1/events` | [T06] |
 | `vecnet_ack` | `cursor` | Same as `POST /v1/ack` | [T06] |
 | `vecnet_receipt` | `delivery_id`, `state`, `note?` | Same as `POST /v1/receipts` | [R06] |
@@ -452,7 +456,7 @@ Implements OpenAI's ChatGPT profile in webhook mode [T02, DOTS]:
 - **Outage:** while no live subscription exists, queue durably and drain from the cursor on re-subscribe [DOTS].
 - **Payload:** envelope metadata plus content, or a preview plus a blob reference when over the cap; never model instructions; label content untrusted [DOTS]. The label is in the `events/list` description and `payloadSchema`: each POST keeps the profile's five fields.
 - **Mapping:** `eventId` is the `delivery_id` for a `delivery` Event and the log cursor string otherwise; the Events `cursor` is the log cursor [R14].
-- **Types:** a dot is pushed `delivery` Events by default, and `receipt`, `thread_updated` or `approval_expired` only when its subscribe `arguments` list them in `types`. No other type is pushed to a dot [R14]. Priority still gates `delivery` pushes (section 5.2).
+- **Types:** a dot is pushed `delivery` Events by default, and `receipt`, `thread_updated` or `approval_expired` only when its subscribe `arguments` list them in `types`. No other type is pushed to a dot [R14]. In particular, `reaction` Events are never pushed to a dot (§17.1); a waking reaction travels as a `delivery` Event (§17.4). Priority still gates `delivery` pushes (section 5.2).
 - **Limits:** one principal holds at most 16 live subscriptions; another subscribe is `-32602` with `data.reason: too_many`.
 - **Tunnel:** OpenAI's Secure MCP Tunnel is unsupported in v1; dots reach the hub over public HTTPS [R14].
 
@@ -483,10 +487,11 @@ queued ──push──▶ pushed ──2xx──▶ accepted ──receipt─�
    │                ├─retryable, attempts left─▶ (re-push)
    │                └─exhausted / terminal 4xx─▶ dead_letter
    ├─(hold) cursor ack past entry──────────▶ accepted
-   └─expires_at passes before accepted─────▶ expired
+   ├─expires_at passes before accepted─────▶ expired
+   └─reaction coalesced or withdrawn───────▶ superseded (§17.5)
 ```
 
-Terminal: `failed`, `expired`, `dead_letter` [T10]. `accepted` = 2xx on push, or the recipient acks a cursor past the entry on pull [T10]. `processed` and `failed` come only from the recipient's receipt [T10]. A Delivery undelivered at `expires_at` becomes `expired` and is not retried [SCH].
+Terminal: `failed`, `expired`, `dead_letter` [T10], and internal `superseded` for queued reaction Deliveries (§17.5). `accepted` = 2xx on push, or the recipient acks a cursor past the entry on pull [T10]. `processed` and `failed` come only from the recipient's receipt [T10]. A Delivery undelivered at `expires_at` becomes `expired` and is not retried [SCH].
 
 The sender receives a `receipt` Event for `dead_letter` and `expired` [T10], and for `accepted`/`processed` [ENV].
 
@@ -553,7 +558,7 @@ The hub fills `loop` on every Message [ENV]:
 
 **Thread budget.** Default 500 messages per thread. `budget_remaining` lives on the thread and rides in every `Delivery.thread`; `null` means unlimited. Only the operator raises a budget [T16, SCH].
 
-**What counts.** Approval requests, approval responses and `job_status` messages are Messages: each counts against the thread budget and increments depth like any reply. Hub-posted messages, such as the expiry `approval_response`, count against neither [R20].
+**What counts.** Approval requests, approval responses and `job_status` messages are Messages: each counts against the thread budget and increments depth like any reply. Hub-posted messages, such as the expiry `approval_response`, count against neither [R20]. Reactions are exempt from the thread budget; their waking Messages still increment depth and obey expiry, subject to the operator exception (§17.4, §16.1). A non-operator reactor can wake at most once per (target message, emoji), ever: at most eight wakes per target message, or three with client default priorities (§17.4, §17.6). Real messages remain budgeted and depth-bounded, so the thread budget stays the hard stop (§17.4). A reaction Message is never the implicit loop parent (§17.4).
 
 **Client breaker (connector recommendation).** When `sender_chain` shows the same two peers alternating for N consecutive entries (default 12) within a window (default 10 min), the connector SHOULD stop auto-replying and ask the operator via `approval_request` before continuing. Both values are configurable. The hub's thread budget is the hard stop regardless [T16].
 
@@ -677,7 +682,7 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 - [ ] Dedupe on `delivery_id` within a bounded window.
 - [ ] Ack via `/v1/ack` per batch; send `processed` receipts where required.
 - [ ] Fall back to long-poll on repeated SSE failures.
-- [ ] Drop `receipt`, `presence` and other non-`delivery` Events before waking an agent; never auto-reply to them [ENV §1, OC].
+- [ ] Drop `receipt`, `presence`, `reaction` and other non-`delivery` Events before waking an agent; never auto-reply to them [ENV §1, OC, §17.1]. A Delivery of kind `reaction` MAY wake under §5.2; connectors apply their usual loop breakers and MUST NOT reply to it (§17.4).
 
 ### 13.2 Every push receiver [W2M, T10]
 
@@ -730,7 +735,7 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 ### 13.7 `vecnet` CLI [T17, ADR1]
 
 - [ ] Single static Go binary per OS/arch.
-- [ ] Commands: `send <peer|group> "text" [--thread] [--reply-to] [--wake|--wake-idle|--hold] [--attach FILE]`, `reply <message_id> "text"`, `inbox [--since CURSOR] [--ack]`, `ack <cursor>`, `watch [--for-monitor]`, `threads`, `thread <id> [--after MESSAGE_ID]`, `peers`, `groups create|add|list`, `presence set <state>`, `presence subscribe <all|teams|none>`; admin `principal add`, `peer add [--principal]|move|link|rotate|scope`, `source add`, `route add`, `dead-letters list|retry|discard` [R08, R10, R15, R22].
+- [ ] Commands: `send <peer|group> "text" [--thread] [--reply-to] [--wake|--wake-idle|--hold] [--attach FILE]`, `reply <message_id> "text"`, `react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]` (§17.6), `inbox [--since CURSOR] [--ack]`, `ack <cursor>`, `watch [--for-monitor]`, `threads`, `thread <id> [--after MESSAGE_ID]`, `peers`, `groups create|add|list`, `presence set <state>`, `presence subscribe <all|teams|none>`; admin `principal add`, `peer add [--principal]|move|link|rotate|scope`, `source add`, `route add`, `dead-letters list|retry|discard` [R08, R10, R15, R22].
 - [ ] `watch --for-monitor` holds the SSE stream and prints one compact line per event: `<cursor> <type> <thread_id> <sender_id> <text>`. The first four columns retain ids (`-` for empty fields); when the sender's display name is known, the text starts with `<name>: `. Text is flattened to one safe terminal line and capped at 120 Unicode runes including the name prefix. Names are flattened, spaces replaced with `_`, and capped at 32 runes. The CLI fetches `/v1/peers` at watch startup and on `directory_updated`, keeps old names if fetching fails, and caches names in `peers.json` for `inbox` to use without fetching. It is exempt from the section 13.1 drop rule by default: it prints `receipt`, `presence` and other non-`delivery` Events too, because the agent reading the monitor decides what to act on and MUST NOT auto-reply to them; `--deliveries-only` applies the 13.1 drop.
 - [ ] Plain `watch` and `inbox` print `CURSOR TYPE THREAD FROM MSG DELIVERY TEXT` once at the start, then one line per event with `name(peer_id)` in FROM when known, the peer id otherwise, and `-` for empty fields. JSON output is unchanged. `watch` does not ack by default; use `--auto-ack` or `vecnet ack <cursor>` to avoid replaying the log after a restart.
 - [ ] MAY act as a stdio channel server for Claude Code, re-emitting `/v1/events` as `notifications/claude/channel` [SSE].
@@ -773,6 +778,8 @@ Further reason codes, introduced by the core-hub implementation plan (2026-11-01
 - `not_your_peer` (403): `?peer=` names a peer the principal does not own.
 - `invalid_state` (422): a receipt state other than `processed`, `read` or `failed`.
 - `invalid_value` (422): a field value outside its allowed set or range (e.g. `subscribe_presence`).
+- `emoji_not_allowed` (422): a reaction emoji outside the fixed set (§17.1–§17.2).
+- `not_replyable` (422): a reply or reaction targeting a Message of kind `reaction` (§17.4).
 - `unknown_thread` (404): the named thread does not exist.
 - `not_member` (403): a non-member tried to change an ad hoc group.
 - `unknown_approval` (404): an `approval_response` names no approval of this thread.
@@ -837,3 +844,99 @@ The hub MUST enforce per-peer limits on `POST /v1/messages` and the MCP send too
 ### 16.4 Operator note [no rule change]
 
 The dashboard SHOULD show, per peer, any thread whose push queue is blocked on a delivery under retry ("thread blocked on delivery N"), since per-(peer, thread) serialisation can hold a thread for hours while others flow.
+
+---
+
+## 17. Reactions (2026-11-03)
+
+[issue 24] This amendment extends the objects (§1.2), HTTP API (§2), MCP tools and Events profile (§4), delivery semantics (§5), loop control (§6), and connector obligations (§13). Its rules supersede those sections where reactions need special treatment.
+
+### 17.1 Event layer
+
+The fixed set, in display order and in the order of `Message.reactions`, is **👍 👎 ❤️ 😂 👀 ✅ ❓ ❗**. The canonical code points are **U+1F44D, U+1F44E, U+2764 U+FE0F, U+1F602, U+1F440, U+2705, U+2753, U+2757**, respectively. A bare U+2764 (without U+FE0F) MUST be normalised to ❤️. Nothing else is allowed: no skin tones, no ZWJ sequences (§17.2).
+
+The hub stores one row per (message, peer, emoji). An `add` creates that row and a `remove` deletes it; different emoji by the same peer are independent. Each state change appends a `reaction` Event whose data is `{message_id, thread_id, peer_id, emoji, op, at}`, where `peer_id` is the reactor, `op` is `add` or `remove`, and `at` is the hub's timestamp (§1.2).
+
+The Event is appended once to every participant that can see the target under §16.3, plus the reactor. The operator sees every message; every other reactor MUST participate and, under `from_join`, have joined before the target's sequence. The same visibility predicate selects the participants receiving the Event. Outsiders and late joiners MUST NOT receive an Event about an invisible target (§16.3). After commit, the hub MUST notify every log it appended to, including operator-view and wake-recipient logs, so SSE and long-poll readers see the change at once (§2.3).
+
+The `reaction` Event is never pushed: not to push routes, Grok Bot or dots (§4.4). Only a wake layer's Delivery can travel through §5.2 (§17.4). Unknown event types are already ignored for invalidation (§2.13).
+
+### 17.2 `POST /v1/reactions`
+
+Peer or principal authentication and reactor selection with `as` follow sends (§2.2). The request names `message_id`, `emoji`, and `op` (`add` or `remove`), with optional `priority` (`hold`, `wake_idle`, or `wake`) and `as`. For example:
+
+```json
+{"message_id": "msg_…", "emoji": "✅", "op": "add", "priority": "wake_idle", "as": "peer_…"}
+```
+
+The hub API defaults an omitted `priority` to `hold`; client defaults are in §17.6. The response is **200**, also on a no-op:
+
+```json
+{"message_id": "msg_…", "thread_id": "thr_…", "emoji": "✅", "op": "add", "changed": true,
+ "reactions": [{"emoji": "✅", "peers": ["peer_…"]}],
+ "superseded": ["dly_…"],
+ "wake": {"message_id": "msg_…", "delivery_id": "dly_…", "recipient": "peer_…", "state": "queued"}}
+```
+
+`reactions` and top-level `superseded` MUST always be arrays, never null. `reactions` is the target's current aggregate (§17.3). `superseded` lists the reactor's queued reaction Deliveries this call superseded or withdrew, on `add` or `remove` (§17.5). `wake` MUST be `null` unless this call created a Delivery (§17.4).
+
+The hub MUST check in this order, identically for HTTP and `vecnet_react` (§4.3):
+
+1. Body shape: 400 `invalid_body` (HTTP layer; MCP schema).
+2. `emoji` outside the set: 422 `emoji_not_allowed`. Bad `op` or `priority`: 422 `invalid_value` with `details.field`.
+3. Reactor (`as`): `as_required` / `forbidden`, as on send (§2.2, §15).
+4. Message unknown or not visible to the reactor: 404 `not_found` (§16.3).
+5. Target is `kind: reaction`: 422 `not_replyable` (§17.4).
+6. **No-op:** an `add` whose row exists, or a `remove` whose row is absent, returns 200 `changed: false`, `superseded: []`, `wake: null` at once, before any rate, loop or wake check. A retry after a lost response therefore always succeeds.
+7. Rate: 429 `rate_limited` (§16.2).
+8. Wake checks: eligibility, scopes, loop (§17.4).
+9. Writes: change the row, append Events, and create or supersede wake Deliveries as applicable (§17.1, §17.4–§17.5).
+
+Every state change, including a remove, counts against §16.2's sends-per-minute limit, which reactions share with sends. A no-op does not count. A rate or loop refusal commits only its counter and audit row; it MUST NOT change reaction state, append reaction Events or create or supersede wake Deliveries (§16.2, §6).
+
+### 17.3 Read side
+
+`Message.reactions` in `GET /v1/threads/{id}/messages` (§2.8) and `vecnet_thread` (§4.3) is an array of `{emoji, peers}` aggregates in the fixed order (§17.1), with peers in reaction order. An absent field means no reactions. Messages of kind `reaction` never appear in history.
+
+A `reaction` Event invalidates `thread:<thread_id>` (§2.13). For a changed reaction, enabled operator peers that did not receive that Event instead receive `operator_view` with `{reason: "reaction", thread_id}` in the same transaction (§2.13). This includes a non-participant operator other than the reactor; the reactor already receives the reaction Event (§17.1).
+
+### 17.4 Wake layer
+
+`priority` defaults to `hold`, which means the Event only (§17.1–§17.2).
+
+With `wake`/`wake_idle`, an `add` that changed state creates one Message of kind `reaction`: `recipients: [target sender]`, `in_reply_to: target`, `reaction: {target, emoji}`, `content.text` = the emoji, `priority` as given, `loop.sender_chain` = the target's chain + the reactor, `depth` = target + 1. The chain retains the last 32 originators (§6). It has one Delivery under §5.2, including held `wake_idle` release on idle or stale presence and the operator's notification webhooks for `wake`. The following eligibility and refusal rules apply before any write (§17.2).
+
+**At most one wake per (reactor, target message, emoji), ever:** a later add of the same emoji, after a remove, is Event-only. Peers of kind `operator` are exempt, as §16.1 exempts them from loop refusals. With the eight emoji, an agent can wake a given message's sender at most eight times, and three times with the default priorities. Real messages are budgeted and depth-bounded, so the thread budget stays the hard stop (§6).
+
+There is no wake (Event only) when the target's sender is the reactor, a source or `hub`. A `remove` never wakes (§17.5). Send scopes apply to a wake; a refusal is `scope_denied` (§12, §2.2).
+
+`max_depth` and `expires_at` apply (§6), and a refused wake refuses the whole reaction (§17.2). The operator resets depth and TTL (§16.1); `sender_chain` still records the reactor. A reaction is exempt from the thread budget, changes neither `message_count` nor `last_message_at`, and is never the implicit loop parent (§6).
+
+Replying to a reaction Message through `POST /v1/messages`, `vecnet_reply` or `vecnet reply`, or reacting to it, is **422 `not_replyable`** (§2.2, §4.3, §13.7). Connectors' breakers treat its Delivery like any message (§6, §13.1); they MUST NOT auto-reply to it.
+
+An operator that is not a participant MAY wake, and its reaction Message then has a sender outside `thread.participants` (§16.3). Reacting does not add the operator as a participant.
+
+### 17.5 Coalescing
+
+A newer waking reaction by the same reactor in the same thread moves that reactor's still-`queued` reaction Deliveries to the recipient to `superseded`. Thus at most one still-`queued` reaction Delivery exists per (reactor, recipient, thread). A wake already accepted is never superseded (§5.1).
+
+A `remove` withdraws the still-`queued` wake of that (target, emoji) by the same reactor the same way. Removing does not restore the once-ever wake eligibility (§17.4). Both operations report the affected delivery ids in top-level `superseded` (§17.2).
+
+`superseded` is terminal and internal: never pushed, absent from the operator inbox, its unread count and mark-read; the hub sends no receipt when it supersedes (§5.1, §2.13).
+
+### 17.6 Client defaults
+
+The CLI, MCP tool, TUI and web use the following names and per-emoji priorities unless the user overrides them. This display order also governs `Message.reactions` (§17.1, §17.3):
+
+| Emoji | Name | Default priority |
+|---|---|---|
+| 👍 | `+1` | `hold` |
+| 👎 | `-1` | `hold` |
+| ❤️ | `heart` | `hold` |
+| 😂 | `laugh` | `hold` |
+| 👀 | `eyes` | `hold` |
+| ✅ | `check` | `wake_idle` |
+| ❓ | `q` | `wake_idle` |
+| ❗ | `bang` | `wake_idle` |
+
+The CLI command is `react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]` (§13.7): it adds unless `--remove` is given, and an explicit priority flag overrides the table. `vecnet_react` uses the same per-emoji default when the caller omits priority (§4.3). The hub API itself always defaults an omitted priority to `hold` (§17.2).
