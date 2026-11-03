@@ -266,6 +266,16 @@ func TestToolsListNamesAndHints(t *testing.T) {
 		if !readOnly[tool.Name] && !strings.Contains(tool.Description, "operator's bus") {
 			t.Errorf("%s: a write tool's description must say it writes to the operator's bus: %q", tool.Name, tool.Description)
 		}
+		if tool.Name == "vecnet_react" {
+			props := tool.InputSchema["properties"].(map[string]any)
+			if got := props["op"].(map[string]any)["enum"]; mustJSON(t, got) != `["add","remove"]` {
+				t.Errorf("reaction op enum = %v", got)
+			}
+			defs := tool.InputSchema["$defs"].(map[string]any)
+			if got := defs["priority"].(map[string]any)["enum"]; mustJSON(t, got) != `["wake","wake_idle","hold"]` {
+				t.Errorf("reaction priority enum = %v", got)
+			}
+		}
 		names := map[string]bool{}
 		propertyNames(tool.InputSchema, names)
 		for name := range names {
@@ -1155,6 +1165,162 @@ func TestReactTool(t *testing.T) {
 			"message_id": sent.MessageID, "emoji": "not-an-emoji",
 		}, "emoji_not_allowed")
 	})
+}
+
+func TestReactValidationParity(t *testing.T) {
+	env := testhub.Start(t)
+	reactor, secret := env.NewPeer("session", "reactor")
+	_, senderSecret := env.NewPeer("session", "sender")
+	var sent sendResult
+	toolOK(t, env, senderSecret, "vecnet_send", map[string]any{
+		"idempotency_key": "validation-target", "recipients": []string{reactor},
+		"priority": "hold", "content": map[string]any{"text": "react to this"},
+	}, &sent)
+	writeCounts := func() [8]int {
+		t.Helper()
+		var counts [8]int
+		for i, table := range []string{"reactions", "reaction_ops", "reaction_wakes", "messages", "deliveries", "events", "audit", "counters"} {
+			if err := env.Hub.DB.QueryRow("SELECT count(*) FROM " + table).Scan(&counts[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return counts
+	}
+	// The schema's character bound also has a UTF-8 byte cap. Body shape
+	// must win over semantic errors and target lookup on both transports.
+	for _, tc := range []struct {
+		name, emoji string
+	}{
+		{"33 ASCII bytes", strings.Repeat("x", 33)},
+		{"33 UTF-8 bytes", strings.Repeat("✅", 11)},
+		{"32 ASCII bytes", strings.Repeat("x", 32)},
+		{"32 UTF-8 bytes", strings.Repeat("👍", 8)},
+	} {
+		for _, mixed := range []bool{false, true} {
+			args := map[string]any{"message_id": sent.MessageID, "emoji": tc.emoji, "op": "add", "priority": "hold"}
+			name := tc.name + "/valid fields"
+			if mixed {
+				name = tc.name + "/invalid op and priority and unknown target"
+				args["message_id"] = "msg_00000000000000000000000000"
+				args["op"], args["priority"] = "bad", "bad"
+			}
+			for _, transport := range []string{"HTTP", "MCP"} {
+				t.Run("emoji length/"+name+"/"+transport, func(t *testing.T) {
+					before := writeCounts()
+					t.Cleanup(func() {
+						if after := writeCounts(); after != before {
+							t.Errorf("rejected reaction wrote state: %v -> %v", before, after)
+						}
+					})
+					if transport == "MCP" {
+						if len(tc.emoji) <= 32 {
+							toolFails(t, env, secret, "vecnet_react", args, "emoji_not_allowed")
+						} else if path := invalidPath(t, env, secret, "vecnet_react", args); path != "/emoji" {
+							t.Fatalf("MCP rejected at %q, want /emoji", path)
+						}
+						return
+					}
+					resp, body := env.Do(secret, http.MethodPost, "/v1/reactions", args)
+					var got toolErrorBody
+					if err := json.Unmarshal(body, &got); err != nil {
+						t.Fatal(err)
+					}
+					if len(tc.emoji) <= 32 {
+						if resp.StatusCode != 422 || got.Error.Code != "emoji_not_allowed" {
+							t.Fatalf("HTTP reaction: %d %s, want 422 emoji_not_allowed", resp.StatusCode, body)
+						}
+					} else if resp.StatusCode != 400 || got.Error.Code != "invalid_body" || got.Error.Details["path"] != "/emoji" {
+						t.Fatalf("HTTP reaction: %d %s, want 400 invalid_body at /emoji", resp.StatusCode, body)
+					}
+				})
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name, emoji, op, priority, code, field string
+	}{
+		{"invalid op", "✅", "bad", "hold", "invalid_value", "op"},
+		{"invalid priority", "✅", "add", "bad", "invalid_value", "priority"},
+		{"emoji before op", "invalid", "bad", "hold", "emoji_not_allowed", ""},
+		{"emoji before priority", "invalid", "add", "bad", "emoji_not_allowed", ""},
+		{"op before priority", "✅", "bad", "bad", "invalid_value", "op"},
+		{"empty op", "✅", "", "hold", "invalid_value", "op"},
+		{"empty priority", "✅", "add", "", "invalid_value", "priority"},
+		{"empty priority on remove", "✅", "remove", "", "invalid_value", "priority"},
+		{"emoji before empty priority", "invalid", "add", "", "emoji_not_allowed", ""},
+		{"op before empty priority", "✅", "bad", "", "invalid_value", "op"},
+	} {
+		for _, target := range []struct{ name, id string }{
+			{"valid target", sent.MessageID},
+			{"unknown target", "msg_00000000000000000000000000"},
+		} {
+			t.Run(tc.name+"/"+target.name, func(t *testing.T) {
+				before := writeCounts()
+				t.Cleanup(func() {
+					if after := writeCounts(); after != before {
+						t.Errorf("rejected reaction wrote state: counts %v -> %v", before, after)
+					}
+				})
+				// Semantic errors must win over target lookup on both transports
+				// and must not write reactions, wakes, events, rates or audit rows.
+				args := map[string]any{"message_id": target.id, "emoji": tc.emoji, "op": tc.op, "priority": tc.priority}
+				resp, body := env.Do(secret, http.MethodPost, "/v1/reactions", args)
+				var httpErr toolErrorBody
+				if err := json.Unmarshal(body, &httpErr); err != nil {
+					t.Fatal(err)
+				}
+				var field any
+				if tc.field != "" {
+					field = tc.field
+				}
+				if resp.StatusCode != 422 || httpErr.Error.Code != tc.code || httpErr.Error.Details["field"] != field {
+					t.Errorf("HTTP reaction: %d %s, want %s field %q", resp.StatusCode, body, tc.code, tc.field)
+				}
+				mcpErr := toolFails(t, env, secret, "vecnet_react", args, tc.code)
+				if mustJSON(t, mcpErr) != mustJSON(t, httpErr) {
+					t.Fatalf("MCP error %+v differs from HTTP %+v", mcpErr, httpErr)
+				}
+			})
+		}
+	}
+	// MCP retains schema guards for message IDs even when emoji semantics fail.
+	for _, id := range []string{
+		"peer_00000000000000000000000000", "bad", "",
+		"msg_0000000000000000000000000", "msg_000000000000000000000000000",
+		"msg_0000000000000000000000000I", "msg_0000000000000000000000000a",
+	} {
+		for _, emoji := range []string{"✅", "invalid"} {
+			t.Run("message ID shape/"+id+"/"+emoji, func(t *testing.T) {
+				before := writeCounts()
+				t.Cleanup(func() {
+					if after := writeCounts(); after != before {
+						t.Errorf("malformed reaction wrote state: %v -> %v", before, after)
+					}
+				})
+				path := invalidPath(t, env, secret, "vecnet_react", map[string]any{
+					"message_id": id, "emoji": emoji, "op": "add", "priority": "hold",
+				})
+				if path != "/message_id" {
+					t.Fatalf("MCP rejected at %q, want /message_id", path)
+				}
+			})
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		args any
+	}{
+		{"missing message", map[string]any{"emoji": "invalid", "op": "bad"}},
+		{"invalid message id", map[string]any{"message_id": "bad", "emoji": "invalid", "op": "bad"}},
+		{"unknown property", map[string]any{"message_id": "msg_00000000000000000000000000", "emoji": "invalid", "op": "bad", "extra": true}},
+		{"non-string priority", map[string]any{"message_id": "msg_00000000000000000000000000", "emoji": "invalid", "priority": 42}},
+		{"null op", map[string]any{"message_id": "msg_00000000000000000000000000", "emoji": "invalid", "op": nil}},
+		{"non-object", []any{"invalid"}},
+	} {
+		t.Run("body shape before semantics/"+tc.name, func(t *testing.T) {
+			invalidPath(t, env, secret, "vecnet_react", tc.args)
+		})
+	}
 }
 
 func TestEventsSubscribeRefusesReactionType(t *testing.T) {

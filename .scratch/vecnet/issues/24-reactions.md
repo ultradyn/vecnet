@@ -1,5 +1,9 @@
 # 24: Reactions (tapbacks) on messages
 
+Status: resolved
+
+Done: implemented across hub, CLI, MCP, web and TUI under the [reactions plan](../../../docs/plans/2026-11-03-reactions.md), with the shared-client journey and full verification gate.
+
 Raised by Max over vecnet, 2026-11-03: "we should add tapbacks for msgs so I can 👍 you".
 
 A protocol change (hub, CLI, MCP, web UI, TUI), so it gets its own plan and a PROTOCOL amendment (new §17, one CHANGELOG line). Start after the attachments merge and issues 21/23.

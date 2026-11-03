@@ -99,4 +99,9 @@ type ReactionRequest struct {
 	Op        string `json:"op"`
 	As        string `json:"as,omitempty"`
 	Priority  string `json:"priority,omitempty"`
+
+	// PrioritySupplied distinguishes an explicit empty priority from omission
+	// when transport adapters decode the request. Nonempty values are always
+	// validated, regardless of this flag.
+	PrioritySupplied bool `json:"-"`
 }

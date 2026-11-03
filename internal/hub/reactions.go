@@ -47,9 +47,10 @@ func (h *Hub) React(ctx context.Context, c auth.Caller, req envelope.ReactionReq
 	if req.Op != "add" && req.Op != "remove" {
 		return nil, invalidValue("op", "op must be add or remove")
 	}
-	switch req.Priority {
-	case "":
+	if req.Priority == "" && !req.PrioritySupplied {
 		req.Priority = "hold"
+	}
+	switch req.Priority {
 	case "hold", "wake", "wake_idle":
 	default:
 		return nil, invalidValue("priority", "priority must be wake, wake_idle or hold")
