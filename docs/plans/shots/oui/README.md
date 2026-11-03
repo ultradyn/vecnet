@@ -96,6 +96,13 @@ Message bodies, timing and priority tips (issues 21, 23 and 25) come from `scrip
 - [md-thread-narrow.png](md-thread-narrow.png) — Narrow thread: relative time and reply stay on one line; the code block scrolls inside its box.
 - [md-tip-thread-narrow.png](md-tip-thread-narrow.png) — Narrow reply box: the `wake_idle` tip on keyboard focus.
 
+Terminal reaction screens come from `scripts/ui/rx-tui.mjs`. They cover ASCII reaction chips, selected-message reactor names, the `:react` command and unknown-name validation.
+
+- [rx07-tui-initial.png](rx07-tui-initial.png) — Reaction chips show ASCII names and counts beneath an unselected message.
+- [rx07-tui-progress.png](rx07-tui-progress.png) — Selected message shows reactor names while `:react check` is ready to submit.
+- [rx07-tui-success.png](rx07-tui-success.png) — Added check reaction increases the count and marks the operator's own reaction with `*`.
+- [rx07-tui-error.png](rx07-tui-error.png) — Unknown reaction name is refused with the command preserved and accepted names listed.
+
 Reaction screens come from `scripts/ui/rx-thread.mjs`. They cover reaction chips, the picker surviving a live thread rebuild, a priority override, removal, focus restoration and a rate-limit retry time.
 
 - [rx08-thread-initial.png](rx08-thread-initial.png) — Reaction chips with counts, cleaned peer names and the operator's own reaction highlighted.
