@@ -80,6 +80,11 @@ func hookEvent(n int, text string) envelope.Event {
 	raw, _ := json.Marshal(map[string]any{"delivery_id": fmt.Sprintf("dly_%d", n), "message": map[string]any{"message_id": fmt.Sprintf("msg_%d", n), "thread_id": "thr_X", "sender": "peer_h", "kind": "message", "content": map[string]string{"text": text}}})
 	return envelope.Event{Cursor: fmt.Sprintf("e1.%d", n), Type: "delivery", Data: raw}
 }
+func hookSchemaEvent(text string) envelope.Event {
+	const ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	raw, _ := json.Marshal(map[string]any{"delivery_id": "dly_" + ulid, "message": map[string]any{"message_id": "msg_" + ulid, "thread_id": "thr_" + ulid, "sender": "peer_" + ulid, "kind": "message", "content": map[string]string{"text": text}}})
+	return envelope.Event{Cursor: "e1.1", Type: "delivery", Data: raw}
+}
 func hookPage(w http.ResponseWriter, evs []envelope.Event, next string) {
 	_ = json.NewEncoder(w).Encode(pollBody{Events: evs, NextCursor: next})
 }
@@ -131,6 +136,154 @@ func TestHookPipeSingleItemFits(t *testing.T) {
 			}
 		}
 	}
+}
+
+// BSD's POSIX atomic minimum is 512 bytes, but even an ordinary frame
+// with schema-shaped IDs is larger. The platform path must still progress.
+func TestHookSmallAtomicPlatformMakesProgress(t *testing.T) {
+	for _, platform := range []string{"darwin", "freebsd", "openbsd", "netbsd", "dragonfly", "windows"} {
+		t.Run(platform, func(t *testing.T) {
+			const ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+			ev := hookSchemaEvent("x")
+			env, path := hookFixture(t, func(w http.ResponseWriter, r *http.Request) { hookPage(w, []envelope.Event{ev}, "e1.1") })
+			seedHook(t, path, "e1.0")
+			limit, supported := hookPipeLimit(platform)
+			if !supported {
+				t.Fatal("native stdout is unsupported")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), hookBudget)
+			defer cancel()
+			a := &app{ctx: ctx, stdin: strings.NewReader(""), stderr: io.Discard, getenv: func(k string) string { return env[k] }}
+			result := a.hookRun([]string{"--event", "user-prompt"}, time.Now, func() {}, limit)
+			if len(result.output) <= 512 {
+				t.Fatalf("ordinary frame missing: bytes=%d limit=%d", len(result.output), limit)
+			}
+			if !strings.Contains(contextOf(t, string(result.output)), "delivery=dly_"+ulid+" ") {
+				t.Fatal("missing delivery")
+			}
+			state := readHookState(t, path)
+			if state.PollCursor != "e1.1" || !reflect.DeepEqual(state.Shown, []string{"dly_" + ulid}) {
+				t.Fatalf("no progress: %+v", state)
+			}
+		})
+	}
+}
+
+// Includes Windows: use inherited native stdout, rather than a buffer that
+// bypasses preparation and capacity checks in the actual command.
+func TestHookNativePipePrintsDelivery(t *testing.T) {
+	var polls atomic.Int32
+	env, path := hookFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		polls.Add(1)
+		hookPage(w, []envelope.Event{hookSchemaEvent("native stdout delivery")}, "e1.1")
+	})
+	seedHook(t, path, "e1.0")
+	start := time.Now()
+	raw, err := hookProcess(t, env).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) >= 2500*time.Millisecond {
+		t.Fatal("native hook exceeded budget")
+	}
+	if polls.Load() != 1 {
+		t.Fatalf("polls=%d, want 1", polls.Load())
+	}
+	if !strings.Contains(contextOf(t, string(raw)), `text="native stdout delivery"`) {
+		t.Fatal("missing delivery")
+	}
+	state := readHookState(t, path)
+	if state.PollCursor != "e1.1" || !reflect.DeepEqual(state.Shown, []string{"dly_01ARZ3NDEKTSV4RRFFQ69G5FAV"}) {
+		t.Fatalf("no progress: %+v", state)
+	}
+}
+
+// Exercise the publication decision independently of a platform's syscall.
+// A reader stopping with 512 bytes free must never receive a frame prefix.
+func TestHookCapacityPublication(t *testing.T) {
+	data := hookOutput("user-prompt", hookContext("p", []hookItem{{Cursor: "e1.1", Thread: strings.Repeat("x", 30), From: strings.Repeat("x", 31), Message: strings.Repeat("x", 30), Delivery: strings.Repeat("x", 30), Kind: "message", Text: "x"}}, 0, false))
+	if len(data) <= 512 {
+		t.Fatal("fixture must exceed BSD's POSIX atomic minimum")
+	}
+	for _, free := range []int{0, 512, 4096} {
+		t.Run(fmt.Sprint(free), func(t *testing.T) {
+			var out bytes.Buffer
+			writes := 0
+			writer := &hookPipeWriter{limit: 4096, available: func() (int, error) { return free, nil }, write: func(raw []byte) (int, error) { writes++; return out.Write(raw) }}
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			got := hookWrite(ctx, writer, data)
+			if free >= len(data) {
+				if !got || writes != 1 || !bytes.Equal(out.Bytes(), data) {
+					t.Fatal("frame not published in one write")
+				}
+				contextOf(t, out.String())
+			} else if got || writes != 0 || out.Len() != 0 {
+				t.Fatal("insufficient capacity exposed a partial frame")
+			}
+		})
+	}
+}
+
+// Runs on Windows and kqueue platforms, including a pipe with space for a
+// prefix but insufficient capacity for the complete required frame.
+func TestHookNativeCapacityPublication(t *testing.T) {
+	if hookPlatformPipe == nil {
+		t.Skip("platform uses the POSIX atomic write path")
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	prepared, closeOutput := hookPrepareWriter(writer)
+	if prepared == nil {
+		t.Fatal("native pipe preparation failed")
+	}
+	defer closeOutput()
+	pipe, ok := prepared.(*hookPipeWriter)
+	if !ok {
+		t.Fatal("native pipe missing capacity checks")
+	}
+	free, err := pipe.available()
+	if err != nil || free < 4096 {
+		t.Fatalf("initial pipe capacity=%d, err=%v", free, err)
+	}
+	prefill := bytes.Repeat([]byte("x"), free-512)
+	if n, err := pipe.write(prefill); err != nil || n != len(prefill) {
+		t.Fatalf("prefill n=%d err=%v", n, err)
+	}
+	// Use maximal IDs to exceed 512 bytes without changing the wrapper.
+	id := strings.Repeat("x", 30)
+	data := hookOutput("user-prompt", hookContext("p", []hookItem{{Cursor: "e1.1", Thread: id, From: id, Message: id, Delivery: id, Kind: "message", Text: "x"}}, 0, false))
+	if len(data) <= 512 {
+		t.Fatalf("fixture bytes=%d", len(data))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if hookWrite(ctx, prepared, data) {
+		t.Fatal("published with insufficient free space")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("capacity wait escaped deadline")
+	}
+	drained := make([]byte, len(prefill))
+	if _, err := io.ReadFull(reader, drained); err != nil || !bytes.Equal(drained, prefill) {
+		t.Fatal("prefill changed")
+	}
+	// No reader is active: successful retry must fit in the buffer entirely.
+	retry, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	if !hookWrite(retry, prepared, data) {
+		t.Fatal("empty pipe failed to publish")
+	}
+	raw := make([]byte, len(data))
+	if _, err := io.ReadFull(reader, raw); err != nil || !bytes.Equal(raw, data) {
+		t.Fatalf("late/prefix output: %v", err)
+	}
+	contextOf(t, string(raw))
 }
 
 func TestHookPipeLimitLeavesOversizedDeliveryEligible(t *testing.T) {

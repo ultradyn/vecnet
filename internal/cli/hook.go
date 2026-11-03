@@ -222,13 +222,69 @@ func (a *app) cmdHook(args []string) (err error) {
 	}
 }
 
+// hookPlatformPipe is supplied by the BSD/Windows files. Their kernels can
+// report free pipe capacity, allowing complete frames larger than PIPE_BUF.
+var hookPlatformPipe func(*os.File) (*hookPipeWriter, func(), error)
+
+// hookPipeWriter is for a dedicated hook stdout pipe: the hook is its only
+// writer. Readers can only increase available space. A capacity check followed
+// by ONE nonblocking write therefore publishes a complete frame or nothing,
+// even when a reader stops. Concurrent writers sharing stdout are unsupported
+// here; POSIX only guarantees 512 bytes against those writers on BSD, which
+// cannot contain the protocol's required wrapper and schema-shaped IDs.
+type hookPipeWriter struct {
+	limit     int
+	available func() (int, error)
+	write     func([]byte) (int, error)
+}
+
+func (w *hookPipeWriter) Write(data []byte) (int, error) { return w.write(data) }
+
+func (w *hookPipeWriter) publish(ctx context.Context, data []byte) bool {
+	if len(data) > w.limit {
+		return false
+	}
+	for ctx.Err() == nil {
+		free, err := w.available()
+		if err != nil {
+			return false
+		}
+		if free >= len(data) {
+			if ctx.Err() != nil {
+				return false
+			}
+			n, err := w.write(data)
+			return err == nil && n == len(data)
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+	return false
+}
+
 // hookPrepareWriter runs in the supervised worker, since even opening a
 // descriptor can stall. Inherited Unix stdout/stderr pipes are often not
 // registered with Go's poller. Reopen just those pipes as owned, pollable
 // handles. O_RDWR avoids waiting for a FIFO reader during open; the handle
-// is closed before returning. Never change the caller's descriptor flags.
+// is closed before returning. Platform helpers restore any shared pipe flags.
 func hookPrepareWriter(w io.Writer) (io.Writer, func()) {
 	noop := func() {}
+	if f, ok := w.(*os.File); ok && hookPlatformPipe != nil {
+		info, err := f.Stat()
+		if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+			return nil, noop
+		}
+		prepared, closeOutput, err := hookPlatformPipe(f)
+		if err != nil {
+			return nil, noop
+		}
+		return prepared, closeOutput
+	}
 	switch w.(type) {
 	case *bytes.Buffer, *strings.Builder, *io.PipeWriter:
 		return w, noop
@@ -259,14 +315,18 @@ func hookPrepareWriter(w io.Writer) (io.Writer, func()) {
 }
 
 // Cancellation alone cannot retract a partial write. Only memory outputs
-// and native POSIX pipes have the all-or-empty publication contract we need.
-// Bound the ENTIRE serialized object (including its newline) by PIPE_BUF so
-// one deadline-aware pipe write either publishes it all or publishes nothing.
-// Linux guarantees 4096 bytes; other POSIX systems guarantee at least 512.
+// and prepared native pipes have the all-or-empty publication contract we need.
+// Bound the ENTIRE serialized object, including its newline. The POSIX
+// path stays within PIPE_BUF; capacity-aware paths check enough free space
+// before attempting a single nonblocking write.
+// Linux guarantees 4096 bytes. BSD/Windows use a capacity-checked single
+// nonblocking write instead of their smaller/no POSIX atomicity guarantee.
 // io.Pipe and arbitrary deadline writers can expose a prefix, so they are
 // unsupported as stdout, even though diagnostics may safely use them.
 func hookOutputLimit(w io.Writer) (int, bool) {
-	switch w.(type) {
+	switch w := w.(type) {
+	case *hookPipeWriter:
+		return w.limit, true
 	case *bytes.Buffer, *strings.Builder:
 		return 0, true
 	}
@@ -281,10 +341,16 @@ func hookOutputLimit(w io.Writer) (int, bool) {
 	if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
 		return 0, false
 	}
-	switch runtime.GOOS {
+	return hookPipeLimit(runtime.GOOS)
+}
+
+func hookPipeLimit(platform string) (int, bool) {
+	switch platform {
 	case "linux", "android":
 		return 4096, true
-	case "darwin", "ios", "freebsd", "openbsd", "netbsd", "dragonfly", "solaris", "illumos", "aix":
+	case "darwin", "ios", "freebsd", "openbsd", "netbsd", "dragonfly", "windows":
+		return 4096, true
+	case "solaris", "illumos", "aix":
 		return 512, true
 	default:
 		return 0, false
@@ -306,6 +372,8 @@ func hookWrite(ctx context.Context, w io.Writer, data []byte) bool {
 		}
 	}
 	switch w := w.(type) {
+	case *hookPipeWriter:
+		return w.publish(ctx, data)
 	case *bytes.Buffer:
 		_, _ = w.Write(data)
 		return true
