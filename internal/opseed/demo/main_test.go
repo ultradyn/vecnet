@@ -18,6 +18,70 @@ import (
 	"github.com/XertroV/vecnet/internal/store"
 )
 
+func TestExitOnStdinEOF(t *testing.T) { testStdinEOF(t, true) }
+
+func TestStdinIgnoredWithoutFlag(t *testing.T) { testStdinEOF(t, false) }
+
+func testStdinEOF(t *testing.T, exitOnEOF bool) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stdin, input := io.Pipe()
+	defer stdin.Close()
+	defer input.Close()
+	output, writer := io.Pipe()
+	defer output.Close()
+	done := make(chan error, 1)
+	args := []string{"--listen", "127.0.0.1:0", "--data-dir", t.TempDir()}
+	if exitOnEOF {
+		args = append(args, "--exit-on-stdin-eof")
+	}
+	go func() {
+		err := run(ctx, args, stdin, writer)
+		writer.CloseWithError(err)
+		done <- err
+	}()
+	var m manifest
+	ready := make(chan error, 1)
+	go func() { ready <- json.NewDecoder(output).Decode(&m) }()
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("manifest startup timeout")
+	}
+	if err := input.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !exitOnEOF {
+		select {
+		case err := <-done:
+			t.Fatalf("stdin EOF stopped demo without flag: %v", err)
+		case <-time.After(time.Second):
+		}
+		client := &http.Client{Timeout: time.Second}
+		resp, err := client.Get(m.URL + "/healthz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("health after stdin EOF = %d", resp.StatusCode)
+		}
+		cancel()
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(7 * time.Second):
+		t.Fatal("demo did not shut down within 7s")
+	}
+}
+
 func TestDemoControls(t *testing.T) {
 	t.Run("wire contract", func(t *testing.T) {
 		for _, tc := range []struct {
@@ -202,7 +266,7 @@ func startDemo(t *testing.T, dir string, extra ...string) (manifest, func()) {
 	reader, writer := io.Pipe()
 	done := make(chan error, 1)
 	args := append([]string{"--listen", "127.0.0.1:0", "--data-dir", dir}, extra...)
-	go func() { err := run(ctx, args, writer); writer.CloseWithError(err); done <- err }()
+	go func() { err := run(ctx, args, strings.NewReader(""), writer); writer.CloseWithError(err); done <- err }()
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
@@ -318,7 +382,7 @@ func TestDemoRefusesUnownedDatabase(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hub.db"), []byte("do not change"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := run(context.Background(), []string{"--data-dir", dir, "--reset"}, io.Discard); err == nil {
+	if err := run(context.Background(), []string{"--data-dir", dir, "--reset"}, strings.NewReader(""), io.Discard); err == nil {
 		t.Fatal("reset accepted an unowned database")
 	}
 	content, err := os.ReadFile(filepath.Join(dir, "hub.db"))
