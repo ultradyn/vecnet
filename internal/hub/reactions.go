@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/ids"
 )
 
 // ReactResponse is the response of POST /v1/reactions, including no-op retries.
@@ -77,6 +79,9 @@ func (h *Hub) React(ctx context.Context, c auth.Caller, req envelope.ReactionReq
 	if cut != nil {
 		return nil, cut
 	}
+	if resp != nil && resp.Wake != nil {
+		h.notifyOperatorDeliveries(ctx, resp.Wake.MessageID)
+	}
 	return resp, nil
 }
 
@@ -124,8 +129,31 @@ func (h *Hub) reactTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req envelo
 			}
 			return nil, nil, &cutError{api}
 		}
-		// The optional wake layer belongs here, after rate checks and before writes.
-		// Until it is installed, accepted wake priorities create only the event.
+		// Eligibility, scopes and loop refusals precede every reaction write.
+		var targets []target
+		var loop envelope.Loop
+		if req.Op == "add" && req.Priority != "hold" && ids.Is(ids.Peer, msg.Sender) && msg.Sender != snd.peer {
+			eligible := true
+			if snd.kind != "operator" {
+				if err := tx.QueryRowContext(ctx, `SELECT NOT EXISTS(SELECT 1 FROM reaction_wakes WHERE msg_id=? AND peer_id=? AND emoji=?)`, req.MessageID, snd.peer, req.Emoji).Scan(&eligible); err != nil {
+					return nil, nil, err
+				}
+			}
+			if eligible {
+				targets, err = h.resolveTargets(ctx, tx, snd, []string{msg.Sender})
+				if err != nil {
+					return nil, nil, err
+				}
+				var apiErr *APIError
+				loop, apiErr = h.buildLoop(msg, snd.peer, snd.kind, &envelope.SendRequest{}, now)
+				if apiErr != nil {
+					if err := h.countCut(ctx, tx, CounterLoopCut, snd.peer, []string{thr}, map[string]any{"reason": apiErr.Code, "via": "reaction"}); err != nil {
+						return nil, nil, err
+					}
+					return nil, nil, &cutError{apiErr}
+				}
+			}
+		}
 		at := envelope.FormatTime(now)
 		if req.Op == "add" {
 			_, err = tx.ExecContext(ctx, `INSERT INTO reactions(msg_id,peer_id,emoji,created_at) VALUES(?,?,?,?)`, req.MessageID, snd.peer, req.Emoji, at)
@@ -138,13 +166,55 @@ func (h *Hub) reactTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req envelo
 		if _, err = tx.ExecContext(ctx, `INSERT INTO reaction_ops(peer_id,at) VALUES(?,?)`, snd.peer, at); err != nil {
 			return nil, nil, err
 		}
-		owners, err = reactionAudience(ctx, tx, thr, seq, snd.peer)
+		if req.Op == "remove" || len(targets) > 0 {
+			targetID, emoji := "", ""
+			if req.Op == "remove" {
+				targetID, emoji = req.MessageID, req.Emoji
+			}
+			resp.Superseded, err = supersedeReactionDeliveries(ctx, tx, msg.Sender, snd.peer, thr, at, targetID, emoji)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		if len(targets) > 0 {
+			thread, err := loadThread(ctx, tx, thr)
+			if err != nil {
+				return nil, nil, err
+			}
+			wake := envelope.Message{
+				SchemaVersion: envelope.SchemaVersion, MessageID: ids.New(ids.Msg), ThreadID: thr,
+				Kind: "reaction", InReplyTo: &req.MessageID, Sender: snd.peer,
+				Recipients: []string{msg.Sender}, Priority: req.Priority, CreatedAt: at,
+				Content: envelope.Content{Text: req.Emoji}, Reaction: &envelope.ReactionRef{Target: req.MessageID, Emoji: req.Emoji},
+				Attachments: []envelope.Attachment{}, Metadata: map[string]any{}, Loop: loop,
+			}
+			msgJSON, err := json.Marshal(wake)
+			if err != nil {
+				return nil, nil, err
+			}
+			if err := insertReactionMessage(ctx, tx, thread, &wake, msgJSON); err != nil {
+				return nil, nil, err
+			}
+			if snd.kind != "operator" {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO reaction_wakes(msg_id,peer_id,emoji,created_at) VALUES(?,?,?,?)`, req.MessageID, snd.peer, req.Emoji, at); err != nil {
+					return nil, nil, err
+				}
+			}
+			refs, notify, err := h.fanOut(ctx, tx, thread, &wake, msgJSON, targets, nil, ingress, wake.Loop.ExpiresAt, now)
+			if err != nil {
+				return nil, nil, err
+			}
+			owners = append(owners, notify...)
+			resp.Wake = &ReactWake{MessageID: wake.MessageID, DeliveryID: refs[0].DeliveryID, Recipient: refs[0].Recipient, State: refs[0].State}
+		}
+		audience, err := reactionAudience(ctx, tx, thr, seq, snd.peer)
 		if err != nil {
 			return nil, nil, err
 		}
+		owners = append(owners, audience...)
 		data := envelope.ReactionEvent{MessageID: req.MessageID, ThreadID: thr, PeerID: snd.peer, Emoji: req.Emoji, Op: req.Op, At: at}
 		except := make(map[string]bool, len(owners))
-		for _, peer := range owners {
+		for _, peer := range audience {
 			if _, err = h.Log.Append(ctx, tx, peer, "reaction", now, data); err != nil {
 				return nil, nil, err
 			}
@@ -249,4 +319,62 @@ func reactionGroups(ctx context.Context, tx *sql.Tx, msgIDs []string) (map[strin
 		}
 	}
 	return out, nil
+}
+
+// insertReactionMessage assigns a sequence without changing activity or budget.
+func insertReactionMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envelope.Message, msgJSON []byte) error {
+	var seq int
+	if err := tx.QueryRowContext(ctx, `SELECT coalesce(max(seq),0)+1 FROM messages WHERE thr_id=?`, thr.ID).Scan(&seq); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO messages(msg_id,thr_id,seq,sender,kind,created_at,body) VALUES(?,?,?,?,?,?,?)`, msg.MessageID, thr.ID, seq, msg.Sender, msg.Kind, msg.CreatedAt, string(msgJSON))
+	return err
+}
+
+// supersedeRequeuedReaction handles a wake that was in flight when a newer
+// reaction arrived. Requeue and coalescing share the caller's transaction, so
+// the older wake cannot become claimable alongside its successor. Sequence
+// order handles wakes created at the same clock time. Accepted deliveries are
+// never changed; a newer accepted wake also makes an older retry unnecessary.
+func supersedeRequeuedReaction(ctx context.Context, tx *sql.Tx, deliveryID, at string) error {
+	_, err := tx.ExecContext(ctx, `UPDATE deliveries SET state='superseded',held=0,next_attempt_at=NULL,updated_at=?
+ WHERE dly_id=? AND state='queued' AND EXISTS (
+  SELECT 1 FROM messages m
+  JOIN messages newer ON newer.thr_id=m.thr_id AND newer.sender=m.sender
+   AND newer.kind='reaction' AND newer.seq>m.seq
+  JOIN deliveries nd ON nd.msg_id=newer.msg_id AND nd.recipient=deliveries.recipient
+   AND nd.state != 'superseded'
+  WHERE m.msg_id=deliveries.msg_id AND m.kind='reaction')`, at, deliveryID)
+	if err != nil {
+		return fmt.Errorf("hub: coalesce requeued reaction: %w", err)
+	}
+	return nil
+}
+
+// supersedeReactionDeliveries withdraws only queued wakes. A nonempty target
+// narrows a remove to that emoji and target; a new wake coalesces the thread.
+func supersedeReactionDeliveries(ctx context.Context, tx *sql.Tx, recipient, reactor, thr, at, targetID, emoji string) ([]string, error) {
+	query := `UPDATE deliveries SET state='superseded',held=0,next_attempt_at=NULL,updated_at=?
+ WHERE recipient=? AND thr_id=? AND state='queued'
+ AND msg_id IN (SELECT msg_id FROM messages WHERE kind='reaction' AND sender=? AND thr_id=?`
+	args := []any{at, recipient, thr, reactor, thr}
+	if targetID != "" {
+		query += ` AND json_extract(body,'$.reaction.target')=? AND json_extract(body,'$.reaction.emoji')=?`
+		args = append(args, targetID, emoji)
+	}
+	query += `) RETURNING dly_id`
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }

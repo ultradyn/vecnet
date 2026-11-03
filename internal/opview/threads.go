@@ -244,7 +244,7 @@ func (r *Reader) Matrix(ctx context.Context, thrID, after string, limit int) (op
 			}
 		}
 		rows, err := tx.QueryContext(ctx, `SELECT p.peer_id FROM thread_participants p WHERE p.thr_id=?
-   AND EXISTS(SELECT 1 FROM deliveries d WHERE d.thr_id=p.thr_id AND d.recipient=p.peer_id)
+   AND EXISTS(SELECT 1 FROM deliveries d WHERE d.thr_id=p.thr_id AND d.recipient=p.peer_id AND d.msg_id IN (SELECT msg_id FROM messages WHERE thr_id=p.thr_id AND kind != 'reaction'))
    ORDER BY p.rowid`, thrID)
 		if err != nil {
 			return err
@@ -262,7 +262,7 @@ func (r *Reader) Matrix(ctx context.Context, thrID, after string, limit int) (op
 			return err
 		}
 		rows, err = tx.QueryContext(ctx, `SELECT msg_id,created_at,sender,body FROM messages
-   WHERE thr_id=? AND seq>? ORDER BY seq LIMIT ?`, thrID, from, limit+1)
+   WHERE thr_id=? AND seq>? AND kind != 'reaction' ORDER BY seq LIMIT ?`, thrID, from, limit+1)
 		if err != nil {
 			return err
 		}

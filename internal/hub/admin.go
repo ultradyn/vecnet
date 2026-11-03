@@ -602,6 +602,9 @@ func (h *Hub) RetryDeadLetter(ctx context.Context, dly string) error {
 		if n, _ := res.RowsAffected(); n != 1 {
 			return unknownDeadLetter(dly)
 		}
+		if err := supersedeRequeuedReaction(ctx, tx, dly, now); err != nil {
+			return err
+		}
 		if err := audit.Record(ctx, tx, "operator", "dead_letter_retry", []string{dly}, nil); err != nil {
 			return err
 		}
