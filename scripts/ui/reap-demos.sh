@@ -23,9 +23,11 @@ for root in "${candidates[@]}"; do
     $duplicate || roots+=("$root")
 done
 
-while read -r pid age args; do
+while read -r pid age; do
     [[ $pid =~ ^[0-9]+$ && $age =~ ^[0-9]+$ ]] || continue
-    read -r -a argv <<< "$args"
+    # ps renders argv as whitespace-separated text. Read Linux's NUL-delimited
+    # arguments instead so roots and --data-dir values retain spaces.
+    { mapfile -d '' -t argv < "/proc/$pid/cmdline"; } 2>/dev/null || continue
     first=${argv[0]:-}
     for root in "${roots[@]}"; do
         case "$first" in "$root"/vecnet-ui-build-*/demo) ;; *) continue ;; esac
@@ -42,16 +44,17 @@ while read -r pid age args; do
         if ((age >= min_age)); then old[$pid]=$first; fi
         break
     done
-done < <(ps -u "$uid" -o pid=,etimes=,args= 2>/dev/null)
+done < <(ps -u "$uid" -o pid=,etimes= 2>/dev/null)
 
 # Recheck uid and command before each signal so a recycled pid cannot cause
 # us to signal an unrelated process during the grace period.
 same_demo() {
-    local pid=$1 expected=$2 owner args
+    local pid=$1 expected=$2 owner
+    local -a argv
     owner=$(ps -p "$pid" -o uid= 2>/dev/null) || return 1
     [[ ${owner// /} == "$uid" ]] || return 1
-    args=$(ps -p "$pid" -o args= 2>/dev/null) || return 1
-    [[ ${args%% *} == "$expected" ]]
+    { mapfile -d '' -t argv < "/proc/$pid/cmdline"; } 2>/dev/null || return 1
+    [[ ${argv[0]:-} == "$expected" ]]
 }
 for pid in "${!old[@]}"; do
     if same_demo "$pid" "${old[$pid]}" && kill -TERM -- "$pid" 2>/dev/null; then
