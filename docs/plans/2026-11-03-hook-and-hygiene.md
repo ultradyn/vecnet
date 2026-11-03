@@ -693,6 +693,8 @@ func TestTUIBeatOverrideEnv(t *testing.T)        // "" → 0,""; "5s" → 5s,"";
 
 **Depends:** 4 and 5. Task 5 shares `scripts/ui/lib.mjs`, and Task 4 shares `CHANGELOG.md`.
 
+**Already on master (reactions Task 9 fix, 2026-11-03):** `lib.mjs` gained `scrollMessageIntoView(page, id)` (a `waitForFunction` that re-queries `#m-<id>`, scrolls and checks intersection each poll), with a test in `scripts/ui/lib.test.mjs`. The three md-thread call sites already use it. Build on it rather than adding a parallel helper: add `scrollIntoViewStable(page, selector)` with the semantics below, make `scrollMessageIntoView` a one-line wrapper over it (keep the export and its test), and convert the remaining `dash.mjs` and `subs.mjs` sites. Line numbers below predate that change; locate sites by grep.
+
 **Cause:**
 - `richEl` is a Locator.
 - `md-thread.mjs:223` changes the hash, and `:224` waits for the first render.
