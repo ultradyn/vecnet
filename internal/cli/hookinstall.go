@@ -241,15 +241,23 @@ func parseJSONNode(src []byte) (*jsonNode, error) {
 			return nil, fmt.Errorf("unexpected JSON delimiter %q", delim)
 		}
 		n := &jsonNode{kind: byte(delim)}
+		// Compare decoded keys so escaped-equivalent spellings cannot hide
+		// the effective value from member lookup or downstream consumers.
+		seen := make(map[string]struct{})
 		for dec.More() {
 			if delim == '{' {
 				key, raw, err := token()
 				if err != nil {
 					return nil, err
 				}
-				if _, ok := key.(string); !ok {
+				name, ok := key.(string)
+				if !ok {
 					return nil, errors.New("JSON object key is not a string")
 				}
+				if _, duplicate := seen[name]; duplicate {
+					return nil, fmt.Errorf("duplicate JSON object key %q", name)
+				}
+				seen[name] = struct{}{}
 				n.keys = append(n.keys, raw)
 			}
 			child, err := read()
@@ -405,13 +413,24 @@ func oursHook(handler *jsonNode, bin, profile, event string) bool {
 	if !ok || (filepath.Base(word) != "vecnet" && word != bin) {
 		return false
 	}
-	for _, separator := range []string{" ", "="} {
-		marker := "hook --profile" + separator + profile + " --event " + event
-		if args == marker || args == marker+" --auto-ack" {
-			return true
+	var words []string
+	for args != "" {
+		word, rest, ok := shellFirstWord(args)
+		if !ok {
+			return false
 		}
+		words = append(words, word)
+		args = rest
 	}
-	return false
+	// Accept supported global and hook flags, including repeats and either
+	// value syntax. Parsing values avoids substring matches for other profiles
+	// or events. Keep recognising legacy space-separated flag-like profiles.
+	o, err := parseFlags("hook", words, map[string]flagKind{
+		"profile": strFlag, "event": strFlag, "auto-ack": boolFlag,
+		"as": strFlag, "net": strFlag, "json": boolFlag,
+	})
+	return err == nil && len(o.pos) == 1 && o.pos[0] == "hook" &&
+		o.str("profile") == profile && o.str("event") == event
 }
 
 func mergeHookSettings(existing []byte, bin, profile string, autoAck bool) (out []byte, changed bool, err error) {

@@ -668,3 +668,109 @@ func TestHookInstallFallbackToCwd(t *testing.T) {
 		t.Fatalf("directory mode=%v err=%v", st, err)
 	}
 }
+
+func TestHookInstallReplacesSupportedExtraFlags(t *testing.T) {
+	const peer = "peer_00000000000000000000000000"
+	for _, tc := range []struct{ name, command string }{
+		{"as suffix", "vecnet hook --profile p --event %s --as " + peer},
+		{"as prefix", "vecnet --as=" + peer + " hook --profile p --event %s"},
+		{"as interleaved", "vecnet hook --profile p --as " + peer + " --event %s"},
+		{"repeated boolean", "vecnet hook --profile p --event %s --auto-ack --auto-ack"},
+		{"reordered flags", "vecnet hook --auto-ack --event=%s --as=" + peer + " --profile=p --auto-ack"},
+		{"quoted arguments", "'vecnet' hook --profile 'p' --event '%s' --as '" + peer + "'"},
+		{"global flags", "vecnet --json --net=other hook --profile p --event %s --json"},
+		{"last profile wins", "vecnet hook --profile other --event %s --profile p"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := installUser(t)
+			seed := hookInstallExtraFlagSeed(t, tc.command)
+			path := installFile(t, seed, 0640)
+			args := []string{"--profile", "p", "--write", "--settings", path}
+			for _, autoAck := range []bool{false, true} {
+				runArgs := append([]string(nil), args...)
+				if autoAck {
+					runArgs = append(runArgs, "--auto-ack")
+				}
+				installRun(t, u, runArgs...)
+				body := readSettings(t, path)
+				hooks := decodeSettings(t, body)["hooks"].(map[string]any)
+				original := decodeSettings(t, seed)["hooks"].(map[string]any)
+				for event, suffix := range map[string]string{"UserPromptSubmit": "user-prompt", "PostToolUse": "post-tool"} {
+					groups := hooks[event].([]any)
+					if len(groups) != 1 {
+						t.Fatalf("%s: appended a duplicate group: %v", event, groups)
+					}
+					group := groups[0].(map[string]any)
+					handlers := group["hooks"].([]any)
+					oldGroup := original[event].([]any)[0].(map[string]any)
+					oldHandlers := oldGroup["hooks"].([]any)
+					if len(handlers) != 3 || !reflect.DeepEqual(handlers[0], oldHandlers[0]) || !reflect.DeepEqual(handlers[2], oldHandlers[2]) || group["extra"] != oldGroup["extra"] {
+						t.Fatalf("%s: foreign handlers or group metadata changed: %v", event, group)
+					}
+					want := "vecnet hook --profile p --event " + suffix
+					if autoAck {
+						want += " --auto-ack"
+					}
+					handler := handlers[1].(map[string]any)
+					if handler["command"] != want || handler["type"] != "command" || handler["timeout"] != float64(5) {
+						t.Fatalf("%s: handler was not replaced in place: %v", event, handler)
+					}
+				}
+				_, errs := installRun(t, u, runArgs...)
+				if string(readSettings(t, path)) != string(body) || !strings.Contains(errs, "unchanged "+path) {
+					t.Fatalf("repeat install changed settings: %s", errs)
+				}
+			}
+		})
+	}
+}
+
+func hookInstallExtraFlagSeed(t *testing.T, command string) []byte {
+	t.Helper()
+	hooks := map[string]any{}
+	for event, suffix := range map[string]string{"UserPromptSubmit": "user-prompt", "PostToolUse": "post-tool"} {
+		hooks[event] = []any{map[string]any{
+			"extra": "keep",
+			"hooks": []any{
+				map[string]any{"type": "command", "command": "c2c hook"},
+				map[string]any{"type": "command", "command": fmt.Sprintf(command, suffix), "timeout": 2},
+				map[string]any{"type": "command", "command": "vecnet hook --profile p-other --event " + suffix + " --as peer_other"},
+			},
+		}}
+	}
+	body, err := json.Marshal(map[string]any{"hooks": hooks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func TestHookInstallRefusesDuplicateKeys(t *testing.T) {
+	for _, body := range []string{
+		`{"hooks":{},"hooks":{}}`,
+		`{"hooks":{},"hooks":[]}`,
+		`{"hooks":{},"ho\u006fks":{}}`,
+		`{"ho\u006fks":{},"hooks":[]}`,
+		`{"hooks":{"UserPromptSubmit":[],"UserPromptSubmit":[]}}`,
+		`{"hooks":{"UserPromptSubmit":[],"UserPromptSubmit":{}}}`,
+		`{"hooks":{"PostToolUse":[],"PostTool\u0055se":[]}}`,
+		`{"hooks":{"PostTool\u0055se":[],"PostToolUse":false}}`,
+		`{"hooks":{"UserPromptSubmit":[{"hooks":[],"hooks":[]}]}}`,
+		`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","type":"prompt","command":"vecnet hook --profile p --event user-prompt"}]}]}}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			u := installUser(t)
+			path := installFile(t, []byte(body), 0640)
+			code, out, errs := u.run("hook", "install", "--profile", "p", "--bin", "vecnet", "--write", "--settings", path)
+			if code != 1 || out != "" || !strings.Contains(errs, "duplicate JSON object key") {
+				t.Errorf("duplicate keys not rejected: exit=%d stdout=%q stderr=%q", code, out, errs)
+			}
+			if got := string(readSettings(t, path)); got != body {
+				t.Errorf("invalid settings changed: %q", got)
+			}
+			if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0640 {
+				t.Errorf("invalid settings mode changed: %v %v", info, err)
+			}
+		})
+	}
+}

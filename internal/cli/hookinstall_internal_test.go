@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,5 +73,35 @@ func TestHookInstallCommandQuotesBinary(t *testing.T) {
 	}
 	if got := hookCommand("vecnet", "q", "post-tool", true); got != "vecnet hook --profile q --event post-tool --auto-ack" {
 		t.Fatal(got)
+	}
+}
+
+func TestOursHookArgumentBoundaries(t *testing.T) {
+	for _, command := range []string{
+		"vecnet hook --profile p-other --event user-prompt --as peer_other",
+		"vecnet hook --profile p --event user-prompt-extra --auto-ack --auto-ack",
+		"vecnet hook --profile p --event post-tool --as peer_other",
+		"vecnet hook --profile p --event user-prompt --profile q",
+		"vecnet hook --profile p --event user-prompt --event post-tool",
+		"vecnet hook --profile p --event user-prompt --unsupported",
+		"vecnet hook --profile p --event user-prompt --as",
+		"vecnet hook --profile p --event user-prompt --auto-ack=false",
+		"vecnet hook --profile p --event user-prompt --help",
+		"vecnet hook --profile p --event user-prompt && foreign",
+		"vecnet hook install --profile p --event user-prompt",
+		"vecnet echo hook --profile p --event user-prompt",
+		"vecnet hook --profile p --event 'user-prompt",
+	} {
+		raw, err := json.Marshal(hookHandler{Type: "command", Command: command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler, err := parseJSONNode(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if oursHook(handler, "vecnet", "p", "user-prompt") {
+			t.Errorf("claimed foreign or invalid command: %q", command)
+		}
 	}
 }
