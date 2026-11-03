@@ -21,5 +21,7 @@ backups/
 .scratch/vecnet/build-cli22/
 .scratch/vecnet/build-launcher/
 .scratch/vecnet/build-md/
+.scratch/vecnet/build-loopjudge/
 
 .demo-data/
+.scratch/vecnet/build-hook-hygiene/

@@ -25,3 +25,7 @@ Raised by Max, 2026-11-03, after the coordinator ↔ pag-chat design thread hit 
 
 ## Order
 After reactions. Plan it alongside the launcher, because launched sessions talking to their parent are the main long-thread users.
+
+## Max's decisions (2026-11-03)
+- Judge model: start with **gpt-6-luna--fast** (through LLMP). Make the model and endpoint configurable; other judges (e.g. Jev/Kev) come later.
+- Timing: plan it alongside the launcher, after reactions.
