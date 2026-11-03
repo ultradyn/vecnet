@@ -266,6 +266,16 @@ func TestToolsListNamesAndHints(t *testing.T) {
 		if !readOnly[tool.Name] && !strings.Contains(tool.Description, "operator's bus") {
 			t.Errorf("%s: a write tool's description must say it writes to the operator's bus: %q", tool.Name, tool.Description)
 		}
+		if tool.Name == "vecnet_react" {
+			props := tool.InputSchema["properties"].(map[string]any)
+			if got := props["op"].(map[string]any)["enum"]; mustJSON(t, got) != `["add","remove"]` {
+				t.Errorf("reaction op enum = %v", got)
+			}
+			defs := tool.InputSchema["$defs"].(map[string]any)
+			if got := defs["priority"].(map[string]any)["enum"]; mustJSON(t, got) != `["wake","wake_idle","hold"]` {
+				t.Errorf("reaction priority enum = %v", got)
+			}
+		}
 		names := map[string]bool{}
 		propertyNames(tool.InputSchema, names)
 		for name := range names {
@@ -1155,6 +1165,58 @@ func TestReactTool(t *testing.T) {
 			"message_id": sent.MessageID, "emoji": "not-an-emoji",
 		}, "emoji_not_allowed")
 	})
+}
+
+func TestReactValidationParity(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "reactor")
+	for _, tc := range []struct {
+		name, emoji, op, priority, code, field string
+	}{
+		{"invalid op", "✅", "bad", "hold", "invalid_value", "op"},
+		{"invalid priority", "✅", "add", "bad", "invalid_value", "priority"},
+		{"emoji before op", "invalid", "bad", "hold", "emoji_not_allowed", ""},
+		{"emoji before priority", "invalid", "add", "bad", "emoji_not_allowed", ""},
+		{"op before priority", "✅", "bad", "bad", "invalid_value", "op"},
+		{"empty op", "✅", "", "hold", "invalid_value", "op"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A well-formed but unknown target also checks that semantic errors
+			// win over message lookup on both transports (§17.2).
+			args := map[string]any{"message_id": "msg_00000000000000000000000000", "emoji": tc.emoji, "op": tc.op, "priority": tc.priority}
+			resp, body := env.Do(secret, http.MethodPost, "/v1/reactions", args)
+			var httpErr toolErrorBody
+			if err := json.Unmarshal(body, &httpErr); err != nil {
+				t.Fatal(err)
+			}
+			var field any
+			if tc.field != "" {
+				field = tc.field
+			}
+			if resp.StatusCode != 422 || httpErr.Error.Code != tc.code || httpErr.Error.Details["field"] != field {
+				t.Fatalf("HTTP reaction: %d %s, want %s field %q", resp.StatusCode, body, tc.code, tc.field)
+			}
+			mcpErr := toolFails(t, env, secret, "vecnet_react", args, tc.code)
+			if mustJSON(t, mcpErr) != mustJSON(t, httpErr) {
+				t.Fatalf("MCP error %+v differs from HTTP %+v", mcpErr, httpErr)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		args any
+	}{
+		{"missing message", map[string]any{"emoji": "invalid", "op": "bad"}},
+		{"invalid message id", map[string]any{"message_id": "bad", "emoji": "invalid", "op": "bad"}},
+		{"unknown property", map[string]any{"message_id": "msg_00000000000000000000000000", "emoji": "invalid", "op": "bad", "extra": true}},
+		{"non-string priority", map[string]any{"message_id": "msg_00000000000000000000000000", "emoji": "invalid", "priority": 42}},
+		{"null op", map[string]any{"message_id": "msg_00000000000000000000000000", "emoji": "invalid", "op": nil}},
+		{"non-object", []any{"invalid"}},
+	} {
+		t.Run("body shape before semantics/"+tc.name, func(t *testing.T) {
+			invalidPath(t, env, secret, "vecnet_react", tc.args)
+		})
+	}
 }
 
 func TestEventsSubscribeRefusesReactionType(t *testing.T) {

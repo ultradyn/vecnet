@@ -2,7 +2,7 @@
 // autolinks, code, lists, emphasis, headings), a hostile body that must stay
 // inert, the delta and relative-time labels in each header, and the priority
 // tips on hover and keyboard focus in both composers. Desktop and narrow.
-import { assert, cleanBuild, withDemo } from './lib.mjs';
+import { assert, cleanBuild, scrollMessageIntoView, withDemo } from './lib.mjs';
 
 const HUB_URL = 'https://xsm.hornbill-boa.ts.net:29044';
 const RICH = [
@@ -153,9 +153,9 @@ try {
     assert(quiet, 'the newest ago label never ticked over');
     assert(quiet.rewrites === 0, `an unchanged ago label was rewritten ${quiet.rewrites} times while ${quiet.start} became ${quiet.now}`);
     await page.mouse.move(0, 0);
-    await firstEl.evaluate(el => el.scrollIntoView({ block: 'start' }));
+    await scrollMessageIntoView(page, first.message_id);
     await shot('md-thread-desktop');
-    await hostEl.scrollIntoViewIfNeeded();
+    await scrollMessageIntoView(page, hostile.message_id);
     await shot('md-hostile-desktop');
 
     // Priority tips in the reply box: hover, then keyboard focus, then Escape.
@@ -230,7 +230,7 @@ try {
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'the narrow thread scrolls sideways');
     const preN = await measure(`[id="m-${rich.message_id}"] pre.md-pre`);
     assert(preN.sw > preN.cw && preN.right <= 390, 'the narrow code block overflows the page');
-    await richEl.scrollIntoViewIfNeeded();
+    await scrollMessageIntoView(page, rich.message_id);
     await shot('md-thread-narrow');
     await page.locator('.composer textarea').focus();
     await page.locator('.composer .seg button[value="wake"]').focus();

@@ -34,7 +34,7 @@ type tool struct {
 	// vecnet_reply: the reason codes POST /v1/messages reports ahead of the
 	// schema).
 	precheck func(raw []byte) error
-	// call receives the validated arguments as validatedArgs encodes them.
+	// call receives the shape-validated arguments as validatedArgs encodes them.
 	call func(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error)
 }
 
@@ -55,9 +55,9 @@ func (s *Server) registerTools() {
 }
 
 // toolsCall validates the arguments, runs the tool and renders the outcome.
-// Arguments the inputSchema rejects are invalid params (-32602, data.path
-// naming the JSON pointer of the violation); hub rejections are tool-level
-// errors, which a model can read and act on.
+// Shape errors are invalid params (-32602, data.path naming the JSON pointer
+// of the violation). Reaction enum values are checked by the hub in §17.2
+// order; hub rejections are tool-level errors a model can read and act on.
 func (s *Server) toolsCall(ctx context.Context, sess *Session, req *Request) (any, error) {
 	if req.IsNotification() {
 		return nil, nil // a write with no way to report its outcome is not run
@@ -206,13 +206,17 @@ func callReact(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, 
 	if err := decodeArgs(raw, &req); err != nil {
 		return nil, err
 	}
-	if req.Op == "" {
+	var fields map[string]json.RawMessage
+	if err := decodeArgs(raw, &fields); err != nil {
+		return nil, err
+	}
+	if _, supplied := fields["op"]; !supplied {
 		req.Op = "add"
 	}
 	if emoji, ok := envelope.ParseReaction(req.Emoji); ok {
 		req.Emoji = emoji
 	}
-	if req.Priority == "" && req.Op == "add" {
+	if _, supplied := fields["priority"]; !supplied && req.Op == "add" {
 		req.Priority = envelope.DefaultReactionPriority(req.Emoji)
 	}
 	resp, err := s.Hub.React(ctx, c, req, mcpIngress)
@@ -530,9 +534,12 @@ func writeAnnotations(openWorld bool) *mcp.ToolAnnotations {
 type toolSpec struct {
 	name, description string
 	input             schema
-	annotations       *mcp.ToolAnnotations
-	precheck          func([]byte) error
-	call              func(context.Context, *Server, auth.Caller, []byte) (any, error)
+	// hubValues keeps enums in tools/list, but validates only their string
+	// shape here so the hub checks their semantics in protocol order.
+	hubValues   []string
+	annotations *mcp.ToolAnnotations
+	precheck    func([]byte) error
+	call        func(context.Context, *Server, auth.Caller, []byte) (any, error)
 }
 
 // narrowAttachments takes the URL fields out of defs, the tools' own copy of
@@ -609,6 +616,7 @@ func toolSpecs(defs schema) []toolSpec {
 			"priority":   ref("priority"),
 			"as":         ref("peerId"),
 		}, "message_id", "emoji"),
+		hubValues:   []string{"op", "priority"},
 		annotations: writeAnnotations(false), call: callReact,
 	}, {
 		name:        "vecnet_inbox",
@@ -681,6 +689,18 @@ func buildTools() *toolTable {
 		input, sch, err := compileInput(spec.name, spec.input, doc.Defs)
 		if err != nil {
 			panic("mcpserver: tool " + spec.name + ": " + err.Error())
+		}
+		if len(spec.hubValues) > 0 {
+			shape := maps.Clone(spec.input)
+			props := maps.Clone(shape["properties"].(schema))
+			for _, field := range spec.hubValues {
+				props[field] = schema{"type": "string"}
+			}
+			shape["properties"] = props
+			_, sch, err = compileInput(spec.name, shape, doc.Defs)
+			if err != nil {
+				panic("mcpserver: tool shape " + spec.name + ": " + err.Error())
+			}
 		}
 		t.list = append(t.list, &mcp.Tool{Name: spec.name, Description: spec.description, InputSchema: input, Annotations: spec.annotations})
 		t.byName[spec.name] = &tool{schema: sch, precheck: spec.precheck, call: spec.call}
