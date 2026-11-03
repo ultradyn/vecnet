@@ -250,6 +250,8 @@ test('errorText: 429 shows the en-AU time from retry_after_seconds; 413 without 
   const t429 = errorText(quota, nowMs);
   assert.ok(t429.includes('11:30'), t429);
   assert.ok(!/am|pm/i.test(t429), t429);
+  const beforeMidnight = new Date(2026, 10, 3, 23, 0, 0).getTime();
+  assert.equal(errorText(quota, beforeMidnight), 'Daily upload quota reached; try again at 4 Nov 00:30.');
   // 24-hour: 13:45, not 1:45.
   assert.ok(errorText(new APIError(429, 'upload_quota_exceeded', '', { retry_after_seconds: 13500 }), nowMs).includes('13:45'));
   // No retry time still reads as a 429.

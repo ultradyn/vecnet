@@ -3,9 +3,14 @@ package httpapi
 import (
 	"io"
 	"net/http"
+	"regexp"
 
 	"github.com/XertroV/vecnet/internal/envelope"
 )
+
+// PROTOCOL §1.3: a wrong prefix or malformed ULID is a body-shape error.
+// Keep this aligned with envelope.schema.json $defs.messageId.
+var reactionMessageID = regexp.MustCompile(`^msg_[0-9A-HJKMNP-TV-Z]{26}$`)
 
 func (s *server) postReactions(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(r.Body)
@@ -28,6 +33,10 @@ func (s *server) postReactions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
+	}
+	if !reactionMessageID.MatchString(req.MessageID) {
+		writeError(w, &envelope.SchemaError{Path: "/message_id", Message: "message_id must match ^msg_[0-9A-HJKMNP-TV-Z]{26}$"})
+		return
 	}
 	_, req.PrioritySupplied = top["priority"]
 	c := callerFrom(r.Context())

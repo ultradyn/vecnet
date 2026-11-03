@@ -1233,6 +1233,29 @@ func TestReactValidationParity(t *testing.T) {
 			})
 		}
 	}
+	// MCP retains schema guards for message IDs even when emoji semantics fail.
+	for _, id := range []string{
+		"peer_00000000000000000000000000", "bad", "",
+		"msg_0000000000000000000000000", "msg_000000000000000000000000000",
+		"msg_0000000000000000000000000I", "msg_0000000000000000000000000a",
+	} {
+		for _, emoji := range []string{"✅", "invalid"} {
+			t.Run("message ID shape/"+id+"/"+emoji, func(t *testing.T) {
+				before := writeCounts()
+				t.Cleanup(func() {
+					if after := writeCounts(); after != before {
+						t.Errorf("malformed reaction wrote state: %v -> %v", before, after)
+					}
+				})
+				path := invalidPath(t, env, secret, "vecnet_react", map[string]any{
+					"message_id": id, "emoji": emoji, "op": "add", "priority": "hold",
+				})
+				if path != "/message_id" {
+					t.Fatalf("MCP rejected at %q, want /message_id", path)
+				}
+			})
+		}
+	}
 	for _, tc := range []struct {
 		name string
 		args any
