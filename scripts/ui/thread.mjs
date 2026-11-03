@@ -103,17 +103,19 @@ try {
     assert(await inView(first.message_id), 'the reply link did not bring its parent into view');
     await page.evaluate(() => window.removeEventListener('scroll', window.__holdScroll, true));
 
-    // Show full text renders the spilled body literally
+    // Show full text renders the spilled body as markdown: its markup stays text
     const hostileLong = Array.from({ length: 160 }, (_, i) => `<img src=x onerror=alert(${i})> line ${i}`).join('\n');
     const spilled = await api('POST', '/v1/messages', { idempotency_key: 'thread-spill', thread_id: hark, priority: 'hold', content: { text: hostileLong } }, 'codex');
     assert(spilled.spilled === true, 'the long body did not spill');
     const spillMsg = msgEl(spilled.message_id);
     await spillMsg.locator('.att.spill', { hasText: 'message.md' }).waitFor();
     await spillMsg.getByRole('button', { name: 'Show full text' }).click();
-    const pre = spillMsg.locator('pre.full');
+    const pre = spillMsg.locator('div.full > .md');
     await pre.waitFor();
-    assert(await pre.textContent() === hostileLong, 'the full text is not the spilled body, byte for byte');
-    assert(await pre.evaluate(el => el.children.length) === 0, 'the full text became elements');
+    // One paragraph whose lines are hard breaks: the text, line for line, and
+    // no element but p and br.
+    assert(await pre.evaluate(el => [...el.querySelectorAll('p')].map(p => [...p.childNodes].map(n => n.nodeName === 'BR' ? '\n' : n.textContent).join('')).join('\n')) === hostileLong, 'the full text is not the spilled body, line for line');
+    assert(await pre.evaluate(el => el.querySelectorAll(':not(p):not(br)').length) === 0, 'the full text became elements other than paragraphs and breaks');
     assert(await page.locator('img').count() === 0, 'a spilled body became an image');
     assert(await spillMsg.locator('.txt').count() === 0, 'the preview still shows beside the full text');
     await spillMsg.getByRole('button', { name: 'Hide full text' }).click();
