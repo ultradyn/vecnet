@@ -16,6 +16,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	venv "github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/mcpserver"
 	"github.com/XertroV/vecnet/internal/testhub"
@@ -1568,5 +1569,59 @@ func TestListenStreamsCappedPerCredential(t *testing.T) {
 	})
 	if r.Error == nil || errReason(t, r) != "too_many" {
 		t.Fatalf("listen past the cap = %+v / %s", r.Error, r.Result)
+	}
+}
+
+func TestInboxResourceListsReactions(t *testing.T) {
+	env := testhub.Start(t)
+	_, senderSecret := env.NewPeer("session", "sender")
+	reactor, secret := env.NewPeer("session", "reactor")
+	var sent sendResult
+	toolOK(t, env, senderSecret, "vecnet_send", map[string]any{
+		"idempotency_key": "resource-target", "recipients": []string{reactor},
+		"priority": "hold", "content": map[string]any{"text": "react to this"},
+	}, &sent)
+	toolOK(t, env, secret, "vecnet_react", map[string]any{
+		"message_id": sent.MessageID, "emoji": "+1",
+	}, nil)
+	r := rpc2026(t, env, secret, "resources/read", map[string]any{"uri": peerURI(reactor)})
+	if r.Error != nil {
+		t.Fatalf("resources/read: %+v", r.Error)
+	}
+	var res struct {
+		Contents []struct {
+			URI      string `json:"uri"`
+			MimeType string `json:"mimeType"`
+			Text     string `json:"text"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(r.Result, &res); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Contents) != 1 || res.Contents[0].URI != peerURI(reactor) || res.Contents[0].MimeType != "application/json" {
+		t.Fatalf("contents = %+v, want reactor's JSON inbox", res.Contents)
+	}
+	var inbox struct {
+		Events []struct {
+			Type string             `json:"type"`
+			Data venv.ReactionEvent `json:"data"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(res.Contents[0].Text), &inbox); err != nil {
+		t.Fatal(err)
+	}
+	var reactions []venv.ReactionEvent
+	for _, event := range inbox.Events {
+		if event.Type == "reaction" {
+			reactions = append(reactions, event.Data)
+		}
+	}
+	if len(reactions) != 1 {
+		t.Fatalf("reaction events = %+v, want exactly one", reactions)
+	}
+	got := reactions[0]
+	if got.MessageID != sent.MessageID || got.ThreadID != sent.ThreadID || got.PeerID != reactor ||
+		got.Op != "add" || got.Emoji != venv.ReactionNames["+1"] || got.At == "" {
+		t.Fatalf("reaction event = %+v, want reactor's add on target", got)
 	}
 }
