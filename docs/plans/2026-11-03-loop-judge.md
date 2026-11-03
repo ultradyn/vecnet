@@ -26,7 +26,7 @@
 - The model id `gpt-6-luna--fast` is documented as an LLMP upstream id in `~/.llm-general/buildboxes/llmp-harness-setup.md:22`, with the suffix explained at `:27-28`.
 - **Unverified, checked live in Task 8's `just loop-judge-live` step:** whether Luna accepts `temperature` (the plan omits it, which is always valid), and whether the 20 s default timeout fits Luna's latency over the Cloudflare tunnel.
 
-**Starts from:** `master` after the reactions build (migration `0012`, PROTOCOL §17, root `CHANGELOG.md`) and the launcher build (migration `0013`, PROTOCOL §18) merge. This plan takes migration **`0014`** and PROTOCOL **§19**. **Preflight (coordinator, before the run):** `ls internal/store/migrations/0012_*.sql internal/store/migrations/0013_*.sql CHANGELOG.md` succeeds, and `grep -nE '^## 1[78]\.' docs/PROTOCOL.md` finds both sections. If not, wait.
+**Starts from:** `master` after the reactions build (migration `0012`, PROTOCOL §17, root `CHANGELOG.md`) and the launcher build (migration `0014`, PROTOCOL §18) merge. This plan takes migration **`0015`** and PROTOCOL **§19**. **Preflight (coordinator, before the run):** `ls internal/store/migrations/0012_*.sql internal/store/migrations/0014_*.sql CHANGELOG.md` succeeds, and `grep -nE '^## 1[78]\.' docs/PROTOCOL.md` finds both sections. If not, wait.
 - **UI headroom (coordinator, preflight).** `du -cb internal/ui/static/* | tail -1` was 234,574 B (about 229 KiB) on master @ 1e2f761. The cap is `uiMaxBytes` 256 KiB (`internal/httpapi/ui_test.go:19`), and reactions and the launcher both add to the total. Measure again after the launcher merges. If fewer than 12 KiB remain, raise `uiMaxBytes` to 288 KiB in a housekeeping commit, with one `CHANGELOG.md` line, before the run. Task 9 has its own byte budget.
 - **Judge key (coordinator, recommended).** Provision a dedicated LLMP consumer key and run `just loop-judge-live` (Task 8) on the deploy host before the deploy that ships this. Without a key the hub still works, but every checkpoint pauses for the operator (Global Constraints, Defaults).
 - **Rebase points.** These files are also edited by the reactions or launcher builds; the executor rebases onto them and never reverts them:
@@ -259,12 +259,12 @@
 
 ---
 
-### Task 1: Contract: migration 0014, config, ids, wire and opapi types
+### Task 1: Contract: migration 0015, config, ids, wire and opapi types
 
 **Depends:** none
 
 **Files:**
-- Create: `internal/store/migrations/0014_loop_judge.sql`.
+- Create: `internal/store/migrations/0015_loop_judge.sql`.
 - Modify:
   - `internal/store/store_test.go`;
   - `internal/hub/hub.go` (`Config.Loop`, `DefaultConfig`);
@@ -274,7 +274,7 @@
   - `internal/envelope/schema.json` and `docs/protocol/envelope.schema.json` (identical; description text only).
 
 **Interfaces:**
-- **`0014_loop_judge.sql`:**
+- **`0015_loop_judge.sql`:**
 
   ```sql
   ALTER TABLE threads ADD COLUMN loop_mode   TEXT NOT NULL DEFAULT 'judge' CHECK (loop_mode IN ('judge', 'operator', 'off'));
@@ -362,7 +362,7 @@
 - [ ] **Step 1: Write the failing tests**
 
 ```go
-func TestMigration0014ThreadLoopColumns(t *testing.T)   // store_test.go: pre-0014 thread row → loop_mode 'judge', loop_state 'open', loop_run 0, loop_allow NULL, loop_passes 0; loop_mode 'bogus' fails the CHECK; loop_run -1 fails
+func TestMigration0015ThreadLoopColumns(t *testing.T)   // store_test.go: pre-0015 thread row → loop_mode 'judge', loop_state 'open', loop_run 0, loop_allow NULL, loop_passes 0; loop_mode 'bogus' fails the CHECK; loop_run -1 fails
 func TestLoopChecksOneOpenPerThread(t *testing.T)      // second 'checking' or 'paused' row for one thr_id conflicts; a 'passed' row beside an open one is fine
 func TestLoopHoldsWireJSON(t *testing.T)               // wire NULL ok; invalid JSON fails the CHECK
 func TestNewHasPrefixAndCrockford(t *testing.T)        // existing; adds lck
@@ -372,12 +372,12 @@ func TestWireSlicesNeverNull(t *testing.T)             // existing; values gain 
 func TestApprovalLoopCheckJSON(t *testing.T)           // opapi: OpenApproval{} and ThreadApproval{} marshal "loop_check":null; set → {"check_id","thread_id"}
 ```
 
-`TestOpenMigratesAndIsIdempotent` gains 0014. `just validate-protocol` keeps the two schema files identical.
+`TestOpenMigratesAndIsIdempotent` gains 0015. `just validate-protocol` keeps the two schema files identical.
 
-- [ ] **Step 2:** `build2 go test -p 2 ./internal/store/ ./internal/ids/ ./internal/hub/ ./internal/opapi/ -run 'Migration0014|LoopChecks|LoopHolds|NewHasPrefix|DefaultLoopConfig|SendResponseOmits|WireSlices|OpenMigrates'` fails on the new tests.
+- [ ] **Step 2:** `build2 go test -p 2 ./internal/store/ ./internal/ids/ ./internal/hub/ ./internal/opapi/ -run 'Migration0015|LoopChecks|LoopHolds|NewHasPrefix|DefaultLoopConfig|SendResponseOmits|WireSlices|OpenMigrates'` fails on the new tests.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** `build2 go test -p 2 ./...` and `just validate-protocol` pass.
-- [ ] **Step 5: Commit** `feat: loop judge storage, config and wire types (migration 0014)`
+- [ ] **Step 5: Commit** `feat: loop judge storage, config and wire types (migration 0015)`
 
 ---
 
@@ -1135,7 +1135,7 @@ After the merge, the coordinator (not a task):
 
 --- SUMMARY ---
 
-- **What:** the hard `max_depth` wall becomes checkpoints. Every 20 unsupervised messages in a thread, the next send is accepted (202) but its non-operator Deliveries are held in a new `loop_check` state. Deterministic checks run, then a judge model (gpt-6-luna--fast through LLMP, configurable) decides whether to allow 20 more. Anything else pauses the thread for the operator, who chooses Continue or Stop. PROTOCOL gains §19 (with a §5.4 ordering amendment and a §13.8 launcher rule) and migration 0014.
+- **What:** the hard `max_depth` wall becomes checkpoints. Every 20 unsupervised messages in a thread, the next send is accepted (202) but its non-operator Deliveries are held in a new `loop_check` state. Deterministic checks run, then a judge model (gpt-6-luna--fast through LLMP, configurable) decides whether to allow 20 more. Anything else pauses the thread for the operator, who chooses Continue or Stop. PROTOCOL gains §19 (with a §5.4 ordering amendment and a §13.8 launcher rule) and migration 0015.
 - **What a checkpoint counts:** an *unsupervised run* per thread. These are counted messages from non-operator peers since the last operator message or continue. They are not depth or reply-chain length, because the launcher's S1 rule pins depth at 1 and any client can reset a chain. Escaping into new threads is bounded by §16.2. An operator message resets the run.
 - **Holding:**
   - A held Delivery's wire bytes are built at send time, but no log Event, push or notification happens.
