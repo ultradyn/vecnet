@@ -24,3 +24,4 @@ backups/
 .scratch/vecnet/build-loopjudge/
 
 .demo-data/
+.scratch/vecnet/build-hook-hygiene/
