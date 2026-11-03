@@ -5,7 +5,9 @@ import { answerBody, countdown } from './approvals.js';
 import { createAttachments } from './attach.js';
 import { sendRefusal } from './attach-model.js';
 import { avatar, h } from './dom.js';
-import { bytes, clean, plural, short, title, when } from './format.js';
+import { ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, plural, short, title, when } from './format.js';
+import { markdown } from './md.js';
+import { prioritySeg } from './prio.js';
 import { budgetBanner, budgetOut, canShowFull, excerpt, FULL_TEXT_CAP, items, replyKey, replySig, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
 import { createThumbs } from './thumbs.js';
 
@@ -82,7 +84,9 @@ export function mount(root, ctx) {
     flash: '',
     pinned: true,
   };
-  let gone = false, ticks = [];
+  // ticks: live approval countdowns; agos: the relative times on the right
+  // of each header. The one-second tick refreshes both.
+  let gone = false, ticks = [], agos = [];
   // Reply attachments, and the thread's inline thumbnails: a settled fetch or
   // an upload's change draws again.
   const atts = createAttachments({ api, onChange: () => render() });
@@ -112,7 +116,11 @@ export function mount(root, ctx) {
       if (!gone && r && r.marked) store.invalidate('inbox', 'threads', tag);
     }, () => {});
   }
-  const onVisible = () => { if (owedRead && document.visibilityState === 'visible') markRead(); };
+  const onVisible = () => {
+    if (document.visibilityState !== 'visible') return;
+    if (owedRead) markRead();
+    tick(); // relative times caught up at once, not on the next second
+  };
 
   async function send(ta, btn) {
     if (S.sending || !atts.ready()) return;
@@ -246,14 +254,13 @@ export function mount(root, ctx) {
     btn.addEventListener('click', () => send(ta, btn));
     ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(ta, btn); } });
     ta.addEventListener('input', () => { counter(ta); gate(); });
-    const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Priority' },
-      ['wake', 'wake_idle', 'hold'].map(p => h('button', { type: 'button', value: p, text: p, onclick: () => { S.prio = p; render(); } })));
+    const prio = prioritySeg(p => { S.prio = p; render(); });
     const wrap = h('div', { class: 'wrap' },
       h('div', { class: 'join', hidden: true, text: 'You are not a participant in this thread. Sending adds you to it.' }),
       h('div', { class: 'to', hidden: true }, h('span'), h('button', { type: 'button', title: 'Reply to the thread instead', text: '×', onclick: () => { S.replyTo = ''; render(); } })),
       ta,
       atts.el,
-      h('div', { class: 'bar' }, seg, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint', text: 'Drop or paste files · Enter to send · Shift+Enter for a new line' }), pick, btn));
+      h('div', { class: 'bar' }, prio.el, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint', text: 'Drop or paste files · Enter to send · Shift+Enter for a new line' }), pick, btn));
     atts.wire(wrap, ta, pick);
     return h('div', { class: 'composer' }, h('div', { class: 'cbanner', role: 'alert', hidden: true }), wrap);
   }
@@ -289,8 +296,22 @@ export function mount(root, ctx) {
     return card;
   }
 
+  // agoLabel is a message's relative time, refreshed by tick while the page
+  // is visible; its title is the full local date and time.
+  function agoLabel(iso) {
+    const el = h('time', { class: 'ago', datetime: iso, title: fullWhen(iso), text: ago(iso, store.hubNow()) });
+    agos.push({ el, iso });
+    return el;
+  }
+
   function tick() {
     const now = store.hubNow();
+    if (document.visibilityState === 'visible') {
+      for (const a of agos) {
+        const s = ago(a.iso, now);
+        if (a.el.textContent !== s) a.el.textContent = s;
+      }
+    }
     for (const t of ticks) {
       const c = countdown(t.approval.expires_at, now);
       if (c.expired) {
@@ -343,14 +364,17 @@ export function mount(root, ctx) {
       h('div', { class: 'atts' },
         h('span', { class: 'att spill', title: att.sha256 }, att.name || 'message.md', h('span', { class: 'sz', text: bytes(att.size) })),
         toggle),
-      f && f.state === 'ok' ? h('pre', { class: 'full', text: f.text }) : null,
+      f && f.state === 'ok' ? h('div', { class: 'full' }, markdown(f.text)) : null,
       f && f.state === 'error' ? h('div', { class: 'full-err', text: f.text }) : null,
     ];
   }
 
-  function message(it) {
+  // message draws one item; prev is the message before it in the thread, for
+  // the delta beside the timestamp (issue 25).
+  function message(it, prev) {
     const m = it.message;
     if (it.system) return systemLine(it);
+    const delta = prev ? deltaLabel(prev.created_at, m.created_at) : '';
     const others = (m.recipients || []).map(nameOf).join(', ');
     // Images show inline from the thumbnail cache; everything else is a chip.
     const files = (m.attachments || []).filter(a => a !== it.spill).map(a => thumbs.render(a, hostedOf(m.message_id, a.sha256)));
@@ -363,12 +387,13 @@ export function mount(root, ctx) {
           h('b', { text: m.sender === me ? nameOf(m.sender) + ' (you)' : nameOf(m.sender) }),
           h('span', { class: 'kind', text: kindOf(m.sender) }),
           h('span', { class: 't', text: when(m.created_at), title: m.created_at }),
+          delta ? h('span', { class: 'dt', text: delta, title: deltaTitle(prev.created_at, m.created_at) }) : null,
           h('span', { class: 'prio ' + m.priority, text: m.priority }),
           others ? h('span', { class: 'via', text: 'to ' + others }) : null,
-          h('span', { class: 'acts' }, h('button', { type: 'button', text: 'reply', onclick: () => { S.replyTo = m.message_id; render(); comp.querySelector('textarea').focus(); } }))),
+          h('span', { class: 'acts' }, agoLabel(m.created_at), h('button', { type: 'button', text: 'reply', onclick: () => { S.replyTo = m.message_id; render(); comp.querySelector('textarea').focus(); } }))),
         it.parent ? replyQuote(it.parent) : null,
         // A spilled preview is clamped to a few lines; Show full text opens it.
-        showTxt ? h('div', { class: 'txt' + (it.spill ? ' clamp' : ''), text: m.content.text }) : null,
+        showTxt ? h('div', { class: 'txt' + (it.spill ? ' clamp' : '') }, markdown(m.content.text)) : null,
         it.spill ? spillBlock(m, it.spill) : (m.content && m.content.truncated ? h('span', { class: 'trunc', text: 'Preview only. The hub truncated this text.' }) : null),
         it.approval ? approvalCard(it.approval) : jobBox(m),
         files.length ? h('div', { class: 'atts' }, files) : null,
@@ -384,6 +409,7 @@ export function mount(root, ctx) {
     head.replaceChildren(h('h1', { text: t ? title(t, me, nameOf) : short(threadId) }),
       h('div', { class: 'ids', text: threadId + (t ? ' · ' + plural(t.message_count, 'message') : '') }));
     ticks = [];
+    agos = [];
     if (history.error() && !history.get()) {
       list.replaceChildren(h('div', { class: 'empty error' }, h('b', { text: 'Thread unavailable' }), history.error().message));
     } else if (history.loading() && !all.length) {
@@ -391,7 +417,7 @@ export function mount(root, ctx) {
     } else {
       // A rebuild replaces every node: a focused thumbnail keeps its focus.
       const f = document.activeElement, keep = f && list.contains(f) && f.matches('button.thumb') && f.closest('.msg');
-      list.replaceChildren(...items(all, matrix.get() || null, (d && d.open_approvals) || []).map(message));
+      list.replaceChildren(...items(all, matrix.get() || null, (d && d.open_approvals) || []).map((it, i, all) => message(it, i ? all[i - 1].message : null)));
       const again = keep && document.getElementById(keep.id);
       const thumb = again && again.querySelector('button.thumb[data-sha="' + f.dataset.sha + '"]');
       if (thumb) thumb.focus({ preventScroll: true });

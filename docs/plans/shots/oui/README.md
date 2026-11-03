@@ -85,3 +85,13 @@ Attachment screens cover web compose, thread replies and inline images, and the 
 - [att05-tui-progress.png](att05-tui-progress.png) — TUI upload in progress while the hub is stalled.
 - [att05-tui-success.png](att05-tui-success.png) — TUI message sent with an attachment file row.
 - [att05-tui-error.png](att05-tui-error.png) — Missing file refused with the TUI draft preserved.
+
+Message bodies, timing and priority tips (issues 21, 23 and 25) come from `scripts/ui/md-thread.mjs`. Bodies render as a safe markdown subset; each header shows the gap since the previous message beside its time and a live relative time beside reply; the priority buttons explain themselves on hover and keyboard focus. Desktop is 1440 by 900; narrow is 390 by 844.
+
+- [md-thread-desktop.png](md-thread-desktop.png) — Markdown body (heading, emphasis, labelled link with its host, bare and `<url>` autolinks, lists, scrolling code block, quote) with `+4m 12s` and `4m ago` header labels.
+- [md-hostile-desktop.png](md-hostile-desktop.png) — Hostile body: `<script>` and `<img onerror>` stay literal, `javascript:` and `data:` links stay text, a `github.com` label shows its real host `evil.example`, an image becomes a link.
+- [md-tip-thread-desktop.png](md-tip-thread-desktop.png) — Reply box: the `wake_idle` tip on keyboard focus.
+- [md-tip-compose-desktop.png](md-tip-compose-desktop.png) — New message: the `hold` tip on hover, opening leftward from the end of the row.
+- [md-tip-compose-narrow.png](md-tip-compose-narrow.png) — New message at narrow width: the `wake_idle` tip on keyboard focus stays on screen.
+- [md-thread-narrow.png](md-thread-narrow.png) — Narrow thread: relative time and reply stay on one line; the code block scrolls inside its box.
+- [md-tip-thread-narrow.png](md-tip-thread-narrow.png) — Narrow reply box: the `wake_idle` tip on keyboard focus.

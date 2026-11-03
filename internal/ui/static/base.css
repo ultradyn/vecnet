@@ -28,6 +28,15 @@ span,b,time,code,a{unicode-bidi:isolate}
 .prio.wake{color:var(--wake);border-color:#fbbf2450;background:#fbbf2412}
 .prio.wake_idle{color:var(--widle);border-color:#38bdf850;background:#38bdf812}
 .prio.hold{color:var(--hold);border-color:#8391ad50;background:#8391ad12}
+/* priority tips (prio.js, issue 21): shown on hover or keyboard focus, hidden by Escape */
+.ptips{position:relative;display:inline-flex;align-self:flex-start}
+.ptip{display:none;position:absolute;left:0;bottom:calc(100% + 8px);z-index:40;width:max-content;max-width:min(300px,calc(100vw - 32px));padding:8px 11px;border:1px solid var(--line2);border-radius:7px;background:#1a2139;color:#dfe3ea;font:400 12px/1.5 var(--sans);text-align:left;white-space:normal;box-shadow:0 12px 30px #000a;pointer-events:none}
+.ptip b{display:block;margin-bottom:3px;font:500 11px var(--mono);color:var(--c)}
+.seg button:focus-visible{outline-offset:-2px;border-radius:6px}
+.ptip[data-p=wake]{--c:var(--wake)}.ptip[data-p=wake_idle]{--c:var(--widle)}.ptip[data-p=hold]{--c:var(--hold)}
+.ptips:not(.quiet):has(button[value=wake]:is(:hover,:focus-visible)) .ptip[data-p=wake],
+.ptips:not(.quiet):has(button[value=wake_idle]:is(:hover,:focus-visible)) .ptip[data-p=wake_idle],
+.ptips:not(.quiet):has(button[value=hold]:is(:hover,:focus-visible)) .ptip[data-p=hold]{display:block}
 .att{display:inline-flex;align-items:center;gap:6px;font:500 12px var(--mono);padding:4px 8px;border-radius:6px;border:1px solid var(--line2);background:#0d1325;color:#cbd5e1}
 .att .sz{color:var(--dim)}
 .att.spill{border-style:dashed;border-color:#a855f780}

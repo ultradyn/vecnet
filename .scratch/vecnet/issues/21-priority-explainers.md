@@ -12,3 +12,6 @@ The priority buttons in the new-message form (`internal/ui/static/compose.js`, t
 
 ## Shape
 One `PRIORITY_HELP` map in `format.js` used by both rows; a styled tooltip from a CSS file (shows on hover and on keyboard focus, dark palette, no inline style, CSP unchanged), plus `aria-describedby` so screen readers get the same text. Optional: the same lines in the TUI help for its priority toggle.
+
+## Done (2026-11-03, branch `md`)
+`internal/ui/static/prio.js` builds the priority picker for both composers (`compose.js`, `thread.js`). Each button's `aria-describedby` names a hidden element holding `PRIORITY_HELP[p]`; a visible, `aria-hidden` tip (priority name in its colour, then the same words) shows on hover and on keyboard focus through CSS `:has()` in `base.css`, and Escape hides it until focus or the pointer moves (WCAG 1.4.13). No `title` on the buttons, no inline style, CSP unchanged. The new-message tip opens leftward because the picker ends its row. Checked by `scripts/ui/md-thread.mjs` (hover, Tab focus, Escape, on-screen at 390 px); shots `md-tip-*.png`. TUI help lines not done (optional).

@@ -25,6 +25,45 @@ export function ago(iso, nowMs = Date.now()) {
   return Math.floor(s / 86400) + 'd ago';
 }
 
+// deltaLabel is how long after prevIso a message came: +3.8s, +42s, +4m 12s,
+// +2h 5m, +3d. Empty for the first message, a bad time or an earlier one.
+export function deltaLabel(prevIso, iso) {
+  const a = Date.parse(prevIso), b = Date.parse(iso);
+  if (Number.isNaN(a) || Number.isNaN(b) || b < a) return '';
+  const ms = b - a;
+  if (ms < 9950) return '+' + (ms / 1000).toFixed(1) + 's';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return '+' + s + 's';
+  if (s < 3600) return '+' + Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  if (s < 86400) return '+' + Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+  return '+' + Math.floor(s / 86400) + 'd';
+}
+
+// deltaTitle is deltaLabel spelled out for a tooltip: "3.8 s after the
+// previous message", "4m 12s after the previous message". Empty when the
+// label is.
+export function deltaTitle(prevIso, iso) {
+  const d = deltaLabel(prevIso, iso);
+  return d ? d.slice(1).replace(/^([\d.]+)s$/, '$1 s') + ' after the previous message' : '';
+}
+
+// fullWhen is the full local date and time, for the title of a relative
+// time: "Tue, 3 Nov 2026, 14:05:09".
+const FULL = { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' };
+export function fullWhen(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('en-AU', FULL);
+}
+
+// PRIORITY_HELP explains each priority (PROTOCOL §5.2) for the hover and
+// focus tips on the priority buttons (issue 21).
+export const PRIORITY_HELP = {
+  wake: 'Interrupt now. Pushed to the recipient straight away (push routes, Grok Bot routines, dots); pull clients see it at once.',
+  wake_idle: 'Interrupt only if the recipient is idle or its presence is unknown. Otherwise it waits, and is pushed once when the recipient goes idle.',
+  hold: 'Never pushed. It waits in the recipient\'s inbox until it next checks; pull clients still see it as it arrives.',
+};
+
 export function bytes(n) {
   if (n < 1024) return n + ' B';
   return n < 1 << 20 ? (n / 1024).toFixed(1) + ' KiB' : (n / 1048576).toFixed(1) + ' MiB';
