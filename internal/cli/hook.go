@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -114,7 +115,12 @@ func hookOutput(event, context string) []byte {
 	if event == "post-tool" {
 		name = "PostToolUse"
 	}
-	raw, _ := json.Marshal(struct {
+	var raw bytes.Buffer
+	encoder := json.NewEncoder(&raw)
+	// The context is already HTML-escaped by inert. Retain those bytes in
+	// JSON rather than expanding every '&' into six bytes a second time.
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(struct {
 		HookSpecificOutput struct {
 			HookEventName     string `json:"hookEventName"`
 			AdditionalContext string `json:"additionalContext"`
@@ -123,7 +129,7 @@ func hookOutput(event, context string) []byte {
 		HookEventName     string `json:"hookEventName"`
 		AdditionalContext string `json:"additionalContext"`
 	}{name, context}})
-	return append(raw, '\n')
+	return raw.Bytes()
 }
 
 type hookResult struct {
@@ -175,7 +181,11 @@ func (a *app) cmdHook(args []string) (err error) {
 		if stdout == nil {
 			return
 		}
-		result = worker.hookRun(args, nowTime, afterPoll)
+		outputLimit, supported := hookOutputLimit(stdout)
+		if !supported {
+			return
+		}
+		result = worker.hookRun(args, nowTime, afterPoll, outputLimit)
 	}()
 	select {
 	case <-ctx.Done():
@@ -248,6 +258,39 @@ func hookPrepareWriter(w io.Writer) (io.Writer, func()) {
 	return owned, func() { _ = owned.Close() }
 }
 
+// Cancellation alone cannot retract a partial write. Only memory outputs
+// and native POSIX pipes have the all-or-empty publication contract we need.
+// Bound the ENTIRE serialized object (including its newline) by PIPE_BUF so
+// one deadline-aware pipe write either publishes it all or publishes nothing.
+// Linux guarantees 4096 bytes; other POSIX systems guarantee at least 512.
+// io.Pipe and arbitrary deadline writers can expose a prefix, so they are
+// unsupported as stdout, even though diagnostics may safely use them.
+func hookOutputLimit(w io.Writer) (int, bool) {
+	switch w.(type) {
+	case *bytes.Buffer, *strings.Builder:
+		return 0, true
+	}
+	if w == io.Discard {
+		return 0, true
+	}
+	f, ok := w.(*os.File)
+	if !ok {
+		return 0, false
+	}
+	info, err := f.Stat()
+	if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+		return 0, false
+	}
+	switch runtime.GOOS {
+	case "linux", "android":
+		return 4096, true
+	case "darwin", "ios", "freebsd", "openbsd", "netbsd", "dragonfly", "solaris", "illumos", "aix":
+		return 512, true
+	default:
+		return 0, false
+	}
+}
+
 // hookWrite performs the write synchronously, with cancellation applied to
 // the underlying I/O. Returning from a goroutine select alone would permit
 // a delayed write after the invocation has returned. Unknown writers have
@@ -255,6 +298,12 @@ func hookPrepareWriter(w io.Writer) (io.Writer, func()) {
 func hookWrite(ctx context.Context, w io.Writer, data []byte) bool {
 	if ctx.Err() != nil {
 		return false
+	}
+	if _, native := w.(*os.File); native {
+		limit, supported := hookOutputLimit(w)
+		if !supported || len(data) > limit {
+			return false
+		}
 	}
 	switch w := w.(type) {
 	case *bytes.Buffer:
@@ -308,7 +357,7 @@ func hookWrite(ctx context.Context, w io.Writer, data []byte) bool {
 	}
 }
 
-func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func()) hookResult {
+func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(), outputLimit int) hookResult {
 	ctx := a.ctx
 	o, e := parseFlags("hook", args, map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag})
 	if e != nil || len(o.pos) != 0 {
@@ -340,6 +389,9 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func())
 	}
 	if event != "user-prompt" && event != "post-tool" {
 		return hookResult{}
+	}
+	fits := func(context string) bool {
+		return utf16Len(context) <= hookMaxUnits && (outputLimit == 0 || len(hookOutput(event, context)) <= outputLimit)
 	}
 	c, name, ch, e := a.connect()
 	if e != nil || ctx.Err() != nil {
@@ -401,6 +453,9 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func())
 				}
 				if count > 0 {
 					output = hookSummary(name, count, len(body.Events) == hookPageLimit)
+					if !fits(output) {
+						return errHookOutputTooLarge
+					}
 				}
 			}
 			s.PollCursor = head.NextCursor
@@ -456,7 +511,11 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func())
 				}
 			}
 			candidate := append(append([]hookItem(nil), items...), item)
-			if len(items) == hookMaxItems || utf16Len(hookContext(name, candidate, remaining, lowerBound)) > hookMaxUnits {
+			if len(items) == hookMaxItems || !fits(hookContext(name, candidate, remaining, lowerBound)) {
+				if len(items) == 0 {
+					// Do not advance or ack past a delivery that cannot fit.
+					return errHookOutputTooLarge
+				}
 				cut = true
 				for _, next := range body.Events[i:] {
 					if next.Type == "delivery" && !s.has(eventFieldsOf(next).deliveryID) {
@@ -478,6 +537,9 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func())
 		}
 		if len(items) > 0 {
 			output = hookContext(name, items, more, lowerBound)
+			if !fits(output) {
+				return errHookOutputTooLarge
+			}
 		}
 		// Cache preparation can block on local I/O. Keep it inside the
 		// transaction, so an expired worker cannot commit shown ids/cursor.
@@ -500,6 +562,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func())
 }
 
 var errHookRateLimited = errors.New("hook poll rate limited")
+var errHookOutputTooLarge = errors.New("hook output exceeds atomic pipe limit")
 
 func hookPurged(err error) bool {
 	var he *hubError
