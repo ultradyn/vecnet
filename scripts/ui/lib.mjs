@@ -12,17 +12,74 @@ import { crc32, deflateSync } from 'node:zlib';
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export function assert(cond, msg = 'assertion failed') { if (!cond) throw new Error(msg); }
 
-export async function scrollMessageIntoView(page, id) {
-  // Resource notifications replace message nodes. Query, scroll and measure
-  // synchronously on each poll, with no element handle held across frames.
-  await page.waitForFunction(id => {
-    const el = document.getElementById(`m-${id}`);
-    if (!el) return false;
-    el.scrollIntoView({ block: 'start', behavior: 'instant' });
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0 && r.top < innerHeight && r.bottom > 0;
-  }, id);
+// Each demo owns its process group. Keep this registry at module scope so
+// normal exit and uncaught ESM errors share the same synchronous backstop.
+const live = new Map();
+const exitCleanups = new Set();
+export function registerExitCleanup(fn) {
+  exitCleanups.add(fn);
+  return () => exitCleanups.delete(fn);
 }
+export function liveDemoCount() { return live.size; }
+function signalGroup(pgid, signal) {
+  try { process.kill(-pgid, signal); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+}
+process.on('exit', () => {
+  for (const pgid of live.keys()) {
+    try { signalGroup(pgid, 'SIGKILL'); } catch {}
+  }
+  for (const dir of live.values()) {
+    const prefix = join(tmpdir(), 'vecnet-ui-data-');
+    if (dir.startsWith(prefix) && /^[A-Za-z0-9]+$/.test(dir.slice(prefix.length))) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    }
+  }
+  for (const cleanup of exitCleanups) { try { cleanup(); } catch {} }
+});
+for (const [signal, number] of [['SIGINT', 2], ['SIGTERM', 15], ['SIGHUP', 1]]) {
+  process.once(signal, () => {
+    for (const pgid of live.keys()) { try { signalGroup(pgid, 'SIGTERM'); } catch {} }
+    const deadline = Date.now() + 2000;
+    const sleeper = new Int32Array(new SharedArrayBuffer(4));
+    while (Date.now() < deadline) {
+      const remaining = [...live.keys()].some(pgid => {
+        try { process.kill(-pgid, 0); return true; }
+        catch (error) { return error.code !== 'ESRCH'; }
+      });
+      if (!remaining) break;
+      Atomics.wait(sleeper, 0, 0, Math.min(50, deadline - Date.now()));
+    }
+    process.exit(128 + number);
+  });
+}
+
+export async function scrollIntoViewStable(page, selector, { frames = 3, timeout = 15000 } = {}) {
+  // Resource notifications replace nodes. Re-query each frame and wait for
+  // the same connected node to remain in view across consecutive frames.
+  await page.waitForFunction(({ selector, frames }) => {
+    const states = window.__vnStable ||= Object.create(null);
+    const state = states[selector] ||= { node: null, count: 0 };
+    const el = document.querySelector(selector);
+    if (!el || el !== state.node) {
+      state.node = el;
+      state.count = 0;
+    }
+    if (!el) return false;
+    let r = el.getBoundingClientRect();
+    const intersects = r.bottom > 0 && r.top < innerHeight;
+    const fits = r.height <= innerHeight;
+    if (!intersects || (fits && (r.top < 0 || r.bottom > innerHeight))) {
+      el.scrollIntoView({ block: 'center', inline: 'nearest' });
+      r = el.getBoundingClientRect();
+    }
+    if (el.isConnected && r.bottom > 0 && r.top < innerHeight) state.count++;
+    else state.count = 0;
+    if (state.count < frames) return false;
+    delete states[selector];
+    return true;
+  }, { selector, frames }, { polling: 'raf', timeout });
+}
+export async function scrollMessageIntoView(page, id) { return scrollIntoViewStable(page, `[id="m-${id}"]`); }
 
 // png encodes a w×h 8-bit RGB image whose pixel colours come from px(x, y),
 // for image fixtures built at run time (no binaries are committed).
@@ -89,7 +146,10 @@ export async function buildCLI(dir) {
 export async function bootDemo({ scale = false } = {}) {
   const binDir = await binaries();
   const dir = await mkdtemp(join(tmpdir(), 'vecnet-ui-data-'));
-  const child = spawn(join(binDir, 'demo'), ['--listen', '127.0.0.1:0', '--data-dir', dir, ...(scale ? ['--scale'] : [])], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(join(binDir, 'demo'), ['--listen', '127.0.0.1:0', '--data-dir', dir, '--exit-on-stdin-eof', ...(scale ? ['--scale'] : [])], { cwd: root, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  live.set(child.pid, dir);
+  child.once('exit', () => live.delete(child.pid));
+  child.stdin.on('error', () => {}); // The demo may close stdin before its holder.
   // Consume logs, but never echo peer text or credentials into a terminal.
   child.stderr.resume();
   const closed = new Promise(resolve => child.once('close', resolve));
@@ -97,11 +157,12 @@ export async function bootDemo({ scale = false } = {}) {
   async function close() {
     if (stopped) return;
     stopped = true;
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    signalGroup(child.pid, 'SIGTERM');
     let timer;
-    await Promise.race([closed, new Promise(resolve => { timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 7000); })]);
+    await Promise.race([closed, new Promise(resolve => { timer = setTimeout(() => { signalGroup(child.pid, 'SIGKILL'); resolve(); }, 7000); })]);
     clearTimeout(timer);
     await closed;
+    live.delete(child.pid);
     await rm(dir, { recursive: true, force: true });
   }
   const lines = createInterface({ input: child.stdout });
@@ -120,7 +181,7 @@ export async function bootDemo({ scale = false } = {}) {
       assert(secret, `no bearer for peer ${name}`);
       return fetch(demo.url + path, { method, headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json', 'X-Vecnet-Ingress': 'operator_ui' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     };
-    return { demo, dir, close, asPeer, advance: by => control('advance', { by }), stall: duration => control('stall', { for: duration }), clear: name => control('clear', { control: name }), controlStatus: () => control('status', {}), fail: (prefix, status, duration) => control('fail', { prefix, status, for: duration }) };
+    return { demo, dir, pid: child.pid, buildDir: binDir, close, asPeer, advance: by => control('advance', { by }), stall: duration => control('stall', { for: duration }), clear: name => control('clear', { control: name }), controlStatus: () => control('status', {}), fail: (prefix, status, duration) => control('fail', { prefix, status, for: duration }) };
   } catch (error) { await close(); throw error; }
   finally { clearTimeout(timer); lines.close(); child.stdout.resume(); }
 }
