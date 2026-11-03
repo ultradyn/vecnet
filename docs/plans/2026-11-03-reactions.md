@@ -517,13 +517,13 @@ func TestReactionWakeNotifiesOperator(t *testing.T)           // agent reacts �
   - It is ASCII so cell widths stay exact, since emoji widths vary between terminals (❤️ most of all): `[+1 2] [check 1*]`, where `*` marks a reaction by the operator's own peer.
   - On the selected message the row shows names instead: `[check: codex, you] [+1: sleuth]`, with names through `l.names.short` and `Clean`.
   - It truncates with `+N more`, like receipts.
-  - Reactions arrive through `opapi.Tags` (`reaction` → `thread:<id>`, Task 1), so `onTailBatch` reloads the thread with no TUI event code.
+  - Reactions arrive through `opapi.Tags` (`reaction` → `thread:<id>`, Task 1), so `onTailBatch` reloads the thread. Because a reaction changes a held message in place, the reload goes back to it: a `reaction` Event rewinds to its message; `operator_view {reason:"reaction"}` (no message id) and a cursor reset rewind to the first held message, so the whole held history is fetched again (whole-branch review spec-1).
 - **`:react` command:** `chatScreen.register` adds `m.Commands["react"]`. Help: `[n] <emoji|name> [--wake|--wake-idle|--hold]  toggle a reaction; n counts back from the newest message (1 = newest), default the selected one`.
   - **Parsing:** the first of two positional arguments is `n` only when it matches `^[1-9][0-9]*$`. With one positional argument, it is always the emoji, so `:react +1` is 👍 and `:react -1` is 👎. `n` counts only peer messages: hub system lines (`sender == "hub"`) are skipped.
   - **Toggle:** when the operator's peer already has that reaction, `:react` removes it; otherwise it adds it with the per-emoji default or the override flag.
-  - **Refusals** toast and return `chatRefusedMsg`, so the line stays: no open thread, no message, `n` out of range, an unknown emoji or name (the toast lists `ReactionList()`), two priority flags.
+  - **Refusals** toast and return `chatRefusedMsg`, so the line stays: no open thread, no message, `n` out of range, an unknown emoji or name (the toast lists the names in display order, without emoji), two priority flags.
   - **Hub errors** toast with the code; `rate_limited` shows the retry time, as `chatSendWhy` formats it.
-  - **Success** toasts `reacted ✅` or `removed ✅` and reloads the thread.
+  - **Success** toasts `reacted check` or `removed check` (names, as on the chips) and reloads the thread from the reacted message on. It does not apply the response's `reactions`: they carry no revision, so a response that arrives after the tail loaded a newer peer reaction would roll it back (whole-branch review spec-2).
   - The chat's `Hints()` gains `:react`.
 
 - [ ] **Step 1: Failing tests:**

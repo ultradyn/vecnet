@@ -507,33 +507,60 @@ func (m *Model) onTailBatch(msg tailBatchMsg) tea.Cmd {
 	for _, ev := range msg.batch.Events {
 		tags = append(tags, opapi.Tags(ev)...)
 		m.remember(ev)
-		if ev.Type == "reaction" {
-			m.rewindTo(ev)
+		switch ev.Type {
+		case "reaction":
+			var r envelope.ReactionEvent
+			if json.Unmarshal(ev.Data, &r) == nil {
+				m.rewindTo(r.ThreadID, r.MessageID)
+			}
+		case "operator_view":
+			// A non-participant operator learns of a reaction without the
+			// message it changed (PROTOCOL §17.3): refetch every held one.
+			var v struct {
+				Reason   string `json:"reason"`
+				ThreadID string `json:"thread_id"`
+			}
+			if json.Unmarshal(ev.Data, &v) == nil && v.Reason == "reaction" {
+				m.rewindAll(v.ThreadID)
+			}
 		}
 	}
 	if msg.batch.Reset {
+		// A purged cursor skipped events, reactions among them, which change
+		// held messages in place: every held thread is fetched again whole.
+		for id := range m.Data.Thread {
+			m.rewindAll(id)
+		}
 		tags = append(tags, TagAll)
 	}
 	return m.startLoads(tags, msg.ack)
 }
 
-// rewindTo marks the held message a reaction event names, so the thread's next
+// rewindTo marks a held message whose reactions changed, so the thread's next
 // load fetches it again with its new reactions.
-func (m *Model) rewindTo(ev envelope.Event) {
-	var r envelope.ReactionEvent
-	if json.Unmarshal(ev.Data, &r) != nil {
-		return
-	}
-	st := m.Data.Thread[r.ThreadID]
+func (m *Model) rewindTo(threadID, messageID string) {
+	st := m.Data.Thread[threadID]
 	if st == nil {
 		return
 	}
-	i := slices.IndexFunc(st.Messages, func(msg envelope.Message) bool { return msg.MessageID == r.MessageID })
+	i := slices.IndexFunc(st.Messages, func(msg envelope.Message) bool { return msg.MessageID == messageID })
 	if i < 0 {
 		return
 	}
-	if st.rewind == 0 || i+1 < st.rewind {
-		st.rewind = i + 1
+	st.rewindFrom(i + 1)
+}
+
+// rewindAll marks every message held for a thread, for a change that does not
+// say which message it touched.
+func (m *Model) rewindAll(threadID string) {
+	if st := m.Data.Thread[threadID]; st != nil && len(st.Messages) > 0 {
+		st.rewindFrom(1)
+	}
+}
+
+func (st *ThreadState) rewindFrom(i int) {
+	if st.rewind == 0 || i < st.rewind {
+		st.rewind = i
 	}
 	st.rewinds++
 }

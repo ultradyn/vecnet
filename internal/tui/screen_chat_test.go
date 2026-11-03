@@ -2612,10 +2612,10 @@ func TestReactionChipsNamesWhenSelected(t *testing.T) {
 func TestReactCommandToggles(t *testing.T) {
 	a, m, p := chatOpen(t)
 	react(t, p, m, "check")
-	waitToast(t, p, m, "reacted "+rxCheck)
+	waitToast(t, p, m, "reacted check")
 	p.until("the chip", func() bool { return strings.Contains(chatFrame(t, m), "[check: you]") })
 	react(t, p, m, "check")
-	waitToast(t, p, m, "removed "+rxCheck)
+	waitToast(t, p, m, "removed check")
 	p.until("the chip to go", func() bool { return !strings.Contains(chatFrame(t, m), "[check") })
 	got := a.reactions()
 	if len(got) != 2 {
@@ -2646,7 +2646,7 @@ func TestReactCommandDefaults(t *testing.T) {
 	for i, step := range steps {
 		react(t, p, m, step.args...)
 		p.until("the reaction", func() bool { return len(a.reactions()) == i+1 })
-		waitToast(t, p, m, "reacted "+step.emoji)
+		waitToast(t, p, m, "reacted "+envelope.ReactionName(step.emoji))
 		got := a.reactions()[i]
 		if got.Op != "add" || got.Emoji != step.emoji || got.Priority != step.pri {
 			t.Fatalf("%v sent %+v, want add %s %s", step.args, got, step.emoji, step.pri)
@@ -2659,14 +2659,14 @@ func TestReactCommandByNumber(t *testing.T) {
 	// Newest first, the peer messages are the approval, the fix (the hub's
 	// expired line between them does not count), the job, ...
 	react(t, p, m, "2", "+1")
-	waitToast(t, p, m, "reacted "+rxUp)
+	waitToast(t, p, m, "reacted +1")
 	chatSelect(t, p, m, "msg_01job")
 	react(t, p, m, "+1")
 	p.until("second", func() bool { return len(a.reactions()) == 2 })
-	waitToast(t, p, m, "reacted "+rxUp)
+	waitToast(t, p, m, "reacted +1")
 	react(t, p, m, "-1")
 	p.until("third", func() bool { return len(a.reactions()) == 3 })
-	waitToast(t, p, m, "reacted "+rxDown)
+	waitToast(t, p, m, "reacted -1")
 	want := []struct{ id, emoji string }{{"msg_01fix", rxUp}, {"msg_01job", rxUp}, {"msg_01job", rxDown}}
 	for i, got := range a.reactions() {
 		if got.MessageID != want[i].id || got.Emoji != want[i].emoji || got.Op != "add" {
@@ -2734,7 +2734,12 @@ func TestReactCommandRefusals(t *testing.T) {
 	t.Run("the toast lists the set", func(t *testing.T) {
 		_, m, p := chatOpen(t)
 		react(t, p, m, "smile")
-		waitToast(t, p, m, envelope.ReactionList())
+		waitToast(t, p, m, "use one of +1 -1 heart laugh eyes check q bang")
+		for _, emoji := range envelope.ReactionEmoji {
+			if strings.Contains(m.toast.text, emoji) {
+				t.Fatalf("the refusal prints %s: %q", emoji, m.toast.text)
+			}
+		}
 	})
 }
 
@@ -2772,7 +2777,10 @@ func TestChatReactionsGolden(t *testing.T) {
 // A peer's reaction to a message the client already holds arrives as a
 // reaction Event; the thread's reload must show it, though the message is
 // older than the newest one the client holds.
-func TestReactionEventRefreshesHeldMessage(t *testing.T) {
+// rxTail opens the chat with a tail the test feeds: deliver hands the model
+// one batch and returns once it is acked and the reloads have settled.
+func rxTail(t *testing.T) (*chatAPI, *Model, *pump, func(opclient.Batch)) {
+	t.Helper()
 	a := chatSeed()
 	next := make(chan opclient.Batch)
 	acked := make(chan error, 1)
@@ -2788,32 +2796,97 @@ func TestReactionEventRefreshesHeldMessage(t *testing.T) {
 		}
 	}
 	m, p := chatModel(t, a, newClock())
-	refuseFrame(t, chatFrame(t, m), "[+1 ")
+	deliver := func(b opclient.Batch) {
+		t.Helper()
+		go func() { next <- b }()
+		p.until("the batch to be handled", func() bool {
+			select {
+			case err := <-acked:
+				if err != nil {
+					t.Fatal(err)
+				}
+				return true
+			default:
+				return false
+			}
+		})
+		p.idle()
+	}
+	return a, m, p, deliver
+}
+
+// rxSetReactions changes a held message's reactions on the fake hub only.
+func rxSetReactions(a *chatAPI, i int, groups []envelope.ReactionGroup) {
 	a.cmu.Lock()
-	a.byID[chatHark].messages[4].Reactions = []envelope.ReactionGroup{{Emoji: rxUp, Peers: []string{chatCodex}}}
+	a.byID[chatHark].messages[i].Reactions = groups
 	a.cmu.Unlock()
+}
+
+func TestReactionEventRefreshesHeldMessage(t *testing.T) {
+	a, m, _, deliver := rxTail(t)
+	refuseFrame(t, chatFrame(t, m), "[+1 ")
+	rxSetReactions(a, 4, []envelope.ReactionGroup{{Emoji: rxUp, Peers: []string{chatCodex}}})
 	data, err := json.Marshal(envelope.ReactionEvent{MessageID: "msg_01fix", ThreadID: chatHark, PeerID: chatCodex, Emoji: rxUp, Op: "add", At: chatAt(7, 40)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	go func() {
-		next <- opclient.Batch{Cursor: "e9", Events: []envelope.Event{{Cursor: "e9", Type: "reaction", Data: data}}}
-	}()
-	p.until("the batch to be handled", func() bool {
-		select {
-		case err := <-acked:
-			if err != nil {
-				t.Fatal(err)
-			}
-			return true
-		default:
-			return false
-		}
-	})
-	p.idle()
+	deliver(opclient.Batch{Cursor: "e9", Events: []envelope.Event{{Cursor: "e9", Type: "reaction", Data: data}}})
 	frame := chatFrame(t, m)
 	wantFrame(t, frame, "[+1 1]")
 	if n := len(m.Data.Thread[chatHark].Messages); n != len(a.byID[chatHark].messages) {
 		t.Fatalf("the refetch holds %d messages, want %d", n, len(a.byID[chatHark].messages))
 	}
+}
+
+// An operator who is not a participant gets operator_view {reason:"reaction"}
+// instead of the reaction Event, with no message id (PROTOCOL §17.3): the
+// open thread's held messages are all fetched again.
+func TestOperatorViewReactionRefreshesHeldMessage(t *testing.T) {
+	a, m, _, deliver := rxTail(t)
+	rxSetReactions(a, 0, []envelope.ReactionGroup{{Emoji: rxUp, Peers: []string{chatCodex}}})
+	data := json.RawMessage(`{"reason":"reaction","thread_id":"` + chatHark + `"}`)
+	deliver(opclient.Batch{Cursor: "e9", Events: []envelope.Event{{Cursor: "e9", Type: "operator_view", Data: data}}})
+	rxWantHeld(t, m, 0, rxUp)
+	if n := len(m.Data.Thread[chatHark].Messages); n != len(a.byID[chatHark].messages) {
+		t.Fatalf("the refetch holds %d messages, want %d", n, len(a.byID[chatHark].messages))
+	}
+}
+
+// A purged cursor resets the tail with no per-message Events, so every held
+// thread is fetched again from its first message (operator UI Review Focus 4).
+func TestCursorResetRefreshesHeldReactions(t *testing.T) {
+	a, m, _, deliver := rxTail(t)
+	rxSetReactions(a, 0, []envelope.ReactionGroup{{Emoji: rxUp, Peers: []string{chatCodex}}})
+	deliver(opclient.Batch{Cursor: "e9", Reset: true})
+	rxWantHeld(t, m, 0, rxUp)
+}
+
+// rxWantHeld checks the model holds message i of the hark thread with one
+// reaction group of emoji (the root is scrolled out of the frame).
+func rxWantHeld(t *testing.T, m *Model, i int, emoji string) {
+	t.Helper()
+	got := m.Data.Thread[chatHark].Messages[i].Reactions
+	if len(got) != 1 || got[0].Emoji != emoji {
+		t.Fatalf("held message %d reactions = %+v, want one %s group", i, got, emoji)
+	}
+}
+
+// A :react response held back until after the tail loaded a newer aggregate
+// must not roll the message back to the response's older snapshot.
+func TestDelayedReactResponseKeepsNewerReactions(t *testing.T) {
+	a, m, p, deliver := rxTail(t)
+	release := a.hold("React")
+	react(t, p, m, "check")
+	p.until("the request", func() bool { return a.count("React") == 1 })
+	rxSetReactions(a, 6, []envelope.ReactionGroup{{Emoji: rxCheck, Peers: []string{chatOp, chatCodex}}})
+	data, err := json.Marshal(envelope.ReactionEvent{MessageID: "msg_01apr", ThreadID: chatHark, PeerID: chatCodex, Emoji: rxCheck, Op: "add", At: chatAt(7, 40)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliver(opclient.Batch{Cursor: "e9", Events: []envelope.Event{{Cursor: "e9", Type: "reaction", Data: data}}})
+	wantFrame(t, chatFrame(t, m), "[check: you, codex]")
+	release()
+	waitToast(t, p, m, "reacted check")
+	p.idle()
+	wantFrame(t, chatFrame(t, m), "[check: you, codex]")
 }

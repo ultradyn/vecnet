@@ -1059,7 +1059,7 @@ func (s *chatScreen) commandReact(m *Model, args []string) tea.Cmd {
 	}
 	emoji, ok := envelope.ParseReaction(pos[0])
 	if !ok {
-		return refuse("unknown reaction " + pos[0] + ": use one of " + envelope.ReactionList())
+		return refuse("unknown reaction " + pos[0] + ": use one of " + reactionNames())
 	}
 	req := envelope.ReactionRequest{MessageID: target.MessageID, Emoji: emoji, Op: "add", Priority: prio}
 	me := m.Data.Inbox.Me.PeerID
@@ -1078,8 +1078,9 @@ func (s *chatScreen) commandReact(m *Model, args []string) tea.Cmd {
 	}
 }
 
-// onReacted shows the hub's aggregate on the message at once: a reload only
-// fetches messages newer than the ones held.
+// onReacted reloads the thread from the reacted message on. The response's
+// aggregate is not applied: it carries no revision, so a response that
+// arrives after the tail loaded a newer peer reaction would roll it back.
 func (s *chatScreen) onReacted(msg chatReactedMsg, m *Model) tea.Cmd {
 	if msg.err != nil {
 		if isStatus(msg.err, 401) {
@@ -1088,19 +1089,24 @@ func (s *chatScreen) onReacted(msg chatReactedMsg, m *Model) tea.Cmd {
 		m.Toast("react failed: "+chatSendWhy(m, msg.thread, msg.err), true)
 		return nil
 	}
-	if st := m.Data.Thread[msg.thread]; st != nil {
-		for i := range st.Messages {
-			if st.Messages[i].MessageID == msg.message {
-				st.Messages[i].Reactions = msg.result.Reactions
-			}
-		}
-	}
+	m.rewindTo(msg.thread, msg.message)
 	verb := "reacted "
 	if msg.op == "remove" {
 		verb = "removed "
 	}
-	m.Toast(verb+msg.emoji, false)
+	// Names, as on the chips: terminals disagree on emoji widths.
+	m.Toast(verb+envelope.ReactionName(msg.emoji), false)
 	return m.Reload(threadPrefix + msg.thread)
+}
+
+// reactionNames lists the fixed set by name in display order, for TUI text
+// that must keep exact cell widths.
+func reactionNames() string {
+	names := make([]string, len(envelope.ReactionEmoji))
+	for i, emoji := range envelope.ReactionEmoji {
+		names[i] = envelope.ReactionName(emoji)
+	}
+	return strings.Join(names, " ")
 }
 
 // refuseMsg is a :msg stopped here. The line comes back through a message, so
