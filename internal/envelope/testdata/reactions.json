@@ -1,0 +1,10 @@
+[
+  {"emoji":"\ud83d\udc4d","name":"+1","priority":"hold"},
+  {"emoji":"\ud83d\udc4e","name":"-1","priority":"hold"},
+  {"emoji":"\u2764\ufe0f","name":"heart","priority":"hold"},
+  {"emoji":"\ud83d\ude02","name":"laugh","priority":"hold"},
+  {"emoji":"\ud83d\udc40","name":"eyes","priority":"hold"},
+  {"emoji":"\u2705","name":"check","priority":"wake_idle"},
+  {"emoji":"\u2753","name":"q","priority":"wake_idle"},
+  {"emoji":"\u2757","name":"bang","priority":"wake_idle"}
+]

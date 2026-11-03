@@ -437,6 +437,38 @@ type DeliveryRef struct {
 	State      string  `json:"state"`
 }
 
+// ReactionResult is returned for both changed and no-op reaction requests.
+type ReactionResult struct {
+	MessageID  string                   `json:"message_id"`
+	ThreadID   string                   `json:"thread_id"`
+	Emoji      string                   `json:"emoji"`
+	Op         string                   `json:"op"`
+	Changed    bool                     `json:"changed"`
+	Reactions  []envelope.ReactionGroup `json:"reactions"`
+	Superseded []string                 `json:"superseded"`
+	Wake       *ReactionWake            `json:"wake"`
+}
+
+// ReactionWake describes a Delivery created by this reaction request.
+type ReactionWake struct {
+	MessageID  string `json:"message_id"`
+	DeliveryID string `json:"delivery_id"`
+	Recipient  string `json:"recipient"`
+	State      string `json:"state"`
+}
+
+// MarshalJSON emits empty reaction and superseded collections as arrays.
+func (v ReactionResult) MarshalJSON() ([]byte, error) {
+	type plain ReactionResult
+	if v.Reactions == nil {
+		v.Reactions = []envelope.ReactionGroup{}
+	}
+	if v.Superseded == nil {
+		v.Superseded = []string{}
+	}
+	return json.Marshal(plain(v))
+}
+
 type SendResult struct {
 	MessageID  string        `json:"message_id"`
 	ThreadID   string        `json:"thread_id"`

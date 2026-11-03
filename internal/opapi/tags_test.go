@@ -32,14 +32,14 @@ func TestTagsFixture(t *testing.T) {
 			t.Errorf("row %d (%s): got %v, want %v", i, row.Event.Type, got, row.Tags)
 		}
 	}
-	for _, kind := range []string{"delivery", "receipt", "thread_updated", "presence", "directory_updated", "approval_expired", "unknown"} {
+	for _, kind := range []string{"delivery", "receipt", "thread_updated", "presence", "directory_updated", "approval_expired", "reaction", "unknown"} {
 		for _, data := range []string{`{`, `null`, `[]`, `"text"`, `123`} {
 			if got := opapi.Tags(envelope.Event{Type: kind, Data: json.RawMessage(data)}); len(got) != 0 {
 				t.Errorf("%s with %s: got %v", kind, data, got)
 			}
 		}
 	}
-	for _, kind := range []string{"delivery", "receipt", "thread_updated", "approval_expired"} {
+	for _, kind := range []string{"delivery", "receipt", "thread_updated", "approval_expired", "reaction"} {
 		for _, data := range []string{`{}`, `{"message":{}}`, `{"thread_id":7}`, `{"thread_id":""}`} {
 			if got := opapi.Tags(envelope.Event{Type: kind, Data: json.RawMessage(data)}); len(got) != 0 {
 				t.Errorf("%s with missing/bad thread: %v", kind, got)
@@ -111,7 +111,7 @@ func TestThreadRowJSONKeepsSiblings(t *testing.T) {
 }
 
 func TestWireSlicesNeverNull(t *testing.T) {
-	values := []any{opapi.OpenApproval{}, opapi.Inbox{}, opapi.ThreadPage{}, opapi.ThreadApproval{}, opapi.ThreadDetail{}, opapi.MatrixCell{}, opapi.MatrixRow{}, opapi.Matrix{}, opapi.Peer{}, opapi.PeerRow{}, opapi.LoopCuts{}, opapi.DeliveryHealth{}, opapi.AuditEntry{}, opapi.AuditPage{}, opapi.History{}, opapi.SendResult{}}
+	values := []any{opapi.OpenApproval{}, opapi.Inbox{}, opapi.ThreadPage{}, opapi.ThreadApproval{}, opapi.ThreadDetail{}, opapi.MatrixCell{}, opapi.MatrixRow{}, opapi.Matrix{}, opapi.Peer{}, opapi.PeerRow{}, opapi.LoopCuts{}, opapi.DeliveryHealth{}, opapi.AuditEntry{}, opapi.AuditPage{}, opapi.History{}, opapi.SendResult{}, opapi.ReactionResult{}}
 	for _, value := range values {
 		raw, err := json.Marshal(value)
 		if err != nil {
