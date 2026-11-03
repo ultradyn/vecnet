@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1096,5 +1098,159 @@ func TestReactionWakeNotifiesOperator(t *testing.T) {
 	var d envelope.Delivery
 	if err := json.Unmarshal(ev.Data, &d); err != nil || ev.Type != "delivery" || d.DeliveryID != w.DeliveryID || d.Message.Kind != "reaction" {
 		t.Fatalf("notification=%+v delivery=%+v err=%v", ev, d, err)
+	}
+}
+
+func TestCoalesceAdminRetryDeadLetter(t *testing.T) {
+	for _, newerState := range []string{"queued", "accepted"} {
+		t.Run(newerState, func(t *testing.T) {
+			f := newRX(t)
+			cb, _ := rxRoute(t, f)
+			ctx := context.Background()
+			first := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))
+			due, err := f.env.Hub.ClaimDue(ctx, f.env.Now.Now(), 10)
+			if err != nil || len(due) != 1 || due[0].DeliveryID != first.DeliveryID {
+				t.Fatalf("claim first = %+v, %v", due, err)
+			}
+			if err := f.env.Hub.PushResult(ctx, due[0], http.StatusBadRequest, 0, nil, f.env.Now.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if state, _ := deliveryState(t, f.env, first.DeliveryID); state != "dead_letter" {
+				t.Fatalf("first state = %s, want dead_letter", state)
+			}
+			second := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "❗", "add", "wake"))
+			if newerState == "accepted" {
+				rxAccept(t, f, second)
+			}
+			receiptsBefore := len(reactionEvents(t, f.env, f.b, "receipt"))
+			if err := f.env.Hub.RetryDeadLetter(ctx, first.DeliveryID); err != nil {
+				t.Fatal(err)
+			}
+			wantQueued := 1
+			if newerState == "accepted" {
+				wantQueued = 0
+			}
+			if queued := count(t, f.env, `SELECT count(*) FROM deliveries d JOIN messages m ON m.msg_id=d.msg_id
+ WHERE d.state='queued' AND d.recipient=? AND d.thr_id=? AND m.kind='reaction' AND m.sender=?`, f.a, f.target.ThreadID, f.b); queued != wantQueued {
+				t.Errorf("queued reaction wakes = %d, want %d", queued, wantQueued)
+			}
+			if state, held := deliveryState(t, f.env, first.DeliveryID); state != "superseded" || held != 0 {
+				t.Errorf("retried wake = %s, held %d; want superseded, 0", state, held)
+			}
+			var next *string
+			if err := f.env.Hub.DB.QueryRow(`SELECT next_attempt_at FROM deliveries WHERE dly_id=?`, first.DeliveryID).Scan(&next); err != nil {
+				t.Fatal(err)
+			}
+			if next != nil {
+				t.Error("superseded wake still scheduled")
+			}
+			if state, _ := deliveryState(t, f.env, second.DeliveryID); state != newerState {
+				t.Errorf("newer wake = %s, want %s", state, newerState)
+			}
+			if got := len(reactionEvents(t, f.env, f.b, "receipt")); got != receiptsBefore {
+				t.Errorf("admin coalescing emitted receipt: before %d, after %d", receiptsBefore, got)
+			}
+			rxStep(t, f.env)
+			rxStep(t, f.env)
+			posts := cb.Posts()
+			if len(posts) != wantQueued {
+				t.Fatalf("pushes = %d, want %d", len(posts), wantQueued)
+			}
+			if len(posts) != 0 {
+				var d envelope.Delivery
+				if err := json.Unmarshal(posts[0].Body, &d); err != nil || d.DeliveryID != second.DeliveryID {
+					t.Fatalf("pushed = %+v, %v; want newer %s", d, err, second.DeliveryID)
+				}
+			}
+		})
+	}
+}
+
+func TestReactionOperatorNotifyStopsAfterSuperseded(t *testing.T) {
+	for _, change := range []string{"remove", "coalesce"} {
+		t.Run(change, func(t *testing.T) {
+			f := newRX(t)
+			target := mustSend(t, f.env, f.env.OperatorSecret, holdReq("operator", f.b))
+			firstAttempt := make(chan envelope.Event, 1)
+			release := make(chan struct{})
+			releaseFirst := sync.OnceFunc(func() { close(release) })
+			var firstOnce sync.Once
+			var mu sync.Mutex
+			hits := map[string]int{}
+			rcv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var ev envelope.Event
+				var d envelope.Delivery
+				if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+					t.Errorf("decode notification: %v", err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if err := json.Unmarshal(ev.Data, &d); err != nil {
+					t.Errorf("decode delivery: %v", err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				mu.Lock()
+				hits[d.DeliveryID]++
+				mu.Unlock()
+				if d.Message.Content.Text == "✅" {
+					firstOnce.Do(func() {
+						firstAttempt <- ev
+						<-release
+					})
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer rcv.Close()
+			defer func() {
+				releaseFirst()
+				f.env.Hub.WaitNotifies()
+			}()
+			putNotify(t, f.env, map[string]string{"url": rcv.URL, "filter": "wake"})
+			f.env.Hub.NotifyRetry = []time.Duration{time.Millisecond, time.Millisecond}
+			first := needWake(t, rx(t, f.env, f.bs, target.MessageID, "✅", "add", "wake"))
+			var ev envelope.Event
+			select {
+			case ev = <-firstAttempt:
+			case <-time.After(5 * time.Second):
+				t.Fatal("first notification never arrived")
+			}
+			var second *hub.ReactWake
+			if change == "remove" {
+				rx(t, f.env, f.bs, target.MessageID, "✅", "remove", "wake")
+			} else {
+				second = needWake(t, rx(t, f.env, f.bs, target.MessageID, "❗", "add", "wake"))
+			}
+			if state, _ := deliveryState(t, f.env, first.DeliveryID); state != "superseded" {
+				t.Fatalf("withdrawn wake state = %s", state)
+			}
+			releaseFirst()
+			f.env.Hub.WaitNotifies()
+			mu.Lock()
+			oldHits := hits[first.DeliveryID]
+			newHits := 0
+			if second != nil {
+				newHits = hits[second.DeliveryID]
+			}
+			mu.Unlock()
+			if oldHits != 1 {
+				t.Errorf("withdrawn wake POSTs = %d, want only the first attempt", oldHits)
+			}
+			if second != nil && newHits != 1 {
+				t.Errorf("newer wake POSTs = %d, want 1", newHits)
+			}
+			// A stale event handed to the notification path after withdrawal
+			// must also be stopped before its very first attempt.
+			f.env.Hub.Notify(context.Background(), ev, hub.NotifyWake)
+			f.env.Hub.WaitNotifies()
+			mu.Lock()
+			afterReplay := hits[first.DeliveryID]
+			mu.Unlock()
+			if afterReplay != oldHits {
+				t.Errorf("already superseded wake was notified: before %d, after %d", oldHits, afterReplay)
+			}
+		})
 	}
 }
