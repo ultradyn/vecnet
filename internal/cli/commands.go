@@ -49,6 +49,8 @@ messaging:
        [--attach FILE]… [--title T] [--idempotency-key K]       text "-" reads stdin
        recipients are peer ids (or group/team ids); names are refused
   reply <message_id> "text" (--wake|--wake-idle|--hold) [--thread ID] [--attach FILE]…
+  react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]
+       default priority depends on the emoji: ✅ ❓ ❗ wake_idle, others hold
   inbox [--since CURSOR] [--ack] [--limit N]
   ack <cursor>
   watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]
@@ -360,6 +362,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdSend(args)
 	case "reply":
 		return a.cmdReply(args)
+	case "react":
+		return a.cmdReact(args)
 	case "inbox":
 		return a.cmdInbox(args)
 	case "ack":
@@ -554,6 +558,85 @@ func (a *app) cmdReply(args []string) error {
 	}
 	req := envelope.SendRequest{Priority: prio, ThreadID: &thread, InReplyTo: &msgID}
 	return a.send(req, text, o)
+}
+
+// reactPriority permits one override, otherwise using the emoji's client default.
+func reactPriority(o opts, emoji string) (string, error) {
+	got := envelope.DefaultReactionPriority(emoji)
+	count := 0
+	for flag, value := range map[string]string{"wake": "wake", "wake-idle": "wake_idle", "hold": "hold"} {
+		if o.has(flag) {
+			count += len(o.all(flag))
+			got = value
+		}
+	}
+	if count > 1 {
+		return "", usageErr("at most one priority flag --wake|--wake-idle|--hold is allowed")
+	}
+	return got, nil
+}
+
+func (a *app) cmdReact(args []string) error {
+	o, err := parseFlags("react", args, mergeSpec(priorityFlags, map[string]flagKind{"remove": boolFlag}))
+	if err != nil {
+		return err
+	}
+	if len(o.pos) != 2 {
+		return usageErr("usage: vecnet react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]")
+	}
+	emoji, ok := envelope.ParseReaction(o.pos[1])
+	if !ok {
+		return usageErr("reaction must be one of: " + envelope.ReactionList())
+	}
+	prio, err := reactPriority(o, emoji)
+	if err != nil {
+		return err
+	}
+	op := "add"
+	if o.has("remove") {
+		for flag := range priorityFlags {
+			if o.has(flag) {
+				return usageErr("--remove cannot be combined with a priority flag")
+			}
+		}
+		op = "remove"
+	}
+	req := envelope.ReactionRequest{MessageID: o.pos[0], Emoji: emoji, Op: op, Priority: prio, As: a.as}
+	var raw json.RawMessage
+	if err := a.call(http.MethodPost, "/v1/reactions", req, &raw); err != nil {
+		return err
+	}
+	if a.json {
+		return a.emitJSON(raw)
+	}
+	var out struct {
+		MessageID  string   `json:"message_id"`
+		Emoji      string   `json:"emoji"`
+		Changed    bool     `json:"changed"`
+		Superseded []string `json:"superseded"`
+		Wake       *struct {
+			Recipient  string `json:"recipient"`
+			DeliveryID string `json:"delivery_id"`
+		} `json:"wake"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return &hubError{Code: "bad_response", Message: err.Error()}
+	}
+	verb := "reacted"
+	if !out.Changed {
+		verb = "no change"
+	} else if op == "remove" {
+		verb = "removed"
+	}
+	fmt.Fprintf(a.stdout, "%s %s %s", verb, out.Emoji, out.MessageID)
+	if out.Wake != nil {
+		fmt.Fprintf(a.stdout, " (wakes %s, %s)", out.Wake.Recipient, out.Wake.DeliveryID)
+	}
+	if len(out.Superseded) > 0 {
+		fmt.Fprintf(a.stdout, " superseded %s", strings.Join(out.Superseded, ","))
+	}
+	fmt.Fprintln(a.stdout)
+	return nil
 }
 
 // send fills the idempotency key, text, sender and attachments of req,
@@ -912,6 +995,13 @@ func (a *app) cmdThread(args []string) error {
 	}
 	for _, m := range body.Messages {
 		fmt.Fprintf(a.stdout, "%s %s %s %s\n", m.MessageID, m.CreatedAt, m.Sender, flatten(m.Content.Text))
+		if len(m.Reactions) > 0 {
+			groups := make([]string, 0, len(m.Reactions))
+			for _, group := range m.Reactions {
+				groups = append(groups, fmt.Sprintf("%s %d", group.Emoji, len(group.Peers)))
+			}
+			fmt.Fprintf(a.stdout, "  reactions: %s\n", strings.Join(groups, "  "))
+		}
 	}
 	if body.NextAfter != nil {
 		fmt.Fprintf(a.stderr, "more: vecnet thread %s --after %s\n", o.pos[0], *body.NextAfter)
