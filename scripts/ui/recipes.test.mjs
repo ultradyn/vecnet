@@ -19,7 +19,8 @@ test('ui-shots propagates screen failure even when the last glob entry is a help
     for (const name of ['ansi.mjs', 'lib.mjs', 'smoke.mjs', 'tmux.mjs', 'recipes.test.mjs', 'shots-index.mjs']) {
       await writeFile(join(dir, 'scripts/ui', name), '');
     }
-    await writeFile(join(dir, 'bin/build2'), '#!/usr/bin/env bash\nprintf "%s\\n" "$2" >> "$CALL_LOG"\nexit "$CHECK_STATUS"\n', { mode: 0o700 });
+    // The recipe's leading `node --test …` unit step is logged as "unit" and passes; screens get CHECK_STATUS.
+    await writeFile(join(dir, 'bin/build2'), '#!/usr/bin/env bash\nif [[ "$2" == --test ]]; then echo unit >> "$CALL_LOG"; exit 0; fi\nprintf "%s\\n" "$2" >> "$CALL_LOG"\nexit "$CHECK_STATUS"\n', { mode: 0o700 });
     for (const status of [23, 0]) {
       const log = join(dir, `calls-${status}`);
       const result = spawnSync('bash', ['-c', script], {
@@ -27,7 +28,7 @@ test('ui-shots propagates screen failure even when the last glob entry is a help
         env: { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, CALL_LOG: log, CHECK_STATUS: String(status) },
       });
       assert.equal(result.status, status, `screen exit ${status}: ${result.stderr}`);
-      assert.equal(await readFile(log, 'utf8'), 'scripts/ui/smoke.mjs\n' + (status === 0 ? 'scripts/ui/shots-index.mjs\n' : ''));
+      assert.equal(await readFile(log, 'utf8'), 'unit\nscripts/ui/smoke.mjs\n' + (status === 0 ? 'scripts/ui/shots-index.mjs\n' : ''));
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
