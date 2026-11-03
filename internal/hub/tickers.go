@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/envelope"
 )
 
 // DefaultTickInterval is the production ticker period.
@@ -51,6 +53,9 @@ func (h *Hub) Tick(ctx context.Context, slow bool) {
 	}
 	if !slow {
 		return
+	}
+	if _, err := h.DB.ExecContext(ctx, `DELETE FROM reaction_ops WHERE at < ?`, envelope.FormatTime(now.Add(-time.Hour))); err != nil && ctx.Err() == nil {
+		slog.Error("hub: tick prune reaction ops", "err", err)
 	}
 	if _, err := h.ArchiveIdleGroups(ctx, now); err != nil && ctx.Err() == nil {
 		slog.Error("hub: tick archive groups", "err", err)
