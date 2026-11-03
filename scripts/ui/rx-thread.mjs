@@ -1,7 +1,8 @@
 // Reactions in the web thread (PROTOCOL §17, reactions plan Task 8): chips
 // with cleaned titles, the react button and picker surviving a live rebuild,
-// a priority override, removing by chip, Escape and outside click returning
-// focus, and a rate-limited reaction's toast. Fixtures are built here through
+// a priority override, removing by chip, a reserved chips row, Escape and
+// outside click returning focus (a click on a control keeps it), Tab out, the
+// picker's priority tip in view, and a rate-limited reaction's toast. Fixtures are built here through
 // asPeer; the demo seed is unchanged.
 import { assert, cleanBuild, withDemo } from './lib.mjs';
 
@@ -57,9 +58,24 @@ try {
     assert(rows[2].text === CHECK + '2' && rows[2].title === nameOf('claw') + ', ' + hostileClean && !rows[2].mine, 'the ✅ chip is wrong: ' + JSON.stringify(rows[2]));
     assert(!CONTROLS.test(rows[2].title) && rows[2].title.includes('<img src=x onerror=alert(1)>'), 'the hostile name is not cleaned literal text');
     assert(await page.locator('#view img').count() === 0, 'a hostile name became an element');
-    // The chips row keeps its reserved height.
-    const rowH = await page.evaluate(id => document.querySelector(`[id="m-${id}"] .rx-row`).getBoundingClientRect().height, target);
-    assert(rowH >= 26 && rowH < 34, 'the chips row height is not reserved: ' + rowH);
+    // Reserved height (Review Focus 5): every message has its chips row, the
+    // react button first, so the first chip arriving on the question and the
+    // last one leaving it move neither it nor the answer below it.
+    const qMsg = page.locator(`[id="m-${q.message_id}"]`);
+    assert(await qMsg.locator('.rx-row .rx-btn').count() === 1 && await qMsg.locator('.rx-chip').count() === 0, 'the question lacks its empty chips row');
+    const geo = () => page.evaluate(([a, b]) => {
+      const r = id => document.getElementById('m-' + id).getBoundingClientRect();
+      return { h: r(a).height, top: r(b).top, row: document.querySelector(`[id="m-${a}"] .rx-row`).getBoundingClientRect().height };
+    }, [q.message_id, target]);
+    const g0 = await geo();
+    await react('sleuth', q.message_id, CHECK);
+    await qMsg.locator('.rx-chip').waitFor();
+    const g1 = await geo();
+    await react('sleuth', q.message_id, CHECK, 'remove');
+    await qMsg.locator('.rx-chip').waitFor({ state: 'detached' });
+    const g2 = await geo();
+    assert(g0.row >= 26 && g0.row < 34, 'the empty chips row height is not reserved: ' + g0.row);
+    assert([g1, g2].every(g => g.h === g0.h && g.top === g0.top), 'a chip coming or going moved the thread: ' + JSON.stringify([g0, g1, g2]));
     await msg.hover();
     await shown();
     await shot('rx08-thread-initial');
@@ -85,7 +101,7 @@ try {
     assert(label(PLUS)[1] === '+1, no wake' && label(PLUS)[2] === 'hold', '+1 is not marked hold: ' + label(PLUS));
     assert(label(EYES)[1] === 'eyes, remove yours', 'the own 👀 is not marked as yours: ' + label(EYES));
     const pb = await picker.boundingBox(), bb = await btn.boundingBox();
-    assert(Math.abs(pb.x + pb.width - (bb.x + bb.width)) < 2 && (pb.y >= bb.y + bb.height || pb.y + pb.height <= bb.y), 'the picker is not beside the button: ' + JSON.stringify({ pb, bb }));
+    assert(Math.abs(pb.x - bb.x) < 2 && (pb.y >= bb.y + bb.height || pb.y + pb.height <= bb.y), 'the picker is not beside the button: ' + JSON.stringify({ pb, bb }));
 
     // A peer reacts while the picker is open: the thread rebuilds, the picker
     // stays open with focus kept, and the new chip appears.
@@ -138,6 +154,33 @@ try {
     await page.locator('.thead h1').click();
     await picker.waitFor({ state: 'hidden' });
     assert(await backOnButton(), 'an outside click did not return focus to the react button');
+    // A click on a control closes it too, but keeps the focus the click gave,
+    // so the operator can type (the plan's recorded exception).
+    const isOn = sel => page.evaluate(s => !!document.activeElement && document.activeElement.matches(s), sel);
+    await page.locator(`[id="rx-btn-${target}"]`).click();
+    await picker.waitFor({ state: 'visible' });
+    await page.locator('.composer textarea').click();
+    await picker.waitFor({ state: 'hidden' });
+    assert(await isOn('.composer textarea'), 'a click on the composer did not keep its focus');
+    assert(await page.locator(`[id="rx-btn-${target}"]`).getAttribute('aria-expanded') === 'false', 'the composer click left the button expanded');
+    // Tabbing out of it closes it where focus went.
+    await page.locator(`[id="rx-btn-${target}"]`).click();
+    await picker.waitFor({ state: 'visible' });
+    await page.keyboard.press('Shift+Tab');
+    await picker.waitFor({ state: 'hidden' });
+    assert(!(await isOn('.rx-pick *')), 'Shift+Tab left focus in the hidden picker');
+    // The priority tip opens leftwards from the picker's right edge, inside
+    // the thread column (it used to run under the aside).
+    await page.locator(`[id="rx-btn-${target}"]`).click();
+    await picker.waitFor({ state: 'visible' });
+    await picker.locator('.seg button[value="hold"]').hover();
+    const tip = picker.locator('.ptip[data-p="hold"]');
+    await tip.waitFor({ state: 'visible' });
+    const tb = await tip.boundingBox(), vb = await page.locator('#view').boundingBox();
+    assert(tb.x >= vb.x && tb.x + tb.width <= vb.x + vb.width + 0.5, 'the picker tip leaves the thread column: ' + JSON.stringify({ tb, vb }));
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
+    await picker.waitFor({ state: 'hidden' });
 
     // A rate-limited reaction: the toast names the en-AU time to retry at.
     await page.route('**/v1/reactions', route => route.fulfill({ status: 429, contentType: 'application/json', body: JSON.stringify({ error: { code: 'rate_limited', message: 'rate limited', details: { retry_after_seconds: 90 } } }) }));

@@ -1,6 +1,6 @@
-// Reaction chips, the react button and its picker (PROTOCOL §17). The thread
-// rebuilds every .msg on each update, so the picker is one node outside the
-// message list and the open message lives here, not in the DOM.
+// Reaction chips, the react button and picker (PROTOCOL §17). Each update
+// rebuilds every .msg, so the picker is one node outside the list and the
+// open message lives here.
 import { h } from './dom.js';
 import { prioritySeg } from './prio.js';
 import { chips, errorText, nextOp, reactBody, REACTIONS } from './react-model.js';
@@ -27,8 +27,8 @@ export function createReactions({ api, me, nameOf, onDone, toast }) {
     for (const b of seg.seg.children) { b.className = b.value === override ? 'on' : ''; b.disabled = busy; }
   }
 
-  // place pins the picker under the button (above it near the bottom), right
-  // edges aligned, in the coordinates of the picker's positioned parent.
+  // place pins the picker under the button (above it near the bottom), left
+  // edges aligned while it fits.
   function place(btn) {
     const box = picker.offsetParent;
     if (!box || !btn.isConnected) return;
@@ -36,7 +36,7 @@ export function createReactions({ api, me, nameOf, onDone, toast }) {
     let top = a.bottom - r.top + 6;
     if (top + picker.offsetHeight > box.clientHeight && a.top - r.top > picker.offsetHeight + 6) top = a.top - r.top - picker.offsetHeight - 6;
     picker.style.setProperty('--rx-top', top + 'px');
-    picker.style.setProperty('--rx-right', Math.max(0, r.right - a.right) + 'px');
+    picker.style.setProperty('--rx-left', Math.max(0, Math.min(a.left - r.left, box.clientWidth - picker.offsetWidth)) + 'px');
   }
 
   function show(m, btn) {
@@ -50,8 +50,7 @@ export function createReactions({ api, me, nameOf, onDone, toast }) {
     emo[0].focus({ preventScroll: true });
   }
 
-  // close hides the picker and, when refocus, returns focus to the react
-  // button of the re-rendered message.
+  // close hides the picker; refocus focuses the rebuilt react button.
   function close(refocus = true) {
     if (!open) return;
     const b = document.getElementById('rx-btn-' + open);
@@ -78,9 +77,8 @@ export function createReactions({ api, me, nameOf, onDone, toast }) {
     }
   }
 
-  // keep: a rebuild that detaches the focused chip or button focuses its
-  // last replacement (same data-rx) on the next frame, after every rebuild in
-  // it, instead of dropping focus to the body.
+  // keep: when a rebuild detaches the focused chip or button, its last
+  // replacement (same data-rx) takes focus on the next frame.
   let want = '', wantEl = null;
   function keep(b) {
     const f = document.activeElement, k = b.dataset.rx;
@@ -98,6 +96,8 @@ export function createReactions({ api, me, nameOf, onDone, toast }) {
   }
 
   const onKey = e => { if (open && e.key === 'Escape') { e.preventDefault(); close(); } };
+  // An outside click refocuses the react button; a click on a control keeps
+  // its focus.
   const onClick = e => {
     const t = e.target;
     if (!open || picker.contains(t) || (t.closest && t.closest('.rx-btn'))) return;
@@ -105,31 +105,38 @@ export function createReactions({ api, me, nameOf, onDone, toast }) {
   };
   document.addEventListener('keydown', onKey);
   document.addEventListener('click', onClick);
+  // Tabbing out closes it in place.
+  picker.addEventListener('focusout', e => {
+    const t = e.relatedTarget;
+    if (open && !busy && t && !picker.contains(t) && !t.closest('.rx-btn')) close(false);
+  });
+
+  function button(m) {
+    const id = m.message_id, on = open === id;
+    const b = h('button', {
+      type: 'button', class: 'rx-btn', id: 'rx-btn-' + id, 'data-rx': id, text: 'react', title: 'React',
+      'aria-haspopup': 'dialog', 'aria-expanded': on ? 'true' : 'false',
+      onclick: () => (open === id ? close() : show(m, b)),
+    });
+    if (on) {
+      cur = m; // fresh reactions for the open picker
+      paint();
+      queueMicrotask(() => place(b));
+    }
+    return keep(b);
+  }
 
   return {
     picker,
     close,
+    button,
+    // Every message has a row, react button first: chips never change its
+    // height.
     chipsRow(m) {
-      const list = chips(m.reactions, me, nameOf);
-      if (!list.length) return null;
-      return h('div', { class: 'rx-row' }, list.map(c => keep(h('button', {
+      return h('div', { class: 'rx-row' }, button(m), chips(m.reactions, me, nameOf).map(c => keep(h('button', {
         type: 'button', class: 'rx-chip' + (c.mine ? ' mine' : ''), 'aria-pressed': c.mine ? 'true' : 'false', title: c.title,
         'data-rx': m.message_id + c.emoji, onclick: () => send(m, c.emoji, false),
       }, c.emoji, h('b', { text: String(c.count) })))));
-    },
-    button(m) {
-      const id = m.message_id, on = open === id;
-      const b = h('button', {
-        type: 'button', class: 'rx-btn', id: 'rx-btn-' + id, 'data-rx': id, text: 'react', title: 'React',
-        'aria-haspopup': 'dialog', 'aria-expanded': on ? 'true' : 'false',
-        onclick: () => (open === id ? close() : show(m, b)),
-      });
-      if (on) {
-        cur = m; // fresh reactions for the open picker
-        paint();
-        queueMicrotask(() => place(b));
-      }
-      return keep(b);
     },
     destroy() {
       document.removeEventListener('keydown', onKey);

@@ -119,7 +119,7 @@
    - SSE and long-poll readers see the `reaction` Event at once (Notify after commit), not at the next heartbeat.
 5. **Web picker under churn.**
    - The thread rebuilds every `.msg` node on each store update (`thread.js:349`). The picker stays open and keeps focus while a peer's reaction arrives.
-   - Escape and an outside click close it and return focus to the react button.
+   - Escape and an outside click close it and return focus to the react button. Exception (whole-branch review spec-3/tests-2): a click on another control, such as the composer, keeps the focus that click gave it, so the operator can type; Tab out also closes it in place.
    - Hostile peer names in chip titles are cleaned, and nothing shifts the layout.
 
 ---
@@ -190,7 +190,7 @@ func TestReactionTableMatchesFixture(t *testing.T)     // ReactionEmoji, names, 
 func TestCanonicalEmoji(t *testing.T)                  // all 8 ok; bare ❤ → ❤️; "👍🏽", "🙂", "check", "", "✅́́", "‮✅" → false
 func TestParseReactionNames(t *testing.T)              // "+1","CHECK","q","bang" → emoji; "smile" → false
 func TestReactionMessageSchema(t *testing.T)           // Validate("message"): kind reaction with reaction{} ok; without it fails; kind message, job_status or approval_request carrying reaction fails; kind reaction carrying job_status fails
-func TestSendRequestRefusesReactionKind(t *testing.T)  // Validate("sendRequest") with kind "reaction" fails at /kind
+func TestSendRequestRefusesReactionKind(t *testing.T)  // (guard) Validate("sendRequest") with kind "reaction" fails at /kind
 func TestReactionEventAndRequestSchema(t *testing.T)   // Validate("reactionEvent"/"reactionRequest"/"reaction"): spec shapes pass, unknown fields fail
 func TestMigration0012KeepsMessages(t *testing.T)      // store_test.go, as TestMigration0007KeepsRoutes: pre-0012 schema with a message row → row intact after 0012; a kind 'reaction' row inserts; a 'bogus' kind fails the CHECK
 func TestReactionTablesPrimaryKeys(t *testing.T)       // second (msg, peer, emoji) insert into reactions, and into reaction_wakes, conflicts
@@ -393,7 +393,7 @@ func TestSendRefusesReactionKind(t *testing.T)         // (guard after Task 1) P
 - [ ] **Step 1: Write the failing tests**
 
 ```go
-func TestReactionHoldCreatesNoDelivery(t *testing.T)          // hold (and omitted priority): no kind reaction row, no deliveries row, no reaction_wakes row
+func TestReactionHoldCreatesNoDelivery(t *testing.T)          // (guard) hold (and omitted priority): no kind reaction row, no deliveries row, no reaction_wakes row
 func TestReactionWakeOneDeliveryToSender(t *testing.T)        // 3-peer thread, B reacts ✅ wake to A's message: one delivery to A; C and B get none; Validate("delivery") passes; kind reaction, in_reply_to target, reaction{target,emoji}, recipients [A]; response wake set
 func TestReactionWakePushedPerRoute(t *testing.T)             // A has a verified http route: one signed POST whose body is that Delivery
 func TestReactionWakeIdleHeldThenReleased(t *testing.T)       // A presence working: delivery held; A posts idle → pushed once
@@ -409,12 +409,12 @@ func TestRepeatedAddDoesNotWakeTwice(t *testing.T)            // add ✅ wake tw
 func TestReaddAfterRemoveDoesNotWakeAgain(t *testing.T)       // B: add ✅ wake (A accepts it), remove, add ✅ wake → changed true, reaction event sent, wake null, still one delivery
 func TestEmojiRotationWakesAtMostThree(t *testing.T)          // B rotates ✅→❓→❗→✅→❓→❗ (remove between, all wake, A accepts each) on one target → exactly 3 deliveries to A
 func TestOperatorReaddDoesWake(t *testing.T)                  // operator: add ✅ wake, remove, add ✅ wake → 2 deliveries; no reaction_wakes rows for the operator
-func TestRemoveNeverWakes(t *testing.T)                       // remove with priority wake → no delivery
+func TestRemoveNeverWakes(t *testing.T)                       // (guard) remove with priority wake → no delivery
 func TestRemoveWithdrawsQueuedWake(t *testing.T)              // A working, B adds ✅ wake_idle (held), removes → response superseded = [that dly]; state superseded; release on idle pushes nothing
 func TestCoalesceSupersedesQueuedWake(t *testing.T)           // A working: B ✅ then ❗ (wake_idle) on two A messages in one thread → first superseded (listed in superseded), second queued; idle → exactly one push
 func TestCoalesceLeavesAcceptedWake(t *testing.T)             // first delivery acked (accepted) → second creates a delivery, superseded []
 func TestCoalesceIsPerThreadAndReactor(t *testing.T)          // B's wake in thread X does not supersede B's in thread Y, nor C's in X
-func TestReactionWakeSkipsSelfAndSources(t *testing.T)        // react wake to own message, and to a source-sent message → 200, wake null, no delivery
+func TestReactionWakeSkipsSelfAndSources(t *testing.T)        // (guard) react wake to own message, and to a source-sent message → 200, wake null, no delivery
 func TestReactionWakeRespectsScopes(t *testing.T)             // B's scopes deny A → 403 scope_denied, nothing written
 func TestHistoryHidesReactionMessages(t *testing.T)           // history lists target, not the reaction msg; next_after paging unaffected
 func TestPlainSendAfterReactionContinuesLoop(t *testing.T)    // loop_test.go: send without in_reply_to after a reaction → depth = latest non-reaction + 1
@@ -569,20 +569,21 @@ func TestReactionWakeNotifiesOperator(t *testing.T)           // agent reacts �
     - `emoji_not_allowed` and network errors → fixed text;
     - anything else → the hub's message.
 - **`api.react(body)`** → `post('/v1/reactions', {body, headers: {'X-Vecnet-Ingress': 'operator_ui'}})`.
-- **`react.js`:** `createReactions({ api, me, nameOf, onDone, toast })` → `{ chipsRow(message) → Node|null, button(message) → Node, picker → Node, close(), destroy() }`.
+- **`react.js`:** `createReactions({ api, me, nameOf, onDone, toast })` → `{ chipsRow(message) → Node, button(message) → Node, picker → Node, close(), destroy() }`.
   - **Chips:** `button.rx-chip[aria-pressed]` showing the emoji and count, with `title` = the names and `.mine` highlighted. A click sends `nextOp` with the default priority.
-  - **React button:** `button.rx-btn[type=button][aria-haspopup=dialog][aria-expanded]`, id `rx-btn-<message_id>`, in `span.acts` beside `reply`, visible on `.msg:hover` and `:focus-within`.
+  - **React button:** `button.rx-btn[type=button][aria-haspopup=dialog][aria-expanded]`, id `rx-btn-<message_id>`, the first item of the message's chips row, always visible as dim text like `reply`. (Amended by the whole-branch review, tests-1/design-2: the row is on every message so its height is reserved, and the meta line has no hidden gap.)
   - **Picker:** one `div.rx-pick[role=dialog][aria-label="React"]`, built once per thread mount and appended outside the message list, so the `.msg` rebuild at `thread.js:349` never destroys it.
     - The open state (`messageId`) lives in the reactions object. The picker is positioned beside the button through `style.setProperty('--rx-top', …)`.
     - It holds 8 emoji buttons (`aria-label` such as "check, wakes if idle") and a `.seg` row `wake | wake_idle | hold`. With no segment selected, each emoji uses its own default, shown as a small marker on the emoji. A selected segment overrides for one reaction and resets on close.
-    - Escape and an outside click close it. Focus goes to the first emoji on open and returns to `#rx-btn-<id>` on close (looked up after re-render).
+    - Escape and an outside click close it. Focus goes to the first emoji on open and returns to `#rx-btn-<id>` on close (looked up after re-render), except after a click on another control (`a,button,input,textarea,select,[tabindex]`), which keeps the focus that click gave it. Tabbing out of the picker closes it without moving focus.
+    - The picker's left edge aligns with the button while it fits; its priority tip opens leftwards from the segment's right edge, inside the thread column. Each segment label carries the same default marker as the emoji, as a legend.
     - Its buttons are disabled while a request is in flight.
   - **Results:** success calls `onDone()` (`store.invalidate('thread:'+id)`). An error calls `toast(errorText(e), true)`, except a 401, which stays silent as `sendError` does.
-- **`thread.js`:** `message(it)` adds `R.button(m)` to `span.acts` and `R.chipsRow(m)` after `div.atts`, before `div.rc`. Mount creates `R`; unmount calls `R.destroy()`. Nothing else in `thread.js` changes.
+- **`thread.js`:** `message(it)` adds `R.chipsRow(m)` (which holds `R.button(m)` first) after `div.atts`, before `div.rc`. Mount creates `R`; unmount calls `R.destroy()`. Nothing else in `thread.js` changes.
 - **`react.css`** (linked from `index.html`):
   - chips use the existing `--panel2`/`--line` tokens, with `.mine` given the accent gradient border;
   - the picker is a dark panel;
-  - the chips row has a reserved height, so chips never shift the bottom-pinned list.
+  - the chips row has a reserved height and is present on every message, so the first chip arriving or the last one leaving never shifts the bottom-pinned list.
 
 - [ ] **Step 1: Write the failing tests** (`react.test.mjs`)
 

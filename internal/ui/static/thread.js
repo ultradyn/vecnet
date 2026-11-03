@@ -393,7 +393,7 @@ export function mount(root, ctx) {
           delta ? h('span', { class: 'dt', text: delta, title: deltaTitle(prev.created_at, m.created_at) }) : null,
           h('span', { class: 'prio ' + m.priority, text: m.priority }),
           others ? h('span', { class: 'via', text: 'to ' + others }) : null,
-          h('span', { class: 'acts' }, agoLabel(m.created_at), R.button(m), h('button', { type: 'button', text: 'reply', onclick: () => { S.replyTo = m.message_id; render(); comp.querySelector('textarea').focus(); } }))),
+          h('span', { class: 'acts' }, agoLabel(m.created_at), h('button', { type: 'button', text: 'reply', onclick: () => { S.replyTo = m.message_id; render(); comp.querySelector('textarea').focus(); } }))),
         it.parent ? replyQuote(it.parent) : null,
         // A spilled preview is clamped to a few lines; Show full text opens it.
         showTxt ? h('div', { class: 'txt' + (it.spill ? ' clamp' : '') }, markdown(m.content.text)) : null,
