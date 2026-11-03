@@ -33,7 +33,12 @@ func hookCommand(bin, profile, event string, autoAck bool) string {
 	if !hookShellSafe.MatchString(bin) {
 		bin = "'" + strings.ReplaceAll(bin, "'", "'\"'\"'") + "'"
 	}
-	command := bin + " hook --profile " + profile + " --event " + event
+	profileFlag := "--profile " + profile
+	if strings.HasPrefix(profile, "-") {
+		// Keep flag-like values away from the global flag parser.
+		profileFlag = "--profile=" + profile
+	}
+	command := bin + " hook " + profileFlag + " --event " + event
 	if autoAck {
 		command += " --auto-ack"
 	}
@@ -362,19 +367,19 @@ func (n *jsonNode) scalarString() string {
 
 // shellFirstWord decodes quoting without evaluating any shell expressions.
 // It recognises the quoting emitted by hookCommand, including apostrophes.
-func shellFirstWord(command string) (string, bool) {
+func shellFirstWord(command string) (wordValue, rest string, ok bool) {
 	command = strings.TrimLeft(command, " \t\r\n")
 	var word strings.Builder
 	var quote byte
 	for i := 0; i < len(command); i++ {
 		c := command[i]
 		if quote == 0 && strings.ContainsRune(" \t\r\n", rune(c)) {
-			return word.String(), true
+			return word.String(), strings.TrimSpace(command[i:]), true
 		}
 		if c == '\\' && quote != '\'' {
 			i++
 			if i == len(command) {
-				return "", false
+				return "", "", false
 			}
 			word.WriteByte(command[i])
 		} else if c == quote {
@@ -385,21 +390,28 @@ func shellFirstWord(command string) (string, bool) {
 			word.WriteByte(c)
 		}
 	}
-	return word.String(), quote == 0
+	return word.String(), "", quote == 0
 }
 
-func oursHook(handler *jsonNode, profile, event string) bool {
+func oursHook(handler *jsonNode, bin, profile, event string) bool {
 	if handler.member("type").scalarString() != "command" {
 		return false
 	}
 	command := handler.member("command").scalarString()
-	word, ok := shellFirstWord(command)
-	if !ok || filepath.Base(word) != "vecnet" {
+	word, args, ok := shellFirstWord(command)
+	// Keep recognising vecnet installations after their binary path changes,
+	// and recognise renamed executables only at the configured path. The latter
+	// is required for the protocol's unconditional repeat-install idempotence.
+	if !ok || (filepath.Base(word) != "vecnet" && word != bin) {
 		return false
 	}
-	marker := " hook --profile " + profile + " --event " + event
-	_, rest, found := strings.Cut(command, marker)
-	return found && (rest == "" || strings.HasPrefix(rest, " "))
+	for _, separator := range []string{" ", "="} {
+		marker := "hook --profile" + separator + profile + " --event " + event
+		if args == marker || args == marker+" --auto-ack" {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeHookSettings(existing []byte, bin, profile string, autoAck bool) (out []byte, changed bool, err error) {
@@ -454,7 +466,7 @@ func mergeHookSettings(existing []byte, bin, profile string, autoAck bool) (out 
 				continue
 			}
 			for i, handler := range handlers.vals {
-				if oursHook(handler, profile, event.name) {
+				if oursHook(handler, bin, profile, event.name) {
 					handlers.vals[i] = replacement
 					replaced = true
 				}

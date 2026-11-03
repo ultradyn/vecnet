@@ -2,11 +2,15 @@ package cli_test
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -88,6 +92,64 @@ func settingsCommands(t *testing.T, body []byte, event string) []string {
 		}
 	}
 	return commands
+}
+
+// Execute installed argv through the public CLI, including global flag parsing.
+func TestHookInstallFlagProfilesExecuteHook(t *testing.T) {
+	for _, profile := range []string{"-h", "--help"} {
+		for _, mode := range []string{"explicit", "default"} {
+			for _, event := range []string{"UserPromptSubmit", "PostToolUse"} {
+				t.Run(profile+"/"+mode+"/"+event, func(t *testing.T) {
+					var polled atomic.Bool
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.URL.Path != "/v1/events" || r.URL.Query().Get("wait") != "0" {
+							t.Errorf("unexpected hook request: %s", r.URL)
+						}
+						polled.Store(true)
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = w.Write([]byte(`{"events":[{"cursor":"e1.1","type":"delivery","data":{"delivery_id":"dly_1","message":{"message_id":"msg_1","thread_id":"thr_1","sender":"peer_1","content":{"text":"hello"}}}}],"next_cursor":"e1.1"}`))
+					}))
+					defer srv.Close()
+					u := installUser(t)
+					defaultProfile := profile
+					if mode == "explicit" {
+						defaultProfile = "p"
+					}
+					body := fmt.Sprintf("default = %q\n[profiles.%s]\nhub = %q\nsecret = %q\n", defaultProfile, profile, srv.URL, "vn_peer_unused")
+					if mode == "explicit" {
+						body += "[profiles.p]\nhub = \"http://127.0.0.1:1\"\nsecret = \"vn_peer_unused\"\n"
+					}
+					if err := os.WriteFile(u.conf, []byte(body), 0600); err != nil {
+						t.Fatal(err)
+					}
+					args := []string{"--settings", filepath.Join(t.TempDir(), "settings.local.json")}
+					if mode == "explicit" {
+						args = append(args, "--profile="+profile)
+					}
+					stanza, _ := installRun(t, u, args...)
+					var settings struct {
+						Hooks map[string][]struct {
+							Hooks []struct{ Command string }
+						}
+					}
+					if err := json.Unmarshal([]byte(stanza), &settings); err != nil {
+						t.Fatal(err)
+					}
+					command := settings.Hooks[event][0].Hooks[0].Command
+					code, out, errs := u.run(strings.Fields(command)[1:]...)
+					var result struct {
+						HookSpecificOutput struct{ HookEventName, AdditionalContext string }
+					}
+					if code != 0 || json.Unmarshal([]byte(out), &result) != nil || result.HookSpecificOutput.HookEventName != event || !strings.Contains(result.HookSpecificOutput.AdditionalContext, "profile "+profile) {
+						t.Fatalf("command %q: exit=%d stdout=%q stderr=%q", command, code, out, errs)
+					}
+					if !polled.Load() {
+						t.Fatal("installed command did not poll")
+					}
+				})
+			}
+		}
+	}
 }
 
 func TestHookInstallPrintsStanza(t *testing.T) {
@@ -315,6 +377,90 @@ func TestHookInstallSecondProfile(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s commands=%v", event, got)
 		}
+	}
+}
+
+func TestHookInstallFlagProfilesReplaceExisting(t *testing.T) {
+	for _, profile := range []string{"-h", "--help"} {
+		for _, separator := range []string{" ", "="} {
+			t.Run(profile+separator, func(t *testing.T) {
+				u := installUser(t)
+				before := fmt.Sprintf(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":%q,"timeout":5}]}],"PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":%q,"timeout":5}]}]}}`,
+					"vecnet hook --profile"+separator+profile+" --event user-prompt",
+					"vecnet hook --profile"+separator+profile+" --event post-tool")
+				path := installFile(t, []byte(before), 0644)
+				args := []string{"--profile=" + profile, "--write", "--settings", path}
+				installRun(t, u, args...)
+				first := string(readSettings(t, path))
+				_, errs := installRun(t, u, args...)
+				if !strings.Contains(errs, "unchanged "+path) || string(readSettings(t, path)) != first {
+					t.Fatalf("flag profile not idempotent: %q", errs)
+				}
+				installRun(t, u, append(args, "--auto-ack")...)
+				hooks := decodeSettings(t, readSettings(t, path))["hooks"].(map[string]any)
+				for event, suffix := range map[string]string{"UserPromptSubmit": "user-prompt", "PostToolUse": "post-tool"} {
+					groups := hooks[event].([]any)
+					if len(groups) != 1 {
+						t.Fatalf("%s groups=%v", event, groups)
+					}
+					handlers := groups[0].(map[string]any)["hooks"].([]any)
+					want := "vecnet hook --profile=" + profile + " --event " + suffix + " --auto-ack"
+					if len(handlers) != 1 || handlers[0].(map[string]any)["command"] != want {
+						t.Fatalf("%s handlers=%v", event, handlers)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestHookInstallRenamedBinaryIdempotent(t *testing.T) {
+	for _, tc := range []struct{ bin, shellBin string }{
+		{"/opt/bin/vn", "/opt/bin/vn"},
+		{"/opt/it's tools/vn", "'/opt/it'\"'\"'s tools/vn'"},
+	} {
+		t.Run(tc.bin, func(t *testing.T) {
+			u := installUser(t)
+			foreign := fmt.Sprintf(`{"hooks":{"UserPromptSubmit":[{"extra":"keep","hooks":[{"type":"command","command":"/opt/foreign/vn hook --profile p --event user-prompt"},{"type":"command","command":%q},{"type":"command","command":%q},{"type":"command","command":%q}]}]}}`,
+				tc.shellBin+" hook --profile p-other --event user-prompt",
+				tc.shellBin+" hook --profile p --event user-prompt-extra",
+				tc.shellBin+" hook --profile p --event post-tool")
+			path := installFile(t, []byte(foreign), 0644)
+			args := []string{"hook", "install", "--bin", tc.bin, "--profile=p", "--write", "--settings", path}
+			code, out, errs := u.run(args...)
+			if code != 0 || out != "" {
+				t.Fatalf("initial install: exit=%d stdout=%q stderr=%q", code, out, errs)
+			}
+			first := string(readSettings(t, path))
+			code, out, errs = u.run(args...)
+			if code != 0 || out != "" || !strings.Contains(errs, "unchanged "+path) || string(readSettings(t, path)) != first {
+				t.Fatalf("renamed binary not idempotent: exit=%d stdout=%q stderr=%q", code, out, errs)
+			}
+			code, out, errs = u.run(append(args, "--auto-ack")...)
+			if code != 0 || out != "" {
+				t.Fatalf("auto-ack install: exit=%d stdout=%q stderr=%q", code, out, errs)
+			}
+			hooks := decodeSettings(t, readSettings(t, path))["hooks"].(map[string]any)
+			for event, suffix := range map[string]string{"UserPromptSubmit": "user-prompt", "PostToolUse": "post-tool"} {
+				groups := hooks[event].([]any)
+				index := 0
+				if event == "UserPromptSubmit" {
+					index = 1
+					original := decodeSettings(t, []byte(foreign))["hooks"].(map[string]any)[event].([]any)[0]
+					if !reflect.DeepEqual(groups[0], original) {
+						t.Fatal("foreign hooks changed")
+					}
+				}
+				if len(groups) != index+1 {
+					t.Fatalf("%s groups=%v", event, groups)
+				}
+				handlers := groups[index].(map[string]any)["hooks"].([]any)
+				want := tc.shellBin + " hook --profile p --event " + suffix + " --auto-ack"
+				if len(handlers) != 1 || handlers[0].(map[string]any)["command"] != want {
+					t.Fatalf("%s handlers=%v", event, handlers)
+				}
+			}
+		})
 	}
 }
 
