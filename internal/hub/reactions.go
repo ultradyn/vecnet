@@ -331,6 +331,26 @@ func insertReactionMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg 
 	return err
 }
 
+// supersedeRequeuedReaction handles a wake that was in flight when a newer
+// reaction arrived. Requeue and coalescing share the caller's transaction, so
+// the older wake cannot become claimable alongside its successor. Sequence
+// order handles wakes created at the same clock time. Accepted deliveries are
+// never changed; a newer accepted wake also makes an older retry unnecessary.
+func supersedeRequeuedReaction(ctx context.Context, tx *sql.Tx, deliveryID, at string) error {
+	_, err := tx.ExecContext(ctx, `UPDATE deliveries SET state='superseded',held=0,next_attempt_at=NULL,updated_at=?
+ WHERE dly_id=? AND state='queued' AND EXISTS (
+  SELECT 1 FROM messages m
+  JOIN messages newer ON newer.thr_id=m.thr_id AND newer.sender=m.sender
+   AND newer.kind='reaction' AND newer.seq>m.seq
+  JOIN deliveries nd ON nd.msg_id=newer.msg_id AND nd.recipient=deliveries.recipient
+   AND nd.state != 'superseded'
+  WHERE m.msg_id=deliveries.msg_id AND m.kind='reaction')`, at, deliveryID)
+	if err != nil {
+		return fmt.Errorf("hub: coalesce requeued reaction: %w", err)
+	}
+	return nil
+}
+
 // supersedeReactionDeliveries withdraws only queued wakes. A nonempty target
 // narrows a remove to that emoji and target; a new wake coalesces the thread.
 func supersedeReactionDeliveries(ctx context.Context, tx *sql.Tx, recipient, reactor, thr, at, targetID, emoji string) ([]string, error) {

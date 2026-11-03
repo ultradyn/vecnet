@@ -100,14 +100,14 @@ func (h *Hub) ReceiptChanged(ctx context.Context, c auth.Caller, deliveryID, sta
 		}
 		if state == "read" {
 			res, err := tx.ExecContext(ctx,
-				`UPDATE deliveries SET read_at = ? WHERE dly_id = ? AND read_at IS NULL`, now, deliveryID)
+				`UPDATE deliveries SET read_at = ? WHERE dly_id = ? AND read_at IS NULL AND state != 'superseded'`, now, deliveryID)
 			if err != nil {
 				return fmt.Errorf("hub: receipt read: %w", err)
 			}
 			if n, err := res.RowsAffected(); err != nil {
 				return fmt.Errorf("hub: receipt read: %w", err)
 			} else if n == 0 {
-				return nil // already read: one read receipt per delivery
+				return nil // already read or withdrawn: nothing to report
 			}
 		}
 		if state == "read" && recipientKind == "operator" {

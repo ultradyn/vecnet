@@ -153,15 +153,25 @@ func (h *Hub) ClaimDue(ctx context.Context, now time.Time, limit int) ([]DueDeli
 // DeferPush gives back a claim that was not attempted: the delivery is
 // queued again until next with its attempt and attempts_left as they were
 // before ClaimDue. It stays in line, so §3.4 keeps its thread's later
-// deliveries behind it. A delivery that moved on meanwhile is left alone.
+// deliveries behind it, unless a newer reaction wake supersedes it (§17.5).
+// A delivery that moved on meanwhile is left alone.
 func (h *Hub) DeferPush(ctx context.Context, d DueDelivery, next time.Time) error {
-	if _, err := h.DB.ExecContext(ctx,
-		`UPDATE deliveries SET state = 'queued', attempt = attempt - 1, next_attempt_at = ?, updated_at = ?
+	at := h.nowStr()
+	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE deliveries SET state = 'queued', attempt = attempt - 1, next_attempt_at = ?, updated_at = ?
 		 WHERE dly_id = ? AND state = 'pushed' AND attempt = ?`,
-		envelope.FormatTime(next), h.nowStr(), d.DeliveryID, d.Attempt); err != nil {
-		return fmt.Errorf("hub: defer push: %w", err)
-	}
-	return nil
+			envelope.FormatTime(next), at, d.DeliveryID, d.Attempt)
+		if err != nil {
+			return fmt.Errorf("hub: defer push: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return fmt.Errorf("hub: defer push: %w", err)
+		} else if n == 0 {
+			return nil
+		}
+		return supersedeRequeuedReaction(ctx, tx, d.DeliveryID, at)
+	})
 }
 
 // pushOutcome classifies a push result (§3.3).
@@ -316,7 +326,10 @@ func (h *Hub) recordPush(ctx context.Context, d DueDelivery, outcome pushOutcome
 				return deadLetter(left, "push retries exhausted")
 			}
 			next := envelope.FormatTime(now.Add(PushBackoff(d.Attempt, retryAfter, nil)))
-			return set("queued", left, next)
+			if err := set("queued", left, next); err != nil {
+				return err
+			}
+			return supersedeRequeuedReaction(ctx, tx, d.DeliveryID, nowS)
 		case pushConflict:
 			if err := set("failed", left-1, nil); err != nil {
 				return err

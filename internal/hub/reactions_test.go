@@ -916,6 +916,61 @@ func TestCoalesceLeavesAcceptedWake(t *testing.T) {
 	}
 	rxCount(t, f.env, 2)
 }
+
+func TestCoalesceClaimedWakeReturnsToQueue(t *testing.T) {
+	for _, outcome := range []string{"retry", "defer"} {
+		t.Run(outcome, func(t *testing.T) {
+			f := newRX(t)
+			cb, _ := rxRoute(t, f)
+			ctx := context.Background()
+			first := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))
+			due, err := f.env.Hub.ClaimDue(ctx, f.env.Now.Now(), 10)
+			if err != nil || len(due) != 1 || due[0].DeliveryID != first.DeliveryID {
+				t.Fatalf("claim first = %+v, %v", due, err)
+			}
+			second := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "❗", "add", "wake"))
+			switch outcome {
+			case "retry":
+				err = f.env.Hub.PushResult(ctx, due[0], http.StatusServiceUnavailable, 0, nil, f.env.Now.Now())
+			case "defer":
+				err = f.env.Hub.DeferPush(ctx, due[0], f.env.Now.Now().Add(time.Second))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			queued := count(t, f.env, `SELECT count(*) FROM deliveries d JOIN messages m ON m.msg_id=d.msg_id
+ WHERE d.state='queued' AND d.recipient=? AND d.thr_id=? AND m.kind='reaction' AND m.sender=?`, f.a, f.target.ThreadID, f.b)
+			if queued != 1 {
+				t.Errorf("queued reaction wakes = %d, want 1", queued)
+			}
+			if state, held := deliveryState(t, f.env, first.DeliveryID); state != "superseded" || held != 0 {
+				t.Errorf("first state = %s, held = %d; want superseded, 0", state, held)
+			}
+			var next *string
+			if err := f.env.Hub.DB.QueryRow(`SELECT next_attempt_at FROM deliveries WHERE dly_id=?`, first.DeliveryID).Scan(&next); err != nil {
+				t.Fatal(err)
+			}
+			if next != nil {
+				t.Error("superseded wake still scheduled")
+			}
+			if evs := reactionEvents(t, f.env, f.b, "receipt"); len(evs) != 0 {
+				t.Errorf("coalescing sent receipts: %+v", evs)
+			}
+			f.env.Now.Advance(time.Minute)
+			rxStep(t, f.env)
+			rxStep(t, f.env)
+			posts := cb.Posts()
+			if len(posts) != 1 {
+				t.Fatalf("pushes = %d, want only the newer wake", len(posts))
+			}
+			var d envelope.Delivery
+			if err := json.Unmarshal(posts[0].Body, &d); err != nil || d.DeliveryID != second.DeliveryID {
+				t.Fatalf("pushed = %+v, %v; want %s", d, err, second.DeliveryID)
+			}
+		})
+	}
+}
+
 func TestCoalesceIsPerThreadAndReactor(t *testing.T) {
 	f := newRX(t)
 	x := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))

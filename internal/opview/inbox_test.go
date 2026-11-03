@@ -479,3 +479,70 @@ func TestInboxHidesSuperseded(t *testing.T) {
 		}
 	}
 }
+
+func TestReadSelectedWakeAfterSuperseded(t *testing.T) {
+	for _, operation := range []string{"remove", "coalesce"} {
+		t.Run(operation, func(t *testing.T) {
+			env := testhub.Start(t)
+			reactor, secret := env.NewPeer("session", "reactor")
+			target := send(t, env, env.OperatorSecret, body("target", "hold", reactor))
+			react := func(emoji, op string) hub.ReactResponse {
+				t.Helper()
+				resp, raw := env.Do(secret, "POST", "/v1/reactions", map[string]any{
+					"message_id": target.MessageID, "emoji": emoji, "op": op, "priority": "wake_idle",
+				})
+				if resp.StatusCode != 200 {
+					t.Fatalf("reaction = %d: %s", resp.StatusCode, raw)
+				}
+				var out hub.ReactResponse
+				if err := json.Unmarshal(raw, &out); err != nil {
+					t.Fatal(err)
+				}
+				return out
+			}
+			wake := react("✅", "add").Wake
+			if wake == nil {
+				t.Fatal("missing wake")
+			}
+			// Reproduce MarkThreadRead's snapshot, close it, then commit the
+			// withdrawal before its per-delivery ReceiptChanged transaction.
+			var selected string
+			if err := env.Hub.DB.QueryRow(`SELECT dly_id FROM deliveries WHERE thr_id=? AND recipient=?
+ AND read_at IS NULL AND state != 'superseded' ORDER BY dly_id`, target.ThreadID, env.OperatorPeer).Scan(&selected); err != nil {
+				t.Fatal(err)
+			}
+			if selected != wake.DeliveryID {
+				t.Fatalf("selected %s, want %s", selected, wake.DeliveryID)
+			}
+			var withdrawn hub.ReactResponse
+			if operation == "remove" {
+				withdrawn = react("✅", "remove")
+			} else {
+				withdrawn = react("❗", "add")
+			}
+			if !reflect.DeepEqual(withdrawn.Superseded, []string{selected}) {
+				t.Fatalf("superseded = %v", withdrawn.Superseded)
+			}
+			changed, err := env.Hub.ReceiptChanged(context.Background(), caller(t, env), selected, "read", "")
+			if err != nil || changed {
+				t.Errorf("stale snapshot read = %v, %v; want unchanged", changed, err)
+			}
+			var readAt *string
+			if err := env.Hub.DB.QueryRow(`SELECT read_at FROM deliveries WHERE dly_id=?`, selected).Scan(&readAt); err != nil {
+				t.Fatal(err)
+			}
+			if readAt != nil {
+				t.Error("withdrawn wake marked read")
+			}
+			evs, err := env.Hub.Log.Read(context.Background(), []string{reactor}, eventlog.Cursor{Epoch: env.Hub.Log.Epoch()}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, ev := range evs {
+				if ev.Type == "receipt" {
+					t.Errorf("receipt for withdrawn wake: %s", ev.Data)
+				}
+			}
+		})
+	}
+}
