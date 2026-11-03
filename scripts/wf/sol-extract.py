@@ -51,6 +51,7 @@ def scan(path):
 for path in sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)[:400]:
     found = scan(path)
     if found:
+        os.makedirs(os.path.dirname(base) or '.', exist_ok=True)  # a fresh run's ccc/ dir may not exist yet
         with open(base + '.md', 'w') as f:
             f.write(found)
         print(f'assignment: {len(found.encode())} bytes')
