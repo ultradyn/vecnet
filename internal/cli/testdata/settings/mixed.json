@@ -1,0 +1,37 @@
+{
+  "permissions": {},
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "command": "dcg",
+            "type": "command"
+          },
+          {
+            "command": "deny-find-home",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "c2c hook",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "escaped": "\u00e9",
+    "html": "<&>",
+    "decimal": 1.0,
+    "exponent": 1e3
+  }
+}

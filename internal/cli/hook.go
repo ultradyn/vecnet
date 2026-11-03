@@ -29,10 +29,6 @@ const (
 	hookPageLimit     = 500
 )
 
-// Task 3 supplies the ordinary (fallible) installer without changing the
-// runtime hook's fail-open contract.
-var hookInstall func(*app, []string) error
-
 var hookID = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,80}$`)
 var hookKind = regexp.MustCompile(`^[a-z_]{1,32}$`)
 var hookAngles = strings.NewReplacer("＜", "<", "＞", ">", "﹤", "<", "﹥", ">", "‹", "<", "›", ">", "⟨", "<", "⟩", ">", "〈", "<", "〉", ">", "〈", "<", "〉", ">")
@@ -138,8 +134,8 @@ type hookResult struct {
 
 func (a *app) cmdHook(args []string) (err error) {
 	// Installation is an ordinary command and intentionally outside recovery.
-	if len(args) > 0 && args[0] == "install" && hookInstall != nil {
-		return hookInstall(a, args[1:])
+	if len(args) > 0 && args[0] == "install" {
+		return a.cmdHookInstall(args[1:])
 	}
 	defer func() { _ = recover(); err = nil }()
 	ctx, cancel := context.WithTimeout(a.ctx, hookBudget)
