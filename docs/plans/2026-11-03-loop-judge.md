@@ -929,7 +929,7 @@ func TestCLISendPrintsHeld(t *testing.T)          // vecnet send into a thread a
   - Output: one line per run, then `judge ok: loop=<b> progress=<p> latency min=<ms>ms max=<ms>ms model=<m>` (exit 0), or `judge failed: <class> (HTTP <status>)` (exit 1).
   - `--probe-temperature` sends one more call with `temperature: 0` and prints `temperature: accepted` or `temperature: refused (<class>, HTTP <status>)`.
   - It never prints the key, the prompt or the response body.
-- **`justfile`:** `loop-judge-live:` runs `CGO_ENABLED=0 build2 go run -p 2 ./cmd/vecnet-hub loop-judge-check --runs 5 --probe-temperature --loop-judge-key-file ${VECNET_LOOP_JUDGE_KEY_FILE:-$HOME/.llmp-key-vecnet-judge}`. It is manual and never part of the gate; it is the only command in the build that reaches LLMP.
+- **`justfile`:** `loop-judge-live:` runs `CGO_ENABLED=0 build2 go run -p 2 ./cmd/vecnet-hub loop-judge-check --runs 5 --probe-temperature --loop-judge-key-file ${VECNET_LOOP_JUDGE_KEY_FILE:-$HOME/.llmp-vecnet-loop-judge}`. It is manual and never part of the gate; it is the only command in the build that reaches LLMP.
 - **Verify live (manual, after this task merges and a key exists, recorded in the build status file):**
   1. Run `just loop-judge-live` from the deploy host's network, or from xsm as a proxy for it.
   2. Record whether `gpt-6-luna--fast` answers with a parsable verdict.
@@ -1077,7 +1077,7 @@ test('answerTarget: an approval with loop_check → {loop: {threadId, action: op
     - `--loop-mode off` or `VECNET_LOOP_MODE=off` turns checks off hub-wide;
     - provision the key before the deploy;
   - judge setup:
-    - a dedicated LLMP consumer key, `chmod 600 ~/.llmp-key-vecnet-judge`, `fly secrets set VECNET_LOOP_JUDGE_KEY=…`;
+    - a dedicated LLMP consumer key, `chmod 600 ~/.llmp-vecnet-loop-judge (provisioned by Max 2026-11-03)`, `fly secrets set VECNET_LOOP_JUDGE_KEY=…`;
     - `just loop-judge-live` to verify the model id, the latency (and the timeout to set) and `temperature`;
   - data exposure: excerpts of agent messages (≤ 300 characters each) go to LLMP and its upstream provider; use `loop_mode operator` for threads whose content must stay local;
   - the judge's reason is model output and can be steered by the messages it reads;
