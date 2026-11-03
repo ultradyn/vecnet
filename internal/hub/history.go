@@ -234,7 +234,7 @@ func (h *Hub) ThreadMessages(ctx context.Context, c auth.Caller, thrID, afterMsg
 			from = max(from, seq)
 		}
 		rows, err := tx.QueryContext(ctx,
-			`SELECT body FROM messages WHERE thr_id = ? AND seq > ? ORDER BY seq LIMIT ?`, thrID, from, limit+1)
+			`SELECT body FROM messages WHERE thr_id = ? AND seq > ? AND kind != 'reaction' ORDER BY seq LIMIT ?`, thrID, from, limit+1)
 		if err != nil {
 			return fmt.Errorf("hub: history: %w", err)
 		}
@@ -259,6 +259,21 @@ func (h *Hub) ThreadMessages(ctx context.Context, c auth.Caller, thrID, afterMsg
 			id := out[limit-1].MessageID
 			nextAfter = &id
 		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		msgIDs := make([]string, len(out))
+		for i := range out {
+			msgIDs[i] = out[i].MessageID
+		}
+		groups, err := reactionGroups(ctx, tx, msgIDs)
+		if err != nil {
+			return err
+		}
+		for i := range out {
+			out[i].Reactions = groups[out[i].MessageID]
+		}
+
 		return nil
 	})
 	if err != nil {
