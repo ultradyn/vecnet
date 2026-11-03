@@ -26,3 +26,6 @@ No library: marked plus DOMPurify is roughly 60 KiB and the static dir cap is 25
 
 ## Later (not this issue)
 TUI: autolink-only (OSC 8 hyperlinks where the terminal supports them).
+
+## Done (2026-11-03, branch `md`)
+`thread.js` renders message bodies (`div.txt > div.md`, spilled previews keep the clamp) and the Show full text view (`div.full > div.md`, was `pre.full`) with `markdown()`; `thread.css` styles `.md`. Inbox, dead-letter and reply-quote excerpts stay plain one-line text. Wiring found a renderer bug: a link whose label hides its host rendered as its bare href plus `[object HTMLSpanElement]` (nested array into `append()`); fixed with `flatMap` and covered by `jstest/md-dom.test.mjs`. `scripts/ui/md-thread.mjs` checks every construct, a hostile body (literal `<script>`/`<img onerror>`, no `javascript:`/`data:` anchors, `.md-host` disclosure, `rel`/`target`, no request to the image host, no CSP violation, no script run) and narrow layout; `scripts/ui/thread.mjs` now asserts the spilled full text line for line as `p`/`br` only. TUI autolinks remain for later.

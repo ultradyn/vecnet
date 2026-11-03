@@ -12,3 +12,6 @@ Raised by Max over vecnet, 2026-11-03: "showing a msg delta (delay) in the webui
 ## Tests
 - jstest: `deltaLabel` boundaries (0, 9.94 s, 10 s, 59 s, 60 s, 1 h, 1 d), a negative or out-of-order pair shows nothing, and a bad timestamp shows nothing.
 - Screen script: a thread with known timestamps; asserts the delta and ago text and their titles; shots of the header at desktop and narrow widths (the right-side label must not wrap the reply button).
+
+## Done (2026-11-03, branch `md`)
+Each message header shows `deltaLabel(prev.created_at, created_at)` (`span.dt`, title from the new `deltaTitle`, e.g. "42 s after the previous message") beside its time, where prev is the previous message in the thread, and `time.ago` beside reply with the full local date and time (new `fullWhen`) as its title. The thread's one-second tick refreshes the ago labels from the hub clock only while the page is visible and writes only labels whose text changed; returning to the tab refreshes at once. `.acts` is `nowrap`/`flex:none`, so ago and reply never split at narrow widths. jstests cover `deltaTitle` and `fullWhen`; `scripts/ui/md-thread.mjs` checks the labels, titles, the untouched-label rule and the 390 px header.
