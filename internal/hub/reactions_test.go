@@ -272,8 +272,8 @@ func TestReactionWakesLongPoll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
 	r, err := http.NewRequestWithContext(ctx, "GET", env.URL+"/v1/events?wait=25&after="+url.QueryEscape(cur.String()), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -296,14 +296,33 @@ func TestReactionWakesLongPoll(t *testing.T) {
 		raw, err := io.ReadAll(resp.Body)
 		ch <- result{raw, err, resp.StatusCode}
 	}()
-	// Give the request time to park, and fail if it answered before the reaction.
-	select {
-	case got := <-ch:
-		t.Fatalf("poll did not park: %+v", got)
-	case <-time.After(75 * time.Millisecond):
+	// Wait for the HTTP handler to register before appending the reaction.
+	ready := time.NewTimer(time.Second)
+	defer ready.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for env.Hub.Log.Waiters(a) == 0 {
+		select {
+		case got := <-ch:
+			t.Fatalf("poll did not park: %+v", got)
+		case <-ready.C:
+			t.Fatal("long poll did not register a log waiter")
+		case <-tick.C:
+		}
 	}
+	// The handler re-reads after registering, so it can observe the reaction
+	// even without Notify. This separate waiter proves Notify itself ran;
+	// its context cannot close the channel until test cleanup.
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	t.Cleanup(cancelWait)
+	notified := env.Hub.Log.Wait(waitCtx, []string{a})
 	start := time.Now()
 	react(t, env, bs, m.MessageID, "✅", "add")
+	select {
+	case <-notified:
+	default:
+		t.Fatal("reaction did not notify the registered log waiter")
+	}
 	select {
 	case got := <-ch:
 		var p struct {
