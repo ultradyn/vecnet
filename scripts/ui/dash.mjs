@@ -1,5 +1,5 @@
 // Task 12: the provisional read-only dashboard, in a real browser.
-import { assert, cleanBuild, withDemo } from './lib.mjs';
+import { assert, cleanBuild, scrollIntoViewStable, withDemo } from './lib.mjs';
 
 const WRITE = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 // The shell owns the ack and the presence heartbeat; neither is the dashboard's.
@@ -131,7 +131,7 @@ try {
     await sec('subs').locator('.subs-table').waitFor();
     assert(await dash.locator('.empty.error').count() === 1, 'the failure spread beyond its section');
     assert(await dash.locator('.loading').count() === 0, 'a section is stuck loading');
-    await sec('threads').locator('h2').scrollIntoViewIfNeeded();
+    await scrollIntoViewStable(page, '.dash-threads h2');
     await page.locator('#main').evaluate(el => {
       const target = document.getElementById('d-health');
       el.scrollTop += target.getBoundingClientRect().top - 260;

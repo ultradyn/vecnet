@@ -53,17 +53,33 @@ for (const [signal, number] of [['SIGINT', 2], ['SIGTERM', 15], ['SIGHUP', 1]]) 
   });
 }
 
-export async function scrollMessageIntoView(page, id) {
-  // Resource notifications replace message nodes. Query, scroll and measure
-  // synchronously on each poll, with no element handle held across frames.
-  await page.waitForFunction(id => {
-    const el = document.getElementById(`m-${id}`);
+export async function scrollIntoViewStable(page, selector, { frames = 3, timeout = 15000 } = {}) {
+  // Resource notifications replace nodes. Re-query each frame and wait for
+  // the same connected node to remain in view across consecutive frames.
+  await page.waitForFunction(({ selector, frames }) => {
+    const states = window.__vnStable ||= Object.create(null);
+    const state = states[selector] ||= { node: null, count: 0 };
+    const el = document.querySelector(selector);
+    if (!el || el !== state.node) {
+      state.node = el;
+      state.count = 0;
+    }
     if (!el) return false;
-    el.scrollIntoView({ block: 'start', behavior: 'instant' });
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0 && r.top < innerHeight && r.bottom > 0;
-  }, id);
+    let r = el.getBoundingClientRect();
+    const intersects = r.bottom > 0 && r.top < innerHeight;
+    const fits = r.height <= innerHeight;
+    if (!intersects || (fits && (r.top < 0 || r.bottom > innerHeight))) {
+      el.scrollIntoView({ block: 'center', inline: 'nearest' });
+      r = el.getBoundingClientRect();
+    }
+    if (el.isConnected && r.bottom > 0 && r.top < innerHeight) state.count++;
+    else state.count = 0;
+    if (state.count < frames) return false;
+    delete states[selector];
+    return true;
+  }, { selector, frames }, { polling: 'raf', timeout });
 }
+export async function scrollMessageIntoView(page, id) { return scrollIntoViewStable(page, `[id="m-${id}"]`); }
 
 // png encodes a w×h 8-bit RGB image whose pixel colours come from px(x, y),
 // for image fixtures built at run time (no binaries are committed).

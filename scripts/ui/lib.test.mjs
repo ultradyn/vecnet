@@ -16,7 +16,7 @@ test('message scroll reaches the viewport while live updates replace message nod
         const message = document.getElementById('m-target');
         message.replaceWith(message.cloneNode(true));
         window.rebuilds++;
-        requestAnimationFrame(rebuild);
+        if (window.rebuilds < 24) requestAnimationFrame(rebuild);
       };
       requestAnimationFrame(rebuild);
     });

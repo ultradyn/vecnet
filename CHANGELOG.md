@@ -6,3 +6,4 @@
 - 2026-11-03: HTTP and `vecnet_react` reject explicitly empty reaction priorities before target lookup; omitted priorities retain hub/client defaults (PROTOCOL §17.2).
 - 2026-11-03: `vecnet_react` preserves body-shape validation and shares HTTP reaction semantic errors and check order in `Hub.React` (`internal/mcpserver/tools.go`, PROTOCOL §17.2).
 - 2026-11-03: reactions: POST /v1/reactions, reaction Event, Message kind reaction, operator_view reason reaction (PROTOCOL §17).
+- 2026-11-03: screen scripts: use lib.mjs scrollIntoViewStable(page, selector), never Locator.scrollIntoViewIfNeeded (nodes are rebuilt on every store notify); bootDemo returns pid and buildDir and cleans up its process group on exit; registerExitCleanup; withTui({ beatEvery }).
