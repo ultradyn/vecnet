@@ -91,6 +91,18 @@ func TestOursHookArgumentBoundaries(t *testing.T) {
 		"vecnet hook install --profile p --event user-prompt",
 		"vecnet echo hook --profile p --event user-prompt",
 		"vecnet hook --profile p --event 'user-prompt",
+		"C2C_CONFIG=/foreign/vecnet hook --profile p --event user-prompt",
+		"C2C_CONFIG='/foreign/vecnet' hook --profile p --event user-prompt",
+		"X=1 vecnet hook --profile p --event user-prompt",
+		"vecnet hook --profile=p --event user-prompt",
+		"vecnet hook --profile p --event user-prompt --as peer_1",
+		"vecnet --net p hook --profile p --event user-prompt",
+		" vecnet hook --profile p --event user-prompt",
+		"'vecnet' hook --profile p --event user-prompt",
+		"'/opt/it's/vecnet' hook --profile p --event user-prompt",
+		"/opt/bin/vn hook --profile p --event user-prompt",
+		"vecnet hook --profile p --event post-tool",
+		"vecnet hook --profile q --event user-prompt",
 	} {
 		raw, err := json.Marshal(hookHandler{Type: "command", Command: command})
 		if err != nil {
@@ -106,19 +118,27 @@ func TestOursHookArgumentBoundaries(t *testing.T) {
 	}
 }
 
-func TestShellFirstWordLiteralSyntax(t *testing.T) {
-	for _, tc := range []struct{ command, word, rest string }{
-		{` '/opt/it'"'"'s/vecnet' hook`, "/opt/it's/vecnet", "hook"},
-		{`"/opt/\vecnet" hook`, `/opt/\vecnet`, "hook"},
-		{`"/opt/\$literal/vecnet" hook`, "/opt/$literal/vecnet", "hook"},
-		{`/opt/\;\>\|\$literal/vecnet hook`, "/opt/;>|$literal/vecnet", "hook"},
-		{`'/opt/$(literal);>|&*/vecnet' hook`, "/opt/$(literal);>|&*/vecnet", "hook"},
-		{`"/opt/;>|&*/vecnet" hook`, "/opt/;>|&*/vecnet", "hook"},
-		{`''#literal hook`, "#literal", "hook"},
+func TestOursHookExactForms(t *testing.T) {
+	for _, tc := range []struct{ bin, command string }{
+		{"vecnet", "vecnet hook --profile p --event user-prompt"},
+		{"vecnet", "vecnet hook --profile p --event user-prompt --auto-ack"},
+		{"vecnet", "/usr/local/bin/vecnet hook --profile p --event user-prompt"},
+		{"vecnet", "/opt/vecnet.exe hook --profile p --event user-prompt"},
+		{"vecnet", "'/opt/my tools/vecnet' hook --profile p --event user-prompt"},
+		{"/opt/it's tools/vn", "'/opt/it'\"'\"'s tools/vn' hook --profile p --event user-prompt --auto-ack"},
+		{"/opt/bin/vn", "/opt/bin/vn hook --profile p --event user-prompt"},
+		{"vecnet", hookCommand("/opt/$(x);'\"/vecnet", "p", "user-prompt", true)},
 	} {
-		word, rest, ok := shellFirstWord(tc.command)
-		if !ok || word != tc.word || rest != tc.rest {
-			t.Errorf("shellFirstWord(%q)=(%q,%q,%v), want (%q,%q,true)", tc.command, word, rest, ok, tc.word, tc.rest)
+		raw, err := json.Marshal(hookHandler{Type: "command", Command: tc.command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler, err := parseJSONNode(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !oursHook(handler, tc.bin, "p", "user-prompt") {
+			t.Errorf("did not recognise exact form %q (bin %q)", tc.command, tc.bin)
 		}
 	}
 }

@@ -26,24 +26,29 @@ type hookGroup struct {
 	Hooks   []hookHandler `json:"hooks"`
 }
 
-var hookInstallProfile = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+// Profiles never start with '-', so an installed command cannot be read
+// as flags by the global flag parser.
+var hookInstallProfile = regexp.MustCompile(`^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$`)
 var hookShellSafe = regexp.MustCompile(`^[A-Za-z0-9/._-]+$`)
 
+// hookShellWord is the only shell quoting hookCommand uses.
+func hookShellWord(bin string) string {
+	if hookShellSafe.MatchString(bin) {
+		return bin
+	}
+	return "'" + strings.ReplaceAll(bin, "'", `'"'"'`) + "'"
+}
+
 func hookCommand(bin, profile, event string, autoAck bool) string {
-	if !hookShellSafe.MatchString(bin) {
-		bin = "'" + strings.ReplaceAll(bin, "'", "'\"'\"'") + "'"
-	}
-	profileFlag := "--profile " + profile
-	if strings.HasPrefix(profile, "-") {
-		// Keep flag-like values away from the global flag parser.
-		profileFlag = "--profile=" + profile
-	}
-	command := bin + " hook " + profileFlag + " --event " + event
+	command := hookShellWord(bin) + " hook --profile " + profile + " --event " + event
 	if autoAck {
 		command += " --auto-ack"
 	}
 	return command
 }
+
+// hookOwnedCommand matches exactly the commands hookCommand can emit.
+var hookOwnedCommand = regexp.MustCompile(`^([A-Za-z0-9/._-]+|'(?:[^']|'"'"')*') hook --profile ([^ ]+) --event ([^ ]+)( --auto-ack)?$`)
 
 // defaultBin returns a persistent executable path when it is the vecnet
 // binary. Test executables and go-run binaries use PATH's vecnet instead.
@@ -84,7 +89,7 @@ func (a *app) cmdHookInstall(args []string) error {
 		}
 	}
 	if !hookInstallProfile.MatchString(profile) {
-		return usageErr("hook install: profile must match [A-Za-z0-9._-]{1,64}")
+		return usageErr("hook install: profile must match [A-Za-z0-9._][A-Za-z0-9._-]{0,63}")
 	}
 	bin := o.str("bin")
 	if o.has("bin") {
@@ -373,81 +378,29 @@ func (n *jsonNode) scalarString() string {
 	return value
 }
 
-// shellFirstWord decodes a literal word in a simple shell command without
-// evaluation. Operators, redirections, comments and expansions are unsupported:
-// oursHook must preserve the entire handler if any word uses that syntax.
-// Quoted/escaped metacharacters remain literal, including hookCommand's quoting.
-func shellFirstWord(command string) (wordValue, rest string, ok bool) {
-	command = strings.TrimLeft(command, " \t")
-	var word strings.Builder
-	var quote byte
-	for i := 0; i < len(command); i++ {
-		c := command[i]
-		if c == 0 {
-			return "", "", false
-		}
-		if quote == 0 {
-			if c == ' ' || c == '\t' {
-				return word.String(), strings.TrimLeft(command[i:], " \t"), true
-			}
-			if strings.ContainsRune("\r\n;&|<>()$`*?[]{}~!", rune(c)) || (c == '#' && i == 0) {
-				return "", "", false
-			}
-		} else if quote == '"' && (c == '$' || c == '`') {
-			return "", "", false
-		}
-		if c == '\\' && quote != '\'' {
-			i++
-			if i == len(command) || command[i] == '\n' || command[i] == '\r' || command[i] == 0 {
-				return "", "", false
-			}
-			// In double quotes, backslash only escapes $, `, ", and \\.
-			// Before other characters the backslash itself stays literal.
-			if quote == '"' && !strings.ContainsRune("$`\"\\", rune(command[i])) {
-				word.WriteByte('\\')
-			}
-			word.WriteByte(command[i])
-		} else if c == quote {
-			quote = 0
-		} else if quote == 0 && (c == '\'' || c == '"') {
-			quote = c
-		} else {
-			word.WriteByte(c)
-		}
-	}
-	return word.String(), "", quote == 0 && len(command) > 0
-}
-
+// oursHook reports whether handler is one vecnet hook install wrote for
+// this profile and event: the exact hookCommand form, with no shell parsing.
+// Any other spelling, even one a shell would run identically, is foreign
+// and preserved. The binary may be any vecnet, so installations survive a
+// changed path, or a renamed binary at the --bin being installed.
 func oursHook(handler *jsonNode, bin, profile, event string) bool {
 	if handler.member("type").scalarString() != "command" {
 		return false
 	}
-	command := handler.member("command").scalarString()
-	word, args, ok := shellFirstWord(command)
-	// Keep recognising vecnet installations after their binary path changes,
-	// and recognise renamed executables only at the configured path. The latter
-	// is required for the protocol's unconditional repeat-install idempotence.
-	if !ok || (filepath.Base(word) != "vecnet" && word != bin) {
+	m := hookOwnedCommand.FindStringSubmatch(handler.member("command").scalarString())
+	if m == nil || m[2] != profile || m[3] != event {
 		return false
 	}
-	var words []string
-	for args != "" {
-		word, rest, ok := shellFirstWord(args)
-		if !ok {
-			return false
-		}
-		words = append(words, word)
-		args = rest
+	word := m[1]
+	if strings.HasPrefix(word, "'") {
+		word = strings.ReplaceAll(word[1:len(word)-1], `'"'"'`, "'")
 	}
-	// Accept supported global and hook flags, including repeats and either
-	// value syntax. Parsing values avoids substring matches for other profiles
-	// or events. Keep recognising legacy space-separated flag-like profiles.
-	o, err := parseFlags("hook", words, map[string]flagKind{
-		"profile": strFlag, "event": strFlag, "auto-ack": boolFlag,
-		"as": strFlag, "net": strFlag, "json": boolFlag,
-	})
-	return err == nil && len(o.pos) == 1 && o.pos[0] == "hook" &&
-		o.str("profile") == profile && o.str("event") == event
+	// Quoting must be exactly hookCommand's: 'vecnet' is not its spelling.
+	if hookShellWord(word) != m[1] {
+		return false
+	}
+	base := filepath.Base(word)
+	return base == "vecnet" || base == "vecnet.exe" || word == bin
 }
 
 func mergeHookSettings(existing []byte, bin, profile string, autoAck bool) (out []byte, changed bool, err error) {
