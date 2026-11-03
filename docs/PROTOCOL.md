@@ -431,7 +431,7 @@ The hub exposes exactly these ten tools [R13, §17.2]:
 |---|---|---|---|
 | `vecnet_send` | `SendRequest` | Same as `POST /v1/messages` | [SCH] |
 | `vecnet_reply` | `message_id`, `text`, `priority`, other `SendRequest` fields | Sugar for `vecnet_send`: derives `thread_id` and `in_reply_to` from `message_id` | [R13] |
-| `vecnet_react` | `message_id`, `emoji`, `op`, `priority?`, `as?` | Same as `POST /v1/reactions`; client defaults per §17.6 | §17.2 |
+| `vecnet_react` | `message_id`, `emoji`, `op?`, `priority?`, `as?` | Same as `POST /v1/reactions`; omitted `op` defaults to `add`; client priority defaults per §17.6 | §17.2 |
 | `vecnet_inbox` | `after?`, `limit?` | `{events, next_cursor}` from the same log as `/v1/events` | [T06] |
 | `vecnet_ack` | `cursor` | Same as `POST /v1/ack` | [T06] |
 | `vecnet_receipt` | `delivery_id`, `state`, `note?` | Same as `POST /v1/receipts` | [R06] |

@@ -1186,6 +1186,56 @@ func TestReactValidationParity(t *testing.T) {
 		}
 		return counts
 	}
+	// The schema's character bound also has a UTF-8 byte cap. Body shape
+	// must win over semantic errors and target lookup on both transports.
+	for _, tc := range []struct {
+		name, emoji string
+	}{
+		{"33 ASCII bytes", strings.Repeat("x", 33)},
+		{"33 UTF-8 bytes", strings.Repeat("✅", 11)},
+		{"32 ASCII bytes", strings.Repeat("x", 32)},
+		{"32 UTF-8 bytes", strings.Repeat("👍", 8)},
+	} {
+		for _, mixed := range []bool{false, true} {
+			args := map[string]any{"message_id": sent.MessageID, "emoji": tc.emoji, "op": "add", "priority": "hold"}
+			name := tc.name + "/valid fields"
+			if mixed {
+				name = tc.name + "/invalid op and priority and unknown target"
+				args["message_id"] = "msg_00000000000000000000000000"
+				args["op"], args["priority"] = "bad", "bad"
+			}
+			for _, transport := range []string{"HTTP", "MCP"} {
+				t.Run("emoji length/"+name+"/"+transport, func(t *testing.T) {
+					before := writeCounts()
+					t.Cleanup(func() {
+						if after := writeCounts(); after != before {
+							t.Errorf("rejected reaction wrote state: %v -> %v", before, after)
+						}
+					})
+					if transport == "MCP" {
+						if len(tc.emoji) <= 32 {
+							toolFails(t, env, secret, "vecnet_react", args, "emoji_not_allowed")
+						} else if path := invalidPath(t, env, secret, "vecnet_react", args); path != "/emoji" {
+							t.Fatalf("MCP rejected at %q, want /emoji", path)
+						}
+						return
+					}
+					resp, body := env.Do(secret, http.MethodPost, "/v1/reactions", args)
+					var got toolErrorBody
+					if err := json.Unmarshal(body, &got); err != nil {
+						t.Fatal(err)
+					}
+					if len(tc.emoji) <= 32 {
+						if resp.StatusCode != 422 || got.Error.Code != "emoji_not_allowed" {
+							t.Fatalf("HTTP reaction: %d %s, want 422 emoji_not_allowed", resp.StatusCode, body)
+						}
+					} else if resp.StatusCode != 400 || got.Error.Code != "invalid_body" || got.Error.Details["path"] != "/emoji" {
+						t.Fatalf("HTTP reaction: %d %s, want 400 invalid_body at /emoji", resp.StatusCode, body)
+					}
+				})
+			}
+		}
+	}
 	for _, tc := range []struct {
 		name, emoji, op, priority, code, field string
 	}{

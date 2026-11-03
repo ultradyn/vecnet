@@ -206,6 +206,10 @@ func callReact(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, 
 	if err := decodeArgs(raw, &req); err != nil {
 		return nil, err
 	}
+	// JSON Schema maxLength counts characters; reactionRequest also caps bytes.
+	if len(req.Emoji) > 32 {
+		return nil, &envelope.SchemaError{Path: "/emoji", Message: "emoji must be at most 32 UTF-8 bytes"}
+	}
 	var fields map[string]json.RawMessage
 	if err := decodeArgs(raw, &fields); err != nil {
 		return nil, err
@@ -612,7 +616,7 @@ func toolSpecs(defs schema) []toolSpec {
 			"Reactions cannot be replied to.",
 		input: object(schema{
 			"message_id": ref("messageId"),
-			"emoji":      schema{"type": "string", "description": "one of " + envelope.ReactionList()},
+			"emoji":      schema{"type": "string", "maxLength": 32, "description": "At most 32 UTF-8 bytes; one of " + envelope.ReactionList()},
 			"op":         schema{"type": "string", "enum": []string{"add", "remove"}, "default": "add"},
 			"priority":   ref("priority"),
 			"as":         ref("peerId"),

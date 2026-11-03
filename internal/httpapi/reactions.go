@@ -37,6 +37,11 @@ func (s *server) postReactions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// reactionRequest's maxLength also carries a UTF-8 byte cap.
+	if len(req.Emoji) > 32 {
+		writeError(w, &envelope.SchemaError{Path: "/emoji", Message: "emoji must be at most 32 UTF-8 bytes"})
+		return
+	}
 	if !reactionMessageID.MatchString(req.MessageID) {
 		writeError(w, &envelope.SchemaError{Path: "/message_id", Message: "message_id must match ^msg_[0-9A-HJKMNP-TV-Z]{26}$"})
 		return
