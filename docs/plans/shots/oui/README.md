@@ -95,3 +95,10 @@ Message bodies, timing and priority tips (issues 21, 23 and 25) come from `scrip
 - [md-tip-compose-narrow.png](md-tip-compose-narrow.png) — New message at narrow width: the `wake_idle` tip on keyboard focus stays on screen.
 - [md-thread-narrow.png](md-thread-narrow.png) — Narrow thread: relative time and reply stay on one line; the code block scrolls inside its box.
 - [md-tip-thread-narrow.png](md-tip-thread-narrow.png) — Narrow reply box: the `wake_idle` tip on keyboard focus.
+
+Reaction screens come from `scripts/ui/rx-thread.mjs`. They cover reaction chips, the picker surviving a live thread rebuild, a priority override, removal, focus restoration and a rate-limit retry time.
+
+- [rx08-thread-initial.png](rx08-thread-initial.png) — Reaction chips with counts, cleaned peer names and the operator's own reaction highlighted.
+- [rx08-thread-progress.png](rx08-thread-progress.png) — Open reaction picker preserves focus while a live reaction rebuilds the thread.
+- [rx08-thread-success.png](rx08-thread-success.png) — Added reaction with an explicit hold priority appears as the operator's own chip.
+- [rx08-thread-error.png](rx08-thread-error.png) — Rate-limited reaction leaves the chip unchanged and shows a local retry time.
