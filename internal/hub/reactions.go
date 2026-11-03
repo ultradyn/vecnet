@@ -332,31 +332,107 @@ func insertReactionMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg 
 	return err
 }
 
-// supersedeRequeuedReaction handles a wake that was in flight when a newer
-// reaction arrived. Requeue and coalescing share the caller's transaction, so
-// the older wake cannot become claimable alongside its successor. Sequence
-// order handles wakes created at the same clock time. Accepted deliveries are
-// never changed; a newer accepted wake also makes an older retry unnecessary.
+// reactionWithdrawn is true of a deliveries row (correlated as "deliveries")
+// whose reaction wake no longer stands: its reaction was removed, or a newer
+// live wake by the same reactor to the same recipient in the same thread
+// replaced it (§17.5). Sequence order handles wakes created at the same clock
+// time; a newer accepted wake also makes an older retry unnecessary.
+const reactionWithdrawn = `EXISTS (
+  SELECT 1 FROM messages m WHERE m.msg_id=deliveries.msg_id AND m.kind='reaction' AND (
+   NOT EXISTS (SELECT 1 FROM reactions r WHERE r.msg_id=json_extract(m.body,'$.reaction.target')
+    AND r.peer_id=m.sender AND r.emoji=json_extract(m.body,'$.reaction.emoji'))
+   OR EXISTS (SELECT 1 FROM messages newer
+    JOIN deliveries nd ON nd.msg_id=newer.msg_id AND nd.recipient=deliveries.recipient AND nd.state != 'superseded'
+    WHERE newer.thr_id=m.thr_id AND newer.sender=m.sender AND newer.kind='reaction' AND newer.seq>m.seq)))`
+
+// supersedeRequeuedReaction settles a wake that was out of reach of §17.5
+// while an attempt was in flight (a push claim or a dispatch claim) and is
+// queued again: if a remove or a newer wake meanwhile withdrew it, it becomes
+// superseded rather than being retried. Requeue and settling share the
+// caller's transaction, so the stale wake never becomes claimable. Accepted
+// deliveries, and any with another attempt still in flight, are never changed.
 func supersedeRequeuedReaction(ctx context.Context, tx *sql.Tx, deliveryID, at string) error {
 	_, err := tx.ExecContext(ctx, `UPDATE deliveries SET state='superseded',held=0,next_attempt_at=NULL,updated_at=?
- WHERE dly_id=? AND state='queued' AND EXISTS (
-  SELECT 1 FROM messages m
-  JOIN messages newer ON newer.thr_id=m.thr_id AND newer.sender=m.sender
-   AND newer.kind='reaction' AND newer.seq>m.seq
-  JOIN deliveries nd ON nd.msg_id=newer.msg_id AND nd.recipient=deliveries.recipient
-   AND nd.state != 'superseded'
-  WHERE m.msg_id=deliveries.msg_id AND m.kind='reaction')`, at, deliveryID)
+ WHERE dly_id=? AND state='queued' AND dispatching=0 AND `+reactionWithdrawn, at, deliveryID)
 	if err != nil {
 		return fmt.Errorf("hub: coalesce requeued reaction: %w", err)
 	}
 	return nil
 }
 
+// BeginDispatch claims one outbound attempt of deliveryID's Delivery by a path
+// that does not go through ClaimDue: an Events callback POST or an operator
+// notification. It must be called, and must return true, before the attempt
+// is prepared, and every true is paired with one EndDispatch. While the claim
+// is held, §17.5 supersession cannot withdraw the delivery, so a superseded
+// wake is never pushed. A reaction wake that is superseded, or that a remove
+// or a newer wake already withdrew, is refused (and settled when nothing else
+// is in flight). Only reaction wakes can be superseded, so any other delivery
+// is passed without a write.
+func (h *Hub) BeginDispatch(ctx context.Context, deliveryID string) (bool, error) {
+	ok := false
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		ok = false
+		var kind, state string
+		var withdrawn bool
+		err := tx.QueryRowContext(ctx, `SELECT k.kind, deliveries.state, `+reactionWithdrawn+`
+ FROM deliveries JOIN messages k ON k.msg_id=deliveries.msg_id WHERE deliveries.dly_id=?`, deliveryID).Scan(&kind, &state, &withdrawn)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("hub: begin dispatch: %w", err)
+		}
+		if kind != "reaction" {
+			ok = true
+			return nil
+		}
+		if state == "superseded" {
+			return nil
+		}
+		if withdrawn {
+			return supersedeRequeuedReaction(ctx, tx, deliveryID, h.nowStr())
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE deliveries SET dispatching=dispatching+1 WHERE dly_id=?`, deliveryID); err != nil {
+			return fmt.Errorf("hub: begin dispatch: %w", err)
+		}
+		ok = true
+		return nil
+	})
+	return ok, err
+}
+
+// EndDispatch releases a BeginDispatch claim once its attempt is over.
+// pushed reports a notification the receiver accepted: the wake has then
+// gone out, so a queued one moves to pushed and is never superseded. A wake
+// whose attempt failed is settled: one a remove or newer wake withdrew while
+// it was in flight is superseded now, so no retry sends it. The Events worker
+// records a callback's 2xx (AcceptEventPush) before it ends the claim.
+func (h *Hub) EndDispatch(ctx context.Context, deliveryID string, pushed bool) error {
+	ctx = context.WithoutCancel(ctx)
+	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE deliveries SET dispatching=dispatching-1 WHERE dly_id=? AND dispatching>0`, deliveryID)
+		if err != nil {
+			return fmt.Errorf("hub: end dispatch: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil || n == 0 {
+			return err // not a claimed reaction wake
+		}
+		at := h.nowStr()
+		if pushed {
+			if _, err := tx.ExecContext(ctx, `UPDATE deliveries SET state='pushed',updated_at=? WHERE dly_id=? AND state='queued' AND route_id IS NULL`, at, deliveryID); err != nil {
+				return fmt.Errorf("hub: end dispatch: %w", err)
+			}
+		}
+		return supersedeRequeuedReaction(ctx, tx, deliveryID, at)
+	})
+}
+
 // supersedeReactionDeliveries withdraws only queued wakes. A nonempty target
 // narrows a remove to that emoji and target; a new wake coalesces the thread.
 func supersedeReactionDeliveries(ctx context.Context, tx *sql.Tx, recipient, reactor, thr, at, targetID, emoji string) ([]string, error) {
 	query := `UPDATE deliveries SET state='superseded',held=0,next_attempt_at=NULL,updated_at=?
- WHERE recipient=? AND thr_id=? AND state='queued'
+ WHERE recipient=? AND thr_id=? AND state='queued' AND dispatching=0
  AND msg_id IN (SELECT msg_id FROM messages WHERE kind='reaction' AND sender=? AND thr_id=?`
 	args := []any{at, recipient, thr, reactor, thr}
 	if targetID != "" {

@@ -238,16 +238,25 @@ func (h *Hub) postNotify(ctx context.Context, r NotifyRoute, id string, body []b
 			}
 		}
 		if reactionDeliveryID != "" {
-			var live bool
-			if err := h.DB.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM deliveries WHERE dly_id=? AND state != 'superseded')`, reactionDeliveryID).Scan(&live); err != nil {
-				slog.Error("hub: reaction notification state", "err", err)
+			// Claim before preparing the attempt: a wake that a remove or a
+			// newer wake withdrew is not sent, and one in flight cannot be
+			// withdrawn until the attempt is over (§17.5).
+			live, err := h.BeginDispatch(ctx, reactionDeliveryID)
+			if err != nil {
+				slog.Error("hub: reaction notification claim", "err", err)
 				return
 			}
 			if !live {
 				return
 			}
 		}
-		if lastErr = h.postNotifyOnce(ctx, client, r, id, body); lastErr == nil {
+		lastErr = h.postNotifyOnce(ctx, client, r, id, body)
+		if reactionDeliveryID != "" {
+			if err := h.EndDispatch(ctx, reactionDeliveryID, lastErr == nil); err != nil {
+				slog.Error("hub: reaction notification release", "err", err)
+			}
+		}
+		if lastErr == nil {
 			return
 		}
 	}

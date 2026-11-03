@@ -922,6 +922,8 @@ A newer waking reaction by the same reactor in the same thread moves that reacto
 
 A `remove` withdraws the still-`queued` wake of that (target, emoji) by the same reactor the same way. Removing does not restore the once-ever wake eligibility (§17.4). Both operations report the affected delivery ids in top-level `superseded` (§17.2).
 
+A wake whose push, Events callback or operator notification attempt is in flight is not withdrawn: the hub claims each attempt before preparing it, and superseding skips a claimed wake. A wake that a remove or a newer wake would have withdrawn meanwhile becomes `superseded` when that attempt fails, so it is never retried, and is absent from that call's `superseded`. Once an operator notification for a queued wake succeeds, the wake moves to `pushed` and is never superseded.
+
 `superseded` is terminal and internal: never pushed, absent from the operator inbox, its unread count and mark-read; the hub sends no receipt when it supersedes (§5.1, §2.13).
 
 ### 17.6 Client defaults

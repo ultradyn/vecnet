@@ -1101,6 +1101,27 @@ func TestReactionWakeNotifiesOperator(t *testing.T) {
 	}
 }
 
+// TestReactionNotifiedWakeNotWithdrawn: once the operator's notification
+// webhook accepted a wake, it has gone out, so a later remove cannot make it
+// superseded (§17.5: superseded is never pushed).
+func TestReactionNotifiedWakeNotWithdrawn(t *testing.T) {
+	f := newRX(t)
+	target := mustSend(t, f.env, f.env.OperatorSecret, holdReq("operator", f.b))
+	rcv := newNotifyReceiver(t)
+	putNotify(t, f.env, map[string]string{"url": rcv.srv.URL, "filter": "wake"})
+	w := needWake(t, rx(t, f.env, f.bs, target.MessageID, "✅", "add", "wake"))
+	f.env.Hub.WaitNotifies()
+	if len(rcv.Hits()) != 1 {
+		t.Fatalf("notifications=%d", len(rcv.Hits()))
+	}
+	if out := rx(t, f.env, f.bs, target.MessageID, "✅", "remove", ""); len(out.Superseded) != 0 {
+		t.Fatalf("remove withdrew a notified wake: %v", out.Superseded)
+	}
+	if state, _ := deliveryState(t, f.env, w.DeliveryID); state != "pushed" {
+		t.Fatalf("notified wake state = %s, want pushed", state)
+	}
+}
+
 func TestCoalesceAdminRetryDeadLetter(t *testing.T) {
 	for _, newerState := range []string{"queued", "accepted"} {
 		t.Run(newerState, func(t *testing.T) {
@@ -1217,17 +1238,28 @@ func TestReactionOperatorNotifyStopsAfterSuperseded(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("first notification never arrived")
 			}
+			// The first attempt is in flight: §17.5 cannot withdraw it yet,
+			// since superseded is never pushed (BeginDispatch).
+			var during hub.ReactResponse
 			var second *hub.ReactWake
 			if change == "remove" {
-				rx(t, f.env, f.bs, target.MessageID, "✅", "remove", "wake")
+				during = rx(t, f.env, f.bs, target.MessageID, "✅", "remove", "wake")
 			} else {
-				second = needWake(t, rx(t, f.env, f.bs, target.MessageID, "❗", "add", "wake"))
+				during = rx(t, f.env, f.bs, target.MessageID, "❗", "add", "wake")
+				second = needWake(t, during)
 			}
-			if state, _ := deliveryState(t, f.env, first.DeliveryID); state != "superseded" {
-				t.Fatalf("withdrawn wake state = %s", state)
+			if len(during.Superseded) != 0 {
+				t.Fatalf("withdrew %v while its notification was in flight", during.Superseded)
+			}
+			if state, _ := deliveryState(t, f.env, first.DeliveryID); state != "queued" {
+				t.Fatalf("in-flight wake state = %s, want queued", state)
 			}
 			releaseFirst()
 			f.env.Hub.WaitNotifies()
+			// The failed attempt settles the withdrawal: no retry sends it.
+			if state, _ := deliveryState(t, f.env, first.DeliveryID); state != "superseded" {
+				t.Fatalf("withdrawn wake state = %s after its failed attempt", state)
+			}
 			mu.Lock()
 			oldHits := hits[first.DeliveryID]
 			newHits := 0
