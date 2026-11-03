@@ -353,6 +353,11 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 			e.Details["in_reply_to"] = *req.InReplyTo
 			return nil, false, nil, e
 		}
+		if m.Kind == "reaction" {
+			e := E(http.StatusUnprocessableEntity, "not_replyable", "reaction messages cannot be replied to")
+			e.Details["in_reply_to"] = *req.InReplyTo
+			return nil, false, nil, e
+		}
 		parent = m
 	} else if !thr.isNew && act.src == nil {
 		if parent, err = latestMessage(ctx, tx, thr.ID); err != nil {

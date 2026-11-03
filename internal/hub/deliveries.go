@@ -387,7 +387,7 @@ func (h *Hub) DeliveryPushGate(ctx context.Context, deliveryID string) (PushGate
 		return GateNever, fmt.Errorf("hub: delivery gate: %w", err)
 	}
 	switch {
-	case state == "failed", state == "expired", state == "dead_letter", priority == "hold":
+	case state == "failed", state == "expired", state == "dead_letter", state == "superseded", priority == "hold":
 		return GateNever, nil
 	case held:
 		return GateHeld, nil

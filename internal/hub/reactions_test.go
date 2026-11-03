@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -498,5 +499,547 @@ func TestSendRefusesReactionKind(t *testing.T) {
 	_, d := mustReject(t, env, as, body, 400, "invalid_body")
 	if d["path"] != "/kind" {
 		t.Fatalf("details=%v", d)
+	}
+}
+
+// rxFixture exercises the HTTP reaction boundary with a three-peer thread.
+type rxFixture struct {
+	env                 *testhub.Env
+	a, as, b, bs, c, cs string
+	target              hub.SendResponse
+}
+
+func newRX(t *testing.T) rxFixture {
+	t.Helper()
+	f := rxFixture{env: testhub.Start(t)}
+	f.a, f.as = f.env.NewPeer("session", "A")
+	f.b, f.bs = f.env.NewPeer("session", "B")
+	f.c, f.cs = f.env.NewPeer("session", "C")
+	f.target = mustSend(t, f.env, f.as, holdReq("target", f.b, f.c))
+	return f
+}
+func rxBody(msg, emoji, op, priority string) map[string]any {
+	b := reactBody(msg, emoji, op)
+	if priority != "" {
+		b["priority"] = priority
+	}
+	return b
+}
+func rx(t *testing.T, env *testhub.Env, secret, msg, emoji, op, priority string) hub.ReactResponse {
+	t.Helper()
+	r, raw := env.Do(secret, "POST", "/v1/reactions", rxBody(msg, emoji, op, priority))
+	if r.StatusCode != 200 {
+		t.Fatalf("reaction = %d: %s", r.StatusCode, raw)
+	}
+	var out hub.ReactResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Reactions == nil || out.Superseded == nil {
+		t.Fatalf("null arrays: %s", raw)
+	}
+	return out
+}
+func needWake(t *testing.T, out hub.ReactResponse) *hub.ReactWake {
+	t.Helper()
+	if !out.Changed || out.Wake == nil {
+		t.Fatalf("expected changed reaction with wake: %+v", out)
+	}
+	if out.Wake.DeliveryID == "" || out.Wake.MessageID == "" || out.Wake.State != "queued" {
+		t.Fatalf("wake: %+v", out.Wake)
+	}
+	return out.Wake
+}
+func rxCount(t *testing.T, env *testhub.Env, want int) {
+	t.Helper()
+	if n := count(t, env, `SELECT count(*) FROM deliveries d JOIN messages m ON m.msg_id=d.msg_id WHERE m.kind='reaction'`); n != want {
+		t.Fatalf("reaction deliveries=%d want %d", n, want)
+	}
+}
+func rxRoute(t *testing.T, f rxFixture) (*testhub.Callback, string) {
+	t.Helper()
+	cb := testhub.NewCallback(t)
+	route, secret, err := f.env.Hub.AddRoute(context.Background(), "peer", f.a, cb.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.env.Worker.Verify(context.Background(), route); err != nil {
+		t.Fatal(err)
+	}
+	return cb, secret
+}
+func rxStep(t *testing.T, env *testhub.Env) {
+	t.Helper()
+	if _, err := env.Worker.Step(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+func rxAccept(t *testing.T, f rxFixture, w *hub.ReactWake) {
+	t.Helper()
+	cur, err := f.env.Hub.Log.Current(context.Background(), []string{f.a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, raw := f.env.Do(f.as, "POST", "/v1/ack", map[string]string{"cursor": cur.String()})
+	if r.StatusCode != 204 {
+		t.Fatalf("ack=%d %s", r.StatusCode, raw)
+	}
+	if state, _ := deliveryState(t, f.env, w.DeliveryID); state != "accepted" {
+		t.Fatalf("state=%s", state)
+	}
+}
+func rxStored(t *testing.T, env *testhub.Env, id string) envelope.Message {
+	t.Helper()
+	var raw string
+	if err := env.Hub.DB.QueryRow(`SELECT body FROM messages WHERE msg_id=?`, id).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var m envelope.Message
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+func TestReactionHoldCreatesNoDelivery(t *testing.T) {
+	for _, p := range []string{"", "hold"} {
+		t.Run(p, func(t *testing.T) {
+			f := newRX(t)
+			out := rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", p)
+			if !out.Changed || out.Wake != nil {
+				t.Fatalf("hold=%+v", out)
+			}
+			for _, q := range []string{`SELECT count(*) FROM messages WHERE kind='reaction'`, `SELECT count(*) FROM reaction_wakes`, `SELECT count(*) FROM deliveries WHERE recipient=?`} {
+				var args []any
+				if strings.Contains(q, "recipient") {
+					args = []any{f.a}
+				}
+				if n := count(t, f.env, q, args...); n != 0 {
+					t.Fatalf("%s=%d", q, n)
+				}
+			}
+			rxCount(t, f.env, 0)
+		})
+	}
+}
+func TestReactionWakeOneDeliveryToSender(t *testing.T) {
+	f := newRX(t)
+	w := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))
+	if w.Recipient != f.a {
+		t.Fatalf("recipient=%s", w.Recipient)
+	}
+	rxCount(t, f.env, 1)
+	evs := deliveryEvents(t, f.env, f.a)
+	if len(evs) != 1 {
+		t.Fatalf("deliveries to A=%d", len(evs))
+	}
+	if err := envelope.Validate("delivery", evs[0]); err != nil {
+		t.Fatal(err)
+	}
+	var d envelope.Delivery
+	if err := json.Unmarshal(evs[0], &d); err != nil {
+		t.Fatal(err)
+	}
+	m := d.Message
+	if d.DeliveryID != w.DeliveryID || m.MessageID != w.MessageID || m.Kind != "reaction" || m.InReplyTo == nil || *m.InReplyTo != f.target.MessageID || m.Reaction == nil || *m.Reaction != (envelope.ReactionRef{Target: f.target.MessageID, Emoji: "✅"}) || !reflect.DeepEqual(m.Recipients, []string{f.a}) || m.Sender != f.b || m.Content.Text != "✅" || m.Priority != "wake" || len(m.Attachments) != 0 || len(m.Metadata) != 0 {
+		t.Fatalf("delivery=%+v message=%+v", d, m)
+	}
+	for _, p := range []string{f.b, f.c} {
+		if n := count(t, f.env, `SELECT count(*) FROM deliveries WHERE msg_id=? AND recipient=?`, w.MessageID, p); n != 0 {
+			t.Fatalf("delivery to %s", p)
+		}
+	}
+}
+func TestReactionWakePushedPerRoute(t *testing.T) {
+	f := newRX(t)
+	cb, secret := rxRoute(t, f)
+	w := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))
+	rxStep(t, f.env)
+	rxStep(t, f.env)
+	posts := cb.Posts()
+	if len(posts) != 1 {
+		t.Fatalf("pushes=%d", len(posts))
+	}
+	p := posts[0]
+	if err := webhook.Verify([]string{secret}, p.ID, p.Timestamp, p.Signature, p.Body, f.env.Now.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var d envelope.Delivery
+	if err := json.Unmarshal(p.Body, &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.DeliveryID != w.DeliveryID || d.Message.MessageID != w.MessageID {
+		t.Fatalf("push=%s", p.Body)
+	}
+	if !reflect.DeepEqual(p.Body, []byte(deliveryEvents(t, f.env, f.a)[0])) {
+		t.Fatal("push differs from logged Delivery")
+	}
+}
+func TestReactionWakeIdleHeldThenReleased(t *testing.T) {
+	f := newRX(t)
+	cb, _ := rxRoute(t, f)
+	reportPresence(t, f.env, f.as, "", "working")
+	w := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake_idle"))
+	if s, held := deliveryState(t, f.env, w.DeliveryID); s != "queued" || held != 1 {
+		t.Fatalf("held=%s/%d", s, held)
+	}
+	rxStep(t, f.env)
+	if len(cb.Posts()) != 0 {
+		t.Fatal("pushed while working")
+	}
+	reportPresence(t, f.env, f.as, "", "idle")
+	rxStep(t, f.env)
+	rxStep(t, f.env)
+	if len(cb.Posts()) != 1 {
+		t.Fatalf("released pushes=%d", len(cb.Posts()))
+	}
+}
+func TestReactionLoopFields(t *testing.T) {
+	f := newRX(t)
+	m := mustSend(t, f.env, f.as, replyReq("second", f.target.ThreadID, f.target.MessageID))
+	w := needWake(t, rx(t, f.env, f.bs, m.MessageID, "✅", "add", "wake"))
+	parent, got := storedLoop(t, f.env, m.MessageID), storedLoop(t, f.env, w.MessageID)
+	if got.Depth != parent.Depth+1 || !reflect.DeepEqual(got.SenderChain, append(parent.SenderChain, f.b)) || got.MaxDepth != parent.MaxDepth || got.ExpiresAt != parent.ExpiresAt {
+		t.Fatalf("loop=%+v parent=%+v", got, parent)
+	}
+}
+func TestReactionRefusedPastMaxDepth(t *testing.T) {
+	f := newRX(t)
+	b := replyReq("max", f.target.ThreadID, f.target.MessageID)
+	b["max_depth"] = 1
+	target := mustSend(t, f.env, f.as, b)
+	before := count(t, f.env, `SELECT count(*) FROM events`)
+	rejectReact(t, f.env, f.bs, rxBody(target.MessageID, "✅", "add", "wake"), 422, "max_depth_exceeded")
+	if count(t, f.env, `SELECT count(*) FROM reactions`) != 0 || count(t, f.env, `SELECT count(*) FROM reaction_ops`) != 0 || count(t, f.env, `SELECT count(*) FROM events`) != before || counter(t, f.env, "loop_cut") != 1 {
+		t.Fatal("cut did not commit only its counter and audit")
+	}
+	if n := count(t, f.env, `SELECT count(*) FROM audit WHERE action='loop_cut' AND actor=? AND json_extract(detail,'$.via')='reaction' AND json_extract(detail,'$.reason')='max_depth_exceeded'`, f.b); n != 1 {
+		t.Fatalf("cut audit=%d", n)
+	}
+	rxCount(t, f.env, 0)
+}
+func TestReactionRefusedAfterExpiry(t *testing.T) {
+	f := newRX(t)
+	f.env.Now.Advance(25 * time.Hour)
+	rejectReact(t, f.env, f.bs, rxBody(f.target.MessageID, "✅", "add", "wake"), 422, "expired")
+	if count(t, f.env, `SELECT count(*) FROM reactions`) != 0 {
+		t.Fatal("expired changed reaction")
+	}
+	if !rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "hold").Changed {
+		t.Fatal("hold refused")
+	}
+}
+func TestNoopRetryAfterExpiryIs200(t *testing.T) {
+	f := newRX(t)
+	needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))
+	f.env.Now.Advance(25 * time.Hour)
+	out := rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake")
+	if out.Changed || out.Wake != nil || len(out.Superseded) != 0 {
+		t.Fatalf("retry=%+v", out)
+	}
+	rxCount(t, f.env, 1)
+}
+func TestOperatorReactionNeverCut(t *testing.T) {
+	f := newRX(t)
+	b := replyReq("max", f.target.ThreadID, f.target.MessageID)
+	b["max_depth"] = 1
+	m := mustSend(t, f.env, f.as, b)
+	f.env.Now.Advance(25 * time.Hour)
+	w := needWake(t, rx(t, f.env, f.env.OperatorSecret, m.MessageID, "✅", "add", "wake"))
+	l := storedLoop(t, f.env, w.MessageID)
+	exp, err := envelope.ParseTime(l.ExpiresAt)
+	if err != nil || l.Depth != 0 || !exp.Equal(f.env.Now.Now().Add(24*time.Hour)) || !reflect.DeepEqual(l.SenderChain, []string{f.a, f.a, f.env.OperatorPeer}) {
+		t.Fatalf("operator loop=%+v err=%v", l, err)
+	}
+	if participants(t, f.env, m.ThreadID)[f.env.OperatorPeer] {
+		t.Fatal("operator became participant")
+	}
+	rxCount(t, f.env, 1)
+}
+func TestReactionNoBudgetCost(t *testing.T) {
+	f := newRX(t)
+	if _, err := f.env.Hub.DB.Exec(`UPDATE threads SET budget_remaining=0 WHERE thr_id=?`, f.target.ThreadID); err != nil {
+		t.Fatal(err)
+	}
+	var before, after string
+	snapshot := func(out *string) {
+		t.Helper()
+		if err := f.env.Hub.DB.QueryRow(`SELECT json_array(budget_remaining,message_count,last_message_at) FROM threads WHERE thr_id=?`, f.target.ThreadID).Scan(out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot(&before)
+	f.env.Now.Advance(time.Second)
+	needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))
+	snapshot(&after)
+	if before != after {
+		t.Fatalf("thread changed: %s -> %s", before, after)
+	}
+}
+func TestReplyToReactionRefused(t *testing.T) {
+	f := newRX(t)
+	w := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))
+	_, d := mustReject(t, f.env, f.as, replyReq("reply", f.target.ThreadID, w.MessageID), 422, "not_replyable")
+	if d["in_reply_to"] != w.MessageID {
+		t.Fatalf("details=%v", d)
+	}
+	c, err := f.env.Hub.Auth.Resolve(context.Background(), f.as)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.env.Hub.ReplyThread(context.Background(), c, "", w.MessageID)
+	e, ok := err.(*hub.APIError)
+	if !ok || e.Code != "not_replyable" || e.Status != 422 || e.Details["in_reply_to"] != w.MessageID {
+		t.Fatalf("ReplyThread=%v", err)
+	}
+}
+func TestReactToReactionRefused(t *testing.T) {
+	f := newRX(t)
+	w := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))
+	rejectReact(t, f.env, f.as, rxBody(w.MessageID, "❗", "add", "wake"), 422, "not_replyable")
+}
+func TestRepeatedAddDoesNotWakeTwice(t *testing.T) {
+	f := newRX(t)
+	needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))
+	out := rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake")
+	if out.Changed || out.Wake != nil {
+		t.Fatalf("repeat=%+v", out)
+	}
+	rxCount(t, f.env, 1)
+}
+func TestReaddAfterRemoveDoesNotWakeAgain(t *testing.T) {
+	f := newRX(t)
+	w := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))
+	rxAccept(t, f, w)
+	rx(t, f.env, f.bs, f.target.MessageID, "✅", "remove", "wake")
+	before := len(reactionEvents(t, f.env, f.a, "reaction"))
+	out := rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake")
+	if !out.Changed || out.Wake != nil || len(reactionEvents(t, f.env, f.a, "reaction")) != before+1 {
+		t.Fatalf("readd=%+v", out)
+	}
+	rxCount(t, f.env, 1)
+}
+func TestEmojiRotationWakesAtMostThree(t *testing.T) {
+	f := newRX(t)
+	for i, emoji := range []string{"✅", "❓", "❗", "✅", "❓", "❗"} {
+		out := rx(t, f.env, f.bs, f.target.MessageID, emoji, "add", "wake")
+		if !out.Changed {
+			t.Fatal("rotation unchanged")
+		}
+		if i < 3 {
+			rxAccept(t, f, needWake(t, out))
+		} else if out.Wake != nil {
+			t.Fatalf("repeat emoji woke: %+v", out)
+		}
+		rx(t, f.env, f.bs, f.target.MessageID, emoji, "remove", "wake")
+	}
+	rxCount(t, f.env, 3)
+	if n := count(t, f.env, `SELECT count(*) FROM reaction_wakes WHERE peer_id=? AND msg_id=?`, f.b, f.target.MessageID); n != 3 {
+		t.Fatalf("wake ledger=%d", n)
+	}
+}
+func TestOperatorReaddDoesWake(t *testing.T) {
+	f := newRX(t)
+	needWake(t, rx(t, f.env, f.env.OperatorSecret, f.target.MessageID, "✅", "add", "wake"))
+	rx(t, f.env, f.env.OperatorSecret, f.target.MessageID, "✅", "remove", "wake")
+	needWake(t, rx(t, f.env, f.env.OperatorSecret, f.target.MessageID, "✅", "add", "wake"))
+	rxCount(t, f.env, 2)
+	if n := count(t, f.env, `SELECT count(*) FROM reaction_wakes WHERE peer_id=?`, f.env.OperatorPeer); n != 0 {
+		t.Fatalf("operator ledger=%d", n)
+	}
+}
+func TestRemoveNeverWakes(t *testing.T) {
+	f := newRX(t)
+	rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "hold")
+	out := rx(t, f.env, f.bs, f.target.MessageID, "✅", "remove", "wake")
+	if !out.Changed || out.Wake != nil {
+		t.Fatalf("remove=%+v", out)
+	}
+	rxCount(t, f.env, 0)
+}
+func TestRemoveWithdrawsQueuedWake(t *testing.T) {
+	f := newRX(t)
+	cb, _ := rxRoute(t, f)
+	reportPresence(t, f.env, f.as, "", "working")
+	w := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake_idle"))
+	out := rx(t, f.env, f.bs, f.target.MessageID, "✅", "remove", "wake")
+	if out.Wake != nil || !reflect.DeepEqual(out.Superseded, []string{w.DeliveryID}) {
+		t.Fatalf("withdraw=%+v", out)
+	}
+	if s, held := deliveryState(t, f.env, w.DeliveryID); s != "superseded" || held != 0 {
+		t.Fatalf("state=%s held=%d", s, held)
+	}
+	reportPresence(t, f.env, f.as, "", "idle")
+	rxStep(t, f.env)
+	if len(cb.Posts()) != 0 {
+		t.Fatal("withdrawn wake pushed")
+	}
+}
+func TestCoalesceSupersedesQueuedWake(t *testing.T) {
+	f := newRX(t)
+	cb, _ := rxRoute(t, f)
+	reportPresence(t, f.env, f.as, "", "working")
+	w := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake_idle"))
+	m := mustSend(t, f.env, f.as, replyReq("other-target", f.target.ThreadID, f.target.MessageID))
+	out := rx(t, f.env, f.bs, m.MessageID, "❗", "add", "wake_idle")
+	w2 := needWake(t, out)
+	if !reflect.DeepEqual(out.Superseded, []string{w.DeliveryID}) {
+		t.Fatalf("superseded=%v", out.Superseded)
+	}
+	if s, _ := deliveryState(t, f.env, w.DeliveryID); s != "superseded" {
+		t.Fatalf("first=%s", s)
+	}
+	if s, _ := deliveryState(t, f.env, w2.DeliveryID); s != "queued" {
+		t.Fatalf("second=%s", s)
+	}
+	reportPresence(t, f.env, f.as, "", "idle")
+	rxStep(t, f.env)
+	rxStep(t, f.env)
+	if len(cb.Posts()) != 1 {
+		t.Fatalf("pushes=%d", len(cb.Posts()))
+	}
+	var d envelope.Delivery
+	if err := json.Unmarshal(cb.Posts()[0].Body, &d); err != nil || d.DeliveryID != w2.DeliveryID {
+		t.Fatalf("wrong push: %+v %v", d, err)
+	}
+}
+func TestCoalesceLeavesAcceptedWake(t *testing.T) {
+	f := newRX(t)
+	w := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))
+	rxAccept(t, f, w)
+	out := rx(t, f.env, f.bs, f.target.MessageID, "❗", "add", "wake")
+	needWake(t, out)
+	if len(out.Superseded) != 0 {
+		t.Fatalf("superseded=%v", out.Superseded)
+	}
+	if s, _ := deliveryState(t, f.env, w.DeliveryID); s != "accepted" {
+		t.Fatalf("first=%s", s)
+	}
+	rxCount(t, f.env, 2)
+}
+func TestCoalesceIsPerThreadAndReactor(t *testing.T) {
+	f := newRX(t)
+	x := needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))
+	other := mustSend(t, f.env, f.as, holdReq("Y", f.b))
+	y := needWake(t, rx(t, f.env, f.bs, other.MessageID, "✅", "add", "wake"))
+	c := needWake(t, rx(t, f.env, f.cs, f.target.MessageID, "✅", "add", "wake"))
+	out := rx(t, f.env, f.bs, f.target.MessageID, "❗", "add", "wake")
+	needWake(t, out)
+	if !reflect.DeepEqual(out.Superseded, []string{x.DeliveryID}) {
+		t.Fatalf("superseded=%v", out.Superseded)
+	}
+	for _, w := range []*hub.ReactWake{y, c} {
+		if s, _ := deliveryState(t, f.env, w.DeliveryID); s != "queued" {
+			t.Fatalf("other wake=%s", s)
+		}
+	}
+}
+func TestReactionWakeSkipsSelfAndSources(t *testing.T) {
+	f := newRX(t)
+	out := rx(t, f.env, f.as, f.target.MessageID, "✅", "add", "wake")
+	if !out.Changed || out.Wake != nil {
+		t.Fatalf("self=%+v", out)
+	}
+	src, _, _, err := f.env.Hub.AddSource(context.Background(), "github", "source", f.b, []string{"issues"}, "hold")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, dropped, err := f.env.Hub.IngestSource(context.Background(), hub.SourceMessage{SrcID: src, ProviderDeliveryID: "delivery", OriginThreadID: "issue/1", OriginEventID: "event/1", EventName: "issues.opened", Summary: "source", Raw: []byte(`{}`), MediaType: "application/json"})
+	if err != nil || dropped {
+		t.Fatalf("source=%s %v %v", msg, dropped, err)
+	}
+	out = rx(t, f.env, f.bs, msg, "✅", "add", "wake")
+	if !out.Changed || out.Wake != nil {
+		t.Fatalf("source reaction=%+v", out)
+	}
+	rxCount(t, f.env, 0)
+}
+func TestReactionWakeRespectsScopes(t *testing.T) {
+	f := newRX(t)
+	if err := f.env.Hub.SetScopes(context.Background(), f.b, nil, []string{f.a}); err != nil {
+		t.Fatal(err)
+	}
+	before := count(t, f.env, `SELECT count(*) FROM events`)
+	rejectReact(t, f.env, f.bs, rxBody(f.target.MessageID, "✅", "add", "wake"), 403, "scope_denied")
+	if count(t, f.env, `SELECT count(*) FROM reactions`) != 0 || count(t, f.env, `SELECT count(*) FROM reaction_ops`) != 0 || count(t, f.env, `SELECT count(*) FROM events`) != before {
+		t.Fatal("scope refusal wrote reaction state")
+	}
+	rxCount(t, f.env, 0)
+}
+func TestHistoryHidesReactionMessages(t *testing.T) {
+	f := newRX(t)
+	needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))
+	m2 := mustSend(t, f.env, f.as, replyReq("next", f.target.ThreadID, f.target.MessageID))
+	needWake(t, rx(t, f.env, f.bs, m2.MessageID, "❗", "add", "wake"))
+	m3 := mustSend(t, f.env, f.as, replyReq("last", f.target.ThreadID, m2.MessageID))
+	c, err := f.env.Hub.Auth.Resolve(context.Background(), f.bs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, next, err := f.env.Hub.ThreadMessages(context.Background(), c, f.target.ThreadID, "", 2)
+	if err != nil || len(page) != 2 || page[0].MessageID != f.target.MessageID || page[1].MessageID != m2.MessageID || next == nil || *next != m2.MessageID {
+		t.Fatalf("page=%+v next=%v err=%v", page, next, err)
+	}
+	page, next, err = f.env.Hub.ThreadMessages(context.Background(), c, f.target.ThreadID, *next, 2)
+	if err != nil || len(page) != 1 || page[0].MessageID != m3.MessageID || next != nil {
+		t.Fatalf("last page=%+v next=%v err=%v", page, next, err)
+	}
+}
+func TestSupersededNeverPushed(t *testing.T) {
+	f := newRX(t)
+	cb, _ := rxRoute(t, f)
+	// Seed a queued delivery in the terminal state so the gate fails red
+	// independently of whether wake creation has been implemented yet.
+	m := mustSend(t, f.env, f.bs, req("terminal", f.a))
+	id := m.Deliveries[0].DeliveryID
+	if _, err := f.env.Hub.DB.Exec(`UPDATE messages SET kind='reaction',body=json_set(body,'$.kind','reaction','$.reaction',json_object('target',?,'emoji','✅')) WHERE msg_id=?`, f.target.MessageID, m.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.env.Hub.DB.Exec(`UPDATE deliveries SET state='superseded',held=0,next_attempt_at=NULL WHERE dly_id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := f.env.Hub.DeliveryPushGate(context.Background(), id)
+	if err != nil || gate != hub.GateNever {
+		t.Errorf("gate=%v err=%v want GateNever", gate, err)
+	}
+	rxStep(t, f.env)
+	if len(cb.Posts()) != 0 {
+		t.Fatal("superseded claimed/pushed")
+	}
+	cur, err := f.env.Hub.Log.Current(context.Background(), []string{f.a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, raw := f.env.Do(f.as, "POST", "/v1/ack", map[string]string{"cursor": cur.String()})
+	if r.StatusCode != 204 {
+		t.Fatalf("ack=%d %s", r.StatusCode, raw)
+	}
+	f.env.Now.Advance(25 * time.Hour)
+	if _, err := f.env.Hub.ExpireDeliveries(context.Background(), f.env.Now.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := deliveryState(t, f.env, id); s != "superseded" {
+		t.Fatalf("terminal state=%s", s)
+	}
+	for _, rc := range receipts(t, f.env, f.b) {
+		if rc.DeliveryID == id {
+			t.Fatalf("receipt for superseded=%+v", rc)
+		}
+	}
+}
+func TestReactionWakeNotifiesOperator(t *testing.T) {
+	f := newRX(t)
+	target := mustSend(t, f.env, f.env.OperatorSecret, holdReq("operator", f.b))
+	rcv := newNotifyReceiver(t)
+	routes := putNotify(t, f.env, map[string]string{"url": rcv.srv.URL, "filter": "wake"})
+	w := needWake(t, rx(t, f.env, f.bs, target.MessageID, "✅", "add", "wake"))
+	f.env.Hub.WaitNotifies()
+	hits := rcv.Hits()
+	if len(hits) != 1 {
+		t.Fatalf("notifications=%d", len(hits))
+	}
+	ev := verifyNotify(t, hits[0], routes[rcv.srv.URL].Whsec, f.env.Now.Now())
+	var d envelope.Delivery
+	if err := json.Unmarshal(ev.Data, &d); err != nil || ev.Type != "delivery" || d.DeliveryID != w.DeliveryID || d.Message.Kind != "reaction" {
+		t.Fatalf("notification=%+v delivery=%+v err=%v", ev, d, err)
 	}
 }

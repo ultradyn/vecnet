@@ -467,3 +467,25 @@ func TestMatrix64Recipients(t *testing.T) {
 		}
 	}
 }
+
+func TestMatrixHidesReactionMessages(t *testing.T) {
+	env := testhub.Start(t)
+	a, as := env.NewPeer("session", "A")
+	b, bs := env.NewPeer("session", "B")
+	target := threadSend(t, env, as, "", []string{b}, nil)
+	// Give A only a reaction delivery, and keep B's original message column.
+	reaction := threadSend(t, env, bs, target.ThreadID, []string{a}, nil)
+	threadExecFixture(t, env, `UPDATE messages SET kind='reaction',body=json_set(body,'$.kind','reaction','$.reaction',json_object('target',?,'emoji','✅')) WHERE msg_id=?`, target.MessageID, reaction.MessageID)
+	last := threadSend(t, env, as, target.ThreadID, []string{b}, nil)
+	reader := opview.New(env.Hub)
+	got, err := reader.Matrix(threadCtx, target.ThreadID, "", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Recipients, []string{b}) {
+		t.Errorf("columns=%v want only B", got.Recipients)
+	}
+	if len(got.Rows) != 2 || got.Rows[0].MessageID != target.MessageID || got.Rows[1].MessageID != last.MessageID || got.NextAfter != nil {
+		t.Fatalf("matrix=%+v", got)
+	}
+}

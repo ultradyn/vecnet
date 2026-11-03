@@ -41,7 +41,7 @@ func (r *Reader) Inbox(ctx context.Context, c auth.Caller, q opapi.InboxQuery) (
 
 	// The same predicate applies to the page and the total unread count, so
 	// actionable approvals appear once and never pad the delivery count.
-	const visible = `d.recipient = ? AND NOT EXISTS (
+	const visible = `d.recipient = ? AND d.state != 'superseded' AND NOT EXISTS (
   SELECT 1 FROM approvals a WHERE a.msg_id = d.msg_id
   AND a.closed_at IS NULL AND a.expires_at > ?)`
 	// An approval the recipient answered was read, whether or not a read
@@ -202,7 +202,7 @@ func (r *Reader) MarkThreadRead(ctx context.Context, c auth.Caller, thrID string
 		return out, fmt.Errorf("opview: read thread: %w", err)
 	}
 	rows, err := r.Hub.DB.QueryContext(ctx,
-		`SELECT dly_id FROM deliveries WHERE thr_id = ? AND recipient = ? AND read_at IS NULL ORDER BY dly_id`, thrID, c.PeerID)
+		`SELECT dly_id FROM deliveries WHERE thr_id = ? AND recipient = ? AND read_at IS NULL AND state != 'superseded' ORDER BY dly_id`, thrID, c.PeerID)
 	if err != nil {
 		return out, fmt.Errorf("opview: unread thread deliveries: %w", err)
 	}

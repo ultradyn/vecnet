@@ -443,3 +443,39 @@ func TestMarkThreadReadConcurrent(t *testing.T) {
 		t.Errorf("repeat after concurrent reads = %+v, %v; want marked 0", got, err)
 	}
 }
+
+func TestInboxHidesSuperseded(t *testing.T) {
+	env := testhub.Start(t)
+	sender, secret := env.NewPeer("session", "reactor")
+	sent := send(t, env, secret, body("superseded", "wake", env.OperatorPeer))
+	id := sent.Deliveries[0].DeliveryID
+	// Seed a withdrawn wake independently of hub wake creation.
+	threadExecFixture(t, env, `UPDATE messages SET kind='reaction',body=json_set(body,'$.kind','reaction','$.reaction',json_object('target',msg_id,'emoji','✅')) WHERE msg_id=?`, sent.MessageID)
+	threadExecFixture(t, env, `UPDATE deliveries SET state='superseded' WHERE dly_id=?`, id)
+	for _, q := range []opapi.InboxQuery{{}, {UnreadOnly: true}} {
+		got := inbox(t, env, q)
+		if len(got.Deliveries) != 0 || got.Unread != 0 {
+			t.Errorf("superseded inbox=%+v", got)
+		}
+	}
+	got, err := opview.New(env.Hub).MarkThreadRead(context.Background(), caller(t, env), sent.ThreadID)
+	if err != nil || got.Marked != 0 {
+		t.Errorf("mark read=%+v err=%v", got, err)
+	}
+	var readAt *string
+	if err := env.Hub.DB.QueryRow(`SELECT read_at FROM deliveries WHERE dly_id=?`, id).Scan(&readAt); err != nil {
+		t.Fatal(err)
+	}
+	if readAt != nil {
+		t.Error("superseded marked read")
+	}
+	evs, err := env.Hub.Log.Read(context.Background(), []string{sender}, eventlog.Cursor{Epoch: env.Hub.Log.Epoch()}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range evs {
+		if ev.Type == "receipt" {
+			t.Errorf("receipt for superseded: %s", ev.Data)
+		}
+	}
+}
