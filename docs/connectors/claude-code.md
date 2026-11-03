@@ -75,4 +75,4 @@ vecnet --net P inbox
 
 The hook exits 0 after dispatch even on bad configuration, a hub failure, a busy lock or its 1.5-second budget expiring. Diagnostics go to stderr, which Claude Code keeps in its debug log. An unwritable config directory makes the hook silent; shown-state lives at `<config dir>/state/<profile>.json` or `<profile>@<as>.json` (§13.9).
 
-If a turn was interrupted, Claude Code may have dropped output that was already claimed. The delivery remains unacked and readable through `vecnet inbox`; starting a Monitor replays the unacked backlog (§13.9).
+A delivery is recorded as shown only after the hook's output was fully written; a timeout can repeat it next turn, never drop it. If a turn was interrupted, Claude Code may have dropped output that was already claimed. The delivery remains unacked and readable through `vecnet inbox`; starting a Monitor replays the unacked backlog (§13.9).
