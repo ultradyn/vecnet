@@ -112,6 +112,17 @@ func flatten(s string) string {
 	}, s)
 }
 
+// unbidi removes invisible formatting and Unicode line separators from
+// untrusted display text so peers cannot reorder or hide terminal output.
+func unbidi(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
 // firstRunes returns the first n characters of s.
 func firstRunes(s string, n int) string {
 	i := 0
@@ -133,7 +144,7 @@ func dash(s string) string {
 
 // peerName makes an untrusted display name safe for one output column.
 func peerName(name string) string {
-	return firstRunes(strings.ReplaceAll(flatten(name), " ", "_"), peerNameRunes)
+	return firstRunes(strings.ReplaceAll(unbidi(flatten(name)), " ", "_"), peerNameRunes)
 }
 
 // monitorLine is the `watch --for-monitor` line (PROTOCOL §13.7):
@@ -141,7 +152,7 @@ func peerName(name string) string {
 // prefix in text. The prefix and text together are capped at 120 runes.
 func monitorLine(ev envelope.Event, names map[string]string) string {
 	f := eventFieldsOf(ev)
-	text := flatten(f.text)
+	text := unbidi(flatten(f.text))
 	if name := names[f.sender]; name != "" {
 		text = peerName(name) + ": " + text
 	}
@@ -158,7 +169,7 @@ func inboxLine(ev envelope.Event, names map[string]string) string {
 	if name := names[f.sender]; name != "" {
 		from = peerName(name) + "(" + f.sender + ")"
 	}
-	text := flatten(f.text)
+	text := unbidi(flatten(f.text))
 	if f.attachments > 0 {
 		text += fmt.Sprintf(" [+%d attachment(s)]", f.attachments)
 	}
@@ -178,7 +189,7 @@ func (a *app) cmdWatch(args []string) error {
 	if len(o.pos) != 0 {
 		return usageErr("usage: vecnet watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]")
 	}
-	c, _, ch, err := a.connect()
+	c, name, ch, err := a.connect()
 	if err != nil {
 		return err
 	}
@@ -187,6 +198,11 @@ func (a *app) cmdWatch(args []string) error {
 		names:      ch.peerNames(),
 		forMonitor: o.has("for-monitor"), autoAck: o.has("auto-ack"), deliveriesOnly: o.has("deliveries-only"),
 		retry: watchDefaultRetry, seen: newDedupe(dedupeWindow),
+	}
+	if w.forMonitor && !a.json {
+		if path, err := statePath(a.getenv, name, a.as); err == nil {
+			w.shown = &stateFile{path: path}
+		}
 	}
 	// Without --since the first connect leaves out ?after=, so the hub
 	// starts at the stream's shared acked cursor (PROTOCOL §2.3).
@@ -209,6 +225,8 @@ type watcher struct {
 	retry      time.Duration // the hub's "retry:" value
 	seen       *dedupe
 	pendingAck string
+	shown      *stateFile
+	replayed   bool
 }
 
 // errPeerDisabled is the 204 answer: stop reconnecting (PROTOCOL §2.3).
@@ -242,7 +260,12 @@ func (w *watcher) run() error {
 			return nil
 		}
 		var err error
-		if failures >= watchSSEFailures && failures%2 == 1 {
+		if w.forMonitor && !w.a.json && !w.replayed {
+			err = w.replay()
+			if err == nil {
+				err = w.stream()
+			}
+		} else if failures >= watchSSEFailures && failures%2 == 1 {
 			err = w.longPoll()
 		} else {
 			err = w.stream()
@@ -390,7 +413,7 @@ func (w *watcher) stream() error {
 				// Empty data (the hub's priming event) only moves the
 				// cursor; it is not an event (PROTOCOL §13.1).
 				if joined := strings.Join(data, "\n"); hasData && joined != "" {
-					w.handle(evType, joined)
+					w.handle(evType, joined, false)
 				}
 				w.cursor = idBuf
 				data, hasData, evType = nil, false, ""
@@ -478,7 +501,7 @@ func (w *watcher) longPoll() error {
 		if err != nil {
 			continue
 		}
-		w.handle(ev.Type, string(raw))
+		w.handle(ev.Type, string(raw), false)
 		w.cursor = ev.Cursor
 	}
 	if body.NextCursor != "" {
@@ -487,9 +510,34 @@ func (w *watcher) longPoll() error {
 	return nil
 }
 
+// replay prints the unacked backlog even if another consumer showed it.
+// Only the subsequent live stream consults the shared shown set.
+func (w *watcher) replay() error {
+	for page := 0; page < 100; page++ {
+		body, err := w.a.poll(w.c, w.cursor, 0)
+		if err != nil {
+			return err
+		}
+		for _, ev := range body.Events {
+			raw, err := json.Marshal(ev)
+			if err != nil {
+				return err
+			}
+			w.handle(ev.Type, string(raw), true)
+		}
+		w.cursor = body.NextCursor
+		if len(body.Events) == 0 {
+			break
+		}
+	}
+	w.replayed = true
+	w.connected = false
+	return nil
+}
+
 // handle prints one event (deduped on delivery_id), caches its message
 // thread and queues its cursor for --auto-ack.
-func (w *watcher) handle(evType, data string) {
+func (w *watcher) handle(evType, data string, replay bool) {
 	var ev envelope.Event
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
 		fmt.Fprintf(w.a.stderr, "vecnet: watch: undecodable %s event: %v\n", evType, err)
@@ -508,6 +556,14 @@ func (w *watcher) handle(evType, data string) {
 		f := eventFieldsOf(ev)
 		if f.deliveryID != "" && !w.seen.add(f.deliveryID) {
 			return
+		}
+		if w.forMonitor && !w.a.json && w.shown != nil && f.deliveryID != "" {
+			ctx, cancel := context.WithTimeout(w.a.ctx, 250*time.Millisecond)
+			claimed := w.shown.claimOne(ctx, f.deliveryID)
+			cancel()
+			if !replay && !claimed {
+				return
+			}
 		}
 		w.a.rememberEvents(w.ch, []envelope.Event{ev})
 	} else if w.deliveriesOnly {
