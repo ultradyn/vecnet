@@ -23,7 +23,7 @@ const schemaID = "urn:vecnet:envelope:1"
 var schemaJSON []byte
 
 // defs are the $defs names Validate accepts.
-var defs = []string{"sendRequest", "delivery", "event", "receipt", "presence", "threadSummary", "message"}
+var defs = []string{"sendRequest", "delivery", "event", "receipt", "presence", "threadSummary", "message", "reaction", "reactionEvent", "reactionRequest"}
 
 var (
 	compiled = map[string]*jsonschema.Schema{}
@@ -67,7 +67,8 @@ func (e *SchemaError) Error() string {
 
 // Validate checks raw JSON against $defs/<def> of the embedded schema.
 // def is one of "sendRequest", "delivery", "event", "receipt", "presence",
-// "threadSummary", "message". A violation, including malformed JSON or
+// "threadSummary", "message", "reaction", "reactionEvent", "reactionRequest".
+// A violation, including malformed JSON or
 // trailing data, is returned as *SchemaError; an unknown def is a plain error.
 func Validate(def string, raw []byte) error {
 	sch, ok := compiled[def]

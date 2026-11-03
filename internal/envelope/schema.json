@@ -105,9 +105,10 @@
         "message",
         "approval_request",
         "approval_response",
-        "job_status"
+        "job_status",
+        "reaction"
       ],
-      "description": "message: ordinary content, may carry job_request. approval_request/approval_response: yes/no with expiry. job_status: progress report on a job. Presence and receipts are NOT messages; they are their own Event types."
+      "description": "message: ordinary content, may carry job_request. approval_request/approval_response: yes/no with expiry. job_status: progress report on a job. reaction: hub-authored wake referencing a target message. Presence and receipts are NOT messages; they are their own Event types."
     },
     "origin": {
       "type": "object",
@@ -368,6 +369,53 @@
         }
       }
     },
+    "reactionEmoji": {
+      "type": "string",
+      "enum": ["\ud83d\udc4d", "\ud83d\udc4e", "\u2764\ufe0f", "\ud83d\ude02", "\ud83d\udc40", "\u2705", "\u2753", "\u2757"]
+    },
+    "reaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "emoji"],
+      "properties": {
+        "target": {"$ref": "#/$defs/messageId"},
+        "emoji": {"$ref": "#/$defs/reactionEmoji"}
+      }
+    },
+    "reactionGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["emoji", "peers"],
+      "properties": {
+        "emoji": {"$ref": "#/$defs/reactionEmoji"},
+        "peers": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/peerId"}}
+      }
+    },
+    "reactionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_id", "emoji", "op"],
+      "properties": {
+        "message_id": {"$ref": "#/$defs/messageId"},
+        "emoji": {"type": "string", "maxLength": 32, "description": "At most 32 UTF-8 bytes (hub enforced); not restricted to the enum so an unsupported emoji returns 422 emoji_not_allowed."},
+        "op": {"type": "string", "enum": ["add", "remove"]},
+        "as": {"$ref": "#/$defs/peerId"},
+        "priority": {"$ref": "#/$defs/priority"}
+      }
+    },
+    "reactionEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_id", "thread_id", "peer_id", "emoji", "op", "at"],
+      "properties": {
+        "message_id": {"$ref": "#/$defs/messageId"},
+        "thread_id": {"$ref": "#/$defs/threadId"},
+        "peer_id": {"$ref": "#/$defs/peerId"},
+        "emoji": {"$ref": "#/$defs/reactionEmoji"},
+        "op": {"type": "string", "enum": ["add", "remove"]},
+        "at": {"$ref": "#/$defs/timestamp"}
+      }
+    },
     "message": {
       "type": "object",
       "description": "The logical message. Identical across every Delivery of it. Fields the hub fills: message_id, thread_id (if new), sender, created_at, loop, origin (bridged ingress only).",
@@ -469,9 +517,28 @@
         },
         "approval_response": {
           "$ref": "#/$defs/approvalResponse"
+        },
+        "reaction": {
+          "$ref": "#/$defs/reaction"
+        },
+        "reactions": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/reactionGroup"},
+          "description": "thread history only; never in a Delivery"
         }
       },
       "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "reaction"}}},
+          "then": {
+            "required": ["reaction"],
+            "not": {"anyOf": [{"required": ["job_request"]}, {"required": ["job_status"]}, {"required": ["approval_request"]}, {"required": ["approval_response"]}]}
+          }
+        },
+        {
+          "if": {"not": {"properties": {"kind": {"const": "reaction"}}}},
+          "then": {"not": {"required": ["reaction"]}}
+        },
         {
           "if": {
             "properties": {
@@ -817,7 +884,8 @@
             "thread_updated",
             "directory_updated",
             "approval_expired",
-            "operator_view"
+            "operator_view",
+            "reaction"
           ]
         },
         "at": {
@@ -838,8 +906,11 @@
               "$ref": "#/$defs/threadSummary"
             },
             {
+              "$ref": "#/$defs/reactionEvent"
+            },
+            {
               "type": "object",
-              "description": "directory_updated: {peer_id, change}. approval_expired: {approval_id, thread_id}. operator_view: {reason: sent|read|presence|dead_letter|subscription, thread_id: thr_ id or null}; operator logs only."
+              "description": "directory_updated: {peer_id, change}. approval_expired: {approval_id, thread_id}. operator_view: {reason: sent|read|presence|dead_letter|subscription|reaction, thread_id: thr_ id or null}; operator logs only."
             }
           ]
         }
@@ -900,7 +971,8 @@
           }
         },
         "kind": {
-          "$ref": "#/$defs/kind",
+          "type": "string",
+          "enum": ["message", "approval_request", "approval_response", "job_status"],
           "default": "message"
         },
         "priority": {
