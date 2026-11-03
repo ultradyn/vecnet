@@ -183,12 +183,11 @@ func TestHookAndWatchShowOnce(t *testing.T) {
 			contexts.WriteString(hookE2EContext(t, raw, "UserPromptSubmit"))
 			contexts.WriteByte('\n')
 		}
-		deadline := time.Now().Add(3 * time.Second)
-		for !strings.Contains(out.String()+contexts.String(), msg) && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-		}
-		time.Sleep(30 * time.Millisecond)
 	}
+	// This later delivery is consumed only by watch. Ordered SSE handling
+	// guarantees the six competing deliveries have passed through live dedupe.
+	b.send(aID, "watch completion barrier", "--hold")
+	waitLine(t, out, regexp.MustCompile(`watch completion barrier$`), 5*time.Second)
 	stop()
 	combined := out.String() + contexts.String()
 	for i := 1; i <= 6; i++ {

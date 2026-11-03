@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -126,10 +127,12 @@ func hookOutput(event, context string) []byte {
 }
 
 type hookResult struct {
-	output      []byte
-	diagnostics []byte
-	client      *client
-	ackCursor   string
+	output         []byte
+	diagnostics    []byte
+	client         *client
+	ackCursor      string
+	stdout, stderr io.Writer
+	closeOutput    func()
 }
 
 func (a *app) cmdHook(args []string) (err error) {
@@ -143,35 +146,55 @@ func (a *app) cmdHook(args []string) (err error) {
 	a.ctx = ctx
 	worker := *a
 	nowTime, afterPoll := hookNow, hookAfterPoll
-	done := make(chan hookResult, 1)
+	done := make(chan hookResult)
 	// Local filesystem reads cannot take a context. Supervise the complete
 	// operation so blocked config, cache or stdin I/O cannot hold up a turn.
 	// Only the caller writes stdout; expired workers cannot emit later.
 	go func() {
 		var result hookResult
 		var diagnostics bytes.Buffer
+		var stdout, stderr io.Writer
+		closeOut, closeErr := func() {}, func() {}
 		worker.stderr = &diagnostics
 		defer func() {
 			if recover() != nil {
 				result = hookResult{}
 			}
 			result.diagnostics = append([]byte(nil), diagnostics.Bytes()...)
-			done <- result
+			result.stdout, result.stderr = stdout, stderr
+			result.closeOutput = func() { closeOut(); closeErr() }
+			select {
+			case done <- result:
+				// The caller now owns the prepared outputs.
+			case <-ctx.Done():
+				result.closeOutput()
+			}
 		}()
+		stdout, closeOut = hookPrepareWriter(a.stdout)
+		stderr, closeErr = hookPrepareWriter(a.stderr)
+		if stdout == nil {
+			return
+		}
 		result = worker.hookRun(args, nowTime, afterPoll)
 	}()
 	select {
 	case <-ctx.Done():
 		return nil
 	case result := <-done:
+		defer result.closeOutput()
 		if ctx.Err() != nil {
 			return nil
 		}
 		if len(result.diagnostics) > 0 {
-			_, _ = a.stderr.Write(result.diagnostics)
+			_ = hookWrite(ctx, result.stderr, result.diagnostics)
+			if ctx.Err() != nil {
+				return nil
+			}
 		}
 		if len(result.output) > 0 {
-			_, _ = a.stdout.Write(result.output)
+			if !hookWrite(ctx, result.stdout, result.output) {
+				return nil
+			}
 		}
 		if result.ackCursor != "" {
 			acked := make(chan struct{})
@@ -186,6 +209,102 @@ func (a *app) cmdHook(args []string) (err error) {
 			}
 		}
 		return nil
+	}
+}
+
+// hookPrepareWriter runs in the supervised worker, since even opening a
+// descriptor can stall. Inherited Unix stdout/stderr pipes are often not
+// registered with Go's poller. Reopen just those pipes as owned, pollable
+// handles. O_RDWR avoids waiting for a FIFO reader during open; the handle
+// is closed before returning. Never change the caller's descriptor flags.
+func hookPrepareWriter(w io.Writer) (io.Writer, func()) {
+	noop := func() {}
+	switch w.(type) {
+	case *bytes.Buffer, *strings.Builder, *io.PipeWriter:
+		return w, noop
+	}
+	if w == io.Discard {
+		return w, noop
+	}
+	if deadline, ok := w.(interface{ SetWriteDeadline(time.Time) error }); ok && deadline.SetWriteDeadline(time.Time{}) == nil {
+		return w, noop
+	}
+	f, ok := w.(*os.File)
+	if !ok || (f != os.Stdout && f != os.Stderr) {
+		return nil, noop
+	}
+	info, err := f.Stat()
+	if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+		return nil, noop
+	}
+	owned, err := os.OpenFile(f.Name(), os.O_RDWR, 0)
+	if err != nil {
+		return nil, noop
+	}
+	if owned.SetWriteDeadline(time.Time{}) != nil {
+		_ = owned.Close()
+		return nil, noop
+	}
+	return owned, func() { _ = owned.Close() }
+}
+
+// hookWrite performs the write synchronously, with cancellation applied to
+// the underlying I/O. Returning from a goroutine select alone would permit
+// a delayed write after the invocation has returned. Unknown writers have
+// no cancellation contract, so leave them untouched and fail open silently.
+func hookWrite(ctx context.Context, w io.Writer, data []byte) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	switch w := w.(type) {
+	case *bytes.Buffer:
+		_, _ = w.Write(data)
+		return true
+	case *strings.Builder:
+		_, _ = w.Write(data)
+		return true
+	case interface {
+		io.Writer
+		SetWriteDeadline(time.Time) error
+	}:
+		deadline, ok := ctx.Deadline()
+		if !ok || w.SetWriteDeadline(deadline) != nil {
+			return false
+		}
+		canceled := make(chan struct{})
+		stop := context.AfterFunc(ctx, func() {
+			defer close(canceled)
+			_ = w.SetWriteDeadline(time.Now())
+		})
+		defer func() {
+			if !stop() {
+				<-canceled
+			}
+			_ = w.SetWriteDeadline(time.Time{})
+		}()
+		if ctx.Err() != nil {
+			return false
+		}
+		n, err := w.Write(data)
+		return err == nil && n == len(data)
+	case *io.PipeWriter:
+		canceled := make(chan struct{})
+		stop := context.AfterFunc(ctx, func() {
+			defer close(canceled)
+			_ = w.CloseWithError(ctx.Err())
+		})
+		defer func() {
+			if !stop() {
+				<-canceled
+			}
+		}()
+		if ctx.Err() != nil {
+			return false
+		}
+		n, err := w.Write(data)
+		return err == nil && n == len(data)
+	default:
+		return w == io.Discard
 	}
 }
 
@@ -360,15 +479,14 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func())
 		if len(items) > 0 {
 			output = hookContext(name, items, more, lowerBound)
 		}
+		// Cache preparation can block on local I/O. Keep it inside the
+		// transaction, so an expired worker cannot commit shown ids/cursor.
+		if len(claimed) > 0 {
+			a.rememberEvents(ch, claimed)
+		}
 		return ctx.Err()
 	})
 	if e != nil || ctx.Err() != nil {
-		return hookResult{}
-	}
-	if len(claimed) > 0 {
-		a.rememberEvents(ch, claimed)
-	}
-	if ctx.Err() != nil {
 		return hookResult{}
 	}
 	result := hookResult{client: c}

@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -314,6 +316,11 @@ func TestHookHostileIsInert(t *testing.T) {
 	}
 }
 func TestHookCapsLength(t *testing.T) {
+	// This test stresses multi-megabyte fixtures and formatting, not timing.
+	// Race instrumentation must not compete with the production timeout test.
+	old := hookBudget
+	hookBudget = 15 * time.Second
+	defer func() { hookBudget = old }()
 	for _, text := range []string{strings.Repeat("界", 10000), strings.Repeat("😀", 10000), strings.Repeat("\"", 10000)} {
 		events := make([]envelope.Event, 100)
 		for i := range events {
@@ -349,8 +356,39 @@ func TestHookCapsLength(t *testing.T) {
 		if text[0] != byte('"') && (items != 8 || !strings.Contains(ctx, "(+92 more")) {
 			t.Fatalf("expected eight items: %q", ctx)
 		}
+		if text[0] == byte('"') && items >= hookMaxItems {
+			t.Fatal("quote-heavy fixture did not exercise the UTF-16 cap")
+		}
+		assertBatch := func(context string, first int) {
+			t.Helper()
+			var ids []string
+			for _, line := range strings.Split(context, "\n") {
+				if !strings.HasPrefix(line, "cursor=") {
+					continue
+				}
+				n := first + len(ids)
+				if !strings.HasPrefix(line, fmt.Sprintf("cursor=e1.%d ", n)) || !strings.Contains(line, fmt.Sprintf(" delivery=dly_%d ", n)) {
+					t.Fatalf("noncontiguous batch: first=%d line=%q", first, line)
+				}
+				ids = append(ids, fmt.Sprintf("dly_%d", n))
+			}
+			if len(ids) != items {
+				t.Fatalf("batch has %d items, want %d", len(ids), items)
+			}
+			state := readHookState(t, path)
+			last := first + len(ids) - 1
+			var shown []string
+			for n := 1; n <= last; n++ {
+				shown = append(shown, fmt.Sprintf("dly_%d", n))
+			}
+			if state.PollCursor != fmt.Sprintf("e1.%d", last) || !reflect.DeepEqual(state.Shown, shown) {
+				t.Fatalf("batch state=%+v, want shown=%v through e1.%d", state, shown, last)
+			}
+		}
+		assertBatch(ctx, 1)
 		out, _ = runHook(t, env, "--event", "user-prompt")
 		next := contextOf(t, out)
+		assertBatch(next, items+1)
 		for i := 1; i <= items; i++ {
 			if strings.Contains(next, fmt.Sprintf("delivery=dly_%d ", i)) {
 				t.Fatalf("repeated delivery %d", i)
@@ -529,5 +567,190 @@ func TestHookConfigBudget(t *testing.T) {
 		close(release)
 		<-finished
 		t.Fatal("configuration escaped hook budget")
+	}
+}
+
+// Run the actual CLI with inherited OS pipes, rather than only bytes.Buffer.
+func TestHookProcess(t *testing.T) {
+	if os.Getenv("HH_T02_HOOK_CHILD") != "1" {
+		return
+	}
+	os.Exit(RunContext(context.Background(), []string{"hook", "--event", "user-prompt"}, strings.NewReader(""), os.Stdout, os.Stderr, os.Getenv))
+}
+
+func hookProcess(t *testing.T, env map[string]string) *exec.Cmd {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHookProcess$")
+	cmd.Env = append(os.Environ(), "HH_T02_HOOK_CHILD=1", "GORACE="+os.Getenv("GORACE")+" atexit_sleep_ms=0")
+	for key, value := range env {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	return cmd
+}
+
+func TestHookBlockedOutputBudget(t *testing.T) {
+	for _, stream := range []string{"stdout", "stderr"} {
+		t.Run(stream, func(t *testing.T) {
+			env, path := hookFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if stream == "stderr" {
+					w.WriteHeader(409)
+					fmt.Fprint(w, `{"error":{"code":"cursor_purged","details":{}}}`)
+					return
+				}
+				hookPage(w, []envelope.Event{hookEvent(1, "blocked output")}, "e1.1")
+			})
+			seedHook(t, path, "e1.0")
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Close()
+			defer writer.Close()
+			// A short deadline can expire before the first write is even
+			// scheduled on the shared build slice. Require actual prefill,
+			// retrying zero-byte timeouts before starting the hook budget.
+			filled := 0
+			prefillUntil := time.Now().Add(5 * time.Second)
+			for filled == 0 {
+				if err := writer.SetWriteDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+					t.Skipf("pipe deadlines unavailable: %v", err)
+				}
+				n, err := writer.Write(bytes.Repeat([]byte("x"), 1<<20))
+				filled += n
+				if !os.IsTimeout(err) {
+					t.Fatalf("prefill: n=%d err=%v", filled, err)
+				}
+				if filled == 0 && time.Now().After(prefillUntil) {
+					t.Fatal("could not prefill output pipe")
+				}
+			}
+			if err := writer.SetWriteDeadline(time.Time{}); err != nil {
+				t.Fatal(err)
+			}
+			cmd := hookProcess(t, env)
+			var other bytes.Buffer
+			if stream == "stdout" {
+				cmd.Stdout, cmd.Stderr = writer, &other
+			} else {
+				cmd.Stdout, cmd.Stderr = &other, writer
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(2500 * time.Millisecond):
+				_ = cmd.Process.Kill()
+				<-done
+				t.Fatal("blocked " + stream + " escaped hook budget")
+			}
+			// Once the hook returns, draining must reveal only the prefill.
+			_ = writer.Close()
+			raw, err := io.ReadAll(reader)
+			if err != nil || len(raw) != filled || bytes.Count(raw, []byte("x")) != filled {
+				t.Fatalf("late/partial hook emission: size=%d prefill=%d err=%v", len(raw), filled, err)
+			}
+		})
+	}
+}
+
+func TestHookBlockedMessageCacheKeepsDelivery(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("FIFO regression requires Unix")
+	}
+	env, path := hookFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		hookPage(w, []envelope.Event{hookEvent(1, "retry after cache timeout")}, "e1.1")
+	})
+	seedHook(t, path, "e1.0")
+	dir, _ := cacheDir(func(k string) string { return env[k] })
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(dir, "messages.json")
+	if err := exec.Command("mkfifo", fifo).Run(); err != nil {
+		t.Fatal(err)
+	}
+	cmd := hookProcess(t, env)
+	raw, err := cmd.Output()
+	if err != nil || len(raw) != 0 {
+		t.Fatalf("cache timeout: output=%q err=%v", raw, err)
+	}
+	s := readHookState(t, path)
+	if s.PollCursor != "e1.0" || len(s.Shown) != 0 {
+		t.Fatalf("cache timeout consumed delivery: %+v", s)
+	}
+	if err := os.Remove(fifo); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = hookProcess(t, env).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(contextOf(t, string(raw)), "delivery=dly_1 ") {
+		t.Fatal("retry lost delivery")
+	}
+	s = readHookState(t, path)
+	if s.PollCursor != "e1.1" || !reflect.DeepEqual(s.Shown, []string{"dly_1"}) {
+		t.Fatalf("retry state=%+v", s)
+	}
+}
+
+func TestHookPipeOutputCancellation(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if hookWrite(ctx, writer, []byte("must not appear later")) || time.Since(start) > time.Second {
+		t.Fatalf("blocked pipe escaped cancellation after %s", time.Since(start))
+	}
+	read := make(chan []byte, 1)
+	go func() { raw, _ := io.ReadAll(reader); read <- raw }()
+	select {
+	case raw := <-read:
+		if len(raw) != 0 {
+			t.Fatalf("late hook output: %q", raw)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled output pipe remained open")
+	}
+}
+
+func TestHookUncancellableOutputLeavesDeliveryEligible(t *testing.T) {
+	env, path := hookFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		hookPage(w, []envelope.Event{hookEvent(1, "unsupported output")}, "e1.1")
+	})
+	seedHook(t, path, "e1.0")
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	// Hiding CloseWithError removes the pipe's cancellation contract.
+	opaque := struct{ io.Writer }{writer}
+	done := make(chan int, 1)
+	var errs bytes.Buffer
+	go func() {
+		done <- RunContext(context.Background(), []string{"hook", "--event", "user-prompt"}, strings.NewReader(""), opaque, &errs, func(k string) string { return env[k] })
+	}()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("exit=%d", code)
+		}
+	case <-time.After(2 * time.Second):
+		_ = writer.Close()
+		<-done
+		t.Fatal("uncancellable writer escaped budget")
+	}
+	state := readHookState(t, path)
+	if state.PollCursor != "e1.0" || len(state.Shown) != 0 {
+		t.Fatalf("unsupported stdout consumed delivery: %+v", state)
 	}
 }
