@@ -1,14 +1,16 @@
 import { rm, writeFile } from 'node:fs/promises';
+import { rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { ansiHTML, LINE } from './ansi.mjs';
-import { assert, bootDemo, buildCLI, chromium, run, shotPath } from './lib.mjs';
+import { assert, bootDemo, buildCLI, chromium, registerExitCleanup, run, shotPath } from './lib.mjs';
 
 const quote = s => `'${s.replaceAll("'", "'\\''")}'`;
 export async function withTui({ scale = false, command, env: shared, beatEvery } = {}, fn) {
   const env = shared || await bootDemo({ scale });
   const socket = `oui-${process.pid}`;
   const tmux = (...args) => run('tmux', ['-L', socket, ...args], { env: { ...process.env, TMUX: '' } });
-  let browser, started = false;
+  let browser, started = false, unregister;
   try {
     const config = join(env.dir, 'config.toml');
     await writeFile(config, `default = "demo"\n[profiles.demo]\nhub = ${JSON.stringify(env.demo.url)}\nsecret = ${JSON.stringify(env.demo.operator_secret)}\npeer_id = ${JSON.stringify(env.demo.operator_peer)}\n`, { mode: 0o600 });
@@ -22,6 +24,10 @@ export async function withTui({ scale = false, command, env: shared, beatEvery }
     const shell = `env -u NO_COLOR COLORTERM=truecolor VECNET_CONFIG=${quote(config)} XDG_CACHE_HOME=${quote(join(env.dir, 'cache'))} XDG_CONFIG_HOME=${quote(join(env.dir, 'config'))} TERM=xterm-256color${beat} ${argv.map(quote).join(' ')}`;
     await tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'ui', '-x', '140', '-y', '42', shell);
     started = true;
+    unregister = registerExitCleanup(() => {
+      spawnSync('tmux', ['-L', socket, 'kill-server'], { env: { ...process.env, TMUX: '' } });
+      rmSync(join(process.env.TMUX_TMPDIR || '/tmp', `tmux-${process.getuid()}`, socket), { force: true });
+    });
     await tmux('set-option', '-g', 'status', 'off');
     browser = await (await chromium()).launch({ headless: true });
     const page = await browser.newPage({ viewport: { width: 1240, height: Math.ceil(42 * LINE) + 32 }, colorScheme: 'dark' });
@@ -59,7 +65,7 @@ export async function withTui({ scale = false, command, env: shared, beatEvery }
       try { if (started) await tmux('kill-server'); } finally {
         // tmux leaves the socket file behind after kill-server; remove ours so runs do not pile up in the tmux dir.
         await rm(join(process.env.TMUX_TMPDIR || '/tmp', `tmux-${process.getuid()}`, socket), { force: true }).catch(() => {});
-        if (!shared) await env.close();
+        try { if (!shared) await env.close(); } finally { unregister?.(); }
       }
     }
   }
