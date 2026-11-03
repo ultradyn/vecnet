@@ -8,9 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"regexp"
-	"runtime"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -133,12 +131,9 @@ func hookOutput(event, context string) []byte {
 }
 
 type hookResult struct {
-	output         []byte
-	diagnostics    []byte
-	client         *client
-	ackCursor      string
-	stdout, stderr io.Writer
-	closeOutput    func()
+	diagnostics []byte
+	client      *client
+	ackCursor   string
 }
 
 func (a *app) cmdHook(args []string) (err error) {
@@ -151,281 +146,87 @@ func (a *app) cmdHook(args []string) (err error) {
 	defer cancel()
 	a.ctx = ctx
 	worker := *a
+	stdout, stderr := a.stdout, a.stderr
 	nowTime, afterPoll := hookNow, hookAfterPoll
-	done := make(chan hookResult)
+	publish := func(data []byte) error { return hookWrite(ctx, stdout, data) }
+	done := make(chan hookResult, 1)
 	// Local filesystem reads cannot take a context. Supervise the complete
 	// operation so blocked config, cache or stdin I/O cannot hold up a turn.
-	// Only the caller writes stdout; expired workers cannot emit later.
 	go func() {
 		var result hookResult
 		var diagnostics bytes.Buffer
-		var stdout, stderr io.Writer
-		closeOut, closeErr := func() {}, func() {}
 		worker.stderr = &diagnostics
 		defer func() {
 			if recover() != nil {
 				result = hookResult{}
 			}
-			result.diagnostics = append([]byte(nil), diagnostics.Bytes()...)
-			result.stdout, result.stderr = stdout, stderr
-			result.closeOutput = func() { closeOut(); closeErr() }
-			select {
-			case done <- result:
-				// The caller now owns the prepared outputs.
-			case <-ctx.Done():
-				result.closeOutput()
-			}
+			result.diagnostics = diagnostics.Bytes()
+			done <- result
 		}()
-		stdout, closeOut = hookPrepareWriter(a.stdout)
-		stderr, closeErr = hookPrepareWriter(a.stderr)
-		if stdout == nil {
-			return
-		}
-		outputLimit, supported := hookOutputLimit(stdout)
-		if !supported {
-			return
-		}
-		result = worker.hookRun(args, nowTime, afterPoll, outputLimit)
+		result = worker.hookRun(args, nowTime, afterPoll, publish)
 	}()
+	var result hookResult
 	select {
 	case <-ctx.Done():
 		return nil
-	case result := <-done:
-		defer result.closeOutput()
-		if ctx.Err() != nil {
-			return nil
-		}
-		if len(result.diagnostics) > 0 {
-			_ = hookWrite(ctx, result.stderr, result.diagnostics)
-			if ctx.Err() != nil {
-				return nil
-			}
-		}
-		if len(result.output) > 0 {
-			if !hookWrite(ctx, result.stdout, result.output) {
-				return nil
-			}
-		}
-		if result.ackCursor != "" {
-			acked := make(chan struct{})
-			go func() {
-				defer close(acked)
-				defer func() { _ = recover() }()
-				_ = a.ack(result.client, result.ackCursor)
-			}()
-			select {
-			case <-ctx.Done():
-			case <-acked:
-			}
-		}
-		return nil
+	case result = <-done:
 	}
-}
-
-// hookPlatformPipe is supplied by the BSD/Windows files. Their kernels can
-// report free pipe capacity, allowing complete frames larger than PIPE_BUF.
-var hookPlatformPipe func(*os.File) (*hookPipeWriter, func(), error)
-
-// hookPipeWriter is for a dedicated hook stdout pipe: the hook is its only
-// writer. Readers can only increase available space. A capacity check followed
-// by ONE nonblocking write therefore publishes a complete frame or nothing,
-// even when a reader stops. Concurrent writers sharing stdout are unsupported
-// here; POSIX only guarantees 512 bytes against those writers on BSD, which
-// cannot contain the protocol's required wrapper and schema-shaped IDs.
-type hookPipeWriter struct {
-	limit     int
-	available func() (int, error)
-	write     func([]byte) (int, error)
-}
-
-func (w *hookPipeWriter) Write(data []byte) (int, error) { return w.write(data) }
-
-func (w *hookPipeWriter) publish(ctx context.Context, data []byte) bool {
-	if len(data) > w.limit {
-		return false
-	}
-	for ctx.Err() == nil {
-		free, err := w.available()
-		if err != nil {
-			return false
-		}
-		if free >= len(data) {
-			if ctx.Err() != nil {
-				return false
-			}
-			n, err := w.write(data)
-			return err == nil && n == len(data)
-		}
-		timer := time.NewTimer(10 * time.Millisecond)
+	if result.ackCursor != "" && ctx.Err() == nil {
+		acked := make(chan struct{})
+		go func() {
+			defer close(acked)
+			defer func() { _ = recover() }()
+			_ = a.ack(result.client, result.ackCursor)
+		}()
 		select {
 		case <-ctx.Done():
-			timer.Stop()
-			return false
-		case <-timer.C:
+		case <-acked:
 		}
 	}
-	return false
+	if len(result.diagnostics) > 0 {
+		_ = hookWrite(ctx, stderr, result.diagnostics)
+	}
+	return nil
 }
 
-// hookPrepareWriter runs in the supervised worker, since even opening a
-// descriptor can stall. Inherited Unix stdout/stderr pipes are often not
-// registered with Go's poller. Reopen just those pipes as owned, pollable
-// handles. O_RDWR avoids waiting for a FIFO reader during open; the handle
-// is closed before returning. Platform helpers restore any shared pipe flags.
-func hookPrepareWriter(w io.Writer) (io.Writer, func()) {
-	noop := func() {}
-	if f, ok := w.(*os.File); ok && hookPlatformPipe != nil {
-		info, err := f.Stat()
-		if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
-			return nil, noop
-		}
-		prepared, closeOutput, err := hookPlatformPipe(f)
-		if err != nil {
-			return nil, noop
-		}
-		return prepared, closeOutput
+// hookWrite bounds a write by ctx. The write runs in a goroutine; on timeout
+// the hook returns and the process exits, ending a write stuck on a reader
+// that stopped. Callers record deliveries as shown only after a nil result,
+// so a failed or timed-out write repeats them next turn (at-least-once).
+func hookWrite(ctx context.Context, w io.Writer, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	switch w.(type) {
-	case *bytes.Buffer, *strings.Builder, *io.PipeWriter:
-		return w, noop
-	}
-	if w == io.Discard {
-		return w, noop
-	}
-	if deadline, ok := w.(interface{ SetWriteDeadline(time.Time) error }); ok && deadline.SetWriteDeadline(time.Time{}) == nil {
-		return w, noop
-	}
-	f, ok := w.(*os.File)
-	if !ok || (f != os.Stdout && f != os.Stderr) {
-		return nil, noop
-	}
-	info, err := f.Stat()
-	if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
-		return nil, noop
-	}
-	owned, err := os.OpenFile(f.Name(), os.O_RDWR, 0)
-	if err != nil {
-		return nil, noop
-	}
-	if owned.SetWriteDeadline(time.Time{}) != nil {
-		_ = owned.Close()
-		return nil, noop
-	}
-	return owned, func() { _ = owned.Close() }
-}
-
-// Cancellation alone cannot retract a partial write. Only memory outputs
-// and prepared native pipes have the all-or-empty publication contract we need.
-// Bound the ENTIRE serialized object, including its newline. The POSIX
-// path stays within PIPE_BUF; capacity-aware paths check enough free space
-// before attempting a single nonblocking write.
-// Linux guarantees 4096 bytes. BSD/Windows use a capacity-checked single
-// nonblocking write instead of their smaller/no POSIX atomicity guarantee.
-// io.Pipe and arbitrary deadline writers can expose a prefix, so they are
-// unsupported as stdout, even though diagnostics may safely use them.
-func hookOutputLimit(w io.Writer) (int, bool) {
-	switch w := w.(type) {
-	case *hookPipeWriter:
-		return w.limit, true
-	case *bytes.Buffer, *strings.Builder:
-		return 0, true
-	}
-	if w == io.Discard {
-		return 0, true
-	}
-	f, ok := w.(*os.File)
-	if !ok {
-		return 0, false
-	}
-	info, err := f.Stat()
-	if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
-		return 0, false
-	}
-	return hookPipeLimit(runtime.GOOS)
-}
-
-func hookPipeLimit(platform string) (int, bool) {
-	switch platform {
-	case "linux", "android":
-		return 4096, true
-	case "darwin", "ios", "freebsd", "openbsd", "netbsd", "dragonfly", "windows":
-		return 4096, true
-	case "solaris", "illumos", "aix":
-		return 512, true
-	default:
-		return 0, false
-	}
-}
-
-// hookWrite performs the write synchronously, with cancellation applied to
-// the underlying I/O. Returning from a goroutine select alone would permit
-// a delayed write after the invocation has returned. Unknown writers have
-// no cancellation contract, so leave them untouched and fail open silently.
-func hookWrite(ctx context.Context, w io.Writer, data []byte) bool {
-	if ctx.Err() != nil {
-		return false
-	}
-	if _, native := w.(*os.File); native {
-		limit, supported := hookOutputLimit(w)
-		if !supported || len(data) > limit {
-			return false
-		}
-	}
-	switch w := w.(type) {
-	case *hookPipeWriter:
-		return w.publish(ctx, data)
-	case *bytes.Buffer:
-		_, _ = w.Write(data)
-		return true
-	case *strings.Builder:
-		_, _ = w.Write(data)
-		return true
-	case interface {
-		io.Writer
-		SetWriteDeadline(time.Time) error
-	}:
-		deadline, ok := ctx.Deadline()
-		if !ok || w.SetWriteDeadline(deadline) != nil {
-			return false
-		}
-		canceled := make(chan struct{})
-		stop := context.AfterFunc(ctx, func() {
-			defer close(canceled)
-			_ = w.SetWriteDeadline(time.Now())
-		})
+	done := make(chan error, 1)
+	go func() {
 		defer func() {
-			if !stop() {
-				<-canceled
-			}
-			_ = w.SetWriteDeadline(time.Time{})
-		}()
-		if ctx.Err() != nil {
-			return false
-		}
-		n, err := w.Write(data)
-		return err == nil && n == len(data)
-	case *io.PipeWriter:
-		canceled := make(chan struct{})
-		stop := context.AfterFunc(ctx, func() {
-			defer close(canceled)
-			_ = w.CloseWithError(ctx.Err())
-		})
-		defer func() {
-			if !stop() {
-				<-canceled
+			if recover() != nil {
+				done <- errHookWritePanic
 			}
 		}()
-		if ctx.Err() != nil {
-			return false
-		}
 		n, err := w.Write(data)
-		return err == nil && n == len(data)
-	default:
-		return w == io.Discard
+		if err == nil && n != len(data) {
+			err = io.ErrShortWrite
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		// Prefer a write that completed as the deadline expired.
+		select {
+		case err := <-done:
+			return err
+		default:
+			return ctx.Err()
+		}
 	}
 }
 
-func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(), outputLimit int) hookResult {
+// hookRun publishes inside the state transaction: shown ids and the poll
+// cursor are committed only after publish succeeds.
+func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(), publish func([]byte) error) hookResult {
 	ctx := a.ctx
 	o, e := parseFlags("hook", args, map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag})
 	if e != nil || len(o.pos) != 0 {
@@ -458,9 +259,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	if event != "user-prompt" && event != "post-tool" {
 		return hookResult{}
 	}
-	fits := func(context string) bool {
-		return utf16Len(context) <= hookMaxUnits && (outputLimit == 0 || len(hookOutput(event, context)) <= outputLimit)
-	}
+	fits := func(context string) bool { return utf16Len(context) <= hookMaxUnits }
 	c, name, ch, e := a.connect()
 	if e != nil || ctx.Err() != nil {
 		return hookResult{}
@@ -491,6 +290,14 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	var output string
 	var claimed []envelope.Event
 	var processed string
+	// Publish the complete output before the transaction commits. An error
+	// (including expiry) aborts the commit, so the next run shows it again.
+	finish := func() error {
+		if output == "" {
+			return ctx.Err()
+		}
+		return publish(hookOutput(event, output))
+	}
 	poll := func(after string) (pollBody, error) {
 		body, e := a.poll(c, after, 0)
 		afterPoll()
@@ -521,14 +328,11 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 				}
 				if count > 0 {
 					output = hookSummary(name, count, len(body.Events) == hookPageLimit)
-					if !fits(output) {
-						return errHookOutputTooLarge
-					}
 				}
 			}
 			s.PollCursor = head.NextCursor
 			// First-run backlog is never acknowledged, even with --auto-ack.
-			return ctx.Err()
+			return finish()
 		}
 		body, e := poll(s.PollCursor)
 		if hookPurged(e) {
@@ -578,12 +382,10 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 					}
 				}
 			}
+			// The first item always fits: one maximal item is far below
+			// hookMaxUnits (TestHookMaxItemAlwaysFits).
 			candidate := append(append([]hookItem(nil), items...), item)
-			if len(items) == hookMaxItems || !fits(hookContext(name, candidate, remaining, lowerBound)) {
-				if len(items) == 0 {
-					// Do not advance or ack past a delivery that cannot fit.
-					return errHookOutputTooLarge
-				}
+			if len(items) > 0 && (len(items) == hookMaxItems || !fits(hookContext(name, candidate, remaining, lowerBound))) {
 				cut = true
 				for _, next := range body.Events[i:] {
 					if next.Type == "delivery" && !s.has(eventFieldsOf(next).deliveryID) {
@@ -605,24 +407,18 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		}
 		if len(items) > 0 {
 			output = hookContext(name, items, more, lowerBound)
-			if !fits(output) {
-				return errHookOutputTooLarge
-			}
 		}
 		// Cache preparation can block on local I/O. Keep it inside the
 		// transaction, so an expired worker cannot commit shown ids/cursor.
 		if len(claimed) > 0 {
 			a.rememberEvents(ch, claimed)
 		}
-		return ctx.Err()
+		return finish()
 	})
-	if e != nil || ctx.Err() != nil {
+	if e != nil {
 		return hookResult{}
 	}
 	result := hookResult{client: c}
-	if output != "" {
-		result.output = hookOutput(event, output)
-	}
 	if o.has("auto-ack") {
 		result.ackCursor = processed
 	}
@@ -630,7 +426,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 }
 
 var errHookRateLimited = errors.New("hook poll rate limited")
-var errHookOutputTooLarge = errors.New("hook output exceeds atomic pipe limit")
+var errHookWritePanic = errors.New("hook output writer panicked")
 
 func hookPurged(err error) bool {
 	var he *hubError
