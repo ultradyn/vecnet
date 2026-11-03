@@ -1402,14 +1402,22 @@ func TestPresenceHeartbeatOverride(t *testing.T) {
 	clock := newClock()
 	m := newModel(context.Background(), Options{API: f, Now: clock.Now, BeatEvery: 5 * time.Second})
 	t.Cleanup(m.cancel)
+	if m.slowEvery != 5*time.Second {
+		t.Fatalf("slowEvery = %v, want 5s", m.slowEvery)
+	}
 	p := newPump(t, m)
 	p.run(m.Init())
 	p.until("first load", func() bool { return !m.firstLoading() && m.Conn == ConnLive })
 	p.idle()
 	f.reset()
+	lastSlow := m.lastSlow
 
 	clock.advance(4 * time.Second)
 	p.send(tickMsg{})
+	// Scheduling is synchronous; API calls wait for the pump to drain reloadMsg.
+	if !m.lastSlow.Equal(lastSlow) {
+		t.Fatalf("slow refresh scheduled at four seconds: lastSlow = %v, want %v", m.lastSlow, lastSlow)
+	}
 	// A Loaded can wake beat even before the next slow refresh.
 	if _, cmd := m.Update(Loaded{Key: "subs"}); cmd != nil {
 		t.Fatal("heartbeat ran before five seconds")
@@ -1425,6 +1433,10 @@ func TestPresenceHeartbeatOverride(t *testing.T) {
 	})
 	clock.advance(time.Second)
 	p.send(tickMsg{})
+	if !m.lastSlow.Equal(clock.Now()) {
+		t.Fatalf("slow refresh not scheduled at five seconds: lastSlow = %v, want %v", m.lastSlow, clock.Now())
+	}
+	lastSlow = m.lastSlow
 	p.loaded(f.fakeAPI, "Subscriptions")
 	p.until("five-second heartbeat", func() bool { return f.count("SetPresence") == 1 })
 	p.idle()
@@ -1446,11 +1458,17 @@ func TestPresenceHeartbeatOverride(t *testing.T) {
 
 	clock.advance(4 * time.Second)
 	p.send(tickMsg{})
+	if !m.lastSlow.Equal(lastSlow) {
+		t.Fatalf("slow refresh scheduled at nine seconds: lastSlow = %v, want %v", m.lastSlow, lastSlow)
+	}
 	if f.count("Subscriptions") != 1 || f.count("SetPresence") != 1 {
 		t.Fatal("next slow refresh or heartbeat ran early")
 	}
 	clock.advance(time.Second)
 	p.send(tickMsg{})
+	if !m.lastSlow.Equal(clock.Now()) {
+		t.Fatalf("slow refresh not scheduled at ten seconds: lastSlow = %v, want %v", m.lastSlow, clock.Now())
+	}
 	p.until("next five-second refresh", func() bool {
 		return f.count("Subscriptions") == 2 && f.count("SetPresence") == 2
 	})
