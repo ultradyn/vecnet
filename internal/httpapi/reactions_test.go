@@ -113,3 +113,44 @@ func TestPostReactionsMessageIDShape(t *testing.T) {
 		}
 	}
 }
+
+// An explicit as, even empty, must be a peer id and fail body validation before
+// emoji semantics, target lookup or authorization (PROTOCOL §1.3, §17.2 step 1).
+func TestPostReactionsAsShape(t *testing.T) {
+	env := testhub.Start(t)
+	_, as := env.NewPeer("session", "A")
+	b, bs := env.NewPeer("session", "B")
+	m := postSend(t, env, as, sendBody("reaction-as-shape", b), 202)
+	var kicks atomic.Int32
+	env.Configure(func(d *httpapi.Deps) { d.Kick = func() { kicks.Add(1) } })
+	counts := func() [3]int {
+		t.Helper()
+		var c [3]int
+		for i, table := range []string{"reactions", "reaction_ops", "reaction_wakes"} {
+			if err := env.Hub.DB.QueryRow("SELECT count(*) FROM " + table).Scan(&c[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return c
+	}
+	before := counts()
+	for _, asID := range []string{"", "msg_" + strings.Repeat("0", 26), "peer_" + strings.Repeat("0", 25), "peer_" + strings.Repeat("a", 26)} {
+		for _, target := range []string{m.MessageID, "msg_" + strings.Repeat("0", 26)} {
+			for _, emoji := range []string{"✅", "invalid"} {
+				r, raw := env.Do(bs, "POST", "/v1/reactions", map[string]any{"message_id": target, "emoji": emoji, "op": "add", "as": asID})
+				e := mustErr(t, r, raw, 400, "invalid_body")
+				if e.Error.Details["path"] != "/as" {
+					t.Fatalf("as=%q target=%s emoji=%s details=%v, want path /as", asID, target, emoji, e.Error.Details)
+				}
+			}
+		}
+	}
+	if after := counts(); after != before || kicks.Load() != 0 {
+		t.Fatalf("malformed as wrote state %v -> %v, kicks=%d", before, after, kicks.Load())
+	}
+	// Omission stays valid.
+	if r, raw := env.Do(bs, "POST", "/v1/reactions", map[string]any{"message_id": m.MessageID, "emoji": "✅", "op": "add"}); r.StatusCode != 200 {
+		t.Fatalf("omitted as=%d %s", r.StatusCode, raw)
+	}
+	_ = b
+}

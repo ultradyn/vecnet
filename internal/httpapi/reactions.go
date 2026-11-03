@@ -12,6 +12,9 @@ import (
 // Keep this aligned with envelope.schema.json $defs.messageId.
 var reactionMessageID = regexp.MustCompile(`^msg_[0-9A-HJKMNP-TV-Z]{26}$`)
 
+// Keep this aligned with envelope.schema.json $defs.peerId.
+var reactionPeerID = regexp.MustCompile(`^peer_[0-9A-HJKMNP-TV-Z]{26}$`)
+
 func (s *server) postReactions(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -36,6 +39,11 @@ func (s *server) postReactions(w http.ResponseWriter, r *http.Request) {
 	}
 	if !reactionMessageID.MatchString(req.MessageID) {
 		writeError(w, &envelope.SchemaError{Path: "/message_id", Message: "message_id must match ^msg_[0-9A-HJKMNP-TV-Z]{26}$"})
+		return
+	}
+	// An explicit as, even empty, must be a peer id; only omission means "the caller".
+	if _, ok := top["as"]; ok && !reactionPeerID.MatchString(req.As) {
+		writeError(w, &envelope.SchemaError{Path: "/as", Message: "as must match ^peer_[0-9A-HJKMNP-TV-Z]{26}$"})
 		return
 	}
 	_, req.PrioritySupplied = top["priority"]
