@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -71,6 +73,15 @@ func monitorOutput(t *testing.T, name, text string) string {
 					"message_id": "msg_X", "thread_id": "thr_X", "sender": "peer_X",
 					"content": map[string]string{"text": text},
 				}},
+			}
+			if r.Header.Get("Accept") != "text/event-stream" {
+				w.Header().Set("Content-Type", "application/json")
+				events := []any{}
+				if r.URL.Query().Get("after") == "" {
+					events = append(events, ev)
+				}
+				json.NewEncoder(w).Encode(map[string]any{"events": events, "next_cursor": "e1.1"})
+				return
 			}
 			raw, _ := json.Marshal(ev)
 			fmt.Fprintf(w, "id: e1.1\nevent: delivery\ndata: %s\n\n", raw)
@@ -322,5 +333,34 @@ func TestWatchJSONUnchanged(t *testing.T) {
 		if !json.Valid([]byte(line)) {
 			t.Fatalf("watch JSON contains a header or non-JSON line: %q", line)
 		}
+	}
+}
+
+func TestWatchPlainIgnoresShownState(t *testing.T) {
+	for _, args := range [][]string{{"watch"}, {"--json", "watch", "--for-monitor"}} {
+		t.Run(strings.Join(args, "-"), func(t *testing.T) {
+			env := testhub.Start(t)
+			_, senderSecret := env.NewPeer("session", "Sender")
+			recipient, secret := env.NewPeer("session", "Watcher")
+			sender := profileUser(t, env.URL, senderSecret)
+			u := profileUser(t, env.URL, secret)
+			u.env["XDG_CONFIG_HOME"] = filepath.Join(filepath.Dir(u.conf), "xdg")
+			sent := sender.send(recipient, "already shown", "--hold")
+			path := filepath.Join(filepath.Dir(u.conf), "state", "p.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(map[string]any{"shown": []string{sent.Deliveries[0].DeliveryID}})
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, stop := startWatch(t, u, args...)
+			waitLine(t, out, regexp.MustCompile(regexp.QuoteMeta(sent.MessageID)), 5*time.Second)
+			stop()
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != string(raw) {
+				t.Fatalf("plain/JSON watch modified shown state: %s, %v", got, err)
+			}
+		})
 	}
 }
