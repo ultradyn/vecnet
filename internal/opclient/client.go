@@ -65,7 +65,7 @@ func (c *Client) request(ctx context.Context, method, path string, body any) (*h
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if method == http.MethodPost && path == "/v1/messages" {
+	if method == http.MethodPost && (path == "/v1/messages" || path == "/v1/reactions") {
 		req.Header.Set("X-Vecnet-Ingress", "operator_ui")
 	}
 	resp, err := c.hc.Do(req)
@@ -202,6 +202,13 @@ func (c *Client) DiscardDeadLetter(ctx context.Context, dly string) error {
 }
 func (c *Client) Send(ctx context.Context, r envelope.SendRequest) (out opapi.SendResult, err error) {
 	err = c.do(ctx, "POST", "/v1/messages", r, &out)
+	return
+}
+
+// React adds or removes the operator's reaction (PROTOCOL §17.2). A no-op is
+// also a success, with Changed false.
+func (c *Client) React(ctx context.Context, req envelope.ReactionRequest) (out opapi.ReactionResult, err error) {
+	err = c.do(ctx, http.MethodPost, "/v1/reactions", req, &out)
 	return
 }
 func (c *Client) Answer(ctx context.Context, a opapi.OpenApproval, option int) error {

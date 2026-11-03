@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1755,6 +1756,12 @@ func TestChatHostile(t *testing.T) {
 	spill.Metadata = map[string]any{"vecnet.spilled": true}
 	spill.Attachments = []envelope.Attachment{{SHA256: "sha-spillbad", Size: 40, MediaType: "text/plain", Name: "message.md"}}
 	a.blobs["sha-spillbad"] = chatBlob{[]byte(hostile), "text/plain"}
+	// The selected message's reactors: a peer with a hostile name, an unknown
+	// hostile id, and an emoji outside the set, which no hub should send.
+	spill.Reactions = []envelope.ReactionGroup{
+		{Emoji: envelope.ReactionEmoji[5], Peers: []string{"peer_bad", hostile}},
+		{Emoji: hostile, Peers: []string{hostile}},
+	}
 	// A closed card: the decision is an option string the requester chose.
 	closed := chatMsg("msg_bad4", "peer_bad", "hold", chatAt(6, 58), "closed one")
 	closed.Kind = "approval_request"
@@ -1785,6 +1792,14 @@ func TestChatHostile(t *testing.T) {
 	t.Run("log", func(t *testing.T) {
 		wantFrame(t, chatFrame(t, m), "pwn", "<img src=x onerror=alert(1)>", "answered: <img src=x")
 		check(t)
+	})
+	t.Run("reactions", func(t *testing.T) {
+		wantFrame(t, chatFrame(t, m), "[check: <img src")
+		check(t)
+		p.press("k")
+		wantFrame(t, chatFrame(t, m), "[check 2]", "[? 1]")
+		check(t)
+		p.press("j")
 	})
 	t.Run("prompt", func(t *testing.T) {
 		p.press("k", "a")
@@ -2458,4 +2473,347 @@ func TestAttachHostileUploadErrorCleaned(t *testing.T) {
 		t.Fatalf("chip error lost its text: %q", att.err)
 	}
 	wantFrame(t, chatFrame(t, m), "[x] x.bin: boom")
+}
+
+// React answers as the hub would: it changes the operator's reaction on the
+// stored message and returns the whole aggregate in the fixed order.
+func (a *chatAPI) React(ctx context.Context, r envelope.ReactionRequest) (opapi.ReactionResult, error) {
+	if _, err := a.fakeAPI.React(ctx, r); err != nil {
+		return opapi.ReactionResult{}, err
+	}
+	a.cmu.Lock()
+	defer a.cmu.Unlock()
+	out := opapi.ReactionResult{MessageID: r.MessageID, Emoji: r.Emoji, Op: r.Op, Changed: true, Reactions: []envelope.ReactionGroup{}, Superseded: []string{}}
+	for id, th := range a.byID {
+		for i := range th.messages {
+			msg := &th.messages[i]
+			if msg.MessageID != r.MessageID {
+				continue
+			}
+			out.ThreadID = id
+			msg.Reactions = chatToggled(msg.Reactions, r.Emoji, chatOp, r.Op == "add")
+			out.Reactions = append(out.Reactions, msg.Reactions...)
+		}
+	}
+	return out, nil
+}
+
+// chatToggled adds or removes peer under emoji, keeping the fixed order.
+func chatToggled(groups []envelope.ReactionGroup, emoji, peer string, add bool) []envelope.ReactionGroup {
+	var out []envelope.ReactionGroup
+	found := false
+	for _, g := range groups {
+		peers := append([]string(nil), g.Peers...)
+		if g.Emoji == emoji {
+			found = true
+			if i := slices.Index(peers, peer); add && i < 0 {
+				peers = append(peers, peer)
+			} else if !add && i >= 0 {
+				peers = slices.Delete(peers, i, i+1)
+			}
+		}
+		if len(peers) > 0 {
+			out = append(out, envelope.ReactionGroup{Emoji: g.Emoji, Peers: peers})
+		}
+	}
+	if !found && add {
+		out = append(out, envelope.ReactionGroup{Emoji: emoji, Peers: []string{peer}})
+		slices.SortStableFunc(out, func(x, y envelope.ReactionGroup) int {
+			return envelope.ReactionIndex(x.Emoji) - envelope.ReactionIndex(y.Emoji)
+		})
+	}
+	return out
+}
+
+var (
+	rxUp    = envelope.ReactionEmoji[0]
+	rxDown  = envelope.ReactionEmoji[1]
+	rxEyes  = envelope.ReactionEmoji[4]
+	rxCheck = envelope.ReactionEmoji[5]
+	rxQ     = envelope.ReactionEmoji[6]
+	rxBang  = envelope.ReactionEmoji[7]
+)
+
+// chatReacted is chatSeed with reactions on the root message: codex and
+// sleuth gave +1, and the operator's own peer gave check.
+func chatReacted() *chatAPI {
+	a := chatSeed()
+	a.byID[chatHark].messages[0].Reactions = []envelope.ReactionGroup{
+		{Emoji: rxUp, Peers: []string{chatCodex, chatSleuth}},
+		{Emoji: rxCheck, Peers: []string{chatOp}},
+	}
+	return a
+}
+
+// chatLineOf is the index of the first frame line holding s, or -1.
+func chatLineOf(frame, s string) int {
+	return slices.IndexFunc(strings.Split(frame, "\n"), func(line string) bool { return strings.Contains(line, s) })
+}
+
+// chatSelect moves the selection onto the message with id.
+func chatSelect(t *testing.T, p *pump, m *Model, id string) {
+	t.Helper()
+	for range 20 {
+		st := m.Data.Thread[m.CurrentThread]
+		if msg := chatOf(m).selected(st); msg != nil && msg.MessageID == id {
+			return
+		}
+		p.press("k")
+	}
+	t.Fatalf("could not select %s", id)
+}
+
+// react runs :react with args, as the command line would.
+func react(t *testing.T, p *pump, m *Model, args ...string) {
+	t.Helper()
+	cmd, ok := m.Commands["react"]
+	if !ok {
+		t.Fatal(":react is not registered")
+	}
+	p.run(cmd.Run(m, args))
+}
+
+func TestReactionChipsRow(t *testing.T) {
+	a := chatReacted()
+	m, _ := chatModel(t, a, newClock())
+	frame := chatFrame(t, m)
+	wantFrame(t, frame, "[+1 2] [check 1*]")
+	lines := strings.Split(frame, "\n")
+	chips := chatLineOf(frame, "[+1 2] [check 1*]")
+	// The root message's receipts row (grok processed, max read) follows it.
+	if chips < 0 || chips+1 >= len(lines) || !strings.Contains(lines[chips+1], "grok✓✓") || !strings.Contains(lines[chips+1], "max●") {
+		t.Fatalf("the chips row is not right above the root's receipts:\n%s", frame)
+	}
+	if !strings.Contains(lines[chips], "│"+chatIndent+"[+1 2]") && !strings.Contains(lines[chips], " "+chatIndent+"[+1 2]") {
+		t.Fatalf("chips row is not indented by chatIndent: %q", lines[chips])
+	}
+	refuseFrame(t, frame, "[+1: ", "[check: ")
+	for _, msg := range a.byID[chatHark].messages[1:] {
+		if len(msg.Reactions) != 0 {
+			t.Fatal("seed gave another message reactions")
+		}
+	}
+	if strings.Count(frame, "[+1 ") != 1 {
+		t.Fatalf("chips drawn for a message without reactions:\n%s", frame)
+	}
+}
+
+func TestReactionChipsNamesWhenSelected(t *testing.T) {
+	a := chatReacted()
+	m, p := chatModel(t, a, newClock())
+	chatSelect(t, p, m, "msg_01root")
+	frame := chatFrame(t, m)
+	// Names are l.names.short: codex-hark is codex, pag-hark-sleuth is pag,
+	// and the operator's own peer is you.
+	wantFrame(t, frame, "[+1: codex, pag] [check: you]")
+	refuseFrame(t, frame, "[+1 2]", "[check 1*]")
+}
+
+func TestReactCommandToggles(t *testing.T) {
+	a, m, p := chatOpen(t)
+	react(t, p, m, "check")
+	waitToast(t, p, m, "reacted "+rxCheck)
+	p.until("the chip", func() bool { return strings.Contains(chatFrame(t, m), "[check: you]") })
+	react(t, p, m, "check")
+	waitToast(t, p, m, "removed "+rxCheck)
+	p.until("the chip to go", func() bool { return !strings.Contains(chatFrame(t, m), "[check") })
+	got := a.reactions()
+	if len(got) != 2 {
+		t.Fatalf("%d reactions sent, want 2: %+v", len(got), got)
+	}
+	for i, op := range []string{"add", "remove"} {
+		if got[i].Op != op || got[i].Emoji != rxCheck || got[i].MessageID != "msg_01apr" || got[i].As != "" {
+			t.Fatalf("reaction %d = %+v, want %s %s on msg_01apr", i, got[i], op, rxCheck)
+		}
+	}
+	if got[0].Priority != "wake_idle" {
+		t.Fatalf("add priority %q", got[0].Priority)
+	}
+}
+
+func TestReactCommandDefaults(t *testing.T) {
+	a, m, p := chatOpen(t)
+	steps := []struct {
+		args       []string
+		emoji, pri string
+	}{
+		{[]string{"check"}, rxCheck, "wake_idle"},
+		{[]string{"eyes"}, rxEyes, "hold"},
+		{[]string{"laugh", "--wake"}, envelope.ReactionEmoji[3], "wake"},
+		{[]string{"--hold", "bang"}, rxBang, "hold"},
+		{[]string{"--wake-idle", "+1"}, rxUp, "wake_idle"},
+	}
+	for i, step := range steps {
+		react(t, p, m, step.args...)
+		p.until("the reaction", func() bool { return len(a.reactions()) == i+1 })
+		waitToast(t, p, m, "reacted "+step.emoji)
+		got := a.reactions()[i]
+		if got.Op != "add" || got.Emoji != step.emoji || got.Priority != step.pri {
+			t.Fatalf("%v sent %+v, want add %s %s", step.args, got, step.emoji, step.pri)
+		}
+	}
+}
+
+func TestReactCommandByNumber(t *testing.T) {
+	a, m, p := chatOpen(t)
+	// Newest first, the peer messages are the approval, the fix (the hub's
+	// expired line between them does not count), the job, ...
+	react(t, p, m, "2", "+1")
+	waitToast(t, p, m, "reacted "+rxUp)
+	chatSelect(t, p, m, "msg_01job")
+	react(t, p, m, "+1")
+	p.until("second", func() bool { return len(a.reactions()) == 2 })
+	waitToast(t, p, m, "reacted "+rxUp)
+	react(t, p, m, "-1")
+	p.until("third", func() bool { return len(a.reactions()) == 3 })
+	waitToast(t, p, m, "reacted "+rxDown)
+	want := []struct{ id, emoji string }{{"msg_01fix", rxUp}, {"msg_01job", rxUp}, {"msg_01job", rxDown}}
+	for i, got := range a.reactions() {
+		if got.MessageID != want[i].id || got.Emoji != want[i].emoji || got.Op != "add" {
+			t.Fatalf("reaction %d = %+v, want %s on %s", i, got, want[i].emoji, want[i].id)
+		}
+	}
+}
+
+func TestReactCommandRefusals(t *testing.T) {
+	kept := func(t *testing.T, p *pump, m *Model, input string, reason ...string) {
+		t.Helper()
+		p.until("the line to reopen", func() bool { return m.Mode == ModeCommand && m.Input == input })
+		frame := chatFrame(t, m)
+		wantFrame(t, frame, ":"+input)
+		wantFrame(t, frame, reason...)
+	}
+	t.Run("no thread", func(t *testing.T) {
+		a := chatSeed()
+		a.threads = opapi.ThreadPage{}
+		m := newTestModel(t, a, newClock())
+		p := newPump(t, m)
+		p.send(tea.WindowSizeMsg{Width: 140, Height: 42})
+		p.run(m.Init())
+		p.until("first load", func() bool { return !m.firstLoading() })
+		p.press("2")
+		react(t, p, m, "check")
+		kept(t, p, m, "react check", "no open thread")
+		if a.count("React") != 0 {
+			t.Fatal("reacted with no thread")
+		}
+	})
+	t.Run("no message", func(t *testing.T) {
+		a := chatSeed()
+		a.byID[chatHark].messages = nil
+		m, p := chatModel(t, a, newClock())
+		react(t, p, m, "check")
+		kept(t, p, m, "react check", "no message to react to")
+		if a.count("React") != 0 {
+			t.Fatal("reacted in an empty thread")
+		}
+	})
+	cases := []struct {
+		name   string
+		args   []string
+		reason []string
+	}{
+		{"n out of range", []string{"7", "+1"}, []string{"no message 7: the thread has 6"}},
+		{"unknown name", []string{"smile"}, []string{"unknown reaction smile", "+1", "heart", "check", "bang"}},
+		{"unknown name by number", []string{"1", "smile"}, []string{"unknown reaction smile"}},
+		{"two flags", []string{"check", "--wake", "--hold"}, []string{"one priority flag at most"}},
+		{"no emoji", nil, []string{"usage: react"}},
+		{"too many", []string{"1", "2", "check"}, []string{"usage: react"}},
+		{"n not a number", []string{"x", "check"}, []string{"usage: react"}},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			a, m, p := chatOpen(t)
+			react(t, p, m, tt.args...)
+			kept(t, p, m, strings.TrimSpace("react "+strings.Join(tt.args, " ")), tt.reason...)
+			if a.count("React") != 0 {
+				t.Fatalf("reacted despite %s", tt.name)
+			}
+		})
+	}
+	t.Run("the toast lists the set", func(t *testing.T) {
+		_, m, p := chatOpen(t)
+		react(t, p, m, "smile")
+		waitToast(t, p, m, envelope.ReactionList())
+	})
+}
+
+func TestReactHubErrorToast(t *testing.T) {
+	t.Run("not_replyable", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		a.fail("React", &opclient.Error{Status: 422, Code: "not_replyable", Message: "reaction messages cannot be reacted to"})
+		react(t, p, m, "check")
+		waitToast(t, p, m, "not_replyable")
+		if !m.toast.bad {
+			t.Fatal("the hub's refusal is not a bad toast")
+		}
+		refuseFrame(t, chatFrame(t, m), "[check")
+	})
+	t.Run("rate_limited", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		a.fail("React", &opclient.Error{Status: 429, Code: "rate_limited", Message: "too many sends", Details: map[string]any{"retry_after_seconds": float64(12)}})
+		react(t, p, m, "check")
+		waitToast(t, p, m, "rate_limited")
+		waitToast(t, p, m, "retry after 12s")
+	})
+}
+
+func TestChatReactionsGolden(t *testing.T) {
+	a := chatSeed()
+	msgs := a.byID[chatHark].messages
+	msgs[4].Reactions = []envelope.ReactionGroup{{Emoji: rxUp, Peers: []string{chatSleuth, chatGrok}}, {Emoji: rxCheck, Peers: []string{chatOp}}}
+	msgs[6].Reactions = []envelope.ReactionGroup{{Emoji: rxEyes, Peers: []string{chatCodex}}, {Emoji: rxQ, Peers: []string{chatOp, chatSleuth}}}
+	m, _ := chatModel(t, a, newClock())
+	frame := chatGolden(t, m, "reactions-80x24", 80, 24)
+	assertFrame(t, frame, 80, 24)
+	wantFrame(t, frame, "[eyes: codex] [q: you, pag]", ":react")
+}
+
+// A peer's reaction to a message the client already holds arrives as a
+// reaction Event; the thread's reload must show it, though the message is
+// older than the newest one the client holds.
+func TestReactionEventRefreshesHeldMessage(t *testing.T) {
+	a := chatSeed()
+	next := make(chan opclient.Batch)
+	acked := make(chan error, 1)
+	a.tail = func(ctx context.Context, handle func(opclient.Batch) error, status func(string)) error {
+		status("live")
+		for {
+			select {
+			case b := <-next:
+				acked <- handle(b)
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	m, p := chatModel(t, a, newClock())
+	refuseFrame(t, chatFrame(t, m), "[+1 ")
+	a.cmu.Lock()
+	a.byID[chatHark].messages[4].Reactions = []envelope.ReactionGroup{{Emoji: rxUp, Peers: []string{chatCodex}}}
+	a.cmu.Unlock()
+	data, err := json.Marshal(envelope.ReactionEvent{MessageID: "msg_01fix", ThreadID: chatHark, PeerID: chatCodex, Emoji: rxUp, Op: "add", At: chatAt(7, 40)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		next <- opclient.Batch{Cursor: "e9", Events: []envelope.Event{{Cursor: "e9", Type: "reaction", Data: data}}}
+	}()
+	p.until("the batch to be handled", func() bool {
+		select {
+		case err := <-acked:
+			if err != nil {
+				t.Fatal(err)
+			}
+			return true
+		default:
+			return false
+		}
+	})
+	p.idle()
+	frame := chatFrame(t, m)
+	wantFrame(t, frame, "[+1 1]")
+	if n := len(m.Data.Thread[chatHark].Messages); n != len(a.byID[chatHark].messages) {
+		t.Fatalf("the refetch holds %d messages, want %d", n, len(a.byID[chatHark].messages))
+	}
 }
