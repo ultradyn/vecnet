@@ -417,6 +417,7 @@ func TestHookInstallFlagProfilesReplaceExisting(t *testing.T) {
 func TestHookInstallRenamedBinaryIdempotent(t *testing.T) {
 	for _, tc := range []struct{ bin, shellBin string }{
 		{"/opt/bin/vn", "/opt/bin/vn"},
+		{"/opt/$(unsafe);>|&*/vecnet", "'/opt/$(unsafe);>|&*/vecnet'"},
 		{"/opt/it's tools/vn", "'/opt/it'\"'\"'s tools/vn'"},
 	} {
 		t.Run(tc.bin, func(t *testing.T) {
@@ -770,6 +771,69 @@ func TestHookInstallRefusesDuplicateKeys(t *testing.T) {
 			}
 			if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0640 {
 				t.Errorf("invalid settings mode changed: %v %v", info, err)
+			}
+		})
+	}
+}
+
+func TestHookInstallPreservesShellCommands(t *testing.T) {
+	for _, tc := range []struct{ name, command string }{
+		{"redirected c2c", "c2c>/foreign/vecnet hook --profile p --event %s"},
+		{"redirected vecnet", "vecnet hook --profile p --event %s --as peer>/foreign/output"},
+		{"semicolon", "vecnet hook --profile p --event %s --as peer;c2c"},
+		{"background", "vecnet hook --profile p --event %s --as peer&c2c"},
+		{"pipeline", "vecnet hook --profile p --event %s --as peer|c2c"},
+		{"and list", "vecnet hook --profile p --event %s --as peer&&c2c"},
+		{"or list", "vecnet hook --profile p --event %s --as peer||c2c"},
+		{"newline", "vecnet hook --profile p --event %s --as peer\nc2c"},
+		{"command substitution", "$(c2c)/vecnet hook --profile p --event %s"},
+		{"double quoted backslash", `"/opt/\vecnet" hook --profile p --event %s`},
+		{"quoted command substitution", "\"$(c2c)/vecnet\" hook --profile p --event %s"},
+		{"backticks", "`c2c`/vecnet hook --profile p --event %s"},
+		{"parameter expansion", "${OTHER}/vecnet hook --profile p --event %s"},
+		{"argument expansion", "vecnet hook --profile p --event %s --as $PEER"},
+		{"glob", "/opt/*/vecnet hook --profile p --event %s"},
+		{"tilde", "~/vecnet hook --profile p --event %s"},
+		{"brace expansion", "/opt/{one,two}/vecnet hook --profile p --event %s"},
+		{"comment hides flags", "vecnet # hook --profile p --event %s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := installUser(t)
+			seed := hookInstallExtraFlagSeed(t, tc.command)
+			path := installFile(t, seed, 0640)
+			original := decodeSettings(t, seed)["hooks"].(map[string]any)
+			for _, autoAck := range []bool{false, true} {
+				args := []string{"--profile", "p", "--write", "--settings", path}
+				if autoAck {
+					args = append(args, "--auto-ack")
+				}
+				installRun(t, u, args...)
+				body := readSettings(t, path)
+				hooks := decodeSettings(t, body)["hooks"].(map[string]any)
+				for event, suffix := range map[string]string{"UserPromptSubmit": "user-prompt", "PostToolUse": "post-tool"} {
+					groups := hooks[event].([]any)
+					if !reflect.DeepEqual(groups[0], original[event].([]any)[0]) {
+						t.Fatalf("%s: foreign shell command or metadata changed: %q", event, fmt.Sprintf(tc.command, suffix))
+					}
+					if len(groups) != 2 {
+						t.Fatalf("%s: groups=%v, want original plus installed group", event, groups)
+					}
+					handlers := groups[1].(map[string]any)["hooks"].([]any)
+					want := "vecnet hook --profile p --event " + suffix
+					if autoAck {
+						want += " --auto-ack"
+					}
+					if len(handlers) != 1 || handlers[0].(map[string]any)["command"] != want {
+						t.Fatalf("%s: installed handlers=%v, want %q", event, handlers, want)
+					}
+				}
+				_, errs := installRun(t, u, args...)
+				if string(readSettings(t, path)) != string(body) || !strings.Contains(errs, "unchanged "+path) {
+					t.Fatalf("repeat install changed settings: %s", errs)
+				}
+				if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0640 {
+					t.Fatalf("settings mode changed: %v %v", info, err)
+				}
 			}
 		})
 	}

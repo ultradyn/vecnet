@@ -105,3 +105,20 @@ func TestOursHookArgumentBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestShellFirstWordLiteralSyntax(t *testing.T) {
+	for _, tc := range []struct{ command, word, rest string }{
+		{` '/opt/it'"'"'s/vecnet' hook`, "/opt/it's/vecnet", "hook"},
+		{`"/opt/\vecnet" hook`, `/opt/\vecnet`, "hook"},
+		{`"/opt/\$literal/vecnet" hook`, "/opt/$literal/vecnet", "hook"},
+		{`/opt/\;\>\|\$literal/vecnet hook`, "/opt/;>|$literal/vecnet", "hook"},
+		{`'/opt/$(literal);>|&*/vecnet' hook`, "/opt/$(literal);>|&*/vecnet", "hook"},
+		{`"/opt/;>|&*/vecnet" hook`, "/opt/;>|&*/vecnet", "hook"},
+		{`''#literal hook`, "#literal", "hook"},
+	} {
+		word, rest, ok := shellFirstWord(tc.command)
+		if !ok || word != tc.word || rest != tc.rest {
+			t.Errorf("shellFirstWord(%q)=(%q,%q,%v), want (%q,%q,true)", tc.command, word, rest, ok, tc.word, tc.rest)
+		}
+	}
+}

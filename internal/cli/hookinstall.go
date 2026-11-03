@@ -373,21 +373,38 @@ func (n *jsonNode) scalarString() string {
 	return value
 }
 
-// shellFirstWord decodes quoting without evaluating any shell expressions.
-// It recognises the quoting emitted by hookCommand, including apostrophes.
+// shellFirstWord decodes a literal word in a simple shell command without
+// evaluation. Operators, redirections, comments and expansions are unsupported:
+// oursHook must preserve the entire handler if any word uses that syntax.
+// Quoted/escaped metacharacters remain literal, including hookCommand's quoting.
 func shellFirstWord(command string) (wordValue, rest string, ok bool) {
-	command = strings.TrimLeft(command, " \t\r\n")
+	command = strings.TrimLeft(command, " \t")
 	var word strings.Builder
 	var quote byte
 	for i := 0; i < len(command); i++ {
 		c := command[i]
-		if quote == 0 && strings.ContainsRune(" \t\r\n", rune(c)) {
-			return word.String(), strings.TrimSpace(command[i:]), true
+		if c == 0 {
+			return "", "", false
+		}
+		if quote == 0 {
+			if c == ' ' || c == '\t' {
+				return word.String(), strings.TrimLeft(command[i:], " \t"), true
+			}
+			if strings.ContainsRune("\r\n;&|<>()$`*?[]{}~!", rune(c)) || (c == '#' && i == 0) {
+				return "", "", false
+			}
+		} else if quote == '"' && (c == '$' || c == '`') {
+			return "", "", false
 		}
 		if c == '\\' && quote != '\'' {
 			i++
-			if i == len(command) {
+			if i == len(command) || command[i] == '\n' || command[i] == '\r' || command[i] == 0 {
 				return "", "", false
+			}
+			// In double quotes, backslash only escapes $, `, ", and \\.
+			// Before other characters the backslash itself stays literal.
+			if quote == '"' && !strings.ContainsRune("$`\"\\", rune(command[i])) {
+				word.WriteByte('\\')
 			}
 			word.WriteByte(command[i])
 		} else if c == quote {
@@ -398,7 +415,7 @@ func shellFirstWord(command string) (wordValue, rest string, ok bool) {
 			word.WriteByte(c)
 		}
 	}
-	return word.String(), "", quote == 0
+	return word.String(), "", quote == 0 && len(command) > 0
 }
 
 func oursHook(handler *jsonNode, bin, profile, event string) bool {
