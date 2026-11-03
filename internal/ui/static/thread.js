@@ -8,6 +8,7 @@ import { avatar, h } from './dom.js';
 import { ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, plural, short, title, when } from './format.js';
 import { markdown } from './md.js';
 import { prioritySeg } from './prio.js';
+import { createReactions } from './react.js';
 import { budgetBanner, budgetOut, canShowFull, excerpt, FULL_TEXT_CAP, items, replyKey, replySig, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
 import { createThumbs } from './thumbs.js';
 
@@ -91,6 +92,8 @@ export function mount(root, ctx) {
   // an upload's change draws again.
   const atts = createAttachments({ api, onChange: () => render() });
   const thumbs = createThumbs({ api, onReady: () => render() });
+  // Reaction chips and the picker; a reaction's event reloads the thread too.
+  const R = createReactions({ api, me, nameOf, onDone: () => store.invalidate(tag), toast });
 
   const summary = () => ((ctx.threads.get() || {}).threads || []).find(t => t.thread_id === threadId);
   const thread = () => { const d = detail.get(); return (d && d.row && d.row.thread) || summary() || null; };
@@ -390,18 +393,19 @@ export function mount(root, ctx) {
           delta ? h('span', { class: 'dt', text: delta, title: deltaTitle(prev.created_at, m.created_at) }) : null,
           h('span', { class: 'prio ' + m.priority, text: m.priority }),
           others ? h('span', { class: 'via', text: 'to ' + others }) : null,
-          h('span', { class: 'acts' }, agoLabel(m.created_at), h('button', { type: 'button', text: 'reply', onclick: () => { S.replyTo = m.message_id; render(); comp.querySelector('textarea').focus(); } }))),
+          h('span', { class: 'acts' }, agoLabel(m.created_at), R.button(m), h('button', { type: 'button', text: 'reply', onclick: () => { S.replyTo = m.message_id; render(); comp.querySelector('textarea').focus(); } }))),
         it.parent ? replyQuote(it.parent) : null,
         // A spilled preview is clamped to a few lines; Show full text opens it.
         showTxt ? h('div', { class: 'txt' + (it.spill ? ' clamp' : '') }, markdown(m.content.text)) : null,
         it.spill ? spillBlock(m, it.spill) : (m.content && m.content.truncated ? h('span', { class: 'trunc', text: 'Preview only. The hub truncated this text.' }) : null),
         it.approval ? approvalCard(it.approval) : jobBox(m),
         files.length ? h('div', { class: 'atts' }, files) : null,
+        R.chipsRow(m),
         it.receipts.length ? h('div', { class: 'rc' }, it.receipts.map(r => h('span', { class: 'st-' + r.display, title: r.delivery_id + ' · ' + r.state }, h('i'), nameOf(r.recipient) + ' ' + r.display))) : null));
   }
 
   const head = h('div', { class: 'thead' }), list = h('div', { class: 'msgs' }), comp = composer();
-  root.replaceChildren(head, list, comp);
+  root.replaceChildren(head, list, comp, R.picker);
 
   function render() {
     if (gone) return;
@@ -473,5 +477,6 @@ export function mount(root, ctx) {
     off.forEach(fn => fn());
     atts.destroy();
     thumbs.release();
+    R.destroy();
   };
 }
