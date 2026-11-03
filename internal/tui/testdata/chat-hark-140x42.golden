@@ -38,5 +38,5 @@
 │                       ││                                                                                   ││                            │
 └───────────────────────┘└───────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────┘
 hark B196: radio end-ph… › i to write, or :msg <peer> <text>                                                                                
- NORMAL   i write  [ ] thread  j/k select  R reply  a answer  e expand  m matrix  s save  f file           max@vecnet · working · prio wake 
+ NORMAL   i write  [ ] thread  j/k select  R reply  a answer  e expand  m matrix  s save  f file  :react   max@vecnet · working · prio wake 
 : command  ? help                                                                                                                           

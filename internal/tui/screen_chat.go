@@ -54,7 +54,7 @@ const (
 	chatMatrixDay = 6         // width of the matrix's time column
 	chatMatrixWho = 15        // width of its sender column
 	chatMatrixBox = 14        // width of one recipient's column
-	chatHintsWide = 137       // width at which every word of the hints still fits
+	chatHintsWide = 140       // width at which every word of the hints still fits
 )
 
 var (
@@ -134,8 +134,10 @@ func (c *chatCounter) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// chatHeldMsg is a :msg that did not go, waiting for the command line.
+// chatHeldMsg is a :msg or :react that did not go, waiting for the command
+// line.
 type chatHeldMsg struct {
+	cmd  string // the command's name, which the line starts with again
 	args []string
 	why  string // the reason to show with the line
 }
@@ -182,8 +184,14 @@ type (
 		err     error
 	}
 	chatRefusedMsg struct {
+		cmd  string // "" is msg
 		args []string
 		why  string
+	}
+	chatReactedMsg struct {
+		thread, message, emoji, op string
+		result                     opapi.ReactionResult
+		err                        error
 	}
 	chatAnsweredMsg struct {
 		approval opapi.OpenApproval
@@ -259,9 +267,9 @@ func (s *chatScreen) Hints() string {
 		return "j/k scroll  pgup/pgdn page  esc close"
 	}
 	if s.narrow {
-		return "i [ ] j/k R a e m s f"
+		return "i [ ] j/k R a e m s f :react"
 	}
-	return "i write  [ ] thread  j/k select  R reply  a answer  e expand  m matrix  s save  f file"
+	return "i write  [ ] thread  j/k select  R reply  a answer  e expand  m matrix  s save  f file  :react"
 }
 
 // Update also registers :msg: the first message is the first moment a screen
@@ -289,7 +297,9 @@ func (s *chatScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 	case chatStartedMsg:
 		cmd = s.onStarted(msg, m)
 	case chatRefusedMsg:
-		s.holdMsg(m, msg.args, msg.why, msg.why)
+		s.holdMsg(m, msg.cmd, msg.args, msg.why, msg.why)
+	case chatReactedMsg:
+		cmd = s.onReacted(msg, m)
 	case chatAnsweredMsg:
 		cmd = s.onAnswered(msg, m)
 	case chatBlobMsg:
@@ -321,6 +331,7 @@ func (s *chatScreen) register(m *Model) {
 	m.Commands["msg"] = Command{Help: "<peer-prefix> <text>  start a new thread with that peer", Run: s.commandMsg}
 	m.Commands["attach"] = Command{Help: "[path]  add a file to the draft; ~/ expands, a run of spaces reads as one; alone, lists them", Run: s.commandAttach}
 	m.Commands["detach"] = Command{Help: "[n]  remove the nth file from the draft, or every file", Run: s.commandDetach}
+	m.Commands["react"] = Command{Help: "[n] <emoji|name> [--wake|--wake-idle|--hold]  toggle a reaction; n counts back from the newest message (1 = newest), default the selected one", Run: s.commandReact}
 }
 
 func (s *chatScreen) arm() tea.Cmd {
@@ -969,11 +980,139 @@ func (s *chatScreen) commandMsg(m *Model, args []string) tea.Cmd {
 	}
 }
 
+// chatReactFlags are :react's priority overrides.
+var chatReactFlags = map[string]string{"--wake": "wake", "--wake-idle": "wake_idle", "--hold": "hold"}
+
+// chatCount is whether s is :react's n: a positive decimal, no leading zero.
+func chatCount(s string) bool {
+	if s == "" || s[0] == '0' {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// commandReact is :react [n] <emoji|name> [--wake|--wake-idle|--hold]. It
+// toggles the operator's reaction on the selected message, or on the nth peer
+// message counting back from the newest (PROTOCOL §17.6). With one positional
+// argument it is always the emoji, so :react -1 is a thumbs down. Every
+// refusal comes before the request and keeps the line.
+func (s *chatScreen) commandReact(m *Model, args []string) tea.Cmd {
+	refuse := func(why string) tea.Cmd { return s.refuseLine(m, "react", args, why) }
+	const syntax = "usage: react [n] <emoji|name> [--wake|--wake-idle|--hold]"
+	var pos []string
+	prio, flags := "", 0
+	for _, arg := range args {
+		if p, ok := chatReactFlags[arg]; ok {
+			prio, flags = p, flags+1
+			continue
+		}
+		pos = append(pos, arg)
+	}
+	if flags > 1 {
+		return refuse("one priority flag at most: --wake, --wake-idle or --hold")
+	}
+	n := 0
+	switch {
+	case len(pos) == 1:
+	case len(pos) == 2 && chatCount(pos[0]):
+		var err error
+		if n, err = strconv.Atoi(pos[0]); err != nil {
+			return refuse(syntax)
+		}
+		pos = pos[1:]
+	default:
+		return refuse(syntax)
+	}
+	if m.stopped() {
+		return refuse(m.Conn + ": restart with a valid profile")
+	}
+	id := m.CurrentThread
+	st := m.Data.Thread[id]
+	if id == "" || st == nil {
+		return refuse("no open thread: [ and ] open one")
+	}
+	var target *envelope.Message
+	if n > 0 {
+		var peers []*envelope.Message
+		for i := range st.Messages {
+			if st.Messages[i].Sender != "hub" {
+				peers = append(peers, &st.Messages[i])
+			}
+		}
+		if n > len(peers) {
+			return refuse(fmt.Sprintf("no message %d: the thread has %d", n, len(peers)))
+		}
+		target = peers[len(peers)-n]
+	} else {
+		target = s.selected(st)
+		if target != nil && target.Sender == "hub" {
+			return refuse("the selected line is the hub's: select a message, or give its number")
+		}
+	}
+	if target == nil {
+		return refuse("no message to react to")
+	}
+	emoji, ok := envelope.ParseReaction(pos[0])
+	if !ok {
+		return refuse("unknown reaction " + pos[0] + ": use one of " + envelope.ReactionList())
+	}
+	req := envelope.ReactionRequest{MessageID: target.MessageID, Emoji: emoji, Op: "add", Priority: prio}
+	me := m.Data.Inbox.Me.PeerID
+	for _, g := range target.Reactions {
+		if g.Emoji == emoji && me != "" && slices.Contains(g.Peers, me) {
+			req.Op, req.Priority = "remove", ""
+		}
+	}
+	if req.Op == "add" && req.Priority == "" {
+		req.Priority = envelope.DefaultReactionPriority(emoji)
+	}
+	api, ctx := m.API, m.ctx
+	return func() tea.Msg {
+		r, err := api.React(ctx, req)
+		return chatReactedMsg{thread: id, message: req.MessageID, emoji: emoji, op: req.Op, result: r, err: err}
+	}
+}
+
+// onReacted shows the hub's aggregate on the message at once: a reload only
+// fetches messages newer than the ones held.
+func (s *chatScreen) onReacted(msg chatReactedMsg, m *Model) tea.Cmd {
+	if msg.err != nil {
+		if isStatus(msg.err, 401) {
+			m.reject(msg.err)
+		}
+		m.Toast("react failed: "+chatSendWhy(m, msg.thread, msg.err), true)
+		return nil
+	}
+	if st := m.Data.Thread[msg.thread]; st != nil {
+		for i := range st.Messages {
+			if st.Messages[i].MessageID == msg.message {
+				st.Messages[i].Reactions = msg.result.Reactions
+			}
+		}
+	}
+	verb := "reacted "
+	if msg.op == "remove" {
+		verb = "removed "
+	}
+	m.Toast(verb+msg.emoji, false)
+	return m.Reload(threadPrefix + msg.thread)
+}
+
 // refuseMsg is a :msg stopped here. The line comes back through a message, so
 // the shell has finished closing it by then, whichever way round it does that.
 func (s *chatScreen) refuseMsg(m *Model, args []string, why string) tea.Cmd {
+	return s.refuseLine(m, "msg", args, why)
+}
+
+// refuseLine is refuseMsg for any chat command that keeps its line.
+func (s *chatScreen) refuseLine(m *Model, cmd string, args []string, why string) tea.Cmd {
 	m.Toast(why, true)
-	return func() tea.Msg { return chatRefusedMsg{args: args, why: why} }
+	return func() tea.Msg { return chatRefusedMsg{cmd: cmd, args: args, why: why} }
 }
 
 // chatLineFree is whether the command line can be taken without taking it from
@@ -983,12 +1122,15 @@ func chatLineFree(m *Model) bool { return m.Mode == ModeNormal && !m.Help }
 // holdMsg keeps a :msg that did not go until the line is free, which Update
 // checks after every message. why goes with the line; reason says what happened
 // until then, because enter does not retry it yet.
-func (s *chatScreen) holdMsg(m *Model, args []string, why, reason string) {
-	s.heldMsgs = append(s.heldMsgs, chatHeldMsg{args, why})
+func (s *chatScreen) holdMsg(m *Model, cmd string, args []string, why, reason string) {
+	if cmd == "" {
+		cmd = "msg"
+	}
+	s.heldMsgs = append(s.heldMsgs, chatHeldMsg{cmd, args, why})
 	if chatLineFree(m) {
 		return
 	}
-	m.Toast(":msg failed, returns to the command line when you finish: "+reason, true)
+	m.Toast(":"+cmd+" failed, returns to the command line when you finish: "+reason, true)
 	if m.Mode == ModeCommand {
 		s.showMsgErr(m)
 	}
@@ -1001,7 +1143,7 @@ func (s *chatScreen) reopenMsg(m *Model) {
 	}
 	held := s.heldMsgs[0]
 	s.heldMsgs = s.heldMsgs[1:]
-	m.Mode, m.Input = ModeCommand, strings.TrimSpace("msg "+strings.Join(held.args, " "))
+	m.Mode, m.Input = ModeCommand, strings.TrimSpace(held.cmd+" "+strings.Join(held.args, " "))
 	m.Toast(held.why, true)
 	s.showMsgErr(m)
 }
@@ -1017,7 +1159,7 @@ func (s *chatScreen) onStarted(msg chatStartedMsg, m *Model) tea.Cmd {
 		if isStatus(msg.err, 401) {
 			m.reject(msg.err)
 		}
-		s.holdMsg(m, msg.args, chatSendError(m, "", msg.err), chatSendWhy(m, "", msg.err))
+		s.holdMsg(m, "msg", msg.args, chatSendError(m, "", msg.err), chatSendWhy(m, "", msg.err))
 		return nil
 	}
 	delete(s.newKeys, msg.attempt)
@@ -1578,6 +1720,9 @@ func (l *chatLog) item(msg *envelope.Message, selected bool) []chatRow {
 		rows = append(rows, l.files(msg, selected)...)
 		rows = append(rows, l.job(msg)...)
 		rows = append(rows, l.approval(msg)...)
+		if row := l.reactions(msg, selected); row != nil {
+			rows = append(rows, row)
+		}
 		if row := l.receipts(msg); row != nil {
 			rows = append(rows, row)
 		}
@@ -1767,6 +1912,64 @@ func (l *chatLog) receipts(msg *envelope.Message) chatRow {
 		}
 		used += lipgloss.Width(text)
 		row = append(row, chatSeg{text, style})
+	}
+	return row
+}
+
+// reactions is one ASCII chip per emoji, because terminals disagree on emoji
+// widths: [+1 2] [check 1*], where * marks the operator's own reaction. The
+// selected message names its reactors instead: [check: codex, you]. Like
+// receipts, it is cut with a count when it runs past the line.
+func (l *chatLog) reactions(msg *envelope.Message, selected bool) chatRow {
+	if len(msg.Reactions) == 0 {
+		return nil
+	}
+	me := l.m.Data.Inbox.Me.PeerID
+	row := chatRow{{chatIndent, styleMuted}}
+	used := len(chatIndent)
+	for i, g := range msg.Reactions {
+		name := envelope.ReactionName(g.Emoji)
+		if name == "" { // outside the set: no hub sends it, and its width is unknown
+			name = "?"
+		}
+		mine := slices.Contains(g.Peers, me) && me != ""
+		var text string
+		if selected {
+			who := make([]string, len(g.Peers))
+			for j, peer := range g.Peers {
+				who[j] = l.names.short(peer)
+				if peer == me && me != "" {
+					who[j] = "you"
+				}
+			}
+			text = "[" + name + ": " + strings.Join(who, ", ") + "]"
+		} else {
+			mark := ""
+			if mine {
+				mark = "*"
+			}
+			text = fmt.Sprintf("[%s %d%s]", name, len(g.Peers), mark)
+		}
+		style := styleMuted
+		if mine {
+			style = styleCyan
+		}
+		sep := ""
+		if i > 0 {
+			sep = " "
+		}
+		room := l.width - used - len(sep)
+		if i < len(msg.Reactions)-1 {
+			room -= len(" +8 more") // what a cut after this chip needs
+		}
+		if lipgloss.Width(text) > room {
+			if i > 0 {
+				return append(row, chatSeg{fmt.Sprintf(" +%d more", len(msg.Reactions)-i), styleMuted})
+			}
+			text = ansi.Truncate(text, max(room, 0), "…")
+		}
+		used += len(sep) + lipgloss.Width(text)
+		row = append(row, chatSeg{sep, styleMuted}, chatSeg{text, style})
 	}
 	return row
 }
