@@ -139,6 +139,8 @@ type Message struct {
 	JobStatus        *JobStatus        `json:"job_status,omitempty"`
 	ApprovalRequest  *ApprovalRequest  `json:"approval_request,omitempty"`
 	ApprovalResponse *ApprovalResponse `json:"approval_response,omitempty"`
+	Reaction         *ReactionRef      `json:"reaction,omitempty"`
+	Reactions        []ReactionGroup   `json:"reactions,omitempty"` // Thread history only; never in a Delivery.
 }
 
 // MarshalJSON emits empty attachments/metadata as []/{} rather than null,

@@ -33,10 +33,13 @@ One unit of communication from a sender to one or more recipients, within a **Th
 One message to one recipient peer. Has its own delivery id, distinct from the message id, and is the unit of retry, dedupe and receipts. A message to three recipients has three deliveries.
 
 ## Event
-One entry in a peer's durable, ordered log, identified by a **Cursor**. Everything a peer receives is an event: a delivery, a receipt, a presence update, a thread update, a directory update, or an approval expiry.
+One entry in a peer's durable, ordered log, identified by a **Cursor**. Everything a peer receives is an event: a delivery, a receipt, a presence update, a thread update, a directory update, an approval expiry, or a **Reaction** (PROTOCOL §17).
 
 ## Cursor
 A peer's or principal's position in its event log. Replaying from a cursor is lossless.
+
+## Reaction
+A peer's emoji response to a message, always an **Event** and, only when it wakes the message's sender, also a **Message** that cannot be replied to (PROTOCOL §17).
 
 ## Receipt
 A signal about a delivery's progress. **Accepted** means the transport took the bytes durably. **Processed** means the recipient acted on it. **Read** means a human saw it. **Failed**, **expired** and **dead letter** are terminal. Receipts are events, never messages.

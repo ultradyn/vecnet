@@ -14,8 +14,10 @@ import (
 
 	venv "github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/httpapi"
+	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/mcpserver"
 	"github.com/XertroV/vecnet/internal/testhub"
+	"github.com/XertroV/vecnet/internal/webhook"
 )
 
 // rpc posts one 2026-era JSON-RPC request and returns the HTTP status and
@@ -242,7 +244,7 @@ func TestToolsListNamesAndHints(t *testing.T) {
 	}
 
 	want := []string{
-		"vecnet_ack", "vecnet_inbox", "vecnet_peers", "vecnet_presence", "vecnet_receipt",
+		"vecnet_ack", "vecnet_inbox", "vecnet_peers", "vecnet_presence", "vecnet_react", "vecnet_receipt",
 		"vecnet_reply", "vecnet_send", "vecnet_thread", "vecnet_threads",
 	}
 	var got []string
@@ -263,6 +265,16 @@ func TestToolsListNamesAndHints(t *testing.T) {
 		}
 		if !readOnly[tool.Name] && !strings.Contains(tool.Description, "operator's bus") {
 			t.Errorf("%s: a write tool's description must say it writes to the operator's bus: %q", tool.Name, tool.Description)
+		}
+		if tool.Name == "vecnet_react" {
+			props := tool.InputSchema["properties"].(map[string]any)
+			if got := props["op"].(map[string]any)["enum"]; mustJSON(t, got) != `["add","remove"]` {
+				t.Errorf("reaction op enum = %v", got)
+			}
+			defs := tool.InputSchema["$defs"].(map[string]any)
+			if got := defs["priority"].(map[string]any)["enum"]; mustJSON(t, got) != `["wake","wake_idle","hold"]` {
+				t.Errorf("reaction priority enum = %v", got)
+			}
 		}
 		names := map[string]bool{}
 		propertyNames(tool.InputSchema, names)
@@ -1027,5 +1039,313 @@ func TestToolSendKicksPushWorker(t *testing.T) {
 	toolOK(t, env, secret, "vecnet_send", args, nil) // replay: nothing new to push
 	if n := kicks.Load(); n != 1 {
 		t.Fatalf("kicks after a replay = %d, want 1", n)
+	}
+}
+
+func TestReactTool(t *testing.T) {
+	setup := func(t *testing.T) (*testhub.Env, string, string, string, string, sendResult) {
+		t.Helper()
+		env := testhub.Start(t)
+		sender, senderSecret := env.NewPeer("session", "sender")
+		reactor, reactorSecret := env.NewPeer("session", "reactor")
+		var sent sendResult
+		toolOK(t, env, senderSecret, "vecnet_send", map[string]any{
+			"idempotency_key": "target", "recipients": []string{reactor},
+			"priority": "hold", "content": map[string]any{"text": "react to this"},
+		}, &sent)
+		return env, sender, senderSecret, reactor, reactorSecret, sent
+	}
+
+	t.Run("check by name defaults to add and wake_idle", func(t *testing.T) {
+		env, sender, senderSecret, reactor, secret, sent := setup(t)
+		var kicks atomic.Int64
+		env.Configure(func(d *httpapi.Deps) { d.Kick = func() { kicks.Add(1) } })
+		var got hub.ReactResponse
+		toolOK(t, env, secret, "vecnet_react", map[string]any{
+			"message_id": sent.MessageID, "emoji": "check",
+		}, &got)
+		if !got.Changed || got.Op != "add" || got.Emoji != venv.ReactionNames["check"] ||
+			got.MessageID != sent.MessageID || got.ThreadID != sent.ThreadID {
+			t.Fatalf("reaction = %+v, want canonical check added to target", got)
+		}
+		if len(got.Reactions) != 1 || got.Reactions[0].Emoji != got.Emoji ||
+			!slices.Equal(got.Reactions[0].Peers, []string{reactor}) {
+			t.Fatalf("reactions = %+v, want check by %s", got.Reactions, reactor)
+		}
+		if got.Superseded == nil || len(got.Superseded) != 0 || got.Wake == nil ||
+			got.Wake.Recipient != sender || got.Wake.MessageID == "" || got.Wake.DeliveryID == "" {
+			t.Fatalf("wake/superseded = %+v / %v, want new wake to sender and empty array", got.Wake, got.Superseded)
+		}
+		var inbox struct {
+			Events []struct {
+				Type string `json:"type"`
+				Data struct {
+					DeliveryID string       `json:"delivery_id"`
+					Ingress    string       `json:"ingress"`
+					Message    venv.Message `json:"message"`
+				} `json:"data"`
+			} `json:"events"`
+		}
+		toolOK(t, env, senderSecret, "vecnet_inbox", map[string]any{}, &inbox)
+		found := false
+		for _, event := range inbox.Events {
+			if event.Type == "delivery" && event.Data.DeliveryID == got.Wake.DeliveryID {
+				found = true
+				if event.Data.Message.Priority != "wake_idle" || event.Data.Message.Kind != "reaction" ||
+					event.Data.Message.MessageID != got.Wake.MessageID || event.Data.Ingress != "mcp_tool" {
+					t.Fatalf("wake delivery = %+v, want wake_idle reaction via mcp_tool", event.Data)
+				}
+			}
+		}
+		if !found || kicks.Load() != 1 {
+			t.Fatalf("wake found = %v, kicks = %d, want true and 1", found, kicks.Load())
+		}
+		// A retry succeeds without creating another wake.
+		toolOK(t, env, secret, "vecnet_react", map[string]any{
+			"message_id": sent.MessageID, "emoji": "check",
+		}, &got)
+		if got.Changed || got.Wake != nil || got.Superseded == nil || len(got.Superseded) != 0 {
+			t.Fatalf("retry = %+v, want unchanged and no wake", got)
+		}
+	})
+
+	t.Run("+1 has no delivery and remove works", func(t *testing.T) {
+		env, _, senderSecret, _, secret, sent := setup(t)
+		var got hub.ReactResponse
+		toolOK(t, env, secret, "vecnet_react", map[string]any{
+			"message_id": sent.MessageID, "emoji": "+1",
+		}, &got)
+		if !got.Changed || got.Op != "add" || got.Emoji != venv.ReactionNames["+1"] || got.Wake != nil || len(got.Reactions) != 1 {
+			t.Fatalf("+1 = %+v, want added with no wake", got)
+		}
+		var inbox inboxResult
+		toolOK(t, env, senderSecret, "vecnet_inbox", map[string]any{}, &inbox)
+		if ds := inbox.deliveries(); len(ds) != 0 {
+			t.Fatalf("+1 created deliveries: %+v", ds)
+		}
+		toolOK(t, env, secret, "vecnet_react", map[string]any{
+			"message_id": sent.MessageID, "emoji": "+1", "op": "remove",
+		}, &got)
+		if !got.Changed || got.Op != "remove" || got.Wake != nil || got.Reactions == nil || len(got.Reactions) != 0 {
+			t.Fatalf("remove = %+v, want removed without wake", got)
+		}
+	})
+
+	t.Run("explicit priority overrides the client default", func(t *testing.T) {
+		env, _, _, _, secret, sent := setup(t)
+		var got hub.ReactResponse
+		toolOK(t, env, secret, "vecnet_react", map[string]any{
+			"message_id": sent.MessageID, "emoji": "check", "op": "add", "priority": "hold",
+		}, &got)
+		if !got.Changed || got.Wake != nil {
+			t.Fatalf("explicit hold = %+v, want changed without wake", got)
+		}
+	})
+
+	t.Run("reaction messages are not replyable", func(t *testing.T) {
+		env, _, senderSecret, _, secret, sent := setup(t)
+		var got hub.ReactResponse
+		toolOK(t, env, secret, "vecnet_react", map[string]any{
+			"message_id": sent.MessageID, "emoji": "check",
+		}, &got)
+		if got.Wake == nil {
+			t.Fatal("check did not create a wake message")
+		}
+		toolFails(t, env, senderSecret, "vecnet_react", map[string]any{
+			"message_id": got.Wake.MessageID, "emoji": "+1",
+		}, "not_replyable")
+		toolFails(t, env, senderSecret, "vecnet_reply", map[string]any{
+			"message_id": got.Wake.MessageID, "text": "reply", "priority": "hold", "idempotency_key": "bad-reply",
+		}, "not_replyable")
+	})
+
+	t.Run("unknown emoji reaches hub reason code", func(t *testing.T) {
+		env, _, _, _, secret, sent := setup(t)
+		toolFails(t, env, secret, "vecnet_react", map[string]any{
+			"message_id": sent.MessageID, "emoji": "not-an-emoji",
+		}, "emoji_not_allowed")
+	})
+}
+
+func TestReactValidationParity(t *testing.T) {
+	env := testhub.Start(t)
+	reactor, secret := env.NewPeer("session", "reactor")
+	_, senderSecret := env.NewPeer("session", "sender")
+	var sent sendResult
+	toolOK(t, env, senderSecret, "vecnet_send", map[string]any{
+		"idempotency_key": "validation-target", "recipients": []string{reactor},
+		"priority": "hold", "content": map[string]any{"text": "react to this"},
+	}, &sent)
+	writeCounts := func() [8]int {
+		t.Helper()
+		var counts [8]int
+		for i, table := range []string{"reactions", "reaction_ops", "reaction_wakes", "messages", "deliveries", "events", "audit", "counters"} {
+			if err := env.Hub.DB.QueryRow("SELECT count(*) FROM " + table).Scan(&counts[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return counts
+	}
+	// The schema's character bound also has a UTF-8 byte cap. Body shape
+	// must win over semantic errors and target lookup on both transports.
+	for _, tc := range []struct {
+		name, emoji string
+	}{
+		{"33 ASCII bytes", strings.Repeat("x", 33)},
+		{"33 UTF-8 bytes", strings.Repeat("✅", 11)},
+		{"32 ASCII bytes", strings.Repeat("x", 32)},
+		{"32 UTF-8 bytes", strings.Repeat("👍", 8)},
+	} {
+		for _, mixed := range []bool{false, true} {
+			args := map[string]any{"message_id": sent.MessageID, "emoji": tc.emoji, "op": "add", "priority": "hold"}
+			name := tc.name + "/valid fields"
+			if mixed {
+				name = tc.name + "/invalid op and priority and unknown target"
+				args["message_id"] = "msg_00000000000000000000000000"
+				args["op"], args["priority"] = "bad", "bad"
+			}
+			for _, transport := range []string{"HTTP", "MCP"} {
+				t.Run("emoji length/"+name+"/"+transport, func(t *testing.T) {
+					before := writeCounts()
+					t.Cleanup(func() {
+						if after := writeCounts(); after != before {
+							t.Errorf("rejected reaction wrote state: %v -> %v", before, after)
+						}
+					})
+					if transport == "MCP" {
+						if len(tc.emoji) <= 32 {
+							toolFails(t, env, secret, "vecnet_react", args, "emoji_not_allowed")
+						} else if path := invalidPath(t, env, secret, "vecnet_react", args); path != "/emoji" {
+							t.Fatalf("MCP rejected at %q, want /emoji", path)
+						}
+						return
+					}
+					resp, body := env.Do(secret, http.MethodPost, "/v1/reactions", args)
+					var got toolErrorBody
+					if err := json.Unmarshal(body, &got); err != nil {
+						t.Fatal(err)
+					}
+					if len(tc.emoji) <= 32 {
+						if resp.StatusCode != 422 || got.Error.Code != "emoji_not_allowed" {
+							t.Fatalf("HTTP reaction: %d %s, want 422 emoji_not_allowed", resp.StatusCode, body)
+						}
+					} else if resp.StatusCode != 400 || got.Error.Code != "invalid_body" || got.Error.Details["path"] != "/emoji" {
+						t.Fatalf("HTTP reaction: %d %s, want 400 invalid_body at /emoji", resp.StatusCode, body)
+					}
+				})
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name, emoji, op, priority, code, field string
+	}{
+		{"invalid op", "✅", "bad", "hold", "invalid_value", "op"},
+		{"invalid priority", "✅", "add", "bad", "invalid_value", "priority"},
+		{"emoji before op", "invalid", "bad", "hold", "emoji_not_allowed", ""},
+		{"emoji before priority", "invalid", "add", "bad", "emoji_not_allowed", ""},
+		{"op before priority", "✅", "bad", "bad", "invalid_value", "op"},
+		{"empty op", "✅", "", "hold", "invalid_value", "op"},
+		{"empty priority", "✅", "add", "", "invalid_value", "priority"},
+		{"empty priority on remove", "✅", "remove", "", "invalid_value", "priority"},
+		{"emoji before empty priority", "invalid", "add", "", "emoji_not_allowed", ""},
+		{"op before empty priority", "✅", "bad", "", "invalid_value", "op"},
+	} {
+		for _, target := range []struct{ name, id string }{
+			{"valid target", sent.MessageID},
+			{"unknown target", "msg_00000000000000000000000000"},
+		} {
+			t.Run(tc.name+"/"+target.name, func(t *testing.T) {
+				before := writeCounts()
+				t.Cleanup(func() {
+					if after := writeCounts(); after != before {
+						t.Errorf("rejected reaction wrote state: counts %v -> %v", before, after)
+					}
+				})
+				// Semantic errors must win over target lookup on both transports
+				// and must not write reactions, wakes, events, rates or audit rows.
+				args := map[string]any{"message_id": target.id, "emoji": tc.emoji, "op": tc.op, "priority": tc.priority}
+				resp, body := env.Do(secret, http.MethodPost, "/v1/reactions", args)
+				var httpErr toolErrorBody
+				if err := json.Unmarshal(body, &httpErr); err != nil {
+					t.Fatal(err)
+				}
+				var field any
+				if tc.field != "" {
+					field = tc.field
+				}
+				if resp.StatusCode != 422 || httpErr.Error.Code != tc.code || httpErr.Error.Details["field"] != field {
+					t.Errorf("HTTP reaction: %d %s, want %s field %q", resp.StatusCode, body, tc.code, tc.field)
+				}
+				mcpErr := toolFails(t, env, secret, "vecnet_react", args, tc.code)
+				if mustJSON(t, mcpErr) != mustJSON(t, httpErr) {
+					t.Fatalf("MCP error %+v differs from HTTP %+v", mcpErr, httpErr)
+				}
+			})
+		}
+	}
+	// MCP retains schema guards for message IDs even when emoji semantics fail.
+	for _, id := range []string{
+		"peer_00000000000000000000000000", "bad", "",
+		"msg_0000000000000000000000000", "msg_000000000000000000000000000",
+		"msg_0000000000000000000000000I", "msg_0000000000000000000000000a",
+	} {
+		for _, emoji := range []string{"✅", "invalid"} {
+			t.Run("message ID shape/"+id+"/"+emoji, func(t *testing.T) {
+				before := writeCounts()
+				t.Cleanup(func() {
+					if after := writeCounts(); after != before {
+						t.Errorf("malformed reaction wrote state: %v -> %v", before, after)
+					}
+				})
+				path := invalidPath(t, env, secret, "vecnet_react", map[string]any{
+					"message_id": id, "emoji": emoji, "op": "add", "priority": "hold",
+				})
+				if path != "/message_id" {
+					t.Fatalf("MCP rejected at %q, want /message_id", path)
+				}
+			})
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		args any
+	}{
+		{"missing message", map[string]any{"emoji": "invalid", "op": "bad"}},
+		{"invalid message id", map[string]any{"message_id": "bad", "emoji": "invalid", "op": "bad"}},
+		{"unknown property", map[string]any{"message_id": "msg_00000000000000000000000000", "emoji": "invalid", "op": "bad", "extra": true}},
+		{"non-string priority", map[string]any{"message_id": "msg_00000000000000000000000000", "emoji": "invalid", "priority": 42}},
+		{"null op", map[string]any{"message_id": "msg_00000000000000000000000000", "emoji": "invalid", "op": nil}},
+		{"non-object", []any{"invalid"}},
+	} {
+		t.Run("body shape before semantics/"+tc.name, func(t *testing.T) {
+			invalidPath(t, env, secret, "vecnet_react", tc.args)
+		})
+	}
+}
+
+func TestEventsSubscribeRefusesReactionType(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "subscriber")
+	cb := testhub.NewCallback(t)
+	r := rpc2026(t, env, secret, "events/subscribe", subParams(cb.URL, webhook.NewSecret(), map[string]any{
+		"arguments": map[string]any{"types": []string{"reaction"}},
+	}))
+	if r.Error == nil || r.Error.Code != -32602 {
+		t.Fatalf("reaction subscription: %+v / %s, want -32602", r.Error, r.Result)
+	}
+	if n := cb.Requests(); n != 0 {
+		t.Fatalf("invalid subscription contacted callback %d times, want 0", n)
+	}
+}
+
+func TestSendToolRefusesReactionKind(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "sender")
+	recipient, _ := env.NewPeer("session", "recipient")
+	if path := invalidPath(t, env, secret, "vecnet_send", map[string]any{
+		"idempotency_key": "forged-reaction", "recipients": []string{recipient},
+		"kind": "reaction", "priority": "hold", "content": map[string]any{"text": "forged"},
+	}); path != "/kind" {
+		t.Fatalf("reaction kind rejected at %q, want /kind", path)
 	}
 }

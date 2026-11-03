@@ -186,6 +186,15 @@ func (h *Hub) notify(ctx context.Context, ev envelope.Event, classes ...string) 
 		slog.Error("hub: notify encode", "err", err)
 		return
 	}
+	// Reaction notifications outlive the send transaction and may retry after
+	// the queued wake is withdrawn. Carry its identity to every attempt.
+	var reactionDeliveryID string
+	if ev.Type == "delivery" {
+		var d envelope.Delivery
+		if err := json.Unmarshal(ev.Data, &d); err == nil && d.Message.Kind == "reaction" {
+			reactionDeliveryID = d.DeliveryID
+		}
+	}
 	id := ev.Cursor
 	if id == "" {
 		id = ids.New(notifyPrefix)
@@ -201,13 +210,13 @@ func (h *Hub) notify(ctx context.Context, ev envelope.Event, classes ...string) 
 		go func() {
 			defer h.notifyWG.Done()
 			defer func() { <-h.notifySem }()
-			h.postNotify(ctx, r, id, body)
+			h.postNotify(ctx, r, id, body, reactionDeliveryID)
 		}()
 	}
 }
 
 // postNotify sends one notification, retrying per NotifyRetry.
-func (h *Hub) postNotify(ctx context.Context, r NotifyRoute, id string, body []byte) {
+func (h *Hub) postNotify(ctx context.Context, r NotifyRoute, id string, body []byte, reactionDeliveryID string) {
 	delays := h.NotifyRetry
 	if delays == nil {
 		delays = DefaultNotifyRetry
@@ -228,7 +237,26 @@ func (h *Hub) postNotify(ctx context.Context, r NotifyRoute, id string, body []b
 			case <-t.C:
 			}
 		}
-		if lastErr = h.postNotifyOnce(ctx, client, r, id, body); lastErr == nil {
+		if reactionDeliveryID != "" {
+			// Claim before preparing the attempt: a wake that a remove or a
+			// newer wake withdrew is not sent, and one in flight cannot be
+			// withdrawn until the attempt is over (§17.5).
+			live, err := h.BeginDispatch(ctx, reactionDeliveryID)
+			if err != nil {
+				slog.Error("hub: reaction notification claim", "err", err)
+				return
+			}
+			if !live {
+				return
+			}
+		}
+		lastErr = h.postNotifyOnce(ctx, client, r, id, body)
+		if reactionDeliveryID != "" {
+			if err := h.EndDispatch(ctx, reactionDeliveryID, lastErr == nil); err != nil {
+				slog.Error("hub: reaction notification release", "err", err)
+			}
+		}
+		if lastErr == nil {
 			return
 		}
 	}
@@ -276,7 +304,7 @@ func (h *Hub) notifyOperatorDeliveries(ctx context.Context, msgID string) {
 		 JOIN peers p ON p.peer_id = d.recipient AND p.kind = 'operator'
 		 JOIN events e ON e.seq = d.event_seq
 		 JOIN messages m ON m.msg_id = d.msg_id
-		 WHERE d.msg_id = ?
+		 WHERE d.msg_id = ? AND d.state != 'superseded'
 		 ORDER BY e.seq`, msgID)
 	if err != nil {
 		slog.Error("hub: operator notifications", "err", err)

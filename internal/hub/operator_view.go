@@ -8,7 +8,9 @@ import (
 
 // noteOperatorView invalidates operator snapshots in the same transaction as
 // their change. Callers wake the returned log owners only after commit.
-func (h *Hub) noteOperatorView(ctx context.Context, tx *sql.Tx, reason string, threadID string) ([]string, error) {
+// An optional except set excludes peers already receiving the underlying event.
+// Omitting it preserves the existing callers' empty exclusion set.
+func (h *Hub) noteOperatorView(ctx context.Context, tx *sql.Tx, reason string, threadID string, except ...map[string]bool) ([]string, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT peer_id FROM peers WHERE kind = 'operator' AND disabled = 0 ORDER BY peer_id`)
 	if err != nil {
 		return nil, fmt.Errorf("hub: operator view peers: %w", err)
@@ -20,7 +22,9 @@ func (h *Hub) noteOperatorView(ctx context.Context, tx *sql.Tx, reason string, t
 			rows.Close()
 			return nil, err
 		}
-		peers = append(peers, peer)
+		if len(except) == 0 || !except[0][peer] {
+			peers = append(peers, peer)
+		}
 	}
 	err = rows.Err()
 	closeErr := rows.Close()

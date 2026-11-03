@@ -1283,3 +1283,75 @@ func TestOAuthSubscriptionFailsClosedWithoutSeam(t *testing.T) {
 		t.Fatalf("paused = %q, want %q", got.PausedReason, events.PausedUnauthorized)
 	}
 }
+
+// TestReactionWakeInFlightNotWithdrawn pins the dispatch claim (PROTOCOL
+// §17.5): a remove that lands while the wake's callback POST is in flight
+// cannot withdraw it, since superseded is never pushed. A failed attempt then
+// settles the withdrawal, so no retry sends it; an accepted one stays accepted.
+func TestReactionWakeInFlightNotWithdrawn(t *testing.T) {
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusOK} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			env := testhub.Start(t)
+			owner, ownerSecret := env.NewPeer("session", "d")
+			reactor, reactorSecret := env.NewPeer("session", "s")
+			resp, out := env.Do(ownerSecret, "POST", "/v1/messages", map[string]any{
+				"idempotency_key": "target", "priority": "hold",
+				"recipients": []string{reactor}, "content": map[string]any{"text": "target"},
+			})
+			if resp.StatusCode != http.StatusAccepted {
+				t.Fatalf("send: %d %s", resp.StatusCode, out)
+			}
+			var target struct {
+				MessageID string `json:"message_id"`
+			}
+			if err := json.Unmarshal(out, &target); err != nil {
+				t.Fatal(err)
+			}
+			cb := testhub.NewCallback(t)
+			subscribe(t, env, cb, owner, map[string]any{"types": []string{"delivery"}}, time.Time{})
+			react := func(op string) hub.ReactResponse {
+				resp, out := env.Do(reactorSecret, "POST", "/v1/reactions", map[string]any{
+					"message_id": target.MessageID, "emoji": "✅", "op": op, "priority": "wake",
+				})
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("%s: %d %s", op, resp.StatusCode, out)
+				}
+				var r hub.ReactResponse
+				if err := json.Unmarshal(out, &r); err != nil {
+					t.Fatal(err)
+				}
+				return r
+			}
+			wake := react("add").Wake
+			if wake == nil {
+				t.Fatal("no wake")
+			}
+			var during hub.ReactResponse
+			cb.OnPost(func(n int, w http.ResponseWriter) {
+				if n == 1 {
+					during = react("remove")
+				}
+				w.WriteHeader(status)
+			})
+			step(t, env)
+			wantPosts(t, cb, 1)
+			if len(during.Superseded) != 0 {
+				t.Fatalf("remove during the POST withdrew %v, want nothing while in flight", during.Superseded)
+			}
+			want := "superseded"
+			if status == http.StatusOK {
+				want = "accepted"
+			}
+			var state string
+			if err := env.Hub.DB.QueryRow(`SELECT state FROM deliveries WHERE dly_id = ?`, wake.DeliveryID).Scan(&state); err != nil {
+				t.Fatal(err)
+			}
+			if state != want {
+				t.Fatalf("after the attempt state = %s, want %s", state, want)
+			}
+			env.Now.Advance(time.Hour)
+			step(t, env)
+			wantPosts(t, cb, 1)
+		})
+	}
+}

@@ -37,6 +37,8 @@ The [operator guide](docs/OPERATOR.md) covers sign-in, priorities, TUI keys, pre
 
 Both clients can send [attachments](docs/OPERATOR.md#attachments): pick, drop or paste in the web UI, use `:attach` / `:detach` in the TUI, and view safe raster images inline on the web; `build2 node scripts/ui/att-journey.mjs` checks the exchange between clients.
 
+Both clients support [reactions](docs/OPERATOR.md#reactions), with per-emoji wake defaults and a once-per-emoji wake limit for agents; `build2 node scripts/ui/rx-journey.mjs` checks live web/TUI toggles and bounded delivery.
+
 ## Connectors
 
 Each connects by what its platform offers, and each guide covers setup, what the bot receives, how it replies and how to tell when it has broken. All three run inside the hub, so none needs a separate process.

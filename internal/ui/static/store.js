@@ -7,6 +7,7 @@ const THREAD_TAGS = {
   receipt: ['inbox'],
   thread_updated: ['threads'],
   approval_expired: ['inbox'],
+  reaction: [],
 };
 
 function isObject(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }

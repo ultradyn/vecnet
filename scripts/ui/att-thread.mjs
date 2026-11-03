@@ -232,6 +232,9 @@ try {
     await page.mouse.click(8, 450);
     await viewer.waitFor({ state: 'detached' });
 
+    // Pin local browser time so the 90-minute retry always crosses midnight.
+    // setFixedTime leaves timers running for page updates and locators.
+    await page.clock.setFixedTime(await page.evaluate(() => new Date(2026, 10, 3, 23, 0, 0).getTime()));
     // A faked daily quota refusal on the reply chip names the retry time.
     const quota = route => route.fulfill({ status: 429, contentType: 'application/json', body: JSON.stringify({ error: { code: 'upload_quota_exceeded', message: 'daily upload quota exceeded', details: { retry_after_seconds: 5400 } } }) });
     await page.route(isUpload, quota);
@@ -241,8 +244,8 @@ try {
     await chooser.setFiles({ name: 'second-run.log', mimeType: 'text/plain', buffer: Buffer.from('radio: finalize called\nradio: ok\n') });
     const failed = page.locator('.composer .up-chip.up-failed', { hasText: 'second-run.log' });
     await failed.waitFor();
-    const errLine = await failed.locator('.up-err').textContent();
-    assert(/Daily upload quota reached; try again at \d\d:\d\d\./.test(errLine), `the quota error does not name a 24-hour time: ${errLine}`);
+    const errLine = await failed.locator('.up-err > span').textContent();
+    assert(errLine === 'Daily upload quota reached; try again at 4 Nov 00:30.', `the quota error does not name the en-AU next-day retry time: ${errLine}`);
     await failed.getByRole('button', { name: 'Retry', exact: true }).waitFor();
     await failed.getByRole('button', { name: 'Remove', exact: true }).waitFor();
     await page.locator('.composer .send:disabled').waitFor();

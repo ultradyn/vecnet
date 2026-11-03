@@ -408,3 +408,13 @@ func TestThreadSendWithoutInReplyToContinuesLoop(t *testing.T) {
 	// The bot reply chain under the expired message stays closed.
 	mustReject(t, env, bSec, replyReq("b-old", thr, b1.MessageID), http.StatusUnprocessableEntity, "expired")
 }
+
+func TestPlainSendAfterReactionContinuesLoop(t *testing.T) {
+	f := newRX(t)
+	needWake(t, rx(t, f.env, f.bs, f.target.MessageID, "✅", "add", "wake"))
+	sent := mustSend(t, f.env, f.as, replyReq("plain", f.target.ThreadID, ""))
+	l := storedLoop(t, f.env, sent.MessageID)
+	if l.Depth != 1 || !chainEq(l.SenderChain, []string{f.a, f.a}) {
+		t.Fatalf("plain loop=%+v; reaction became implicit parent", l)
+	}
+}

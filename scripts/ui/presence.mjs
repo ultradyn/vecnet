@@ -83,7 +83,15 @@ try {
       await page.clock.fastForward('20:00');
       const heldBody = (await heldBeat).postDataJSON();
       assert(heldBody.state === 'working', `held heartbeat re-posted ${heldBody.state}`);
+      // Each tab estimates hub time from its last snapshot; request latency
+      // can date a later click before this heartbeat. Advance the demo clock
+      // and reload tab 2 so this scenario establishes a strictly newer report.
+      await ctx.advance('1s');
+      await tab2.reload({ waitUntil: 'load' });
+      await tab2.locator('#me .who', { hasText: /^max is working$/ }).waitFor();
+      const newerChoice = tab2.waitForRequest(isPresencePost);
       await tab2.locator('#me button.ptog', { hasText: 'Set idle' }).click();
+      assert(Date.parse((await newerChoice).postDataJSON().at) > Date.parse(heldBody.at), 'second tab choice is not newer than the held heartbeat');
       await tab2.locator('#me .who', { hasText: /^max is idle$/ }).waitFor();
       assert(await hubState() === 'idle', 'second tab did not set idle');
       const landed = page.waitForResponse(res => isPresencePost(res.request()));

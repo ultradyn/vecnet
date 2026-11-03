@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -480,5 +481,53 @@ func TestUploadQuotaError(t *testing.T) {
 	}
 	if seconds, ok := apiErr.Details["retry_after_seconds"].(float64); !ok || seconds <= 0 || seconds > 86400 {
 		t.Fatalf("quota retry_after_seconds = %v, want seconds until the next UTC day", apiErr.Details["retry_after_seconds"])
+	}
+}
+
+// TestClientReact adds and then removes a reaction against a real hub. The
+// proxy checks the operator_ui ingress header on every reaction request.
+func TestClientReact(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	target, err := url.Parse(env.URL)
+	mustOK(t, err)
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	var reacts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/reactions" {
+			reacts.Add(1)
+			if r.Method != "POST" || r.Header.Get("X-Vecnet-Ingress") != "operator_ui" || r.Header.Get("Content-Type") != "application/json" {
+				t.Errorf("reaction request %s ingress %q type %q", r.Method, r.Header.Get("X-Vecnet-Ingress"), r.Header.Get("Content-Type"))
+			}
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, env.OperatorSecret)
+	peer, _ := env.NewPeer("session", "reacted-to")
+	sent, err := c.Send(ctx, envelope.SendRequest{IdempotencyKey: "react-target", Recipients: []string{peer}, Priority: "hold", Content: envelope.SendContent{Text: "react to me"}})
+	mustOK(t, err)
+	check := envelope.ReactionEmoji[5]
+
+	added, err := c.React(ctx, envelope.ReactionRequest{MessageID: sent.MessageID, Emoji: check, Op: "add", Priority: "hold"})
+	mustOK(t, err)
+	want := []envelope.ReactionGroup{{Emoji: check, Peers: []string{env.OperatorPeer}}}
+	if added.MessageID != sent.MessageID || added.ThreadID != sent.ThreadID || added.Emoji != check || added.Op != "add" || !added.Changed || !reflect.DeepEqual(added.Reactions, want) {
+		t.Fatalf("add = %+v", added)
+	}
+	if added.Superseded == nil || len(added.Superseded) != 0 || added.Wake != nil {
+		t.Fatalf("add superseded %#v wake %+v, want [] and nil", added.Superseded, added.Wake)
+	}
+
+	removed, err := c.React(ctx, envelope.ReactionRequest{MessageID: sent.MessageID, Emoji: check, Op: "remove"})
+	mustOK(t, err)
+	if removed.Op != "remove" || !removed.Changed || removed.Reactions == nil || len(removed.Reactions) != 0 {
+		t.Fatalf("remove = %+v", removed)
+	}
+	if removed.Superseded == nil || len(removed.Superseded) != 0 || removed.Wake != nil {
+		t.Fatalf("remove superseded %#v wake %+v, want [] and nil", removed.Superseded, removed.Wake)
+	}
+	if n := reacts.Load(); n != 2 {
+		t.Fatalf("%d reaction requests, want 2", n)
 	}
 }

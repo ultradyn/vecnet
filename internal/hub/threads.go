@@ -168,7 +168,7 @@ func (h *Hub) ReplyThread(ctx context.Context, c auth.Caller, as, msgID string) 
 		if err != nil {
 			return err
 		}
-		_, mThr, found, err := loadMessage(ctx, tx, msgID)
+		m, mThr, found, err := loadMessage(ctx, tx, msgID)
 		if err != nil {
 			return err
 		}
@@ -183,6 +183,11 @@ func (h *Hub) ReplyThread(ctx context.Context, c auth.Caller, as, msgID string) 
 			e.Details["message_id"] = msgID
 			return e
 		}
+		if m.Kind == "reaction" {
+			e := E(http.StatusUnprocessableEntity, "not_replyable", "reaction messages cannot be replied to")
+			e.Details["in_reply_to"] = msgID
+			return e
+		}
 		thr = mThr
 		return nil
 	})
@@ -194,7 +199,7 @@ func (h *Hub) ReplyThread(ctx context.Context, c auth.Caller, as, msgID string) 
 // (PROTOCOL §6).
 func latestMessage(ctx context.Context, tx *sql.Tx, thr string) (*envelope.Message, error) {
 	var id string
-	err := tx.QueryRowContext(ctx, `SELECT msg_id FROM messages WHERE thr_id = ? ORDER BY seq DESC LIMIT 1`, thr).Scan(&id)
+	err := tx.QueryRowContext(ctx, `SELECT msg_id FROM messages WHERE thr_id = ? AND kind != 'reaction' ORDER BY seq DESC LIMIT 1`, thr).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

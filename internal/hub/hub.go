@@ -137,6 +137,12 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 		`UPDATE peers SET reachability = 'reachable', reach_via = 'call' WHERE reachability = 'connected'`); err != nil {
 		return nil, fmt.Errorf("hub: reset reachability: %w", err)
 	}
+	// No outbound attempt survives a restart either: release every dispatch
+	// claim, so §17.5 can withdraw those wakes again (BeginDispatch).
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE deliveries SET dispatching = 0 WHERE dispatching > 0`); err != nil {
+		return nil, fmt.Errorf("hub: reset dispatch claims: %w", err)
+	}
 	h := &Hub{DB: db, Log: log, Blobs: blobs, Auth: &auth.Resolver{DB: db, Now: now}, Cfg: cfg, Now: now,
 		streams: map[string]int{}, notifySem: make(chan struct{}, MaxNotifyInFlight)}
 	h.IdleHook = h.OnIdle // release held wake_idle deliveries (PROTOCOL §5.2)

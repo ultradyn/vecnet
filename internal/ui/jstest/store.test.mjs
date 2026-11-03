@@ -50,6 +50,10 @@ test('tagsFor matches internal/opapi/testdata/tags.json row for row', () => {
 
 test('tagsFor mirrors opapi.Tags on malformed events: they invalidate nothing', () => {
   for (const event of [
+    { type: 'reaction' },
+    { type: 'reaction', data: {} },
+    { type: 'reaction', data: { thread_id: 7 } },
+    { type: 'reaction', data: { thread_id: '' } },
     { type: 'delivery' },
     { type: 'delivery', data: null },
     { type: 'delivery', data: [] },

@@ -41,7 +41,7 @@ func (h *Hub) checkRate(ctx context.Context, tx *sql.Tx, peerID string, newThrea
 // limit in the error message.
 func rateVerdict(ctx context.Context, tx *sql.Tx, what, actor string, perMin, perHour int, newThread bool, now time.Time) (*APIError, error) {
 	retry, err := windowRetry(ctx, tx,
-		`SELECT created_at FROM messages WHERE sender = ? AND created_at > ? ORDER BY created_at`,
+		`SELECT created_at FROM messages WHERE sender = ?1 AND kind != 'reaction' AND created_at > ?2 UNION ALL SELECT at AS created_at FROM reaction_ops WHERE peer_id = ?1 AND at > ?2 ORDER BY created_at`,
 		actor, perMin, sendWindow, now)
 	if err != nil {
 		return nil, err
@@ -89,7 +89,7 @@ func windowRetry(ctx context.Context, tx *sql.Tx, q, peer string, max int, windo
 		return 0, nil
 	}
 	var at string
-	err := tx.QueryRowContext(ctx, q+` LIMIT 1 OFFSET ?`, peer, envelope.FormatTime(now.Add(-window)), n-max).Scan(&at)
+	err := tx.QueryRowContext(ctx, q+` LIMIT 1 OFFSET ?3`, peer, envelope.FormatTime(now.Add(-window)), n-max).Scan(&at)
 	if errors.Is(err, sql.ErrNoRows) {
 		return int(window / time.Second), nil // max is 0: nothing will admit a send sooner
 	}

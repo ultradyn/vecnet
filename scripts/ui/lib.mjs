@@ -12,6 +12,18 @@ import { crc32, deflateSync } from 'node:zlib';
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export function assert(cond, msg = 'assertion failed') { if (!cond) throw new Error(msg); }
 
+export async function scrollMessageIntoView(page, id) {
+  // Resource notifications replace message nodes. Query, scroll and measure
+  // synchronously on each poll, with no element handle held across frames.
+  await page.waitForFunction(id => {
+    const el = document.getElementById(`m-${id}`);
+    if (!el) return false;
+    el.scrollIntoView({ block: 'start', behavior: 'instant' });
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && r.top < innerHeight && r.bottom > 0;
+  }, id);
+}
+
 // png encodes a w×h 8-bit RGB image whose pixel colours come from px(x, y),
 // for image fixtures built at run time (no binaries are committed).
 export function png(w, h, px) {

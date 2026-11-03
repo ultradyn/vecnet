@@ -25,6 +25,8 @@ ok &= v("delivery", load("03-delivery-group-hold.json"), "03")
 ok &= v("sendRequest", load("04-approval-request.json"), "04")
 ok &= v("sendRequest", load("05-job-status.json"), "05")
 ok &= v("delivery", load("08-github-ingress-delivery.json"), "08")
+ok &= v("delivery", load("09-reaction-delivery.json"), "09")
+ok &= v("event", load("10-reaction-event.json"), "10")
 for i, e in enumerate(load("06-events-stream.json")["events"]):
     ok &= v("event", e, f"06[{i}]")
 # negative checks

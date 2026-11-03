@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -36,6 +37,11 @@ type ThreadState struct {
 	Messages []envelope.Message
 	Matrix   opapi.Matrix
 	Loading  bool
+
+	// rewind is one past the oldest held message whose reactions changed
+	// since the last load (0: none), and rewinds counts the reaction events
+	// that set it, so a load that raced a newer one leaves it set.
+	rewind, rewinds int
 }
 
 // TagAll asks Reload for every resource and every opened thread. The other tags
@@ -364,9 +370,15 @@ func (m *Model) fetchThread(key, id string) tea.Cmd {
 	if st == nil {
 		return nil
 	}
+	// A held message's reactions change in place (PROTOCOL §17.3), so a load
+	// after a reaction event goes back to that message.
+	from, rewinds := len(st.Messages), st.rewinds
+	if st.rewind > 0 {
+		from = st.rewind - 1
+	}
 	after := ""
-	if n := len(st.Messages); n > 0 {
-		after = st.Messages[n-1].MessageID
+	if from > 0 {
+		after = st.Messages[from-1].MessageID
 	}
 	api, ctx, now := m.API, m.ctx, m.Now
 	return func() tea.Msg {
@@ -403,7 +415,20 @@ func (m *Model) fetchThread(key, id string) tea.Cmd {
 		return loadMsg{key: key, hubNow: detail.Now, at: now(), apply: func(m *Model) {
 			st := m.Data.Thread[id]
 			st.Detail, st.Matrix, st.Loading = detail, matrix, false
-			st.Messages = append(st.Messages, messages...)
+			if st.rewinds == rewinds {
+				st.rewind = 0
+			}
+			held := make(map[string]int, len(st.Messages))
+			for i, msg := range st.Messages {
+				held[msg.MessageID] = i
+			}
+			for _, msg := range messages {
+				if i, ok := held[msg.MessageID]; ok {
+					st.Messages[i] = msg
+					continue
+				}
+				st.Messages = append(st.Messages, msg)
+			}
 		}}
 	}
 }
@@ -482,11 +507,62 @@ func (m *Model) onTailBatch(msg tailBatchMsg) tea.Cmd {
 	for _, ev := range msg.batch.Events {
 		tags = append(tags, opapi.Tags(ev)...)
 		m.remember(ev)
+		switch ev.Type {
+		case "reaction":
+			var r envelope.ReactionEvent
+			if json.Unmarshal(ev.Data, &r) == nil {
+				m.rewindTo(r.ThreadID, r.MessageID)
+			}
+		case "operator_view":
+			// A non-participant operator learns of a reaction without the
+			// message it changed (PROTOCOL §17.3): refetch every held one.
+			var v struct {
+				Reason   string `json:"reason"`
+				ThreadID string `json:"thread_id"`
+			}
+			if json.Unmarshal(ev.Data, &v) == nil && v.Reason == "reaction" {
+				m.rewindAll(v.ThreadID)
+			}
+		}
 	}
 	if msg.batch.Reset {
+		// A purged cursor skipped events, reactions among them, which change
+		// held messages in place: every held thread is fetched again whole.
+		for id := range m.Data.Thread {
+			m.rewindAll(id)
+		}
 		tags = append(tags, TagAll)
 	}
 	return m.startLoads(tags, msg.ack)
+}
+
+// rewindTo marks a held message whose reactions changed, so the thread's next
+// load fetches it again with its new reactions.
+func (m *Model) rewindTo(threadID, messageID string) {
+	st := m.Data.Thread[threadID]
+	if st == nil {
+		return
+	}
+	i := slices.IndexFunc(st.Messages, func(msg envelope.Message) bool { return msg.MessageID == messageID })
+	if i < 0 {
+		return
+	}
+	st.rewindFrom(i + 1)
+}
+
+// rewindAll marks every message held for a thread, for a change that does not
+// say which message it touched.
+func (m *Model) rewindAll(threadID string) {
+	if st := m.Data.Thread[threadID]; st != nil && len(st.Messages) > 0 {
+		st.rewindFrom(1)
+	}
+}
+
+func (st *ThreadState) rewindFrom(i int) {
+	if st.rewind == 0 || i < st.rewind {
+		st.rewind = i
+	}
+	st.rewinds++
 }
 
 // remember keeps the newest events. A replay after a failed ack is not news.

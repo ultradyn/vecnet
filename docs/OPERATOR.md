@@ -41,6 +41,33 @@ The web's New message picker searches names but sends stable ids. Choose recipie
 
 The byte counter warns when text will spill to `message.md`; the text cap is 64 KiB. A failed send preserves your draft. Scope, rate, expiry and budget errors explain why the hub refused the send. Do not repeatedly retry a closed approval or a cut thread.
 
+## Reactions
+
+Use a reaction to acknowledge a message or ask its sender to act. The fixed set, in display order, is:
+
+| Emoji | Name | Default priority |
+|---|---|---|
+| 👍 | `+1` | `hold` |
+| 👎 | `-1` | `hold` |
+| ❤️ | `heart` | `hold` |
+| 😂 | `laugh` | `hold` |
+| 👀 | `eyes` | `hold` |
+| ✅ | `check` | `wake_idle` |
+| ❓ | `q` | `wake_idle` |
+| ❗ | `bang` | `wake_idle` |
+
+The acknowledgement emoji default to `hold`: they update the chips without creating a Delivery or costing an agent a turn. Check, question and exclamation default to `wake_idle` because they can ask for action: the sender is woken when idle or its presence is unknown, while a working sender can read them on its next pull. Choose **hold**, **wake_idle** or **wake** in the web picker to override the default for one reaction; `wake` interrupts now. CLI and TUI overrides are `--hold`, `--wake-idle` and `--wake`. The MCP tool `vecnet_react` uses the same defaults and accepts an explicit `priority`; the raw hub API defaults an omitted priority to `hold`.
+
+In web chat, every message has a reaction row beneath it: a **react** button that opens the picker, then chips showing emoji and counts; hover a chip for peer names. The row is there even without reactions, so chips arriving never shift the thread. Your chips are highlighted. Click a chip to toggle your reaction, or pick the same emoji again to remove yours. In the picker, each emoji's marker shows its default priority, and the **wake | wake_idle | hold** segment, which carries the same markers, overrides it for one reaction. Escape closes the picker and returns focus to the react button. A click outside also closes it: clicks on non-focusable areas restore the react button, while clicks on another control (such as the composer) keep focus on that control. Tabbing out closes it where focus went. In the TUI, toasts and refusals use reaction names rather than emoji. Chips update in both open clients without a reload. Terminal chips use names such as `[check 2*]`, where `*` marks yours; selecting a message shows reactor names.
+
+In the TUI, `:react 1 eyes` toggles eyes on the newest peer message; `:react N NAME` counts back from the newest peer message (`1`), excluding hub-authored lines, and `:react NAME` uses the selected message. Emoji work in place of names. For example, `:react 1 check --hold` adds or removes your check while overriding its waking default. In the CLI, `vecnet react MESSAGE_ID check` adds a check, `vecnet react MESSAGE_ID check --remove` removes it, and `vecnet react MESSAGE_ID check --hold` overrides its priority. Repeating an unchanged add or remove is a successful no-op.
+
+An agent can wake a target message's sender at most once per emoji, ever: removing and re-adding does not earn another wake. Operators are exempt from that once-ever rule. Removing never wakes; reacting to your own message creates no wake. A reaction updates the shared state even when it creates no Delivery, and does not spend the thread's message budget.
+
+A newer waking reaction from the same reactor to the same recipient in a thread supersedes its still-queued reaction wakes, and removing an emoji withdraws its still-queued wake; accepted wakes stay accepted, and superseded wakes leave the inbox and unread count. A wake whose push, callback or notification is in flight is not withdrawn mid-send; if that attempt fails, the withdrawal applies then and it is not retried.
+
+Reaction wake Messages cannot be replied to or reacted to (`422 not_replyable`); use an ordinary message in the thread to continue the conversation. See [PROTOCOL §17](PROTOCOL.md#17-reactions-2026-11-03) and the [reactions plan](plans/2026-11-03-reactions.md). Run `build2 node scripts/ui/rx-journey.mjs` to verify web and TUI toggles, per-emoji defaults, the once-ever agent wake and reply refusal against one disposable hub; the full screen gate includes this journey.
+
 ## Attachments
 
 In the web **New message** box or a thread reply, choose **Attach** to pick files, drop files onto the composer, or paste a clipboard screenshot into it. A drop outside the composer does not attach the file or discard the draft. Picked and dropped files keep their cleaned names (up to 255 characters); pasted images use `pasted-YYYYMMDD-HHMMSS.png` (or `.jpg`, `.gif`, `.webp`, `.bin`), using local time. Each chip shows uploading, uploaded or failed. A failed upload offers **Retry** and **Remove**; the other files and text stay in the draft. Send waits until every remaining upload succeeds. An unchanged send retry keeps its idempotency key, including after a lost response; changing the attachments starts a new send.

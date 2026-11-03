@@ -44,7 +44,7 @@ func Excerpt(m envelope.Message) string {
 func Tags(ev envelope.Event) []string {
 	empty := []string{}
 	switch ev.Type {
-	case "delivery", "receipt", "thread_updated", "presence", "directory_updated", "approval_expired", "operator_view":
+	case "delivery", "receipt", "thread_updated", "presence", "directory_updated", "approval_expired", "operator_view", "reaction":
 	default:
 		return empty
 	}
@@ -103,6 +103,8 @@ func Tags(ev envelope.Event) []string {
 		return []string{"inbox", "thread:" + thread}
 	case "thread_updated":
 		return []string{"threads", "thread:" + thread}
+	case "reaction":
+		return []string{"thread:" + thread}
 	}
 	return empty
 }

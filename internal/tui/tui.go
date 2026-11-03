@@ -39,6 +39,7 @@ type API interface {
 	RetryDeadLetter(ctx context.Context, dly string) error
 	DiscardDeadLetter(ctx context.Context, dly string) error
 	Send(ctx context.Context, r envelope.SendRequest) (opapi.SendResult, error)
+	React(ctx context.Context, req envelope.ReactionRequest) (opapi.ReactionResult, error)
 	Answer(ctx context.Context, a opapi.OpenApproval, option int) error
 	SetPresence(ctx context.Context, state string, at time.Time) error
 	Blob(ctx context.Context, sha string, max int64) ([]byte, string, error)

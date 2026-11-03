@@ -1,0 +1,55 @@
+{
+  "$comment": "A reaction wake Delivery to the target sender. Reaction aggregates appear only in thread history; the reaction Event itself is never pushed.",
+  "schema_version": 1,
+  "delivery_id": "dly_01JD3Q5H2A4C6E8G0J2M4N6P8S",
+  "recipient": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C",
+  "via": null,
+  "attempt": 1,
+  "ingress": "hub",
+  "thread": {
+    "thread_id": "thr_01JD3Q5G9Z1B3D5F7H9K1M3P5R",
+    "title": "Flaky test in hark B196",
+    "participants": [
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C",
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A",
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B"
+    ],
+    "group": null,
+    "message_count": 2,
+    "budget_remaining": 499,
+    "history_access": "from_join"
+  },
+  "message": {
+    "schema_version": 1,
+    "message_id": "msg_01JD3Q5H0X2Z4B6D8F0H2K4M6R",
+    "thread_id": "thr_01JD3Q5G9Z1B3D5F7H9K1M3P5R",
+    "in_reply_to": "msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P",
+    "origin": null,
+    "kind": "reaction",
+    "sender": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A",
+    "recipients": [
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C"
+    ],
+    "priority": "wake_idle",
+    "created_at": "2026-11-01T06:13:03.412Z",
+    "content": {
+      "text": "Reacted ✅",
+      "truncated": false
+    },
+    "attachments": [],
+    "metadata": {},
+    "loop": {
+      "depth": 1,
+      "max_depth": 8,
+      "expires_at": "2026-11-02T06:12:03.412Z",
+      "sender_chain": [
+        "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C",
+        "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A"
+      ]
+    },
+    "reaction": {
+      "target": "msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P",
+      "emoji": "✅"
+    }
+  }
+}

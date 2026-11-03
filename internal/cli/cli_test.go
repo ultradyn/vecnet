@@ -18,6 +18,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/XertroV/vecnet/internal/cli"
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -113,6 +114,9 @@ type inboxEvent struct {
 			ThreadID    string                `json:"thread_id"`
 			InReplyTo   *string               `json:"in_reply_to"`
 			Sender      string                `json:"sender"`
+			Kind        string                `json:"kind"`
+			Priority    string                `json:"priority"`
+			Reaction    *envelope.ReactionRef `json:"reaction"`
 			Content     struct{ Text string } `json:"content"`
 			Attachments []struct {
 				SHA256    string `json:"sha256"`
@@ -690,5 +694,262 @@ func TestEnrolTokenFromStdinOrEnv(t *testing.T) {
 	u2.env["VECNET_ENROL_TOKEN"] = tok2
 	if out := u2.mustRun("enrol", "--hub", env.URL, "--profile", "p"); !strings.Contains(out, p2) {
 		t.Fatalf("enrol via VECNET_ENROL_TOKEN = %q, want %s", out, p2)
+	}
+}
+
+// reactionResponse mirrors the HTTP response without linking CLI code to hub.
+type reactionResponse struct {
+	MessageID  string                   `json:"message_id"`
+	ThreadID   string                   `json:"thread_id"`
+	Emoji      string                   `json:"emoji"`
+	Op         string                   `json:"op"`
+	Changed    bool                     `json:"changed"`
+	Reactions  []envelope.ReactionGroup `json:"reactions"`
+	Superseded []string                 `json:"superseded"`
+	Wake       *struct {
+		MessageID  string `json:"message_id"`
+		DeliveryID string `json:"delivery_id"`
+		Recipient  string `json:"recipient"`
+		State      string `json:"state"`
+	} `json:"wake"`
+}
+
+func postReaction(t *testing.T, env *testhub.Env, secret, msg, emoji, op, priority string) reactionResponse {
+	t.Helper()
+	resp, raw := env.Do(secret, http.MethodPost, "/v1/reactions", envelope.ReactionRequest{
+		MessageID: msg, Emoji: emoji, Op: op, Priority: priority,
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST reaction: %d %s", resp.StatusCode, raw)
+	}
+	var out reactionResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestReactCommand(t *testing.T) {
+	env := testhub.Start(t)
+	aID, aSec := env.NewPeer("session", "A")
+	bID, bSec := env.NewPeer("session", "B")
+	a := profileUser(t, env.URL, aSec)
+	sent := a.send(bID, "react here", "--hold")
+	for _, tc := range []struct {
+		label, prefix string
+		remove        bool
+		rows          int
+	}{
+		{"add", "reacted", false, 1},
+		{"repeat", "no change", false, 1},
+		{"remove", "removed", true, 0},
+		{"repeat remove", "no change", true, 0},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			b := profileUser(t, env.URL, bSec)
+			args := []string{"react", sent.MessageID, "👍"}
+			if tc.remove {
+				args = append(args, "--remove")
+			}
+			out := b.mustRun(args...)
+			if want := tc.prefix + " 👍 " + sent.MessageID + "\n"; out != want {
+				t.Fatalf("react output = %q, want %q", out, want)
+			}
+			var rows int
+			if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM reactions WHERE msg_id=? AND peer_id=? AND emoji=?`, sent.MessageID, bID, "👍").Scan(&rows); err != nil {
+				t.Fatal(err)
+			}
+			if rows != tc.rows {
+				t.Fatalf("reaction rows = %d, want %d", rows, tc.rows)
+			}
+		})
+	}
+	b := profileUser(t, env.URL, bSec)
+	first := postReaction(t, env, bSec, sent.MessageID, "✅", "add", "wake_idle")
+	if first.Wake == nil {
+		t.Fatal("setup reaction did not wake")
+	}
+	human := b.mustRun("react", sent.MessageID, "q", "--wake")
+	re := regexp.MustCompile(`^reacted ❓ ` + regexp.QuoteMeta(sent.MessageID) + ` \(wakes ` + regexp.QuoteMeta(aID) + `, (dly_[A-Za-z0-9]+)\) superseded ` + regexp.QuoteMeta(first.Wake.DeliveryID) + `\n$`)
+	match := re.FindStringSubmatch(human)
+	if match == nil {
+		t.Fatalf("human wake/superseded output = %q", human)
+	}
+	if got := b.mustRun("react", sent.MessageID, "q"); got != "no change ❓ "+sent.MessageID+"\n" {
+		t.Fatalf("repeat wake = %q", got)
+	}
+	if got, want := b.mustRun("react", sent.MessageID, "q", "--remove"), "removed ❓ "+sent.MessageID+" superseded "+match[1]+"\n"; got != want {
+		t.Fatalf("remove wake = %q, want %q", got, want)
+	}
+	// Principal credentials must select the reactor with --as in the body.
+	pID, pSec := env.NewPrincipal("P")
+	pPeer, _, err := env.Hub.AddPeer(context.Background(), "session", "P peer", pID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := profileUser(t, env.URL, pSec)
+	target := a.send(pPeer, "principal target", "--hold")
+	var out reactionResponse
+	if err := json.Unmarshal([]byte(p.mustRun("--as", pPeer, "--json", "react", target.MessageID, "heart")), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.MessageID != target.MessageID || out.ThreadID != target.ThreadID || out.Emoji != "❤️" || out.Op != "add" || !out.Changed || out.Wake != nil || out.Superseded == nil || len(out.Superseded) != 0 || len(out.Reactions) != 1 || len(out.Reactions[0].Peers) != 1 || out.Reactions[0].Peers[0] != pPeer {
+		t.Fatalf("react --as --json = %+v (sender %s)", out, aID)
+	}
+}
+
+func TestReactNamesAndDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		label, name, emoji, priority string
+		flags                        []string
+		wakes                        bool
+	}{
+		{"check", "check", "✅", "wake_idle", nil, true},
+		{"thumb", "+1", "👍", "hold", nil, false},
+		{"hold override", "check", "✅", "hold", []string{"--hold"}, false},
+		{"wake override", "eyes", "👀", "wake", []string{"--wake"}, true},
+		{"wake idle override", "+1", "👍", "wake_idle", []string{"--wake-idle"}, true},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			env := testhub.Start(t)
+			aID, aSec := env.NewPeer("session", "A")
+			bID, bSec := env.NewPeer("session", "B")
+			a, b := profileUser(t, env.URL, aSec), profileUser(t, env.URL, bSec)
+			sent := a.send(bID, "target", "--hold")
+			a.mustRun("inbox", "--ack")
+			var out reactionResponse
+			args := append([]string{"--json", "react", sent.MessageID, tc.name}, tc.flags...)
+			if err := json.Unmarshal([]byte(b.mustRun(args...)), &out); err != nil {
+				t.Fatal(err)
+			}
+			if !out.Changed || out.Emoji != tc.emoji || (out.Wake != nil) != tc.wakes {
+				t.Fatalf("react response = %+v, want emoji %s, wake %v", out, tc.emoji, tc.wakes)
+			}
+			deliveries := 0
+			for _, ev := range a.inboxJSON() {
+				if ev.Type != "delivery" {
+					continue
+				}
+				deliveries++
+				m := ev.Data.Message
+				if m.Kind != "reaction" || m.Priority != tc.priority || m.Sender != bID || m.Content.Text != tc.emoji || m.ThreadID != sent.ThreadID || m.InReplyTo == nil || *m.InReplyTo != sent.MessageID || m.Reaction == nil || m.Reaction.Target != sent.MessageID || m.Reaction.Emoji != tc.emoji {
+					t.Fatalf("reaction delivery message = %+v", m)
+				}
+				if out.Wake == nil || out.Wake.Recipient != aID || out.Wake.DeliveryID != ev.Data.DeliveryID || out.Wake.MessageID != ev.Data.Message.MessageID {
+					t.Fatalf("wake = %+v, delivery = %+v", out.Wake, ev)
+				}
+			}
+			want := 0
+			if tc.wakes {
+				want = 1
+			}
+			if deliveries != want {
+				t.Fatalf("deliveries = %d, want %d", deliveries, want)
+			}
+		})
+	}
+}
+
+func TestReactRefusals(t *testing.T) {
+	env := testhub.Start(t)
+	aID, aSec := env.NewPeer("session", "A")
+	bID, bSec := env.NewPeer("session", "B")
+	a, b := profileUser(t, env.URL, aSec), profileUser(t, env.URL, bSec)
+	sent := a.send(bID, "target", "--hold")
+	for _, tc := range []struct {
+		label string
+		args  []string
+		want  string
+	}{
+		{"unknown emoji", []string{sent.MessageID, "smile"}, envelope.ReactionList()},
+		{"two priorities", []string{sent.MessageID, "check", "--wake", "--hold"}, "priority"},
+		{"remove priority", []string{sent.MessageID, "check", "--remove", "--wake"}, "--remove"},
+		{"missing emoji", []string{sent.MessageID}, "usage:"},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			code, out, errs := b.run(append([]string{"react"}, tc.args...)...)
+			if code != 1 || out != "" || !strings.Contains(errs, tc.want) {
+				t.Fatalf("react: exit %d, stdout %q, stderr %q; want usage containing %q", code, out, errs, tc.want)
+			}
+		})
+	}
+	r := postReaction(t, env, bSec, sent.MessageID, "✅", "add", "wake_idle")
+	if r.Wake == nil || r.Wake.Recipient != aID {
+		t.Fatalf("setup wake = %+v", r.Wake)
+	}
+	code, out, errs := a.run("react", r.Wake.MessageID, "+1")
+	if code != 2 || out != "" || !strings.Contains(errs, "not_replyable:") {
+		t.Fatalf("react reaction: exit %d, stdout %q, stderr %q", code, out, errs)
+	}
+}
+
+// TestReactionEventFields exercises the private field extraction through its
+// public inbox consumer, retaining the external-test package and file scope.
+func TestReactionEventFields(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	bID, bSec := env.NewPeer("session", "B")
+	a := profileUser(t, env.URL, aSec)
+	sent := a.send(bID, "target", "--hold")
+	a.mustRun("inbox", "--ack")
+	for _, tc := range []struct{ op, text string }{{"add", "+✅"}, {"remove", "-✅"}} {
+		postReaction(t, env, bSec, sent.MessageID, "✅", tc.op, "hold")
+		lines := nonEmptyLines(a.mustRun("inbox", "--ack"))
+		if len(lines) != 2 || lines[0] != "CURSOR TYPE THREAD FROM MSG DELIVERY TEXT" {
+			t.Fatalf("reaction inbox = %q", lines)
+		}
+		fields := strings.Fields(lines[1])
+		if len(fields) != 7 || fields[1] != "reaction" || fields[2] != sent.ThreadID || fields[3] != bID || fields[4] != sent.MessageID || fields[5] != "-" || fields[6] != tc.text {
+			t.Fatalf("reaction fields = %q; want thread %s, sender %s, msg %s, text %s", fields, sent.ThreadID, bID, sent.MessageID, tc.text)
+		}
+	}
+}
+
+func TestWatchPrintsReaction(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	bID, bSec := env.NewPeer("session", "B\nWatcher")
+	a := profileUser(t, env.URL, aSec)
+	sent := a.send(bID, "target", "--hold")
+	postReaction(t, env, bSec, sent.MessageID, "✅", "add", "hold")
+	out, stop := startWatch(t, a, "watch", "--for-monitor")
+	line := waitLine(t, out, regexp.MustCompile(`reaction.*\+✅`), 5*time.Second)
+	stop()
+	fields := strings.Fields(line)
+	if len(fields) < 5 || fields[1] != "reaction" || fields[2] != sent.ThreadID || fields[3] != bID || !strings.HasSuffix(line, "B_Watcher: +✅") {
+		t.Fatalf("reaction monitor columns/text = %q", line)
+	}
+	filtered, stopFiltered := startWatch(t, profileUser(t, env.URL, aSec), "watch", "--for-monitor", "--deliveries-only")
+	// A later delivery is a stream barrier: the reaction must have been skipped.
+	b := profileUser(t, env.URL, bSec)
+	b.send2("reply", sent.MessageID, "after reaction", "--hold", "--thread", sent.ThreadID)
+	waitLine(t, filtered, regexp.MustCompile(`delivery.*after reaction$`), 5*time.Second)
+	stopFiltered()
+	if strings.Contains(filtered.String(), " reaction ") {
+		t.Fatalf("deliveries-only printed reaction: %s", filtered.String())
+	}
+}
+
+func TestThreadShowsReactions(t *testing.T) {
+	env := testhub.Start(t)
+	aID, aSec := env.NewPeer("session", "A")
+	bID, bSec := env.NewPeer("session", "B")
+	a := profileUser(t, env.URL, aSec)
+	sent := a.send(bID, "target", "--hold")
+	postReaction(t, env, bSec, sent.MessageID, "✅", "add", "hold")
+	postReaction(t, env, aSec, sent.MessageID, "👍", "add", "hold")
+	postReaction(t, env, bSec, sent.MessageID, "👍", "add", "hold")
+	lines := nonEmptyLines(a.mustRun("thread", sent.ThreadID))
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], sent.MessageID+" ") || lines[1] != "  reactions: 👍 2  ✅ 1" {
+		t.Fatalf("thread reactions = %q", lines)
+	}
+	var raw struct {
+		Messages []envelope.Message `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(a.mustRun("--json", "thread", sent.ThreadID)), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw.Messages) != 1 || len(raw.Messages[0].Reactions) != 2 || len(raw.Messages[0].Reactions[0].Peers) != 2 || raw.Messages[0].Reactions[0].Emoji != "👍" || raw.Messages[0].Reactions[1].Emoji != "✅" {
+		t.Fatalf("thread JSON = %+v (reactors %s, %s)", raw, aID, bID)
 	}
 }

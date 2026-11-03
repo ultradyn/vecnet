@@ -52,6 +52,8 @@ func TestExamplesValidate(t *testing.T) {
 		"04-approval-request.json":        "sendRequest",
 		"05-job-status.json":              "sendRequest",
 		"08-github-ingress-delivery.json": "delivery",
+		"09-reaction-delivery.json":       "delivery",
+		"10-reaction-event.json":          "event",
 	}
 	for f, def := range cases {
 		doc := loadExample(t, f)
@@ -67,6 +69,98 @@ func TestExamplesValidate(t *testing.T) {
 	for i, e := range events {
 		if err := envelope.Validate("event", mustJSON(t, e)); err != nil {
 			t.Errorf("06[%d] as event: %v", i, err)
+		}
+	}
+}
+
+func TestReactionMessageSchema(t *testing.T) {
+	base := func() map[string]any { return loadExample(t, "02-delivery-direct.json")["message"].(map[string]any) }
+	ref := map[string]any{"target": "msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P", "emoji": "✅"}
+	for _, kind := range []string{"reaction", "message", "job_status", "approval_request"} {
+		m := base()
+		m["kind"], m["reaction"] = kind, ref
+		if kind == "job_status" {
+			m["job_status"] = loadExample(t, "05-job-status.json")["job_status"]
+		}
+		if kind == "approval_request" {
+			m["approval_request"] = loadExample(t, "04-approval-request.json")["approval_request"]
+		}
+		err := envelope.Validate("message", mustJSON(t, m))
+		if (err == nil) != (kind == "reaction") {
+			t.Errorf("kind %s: %v", kind, err)
+		}
+	}
+	m := base()
+	m["kind"] = "reaction"
+	if err := envelope.Validate("message", mustJSON(t, m)); err == nil {
+		t.Fatal("reaction without ref accepted")
+	}
+	m["reaction"] = ref
+	for _, field := range []string{"job_request", "job_status", "approval_request", "approval_response"} {
+		var payload any
+		switch field {
+		case "job_request":
+			payload = map[string]any{"version": 1, "job_key": "k", "operation": "op", "instructions": "do", "input": map[string]any{}}
+		case "job_status":
+			payload = loadExample(t, "05-job-status.json")[field]
+		case "approval_request":
+			payload = loadExample(t, "04-approval-request.json")[field]
+		case "approval_response":
+			payload = map[string]any{"approval_id": "apr_01JD3Q5H0X2Z4B6D8F0H2K4M6P", "decision": "yes"}
+		}
+		m[field] = payload
+		if err := envelope.Validate("message", mustJSON(t, m)); err == nil {
+			t.Errorf("reaction carrying %s accepted", field)
+		}
+		delete(m, field)
+	}
+}
+
+func TestSendRequestRefusesReactionKind(t *testing.T) {
+	doc := loadExample(t, "01-send-request.json")
+	doc["kind"] = "reaction"
+	var se *envelope.SchemaError
+	if err := envelope.Validate("sendRequest", mustJSON(t, doc)); !errors.As(err, &se) || se.Path != "/kind" {
+		t.Fatalf("want /kind error, got %v", err)
+	}
+}
+
+func TestReactionEventAndRequestSchema(t *testing.T) {
+	for def, doc := range map[string]map[string]any{
+		"reaction":        {"target": "msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P", "emoji": "✅"},
+		"reactionRequest": {"message_id": "msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P", "emoji": "🙂", "op": "add", "as": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C", "priority": "hold"},
+		"reactionEvent":   {"message_id": "msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P", "thread_id": "thr_01JD3Q5G9Z1B3D5F7H9K1M3P5R", "peer_id": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C", "emoji": "✅", "op": "remove", "at": "2026-11-03T00:00:00.000Z"},
+	} {
+		if err := envelope.Validate(def, mustJSON(t, doc)); err != nil {
+			t.Errorf("%s: %v", def, err)
+		}
+		doc["unknown"] = true
+		if err := envelope.Validate(def, mustJSON(t, doc)); err == nil {
+			t.Errorf("%s accepted unknown field", def)
+		}
+		delete(doc, "unknown")
+		for field, value := range doc {
+			if def == "reactionRequest" && (field == "as" || field == "priority") {
+				continue
+			}
+			delete(doc, field)
+			if err := envelope.Validate(def, mustJSON(t, doc)); err == nil {
+				t.Errorf("%s missing %s accepted", def, field)
+			}
+			doc[field] = value
+		}
+	}
+	if err := envelope.Validate("reactionRequest", []byte(`{"message_id":"msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P","emoji":"✅","op":"add"}`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{`{"target":"msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P","emoji":"❤"}`, `{"target":"msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P","emoji":"🙂"}`} {
+		if err := envelope.Validate("reaction", []byte(raw)); err == nil {
+			t.Errorf("accepted noncanonical ref %s", raw)
+		}
+	}
+	for _, raw := range []string{`{"message_id":"msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P","emoji":"x","op":"toggle"}`, `{"message_id":"msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P","emoji":"x","op":"add","priority":"urgent"}`, `{"message_id":"msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P","emoji":"123456789012345678901234567890123","op":"add"}`} {
+		if err := envelope.Validate("reactionRequest", []byte(raw)); err == nil {
+			t.Errorf("accepted bad request %s", raw)
 		}
 	}
 }

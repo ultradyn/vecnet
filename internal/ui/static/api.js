@@ -122,6 +122,7 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     events: ({ after, wait, signal } = {}) => get('/v1/events' + query({ after, wait }), { signal }),
     ack: cursor => post('/v1/ack', { body: { cursor } }),
     send: body => post('/v1/messages', { body, headers: { 'X-Vecnet-Ingress': 'operator_ui' } }),
+    react: body => post('/v1/reactions', { body, headers: { 'X-Vecnet-Ingress': 'operator_ui' } }),
     presence: (state, at) => post('/v1/presence', { body: { state, at } }),
     deadLetters: () => get('/v1/admin/dead-letters'),
     retryDeadLetter: dly => post('/v1/admin/dead-letters/' + seg(dly) + '/retry'),

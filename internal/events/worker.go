@@ -344,12 +344,20 @@ func (w *Worker) drain(ctx context.Context, sub Subscription) (int, error) {
 		if now.Sub(started) >= drainBudget {
 			break
 		}
+		claimed := false
 		if strings.HasPrefix(r.eventID, deliveryPrefix) {
 			gate := w.Hub.DeliveryGate
 			if r.parked {
 				gate = w.Hub.DeliveryUnread
 			}
 			ok, err := gate(ctx, r.eventID)
+			if err == nil && ok {
+				// The claim, not the read gate, is what a concurrent §17.5
+				// supersession cannot pass: from here the wake stays out of
+				// its reach until the attempt is recorded.
+				ok, err = w.Hub.BeginDispatch(ctx, r.eventID)
+				claimed = ok
+			}
 			if err != nil {
 				return sent, err
 			}
@@ -361,10 +369,18 @@ func (w *Worker) drain(ctx context.Context, sub Subscription) (int, error) {
 			}
 		}
 		status, retryAfter, netErr := w.post(ctx, s, r)
-		if netErr != nil && ctx.Err() != nil {
-			return sent, nil // shutting down: this attempt does not count
+		var delivered, stop bool
+		if netErr == nil || ctx.Err() == nil {
+			delivered, stop, err = w.record(context.WithoutCancel(ctx), s, r, status, retryAfter, netErr)
 		}
-		delivered, stop, err := w.record(context.WithoutCancel(ctx), s, r, status, retryAfter, netErr)
+		if claimed {
+			if endErr := w.Hub.EndDispatch(ctx, r.eventID, false); err == nil {
+				err = endErr
+			}
+		}
+		if netErr != nil && ctx.Err() != nil {
+			return sent, err // shutting down: this attempt does not count
+		}
 		if err != nil {
 			return sent, err
 		}

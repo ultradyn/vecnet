@@ -43,6 +43,7 @@ type fakeAPI struct {
 	sent     []envelope.SendRequest
 	blob     []byte
 	uploads  []fakeUpload // uploads whose bytes the fake read in full
+	reacted  []envelope.ReactionRequest
 
 	// tail replaces the default Tail, which reports live and blocks.
 	tail func(ctx context.Context, handle func(opclient.Batch) error, status func(string)) error
@@ -156,6 +157,31 @@ func (f *fakeAPI) Send(ctx context.Context, r envelope.SendRequest) (opapi.SendR
 	f.mu.Unlock()
 	return opapi.SendResult{}, f.hit(ctx, "Send")
 }
+
+// React records the request and answers as the hub would for the operator's
+// own peer: an add leaves that peer as the emoji's only reactor, and a remove
+// leaves no reactions.
+func (f *fakeAPI) React(ctx context.Context, r envelope.ReactionRequest) (opapi.ReactionResult, error) {
+	f.mu.Lock()
+	f.reacted = append(f.reacted, r)
+	me := f.inbox.Me.PeerID
+	f.mu.Unlock()
+	out := opapi.ReactionResult{MessageID: r.MessageID, Emoji: r.Emoji, Op: r.Op, Changed: true, Reactions: []envelope.ReactionGroup{}, Superseded: []string{}}
+	if r.Op == "add" {
+		out.Reactions = []envelope.ReactionGroup{{Emoji: r.Emoji, Peers: []string{me}}}
+	}
+	if err := f.hit(ctx, "React"); err != nil {
+		return opapi.ReactionResult{}, err
+	}
+	return out, nil
+}
+
+func (f *fakeAPI) reactions() []envelope.ReactionRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]envelope.ReactionRequest(nil), f.reacted...)
+}
+
 func (f *fakeAPI) Answer(ctx context.Context, _ opapi.OpenApproval, _ int) error {
 	return f.hit(ctx, "Answer")
 }

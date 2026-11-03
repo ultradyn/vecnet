@@ -70,6 +70,15 @@ func eventFieldsOf(ev envelope.Event) eventFields {
 				f.text += " " + r.Note
 			}
 		}
+	case "reaction":
+		var r envelope.ReactionEvent
+		if json.Unmarshal(ev.Data, &r) == nil {
+			sign := "+"
+			if r.Op == "remove" {
+				sign = "-"
+			}
+			f = eventFields{thread: r.ThreadID, sender: r.PeerID, messageID: r.MessageID, text: sign + r.Emoji}
+		}
 	case "presence":
 		var p envelope.Presence
 		if json.Unmarshal(ev.Data, &p) == nil {
