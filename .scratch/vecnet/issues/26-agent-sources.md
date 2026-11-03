@@ -57,3 +57,6 @@ Working name **launcher** (peer kind `launcher`, a `launch` job). "Source" is al
 7. Home: `connectors/launcher/` in vecnet4, sharing the openclaw hub client: rec.
 8. Idle defaults (park 30 min; settle 2 h opaque / 24 h observable; wrap-up turn opt-in): rec.
 9. Fix the failed Paseo units and the paseo-bot setting before P2: rec.
+
+## Dogfooding note (2026-11-03)
+The coordinator ↔ pag-chat thread hit `max_depth_exceeded` at depth 16 after a long design discussion, and the send was refused with exit 2. Long agent conversations (and launched sessions, see the launcher plan's root-reply rule) need a way to continue: e.g. the CLI could offer "continue in a new thread" linking the old one, or replies to a human operator could reset depth (§16.1 already does this for the operator). Consider before agents rely on long threads.
