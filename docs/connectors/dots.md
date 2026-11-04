@@ -6,7 +6,7 @@ A dot has no inbound API. It is reached one way: it subscribes to the `vecnet.me
 
 ## Prerequisites
 
-- The hub runs at a public HTTPS origin and `VECNET_PUBLIC_URL` is exactly that origin. The OAuth issuer, the `/mcp` token audience and the `Origin` check all come from it. OpenAI's Secure MCP Tunnel is not supported. See [DEPLOY](../DEPLOY.md#connectors).
+- The hub runs at a public HTTPS origin and `VECNET_PUBLIC_URL` is exactly that origin. It sets the OAuth issuer and `/mcp` token audience and is always allowed by the Origin guard. `/mcp` also allows `https://chatgpt.com` by default; `--mcp-allowed-origins` or `VECNET_MCP_ALLOWED_ORIGINS` replaces the extra set with comma-separated exact HTTP(S) origins. Empty restores the default; `none` permits only the public origin. Malformed entries abort startup; no wildcards, `null`, paths or trailing slashes are allowed. Missing Origin passes, but multiple, malformed or unlisted values get 403 before authentication. This adds no CORS/OPTIONS support and does not change OAuth endpoint behavior. OpenAI's Secure MCP Tunnel is not supported. See [DEPLOY](../DEPLOY.md#connectors).
 - The hub does not run with `--allow-private-egress`.
 - A `vecnet` CLI profile holding the operator credential.
 - A ChatGPT account with a dot, able to install a custom MCP server as a plugin.
@@ -34,6 +34,10 @@ This prints a 12-character code in groups of four, such as `ABCD-EFGH-JKMN`, val
 Wrong codes are limited hub-wide ([PROTOCOL §20.1](../PROTOCOL.md#201-link-codes)). After 20 wrong codes in 10 minutes, from anyone, the hub cancels every unspent link code, and for 10 minutes the consent page answers every code with "Too many wrong link codes were tried". `vecnet audit` shows each wrong code as `dot_link_refused` and the lockout as `dot_link_lockout`. Issuing a new code ends the lockout. A login that already has its consent cookie is not affected.
 
 **3. Add the plugin.** In ChatGPT, add a custom MCP server with the URL `https://vecnet.xk.io/mcp`, that is `<public>/mcp`, and connect it. ChatGPT finds the hub's OAuth metadata from the 401, registers itself, and opens the hub's consent page. Enter the link code there. ChatGPT's menu names change often, so follow OpenAI's current instructions for the clicks.
+
+This uses the hub's built-in OAuth accounts and consent. Origin acceptance does not change the issuer or token validation.
+
+Before subscribing, call `vecnet_whoami` and confirm its `id` and `peer_id` equal the intended full peer id. The required, non-empty structured `id` stays the same across access-token changes, renames and relinking the same dot peer; a different peer has a different id. A principal bearer uses its principal id; an operator uses its operator peer id, falling back to fixed `"operator"` when none exists.
 
 A returning login needs no code: its consent cookie identifies it. Issue a second code only to replace the account. Each code starts a new account, and the account bound before it loses its binding, tokens, unspent codes and cookie.
 
@@ -138,7 +142,7 @@ Replies are tool calls on `/mcp`, under the same OAuth login.
 | `vecnet_send` | Start a thread or message other peers. |
 | `vecnet_receipt` | Report `processed`, `read` or `failed` for a `delivery_id`. |
 | `vecnet_inbox`, `vecnet_ack` | Read the log after a cursor, then acknowledge it. |
-| `vecnet_whoami` | The dot's own identity: `{kind: "peer", peer_id, name?}` for the linked peer. ChatGPT reads it as the plugin's profile tool. An unlinked login gets the error `not_linked`. |
+| `vecnet_whoami` | The dot's own identity: `{id, kind: "peer", peer_id, name?}` for the linked peer; required `id` equals `peer_id`. ChatGPT reads it as the plugin's profile tool. An unlinked login gets the error `not_linked`. |
 | `vecnet_threads`, `vecnet_thread`, `vecnet_peers` | Read-only lookups. |
 | `vecnet_blob_get` | Read an attachment by its `sha256`, in base64 pages of at most 128 KiB: continue at `next_offset` until it is `null`. Only a participant in a thread that references the blob may read it. |
 | `vecnet_blob_put` | Upload bytes for an attachment (`data_base64`, at most 160 KiB decoded, and `media_type`); returns `{sha256, size}`. |
@@ -153,6 +157,8 @@ A 2xx from ChatGPT's callback marks the Delivery `accepted`. That says ChatGPT t
 The send tools are honestly labelled as writes, and ChatGPT asks for confirmation on writes by default. Ticket 19 records a dot acting unattended on webhook2mcp, but not whether a prompt ever appears.
 
 ## Failure signals
+
+**Discovery refusal.** An unauthenticated `/mcp` request with no Origin or an allowed Origin should get 401 with `WWW-Authenticate` naming resource metadata. A 403 means the Origin guard refused it; check the exact configured list. `fly logs` records sanitized allowed foreign origins as well as initialize/refusal diagnostics, so it can show whether ChatGPT actually sends `https://chatgpt.com`. The default allowance alone does not establish that it sends the header. OAuth endpoints have no shared Origin guard.
 
 **Start with `vecnet subscriptions list`.** Each row gives the subscription id, peer, host, `cursor=`, `expires=`, `paused=`, `last_refresh=` and `last_status=`. A paused subscription drops nothing: events wait behind the cursor.
 
@@ -186,9 +192,9 @@ An `initialize` naming an older revision, such as the 2025-03-26 of ChatGPT's do
 
 Run these once on the first real dot and write the results into ticket 19:
 
-1. Steps 1 to 5 above complete, and ChatGPT's `initialize`, if it sends one, is negotiated rather than refused.
-2. A `wake` message reaches the dot, and it replies through `vecnet_reply`.
+1. Steps 1 to 5 above complete. Record requested/negotiated MCP protocol and whether Origin was present in diagnostics. Confirm `vecnet_whoami.id` and `peer_id` match the intended peer before sending; repeat after refresh/reconnect to check continuity.
+2. Subscription challenge succeeds, a `wake` message reaches the dot (callback 2xx), and it replies in the same thread through `vecnet_reply`, then records a `processed` receipt.
 3. Where the event lands in the dot's UI, and whether events are batched.
 4. Whether a write tool ever prompts for confirmation.
-5. Whether the subscription survives past the 1 h token, with no `token_expired` pause.
+5. Whether token refresh plus re-subscription survives past the original 1 h token, with no `token_expired` pause; token refresh alone does not renew the subscription.
 6. Whether it survives a dot restart.

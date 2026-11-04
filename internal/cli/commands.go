@@ -100,6 +100,7 @@ admin (operator credential):
   peer limits <peer> --sends-per-min N --threads-per-hour N
   route add --owner ID --url URL | route verify <route_id>
   route add --owner ID --kind grokbot --url URL --key-file PATH
+  route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>
        the crsr_ key is read only from a file, 0600, never from argv
   source add --kind github --name N --route ID [--events A,B] [--priority P]
        prints the ingress URL and the secret, once
@@ -1495,6 +1496,49 @@ func (a *app) cmdRoute(args []string) error {
 			return err
 		}
 		return a.emitObject(out, "route_id", "whsec")
+	case len(o.pos) == 1 && o.pos[0] == "list":
+		items, err := a.getList("/v1/admin/routes", nil, "routes")
+		if err != nil {
+			return err
+		}
+		if a.json {
+			return a.emitList(items)
+		}
+		for _, item := range items {
+			var route struct {
+				RouteID     string  `json:"route_id"`
+				OwnerKind   string  `json:"owner_kind"`
+				OwnerID     string  `json:"owner_id"`
+				Kind        string  `json:"kind"`
+				Host        string  `json:"host"`
+				VerifiedAt  *string `json:"verified_at"`
+				RunsPerHour int     `json:"runs_per_hour"`
+			}
+			if err := json.Unmarshal(item, &route); err != nil {
+				return err
+			}
+			verified := "-"
+			if route.VerifiedAt != nil {
+				verified = *route.VerifiedAt
+			}
+			fmt.Fprintf(a.stdout, "%s owner=%s:%s kind=%s host=%s verified_at=%s runs_per_hour=%d\n",
+				route.RouteID, route.OwnerKind, route.OwnerID, route.Kind, flatten(route.Host), verified, route.RunsPerHour)
+		}
+		return nil
+	case len(o.pos) == 2 && o.pos[0] == "rotate" && o.str("key-file") != "":
+		key, err := a.readKeyFile(o.str("key-file"))
+		if err != nil {
+			return err
+		}
+		if err := a.call(http.MethodPost, "/v1/admin/routes/"+pathEscape(o.pos[1])+"/rotate", map[string]string{"key": key}, nil); err != nil {
+			return err
+		}
+		return a.ok("rotated " + o.pos[1])
+	case len(o.pos) == 2 && o.pos[0] == "remove":
+		if err := a.call(http.MethodDelete, "/v1/admin/routes/"+pathEscape(o.pos[1]), nil, nil); err != nil {
+			return err
+		}
+		return a.ok("removed " + o.pos[1])
 	case len(o.pos) == 2 && o.pos[0] == "verify":
 		if err := a.call(http.MethodPost, "/v1/admin/routes/"+pathEscape(o.pos[1])+"/verify", nil, nil); err != nil {
 			return err
@@ -1502,7 +1546,7 @@ func (a *app) cmdRoute(args []string) error {
 		return a.ok("verified " + o.pos[1])
 	}
 	return usageErr("usage: vecnet route add --owner ID --url URL | " +
-		"route add --owner ID --kind grokbot --url URL --key-file PATH | route verify <route_id>")
+		"route add --owner ID --kind grokbot --url URL --key-file PATH | route verify <route_id> | route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>")
 }
 
 func (a *app) cmdTeam(args []string) error {

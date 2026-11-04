@@ -39,6 +39,7 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/sources/{id}/disable", s.adminDisableSource)
 	mux.HandleFunc("POST /v1/admin/routes", s.adminAddRoute)
 	mux.HandleFunc("GET /v1/admin/routes", s.adminListRoutes)
+	mux.HandleFunc("DELETE /v1/admin/routes/{id}", s.adminRemoveRoute)
 	mux.HandleFunc("POST /v1/admin/routes/{id}/rotate", s.adminRotateRoute)
 	mux.HandleFunc("POST /v1/admin/routes/{id}/verify", s.adminVerifyRoute)
 	mux.HandleFunc("POST /v1/admin/teams", s.adminAddTeam)
@@ -383,6 +384,20 @@ func (s *server) adminListRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"routes": routes})
+}
+
+// adminRemoveRoute is DELETE /v1/admin/routes/{id}: 204, or 404 for an
+// unknown route. Pending deliveries remain available through pull.
+func (s *server) adminRemoveRoute(w http.ResponseWriter, r *http.Request) {
+	if err := readNoBody(r); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.Hub.RemoveRoute(r.Context(), r.PathValue("id")); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // adminRotateRoute is POST /v1/admin/routes/{id}/rotate. An http route takes

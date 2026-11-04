@@ -565,6 +565,69 @@ func TestOriginAndAuth(t *testing.T) {
 	}
 }
 
+func TestAllowedOrigins(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "origins")
+	for _, tc := range []struct {
+		name    string
+		origins []string
+		status  int
+	}{
+		{"absent", nil, 200},
+		{"own", []string{env.URL}, 200},
+		{"chatgpt", []string{"https://chatgpt.com"}, 200},
+		{"unlisted", []string{"https://evil.example"}, 403},
+		{"multiple", []string{env.URL, "https://chatgpt.com"}, 403},
+		{"joined", []string{env.URL + " https://chatgpt.com"}, 403},
+		{"null", []string{"null"}, 403},
+		{"empty", []string{""}, 403},
+		{"path", []string{env.URL + "/path"}, 403},
+		{"slash", []string{env.URL + "/"}, 403},
+		{"bracketed IPv4", []string{strings.Replace(env.URL, "127.0.0.1", "[127.0.0.1]", 1)}, 403},
+		{"userinfo", []string{"https://user@chatgpt.com"}, 403},
+		{"query", []string{env.URL + "?query"}, 403},
+		{"fragment", []string{env.URL + "#fragment"}, 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, env.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+secret)
+			req.Header.Set("Content-Type", "application/json")
+			for k, v := range modern() {
+				req.Header.Set(k, v)
+			}
+			for _, v := range tc.origins {
+				req.Header.Add("Origin", v)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.status)
+			}
+		})
+	}
+	for _, origin := range []string{"https://chatgpt.com", "https://evil.example"} {
+		headers := modern()
+		headers["Origin"] = origin
+		resp, body := do(t, env, call{headers: headers, body: discover(1, "protocolVersion", mcpserver.ProtoCurrent)})
+		want := http.StatusForbidden
+		if origin == "https://chatgpt.com" {
+			want = http.StatusUnauthorized
+		}
+		if resp.StatusCode != want {
+			t.Fatalf("anonymous %s: %d %s, want %d", origin, resp.StatusCode, body, want)
+		}
+		if want == http.StatusUnauthorized && !strings.Contains(resp.Header.Get("WWW-Authenticate"), `resource_metadata="`+env.URL+`/.well-known/oauth-protected-resource"`) {
+			t.Fatalf("missing discovery challenge: %v", resp.Header)
+		}
+	}
+}
+
 // TestBodyLimit413: /mcp skips httpapi's bearer middleware but keeps the
 // 256 KiB body cap and the hub error envelope.
 func TestBodyLimit413(t *testing.T) {
@@ -839,5 +902,55 @@ func TestGetStreamOutlivesServerTimeouts(t *testing.T) {
 	}
 	if n < 10 {
 		t.Fatalf("%d heartbeats in 1.5 s, want at least 10", n)
+	}
+}
+
+func TestAllowedOriginsConfig(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "origin config")
+	for _, tc := range []struct {
+		config          string
+		allowed, denied string
+	}{
+		{"", "https://chatgpt.com", "https://client.example"},
+		{"none", env.URL, "https://chatgpt.com"},
+		{" https://client.example , HTTPS://OTHER.EXAMPLE:443 ", "https://other.example", "https://chatgpt.com"},
+		{"http://localhost:8080,https://[::1]:8443", "https://[::1]:8443", "https://[::1]"},
+		{"https://[::1]:8443", "https://[::1]:8443", "https://::1:8443"},
+	} {
+		t.Run(tc.config, func(t *testing.T) {
+			origins, err := mcpserver.ParseAllowedOrigins(tc.config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			env.Configure(func(d *httpapi.Deps) { d.MCPAllowedOrigins = origins })
+			for _, tc := range []struct {
+				origin string
+				status int
+			}{
+				{env.URL, 200}, {tc.allowed, 200}, {tc.denied, 403},
+			} {
+				headers := modern()
+				headers["Origin"] = tc.origin
+				resp, body := do(t, env, call{secret: secret, headers: headers, body: discover(1, "protocolVersion", mcpserver.ProtoCurrent)})
+				if resp.StatusCode != tc.status {
+					t.Errorf("%s: %d %s, want %d", tc.origin, resp.StatusCode, body, tc.status)
+				}
+			}
+		})
+	}
+	for _, config := range []string{
+		"null", "*", "https://*.example", "https://chatgpt.com/", "https://chatgpt.com/path",
+		"https://user@chatgpt.com", "https://chatgpt.com?", "https://chatgpt.com#", "https://chatgpt.com?x=1",
+		"https://chatgpt.com#frag", "chatgpt.com", "ftp://chatgpt.com", "https://", "https://chatgpt.com:",
+		"https://chatgpt.com:0", "https://chatgpt.com:65536", "https://chatgpt.com:bad", "https://[bogus]:443",
+		"https://[127.0.0.1]", "https://::1:443", "https://2001:db8::1:443",
+		"https://a..example", "https://-bad.example", "https://bad_.example", ",", "https://chatgpt.com,", "none,https://chatgpt.com",
+	} {
+		t.Run("invalid/"+config, func(t *testing.T) {
+			if _, err := mcpserver.ParseAllowedOrigins(config); err == nil {
+				t.Fatalf("accepted malformed config %q", config)
+			}
+		})
 	}
 }

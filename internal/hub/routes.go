@@ -173,6 +173,30 @@ func (h *Hub) ListRoutes(ctx context.Context) ([]RouteInfo, error) {
 	return out, nil
 }
 
+// RemoveRoute removes a push route and its keys. Deliveries keep their
+// state, attempts and inbox events, but lose the route, just as for a
+// pull-only owner. An already claimed network request may still finish.
+// Run reservations remain until their normal expiry so removal cannot
+// evade the account-wide rolling-hour Grok budget.
+func (h *Hub) RemoveRoute(ctx context.Context, routeID string) error {
+	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		if _, err := routeKind(ctx, tx, routeID); err != nil {
+			return err
+		}
+		for _, query := range []string{
+			`UPDATE peers SET route_id = NULL WHERE route_id = ?`,
+			`UPDATE deliveries SET route_id = NULL WHERE route_id = ?`,
+			`DELETE FROM route_keys WHERE route_id = ?`,
+			`DELETE FROM routes WHERE route_id = ?`,
+		} {
+			if _, err := tx.ExecContext(ctx, query, routeID); err != nil {
+				return fmt.Errorf("hub: remove route: %w", err)
+			}
+		}
+		return audit.Record(ctx, tx, "operator", "route_remove", []string{routeID}, nil)
+	})
+}
+
 // RotateRoute issues a new key for routeID and retires every active older
 // key RouteKeyOverlap from now (PROTOCOL §3.5). An unknown route is 404
 // not_found; a grokbot route, which has no whsec_ to rotate, is 422
