@@ -272,5 +272,9 @@ func (h *Hub) expireApproval(ctx context.Context, tx *sql.Tx, apr, thrID, reqMsg
 	if err := audit.Record(ctx, tx, HubSender, "approval_expired", []string{apr, thrID, msg.MessageID}, nil); err != nil {
 		return nil, err
 	}
-	return append([]string{}, thr.participants...), nil
+	watchers, err := h.noteThreadActivity(ctx, tx, thrID, thr.participants)
+	if err != nil {
+		return nil, err
+	}
+	return append(append([]string{}, thr.participants...), watchers...), nil
 }

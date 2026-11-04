@@ -910,7 +910,7 @@
             },
             {
               "type": "object",
-              "description": "directory_updated: {peer_id, change}. approval_expired: {approval_id, thread_id}. operator_view: {reason: sent|read|presence|dead_letter|subscription|reaction, thread_id: thr_ id or null}; operator logs only."
+              "description": "directory_updated: {peer_id, change}. approval_expired: {approval_id, thread_id}. operator_view: {reason: sent|read|presence|dead_letter|subscription|reaction|activity, thread_id: thr_ id or null}; operator logs only."
             }
           ]
         }

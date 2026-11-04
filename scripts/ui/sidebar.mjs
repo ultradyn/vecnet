@@ -1,5 +1,6 @@
 // Sidebar: You above Your Threads, then Other Threads (threads the operator
-// is not in, newest activity first), in a real browser. Four shots: empty,
+// is not in, newest activity first, kept live by operator_view "activity"),
+// in a real browser. Four shots: empty,
 // populated, error, and an other thread opened from the list.
 import { assert, cleanBuild, withDemo } from './lib.mjs';
 
@@ -24,6 +25,14 @@ try {
       assert(r.status === 202, `${peer} send: ${r.status} ${body2}`);
       return JSON.parse(body2);
     };
+    // The browser's own event response, so a list that is current proves the
+    // event path rather than a reload of some other kind.
+    const operatorView = (reason, thread) => page.waitForResponse(async response => {
+      if (new URL(response.url()).pathname !== '/v1/events' || response.status() !== 200) return false;
+      const batch = await response.json();
+      return batch.events.some(event => event.type === 'operator_view' && event.data.reason === reason && event.data.thread_id === thread);
+    });
+    const inboxReads = () => countRequests(req => new URL(req.url()).pathname === '/v1/admin/inbox');
     // Shown only once a fresh page of other threads has drawn.
     const drawn = async () => { await page.waitForResponse(r => isOthers(r.url()) && r.ok()); await page.evaluate(() => new Promise(requestAnimationFrame)); };
 
@@ -44,7 +53,12 @@ try {
     await shot('sb-others-empty');
 
     // Four threads between peers, oldest first; advance spaces their activity.
+    // Each message reaches the operator as operator_view "activity".
     const p = name => demo.peers[name].id;
+    const firstActivity = page.waitForResponse(async response => {
+      if (new URL(response.url()).pathname !== '/v1/events' || response.status() !== 200) return false;
+      return (await response.json()).events.some(event => event.type === 'operator_view' && event.data.reason === 'activity');
+    });
     const release = await send('codex', { thread_title: 'Release train: hark 0.9', recipients: [p('sleuth'), p('grok'), p('claw'), p('digest'), p('triage')], content: { text: 'Cutting 0.9 tonight.' } });
     await send('sleuth', { thread_id: release.thread_id, content: { text: 'Classifier fix is in.' } });
     await send('grok', { thread_id: release.thread_id, content: { text: 'Reviewed.' } });
@@ -60,12 +74,10 @@ try {
     const pres = await asPeer('operator', 'POST', '/v1/presence', { state: 'working', at: now });
     assert(pres.ok, `operator presence: ${pres.status}`);
 
-    // None of that reaches the operator as an Event. An operator send does
-    // (operator_view), and re-reads both lists and the hub clock.
-    let fresh = drawn();
-    await send('operator', { thread_id: demo.threads.ticket18, content: { text: 'Looking at the sidebar now.' } });
-    await fresh;
-    // The inbox reload in the same batch carries the advanced hub clock.
+    // No poll and no operator action: the activity events alone fill the
+    // list. The presence change re-reads the inbox, which carries the
+    // advanced hub clock for the relative times.
+    await firstActivity;
     await others.locator('a', { hasText: 'Classifier rollout plan' }).locator('.ago', { hasText: '2m ago' }).waitFor();
     let rows = await rowsOf();
     assert(rows.map(r => r.id).join() === [rollout, hostile, untitled, release].map(t => t.thread_id).join(), `order ${JSON.stringify(rows)}`);
@@ -80,15 +92,18 @@ try {
     assert(await page.locator('nav.side img').count() === 0, 'a peer string became an element');
     await shot('sb-others-populated');
 
-    // Live: new activity in the oldest thread moves it to the top on the next
-    // poll. The poll also runs when the tab is shown again.
+    // Live: a reply in the oldest thread arrives as operator_view "activity",
+    // which re-reads Other Threads (and that thread) but not the inbox.
+    const inboxBefore = inboxReads();
+    const activity = operatorView('activity', release.thread_id);
+    let fresh = drawn();
     await send('claw', { thread_id: release.thread_id, content: { text: 'Push route is fine.' } });
-    fresh = drawn();
-    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await activity;
     await fresh;
     await page.waitForFunction(id => document.querySelector('#others a')?.getAttribute('href') === '#thread/' + id, release.thread_id);
     rows = await rowsOf();
     assert(rows[0].count === '4' && /^(now|\d+s ago)$/.test(rows[0].ago), `re-sorted top row ${JSON.stringify(rows[0])}`);
+    assert(inboxReads() === inboxBefore, `activity re-read the inbox ${inboxReads() - inboxBefore} times`);
 
     // Bounded: a page with more behind it offers one more page per click.
     const paged = async route => {

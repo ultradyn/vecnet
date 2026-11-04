@@ -112,7 +112,7 @@ Reaction screens come from `scripts/ui/rx-thread.mjs`. They cover reaction chips
 - [rx08-thread-success.png](rx08-thread-success.png) — Question added with an explicit hold override appears as the operator's own chip.
 - [rx08-thread-error.png](rx08-thread-error.png) — A rate-limited chip toggle keeps its count and shows an en-AU retry time.
 
-Sidebar screens come from `scripts/ui/sidebar.mjs`. You sits above Your Threads; Other Threads lists threads the operator is not in, newest activity first, with participants (three names then +N), message count and relative last activity. The script also checks exclusion, live re-sorting, Show more and recovery.
+Sidebar screens come from `scripts/ui/sidebar.mjs`. You sits above Your Threads; Other Threads lists threads the operator is not in, newest activity first, with participants (three names then +N), message count and relative last activity. The script also checks exclusion, live re-sorting from operator_view `activity` events alone (no poll, no inbox re-read), Show more and recovery.
 
 - [sb-others-empty.png](sb-others-empty.png) — Seeded hub: every thread includes the operator, so Other Threads is empty.
 - [sb-others-populated.png](sb-others-populated.png) — Four peer-only threads newest first: titled, hostile title kept as text, untitled fallback, and a +3 participant line.

@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -2849,6 +2850,24 @@ func TestOperatorViewReactionRefreshesHeldMessage(t *testing.T) {
 	rxWantHeld(t, m, 0, rxUp)
 	if n := len(m.Data.Thread[chatHark].Messages); n != len(a.byID[chatHark].messages) {
 		t.Fatalf("the refetch holds %d messages, want %d", n, len(a.byID[chatHark].messages))
+	}
+}
+
+// operator_view {reason:"activity"} (a message in a thread the operator is not
+// in) reloads the thread list and that thread, never the inbox or peers.
+func TestOperatorViewActivityReloadsThreadsOnly(t *testing.T) {
+	a, m, _, deliver := rxTail(t)
+	data := json.RawMessage(`{"reason":"activity","thread_id":"` + chatHark + `"}`)
+	ev := envelope.Event{Cursor: "e9", Type: "operator_view", Data: data}
+	if got := m.expand(opapi.Tags(ev)); !reflect.DeepEqual(got, []string{"threads", threadPrefix + chatHark}) {
+		t.Fatalf("activity expands to %v", got)
+	}
+	a.reset()
+	deliver(opclient.Batch{Cursor: "e9", Events: []envelope.Event{ev}})
+	// The open thread's reload pages its history and marks it read, as any
+	// thread load does; the tags themselves reach no inbox or peers load.
+	if a.count("Threads") != 1 || a.count("History") == 0 || a.count("Peers") != 0 {
+		t.Fatalf("threads %d, history %d, peers %d loads", a.count("Threads"), a.count("History"), a.count("Peers"))
 	}
 }
 

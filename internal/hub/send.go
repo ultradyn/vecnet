@@ -529,6 +529,11 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 		}
 		notify = append(notify, operators...)
 	}
+	watchers, err := h.noteThreadActivity(ctx, tx, thr.ID, thr.participants)
+	if err != nil {
+		return nil, false, nil, err
+	}
+	notify = append(notify, watchers...)
 	return resp, false, notify, nil
 }
 
