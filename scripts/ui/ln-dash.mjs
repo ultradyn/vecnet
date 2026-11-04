@@ -51,20 +51,20 @@ try {
 
     // Initial: a launcher peer reporting working, its kind dot in blue.
     await enrolLauncher(demo);
-    const row = sec('peers').locator('tbody tr', { has: page.locator('td:first-child > span:first-child', { hasText: new RegExp('^' + LAUNCHER + '$') }) });
+    const row = sec('peers').locator('tbody tr', { has: page.locator('td:first-child > .pn', { hasText: new RegExp('^' + LAUNCHER + '$') }) });
     await row.locator('td', { hasText: /^72%$/ }).waitFor();
     await row.locator('td').nth(2).filter({ hasText: /^working/ }).waitFor();
     // Reloads replace table rows, so each poll finds the live row and reads
     // its dot colour in the same callback; no fixed sleep.
     await page.waitForFunction(([name, want]) => {
-      const tr = [...document.querySelectorAll('.dash-peers tbody tr')].find(el => el.querySelector('td:first-child > span')?.textContent === name);
+      const tr = [...document.querySelectorAll('.dash-peers tbody tr')].find(el => el.querySelector('td:first-child > .pn')?.textContent === name);
       const dot = tr?.querySelector('i.kd.k-launcher');
       return !!dot && getComputedStyle(dot).backgroundColor === want;
     }, [LAUNCHER, BLUE], { timeout: 10000 }).catch(() => { throw new Error(`launcher kind dot never became ${BLUE}`); });
     // Keep the Peers heading and thead in view, with the launcher row below.
     await page.waitForFunction(name => {
       const main = document.getElementById('main'), sec = document.getElementById('d-peers');
-      const tr = [...document.querySelectorAll('.dash-peers tbody tr')].find(el => el.querySelector('td:first-child > span')?.textContent === name);
+      const tr = [...document.querySelectorAll('.dash-peers tbody tr')].find(el => el.querySelector('td:first-child > .pn')?.textContent === name);
       if (!main || !sec || !tr) return false;
       main.scrollTop += sec.getBoundingClientRect().top - main.getBoundingClientRect().top - 16;
       const head = sec.querySelector('thead')?.getBoundingClientRect(), r = tr.getBoundingClientRect();

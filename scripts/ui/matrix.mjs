@@ -77,9 +77,26 @@ try {
     const cells = before.rows.flatMap(r => r.cells);
     // Opening the thread marks it read, so the hub can be a step ahead of the
     // first grid; the open matrix reloads on the thread tag and must catch up.
+    // A receipt can also advance between the grid's load and this snapshot
+    // (queued → read); then the grid is already right and the snapshot is
+    // stale. So each cell must match the hub's display as of the latest read:
+    // short waits, re-reading the hub between them, within the usual 60 s.
+    const hubNow = async id => (await (await asPeer('operator', 'GET', `/v1/admin/threads/${hark}/deliveries`)).json()).rows.flatMap(r => r.cells).find(x => x.delivery_id === id);
+    const matched = [];
     for (const c of cells) {
       try {
-        await page.locator(`dialog.mx .mx-b[data-dly="${c.delivery_id}"][data-state="${c.display}"]`).waitFor();
+        let want = c.display;
+        for (let i = 0; ; i++) {
+          try {
+            await page.locator(`dialog.mx .mx-b[data-dly="${c.delivery_id}"][data-state="${want}"]`).waitFor({ timeout: 5000 });
+            matched.push(want);
+            break;
+          } catch (e) {
+            const now = await hubNow(c.delivery_id);
+            if (i >= 11 || !now) throw e;
+            want = now.display;
+          }
+        }
       } catch (e) {
         // Say what each side holds now, so a mismatch names its cause.
         const shown = await page.evaluate(id => document.querySelector(`dialog.mx .mx-b[data-dly="${id}"]`)?.dataset.state ?? 'absent', c.delivery_id);
@@ -97,7 +114,7 @@ try {
       const want = getComputedStyle(probe).backgroundColor;
       probe.remove();
       return { state, got: getComputedStyle(cell).backgroundColor, want };
-    }), [...new Set(cells.map(c => c.display))]);
+    }), [...new Set(matched)]);
     for (const p of paints) assert(p.got === p.want && p.want !== 'rgba(0, 0, 0, 0)', `${p.state} cell paints ${p.got}, token is ${p.want}`);
     const selfCells = before.rows.reduce((n, r) => n + (before.recipients.includes(r.sender) ? 1 : 0), 0);
     assert(selfCells > 0 && await page.locator('dialog.mx .mx-b.st-self').count() === selfCells, 'sender cells are not hatched');
