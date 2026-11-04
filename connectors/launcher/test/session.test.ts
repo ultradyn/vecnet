@@ -88,7 +88,7 @@ test('a crash between marking sending and send: attach resends the same batch wi
   const s=await setup(t,{attach:false});const ds=[s.message('first'),s.message('second')];for(const d of ds)await s.lane.handleMessage(d);
   const ids=ds.map(d=>d.delivery_id),batchId=createHash('sha256').update([...ids].sort().join('\n')).digest('hex').slice(0,24);
   s.ledger.markInputs(ids,{state:'sending',mode:'start',batchId,turnSeq:0});s.lane.attach(s.handle);await tick();
-  assert.equal(s.sends.length,1);assert.deepEqual(s.sends[0].input.items.map(i=>i.deliveryId),ids);assert.deepEqual(s.sends[0].batchIds,[batchId,batchId]);assert.equal(s.ledger.inputs('job_one',['sent']).length,2);
+  assert.equal(s.sends.length,1);assert.deepEqual(s.sends[0].input.items.map(i=>i.deliveryId),ids);assert.equal((s.sends[0].input as TurnInput & { batchId?: string }).batchId,batchId);assert.deepEqual(s.sends[0].batchIds,[batchId,batchId]);assert.equal(s.ledger.inputs('job_one',['sent']).length,2);
 });
 test('spilled inbound text is rehydrated before relay',async t=>{
   const s=await setup(t),d=s.message('preview');d.message.content.truncated=true;d.message.metadata['vecnet.spilled']=true;d.message.attachments=[{name:'message.md',sha256:'b'.repeat(64),size:40,media_type:'text/markdown',blob_url:'https://hub/blob?t=secret'}];await s.lane.handleMessage(d);assert.deepEqual(s.fetched,['https://hub/blob?t=secret']);assert.match(s.sends[0].input.items[0].text,/> full spilled text/);assert.ok(!s.sends[0].input.items[0].text.includes('preview'));
@@ -126,17 +126,20 @@ test('oversized spilled input continues across capped sends and is processed onl
 test('a sending batch preserves prepended hold order across restart and reuses the stored batch id',async t=>{
   const s=await setup(t,{kind:'turn_running'});const queued=s.message('queued','wake_idle'),hold=s.message('hold','hold');
   await s.lane.handleMessage(queued);await s.lane.handleMessage(hold);
-  const original=s.handle.send;let attempted:TurnInput|undefined;
-  s.handle.send=async input=>{attempted=structuredClone(input);throw new Error('crash before send');};
+  const original=s.handle.send;let attempted:TurnInput|undefined,attemptedMode:SendMode|undefined;
+  s.handle.send=async (input,mode)=>{attemptedMode=mode;attempted=structuredClone(input);throw new Error('crash before send');};
   await s.emit(finished());assert.ok(attempted);assert.equal(s.ledger.inputs('job_one',['sending']).length,2);
-  const batch=s.ledger.inputs('job_one',['sending'])[0].batchId;
+  const batch=createHash('sha256').update([hold.delivery_id,queued.delivery_id].sort().join('\n')).digest('hex').slice(0,24);
+  const expected = { batchId: batch, items: [hold, queued].map(d => ({deliveryId:d.delivery_id,messageId:d.message.message_id,from:'req',text:s.ledger.inputs('job_one',['sending']).find(r=>r.deliveryId===d.delivery_id)!.text,attachments:[]})) };
+  assert.equal(attemptedMode,'start');assert.deepEqual(attempted,expected);
+  assert.equal(s.ledger.inputs('job_one',['sending'])[0].mode,'start');
   await s.lane.stop();s.handle.send=original;
   const resumed=createLane(s.ledger.job('job_one')!,s.deps);resumed.attach(s.handle);await tick();
-  assert.deepEqual(s.sends[0].input,attempted);assert.deepEqual(s.sends[0].input.items.map(i=>i.deliveryId),[hold.delivery_id,queued.delivery_id]);assert.deepEqual(s.sends[0].batchIds,[batch,batch]);await resumed.stop();
+  assert.equal(s.sends[0].mode,'start');assert.deepEqual(s.sends[0].input,expected);assert.deepEqual(s.sends[0].input,attempted);assert.deepEqual(s.sends[0].input.items.map(i=>i.deliveryId),[hold.delivery_id,queued.delivery_id]);assert.deepEqual(s.sends[0].batchIds,[batch,batch]);await resumed.stop();
 });
 test('native queued input belongs to the following turn; hold alone never starts; controls and stop retain their boundaries',async t=>{
   const s=await setup(t,{kind:'turn_running',caps:{queue:'native',steer:false}}),q=s.message('queued','wake_idle');
-  await s.lane.handleMessage(q);assert.equal(s.sends[0].mode,'queue');await s.emit(finished('initial'));assert.equal(s.receipts().length,0);
+  assert.equal(await s.lane.handleMessage(q),'buffered');assert.equal(s.sends.length,0);await s.emit(finished('initial'));assert.equal(s.sends[0].mode,'start');assert.equal(s.receipts().length,0);
   await s.emit(finished('queued'));assert.equal(s.receipts()[0].delivery_id,q.delivery_id);
   const hold=s.message('hold','hold');await s.lane.handleMessage(hold);assert.equal(s.sends.length,1);
   s.clock.advance(25);await s.lane.control('extend','op');assert.equal(s.ledger.job('job_one')!.lastActivityAt,125);assert.ok(s.activities()>0);
@@ -333,9 +336,9 @@ test('a wake racing the exited iterator closing starts only one replacement pump
 });
 
 
-async function nativeSession(t: TestContext) {
-  const s = await setup(t, { attach: false, kind: 'turn_running', caps: { queue: 'native' } });
-  const backend = createFakeBackend({ clock: s.clock, caps: { queue: 'native' } });
+async function nativeSession(t: TestContext, overrides: Partial<BackendCapabilities> = {}) {
+  const s = await setup(t, { attach: false, kind: 'turn_running', caps: { queue: 'native', ...overrides } });
+  const backend = createFakeBackend({ clock: s.clock, caps: { queue: 'native', ...overrides } });
   const handle = await backend.launch({
     jobId: s.job.jobId, tag: s.job.tag, title: s.job.title, prompt: 'initial',
     project: { alias: 'repo', repoRoot: '/repo', baseRef: 'main' }, branch: 'launch/job_one',
@@ -345,9 +348,21 @@ async function nativeSession(t: TestContext) {
   return { ...s, backend, nativeHandle: handle };
 }
 
+// Preserve coverage for native batches already persisted by earlier lane versions.
+async function seedNativeBatch(s: Awaited<ReturnType<typeof nativeSession>>, d: ReturnType<typeof s.message>, targetTurnSeq: number) {
+  await s.lane.handleMessage(d);
+  const row = s.ledger.inputs(s.job.jobId,['buffered']).find(r=>r.deliveryId===d.delivery_id)!;
+  const batchId = createHash('sha256').update(d.delivery_id).digest('hex').slice(0,24);
+  const input = { batchId, items: [{deliveryId:row.deliveryId,messageId:row.messageId,from:row.sender,text:row.text,attachments:[]}] };
+  s.ledger.kv(`lane:${s.job.jobId}`).set(`batch:${batchId}`,JSON.stringify({input,parts:{},targetTurnSeq}));
+  s.ledger.markInputs([row.deliveryId],{state:'sending',mode:'queue',batchId,turnSeq:0});
+  await s.nativeHandle.send(input,'queue');
+  s.ledger.markInputs([row.deliveryId],{state:'sent'});
+}
+
 test('restart steer targets the active native successor before unread history replays', async t => {
   const s = await nativeSession(t), queued = s.message('next turn', 'wake_idle');
-  await s.lane.handleMessage(queued); await s.lane.stop();
+  await seedNativeBatch(s,queued,2); await s.lane.stop();
   s.backend.finishTurn(s.job.jobId, 'offline first turn');
   assert.equal(s.nativeHandle.state().kind, 'turn_running');
   const resumed = createLane(s.ledger.job(s.job.jobId)!, s.deps), urgent = s.message('urgent successor steer');
@@ -364,9 +379,9 @@ test('restart steer targets the active native successor before unread history re
   } finally { await resumed.stop(); }
 });
 
-test('separate native queue batches receive receipts only from their own finished turn across restart', async t => {
+test('persisted separate native queue batches receive receipts only from their own finished turn across restart', async t => {
   const s = await nativeSession(t), q1 = s.message('queue one', 'wake_idle'), q2 = s.message('queue two', 'wake_idle');
-  await s.lane.handleMessage(q1); await s.lane.handleMessage(q2);
+  await seedNativeBatch(s,q1,2); await seedNativeBatch(s,q2,3);
   assert.equal(s.backend.sessions()[0].sent.length, 2);
   await s.lane.stop();
   const resumed = createLane(s.ledger.job(s.job.jobId)!, s.deps); resumed.attach(s.nativeHandle); await tick();
@@ -388,8 +403,9 @@ test('hold precedes a native wake_idle batch and both are processed by the next 
   await s.lane.handleMessage(hold);
   assert.equal(s.backend.sessions()[0].sent.length, 0);
   await s.lane.handleMessage(queued);
-  assert.deepEqual(s.backend.sessions()[0].sent[0].items.map(i => i.deliveryId), [hold.delivery_id, queued.delivery_id]);
+  assert.equal(s.backend.sessions()[0].sent.length, 0);
   s.backend.finishTurn(s.job.jobId, 'initial'); await tick();
+  assert.deepEqual(s.backend.sessions()[0].sent[0].items.map(i => i.deliveryId), [hold.delivery_id, queued.delivery_id]);
   assert.equal(s.receipts().length, 0);
   s.backend.finishTurn(s.job.jobId, 'next'); await tick();
   assert.deepEqual(s.replies()[1].metadata!['launch.consumed'], [hold.message.message_id, queued.message.message_id]);
@@ -424,4 +440,97 @@ test('ordinary delivery retry after consumption and settle preserves its receipt
     assert.deepEqual(ledger.pendingOutbox(100, s.clock.now()).filter(r => r.kind === 'receipt').at(-1)!.payload,
       { delivery_id: fresh.delivery_id, state: 'failed', note: 'session_ended' });
   } finally { await lane.stop(); ledger.close(); }
+});
+
+
+test('attach retries a rejected durable resend before replaying completions or dispatching fresh input', async t => {
+  const s = await setup(t), original = s.message('durable original');
+  const send = s.handle.send;
+  s.handle.send = async (input, mode) => { await send(input, mode); throw new Error('crash after backend accepted'); };
+  await assert.rejects(s.lane.handleMessage(original));
+  await s.lane.stop();
+  await s.emit(finished('original-offline'));
+  const attempted: Array<{input: TurnInput; mode: SendMode}> = [];
+  let streams = 0;
+  const turns = s.handle.turns;
+  s.handle.turns = async function* (after, signal) { streams++; yield* turns(after, signal); };
+  s.handle.send = async (input, mode) => {
+    attempted.push({ input: structuredClone(input), mode });
+    if (attempted.length === 1) throw new Error('backend temporarily unavailable');
+    if (input.items[0].deliveryId === original.delivery_id) return { mode }; // idempotent backend replay
+    return send(input, mode);
+  };
+  const resumed = createLane(s.ledger.job(s.job.jobId)!, s.deps);
+  try {
+    resumed.attach(s.handle); await tick();
+    assert.equal(attempted.length, 1);
+    assert.equal(await resumed.handleMessage(original), 'relayed');
+    const fresh = s.message('future input');
+    assert.equal(await resumed.handleMessage(fresh), 'buffered');
+    assert.equal(attempted.length, 1); assert.equal(streams, 0);
+    s.clock.advance(1000); await tick();
+    assert.equal(attempted.length, 3);
+    assert.deepEqual(attempted[1], attempted[0]);
+    assert.equal((attempted[0].input as TurnInput & {batchId?: string}).batchId,
+      createHash('sha256').update(original.delivery_id).digest('hex').slice(0,24));
+    assert.equal(streams, 1);
+    assert.deepEqual(s.replies()[0].metadata!['launch.consumed'], [original.message.message_id]);
+    assert.deepEqual(s.receipts(), [{delivery_id:original.delivery_id,state:'processed'}]);
+    assert.equal(s.ledger.inputs(s.job.jobId,['sending']).length, 0);
+    await s.emit(finished('fresh-finished'));
+    assert.deepEqual(s.replies()[1].metadata!['launch.consumed'], [fresh.message.message_id]);
+    assert.equal(s.receipts().length, 2);
+    await resumed.handleMessage(original);
+    s.clock.advance(1000); await tick();
+    assert.equal(attempted.length, 3); assert.equal(s.replies().length, 2);
+  } finally { await resumed.stop(); }
+});
+
+test('a native wake_idle followed by hold includes the hold ahead of the wake in the next turn', async t => {
+  const s = await nativeSession(t), queued = s.message('wake next','wake_idle'), hold = s.message('later hold','hold');
+  await s.lane.handleMessage(queued); await s.lane.handleMessage(hold);
+  s.backend.finishTurn(s.job.jobId,'initial'); await tick();
+  assert.equal(s.receipts().length,0);
+  assert.deepEqual(s.backend.sessions()[0].sent[0].items.map(i=>i.deliveryId),[hold.delivery_id,queued.delivery_id]);
+  s.backend.finishTurn(s.job.jobId,'next'); await tick();
+  assert.deepEqual([...(s.replies()[1].metadata!['launch.consumed'] as string[])].sort(),[hold.message.message_id,queued.message.message_id].sort());
+  assert.deepEqual(s.receipts().map(r=>r.delivery_id).sort(),[hold.delivery_id,queued.delivery_id].sort());
+});
+
+
+test('native next-turn input stays amendable across restart and splits at the byte cap', async t => {
+  const s = await nativeSession(t,{maxInputBytes:400});
+  const q1=s.message('a'.repeat(60),'wake_idle'),q2=s.message('b'.repeat(160),'wake_idle'),hold=s.message('held','hold');
+  await s.lane.handleMessage(q1);await s.lane.handleMessage(q2);await s.lane.handleMessage(hold);
+  assert.equal(s.backend.sessions()[0].sent.length,0);
+  await s.lane.stop();
+  const resumed=createLane(s.ledger.job(s.job.jobId)!,s.deps);
+  try {
+    resumed.attach(s.nativeHandle);await tick();
+    s.backend.finishTurn(s.job.jobId,'initial');await tick();
+    assert.deepEqual(s.backend.sessions()[0].sent[0].items.map(i=>i.deliveryId),[hold.delivery_id,q1.delivery_id]);
+    assert.equal(s.receipts().length,0);
+    s.backend.finishTurn(s.job.jobId,'first batch');await tick();
+    assert.deepEqual(s.backend.sessions()[0].sent[1].items.map(i=>i.deliveryId),[q2.delivery_id]);
+    assert.ok(!s.receipts().some(r=>r.delivery_id===q2.delivery_id));
+    s.backend.finishTurn(s.job.jobId,'overflow');await tick();
+    assert.equal(s.receipts().filter(r=>r.state==='processed').length,3);
+    assert.ok(s.backend.sessions()[0].sent.every(batch=>Buffer.byteLength(batch.items.map(i=>i.text).join('\n\n'))<=400));
+    await resumed.handleMessage(s.message('hold alone','hold'));await tick();
+    assert.equal(s.backend.sessions()[0].sent.length,2);
+  } finally {await resumed.stop();}
+});
+
+test('stopping a lane cancels its pending attach retry', async t => {
+  const s=await setup(t,{attach:false}),d=s.message('pending');
+  await s.lane.handleMessage(d);
+  const batchId=createHash('sha256').update(d.delivery_id).digest('hex').slice(0,24);
+  s.ledger.markInputs([d.delivery_id],{state:'sending',mode:'start',batchId,turnSeq:0});
+  let attempts=0;
+  s.handle.send=async()=>{attempts++;throw new Error('unreachable');};
+  s.lane.attach(s.handle);await tick();assert.equal(attempts,1);
+  s.clock.advance(1000);await tick();assert.equal(attempts,2);
+  await s.lane.stop();s.clock.advance(5000);await tick();assert.equal(attempts,2);
+  assert.equal(s.ledger.job(s.job.jobId)!.state,'running');
+  assert.equal(s.ledger.inputs(s.job.jobId,['sending']).length,1);
 });

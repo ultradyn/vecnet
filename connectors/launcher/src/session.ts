@@ -64,6 +64,8 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
   // A backend can already be idle while the saved lane still has a running
   // turn. Replay that completion before assigning a counter to any new send.
   let recovering = false;
+  let replaying = false;
+  let attachRetry: ReturnType<Clock['timer']> | undefined;
   const job = () => ledger.job(jobId)!;
   function serial<T>(fn: () => Promise<T> | T): Promise<T> {
     const work = chain.then(fn).catch(() => {
@@ -147,7 +149,7 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     startPump();
   }
   async function flush(mode: SendMode) {
-    if (recovering) return;
+    if (recovering || replaying) return;
     const buffered = ledger.inputs(jobId, ['buffered']).filter(row => {
       if (mode === 'start') return true;
       // Holds join the next non-hold turn batch, including a native queue,
@@ -187,6 +189,7 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
         ...(ended === 'idle_wrapup' ? { quiescence: extra.quiescence ?? (deps.caps.backgroundTasks === 'observable' ? 'proven' : 'assumed') } : {}),
       });
     });
+    attachRetry?.cancel();
     controller?.abort(); deps.onEnded(jobId);
   }
   async function control(c: 'interrupt' | 'settle' | 'extend', from: string) {
@@ -268,7 +271,7 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     });
   }
   function startPump() {
-    if (!handle || pump || stopped || job().state === 'ended') return;
+    if (!handle || pump || replaying || stopped || job().state === 'ended') return;
     const next = handle, signal = controller!.signal, generation = sendGeneration;
     pump = (async () => {
       for await (const item of next.turns(job().turnCursor ? { value: job().turnCursor! } : undefined, signal)) {
@@ -320,6 +323,30 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     await control(command, from);
     ledger.tx(() => { store.set(key, JSON.stringify({ ...decision, state: 'done' })); receipt(id, 'processed'); });
   }
+  async function replayAttachment() {
+    if (stopped || job().state === 'ended') return;
+    replaying = true;
+    const batches = new Map<string, InputRow[]>();
+    for (const row of ledger.inputs(jobId, ['sending'])) {
+      const key = row.batchId!;
+      batches.set(key, [...(batches.get(key) ?? []), row]);
+    }
+    for (const rows of batches.values()) await sendBatch(rows, rows[0].mode!, true);
+    replaying = false;
+    // The pump must not consume a completion until every uncertain send has
+    // been restored to sent. The recovery fence then reconciles unread turns
+    // before newly buffered input can be dispatched.
+    startPump();
+    if (['idle', 'parked'].includes(job().sessionKind!)) await flush('start');
+  }
+  function retryAttachment() {
+    if (stopped || job().state === 'ended') return;
+    replaying = true;
+    attachRetry = clock.timer(1000, () => {
+      attachRetry = undefined;
+      void serial(replayAttachment).catch(retryAttachment);
+    });
+  }
   const lane: SessionLane = {
     jobId,
     attach(next) {
@@ -335,27 +362,8 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
           (state.kind === 'idle' || state.kind === 'parked' || (state.kind === 'ended' && state.resumable));
         if (awaitingTurn) store.set('awaitingTurn', '1');
         ledger.updateJob(jobId, { state: 'running', sessionKind: state.kind === 'ended' && state.resumable ? 'parked' : state.kind });
-        const sending = ledger.inputs(jobId, ['sending']);
-        const batches = new Map<string, InputRow[]>();
-        for (const row of sending) { const key = row.batchId!; batches.set(key, [...(batches.get(key) ?? []), row]); }
-        for (const rows of batches.values()) await sendBatch(rows, rows[0].mode!, true);
-        if (['idle', 'parked'].includes(job().sessionKind!)) await flush('start');
-        else if (ledger.inputs(jobId, ['buffered']).some(r => r.priority !== 'hold')) {
-          const p = planInput('wake_idle', job().sessionKind!, deps.caps);
-          if (p === 'queue-native') {
-            // Launch-time buffers acquire their scheduling intent only when
-            // the backend is attached; existing queue/hold intent stays put.
-            ledger.tx(() => {
-              for (const row of ledger.inputs(jobId, ['buffered'])) {
-                if (row.priority !== 'hold' && store.get(`plan:${row.deliveryId}`) === 'buffer')
-                  store.set(`plan:${row.deliveryId}`, 'queue-native');
-              }
-            });
-            await flush('queue');
-          }
-        }
-        startPump();
-      }).catch(() => {});
+        await replayAttachment();
+      }).catch(retryAttachment);
     },
     handleMessage(d) {
       return serial(async () => {
@@ -403,7 +411,11 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
           remaining = `> ${remaining.slice(chunk.length)}`;
         }
         if (chunks.length) chunks.push(remaining);
-        const plan = planInput(m.priority, handle && !recovering ? job().sessionKind ?? 'starting' : 'launching', deps.caps);
+        const planned = planInput(m.priority, handle && !recovering && !replaying ? job().sessionKind ?? 'starting' : 'launching', deps.caps);
+        // No backend seam can amend an already queued batch. Keep next-turn
+        // input here until the running turn ends, so later holds can still be
+        // prepended. Persisted native batches from older lanes remain replayable.
+        const plan = planned === 'queue-native' ? 'queue-launcher' : planned;
         ledger.tx(() => {
           ledger.addInput({ deliveryId: d.delivery_id, jobId, messageId: m.message_id, sender: m.sender, text: formatted, priority: m.priority, createdAt: clock.now() });
           if (chunks.length) store.set(`parts:${d.delivery_id}`, JSON.stringify(chunks));
@@ -412,7 +424,7 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
           ledger.updateJob(jobId, { lastActivityAt: clock.now() });
         });
         deps.onActivity(jobId);
-        if (plan === 'start' || plan === 'steer' || plan === 'queue-native') await flush(plan === 'queue-native' ? 'queue' : plan);
+        if (plan === 'start' || plan === 'steer') await flush(plan);
         return plan === 'buffer' || plan === 'queue-launcher' ? 'buffered' : 'relayed';
       });
     },
@@ -421,7 +433,7 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     park: () => serial(async () => { if (!stopped && job().state !== 'ended' && handle?.park) { await handle.park(); ledger.updateJob(jobId, { sessionKind: 'parked', parkedAt: clock.now() }); } }),
     settle: (mode, ended, extra) => serial(() => end(mode, ended, extra)),
     activity: () => serial(async () => ({ ...(handle ? await handle.activity() : { turnRunning: false, openApprovals: 0, queuedInputs: 0, backgroundTasks: { known: 0, observable: false }, lastActivityAt: new Date(job().lastActivityAt).toISOString() }), launcherBuffered: ledger.inputs(jobId, ['buffered', 'sending']).length, lastRelayAt: Number(store.get('lastRelayAt') ?? initial.lastActivityAt) })),
-    async stop() { stopped = true; controller?.abort(); await chain; await pump; },
+    async stop() { stopped = true; attachRetry?.cancel(); controller?.abort(); await chain; await pump; },
   };
   return lane;
 }
