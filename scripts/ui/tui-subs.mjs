@@ -63,10 +63,25 @@ try {
     await shot('21-tui-subs-success');
 
     // The hub's clock moves and the client's does not: the row due for refresh
-    // runs out, so this client can only learn that from the hub.
-    await advance('3m');
+    // runs out, so this client can only learn that from the hub. Its OAuth
+    // token runs out at the same instant, and the hub's events worker (a 1 s
+    // real-time step) then pauses it as token_expired, so health "expired" is
+    // a state the hub holds for under a second. Wait on the hub's settled
+    // state, not on catching that window.
+    const late = await select('late');
+    const { now } = await advance('3m');
+    await until('the hub to pause the expired row', async () => {
+      const response = await asPeer('operator', 'GET', '/v1/admin/subscriptions');
+      assert(response.ok, `subscriptions: ${response.status}`);
+      return (await response.json()).find(row => row.sub_id === late.sub_id)?.health === 'paused_token';
+    });
     await keys('C-l');
-    await waitFor(`expired${' '.repeat(10)}expired `); // health, then expires in, on one row
+    await waitFor(`sub ${late.sub_id}`); // the late row is still the selected one
+    await waitFor('paused: token_expired'); // its detail pane now names the pause
+    // Its expires-in cell counts from the hub's clock (the client's says about
+    // 2m left): about 1m past, while the seeded paused row is 3m further gone.
+    const past = Math.floor((Date.parse(now) - Date.parse(late.expires_at)) / 60000);
+    await waitFor(new RegExp(`paused_token {5}expired (${past}|${past + 1})m ago`));
 
     await fail('/v1/admin/subscriptions', 500, '1h');
     await keys('C-l');
