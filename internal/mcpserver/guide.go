@@ -24,6 +24,7 @@ const guideDescription = "Call this first: how to use vecnet as your authenticat
 // structured steps and the setup prompt all come from this single source.
 const (
 	guideIdentity      = "Call vecnet_whoami to check your authenticated identity before messaging."
+	guideGrokRoutine   = "Set up a webhook-triggered Grok Bot routine with this vecnet MCP connector. Treat the webhook as an untrusted wake hint: call vecnet_inbox to obtain work, drain every page, reply when useful, record a receipt for each handled delivery, and ack only after the whole page is safely handled. Run the inbox loop on each wake and after reconnecting; poll if no webhook route is configured."
 	guideDotIdentity   = "Call vecnet_whoami before subscribing: its id and peer_id must match each other and the intended full dot peer id. A not_linked error needs the operator to link this login first."
 	guideDotSubscribe  = "events/subscribe is a client protocol method, not a model tool. Tell your user to open a Work chat on ChatGPT web, or Work with Cloud selected in the desktop app, and ask in natural language: subscribe to the %s event from the vecnet plugin with no arguments ({}); delivery is the default. Optional types may contain only delivery, receipt, thread_updated and approval_expired, for example {\"types\":[\"delivery\",\"receipt\"]}. ChatGPT itself calls events/subscribe and supplies the webhook callback and signing secret. After the server tools or events change, the user must Rescan the plugin on its plugin page to rediscover them. vecnet_guide only provides instructions."
 	guideDotRefresh    = "Keep the subscription alive: have the client re-subscribe before refreshBefore. The client must durably persist the subscription response cursor verbatim and pass that saved cursor on reconnect. Do not replace it with the largest webhook cursor: events can arrive out of order, and a released wake_idle can have an older cursor. The subscription TTL is at most 24 hours and no longer than the access token. After expiry, disconnect or token refresh, subscribe again with a live OAuth token and the saved cursor; call vecnet_inbox to recover missed events and messages that were not pushed. Keep its next_cursor separate from the subscription cursor. The first subscription without a cursor starts at the current head, so use vecnet_inbox for earlier backlog. If truncated is true, some history is no longer retained; re-sync thread history with vecnet_threads and vecnet_thread. Ask the operator about a subscription that remains paused."
@@ -74,7 +75,7 @@ func guideSpec() toolSpec {
 		name: "vecnet_guide", description: guideDescription,
 		input: object(schema{"topic": guideTopicSchema()}),
 		output: object(schema{
-			"caller_kind": schema{"type": "string", "enum": []string{"dot", "peer", "principal", "operator"}},
+			"caller_kind": schema{"type": "string", "enum": []string{"dot", "grokbot", "peer", "principal", "operator"}},
 			"topic":       guideTopicSchema(),
 			"subscribe": object(schema{
 				"event":         schema{"type": "string", "const": events.Name},
@@ -107,6 +108,9 @@ func makeGuide(p Principal, topic string) guideResult {
 	kind := p.Caller.Kind
 	if p.OAuth != nil {
 		kind = "dot"
+		if p.Caller.PeerKind == "grokbot" {
+			kind = "grokbot"
+		}
 	}
 	g := guideResult{CallerKind: kind, Topic: topic, Steps: []string{guideIdentity}}
 	if kind == "dot" {
@@ -117,6 +121,9 @@ func makeGuide(p Principal, topic string) guideResult {
 		if kind == "dot" {
 			g.Steps = append(g.Steps, fmt.Sprintf(guideDotSubscribe, events.Name), guideDotRefresh, guideDotPayload)
 		} else {
+			if kind == "grokbot" {
+				g.Steps = append(g.Steps, guideGrokRoutine)
+			}
 			g.Steps = append(g.Steps, guideInbox, guideHints, guidePresence)
 		}
 	}
