@@ -10,6 +10,12 @@ import type { VecnetEvent } from '../src/wire.ts';
 const encode = (s: string) => new TextEncoder().encode(s);
 const frame = (cursor: string) => `id: ${cursor}\nevent: delivery\ndata: ${JSON.stringify(event('delivery',{},cursor))}\n\n`;
 async function until(fn: () => boolean) { for (let n=0;n<300;n++) {if (fn()) return; await setImmediate();} assert.fail('condition did not become true'); }
+// Real HTTP I/O has no event-loop-turn budget: wait on the condition with a
+// bounded real-time deadline instead (protocol timers stay on the fake clock).
+async function eventually(fn: () => boolean, ms = 10_000) {
+  const end = Date.now() + ms;
+  while (!fn()) { if (Date.now() > end) assert.fail('condition did not become true'); await new Promise(resolve => setTimeout(resolve, 5)); }
+}
 function harness(steps: Array<string | Response | Error>, initial: string | null = null, recovery: Pick<Parameters<typeof createEventStream>[0], 'onCursorPurged'> = {}) {
   const clock = fakeClock(), log = memoryLog(), abort = new AbortController();
   const requests: Array<{url: URL; headers: Headers; signal: AbortSignal}> = [], saved: string[] = [], waits: number[] = [];
@@ -63,10 +69,10 @@ for (const deferredEOF of [false,true]) {
     const stream = createEventStream({baseUrl:hub.url,credential:hub.bearer,clock,log:memoryLog(),fetch:fetcher,cursors:{async load(){return null;},async save(c){saved.push(c);}}});
     const running = stream.run(async e => {seen.push(e.cursor);},abort.signal);
     try {
-      await until(()=>saved.length===2); hub.dropConnections();
+      await eventually(()=>saved.length===2); hub.dropConnections();
       if (deferredEOF) await eofReached;
       releaseEOF();await retryReady;clock.advance(3000);
-      await until(()=>hub.requests.length===2);
+      await eventually(()=>hub.requests.length===2);
       assert.deepEqual(seen,['e1.1','e1.2']); assert.deepEqual(saved,['e1.1','e1.2']); assert.equal(hub.requests[1]?.headers['last-event-id'],'e1.2');
     } finally {releaseEOF();abort.abort();assert.deepEqual(await running,{reason:'aborted'});}
   });
@@ -108,7 +114,7 @@ test('45 s of silence reconnects; a heartbeat comment prevents it', async t => {
   const h=harness([]), run=h.stream.run(async()=>{},h.abort.signal);await h.next(1);h.clock.advance(44_999);await setImmediate();assert.equal(h.requests.length,1);h.clock.advance(1);await h.retry(1);assert.equal(h.requests.length,2);h.abort.abort();await run;
   const clock=fakeClock(), hub=await startFakeHub({clock,heartbeatMs:15_000});t.after(()=>hub.close());const abort=new AbortController();t.after(()=>abort.abort());
   const running=createEventStream({baseUrl:hub.url,credential:hub.bearer,clock,log:memoryLog(),cursors:{async load(){return null;},async save(){assert.fail('priming must not save');}}}).run(async()=>assert.fail('no events'),abort.signal);
-  await until(()=>hub.requests.length===1);await setImmediate();
+  await eventually(()=>hub.requests.length===1);await setImmediate();
   for(let n=0;n<5;n++){clock.advance(15_000);await setImmediate();await setImmediate();}
   assert.equal(hub.requests.length,1);abort.abort();await running;
 });
@@ -172,7 +178,7 @@ test("abort resolves { reason: 'aborted' } and leaves no open socket", async t =
   const address=server.address();assert.ok(address && typeof address!=='string');
   const abort=new AbortController();t.after(()=>abort.abort());
   const running=createEventStream({baseUrl:`http://127.0.0.1:${address.port}`,credential:'fake',clock:fakeClock(),log:memoryLog(),cursors:{async load(){return null;},async save(){}}}).run(async()=>{},abort.signal);
-  await until(()=>connected);abort.abort();assert.deepEqual(await running,{reason:'aborted'});await until(()=>closed);assert.equal(closed,true);
+  await eventually(()=>connected);abort.abort();assert.deepEqual(await running,{reason:'aborted'});await eventually(()=>closed);assert.equal(closed,true);
 });
 test('a slow handler stays serial and persists before a reconnect', async () => {
   const h=harness([frame('e1.1')+frame('e1.2'),frame('e1.2')]);let release!:()=>void;
