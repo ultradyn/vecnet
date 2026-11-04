@@ -1,6 +1,7 @@
 import { open, readFile } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import type { PermissionMode } from './backend.ts';
+import { redactText } from './redact.ts';
 
 export type ApprovalCategory = 'outside_workspace_writes' | 'privileged_exec' | 'unverifiable' | 'exec' | 'edit' | 'network' | 'mcp_tool' | 'other';
 export interface Ceiling { backends: string[]; permission_modes: PermissionMode[]; projects: string[]; max_sessions: number; max_open_sessions: number; launches_per_hour: number }
@@ -23,7 +24,7 @@ export interface LauncherConfig {
 export class ConfigError extends Error {
   readonly pointer: string;
   constructor(pointer: string, reason = 'invalid field') {
-    super(`${pointer || '/'}: ${reason}`); this.name = 'ConfigError'; this.pointer = pointer || '/';
+    super(redactText(`${pointer || '/'}: ${reason}`).text); this.name = 'ConfigError'; this.pointer = pointer || '/';
   }
 }
 export function parseDuration(s: string): number {

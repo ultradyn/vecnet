@@ -42,3 +42,34 @@ test('explicit null config values are rejected rather than selecting a permissiv
   for(const field of ['limits','approvals','policies','relays','idle','presence','questions','wake_interrupts']) assert.throws(()=>parseConfig({...minimal(),[field]:null}),ConfigError,field);
   for(const value of [{limits:{max_sessions:null}},{approvals:{to_operator:{presets:null}}},{idle:{park_after_ms:null}}]) assert.throws(()=>parseConfig({...minimal(),...value}),ConfigError);
 });
+for (const location of ['policy key', 'unknown field', 'nested unknown field'] as const) {
+  test(`ConfigError redacts a credential in ${location} while preserving its JSON pointer`,()=>{
+    const secret = 'vn_peer_' + 'A'.repeat(43);
+    const pointer = location === 'policy key' ? `/policies/${secret}` : location === 'unknown field' ? `/${secret}` : `/hub/${secret}`;
+    const raw = location === 'policy key' ? {...minimal(),policies:{[secret]:{}}} :
+      location === 'unknown field' ? {...minimal(),[secret]:true} : {...minimal(),hub:{...minimal().hub,[secret]:true}};
+    assert.throws(()=>parseConfig(raw),(e:unknown)=>{
+      assert.ok(e instanceof ConfigError);
+      assert.equal(e.pointer,pointer);
+      assert.equal(e.message.includes(secret),false,'message must not expose the credential');
+      assert.ok(e.message.includes('[redacted]'));
+      return true;
+    });
+  });
+}
+test('ConfigError keeps ordinary bad-field pointer diagnostics intact',()=>{
+  for (const [raw,pointer,reason] of [
+    [{...minimal(),limits:{max_sessions:'oops'}},'/limits/max_sessions','expected nonnegative integer'],
+    [{...minimal(),hub:{...minimal().hub,typo:true}},'/hub/typo','unknown field'],
+    [{...minimal(),policies:{typo:{}}},'/policies/typo','expected default, peer id or principal id'],
+  ] as const) {
+    assert.throws(()=>parseConfig(raw),(e:unknown)=>{
+      assert.ok(e instanceof ConfigError);
+      assert.equal(e.pointer,pointer);
+      assert.equal(e.message,`${pointer}: ${reason}`);
+      return true;
+    });
+  }
+  assert.equal(new ConfigError('').message,'/: invalid field');
+  assert.equal(new ConfigError('').pointer,'/');
+});
