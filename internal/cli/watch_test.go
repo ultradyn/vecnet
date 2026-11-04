@@ -160,7 +160,8 @@ func TestInboxHeaderAndFrom(t *testing.T) {
 		from  string
 	}{
 		{"cached", b, "Max(" + aID + ")"},
-		{"unknown", profileUser(t, env.URL, bSec), aID},
+		// No cached directory: the delivery's own sender_info names it.
+		{"uncached", profileUser(t, env.URL, bSec), "Max(" + aID + ")"},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
 			got := tc.u.mustRun("inbox")
@@ -273,13 +274,9 @@ func TestPeerNameFetchFailureKeepsWatching(t *testing.T) {
 			if got := fetches.Load(); got <= initialFetches {
 				t.Fatalf("directory update did not retry fetch: before %d, after %d", initialFetches, got)
 			}
+			// Even when the startup fetch failed, the delivery's sender_info
+			// names the sender: no directory lookup is needed (PROTOCOL §14).
 			want := " Max: still watching"
-			if mode == "startup" {
-				want = " still watching"
-				if strings.Contains(line, "Max:") {
-					t.Fatalf("name unexpectedly known after startup fetch failure: %q", line)
-				}
-			}
 			if !strings.HasSuffix(line, want) {
 				t.Fatalf("fetch failure lost previous name: %q, want suffix %q", line, want)
 			}

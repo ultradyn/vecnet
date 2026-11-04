@@ -1158,3 +1158,28 @@ func TestPrincipalListFlattensNames(t *testing.T) {
 	}
 	t.Fatalf("missing safe principal line starting %q in %q", wantPrefix, human)
 }
+
+// TestThreadShowsSendTimeName: `vecnet thread` renders the sender as
+// name(peer_id) from each Message's sender_info, so a rename after the send
+// does not relabel old messages and no directory lookup is made.
+func TestThreadShowsSendTimeName(t *testing.T) {
+	env := testhub.Start(t)
+	aID, aSec := env.NewPeer("session", "Before")
+	bID, _ := env.NewPeer("session", "B")
+	a := profileUser(t, env.URL, aSec)
+	sent := a.send(bID, "first", "--hold")
+	if _, err := env.Hub.DB.Exec(`UPDATE peers SET name = 'After' WHERE peer_id = ?`, aID); err != nil {
+		t.Fatal(err)
+	}
+	second := a.send2("reply", sent.MessageID, "second", "--hold", "--thread", sent.ThreadID)
+	lines := nonEmptyLines(a.mustRun("thread", sent.ThreadID))
+	if len(lines) != 2 {
+		t.Fatalf("thread = %q", lines)
+	}
+	if f := strings.Fields(lines[0]); len(f) != 4 || f[0] != sent.MessageID || f[2] != "Before("+aID+")" || f[3] != "first" {
+		t.Fatalf("first line = %q", lines[0])
+	}
+	if f := strings.Fields(lines[1]); len(f) != 4 || f[0] != second.MessageID || f[2] != "After("+aID+")" || f[3] != "second" {
+		t.Fatalf("second line = %q", lines[1])
+	}
+}

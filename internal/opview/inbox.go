@@ -90,7 +90,7 @@ func (r *Reader) Inbox(ctx context.Context, c auth.Caller, q opapi.InboxQuery) (
 		if err := json.Unmarshal([]byte(raw), &m); err != nil {
 			return out, fmt.Errorf("opview: inbox message: %w", err)
 		}
-		d.Excerpt, d.Attachments = opapi.Excerpt(m), len(m.Attachments)
+		d.Excerpt, d.Attachments, d.SenderInfo = opapi.Excerpt(m), len(m.Attachments), m.SenderInfo
 		d.Section = "held"
 		if d.Priority == "wake" {
 			d.Section = "woke"

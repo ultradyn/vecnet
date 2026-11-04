@@ -40,6 +40,18 @@ const inboxHeader = "CURSOR TYPE THREAD FROM MSG DELIVERY TEXT"
 type eventFields struct {
 	thread, sender, messageID, deliveryID, text string
 	attachments                                 int
+	// senderName is a delivery's send-time sender_info.name (PROTOCOL §2.2
+	// step 12), preferred over the cached directory; "" when absent.
+	senderName string
+}
+
+// nameOf is the display name for f's sender: the delivery's own
+// sender_info, else the cached directory, else "".
+func (f eventFields) nameOf(names map[string]string) string {
+	if f.senderName != "" {
+		return f.senderName
+	}
+	return names[f.sender]
 }
 
 // eventFieldsOf extracts eventFields from ev's data by type: a delivery's
@@ -51,16 +63,20 @@ func eventFieldsOf(ev envelope.Event) eventFields {
 		var d struct {
 			DeliveryID string `json:"delivery_id"`
 			Message    struct {
-				MessageID   string            `json:"message_id"`
-				ThreadID    string            `json:"thread_id"`
-				Sender      string            `json:"sender"`
-				Content     envelope.Content  `json:"content"`
-				Attachments []json.RawMessage `json:"attachments"`
+				MessageID   string               `json:"message_id"`
+				ThreadID    string               `json:"thread_id"`
+				Sender      string               `json:"sender"`
+				SenderInfo  *envelope.SenderInfo `json:"sender_info"`
+				Content     envelope.Content     `json:"content"`
+				Attachments []json.RawMessage    `json:"attachments"`
 			} `json:"message"`
 		}
 		if json.Unmarshal(ev.Data, &d) == nil {
 			f = eventFields{thread: d.Message.ThreadID, sender: d.Message.Sender, messageID: d.Message.MessageID,
 				deliveryID: d.DeliveryID, text: d.Message.Content.Text, attachments: len(d.Message.Attachments)}
+			if d.Message.SenderInfo != nil {
+				f.senderName = d.Message.SenderInfo.Name
+			}
 		}
 	case "receipt":
 		var r envelope.Receipt
@@ -149,12 +165,12 @@ func peerName(name string) string {
 
 // monitorLine is the `watch --for-monitor` line (PROTOCOL §13.7):
 // "<cursor> <type> <thread_id> <sender> <text>", with an optional name
-// prefix in text. The prefix and text together are capped at 120 runes.
+// prefix in text: a delivery's sender_info.name, else the cached directory. The prefix and text together are capped at 120 runes.
 func monitorLine(ev envelope.Event, names map[string]string) string {
 	f := eventFieldsOf(ev)
 	text := unbidi(flatten(f.text))
-	if name := names[f.sender]; name != "" {
-		text = peerName(name) + ": " + text
+	if name := peerName(f.nameOf(names)); name != "" {
+		text = name + ": " + text
 	}
 	text = firstRunes(text, monitorTextRunes)
 	return strings.TrimRight(fmt.Sprintf("%s %s %s %s %s", ev.Cursor, ev.Type, dash(f.thread), dash(f.sender), text), " ")
@@ -162,12 +178,13 @@ func monitorLine(ev envelope.Event, names map[string]string) string {
 
 // inboxLine is the human line of `inbox` and plain `watch`:
 // "<cursor> <type> <thread_id> <from> <message_id> <delivery_id> <text>",
-// with from rendered as name(peer_id) when known and text on one line.
+// with from rendered as name(peer_id) when known (a delivery's
+// sender_info.name, else the cached directory) and text on one line.
 func inboxLine(ev envelope.Event, names map[string]string) string {
 	f := eventFieldsOf(ev)
 	from := f.sender
-	if name := names[f.sender]; name != "" {
-		from = peerName(name) + "(" + f.sender + ")"
+	if name := peerName(f.nameOf(names)); name != "" {
+		from = name + "(" + f.sender + ")"
 	}
 	text := unbidi(flatten(f.text))
 	if f.attachments > 0 {

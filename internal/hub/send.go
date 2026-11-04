@@ -77,6 +77,12 @@ type target struct {
 // actor.src, never on this kind: peers.kind accepts "source" too.
 type sender struct {
 	peer, prn, kind string
+	name            string // directory name, snapshotted into Message.sender_info
+}
+
+// info is the Message.sender_info snapshot of s (PROTOCOL §2.2 step 12).
+func (s sender) info() *envelope.SenderInfo {
+	return &envelope.SenderInfo{Name: s.name, Kind: s.kind}
 }
 
 // actor is who a send runs as. Exactly one field is set. A credential is
@@ -433,6 +439,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 		InReplyTo:        req.InReplyTo,
 		Kind:             kind,
 		Sender:           snd.peer,
+		SenderInfo:       snd.info(), // the directory entry as of now, stored with the Message
 		Recipients:       msgRecipients,
 		Priority:         req.Priority,
 		CreatedAt:        now,
@@ -687,7 +694,7 @@ func resolveSender(ctx context.Context, tx *sql.Tx, c auth.Caller, as string) (s
 	}
 	s := sender{peer: peer}
 	var disabled int
-	err := tx.QueryRowContext(ctx, `SELECT prn_id, kind, disabled FROM peers WHERE peer_id = ?`, peer).Scan(&s.prn, &s.kind, &disabled)
+	err := tx.QueryRowContext(ctx, `SELECT prn_id, kind, name, disabled FROM peers WHERE peer_id = ?`, peer).Scan(&s.prn, &s.kind, &s.name, &disabled)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && (disabled != 0 || s.prn != c.PrincipalID)) {
 		return sender{}, forbidden()
 	}

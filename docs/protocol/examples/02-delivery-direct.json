@@ -1,5 +1,5 @@
 {
-  "$comment": "What the Grok Bot's connector receives for example 01: the Delivery for recipient …8A. Pushed as a signed webhook body (webhook-id = delivery_id), or as the data of an SSE event. blob_url carries a token scoped to this recipient. origin is null because the message is native vecnet traffic.",
+  "$comment": "What the Grok Bot's connector receives for example 01: the Delivery for recipient …8A. Pushed as a signed webhook body (webhook-id = delivery_id), or as the data of an SSE event. blob_url carries a token scoped to this recipient. origin is null because the message is native vecnet traffic. sender_info is the hub's snapshot of the sender's directory name and kind at send time, so the receiver needs no GET /v1/peers to label it (display data only; PROTOCOL 2.2 step 12).",
   "schema_version": 1,
   "delivery_id": "dly_01JD3Q5H2A4C6E8G0J2M4N6P8R",
   "recipient": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A",
@@ -27,6 +27,7 @@
     "origin": null,
     "kind": "message",
     "sender": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C",
+    "sender_info": {"name": "codex-hark", "kind": "session"},
     "recipients": [
       "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A",
       "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B"

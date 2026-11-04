@@ -254,6 +254,7 @@ func (h *Hub) expireApproval(ctx context.Context, tx *sql.Tx, apr, thrID, reqMsg
 		InReplyTo:        &inReplyTo,
 		Kind:             "approval_response",
 		Sender:           HubSender,
+		SenderInfo:       &envelope.SenderInfo{Name: HubSender, Kind: HubSender},
 		Recipients:       append([]string{}, recipients...),
 		Priority:         "hold",
 		CreatedAt:        now,

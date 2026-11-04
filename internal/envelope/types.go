@@ -118,6 +118,16 @@ type ApprovalResponse struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
+// SenderInfo is Message.sender_info ($defs/senderInfo): the sender's
+// directory name and kind, snapshotted by the hub when the Message was sent
+// (PROTOCOL §2.2 step 12, §8.2). Untrusted display data: name is whatever
+// the sender's directory entry said; kind is as trustworthy as the
+// operator's enrolment. For the hub's own messages it is {"hub", "hub"}.
+type SenderInfo struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+}
+
 // Message is the logical message, identical across its Deliveries
 // ($defs/message). Nullable required fields are pointers without omitempty.
 type Message struct {
@@ -128,6 +138,7 @@ type Message struct {
 	Origin           *Origin           `json:"origin"`
 	Kind             string            `json:"kind"`
 	Sender           string            `json:"sender"`
+	SenderInfo       *SenderInfo       `json:"sender_info,omitempty"` // hub-set at send; absent from older hubs
 	Recipients       []string          `json:"recipients"`
 	Priority         string            `json:"priority"`
 	CreatedAt        string            `json:"created_at"`

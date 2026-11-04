@@ -1031,7 +1031,13 @@ func (a *app) cmdThread(args []string) error {
 		return a.emitJSON(raw)
 	}
 	for _, m := range body.Messages {
-		fmt.Fprintf(a.stdout, "%s %s %s %s\n", m.MessageID, m.CreatedAt, m.Sender, flatten(m.Content.Text))
+		from := m.Sender
+		if m.SenderInfo != nil {
+			if name := peerName(m.SenderInfo.Name); name != "" {
+				from = name + "(" + m.Sender + ")" // the send-time name, as in inbox lines
+			}
+		}
+		fmt.Fprintf(a.stdout, "%s %s %s %s\n", m.MessageID, m.CreatedAt, from, flatten(m.Content.Text))
 		if len(m.Reactions) > 0 {
 			groups := make([]string, 0, len(m.Reactions))
 			for _, group := range m.Reactions {
