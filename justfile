@@ -78,7 +78,7 @@ ui-shots:
     #!/usr/bin/env bash
     set -euo pipefail
     bash scripts/ui/reap-demos.sh
-    build2 node --test --test-concurrency=2 scripts/ui/lib.test.mjs
+    build2 node --test --test-concurrency=2 scripts/ui/lib.test.mjs scripts/ui/closer.test.mjs
     for script in scripts/ui/*.mjs; do
         case "$script" in */lib.mjs|*/tmux.mjs|*/ansi.mjs|*/shots-index.mjs|*.test.mjs) continue ;; esac
         build2 node "$script"

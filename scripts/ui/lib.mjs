@@ -143,28 +143,39 @@ export async function buildCLI(dir) {
   await run('build2', ['go', 'build', '-p', '2', '-o', join(dir, 'vecnet'), './cmd/vecnet'], { env: { ...process.env, CGO_ENABLED: '0' } });
   return join(dir, 'vecnet');
 }
-export async function bootDemo({ scale = false } = {}) {
-  const binDir = await binaries();
-  const dir = await mkdtemp(join(tmpdir(), 'vecnet-ui-data-'));
-  const child = spawn(join(binDir, 'demo'), ['--listen', '127.0.0.1:0', '--data-dir', dir, '--exit-on-stdin-eof', ...(scale ? ['--scale'] : [])], { cwd: root, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+// demoCloser registers a spawned demo (its own process group) and returns
+// close(), which stops the group and removes its data dir. It signals only
+// while the original ChildProcess is unreaped and still registered: once it
+// has exited, its numeric PGID may already name an unrelated group, so a
+// late close() or delayed KILL must not reuse it. Node sets exitCode or
+// signalCode in the same callback that reaps the child, before any other JS.
+export function demoCloser(child, dir, { signal = signalGroup, killAfterMs = 7000 } = {}) {
   live.set(child.pid, dir);
   child.once('exit', () => live.delete(child.pid));
-  child.stdin.on('error', () => {}); // The demo may close stdin before its holder.
-  // Consume logs, but never echo peer text or credentials into a terminal.
-  child.stderr.resume();
   const closed = new Promise(resolve => child.once('close', resolve));
+  const running = () => child.exitCode === null && child.signalCode === null && live.get(child.pid) === dir;
   let stopped = false;
   async function close() {
     if (stopped) return;
     stopped = true;
-    signalGroup(child.pid, 'SIGTERM');
+    if (running()) signal(child.pid, 'SIGTERM');
     let timer;
-    await Promise.race([closed, new Promise(resolve => { timer = setTimeout(() => { signalGroup(child.pid, 'SIGKILL'); resolve(); }, 7000); })]);
+    await Promise.race([closed, new Promise(resolve => { timer = setTimeout(() => { if (running()) signal(child.pid, 'SIGKILL'); resolve(); }, killAfterMs); })]);
     clearTimeout(timer);
     await closed;
-    live.delete(child.pid);
+    if (live.get(child.pid) === dir) live.delete(child.pid);
     await rm(dir, { recursive: true, force: true });
   }
+  return { close, closed };
+}
+export async function bootDemo({ scale = false } = {}) {
+  const binDir = await binaries();
+  const dir = await mkdtemp(join(tmpdir(), 'vecnet-ui-data-'));
+  const child = spawn(join(binDir, 'demo'), ['--listen', '127.0.0.1:0', '--data-dir', dir, '--exit-on-stdin-eof', ...(scale ? ['--scale'] : [])], { cwd: root, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const { close, closed } = demoCloser(child, dir);
+  child.stdin.on('error', () => {}); // The demo may close stdin before its holder.
+  // Consume logs, but never echo peer text or credentials into a terminal.
+  child.stderr.resume();
   const lines = createInterface({ input: child.stdout });
   let timer;
   try {
