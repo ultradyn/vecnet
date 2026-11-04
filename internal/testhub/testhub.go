@@ -98,6 +98,33 @@ func StartWithServer(t *testing.T, cfgFn func(*hub.Config), srvFn func(*http.Ser
 		t.Fatalf("testhub: open store: %v", err)
 	}
 	clock := &FakeClock{t: time.Now().UTC().Truncate(time.Millisecond)}
+	return startDB(t, db, dir, clock, cfgFn, srvFn)
+}
+
+// CloneDB starts another hub over a VACUUM INTO snapshot. Database-backed
+// identity, peers and credentials survive, while the URL and clock are its own.
+func (e *Env) CloneDB(t *testing.T) *Env {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hub.db")
+	if _, err := e.Hub.DB.ExecContext(context.Background(), `VACUUM INTO ?`, path); err != nil {
+		t.Fatalf("testhub: clone database: %v", err)
+	}
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("testhub: open cloned store: %v", err)
+	}
+	env := startDB(t, db, dir, &FakeClock{t: e.Now.Now()}, func(c *hub.Config) {
+		url, dataDir := c.PublicURL, c.DataDir
+		*c = e.Hub.Cfg
+		c.PublicURL, c.DataDir = url, dataDir
+	}, nil)
+	env.OperatorSecret, env.OperatorPeer = e.OperatorSecret, e.OperatorPeer
+	return env
+}
+
+func startDB(t *testing.T, db *store.DB, dir string, clock *FakeClock, cfgFn func(*hub.Config), srvFn func(*http.Server)) *Env {
+	t.Helper()
 
 	// The handler is installed after the server exists so Config.PublicURL
 	// can carry the server's real URL; no request arrives before then.

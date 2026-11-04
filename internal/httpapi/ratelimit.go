@@ -187,6 +187,8 @@ const (
 func classify(r *http.Request) throttleKind {
 	p := r.URL.Path
 	switch {
+	case p == "/v1/hub/identity" && r.URL.Query().Has("challenge"):
+		return throttleEach
 	case p == "/v1/enrol", p == "/oauth/register", p == "/oauth/authorize", p == "/oauth/token":
 		return throttleEach
 	case strings.HasPrefix(p, "/v1/ingress/"), p == "/mcp",
@@ -197,6 +199,7 @@ func classify(r *http.Request) throttleKind {
 }
 
 // throttle applies l to the public routes (PROTOCOL §20.2):
+//   - identity metadata is free; a challenge costs one token per request;
 //   - enrolment and the OAuth endpoints that do work (register, authorize,
 //     token) cost one token per request;
 //   - ingress, tokened blob reads and /mcp cost one per failure (401, and for

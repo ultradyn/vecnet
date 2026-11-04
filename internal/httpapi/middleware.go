@@ -52,7 +52,7 @@ func limitBody(next http.Handler) http.Handler {
 	})
 }
 
-// isPublic reports the paths that skip bearer auth: /healthz, /v1/enrol,
+// isPublic reports the paths that skip bearer auth: /healthz, /v1/hub/identity, /v1/enrol,
 // /v1/ingress/*, /v1/blobs/{sha} carrying ?t=, /ui/*, and the OAuth endpoints
 // (/oauth/*, /.well-known/oauth-*), which a client reaches before it has a
 // token. /mcp also skips it because mcpserver authenticates every request
@@ -60,7 +60,7 @@ func limitBody(next http.Handler) http.Handler {
 func isPublic(r *http.Request) bool {
 	p := r.URL.Path
 	switch {
-	case p == "/healthz", p == "/v1/enrol", p == "/mcp":
+	case p == "/healthz", p == "/v1/enrol", p == "/mcp", p == "/v1/hub/identity":
 		return true
 	case strings.HasPrefix(p, "/v1/ingress/"):
 		return true
