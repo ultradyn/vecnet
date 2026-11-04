@@ -23,7 +23,7 @@ cleanenv=(
   "HOME=$RL/home" "USER=${USER:-$(id -un)}" "LOGNAME=${LOGNAME:-$(id -un)}" "LANG=C.UTF-8" "TERM=dumb"
   "XDG_CONFIG_HOME=$RL/home/.config" "XDG_CACHE_HOME=$RL/home/.cache" "XDG_DATA_HOME=$RL/home/.local/share"
   "TMPDIR=$RL/tmp" "TMUX_TMPDIR=$RL/tmp" "REAP_ROOTS=$RL/tmp"
-  "PATH=$RL/src/scripts/bb/bin:$TC/go/bin:$TC/node/bin:$TC/py/bin:/usr/local/bin:/usr/bin:/bin"
+  "PATH=$RL/bb/bin:$TC/go/bin:$TC/node/bin:$TC/py/bin:/usr/local/bin:/usr/bin:/bin"
   "GOTOOLCHAIN=local" "GOTELEMETRY=off" "GOCACHE=$BASE/.cache/go-build" "GOMODCACHE=$BASE/.cache/gomod" "GOPATH=$RL/home/go"
   "PLAYWRIGHT_BROWSERS_PATH=$TC/ms-playwright" "PLAYWRIGHT_MODULE=$TC/playwright-1.61.1/node_modules/playwright/index.mjs"
   "npm_config_cache=$BASE/.cache/npm" "npm_config_update_notifier=false"
@@ -41,7 +41,7 @@ done
 cleanenv+=("BB_JOBS=$jobs" "GOFLAGS=-p=$jobs${goflags:+ $goflags}")
 
 # `go … -p N` (the xsm two-thread habit) becomes -p $BB_JOBS on the box.
-# scripts/bb/bin/build2 applies the same rule to `build2 go …`.
+# bin/build2 (shipped beside this script) applies the same rule to `build2 go …`.
 if [[ ${argv[0]} == go ]]; then
   for ((i=1; i<${#argv[@]}; i++)); do
     case "${argv[i]}" in

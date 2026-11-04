@@ -6,7 +6,7 @@ set -euo pipefail
 lane=${1:?usage: just bb-clean <lane>}
 [[ $lane =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] || { echo "bb: bad lane name '$lane'" >&2; exit 64; }
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=4 -a -x)
-read -r -a hosts <<<"${BB_HOST:-${BB_HOSTS:-x-alpha x-tall x-p35 x-19}}"
+read -r -a hosts <<<"${BB_HOST:-${BB_HOSTS:-x-tall x-p35 x-tuf x-19}}"
 for host in "${hosts[@]}"; do
   home=$(timeout 6 ssh "${ssh_opts[@]}" "$host" 'printf %s "$HOME"' </dev/null 2>/dev/null) || { echo "bb: $host unreachable, skipped" >&2; continue; }
   [[ $home == /home/* && $home != *"'"* ]] || { echo "bb: unexpected remote HOME '$home' on $host" >&2; continue; }

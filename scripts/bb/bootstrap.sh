@@ -8,7 +8,7 @@ umask 022
 BASE="$HOME/bb-src/vecnet4"
 TC="$BASE/.toolchain"
 lane=${1:?lane}
-SRC="$BASE/$lane/src/scripts/bb"
+SRC="$BASE/$lane/bb"
 
 GO_VER=1.27.1
 GO_SHA=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
