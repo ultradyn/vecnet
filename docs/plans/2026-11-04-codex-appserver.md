@@ -10,6 +10,9 @@
 > 5. **`waitingOnUserInput`** (Liveness; Tasks 4, 5). It gets its own dormant reason, `waiting_input`, with the same hold-and-keep-subscription rule as `waiting_approval`. Questions are never answered.
 > 6. **Positive context canary** (Task 6 smoke). The trusted prompt asks the throwaway agent to report a random nonce that exists only in the peer body. A stub-only control turn runs first and must not produce it.
 >
+> 7. **Binding pins its identity** (coordinator, from the review check; Tasks 1, 2, 5). `codex bind` records the profile's normalised hub and caller peer. The engine passes them to every `hook --event app-server` run as `--expect-hub` and `--expect-caller`, and Go refuses to claim on a mismatch. A profile later pointed at another hub or peer can therefore never route that identity into the old thread. The binding goes dormant `identity_changed` until it is re-bound. The hook-state reset is not consent.
+> 8. **Canonical `codex_home`** (coordinator; Tasks 2, 6). `codex bind` and the connector resolve `codex_home` through symlinks (`filepath.EvalSymlinks` / `fs.realpathSync`) before comparing or counting, so a symlinked alias cannot get around the per-home limit.
+>
 > **Refuted:** none. **Noted, not adopted:** the review's collaboration-mode variant of the question test adds nothing at fake level. The engine keys off the flag alone and never sends `collaborationMode`.
 
 **Goal:** vecnet delivers wake-priority messages into Codex sessions that are already running, through the app-server daemon that is already running. This covers idle and mid-turn sessions, including sessions that vecnet did not start. Peer text stays inert, and the connector never touches a session's policy or approvals.
@@ -127,6 +130,7 @@
       - The same rules as `waiting_approval` apply: the subscription is kept, nothing is pushed, the reason clears with the flag, and `codex_binding_blocked` is logged after 10 min.
       - The question is never answered, and no answer is ever synthesized.
     - **`over_limit`**: see Binding limit.
+    - **`identity_changed`**: the profile now resolves to a different hub or caller than the binding recorded (Task 1 refuses with `identity_changed`). The engine unsubscribes and logs `codex_binding_identity_changed {threadId}` once. Only a fresh `codex bind` clears it.
   - Any `active` status, or a new turn from any source, ends `idle_stale` and `not_loaded`.
   - Dormant bindings send nothing; their deliveries stay with the hooks and `vecnet inbox`.
   - **Keep-loaded subscription** ([R] K1–K5). This replaces the old "never resumed" rule.
@@ -135,7 +139,7 @@
        - It then sends `thread/unsubscribe` at once and goes dormant `not_loaded`.
        - A `thread closing` error is also `not_loaded`.
     3. **Never subscribe to a `notLoaded` explicit thread.** It stays dormant until another client loads it, for example `codex resume <id>`. The broadcast then shows `idle` or `active`, and the engine subscribes.
-    4. **Unsubscribe** with `thread/unsubscribe` on unbind, `expired`, `archived`, `idle_stale`, `approval_policy` and `over_limit`. The thread then unloads after the normal 60 s, unless another client holds it (VERIFIED).
+    4. **Unsubscribe** with `thread/unsubscribe` on unbind, `expired`, `archived`, `idle_stale`, `approval_policy`, `over_limit` and `identity_changed`. The thread then unloads after the normal 60 s, unless another client holds it (VERIFIED).
        - `waiting_approval` and `waiting_input` keep the subscription.
        - Closing the connection, for example when the launcher daemon stops, also unsubscribes. Bound threads with no TUI therefore go dormant unless the connector reconnects within about 60 s.
     5. **Re-subscribe after every reconnect,** following the same rules.
@@ -211,7 +215,8 @@
   - Constant `appServerEntryBytes = 1000`.
   - `type appServerOut struct { Version int "json:\"version\""; Stub string "json:\"stub\""; Entries []appServerEntry "json:\"entries\""; Deliveries []string "json:\"deliveries\""; Priorities map[string]string "json:\"priorities\""; More int "json:\"more\""; Pointer bool "json:\"pointer\"" }`, with `type appServerEntry struct { Key, Value string }` (JSON names `key` and `value`).
   - `type replayRef struct { ID, After, Priority string }` and `type claimRef struct { ID, After, Priority, Claim string }`. `After` is the hub-issued cursor just before the delivery: the previous event's `Cursor` in the page, or the `after=` that fetched the page. It is stored and passed back verbatim, and never compared or built (§1.3). Both lists are kept in log order, `Replay` at most 64 entries and `Claims` at most 256. Overflow drops the oldest entry with a stderr note naming its delivery id, and that delivery stays unacked in `vecnet inbox`.
-  - **`vecnet --net P [--as X] hook --event app-server --claim <nonce> --priorities <csv>`:**
+  - **`vecnet --net P [--as X] hook --event app-server --claim <nonce> --priorities <csv> --expect-hub <url> --expect-caller <peer_id>`:**
+    - **Identity pin, checked first.** It resolves the run's identity as the hooks do (`resolveIdentity`). If `normalizeHub` of `--expect-hub` or `--expect-caller` differs from it, or either flag is missing, it prints `{"version":1,"deliveries":[],"refused":"identity_changed"}`, claims nothing, leaves the state file untouched and exits 0.
     - `<nonce>` matches `hookID`. `<csv>` is a non-empty subset of `wake,wake_idle`; anything else, `hold` included, makes the run print `{"version":1,"deliveries":[]}` and exit 0.
     - **Replay first.** If `Replay` holds an entry whose priority is in `<csv>` and whose id is not in `Shown`, the run makes one poll `after=<that entry's After>`. It claims every eligible `Replay` id found on that page, at most `hookMaxItems`, and removes them from `Replay`.
       - Entries already in `Shown` (a hook showed them meanwhile) are dropped.
@@ -252,6 +257,7 @@ func TestHookAppServerStubHasNoPeerText(t *testing.T)   // body "ZQXJ-canary", n
 func TestHookAppServerClaimAndRelease(t *testing.T)     // claim d1,d2 under c1; --release --claim c1 → {"released":2}; next app-server run re-offers d1,d2 in log order; invalid nonce "bogus!" → {"released":0}
 func TestHookAppServerIdentityResetClearsReplay(t *testing.T) // Replay, Claims and AppCursor populated; state rebinds to another caller → all three empty, as PollCursor and Shown are
 func TestHookAppServerSharesShownWithHook(t *testing.T) // app-server claims d1 → `hook --event user-prompt` prints nothing for d1; a new d2 is shown by the hook
+func TestHookAppServerRefusesChangedIdentity(t *testing.T) // --expect-caller of another peer, or --expect-hub of another hub, or either flag missing → refused identity_changed, nothing claimed, state file bytes unchanged
 func TestHookAppServerNeverFails(t *testing.T)          // hub 500, garbage JSON, held lock, panic → exit 0, stdout empty or valid JSON
 ```
 
@@ -274,7 +280,7 @@ Guards: `TestHookHostileIsInert` (golden unchanged), `TestHookNeverFailsATurn`, 
 - **Consumes:** `configPath(getenv)`, `lockPath`, and the atomic-write helper used by `stateFile`.
 - **Produces:**
   - **Path:** `func codexBindingsPath(getenv func(string) string) (string, error)` returns `filepath.Join(filepath.Dir(configPath(getenv)), "codex", "bindings.json")`.
-  - **File:** mode 0600 and directory 0700, written under `lockPath`. Its content is `{"version":1,"bindings":[{"profile","as","codex_home","thread_id","created_at","expires_at","idle_dormant_hours","attended"}]}`. `idle_dormant_hours` is omitted when unset, and `attended` is omitted when false.
+  - **File:** mode 0600 and directory 0700, written under `lockPath`. Its content is `{"version":1,"bindings":[{"profile","as","hub","caller","codex_home","thread_id","created_at","expires_at","idle_dormant_hours","attended"}]}`. `hub` is `normalizeHub` of the profile's hub and `caller` is the peer it authenticates as (`whoami`), both resolved at bind time; bind exits 1 if the hub cannot be reached. `idle_dormant_hours` is omitted when unset, and `attended` is omitted when false.
   - **`vecnet [--net P] [--as X] codex bind --thread <uuid> [--codex-home DIR] [--ttl DUR] [--idle-dormant DUR] [--attended] [--renew]`:**
     - `--ttl` accepts a Go duration from `1h` to `168h`, default `24h`. `expires_at = now + ttl`.
     - `--renew` on an existing binding resets `expires_at = now + ttl`, never beyond `now + 168h`.
@@ -286,7 +292,8 @@ Guards: `TestHookHostileIsInert` (golden unchanged), `TestHookNeverFailsATurn`, 
     - **Limit.** The command counts the unexpired bindings that have the same `codex_home`. If adding this one would exceed `VECNET_CODEX_MAX_BINDINGS` (default 8, valid 1–32; out of range means 8), it exits 1 with `vecnet: binding limit <n> reached for <codex_home>; unbind one or raise VECNET_CODEX_MAX_BINDINGS`. A no-op re-bind or a `--renew` never counts as new.
     - The success line adds, when not attended: ` (needs -a never or the auto reviewer; pass --attended if a human answers approvals)`.
     - `--thread` must match `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`.
-    - `codex_home` defaults to `$CODEX_HOME`, else `~/.codex`, and must be absolute.
+    - `codex_home` defaults to `$CODEX_HOME`, else `~/.codex`, and must be absolute. It must exist, and is stored after `filepath.EvalSymlinks` + `filepath.Clean`; uniqueness and the limit compare these canonical paths.
+    - `--renew` re-resolves `hub` and `caller`; if either changed it exits 1 with `vecnet: identity changed since bind; unbind and bind again`.
     - Re-binding the same profile to the same thread is a no-op. Binding a profile that is already bound elsewhere, or a thread already bound to another profile, exits 1 with `vecnet: already bound: <which>`.
     - It prints `bound <profile> to Codex thread <id>; the launcher connector picks it up within 10 s`.
   - **`codex unbind [--thread <uuid>]`** removes the current profile's binding, or the binding for that thread.
@@ -303,6 +310,8 @@ func TestCodexUnbind(t *testing.T)            // unbind removes only the profile
 func TestCodexBindTTL(t *testing.T)           // default expires_at = now+24h; --ttl 2h; --ttl 30m and --ttl 169h exit 1, file unchanged; --idle-dormant 6h stored, absent when unset
 func TestCodexBindRenew(t *testing.T)         // --renew moves expires_at to now+ttl; renewing past 168h from now is capped; bindings shows expired after the clock passes expires_at
 func TestCodexBindAttended(t *testing.T)      // default omits attended and prints the policy hint; --attended stores true, no hint; --renew keeps it; --renew --attended sets it
+func TestCodexBindRecordsIdentity(t *testing.T) // entry carries normalised hub and caller from whoami; hub unreachable → exit 1, file unchanged; --renew after the profile is pointed at another peer → exit 1 "identity changed"
+func TestCodexBindCanonicalHome(t *testing.T)  // home B is a symlink to home A → stored as A; 8 in A plus 1 via B → exit 1 "binding limit 8"; nonexistent --codex-home → exit 1
 func TestCodexBindLimit(t *testing.T)         // 8 bindings in home A ok; 9th in A exit 1 "binding limit 8", file unchanged; 9th in home B ok; an expired binding in A frees a slot; VECNET_CODEX_MAX_BINDINGS=2 and =99 (→8) respected
 ```
 
@@ -479,7 +488,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine;
   1. **Action.** `mapStatus` gives `idle` → `turn/start` or `turn_running` → `turn/steer`. Any other state pushes nothing. `eligible` is every priority for which `planInput(p, state, {steer: true, queue: "launcher"})` is that action (Global Constraints › Priority → injection).
      - The steer path first reads the active turn id from `thread/turns/list {threadId, limit:1}` (`status:"inProgress"`).
      - The start path reads `priorTurnId` the same way.
-  2. **Claim handoff.** Generate `nonce` (24 hex from `node:crypto`), then `kv.set("claiming:"+nonce, {threadId, at})`. Only then run `hook --event app-server --claim <nonce> --priorities <eligible>`.
+  2. **Claim handoff.** Generate `nonce` (24 hex from `node:crypto`), then `kv.set("claiming:"+nonce, {threadId, at})`. Only then run `hook --event app-server --claim <nonce> --priorities <eligible> --expect-hub <binding.hub> --expect-caller <binding.caller>`. A `refused: "identity_changed"` reply deletes the `claiming:` row (nothing was claimed) and makes the binding dormant `identity_changed`.
      - If `deliveries` is empty and there is no summary entry: delete `claiming:<nonce>` and stop.
   3. **Inflight.** Compute `key` and write `kv.set("inflight:"+key, InflightRow{claim: nonce, method, attemptTurnId (steer), priorTurnId (start), state:"sending"})`, then delete `claiming:<nonce>`. A crash between these two writes leaves both rows, and restart drops the `claiming` row whose nonce an `inflight` row already holds.
   4. **Send.**
@@ -534,6 +543,7 @@ test("re-subscribes after reconnect within the unload window")            // fak
 test("asking policy without attended unsubscribes and sends nothing")     // resume reply approvalPolicy on-request, reviewer user → thread/unsubscribe, reason approval_policy, 0 turn/*; never or auto_review → stays subscribed
 test("attended binding stays subscribed under on-request")
 test("waitingOnApproval holds deliveries and keeps the subscription")     // status active+waitingOnApproval → wakes send nothing, no unsubscribe; after 10 min one codex_binding_blocked log; flag clears → held wake delivered once
+test("identity_changed binding unsubscribes and sends nothing")           // fake vecnet answers refused identity_changed → no send, claiming row deleted, thread/unsubscribe once, one codex_binding_identity_changed log; every hook argv carried --expect-hub and --expect-caller from the binding
 test("waitingOnUserInput holds deliveries and answers nothing")          // status active+waitingOnUserInput with a pending requestUserInput server request → reason waiting_input, wakes send nothing, subscription kept, fake.replies empty; after 10 min one codex_binding_blocked; flag clears → held wake delivered once
 test("replayed approval on resubscribe gets no reply")                    // fake has a pending request; engine re-subscribes → request replayed, fake.replies stays empty
 test("accepted steer without a userMessage receipt is resolved by scan")  // fake withholds item/started, turn completes → turns/list itemsView full back to attemptTurnId; absent → --release --claim <nonce>
@@ -567,7 +577,7 @@ test("unreachable socket backs off and never spawns codex")                // sp
   - It reads the bindings file at `VECNET_CODEX_BINDINGS`, defaulting to the same path as Task 2's `codexBindingsPath`, every 10 s. It runs one `createEngine` per binding, stops engines whose binding is gone, and logs `codex_connector_disabled` once if the file is absent.
     - Stopping an engine unsubscribes it, so the thread unloads 60 s later unless another client holds it.
   - It refuses a bindings file that is group- or world-readable.
-  - **Limit.** Per `codex_home`, it takes the unexpired explicit bindings in `created_at` order and calls `setOverLimit(false)` on the first `VECNET_CODEX_MAX_BINDINGS` (default 8, valid 1–32) and `setOverLimit(true)` on the rest. This applies even when the file was edited by hand. Launcher bindings are not counted.
+  - **Limit.** Per canonical `codex_home` (`fs.realpathSync`; an unresolvable home is grouped by its literal path and logged), it takes the unexpired explicit bindings in `created_at` order and calls `setOverLimit(false)` on the first `VECNET_CODEX_MAX_BINDINGS` (default 8, valid 1–32) and `setOverLimit(true)` on the rest. This applies even when the file was edited by hand. Launcher bindings are not counted.
   - **Shutdown.** `stop()` stops every engine, so all keep-loaded subscriptions close. The doc states that bound threads with no TUI go dormant if the launcher daemon stays down for more than about 60 s.
 - **Launcher bindings:** `startCodexConnector` also returns `addLauncherBinding(b: Omit<Binding, "origin"> & { ensureLoaded: () => Promise<boolean> }): void` and `removeLauncherBinding(threadId: string): void`.
   - These are consumed by the future launcher P4 `codex-app-server` plugin; this plan builds no caller.
@@ -608,6 +618,7 @@ test("unreachable socket backs off and never spawns codex")                // sp
 
 ```ts
 test("connector starts one engine per binding and stops removed ones")
+test("limit groups symlinked codex homes together")                    // 8 bindings under home A and 1 under a symlink to A → the 9th (by created_at) is over_limit
 test("absent bindings file disables quietly; 0644 file is refused")
 test("daemon start and stop drive the connector")       // startDaemon with fakes; no engine without a file
 test("launcher bindings live until expiresAt and are never written to the file")
@@ -648,7 +659,7 @@ test("connector stop unsubscribes every engine")
   - While `waitingOnApproval` is set, deliveries are held and the subscription is kept, so a human who attaches later gets the replayed request.
 - **Liveness:**
   - Bindings have a TTL (24 h default, renewable, at most 7 d) instead of a human lease.
-  - They go dormant on `expired`, `archived`, `not_loaded`, `idle_stale` (opt-in), `approval_policy`, `waiting_approval`, `waiting_input` or `over_limit`. Both waiting states keep the subscription and answer nothing.
+  - They go dormant on `expired`, `archived`, `not_loaded`, `idle_stale` (opt-in), `approval_policy`, `waiting_approval`, `waiting_input`, `over_limit` or `identity_changed`. Both waiting states keep the subscription and answer nothing.
   - An `active` 12 h job is live, and steerable, throughout.
   - Launcher-spawned threads get implicit in-memory bindings for the job lifetime, and the launcher may cold-resume them through `ensureLoaded`.
 - **Limit:** at most 8 kept-loaded explicit bindings per Codex home (`VECNET_CODEX_MAX_BINDINGS`, 1–32). Each one costs about 40–70 MB, mostly its own MCP servers. Both `codex bind` and the connector enforce the limit.

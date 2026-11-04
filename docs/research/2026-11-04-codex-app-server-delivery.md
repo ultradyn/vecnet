@@ -333,7 +333,7 @@ sessions).
    - `--hold` messages are not pushed; the hook or `inbox` picks them up.
 6. **Idempotency.** Keep a hub-side ledger keyed by D. Set `clientUserMessageId=D` and, before any
    retry, look for an item with `clientId==D` (via `thread/turns/list`). Codex does not
-   deduplicate. Mark delivered on the accepted RPC response. An unsubscribed connection receives no
+   deduplicate. ~~Mark delivered on the accepted RPC response.~~ *Superseded 2026-11-05: receipts settle by checkpoint, not by the accepted RPC; see the plan's Amendment 2026-11-05 item 4.* An unsubscribed connection receives no
    `item/*` events.
 7. **Inertness.** The visible `input` is a fixed template ("vecnet: N message(s) for profile P; ids
    ...; reply with `vecnet reply`"). The body sits only in the untrusted context, using the shared
