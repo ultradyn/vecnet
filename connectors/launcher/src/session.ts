@@ -60,6 +60,10 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
   let stopped = false;
   let controller: AbortController | undefined;
   let pump: Promise<void> | undefined;
+  let sendGeneration = 0;
+  // A backend can already be idle while the saved lane still has a running
+  // turn. Replay that completion before assigning a counter to any new send.
+  let recovering = false;
   const job = () => ledger.job(jobId)!;
   function serial<T>(fn: () => Promise<T> | T): Promise<T> {
     const work = chain.then(fn).catch(() => {
@@ -106,19 +110,29 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     if (!replay) ledger.tx(() => {
       ledger.markInputs(ids, { state: 'sending', mode, batchId, turnSeq: job().turns });
       store.set(`batch:${batchId}`, JSON.stringify(batch));
+      if (mode !== 'queue') store.set('awaitingTurn', '1');
     });
     // The optional structural field is consumed by t3's existing T3TurnInput seam.
     const input = batch.input;
     await handle.send(input, mode);
+    sendGeneration++;
     ledger.tx(() => {
       ledger.markInputs(ids, { state: 'sent' });
       for (const [id, part] of Object.entries(batch.parts)) store.set(`part:${id}`, String(part));
       if (mode === 'start') ledger.updateJob(jobId, { sessionKind: 'turn_running', parkedAt: null });
     });
+    startPump();
   }
   async function flush(mode: SendMode) {
-    const buffered = ledger.inputs(jobId, ['buffered']);
-    // Holds may join a send, but can never initiate one by themselves.
+    if (recovering) return;
+    const buffered = ledger.inputs(jobId, ['buffered']).filter(row => {
+      if (mode === 'start') return true;
+      // Holds and launcher-queued rows belong to the next start, regardless
+      // of a later wake that is eligible to steer the current turn.
+      const intent = store.get(`plan:${row.deliveryId}`);
+      return mode === 'steer' ? intent === 'steer' : intent === 'queue-native';
+    });
+    // Holds may join a start, but can never initiate one by themselves.
     if (!buffered.some(r => r.priority !== 'hold')) return;
     const ordered = [...buffered.filter(r => r.priority === 'hold'), ...buffered.filter(r => r.priority !== 'hold')];
     const selected: InputRow[] = [];
@@ -184,19 +198,31 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
           ledger.markInputs(ids, { state: 'consumed' });
           ledger.markInputs(continuing.map(r => r.deliveryId), { state: 'buffered', mode: null, batchId: null, turnSeq: null });
           store.set(`turn:${hash(ev.turnId)}`, String(n));
-          ledger.updateJob(jobId, { turns: n, lastActivityAt: clock.now(), sessionKind: ledger.inputs(jobId, ['sent']).some(r => r.mode === 'queue') ? 'turn_running' : 'idle' });
+          const nativeQueued = ledger.inputs(jobId, ['sent']).some(r => r.mode === 'queue');
+          ledger.updateJob(jobId, { turns: n, lastActivityAt: clock.now(), sessionKind: nativeQueued ? 'turn_running' : 'idle' });
+          store.set('awaitingTurn', nativeQueued ? '1' : '0');
         }
         ledger.updateJob(jobId, { turnCursor: cursor });
       });
       if (fresh) {
         if (JSON.stringify([...ev.consumed].sort()) !== JSON.stringify([...ids].sort())) log.warn('turn consumed mismatch', { jobId, turn: n });
         deps.onActivity(jobId);
-        if (job().sessionKind === 'idle') await flush('start');
+        if (job().sessionKind === 'idle') {
+          recovering = false;
+          await flush('start');
+        }
       }
       return;
     }
     if (ev.type === 'process_exited') {
-      if (ev.resumable) ledger.updateJob(jobId, { turnCursor: cursor, sessionKind: 'parked', parkedAt: clock.now() });
+      if (ev.resumable) {
+        ledger.tx(() => {
+          ledger.updateJob(jobId, { turnCursor: cursor, sessionKind: 'parked', parkedAt: clock.now() });
+          store.set('awaitingTurn', '0');
+        });
+        recovering = false;
+        await flush('start');
+      }
       else {
         await end('lost', 'session_exited');
         // A failed settle must leave this event replayable after a restart.
@@ -205,10 +231,64 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
       return;
     }
     ledger.tx(() => {
+      if (ev.type === 'turn_started') store.set('awaitingTurn', '1');
       ledger.updateJob(jobId, { turnCursor: cursor,
         ...(ev.type === 'state' ? { sessionKind: ev.state.kind } : ev.type === 'turn_started' ? { sessionKind: 'turn_running' as const } : {}),
       });
     });
+  }
+  function startPump() {
+    if (!handle || pump || stopped || job().state === 'ended') return;
+    const next = handle, signal = controller!.signal, generation = sendGeneration;
+    pump = (async () => {
+      for await (const item of next.turns(job().turnCursor ? { value: job().turnCursor! } : undefined, signal)) {
+        if (signal.aborted) break;
+        await serial(() => event(item.event, item.cursor.value));
+      }
+    })().catch(() => {
+      if (!signal.aborted) log.warn('session turn stream failed', { jobId });
+    }).finally(() => {
+      pump = undefined;
+      // A wake can race the old iterator returning after a resumable exit.
+      // Start its replacement only after the old iterator has fully closed.
+      if (sendGeneration > generation) startPump();
+    });
+  }
+  type ControlDecision = { command: 'interrupt' | 'settle' | 'extend'; state: 'claimed' | 'done'; turnSeq: number; turnId?: string };
+  async function deliveryControl(id: string, command: ControlDecision['command'], from: string) {
+    const key = `control:${id}`, saved = store.get(key);
+    if (saved) {
+      const decision = JSON.parse(saved) as ControlDecision;
+      if (decision.state === 'done') return;
+      // Interrupt has no backend idempotency token. Fence an uncertain retry
+      // to the same positively identified turn, never to whichever turn is
+      // running after restart. Without that identity prefer at-most-once.
+      const state = handle?.state();
+      if (decision.command === 'settle') await control('settle', from);
+      else if (decision.command === 'interrupt' && decision.turnId && decision.turnSeq === job().turns &&
+          state?.kind === 'turn_running' && state.turnId === decision.turnId) await control('interrupt', from);
+      ledger.tx(() => { store.set(key, JSON.stringify({ ...decision, state: 'done' })); receipt(id, 'processed'); });
+      return;
+    }
+    const state = handle?.state();
+    const decision: ControlDecision = { command, state: 'claimed', turnSeq: job().turns,
+      ...(state?.kind === 'turn_running' ? { turnId: state.turnId } : {}) };
+    if (!authorized(from)) {
+      ledger.tx(() => { store.set(key, JSON.stringify({ ...decision, state: 'done' })); receipt(id, 'processed', 'not_relayed'); });
+      return;
+    }
+    if (command === 'extend') {
+      ledger.tx(() => {
+        ledger.updateJob(jobId, { lastActivityAt: clock.now() });
+        store.set(key, JSON.stringify({ ...decision, state: 'done' }));
+        receipt(id, 'processed');
+      });
+      deps.onActivity(jobId);
+      return;
+    }
+    store.set(key, JSON.stringify(decision));
+    await control(command, from);
+    ledger.tx(() => { store.set(key, JSON.stringify({ ...decision, state: 'done' })); receipt(id, 'processed'); });
   }
   const lane: SessionLane = {
     jobId,
@@ -217,9 +297,13 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
       if (handle) throw new Error('session lane already attached');
       handle = next;
       controller = new AbortController();
-      const signal = controller.signal;
       void serial(async () => {
         const state = next.state();
+        const awaitingTurn = store.get('awaitingTurn') === '1' ||
+          ['turn_running', 'waiting_approval', 'starting'].includes(job().sessionKind ?? '');
+        recovering = awaitingTurn &&
+          (state.kind === 'idle' || state.kind === 'parked' || (state.kind === 'ended' && state.resumable));
+        if (awaitingTurn) store.set('awaitingTurn', '1');
         ledger.updateJob(jobId, { state: 'running', sessionKind: state.kind === 'ended' && state.resumable ? 'parked' : state.kind });
         const sending = ledger.inputs(jobId, ['sending']);
         const batches = new Map<string, InputRow[]>();
@@ -228,15 +312,19 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
         if (['idle', 'parked'].includes(job().sessionKind!)) await flush('start');
         else if (ledger.inputs(jobId, ['buffered']).some(r => r.priority !== 'hold')) {
           const p = planInput('wake_idle', job().sessionKind!, deps.caps);
-          if (p === 'queue-native') await flush('queue');
-        }
-        if (stopped) return;
-        pump = (async () => {
-          for await (const item of next.turns(job().turnCursor ? { value: job().turnCursor! } : undefined, signal)) {
-            if (signal.aborted) break;
-            await serial(() => event(item.event, item.cursor.value));
+          if (p === 'queue-native') {
+            // Launch-time buffers acquire their scheduling intent only when
+            // the backend is attached; existing queue/hold intent stays put.
+            ledger.tx(() => {
+              for (const row of ledger.inputs(jobId, ['buffered'])) {
+                if (row.priority !== 'hold' && store.get(`plan:${row.deliveryId}`) === 'buffer')
+                  store.set(`plan:${row.deliveryId}`, 'queue-native');
+              }
+            });
+            await flush('queue');
           }
-        })().catch(() => { if (!signal.aborted) log.warn('session turn stream failed', { jobId }); });
+        }
+        startPump();
       }).catch(() => {});
     },
     handleMessage(d) {
@@ -244,11 +332,15 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
         const m = d.message;
         const decision = relayDecision(m.sender, job(), deps.self, id => deps.dir.isOperator(id));
         if (!decision.relay || m.thread_id !== job().threadId) { receipt(d.delivery_id, 'processed', 'not_relayed'); return 'not_relayed'; }
-        if (stopped || job().state === 'ended' || job().sessionKind === 'ended') { receipt(d.delivery_id, 'failed', 'session_ended'); return 'refused'; }
         const command = m.metadata['launch.control'];
+        if ((command === 'interrupt' || command === 'settle' || command === 'extend') && store.get(`control:${d.delivery_id}`)) {
+          await deliveryControl(d.delivery_id, command, m.sender);
+          return authorized(m.sender) ? 'relayed' : 'not_relayed';
+        }
+        if (stopped || job().state === 'ended' || job().sessionKind === 'ended') { receipt(d.delivery_id, 'failed', 'session_ended'); return 'refused'; }
         if (command === 'interrupt' || command === 'settle' || command === 'extend') {
           const allowed = authorized(m.sender);
-          await control(command, m.sender); receipt(d.delivery_id, 'processed', allowed ? undefined : 'not_relayed');
+          await deliveryControl(d.delivery_id, command, m.sender);
           return allowed ? 'relayed' : 'not_relayed';
         }
         // Structured parent-bridge traffic is consumed by Task 12 upstream.
@@ -278,14 +370,15 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
           remaining = `> ${remaining.slice(chunk.length)}`;
         }
         if (chunks.length) chunks.push(remaining);
+        const plan = planInput(m.priority, handle && !recovering ? job().sessionKind ?? 'starting' : 'launching', deps.caps);
         ledger.tx(() => {
           ledger.addInput({ deliveryId: d.delivery_id, jobId, messageId: m.message_id, sender: m.sender, text: formatted, priority: m.priority, createdAt: clock.now() });
           if (chunks.length) store.set(`parts:${d.delivery_id}`, JSON.stringify(chunks));
+          store.set(`plan:${d.delivery_id}`, plan);
           store.set('lastRelayAt', String(clock.now()));
           ledger.updateJob(jobId, { lastActivityAt: clock.now() });
         });
         deps.onActivity(jobId);
-        const plan = planInput(m.priority, handle ? job().sessionKind ?? 'starting' : 'launching', deps.caps);
         if (plan === 'start' || plan === 'steer' || plan === 'queue-native') await flush(plan === 'queue-native' ? 'queue' : plan);
         return plan === 'buffer' || plan === 'queue-launcher' ? 'buffered' : 'relayed';
       });

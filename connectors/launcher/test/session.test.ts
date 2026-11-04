@@ -2,6 +2,9 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { SendRequest, ReceiptBody } from '../../hub-client/src/wire.ts';
 import { openLedger } from '../src/ledger.ts';
@@ -155,4 +158,175 @@ test('backend send failures never expose an exception containing the relayed bod
   const s=await setup(t);s.handle.send=async()=>{throw new Error('secret body of user message');};
   await assert.rejects(s.lane.handleMessage(s.message('secret body of user message')),error=>error instanceof Error && !error.message.includes('secret body'));
   assert.ok(!s.log.text().includes('secret body'));assert.equal(s.ledger.inputs('job_one',['sending']).length,1);
+});
+
+
+test('restart reconciles an unread completion before dispatching buffered future input', async t => {
+  const s = await setup(t, { attach: false, kind: 'turn_running' });
+  const future = s.message('future input');
+  await s.lane.handleMessage(future);
+  await s.emit(finished('before-restart'));
+  // The process is idle, while the durable lane still says its turn is running.
+  s.ledger.updateJob(s.job.jobId, { state: 'running', sessionKind: 'turn_running' });
+  s.lane.attach(s.handle);
+  await tick();
+  assert.deepEqual(s.replies()[0].metadata!['launch.consumed'], []);
+  assert.equal(s.receipts().length, 0);
+  assert.equal(s.sends.length, 1);
+  assert.equal(s.ledger.inputs(s.job.jobId, ['sent'])[0].turnSeq, 1);
+  await s.emit(finished('after-restart'));
+  assert.deepEqual(s.replies()[1].metadata!['launch.consumed'], [future.message.message_id]);
+  assert.equal(s.receipts()[0].delivery_id, future.delivery_id);
+});
+
+test('restart recovery survives a reattach refresh of the job session kind', async t => {
+  const s = await setup(t, { kind: 'turn_running' });
+  await tick(); await s.lane.stop();
+  await s.emit(finished('unread-before-reattach'));
+  // Task 10 refreshes sessionKind from the backend before handing off a handle.
+  s.ledger.updateJob(s.job.jobId, { sessionKind: 'idle' });
+  const resumed = createLane(s.ledger.job(s.job.jobId)!, s.deps), future = s.message('after refresh');
+  try {
+    await resumed.handleMessage(future); resumed.attach(s.handle); await tick();
+    assert.deepEqual(s.replies()[0].metadata!['launch.consumed'], []);
+    assert.equal(s.receipts().length, 0);
+    assert.equal(s.ledger.inputs(s.job.jobId, ['sent'])[0].turnSeq, 1);
+    await s.emit(finished('new-after-reattach'));
+    assert.deepEqual(s.replies()[1].metadata!['launch.consumed'], [future.message.message_id]);
+  } finally { await resumed.stop(); }
+});
+
+test('a wake restarts a completed resumable turn iterator from its saved cursor', async t => {
+  const s = await setup(t, { attach: false });
+  const turns = s.handle.turns;
+  let streams = 0, active = 0, maxActive = 0;
+  const cursors: Array<string | undefined> = [];
+  s.handle.turns = async function* (after, signal) {
+    streams++; cursors.push(after?.value); active++; maxActive = Math.max(maxActive, active);
+    try {
+      for await (const item of turns(after, signal)) {
+        yield item;
+        if (item.event.type === 'process_exited') return;
+      }
+    } finally { active--; }
+  };
+  s.lane.attach(s.handle);
+  await s.emit({ type: 'process_exited', at: new Date(100).toISOString(), code: 0, resumable: true });
+  assert.equal(active, 0);
+  const wake = s.message('resume after exit');
+  await s.lane.handleMessage(wake);
+  await s.emit(finished('resumed'));
+  assert.equal(s.replies().length, 1);
+  assert.deepEqual(s.replies()[0].metadata!['launch.consumed'], [wake.message.message_id]);
+  assert.deepEqual(s.receipts(), [{ delivery_id: wake.delivery_id, state: 'processed' }]);
+  assert.equal(streams, 2); assert.deepEqual(cursors, [undefined, '1']); assert.equal(maxActive, 1);
+  await s.lane.stop(); assert.equal(active, 0);
+});
+
+test('launcher queued and held inputs preceding a wake stay out of the current steer', async t => {
+  const s = await setup(t, { kind: 'turn_running' });
+  const queued = s.message('next turn', 'wake_idle'), hold = s.message('held', 'hold'), wake = s.message('urgent');
+  await s.lane.handleMessage(queued); await s.lane.handleMessage(hold); await s.lane.handleMessage(wake);
+  assert.equal(s.sends.length, 1); assert.equal(s.sends[0].mode, 'steer');
+  assert.deepEqual(s.sends[0].input.items.map(i => i.deliveryId), [wake.delivery_id]);
+  await s.emit(finished('current'));
+  assert.deepEqual(s.replies()[0].metadata!['launch.consumed'], [wake.message.message_id]);
+  assert.equal(s.sends[1].mode, 'start');
+  assert.deepEqual(s.sends[1].input.items.map(i => i.deliveryId), [hold.delivery_id, queued.delivery_id]);
+});
+
+test('extend delivery commits its clock, dedupe decision and receipt atomically and survives restart', async t => {
+  const s = await setup(t), d = s.message('extend'); d.message.metadata['launch.control'] = 'extend';
+  // Model a crash before the enclosing ingress completion with a real reopened DB.
+  const root = mkdtempSync(join(tmpdir(), 'vl-control-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  await s.lane.stop();
+  let ledger = openLedger(join(root, 'ledger.sqlite'), s.clock);
+  ledger.createJob(s.job);
+  const makeLane = () => {
+    const outbox = createOutbox({ ledger, clock: s.clock, log: s.log, hub: { async send() { throw new Error('unused'); }, async receipt() {} } });
+    return createLane(ledger.job(s.job.jobId)!, { ...s.deps, ledger, outbox, jobs: createJobReporter({ ledger, outbox }) });
+  };
+  let lane = makeLane();
+  const tx = ledger.tx.bind(ledger);
+  let atomic = false;
+  ledger.tx = fn => tx(() => {
+    const result = fn();
+    if (ledger.job(s.job.jobId)!.lastActivityAt === 125) {
+      atomic = ledger.kv(`lane:${s.job.jobId}`).keys('control:').length === 1 &&
+        ledger.pendingOutbox(100, s.clock.now()).some(r => r.key === `vl.rc.${d.delivery_id}.processed`);
+    }
+    return result;
+  });
+  s.clock.advance(25); await lane.handleMessage(d); assert.equal(atomic, true);
+  await lane.stop(); ledger.close();
+  ledger = openLedger(join(root, 'ledger.sqlite'), s.clock); lane = makeLane();
+  try {
+    s.clock.advance(100); await lane.handleMessage(d);
+    assert.equal(ledger.job(s.job.jobId)!.lastActivityAt, 125);
+    assert.equal(ledger.pendingOutbox(100, s.clock.now()).filter(r => r.kind === 'receipt').length, 1);
+  } finally { await lane.stop(); ledger.close(); }
+});
+
+test('interrupt delivery replay cannot interrupt a later turn, even after a lane restart', async t => {
+  const s = await setup(t, { kind: 'turn_running' }), d = s.message('interrupt');
+  d.message.metadata['launch.control'] = 'interrupt';
+  await s.lane.handleMessage(d); assert.deepEqual(s.calls, ['interrupt']);
+  await s.lane.stop();
+  const resumed = createLane(s.ledger.job(s.job.jobId)!, s.deps); resumed.attach(s.handle); await tick();
+  try {
+    await resumed.handleMessage(s.message('later work')); await resumed.handleMessage(d);
+    assert.deepEqual(s.calls, ['interrupt']);
+    assert.equal(s.receipts().filter(r => r.delivery_id === d.delivery_id).length, 1);
+  } finally { await resumed.stop(); }
+});
+
+test('settle control replay after the session ends retains its original processed receipt', async t => {
+  const s = await setup(t), d = s.message('settle'); d.message.metadata['launch.control'] = 'settle';
+  await s.lane.handleMessage(d); await s.lane.handleMessage(d);
+  assert.deepEqual(s.calls, ['settle:requested']);
+  assert.deepEqual(s.receipts(), [{ delivery_id: d.delivery_id, state: 'processed' }]);
+});
+
+
+test('an uncertain interrupt retry is fenced to its original backend turn identity', async t => {
+  const s = await setup(t, { kind: 'turn_running' }), d = s.message('interrupt original');
+  d.message.metadata['launch.control'] = 'interrupt';
+  let turnId = 'original';
+  s.handle.state = () => ({ kind: 'turn_running', turnId, since: new Date(100).toISOString() });
+  s.handle.interrupt = async () => { s.calls.push(`interrupt:${turnId}`); throw new Error('crash after interrupt'); };
+  await assert.rejects(s.lane.handleMessage(d), /session lane operation failed/);
+  await s.lane.stop();
+  turnId = 'later';
+  const resumed = createLane(s.ledger.job(s.job.jobId)!, s.deps); resumed.attach(s.handle); await tick();
+  try {
+    await resumed.handleMessage(d);
+    assert.deepEqual(s.calls, ['interrupt:original']);
+    assert.deepEqual(s.receipts(), [{ delivery_id: d.delivery_id, state: 'processed' }]);
+  } finally { await resumed.stop(); }
+});
+
+test('a wake racing the exited iterator closing starts only one replacement pump', async t => {
+  const s = await setup(t, { attach: false });
+  const turns = s.handle.turns;
+  let closing!: () => void;
+  const closed = new Promise<void>(resolve => { closing = resolve; });
+  let streams = 0, active = 0, maxActive = 0;
+  s.handle.turns = async function* (after, signal) {
+    streams++; active++; maxActive = Math.max(maxActive, active);
+    try {
+      for await (const item of turns(after, signal)) {
+        yield item;
+        if (item.event.type === 'process_exited') { await closed; return; }
+      }
+    } finally { active--; }
+  };
+  s.lane.attach(s.handle);
+  await s.emit({ type: 'process_exited', at: new Date(100).toISOString(), code: 0, resumable: true });
+  const wake = s.message('wake while old iterator closes');
+  await s.lane.handleMessage(wake); assert.equal(streams, 1);
+  closing(); await tick();
+  await s.emit(finished('raced-resume'));
+  assert.equal(s.replies().length, 1); assert.equal(streams, 2); assert.equal(maxActive, 1);
+  await s.lane.stop(); assert.equal(active, 0);
 });
