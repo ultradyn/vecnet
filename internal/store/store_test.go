@@ -594,3 +594,56 @@ func TestMigration0018BackfillsSenderInfo(t *testing.T) {
 		t.Fatalf("receipt event = %q, %v", receipt, err)
 	}
 }
+
+func TestMigration0019SeedsIdentity(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "hub.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	seed, err := db.Meta(ctx, "hub_identity_seed")
+	if err != nil || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(seed) {
+		t.Fatalf("identity seed = %q, %v", seed, err)
+	}
+	created, err := db.Meta(ctx, "hub_identity_created_at")
+	if err != nil || !regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`).MatchString(created) {
+		t.Fatalf("created_at = %q, %v", created, err)
+	}
+	hubKey, err := db.Meta(ctx, "hub_key")
+	if err != nil || seed == hubKey {
+		t.Fatalf("identity must be separate from hub_key: %v", err)
+	}
+	second, err := openTemp(t).Meta(ctx, "hub_identity_seed")
+	if err != nil || seed == second {
+		t.Fatalf("fresh DB identity reused: %v", err)
+	}
+	for _, kind := range []string{"moving", "maintenance", "restart", "other"} {
+		_, err := db.ExecContext(ctx, `INSERT INTO hub_notices(notice_id,kind,message,hub,issued_at,expires_at,sig,created_by) VALUES (?,?, 'Moving tonight','https://hub.example','2026-11-05T07:00:00.000Z','2026-11-06T07:00:00.000Z','sig','peer_operator')`, "ntc_"+kind, kind)
+		if (err == nil) != (kind != "other") {
+			t.Fatalf("kind %q insert = %v", kind, err)
+		}
+	}
+	var n int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_list WHERE name='hub_notices' AND strict=1`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("STRICT hub_notices: %d, %v", n, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_index_info('hub_notices_active') WHERE (seqno=0 AND name='cleared_at') OR (seqno=1 AND name='kind')`).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("active index: %d, %v", n, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	for name, want := range map[string]string{"hub_identity_seed": seed, "hub_identity_created_at": created} {
+		got, err := reopened.Meta(ctx, name)
+		if err != nil || got != want {
+			t.Fatalf("reopened %s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+}

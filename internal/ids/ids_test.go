@@ -68,3 +68,14 @@ func TestIsAndIsGroup(t *testing.T) {
 		t.Fatal("IsGroup")
 	}
 }
+
+func TestNoticeIDPrefix(t *testing.T) {
+	id := ids.New(ids.Ntc)
+	if !strings.HasPrefix(id, "ntc_") || !ids.Is(ids.Ntc, id) {
+		t.Fatalf("invalid notice id %q", id)
+	}
+	p, _, err := ids.Parse(id)
+	if err != nil || p != ids.Ntc {
+		t.Fatalf("Parse(%q) = %q, %v", id, p, err)
+	}
+}

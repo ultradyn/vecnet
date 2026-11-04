@@ -23,7 +23,7 @@ const schemaID = "urn:vecnet:envelope:1"
 var schemaJSON []byte
 
 // defs are the $defs names Validate accepts.
-var defs = []string{"sendRequest", "delivery", "event", "receipt", "presence", "threadSummary", "message", "reaction", "reactionEvent", "reactionRequest"}
+var defs = []string{"sendRequest", "delivery", "event", "receipt", "presence", "threadSummary", "message", "reaction", "reactionEvent", "reactionRequest", "hubNotice", "hubNoticeEvent", "hubIdentity"}
 
 var (
 	compiled = map[string]*jsonschema.Schema{}

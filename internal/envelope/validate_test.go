@@ -363,3 +363,51 @@ func TestEmbeddedSchemaMatchesDocs(t *testing.T) {
 		t.Fatal("internal/envelope/schema.json differs from docs/protocol/envelope.schema.json")
 	}
 }
+
+func TestHubNoticeEventSchema(t *testing.T) {
+	doc := loadExample(t, "11-hub-notice-event.json")
+	if err := envelope.Validate("event", mustJSON(t, doc)); err != nil {
+		t.Fatalf("example 11: %v", err)
+	}
+	var event envelope.Event
+	if err := json.Unmarshal(mustJSON(t, doc), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != "hub_notice" {
+		t.Fatal(event.Type)
+	}
+	if err := envelope.Validate("event", mustJSON(t, event)); err != nil {
+		t.Fatal(err)
+	}
+	payload := doc["data"].(map[string]any)
+	for _, change := range []string{"posted", "cleared"} {
+		payload["change"] = change
+		if err := envelope.Validate("hubNoticeEvent", mustJSON(t, payload)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n := payload["notice"].(map[string]any)
+	if err := envelope.Validate("hubNotice", mustJSON(t, n)); err != nil {
+		t.Fatal(err)
+	}
+	n["unknown"] = true
+	if err := envelope.Validate("hubNotice", mustJSON(t, n)); err == nil {
+		t.Fatal("unknown notice field accepted")
+	}
+	if err := envelope.Validate("event", mustJSON(t, doc)); err == nil {
+		t.Fatal("event accepted unknown notice field")
+	}
+	delete(n, "unknown")
+	payload["change"] = "other"
+	if err := envelope.Validate("hubNoticeEvent", mustJSON(t, payload)); err == nil {
+		t.Fatal("unknown change accepted")
+	}
+	identity := map[string]any{"pubkey": "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "public_url": "https://hub.example", "key_created_at": "2026-11-05T07:00:00.000Z"}
+	if err := envelope.Validate("hubIdentity", mustJSON(t, identity)); err != nil {
+		t.Fatal(err)
+	}
+	identity["unknown"] = true
+	if err := envelope.Validate("hubIdentity", mustJSON(t, identity)); err == nil {
+		t.Fatal("unknown identity field accepted")
+	}
+}

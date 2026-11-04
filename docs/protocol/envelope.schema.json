@@ -872,6 +872,171 @@
         }
       }
     },
+    "noticeId": {
+      "type": "string",
+      "pattern": "^ntc_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "hubNotice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "notice_id",
+        "kind",
+        "message",
+        "hub",
+        "issued_at",
+        "expires_at",
+        "sig"
+      ],
+      "properties": {
+        "notice_id": {
+          "$ref": "#/$defs/noticeId"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "maintenance",
+            "restart",
+            "moving"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "hub": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://[^/?#@\\s]+(?:/[^?#\\s]*)?$"
+        },
+        "issued_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "new_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://[^/?#@\\s]+(?:/[^?#\\s]*)?$"
+        },
+        "sig": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        },
+        "cleared_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "cleared_how": {
+          "type": "string",
+          "enum": [
+            "operator",
+            "expired",
+            "replaced",
+            "boot"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "moving"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "new_url"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "new_url"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "hubNoticeEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "change",
+        "notice"
+      ],
+      "properties": {
+        "change": {
+          "type": "string",
+          "enum": [
+            "posted",
+            "cleared"
+          ]
+        },
+        "notice": {
+          "$ref": "#/$defs/hubNotice"
+        }
+      }
+    },
+    "hubIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pubkey",
+        "fingerprint",
+        "public_url",
+        "key_created_at"
+      ],
+      "properties": {
+        "pubkey": {
+          "type": "string",
+          "pattern": "^ed25519:[A-Za-z0-9_-]{43}$"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^SHA256:[A-Za-z0-9+/]{43}$"
+        },
+        "public_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://[^/?#@\\s]+(?:/[^?#\\s]*)?$"
+        },
+        "key_created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "previous": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "pubkey",
+            "rotated_at",
+            "endorsement"
+          ],
+          "properties": {
+            "pubkey": {
+              "type": "string",
+              "pattern": "^ed25519:[A-Za-z0-9_-]{43}$"
+            },
+            "rotated_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "endorsement": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{86}$"
+            }
+          }
+        },
+        "challenge_sig": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        }
+      }
+    },
     "event": {
       "type": "object",
       "description": "One entry in a peer's (or principal's) durable log. SSE: id = cursor, event = type, data = this object. Long-poll and MCP vecnet_inbox return arrays of these.",
@@ -896,7 +1061,8 @@
             "directory_updated",
             "approval_expired",
             "operator_view",
-            "reaction"
+            "reaction",
+            "hub_notice"
           ]
         },
         "at": {
@@ -920,12 +1086,36 @@
               "$ref": "#/$defs/reactionEvent"
             },
             {
+              "$ref": "#/$defs/hubNoticeEvent"
+            },
+            {
               "type": "object",
               "description": "directory_updated: {peer_id, change}. approval_expired: {approval_id, thread_id}. operator_view: {reason: sent|read|presence|dead_letter|subscription|reaction, thread_id: thr_ id or null}; operator logs only."
             }
           ]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "hub_notice"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/hubNoticeEvent"
+              }
+            }
+          }
+        }
+      ]
     },
     "sendRequest": {
       "type": "object",
