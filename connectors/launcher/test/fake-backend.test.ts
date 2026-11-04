@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createFakeBackend } from './fake-backend.ts';
@@ -63,4 +63,12 @@ test('fake backend: hooks round-trip a question and a permission draft', async (
   assert.deepEqual(await backend.ask(spec.jobId,q),{answers:{q:'yes'},answeredBy:'peer_one'}); assert.deepEqual(question,q);
   const r:PermissionRequest={requestId:'p1',summary:'edit file',defaultOnExpiry:'deny',options:[{id:'deny',label:'deny',grants:'deny'}],permission:{kind:'edit',backend_method:'edit',scope:'once',options:[{id:'deny',label:'deny',grants:'deny'}],paths:[{path:'/tmp/a',access:'write'}],backend_raw:{path:'/tmp/a'},fidelity:{kind:'enforced',command:'none',paths:'enforced',host:'none'}}};
   assert.deepEqual(await backend.requestPermission(spec.jobId,r),{optionId:'deny',decidedBy:'expired'}); assert.deepEqual(permission,r);
+});
+
+test('launch fixtures use unique job keys matching the normative schema', () => {
+  const schema=JSON.parse(readFileSync(new URL('../../../docs/protocol/envelope.schema.json',import.meta.url),'utf8'));
+  const pattern=new RegExp(schema.$defs.jobRequest.properties.job_key.pattern);
+  const keys=Array.from({length:32},() => launchDelivery({backend:'fake'}).message.job_request!.job_key);
+  for (const key of keys) assert.match(key,pattern);
+  assert.equal(new Set(keys).size,keys.length);
 });
