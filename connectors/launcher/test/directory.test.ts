@@ -1,0 +1,75 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { directoryEntry, memoryLog } from '../../hub-client/testing/fixtures.ts';
+import type { DirectoryEntry } from '../../hub-client/src/wire.ts';
+import { createDirectory } from '../src/directory.ts';
+
+test('directory: created_by and operator lookup; directory_updated that drops a peer emits removed once', async () => {
+  const bot = directoryEntry({peer_id:'peer_bot',name:'same name',kind:'pagchat-bot',created_by:'prn_pagd'});
+  const operator = directoryEntry({peer_id:'peer_operator',name:'Max',kind:'operator'});
+  const imposter = directoryEntry({peer_id:'peer_imposter',name:'Max',kind:'session',capabilities:['operator']});
+  let peers: DirectoryEntry[] = [bot,operator,imposter];
+  const dir = createDirectory({hub:{async peers() { return peers; }},log:memoryLog()});
+  const removed: string[] = [];
+  dir.onRemoved(id=>removed.push(id));
+  assert.equal(dir.operatorPeerId(),undefined);
+  assert.equal(dir.isOperator('peer_operator'),false);
+  await dir.refresh();
+  assert.deepEqual(dir.get(bot.peer_id),bot);
+  assert.equal(dir.name(bot.peer_id),'same name');
+  assert.equal(dir.name('peer_missing'),'peer_missing');
+  assert.equal(dir.kindOf(bot.peer_id),'pagchat-bot');
+  assert.equal(dir.kindOf('peer_missing'),undefined);
+  assert.equal(dir.createdBy(bot.peer_id),'prn_pagd');
+  assert.equal(dir.createdBy(operator.peer_id),undefined);
+  assert.equal(dir.createdBy('peer_missing'),undefined);
+  assert.equal(dir.operatorPeerId(),operator.peer_id);
+  assert.equal(dir.isOperator(operator.peer_id),true);
+  assert.equal(dir.isOperator(imposter.peer_id),false);
+  assert.equal(dir.isOperator('peer_missing'),false);
+  assert.deepEqual(removed,[]);
+  // The event is a refresh hint, never a source of identity or provenance.
+  peers = [operator,imposter];
+  await dir.onDirectoryUpdated({peer_id:imposter.peer_id,kind:'operator',created_by:'prn_spoof'});
+  await dir.onDirectoryUpdated(null);
+  assert.deepEqual(removed,[bot.peer_id]);
+  assert.equal(dir.get(bot.peer_id),undefined);
+  assert.equal(dir.createdBy(imposter.peer_id),undefined);
+  assert.equal(dir.isOperator(imposter.peer_id),false);
+  const disabledOperator = {...operator,disabled:true};
+  peers = [disabledOperator,imposter];
+  await dir.onDirectoryUpdated({});
+  await dir.onDirectoryUpdated({});
+  assert.deepEqual(removed,[bot.peer_id,operator.peer_id]);
+  assert.equal(dir.operatorPeerId(),undefined);
+  assert.equal(dir.isOperator(operator.peer_id),false);
+});
+
+test('ensureKnown refreshes once for an unknown peer and finds a just-created bot', async () => {
+  let calls = 0;
+  let failure = false;
+  const signals: Array<AbortSignal | undefined> = [];
+  const log = memoryLog();
+  const dir = createDirectory({hub:{async peers(signal) {
+    signals.push(signal); calls++;
+    if (failure) throw new Error('vn_peer_secret-from-hub');
+    return calls === 1 ? [] : [directoryEntry({peer_id:'peer_new',created_by:'prn_pagd'})];
+  }},log});
+  await dir.refresh();
+  const signal = new AbortController().signal;
+  assert.equal(await dir.ensureKnown('peer_new',signal),true);
+  assert.equal(calls,2);
+  assert.equal(signals[1],signal);
+  assert.equal(dir.createdBy('peer_new'),'prn_pagd');
+  assert.equal(await dir.ensureKnown('peer_new'),true);
+  assert.equal(calls,2,'known peers do not cause a refresh');
+  assert.equal(await dir.ensureKnown('peer_missing'),false);
+  assert.equal(calls,3,'one refresh per unknown lookup, never a retry loop');
+  const removed: string[] = [];
+  dir.onRemoved(id=>removed.push(id));
+  failure = true;
+  await assert.rejects(dir.onDirectoryUpdated({}));
+  assert.equal(dir.kindOf('peer_new'),'session','a failed refresh preserves the last complete snapshot');
+  assert.deepEqual(removed,[]);
+  assert.equal(log.text().includes('vn_peer_secret-from-hub'),false);
+});
