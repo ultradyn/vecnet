@@ -96,7 +96,15 @@ try {
     assert(await kinds.locator('span.pill > i.kd.k-pagchat-bot').count() === 1 && await kinds.textContent() === 'pagchat-bot', 'kinds column is not one kind pill');
     assert(await prow.locator('td').nth(2).evaluate(el => el.classList.contains('mono')), 'disabled column is not mono');
     assert(await prow.locator('td').nth(3).textContent() === '2/10', 'creates per hour column');
-    const amber = await cap.evaluate(el => getComputedStyle(el).color);
+    // A peers-tag reload can replace the row between resolving the cell and
+    // reading its style (a detached cell computes no colour), so poll the
+    // live cell rather than read once.
+    const amber = await page.waitForFunction(() => {
+      const row = [...document.querySelectorAll('#d-principals tbody tr')].find(r => r.textContent.includes('pagchat-host'));
+      const td = row && row.querySelectorAll('td')[1];
+      const c = td && td.isConnected ? getComputedStyle(td).color : '';
+      return c === 'rgb(251, 191, 36)' ? c : false;
+    }, null, { polling: 'raf', timeout: 15000 }).then(h => h.jsonValue(), () => 'not amber within 15 s');
     assert(amber === 'rgb(251, 191, 36)', `cap colour is ${amber}`);
     await page.locator('#main').evaluate(el => { el.scrollTop += document.getElementById('d-principals').getBoundingClientRect().top - 140; });
     await shot('ln04-dash-principals');
