@@ -156,7 +156,7 @@ One signed POST per event, at most 256 KiB, to ChatGPT's callback. Headers are `
 - **Oversize events.** Over 256 KiB, `data` becomes `{delivery_id, message_id, thread_id, preview, blob_url?}`: the first 1 KiB of text and a read URL when the hub hosts the content.
 - **Delivery is at least once.** A retry keeps `eventId`, and events can arrive out of order. Durably dedupe by `delivery_id` across restarts; this is not exactly-once processing. Retries are bounded, and an undelivered Delivery expires at `message.loop.expires_at` (fresh-message default 24 h), stops retrying, and sends an `expired` receipt to the sender. A released `wake_idle` carries its original, older cursor.
 - **While no live subscription exists,** events wait. The dot drains them from its cursor when it subscribes again.
-- **A passed challenge lasts 24 hours, or until the subscription lapses.** A subscribe after that is challenged again, with the secret it supplies, and nothing is sent until it passes. A new secret on an ordinary refresh needs no challenge: the pass belongs to the login and URL, and the old secret still signs for 10 minutes.
+- **A passed challenge is cached for five minutes for the same principal, callback URL and signing secret.** Identical refreshes reuse it; a new secret requires a fresh challenge, and nothing is sent until it passes. The prior secret can still sign alongside the new one during the 10-minute rotation overlap. Verification has a 15-second total deadline, rejects redirects and accepts only a successful response echoing the challenge.
 
 ## How it replies
 
@@ -184,6 +184,43 @@ A 2xx from ChatGPT's callback marks the Delivery `accepted`. `vecnet_ack` also m
 
 The send tools are honestly labelled as writes, and ChatGPT asks for confirmation on writes by default. Ticket 19 records a dot acting unattended on webhook2mcp, but not whether a prompt ever appears.
 
+## MCP Events compatibility and transport selection
+
+The working webhook2mcp implementation is a useful interoperability reference. Its deployment accepts only stateless MCP `2026-07-28`. Vecnet also keeps its existing session transport. [OpenAI's MCP Events guide](https://developers.openai.com/plugins/build/mcp-events) supports both `initialize` and the stateless revision; observing `initialize` alone does not establish why a client omitted subscription calls.
+
+| ChatGPT-visible surface | webhook2mcp reference | Vecnet |
+|---|---|---|
+| OAuth discovery | Resource audience, header bearer, `events:read events:write`; external authorization server | Hub `/mcp` resource, header bearer, hub authorization server; `vecnet events:read events:write` advertised and issued on fresh consent, including when an older client asks only for `vecnet` |
+| OAuth registration and tokens | External authorization server owns DCR/CIMD, grants and JWT issuance | Built-in public-client DCR/CIMD, PKCE S256, opaque resource-bound tokens and rotating refresh tokens; existing tokens retain their granted scopes |
+| Missing event write scope | HTTP 403, `-32003`, `WWW-Authenticate` with `insufficient_scope` and `scope="events:write"` | Same requirement on OAuth `events/subscribe` and `events/unsubscribe`; link again with event scopes when needed. Peer bearers retain their own authorization model |
+| Stateless discovery | Complete result, private caching with `ttlMs: 0`, only `2026-07-28`, tools and events capabilities | Same current-revision envelope and cache policy; additional prompts/resources capabilities and guide instructions |
+| Request envelopes | Protocol/version and method headers, namespaced version/client capabilities metadata; named calls include `Mcp-Name` | The complete reference envelope works; redundant `Mcp-Method`/`Mcp-Name` and client capabilities metadata are tolerated without enforcement for existing clients. Supplied protocol-version conflicts are rejected |
+| Legacy initialization | Unsupported method | Session transport remains enabled by default; an operator can turn it off for OAuth or for everyone |
+| Tool catalog | OAuth security schemes, annotations and output schemas | OAuth schemes and read/write annotations on all tools; optional output schemas on selected tools. Cheap own-peer `vecnet_subscriptions` returns structured health data without a declared output schema |
+| Event schemas | Flat strict arguments; payload uses `oneOf` | Flat strict arguments; simplified payload without references or unions. Strict validation remains separate from discovery |
+| Subscription | Canonical account/callback/event/arguments key, signed callback challenge, bounded verification cache | Canonical principal/callback/event/arguments key, same subscription on repeat requests, bounded verification cache; subscription cannot outlive its access token |
+| Callback and delivery | Public HTTPS callback, no redirects, Standard Webhooks signatures and subscription ID, verification echo; occurrence has event ID, name, timestamp, data and cursor | Same wire contract; direct guarded egress rather than a callback gateway |
+| Subscription response | `id`, `refreshBefore`, `cursor`, `truncated` | Same fields; cursor encoding and replay semantics belong to this hub and must be saved verbatim |
+
+To test whether session selection contributes to a missing subscription, set the hub's `VECNET_MCP_LEGACY_SESSIONS` environment variable or `--mcp-legacy-sessions` flag:
+
+| Value | Behavior |
+|---|---|
+| `on` | Default. Existing session clients and stateless clients work |
+| `off-for-oauth` | Reject OAuth/dot `initialize` with method-not-found; bearer peers can still initialize |
+| `off` | Reject `initialize` for all callers; require stateless discovery |
+
+For example, add `--mcp-legacy-sessions off-for-oauth` to the hub invocation, restart it, reconnect/rescan the plugin and inspect discovery/subscription diagnostics. A rejected initialization uses HTTP 404 and JSON-RPC `-32601`. This is an operator experiment: it cannot force ChatGPT to retry with `server/discover`. Restore `on` if the client cannot connect. Changing transport policy does not grant scopes; existing OAuth tokens without `events:write` need a fresh authorization.
+
+Inspect sanitized request and lifecycle records without access to the hosting provider's logs:
+
+```sh
+vecnet diag mcp --limit 100
+vecnet diag mcp --peer peer_01EXAMPLE --method events/subscribe --limit 100 --follow
+```
+
+The operator API is `GET /v1/diag/mcp?peer=peer_01EXAMPLE&method=events%2Fsubscribe&limit=100`. It exposes the last 1000 sanitized records in memory, so a hub restart clears the history. Request records include HTTP status/duration, protocol/method/name headers, session presence, parsed method and ID type, auth outcome/caller/peer, scope names, origin, bounded user agent and error code. Event records identify verification, activation, refresh, pause, expiry, unsubscribe and delivery results. Callback diagnostics expose the host only. Tokens, signing secrets, callback paths and message content are excluded.
+
 ## Failure signals
 
 **Discovery refusal.** An unauthenticated `/mcp` request with no Origin or an allowed Origin should get 401 with `WWW-Authenticate` naming resource metadata. A 403 means the Origin guard refused it; check the exact configured list. `fly logs` records sanitized allowed foreign origins as well as initialize/refusal diagnostics, so it can show whether ChatGPT actually sends `https://chatgpt.com`. The default allowance alone does not establish that it sends the header. OAuth endpoints have no shared Origin guard.
@@ -200,7 +237,7 @@ The send tools are honestly labelled as writes, and ChatGPT asks for confirmatio
 | `paused=operator` | You stopped it with `vecnet subscriptions pause <sub_id>`; a re-subscribe does not lift this | `vecnet subscriptions resume <sub_id>` |
 | `expires=` in the past, `paused=-` | ChatGPT stopped refreshing | Ask the dot to subscribe again |
 
-A subscription lives at most 24 hours and no longer than the access token, so with a 1 h token expect ChatGPT to refresh it roughly hourly, before `refreshBefore`. Whether that refresh holds up in practice is one of the things the live test has to show.
+A subscription lives at most 24 hours and no longer than the access token. The client must refresh before `refreshBefore`, and may refresh much more often: the working webhook2mcp deployment observed a median interval of roughly 50 seconds. Repeated identical subscriptions retain one subscription ID and reuse a bounded successful verification, so frequent refreshes should not create rows or challenge on every call. Whether ChatGPT keeps this hub's subscription alive still requires a live test.
 
 **Errors the dot reports from `events/subscribe`:**
 
