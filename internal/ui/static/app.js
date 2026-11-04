@@ -2,8 +2,11 @@
 // export mount(root, ctx) and return an unmount function. Beyond the plan's
 // list, ctx carries threadId on a thread route and the session's shared
 // `peers`, `threads` and `inboxHead` resources, so a screen need not refetch
-// them. The operator secret stays in localStorage and travels only in
+// them. The sidebar's Other Threads list is the shell's own (see renderOthers).
+// The operator secret stays in localStorage and travels only in
 // Authorization (PROTOCOL §2).
+import { activityAction } from './activity-model.js';
+import { createActivity } from './activity.js';
 import { createApi } from './api.js';
 import * as compose from './compose.js';
 import * as dash from './dash.js';
@@ -12,6 +15,7 @@ import { short, title } from './format.js';
 import * as inbox from './inbox.js';
 import * as matrix from './matrix.js';
 import * as presence from './presence.js';
+import { OTHER_PAGE, nextLimit, otherThreads } from './sidebar-model.js';
 import { createStore } from './store.js';
 import * as threadAside from './thread-aside.js';
 import * as thread from './thread.js';
@@ -70,6 +74,24 @@ function renderNav(s, route) {
   });
   const none = s.threads.error() ? 'Threads unavailable' : s.threads.get() ? 'No threads yet' : '…';
   $('threads').replaceChildren(...(rows.length ? rows : [h('div', { class: 'none', text: none })]));
+  renderOthers(s, route, threads);
+}
+
+// Other Threads: the newest threads the operator is not in, two lines each.
+// Peer strings go in as text only (dom.h), like the list above.
+function renderOthers(s, route, mine) {
+  const res = s.others;
+  const v = otherThreads({
+    page: res && res.get(), error: res && res.error(), mine, me: s.me,
+    nameOf: s.nameOf, now: s.store.hubNow(), limit: s.otherLimit,
+  });
+  const rows = v.rows.map(r => h('a', { href: r.href, class: r.id === route.id ? 'on' : '', title: r.tip },
+    h('span', { class: 'tt' + (r.untitled ? ' un' : ''), text: r.title }), h('span', { class: 'cnt', text: r.count }),
+    h('span', { class: 'pp', text: r.people }), h('span', { class: 'ago', text: r.active })));
+  const tail = v.more === 'show'
+    ? h('button', { type: 'button', class: 'linkbtn more', text: 'Show more', onclick: () => { s.otherLimit = nextLimit(s.otherLimit); res.reload(); } })
+    : v.more === 'dash' ? h('a', { href: '#dash', class: 'more', text: 'All threads on the dashboard' }) : null;
+  $('others').replaceChildren(...(rows.length ? rows : [h('div', { class: 'none', text: v.note })]), ...(tail ? [tail] : []));
 }
 
 function renderConn(store) {
@@ -106,6 +128,10 @@ function start(secret) {
     onUnauthorized: () => { if (session === s) signOut('The hub rejected that secret.'); },
   });
   const store = createStore({ api });
+  // The operator activity feed (PROTOCOL §2.13): one stream per tab, shared
+  // by the sidebar and the dashboard. Activity in threads the operator is not
+  // in reaches it only this way.
+  const activity = createActivity({ api, signal: stop.signal });
   const peers = store.resource('peers', () => api.peers());
   const threads = store.resource('threads', () => api.myThreads({ limit: 200 }));
   // limit pages deliveries; the unread count and `me` do not depend on it.
@@ -123,7 +149,7 @@ function start(secret) {
   const kindOf = id => { const p = byId().get(id); return p ? p.kind : (id || '').split('_')[0]; };
 
   const s = {
-    threads, inboxHead, nameOf,
+    threads, inboxHead, nameOf, store, others: null, otherLimit: OTHER_PAGE,
     me: '', ctx: null, mounted: '', matrixHash: '', unmount: () => {}, offs: [],
     close() {
       stop.abort();
@@ -132,6 +158,7 @@ function start(secret) {
       $('view').replaceChildren();
       $('aside').replaceChildren();
       $('me').replaceChildren();
+      $('others').replaceChildren();
     },
   };
   session = s;
@@ -141,8 +168,19 @@ function start(secret) {
     const op = ((peers.get() || {}).peers || []).find(p => p.kind === 'operator');
     if (!op) return;
     s.me = op.peer_id;
-    s.ctx = { api, store, me: s.me, nameOf, kindOf, peers, threads, inboxHead, toast, nav: hash => { location.hash = hash; } };
+    s.ctx = { api, store, activity, me: s.me, nameOf, kindOf, peers, threads, inboxHead, toast, nav: hash => { location.hash = hash; } };
     s.offs.push(presence.renderNav($('me'), s.ctx), presence.startHeartbeat(s.ctx));
+    // Tagged threads: the operator's own sends and reads re-sort it at once.
+    // The activity feed keeps it live otherwise; Your Threads' own threads
+    // are left to its delivery Events.
+    s.others = store.resource('threads', () => api.threads({ excludeParticipant: s.me, limit: s.otherLimit }));
+    s.offs.push(s.others.subscribe(() => { if (session === s) renderRoute(s); }));
+    s.offs.push(activity.subscribe(ev => {
+      const mine = new Set(((threads.get() || {}).threads || []).map(t => t.thread_id));
+      const act = activityAction(s.others.get(), ev, mine);
+      if (act && act.reload) s.others.reload();
+      else if (act && act.page) s.others.set(act.page);
+    }));
   };
   const redraw = () => { if (session === s) { ready(); renderRoute(s); } };
 
@@ -158,14 +196,19 @@ function start(secret) {
     peers.subscribe(redraw),
   );
   const refresh = setInterval(() => peers.reload(), PEERS_REFRESH);
-  s.offs.push(() => clearInterval(refresh));
+  // A tab shown again re-reads Other Threads, so its relative times are fresh.
+  const reloadOthers = () => { if (s.others && !document.hidden) s.others.reload(); };
+  document.addEventListener('visibilitychange', reloadOthers);
+  s.offs.push(() => clearInterval(refresh), () => document.removeEventListener('visibilitychange', reloadOthers));
   redraw();
 
   // The pump waits for the directory so conn stays "connecting" until the
   // shell can show something, and a rejected secret never reaches the loop.
   // If the hub is down, the pump's first answered poll retries all three views.
   peers.reload().then(() => {
-    if (session === s) store.pump(stop.signal);
+    if (session !== s) return;
+    store.pump(stop.signal);
+    activity.start();
   });
 }
 

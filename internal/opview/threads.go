@@ -33,10 +33,14 @@ func threadInvalid(field, message string) *hub.APIError {
 // Threads is the operator's view of every thread, including those the
 // operator has never joined. Its cursor uses the same ordering and encoding
 // as Hub.ListThreads: last_message_at and thread id, descending.
+// ExcludeParticipant filters in the same query, before the page is cut.
 func (r *Reader) Threads(ctx context.Context, q opapi.ThreadQuery) (opapi.ThreadPage, error) {
 	out := opapi.ThreadPage{Threads: []opapi.ThreadRow{}}
 	if q.Participant != "" && !ids.Is(ids.Peer, q.Participant) {
 		return out, threadInvalid("participant", "participant must be a peer_ id")
+	}
+	if q.ExcludeParticipant != "" && !ids.Is(ids.Peer, q.ExcludeParticipant) {
+		return out, threadInvalid("exclude_participant", "exclude_participant must be a peer_ id")
 	}
 	var at, id string
 	if q.Cursor != "" {
@@ -55,8 +59,9 @@ func (r *Reader) Threads(ctx context.Context, q opapi.ThreadQuery) (opapi.Thread
 	err := r.Hub.DB.Tx(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `SELECT t.thr_id FROM threads t
    WHERE (?1='' OR EXISTS(SELECT 1 FROM thread_participants p WHERE p.thr_id=t.thr_id AND p.peer_id=?1))
+   AND (?5='' OR NOT EXISTS(SELECT 1 FROM thread_participants x WHERE x.thr_id=t.thr_id AND x.peer_id=?5))
    AND (?2='' OR t.last_message_at<?2 OR (t.last_message_at=?2 AND t.thr_id<?3))
-   ORDER BY t.last_message_at DESC,t.thr_id DESC LIMIT ?4`, q.Participant, at, id, limit+1)
+   ORDER BY t.last_message_at DESC,t.thr_id DESC LIMIT ?4`, q.Participant, at, id, limit+1, q.ExcludeParticipant)
 		if err != nil {
 			return err
 		}

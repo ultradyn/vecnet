@@ -118,8 +118,11 @@ type ReadResult struct {
 
 type ThreadQuery struct {
 	Participant string `json:"participant"`
-	Cursor      string `json:"cursor"`
-	Limit       int    `json:"limit"`
+	// ExcludeParticipant drops threads that peer is in (the web sidebar's
+	// Other Threads passes the operator's own peer id).
+	ExcludeParticipant string `json:"exclude_participant"`
+	Cursor             string `json:"cursor"`
+	Limit              int    `json:"limit"`
 }
 
 type CutInfo struct {

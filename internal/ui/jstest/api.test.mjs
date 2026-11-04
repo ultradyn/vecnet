@@ -115,6 +115,7 @@ test('every method calls its route with the secret only in the header', async ()
     [() => api.inbox(), 'GET', '/v1/admin/inbox'],
     [() => api.myThreads({ limit: 200 }), 'GET', '/v1/threads?limit=200'],
     [() => api.threads({ participant: 'peer_1', limit: 5, cursor: 'c/1' }), 'GET', '/v1/admin/threads?participant=peer_1&limit=5&cursor=c%2F1'],
+    [() => api.threads({ excludeParticipant: 'peer_op', limit: 50 }), 'GET', '/v1/admin/threads?exclude_participant=peer_op&limit=50'],
     [() => api.thread('thr_1'), 'GET', '/v1/admin/threads/thr_1'],
     [() => api.messages('thr_1', { after: 'msg_1', limit: 200 }), 'GET', '/v1/threads/thr_1/messages?after=msg_1&limit=200'],
     [() => api.matrix('thr_1', { after: 'msg_1', limit: 10 }), 'GET', '/v1/admin/threads/thr_1/deliveries?after=msg_1&limit=10'],
@@ -194,4 +195,21 @@ test('blob resolves to a Blob and errors like every other call', async () => {
   const error = await missing.api.blob('abc').catch(e => e);
   assert.equal(error.status, 404);
   assert.equal(error.code, 'not_found');
+});
+
+test('activity opens the feed with the bearer in a header, never the URL', async () => {
+  const { api, calls } = harness(() => new Response('event: ready\ndata: {}\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+  const r = await api.activity();
+  assert.equal(await r.text(), 'event: ready\ndata: {}\n\n');
+  assert.equal(calls[0].url, '/v1/admin/activity');
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer vn_secret');
+  assert.equal(calls[0].init.headers.Accept, 'text/event-stream');
+  assert.ok(!calls[0].url.includes('vn_secret'));
+  let unauthorized = 0;
+  const denied = harness(() => json(403, { error: { code: 'forbidden', message: 'operator credential required' } }), { onUnauthorized: () => { unauthorized++; } });
+  const e = await denied.api.activity().catch(x => x);
+  assert.ok(e instanceof APIError);
+  assert.equal(e.status, 403);
+  assert.equal(e.code, 'forbidden');
+  assert.equal(unauthorized, 0);
 });

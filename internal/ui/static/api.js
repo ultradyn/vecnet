@@ -105,6 +105,24 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
       x.send(file);
     });
   }
+  // activity opens the operator activity feed (PROTOCOL §2.13), an SSE
+  // stream. EventSource cannot send headers, so this is a fetch whose body
+  // the caller reads: the bearer stays in Authorization, never in the URL.
+  async function activity({ signal } = {}) {
+    let r;
+    try {
+      r = await fetch('/v1/admin/activity', {
+        method: 'GET', signal, cache: 'no-store', credentials: 'omit',
+        headers: { Authorization: 'Bearer ' + secret, Accept: 'text/event-stream' },
+      });
+    } catch (e) {
+      throw transportError(e, 'hub unreachable');
+    }
+    if (r.ok && r.body) return r;
+    let j = null;
+    try { j = await r.json(); } catch { /* the status still says what happened */ }
+    throw httpError(r.status, r.statusText, j);
+  }
   const get = (path, options) => request('GET', path, options);
   const post = (path, options) => request('POST', path, options);
 
@@ -113,12 +131,13 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     adminPeers: () => get('/v1/admin/peers'),
     inbox: ({ limit, before, unread } = {}) => get('/v1/admin/inbox' + query({ limit, before, unread: unread ? 1 : undefined })),
     myThreads: ({ limit } = {}) => get('/v1/threads' + query({ limit })),
-    threads: ({ participant, limit, cursor } = {}) => get('/v1/admin/threads' + query({ participant, limit, cursor })),
+    threads: ({ participant, excludeParticipant, limit, cursor } = {}) => get('/v1/admin/threads' + query({ participant, exclude_participant: excludeParticipant, limit, cursor })),
     thread: id => get('/v1/admin/threads/' + seg(id)),
     messages: (id, { after, limit } = {}) => get('/v1/threads/' + seg(id) + '/messages' + query({ after, limit })),
     matrix: (id, { after, limit } = {}) => get('/v1/admin/threads/' + seg(id) + '/deliveries' + query({ after, limit })),
     readThread: id => post('/v1/admin/threads/' + seg(id) + '/read'),
     // signal lets a sign-out end a parked long-poll at once.
+    activity,
     events: ({ after, wait, signal } = {}) => get('/v1/events' + query({ after, wait }), { signal }),
     ack: cursor => post('/v1/ack', { body: { cursor } }),
     send: body => post('/v1/messages', { body, headers: { 'X-Vecnet-Ingress': 'operator_ui' } }),

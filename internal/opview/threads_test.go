@@ -137,6 +137,56 @@ func TestThreadsAllPeers(t *testing.T) {
 	assertThreadAPIError(t, err, 422, "invalid_value")
 }
 
+// ExcludeParticipant drops every thread a peer is in, before the page is
+// cut, so a bounded page of "other" threads is never short because of them.
+func TestThreadsExcludeParticipant(t *testing.T) {
+	env := testhub.Start(t)
+	a, asec := env.NewPeer("session", "A")
+	b, _ := env.NewPeer("session", "B")
+	env.SetLimits(a, 1000, 1000)
+	others := []string{}
+	for i := 0; i < 3; i++ {
+		others = append(others, threadSend(t, env, asec, "", []string{b}, nil).ThreadID)
+		env.Now.Advance(time.Second)
+	}
+	// Newer threads the operator is in would fill a page of 3 on their own.
+	for i := 0; i < 3; i++ {
+		threadSend(t, env, asec, "", []string{env.OperatorPeer}, nil)
+		env.Now.Advance(time.Second)
+	}
+	r := opview.New(env.Hub)
+	page, err := r.Threads(threadCtx, opapi.ThreadQuery{ExcludeParticipant: env.OperatorPeer, Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, row := range page.Threads {
+		got = append(got, row.Thread.ThreadID)
+	}
+	if want := []string{others[2], others[1], others[0]}; !reflect.DeepEqual(got, want) || page.Next != nil {
+		t.Fatalf("excluded page = %v next %v, want %v", got, page.Next, want)
+	}
+	first, err := r.Threads(threadCtx, opapi.ThreadQuery{ExcludeParticipant: env.OperatorPeer, Limit: 2})
+	if err != nil || len(first.Threads) != 2 || first.Next == nil {
+		t.Fatalf("excluded page 1: %+v %v", first, err)
+	}
+	rest, err := r.Threads(threadCtx, opapi.ThreadQuery{ExcludeParticipant: env.OperatorPeer, Limit: 2, Cursor: *first.Next})
+	if err != nil || len(rest.Threads) != 1 || rest.Threads[0].Thread.ThreadID != others[0] || rest.Next != nil {
+		t.Fatalf("excluded page 2: %+v %v", rest, err)
+	}
+	// Combined with participant: B's threads the operator is not in.
+	both, err := r.Threads(threadCtx, opapi.ThreadQuery{Participant: b, ExcludeParticipant: env.OperatorPeer})
+	if err != nil || len(both.Threads) != 3 {
+		t.Fatalf("participant and exclude: %+v %v", both, err)
+	}
+	none, err := r.Threads(threadCtx, opapi.ThreadQuery{Participant: env.OperatorPeer, ExcludeParticipant: env.OperatorPeer})
+	if err != nil || len(none.Threads) != 0 {
+		t.Fatalf("same peer both ways: %+v %v", none, err)
+	}
+	_, err = r.Threads(threadCtx, opapi.ThreadQuery{ExcludeParticipant: "me"})
+	assertThreadAPIError(t, err, 422, "invalid_value")
+}
+
 func TestThreadCut(t *testing.T) {
 	env := testhub.Start(t)
 	_, asec := env.NewPeer("session", "A")
