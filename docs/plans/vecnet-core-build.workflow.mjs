@@ -549,7 +549,7 @@ Check and report:
 1. ${WT} exists, is a git worktree on branch ${BRANCH}, and ${BASE_REF} is an ancestor of HEAD.
 2. \`git status --porcelain\` output (dirty_files). A dirty tree is acceptable only when ${STATUS}/task-NN.json for the first not-yet-passed task in range has status "implemented", "fixed_pending_review" or an in-progress state left by an interrupted run; otherwise set ok=false.
 3. \`go version\` is at least 1.26; \`command -v build2\` succeeds; ${PLAN} and ${PROTO} exist.
-4. For every task number t < ${START}: a commit with trailer \`Plan-Task: NN\` (two-digit) is on the branch (\`git log ${BASE_REF}..HEAD --grep '^Plan-Task: NN$'\`). A missing one sets ok=false: the base would be incomplete.
+4. For every task number t < ${START}: a commit with trailer \`Plan-Task: NN\` (two-digit) is reachable from HEAD (\`git log HEAD --grep '^Plan-Task: NN$'\`; earlier tasks may already be merged into ${BASE_REF}, so search the whole history, not only ${BASE_REF}..HEAD). A missing one sets ok=false: the base would be incomplete.
 5. passed_tasks: every t in ${START}..${END} whose ${STATUS}/task-NN.json has status "passed" AND whose Plan-Task commit is on the branch.
 6. Baseline: if go.mod exists, run \`${RUN}build2 go test -p 2 -count=1 ./...\`. Failure sets ok=false (never build on a red base). If go.mod does not exist, report "no-module-yet" (only valid when ${START} == 1).
 
