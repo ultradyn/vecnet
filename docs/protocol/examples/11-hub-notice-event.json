@@ -1,0 +1,20 @@
+{
+  "$comment": "A signed operator notice is an Event, outside message threads. sig is an illustrative unpadded base64url Ed25519 signature.",
+  "cursor": "e1.43",
+  "type": "hub_notice",
+  "at": "2026-11-05T07:00:00.000Z",
+  "data": {
+    "change": "posted",
+    "notice": {
+      "notice_id": "ntc_01JD3Q5H0X2Z4B6D8F0H2K4M6P",
+      "kind": "moving",
+      "message": "Moving tonight",
+      "hub": "https://hub.example",
+      "issued_at": "2026-11-05T07:00:00.000Z",
+      "at": "2026-11-05T23:00:00.000Z",
+      "expires_at": "2026-11-06T07:00:00.000Z",
+      "new_url": "https://new.example",
+      "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    }
+  }
+}

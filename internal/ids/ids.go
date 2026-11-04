@@ -15,7 +15,7 @@ import (
 // Prefix is the type tag in front of every vecnet id.
 type Prefix string
 
-// The ten id prefixes of PROTOCOL §1.3.
+// Id prefixes of PROTOCOL §1.3 and hub notices.
 const (
 	Msg  Prefix = "msg"
 	Dly  Prefix = "dly"
@@ -27,6 +27,7 @@ const (
 	Job  Prefix = "job"
 	Apr  Prefix = "apr"
 	Src  Prefix = "src"
+	Ntc  Prefix = "ntc"
 )
 
 // ErrBadID reports an id that is not "<known prefix>_<Crockford ULID>".
@@ -34,7 +35,7 @@ var ErrBadID = errors.New("ids: malformed id")
 
 var known = map[Prefix]bool{
 	Msg: true, Dly: true, Thr: true, Peer: true, Prn: true,
-	Team: true, Grp: true, Job: true, Apr: true, Src: true,
+	Team: true, Grp: true, Job: true, Apr: true, Src: true, Ntc: true,
 }
 
 var (
@@ -51,7 +52,7 @@ func New(p Prefix) string {
 	return string(p) + "_" + u.String()
 }
 
-// Parse splits s on its first "_", requires one of the ten known prefixes and
+// Parse splits s on its first "_", requires one of the known prefixes and
 // strictly parses the rest as an upper-case ULID matching
 // ^[0-9A-HJKMNP-TV-Z]{26}$ (rejecting I, L, O, U, lower case and overflow).
 func Parse(s string) (Prefix, ulid.ULID, error) {

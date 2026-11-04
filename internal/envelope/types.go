@@ -257,3 +257,42 @@ type SendRequest struct {
 	ApprovalRequest    *ApprovalRequest  `json:"approval_request,omitempty"`
 	ApprovalResponse   *ApprovalResponse `json:"approval_response,omitempty"`
 }
+
+// HubNotice is a signed operator announcement, independent of message threads.
+// Clear metadata describes lifecycle state and is not signed.
+type HubNotice struct {
+	NoticeID   string `json:"notice_id"`
+	Kind       string `json:"kind"` // maintenance | restart | moving
+	Message    string `json:"message"`
+	Hub        string `json:"hub"`
+	IssuedAt   string `json:"issued_at"`
+	At         string `json:"at,omitempty"`
+	ExpiresAt  string `json:"expires_at"`
+	NewURL     string `json:"new_url,omitempty"` // moving only
+	Sig        string `json:"sig"`
+	ClearedAt  string `json:"cleared_at,omitempty"`
+	ClearedHow string `json:"cleared_how,omitempty"` // operator | expired | replaced | boot
+}
+
+// HubNoticeEvent is the data of a hub_notice Event.
+type HubNoticeEvent struct {
+	Change string    `json:"change"` // posted | cleared
+	Notice HubNotice `json:"notice"`
+}
+
+// HubKeyPrevious is the previous identity's endorsement of its successor.
+type HubKeyPrevious struct {
+	Pubkey      string `json:"pubkey"`
+	RotatedAt   string `json:"rotated_at"`
+	Endorsement string `json:"endorsement"`
+}
+
+// HubIdentity is the public identity, optionally proving a fresh challenge.
+type HubIdentity struct {
+	Pubkey       string          `json:"pubkey"`
+	Fingerprint  string          `json:"fingerprint"`
+	PublicURL    string          `json:"public_url"`
+	KeyCreatedAt string          `json:"key_created_at"`
+	Previous     *HubKeyPrevious `json:"previous,omitempty"`
+	ChallengeSig string          `json:"challenge_sig,omitempty"`
+}
