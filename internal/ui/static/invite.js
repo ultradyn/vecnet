@@ -1,6 +1,7 @@
-// "Add agent" (dashboard, Peers): creates a peer and shows the paste-ready
-// invite once. The token lives only in this dialog's DOM: never in storage,
-// and closing removes the dialog, so it is gone with it.
+// "Add agent" (the sidebar's nav button, and the dashboard's Peers heading):
+// creates a peer and shows the paste-ready invite once. The token lives only
+// in this dialog's DOM: never in storage, and closing removes the dialog, so
+// it is gone with it.
 import { copyText, h, toast } from './dom.js';
 import { DEFAULT_TTL, invite, KINDS, TTLS } from './invite-model.js';
 
@@ -13,7 +14,9 @@ export function inviteButton(ctx, onCreated) {
   return h('button', { type: 'button', class: 'btn inv-open', text: 'Add agent', onclick: e => openInvite(ctx, onCreated, e.currentTarget) });
 }
 
-function openInvite(ctx, onCreated, opener) {
+// openInvite shows the dialog over whatever view is mounted; focus returns
+// to opener when it closes. One dialog at a time: opening closes any other.
+export function openInvite(ctx, onCreated, opener) {
   closeInvite();
   const name = h('input', { id: 'inv-name', 'aria-required': 'true', maxlength: '80', spellcheck: 'false', autocomplete: 'off', placeholder: 'e.g. web-repo claude' });
   const kind = h('select', { id: 'inv-kind' }, KINDS.map(k => h('option', { value: k, text: k })));

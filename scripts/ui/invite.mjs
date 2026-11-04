@@ -1,4 +1,4 @@
-// Add agent (dashboard, Peers) in a real browser: the button, the form, a
+// Add agent (dashboard, Peers; the sidebar) in a real browser: the button, the form, a
 // server error and a client one, and the success panel whose invite text
 // matches the CLI's (invite-model.js, pinned by internal/cli/testdata/
 // invite.json), enrols for real, and leaves no token behind once closed.
@@ -101,6 +101,64 @@ try {
     const named = await fetch(demo.url + '/v1/enrol', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: ores.enrol_token, name: 'Helper Bot 2' }) });
     assert(named.status === 200 && (await named.json()).name === 'Helper Bot 2', `enrol with a chosen name: ${named.status}`);
     await peers.locator('tbody tr', { hasText: 'Helper Bot 2' }).waitFor();
+
+    // The sidebar's Add agent, under the route links: the same dialog from
+    // any view, opened by keyboard over a thread that stays mounted (its
+    // draft survives), with focus back on the button when it closes.
+    const navAdd = page.locator('#nav-add');
+    const navIds = await page.locator('nav.side > .nav').first().locator(':scope > a, :scope > button').evaluateAll(els => els.map(e => e.id));
+    assert(navIds.join() === 'nav-inbox,nav-new,nav-dash,nav-add', `sidebar nav ${navIds}`);
+    await page.evaluate(id => { location.hash = `#thread/${id}`; }, demo.threads.hark);
+    await page.locator('.msg').first().waitFor();
+    const draft = page.locator('.composer textarea');
+    await draft.fill('draft kept under the dialog');
+    await page.evaluate(() => { document.querySelector('.composer textarea').dataset.mounted = 'nav-add'; });
+    assert(await navAdd.isEnabled(), 'sidebar Add agent is disabled once signed in');
+    await shot('inv-6-nav');
+    await navAdd.focus();
+    await page.keyboard.press('Enter');
+    await dlg.waitFor();
+    assert(await page.evaluate(() => document.activeElement && document.activeElement.id) === 'inv-name', 'focus is not in the name field');
+    assert(await page.evaluate(() => location.hash.startsWith('#thread/')), 'opening Add agent changed the route');
+    await dlg.locator('#inv-name').fill('nav agent');
+    await shot('inv-7-nav-thread');
+    await page.keyboard.press('Escape');
+    await page.locator('dialog.inv').waitFor({ state: 'detached' });
+    assert(await page.evaluate(() => document.activeElement && document.activeElement.id) === 'nav-add', 'focus did not return to the sidebar button');
+    assert(await page.locator('.composer textarea[data-mounted="nav-add"]').inputValue() === 'draft kept under the dialog', 'the thread remounted or lost its draft');
+
+    // Created from the sidebar: the session's api, the same invite, and the
+    // directory picks the peer up.
+    await navAdd.click();
+    await dlg.locator('#inv-name').fill('nav agent');
+    const navAnswer = page.waitForResponse(r => r.url().endsWith('/v1/admin/peers') && r.request().method() === 'POST');
+    await dlg.getByRole('button', { name: 'Create invite' }).click();
+    const nres = await (await navAnswer).json();
+    const ntext = await dlg.locator('pre.inv-block').textContent();
+    assert(ntext === inviteBlock({ owner: nres.hub_owner, hubURL: nres.hub_url, profile: 'nav-agent', token: nres.enrol_token, expires: nres.enrol_expires_at }), `sidebar invite text:\n${ntext}`);
+    await dlg.getByRole('button', { name: 'Done' }).click();
+    await page.locator('dialog.inv').waitFor({ state: 'detached' });
+    assert(!(await page.content()).includes(nres.enrol_token), 'the sidebar invite token is still in the page');
+    assert(await page.evaluate(() => document.activeElement && document.activeElement.id) === 'nav-add', 'focus did not return after Done');
+    await page.waitForFunction(async ({ secret, id }) => {
+      const r = await fetch('/v1/peers', { headers: { Authorization: `Bearer ${secret}` } });
+      return ((await r.json()).peers || []).some(p => p.peer_id === id);
+    }, { secret: demo.operator_secret, id: nres.peer_id }, { polling: 200 });
+
+    // Narrow: the sidebar stacks above the view; the button and dialog fit.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await draft.fill('');
+    await page.evaluate(() => { document.getElementById('main').scrollTop = 0; window.scrollTo(0, 0); });
+    const box = await navAdd.boundingBox();
+    assert(box && box.x >= 0 && box.x + box.width <= 390, `sidebar Add agent off screen at 390 px: ${JSON.stringify(box)}`);
+    await shot('inv-8-nav-narrow');
+    await navAdd.click();
+    await dlg.waitFor();
+    const dbox = await dlg.boundingBox();
+    assert(dbox && dbox.x >= 0 && dbox.x + dbox.width <= 390, `dialog off screen at 390 px: ${JSON.stringify(dbox)}`);
+    await shot('inv-9-nav-narrow-dialog');
+    await page.keyboard.press('Escape');
+    await page.locator('dialog.inv').waitFor({ state: 'detached' });
   });
-  console.log('Invite passed: form, client and server errors, CLI-identical text, copy, no token kept, enrol once, open name chosen at enrol');
+  console.log('Invite passed: form, client and server errors, CLI-identical text, copy, no token kept, enrol once, open name chosen at enrol, sidebar Add agent over a mounted thread with focus return, narrow');
 } finally { await cleanBuild(); }

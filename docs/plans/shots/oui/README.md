@@ -7,6 +7,7 @@ Task 23 runs both clients against one disposable hub. Its assertions verify cros
 - [02-smoke-login.png](02-smoke-login.png) — Demo hub sign-in page.
 - [02-smoke-tmux.png](02-smoke-tmux.png) — Private tmux harness smoke check.
 - [07-shell-error.png](07-shell-error.png) — Web shell and connection handling — error state.
+- [07-shell-favicon.png](07-shell-favicon.png) — The favicon set from the vecnet logo: SVG and 32 px PNG at tab size on a dark and a light tab strip, the 180 px apple-touch-icon (masked as a home-screen tile) and the SVG at 128 px.
 - [07-shell-initial.png](07-shell-initial.png) — Web shell and connection handling — initial state.
 - [07-shell-progress.png](07-shell-progress.png) — Web shell and connection handling — progress state.
 - [07-shell-success.png](07-shell-success.png) — Web shell and connection handling — success state.
@@ -159,13 +160,17 @@ Avatar screens come from `scripts/ui/avatar.mjs`. Three peers upload off-square 
 - [av-compose.png](av-compose.png) — New message's peer list: dot-research's pet, the grokbot icon, and letters for peers with no avatar.
 - [av-fallback.png](av-fallback.png) — Fallback: one avatar fetch answers 500, one returns undecodable bytes and one never answers; every peer shows its letter.
 
-Add agent screens come from `scripts/ui/invite.mjs`. The dashboard's Peers heading has an Add agent button: a small form (name, kind without operator or dot, token lifetime 1 h / 24 h / 7 d) creates the peer and shows the same paste-ready invite `vecnet peer invite` prints, once. The script checks the text against the CLI's renderer, the copy, that no token reaches web storage or survives closing, and that the token enrols exactly once.
+Add agent screens come from `scripts/ui/invite.mjs`. The sidebar's nav block (under Inbox, New message, Dashboard) has an Add agent button that opens the dialog over whatever view is showing, and the dashboard's Peers heading has another: a small form (name, kind without operator or dot, token lifetime 1 h / 24 h / 7 d) creates the peer and shows the same paste-ready invite `vecnet peer invite` prints, once. The script checks the text against the CLI's renderer, the copy, that no token reaches web storage or survives closing, and that the token enrols exactly once.
 
 - [inv-1-button.png](inv-1-button.png) — Dashboard Peers heading with the Add agent button.
 - [inv-2-form.png](inv-2-form.png) — The form filled in: name, kind session, token valid for 1 hour.
 - [inv-3-error.png](inv-3-error.png) — The hub refuses the create: its code and message under the form, which stays editable.
 - [inv-4-success.png](inv-4-success.png) — The invite shown once: warning, paste block with the hub's public URL and token, profile, peer id and expiry, Copy invite.
 - [inv-5-open.png](inv-5-open.png) — An open-name invite ("Let the agent choose its name at enrol", suggestion `helper bot`): the block has the agent enrol with `--name`, and its profile follows from the name it picks.
+- [inv-6-nav.png](inv-6-nav.png) — A thread open, with the sidebar's Add agent button under Inbox, New message and Dashboard.
+- [inv-7-nav-thread.png](inv-7-nav-thread.png) — Add agent opened from the sidebar by keyboard over that thread, which stays mounted underneath.
+- [inv-8-nav-narrow.png](inv-8-nav-narrow.png) — At 390 px the sidebar stacks above the view; Add agent spans its width.
+- [inv-9-nav-narrow-dialog.png](inv-9-nav-narrow-dialog.png) — The Add agent dialog at 390 px.
 
 Composer fit screens come from `scripts/ui/composer-fit.mjs`, which sweeps the viewport from 320 to 1600 px with short and spilling text and asserts the control row: Attach and Send share one row at the right edge, nothing leaves the bar, and the keyboard hint is either hidden or at most two unclipped lines (it breaks at its `·` separators and is dropped by `fitHint` before anything else moves). Only at phone width, after the hint has gone, does the priority control take its own full-width row.
 

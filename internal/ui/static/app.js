@@ -15,6 +15,7 @@ import * as dash from './dash.js';
 import { h, peerLink, toast } from './dom.js';
 import { short } from './format.js';
 import * as inbox from './inbox.js';
+import { closeInvite, openInvite } from './invite.js';
 import * as matrix from './matrix.js';
 import { peerHref } from './peer-model.js';
 import * as peer from './peer.js';
@@ -74,6 +75,7 @@ function renderNav(s, route) {
   $('nav-inbox').className = route.name === 'inbox' ? 'on' : '';
   $('nav-new').className = route.name === 'new' ? 'on' : '';
   $('nav-dash').className = route.name === 'dash' ? 'on' : '';
+  $('nav-add').disabled = !s.ctx; // the invite needs the session's api
   const now = s.store.hubNow(), mineRes = s.mine;
   const yours = yourThreads({
     page: mineRes && mineRes.get(), summaries: s.threads.get() ? threads : null,
@@ -183,6 +185,7 @@ function start(secret) {
     me: '', ctx: null, mounted: '', matrixHash: '', unmount: () => {}, offs: [],
     close() {
       stop.abort();
+      closeInvite(); // a shown token goes with the session
       this.unmount();
       for (const off of this.offs) if (typeof off === 'function') off();
       avatars.release();
@@ -271,6 +274,13 @@ $('login-form').addEventListener('submit', e => {
   if (secret) signIn(secret);
 });
 $('signout').addEventListener('click', () => signOut(''));
+// Add agent from any view: the invite dialog opens over the current screen,
+// which stays mounted. A created peer reloads the shared directory; the
+// dashboard follows the hub's directory_updated event.
+$('nav-add').addEventListener('click', e => {
+  const s = session;
+  if (s && s.ctx) openInvite(s.ctx, () => s.ctx.peers.reload(), e.currentTarget);
+});
 window.addEventListener('hashchange', () => { if (session) renderRoute(session); });
 // A peer named inside another link (an inbox row, a sidebar row) is a span
 // with data-peer: a plain click on it opens the peer instead of the row.
