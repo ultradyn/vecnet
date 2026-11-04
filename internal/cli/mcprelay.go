@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"mime"
 	"net/http"
 	"slices"
@@ -40,8 +41,11 @@ type mcpRelay struct {
 	a                *app
 	c                *client
 	session, version string
-	initialize       []byte
-	tools            map[string][]string
+	// discovered is the revision a server/discover answered; it is the
+	// header of a later stateless request that names none in params._meta.
+	discovered string
+	initialize []byte
+	tools      map[string][]string
 }
 
 func (a *app) cmdMCP(args []string) error {
@@ -161,8 +165,13 @@ func (r *mcpRelay) exchange(raw []byte, msg mcpRelayMessage, emit bool) error {
 	// property that the previous catalog caused us to inject.
 	wire := raw
 	var err error
+	if r.a.as != "" {
+		if err := r.bindResource(msg); err != nil {
+			return err
+		}
+	}
 	if r.a.as != "" && msg.Method == "tools/call" {
-		wire, err = r.bind(raw, msg.Params)
+		wire, err = r.bind(raw, msg)
 		if err != nil {
 			return err
 		}
@@ -182,7 +191,7 @@ func (r *mcpRelay) exchange(raw []byte, msg mcpRelayMessage, emit bool) error {
 		// A restarted hub may advertise different identity properties.
 		// Recheck the caller's original arguments under its new catalog.
 		if r.a.as != "" && msg.Method == "tools/call" {
-			wire, err = r.bind(raw, msg.Params)
+			wire, err = r.bind(raw, msg)
 			if err != nil {
 				return err
 			}
@@ -205,11 +214,20 @@ func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool) error {
 		return err
 	}
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	if r.session != "" {
-		req.Header.Set("Mcp-Session-Id", r.session)
+	session, version := r.session, r.version
+	if mv := mcpRelayMetaVersion(msg.Params); mv != "" && mv != version {
+		// A 2026-07-28 request (server/discover included) names its revision
+		// in params._meta, which the hub requires the header to equal. It
+		// belongs to no session (PROTOCOL §4.1).
+		session, version = "", mv
+	} else if version == "" {
+		version = r.discovered
 	}
-	if r.version != "" {
-		req.Header.Set("MCP-Protocol-Version", r.version)
+	if session != "" {
+		req.Header.Set("Mcp-Session-Id", session)
+	}
+	if version != "" {
+		req.Header.Set("MCP-Protocol-Version", version)
 	}
 	resp, err := r.c.send(req)
 	if err != nil {
@@ -234,9 +252,24 @@ func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool) error {
 					r.initialize = append(r.initialize[:0], raw...)
 					r.tools = nil
 				}
+			case "server/discover":
+				var result struct {
+					ProtocolVersion string `json:"protocolVersion"`
+				}
+				if json.Unmarshal(reply.Result, &result) == nil && result.ProtocolVersion != "" {
+					r.discovered = result.ProtocolVersion
+				}
 			case "tools/list":
 				if err := r.cacheTools(reply.Result); err != nil {
 					return err
+				}
+			case "resources/list":
+				if r.a.as != "" {
+					bound, err := r.boundResources(payload)
+					if err != nil {
+						return err
+					}
+					payload = bound
 				}
 			}
 		}
@@ -261,10 +294,13 @@ func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool) error {
 
 // mcpRelaySSE joins multi-line data fields within each frame, drops
 // comments and event metadata, and emits compact JSON one frame at a time.
+// Lines end in CR, LF or CRLF, as for every SSE reader (PROTOCOL §13.1).
 func mcpRelaySSE(body io.Reader, handle func([]byte) error) error {
-	// Response frames can contain a full inbox page. Read complete lines
-	// without a Scanner token ceiling; only requests have a size cap.
-	reader := bufio.NewReader(body)
+	// Response frames can contain a full inbox page: no token ceiling
+	// beyond memory; only requests have a size cap.
+	sc := bufio.NewScanner(body)
+	sc.Buffer(make([]byte, 0, 64<<10), math.MaxInt)
+	sc.Split(mcpRelaySSELines())
 	var data []string
 	flush := func() error {
 		if len(data) == 0 {
@@ -274,26 +310,155 @@ func mcpRelaySSE(body io.Reader, handle func([]byte) error) error {
 		data = nil
 		return err
 	}
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil && err != io.EOF {
-			return err
-		}
-		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	for sc.Scan() {
+		line := sc.Text()
 		if line == "" {
 			if err := flush(); err != nil {
 				return err
 			}
-		} else {
-			field, value, _ := strings.Cut(line, ":")
-			if field == "data" {
-				data = append(data, strings.TrimPrefix(value, " "))
-			}
+			continue
 		}
-		if err == io.EOF {
-			return flush()
+		field, value, _ := strings.Cut(line, ":")
+		if field == "data" {
+			data = append(data, strings.TrimPrefix(value, " "))
 		}
 	}
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	return flush()
+}
+
+// mcpRelaySSELines splits on CR, LF and CRLF like splitSSELines, but ends a
+// line at its CR at once and drops a following LF when it arrives, so a
+// live stream's CR-terminated frame is relayed without waiting for the
+// next byte.
+func mcpRelaySSELines() bufio.SplitFunc {
+	skipLF := false
+	return func(data []byte, atEOF bool) (int, []byte, error) {
+		start := 0
+		if skipLF && len(data) > 0 {
+			skipLF = false
+			if data[0] == '\n' {
+				start = 1
+			}
+		}
+		i := bytes.IndexAny(data[start:], "\r\n")
+		if i < 0 {
+			if atEOF && len(data) > start {
+				return len(data), data[start:], nil
+			}
+			return start, nil, nil
+		}
+		i += start
+		skipLF = data[i] == '\r'
+		return i + 1, data[start:i], nil
+	}
+}
+
+// mcpRelayMetaVersion is the revision a request names in params._meta,
+// read exactly as the hub reads it (mcpserver.metaVersion), or "".
+func mcpRelayMetaVersion(params json.RawMessage) string {
+	var p struct {
+		Meta map[string]any `json:"_meta"`
+	}
+	if len(params) == 0 || json.Unmarshal(params, &p) != nil {
+		return ""
+	}
+	for _, key := range []string{"io.modelcontextprotocol/protocolVersion", "protocolVersion"} {
+		if v, ok := p.Meta[key].(string); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// mcpRelayInboxURI is the inbox resource of peer id (PROTOCOL §4.2).
+func mcpRelayInboxURI(id string) string { return "vecnet://peer/" + id + "/inbox" }
+
+// bindResource holds a --as relay's resource methods to the bound peer's
+// own inbox: a principal's other peers and its aggregate inbox are refused
+// before anything is forwarded, like a tool argument naming another peer.
+func (r *mcpRelay) bindResource(msg mcpRelayMessage) error {
+	refused := &mcpBindingError{"relay is bound to --as " + r.a.as}
+	want := mcpRelayInboxURI(r.a.as)
+	params := msg.Params
+	if len(params) == 0 || string(params) == "null" {
+		params = json.RawMessage("{}")
+	}
+	switch msg.Method {
+	case "resources/read", "resources/subscribe", "resources/unsubscribe":
+		p, err := mcpRelayFields(params, "uri")
+		if err != nil {
+			return err
+		}
+		var uri string
+		if json.Unmarshal(p["uri"], &uri) != nil || uri != want {
+			return refused
+		}
+	case "subscriptions/listen":
+		p, err := mcpRelayFields(params, "resourceSubscriptions", "notifications")
+		if err != nil {
+			return err
+		}
+		lists := []json.RawMessage{p["resourceSubscriptions"]}
+		if n := p["notifications"]; len(n) > 0 && string(n) != "null" {
+			nested, err := mcpRelayFields(n, "resourceSubscriptions")
+			if err != nil {
+				return err
+			}
+			lists = append(lists, nested["resourceSubscriptions"])
+		}
+		for _, list := range lists {
+			if len(list) == 0 || string(list) == "null" {
+				continue
+			}
+			var uris []string
+			if json.Unmarshal(list, &uris) != nil {
+				return refused
+			}
+			for _, uri := range uris {
+				if uri != want {
+					return refused
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// boundResources keeps only the bound peer's inbox in a resources/list
+// reply; every other field is relayed as the hub sent it.
+func (r *mcpRelay) boundResources(payload []byte) ([]byte, error) {
+	invalid := errors.New("invalid resources list")
+	var reply, result map[string]json.RawMessage
+	var resources []json.RawMessage
+	if json.Unmarshal(payload, &reply) != nil || json.Unmarshal(reply["result"], &result) != nil ||
+		json.Unmarshal(result["resources"], &resources) != nil {
+		return nil, invalid
+	}
+	want := mcpRelayInboxURI(r.a.as)
+	kept := []json.RawMessage{}
+	for _, resource := range resources {
+		var entry struct {
+			URI string `json:"uri"`
+		}
+		if json.Unmarshal(resource, &entry) == nil && entry.URI == want {
+			kept = append(kept, resource)
+		}
+	}
+	var b bytes.Buffer
+	b.WriteByte('[')
+	for i, resource := range kept {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.Write(resource)
+	}
+	b.WriteByte(']')
+	result["resources"] = b.Bytes()
+	reply["result"] = mcpRelayEncodeFields(result)
+	return mcpRelayEncodeFields(reply), nil
 }
 
 func (r *mcpRelay) cacheTools(raw json.RawMessage) error {
@@ -325,8 +490,8 @@ func (r *mcpRelay) cacheTools(raw json.RawMessage) error {
 	return nil
 }
 
-func (r *mcpRelay) bind(raw, params json.RawMessage) ([]byte, error) {
-	p, err := mcpRelayFields(params, "name", "arguments")
+func (r *mcpRelay) bind(raw []byte, msg mcpRelayMessage) ([]byte, error) {
+	p, err := mcpRelayFields(msg.Params, "name", "arguments")
 	if err != nil {
 		return nil, &mcpBindingError{"invalid tools/call params"}
 	}
@@ -337,7 +502,13 @@ func (r *mcpRelay) bind(raw, params json.RawMessage) ([]byte, error) {
 	if r.tools == nil {
 		// Private ids cannot collide on the wire: these responses are consumed
 		// here and are never emitted to the stdio client.
-		list := []byte(`{"jsonrpc":"2.0","id":"vecnet-relay-tools","method":"tools/list","params":{}}`)
+		params := `{}`
+		if mv := mcpRelayMetaVersion(msg.Params); mv != "" {
+			// A stateless caller's catalogue is fetched in its own revision.
+			encoded, _ := json.Marshal(mv)
+			params = `{"_meta":{"io.modelcontextprotocol/protocolVersion":` + string(encoded) + `}}`
+		}
+		list := []byte(`{"jsonrpc":"2.0","id":"vecnet-relay-tools","method":"tools/list","params":` + params + `}`)
 		var msg mcpRelayMessage
 		_ = json.Unmarshal(list, &msg)
 		if err := r.exchange(list, msg, false); err != nil {
