@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { SendRequest } from '../../hub-client/src/wire.ts';
 import { createFakeBackend } from './fake-backend.ts';
@@ -12,9 +15,17 @@ import type { LaunchDeps } from '../src/launch.ts';
 import type { SessionHooks } from '../src/backend.ts';
 
 const hooks: SessionHooks = { onEvent() {}, async onPermissionRequest(r) { return {optionId:r.defaultOnExpiry,decidedBy:'expired'}; }, async onQuestion() { return {answers:{},answeredBy:'timeout'}; } };
-function setup(t: { after(fn: () => void): void }) {
-  const clock = fakeClock(100), ledger = openLedger(':memory:',clock), log = memoryLog();
-  t.after(() => ledger.close());
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return {promise,resolve};
+}
+function setup(t: { after(fn: () => void): void }, persistent = false) {
+  const dir = persistent ? mkdtempSync(join(tmpdir(),'launcher-reattach-')) : undefined;
+  const path = dir ? join(dir,'ledger.sqlite') : ':memory:';
+  const clock = fakeClock(100), log = memoryLog();
+  let ledger = openLedger(path,clock);
+  t.after(() => { ledger.close(); if (dir) rmSync(dir,{recursive:true,force:true}); });
   const backend = createFakeBackend({clock});
   const outbox = createOutbox({ledger,clock,log,hub:{async send() { throw new Error('unused'); },async receipt() {}}});
   const jobs = createJobReporter({ledger,outbox});
@@ -24,7 +35,13 @@ function setup(t: { after(fn: () => void): void }) {
   ledger.createJob(row); jobs.report(row.jobId,'accepted');
   const job = () => ledger.job(row.jobId)!;
   const reports = () => ledger.pendingOutbox(100,clock.now()).map(r => r.payload as SendRequest).filter(r => r.kind === 'job_status').map(r => r.job_status!);
-  return {deps,ledger,clock,backend,job,reports};
+  const restart = () => {
+    assert.ok(persistent);
+    ledger.close(); ledger = openLedger(path,clock); deps.ledger = ledger;
+    deps.jobs = createJobReporter({ledger,outbox:createOutbox({ledger,clock,log,hub:{async send() { throw new Error('unused'); },async receipt() {}}})});
+    return {...deps};
+  };
+  return {deps,ledger,clock,backend,job,reports,restart};
 }
 async function drain<T>(promise: Promise<T>, clock: ReturnType<typeof fakeClock>): Promise<T> {
   let done = false; void promise.then(() => { done = true; },() => { done = true; });
@@ -33,6 +50,78 @@ async function drain<T>(promise: Promise<T>, clock: ReturnType<typeof fakeClock>
 }
 
 import { reattachAll, retryPending } from '../src/reattach.ts';
+
+for (const retry of [false,true]) {
+  for (const terminal of ['cancelled','failed'] as const) {
+    test(`a deferred ${retry ? 'pending retry' : 'reattach'} after ${terminal} keeps capacity released and returns no handle`, async t => {
+      const {deps,ledger,clock,job,backend,reports} = setup(t);
+      await startLaunch(job(),deps);
+      if (retry) {
+        backend.failReattach(1); await reattachAll(deps); clock.advance(30000);
+      }
+      const entered = deferred(), release = deferred();
+      const reattach = backend.reattach.bind(backend);
+      backend.reattach = async (...args) => {
+        const result = await reattach(...args);
+        entered.resolve(); await release.promise;
+        return result;
+      };
+      const pending = retry ? retryPending(deps) : reattachAll(deps);
+      await entered.promise;
+      deps.jobs.report(job().jobId,terminal);
+      const endedAt = job().endedAt;
+      assert.equal(ledger.counts().open,0);
+      release.resolve();
+      const [result] = await pending;
+      assert.equal(job().state,'ended'); assert.equal(job().terminal,terminal);
+      assert.equal(job().endedAt,endedAt); assert.equal(ledger.counts().open,0);
+      assert.equal(result.outcome,'lost'); assert.ok(!('handle' in result));
+      assert.equal(backend.sessions()[0].settles,1); assert.equal(backend.sessions()[0].state.kind,'ended');
+      assert.equal(job().reattachPending,false);
+      assert.deepEqual(reports().map(r => [r.state,r.sequence]),[['accepted',1],['running',2],[terminal,3]]);
+    });
+  }
+}
+
+test('a late handle whose settle fails is retried durably without reopening the ended job or posting unreachable notes', async t => {
+  const {deps,ledger,clock,job,backend,reports,restart} = setup(t,true);
+  const launch = backend.launch.bind(backend);
+  backend.launch = async (...args) => {
+    const handle = await launch(...args);
+    handle.settle = async () => { throw new Error('offline'); };
+    return handle;
+  };
+  deps.beforeRecordRef = () => { deps.jobs.report(job().jobId,'cancelled'); };
+  assert.equal((await startLaunch(job(),deps)).ok,false);
+  assert.equal(job().state,'ended'); assert.equal(job().terminal,'cancelled');
+  assert.equal(job().reattachPending,true); assert.equal(ledger.counts().open,0);
+  assert.deepEqual(await retryPending({...deps}),[]);
+  clock.advance(300000);
+  const [result] = await retryPending(restart());
+  assert.equal(result.outcome,'lost'); assert.ok(!('handle' in result));
+  assert.equal(job().state,'ended'); assert.equal(job().terminal,'cancelled');
+  assert.equal(job().reattachPending,false); assert.equal(deps.ledger.counts().open,0);
+  assert.equal(backend.sessions()[0].settles,1); assert.equal(backend.sessions()[0].state.kind,'ended');
+  assert.deepEqual(reports().map(r => [r.state,r.sequence]),[['accepted',1],['cancelled',2]]);
+  assert.ok(!deps.ledger.pendingOutbox(100,clock.now()).some(r => (r.payload as SendRequest).kind === 'message'));
+});
+
+for (const sent of [false,true]) {
+  test(`restart reattaches a settling job without duplicating its ${sent ? 'sent' : 'queued'} running status`, async t => {
+    const {deps,ledger,clock,job,reports,restart} = setup(t,true);
+    await startLaunch(job(),deps);
+    const sequence = job().statusSeq;
+    if (sent) for (const row of ledger.pendingOutbox(100,clock.now())) ledger.markOutbox(row.id,'sent');
+    ledger.updateJob(job().jobId,{state:'settling'});
+    const before = reports();
+    const restarted = restart();
+    const [result] = await reattachAll(restarted);
+    assert.equal(result.outcome,'live'); assert.ok('handle' in result);
+    assert.equal(job().state,'settling'); assert.equal(job().terminal,null);
+    assert.equal(job().statusSeq,sequence); assert.deepEqual(reports(),before);
+    assert.equal(restarted.ledger.counts().open,1);
+  });
+}
 
 test('kill between launch and record (beforeRecordRef throws) → reattachAll adopts via findByTag; exactly one fake session exists', async t => {
   const {deps,job,backend,reports} = setup(t);

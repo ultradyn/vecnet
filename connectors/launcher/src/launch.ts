@@ -31,7 +31,7 @@ export function pendingDue(job: JobRow, deps: LaunchDeps): boolean {
   const store = deps.ledger.kv('reattach'), raw = store.get(job.jobId);
   if (!raw) return true;
   const pending: Pending = JSON.parse(raw);
-  if (!pending.noted && deps.clock.now()-pending.since >= 300000) {
+  if (job.state !== 'ended' && job.terminal === null && !pending.noted && deps.clock.now()-pending.since >= 300000) {
     deps.ledger.tx(() => {
       const n = deps.ledger.nextCounter(job.jobId,'unreachable');
       const key = `vl.nt.${job.jobId}.unreachable.${n}`;
@@ -61,18 +61,37 @@ export async function findByTagWithRetry(backend: Backend, tag: string, deps: Pi
   return unreachable ? 'unreachable' : null;
 }
 
-export function recordRunning(job: JobRow, handle: SessionHandle, deps: LaunchDeps, branch?: string): void {
+export function recordRunning(job: JobRow, handle: SessionHandle, deps: LaunchDeps, branch?: string): boolean {
   const ref = handle.ref;
-  deps.ledger.tx(() => {
+  return deps.ledger.tx(() => {
     const current = deps.ledger.job(job.jobId)!;
     const resolvedBranch = typeof ref.extra?.branch === 'string' ? ref.extra.branch : branch ?? current.branch;
     const workspace = typeof ref.extra?.workspace === 'string' ? ref.extra.workspace : current.workspace;
-    deps.ledger.updateJob(job.jobId,{sessionRef:ref,branch:resolvedBranch || null,workspace,state:'running',sessionKind:handle.state().kind});
+    // Keep late refs for cleanup without reopening terminal jobs or their slots.
+    if (current.terminal !== null || current.state === 'ended') {
+      deps.ledger.updateJob(job.jobId,{sessionRef:ref,branch:resolvedBranch || null,workspace});
+      markPending(job.jobId,deps);
+      return false;
+    }
+    deps.ledger.updateJob(job.jobId,{sessionRef:ref,branch:resolvedBranch || null,workspace,state:current.state === 'settling' ? 'settling' : 'running',sessionKind:handle.state().kind});
     clearPending(job.jobId,deps);
-    if (current.state !== 'running') deps.jobs.report(job.jobId,'running',{
+    // Settling follows running; lifecycle state is not a reason to report it again.
+    if (current.state === 'accepted' || current.state === 'launching') deps.jobs.report(job.jobId,'running',{
       session_ref:ref,branch:resolvedBranch || null,workspace,link:ref.extra?.link,
     });
+    return true;
   });
+}
+
+export async function settleLateHandle(job: JobRow, handle: SessionHandle, deps: LaunchDeps): Promise<void> {
+  try {
+    await handle.settle(job.terminal === 'cancelled' ? 'cancel' : 'lost');
+    clearPending(job.jobId,deps);
+  } catch {
+    // recordRunning saved the ref and retry schedule atomically. An ended job
+    // stays out of capacity while retryPending finishes its backend cleanup.
+    deps.log.warn('late session cleanup unavailable',{backend:job.backend,jobId:job.jobId});
+  }
 }
 
 // A failure fence is durable and distinct from a crash before recording the ref.
@@ -114,7 +133,7 @@ export async function startLaunch(job: JobRow, deps: LaunchDeps, signal?: AbortS
   // callers must never invoke launch a second time, even on an idempotent fake.
   const claimed = deps.ledger.tx(() => {
     const current = deps.ledger.job(job.jobId);
-    if (!current || current.state !== 'accepted') return false;
+    if (!current || current.terminal !== null || current.state !== 'accepted') return false;
     deps.ledger.updateJob(job.jobId,{state:'launching'});
     return true;
   });
@@ -143,6 +162,9 @@ export async function startLaunch(job: JobRow, deps: LaunchDeps, signal?: AbortS
   // This seam represents process death, so it deliberately escapes the launch
   // error handler. Restart adoption, rather than failure cleanup, owns the gap.
   deps.beforeRecordRef?.(job.jobId);
-  recordRunning(job,handle,deps,branch);
+  if (!recordRunning(job,handle,deps,branch)) {
+    await settleLateHandle(deps.ledger.job(job.jobId)!,handle,deps);
+    return {ok:false,error:'outcome_unknown'};
+  }
   return {ok:true,handle};
 }

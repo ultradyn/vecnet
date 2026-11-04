@@ -1,7 +1,7 @@
 import type { SessionHandle } from './backend.ts';
 import type { JobRow } from './ledger.ts';
 import type { LaunchDeps } from './launch.ts';
-import { clearPending, markPending, pendingDue, recordRunning, recoverFailedLaunch, startLaunch } from './launch.ts';
+import { clearPending, markPending, pendingDue, recordRunning, recoverFailedLaunch, settleLateHandle, startLaunch } from './launch.ts';
 
 export type ReattachOutcome =
   | { job: JobRow; outcome: 'live' | 'parked' | 'adopted'; handle: SessionHandle }
@@ -45,7 +45,10 @@ async function reattach(job: JobRow, deps: LaunchDeps): Promise<ReattachOutcome>
     if (!job.sessionRef) deps.ledger.updateJob(job.jobId,{sessionRef:ref});
     const result = await backend.reattach(ref,deps.hooks(deps.ledger.job(job.jobId)!));
     if (result.found === 'none') return lost(job,deps);
-    recordRunning(job,result.handle,deps);
+    if (!recordRunning(job,result.handle,deps)) {
+      await settleLateHandle(deps.ledger.job(job.jobId)!,result.handle,deps);
+      return {job:deps.ledger.job(job.jobId)!,outcome:'lost'};
+    }
     return {job:deps.ledger.job(job.jobId)!,outcome:job.sessionRef ? result.found : 'adopted',handle:resumingHandle(result.handle,job,deps)};
   } catch {
     markPending(job.jobId,deps);
@@ -59,7 +62,13 @@ export async function reattachAll(deps: LaunchDeps): Promise<ReattachOutcome[]> 
 }
 export async function retryPending(deps: LaunchDeps): Promise<ReattachOutcome[]> {
   const results: ReattachOutcome[] = [];
-  for (const job of deps.ledger.openJobs()) {
+  const jobs = deps.ledger.openJobs();
+  // A late handle may still need cleanup after its job released capacity.
+  for (const jobId of deps.ledger.kv('reattach').keys()) {
+    const job = deps.ledger.job(jobId);
+    if (job?.state === 'ended' && job.reattachPending) jobs.push(job);
+  }
+  for (const job of jobs) {
     if (job.reattachPending && pendingDue(job,deps)) results.push(await reattach(job,deps));
   }
   return results;

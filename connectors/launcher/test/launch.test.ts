@@ -13,6 +13,11 @@ import type { LaunchDeps } from '../src/launch.ts';
 import type { SessionHooks } from '../src/backend.ts';
 
 const hooks: SessionHooks = { onEvent() {}, async onPermissionRequest(r) { return {optionId:r.defaultOnExpiry,decidedBy:'expired'}; }, async onQuestion() { return {answers:{},answeredBy:'timeout'}; } };
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return {promise,resolve};
+}
 function setup(t: { after(fn: () => void): void }) {
   const clock = fakeClock(100), ledger = openLedger(':memory:',clock), log = memoryLog();
   t.after(() => ledger.close());
@@ -62,6 +67,32 @@ test('startLaunch: accepted → launching → running with session_ref, branch a
   assert.deepEqual(reports()[1].output,{session_ref:job().sessionRef,branch:'launch/job_one',workspace:'/repo',link:'fake:job_one'});
   await startLaunch(job(),deps); assert.equal(backend.sessions().length,1); assert.equal(ledger.job('job_one')!.statusSeq,2);
 });
+
+for (const terminal of ['cancelled','failed'] as const) {
+  test(`a launch resolving after ${terminal} keeps the job ended and settles the late handle`, async t => {
+    const {deps,ledger,job,backend,reports} = setup(t);
+    const entered = deferred(), release = deferred();
+    const launch = backend.launch.bind(backend);
+    backend.launch = async (...args) => {
+      const handle = await launch(...args);
+      entered.resolve(); await release.promise;
+      return handle;
+    };
+    const pending = startLaunch(job(),deps);
+    await entered.promise;
+    deps.jobs.report(job().jobId,terminal);
+    const endedAt = job().endedAt;
+    assert.equal(ledger.counts().open,0);
+    release.resolve();
+    const result = await pending;
+    assert.equal(job().state,'ended'); assert.equal(job().terminal,terminal);
+    assert.equal(job().endedAt,endedAt); assert.equal(ledger.counts().open,0);
+    assert.equal(result.ok,false); assert.ok(!('handle' in result));
+    assert.equal(backend.sessions()[0].settles,1); assert.equal(backend.sessions()[0].state.kind,'ended');
+    assert.deepEqual(job().sessionRef,backend.sessions()[0].ref);
+    assert.deepEqual(reports().map(r => [r.state,r.sequence]),[['accepted',1],[terminal,2]]);
+  });
+}
 
 test('startLaunch failure with no session → failed backend_error, no retry', async t => {
   const {deps,clock,job,backend,reports} = setup(t);
