@@ -78,6 +78,17 @@ span,b,time,code,a{unicode-bidi:isolate}
 .va .nav .cnt.hot{color:#0b0f19;background:var(--wake);border-radius:9px;padding:1px 6px}
 .va .nav .none{font-size:12.5px;color:var(--dim);padding:4px 9px}
 .va .grp{font-size:12px;color:var(--dim);padding:20px 9px 6px}
+/* Thread rows (Your Threads and Other Threads): title and count, then
+   participants and last activity. An untitled thread's stand-in is dim italic. */
+.va .nav.rows a{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:8px;row-gap:1px;align-items:baseline;padding:5px 9px}
+.va .nav.rows .tt.un{color:var(--dim);font-style:italic}
+.va .nav.rows a:hover .tt.un,.va .nav.rows a.on .tt.un{color:var(--muted)}
+.va .nav.rows .pp{font-size:11.5px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.va .nav.rows .cnt,.va .nav.rows .ago{justify-self:end}
+.va .nav.rows .ago{font:400 11px var(--mono);color:var(--dim)}
+.va .nav.rows a:hover .pp,.va .nav.rows a.on .pp{color:var(--muted)}
+.va .nav .more{display:block;color:var(--dim);font-size:12px;padding:6px 9px;text-decoration:none}
+.va .nav .more:hover{color:var(--text)}
 .va .me{display:flex;align-items:center;gap:8px;padding:6px 9px;font-size:13px;color:var(--muted)}
 .conn{display:flex;align-items:center;gap:7px;padding:4px 9px;font:400 11.5px var(--mono);color:var(--dim);margin-top:auto}
 .conn i{width:7px;height:7px;border-radius:50%;background:#64748b}

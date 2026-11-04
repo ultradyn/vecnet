@@ -62,7 +62,8 @@
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
     "Never read, write or lock the real ~/.config/vecnet or ~/.cache/vecnet: every test and smoke sets VECNET_CONFIG, XDG_CONFIG_HOME and XDG_CACHE_HOME under a temp dir. This host runs a live vecnet peer whose state must not change.",
     "Every string a peer supplies is hostile by design: when you inspect hook output, tmux captures or message bodies, pipe them through cat -v.",
-    "The hook must never block or fail a turn: every path after dispatch exits 0 within the 1.5 s budget."
+    "The hook must never block or fail a turn: every path after dispatch exits 0 within the 1.5 s budget.",
+    "COORDINATOR DECISION (693da95): publication is at-least-once. Shown ids and PollCursor commit only after hookOutput was fully written by a goroutine write bounded by the context; a failed or timed-out write commits nothing and repeats next turn. Do NOT reintroduce atomic pipe publication, capacity probing, per-OS byte ceilings or platform pipe code. Accepted trade-offs: a timed-out write may leave a partial frame on stdout (the delivery repeats), a stuck in-process write may finish after cmdHook returns (the CLI process exits), and SIGPIPE from a closed reader may end the process before commit (the delivery repeats). Flag only real loss of a delivery, a turn blocked beyond the budget, or non-zero exit on a path with a live reader."
    ]
   },
   {
@@ -74,7 +75,8 @@
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
     "Never read, write or lock the real ~/.config/vecnet or ~/.cache/vecnet: every test and smoke sets VECNET_CONFIG, XDG_CONFIG_HOME and XDG_CACHE_HOME under a temp dir. This host runs a live vecnet peer whose state must not change.",
-    "Never write a real settings file: tests use temp dirs; --write defaults to settings.local.json at the git top-level."
+    "Never write a real settings file: tests use temp dirs; --write defaults to settings.local.json at the git top-level.",
+    "COORDINATOR DECISION: a settings handler is ours ONLY if its command is exactly a form hookCommand emits (bare safe path or hookCommand single-quoted path, then hook --profile P --event E, optional --auto-ack); profiles may not start with a dash. Everything else is foreign and preserved, and ours is appended beside it. Do NOT add shell parsing or flag-reordering recognition; a hand-edited variant staying alongside ours is accepted. Flag only deletion or rewriting of a foreign handler, a non-idempotent repeat install of the exact form, or loss of order/indent."
    ]
   },
   {
@@ -95,10 +97,10 @@
    "suite": "./internal/opseed/demo/",
    "route": "sol",
    "checks": [
-    "build2 node --test --test-concurrency=2 scripts/ui/"
+    "build2 node --test --test-concurrency=2 scripts/ui/*.test.mjs"
    ],
    "reviewChecks": [
-    "build2 node --test --test-concurrency=2 scripts/ui/"
+    "build2 node --test --test-concurrency=2 scripts/ui/*.test.mjs"
    ],
    "hazards": [
     "The screen scripts share the two-core build2 slice with other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
@@ -131,13 +133,13 @@
    "suite": "./internal/ui/...",
    "route": "sol",
    "checks": [
-    "build2 node --test --test-concurrency=2 scripts/ui/",
+    "build2 node --test --test-concurrency=2 scripts/ui/*.test.mjs",
     "build2 node scripts/ui/md-thread.mjs",
     "build2 node scripts/ui/dash.mjs",
     "build2 node scripts/ui/subs.mjs"
    ],
    "reviewChecks": [
-    "build2 node --test --test-concurrency=2 scripts/ui/",
+    "build2 node --test --test-concurrency=2 scripts/ui/*.test.mjs",
     "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-hook-hygiene/review-shots/07 build2 node scripts/ui/md-thread.mjs"
    ],
    "hazards": [
@@ -153,7 +155,7 @@
    "route": "sol",
    "checks": [
     "build2 node --test --test-concurrency=2 internal/ui/jstest/",
-    "build2 node --test --test-concurrency=2 scripts/ui/",
+    "build2 node --test --test-concurrency=2 scripts/ui/*.test.mjs",
     "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-hook-hygiene/gate-shots just ui-shots"
    ],
    "reviewChecks": [
@@ -183,12 +185,12 @@
  ],
  "mergeChecks": [
   "build2 node --test --test-concurrency=2 internal/ui/jstest/",
-  "build2 node --test --test-concurrency=2 scripts/ui/",
+  "build2 node --test --test-concurrency=2 scripts/ui/*.test.mjs",
   "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-hook-hygiene/merge-shots just ui-shots (the whole screen gate: a regression halts at the merge that caused it)"
  ],
  "gateChecks": [
   "`build2 node --test --test-concurrency=2 internal/ui/jstest/`",
-  "`build2 node --test --test-concurrency=2 scripts/ui/`",
+  "`build2 node --test --test-concurrency=2 scripts/ui/*.test.mjs`",
   "`just isa-check` prints 0 for both binaries",
   "`build2 go list -deps ./cmd/vecnet | grep -c 'modernc.org/sqlite'` prints 0",
   "`GOOS=windows build2 go build -p 2 -o /dev/null ./cmd/vecnet` and `GOOS=darwin build2 go build -p 2 -o /dev/null ./cmd/vecnet` succeed",

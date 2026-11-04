@@ -562,3 +562,21 @@ test('tagsFor operator_view mirrors opapi.Tags', () => {
     ['x', []],
   ]) assert.deepEqual(tagsFor({ type: 'operator_view', data }), want, JSON.stringify(data));
 });
+
+test('set replaces a loaded value, clears its error and notifies', async () => {
+  const store = createStore({ api: {} });
+  let fail = true;
+  const res = store.resource('threads', async () => { if (fail) throw new Error('down'); return { n: 1 }; });
+  let seen = 0;
+  res.subscribe(() => { seen++; });
+  await store.settled();
+  assert.ok(res.error());
+  const before = seen;
+  res.set({ n: 2 });
+  assert.deepEqual(res.get(), { n: 2 });
+  assert.equal(res.error(), null);
+  assert.equal(seen, before + 1);
+  fail = false;
+  await res.reload();
+  assert.deepEqual(res.get(), { n: 1 });
+});

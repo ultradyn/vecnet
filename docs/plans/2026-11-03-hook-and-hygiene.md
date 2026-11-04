@@ -620,7 +620,7 @@ test('reaps a tmux server whose owner pid is dead')                  // tmux -L 
 // recipes.test.mjs: both existing tests write a stub scripts/ui/reap-demos.sh (echo reap >> "$CALL_LOG"); the call log starts with "reap\n", before scripts/ui/smoke.mjs
 ```
 
-- [ ] **Step 2:** `CGO_ENABLED=0 build2 go test -p 2 ./internal/opseed/demo/` and `build2 node --test --test-concurrency=2 scripts/ui/` fail on the new tests.
+- [ ] **Step 2:** `CGO_ENABLED=0 build2 go test -p 2 ./internal/opseed/demo/` and `build2 node --test --test-concurrency=2 scripts/ui/*.test.mjs` fail on the new tests.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Both commands pass. Then `build2 node scripts/ui/smoke.mjs` and `build2 node scripts/ui/tui-shell.mjs` pass, and after them `pgrep -u "$(id -u)" -f 'vecnet-ui-build-[A-Za-z0-9]+/demo'` and `ls ${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/ | grep oui-` print nothing.
 - [ ] **Step 5: Commit** `fix: screen scripts no longer leak demo hubs (stdin EOF, process group, exit cleanup, reaper)`
@@ -773,7 +773,7 @@ test('times out on a selector that never appears')                             /
 - [ ] **Step 3: Gate.** Run:
   - `CGO_ENABLED=0 build2 go test -p 2 ./...`
   - `build2 node --test --test-concurrency=2 internal/ui/jstest/`
-  - `build2 node --test --test-concurrency=2 scripts/ui/` (recipes, ansi, leak, reap, stable)
+  - `build2 node --test --test-concurrency=2 scripts/ui/*.test.mjs` (recipes, ansi, leak, reap, stable)
   - `build2 go vet ./...`
   - `gofmt -l .`
   - `CGO_ENABLED=0 build2 go build -p 2 -o bin/ ./cmd/...`

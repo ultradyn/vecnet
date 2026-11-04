@@ -19,6 +19,7 @@ func (s *server) opRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/peers", s.opPeers)
 	mux.HandleFunc("GET /v1/admin/loop-cuts", s.opLoopCuts)
 	mux.HandleFunc("GET /v1/admin/delivery-health", s.opDeliveryHealth)
+	mux.HandleFunc("GET /v1/admin/activity", s.opActivity)
 }
 
 func opResult(w http.ResponseWriter, value any, err error) {
@@ -72,7 +73,12 @@ func (s *server) opThreads(w http.ResponseWriter, r *http.Request) {
 		writeError(w, opInvalid("participant", "participant must be a peer_ id"))
 		return
 	}
-	value, err := s.op.Threads(r.Context(), opapi.ThreadQuery{Participant: participant, Cursor: q.Get("cursor"), Limit: limit})
+	exclude := q.Get("exclude_participant")
+	if q.Has("exclude_participant") && !ids.Is(ids.Peer, exclude) {
+		writeError(w, opInvalid("exclude_participant", "exclude_participant must be a peer_ id"))
+		return
+	}
+	value, err := s.op.Threads(r.Context(), opapi.ThreadQuery{Participant: participant, ExcludeParticipant: exclude, Cursor: q.Get("cursor"), Limit: limit})
 	opResult(w, value, err)
 }
 

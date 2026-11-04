@@ -134,11 +134,19 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
         await null;
         await (running || start());
       },
+      // set replaces the value with one derived locally (the activity feed
+      // folding an entry into a loaded page) and tells the subscribers. A
+      // load already running still lands afterwards.
+      set(v) {
+        value = v;
+        err = null;
+        notify();
+      },
     };
     live.add(self);
     return {
       get: self.get, error: self.error, loading: self.loading,
-      subscribe: self.subscribe, reload: self.reload,
+      subscribe: self.subscribe, reload: self.reload, set: self.set,
     };
   }
 

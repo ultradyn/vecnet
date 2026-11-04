@@ -98,6 +98,8 @@ type Model struct {
 	hubOffset   time.Duration
 	started     time.Time
 	lastSlow    time.Time
+	beatEvery   time.Duration
+	slowEvery   time.Duration
 	toast       toast
 	progress    string // a running command's line, which a passing toast gives back
 	confirmQuit bool
@@ -117,25 +119,31 @@ func newModel(ctx context.Context, o Options) *Model {
 	if now == nil {
 		now = time.Now
 	}
+	beatEvery := o.BeatEvery
+	if beatEvery == 0 {
+		beatEvery = inboxBeatEvery
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	return &Model{
-		API:      o.API,
-		Profile:  o.Profile,
-		Hub:      o.Hub,
-		Now:      now,
-		Conn:     ConnConnecting,
-		Prio:     "wake",
-		Commands: map[string]Command{},
-		Data:     Data{Thread: map[string]*ThreadState{}, Errs: map[string]error{}},
-		screens:  []Screen{newInboxScreen(), newChatScreen(), newDashScreen(), newSubsScreen()},
-		loc:      time.Local,
-		ctx:      ctx,
-		cancel:   cancel,
-		inflight: map[string]bool{},
-		dirty:    map[string]bool{},
-		first:    map[string]bool{},
-		tailCh:   make(chan tea.Msg),
-		stopTail: func() {},
+		beatEvery: beatEvery,
+		slowEvery: min(slowEvery, beatEvery),
+		API:       o.API,
+		Profile:   o.Profile,
+		Hub:       o.Hub,
+		Now:       now,
+		Conn:      ConnConnecting,
+		Prio:      "wake",
+		Commands:  map[string]Command{},
+		Data:      Data{Thread: map[string]*ThreadState{}, Errs: map[string]error{}},
+		screens:   []Screen{newInboxScreen(), newChatScreen(), newDashScreen(), newSubsScreen()},
+		loc:       time.Local,
+		ctx:       ctx,
+		cancel:    cancel,
+		inflight:  map[string]bool{},
+		dirty:     map[string]bool{},
+		first:     map[string]bool{},
+		tailCh:    make(chan tea.Msg),
+		stopTail:  func() {},
 	}
 }
 

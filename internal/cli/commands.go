@@ -57,6 +57,9 @@ messaging:
   watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]
        does not ack; use --auto-ack or vecnet ack <cursor> to avoid replaying
        the log after a restart
+  hook [--event user-prompt|post-tool] [--profile P] [--auto-ack]
+       Claude Code hook: always exits 0
+  hook install [--profile P] [--write] [--settings PATH] [--auto-ack]
   threads [--limit N]
   thread <id> [--after MESSAGE_ID] [--limit N]
   peers
@@ -374,6 +377,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdAck(args)
 	case "watch":
 		return a.cmdWatch(args)
+	case "hook":
+		return a.cmdHook(args)
 	case "threads":
 		return a.cmdThreads(args)
 	case "thread":

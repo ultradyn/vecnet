@@ -77,12 +77,23 @@ test-ui:
 ui-shots:
     #!/usr/bin/env bash
     set -euo pipefail
-    build2 node --test --test-concurrency=2 scripts/ui/lib.test.mjs
+    bash scripts/ui/reap-demos.sh
+    build2 node --test --test-concurrency=2 scripts/ui/lib.test.mjs scripts/ui/closer.test.mjs
     for script in scripts/ui/*.mjs; do
         case "$script" in */lib.mjs|*/tmux.mjs|*/ansi.mjs|*/shots-index.mjs|*.test.mjs) continue ;; esac
         build2 node "$script"
     done
     build2 node scripts/ui/shots-index.mjs
+
+# Run a command on a build box against this worktree: sync, run, stream,
+# pull back SHOTS_DIR + files it wrote, exit with its status (docs/BUILDBOX.md)
+[positional-arguments]
+bb +ARGS:
+    bash {{quote(justfile_directory())}}/scripts/bb/run.sh "$@"
+
+# Remove one lane (a worktree basename) from the build boxes
+bb-clean LANE:
+    bash {{quote(justfile_directory())}}/scripts/bb/clean.sh {{quote(LANE)}}
 
 tui *ARGS:
     CGO_ENABLED=0 build2 go run -p 2 ./cmd/vecnet tui {{ARGS}}

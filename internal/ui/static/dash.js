@@ -2,6 +2,7 @@
 // dead-letter retry and discard and subscription resume live in the inbox.
 // Each section loads and fails on its own. The page reloads on the `peers` tag
 // and every 30 s while mounted. Ages use the hub clock, never the client's.
+import { activityAction } from './activity-model.js';
 import { allThreads, blockedLine, cutSummary, peerRows } from './dash-model.js';
 import { principalRows } from './principals-model.js';
 import { chip, h } from './dom.js';
@@ -172,7 +173,7 @@ export function mount(root, ctx) {
     return [table(['Thread', 'Participants', 'Messages', 'Budget left', 'Last activity', 'Cut'], rows.map(r => {
       const t = r.thread || {}, parts = t.participants || [];
       return h('tr', null,
-        h('td', null, h('a', { href: '#thread/' + t.thread_id, class: 'tl', text: threadTitle(t, ctx.me, peerName) }), idCell(t.thread_id)),
+        h('td', null, h('a', { href: '#thread/' + t.thread_id, class: 'tl' + (t.title ? '' : ' un'), text: threadTitle(t, ctx.me, peerName) }), idCell(t.thread_id)),
         h('td', null, h('span', { text: String(parts.length) }), h('span', { class: 'sub', text: parts.map(peerName).join(', ') })),
         h('td', { text: String(t.message_count ?? 0) }),
         h('td', { text: t.budget_remaining === null || t.budget_remaining === undefined ? 'unlimited' : String(t.budget_remaining), class: t.budget_remaining === 0 ? 'bad' : null }),
@@ -285,6 +286,14 @@ export function mount(root, ctx) {
   render();
   const offs = Object.values(res).map(r => r.subscribe(render));
   const timer = setInterval(() => { for (const r of Object.values(res)) r.reload(); }, RELOAD_MS);
+  // The thread list follows the activity feed (PROTOCOL §2.13) between reloads.
+  if (ctx.activity) {
+    offs.push(ctx.activity.subscribe(ev => {
+      const act = activityAction(res.threads.get(), ev);
+      if (act && act.reload) res.threads.reload();
+      else if (act && act.page) res.threads.set(act.page);
+    }));
+  }
   return () => {
     audit.alive = false;
     clearInterval(timer);

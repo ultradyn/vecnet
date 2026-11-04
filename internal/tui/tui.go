@@ -55,6 +55,7 @@ type Options struct {
 	Now          func() time.Time
 	In           io.Reader
 	Out          io.Writer
+	BeatEvery    time.Duration // presence heartbeat; zero means 20 minutes. Test-only override.
 }
 
 // Screen is one tab. Update receives every key the shell does not claim while

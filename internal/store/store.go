@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver (pure Go, CGO_ENABLED=0)
@@ -21,9 +22,27 @@ type DB struct{ *sql.DB }
 // the lock upgrade instead of queueing on busy_timeout.
 const dsnParams = "_txlock=immediate" +
 	"&_pragma=journal_mode(WAL)" +
-	"&_pragma=synchronous(FULL)" +
 	"&_pragma=busy_timeout(5000)" +
 	"&_pragma=foreign_keys(ON)"
+
+// synchronousEnv selects the WAL fsync policy. FULL (the default) fsyncs every
+// commit, so an acknowledged write survives power loss. NORMAL fsyncs only at
+// checkpoints: it survives a process crash but can lose the last transactions
+// on power loss, in exchange for far less fsync stall under I/O pressure
+// (issue 32). Dev hubs may opt in; production keeps FULL unless the operator
+// decides otherwise.
+const synchronousEnv = "VECNET_SQLITE_SYNCHRONOUS"
+
+func synchronousPragma() (string, error) {
+	switch v := strings.ToLower(os.Getenv(synchronousEnv)); v {
+	case "", "full":
+		return "&_pragma=synchronous(FULL)", nil
+	case "normal":
+		return "&_pragma=synchronous(NORMAL)", nil
+	default:
+		return "", fmt.Errorf("store: %s=%q: want full or normal", synchronousEnv, v)
+	}
+}
 
 // maxOpenConns bounds the pool; writers serialise on the SQLite write lock anyway.
 const maxOpenConns = 4
@@ -35,7 +54,11 @@ var uriPathEscaper = strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23")
 // Open opens (creating if needed) the database at path, applies pragmas on
 // every connection, and runs all pending migrations.
 func Open(path string) (*DB, error) {
-	dsn := "file:" + uriPathEscaper.Replace(path) + "?" + dsnParams
+	sync, err := synchronousPragma()
+	if err != nil {
+		return nil, err
+	}
+	dsn := "file:" + uriPathEscaper.Replace(path) + "?" + dsnParams + sync
 	sqldb, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)

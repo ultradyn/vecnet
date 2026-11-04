@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -330,5 +331,41 @@ func TestDirectoryUpdatedOnEnrol(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("long-poll did not wake on enrolment")
+	}
+}
+
+// GET /v1/peers/me names the authenticated caller, so a client can bind
+// local state to an identity rather than to its config text (PROTOCOL
+// §2.10): kind plus the credential's own id, and nothing else.
+func TestGetPeersMe(t *testing.T) {
+	env := testhub.Start(t)
+	peer, peerSecret := env.NewPeer("session", "me-peer")
+	prn, prnSecret := env.NewPrincipal("me-principal")
+	for _, tc := range []struct {
+		secret string
+		want   map[string]string
+	}{
+		{peerSecret, map[string]string{"kind": "peer", "peer_id": peer}},
+		{prnSecret, map[string]string{"kind": "principal", "principal_id": prn}},
+	} {
+		resp, body := env.Do(tc.secret, "GET", "/v1/peers/me", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /v1/peers/me = %d; %s", resp.StatusCode, body)
+		}
+		var got map[string]string
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("decode: %v; %s", err, body)
+		}
+		// Exact keys: the other credential type's id is absent, not empty.
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("GET /v1/peers/me = %s, want exactly %v", body, tc.want)
+		}
+	}
+	if resp, _ := env.Do("", "GET", "/v1/peers/me", nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous GET /v1/peers/me = %d, want 401", resp.StatusCode)
+	}
+	// The GET route must not shadow the existing PATCH on the same path.
+	if resp, body := env.Do(peerSecret, "PATCH", "/v1/peers/me", map[string]string{"subscribe_presence": "none"}); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("PATCH /v1/peers/me = %d; %s", resp.StatusCode, body)
 	}
 }

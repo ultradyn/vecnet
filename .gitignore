@@ -25,3 +25,5 @@ backups/
 
 .demo-data/
 .scratch/vecnet/build-hook-hygiene/
+.scratch/vecnet/bb-lane/
+!scripts/bb/bin/

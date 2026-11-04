@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -71,6 +73,15 @@ func monitorOutput(t *testing.T, name, text string) string {
 					"message_id": "msg_X", "thread_id": "thr_X", "sender": "peer_X",
 					"content": map[string]string{"text": text},
 				}},
+			}
+			if r.Header.Get("Accept") != "text/event-stream" {
+				w.Header().Set("Content-Type", "application/json")
+				events := []any{}
+				if r.URL.Query().Get("after") == "" {
+					events = append(events, ev)
+				}
+				json.NewEncoder(w).Encode(map[string]any{"events": events, "next_cursor": "e1.1"})
+				return
 			}
 			raw, _ := json.Marshal(ev)
 			fmt.Fprintf(w, "id: e1.1\nevent: delivery\ndata: %s\n\n", raw)
@@ -322,5 +333,86 @@ func TestWatchJSONUnchanged(t *testing.T) {
 		if !json.Valid([]byte(line)) {
 			t.Fatalf("watch JSON contains a header or non-JSON line: %q", line)
 		}
+	}
+}
+
+func TestWatchPlainIgnoresShownState(t *testing.T) {
+	for _, args := range [][]string{{"watch"}, {"--json", "watch", "--for-monitor"}} {
+		t.Run(strings.Join(args, "-"), func(t *testing.T) {
+			env := testhub.Start(t)
+			_, senderSecret := env.NewPeer("session", "Sender")
+			recipient, secret := env.NewPeer("session", "Watcher")
+			sender := profileUser(t, env.URL, senderSecret)
+			u := profileUser(t, env.URL, secret)
+			u.env["XDG_CONFIG_HOME"] = filepath.Join(filepath.Dir(u.conf), "xdg")
+			sent := sender.send(recipient, "already shown", "--hold")
+			path := filepath.Join(filepath.Dir(u.conf), "state", "p.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(map[string]any{"shown": []string{sent.Deliveries[0].DeliveryID}})
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, stop := startWatch(t, u, args...)
+			waitLine(t, out, regexp.MustCompile(regexp.QuoteMeta(sent.MessageID)), 5*time.Second)
+			stop()
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != string(raw) {
+				t.Fatalf("plain/JSON watch modified shown state: %s, %v", got, err)
+			}
+		})
+	}
+}
+
+// A shown-set bound to another identity (a re-pointed profile) must not hide
+// this identity's live deliveries: watch resets it before claiming.
+func TestWatchMismatchedStateDoesNotSuppressLive(t *testing.T) {
+	ev := map[string]any{
+		"cursor": "e1.1", "type": "delivery",
+		"data": map[string]any{"delivery_id": "dly_X", "message": map[string]any{
+			"message_id": "msg_X", "thread_id": "thr_X", "sender": "peer_X",
+			"content": map[string]string{"text": "live for the new identity"},
+		}},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/peers/me":
+			fmt.Fprint(w, `{"kind":"peer","peer_id":"peer_A"}`)
+		case r.URL.Path == "/v1/peers":
+			fmt.Fprint(w, `{"peers":[]}`)
+		case r.URL.Path == "/v1/events" && r.Header.Get("Accept") != "text/event-stream":
+			fmt.Fprint(w, `{"events":[],"next_cursor":"e1.0"}`)
+		case r.URL.Path == "/v1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			raw, _ := json.Marshal(ev)
+			fmt.Fprintf(w, "id: e1.1\nevent: delivery\ndata: %s\n\n", raw)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	u := profileUser(t, srv.URL, "vn_peer_test")
+	state := filepath.Join(filepath.Dir(u.conf), "state", "p.json")
+	if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := `{"hub":"http://other-hub.example","caller":"peer_OTHER","cred":"0123456789abcdef","poll_cursor":"e9.9","shown":["dly_X"]}`
+	if err := os.WriteFile(state, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, stop := startWatch(t, u, "watch", "--for-monitor")
+	waitLine(t, out, regexp.MustCompile(`live for the new identity$`), 5*time.Second)
+	stop()
+	raw, err := os.ReadFile(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil || got["caller"] != "peer_A" || got["poll_cursor"] != nil || len(got["shown"].([]any)) != 1 {
+		t.Fatalf("watch did not rebind the state: %s", raw)
 	}
 }

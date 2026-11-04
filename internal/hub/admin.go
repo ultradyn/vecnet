@@ -736,6 +736,8 @@ func (h *Hub) PatchThread(ctx context.Context, thrID string, p ThreadPatch) erro
 	if len(notify) > 0 {
 		h.Log.Notify(notify...)
 	}
+	// A rename changes what thread lists show: open feeds re-read the row.
+	h.Activity.Publish(ActivityEvent{Type: "thread", ThreadID: thrID, At: h.nowStr()})
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/opapi"
@@ -45,6 +46,7 @@ func TestOpParamValidation(t *testing.T) {
 		{"/v1/admin/loop-cuts?hours=0", "hours"}, {"/v1/admin/loop-cuts?hours=169", "hours"}, {"/v1/admin/loop-cuts?hours=no", "hours"},
 		{"/v1/admin/inbox?before=xyz", "before"}, {"/v1/admin/inbox?before=dly_nope", "before"}, {"/v1/admin/inbox?before=", "before"},
 		{"/v1/admin/threads?participant=xyz", "participant"}, {"/v1/admin/threads?participant=peer_nope", "participant"}, {"/v1/admin/threads?participant=", "participant"},
+		{"/v1/admin/threads?exclude_participant=xyz", "exclude_participant"}, {"/v1/admin/threads?exclude_participant=peer_nope", "exclude_participant"}, {"/v1/admin/threads?exclude_participant=", "exclude_participant"},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			resp, raw := env.Do(env.OperatorSecret, "GET", tc.path, nil)
@@ -54,11 +56,37 @@ func TestOpParamValidation(t *testing.T) {
 			}
 		})
 	}
-	for _, path := range []string{"/v1/admin/loop-cuts?hours=1", "/v1/admin/loop-cuts?hours=168", "/v1/admin/inbox?before=dly_01J00000000000000000000000", "/v1/admin/threads?participant=" + env.OperatorPeer} {
+	for _, path := range []string{"/v1/admin/loop-cuts?hours=1", "/v1/admin/loop-cuts?hours=168", "/v1/admin/inbox?before=dly_01J00000000000000000000000", "/v1/admin/threads?participant=" + env.OperatorPeer, "/v1/admin/threads?exclude_participant=" + env.OperatorPeer} {
 		resp, raw := env.Do(env.OperatorSecret, "GET", path, nil)
 		if resp.StatusCode != 200 {
 			t.Fatalf("valid parameters on %s = %d: %s", path, resp.StatusCode, raw)
 		}
+	}
+}
+
+// exclude_participant drops the operator's own threads on the wire, so the
+// web sidebar's Other Threads page is the newest threads it is not in.
+func TestOpThreadsExcludeParticipant(t *testing.T) {
+	env := testhub.Start(t)
+	a, asec := env.NewPeer("session", "A")
+	b, _ := env.NewPeer("session", "B")
+	other := postSend(t, env, asec, sendBody("exclude-other", b), 202)
+	env.Now.Advance(time.Second)
+	mine := postSend(t, env, asec, sendBody("exclude-mine", env.OperatorPeer), 202)
+	resp, raw := env.Do(env.OperatorSecret, "GET", "/v1/admin/threads?exclude_participant="+env.OperatorPeer, nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("exclude = %d: %s", resp.StatusCode, raw)
+	}
+	var page opapi.ThreadPage
+	if err := json.Unmarshal(raw, &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Threads) != 1 || page.Threads[0].Thread.ThreadID != other.ThreadID {
+		t.Fatalf("excluded list = %s, want only %s (not %s)", raw, other.ThreadID, mine.ThreadID)
+	}
+	row := page.Threads[0]
+	if row.Thread.MessageCount != 1 || row.LastMessageAt == "" || !reflect.DeepEqual(row.Thread.Participants, []string{a, b}) {
+		t.Fatalf("row lacks what the sidebar shows: %+v", row)
 	}
 }
 

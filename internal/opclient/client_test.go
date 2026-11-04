@@ -71,8 +71,8 @@ func TestReadsDecode(t *testing.T) {
 			return c.Inbox(ctx, opapi.InboxQuery{Limit: 7, Before: "dly_a", UnreadOnly: true})
 		}, nil},
 		{"read", "POST", "/v1/admin/threads/thr_a/read", "", fixture[opapi.ReadResult](), func(c *Client) (any, error) { return c.ReadThread(ctx, "thr_a") }, nil},
-		{"threads", "GET", "/v1/admin/threads", "cursor=a%2B%2F%3D&limit=7&participant=peer_a", fixture[opapi.ThreadPage](), func(c *Client) (any, error) {
-			return c.Threads(ctx, opapi.ThreadQuery{Participant: "peer_a", Cursor: "a+/=", Limit: 7})
+		{"threads", "GET", "/v1/admin/threads", "cursor=a%2B%2F%3D&exclude_participant=peer_b&limit=7&participant=peer_a", fixture[opapi.ThreadPage](), func(c *Client) (any, error) {
+			return c.Threads(ctx, opapi.ThreadQuery{Participant: "peer_a", ExcludeParticipant: "peer_b", Cursor: "a+/=", Limit: 7})
 		}, nil},
 		{"thread", "GET", "/v1/admin/threads/thr_a", "", fixture[opapi.ThreadDetail](), func(c *Client) (any, error) { return c.Thread(ctx, "thr_a") }, nil},
 		{"history", "GET", "/v1/threads/thr_a/messages", "after=msg_a&limit=7", fixture[opapi.History](), func(c *Client) (any, error) { return c.History(ctx, "thr_a", "msg_a", 7) }, nil},

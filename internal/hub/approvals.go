@@ -145,8 +145,9 @@ func prepareApprovalResponse(ctx context.Context, tx *sql.Tx, snd sender, thr *t
 func (h *Hub) ExpireApprovals(ctx context.Context, now time.Time) (n int, err error) {
 	nowS := envelope.FormatTime(now)
 	var notify []string
+	var pub []ActivityEvent
 	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		n, notify = 0, nil
+		n, notify, pub = 0, nil, nil
 		rows, err := tx.QueryContext(ctx,
 			`SELECT apr_id, thr_id, msg_id FROM approvals WHERE closed_at IS NULL AND expires_at <= ?
 			 ORDER BY expires_at, apr_id`, nowS)
@@ -170,11 +171,14 @@ func (h *Hub) ExpireApprovals(ctx context.Context, now time.Time) (n int, err er
 			return fmt.Errorf("hub: expired approvals: %w", err)
 		}
 		for _, r := range due {
-			woke, err := h.expireApproval(ctx, tx, r.apr, r.thr, r.msg, now)
+			woke, ev, err := h.expireApproval(ctx, tx, r.apr, r.thr, r.msg, now)
 			if err != nil {
 				return err
 			}
 			notify = append(notify, woke...)
+			if ev != nil {
+				pub = append(pub, *ev)
+			}
 			n++
 		}
 		return nil
@@ -185,39 +189,41 @@ func (h *Hub) ExpireApprovals(ctx context.Context, now time.Time) (n int, err er
 	if len(notify) > 0 {
 		h.Log.Notify(notify...)
 	}
+	h.Activity.Publish(pub...)
 	return n, nil
 }
 
 // expireApproval closes approval apr of thread thrID, asked by message
 // reqMsg, and posts the expiry Event and hub Message inside tx. It returns
-// the peers whose logs it appended to.
-func (h *Hub) expireApproval(ctx context.Context, tx *sql.Tx, apr, thrID, reqMsg string, nowT time.Time) ([]string, error) {
+// the peers whose logs it appended to, and the notice's activity feed entry
+// (nil when no notice was posted) for the caller to publish after commit.
+func (h *Hub) expireApproval(ctx context.Context, tx *sql.Tx, apr, thrID, reqMsg string, nowT time.Time) ([]string, *ActivityEvent, error) {
 	now := envelope.FormatTime(nowT)
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE approvals SET closed_at = ?, decision = ?, decided_by = ? WHERE apr_id = ? AND closed_at IS NULL`,
 		now, ApprovalExpired, HubSender, apr); err != nil {
-		return nil, fmt.Errorf("hub: expire approval: %w", err)
+		return nil, nil, fmt.Errorf("hub: expire approval: %w", err)
 	}
 	thr, err := loadThread(ctx, tx, thrID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, p := range thr.participants {
 		if _, err := h.Log.Append(ctx, tx, p, "approval_expired", nowT,
 			map[string]string{"approval_id": apr, "thread_id": thrID}); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	if len(thr.participants) == 0 {
-		return nil, audit.Record(ctx, tx, HubSender, "approval_expired", []string{apr, thrID}, nil)
+		return nil, nil, audit.Record(ctx, tx, HubSender, "approval_expired", []string{apr, thrID}, nil)
 	}
 
 	parent, _, found, err := loadMessage(ctx, tx, reqMsg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !found {
-		return nil, fmt.Errorf("hub: approval %s: request message %s is missing", apr, reqMsg)
+		return nil, nil, fmt.Errorf("hub: approval %s: request message %s is missing", apr, reqMsg)
 	}
 	// Not a reply in the §6 sense: depth, max_depth and sender_chain stay the
 	// request's. loop.expires_at stays the request's too, even when already
@@ -257,20 +263,21 @@ func (h *Hub) expireApproval(ctx context.Context, tx *sql.Tx, apr, thrID, reqMsg
 	}
 	msgJSON, err := json.Marshal(msg)
 	if err != nil {
-		return nil, fmt.Errorf("hub: encode expiry message: %w", err)
+		return nil, nil, fmt.Errorf("hub: encode expiry message: %w", err)
 	}
 	if err := h.insertMessage(ctx, tx, thr, &msg, msgJSON, "", apr, false); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	targets := make([]target, len(thr.participants))
 	for i, p := range thr.participants {
 		targets[i] = target{peer: p}
 	}
 	if _, _, err := h.fanOut(ctx, tx, thr, &msg, msgJSON, targets, nil, "hub", dlyExpires, nowT); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := audit.Record(ctx, tx, HubSender, "approval_expired", []string{apr, thrID, msg.MessageID}, nil); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return append([]string{}, thr.participants...), nil
+	ev := messageActivity(thrID, msg.MessageID, msg.Sender, msg.Kind, msg.CreatedAt)
+	return append([]string{}, thr.participants...), &ev, nil
 }
