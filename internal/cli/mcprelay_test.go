@@ -690,3 +690,89 @@ func TestMCPRelayEscapableSend(t *testing.T) {
 		})
 	}
 }
+
+func TestMCPRelayClientResponses(t *testing.T) {
+	for _, input := range []string{
+		` {"jsonrpc":"2.0", "id":7, "result": {"ok": true}} `,
+		`{"jsonrpc":"2.0","id":"server-request","error":{"code":-32601,"message":"unsupported"}}`,
+		`{"jsonrpc":"2.0","id":null,"result":null}`,
+	} {
+		for _, status := range []int{http.StatusAccepted, http.StatusOK, http.StatusUnauthorized} {
+			t.Run(fmt.Sprintf("%s/status=%d", input, status), func(t *testing.T) {
+				var posts atomic.Int32
+				server := relayFake(t, func(w http.ResponseWriter, r *http.Request) {
+					posts.Add(1)
+					body, err := io.ReadAll(r.Body)
+					if err != nil || string(body) != input {
+						t.Errorf("response POST changed: %q, error %v", body, err)
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(status)
+					if status == http.StatusOK {
+						fmt.Fprint(w, `{"jsonrpc":"2.0","id":7,"result":{}}`)
+					} else if status == http.StatusUnauthorized {
+						fmt.Fprint(w, `{"error":{"code":"unauthorized"}}`)
+					}
+				})
+				code, out, errs := relayRun(t, profileUser(t, server.URL, "relay-test-secret"), input+"\n", "--as", "P1")
+				if code != 0 || out != "" || errs != "" || posts.Load() != 1 {
+					t.Fatalf("exit=%d posts=%d stdout=%q stderr=%q", code, posts.Load(), out, errs)
+				}
+			})
+		}
+	}
+}
+
+func TestMCPRelayLargeInbox(t *testing.T) {
+	env := testhub.Start(t)
+	a, aSecret := env.NewPeer("session", "A")
+	b, bSecret := env.NewPeer("session", "B")
+	env.SetLimits(a, 1000, 1000)
+	text := strings.Repeat("<", 4096)
+	for i := range 200 {
+		args := relaySend(b, fmt.Sprintf("large-inbox-%d", i))
+		args["content"] = map[string]any{"text": text}
+		resp, body := env.Do(aSecret, http.MethodPost, "/v1/messages", args)
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("send %d: status=%d body=%s", i, resp.StatusCode, body)
+		}
+	}
+	replies := relayOK(t, profileUser(t, env.URL, bSecret), []string{
+		relayInit("2025-11-25"), relayCall(2, "vecnet_inbox", map[string]any{"limit": 200}),
+	})
+	relayIDs(t, replies, 1, 2)
+	var inbox struct {
+		Events []inboxEvent `json:"events"`
+	}
+	relayTool(t, replies[1], &inbox)
+	if len(replies[1].Result) <= 4<<20 || len(inbox.Events) != 200 {
+		t.Fatalf("inbox result: bytes=%d events=%d", len(replies[1].Result), len(inbox.Events))
+	}
+	for i, event := range inbox.Events {
+		if event.Type != "delivery" || event.Data.Recipient != b || event.Data.Message.Content.Text != text {
+			t.Fatalf("event %d incomplete: type=%q recipient=%q text bytes=%d", i, event.Type, event.Data.Recipient, len(event.Data.Message.Content.Text))
+		}
+	}
+}
+
+func TestMCPRelayLargeSSEFrame(t *testing.T) {
+	text := strings.Repeat("x", 5<<20)
+	payload := `{"jsonrpc":"2.0","id":2,"result":{"text":"` + text + `"}}`
+	last := `{"jsonrpc":"2.0","id":2,"result":{"done":true}}`
+	for _, ending := range []string{"\n\n", "\r\n\r\n", ""} {
+		t.Run(fmt.Sprintf("ending=%q", ending), func(t *testing.T) {
+			server := relayFake(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "data: %s\r\n\r\ndata: %s%s", payload, last, ending)
+			})
+			code, out, errs := relayRun(t, profileUser(t, server.URL, "relay-test-secret"), relayCall(2, "large", map[string]any{})+"\n")
+			if code != 0 || errs != "" {
+				t.Fatalf("exit=%d stderr=%q", code, errs)
+			}
+			if out != payload+"\n"+last+"\n" {
+				t.Fatalf("incomplete SSE output: got %d bytes, want %d", len(out), len(payload)+len(last)+2)
+			}
+			relayIDs(t, relayReplies(t, out), 2, 2)
+		})
+	}
+}

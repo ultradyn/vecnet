@@ -73,20 +73,31 @@ func (a *app) cmdMCP(args []string) error {
 			}
 			continue
 		}
-		if err := json.Unmarshal(raw, &msg); err != nil || msg.JSONRPC != "2.0" || msg.Method == "" {
+		if err := json.Unmarshal(raw, &msg); err != nil || msg.JSONRPC != "2.0" {
 			if err := relay.rpcError(nil, -32600, "Invalid Request"); err != nil {
 				return err
 			}
 			continue
 		}
-		if _, err := mcpRelayFields(raw, "jsonrpc", "id", "method", "params", "result", "error"); err != nil {
+		fields, err := mcpRelayFields(raw, "jsonrpc", "id", "method", "params", "result", "error")
+		if err != nil {
 			if err := relay.replyError(msg.ID, err); err != nil {
 				return err
 			}
 			continue
 		}
-		err = relay.exchange(raw, msg, true)
-		if err != nil {
+		// Like the hub, recognize replies to server-initiated requests by
+		// an absent method plus an id and result/error. Forward them
+		// unchanged, without replying to a response (even on HTTP failure).
+		response := fields["method"] == nil && len(msg.ID) > 0 && (len(msg.Result) > 0 || len(msg.Error) > 0)
+		if msg.Method == "" && !response {
+			if err := relay.rpcError(nil, -32600, "Invalid Request"); err != nil {
+				return err
+			}
+			continue
+		}
+		err = relay.exchange(raw, msg, !response)
+		if err != nil && !response {
 			if err := relay.replyError(msg.ID, err); err != nil {
 				return err
 			}
@@ -238,7 +249,7 @@ func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool) error {
 	if mediaType == "text/event-stream" {
 		return mcpRelaySSE(resp.Body, handle)
 	}
-	payload, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	payload, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
@@ -251,8 +262,9 @@ func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool) error {
 // mcpRelaySSE joins multi-line data fields within each frame, drops
 // comments and event metadata, and emits compact JSON one frame at a time.
 func mcpRelaySSE(body io.Reader, handle func([]byte) error) error {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 4096), 4<<20)
+	// Response frames can contain a full inbox page. Read complete lines
+	// without a Scanner token ceiling; only requests have a size cap.
+	reader := bufio.NewReader(body)
 	var data []string
 	flush := func() error {
 		if len(data) == 0 {
@@ -262,23 +274,26 @@ func mcpRelaySSE(body io.Reader, handle func([]byte) error) error {
 		data = nil
 		return err
 	}
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return err
+		}
+		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 		if line == "" {
 			if err := flush(); err != nil {
 				return err
 			}
-			continue
+		} else {
+			field, value, _ := strings.Cut(line, ":")
+			if field == "data" {
+				data = append(data, strings.TrimPrefix(value, " "))
+			}
 		}
-		field, value, _ := strings.Cut(line, ":")
-		if field == "data" {
-			data = append(data, strings.TrimPrefix(value, " "))
+		if err == io.EOF {
+			return flush()
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	return flush()
 }
 
 func (r *mcpRelay) cacheTools(raw json.RawMessage) error {
