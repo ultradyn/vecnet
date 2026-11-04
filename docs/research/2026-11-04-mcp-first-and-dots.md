@@ -2,6 +2,8 @@
 
 _Researched 2026-11-04 by agent `mcp-audit` (branch `research/mcp-first`). Max's direction, 2026-11-04: agents should prefer MCP to the CLI, because some agents (OpenAI dots) can only use MCP; webhook2mcp already bridges Grok Bots to a dot._
 
+_Status, 2026-11-05: implemented by the MCP-first plan ([docs/plans/2026-11-04-mcp-first.md](../plans/2026-11-04-mcp-first.md)): 21 MCP tools including `vecnet_whoami`, groups, presence subscription, peer provisioning and blob put/get, `securitySchemes` and RFC 9207 `iss`, `initialize` negotiation, `resultType`, the `vecnet mcp` relay, hook `--mcp` and `hook install --mcp`, and the Events counters. The gaps below describe the hub before that work; PROTOCOL §4, §13.4, §13.7 and §13.9 are current._
+
 **Tags.** **[O]** official OpenAI docs, re-read 2026-11-04. **[S]** MCP spec. **[L]** Max's local code or ops notes. **[V]** this repo at `ed0f65d`. **[I]** inference: not stated by any source.
 
 ## Answer in brief

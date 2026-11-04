@@ -1,21 +1,27 @@
 package mcpserver_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	venv "github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/mcpserver"
+	"github.com/XertroV/vecnet/internal/oauth"
 	"github.com/XertroV/vecnet/internal/testhub"
 	"github.com/XertroV/vecnet/internal/webhook"
 )
@@ -215,12 +221,131 @@ func uriFormats(v any, into map[string]bool) {
 }
 
 type listedTool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
-	Annotations *struct {
-		ReadOnlyHint bool `json:"readOnlyHint"`
+	Name         string         `json:"name"`
+	Description  string         `json:"description"`
+	InputSchema  map[string]any `json:"inputSchema"`
+	OutputSchema map[string]any `json:"outputSchema"`
+	Annotations  *struct {
+		ReadOnlyHint    bool  `json:"readOnlyHint"`
+		IdempotentHint  bool  `json:"idempotentHint"`
+		DestructiveHint *bool `json:"destructiveHint"`
+		OpenWorldHint   *bool `json:"openWorldHint"`
 	} `json:"annotations"`
+}
+
+func TestToolsListSecuritySchemes(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "profile")
+	for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
+		t.Run(era, func(t *testing.T) {
+			headers := modern()
+			if era == mcpserver.ProtoLegacy {
+				headers = map[string]string{"Mcp-Session-Id": legacySession(t, env, secret), "Accept": "application/json"}
+			}
+			resp, body := do(t, env, call{secret: secret, headers: headers,
+				body: map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}})
+			r := decodeRPC(t, body)
+			if resp.StatusCode != http.StatusOK || r.Error != nil {
+				t.Fatalf("tools/list: %d %+v", resp.StatusCode, r.Error)
+			}
+			var result struct {
+				Tools []map[string]any `json:"tools"`
+			}
+			if err := json.Unmarshal(r.Result, &result); err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, tool := range result.Tools {
+				want := []any{map[string]any{"type": "oauth2", "scopes": []any{oauth.Scope}}}
+				if !reflect.DeepEqual(tool["securitySchemes"], want) {
+					t.Errorf("%s: securitySchemes = %v, want %v", tool["name"], tool["securitySchemes"], want)
+				}
+				if tool["name"] != "vecnet_whoami" {
+					continue
+				}
+				found = true
+				if !reflect.DeepEqual(tool["_meta"], map[string]any{"openai/profile": true}) {
+					t.Errorf("whoami _meta = %v", tool["_meta"])
+				}
+				annotations, ok := tool["annotations"].(map[string]any)
+				if !ok || annotations["readOnlyHint"] != true || annotations["destructiveHint"] != false || annotations["openWorldHint"] != false {
+					t.Errorf("whoami annotations = %v", tool["annotations"])
+				}
+				wantInput := map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
+				if !reflect.DeepEqual(tool["inputSchema"], wantInput) {
+					t.Errorf("whoami inputSchema = %v", tool["inputSchema"])
+				}
+				wantOutput := map[string]any{"type": "object", "properties": map[string]any{
+					"kind":    map[string]any{"enum": []any{"peer", "principal", "operator"}},
+					"peer_id": map[string]any{"type": "string"}, "principal_id": map[string]any{"type": "string"},
+					"name": map[string]any{"type": "string"},
+				}, "required": []any{"kind"}, "additionalProperties": false}
+				if !reflect.DeepEqual(tool["outputSchema"], wantOutput) {
+					t.Errorf("whoami outputSchema = %v, want %v", tool["outputSchema"], wantOutput)
+				}
+			}
+			if !found {
+				t.Fatal("tools/list lacks vecnet_whoami")
+			}
+		})
+	}
+}
+
+func TestWhoamiIdentity(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("session", "Profile name")
+	prn, prnSecret := env.NewPrincipal("Profile principal")
+	for _, tc := range []struct {
+		name, secret string
+		want         map[string]string
+	}{
+		{"peer", secret, map[string]string{"kind": "peer", "peer_id": peer, "name": "Profile name"}},
+		{"principal", prnSecret, map[string]string{"kind": "principal", "principal_id": prn}},
+		{"operator", env.OperatorSecret, map[string]string{"kind": "operator"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got map[string]string
+			toolOK(t, env, tc.secret, "vecnet_whoami", map[string]any{}, &got)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("whoami = %v, want %v", got, tc.want)
+			}
+			resp, body := env.Do(tc.secret, "GET", "/v1/peers/me", nil)
+			var me map[string]string
+			if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &me) != nil {
+				t.Fatalf("GET peers/me: %d %s", resp.StatusCode, body)
+			}
+			if name := tc.want["name"]; name != "" {
+				me["name"] = name
+			}
+			if !reflect.DeepEqual(got, me) {
+				t.Fatalf("whoami = %v, HTTP identity plus name = %v", got, me)
+			}
+		})
+	}
+	t.Run("OAuth dot", func(t *testing.T) {
+		dot, _ := env.NewPeer("dot", "Bound dot")
+		owner, err := env.Hub.PeerPrincipal(context.Background(), dot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		front := eventsFront(t, env, fakeOAuth{prn: owner, expires: func() time.Time { return env.Now.Now().Add(time.Hour) }}, func(s *mcpserver.Server) {
+			s.ResolveDotPeer = func(_ context.Context, principal string) (string, error) {
+				if principal != owner {
+					t.Errorf("ResolveDotPeer principal = %s, want %s", principal, owner)
+				}
+				return dot, nil
+			}
+		})
+		var got map[string]string
+		toolOK(t, front, "oauth-token", "vecnet_whoami", map[string]any{}, &got)
+		want := map[string]string{"kind": "peer", "peer_id": dot, "name": "Bound dot"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("OAuth whoami = %v, want %v", got, want)
+		}
+	})
+	if path := invalidPath(t, env, secret, "vecnet_whoami", map[string]any{"as": peer}); path != "/as" {
+		t.Fatalf("whoami accepts identity override: path = %q", path)
+	}
 }
 
 func TestToolsListNamesAndHints(t *testing.T) {
@@ -244,11 +369,12 @@ func TestToolsListNamesAndHints(t *testing.T) {
 	}
 
 	want := []string{
-		"vecnet_ack", "vecnet_clear_avatar", "vecnet_inbox", "vecnet_peers", "vecnet_presence", "vecnet_react", "vecnet_receipt",
-		"vecnet_reply", "vecnet_send", "vecnet_set_avatar", "vecnet_thread", "vecnet_threads",
+		"vecnet_ack", "vecnet_blob_get", "vecnet_blob_put", "vecnet_clear_avatar", "vecnet_group_add", "vecnet_group_create", "vecnet_groups",
+		"vecnet_inbox", "vecnet_peer_create", "vecnet_peer_set_disabled", "vecnet_peers", "vecnet_presence", "vecnet_presence_subscribe", "vecnet_react", "vecnet_receipt",
+		"vecnet_reply", "vecnet_send", "vecnet_set_avatar", "vecnet_thread", "vecnet_threads", "vecnet_whoami",
 	}
 	var got []string
-	readOnly := map[string]bool{"vecnet_inbox": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true}
+	readOnly := map[string]bool{"vecnet_blob_get": true, "vecnet_groups": true, "vecnet_inbox": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true, "vecnet_whoami": true}
 	for _, tool := range tools {
 		got = append(got, tool.Name)
 		if tool.Annotations == nil {
@@ -256,6 +382,28 @@ func TestToolsListNamesAndHints(t *testing.T) {
 		}
 		if tool.Annotations.ReadOnlyHint != readOnly[tool.Name] {
 			t.Errorf("%s: readOnlyHint = %v, want %v", tool.Name, tool.Annotations.ReadOnlyHint, readOnly[tool.Name])
+		}
+		if tool.Name == "vecnet_peer_create" || tool.Name == "vecnet_peer_set_disabled" {
+			if !tool.Annotations.IdempotentHint {
+				t.Errorf("%s: idempotentHint = false, want true", tool.Name)
+			}
+			if hint := tool.Annotations.DestructiveHint; hint == nil || *hint {
+				t.Errorf("%s: destructiveHint must be explicitly false", tool.Name)
+			}
+			if hint := tool.Annotations.OpenWorldHint; hint == nil || *hint {
+				t.Errorf("%s: openWorldHint must be explicitly false", tool.Name)
+			}
+		}
+		if tool.Name == "vecnet_group_create" {
+			if tool.Annotations.IdempotentHint {
+				t.Error("vecnet_group_create: idempotentHint = true, want false: each call creates a new group")
+			}
+			if hint := tool.Annotations.DestructiveHint; hint == nil || *hint {
+				t.Error("vecnet_group_create: destructiveHint must be explicitly false")
+			}
+			if hint := tool.Annotations.OpenWorldHint; hint == nil || *hint {
+				t.Error("vecnet_group_create: openWorldHint must be explicitly false")
+			}
 		}
 		if tool.InputSchema["type"] != "object" {
 			t.Errorf("%s: inputSchema.type = %v", tool.Name, tool.InputSchema["type"])
@@ -683,7 +831,8 @@ func TestAttachmentURLsRejected(t *testing.T) {
 		t.Fatalf("repeated attachments: %s", res.StructuredContent)
 	}
 
-	// A hash the sender uploaded is still sent, and the hub sets blob_url.
+	// A hash the sender uploaded is still sent. The hub's per-recipient
+	// blob_url stays off the MCP result (TestInboxCarriesNoBlobToken).
 	var inbox inboxResult
 	toolOK(t, env, bSecret, "vecnet_inbox", map[string]any{}, &inbox)
 	ds := inbox.deliveries()
@@ -691,8 +840,8 @@ func TestAttachmentURLsRejected(t *testing.T) {
 		t.Fatalf("B has %d deliveries, want 2", len(ds))
 	}
 	got := ds[1].Data.Message.Attachments
-	if len(got) != 1 || got[0].SHA256 != sha || got[0].OriginURL != "" || got[0].BlobURL == "" {
-		t.Fatalf("delivered attachments = %+v, want %s with only a hub blob_url", got, sha)
+	if len(got) != 1 || got[0].SHA256 != sha || got[0].OriginURL != "" || got[0].BlobURL != "" {
+		t.Fatalf("delivered attachments = %+v, want %s with no URL", got, sha)
 	}
 }
 
@@ -1353,5 +1502,666 @@ func TestSendToolRefusesReactionKind(t *testing.T) {
 		"kind": "reaction", "priority": "hold", "content": map[string]any{"text": "forged"},
 	}); path != "/kind" {
 		t.Fatalf("reaction kind rejected at %q, want /kind", path)
+	}
+}
+
+func TestGroupToolsMatchHTTP(t *testing.T) {
+	env := testhub.Start(t)
+	a, aSecret := env.NewPeer("session", "creator")
+	b, bSecret := env.NewPeer("session", "first member")
+	c, cSecret := env.NewPeer("session", "second member")
+	d, dSecret := env.NewPeer("session", "third member")
+
+	var created map[string]string
+	toolOK(t, env, aSecret, "vecnet_group_create", map[string]any{"members": []string{b, c}}, &created)
+	group := created["group_id"]
+	if len(created) != 1 || !strings.HasPrefix(group, "grp_") {
+		t.Fatalf("create = %v, want exactly {group_id: grp_...}", created)
+	}
+
+	checkGroups := func(wantMembers []string) {
+		t.Helper()
+		var listed, fromHTTP struct {
+			Groups []hub.GroupInfo `json:"groups"`
+		}
+		toolOK(t, env, aSecret, "vecnet_groups", map[string]any{}, &listed)
+		resp, body := env.Do(aSecret, http.MethodGet, "/v1/groups", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /v1/groups = %d: %s", resp.StatusCode, body)
+		}
+		if err := json.Unmarshal(body, &fromHTTP); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(listed, fromHTTP) {
+			t.Fatalf("tool groups = %+v, HTTP groups = %+v", listed, fromHTTP)
+		}
+		slices.Sort(wantMembers)
+		if len(listed.Groups) != 1 {
+			t.Fatalf("groups = %+v, want one group", listed.Groups)
+		}
+		got := listed.Groups[0]
+		if got.GroupID != group || got.CreatedBy != a || got.Archived || !slices.Equal(got.Members, wantMembers) {
+			t.Fatalf("group = %+v, want %s created by %s with members %v, unarchived", got, group, a, wantMembers)
+		}
+	}
+	// The hub includes the creator automatically; two explicit members are
+	// the first two recipients, and adding a third yields three deliveries.
+	checkGroups([]string{a, b, c})
+	var added map[string]any
+	toolOK(t, env, bSecret, "vecnet_group_add", map[string]any{"group_id": group, "members": []string{d}}, &added)
+	if added == nil || len(added) != 0 {
+		t.Fatalf("add result = %v, want {}", added)
+	}
+	checkGroups([]string{a, b, c, d})
+
+	var sent sendResult
+	toolOK(t, env, aSecret, "vecnet_send", map[string]any{
+		"idempotency_key": "group-tool-send", "recipients": []string{group}, "priority": "hold",
+		"content": map[string]any{"text": "hello group"},
+	}, &sent)
+	if !strings.HasPrefix(sent.MessageID, "msg_") {
+		t.Fatalf("send = %+v, want message_id", sent)
+	}
+	var recipients []string
+	for _, delivery := range sent.Deliveries {
+		recipients = append(recipients, delivery.Recipient)
+	}
+	slices.Sort(recipients)
+	wantRecipients := []string{b, c, d}
+	slices.Sort(wantRecipients)
+	if !slices.Equal(recipients, wantRecipients) {
+		t.Fatalf("recipients = %v, want %v", recipients, wantRecipients)
+	}
+	for _, member := range []struct{ id, secret string }{{b, bSecret}, {c, cSecret}, {d, dSecret}} {
+		var inbox inboxResult
+		toolOK(t, env, member.secret, "vecnet_inbox", map[string]any{}, &inbox)
+		deliveries := inbox.deliveries()
+		if len(deliveries) != 1 || deliveries[0].Data.Recipient != member.id || deliveries[0].Data.Message.MessageID != sent.MessageID {
+			t.Fatalf("%s inbox deliveries = %+v, want message %s", member.id, deliveries, sent.MessageID)
+		}
+	}
+}
+
+func TestGroupCreateRepeatedCallsCreateDistinctGroups(t *testing.T) {
+	env := testhub.Start(t)
+	creator, secret := env.NewPeer("session", "creator")
+	member, _ := env.NewPeer("session", "member")
+	args := map[string]any{"members": []string{member}}
+	var ids []string
+	for range 2 {
+		var created struct {
+			GroupID string `json:"group_id"`
+		}
+		toolOK(t, env, secret, "vecnet_group_create", args, &created)
+		if !strings.HasPrefix(created.GroupID, "grp_") || slices.Contains(ids, created.GroupID) {
+			t.Fatalf("repeated create returned %q after %v, want a fresh group id", created.GroupID, ids)
+		}
+		ids = append(ids, created.GroupID)
+	}
+	var listed struct {
+		Groups []hub.GroupInfo `json:"groups"`
+	}
+	toolOK(t, env, secret, "vecnet_groups", map[string]any{}, &listed)
+	if len(listed.Groups) != len(ids) {
+		t.Fatalf("groups = %+v, want two persistent groups", listed.Groups)
+	}
+	wantMembers := []string{creator, member}
+	slices.Sort(wantMembers)
+	var listedIDs []string
+	for _, group := range listed.Groups {
+		listedIDs = append(listedIDs, group.GroupID)
+		if group.CreatedBy != creator || !slices.Equal(group.Members, wantMembers) {
+			t.Fatalf("group = %+v, want creator %s and members %v", group, creator, wantMembers)
+		}
+	}
+	slices.Sort(ids)
+	slices.Sort(listedIDs)
+	if !slices.Equal(listedIDs, ids) {
+		t.Fatalf("listed group ids = %v, want %v", listedIDs, ids)
+	}
+}
+
+func TestGroupToolsRejectNonParticipant(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "creator")
+	b, _ := env.NewPeer("session", "member")
+	outsider, outsiderSecret := env.NewPeer("session", "outsider")
+	resp, body := env.Do(aSecret, http.MethodPost, "/v1/groups", map[string]any{"members": []string{b}})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /v1/groups = %d: %s", resp.StatusCode, body)
+	}
+	var created struct {
+		GroupID string `json:"group_id"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil || created.GroupID == "" {
+		t.Fatalf("create body = %s: %v", body, err)
+	}
+	members := map[string]any{"members": []string{outsider}}
+	resp, body = env.Do(outsiderSecret, http.MethodPost, "/v1/groups/"+created.GroupID+"/members", members)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("HTTP add non-participant = %d: %s", resp.StatusCode, body)
+	}
+	var fromHTTP toolErrorBody
+	if err := json.Unmarshal(body, &fromHTTP); err != nil || fromHTTP.Error.Code != "not_member" {
+		t.Fatalf("HTTP error = %s, want not_member: %v", body, err)
+	}
+	fromTool := toolFails(t, env, outsiderSecret, "vecnet_group_add", map[string]any{
+		"group_id": created.GroupID, "members": []string{outsider},
+	}, fromHTTP.Error.Code)
+	if !reflect.DeepEqual(fromTool, fromHTTP) {
+		t.Fatalf("tool error = %+v, HTTP error = %+v", fromTool, fromHTTP)
+	}
+	var listed struct {
+		Groups []hub.GroupInfo `json:"groups"`
+	}
+	toolOK(t, env, outsiderSecret, "vecnet_groups", map[string]any{}, &listed)
+	if listed.Groups == nil || len(listed.Groups) != 0 {
+		t.Fatalf("outsider groups = %+v, want []", listed.Groups)
+	}
+}
+
+func TestPresenceSubscribeTool(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("session", "subscriber")
+	stored := func() string {
+		t.Helper()
+		var value string
+		if err := env.Hub.DB.QueryRow(`SELECT subscribe_presence FROM peers WHERE peer_id = ?`, peer).Scan(&value); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	for _, value := range []string{"none", "all", "teams"} {
+		t.Run(value, func(t *testing.T) {
+			var result map[string]any
+			toolOK(t, env, secret, "vecnet_presence_subscribe", map[string]any{"subscribe": value}, &result)
+			if result == nil || len(result) != 0 {
+				t.Fatalf("subscribe result = %v, want {}", result)
+			}
+			fromTool := stored()
+			if fromTool != value {
+				t.Fatalf("stored subscription = %q, want %q", fromTool, value)
+			}
+			// Change it before PATCH so the HTTP path must persist a change too.
+			reset := "none"
+			if value == reset {
+				reset = "all"
+			}
+			toolOK(t, env, secret, "vecnet_presence_subscribe", map[string]any{"subscribe": reset}, nil)
+			resp, body := env.Do(secret, http.MethodPatch, "/v1/peers/me", map[string]any{"subscribe_presence": value})
+			if resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("PATCH /v1/peers/me = %d: %s", resp.StatusCode, body)
+			}
+			if fromHTTP := stored(); fromHTTP != fromTool {
+				t.Fatalf("tool stored %q, HTTP stored %q", fromTool, fromHTTP)
+			}
+		})
+	}
+	before := stored()
+	if path := invalidPath(t, env, secret, "vecnet_presence_subscribe", map[string]any{"subscribe": "bogus"}); path != "/subscribe" {
+		t.Fatalf("invalid subscription path = %q, want /subscribe", path)
+	}
+	if after := stored(); after != before {
+		t.Fatalf("invalid subscription changed stored state from %q to %q", before, after)
+	}
+	_, principalSecret := env.NewPrincipal("no own peer")
+	toolFails(t, env, principalSecret, "vecnet_presence_subscribe", map[string]any{"subscribe": "none"}, "forbidden")
+}
+
+// peerToolPrincipal enables the same provisioning policy used by HTTP clients.
+func peerToolPrincipal(t *testing.T, env *testhub.Env, max int) (string, string) {
+	t.Helper()
+	principal, secret := env.NewPrincipal("provisioning host")
+	if err := env.Hub.SetPrincipalLimits(context.Background(), principal, hub.PrincipalLimits{
+		MaxPeers: max, CreatesPerHour: 60, Kinds: []string{"pagchat-bot"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return principal, secret
+}
+
+func peerToolHTTP(t *testing.T, env *testhub.Env, secret, method, path string, args any, status int) map[string]any {
+	t.Helper()
+	resp, body := env.Do(secret, method, path, args)
+	if resp.StatusCode != status {
+		t.Fatalf("%s %s = %d: %s, want %d", method, path, resp.StatusCode, body, status)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("%s %s body = %s: %v", method, path, body, err)
+	}
+	return result
+}
+
+func peerToolErrorLikeHTTP(t *testing.T, env *testhub.Env, secret, tool string, args any, method, path string, body any, status int, code string) toolErrorBody {
+	t.Helper()
+	fromHTTP := peerToolHTTP(t, env, secret, method, path, body, status)
+	fromTool := toolFails(t, env, secret, tool, args, code)
+	var got map[string]any
+	if err := json.Unmarshal([]byte(mustJSON(t, fromTool)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, fromHTTP) {
+		t.Fatalf("%s error = %v, HTTP error = %v", tool, got, fromHTTP)
+	}
+	return fromTool
+}
+
+func TestPeerCreateToolPrincipalOnly(t *testing.T) {
+	env := testhub.Start(t)
+	principal, secret := peerToolPrincipal(t, env, 2)
+	_, peerSecret := env.NewPeer("session", "peer credential")
+	args := map[string]any{"kind": "pagchat-bot", "name": "seed-bot-2", "idempotency_key": "create-seed-bot-2"}
+	for _, tc := range []struct{ name, secret string }{
+		{"peer", peerSecret}, {"operator", env.OperatorSecret}, {"principal", secret},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, r := rpc(t, env, tc.secret, "tools/list", nil)
+			if status != http.StatusOK || r.Error != nil {
+				t.Fatalf("tools/list: %d %+v", status, r.Error)
+			}
+			var listed struct {
+				Tools []listedTool `json:"tools"`
+			}
+			if err := json.Unmarshal(r.Result, &listed); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"vecnet_peer_create", "vecnet_peer_set_disabled"} {
+				if !slices.ContainsFunc(listed.Tools, func(tool listedTool) bool { return tool.Name == name }) {
+					t.Errorf("%s tools/list lacks %s", tc.name, name)
+				}
+			}
+			if tc.name != "principal" {
+				peerToolErrorLikeHTTP(t, env, tc.secret, "vecnet_peer_create", args,
+					http.MethodPost, "/v1/peers", args, http.StatusForbidden, "forbidden")
+				return
+			}
+			var created map[string]any
+			toolOK(t, env, secret, "vecnet_peer_create", args, &created)
+			peer, ok := created["peer"].(map[string]any)
+			if !ok {
+				t.Fatalf("create = %v, want {peer, idempotency_key}", created)
+			}
+			id, _ := peer["peer_id"].(string)
+			if !strings.HasPrefix(id, "peer_") {
+				t.Fatalf("peer_id = %q, want peer_...", id)
+			}
+			want := map[string]any{
+				"peer":            map[string]any{"peer_id": id, "kind": "pagchat-bot", "name": "seed-bot-2", "created_by": principal, "disabled": false},
+				"idempotency_key": "create-seed-bot-2",
+			}
+			if !reflect.DeepEqual(created, want) {
+				t.Fatalf("create = %v, want exactly %v", created, want)
+			}
+			fromHTTP := peerToolHTTP(t, env, secret, http.MethodPost, "/v1/peers", args, http.StatusOK)
+			if !reflect.DeepEqual(created, fromHTTP) {
+				t.Fatalf("tool create = %v, HTTP replay = %v", created, fromHTTP)
+			}
+		})
+	}
+}
+
+func TestPeerCreateToolIdempotentLikeHTTP(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := peerToolPrincipal(t, env, 1)
+	args := map[string]any{"kind": "pagchat-bot", "name": "first bot", "idempotency_key": "first-bot"}
+	var first, replay map[string]any
+	toolOK(t, env, secret, "vecnet_peer_create", args, &first)
+	toolOK(t, env, secret, "vecnet_peer_create", args, &replay)
+	if !reflect.DeepEqual(first, replay) {
+		t.Fatalf("replay = %v, first = %v", replay, first)
+	}
+	peer, ok := first["peer"].(map[string]any)
+	if !ok {
+		t.Fatalf("create = %v, want peer", first)
+	}
+	id, _ := peer["peer_id"].(string)
+	if !strings.HasPrefix(id, "peer_") {
+		t.Fatalf("peer_id = %q, want peer_...", id)
+	}
+	fromHTTP := peerToolHTTP(t, env, secret, http.MethodPost, "/v1/peers", args, http.StatusOK)
+	if !reflect.DeepEqual(first, fromHTTP) {
+		t.Fatalf("tool create = %v, HTTP replay = %v", first, fromHTTP)
+	}
+	conflict := map[string]any{"kind": "pagchat-bot", "name": "different bot", "idempotency_key": "first-bot"}
+	err := peerToolErrorLikeHTTP(t, env, secret, "vecnet_peer_create", conflict,
+		http.MethodPost, "/v1/peers", conflict, http.StatusConflict, "idempotency_conflict")
+	if !reflect.DeepEqual(err.Error.Details, map[string]any{"idempotency_key": "first-bot"}) {
+		t.Fatalf("conflict details = %v", err.Error.Details)
+	}
+	atCap := map[string]any{"kind": "pagchat-bot", "name": "over cap", "idempotency_key": "over-cap"}
+	checkCap := func(disabled float64) {
+		t.Helper()
+		err := peerToolErrorLikeHTTP(t, env, secret, "vecnet_peer_create", atCap,
+			http.MethodPost, "/v1/peers", atCap, http.StatusTooManyRequests, "peer_cap_reached")
+		want := map[string]any{"limit": float64(1), "active": float64(1), "disabled": disabled}
+		if !reflect.DeepEqual(err.Error.Details, want) {
+			t.Fatalf("cap details = %v, want exactly %v", err.Error.Details, want)
+		}
+	}
+	checkCap(0)
+	peerToolHTTP(t, env, secret, http.MethodPatch, "/v1/peers/"+id, map[string]any{"disabled": true}, http.StatusOK)
+	replacement := map[string]any{"kind": "pagchat-bot", "name": "replacement", "idempotency_key": "replacement"}
+	peerToolHTTP(t, env, secret, http.MethodPost, "/v1/peers", replacement, http.StatusCreated)
+	checkCap(1)
+	// Replay wins over both the active-peer cap and the peer's current disabled state.
+	toolOK(t, env, secret, "vecnet_peer_create", args, &replay)
+	if !reflect.DeepEqual(first, replay) {
+		t.Fatalf("replay at cap = %v, original frozen body = %v", replay, first)
+	}
+	err = peerToolErrorLikeHTTP(t, env, secret, "vecnet_peer_set_disabled", map[string]any{"peer_id": id, "disabled": false},
+		http.MethodPatch, "/v1/peers/"+id, map[string]any{"disabled": false}, http.StatusTooManyRequests, "peer_cap_reached")
+	if !reflect.DeepEqual(err.Error.Details, map[string]any{"limit": float64(1), "active": float64(1), "disabled": float64(1)}) {
+		t.Fatalf("re-enable cap details = %v", err.Error.Details)
+	}
+}
+
+func TestPeerSetDisabledTool(t *testing.T) {
+	env := testhub.Start(t)
+	principal, secret := peerToolPrincipal(t, env, 2)
+	_, otherSecret := peerToolPrincipal(t, env, 2)
+	args := map[string]any{"kind": "pagchat-bot", "name": "own bot", "idempotency_key": "own-bot"}
+	created := peerToolHTTP(t, env, secret, http.MethodPost, "/v1/peers", args, http.StatusCreated)
+	id := created["peer"].(map[string]any)["peer_id"].(string)
+	other := peerToolHTTP(t, env, otherSecret, http.MethodPost, "/v1/peers", args, http.StatusCreated)
+	otherID := other["peer"].(map[string]any)["peer_id"].(string)
+	target, peerSecret := env.NewPeer("session", "recipient")
+	for _, tc := range []struct{ name, secret string }{{"peer", peerSecret}, {"operator", env.OperatorSecret}} {
+		t.Run(tc.name, func(t *testing.T) {
+			peerToolErrorLikeHTTP(t, env, tc.secret, "vecnet_peer_set_disabled", map[string]any{"peer_id": id, "disabled": true},
+				http.MethodPatch, "/v1/peers/"+id, map[string]any{"disabled": true}, http.StatusForbidden, "forbidden")
+		})
+	}
+	for _, inaccessible := range []string{otherID, target, "peer_missing"} {
+		t.Run(inaccessible, func(t *testing.T) {
+			peerToolErrorLikeHTTP(t, env, secret, "vecnet_peer_set_disabled", map[string]any{"peer_id": inaccessible, "disabled": true},
+				http.MethodPatch, "/v1/peers/"+inaccessible, map[string]any{"disabled": true}, http.StatusNotFound, "not_found")
+		})
+	}
+	send := map[string]any{
+		"as": id, "recipients": []string{target}, "priority": "hold", "idempotency_key": "before-disable",
+		"content": map[string]any{"text": "from provisioned peer"},
+	}
+	toolOK(t, env, secret, "vecnet_send", send, nil)
+	for i, disabled := range []bool{true, true, false, false} {
+		var result map[string]any
+		toolOK(t, env, secret, "vecnet_peer_set_disabled", map[string]any{"peer_id": id, "disabled": disabled}, &result)
+		want := map[string]any{"peer": map[string]any{
+			"peer_id": id, "kind": "pagchat-bot", "name": "own bot", "created_by": principal, "disabled": disabled,
+		}}
+		if !reflect.DeepEqual(result, want) {
+			t.Fatalf("set disabled = %v, want exactly %v", result, want)
+		}
+		// The tool's own effect, before any HTTP request that could supply
+		// it: the stored flag, then a send under a fresh key.
+		var stored bool
+		if err := env.Hub.DB.QueryRow(`SELECT disabled != 0 FROM peers WHERE peer_id = ?`, id).Scan(&stored); err != nil || stored != disabled {
+			t.Fatalf("call %d: stored disabled = %v (%v), want %v", i, stored, err, disabled)
+		}
+		send["idempotency_key"] = fmt.Sprintf("after-set-%d", i)
+		if disabled {
+			toolFails(t, env, secret, "vecnet_send", send, "forbidden")
+			peerToolErrorLikeHTTP(t, env, secret, "vecnet_send", send,
+				http.MethodPost, "/v1/messages", send, http.StatusForbidden, "forbidden")
+		} else {
+			toolOK(t, env, secret, "vecnet_send", send, nil)
+		}
+		// Only now compare with the HTTP endpoint, which sets the same value.
+		fromHTTP := peerToolHTTP(t, env, secret, http.MethodPatch, "/v1/peers/"+id, map[string]any{"disabled": disabled}, http.StatusOK)
+		if !reflect.DeepEqual(result, fromHTTP) {
+			t.Fatalf("tool set disabled = %v, HTTP = %v", result, fromHTTP)
+		}
+	}
+}
+
+func TestBlobPutGetRoundTrip(t *testing.T) {
+	env := testhub.Start(t)
+	_, sender := env.NewPeer("session", "sender")
+	recipient, reader := env.NewPeer("session", "recipient")
+	data := make([]byte, 150<<10)
+	if _, err := rand.Read(data); err != nil {
+		t.Fatal(err)
+	}
+	var put struct {
+		SHA256 string `json:"sha256"`
+		Size   int    `json:"size"`
+	}
+	toolOK(t, env, sender, "vecnet_blob_put", map[string]any{
+		"data_base64": base64.StdEncoding.EncodeToString(data), "media_type": "application/octet-stream", "ttl_seconds": 3600,
+	}, &put)
+	if want := fmt.Sprintf("%x", sha256.Sum256(data)); put.SHA256 != want || put.Size != len(data) {
+		t.Fatalf("put = %+v, want sha256 %s, size %d", put, want, len(data))
+	}
+	toolOK(t, env, sender, "vecnet_send", map[string]any{
+		"idempotency_key": "blob-round-trip", "recipients": []string{recipient}, "priority": "hold",
+		"content": map[string]any{"text": "attached"}, "attachments": []any{map[string]any{
+			"sha256": put.SHA256, "size": put.Size, "media_type": "application/octet-stream",
+		}},
+	}, nil)
+	type blobPage struct {
+		SHA256     string `json:"sha256"`
+		MediaType  string `json:"media_type"`
+		Size       int    `json:"size"`
+		Offset     int    `json:"offset"`
+		NextOffset *int   `json:"next_offset"`
+		Encoding   string `json:"encoding"`
+		Data       string `json:"data"`
+	}
+	var combined []byte
+	for i, offset := range []int{0, 128 << 10} {
+		args := map[string]any{"sha256": put.SHA256}
+		if i > 0 {
+			args["offset"] = offset
+			args["limit"] = 128 << 10
+		}
+		var page blobPage
+		toolOK(t, env, reader, "vecnet_blob_get", args, &page)
+		if page.SHA256 != put.SHA256 || page.MediaType != "application/octet-stream" || page.Size != len(data) || page.Offset != offset || page.Encoding != "base64" {
+			t.Fatalf("page metadata = sha %s type %s size %d offset %d encoding %s", page.SHA256, page.MediaType, page.Size, page.Offset, page.Encoding)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(page.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantSize := 128 << 10
+		if i == 1 {
+			wantSize = 22 << 10
+		}
+		if len(decoded) != wantSize {
+			t.Fatalf("page %d: %d bytes, want %d", i, len(decoded), wantSize)
+		}
+		if i == 0 && (page.NextOffset == nil || *page.NextOffset != 128<<10) || i == 1 && page.NextOffset != nil {
+			t.Fatalf("page %d next_offset = %v", i, page.NextOffset)
+		}
+		combined = append(combined, decoded...)
+	}
+	if !bytes.Equal(combined, data) {
+		t.Fatal("paginated blob differs from uploaded bytes")
+	}
+	var small blobPage
+	res := verbatimResult(t, env, reader, "vecnet_blob_get", fmt.Sprintf(`{"sha256":%q,"offset":5.0,"limit":1e1}`, put.SHA256))
+	if res.IsError || json.Unmarshal(res.StructuredContent, &small) != nil || small.Offset != 5 || small.Data != base64.StdEncoding.EncodeToString(data[5:15]) || small.NextOffset == nil || *small.NextOffset != 15 {
+		t.Fatalf("explicit short page = %s", res.StructuredContent)
+	}
+	for _, offset := range []int{len(data), len(data) + 1} {
+		var end map[string]any
+		toolOK(t, env, reader, "vecnet_blob_get", map[string]any{"sha256": put.SHA256, "offset": offset}, &end)
+		if next, exists := end["next_offset"]; !exists || next != nil || end["data"] != "" || end["offset"] != float64(offset) {
+			t.Fatalf("EOF page = %v", end)
+		}
+	}
+	for _, tc := range []struct {
+		field string
+		value any
+	}{
+		{"offset", -1}, {"offset", 0.5}, {"limit", 0}, {"limit", (128 << 10) + 1}, {"limit", 1.5},
+	} {
+		if path := invalidPath(t, env, reader, "vecnet_blob_get", map[string]any{"sha256": put.SHA256, tc.field: tc.value}); path != "/"+tc.field {
+			t.Fatalf("%s=%v: path = %q", tc.field, tc.value, path)
+		}
+	}
+}
+
+func TestBlobPutCap(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "uploader")
+	data := bytes.Repeat([]byte{'x'}, (160<<10)+1)
+	// From cap+3 the base64 is past maxLength, and a request of 190 KiB
+	// still fits the 256 KiB body: each is payload_too_large, not -32602.
+	for _, n := range []int{160<<10 + 1, 160<<10 + 3, 190 << 10} {
+		over := bytes.Repeat([]byte{'x'}, n)
+		e := toolFails(t, env, secret, "vecnet_blob_put", map[string]any{
+			"data_base64": base64.StdEncoding.EncodeToString(over), "media_type": "text/plain",
+		}, "payload_too_large")
+		if e.Error.Details["limit"] != float64(163840) {
+			t.Fatalf("%d bytes: limit = %v", n, e.Error.Details["limit"])
+		}
+	}
+	sha := fmt.Sprintf("%x", sha256.Sum256(data))
+	resp, body := env.Do(env.OperatorSecret, "GET", "/v1/blobs/"+sha, nil)
+	var httpErr toolErrorBody
+	if resp.StatusCode != http.StatusNotFound || json.Unmarshal(body, &httpErr) != nil || httpErr.Error.Code != "unknown_blob" {
+		t.Fatalf("rejected blob GET: %d %s", resp.StatusCode, body)
+	}
+	toolOK(t, env, secret, "vecnet_blob_put", map[string]any{
+		"data_base64": base64.StdEncoding.EncodeToString(data[:160<<10]), "media_type": "text/plain",
+	}, nil)
+	if path := invalidPath(t, env, secret, "vecnet_blob_put", map[string]any{"data_base64": "%%%", "media_type": "text/plain"}); path != "/data_base64" {
+		t.Fatalf("invalid base64 path = %q", path)
+	}
+	for _, encoded := range []string{"aGk=", "aGk", " aG\tk=\r\n"} {
+		var put map[string]any
+		toolOK(t, env, secret, "vecnet_blob_put", map[string]any{"data_base64": encoded, "media_type": "text/plain"}, &put)
+		if put["sha256"] != fmt.Sprintf("%x", sha256.Sum256([]byte("hi"))) || put["size"] != float64(2) {
+			t.Fatalf("base64 %q: %v", encoded, put)
+		}
+	}
+	env.Hub.Blobs.DailyQuota = 1
+	toolFails(t, env, secret, "vecnet_blob_put", map[string]any{"data_base64": "bmV3", "media_type": "text/plain"}, "upload_quota_exceeded")
+}
+
+func TestBlobGetParticipantOnly(t *testing.T) {
+	env := testhub.Start(t)
+	_, sender := env.NewPeer("session", "sender")
+	recipient, reader := env.NewPeer("session", "recipient")
+	_, outsider := env.NewPeer("session", "outsider")
+	var put map[string]any
+	toolOK(t, env, sender, "vecnet_blob_put", map[string]any{"data_base64": "aGk=", "media_type": "text/plain"}, &put)
+	sha := put["sha256"].(string)
+	// Uploading alone does not grant bearer read access.
+	toolFails(t, env, sender, "vecnet_blob_get", map[string]any{"sha256": sha}, "forbidden")
+	toolOK(t, env, sender, "vecnet_send", map[string]any{
+		"idempotency_key": "participant-blob", "recipients": []string{recipient}, "priority": "hold",
+		"content": map[string]any{"text": "attached"}, "attachments": []any{map[string]any{
+			"sha256": sha, "size": 2, "media_type": "text/plain",
+		}},
+	}, nil)
+	toolOK(t, env, reader, "vecnet_blob_get", map[string]any{"sha256": sha}, nil)
+	resp, body := env.Do(outsider, "GET", "/v1/blobs/"+sha, nil)
+	var httpErr toolErrorBody
+	if resp.StatusCode != http.StatusForbidden || json.Unmarshal(body, &httpErr) != nil || httpErr.Error.Code != "forbidden" {
+		t.Fatalf("outsider HTTP GET: %d %s", resp.StatusCode, body)
+	}
+	toolFails(t, env, outsider, "vecnet_blob_get", map[string]any{"sha256": sha}, httpErr.Error.Code)
+	res := callTool(t, env, outsider, "vecnet_blob_get", map[string]any{"sha256": sha})
+	var result map[string]any
+	if json.Unmarshal(res.StructuredContent, &result) != nil {
+		t.Fatal("invalid error result")
+	}
+	var walk func(any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, child := range x {
+				if k == "data" {
+					t.Fatal("refused blob read leaked data")
+				}
+				walk(child)
+			}
+		case []any:
+			for _, child := range x {
+				walk(child)
+			}
+		}
+	}
+	walk(result)
+	// Malformed hashes retain the HTTP endpoint's hub-level refusal.
+	toolFails(t, env, outsider, "vecnet_blob_get", map[string]any{"sha256": "bad"}, "unknown_blob")
+}
+
+func TestBlobToolsTakeNoURL(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "uploader")
+	status, r := rpc(t, env, secret, "tools/list", nil)
+	var listed struct {
+		Tools []listedTool `json:"tools"`
+	}
+	if status != http.StatusOK || r.Error != nil || json.Unmarshal(r.Result, &listed) != nil {
+		t.Fatalf("tools/list: %d %s", status, r.Result)
+	}
+	for _, name := range []string{"vecnet_blob_put", "vecnet_blob_get", "vecnet_send"} {
+		i := slices.IndexFunc(listed.Tools, func(x listedTool) bool { return x.Name == name })
+		if i < 0 {
+			t.Fatalf("tools/list missing %s", name)
+		}
+		tool := listed.Tools[i]
+		if tool.InputSchema["additionalProperties"] != false {
+			t.Fatalf("%s input is not closed", name)
+		}
+		names := map[string]bool{}
+		propertyNames(tool.InputSchema, names)
+		if name != "vecnet_send" {
+			if tool.OutputSchema["additionalProperties"] != false {
+				t.Fatalf("%s output is not closed", name)
+			}
+			propertyNames(tool.OutputSchema, names)
+		}
+		for key := range names {
+			if strings.Contains(strings.ToLower(key), "url") {
+				t.Errorf("%s schema exposes %s", name, key)
+			}
+		}
+		if name == "vecnet_blob_put" {
+			props := tool.InputSchema["properties"].(map[string]any)
+			if props["data_base64"].(map[string]any)["maxLength"] != float64(218456) {
+				t.Fatal("blob base64 schema cap differs from avatar cap")
+			}
+		}
+	}
+	var put map[string]any
+	toolOK(t, env, secret, "vecnet_blob_put", map[string]any{"data_base64": "aGk=", "media_type": "text/plain"}, &put)
+	var get map[string]any
+	toolOK(t, env, env.OperatorSecret, "vecnet_blob_get", map[string]any{"sha256": put["sha256"]}, &get)
+	for name, result := range map[string]map[string]any{"vecnet_blob_put": put, "vecnet_blob_get": get} {
+		want := []string{"sha256", "size"}
+		if name == "vecnet_blob_get" {
+			want = []string{"sha256", "media_type", "size", "offset", "next_offset", "encoding", "data"}
+		}
+		if len(result) != len(want) {
+			t.Fatalf("%s output keys = %v", name, result)
+		}
+		for _, key := range want {
+			if _, ok := result[key]; !ok {
+				t.Fatalf("%s output missing %s", name, key)
+			}
+		}
+		for _, key := range []string{"url", "origin_url", "blob_url", "callback_url", "bearer", "extra"} {
+			args := map[string]any{"sha256": put["sha256"]}
+			if name == "vecnet_blob_put" {
+				args = map[string]any{"data_base64": "aGk=", "media_type": "text/plain"}
+			}
+			args[key] = "https://example.invalid/?t=secret"
+			if path := invalidPath(t, env, secret, name, args); path != "/"+key {
+				t.Fatalf("%s accepts %s: path %q", name, key, path)
+			}
+		}
+	}
+	for _, key := range []string{"origin_url", "blob_url"} {
+		if path := invalidPath(t, env, secret, "vecnet_send", map[string]any{
+			"idempotency_key": "reject-url-" + key, "recipients": []string{env.OperatorPeer}, "priority": "hold", "content": map[string]any{"text": "attached"},
+			"attachments": []any{map[string]any{"sha256": put["sha256"], "size": 2, "media_type": "text/plain", key: "https://example.invalid"}},
+		}); path != "/attachments/0/"+key {
+			t.Fatalf("send accepts attachment %s: %q", key, path)
+		}
 	}
 }

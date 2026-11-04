@@ -53,14 +53,16 @@ messaging:
   reply <message_id> "text" (--wake|--wake-idle|--hold) [--thread ID] [--attach FILE]…
   react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]
        default priority depends on the emoji: ✅ ❓ ❗ wake_idle, others hold
+  mcp                                 stdio MCP relay to the hub's /mcp as this profile [--as X]; needs --net P
   inbox [--since CURSOR] [--ack] [--limit N]
   ack <cursor>
   watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]
        does not ack; use --auto-ack or vecnet ack <cursor> to avoid replaying
        the log after a restart
-  hook [--event user-prompt|post-tool] [--profile P] [--auto-ack]
-       Claude Code hook: always exits 0
-  hook install [--profile P] [--write] [--settings PATH] [--auto-ack]
+  hook [--event user-prompt|post-tool] [--profile P] [--auto-ack] [--mcp vecnet-P]
+       Claude Code hook: always exits 0; --mcp names the registered MCP server in its hints
+  hook install [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp]
+       --mcp: the hooks name MCP server vecnet-P, and --write registers it (claude mcp add)
   hook rebind [--profile P]
        bind the profile's hook to this Claude Code session (run from its Bash tool)
   threads [--limit N]
@@ -165,7 +167,11 @@ func (a *app) exit(err error) int {
 	var he *hubError
 	var ne *netError
 	var re *refusedError
+	var me *mcpStartupError
 	switch {
+	case errors.As(err, &me):
+		fmt.Fprintln(a.stderr, me)
+		return exitUsage
 	case errors.As(err, &he):
 		fmt.Fprintf(a.stderr, "%s: %s\n", he.Code, he.Message)
 		if he.Hint != "" {
@@ -420,6 +426,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdInbox(args)
 	case "ack":
 		return a.cmdAck(args)
+	case "mcp":
+		return a.cmdMCP(args)
 	case "watch":
 		return a.cmdWatch(args)
 	case "hook":

@@ -27,6 +27,20 @@ func adminDo(t *testing.T, env *testhub.Env, method, path string, body any, want
 	return raw
 }
 
+func TestAdminCountersListsEvents(t *testing.T) {
+	env := testhub.Start(t)
+	raw := adminDo(t, env, "GET", "/v1/admin/counters", nil, http.StatusOK)
+	var counters map[string]int
+	if err := json.Unmarshal(raw, &counters); err != nil {
+		t.Fatalf("decode counters: %v; %s", err, raw)
+	}
+	for _, name := range []string{"events_push_failed", "events_paused"} {
+		if value, ok := counters[name]; !ok || value != 0 {
+			t.Errorf("counter %s = %d (present %v), want 0", name, value, ok)
+		}
+	}
+}
+
 type addPeerResp struct {
 	PeerID      string `json:"peer_id"`
 	EnrolToken  string `json:"enrol_token"`
