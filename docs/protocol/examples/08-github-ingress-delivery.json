@@ -30,6 +30,7 @@
     },
     "kind": "message",
     "sender": "src_01JD3R0J2M4P6R8T0V2X4Z6B8D",
+    "sender_info": {"name": "hark-github", "kind": "source"},
     "recipients": [
       "team_01JD3R1K3M5P7R9T1V3X5Z7B9D"
     ],

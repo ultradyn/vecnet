@@ -70,7 +70,7 @@ type SourceMessage struct {
 
 // sourceActor is a source send in flight: the actor of sendTx.
 type sourceActor struct {
-	id, target         string
+	id, target, name   string
 	providerID, origin string
 }
 
@@ -277,8 +277,8 @@ func (h *Hub) directorySources(ctx context.Context) ([]DirectoryEntry, error) {
 
 // sourceRow is the part of a sources row ingestion needs.
 type sourceRow struct {
-	id, kind, target, priority, sealed string
-	allow                              []string
+	id, kind, target, priority, sealed, name string
+	allow                                    []string
 }
 
 // loadSource reads srcID; unknown is 404 not_found and disabled 403
@@ -288,8 +288,8 @@ func (h *Hub) loadSource(ctx context.Context, srcID string) (*sourceRow, error) 
 	var allow sql.NullString
 	var disabled int
 	err := h.DB.QueryRowContext(ctx,
-		`SELECT kind, target_id, priority, secret_enc, event_allow, disabled FROM sources WHERE src_id = ?`, srcID).
-		Scan(&s.kind, &s.target, &s.priority, &s.sealed, &allow, &disabled)
+		`SELECT kind, target_id, priority, secret_enc, event_allow, disabled, name FROM sources WHERE src_id = ?`, srcID).
+		Scan(&s.kind, &s.target, &s.priority, &s.sealed, &allow, &disabled, &s.name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, unknownSource(srcID)
 	}
@@ -412,7 +412,7 @@ func (h *Hub) IngestSource(ctx context.Context, m SourceMessage) (msgID string, 
 		SHA256: meta.SHA256, Size: meta.Size, MediaType: media, Name: src.kind + "-event.json",
 	}}
 	resp, _, err := h.sendAs(ctx, actor{src: &sourceActor{
-		id: src.id, target: src.target, providerID: m.ProviderDeliveryID, origin: m.OriginThreadID,
+		id: src.id, target: src.target, name: src.name, providerID: m.ProviderDeliveryID, origin: m.OriginThreadID,
 	}}, "inbound_webhook", req, "")
 	if err != nil {
 		return "", false, err
@@ -481,7 +481,7 @@ func (h *Hub) sourceRateCut(ctx context.Context, tx *sql.Tx, srcID, origin strin
 // current participants, and its events keep their own per-origin thread
 // (R09). A rate cut is returned as a *cutError.
 func (h *Hub) sourceSendStart(ctx context.Context, tx *sql.Tx, src *sourceActor, req *envelope.SendRequest, now time.Time) (sender, *envelope.SendRequest, *SendResponse, error) {
-	snd := sender{peer: src.id, kind: kindSource}
+	snd := sender{peer: src.id, kind: kindSource, name: src.name}
 	if prev, err := sourceDelivered(ctx, tx, src.id, src.providerID); err != nil {
 		return snd, nil, nil, err
 	} else if prev != "" {

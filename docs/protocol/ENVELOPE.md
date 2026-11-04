@@ -110,7 +110,7 @@ ULIDs with a type prefix (`msg_`, `dly_`, `thr_`, `peer_`, `prn_`, `team_`, `grp
 
 ## What the hub fills in
 
-`message_id`, `thread_id` (new threads), `sender`, `created_at`, `origin` (bridged ingress), `loop.depth` (parent + 1), `loop.sender_chain` (parent's chain + sender, last 32), `loop.expires_at` (default 24 h), `loop.max_depth` (default 16, inherited, never raised by a reply), auto-spill attachment and `truncated`, `delivery_id`, `via`, `attempt`, `ingress`, `thread`, attachment `blob_url`s.
+`message_id`, `thread_id` (new threads), `sender`, `sender_info` (the sender's directory name and kind at send time, PROTOCOL §8.2), `created_at`, `origin` (bridged ingress), `loop.depth` (parent + 1), `loop.sender_chain` (parent's chain + sender, last 32), `loop.expires_at` (default 24 h), `loop.max_depth` (default 16, inherited, never raised by a reply), auto-spill attachment and `truncated`, `delivery_id`, `via`, `attempt`, `ingress`, `thread`, attachment `blob_url`s.
 
 ## Resolved elsewhere
 
