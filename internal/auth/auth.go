@@ -52,9 +52,17 @@ var ErrDotBearer = errors.New("auth: a dot holds no vecnet secret")
 // ErrUnknownSubject reports a Rotate of a peer or principal that does not exist.
 var ErrUnknownSubject = errors.New("auth: unknown subject")
 
+// ErrEnrolTokenExpired is the ErrUnauthenticated that Enrol returns for an
+// unused token past its expires_at; errors.Is(err, ErrUnauthenticated) holds
+// for it. POST /v1/enrol answers it with 410 enrol_token_expired.
+var ErrEnrolTokenExpired = fmt.Errorf("%w: enrolment token expired", ErrUnauthenticated)
+
 // DefaultEnrolTTL is the lifetime of an enrolment token when the caller passes
-// a ttl <= 0.
-const DefaultEnrolTTL = 24 * time.Hour
+// a ttl <= 0; MaxEnrolTTL is the longest an operator may ask for.
+const (
+	DefaultEnrolTTL = 24 * time.Hour
+	MaxEnrolTTL     = 7 * 24 * time.Hour
+)
 
 // credKinds are the credentials.kind values.
 var credKinds = map[string]bool{"peer": true, "principal": true, "operator": true}
@@ -160,24 +168,37 @@ func (r *Resolver) Resolve(ctx context.Context, bearer string) (Caller, error) {
 }
 
 // IssueEnrolToken stores a one-time enrolment token for peerID inside tx and
-// returns its plaintext ("vn_enrol_…"), once. ttl <= 0 means DefaultEnrolTTL.
-func (r *Resolver) IssueEnrolToken(ctx context.Context, tx *sql.Tx, peerID string, ttl time.Duration) (string, error) {
+// returns its plaintext ("vn_enrol_…"), once, with its expiry. ttl <= 0
+// means DefaultEnrolTTL; the caller bounds it by MaxEnrolTTL.
+func (r *Resolver) IssueEnrolToken(ctx context.Context, tx *sql.Tx, peerID string, ttl time.Duration) (string, time.Time, error) {
 	if ttl <= 0 {
 		ttl = DefaultEnrolTTL
 	}
 	plain, hash := NewSecret("enrol")
+	exp := r.now().Add(ttl)
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO enrol_tokens(token_hash, peer_id, expires_at) VALUES (?, ?, ?)`,
-		hash, peerID, envelope.FormatTime(r.now().Add(ttl))); err != nil {
-		return "", fmt.Errorf("auth: issue enrol token: %w", err)
+		hash, peerID, envelope.FormatTime(exp)); err != nil {
+		return "", time.Time{}, fmt.Errorf("auth: issue enrol token: %w", err)
 	}
-	return plain, nil
+	return plain, exp, nil
+}
+
+// SpendEnrolTokensTx marks every unspent enrolment token of peerID used,
+// inside tx, so none of them can enrol any more.
+func (r *Resolver) SpendEnrolTokensTx(ctx context.Context, tx *sql.Tx, peerID string) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE enrol_tokens SET used_at = ? WHERE peer_id = ? AND used_at IS NULL`, envelope.FormatTime(r.now()), peerID); err != nil {
+		return fmt.Errorf("auth: spend enrol tokens: %w", err)
+	}
+	return nil
 }
 
 // Enrol exchanges a one-time token for the peer's long-lived secret
 // ("vn_peer_…"), returned once. The token is marked used in the same
-// transaction; an unknown, used or expired token, or a missing or disabled
-// peer, is ErrUnauthenticated. A dot's token is ErrDotBearer: dots never hold
+// transaction; an unknown or used token, or a missing or disabled peer, is
+// ErrUnauthenticated, and an unused token past its expiry is
+// ErrEnrolTokenExpired. A dot's token is ErrDotBearer: dots never hold
 // a vecnet secret (PROTOCOL §12). The exchange is audited as "enrol".
 func (r *Resolver) Enrol(ctx context.Context, token string) (peerID, secret string, err error) {
 	if token == "" {
@@ -210,8 +231,11 @@ func (r *Resolver) Enrol(ctx context.Context, token string) (peerID, secret stri
 			return ErrUnauthenticated
 		}
 		exp, err := envelope.ParseTime(expires)
-		if err != nil || !r.now().Before(exp) {
+		if err != nil {
 			return ErrUnauthenticated
+		}
+		if !r.now().Before(exp) {
+			return ErrEnrolTokenExpired
 		}
 		var disabled int
 		var kind string
@@ -248,8 +272,9 @@ func (r *Resolver) Enrol(ctx context.Context, token string) (peerID, secret stri
 
 // Rotate revokes every live credential of kind for subjectID (a peer id for
 // "peer", a prn id for "principal" and "operator") and returns a new secret,
-// once. The rotation is audited as "rotate" with actor "operator": only the
-// operator rotates credentials (PROTOCOL §2.12).
+// once. Rotating a peer also spends its unused enrolment tokens, since a
+// rotation answers a leak. The rotation is audited as "rotate" with actor
+// "operator": only the operator rotates credentials (PROTOCOL §2.12).
 func (r *Resolver) Rotate(ctx context.Context, kind, subjectID string) (secret string, err error) {
 	err = r.DB.Tx(ctx, func(tx *sql.Tx) error {
 		var err error
@@ -285,6 +310,11 @@ func (r *Resolver) RotateTx(ctx context.Context, tx *sql.Tx, kind, subjectID str
 		now, kind, subjectID); err != nil {
 		return "", fmt.Errorf("auth: rotate revoke: %w", err)
 	}
+	if kind == "peer" {
+		if err := r.SpendEnrolTokensTx(ctx, tx, subjectID); err != nil {
+			return "", err
+		}
+	}
 	secret, err := insertCredential(ctx, tx, kind, subjectID, now)
 	if err != nil {
 		return "", err
@@ -301,11 +331,7 @@ func (r *Resolver) RevokePeerCredentialsTx(ctx context.Context, tx *sql.Tx, peer
 		`UPDATE credentials SET revoked_at = ? WHERE kind = 'peer' AND subject_id = ? AND revoked_at IS NULL`, now, peerID); err != nil {
 		return fmt.Errorf("auth: revoke peer credentials: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE enrol_tokens SET used_at = ? WHERE peer_id = ? AND used_at IS NULL`, now, peerID); err != nil {
-		return fmt.Errorf("auth: spend enrol tokens: %w", err)
-	}
-	return nil
+	return r.SpendEnrolTokensTx(ctx, tx, peerID)
 }
 
 // insertCredential mints a secret of kind for subject, stores its hash and

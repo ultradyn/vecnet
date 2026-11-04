@@ -29,6 +29,7 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/peers", s.adminAddPeer)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/move", s.adminMovePeer)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/rotate", s.adminRotatePeer)
+	mux.HandleFunc("POST /v1/admin/peers/{id}/enrol-token", s.adminReissueEnrol)
 	mux.HandleFunc("PUT /v1/admin/peers/{id}/scopes", s.adminSetScopes)
 	mux.HandleFunc("PUT /v1/admin/peers/{id}/limits", s.adminSetLimits)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/disable", s.adminDisable(true))
@@ -156,12 +157,14 @@ func (s *server) adminRotatePrincipal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"secret": secret})
 }
 
-// adminAddPeer is POST /v1/admin/peers {"kind", "name", "principal_id"?}:
-// 201 {"peer_id", "enrol_token", "principal_id"}; a dot's enrol_token is "",
+// adminAddPeer is POST /v1/admin/peers {"kind", "name", "principal_id"?,
+// "enrol_ttl_seconds"?}: 201 {"peer_id", "enrol_token", "enrol_expires_at",
+// "principal_id", "hub_url"}; a dot's enrol_token and enrol_expires_at are "",
 // since it links with `vecnet peer link` instead. Without principal_id the
-// peer gets an implicit principal named like it.
+// peer gets an implicit principal named like it. hub_url is the hub's public
+// URL, for an invite (PROTOCOL §2.12).
 func (s *server) adminAddPeer(w http.ResponseWriter, r *http.Request) {
-	top, err := readObject(r, []string{"kind", "name", "principal_id"}, []string{"kind", "name"})
+	top, err := readObject(r, []string{"kind", "name", "principal_id", "enrol_ttl_seconds"}, []string{"kind", "name"})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -173,8 +176,13 @@ func (s *server) adminAddPeer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	ttl, err := enrolTTL(top)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	ctx := r.Context()
-	peer, tok, err := s.Hub.AddPeer(ctx, f[0], f[1], f[2])
+	peer, tok, exp, err := s.Hub.AddPeerTTL(ctx, f[0], f[1], f[2], ttl)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -184,8 +192,10 @@ func (s *server) adminAddPeer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	out := s.inviteBody(peer, tok, exp)
+	out["principal_id"] = prn
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusCreated, map[string]string{"peer_id": peer, "enrol_token": tok, "principal_id": prn})
+	writeJSON(w, http.StatusCreated, out)
 }
 
 // adminMovePeer is POST /v1/admin/peers/{id}/move {"principal_id"}: 204.

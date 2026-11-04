@@ -72,6 +72,7 @@ messaging:
   enrol --hub URL --token (T|-) --profile NAME      "-" reads the token from stdin;
        [--allow-insecure-http]                   http:// is refused off loopback/LAN without it
        (preferred: keeps it out of shell history and ps); else $VECNET_ENROL_TOKEN
+  guide                                              the agent manual; needs no config
 
 admin (operator credential):
   principal add --name N
@@ -79,6 +80,9 @@ admin (operator credential):
   principal scope <prn> [--allow IDS] [--deny IDS]
   principal list
   peer add --kind K --name N [--principal PRN]
+  peer invite --name N [--kind K] [--principal PRN] [--ttl 24h] [--profile P]
+       adds the peer and prints a block to paste to the agent (token valid --ttl, max 7d)
+  peer invite <peer> --profile P [--ttl 24h]          re-issues a token for a peer not yet enrolled
   peer move <peer> --principal PRN
   peer link <peer>                                    prints a dot's 12-character link code
   peer avatar <peer> (FILE|https://URL|--clear)       set or clear any peer's avatar
@@ -390,6 +394,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 	switch cmd {
 	case "enrol", "enroll":
 		return a.cmdEnrol(args)
+	case "guide":
+		return a.cmdGuide(args)
 	case "send":
 		return a.cmdSend(args)
 	case "reply":
@@ -1334,6 +1340,7 @@ func (a *app) cmdPeer(args []string) error {
 		"kind": strFlag, "name": strFlag, "principal": strFlag,
 		"allow": multiFlag, "deny": multiFlag,
 		"sends-per-min": strFlag, "threads-per-hour": strFlag, "clear": boolFlag,
+		"ttl": strFlag, "profile": strFlag,
 	})
 	if err != nil {
 		return err
@@ -1343,6 +1350,8 @@ func (a *app) cmdPeer(args []string) error {
 		sub = o.pos[0]
 	}
 	switch {
+	case sub == "invite":
+		return a.peerInvite(o)
 	case sub == "add" && len(o.pos) == 1 && o.str("kind") != "" && o.str("name") != "":
 		body := map[string]string{"kind": o.str("kind"), "name": o.str("name")}
 		if p := o.str("principal"); p != "" {
@@ -1397,7 +1406,7 @@ func (a *app) cmdPeer(args []string) error {
 		}
 		return a.ok("limits set for " + o.pos[1])
 	}
-	return usageErr("usage: vecnet peer add --kind K --name N [--principal PRN] | peer move <peer> --principal PRN | " +
+	return usageErr("usage: vecnet peer add --kind K --name N [--principal PRN] | peer invite --name N [--ttl 24h] | peer move <peer> --principal PRN | " +
 		"peer link <peer> | peer avatar <peer> (FILE|URL|--clear) | peer rotate <peer> | peer scope <peer> [--allow IDS] [--deny IDS] | peer limits <peer> --sends-per-min N --threads-per-hour N")
 }
 

@@ -249,15 +249,26 @@ func (h *Hub) AddPrincipal(ctx context.Context, name string) (prnID, secret stri
 // principal is a 422 invalid_value, and so is kind "operator" under any
 // principal but the operator's.
 func (h *Hub) AddPeer(ctx context.Context, kind, name, prnID string) (peerID, enrolToken string, err error) {
+	peerID, enrolToken, _, err = h.AddPeerTTL(ctx, kind, name, prnID, 0)
+	return peerID, enrolToken, err
+}
+
+// AddPeerTTL is AddPeer with the enrolment token living ttl (0 means
+// auth.DefaultEnrolTTL; see EnrolTTL for the bounds), and returns the
+// token's expiry too (zero for a dot, which gets no token).
+func (h *Hub) AddPeerTTL(ctx context.Context, kind, name, prnID string, ttl time.Duration) (peerID, enrolToken string, expires time.Time, err error) {
+	if err := checkEnrolTTL(ttl); err != nil {
+		return "", "", time.Time{}, err
+	}
 	if !PeerKinds[kind] {
 		e := E(http.StatusUnprocessableEntity, "invalid_value", "unknown peer kind")
 		e.Details["field"] = "kind"
-		return "", "", e
+		return "", "", time.Time{}, e
 	}
 	if name == "" {
 		e := E(http.StatusUnprocessableEntity, "invalid_value", "peer name is required")
 		e.Details["field"] = "name"
-		return "", "", e
+		return "", "", time.Time{}, e
 	}
 	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		now := h.nowStr()
@@ -302,7 +313,7 @@ func (h *Hub) AddPeer(ctx context.Context, kind, name, prnID string) (peerID, en
 		// vecnet secret (PROTOCOL §12), so it gets nothing to enrol with.
 		if kind != "dot" {
 			var err error
-			if enrolToken, err = h.Auth.IssueEnrolToken(ctx, tx, peerID, 0); err != nil {
+			if enrolToken, expires, err = h.Auth.IssueEnrolToken(ctx, tx, peerID, ttl); err != nil {
 				return err
 			}
 		}
@@ -314,11 +325,11 @@ func (h *Hub) AddPeer(ctx context.Context, kind, name, prnID string) (peerID, en
 		return audit.Record(ctx, tx, "operator", "peer_add", []string{peerID, prnID}, map[string]any{"kind": kind})
 	})
 	if err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
 	h.notifyEnabled(ctx)
 	h.Log.Notify(prnID) // the principal's peer set changed; the new peer's log is empty
-	return peerID, enrolToken, nil
+	return peerID, enrolToken, expires, nil
 }
 
 func insertPrincipal(ctx context.Context, tx *sql.Tx, prn, name, now string) error {

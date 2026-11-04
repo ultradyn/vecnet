@@ -552,7 +552,8 @@ func TestOperatorKindReserved(t *testing.T) {
 }
 
 // TestEnrolTokenExpiresOnHubClock: the one-time enrolment token expires 24 h
-// after issue on the hub's clock (PROTOCOL §12), so the fake clock drives it.
+// after issue on the hub's clock (PROTOCOL §12), so the fake clock drives it,
+// and a late enrol says so: 410 enrol_token_expired, not a bare 401.
 func TestEnrolTokenExpiresOnHubClock(t *testing.T) {
 	env := testhub.Start(t)
 	ok := adminAddPeer(t, env, map[string]any{"kind": "session", "name": "fresh"})
@@ -561,9 +562,10 @@ func TestEnrolTokenExpiresOnHubClock(t *testing.T) {
 	enrol(t, env, ok.EnrolToken)
 	env.Now.Advance(2 * time.Hour)
 	resp, raw := env.Do("", "POST", "/v1/enrol", map[string]string{"token": late.EnrolToken})
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("enrol 25 h after issue = %d %s, want 401", resp.StatusCode, raw)
-	}
+	mustErr(t, resp, raw, http.StatusGone, "enrol_token_expired")
+	// A used token stays a plain 401 after its expiry too.
+	resp, raw = env.Do("", "POST", "/v1/enrol", map[string]string{"token": ok.EnrolToken})
+	mustErr(t, resp, raw, http.StatusUnauthorized, "unauthenticated")
 }
 
 // Invariant 8: a dot gets no enrolment token, no rotation mints it a bearer,
@@ -587,7 +589,7 @@ func TestDotHoldsNoBearer(t *testing.T) {
 	var tok string
 	if err := env.Hub.DB.Tx(ctx, func(tx *sql.Tx) error {
 		var err error
-		tok, err = env.Hub.Auth.IssueEnrolToken(ctx, tx, p.PeerID, 0)
+		tok, _, err = env.Hub.Auth.IssueEnrolToken(ctx, tx, p.PeerID, 0)
 		return err
 	}); err != nil {
 		t.Fatal(err)
