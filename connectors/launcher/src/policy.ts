@@ -76,15 +76,21 @@ export type ApprovalRoute = { to: 'requester' | 'operator' | 'relay'; escalateOp
 function commandWords(line: string): string[] {
   const commands: string[] = [];
   const pending = [line];
-  const context = () => ({word:'',started:false,quote:'',atCommand:true,parens:0});
+  const context = () => ({word:'',started:false,plain:true,assignment:false,redirection:false,quote:'',atCommand:true,parens:0});
   while (pending.length) {
     const source = pending.pop()!;
     const parents: ReturnType<typeof context>[] = [];
     let current = context();
     function flush() {
       if (current.started) {
-        if (current.atCommand) commands.push(current.word);
-        current.atCommand = false; current.word = ''; current.started = false;
+        // Assignments and redirection operands precede the executable without
+        // consuming its position. Their substitutions are still scanned below.
+        if (current.redirection) current.redirection = false;
+        else if (!current.assignment) {
+          if (current.atCommand) commands.push(current.word);
+          current.atCommand = false;
+        }
+        current.word = ''; current.started = false; current.plain = true; current.assignment = false;
       }
     }
     for (let i = 0; i < source.length; i++) {
@@ -96,7 +102,7 @@ function commandWords(line: string): string[] {
       if (char === '\\') {
         const next = source[i+1];
         if (next !== undefined && (current.quote !== '"' || '$`"\\\n'.includes(next))) {
-          if (next !== '\n') { current.word += next; current.started = true; }
+          if (next !== '\n') { current.word += next; current.started = true; current.plain = false; }
           i++;
         } else { current.word += char; current.started = true; }
         continue;
@@ -112,13 +118,13 @@ function commandWords(line: string): string[] {
           body += source[i];
         }
         pending.push(body);
-        current.word += '`...`'; current.started = true;
+        current.word += '`...`'; current.started = true; current.plain = false;
         continue;
       }
       if (char === '$' && source[i+1] === '(') {
         // Substitutions run even inside double quotes, with independent quoting.
         // Keep their output opaque in the enclosing word; never synthesise argv.
-        current.word += '$()'; current.started = true;
+        current.word += '$()'; current.started = true; current.plain = false;
         parents.push(current); current = context(); i++;
         continue;
       }
@@ -126,9 +132,20 @@ function commandWords(line: string): string[] {
         if (char === current.quote) current.quote = ''; else current.word += char;
         continue;
       }
-      if (char === "'" || char === '"') { current.quote = char; current.started = true; continue; }
+      if (char === "'" || char === '"') { current.quote = char; current.started = true; current.plain = false; continue; }
       if (char === ')' && parents.length && current.parens === 0) {
         flush(); current = parents.pop()!;
+        continue;
+      }
+      if (char === '<' || char === '>' || (char === '&' && source[i+1] === '>')) {
+        // Only an adjacent, unquoted IO number belongs to the operator.
+        if (current.plain && /^\d+$/.test(current.word)) {
+          current.word = ''; current.started = false;
+        }
+        flush();
+        const operator = /^(?:&>>?|<<<|<<-|<<|<>|<&|>&|>\||>>|[<>])/.exec(source.slice(i))![0];
+        i += operator.length - 1;
+        current.redirection = true;
         continue;
       }
       if (';&|()\n'.includes(char)) {
@@ -138,6 +155,10 @@ function commandWords(line: string): string[] {
         continue;
       }
       if (/\s/.test(char)) { flush(); continue; }
+      // The name and '=' must be literal shell syntax; quotes or escapes in
+      // the name make this an executable word, even if quote removal yields X=Y.
+      if (char === '=' && current.atCommand && !current.redirection && current.plain &&
+          /^[A-Za-z_][A-Za-z0-9_]*\+?$/.test(current.word)) current.assignment = true;
       current.word += char; current.started = true;
     }
     flush();

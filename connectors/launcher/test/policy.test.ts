@@ -244,8 +244,49 @@ const substitutionCases = [
   {line:'echo "$(echo safe)" sudo',privileged:false},
 ];
 
-test('classifyPermission: executable command substitutions are privileged; quoted and escaped literals stay inert', async t => {
-  for (const {line,privileged} of substitutionCases) {
+// Exercise the same shell words at both classification and routing boundaries.
+const prefixCases = [
+  ...[
+    'FLAG=1', 'FLAG=', 'FLAG+=one', 'FLAG="two words"', "FLAG='safe && sudo no'", 'FLAG=one\\ two',
+    'FLAG=1 OTHER="two words"', 'FLAG=$(echo safe)', 'FLAG=`echo safe`',
+    '>/dev/null', '> /dev/null', '2>/dev/null', '2>> /dev/null', '< /dev/null',
+    '2>&1', '0<&3', '2>"two words"', '<<< safe', '<> /dev/null', '>| /dev/null', '&>/dev/null', '&>> /dev/null',
+    'FLAG=1 2>/dev/null OTHER="two words" > /dev/null',
+  ].flatMap(prefix => [
+    `${prefix} sudo id`,
+    `echo safe && ${prefix} sudo id`,
+    `echo safe; ${prefix} sudo id`,
+    `echo safe || ${prefix} sudo id`,
+    `echo safe | ${prefix} sudo id`,
+    `echo safe\n${prefix} sudo id`,
+    `echo "$(${prefix} sudo id)"`,
+    'echo `' + prefix + ' sudo id`',
+  ].map(line => ({line,privileged:true}))),
+  ...['su','doas','pkexec','/usr/bin/sudo'].map(word => ({line:`FLAG=1 2>/dev/null ${word} id`,privileged:true})),
+  ...[
+    'echo "$(FLAG=1 >/dev/null echo "$(OTHER=2 sudo id)")"',
+    'FLAG="$(OTHER=2 sudo id)" echo safe',
+    '>"$(FLAG=1 sudo id)" echo safe',
+    'FLAG=1>/dev/null sudo id',
+  ].map(line => ({line,privileged:true})),
+  ...[
+    'FLAG="safe && sudo id" echo safe', "FLAG='$(sudo id)' echo safe",
+    'FLAG=1 echo sudo', '>sudo echo safe', '>"sudo" echo safe', 'echo safe >sudo',
+    '2>&1 echo sudo', '>"safe && sudo id" echo safe', '>FLAG=1 echo sudo', '<<<"sudo id" echo safe',
+    'echo "FLAG=1 sudo id"', 'echo ">/dev/null sudo id"',
+    'echo \'>/dev/null sudo id\'', 'echo \'$(FLAG=1 sudo id)\'',
+    'echo "\\$(FLAG=1 sudo id)"', 'echo \\`FLAG=1 sudo id\\`',
+    '"FLAG"=1 sudo id', "'FLAG=1' sudo id", 'FLAG\\=1 sudo id', '1FLAG=1 sudo id',
+    '\\2>/dev/null sudo id', '\'2\'>/dev/null sudo id',
+    'echo "$(>sudo echo safe)"', 'echo "$(FLAG=1 echo sudo)"',
+    'echo "$(echo safe)" FLAG=1 sudo id',
+    'echo \\>sudo', 'echo "safe && FLAG=1 sudo id"',
+  ].map(line => ({line,privileged:false})),
+];
+const commandCases = [...substitutionCases,...prefixCases];
+
+test('classifyPermission: command substitutions and shell prefixes preserve executable position; literals stay inert', async t => {
+  for (const {line,privileged} of commandCases) {
     await t.test(line, () => {
       const p = permission({kind:'exec',paths:[],command:{line,shell_operators:true},
         fidelity:{kind:'enforced',command:'line',paths:'none',host:'none'}});
@@ -254,10 +295,10 @@ test('classifyPermission: executable command substitutions are privileged; quote
   }
 });
 
-test('routeApproval: the privileged preset sends executable substitutions to the operator', async t => {
+test('routeApproval: the privileged preset sends executable substitutions and prefixed commands to the operator', async t => {
   const a = await setup();
   a.cfg.approvals.to_operator.presets = ['privileged'];
-  for (const {line,privileged} of substitutionCases) {
+  for (const {line,privileged} of commandCases) {
     await t.test(line, () => {
       const p = permission({kind:'exec',paths:[],command:{line,shell_operators:true},
         fidelity:{kind:'enforced',command:'line',paths:'none',host:'none'}});
