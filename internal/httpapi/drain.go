@@ -73,11 +73,34 @@ func (d *Drain) RetryAfter() time.Duration {
 	return d.current().retry
 }
 
-// Join registers one response; done is idempotent and belongs to the joined
-// generation even if a demo Reset happens before it finishes.
-func (d *Drain) Join() (done func()) {
+// drainHandle pins a response's announcement and retry hint to the same
+// generation as its registration, including across a demo Reset.
+type drainHandle struct {
+	d *Drain
+	g *drainGeneration
+}
+
+func (h drainHandle) C() <-chan struct{} {
+	if h.g == nil {
+		return nil
+	}
+	return h.g.signal
+}
+
+func (h drainHandle) RetryAfter() time.Duration {
+	if h.d == nil {
+		return DefaultRestartRetry
+	}
+	h.d.mu.Lock()
+	defer h.d.mu.Unlock()
+	return h.g.retry
+}
+
+// join atomically registers and captures the generation. Handlers retain the
+// handle until after their final frame; they never re-read the current one.
+func (d *Drain) join() (drainHandle, func()) {
 	if d == nil {
-		return func() {}
+		return drainHandle{}, func() {}
 	}
 	d.mu.Lock()
 	g := d.current()
@@ -87,7 +110,7 @@ func (d *Drain) Join() (done func()) {
 	g.streams++
 	d.mu.Unlock()
 	var once sync.Once
-	return func() {
+	return drainHandle{d: d, g: g}, func() {
 		once.Do(func() {
 			d.mu.Lock()
 			defer d.mu.Unlock()
@@ -97,6 +120,13 @@ func (d *Drain) Join() (done func()) {
 			}
 		})
 	}
+}
+
+// Join registers one response; done is idempotent and belongs to the joined
+// generation even if a demo Reset happens before it finishes.
+func (d *Drain) Join() (done func()) {
+	_, done = d.join()
+	return done
 }
 
 // Wait waits for the joined generation without leaving a waiting goroutine

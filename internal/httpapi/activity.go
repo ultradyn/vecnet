@@ -17,7 +17,8 @@ import (
 // lists then and on every resync. The credential is checked again on each
 // heartbeat, so rotation ends the stream.
 func (s *server) opActivity(w http.ResponseWriter, r *http.Request) {
-	defer s.Drain.Join()()
+	drain, done := s.Drain.join()
+	defer done()
 	activeStreams.Add(1)
 	defer activeStreams.Add(-1)
 	ctx, stop := context.WithCancel(r.Context())
@@ -35,13 +36,13 @@ func (s *server) opActivity(w http.ResponseWriter, r *http.Request) {
 	sub := s.Hub.Activity.Subscribe(ctx)
 	conn := startSSE(w, s.sseStall())
 	defer conn.close()
-	conn.draining = s.Drain.C()
+	conn.draining = drain.C()
 	// A drain can also interrupt send while the replay queue is full. In
 	// that case the handler exits before reaching its idle select.
 	defer func() {
 		select {
 		case <-conn.draining:
-			conn.finish(restartFrame(s.Drain.RetryAfter()), drainFlush)
+			conn.finish(restartFrame(drain.RetryAfter()), drainFlush)
 		default:
 		}
 	}()
@@ -53,8 +54,7 @@ func (s *server) opActivity(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-conn.draining:
-			conn.finish(restartFrame(s.Drain.RetryAfter()), drainFlush)
-			return
+			return // the defer flushes the joined generation's final frame
 		case <-ctx.Done():
 			return
 		case <-conn.failed():

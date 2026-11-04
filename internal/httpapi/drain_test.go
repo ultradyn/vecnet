@@ -2,10 +2,18 @@ package httpapi
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/eventlog"
+	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/store"
 )
 
 func TestDrainGenerationAndWait(t *testing.T) {
@@ -82,18 +90,43 @@ func TestDrainNilMethods(t *testing.T) {
 }
 
 func TestDrainConcurrentJoinAnnounceWait(t *testing.T) {
-	d := NewDrain()
-	anchor := d.Join()
-	var wg sync.WaitGroup
-	for i := 0; i < 32; i++ {
-		wg.Go(func() { done := d.Join(); defer done(); <-d.C() })
-	}
-	d.Announce(time.Second)
-	anchor()
-	wg.Wait()
-	if !d.Wait(time.Second) {
-		t.Fatal("concurrent streams did not finish")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		d := NewDrain()
+		anchor := d.Join()
+		waited := make(chan bool, 1)
+		go func() { waited <- d.Wait(time.Minute) }()
+		synctest.Wait() // Wait is parked before any additional stream joins.
+
+		joined := make(chan struct{}, 32)
+		release := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := 0; i < cap(joined); i++ {
+			wg.Go(func() {
+				done := d.Join()
+				joined <- struct{}{}
+				<-release
+				done()
+			})
+		}
+		for i := 0; i < cap(joined); i++ {
+			<-joined
+		}
+		final := d.Join()
+		d.Announce(time.Second)
+		anchor()
+		close(release)
+		wg.Wait()
+		synctest.Wait() // All other completions overlap the original Wait.
+		select {
+		case result := <-waited:
+			t.Fatalf("Wait returned %v before the final completion", result)
+		default:
+		}
+		final()
+		if !<-waited {
+			t.Fatal("concurrent streams did not finish")
+		}
+	})
 }
 
 func TestDrainFinishFlushesQueuedFrames(t *testing.T) {
@@ -156,5 +189,136 @@ func TestDrainInterruptsBackpressuredSend(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("restart did not interrupt backpressure")
+	}
+}
+
+// restartBarrierWriter pauses setup after registration but before startSSE
+// returns, where the handler used to capture the current drain channel.
+type restartBarrierWriter struct {
+	*httptest.ResponseRecorder
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (w *restartBarrierWriter) WriteHeader(code int) {
+	close(w.entered)
+	<-w.release
+	w.ResponseRecorder.WriteHeader(code)
+}
+
+func restartTestServer(t *testing.T) *server {
+	t.Helper()
+	db, err := store.Open(filepath.Join(t.TempDir(), "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	log, err := eventlog.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &server{Deps: Deps{Hub: &hub.Hub{Log: log}, Drain: NewDrain()}}
+}
+
+func TestRestartKeepsGenerationAcrossReset(t *testing.T) {
+	for _, mode := range []string{"sse_tail", "sse_setup", "activity_setup", "long_poll"} {
+		t.Run(mode, func(t *testing.T) {
+			s := restartTestServer(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			r := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
+			recorder := httptest.NewRecorder()
+			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
+			var w http.ResponseWriter = recorder
+			if strings.HasSuffix(mode, "setup") {
+				w = &restartBarrierWriter{recorder, entered, release}
+			}
+			alive := func(context.Context) bool { close(entered); <-release; return true }
+			finished := make(chan struct{})
+			go func() {
+				defer close(finished)
+				switch mode {
+				case "activity_setup":
+					s.opActivity(w, r)
+				case "long_poll":
+					s.longPoll(w, r, "", nil, eventlog.Head, nil, 25*time.Second, alive)
+				default:
+					s.streamSSE(w, r, "", nil, eventlog.Head, nil, alive)
+				}
+			}()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("handler did not reach barrier")
+			}
+			s.Drain.Announce(1500 * time.Millisecond)
+			if s.Drain.Wait(time.Millisecond) {
+				t.Fatal("wait completed while handler was blocked")
+			}
+			s.Drain.Reset()
+			// An independent announcement makes a setup generation mix-up
+			// fail promptly with the wrong hint, rather than hang forever.
+			if mode != "sse_tail" {
+				s.Drain.Announce(2500 * time.Millisecond)
+			}
+			unblock()
+			select {
+			case <-finished:
+			case <-time.After(5 * time.Second):
+				t.Fatal("old handler missed its announcement after Reset")
+			}
+			want := "event: hub_restarting\ndata: {\"retry_after_ms\":1500}\n\n"
+			if mode == "long_poll" {
+				want = "\"hub_restarting\":{\"retry_after_ms\":1500}"
+			}
+			if got := recorder.Body.String(); !strings.Contains(got, want) || strings.Count(got, "hub_restarting") != 1 {
+				t.Fatalf("restart response = %q; want exactly one %q", got, want)
+			}
+		})
+	}
+}
+
+// The alive callback runs immediately after Log.Wait registers the poll. It
+// provides a channel barrier without a wall-clock readiness polling loop.
+func TestLongPollRestartField(t *testing.T) {
+	s := restartTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	r := httptest.NewRequest("GET", "/v1/events?wait=25", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	cur := eventlog.Cursor{Epoch: s.Hub.Log.Epoch()}
+	registered, finished := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	alive := func(context.Context) bool {
+		once.Do(func() { close(registered) })
+		return true
+	}
+	go func() {
+		defer close(finished)
+		s.longPoll(w, r, "poll-owner", nil, cur, nil, 25*time.Second, alive)
+	}()
+	select {
+	case <-registered:
+	case <-ctx.Done():
+		t.Fatal("long poll did not register")
+	}
+	if s.Hub.Log.Waiters("poll-owner") != 1 {
+		t.Fatal("long poll is not registered")
+	}
+	s.Drain.Announce(1500 * time.Millisecond)
+	select {
+	case <-finished:
+		want := `{"events":[],"next_cursor":"` + cur.String() + `","hub_restarting":{"retry_after_ms":1500}}` + "\n"
+		if w.Code != 200 || w.Body.String() != want {
+			t.Fatalf("restart poll = %d %s, want %s", w.Code, w.Body, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("parked poll ignored restart for 1s")
+	}
+	if !s.Drain.Wait(time.Second) {
+		t.Fatal("poll did not leave drain")
 	}
 }

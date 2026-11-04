@@ -909,57 +909,6 @@ func TestSSERestartFrame(t *testing.T) {
 	}
 }
 
-func TestLongPollRestartField(t *testing.T) {
-	env := testhub.Start(t)
-	d := httpapi.NewDrain()
-	env.Configure(func(deps *httpapi.Deps) { deps.Drain = d })
-	peer, secret := env.NewPeer("session", "reader")
-	cursor := mustPoll(t, env, secret, "?after=head&wait=0").NextCursor
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "GET", env.URL+"/v1/events?after="+cursor+"&wait=25", nil)
-	req.Header.Set("Authorization", "Bearer "+secret)
-	type result struct {
-		resp *http.Response
-		body []byte
-		err  error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			ch <- result{err: err}
-			return
-		}
-		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		ch <- result{resp, body, err}
-	}()
-	deadline := time.Now().Add(time.Second)
-	for env.Hub.Log.Waiters(peer) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("long poll did not park")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	d.Announce(1500 * time.Millisecond)
-	select {
-	case got := <-ch:
-		if got.err != nil {
-			t.Fatal(got.err)
-		}
-		want := `{"events":[],"next_cursor":"` + cursor + `","hub_restarting":{"retry_after_ms":1500}}` + "\n"
-		if got.resp.StatusCode != 200 || string(got.body) != want {
-			t.Fatalf("restart poll = %d %s, want %s", got.resp.StatusCode, got.body, want)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("parked poll ignored restart for 1s")
-	}
-	if !d.Wait(time.Second) {
-		t.Fatal("poll did not leave drain")
-	}
-}
-
 func TestDrainResetServesAgain(t *testing.T) {
 	env := testhub.Start(t)
 	d := httpapi.NewDrain()
