@@ -139,3 +139,8 @@ Peer detail screens come from `scripts/ui/peer.mjs`. A peer name anywhere in the
 - [pv-disabled.png](pv-disabled.png) — A disabled peer: dimmed name, disabled chip and note, status disabled.
 - [pv-hostile.png](pv-hostile.png) — The hostile peer's name stays literal text with controls and bidi overrides stripped, in the header and its principal.
 - [pv-error.png](pv-error.png) — The routes read fails: that section shows its error while every other section renders.
+
+Operator CLI label screens come from `scripts/ui/cli-label.mjs`, which runs the real `vecnet` binary under `env -i` (a pty from script(1) where a terminal is needed). A bare run with no profile is refused without a terminal or with an agent marker set; from a terminal it sends from the operator peer with a hub-set label.
+
+- [cli-label-thread-desktop.png](cli-label-thread-desktop.png) — Three operator CLI sends: `Operator on <host> CLI`, the same `via ssh`, and an explicit `--net` operator send from an agent-looking run marked `(agent suspected)` in amber; codex-hark's reply goes to the operator.
+- [cli-label-thread-narrow.png](cli-label-thread-narrow.png) — The same thread at narrow width: the label chips wrap after the sender kind.
