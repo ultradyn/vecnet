@@ -102,11 +102,19 @@ func (s *server) getPeers(w http.ResponseWriter, r *http.Request) {
 
 // getPeersMe is GET /v1/peers/me (PROTOCOL §2.10): the authenticated
 // caller, so a client can bind local state to the identity its credential
-// proves rather than to its own config text. peer_id is "" for a principal
-// or operator credential.
+// proves rather than to its config text. Only kind and the credential's own
+// id: peer_id for a peer, principal_id for a principal, neither for an
+// operator.
 func (s *server) getPeersMe(w http.ResponseWriter, r *http.Request) {
 	c := callerFrom(r.Context())
-	writeJSON(w, http.StatusOK, map[string]string{"kind": c.Kind, "peer_id": c.PeerID, "principal_id": c.PrincipalID})
+	me := map[string]string{"kind": c.Kind}
+	switch c.Kind {
+	case "peer":
+		me["peer_id"] = c.PeerID
+	case "principal":
+		me["principal_id"] = c.PrincipalID
+	}
+	writeJSON(w, http.StatusOK, me)
 }
 
 // patchPeersMe is PATCH /v1/peers/me (PROTOCOL §2.10): body

@@ -33,7 +33,7 @@ func hookFixture(t *testing.T, h http.HandlerFunc) (map[string]string, string) {
 	t.Helper()
 	return hookFixtureRaw(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/peers/me" {
-			fmt.Fprint(w, `{"kind":"peer","peer_id":"peer_test","principal_id":"prn_test"}`)
+			fmt.Fprint(w, `{"kind":"peer","peer_id":"peer_test"}`)
 			return
 		}
 		h(w, r)

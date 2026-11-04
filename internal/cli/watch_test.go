@@ -379,7 +379,7 @@ func TestWatchMismatchedStateDoesNotSuppressLive(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/v1/peers/me":
-			fmt.Fprint(w, `{"kind":"peer","peer_id":"peer_A","principal_id":"prn_A"}`)
+			fmt.Fprint(w, `{"kind":"peer","peer_id":"peer_A"}`)
 		case r.URL.Path == "/v1/peers":
 			fmt.Fprint(w, `{"peers":[]}`)
 		case r.URL.Path == "/v1/events" && r.Header.Get("Accept") != "text/event-stream":

@@ -35,7 +35,7 @@ func (h *identityHub) serve(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/v1/peers/me":
 		h.whoami.Add(1)
-		_ = json.NewEncoder(w).Encode(map[string]string{"kind": "peer", "peer_id": h.peer.Load().(string), "principal_id": "prn_test"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"kind": "peer", "peer_id": h.peer.Load().(string)})
 	case "/v1/events":
 		after := r.URL.Query().Get("after")
 		hookPage(w, h.pages[after], h.next[after])

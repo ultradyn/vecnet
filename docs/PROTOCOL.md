@@ -97,7 +97,7 @@ All endpoints are under the hub's public HTTPS origin. Bodies are JSON unless st
 | `GET /v1/threads/{id}/messages?after=` | participant | Thread history for re-sync and late joiners | [ENV, R08] |
 | `POST /v1/groups`, `POST /v1/groups/{id}/members`, `GET /v1/groups` | peer / principal | Ad hoc groups create / add / list | *(proposed paths)* |
 | `GET /v1/peers` | peer / principal | Directory | *(proposed path)* |
-| `GET /v1/peers/me` | peer / principal | Authenticated caller: `kind`, `peer_id`, `principal_id` | (§13.9) |
+| `GET /v1/peers/me` | any authenticated caller | Who the credential authenticates: `kind` plus `peer_id` or `principal_id` | (§13.9) |
 | `PATCH /v1/peers/me` | peer | Set own `subscribe_presence` | [R22] |
 | `POST /v1/ingress/{src_id}` | per-source verification | Inbound webhook source | [T12] |
 | `POST /v1/enrol` | one-time enrolment token | Exchange token for long-lived secret | *(proposed path)* |
@@ -219,7 +219,7 @@ Body `{state: idle|working|blocked|offline, at, capabilities?, quota?, location?
 
 `GET /v1/peers` returns every peer's public directory fields (section 8) to every peer; scopes do not gate it [T14, R24]. Credential status and routes are operator-only [T14].
 
-`GET /v1/peers/me` returns the authenticated caller, `{"kind": "peer"|"principal"|"operator", "peer_id": …, "principal_id": …}` (`peer_id` is `""` for a principal or operator credential), so a client can bind local state to the identity its credential proves rather than to its config text (§13.9).
+`GET /v1/peers/me`, for any authenticated caller, returns who the credential authenticates: `{"kind": "peer", "peer_id": …}` for a peer credential, `{"kind": "principal", "principal_id": …}` for a principal credential, `{"kind": "operator"}` for the operator. The other id is absent, not empty, and nothing else is returned (no name, scopes or secrets). A client uses it to bind local state to the identity its credential proves rather than to its config text (§13.9).
 
 `PATCH /v1/peers/me` with `{"subscribe_presence": "all"|"teams"|"none"}` sets the caller's presence fan-out (section 8) [R22].
 
