@@ -426,10 +426,47 @@ func TestHookInstallRefusesUnsafeProfile(t *testing.T) {
 	}
 }
 
+// isolateGitEnv clears Git's repository-location and discovery overrides
+// for the test, restoring the inherited values when it finishes. Git
+// discovery uses the process environment, not the CLI user's getenv, so an
+// inherited GIT_DIR/GIT_WORK_TREE would otherwise point git init and the
+// installer at another checkout.
+func isolateGitEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_NAMESPACE", "GIT_PREFIX", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"} {
+		t.Setenv(key, "") // Restore the inherited value when the test finishes.
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// foreignCheckout points GIT_DIR/GIT_WORK_TREE at a disposable checkout, as
+// a caller's environment might, and returns a check that it is unchanged.
+func foreignCheckout(t *testing.T) func() {
+	t.Helper()
+	foreign := filepath.Join(t.TempDir(), "foreign")
+	if out, err := exec.Command("git", "init", "--quiet", foreign).CombinedOutput(); err != nil {
+		t.Fatalf("git init foreign: %v %s", err, out)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(foreign, ".git"))
+	t.Setenv("GIT_WORK_TREE", foreign)
+	return func() {
+		t.Helper()
+		if _, err := os.Lstat(filepath.Join(foreign, ".claude")); !os.IsNotExist(err) {
+			t.Fatalf("foreign checkout settings touched: %v", err)
+		}
+	}
+}
+
 func TestHookInstallDefaultsToLocalAtGitRoot(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git unavailable")
 	}
+	isolateGitEnv(t)
+	foreignUnchanged := foreignCheckout(t)
+	defer foreignUnchanged()
+	isolateGitEnv(t) // the caller's overrides must not reach git init or the installer
 	u := installUser(t)
 	root := filepath.Join(t.TempDir(), "repo with trailing space ")
 	cmd := exec.Command("git", "init", root)
@@ -586,13 +623,7 @@ func TestHookInstallPreservesTrailingNewline(t *testing.T) {
 }
 
 func TestHookInstallFallbackToCwd(t *testing.T) {
-	// Git discovery uses the process environment, not the CLI user's getenv.
-	for _, key := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES"} {
-		t.Setenv(key, "") // Restore the inherited value when the test finishes.
-		if err := os.Unsetenv(key); err != nil {
-			t.Fatal(err)
-		}
-	}
+	isolateGitEnv(t)
 	u := installUser(t)
 	parent := t.TempDir()
 	if out, err := exec.Command("git", "-C", parent, "init", "--quiet").CombinedOutput(); err != nil {
