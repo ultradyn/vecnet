@@ -148,6 +148,14 @@ func (a *app) cmdHookInstall(args []string) error {
 		fmt.Fprintf(a.stderr, "would merge into %s; rerun with --write\n", path)
 		return nil
 	}
+	if !o.has("settings") {
+		// The default authorises only the personal settings.local.json. A
+		// symlink there (or at .claude) could redirect the write to shared
+		// or global settings, so following it needs explicit --settings.
+		if err := defaultSettingsRedirect(path); err != nil {
+			return err
+		}
+	}
 	target, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -183,6 +191,31 @@ func (a *app) cmdHookInstall(args []string) error {
 		return err
 	}
 	fmt.Fprintf(a.stderr, "wrote %s (UserPromptSubmit, PostToolUse)\n", path)
+	return nil
+}
+
+// defaultSettingsRedirect refuses a default target whose file or .claude
+// directory is a symlink, leaving the link and its target unchanged.
+func defaultSettingsRedirect(path string) error {
+	for _, p := range []string{filepath.Dir(path), path} {
+		info, err := os.Lstat(p)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		resolved := p
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			resolved = r
+		} else if l, err := os.Readlink(p); err == nil {
+			resolved = l
+		}
+		return fmt.Errorf("hook install: %s is a symlink to %s; the default target is only the personal settings.local.json, so rerun with --settings %s to write through it", p, resolved, path)
+	}
 	return nil
 }
 

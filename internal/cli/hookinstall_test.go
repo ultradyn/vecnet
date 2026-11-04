@@ -836,3 +836,79 @@ func TestHookInstallRenamedBinaryReplacedInPlace(t *testing.T) {
 		})
 	}
 }
+
+// Without --settings the installer writes only the personal
+// settings.local.json at the git top level. A symlink at that path, or at
+// .claude, must not redirect the write to shared or global settings: both
+// the link and its target stay unchanged and --settings is required.
+func TestHookInstallDefaultRefusesSymlinkRedirect(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	for _, mode := range []string{"to-shared", "to-global", "parent-dir"} {
+		t.Run(mode, func(t *testing.T) {
+			isolateGitEnv(t)
+			u := installUser(t)
+			root := filepath.Join(t.TempDir(), "repo")
+			if out, err := exec.Command("git", "init", "--quiet", root).CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v %s", err, out)
+			}
+			claude := filepath.Join(root, ".claude")
+			local := filepath.Join(claude, "settings.local.json")
+			body := []byte(`{"env":{"KEEP":"yes"}}`)
+			var target, link string
+			switch mode {
+			case "to-shared":
+				if err := os.MkdirAll(claude, 0755); err != nil {
+					t.Fatal(err)
+				}
+				target, link = filepath.Join(claude, "settings.json"), local
+				if err := os.Symlink("settings.json", link); err != nil {
+					t.Fatal(err)
+				}
+			case "to-global":
+				if err := os.MkdirAll(claude, 0755); err != nil {
+					t.Fatal(err)
+				}
+				target, link = filepath.Join(u.env["HOME"], ".claude", "settings.json"), local
+				if err := os.Symlink(target, link); err != nil {
+					t.Fatal(err)
+				}
+			case "parent-dir":
+				target, link = filepath.Join(u.env["HOME"], ".claude", "settings.local.json"), claude
+				if err := os.Symlink(filepath.Dir(target), link); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(target, body, 0644); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Readlink(link)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(root)
+			code, out, errs := u.run("hook", "install", "--bin", "vecnet", "--profile", "p", "--write")
+			if code == 0 || out != "" || !strings.Contains(errs, "--settings") {
+				t.Fatalf("redirected default accepted: exit=%d stdout=%q stderr=%q", code, out, errs)
+			}
+			if got := readSettings(t, target); string(got) != string(body) {
+				t.Fatalf("link target changed: %q", got)
+			}
+			if after, err := os.Readlink(link); err != nil || after != before {
+				t.Fatalf("link changed: %q %v", after, err)
+			}
+			// The explicit target is still honoured through the link.
+			installRun(t, u, "--profile", "p", "--write", "--settings", local)
+			if len(settingsCommands(t, readSettings(t, target), "PostToolUse")) != 1 {
+				t.Fatal("explicit --settings through the link not written")
+			}
+			if after, err := os.Readlink(link); err != nil || after != before {
+				t.Fatalf("explicit write replaced link: %q %v", after, err)
+			}
+		})
+	}
+}
