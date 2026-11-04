@@ -461,7 +461,7 @@
   "run": "/home/xertrov/src/vecnet4/scripts/wf/sol-run.sh",
   "wait": "/home/xertrov/src/vecnet4/scripts/wf/sol-wait.sh",
   "dir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-launcher/ccc",
-  "transcripts": "/home/xertrov/.claude-p/projects/-home-xertrov-src-vecnet4/*/subagents/workflows/*/agent-*.jsonl"
+  "transcripts": "/home/xertrov/.claude/projects/-home-xertrov-src-vecnet4/*/subagents/workflows/*/agent-*.jsonl"
  },
  "extraRules": [
   "Node and browser checks run through build2 too: `build2 node ...`. Chromium stays headless. Never run xdg-open or open a window.",
