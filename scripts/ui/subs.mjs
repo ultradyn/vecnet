@@ -1,5 +1,5 @@
 // Task 13: subscription health in the dashboard and the inbox, in a real browser.
-import { assert, cleanBuild, withDemo } from './lib.mjs';
+import { assert, cleanBuild, scrollIntoViewStable, withDemo } from './lib.mjs';
 import { expiresIn } from '../../internal/ui/static/subs-model.js';
 
 const SEEDED = ['ok', 'late', 'paused_token', 'paused_failed', 'paused_auth', 'paused_operator'];
@@ -77,7 +77,7 @@ try {
     assert(await section.locator('button, [role=button], input, select, textarea').count() === 0, 'dashboard section has buttons');
     assert(await page.locator('#view button').count() === 0, 'dashboard has buttons');
     // On the full dashboard the section sits below Peers and Threads; bring it into the shot.
-    await section.scrollIntoViewIfNeeded();
+    await scrollIntoViewStable(page, 'section.subs');
     await shot('13-subs-initial');
 
     // Inbox attention: Resume only where the hub offers it.

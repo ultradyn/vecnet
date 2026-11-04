@@ -300,7 +300,7 @@ func (m *Model) onTick() tea.Cmd {
 		}
 	}
 	cmds := []tea.Cmd{tick()}
-	if now.Sub(m.lastSlow) >= slowEvery && m.Conn == ConnLive {
+	if now.Sub(m.lastSlow) >= m.slowEvery && m.Conn == ConnLive {
 		m.lastSlow = now
 		tags := slices.Clone(slowKeys)
 		for key := range m.Data.Errs {

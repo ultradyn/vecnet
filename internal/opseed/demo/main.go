@@ -259,21 +259,30 @@ func controlDuration(w http.ResponseWriter, text string) (time.Duration, bool) {
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
+	if err := run(ctx, os.Args[1:], os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "demo:", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, args []string, out io.Writer) error {
+func run(ctx context.Context, args []string, stdin io.Reader, out io.Writer) error {
 	fs := flag.NewFlagSet("demo", flag.ContinueOnError)
 	listen := fs.String("listen", "127.0.0.1:0", "loopback address")
 	dir := fs.String("data-dir", "", "demo data directory (default: temporary)")
 	ui := fs.String("dev-ui-dir", "", "UI asset directory")
 	scale := fs.Bool("scale", false, "include large threads")
 	reset := fs.Bool("reset", false, "reset this demo's saved data")
+	exitOnEOF := fs.Bool("exit-on-stdin-eof", false, "shut down when stdin closes")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	ctx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	if *exitOnEOF {
+		go func() {
+			_, _ = io.Copy(io.Discard, stdin)
+			cancelRun()
+		}()
 	}
 	host, port, err := net.SplitHostPort(*listen)
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {

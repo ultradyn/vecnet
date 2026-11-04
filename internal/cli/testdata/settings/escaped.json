@@ -1,0 +1,14 @@
+{
+  "\u0065nv": {
+    "unicode": "\u00e9",
+    "slashes": "a\/b",
+    "literal": "<&>",
+    "large": 1e400,
+    "array": [
+      true,
+      null,
+      1.0,
+      -0
+    ]
+  }
+}
