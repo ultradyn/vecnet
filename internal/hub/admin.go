@@ -168,7 +168,7 @@ func newDotLinkCode() (stored, shown string, err error) {
 }
 
 // DotLink mints the one-time code that binds a ChatGPT principal to dot peer
-// peerID on first login (PROTOCOL §4.5, R15, §19.1). The code is returned
+// peerID on first login (PROTOCOL §4.5, R15, §20.1). The code is returned
 // once, grouped for reading, and only its hash is stored; it lasts
 // DotLinkTTL. Issuing a code ends a link-code lockout (DotLinkFailed). A peer
 // of another kind, or a disabled one, is 422 invalid_value; an unknown peer

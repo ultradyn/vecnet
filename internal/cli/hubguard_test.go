@@ -7,7 +7,7 @@ import (
 )
 
 // A plain http:// hub on a public host is refused before any credential is
-// sent (PROTOCOL §19.4); loopback and LAN hosts, https, an explicit opt-in in
+// sent (PROTOCOL §20.4); loopback and LAN hosts, https, an explicit opt-in in
 // the profile, and VECNET_ALLOW_INSECURE_HTTP=1 are allowed.
 func TestInsecureHubRefused(t *testing.T) {
 	refused := []string{"http://vecnet.fly.dev", "http://203.0.113.9:8080", "http://hub.example.com"}

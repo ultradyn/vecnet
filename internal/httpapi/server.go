@@ -47,7 +47,7 @@ type Deps struct {
 	UIDir string
 
 	// Limiter throttles unauthenticated traffic per client (PROTOCOL
-	// §19.2); nil limits nothing. Stack.Deps sets DefaultLimiter.
+	// §20.2); nil limits nothing. Stack.Deps sets DefaultLimiter.
 	Limiter *Limiter
 	// TrustFlyClientIP keys Limiter on the Fly-Client-IP header, which only
 	// Fly's proxy can set (vecnet-hub --trust-fly-client-ip). Off, a direct
@@ -55,7 +55,7 @@ type Deps struct {
 	TrustFlyClientIP bool
 }
 
-// Server timeouts (PROTOCOL §19.3). ReadTimeout bounds reading a whole
+// Server timeouts (PROTOCOL §20.3). ReadTimeout bounds reading a whole
 // request, WriteTimeout writing an ordinary response; streams (SSE, long
 // polls, blob transfers) lift or extend both for themselves with an
 // http.ResponseController, so they are not cut. ConfigureServer applies them.
@@ -114,7 +114,7 @@ func New(d Deps) http.Handler {
 }
 
 // hsts adds Strict-Transport-Security to every response of a hub served over
-// https (PROTOCOL §19.3), so a browser never again tries it in the clear.
+// https (PROTOCOL §20.3), so a browser never again tries it in the clear.
 func hsts(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000")

@@ -601,7 +601,7 @@ func TestSessionBelongsToItsCredential(t *testing.T) {
 }
 
 // The GET stream keeps flowing after the server's ReadTimeout and
-// WriteTimeout (PROTOCOL §19.3) have passed many times over.
+// WriteTimeout (PROTOCOL §20.3) have passed many times over.
 func TestGetStreamOutlivesServerTimeouts(t *testing.T) {
 	env := testhub.StartWithServer(t, nil, func(srv *http.Server) {
 		httpapi.ConfigureServer(srv)

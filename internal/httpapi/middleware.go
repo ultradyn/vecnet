@@ -94,7 +94,7 @@ func bearer(r *http.Request) string {
 // authorised (Send, SetPresence).
 //
 // A credential that does not resolve costs its client one token of lim
-// (PROTOCOL §19.2), and a client with none left gets 429 client_rate_limited
+// (PROTOCOL §20.2), and a client with none left gets 429 client_rate_limited
 // instead of 401. A credential that resolves is never limited here, so one
 // broken client cannot lock out a good one behind the same address. lim may
 // be nil.

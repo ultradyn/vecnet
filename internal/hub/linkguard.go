@@ -12,7 +12,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 )
 
-// The link-code brute-force guard (PROTOCOL §19.1). Link codes are typed on a
+// The link-code brute-force guard (PROTOCOL §20.1). Link codes are typed on a
 // public form, so the hub counts refused codes across every client: the
 // DotLinkFailureBudget-th refusal within DotLinkFailureWindow burns every
 // live link code and refuses link codes for DotLinkLockout, or until the
@@ -22,7 +22,7 @@ import (
 // at once. A refusal's audit row is written after the answer, so a guess never
 // waits on the store's write lock; the refusal that spends the budget writes
 // its row and the burn before answering. Codes typed while locked out are
-// refused unread and not audited: the per-client limiter (PROTOCOL §19.2)
+// refused unread and not audited: the per-client limiter (PROTOCOL §20.2)
 // bounds them, and the lockout row already records the attack.
 const (
 	DotLinkFailureBudget = 20

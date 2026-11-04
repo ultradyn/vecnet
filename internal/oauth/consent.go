@@ -359,7 +359,7 @@ type linkWorth int
 const (
 	linkLive    linkWorth = iota // a good cookie, or a code that could be spent
 	linkRefused                  // no cookie and no live code
-	linkLocked                   // no cookie, and link codes are locked out (§19.1)
+	linkLocked                   // no cookie, and link codes are locked out (§20.1)
 )
 
 // linkCodeWorth reports whether this request can get anywhere in a write

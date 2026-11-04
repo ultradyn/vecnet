@@ -33,7 +33,7 @@ type sseConn struct {
 
 // sseWriteTimeout bounds one frame's write and flush. The server's
 // WriteTimeout covers a whole response, which a stream outlives, so each
-// frame gets its own deadline instead (PROTOCOL §19.3).
+// frame gets its own deadline instead (PROTOCOL §20.3).
 const sseWriteTimeout = 30 * time.Second
 
 // holdOpen lifts the server's read deadline for a long-lived response:

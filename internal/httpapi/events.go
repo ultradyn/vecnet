@@ -104,7 +104,7 @@ func (s *server) getEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	if !sse {
 		// A long poll holds the request for up to wait: lift the server's
-		// read deadline and give the write the hold plus a margin (§19.3).
+		// read deadline and give the write the hold plus a margin (§20.3).
 		holdOpen(http.NewResponseController(w), time.Now().Add(wait+sseWriteTimeout))
 	}
 	// The first read validates the cursor (409 before any 200 is written).

@@ -1,6 +1,6 @@
 package httpapi_test
 
-// Public-deploy hardening (PROTOCOL §19): the per-client limiter, HSTS and
+// Public-deploy hardening (PROTOCOL §20): the per-client limiter, HSTS and
 // server timeouts that long-lived responses must survive.
 
 import (

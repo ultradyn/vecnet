@@ -169,7 +169,7 @@ None. No anonymous path in.
 
 ## Fixes (2026-11-04, branch `research/deploy-audit`)
 
-Normative text is [PROTOCOL §19](../PROTOCOL.md#19-public-deploy-hardening-2026-11-04). Every red test below is now green.
+Normative text is [PROTOCOL §20](../PROTOCOL.md#20-public-deploy-hardening-2026-11-04). Every red test below is now green.
 
 | Finding | Fix | Numbers |
 |---|---|---|

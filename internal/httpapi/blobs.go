@@ -35,7 +35,7 @@ func (s *server) putBlob(w http.ResponseWriter, r *http.Request) {
 		}
 		ttl = time.Duration(secs) * time.Second
 	}
-	// A 25 MiB body may take longer than the server's ReadTimeout (§19.3).
+	// A 25 MiB body may take longer than the server's ReadTimeout (§20.3).
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Now().Add(blobTransferTimeout))
 	_ = rc.SetWriteDeadline(time.Now().Add(blobTransferTimeout + WriteTimeout))
@@ -88,7 +88,7 @@ func (s *server) getBlob(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Content-Security-Policy", "sandbox; default-src 'none'")
 	h.Set("Cache-Control", "private")
-	// A 25 MiB download may take longer than the server's WriteTimeout (§19.3).
+	// A 25 MiB download may take longer than the server's WriteTimeout (§20.3).
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(blobTransferTimeout))
 	http.ServeContent(w, r, "", time.Time{}, f)
 }

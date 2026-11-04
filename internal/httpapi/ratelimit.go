@@ -14,7 +14,7 @@ import (
 	"github.com/XertroV/vecnet/internal/hub"
 )
 
-// Per-client limits on unauthenticated traffic (PROTOCOL §19.2). A client is
+// Per-client limits on unauthenticated traffic (PROTOCOL §20.2). A client is
 // an IP address (an IPv6 /64), taken from RemoteAddr, or from Fly-Client-IP
 // when Deps.TrustFlyClientIP says Fly's proxy sets it. Requests with a
 // credential that resolves are never limited here; only anonymous work and
@@ -196,7 +196,7 @@ func classify(r *http.Request) throttleKind {
 	return throttleNone
 }
 
-// throttle applies l to the public routes (PROTOCOL §19.2):
+// throttle applies l to the public routes (PROTOCOL §20.2):
 //   - enrolment and the OAuth endpoints that do work (register, authorize,
 //     token) cost one token per request;
 //   - ingress, tokened blob reads and /mcp cost one per failure (401, and for

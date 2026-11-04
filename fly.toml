@@ -12,7 +12,7 @@ kill_timeout = 15
 [env]
   VECNET_PUBLIC_URL = "https://vecnet.fly.dev"
   # Fly's proxy sets Fly-Client-IP; the per-client rate limit keys on it
-  # (PROTOCOL §19.2). Never set this where clients reach the hub directly.
+  # (PROTOCOL §20.2). Never set this where clients reach the hub directly.
   VECNET_TRUST_FLY_CLIENT_IP = "1"
 
 [http_service]
@@ -29,7 +29,7 @@ kill_timeout = 15
   # ten times the expected fleet (peers + UI tabs + dots). An idle stream is a
   # goroutine and its buffers (tens of KiB), so 300 is under 30 MiB of the
   # 512 MB machine. At hard_limit Fly queues new connections, then 503s. The
-  # hub's timeouts and per-client limiter (PROTOCOL §19.2, §19.3) keep slow
+  # hub's timeouts and per-client limiter (PROTOCOL §20.2, §20.3) keep slow
   # anonymous requests from holding many. soft_limit only steers traffic
   # between machines; here it marks "near the cap" in Fly's metrics.
   [http_service.concurrency]

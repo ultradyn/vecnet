@@ -10,7 +10,7 @@
 // reach private or loopback addresses (PROTOCOL §14.7).
 // VECNET_TRUST_FLY_CLIENT_IP=1 is the default of --trust-fly-client-ip: the
 // per-client limiter keys on Fly's Fly-Client-IP header, which is only safe
-// behind Fly's proxy (PROTOCOL §19.2; fly.toml sets it).
+// behind Fly's proxy (PROTOCOL §20.2; fly.toml sets it).
 package main
 
 import (

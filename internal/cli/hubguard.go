@@ -13,7 +13,7 @@ const insecureEnv = "VECNET_ALLOW_INSECURE_HTTP"
 // checkHubURL refuses a plain http:// hub unless its host is loopback or on
 // the LAN, or allow is set: a bearer sent over http to a public host crosses
 // the internet in the clear, even when the far end redirects to https
-// (PROTOCOL §19.4). LAN means a private, loopback, link-local or CGNAT
+// (PROTOCOL §20.4). LAN means a private, loopback, link-local or CGNAT
 // address, "localhost", a single-label name ("xsm"), or a name under .local,
 // .lan, .home.arpa or .internal. Names are not resolved.
 func checkHubURL(raw string, allow bool) error {
