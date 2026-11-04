@@ -206,3 +206,27 @@ func TestPresenceGoesStale(t *testing.T) {
 		t.Fatalf("EffectivePresence(no report) = %q, want unknown", got)
 	}
 }
+
+func TestLauncherPresenceGoesStaleAfter15m(t *testing.T) {
+	env := testhub.Start(t)
+	launcher, launcherSec := env.NewPeer("launcher", "launcher")
+	grokbot, grokbotSec := env.NewPeer("grokbot", "grokbot")
+	reportPresence(t, env, launcherSec, "", "idle")
+	reportPresence(t, env, grokbotSec, "", "idle")
+
+	env.Now.Advance(14*time.Minute + 59*time.Second)
+	if got := directoryPresence(t, env, launcher); got != "idle" {
+		t.Fatalf("launcher presence at 14m59s = %q, want idle", got)
+	}
+	env.Now.Advance(time.Second)
+	if got := directoryPresence(t, env, launcher); got != "idle" {
+		t.Fatalf("launcher presence at exactly 15m = %q, want idle", got)
+	}
+	env.Now.Advance(time.Second)
+	if got := directoryPresence(t, env, launcher); got != "unknown" {
+		t.Fatalf("launcher presence at 15m01s = %q, want unknown", got)
+	}
+	if got := directoryPresence(t, env, grokbot); got != "idle" {
+		t.Fatalf("grokbot presence at 15m01s = %q, want idle (1 h TTL)", got)
+	}
+}

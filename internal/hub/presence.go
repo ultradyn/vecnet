@@ -17,8 +17,9 @@ import (
 // Presence staleness defaults (PROTOCOL §8): a report older than its
 // per-kind TTL is shown as "unknown".
 const (
-	DefaultPresenceTTL        = time.Hour
-	DefaultSessionPresenceTTL = 15 * time.Minute
+	DefaultPresenceTTL         = time.Hour
+	DefaultSessionPresenceTTL  = 15 * time.Minute
+	DefaultLauncherPresenceTTL = 15 * time.Minute
 )
 
 // PresenceReport is one self-reported presence (PROTOCOL §2.6). A nil
@@ -46,6 +47,12 @@ type PresenceRow struct {
 
 // presenceTTL is the staleness TTL for a peer of kind.
 func (h *Hub) presenceTTL(kind string) time.Duration {
+	if kind == "launcher" {
+		if h.Cfg.LauncherPresenceTTL > 0 {
+			return h.Cfg.LauncherPresenceTTL
+		}
+		return DefaultLauncherPresenceTTL
+	}
 	if kind == "session" {
 		if h.Cfg.SessionPresenceTTL > 0 {
 			return h.Cfg.SessionPresenceTTL
@@ -60,7 +67,7 @@ func (h *Hub) presenceTTL(kind string) time.Duration {
 
 // EffectivePresence is the presence the hub shows for p at now: the stored
 // state, or "unknown" when there is none or presence_at is older than the
-// kind's TTL (1 h; 15 min for kind session). The hub never invents a state
+// kind's TTL (1 h; 15 min for session and launcher). The hub never invents a state
 // (PROTOCOL §8).
 func (h *Hub) EffectivePresence(p PresenceRow, now time.Time) string {
 	if p.State == nil || *p.State == "" || p.At == nil {
