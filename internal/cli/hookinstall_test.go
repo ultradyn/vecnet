@@ -945,7 +945,10 @@ func TestHookInstallMCPPrintsRegistration(t *testing.T) {
 	log := fakeClaude(t, 0)
 	u := installUser(t)
 	delete(u.env, "VECNET_CONFIG") // --profile names the profile; no config is read
-	out, errs := installRun(t, u, "--profile", "p", "--mcp")
+	// An absent --settings file keeps the target off the checkout's real
+	// .claude/settings.local.json (and off git, ancestors and worktrees).
+	absent := filepath.Join(t.TempDir(), "absent.json")
+	out, errs := installRun(t, u, "--profile", "p", "--mcp", "--settings", absent)
 	for event, suffix := range map[string]string{"UserPromptSubmit": "user-prompt", "PostToolUse": "post-tool"} {
 		if got := settingsCommands(t, []byte(out), event); !reflect.DeepEqual(got, []string{"vecnet hook --profile p --event " + suffix + " --mcp vecnet-p"}) {
 			t.Fatalf("%s commands=%v", event, got)
@@ -954,7 +957,7 @@ func TestHookInstallMCPPrintsRegistration(t *testing.T) {
 	if !strings.Contains(errs, "claude mcp add --scope local vecnet-p -- vecnet --net p mcp") || strings.Contains(errs, "--env") {
 		t.Fatalf("registration=%q", errs)
 	}
-	out, _ = installRun(t, u, "--profile", "p", "--mcp", "--auto-ack")
+	out, _ = installRun(t, u, "--profile", "p", "--mcp", "--auto-ack", "--settings", absent)
 	for event, suffix := range map[string]string{"UserPromptSubmit": "user-prompt", "PostToolUse": "post-tool"} {
 		if got := settingsCommands(t, []byte(out), event); !reflect.DeepEqual(got, []string{"vecnet hook --profile p --event " + suffix + " --auto-ack --mcp vecnet-p"}) {
 			t.Fatalf("%s auto-ack commands=%v", event, got)
@@ -1041,6 +1044,7 @@ func TestHookInstallMCPWriteRunsClaude(t *testing.T) {
 func TestHookInstallMCPWithoutClaudeStillWrites(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // no claude anywhere on PATH
 	u := installUser(t)
+	u.env["CLAUDE_PROJECT_DIR"] = t.TempDir() // claude runs there, not in the checkout
 	path := installFile(t, []byte("{}\n"), 0o644)
 	code, _, errs := u.run("hook", "install", "--bin", "vecnet", "--profile", "p", "--mcp", "--write", "--settings", path)
 	if code != 0 {
