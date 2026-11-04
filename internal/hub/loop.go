@@ -14,6 +14,10 @@ import (
 // SenderChainCap is how many originators loop.sender_chain keeps (PROTOCOL §6).
 const SenderChainCap = 32
 
+// DefaultMaxExpiry bounds an explicit expires_at on a fresh message or an
+// operator reply, relative to the hub's current time.
+const DefaultMaxExpiry = 7 * 24 * time.Hour
+
 // Counter names (the counters table) for loop cuts and rate-limit
 // rejections; each is also the audit action of the rejection (PROTOCOL §6,
 // §16.2).
@@ -42,7 +46,8 @@ func (c *cutError) Unwrap() error { return c.api }
 //     reply, now+DefaultTTL fresh; a reply never raises the parent's value.
 //     An operator reply resets the TTL like depth: it is not bound by the
 //     parent's expires_at, passed or not, and its subtree inherits the
-//     operator's.
+//     operator's. An explicit fresh or operator expires_at must not exceed
+//     now+Cfg.MaxExpiry; inherited or lowered reply values are unaffected.
 //   - sender_chain: the parent's chain + senderID, last 32 kept (the
 //     operator's included).
 //
@@ -52,6 +57,8 @@ func (c *cutError) Unwrap() error { return c.api }
 // It returns 422 expired when the parent's expires_at has passed and the
 // sender is not the operator (or the resulting expires_at is not in the
 // future), and 422 max_depth_exceeded when depth would exceed max_depth.
+// An explicit fresh or operator expires_at beyond the cap returns 422
+// invalid_value with details.field "expires_at" and details.max set to the cap.
 func (h *Hub) buildLoop(parent *envelope.Message, senderID, senderKind string, req *envelope.SendRequest, now time.Time) (envelope.Loop, *APIError) {
 	ttl := now.Add(h.Cfg.DefaultTTL)
 	expires := ttl
@@ -89,6 +96,12 @@ func (h *Hub) buildLoop(parent *envelope.Message, senderID, senderKind string, r
 			return envelope.Loop{}, e
 		}
 		if parent == nil || operator || asked.Before(expires) {
+			if (parent == nil || operator) && asked.After(now.Add(h.Cfg.MaxExpiry)) {
+				e := E(http.StatusUnprocessableEntity, "invalid_value", "expires_at exceeds the maximum lifetime")
+				e.Details["field"] = "expires_at"
+				e.Details["max"] = envelope.FormatTime(now.Add(h.Cfg.MaxExpiry))
+				return envelope.Loop{}, e
+			}
 			expires = asked
 		}
 	}
