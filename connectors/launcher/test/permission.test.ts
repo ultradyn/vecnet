@@ -39,6 +39,33 @@ test('approvalOptions caps at 7 + escalate, keeps deny, trims and dedupes labels
   assert.equal(selected.length,8);assert.ok(selected.some(x=>x.optionId==='no'));assert.equal(selected.at(-1)!.label,'escalate');assert.equal(new Set(selected.map(x=>x.label)).size,8);assert.ok(selected.every(x=>x.label.length<=64));assert.ok(selected.some(x=>x.label.endsWith('(2)')));
   const collisions=approvalOptions([{id:'a',label:'escalate',grants:'once'},{id:'b',label:'escalate',grants:'deny'}],true);assert.equal(new Set(collisions.map(x=>x.label)).size,3);
 });
+test('finishPermission refuses backend option IDs that redaction would rewrite',()=>{
+  const options:PermissionDraft['options']=[
+    {id:'https://a.local/allow',label:'Bearer a',grants:'once'},
+    {id:'https://a.local/deny',label:'Bearer b',grants:'deny'},
+  ];
+  assert.throws(()=>finishPermission({...draft(),options},ctx),{message:'unsafe backend option id'});
+  assert.throws(()=>finishPermission({...draft(),options:[{id:'crsr_optionSecret',label:'Allow',grants:'once'},draft().options[1]]},ctx),{message:'unsafe backend option id'});
+});
+test('finishPermission deduplicates final redacted labels and preserves exact option mapping',()=>{
+  const options:PermissionDraft['options']=[
+    {id:'allow:once',label:'Bearer a',grants:'once'},
+    {id:'deny:once',label:'Bearer b',grants:'deny'},
+  ];
+  const permission=finishPermission({...draft(),options,reason:'Bearer reasonSecret',backend_raw:{token:'crsr_rawSecret'}},ctx);
+  assert.deepEqual(permission.options,[
+    {id:'allow:once',label:'Bearer [redacted]',grants:'once'},
+    {id:'deny:once',label:'Bearer [redacted](2)',grants:'deny'},
+  ]);
+  assert.equal(new Set(permission.options.map(o=>o.label)).size,2);
+  assert.equal(new Set(permission.options.map(o=>o.id)).size,2);
+  assert.equal(permission.redacted,true);
+  assert.equal(permission.reason,'Bearer [redacted]');
+  assert.deepEqual(permission.backend_raw,{token:'[redacted]'});
+  assert.deepEqual(validateLaunchPermission(permission),[]);
+  assert.deepEqual(options.map(o=>o.label),['Bearer a','Bearer b']);
+  assert.throws(()=>finishPermission({...draft(),options:options.map(o=>({...o,id:'same'}))},ctx),{message:'invalid backend option ids'});
+});
 test('hasShellOperators: ; | & && || $( ` > < detected; plain argv-like line not',()=>{
   for(const op of [';','|','&','&&','||','$(','`','>','<']) assert.equal(hasShellOperators(`echo a ${op} b`),true,op);
   assert.equal(hasShellOperators('git status --porcelain'),false);

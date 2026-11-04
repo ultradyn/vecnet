@@ -70,10 +70,11 @@ export function finishPermission(draft: PermissionDraft, ctx: {
     ...draft, v:1,machine_id:ctx.machineId,job_id:ctx.jobId,permission_mode:ctx.permissionMode,preset:ctx.preset,backend:ctx.backend,
     workspace_root:root,outside_workspace:outside,redacted:draft.options.some(o=>redactText(o.label).changed),backend_raw_truncated:false,
     command,paths,
-    options:approvalOptions(draft.options,false).map(o=>({id:o.optionId,label:o.label,grants:o.grants})),
+    options:[],
   };
   // Redact values structurally, never the serialised JSON (a bearer regex could
-  // eat quotes and produce invalid JSON). Also cover reason, argv and labels.
+  // eat quotes and produce invalid JSON). Cover reason, argv and raw keys;
+  // option labels are redacted during final normalization below.
   function scrub(value: unknown): unknown {
     if (typeof value === 'string') {
       const r = redactText(value); if (r.changed) p.redacted = true; return r.text;
@@ -84,6 +85,10 @@ export function finishPermission(draft: PermissionDraft, ctx: {
   }
   const redacted = scrub(JSON.parse(JSON.stringify(p))) as LaunchPermission;
   redacted.redacted = p.redacted;
+  // Finalize options after request redaction: scrubbing a deduplication suffix
+  // can collapse labels again. IDs are opaque; refuse ones unsafe to publish
+  // rather than rewrite the backend's decision mapping.
+  redacted.options = approvalOptions(draft.options,false).map(o=>({id:o.optionId,label:o.label,grants:o.grants}));
   const rawText = JSON.stringify(redacted.backend_raw);
   if (Buffer.byteLength(rawText) > 4096) {
     redacted.backend_raw = truncateJSONText(rawText,4096);
@@ -113,6 +118,7 @@ export function approvalOptions(opts: PermissionRequest['options'], escalate: bo
   const ids = new Set<string>();
   const result = ordered.map(o=>{
     if (!o.id || ids.has(o.id)) throw new Error('invalid backend option ids');
+    if (redactText(o.id).changed) throw new Error('unsafe backend option id');
     ids.add(o.id);
     const text = redactText(o.label).text.trim() || 'Option';
     const base = text.slice(0,64);
