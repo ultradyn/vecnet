@@ -26,19 +26,35 @@ const byActivity = (a, b) => {
   return ai < bi ? 1 : ai > bi ? -1 : 0;
 };
 
+// The widest unread label; past it the pill reads 99+.
+export const UNREAD_MAX = 99;
+
+// unreadOf reads one thread's count from the inbox head's unread_by_thread
+// (PROTOCOL §2.13), the badge's own count split by thread. Anything but a
+// positive integer is 0: an older hub sends no map at all.
+export function unreadOf(byThread, id) {
+  const n = byThread && Object.hasOwn(byThread, id) ? byThread[id] : 0;
+  return Number.isInteger(n) && n > 0 ? n : 0;
+}
+
+export function unreadLabel(n) {
+  return n > UNREAD_MAX ? UNREAD_MAX + '+' : n > 0 ? String(n) : '';
+}
+
 // threadRow is one sidebar row from a ThreadRow (or a bare ThreadSummary
-// under `thread`): title and message count, then participants and last
-// activity. `me` is left out of the participants line, and named "you" in
-// the tip. An untitled thread's title is its stand-in, which already names
-// the participants, so its second line counts them instead. Peer strings stay
-// strings: the view sets them as text.
-export function threadRow(r, me, nameOf, now) {
+// under `thread`): title, message count and unread count, then participants
+// and last activity. `me` is left out of the participants line, and named
+// "you" in the tip. An untitled thread's title is its stand-in, which already
+// names the participants, so its second line counts them instead. Peer
+// strings stay strings: the view sets them as text. unread is the operator's
+// unread deliveries in the thread; Other Threads pass none.
+export function threadRow(r, me, nameOf, now, unread = 0) {
   const t = r.thread, count = Number.isInteger(t.message_count) ? t.message_count : null;
   const ids = t.participants || [];
   const untitled = !t.title;
   const title = untitled ? standInTitle(t, me, nameOf) : t.title;
   const all = ids.map(p => (p === me ? 'you' : nameOf(p))).join(', ');
-  const tip = [title, all, [count === null ? '' : plural(count, 'message'), r.last_message_at ? 'last active ' + fullWhen(r.last_message_at) : ''].filter(Boolean).join(' · ')].filter(Boolean).join('\n');
+  const tip = [title, all, [count === null ? '' : plural(count, 'message'), unread ? unread + ' unread' : '', r.last_message_at ? 'last active ' + fullWhen(r.last_message_at) : ''].filter(Boolean).join(' · ')].filter(Boolean).join('\n');
   return {
     id: t.thread_id,
     href: '#thread/' + t.thread_id,
@@ -49,6 +65,8 @@ export function threadRow(r, me, nameOf, now) {
     // is a stand-in title's plain participant count.
     ids: untitled ? [] : ids.filter(p => p !== me),
     count: count === null ? '' : String(count),
+    unread,
+    unreadText: unreadLabel(unread),
     active: ago(r.last_message_at, now),
     tip,
   };
@@ -59,10 +77,12 @@ export function threadRow(r, me, nameOf, now) {
 // whose ThreadRows carry last_message_at; until it arrives, summaries (the
 // shell's GET /v1/threads list) stand in without times. error shows only
 // when neither has loaded; rows already shown stay through a failed reload.
-export function yourThreads({ page, summaries, error, me, nameOf, now }) {
+// unread is the inbox head's unread_by_thread, so the rows' counts sum to the
+// inbox badge over the threads listed.
+export function yourThreads({ page, summaries, error, me, nameOf, now, unread }) {
   const src = page ? page.threads || [] : summaries ? summaries.map(thread => ({ thread, last_message_at: '' })) : null;
   if (!src) return error ? { state: 'error', note: 'Threads unavailable', rows: [] } : { state: 'loading', note: '…', rows: [] };
-  const rows = src.filter(r => r && r.thread).map(r => threadRow(r, me, nameOf, now));
+  const rows = src.filter(r => r && r.thread).map(r => threadRow(r, me, nameOf, now, unreadOf(unread, r.thread.thread_id)));
   return rows.length ? { state: 'ok', note: '', rows } : { state: 'empty', note: 'No threads yet', rows };
 }
 
