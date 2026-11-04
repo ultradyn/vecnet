@@ -1,6 +1,6 @@
 // Command vecnet-hub runs the vecnet hub, or initialises its operator.
 //
-//	vecnet-hub [--listen 127.0.0.1:45752] [--data-dir /data] [--public-url URL] [--dev-ui-dir DIR] [--allow-private-egress]
+//	vecnet-hub [--listen 127.0.0.1:45752] [--data-dir /data] [--public-url URL] [--dev-ui-dir DIR] [--allow-private-egress] [--trust-fly-client-ip]
 //	vecnet-hub init [--data-dir /data] --operator-name <name>
 //
 // VECNET_LISTEN, VECNET_DATA_DIR and VECNET_PUBLIC_URL, when set, replace
@@ -8,6 +8,9 @@
 // VECNET_ALLOW_PRIVATE_EGRESS=1 is the default of --allow-private-egress,
 // a development-only override that lets push and notify URLs be http and
 // reach private or loopback addresses (PROTOCOL §14.7).
+// VECNET_TRUST_FLY_CLIENT_IP=1 is the default of --trust-fly-client-ip: the
+// per-client limiter keys on Fly's Fly-Client-IP header, which is only safe
+// behind Fly's proxy (PROTOCOL §19.2; fly.toml sets it).
 package main
 
 import (
@@ -62,6 +65,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	devUIDir := fs.String("dev-ui-dir", "", "serve the operator UI from this directory instead of the embedded copy (development)")
 	allowPrivate := fs.Bool("allow-private-egress", getenv("VECNET_ALLOW_PRIVATE_EGRESS") == "1",
 		"development only: let outbound URLs be http and reach private/loopback addresses ($VECNET_ALLOW_PRIVATE_EGRESS=1)")
+	trustFly := fs.Bool("trust-fly-client-ip", getenv("VECNET_TRUST_FLY_CLIENT_IP") == "1",
+		"key the per-client rate limit on the Fly-Client-IP header; only behind Fly's proxy ($VECNET_TRUST_FLY_CLIENT_IP=1)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -80,7 +85,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unknown subcommand %q", fs.Arg(0))
 	}
-	return serve(ctx, *listen, *dataDir, *publicURL, *devUIDir, *allowPrivate, stdout)
+	return serve(ctx, *listen, *dataDir, *publicURL, *devUIDir, *allowPrivate, *trustFly, stdout)
 }
 
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
@@ -135,7 +140,8 @@ const ShutdownGrace = 10 * time.Second
 // stdout once accepting. publicURL "" means http://<bound address>.
 // devUIDir "" serves the embedded operator UI. allowPrivateEgress is the
 // development-only egress override (hub.Config.AllowPrivateEgress).
-func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, allowPrivateEgress bool, stdout io.Writer) error {
+// trustFly keys the per-client limiter on Fly-Client-IP (Deps.TrustFlyClientIP).
+func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, allowPrivateEgress, trustFly bool, stdout io.Writer) error {
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return err
@@ -164,11 +170,9 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 	defer closeStop()
 	deps := stack.Deps()
 	deps.UIDir, deps.Stop = devUIDir, stop
-	srv := &http.Server{
-		Handler:           httpapi.New(deps),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
+	deps.TrustFlyClientIP = trustFly
+	srv := &http.Server{Handler: httpapi.New(deps)}
+	httpapi.ConfigureServer(srv)
 	srv.RegisterOnShutdown(closeStop)
 
 	// Background work stops after the HTTP server, before the store closes.

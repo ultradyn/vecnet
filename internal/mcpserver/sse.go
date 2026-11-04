@@ -39,6 +39,10 @@ type Streamer struct {
 // dispatched handler, ServeHTTP writes nothing after the handler returns.
 func (s *Server) Stream(w http.ResponseWriter, r *http.Request) (*Streamer, error) {
 	rc := http.NewResponseController(w)
+	// The stream outlives the server's ReadTimeout, whose expiry would cancel
+	// the request's context; each frame sets its own write deadline.
+	_ = rc.SetReadDeadline(time.Time{})
+	_ = rc.SetWriteDeadline(time.Now().Add(streamWriteTimeout))
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-store")

@@ -139,7 +139,7 @@ None. No anonymous path in.
 - Test: `TestAuditDockerignoreExcludesDatabases` (`cmd/vecnet-hub/deploy_audit_test.go`). **Fails.**
 
 **S4. No `[http_service.concurrency]` in `fly.toml`.**
-- Evidence: `fly.toml` `[http_service]` has no concurrency block. Fly's documented defaults are soft 20 / hard 25 per machine (confirm against current Fly docs or `fly config show`). There is one machine (`min_machines_running = 1`, no autostart).
+- Evidence: `fly.toml` `[http_service]` has no concurrency block. Fly's documented defaults are soft 20 / hard 25 per machine (confirm against current Fly docs or `fly config show`). *Correction (fix pass): current Fly docs give soft 20 and **no** hard limit by default, so the unbounded side was the real gap; see Fixes.* There is one machine (`min_machines_running = 1`, no autostart).
 - Impact: each peer's SSE stream or long-poll, each ChatGPT `/mcp` stream, and each slow anonymous request holds one slot. At about 25 the proxy stops sending the machine new traffic. `cmd/vecnet-hub/main.go:169` sets only `ReadHeaderTimeout`, with no `ReadTimeout`, so 25 slow-body POSTs to public routes can hold the hub off the air (see M4).
 - Fix:
   - Add an explicit `[http_service.concurrency]` with `type = "connections"`, `hard_limit` sized for streams (e.g. 500) and `soft_limit` a bit below it.
@@ -166,6 +166,29 @@ None. No anonymous path in.
   - `GET /v1/peers` shows the directory to every peer.
   - Anyone with access to Max's Fly org can `fly ssh` in and read `hub.db` and `meta.hub_key`, so org 2FA and membership are part of the privacy boundary.
   - The returning-principal consent page shows only "Approve" (with a new-client warning). An attacker who sends Max a consent link for their own connector relies on Max clicking through the warning, and on ChatGPT's state check failing.
+
+## Fixes (2026-11-04, branch `research/deploy-audit`)
+
+Normative text is [PROTOCOL §19](../PROTOCOL.md#19-public-deploy-hardening-2026-11-04). Every red test below is now green.
+
+| Finding | Fix | Numbers |
+|---|---|---|
+| S1 | Codes lengthened and grouped; a hub-wide failure budget burns every live code and locks linking; each refusal audited (`dot_link_refused`), the lockout too (`dot_link_lockout`); the per-client limit covers `/oauth/authorize` (`internal/hub/linkguard.go`, `admin.go`, `oauth/consent.go`) | 12 characters, about 2^59.4, shown `ABCD-EFGH-JKMN`; 20 refusals in 10 min → burn + 10 min lockout (429 `Retry-After`), ended early by issuing a code |
+| S2 | Read-only pre-check before `BEGIN IMMEDIATE` in `Enrol`, `exchangeCode` and `refresh`; per-client token bucket on unauthenticated routes and failed bearers (`internal/httpapi/ratelimit.go`, `middleware.go`), keyed on `Fly-Client-IP` only with `--trust-fly-client-ip` (`VECNET_TRUST_FLY_CLIENT_IP=1`, set in `fly.toml`), else `RemoteAddr`; 429 `client_rate_limited` + `Retry-After` | 30 tokens, one back per 2 s, per IP or IPv6 /64; 65,536 clients remembered |
+| S3 | `.dockerignore` excludes `backups/`, `.demo-data/`, `**/*.db`, `**/*.db-wal`, `**/*.db-shm` (a bare `*.db` matches the root only) (`.data/`, `.scratch/`, `.worktrees/` were already excluded) | |
+| S4 | `[http_service.concurrency]` in `fly.toml`; server `ReadHeaderTimeout`/`ReadTimeout`/`WriteTimeout`/`IdleTimeout` via `httpapi.ConfigureServer`; SSE, long polls and blob transfers lift or extend the deadlines with `http.ResponseController` | `connections`, soft 250, hard 300; 10 s / 30 s / 60 s / 120 s; 30 s per SSE frame; blobs 10 min |
+| M3 | `Strict-Transport-Security: max-age=31536000` on every response when the public URL is https | |
+| M9 | The CLI refuses `http://` hubs off loopback/LAN unless `enrol --allow-insecure-http` (stored in the profile) or `VECNET_ALLOW_INSECURE_HTTP=1` | |
+
+**Why 250/300 (S4).** Current Fly docs (docs.fly.io/reference/configuration, checked 2026-11-04): with no block, `type` is `connections`, `soft_limit` 20 and no `hard_limit`. With `connections` the proxy opens one connection to the app per request, so the limit counts in-flight requests, and an open stream holds one for its life. At `hard_limit` the proxy stops sending the machine new traffic and queues it, returning 503 if that lasts. `soft_limit` only deprioritises a machine against others in the region, so on one machine it is a warning line, not a cap. The fleet is a few dozen streams (peers' SSE or long polls, UI tabs on `/v1/admin/activity`, dots on `/mcp`), so 300 is about ten times that. An idle stream costs a goroutine and its buffers, tens of KiB at most, so 300 is under 30 MiB of the 512 MB machine. The 30 s `ReadTimeout` and the per-client limit stop slow anonymous requests from holding many of the 300. Fly's proxy idle timeout is not a risk: every SSE stream sends `: hb` every 15 s.
+
+**Deploy steps that change.** None of the commands. `fly.toml` now sets `VECNET_TRUST_FLY_CLIENT_IP = "1"`; never set it on a hub that clients reach directly. The CLI profile must use `https://vecnet.fly.dev`. Operators should expect `dot_link_refused`/`dot_link_lockout` audit rows and 12-character codes.
+
+**Left open (notes, not fixed here).** M1 (DCR table fill; now also bounded by the per-client limit), M2 (CIMD blind GET; likewise), M4 is fixed by S4, M5 (egress override from a Fly secret), M6 (backup consistency and key exposure), M7 (operator-credential recovery), M8 (7-day blob URLs), M10 (trust-boundary notes). Also:
+- A sustained guesser can keep link codes locked (each new code is burned by the next 20 wrong codes). That is a nuisance, never a way in; the per-client limit makes it need many addresses.
+- Codes typed during a lockout are refused unread and not audited, so audit writes stay bounded.
+- An attacker who controls an IPv6 /48 has 65,536 /64 buckets. The per-client limit raises the cost of junk; the read-only pre-checks, the link-code budget and the 256-bit secrets are what make it harmless.
+- The link-code count and the limiter buckets are in memory and reset on restart.
 
 ## Tests added (worktree `.worktrees/deploy-audit`, run on the build box)
 

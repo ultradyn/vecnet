@@ -15,7 +15,7 @@ import (
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
-var dotLinkCode = regexp.MustCompile(`^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$`)
+var dotLinkCode = regexp.MustCompile(`^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}(-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}){2}$`)
 
 func TestAdminDotLinks(t *testing.T) {
 	env := testhub.Start(t)

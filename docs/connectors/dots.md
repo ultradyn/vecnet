@@ -29,7 +29,9 @@ Note the `peer_id`. There is no enrolment token: a dot never holds a vecnet secr
 vecnet peer link peer_01EXAMPLE
 ```
 
-This prints an 8-character code, valid for 10 minutes and usable once. It binds a ChatGPT login to this peer.
+This prints a 12-character code in groups of four, such as `ABCD-EFGH-JKMN`, valid for 10 minutes and usable once. It binds a ChatGPT login to this peer. Case, hyphens and spaces do not matter when it is typed.
+
+Wrong codes are limited hub-wide ([PROTOCOL §19.1](../PROTOCOL.md#191-link-codes)). After 20 wrong codes in 10 minutes, from anyone, the hub cancels every unspent link code, and for 10 minutes the consent page answers every code with "Too many wrong link codes were tried". `vecnet audit` shows each wrong code as `dot_link_refused` and the lockout as `dot_link_lockout`. Issuing a new code ends the lockout. A login that already has its consent cookie is not affected.
 
 **3. Add the plugin.** In ChatGPT, add a custom MCP server with the URL `https://vecnet.fly.dev/mcp`, that is `<public>/mcp`, and connect it. ChatGPT finds the hub's OAuth metadata from the 401, registers itself, and opens the hub's consent page. Enter the link code there. ChatGPT's menu names change often, so follow OpenAI's current instructions for the clicks.
 

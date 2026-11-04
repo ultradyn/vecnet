@@ -67,7 +67,8 @@ messaging:
   presence set <idle|working|blocked|offline> [--note T]
   presence subscribe <all|teams|none>
   receipt <delivery_id> <processed|read|failed> [--note T]
-  enrol --hub URL --token (T|-) --profile NAME      "-" reads the token from stdin
+  enrol --hub URL --token (T|-) --profile NAME      "-" reads the token from stdin;
+       [--allow-insecure-http]                   http:// is refused off loopback/LAN without it
        (preferred: keeps it out of shell history and ps); else $VECNET_ENROL_TOKEN
 
 admin (operator credential):
@@ -77,7 +78,7 @@ admin (operator credential):
   principal list
   peer add --kind K --name N [--principal PRN]
   peer move <peer> --principal PRN
-  peer link <peer>                                    prints a dot's 8-character link code
+  peer link <peer>                                    prints a dot's 12-character link code
   peer rotate <peer>
   peer scope <peer> [--allow IDS] [--deny IDS]        IDS: comma-separated or repeated
   peer limits <peer> --sends-per-min N --threads-per-hour N
@@ -301,6 +302,9 @@ func (a *app) connect() (*client, string, cache, error) {
 	if err != nil {
 		return nil, "", cache{}, err
 	}
+	if err := checkHubURL(p.Hub, p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"); err != nil {
+		return nil, "", cache{}, err
+	}
 	dir, err := cacheDir(a.getenv)
 	if err != nil {
 		dir = ""
@@ -420,7 +424,7 @@ func (a *app) dispatch(cmd string, args []string) error {
 // --- enrol ---
 
 func (a *app) cmdEnrol(args []string) error {
-	o, err := parseFlags("enrol", args, map[string]flagKind{"hub": strFlag, "token": strFlag, "profile": strFlag})
+	o, err := parseFlags("enrol", args, map[string]flagKind{"hub": strFlag, "token": strFlag, "profile": strFlag, "allow-insecure-http": boolFlag})
 	if err != nil {
 		return err
 	}
@@ -438,7 +442,11 @@ func (a *app) cmdEnrol(args []string) error {
 		tok = strings.TrimSpace(a.getenv("VECNET_ENROL_TOKEN"))
 	}
 	if hubURL == "" || tok == "" || name == "" || len(o.pos) != 0 {
-		return usageErr("usage: vecnet enrol --hub URL --token (T|-) --profile NAME  (or $VECNET_ENROL_TOKEN)")
+		return usageErr("usage: vecnet enrol --hub URL --token (T|-) --profile NAME [--allow-insecure-http]  (or $VECNET_ENROL_TOKEN)")
+	}
+	insecure := o.has("allow-insecure-http")
+	if err := checkHubURL(hubURL, insecure || a.getenv(insecureEnv) == "1"); err != nil {
+		return err
 	}
 	path, err := configPath(a.getenv)
 	if err != nil {
@@ -455,7 +463,7 @@ func (a *app) cmdEnrol(args []string) error {
 	if err := newClient(hubURL, "").do(a.ctx, http.MethodPost, "/v1/enrol", nil, map[string]string{"token": tok}, &out); err != nil {
 		return err
 	}
-	cfg.Profiles[name] = Profile{Hub: strings.TrimRight(hubURL, "/"), Secret: out.Secret, PeerID: out.PeerID}
+	cfg.Profiles[name] = Profile{Hub: strings.TrimRight(hubURL, "/"), Secret: out.Secret, PeerID: out.PeerID, AllowInsecureHTTP: insecure}
 	if cfg.Default == "" {
 		cfg.Default = name
 	}

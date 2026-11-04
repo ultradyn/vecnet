@@ -98,6 +98,14 @@ func (s *Server) exchangeCode(ctx context.Context, form url.Values) (*tokenRespo
 		return nil, &tokenError{"invalid_request", "code, client_id, redirect_uri and code_verifier are required"}
 	}
 	hash := auth.HashSecret(code)
+	// The endpoint is public: an unknown code is refused by a read, so junk
+	// never queues on the store's write lock. A known one, even spent, goes on
+	// into the transaction, where reuse revokes its family.
+	if known, err := s.known(ctx, `SELECT EXISTS (SELECT 1 FROM oauth_codes WHERE code_hash = ?)`, hash); err != nil {
+		return nil, err
+	} else if !known {
+		return nil, badGrant("unknown code")
+	}
 	var resp *tokenResponse
 	var refused *tokenError
 	err := s.DB.Tx(ctx, func(tx *sql.Tx) error {
@@ -167,6 +175,11 @@ func (s *Server) refresh(ctx context.Context, form url.Values) (*tokenResponse, 
 		return nil, &tokenError{"invalid_scope", "only scope vecnet is supported"}
 	}
 	hash := auth.HashSecret(presented)
+	if known, err := s.known(ctx, `SELECT EXISTS (SELECT 1 FROM oauth_tokens WHERE token_hash = ? AND kind = 'refresh')`, hash); err != nil {
+		return nil, err
+	} else if !known {
+		return nil, badGrant("unknown refresh token")
+	}
 	clientID := form.Get("client_id")
 	var resp *tokenResponse
 	var refused *tokenError
@@ -216,6 +229,15 @@ func (s *Server) refresh(ctx context.Context, form url.Values) (*tokenResponse, 
 		return nil, refused
 	}
 	return resp, nil
+}
+
+// known runs an EXISTS query with hash, outside any transaction.
+func (s *Server) known(ctx context.Context, query, hash string) (bool, error) {
+	var ok bool
+	if err := s.DB.QueryRowContext(ctx, query, hash).Scan(&ok); err != nil {
+		return false, fmt.Errorf("oauth: look up grant: %w", err)
+	}
+	return ok, nil
 }
 
 // mintPair issues an access and a refresh token, returning the plaintext once.

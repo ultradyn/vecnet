@@ -1117,7 +1117,9 @@ func TestSecretsStoredHashed(t *testing.T) {
 	}
 	check("code", `SELECT count(*) FROM oauth_codes WHERE code_hash = ?`, hash(code))
 	check("tokens", `SELECT count(*) FROM oauth_tokens WHERE token_hash = ?`, hash(got.AccessToken), hash(got.RefreshToken))
-	check("link", `SELECT count(*) FROM dot_links WHERE code_hash = ?`, hash(link))
+	// The code is shown grouped ("ABCD-EFGH-JKMN") and stored ungrouped.
+	stored := strings.ReplaceAll(link, "-", "")
+	check("link", `SELECT count(*) FROM dot_links WHERE code_hash = ?`, hash(stored))
 
 	// No plaintext anywhere, audit included.
 	for _, table := range []string{"oauth_codes", "oauth_tokens", "dot_links", "audit"} {
@@ -1136,7 +1138,7 @@ func TestSecretsStoredHashed(t *testing.T) {
 				t.Fatal(err)
 			}
 			line := fmt.Sprint(vals...)
-			for _, secret := range []string{code, link, got.AccessToken, got.RefreshToken} {
+			for _, secret := range []string{code, link, stored, got.AccessToken, got.RefreshToken} {
 				if strings.Contains(line, secret) {
 					t.Fatalf("%s holds a plaintext secret: %s", table, line)
 				}

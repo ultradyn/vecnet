@@ -16,7 +16,7 @@ func (s *server) oauthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/dot-links", s.adminDotLink)
 }
 
-// adminDotLink is `vecnet peer link <peer>`: an 8-character code, valid for
+// adminDotLink is `vecnet peer link <peer>`: a 12-character code, valid for
 // DotLinkTTL, shown once. expires_at is taken from before the code is minted,
 // so it never overstates the code's life.
 func (s *server) adminDotLink(w http.ResponseWriter, r *http.Request) {

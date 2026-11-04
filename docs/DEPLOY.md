@@ -7,8 +7,8 @@ The hub runs as one always-on Fly.io machine (`shared-cpu-1x`, 512 MB) with a vo
 | File | What it does |
 |---|---|
 | `Dockerfile` | `golang:1.26-alpine` builder runs `CGO_ENABLED=0 go build -trimpath -ldflags="-s -w"` for both binaries, then copies them into `FROM scratch` as `/vecnet-hub` and `/vecnet`, with `/etc/ssl/certs/ca-certificates.crt` and `/usr/share/zoneinfo`. Entrypoint: `/vecnet-hub --listen 0.0.0.0:8080 --data-dir /data`. |
-| `fly.toml` | App `vecnet` in `syd`; `[http_service]` on 8080 with `force_https`, no auto stop or start, one machine minimum; volume `vecnet_data` at `/data`; `VECNET_PUBLIC_URL = "https://vecnet.fly.dev"`; HTTP health check on `/healthz`. |
-| `.dockerignore` | Keeps `.git`, worktrees, scratch, local data, `bin/` and research docs out of the build context. |
+| `fly.toml` | App `vecnet` in `syd`; `[http_service]` on 8080 with `force_https`, no auto stop or start, one machine minimum, and `[http_service.concurrency]` `connections` soft 250 / hard 300 (every open stream holds one; [PROTOCOL §19.3](PROTOCOL.md#193-timeouts-connections-and-hsts)); volume `vecnet_data` at `/data`; `VECNET_PUBLIC_URL = "https://vecnet.fly.dev"` and `VECNET_TRUST_FLY_CLIENT_IP = "1"`; HTTP health check on `/healthz`. |
+| `.dockerignore` | Keeps `.git`, worktrees, scratch, local data (`.data/`, `.demo-data/`), backups and stray databases (`backups/`, `**/*.db`, `**/*.db-wal`, `**/*.db-shm`), `bin/` and research docs out of the build context. A database holds `meta.hub_key`, so it must never reach Fly's builder. |
 
 ## Configuration
 
@@ -20,6 +20,7 @@ The hub runs as one always-on Fly.io machine (`shared-cpu-1x`, 512 MB) with a vo
 | `--data-dir` | `VECNET_DATA_DIR` | `/data` |
 | `--public-url` | `VECNET_PUBLIC_URL` | `http://<bound listen address>` |
 | `--allow-private-egress` | `VECNET_ALLOW_PRIVATE_EGRESS=1` | off; development only, see [Connectors](#connectors) |
+| `--trust-fly-client-ip` | `VECNET_TRUST_FLY_CLIENT_IP=1` | off; on in `fly.toml`, see [Public exposure](#public-exposure) |
 
 The public URL is the origin the hub writes into attachment `blob_url` links, so on Fly it must be the `https://` address clients use. The image's entrypoint sets `--listen` and `--data-dir`; `fly.toml` sets `VECNET_PUBLIC_URL`. On start the hub prints `vecnet-hub listening on http://<addr> (public url <url>)`.
 
@@ -43,6 +44,17 @@ The public URL is the origin the hub writes into attachment `blob_url` links, so
 
 Later deploys are `just fly-deploy` only. The hub migrates its database on start.
 
+## Public exposure
+
+The hub is invite-only on the open internet: every way in needs a secret the operator issued ([audit](research/2026-11-04-public-deploy-audit.md)). [PROTOCOL §19](PROTOCOL.md#19-public-deploy-hardening-2026-11-04) bounds what anonymous clients can cost:
+
+- **Per-client limit.** Unauthenticated work costs a client (an IP, or an IPv6 /64) one of 30 tokens, refilled at one every 2 s; with none left the hub answers 429 `client_rate_limited` with `Retry-After`. A good credential is never limited.
+- **`VECNET_TRUST_FLY_CLIENT_IP=1` belongs on Fly only.** Behind Fly's proxy every TCP peer is the proxy, so the hub keys on the `Fly-Client-IP` header that Fly sets. Anywhere a client reaches the hub directly that header is the client's own, so leave it off: the hub then keys on the TCP peer address.
+- **Link codes** are 12 characters (`ABCD-EFGH-JKMN`). 20 wrong codes in 10 minutes, from anyone, cancel every unspent code and lock linking for 10 minutes or until you issue a new one. Watch `vecnet audit` for `dot_link_lockout`.
+- **Timeouts and connections.** The server cuts request bodies that take over 30 s (blob uploads get 10 min) while streams lift that for themselves, and `fly.toml` allows 300 connections, since every SSE stream holds one.
+- **HSTS** is sent on every response, because the public URL is https.
+- **The CLI refuses `http://` hubs** off loopback and the LAN. Use `https://vecnet.fly.dev`, not `http://`.
+
 ## Connectors
 
 **Public HTTPS is required for dots.** ChatGPT reaches `/mcp`, the OAuth endpoints and the metadata documents over the public internet, and OpenAI's Secure MCP Tunnel is not supported. Fly's `https://vecnet.fly.dev` is enough. Grok Bots (for `/mcp`) and GitHub webhooks (for `/v1/ingress/…`) need the same public origin.
@@ -56,7 +68,7 @@ Connector setup is in [`docs/connectors/`](connectors/): [dots](connectors/dots.
 ## Backups
 
 - **Fly volume snapshots** are the consistent copy: Fly snapshots volumes daily and keeps them for a few days (`fly volumes snapshots list <vol-id>`). Restore by creating a volume from a snapshot.
-- **`just fly-backup`** copies `/data/hub.db` to `backups/hub-<UTC stamp>.db` with `fly ssh sftp get`. It is a manual, best-effort copy: the database runs in WAL mode, so commits still in `hub.db-wal` are not in the copy, and a copy taken during a write can be inconsistent. Prefer it on a quiet hub. `backups/` is gitignored.
+- **`just fly-backup`** copies `/data/hub.db` to `backups/hub-<UTC stamp>.db` with `fly ssh sftp get`. It is a manual, best-effort copy: the database runs in WAL mode, so commits still in `hub.db-wal` are not in the copy, and a copy taken during a write can be inconsistent. Prefer it on a quiet hub. `backups/` is gitignored and dockerignored, so a deploy never uploads a copy.
 - **Nightly copy:** run `just fly-backup` once a day from an always-on machine (a systemd user timer on xsm is enough) and prune old files by hand. It is documented here, not automated in this repo.
 - Blobs live under `/data/blobs/` and are covered by volume snapshots only.
 

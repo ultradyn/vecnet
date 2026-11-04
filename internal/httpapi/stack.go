@@ -38,7 +38,7 @@ func NewStack(h *hub.Hub) *Stack {
 
 // Deps returns the handler's collaborators from this Stack.
 func (st *Stack) Deps() Deps {
-	return Deps{Hub: st.Hub, Kick: st.Push.Kick, VerifyRoute: st.Push.Verify, OAuth: st.OAuth}
+	return Deps{Hub: st.Hub, Kick: st.Push.Kick, VerifyRoute: st.Push.Verify, OAuth: st.OAuth, Limiter: DefaultLimiter()}
 }
 
 // Run runs the push worker, the Events worker and the hub's tickers until ctx
