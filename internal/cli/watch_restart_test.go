@@ -5,12 +5,63 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+type watchCancelReader struct {
+	r      io.Reader
+	cancel context.CancelFunc
+}
+
+func (r watchCancelReader) Read(p []byte) (int, error) { r.cancel(); return r.r.Read(p) }
+
+func TestWatchCanceledLineReaderReportsTerminalError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lines := make(chan string)
+	errs := make(chan error, 1)
+	readLines(ctx, watchCancelReader{strings.NewReader("data: queued\n\n"), cancel}, lines, errs)
+	if _, ok := <-lines; ok {
+		t.Fatal("line channel still open")
+	}
+	select {
+	case err := <-errs:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("terminal=%v", err)
+		}
+	default:
+		t.Fatal("canceled reader closed lines without terminal error")
+	}
+}
+
+func TestWatchCanceledBufferedStreamReturns(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		c := newClient("http://localhost", "test")
+		c.hc.Transport = relayRoundTrip(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(watchCancelReader{strings.NewReader(strings.Repeat("data: queued\n\n", 100)), cancel})}, nil
+		})
+		var out, errs bytes.Buffer
+		w := watcher{a: &app{ctx: ctx, stdout: &out, stderr: &errs}, c: c, forMonitor: true, seen: newDedupe(1024)}
+		done := make(chan error, 1)
+		go func() { done <- w.stream() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(200 * time.Millisecond):
+			cancel()
+			t.Fatalf("canceled stream %d did not return", i)
+		}
+		cancel()
+	}
+}
 
 // A finite response must drain its last event before consuming EOF. The
 // restart control carries no durable cursor and must never reach stdout.

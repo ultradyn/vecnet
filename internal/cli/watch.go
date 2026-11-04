@@ -435,7 +435,7 @@ func (w *watcher) stream() error {
 		case line, ok := <-lines:
 			if !ok {
 				err := <-readErr // all queued lines precede their terminal read error
-				if errors.Is(err, io.EOF) {
+				if ctx.Err() != nil || errors.Is(err, io.EOF) {
 					return nil
 				}
 				return &netError{err: err}
@@ -493,7 +493,17 @@ func (w *watcher) stream() error {
 // readLines splits r into SSE lines (CR, LF or CRLF terminated) onto out,
 // then reports the read error (io.EOF at the end).
 func readLines(ctx context.Context, r io.Reader, out chan<- string, errc chan<- error) {
-	defer close(out)
+	var terminal error
+	defer func() {
+		if terminal == nil {
+			terminal = ctx.Err()
+			if terminal == nil {
+				terminal = io.EOF
+			}
+		}
+		errc <- terminal // every exit publishes its result before closing lines
+		close(out)
+	}()
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64<<10), maxSSELine)
 	sc.Split(splitSSELines)
@@ -504,11 +514,7 @@ func readLines(ctx context.Context, r io.Reader, out chan<- string, errc chan<- 
 			return
 		}
 	}
-	err := sc.Err()
-	if err == nil {
-		err = io.EOF
-	}
-	errc <- err
+	terminal = sc.Err()
 }
 
 // splitSSELines is a bufio.SplitFunc for CR, LF and CRLF line ends.
