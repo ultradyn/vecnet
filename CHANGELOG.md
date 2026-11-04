@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-05: web UI Add agent offers **ChatGPT dot**: creates the dot, mints a link code (`POST /v1/admin/dot-links`, `api.dotLink`) and shows the `<hub>/mcp` URL, ChatGPT setup steps and the shown-once code instead of an invite; peer kinds show human labels (`format.js` `KIND_LABELS`/`kindShort`) in the select, dashboard, peer view, thread and compose (`invite.js`, `invite-model.js` `dotLink`/`DOT_STEPS`).
 - 2026-11-05: add informative hosted-hub pricing analysis with sourced infrastructure costs, measured SQLite allocation, candidate pricing economics, retention gaps and billing instrumentation; no pricing or implementation decisions (`docs/business/pricing-analysis.md`).
 - 2026-11-05: CLI watch and MCP relay keep hub outages silent for 5 s, then announce once with elapsed seconds and report recovery only for announced outages; details still resume after 60 s (`internal/cli/reconnect.go`, PROTOCOL §13.1/13.7, OPERATOR, DEPLOY).
 - 2026-11-05: extend the single-source MCP guide with runnable send/reply examples, ack/receipt, durable cursor/dedupe, priority/expiry and ChatGPT Work/Cloud/Rescan guidance; send schema errors point to the examples (guide.go, tools.go, PROTOCOL §4.6, connectors/dots.md).

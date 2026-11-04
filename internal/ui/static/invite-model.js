@@ -6,9 +6,10 @@
 // TTLS are the web form's token lifetimes: label and enrol_ttl_seconds.
 export const TTLS = [['1 hour', 3600], ['24 hours', 86400], ['7 days', 604800]];
 export const DEFAULT_TTL = 86400;
-// KINDS an operator may invite from the web: never operator, and not dot,
-// which links with a code instead of enrolling.
-export const KINDS = ['session', 'launcher', 'openclaw', 'pagchat-bot', 'grokbot'];
+// KINDS an operator may add from the web: never operator or source. A dot
+// links with a code instead of enrolling, so it gets dotLink's panel, not an
+// invite. The select shows kindLabel (format.js); the value stays raw.
+export const KINDS = ['session', 'launcher', 'openclaw', 'pagchat-bot', 'grokbot', 'dot'];
 
 // slug: ASCII letters lowered, every other run of characters one "-",
 // trimmed, at most 40 characters; "agent" when nothing is left.
@@ -54,3 +55,21 @@ export function invite(res, origin, suggested) {
     text: inviteBlock({ owner: res.hub_owner, hubURL: res.hub_url || origin, profile, token: res.enrol_token, expires: res.enrol_expires_at, open, name: open && suggested ? res.name : '' }),
   };
 }
+
+// dotLink is the web-only panel for a dot (the CLI prints `vecnet peer link`
+// instead): the MCP URL to add in ChatGPT, from the hub's public URL like an
+// invite, and the setup steps. res: the POST /v1/admin/peers answer.
+export function dotLink(res, origin) {
+  return { peerId: res.peer_id, name: res.name, mcpURL: String(res.hub_url || origin).replace(/\/+$/, '') + '/mcp' };
+}
+
+// DOT_STEPS are the numbered steps: plain strings, and {b} for a word to find
+// on screen. The link code goes in after step CODE_STEP.
+export const DOT_STEPS = [
+  ['In ChatGPT, open ', { b: 'Plugins' }, ', choose ', { b: '+' }, ', then ', { b: 'Add custom MCP server' }, '.'],
+  ['Paste the MCP server URL, choose ', { b: 'OAuth' }, ', and create it as a plugin.'],
+  ['When the vecnet consent page asks for a link code, enter this one:'],
+  ['In the dot, create a task with trigger ', { b: 'vecnet' }, ', event ', { b: 'vecnet.message' }, ' and no settings. That is how a dot follows vecnet events.'],
+];
+export const CODE_STEP = 2;
+export const DOT_NOTE = 'Existing chats keep the tool list they started with: after adding or changing the plugin, start a new chat or rescan the plugin.';

@@ -110,6 +110,8 @@ test('every method calls its route with the secret only in the header', async ()
   const table = [
     [() => api.peers(), 'GET', '/v1/peers'],
     [() => api.adminPeers(), 'GET', '/v1/admin/peers'],
+    [() => api.addPeer({ kind: 'dot', name: 'scout' }), 'POST', '/v1/admin/peers'],
+    [() => api.dotLink('peer_1'), 'POST', '/v1/admin/dot-links'],
     [() => api.principals(), 'GET', '/v1/admin/principals'],
     [() => api.routes(), 'GET', '/v1/admin/routes'],
     [() => api.inbox({ limit: 50, before: 'dly_1', unread: true }), 'GET', '/v1/admin/inbox?limit=50&before=dly_1&unread=1'],
@@ -214,4 +216,10 @@ test('activity opens the feed with the bearer in a header, never the URL', async
   assert.equal(e.status, 403);
   assert.equal(e.code, 'forbidden');
   assert.equal(unauthorized, 0);
+});
+
+test('dotLink asks for a link code for one peer, in the body', async () => {
+  const { api, calls } = harness();
+  await api.dotLink('peer_dot');
+  assert.deepEqual(JSON.parse(calls.at(-1).init.body), { peer_id: 'peer_dot' });
 });
