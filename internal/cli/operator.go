@@ -129,9 +129,11 @@ func operatorClientInfo(getenv func(string) string, hostname func() (string, err
 	return out
 }
 
-// isOperatorSecret reports whether secret is an operator credential.
+// isOperatorSecret reports whether secret is an operator credential. The
+// hub trims a bearer with strings.TrimSpace before authenticating it, so a
+// profile secret padded with (Unicode) whitespace is the same credential.
 func isOperatorSecret(secret string) bool {
-	return strings.HasPrefix(secret, "vn_operator_")
+	return strings.HasPrefix(strings.TrimSpace(secret), "vn_operator_")
 }
 
 // operatorLabel is the label of a run that names a profile explicitly: an
