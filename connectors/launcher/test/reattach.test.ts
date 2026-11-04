@@ -186,14 +186,23 @@ test('reattach live resumes turns from the stored cursor; parked keeps running; 
 });
 
 test('pending reattach survives restart, notes once after 5 minutes, backs off after an hour, and never declares transport errors lost', async t => {
-  const {deps,clock,job,backend,ledger,reports} = setup(t);
+  const s = setup(t,true), {clock,backend,job,reports} = s;
+  let deps = s.deps;
   await startLaunch(job(),deps); backend.failReattach(100);
   await reattachAll(deps);
-  clock.advance(300000); await retryPending({...deps});
-  const notes = () => ledger.pendingOutbox(100,clock.now()).map(r => r.payload as SendRequest).filter(p => p.kind === 'message');
+  const pending = () => JSON.parse(deps.ledger.kv('reattach').get('job_one')!) as {since:number; nextAt:number; noted:boolean};
+  const notes = () => deps.ledger.pendingOutbox(100,clock.now()).map(r => r.payload as SendRequest).filter(p => p.kind === 'message');
+  const first = pending();
+  // A restart keeps the original retry epoch and due time.
+  deps = s.restart();
+  assert.deepEqual(pending(),first); assert.equal(job().reattachPending,true);
+  clock.advance(300000); await retryPending(deps);
   assert.equal(notes().length,1); assert.equal(notes()[0].content.text,'backend unreachable; the session will be reattached when it returns');
   assert.equal(notes()[0].in_reply_to,'msg_one'); assert.deepEqual(notes()[0].recipients,['peer_requester']);
-  clock.advance(3300000); await retryPending({...deps});
+  // A second restart keeps the once-only note and the epoch.
+  deps = s.restart();
+  assert.equal(pending().since,first.since); assert.equal(pending().noted,true); assert.equal(notes().length,1);
+  clock.advance(3300000); await retryPending(deps);
   clock.advance(30000); assert.deepEqual(await retryPending(deps),[]);
   clock.advance(570000); assert.equal((await retryPending(deps))[0].outcome,'unreachable');
   assert.equal(notes().length,1); assert.equal(job().state,'running'); assert.equal(job().terminal,null);
