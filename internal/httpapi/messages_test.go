@@ -292,3 +292,63 @@ func TestOperatorUIIngress(t *testing.T) {
 		t.Fatalf("non-operator ingress = %q, want http_send", ingress)
 	}
 }
+
+// postWithClient sends one message with an X-Vecnet-Client header.
+func postWithClient(t *testing.T, env *testhub.Env, secret, key, to, header string) {
+	t.Helper()
+	req, _ := http.NewRequest("POST", env.URL+"/v1/messages",
+		strings.NewReader(`{"idempotency_key":"`+key+`","priority":"wake","content":{"text":"hi"},"recipients":["`+to+`"],"metadata":{"mine":1}}`))
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set(envelope.ClientHeader, header)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("send %s = %d, want 202", key, resp.StatusCode)
+	}
+}
+
+// The operator CLI's bare sends carry X-Vecnet-Client; the hub records a
+// sanitized copy in metadata["vecnet.client"] for the operator credential
+// only, and ignores the header from anyone else or when it is malformed.
+func TestOperatorCLIClientMetadata(t *testing.T) {
+	env := testhub.Start(t)
+	b, _ := env.NewPeer("session", "B")
+
+	postWithClient(t, env, env.OperatorSecret, "op1", b, `{"kind":"operator-cli","host":"x-tall\n<i>","ssh":true,"agent_suspected":true,"label":"the CEO"}`)
+	m, ingress := lastMessage(t, env, b)
+	if ingress != "http_send" || m.Sender != env.OperatorPeer {
+		t.Fatalf("ingress %q sender %q", ingress, m.Sender)
+	}
+	got, _ := json.Marshal(m.Metadata[envelope.ClientMetadataKey])
+	want := `{"agent_suspected":true,"host":"x-talli","kind":"operator-cli","label":"Operator on x-talli CLI via ssh (agent suspected)","ssh":true}`
+	if string(got) != want {
+		t.Fatalf("vecnet.client = %s, want %s", got, want)
+	}
+	if fmt.Sprint(m.Metadata["mine"]) != "1" {
+		t.Fatalf("sender metadata lost: %v", m.Metadata)
+	}
+
+	// Malformed: the send goes through without the label.
+	postWithClient(t, env, env.OperatorSecret, "op2", b, `operator-cli`)
+	if m, _ := lastMessage(t, env, b); m.Metadata[envelope.ClientMetadataKey] != nil {
+		t.Fatalf("malformed header recorded: %v", m.Metadata)
+	}
+
+	// A peer cannot claim to be the operator CLI.
+	_, aSec := env.NewPeer("session", "A")
+	postWithClient(t, env, aSec, "a1", b, `{"kind":"operator-cli","host":"xsm"}`)
+	if m, _ := lastMessage(t, env, b); m.Metadata[envelope.ClientMetadataKey] != nil {
+		t.Fatalf("peer header recorded: %v", m.Metadata)
+	}
+
+	// Nor write the key itself.
+	body := sendBody("a2", b)
+	body["metadata"] = map[string]any{envelope.ClientMetadataKey: map[string]any{"kind": "operator-cli"}}
+	resp, raw := env.Do(aSec, "POST", "/v1/messages", body)
+	if resp.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(string(raw), "reserved_metadata") {
+		t.Fatalf("sender vecnet.client = %d %s, want 422 reserved_metadata", resp.StatusCode, raw)
+	}
+}

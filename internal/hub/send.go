@@ -85,6 +85,10 @@ type sender struct {
 type actor struct {
 	caller *auth.Caller
 	src    *sourceActor
+	// client is the operator CLI label of a credential send, recorded as
+	// metadata["vecnet.client"] only when the caller is the operator
+	// (PROTOCOL §2.2 step 11). nil for every other send.
+	client *envelope.OperatorClient
 }
 
 // Send runs the send pipeline of PROTOCOL §2.2 for caller c over the raw
@@ -94,6 +98,16 @@ type actor struct {
 // body: the original response is returned and nothing is sent. After commit
 // it wakes the recipients' log readers; callers kick the push worker.
 func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress string) (resp *SendResponse, replayed bool, err error) {
+	return h.SendVia(ctx, c, raw, ingress, nil)
+}
+
+// SendVia is Send with the operator CLI label of an X-Vecnet-Client header
+// (PROTOCOL §2.2 step 11). client must already be cleaned; it is ignored
+// unless c is the operator credential.
+func (h *Hub) SendVia(ctx context.Context, c auth.Caller, raw []byte, ingress string, client *envelope.OperatorClient) (resp *SendResponse, replayed bool, err error) {
+	if c.Kind != "operator" {
+		client = nil
+	}
 	if !ingresses[ingress] {
 		return nil, false, fmt.Errorf("hub: send: unknown ingress %q", ingress)
 	}
@@ -121,7 +135,7 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 	if err != nil {
 		return nil, false, err
 	}
-	return h.sendAs(ctx, actor{caller: &c}, ingress, req, bodySHA)
+	return h.sendAs(ctx, actor{caller: &c, client: client}, ingress, req, bodySHA)
 }
 
 // sendAs runs the transactional send of req for act and, after commit,
@@ -436,19 +450,15 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 	}
 	if effect.jobRequest {
 		// Every Delivery carries the hub-set job id (§2.2 Response, R04).
-		if len(msg.Metadata) >= maxMetadataKeys {
-			e := E(http.StatusRequestEntityTooLarge, "payload_too_large",
-				"metadata has no room for the hub-set "+JobIDMetadataKey)
-			e.Details["field"] = "metadata"
-			e.Details["limit"] = maxMetadataKeys - 1
-			return nil, false, nil, e
+		if err := setHubMetadata(&msg, JobIDMetadataKey, effect.jobID); err != nil {
+			return nil, false, nil, err
 		}
-		md := make(map[string]any, len(msg.Metadata)+1)
-		for k, v := range msg.Metadata {
-			md[k] = v
+	}
+	if act.client != nil && c.Kind == "operator" {
+		// The operator CLI label (§2.2 step 11): provenance for display.
+		if err := setHubMetadata(&msg, envelope.ClientMetadataKey, *act.client); err != nil {
+			return nil, false, nil, err
 		}
-		md[JobIDMetadataKey] = effect.jobID
-		msg.Metadata = md
 	}
 	// Attachments (§2.2 step 7) and auto-spill (step 6). hosted holds every
 	// hash whose bytes the hub serves: those are pinned and linked per
@@ -920,4 +930,23 @@ func stripBlobURLs(atts []envelope.Attachment) []envelope.Attachment {
 		out[i] = a
 	}
 	return out
+}
+
+// setHubMetadata adds one hub-owned key to msg's metadata, copying the
+// sender's map rather than writing into it; a map already at the schema's
+// key cap is payload_too_large.
+func setHubMetadata(msg *envelope.Message, key string, value any) error {
+	if len(msg.Metadata) >= maxMetadataKeys {
+		e := E(http.StatusRequestEntityTooLarge, "payload_too_large", "metadata has no room for the hub-set "+key)
+		e.Details["field"] = "metadata"
+		e.Details["limit"] = maxMetadataKeys - 1
+		return e
+	}
+	md := make(map[string]any, len(msg.Metadata)+1)
+	for k, v := range msg.Metadata {
+		md[k] = v
+	}
+	md[key] = value
+	msg.Metadata = md
+	return nil
 }

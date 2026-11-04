@@ -301,6 +301,9 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	fits := func(context string) bool {
 		return utf16Len(context) <= hookMaxUnits && (limit <= 0 || len(hookOutput(event, context)) <= limit)
 	}
+	if a.namedProfile() == "" {
+		return hookResult{} // a hook never makes a bare run (operator.go)
+	}
 	c, name, ch, e := a.connect()
 	if e != nil || ctx.Err() != nil {
 		return hookResult{}

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { budgetBanner, budgetOut, canShowFull, FULL_TEXT_CAP, items, replyKey, replySig, sendError, spillOf } from '../static/thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, clientLabel, CLIENT_LABEL_CAP, clientSuspect, FULL_TEXT_CAP, items, replyKey, replySig, sendError, spillOf } from '../static/thread-model.js';
 import { SPILL_SLOT } from '../static/attach-model.js';
 
 const OP = 'peer_op', CODEX = 'peer_codex', SLEUTH = 'peer_sleuth', GROK = 'peer_grok';
@@ -243,4 +243,29 @@ test('replySig covers every attachment wire field: same bytes under a new name o
   assert.notEqual(replySig(two), replySig([two[1], two[0]]), 'order is part of the signature');
   assert.notEqual(replySig([file]), replySig([]));
   assert.equal(replySig([]), replySig([]));
+});
+
+// A CLI send with the operator credential carries the hub-set
+// metadata["vecnet.client"] (PROTOCOL §2.2 step 11); the header names the
+// terminal beside the sender. Peers cannot write vecnet.* keys, so only the
+// hub's own value shows, flattened to one capped line.
+test('clientLabel shows only the hub operator-cli label, as one safe line', () => {
+  const at = (client) => msg('m', OP, 'hi', { metadata: { 'vecnet.client': client } });
+  assert.equal(clientLabel(at({ kind: 'operator-cli', host: 'xsm', ssh: false, label: 'Operator on xsm CLI' })), 'Operator on xsm CLI');
+  assert.equal(clientLabel(at({ kind: 'operator-cli', host: 'x', ssh: true, agent_suspected: true, label: 'Operator on x CLI via ssh (agent suspected)' })),
+    'Operator on x CLI via ssh (agent suspected)');
+  assert.equal(clientLabel(at({ kind: 'operator-cli', label: 'Operator on \u001b[31mevil\n‮host   CLI' })), 'Operator on [31mevil host CLI');
+  assert.equal(clientLabel(at({ kind: 'operator-cli', label: 'x'.repeat(500) })).length, CLIENT_LABEL_CAP);
+  assert.equal(clientLabel(at({ kind: 'web', label: 'not a CLI' })), '');
+  assert.equal(clientLabel(at({ kind: 'operator-cli', label: 7 })), '');
+  assert.equal(clientLabel(at({ kind: 'operator-cli', label: '  ' })), '');
+  assert.equal(clientLabel(at('Operator on xsm CLI')), '');
+  assert.equal(clientLabel(msg('m', OP, 'hi')), '');
+  assert.equal(clientLabel(msg('m', OP, 'hi', { metadata: { 'client': { kind: 'operator-cli', label: 'spoof' } } })), '');
+  assert.equal(clientLabel(null), '');
+  assert.equal(clientSuspect(at({ kind: 'operator-cli', label: 'L', agent_suspected: true })), true);
+  assert.equal(clientSuspect(at({ kind: 'operator-cli', label: 'L', agent_suspected: 'yes' })), false);
+  assert.equal(clientSuspect(at({ kind: 'operator-cli', label: 'L' })), false);
+  assert.equal(clientSuspect(at({ kind: 'web', label: 'L', agent_suspected: true })), false);
+  assert.equal(clientSuspect(msg('m', OP, 'hi')), false);
 });

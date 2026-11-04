@@ -17,7 +17,9 @@ import (
 func hookTestEnv(t *testing.T) map[string]string {
 	t.Helper()
 	d := t.TempDir()
-	return map[string]string{"VECNET_CONFIG": filepath.Join(d, "config", "v.toml"), "XDG_CONFIG_HOME": filepath.Join(d, "xdg"), "XDG_CACHE_HOME": filepath.Join(d, "cache"), "HOME": filepath.Join(d, "home")}
+	// VECNET_PROFILE names profile p: these tests run without a terminal, so
+	// a bare run would be refused as an agent's (operator.go).
+	return map[string]string{"VECNET_PROFILE": "p", "VECNET_CONFIG": filepath.Join(d, "config", "v.toml"), "XDG_CONFIG_HOME": filepath.Join(d, "xdg"), "XDG_CACHE_HOME": filepath.Join(d, "cache"), "HOME": filepath.Join(d, "home")}
 }
 
 func TestStatePathPerProfileAndPeer(t *testing.T) {

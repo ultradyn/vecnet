@@ -501,7 +501,7 @@
         "metadata": {
           "type": "object",
           "maxProperties": 32,
-          "description": "Free-form, sender-owned, <= 8 KiB serialised. Keys starting with \"vecnet.\" are reserved for the hub (e.g. vecnet.source_kind, vecnet.event, vecnet.spilled)."
+          "description": "Free-form, sender-owned, <= 8 KiB serialised. Keys starting with \"vecnet.\" are reserved for the hub (e.g. vecnet.source_kind, vecnet.event, vecnet.spilled, vecnet.job_id, and vecnet.client: the operator CLI label {kind, host, ssh, agent_suspected?, label}, PROTOCOL 2.2 step 11)."
         },
         "loop": {
           "$ref": "#/$defs/loop"

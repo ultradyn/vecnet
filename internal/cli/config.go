@@ -23,13 +23,23 @@ type Profile struct {
 
 // Config is the TOML config file:
 //
-//	default = "home"
+//	operator_profile = "op"
+//	[profiles.op]
+//	hub = "https://…"
+//	secret = "vn_operator_…"
 //	[profiles.home]
 //	hub = "https://…"
 //	secret = "vn_peer_…"
+//
+// A profile is selected by --net (hook: --profile), else $VECNET_PROFILE.
+// A run naming neither is bare (operator.go): refused for an agent, and for
+// a human at a terminal it uses operator_profile, which must hold an
+// operator credential. Default is the legacy `default` key: still parsed
+// so old files load, never written, and it selects nothing.
 type Config struct {
-	Default  string             `toml:"default,omitempty"`
-	Profiles map[string]Profile `toml:"profiles"`
+	Default         string             `toml:"default,omitempty"`
+	OperatorProfile string             `toml:"operator_profile,omitempty"`
+	Profiles        map[string]Profile `toml:"profiles"`
 }
 
 // configPath resolves the config file: $VECNET_CONFIG, else
@@ -83,22 +93,14 @@ func saveConfig(path string, c Config) error {
 	return writeFileAtomic(path, b.Bytes())
 }
 
-// profile picks the profile named by --net, else the file's default, else
-// the only profile there is.
+// profile returns the profile called name, which callers have already
+// chosen (--net, $VECNET_PROFILE or operator_profile; see connect).
 func (c Config) profile(name string) (string, Profile, error) {
 	if name == "" {
-		name = c.Default
+		return "", Profile{}, usageErr("no profile named; pass --net <profile>")
 	}
-	if name == "" && len(c.Profiles) == 1 {
-		for n := range c.Profiles {
-			name = n
-		}
-	}
-	if name == "" {
-		if len(c.Profiles) == 0 {
-			return "", Profile{}, usageErr("no profile configured; run `vecnet enrol --hub URL --token T --profile NAME`")
-		}
-		return "", Profile{}, usageErr("several profiles and no default; pass --net <profile>")
+	if len(c.Profiles) == 0 {
+		return "", Profile{}, usageErr(fmt.Sprintf("no profile %q: no profile is configured; run `vecnet enrol --hub URL --token T --profile NAME`", name))
 	}
 	p, ok := c.Profiles[name]
 	if !ok {

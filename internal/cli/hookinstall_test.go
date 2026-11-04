@@ -95,10 +95,11 @@ func settingsCommands(t *testing.T, body []byte, event string) []string {
 // refused profile is a usage error and nothing is printed or written.
 func TestHookInstallRefusesFlagProfiles(t *testing.T) {
 	for _, profile := range []string{"-h", "--help", "-p"} {
-		for _, mode := range []string{"explicit", "default"} {
+		for _, mode := range []string{"explicit", "env"} {
 			t.Run(profile+"/"+mode, func(t *testing.T) {
 				u := installUser(t)
-				body := fmt.Sprintf("default = %q\n[profiles.%s]\nhub = \"http://127.0.0.1:1\"\nsecret = \"vn_peer_unused\"\n", profile, profile)
+				u.env["VECNET_PROFILE"] = profile
+				body := fmt.Sprintf("[profiles.%s]\nhub = \"http://127.0.0.1:1\"\nsecret = \"vn_peer_unused\"\n", profile)
 				if err := os.WriteFile(u.conf, []byte(body), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -485,7 +486,7 @@ func TestHookInstallDefaultsToLocalAtGitRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(sub)
-	_, errs := installRun(t, u, "--write") // no --profile: resolved config default
+	_, errs := installRun(t, u, "--write") // no --profile: resolved from $VECNET_PROFILE
 	path := filepath.Join(root, ".claude", "settings.local.json")
 	if got := settingsCommands(t, readSettings(t, path), "UserPromptSubmit"); !reflect.DeepEqual(got, []string{"vecnet hook --profile p --event user-prompt"}) {
 		t.Fatalf("default profile=%v", got)

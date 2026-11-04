@@ -43,15 +43,17 @@ func newUser(t *testing.T) *user {
 	return u
 }
 
-// profileUser returns a user whose config holds one default profile "p"
-// for hubURL with secret.
+// profileUser returns a user whose config holds one profile "p" for hubURL
+// with secret, selected by $VECNET_PROFILE: tests run without a terminal,
+// so a bare run would be refused as an agent's (operator.go).
 func profileUser(t *testing.T, hubURL, secret string) *user {
 	t.Helper()
 	u := newUser(t)
+	u.env["VECNET_PROFILE"] = "p"
 	if err := os.MkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	body := "default = \"p\"\n\n[profiles.p]\nhub = \"" + hubURL + "\"\nsecret = \"" + secret + "\"\n"
+	body := "[profiles.p]\nhub = \"" + hubURL + "\"\nsecret = \"" + secret + "\"\n"
 	if err := os.WriteFile(u.conf, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -193,14 +195,15 @@ func TestEnrolWritesProfile(t *testing.T) {
 	if p.Hub != env.URL {
 		t.Fatalf("profiles.p.hub = %q, want %q", p.Hub, env.URL)
 	}
-	if cfg.Default != "p" {
-		t.Fatalf("default = %q, want p (first profile)", cfg.Default)
+	// The legacy default key selects nothing any more, so enrol never writes it.
+	if cfg.Default != "" {
+		t.Fatalf("default = %q, want none", cfg.Default)
 	}
 	if fi, err := os.Stat(u.conf); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("config mode = %v, %v; want 0600", fi.Mode().Perm(), err)
 	}
 	// The new profile works: peers lists C.
-	if out := u.mustRun("peers"); !strings.Contains(out, added.PeerID) {
+	if out := u.mustRun("--net", "p", "peers"); !strings.Contains(out, added.PeerID) {
 		t.Fatalf("peers via enrolled profile = %q, want %s", out, added.PeerID)
 	}
 	// The token is one-time.

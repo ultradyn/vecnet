@@ -83,6 +83,10 @@ func (a *app) cmdHookInstall(args []string) error {
 	}
 	profile := o.str("profile")
 	if !o.has("profile") {
+		// A hook is an agent's identity: never the operator of a bare run.
+		if a.namedProfile() == "" {
+			return usageErr("hook install: name the agent's profile with --profile P (or --net P, or $VECNET_PROFILE)")
+		}
 		_, profile, _, err = a.connect()
 		if err != nil {
 			return err
