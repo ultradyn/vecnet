@@ -21,6 +21,13 @@ func postNotice(t *testing.T, e *testhub.Env, r hub.NoticeRequest) envelope.HubN
 	if err != nil {
 		t.Fatal(err)
 	}
+	raw, err := json.Marshal(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := envelope.Validate("hubNotice", raw); err != nil {
+		t.Fatal(err)
+	}
 	if err := hubid.VerifyNotice(e.Hub.IdentityKey().Pubkey(), n); err != nil {
 		t.Fatal(err)
 	}
@@ -36,6 +43,13 @@ func noticeEvents(t *testing.T, e *testhub.Env, owners ...string) []envelope.Hub
 	out := []envelope.HubNoticeEvent{}
 	for _, ev := range events {
 		if ev.Type == "hub_notice" {
+			raw, err := json.Marshal(ev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := envelope.Validate("event", raw); err != nil {
+				t.Fatal(err)
+			}
 			var n envelope.HubNoticeEvent
 			if err := json.Unmarshal(ev.Data, &n); err != nil {
 				t.Fatal(err)

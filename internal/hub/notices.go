@@ -57,7 +57,7 @@ func (h *Hub) prepareNotice(r NoticeRequest) (envelope.HubNotice, error) {
 	base := now
 	if r.At != "" {
 		at, err := envelope.ParseTime(r.At)
-		if err != nil {
+		if err != nil || envelope.FormatTime(at) != r.At {
 			return envelope.HubNotice{}, invalidValue("at", "at must be a wire timestamp")
 		}
 		if at.After(base) {
@@ -72,7 +72,7 @@ func (h *Hub) prepareNotice(r NoticeRequest) (envelope.HubNotice, error) {
 		r.ExpiresAt = envelope.FormatTime(base.Add(ttl))
 	} else {
 		expiry, err := envelope.ParseTime(r.ExpiresAt)
-		if err != nil || !expiry.After(now) {
+		if err != nil || envelope.FormatTime(expiry) != r.ExpiresAt || !expiry.After(now) {
 			return envelope.HubNotice{}, invalidValue("expires_at", "expires_at must be a future wire timestamp")
 		}
 	}
@@ -94,7 +94,7 @@ func (h *Hub) PostNotice(ctx context.Context, c auth.Caller, r NoticeRequest) (e
 	if err != nil {
 		return envelope.HubNotice{}, err
 	}
-	err = h.DB.Tx(ctx, func(tx *sql.Tx) error { return h.insertNotice(ctx, tx, n, callerID(c)) })
+	err = h.DB.Tx(ctx, func(tx *sql.Tx) error { return h.insertNotice(ctx, tx, n, "operator") })
 	if err != nil {
 		return envelope.HubNotice{}, err
 	}
@@ -199,7 +199,7 @@ func (h *Hub) ClearNotice(ctx context.Context, c auth.Caller, id string) error {
 		if err != nil {
 			return err
 		}
-		count, err = h.clearNotices(ctx, tx, `cleared_at IS NULL AND notice_id=?`, []any{id}, "operator", callerID(c), h.nowStr())
+		count, err = h.clearNotices(ctx, tx, `cleared_at IS NULL AND notice_id=?`, []any{id}, "operator", "operator", h.nowStr())
 		return err
 	})
 	if err == nil && count > 0 {
