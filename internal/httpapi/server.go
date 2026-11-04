@@ -128,6 +128,7 @@ func hsts(next http.Handler) http.Handler {
 // routes registers the §2.1 endpoints implemented so far; later tasks add
 // /v1/events, /v1/peers, ... here.
 func (s *server) routes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /v1/hub/identity", s.getHubIdentity)
 	mux.HandleFunc("POST /v1/messages", s.postMessages)
 	mux.HandleFunc("POST /v1/reactions", s.postReactions)
 	mux.HandleFunc("PUT /v1/blobs", s.putBlob)

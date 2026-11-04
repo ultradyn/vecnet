@@ -30,6 +30,36 @@ func limited(env *testhub.Env, burst int, trustFly bool) *httpapi.Limiter {
 	return l
 }
 
+func TestIdentityChallengeCostsToken(t *testing.T) {
+	env := testhub.Start(t)
+	lim := httpapi.DefaultLimiter()
+	lim.Now = env.Now.Now
+	env.Configure(func(d *httpapi.Deps) { d.Limiter = lim })
+	for range 100 {
+		identityDoc(t, env, "")
+	}
+	for range 30 {
+		identityDoc(t, env, "?challenge="+identityChallenge())
+	}
+	resp, body := env.Do("", http.MethodGet, "/v1/hub/identity?challenge="+identityChallenge(), nil)
+	want429(t, resp, "31st challenge")
+	var got struct {
+		Error struct {
+			Code    string         `json:"code"`
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Error.Code != "client_rate_limited" || got.Error.Details["retry_after_seconds"] != float64(2) {
+		t.Fatalf("limited challenge: %s", body)
+	}
+	for range 100 {
+		identityDoc(t, env, "")
+	}
+}
+
 func rawPost(t *testing.T, env *testhub.Env, path, body string, hdr map[string]string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, env.URL+path, strings.NewReader(body))

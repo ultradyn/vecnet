@@ -20,6 +20,7 @@ import (
 	"github.com/XertroV/vecnet/internal/egress"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
+	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/ids"
 	"github.com/XertroV/vecnet/internal/store"
 )
@@ -79,6 +80,10 @@ type Hub struct {
 	Auth  *auth.Resolver
 	Cfg   Config
 	Now   func() time.Time
+
+	identity          hubid.Key
+	identityCreatedAt string
+	identityPrevious  *envelope.HubKeyPrevious
 
 	// IdleHook, when set, runs after a peer reports presence idle. New sets
 	// it to OnIdle (the held wake_idle release); nil means no hook. It is
@@ -164,6 +169,9 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	}
 	h := &Hub{DB: db, Log: log, Blobs: blobs, Auth: &auth.Resolver{DB: db, Now: now}, Cfg: cfg, Now: now,
 		streams: map[string]int{}, notifySem: make(chan struct{}, MaxNotifyInFlight)}
+	if err := h.loadIdentity(context.Background()); err != nil {
+		return nil, err
+	}
 	h.IdleHook = h.OnIdle // release held wake_idle deliveries (PROTOCOL §5.2)
 	return h, nil
 }

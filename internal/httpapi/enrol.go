@@ -11,7 +11,7 @@ import (
 
 // postEnrol is POST /v1/enrol {"token", "name"?} (PROTOCOL §2.12, §12), with
 // no bearer: it exchanges a one-time enrolment token for the peer's
-// long-lived secret, returned once, as 200 {"peer_id", "secret", "name"}. An
+// long-lived secret, returned once, as 200 {"peer_id", "secret", "name", "hub_pubkey"}. An
 // invite that left the name open takes it here, once (Hub.Enrol). An unknown or used
 // token is 401 unauthenticated; an unused one past its expiry is 410
 // enrol_token_expired (ask the operator for a new invite); a dot's is 422
@@ -53,5 +53,5 @@ func (s *server) postEnrol(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]string{"peer_id": peer, "secret": secret, "name": final})
+	writeJSON(w, http.StatusOK, map[string]string{"peer_id": peer, "secret": secret, "name": final, "hub_pubkey": s.Hub.IdentityKey().Pubkey()})
 }
