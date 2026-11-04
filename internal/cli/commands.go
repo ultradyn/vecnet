@@ -58,9 +58,10 @@ messaging:
   watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]
        does not ack; use --auto-ack or vecnet ack <cursor> to avoid replaying
        the log after a restart
-  hook [--event user-prompt|post-tool] [--profile P] [--auto-ack]
-       Claude Code hook: always exits 0
-  hook install [--profile P] [--write] [--settings PATH] [--auto-ack]
+  hook [--event user-prompt|post-tool] [--profile P] [--auto-ack] [--mcp vecnet-P]
+       Claude Code hook: always exits 0; --mcp names the registered MCP server in its hints
+  hook install [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp]
+       --mcp: the hooks name MCP server vecnet-P, and --write registers it (claude mcp add)
   hook rebind [--profile P]
        bind the profile's hook to this Claude Code session (run from its Bash tool)
   threads [--limit N]

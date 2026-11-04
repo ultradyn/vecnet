@@ -913,3 +913,184 @@ func TestHookInstallDefaultRefusesSymlinkRedirect(t *testing.T) {
 		})
 	}
 }
+
+// fakeClaude puts a logging `claude` first on PATH (so the test cannot be
+// parallel) and returns its log path: one line per run, its cwd and argv.
+// The real claude is never run. exitCode is the fake's exit status.
+func fakeClaude(t *testing.T, exitCode int) string {
+	t.Helper()
+	dir := t.TempDir()
+	log := filepath.Join(dir, "claude.log")
+	script := fmt.Sprintf("#!/bin/sh\nprintf 'cwd=%%s argv=%%s\\n' \"$(pwd -P)\" \"$*\" >> '%s'\nexit %d\n", log, exitCode)
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
+func claudeRuns(t *testing.T, log string) []string {
+	t.Helper()
+	b, err := os.ReadFile(log)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+}
+
+func TestHookInstallMCPPrintsRegistration(t *testing.T) {
+	log := fakeClaude(t, 0)
+	u := installUser(t)
+	delete(u.env, "VECNET_CONFIG") // --profile names the profile; no config is read
+	out, errs := installRun(t, u, "--profile", "p", "--mcp")
+	for event, suffix := range map[string]string{"UserPromptSubmit": "user-prompt", "PostToolUse": "post-tool"} {
+		if got := settingsCommands(t, []byte(out), event); !reflect.DeepEqual(got, []string{"vecnet hook --profile p --event " + suffix + " --mcp vecnet-p"}) {
+			t.Fatalf("%s commands=%v", event, got)
+		}
+	}
+	if !strings.Contains(errs, "claude mcp add --scope local vecnet-p -- vecnet --net p mcp") || strings.Contains(errs, "--env") {
+		t.Fatalf("registration=%q", errs)
+	}
+	out, _ = installRun(t, u, "--profile", "p", "--mcp", "--auto-ack")
+	for event, suffix := range map[string]string{"UserPromptSubmit": "user-prompt", "PostToolUse": "post-tool"} {
+		if got := settingsCommands(t, []byte(out), event); !reflect.DeepEqual(got, []string{"vecnet hook --profile p --event " + suffix + " --auto-ack --mcp vecnet-p"}) {
+			t.Fatalf("%s auto-ack commands=%v", event, got)
+		}
+	}
+	// An explicit VECNET_CONFIG goes into the registration, after the name.
+	u = installUser(t)
+	other := installFile(t, []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"vecnet hook --profile q --event user-prompt --mcp vecnet-q","timeout":5}]}]}}`), 0o644)
+	_, errs = installRun(t, u, "--profile", "p", "--mcp", "--settings", other)
+	abs, err := filepath.Abs(u.conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errs, "claude mcp add --scope local vecnet-p --env VECNET_CONFIG="+abs+" -- vecnet --net p mcp") {
+		t.Fatalf("registration with config=%q", errs)
+	}
+	if !strings.Contains(errs, "profile(s) q") || !strings.Contains(errs, "every session there also sees each registered vecnet MCP server's tools") {
+		t.Fatalf("other-profile warning=%q", errs)
+	}
+	if runs := claudeRuns(t, log); runs != nil {
+		t.Fatalf("claude ran without --write: %q", runs)
+	}
+}
+
+func TestHookInstallMCPWriteRunsClaude(t *testing.T) {
+	log := fakeClaude(t, 0)
+	u := installUser(t)
+	project := t.TempDir()
+	u.env["CLAUDE_PROJECT_DIR"] = project
+	realProject, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := installFile(t, []byte("{}\n"), 0o644)
+	args := []string{"--profile", "p", "--mcp", "--write", "--settings", path}
+	installRun(t, u, args...)
+	add := "cwd=" + realProject + " argv=mcp add --scope local vecnet-p --env VECNET_CONFIG=" + u.conf + " -- vecnet --net p mcp"
+	remove := "cwd=" + realProject + " argv=mcp remove --scope local vecnet-p"
+	if got := claudeRuns(t, log); !reflect.DeepEqual(got, []string{remove, add}) {
+		t.Fatalf("claude runs=%q\nwant %q", got, []string{remove, add})
+	}
+	first := readSettings(t, path)
+	for event, suffix := range map[string]string{"UserPromptSubmit": "user-prompt", "PostToolUse": "post-tool"} {
+		if got := settingsCommands(t, first, event); !reflect.DeepEqual(got, []string{"vecnet hook --profile p --event " + suffix + " --mcp vecnet-p"}) {
+			t.Fatalf("%s commands=%v", event, got)
+		}
+	}
+	// A re-run replaces in place: no duplicate group; claude runs again.
+	_, errs := installRun(t, u, args...)
+	if string(readSettings(t, path)) != string(first) || !strings.Contains(errs, "unchanged "+path) {
+		t.Fatalf("re-run changed settings: %q", errs)
+	}
+	if got := claudeRuns(t, log); !reflect.DeepEqual(got, []string{remove, add, remove, add}) {
+		t.Fatalf("re-run claude runs=%q", got)
+	}
+	// Without --mcp the handler loses it in place, and claude is not run.
+	installRun(t, u, "--profile", "p", "--write", "--settings", path)
+	after := readSettings(t, path)
+	if want := strings.ReplaceAll(string(first), " --mcp vecnet-p", ""); string(after) != want {
+		t.Fatalf("--mcp not dropped in place:\n%s\nwant\n%s", after, want)
+	}
+	for _, event := range []string{"UserPromptSubmit", "PostToolUse"} {
+		if got := settingsCommands(t, after, event); len(got) != 1 {
+			t.Fatalf("%s commands=%v", event, got)
+		}
+	}
+	if got := claudeRuns(t, log); len(got) != 4 {
+		t.Fatalf("claude ran without --mcp: %q", got)
+	}
+	// Without CLAUDE_PROJECT_DIR the start directory is the cwd.
+	delete(u.env, "CLAUDE_PROJECT_DIR")
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	realCwd, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installRun(t, u, args...)
+	if got := claudeRuns(t, log); len(got) != 6 || got[4] != "cwd="+realCwd+" argv=mcp remove --scope local vecnet-p" || !strings.HasPrefix(got[5], "cwd="+realCwd+" argv=mcp add ") {
+		t.Fatalf("cwd claude runs=%q", got)
+	}
+}
+
+func TestHookInstallMCPWithoutClaudeStillWrites(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no claude anywhere on PATH
+	u := installUser(t)
+	path := installFile(t, []byte("{}\n"), 0o644)
+	code, _, errs := u.run("hook", "install", "--bin", "vecnet", "--profile", "p", "--mcp", "--write", "--settings", path)
+	if code != 0 {
+		t.Fatalf("exit %d, stderr=%q", code, errs)
+	}
+	if got := settingsCommands(t, readSettings(t, path), "UserPromptSubmit"); !reflect.DeepEqual(got, []string{"vecnet hook --profile p --event user-prompt --mcp vecnet-p"}) {
+		t.Fatalf("commands=%v", got)
+	}
+	if !strings.Contains(errs, "claude mcp add --scope local vecnet-p ") || !strings.Contains(errs, "not on PATH") || !strings.Contains(errs, "run the command above") {
+		t.Fatalf("stderr=%q", errs)
+	}
+	// A claude that fails is reported; the hooks are still written.
+	log := fakeClaude(t, 3)
+	path = installFile(t, []byte("{}\n"), 0o644)
+	code, _, errs = u.run("hook", "install", "--bin", "vecnet", "--profile", "p", "--mcp", "--write", "--settings", path)
+	if code != 0 || !strings.Contains(errs, "claude mcp add failed") || !strings.Contains(errs, "run the command above") {
+		t.Fatalf("failing claude: exit %d, stderr=%q", code, errs)
+	}
+	if len(claudeRuns(t, log)) != 2 {
+		t.Fatalf("claude runs=%q", claudeRuns(t, log))
+	}
+	if got := settingsCommands(t, readSettings(t, path), "PostToolUse"); !reflect.DeepEqual(got, []string{"vecnet hook --profile p --event post-tool --mcp vecnet-p"}) {
+		t.Fatalf("commands after failing claude=%v", got)
+	}
+}
+
+func TestHookInstallMCPRefusesUnnameable(t *testing.T) {
+	log := fakeClaude(t, 0)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"dot", []string{"hook", "install", "--profile", "a.b", "--mcp"}},
+		{"25 chars", []string{"hook", "install", "--profile", strings.Repeat("p", 25), "--mcp"}},
+		{"as", []string{"--as", "peer_1", "hook", "install", "--profile", "p", "--mcp"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := installUser(t)
+			const seed = "{\n  \"keep\": true\n}\n"
+			path := installFile(t, []byte(seed), 0o640)
+			code, out, errs := u.run(append(tc.args, "--bin", "vecnet", "--write", "--settings", path)...)
+			if code != 1 || out != "" || !strings.Contains(errs, "hook install --mcp: profile must be 1-24 letters, digits, _ or - (MCP server names), and the installed hooks never take --as") {
+				t.Fatalf("exit=%d stdout=%q stderr=%q", code, out, errs)
+			}
+			if got := string(readSettings(t, path)); got != seed {
+				t.Fatalf("settings changed: %q", got)
+			}
+			if runs := claudeRuns(t, log); runs != nil {
+				t.Fatalf("claude ran: %q", runs)
+			}
+		})
+	}
+}
