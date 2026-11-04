@@ -171,7 +171,6 @@ func TestVerifyHubChecks(t *testing.T) {
 	}{
 		{name: "same", pin: k.Pubkey(), ok: true},
 		{name: "other", pin: old.Pubkey()},
-		{name: "relay", pin: k.Pubkey(), mutate: func(d *envelope.HubIdentity) { d.PublicURL = "https://relay.example" }},
 		{name: "bad challenge", pin: k.Pubkey(), mutate: func(d *envelope.HubIdentity) { d.ChallengeSig = "broken" }},
 		{name: "rotation", pin: old.Pubkey(), ok: true, rotated: true, mutate: func(d *envelope.HubIdentity) {
 			at := "2026-11-05T07:00:00.000Z"
@@ -196,6 +195,37 @@ func TestVerifyHubChecks(t *testing.T) {
 			}
 		})
 	}
+	t.Run("relay", func(t *testing.T) {
+		const publicURL = "https://relay.example"
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			if r.URL.Path != "/v1/hub/identity" || r.Header.Get("Authorization") != "" || r.Header.Get("X-Vecnet-Client") != "" {
+				t.Error("unexpected identity request or credential")
+			}
+			challenge := r.URL.Query().Get("challenge")
+			sig, err := k.SignChallenge(publicURL, challenge)
+			if err != nil {
+				t.Error(err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			// A valid pinned-key proof for another URL must still be refused.
+			if err := hubid.VerifyChallenge(k.Pubkey(), publicURL, challenge, sig); err != nil {
+				t.Errorf("relay proof is invalid: %v", err)
+			}
+			json.NewEncoder(w).Encode(envelope.HubIdentity{Pubkey: k.Pubkey(), PublicURL: publicURL, ChallengeSig: sig})
+		}))
+		defer srv.Close()
+		_, _, err := verifyHub(context.Background(), srv.URL, k.Pubkey(), false)
+		var re *relocationError
+		if !errors.As(err, &re) || re.Code != "relocation_unverified" {
+			t.Fatalf("wanted relocation_unverified for valid proof at another URL: %v", err)
+		}
+		if calls.Load() != 1 {
+			t.Fatalf("identity requests = %d, want 1", calls.Load())
+		}
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	originalTransport := http.DefaultTransport
