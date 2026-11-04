@@ -75,26 +75,73 @@ export type ApprovalRoute = { to: 'requester' | 'operator' | 'relay'; escalateOp
 // This is classification only: no shell evaluation or argv synthesis occurs.
 function commandWords(line: string): string[] {
   const commands: string[] = [];
-  let word = '', started = false, quote = '', escaped = false, atCommand = true;
-  function flush() {
-    if (started) {
-      if (atCommand) commands.push(word);
-      atCommand = false; word = ''; started = false;
+  const pending = [line];
+  const context = () => ({word:'',started:false,quote:'',atCommand:true,parens:0});
+  while (pending.length) {
+    const source = pending.pop()!;
+    const parents: ReturnType<typeof context>[] = [];
+    let current = context();
+    function flush() {
+      if (current.started) {
+        if (current.atCommand) commands.push(current.word);
+        current.atCommand = false; current.word = ''; current.started = false;
+      }
     }
-  }
-  for (const char of line) {
-    if (escaped) { word += char; started = true; escaped = false; continue; }
-    if (char === '\\' && quote !== "'") { escaped = true; started = true; continue; }
-    if (quote) {
-      if (char === quote) quote = ''; else word += char;
-      continue;
+    for (let i = 0; i < source.length; i++) {
+      const char = source[i];
+      if (current.quote === "'") {
+        if (char === "'") current.quote = ''; else current.word += char;
+        continue;
+      }
+      if (char === '\\') {
+        const next = source[i+1];
+        if (next !== undefined && (current.quote !== '"' || '$`"\\\n'.includes(next))) {
+          if (next !== '\n') { current.word += next; current.started = true; }
+          i++;
+        } else { current.word += char; current.started = true; }
+        continue;
+      }
+      if (char === '`') {
+        // Legacy substitutions remove these escapes before parsing their body.
+        let body = '';
+        for (i++; i < source.length && source[i] !== '`'; i++) {
+          if (source[i] === '\\' && i+1 < source.length && '$`\\\n'.includes(source[i+1])) {
+            i++;
+            if (source[i] === '\n') continue;
+          }
+          body += source[i];
+        }
+        pending.push(body);
+        current.word += '`...`'; current.started = true;
+        continue;
+      }
+      if (char === '$' && source[i+1] === '(') {
+        // Substitutions run even inside double quotes, with independent quoting.
+        // Keep their output opaque in the enclosing word; never synthesise argv.
+        current.word += '$()'; current.started = true;
+        parents.push(current); current = context(); i++;
+        continue;
+      }
+      if (current.quote) {
+        if (char === current.quote) current.quote = ''; else current.word += char;
+        continue;
+      }
+      if (char === "'" || char === '"') { current.quote = char; current.started = true; continue; }
+      if (char === ')' && parents.length && current.parens === 0) {
+        flush(); current = parents.pop()!;
+        continue;
+      }
+      if (';&|()\n'.includes(char)) {
+        flush(); current.atCommand = true;
+        if (char === '(') current.parens++;
+        if (char === ')' && current.parens > 0) current.parens--;
+        continue;
+      }
+      if (/\s/.test(char)) { flush(); continue; }
+      current.word += char; current.started = true;
     }
-    if (char === "'" || char === '"') { quote = char; started = true; continue; }
-    if (';&|()\n'.includes(char)) { flush(); atCommand = true; continue; }
-    if (/\s/.test(char)) { flush(); continue; }
-    word += char; started = true;
+    flush();
   }
-  flush();
   return commands;
 }
 function within(root: string, path: string): boolean {

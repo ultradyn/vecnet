@@ -217,6 +217,57 @@ test('classifyPermission: sudo after && is privileged; ~/.ssh write is privilege
   assert.deepEqual(classifyPermission(permission(),'/home/test'),['edit']);
 });
 
+const substitutionCases = [
+  {line:'echo "$(sudo id)"',privileged:true},
+  {line:'echo `sudo id`',privileged:true},
+  {line:'echo $(su user)',privileged:true},
+  {line:'echo "`doas id`"',privileged:true},
+  {line:'echo "$(echo "$(pkexec id)")"',privileged:true},
+  {line:'echo "$(echo `/usr/bin/sudo id`)"',privileged:true},
+  {line:'echo `echo $(sudo id)`',privileged:true},
+  {line:'echo `echo \\`sudo id\\``',privileged:true},
+  {line:'echo "$(printf \'%s\' \')\'; sudo id)"',privileged:true},
+  {line:'echo "$( (echo safe); sudo id)"',privileged:true},
+  {line:'echo "$(echo safe)" && sudo id',privileged:true},
+  {line:'echo "$(echo safe)$(sudo id)"',privileged:true},
+  {line:'echo \'$(sudo id)\'',privileged:false},
+  {line:'echo \'`sudo id`\'',privileged:false},
+  {line:'echo "\\$(sudo id)"',privileged:false},
+  {line:'echo \\`sudo id\\`',privileged:false},
+  {line:'echo "\\`sudo id\\`"',privileged:false},
+  {line:'echo "$(echo sudo)"',privileged:false},
+  {line:'echo `echo sudo`',privileged:false},
+  {line:'echo `echo \'$(sudo id)\'`',privileged:false},
+  {line:'echo "$(echo \'$(sudo id)\')"',privileged:false},
+  {line:'echo "$(echo \'`sudo id`\')"',privileged:false},
+  {line:'echo "$(echo \'safe && sudo id\')"',privileged:false},
+  {line:'echo "$(echo safe)" sudo',privileged:false},
+];
+
+test('classifyPermission: executable command substitutions are privileged; quoted and escaped literals stay inert', async t => {
+  for (const {line,privileged} of substitutionCases) {
+    await t.test(line, () => {
+      const p = permission({kind:'exec',paths:[],command:{line,shell_operators:true},
+        fidelity:{kind:'enforced',command:'line',paths:'none',host:'none'}});
+      assert.deepEqual(classifyPermission(p,'/home/test'),privileged ? ['exec','privileged_exec'] : ['exec']);
+    });
+  }
+});
+
+test('routeApproval: the privileged preset sends executable substitutions to the operator', async t => {
+  const a = await setup();
+  a.cfg.approvals.to_operator.presets = ['privileged'];
+  for (const {line,privileged} of substitutionCases) {
+    await t.test(line, () => {
+      const p = permission({kind:'exec',paths:[],command:{line,shell_operators:true},
+        fidelity:{kind:'enforced',command:'line',paths:'none',host:'none'}});
+      const route = routeApproval(p,{requester:peer,policyKey:'default'},a.dir,a.cfg,'/home/test');
+      assert.equal(route.to,privileged ? 'operator' : 'requester');
+      assert.deepEqual(route.categories,privileged ? ['exec','privileged_exec'] : ['exec']);
+    });
+  }
+});
+
 test('routeApproval default (D10 presets none): everything goes to the requester with escalate option', async () => {
   const a = await setup();
   const route = routeApproval(permission({outside_workspace:true,paths:[{path:'/etc/passwd',access:'delete',in_workspace:false}]}),{requester:peer,policyKey:'default'},a.dir,a.cfg,'/home/test');
