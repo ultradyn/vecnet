@@ -46,15 +46,24 @@ export async function sweep(deps: LaunchDeps & {graceMs: number; retentionMs: nu
     } catch { report.skipped.push({reason:'unreachable'}); continue; }
     for (const job of deps.ledger.allJobRefs()) {
       if (job.backend !== backend.id || job.state !== 'ended' || job.endedAt === null ||
-          deps.clock.now()-job.endedAt <= deps.retentionMs || !job.ref || !job.workspace) continue;
-      if (typeof job.ref.extra?.tag !== 'string' || !job.ref.extra.tag.startsWith('vl-')) {
-        report.skipped.push({ref:job.ref,path:job.workspace,reason:'untagged'}); continue;
+          deps.clock.now()-job.endedAt <= deps.retentionMs) continue;
+      // A launch that failed before the backend returned a session leaves no
+      // ref: the plugin finds the worktree it allocated by the job's tag.
+      const ref: SessionRef | null = job.ref ?? (job.tag.startsWith('vl-') ? {backend:backend.id,host:deps.host,id:'',extra:{tag:job.tag}} : null);
+      if (!ref || (job.ref && !job.workspace)) continue;
+      const path = job.workspace ?? job.tag;
+      if (typeof ref.extra?.tag !== 'string' || !ref.extra.tag.startsWith('vl-')) {
+        report.skipped.push({ref,path,reason:'untagged'}); continue;
       }
+      const done = deps.ledger.kv('sweep:workspace-done');
+      if (!job.ref && done.get(job.jobId)) continue;
       try {
-        const result = await backend.cleanupWorkspace(job.ref);
-        if (result.removed) report.workspacesRemoved.push(job.workspace);
-        else report.skipped.push({ref:job.ref,path:job.workspace,reason:result.reason ?? 'kept'});
-      } catch { report.skipped.push({ref:job.ref,path:job.workspace,reason:'unreachable'}); }
+        const result = await backend.cleanupWorkspace(ref);
+        if (result.removed) report.workspacesRemoved.push(path);
+        else report.skipped.push({ref,path,reason:result.reason ?? 'kept'});
+        // Without a ref there is nothing else to retry once the plugin has no worktree for the tag.
+        if (!job.ref && (result.removed || result.reason === 'missing_workspace_metadata')) done.set(job.jobId,'1');
+      } catch { report.skipped.push({ref,path,reason:'unreachable'}); }
     }
   }
   return report;

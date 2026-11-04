@@ -500,3 +500,11 @@ test('two turns that end with identical text after separate sends both finish, a
   const replay=(await take(attached.handle,1,first.cursor))[0];
   assert.equal('turnId' in replay.event && replay.event.turnId,'turnId' in second.event && second.event.turnId);
 });
+test('a launch that returned agent_id null leaves a worktree cleanupWorkspace can reclaim by the job tag alone', async t => {
+  const h=await harness(t); h.state.launch={agent_id:null,preset:'sol',mode:'full-access'}; const b=await h.create();
+  await assert.rejects(b.launch(h.spec,h.hooks),/launch_failed/);
+  const ws=join(h.ws,h.spec.jobId); await access(ws);
+  assert.deepEqual(await b.cleanupWorkspace!({backend:'paseo',host:'test-host',id:'',extra:{tag:h.spec.tag}}),{removed:true});
+  await assert.rejects(access(ws)); assert.equal(await h.git('rev-parse','launch/job_test'),h.base);
+  assert.deepEqual(await b.cleanupWorkspace!({backend:'paseo',host:'test-host',id:'',extra:{tag:'vl-job_other'}}),{removed:false,reason:'missing_workspace_metadata'});
+});

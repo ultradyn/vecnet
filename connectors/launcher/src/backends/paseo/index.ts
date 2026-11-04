@@ -120,6 +120,13 @@ class PaseoBackend implements Backend {
     return refs.find(r => r.extra?.tag === tag && r.id === preferred) ?? refs.find(r => owns(String(r.extra?.tag), tag)) ?? null;
   }
   async cleanupWorkspace(ref: SessionRef): Promise<{ removed: boolean; reason?: string }> {
+    // A launch that failed before any agent existed leaves only the tag in the
+    // ledger job; the worktree's provenance was saved here when it was created.
+    // Only that exact tag's record counts (never the id index: a failed launch has no id).
+    if (typeof ref.extra?.workspace !== 'string' && typeof ref.extra?.tag === 'string' && ref.extra.tag.startsWith('vl-')) {
+      const saved = this.ctx.store.get(`ref:${ref.extra.tag}`);
+      if (saved) ref = JSON.parse(saved) as SessionRef;
+    }
     const workspace = ref.extra?.workspace, branch = ref.extra?.branch;
     if (typeof workspace !== 'string' || typeof branch !== 'string' || !branch.startsWith('launch/')) return { removed: false, reason: 'missing_workspace_metadata' };
     try {

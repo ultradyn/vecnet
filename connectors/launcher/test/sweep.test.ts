@@ -59,3 +59,19 @@ test('sweep calls cleanupWorkspace only for launcher-dir backends and ended jobs
   backend.cleanupWorkspace = async () => ({removed:false,reason:'dirty'});
   assert.ok((await sweep(sweepDeps)).skipped.some(s => s.path === '/repo' && s.reason === 'dirty'));
 });
+
+test('a launch that failed before any session existed still has its worktree reclaimed by tag after retention, once', async t => {
+  const {deps,clock,job,backend,ledger} = setup(t);
+  const caps = await backend.capabilities(); backend.capabilities = async () => ({...caps,workspace:'launcher-dir'});
+  const seen: Array<Record<string, unknown> | undefined> = [];
+  backend.cleanupWorkspace = async r => { seen.push(r.extra); return {removed:true}; };
+  ledger.createJob({...job(),jobId:'job_failed',threadId:'thr_failed',tag:'vl-job_failed',state:'ended',sessionRef:null,workspace:null});
+  ledger.updateJob('job_failed',{endedAt:clock.now()});
+  const sweepDeps = {...deps,graceMs:86400000,retentionMs:604800000,firstSeen:ledger.kv('sweep')};
+  assert.deepEqual((await sweep(sweepDeps)).workspacesRemoved,[]);
+  clock.advance(604800001);
+  assert.deepEqual((await sweep(sweepDeps)).workspacesRemoved,['vl-job_failed']);
+  assert.deepEqual(seen,[{tag:'vl-job_failed'}]);
+  await sweep(sweepDeps);
+  assert.equal(seen.length,1,'a reclaimed tag-only workspace is not retried');
+});
