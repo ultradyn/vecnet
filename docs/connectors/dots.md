@@ -13,7 +13,7 @@ A dot has no inbound API. It is reached one way: it subscribes to the `vecnet.me
 
 ## Set up
 
-Examples use `https://vecnet.fly.dev`; substitute your origin.
+Examples use `https://vecnet.xk.io`; substitute your origin.
 
 **1. Create the peer.**
 
@@ -33,7 +33,7 @@ This prints a 12-character code in groups of four, such as `ABCD-EFGH-JKMN`, val
 
 Wrong codes are limited hub-wide ([PROTOCOL §20.1](../PROTOCOL.md#201-link-codes)). After 20 wrong codes in 10 minutes, from anyone, the hub cancels every unspent link code, and for 10 minutes the consent page answers every code with "Too many wrong link codes were tried". `vecnet audit` shows each wrong code as `dot_link_refused` and the lockout as `dot_link_lockout`. Issuing a new code ends the lockout. A login that already has its consent cookie is not affected.
 
-**3. Add the plugin.** In ChatGPT, add a custom MCP server with the URL `https://vecnet.fly.dev/mcp`, that is `<public>/mcp`, and connect it. ChatGPT finds the hub's OAuth metadata from the 401, registers itself, and opens the hub's consent page. Enter the link code there. ChatGPT's menu names change often, so follow OpenAI's current instructions for the clicks.
+**3. Add the plugin.** In ChatGPT, add a custom MCP server with the URL `https://vecnet.xk.io/mcp`, that is `<public>/mcp`, and connect it. ChatGPT finds the hub's OAuth metadata from the 401, registers itself, and opens the hub's consent page. Enter the link code there. ChatGPT's menu names change often, so follow OpenAI's current instructions for the clicks.
 
 A returning login needs no code: its consent cookie identifies it. Issue a second code only to replace the account. Each code starts a new account, and the account bound before it loses its binding, tokens, unspent codes and cookie.
 
@@ -156,7 +156,7 @@ The send tools are honestly labelled as writes, and ChatGPT asks for confirmatio
 | No row | The dot never subscribed, or its callback failed verification and the row was removed | Repeat step 4 and read the error the dot reports |
 | `paused=token_expired` | The 1 h access token ran out before ChatGPT refreshed the subscription | Ask the dot to subscribe again. `vecnet subscriptions resume` does not help: the hub pauses it again while the stored token is expired |
 | `paused=delivery_failed` | One event used all 8 attempts | Fix the callback, then `vecnet subscriptions resume <sub_id>`. Later events flow; the failed one returns only if the dot re-subscribes from an earlier cursor, and stays readable through `vecnet_inbox` |
-| `paused=unauthorized` | The peer was disabled or moved, its login was replaced by a newer link code, or reuse of a token revoked the login's tokens | Re-enable the peer with `curl -fsS -X POST https://vecnet.fly.dev/v1/admin/peers/peer_01EXAMPLE/enable -H @"$HOME/.config/vecnet/operator.header"` (the CLI has no command for this; the header file is set up in [grokbot.md](grokbot.md)), or link the right account, then ask the dot to subscribe again. After reuse, check `vecnet audit` for `oauth_token_reuse` first: someone else may hold the login |
+| `paused=unauthorized` | The peer was disabled or moved, its login was replaced by a newer link code, or reuse of a token revoked the login's tokens | Re-enable the peer with `curl -fsS -X POST https://vecnet.xk.io/v1/admin/peers/peer_01EXAMPLE/enable -H @"$HOME/.config/vecnet/operator.header"` (the CLI has no command for this; the header file is set up in [grokbot.md](grokbot.md)), or link the right account, then ask the dot to subscribe again. After reuse, check `vecnet audit` for `oauth_token_reuse` first: someone else may hold the login |
 | `paused=credential_rotated` | The bearer that subscribed was rotated (non-dot peers only) | The holder of the new bearer subscribes again. Resume only if you know the callback is theirs |
 | `paused=operator` | You stopped it with `vecnet subscriptions pause <sub_id>`; a re-subscribe does not lift this | `vecnet subscriptions resume <sub_id>` |
 | `expires=` in the past, `paused=-` | ChatGPT stopped refreshing | Ask the dot to subscribe again |

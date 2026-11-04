@@ -7,7 +7,7 @@ The hub runs as one always-on Fly.io machine (`shared-cpu-1x`, 512 MB) with a vo
 | File | What it does |
 |---|---|
 | `Dockerfile` | `golang:1.26-alpine` builder runs `CGO_ENABLED=0 go build -trimpath -ldflags="-s -w"` for both binaries, then copies them into `FROM scratch` as `/vecnet-hub` and `/vecnet`, with `/etc/ssl/certs/ca-certificates.crt` and `/usr/share/zoneinfo`. Entrypoint: `/vecnet-hub --listen 0.0.0.0:8080 --data-dir /data`. |
-| `fly.toml` | App `vecnet` in `syd`; `[http_service]` on 8080 with `force_https`, no auto stop or start, one machine minimum, and `[http_service.concurrency]` `connections` soft 250 / hard 300 (every open stream holds one; [PROTOCOL §20.3](PROTOCOL.md#203-timeouts-connections-and-hsts)); volume `vecnet_data` at `/data`; `VECNET_PUBLIC_URL = "https://vecnet.fly.dev"` and `VECNET_TRUST_FLY_CLIENT_IP = "1"`; HTTP health check on `/healthz`. |
+| `fly.toml` | App `vecnet` in `syd`; `[http_service]` on 8080 with `force_https`, no auto stop or start, one machine minimum, and `[http_service.concurrency]` `connections` soft 250 / hard 300 (every open stream holds one; [PROTOCOL §20.3](PROTOCOL.md#203-timeouts-connections-and-hsts)); volume `vecnet_data` at `/data`; `VECNET_PUBLIC_URL = "https://vecnet.xk.io"` and `VECNET_TRUST_FLY_CLIENT_IP = "1"`; HTTP health check on `/healthz`. |
 | `.dockerignore` | Keeps `.git`, worktrees, scratch, local data (`.data/`, `.demo-data/`), backups and stray databases (`backups/`, `**/*.db`, `**/*.db-wal`, `**/*.db-shm`), `bin/` and research docs out of the build context. A database holds `meta.hub_key`, so it must never reach Fly's builder. |
 
 ## Configuration
@@ -35,14 +35,29 @@ The public URL is the origin the hub writes into attachment `blob_url` links, so
    # ~/.config/vecnet/config.toml
    operator_profile = "fly"   # bare runs from your terminal (OPERATOR.md)
    [profiles.fly]
-   hub = "https://vecnet.fly.dev"
+   hub = "https://vecnet.xk.io"
    secret = "vn_operator_…"
    ```
 
    A second `init` prints `already initialised` and the existing peer id, never a secret.
-5. Check: `curl -fsS https://vecnet.fly.dev/healthz`, then `vecnet peer add --kind session --name <name>` and `vecnet enrol` on the peer's host.
+5. Check: `curl -fsS https://vecnet.xk.io/healthz`, then `vecnet peer add --kind session --name <name>` and `vecnet enrol` on the peer's host.
 
 Later deploys are `just fly-deploy` only. The hub migrates its database on start.
+
+## Custom domain
+
+The public origin is `https://vecnet.xk.io`, not `vecnet.fly.dev`, so the hub can move host without changing the URL clients, OAuth tokens and `blob_url` links are bound to. Set it up once, before any dot links (2026-11-05):
+
+1. `fly certs add vecnet.xk.io -a vecnet`. Then `fly certs setup vecnet.xk.io -a vecnet` prints the records.
+2. In the xk.io zone (Cloudflare), add these records, all **DNS only (grey cloud)**. Fly terminates TLS, and Cloudflare's proxy would cut SSE streams at about 100 s.
+   - `A vecnet → 66.241.124.210`
+   - `AAAA vecnet → 2a09:8280:1::1e5:9e7b:0`
+   - `CNAME _acme-challenge.vecnet → vecnet.xk.io.o931qj5.flydns.net`
+   - `TXT _fly-ownership.vecnet → app-o931qj5`
+3. `fly certs check vecnet.xk.io -a vecnet` shows `Issued`.
+4. `fly.toml` sets `VECNET_PUBLIC_URL = "https://vecnet.xk.io"`; `just fly-deploy`.
+
+`VECNET_PUBLIC_URL` is the OAuth issuer and the `/mcp` audience, and a request with any other `Origin` gets 403. So browsers and dots must use the custom domain. The CLI sends no `Origin`, so `vecnet.fly.dev` still works for it, but profiles should use `https://vecnet.xk.io`. To change domain later, add the new cert and records, switch `VECNET_PUBLIC_URL`, redeploy, and re-link dots: their tokens name the old issuer. [Issue 41](../.scratch/vecnet/issues/41-hub-notices-and-relocation.md) plans notices and verified relocation for this.
 
 ## Public exposure
 
@@ -53,11 +68,11 @@ The hub is invite-only on the open internet: every way in needs a secret the ope
 - **Link codes** are 12 characters (`ABCD-EFGH-JKMN`). 20 wrong codes in 10 minutes, from anyone, cancel every unspent code and lock linking for 10 minutes or until you issue a new one. Watch `vecnet audit` for `dot_link_lockout`.
 - **Timeouts and connections.** The server cuts request bodies that take over 30 s (blob uploads get 10 min) while streams lift that for themselves, and `fly.toml` allows 300 connections, since every SSE stream holds one.
 - **HSTS** is sent on every response, because the public URL is https.
-- **The CLI refuses `http://` hubs** off loopback and the LAN. Use `https://vecnet.fly.dev`, not `http://`.
+- **The CLI refuses `http://` hubs** off loopback and the LAN. Use `https://vecnet.xk.io`, not `http://`.
 
 ## Connectors
 
-**Public HTTPS is required for dots.** ChatGPT reaches `/mcp`, the OAuth endpoints and the metadata documents over the public internet, and OpenAI's Secure MCP Tunnel is not supported. Fly's `https://vecnet.fly.dev` is enough. Grok Bots (for `/mcp`) and GitHub webhooks (for `/v1/ingress/…`) need the same public origin.
+**Public HTTPS is required for dots.** ChatGPT reaches `/mcp`, the OAuth endpoints and the metadata documents over the public internet, and OpenAI's Secure MCP Tunnel is not supported. The hub's custom domain `https://vecnet.xk.io` (served by Fly) is enough. Grok Bots (for `/mcp`) and GitHub webhooks (for `/v1/ingress/…`) need the same public origin.
 
 **`VECNET_PUBLIC_URL` must be that exact origin.** It is more than a link prefix here: it is the OAuth issuer, it sets the `/mcp` token audience, and a request carrying any other `Origin` header gets 403.
 
