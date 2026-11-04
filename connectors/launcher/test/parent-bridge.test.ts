@@ -10,7 +10,7 @@ import type { Directory } from '../src/directory.ts';
 import type { Outbox } from '../src/outbox.ts';
 import { parseConfig } from '../src/config.ts';
 import { routeApproval } from '../src/policy.ts';
-import { validateLaunchPermission } from '../src/contract/permission.ts';
+import { finishPermission, validateLaunchPermission } from '../src/contract/permission.ts';
 import { parseQuestion, parseApprovalClosed } from '../src/contract/metadata.ts';
 import { createParentBridge } from '../src/parent-bridge.ts';
 import { threadDelivery } from './fixtures.ts';
@@ -239,4 +239,123 @@ test('incomplete or semantically invalid launch.answers falls back to text; inva
   await s.bridge.handleThreadReply(d);assert.equal(s.bridge.open(s.job.jobId).questions,1);
   const valid=structuredClone(d);valid.delivery_id='dly_second';valid.message.content.text='blue';valid.message.metadata={'launch.answers':{question_id:qid,answers:{}}};
   await s.bridge.handleThreadReply(valid);assert.deepEqual(await pending,{answers:{color:'Blue'},answeredBy:'peer_parent'});
+});
+
+for (const terminal of ['decided','expired'] as const) test(`override of an escalated parent after its child is ${terminal} cannot rewrite the family`,async t=>{
+  const s=setup(t),pending=s.hooks.onPermissionRequest(permission(),signal()),parent=s.prompts()[0];
+  const override=s.reply(parent,'','peer_operator',{'launch.decision':terminal==='decided' ? 'Deny' : 'Allow once'});
+  await s.bridge.handleApprovalResponse(s.response(parent,'escalate'));
+  const operator=s.prompts()[0];s.deliverSend(operator);
+  if (terminal==='decided') await s.bridge.handleApprovalResponse(s.response(operator,'Allow once','peer_operator'));
+  else s.clock.advance(s.cfg.approvals.operator_expires_ms);
+  assert.deepEqual(await pending,{optionId:terminal==='decided' ? 'allow-once' : 'deny',decidedBy:terminal==='decided' ? 'peer_operator' : 'expired'});
+  const before=[parent,operator].map(r=>s.ledger.approval(r.approval_request!.approval_id));
+  assert.equal(await s.bridge.handleThreadReply(override),'consumed');
+  assert.deepEqual([parent,operator].map(r=>s.ledger.approval(r.approval_request!.approval_id)),before);
+  assert.equal(s.sends().filter(r=>r.metadata?.['launch.approval_closed']).length,0);
+  assert.ok(s.sends().some(r=>r.idempotency_key.includes('.superseded.')));assert.ok(s.receipt(override));
+});
+
+test('operator opener lives to the bounded session deadline and roots a second prompt after 24 hours',async t=>{
+  const s=setup(t,{approvals:{to_operator:{requesters:['peer_parent']}}});
+  s.job.deadlineAt=s.clock.now()+3*86400000;
+  const first=s.hooks.onPermissionRequest(permission('first'),signal()),opener=s.prompts()[0];
+  assert.equal(Date.parse(opener.expires_at!),s.job.deadlineAt);
+  const delivered=s.deliverSend(opener);
+  await s.bridge.handleApprovalResponse(s.response(opener,'Allow once','peer_operator'));await first;
+  s.clock.advance(25*3600000);
+  const second=s.hooks.onPermissionRequest(permission('second'),signal()),later=s.prompts()[0];
+  assert.equal(later.thread_id,delivered.thread_id);assert.equal(later.in_reply_to,delivered.message_id);
+  assert.ok(Date.parse(opener.expires_at!)>s.clock.now(),'the hub can still accept a reply to this root');
+  s.deliverSend(later);await s.bridge.handleApprovalResponse(s.response(later,'Deny','peer_operator'));await second;
+});
+
+test('operator opener expiry respects the seven-day envelope cap',async t=>{
+  const s=setup(t,{approvals:{to_operator:{requesters:['peer_parent']}}});s.job.deadlineAt=s.clock.now()+9*86400000;
+  const pending=s.hooks.onPermissionRequest(permission(),signal());
+  assert.equal(Date.parse(s.prompts()[0].expires_at!),s.clock.now()+7*86400000);
+  s.bridge.abandonAll(s.job.jobId,'restart');await pending;
+});
+
+for (const direct of [false,true]) for (const char of ['x','😀']) test(`complete escalation title is bounded to 200 Unicode code points (${direct ? 'direct' : 'escalated'}, ${char})`,async t=>{
+  const s=setup(t,direct ? {approvals:{to_operator:{requesters:['peer_parent']}}} : {});s.job.title=char.repeat(200);
+  const pending=s.hooks.onPermissionRequest(permission(),signal());
+  if (!direct) {const parent=s.prompts()[0];s.deliverSend(parent);await s.bridge.handleApprovalResponse(s.response(parent,'escalate'));}
+  const title=s.prompts()[0].thread_title!;
+  assert.equal([...title].length,200);assert.equal(title,`vl escalation: ${char.repeat(185)}`);
+  s.bridge.abandonAll(s.job.jobId,'restart');await pending;
+});
+
+test('reserved label normalization stays under 6 KiB and escalation preserves the finalized permission',async t=>{
+  const s=setup(t),p=permission();p.options[0].label='escalate';p.permission.reason='';p.permission.backend_raw='x'.repeat(3000);
+  const initial=finishPermission(p.permission,{machineId:s.cfg.host,jobId:s.job.jobId,permissionMode:s.job.permissionMode,preset:s.job.preset,backend:s.job.backend,workspaceRoot:'/workspace',home:'/home/test'});
+  p.permission.reason='x'.repeat(6144-Buffer.byteLength(JSON.stringify(initial)));
+  const pending=s.hooks.onPermissionRequest(p,signal()),parent=s.prompts()[0],metadata=parent.metadata!['launch.permission'];
+  assert.ok(Buffer.byteLength(JSON.stringify(metadata))<=6144);assert.deepEqual(validateLaunchPermission(metadata),[]);
+  assert.deepEqual(parent.approval_request!.options,['escalate(2)','Deny','escalate']);
+  s.deliverSend(parent);await s.bridge.handleApprovalResponse(s.response(parent,'escalate'));const operator=s.prompts()[0];
+  assert.deepEqual(operator.metadata!['launch.permission'],metadata);
+  s.deliverSend(operator);await s.bridge.handleApprovalResponse(s.response(operator,'escalate(2)','peer_operator'));assert.equal((await pending).optionId,'allow-once');
+});
+
+for (const text of ['x'.repeat(9000),'😀\n"\\'.repeat(18000)]) test(`oversized question prose is bounded before enqueue and preserves answer mapping (${Buffer.byteLength(text)} input bytes)`,async t=>{
+  const s=setup(t),q=question();q.questions[0].text=text;q.questions[0].header='header '.repeat(2000);
+  q.questions.push({id:'detail',text,allowOther:true,secret:false});
+  const pending=s.hooks.onQuestion(q,signal()),req=s.sends()[0];
+  assert.ok(Buffer.byteLength(JSON.stringify(req.metadata))<=8192);assert.ok(Buffer.byteLength(req.content.text)<=65536);
+  const wire=parseQuestion(req.metadata)!;assert.ok(wire);assert.deepEqual(wire.questions.map(q=>q.id),['color','detail']);
+  assert.deepEqual(wire.questions[0].options,['Blue','Green']);assert.match(req.content.text,/truncated/);
+  const d=s.reply(req,'','peer_parent',{'launch.answers':{question_id:wire.question_id,answers:{color:'green',detail:'Keep going'}}});
+  await s.bridge.handleThreadReply(d);assert.deepEqual(await pending,{answers:{color:'Green',detail:'Keep going'},answeredBy:'peer_parent'});
+});
+
+test('question metadata exactly at 8 KiB remains unchanged; one byte over is shortened',async t=>{
+  for (const extra of [0,1]) {
+    const s=setup(t),q=question(`boundary-${extra}`);q.questions[0].allowOther=true;
+    const qid=`q.${s.job.jobId}.${'a'.repeat(24)}`;
+    const base={'launch.question':{v:1,question_id:qid,blocking:true,questions:[{id:'color',text:'',options:['Blue','Green'],allow_other:true}]}};
+    q.questions[0].text='x'.repeat(8192-Buffer.byteLength(JSON.stringify(base))+extra);
+    const pending=s.hooks.onQuestion(q,signal()),req=s.sends()[0];
+    assert.ok(Buffer.byteLength(JSON.stringify(req.metadata))<=8192);
+    if (!extra) assert.equal(parseQuestion(req.metadata)!.questions[0].text,q.questions[0].text);
+    else assert.match(parseQuestion(req.metadata)!.questions[0].text,/truncated/);
+    await s.bridge.handleThreadReply(s.reply(req,'ok'));assert.equal((await pending).answers.color,'ok');
+  }
+});
+
+test('question IDs or option labels that cannot fit are safely answered without enqueueing oversized metadata',async t=>{
+  const s=setup(t),q=question();q.questions[0].options=[{label:'x'.repeat(9000)}];q.questions[0].id='opaque-id';
+  const pending=s.hooks.onQuestion(q,signal());
+  assert.ok(s.sends().every(r=>!r.metadata?.['launch.question']));
+  assert.deepEqual(await pending,{answers:{'opaque-id':timeoutAnswer},answeredBy:'timeout'});
+  assert.deepEqual(s.bridge.open(s.job.jobId),{approvals:0,questions:0});
+});
+
+for (const relay of [false,true]) test(`opaque backend id escalate remains decidable beside a separate escalation control (${relay ? 'relay' : 'requester'})`,async t=>{
+  const s=setup(t,relay ? {relays:{pagd:{principals:[],peers:['peer_parent'],parent_expires_ms:2100000,escalate_option:true,escalate_to_operator:true}}} : {});
+  const p=permission();p.options[0].id='escalate';
+  const pending=s.hooks.onPermissionRequest(p,signal()),parent=s.prompts()[0];
+  assert.deepEqual((parent.metadata!['launch.permission'] as {options:Array<{id:string}>}).options.map(o=>o.id),['escalate','deny']);
+  const row=s.ledger.approval(parent.approval_request!.approval_id)!;assert.equal(new Set(row.options.map(o=>o.optionId)).size,row.options.length);
+  s.deliverSend(parent);await s.bridge.handleApprovalResponse(s.response(parent,'Allow once'));
+  assert.deepEqual(await pending,{optionId:'escalate',decidedBy:'peer_parent'});assert.equal(s.prompts().length,0);
+  const next=s.hooks.onPermissionRequest({...p,requestId:'next'},signal()),parent2=s.prompts()[0];s.deliverSend(parent2);
+  await s.bridge.handleApprovalResponse(s.response(parent2,'escalate'));const operator=s.prompts()[0];assert.deepEqual(operator.recipients,['peer_operator']);
+  assert.deepEqual(operator.metadata!['launch.permission'],parent2.metadata!['launch.permission']);
+  s.deliverSend(operator);await s.bridge.handleApprovalResponse(s.response(operator,'Allow once','peer_operator'));assert.equal((await next).optionId,'escalate');
+});
+
+test('launch.decision is operator-only even for the requester and authorized relays',async t=>{
+  const s=setup(t),pending=s.hooks.onPermissionRequest(permission(),signal()),req=s.prompts()[0],delivered=s.deliverSend(req);
+  let resolved=false;void pending.then(()=>{resolved=true;});
+  for (const sender of ['peer_parent','peer_relay','peer_intruder','peer_operator']) {
+    const d=threadDelivery(delivered.thread_id,sender,'','wake');d.message.in_reply_to=delivered.message_id;d.message.metadata={'launch.decision':'Allow once'};
+    assert.equal(await s.bridge.handleThreadReply(d),'consumed');
+    if (sender!=='peer_operator') {
+      assert.deepEqual(s.receipt(d),{delivery_id:d.delivery_id,state:'processed',note:'not_relayed'});
+      assert.equal(s.bridge.open(s.job.jobId).approvals,1);assert.equal(resolved,false);
+      assert.equal(s.ledger.approval(req.approval_request!.approval_id)?.decision,null);
+    }
+  }
+  assert.deepEqual(await pending,{optionId:'allow-once',decidedBy:'peer_operator'});
 });

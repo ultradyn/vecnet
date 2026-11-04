@@ -10,6 +10,7 @@ import type { Outbox } from './outbox.ts';
 import type { ApprovalRoute } from './policy.ts';
 import { approvalOptions, finishPermission } from './contract/permission.ts';
 import { buildApprovalClosed, buildQuestion, parseAnswers, parseDecidedVia, parseDecision } from './contract/metadata.ts';
+import type { LaunchQuestion } from './contract/metadata.ts';
 import { redactText } from './redact.ts';
 
 export interface ParentBridgeDeps {
@@ -32,6 +33,34 @@ interface LiveQuestion { promise: Promise<QuestionAnswer>; finish(answer: Questi
 interface LiveApproval {
   promise: Promise<PermissionDecision>; finish(answer: PermissionDecision): void;
   job: JobRow; summary: string; route: ApprovalRoute; activeId: string;
+}
+
+function boundedQuestion(question: LaunchQuestion): { metadata: Record<string, unknown>; content: { text: string } } | undefined {
+  function pack(q: LaunchQuestion) {
+    return {metadata:buildQuestion(q),content:{text:q.questions.map(q=>[q.header,q.text,...q.options.map(label=>`- ${label}`)]
+      .filter(v=>v!==undefined).join('\n')).join('\n\n')}};
+  }
+  function fits(message: ReturnType<typeof pack>) {
+    return Buffer.byteLength(JSON.stringify(message.metadata))<=8192 && Buffer.byteLength(message.content.text)<=65536;
+  }
+  const full=pack(question);
+  if (fits(full)) return full;
+  // Only shorten prose. IDs and option labels retain their exact answer mapping.
+  // If those alone exceed the budget, the caller resolves safely without posting.
+  function shortened(limit: number) {
+    function text(value: string): string {
+      return value.length<=limit ? value : `${value.slice(0,limit).replace(/[\uD800-\uDBFF]$/,'')}… [truncated]`;
+    }
+    return pack({...question,questions:question.questions.map(q=>({...q,text:text(q.text),
+      ...(q.header===undefined ? {} : {header:text(q.header)})}))});
+  }
+  if (!fits(shortened(0))) return;
+  let lo=0,hi=question.questions.reduce((max,q)=>Math.max(max,q.text.length,q.header?.length ?? 0),0);
+  while (lo<hi) {
+    const mid=Math.ceil((lo+hi)/2);
+    if (fits(shortened(mid))) lo=mid;else hi=mid-1;
+  }
+  return shortened(lo);
 }
 
 export function createParentBridge(deps: ParentBridgeDeps): ParentBridge {
@@ -85,7 +114,11 @@ export function createParentBridge(deps: ParentBridgeDeps): ParentBridge {
     if (prior) return Promise.resolve(questionAnswer(prior,TIMEOUT));
     const published = request.questions.map(q=>({id:q.id,...(q.header === undefined ? {} : {header:redactText(q.header).text}),
       text:redactText(q.text).text,options:(q.options ?? []).map(o=>redactText(o.label).text),allow_other:q.allowOther}));
-    const metadata = buildQuestion({v:1,question_id:questionId,blocking:request.blocking,questions:published});
+    const message = boundedQuestion({v:1,question_id:questionId,blocking:request.blocking,questions:published});
+    if (!message) {
+      note(job,'question_oversized',`Question identifiers or options exceed the message budget. ${TIMEOUT}`);
+      return Promise.resolve({answers:Object.fromEntries(request.questions.map(q=>[q.id,TIMEOUT])),answeredBy:'timeout'});
+    }
     let resolve!: (answer: QuestionAnswer) => void;
     const promise = new Promise<QuestionAnswer>(done=>{resolve=done;});
     let alarm: Alarm | undefined;
@@ -95,8 +128,7 @@ export function createParentBridge(deps: ParentBridgeDeps): ParentBridge {
       state:'open',answeredBy:null,createdAt:clock.now(),expiresAt:clock.now()+cfg.questions.blocking_timeout_ms};
     ledger.tx(() => {
       ledger.putQuestion(row);
-      send({...jobMessage(job),kind:'message',idempotency_key:`vl.q.${job.jobId}.${hash(request.requestId)}`,metadata,
-        content:{text:published.map(q=>[q.header,q.text,...q.options.map(label=>`- ${label}`)].filter(v=>v!==undefined).join('\n')).join('\n\n')}},job.jobId);
+      send({...jobMessage(job),kind:'message',idempotency_key:`vl.q.${job.jobId}.${hash(request.requestId)}`,...message},job.jobId);
     });
     if (request.blocking) alarm = clock.timer(cfg.questions.blocking_timeout_ms,abort);
     signal.addEventListener('abort',abort,{once:true});
@@ -115,16 +147,24 @@ export function createParentBridge(deps: ParentBridgeDeps): ParentBridge {
     // A parent card can still be overridden while its operator card is open.
     // Persist the actual choice on both cards before resolving the live hook.
     const seen = new Set<string>();
+    const family: ApprovalRow[] = [];
     let current: ApprovalRow | undefined = row;
     while (current && !seen.has(current.approvalId)) {
       seen.add(current.approvalId);
-      if (current.state === 'open' || current.state === 'escalated') {
-        ledger.updateApproval(current.approvalId,{state:'superseded',decision,decidedBy,decidedVia,decidedAt:clock.now()});
-        approvals.get(current.approvalId)?.finish({optionId:decision,decidedBy});
-        approvals.delete(current.approvalId);
-      }
+      family.push(current);
+      if (!current.escalatedTo) break;
+      if (current.state !== 'escalated') return false;
       current = current.escalatedTo ? ledger.approval(current.escalatedTo) : undefined;
     }
+    // Validate the whole family before writing any decisions: an escalated
+    // ancestor is no longer live once its active descendant has terminated.
+    if (!current || current.escalatedTo || current.state !== 'open') return false;
+    for (const member of family) {
+      ledger.updateApproval(member.approvalId,{state:'superseded',decision,decidedBy,decidedVia,decidedAt:clock.now()});
+      approvals.get(member.approvalId)?.finish({optionId:decision,decidedBy});
+      approvals.delete(member.approvalId);
+    }
+    return true;
   }
   function dispatchOperator(id: string) {
     const row = ledger.approval(id), live = approvals.get(id);
@@ -137,7 +177,9 @@ export function createParentBridge(deps: ParentBridgeDeps): ParentBridge {
     ledger.updateApproval(id,{threadId:thread});
     const parentId = kv.get(`parent.${id}`);
     send({idempotency_key:`vl.ar.${id}`,kind:'approval_request',priority:'wake',recipients:[row.addressee],
-      ...(thread ? {thread_id:thread,...(kv.get(`opener.${row.jobId}`) ? {in_reply_to:kv.get(`opener.${row.jobId}`)} : {})} : {thread_title:redactText(`vl escalation: ${live.job.title}`).text}),
+      ...(thread ? {thread_id:thread,...(kv.get(`opener.${row.jobId}`) ? {in_reply_to:kv.get(`opener.${row.jobId}`)} : {})} : {
+        thread_title:[...redactText(`vl escalation: ${live.job.title}`).text].slice(0,200).join(''),
+        expires_at:new Date(Math.min(live.job.deadlineAt,clock.now()+7*86400000)).toISOString()}),
       content:{text:live.summary},metadata:{'launch.permission':row.permission,'launch.job_id':row.jobId,...(parentId ? {'launch.escalated_from':parentId} : {})},
       approval_request:{approval_id:id,question:live.summary,options:row.options.map(o=>o.label),expires_at:new Date(row.expiresAt).toISOString(),escalate_to_operator:false}},row.jobId);
   }
@@ -174,13 +216,24 @@ export function createParentBridge(deps: ParentBridgeDeps): ParentBridge {
   }
   function escalate(row: ApprovalRow, live: LiveApproval) { operatorPrompt(row,live); }
   function requestPermission(job: JobRow, workspaceRoot: string, req: PermissionRequest, signal: AbortSignal): Promise<PermissionDecision> {
-    const permission = finishPermission({...req.permission,options:req.options},{machineId:cfg.host,jobId:job.jobId,permissionMode:job.permissionMode,preset:job.preset,backend:job.backend,workspaceRoot,home:deps.home});
+    const context = {machineId:cfg.host,jobId:job.jobId,permissionMode:job.permissionMode,preset:job.preset,backend:job.backend,workspaceRoot,home:deps.home};
+    let permission = finishPermission({...req.permission,options:req.options},context);
     const route = deps.route(permission,job);
     const withEscalate = route.to !== 'operator' && route.escalateOption;
-    const options = approvalOptions(permission.options,withEscalate);
-    // Keep published labels and backend IDs aligned even when a backend label
-    // collides with the launcher's reserved escalation label.
-    permission.options = (withEscalate ? options.slice(0,-1) : options).map(o=>({id:o.optionId,label:o.label,grants:o.grants}));
+    // Normalize labels using local surrogate IDs, then restore the opaque IDs.
+    // The launcher control gets a distinct ID even if a backend uses 'escalate'.
+    const backendOptions = permission.options;
+    const ids = new Set(backendOptions.map(o=>o.id));
+    let escalationId='escalate';
+    while (ids.has(escalationId)) escalationId+=':';
+    const options = approvalOptions(backendOptions.map((o,i)=>({...o,id:`option-${i}`})),withEscalate)
+      .map((o,i)=>({...o,optionId:i<backendOptions.length ? backendOptions[i].id : escalationId}));
+    const normalized = options.slice(0,backendOptions.length).map(o=>({id:o.optionId,label:o.label,grants:o.grants}));
+    // Re-finalize the original draft after reserved-label normalization so the
+    // serialized byte cap includes every published suffix. Escalation reuses it.
+    const wasRedacted=permission.redacted;
+    permission = finishPermission({...req.permission,options:normalized},context);
+    permission.redacted ||= wasRedacted;
     if (!options.some(o=>o.optionId===req.defaultOnExpiry && ['deny','deny_always','cancel'].includes(o.grants))) throw new Error('invalid permission expiry option');
     const addressee = route.to === 'operator' ? dir.operatorPeerId() : job.requester;
     if (!addressee) return Promise.resolve({optionId:req.defaultOnExpiry,decidedBy:'expired'});
@@ -270,7 +323,7 @@ export function createParentBridge(deps: ParentBridgeDeps): ParentBridge {
         const option=row.options.find(o=>o.label===response.decision);
         if (!option) {receipt(d,'invalid_option');return 'consumed';}
         const live=approvals.get(row.approvalId);
-        if (option.optionId==='escalate' && row.route!=='operator' && live?.route.escalateOption) escalate(row,live);
+        if (option.label==='escalate' && !row.permission.options.some(o=>o.id===option.optionId) && row.route!=='operator' && live?.route.escalateOption) escalate(row,live);
         else finishApproval(row,option.optionId,sender,'decided',parseDecidedVia(d.message.metadata) ?? null);
       }
       receipt(d);return 'consumed';
@@ -288,12 +341,14 @@ export function createParentBridge(deps: ParentBridgeDeps): ParentBridge {
             const job=ledger.job(row.jobId);
             const parentId = kv.get(`parent.${row.approvalId}`);
             const original = (parentId ? ledger.approval(parentId) : undefined) ?? row;
-            ledger.tx(() => {
-              overrideFamily(original,option.optionId,d.message.sender,parseDecidedVia(d.message.metadata) ?? null);
+            const overridden=ledger.tx(() => {
+              if (!overrideFamily(original,option.optionId,d.message.sender,parseDecidedVia(d.message.metadata) ?? null)) return false;
               if(job) send({...jobMessage(job),idempotency_key:`vl.ac.${original.approvalId}`,kind:'message',content:{text:'Approval closed by operator.'},
                 metadata:buildApprovalClosed({approval_id:original.approvalId,superseded_by:'operator',decision:option.label})},row.jobId);
+              return true;
             });
-          } else superseded(row,d);
+            if (!overridden) {superseded(row,d);return 'consumed';}
+          } else {superseded(row,d);return 'consumed';}
           receipt(d);return 'consumed';
         }
         if (row.state!=='open' && d.message.sender===row.addressee) {superseded(row,d);return 'consumed';}
