@@ -32,8 +32,16 @@ const (
 	cimdCacheTTL     = time.Hour           // a fetched client metadata document
 )
 
-// Scope is the one scope the hub issues.
-const Scope = "vecnet"
+// Scope remains the base scope for vecnet tools. Event scopes are separate
+// grants so a pre-Events token can authenticate and receive an explicit 403.
+const (
+	Scope               = "vecnet"
+	ScopeEventsRead     = "events:read"
+	ScopeEventsWrite    = "events:write"
+	AuthorizationScopes = Scope + " " + ScopeEventsRead + " " + ScopeEventsWrite
+)
+
+func supportedScopes() []string { return []string{Scope, ScopeEventsRead, ScopeEventsWrite} }
 
 // DefaultRedirects are the redirect URIs ChatGPT uses [DOTS §4]. An entry is
 // matched exactly, except that a trailing "{callback_id}" matches one path
@@ -86,14 +94,14 @@ func (s *Server) resource() string { return s.Issuer + "/mcp" }
 // Mount registers the OAuth endpoints. /oauth/* and /.well-known/oauth-* are
 // public paths: a client reaches them before it has a token.
 func (s *Server) Mount(mux *http.ServeMux) {
-	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.authServerMetadata)
-	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.resourceMetadata)
-	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.resourceMetadata) // RFC 9728 §3.1
-	mux.HandleFunc("POST /oauth/register", s.register)
-	mux.HandleFunc("GET /oauth/authorize", s.getAuthorize)
-	mux.HandleFunc("POST /oauth/authorize", s.postAuthorize)
-	mux.HandleFunc("GET /oauth/consent.css", s.consentCSS)
-	mux.HandleFunc("POST /oauth/token", s.token)
+	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.diagnose("oauth.metadata", s.authServerMetadata))
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.diagnose("oauth.metadata", s.resourceMetadata))
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.diagnose("oauth.metadata", s.resourceMetadata)) // RFC 9728 §3.1
+	mux.HandleFunc("POST /oauth/register", s.diagnose("oauth.register", s.register))
+	mux.HandleFunc("GET /oauth/authorize", s.diagnose("oauth.authorize", s.getAuthorize))
+	mux.HandleFunc("POST /oauth/authorize", s.diagnose("oauth.consent", s.postAuthorize))
+	mux.HandleFunc("GET /oauth/consent.css", s.diagnose("oauth.metadata", s.consentCSS))
+	mux.HandleFunc("POST /oauth/token", s.diagnose("oauth.token", s.token))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -104,6 +112,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // writeOAuthError writes the RFC 6749 §5.2 error body.
 func writeOAuthError(w http.ResponseWriter, status int, code, description string) {
+	oauthReason(w, code)
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, status, map[string]string{"error": code, "error_description": description})
 }
@@ -119,7 +128,7 @@ func (s *Server) authServerMetadata(w http.ResponseWriter, _ *http.Request) {
 		"grant_types_supported":                          []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":               []string{"S256"},
 		"token_endpoint_auth_methods_supported":          []string{"none"},
-		"scopes_supported":                               []string{Scope},
+		"scopes_supported":                               supportedScopes(),
 		"client_id_metadata_document_supported":          true,
 		"authorization_response_iss_parameter_supported": true,
 	})
@@ -130,7 +139,7 @@ func (s *Server) resourceMetadata(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"resource":                 s.resource(),
 		"authorization_servers":    []string{s.Issuer},
-		"scopes_supported":         []string{Scope},
+		"scopes_supported":         supportedScopes(),
 		"bearer_methods_supported": []string{"header"},
 	})
 }
@@ -146,10 +155,10 @@ func repeated(v url.Values) bool {
 	return false
 }
 
-// scopeOK reports whether a request's scope is empty or only ours.
+// scopeOK reports whether all requested scope names are supported.
 func scopeOK(scope string) bool {
 	for _, f := range strings.Fields(scope) {
-		if f != Scope {
+		if !slices.Contains(supportedScopes(), f) {
 			return false
 		}
 	}

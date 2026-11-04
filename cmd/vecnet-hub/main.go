@@ -66,6 +66,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	dataDir := fs.String("data-dir", envOr(getenv, "VECNET_DATA_DIR", "/data"), "directory holding hub.db and blobs/ ($VECNET_DATA_DIR)")
 	publicURL := fs.String("public-url", getenv("VECNET_PUBLIC_URL"), "externally visible origin ($VECNET_PUBLIC_URL; default http://<listen address>)")
 	mcpOrigins := fs.String("mcp-allowed-origins", getenv("VECNET_MCP_ALLOWED_ORIGINS"), "extra /mcp origins, comma-separated; empty defaults to https://chatgpt.com, none allows public origin only ($VECNET_MCP_ALLOWED_ORIGINS)")
+	mcpLegacy := fs.String("mcp-legacy-sessions", envOr(getenv, "VECNET_MCP_LEGACY_SESSIONS", "on"), "legacy MCP sessions: on, off-for-oauth, off ($VECNET_MCP_LEGACY_SESSIONS)")
 	devUIDir := fs.String("dev-ui-dir", "", "serve the operator UI from this directory instead of the embedded copy (development)")
 	allowPrivate := fs.Bool("allow-private-egress", getenv("VECNET_ALLOW_PRIVATE_EGRESS") == "1",
 		"development only: let outbound URLs be http and reach private/loopback addresses ($VECNET_ALLOW_PRIVATE_EGRESS=1)")
@@ -93,7 +94,11 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if err != nil {
 		return err
 	}
-	return serve(ctx, *listen, *dataDir, *publicURL, *devUIDir, *allowPrivate, *trustFly, origins, stdout)
+	legacy, err := mcpserver.ParseLegacySessions(*mcpLegacy)
+	if err != nil {
+		return err
+	}
+	return serve(ctx, *listen, *dataDir, *publicURL, *devUIDir, *allowPrivate, *trustFly, origins, stdout, legacy)
 }
 
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
@@ -149,7 +154,7 @@ const ShutdownGrace = 10 * time.Second
 // devUIDir "" serves the embedded operator UI. allowPrivateEgress is the
 // development-only egress override (hub.Config.AllowPrivateEgress).
 // trustFly keys the per-client limiter on Fly-Client-IP (Deps.TrustFlyClientIP).
-func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, allowPrivateEgress, trustFly bool, mcpOrigins []string, stdout io.Writer) error {
+func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, allowPrivateEgress, trustFly bool, mcpOrigins []string, stdout io.Writer, mcpLegacy ...string) error {
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return err
@@ -180,6 +185,9 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 	deps.UIDir, deps.Stop = devUIDir, stop
 	deps.TrustFlyClientIP = trustFly
 	deps.MCPAllowedOrigins = mcpOrigins
+	if len(mcpLegacy) > 0 {
+		deps.MCPLegacySessions = mcpLegacy[0]
+	}
 	srv := &http.Server{Handler: httpapi.New(deps)}
 	httpapi.ConfigureServer(srv)
 	srv.RegisterOnShutdown(closeStop)

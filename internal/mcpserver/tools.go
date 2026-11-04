@@ -1227,9 +1227,9 @@ func listEntry(t *mcp.Tool, meta map[string]any, output schema) map[string]any {
 	if err := json.Unmarshal(raw, &entry); err != nil {
 		panic("mcpserver: decode tool list entry: " + err.Error())
 	}
-	// oauth.Scope is "vecnet"; oauth imports mcpserver, so importing that
-	// package here would create a cycle. The discovery test pins equality.
-	entry["securitySchemes"] = []map[string]any{{"type": "oauth2", "scopes": []string{"vecnet"}}}
+	// Tools use the base vecnet scope; Events write permission is checked
+	// separately at events/subscribe and events/unsubscribe.
+	entry["securitySchemes"] = []map[string]any{{"type": "oauth2", "scopes": []string{ScopeVecnet}}}
 	if meta != nil {
 		entry["_meta"] = meta
 	}

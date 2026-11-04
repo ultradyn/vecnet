@@ -2,13 +2,26 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/auth"
 )
+
+const (
+	ScopeVecnet      = "vecnet"
+	ScopeEventsRead  = "events:read"
+	ScopeEventsWrite = "events:write"
+)
+
+// ErrExpiredToken preserves the 401 authentication contract while letting
+// request diagnostics distinguish expiry from unknown credentials.
+var ErrExpiredToken = fmt.Errorf("oauth token expired: %w", auth.ErrUnauthenticated)
 
 // OAuthInfo describes an OAuth access token behind a Principal. Task 6 (the
 // OAuth resource server) fills it; bearer callers leave it nil.
@@ -25,6 +38,27 @@ type OAuthInfo struct {
 type Principal struct {
 	Caller auth.Caller
 	OAuth  *OAuthInfo // nil for a vecnet bearer
+}
+
+// HasScope checks only OAuth grants. Native vecnet bearer peers retain their
+// existing authorization behavior; their hub permissions still apply.
+func (p Principal) HasScope(scope string) bool {
+	return p.OAuth == nil || slices.Contains(p.OAuth.Scopes, scope)
+}
+
+// RequireScope reports an OAuth authorization failure explicitly so a client
+// can reauthorize an older grant. It never turns an old valid token into 401.
+func (s *Server) RequireScope(w http.ResponseWriter, r *http.Request, p Principal, scope string, id json.RawMessage) bool {
+	if p.HasScope(scope) {
+		return true
+	}
+	noteDiagAuth(r, "insufficient_scope")
+	w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope", scope="`+scope+`", resource_metadata="`+s.PublicOrigin+`/.well-known/oauth-protected-resource/mcp"`)
+	if len(id) == 0 {
+		id = nullID
+	}
+	writeRPCStatus(w, http.StatusForbidden, id, &RPCError{Code: -32003, Message: "Insufficient scope"})
+	return false
 }
 
 // Authenticator resolves the credential on an /mcp request. An error
@@ -59,13 +93,15 @@ type Chain []Authenticator
 func (c Chain) Authenticate(ctx context.Context, r *http.Request) (Principal, error) {
 	var other error
 	refused := auth.ErrUnauthenticated
+	var failed Principal
 	for _, a := range c {
 		p, err := a.Authenticate(ctx, r)
 		if err == nil {
 			return p, nil
 		}
-		if errors.Is(err, auth.ErrPeerDisabled) {
+		if errors.Is(err, auth.ErrPeerDisabled) || errors.Is(err, ErrExpiredToken) {
 			refused = err
+			failed = p
 		}
 		if !errors.Is(err, auth.ErrUnauthenticated) && other == nil {
 			other = err
@@ -74,7 +110,7 @@ func (c Chain) Authenticate(ctx context.Context, r *http.Request) (Principal, er
 	if other != nil {
 		return Principal{}, other
 	}
-	return Principal{}, refused
+	return failed, refused
 }
 
 // BearerToken extracts the token from "Authorization: Bearer <token>".

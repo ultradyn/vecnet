@@ -101,6 +101,9 @@ type Server struct {
 	PublicOrigin string // scheme://host[:port] of Cfg.PublicURL; always allowed
 	// AllowedOrigins are extra normalized exact origins; nil uses https://chatgpt.com.
 	AllowedOrigins []string
+	// LegacySessions controls initialize/session transports: on (default),
+	// off-for-oauth, or off. The current stateless protocol is always available.
+	LegacySessions string
 	Heartbeat      time.Duration // ": hb" interval; zero means DefaultHeartbeat
 	SessionTTL     time.Duration // idle 2025 session lifetime; zero means DefaultSessionTTL
 	Now            func() time.Time
@@ -255,9 +258,17 @@ func (s *Server) now() time.Time {
 // authentication (401), then the per-method handling. Last-Event-ID is
 // never read.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	dw, r, diag := beginDiag(w, r)
-	w = dw
-	defer diag.log(s, dw, r)
+	diag, _ := r.Context().Value(diagKey{}).(*requestDiag)
+	if diag == nil {
+		var dw *diagResponse
+		dw, r, diag = beginDiag(w, r)
+		w = dw
+		defer diag.log(s, dw, r)
+	} else {
+		// The outer HTTP observer also sees middleware refusals. Keep a
+		// local writer for RPC outcome capture without a second log.
+		w = &diagResponse{ResponseWriter: w, diag: diag}
+	}
 	if !s.originOK(r) {
 		httpErr(w, http.StatusForbidden, "forbidden", "Origin is not allowed")
 		return
@@ -270,8 +281,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, err := s.Auth.Authenticate(r.Context(), r)
+	diag.principal = p
 	if err != nil {
 		if errors.Is(err, auth.ErrUnauthenticated) {
+			outcome := "invalid"
+			if BearerToken(r) == "" {
+				outcome = "none"
+			}
+			if errors.Is(err, ErrExpiredToken) {
+				outcome = "expired"
+			}
+			noteDiagAuth(r, outcome)
 			w.Header().Set("WWW-Authenticate",
 				`Bearer resource_metadata="`+s.PublicOrigin+`/.well-known/oauth-protected-resource"`)
 			httpErr(w, http.StatusUnauthorized, "unauthenticated", "missing, unknown or revoked credential")
@@ -280,7 +300,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, "internal", "internal")
 		return
 	}
-	diag.principal = p
+	noteDiagAuth(r, "ok")
 	if s.Touch != nil && p.Caller.PeerID != "" {
 		s.Touch(context.WithoutCancel(r.Context()), p.Caller.PeerID, "reachable")
 	}
@@ -310,6 +330,17 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, p Principal) {
 		httpErr(w, http.StatusBadRequest, "bad_request", "could not read request body")
 		return
 	}
+	// The authenticated, bounded body is already in memory. Capture only the
+	// routing method and id type even for malformed envelopes/client replies.
+	if d, _ := r.Context().Value(diagKey{}).(*requestDiag); d != nil {
+		var meta struct {
+			Method string          `json:"method"`
+			ID     json.RawMessage `json:"id"`
+		}
+		if json.Unmarshal(body, &meta) == nil {
+			d.method, d.idType = meta.Method, diagIDType(meta.ID)
+		}
+	}
 	pr := parseBody(body)
 	switch {
 	case pr.err != nil:
@@ -338,6 +369,10 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, p Principal) {
 
 	switch req.Method {
 	case "initialize":
+		if !s.legacyAllowed(p) {
+			writeRPCStatus(w, http.StatusNotFound, req.ID, &RPCError{Code: ErrMethodNotFound, Message: "method not found"})
+			return
+		}
 		if !accepts(r, "application/json") {
 			httpErr(w, http.StatusNotAcceptable, "not_acceptable", "Accept must list application/json")
 			return
@@ -416,6 +451,9 @@ func HTTPFromContext(ctx context.Context) (w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, sess *Session, p Principal, req *Request) {
+	if (req.Method == "events/subscribe" || req.Method == "events/unsubscribe") && !s.RequireScope(w, r, p, ScopeEventsWrite, req.ID) {
+		return
+	}
 	st := &reqState{w: w}
 	ctx := context.WithValue(withPrincipal(r.Context(), p), reqStateKey{}, st)
 	st.r = r.WithContext(ctx)
@@ -439,7 +477,11 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, sess *Session,
 		return
 	}
 	if !ok {
-		writeRPCError(w, req.ID, &RPCError{Code: ErrMethodNotFound, Message: "method not found: " + req.Method})
+		status := http.StatusOK
+		if sess.Proto == ProtoCurrent {
+			status = http.StatusNotFound
+		}
+		writeRPCStatus(w, status, req.ID, &RPCError{Code: ErrMethodNotFound, Message: "method not found"})
 		return
 	}
 	res, err := h(ctx, sess, req)
@@ -448,6 +490,10 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, sess *Session,
 	}
 	if err == nil && sess.Proto == ProtoCurrent {
 		res, err = completeResult(res)
+		if err == nil && req.Method == "tools/list" {
+			result := res.(map[string]any)
+			result["ttlMs"], result["cacheScope"] = 0, "private"
+		}
 	}
 	if err != nil {
 		var re *RPCError
@@ -523,7 +569,9 @@ func (s *Server) discover(w http.ResponseWriter, req *Request) {
 	}
 	res, err := completeResult(map[string]any{
 		"protocolVersion":   ProtoCurrent,
-		"supportedVersions": SupportedVersions,
+		"supportedVersions": []string{ProtoCurrent},
+		"ttlMs":             0,
+		"cacheScope":        "private",
 		"capabilities":      s.Capabilities(ProtoCurrent),
 		"serverInfo":        serverInfo(),
 		"instructions":      Instructions,
@@ -539,6 +587,11 @@ func (s *Server) discover(w http.ResponseWriter, req *Request) {
 // get serves the 2025-11-25 session stream. One stream per session: a
 // second GET closes the first.
 func (s *Server) get(w http.ResponseWriter, r *http.Request, p Principal) {
+	if !s.legacyAllowed(p) {
+		w.Header().Set("Allow", "POST")
+		httpErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST")
+		return
+	}
 	sid := r.Header.Get(hdrSessionID)
 	if r.Header.Get(hdrProtocolVersion) == ProtoCurrent || sid == "" {
 		w.Header().Set("Allow", "POST")
@@ -622,6 +675,11 @@ func (s *Server) credentialLive(r *http.Request) bool {
 
 // delete ends a 2025-11-25 session.
 func (s *Server) delete(w http.ResponseWriter, r *http.Request, p Principal) {
+	if !s.legacyAllowed(p) {
+		w.Header().Set("Allow", "POST")
+		httpErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST")
+		return
+	}
 	sid := r.Header.Get(hdrSessionID)
 	if r.Header.Get(hdrProtocolVersion) == ProtoCurrent || sid == "" {
 		w.Header().Set("Allow", "POST")
@@ -795,7 +853,11 @@ func writeResult(w http.ResponseWriter, id json.RawMessage, res any) {
 
 // writeRPCError answers with a JSON-RPC error; the HTTP status is 200.
 func writeRPCError(w http.ResponseWriter, id json.RawMessage, e *RPCError) {
-	writeJSON(w, http.StatusOK, errorResponse{JSONRPC: "2.0", ID: orNull(id), Error: e})
+	writeRPCStatus(w, http.StatusOK, id, e)
+}
+
+func writeRPCStatus(w http.ResponseWriter, status int, id json.RawMessage, e *RPCError) {
+	writeJSON(w, status, errorResponse{JSONRPC: "2.0", ID: orNull(id), Error: e})
 }
 
 // httpErr writes the hub's §2 error envelope for transport-level failures.

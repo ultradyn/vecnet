@@ -3,10 +3,13 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
+	"time"
+
+	"github.com/XertroV/vecnet/internal/mcpdiag"
+	"github.com/XertroV/vecnet/internal/webhook"
 )
 
 // Diagnostics deliberately collect a fixed allowlist, never a body, credential
@@ -19,10 +22,18 @@ type diagResponse struct {
 }
 
 func (w *diagResponse) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-func (w *diagResponse) WriteHeader(status int) {
+func (w *diagResponse) FlushError() error {
 	if w.status == 0 {
-		w.status = status
+		w.WriteHeader(http.StatusOK)
 	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+func (w *diagResponse) Flush() { _ = w.FlushError() }
+func (w *diagResponse) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
 	w.ResponseWriter.WriteHeader(status)
 }
 func (w *diagResponse) Write(b []byte) (int, error) {
@@ -35,6 +46,8 @@ func (w *diagResponse) Write(b []byte) (int, error) {
 type diagKey struct{}
 type requestDiag struct {
 	principal                                        Principal
+	started                                          time.Time
+	authOutcome, idType                              string
 	initialize                                       bool
 	clientName, clientVersion, requested, negotiated string
 	method, toolName                                 string
@@ -44,13 +57,29 @@ type requestDiag struct {
 }
 
 type subscribeDiag struct {
-	name, mode, host, verification, reason string
-	argumentKeys                           []string
-	unknownArgumentKeys                    int
+	name, mode, host, verification, reason                     string
+	argumentKeys                                               []string
+	unknownArgumentKeys                                        int
+	secretPresent, secretValidShape, cursorPresent, cursorNull bool
+	ttlMs                                                      int64
+}
+
+// ObserveHTTP sits outside transport limits so even pre-dispatch /mcp
+// refusals produce one completed record. ServeHTTP reuses this context.
+func ObserveHTTP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mcp" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		dw, r, d := beginDiag(w, r)
+		defer d.log(nil, dw, r)
+		next.ServeHTTP(dw, r)
+	})
 }
 
 func beginDiag(w http.ResponseWriter, r *http.Request) (*diagResponse, *http.Request, *requestDiag) {
-	d := &requestDiag{requested: r.Header.Get(hdrProtocolVersion)}
+	d := &requestDiag{requested: r.Header.Get(hdrProtocolVersion), started: time.Now(), authOutcome: "none", idType: "absent"}
 	return &diagResponse{ResponseWriter: w, diag: d}, r.WithContext(context.WithValue(r.Context(), diagKey{}, d)), d
 }
 
@@ -63,6 +92,7 @@ func noteRequest(r *http.Request, req *Request) {
 		return
 	}
 	d.method = req.Method
+	d.idType = diagIDType(req.ID)
 	noteInitialize(r, req)
 	if req.Method == "tools/call" {
 		var p struct {
@@ -77,9 +107,12 @@ func noteRequest(r *http.Request, req *Request) {
 			Name      string                     `json:"name"`
 			Arguments map[string]json.RawMessage `json:"arguments"`
 			Delivery  struct {
-				Mode string `json:"mode"`
-				URL  string `json:"url"`
+				Mode   string `json:"mode"`
+				URL    string `json:"url"`
+				Secret string `json:"secret"`
 			} `json:"delivery"`
+			TTLMS  int64           `json:"ttlMs"`
+			Cursor json.RawMessage `json:"cursor"`
 		}{}
 		// Even partial/malformed params get a diagnostic without raw values.
 		_ = json.Unmarshal(req.Params, &p)
@@ -87,6 +120,12 @@ func noteRequest(r *http.Request, req *Request) {
 		if u, err := url.Parse(p.Delivery.URL); err == nil {
 			sub.host = diagTruncate(u.Hostname(), 253)
 		}
+		sub.secretPresent = p.Delivery.Secret != ""
+		_, secretErr := webhook.KeyBytes(p.Delivery.Secret)
+		sub.secretValidShape = secretErr == nil
+		sub.ttlMs = p.TTLMS
+		sub.cursorPresent = len(p.Cursor) != 0
+		sub.cursorNull = string(p.Cursor) == "null"
 		for k := range p.Arguments {
 			if k == "peer_id" || k == "thread_id" || k == "types" {
 				sub.argumentKeys = append(sub.argumentKeys, k)
@@ -160,20 +199,40 @@ func noteDiagProtocol(r *http.Request, version string) {
 	}
 }
 
-func (d *requestDiag) log(s *Server, w *diagResponse, r *http.Request) {
-	refused := w.status == http.StatusForbidden || w.status == http.StatusBadRequest ||
-		w.status == http.StatusNotFound || w.status == http.StatusNotAcceptable
-	origin := normOrigin(r.Header.Get("Origin"))
-	foreignAllowed := origin != "" && origin != normOrigin(s.PublicOrigin) && s.originOK(r)
-	methodLog := d.method != "" && d.method != "ping"
-	// Never read a rejected request's body solely for diagnostics: even a
-	// bounded unauthenticated read can delay an authentication/Origin refusal.
-	// Still expose every transport failure, with an explicit unknown method.
-	if d.method == "" && w.status >= 400 {
-		d.method, methodLog = "(unparsed)", true
+// noteDiagAuth records a fixed outcome only; callers must never pass an error.
+func noteDiagAuth(r *http.Request, outcome string) {
+	if d, _ := r.Context().Value(diagKey{}).(*requestDiag); d != nil {
+		d.authOutcome = outcome
 	}
-	if !methodLog && !d.initialize && !refused && !foreignAllowed {
-		return
+}
+
+func diagIDType(id json.RawMessage) string {
+	if len(id) == 0 {
+		return "absent"
+	}
+	if string(id) == "null" {
+		return "null"
+	}
+	var v any
+	if json.Unmarshal(id, &v) != nil {
+		return "invalid"
+	}
+	switch v.(type) {
+	case string:
+		return "string"
+	case float64:
+		return "number"
+	}
+	return "invalid"
+}
+
+func (d *requestDiag) log(s *Server, w *diagResponse, r *http.Request) {
+	status := w.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if d.method == "" {
+		d.method = "(unparsed)"
 	}
 	kind := "unauthenticated"
 	if d.principal.OAuth != nil {
@@ -186,52 +245,56 @@ func (d *requestDiag) log(s *Server, w *diagResponse, r *http.Request) {
 			kind = "principal"
 		}
 	}
-	fields := []any{
-		"client_name", diagTruncate(d.clientName, 64),
-		"client_version", diagTruncate(d.clientVersion, 64),
-		"requested_protocol_version", d.requested,
-		"negotiated_protocol_version", d.negotiated,
-		"origin_present", len(r.Header.Values("Origin")) != 0,
-		"accept", diagTruncate(r.Header.Get("Accept"), 100),
-		"session_present", len(r.Header.Values(hdrSessionID)) != 0,
-		"caller_kind", kind,
+	outcome := d.authOutcome
+	if kind != "unauthenticated" && outcome == "none" {
+		outcome = "ok"
 	}
-	if origin != "" && origin != normOrigin(s.PublicOrigin) {
-		fields = append(fields, "origin", diagTruncate(origin, 100))
+	if status == http.StatusUnauthorized && outcome == "none" {
+		if BearerToken(r) != "" {
+			outcome = "invalid"
+		}
 	}
-	if kind != "unauthenticated" && (methodLog || d.principal.Caller.PeerID != "") {
-		fields = append(fields, "peer_id", d.principal.Caller.PeerID)
+	result := "ok"
+	if d.code != 0 || d.toolError || status >= 400 {
+		result = "error"
 	}
-	if methodLog {
-		result := "ok"
-		if d.code != 0 || d.toolError || w.status >= 400 {
-			result = "error"
-		}
-		if d.code == 0 && w.status >= 400 {
-			d.code = w.status
-		}
-		fields = append(fields, "method", diagTruncate(d.method, 128), "result", result, "code", d.code)
-		if d.method == "(unparsed)" {
-			fields = append(fields, "http_method", r.Method)
-		}
-		if w.status >= 400 {
-			fields = append(fields, "http_status", w.status)
-		}
-		if d.method == "tools/call" {
-			fields = append(fields, "tool_name", d.toolName)
-		}
-		if sub := d.subscribe; sub != nil {
-			fields = append(fields, "event_name", sub.name, "argument_keys", sub.argumentKeys, "unknown_argument_keys", sub.unknownArgumentKeys,
-				"delivery_mode", sub.mode, "callback_host", sub.host, "verification", sub.verification, "reason", sub.reason)
-		}
-		slog.Info("mcp: request", fields...)
-	} else if refused {
-		slog.Warn("mcp: request refused", fields...)
-	} else if !d.initialize && foreignAllowed {
-		slog.Info("mcp: allowed foreign origin", fields...)
-	} else {
-		slog.Info("mcp: initialize", fields...)
+	if d.code == 0 && status >= 400 {
+		d.code = status
 	}
+	fields := map[string]any{
+		"http_method": r.Method, "path": "/mcp", "http_status": status, "duration_ms": time.Since(d.started).Milliseconds(),
+		"protocol_version": r.Header.Get(hdrProtocolVersion), "mcp_method": r.Header.Get("Mcp-Method"), "mcp_name": r.Header.Get("Mcp-Name"),
+		"method": d.method, "id_type": d.idType, "auth_outcome": outcome, "caller_kind": kind, "token_scopes": []string{},
+		"origin": normOrigin(r.Header.Get("Origin")), "origin_present": len(r.Header.Values("Origin")) != 0,
+		"user_agent": r.UserAgent(), "session_present": len(r.Header.Values(hdrSessionID)) != 0,
+		"client_name": diagTruncate(d.clientName, 64), "client_version": diagTruncate(d.clientVersion, 64),
+		"requested_protocol_version": d.requested, "negotiated_protocol_version": d.negotiated,
+		"accept": diagTruncate(r.Header.Get("Accept"), 100), "result": result, "code": d.code,
+	}
+	if kind != "unauthenticated" {
+		fields["peer_id"] = d.principal.Caller.PeerID
+	}
+	if d.principal.OAuth != nil {
+		fields["token_scopes"] = d.principal.OAuth.Scopes
+	}
+	if d.method == "tools/call" {
+		fields["tool_name"] = d.toolName
+	}
+	if sub := d.subscribe; sub != nil {
+		fields["event_name"] = sub.name
+		fields["argument_keys"] = sub.argumentKeys
+		fields["unknown_argument_keys"] = sub.unknownArgumentKeys
+		fields["delivery_mode"] = sub.mode
+		fields["callback_host"] = sub.host
+		fields["verification"] = sub.verification
+		fields["reason"] = sub.reason
+		fields["secret_present"] = sub.secretPresent
+		fields["secret_valid_shape"] = sub.secretValidShape
+		fields["ttl_ms"] = sub.ttlMs
+		fields["cursor_present"] = sub.cursorPresent
+		fields["cursor_null"] = sub.cursorNull
+	}
+	mcpdiag.Emit("mcp.request", fields)
 }
 
 func diagTruncate(s string, limit int) string {

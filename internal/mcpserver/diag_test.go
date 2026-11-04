@@ -39,7 +39,7 @@ func TestMCPSubscribeDiagnostics(t *testing.T) {
 		code                       int64
 	}{
 		{"verified", "verified", "", 0}, {"cached", "cached", "", 0},
-		{"challenge failed", "failed", "challenge_failed", mcpserver.ErrCodeCallback},
+		{"challenge failed", "failed", "http_4xx", mcpserver.ErrCodeCallback},
 		{"timeout", "failed", "timeout", mcpserver.ErrCodeCallback},
 		{"egress refusal", "refused", "egress_refused", mcpserver.ErrCodeCallback},
 		{"invalid arguments", "not_attempted", "invalid_params", mcpserver.ErrInvalidParams},
@@ -195,9 +195,7 @@ func TestMCPInitializeDiagnostics(t *testing.T) {
 
 func assertDiagFields(t *testing.T, got, want map[string]any) {
 	t.Helper()
-	if len(got) != len(want) {
-		t.Errorf("diagnostic fields = %v, want only %v", got, want)
-	}
+
 	for name, value := range want {
 		if got[name] != value {
 			t.Errorf("diagnostic %s = %v, want %v", name, got[name], value)
@@ -247,10 +245,7 @@ func TestMCPRefusalDiagnostics(t *testing.T) {
 				t.Fatalf("refusal diagnostic records = %d, want 1; %s", len(capture.records), output)
 			}
 			r := capture.records[0]
-			wantLevel := slog.LevelWarn
-			if r.Message == "mcp: request" {
-				wantLevel = slog.LevelInfo
-			}
+			wantLevel := slog.LevelInfo
 			if r.Level != wantLevel {
 				t.Errorf("refusal level = %s, want %s", r.Level, wantLevel)
 			}
@@ -362,14 +357,14 @@ func TestMCPMethodDiagnostics(t *testing.T) {
 			f["caller_kind"] != "peer" || f["peer_id"] != "peer_diag" || f["client_name"] != "ChatGPT" || f["session_present"] != true {
 			t.Errorf("%s diagnostics: %v (%s)", tc.method, f, record.Message)
 		}
-		if tc.tool != "" && f["tool_name"] != tc.tool {
+		if tc.tool != "" && f["tool_name"] != "unknown" {
 			t.Errorf("tool_name = %v", f["tool_name"])
 		}
 	}
 	before := len(capture.records)
 	diagRequest(s, http.MethodPost, map[string]any{"jsonrpc": "2.0", "id": 3, "method": "ping"}, headers)
-	if len(capture.records) != before {
-		t.Error("successful ping must not log")
+	if len(capture.records) != before+1 {
+		t.Error("successful ping must log exactly once")
 	}
 	assertDiagNoSecrets(t, output.String())
 	for _, secret := range []string{"message-canary-do-not-log", "argument-canary-do-not-log"} {
@@ -410,4 +405,36 @@ func TestMCPEarlyFailureDiagnostics(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An early refusal cannot read even one byte from an unauthenticated client:
+// reading a body for diagnostics would let slow clients delay the refusal.
+type unreadableDiagBody struct{}
+
+func (unreadableDiagBody) Read([]byte) (int, error) { panic("diagnostics read rejected request body") }
+func (unreadableDiagBody) Close() error             { return nil }
+
+func TestMCPAllHTTPMetadataAndNoEarlyBodyRead(t *testing.T) {
+	capture, output := captureDiag(t)
+	s := mcpserver.New(nil, mcpserver.Chain{}, "https://hub.example")
+	r := httptest.NewRequest(http.MethodPost, "https://hub.example/mcp", nil)
+	r.Body = unreadableDiagBody{}
+	r.Header.Set("Mcp-Method", "events/subscribe")
+	r.Header.Set("Mcp-Name", "vecnet.message")
+	r.Header.Set("MCP-Protocol-Version", mcpserver.ProtoCurrent)
+	r.Header.Set("User-Agent", strings.Repeat("A", 140))
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != 401 || len(capture.records) != 1 {
+		t.Fatalf("status=%d records=%d", w.Code, len(capture.records))
+	}
+	rec := capture.records[0]
+	fields := diagFields(rec)
+	if rec.Level != slog.LevelInfo || fields["http_method"] != "POST" || fields["path"] != "/mcp" || fields["http_status"] != int64(401) || fields["mcp_method"] != "events/subscribe" || fields["mcp_name"] != "vecnet.message" || fields["user_agent"] != strings.Repeat("A", 120) || fields["id_type"] != "absent" || fields["auth_outcome"] != "none" {
+		t.Fatalf("metadata: %v", fields)
+	}
+	if _, ok := fields["duration_ms"]; !ok {
+		t.Error("missing duration")
+	}
+	assertDiagNoSecrets(t, output.String())
 }

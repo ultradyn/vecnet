@@ -40,7 +40,9 @@ func TestSubscriptionsFailedRefreshShowsUnverified(t *testing.T) {
 	cb := testhub.NewCallback(t)
 	params := subParams(cb.URL, webhook.NewSecret(), map[string]any{"ttlMs": 1000})
 	sub := subscribeOK(t, env, secret, params)
-	env.Now.Advance(2 * time.Second)
+	// The callback proof can outlive a short lease; force a fresh challenge
+	// after its original cache deadline.
+	env.Now.Advance(events.ChallengeMaxAge + time.Second)
 	cb.OnChallenge(func(_ string, w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) })
 	res := rpc2026(t, env, secret, "events/subscribe", params)
 	if res.Error == nil || res.Error.Code != mcpserver.ErrCodeCallback {

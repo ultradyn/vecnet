@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"net/url"
 	"sync"
 	"time"
@@ -206,8 +207,8 @@ func subscribeTTL(ttlMs *float64) (time.Duration, error) {
 	if ttlMs == nil {
 		return events.MaxTTL, nil
 	}
-	if *ttlMs <= 0 {
-		return 0, invalidParams("ttlMs must be positive")
+	if *ttlMs <= 0 || math.Trunc(*ttlMs) != *ttlMs {
+		return 0, invalidParams("ttlMs must be a positive integer")
 	}
 	if *ttlMs >= float64(events.MaxTTL/time.Millisecond) {
 		return events.MaxTTL, nil
@@ -259,14 +260,21 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 			URL    string `json:"url"`
 			Secret string `json:"secret"`
 		} `json:"delivery"`
-		Cursor *string  `json:"cursor"`
-		TTLMs  *float64 `json:"ttlMs"`
+		Cursor *string                    `json:"cursor"`
+		TTLMs  *float64                   `json:"ttlMs"`
+		Meta   map[string]json.RawMessage `json:"_meta"`
 	}
-	if req.Params == nil || json.Unmarshal(req.Params, &p) != nil {
+	if req.Params == nil || decodeEventParams(req.Params, &p) != nil {
 		return nil, invalidParams("events/subscribe needs params {name, arguments, delivery}")
 	}
 	if p.Name != events.Name {
-		return nil, invalidParams("unknown event: " + p.Name)
+		return nil, invalidParams("unknown event")
+	}
+	if len(p.Delivery.URL) > 2048 {
+		return nil, invalidParams("delivery.url is too long")
+	}
+	if p.Cursor != nil && (len(*p.Cursor) == 0 || len(*p.Cursor) > 4096) {
+		return nil, invalidParams("invalid cursor")
 	}
 	if p.Delivery.Mode != "webhook" {
 		return nil, invalidParams(`delivery.mode must be "webhook"`)
@@ -296,6 +304,11 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 	if err != nil {
 		return nil, err
 	}
+	unlock, err := s.Events.LockCallback(ctx, kind, id, p.Delivery.URL)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	var tokenExp time.Time
 	var tokenHash string
 	if principal.OAuth != nil {
@@ -326,7 +339,14 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 		return nil, err
 	}
 	verify := !sub.Verified
+	verifiedAt := s.now()
+	cached := sub.Verified
 	if verify {
+		if at, ok := s.Events.CachedVerification(sub, p.Delivery.Secret); ok {
+			verifiedAt, cached = at, true
+		}
+	}
+	if verify && !cached {
 		noteEventVerification(ctx, "pending", "")
 		if err := events.Challenge(ctx, s.EventsClient, sub, p.Delivery.Secret, s.now()); err != nil {
 			if created {
@@ -343,8 +363,10 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 			return nil, err
 		}
 		noteEventVerification(ctx, "verified", "")
+		verifiedAt = s.now()
 	} else {
 		noteEventVerification(ctx, "cached", "")
+		events.LogLifecycle("events.verification", sub, map[string]any{"method": "events/subscribe", "result": "cached"})
 	}
 
 	// A given cursor always wins (ChatGPT passes its last saved one). Absent,
@@ -376,9 +398,12 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 		}
 	}
 	if verify {
-		if err := s.Events.MarkVerified(ctx, sub.ID); err != nil {
+		if err := s.Events.MarkVerifiedAt(ctx, sub.ID, verifiedAt); err != nil {
 			return nil, err
 		}
+	}
+	if verify && !cached {
+		s.Events.RememberVerification(sub, p.Delivery.Secret, verifiedAt)
 	}
 	if created {
 		if err := s.auditSubscribe(ctx, sub); err != nil {
@@ -394,6 +419,11 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 	if now := s.now(); refresh.Before(now) {
 		refresh = now // a TTL under the margin must not hand back a time already past
 	}
+	lifecycle, outcome := "events.refresh", "refreshed"
+	if created {
+		lifecycle, outcome = "events.activation", "active"
+	}
+	events.LogLifecycle(lifecycle, sub, map[string]any{"method": "events/subscribe", "result": outcome})
 	return map[string]any{
 		"id":            sub.ID,
 		"refreshBefore": envelope.FormatTime(refresh),
@@ -426,14 +456,27 @@ func (s *Server) eventsUnsubscribe(ctx context.Context, _ *Session, req *Request
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 		Delivery  struct {
-			Mode string `json:"mode"`
-			URL  string `json:"url"`
+			Mode   string `json:"mode"`
+			URL    string `json:"url"`
+			Secret string `json:"secret"`
 		} `json:"delivery"`
+		Cursor *string                    `json:"cursor"`
+		TTLMs  *float64                   `json:"ttlMs"`
+		Meta   map[string]json.RawMessage `json:"_meta"`
 	}
-	if req.Params == nil || json.Unmarshal(req.Params, &p) != nil {
+	if req.Params == nil || decodeEventParams(req.Params, &p) != nil {
 		return nil, invalidParams("events/unsubscribe needs params {name, arguments, delivery}")
 	}
-	if p.Delivery.URL == "" {
+	if p.Name != events.Name || p.Delivery.Mode != "webhook" {
+		return nil, invalidParams("unknown event or delivery mode")
+	}
+	if _, err := subscribeTTL(p.TTLMs); err != nil {
+		return nil, err
+	}
+	if p.Cursor != nil && (len(*p.Cursor) == 0 || len(*p.Cursor) > 4096) {
+		return nil, invalidParams("invalid cursor")
+	}
+	if p.Delivery.URL == "" || len(p.Delivery.URL) > 2048 {
 		return nil, invalidParams("delivery.url is required")
 	}
 	args, err := eventArguments(p.Arguments)
@@ -447,8 +490,35 @@ func (s *Server) eventsUnsubscribe(ctx context.Context, _ *Session, req *Request
 	} else if id = principal.Caller.PrincipalID; principal.Caller.Kind == "peer" {
 		id = principal.Caller.PeerID
 	}
+	unlock, err := s.Events.LockCallback(ctx, kind, id, p.Delivery.URL)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	sub, findErr := s.Events.Find(ctx, kind, id, p.Delivery.URL, p.Name, args)
+	if findErr != nil && !errors.Is(findErr, events.ErrNotFound) {
+		return nil, findErr
+	}
 	if err := s.Events.Delete(ctx, kind, id, p.Delivery.URL, p.Name, args); err != nil {
 		return nil, fmt.Errorf("mcp: unsubscribe: %w", err)
 	}
+	events.LogLifecycle("events.unsubscribe", sub, map[string]any{"method": "events/unsubscribe", "result": "unsubscribed"})
 	return map[string]any{}, nil
+}
+
+// decodeEventParams rejects unexpected control fields while tolerating MCP metadata.
+func decodeEventParams(raw json.RawMessage, out any) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	if meta, ok := fields["_meta"]; ok {
+		meta = bytes.TrimSpace(meta)
+		if len(meta) == 0 || meta[0] != '{' {
+			return errors.New("_meta must be an object")
+		}
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(out)
 }

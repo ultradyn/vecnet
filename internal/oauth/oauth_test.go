@@ -475,7 +475,7 @@ func TestMetadataDocuments(t *testing.T) {
 		!slices.Equal(as.GrantTypes, []string{"authorization_code", "refresh_token"}) ||
 		!slices.Equal(as.ChallengeMethods, []string{"S256"}) ||
 		!slices.Equal(as.AuthMethods, []string{"none"}) ||
-		!slices.Equal(as.Scopes, []string{"vecnet"}) || !as.CIMD {
+		!slices.Equal(as.Scopes, strings.Fields(oauth.AuthorizationScopes)) || !as.CIMD {
 		t.Fatalf("AS capabilities: %s", body)
 	}
 
@@ -496,7 +496,7 @@ func TestMetadataDocuments(t *testing.T) {
 			t.Fatalf("resource metadata %s: %v", body, err)
 		}
 		if rs.Resource != env.URL+"/mcp" || !slices.Equal(rs.AS, []string{env.URL}) ||
-			!slices.Equal(rs.Scopes, []string{"vecnet"}) || !slices.Equal(rs.Bearer, []string{"header"}) {
+			!slices.Equal(rs.Scopes, strings.Fields(oauth.AuthorizationScopes)) || !slices.Equal(rs.Bearer, []string{"header"}) {
 			t.Fatalf("resource metadata: %s", body)
 		}
 	}
@@ -554,7 +554,7 @@ func TestDCRAndFullCodeFlow(t *testing.T) {
 		t.Fatalf("exchange: %d %s", got.status, got.Error)
 	}
 	if !strings.HasPrefix(got.AccessToken, "vat_") || !strings.HasPrefix(got.RefreshToken, "vrt_") ||
-		got.TokenType != "Bearer" || got.ExpiresIn != 3600 || got.Scope != "vecnet" {
+		got.TokenType != "Bearer" || got.ExpiresIn != 3600 || got.Scope != oauth.AuthorizationScopes {
 		t.Fatalf("token response: %+v", got)
 	}
 	if got.header.Get("Cache-Control") != "no-store" {
@@ -635,7 +635,7 @@ func TestRefreshRotation(t *testing.T) {
 	}
 	if second.AccessToken == first.AccessToken || second.RefreshToken == first.RefreshToken ||
 		!strings.HasPrefix(second.AccessToken, "vat_") || !strings.HasPrefix(second.RefreshToken, "vrt_") ||
-		second.ExpiresIn != 3600 || second.Scope != "vecnet" {
+		second.ExpiresIn != 3600 || second.Scope != oauth.AuthorizationScopes {
 		t.Fatalf("refresh response: %+v (first %+v)", second, first)
 	}
 	if second.header.Get("Cache-Control") != "no-store" {

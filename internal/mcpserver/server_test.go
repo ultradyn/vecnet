@@ -827,7 +827,7 @@ func TestUnknownMethod(t *testing.T) {
 	_, secret := env.NewPeer("session", "a1")
 	req := map[string]any{"jsonrpc": "2.0", "id": "x1", "method": "no/such/method"}
 	resp, out := do(t, env, call{secret: secret, headers: modern(), body: req})
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("%d %s", resp.StatusCode, out)
 	}
 	r := decodeRPC(t, out)
