@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -104,6 +105,68 @@ func TestMCPAllowedOriginsFlagAndEnv(t *testing.T) {
 			}
 			if tc.want == 401 && !strings.Contains(resp.Header.Get("WWW-Authenticate"), "resource_metadata=") {
 				t.Fatal("missing discovery challenge")
+			}
+		})
+	}
+}
+
+func TestOAuthRedirectsStartup(t *testing.T) {
+	for _, flagValue := range []bool{false, true} {
+		dir := filepath.Join(t.TempDir(), "unopened")
+		args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir}
+		getenv := func(key string) string {
+			if key == "VECNET_OAUTH_REDIRECTS" {
+				return "http://public.example/callback?PRIVATE_VALUE=secret"
+			}
+			return ""
+		}
+		if flagValue {
+			args = append(args, "--oauth-redirects", "https://*.example/callback")
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := run(ctx, args, io.Discard, getenv)
+		if err == nil || !strings.Contains(err.Error(), "OAuth redirects") || strings.Contains(err.Error(), "PRIVATE_VALUE") {
+			t.Fatalf("startup error = %v, want redacted invalid OAuth redirects", err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("invalid config opened data directory: %v", err)
+		}
+	}
+}
+
+func TestOAuthRedirectsFlagAndEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name, env string
+		flags     []string
+		want      int
+	}{
+		{"env", "https://connector.example/callback", nil, 201},
+		{"flag wins", "http://invalid.example/cb", []string{"--oauth-redirects", "https://connector.example/callback"}, 201},
+		{"empty flag keeps defaults", "https://connector.example/callback", []string{"--oauth-redirects", ""}, 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"--listen", "127.0.0.1:0", "--data-dir", t.TempDir()}, tc.flags...)
+			h := bootHub(t, args, func(key string) string {
+				if key == "VECNET_OAUTH_REDIRECTS" {
+					return tc.env
+				}
+				return ""
+			})
+			for _, uri := range []string{"https://connector.example/callback", "https://chatgpt.com/connector_platform_oauth_redirect", "https://www.cursor.com/agents/mcp/oauth/callback"} {
+				body, _ := json.Marshal(map[string]any{"redirect_uris": []string{uri}})
+				resp, err := http.Post(h.base+"/oauth/register", "application/json", bytes.NewReader(body))
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp.Body.Close()
+				want := http.StatusCreated
+				if uri == "https://connector.example/callback" {
+					want = tc.want
+				}
+				if resp.StatusCode != want {
+					t.Fatalf("register %s: %d, want %d", uri, resp.StatusCode, want)
+				}
 			}
 		})
 	}

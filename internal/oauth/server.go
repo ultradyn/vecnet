@@ -35,13 +35,15 @@ const (
 // Scope is the one scope the hub issues.
 const Scope = "vecnet"
 
-// DefaultRedirects are the redirect URIs ChatGPT uses [DOTS §4]. An entry is
+// DefaultRedirects are the redirect URIs ChatGPT and Cursor use. An entry is
 // matched exactly, except that a trailing "{callback_id}" matches one path
 // segment and a trailing ":*" means any port and path on that scheme and host
 // (redirectAllowed).
 var DefaultRedirects = []string{
 	"https://chatgpt.com/connector_platform_oauth_redirect",
 	"https://chatgpt.com/connector/oauth/{callback_id}",
+	// Cursor Web and Agents: https://cursor.com/docs/mcp#static-redirect-url
+	"https://www.cursor.com/agents/mcp/oauth/callback",
 }
 
 // Server is the authorization server. Hub supplies the link codes, the

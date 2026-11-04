@@ -240,6 +240,7 @@ func (s *Server) getAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !slices.Contains(c.Redirects, redirectURI) || !s.redirectAllowed(redirectURI) {
+		logRedirectRefused(redirectURI, c.Name, "/oauth/authorize")
 		deadEnd(w, "invalid_request", "This redirect address is not registered for the application.")
 		return
 	}
