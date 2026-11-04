@@ -418,3 +418,34 @@ func TestMigration0007KeepsRoutes(t *testing.T) {
 		t.Fatalf("route_runs: %v", err)
 	}
 }
+
+// VECNET_SQLITE_SYNCHRONOUS picks WAL fsync policy: full (default, 2) or normal (1); anything else refuses to open.
+func TestOpenSynchronousEnv(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want int
+	}{{"", 2}, {"full", 2}, {"FULL", 2}, {"normal", 1}, {"Normal", 1}} {
+		t.Run("env="+tc.env, func(t *testing.T) {
+			t.Setenv("VECNET_SQLITE_SYNCHRONOUS", tc.env)
+			db, err := store.Open(filepath.Join(t.TempDir(), "hub.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var got int
+			if err := db.QueryRow("PRAGMA synchronous").Scan(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("synchronous=%d, want %d", got, tc.want)
+			}
+		})
+	}
+	t.Setenv("VECNET_SQLITE_SYNCHRONOUS", "off")
+	if db, err := store.Open(filepath.Join(t.TempDir(), "hub.db")); err == nil {
+		db.Close()
+		t.Fatal("synchronous=off opened; want an error")
+	} else if !strings.Contains(err.Error(), "VECNET_SQLITE_SYNCHRONOUS") {
+		t.Fatalf("err=%v, want it to name VECNET_SQLITE_SYNCHRONOUS", err)
+	}
+}

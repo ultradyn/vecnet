@@ -17,3 +17,6 @@ Low priority; investigate before a production deploy.
 - Host at that moment: load average 92/70/57, `/proc/pressure/io` some avg10=41 full avg10=16, cpu some avg10=33. Top CPU users were unrelated (tesseract, cc1plus/compile, Chrome, Paseo) plus two vecnet build workflows in agent-build.slice.
 - Likely mechanism: fsync stalls under I/O pressure keep a write transaction open past busy_timeout(5000), so background loops and requests queue behind it. Check: log tx duration and fsync time; consider WAL with synchronous=NORMAL (if not already), and a quieter retry for background loops.
 - Store runs WAL with synchronous(FULL) (store.go:23-24), so every commit fsyncs. synchronous(NORMAL) in WAL survives process crashes and only risks the last transactions on power loss; that is a durability decision for Max, not a silent fix.
+
+## Decision 2026-11-04 (Max: rec)
+Dev hub switches to `synchronous=NORMAL` via the new `VECNET_SQLITE_SYNCHRONOUS=normal` (default stays `full`; production decided separately). Re-check the SQLITE_BUSY rate after the switch before closing.
