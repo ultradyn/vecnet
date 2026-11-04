@@ -78,6 +78,22 @@ type hookHint struct {
 	cmd     string // "vecnet --net P[ --as X]"
 	rebind  string // "vecnet[ --as X] hook rebind --profile P"
 	config  string // "" or a clause naming an explicit VECNET_CONFIG's basename
+	mcp     string // "" or the registered MCP server name, mcpServerName(profile, as)
+}
+
+var mcpProfile = regexp.MustCompile(`^[A-Za-z0-9_-]{1,24}$`)
+
+// mcpServerName is the Claude Code MCP server name `hook install --mcp`
+// registers for profile: "vecnet-" + profile, or "" when no binding is
+// possible. The 24-character bound keeps the longest tool name,
+// mcp__vecnet-<P>__vecnet_presence_subscribe, within 64 characters, and
+// dots are not valid in tool names. Installed hooks never take --as, so an
+// --as run never names a server.
+func mcpServerName(profile, as string) string {
+	if as != "" || !mcpProfile.MatchString(profile) {
+		return ""
+	}
+	return "vecnet-" + profile
 }
 
 var hookArg = regexp.MustCompile(`^[A-Za-z0-9._][A-Za-z0-9._-]{0,79}$`)
@@ -86,6 +102,12 @@ var hookArg = regexp.MustCompile(`^[A-Za-z0-9._][A-Za-z0-9._-]{0,79}$`)
 // so a command fails rather than running as another identity. Only the
 // config file's basename is shown, never a home path.
 func newHookHint(profile, as, configEnv string) hookHint {
+	return newHookHintMCP(profile, as, configEnv, "")
+}
+
+// newHookHintMCP also names the MCP server mcp in the hints, only when it is
+// exactly the one registered for this profile; any other value is ignored.
+func newHookHintMCP(profile, as, configEnv, mcp string) hookHint {
 	word := func(s string, n int) string {
 		if len(s) <= n && hookArg.MatchString(s) {
 			return s
@@ -101,12 +123,32 @@ func newHookHint(profile, as, configEnv string) hookHint {
 	if configEnv != "" {
 		h.config = " Commands need the same VECNET_CONFIG (" + inert(filepath.Base(configEnv), 32) + ")."
 	}
+	if mcp != "" && mcp == mcpServerName(profile, as) {
+		h.mcp = mcp
+	}
 	return h
+}
+
+// hookReplyClause is the reply and ack copy between the trust sentence and
+// the config clause. Bound, it names the MCP tools first, the CLI second.
+func hookReplyClause(h hookHint) string {
+	if h.mcp == "" {
+		return fmt.Sprintf("Reply: %s reply <msg> \"text\" --wake|--wake-idle|--hold. Ack: %s ack <cursor>.", h.cmd, h.cmd)
+	}
+	return fmt.Sprintf("Reply: vecnet_reply tool (MCP server %s) with message_id=<msg>, or %s reply <msg> \"text\" --wake|--wake-idle|--hold. Ack: vecnet_ack tool with cursor=<cursor>, or %s ack <cursor>.", h.mcp, h.cmd, h.cmd)
+}
+
+// hookInboxTool is the bound suffix naming the inbox tool, or "".
+func hookInboxTool(h hookHint) string {
+	if h.mcp == "" {
+		return ""
+	}
+	return " the vecnet_inbox tool (MCP server " + h.mcp + ")"
 }
 
 func hookContext(h hookHint, items []hookItem, more int, lowerBound bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "vecnet: %d new message(s) for profile %s. %s Reply: %s reply <msg> \"text\" --wake|--wake-idle|--hold. Ack: %s ack <cursor>.%s\n<vecnet-inbox untrusted=\"true\">\n", len(items), h.profile, hookTrust, h.cmd, h.cmd, h.config)
+	fmt.Fprintf(&b, "vecnet: %d new message(s) for profile %s. %s %s%s\n<vecnet-inbox untrusted=\"true\">\n", len(items), h.profile, hookTrust, hookReplyClause(h), h.config)
 	for _, item := range items {
 		fmt.Fprintf(&b, "cursor=%s thread=%s from=%s", hookSafeID(item.Cursor), hookSafeID(item.Thread), hookSafeID(item.From))
 		if item.Name != "" {
@@ -131,7 +173,11 @@ func hookContext(h hookHint, items []hookItem, more int, lowerBound bool) string
 		if lowerBound {
 			qualifier = " or more"
 		}
-		fmt.Fprintf(&b, "\n(+%d%s more not shown yet: they arrive with your next turn, or run %s inbox)", more, qualifier, h.cmd)
+		tool := ""
+		if h.mcp != "" {
+			tool = ", or" + hookInboxTool(h)
+		}
+		fmt.Fprintf(&b, "\n(+%d%s more not shown yet: they arrive with your next turn, or run %s inbox%s)", more, qualifier, h.cmd, tool)
 	}
 	return b.String()
 }
@@ -140,7 +186,11 @@ func hookSummary(h hookHint, count int, lowerBound bool) string {
 	if lowerBound {
 		qualifier = "at least "
 	}
-	return fmt.Sprintf("vecnet: earlier deliveries for profile %s are waiting. %s%s\n<vecnet-inbox untrusted=\"true\">\n%s%d unacked deliveries waiting; run `%s inbox`\n</vecnet-inbox>", h.profile, hookTrust, h.config, qualifier, count, h.cmd)
+	tool := ""
+	if h.mcp != "" {
+		tool = " or" + hookInboxTool(h)
+	}
+	return fmt.Sprintf("vecnet: earlier deliveries for profile %s are waiting. %s%s\n<vecnet-inbox untrusted=\"true\">\n%s%d unacked deliveries waiting; run `%s inbox`%s\n</vecnet-inbox>", h.profile, hookTrust, h.config, qualifier, count, h.cmd, tool)
 }
 
 // hookForeignNotice is the once-per-session line for a session whose hook
@@ -300,7 +350,7 @@ func hookWrite(ctx context.Context, w io.Writer, data []byte) error {
 // the encoded output in bytes as well as the context in UTF-16 units.
 func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(), publish func([]byte) error, limit int) hookResult {
 	ctx := a.ctx
-	o, e := parseFlags("hook", args, map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag})
+	o, e := parseFlags("hook", args, map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag, "mcp": strFlag})
 	if e != nil || len(o.pos) != 0 {
 		return hookResult{}
 	}
@@ -369,7 +419,13 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	if v := strings.TrimSpace(a.getenv("VECNET_PROFILE")); v != "" && v != name {
 		return hookResult{}
 	}
-	hint := newHookHint(name, a.as, a.getenv("VECNET_CONFIG"))
+	// --mcp names the registered relay only when it is exactly this
+	// profile's server; anything else falls back to the CLI-only hints.
+	mcp := ""
+	if m := o.str("mcp"); m != "" && m == mcpServerName(name, a.as) {
+		mcp = m
+	}
+	hint := newHookHintMCP(name, a.as, a.getenv("VECNET_CONFIG"), mcp)
 	path, e := statePath(a.getenv, name, a.as)
 	if e != nil {
 		return hookResult{}

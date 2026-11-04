@@ -67,11 +67,11 @@ func TestHookInstallCommandQuotesBinary(t *testing.T) {
 		{"/opt/it's/vecnet", "'/opt/it'\"'\"'s/vecnet' hook --profile p --event user-prompt"},
 		{"$(unsafe)/vecnet", "'$(unsafe)/vecnet' hook --profile p --event user-prompt"},
 	} {
-		if got := hookCommand(tc.bin, "p", "user-prompt", false); got != tc.want {
+		if got := hookCommand(tc.bin, "p", "user-prompt", false, ""); got != tc.want {
 			t.Errorf("command=%q, want %q", got, tc.want)
 		}
 	}
-	if got := hookCommand("vecnet", "q", "post-tool", true); got != "vecnet hook --profile q --event post-tool --auto-ack" {
+	if got := hookCommand("vecnet", "q", "post-tool", true, ""); got != "vecnet hook --profile q --event post-tool --auto-ack" {
 		t.Fatal(got)
 	}
 }
@@ -127,7 +127,7 @@ func TestOursHookExactForms(t *testing.T) {
 		{"vecnet", "'/opt/my tools/vecnet' hook --profile p --event user-prompt"},
 		{"/opt/it's tools/vn", "'/opt/it'\"'\"'s tools/vn' hook --profile p --event user-prompt --auto-ack"},
 		{"/opt/bin/vn", "/opt/bin/vn hook --profile p --event user-prompt"},
-		{"vecnet", hookCommand("/opt/$(x);'\"/vecnet", "p", "user-prompt", true)},
+		{"vecnet", hookCommand("/opt/$(x);'\"/vecnet", "p", "user-prompt", true, "")},
 	} {
 		raw, err := json.Marshal(hookHandler{Type: "command", Command: tc.command})
 		if err != nil {

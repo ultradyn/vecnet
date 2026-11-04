@@ -895,3 +895,183 @@ func TestHookBlockedMessageCacheKeepsDelivery(t *testing.T) {
 		t.Fatalf("retry state=%+v", s)
 	}
 }
+
+// runHookStdin runs the hook with the given global flags, hook args and
+// stdin, as Claude Code would.
+func runHookStdin(t *testing.T, env map[string]string, stdin string, args ...string) (string, string) {
+	t.Helper()
+	var out, errs bytes.Buffer
+	code := RunContext(context.Background(), args, strings.NewReader(stdin), &out, &errs, func(k string) string { return env[k] })
+	if code != 0 {
+		t.Fatalf("hook exit %d, stderr=%q", code, errs.String())
+	}
+	return out.String(), errs.String()
+}
+
+func TestMCPServerName(t *testing.T) {
+	p24 := strings.Repeat("p", 24)
+	for _, tc := range []struct{ profile, as, want string }{
+		{"p", "", "vecnet-p"}, {"scout-bot_2", "", "vecnet-scout-bot_2"}, {p24, "", "vecnet-" + p24},
+		{p24 + "p", "", ""}, {"a.b", "", ""}, {"", "", ""}, {"p;rm", "", ""}, {"p", "peer_1", ""},
+	} {
+		if got := mcpServerName(tc.profile, tc.as); got != tc.want {
+			t.Errorf("mcpServerName(%q, %q)=%q, want %q", tc.profile, tc.as, got, tc.want)
+		}
+	}
+	// The longest Claude Code tool name stays within its 64-character cap.
+	if n := len("mcp__" + mcpServerName(p24, "") + "__vecnet_presence_subscribe"); n > 64 {
+		t.Fatalf("longest tool name is %d characters", n)
+	}
+}
+
+func TestHookHintMCPBound(t *testing.T) {
+	env, path, _ := sessionHub(t)
+	seedSession(t, path, boundTo("sess-A"))
+	out, _ := runHookStdin(t, env, sessionStdin("sess-A"), "hook", "--profile", "p", "--mcp", "vecnet-p", "--event", "user-prompt")
+	ctx := contextOf(t, out)
+	header := "vecnet: 1 new message(s) for profile p. " + hookTrust + ` Reply: vecnet_reply tool (MCP server vecnet-p) with message_id=<msg>, or vecnet --net p reply <msg> "text" --wake|--wake-idle|--hold. Ack: vecnet_ack tool with cursor=<cursor>, or vecnet --net p ack <cursor>. Commands need the same VECNET_CONFIG (v.toml).`
+	if first, _, _ := strings.Cut(ctx, "\n"); first != header {
+		t.Fatalf("bound header=%q\nwant %q", first, header)
+	}
+	for _, want := range []string{"vecnet_reply tool (MCP server vecnet-p) with message_id=", "or vecnet --net p reply", "delivery=dly_1 ", `text="secret text"`} {
+		if !strings.Contains(ctx, want) {
+			t.Fatalf("missing %q in %q", want, ctx)
+		}
+	}
+	if s := readHookState(t, path); !reflect.DeepEqual(s.Shown, []string{"dly_1"}) {
+		t.Fatalf("bound run did not claim: %+v", s)
+	}
+
+	// The footer and the first-run summary name the inbox tool too.
+	h := newHookHintMCP("p", "", env["VECNET_CONFIG"], "vecnet-p")
+	if h.mcp != "vecnet-p" {
+		t.Fatalf("hint mcp=%q", h.mcp)
+	}
+	footer := hookContext(h, []hookItem{{Cursor: "e1.1", Kind: "message"}}, 3, false)
+	if !strings.HasSuffix(footer, "\n(+3 more not shown yet: they arrive with your next turn, or run vecnet --net p inbox, or the vecnet_inbox tool (MCP server vecnet-p))") {
+		t.Fatalf("bound footer=%q", footer)
+	}
+	sumEnv, sumPath := hookFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("after") == "" {
+			hookPage(w, []envelope.Event{hookEvent(1, "a"), hookEvent(2, "b")}, "e1.2")
+		} else {
+			hookPage(w, nil, "e1.900")
+		}
+	})
+	seedHook(t, sumPath, "")
+	out, _ = runHookStdin(t, sumEnv, "", "hook", "--profile", "p", "--mcp", "vecnet-p", "--event", "user-prompt")
+	summary := contextOf(t, out)
+	if !strings.Contains(summary, "2 unacked deliveries waiting; run `vecnet --net p inbox` or the vecnet_inbox tool (MCP server vecnet-p)\n</vecnet-inbox>") {
+		t.Fatalf("bound summary=%q", summary)
+	}
+	if summary != hookSummary(newHookHintMCP("p", "", sumEnv["VECNET_CONFIG"], "vecnet-p"), 2, false) {
+		t.Fatalf("summary does not match hookSummary: %q", summary)
+	}
+
+	// With the longest MCP name, one maximal hostile item and the largest
+	// footer (and the summary) still fit the atomic pipe write.
+	long := func(s string) string { return strings.Repeat(s, 4*hookTextRunes) }
+	p24 := strings.Repeat("p", 24)
+	for _, text := range []string{`"`, "&", "<", "＜", "界", "😀", "‮"} {
+		hint := newHookHintMCP(p24, "", "/x/"+long(text), "vecnet-"+p24)
+		if hint.mcp == "" {
+			t.Fatal("24-character profile not bound")
+		}
+		id := strings.Repeat("x", 80)
+		item := hookItem{Cursor: id, Thread: id, From: id, Name: long(text), Message: id, Delivery: id, Kind: strings.Repeat("x", 32), Text: long(text), Attachments: 1 << 30}
+		for _, context := range []string{hookContext(hint, []hookItem{item}, hookPageLimit, true), hookSummary(hint, 1<<30, true)} {
+			if !strings.Contains(context, "MCP server vecnet-"+p24) {
+				t.Fatalf("not bound: %q", context)
+			}
+			if n := utf16Len(context); n > hookMaxUnits {
+				t.Fatalf("text %q: bound context is %d UTF-16 units", text, n)
+			}
+			for _, event := range []string{"user-prompt", "post-tool"} {
+				if n := len(hookOutput(event, context)); n > hookPipeAtomicBytes {
+					t.Fatalf("text %q: bound output is %d bytes, cap %d", text, n, hookPipeAtomicBytes)
+				}
+			}
+		}
+	}
+}
+
+// (guard) Without --mcp every string is today's.
+func TestHookHintUnboundUnchanged(t *testing.T) {
+	h := newHookHint("p", "", "/c/v.toml")
+	if got := newHookHintMCP("p", "", "/c/v.toml", ""); !reflect.DeepEqual(got, h) {
+		t.Fatalf("newHookHintMCP without a name=%+v, want %+v", got, h)
+	}
+	if h.mcp != "" {
+		t.Fatalf("unbound hint names %q", h.mcp)
+	}
+	const clause = `Reply: vecnet --net p reply <msg> "text" --wake|--wake-idle|--hold. Ack: vecnet --net p ack <cursor>.`
+	if got := hookReplyClause(h); got != clause {
+		t.Fatalf("unbound clause=%q", got)
+	}
+	item := hookItem{Cursor: "e1.1", Thread: "thr_X", From: "peer_h", Message: "msg_1", Delivery: "dly_1", Kind: "message", Text: "hi"}
+	wantCtx := "vecnet: 1 new message(s) for profile p. " + hookTrust + " " + clause + " Commands need the same VECNET_CONFIG (v.toml).\n" +
+		"<vecnet-inbox untrusted=\"true\">\ncursor=e1.1 thread=thr_X from=peer_h msg=msg_1 delivery=dly_1 text=\"hi\"\n</vecnet-inbox>\n" +
+		"(+2 or more more not shown yet: they arrive with your next turn, or run vecnet --net p inbox)"
+	if got := hookContext(h, []hookItem{item}, 2, true); got != wantCtx {
+		t.Fatalf("unbound context=%q\nwant %q", got, wantCtx)
+	}
+	wantSummary := "vecnet: earlier deliveries for profile p are waiting. " + hookTrust + " Commands need the same VECNET_CONFIG (v.toml).\n" +
+		"<vecnet-inbox untrusted=\"true\">\nat least 3 unacked deliveries waiting; run `vecnet --net p inbox`\n</vecnet-inbox>"
+	if got := hookSummary(h, 3, true); got != wantSummary {
+		t.Fatalf("unbound summary=%q", got)
+	}
+	// Rebind is CLI-only: a bound hint's notices are the unbound ones.
+	bound := newHookHintMCP("p", "", "/c/v.toml", "vecnet-p")
+	at := time.Date(2026, 11, 4, 9, 30, 0, 0, time.UTC)
+	o := hookOwner{profiles: []string{"p", "q"}}
+	if hookForeignNotice(bound, at, o) != hookForeignNotice(h, at, o) || hookAmbiguousNotice(bound, o.profiles) != hookAmbiguousNotice(h, o.profiles) {
+		t.Fatal("bound notices differ from unbound ones")
+	}
+	// The end-to-end goldens: no --mcp is the default run.
+	t.Run("hostile golden", TestHookHostileIsInert)
+	t.Run("qualified with profile", TestHookHintsQualifiedWithProfile)
+}
+
+func TestHookMCPNameInvalidFallsBack(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		global []string
+		mcp    string
+	}{
+		{"shell", nil, "vecnet-p;rm -rf"},
+		{"other", nil, "other"},
+		{"other profile", nil, "vecnet-q"},
+		{"under --as", []string{"--as", "peer_1"}, "vecnet-p"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, _ := hookFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				hookPage(w, []envelope.Event{hookEvent(1, "hi")}, "e1.1")
+			})
+			as := ""
+			if tc.global != nil {
+				as = tc.global[1]
+			}
+			path, err := statePath(func(k string) string { return env[k] }, "p", as)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seedHook(t, path, "e1.0")
+			out, _ := runHookStdin(t, env, "", append(tc.global, "hook", "--profile", "p", "--mcp", tc.mcp, "--event", "user-prompt")...)
+			ctx := contextOf(t, out)
+			if strings.Contains(ctx, "MCP server") || strings.Contains(ctx, "vecnet_reply") || strings.Contains(ctx, "vecnet_ack") {
+				t.Fatalf("invalid --mcp %q named a tool: %q", tc.mcp, ctx)
+			}
+			cmd := "vecnet --net p"
+			if as != "" {
+				cmd += " --as " + as
+			}
+			want := hookContext(newHookHint("p", as, env["VECNET_CONFIG"]), []hookItem{{Cursor: "e1.1", Thread: "thr_X", From: "peer_h", Message: "msg_1", Delivery: "dly_1", Kind: "message", Text: "hi"}}, 0, false)
+			if ctx != want || !strings.Contains(ctx, "Reply: "+cmd+` reply <msg> "text"`) {
+				t.Fatalf("fallback context=%q\nwant %q", ctx, want)
+			}
+			if s := readHookState(t, path); !reflect.DeepEqual(s.Shown, []string{"dly_1"}) {
+				t.Fatalf("delivery not claimed: %+v", s)
+			}
+		})
+	}
+}
