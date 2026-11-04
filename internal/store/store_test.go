@@ -57,6 +57,15 @@ func TestOpenMigratesAndIsIdempotent(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE name = '0012_reactions.sql'`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("0012_reactions.sql recorded %d times, want 1: %v", n, err)
 	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE name = '0014_principal_peers.sql'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("0014_principal_peers.sql recorded %d times, want 1: %v", n, err)
+	}
+	for _, table := range []string{"principal_limits", "principal_default_scopes", "peer_create_keys"} {
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_list WHERE name = ? AND strict = 1`, table).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("missing STRICT table %s: %d, %v", table, n, err)
+		}
+	}
+
 	for _, table := range []string{"reactions", "reaction_ops", "reaction_wakes"} {
 		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_list WHERE name = ? AND strict = 1`, table).Scan(&n); err != nil || n != 1 {
 			t.Fatalf("missing STRICT table %s: %d, %v", table, n, err)
@@ -416,5 +425,52 @@ func TestMigration0007KeepsRoutes(t *testing.T) {
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO route_runs(route_id, at) VALUES ('route_g', '2026-11-01T00:00:00.000Z')`); err != nil {
 		t.Fatalf("route_runs: %v", err)
+	}
+}
+
+func TestMigration0014AddsCreatedBy(t *testing.T) {
+	ctx := context.Background()
+	db := openTemp(t)
+	for _, q := range []string{
+		`DROP INDEX peers_created_by`,
+		`ALTER TABLE peers DROP COLUMN created_by`,
+		`DROP TABLE principal_limits`, `DROP TABLE principal_default_scopes`, `DROP TABLE peer_create_keys`,
+		`DELETE FROM schema_migrations WHERE name = '0014_principal_peers.sql'`,
+		`INSERT INTO principals(prn_id, name, created_at) VALUES ('prn_old','host','2026-11-01T00:00:00.000Z')`,
+		`INSERT INTO peers(peer_id, prn_id, name, kind, enrolled_at) VALUES ('peer_old','prn_old','old','pagchat-bot','2026-11-01T00:00:00.000Z')`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	applied, err := store.Migrate(ctx, db.DB)
+	if err != nil || !reflect.DeepEqual(applied, []string{"0014_principal_peers.sql"}) {
+		t.Fatalf("Migrate = %v, %v", applied, err)
+	}
+	var prn, name, kind, at string
+	var creator sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT prn_id,name,kind,enrolled_at,created_by FROM peers WHERE peer_id = 'peer_old'`).Scan(&prn, &name, &kind, &at, &creator); err != nil {
+		t.Fatal(err)
+	}
+	if prn != "prn_old" || name != "old" || kind != "pagchat-bot" || at != "2026-11-01T00:00:00.000Z" || creator.Valid {
+		t.Fatalf("migrated row = %q %q %q %q %+v", prn, name, kind, at, creator)
+	}
+	for _, table := range []string{"principal_limits", "principal_default_scopes", "peer_create_keys"} {
+		var n int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_list WHERE name = ? AND strict = 1`, table).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("table %s = %d, %v", table, n, err)
+		}
+	}
+	q := `INSERT INTO principal_limits(prn_id,updated_at) VALUES ('prn_old','2026-11-01T00:00:00.000Z')`
+	if _, err := db.ExecContext(ctx, q); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, q); err == nil {
+		t.Fatal("duplicate principal_limits accepted")
+	}
+	var max, rate int
+	var kinds string
+	if err := db.QueryRowContext(ctx, `SELECT max_peers,creates_per_hour,kinds FROM principal_limits WHERE prn_id = 'prn_old'`).Scan(&max, &rate, &kinds); err != nil || max != 0 || rate != 60 || kinds != "[]" {
+		t.Fatalf("defaults = %d %d %q, %v", max, rate, kinds, err)
 	}
 }
