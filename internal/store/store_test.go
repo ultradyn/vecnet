@@ -505,3 +505,92 @@ func TestMigration0014AddsCreatedBy(t *testing.T) {
 		t.Fatalf("defaults = %d %d %q, %v", max, rate, kinds, err)
 	}
 }
+
+// TestMigration0018BackfillsSenderInfo: messages and delivery Events stored
+// before Message.sender_info get the sender's current directory name and
+// kind (a peer's, a source's as kind "source", the hub's as {"hub","hub"});
+// the rest of each body keeps its exact bytes, and rows that already carry
+// sender_info or whose sender is unknown are untouched.
+func TestMigration0018BackfillsSenderInfo(t *testing.T) {
+	ctx := context.Background()
+	db := openTemp(t)
+	const tail = `"metadata":{"lt":"<b>","n":1.50,"e":1e3}}`
+	legacy := func(id, sender string) string {
+		return `{"message_id":"` + id + `","sender":"` + sender + `",` + tail
+	}
+	for _, q := range []string{
+		`DELETE FROM schema_migrations WHERE name = '0018_sender_info.sql'`,
+		`INSERT INTO principals(prn_id, name, created_at) VALUES ('prn_a','host','2026-11-01T00:00:00.000Z')`,
+		`INSERT INTO peers(peer_id, prn_id, name, kind, enrolled_at) VALUES ('peer_a','prn_a','Ann "A"','pagchat-bot','2026-11-01T00:00:00.000Z')`,
+		`INSERT INTO sources(src_id, kind, name, target_id, secret_hash, secret_enc, created_at) VALUES ('src_g','github','gh','peer_a','h','e','2026-11-01T00:00:00.000Z')`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	msgs := map[string]string{
+		"msg_peer": legacy("msg_peer", "peer_a"),
+		"msg_src":  legacy("msg_src", "src_g"),
+		"msg_hub":  legacy("msg_hub", "hub"),
+		"msg_gone": legacy("msg_gone", "peer_gone"),
+		"msg_has":  `{"message_id":"msg_has","sender":"peer_a","sender_info":{"name":"Then","kind":"session"},` + tail,
+	}
+	seq := 0
+	for id, body := range msgs {
+		seq++
+		var sender string
+		switch id {
+		case "msg_peer", "msg_has":
+			sender = "peer_a"
+		case "msg_src":
+			sender = "src_g"
+		case "msg_hub":
+			sender = "hub"
+		default:
+			sender = "peer_gone"
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO messages(msg_id, thr_id, seq, sender, kind, created_at, body) VALUES (?, 'thr_x', ?, ?, 'message', 'now', ?)`, id, seq, sender, body); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO events(owner, type, at, data) VALUES ('peer_r', 'delivery', 'now', ?)`, `{"delivery_id":"dly_`+id+`","message":`+body+`}`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO events(owner, type, at, data) VALUES ('peer_r', 'receipt', 'now', '{"message_id":"msg_peer"}')`); err != nil {
+		t.Fatal(err)
+	}
+
+	applied, err := store.Migrate(ctx, db.DB)
+	if err != nil || !reflect.DeepEqual(applied, []string{"0018_sender_info.sql"}) {
+		t.Fatalf("Migrate = %v, %v", applied, err)
+	}
+	with := func(id, sender, info string) string {
+		return `{"message_id":"` + id + `","sender":"` + sender + `",` + strings.TrimSuffix(tail, "}") + `,"sender_info":` + info + `}`
+	}
+	want := map[string]string{
+		"msg_peer": with("msg_peer", "peer_a", `{"name":"Ann \"A\"","kind":"pagchat-bot"}`),
+		"msg_src":  with("msg_src", "src_g", `{"name":"gh","kind":"source"}`),
+		"msg_hub":  with("msg_hub", "hub", `{"name":"hub","kind":"hub"}`),
+		"msg_gone": msgs["msg_gone"],
+		"msg_has":  msgs["msg_has"],
+	}
+	for id, w := range want {
+		var body, data string
+		if err := db.QueryRowContext(ctx, `SELECT body FROM messages WHERE msg_id = ?`, id).Scan(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body != w {
+			t.Errorf("%s body:\n got %s\nwant %s", id, body, w)
+		}
+		if err := db.QueryRowContext(ctx, `SELECT data FROM events WHERE json_extract(data, '$.delivery_id') = ?`, "dly_"+id).Scan(&data); err != nil {
+			t.Fatal(err)
+		}
+		if wantData := `{"delivery_id":"dly_` + id + `","message":` + w + `}`; data != wantData {
+			t.Errorf("%s event:\n got %s\nwant %s", id, data, wantData)
+		}
+	}
+	var receipt string
+	if err := db.QueryRowContext(ctx, `SELECT data FROM events WHERE type = 'receipt'`).Scan(&receipt); err != nil || receipt != `{"message_id":"msg_peer"}` {
+		t.Fatalf("receipt event = %q, %v", receipt, err)
+	}
+}

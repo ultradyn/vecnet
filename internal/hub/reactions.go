@@ -184,7 +184,7 @@ func (h *Hub) reactTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req envelo
 			}
 			wake := envelope.Message{
 				SchemaVersion: envelope.SchemaVersion, MessageID: ids.New(ids.Msg), ThreadID: thr,
-				Kind: "reaction", InReplyTo: &req.MessageID, Sender: snd.peer,
+				Kind: "reaction", InReplyTo: &req.MessageID, Sender: snd.peer, SenderInfo: snd.info(),
 				Recipients: []string{msg.Sender}, Priority: req.Priority, CreatedAt: at,
 				Content: envelope.Content{Text: req.Emoji}, Reaction: &envelope.ReactionRef{Target: req.MessageID, Emoji: req.Emoji},
 				Attachments: []envelope.Attachment{}, Metadata: map[string]any{}, Loop: loop,

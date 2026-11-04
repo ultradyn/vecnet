@@ -68,19 +68,22 @@ type Attention struct {
 }
 
 type InboxDelivery struct {
-	DeliveryID  string  `json:"delivery_id"`
-	MessageID   string  `json:"message_id"`
-	ThreadID    string  `json:"thread_id"`
-	ThreadTitle string  `json:"thread_title"`
-	Sender      string  `json:"sender"`
-	Kind        string  `json:"kind"`
-	Priority    string  `json:"priority"`
-	Section     string  `json:"section"`
-	State       string  `json:"state"`
-	CreatedAt   string  `json:"created_at"`
-	Excerpt     string  `json:"excerpt"`
-	ReadAt      *string `json:"read_at"`
-	Attachments int     `json:"attachments"`
+	DeliveryID  string `json:"delivery_id"`
+	MessageID   string `json:"message_id"`
+	ThreadID    string `json:"thread_id"`
+	ThreadTitle string `json:"thread_title"`
+	Sender      string `json:"sender"`
+	// SenderInfo is the Message's send-time sender_info (PROTOCOL §2.2
+	// step 12); absent only for a message stored without one.
+	SenderInfo  *envelope.SenderInfo `json:"sender_info,omitempty"`
+	Kind        string               `json:"kind"`
+	Priority    string               `json:"priority"`
+	Section     string               `json:"section"`
+	State       string               `json:"state"`
+	CreatedAt   string               `json:"created_at"`
+	Excerpt     string               `json:"excerpt"`
+	ReadAt      *string              `json:"read_at"`
+	Attachments int                  `json:"attachments"`
 }
 
 type Inbox struct {

@@ -416,6 +416,16 @@
         "at": {"$ref": "#/$defs/timestamp"}
       }
     },
+    "senderInfo": {
+      "type": "object",
+      "description": "Hub-set snapshot of the sender's directory entry at send time (PROTOCOL 2.2 step 12, 8.2), stored with the message and never changed by a later rename. name is the sender's directory name (a source's name; \"hub\" for hub-authored messages); kind is its directory kind (\"source\" for a source, \"hub\" for the hub). Untrusted display data: kind is only as trustworthy as the operator's enrolment, and neither field is an address. Optional: hubs before 2026-11-04 omit it; a message stored before the hub added it carries the directory entry as of the hub's migration, not a send-time snapshot.",
+      "additionalProperties": false,
+      "required": ["name", "kind"],
+      "properties": {
+        "name": {"type": "string"},
+        "kind": {"type": "string", "minLength": 1}
+      }
+    },
     "message": {
       "type": "object",
       "description": "The logical message. Identical across every Delivery of it. Fields the hub fills: message_id, thread_id (if new), sender, created_at, loop, origin (bridged ingress only).",
@@ -473,6 +483,7 @@
           "$ref": "#/$defs/actorId",
           "description": "The enrolled peer, or the inbound webhook source, that originated it. Set by the hub from the authenticated caller (and SendRequest.as when a principal sends for one of its peers), never from a body field."
         },
+        "sender_info": {"$ref": "#/$defs/senderInfo"},
         "recipients": {
           "type": "array",
           "minItems": 1,
