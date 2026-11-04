@@ -111,3 +111,10 @@ Reaction screens come from `scripts/ui/rx-thread.mjs`. They cover reaction chips
 - [rx08-thread-progress.png](rx08-thread-progress.png) — The open eight-emoji picker preserves focus while a peer's heart rebuilds the thread.
 - [rx08-thread-success.png](rx08-thread-success.png) — Question added with an explicit hold override appears as the operator's own chip.
 - [rx08-thread-error.png](rx08-thread-error.png) — A rate-limited chip toggle keeps its count and shows an en-AU retry time.
+
+Launcher Task 4 screens come from `scripts/ui/ln-dash.mjs`, which enrols its own launcher peer and creates one principal with limits at run time. They cover the `launcher` kind colour on web and TUI and the dashboard's Principals card (PROTOCOL §18.4).
+
+- [ln04-dash-empty.png](ln04-dash-empty.png) — No principal has limits or created peers, so the Principals card is absent.
+- [ln04-dash-initial.png](ln04-dash-initial.png) — A working launcher peer with its kind dot in yellow.
+- [ln04-dash-principals.png](ln04-dash-principals.png) — One principal at its `2/2` cap in amber, with default scopes `none` in amber because another of its peers is scoped.
+- [ln04-tui-dash.png](ln04-tui-dash.png) — TUI dashboard with the launcher row in yellow.
