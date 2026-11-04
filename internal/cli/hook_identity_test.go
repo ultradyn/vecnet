@@ -151,6 +151,7 @@ func TestHookHintsQualifiedWithProfile(t *testing.T) {
 	}
 	h.pages["e1.10"], h.next["e1.10"] = events, "e1.22"
 	env, _, _ := identityFixture(t, h)
+	env["VECNET_PROFILE"] = "q" // a session launched as q (a mismatch would silence the hook)
 	run := func(env map[string]string) string {
 		t.Helper()
 		var out, errs bytes.Buffer

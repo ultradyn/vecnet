@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -121,25 +122,40 @@ func (a *app) cmdHookInstall(args []string) error {
 		}
 		fmt.Fprintf(a.stderr, "settings target %s (explicit --settings)\n", path)
 	} else {
-		cwd, err := os.Getwd()
+		start, err := os.Getwd()
 		if err != nil {
 			return err
 		}
-		ctx, cancel := context.WithTimeout(a.ctx, 2*time.Second)
-		cmd := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel")
-		// Also bound pipe teardown if a misbehaving git child retains stdout.
-		cmd.WaitDelay = 100 * time.Millisecond
-		rootBytes, gitErr := cmd.Output()
-		cancel()
-		root := strings.TrimSuffix(string(rootBytes), "\n")
-		reason := "git top-level; personal settings.local.json"
+		from := "cwd"
+		// Claude Code exports CLAUDE_PROJECT_DIR, the directory the session
+		// started in, to hooks; it stays put when the session's cwd moves.
+		if dir := a.getenv("CLAUDE_PROJECT_DIR"); dir != "" {
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				if dir != start {
+					fmt.Fprintf(a.stderr, "using CLAUDE_PROJECT_DIR %s rather than the current directory\n", dir)
+				}
+				start, from = dir, "CLAUDE_PROJECT_DIR"
+			} else {
+				a.warn("CLAUDE_PROJECT_DIR %s is not a directory; using the current directory", dir)
+			}
+		}
+		root, gitErr := a.hookGit(start, "--show-toplevel")
+		reason := from + " git top-level; personal settings.local.json"
 		if gitErr != nil || root == "" {
-			root = cwd
-			reason = "cwd fallback; personal settings.local.json"
-			fmt.Fprintf(a.stderr, "not in a git repository; using %s\n", cwd)
+			root = start
+			reason = from + " fallback; personal settings.local.json"
+			fmt.Fprintf(a.stderr, "not in a git repository; using %s\n", start)
+		} else if main := a.hookMainCheckout(start); main != "" {
+			want := filepath.Join(main, ".claude", "settings.local.json")
+			a.warn("%s is a linked git worktree; Claude Code reads settings.local.json from the main checkout's root, so sessions here most likely read %s. Rerun from %s, or pass --settings %s", root, want, main, want)
 		}
 		path = filepath.Join(root, ".claude", "settings.local.json")
 		fmt.Fprintf(a.stderr, "settings target %s (%s)\n", path, reason)
+	}
+	if raw, err := os.ReadFile(path); err == nil {
+		if others := otherHookProfiles(raw, profile); len(others) > 0 {
+			a.warn("%s already has vecnet hooks for profile(s) %s; every Claude Code session that reads it runs all of them. Session binding keeps each profile's deliveries in one session, and a session that runs several profiles' hooks binds none of them until its agent runs `vecnet hook rebind --profile P` (PROTOCOL §13.9). Launch each session with its own profile, e.g. VECNET_PROFILE=%s claude, so the other profiles' hooks stay silent there", path, strings.Join(others, ", "), profile)
+		}
 	}
 	if !o.has("write") {
 		stanza, _, err := mergeHookSettings(nil, bin, profile, o.has("auto-ack"))
@@ -196,6 +212,82 @@ func (a *app) cmdHookInstall(args []string) error {
 	}
 	fmt.Fprintf(a.stderr, "wrote %s (UserPromptSubmit, PostToolUse)\n", path)
 	return nil
+}
+
+// hookGit runs one bounded `git -C dir rev-parse <arg>` and returns its
+// trimmed output.
+func (a *app) hookGit(dir, arg string) (string, error) {
+	ctx, cancel := context.WithTimeout(a.ctx, 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", arg)
+	// Also bound pipe teardown if a misbehaving git child retains stdout.
+	cmd.WaitDelay = 100 * time.Millisecond
+	out, err := cmd.Output()
+	return strings.TrimSuffix(string(out), "\n"), err
+}
+
+// hookMainCheckout returns the main checkout's root when dir is in a
+// linked worktree (its git dir differs from the common dir), else "".
+func (a *app) hookMainCheckout(dir string) string {
+	gitDir, err1 := a.hookGit(dir, "--git-dir")
+	common, err2 := a.hookGit(dir, "--git-common-dir")
+	if err1 != nil || err2 != nil || gitDir == "" || common == "" {
+		return ""
+	}
+	abs := func(p string) string {
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(dir, p)
+		}
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return filepath.Clean(p)
+	}
+	gitDir, common = abs(gitDir), abs(common)
+	if gitDir == common {
+		return ""
+	}
+	if filepath.Base(common) == ".git" {
+		return filepath.Dir(common)
+	}
+	return common // a bare repository's worktree: name the common dir
+}
+
+// otherHookProfiles lists the profiles, other than profile, of handlers
+// in exactly the form `hook install` writes. Unparseable settings list
+// nothing; the merge reports them.
+func otherHookProfiles(settings []byte, profile string) []string {
+	root, err := parseJSONNode(settings)
+	if err != nil {
+		return nil
+	}
+	var found []string
+	hooks := root.member("hooks")
+	if hooks == nil || hooks.kind != '{' {
+		return nil
+	}
+	for _, groups := range hooks.vals {
+		if groups.kind != '[' {
+			continue
+		}
+		for _, group := range groups.vals {
+			handlers := group.member("hooks")
+			if handlers == nil || handlers.kind != '[' {
+				continue
+			}
+			for _, handler := range handlers.vals {
+				if handler.member("type").scalarString() != "command" {
+					continue
+				}
+				m := hookOwnedCommand.FindStringSubmatch(handler.member("command").scalarString())
+				if m != nil && m[2] != profile && !slices.Contains(found, inert(m[2], 64)) {
+					found = append(found, inert(m[2], 64))
+				}
+			}
+		}
+	}
+	slices.Sort(found)
+	return found
 }
 
 // defaultSettingsRedirect refuses a default target whose file or .claude
