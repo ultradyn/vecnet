@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Build-box stand-in for xsm's build2 (which runs a command inside a shared
+# 2-core systemd slice). On the box there is no slice: run the command
+# directly, already niced by remote.sh, and widen `go … -p N` to $BB_JOBS so
+# recipes and workflow commands written for xsm use the box's cores.
+set -euo pipefail
+(($#)) || { echo "usage: build2 <command> [args...]" >&2; exit 64; }
+args=("$@")
+if [[ ${args[0]} == go && -n ${BB_JOBS:-} ]]; then
+  for ((i=1; i<${#args[@]}; i++)); do
+    case "${args[i]}" in
+      -p) ((i+1 < ${#args[@]})) && args[i+1]=$BB_JOBS ;;
+      -p=*) args[i]="-p=$BB_JOBS" ;;
+    esac
+  done
+fi
+exec "${args[@]}"
