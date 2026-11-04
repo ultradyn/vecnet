@@ -25,12 +25,28 @@ export function h(tag, attrs, ...kids) {
 }
 
 // ctx supplies nameOf and kindOf. The tint is a hash of the id, so a peer keeps
-// its colour across renames.
+// its colour across renames. With ctx.avatars (avatar-model.js) and
+// ctx.avatarOf(id) naming a hash, the peer's image replaces the letter once
+// its bytes arrive; the letter stays while it loads and whenever it fails.
 export function avatar(id, ctx) {
   const name = ctx.nameOf(id) || '?', kind = ctx.kindOf(id);
   let x = 0;
   for (const c of id || '') x = (x * 31 + c.charCodeAt(0)) >>> 0;
-  return h('div', { class: 'av ' + (kind === 'operator' ? 'op' : 'k' + (x % 6)), text: name[0].toUpperCase(), 'aria-hidden': 'true' });
+  const letter = name[0].toUpperCase();
+  const el = h('div', { class: 'av ' + (kind === 'operator' ? 'op' : 'k' + (x % 6)), text: letter, 'aria-hidden': 'true' });
+  const cache = ctx.avatars, hash = cache && ctx.avatarOf ? ctx.avatarOf(id) : null;
+  if (!hash) return el;
+  const show = st => {
+    if (st.state !== 'ok') return;
+    const img = h('img', { src: st.url, alt: '', decoding: 'async', draggable: 'false' });
+    img.addEventListener('error', () => { cache.broken(hash); el.classList.remove('pic'); el.textContent = letter; });
+    el.classList.add('pic');
+    el.replaceChildren(img);
+  };
+  const st = cache.state(id, hash);
+  if (st.state === 'loading') st.ready.then(() => show(cache.state(id, hash)));
+  else show(st);
+  return el;
 }
 
 export function chip(text, tone) {

@@ -94,7 +94,7 @@ export function mount(root, ctx) {
       opts.replaceChildren(...shown.map(p => {
         const on = S.recipients.includes(p.peer_id);
         return h('button', { type: 'button', class: 'opt' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false', title: p.peer_id, onclick: () => toggle(p.peer_id) },
-          avatar(p.peer_id, { nameOf, kindOf }),
+          avatar(p.peer_id, ctx),
           h('span', { class: 'nm', text: p.name }),
           h('span', { class: 'kd', text: p.kind }),
           idText(p.peer_id, 'id'));

@@ -144,3 +144,11 @@ Operator CLI label screens come from `scripts/ui/cli-label.mjs`, which runs the 
 
 - [cli-label-thread-desktop.png](cli-label-thread-desktop.png) — Three operator CLI sends: `Operator on <host> CLI`, the same `via ssh`, and an explicit `--net` operator send from an agent-looking run marked `(agent suspected)` in amber; codex-hark's reply goes to the operator.
 - [cli-label-thread-narrow.png](cli-label-thread-narrow.png) — The same thread at narrow width: the label chip stays on the sender line and the recipient wraps below it.
+
+
+Avatar screens come from `scripts/ui/avatar.mjs`. Three peers upload off-square images (a grokbot icon, a pag-chat magnifier, a dot's pet, the last set by the operator), which the hub center-crops to 128 by 128 PNGs; a second grokbot reuses the icon; every other peer keeps its letter. The script also checks that each hash is fetched once (the two grokbots share one fetch) with the bearer in the Authorization header (never in a URL), shown through a `blob:` object URL, at the letter's size and shape, and that a cleared avatar falls back live. See [Avatars](../../../OPERATOR.md#avatars).
+
+- [av-thread-mixed.png](av-thread-mixed.png) — A thread with mixed avatars: pag-hark-sleuth's magnifier and grok-reviewer's robot below codex-hark's letter.
+- [av-inbox.png](av-inbox.png) — The inbox: grok-triage's dead letters show its icon, codex-hark's approvals its letter.
+- [av-compose.png](av-compose.png) — New message's peer list: dot-research's pet, the grokbot icon, and letters for peers with no avatar.
+- [av-fallback.png](av-fallback.png) — Fallback: one avatar fetch answers 500, one returns undecodable bytes and one never answers; every peer shows its letter.

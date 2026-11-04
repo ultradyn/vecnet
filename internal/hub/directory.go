@@ -30,6 +30,9 @@ type DirectoryEntry struct {
 	LastSeen     *string        `json:"last_seen"`
 	EnrolledAt   *string        `json:"enrolled_at"`
 	Teams        []string       `json:"teams"`
+	// Avatar is the sha256 of the peer's avatar PNG (GET
+	// /v1/peers/{id}/avatar), or null (PROTOCOL §8.1).
+	Avatar *string `json:"avatar"`
 }
 
 // Reachability values (PROTOCOL §8).
@@ -94,7 +97,7 @@ func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
 
 	rows, err = h.DB.QueryContext(ctx,
 		`SELECT peer_id, name, kind, capabilities, quota, location, presence_state, presence_at,
-		        reachability, reach_via, last_seen, enrolled_at, created_by
+		        reachability, reach_via, last_seen, enrolled_at, created_by, avatar
 		 FROM peers WHERE disabled = 0 ORDER BY peer_id`)
 	if err != nil {
 		return nil, fmt.Errorf("hub: directory: %w", err)
@@ -107,9 +110,10 @@ func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
 			e                                        DirectoryEntry
 			caps, quota, enrolled, reach             string
 			loc, state, at, via, lastSeen, createdBy sql.NullString
+			avatar                                   sql.NullString
 		)
 		if err := rows.Scan(&e.PeerID, &e.Name, &e.Kind, &caps, &quota, &loc, &state, &at,
-			&reach, &via, &lastSeen, &enrolled, &createdBy); err != nil {
+			&reach, &via, &lastSeen, &enrolled, &createdBy, &avatar); err != nil {
 			return nil, fmt.Errorf("hub: directory: %w", err)
 		}
 		if err := json.Unmarshal([]byte(caps), &e.Capabilities); err != nil || e.Capabilities == nil {
@@ -121,6 +125,7 @@ func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
 			e.Quota = map[string]any{}
 		}
 		e.CreatedBy = nullable(createdBy)
+		e.Avatar = nullable(avatar)
 		e.Location = nullable(loc)
 		e.LastSeen = nullable(lastSeen)
 		e.Reachability = EffectiveReachability(reach, nullable(via), e.LastSeen, now)

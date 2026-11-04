@@ -30,18 +30,23 @@ func withCaller(ctx context.Context, c auth.Caller) context.Context {
 // payload_too_large before anything else runs, and caps every other body with
 // http.MaxBytesReader (handlers surface the overflow through writeError).
 // Blob uploads are exempt: the blob store enforces their own 25 MiB cap.
+// Avatar uploads are capped at 2 MiB instead (isAvatarUpload).
 func limitBody(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isBlobUpload(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.ContentLength > MaxBodyBytes {
-			writeError(w, &http.MaxBytesError{Limit: MaxBodyBytes})
+		limit := int64(MaxBodyBytes)
+		if isAvatarUpload(r) {
+			limit = avatarLimit // an avatar image may be up to 2 MiB (PROTOCOL §8.1)
+		}
+		if r.ContentLength > limit {
+			writeError(w, &http.MaxBytesError{Limit: limit})
 			return
 		}
 		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, MaxBodyBytes)
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
 		next.ServeHTTP(w, r)
 	})

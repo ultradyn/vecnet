@@ -66,6 +66,8 @@ messaging:
   groups create <peer…> | groups add <grp> <peer…> | groups list
   presence set <idle|working|blocked|offline> [--note T]
   presence subscribe <all|teams|none>
+  avatar set <FILE|https://URL> | avatar clear       PNG, JPEG, GIF or WebP, at most 2 MiB;
+       the hub crops it square and stores 128x128; a URL is fetched by the hub
   receipt <delivery_id> <processed|read|failed> [--note T]
   enrol --hub URL --token (T|-) --profile NAME      "-" reads the token from stdin
        (preferred: keeps it out of shell history and ps); else $VECNET_ENROL_TOKEN
@@ -78,6 +80,7 @@ admin (operator credential):
   peer add --kind K --name N [--principal PRN]
   peer move <peer> --principal PRN
   peer link <peer>                                    prints a dot's 8-character link code
+  peer avatar <peer> (FILE|https://URL|--clear)       set or clear any peer's avatar
   peer rotate <peer>
   peer scope <peer> [--allow IDS] [--deny IDS]        IDS: comma-separated or repeated
   peer limits <peer> --sends-per-min N --threads-per-hour N
@@ -407,6 +410,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdGroups(args)
 	case "presence":
 		return a.cmdPresence(args)
+	case "avatar":
+		return a.cmdAvatar(args)
 	case "receipt":
 		return a.cmdReceipt(args)
 	case "principal":
@@ -1320,7 +1325,7 @@ func (a *app) cmdPeer(args []string) error {
 	o, err := parseFlags("peer", args, map[string]flagKind{
 		"kind": strFlag, "name": strFlag, "principal": strFlag,
 		"allow": multiFlag, "deny": multiFlag,
-		"sends-per-min": strFlag, "threads-per-hour": strFlag,
+		"sends-per-min": strFlag, "threads-per-hour": strFlag, "clear": boolFlag,
 	})
 	if err != nil {
 		return err
@@ -1358,6 +1363,8 @@ func (a *app) cmdPeer(args []string) error {
 		return a.ok("moved " + o.pos[1] + " to " + o.str("principal"))
 	case sub == "link" && len(o.pos) == 2:
 		return a.peerLink(o.pos[1])
+	case sub == "avatar" && (len(o.pos) == 2 || len(o.pos) == 3):
+		return a.peerAvatar(o.pos[1], strings.Join(o.pos[2:], ""), o.has("clear"))
 	case sub == "rotate" && len(o.pos) == 2:
 		var out map[string]any
 		if err := a.call(http.MethodPost, "/v1/admin/peers/"+pathEscape(o.pos[1])+"/rotate", nil, &out); err != nil {
@@ -1383,7 +1390,7 @@ func (a *app) cmdPeer(args []string) error {
 		return a.ok("limits set for " + o.pos[1])
 	}
 	return usageErr("usage: vecnet peer add --kind K --name N [--principal PRN] | peer move <peer> --principal PRN | " +
-		"peer link <peer> | peer rotate <peer> | peer scope <peer> [--allow IDS] [--deny IDS] | peer limits <peer> --sends-per-min N --threads-per-hour N")
+		"peer link <peer> | peer avatar <peer> (FILE|URL|--clear) | peer rotate <peer> | peer scope <peer> [--allow IDS] [--deny IDS] | peer limits <peer> --sends-per-min N --threads-per-hour N")
 }
 
 func (a *app) cmdRoute(args []string) error {

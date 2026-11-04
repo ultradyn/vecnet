@@ -244,8 +244,8 @@ func TestToolsListNamesAndHints(t *testing.T) {
 	}
 
 	want := []string{
-		"vecnet_ack", "vecnet_inbox", "vecnet_peers", "vecnet_presence", "vecnet_react", "vecnet_receipt",
-		"vecnet_reply", "vecnet_send", "vecnet_thread", "vecnet_threads",
+		"vecnet_ack", "vecnet_clear_avatar", "vecnet_inbox", "vecnet_peers", "vecnet_presence", "vecnet_react", "vecnet_receipt",
+		"vecnet_reply", "vecnet_send", "vecnet_set_avatar", "vecnet_thread", "vecnet_threads",
 	}
 	var got []string
 	readOnly := map[string]bool{"vecnet_inbox": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true}
@@ -279,6 +279,12 @@ func TestToolsListNamesAndHints(t *testing.T) {
 		names := map[string]bool{}
 		propertyNames(tool.InputSchema, names)
 		for name := range names {
+			// The one exception (PROTOCOL §4.3, §8.1): vecnet_set_avatar's url,
+			// which the hub fetches through the egress guard and re-encodes;
+			// it is never stored or passed to another peer.
+			if tool.Name == "vecnet_set_avatar" && name == "url" {
+				continue
+			}
 			if strings.Contains(strings.ToLower(name), "url") {
 				t.Errorf("%s: inputSchema has a property named %s", tool.Name, name)
 			}

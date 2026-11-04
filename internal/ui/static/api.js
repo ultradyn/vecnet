@@ -155,6 +155,8 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     audit: ({ limit, before } = {}) => get('/v1/admin/audit' + query({ limit, before })),
     counters: () => get('/v1/admin/counters'),
     blob: sha => get('/v1/blobs/' + seg(sha), { read: 'blob' }),
+    // A peer's avatar PNG (PROTOCOL §8.1), by bearer like a blob.
+    avatar: id => get('/v1/peers/' + seg(id) + '/avatar', { read: 'blob' }),
     upload,
   };
 }
