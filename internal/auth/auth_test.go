@@ -148,7 +148,7 @@ func issue(t *testing.T, db *store.DB, r *auth.Resolver, peer string, ttl time.D
 	var tok string
 	err := db.Tx(context.Background(), func(tx *sql.Tx) error {
 		var err error
-		tok, err = r.IssueEnrolToken(context.Background(), tx, peer, ttl)
+		tok, _, err = r.IssueEnrolToken(context.Background(), tx, peer, ttl)
 		return err
 	})
 	if err != nil {

@@ -29,6 +29,7 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/peers", s.adminAddPeer)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/move", s.adminMovePeer)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/rotate", s.adminRotatePeer)
+	mux.HandleFunc("POST /v1/admin/peers/{id}/enrol-token", s.adminReissueEnrol)
 	mux.HandleFunc("PUT /v1/admin/peers/{id}/scopes", s.adminSetScopes)
 	mux.HandleFunc("PUT /v1/admin/peers/{id}/limits", s.adminSetLimits)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/disable", s.adminDisable(true))
@@ -156,12 +157,16 @@ func (s *server) adminRotatePrincipal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"secret": secret})
 }
 
-// adminAddPeer is POST /v1/admin/peers {"kind", "name", "principal_id"?}:
-// 201 {"peer_id", "enrol_token", "principal_id"}; a dot's enrol_token is "",
-// since it links with `vecnet peer link` instead. Without principal_id the
-// peer gets an implicit principal named like it.
+// adminAddPeer is POST /v1/admin/peers {"kind", "name"?, "principal_id"?,
+// "enrol_ttl_seconds"?, "name_open"?}: 201 {"peer_id", "name", "name_open",
+// "enrol_token", "enrol_expires_at", "principal_id", "hub_url"}; a dot's
+// enrol_token and enrol_expires_at are "", since it links with `vecnet peer
+// link` instead. name is required unless name_open, which leaves it to the
+// agent at enrol (name is then a suggestion). Without principal_id the peer
+// gets an implicit principal named like it. hub_url is the hub's public URL,
+// for an invite (PROTOCOL §2.12).
 func (s *server) adminAddPeer(w http.ResponseWriter, r *http.Request) {
-	top, err := readObject(r, []string{"kind", "name", "principal_id"}, []string{"kind", "name"})
+	top, err := readObject(r, []string{"kind", "name", "principal_id", "enrol_ttl_seconds", "name_open"}, []string{"kind"})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -173,19 +178,27 @@ func (s *server) adminAddPeer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	open, err := optBool(top, "name_open")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if _, has := top["name"]; !has && !open {
+		writeError(w, &envelope.SchemaError{Path: "/name", Message: "name is required"})
+		return
+	}
+	ttl, err := enrolTTL(top)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	ctx := r.Context()
-	peer, tok, err := s.Hub.AddPeer(ctx, f[0], f[1], f[2])
+	peer, tok, exp, err := s.Hub.AddPeerWith(ctx, hub.AddPeerOpts{Kind: f[0], Name: f[1], PrincipalID: f[2], TTL: ttl, NameOpen: open})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	prn, err := s.Hub.PeerPrincipal(ctx, peer)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusCreated, map[string]string{"peer_id": peer, "enrol_token": tok, "principal_id": prn})
+	s.writeInvite(w, r, peer, tok, exp)
 }
 
 // adminMovePeer is POST /v1/admin/peers/{id}/move {"principal_id"}: 204.
