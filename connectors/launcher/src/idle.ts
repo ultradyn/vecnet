@@ -67,6 +67,7 @@ type Tracked = {
   touchedAt: number;
   parkedSince?: number;
   deadlineCheckAt?: number;
+  settleReason?: SettleReason;
 };
 
 export function createIdleClock(deps: {
@@ -88,13 +89,38 @@ export function createIdleClock(deps: {
   }
   function arm(jobId: string, job: Tracked, at: number) {
     job.timer?.cancel();
+    const deadline = job.deadlineCheckAt ?? Infinity;
+    if (!job.settleReason || deadline > clock.now()) at = Math.min(at, deadline);
     // Node timers have a signed 32-bit delay even when a config allows longer windows.
     job.timer = clock.timer(Math.min(2_147_483_647, Math.max(0, at - clock.now())), () => {
       job.timer = undefined;
-      if (live(jobId, job)) void check(jobId, job);
+      if (!live(jobId, job)) return;
+      if (job.deadlineCheckAt !== undefined && clock.now() >= job.deadlineCheckAt) {
+        void settle(jobId, job, { reason: 'deadline' });
+      } else if (job.settleReason) void settle(jobId, job, job.settleReason);
+      else void check(jobId, job);
     });
   }
+  async function settle(jobId: string, job: Tracked, why: SettleReason) {
+    // Latch before awaiting: a deadline can supersede a pending probe or park,
+    // whose late completion must not start another action or re-arm the clock.
+    job.settleReason = why;
+    job.timer?.cancel();
+    job.timer = undefined;
+    try {
+      await deps.settle(jobId, why);
+      if (live(jobId, job)) untrack(jobId);
+    } catch {
+      if (live(jobId, job)) {
+        log.warn('idle clock check failed', { jobId });
+        arm(jobId, job, clock.now() + cfg.check_every_ms);
+      }
+    }
+  }
   async function check(jobId: string, job: Tracked) {
+    // Keep the sole timer on the known deadline throughout asynchronous work.
+    // Re-arm even on a capped long timer waking while a check is still pending.
+    if (job.deadlineCheckAt !== undefined) arm(jobId, job, job.deadlineCheckAt);
     if (job.running) return;
     job.running = true;
     job.touched = false;
@@ -102,9 +128,11 @@ export function createIdleClock(deps: {
     try {
       // The owner omits reattachPending jobs from track, or returns undefined here.
       const input = await deps.probe(jobId);
-      if (!live(jobId, job) || job.touched) return;
+      if (!live(jobId, job) || job.settleReason) return;
       if (!input) { untrack(jobId); return; }
       job.deadlineCheckAt = input.deadlineAt - cfg.deadline_margin_ms;
+      arm(jobId, job, job.deadlineCheckAt);
+      if (job.touched) return;
       const lastRelayAt = Math.max(input.lastRelayAt, job.touchedAt);
       const since = Math.max(input.lastActivityAt, lastRelayAt);
       const verdict = idleVerdict({ ...input, lastRelayAt,
@@ -112,11 +140,11 @@ export function createIdleClock(deps: {
       if (verdict.action === 'settle') {
         const why: SettleReason = verdict.reason === 'deadline'
           ? { reason: 'deadline' } : { reason: 'idle', quiescence: verdict.quiescence };
-        await deps.settle(jobId, why);
-        if (live(jobId, job)) untrack(jobId);
+        await settle(jobId, job, why);
       } else {
         if (verdict.action === 'park') {
           await deps.park(jobId);
+          if (!live(jobId, job) || job.settleReason) return;
           // A delayed probe snapshot must not issue a second park for the same idle window.
           job.parkedSince = since;
         }
@@ -124,10 +152,10 @@ export function createIdleClock(deps: {
       }
     } catch {
       // A bridge exception may contain credentials or agent text. Never copy it to logs.
-      if (live(jobId, job)) log.warn('idle clock check failed', { jobId });
+      if (live(jobId, job) && !job.settleReason) log.warn('idle clock check failed', { jobId });
     } finally {
       job.running = false;
-      if (live(jobId, job)) {
+      if (live(jobId, job) && !job.settleReason) {
         const now = clock.now();
         const retryAt = Math.min(now + cfg.check_every_ms,
           job.deadlineCheckAt !== undefined && job.deadlineCheckAt > now ? job.deadlineCheckAt : Infinity);
@@ -146,7 +174,7 @@ export function createIdleClock(deps: {
     },
     touch(jobId) {
       const job = jobs.get(jobId);
-      if (!job || stopped) return;
+      if (!job || stopped || job.settleReason) return;
       job.touchedAt = clock.now();
       job.touched = true;
       if (!job.running) arm(jobId, job, clock.now());

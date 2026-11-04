@@ -192,3 +192,95 @@ test('a slow park cannot defer the hard deadline past the next check', async () 
   clock.advance(84); release(); await flush(); assert.equal(settled, 0);
   clock.advance(1); await flush(); assert.equal(settled, 1); idle.stop();
 });
+
+for (const pending of ['probe', 'park'] as const) {
+  for (const outcome of ['resolve', 'reject'] as const) {
+    test(`deadline settles while ${pending} is pending past expiry; late ${outcome} is fenced`, async () => {
+      const baseClock = fakeClock(), timers = new Set<symbol>();
+      const clock = {...baseClock, timer(ms: number, fn: () => void) {
+        const id = Symbol(); timers.add(id);
+        assert.equal(timers.size, 1, 'at most one timer per job');
+        const timer = baseClock.timer(ms, () => { timers.delete(id); fn(); });
+        return {cancel() { timers.delete(id); timer.cancel(); }};
+      }};
+      const shortCfg = {...cfg, park_after_ms: 10, settle_opaque_ms: 200, check_every_ms: 60, deadline_margin_ms: 5};
+      let release!: () => void, reject!: (error: Error) => void;
+      const held = new Promise<void>((resolve, fail) => { release = resolve; reject = fail; });
+      let releaseSettle!: () => void, probes = 0, parks = 0;
+      const calls: unknown[] = [], log = memoryLog();
+      const idle = createIdleClock({clock, cfg: shortCfg, log, async probe() {
+        if (++probes === 2 && pending === 'probe') await held;
+        return input({deadlineAt: 100});
+      }, async park() { parks++; await held; }, async settle(job, why) {
+        calls.push([clock.now(), job, why]);
+        await new Promise<void>(resolve => { releaseSettle = resolve; });
+      }});
+      idle.track('one'); clock.advance(0); await flush();
+      clock.advance(10); await flush();
+      assert.equal(probes, 2); assert.equal(parks, pending === 'park' ? 1 : 0);
+      idle.touch('one'); idle.touch('one');
+      clock.advance(84); await flush(); assert.deepEqual(calls, []);
+      clock.advance(1); await flush();
+      assert.deepEqual(calls, [[95, 'one', {reason: 'deadline'}]]);
+      assert.equal(timers.size, 0);
+      clock.advance(15); await flush(); // Both callbacks remain pending beyond expiry at t=100.
+      idle.touch('one'); clock.advance(0); await flush();
+      assert.equal(calls.length, 1); assert.equal(probes, 2); assert.equal(timers.size, 0);
+      if (outcome === 'resolve') release(); else reject(new Error('secret callback body'));
+      await flush();
+      clock.advance(1_000); await flush();
+      assert.equal(calls.length, 1); assert.equal(probes, 2);
+      assert.equal(parks, pending === 'park' ? 1 : 0); assert.equal(timers.size, 0);
+      assert.equal(log.text().includes('secret callback body'), false);
+      releaseSettle(); await flush();
+      clock.advance(1_000); await flush();
+      assert.equal(calls.length, 1); assert.equal(probes, 2); assert.equal(timers.size, 0);
+      idle.stop();
+    });
+  }
+
+  test(`late ${pending} completion after deadline cannot affect a re-tracked job`, async () => {
+    const clock = fakeClock();
+    const shortCfg = {...cfg, park_after_ms: 10, settle_opaque_ms: 200, check_every_ms: 60, deadline_margin_ms: 5};
+    let release!: () => void, probes = 0;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let current = input({deadlineAt: 100});
+    const calls: unknown[] = [];
+    const idle = createIdleClock({clock, cfg: shortCfg, log: memoryLog(), async probe() {
+      const snapshot = current;
+      if (++probes === 2 && pending === 'probe') await held;
+      return snapshot;
+    }, async park() { await held; }, async settle(_job, why) { calls.push([clock.now(), why]); }});
+    idle.track('one'); clock.advance(0); await flush();
+    clock.advance(10); await flush(); clock.advance(100); await flush();
+    assert.deepEqual(calls, [[95, {reason: 'deadline'}]]);
+    current = input({canPark: false, lastActivityAt: 110, deadlineAt: 1_000});
+    idle.track('one'); clock.advance(0); await flush();
+    release(); await flush();
+    clock.advance(199); await flush(); assert.equal(calls.length, 1);
+    clock.advance(1); await flush();
+    assert.deepEqual(calls, [[95, {reason: 'deadline'}], [310, {reason: 'idle', quiescence: 'assumed'}]]);
+    idle.stop();
+  });
+}
+
+test('a failed idle settlement retries at the deadline without re-probing or logging the exception', async () => {
+  const clock = fakeClock(), log = memoryLog();
+  const shortCfg = {...cfg, settle_opaque_ms: 10, check_every_ms: 100, deadline_margin_ms: 5};
+  let probes = 0;
+  const calls: unknown[] = [];
+  const idle = createIdleClock({clock, cfg: shortCfg, log, async probe() {
+    probes++; return input({canPark: false, deadlineAt: 100});
+  }, async park() { assert.fail('park not offered'); }, async settle(_job, why) {
+    calls.push([clock.now(), why]);
+    if (calls.length === 1) throw new Error('secret settle body');
+  }});
+  idle.track('one'); clock.advance(0); await flush(); clock.advance(10); await flush();
+  assert.deepEqual(calls, [[10, {reason: 'idle', quiescence: 'assumed'}]]);
+  idle.touch('one'); clock.advance(84); await flush(); assert.equal(calls.length, 1);
+  clock.advance(1); await flush();
+  assert.deepEqual(calls, [[10, {reason: 'idle', quiescence: 'assumed'}], [95, {reason: 'deadline'}]]);
+  assert.equal(probes, 2); assert.equal(log.entries.length, 1);
+  assert.equal(log.text().includes('secret settle body'), false);
+  clock.advance(200); await flush(); assert.equal(calls.length, 2); idle.stop();
+});
