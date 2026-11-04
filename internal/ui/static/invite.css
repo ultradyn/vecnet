@@ -1,0 +1,16 @@
+/* Add agent dialog (invite.js). It sits on <body>, outside .va. */
+.dash-peers h2 .inv-open{margin-left:auto;font-size:12.5px;padding:4px 11px}
+dialog.inv{width:min(720px,calc(100vw - 48px));padding:20px 22px;border:1px solid var(--line2);border-radius:12px;background:#0e1426;color:var(--text);box-shadow:0 24px 80px #000a}
+dialog.inv::backdrop{background:#05070dcc}
+.inv h2{margin:0 0 4px;font-size:15px;font-weight:600}
+.inv .inv-lede{margin:0 0 14px;color:var(--muted);font-size:13px;line-height:1.5}
+.inv-form{display:flex;flex-direction:column;gap:6px}
+.inv-form label{font-size:12px;color:var(--dim);display:block;margin:0 0 4px}
+.inv-form input,.inv-form select{background:#0b1020;border:1px solid var(--line2);border-radius:7px;padding:8px 10px;font-size:13px;color:var(--text)}
+.inv-form input{font-family:var(--mono)}
+.inv-row{display:flex;gap:14px;margin-top:6px}
+.inv-row>span{display:flex;flex-direction:column}
+.inv-acts{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+.inv-warn{margin:0 0 10px;padding:9px 12px;border:1px solid #fbbf2466;border-radius:8px;background:#fbbf2410;color:var(--wake);font-size:13px}
+.inv-block{margin:0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#080c18;font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;max-height:50vh;overflow:auto;user-select:all}
+.inv-meta{margin:8px 0 0;font-size:11.5px;color:var(--dim);overflow-wrap:anywhere}

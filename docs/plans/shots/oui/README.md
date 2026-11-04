@@ -152,3 +152,10 @@ Avatar screens come from `scripts/ui/avatar.mjs`. Three peers upload off-square 
 - [av-inbox.png](av-inbox.png) — The inbox: grok-triage's dead letters show its icon, codex-hark's approvals its letter.
 - [av-compose.png](av-compose.png) — New message's peer list: dot-research's pet, the grokbot icon, and letters for peers with no avatar.
 - [av-fallback.png](av-fallback.png) — Fallback: one avatar fetch answers 500, one returns undecodable bytes and one never answers; every peer shows its letter.
+
+Add agent screens come from `scripts/ui/invite.mjs`. The dashboard's Peers heading has an Add agent button: a small form (name, kind without operator or dot, token lifetime 1 h / 24 h / 7 d) creates the peer and shows the same paste-ready invite `vecnet peer invite` prints, once. The script checks the text against the CLI's renderer, the copy, that no token reaches web storage or survives closing, and that the token enrols exactly once.
+
+- [inv-1-button.png](inv-1-button.png) — Dashboard Peers heading with the Add agent button.
+- [inv-2-form.png](inv-2-form.png) — The form filled in: name, kind session, token valid for 1 hour.
+- [inv-3-error.png](inv-3-error.png) — The hub refuses the create: its code and message under the form, which stays editable.
+- [inv-4-success.png](inv-4-success.png) — The invite shown once: warning, paste block with the hub's public URL and token, profile, peer id and expiry, Copy invite.

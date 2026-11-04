@@ -1,11 +1,13 @@
-// Provisional read-only dashboard (operator UI Task 12). It performs no writes:
-// dead-letter retry and discard and subscription resume live in the inbox.
+// Provisional dashboard (operator UI Task 12). Its one write is Add agent
+// (invite.js, under Peers), which only creates; dead-letter retry and discard
+// and subscription resume live in the inbox.
 // Each section loads and fails on its own. The page reloads on the `peers` tag
 // and every 30 s while mounted. Ages use the hub clock, never the client's.
 import { activityAction } from './activity-model.js';
 import { allThreads, blockedLine, cutSummary, peerRows } from './dash-model.js';
 import { principalRows } from './principals-model.js';
 import { chip, h, idCopy, idText, peerLink } from './dom.js';
+import { closeInvite, inviteButton } from './invite.js';
 import { ago, short, title as threadTitle, when } from './format.js';
 import * as subs from './subs.js';
 
@@ -95,7 +97,7 @@ export function mount(root, ctx) {
   root.replaceChildren(
     h('div', { class: 'dash' },
       h('h1', { text: 'Dashboard' }),
-      h('p', { class: 'lede', text: 'Read-only view of the hub. Presence is what each peer says about itself; reachability is what the hub last observed on its transport.' }),
+      h('p', { class: 'lede', text: 'A view of the hub; Add agent, under Peers, is its one write. Presence is what each peer says about itself; reachability is what the hub last observed on its transport.' }),
       counterLine,
       section('peers', 'd-peers', 'Peers'),
       section('principals', 'd-principals', 'Principals'),
@@ -106,6 +108,7 @@ export function mount(root, ctx) {
       subsSlot,
       section('audit', 'd-audit', 'Audit tail')));
   subs.renderSection(subsSlot, ctx);
+  sections.peers.el.querySelector('h2').append(inviteButton(ctx, () => res.peers.reload()));
 
   // fill renders one section from its resource: its own error, then whatever
   // it last loaded, or a loading line before the first answer.
@@ -297,6 +300,7 @@ export function mount(root, ctx) {
     }));
   }
   return () => {
+    closeInvite();
     audit.alive = false;
     clearInterval(timer);
     for (const off of offs) off();
