@@ -308,6 +308,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	var input struct {
 		HookEventName string `json:"hook_event_name"`
 		SessionID     string `json:"session_id"`
+		AgentID       string `json:"agent_id"`
 	}
 	raw, e := hookStdin(a.stdin)
 	if e != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &input) != nil {
@@ -315,7 +316,14 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			return hookResult{}
 		}
 		// --event without usable input (a manual run): no session id.
-		input.HookEventName, input.SessionID = "", ""
+		input.HookEventName, input.SessionID, input.AgentID = "", "", ""
+	}
+	// A subagent or teammate shares its parent's session_id, so its tool
+	// hooks would pass the binding and claim into the subagent's context,
+	// which the parent may never see. Leave deliveries for the parent's own
+	// runs: claim nothing, say nothing, touch no state (issue 39).
+	if input.AgentID != "" {
+		return hookResult{}
 	}
 	if ctx.Err() != nil {
 		return hookResult{}

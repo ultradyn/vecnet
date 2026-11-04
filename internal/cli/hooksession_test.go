@@ -534,3 +534,50 @@ func TestSessionRegistryBounded(t *testing.T) {
 		t.Fatal("oldest session kept")
 	}
 }
+
+// A subagent's or teammate's tool hook carries agent_id and its parent's
+// session_id. It claims nothing, prints nothing, makes no hub request and
+// leaves the binding and registry alone, so the parent's next run shows
+// the delivery (issue 39).
+func TestHookSubagentClaimsNothing(t *testing.T) {
+	for _, tc := range []struct{ name, state string }{{"bound to parent", "S1"}, {"unbound", ""}} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, path, polls := sessionHub(t)
+			noVecnetProfile(env)
+			seedSession(t, path, func(s *hookState) {
+				if tc.state != "" {
+					boundTo(tc.state)(s)
+				}
+			})
+			before, _ := os.ReadFile(path)
+			for _, event := range []string{"PostToolUse", "UserPromptSubmit"} {
+				var out, errs bytes.Buffer
+				stdin := `{"hook_event_name":"` + event + `","session_id":"S1","agent_id":"agent-7f3a","agent_type":"Explore","tool_name":"Bash"}`
+				for _, args := range [][]string{{"hook", "--profile", "p", "--event", "post-tool"}, {"hook", "--profile", "p"}} {
+					out.Reset()
+					errs.Reset()
+					if code := RunContext(context.Background(), args, strings.NewReader(stdin), &out, &errs, func(k string) string { return env[k] }); code != 0 || out.Len() != 0 || errs.Len() != 0 {
+						t.Fatalf("%s %v: exit=%d out=%q errs=%q", event, args, code, out.String(), errs.String())
+					}
+				}
+			}
+			if after, _ := os.ReadFile(path); !bytes.Equal(before, after) || polls.Load() != 0 {
+				t.Fatalf("subagent run changed state (%t) or polled (%d)", !bytes.Equal(before, after), polls.Load())
+			}
+			if _, err := os.Stat(sessionsPath(path)); !os.IsNotExist(err) {
+				t.Fatalf("subagent run wrote the registry: %v", err)
+			}
+			// The parent itself (no agent_id) still claims; agent_type alone
+			// (a session started with --agent) is the main thread.
+			if tc.state == "" {
+				runHookAs(t, env, "S1", "p") // binding run
+			}
+			var out, errs bytes.Buffer
+			stdin := `{"hook_event_name":"UserPromptSubmit","session_id":"S1","agent_type":"reviewer"}`
+			RunContext(context.Background(), []string{"hook", "--profile", "p", "--event", "user-prompt"}, strings.NewReader(stdin), &out, &errs, func(k string) string { return env[k] })
+			if !strings.Contains(contextOf(t, out.String()), "secret text") {
+				t.Fatalf("parent missed the delivery: out=%q errs=%q", out.String(), errs.String())
+			}
+		})
+	}
+}

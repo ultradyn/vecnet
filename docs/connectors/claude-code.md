@@ -93,7 +93,7 @@ vecnet: profile P's hook belongs to another Claude Code session (bound 2026-11-0
 
 **Restarts, `/clear` and `--resume`.** `claude --resume` keeps the session id, so a resumed session keeps its binding; `--fork-session` gets a new id. `/clear` changes the id but not the Claude Code process, so the binding follows it (this needs `CLAUDE_PID`, Claude Code v2.1.214 or later). When the bound session's process has exited, the next session binds the profile as if it were new. A session that cannot be told apart that way (older Claude Code, another host) gets the notice and rebinds with one command.
 
-Subagents and teammates share their session's id, so their tool hooks claim for that session. Hook runs without a session id, such as a manual `vecnet hook --event user-prompt`, keep the old unbound behaviour.
+Subagents and teammates share their session's id, but their tool hooks carry `agent_id`, and the hook stays silent for them: deliveries wait for the main thread's next prompt or tool call, so they never land only in a subagent's context (§13.9). Hook runs without a session id, such as a manual `vecnet hook --event user-prompt`, keep the old unbound behaviour.
 
 ## What the agent sees
 
