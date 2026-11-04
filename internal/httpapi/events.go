@@ -180,15 +180,22 @@ func (s *server) startCursor(ctx context.Context, r *http.Request, owners []stri
 
 // pollBody is the long-poll response [EX06].
 type pollBody struct {
-	Events     []envelope.Event `json:"events"`
-	NextCursor string           `json:"next_cursor"`
+	Events        []envelope.Event `json:"events"`
+	NextCursor    string           `json:"next_cursor"`
+	HubRestarting *restartHint     `json:"hub_restarting,omitempty"`
+}
+
+type restartHint struct {
+	RetryAfterMS int64 `json:"retry_after_ms"`
 }
 
 // longPoll answers at once when first has events, else holds until an
 // append for the owners, a change to the credential or wait elapses; once
 // alive reports false it answers empty, and the next poll meets the new state.
 func (s *server) longPoll(w http.ResponseWriter, r *http.Request, prn string, owners []string, cur eventlog.Cursor, first []envelope.Event, wait time.Duration, alive func(context.Context) bool) {
+	defer s.Drain.Join()()
 	ctx := r.Context()
+	var restarting *restartHint
 	evs := first
 	if len(evs) == 0 && wait > 0 {
 		timer := time.NewTimer(wait)
@@ -223,6 +230,11 @@ func (s *server) longPoll(w http.ResponseWriter, r *http.Request, prn string, ow
 			case <-timer.C:
 				cancel()
 				break hold
+			case <-s.Drain.C():
+				cancel()
+				evs = []envelope.Event{}
+				restarting = &restartHint{RetryAfterMS: s.Drain.RetryAfter().Milliseconds()}
+				break hold
 			case <-s.Stop: // nil (never) unless the server is shutting down
 				cancel()
 				break hold
@@ -233,7 +245,7 @@ func (s *server) longPoll(w http.ResponseWriter, r *http.Request, prn string, ow
 	if len(evs) > 0 {
 		next = evs[len(evs)-1].Cursor
 	}
-	writeJSON(w, http.StatusOK, pollBody{Events: evs, NextCursor: next})
+	writeJSON(w, http.StatusOK, pollBody{Events: evs, NextCursor: next, HubRestarting: restarting})
 }
 
 // waitKeys are what a stream waits on: its owners' logs, and the principal,
@@ -252,6 +264,7 @@ func waitKeys(prn string, owners []string) []string {
 // connection. No database transaction is open while frames are queued or
 // written: reads finish before their frames are queued.
 func (s *server) streamSSE(w http.ResponseWriter, r *http.Request, prn string, owners []string, cur eventlog.Cursor, first []envelope.Event, alive func(context.Context) bool) {
+	defer s.Drain.Join()()
 	activeStreams.Add(1)
 	defer activeStreams.Add(-1)
 	defer s.streamReach(owners)() // connected while open; runs before the counter drops
@@ -269,6 +282,16 @@ func (s *server) streamSSE(w http.ResponseWriter, r *http.Request, prn string, o
 	}
 	conn := startSSE(w, s.sseStall())
 	defer conn.close()
+	conn.draining = s.Drain.C()
+	// A drain can also interrupt send while the replay queue is full. In
+	// that case the handler exits before reaching its idle select.
+	defer func() {
+		select {
+		case <-conn.draining:
+			conn.finish(restartFrame(s.Drain.RetryAfter()), drainFlush)
+		default:
+		}
+	}()
 
 	if !conn.send(ctx, []byte("retry: 3000\n\n")) || !conn.send(ctx, []byte("id: "+cur.String()+"\ndata:\n\n")) {
 		return
@@ -326,6 +349,9 @@ func (s *server) sseTail(ctx context.Context, conn *sseConn, prn string, owners 
 		}
 	}
 	select {
+	case <-conn.draining:
+		conn.finish(restartFrame(s.Drain.RetryAfter()), drainFlush)
+		return false
 	case <-ctx.Done():
 		return false
 	case <-conn.failed():

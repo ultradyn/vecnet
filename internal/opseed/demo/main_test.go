@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"io"
@@ -411,5 +412,100 @@ func TestDemoControlsCanClearFailure(t *testing.T) {
 		if w.Code != step.status {
 			t.Fatalf("%s: got %d, want %d", step.path, w.Code, step.status)
 		}
+	}
+}
+
+func TestDemoRestartControl(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	output, writer := io.Pipe()
+	defer output.Close()
+	done := make(chan error, 1)
+	dir := t.TempDir()
+	go func() {
+		err := run(ctx, []string{"--listen", "127.0.0.1:0", "--data-dir", dir}, strings.NewReader(""), writer)
+		writer.CloseWithError(err)
+		done <- err
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(7 * time.Second):
+			t.Error("demo shutdown timeout")
+		}
+	})
+	var m manifest
+	ready := make(chan error, 1)
+	go func() { ready <- json.NewDecoder(output).Decode(&m) }()
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("demo startup timeout")
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	open := func() (*http.Response, *bufio.Reader) {
+		req, _ := http.NewRequest("GET", m.URL+"/v1/admin/activity", nil)
+		req.Header.Set("Authorization", "Bearer "+m.OperatorSecret)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		if resp.StatusCode != 200 {
+			t.Fatalf("activity = %d", resp.StatusCode)
+		}
+		return resp, bufio.NewReader(resp.Body)
+	}
+	frame := func(br *bufio.Reader) string {
+		var out strings.Builder
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				t.Fatal(err)
+			}
+			out.WriteString(line)
+			if line == "\n" {
+				return out.String()
+			}
+		}
+	}
+	_, br := open()
+	if got := frame(br); got != "retry: 3000\n\n" {
+		t.Fatalf("retry = %q", got)
+	}
+	if got := frame(br); got != "event: ready\ndata: {}\n\n" {
+		t.Fatalf("ready = %q", got)
+	}
+	resp, err := client.Post(m.URL+"/__demo/restart", "application/json", strings.NewReader(`{"retry_after_ms":1500}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("restart control = %d %s %v", resp.StatusCode, body, err)
+	}
+	if string(body) != "{\"streams\":1}\n" {
+		t.Fatalf("restart result = %s", body)
+	}
+	if got := frame(br); got != "event: hub_restarting\ndata: {\"retry_after_ms\":1500}\n\n" {
+		t.Fatalf("restart frame = %q", got)
+	}
+	if rest, err := io.ReadAll(br); err != nil || len(rest) != 0 {
+		t.Fatalf("after restart = %q %v", rest, err)
+	}
+	_, br = open()
+	if got := frame(br); got != "retry: 3000\n\n" {
+		t.Fatalf("new retry = %q", got)
+	}
+	if got := frame(br); got != "event: ready\ndata: {}\n\n" {
+		t.Fatalf("new stream = %q", got)
 	}
 }

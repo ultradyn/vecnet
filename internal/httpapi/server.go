@@ -41,6 +41,9 @@ type Deps struct {
 	// long-lived requests.
 	Stop <-chan struct{}
 
+	// Drain announces a restart before Stop closes; nil preserves legacy streams.
+	Drain *Drain
+
 	// UIDir, when set, serves the operator UI under /ui/ from this directory
 	// on disk instead of the embedded copy (vecnet-hub --dev-ui-dir), so an
 	// edit shows on refresh without a rebuild.

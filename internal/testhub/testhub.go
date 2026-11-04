@@ -37,6 +37,7 @@ type Env struct {
 	Worker         *push.Worker
 	Events         *events.Worker
 	OAuth          *oauth.Server
+	Drain          *httpapi.Drain
 	OperatorSecret string
 	OperatorPeer   string
 	Now            *FakeClock
@@ -100,7 +101,7 @@ func StartWithServer(t *testing.T, cfgFn func(*hub.Config), srvFn func(*http.Ser
 
 	// The handler is installed after the server exists so Config.PublicURL
 	// can carry the server's real URL; no request arrives before then.
-	env := &Env{T: t, Now: clock}
+	env := &Env{T: t, Now: clock, Drain: httpapi.NewDrain()}
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		(*env.handler.Load()).ServeHTTP(w, r)
 	}))
@@ -156,6 +157,7 @@ func (e *Env) Configure(f func(*httpapi.Deps)) {
 	// per-client limiter sets Deps.Limiter itself.
 	d.Limiter = nil
 	d.Stop = e.stop
+	d.Drain = e.Drain
 	if f != nil {
 		f(&d)
 	}

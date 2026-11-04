@@ -192,7 +192,7 @@ export async function bootDemo({ scale = false } = {}) {
       assert(secret, `no bearer for peer ${name}`);
       return fetch(demo.url + path, { method, headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json', 'X-Vecnet-Ingress': 'operator_ui' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     };
-    return { demo, dir, pid: child.pid, buildDir: binDir, close, asPeer, advance: by => control('advance', { by }), stall: duration => control('stall', { for: duration }), clear: name => control('clear', { control: name }), controlStatus: () => control('status', {}), fail: (prefix, status, duration) => control('fail', { prefix, status, for: duration }) };
+    return { demo, dir, pid: child.pid, buildDir: binDir, close, asPeer, advance: by => control('advance', { by }), restart: ms => control('restart', { retry_after_ms: ms }), stall: duration => control('stall', { for: duration }), clear: name => control('clear', { control: name }), controlStatus: () => control('status', {}), fail: (prefix, status, duration) => control('fail', { prefix, status, for: duration }) };
   } catch (error) { await close(); throw error; }
   finally { clearTimeout(timer); lines.close(); child.stdout.resume(); }
 }
@@ -215,7 +215,7 @@ export async function withDemo({ scale = false, signedIn = true } = {}, fn) {
     const requests = [];
     page.on('request', req => requests.push(req));
     const ctx = {
-      page, dir: env.dir, demo: env.demo, advance: env.advance, asPeer: env.asPeer,
+      page, dir: env.dir, demo: env.demo, advance: env.advance, restart: env.restart, asPeer: env.asPeer,
       allowConsole: regex => allowed.push(regex),
       countRequests: filter => requests.filter(req => typeof filter === 'function' ? filter(req) : filter instanceof RegExp ? filter.test(req.url()) : req.url().includes(filter)).length,
       shot: async name => { await page.evaluate(() => document.fonts.ready); await page.screenshot({ path: await shotPath(name) }); },

@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"io"
@@ -106,5 +107,30 @@ func TestActivityFeedMetadataOnly(t *testing.T) {
 		if f := s.next(t, 5*time.Second); f.Comment == "hb" {
 			break
 		}
+	}
+}
+
+func TestActivityRestartFrame(t *testing.T) {
+	env := testhub.Start(t)
+	d := httpapi.NewDrain()
+	env.Configure(func(deps *httpapi.Deps) { deps.Drain = d })
+	resp := openActivity(t, env, env.OperatorSecret)
+	if resp.StatusCode != 200 {
+		t.Fatalf("activity = %d", resp.StatusCode)
+	}
+	br := bufio.NewReader(resp.Body)
+	if got := readRawFrame(t, br); got != "retry: 3000\n\n" {
+		t.Fatalf("retry = %q", got)
+	}
+	if got := readRawFrame(t, br); got != "event: ready\ndata: {}\n\n" {
+		t.Fatalf("ready = %q", got)
+	}
+	d.Announce(1500 * time.Millisecond)
+	if got := readRawFrame(t, br); got != "event: hub_restarting\ndata: {\"retry_after_ms\":1500}\n\n" {
+		t.Fatalf("restart = %q", got)
+	}
+	expectRawEOF(t, br)
+	if !d.Wait(time.Second) {
+		t.Fatal("activity did not leave drain")
 	}
 }

@@ -42,6 +42,9 @@ type manifest struct {
 }
 
 type controls struct {
+	drain     *httpapi.Drain
+	restartMu sync.Mutex
+	streams   atomic.Int64
 	// wallNow and wait are injectable so control tests never race wall time.
 	wallNow      func() time.Time
 	wait         func(context.Context, time.Duration, <-chan struct{})
@@ -99,6 +102,26 @@ func (c *controls) handler(next http.Handler) http.Handler {
 				return
 			}
 			switch r.URL.Path {
+			case "/__demo/restart":
+				var in struct {
+					RetryAfterMS *int64 `json:"retry_after_ms"`
+				}
+				if !readControl(w, r, &in) {
+					return
+				}
+				if in.RetryAfterMS == nil || *in.RetryAfterMS < 0 || *in.RetryAfterMS > 60000 {
+					writeDemoError(w, http.StatusBadRequest, "invalid_body", "retry_after_ms must be in 0..60000")
+					return
+				}
+				// Serialize generations; stream handlers remain free to finish.
+				c.restartMu.Lock()
+				defer c.restartMu.Unlock()
+				streams := c.streams.Load()
+				c.drain.Announce(time.Duration(*in.RetryAfterMS) * time.Millisecond)
+				c.drain.Wait(2 * time.Second)
+				c.drain.Reset()
+				_ = json.NewEncoder(w).Encode(map[string]int64{"streams": streams})
+				return
 			case "/__demo/status":
 				if !readControl(w, r, &struct{}{}) {
 					return
@@ -210,6 +233,12 @@ func (c *controls) handler(next http.Handler) http.Handler {
 				writeDemoError(w, status, "demo_failure", "Demo failure")
 				return
 			}
+		}
+		// Count only the two transports participating in this demo restart.
+		// This wrapper keeps counting out of the production Drain interface.
+		if r.Method == http.MethodGet && (r.URL.Path == "/v1/events" || r.URL.Path == "/v1/admin/activity") {
+			c.streams.Add(1)
+			defer c.streams.Add(-1)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -339,7 +368,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, out io.Writer) err
 		return err
 	}
 	defer db.Close()
-	c := &controls{}
+	c := &controls{drain: httpapi.NewDrain()}
 	c.offset.Store(int64(7 * time.Minute))
 	cfg := hub.DefaultConfig()
 	cfg.DataDir = *dir
@@ -395,6 +424,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, out io.Writer) err
 	deps := stack.Deps()
 	deps.UIDir = *ui
 	deps.Stop = stop
+	deps.Drain = c.drain
 	srv := &http.Server{Handler: c.handler(httpapi.New(deps)), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	srv.RegisterOnShutdown(closeStop)
 	bgCtx, cancel := context.WithCancel(ctx)
