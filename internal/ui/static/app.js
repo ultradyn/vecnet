@@ -2,7 +2,7 @@
 // export mount(root, ctx) and return an unmount function. Beyond the plan's
 // list, ctx carries threadId on a thread route and the session's shared
 // `peers`, `threads` and `inboxHead` resources, so a screen need not refetch
-// them. The sidebar's Other Threads list is the shell's own (see renderOthers).
+// them. The sidebar's thread lists are the shell's own (see renderNav).
 // The operator secret stays in localStorage and travels only in
 // Authorization (PROTOCOL §2).
 import { activityAction } from './activity-model.js';
@@ -11,11 +11,11 @@ import { createApi } from './api.js';
 import * as compose from './compose.js';
 import * as dash from './dash.js';
 import { h, toast } from './dom.js';
-import { short, title } from './format.js';
+import { short } from './format.js';
 import * as inbox from './inbox.js';
 import * as matrix from './matrix.js';
 import * as presence from './presence.js';
-import { OTHER_PAGE, nextLimit, otherThreads } from './sidebar-model.js';
+import { OTHER_PAGE, nextLimit, otherThreads, yourThreads } from './sidebar-model.js';
 import { createStore } from './store.js';
 import * as threadAside from './thread-aside.js';
 import * as thread from './thread.js';
@@ -67,27 +67,31 @@ function renderNav(s, route) {
   $('nav-inbox').className = route.name === 'inbox' ? 'on' : '';
   $('nav-new').className = route.name === 'new' ? 'on' : '';
   $('nav-dash').className = route.name === 'dash' ? 'on' : '';
-  const rows = threads.map(t => {
-    const name = title(t, s.me, s.nameOf);
-    return h('a', { href: '#thread/' + t.thread_id, class: t.thread_id === route.id ? 'on' : '', title: name },
-      h('span', { class: 'tt', text: name }), h('span', { class: 'cnt', text: String(t.message_count ?? '') }));
+  const now = s.store.hubNow(), mineRes = s.mine;
+  const yours = yourThreads({
+    page: mineRes && mineRes.get(), summaries: s.threads.get() ? threads : null,
+    error: s.threads.error() || (mineRes && mineRes.error()), me: s.me, nameOf: s.nameOf, now,
   });
-  const none = s.threads.error() ? 'Threads unavailable' : s.threads.get() ? 'No threads yet' : '…';
-  $('threads').replaceChildren(...(rows.length ? rows : [h('div', { class: 'none', text: none })]));
-  renderOthers(s, route, threads);
+  $('threads').replaceChildren(...(yours.rows.length ? yours.rows.map(r => threadLink(r, route)) : [h('div', { class: 'none', text: yours.note })]));
+  renderOthers(s, route, threads, now);
 }
 
-// Other Threads: the newest threads the operator is not in, two lines each.
-// Peer strings go in as text only (dom.h), like the list above.
-function renderOthers(s, route, mine) {
+// One sidebar thread row, two lines (sidebar-model threadRow). Peer strings
+// go in as text only (dom.h).
+function threadLink(r, route) {
+  return h('a', { href: r.href, class: r.id === route.id ? 'on' : '', title: r.tip },
+    h('span', { class: 'tt' + (r.untitled ? ' un' : ''), text: r.title }), h('span', { class: 'cnt', text: r.count }),
+    h('span', { class: 'pp', text: r.people }), h('span', { class: 'ago', text: r.active }));
+}
+
+// Other Threads: the newest threads the operator is not in.
+function renderOthers(s, route, mine, now) {
   const res = s.others;
   const v = otherThreads({
     page: res && res.get(), error: res && res.error(), mine, me: s.me,
-    nameOf: s.nameOf, now: s.store.hubNow(), limit: s.otherLimit,
+    nameOf: s.nameOf, now, limit: s.otherLimit,
   });
-  const rows = v.rows.map(r => h('a', { href: r.href, class: r.id === route.id ? 'on' : '', title: r.tip },
-    h('span', { class: 'tt' + (r.untitled ? ' un' : ''), text: r.title }), h('span', { class: 'cnt', text: r.count }),
-    h('span', { class: 'pp', text: r.people }), h('span', { class: 'ago', text: r.active })));
+  const rows = v.rows.map(r => threadLink(r, route));
   const tail = v.more === 'show'
     ? h('button', { type: 'button', class: 'linkbtn more', text: 'Show more', onclick: () => { s.otherLimit = nextLimit(s.otherLimit); res.reload(); } })
     : v.more === 'dash' ? h('a', { href: '#dash', class: 'more', text: 'All threads on the dashboard' }) : null;
@@ -149,7 +153,7 @@ function start(secret) {
   const kindOf = id => { const p = byId().get(id); return p ? p.kind : (id || '').split('_')[0]; };
 
   const s = {
-    threads, inboxHead, nameOf, store, others: null, otherLimit: OTHER_PAGE,
+    threads, inboxHead, nameOf, store, mine: null, others: null, otherLimit: OTHER_PAGE,
     me: '', ctx: null, mounted: '', matrixHash: '', unmount: () => {}, offs: [],
     close() {
       stop.abort();
@@ -158,6 +162,7 @@ function start(secret) {
       $('view').replaceChildren();
       $('aside').replaceChildren();
       $('me').replaceChildren();
+      $('threads').replaceChildren();
       $('others').replaceChildren();
     },
   };
@@ -175,6 +180,10 @@ function start(secret) {
     // are left to its delivery Events.
     s.others = store.resource('threads', () => api.threads({ excludeParticipant: s.me, limit: s.otherLimit }));
     s.offs.push(s.others.subscribe(() => { if (session === s) renderRoute(s); }));
+    // Your Threads as ThreadRows, for their last activity; the shell's own
+    // list (GET /v1/threads) carries no times and stands in until this loads.
+    s.mine = store.resource('threads', () => api.threads({ participant: s.me, limit: 200 }));
+    s.offs.push(s.mine.subscribe(() => { if (session === s) renderRoute(s); }));
     s.offs.push(activity.subscribe(ev => {
       const mine = new Set(((threads.get() || {}).threads || []).map(t => t.thread_id));
       const act = activityAction(s.others.get(), ev, mine);
