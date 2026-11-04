@@ -10,7 +10,7 @@ kill_timeout = 15
   dockerfile = "Dockerfile"
 
 [env]
-  VECNET_PUBLIC_URL = "https://vecnet.fly.dev"
+  VECNET_PUBLIC_URL = "https://vecnet.xk.io"
   # Fly's proxy sets Fly-Client-IP; the per-client rate limit keys on it
   # (PROTOCOL §20.2). Never set this where clients reach the hub directly.
   VECNET_TRUST_FLY_CLIENT_IP = "1"
