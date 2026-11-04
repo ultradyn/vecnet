@@ -255,6 +255,9 @@ func (s *Server) now() time.Time {
 // authentication (401), then the per-method handling. Last-Event-ID is
 // never read.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	dw, r, diag := beginDiag(w, r)
+	w = dw
+	defer diag.log(s, dw, r)
 	if !s.originOK(r) {
 		httpErr(w, http.StatusForbidden, "forbidden", "Origin is not this hub's public origin")
 		return
@@ -278,6 +281,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, "internal", "internal")
 		return
 	}
+	diag.principal = p
 	if s.Touch != nil && p.Caller.PeerID != "" {
 		s.Touch(context.WithoutCancel(r.Context()), p.Caller.PeerID, "reachable")
 	}
@@ -317,7 +321,11 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, p Principal) {
 		return
 	}
 	req := pr.req
+	noteInitialize(r, req)
 	hv := r.Header.Get(hdrProtocolVersion)
+	if hv == ProtoCurrent && req.Method != "initialize" {
+		noteDiagProtocol(r, ProtoCurrent)
+	}
 
 	switch req.Method {
 	case "initialize":
@@ -359,6 +367,7 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, p Principal) {
 			httpErr(w, http.StatusNotFound, "session_not_found", "session not found")
 			return
 		}
+		noteDiagProtocol(r, sess.Proto)
 		if hv != "" && hv != sess.Proto {
 			httpErr(w, http.StatusBadRequest, "bad_request", "MCP-Protocol-Version does not match the session's protocol version")
 			return
@@ -518,6 +527,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, p Principal) {
 		httpErr(w, http.StatusNotFound, "session_not_found", "session not found")
 		return
 	}
+	noteDiagProtocol(r, sess.Proto)
 	if !accepts(r, "text/event-stream") {
 		httpErr(w, http.StatusNotAcceptable, "not_acceptable", "Accept must list text/event-stream")
 		return
