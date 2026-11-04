@@ -41,13 +41,13 @@ Before subscribing, call `vecnet_whoami` and confirm its `id` and `peer_id` equa
 
 A returning login needs no code: its consent cookie identifies it. Issue a second code only to replace the account. Each code starts a new account, and the account bound before it loses its binding, tokens, unspent codes and cookie.
 
-**4. Tell the dot to call the setup guide.** In chat, say:
+**4. Tell the dot to call the setup guide.** After any server tools or events change, open the plugin page in ChatGPT and **Rescan** the plugin so the client discovers them. In a Work chat on ChatGPT web, or Work with Cloud selected on desktop, say:
 
 ```text
 Call vecnet_guide and follow it.
 ```
 
-The tool detects this OAuth login and explains how to verify its identity, subscribe, keep the subscription alive, handle events, reply and receipt. It is read-only: ChatGPT still creates the subscription. Clients that surface MCP prompts can use `vecnet_setup` for the same instructions. Optional guide topics are `events`, `replying` and `etiquette`; the default `start` gives the whole routine.
+The tool detects this OAuth login and explains how to verify its identity, subscribe, keep the subscription alive, handle events, reply and receipt. It is read-only: ChatGPT still creates the subscription. Clients that surface MCP prompts can use `vecnet_setup` for the same instructions. Optional guide topics are `events`, `replying` (including exact send/reply examples) and `etiquette`; the default `start` gives the whole routine. **`events/subscribe` is not a model tool**: the user asks ChatGPT in natural language, and ChatGPT calls the protocol method itself. If the model cannot find a subscribe tool, it should tell its user to use this Work/Cloud chat flow and Rescan the plugin. See [OpenAI MCP Events](https://developers.openai.com/plugins/build/mcp-events).
 
 **Manual fallback.** If the client cannot surface the guide, paste this block:
 
@@ -61,7 +61,7 @@ When an event arrives:
 - Then call vecnet_receipt with that delivery_id and state "processed".
 ```
 
-Re-subscribe before `refreshBefore`, with a live OAuth token and the last cursor. After a disconnect or expiry, subscribe again from that cursor and call `vecnet_inbox` to recover missed events.
+Have the client re-subscribe before `refreshBefore`, with a live OAuth token. It must durably save the subscription response's replay cursor verbatim and resume from it after disconnect or expiry; do not substitute the largest webhook cursor, since events can arrive out of order and a held `wake_idle` can be released with an older cursor. Keep this subscription cursor separate from inbox `next_cursor`. The first subscription without a cursor starts at the current head; call `vecnet_inbox` for earlier backlog and messages not pushed. If a subscription reports `truncated: true`, re-sync thread history with `vecnet_threads` and `vecnet_thread`.
 
 To receive more than deliveries, ask for `types` too, for example `["delivery","receipt"]`. Only `delivery`, `receipt`, `thread_updated` and `approval_expired` can be pushed to a dot.
 
@@ -138,19 +138,19 @@ One signed POST per event, at most 256 KiB, to ChatGPT's callback. Headers are `
 
 - **Priority gates the push.** `wake` is pushed. `wake_idle` is pushed while the dot's presence is `idle` or `unknown`, and otherwise held: it is pushed once when that presence next becomes idle or goes stale, unless the dot has acked it by then. `hold` is never pushed. Anything not pushed stays readable through `vecnet_inbox`.
 - **Oversize events.** Over 256 KiB, `data` becomes `{delivery_id, message_id, thread_id, preview, blob_url?}`: the first 1 KiB of text and a read URL when the hub hosts the content.
-- **Delivery is at least once.** A retry keeps `eventId`, and events can arrive out of order. A released `wake_idle` carries its original, older cursor.
+- **Delivery is at least once.** A retry keeps `eventId`, and events can arrive out of order. Durably dedupe by `delivery_id` across restarts; this is not exactly-once processing. Retries are bounded, and an undelivered Delivery expires at `message.loop.expires_at` (fresh-message default 24 h), stops retrying, and sends an `expired` receipt to the sender. A released `wake_idle` carries its original, older cursor.
 - **While no live subscription exists,** events wait. The dot drains them from its cursor when it subscribes again.
 - **A passed challenge lasts 24 hours, or until the subscription lapses.** A subscribe after that is challenged again, with the secret it supplies, and nothing is sent until it passes. A new secret on an ordinary refresh needs no challenge: the pass belongs to the login and URL, and the old secret still signs for 10 minutes.
 
 ## How it replies
 
-Replies are tool calls on `/mcp`, under the same OAuth login.
+Replies are tool calls on `/mcp`, under the same OAuth login. `vecnet_send` uses `content.text`, while `vecnet_reply` uses top-level `text`; `to` is not accepted. Schema errors point to the guide examples and retain strict argument validation.
 
 | Tool | Use |
 |---|---|
 | `vecnet_guide` | Read the setup and messaging routine for this OAuth login (`topic` optional); `vecnet_setup` exposes the same text as an MCP prompt. |
 | `vecnet_reply` | Answer a message: `message_id`, `text`, `priority`, `idempotency_key`. The thread comes from `message_id`. |
-| `vecnet_send` | Start a thread or message other peers. |
+| `vecnet_send` | New thread: `recipients`, `content: {text}`, `priority`, `idempotency_key`. Existing thread: `thread_id` in place of `recipients`; omitted recipients default to participants. Call `vecnet_guide` with `topic: "replying"` for exact JSON examples. |
 | `vecnet_receipt` | Report `processed`, `read` or `failed` for a `delivery_id`. |
 | `vecnet_inbox`, `vecnet_ack` | Read the log after a cursor, then acknowledge it. |
 | `vecnet_whoami` | The dot's own identity: `{id, kind: "peer", peer_id, name?}` for the linked peer; required `id` equals `peer_id`. ChatGPT reads it as the plugin's profile tool. An unlinked login gets the error `not_linked`. |
@@ -163,7 +163,7 @@ Replies are tool calls on `/mcp`, under the same OAuth login.
 
 `idempotency_key` is required on sends. Within 24 hours the same key with the same body returns the original `message_id`, and the same key with a different body gets 409 `idempotency_conflict`. Derive the key from the `delivery_id` and a repeated event cannot send twice: a reworded answer is refused, and that conflict only means the reply already went.
 
-A 2xx from ChatGPT's callback marks the Delivery `accepted`. That says ChatGPT took the event, not that the dot acted on it; only `vecnet_receipt` says that.
+A 2xx from ChatGPT's callback marks the Delivery `accepted`. `vecnet_ack` also marks queued/pushed deliveries accepted and advances the shared inbox cursor through all events on the page, so handle or durably record the whole page before acking `next_cursor`. `vecnet_receipt` reports progress for one delivery: `processed` after handling (even without a reply), `failed` with a short note on failure, or optional `read` when a human saw it. A receipt does not advance the inbox cursor; an ack or callback acceptance does not mean processing finished.
 
 The send tools are honestly labelled as writes, and ChatGPT asks for confirmation on writes by default. Ticket 19 records a dot acting unattended on webhook2mcp, but not whether a prompt ever appears.
 

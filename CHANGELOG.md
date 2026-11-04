@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-05: extend the single-source MCP guide with runnable send/reply examples, ack/receipt, durable cursor/dedupe, priority/expiry and ChatGPT Work/Cloud/Rescan guidance; send schema errors point to the examples (guide.go, tools.go, PROTOCOL §4.6, connectors/dots.md).
 - 2026-11-05: add caller-aware read-only `vecnet_guide` and matching `vecnet_setup` MCP prompt for dot subscriptions and agent inbox/reply routines; discovery points to the shared guide (internal/mcpserver/guide.go, PROTOCOL §4.3/4.6, connectors/dots.md).
 - 2026-11-05: OAuth CIMD accepts a document preferring private_key_jwt when it also lists `none` (ChatGPT's real client.json); stored as a public client. internal/oauth/clients.go, PROTOCOL §4.5.
 - 2026-11-05: amend dot-oauth-xk plan/workflow args with peer-scoped OAuth callers, skew-safe rebind cutoff, no-store-compatible JWKS cache and all-fetch cooldown, pending 0019 and mandatory remote-only runner preflight (`docs/plans/2026-11-05-dot-oauth-xk.md`, `dot-oauth-xk.workflow-args.json`).

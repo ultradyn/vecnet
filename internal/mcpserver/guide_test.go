@@ -175,11 +175,11 @@ func TestGuide(t *testing.T) {
 							t.Fatalf("prompt differs: %s", prompt.Result)
 						}
 					}
-					needles := []string{"vecnet_reply", "message_id", "wake_idle", "reply-", "delivery_id", "idempotency_conflict", "vecnet_receipt", "processed", "untrusted", "vecnet_thread"}
+					needles := []string{"vecnet_reply", "message_id", "wake_idle", "reply-", "delivery_id", "idempotency_conflict", "vecnet_receipt", "processed", "untrusted", "vecnet_thread", "recipients", "content", "vecnet_ack", "accepted", "human", "read", "failed", "at-least-once", "expires_at", "durably", "hold", "working", "unknown"}
 					if tc.kind == "dot" {
-						needles = append(needles, "data.data.message.content.text", "data.preview", "vecnet_inbox", "refreshBefore", "id", "peer_id", "vecnet_whoami")
+						needles = append(needles, "data.data.message.content.text", "data.preview", "vecnet_inbox", "refreshBefore", "id", "peer_id", "vecnet_whoami", "not a model tool", "Work chat", "Cloud", "Rescan", "plugin page", "natural language", "events/subscribe")
 					} else {
-						needles = append(needles, "vecnet_inbox", "next_cursor", "vecnet_ack", "notifications/resources/updated", "vecnet_presence_subscribe", "cursor_purged", "oldest_cursor")
+						needles = append(needles, "vecnet_inbox", "next_cursor", "vecnet_ack", "notifications/resources/updated", "vecnet_presence_subscribe", "cursor_purged", "oldest_cursor", "cursor for other inbox events")
 					}
 					for _, needle := range needles {
 						if !strings.Contains(start.Text, needle) {
@@ -205,9 +205,9 @@ func TestGuideDiscoveryAndValidation(t *testing.T) {
 		t.Error("Instructions must point to vecnet_guide")
 	}
 	for _, method := range []string{"server/discover", "initialize"} {
-		params := map[string]any{}
+		params := map[string]any{"_meta": map[string]any{"protocolVersion": mcpserver.ProtoCurrent}}
 		if method == "initialize" {
-			params["protocolVersion"] = mcpserver.ProtoLegacy
+			params = map[string]any{"protocolVersion": mcpserver.ProtoLegacy}
 		}
 		_, r := rpc(t, env, secret, method, params)
 		var result struct {
@@ -262,5 +262,85 @@ func TestGuideDiscoveryAndValidation(t *testing.T) {
 	_, r = rpc(t, env, secret, "prompts/get", map[string]any{"name": "unknown"})
 	if r.Error == nil || r.Error.Code != mcpserver.ErrInvalidParams {
 		t.Errorf("unknown prompt: %+v", r.Error)
+	}
+}
+
+// Run the published examples through the real MCP tools, replacing only the
+// explicitly marked ids. This catches examples that look plausible but cannot
+// actually start a thread, post to it, or answer its message.
+func TestGuideMessagingExamples(t *testing.T) {
+	env := testhub.Start(t)
+	_, sender := env.NewPeer("session", "sender")
+	peer, recipient := env.NewPeer("session", "recipient")
+	var guide guideWire
+	_, r := rpc(t, env, sender, "tools/call", map[string]any{"name": "vecnet_guide", "arguments": map[string]any{"topic": "replying"}})
+	var guideTool toolResult
+	if r.Error != nil || json.Unmarshal(r.Result, &guideTool) != nil || json.Unmarshal(guideTool.StructuredContent, &guide) != nil {
+		t.Fatalf("guide: %s %+v", r.Result, r.Error)
+	}
+	var first sendResult
+	count := 0
+	for _, part := range strings.Split(guide.Text, "```json\n")[1:] {
+		raw := strings.SplitN(part, "```", 2)[0]
+		raw = strings.NewReplacer("<peer_id>", peer, "<thread_id>", first.ThreadID,
+			"<message_id>", first.MessageID, "<delivery_id>", firstDeliveryID(first)).Replace(raw)
+		var params struct {
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+		}
+		if err := json.Unmarshal([]byte(raw), &params); err != nil {
+			t.Fatalf("invalid guide example: %v", err)
+		}
+		var result sendResult
+		secret := sender
+		if params.Name == "vecnet_reply" {
+			secret = recipient
+		}
+		toolOK(t, env, secret, params.Name, params.Arguments, &result)
+		if count == 0 {
+			if params.Name != "vecnet_send" || len(result.Deliveries) != 1 || result.Deliveries[0].Recipient != peer {
+				t.Fatalf("new-thread example: %+v", result)
+			}
+			first = result
+		} else if result.ThreadID != first.ThreadID {
+			t.Fatalf("example %d left the thread: %+v", count, result)
+		}
+		count++
+	}
+	if count != 3 {
+		t.Fatalf("want new-thread send, existing-thread send and reply examples, got %d", count)
+	}
+}
+
+func firstDeliveryID(result sendResult) string {
+	if len(result.Deliveries) == 0 {
+		return ""
+	}
+	return result.Deliveries[0].DeliveryID
+}
+
+func TestGuideSchemaErrorRecovery(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "sender")
+	for _, name := range []string{"vecnet_send", "vecnet_reply"} {
+		for _, args := range []any{
+			map[string]any{"to": "peer_00000000000000000000000000", "text": "private-message-canary", "priority": "hold", "idempotency_key": "bad-shape"},
+			map[string]any{"priority": "hold", "idempotency_key": "missing-address", "content": map[string]any{"text": "hello"}},
+		} {
+			_, r := rpc(t, env, secret, "tools/call", map[string]any{"name": name, "arguments": args})
+			if r.Error == nil || r.Error.Code != mcpserver.ErrInvalidParams {
+				t.Fatalf("%s must still reject bad arguments: %+v", name, r)
+			}
+			if !strings.Contains(r.Error.Message, "vecnet_guide") || !strings.Contains(r.Error.Message, "replying") || !strings.Contains(r.Error.Message, "examples") {
+				t.Errorf("%s lacks actionable schema feedback: %s", name, r.Error.Message)
+			}
+			if strings.Contains(r.Error.Message, "private-message-canary") {
+				t.Error("schema hint exposed message content")
+			}
+			var data map[string]any
+			if json.Unmarshal(r.Error.Data, &data) != nil || data["path"] == nil {
+				t.Fatalf("schema feedback lost data.path: %s", r.Error.Data)
+			}
+		}
 	}
 }

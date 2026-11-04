@@ -138,7 +138,11 @@ func invalidArguments(name string, err error) error {
 	if !errors.As(err, &se) {
 		return err
 	}
-	return &RPCError{Code: ErrInvalidParams, Message: "invalid arguments for " + name + ": " + se.Message,
+	hint := ""
+	if name == "vecnet_send" || name == "vecnet_reply" {
+		hint = guideSendErrorHint
+	}
+	return &RPCError{Code: ErrInvalidParams, Message: "invalid arguments for " + name + ": " + se.Message + hint,
 		Data: map[string]any{"path": se.Path}}
 }
 
