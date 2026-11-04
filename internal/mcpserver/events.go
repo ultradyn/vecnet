@@ -270,6 +270,7 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 		return nil, err
 	}
 	if err := s.checkCallback(ctx, p.Delivery.URL); err != nil {
+		noteEventVerification(ctx, "refused", "egress_refused")
 		return nil, err
 	}
 	principal := PrincipalFromContext(ctx)
@@ -309,6 +310,7 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 	}
 	verify := !sub.Verified
 	if verify {
+		noteEventVerification(ctx, "pending", "")
 		if err := events.Challenge(ctx, s.EventsClient, sub, p.Delivery.Secret, s.now()); err != nil {
 			if created {
 				if err := s.Events.Delete(context.WithoutCancel(ctx), kind, id, p.Delivery.URL, p.Name, args); err != nil {
@@ -317,10 +319,15 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 			}
 			var failed events.ErrChallenge
 			if errors.As(err, &failed) {
+				noteEventVerification(ctx, "failed", failed.Reason)
 				return nil, callbackError(failed.Reason)
 			}
+			noteEventVerification(ctx, "failed", "internal_error")
 			return nil, err
 		}
+		noteEventVerification(ctx, "verified", "")
+	} else {
+		noteEventVerification(ctx, "cached", "")
 	}
 
 	// A given cursor always wins (ChatGPT passes its last saved one). Absent,

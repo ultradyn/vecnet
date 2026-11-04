@@ -189,7 +189,7 @@ func TestMCPRelayOlderClientVersion(t *testing.T) {
 	var init struct {
 		ProtocolVersion string `json:"protocolVersion"`
 	}
-	if err := json.Unmarshal(replies[0].Result, &init); err != nil || init.ProtocolVersion != "2025-11-25" {
+	if err := json.Unmarshal(replies[0].Result, &init); err != nil || init.ProtocolVersion != "2025-06-18" {
 		t.Fatalf("initialize = %s: %v", replies[0].Result, err)
 	}
 	relayTool(t, replies[1], nil)

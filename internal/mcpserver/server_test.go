@@ -319,12 +319,35 @@ func TestInitializeNegotiatesOlderVersion(t *testing.T) {
 			if err := json.Unmarshal(r.Result, &result); err != nil {
 				t.Fatal(err)
 			}
-			if result.ProtocolVersion != "2025-11-25" {
-				t.Fatalf("protocolVersion = %q, want 2025-11-25", result.ProtocolVersion)
+			wantVersion := version
+			if version == "2025-03-26" {
+				wantVersion = mcpserver.ProtoLegacy
+			} // March requires batch reception, which /mcp does not implement.
+			if result.ProtocolVersion != wantVersion {
+				t.Fatalf("protocolVersion = %q, want %s", result.ProtocolVersion, wantVersion)
 			}
-			got := toolNames(t, map[string]string{"Mcp-Session-Id": sid, "Accept": "application/json, text/event-stream"})
+			headers := map[string]string{"Mcp-Session-Id": sid, "MCP-Protocol-Version": wantVersion, "Accept": "application/json, text/event-stream"}
+			got := toolNames(t, headers)
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("legacy tool names = %v, current = %v", got, want)
+			}
+			resp, body = do(t, env, call{secret: secret, headers: headers,
+				body: map[string]any{"jsonrpc": "2.0", "id": 4, "method": "resources/list"}})
+			r = decodeRPC(t, body)
+			var resources struct {
+				Resources []struct {
+					URI string `json:"uri"`
+				} `json:"resources"`
+			}
+			if resp.StatusCode != http.StatusOK || r.Error != nil || json.Unmarshal(r.Result, &resources) != nil || len(resources.Resources) == 0 {
+				t.Fatalf("resources/list: %d %s", resp.StatusCode, body)
+			}
+			for _, method := range []string{"resources/subscribe", "resources/unsubscribe"} {
+				resp, body = do(t, env, call{secret: secret, headers: headers, body: map[string]any{"jsonrpc": "2.0", "id": 5, "method": method,
+					"params": map[string]any{"uri": resources.Resources[0].URI}}})
+				if r := decodeRPC(t, body); resp.StatusCode != http.StatusOK || r.Error != nil {
+					t.Fatalf("%s: %d %s", method, resp.StatusCode, body)
+				}
 			}
 			resp, body = do(t, env, call{secret: secret, client: traced, headers: modern(),
 				body: discover(2, "io.modelcontextprotocol/protocolVersion", mcpserver.ProtoCurrent)})

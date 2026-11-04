@@ -42,7 +42,7 @@ const (
 )
 
 // SupportedVersions is every revision /mcp accepts, newest first.
-var SupportedVersions = []string{ProtoCurrent, ProtoLegacy}
+var SupportedVersions = []string{ProtoCurrent, ProtoLegacy, "2025-06-18"}
 
 // Defaults for Server fields left zero.
 const (
@@ -71,9 +71,10 @@ var metaVersionKeys = []string{"io.modelcontextprotocol/protocolVersion", "proto
 // transient Session (ID "", Proto ProtoCurrent); a 2025-11-25 request gets
 // the session its initialize minted.
 type Session struct {
-	ID        string
-	Proto     string
-	Principal Principal
+	ID                        string
+	Proto                     string
+	Principal                 Principal
+	clientName, clientVersion string // bounded initialize metadata, never credentials
 
 	// 2025 only:
 	stream   *sseConn
@@ -276,7 +277,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusUnauthorized, "unauthenticated", "missing, unknown or revoked credential")
 			return
 		}
-		slog.Error("mcp: authenticate", "err", err)
 		httpErr(w, http.StatusInternalServerError, "internal", "internal")
 		return
 	}
@@ -313,6 +313,16 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, p Principal) {
 	pr := parseBody(body)
 	switch {
 	case pr.err != nil:
+		if d, _ := r.Context().Value(diagKey{}).(*requestDiag); d != nil {
+			var meta struct {
+				Method string `json:"method"`
+			}
+			_ = json.Unmarshal(body, &meta)
+			d.method = meta.Method
+			if d.method == "" {
+				d.method = "(invalid)"
+			}
+		}
 		writeRPCError(w, pr.errID, pr.err)
 		return
 	case pr.response:
@@ -320,7 +330,7 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, p Principal) {
 		return
 	}
 	req := pr.req
-	noteInitialize(r, req)
+	noteRequest(r, req)
 	hv := r.Header.Get(hdrProtocolVersion)
 	if hv == ProtoCurrent && req.Method != "initialize" {
 		noteDiagProtocol(r, ProtoCurrent)
@@ -332,7 +342,7 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, p Principal) {
 			httpErr(w, http.StatusNotAcceptable, "not_acceptable", "Accept must list application/json")
 			return
 		}
-		s.initialize(w, req, p)
+		s.initialize(w, r, req, p)
 		return
 	case "server/discover":
 		if hv == "" || hv != metaVersion(req) {
@@ -366,7 +376,7 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, p Principal) {
 			httpErr(w, http.StatusNotFound, "session_not_found", "session not found")
 			return
 		}
-		noteDiagProtocol(r, sess.Proto)
+		noteDiagSession(r, sess)
 		if hv != "" && hv != sess.Proto {
 			httpErr(w, http.StatusBadRequest, "bad_request", "MCP-Protocol-Version does not match the session's protocol version")
 			return
@@ -414,7 +424,13 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, sess *Session,
 	if req.IsNotification() {
 		if ok {
 			if _, err := h(ctx, sess, req); err != nil {
-				slog.Warn("mcp: notification handler", "method", req.Method, "err", err)
+				if d, _ := r.Context().Value(diagKey{}).(*requestDiag); d != nil {
+					d.code = ErrInternal
+					var re *RPCError
+					if errors.As(err, &re) {
+						d.rpcError(re)
+					}
+				}
 			}
 		}
 		if !st.streamed {
@@ -436,7 +452,6 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, sess *Session,
 	if err != nil {
 		var re *RPCError
 		if !errors.As(err, &re) {
-			slog.Error("mcp: handler", "method", req.Method, "err", err)
 			re = &RPCError{Code: ErrInternal, Message: "internal error"}
 		}
 		writeRPCError(w, req.ID, re)
@@ -457,9 +472,10 @@ func unsupportedVersion(requested string) *RPCError {
 		}}
 }
 
-// initialize opens a 2025-11-25 session for any non-empty requested revision.
-// Clients requesting another revision negotiate the legacy era.
-func (s *Server) initialize(w http.ResponseWriter, req *Request, p Principal) {
+// initialize echoes supported session revisions. Unknown revisions (and a
+// current-era client using initialize rather than discover) retain the legacy
+// fallback; the stateless current era is negotiated only by server/discover.
+func (s *Server) initialize(w http.ResponseWriter, r *http.Request, req *Request, p Principal) {
 	if req.IsNotification() {
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -477,7 +493,15 @@ func (s *Server) initialize(w http.ResponseWriter, req *Request, p Principal) {
 		writeRPCError(w, req.ID, unsupportedVersion(""))
 		return
 	}
-	sess := s.mint(p, ProtoLegacy)
+	proto := ProtoLegacy
+	if params.ProtocolVersion != ProtoCurrent && slices.Contains(SupportedVersions, params.ProtocolVersion) {
+		proto = params.ProtocolVersion
+	}
+	sess := s.mint(p, proto)
+	if d, _ := r.Context().Value(diagKey{}).(*requestDiag); d != nil {
+		sess.clientName, sess.clientVersion = diagTruncate(d.clientName, 64), diagTruncate(d.clientVersion, 64)
+	}
+	noteDiagSession(r, sess)
 	w.Header().Set(hdrSessionID, sess.ID)
 	writeResult(w, req.ID, map[string]any{
 		"protocolVersion": sess.Proto,
@@ -752,6 +776,11 @@ func accepts(r *http.Request, types ...string) bool {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	if dw, ok := w.(*diagResponse); ok {
+		if e, ok := v.(errorResponse); ok {
+			dw.diag.rpcError(e.Error)
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)

@@ -4,22 +4,100 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/logging"
 	"github.com/XertroV/vecnet/internal/mcpserver"
+	"github.com/XertroV/vecnet/internal/testhub"
+	"github.com/XertroV/vecnet/internal/webhook"
 )
 
 // diagAuth keeps these transport tests independent of credentials and the store.
 type diagAuth struct{ principal mcpserver.Principal }
 
+type diagFailureAuth struct{}
+
+func (diagFailureAuth) Authenticate(context.Context, *http.Request) (mcpserver.Principal, error) {
+	return mcpserver.Principal{}, errors.New("auth-secret-canary")
+}
+
 func (a diagAuth) Authenticate(context.Context, *http.Request) (mcpserver.Principal, error) {
 	return a.principal, nil
+}
+
+func TestMCPSubscribeDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		name, verification, reason string
+		code                       int64
+	}{
+		{"verified", "verified", "", 0}, {"cached", "cached", "", 0},
+		{"challenge failed", "failed", "challenge_failed", mcpserver.ErrCodeCallback},
+		{"timeout", "failed", "timeout", mcpserver.ErrCodeCallback},
+		{"egress refusal", "refused", "egress_refused", mcpserver.ErrCodeCallback},
+		{"invalid arguments", "not_attempted", "invalid_params", mcpserver.ErrInvalidParams},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testhub.Start(t)
+			_, bearer := env.NewPeer("session", "diagnostic subscription")
+			cb := testhub.NewCallback(t)
+			if tc.name == "challenge failed" {
+				cb.OnChallenge(func(_ string, w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) })
+			}
+			if tc.name == "timeout" {
+				release := make(chan struct{})
+				t.Cleanup(func() { close(release) })
+				cb.OnChallenge(func(_ string, _ http.ResponseWriter, r *http.Request) {
+					select {
+					case <-r.Context().Done():
+					case <-release:
+					}
+				})
+			}
+			front := eventsFront(t, env, nil, func(s *mcpserver.Server) {
+				s.EventsClient = env.Hub.EgressPolicy().Client(30 * time.Millisecond)
+				if tc.name == "egress refusal" {
+					s.Egress.AllowPrivate = false
+				}
+			})
+			whsec := webhook.NewSecret()
+			params := subParams(cb.URL+"?callback-query-canary", whsec, map[string]any{"arguments": map[string]any{"types": []string{"delivery"}}})
+			if tc.name == "cached" {
+				subscribeOK(t, front, bearer, params)
+			}
+			if tc.name == "invalid arguments" {
+				params["arguments"].(map[string]any)["secret-key-canary"] = "argument-canary"
+			}
+			capture, output := captureDiag(t)
+			rpc2026(t, front, bearer, "events/subscribe", params)
+			var records []slog.Record
+			for _, r := range capture.records {
+				if r.Message == "mcp: request" {
+					records = append(records, r)
+				}
+			}
+			if len(records) != 1 {
+				t.Fatalf("got %d request logs: %s", len(records), output)
+			}
+			f := diagFields(records[0])
+			if f["event_name"] != "vecnet.message" || f["delivery_mode"] != "webhook" || f["callback_host"] != "127.0.0.1" ||
+				f["verification"] != tc.verification || f["reason"] != tc.reason || f["code"] != tc.code || !reflect.DeepEqual(f["argument_keys"], []string{"types"}) {
+				t.Errorf("subscribe diagnostics: %v", f)
+			}
+			for _, secret := range []string{bearer, whsec, "/hook/path-with-token", "callback-query-canary", "secret-key-canary", "argument-canary"} {
+				if strings.Contains(output.String(), secret) {
+					t.Errorf("diagnostics leaked canary: %s", output)
+				}
+			}
+		})
+	}
 }
 
 type diagCapture struct {
@@ -102,14 +180,13 @@ func TestMCPInitializeDiagnostics(t *testing.T) {
 			}
 			fields := diagFields(r)
 			want := map[string]any{
+				"method": "initialize", "result": "ok", "code": int64(0),
 				"client_name": strings.Repeat("界", 64), "client_version": strings.Repeat("版", 64),
 				"requested_protocol_version": "2024-11-05", "negotiated_protocol_version": mcpserver.ProtoLegacy,
 				"origin_present": true, "accept": "application/json," + strings.Repeat("界", 83),
 				"session_present": true, "caller_kind": tc.kind,
 			}
-			if tc.p.Caller.PeerID != "" {
-				want["peer_id"] = tc.p.Caller.PeerID
-			}
+			want["peer_id"] = tc.p.Caller.PeerID
 			assertDiagFields(t, fields, want)
 			assertDiagNoSecrets(t, output.String())
 		})
@@ -170,8 +247,12 @@ func TestMCPRefusalDiagnostics(t *testing.T) {
 				t.Fatalf("refusal diagnostic records = %d, want 1; %s", len(capture.records), output)
 			}
 			r := capture.records[0]
-			if r.Level != slog.LevelWarn {
-				t.Errorf("refusal level = %s, want WARN", r.Level)
+			wantLevel := slog.LevelWarn
+			if r.Message == "mcp: request" {
+				wantLevel = slog.LevelInfo
+			}
+			if r.Level != wantLevel {
+				t.Errorf("refusal level = %s, want %s", r.Level, wantLevel)
 			}
 			fields := diagFields(r)
 			if fields["caller_kind"] != tc.caller {
@@ -243,6 +324,90 @@ func TestMCPAllowedForeignOriginDiagnostics(t *testing.T) {
 				t.Errorf("foreign origin diagnostics: %v", fields)
 			}
 			assertDiagNoSecrets(t, output.String())
+		})
+	}
+}
+
+func TestMCPMethodDiagnostics(t *testing.T) {
+	capture, output := captureDiag(t)
+	s := mcpserver.New(nil, diagAuth{mcpserver.Principal{Caller: auth.Caller{Kind: "peer", PeerID: "peer_diag"}}}, "https://hub.example")
+	s.Register("diag/fail", func(context.Context, *mcpserver.Session, *mcpserver.Request) (any, error) {
+		return nil, errors.New("message-canary-do-not-log")
+	})
+	body := initialize(1, "2025-03-26")
+	body["params"].(map[string]any)["clientInfo"] = map[string]any{"name": "ChatGPT", "version": "1"}
+	initialized := diagRequest(s, http.MethodPost, body, nil)
+	headers := map[string]string{"Mcp-Session-Id": initialized.Header().Get("Mcp-Session-Id")}
+	for _, tc := range []struct {
+		method, tool string
+		code         int64
+	}{
+		{"events/list", "", 0}, {"tools/list", "", 0}, {"prompts/list", "", 0},
+		{"tools/call", "unknown_tool", mcpserver.ErrInvalidParams}, {"missing/method", "", mcpserver.ErrMethodNotFound},
+		{"diag/fail", "", mcpserver.ErrInternal},
+	} {
+		before := len(capture.records)
+		diagRequest(s, http.MethodPost, map[string]any{"jsonrpc": "2.0", "id": 2, "method": tc.method,
+			"params": map[string]any{"name": tc.tool, "arguments": map[string]any{"text": "message-canary-do-not-log", "secret": "argument-canary-do-not-log"}}}, headers)
+		if len(capture.records) != before+1 {
+			t.Fatalf("%s: got %d new records: %s", tc.method, len(capture.records)-before, output)
+		}
+		record := capture.records[before]
+		f := diagFields(record)
+		wantResult := "ok"
+		if tc.code != 0 {
+			wantResult = "error"
+		}
+		if record.Message != "mcp: request" || record.Level != slog.LevelInfo || f["method"] != tc.method || f["result"] != wantResult || f["code"] != tc.code ||
+			f["caller_kind"] != "peer" || f["peer_id"] != "peer_diag" || f["client_name"] != "ChatGPT" || f["session_present"] != true {
+			t.Errorf("%s diagnostics: %v (%s)", tc.method, f, record.Message)
+		}
+		if tc.tool != "" && f["tool_name"] != tc.tool {
+			t.Errorf("tool_name = %v", f["tool_name"])
+		}
+	}
+	before := len(capture.records)
+	diagRequest(s, http.MethodPost, map[string]any{"jsonrpc": "2.0", "id": 3, "method": "ping"}, headers)
+	if len(capture.records) != before {
+		t.Error("successful ping must not log")
+	}
+	assertDiagNoSecrets(t, output.String())
+	for _, secret := range []string{"message-canary-do-not-log", "argument-canary-do-not-log"} {
+		if strings.Contains(output.String(), secret) {
+			t.Errorf("diagnostics leaked %s", secret)
+		}
+	}
+}
+
+func TestMCPEarlyFailureDiagnostics(t *testing.T) {
+	peer := diagAuth{mcpserver.Principal{Caller: auth.Caller{Kind: "peer", PeerID: "peer_diag"}}}
+	for _, tc := range []struct {
+		name, method string
+		auth         mcpserver.Authenticator
+		headers      map[string]string
+		status       int64
+	}{
+		{"unauthenticated", http.MethodPost, mcpserver.Chain{}, nil, 401},
+		{"authentication failure", http.MethodPost, diagFailureAuth{}, nil, 500},
+		{"content type", http.MethodPost, peer, map[string]string{"Content-Type": "text/plain"}, 415},
+		{"http method", http.MethodPut, peer, nil, 405},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture, output := captureDiag(t)
+			s := mcpserver.New(nil, tc.auth, "https://hub.example")
+			w := diagRequest(s, tc.method, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "events/subscribe", "params": map[string]any{"secret": "body-canary-do-not-log"}}, tc.headers)
+			if int64(w.Code) != tc.status || len(capture.records) != 1 {
+				t.Fatalf("status=%d logs=%d: %s", w.Code, len(capture.records), output)
+			}
+			r := capture.records[0]
+			f := diagFields(r)
+			if r.Message != "mcp: request" || r.Level != slog.LevelInfo || f["result"] != "error" || f["code"] != tc.status || f["method"] != "(unparsed)" {
+				t.Fatalf("diagnostics: %v", f)
+			}
+			assertDiagNoSecrets(t, output.String())
+			if strings.Contains(output.String(), "auth-secret-canary") {
+				t.Error("auth error leaked")
+			}
 		})
 	}
 }
