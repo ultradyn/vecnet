@@ -1,8 +1,11 @@
 package mcpserver_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -218,10 +221,11 @@ func uriFormats(v any, into map[string]bool) {
 }
 
 type listedTool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
-	Annotations *struct {
+	Name         string         `json:"name"`
+	Description  string         `json:"description"`
+	InputSchema  map[string]any `json:"inputSchema"`
+	OutputSchema map[string]any `json:"outputSchema"`
+	Annotations  *struct {
 		ReadOnlyHint    bool  `json:"readOnlyHint"`
 		IdempotentHint  bool  `json:"idempotentHint"`
 		DestructiveHint *bool `json:"destructiveHint"`
@@ -365,12 +369,12 @@ func TestToolsListNamesAndHints(t *testing.T) {
 	}
 
 	want := []string{
-		"vecnet_ack", "vecnet_clear_avatar", "vecnet_group_add", "vecnet_group_create", "vecnet_groups",
+		"vecnet_ack", "vecnet_blob_get", "vecnet_blob_put", "vecnet_clear_avatar", "vecnet_group_add", "vecnet_group_create", "vecnet_groups",
 		"vecnet_inbox", "vecnet_peer_create", "vecnet_peer_set_disabled", "vecnet_peers", "vecnet_presence", "vecnet_presence_subscribe", "vecnet_react", "vecnet_receipt",
 		"vecnet_reply", "vecnet_send", "vecnet_set_avatar", "vecnet_thread", "vecnet_threads", "vecnet_whoami",
 	}
 	var got []string
-	readOnly := map[string]bool{"vecnet_groups": true, "vecnet_inbox": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true, "vecnet_whoami": true}
+	readOnly := map[string]bool{"vecnet_blob_get": true, "vecnet_groups": true, "vecnet_inbox": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true, "vecnet_whoami": true}
 	for _, tool := range tools {
 		got = append(got, tool.Name)
 		if tool.Annotations == nil {
@@ -1897,6 +1901,253 @@ func TestPeerSetDisabledTool(t *testing.T) {
 				http.MethodPost, "/v1/messages", send, http.StatusForbidden, "forbidden")
 		} else {
 			toolOK(t, env, secret, "vecnet_send", send, nil)
+		}
+	}
+}
+
+func TestBlobPutGetRoundTrip(t *testing.T) {
+	env := testhub.Start(t)
+	_, sender := env.NewPeer("session", "sender")
+	recipient, reader := env.NewPeer("session", "recipient")
+	data := make([]byte, 150<<10)
+	if _, err := rand.Read(data); err != nil {
+		t.Fatal(err)
+	}
+	var put struct {
+		SHA256 string `json:"sha256"`
+		Size   int    `json:"size"`
+	}
+	toolOK(t, env, sender, "vecnet_blob_put", map[string]any{
+		"data_base64": base64.StdEncoding.EncodeToString(data), "media_type": "application/octet-stream", "ttl_seconds": 3600,
+	}, &put)
+	if want := fmt.Sprintf("%x", sha256.Sum256(data)); put.SHA256 != want || put.Size != len(data) {
+		t.Fatalf("put = %+v, want sha256 %s, size %d", put, want, len(data))
+	}
+	toolOK(t, env, sender, "vecnet_send", map[string]any{
+		"idempotency_key": "blob-round-trip", "recipients": []string{recipient}, "priority": "hold",
+		"content": map[string]any{"text": "attached"}, "attachments": []any{map[string]any{
+			"sha256": put.SHA256, "size": put.Size, "media_type": "application/octet-stream",
+		}},
+	}, nil)
+	type blobPage struct {
+		SHA256     string `json:"sha256"`
+		MediaType  string `json:"media_type"`
+		Size       int    `json:"size"`
+		Offset     int    `json:"offset"`
+		NextOffset *int   `json:"next_offset"`
+		Encoding   string `json:"encoding"`
+		Data       string `json:"data"`
+	}
+	var combined []byte
+	for i, offset := range []int{0, 128 << 10} {
+		args := map[string]any{"sha256": put.SHA256}
+		if i > 0 {
+			args["offset"] = offset
+			args["limit"] = 128 << 10
+		}
+		var page blobPage
+		toolOK(t, env, reader, "vecnet_blob_get", args, &page)
+		if page.SHA256 != put.SHA256 || page.MediaType != "application/octet-stream" || page.Size != len(data) || page.Offset != offset || page.Encoding != "base64" {
+			t.Fatalf("page metadata = sha %s type %s size %d offset %d encoding %s", page.SHA256, page.MediaType, page.Size, page.Offset, page.Encoding)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(page.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantSize := 128 << 10
+		if i == 1 {
+			wantSize = 22 << 10
+		}
+		if len(decoded) != wantSize {
+			t.Fatalf("page %d: %d bytes, want %d", i, len(decoded), wantSize)
+		}
+		if i == 0 && (page.NextOffset == nil || *page.NextOffset != 128<<10) || i == 1 && page.NextOffset != nil {
+			t.Fatalf("page %d next_offset = %v", i, page.NextOffset)
+		}
+		combined = append(combined, decoded...)
+	}
+	if !bytes.Equal(combined, data) {
+		t.Fatal("paginated blob differs from uploaded bytes")
+	}
+	var small blobPage
+	res := verbatimResult(t, env, reader, "vecnet_blob_get", fmt.Sprintf(`{"sha256":%q,"offset":5.0,"limit":1e1}`, put.SHA256))
+	if res.IsError || json.Unmarshal(res.StructuredContent, &small) != nil || small.Offset != 5 || small.Data != base64.StdEncoding.EncodeToString(data[5:15]) || small.NextOffset == nil || *small.NextOffset != 15 {
+		t.Fatalf("explicit short page = %s", res.StructuredContent)
+	}
+	for _, offset := range []int{len(data), len(data) + 1} {
+		var end map[string]any
+		toolOK(t, env, reader, "vecnet_blob_get", map[string]any{"sha256": put.SHA256, "offset": offset}, &end)
+		if next, exists := end["next_offset"]; !exists || next != nil || end["data"] != "" || end["offset"] != float64(offset) {
+			t.Fatalf("EOF page = %v", end)
+		}
+	}
+	for _, tc := range []struct {
+		field string
+		value any
+	}{
+		{"offset", -1}, {"offset", 0.5}, {"limit", 0}, {"limit", (128 << 10) + 1}, {"limit", 1.5},
+	} {
+		if path := invalidPath(t, env, reader, "vecnet_blob_get", map[string]any{"sha256": put.SHA256, tc.field: tc.value}); path != "/"+tc.field {
+			t.Fatalf("%s=%v: path = %q", tc.field, tc.value, path)
+		}
+	}
+}
+
+func TestBlobPutCap(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "uploader")
+	data := bytes.Repeat([]byte{'x'}, (160<<10)+1)
+	e := toolFails(t, env, secret, "vecnet_blob_put", map[string]any{
+		"data_base64": base64.StdEncoding.EncodeToString(data), "media_type": "text/plain",
+	}, "payload_too_large")
+	if e.Error.Details["limit"] != float64(163840) {
+		t.Fatalf("limit = %v", e.Error.Details["limit"])
+	}
+	sha := fmt.Sprintf("%x", sha256.Sum256(data))
+	resp, body := env.Do(env.OperatorSecret, "GET", "/v1/blobs/"+sha, nil)
+	var httpErr toolErrorBody
+	if resp.StatusCode != http.StatusNotFound || json.Unmarshal(body, &httpErr) != nil || httpErr.Error.Code != "unknown_blob" {
+		t.Fatalf("rejected blob GET: %d %s", resp.StatusCode, body)
+	}
+	toolOK(t, env, secret, "vecnet_blob_put", map[string]any{
+		"data_base64": base64.StdEncoding.EncodeToString(data[:160<<10]), "media_type": "text/plain",
+	}, nil)
+	if path := invalidPath(t, env, secret, "vecnet_blob_put", map[string]any{"data_base64": "%%%", "media_type": "text/plain"}); path != "/data_base64" {
+		t.Fatalf("invalid base64 path = %q", path)
+	}
+	for _, encoded := range []string{"aGk=", "aGk", " aG\tk=\r\n"} {
+		var put map[string]any
+		toolOK(t, env, secret, "vecnet_blob_put", map[string]any{"data_base64": encoded, "media_type": "text/plain"}, &put)
+		if put["sha256"] != fmt.Sprintf("%x", sha256.Sum256([]byte("hi"))) || put["size"] != float64(2) {
+			t.Fatalf("base64 %q: %v", encoded, put)
+		}
+	}
+	env.Hub.Blobs.DailyQuota = 1
+	toolFails(t, env, secret, "vecnet_blob_put", map[string]any{"data_base64": "bmV3", "media_type": "text/plain"}, "upload_quota_exceeded")
+}
+
+func TestBlobGetParticipantOnly(t *testing.T) {
+	env := testhub.Start(t)
+	_, sender := env.NewPeer("session", "sender")
+	recipient, reader := env.NewPeer("session", "recipient")
+	_, outsider := env.NewPeer("session", "outsider")
+	var put map[string]any
+	toolOK(t, env, sender, "vecnet_blob_put", map[string]any{"data_base64": "aGk=", "media_type": "text/plain"}, &put)
+	sha := put["sha256"].(string)
+	// Uploading alone does not grant bearer read access.
+	toolFails(t, env, sender, "vecnet_blob_get", map[string]any{"sha256": sha}, "forbidden")
+	toolOK(t, env, sender, "vecnet_send", map[string]any{
+		"idempotency_key": "participant-blob", "recipients": []string{recipient}, "priority": "hold",
+		"content": map[string]any{"text": "attached"}, "attachments": []any{map[string]any{
+			"sha256": sha, "size": 2, "media_type": "text/plain",
+		}},
+	}, nil)
+	toolOK(t, env, reader, "vecnet_blob_get", map[string]any{"sha256": sha}, nil)
+	resp, body := env.Do(outsider, "GET", "/v1/blobs/"+sha, nil)
+	var httpErr toolErrorBody
+	if resp.StatusCode != http.StatusForbidden || json.Unmarshal(body, &httpErr) != nil || httpErr.Error.Code != "forbidden" {
+		t.Fatalf("outsider HTTP GET: %d %s", resp.StatusCode, body)
+	}
+	toolFails(t, env, outsider, "vecnet_blob_get", map[string]any{"sha256": sha}, httpErr.Error.Code)
+	res := callTool(t, env, outsider, "vecnet_blob_get", map[string]any{"sha256": sha})
+	var result map[string]any
+	if json.Unmarshal(res.StructuredContent, &result) != nil {
+		t.Fatal("invalid error result")
+	}
+	var walk func(any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, child := range x {
+				if k == "data" {
+					t.Fatal("refused blob read leaked data")
+				}
+				walk(child)
+			}
+		case []any:
+			for _, child := range x {
+				walk(child)
+			}
+		}
+	}
+	walk(result)
+	// Malformed hashes retain the HTTP endpoint's hub-level refusal.
+	toolFails(t, env, outsider, "vecnet_blob_get", map[string]any{"sha256": "bad"}, "unknown_blob")
+}
+
+func TestBlobToolsTakeNoURL(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "uploader")
+	status, r := rpc(t, env, secret, "tools/list", nil)
+	var listed struct {
+		Tools []listedTool `json:"tools"`
+	}
+	if status != http.StatusOK || r.Error != nil || json.Unmarshal(r.Result, &listed) != nil {
+		t.Fatalf("tools/list: %d %s", status, r.Result)
+	}
+	for _, name := range []string{"vecnet_blob_put", "vecnet_blob_get", "vecnet_send"} {
+		i := slices.IndexFunc(listed.Tools, func(x listedTool) bool { return x.Name == name })
+		if i < 0 {
+			t.Fatalf("tools/list missing %s", name)
+		}
+		tool := listed.Tools[i]
+		if tool.InputSchema["additionalProperties"] != false {
+			t.Fatalf("%s input is not closed", name)
+		}
+		names := map[string]bool{}
+		propertyNames(tool.InputSchema, names)
+		if name != "vecnet_send" {
+			if tool.OutputSchema["additionalProperties"] != false {
+				t.Fatalf("%s output is not closed", name)
+			}
+			propertyNames(tool.OutputSchema, names)
+		}
+		for key := range names {
+			if strings.Contains(strings.ToLower(key), "url") {
+				t.Errorf("%s schema exposes %s", name, key)
+			}
+		}
+		if name == "vecnet_blob_put" {
+			props := tool.InputSchema["properties"].(map[string]any)
+			if props["data_base64"].(map[string]any)["maxLength"] != float64(218456) {
+				t.Fatal("blob base64 schema cap differs from avatar cap")
+			}
+		}
+	}
+	var put map[string]any
+	toolOK(t, env, secret, "vecnet_blob_put", map[string]any{"data_base64": "aGk=", "media_type": "text/plain"}, &put)
+	var get map[string]any
+	toolOK(t, env, env.OperatorSecret, "vecnet_blob_get", map[string]any{"sha256": put["sha256"]}, &get)
+	for name, result := range map[string]map[string]any{"vecnet_blob_put": put, "vecnet_blob_get": get} {
+		want := []string{"sha256", "size"}
+		if name == "vecnet_blob_get" {
+			want = []string{"sha256", "media_type", "size", "offset", "next_offset", "encoding", "data"}
+		}
+		if len(result) != len(want) {
+			t.Fatalf("%s output keys = %v", name, result)
+		}
+		for _, key := range want {
+			if _, ok := result[key]; !ok {
+				t.Fatalf("%s output missing %s", name, key)
+			}
+		}
+		for _, key := range []string{"url", "origin_url", "blob_url", "callback_url", "bearer", "extra"} {
+			args := map[string]any{"sha256": put["sha256"]}
+			if name == "vecnet_blob_put" {
+				args = map[string]any{"data_base64": "aGk=", "media_type": "text/plain"}
+			}
+			args[key] = "https://example.invalid/?t=secret"
+			if path := invalidPath(t, env, secret, name, args); path != "/"+key {
+				t.Fatalf("%s accepts %s: path %q", name, key, path)
+			}
+		}
+	}
+	for _, key := range []string{"origin_url", "blob_url"} {
+		if path := invalidPath(t, env, secret, "vecnet_send", map[string]any{
+			"idempotency_key": "reject-url-" + key, "recipients": []string{env.OperatorPeer}, "priority": "hold", "content": map[string]any{"text": "attached"},
+			"attachments": []any{map[string]any{"sha256": put["sha256"], "size": 2, "media_type": "text/plain", key: "https://example.invalid"}},
+		}); path != "/attachments/0/"+key {
+			t.Fatalf("send accepts attachment %s: %q", key, path)
 		}
 	}
 }
