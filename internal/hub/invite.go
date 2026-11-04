@@ -69,11 +69,12 @@ func (h *Hub) ReissueEnrolToken(ctx context.Context, peerID string, ttl time.Dur
 // InviteInfo is what an invite says about its peer besides the token.
 type InviteInfo struct {
 	Name, PrincipalID string
-	NameOpen          bool // the agent picks its name at enrol
+	NameOpen          bool   // the agent picks its name at enrol
+	Owner             string // the operator principal's name, for "<owner>'s hub"
 }
 
 // InviteInfo reads peerID's name, principal and whether its name is still
-// open; 404 not_found for an unknown peer.
+// open, and the operator's name; 404 not_found for an unknown peer.
 func (h *Hub) InviteInfo(ctx context.Context, peerID string) (InviteInfo, error) {
 	var in InviteInfo
 	var open int
@@ -85,5 +86,10 @@ func (h *Hub) InviteInfo(ctx context.Context, peerID string) (InviteInfo, error)
 		return in, fmt.Errorf("hub: invite info: %w", err)
 	}
 	in.NameOpen = open != 0
+	err = h.DB.QueryRowContext(ctx, `SELECT p.name FROM principals p JOIN credentials c ON c.subject_id = p.prn_id
+		WHERE c.kind = 'operator' AND c.revoked_at IS NULL ORDER BY c.created_at LIMIT 1`).Scan(&in.Owner)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return in, fmt.Errorf("hub: invite owner: %w", err)
+	}
 	return in, nil
 }

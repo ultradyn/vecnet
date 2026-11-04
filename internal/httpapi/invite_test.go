@@ -16,6 +16,7 @@ type inviteResp struct {
 	EnrolToken     string `json:"enrol_token"`
 	EnrolExpiresAt string `json:"enrol_expires_at"`
 	HubURL         string `json:"hub_url"`
+	HubOwner       string `json:"hub_owner"`
 }
 
 func decodeInvite(t *testing.T, raw []byte) inviteResp {
@@ -35,6 +36,9 @@ func TestAddPeerEnrolTTL(t *testing.T) {
 	p := decodeInvite(t, raw)
 	if want := envelope.FormatTime(env.Now.Now().Add(time.Hour)); p.EnrolExpiresAt != want {
 		t.Fatalf("enrol_expires_at = %q, want %q", p.EnrolExpiresAt, want)
+	}
+	if p.HubOwner == "" {
+		t.Fatalf("hub_owner is empty: %s", raw)
 	}
 	if p.HubURL != env.Hub.Cfg.PublicURL || p.HubURL == "" {
 		t.Fatalf("hub_url = %q, want %q", p.HubURL, env.Hub.Cfg.PublicURL)

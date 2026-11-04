@@ -55,7 +55,7 @@ function openInvite(ctx, onCreated, opener) {
     try {
       const res = await ctx.api.addPeer(body);
       if (!dialog.isConnected) return; // closed while it ran
-      showResult(invite(n, res, location.origin));
+      showResult(invite(res, location.origin, !!n));
       if (onCreated) onCreated();
     } catch (x) {
       err.textContent = (x && x.code && x.code !== 'network' ? x.code + ': ' : '') + ((x && x.message) || String(x));
@@ -74,7 +74,7 @@ function openInvite(ctx, onCreated, opener) {
     body.replaceChildren(
       h('p', { class: 'inv-warn', role: 'note', text: 'Shown once — it grants a new identity on your hub. Paste it only to the agent it is for.' }),
       text,
-      h('p', { class: 'inv-meta mono' }, (inv.open ? 'name and profile chosen at enrol' : 'profile ' + inv.profile) + ' · peer ' + inv.peerId + ' · expires ', h('time', { text: inv.expires })),
+      h('p', { class: 'inv-meta mono' }, 'profile ' + inv.profile + (inv.open ? ' · name chosen at enrol' : '') + ' · peer ' + inv.peerId + ' · expires ', h('time', { text: inv.expires })),
       h('div', { class: 'inv-acts' }, h('button', { type: 'button', class: 'btn', text: 'Done', onclick: () => close() }), copy));
     copy.focus();
   }

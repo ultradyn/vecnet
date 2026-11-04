@@ -3,7 +3,7 @@
 // matches the CLI's (invite-model.js, pinned by internal/cli/testdata/
 // invite.json), enrols for real, and leaves no token behind once closed.
 import { assert, cleanBuild, scrollIntoViewStable, withDemo } from './lib.mjs';
-import { inviteBlock, inviteOpenBlock } from '../../internal/ui/static/invite-model.js';
+import { inviteBlock } from '../../internal/ui/static/invite-model.js';
 
 try {
   await withDemo({}, async ctx => {
@@ -53,7 +53,8 @@ try {
     await pre.waitFor();
     const text = await pre.textContent();
     assert(res.hub_url === demo.url, `hub_url ${res.hub_url}`);
-    assert(text === inviteBlock(res.hub_url, 'web-repo-claude', res.enrol_token, res.enrol_expires_at), `invite text:\n${text}`);
+    assert(text === inviteBlock({ owner: res.hub_owner, hubURL: res.hub_url, profile: 'web-repo-claude', token: res.enrol_token, expires: res.enrol_expires_at }), `invite text:\n${text}`);
+    assert(text.split('\n').length <= 6 && !/[$;]/.test(text), 'the invite is not a short plain block');
     await dlg.locator('.inv-warn', { hasText: 'Shown once' }).waitFor();
     await dlg.locator('.inv-meta time', { hasText: res.enrol_expires_at }).waitFor();
     await dlg.getByRole('button', { name: 'Copy invite' }).click();
@@ -92,8 +93,8 @@ try {
     const ores = await (await openAnswer).json();
     assert(ores.name_open === true && ores.name === 'helper bot', `open answer ${JSON.stringify({ ...ores, enrol_token: '…' })}`);
     const otext = await dlg.locator('pre.inv-block').textContent();
-    assert(otext === inviteOpenBlock(ores.hub_url, 'helper bot', ores.enrol_token, ores.enrol_expires_at), `open invite text:\n${otext}`);
-    await dlg.locator('.inv-meta', { hasText: 'name and profile chosen at enrol' }).waitFor();
+    assert(otext === inviteBlock({ owner: ores.hub_owner, hubURL: ores.hub_url, profile: 'helper-bot', token: ores.enrol_token, expires: ores.enrol_expires_at, open: true, name: 'helper bot' }), `open invite text:\n${otext}`);
+    await dlg.locator('.inv-meta', { hasText: 'profile helper-bot · name chosen at enrol' }).waitFor();
     await shot('inv-5-open');
     await dlg.getByRole('button', { name: 'Done' }).click();
     await page.locator('dialog.inv').waitFor({ state: 'detached' });

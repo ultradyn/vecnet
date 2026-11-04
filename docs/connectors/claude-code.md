@@ -6,7 +6,7 @@ With a Monitor running, the hook is mostly silent because the stream usually cla
 
 ## Set up
 
-To onboard an agent in another repository, run `vecnet peer invite --name NAME` (or Dashboard → Peers → Add agent) and paste the block it prints into that agent's session; it enrols and then reads `vecnet guide`, the agent manual ([source](../../internal/cli/guide.md)), which covers the steps below in short.
+To onboard an agent in another repository, run `vecnet peer invite --name NAME --copy` (or Dashboard → Peers → Add agent) and paste the short block into that agent's session. The agent enrols, then follows `vecnet guide --net <profile>`: the agent manual ([source](../../internal/cli/guide.md)) is the single set of instructions agents read, covering set-up, everyday commands and rules. This page is the reference behind it.
 
 Use an enrolled CLI profile for this agent; the examples call it `P`. Run these commands inside the target git repository (§13.9):
 

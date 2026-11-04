@@ -74,7 +74,7 @@ messaging:
        (preferred: keeps it out of shell history and ps); else $VECNET_ENROL_TOKEN
        --name N picks your display name when the invite leaves it open (once);
        the profile then defaults to its lowercase slug
-  guide                                              the agent manual; needs no config
+  guide [--net P]                                    the agent manual, filled in for profile P; needs no config
 
 admin (operator credential):
   principal add --name N
@@ -82,10 +82,11 @@ admin (operator credential):
   principal scope <prn> [--allow IDS] [--deny IDS]
   principal list
   peer add --kind K --name N [--principal PRN]
-  peer invite [--name N [--open-name]] [--kind K] [--principal PRN] [--ttl 24h] [--profile P]
-       adds the peer and prints a block to paste to the agent (token valid --ttl, max 7d);
-       without --name, or with --open-name, the agent picks its name at enrol
-  peer invite <peer> [--ttl 24h]                      re-issues a token for a peer not yet enrolled
+  peer invite [--name N [--open-name]] [--kind K] [--principal PRN] [--ttl 24h] [--profile P] [--copy]
+       adds the peer and prints a short block to paste to the agent (token valid --ttl,
+       max 7d); --copy also puts it on the clipboard; without --name, or with
+       --open-name, the agent picks its name at enrol
+  peer invite <peer> [--ttl 24h] [--copy]             re-issues a token for a peer not yet enrolled
   peer move <peer> --principal PRN
   peer link <peer>                                    prints a dot's 12-character link code
   peer avatar <peer> (FILE|https://URL|--clear)       set or clear any peer's avatar
@@ -1361,7 +1362,7 @@ func (a *app) cmdPeer(args []string) error {
 		"kind": strFlag, "name": strFlag, "principal": strFlag,
 		"allow": multiFlag, "deny": multiFlag,
 		"sends-per-min": strFlag, "threads-per-hour": strFlag, "clear": boolFlag,
-		"ttl": strFlag, "profile": strFlag, "open-name": boolFlag,
+		"ttl": strFlag, "profile": strFlag, "open-name": boolFlag, "copy": boolFlag,
 	})
 	if err != nil {
 		return err

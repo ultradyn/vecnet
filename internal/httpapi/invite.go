@@ -42,7 +42,8 @@ func optBool(top map[string]json.RawMessage, name string) (bool, error) {
 
 // writeInvite answers a peer create or a re-issue with everything an invite
 // needs: the peer, its name and whether the agent picks it, its principal,
-// the one-time token and expiry ("" for a dot), and the hub's public URL.
+// the one-time token and expiry ("" for a dot), the hub's public URL and its
+// operator's name.
 func (s *server) writeInvite(w http.ResponseWriter, r *http.Request, peer, tok string, exp time.Time) {
 	info, err := s.Hub.InviteInfo(r.Context(), peer)
 	if err != nil {
@@ -56,7 +57,7 @@ func (s *server) writeInvite(w http.ResponseWriter, r *http.Request, peer, tok s
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusCreated, map[string]any{"peer_id": peer, "name": info.Name, "name_open": info.NameOpen,
 		"principal_id": info.PrincipalID, "enrol_token": tok, "enrol_expires_at": expires,
-		"hub_url": strings.TrimRight(s.Hub.Cfg.PublicURL, "/")})
+		"hub_url": strings.TrimRight(s.Hub.Cfg.PublicURL, "/"), "hub_owner": info.Owner})
 }
 
 // adminReissueEnrol is POST /v1/admin/peers/{id}/enrol-token
