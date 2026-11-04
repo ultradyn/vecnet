@@ -19,7 +19,15 @@ test('ui-shots propagates screen failure even when the last glob entry is a help
     for (const name of ['ansi.mjs', 'lib.mjs', 'smoke.mjs', 'tmux.mjs', 'recipes.test.mjs', 'shots-index.mjs']) {
       await writeFile(join(dir, 'scripts/ui', name), '');
     }
-    await writeFile(join(dir, 'bin/build2'), '#!/usr/bin/env bash\nprintf "%s\\n" "$2" >> "$CALL_LOG"\nexit "$CHECK_STATUS"\n', { mode: 0o700 });
+    // The preliminary lib.test.mjs check always passes; every screen script
+    // and the final index exit CHECK_STATUS. Each call logs its node args.
+    await writeFile(join(dir, 'bin/build2'), `#!/usr/bin/env bash
+shift
+printf "%s\\n" "$*" >> "$CALL_LOG"
+if [[ "$1" == --test ]]; then exit 0; fi
+exit "$CHECK_STATUS"
+`, { mode: 0o700 });
+    const check = '--test --test-concurrency=2 scripts/ui/lib.test.mjs\n';
     for (const status of [23, 0]) {
       const log = join(dir, `calls-${status}`);
       const result = spawnSync('bash', ['-c', script], {
@@ -27,7 +35,9 @@ test('ui-shots propagates screen failure even when the last glob entry is a help
         env: { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, CALL_LOG: log, CHECK_STATUS: String(status) },
       });
       assert.equal(result.status, status, `screen exit ${status}: ${result.stderr}`);
-      assert.equal(await readFile(log, 'utf8'), 'scripts/ui/smoke.mjs\n' + (status === 0 ? 'scripts/ui/shots-index.mjs\n' : ''));
+      // A failing screen stops the loop and skips the final index; success runs it.
+      const want = check + 'scripts/ui/smoke.mjs\n' + (status === 0 ? 'scripts/ui/shots-index.mjs\n' : '');
+      assert.equal(await readFile(log, 'utf8'), want, `calls for screen exit ${status}`);
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
