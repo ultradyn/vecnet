@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,7 +31,13 @@ assert.equal(cacheResult.status, 0, cacheResult.stderr);
 const goCache = cacheResult.stdout.trim();
 assert.ok(goCache && goCache !== 'off', 'leak fixtures require a reusable Go build cache');
 function fixtureEnv(privateRoot) {
-  return { ...process.env, GOCACHE: goCache, TMUX_TMPDIR: privateRoot, TMUX: '', VECNET_CONFIG: join(privateRoot, 'config.toml'), XDG_CONFIG_HOME: join(privateRoot, 'config'), XDG_CACHE_HOME: join(privateRoot, 'cache') };
+  // Go telemetry may outlive its invoking process and race recursive cleanup.
+  // GOTELEMETRY is read-only in Go 1.26: set its private mode file before
+  // starting any Go command, so even the first invocation cannot fork a writer.
+  const telemetryDir = join(privateRoot, 'config', 'go', 'telemetry');
+  mkdirSync(telemetryDir, { recursive: true });
+  writeFileSync(join(telemetryDir, 'mode'), 'off\n');
+  return { ...process.env, GOCACHE: goCache, GOTELEMETRY: 'off', TMUX_TMPDIR: privateRoot, TMUX: '', VECNET_CONFIG: join(privateRoot, 'config.toml'), XDG_CONFIG_HOME: join(privateRoot, 'config'), XDG_CACHE_HOME: join(privateRoot, 'cache') };
 }
 
 // Budget dependency compilation separately from demo/TUI readiness and the
@@ -54,6 +60,9 @@ test('fixture keeps Go builds out of its private XDG cache', async t => {
   assert.equal(inherited.status, 0, inherited.stderr);
   const env = fixtureEnv(privateRoot);
   const isolated = spawnSync('build2', ['go', 'env', 'GOCACHE'], { env, encoding: 'utf8' });
+  const telemetry = spawnSync('build2', ['go', 'env', 'GOTELEMETRY'], { env, encoding: 'utf8' });
+  assert.equal(telemetry.status, 0, telemetry.stderr);
+  assert.equal(telemetry.stdout.trim(), 'off', 'fixture disables Go telemetry before its private config directory is removed');
   assert.equal(isolated.status, 0, isolated.stderr);
   assert.equal(isolated.stdout.trim(), inherited.stdout.trim(), 'fixture reuses the parent Go build cache');
   assert.equal(env.GOCACHE, inherited.stdout.trim(), 'Go cache is explicit before overriding XDG_CACHE_HOME');

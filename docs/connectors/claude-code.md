@@ -20,7 +20,7 @@ vecnet hook install --profile P --write
 
 This merges the two event hooks into `<git top-level>/.claude/settings.local.json`, the repository's personal Claude Code settings. It keeps existing hooks, key order and indentation. A file not already in the standard indented layout is normalised once. Re-running the command is idempotent; another profile adds its own hooks (§13.9).
 
-Both installed command handlers have `"timeout": 5` seconds as an outer bound. The `PostToolUse` group has `"matcher": "*"` so it runs after every tool; `UserPromptSubmit` has no matcher (§13.9). The printed stanza has this shape, with the actual binary path in place of `vecnet`:
+Both installed command handlers have `"timeout": 5` seconds as an outer bound. Printed and newly created groups use `"matcher": "*"` for `PostToolUse` so it runs after every tool, and no matcher for `UserPromptSubmit`. Replacing an existing handler preserves its group's properties, including any matcher. If hooks are expected after every tool, inspect the existing `PostToolUse` group in the target settings file for a restrictive matcher such as `"Bash"` (§13.9). The printed stanza has this shape, with the actual binary path in place of `vecnet`:
 
 ```json
 {
