@@ -20,3 +20,4 @@ Low priority; investigate before a production deploy.
 
 ## Decision 2026-11-04 (Max: rec)
 Dev hub switches to `synchronous=NORMAL` via the new `VECNET_SQLITE_SYNCHRONOUS=normal` (default stays `full`; production decided separately). Re-check the SQLITE_BUSY rate after the switch before closing.
+- 2026-11-04 13:29:20 AEDT: dev hub restarted with VECNET_SQLITE_SYNCHRONOUS=normal; SQLITE_BUSY count in devhub.log at restart: 441.
