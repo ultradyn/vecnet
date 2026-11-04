@@ -1,0 +1,253 @@
+{
+ "runStamp": "20261104T23-mcp-first",
+ "maxFixRounds": 3,
+ "planName": "mcp-first",
+ "plan": "docs/plans/2026-11-04-mcp-first.md",
+ "worktree": "/home/xertrov/src/vecnet4/.worktrees/mcp-first",
+ "branch": "mcp-first",
+ "baseRef": "master",
+ "statusDir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-mcp-first",
+ "taskPrefix": "mf",
+ "startTask": 1,
+ "endTask": 10,
+ "finalReview": true,
+ "openBrowser": false,
+ "deps": {
+  "1": [],
+  "2": [],
+  "3": [
+   2
+  ],
+  "4": [
+   3
+  ],
+  "5": [
+   4
+  ],
+  "6": [],
+  "7": [
+   1
+  ],
+  "8": [
+   7
+  ],
+  "9": [
+   1,
+   2
+  ],
+  "10": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9
+  ]
+ },
+ "tasks": [
+  {
+   "title": "`initialize` negotiation and 2026-07-28 result envelope (G5, part of G4)",
+   "refs": "\u00a74.1, \u00a74.4; Review Focus 1",
+   "race": false,
+   "suite": "./internal/mcpserver/ ./internal/httpapi/ ./cmd/vecnet-hub/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Keep the go-sdk client tests (TestInitializeLegacyMintsSession, and those in resources_test.go) passing unchanged: they are the guard for existing clients.",
+    "TestInitializeNegotiatesOlderVersion compares tool names with a 2026-07-28 tools/list; it must not assert a count (Tasks 2-5 add tools in parallel).",
+    "completeResult applies only to non-streamed results of ProtoCurrent requests and to server/discover; legacy sessions and error responses stay byte-identical."
+   ]
+  },
+  {
+   "title": "`securitySchemes`, `vecnet_whoami` profile tool, RFC 9207 `iss` (G4)",
+   "refs": "\u00a72.10, \u00a74.3, \u00a74.5; Review Focus 2, 5",
+   "race": false,
+   "suite": "./internal/mcpserver/ ./internal/oauth/ ./internal/httpapi/ ./cmd/vecnet-hub/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Assert tool names, never a tool count: add your tools to TestToolsListNamesAndHints's want list (and its readOnly map for read tools). Other tasks add tools in parallel branches.",
+    "Each tool calls the same hub.* function as its HTTP endpoint; hub errors become tool errors via toolOutcome/toolFailure, never JSON-RPC errors.",
+    "go-sdk v1.8.0's mcp.Tool has no securitySchemes field: render tools/list entries as maps (listEntry), built once in buildTools.",
+    "vecnet_whoami returns the GET /v1/peers/me body (httpapi getPeersMe) plus name for a peer; never a secret, scope or route.",
+    "iss goes on every redirectWith call (consent.go:249, :307, :353); the \u00a720 link-code refusal, retry and lockout pages are HTML, not redirects, and stay unchanged."
+   ]
+  },
+  {
+   "title": "Group and presence-subscription tools (G2)",
+   "refs": "\u00a74.3, \u00a77, \u00a78; Review Focus",
+   "race": false,
+   "suite": "./internal/mcpserver/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Assert tool names, never a tool count: add your tools to TestToolsListNamesAndHints's want list (and its readOnly map for read tools). Other tasks add tools in parallel branches.",
+    "Each tool calls the same hub.* function as its HTTP endpoint; hub errors become tool errors via toolOutcome/toolFailure, never JSON-RPC errors.",
+    "No new tool takes or returns a URL, bearer, ?t= token or callback URL. vecnet_set_avatar's url is the only existing exception (PROTOCOL \u00a74.3, \u00a78.1)."
+   ]
+  },
+  {
+   "title": "Issue 28 provisioning tools (G6)",
+   "refs": "\u00a74.3, \u00a718.4; Review Focus 4",
+   "race": false,
+   "suite": "./internal/mcpserver/ ./internal/hub/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Assert tool names, never a tool count: add your tools to TestToolsListNamesAndHints's want list (and its readOnly map for read tools). Other tasks add tools in parallel branches.",
+    "Each tool calls the same hub.* function as its HTTP endpoint; hub errors become tool errors via toolOutcome/toolFailure, never JSON-RPC errors.",
+    "Issue 28 wire shapes are frozen with pag-chat (a live consumer): the tools return the \u00a718.4 bodies exactly and the HTTP error codes (idempotency_conflict, peer_cap_reached with details {limit, active, disabled}, not_found) unchanged."
+   ]
+  },
+  {
+   "title": "Blob tools (G3)",
+   "refs": "\u00a72.7, \u00a74.3, \u00a711; Review Focus 3",
+   "race": false,
+   "suite": "./internal/mcpserver/ ./internal/hub/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Assert tool names, never a tool count: add your tools to TestToolsListNamesAndHints's want list (and its readOnly map for read tools). Other tasks add tools in parallel branches.",
+    "Each tool calls the same hub.* function as its HTTP endpoint; hub errors become tool errors via toolOutcome/toolFailure, never JSON-RPC errors.",
+    "No new tool takes or returns a URL, bearer, ?t= token or callback URL. vecnet_set_avatar's url is the only existing exception (PROTOCOL \u00a74.3, \u00a78.1).",
+    "Reuse decodeBase64, mcpAvatarMax and mcpAvatarBase64Max from the avatar tool; oversize is payload_too_large (413) with details.limit 163840, exactly like vecnet_set_avatar. No new reason code.",
+    "vecnet_blob_get goes through Hub.ReadBlob(ctx, &c, \"\", sha): participants only, same refusal codes as GET /v1/blobs with a bearer."
+   ]
+  },
+  {
+   "title": "Events push observability (G7)",
+   "refs": "\u00a74.4, \u00a75.5, \u00a713.4; Review Focus 6",
+   "race": true,
+   "suite": "./internal/events/ ./internal/hub/ ./internal/httpapi/ ./internal/tui/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Hub.Counters reads only hub.AdminCounters: append both counter names there, or GET /v1/admin/counters will not report them.",
+    "Count only real pause transitions: Store.pause's UPDATE adds `AND paused_reason IS NULL` and bumps on one changed row; pauseExpiredTokens bumps by RowsAffected. credential_rotated and operator pauses never bump.",
+    "Bump inside the same transaction as the outbox/subscription write it describes (retryLater, the exhausted settle, the pause).",
+    "Do not change internal/ui/static/dash.js; the TUI dashboard lists every counter key by itself. If a TUI screen or golden changes, regenerate it and say so in deviations."
+   ]
+  },
+  {
+   "title": "`vecnet mcp` stdio relay",
+   "refs": "\u00a72.10, \u00a74.1, \u00a713.7, \u00a720.2; Review Focus 2, 3",
+   "race": true,
+   "suite": "./internal/cli/",
+   "route": "sol",
+   "checks": [
+    "just bb GOOS=windows CGO_ENABLED=0 go build -o /dev/null ./cmd/vecnet"
+   ],
+   "reviewChecks": [
+    "just bb GOOS=windows CGO_ENABLED=0 go build -o /dev/null ./cmd/vecnet"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Never touch connectors/launcher/** or connectors/hub-client/** (the launcher daemon is building on branch `launcher`).",
+    "Resolve the profile with a.connect(): the operator-cli rules (no bare agent run, --net or VECNET_PROFILE, checkHubURL) apply unchanged. Refuse an operator credential (isOperatorSecret) and a VECNET_PROFILE that differs from the resolved profile, before reading stdin.",
+    "Stdout carries only JSON-RPC lines; the secret, Authorization header and hub userinfo never reach stdout or stderr. Tests check both streams.",
+    "The --as binding covers every tool whose inputSchema has `as` or `peer`, plus vecnet_threads' participant; read the property list from the relayed tools/list, never a hard-coded tool list.",
+    "Tests use testhub.Start or an httptest fake hub on 127.0.0.1:0 and temp config dirs; never the user's ~/.config/vecnet."
+   ]
+  },
+  {
+   "title": "MCP-first hook hints, `hook install --mcp`, and the guide (G8, G9)",
+   "refs": "\u00a713.7, \u00a713.9; Review Focus 2, 7",
+   "race": false,
+   "suite": "./internal/cli/",
+   "route": "opus",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Never touch connectors/launcher/** or connectors/hub-client/** (the launcher daemon is building on branch `launcher`).",
+    "Build on the session-binding code (hookRun, hookOwner, state/<p>+session.json, the agent_id skip, the VECNET_PROFILE no-op): the MCP hint is chosen after connect() resolves the profile and changes nothing about who may claim.",
+    "Unbound output is byte-identical: hook-hostile.golden, TestHookHostileIsInert, TestHookHintsQualifiedWithProfile, the hooksession notice tests and TestHookMaxItemAlwaysFits must pass unchanged. The bound output must still fit hookPipeAtomicBytes with a 24-char profile.",
+    "--mcp is honoured only when it equals mcpServerName(profile, a.as) (`vecnet-<P>`, profile ^[A-Za-z0-9_-]{1,24}$, no --as); anything else falls back to the CLI-only hint silently.",
+    "Tests never run the real claude: put a fake `claude` script first on PATH in a temp dir (t.Setenv, so those tests are not parallel) and log argv and cwd. Never touch ~/.claude.json or a real settings.local.json.",
+    "Regenerate the guide goldens with `CGO_ENABLED=0 just bb go test -p 2 ./internal/cli/ -run TestGuideGolden -update` and read the diff before committing."
+   ]
+  },
+  {
+   "title": "`just mcp-conformance` (G1 prerequisite)",
+   "refs": "\u00a74.1, \u00a74.4, \u00a74.5, \u00a720.2; Review Focus 5",
+   "race": false,
+   "suite": "./internal/mcpserver/",
+   "route": "sol",
+   "checks": [
+    "just bb build2 node --test --test-concurrency=2 scripts/mcp-conformance.test.mjs"
+   ],
+   "reviewChecks": [
+    "just bb build2 node --test --test-concurrency=2 scripts/mcp-conformance.test.mjs"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "The test boots the demo with bootDemo() from scripts/ui/lib.mjs on 127.0.0.1:0 and closes it in a finally; never the dev hub on 45752 or the preview on 49575.",
+    "The script never prints VECNET_MCP_TOKEN, and makes at most 2 unauthenticated /mcp requests per run (the \u00a720.2 per-client limiter)."
+   ]
+  },
+  {
+   "title": "Docs, changelog and gate",
+   "refs": "\u00a74.1, \u00a74.3, \u00a74.5, \u00a713.4, \u00a713.7, \u00a713.9",
+   "race": false,
+   "suite": "./...",
+   "route": "opus",
+   "checks": [
+    "just bb just validate-protocol",
+    "just bb build2 node --test --test-concurrency=2 scripts/mcp-conformance.test.mjs",
+    "just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-mcp-first/gate-shots just ui-shots"
+   ],
+   "reviewChecks": [
+    "just bb just validate-protocol",
+    "just bb build2 node --test --test-concurrency=2 scripts/mcp-conformance.test.mjs",
+    "just bb build2 node --test --test-concurrency=2 internal/ui/jstest/"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Never touch connectors/launcher/** or connectors/hub-client/** (the launcher daemon is building on branch `launcher`).",
+    "Docs plus the CHANGELOG line; PROTOCOL text must match the code from Tasks 1-9 (tool table, counters, relay, hook wrapper). The launcher daemon slice and the loop judge also edit PROTOCOL (\u00a713.8, \u00a718, \u00a719) and CHANGELOG.md: add, never reorder or rewrite their text.",
+    "No new PROTOCOL section and no migration; \u00a719 is reserved for the loop judge and \u00a720 is deploy hardening.",
+    ".scratch/vecnet/issues is tracked; edit the worktree copy if you touch it (this task should not need to)."
+   ]
+  }
+ ],
+ "solRelay": {
+  "run": "/home/xertrov/src/vecnet4/scripts/wf/sol-run.sh",
+  "wait": "/home/xertrov/src/vecnet4/scripts/wf/sol-wait.sh",
+  "dir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-mcp-first/ccc",
+  "transcripts": "/home/xertrov/.claude/projects/-home-xertrov-src-vecnet4/*/subagents/workflows/*/agent-*.jsonl"
+ },
+ "extraRules": [
+  "Node and browser checks run through build2 too: `build2 node ...`. Chromium stays headless. Never run xdg-open or open a window.",
+  "Never touch the dev hub on 45752, the coordinator's preview on 49575, `.data/` or `.demo-data/`. Tmux only through the private `-L oui-<pid>` server, never Max's.",
+  "Read-only reviewers run screen scripts with the SHOTS_DIR their command gives, so committed PNGs stay unchanged.",
+  "No npm or pnpm install.",
+  "Never run the real `claude` or `codex` CLIs (no `claude mcp add/remove`, no `codex mcp`), and never read or write ~/.claude.json, ~/.claude/, ~/.codex/, ~/.config/vecnet/ or any real `.claude/settings.local.json`; tests use temp dirs and a fake `claude` on PATH.",
+  "Never touch connectors/launcher/** or connectors/hub-client/**: the launcher daemon slice is building on branch `launcher`.",
+  "Tests, vet, node tests and screen scripts run on a build box via `just bb <cmd>` (docs/BUILDBOX.md), never on xsm. Only gofmt, git, `just isa-check` and `go list` run locally. Never run two ui-shots on the same box at once; if a screen check flakes, rerun it once before treating it as a regression."
+ ],
+ "mergeChecks": [
+  "just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
+  "just bb bash -c '[ ! -f scripts/mcp-conformance.test.mjs ] || build2 node --test --test-concurrency=2 scripts/mcp-conformance.test.mjs'",
+  "just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-mcp-first/merge-shots just ui-shots (the whole screen gate: a regression halts at the merge that caused it)"
+ ],
+ "gateChecks": [
+  "`just bb build2 node --test --test-concurrency=2 internal/ui/jstest/`",
+  "`just isa-check` prints 0 for both binaries",
+  "`just bb just validate-protocol`",
+  "`build2 go list -deps ./cmd/vecnet | grep -c 'modernc.org/sqlite'` prints 0",
+  "`just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-mcp-first/gate-shots just ui-shots` exits 0",
+  "Every PNG listed in docs/plans/shots/oui/README.md exists, and every PNG in that directory is listed",
+  "`just bb build2 node --test --test-concurrency=2 scripts/mcp-conformance.test.mjs`",
+  "`just bb GOOS=windows CGO_ENABLED=0 go build -o /dev/null ./cmd/vecnet`",
+  "`git diff --name-only master...HEAD -- connectors/` prints nothing"
+ ],
+ "lensFocus": {
+  "spec": "This run implements Tasks 1-10 of docs/plans/2026-11-04-mcp-first.md (amended 2026-11-04 post-merge) against PROTOCOL \u00a74, \u00a713.4, \u00a713.7, \u00a713.9 and docs/research/2026-11-04-mcp-first-and-dots.md G1-G9, G11. Check initialize negotiation, resultType on 2026-07-28 only, the 21-tool table, vecnet_whoami = GET /v1/peers/me (+name), \u00a718.4 shapes unchanged, blob caps, counters in AdminCounters, relay behaviour, the hook wrapper's bound/unbound clause, hook install --mcp and the guide text.",
+  "security": "No identity confusion: the relay serves only its own profile (refuses operator credentials and a mismatched VECNET_PROFILE), binds as/peer/participant under --as, and never prints a secret; hook --mcp is honoured only when it equals mcpServerName(profile, as); unbound hook output byte-identical; no new tool takes or returns a URL, bearer or ?t= token; blob reads participant-only; provisioning principal-only with HTTP's codes; hostile peer text stays inert.",
+  "tests": "Each named plan test exists and fails without its fix; guard tests are marked; tool tests assert names not counts; relay tests check both stdout and stderr for the secret; installer tests use a fake claude on PATH and temp dirs; the conformance test boots the demo on port 0 and closes it."
+ },
+ "extraLenses": [],
+ "runner": "just bb "
+}
