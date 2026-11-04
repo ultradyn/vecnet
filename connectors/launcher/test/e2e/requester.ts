@@ -65,9 +65,11 @@ export async function connectPeer(o: { url: string; peerId: string; secret: stri
     seen.push(e);
     for (const wake of [...listeners]) wake();
   }, controller.signal).catch(() => {});
-  const timeout = setTimeout(() => connected(), 10_000);
-  await ready;
-  clearTimeout(timeout);
+  let timeout!: ReturnType<typeof setTimeout>;
+  try {
+    await Promise.race([ready, new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error('stream did not connect within 10 s')), 10_000); })]);
+  } catch (err) { controller.abort(); throw err; }
+  finally { clearTimeout(timeout); }
 
   async function send(req: Omit<SendRequest, 'idempotency_key'> & { idempotency_key?: string }): Promise<SendResponse> {
     return hub.send({ ...req, idempotency_key: req.idempotency_key ?? `e2e.${randomUUID()}` });

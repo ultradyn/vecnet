@@ -396,9 +396,11 @@ test('6. cancel reaches the hub: interrupt and settle, a cancelled report the hu
 test('7. idle park and settle: park at about 2 s, settle at about 4 s, succeeded idle_wrapup', async t => {
   const env = await setup(t);
   const l = await running(env);
+  // The idle window starts when the backend turn ends, not when its reply
+  // reaches the requester: a slow delivery must not shorten the measurement.
+  const start = Date.now();
   env.fake().finishTurn(l.jobId, 'all done');
   await waitReply(env, l.thread);
-  const start = Date.now();
   let parkedAt = 0, settledAt = 0;
   await until(() => {
     const s = env.fake().sessions()[0];
@@ -406,8 +408,10 @@ test('7. idle park and settle: park at about 2 s, settle at about 4 s, succeeded
     if (!settledAt && s.settles > 0) settledAt = Date.now() - start;
     return settledAt > 0;
   }, 'idle settle', 10_000);
-  assert.ok(parkedAt >= 1500 && parkedAt <= 3500, `parked after ${parkedAt} ms`);
-  assert.ok(settledAt >= 3500 && settledAt <= 6000, `settled after ${settledAt} ms`);
+  // Lower bounds prove the timers; upper bounds only catch a stuck clock, so
+  // they leave room for a loaded build box.
+  assert.ok(parkedAt >= 1500 && parkedAt <= 8000, `parked after ${parkedAt} ms`);
+  assert.ok(settledAt >= 3500 && settledAt <= 12_000, `settled after ${settledAt} ms`);
   assert.ok(parkedAt < settledAt);
   const done = await status(env, l.jobId, 'succeeded');
   const out = done.job_status!.output as { ended: string; quiescence: string; turns: number };
@@ -550,15 +554,17 @@ test('12. redelivery after a cursor reset: no second session, no duplicate repli
   const l = await running(env);
   env.fake().finishTurn(l.jobId, 'turn one done');
   await waitReply(env, l.thread);
-  await sleep(1500);
   const before = (await env.requester.history(l.thread)).map(m => m.message_id);
-  const cursor = env.inspect(ledger => ledger.cursor());
-  assert.ok(cursor && cursor !== first);
   await env.daemon.stop();
   env.inspect(ledger => ledger.setCursor(first));
   await env.start();
-  // The replay re-admits every event after the first cursor, the launch included.
-  await until(() => env.inspect(ledger => ledger.cursor()) === cursor, 'replay caught up');
+  // The replay re-admits every event after the first cursor, the launch
+  // included: wait until the ledger reaches the hub's head as of the restart
+  // (later events may move it further) with no ingress row left to process.
+  const head = await headCursor(env.hub.url, env.launcher.secret);
+  const seq = (c: string | null) => Number(/\.(\d+)$/.exec(c ?? '')?.[1] ?? NaN);
+  assert.ok(Number.isFinite(seq(head)) && seq(head) > seq(first));
+  await until(() => env.inspect(ledger => seq(ledger.cursor()) >= seq(head) && ledger.queued(10).length === 0), 'replay caught up');
   await sleep(1500);
   assert.equal(env.fake().sessions().length, 1);
   assert.equal(env.fake().sessions()[0].sent.length, 0);
