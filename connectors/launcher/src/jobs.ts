@@ -35,6 +35,14 @@ export function createJobReporter(deps: { ledger: Ledger; outbox: Outbox }): Job
           job_status: { job_id: jobId, sequence, state, ...(bounded === undefined ? {} : { output: bounded }) },
         }, jobId);
         if (terminal) {
+          // One terminal finalization for every path that ends a job (lane
+          // settle, restart loss, failed launch): inputs still buffered or in
+          // flight are failed with session_ended in the same commit.
+          const pending = ledger.inputs(jobId, ['buffered', 'sending', 'sent']);
+          for (const row of pending) {
+            outbox.enqueue('receipt', `vl.rc.${row.deliveryId}.failed`, { delivery_id: row.deliveryId, state: 'failed', note: 'session_ended' }, jobId);
+          }
+          ledger.markInputs(pending.map(r => r.deliveryId), { state: 'failed' });
           // updatedAt is supplied by the ledger's Clock port, keeping this interface clock-free.
           ledger.updateJob(jobId, { terminal: state as Terminal, state: 'ended' });
           ledger.updateJob(jobId, { endedAt: ledger.job(jobId)!.updatedAt });

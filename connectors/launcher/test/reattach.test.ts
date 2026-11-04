@@ -223,3 +223,19 @@ test('an orphan whose settle fails stays pending and is settled on retry; missin
   assert.equal((await reattachAll(deps))[0].outcome,'lost');
   assert.deepEqual(reports().at(-1)!.output,{error:'outcome_unknown',reason:'backend_missing'});
 });
+
+test('a session lost across a restart fails its pending inputs with session_ended in the same commit as the report', async t => {
+  const {deps,ledger,clock,job,backend,reports} = setup(t);
+  await startLaunch(job(),deps);
+  for (const [id,state] of [['dly_buffered','buffered'],['dly_sending','sending'],['dly_sent','sent'],['dly_done','consumed']] as const) {
+    ledger.addInput({deliveryId:id,jobId:job().jobId,messageId:`msg_${id}`,sender:'peer_requester',text:id,priority:'wake',createdAt:100});
+    if (state !== 'buffered') ledger.markInputs([id],{state});
+  }
+  backend.lose(job().jobId);
+  assert.equal((await reattachAll(deps))[0].outcome,'lost');
+  assert.deepEqual(reports().at(-1)!.output,{error:'outcome_unknown'});
+  const receipts = ledger.pendingOutbox(100,clock.now()).filter(r => r.kind === 'receipt').map(r => r.payload);
+  assert.deepEqual(receipts,['dly_buffered','dly_sending','dly_sent'].map(id => ({delivery_id:id,state:'failed',note:'session_ended'})));
+  assert.deepEqual(ledger.inputs(job().jobId,['buffered','sending','sent']),[]);
+  assert.equal(ledger.inputs(job().jobId,['consumed']).length,1);
+});

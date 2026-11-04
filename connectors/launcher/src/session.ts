@@ -160,7 +160,12 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     const input = batch.input;
     let result: SendResult;
     try { result = await handle.send(input, mode); }
-    catch (error) { scheduleRecovery(); throw error; }
+    catch (error) {
+      // A deterministic pre-dispatch refusal is not uncertain backend I/O:
+      // retrying the same batch would block the lane forever.
+      if (error instanceof Error && error.message === 'input_too_large') { await rejectTooLarge(rows, mode, replay); return; }
+      scheduleRecovery(); throw error;
+    }
     sendGeneration++;
     ledger.tx(() => {
       // A steer may race a backend turn boundary. Prefer its actual send
@@ -172,6 +177,33 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
       if (mode === 'start') ledger.updateJob(jobId, { sessionKind: 'turn_running', parkedAt: null });
     });
     startPump();
+  }
+  // The backend refused the batch before dispatch (t3 checks the serialized
+  // request size, which JSON escaping can push past the lane's byte cap).
+  // A batch of several inputs is split: the first is retried alone and the
+  // rest go back to the buffer. A single input that still does not fit fails
+  // with input_too_large, and dispatch continues with the next.
+  async function rejectTooLarge(rows: InputRow[], mode: SendMode, replay: boolean) {
+    const kind = job().sessionKind ?? '';
+    const awaiting = ['turn_running', 'waiting_approval', 'starting'].includes(kind) ? '1' : '0';
+    if (rows.length > 1) {
+      const first = rows[0];
+      ledger.tx(() => {
+        ledger.markInputs(rows.map(r => r.deliveryId), { state: 'buffered', mode: null, batchId: null, turnSeq: null });
+        store.set('awaitingTurn', awaiting);
+      });
+      log.warn('backend refused a batch as too large; splitting it', { jobId, inputs: rows.length });
+      await sendBatch([ledger.inputs(jobId, ['buffered']).find(r => r.deliveryId === first.deliveryId)!], mode);
+      return;
+    }
+    ledger.tx(() => {
+      receipt(rows[0].deliveryId, 'failed', 'input_too_large');
+      ledger.markInputs([rows[0].deliveryId], { state: 'failed' });
+      store.set('awaitingTurn', awaiting);
+    });
+    log.warn('backend refused an input as too large', { jobId });
+    // reconcile releases any held completion and re-drives the buffer itself.
+    if (!replay) await flush(mode);
   }
   // Dispatch from a completion or exit. A failure is already queued for
   // recovery, so it must not also tear down the turn stream.

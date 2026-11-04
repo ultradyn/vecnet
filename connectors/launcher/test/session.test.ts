@@ -661,3 +661,22 @@ test('a transient turns() failure retries on the Clock from the committed cursor
   await s.lane.stop(); s.clock.advance(60_000); await tick();
   assert.equal(streams, 3); assert.equal(active, 0);
 });
+test('a backend input_too_large refusal fails just that input, splits its batch and never retries forever',async t=>{
+  const s=await setup(t,{kind:'turn_running'});
+  const send=s.handle.send.bind(s.handle);
+  s.handle.send=async(input,mode)=>{ if(input.items.some(i=>i.text.includes('HUGE'))) throw new Error('input_too_large'); return send(input,mode); };
+  const huge=s.message('HUGE \u0001'.repeat(10),'wake_idle'),small=s.message('small','wake_idle');
+  await s.lane.handleMessage(huge);await s.lane.handleMessage(small);
+  await s.emit(finished());
+  assert.deepEqual(s.sends.map(x=>x.input.items.map(i=>i.deliveryId)),[[small.delivery_id]]);
+  assert.deepEqual(s.receipts().filter(r=>r.delivery_id===huge.delivery_id),[{delivery_id:huge.delivery_id,state:'failed',note:'input_too_large'}]);
+  assert.equal(s.ledger.inputs('job_one',['sending']).length,0);
+  // The completion of the small input's turn is not fenced, and nothing retries the refused input.
+  await s.emit(finished('turn-2'));
+  assert.ok(s.receipts().some(r=>r.delivery_id===small.delivery_id && r.state==='processed'));
+  s.clock.advance(120_000);await tick();
+  assert.equal(s.sends.length,1);
+  // A later lone input still reaches the backend.
+  const next=s.message('later');await s.lane.handleMessage(next);
+  assert.deepEqual(s.sends.at(-1)!.input.items.map(i=>i.deliveryId),[next.delivery_id]);
+});
