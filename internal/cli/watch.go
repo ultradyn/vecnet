@@ -249,6 +249,7 @@ type watcher struct {
 	sleep      func(context.Context, time.Duration) bool
 	outage     reconnectStatus
 	hadLive    bool
+	ackOutage  bool // a retryable acknowledgement failure still owes pendingAck
 }
 
 func (w *watcher) pause(d time.Duration) bool {
@@ -370,7 +371,12 @@ func (w *watcher) backoff(failures int) time.Duration {
 	return reconnectDelay(failures)
 }
 
-func (w *watcher) live() { w.hadLive = true; w.outage.live() }
+func (w *watcher) live() {
+	w.hadLive = true
+	if !w.ackOutage {
+		w.outage.live()
+	}
+}
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
@@ -646,11 +652,27 @@ func (w *watcher) flushAck() {
 	cur := w.pendingAck
 	if err := w.a.ack(w.c, cur); err != nil {
 		if w.a.ctx.Err() == nil {
-			fmt.Fprintf(w.a.stderr, "vecnet: watch: ack %s: %v\n", cur, err)
+			var network *netError
+			var hub *hubError
+			if errors.As(err, &network) || (errors.As(err, &hub) && (hub.Status == 502 || hub.Status == 503 || hub.Status == 504)) {
+				w.ackOutage = true
+				w.outage.failed(fmt.Sprintf("ack %s: %v", cur, err))
+			} else {
+				fmt.Fprintf(w.a.stderr, "vecnet: watch: ack %s: %v\n", cur, err)
+			}
 		}
 		return
 	}
 	w.pendingAck = ""
+	if w.ackOutage {
+		w.ackOutage = false
+		// Ack success alone cannot establish recovery while the stream is
+		// still unavailable. Conversely, live frames must not announce a
+		// recovery followed by another outage while this ack remains owed.
+		if w.hadLive {
+			w.outage.live()
+		}
+	}
 }
 
 // dedupe remembers the last n delivery ids.
