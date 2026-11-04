@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -32,6 +33,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/hubid"
@@ -104,8 +107,9 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	}, stdout)
 }
 
-// runIdentity manages the database-backed key offline. Refuse an unconfirmed
-// rotation before opening the store, so even a new data directory is untouched.
+// runIdentity reads identity metadata or rotates the database-backed key offline.
+// Refuse an unconfirmed rotation before opening the store, so even a new data
+// directory is untouched.
 func runIdentity(ctx context.Context, args []string, defaultDir string, stdout io.Writer) error {
 	if len(args) == 0 || (args[0] != "show" && args[0] != "rotate") {
 		return errors.New("usage: vecnet-hub identity show|rotate [--data-dir D] [--yes]")
@@ -125,9 +129,9 @@ func runIdentity(ctx context.Context, args []string, defaultDir string, stdout i
 	if args[0] == "rotate" && !yes {
 		return errors.New("identity rotate: --yes is required; stop the hub before rotating")
 	}
-	// Identity metadata does not depend on the serving URL. Use a local origin
-	// solely to build IdentityDoc; no listener or outbound request is created.
-	h, db, err := openHub(*dir, "http://localhost", false)
+	// Do not construct a Hub here: startup recovery would reset a live hub's
+	// connected peers and in-flight dispatch claims, even for identity show.
+	db, err := openStore(*dir)
 	if err != nil {
 		return err
 	}
@@ -140,7 +144,7 @@ func runIdentity(ctx context.Context, args []string, defaultDir string, stdout i
 		_, err = fmt.Fprintf(stdout, "old %s\nnew %s\n", oldFP, newFP)
 		return err
 	}
-	doc, err := h.IdentityDoc("")
+	doc, err := readIdentityMetadata(ctx, db)
 	if err != nil {
 		return err
 	}
@@ -153,12 +157,52 @@ func runIdentity(ctx context.Context, args []string, defaultDir string, stdout i
 	return err
 }
 
+// readIdentityMetadata reads one consistent metadata snapshot without running
+// serving-hub recovery or creating a blob store. The URL is not needed by show.
+func readIdentityMetadata(ctx context.Context, db *store.DB) (envelope.HubIdentity, error) {
+	var doc envelope.HubIdentity
+	var seed, previous string
+	if err := db.QueryRowContext(ctx, `SELECT seed.value, created.value,
+		COALESCE((SELECT value FROM meta WHERE key='hub_identity_prev'), '')
+		FROM meta seed JOIN meta created ON created.key='hub_identity_created_at'
+		WHERE seed.key='hub_identity_seed'`).Scan(&seed, &doc.KeyCreatedAt, &previous); err != nil {
+		return doc, fmt.Errorf("read identity: %w", err)
+	}
+	key, err := hubid.KeyFromSeedHex(seed)
+	if err != nil {
+		return doc, err
+	}
+	doc.Pubkey = key.Pubkey()
+	doc.Fingerprint, err = hubid.Fingerprint(doc.Pubkey)
+	if err != nil {
+		return doc, err
+	}
+	if _, err := envelope.ParseTime(doc.KeyCreatedAt); err != nil {
+		return doc, fmt.Errorf("identity creation time: %w", err)
+	}
+	if previous != "" {
+		var prev envelope.HubKeyPrevious
+		if err := json.Unmarshal([]byte(previous), &prev); err != nil {
+			return doc, fmt.Errorf("previous identity: %w", err)
+		}
+		if err := hubid.VerifyEndorsement(prev, doc.Pubkey); err != nil {
+			return doc, fmt.Errorf("previous identity: %w", err)
+		}
+		doc.Previous = &prev
+	}
+	return doc, nil
+}
+
+func openStore(dataDir string) (*store.DB, error) {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create data dir: %w", err)
+	}
+	return store.Open(filepath.Join(dataDir, "hub.db"))
+}
+
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
 func openHub(dataDir, publicURL string, allowPrivateEgress bool) (*hub.Hub, *store.DB, error) {
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		return nil, nil, fmt.Errorf("create data dir: %w", err)
-	}
-	db, err := store.Open(filepath.Join(dataDir, "hub.db"))
+	db, err := openStore(dataDir)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -279,6 +323,18 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 		notice, err := h.EnsureMovingNotice(ctx, target)
 		if err != nil {
 			return err
+		}
+		// An offline rotation leaves stored notices signed by the old key.
+		// Replace only an unverifiable notice, atomically updating the active
+		// notice and its Events while preserving the operator's move fields.
+		if err := hubid.VerifyNotice(h.IdentityKey().Pubkey(), notice); err != nil {
+			notice, err = h.PostNotice(ctx, auth.Caller{Kind: "operator"}, hub.NoticeRequest{
+				Kind: notice.Kind, Message: notice.Message, At: notice.At,
+				ExpiresAt: notice.ExpiresAt, NewURL: notice.NewURL,
+			})
+			if err != nil {
+				return err
+			}
 		}
 		handler = httpapi.Relocated(deps, notice)
 	} else {

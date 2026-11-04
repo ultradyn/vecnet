@@ -353,3 +353,161 @@ func TestIdentityShowAndRotate(t *testing.T) {
 		t.Fatalf("unconfirmed rotation wrote data: %v", err)
 	}
 }
+
+func TestIdentityShowPreservesLiveState(t *testing.T) {
+	e := testhub.Start(t)
+	ctx := context.Background()
+	a, as := e.NewPeer("session", "sender")
+	b, bs := e.NewPeer("session", "reactor")
+	resp, raw := e.Do(as, "POST", "/v1/messages", map[string]any{
+		"idempotency_key": "identity-show-live", "priority": "hold", "recipients": []string{b}, "content": map[string]string{"text": "target"},
+	})
+	if resp.StatusCode != 202 {
+		t.Fatalf("send: %d %s", resp.StatusCode, raw)
+	}
+	var target hub.SendResponse
+	if err := json.Unmarshal(raw, &target); err != nil {
+		t.Fatal(err)
+	}
+	resp, raw = e.Do(bs, "POST", "/v1/reactions", map[string]string{
+		"message_id": target.MessageID, "emoji": "✅", "op": "add", "priority": "wake",
+	})
+	var reaction hub.ReactResponse
+	if err := json.Unmarshal(raw, &reaction); err != nil || resp.StatusCode != 200 || reaction.Wake == nil {
+		t.Fatalf("reaction: %d %s %v", resp.StatusCode, raw, err)
+	}
+	id := reaction.Wake.DeliveryID
+	if ok, err := e.Hub.BeginDispatch(ctx, id); err != nil || !ok {
+		t.Fatalf("begin dispatch: %v %v", ok, err)
+	}
+	// Use the same lifecycle seam as an open SSE request; no background
+	// worker can complete the reaction claim before show reads the database.
+	e.Hub.StreamOpened(ctx, a)
+	defer e.Hub.StreamClosed(ctx, a)
+	check := func(wantState string, wantClaims int) {
+		t.Helper()
+		var reach, state string
+		var claims int
+		if err := e.Hub.DB.QueryRow(`SELECT reachability FROM peers WHERE peer_id=?`, a).Scan(&reach); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.Hub.DB.QueryRow(`SELECT state, dispatching FROM deliveries WHERE dly_id=?`, id).Scan(&state, &claims); err != nil {
+			t.Fatal(err)
+		}
+		if reach != "connected" || state != wantState || claims != wantClaims {
+			t.Errorf("live state: reach=%s state=%s claims=%d; want connected %s %d", reach, state, claims, wantState, wantClaims)
+		}
+	}
+	check("queued", 1)
+	var out bytes.Buffer
+	if err := run(ctx, []string{"identity", "show", "--data-dir", e.Hub.Cfg.DataDir}, &out, noEnv); err != nil {
+		t.Fatal(err)
+	}
+	doc := servedIdentity(t, e.URL)
+	if want := fmt.Sprintf("pubkey %s\nfingerprint %s\ncreated_at %s\n", doc.Pubkey, doc.Fingerprint, doc.KeyCreatedAt); out.String() != want {
+		t.Fatalf("show: %q want %q", out.String(), want)
+	}
+	check("queued", 1)
+	// A remove while dispatch is in flight must not withdraw the wake.
+	resp, raw = e.Do(bs, "POST", "/v1/reactions", map[string]string{
+		"message_id": target.MessageID, "emoji": "✅", "op": "remove",
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("remove: %d %s", resp.StatusCode, raw)
+	}
+	check("queued", 1)
+	if err := e.Hub.EndDispatch(ctx, id, true); err != nil {
+		t.Fatal(err)
+	}
+	check("pushed", 0)
+}
+
+func TestRelocatedAfterIdentityRotation(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	const own, target = "https://old.example", "https://next.example"
+	h, db, err := openHub(dir, own, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secret, _, err := h.EnsureOperator(ctx, "operator")
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	oldKey := h.IdentityKey().Pubkey()
+	n, err := h.PostNotice(ctx, auth.Caller{Kind: "operator"}, hub.NoticeRequest{
+		Kind: "moving", Message: "Operator move announcement", NewURL: target,
+		At: envelope.FormatTime(time.Now().Add(time.Hour)),
+	})
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hubid.VerifyNotice(oldKey, n); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(ctx, []string{"identity", "rotate", "--data-dir", dir, "--yes"}, io.Discard, noEnv); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir, "--public-url", own, "--relocated-to", target}
+	boot := bootHub(t, args, noEnv)
+	doc := servedIdentity(t, boot.base)
+	if doc.Pubkey == oldKey {
+		t.Fatal("rotation did not change the served key")
+	}
+	resp, err := http.Get(boot.base + "/v1/threads")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var moved struct {
+		Error struct {
+			Code    string
+			Details struct{ Notice envelope.HubNotice }
+		}
+	}
+	err = json.NewDecoder(resp.Body).Decode(&moved)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != 410 || moved.Error.Code != "hub_moved" {
+		t.Fatalf("relocated response: %d %+v %v", resp.StatusCode, moved, err)
+	}
+	got := moved.Error.Details.Notice
+	if err := hubid.VerifyNotice(doc.Pubkey, got); err != nil {
+		t.Errorf("moving notice must verify against the served identity: %v", err)
+	}
+	if got.NewURL != target || got.Message != n.Message || got.At != n.At || got.ExpiresAt != n.ExpiresAt {
+		t.Errorf("replacement lost operator move fields: %+v", got)
+	}
+	req, err := http.NewRequest("GET", boot.base+"/v1/hub/notices", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var page struct{ Notices []envelope.HubNotice }
+	err = json.NewDecoder(resp.Body).Decode(&page)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != 200 || len(page.Notices) != 1 || page.Notices[0] != got {
+		t.Fatalf("active notices differ from the 410 notice: %d %+v %v", resp.StatusCode, page, err)
+	}
+	if err := boot.stop(); err != nil {
+		t.Fatal(err)
+	}
+	// A subsequent relocated restart reuses the replacement unchanged.
+	next := bootHub(t, args, noEnv)
+	db, err = store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var activeID string
+	if err := db.QueryRow(`SELECT notice_id FROM hub_notices WHERE cleared_at IS NULL AND kind='moving'`).Scan(&activeID); err != nil || activeID != got.NoticeID {
+		t.Fatalf("restart replaced valid notice: %s %v", activeID, err)
+	}
+	if servedIdentity(t, next.base).Pubkey != doc.Pubkey {
+		t.Fatal("restart changed identity")
+	}
+}

@@ -28,15 +28,17 @@ func TestRelocatedAnswers410(t *testing.T) {
 		{"GET", "/v1/peers/me", ""}, {"POST", "/v1/admin/notices", ""},
 		{"POST", "/v1/hub/identity", ""}, {"POST", "/healthz", ""}, {"GET", "/unknown", ""},
 	} {
-		for _, secret := range []string{"", peer, "invalid"} {
-			t.Run(tc.method+tc.path+tc.accept+secret, func(t *testing.T) {
+		for _, credential := range []struct{ name, secret string }{
+			{"anonymous", ""}, {"valid", peer}, {"invalid", "invalid"},
+		} {
+			t.Run(tc.method+tc.path+tc.accept+"/"+credential.name, func(t *testing.T) {
 				req, err := http.NewRequest(tc.method, e.URL+tc.path, strings.NewReader("not JSON"))
 				if err != nil {
 					t.Fatal(err)
 				}
 				req.Header.Set("Accept", tc.accept)
-				if secret != "" {
-					req.Header.Set("Authorization", "Bearer "+secret)
+				if credential.secret != "" {
+					req.Header.Set("Authorization", "Bearer "+credential.secret)
 				}
 				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
