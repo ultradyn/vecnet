@@ -368,10 +368,51 @@ func TestCreatePeerRefusalsAudited(t *testing.T) {
 				t.Fatalf("details = %v", e.Details)
 			}
 			provisionAudit(t, env, "peer_create_refused", actor, tc.code, 1)
-			if n := count(t, env, `SELECT count(*) FROM audit WHERE action = 'peer_create_refused' AND json_extract(detail,'$.kind') = ?`, r.Kind); n != 1 {
-				t.Fatalf("kind missing from refusal audit: %d", n)
+			want := r.Kind
+			if !hub.PeerKinds[r.Kind] {
+				want = hub.AuditUnrecognizedKind
+			}
+			if n := count(t, env, `SELECT count(*) FROM audit WHERE action = 'peer_create_refused' AND json_extract(detail,'$.kind') = ?`, want); n != 1 {
+				t.Fatalf("kind %q missing from refusal audit: %d", want, n)
 			}
 		})
+	}
+}
+
+// A credential pasted as kind is refused and must not land in append-only
+// audit (PROTOCOL §14 invariant 6), whoever sent it and at whatever step.
+func TestCreatePeerRefusalNeverAuditsRawKind(t *testing.T) {
+	secrets := []string{
+		"vn_peer_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		"vn_enrol_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+		"whsec_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+	}
+	for _, from := range []string{"principal", "peer"} {
+		for i, secret := range secrets {
+			t.Run(fmt.Sprintf("%s/%d", from, i), func(t *testing.T) {
+				env, c, _ := provisionSetup(t, 2, 60)
+				if from == "peer" {
+					_, sec := env.NewPeer("session", "peer")
+					c = provisionCaller(t, env, sec)
+				}
+				reqs := []hub.CreatePeerRequest{
+					{Kind: secret, Name: "x", IdempotencyKey: "audit-probe"},
+					{Kind: secret, Name: "", IdempotencyKey: "audit-probe"},
+					{Kind: secret, Name: "x", IdempotencyKey: "!bad"},
+				}
+				for _, r := range reqs {
+					if _, err := env.Hub.CreatePeer(context.Background(), c, r); err == nil {
+						t.Fatalf("create with kind %q succeeded", secret)
+					}
+				}
+				if n := count(t, env, `SELECT count(*) FROM audit WHERE action = 'peer_create_refused'`); n != len(reqs) {
+					t.Fatalf("refusals audited = %d, want %d", n, len(reqs))
+				}
+				if n := count(t, env, `SELECT count(*) FROM audit WHERE instr(detail, ?) > 0`, secret); n != 0 {
+					t.Fatalf("%d audit rows carry the raw kind", n)
+				}
+			})
+		}
 	}
 }
 

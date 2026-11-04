@@ -44,7 +44,8 @@ export function deadLetterParts(dl, nowMs = Date.now()) {
   parts.push({ text: 'attempts ' + attempt + '/' + budget, cls: '' });
   const at = when(dl.updated_at, nowMs);
   if (at) parts.push({ text: at, cls: '' });
-  parts.push({ text: short(dl.delivery_id), cls: 'mono' });
+  // id lets the page keep the full id in the text, so a copy is whole.
+  parts.push({ text: short(dl.delivery_id), cls: 'mono', id: dl.delivery_id });
   return parts;
 }
 

@@ -4,7 +4,7 @@
 import { answerBody, countdown } from './approvals.js';
 import { createAttachments } from './attach.js';
 import { sendRefusal } from './attach-model.js';
-import { avatar, h } from './dom.js';
+import { avatar, h, idText, peerLink } from './dom.js';
 import { ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, plural, short, title, when } from './format.js';
 import { markdown } from './md.js';
 import { prioritySeg } from './prio.js';
@@ -59,7 +59,7 @@ function jobBox(m) {
   const box = (k, ...rest) => h('div', { class: 'box' }, h('span', { class: 'k', text: k + ' ' }), ...rest);
   if (m.approval_response) return box('decision', m.approval_response.decision + (m.approval_response.reason ? ' · ' + m.approval_response.reason : ''));
   if (m.job_request) return box('job', m.job_request.operation + ' · ' + m.job_request.job_key);
-  if (m.job_status) return box('job ' + short(m.job_status.job_id), h('span', { class: 'js ' + m.job_status.state, text: m.job_status.state }), ' · sequence ' + m.job_status.sequence);
+  if (m.job_status) return box('job', idText(m.job_status.job_id), ' ', h('span', { class: 'js ' + m.job_status.state, text: m.job_status.state }), ' · sequence ' + m.job_status.sequence);
   return null;
 }
 
@@ -387,12 +387,12 @@ export function mount(root, ctx) {
       avatar(m.sender, ctx),
       h('div', {},
         h('header', {},
-          h('b', { text: m.sender === me ? nameOf(m.sender) + ' (you)' : nameOf(m.sender) }),
+          h('b', null, peerLink(m.sender, nameOf(m.sender)), m.sender === me ? ' (you)' : null),
           h('span', { class: 'kind', text: kindOf(m.sender) }),
           h('span', { class: 't', text: when(m.created_at), title: m.created_at }),
           delta ? h('span', { class: 'dt', text: delta, title: deltaTitle(prev.created_at, m.created_at) }) : null,
           h('span', { class: 'prio ' + m.priority, text: m.priority }),
-          others ? h('span', { class: 'via', text: 'to ' + others }) : null,
+          others ? h('span', { class: 'via' }, 'to ', (m.recipients || []).flatMap((r, i) => [i ? ', ' : '', peerLink(r, nameOf(r))])) : null,
           h('span', { class: 'acts' }, agoLabel(m.created_at), h('button', { type: 'button', text: 'reply', onclick: () => { S.replyTo = m.message_id; render(); comp.querySelector('textarea').focus(); } }))),
         it.parent ? replyQuote(it.parent) : null,
         // A spilled preview is clamped to a few lines; Show full text opens it.
@@ -410,7 +410,7 @@ export function mount(root, ctx) {
   function render() {
     if (gone) return;
     const t = thread(), all = msgs(), d = detail.get();
-    head.replaceChildren(h('h1', { text: t ? title(t, me, nameOf) : short(threadId) }),
+    head.replaceChildren(t ? h('h1', { class: t.title ? null : 'un', text: title(t, me, nameOf) }) : h('h1', null, idText(threadId)),
       h('div', { class: 'ids', text: threadId + (t ? ' · ' + plural(t.message_count, 'message') : '') }));
     ticks = [];
     agos = [];

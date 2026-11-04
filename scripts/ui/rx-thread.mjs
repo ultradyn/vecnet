@@ -67,6 +67,10 @@ try {
       const r = id => document.getElementById('m-' + id).getBoundingClientRect();
       return { h: r(a).height, top: r(b).top, row: document.querySelector(`[id="m-${a}"] .rx-row`).getBoundingClientRect().height };
     }, [q.message_id, target]);
+    // The receipts line under the question comes from the delivery matrix, a
+    // separate load that can land after the chips. Measure only once it shows
+    // all four recipients, or its arrival (24 px) reads as a chip moving things.
+    await page.waitForFunction(id => document.querySelectorAll(`[id="m-${id}"] .rc > span`).length === 4, q.message_id);
     const g0 = await geo();
     await react('sleuth', q.message_id, CHECK);
     await qMsg.locator('.rx-chip').waitFor();

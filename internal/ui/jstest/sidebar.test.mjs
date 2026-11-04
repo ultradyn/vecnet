@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { OTHER_MAX, OTHER_PAGE, nextLimit, otherThreads, peopleLine } from '../static/sidebar-model.js';
+import { OTHER_MAX, OTHER_PAGE, nextLimit, otherThreads, peopleLine, yourThreads } from '../static/sidebar-model.js';
 
 const NOW = Date.parse('2026-11-04T10:00:00.000Z');
 const back = ms => new Date(NOW - ms).toISOString();
@@ -55,14 +55,79 @@ test('otherThreads row: title, participants line, count, relative and full time'
   assert.match(r.tip, /^Release plan\ncodex-hark, grok-reviewer, pag-sleuth, claw-ops\n42 messages · last active /);
 });
 
-test('otherThreads falls back for an untitled thread and a missing count or time', () => {
-  const t = row('thr_01JBCDEFGHJKMNPQRS', { count: undefined, at: '' });
+test('otherThreads falls back for a missing count or time', () => {
+  const t = row('thr_01JBCDEFGHJKMNPQRS', { title: 'Plan', count: undefined, at: '' });
   delete t.thread.message_count;
   const [r] = view({ threads: [t], next: null }).rows;
-  assert.equal(r.title, 'Untitled thread');
-  assert.equal(r.untitled, true);
   assert.equal(r.count, '');
   assert.equal(r.active, '');
+  assert.equal(r.tip, 'Plan\ncodex-hark, grok-reviewer');
+});
+
+test('an untitled other thread names its participants; the second line counts them', () => {
+  const [pair, group] = view({ threads: [
+    row('thr_2', { at: back(1000) }),
+    row('thr_1', { participants: ['peer_a', 'peer_b', 'peer_c', 'peer_d', 'peer_e'], at: back(2000) }),
+  ], next: null }).rows;
+  assert.equal(pair.title, 'codex-hark ↔ grok-reviewer');
+  assert.equal(pair.untitled, true);
+  assert.equal(pair.people, '2 participants');
+  assert.equal(group.title, 'codex-hark, grok-reviewer +3');
+  assert.equal(group.people, '5 participants');
+  // The tip still lists everyone.
+  assert.match(group.tip, /^codex-hark, grok-reviewer \+3\ncodex-hark, grok-reviewer, pag-sleuth, claw-ops, dot-research\n1 message · last active /);
+});
+
+const mineView = extra => yourThreads({ page: null, summaries: null, error: null, me: 'peer_me', nameOf, now: NOW, ...extra });
+const summary = (id, { title = null, participants = ['peer_me', 'peer_a'], count = 1 } = {}) => ({ thread_id: id, title, participants, message_count: count });
+
+test('yourThreads uses the shared row: title, others, count, last active', () => {
+  const v = mineView({ page: { threads: [
+    row('thr_b', { title: 'Release plan', participants: ['peer_me', 'peer_a', 'peer_b', 'peer_c', 'peer_d'], count: 7, at: back(3 * 60_000) }),
+    row('thr_a', { participants: ['peer_a', 'peer_me'], count: 2, at: back(2 * 3_600_000) }),
+  ], next: null } });
+  assert.equal(v.state, 'ok');
+  const [titled, oneToOne] = v.rows;
+  // The operator is in every one of these, so the participants line leaves it out.
+  assert.deepEqual({ ...titled, tip: undefined }, {
+    id: 'thr_b', href: '#thread/thr_b', title: 'Release plan', untitled: false,
+    people: 'codex-hark, grok-reviewer, pag-sleuth +1', count: '7', active: '3m ago', tip: undefined,
+    ids: ['peer_a', 'peer_b', 'peer_c', 'peer_d'],
+  });
+  // The tip names the operator as you.
+  assert.match(titled.tip, /^Release plan\nyou, codex-hark, grok-reviewer, pag-sleuth, claw-ops\n7 messages · last active /);
+  assert.equal(oneToOne.title, 'codex-hark');
+  assert.equal(oneToOne.untitled, true);
+  assert.equal(oneToOne.people, '2 participants');
+  // A stand-in title's count is plain text: no peer links.
+  assert.deepEqual(oneToOne.ids, []);
+  assert.equal(oneToOne.active, '2h ago');
+});
+
+test('yourThreads keeps the hub order', () => {
+  const v = mineView({ page: { threads: [row('thr_a', { at: back(9000) }), row('thr_z', { at: back(1000) })], next: null } });
+  assert.deepEqual(v.rows.map(r => r.id), ['thr_a', 'thr_z']);
+});
+
+test('yourThreads shows the plain summaries until the timed page arrives', () => {
+  const v = mineView({ summaries: [summary('thr_1', { title: 'Hosting', count: 4 }), summary('thr_2', { participants: ['peer_me', 'peer_a', 'peer_b'] })] });
+  assert.equal(v.state, 'ok');
+  assert.deepEqual(v.rows.map(r => [r.title, r.people, r.count, r.active]), [
+    ['Hosting', 'codex-hark', '4', ''],
+    ['codex-hark, grok-reviewer', '3 participants', '1', ''],
+  ]);
+  // A page, once there, wins.
+  const both = mineView({ summaries: [summary('thr_1')], page: { threads: [row('thr_9', { participants: ['peer_me', 'peer_b'] })], next: null } });
+  assert.deepEqual(both.rows.map(r => r.id), ['thr_9']);
+});
+
+test('yourThreads states: loading, error, empty', () => {
+  assert.deepEqual(mineView({}), { state: 'loading', note: '…', rows: [] });
+  assert.deepEqual(mineView({ error: new Error('boom') }), { state: 'error', note: 'Threads unavailable', rows: [] });
+  assert.deepEqual(mineView({ summaries: [] }), { state: 'empty', note: 'No threads yet', rows: [] });
+  assert.deepEqual(mineView({ page: { threads: [], next: null } }), { state: 'empty', note: 'No threads yet', rows: [] });
+  // Rows already shown stay shown through a failed reload.
+  assert.equal(mineView({ summaries: [summary('thr_1')], error: new Error('boom') }).state, 'ok');
 });
 
 test('otherThreads states: loading, error, empty, empty after exclusion', () => {

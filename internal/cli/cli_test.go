@@ -1055,6 +1055,8 @@ func TestPrincipalScopeAndList(t *testing.T) {
 	}
 }
 
+// (guard) Task 1 already admits the launcher kind and peer add passes kinds
+// through, so this is CLI regression coverage, not Task 3 red-to-green evidence.
 func TestPeerAddLauncherKind(t *testing.T) {
 	env := testhub.Start(t)
 	op := profileUser(t, env.URL, env.OperatorSecret)

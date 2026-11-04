@@ -65,6 +65,11 @@ type PrincipalInfo struct {
 	DefaultDeny     []string        `json:"default_deny"`
 }
 
+// AuditUnrecognizedKind stands in for a requested kind that is not a peer
+// kind. A refused create audits only enum values, so a credential pasted as
+// kind never reaches append-only audit (PROTOCOL §14 invariant 6).
+const AuditUnrecognizedKind = "(unrecognized)"
+
 // provisionRefused records just reason and kind, never the requested name or
 // body. A cutError lets the caller commit the audit before returning the API error.
 func provisionRefused(ctx context.Context, tx *sql.Tx, c auth.Caller, action string, api *APIError, detail map[string]any) error {
@@ -111,8 +116,12 @@ func (h *Hub) CreatePeer(ctx context.Context, c auth.Caller, req CreatePeerReque
 }
 
 func (h *Hub) createPeerTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req CreatePeerRequest) (*CreatePeerResult, error) {
+	auditKind := AuditUnrecognizedKind
+	if PeerKinds[req.Kind] {
+		auditKind = req.Kind
+	}
 	refuse := func(api *APIError) (*CreatePeerResult, error) {
-		return nil, provisionRefused(ctx, tx, c, "peer_create_refused", api, map[string]any{"kind": req.Kind})
+		return nil, provisionRefused(ctx, tx, c, "peer_create_refused", api, map[string]any{"kind": auditKind})
 	}
 	if c.Kind != "principal" {
 		return refuse(E(http.StatusForbidden, "forbidden", "a principal credential is required"))

@@ -70,14 +70,41 @@ export function bytes(n) {
 }
 
 export function short(id) {
-  return id && id.length > 14 ? id.slice(0, id.indexOf('_') + 1) + '…' + id.slice(-5) : (id || '?');
+  const p = idParts(id);
+  return p.mid ? p.head + '…' + p.tail : p.head;
 }
 
+// idParts splits an id for display: head and tail are what short() shows
+// either side of its ellipsis, and mid is the elided rest. head + mid + tail
+// is the whole id, so a page can keep the full id in its text and hide only
+// mid (dom.js idText), and a selection then copies the id, never the "…".
+export function idParts(id) {
+  if (!id || id.length <= 14) return { head: id || '?', mid: '', tail: '' };
+  const cut = id.indexOf('_') + 1;
+  return { head: id.slice(0, cut), mid: id.slice(cut, -5), tail: id.slice(-5) };
+}
+
+// title is a thread's own title, else its stand-in (standInTitle).
 export function title(thread, me, nameOf) {
   if (!thread) return '';
-  if (thread.title) return thread.title;
-  const others = (thread.participants || []).filter(p => p !== me).map(nameOf);
-  return others.length ? others.join(', ') : short(thread.thread_id);
+  return thread.title || standInTitle(thread, me, nameOf);
+}
+
+// standInTitle names an untitled thread by its participants, leaving out
+// `me` (the operator): two peers read "A ↔ B"; a 1:1 with the operator reads
+// as the other peer alone; three names are listed and more read "A, B +3", so
+// the count survives the sidebar's width. A name is cleaned and folded to one
+// line; an unknown or blank one is the peer's short id, as is the thread with
+// no one else in it. The result is text, never markup.
+const GROUP_LISTED = 3, GROUP_NAMED = 2;
+export function standInTitle(thread, me, nameOf) {
+  if (!thread) return '';
+  const all = thread.participants || [];
+  const names = all.filter(p => p !== me).map(id => clean(nameOf(id) ?? '').replace(/\s+/g, ' ').trim() || short(id));
+  if (!names.length) return short(thread.thread_id);
+  if (names.length === 2 && names.length === all.length) return names.join(' ↔ ');
+  if (names.length <= GROUP_LISTED) return names.join(', ');
+  return names.slice(0, GROUP_NAMED).join(', ') + ' +' + (names.length - GROUP_NAMED);
 }
 
 // quotaLabel is the quota rule the TUI dash shares (internal/tui dashCellQuota):

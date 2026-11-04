@@ -23,6 +23,9 @@ body[data-route=dash] .va .col{max-width:1120px}
 .dash .kd{width:8px;height:8px;border-radius:2px;background:#64748b;flex:none}
 .dash .kd.k-operator{background:#a855f7}.dash .kd.k-session{background:#818cf8}.dash .kd.k-grokbot{background:#2dd4bf}
 .dash .kd.k-pagchat-bot{background:#a3e635}.dash .kd.k-openclaw{background:#fb923c}.dash .kd.k-dot{background:#f472b6}.dash .kd.k-source{background:#94a3b8}
+.dash .kd.k-launcher{background:#60a5fa}
+.dash td.kinds .pill{margin:0 10px 2px 0}
+.dash .warn{color:var(--wake)}
 .dash .pd{width:8px;height:8px;border-radius:50%;flex:none;background:#475569}
 .dash .pd.idle{background:var(--ok)}.dash .pd.working{background:var(--wake)}.dash .pd.blocked{background:var(--bad)}
 .dash .pd.offline{background:none;border:1.5px solid #64748b}
@@ -34,6 +37,7 @@ body[data-route=dash] .va .col{max-width:1120px}
 .dash .cred{font:12px var(--mono);color:var(--muted)}
 .dash .cred.active{color:var(--ok)}.dash .cred.revoked{color:var(--bad)}
 .dash .tl{color:var(--text)}
+.dash .tl.un{color:var(--muted);font-style:italic}
 .dash ul.blocked{list-style:none;margin:0;padding:0}
 .dash ul.blocked li{padding:8px 0;border-bottom:1px solid #161d33;font-size:13px;color:var(--wake);overflow-wrap:anywhere}
 .dash ul.blocked li .sub{color:var(--dim)}

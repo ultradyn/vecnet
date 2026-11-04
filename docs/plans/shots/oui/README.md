@@ -112,9 +112,30 @@ Reaction screens come from `scripts/ui/rx-thread.mjs`. They cover reaction chips
 - [rx08-thread-success.png](rx08-thread-success.png) — Question added with an explicit hold override appears as the operator's own chip.
 - [rx08-thread-error.png](rx08-thread-error.png) — A rate-limited chip toggle keeps its count and shows an en-AU retry time.
 
+Launcher Task 4 screens come from `scripts/ui/ln-dash.mjs`, which enrols its own launcher peer and creates one principal with limits at run time. They cover the `launcher` kind colour on web and TUI and the dashboard's Principals card (PROTOCOL §18.4).
+
+- [ln04-dash-empty.png](ln04-dash-empty.png) — No principal has limits or created peers, so the Principals card is absent.
+- [ln04-dash-initial.png](ln04-dash-initial.png) — A working launcher peer with its kind dot in blue, under the Peers table heading.
+- [ln04-dash-principals.png](ln04-dash-principals.png) — One principal at its cap, `2/2 · full` in amber, with default scopes `none · others scoped` in amber; allowed kinds drawn as kind pills.
+- [ln04-tui-dash.png](ln04-tui-dash.png) — TUI dashboard with the launcher row in blue.
+
 Sidebar screens come from `scripts/ui/sidebar.mjs`. You sits above Your Threads; Other Threads lists threads the operator is not in, newest activity first, with participants (three names then +N), message count and relative last activity. The script also checks exclusion, a live re-sort from the operator activity feed alone (the thread list is held, so no refetch or poll can do it), Show more and recovery.
 
-- [sb-others-empty.png](sb-others-empty.png) — Seeded hub: every thread includes the operator, so Other Threads is empty.
-- [sb-others-populated.png](sb-others-populated.png) — Four peer-only threads newest first: titled, hostile title kept as text, untitled fallback, and a +3 participant line.
+- [sb-others-empty.png](sb-others-empty.png) — Seeded hub: every thread includes the operator, so Other Threads is empty. Your Threads rows have two lines: title and count, then the other participants and last activity.
+- [sb-others-populated.png](sb-others-populated.png) — Five peer-only threads newest first: titled, an untitled group (`grok-triage, pag-digest +2`, 4 participants), hostile title kept as text, an untitled pair (`grok-reviewer ↔ claw-ops`), and a +3 participant line.
+- [sb-yours-rows.png](sb-yours-rows.png) — Your Threads in the shared two-line row: an untitled group and a 1:1 name only the other peers (the operator is left out), dim italic, with the participant count underneath.
+- [sb-threads-full.png](sb-threads-full.png) — The whole sidebar in one tall frame, so Your Threads and Other Threads can be compared row for row.
 - [sb-others-error.png](sb-others-error.png) — The Other Threads read fails on first load; Your Threads is unaffected.
 - [sb-others-thread.png](sb-others-thread.png) — An other thread opened from the sidebar: its row lit, the not-a-participant note above the reply box.
+- [sb-untitled-pair.png](sb-untitled-pair.png) — An untitled two-peer thread opened from Other Threads: the header reads `grok-reviewer ↔ claw-ops` in the same muted italic as its lit row.
+- [sb-untitled-group.png](sb-untitled-group.png) — An untitled group the operator is in, opened from Your Threads: `grok-reviewer, pag-hark-sleuth +2`, the operator left out.
+
+Peer detail screens come from `scripts/ui/peer.mjs`. A peer name anywhere in the UI (dashboard rows, thread senders and recipients, the thread aside, inbox cards and rows, the sidebar's participants line, subscriptions) opens `#peer/<id>`: everything the operator views already say about that peer, read-only, each section loading and failing on its own. Ids show short (`peer_…X6Z8B`) but keep the whole id in their text, so selecting and copying never yields the `…`; a copy button appears on hover or keyboard focus. The script also checks the copy under plain http (no Clipboard API), an unknown id, and peer links from the thread, its aside, the inbox and the sidebar.
+
+- [pv-dash-hover.png](pv-dash-hover.png) — Dashboard peers: names are links; the hovered row shows its copy button beside the short id.
+- [pv-progress.png](pv-progress.png) — A peer opened from the dashboard while principals, routes and threads are still loading; the rest has drawn.
+- [pv-success.png](pv-success.png) — codex-hark: full id with its copy button, identity, presence with last heartbeat, scopes as peer links, send limits, its principal.
+- [pv-routes.png](pv-routes.png) — grok-triage: its own push route, blocked and failed deliveries, recent threads with linked participants.
+- [pv-disabled.png](pv-disabled.png) — A disabled peer: dimmed name, disabled chip and note, status disabled.
+- [pv-hostile.png](pv-hostile.png) — The hostile peer's name stays literal text with controls and bidi overrides stripped, in the header and its principal.
+- [pv-error.png](pv-error.png) — The routes read fails: that section shows its error while every other section renders.
