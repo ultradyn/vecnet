@@ -580,3 +580,49 @@ test('set replaces a loaded value, clears its error and notifies', async () => {
   await res.reload();
   assert.deepEqual(res.get(), { n: 1 });
 });
+
+test('tagsFor(hub_notice) is ["notices"]; malformed data invalidates nothing', () => {
+  const notice = {
+    notice_id: 'ntc_01JD3Q5H0X2Z4B6D8F0H2K4M6P', kind: 'maintenance', message: 'hello', hub: 'https://hub.example',
+    issued_at: '2026-11-05T07:00:00.000Z', expires_at: '2026-11-06T07:00:00.000Z', sig: 'A'.repeat(86),
+  };
+  const moving = { ...notice, kind: 'moving', new_url: 'https://vecnet.xk.io', at: '2026-11-05T09:00:00.000Z' };
+  for (const data of [
+    { change: 'posted', notice },
+    { change: 'posted', notice: moving },
+    { change: 'cleared', notice: { ...notice, cleared_at: '2026-11-05T08:00:00.000Z', cleared_how: 'operator' } },
+  ]) assert.deepEqual(tagsFor({ type: 'hub_notice', data }), ['notices'], JSON.stringify(data));
+  const bad = [
+    undefined, null, [], 'x', {}, { change: 'posted' }, { change: 'posted', notice: null },
+    { change: 'posted', notice: {} }, { change: 'unknown', notice }, { change: ['posted'], notice },
+    { change: 'posted', notice, extra: 1 }, { change: 'cleared', notice: { notice_id: 'ntc_test' } },
+    { change: 'posted', notice: { notice_id: 'ntc_test', kind: 7, message: false } },
+    { change: 'posted', notice: { ...notice, kind: 'party' } },
+    { change: 'posted', notice: { ...notice, new_url: 'https://vecnet.xk.io' } }, // only moving carries new_url
+    { change: 'posted', notice: { ...moving, new_url: undefined } },
+    { change: 'posted', notice: { ...notice, new_url: 'javascript:alert(1)', kind: 'moving' } },
+    { change: 'posted', notice: { ...notice, at: '2026-11-05' } },
+    { change: 'posted', notice: { ...notice, cleared_how: 'whim' } },
+    { change: 'posted', notice: { ...notice, extra: 'x' } },
+  ];
+  for (const field of Object.keys(notice)) {
+    const without = { ...notice };
+    delete without[field];
+    bad.push({ change: 'posted', notice: without }, { change: 'posted', notice: { ...notice, [field]: 7 } });
+  }
+  for (const data of bad) assert.deepEqual(tagsFor({ type: 'hub_notice', data }), [], JSON.stringify(data));
+});
+
+test('the pump passes on a long-poll hub_restarting hint, and null for each plain answer', async () => {
+  const h = hub([
+    { events: [], next_cursor: 'e1.1' },
+    { events: [], next_cursor: 'e1.1', hub_restarting: { retry_after_ms: 5000 } },
+    { events: [], next_cursor: 'e1.1', hub_restarting: { retry_after_ms: 'soon' } },
+    { events: [], next_cursor: 'e1.1' },
+  ]);
+  const seen = [];
+  const off = h.store.onRestart(ms => seen.push(ms));
+  await h.run();
+  off();
+  assert.deepEqual(seen.slice(0, 4), [null, 5000, null, null]);
+});

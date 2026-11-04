@@ -15,6 +15,7 @@ import { h, peerLink, toast } from './dom.js';
 import { short } from './format.js';
 import * as inbox from './inbox.js';
 import * as matrix from './matrix.js';
+import { createNotices } from './notice.js';
 import { peerHref } from './peer-model.js';
 import * as peer from './peer.js';
 import * as presence from './presence.js';
@@ -25,7 +26,7 @@ import * as thread from './thread.js';
 
 const SECRET_KEY = 'vecnet.ui.secret';
 const PEERS_REFRESH = 60000;
-const CONN_CLASS = { live: 'live', offline: 'off', stopped: 'off' };
+const CONN_CLASS = { live: 'live', offline: 'off', stopped: 'off', restarting: 'warn' };
 const $ = id => document.getElementById(id);
 
 const SCREENS = {
@@ -118,8 +119,9 @@ function peopleLinks(r, nameOf) {
   return [...shown.flatMap((id, i) => [i ? ', ' : '', peerLink(id, nameOf(id), { nested: true })]), ids.length > shown.length ? ' +' + (ids.length - shown.length) : ''];
 }
 
-function renderConn(store) {
-  const state = store.conn();
+// An announced restart reads as restarting, not offline, until it runs out.
+function renderConn(store, notices) {
+  const state = notices && notices.phase() === 'restarting' ? 'restarting' : store.conn();
   $('conn').className = 'conn ' + (CONN_CLASS[state] || '');
   $('conn').lastElementChild.textContent = state;
 }
@@ -156,6 +158,7 @@ function start(secret) {
   // by the sidebar and the dashboard. Activity in threads the operator is not
   // in reaches it only this way.
   const activity = createActivity({ api, signal: stop.signal });
+  const notices = createNotices({ api, store, root: $('notices'), onPhase: () => renderConn(store, notices) });
   const peers = store.resource('peers', () => api.peers());
   const threads = store.resource('threads', () => api.myThreads({ limit: 200 }));
   // limit pages deliveries; the unread count and `me` do not depend on it.
@@ -223,9 +226,12 @@ function start(secret) {
   $('app').hidden = false;
   $('hubname').textContent = location.host;
   $('view').replaceChildren(h('div', { class: 'loading', text: 'Connecting to the hub…' }));
-  renderConn(store);
+  renderConn(store, notices);
   s.offs.push(
-    store.onConn(() => renderConn(store)),
+    store.onConn(() => renderConn(store, notices)),
+    store.onRestart(ms => notices.poll(ms)),
+    activity.subscribe(ev => notices.activity(ev)),
+    () => notices.close(),
     threads.subscribe(redraw),
     inboxHead.subscribe(redraw),
     peers.subscribe(redraw),

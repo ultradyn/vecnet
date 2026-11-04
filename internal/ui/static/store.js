@@ -1,4 +1,5 @@
 // Cached views, the event pump and the hub clock. No DOM: covered by node.
+import { isNoticeEvent, validNotice } from './notice-model.js';
 
 const WAIT = 25, BACKOFF_FIRST = 1000, BACKOFF_MAX = 30000;
 
@@ -16,6 +17,7 @@ function stringOrAbsent(v) { return v === undefined || v === null || typeof v ==
 // tagsFor mirrors opapi.Tags (PROTOCOL §2.13). As there, an event whose data
 // would not decode invalidates nothing, whichever field is the wrong type.
 export function tagsFor(ev) {
+  if (isNoticeEvent(ev)) return validNotice(ev.data) ? ['notices'] : [];
   const type = ev && ev.type, data = ev && ev.data;
   if (type === 'operator_view') {
     if (!isObject(data) || typeof data.reason !== 'string' || !(data.thread_id === null || typeof data.thread_id === 'string')) return [];
@@ -45,6 +47,7 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
   const live = new Set();       // resources invalidation reaches
   const inflight = new Set();   // running load cycles
   const connWatchers = new Set();
+  const restartWatchers = new Set();
   let flushQueued = false, offset = 0, conn = 'connecting';
 
   function setConn(next) {
@@ -219,6 +222,9 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
         backoff = BACKOFF_FIRST;
         setConn('live');
         retryFailed();
+        // A drain answers the parked poll with hub_restarting (PROTOCOL §21).
+        const hint = page.hub_restarting, ms = isObject(hint) && Number.isFinite(hint.retry_after_ms) ? hint.retry_after_ms : null;
+        for (const fn of [...restartWatchers]) fn(ms);
         after = page.next_cursor || after;
         const events = page.events || [];
         if (!events.length) continue;
@@ -258,5 +264,7 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
     conn: () => conn,
     // The nav redraws its connection state from this.
     onConn(fn) { connWatchers.add(fn); return () => connWatchers.delete(fn); },
+    // fn(retryAfterMs) on a hub_restarting hint, fn(null) on a plain answer.
+    onRestart(fn) { restartWatchers.add(fn); return () => restartWatchers.delete(fn); },
   };
 }
