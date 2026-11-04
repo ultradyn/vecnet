@@ -22,6 +22,12 @@ for root in "${candidates[@]}"; do
     for seen in "${roots[@]}"; do [[ $seen != "$root" ]] || duplicate=true; done
     $duplicate || roots+=("$root")
 done
+# Test hook: print the selected roots and stop before any scan or signal.
+if [[ ${REAP_LIST_ROOTS:-} == 1 ]]; then
+    trap - EXIT
+    printf '%s\n' "${roots[@]}"
+    exit 0
+fi
 
 while read -r pid age; do
     [[ $pid =~ ^[0-9]+$ && $age =~ ^[0-9]+$ ]] || continue

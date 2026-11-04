@@ -137,3 +137,24 @@ test('reaps a tmux server whose owner pid is dead', async t => {
   assert.equal(liveTmux('has-session').status, 0, 'a live owner keeps its private server');
   assert.ok(existsSync(join(tmuxRoot, `tmux-${process.getuid()}`, liveSocket)));
 });
+
+// Default roots, selected only when REAP_ROOTS is absent. REAP_LIST_ROOTS
+// prints the selection and exits before any scan, signal or removal.
+test('default roots include TMPDIR, /tmp and /tmp/build2-$USER once each', () => {
+  const user = spawnSync('id', ['-un'], { encoding: 'utf8' }).stdout.trim();
+  assert.ok(user);
+  const build2 = `/tmp/build2-${user}`;
+  const roots = tmp => {
+    const env = { ...process.env, REAP_LIST_ROOTS: '1' };
+    delete env.REAP_ROOTS;
+    if (tmp === undefined) delete env.TMPDIR; else env.TMPDIR = tmp;
+    const result = spawnSync('bash', [reaper], { env, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.split('\n').filter(Boolean);
+  };
+  assert.deepEqual(roots(undefined), ['/tmp', build2]);
+  assert.deepEqual(roots(''), ['/tmp', build2]);
+  assert.deepEqual(roots('/srv/private-tmp/'), ['/srv/private-tmp', '/tmp', build2]);
+  assert.deepEqual(roots('/tmp/'), ['/tmp', build2]);
+  assert.deepEqual(roots(build2), [build2, '/tmp']);
+});
