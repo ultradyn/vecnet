@@ -391,3 +391,74 @@ func TestPeersRowCarriesCreatedBy(t *testing.T) {
 		t.Fatalf("disabled created_by: %v", got)
 	}
 }
+
+// PeerRow carries each peer's own scopes and send limits (PROTOCOL §2.13), so
+// the web peer view needs no per-peer request. A source has neither.
+func TestPeersRowCarriesScopesAndLimits(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	scoped, _ := env.NewPeer("session", "scoped")
+	friend, _ := env.NewPeer("session", "friend")
+	foe, _ := env.NewPeer("session", "foe")
+	plain, _ := env.NewPeer("session", "plain")
+	if err := env.Hub.SetScopes(ctx, scoped, []string{friend}, []string{foe}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.Hub.SetPeerLimits(ctx, scoped, 7, 3); err != nil {
+		t.Fatal(err)
+	}
+	source, _, _, err := env.Hub.AddSource(ctx, "github", "source", plain, nil, "wake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := peerRows(t, env)
+	got := rows[scoped]
+	if !reflect.DeepEqual(got.Scopes, opapi.PeerScopes{Allow: []string{friend}, Deny: []string{foe}}) {
+		t.Fatalf("scopes: %+v", got.Scopes)
+	}
+	if got.Limits == nil || got.Limits.SendsPerMin != 7 || got.Limits.ThreadsPerHour != 3 {
+		t.Fatalf("limits: %+v", got.Limits)
+	}
+	// Defaults: an unscoped peer allows all, and carries the column defaults.
+	if p := rows[plain]; len(p.Scopes.Allow) != 0 || len(p.Scopes.Deny) != 0 || p.Limits == nil || p.Limits.SendsPerMin != 60 || p.Limits.ThreadsPerHour != 20 {
+		t.Fatalf("plain: %+v %+v", p.Scopes, p.Limits)
+	}
+	if s := rows[source]; s.Limits != nil || len(s.Scopes.Allow) != 0 || len(s.Scopes.Deny) != 0 {
+		t.Fatalf("source: %+v %+v", s.Scopes, s.Limits)
+	}
+	// On the wire: empty lists are [], a source's limits are null.
+	resp, wire := env.Do(env.OperatorSecret, "GET", "/v1/admin/peers", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("peers HTTP %d: %s", resp.StatusCode, wire)
+	}
+	var page struct {
+		Peers []map[string]json.RawMessage `json:"peers"`
+	}
+	if err := json.Unmarshal(wire, &page); err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, row := range page.Peers {
+		var peer struct {
+			PeerID string `json:"peer_id"`
+		}
+		if err := json.Unmarshal(row["peer"], &peer); err != nil {
+			t.Fatal(err)
+		}
+		switch peer.PeerID {
+		case plain:
+			seen++
+			if string(row["scopes"]) != `{"allow":[],"deny":[]}` || string(row["limits"]) != `{"sends_per_min":60,"threads_per_hour":20}` {
+				t.Fatalf("plain wire: scopes %s limits %s", row["scopes"], row["limits"])
+			}
+		case source:
+			seen++
+			if string(row["scopes"]) != `{"allow":[],"deny":[]}` || string(row["limits"]) != "null" {
+				t.Fatalf("source wire: scopes %s limits %s", row["scopes"], row["limits"])
+			}
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("wire rows seen: %d", seen)
+	}
+}

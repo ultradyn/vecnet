@@ -45,6 +45,9 @@ export function threadRow(r, me, nameOf, now) {
     title,
     untitled,
     people: untitled ? plural(ids.length, 'participant') : peopleLine(ids.filter(p => p !== me), nameOf),
+    // The peers `people` names, for per-name peer links; none when people
+    // is a stand-in title's plain participant count.
+    ids: untitled ? [] : ids.filter(p => p !== me),
     count: count === null ? '' : String(count),
     active: ago(r.last_message_at, now),
     tip,

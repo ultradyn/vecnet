@@ -293,6 +293,10 @@ type PeerRow struct {
 	PresenceAt  *string     `json:"presence_at"`
 	ReachVia    *string     `json:"reach_via"`
 	Routes      []RouteInfo `json:"routes"`
+	// Scopes are the peer's own allow and deny lists (both empty: allow
+	// all). Limits are its send limits; null for a directory source.
+	Scopes PeerScopes  `json:"scopes"`
+	Limits *PeerLimits `json:"limits"`
 }
 
 // MarshalJSON keeps empty collections in PeerRow non-null.
@@ -302,6 +306,30 @@ func (v PeerRow) MarshalJSON() ([]byte, error) {
 		v.Routes = []RouteInfo{}
 	}
 	return json.Marshal(plain(v))
+}
+
+// PeerScopes holds peer, team and group ids (PUT /v1/admin/peers/{id}/scopes).
+type PeerScopes struct {
+	Allow []string `json:"allow"`
+	Deny  []string `json:"deny"`
+}
+
+// MarshalJSON keeps empty collections in PeerScopes non-null.
+func (v PeerScopes) MarshalJSON() ([]byte, error) {
+	type plain PeerScopes
+	if v.Allow == nil {
+		v.Allow = []string{}
+	}
+	if v.Deny == nil {
+		v.Deny = []string{}
+	}
+	return json.Marshal(plain(v))
+}
+
+// PeerLimits mirrors PUT /v1/admin/peers/{id}/limits.
+type PeerLimits struct {
+	SendsPerMin    int `json:"sends_per_min"`
+	ThreadsPerHour int `json:"threads_per_hour"`
 }
 
 type LoopCut struct {

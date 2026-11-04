@@ -2,8 +2,8 @@
 // native modal <dialog> over the thread, messages down, recipients across,
 // each cell coloured by the hub's `display` (PROTOCOL §2.13). It reloads on
 // the thread's tag while open and is removed from the page when it closes.
-import { h } from './dom.js';
-import { plural, short, title, when } from './format.js';
+import { h, idText } from './dom.js';
+import { plural, title, when } from './format.js';
 import { grid, merge } from './matrix-model.js';
 
 const PAGE = 200;
@@ -156,7 +156,7 @@ export function openMatrix(threadId, ctx) {
     if (done) return;
     const t = ((ctx.threads && ctx.threads.get()) || {}).threads || [];
     const summary = t.find(x => x.thread_id === threadId);
-    heading.replaceChildren('Delivery matrix', h('span', { class: 'mx-thr', text: summary ? title(summary, ctx.me, nameOf) : short(threadId), title: threadId }));
+    heading.replaceChildren('Delivery matrix', summary ? h('span', { class: 'mx-thr', text: title(summary, ctx.me, nameOf), title: threadId }) : h('span', { class: 'mx-thr' }, idText(threadId)));
     const value = res.get(), err = res.error(), loading = res.loading();
     // A rotated secret signs the shell out; the dialog must not linger over it.
     if (signedOut() || (err && err.status === 401)) { endSession(); return; }

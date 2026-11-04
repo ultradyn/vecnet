@@ -49,7 +49,9 @@ try {
     assert(await page.locator('#inbox-approvals .n').textContent() === '2 open', 'approval count label');
     assert(await page.locator('#inbox-dead_letters .n').textContent() === '3 dead letters', 'dead letter count label');
     const line503 = await card(dl503).locator('.meta').textContent();
-    assert(/^503 · retries exhausted · attempts 8\/8 · \d\d:\d\d · dly_…\w{5}$/.test(line503), `503 line: ${line503}`);
+    // The delivery id shows short (dly_…8J0M2) but its text is the whole id,
+    // so a copy is whole (dom.js idText); the ellipsis is CSS.
+    assert(/^503 · retries exhausted · attempts 8\/8 · \d\d:\d\d · dly_[0-9A-Z]{26}$/.test(line503), `503 line: ${line503}`);
     assert(/^410 · terminal 4xx · attempts 1\/8 · /.test(await card(dl410).locator('.meta').textContent()), '410 line');
     assert(/^network error · attempts 8\/8 · /.test(await card(dlNet).locator('.meta').textContent()), 'network line');
     assert(/^expires in \d\d:\d\d$/.test(await card(aprA).locator('.exp').textContent()), 'countdown text');

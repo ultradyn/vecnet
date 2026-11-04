@@ -152,7 +152,7 @@ Commands: `:attach PATH`, `:attach`, `:detach N`, `:detach` (see [Attachments](#
 
 ## Dashboard and administration
 
-The dashboard observes peers, filtered threads, subscription health, loop cuts, blocked/failed deliveries, counters and audit entries. It performs no writes. Use the inbox for retry/discard/resume or the CLI for administration:
+The dashboard observes peers, filtered threads, subscription health, loop cuts, blocked/failed deliveries, counters and audit entries. It performs no writes. In the web client every peer name links to that peer's own read-only page (`#peer/<id>`): its full id, kind, principal, credential and disabled state, presence with the last heartbeat and capabilities, scopes and send limits, routes (its own and its principal's), subscriptions, delivery health and recent threads. Ids show short (`peer_…X6Z8B`) but copy whole: select one (a click selects it all) or use the copy button that appears on hover or focus. Use the inbox for retry/discard/resume or the CLI for administration:
 
 | Change | CLI command |
 |---|---|

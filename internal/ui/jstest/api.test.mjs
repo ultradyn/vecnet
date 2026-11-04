@@ -110,6 +110,8 @@ test('every method calls its route with the secret only in the header', async ()
   const table = [
     [() => api.peers(), 'GET', '/v1/peers'],
     [() => api.adminPeers(), 'GET', '/v1/admin/peers'],
+    [() => api.principals(), 'GET', '/v1/admin/principals'],
+    [() => api.routes(), 'GET', '/v1/admin/routes'],
     [() => api.inbox({ limit: 50, before: 'dly_1', unread: true }), 'GET', '/v1/admin/inbox?limit=50&before=dly_1&unread=1'],
     [() => api.inbox({}), 'GET', '/v1/admin/inbox'],
     [() => api.inbox(), 'GET', '/v1/admin/inbox'],

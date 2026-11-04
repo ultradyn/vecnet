@@ -15,8 +15,8 @@ import (
 )
 
 // uiMaxBytes caps the sum of every file in the UI, which ships with no build
-// step (raised from 60 KiB by operator UI Task 7, and from 256 KiB by peer
-// avatars, when the shell had already reached 262,735 bytes).
+// step (raised from 60 KiB by operator UI Task 7; to 320 KiB on 2026-11-04
+// when the sidebar, activity feed and peer view took it past 256 KiB).
 const uiMaxBytes = 320 << 10
 
 var (
