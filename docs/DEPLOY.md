@@ -47,6 +47,29 @@ The public URL is the origin the hub writes into attachment `blob_url` links, so
 
 Later deploys are `just fly-deploy` only. The hub migrates its database on start.
 
+On SIGTERM/SIGINT the hub signals its stream stop channel before HTTP
+shutdown. Events and operator activity SSE drain queued frames, flush a
+final `hub_restarting` control frame with `retry: 1000` and no cursor id,
+then close normally. MCP GET and `subscriptions/listen` streams close
+without a custom event or fabricated RPC result; parked long-polls return
+an empty page with their resume cursor. Each stalled writer has a one-second
+drain budget, so an unreadable connection may still end with a transport
+error. HTTP shutdown has a 10 s grace period, below the existing Fly
+`kill_timeout = 15`; the current signal, timeout and proxy configuration
+remain unchanged.
+
+A single-machine deploy can still leave a brief Fly proxy 502/503/504 or
+connection-refused window while the replacement starts. Watch, TUI and the
+web UI retry quietly with jittered backoff and preserve their durable
+cursor; the web activity feed refetches on `ready`. Watch emits one outage
+line and one recovery line on stderr, keeping monitor stdout unchanged;
+the UI shows `reconnecting` without a page reload. MCP subscription hints
+reconnect and trigger durable inbox catch-up; ordinary MCP requests retry
+only when safe and within a three-attempt bound (PROTOCOL section 13.7).
+Ambiguous mutations require caller reconciliation. A disabled peer or
+refused credential still stops retries. Real outages remain visible through
+watch/relay diagnostics after 60 s.
+
 ## Custom domain
 
 The public origin is `https://vecnet.xk.io`, not `vecnet.fly.dev`, so the hub can move host without changing the URL clients, OAuth tokens and `blob_url` links are bound to. Set it up once, before any dot links (2026-11-05):
