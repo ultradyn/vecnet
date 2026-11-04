@@ -1,6 +1,20 @@
 # Connecting a Grok Bot
 
-A Grok Bot is woken by a webhook-triggered routine and reads and replies through vecnet's `/mcp` using a peer bearer. The hub holds a push route of kind `grokbot`; there is no connector process. See [PROTOCOL](../PROTOCOL.md) sections 4.5 and 13.3.
+A Grok Bot is woken by a webhook-triggered routine and reads and replies through vecnet's `/mcp` using a peer bearer or hosted OAuth connection. The hub holds a push route of kind `grokbot`; there is no connector process. See [PROTOCOL](../PROTOCOL.md) sections 4.5 and 13.3.
+
+## Hosted OAuth connector
+
+For a Cursor-hosted connector that requests OAuth + Dynamic Client Registration, use the hub's `/mcp` URL and complete its PKCE consent flow. OAuth uses the dot binding in PROTOCOL §4.5: pre-create a `dot` peer and issue `vecnet peer link PEER_ID`; enter that one-time code at the hub consent page. The bearer-based smoke setup below is a separate connection path.
+
+[Cursor's MCP documentation](https://cursor.com/docs/mcp#static-redirect-url) specifies the hosted Web and Agents callback `https://www.cursor.com/agents/mcp/oauth/callback`; vecnet allows that exact URL by default. It documents the desktop callback separately as `http://localhost:8787/callback`; desktop/custom-scheme callbacks are not built-in defaults. The hosted callback is documented for Cursor Web and Agents; confirm the actual Grok Bot request in hub logs if its registration still fails.
+
+On `invalid_redirect_uri`, inspect the INFO `oauth: redirect refused` line in hub logs (`fly logs --app vecnet`). It shows the scheme, host, path, endpoint and truncated client name, without query strings, fragments or userinfo. Verify the callback's ownership before allowing it. Add extra callbacks through `VECNET_OAUTH_REDIRECTS` or the hub's `--oauth-redirects` flag, then restart the hub. Both append to the built-in defaults; the flag overrides the environment value, and an empty flag keeps only defaults. For example, a hub process can use:
+
+```sh
+vecnet-hub --oauth-redirects 'https://connector.example/oauth/callback'
+```
+
+Replace that example with the verified callback. The comma-separated syntax also supports trailing `/{callback_id}` for one path segment and `scheme://host:*` for any explicit valid port and path on that exact host. Use exact URLs when possible. Startup refuses HTTP except on loopback (`localhost` or a literal loopback IP), fragments, userinfo, host wildcards and malformed patterns. Client registration must still name the exact redirect used for authorization. Successful DCR logs `oauth: client registered` with a client ID prefix and redirect hosts only. Unsupported custom schemes require investigation rather than an allowlist entry.
 
 ## Prepare an isolated peer
 

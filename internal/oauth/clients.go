@@ -154,6 +154,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, u := range m.RedirectURIs {
 		if !s.redirectAllowed(u) {
+			logRedirectRefused(u, m.ClientName, "/oauth/register")
 			writeOAuthError(w, http.StatusBadRequest, "invalid_redirect_uri", "a redirect URI is not allowed")
 			return
 		}
@@ -177,6 +178,12 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "internal")
 		return
 	}
+	hosts := make([]string, 0, len(m.RedirectURIs))
+	for _, uri := range m.RedirectURIs {
+		u, _ := url.Parse(uri) // each URI passed redirectAllowed
+		hosts = append(hosts, u.Host)
+	}
+	slog.Info("oauth: client registered", "client_id_prefix", m.ClientID[:12], "redirect_hosts", hosts)
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"client_id":                  m.ClientID,
