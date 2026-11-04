@@ -88,51 +88,65 @@ func TestWatchFiniteRestartPreservesLastEvent(t *testing.T) {
 
 func TestWatchQuietOutageAndRecovery(t *testing.T) {
 	for _, restart := range []bool{false, true} {
-		t.Run(fmt.Sprint(restart), func(t *testing.T) {
-			var calls int
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/v1/peers" {
-					fmt.Fprint(w, `{"peers":[]}`)
-					return
+		for _, sustained := range []bool{false, true} {
+			t.Run(fmt.Sprintf("restart=%t/sustained=%t", restart, sustained), func(t *testing.T) {
+				var calls int
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/v1/peers" {
+						fmt.Fprint(w, `{"peers":[]}`)
+						return
+					}
+					calls++
+					if calls == 1 && restart {
+						w.Header().Set("Content-Type", "text/event-stream")
+						fmt.Fprint(w, "retry: 3000\n\nevent: hub_restarting\nretry: 1000\ndata: {\"retry_after_ms\":1000}\n\n")
+						return
+					}
+					if calls <= 2 {
+						w.WriteHeader(503)
+						return
+					}
+					if calls == 3 {
+						w.Header().Set("Content-Type", "text/event-stream")
+						fmt.Fprint(w, "id: e1.7\nevent: presence\ndata: {\"cursor\":\"e1.7\",\"type\":\"presence\",\"data\":{}}\n\n")
+						return
+					}
+					if r.Header.Get("Last-Event-ID") != "e1.7" {
+						t.Errorf("resume cursor = %q", r.Header.Get("Last-Event-ID"))
+					}
+					w.WriteHeader(204)
+				}))
+				defer srv.Close()
+				var out, errs bytes.Buffer
+				w := watcher{a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: newClient(srv.URL, "test"), forMonitor: true, replayed: true, seen: newDedupe(1024), retry: watchDefaultRetry}
+				now := time.Unix(100, 0)
+				w.now = func() time.Time { return now }
+				var delays []time.Duration
+				w.sleep = func(_ context.Context, d time.Duration) bool {
+					delays = append(delays, d)
+					if sustained {
+						now = now.Add(6 * time.Second)
+					}
+					return true
 				}
-				calls++
-				if calls == 1 && restart {
-					w.Header().Set("Content-Type", "text/event-stream")
-					fmt.Fprint(w, "retry: 3000\n\nevent: hub_restarting\nretry: 1000\ndata: {\"retry_after_ms\":1000}\n\n")
-					return
+				if err := w.run(); !errors.Is(err, errPeerDisabled) {
+					t.Fatalf("terminal=%v", err)
 				}
-				if calls <= 2 {
-					w.WriteHeader(503)
-					return
+				wantStatus := ""
+				if sustained {
+					wantStatus = "vecnet: watch: hub unreachable for 6s; reconnecting…\nvecnet: watch: reconnected after 12s\n"
 				}
-				if calls == 3 {
-					w.Header().Set("Content-Type", "text/event-stream")
-					fmt.Fprint(w, "id: e1.7\nevent: presence\ndata: {\"cursor\":\"e1.7\",\"type\":\"presence\",\"data\":{}}\n\n")
-					return
+				if errs.String() != wantStatus {
+					t.Fatalf("status=%q", errs.String())
 				}
-				if r.Header.Get("Last-Event-ID") != "e1.7" {
-					t.Errorf("resume cursor = %q", r.Header.Get("Last-Event-ID"))
+				if len(delays) == 0 || delays[0] < 750*time.Millisecond || delays[0] > 1250*time.Millisecond {
+					t.Fatalf("first delays=%v", delays)
 				}
-				w.WriteHeader(204)
-			}))
-			defer srv.Close()
-			var out, errs bytes.Buffer
-			w := watcher{a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: newClient(srv.URL, "test"), forMonitor: true, replayed: true, seen: newDedupe(1024), retry: watchDefaultRetry}
-			var delays []time.Duration
-			w.sleep = func(_ context.Context, d time.Duration) bool { delays = append(delays, d); return true }
-			if err := w.run(); !errors.Is(err, errPeerDisabled) {
-				t.Fatalf("terminal=%v", err)
-			}
-			if strings.Count(errs.String(), "hub restarting; reconnecting") != 2 || strings.Count(errs.String(), "reconnected") != 1 || strings.Contains(errs.String(), "http_503") {
-				t.Fatalf("status=%q", errs.String())
-			}
-			if len(delays) == 0 || delays[0] < 750*time.Millisecond || delays[0] > 1250*time.Millisecond {
-				t.Fatalf("first delays=%v", delays)
-			}
-			if strings.Contains(out.String(), "hub_restarting") || strings.Count(out.String(), "presence") != 1 {
-				t.Fatalf("stdout=%q", out.String())
-			}
-		})
+				if strings.Contains(out.String(), "hub_restarting") || strings.Count(out.String(), "presence") != 1 {
+					t.Fatalf("stdout=%q", out.String())
+				}
+			})
+		}
 	}
 }
 
@@ -149,7 +163,7 @@ func TestWatchVerboseOnlyAfterSustainedOutage(t *testing.T) {
 	now = now.Add(time.Second)
 	status.failed("connection refused")
 	status.live()
-	if strings.Count(errs.String(), "hub restarting") != 1 || strings.Count(errs.String(), "reconnected") != 1 || !strings.Contains(errs.String(), "connection refused") {
+	if strings.Count(errs.String(), "hub unreachable for 59s") != 1 || strings.Count(errs.String(), "reconnected after 60s") != 1 || !strings.Contains(errs.String(), "connection refused") {
 		t.Fatalf("outage status: %q", errs.String())
 	}
 	for i := 1; i < 100; i++ {
@@ -181,7 +195,7 @@ func TestWatchPurgedCursorThenAuthStops(t *testing.T) {
 	var out, errs bytes.Buffer
 	w := watcher{a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: newClient(srv.URL, "test"), forMonitor: true, replayed: true, connected: true, cursor: "e1.9", seen: newDedupe(1024)}
 	err := w.run()
-	if !terminal(err) || calls != 2 || !strings.Contains(errs.String(), "cursor_purged") || strings.Contains(errs.String(), "hub restarting") {
+	if !terminal(err) || calls != 2 || !strings.Contains(errs.String(), "cursor_purged") || strings.Contains(errs.String(), "reconnect") {
 		t.Fatalf("calls=%d err=%v stderr=%q", calls, err, errs.String())
 	}
 }
@@ -206,11 +220,12 @@ func TestWatchSuccessfulPollIsRecovery(t *testing.T) {
 	}))
 	defer srv.Close()
 	var out, errs bytes.Buffer
-	w := watcher{a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: newClient(srv.URL, "test"), forMonitor: true, replayed: true, seen: newDedupe(1024), sleep: func(context.Context, time.Duration) bool { return true }}
+	now := time.Unix(100, 0)
+	w := watcher{a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: newClient(srv.URL, "test"), forMonitor: true, replayed: true, seen: newDedupe(1024), now: func() time.Time { return now }, sleep: func(context.Context, time.Duration) bool { now = now.Add(6 * time.Second); return true }}
 	if err := w.run(); !terminal(err) {
 		t.Fatal(err)
 	}
-	if strings.Count(errs.String(), "hub restarting") != 1 || strings.Count(errs.String(), "reconnected") != 1 {
+	if strings.Count(errs.String(), "hub unreachable for 6s") != 1 || strings.Count(errs.String(), "reconnected after 18s") != 1 {
 		t.Fatalf("status=%q", errs.String())
 	}
 }

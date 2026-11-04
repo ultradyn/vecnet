@@ -115,7 +115,7 @@ func TestMCPRelayBodyReadFailureRecovery(t *testing.T) {
 				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {media}}, Body: io.NopCloser(body)}, nil
 			})
 			var out, errs bytes.Buffer
-			r := mcpRelay{a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: c, sleep: func(context.Context, time.Duration) bool { return true }}
+			r := mcpRelay{a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: c, now: func() time.Time { return time.Unix(100, 0) }, sleep: func(context.Context, time.Duration) bool { return true }}
 			raw := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":9,"method":%q}`, method))
 			var msg mcpRelayMessage
 			json.Unmarshal(raw, &msg)
@@ -132,7 +132,7 @@ func TestMCPRelayBodyReadFailureRecovery(t *testing.T) {
 			if method == "subscriptions/listen" && (strings.Count(out.String(), "acknowledged") != 1 || strings.Count(out.String(), "resources/updated") != 1 || !strings.Contains(out.String(), `"subscriptionId":9`)) {
 				t.Fatalf("catch-up=%s", out.String())
 			}
-			if strings.Count(errs.String(), "hub restarting") != 1 || strings.Count(errs.String(), "reconnected") != 1 {
+			if errs.Len() != 0 {
 				t.Fatalf("status=%s", errs.String())
 			}
 		})
@@ -202,39 +202,53 @@ func TestMCPRelayBoundsOrdinaryRetries(t *testing.T) {
 }
 
 func TestMCPRelayReconnectsSubscriptionHints(t *testing.T) {
-	var calls int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			t.Errorf("unexpected %s", r.Method)
-		}
-		calls++
-		if calls == 2 {
-			w.WriteHeader(503)
-			fmt.Fprint(w, "private proxy body")
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, `data: {"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"_meta":{"subscriptionId":9},"notifications":{"resourceSubscriptions":["vecnet://inbox","vecnet://inbox"]}}}`+"\n\n")
-		if calls == 1 {
-			fmt.Fprint(w, `data: {"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"vecnet://inbox"}}`+"\n\n")
-			return
-		}
-		fmt.Fprint(w, `data: {"jsonrpc":"2.0","id":9,"result":{}}`+"\n\n")
-	}))
-	defer srv.Close()
-	var out, errs bytes.Buffer
-	r := mcpRelay{a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: newClient(srv.URL, "private-secret"), sleep: func(context.Context, time.Duration) bool { return true }}
-	raw := []byte(`{"jsonrpc":"2.0","id":9,"method":"subscriptions/listen","params":{"resourceSubscriptions":["vecnet://inbox"]}}`)
-	var msg mcpRelayMessage
-	json.Unmarshal(raw, &msg)
-	if err := r.exchange(raw, msg, true); err != nil {
-		t.Fatal(err)
-	}
-	if calls != 3 || strings.Count(out.String(), "subscriptions/acknowledged") != 1 || strings.Count(out.String(), "notifications/resources/updated") != 2 || strings.Count(out.String(), `"id":9`) != 1 {
-		t.Fatalf("calls=%d stdout=%s", calls, out.String())
-	}
-	if strings.Count(errs.String(), "hub restarting") != 1 || strings.Count(errs.String(), "reconnected") != 1 || strings.Contains(errs.String(), "private") {
-		t.Fatalf("status=%q", errs.String())
+	for _, sustained := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sustained=%t", sustained), func(t *testing.T) {
+			var calls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "POST" {
+					t.Errorf("unexpected %s", r.Method)
+				}
+				calls++
+				if calls == 2 {
+					w.WriteHeader(503)
+					fmt.Fprint(w, "private proxy body")
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(w, `data: {"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"_meta":{"subscriptionId":9},"notifications":{"resourceSubscriptions":["vecnet://inbox","vecnet://inbox"]}}}`+"\n\n")
+				if calls == 1 {
+					fmt.Fprint(w, `data: {"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"vecnet://inbox"}}`+"\n\n")
+					return
+				}
+				fmt.Fprint(w, `data: {"jsonrpc":"2.0","id":9,"result":{}}`+"\n\n")
+			}))
+			defer srv.Close()
+			var out, errs bytes.Buffer
+			now := time.Unix(100, 0)
+			r := mcpRelay{a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: newClient(srv.URL, "private-secret"), now: func() time.Time { return now }, sleep: func(context.Context, time.Duration) bool {
+				if sustained {
+					now = now.Add(6 * time.Second)
+				}
+				return true
+			}}
+			raw := []byte(`{"jsonrpc":"2.0","id":9,"method":"subscriptions/listen","params":{"resourceSubscriptions":["vecnet://inbox"]}}`)
+			var msg mcpRelayMessage
+			json.Unmarshal(raw, &msg)
+			if err := r.exchange(raw, msg, true); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 3 || strings.Count(out.String(), "subscriptions/acknowledged") != 1 || strings.Count(out.String(), "notifications/resources/updated") != 2 || strings.Count(out.String(), `"id":9`) != 1 {
+				t.Fatalf("calls=%d stdout=%s", calls, out.String())
+			}
+			wantStatus := ""
+			if sustained {
+				wantStatus = "vecnet: mcp: hub unreachable for 6s; reconnecting…\nvecnet: mcp: reconnected after 12s\n"
+			}
+			if errs.String() != wantStatus || strings.Contains(errs.String(), "private") {
+				t.Fatalf("status=%q", errs.String())
+			}
+		})
 	}
 }
 

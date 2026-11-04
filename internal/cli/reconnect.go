@@ -7,33 +7,47 @@ import (
 	"time"
 )
 
-// reconnectStatus reports one outage, with details only once it has lasted
-// long enough to need attention. MCP callers supply sanitized details.
+const quietOutage = 5 * time.Second
+
+// reconnectStatus reports outages only once they need attention, with details
+// after one minute. MCP callers supply sanitized details.
 type reconnectStatus struct {
-	out    io.Writer
-	name   string
-	now    func() time.Time
-	since  time.Time
-	active bool
+	out       io.Writer
+	name      string
+	now       func() time.Time
+	since     time.Time
+	active    bool
+	announced bool
+}
+
+func (s *reconnectStatus) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 func (s *reconnectStatus) failed(detail string) {
-	now := time.Now()
-	if s.now != nil {
-		now = s.now()
-	}
+	now := s.clock()
 	if !s.active {
 		s.active, s.since = true, now
-		fmt.Fprintf(s.out, "vecnet: %s: hub restarting; reconnecting…\n", s.name)
-	} else if now.Sub(s.since) >= time.Minute && detail != "" {
+	}
+	elapsed := now.Sub(s.since)
+	if !s.announced && elapsed >= quietOutage {
+		fmt.Fprintf(s.out, "vecnet: %s: hub unreachable for %ds; reconnecting…\n", s.name, int64(elapsed/time.Second))
+		s.announced = true
+	}
+	if elapsed >= time.Minute && detail != "" {
 		fmt.Fprintf(s.out, "vecnet: %s: %s; reconnecting\n", s.name, flatten(detail))
 	}
 }
 
 func (s *reconnectStatus) live() {
 	if s.active {
-		fmt.Fprintf(s.out, "vecnet: %s: reconnected\n", s.name)
-		s.active = false
+		if s.announced {
+			fmt.Fprintf(s.out, "vecnet: %s: reconnected after %ds\n", s.name, int64(s.clock().Sub(s.since)/time.Second))
+		}
+		s.active, s.announced, s.since = false, false, time.Time{}
 	}
 }
 

@@ -61,8 +61,12 @@ remain unchanged.
 A single-machine deploy can still leave a brief Fly proxy 502/503/504 or
 connection-refused window while the replacement starts. Watch, TUI and the
 web UI retry quietly with jittered backoff and preserve their durable
-cursor; the web activity feed refetches on `ready`. Watch emits one outage
-line and one recovery line on stderr, keeping monitor stdout unchanged;
+cursor; the web activity feed refetches on `ready`. Watch and the MCP relay
+keep brief outages silent. The first failed attempt at or after 5 s emits
+`vecnet: <name>: hub unreachable for <N>s; reconnecting…` on stderr, once
+per outage; only an announced outage emits
+`vecnet: <name>: reconnected after <N>s` on recovery (`<name>` is `watch`
+or `mcp`, `<N>` is elapsed whole seconds). Monitor stdout stays unchanged;
 the UI shows `reconnecting` without a page reload. MCP subscription hints
 reconnect and trigger durable inbox catch-up; ordinary MCP requests retry
 only when safe and within a three-attempt bound (PROTOCOL section 13.7).
