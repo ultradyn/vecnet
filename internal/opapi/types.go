@@ -94,7 +94,10 @@ type Inbox struct {
 	Attention   []Attention     `json:"attention"`
 	Deliveries  []InboxDelivery `json:"deliveries"`
 	Unread      int             `json:"unread"`
-	NextBefore  *string         `json:"next_before"`
+	// UnreadByThread splits Unread by thread id: only threads with unread
+	// deliveries appear, and its values sum to Unread.
+	UnreadByThread map[string]int `json:"unread_by_thread"`
+	NextBefore     *string        `json:"next_before"`
 }
 
 // MarshalJSON keeps empty collections in Inbox non-null.
@@ -111,6 +114,9 @@ func (v Inbox) MarshalJSON() ([]byte, error) {
 	}
 	if v.Deliveries == nil {
 		v.Deliveries = []InboxDelivery{}
+	}
+	if v.UnreadByThread == nil {
+		v.UnreadByThread = map[string]int{}
 	}
 	return json.Marshal(plain(v))
 }

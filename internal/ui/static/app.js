@@ -67,7 +67,7 @@ function signOut(msg) {
 
 function renderNav(s, route) {
   const threads = (s.threads.get() || {}).threads || [];
-  const count = $('inbox-count'), unread = (s.inboxHead.get() || {}).unread;
+  const head = s.inboxHead.get() || {}, count = $('inbox-count'), unread = head.unread;
   count.textContent = unread ? String(unread) : '';
   count.className = 'cnt' + (unread ? ' hot' : '');
   $('nav-inbox').className = route.name === 'inbox' ? 'on' : '';
@@ -77,6 +77,7 @@ function renderNav(s, route) {
   const yours = yourThreads({
     page: mineRes && mineRes.get(), summaries: s.threads.get() ? threads : null,
     error: s.threads.error() || (mineRes && mineRes.error()), me: s.me, nameOf: s.nameOf, now,
+    unread: head.unread_by_thread,
   });
   $('threads').replaceChildren(...(yours.rows.length ? yours.rows.map(r => threadLink(r, route, s.nameOf)) : [h('div', { class: 'none', text: yours.note })]));
   renderOthers(s, route, threads, now);
@@ -84,9 +85,13 @@ function renderNav(s, route) {
 
 // One sidebar thread row, two lines (sidebar-model threadRow). Peer strings
 // go in as text only (dom.h). A titled row's participants are peer links.
+// An unread count is a tinted pill that never reads as the inbox badge, and
+// takes the message count's place (base.css); zero shows nothing.
 function threadLink(r, route, nameOf) {
-  return h('a', { href: r.href, class: r.id === route.id ? 'on' : '', title: r.tip },
-    h('span', { class: 'tt' + (r.untitled ? ' un' : ''), text: r.title }), h('span', { class: 'cnt', text: r.count }),
+  const cls = [r.id === route.id ? 'on' : '', r.unread ? 'unread' : ''].filter(Boolean).join(' ');
+  return h('a', { href: r.href, class: cls, title: r.tip },
+    h('span', { class: 'tt' + (r.untitled ? ' un' : ''), text: r.title }),
+    h('span', { class: 'nums' }, h('span', { class: 'cnt', text: r.count }), ...(r.unread ? [h('span', { class: 'ur', text: r.unreadText, 'aria-label': r.unread + ' unread' })] : [])),
     r.ids && r.ids.length ? h('span', { class: 'pp' }, peopleLinks(r, nameOf)) : h('span', { class: 'pp', text: r.people }),
     h('span', { class: 'ago', text: r.active }));
 }
