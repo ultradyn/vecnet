@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/ids"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
@@ -289,7 +290,7 @@ func TestRequesterCancelKeepsRecipientSequence(t *testing.T) {
 	if err := env.Hub.DB.QueryRow(`SELECT updated_at FROM jobs WHERE job_id = ?`, job).Scan(&cancelledAt); err != nil {
 		t.Fatal(err)
 	}
-	if want := env.Now.Now().Format(time.RFC3339Nano); cancelledAt != want {
+	if want := envelope.FormatTime(env.Now.Now()); cancelledAt != want {
 		t.Fatalf("first requester cancel updated_at = %s, want %s", cancelledAt, want)
 	}
 	// A second requester cancel is accepted and changes nothing, even the timestamp.
