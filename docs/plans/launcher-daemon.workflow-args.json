@@ -134,12 +134,12 @@
    "route": "opus",
    "shots": "ln04",
    "checks": [
-    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
-    "build2 node scripts/ui/ln-dash.mjs"
+    "just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "just bb build2 node scripts/ui/ln-dash.mjs"
    ],
    "reviewChecks": [
-    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
-    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-launcher/review-shots/04 build2 node scripts/ui/ln-dash.mjs"
+    "just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-launcher/review-shots/04 build2 node scripts/ui/ln-dash.mjs"
    ],
    "hazards": [
     "The screen scripts share the two-core build2 slice with other agents, so wait on page state (locators, waitFor), never on elapsed time.",
@@ -166,12 +166,12 @@
    "suite": "./internal/envelope/",
    "route": "sol",
    "checks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "reviewChecks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
@@ -187,12 +187,12 @@
    "suite": "./internal/envelope/",
    "route": "sol",
    "checks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "reviewChecks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
@@ -207,12 +207,12 @@
    "suite": "./internal/envelope/",
    "route": "sol",
    "checks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "reviewChecks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
@@ -227,12 +227,12 @@
    "suite": "./internal/envelope/",
    "route": "sol",
    "checks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "reviewChecks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
@@ -247,12 +247,12 @@
    "suite": "./internal/envelope/",
    "route": "sol",
    "checks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "reviewChecks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
@@ -267,12 +267,12 @@
    "suite": "./internal/envelope/",
    "route": "sol",
    "checks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "reviewChecks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
@@ -287,12 +287,12 @@
    "suite": "./internal/envelope/",
    "route": "sol",
    "checks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "reviewChecks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
@@ -307,12 +307,12 @@
    "suite": "./internal/envelope/",
    "route": "sol",
    "checks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "reviewChecks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
@@ -327,12 +327,12 @@
    "suite": "./internal/envelope/",
    "route": "sol",
    "checks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "reviewChecks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
@@ -347,12 +347,12 @@
    "suite": "./internal/envelope/",
    "route": "sol",
    "checks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "reviewChecks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
@@ -367,12 +367,12 @@
    "suite": "./internal/envelope/",
    "route": "sol",
    "checks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "reviewChecks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
@@ -387,12 +387,12 @@
    "suite": "./internal/envelope/",
    "route": "opus",
    "checks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "reviewChecks": [
-    "just ln-setup",
-    "just ln-check"
+    "just bb just ln-setup",
+    "just bb just ln-check"
    ],
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
@@ -407,14 +407,14 @@
    "suite": "./internal/envelope/",
    "route": "opus",
    "checks": [
-    "just ln-setup",
-    "just ln-check",
-    "just ln-e2e"
+    "just bb just ln-setup",
+    "just bb just ln-check",
+    "just bb just ln-e2e"
    ],
    "reviewChecks": [
-    "just ln-setup",
-    "just ln-check",
-    "just ln-e2e"
+    "just bb just ln-setup",
+    "just bb just ln-check",
+    "just bb just ln-e2e"
    ],
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
@@ -429,17 +429,17 @@
    "suite": "./...",
    "route": "opus",
    "checks": [
-    "just ln-setup",
-    "just ln-check",
-    "just ln-e2e",
-    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
-    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-launcher/gate-shots just ui-shots"
+    "just bb just ln-setup",
+    "just bb just ln-check",
+    "just bb just ln-e2e",
+    "just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-launcher/gate-shots just ui-shots"
    ],
    "reviewChecks": [
-    "just ln-setup",
-    "just ln-check",
-    "just ln-e2e",
-    "build2 node --test --test-concurrency=2 internal/ui/jstest/"
+    "just bb just ln-setup",
+    "just bb just ln-check",
+    "just bb just ln-e2e",
+    "just bb build2 node --test --test-concurrency=2 internal/ui/jstest/"
    ],
    "hazards": [
     "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
