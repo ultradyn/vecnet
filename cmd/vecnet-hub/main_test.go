@@ -4,7 +4,18 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+
+	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/hubid"
+	"github.com/XertroV/vecnet/internal/store"
+	"github.com/XertroV/vecnet/internal/testhub"
 	"io"
 	"net/http"
 	"regexp"
@@ -147,5 +158,198 @@ func TestRestartRetryFlag(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "restart-retry-ms") {
 			t.Fatalf("invalid env retry %q = %v", value, err)
 		}
+	}
+}
+
+func TestRelocatedRunsNoWorkers(t *testing.T) {
+	e := testhub.Start(t)
+	callback := testhub.NewCallback(t)
+	recipient, _ := e.NewPeer("session", "push recipient")
+	_, sender := e.NewPeer("grokbot", "sender")
+	route, _, err := e.Hub.AddRoute(context.Background(), "peer", recipient, callback.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Hub.MarkRouteVerified(context.Background(), route); err != nil {
+		t.Fatal(err)
+	}
+	resp, raw := e.Do(sender, "POST", "/v1/messages", map[string]any{
+		"idempotency_key": "relocated-push", "priority": "wake", "recipients": []string{recipient}, "content": map[string]string{"text": "due push"},
+	})
+	if resp.StatusCode != 202 {
+		t.Fatalf("seed delivery: %d %s", resp.StatusCode, raw)
+	}
+	var due int
+	if err := e.Hub.DB.QueryRow(`SELECT count(*) FROM deliveries WHERE route_id=? AND state='queued' AND held=0`, route).Scan(&due); err != nil || due != 1 {
+		t.Fatalf("due deliveries: %d %v", due, err)
+	}
+	boot := bootHub(t, []string{"--listen", "127.0.0.1:0", "--data-dir", e.Hub.Cfg.DataDir, "--public-url", e.URL, "--relocated-to", "HTTPS://NEXT.EXAMPLE:443/", "--allow-private-egress"}, noEnv)
+	if !strings.Contains(boot.out.String(), "vecnet-hub relocated: answering hub_moved → https://next.example\n") {
+		t.Fatalf("announcement: %s", boot.out.String())
+	}
+	time.Sleep(3 * hub.DefaultTickInterval)
+	if got := callback.Requests(); got != 0 {
+		t.Fatalf("relocated workers delivered %d callbacks", got)
+	}
+	if err := boot.stop(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRelocatedRefusesOwnURL(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	for _, target := range []string{"HTTPS://OLD.EXAMPLE:443/", "javascript:alert(1)", "https://next.example?secret=1"} {
+		dir := t.TempDir()
+		err := run(context.Background(), []string{"--listen", ln.Addr().String(), "--data-dir", dir, "--public-url", "https://old.example", "--relocated-to", target}, io.Discard, noEnv)
+		if err == nil || !strings.Contains(err.Error(), "relocated-to") {
+			t.Fatalf("target %q must fail before binding: %v", target, err)
+		}
+		entries, readErr := os.ReadDir(dir)
+		if readErr != nil || len(entries) != 0 {
+			t.Fatalf("invalid relocation wrote data: %v %v", entries, readErr)
+		}
+	}
+	t.Run("environment", func(t *testing.T) {
+		dir := t.TempDir()
+		env := func(k string) string {
+			if k == "VECNET_RELOCATED_TO" {
+				return "https://next.example"
+			}
+			return ""
+		}
+		boot := bootHub(t, []string{"--listen", "127.0.0.1:0", "--data-dir", dir}, env)
+		resp, err := http.Get(boot.base + "/mcp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 410 {
+			t.Fatalf("env relocation: %d", resp.StatusCode)
+		}
+	})
+}
+
+func TestServeClearsBootNotices(t *testing.T) {
+	e := testhub.Start(t)
+	n, err := e.Hub.PostNotice(context.Background(), auth.Caller{Kind: "operator", PrincipalID: "operator"}, hub.NoticeRequest{Kind: "restart", Message: "restart now"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	boot := bootHub(t, []string{"--listen", "127.0.0.1:0", "--data-dir", e.Hub.Cfg.DataDir}, noEnv)
+	req, err := http.NewRequest("GET", boot.base+"/v1/hub/notices", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+e.OperatorSecret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != 200 || string(raw) != "{\"notices\":[]}\n" {
+		t.Fatalf("boot notices: %d %s %v", resp.StatusCode, raw, err)
+	}
+	var how string
+	if err := e.Hub.DB.QueryRow(`SELECT cleared_how FROM hub_notices WHERE notice_id=?`, n.NoticeID).Scan(&how); err != nil || how != "boot" {
+		t.Fatalf("clear reason: %q %v", how, err)
+	}
+}
+
+func servedIdentity(t *testing.T, base string) envelope.HubIdentity {
+	t.Helper()
+	resp, err := http.Get(base + "/v1/hub/identity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var doc envelope.HubIdentity
+	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("identity: %d", resp.StatusCode)
+	}
+	return doc
+}
+
+func TestIdentityShowAndRotate(t *testing.T) {
+	dir := t.TempDir()
+	args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir}
+	boot := bootHub(t, args, noEnv)
+	old := servedIdentity(t, boot.base)
+	if err := boot.stop(); err != nil {
+		t.Fatal(err)
+	}
+	readSeed := func() string {
+		t.Helper()
+		db, err := store.Open(filepath.Join(dir, "hub.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var seed string
+		if err := db.QueryRow(`SELECT value FROM meta WHERE key='hub_identity_seed'`).Scan(&seed); err != nil {
+			t.Fatal(err)
+		}
+		return seed
+	}
+	originalSeed := readSeed()
+	var out bytes.Buffer
+	command := func(extra ...string) error {
+		out.Reset()
+		return run(context.Background(), append([]string{"identity", extra[0], "--data-dir", dir}, extra[1:]...), &out, noEnv)
+	}
+	if err := command("show"); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("pubkey %s\nfingerprint %s\ncreated_at %s\n", old.Pubkey, old.Fingerprint, old.KeyCreatedAt)
+	if out.String() != want {
+		t.Fatalf("show: %q want %q", out.String(), want)
+	}
+	if err := command("rotate"); err == nil || !strings.Contains(err.Error(), "--yes") || out.Len() != 0 {
+		t.Fatalf("unconfirmed rotation: %v %q", err, out.String())
+	}
+	if readSeed() != originalSeed {
+		t.Fatal("unconfirmed rotation changed the seed")
+	}
+	if err := command("show"); err != nil || out.String() != want {
+		t.Fatalf("unconfirmed rotation changed identity: %v %q", err, out.String())
+	}
+	if err := command("rotate", "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	rotation := out.String()
+	nextBoot := bootHub(t, args, noEnv)
+	next := servedIdentity(t, nextBoot.base)
+	if next.Pubkey == old.Pubkey || next.Previous == nil || next.Previous.Pubkey != old.Pubkey {
+		t.Fatalf("rotation: old %+v new %+v", old, next)
+	}
+	if err := hubid.VerifyEndorsement(*next.Previous, next.Pubkey); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("old %s\nnew %s\n", old.Fingerprint, next.Fingerprint); rotation != want {
+		t.Fatalf("rotate output: %q want %q", rotation, want)
+	}
+	if err := nextBoot.stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command("show"); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("pubkey %s\nfingerprint %s\ncreated_at %s\nprevious %s\n", next.Pubkey, next.Fingerprint, next.KeyCreatedAt, old.Pubkey); out.String() != want {
+		t.Fatalf("rotated show: %q want %q", out.String(), want)
+	}
+	// Refusal must not even initialize a missing data directory.
+	absent := dir + "/uncreated"
+	if err := run(context.Background(), []string{"identity", "rotate", "--data-dir", absent}, io.Discard, noEnv); err == nil {
+		t.Fatal("unconfirmed fresh rotation succeeded")
+	}
+	if _, err := os.Stat(absent); !os.IsNotExist(err) {
+		t.Fatalf("unconfirmed rotation wrote data: %v", err)
 	}
 }

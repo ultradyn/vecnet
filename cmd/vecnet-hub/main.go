@@ -2,9 +2,11 @@
 //
 //	vecnet-hub [--listen 127.0.0.1:45752] [--data-dir /data] [--public-url URL] [--dev-ui-dir DIR] [--allow-private-egress] [--trust-fly-client-ip]
 //	vecnet-hub init [--data-dir /data] --operator-name <name>
+//	vecnet-hub identity show|rotate [--data-dir /data] [--yes]
 //
-// VECNET_LISTEN, VECNET_DATA_DIR and VECNET_PUBLIC_URL, when set, replace
-// the defaults of --listen, --data-dir and --public-url; flags still win.
+// VECNET_LISTEN, VECNET_DATA_DIR, VECNET_PUBLIC_URL and VECNET_RELOCATED_TO
+// replace the corresponding flag defaults; flags still win. --relocated-to
+// serves the old hub without workers and answers hub_moved for ordinary routes.
 // VECNET_ALLOW_PRIVATE_EGRESS=1 is the default of --allow-private-egress,
 // a development-only override that lets push and notify URLs be http and
 // reach private or loopback addresses (PROTOCOL §14.7).
@@ -32,6 +34,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/logging"
 	"github.com/XertroV/vecnet/internal/store"
 )
@@ -68,6 +71,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 		"development only: let outbound URLs be http and reach private/loopback addresses ($VECNET_ALLOW_PRIVATE_EGRESS=1)")
 	trustFly := fs.Bool("trust-fly-client-ip", getenv("VECNET_TRUST_FLY_CLIENT_IP") == "1",
 		"key the per-client rate limit on the Fly-Client-IP header; only behind Fly's proxy ($VECNET_TRUST_FLY_CLIENT_IP=1)")
+	relocatedTo := fs.String("relocated-to", getenv("VECNET_RELOCATED_TO"), "answer hub_moved without workers at the old hub ($VECNET_RELOCATED_TO)")
 	restartRetry := fs.String("restart-retry-ms", envOr(getenv, "VECNET_RESTART_RETRY_MS", "5000"), "restart reconnect delay in milliseconds, 0..60000 ($VECNET_RESTART_RETRY_MS)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -84,6 +88,9 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 		}
 		return runInit(*dir, *name, stdout)
 	}
+	if fs.Arg(0) == "identity" {
+		return runIdentity(ctx, fs.Args()[1:], *dataDir, stdout)
+	}
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unknown subcommand %q", fs.Arg(0))
 	}
@@ -92,9 +99,58 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 		return errors.New("--restart-retry-ms must be an integer in 0..60000")
 	}
 	return serve(ctx, serveConfig{
-		Listen: *listen, DataDir: *dataDir, PublicURL: *publicURL, DevUIDir: *devUIDir,
+		Listen: *listen, DataDir: *dataDir, PublicURL: *publicURL, DevUIDir: *devUIDir, RelocatedTo: *relocatedTo,
 		AllowPrivateEgress: *allowPrivate, TrustFly: *trustFly, RestartRetry: time.Duration(retryMS) * time.Millisecond,
 	}, stdout)
+}
+
+// runIdentity manages the database-backed key offline. Refuse an unconfirmed
+// rotation before opening the store, so even a new data directory is untouched.
+func runIdentity(ctx context.Context, args []string, defaultDir string, stdout io.Writer) error {
+	if len(args) == 0 || (args[0] != "show" && args[0] != "rotate") {
+		return errors.New("usage: vecnet-hub identity show|rotate [--data-dir D] [--yes]")
+	}
+	fs := flag.NewFlagSet("vecnet-hub identity "+args[0], flag.ContinueOnError)
+	dir := fs.String("data-dir", defaultDir, "directory holding hub.db")
+	var yes bool
+	if args[0] == "rotate" {
+		fs.BoolVar(&yes, "yes", false, "confirm offline identity rotation (stop the hub first)")
+	}
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("identity: unexpected arguments")
+	}
+	if args[0] == "rotate" && !yes {
+		return errors.New("identity rotate: --yes is required; stop the hub before rotating")
+	}
+	// Identity metadata does not depend on the serving URL. Use a local origin
+	// solely to build IdentityDoc; no listener or outbound request is created.
+	h, db, err := openHub(*dir, "http://localhost", false)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if args[0] == "rotate" {
+		oldFP, newFP, err := hub.RotateIdentity(ctx, db, time.Now())
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "old %s\nnew %s\n", oldFP, newFP)
+		return err
+	}
+	doc, err := h.IdentityDoc("")
+	if err != nil {
+		return err
+	}
+	if _, err = fmt.Fprintf(stdout, "pubkey %s\nfingerprint %s\ncreated_at %s\n", doc.Pubkey, doc.Fingerprint, doc.KeyCreatedAt); err != nil {
+		return err
+	}
+	if doc.Previous != nil {
+		_, err = fmt.Fprintf(stdout, "previous %s\n", doc.Previous.Pubkey)
+	}
+	return err
 }
 
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
@@ -146,12 +202,14 @@ const ShutdownGrace = 10 * time.Second
 
 type serveConfig struct {
 	Listen, DataDir, PublicURL, DevUIDir string
+	RelocatedTo                          string
 	AllowPrivateEgress, TrustFly         bool
 	RestartRetry                         time.Duration
 }
 
-// serve runs the HTTP server, the push and Events workers and the hub's
-// tickers until ctx is cancelled. It binds listen first, so ":0" picks a free port, and
+// serve runs until ctx is cancelled. Relocated mode serves a signed move
+// without workers; ordinary mode runs the push and Events workers and tickers.
+// It binds listen first, so ":0" picks a free port, and
 // writes "vecnet-hub listening on http://<addr> (public url <url>)" to
 // stdout once accepting. publicURL "" means http://<bound address>.
 // devUIDir "" serves the embedded operator UI. allowPrivateEgress is the
@@ -159,13 +217,40 @@ type serveConfig struct {
 // trustFly keys the per-client limiter on Fly-Client-IP (Deps.TrustFlyClientIP).
 func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	publicURL := cfg.PublicURL
+	var target string
+	if cfg.RelocatedTo != "" {
+		var err error
+		target, err = hubid.NormalizeURL(cfg.RelocatedTo)
+		if err != nil {
+			return fmt.Errorf("--relocated-to: %w", err)
+		}
+		if publicURL != "" {
+			own, err := hubid.NormalizeURL(publicURL)
+			if err != nil {
+				return fmt.Errorf("--public-url: %w", err)
+			}
+			if target == own {
+				return errors.New("--relocated-to must differ from --public-url")
+			}
+		}
+	}
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err
 	}
+	defer ln.Close()
 	addr := ln.Addr().String()
 	if publicURL == "" {
 		publicURL = "http://" + addr
+	}
+	if target != "" {
+		own, err := hubid.NormalizeURL(publicURL)
+		if err != nil {
+			return fmt.Errorf("--public-url: %w", err)
+		}
+		if target == own {
+			return errors.New("--relocated-to must differ from --public-url")
+		}
 	}
 	h, db, err := openHub(cfg.DataDir, publicURL, cfg.AllowPrivateEgress)
 	if err != nil {
@@ -189,7 +274,20 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	deps.UIDir, deps.Stop = cfg.DevUIDir, stop
 	deps.Drain = httpapi.NewDrain()
 	deps.TrustFlyClientIP = cfg.TrustFly
-	srv := &http.Server{Handler: httpapi.New(deps)}
+	var handler http.Handler
+	if target != "" {
+		notice, err := h.EnsureMovingNotice(ctx, target)
+		if err != nil {
+			return err
+		}
+		handler = httpapi.Relocated(deps, notice)
+	} else {
+		if _, err := h.ClearOnBoot(ctx); err != nil {
+			return err
+		}
+		handler = httpapi.New(deps)
+	}
+	srv := &http.Server{Handler: handler}
 	httpapi.ConfigureServer(srv)
 	srv.RegisterOnShutdown(closeStop)
 
@@ -200,11 +298,16 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 		bgCancel()
 		bg.Wait()
 	}()
-	bg.Go(func() { stack.Run(bgCtx) })
+	if target == "" {
+		bg.Go(func() { stack.Run(bgCtx) })
+	}
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
 	slog.Info("vecnet-hub listening", "addr", addr, "public_url", publicURL)
+	if target != "" {
+		fmt.Fprintf(stdout, "vecnet-hub relocated: answering hub_moved → %s\n", target)
+	}
 	fmt.Fprintf(stdout, "vecnet-hub listening on http://%s (public url %s)\n", addr, publicURL)
 
 	select {

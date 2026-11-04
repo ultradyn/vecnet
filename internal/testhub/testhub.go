@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
@@ -190,6 +191,21 @@ func (e *Env) Configure(f func(*httpapi.Deps)) {
 	}
 	h := httpapi.New(d)
 	e.handler.Store(&h)
+}
+
+// Relocate installs the frozen hub handler and returns its signed moving notice.
+func (e *Env) Relocate(t *testing.T, newURL string) envelope.HubNotice {
+	t.Helper()
+	n, err := e.Hub.EnsureMovingNotice(context.Background(), newURL)
+	if err != nil {
+		t.Fatalf("testhub: relocating: %v", err)
+	}
+	d := e.stack.Deps()
+	d.Limiter = nil
+	d.Stop, d.Drain = e.stop, e.Drain
+	h := httpapi.Relocated(d, n)
+	e.handler.Store(&h)
+	return n
 }
 
 // StartWorkers runs the push worker, the Events worker and the hub's tickers
