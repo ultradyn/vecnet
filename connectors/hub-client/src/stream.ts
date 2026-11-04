@@ -17,6 +17,8 @@ export function createEventStream(opts: {
   return {
     async run(handler, signal) {
       if (signal.aborted) return {reason:'aborted'};
+      // Only this private marker makes history-reconciliation failures terminal.
+      const reconciliationFailed = Symbol();
       let cursor = await opts.cursors.load();
       let recoveryAfter: string | undefined;
       let retryMs = 3000, failures = 0, frameless = 0, pollUntil = 0;
@@ -70,9 +72,9 @@ export function createEventStream(opts: {
               // The socket watchdog must not time out explicit history recovery.
               watchdog?.cancel();
               controller.abort();
-              if (!opts.onCursorPurged) throw new HubError(409,'cursor_purged');
+              if (!opts.onCursorPurged) throw reconciliationFailed;
               try {await abortable(opts.onCursorPurged({oldestCursor:oldest,signal}),signal);}
-              catch {throw new HubError(409,'cursor_purged');}
+              catch {throw reconciliationFailed;}
               if (signal.aborted) break;
               recoveryAfter = oldest;
               resync = true;
@@ -124,7 +126,7 @@ export function createEventStream(opts: {
             await response.body?.cancel();
           }
         } catch (err) {
-          if (!signal.aborted && err instanceof HubError && err.code === 'cursor_purged') throw err;
+          if (!signal.aborted && err === reconciliationFailed) throw new HubError(409,'cursor_purged');
           if (!signal.aborted) opts.log.warn('Event stream interrupted');
         } finally {
           watchdog?.cancel();

@@ -37,16 +37,40 @@ function harness(steps: Array<string | Response | Error>, initial: string | null
   return {clock,log,abort,requests,saved,waits,stream,open:()=>open,async next(n: number) {await until(()=>requests.length>=n);},async retry(n: number) {await until(()=>waits.length>=n);clock.advance(60_000);await until(()=>requests.length>=n+1);}};
 }
 
-test('delivers events in order and resumes with Last-Event-ID after a drop', async t => {
-  const clock = fakeClock(), hub = await startFakeHub({clock}); t.after(()=>hub.close()); hub.push('delivery',{one:1});hub.push('delivery',{two:2});
-  const abort = new AbortController(), seen: string[] = [], saved: string[] = [];
-  const stream = createEventStream({baseUrl:hub.url,credential:hub.bearer,clock,log:memoryLog(),cursors:{async load(){return null;},async save(c){saved.push(c);}}});
-  const running = stream.run(async e => {seen.push(e.cursor);},abort.signal); t.after(()=>abort.abort());
-  await until(()=>saved.length===2); hub.dropConnections(); await until(()=>hub.requests.length===1); await setImmediate(); clock.advance(3000);
-  await until(()=>hub.requests.length===2);
-  assert.deepEqual(seen,['e1.1','e1.2']); assert.deepEqual(saved,['e1.1','e1.2']); assert.equal(hub.requests[1]?.headers['last-event-id'],'e1.2');
-  abort.abort();assert.deepEqual(await running,{reason:'aborted'});
-});
+for (const deferredEOF of [false,true]) {
+  test(`delivers events in order and resumes with Last-Event-ID after a drop (deferred EOF: ${deferredEOF})`, async t => {
+    const clock = fakeClock(), hub = await startFakeHub({clock}); t.after(()=>hub.close()); hub.push('delivery',{one:1});hub.push('delivery',{two:2});
+    const abort = new AbortController(), seen: string[] = [], saved: string[] = [];
+    let releaseEOF!:()=>void;
+    const eofGate = new Promise<void>(resolve=>{releaseEOF=resolve;});
+    let reachedEOF!:()=>void, retryScheduled!:()=>void;
+    const eofReached = new Promise<void>(resolve=>{reachedEOF=resolve;});
+    const retryReady = new Promise<void>(resolve=>{retryScheduled=resolve;});
+    const sleep = clock.sleep.bind(clock);
+    clock.sleep = (ms,signal) => {const pending=sleep(ms,signal);retryScheduled();return pending;};
+    const fetcher: typeof fetch = async (input,init) => {
+      const response = await fetch(input,init);
+      if (!deferredEOF || !response.body) return response;
+      const reader = response.body.getReader();
+      return new Response(new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          const {done,value} = await reader.read();
+          if (done) {reachedEOF();await eofGate;controller.close();} else controller.enqueue(value);
+        },
+        async cancel() {releaseEOF();try {await reader.cancel();} finally {reader.releaseLock();}},
+      }),{status:response.status,headers:response.headers});
+    };
+    const stream = createEventStream({baseUrl:hub.url,credential:hub.bearer,clock,log:memoryLog(),fetch:fetcher,cursors:{async load(){return null;},async save(c){saved.push(c);}}});
+    const running = stream.run(async e => {seen.push(e.cursor);},abort.signal);
+    try {
+      await until(()=>saved.length===2); hub.dropConnections();
+      if (deferredEOF) await eofReached;
+      releaseEOF();await retryReady;clock.advance(3000);
+      await until(()=>hub.requests.length===2);
+      assert.deepEqual(seen,['e1.1','e1.2']); assert.deepEqual(saved,['e1.1','e1.2']); assert.equal(hub.requests[1]?.headers['last-event-id'],'e1.2');
+    } finally {releaseEOF();abort.abort();assert.deepEqual(await running,{reason:'aborted'});}
+  });
+}
 test('first connect with no stored cursor sends neither header nor after', async () => {
   const h=harness([]), run=h.stream.run(async()=>{},h.abort.signal); await h.next(1);
   assert.equal(h.requests[0]?.headers.get('last-event-id'),null);assert.equal(h.requests[0]?.url.searchParams.has('after'),false);
@@ -59,6 +83,17 @@ test('handler failure reconnects from the last good cursor and redelivers', asyn
   await until(()=>seen.length===1);assert.deepEqual(h.saved,[]);release();await h.retry(1);await until(()=>h.saved.length===2);
   assert.equal(h.requests[0]?.headers.get('last-event-id'),'e1.0');assert.equal(h.requests[1]?.headers.get('last-event-id'),'e1.1');assert.deepEqual(seen,['e1.1','e1.2','e1.2']);assert.deepEqual(h.saved,['e1.1','e1.2']);assert.ok(!h.log.text().includes('private body'));
   h.abort.abort();await run;
+});
+test('handler HubError cursor_purged reconnects from the last good cursor and redelivers', async () => {
+  const h=harness([frame('e1.1')+frame('e1.2'),frame('e1.2')],'e1.0'), seen: string[]=[];
+  const run=h.stream.run(async e=>{seen.push(e.cursor);if(seen.length===2)throw new HubError(409,'cursor_purged');},h.abort.signal);
+  void run.catch(()=>{});
+  try {
+    await h.retry(1);await until(()=>h.saved.length===2);
+    assert.equal(h.requests[0]?.headers.get('last-event-id'),'e1.0');
+    assert.equal(h.requests[1]?.headers.get('last-event-id'),'e1.1');
+    assert.deepEqual(seen,['e1.1','e1.2','e1.2']);assert.deepEqual(h.saved,['e1.1','e1.2']);
+  } finally {h.abort.abort();await run;}
 });
 test('priming frame does not move the resume cursor', async () => {
   const h=harness(['id: e1.99\ndata:\n\n'],'e1.1'), seen: VecnetEvent[]=[]; const run=h.stream.run(async e=>{seen.push(e);},h.abort.signal);
