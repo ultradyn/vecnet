@@ -138,7 +138,11 @@ func invalidArguments(name string, err error) error {
 	if !errors.As(err, &se) {
 		return err
 	}
-	return &RPCError{Code: ErrInvalidParams, Message: "invalid arguments for " + name + ": " + se.Message,
+	hint := ""
+	if name == "vecnet_send" || name == "vecnet_reply" {
+		hint = guideSendErrorHint
+	}
+	return &RPCError{Code: ErrInvalidParams, Message: "invalid arguments for " + name + ": " + se.Message + hint,
 		Data: map[string]any{"path": se.Path}}
 }
 
@@ -154,8 +158,12 @@ func toolOutcome(name string, res any, err error) (any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mcp: marshal tool result: %w", err)
 		}
+		text := string(b)
+		if guide, ok := res.(guideResult); ok {
+			text = guide.Text
+		}
 		return &mcp.CallToolResult{
-			Content:           []mcp.Content{&mcp.TextContent{Text: string(b)}},
+			Content:           []mcp.Content{&mcp.TextContent{Text: text}},
 			StructuredContent: json.RawMessage(b),
 		}, nil
 	case errors.As(err, &api):
@@ -1173,7 +1181,7 @@ func buildTools() *toolTable {
 	}
 	narrowAttachments(doc.Defs)
 	t := &toolTable{byName: map[string]*tool{}}
-	for _, spec := range toolSpecs(doc.Defs) {
+	for _, spec := range append(toolSpecs(doc.Defs), guideSpec()) {
 		input, sch, err := compileInput(spec.name, spec.input, doc.Defs)
 		if err != nil {
 			panic("mcpserver: tool " + spec.name + ": " + err.Error())

@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-05: extend the single-source MCP guide with runnable send/reply examples, ack/receipt, durable cursor/dedupe, priority/expiry and ChatGPT Work/Cloud/Rescan guidance; send schema errors point to the examples (guide.go, tools.go, PROTOCOL §4.6, connectors/dots.md).
+- 2026-11-05: add caller-aware read-only `vecnet_guide` and matching `vecnet_setup` MCP prompt for dot subscriptions and agent inbox/reply routines; discovery points to the shared guide (internal/mcpserver/guide.go, PROTOCOL §4.3/4.6, connectors/dots.md).
 - 2026-11-05: web UI: sidebar **Add agent** button opens the invite dialog from any view (`invite.js` `openInvite`, `app.js`); favicon set from Max's vecnet logo (`favicon.svg`, `favicon-32.png`, `apple-touch-icon.png`; bare mark `logo.svg` is the `.logo` brand mark); `TestUIIcons`, UI size cap 336 KiB (`internal/httpapi/ui_test.go`).
 - 2026-11-05: hub restarts drain SSE/MCP streams within bounded shutdown grace; watch, TUI, MCP subscription relay and web UI reconnect quietly with jittered retries and durable cursor recovery, while ambiguous MCP mutations remain explicit errors (PROTOCOL §2.3/2.13/4/13, DEPLOY).
 - 2026-11-05: MCP `vecnet_send` input schema drops sendRequest's top-level `anyOf` (ChatGPT rendered it as opaque objects and demanded thread_id); no tool may have a top-level anyOf/oneOf/allOf. internal/mcpserver/tools.go, PROTOCOL §4.3.

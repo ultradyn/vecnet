@@ -97,7 +97,8 @@ await check('authorization-server metadata', async () => {
 });
 await check('server/discover', async () => {
   const result = await rpc('server/discover');
-  requireCheck(object(result.capabilities?.events) && result.resultType === 'complete');
+  requireCheck(object(result.capabilities?.events) && object(result.capabilities?.prompts) && result.resultType === 'complete');
+  requireCheck(result.instructions?.includes('vecnet_guide'));
 });
 await check('initialize older revision', async () => {
   const result = await rpc('initialize', {
@@ -112,6 +113,19 @@ await check('tools/list', async () => {
   requireCheck(result.tools.every(tool => Array.isArray(tool.securitySchemes) && tool.securitySchemes.length > 0));
   const whoami = result.tools.find(tool => tool.name === 'vecnet_whoami');
   requireCheck(whoami?._meta?.['openai/profile'] === true);
+  const guide = result.tools.find(tool => tool.name === 'vecnet_guide');
+  requireCheck(guide?.annotations?.readOnlyHint === true && guide.annotations.openWorldHint === false);
+  requireCheck(object(guide.outputSchema));
+});
+await check('setup guide and prompt', async () => {
+  const guide = await rpc('tools/call', { name: 'vecnet_guide' });
+  requireCheck(guide.isError !== true && guide.structuredContent?.topic === 'start');
+  requireCheck(guide.content?.[0]?.type === 'text' && guide.content[0].text === guide.structuredContent.text);
+  const prompts = await rpc('prompts/list');
+  requireCheck(prompts.prompts?.some(prompt => prompt.name === 'vecnet_setup'));
+  const prompt = await rpc('prompts/get', { name: 'vecnet_setup' });
+  requireCheck(prompt.messages?.[0]?.role === 'user'
+    && prompt.messages[0].content?.text === guide.structuredContent.text);
 });
 await check('events/list', async () => {
   const result = await rpc('events/list');
