@@ -1,0 +1,8 @@
+{
+  "name": "@vecnet/hub-client",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  }
+}
