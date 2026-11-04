@@ -168,16 +168,35 @@ func TestEventsListShape(t *testing.T) {
 	if e.InputSchema.AdditionalProperties == nil || *e.InputSchema.AdditionalProperties {
 		t.Fatalf("inputSchema is not strict: %+v", e.InputSchema)
 	}
-	if _, ok := e.InputSchema.Defs["peerId"]; !ok {
-		t.Fatalf("inputSchema does not carry $defs/peerId: %+v", e.InputSchema)
-	}
-	ev, ok := e.PayloadSchema.Defs["event"]
-	if !ok {
-		t.Fatalf("payloadSchema has no $defs/event: %+v", e.PayloadSchema)
-	}
 	for _, p := range []string{"cursor", "type", "at", "data"} {
-		if _, ok := ev.Properties[p]; !ok {
-			t.Fatalf("payloadSchema event lacks %s: %+v", p, ev)
+		if _, ok := e.PayloadSchema.Properties[p]; !ok {
+			t.Fatalf("payloadSchema event lacks %s: %+v", p, e.PayloadSchema)
+		}
+	}
+	var listed any
+	if err := json.Unmarshal(r.Result, &listed); err != nil {
+		t.Fatal(err)
+	}
+	assertSimpleEventSchema(t, listed)
+}
+
+// assertSimpleEventSchema rejects compatibility hazards at every depth,
+// including definitions that a shallow top-level schema check would miss.
+func assertSimpleEventSchema(t *testing.T, value any) {
+	t.Helper()
+	switch node := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"$ref", "$defs", "anyOf", "oneOf", "allOf"} {
+			if _, ok := node[key]; ok {
+				t.Errorf("events/list contains unsupported schema keyword %s", key)
+			}
+		}
+		for _, child := range node {
+			assertSimpleEventSchema(t, child)
+		}
+	case []any:
+		for _, child := range node {
+			assertSimpleEventSchema(t, child)
 		}
 	}
 }
@@ -766,6 +785,8 @@ func TestSubscribeParamsStrict(t *testing.T) {
 		"argument":      subParams(cb.URL, whsec, map[string]any{"arguments": map[string]any{"color": "red"}}),
 		"type":          subParams(cb.URL, whsec, map[string]any{"arguments": map[string]any{"types": []string{"presence"}}}),
 		"empty types":   subParams(cb.URL, whsec, map[string]any{"arguments": map[string]any{"types": []string{}}}),
+		"repeat types":  subParams(cb.URL, whsec, map[string]any{"arguments": map[string]any{"types": []string{"delivery", "delivery"}}}),
+		"peer":          subParams(cb.URL, whsec, map[string]any{"arguments": map[string]any{"peer_id": "nope"}}),
 		"thread":        subParams(cb.URL, whsec, map[string]any{"arguments": map[string]any{"thread_id": "nope"}}),
 		"cursor":        subParams(cb.URL, whsec, map[string]any{"cursor": "1.2"}),
 		"future cursor": subParams(cb.URL, whsec, map[string]any{"cursor": fmt.Sprintf("e%d.999999", env.Hub.Log.Epoch())}),
