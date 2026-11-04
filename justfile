@@ -97,3 +97,50 @@ bb-clean LANE:
 
 tui *ARGS:
     CGO_ENABLED=0 build2 go run -p 2 ./cmd/vecnet tui {{ARGS}}
+
+# launcher: first-time setup in a worktree (dev dependencies only)
+ln-setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd connectors/launcher
+    manager=(pnpm)
+    command -v pnpm >/dev/null 2>&1 || manager=(corepack pnpm)
+    build2 "${manager[@]}" install --frozen-lockfile --child-concurrency=2
+
+# launcher + hub-client: type-check
+ln-typecheck:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd connectors/launcher
+    manager=(pnpm)
+    command -v pnpm >/dev/null 2>&1 || manager=(corepack pnpm)
+    GOMAXPROCS=2 build2 "${manager[@]}" exec tsc -p tsconfig.json
+
+# launcher + hub-client: unit tests; pass files to narrow
+ln-test *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    shopt -s nullglob
+    files=({{ARGS}})
+    [ ${#files[@]} -gt 0 ] || files=(connectors/hub-client/test/*.test.ts connectors/launcher/test/*.test.ts connectors/launcher/test/backends/*.test.ts)
+    build2 node --disable-warning=ExperimentalWarning --test --test-concurrency=2 "${files[@]}"
+
+ln-check: ln-typecheck ln-test
+
+# launcher: end to end against a real hub and fake backend
+ln-e2e: build
+    build2 node --disable-warning=ExperimentalWarning --test --test-concurrency=1 connectors/launcher/test/e2e/*.test.ts
+
+ln-run *ARGS:
+    node --disable-warning=ExperimentalWarning connectors/launcher/src/main.ts {{ARGS}}
+
+# coordinator/Max only; never enables the unit
+ln-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dest="$HOME/.local/share/vecnet-launcher/$(git rev-parse --short HEAD)"
+    mkdir -p "$dest"
+    rsync -a --delete --exclude node_modules connectors/hub-client connectors/launcher "$dest/"
+    ln -sfn "$dest" "$HOME/.local/share/vecnet-launcher/current"
+    install -Dm0644 connectors/launcher/systemd/vecnet-launcher.service "$HOME/.config/systemd/user/vecnet-launcher.service"
+    echo "installed $dest; run: systemctl --user daemon-reload"
