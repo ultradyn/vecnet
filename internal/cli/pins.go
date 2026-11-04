@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
@@ -108,7 +109,7 @@ func (a *app) effectivePin(name string, p Profile) (pubkey, how string) {
 	return "", ""
 }
 func (a *app) ensurePin(name string, p Profile) {
-	if a.inHook || a.inMCP {
+	if a.inHook {
 		return
 	}
 	if pub, _ := a.effectivePin(name, p); pub != "" {
@@ -146,6 +147,25 @@ func (a *app) ensurePin(name string, p Profile) {
 		records[name] = pinRecord{Hub: hub, Pubkey: doc.Pubkey, PinnedAt: now, How: "tofu"}
 		return nil
 	})
+}
+
+// ensureRelayPin runs only after the relay's request-free startup checks.
+// Re-read the profile to preserve its explicit pin and insecure-HTTP opt-in,
+// and skip best-effort TOFU if it no longer matches the connected client.
+func (a *app) ensureRelayPin(name string, c *client) {
+	path, err := configPath(a.getenv)
+	if err != nil {
+		return
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		return
+	}
+	p, exists := cfg.Profiles[name]
+	if !exists || strings.TrimRight(p.Hub, "/") != c.base || p.Secret != c.secret {
+		return
+	}
+	a.ensurePin(name, p)
 }
 
 type relocationError struct{ Code, Reason string }

@@ -3,6 +3,11 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/XertroV/vecnet/internal/envelope"
 	"strings"
 	"testing"
 
@@ -179,5 +184,102 @@ func TestProfileRepointRequiresExistingPin(t *testing.T) {
 	}
 	if calls.Load() != 0 || string(pinRead(t, path)) != original {
 		t.Fatal("unpinned repoint probed or rewrote config")
+	}
+}
+
+// Hold the proof response while enrol replaces exactly the selected profile.
+// The proof must never authorize moving the replacement's credential.
+func TestProfileRefusesConcurrentEnrol(t *testing.T) {
+	for _, command := range []string{"pin", "repoint"} {
+		t.Run(command, func(t *testing.T) {
+			replacement := testhub.Start(t)
+			_, token, err := replacement.Hub.AddPeer(context.Background(), "session", "replacement", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := testIdentityKey(t, "1")
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			defer once.Do(func() { close(release) })
+			srv, _ := identityStub(t, key, func(*envelope.HubIdentity) { close(entered); <-release })
+			path, env := pinTestEnv(t, "[profiles.p]\nhub = \""+srv.URL+"\"\nhub_pubkey = \""+key.Pubkey()+"\"\nsecret = \"old-secret\"\n")
+			args := []string{"profile", command}
+			if command == "repoint" {
+				args = append(args, srv.URL)
+			}
+			type result struct {
+				code   int
+				stderr string
+			}
+			done := make(chan result, 1)
+			go func() { code, _, stderr := pinRun(env, args...); done <- result{code, stderr} }()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("identity request did not start")
+			}
+			if code, _, stderr := pinRun(env, "enrol", "--hub", replacement.URL, "--token", token, "--profile", "p"); code != 0 {
+				t.Fatalf("replacement enrol: %d %s", code, stderr)
+			}
+			enrolled := string(pinRead(t, path))
+			once.Do(func() { close(release) })
+			got := <-done
+			if got.code != 1 || !strings.Contains(got.stderr, "profile changed") {
+				t.Fatalf("stale proof accepted: %d %s", got.code, got.stderr)
+			}
+			if string(pinRead(t, path)) != enrolled {
+				t.Fatal("replacement config changed")
+			}
+			if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+				t.Fatalf("refusal created backup: %v", err)
+			}
+		})
+	}
+}
+
+func TestProfileRefusesConcurrentSidecarPin(t *testing.T) {
+	for _, command := range []string{"pin", "repoint"} {
+		t.Run(command, func(t *testing.T) {
+			key, other := testIdentityKey(t, "1"), testIdentityKey(t, "2")
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			defer once.Do(func() { close(release) })
+			srv, _ := identityStub(t, key, func(*envelope.HubIdentity) { close(entered); <-release })
+			original := "[profiles.p]\nhub = \"" + srv.URL + "\"\nsecret = \"s\"\n"
+			path, env := pinTestEnv(t, original)
+			a := &app{ctx: context.Background(), getenv: env}
+			save := func(pub string) error {
+				return a.updatePins(func(records map[string]pinRecord) error {
+					records["p"] = pinRecord{Hub: srv.URL, Pubkey: pub, How: "accept"}
+					return nil
+				})
+			}
+			if err := save(key.Pubkey()); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"profile", command}
+			if command == "repoint" {
+				args = append(args, srv.URL)
+			}
+			done := make(chan int, 1)
+			go func() { code, _, _ := pinRun(env, args...); done <- code }()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("identity request did not start")
+			}
+			if err := save(other.Pubkey()); err != nil {
+				t.Fatal(err)
+			}
+			pp, _ := pinsPath(env)
+			saved := string(pinRead(t, pp))
+			once.Do(func() { close(release) })
+			if code := <-done; code != 1 {
+				t.Fatalf("stale sidecar proof accepted: %d", code)
+			}
+			if string(pinRead(t, path)) != original || string(pinRead(t, pp)) != saved {
+				t.Fatal("refusal changed config or sidecar")
+			}
+		})
 	}
 }

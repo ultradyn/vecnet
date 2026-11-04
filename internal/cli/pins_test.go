@@ -264,3 +264,53 @@ func TestTOFURetryAfter24Hours(t *testing.T) {
 		t.Fatalf("retry %s %s %d", pub, how, calls.Load())
 	}
 }
+
+func TestMCPTOFUAfterPreflight(t *testing.T) {
+	key := testIdentityKey(t, "1")
+	var identities, posts atomic.Int32
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/hub/identity" {
+			identities.Add(1)
+			if r.Header.Get("Authorization") != "" {
+				t.Error("identity request carried a credential")
+			}
+			sig, err := key.SignChallenge(srv.URL, r.URL.Query().Get("challenge"))
+			if err != nil {
+				t.Error(err)
+			}
+			json.NewEncoder(w).Encode(envelope.HubIdentity{Pubkey: key.Pubkey(), PublicURL: srv.URL, ChallengeSig: sig})
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/mcp" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if identities.Load() != 1 {
+			t.Error("relay started before TOFU")
+		}
+		posts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer srv.Close()
+	original := "# unchanged\n[profiles.p]\nhub = \"" + srv.URL + "\"\nsecret = \"peer-secret\"\n"
+	path, env := pinTestEnv(t, original)
+	for i := 0; i < 2; i++ {
+		var out, stderr bytes.Buffer
+		code := Run([]string{"mcp"}, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`+"\n"), &out, &stderr, env)
+		if code != 0 || stderr.Len() != 0 || !strings.Contains(out.String(), `"result":{}`) {
+			t.Fatalf("relay: %d %s %s", code, out.String(), stderr.String())
+		}
+	}
+	pp, _ := pinsPath(env)
+	records, err := readPins(pp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := records["p"]; got.Pubkey != key.Pubkey() || got.Hub != srv.URL || got.How != "tofu" {
+		t.Fatalf("missing MCP TOFU pin: %+v", got)
+	}
+	if identities.Load() != 1 || posts.Load() != 2 || string(pinRead(t, path)) != original {
+		t.Fatal("TOFU rewrote config, retried identity, or failed relay")
+	}
+}

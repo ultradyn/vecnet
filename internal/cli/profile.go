@@ -107,10 +107,7 @@ func (a *app) cmdProfile(args []string) error {
 		if e != nil {
 			return e
 		}
-		if err = editProfiles(path, map[string]map[string]string{name: {"hub": hub, "hub_pubkey": ""}}); err != nil {
-			return err
-		}
-		if err = a.updatePins(func(records map[string]pinRecord) error { delete(records, name); return nil }); err != nil {
+		if err = a.editProfileSnapshot(path, name, p, pin, map[string]string{"hub": hub, "hub_pubkey": ""}, func(records map[string]pinRecord) { delete(records, name) }); err != nil {
 			return err
 		}
 		return a.ok("profile repointed; identity will be pinned on the next command")
@@ -154,11 +151,8 @@ func (a *app) cmdProfile(args []string) error {
 			return err
 		}
 	}
-	if err = editProfiles(path, map[string]map[string]string{name: edits}); err != nil {
-		return err
-	}
 	normalized, _ := hubid.NormalizeURL(hub)
-	if err = a.updatePins(func(records map[string]pinRecord) error {
+	if err = a.editProfileSnapshot(path, name, p, pin, edits, func(records map[string]pinRecord) {
 		r := records[name]
 		if r.Hub != normalized {
 			r = pinRecord{}
@@ -167,9 +161,28 @@ func (a *app) cmdProfile(args []string) error {
 		r.PinnedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		r.TofuTriedAt = ""
 		records[name] = r
-		return nil
 	}); err != nil {
 		return err
 	}
 	return a.ok("profile identity saved")
+}
+
+// The pins lock encloses the conditional config edit, so neither enrol nor a
+// concurrent sidecar update can substitute a different trust snapshot. Keep
+// the pin update in the same critical section as its snapshot check.
+func (a *app) editProfileSnapshot(path, name string, verified Profile, pin string, edits map[string]string, update func(map[string]pinRecord)) error {
+	return a.updatePins(func(records map[string]pinRecord) error {
+		if err := editProfilesIf(path, map[string]map[string]string{name: edits}, func(current Config) error {
+			p, exists := current.Profiles[name]
+			currentPin, _ := a.effectivePin(name, p)
+			if !exists || p != verified || currentPin != pin {
+				return fmt.Errorf("profile edit: profile changed while verifying identity; retry the command")
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		update(records)
+		return nil
+	})
 }

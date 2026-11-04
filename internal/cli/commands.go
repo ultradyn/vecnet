@@ -350,7 +350,8 @@ func (a *app) connect() (*client, string, cache, error) {
 	if err := checkHubURL(p.Hub, p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"); err != nil {
 		return nil, "", cache{}, err
 	}
-	if !a.inHook {
+	// MCP runs TOFU after its additional startup refusals in cmdMCP.
+	if !a.inHook && !a.inMCP {
 		a.ensurePin(name, p)
 	}
 	dir, err := cacheDir(a.getenv)

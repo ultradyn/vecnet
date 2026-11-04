@@ -20,6 +20,12 @@ var profileKeyLine = regexp.MustCompile(`^([ \t]*)([A-Za-z0-9_-]+|"(?:[^"\\]|\\.
 // values. Empty edit values remove the key (used to drop hub_pubkey). It proves
 // both the typed config and the entire TOML tree before writing any backup.
 func editProfiles(path string, edits map[string]map[string]string) error {
+	return editProfilesIf(path, edits, nil)
+}
+
+// editProfilesIf checks a caller's snapshot after re-reading under the config
+// lock, before creating a backup or changing any bytes.
+func editProfilesIf(path string, edits map[string]map[string]string, check func(Config) error) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	unlock, err := lockPath(ctx, path+".lock")
@@ -35,6 +41,11 @@ func editProfiles(path string, edits map[string]map[string]string) error {
 	beforeMD, err := toml.Decode(string(original), &before)
 	if err != nil {
 		return err
+	}
+	if check != nil {
+		if err = check(before); err != nil {
+			return err
+		}
 	}
 	var expected map[string]any
 	if _, err = toml.Decode(string(original), &expected); err != nil {
