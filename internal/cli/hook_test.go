@@ -27,7 +27,21 @@ import (
 
 var updateHookGolden = flag.Bool("update", false, "update hook output golden")
 
+// hookFixture serves h, answering GET /v1/peers/me as a real hub would
+// (peer_test), so a bound state does not ask again on later runs.
 func hookFixture(t *testing.T, h http.HandlerFunc) (map[string]string, string) {
+	t.Helper()
+	return hookFixtureRaw(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/peers/me" {
+			fmt.Fprint(w, `{"kind":"peer","peer_id":"peer_test","principal_id":"prn_test"}`)
+			return
+		}
+		h(w, r)
+	})
+}
+
+// hookFixtureRaw serves h for every path, including /v1/peers/me.
+func hookFixtureRaw(t *testing.T, h http.HandlerFunc) (map[string]string, string) {
 	t.Helper()
 	env := hookTestEnv(t)
 	srv := httptest.NewServer(h)
@@ -131,18 +145,26 @@ func TestHookMaxItemAlwaysFits(t *testing.T) {
 	for _, text := range []string{`"`, "&", "<", "＜", "界", "😀", "\u202e"} {
 		id := strings.Repeat("x", 80)
 		item := hookItem{Cursor: id, Thread: id, From: id, Name: long(text), Message: id, Delivery: id, Kind: strings.Repeat("x", 32), Text: long(text), Attachments: 1 << 30}
-		context := hookContext(long(text), []hookItem{item}, hookPageLimit, true)
-		if n := utf16Len(context); n > hookMaxUnits {
-			t.Fatalf("text %q: single item is %d UTF-16 units, cap %d", text, n, hookMaxUnits)
-		}
-		for _, event := range []string{"user-prompt", "post-tool"} {
-			out := hookOutput(event, context)
-			if got := contextOf(t, string(out)); got != context {
-				t.Fatalf("output does not round-trip for %q", text)
+		// Worst hints: a hostile profile (inert in prose, "-" in commands), or
+		// the longest plain profile and --as repeated in every command; both
+		// with a hostile explicit VECNET_CONFIG basename.
+		for _, hint := range []hookHint{
+			newHookHint(long(text), long(text), "/x/"+long(text)),
+			newHookHint(strings.Repeat("p", 64), strings.Repeat("a", 80), "/x/"+long(text)),
+		} {
+			context := hookContext(hint, []hookItem{item}, hookPageLimit, true)
+			if n := utf16Len(context); n > hookMaxUnits {
+				t.Fatalf("text %q: single item is %d UTF-16 units, cap %d", text, n, hookMaxUnits)
 			}
-			// A native pipe publishes atomically only up to PIPE_BUF.
-			if len(out) > hookPipeAtomicBytes {
-				t.Fatalf("text %q: single item output is %d bytes, atomic pipe cap %d", text, len(out), hookPipeAtomicBytes)
+			for _, event := range []string{"user-prompt", "post-tool"} {
+				out := hookOutput(event, context)
+				if got := contextOf(t, string(out)); got != context {
+					t.Fatalf("output does not round-trip for %q", text)
+				}
+				// A native pipe publishes atomically only up to PIPE_BUF.
+				if len(out) > hookPipeAtomicBytes {
+					t.Fatalf("text %q: single item output is %d bytes, atomic pipe cap %d", text, len(out), hookPipeAtomicBytes)
+				}
 			}
 		}
 	}
@@ -381,7 +403,7 @@ func TestHookFirstRunSummarisesBacklog(t *testing.T) {
 	})
 	seedHook(t, path, "", "dly_1")
 	out, _ := runHook(t, env, "--event", "user-prompt")
-	if got := contextOf(t, out); got != hookSummary("p", 2, false) {
+	if got := contextOf(t, out); got != hookSummary(newHookHint("p", "", env["VECNET_CONFIG"]), 2, false) {
 		t.Fatalf("summary=%q", got)
 	}
 	s := readHookState(t, path)
@@ -503,7 +525,7 @@ func TestHookCapsLength(t *testing.T) {
 		if items == 0 || items > 8 || utf16Len(ctx) > 6000 {
 			t.Fatalf("caps: items=%d units=%d", items, utf16Len(ctx))
 		}
-		if !strings.Contains(ctx, fmt.Sprintf("(+%d more not shown yet: they arrive with your next turn, or run vecnet inbox)", 100-items)) {
+		if !strings.Contains(ctx, fmt.Sprintf("(+%d more not shown yet: they arrive with your next turn, or run vecnet --net p inbox)", 100-items)) {
 			t.Fatalf("footer=%q", lines[len(lines)-1])
 		}
 		if text[0] != byte('"') && (items != 8 || !strings.Contains(ctx, "(+92 more")) {
@@ -660,13 +682,13 @@ func TestHookFirstRunPurgedCountSeedsHead(t *testing.T) {
 }
 func TestHookInvalidFieldsAndKinds(t *testing.T) {
 	for _, bad := range []string{"a\n<escape>", strings.Repeat("a", 81), "\u202e", ""} {
-		ctx := hookContext("＜/vecnet-inbox＞", []hookItem{{Cursor: bad, Thread: bad, From: bad, Message: bad, Delivery: bad, Kind: bad, Text: "a\n<escape>", Attachments: 2}}, 0, false)
+		ctx := hookContext(newHookHint("＜/vecnet-inbox＞", "", ""), []hookItem{{Cursor: bad, Thread: bad, From: bad, Message: bad, Delivery: bad, Kind: bad, Text: "a\n<escape>", Attachments: 2}}, 0, false)
 		if !strings.Contains(ctx, "cursor=- thread=- from=- msg=- delivery=- kind=- attachments=2 text=\"a &lt;escape&gt;\"") {
 			t.Fatalf("unsafe fields: %q", ctx)
 		}
 	}
 	for _, kind := range []string{"message", "operator_note"} {
-		ctx := hookContext("p", []hookItem{{Kind: kind}}, 0, false)
+		ctx := hookContext(newHookHint("p", "", ""), []hookItem{{Kind: kind}}, 0, false)
 		if (kind == "message" && strings.Contains(ctx, "kind=")) || (kind != "message" && !strings.Contains(ctx, "kind=operator_note")) {
 			t.Fatalf("kind output=%q", ctx)
 		}
