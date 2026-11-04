@@ -97,3 +97,7 @@ bb-clean LANE:
 
 tui *ARGS:
     CGO_ENABLED=0 build2 go run -p 2 ./cmd/vecnet tui {{ARGS}}
+
+# Check a deployed hub's MCP and OAuth contracts (bearer in VECNET_MCP_TOKEN).
+mcp-conformance ORIGIN:
+    node scripts/mcp-conformance.mjs {{quote(ORIGIN)}}
