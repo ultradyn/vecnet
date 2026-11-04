@@ -125,8 +125,11 @@ export function createDispatcher(deps: DispatchDeps): { run(signal: AbortSignal)
         instructions: req.instructions, input: req.input });
       ledger.noteLaunch(gate.account, now);
       jobs.report(req.jobId, 'accepted', { host: deps.host, backend: req.input.backend, preset: req.input.preset, permission_mode: req.input.permission_mode });
-      // The launch Delivery has been acted on: its instructions are the session's first input.
-      receipt(row.deliveryId, 'processed');
+      // The launch Delivery is the first turn's input (its instructions are the
+      // launch prompt, never sent twice): turn 1 lists it in launch.consumed and
+      // posts its processed receipt; a session that ends first fails it.
+      ledger.addInput({ deliveryId: row.deliveryId, jobId: req.jobId, messageId: m.message_id, sender: m.sender, text: '', priority: m.priority, createdAt: now });
+      ledger.markInputs([row.deliveryId], { state: 'sent', mode: 'start', turnSeq: 0 });
       ledger.finishIngress(row.deliveryId, 'done');
       return true;
     });

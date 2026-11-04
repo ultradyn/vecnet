@@ -271,3 +271,20 @@ test('two default requesters each get the default per-requester session cap', as
   assert.equal(h.statuses(againId)[0].state, 'failed');
   assert.equal((h.statuses(againId)[0].output as { error: string }).error, 'cap_reached');
 });
+
+test('the launch Delivery is turn one\'s input: processed with turn one, listed in its launch.consumed; failed if the session ends first', async t => {
+  const h = await harness(t);
+  const { d, jobId, thread } = await launched(h);
+  await settle(20);
+  assert.equal(h.receipts().some(r => r.delivery_id === d.delivery_id), false, 'not processed before the first turn finishes');
+  h.backend.finishTurn(jobId, 'turn one');
+  await until(() => h.replies(thread).length === 1 && h.receipts().some(r => r.delivery_id === d.delivery_id), 'turn one reply and receipt');
+  assert.deepEqual(h.replies(thread)[0].metadata!['launch.consumed'], [d.message.message_id]);
+  assert.deepEqual(h.receipts().filter(r => r.delivery_id === d.delivery_id), [{ delivery_id: d.delivery_id, state: 'processed' }]);
+
+  const lost = await launched(h);
+  h.backend.exitProcess(lost.jobId, false);
+  await until(() => h.statuses(lost.jobId).some(s => s.state === 'failed'), 'session_exited');
+  await until(() => h.receipts().some(r => r.delivery_id === lost.d.delivery_id), 'launch delivery receipt');
+  assert.deepEqual(h.receipts().filter(r => r.delivery_id === lost.d.delivery_id), [{ delivery_id: lost.d.delivery_id, state: 'failed', note: 'session_ended' }]);
+});

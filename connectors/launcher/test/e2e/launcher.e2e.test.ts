@@ -229,8 +229,9 @@ test('1. launch: accepted, running with session_ref, one turn reply to the launc
   assert.equal(reply.content.text, 'turn one done');
   assert.equal(reply.metadata['launch.turn'], 'completed');
   assert.equal(reply.metadata['launch.job_id'], l.jobId);
-  assert.ok(Array.isArray(reply.metadata['launch.consumed']));
-  // The launch Delivery to the launcher is marked processed.
+  // The launch message is turn one's input.
+  assert.deepEqual(reply.metadata['launch.consumed'], [l.launchId]);
+  // The launch Delivery to the launcher is marked processed (with turn one).
   await env.requester.waitFor(e => e.type === 'receipt' && (e.data as { message_id: string; state: string }).message_id === l.launchId
     && (e.data as { state: string }).state === 'processed' ? true : undefined, WAIT, 'processed receipt for the launch');
   await sleep(300);
@@ -276,7 +277,7 @@ test('3. steer, queue, buffer; a bystander added by the requester is not relayed
 
   env.fake().finishTurn(l.jobId, 'turn one done');
   const reply = await waitReply(env, l.thread);
-  assert.deepEqual(reply.metadata['launch.consumed'], [steer.message_id]);
+  assert.deepEqual(reply.metadata['launch.consumed'], [l.launchId, steer.message_id]);
   await until(() => env.fake().sessions()[0].sent.length === 2, 'next turn started');
   const next = env.fake().sessions()[0].sent[1];
   assert.equal(next.mode, 'start');
