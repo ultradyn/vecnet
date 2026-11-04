@@ -25,6 +25,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/oklog/ulid/v2"
 
@@ -163,9 +164,16 @@ func (a *app) exit(err error) int {
 	var ue *usageError
 	var he *hubError
 	var ne *netError
+	var re *refusedError
 	switch {
 	case errors.As(err, &he):
 		fmt.Fprintf(a.stderr, "%s: %s\n", he.Code, he.Message)
+		if he.Hint != "" {
+			fmt.Fprintln(a.stderr, he.Hint)
+		}
+		return exitHub
+	case errors.As(err, &re):
+		fmt.Fprintf(a.stderr, "vecnet: %s\n", re.msg)
 		return exitHub
 	case errors.As(err, &ne):
 		fmt.Fprintf(a.stderr, "vecnet: %v\n", ne)
@@ -479,12 +487,15 @@ func (a *app) cmdEnrol(args []string) error {
 		if tok, err = a.readText("-"); err != nil {
 			return err
 		}
-		tok = strings.TrimSpace(tok)
 	case "":
-		tok = strings.TrimSpace(a.getenv("VECNET_ENROL_TOKEN"))
+		tok = a.getenv("VECNET_ENROL_TOKEN")
 	}
+	tok = strings.TrimSpace(tok)
 	if hubURL == "" || tok == "" || name == "" || len(o.pos) != 0 {
 		return usageErr("usage: vecnet enrol --hub URL --token (T|-) (--profile P | --name N [--profile P]) [--allow-insecure-http]  (or $VECNET_ENROL_TOKEN)")
+	}
+	if err := checkEnrolToken(tok); err != nil {
+		return err
 	}
 	insecure := o.has("allow-insecure-http")
 	if err := checkHubURL(hubURL, insecure || a.getenv(insecureEnv) == "1"); err != nil {
@@ -511,6 +522,12 @@ func (a *app) cmdEnrol(args []string) error {
 		req["name"] = display
 	}
 	if err := newClient(hubURL, "").do(a.ctx, http.MethodPost, "/v1/enrol", nil, req, &out); err != nil {
+		// "unauthenticated" alone reads as a revoked invite; say what else
+		// it covers and how to get a fresh one.
+		var he *hubError
+		if errors.As(err, &he) && he.Status == http.StatusUnauthorized {
+			he.Hint = enrolUnauthHint
+		}
 		return err
 	}
 	cfg.Profiles[name] = Profile{Hub: strings.TrimRight(hubURL, "/"), Secret: out.Secret, PeerID: out.PeerID, AllowInsecureHTTP: insecure}
@@ -525,6 +542,20 @@ func (a *app) cmdEnrol(args []string) error {
 	fmt.Fprintf(a.stdout, "enrolled %s as profile %s (%s)\n", out.PeerID, name, path)
 	if display != "" {
 		fmt.Fprintf(a.stdout, "display name %s; use --net %s on every vecnet command\n", out.Name, name)
+	}
+	return nil
+}
+
+const enrolUnauthHint = "the token may be mistyped, already used, re-issued or expired; ask the operator for a fresh invite (vecnet peer invite <peer>)"
+
+// checkEnrolToken refuses, before any request, text that is the invite
+// block (or part of it) rather than the bare token: whitespace inside it,
+// several lines, or "vecnet enrol". It never pulls a token out of the
+// block, since the block's own --hub would then choose where the token
+// goes; the agent runs the block's printf line instead (issue 42).
+func checkEnrolToken(tok string) error {
+	if strings.IndexFunc(tok, unicode.IsSpace) >= 0 || strings.Contains(tok, "vecnet enrol") {
+		return &refusedError{msg: "that looks like the whole invite block, not the token; run the block's printf line instead (or pass only the quoted token)"}
 	}
 	return nil
 }

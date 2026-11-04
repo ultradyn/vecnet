@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { OTHER_MAX, OTHER_PAGE, nextLimit, otherThreads, peopleLine, yourThreads } from '../static/sidebar-model.js';
+import { OTHER_MAX, OTHER_PAGE, UNREAD_MAX, nextLimit, otherThreads, peopleLine, unreadLabel, unreadOf, yourThreads } from '../static/sidebar-model.js';
 
 const NOW = Date.parse('2026-11-04T10:00:00.000Z');
 const back = ms => new Date(NOW - ms).toISOString();
@@ -91,7 +91,7 @@ test('yourThreads uses the shared row: title, others, count, last active', () =>
   // The operator is in every one of these, so the participants line leaves it out.
   assert.deepEqual({ ...titled, tip: undefined }, {
     id: 'thr_b', href: '#thread/thr_b', title: 'Release plan', untitled: false,
-    people: 'codex-hark, grok-reviewer, pag-sleuth +1', count: '7', active: '3m ago', tip: undefined,
+    people: 'codex-hark, grok-reviewer, pag-sleuth +1', count: '7', unread: 0, unreadText: '', active: '3m ago', tip: undefined,
     ids: ['peer_a', 'peer_b', 'peer_c', 'peer_d'],
   });
   // The tip names the operator as you.
@@ -164,4 +164,60 @@ test('nextLimit grows a page at a time up to the cap', () => {
   assert.equal(nextLimit(OTHER_PAGE), OTHER_PAGE * 2);
   assert.equal(nextLimit(OTHER_MAX - 10), OTHER_MAX);
   assert.equal(nextLimit(OTHER_MAX), OTHER_MAX);
+});
+
+test('unreadOf reads a positive integer count and treats anything else as zero', () => {
+  const m = { thr_a: 3, thr_z: 0, thr_neg: -1, thr_f: 1.5, thr_s: '2' };
+  assert.equal(unreadOf(m, 'thr_a'), 3);
+  for (const id of ['thr_z', 'thr_neg', 'thr_f', 'thr_s', 'thr_missing', 'toString', '__proto__']) assert.equal(unreadOf(m, id), 0, id);
+  // An older hub sends no map.
+  assert.equal(unreadOf(undefined, 'thr_a'), 0);
+  assert.equal(unreadOf(null, 'thr_a'), 0);
+});
+
+test('unreadLabel: empty at zero, the number, then capped', () => {
+  assert.equal(unreadLabel(0), '');
+  assert.equal(unreadLabel(1), '1');
+  assert.equal(unreadLabel(UNREAD_MAX), String(UNREAD_MAX));
+  assert.equal(unreadLabel(UNREAD_MAX + 1), UNREAD_MAX + '+');
+  assert.equal(unreadLabel(12345), '99+');
+});
+
+test('yourThreads carries each row\'s unread count from the inbox head; zero shows nothing', () => {
+  const page = { threads: [
+    row('thr_c', { title: 'Release plan', participants: ['peer_me', 'peer_a'], count: 12 }),
+    row('thr_b', { participants: ['peer_me', 'peer_b'], count: 4 }),
+    row('thr_a', { title: 'Quiet', participants: ['peer_me', 'peer_a'], count: 2 }),
+  ], next: null };
+  // unread_by_thread lists only threads with unread deliveries; thr_gone is
+  // not in the list (past the page cap, say) and is simply not shown.
+  const head = { unread: 9, unread_by_thread: { thr_c: 5, thr_b: 120, thr_gone: 1 } };
+  const v = mineView({ page, unread: head.unread_by_thread });
+  assert.deepEqual(v.rows.map(r => [r.id, r.unread, r.unreadText]), [['thr_c', 5, '5'], ['thr_b', 120, '99+'], ['thr_a', 0, '']]);
+  // The message count is unchanged beside it; the tip spells the count out.
+  assert.equal(v.rows[0].count, '12');
+  assert.match(v.rows[0].tip, /\n12 messages · 5 unread · last active /);
+  assert.doesNotMatch(v.rows[2].tip, /unread/);
+  // Over the listed threads the counts sum to the badge, less any thread not listed.
+  const listed = v.rows.reduce((n, r) => n + r.unread, 0);
+  assert.equal(listed, Object.values(head.unread_by_thread).reduce((a, b) => a + b, 0) - head.unread_by_thread.thr_gone);
+  // The summaries stand-in takes the same counts.
+  const early = mineView({ summaries: [summary('thr_c'), summary('thr_a')], unread: head.unread_by_thread });
+  assert.deepEqual(early.rows.map(r => r.unread), [5, 0]);
+  // No map (an older hub, or the head not loaded yet): no counts.
+  assert.deepEqual(mineView({ page }).rows.map(r => r.unreadText), ['', '', '']);
+});
+
+test('yourThreads counts follow the inbox head as it changes: a read drops a row, a delivery raises one', () => {
+  const page = { threads: [row('thr_a', { title: 'A', participants: ['peer_me', 'peer_a'] }), row('thr_b', { title: 'B', participants: ['peer_me', 'peer_b'] })], next: null };
+  const counts = byThread => mineView({ page, unread: byThread }).rows.map(r => r.unread);
+  assert.deepEqual(counts({ thr_a: 2, thr_b: 1 }), [2, 1]);
+  assert.deepEqual(counts({ thr_b: 1 }), [0, 1]);
+  assert.deepEqual(counts({ thr_a: 1, thr_b: 1 }), [1, 1]);
+});
+
+test('Other Threads show no unread count', () => {
+  const [r] = view({ threads: [row('thr_o')], next: null }).rows;
+  assert.equal(r.unread, 0);
+  assert.equal(r.unreadText, '');
 });

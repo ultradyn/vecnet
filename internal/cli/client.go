@@ -26,13 +26,20 @@ func (e *usageError) Error() string { return e.msg }
 
 func usageErr(msg string) error { return &usageError{msg: msg} }
 
+// refusedError is a refusal the CLI makes itself, before contacting the
+// hub: exit 2 like a hub refusal, printed as "vecnet: msg".
+type refusedError struct{ msg string }
+
+func (e *refusedError) Error() string { return e.msg }
+
 // hubError is a non-2xx answer from the hub: exit 2, printed as
-// "code: message".
+// "code: message", then Hint on its own line when set.
 type hubError struct {
 	Status  int
 	Code    string
 	Message string
 	Details map[string]any
+	Hint    string
 }
 
 func (e *hubError) Error() string { return e.Code + ": " + e.Message }
