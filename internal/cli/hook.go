@@ -27,6 +27,9 @@ const (
 	hookMaxUnits      = 6000
 	hookPostToolEvery = 5 * time.Second
 	hookPageLimit     = 500
+	// hookPipeAtomicBytes is Linux PIPE_BUF: a pipe write of at most this
+	// many bytes is all or nothing.
+	hookPipeAtomicBytes = 4096
 )
 
 var hookID = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,80}$`)
@@ -138,6 +141,7 @@ func (a *app) cmdHook(args []string) (err error) {
 		return a.cmdHookInstall(args[1:])
 	}
 	defer func() { _ = recover(); err = nil }()
+	hookCatchSIGPIPE()
 	ctx, cancel := context.WithTimeout(a.ctx, hookBudget)
 	defer cancel()
 	a.ctx = ctx
@@ -145,6 +149,13 @@ func (a *app) cmdHook(args []string) (err error) {
 	stdout, stderr := a.stdout, a.stderr
 	nowTime, afterPoll := hookNow, hookAfterPoll
 	publish := func(data []byte) error { return hookWrite(ctx, stdout, data) }
+	limit := 0
+	// A native pipe gets an all-or-nothing write, so the output is capped at
+	// the atomic write size; an expired deadline then emits nothing at all.
+	if write, ok := hookAtomicPipe(stdout); ok {
+		publish = func(data []byte) error { return write(ctx, data) }
+		limit = hookPipeAtomicBytes
+	}
 	done := make(chan hookResult, 1)
 	// Local filesystem reads cannot take a context. Supervise the complete
 	// operation so blocked config, cache or stdin I/O cannot hold up a turn.
@@ -159,7 +170,7 @@ func (a *app) cmdHook(args []string) (err error) {
 			result.diagnostics = diagnostics.Bytes()
 			done <- result
 		}()
-		result = worker.hookRun(args, nowTime, afterPoll, publish)
+		result = worker.hookRun(args, nowTime, afterPoll, publish, limit)
 	}()
 	var result hookResult
 	select {
@@ -221,8 +232,9 @@ func hookWrite(ctx context.Context, w io.Writer, data []byte) error {
 }
 
 // hookRun publishes inside the state transaction: shown ids and the poll
-// cursor are committed only after publish succeeds.
-func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(), publish func([]byte) error) hookResult {
+// cursor are committed only after publish succeeds. A positive limit caps
+// the encoded output in bytes as well as the context in UTF-16 units.
+func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(), publish func([]byte) error, limit int) hookResult {
 	ctx := a.ctx
 	o, e := parseFlags("hook", args, map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag})
 	if e != nil || len(o.pos) != 0 {
@@ -255,7 +267,9 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	if event != "user-prompt" && event != "post-tool" {
 		return hookResult{}
 	}
-	fits := func(context string) bool { return utf16Len(context) <= hookMaxUnits }
+	fits := func(context string) bool {
+		return utf16Len(context) <= hookMaxUnits && (limit <= 0 || len(hookOutput(event, context)) <= limit)
+	}
 	c, name, ch, e := a.connect()
 	if e != nil || ctx.Err() != nil {
 		return hookResult{}
@@ -379,7 +393,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 				}
 			}
 			// The first item always fits: one maximal item is far below
-			// hookMaxUnits (TestHookMaxItemAlwaysFits).
+			// hookMaxUnits and hookPipeAtomicBytes (TestHookMaxItemAlwaysFits).
 			candidate := append(append([]hookItem(nil), items...), item)
 			if len(items) > 0 && (len(items) == hookMaxItems || !fits(hookContext(name, candidate, remaining, lowerBound))) {
 				cut = true

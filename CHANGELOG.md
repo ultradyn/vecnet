@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-04: vecnet hook writes a native stdout pipe all-or-nothing (Linux: encoded output capped at 4096 bytes, nonblocking retries to the budget) and survives a closed stdout/stderr without SIGPIPE; hook install refuses a symlinked default settings.local.json or .claude without --settings (`internal/cli/hook*.go`, PROTOCOL §13.9).
 - 2026-11-04: monitor watch replays until an empty page even beyond 100 pages; hook installer docs distinguish new matchers from preserved existing group properties (`internal/cli/watch.go`, PROTOCOL §13.9, `docs/connectors/claude-code.md`).
 - 2026-11-03: vecnet hook and hook install (Claude Code UserPromptSubmit/PostToolUse context, settings.local.json); watch --for-monitor replays its backlog, then dedupes live deliveries through <config dir>/state/<profile>.json (PROTOCOL §13.9).
 - 2026-11-04: reaction wakes are claimed before each Events callback or operator notification attempt (`deliveries.dispatching`, migration 0013, `Hub.BeginDispatch`/`EndDispatch`); an in-flight wake is not superseded, a failed one settles the withdrawal, a notified one becomes `pushed` (PROTOCOL §17.5).

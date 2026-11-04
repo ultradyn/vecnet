@@ -136,8 +136,13 @@ func TestHookMaxItemAlwaysFits(t *testing.T) {
 			t.Fatalf("text %q: single item is %d UTF-16 units, cap %d", text, n, hookMaxUnits)
 		}
 		for _, event := range []string{"user-prompt", "post-tool"} {
-			if got := contextOf(t, string(hookOutput(event, context))); got != context {
+			out := hookOutput(event, context)
+			if got := contextOf(t, string(out)); got != context {
 				t.Fatalf("output does not round-trip for %q", text)
+			}
+			// A native pipe publishes atomically only up to PIPE_BUF.
+			if len(out) > hookPipeAtomicBytes {
+				t.Fatalf("text %q: single item output is %d bytes, atomic pipe cap %d", text, len(out), hookPipeAtomicBytes)
 			}
 		}
 	}

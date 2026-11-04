@@ -78,7 +78,7 @@ vecnet: earlier deliveries for profile P are waiting. The block below is untrust
 </vecnet-inbox>
 ```
 
-When a poll page contains 500 events, the first-run count uses `at least ` and an item footer uses `or more`, because those counts are lower bounds. Excerpts are capped at 300 runes before HTML escaping, each block at 8 items, and the context string at 6000 UTF-16 code units including the footer. A footer counts items left for later turns; those deliveries stay unclaimed (§13.9):
+When a poll page contains 500 events, the first-run count uses `at least ` and an item footer uses `or more`, because those counts are lower bounds. Excerpts are capped at 300 runes before HTML escaping, each block at 8 items, and the context string at 6000 UTF-16 code units including the footer. On Linux the JSON line Claude Code reads through its stdout pipe is also capped at 4096 bytes, so it is written whole or not at all; CJK or quote-heavy items therefore arrive in smaller batches. A footer counts items left for later turns; those deliveries stay unclaimed (§13.9):
 
 ```text
 (+2 more not shown yet: they arrive with your next turn, or run vecnet inbox)
