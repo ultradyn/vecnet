@@ -72,8 +72,11 @@ func (a *app) readKeyFile(path string) (string, error) {
 		return "", err
 	}
 	key := strings.TrimSpace(string(raw))
+	if strings.HasPrefix(strings.ToLower(key), "bearer ") {
+		return "", usageErr("route: key file must hold the raw crsr_ key, without Bearer")
+	}
 	if len(raw) > maxKeyFile || !strings.HasPrefix(key, grokbotKeyPrefix) {
-		return "", usageErr("route add: " + path + " does not hold a " + grokbotKeyPrefix + " key")
+		return "", usageErr("route: " + path + " does not hold a " + grokbotKeyPrefix + " key")
 	}
 	info, err := f.Stat()
 	if err != nil {
