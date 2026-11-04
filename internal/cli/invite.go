@@ -115,7 +115,7 @@ func (a *app) peerInvite(o opts) error {
 		if kind == "" {
 			kind = "session"
 		}
-		if kind == "operator" || kind == "dot" {
+		if kind == "operator" || kind == "dot" || kind == "source" {
 			return usageErr("peer invite: kind " + kind + " cannot be invited; use `vecnet peer add`")
 		}
 		if profile == "" {
