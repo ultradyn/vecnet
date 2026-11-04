@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/url"
 	"strconv"
 	"time"
@@ -131,12 +132,12 @@ func (c *Client) Tail(ctx context.Context, handle func(Batch) error, status func
 			}
 		}
 		report("offline")
-		if err = c.pause(ctx, backoff); err != nil {
+		if err = c.pause(ctx, backoff*4/5+rand.N(backoff*2/5+1)); err != nil {
 			return err
 		}
 		backoff *= 2
-		if backoff > 30*time.Second {
-			backoff = 30 * time.Second
+		if backoff > 20*time.Second {
+			backoff = 20 * time.Second
 		}
 	}
 }
