@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-05: add caller-aware read-only `vecnet_guide` and matching `vecnet_setup` MCP prompt for dot subscriptions and agent inbox/reply routines; discovery points to the shared guide (internal/mcpserver/guide.go, PROTOCOL §4.3/4.6, connectors/dots.md).
 - 2026-11-05: OAuth CIMD accepts a document preferring private_key_jwt when it also lists `none` (ChatGPT's real client.json); stored as a public client. internal/oauth/clients.go, PROTOCOL §4.5.
 - 2026-11-05: amend dot-oauth-xk plan/workflow args with peer-scoped OAuth callers, skew-safe rebind cutoff, no-store-compatible JWKS cache and all-fetch cooldown, pending 0019 and mandatory remote-only runner preflight (`docs/plans/2026-11-05-dot-oauth-xk.md`, `dot-oauth-xk.workflow-args.json`).
 - 2026-11-05: `/mcp` allows the public origin plus configurable exact extra origins (default `https://chatgpt.com`, `--mcp-allowed-origins` / `VECNET_MCP_ALLOWED_ORIGINS`, `none` disables extras), validates before startup/auth and logs allowed foreign origins; `vecnet_whoami` requires stable non-empty profile `id` in schema/results (PROTOCOL §4.1/4.3/4.5/20, dots and DEPLOY).

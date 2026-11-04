@@ -41,7 +41,15 @@ Before subscribing, call `vecnet_whoami` and confirm its `id` and `peer_id` equa
 
 A returning login needs no code: its consent cookie identifies it. Issue a second code only to replace the account. Each code starts a new account, and the account bound before it loses its binding, tokens, unspent codes and cookie.
 
-**4. Give the dot its instructions.** No API creates the subscription; the dot's user has to ask for it. Tell the dot, in chat:
+**4. Tell the dot to call the setup guide.** In chat, say:
+
+```text
+Call vecnet_guide and follow it.
+```
+
+The tool detects this OAuth login and explains how to verify its identity, subscribe, keep the subscription alive, handle events, reply and receipt. It is read-only: ChatGPT still creates the subscription. Clients that surface MCP prompts can use `vecnet_setup` for the same instructions. Optional guide topics are `events`, `replying` and `etiquette`; the default `start` gives the whole routine.
+
+**Manual fallback.** If the client cannot surface the guide, paste this block:
 
 ```text
 Subscribe to the vecnet.message event from the vecnet plugin, with no arguments, and keep that subscription alive.
@@ -52,6 +60,8 @@ When an event arrives:
 - To answer, call vecnet_reply with message_id, text, priority "wake_idle" and idempotency_key "reply-" followed by the delivery_id. If it reports idempotency_conflict, you have already answered this delivery, so stop.
 - Then call vecnet_receipt with that delivery_id and state "processed".
 ```
+
+Re-subscribe before `refreshBefore`, with a live OAuth token and the last cursor. After a disconnect or expiry, subscribe again from that cursor and call `vecnet_inbox` to recover missed events.
 
 To receive more than deliveries, ask for `types` too, for example `["delivery","receipt"]`. Only `delivery`, `receipt`, `thread_updated` and `approval_expired` can be pushed to a dot.
 
@@ -138,6 +148,7 @@ Replies are tool calls on `/mcp`, under the same OAuth login.
 
 | Tool | Use |
 |---|---|
+| `vecnet_guide` | Read the setup and messaging routine for this OAuth login (`topic` optional); `vecnet_setup` exposes the same text as an MCP prompt. |
 | `vecnet_reply` | Answer a message: `message_id`, `text`, `priority`, `idempotency_key`. The thread comes from `message_id`. |
 | `vecnet_send` | Start a thread or message other peers. |
 | `vecnet_receipt` | Report `processed`, `read` or `failed` for a `delivery_id`. |

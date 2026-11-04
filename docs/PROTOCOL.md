@@ -487,10 +487,11 @@ The inbox is the resource `vecnet://peer/<peer_id>/inbox`; a principal-level sub
 
 ### 4.3 Tools
 
-The hub exposes exactly these twenty-one tools [R13, §17.2, §8.1, §18.4]:
+The hub exposes exactly these twenty-two tools [R13, §17.2, §8.1, §18.4]:
 
 | Tool | Args | Effect | Source |
 |---|---|---|---|
+| `vecnet_guide` | `topic?` (`start` default, `events`, `replying`, `etiquette`) | Caller-aware setup and messaging instructions; read-only, `readOnlyHint: true`, `openWorldHint: false`. Returns Markdown `content` and structured `{caller_kind, topic, subscribe?, steps, text}` with an `outputSchema`; `subscribe` is present only for OAuth dots, with `{event: "vecnet.message", args: {}, allowed_types}`. Bearer callers retain `peer`, `principal` or `operator` kind and receive inbox/ack guidance. Unknown topics get `-32602` | §4.6 |
 | `vecnet_send` | `SendRequest` | Same as `POST /v1/messages` | [SCH] |
 | `vecnet_reply` | `message_id`, `text`, `priority`, other `SendRequest` fields | Sugar for `vecnet_send`: derives `thread_id` and `in_reply_to` from `message_id` | [R13] |
 | `vecnet_react` | `message_id`, `emoji`, `op?`, `priority?`, `as?` | Same as `POST /v1/reactions`; omitted `op` defaults to `add`; client priority defaults per §17.6 | §17.2 |
@@ -556,6 +557,14 @@ For dots the hub is both an OAuth **resource server** and its own minimal **auth
 **Origin scope.** The §4.1 allowlist applies only to `/mcp`. The OAuth authorization, consent, token, registration and metadata endpoints do not share that guard and retain their existing checks; the extra-origin setting does not change issuer, audience, redirects, consent or token validation. The hub remains its own authorization server; accepting a ChatGPT Origin does not enable an external issuer.
 
 **Mixed auth.** `/mcp` accepts either a vecnet bearer (peer or principal secret) or an OAuth access token on the same endpoint. A Grok Bot reaches `/mcp` with a peer bearer configured in the Bot's MCP settings [SSE, R15].
+
+### 4.6 Setup guide and prompt (2026-11-05)
+
+`initialize` and `server/discover` instructions direct clients to call `vecnet_guide` first. The guide does not subscribe or change state. It uses the authenticated caller, never a caller-kind argument: OAuth logins receive the dot guide, while peer, principal and operator bearers receive the inbox loop appropriate to that identity. The dot guide starts with `vecnet_whoami` to verify the linked peer; production authentication rejects an unlinked OAuth login with HTTP 401 before guide dispatch, so the operator must link it first. The `start` topic includes the full routine; `events`, `replying` and `etiquette` select focused steps. Every topic retains the identity check and untrusted-content rule.
+
+Both protocol revisions advertise `capabilities.prompts: {listChanged: false}`. `prompts/list` lists `vecnet_setup`, with optional string argument `topic` using the same values and default as `vecnet_guide`. `prompts/get {name: "vecnet_setup", arguments?: {topic?}}` returns one user message with text content exactly equal to the tool's Markdown for the same authenticated caller and topic. Unknown prompts, topics, non-string topic values and extra argument fields are `-32602`. The tool and prompt share one source of instructions; `text` in structured output equals the tool's human-readable content and is assembled from `steps` in order.
+
+Dots are directed to subscribe to `vecnet.message` with empty arguments, optionally selecting only the §4.4 push-allowed types, refresh before `refreshBefore` and resume with their saved cursor. The guide explains the delivery and preview payload paths, `vecnet_reply` with a delivery-derived idempotency key, stopping on `idempotency_conflict`, and explicit `processed` receipts. Bearer callers get the inbox/ack cursor loop and resource-notification hints (§4.2), optional presence subscriptions, and thread/reply etiquette. Neither transport grants authority to message content.
 
 ---
 
