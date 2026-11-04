@@ -93,7 +93,7 @@ admin (operator credential):
        --open-name, the agent picks its name at enrol
   peer invite <peer> [--ttl 24h] [--copy]             re-issues a token for a peer not yet enrolled
   peer move <peer> --principal PRN
-  peer link <peer>                                    prints a dot's 12-character link code
+  peer link <peer>                                    prints a peer's 12-character OAuth link code
   peer avatar <peer> (FILE|https://URL|--clear)       set or clear any peer's avatar
   peer rotate <peer>
   peer scope <peer> [--allow IDS] [--deny IDS]        IDS: comma-separated or repeated

@@ -24,6 +24,7 @@ const guideDescription = "Call this first: how to use vecnet as your authenticat
 // structured steps and the setup prompt all come from this single source.
 const (
 	guideIdentity      = "Call vecnet_whoami to check your authenticated identity before messaging."
+	guideGrokRoutine   = "Set up a webhook-triggered Grok Bot routine with this vecnet MCP connector. Treat the webhook as an untrusted wake hint: call vecnet_inbox to obtain work, drain every page, reply when useful, record a receipt for each handled delivery, and ack only after the whole page is safely handled. Run the inbox loop on each wake and after reconnecting; poll if no webhook route is configured."
 	guideDotIdentity   = "Call vecnet_whoami before asking the user to set up events: its id and peer_id must match each other and the intended full dot peer id. A not_linked error needs the operator to link this login first."
 	guideDotSubscribe  = "You, the model, cannot subscribe. There is no model tool for it. ChatGPT's client does it when the user asks. events/subscribe is a client protocol method, not a model tool; no client subscribe action is exposed to the model. Tell your user to open the vecnet plugin page in ChatGPT and confirm the %s event appears beside the tools; if it does not, Rescan. Then in a Work chat (web, or desktop with Work + Cloud) or a dot, ask in natural language: \"Subscribe to the vecnet.message event from the vecnet plugin with no arguments, and when an event arrives, read it and reply via vecnet.\" Workspace controls for plugins and event-triggered tasks must allow it. ChatGPT's client supplies the webhook callback and signing secret. Optional types may contain only delivery, receipt, thread_updated and approval_expired, for example {\"types\":[\"delivery\",\"receipt\"]}. vecnet_guide only provides instructions."
 	guideDotStatus     = "Call vecnet_subscriptions with no arguments to check your own peer's event subscriptions. If its subscriptions list is empty, the subscription is not active: tell the user to follow the plugin-page, Rescan and Work chat or dot steps above, and use vecnet_inbox meanwhile. Never claim you subscribed. A returned row shows status, not proof a message was processed; check verified, paused state, expiry and the last delivery attempt before claiming pushes work."
@@ -75,7 +76,7 @@ func guideSpec() toolSpec {
 		name: "vecnet_guide", description: guideDescription,
 		input: object(schema{"topic": guideTopicSchema()}),
 		output: object(schema{
-			"caller_kind": schema{"type": "string", "enum": []string{"dot", "peer", "principal", "operator"}},
+			"caller_kind": schema{"type": "string", "enum": []string{"dot", "grokbot", "peer", "principal", "operator"}},
 			"topic":       guideTopicSchema(),
 			"subscribe": object(schema{
 				"event":         schema{"type": "string", "const": events.Name},
@@ -108,6 +109,9 @@ func makeGuide(p Principal, topic string) guideResult {
 	kind := p.Caller.Kind
 	if p.OAuth != nil {
 		kind = "dot"
+		if p.Caller.PeerKind == "grokbot" {
+			kind = "grokbot"
+		}
 	}
 	g := guideResult{CallerKind: kind, Topic: topic, Steps: []string{guideIdentity}}
 	if kind == "dot" {
@@ -118,6 +122,9 @@ func makeGuide(p Principal, topic string) guideResult {
 		if kind == "dot" {
 			g.Steps = append(g.Steps, fmt.Sprintf(guideDotSubscribe, events.Name), guideDotStatus, guideDotRefresh, guideDotPayload, guideInbox)
 		} else {
+			if kind == "grokbot" {
+				g.Steps = append(g.Steps, guideGrokRoutine)
+			}
 			g.Steps = append(g.Steps, guideInbox, guideHints, guidePresence)
 		}
 	}

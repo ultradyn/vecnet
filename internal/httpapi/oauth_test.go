@@ -149,3 +149,77 @@ func TestOAuthPathsArePublic(t *testing.T) {
 		t.Errorf("GET /v1/peers without a bearer: %d", resp.StatusCode)
 	}
 }
+
+// Link eligibility is identical at issue and consume time, including changes
+// made after issue. Never print the returned code, even on test failures.
+func TestOAuthLinkKinds(t *testing.T) {
+	ctx := context.Background()
+	for _, kind := range []string{"dot", "grokbot"} {
+		t.Run(kind, func(t *testing.T) {
+			env := testhub.Start(t)
+			peer, _ := env.NewPeer(kind, "linkable")
+			issue := func() string {
+				t.Helper()
+				resp, body := env.Do(env.OperatorSecret, "POST", "/v1/admin/dot-links", map[string]string{"peer_id": peer})
+				if resp.StatusCode != http.StatusCreated {
+					t.Fatalf("issue: HTTP %d", resp.StatusCode)
+				}
+				var out struct {
+					Code string `json:"code"`
+				}
+				if err := json.Unmarshal(body, &out); err != nil {
+					t.Fatal("invalid link response")
+				}
+				if !dotLinkCode.MatchString(out.Code) {
+					t.Fatal("invalid code format")
+				}
+				return out.Code
+			}
+			code := issue()
+			if got, err := env.Hub.ConsumeDotLink(ctx, code); err != nil || got != peer {
+				t.Fatalf("consume: peer=%s err=%v", got, err)
+			}
+			if _, err := env.Hub.ConsumeDotLink(ctx, code); !errors.Is(err, hub.ErrDotLink) {
+				t.Fatal("code reuse was not refused")
+			}
+			code = issue()
+			if err := env.Hub.SetPeerDisabled(ctx, peer, true); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := env.Hub.ConsumeDotLink(ctx, code); !errors.Is(err, hub.ErrDotLink) {
+				t.Fatal("disabled consume was not refused")
+			}
+			if _, err := env.Hub.DotLink(ctx, peer); err == nil {
+				t.Fatal("disabled issue succeeded")
+			}
+			if err := env.Hub.SetPeerDisabled(ctx, peer, false); err != nil {
+				t.Fatal(err)
+			}
+			for _, refusedKind := range []string{"operator", "session"} {
+				code = issue()
+				if _, err := env.Hub.DB.ExecContext(ctx, `UPDATE peers SET kind = ? WHERE peer_id = ?`, refusedKind, peer); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := env.Hub.ConsumeDotLink(ctx, code); !errors.Is(err, hub.ErrDotLink) {
+					t.Fatalf("%s consume was not refused", refusedKind)
+				}
+				if _, err := env.Hub.DB.ExecContext(ctx, `UPDATE peers SET kind = ? WHERE peer_id = ?`, kind, peer); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+	env := testhub.Start(t)
+	session, _ := env.NewPeer("session", "not-linkable")
+	principal, _ := env.NewPrincipal("not-a-peer")
+	for _, peer := range []string{env.OperatorPeer, session, principal} {
+		resp, _ := env.Do(env.OperatorSecret, "POST", "/v1/admin/dot-links", map[string]string{"peer_id": peer})
+		want := http.StatusUnprocessableEntity
+		if peer == principal {
+			want = http.StatusNotFound
+		}
+		if resp.StatusCode != want {
+			t.Errorf("refused identity: HTTP %d, want %d", resp.StatusCode, want)
+		}
+	}
+}

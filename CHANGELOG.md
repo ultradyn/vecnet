@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-05: OAuth link codes support enabled `dot` and `grokbot` peers through one shared allowlist; Grok Bot logins receive their own webhook/inbox guide, with generic CLI link help and connector setup docs (hub/admin.go, mcpserver/guide.go, PROTOCOL §4.5, connectors/grokbot.md).
 - 2026-11-05: hub `VECNET_OAUTH_REDIRECTS`/`--oauth-redirects` appends startup-validated OAuth redirect patterns; add Cursor's documented hosted HTTPS callback and query-free refusal/DCR diagnostics (`internal/oauth`, PROTOCOL §4.5, connectors/grokbot.md).
 - 2026-11-05: align dot MCP discovery and event OAuth scopes, add optional legacy-session refusal, cache verified idempotent subscription refreshes, and expose sanitized MCP/OAuth/Events diagnostics through an operator ring API and CLI (connectors/dots.md).
 - 2026-11-05: MCP logs sanitized request/subscribe outcomes, publishes ChatGPT-safe event schemas, echoes supported June 2025 sessions, and adds caller-scoped `vecnet_subscriptions` with verified health and explicit client-only setup/inbox fallback (mcpserver, PROTOCOL §4, connectors/dots.md).

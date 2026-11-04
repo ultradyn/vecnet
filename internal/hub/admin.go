@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -145,8 +146,16 @@ const (
 	dotLinkGroup    = 4
 )
 
+// oauthLinkKinds is the space-separated allowlist for issuing and consuming
+// OAuth link codes. Keep both checks on this single list as new clients join.
+const oauthLinkKinds = "dot grokbot"
+
+func oauthLinkKind(kind string) bool {
+	return slices.Contains(strings.Fields(oauthLinkKinds), kind)
+}
+
 // ErrDotLink is every refused link code: unknown, used, expired, or naming a
-// peer that is no longer an enabled dot. The cases are not told apart.
+// peer that is no longer enabled or eligible for OAuth linking. The cases are not told apart.
 var ErrDotLink = errors.New("hub: invalid link code")
 
 // newDotLinkCode draws DotLinkLen uniform characters from the alphabet and
@@ -168,7 +177,7 @@ func newDotLinkCode() (stored, shown string, err error) {
 	return string(b), strings.Join(groups, "-"), nil
 }
 
-// DotLink mints the one-time code that binds a ChatGPT principal to dot peer
+// DotLink mints the one-time code that binds an OAuth principal to eligible peer
 // peerID on first login (PROTOCOL §4.5, R15, §20.1). The code is returned
 // once, grouped for reading, and only its hash is stored; it lasts
 // DotLinkTTL. Issuing a code ends a link-code lockout (DotLinkFailed). A peer
@@ -184,8 +193,8 @@ func (h *Hub) DotLink(ctx context.Context, peerID string) (string, error) {
 		if err != nil {
 			return err
 		}
-		if kind != "dot" {
-			return invalidValue("peer_id", "only a dot peer can be linked")
+		if !oauthLinkKind(kind) {
+			return invalidValue("peer_id", "only a dot or grokbot peer can be linked")
 		}
 		if disabled {
 			return invalidValue("peer_id", "the peer is disabled")
@@ -283,7 +292,7 @@ func (h *Hub) ConsumeDotLinkTx(ctx context.Context, tx *sql.Tx, code string) (st
 	if err != nil {
 		return "", err
 	}
-	if kind != "dot" || disabled {
+	if !oauthLinkKind(kind) || disabled {
 		return "", ErrDotLink
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE dot_links SET used_at = ? WHERE code_hash = ? AND used_at IS NULL`, h.nowStr(), hash)
@@ -299,7 +308,7 @@ func (h *Hub) ConsumeDotLinkTx(ctx context.Context, tx *sql.Tx, code string) (st
 	return peerID, nil
 }
 
-// BindDotPrincipalTx moves dot peer peerID under a new principal named "dot:"
+// BindDotPrincipalTx moves an OAuth-linkable peer peerID under a new principal named "dot:"
 // + the peer's name, inside tx, on the authority of the operator's link code
 // (PROTOCOL §2.12, §4.5), and ends any bearer left on it. It returns the
 // principal. After commit, wake readers with Log.Notify(peerID, prnID).
@@ -319,8 +328,8 @@ func (h *Hub) BindDotPrincipalTx(ctx context.Context, tx *sql.Tx, peerID string)
 	if err := h.movePeer(ctx, tx, peerID, prnID, "hub"); err != nil {
 		return "", err
 	}
-	// A link code cuts off whoever had this dot, and a bearer from before dots
-	// lost them would survive it.
+	// A link code cuts off whoever had this peer, including any bearer or
+	// enrolment token from before the OAuth binding.
 	if err := h.Auth.RevokePeerCredentialsTx(ctx, tx, peerID); err != nil {
 		return "", err
 	}

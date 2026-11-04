@@ -55,10 +55,14 @@ func TestGuide(t *testing.T) {
 	oauthPeer := oauthPrincipal
 	oauthPeer.Caller.Kind = "peer"
 	dotPeer := eventsFront(t, env, guideAuth{oauthPeer}, nil)
+	grokPrincipal := oauthPrincipal
+	grokPrincipal.Caller.PeerKind = "grokbot"
+	grok := eventsFront(t, env, guideAuth{grokPrincipal}, nil)
 	for _, tc := range []struct {
 		name, kind, secret string
 		front              *testhub.Env
 	}{
+		{"OAuth grokbot", "grokbot", "oauth-token", grok},
 		{"OAuth principal", "dot", "oauth-token", dot}, {"OAuth peer", "dot", "oauth-token", dotPeer},
 		{"peer", "peer", peerSecret, env}, {"principal", "principal", principalSecret, env}, {"operator", "operator", env.OperatorSecret, env},
 	} {
@@ -175,6 +179,13 @@ func TestGuide(t *testing.T) {
 						} else if got.Subscribe != nil || strings.Contains(got.Text, "vecnet.message") {
 							t.Fatalf("%s has dot subscription guidance: %s", tc.kind, got.Text)
 						}
+						if tc.kind == "grokbot" {
+							for _, forbidden := range []string{"ChatGPT", "Work chat", "Cloud", "Rescan", "plugin page"} {
+								if strings.Contains(got.Text, forbidden) {
+									t.Errorf("grokbot guide contains %q", forbidden)
+								}
+							}
+						}
 						if topic == "" {
 							start = got
 						}
@@ -200,6 +211,9 @@ func TestGuide(t *testing.T) {
 						needles = append(needles, "data.data.message.content.text", "data.preview", "vecnet_inbox", "refreshBefore", "id", "peer_id", "vecnet_whoami", "not a model tool", "Work chat", "Cloud", "Rescan", "plugin page", "natural language", "events/subscribe", "vecnet_subscriptions", "Never claim you subscribed")
 					} else {
 						needles = append(needles, "vecnet_inbox", "next_cursor", "vecnet_ack", "notifications/resources/updated", "vecnet_presence_subscribe", "cursor_purged", "oldest_cursor", "cursor for other inbox events")
+					}
+					if tc.kind == "grokbot" {
+						needles = append(needles, "webhook-triggered Grok Bot routine", "wake hint", "drain every page")
 					}
 					for _, needle := range needles {
 						if !strings.Contains(start.Text, needle) {

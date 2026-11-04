@@ -639,7 +639,7 @@ func callPresenceSubscribe(ctx context.Context, s *Server, c auth.Caller, raw []
 }
 
 // callWhoami uses the same caller fields as GET /v1/peers/me. An OAuth
-// profile identifies the linked dot peer, and peer profiles add its public
+// profile identifies the linked peer, and peer profiles add its public
 // directory name. The required profile id is the stable peer/principal id,
 // or "operator" when no operator peer exists. No credential or principal-wide
 // settings are exposed.
@@ -654,7 +654,7 @@ func callWhoami(ctx context.Context, s *Server, c auth.Caller, _ []byte) (any, e
 			}
 		}
 		if peer == "" {
-			return nil, hub.E(http.StatusForbidden, "not_linked", "this account is not linked to a dot peer")
+			return nil, hub.E(http.StatusForbidden, "not_linked", "this account is not linked to a peer")
 		}
 		c.Kind, c.PeerID = "peer", peer
 	}

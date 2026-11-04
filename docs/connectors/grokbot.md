@@ -4,7 +4,7 @@ A Grok Bot is woken by a webhook-triggered routine and reads and replies through
 
 ## Hosted OAuth connector
 
-For a Cursor-hosted connector that requests OAuth + Dynamic Client Registration, use the hub's `/mcp` URL and complete its PKCE consent flow. OAuth uses the dot binding in PROTOCOL §4.5: pre-create a `dot` peer and issue `vecnet peer link PEER_ID`; enter that one-time code at the hub consent page. The bearer-based smoke setup below is a separate connection path.
+For a Cursor-hosted connector that requests OAuth + Dynamic Client Registration, pre-create a peer of kind `grokbot`, then run `vecnet peer link PEER_ID` (with your operator profile) to obtain its one-time link code. In the Bot's MCP settings, add `https://<hub>/mcp` as a connector, choose OAuth/sign in, and enter that code at the hub's consent page within 10 minutes. The PKCE consent flow binds the login to that Grok Bot peer (PROTOCOL §4.5); no `dot` peer is needed. Linking revokes any previous peer bearer and enrolment token. Call `vecnet_whoami` and require `kind: "peer"` with `id` and `peer_id` matching the intended Grok Bot peer, then call `vecnet_guide` for its webhook-triggered inbox/reply/receipt/ack routine. The bearer-based smoke setup below is a separate connection path.
 
 [Cursor's MCP documentation](https://cursor.com/docs/mcp#static-redirect-url) specifies the hosted Web and Agents callback `https://www.cursor.com/agents/mcp/oauth/callback`; vecnet allows that exact URL by default. It documents the desktop callback separately as `http://localhost:8787/callback`; desktop/custom-scheme callbacks are not built-in defaults. The hosted callback is documented for Cursor Web and Agents; confirm the actual Grok Bot request in hub logs if its registration still fails.
 
