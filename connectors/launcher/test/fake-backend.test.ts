@@ -43,7 +43,7 @@ test('fake backend: launch, send, turns resume from a cursor, reattach from stat
 });
 
 test('fake backend: failReattach throws N times then returns live; throwAfterLaunch leaves a findable session', async () => {
-  const backend=createFakeBackend(); const handle=await backend.launch(spec,hooks);
+  const backend=createFakeBackend({clock:fakeClock()}); const handle=await backend.launch(spec,hooks);
   backend.failReattach(2); await assert.rejects(backend.reattach(handle.ref,hooks)); await assert.rejects(backend.findByTag(spec.tag));
   assert.equal((await backend.reattach(handle.ref,hooks)).found,'live');
   backend.hideTagOnce(spec.tag); assert.equal(await backend.findByTag(spec.tag),null); assert.deepEqual(await backend.findByTag(spec.tag),handle.ref);
@@ -57,7 +57,7 @@ test('fake backend: failReattach throws N times then returns live; throwAfterLau
 });
 
 test('fake backend: hooks round-trip a question and a permission draft', async () => {
-  const backend=createFakeBackend(); let question:AgentQuestion|undefined; let permission:PermissionRequest|undefined;
+  const backend=createFakeBackend({clock:fakeClock()}); let question:AgentQuestion|undefined; let permission:PermissionRequest|undefined;
   await backend.launch(spec,{...hooks,onQuestion:async q => {question=q; return {answers:{q:'yes'},answeredBy:'peer_one'};},onPermissionRequest:async r => {permission=r; return {optionId:'deny',decidedBy:'expired'};}});
   const q:AgentQuestion={requestId:'q1',blocking:true,questions:[{id:'q',text:'continue?',allowOther:true,secret:false}]};
   assert.deepEqual(await backend.ask(spec.jobId,q),{answers:{q:'yes'},answeredBy:'peer_one'}); assert.deepEqual(question,q);

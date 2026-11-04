@@ -53,6 +53,9 @@ export async function startFakeHub(opts: { bearer?: string; heartbeatMs?: number
     res.writeHead(status, {'Content-Type':'application/json', ...headers});
     res.end(status === 204 ? undefined : JSON.stringify(body));
   }
+  function error(res: ServerResponse, status: number, code: string, message: string, details: Record<string,unknown> = {}) {
+    json(res,status,{error:{code,message,details}});
+  }
   const frame = (ev: VecnetEvent) => `id: ${ev.cursor}\nevent: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`;
   const server = createServer(async (req, res) => {
     try {
@@ -65,7 +68,7 @@ export async function startFakeHub(opts: { bearer?: string; heartbeatMs?: number
       requests.push({method:req.method ?? 'GET',path,headers:{...req.headers},body});
       const blob = blobs.get(url.pathname + url.search) ?? blobs.get(path);
       if (!(req.method === 'GET' && blob && url.searchParams.has('t')) && req.headers.authorization !== `Bearer ${bearer}`) {
-        json(res,401,{error:{code:'unauthorized',message:'unauthorized'}}); return;
+        error(res,401,'unauthenticated','Missing or invalid bearer credential'); return;
       }
       const fail = failures.get(path)?.shift();
       if (fail) { json(res,fail.status,fail.body,fail.headers); return; }
@@ -74,7 +77,7 @@ export async function startFakeHub(opts: { bearer?: string; heartbeatMs?: number
         const after = req.headers['last-event-id'] ?? url.searchParams.get('after') ?? acked.at(-1) ?? 'e1.0';
         const head = after === 'head';
         if (!head && (typeof after !== 'string' || !/^e1\.\d+$/.test(after))) {
-          json(res,409,{error:{code:'cursor_purged',details:{oldest_cursor:'e1.0'}}}); return;
+          error(res,409,'cursor_purged','Cursor is no longer available',{oldest_cursor:'e1.0'}); return;
         }
         const n = head ? sequence : Number(String(after).split('.')[1]);
         const pending = () => events.filter(e => Number(e.cursor.split('.')[1]) > n);
@@ -118,9 +121,9 @@ export async function startFakeHub(opts: { bearer?: string; heartbeatMs?: number
         if (path === '/v1/ack') acked.push((body as {cursor:string}).cursor);
         json(res,204,undefined); return;
       }
-      json(res,404,{error:{code:'not_found'}});
+      error(res,404,'not_found','Route not found');
     } catch {
-      if (!res.headersSent) json(res,400,{error:{code:'invalid_request'}});
+      if (!res.headersSent) error(res,400,'invalid_body','Body is not valid JSON',{path:''});
       else res.destroy();
     }
   });
