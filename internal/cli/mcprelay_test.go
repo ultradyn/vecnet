@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/XertroV/vecnet/internal/cli"
+	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -532,6 +533,160 @@ func TestMCPRelayRebindsAfterSessionLoss(t *testing.T) {
 			if inits.Load() != 2 || lists.Load() != 2 {
 				t.Fatalf("recovery initializes=%d lists=%d", inits.Load(), lists.Load())
 			}
+		})
+	}
+}
+
+func TestMCPRelayRejectsRoutingAliases(t *testing.T) {
+	env := testhub.Start(t)
+	prn, secret := env.NewPrincipal("relay principal")
+	p1, _, err := env.Hub.AddPeer(context.Background(), "session", "P1", prn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, _, err := env.Hub.AddPeer(context.Background(), "session", "P2", prn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, bSecret := env.NewPeer("session", "B")
+	wrong := relaySend(b, "routing-alias")
+	wrong["as"] = p2
+	arguments, _ := json.Marshal(wrong)
+	params := fmt.Sprintf(`{"name":"vecnet_send","arguments":%s}`, arguments)
+	request := func(p string) string {
+		return `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":` + p + `}`
+	}
+	cases := map[string]string{
+		"name-alias-after":         request(fmt.Sprintf(`{"name":"vecnet_peers","Name":"vecnet_send","arguments":%s}`, arguments)),
+		"name-alias-before":        request(fmt.Sprintf(`{"NAME":"vecnet_send","name":"vecnet_peers","arguments":%s}`, arguments)),
+		"name-alias-only":          request(fmt.Sprintf(`{"Name":"vecnet_send","arguments":%s}`, arguments)),
+		"name-duplicate":           request(fmt.Sprintf(`{"name":"vecnet_peers","name":"vecnet_send","arguments":%s}`, arguments)),
+		"arguments-ascii":          request(fmt.Sprintf(`{"name":"vecnet_send","arguments":{},"Arguments":%s}`, arguments)),
+		"arguments-long-s":         request(fmt.Sprintf(`{"name":"vecnet_send","arguments":{},"argumentſ":%s}`, arguments)),
+		"arguments-escaped-long-s": request(fmt.Sprintf(`{"name":"vecnet_send","arguments":{},"argument\u017f":%s}`, arguments)),
+		"arguments-alias-only":     request(fmt.Sprintf(`{"name":"vecnet_send","ARGUMENTS":%s}`, arguments)),
+		"arguments-duplicate":      request(fmt.Sprintf(`{"name":"vecnet_send","arguments":{},"arguments":%s}`, arguments)),
+		"method-alias":             `{"jsonrpc":"2.0","id":2,"method":"tools/list","Method":"tools/call","params":` + params + `}`,
+		"method-duplicate":         `{"jsonrpc":"2.0","id":2,"method":"tools/list","method":"tools/call","params":` + params + `}`,
+		"params-ascii":             `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{},"Params":` + params + `}`,
+		"params-long-s":            `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{},"paramſ":` + params + `}`,
+		"params-duplicate":         `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{},"params":` + params + `}`,
+		"id-alias":                 `{"jsonrpc":"2.0","ID":2,"method":"tools/call","params":` + params + `}`,
+		"id-duplicate":             `{"jsonrpc":"2.0","id":2,"id":2,"method":"tools/call","params":` + params + `}`,
+		"jsonrpc-alias":            `{"JSONRPC":"2.0","id":2,"method":"tools/call","params":` + params + `}`,
+		"jsonrpc-duplicate":        `{"jsonrpc":"2.0","jsonrpc":"2.0","id":2,"method":"tools/call","params":` + params + `}`,
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			replies := relayOK(t, profileUser(t, env.URL, secret), []string{relayInit("2025-11-25"), input}, "--as", p1)
+			relayIDs(t, replies, 1, 2)
+			if replies[1].Error == nil || replies[1].Error.Code != -32602 {
+				t.Errorf("routing alias was not rejected: %+v", replies[1])
+			}
+		})
+	}
+	for _, event := range profileUser(t, env.URL, bSecret).inboxJSON() {
+		if event.Type == "delivery" {
+			t.Errorf("routing alias delivered a message from %s", event.Data.Message.Sender)
+		}
+	}
+}
+
+func TestMCPRelayRawFieldsAndBodyCap(t *testing.T) {
+	// These are deliberately raw UTF-8 and HTML characters, rather than the
+	// escaped representation produced by json.Marshal. Binding must preserve
+	// each existing value, including whitespace inside nested raw objects.
+	prefix := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"future_tool","arguments":{"content":{ "text": "`
+	suffix := `" },"metadata":{ "keep": "<>&` + "\u2028\u2029" + `" }}}}`
+	for _, bound := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bound=%v", bound), func(t *testing.T) {
+			growth := 0
+			var options []string
+			if bound {
+				growth = len(`"as":"P1",`)
+				options = []string{"--as", "P1"}
+			}
+			for _, tc := range []struct {
+				name string
+				text string
+				over bool
+			}{
+				{"html", strings.Repeat("<", 50000), false},
+				{"unicode", strings.Repeat("<>&\u2028\u2029", 6000), false},
+				{"at-cap", strings.Repeat("<", httpapi.MaxBodyBytes-len(prefix+suffix)-growth), false},
+				{"over-cap", strings.Repeat("<", httpapi.MaxBodyBytes-len(prefix+suffix)-growth+1), true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					var calls atomic.Int32
+					server := relayFake(t, func(w http.ResponseWriter, r *http.Request) {
+						body, _ := io.ReadAll(r.Body)
+						if len(body) > httpapi.MaxBodyBytes {
+							t.Errorf("oversized request forwarded: %d bytes", len(body))
+						}
+						var req map[string]json.RawMessage
+						if err := json.Unmarshal(body, &req); err != nil {
+							t.Fatal(err)
+						}
+						if string(req["method"]) == `"tools/list"` {
+							relayResult(w, req["id"], map[string]any{"tools": []any{map[string]any{"name": "future_tool", "inputSchema": map[string]any{"properties": map[string]any{"as": map[string]any{}}}}}})
+							return
+						}
+						calls.Add(1)
+						if tc.name == "at-cap" && len(body) != httpapi.MaxBodyBytes {
+							t.Errorf("boundary request is %d bytes, want %d", len(body), httpapi.MaxBodyBytes)
+						}
+						var p struct {
+							Arguments map[string]json.RawMessage `json:"arguments"`
+						}
+						if err := json.Unmarshal(req["params"], &p); err != nil {
+							t.Error(err)
+						}
+						if string(p.Arguments["content"]) != `{ "text": "`+tc.text+`" }` || string(p.Arguments["metadata"]) != `{ "keep": "<>&`+"\u2028\u2029"+`" }` {
+							t.Error("binding rewrote existing raw JSON values")
+						}
+						if bound && string(p.Arguments["as"]) != `"P1"` {
+							t.Errorf("identity = %s", p.Arguments["as"])
+						}
+						if !bound && string(body) != prefix+tc.text+suffix {
+							t.Error("unbound request changed")
+						}
+						relayResult(w, req["id"], map[string]any{"ok": true})
+					})
+					replies := relayOK(t, profileUser(t, server.URL, "relay-test-secret"), []string{prefix + tc.text + suffix}, options...)
+					relayIDs(t, replies, 2)
+					if tc.over {
+						relayError(t, replies[0], -32602, "relay request exceeds 256 KiB")
+						if calls.Load() != 0 {
+							t.Errorf("oversized call reached hub %d times", calls.Load())
+						}
+					} else if replies[0].Error != nil || calls.Load() != 1 {
+						t.Errorf("valid call: reply=%+v posts=%d", replies[0], calls.Load())
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestMCPRelayEscapableSend(t *testing.T) {
+	for _, bound := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bound=%v", bound), func(t *testing.T) {
+			env := testhub.Start(t)
+			prn, secret := env.NewPrincipal("relay principal")
+			p1, _, err := env.Hub.AddPeer(context.Background(), "session", "P1", prn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, _ := env.NewPeer("session", "B")
+			text := strings.Repeat("<", 50000)
+			input := fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vecnet_send","arguments":{"as":%q,"recipients":[%q],"content":{"text":"%s"},"priority":"hold","idempotency_key":"escapable"}}}`, p1, b, text)
+			options := []string{}
+			if bound {
+				options = []string{"--as", p1}
+			}
+			replies := relayOK(t, profileUser(t, env.URL, secret), []string{relayInit("2025-11-25"), input}, options...)
+			relayIDs(t, replies, 1, 2)
+			relayTool(t, replies[1], nil)
 		})
 	}
 }

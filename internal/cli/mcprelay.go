@@ -7,11 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"mime"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 )
+
+// mcpRelayMaxBodyBytes matches httpapi.MaxBodyBytes without making the CLI
+// transport depend on the server package.
+const mcpRelayMaxBodyBytes = 256 << 10
 
 // mcpStartupError preserves the relay's specified one-line refusal text.
 // All other CLI errors keep their usual formatting and exit codes.
@@ -57,7 +63,7 @@ func (a *app) cmdMCP(args []string) error {
 	relay := mcpRelay{a: a, c: c}
 	scanner := bufio.NewScanner(a.stdin)
 	// Match the hub's 256 KiB request cap, with room for the line delimiter.
-	scanner.Buffer(make([]byte, 4096), (256<<10)+2)
+	scanner.Buffer(make([]byte, 4096), mcpRelayMaxBodyBytes+2)
 	for scanner.Scan() {
 		raw := append([]byte(nil), scanner.Bytes()...)
 		var msg mcpRelayMessage
@@ -69,6 +75,12 @@ func (a *app) cmdMCP(args []string) error {
 		}
 		if err := json.Unmarshal(raw, &msg); err != nil || msg.JSONRPC != "2.0" || msg.Method == "" {
 			if err := relay.rpcError(nil, -32600, "Invalid Request"); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := mcpRelayFields(raw, "jsonrpc", "id", "method", "params", "result", "error"); err != nil {
+			if err := relay.replyError(msg.ID, err); err != nil {
 				return err
 			}
 			continue
@@ -170,6 +182,11 @@ func (r *mcpRelay) exchange(raw []byte, msg mcpRelayMessage, emit bool) error {
 }
 
 func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool) error {
+	// Binding can add bytes to a legal input line. Check the final body on
+	// every path, including unbound requests and session recovery posts.
+	if len(raw) > mcpRelayMaxBodyBytes {
+		return &mcpBindingError{"relay request exceeds 256 KiB"}
+	}
 	// MCP POST replies can be SSE streams. Their lifetime belongs to the
 	// caller and hub EOF, rather than the ordinary CLI request deadline.
 	req, err := r.c.newRequest(r.a.ctx, http.MethodPost, "/mcp", nil, rawBody{r: bytes.NewReader(raw), contentType: "application/json", length: int64(len(raw))})
@@ -294,8 +311,8 @@ func (r *mcpRelay) cacheTools(raw json.RawMessage) error {
 }
 
 func (r *mcpRelay) bind(raw, params json.RawMessage) ([]byte, error) {
-	var p map[string]json.RawMessage
-	if err := json.Unmarshal(params, &p); err != nil || p == nil {
+	p, err := mcpRelayFields(params, "name", "arguments")
+	if err != nil {
 		return nil, &mcpBindingError{"invalid tools/call params"}
 	}
 	var name string
@@ -337,9 +354,67 @@ func (r *mcpRelay) bind(raw, params json.RawMessage) ([]byte, error) {
 		}
 		arguments[field], _ = json.Marshal(r.a.as)
 	}
-	p["arguments"], _ = json.Marshal(arguments)
+	p["arguments"] = mcpRelayEncodeFields(arguments)
 	var request map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &request)
-	request["params"], _ = json.Marshal(p)
-	return json.Marshal(request)
+	request["params"] = mcpRelayEncodeFields(p)
+	return mcpRelayEncodeFields(request), nil
+}
+
+// mcpRelayFields rejects aliases and duplicate routing fields before a map
+// can hide them. The hub's struct decoder accepts Unicode case folds (such
+// as argumentſ), whereas map keys are exact; forwarding both would let the
+// hub select a different tool or arguments from the ones we bound.
+func mcpRelayFields(raw json.RawMessage, routing ...string) (map[string]json.RawMessage, error) {
+	invalid := &mcpBindingError{"invalid relay request fields"}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	if start, err := d.Token(); err != nil || start != json.Delim('{') {
+		return nil, invalid
+	}
+	fields := make(map[string]json.RawMessage)
+	for d.More() {
+		token, err := d.Token()
+		if err != nil {
+			return nil, invalid
+		}
+		key, ok := token.(string)
+		if !ok {
+			return nil, invalid
+		}
+		for _, name := range routing {
+			if strings.EqualFold(key, name) {
+				if _, duplicate := fields[name]; key != name || duplicate {
+					return nil, invalid
+				}
+			}
+		}
+		var value json.RawMessage
+		if err := d.Decode(&value); err != nil {
+			return nil, invalid
+		}
+		fields[key] = value
+	}
+	if _, err := d.Token(); err != nil {
+		return nil, invalid
+	}
+	return fields, nil
+}
+
+// Like mcpserver.encodeFields, keep raw values byte for byte: json.Marshal
+// expands <, >, &, and U+2028/9 even inside RawMessage. SetEscapeHTML(false)
+// still rewrites U+2028/9. Expansion can push a legal request over the cap.
+func mcpRelayEncodeFields(fields map[string]json.RawMessage) []byte {
+	var b bytes.Buffer
+	b.WriteByte('{')
+	for i, key := range slices.Sorted(maps.Keys(fields)) {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		encoded, _ := json.Marshal(key)
+		b.Write(encoded)
+		b.WriteByte(':')
+		b.Write(fields[key])
+	}
+	b.WriteByte('}')
+	return b.Bytes()
 }
