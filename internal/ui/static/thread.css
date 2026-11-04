@@ -1,6 +1,8 @@
 /* thread: the reading column fills nav to side panel, up to a 980 px measure (ticket 18) */
 body[data-route=thread] .va .col,body[data-route=matrix] .va .col{max-width:980px}
 .va .thead{border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:8px}
+/* an untitled thread's stand-in title (format.js standInTitle) */
+.va .thead h1.un{color:var(--muted);font-style:italic}
 .va .thead .ids{font:400 12px var(--mono);color:var(--dim);overflow-wrap:anywhere}
 .va .msg{display:grid;grid-template-columns:28px minmax(0,1fr);gap:12px;padding:16px 0;border-bottom:1px solid #161d33}
 .va .msg.target{background:#6366f112;box-shadow:-12px 0 0 #6366f112,12px 0 0 #6366f112}

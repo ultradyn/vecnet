@@ -114,7 +114,11 @@ Reaction screens come from `scripts/ui/rx-thread.mjs`. They cover reaction chips
 
 Sidebar screens come from `scripts/ui/sidebar.mjs`. You sits above Your Threads; Other Threads lists threads the operator is not in, newest activity first, with participants (three names then +N), message count and relative last activity. The script also checks exclusion, a live re-sort from the operator activity feed alone (the thread list is held, so no refetch or poll can do it), Show more and recovery.
 
-- [sb-others-empty.png](sb-others-empty.png) — Seeded hub: every thread includes the operator, so Other Threads is empty.
-- [sb-others-populated.png](sb-others-populated.png) — Four peer-only threads newest first: titled, hostile title kept as text, untitled fallback, and a +3 participant line.
+- [sb-others-empty.png](sb-others-empty.png) — Seeded hub: every thread includes the operator, so Other Threads is empty. Your Threads rows have two lines: title and count, then the other participants and last activity.
+- [sb-others-populated.png](sb-others-populated.png) — Five peer-only threads newest first: titled, an untitled group (`grok-triage, pag-digest +2`, 4 participants), hostile title kept as text, an untitled pair (`grok-reviewer ↔ claw-ops`), and a +3 participant line.
+- [sb-yours-rows.png](sb-yours-rows.png) — Your Threads in the shared two-line row: an untitled group and a 1:1 name only the other peers (the operator is left out), dim italic, with the participant count underneath.
+- [sb-threads-full.png](sb-threads-full.png) — The whole sidebar in one tall frame, so Your Threads and Other Threads can be compared row for row.
 - [sb-others-error.png](sb-others-error.png) — The Other Threads read fails on first load; Your Threads is unaffected.
 - [sb-others-thread.png](sb-others-thread.png) — An other thread opened from the sidebar: its row lit, the not-a-participant note above the reply box.
+- [sb-untitled-pair.png](sb-untitled-pair.png) — An untitled two-peer thread opened from Other Threads: the header reads `grok-reviewer ↔ claw-ops` in the same muted italic as its lit row.
+- [sb-untitled-group.png](sb-untitled-group.png) — An untitled group the operator is in, opened from Your Threads: `grok-reviewer, pag-hark-sleuth +2`, the operator left out.

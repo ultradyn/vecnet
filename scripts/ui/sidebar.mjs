@@ -1,7 +1,9 @@
 // Sidebar: You above Your Threads, then Other Threads (threads the operator
 // is not in, newest activity first, kept live by the operator activity feed),
-// in a real browser. Four shots: empty, populated, error, and an other thread
-// opened from the list.
+// in a real browser. Both lists share one two-line row; an untitled thread
+// reads as its participants ("A ↔ B", "A, B +2") in dim italic. Shots: Other
+// Threads empty, populated, error and opened; Your Threads; the whole
+// sidebar; an untitled pair and an untitled group opened.
 import { assert, cleanBuild, withDemo } from './lib.mjs';
 
 const HOSTILE = '<img src=x onerror=alert(1)> ‮pwn';
@@ -13,11 +15,15 @@ try {
     // Chromium logs each non-2xx fetch; this is the failure the script provokes.
     allowConsole(/status of 500/);
     const others = page.locator('#others');
-    const rowsOf = () => others.locator('a[href^="#thread/"]').evaluateAll(as => as.map(a => ({
+    const mineList = page.locator('#threads');
+    const rowsIn = list => list.locator('a[href^="#thread/"]').evaluateAll(as => as.map(a => ({
       id: a.getAttribute('href').slice('#thread/'.length),
-      title: a.querySelector('.tt').textContent, count: a.querySelector('.cnt').textContent,
+      title: a.querySelector('.tt').textContent, un: a.querySelector('.tt').classList.contains('un'), count: a.querySelector('.cnt').textContent,
       people: a.querySelector('.pp').textContent, ago: a.querySelector('.ago').textContent, on: a.classList.contains('on'),
     })));
+    const rowsOf = () => rowsIn(others);
+    // The lists are longer than the viewport now that Your Threads has two lines a row.
+    const showOthers = () => page.locator('nav.side .grp', { hasText: 'Other Threads' }).evaluate(el => el.scrollIntoView({ block: 'start' }));
     let serial = 0;
     const send = async (peer, body) => {
       const r = await asPeer(peer, 'POST', '/v1/messages', { idempotency_key: `sidebar-${++serial}`, priority: 'hold', ...body });
@@ -45,7 +51,15 @@ try {
     // Empty: every seeded thread includes the operator.
     await others.locator('.none', { hasText: 'No other threads' }).waitFor();
     assert(countRequests(req => isOthers(req.url()) && new URL(req.url()).searchParams.get('exclude_participant') === demo.operator_peer) >= 1, 'Other Threads did not exclude the operator');
+    await showOthers();
     await shot('sb-others-empty');
+
+    // Your Threads: the operator's threads as ThreadRows, so each row has its last activity.
+    await mineList.locator('a .ago', { hasText: /ago|now/ }).first().waitFor();
+    assert(countRequests(req => { const u = new URL(req.url()); return u.pathname === '/v1/admin/threads' && u.searchParams.get('participant') === demo.operator_peer; }) >= 1, 'Your Threads did not read its ThreadRows');
+    const seeded = await rowsIn(mineList);
+    const hark = seeded.find(r => r.title.startsWith('hark B196'));
+    assert(hark && !hark.un && hark.count === '10' && hark.people && !hark.people.includes('max') && hark.ago, `hark row ${JSON.stringify(hark)}`);
 
     // Four threads between peers, oldest first; advance spaces their activity.
     const p = name => demo.peers[name].id;
@@ -56,9 +70,15 @@ try {
     const untitled = await send('grok', { recipients: [p('claw')], content: { text: 'Can you look at the push route?' } });
     await advance('25m');
     const hostile = await send('hostile', { thread_title: HOSTILE, recipients: [p('codex')], content: { text: 'hello' } });
-    await advance('4m');
+    await advance('3m');
+    // An untitled group: two names and a count. The hostile peer's name hides in the count.
+    const group = await send('triage', { recipients: [p('digest'), p('dot'), p('hostile')], content: { text: 'Who owns the digest cron?' } });
+    await advance('1m');
     const rollout = await send('sleuth', { thread_title: 'Classifier rollout plan', recipients: [p('grok'), p('codex')], content: { text: 'Staged rollout, 10% first.' } });
     await send('codex', { thread_id: rollout.thread_id, content: { text: 'Agreed.' } });
+    // Untitled threads the operator is in: a 1:1 reads as the other peer, a group leaves the operator out.
+    const solo = await send('codex', { recipients: [demo.operator_peer], content: { text: 'Quick one: is the gate green?' } });
+    const huddle = await send('grok', { recipients: [demo.operator_peer, p('sleuth'), p('claw'), p('digest')], content: { text: 'Huddle on the push route.' } });
     const { now } = await advance('2m');
     // The jump outlives the seeded presence; report it again at the new hub time.
     const pres = await asPeer('operator', 'POST', '/v1/presence', { state: 'working', at: now });
@@ -69,19 +89,38 @@ try {
     // action. The presence change re-reads the inbox, which carries the
     // advanced hub clock for the relative times.
     await others.locator('a', { hasText: 'Classifier rollout plan' }).locator('.ago', { hasText: '2m ago' }).waitFor();
-    await page.waitForFunction(() => document.querySelectorAll('#others a[href^="#thread/"]').length === 4);
+    await page.waitForFunction(() => document.querySelectorAll('#others a[href^="#thread/"]').length === 5);
     let rows = await rowsOf();
-    assert(rows.map(r => r.id).join() === [rollout, hostile, untitled, release].map(t => t.thread_id).join(), `order ${JSON.stringify(rows)}`);
+    assert(rows.map(r => r.id).join() === [rollout, group, hostile, untitled, release].map(t => t.thread_id).join(), `order ${JSON.stringify(rows)}`);
     const mine = await page.locator('#threads a').evaluateAll(as => as.map(a => a.getAttribute('href')));
     assert(rows.every(r => !mine.includes('#thread/' + r.id)), 'a thread is in both lists');
-    const [ro, ho, un, re] = rows;
-    assert(ro.count === '2' && ro.people === 'pag-hark-sleuth, grok-reviewer, codex-hark' && ro.ago === '2m ago', `rollout row ${JSON.stringify(ro)}`);
+    const [ro, gr, ho, un, re] = rows;
+    assert(ro.count === '2' && !ro.un && ro.people === 'pag-hark-sleuth, grok-reviewer, codex-hark' && ro.ago === '2m ago', `rollout row ${JSON.stringify(ro)}`);
     assert(re.count === '3' && re.people === 'codex-hark, pag-hark-sleuth, grok-reviewer +3' && re.ago === '1h ago', `release row ${JSON.stringify(re)}`);
-    assert(un.title === 'Untitled thread' && un.people === 'grok-reviewer, claw-ops', `untitled row ${JSON.stringify(un)}`);
+    // Untitled: the stand-in names the participants, the second line counts them.
+    assert(un.title === 'grok-reviewer ↔ claw-ops' && un.un && un.people === '2 participants' && un.ago === '31m ago', `untitled row ${JSON.stringify(un)}`);
+    assert(gr.title === 'grok-triage, pag-digest +2' && gr.un && gr.people === '4 participants' && gr.ago === '3m ago', `group row ${JSON.stringify(gr)}`);
     // Peer text is text: the hostile title neither makes an element nor keeps its bidi override.
     assert(ho.title === '<img src=x onerror=alert(1)> pwn', `hostile title ${JSON.stringify(ho.title)}`);
     assert(await page.locator('nav.side img').count() === 0, 'a peer string became an element');
+    await showOthers();
     await shot('sb-others-populated');
+
+    // Your Threads: the same row. The operator is left out of stand-ins and participant lines.
+    await mineList.locator('a', { hasText: 'grok-reviewer, pag-hark-sleuth +2' }).waitFor();
+    const yours = await rowsIn(mineList);
+    const hu = yours.find(r => r.id === huddle.thread_id), so = yours.find(r => r.id === solo.thread_id);
+    assert(hu && so, `untitled threads missing from Your Threads ${JSON.stringify(yours)}`);
+    assert(hu.un && hu.title === 'grok-reviewer, pag-hark-sleuth +2' && hu.people === '5 participants' && hu.count === '1' && hu.ago === '2m ago', `huddle row ${JSON.stringify(hu)}`);
+    assert(so.un && so.title === 'codex-hark' && so.people === '2 participants' && so.ago === '2m ago', `1:1 row ${JSON.stringify(so)}`);
+    assert(yours.filter(r => !r.un).every(r => r.ago && !r.people.split(', ').includes('max')), `titled rows ${JSON.stringify(yours)}`);
+    await page.locator('nav.side').evaluate(el => { el.scrollTop = 0; });
+    await shot('sb-yours-rows');
+    // The whole sidebar in one frame, so the two lists can be compared.
+    const tall = await page.locator('nav.side').evaluate(el => el.scrollHeight);
+    await page.setViewportSize({ width: 1440, height: tall });
+    await shot('sb-threads-full');
+    await page.setViewportSize({ width: 1440, height: 900 });
 
     // Live: a reply in the oldest (listed) thread arrives on the feed and is
     // folded in place. The thread list is held, so a re-sort can only come
@@ -91,7 +130,7 @@ try {
     await page.waitForFunction(id => document.querySelector('#others a')?.getAttribute('href') === '#thread/' + id, release.thread_id);
     rows = await rowsOf();
     assert(rows[0].count === '4' && /^(now|\d+s ago)$/.test(rows[0].ago), `re-sorted top row ${JSON.stringify(rows[0])}`);
-    assert(rows.slice(1).map(r => r.id).join() === [rollout, hostile, untitled].map(t => t.thread_id).join(), `rest ${JSON.stringify(rows)}`);
+    assert(rows.slice(1).map(r => r.id).join() === [rollout, group, hostile, untitled].map(t => t.thread_id).join(), `rest ${JSON.stringify(rows)}`);
     await releaseList();
     let fresh;
 
@@ -124,7 +163,20 @@ try {
     await others.locator('a.on', { hasText: 'Classifier rollout plan' }).waitFor();
     assert(await page.locator('#threads a.on').count() === 0, 'Your Threads lit a thread the operator is not in');
     await page.locator('#aside .pp', { hasText: 'pag-hark-sleuth' }).first().waitFor();
+    await showOthers();
     await shot('sb-others-thread');
+
+    // Untitled, opened: the thread header takes the same stand-in and style.
+    const opened = async (list, stand, text, name) => {
+      await list.locator('a', { hasText: stand }).click();
+      await page.locator('#view .msg', { hasText: text }).waitFor();
+      await page.locator('.thead h1.un', { hasText: stand }).waitFor();
+      assert(await page.locator('.thead h1').textContent() === stand, `header ${await page.locator('.thead h1').textContent()}`);
+      await list.locator('a.on .tt.un', { hasText: stand }).waitFor();
+      await shot(name);
+    };
+    await opened(others, 'grok-reviewer ↔ claw-ops', 'Can you look at the push route?', 'sb-untitled-pair');
+    await opened(mineList, 'grok-reviewer, pag-hark-sleuth +2', 'Huddle on the push route.', 'sb-untitled-group');
 
     // Error: the first load fails, so there is nothing stale to show.
     await page.evaluate(() => { location.hash = '#inbox'; });
@@ -145,7 +197,7 @@ try {
     await fresh;
     await others.locator('a', { hasText: 'Release train: hark 0.9' }).waitFor();
   });
-  console.log('Sidebar passed: You above Your Threads; Other Threads excludes the operator, sorts by activity, re-sorts live, pages, opens read-only, recovers from an error');
+  console.log('Sidebar passed: You above Your Threads; both lists share the two-line row; untitled threads read as their participants; Other Threads excludes the operator, sorts by activity, re-sorts live, pages, opens read-only, recovers from an error');
 } finally {
   await cleanBuild();
 }

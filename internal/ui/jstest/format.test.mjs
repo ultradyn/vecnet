@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PRIORITY_HELP, ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, plural, quotaLabel, short, title, when } from '../static/format.js';
+import { PRIORITY_HELP, ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, plural, quotaLabel, short, standInTitle, title, when } from '../static/format.js';
 
 test('when is 24-hour local today, with the date on other days, and survives midnight', () => {
   const noon = new Date(2026, 10, 2, 14, 5, 0).getTime();
@@ -44,6 +44,44 @@ test('title prefers the thread title, then the other participants, then the id',
   assert.equal(title({ title: '', participants: ['peer_me', 'peer_a', 'peer_b'], thread_id: 'thr_1' }, 'peer_me', nameOf), 'codex, grok');
   assert.equal(title({ title: null, participants: ['peer_me'], thread_id: 'thr_01JD3S2C4E6G8J0M2P4R6T8V0X' }, 'peer_me', nameOf), 'thr_…T8V0X');
   assert.equal(title(null, 'peer_me', nameOf), '');
+  // An untitled thread takes its stand-in.
+  assert.equal(title({ title: null, participants: ['peer_a', 'peer_b'], thread_id: 'thr_1' }, 'peer_me', nameOf), 'codex ↔ grok');
+});
+
+const PEOPLE = { peer_me: 'max', peer_a: 'codex-hark', peer_b: 'grok-reviewer', peer_c: 'pag-sleuth', peer_d: 'claw-ops', peer_e: 'dot-research' };
+const nameOf = id => PEOPLE[id];
+const thr = (...participants) => ({ thread_id: 'thr_01JD3S2C4E6G8J0M2P4R6T8V0X', title: null, participants });
+
+test('standInTitle: two peers read A ↔ B, a group names two and counts the rest', () => {
+  assert.equal(standInTitle(thr('peer_a', 'peer_b'), 'peer_me', nameOf), 'codex-hark ↔ grok-reviewer');
+  assert.equal(standInTitle(thr('peer_a', 'peer_b', 'peer_c'), 'peer_me', nameOf), 'codex-hark, grok-reviewer, pag-sleuth');
+  assert.equal(standInTitle(thr('peer_a', 'peer_b', 'peer_c', 'peer_d'), 'peer_me', nameOf), 'codex-hark, grok-reviewer +2');
+  assert.equal(standInTitle(thr('peer_a', 'peer_b', 'peer_c', 'peer_d', 'peer_e'), 'peer_me', nameOf), 'codex-hark, grok-reviewer +3');
+  // One peer alone (a thread whose creator was its only participant).
+  assert.equal(standInTitle(thr('peer_a'), 'peer_me', nameOf), 'codex-hark');
+});
+
+test('standInTitle leaves the operator out: a 1:1 reads as the other peer', () => {
+  assert.equal(standInTitle(thr('peer_me', 'peer_a'), 'peer_me', nameOf), 'codex-hark');
+  // With the operator in, two others are a group of three, not a pair.
+  assert.equal(standInTitle(thr('peer_a', 'peer_me', 'peer_b'), 'peer_me', nameOf), 'codex-hark, grok-reviewer');
+  assert.equal(standInTitle(thr('peer_me', 'peer_a', 'peer_b', 'peer_c'), 'peer_me', nameOf), 'codex-hark, grok-reviewer, pag-sleuth');
+  assert.equal(standInTitle(thr('peer_me', 'peer_a', 'peer_b', 'peer_c', 'peer_d'), 'peer_me', nameOf), 'codex-hark, grok-reviewer +2');
+  // Only the operator: the thread's short id.
+  assert.equal(standInTitle(thr('peer_me'), 'peer_me', nameOf), 'thr_…T8V0X');
+  assert.equal(standInTitle(thr(), 'peer_me', nameOf), 'thr_…T8V0X');
+  assert.equal(standInTitle(null, 'peer_me', nameOf), '');
+});
+
+test('standInTitle falls back to short ids and keeps peer names inert', () => {
+  assert.equal(standInTitle(thr('peer_01JD3S2C4E6G8J0M2P4R6T8V0X', 'peer_a'), 'peer_me', nameOf), 'peer_…T8V0X ↔ codex-hark');
+  // An empty or blank name is no name.
+  assert.equal(standInTitle(thr('peer_a', 'peer_01JD3S2C4E6G8J0M2P4R6T8VZZ'), 'peer_me', id => (id === 'peer_a' ? 'codex' : ' \t ')), 'codex ↔ peer_…T8VZZ');
+  // Controls and bidi overrides go; line breaks and runs of space fold to one space.
+  const hostile = { peer_a: '\u202egrok\u0007 bot', peer_b: 'line\none\u2028two  three' };
+  assert.equal(standInTitle(thr('peer_a', 'peer_b'), 'peer_me', id => hostile[id]), 'grok bot ↔ line one two three');
+  // Markup stays text: the view sets it as textContent.
+  assert.equal(standInTitle(thr('peer_a', 'peer_b'), 'peer_me', id => (id === 'peer_a' ? '<img src=x>' : 'b')), '<img src=x> ↔ b');
 });
 
 test('quotaLabel reads a *_pct value as a percentage, an empty quota as none, anything else as k=v', () => {

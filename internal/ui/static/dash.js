@@ -152,7 +152,7 @@ export function mount(root, ctx) {
     return [table(['Thread', 'Participants', 'Messages', 'Budget left', 'Last activity', 'Cut'], rows.map(r => {
       const t = r.thread || {}, parts = t.participants || [];
       return h('tr', null,
-        h('td', null, h('a', { href: '#thread/' + t.thread_id, class: 'tl', text: threadTitle(t, ctx.me, peerName) }), idCell(t.thread_id)),
+        h('td', null, h('a', { href: '#thread/' + t.thread_id, class: 'tl' + (t.title ? '' : ' un'), text: threadTitle(t, ctx.me, peerName) }), idCell(t.thread_id)),
         h('td', null, h('span', { text: String(parts.length) }), h('span', { class: 'sub', text: parts.map(peerName).join(', ') })),
         h('td', { text: String(t.message_count ?? 0) }),
         h('td', { text: t.budget_remaining === null || t.budget_remaining === undefined ? 'unlimited' : String(t.budget_remaining), class: t.budget_remaining === 0 ? 'bad' : null }),

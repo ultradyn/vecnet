@@ -34,6 +34,7 @@ body[data-route=dash] .va .col{max-width:1120px}
 .dash .cred{font:12px var(--mono);color:var(--muted)}
 .dash .cred.active{color:var(--ok)}.dash .cred.revoked{color:var(--bad)}
 .dash .tl{color:var(--text)}
+.dash .tl.un{color:var(--muted);font-style:italic}
 .dash ul.blocked{list-style:none;margin:0;padding:0}
 .dash ul.blocked li{padding:8px 0;border-bottom:1px solid #161d33;font-size:13px;color:var(--wake);overflow-wrap:anywhere}
 .dash ul.blocked li .sub{color:var(--dim)}
