@@ -84,7 +84,17 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
   function pending() { return ledger.inputs(jobId, ['buffered', 'sending', 'sent']); }
   const cap = Math.min(MAX_TURN_INPUT_BYTES, deps.caps.maxInputBytes ?? Infinity);
   if (!Number.isSafeInteger(cap) || cap < 4) throw new Error('invalid backend input cap');
-  type StoredBatch = { input: TurnInput & { batchId: string }; parts: Record<string, number> };
+  type StoredBatch = {
+    input: TurnInput & { batchId: string }; parts: Record<string, number>;
+    // Native sends can each create a distinct future turn. The send-time
+    // counter alone cannot distinguish those batches, nor an active successor
+    // from unread completions. Keep ownership alongside the durable payload.
+    targetTurnSeq?: number; targetTurnId?: string;
+  };
+  function storedBatch(row: InputRow): StoredBatch | undefined {
+    const saved = row.batchId && store.get(`batch:${row.batchId}`);
+    return saved ? JSON.parse(saved) as StoredBatch : undefined;
+  }
   function parts(row: InputRow): string[] | undefined {
     const saved = store.get(`parts:${row.deliveryId}`);
     return saved === undefined ? undefined : JSON.parse(saved) as string[];
@@ -107,6 +117,15 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     const batch: StoredBatch = saved ? JSON.parse(saved) as StoredBatch : {
       input: { batchId, items }, parts: Object.fromEntries(rows.filter(r => parts(r)).map(r => [r.deliveryId, position(r.deliveryId) + 1])),
     };
+    if (!replay && mode === 'queue') {
+      const queuedTargets = pending().filter(r => r.mode === 'queue')
+        .map(r => storedBatch(r)?.targetTurnSeq ?? (r.turnSeq ?? job().turns) + 2);
+      batch.targetTurnSeq = Math.max(job().turns + 1, ...queuedTargets) + 1;
+    }
+    if (!replay && mode === 'steer') {
+      const state = handle.state();
+      if (state.kind === 'turn_running' && state.turnId) batch.targetTurnId = state.turnId;
+    }
     if (!replay) ledger.tx(() => {
       ledger.markInputs(ids, { state: 'sending', mode, batchId, turnSeq: job().turns });
       store.set(`batch:${batchId}`, JSON.stringify(batch));
@@ -114,9 +133,13 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     });
     // The optional structural field is consumed by t3's existing T3TurnInput seam.
     const input = batch.input;
-    await handle.send(input, mode);
+    const result = await handle.send(input, mode);
     sendGeneration++;
     ledger.tx(() => {
+      // A steer may race a backend turn boundary. Prefer its actual send
+      // result, also on an idempotent retry after a crash, over the snapshot.
+      if (mode === 'steer' && result.turnId) batch.targetTurnId = result.turnId;
+      store.set(`batch:${batchId}`, JSON.stringify(batch));
       ledger.markInputs(ids, { state: 'sent' });
       for (const [id, part] of Object.entries(batch.parts)) store.set(`part:${id}`, String(part));
       if (mode === 'start') ledger.updateJob(jobId, { sessionKind: 'turn_running', parkedAt: null });
@@ -127,12 +150,12 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     if (recovering) return;
     const buffered = ledger.inputs(jobId, ['buffered']).filter(row => {
       if (mode === 'start') return true;
-      // Holds and launcher-queued rows belong to the next start, regardless
-      // of a later wake that is eligible to steer the current turn.
+      // Holds join the next non-hold turn batch, including a native queue,
+      // while a steer must leave both holds and launcher-queued rows alone.
       const intent = store.get(`plan:${row.deliveryId}`);
-      return mode === 'steer' ? intent === 'steer' : intent === 'queue-native';
+      return mode === 'steer' ? intent === 'steer' : intent === 'queue-native' || row.priority === 'hold';
     });
-    // Holds may join a start, but can never initiate one by themselves.
+    // Holds may join a turn batch, but never initiate one by themselves.
     if (!buffered.some(r => r.priority !== 'hold')) return;
     const ordered = [...buffered.filter(r => r.priority === 'hold'), ...buffered.filter(r => r.priority !== 'hold')];
     const selected: InputRow[] = [];
@@ -176,7 +199,14 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     if (stopped || job().state === 'ended') return;
     if (ev.type === 'turn_finished') {
       const current = job(), n = current.turns + 1;
-      const inputs = ledger.inputs(jobId, ['sent']).filter(r => r.turnSeq !== null && (r.mode === 'queue' ? r.turnSeq < n - 1 : r.turnSeq <= n - 1));
+      const inputs = ledger.inputs(jobId, ['sent']).filter(r => {
+        const batch = storedBatch(r);
+        if (batch?.targetTurnId) return batch.targetTurnId === ev.turnId;
+        if (batch?.targetTurnSeq !== undefined) return batch.targetTurnSeq === n;
+        // Older ledgers and backends without turn identity retain the
+        // counter rule; new native queue batches have distinct targets.
+        return r.turnSeq !== null && (r.mode === 'queue' ? r.turnSeq < n - 1 : r.turnSeq <= n - 1);
+      });
       const continuing = inputs.filter(r => { const chunks = parts(r); return chunks && position(r.deliveryId) < chunks.length; });
       const consumed = inputs.filter(r => !continuing.includes(r));
       const ids = consumed.map(r => r.deliveryId);
@@ -198,9 +228,9 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
           ledger.markInputs(ids, { state: 'consumed' });
           ledger.markInputs(continuing.map(r => r.deliveryId), { state: 'buffered', mode: null, batchId: null, turnSeq: null });
           store.set(`turn:${hash(ev.turnId)}`, String(n));
-          const nativeQueued = ledger.inputs(jobId, ['sent']).some(r => r.mode === 'queue');
-          ledger.updateJob(jobId, { turns: n, lastActivityAt: clock.now(), sessionKind: nativeQueued ? 'turn_running' : 'idle' });
-          store.set('awaitingTurn', nativeQueued ? '1' : '0');
+          const outstandingTurn = ledger.inputs(jobId, ['sent']).some(r => r.mode === 'queue' || !!storedBatch(r)?.targetTurnId);
+          ledger.updateJob(jobId, { turns: n, lastActivityAt: clock.now(), sessionKind: outstandingTurn ? 'turn_running' : 'idle' });
+          store.set('awaitingTurn', outstandingTurn ? '1' : '0');
         }
         ledger.updateJob(jobId, { turnCursor: cursor });
       });
@@ -337,6 +367,11 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
           await deliveryControl(d.delivery_id, command, m.sender);
           return authorized(m.sender) ? 'relayed' : 'not_relayed';
         }
+        // A queued ingress can be retried after its turn and even after
+        // settle. Its durable input decision takes precedence over refusing
+        // fresh input to the now-ended session, preserving the original receipt.
+        const existing = ledger.inputs(jobId, ['buffered', 'sending', 'sent', 'consumed', 'failed']).find(r => r.deliveryId === d.delivery_id);
+        if (existing) return existing.state === 'failed' ? 'refused' : existing.state === 'buffered' ? 'buffered' : 'relayed';
         if (stopped || job().state === 'ended' || job().sessionKind === 'ended') { receipt(d.delivery_id, 'failed', 'session_ended'); return 'refused'; }
         if (command === 'interrupt' || command === 'settle' || command === 'extend') {
           const allowed = authorized(m.sender);
@@ -345,8 +380,6 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
         }
         // Structured parent-bridge traffic is consumed by Task 12 upstream.
         if (m.kind !== 'message' || m.job_request || m.metadata['launch.answers'] || m.metadata['launch.decision']) { receipt(d.delivery_id, 'processed', 'not_relayed'); return 'not_relayed'; }
-        const existing = ledger.inputs(jobId, ['buffered', 'sending', 'sent', 'consumed', 'failed']).find(r => r.deliveryId === d.delivery_id);
-        if (existing) return existing.state === 'buffered' ? 'buffered' : 'relayed';
         let text = m.content.text;
         let attachments = m.attachments;
         if (m.content.truncated) {

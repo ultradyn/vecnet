@@ -16,6 +16,7 @@ import type { LaneDeps } from '../src/session.ts';
 import { redactText } from '../src/redact.ts';
 import type { BackendCapabilities, SessionHandle, SessionState, TurnEvent, TurnInput, SendMode, SettleMode } from '../src/backend.ts';
 import { threadDelivery } from './fixtures.ts';
+import { createFakeBackend } from './fake-backend.ts';
 
 const caps: BackendCapabilities = {steer:true,queue:'launcher',interrupt:true,approvals:'none',questions:'text-only',resume:'transcript',backgroundTasks:'observable',attachments:false,workspace:'backend-worktree',branchName:'settable',permissionModes:['ask'],presets:[]};
 const finished = (id = 'turn-1', text = 'done', consumed: string[] = []): Extract<TurnEvent,{type:'turn_finished'}> => ({type:'turn_finished',turnId:id,at:new Date(0).toISOString(),outcome:'completed',finalText:text,consumed});
@@ -329,4 +330,98 @@ test('a wake racing the exited iterator closing starts only one replacement pump
   await s.emit(finished('raced-resume'));
   assert.equal(s.replies().length, 1); assert.equal(streams, 2); assert.equal(maxActive, 1);
   await s.lane.stop(); assert.equal(active, 0);
+});
+
+
+async function nativeSession(t: TestContext) {
+  const s = await setup(t, { attach: false, kind: 'turn_running', caps: { queue: 'native' } });
+  const backend = createFakeBackend({ clock: s.clock, caps: { queue: 'native' } });
+  const handle = await backend.launch({
+    jobId: s.job.jobId, tag: s.job.tag, title: s.job.title, prompt: 'initial',
+    project: { alias: 'repo', repoRoot: '/repo', baseRef: 'main' }, branch: 'launch/job_one',
+    preset: 'test', permissionMode: 'ask', attachments: [], env: {},
+  }, { onEvent() {}, async onQuestion() { throw new Error('unused'); }, async onPermissionRequest() { throw new Error('unused'); } });
+  s.lane.attach(handle); await tick();
+  return { ...s, backend, nativeHandle: handle };
+}
+
+test('restart steer targets the active native successor before unread history replays', async t => {
+  const s = await nativeSession(t), queued = s.message('next turn', 'wake_idle');
+  await s.lane.handleMessage(queued); await s.lane.stop();
+  s.backend.finishTurn(s.job.jobId, 'offline first turn');
+  assert.equal(s.nativeHandle.state().kind, 'turn_running');
+  const resumed = createLane(s.ledger.job(s.job.jobId)!, s.deps), urgent = s.message('urgent successor steer');
+  try {
+    resumed.attach(s.nativeHandle);
+    // Deliberately enqueue ingress before the pump can reconcile its first event.
+    await resumed.handleMessage(urgent); await tick();
+    assert.equal(s.backend.sessions()[0].sent.at(-1)!.mode, 'steer');
+    assert.deepEqual(s.replies()[0].metadata!['launch.consumed'], []);
+    assert.ok(!s.receipts().some(r => r.delivery_id === urgent.delivery_id));
+    s.backend.finishTurn(s.job.jobId, 'successor done'); await tick();
+    assert.deepEqual(s.replies()[1].metadata!['launch.consumed'], [queued.message.message_id, urgent.message.message_id]);
+    assert.equal(s.receipts().filter(r => r.delivery_id === urgent.delivery_id && r.state === 'processed').length, 1);
+  } finally { await resumed.stop(); }
+});
+
+test('separate native queue batches receive receipts only from their own finished turn across restart', async t => {
+  const s = await nativeSession(t), q1 = s.message('queue one', 'wake_idle'), q2 = s.message('queue two', 'wake_idle');
+  await s.lane.handleMessage(q1); await s.lane.handleMessage(q2);
+  assert.equal(s.backend.sessions()[0].sent.length, 2);
+  await s.lane.stop();
+  const resumed = createLane(s.ledger.job(s.job.jobId)!, s.deps); resumed.attach(s.nativeHandle); await tick();
+  try {
+    s.backend.finishTurn(s.job.jobId, 'initial'); await tick();
+    assert.equal(s.receipts().length, 0);
+    s.backend.finishTurn(s.job.jobId, 'queue one done'); await tick();
+    assert.deepEqual(s.replies()[1].metadata!['launch.consumed'], [q1.message.message_id]);
+    assert.deepEqual(s.receipts(), [{ delivery_id: q1.delivery_id, state: 'processed' }]);
+    assert.equal(s.nativeHandle.state().kind, 'turn_running');
+    s.backend.finishTurn(s.job.jobId, 'queue two done'); await tick();
+    assert.deepEqual(s.replies()[2].metadata!['launch.consumed'], [q2.message.message_id]);
+    assert.equal(s.receipts().filter(r => r.delivery_id === q2.delivery_id && r.state === 'processed').length, 1);
+  } finally { await resumed.stop(); }
+});
+
+test('hold precedes a native wake_idle batch and both are processed by the next turn', async t => {
+  const s = await nativeSession(t), hold = s.message('held', 'hold'), queued = s.message('wake next', 'wake_idle');
+  await s.lane.handleMessage(hold);
+  assert.equal(s.backend.sessions()[0].sent.length, 0);
+  await s.lane.handleMessage(queued);
+  assert.deepEqual(s.backend.sessions()[0].sent[0].items.map(i => i.deliveryId), [hold.delivery_id, queued.delivery_id]);
+  s.backend.finishTurn(s.job.jobId, 'initial'); await tick();
+  assert.equal(s.receipts().length, 0);
+  s.backend.finishTurn(s.job.jobId, 'next'); await tick();
+  assert.deepEqual(s.replies()[1].metadata!['launch.consumed'], [hold.message.message_id, queued.message.message_id]);
+  assert.deepEqual(s.receipts().map(r => r.delivery_id), [hold.delivery_id, queued.delivery_id]);
+});
+
+test('ordinary delivery retry after consumption and settle preserves its receipt with reopened queued ingress', async t => {
+  const s = await setup(t, { attach: false }), d = s.message('ordinary input');
+  const root = mkdtempSync(join(tmpdir(), 'vl-input-retry-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let ledger = openLedger(join(root, 'ledger.sqlite'), s.clock);
+  ledger.createJob(s.job);
+  ledger.admit({ deliveryId: d.delivery_id, cursor: 'ingress-1', threadId: s.job.threadId,
+    messageId: d.message.message_id, sender: d.message.sender, delivery: d, receivedAt: s.clock.now() });
+  const makeLane = () => {
+    const outbox = createOutbox({ ledger, clock: s.clock, log: s.log, hub: { async send() { throw new Error('unused'); }, async receipt() {} } });
+    return createLane(ledger.job(s.job.jobId)!, { ...s.deps, ledger, outbox, jobs: createJobReporter({ ledger, outbox }) });
+  };
+  let lane = makeLane(); lane.attach(s.handle); await tick();
+  try {
+    await lane.handleMessage(d); await s.emit(finished('ordinary-done'));
+    await lane.settle('requested', 'settled');
+    assert.equal(await lane.handleMessage(d), 'relayed');
+    await lane.stop(); ledger.close();
+    ledger = openLedger(join(root, 'ledger.sqlite'), s.clock); lane = makeLane();
+    assert.equal(ledger.queued(10).length, 1);
+    assert.equal(await lane.handleMessage(ledger.queued(10)[0].delivery), 'relayed');
+    assert.deepEqual(ledger.pendingOutbox(100, s.clock.now()).filter(r => r.kind === 'receipt').map(r => r.payload),
+      [{ delivery_id: d.delivery_id, state: 'processed' }]);
+    const fresh = s.message('fresh late input');
+    assert.equal(await lane.handleMessage(fresh), 'refused');
+    assert.deepEqual(ledger.pendingOutbox(100, s.clock.now()).filter(r => r.kind === 'receipt').at(-1)!.payload,
+      { delivery_id: fresh.delivery_id, state: 'failed', note: 'session_ended' });
+  } finally { await lane.stop(); ledger.close(); }
 });
