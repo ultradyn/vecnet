@@ -541,9 +541,18 @@ func TestUnsubscribeIdempotent(t *testing.T) {
 	params := map[string]any{"name": events.Name, "arguments": map[string]any{},
 		"delivery": map[string]any{"mode": "webhook", "url": cb.URL}}
 
-	// Another account's unsubscribe is {} too, and removes nothing.
+	wantResult, err := json.Marshal(map[string]any{
+		"resultType": "complete",
+		"_meta": map[string]any{
+			"io.modelcontextprotocol/serverInfo": map[string]any{"name": "vecnet", "version": mcpserver.Version},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another account's unsubscribe returns the same envelope and removes nothing.
 	r := rpc2026(t, env, otherSecret, "events/unsubscribe", params)
-	if r.Error != nil || string(r.Result) != "{}" {
+	if r.Error != nil || !bytes.Equal(r.Result, wantResult) {
 		t.Fatalf("foreign unsubscribe: %+v %s", r.Error, r.Result)
 	}
 	sendPriority(t, env, sender, dot, "one", "wake")
@@ -554,7 +563,7 @@ func TestUnsubscribeIdempotent(t *testing.T) {
 
 	for i := range 2 {
 		r := rpc2026(t, env, dotSecret, "events/unsubscribe", params)
-		if r.Error != nil || string(r.Result) != "{}" {
+		if r.Error != nil || !bytes.Equal(r.Result, wantResult) {
 			t.Fatalf("unsubscribe %d: %+v %s", i, r.Error, r.Result)
 		}
 	}
