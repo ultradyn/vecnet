@@ -345,7 +345,11 @@ func TestMCPRelayStdoutIsJSONOnly(t *testing.T) {
 	secret := "relay-test-secret"
 	u := profileUser(t, strings.Replace(closed.URL, "http://", "http://url-user:url-password@", 1), secret)
 	code, out, errs := relayRun(t, u, strings.Join([]string{relayLine(2, "ping", nil), `not json`, relayCall(3, "vecnet_peers", map[string]any{}), `{"jsonrpc":"2.0","method":"notifications/initialized"}`}, "\n"))
-	if code != 0 || strings.Count(errs, "hub restarting; reconnecting") != 1 {
+	// Several bounded requests share one outage and may cross the quiet
+	// window. Fake-clock tests pin its timing; here any status stays on stderr.
+	statusOK := errs == "" || (strings.HasPrefix(errs, "vecnet: mcp: hub unreachable for ") &&
+		strings.HasSuffix(errs, "s; reconnecting…\n") && strings.Count(errs, "\n") == 1)
+	if code != 0 || !statusOK {
 		t.Fatalf("exit=%d stderr=%q", code, errs)
 	}
 	replies := relayReplies(t, out)

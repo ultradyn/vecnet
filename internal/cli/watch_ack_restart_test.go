@@ -142,7 +142,11 @@ func TestWatchAutoAckQuietOutage(t *testing.T) {
 					if events != 5 || acks != 5 || sleeps != 3 || w.cursor != "e1.7" || w.pendingAck != "" {
 						t.Fatalf("events=%d acks=%d sleeps=%d cursor=%q pending=%q", events, acks, sleeps, w.cursor, w.pendingAck)
 					}
-					if strings.Count(errs.String(), "hub restarting; reconnecting") != 1 || strings.Count(errs.String(), "reconnected") != 1 {
+					wantLines := 0
+					if sustained {
+						wantLines = 1
+					}
+					if strings.Count(errs.String(), "hub unreachable for 31s") != wantLines || strings.Count(errs.String(), "reconnected after 93s") != wantLines || (!sustained && errs.Len() != 0) {
 						t.Errorf("status=%q", errs.String())
 					}
 					if strings.Contains(errs.String(), "ack e1.7:") != sustained {
@@ -192,9 +196,11 @@ func TestWatchAutoAckStreamRecovery(t *testing.T) {
 	defer cancel()
 	out, errs := new(hookWatchOutput), new(hookWatchOutput)
 	c := newClient("http://localhost", "test")
+	now := time.Unix(100, 0)
 	w := watcher{a: &app{ctx: ctx, stdout: out, stderr: errs}, c: c, autoAck: true,
 		forMonitor: true, replayed: true, connected: true, cursor: "e1.7", seen: newDedupe(1024),
-		sleep: func(context.Context, time.Duration) bool { return true }}
+		now:   func() time.Time { return now },
+		sleep: func(context.Context, time.Duration) bool { now = now.Add(6 * time.Second); return true }}
 	w.handle("presence", `{"cursor":"e1.7","type":"presence","data":{}}`, false)
 	events, acks := 0, 0
 	c.hc.Transport = relayRoundTrip(func(req *http.Request) (*http.Response, error) {
@@ -231,7 +237,7 @@ func TestWatchAutoAckStreamRecovery(t *testing.T) {
 	})
 	done := make(chan error, 1)
 	go func() { done <- w.run() }()
-	waitHookOutput(t, errs, "reconnected")
+	waitHookOutput(t, errs, "reconnected after 12s")
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -239,7 +245,7 @@ func TestWatchAutoAckStreamRecovery(t *testing.T) {
 	if events != 3 || acks != 3 || w.pendingAck != "" || strings.Count(out.String(), "e1.7 presence") != 1 {
 		t.Fatalf("events=%d acks=%d pending=%q stdout=%q", events, acks, w.pendingAck, out.String())
 	}
-	if strings.Count(errs.String(), "hub restarting") != 1 || strings.Count(errs.String(), "reconnected") != 1 || strings.Contains(errs.String(), "ack e1.7:") {
+	if strings.Count(errs.String(), "hub unreachable for 6s") != 1 || strings.Count(errs.String(), "reconnected after 12s") != 1 || strings.Contains(errs.String(), "ack e1.7:") {
 		t.Fatalf("status=%q", errs.String())
 	}
 }

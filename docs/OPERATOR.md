@@ -206,6 +206,8 @@ There is no dedicated CLI command for raising a thread budget, renaming a thread
 
 ## Reconnect and credential changes
 
+CLI watch and the MCP relay keep brief hub outages silent. The first failed attempt at or after 5 s writes `vecnet: <name>: hub unreachable for <N>s; reconnecting…` to stderr, once per outage; only an announced outage writes `vecnet: <name>: reconnected after <N>s` on recovery (`<name>` is `watch` or `mcp`, `<N>` is elapsed whole seconds). Detailed errors resume after 60 s without recovery. Monitor event output on stdout is unchanged.
+
 A new client follows the owner's acked cursor rather than forcing replay from `e0.0`. If retention purges a saved cursor, 409 `cursor_purged` supplies `oldest_cursor`; the client refetches snapshots/history and resumes there. A 401 stops event retries and returns the browser to sign-in. Update the stored credential before reconnecting. The TUI stops on a rejected credential and must be restarted with a valid profile. Connection status and cached data should be considered together when the hub is unreachable.
 
 Keep both clients open on the same operator identity: an approval answered in the TUI leaves the web inbox, opening a web thread lowers the TUI's shared unread count, and a web presence toggle updates the TUI status bar. These changes arrive through durable `operator_view` events; no reload is needed. Both clients' heartbeats read the hub's current presence before re-posting it, so an older client does not undo the other client's choice. Expired approvals leave both inboxes, and the hub records an `expired` response in the thread.
