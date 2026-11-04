@@ -49,7 +49,6 @@ func TestNoticeSignVerifyRoundTrip(t *testing.T) {
 	}
 	changes := map[string]func(*envelope.HubNotice){
 		"notice_id":  func(n *envelope.HubNotice) { n.NoticeID = "ntc_01JD3Q5H0X2Z4B6D8F0H2K4M6Q" },
-		"kind":       func(n *envelope.HubNotice) { n.Kind = "restart" },
 		"hub":        func(n *envelope.HubNotice) { n.Hub = "https://other.example" },
 		"issued_at":  func(n *envelope.HubNotice) { n.IssuedAt = "2026-11-05T07:01:00.000Z" },
 		"at":         func(n *envelope.HubNotice) { n.At = "2026-11-05T23:01:00.000Z" },
@@ -66,6 +65,23 @@ func TestNoticeSignVerifyRoundTrip(t *testing.T) {
 			}
 		})
 	}
+	t.Run("kind", func(t *testing.T) {
+		changed := notice()
+		changed.Kind, changed.NewURL = "maintenance", ""
+		if err := k.SignNotice(&changed); err != nil {
+			t.Fatal(err)
+		}
+		if err := hubid.VerifyNotice(k.Pubkey(), changed); err != nil {
+			t.Fatal(err)
+		}
+		changed.Kind = "restart"
+		if _, err := hubid.NoticeBytes(changed); err != nil {
+			t.Fatalf("kind mutation is structurally invalid: %v", err)
+		}
+		if err := hubid.VerifyNotice(k.Pubkey(), changed); err == nil {
+			t.Fatal("kind tampering accepted")
+		}
+	})
 	if err := hubid.VerifyNotice(key(t, "2").Pubkey(), n); err == nil {
 		t.Fatal("wrong key accepted")
 	}
@@ -156,6 +172,11 @@ func TestNormalizeURL(t *testing.T) {
 	for _, tc := range []struct{ raw, want string }{
 		{"HTTPS://Hub.Example:443/", "https://hub.example"}, {"http://x:80", "http://x"},
 		{"https://x:8443/base/", "https://x:8443/base"}, {"http://[::1]:80/", "http://[::1]"},
+		{"http://[fe80::1%25eth0]/", "http://[fe80::1%25eth0]"},
+		{"http://[fe80::1%25eth0]:8080/", "http://[fe80::1%25eth0]:8080"},
+		{"HTTPS://[FE80::1%25eth0]:443/", "https://[fe80::1%25eth0]"},
+		{"https://[fe80::1%25eth0]:8443/a%2Fb///", "https://[fe80::1%25eth0]:8443/a%2Fb"},
+		{"https://x/a%2Fb///", "https://x/a%2Fb"},
 		{"https://user:pass@x", ""}, {"https://x?q=1", ""}, {"https://x?", ""},
 		{"https://x#frag", ""}, {"https://x#", ""}, {"ftp://x", ""}, {"https:///path", ""},
 		{"https://x\n", ""}, {"https://x:bad", ""},
@@ -170,6 +191,9 @@ func TestNormalizeURL(t *testing.T) {
 			}
 			if err != nil || got != tc.want {
 				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
+			}
+			if again, err := hubid.NormalizeURL(got); err != nil || again != got {
+				t.Fatalf("normalizing %q again got %q, %v", got, again, err)
 			}
 		})
 	}

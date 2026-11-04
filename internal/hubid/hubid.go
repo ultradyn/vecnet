@@ -93,8 +93,10 @@ func NormalizeURL(raw string) (string, error) {
 	} else if strings.Contains(host, ":") {
 		host = "[" + host + "]"
 	}
+	// URL.String restores escaping for IPv6 zone identifiers in the authority.
+	authority := url.URL{Scheme: scheme, Host: host}
 	// EscapedPath preserves encoded slashes: /a%2Fb is distinct from /a/b.
-	return scheme + "://" + host + strings.TrimRight(u.EscapedPath(), "/"), nil
+	return authority.String() + strings.TrimRight(u.EscapedPath(), "/"), nil
 }
 
 var noticeID = regexp.MustCompile(`^ntc_[0-9A-HJKMNP-TV-Z]{26}$`)
