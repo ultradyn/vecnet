@@ -7,15 +7,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	venv "github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/mcpserver"
+	"github.com/XertroV/vecnet/internal/oauth"
 	"github.com/XertroV/vecnet/internal/testhub"
 	"github.com/XertroV/vecnet/internal/webhook"
 )
@@ -223,6 +226,121 @@ type listedTool struct {
 	} `json:"annotations"`
 }
 
+func TestToolsListSecuritySchemes(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "profile")
+	for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
+		t.Run(era, func(t *testing.T) {
+			headers := modern()
+			if era == mcpserver.ProtoLegacy {
+				headers = map[string]string{"Mcp-Session-Id": legacySession(t, env, secret), "Accept": "application/json"}
+			}
+			resp, body := do(t, env, call{secret: secret, headers: headers,
+				body: map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}})
+			r := decodeRPC(t, body)
+			if resp.StatusCode != http.StatusOK || r.Error != nil {
+				t.Fatalf("tools/list: %d %+v", resp.StatusCode, r.Error)
+			}
+			var result struct {
+				Tools []map[string]any `json:"tools"`
+			}
+			if err := json.Unmarshal(r.Result, &result); err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, tool := range result.Tools {
+				want := []any{map[string]any{"type": "oauth2", "scopes": []any{oauth.Scope}}}
+				if !reflect.DeepEqual(tool["securitySchemes"], want) {
+					t.Errorf("%s: securitySchemes = %v, want %v", tool["name"], tool["securitySchemes"], want)
+				}
+				if tool["name"] != "vecnet_whoami" {
+					continue
+				}
+				found = true
+				if !reflect.DeepEqual(tool["_meta"], map[string]any{"openai/profile": true}) {
+					t.Errorf("whoami _meta = %v", tool["_meta"])
+				}
+				annotations, ok := tool["annotations"].(map[string]any)
+				if !ok || annotations["readOnlyHint"] != true || annotations["destructiveHint"] != false || annotations["openWorldHint"] != false {
+					t.Errorf("whoami annotations = %v", tool["annotations"])
+				}
+				wantInput := map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
+				if !reflect.DeepEqual(tool["inputSchema"], wantInput) {
+					t.Errorf("whoami inputSchema = %v", tool["inputSchema"])
+				}
+				wantOutput := map[string]any{"type": "object", "properties": map[string]any{
+					"kind":    map[string]any{"enum": []any{"peer", "principal", "operator"}},
+					"peer_id": map[string]any{"type": "string"}, "principal_id": map[string]any{"type": "string"},
+					"name": map[string]any{"type": "string"},
+				}, "required": []any{"kind"}, "additionalProperties": false}
+				if !reflect.DeepEqual(tool["outputSchema"], wantOutput) {
+					t.Errorf("whoami outputSchema = %v, want %v", tool["outputSchema"], wantOutput)
+				}
+			}
+			if !found {
+				t.Fatal("tools/list lacks vecnet_whoami")
+			}
+		})
+	}
+}
+
+func TestWhoamiIdentity(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("session", "Profile name")
+	prn, prnSecret := env.NewPrincipal("Profile principal")
+	for _, tc := range []struct {
+		name, secret string
+		want         map[string]string
+	}{
+		{"peer", secret, map[string]string{"kind": "peer", "peer_id": peer, "name": "Profile name"}},
+		{"principal", prnSecret, map[string]string{"kind": "principal", "principal_id": prn}},
+		{"operator", env.OperatorSecret, map[string]string{"kind": "operator"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got map[string]string
+			toolOK(t, env, tc.secret, "vecnet_whoami", map[string]any{}, &got)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("whoami = %v, want %v", got, tc.want)
+			}
+			resp, body := env.Do(tc.secret, "GET", "/v1/peers/me", nil)
+			var me map[string]string
+			if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &me) != nil {
+				t.Fatalf("GET peers/me: %d %s", resp.StatusCode, body)
+			}
+			if name := tc.want["name"]; name != "" {
+				me["name"] = name
+			}
+			if !reflect.DeepEqual(got, me) {
+				t.Fatalf("whoami = %v, HTTP identity plus name = %v", got, me)
+			}
+		})
+	}
+	t.Run("OAuth dot", func(t *testing.T) {
+		dot, _ := env.NewPeer("dot", "Bound dot")
+		owner, err := env.Hub.PeerPrincipal(context.Background(), dot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		front := eventsFront(t, env, fakeOAuth{prn: owner, expires: func() time.Time { return env.Now.Now().Add(time.Hour) }}, func(s *mcpserver.Server) {
+			s.ResolveDotPeer = func(_ context.Context, principal string) (string, error) {
+				if principal != owner {
+					t.Errorf("ResolveDotPeer principal = %s, want %s", principal, owner)
+				}
+				return dot, nil
+			}
+		})
+		var got map[string]string
+		toolOK(t, front, "oauth-token", "vecnet_whoami", map[string]any{}, &got)
+		want := map[string]string{"kind": "peer", "peer_id": dot, "name": "Bound dot"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("OAuth whoami = %v, want %v", got, want)
+		}
+	})
+	if path := invalidPath(t, env, secret, "vecnet_whoami", map[string]any{"as": peer}); path != "/as" {
+		t.Fatalf("whoami accepts identity override: path = %q", path)
+	}
+}
+
 func TestToolsListNamesAndHints(t *testing.T) {
 	env := testhub.Start(t)
 	_, secret := env.NewPeer("session", "a1")
@@ -245,10 +363,10 @@ func TestToolsListNamesAndHints(t *testing.T) {
 
 	want := []string{
 		"vecnet_ack", "vecnet_clear_avatar", "vecnet_inbox", "vecnet_peers", "vecnet_presence", "vecnet_react", "vecnet_receipt",
-		"vecnet_reply", "vecnet_send", "vecnet_set_avatar", "vecnet_thread", "vecnet_threads",
+		"vecnet_reply", "vecnet_send", "vecnet_set_avatar", "vecnet_thread", "vecnet_threads", "vecnet_whoami",
 	}
 	var got []string
-	readOnly := map[string]bool{"vecnet_inbox": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true}
+	readOnly := map[string]bool{"vecnet_inbox": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true, "vecnet_whoami": true}
 	for _, tool := range tools {
 		got = append(got, tool.Name)
 		if tool.Annotations == nil {

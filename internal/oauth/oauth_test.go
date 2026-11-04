@@ -275,6 +275,72 @@ func linkCode(t *testing.T, env *testhub.Env, peer string) string {
 	return out.Code
 }
 
+func TestAuthorizeRedirectCarriesIss(t *testing.T) {
+	for _, action := range []string{"approve", "deny", "invalid scope"} {
+		t.Run(action, func(t *testing.T) {
+			env := testhub.Start(t)
+			b := newBrowser(t, env)
+			q := b.query(verifierA)
+			if action == "invalid scope" {
+				q.Set("scope", "other")
+			}
+			resp, body := b.authorize(q)
+			if action != "invalid scope" {
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("authorize: %d %s", resp.StatusCode, body)
+				}
+				request := sealedRequest(t, body)
+				if action == "approve" {
+					peer := newDot(t, env, "iss-dot")
+					resp, body = b.consent(request, linkCode(t, env, peer))
+				} else {
+					resp, body = postForm(t, env, "/oauth/authorize", url.Values{"request": {request}}, nil)
+				}
+			}
+			if resp.StatusCode != http.StatusFound {
+				t.Fatalf("redirect: %d %s", resp.StatusCode, body)
+			}
+			loc, err := url.Parse(resp.Header.Get("Location"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			query := loc.Query()
+			if query.Get("iss") != env.OAuth.Issuer || query.Get("state") != "st-123" {
+				t.Errorf("redirect iss/state = %v, want iss %s and state st-123", query, env.OAuth.Issuer)
+			}
+			switch action {
+			case "approve":
+				if query.Get("code") == "" || query.Get("error") != "" {
+					t.Fatalf("approve redirect = %v", query)
+				}
+			case "deny":
+				if query.Get("error") != "access_denied" || query.Get("code") != "" {
+					t.Fatalf("deny redirect = %v", query)
+				}
+			case "invalid scope":
+				if query.Get("error") != "invalid_scope" || query.Get("code") != "" {
+					t.Fatalf("scope redirect = %v", query)
+				}
+			}
+		})
+	}
+}
+
+func TestASMetadataAdvertisesIss(t *testing.T) {
+	env := testhub.Start(t)
+	resp, body := env.Do("", "GET", "/.well-known/oauth-authorization-server", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("metadata: %d %s", resp.StatusCode, body)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(body, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["authorization_response_iss_parameter_supported"] != true {
+		t.Fatalf("authorization_response_iss_parameter_supported = %v, want true", metadata["authorization_response_iss_parameter_supported"])
+	}
+}
+
 // login runs the whole first-login flow and returns the browser, its peer
 // and a fresh token pair.
 func login(t *testing.T, env *testhub.Env) (*browser, string, tokens) {

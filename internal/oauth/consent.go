@@ -246,7 +246,7 @@ func (s *Server) getAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	state := q.Get("state")
 	refuse := func(code string) {
-		redirectWith(w, r, redirectURI, map[string]string{"error": code, "state": state})
+		redirectWith(w, r, redirectURI, map[string]string{"error": code, "state": state, "iss": s.Issuer})
 	}
 	scope := q.Get("scope")
 	resource := q.Get("resource")
@@ -304,7 +304,7 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.PostForm.Get("approve") != "1" {
-		redirectWith(w, r, req.RedirectURI, map[string]string{"error": "access_denied", "state": req.State})
+		redirectWith(w, r, req.RedirectURI, map[string]string{"error": "access_denied", "state": req.State, "iss": s.Issuer})
 		return
 	}
 	ctx := r.Context()
@@ -350,7 +350,7 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
-	redirectWith(w, r, req.RedirectURI, map[string]string{"code": code, "state": req.State})
+	redirectWith(w, r, req.RedirectURI, map[string]string{"code": code, "state": req.State, "iss": s.Issuer})
 }
 
 // linkWorth is linkCodeWorth's answer.

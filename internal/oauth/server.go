@@ -111,16 +111,17 @@ func writeOAuthError(w http.ResponseWriter, status int, code, description string
 // authServerMetadata is RFC 8414.
 func (s *Server) authServerMetadata(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"issuer":                                s.Issuer,
-		"authorization_endpoint":                s.Issuer + "/oauth/authorize",
-		"token_endpoint":                        s.Issuer + "/oauth/token",
-		"registration_endpoint":                 s.Issuer + "/oauth/register",
-		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
-		"code_challenge_methods_supported":      []string{"S256"},
-		"token_endpoint_auth_methods_supported": []string{"none"},
-		"scopes_supported":                      []string{Scope},
-		"client_id_metadata_document_supported": true,
+		"issuer":                                         s.Issuer,
+		"authorization_endpoint":                         s.Issuer + "/oauth/authorize",
+		"token_endpoint":                                 s.Issuer + "/oauth/token",
+		"registration_endpoint":                          s.Issuer + "/oauth/register",
+		"response_types_supported":                       []string{"code"},
+		"grant_types_supported":                          []string{"authorization_code", "refresh_token"},
+		"code_challenge_methods_supported":               []string{"S256"},
+		"token_endpoint_auth_methods_supported":          []string{"none"},
+		"scopes_supported":                               []string{Scope},
+		"client_id_metadata_document_supported":          true,
+		"authorization_response_iss_parameter_supported": true,
 	})
 }
 
