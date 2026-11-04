@@ -6,7 +6,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { BackendCapabilities, BackendHealth } from '../src/backend.ts';
-import { harness, launch, launched, settle, until } from './daemon-harness.ts';
+import { createHubClient } from '../../hub-client/src/client.ts';
+import type { HubApi } from '../../hub-client/src/ports.ts';
+import { startDaemon } from '../src/daemon.ts';
+import { createFakeBackend } from './fake-backend.ts';
+import { harness, launch, launched, message, settle, until, LAUNCHER, REQUESTER } from './daemon-harness.ts';
 
 test('a crash after the accept tx and before startLaunch → restart launches exactly once', async t => {
   const h = await harness(t);
@@ -87,6 +91,48 @@ test('crash() then a new daemon on the same ledger: open job reattached, no dupl
   assert.equal(h.launches(), 1);
   assert.equal(h.backend.sessions().length, 1);
   assert.deepEqual(h.statuses(jobId).map(s => s.state), ['accepted', 'running']);
+});
+
+test('a backend whose capabilities() fails at restart: the lane keeps its last known input cap and splits relayed input at it', async t => {
+  const cap = 2000;
+  const h = await harness(t, { backend: createFakeBackend({ caps: { maxInputBytes: cap } }) });
+  const { jobId, thread } = await launched(h);
+  h.backend.finishTurn(jobId, 'turn one');
+  await until(() => h.replies(thread).length === 1, 'first turn reply');
+
+  // A slow backend start: no capabilities and no reattach when the daemon starts.
+  const caps = h.backend.capabilities.bind(h.backend);
+  let down = true;
+  h.backend.capabilities = async (): Promise<BackendCapabilities> => { if (down) throw new Error('bridge not up'); return caps(); };
+  h.backend.failReattach(1);
+  await h.restart();
+  await until(() => h.inspect(l => l.job(jobId)!.reattachPending), 'reattach pending');
+  down = false;
+  h.clock.advance(30_000);
+  await until(() => h.inspect(l => !l.job(jobId)!.reattachPending), 'reattached after the backend returned');
+
+  const big = message(thread, REQUESTER, 'x'.repeat(5 * cap));
+  await h.push('delivery', big);
+  await until(() => h.backend.sessions()[0].sent.length >= 1, 'relayed input');
+  const items = h.backend.sessions()[0].sent.flatMap(s => s.items);
+  assert.equal(items[0].deliveryId, `${big.delivery_id}.part.1`);
+  for (const item of items) assert.ok(Buffer.byteLength(item.text) <= cap, `${Buffer.byteLength(item.text)} bytes exceeds the backend cap`);
+});
+
+test('a fatal event stream end stops the daemon: stopped settles, exit code 1, offline presence', async t => {
+  const h = await harness(t);
+  await h.daemon.stop();
+  const previous = process.exitCode;
+  t.after(() => { process.exitCode = previous; });
+  const client: HubApi & { me(): Promise<unknown> } = { ...createHubClient({ baseUrl: h.hub.url, credential: h.hub.bearer }), me: async () => ({ kind: 'peer', peer_id: LAUNCHER }) };
+  const daemon = await startDaemon({ cfg: h.cfg, hub: client, clock: h.clock, log: h.log, backends: new Map([['fake', h.backend]]),
+    stream: { run: async () => ({ reason: 'auth', status: 401 }) } });
+  t.after(() => daemon.stop());
+  await daemon.stopped;
+  assert.equal(process.exitCode, 1);
+  process.exitCode = previous;
+  // One offline report from the harness daemon's stop, one from this daemon stopping itself.
+  assert.equal(h.presence().filter(p => p.state === 'offline').length, 2);
 });
 
 test('stop() posts offline presence and leaves open jobs for the next start', async t => {

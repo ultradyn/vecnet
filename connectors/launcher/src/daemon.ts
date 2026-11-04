@@ -98,7 +98,9 @@ const noCaps: BackendCapabilities = { steer: false, queue: 'launcher', interrupt
   backgroundTasks: 'opaque', attachments: false, workspace: 'launcher-dir', branchName: 'backend-chosen', permissionModes: [], presets: [] };
 
 export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream?: EventStream; clock?: Clock; log?: Log;
-  backends?: Map<string, Backend>; beforeRecordRef?: (jobId: string) => void }): Promise<{ stop(): Promise<void>; crash(): void }> {
+  backends?: Map<string, Backend>; beforeRecordRef?: (jobId: string) => void }): Promise<{ stop(): Promise<void>; crash(): void;
+  /** Settles once the daemon has stopped, including when it stops itself on a fatal event stream end. */
+  stopped: Promise<void> }> {
   const { cfg } = o;
   const log = redactingLog(o.log ?? stderrLog());
   const base = o.clock ?? systemClock;
@@ -149,20 +151,39 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
 
     // 3. Backends and their health.
     const backends = o.backends ?? await loadBackends(cfg, id => pluginContext({ host: cfg.host, log, ledger, id, clock }));
+    // A lane takes its backend's capabilities once, when it is created, and
+    // splits buffered input at that cap. Lanes for reattached jobs are created
+    // before a slow backend may answer, so the last capabilities each backend
+    // reported are kept in the ledger and stand in until it answers again. The
+    // gate accepts a job only against known capabilities (its preset must be
+    // offered), so every open job's backend has a stored set.
     const info = new Map<string, Info>();
+    for (const id of backends.keys()) {
+      const stored = daemonKv.get(`caps:${id}`);
+      if (!stored) continue;
+      try { info.set(id, { caps: JSON.parse(stored) as BackendCapabilities, health: downHealth }); }
+      catch { log.warn('stored backend capabilities unreadable', { backend: id }); }
+    }
+    function learned(id: string, caps: BackendCapabilities, health: BackendHealth) {
+      info.set(id, { caps, health });
+      if (!dead) daemonKv.set(`caps:${id}`, JSON.stringify(caps));
+    }
     async function refreshHealth(): Promise<void> {
       await Promise.all([...backends].map(async ([id, backend]) => {
-        let caps = info.get(id)?.caps ?? noCaps, health = downHealth;
+        let caps: BackendCapabilities | undefined, health = downHealth;
         try { caps = await backend.capabilities(); } catch { log.warn('backend capabilities unavailable', { backend: id }); }
         try { health = await backend.health(); } catch { log.warn('backend health unavailable', { backend: id }); }
-        info.set(id, { caps, health });
+        if (dead) return;
+        if (caps) learned(id, caps, health);
+        else info.set(id, { caps: info.get(id)?.caps ?? noCaps, health });
       }));
     }
     await refreshHealth();
 
     // 4. Directory, outbox, reports, parent bridge.
     const dir = createDirectory({ hub, log });
-    try { await dir.refresh(); } catch { log.warn('directory unavailable at startup; refreshing on demand'); }
+    let directoryLoaded = false;
+    try { await dir.refresh(); directoryLoaded = true; } catch { log.warn('directory unavailable at startup; refreshing on demand'); }
     const outbox = createOutbox({ ledger, hub, clock, log });
     const jobs = createJobReporter({ ledger, outbox });
     const home = homedir();
@@ -268,16 +289,16 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
       const job = ledger.job(jobId);
       if (!job) return;
       changed();
-      laneFor(jobId);
       const backend = backends.get(job.backend);
       if (backend) {
-        // Refresh the capabilities the lane and presence use before launching.
+        // Refresh the capabilities before the lane is built from them.
         try {
           const caps = await backend.capabilities();
-          info.set(job.backend, { caps, health: info.get(job.backend)?.health ?? downHealth });
+          if (!dead) learned(job.backend, caps, info.get(job.backend)?.health ?? downHealth);
         } catch { log.warn('backend capabilities unavailable', { backend: job.backend }); }
       }
       if (dead) return;
+      laneFor(jobId);
       const result = await startLaunch(ledger.job(jobId)!, launchDeps);
       if (dead) return;
       if (result.ok) attach(jobId, result.handle);
@@ -308,7 +329,7 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
         if (lane) detach(lane.settle('cancel', 'requester_retired'), 'requester_retired settle');
       }));
     }
-    dir.onRemoved(peer => {
+    function retire(peer: string) {
       if (dead) return;
       for (const job of ledger.jobsByRequester(peer)) {
         if (job.state === 'ended' || daemonKv.get(`retire:${job.jobId}`)) continue;
@@ -323,7 +344,8 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
         if (lane) detach(lane.control('interrupt', self), 'retired requester interrupt');
         armRetire(job.jobId, at);
       }
-    });
+    }
+    dir.onRemoved(retire);
 
     // 9. Reattach. Parent rows still open from before the restart have lost
     // their live hooks: abandon them first, so a prompt raised during
@@ -334,6 +356,11 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
     }
     for (const r of await reattachAll(launchDeps)) outcome(r);
     for (const key of daemonKv.keys('retire:')) armRetire(key.slice('retire:'.length), Number(daemonKv.get(key)));
+    // A requester retired while the daemon was down never leaves a later
+    // snapshot: compare the open jobs with the directory loaded at startup.
+    if (directoryLoaded) {
+      for (const peer of new Set(ledger.openJobs().map(j => j.requester))) if (!dir.get(peer)) retire(peer);
+    }
 
     // 10. Outbox, idle clock (tracked on attach), presence, stream, dispatcher.
     const controller = new AbortController();
@@ -372,6 +399,8 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
       async onCursorPurged() { log.error('event cursor purged; deliveries in the gap are lost'); },
     });
     let stopping: Promise<void> | undefined;
+    let markStopped!: () => void;
+    const stopped = new Promise<void>(resolve => { markStopped = resolve; });
     loops.add(stream.run(async e => { await ingress.handler(e); dispatcher.kick(); }, signal).then(result => {
       if (dead || signal.aborted || result.reason === 'aborted') return;
       log.error('event stream stopped', { reason: result.reason });
@@ -422,11 +451,12 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
         await presence!.stop();
         halt();
         try { ledger.close(); } catch { /* already closed */ }
-      })();
+      })().finally(markStopped);
       return stopping;
     }
     return {
       stop,
+      stopped,
       crash() {
         if (dead) return;
         // A dead process: no settle, no offline presence, nothing more written.
@@ -435,6 +465,7 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
         for (const lane of lanes.values()) void lane.stop().catch(() => {});
         void presence?.stop().catch(() => {});
         try { ledger.close(); } catch { /* already closed */ }
+        markStopped();
       },
     };
   } catch (err) {

@@ -29,7 +29,7 @@ test('ingress: duplicate delivery admitted once; cursor saved then acked; receip
   assert.equal(ledger.cursor(), 'e1.6');
   assert.equal(acks.length, 1);
   clock.advance(1000);
-  await settle(10);
+  await until(() => acks.length === 2, 'batched ack');
   assert.deepEqual(acks.at(-1), { cursor: 'e1.6', saved: 'e1.6' });
   assert.equal(acks.length, 2);
   await ingress.handler(event('directory_updated', { change: 'removed', peer_id: REQUESTER }, 'e1.7'));
@@ -209,6 +209,22 @@ test('directory_updated removing the requester → interrupt, note, cancelled re
   await until(() => h.statuses(jobId).some(s => s.state === 'cancelled'), 'cancelled requester_retired');
   assert.deepEqual(h.statuses(jobId).at(-1)!.output, { reason: 'requester_retired' });
   assert.equal(h.backend.sessions()[0].settles, 1);
+});
+
+test('a requester retired while the daemon was down → after restart: interrupt, note, cancelled requester_retired after 10 min', async t => {
+  const h = await harness(t);
+  const { jobId, thread } = await launched(h);
+  h.hub.setPeers([
+    directoryEntry({ peer_id: LAUNCHER, name: 'launcher-test', kind: 'launcher' }),
+    directoryEntry({ peer_id: OPERATOR, name: 'operator', kind: 'operator' }),
+  ]);
+  await h.restart();
+  await until(() => h.backend.sessions()[0].interrupts === 1, 'interrupt');
+  await until(() => h.replies(thread).some(r => /retired/.test(r.content.text)), 'retirement note');
+  h.clock.advance(10 * 60_000);
+  await until(() => h.statuses(jobId).some(s => s.state === 'cancelled'), 'cancelled requester_retired');
+  assert.deepEqual(h.statuses(jobId).at(-1)!.output, { reason: 'requester_retired' });
+  assert.equal(h.replies(thread).filter(r => /retired/.test(r.content.text)).length, 1);
 });
 
 test('requester message relays to the agent; a stranger gets not_relayed', async t => {

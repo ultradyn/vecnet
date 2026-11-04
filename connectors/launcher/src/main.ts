@@ -50,12 +50,15 @@ async function main(argv: string[]): Promise<number> {
   catch (err) { return fail(err instanceof ConfigError ? err.message : 'cannot read config', 2); }
   if (command === 'check') return check(cfg);
   const daemon = await startDaemon({ cfg });
-  await new Promise<void>(resolve => {
+  // The daemon also stops itself when its event stream ends for good (auth or
+  // disabled); it then sets exit code 1 so systemd's Restart=on-failure applies.
+  await Promise.race([daemon.stopped, new Promise<void>(resolve => {
     process.once('SIGTERM', () => resolve());
     process.once('SIGINT', () => resolve());
-  });
+  })]);
   await daemon.stop();
-  return 0;
+  // Exit even if a plugin child or keep-alive socket still holds the event loop.
+  process.exit(typeof process.exitCode === 'number' ? process.exitCode : 0);
 }
 
 main(process.argv.slice(2)).then(code => { process.exitCode = code; }, () => {
