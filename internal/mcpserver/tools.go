@@ -41,7 +41,7 @@ type tool struct {
 
 // toolTable is the static tool list, built and compiled once per process.
 type toolTable struct {
-	list   []*mcp.Tool
+	listed []map[string]any
 	byName map[string]*tool
 }
 
@@ -50,7 +50,7 @@ var tools = sync.OnceValue(buildTools)
 // registerTools adds tools/list and tools/call.
 func (s *Server) registerTools() {
 	s.Register("tools/list", func(context.Context, *Session, *Request) (any, error) {
-		return map[string]any{"tools": tools().list}, nil
+		return map[string]any{"tools": tools().listed}, nil
 	})
 	s.Register("tools/call", s.toolsCall)
 }
@@ -491,6 +491,46 @@ func callPeers(ctx context.Context, s *Server, _ auth.Caller, _ []byte) (any, er
 	return map[string]any{"peers": dir}, nil
 }
 
+// callWhoami uses the same caller fields as GET /v1/peers/me. An OAuth
+// profile identifies the linked dot peer, and peer profiles add its public
+// directory name. No credential or principal-wide settings are exposed.
+func callWhoami(ctx context.Context, s *Server, c auth.Caller, _ []byte) (any, error) {
+	if p := PrincipalFromContext(ctx); p.OAuth != nil {
+		peer := c.PeerID
+		if s.ResolveDotPeer != nil {
+			var err error
+			peer, err = s.ResolveDotPeer(ctx, p.OAuth.PrincipalID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if peer == "" {
+			return nil, hub.E(http.StatusForbidden, "not_linked", "this account is not linked to a dot peer")
+		}
+		c.Kind, c.PeerID = "peer", peer
+	}
+	me := map[string]string{"kind": c.Kind}
+	switch c.Kind {
+	case "peer":
+		me["peer_id"] = c.PeerID
+		dir, err := s.Hub.Directory(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, peer := range dir {
+			if peer.PeerID == c.PeerID {
+				if peer.Name != "" {
+					me["name"] = peer.Name
+				}
+				break
+			}
+		}
+	case "principal":
+		me["principal_id"] = c.PrincipalID
+	}
+	return me, nil
+}
+
 // schema is a JSON Schema document under construction.
 type schema = map[string]any
 
@@ -540,6 +580,8 @@ func writeAnnotations(openWorld bool) *mcp.ToolAnnotations {
 type toolSpec struct {
 	name, description string
 	input             schema
+	meta              map[string]any
+	output            schema
 	// hubValues keeps enums in tools/list, but validates only their string
 	// shape here so the hub checks their semantics in protocol order.
 	hubValues   []string
@@ -561,7 +603,7 @@ func narrowAttachments(defs schema) {
 	attachments["description"] = "Blobs by hash, uploaded first with PUT /v1/blobs using the same bearer; the hub rejects unknown hashes."
 }
 
-// toolSpecs returns the twelve tools (PROTOCOL §4.3). defs is the envelope
+// toolSpecs returns the tools (PROTOCOL §4.3). defs is the envelope
 // schema's $defs after narrowAttachments, so vecnet_send's input is
 // $defs/sendRequest and no message tool takes a URL. vecnet_set_avatar's url
 // is the one exception: the hub fetches it through the egress guard and
@@ -679,6 +721,18 @@ func toolSpecs(defs schema) []toolSpec {
 		description: "List the peer directory: ids, names, presence, reachability and avatar hashes.",
 		input:       object(schema{}),
 		annotations: readAnnotations(), call: callPeers,
+	}, {
+		name:        "vecnet_whoami",
+		description: "Read the identity authenticated by this credential, with the peer's public directory name when set.",
+		input:       object(schema{}),
+		meta:        map[string]any{"openai/profile": true},
+		output: object(schema{
+			"kind":         schema{"enum": []string{"peer", "principal", "operator"}},
+			"peer_id":      schema{"type": "string"},
+			"principal_id": schema{"type": "string"},
+			"name":         schema{"type": "string"},
+		}, "kind"),
+		annotations: readAnnotations(), call: callWhoami,
 	}, {
 		name: "vecnet_set_avatar",
 		description: "Write: set your avatar on the operator's bus; every peer's directory shows it. " +
@@ -800,10 +854,33 @@ func buildTools() *toolTable {
 				panic("mcpserver: tool shape " + spec.name + ": " + err.Error())
 			}
 		}
-		t.list = append(t.list, &mcp.Tool{Name: spec.name, Description: spec.description, InputSchema: input, Annotations: spec.annotations})
+		t.listed = append(t.listed, listEntry(&mcp.Tool{Name: spec.name, Description: spec.description, InputSchema: input, Annotations: spec.annotations}, spec.meta, spec.output))
 		t.byName[spec.name] = &tool{schema: sch, precheck: spec.precheck, call: spec.call}
 	}
 	return t
+}
+
+// listEntry extends the SDK's tool representation with discovery fields it
+// cannot represent. The static entries are rendered once by buildTools.
+func listEntry(t *mcp.Tool, meta map[string]any, output schema) map[string]any {
+	raw, err := json.Marshal(t)
+	if err != nil {
+		panic("mcpserver: marshal tool list entry: " + err.Error())
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		panic("mcpserver: decode tool list entry: " + err.Error())
+	}
+	// oauth.Scope is "vecnet"; oauth imports mcpserver, so importing that
+	// package here would create a cycle. The discovery test pins equality.
+	entry["securitySchemes"] = []map[string]any{{"type": "oauth2", "scopes": []string{"vecnet"}}}
+	if meta != nil {
+		entry["_meta"] = meta
+	}
+	if output != nil {
+		entry["outputSchema"] = output
+	}
+	return entry
 }
 
 // compileInput attaches the $defs a tool schema references, transitively, so
