@@ -64,10 +64,12 @@ try {
 
     // The hub's clock moves and the client's does not: the row due for refresh
     // runs out, so this client can only learn that from the hub. Its OAuth
-    // token runs out at the same instant, and the hub's events worker (a 1 s
-    // real-time step) then pauses it as token_expired, so health "expired" is
-    // a state the hub holds for under a second. Wait on the hub's settled
-    // state, not on catching that window.
+    // token runs out at the same instant (PROTOCOL §4.4 clamps a dot's TTL to
+    // the token's expiry, so live rows do this too), and the hub's events
+    // worker (a 1 s real-time step) then pauses it as token_expired; health
+    // lists paused reasons before expiry. So "expired" is a state the hub holds
+    // for under a second, by design. Wait on the hub's settled state, not on
+    // catching that window.
     const late = await select('late');
     const { now } = await advance('3m');
     await until('the hub to pause the expired row', async () => {
