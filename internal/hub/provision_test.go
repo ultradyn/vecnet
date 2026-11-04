@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
@@ -141,14 +142,14 @@ func TestCreatePeerHappyPath(t *testing.T) {
 	if prn != c.PrincipalID || creator != prn {
 		t.Fatalf("ownership = %s / %s", prn, creator)
 	}
-	for _, owner := range []string{env.OperatorPeer, observer} {
+	for _, owner := range []string{env.OperatorPeer, observer, r.Peer.PeerID} {
 		provisionDirectoryEvent(t, env, owner, r.Peer.PeerID, "enrolled", 1)
 	}
 	provisionAudit(t, env, "peer_create", c.PrincipalID, "", 1)
 	if n := count(t, env, `SELECT count(*) FROM audit WHERE action = 'peer_create' AND json_extract(target_ids,'$[0]') = ? AND json_extract(target_ids,'$[1]') = ? AND json_extract(detail,'$.kind') = 'pagchat-bot'`, r.Peer.PeerID, c.PrincipalID); n != 1 {
 		t.Fatalf("create audit targets/kind = %d", n)
 	}
-	for _, owner := range []string{env.OperatorPeer, observer} {
+	for _, owner := range []string{env.OperatorPeer, observer, r.Peer.PeerID} {
 		if n := count(t, env, `SELECT count(*) FROM events WHERE owner = ? AND type = 'directory_updated' AND json_extract(data,'$.peer_id') = ? AND json_extract(data,'$.fields') = '["name","kind","enrolled_at"]'`, owner, r.Peer.PeerID); n != 1 {
 			t.Fatalf("enrolled fields = %d", n)
 		}
@@ -166,13 +167,58 @@ func TestCreatePeerHappyPath(t *testing.T) {
 	}
 }
 
+func TestCreatePeerFirstPeerStream(t *testing.T) {
+	env, c, sec := provisionSetup(t, 1, 60)
+	r := createProvisioned(t, env, c, "first")
+	for _, path := range []string{"/v1/events?wait=0", "/v1/events?peer=" + r.Peer.PeerID + "&wait=0"} {
+		resp, raw := env.Do(sec, "GET", path, nil)
+		if resp.StatusCode != 200 {
+			t.Fatalf("principal stream %s = %d %s", path, resp.StatusCode, raw)
+		}
+		var poll struct {
+			Events []envelope.Event `json:"events"`
+		}
+		if err := json.Unmarshal(raw, &poll); err != nil {
+			t.Fatal(err)
+		}
+		matched := 0
+		for _, event := range poll.Events {
+			if event.Type != "directory_updated" {
+				continue
+			}
+			var data struct {
+				PeerID string   `json:"peer_id"`
+				Change string   `json:"change"`
+				Fields []string `json:"fields"`
+			}
+			if err := json.Unmarshal(event.Data, &data); err != nil {
+				t.Fatal(err)
+			}
+			if data.PeerID == r.Peer.PeerID && data.Change == "enrolled" {
+				matched++
+				if !reflect.DeepEqual(data.Fields, []string{"name", "kind", "enrolled_at"}) {
+					t.Fatalf("enrolled fields = %v", data.Fields)
+				}
+			}
+		}
+		if matched != 1 {
+			t.Fatalf("principal stream %s has %d first-peer enrollment events, want 1: %s", path, matched, raw)
+		}
+	}
+}
+
 func TestCreatePeerIdempotentReplay(t *testing.T) {
 	env, c, _ := provisionSetup(t, 2, 60)
 	first := createProvisioned(t, env, c, "same")
+	before := count(t, env, `SELECT count(*) FROM events`)
 	r, err := env.Hub.CreatePeer(context.Background(), c, hub.CreatePeerRequest{Kind: "pagchat-bot", Name: "bot same", IdempotencyKey: "same"})
 	if err != nil || r == nil || !r.Replayed || r.Peer != first.Peer {
 		t.Fatalf("replay = %+v, %v", r, err)
 	}
+	if after := count(t, env, `SELECT count(*) FROM events`); after != before {
+		t.Fatalf("replay appended %d events, want 0", after-before)
+	}
+	provisionDirectoryEvent(t, env, first.Peer.PeerID, first.Peer.PeerID, "enrolled", 1)
 	if n := count(t, env, `SELECT count(*) FROM peers WHERE created_by = ?`, c.PrincipalID); n != 1 {
 		t.Fatalf("created %d peers", n)
 	}
@@ -375,10 +421,14 @@ func TestOwnPeerDisableScope(t *testing.T) {
 	}
 	provisionAudit(t, env, "peer_patch_refused", c.PrincipalID, "not_found", 3)
 	own := createProvisioned(t, env, c, "own")
-	for range 2 {
+	for i := range 2 {
+		before := count(t, env, `SELECT count(*) FROM events`)
 		r, err := env.Hub.SetOwnPeerDisabled(context.Background(), c, own.Peer.PeerID, true)
 		if err != nil || r == nil || !r.Disabled || r.CreatedBy != c.PrincipalID {
 			t.Fatalf("disable = %+v, %v", r, err)
+		}
+		if after := count(t, env, `SELECT count(*) FROM events`); i == 1 && after != before {
+			t.Fatalf("disable no-op appended %d events, want 0", after-before)
 		}
 	}
 	provisionDirectoryEvent(t, env, env.OperatorPeer, own.Peer.PeerID, "removed", 1)
@@ -387,11 +437,16 @@ func TestOwnPeerDisableScope(t *testing.T) {
 	if resp.StatusCode != 204 {
 		t.Fatalf("disabled stream = %d %s", resp.StatusCode, raw)
 	}
-	for range 2 {
+	for i := range 2 {
+		before := count(t, env, `SELECT count(*) FROM events`)
 		r, err := env.Hub.SetOwnPeerDisabled(context.Background(), c, own.Peer.PeerID, false)
 		if err != nil || r == nil || r.Disabled {
 			t.Fatalf("reenable = %+v, %v", r, err)
 		}
+		if after := count(t, env, `SELECT count(*) FROM events`); i == 1 && after != before {
+			t.Fatalf("enable no-op appended %d events, want 0", after-before)
+		}
+		provisionDirectoryEvent(t, env, own.Peer.PeerID, own.Peer.PeerID, "enrolled", 2)
 	}
 	provisionDirectoryEvent(t, env, env.OperatorPeer, own.Peer.PeerID, "enrolled", 2)
 	provisionAudit(t, env, "peer_enable", c.PrincipalID, "", 1)
@@ -517,6 +572,7 @@ func TestSetPeerDisabledOperatorUnchanged(t *testing.T) {
 	}
 	provisionDirectoryEvent(t, env, env.OperatorPeer, peer, "removed", 1)
 	provisionDirectoryEvent(t, env, env.OperatorPeer, peer, "enrolled", 2)
+	provisionDirectoryEvent(t, env, peer, peer, "enrolled", 0)
 	provisionAudit(t, env, "peer_disable", "operator", "", 1)
 	provisionAudit(t, env, "peer_enable", "operator", "", 1)
 	if _, err := env.Hub.Auth.Resolve(context.Background(), sec); err != nil {

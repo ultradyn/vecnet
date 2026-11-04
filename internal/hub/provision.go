@@ -191,6 +191,11 @@ func (h *Hub) createPeerTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req C
 	if err := h.DirectoryUpdated(ctx, tx, peer, "enrolled", enrolledFields); err != nil {
 		return nil, err
 	}
+	// The shared fan-out skips the enrolled subject for operator enrolment.
+	// Principal-created peers also need the event on their own durable log.
+	if _, err := h.Log.Append(ctx, tx, peer, "directory_updated", h.Now(), map[string]any{"peer_id": peer, "change": "enrolled", "fields": enrolledFields}); err != nil {
+		return nil, err
+	}
 	if err := audit.Record(ctx, tx, c.PrincipalID, "peer_create", []string{peer, c.PrincipalID}, map[string]any{"kind": req.Kind}); err != nil {
 		return nil, err
 	}
@@ -307,6 +312,11 @@ func (h *Hub) SetOwnPeerDisabled(ctx context.Context, c auth.Caller, peerID stri
 				return refuse(api)
 			}
 			return err
+		}
+		if changed && !disabled {
+			if _, err := h.Log.Append(ctx, tx, peerID, "directory_updated", h.Now(), map[string]any{"peer_id": peerID, "change": "enrolled", "fields": enrolledFields}); err != nil {
+				return err
+			}
 		}
 		result.Disabled = disabled
 		return nil
