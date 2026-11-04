@@ -149,7 +149,7 @@ test('resuming an evicted run cursor delivers newer empty failed and cancelled r
     e.recentRuns=[{runId:'old',ordinal:50,status:'completed',completedAt:time}];
     e.items=[{itemId:'old-final',position:10,runId:'old',createdBy:'agent',type:'assistant',text:'old result'}];
   });
-  const first=(await f.live()).turns()[Symbol.asyncIterator]();
+  const first=(await f.live()).turns({value:JSON.stringify({p:0,r:'previous',o:49})})[Symbol.asyncIterator]();
   const old=await first.next();assert.ok(old.value);const cursor=old.value.cursor;await first.return?.();
   await f.update(s => {const e=s.threads[0];e.thread.latestRunId='cancelled';
     e.recentRuns=[{runId:'cancelled',ordinal:52,status:'cancelled',completedAt:time},{runId:'failed',ordinal:51,status:'failed',completedAt:time}];
@@ -175,6 +175,69 @@ test('resuming an evicted run cursor delivers newer empty failed and cancelled r
   const replay=[];
   for await (const value of (await f.live()).turns(delivered[1].cursor,resumeAbort.signal)) replay.push(value);
   assert.deepEqual(replay,[]);
+});
+
+test('restart refuses a bounded run-history gap even when omitted finals survive timeline pagination',async t => {
+  const f=await fixture(t);
+  await f.update(s => {const e=s.threads[0];e.thread.status='idle';e.thread.activeRunId=null;
+    e.recentRuns[0].status='completed';
+    e.items=[{itemId:'first',position:1,runId:'run-1',createdBy:'agent',type:'assistant',text:'first result'}];
+  });
+  const first=(await f.live()).turns()[Symbol.asyncIterator]();
+  const delivered=await first.next();assert.ok(delivered.value);
+  const cursor=delivered.value.cursor;const saved=cursor.value;await first.return?.();
+  await f.update(s => {const e=s.threads[0];e.thread.latestRunId='run-52';
+    e.recentRuns=Array.from({length:52},(_,i) => ({runId:`run-${i+1}`,ordinal:i+1,status:'completed',completedAt:time}));
+    // The run-2 final survives beyond the first transcript page, but its item
+    // cannot establish the run outcome (a failed run may also have final text).
+    e.items.push(...Array.from({length:55},(_,i) => ({itemId:`tool-${i}`,position:i+2,runId:'run-2',createdBy:'agent',type:'tool_result',text:'tool'})),
+      {itemId:'omitted-final',position:57,runId:'run-2',createdBy:'agent',type:'assistant',text:'surviving result'});
+  });
+  for (let restart=0;restart<2;restart++) {
+    const resumed=(await f.live()).turns(cursor)[Symbol.asyncIterator]();
+    await assert.rejects(resumed.next(),error => {
+      assert.equal((error as Error).message,'t3-bridge history_gap');
+      assert.equal((error as Error & {unreachable:boolean}).unreachable,true);return true;
+    });
+    assert.equal(cursor.value,saved,'a history gap must preserve the durable cursor');
+  }
+  const reads=(await f.calls()).filter(x => x[3]==='t3_thread_read').map(x => JSON.parse(x[5]));
+  assert.ok(reads.some(x => x.afterPosition===51),'the surviving final must be read from a later page');
+});
+
+test('restart can deliver exactly 50 retained undelivered runs in order',async t => {
+  const f=await fixture(t);
+  await f.update(s => {const e=s.threads[0];e.thread.status='idle';e.thread.activeRunId=null;e.thread.latestRunId='run-51';
+    e.recentRuns=Array.from({length:51},(_,i) => ({runId:`run-${i+1}`,ordinal:i+1,status:'failed',completedAt:time}));e.items=[];
+  });
+  const it=(await f.live()).turns({value:JSON.stringify({p:1,r:'run-1',o:1})})[Symbol.asyncIterator]();
+  for (let ordinal=2;ordinal<=51;ordinal++) {
+    const value=await it.next();assert.ok(value.value);assert.equal(value.value.event.type,'turn_finished');
+    assert.equal(value.value.event.turnId,`run-${ordinal}`);
+    assert.deepEqual(JSON.parse(value.value.cursor.value),{p:1,r:`run-${ordinal}`,o:ordinal});
+  }
+  await it.return?.();
+});
+
+test('an initial read with evicted run history fails instead of starting past the gap',async t => {
+  const f=await fixture(t);
+  await f.update(s => {const e=s.threads[0];e.thread.status='idle';e.thread.activeRunId=null;e.thread.latestRunId='run-51';
+    e.recentRuns=Array.from({length:51},(_,i) => ({runId:`run-${i+1}`,ordinal:i+1,status:'failed',completedAt:time}));
+  });
+  await assert.rejects((await f.live()).turns()[Symbol.asyncIterator]().next(),/history_gap/);
+});
+
+test('a gap after a recoverable run preserves that run as the last delivered cursor',async t => {
+  const f=await fixture(t);
+  await f.update(s => {const e=s.threads[0];e.thread.status='idle';e.thread.activeRunId=null;e.thread.latestRunId='run-4';
+    e.recentRuns=[{runId:'run-2',ordinal:2,status:'failed',completedAt:time},{runId:'run-4',ordinal:4,status:'cancelled',completedAt:time}];
+  });
+  const it=(await f.live()).turns({value:JSON.stringify({p:1,r:'run-1',o:1})})[Symbol.asyncIterator]();
+  const next=await it.next();assert.ok(next.value);
+  assert.equal(next.value.event.turnId,'run-2');
+  assert.deepEqual(JSON.parse(next.value.cursor.value),{p:1,r:'run-2',o:2});
+  await assert.rejects(it.next(),/history_gap/);
+  await assert.rejects((await f.live()).turns(next.value.cursor)[Symbol.asyncIterator]().next(),/history_gap/);
 });
 
 test('a legacy cursor recovers run order while its last run is still available',async t => {

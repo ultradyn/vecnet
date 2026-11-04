@@ -56,7 +56,7 @@ else if (command === 'call' && flag === '--json') {
     };
     const all = entry.items.filter(x => args.itemId ? x.itemId === args.itemId : x.position > (args.afterPosition ?? -1));
     const page = args.itemId ? all.map(x => chunk(x,args.textOffset ?? 0)) : all.slice(0,args.limit ?? 50).map(x => chunk(x));
-    reply({ thread:entry.thread, recentRuns:entry.recentRuns, items:page, nextPosition:page.at(-1)?.position ?? args.afterPosition ?? 0, hasMore:!args.itemId && all.length > page.length });
+    reply({ thread:entry.thread, recentRuns:[...entry.recentRuns].sort((a,b) => b.ordinal-a.ordinal).slice(0,50), items:page, nextPosition:page.at(-1)?.position ?? args.afterPosition ?? 0, hasMore:!args.itemId && all.length > page.length });
   } else if (name === 't3_thread_send') {
     if (state.escalationDenied) fail('runtime_mode_escalation_denied');
     state.sends ??= [];

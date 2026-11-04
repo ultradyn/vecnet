@@ -104,8 +104,17 @@ class T3Session implements SessionHandle {
           cursor={...cursor,o:last.ordinal};
         }
         for (const run of ordered) {
+          if (run.runId === cursor.r || (cursor.o !== undefined && run.ordinal <= cursor.o)) continue;
+          // recentRuns retains at most 50 runs independently of transcript
+          // pagination. Items can survive eviction, but cannot prove a run's
+          // terminal outcome (or reveal an empty failed/cancelled run). The
+          // supported read API cannot page run history. Require consecutive
+          // ordinals before advancing; an unrecoverable gap is unreachable,
+          // leaving the last yielded cursor intact for retry/operator recovery.
+          if (run.ordinal !== (cursor.o ?? 0)+1) throw new BridgeError(-1,'t3-bridge history_gap');
           const result=outcome(run.status);
-          if (!result || run.runId === cursor.r || (cursor.o !== undefined && run.ordinal <= cursor.o)) continue;
+          // A later terminal run must not consume a still-open earlier run.
+          if (!result) break;
           const own=items.filter(x => x.runId === run.runId);
           const final=own.filter(x => x.createdBy === 'agent' && /assistant/i.test(x.type)).at(-1);
           const finalText=final ? await this.hydrate(final,signal) : '';
