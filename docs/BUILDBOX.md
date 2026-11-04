@@ -24,7 +24,7 @@ Commands are argv, not a shell string: use `bash -c '…'` for `||`, `&&`, pipes
 
 | On xsm | On the box |
 |---|---|
-| `build2 <cmd>` (2-core slice) | `scripts/bb/bin/build2`: runs `<cmd>` directly and rewrites `go … -p N` to `-p $BB_JOBS` |
+| `build2 <cmd>` (2-core slice) | `<lane>/bb/bin/build2` (from `scripts/bb/bin`): runs `<cmd>` directly and rewrites `go … -p N` to `-p $BB_JOBS` |
 | `go … -p 2` | also rewritten to `-p $BB_JOBS` (default 8); `GOFLAGS=-p=$BB_JOBS` covers commands without `-p` |
 | Go 1.27.1 (CachyOS) | Go 1.27.1 (upstream tarball) |
 | Node 22.23.3 | Node 22.23.3 (pinned tarball; the box's own Node is not used) |
@@ -38,11 +38,21 @@ The remote command gets a clean environment (`env -i`): lane-private `HOME`, `TM
 
 ## Box choice and fallback
 
-`BB_HOST=<host>` pins a box. Otherwise the first reachable host in `BB_HOSTS` (default `x-alpha x-tall x-p35 x-19`) wins. When the preferred box fails its probe (an mDNS miss costs about 7 s), the fallback is cached for 10 minutes in `$XDG_RUNTIME_DIR/vecnet-bb/host`, so a burst of checks does not pay the probe each time.
+`BB_HOST=<host>` pins a box. Otherwise the first reachable host in `BB_HOSTS` wins; the default is `x-tall x-p35 x-tuf x-19`. When the first box fails its probe (an mDNS miss costs about 7 s), the fallback is cached for 10 minutes in `$XDG_RUNTIME_DIR/vecnet-bb/host`, so a burst of checks does not pay the probe each time. `BB_HOSTS` is also the host list for `just bb-clean`.
 
-- **x-alpha** (48 threads): preferred. On 2026-11-04 it was unreachable from xsm: `x-alpha.local` did not resolve, `x-alpha.lan` (10.100.0.160) and 10.100.0.161 had no ARP reply, and the IPv6 link-local fallback cannot work while xsm is on Wi-Fi. When it is back, the first `just bb` bootstraps it.
-- **x-tall** (12 cores, 15 GiB): the working default. Proof runs below used it.
-- **x-p35** (8 cores) and **x-19** (no ssh config entry; does not resolve) follow.
+- **x-alpha** (48 threads) is the preferred box once it is back. It was down on 2026-11-04 for a few days, so it is left out of the default to avoid a failed probe on every run. From xsm, `x-alpha.local` did not resolve, and `x-alpha.lan` (10.100.0.160) and 10.100.0.161 gave no ARP reply. The IPv6 link-local fallback cannot work while xsm is on Wi-Fi. When it returns, put it first: `BB_HOSTS="x-alpha x-tall x-p35 x-tuf"`, or change the default in `scripts/bb/run.sh` and `clean.sh`. The first run bootstraps it.
+- **x-tall** (12 cores, 15 GiB, load about 3): the default. The proof runs below used it.
+- **x-p35** (8 cores, 7.5 GiB free, load under 1 on 2026-11-04): has every required tool; not yet bootstrapped.
+- **x-tuf** (8 cores, 23 GiB free): has the tools but is busy (load 13 on 2026-11-04).
+- **x-19**: no ssh config entry and does not resolve; kept last.
+
+## From a worktree without `scripts/bb`
+
+The wrapper copies its own `scripts/bb` to `<lane>/bb/` on the box, so it can test any vecnet checkout, including branches cut before it existed. The tested checkout is the git top level of the current directory (`BB_ROOT` overrides it):
+
+```sh
+just -f /path/to/checkout-with-bb/justfile -d /path/to/other-worktree bb go test ./...
+```
 
 Use `BB_JOBS=<n>` to change the Go `-p` cap.
 
@@ -54,6 +64,7 @@ Use `BB_JOBS=<n>` to change the Go `-p` cap.
 ├── .cache/       go-build, gomod, npm, uv (shared; safe for concurrent use)
 └── <lane>/
     ├── src/      synced worktree (rsync --delete confined here)
+    ├── bb/       the wrapper's own scripts/bb (remote.sh, bootstrap.sh, bin/build2)
     ├── home/     lane HOME
     ├── tmp/      TMPDIR + TMUX_TMPDIR; demo builds, data dirs, tmux sockets
     ├── shots/    remote SHOTS_DIR, emptied before each run

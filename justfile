@@ -89,11 +89,11 @@ ui-shots:
 # pull back SHOTS_DIR + files it wrote, exit with its status (docs/BUILDBOX.md)
 [positional-arguments]
 bb +ARGS:
-    bash scripts/bb/run.sh "$@"
+    bash {{quote(justfile_directory())}}/scripts/bb/run.sh "$@"
 
 # Remove one lane (a worktree basename) from the build boxes
 bb-clean LANE:
-    bash scripts/bb/clean.sh {{quote(LANE)}}
+    bash {{quote(justfile_directory())}}/scripts/bb/clean.sh {{quote(LANE)}}
 
 tui *ARGS:
     CGO_ENABLED=0 build2 go run -p 2 ./cmd/vecnet tui {{ARGS}}

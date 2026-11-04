@@ -6,9 +6,16 @@
 set -euo pipefail
 
 PROJECT=vecnet4
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
+# The wrapper ships its own scripts/bb to the lane, so the worktree being
+# tested need not contain them: ROOT is the checkout of the caller's cwd
+# (BB_ROOT overrides), SELF is where this script lives.
+SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 say() { printf 'bb: %s\n' "$*" >&2; }
 die() { say "$1"; exit "${2:-2}"; }
+ROOT=${BB_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || true)}
+ROOT=$(cd "${ROOT:-$SELF/../..}" && pwd -P)
+[[ -f $ROOT/go.mod && $(head -1 "$ROOT/go.mod") == "module github.com/XertroV/vecnet" ]] \
+  || die "$ROOT is not a vecnet checkout; run from one or set BB_ROOT"
 now() { date +%s.%N; }
 secs() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.1f", b - a }'; }
 
@@ -46,9 +53,11 @@ if [[ -n ${BB_HOST:-} ]]; then
   host=$BB_HOST
   reachable "$host" || die "BB_HOST=$host is unreachable" 255
 else
-  read -r -a hosts <<<"${BB_HOSTS:-x-alpha x-tall x-p35 x-19}"
+  # x-alpha (48 threads) is preferred once it is back; until then it is left
+  # out so no run pays its failed probe. BB_HOSTS="x-alpha x-tall …" restores it.
+  read -r -a hosts <<<"${BB_HOSTS:-x-tall x-p35 x-tuf x-19}"
   host=""
-  # A failed probe of the preferred box costs up to 6 s (mDNS); remember the
+  # A failed probe of the first box costs up to 6 s (mDNS); remember the
   # fallback for 10 minutes so a run of checks does not pay it each time.
   cached="$cache_dir/host"
   if [[ -f $cached && $(find "$cached" -mmin -10 2>/dev/null) ]]; then
@@ -92,7 +101,8 @@ excludes=(--exclude=.git --exclude=node_modules/ --exclude=.worktrees/ --exclude
 # --delete is confined to the lane's own src/; excluded paths (box-side
 # node_modules, bin/) are left alone so installs persist between runs.
 rsync -rlptz --delete --safe-links "${excludes[@]}" -e "ssh ${ssh_opts[*]}" "$ROOT/" "$host:$RL/src/"
-ssh "${ssh_opts[@]}" "$host" "bash '$RL/src/scripts/bb/bootstrap.sh' '$lane'" </dev/null
+rsync -rlptz --delete -e "ssh ${ssh_opts[*]}" "$SELF/" "$host:$RL/bb/"
+ssh "${ssh_opts[@]}" "$host" "bash '$RL/bb/bootstrap.sh' '$lane'" </dev/null
 t1=$(now)
 
 # SHOTS_DIR: run against a fresh lane-local dir, then copy it to the
@@ -111,7 +121,7 @@ say "host=$host lane=$lane jobs=${env[BB_JOBS]} sync+bootstrap=$(secs "$t0" "$t1
 # session ends, which only works when the session owns its connection.
 set +e
 ssh "${ssh_opts[@]}" -T -o ControlMaster=no -o ControlPath=none "$host" \
-  "bash '$RL/src/scripts/bb/remote.sh' '$lane' '$b64env' '$b64argv'" </dev/null
+  "bash '$RL/bb/remote.sh' '$lane' '$b64env' '$b64argv'" </dev/null
 rc=$?
 set -e
 t2=$(now)

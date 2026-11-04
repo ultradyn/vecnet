@@ -1,6 +1,6 @@
 # Changelog
 
-- 2026-11-04: `just bb <cmd…>` runs a command on a build box against the current worktree (rsync to `~/bb-src/vecnet4/<lane>/`, pinned Go/Node/Playwright/fonts bootstrap, `build2` and `go -p` widened to `BB_JOBS`, SHOTS_DIR and written files pulled back); `just bb-clean <lane>` (`scripts/bb/`, docs/BUILDBOX.md).
+- 2026-11-04: `just bb <cmd…>` runs a command on a build box (default x-tall; x-alpha preferred once back) against the current worktree, or any checkout via `just -f …/justfile -d <worktree> bb` (rsync to `~/bb-src/vecnet4/<lane>/`, pinned Go/Node/Playwright/fonts bootstrap, `build2` and `go -p` widened to `BB_JOBS`, SHOTS_DIR and written files pulled back); `just bb-clean <lane>` (`scripts/bb/`, docs/BUILDBOX.md).
 
 - 2026-11-04: hook/watch state binds to hub + authenticated caller (new `GET /v1/peers/me`; mismatch resets to the first-run path, rotation keeps, legacy adopts) and every hook command hint carries `--net <profile>`/`--as` plus an explicit-VECNET_CONFIG basename clause (issue 33; `internal/cli/hookstate.go`, `hook.go`, `watch.go`, PROTOCOL §2.10, §13.9)
 - 2026-11-04: `VECNET_SQLITE_SYNCHRONOUS=normal|full` (default full) selects the hub's WAL fsync policy; dev hubs may use normal to avoid fsync stalls under I/O pressure (`internal/store/store.go`, docs/OPERATOR.md, issue 32).
