@@ -184,7 +184,7 @@ func TestHookSessionFirstClaimRace(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := f.update(ctx, func(s *hookState) error {
-				results[i] = s.admit(hookOwner{session: "S" + strconv.Itoa(i), profiles: []string{"p"}}, time.Now())
+				results[i] = s.admit(hookOwner{session: "S" + strconv.Itoa(i), profiles: []string{"p"}, prompt: true}, time.Now())
 				return nil
 			}); err != nil {
 				t.Error(err)
