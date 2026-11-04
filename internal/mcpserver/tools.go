@@ -625,7 +625,9 @@ func callPresenceSubscribe(ctx context.Context, s *Server, c auth.Caller, raw []
 
 // callWhoami uses the same caller fields as GET /v1/peers/me. An OAuth
 // profile identifies the linked dot peer, and peer profiles add its public
-// directory name. No credential or principal-wide settings are exposed.
+// directory name. The required profile id is the stable peer/principal id,
+// or "operator" when no operator peer exists. No credential or principal-wide
+// settings are exposed.
 func callWhoami(ctx context.Context, s *Server, c auth.Caller, _ []byte) (any, error) {
 	if p := PrincipalFromContext(ctx); p.OAuth != nil {
 		peer := c.PeerID
@@ -644,7 +646,7 @@ func callWhoami(ctx context.Context, s *Server, c auth.Caller, _ []byte) (any, e
 	me := map[string]string{"kind": c.Kind}
 	switch c.Kind {
 	case "peer":
-		me["peer_id"] = c.PeerID
+		me["id"], me["peer_id"] = c.PeerID, c.PeerID
 		dir, err := s.Hub.Directory(ctx)
 		if err != nil {
 			return nil, err
@@ -658,7 +660,15 @@ func callWhoami(ctx context.Context, s *Server, c auth.Caller, _ []byte) (any, e
 			}
 		}
 	case "principal":
-		me["principal_id"] = c.PrincipalID
+		me["id"], me["principal_id"] = c.PrincipalID, c.PrincipalID
+	case "operator":
+		me["id"] = c.PeerID
+		if me["id"] == "" {
+			me["id"] = "operator"
+		}
+	}
+	if me["id"] == "" {
+		return nil, errors.New("mcp: authenticated profile has no stable id")
 	}
 	return me, nil
 }
@@ -912,11 +922,12 @@ func toolSpecs(defs schema) []toolSpec {
 		input:       object(schema{}),
 		meta:        map[string]any{"openai/profile": true},
 		output: object(schema{
+			"id":           schema{"type": "string", "minLength": 1},
 			"kind":         schema{"enum": []string{"peer", "principal", "operator"}},
 			"peer_id":      schema{"type": "string"},
 			"principal_id": schema{"type": "string"},
 			"name":         schema{"type": "string"},
-		}, "kind"),
+		}, "kind", "id"),
 		annotations: readAnnotations(), call: callWhoami,
 	}, {
 		name: "vecnet_blob_put",
