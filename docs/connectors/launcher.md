@@ -69,7 +69,7 @@ The launcher then shows in the directory with kind `launcher`, presence `idle`, 
 
 **Agents never pair, re-pair or write any t3-bridge token or config.** Only Max changes them.
 
-- The existing auto token (`~/.config/t3-bridge/token`) is enough for `read-only`, `ask` and `auto` launches. Nothing changes.
+- The existing auto token (`~/.config/t3-bridge/token`) is enough for `ask` and `auto` launches. Nothing changes. (The T3 plugin does not offer `read-only`.)
 - **`full-access` is a manual step for Max:** add `vecnet-launcher` to `full_access.callers` in `~/.config/t3-bridge/config.json`. `token-full` already exists on xsm and is shared with `forge`, `xpp` and `xpp-eng-lead`; re-pairing full-access would replace it and break them, so pair full-access only on a box where `token-full` is missing. Caveat: once allowlisted, **every** launcher call goes through `token-full`, not only full-access ones.
 - Until Max does this, T3 refuses full-access launches and the job fails `backend_error`. The launcher looks for anything the failed call created (by its `vl-<job_id>` tag) and settles it at once (`settled_orphan: true`), so no session runs unsupervised.
 - The plugin uses only `t3-bridge` subcommands that exist today. It does not append Grok Bot wake instructions and registers no watcher wakes, so `t3-bridge outbox list` and `~/.local/state/t3-bridge/launches.json` never gain launcher entries.
@@ -135,6 +135,8 @@ The normative rules are [PROTOCOL §13.8](../PROTOCOL.md#138-launcher-issue-26);
 - No `thread_id`: every launch starts its own thread, and a second `job_request` in it is refused `unsupported` ("one job per thread"). Exactly one recipient, the launcher.
 - **Set `expires_at`** (at most now + 7 days, §18.3). It bounds the session: the deadline is `min(expires_at, accepted + max_session_lifetime)`, and the session settles 5 minutes before it, busy or not (`succeeded {ended: "deadline"}`). Without it the hub's default of now + 24 h applies. A launch whose remaining lifetime is shorter than its settle timer plus 10 minutes is refused `policy_denied` / `expires_too_soon` with `details {expires_at, needed_ms}`.
 - `input` fields: `backend`, `project`, `preset`, `permission_mode` (`read-only`, `ask`, `auto`, `full-access`) are required; `base_ref`, `title` (≤ 200 characters; the launcher prefixes `vl-<job_id>`), `idle.wrapup_after`, `idle.wrapup_turn`, `relay_from` (extra peer ids the agent hears), `reply_priority` and `deliver.push_branch` are optional. Unknown keys are refused. `backend: "any"` and `continue_job` are reserved and refused.
+- **Modes per backend.** The launcher's `mode:` presence tags list the modes it offers. T3 offers `ask`, `auto` and `full-access`; Paseo offers `full-access` only. Neither offers `read-only` today, so such a launch is refused `policy_denied` / `permission_mode`.
+- `idle.wrapup_turn: true` asks for one wrap-up turn before an idle settle: the launcher prompts the agent to commit and summarise, posts that turn's reply, and settles when it ends, with the turn's (redacted) text as `succeeded.summary`. New input during it keeps the session open; the deadline settle never waits for it.
 
 **Threads and replies.** The launcher replies **to your launch message** with every post (turn replies, notes, questions, approval requests and `job_status`), so depth stays at 1 and each post lives `min(launch expires_at, now + 24 h)`. Do the same: reply to the launch message, or to a launcher post less than 24 hours old. A reply to an older reply can be refused 422 `expired`.
 
@@ -146,7 +148,7 @@ The normative rules are [PROTOCOL §13.8](../PROTOCOL.md#138-launcher-issue-26);
 | `wake_idle` | Starts a turn | Queues; sent as one turn when the current one ends |
 | `hold` | Buffered; prepended to the next turn's input | Buffered |
 
-**Turn replies.** One reply per finished turn, at `input.reply_priority` (default `wake_idle`), with `metadata` `launch.turn` (`completed`, `interrupted`, `failed`, `refused`, `max_tokens`), `launch.turn_id`, `launch.job_id` and `launch.consumed` (the message ids that turn used). Text over 60 KiB is cut with `[truncated: N bytes; full text attached]` and the full text rides as `turn-<n>.md`. **Paseo** sees only an agent's final output, so its turn text is best effort and is marked `launch.final_text: "best_effort"`.
+**Turn replies.** One reply per finished turn, at `input.reply_priority` (default `wake_idle`), with `metadata` `launch.turn` (`completed`, `interrupted`, `failed`, `refused`, `max_tokens`), `launch.turn_id`, `launch.job_id` and `launch.consumed` (the message ids that turn used; turn one lists your launch message, whose `processed` receipt arrives with that reply). Text over 60 KiB is cut with `[truncated: N bytes; full text attached]` and the full text rides as `turn-<n>.md`. **Paseo** sees only an agent's final output, so its turn text is best effort and is marked `launch.final_text: "best_effort"`.
 
 **Questions.** A turn that ends in a question needs nothing special: your reply is the next turn. A structured question arrives as a `message` with `metadata["launch.question"]` (`{v: 1, question_id, blocking, questions: [{id, text, options, allow_other}]}`); answer it with a reply to that message whose text matches an option label, or with `metadata["launch.answers"] {question_id, answers: {<id>: value}}`. A blocking question unanswered for 30 minutes is answered "use your best judgement". A question asking for a secret is refused at once: never send credentials through vecnet.
 
@@ -155,6 +157,7 @@ The normative rules are [PROTOCOL §13.8](../PROTOCOL.md#138-launcher-issue-26);
 - Validate it strictly; escalate on an unknown `v` or field. Only `fidelity` `enforced` describes what the approval grants; treat `reported`/`none`, `redacted: true`, `command.shell_operators: true` and `outside_workspace: "unknown"` as "cannot verify". `reason`, `command`, `tool` and `backend_raw` come from the agent and are untrusted.
 - An automatic decider picks only options whose `grants` is `once`.
 - Answer with an `approval_response` naming an option label, or `escalate` to hand it to the operator. The operator's prompt opens a per-job escalation thread (`vl escalation: <job title>`) with the same `launch.permission` and `launch.escalated_from`. If the operator decides first, you receive `metadata["launch.approval_closed"]` and should close your own card; a later answer gets a "superseded" note.
+- A backend that asks for approval only in its own UI (T3's ask mode, Paseo permission waits) cannot be answered through vecnet: you get one note per turn saying the agent is waiting there.
 - If you do not answer in time (default 15 minutes) the prompt resolves to the backend's deny option, or escalates if the launcher is configured to. An operator prompt's expiry always denies.
 
 **Controls.** Send a message with `metadata["launch.control"]` set to `"interrupt"` (stop the running turn, keep the session), `"settle"` (end now; `succeeded {ended: "settled"}`) or `"extend"` (reset the idle clock once). Only you and the operator can; anyone else's control is ignored with `not_relayed`.
@@ -233,7 +236,8 @@ Record the evidence (job ids, link, screenshots of the T3 thread) in the build's
 | Symptom | Cause |
 |---|---|
 | Unit exits at once, `credential must be a readable regular file with mode 0600` | `chmod 600` the credential file |
-| Unit stops with exit 1 after running | The event stream ended for good (401/403, or the peer was disabled); fix the credential, then restart |
+| Unit exits 1 after running, and systemd restarts it every 10 s | The event stream ended for good (401/403, or the peer was disabled; the journal shows the stream ending with `auth` or `disabled`). Fix the credential or re-enable the peer |
+| Unit exits 3 and stays stopped, `cursor_purged` | The hub no longer holds events the launcher missed while it was down, so launches, controls or inputs in that gap were never admitted. Check the open job threads and any launches sent to it meanwhile, then run once with `--accept-cursor-gap` (`node … main.ts run --config PATH --accept-cursor-gap`), which resumes from the hub's oldest retained event; then start the unit again |
 | Every launch `backend_unhealthy`; presence `blocked` | `just ln-run check` shows which backend is down and why |
 | `policy_denied` / `project` | The alias is not in the requester's `projects` ceiling (the default allows none) |
 | `backend_error` on `full-access` (T3) | `vecnet-launcher` is not in `full_access.callers`; see [T3 prerequisites](#t3-prerequisites) |
