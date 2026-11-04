@@ -143,14 +143,12 @@ func operatorAdminChanges(t *testing.T, env *testhub.Env, peer, secret string) [
 	t.Helper()
 	sent := mustSend(t, env, secret, req("dead", peer))
 	dly := sent.Deliveries[0].DeliveryID
-	// The operator is not in this thread, so the send itself is activity.
-	want := []operatorView{{"activity", &sent.ThreadID}}
 	// Seed the delivery failure as the push worker would.
 	if _, err := env.Hub.DB.Exec(`UPDATE deliveries SET state = 'dead_letter' WHERE dly_id = ?`, dly); err != nil {
 		t.Fatal(err)
 	}
 	operatorPost(t, env, "/v1/admin/dead-letters/"+dly+"/retry", nil)
-	want = append(want, operatorView{"dead_letter", &sent.ThreadID})
+	want := []operatorView{{"dead_letter", &sent.ThreadID}}
 	if _, err := env.Hub.DB.Exec(`UPDATE deliveries SET state = 'dead_letter' WHERE dly_id = ?`, dly); err != nil {
 		t.Fatal(err)
 	}
@@ -223,12 +221,8 @@ func TestOperatorViewEnabledOperators(t *testing.T) {
 	defer cancel()
 	wake := env.Hub.Log.Wait(waitCtx, []string{other})
 	sent := mustSend(t, env, env.OperatorSecret, req("fanout", agent))
-	// The other operator is not in the thread, so it also sees activity.
-	wants := map[string][]operatorView{
-		env.OperatorPeer: {{"sent", &sent.ThreadID}},
-		other:            {{"sent", &sent.ThreadID}, {"activity", &sent.ThreadID}},
-	}
-	for peer, want := range wants {
+	want := []operatorView{{"sent", &sent.ThreadID}}
+	for _, peer := range []string{env.OperatorPeer, other} {
 		if got := operatorViews(t, env, peer); !reflect.DeepEqual(got, want) {
 			t.Fatalf("operator %s: got %v, want %v", peer, got, want)
 		}
@@ -241,63 +235,6 @@ func TestOperatorViewEnabledOperators(t *testing.T) {
 	default:
 		t.Fatal("committed send did not wake the other operator's tail")
 	}
-}
-
-// A message in a thread the operator is not in reaches it as one
-// operator_view "activity" per message; a thread it is in, its own send, and
-// an idempotent replay add none.
-func TestOperatorViewActivity(t *testing.T) {
-	env := testhub.Start(t)
-	a, asec := env.NewPeer("session", "A")
-	b, bsec := env.NewPeer("session", "B")
-	first := mustSend(t, env, asec, req("one", b))
-	wantViews(t, env, operatorView{"activity", &first.ThreadID})
-	reply := req("two")
-	reply["thread_id"] = first.ThreadID
-	mustSend(t, env, bsec, reply)
-	wantViews(t, env, operatorView{"activity", &first.ThreadID}, operatorView{"activity", &first.ThreadID})
-	// Replaying the same key and body is answered from the idempotency store.
-	status, _, raw := sendHTTP(t, env, bsec, reply)
-	if status != http.StatusOK {
-		t.Fatalf("replay = %d, want 200: %s", status, raw)
-	}
-	wantViews(t, env, operatorView{"activity", &first.ThreadID}, operatorView{"activity", &first.ThreadID})
-	// A thread the operator is in: the operator gets a delivery, no activity.
-	mine := mustSend(t, env, asec, req("mine", env.OperatorPeer, b))
-	wantViews(t, env, operatorView{"activity", &first.ThreadID}, operatorView{"activity", &first.ThreadID})
-	if len(deliveryEvents(t, env, env.OperatorPeer)) != 1 {
-		t.Fatalf("operator should have one delivery for %s", mine.ThreadID)
-	}
-	// Joining by sending is "sent", not activity: the operator is now in it.
-	join := req("join")
-	join["thread_id"] = first.ThreadID
-	mustSend(t, env, env.OperatorSecret, join)
-	wantViews(t, env, operatorView{"activity", &first.ThreadID}, operatorView{"activity", &first.ThreadID}, operatorView{"sent", &first.ThreadID})
-	again := req("after-join")
-	again["thread_id"] = first.ThreadID
-	mustSend(t, env, asec, again)
-	wantViews(t, env, operatorView{"activity", &first.ThreadID}, operatorView{"activity", &first.ThreadID}, operatorView{"sent", &first.ThreadID})
-	// Participants never receive operator_view.
-	for _, peer := range []string{a, b} {
-		if got := operatorViews(t, env, peer); len(got) != 0 {
-			t.Fatalf("participant %s received operator_view: %v", peer, got)
-		}
-	}
-}
-
-// The hub's own expiry notice is a message too: a non-participant operator
-// sees it as activity.
-func TestOperatorViewActivityOnApprovalExpiry(t *testing.T) {
-	env := testhub.Start(t)
-	_, asec := env.NewPeer("session", "A")
-	b, _ := env.NewPeer("session", "B")
-	apr := ids.New(ids.Apr)
-	sent := mustSend(t, env, asec, approvalReq("ask", apr, env.Now.Now().Add(time.Minute), []string{"yes", "no"}, b))
-	env.Now.Advance(2 * time.Minute)
-	if n, err := env.Hub.ExpireApprovals(context.Background(), env.Now.Now()); err != nil || n != 1 {
-		t.Fatalf("expire = %d, %v", n, err)
-	}
-	wantViews(t, env, operatorView{"activity", &sent.ThreadID}, operatorView{"activity", &sent.ThreadID})
 }
 
 func TestOperatorViewAppendFailureRollsBackRead(t *testing.T) {

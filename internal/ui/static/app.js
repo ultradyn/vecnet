@@ -20,6 +20,9 @@ import * as thread from './thread.js';
 
 const SECRET_KEY = 'vecnet.ui.secret';
 const PEERS_REFRESH = 60000;
+// Activity in a thread the operator is not in sends the operator no Event
+// (PROTOCOL §2.13), so Other Threads also polls, only while the tab is shown.
+const OTHERS_REFRESH = 30000;
 const CONN_CLASS = { live: 'live', offline: 'off', stopped: 'off' };
 const $ = id => document.getElementById(id);
 
@@ -164,10 +167,8 @@ function start(secret) {
     s.me = op.peer_id;
     s.ctx = { api, store, me: s.me, nameOf, kindOf, peers, threads, inboxHead, toast, nav: hash => { location.hash = hash; } };
     s.offs.push(presence.renderNav($('me'), s.ctx), presence.startHeartbeat(s.ctx));
-    // others: activity in a thread the operator is not in (operator_view
-    // "activity", PROTOCOL §2.13); threads: the operator's own sends and
-    // reads, which can move a thread into Your Threads.
-    s.others = store.resource(['threads', 'others'], () => api.threads({ excludeParticipant: s.me, limit: s.otherLimit }));
+    // Tagged threads: the operator's own sends and reads re-sort it at once.
+    s.others = store.resource('threads', () => api.threads({ excludeParticipant: s.me, limit: s.otherLimit }));
     s.offs.push(s.others.subscribe(() => { if (session === s) renderRoute(s); }));
   };
   const redraw = () => { if (session === s) { ready(); renderRoute(s); } };
@@ -184,11 +185,10 @@ function start(secret) {
     peers.subscribe(redraw),
   );
   const refresh = setInterval(() => peers.reload(), PEERS_REFRESH);
-  // Events keep Other Threads live; a tab shown again also re-reads it, so its
-  // relative times are fresh.
   const reloadOthers = () => { if (s.others && !document.hidden) s.others.reload(); };
+  const othersTimer = setInterval(reloadOthers, OTHERS_REFRESH);
   document.addEventListener('visibilitychange', reloadOthers);
-  s.offs.push(() => clearInterval(refresh), () => document.removeEventListener('visibilitychange', reloadOthers));
+  s.offs.push(() => clearInterval(refresh), () => clearInterval(othersTimer), () => document.removeEventListener('visibilitychange', reloadOthers));
   redraw();
 
   // The pump waits for the directory so conn stays "connecting" until the

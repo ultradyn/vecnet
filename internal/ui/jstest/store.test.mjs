@@ -551,9 +551,6 @@ test('tagsFor operator_view mirrors opapi.Tags', () => {
     [{ reason: 'read', thread_id: 'thr_x' }, ['inbox', 'threads', 'peers', 'thread:thr_x']],
     [{ reason: 'presence', thread_id: null }, ['inbox', 'threads', 'peers']],
     [{ reason: 'sent', thread_id: '' }, ['inbox', 'threads', 'peers']],
-    [{ reason: 'activity', thread_id: 'thr_x' }, ['others', 'thread:thr_x']],
-    [{ reason: 'activity', thread_id: null }, ['others']],
-    [{ reason: 'future_reason', thread_id: 'thr_x' }, ['inbox', 'threads', 'peers', 'thread:thr_x']],
     [{ reason: 7, thread_id: 'thr_x' }, []],
     [{ reason: null, thread_id: null }, []],
     [{ reason: null, Reason: 'read', thread_id: null }, []],
@@ -564,31 +561,4 @@ test('tagsFor operator_view mirrors opapi.Tags', () => {
     [{ reason: 'read', thread_id: 7 }, []],
     ['x', []],
   ]) assert.deepEqual(tagsFor({ type: 'operator_view', data }), want, JSON.stringify(data));
-});
-
-test('a resource with several tags reloads on any of them, once per batch', async () => {
-  const store = createStore({ api: {} });
-  let loads = 0;
-  const res = store.resource(['threads', 'others'], async () => ({ n: ++loads }));
-  res.subscribe(() => {});
-  await store.settled();
-  assert.equal(loads, 1);
-  store.invalidate('others');
-  await store.settled();
-  assert.equal(loads, 2);
-  store.invalidate('threads');
-  await store.settled();
-  assert.equal(loads, 3);
-  // activity tags reach it, not an inbox-only resource.
-  let inboxLoads = 0;
-  const inbox = store.resource('inbox', async () => ({ n: ++inboxLoads }));
-  inbox.subscribe(() => {});
-  await store.settled();
-  store.invalidate(...tagsFor({ type: 'operator_view', data: { reason: 'activity', thread_id: 'thr_x' } }));
-  await store.settled();
-  assert.equal(loads, 4);
-  assert.equal(inboxLoads, 1);
-  store.invalidate('others', 'threads');
-  await store.settled();
-  assert.equal(loads, 5);
 });

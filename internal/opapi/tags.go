@@ -67,13 +67,7 @@ func Tags(ev envelope.Event) []string {
 		if json.Unmarshal(data["thread_id"], &thread) != nil {
 			return empty
 		}
-		// activity is a message in a thread the operator is not in: only the
-		// views that list such threads, not the inbox or directory. Any other
-		// reason, known or not, invalidates the operator's whole view.
 		tags := []string{"inbox", "threads", "peers"}
-		if *reason == "activity" {
-			tags = []string{"others"}
-		}
 		if thread != nil && *thread != "" {
 			tags = append(tags, "thread:"+*thread)
 		}

@@ -6,7 +6,5 @@
  {"event":{"type":"directory_updated","data":{"peer_id":"peer_directory","change":"updated"}},"tags":["peers"]},
  {"event":{"type":"approval_expired","data":{"approval_id":"apr_example","thread_id":"thr_expired"}},"tags":["inbox","thread:thr_expired"]},
  {"event":{"type":"reaction","data":{"thread_id":"thr_reaction","message_id":"msg_target","peer_id":"peer_reactor","emoji":"\u2705","op":"add","at":"2026-11-03T00:00:00.000Z"}},"tags":["thread:thr_reaction"]},
- {"event":{"type":"operator_view","data":{"reason":"read","thread_id":"thr_read"}},"tags":["inbox","threads","peers","thread:thr_read"]},
- {"event":{"type":"operator_view","data":{"reason":"activity","thread_id":"thr_other"}},"tags":["others","thread:thr_other"]},
  {"event":{"type":"future_event","data":{}},"tags":[]}
 ]

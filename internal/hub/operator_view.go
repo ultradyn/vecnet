@@ -47,18 +47,6 @@ func (h *Hub) noteOperatorView(ctx context.Context, tx *sql.Tx, reason string, t
 	return peers, nil
 }
 
-// noteThreadActivity tells enabled operators that are not participants of
-// thr that a message was stored in it (reason "activity"). Participants learn
-// of it from their own delivery Event, so they get nothing extra. Called in
-// the transaction that inserts the message; replays never reach it.
-func (h *Hub) noteThreadActivity(ctx context.Context, tx *sql.Tx, threadID string, participants []string) ([]string, error) {
-	except := make(map[string]bool, len(participants))
-	for _, p := range participants {
-		except[p] = true
-	}
-	return h.noteOperatorView(ctx, tx, "activity", threadID, except)
-}
-
 // NoteOperatorSubscription is the transactional bridge for the subscription
 // store (which lives in package events). It returns log owners to notify after
 // commit, and cannot publish another reason or thread from that package.

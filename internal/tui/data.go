@@ -46,9 +46,7 @@ type ThreadState struct {
 
 // TagAll asks Reload for every resource and every opened thread. The other tags
 // are resource keys: opapi.Tags' "inbox", "threads", "peers" and "thread:<id>",
-// and the untagged "subs", "cuts", "health", "audit" and "counters". opapi's
-// "others" (activity in a thread the operator is not in) reloads "threads",
-// which lists every thread.
+// and the untagged "subs", "cuts", "health", "audit" and "counters".
 const TagAll = "all"
 
 const (
@@ -136,8 +134,6 @@ func (m *Model) expand(tags []string) []string {
 			for id := range m.Data.Thread {
 				add(threadPrefix + id)
 			}
-		case tag == "others":
-			add("threads")
 		case strings.HasPrefix(tag, threadPrefix):
 			if m.Data.Thread[strings.TrimPrefix(tag, threadPrefix)] != nil {
 				add(tag)

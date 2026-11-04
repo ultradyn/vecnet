@@ -46,8 +46,7 @@ export function mount(root, ctx) {
   const res = {
     counters: store.resource('peers', () => api.counters()),
     peers: store.resource('peers', () => api.adminPeers()),
-    // others: operator_view "activity", a message in a thread the operator is not in.
-    threads: store.resource(['threads', 'others'], () => allThreads(api, THREAD_PAGE)),
+    threads: store.resource('threads', () => allThreads(api, THREAD_PAGE)),
     health: store.resource('peers', () => api.deliveryHealth()),
     dead: store.resource('peers', () => api.deadLetters()),
     cuts: store.resource('peers', () => api.loopCuts(24)),

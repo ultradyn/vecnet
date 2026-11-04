@@ -19,9 +19,7 @@ export function tagsFor(ev) {
   const type = ev && ev.type, data = ev && ev.data;
   if (type === 'operator_view') {
     if (!isObject(data) || typeof data.reason !== 'string' || !(data.thread_id === null || typeof data.thread_id === 'string')) return [];
-    // activity: a message in a thread the operator is not in (§2.13). Any
-    // other reason, known or not, invalidates the whole operator view.
-    const tags = data.reason === 'activity' ? ['others'] : ['inbox', 'threads', 'peers'];
+    const tags = ['inbox', 'threads', 'peers'];
     return data.thread_id ? [...tags, 'thread:' + data.thread_id] : tags;
   }
   const known = type === 'presence' || type === 'directory_updated' || Object.hasOwn(THREAD_TAGS, type);
@@ -75,9 +73,7 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
   // was invalidated meanwhile. It stops being reachable when its last
   // subscriber leaves, and catches up when one returns, so a screen that
   // unmounts stops costing requests.
-  // tag is one invalidation tag or a list of them; any one reloads it.
   function resource(tag, loader) {
-    const tags = Array.isArray(tag) ? tag : [tag];
     const subs = new Set();
     let value, err = null, dirty = false, running = null, stale = true;
 
@@ -113,7 +109,7 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
       return running;
     }
     const self = {
-      tags,
+      tag,
       start,
       mark() { dirty = true; queueFlush(); },
       get: () => value,
@@ -150,7 +146,7 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
   // batch invalidated has been shown.
   function invalidate(...tags) {
     const marked = [];
-    for (const r of live) if (r.tags.some(t => tags.includes(t))) { r.mark(); marked.push(r); }
+    for (const r of live) if (tags.includes(r.tag)) { r.mark(); marked.push(r); }
     return marked;
   }
   function invalidateAll() {

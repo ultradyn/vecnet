@@ -349,22 +349,16 @@ unknown event types or undecodable data invalidate nothing:
 | `thread_updated` | `threads`, `thread:<thread_id>` |
 | `presence`, `directory_updated` | `peers` |
 | `approval_expired` | `inbox`, `thread:<thread_id>` |
-| `operator_view` | `inbox`, `threads`, `peers`, plus `thread:<thread_id>` when non-empty; for reason `activity`, only `others` plus `thread:<thread_id>` when non-empty |
+| `operator_view` | `inbox`, `threads`, `peers`, plus `thread:<thread_id>` when non-empty |
 
 `operator_view` is appended only to enabled operator peers, in the transaction
 that changes a view. Its data is `{reason, thread_id}`: `reason` is `sent`,
-`read`, `presence`, `dead_letter`, `subscription`, `reaction` (§17.3), or `activity`; `thread_id` is a `thr_`
+`read`, `presence`, `dead_letter`, `subscription`, or `reaction` (§17.3); `thread_id` is a `thr_`
 id or `null`. It fires for a new operator send (including approval responses),
 a newly read operator delivery, a changed effective operator presence, a
 dead-letter retry or discard, or a subscription pause or resume. Idempotent
 sends, repeated reads, unchanged presence heartbeats, and unchanged
-subscriptions emit none. `activity` goes, in the transaction that stores a
-Message (including the hub's approval-expiry notice), to each enabled operator
-peer that is not a participant of its thread; participants already receive the
-`delivery` Event, and an idempotent replay stores nothing and emits none. The
-`others` tag names views that list threads the operator is not in (the web
-sidebar's Other Threads and the dashboard's thread list). A client that treats
-`activity` like any other reason over-invalidates, which is safe. For a changed reaction, it is sent to enabled operator peers that did not receive the `reaction` Event (§17.3). It is not pushed to agents or MCP Events. Data that
+subscriptions emit none. For a changed reaction, it is sent to enabled operator peers that did not receive the `reaction` Event (§17.3). It is not pushed to agents or MCP Events. Data that
 is not an object, a non-string `reason`, or a `thread_id` that is neither a
 string nor null invalidates nothing.
 
