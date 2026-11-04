@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-05: MCP logs sanitized request/subscribe outcomes, publishes ChatGPT-safe event schemas, echoes supported June 2025 sessions, and adds caller-scoped `vecnet_subscriptions` with verified health and explicit client-only setup/inbox fallback (mcpserver, PROTOCOL §4, connectors/dots.md).
 - 2026-11-05: CLI watch and MCP relay keep hub outages silent for 5 s, then announce once with elapsed seconds and report recovery only for announced outages; details still resume after 60 s (`internal/cli/reconnect.go`, PROTOCOL §13.1/13.7, OPERATOR, DEPLOY).
 - 2026-11-05: extend the single-source MCP guide with runnable send/reply examples, ack/receipt, durable cursor/dedupe, priority/expiry and ChatGPT Work/Cloud/Rescan guidance; send schema errors point to the examples (guide.go, tools.go, PROTOCOL §4.6, connectors/dots.md).
 - 2026-11-05: add caller-aware read-only `vecnet_guide` and matching `vecnet_setup` MCP prompt for dot subscriptions and agent inbox/reply routines; discovery points to the shared guide (internal/mcpserver/guide.go, PROTOCOL §4.3/4.6, connectors/dots.md).

@@ -152,6 +152,26 @@ func TestGuide(t *testing.T) {
 							if got.Subscribe == nil || got.Subscribe.Event != "vecnet.message" || len(got.Subscribe.Args) != 0 || !reflect.DeepEqual(got.Subscribe.AllowedTypes, []string{"delivery", "receipt", "thread_updated", "approval_expired"}) {
 								t.Fatalf("dot subscribe: %+v", got.Subscribe)
 							}
+							if wantTopic == "start" || wantTopic == "events" {
+								for _, needle := range []string{
+									"You, the model, cannot subscribe. There is no model tool for it. ChatGPT's client does it when the user asks.",
+									"no client subscribe action is exposed to the model",
+									"confirm the vecnet.message event appears beside the tools; if it does not, Rescan",
+									"Work chat (web, or desktop with Work + Cloud) or a dot",
+									"Subscribe to the vecnet.message event from the vecnet plugin with no arguments, and when an event arrives, read it and reply via vecnet.",
+									"Workspace controls for plugins and event-triggered tasks must allow it",
+									"Call vecnet_subscriptions with no arguments",
+									"If its subscriptions list is empty, the subscription is not active",
+									"tell the user to follow the plugin-page, Rescan and Work chat or dot steps above",
+									"use vecnet_inbox meanwhile",
+									"Never claim you subscribed",
+									"Handle every event on the page",
+								} {
+									if !strings.Contains(got.Text, needle) {
+										t.Errorf("dot %s guide lacks %q: %s", wantTopic, needle, got.Text)
+									}
+								}
+							}
 						} else if got.Subscribe != nil || strings.Contains(got.Text, "vecnet.message") {
 							t.Fatalf("%s has dot subscription guidance: %s", tc.kind, got.Text)
 						}
@@ -177,7 +197,7 @@ func TestGuide(t *testing.T) {
 					}
 					needles := []string{"vecnet_reply", "message_id", "wake_idle", "reply-", "delivery_id", "idempotency_conflict", "vecnet_receipt", "processed", "untrusted", "vecnet_thread", "recipients", "content", "vecnet_ack", "accepted", "human", "read", "failed", "at-least-once", "expires_at", "durably", "hold", "working", "unknown"}
 					if tc.kind == "dot" {
-						needles = append(needles, "data.data.message.content.text", "data.preview", "vecnet_inbox", "refreshBefore", "id", "peer_id", "vecnet_whoami", "not a model tool", "Work chat", "Cloud", "Rescan", "plugin page", "natural language", "events/subscribe")
+						needles = append(needles, "data.data.message.content.text", "data.preview", "vecnet_inbox", "refreshBefore", "id", "peer_id", "vecnet_whoami", "not a model tool", "Work chat", "Cloud", "Rescan", "plugin page", "natural language", "events/subscribe", "vecnet_subscriptions", "Never claim you subscribed")
 					} else {
 						needles = append(needles, "vecnet_inbox", "next_cursor", "vecnet_ack", "notifications/resources/updated", "vecnet_presence_subscribe", "cursor_purged", "oldest_cursor", "cursor for other inbox events")
 					}
