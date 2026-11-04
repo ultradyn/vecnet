@@ -19,10 +19,13 @@ The hub runs as one always-on Fly.io machine (`shared-cpu-1x`, 512 MB) with a vo
 | `--listen` | `VECNET_LISTEN` | `127.0.0.1:45752` |
 | `--data-dir` | `VECNET_DATA_DIR` | `/data` |
 | `--public-url` | `VECNET_PUBLIC_URL` | `http://<bound listen address>` |
+| `--mcp-allowed-origins` | `VECNET_MCP_ALLOWED_ORIGINS` | extra `/mcp` origin `https://chatgpt.com`; `none` for public origin only |
 | `--allow-private-egress` | `VECNET_ALLOW_PRIVATE_EGRESS=1` | off; development only, see [Connectors](#connectors) |
 | `--trust-fly-client-ip` | `VECNET_TRUST_FLY_CLIENT_IP=1` | off; on in `fly.toml`, see [Public exposure](#public-exposure) |
 
 The public URL is the origin the hub writes into attachment `blob_url` links, so on Fly it must be the `https://` address clients use. The image's entrypoint sets `--listen` and `--data-dir`; `fly.toml` sets `VECNET_PUBLIC_URL`. On start the hub prints `vecnet-hub listening on http://<addr> (public url <url>)`.
+
+`--mcp-allowed-origins` replaces the extra-origin set with comma-separated exact HTTP(S) origins, for example `https://chatgpt.com,https://client.example:8443`. Empty (including an empty flag overriding the environment) restores `https://chatgpt.com`; literal `none` disables extras. The public origin is always allowed. Each entry must be `scheme://host[:port]`: no path or trailing slash, userinfo, query, fragment, wildcard or `null`. Surrounding list-entry whitespace is trimmed, case and default ports are normalized, and a malformed entry aborts startup before opening the listener or store. No CORS headers or OPTIONS support are added. The setting applies only to `/mcp`; OAuth endpoints retain their existing checks.
 
 ## First deploy
 
@@ -57,7 +60,7 @@ The public origin is `https://vecnet.xk.io`, not `vecnet.fly.dev`, so the hub ca
 3. `fly certs check vecnet.xk.io -a vecnet` shows `Issued`.
 4. `fly.toml` sets `VECNET_PUBLIC_URL = "https://vecnet.xk.io"`; `just fly-deploy`.
 
-`VECNET_PUBLIC_URL` is the OAuth issuer and the `/mcp` audience, and a request with any other `Origin` gets 403. So browsers and dots must use the custom domain. The CLI sends no `Origin`, so `vecnet.fly.dev` still works for it, but profiles should use `https://vecnet.xk.io`. To change domain later, add the new cert and records, switch `VECNET_PUBLIC_URL`, redeploy, and re-link dots: their tokens name the old issuer. [Issue 41](../.scratch/vecnet/issues/41-hub-notices-and-relocation.md) plans notices and verified relocation for this.
+`VECNET_PUBLIC_URL` is the OAuth issuer and the `/mcp` audience, so clients must use the configured custom domain. A present `/mcp` `Origin` must be that public origin or an allowed extra origin (default `https://chatgpt.com`); any other origin gets 403 before authentication. The CLI sends no `Origin`, so `vecnet.fly.dev` still works for it, but profiles should use `https://vecnet.xk.io`. To change domain later, add the new cert and records, switch `VECNET_PUBLIC_URL`, redeploy, and re-link dots: their tokens name the old issuer. [Issue 41](../.scratch/vecnet/issues/41-hub-notices-and-relocation.md) plans notices and verified relocation for this.
 
 ## Public exposure
 
@@ -74,7 +77,9 @@ The hub is invite-only on the open internet: every way in needs a secret the ope
 
 **Public HTTPS is required for dots.** ChatGPT reaches `/mcp`, the OAuth endpoints and the metadata documents over the public internet, and OpenAI's Secure MCP Tunnel is not supported. The hub's custom domain `https://vecnet.xk.io` (served by Fly) is enough. Grok Bots (for `/mcp`) and GitHub webhooks (for `/v1/ingress/…`) need the same public origin.
 
-**`VECNET_PUBLIC_URL` must be that exact origin.** It is more than a link prefix here: it is the OAuth issuer, it sets the `/mcp` token audience, and a request carrying any other `Origin` header gets 403.
+**`VECNET_PUBLIC_URL` must be that exact origin.** It is more than a link prefix here: it is the OAuth issuer, it sets the `/mcp` token audience, and it is always allowed by the `/mcp` Origin guard. Extra origins come from `VECNET_MCP_ALLOWED_ORIGINS` (default `https://chatgpt.com`), independently of issuer and audience. An allowed Origin without credentials still receives the 401 discovery challenge.
+
+**Dot profile and acceptance.** `vecnet_whoami` returns a required stable `id` in structured content: the linked dot's peer id, independent of access-token refresh and display name. Linking another account to that same peer keeps the profile id while revoking the previous account's tokens. The hub still uses built-in OAuth and operator-issued link codes. Live ChatGPT installation and event acceptance remain pending operator work; follow the [dot checklist](connectors/dots.md#live-test-checklist), recording requested/negotiated protocol, whether an Origin was sent, profile identity and confirmation prompts. `fly logs` records allowed foreign origins, including ordinary `/mcp` requests, using the existing sanitized diagnostics.
 
 **`VECNET_ALLOW_PRIVATE_EGRESS` is dev-only.** By default every outbound POST (push routes, notification routes, Events callbacks, Grok Bot routines, CIMD fetches) is https, resolved once to a public unicast address, pinned to it, and never follows a redirect. `--allow-private-egress`, or the variable set to `1`, lets those URLs be http and reach private or loopback addresses so LAN receivers work on xsm. It also lifts the port 443 rule on Events callbacks and CIMD fetches. It removes the hub's protection against being pointed at internal services, so never set it on Fly; `fly.toml` does not.
 

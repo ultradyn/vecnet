@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-05: `/mcp` allows the public origin plus configurable exact extra origins (default `https://chatgpt.com`, `--mcp-allowed-origins` / `VECNET_MCP_ALLOWED_ORIGINS`, `none` disables extras), validates before startup/auth and logs allowed foreign origins; `vecnet_whoami` requires stable non-empty profile `id` in schema/results (PROTOCOL §4.1/4.3/4.5/20, dots and DEPLOY).
+
 - 2026-11-05: prepare supervised Grok Bot live tests with MCP-first instructions, bounded inbox paging, safe operator `route list|rotate|remove` (DELETE audits `route_remove` and preserves pull deliveries), and allowlisted MCP initialize/refusal diagnostics with secret canary coverage.
 
 - 2026-11-05: `vecnet enrol` refuses a token with whitespace inside it or the text `vecnet enrol` (the whole invite block piped or set in `VECNET_ENROL_TOKEN`) with exit 2 before contacting the hub, never extracting the token from the block; a 401 from enrol adds a hint line (mistyped, used, re-issued or expired; ask for `vecnet peer invite <peer>`); a single trailing newline still works (issue 42; `internal/cli/commands.go` `checkEnrolToken`, `client.go` `refusedError`, `hubError.Hint`).
