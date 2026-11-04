@@ -87,12 +87,15 @@ func stringsField(top map[string]json.RawMessage, name string) ([]string, error)
 	if !has {
 		return nil, nil
 	}
-	var out []string
-	if isNull(raw) || json.Unmarshal(raw, &out) != nil {
+	var elements []json.RawMessage
+	if isNull(raw) || json.Unmarshal(raw, &elements) != nil {
 		return nil, &envelope.SchemaError{Path: "/" + name, Message: name + " must be an array of strings"}
 	}
-	if out == nil {
-		out = []string{}
+	out := make([]string, len(elements))
+	for i, element := range elements {
+		if isNull(element) || json.Unmarshal(element, &out[i]) != nil {
+			return nil, &envelope.SchemaError{Path: "/" + name + "/" + strconv.Itoa(i), Message: "must be a string"}
+		}
 	}
 	return out, nil
 }

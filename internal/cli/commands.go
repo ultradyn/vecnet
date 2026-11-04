@@ -1184,27 +1184,39 @@ func (a *app) emitObject(out map[string]any, keys ...string) error {
 
 func (a *app) cmdPrincipal(args []string) error {
 	const usage = "usage: vecnet principal add --name N | principal limits <prn> --max-peers N --creates-per-hour N --kinds K[,K] | principal scope <prn> [--allow IDS] [--deny IDS] | principal list"
-	if len(args) == 0 {
-		return usageErr(usage)
+	specs := map[string]map[string]flagKind{
+		"add":    {"name": strFlag},
+		"limits": {"max-peers": strFlag, "creates-per-hour": strFlag, "kinds": strFlag},
+		"scope":  {"allow": multiFlag, "deny": multiFlag},
+		"list":   {},
 	}
-	var spec map[string]flagKind
-	switch args[0] {
-	case "add":
-		spec = map[string]flagKind{"name": strFlag}
-	case "limits":
-		spec = map[string]flagKind{"max-peers": strFlag, "creates-per-hour": strFlag, "kinds": strFlag}
-	case "scope":
-		spec = map[string]flagKind{"allow": multiFlag, "deny": multiFlag}
-	case "list":
-		spec = map[string]flagKind{}
-	default:
-		return usageErr(usage)
+	// Parse the complete slice so flag values cannot be mistaken for a
+	// subcommand, and flags may appear before or after any positional.
+	allFlags := map[string]flagKind{}
+	for _, spec := range specs {
+		for name, kind := range spec {
+			allFlags[name] = kind
+		}
 	}
-	o, err := parseFlags("principal "+args[0], args[1:], spec)
+	o, err := parseFlags("principal", args, allFlags)
 	if err != nil {
 		return err
 	}
-	switch args[0] {
+	if len(o.pos) == 0 {
+		return usageErr(usage)
+	}
+	sub := o.pos[0]
+	spec, ok := specs[sub]
+	if !ok {
+		return usageErr(usage)
+	}
+	for name := range o.vals {
+		if _, ok := spec[name]; !ok {
+			return usageErr(fmt.Sprintf("principal %s: unknown flag --%s", sub, name))
+		}
+	}
+	o.pos = o.pos[1:]
+	switch sub {
 	case "add":
 		if len(o.pos) != 0 || o.str("name") == "" {
 			return usageErr(usage)
@@ -1264,7 +1276,7 @@ func (a *app) cmdPrincipal(args []string) error {
 				scopes = fmt.Sprintf("allow %d deny %d", len(p.DefaultAllow), len(p.DefaultDeny))
 			}
 			fmt.Fprintf(a.stdout, "%s  %s  active %d/%d  disabled %d  creates/h %d/%d  kinds %s  default-scopes %s\n",
-				p.PrincipalID, p.Name, p.Active, p.MaxPeers, p.Disabled, p.CreatesLastHour, p.CreatesPerHour, strings.Join(p.Kinds, ","), scopes)
+				p.PrincipalID, flatten(p.Name), p.Active, p.MaxPeers, p.Disabled, p.CreatesLastHour, p.CreatesPerHour, strings.Join(p.Kinds, ","), scopes)
 		}
 		return nil
 	}

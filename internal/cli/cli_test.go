@@ -1077,3 +1077,79 @@ func TestPeerAddLauncherKind(t *testing.T) {
 		t.Fatalf("launcher directory: %s", peers)
 	}
 }
+
+func TestPrincipalInterleavedFlags(t *testing.T) {
+	env := testhub.Start(t)
+	op := profileUser(t, env.URL, env.OperatorSecret)
+	prn, _ := env.NewPrincipal("interleaved")
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"add", []string{"--name", "limits", "add"}},
+		{"add-equals", []string{"--name=scope", "add"}},
+		{"limits", []string{"--max-peers", "2", "limits", "--creates-per-hour", "12", prn, "--kinds", "pagchat-bot"}},
+		{"limits-all-before", []string{"--max-peers=2", "--creates-per-hour=12", "--kinds=pagchat-bot", "limits", prn}},
+		{"scope", []string{"--allow", env.OperatorPeer, "scope", prn}},
+		{"scope-equals", []string{"--deny=" + env.OperatorPeer, "scope", prn}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out, errs := op.run(append([]string{"principal"}, tc.args...)...)
+			if code != 0 || out == "" || errs != "" {
+				t.Fatalf("principal %q: exit %d, stdout %q, stderr %q", tc.args, code, out, errs)
+			}
+		})
+	}
+	// Flags for other subcommands must still be rejected, wherever they occur.
+	for _, args := range [][]string{
+		{"--name", "P", "list"},
+		{"add", "--name", "P", "--kinds", "pagchat-bot"},
+		{"--allow", env.OperatorPeer, "limits", prn, "--max-peers", "2", "--creates-per-hour", "12", "--kinds", "pagchat-bot"},
+		{"scope", prn, "--max-peers", "2"},
+	} {
+		code, _, errs := op.run(append([]string{"principal"}, args...)...)
+		if code != 1 || !strings.Contains(errs, "unknown flag") {
+			t.Errorf("principal %q: exit %d, stderr %q; want unknown flag usage error", args, code, errs)
+		}
+	}
+}
+
+func TestPrincipalListFlattensNames(t *testing.T) {
+	env := testhub.Start(t)
+	name := "first\nsecond\r\nthird\t\x1b[31m\x7f\u0085\u2028\u2029last"
+	prn, _ := env.NewPrincipal(name)
+	op := profileUser(t, env.URL, env.OperatorSecret)
+	human := op.mustRun("principal", "list")
+	raw := op.mustRun("--json", "principal", "list")
+	var rows []struct {
+		PrincipalID string `json:"principal_id"`
+		Name        string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(raw), &rows); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(human, "\n"), "\n")
+	if len(lines) != len(rows) {
+		t.Errorf("got %d lines for %d principals: %q", len(lines), len(rows), human)
+	}
+	found := false
+	for _, row := range rows {
+		if row.PrincipalID == prn {
+			found = true
+			if row.Name != name {
+				t.Errorf("JSON name = %q, want original %q", row.Name, name)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("principal missing from JSON")
+	}
+	wantPrefix := prn + "  first second third  [31m    last  active "
+	for _, line := range lines {
+		if strings.HasPrefix(line, prn+"  ") && strings.HasPrefix(line, wantPrefix) {
+			return
+		}
+	}
+	t.Fatalf("missing safe principal line starting %q in %q", wantPrefix, human)
+}

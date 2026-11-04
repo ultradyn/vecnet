@@ -334,3 +334,44 @@ func TestAdminDefaultScopes(t *testing.T) {
 		t.Fatalf("cleared defaults: %v", row)
 	}
 }
+
+func TestAdminPrincipalPolicyRejectsNonStringElements(t *testing.T) {
+	env := testhub.Start(t)
+	prn, _ := env.NewPrincipal("unchanged policy")
+	denied, _ := env.NewPeer("session", "denied")
+	base := "/v1/admin/principals/" + prn
+	adminDo(t, env, "PUT", base+"/limits", map[string]any{"max_peers": 3, "creates_per_hour": 12, "kinds": []string{"pagchat-bot"}}, 204)
+	adminDo(t, env, "PUT", base+"/default-scopes", map[string][]string{"allow": {env.OperatorPeer}, "deny": {denied}}, 204)
+	before := principalRow(t, env, prn)
+	for _, field := range []string{"kinds", "allow", "deny"} {
+		for _, value := range []string{"null", "1", "true", `{}`, `[]`} {
+			for _, index := range []int{0, 1} {
+				t.Run(field+"/"+value+"/"+strconv.Itoa(index), func(t *testing.T) {
+					path := "/default-scopes"
+					valid := strconv.Quote(env.OperatorPeer)
+					if field == "kinds" {
+						path = "/limits"
+						valid = `"launcher"`
+					}
+					items := value
+					if index == 1 {
+						items = valid + "," + value
+					}
+					body := `{"` + field + `":[` + items + `]}`
+					if field == "kinds" {
+						body = `{"max_peers":9,"creates_per_hour":99,"kinds":[` + items + `]}`
+					}
+					resp, raw := env.Do(env.OperatorSecret, "PUT", base+path, json.RawMessage(body))
+					e := mustErr(t, resp, raw, 400, "invalid_body")
+					want := "/" + field + "/" + strconv.Itoa(index)
+					if e.Error.Details["path"] != want {
+						t.Errorf("details.path = %v, want %s", e.Error.Details["path"], want)
+					}
+					if after := principalRow(t, env, prn); !reflect.DeepEqual(before, after) {
+						t.Errorf("policy changed after invalid request: before %v, after %v", before, after)
+					}
+				})
+			}
+		}
+	}
+}
