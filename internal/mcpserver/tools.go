@@ -324,14 +324,71 @@ func callInbox(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, 
 	if err != nil {
 		return nil, err
 	}
-	res := inboxResult{Events: evs, NextCursor: cur.String()}
-	if res.Events == nil {
-		res.Events = []envelope.Event{}
+	res := inboxResult{NextCursor: cur.String()}
+	if res.Events, err = withoutBlobURLs(evs); err != nil {
+		return nil, err
 	}
 	if n := len(evs); n > 0 {
 		res.NextCursor = evs[n-1].Cursor
 	}
 	return res, nil
+}
+
+// withoutBlobURLs returns a copy of evs in which no attachment carries a
+// blob_url. A Delivery's blob_url holds a per-recipient read token (?t=),
+// and no MCP result may carry one (PROTOCOL §4.3): an MCP client reads
+// the bytes with vecnet_blob_get by sha256. The stored log, GET
+// /v1/events and pushes keep the Delivery bytes unchanged.
+func withoutBlobURLs(evs []envelope.Event) ([]envelope.Event, error) {
+	out := make([]envelope.Event, len(evs))
+	for i, ev := range evs {
+		out[i] = ev
+		if !bytes.Contains(ev.Data, []byte(`"blob_url"`)) {
+			continue
+		}
+		data, err := dataWithoutBlobURLs(ev.Data)
+		if err != nil {
+			return nil, fmt.Errorf("mcp: event %s: %w", ev.Cursor, err)
+		}
+		out[i].Data = data
+	}
+	return out, nil
+}
+
+// dataWithoutBlobURLs drops blob_url from data.message.attachments; every
+// other value keeps its bytes.
+func dataWithoutBlobURLs(data json.RawMessage) (json.RawMessage, error) {
+	var d, msg map[string]json.RawMessage
+	if err := json.Unmarshal(data, &d); err != nil {
+		return nil, err
+	}
+	if len(d["message"]) == 0 {
+		return data, nil
+	}
+	if err := json.Unmarshal(d["message"], &msg); err != nil {
+		return nil, err
+	}
+	raw := msg["attachments"]
+	if len(raw) == 0 || string(raw) == "null" {
+		return data, nil
+	}
+	var atts []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &atts); err != nil {
+		return nil, err
+	}
+	var b bytes.Buffer
+	b.WriteByte('[')
+	for i, a := range atts {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		delete(a, "blob_url")
+		b.Write(encodeFields(a))
+	}
+	b.WriteByte(']')
+	msg["attachments"] = b.Bytes()
+	d["message"] = encodeFields(msg)
+	return encodeFields(d), nil
 }
 
 func (s *Server) inboxCursor(ctx context.Context, after string, owners []string, ackOwner, ackScope string) (eventlog.Cursor, error) {

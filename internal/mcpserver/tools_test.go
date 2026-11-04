@@ -831,7 +831,8 @@ func TestAttachmentURLsRejected(t *testing.T) {
 		t.Fatalf("repeated attachments: %s", res.StructuredContent)
 	}
 
-	// A hash the sender uploaded is still sent, and the hub sets blob_url.
+	// A hash the sender uploaded is still sent. The hub's per-recipient
+	// blob_url stays off the MCP result (TestInboxCarriesNoBlobToken).
 	var inbox inboxResult
 	toolOK(t, env, bSecret, "vecnet_inbox", map[string]any{}, &inbox)
 	ds := inbox.deliveries()
@@ -839,8 +840,8 @@ func TestAttachmentURLsRejected(t *testing.T) {
 		t.Fatalf("B has %d deliveries, want 2", len(ds))
 	}
 	got := ds[1].Data.Message.Attachments
-	if len(got) != 1 || got[0].SHA256 != sha || got[0].OriginURL != "" || got[0].BlobURL == "" {
-		t.Fatalf("delivered attachments = %+v, want %s with only a hub blob_url", got, sha)
+	if len(got) != 1 || got[0].SHA256 != sha || got[0].OriginURL != "" || got[0].BlobURL != "" {
+		t.Fatalf("delivered attachments = %+v, want %s with no URL", got, sha)
 	}
 }
 

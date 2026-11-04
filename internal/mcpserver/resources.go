@@ -211,6 +211,10 @@ func (s *Server) resourcesRead(ctx context.Context, sess *Session, req *Request)
 	if err != nil {
 		return nil, err
 	}
+	// Like vecnet_inbox, an MCP read carries no blob_url token (§4.3).
+	if evs, err = withoutBlobURLs(evs); err != nil {
+		return nil, err
+	}
 	text, err := json.Marshal(map[string]any{"events": evs, "next_cursor": next})
 	if err != nil {
 		return nil, err
