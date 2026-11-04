@@ -61,11 +61,26 @@
 - **Never answer approvals or questions.** A server request (a message with `id` and `method`) is logged by method name and never answered, not even with an error. The first answer wins for every subscriber ([R] §5).
 - **Peer text only as untrusted context.** `input` is one text item: the Go `stub`, which contains no peer bytes. Peer text goes only in `additionalContext` entries `{kind:"untrusted", name:"vecnet_inbox"}`. Each entry is one delivery's full `hookContext` block, inside `hookTrust` and `<vecnet-inbox untrusted="true">`. `kind:"application"` (developer-role) is never sent.
 - **1000-token cap.** Each entry is at most `appServerEntryBytes = 1000` UTF-8 bytes. Tokens never exceed bytes, so Codex's middle-truncation never cuts the block. An item that fits at no excerpt length becomes a **pointer**: the stub names `<cmd> inbox`. At most `hookMaxItems = 8` entries go in one send; the rest are counted in the stub.
-- **Dedupe by delivery id.** `clientUserMessageId` is not idempotent ([R] §4). The key is `"vn." + first 24 hex of sha256(threadId + "\n" + sorted delivery ids joined by ",")`, sent as `clientUserMessageId` and written to the ledger before the RPC. After an ambiguous outcome (the socket closed before the reply), the engine reconnects and scans `thread/turns/list {limit:5}` for a `userMessage` with `clientId == key`. It runs `--release` only if the key is proven absent.
+- **Dedupe by delivery id.** `clientUserMessageId` is not idempotent ([R] §4). The key is `"vn." + first 24 hex of sha256(threadId + "\n" + sorted delivery ids joined by ",")`, sent as `clientUserMessageId` and written to the ledger before the RPC. After an ambiguous outcome (the socket closed before the reply), the engine reconnects and scans `thread/turns/list {limit:5, itemsView:"full"}` for a `userMessage` with `clientId == key` (the default `summary` view hides steered items, [R] L4). It runs `--release` only if the key is proven absent.
 - **Socket discipline.** The path is `<codexHome>/app-server-control/app-server-control.sock`. It must be a symlink whose target directory has mode `0700` and is owned by our euid, and whose target socket is owned by our euid. Connect only to `ws://localhost/` with the literal path `/`; code refuses `/daemon*`. Never run `codex`, `codex app-server daemon …` or `codex app-server proxy`. A missing or failing socket means `unreachable`; the connector never starts a server.
 - **Version allowlist.** The `initialize` `userAgent` must match `/^[^/\s]+\/(\d+\.\d+\.\d+)/`, with the version in `CODEX_APPSERVER_VERSIONS = ["0.166.0"]` (Task 4). Otherwise the state is `refused_version`: nothing is sent, and one error is logged per connection.
-- **Explicit per-thread opt-in.** Only threads in the bindings file (Task 2) receive anything. Each thread and each `profile@as` appears in at most one binding. A `notLoaded` thread gets nothing and is never resumed. Unbinding takes effect within one 10 s reload.
-- **Priority.** Launcher `planInput(priority, state, {steer:true, queue:"launcher"})` decides. State mapping: Codex `idle` → `idle`; `active` → `turn_running`, or `waiting_approval` when `activeFlags` has `waitingOnApproval`. Plan mapping: `start` → `turn/start`; `steer` → `turn/steer`; `queue-launcher` → wait for idle, then `turn/start`; `buffer` (hold) → nothing, and the hook or `vecnet inbox` picks it up.
+- **Binding liveness belongs to the thread, not to a human** ([R] addendum). Delivery must work agent-to-agent for a 12 h job.
+  - **Explicit bindings** (Task 2) are opt-in per thread. Each thread and each `profile@as` appears in at most one binding. Each binding carries `expires_at`: default `now + 24 h`, `--ttl` from 1 h to 168 h, renewable with `codex bind --renew` (again capped at `now + 168 h`, the hub's 7-day `expires_at` cap).
+  - **`live`** means: not expired, not archived, and status `idle` or `active`. An `active` thread stays live for as long as it is active, with no idle clock.
+  - **`dormant`** means one of the reasons `expired`, `archived` (a `thread/archived` broadcast, or `thread/read` reports it), `not_loaded`, or `idle_stale`.
+    - `idle_stale` applies only when the binding sets `idle_dormant_hours`, which is off by default. A background-terminal job reads `idle` ([R] L2), and an idle thread with a subscriber never unloads ([R] L3).
+    - Any `active` status, or a new turn from any source, ends `idle_stale` and `not_loaded`.
+    - Dormant bindings send nothing; their deliveries stay with the hooks and `vecnet inbox`.
+  - **Explicit threads are never resumed.** An explicit thread stays loaded only while some client is subscribed, such as its TUI. It unloads 60 s after the last client leaves ([R] L3).
+  - **Launcher bindings** (Task 6, for launcher P4): `origin:"launcher"`, `expires_at` = the job's `deadlineAt`, added and removed by the launcher only, and never written to the bindings file.
+    - When their thread is `not_loaded`, the engine calls the binding's `ensureLoaded()`. That hook belongs to the launcher, which owns the thread, so it may `thread/resume` it.
+    - The connector itself never calls `thread/resume` for any origin.
+  - Unbinding or expiry takes effect within one 10 s reload.
+- **Priority → injection.**
+  - `wake`: steer a busy thread, start a turn on an idle one.
+  - `wake_idle`: inject only when idle; never steer.
+  - `hold`: never inject; the hook pulls it on a later turn.
+  - Launcher `planInput(priority, state, {steer:true, queue:"launcher"})` implements this. State mapping: Codex `idle` → `idle`; `active` → `turn_running`, or `waiting_approval` when `activeFlags` has `waitingOnApproval`. Plan mapping: `start` → `turn/start`; `steer` → `turn/steer`; `queue-launcher` → wait for idle, then `turn/start`; `buffer` (hold) → nothing, and the hook or `vecnet inbox` picks it up.
 - **Hooks untouched.** Existing `hookContext` output is byte-identical, and `testdata/hook-hostile.golden` is unchanged.
 - **Secrets and bodies** never reach logs. Logs go through `redactingLog`. Child environments go through `scrubEnv`, allowing only `HOME`, `PATH`, `XDG_CONFIG_HOME`, `XDG_RUNTIME_DIR` and `VECNET_CONFIG`. The stdout of `hook --event app-server` is never logged.
 - **Tests** use `t.TempDir()`/`mkdtemp` and never touch `~/.codex`, `/tmp/codex-daemon-*` or `~/.config/vecnet`. A **(guard)** test passes before its task and keeps passing; every other listed test fails first.
@@ -78,6 +93,11 @@
 4. **Right socket, and no daemon is ever started.** Task 4: `refuses a socket outside a 0700 euid directory`, `connects with path / only`, `missing socket is unreachable and runs nothing`, `unknown version is refused`.
 5. **No lost or doubled deliveries.** Task 1: `TestHookAppServerClaimAndRelease`, `TestHookAppServerSharesShownWithHook`. Task 5: `ambiguous send is resolved by clientId without resending`, `definite rejection releases claims`, `steer mismatch re-reads once then waits for idle`, `restart with an inflight key recovers once`.
 6. **Opt-in only.** Task 2: `TestCodexBindUnique`, `TestCodexBindFileMode`. Task 5: `unbound or notLoaded threads receive nothing`. Task 6: `connector starts one engine per binding and stops removed ones`.
+7. **Liveness without a human.**
+   - A 12 h `active` thread keeps receiving steers; expiry, archive, unload and the opt-in idle rule each stop delivery; activity revives a dormant binding; only launcher bindings get `ensureLoaded`.
+   - Task 2: `TestCodexBindTTL`, `TestCodexBindRenew`.
+   - Task 5: `12-hour active turn is steered throughout`, `expired binding sends nothing`, `archived thread goes dormant`, `idle_stale only when idle_dormant_hours is set`, `activity from another client revives`, `explicit binding never resumes`, `launcher binding calls ensureLoaded when not_loaded`.
+   - Task 6: `launcher bindings live until expiresAt and are never written to the file`.
 
 ---
 
@@ -143,14 +163,17 @@ Guards: `TestHookHostileIsInert` (golden unchanged), `TestHookNeverFailsATurn`, 
 - **Consumes:** `configPath(getenv)`, `lockPath`, and the atomic-write helper used by `stateFile`.
 - **Produces:**
   - **Path:** `func codexBindingsPath(getenv func(string) string) (string, error)` returns `filepath.Join(filepath.Dir(configPath(getenv)), "codex", "bindings.json")`.
-  - **File:** mode 0600 and directory 0700, written under `lockPath`. Its content is `{"version":1,"bindings":[{"profile","as","codex_home","thread_id","created_at"}]}`.
-  - **`vecnet [--net P] [--as X] codex bind --thread <uuid> [--codex-home DIR]`:**
+  - **File:** mode 0600 and directory 0700, written under `lockPath`. Its content is `{"version":1,"bindings":[{"profile","as","codex_home","thread_id","created_at","expires_at","idle_dormant_hours"}]}`. `idle_dormant_hours` is omitted when unset.
+  - **`vecnet [--net P] [--as X] codex bind --thread <uuid> [--codex-home DIR] [--ttl DUR] [--idle-dormant DUR] [--renew]`:**
+    - `--ttl` accepts a Go duration from `1h` to `168h`, default `24h`. `expires_at = now + ttl`.
+    - `--renew` on an existing binding resets `expires_at = now + ttl`, never beyond `now + 168h`.
+    - `--idle-dormant` accepts `1h` to `168h`; omit it to leave the rule off.
     - `--thread` must match `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`.
     - `codex_home` defaults to `$CODEX_HOME`, else `~/.codex`, and must be absolute.
     - Re-binding the same profile to the same thread is a no-op. Binding a profile that is already bound elsewhere, or a thread already bound to another profile, exits 1 with `vecnet: already bound: <which>`.
     - It prints `bound <profile> to Codex thread <id>; the launcher connector picks it up within 10 s`.
   - **`codex unbind [--thread <uuid>]`** removes the current profile's binding, or the binding for that thread.
-  - **`codex bindings [--json]`** lists bindings.
+  - **`codex bindings [--json]`** lists bindings with their state: `active`, or `expired` once `expires_at` has passed.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -160,9 +183,11 @@ func TestCodexBindUnique(t *testing.T)        // p→T1 ok; p→T1 again no-op; 
 func TestCodexBindRejectsBadIds(t *testing.T) // thread "../x", uppercase UUID, relative --codex-home → exit 1, file unchanged
 func TestCodexBindFileMode(t *testing.T)      // file 0600, dir 0700; a pre-existing 0644 file is rewritten 0600
 func TestCodexUnbind(t *testing.T)            // unbind removes only the profile's entry; bindings --json reflects it
+func TestCodexBindTTL(t *testing.T)           // default expires_at = now+24h; --ttl 2h; --ttl 30m and --ttl 169h exit 1, file unchanged; --idle-dormant 6h stored, absent when unset
+func TestCodexBindRenew(t *testing.T)         // --renew moves expires_at to now+ttl; renewing past 168h from now is capped; bindings shows expired after the clock passes expires_at
 ```
 
-- [ ] **Steps 2–4:** `CGO_ENABLED=0 just bb go test -p 2 ./internal/cli/ -run 'CodexBind|CodexUnbind'` fails, implement, then the whole package passes.
+- [ ] **Steps 2–4:** `CGO_ENABLED=0 just bb go test -p 2 ./internal/cli/ -run 'CodexBind|CodexUnbind'` (the TTL tests use an injected clock) fails, implement, then the whole package passes.
 - [ ] **Step 5: Commit** `feat(cli): codex bind/unbind/bindings opt-in file`
 
 ---
@@ -273,15 +298,22 @@ test("mapStatus covers idle, active, active+waitingOnApproval, notLoaded, garbag
 **Interfaces:**
 
 ```ts
-export interface Binding { profile: string; as?: string; codexHome: string; threadId: string }
+export interface Binding { profile: string; as?: string; codexHome: string; threadId: string; expiresAt: number; idleDormantMs?: number;
+  origin: "explicit" | "launcher"; ensureLoaded?: () => Promise<boolean> }   // ensureLoaded only when origin === "launcher"
+export type Liveness = { live: true } | { live: false; reason: "expired" | "archived" | "not_loaded" | "idle_stale" };
 export interface EngineDeps { clock: Clock; log: Log; kv: KeyValue; vecnetBin: string; env: Record<string, string>;
   openRpc: typeof openCodexRpc; euid: number; debounceMs?: number /* 500 */; minGapMs?: number /* 5000 */ }
-export interface Engine { start(): void; stop(): Promise<void>; state(): "connecting" | "ready" | "unreachable" | "refused_version" | "not_loaded" }
+export interface Engine { start(): void; stop(): Promise<void>; state(): "connecting" | "ready" | "unreachable" | "refused_version"; liveness(): Liveness }
 export function createEngine(b: Binding, d: EngineDeps): Engine;
 ```
 
 - **Trigger:** a long-running child `vecnetBin --net <profile> [--as X] watch --json`. Each `delivery` line with a priority other than `hold` arms a debounce of `debounceMs`. Hold-only traffic arms nothing.
-- **State:** on connect, `thread/read` gives the status. After that, the global `thread/status/changed` notifications for `threadId` keep it current (no subscription). `not_loaded` means nothing is sent until the status changes.
+- **State and activity:**
+  - On connect, `thread/read` gives the status, and `thread/turns/list {limit:1}` gives `lastActivityAt` (the last turn's `completedAt` or `startedAt`).
+  - After that, the global `thread/status/changed` and `thread/archived` broadcasts keep both current, with no subscription. Every status change counts as activity.
+  - `liveness()` follows Global Constraints and is re-evaluated on every broadcast and every minute (`Clock`).
+  - A dormant binding never pushes.
+  - **`not_loaded`:** an explicit binding waits for a status change. A launcher binding calls `ensureLoaded()` once per minute at most, then re-reads the status.
 - **Push** (serialised per binding, at most one per `minGapMs`):
   1. Run `hook --event app-server`. Stop if `deliveries` is empty and there is no summary entry.
   2. Compute `key` and write `kv.set("inflight:"+key, {threadId, deliveries})`.
@@ -310,6 +342,14 @@ test("definite rejection releases claims")
 test("additionalContext rejection falls back to the pointer stub once")
 test("restart with an inflight key recovers once")
 test("unbound or notLoaded threads receive nothing")                       // status notLoaded → 0 turn/* requests
+test("12-hour active turn is steered throughout")                         // status active for 12 h of fakeClock; a wake every 2 h → 6 turn/steer to the same turn id, liveness stays live
+test("expired binding sends nothing")                                     // expiresAt passes mid-run → liveness {live:false, reason:"expired"}; later wakes send nothing; no --release of unclaimed ids
+test("archived thread goes dormant")                                      // fake.notify("thread/archived") → reason "archived"; no turn/*
+test("idle_stale only when idle_dormant_hours is set")                    // idle 30 h without idleDormantMs → still live; with 6 h → idle_stale after 6 h
+test("activity from another client revives")                              // idle_stale, then status active from the fake → live; the next wake steers
+test("explicit binding never resumes")                                    // not_loaded for 1 h → no thread/resume and no ensureLoaded call
+test("launcher binding calls ensureLoaded when not_loaded")               // ensureLoaded resolves true and the fake flips to idle → the next wake sends turn/start
+test("clientId scan requests the full items view")                        // the recorded thread/turns/list params include itemsView "full"
 test("approval request during a steered turn gets no reply")
 test("every recorded request uses only allowlisted methods and keys")      // over all tests' fake.requests
 test("unreachable socket backs off and never spawns codex")                // spawn spy: only vecnetBin
@@ -339,8 +379,11 @@ test("unreachable socket backs off and never spawns codex")                // sp
 - **`connector.ts`:** `export function startCodexConnector(o: { kv: KeyValue; clock: Clock; log: Log; env: NodeJS.ProcessEnv }): { stop(): Promise<void> }`.
   - It reads the bindings file at `VECNET_CODEX_BINDINGS`, defaulting to the same path as Task 2's `codexBindingsPath`, every 10 s. It runs one `createEngine` per binding, stops engines whose binding is gone, and logs `codex_connector_disabled` once if the file is absent.
   - It refuses a bindings file that is group- or world-readable.
+- **Launcher bindings:** `startCodexConnector` also returns `addLauncherBinding(b: Omit<Binding, "origin"> & { ensureLoaded: () => Promise<boolean> }): void` and `removeLauncherBinding(threadId: string): void`.
+  - These are consumed by the future launcher P4 `codex-app-server` plugin; this plan builds no caller.
+  - Such bindings are held in memory only, never in the file, and stop at `expiresAt` or on removal.
 - **`startDaemon`** calls `startCodexConnector` after ledger open and stops it on `stop()`.
-- **Doc:** cover what this reaches and what it does not, the fallback to the hooks plan, binding (`vecnet codex bind --thread <id>`; the full id is in the TUI footer on a wide terminal and in `codex resume`'s picker), what the TUI user sees (the stub as a `›` prompt), the safety rules, and the version allowlist bump procedure (re-run [R] §3–§5 on the new version before editing `CODEX_APPSERVER_VERSIONS`).
+- **Doc:** cover what this reaches and what it does not, the fallback to the hooks plan, binding (`vecnet codex bind --thread <id> [--ttl] [--renew]`; the full id is in the TUI footer at ≥ 200 columns ([R] addendum) and in `codex resume`'s picker; a bound thread stays reachable only while some client keeps it loaded, e.g. a TUI left running in tmux), what the TUI user sees (the stub as a `›` prompt), the safety rules, and the version allowlist bump procedure (re-run [R] §3–§5 on the new version before editing `CODEX_APPSERVER_VERSIONS`).
 - **Live smoke (`just codex-appserver-smoke`):** opt-in, coordinator-run on **xsm**, and never against Max's sessions. It:
   1. skips cleanly (exit 0, `skipped: …`) without `codex` or an allowlisted daemon version;
   2. boots a demo hub (`bootDemo`) with private config;
@@ -357,6 +400,7 @@ test("unreachable socket backs off and never spawns codex")                // sp
 test("connector starts one engine per binding and stops removed ones")
 test("absent bindings file disables quietly; 0644 file is refused")
 test("daemon start and stop drive the connector")       // startDaemon with fakes; no engine without a file
+test("launcher bindings live until expiresAt and are never written to the file")
 ```
 
 - [ ] **Steps 2–4:** `just bb bash -c 'just ln-setup && just ln-test connectors/launcher/test/codex-connector.test.ts'` fails, implement, passes.
@@ -373,9 +417,14 @@ test("daemon start and stop drive the connector")       // startDaemon with fake
 
 - **What:** vecnet pushes wake-priority deliveries into running Codex TUIs through Codex's shared app-server daemon: `turn/start` when idle, `turn/steer` when busy. It never interrupts, uses the native queue, resumes or subscribes. Unreachable sessions stay on the Codex hooks plan and `vecnet inbox`.
 - **Split:** Go keeps credentials, rendering and shown-state: `hook --event app-server`, `--release` and `codex bind`. The TypeScript connector in the launcher daemon owns the socket, the version gate, state tracking and send recovery.
-- **Safety:** Only allowlisted methods and keys are sent, never policy fields. Server requests are never answered. The visible input is a stub with no peer bytes. Peer text goes only in untrusted entries of at most 1000 bytes, wrapped by `hookTrust`, with a pointer fallback. The connector uses `ws://localhost/` on a verified 0700/euid socket and never starts a daemon. A version allowlist gates every connection. Delivery goes only to explicitly bound, loaded threads.
+- **Safety:** Only allowlisted methods and keys are sent, never policy fields. Server requests are never answered. The visible input is a stub with no peer bytes. Peer text goes only in untrusted entries of at most 1000 bytes, wrapped by `hookTrust`, with a pointer fallback. The connector uses `ws://localhost/` on a verified 0700/euid socket and never starts a daemon. A version allowlist gates every connection. Delivery goes only to bound, live threads.
+- **Liveness:**
+  - Bindings have a TTL (24 h default, renewable, at most 7 d) instead of a human lease.
+  - They go dormant on expiry, archive or unload; an idle cutoff is opt-in.
+  - An `active` 12 h job is live, and steerable, throughout.
+  - Launcher-spawned threads get implicit in-memory bindings for the job lifetime, and the launcher may resume them through `ensureLoaded`. Explicit threads are never resumed.
 - **Dedupe:** A deterministic key is recorded before each RPC. Ambiguous outcomes are resolved by `clientId` scan; definite failures release claims. The shared shown-state stops the in-turn Codex hook from repeating deliveries.
 - **Launcher dependencies:** Tasks 6, 8, 9, 11 and 17. Task 7 is not used. The P4 Codex types and client are produced here (Task 4).
 - **Shape:** six tasks. 1, 2 and 3 run in parallel; then 4, then 5, then 6. Tests use a fake app-server over a unix socket and a fake `vecnet` script. The only live check is a coordinator-run smoke on xsm against a throwaway thread.
-- **Decisions (reversible):** Render in Go: one trust wrapper. Trigger from `watch --json`: no profile credentials in the daemon. No `thread/queue/*`. Never `thread/resume`. Headless turns are allowed for bound threads, since there is no "TUI attached" signal. One entry per delivery.
-- **Open:** How a user best reads the full thread id: the footer truncates on narrow terminals. A real daemon restart is exercised only in fake-backed tests.
+- **Decisions (reversible):** Render in Go: one trust wrapper. Trigger from `watch --json`: no profile credentials in the daemon. No `thread/queue/*`. The connector never calls `thread/resume`; only a launcher's `ensureLoaded` may. Idle cutoff off by default. Headless turns are allowed for bound threads, since there is no "TUI attached" signal. One entry per delivery.
+- **Open:** A real daemon restart is exercised only in fake-backed tests. On restart, explicit threads return only if their TUI reattaches ([R] L5).

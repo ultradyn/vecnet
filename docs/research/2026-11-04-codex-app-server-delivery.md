@@ -358,3 +358,155 @@ sessions).
 - Same-uid access means any local process can do what the connector does, so this is not a new
   boundary.
 - The restart and recovery behaviour was not exercised.
+
+---
+
+## Addendum 2026-11-04 (evening): liveness for agent-to-agent delivery without a human
+
+**Question (Max).** If a coding job runs for 12 hours, can another agent keep messaging it the
+whole time, with no human involved? Do launcher-spawned agents follow different rules?
+
+**Setup.** As before: a throwaway thread `01a1a53b-68ef-7910-b0cf-23e95e936474`, started in a
+private tmux server with `codex -s read-only -a on-request` in `.scratch/vecnet/codex-spike2`.
+It was archived afterwards and its scratch directory was removed. Nothing was sent to any other
+thread. Other threads appear below only as ids and status transitions, taken from the global
+broadcast.
+
+**Footer finding.** At 200 columns the TUI footer shows the **full** thread id
+(`… · 01a1a53b-68ef-7910-b0cf-23e95e936474`). This closes the open item from the plan.
+
+### L1. Repeated steers into a long turn: VERIFIED
+
+The turn ran `for i in $(seq 1 12); do echo tick $i; sleep 60; done` under read-only, about
+12 minutes. Steers were sent at +2, +5, +8 and +9 min: three `turn/steer` calls plus one
+`turn/start`, which steers.
+
+```
+17:25:37 turn/start -> turn 01a1a53c-081c-...; status active
+17:27:37 turn/steer S1 -> {turnId: 01a1a53c-081c-...}
+17:30:37 turn/steer S2 -> same turnId
+17:33:37 turn/steer S3 -> same turnId
+17:34:37 turn/start S4 (clientUserMessageId "vn.spike-start-while-busy") -> same turn id
+17:37:47 status idle (Worked for 12m 10s); command printed tick 1..12, never restarted
+```
+
+The model's final answer:
+
+```
+DONE-LONG
+1. [vecnet steer S1] ... — Last tick seen: 2.
+2. [vecnet steer S2] ... — Last tick seen: 5.
+3. [vecnet steer S3] ... — Last tick seen: 8.
+4. [vecnet steer S4 via turn/start] ... — Last tick seen: 9.
+```
+
+- **Order and timing.** Every steer landed in send order. The model noticed each within about a
+  minute while the command kept running, shown in the TUI as "Waiting for background terminal".
+- **The command was not disturbed.** The steered text appeared in the TUI as `›` user prompts
+  inside the running turn.
+- **Implication.** A long-running turn can take any number of wake messages over its whole life.
+  Each one costs the model a short wake-up while it polls its terminal.
+
+### L2. Status while busy: VERIFIED. It does not distinguish a background terminal
+
+- During the 12-minute turn there was exactly **one** `active` broadcast at the start and **one**
+  `idle` at the end, with no flapping.
+- **Background terminal after the turn ended** (my thread): a turn running `sleep 150` was
+  interrupted after 12 s. Status went to `idle` and `thread/read` reported `idle`, while
+  `thread/backgroundTerminals/list` (experimental) still listed `{processId, command:"sleep 150",
+  osPid, cpuPercent, rssKb, cwd, itemId}`. `thread/backgroundTerminals/clean` removed it.
+- `ThreadStatus` is `notLoaded | idle | systemError | active{activeFlags}`, and `activeFlags` is
+  only `waitingOnApproval | waitingOnUserInput` (`app-server-protocol/src/protocol/v2/thread.rs:1701-1718`).
+  No status value marks running background work.
+- **Implication.**
+  - A job that keeps running **inside** a turn is `active` throughout.
+  - A job left running in a background terminal after the turn ends reads as `idle`. A wake there
+    starts a new turn, which is correct, because the model can poll the terminal.
+  - Any "idle for N hours" rule would wrongly call that job stale unless it also checks
+    `thread/backgroundTerminals/list`.
+
+### L3. Idle unload: VERIFIED. **60 s after the last subscriber leaves and the thread is inactive**
+
+- **Source.** `UnloadingState` (`app-server/src/request_processors/thread_lifecycle.rs:28-120`)
+  unloads a thread when it has **no subscribers and is not `active`**. The deadline is
+  `max(no-subscriber-since, inactive-since) + thread_unload_delay`.
+  - The default delay is `thread_unload_delay_secs.unwrap_or(60)` (`core/src/config/mod.rs:4143-4144`). Max's `~/.codex/config.toml` does not set it.
+  - There is no memory-pressure or wall-clock eviction while a subscriber exists.
+- **Runtime evidence:**
+  - **TUI attached, idle:** the thread stayed loaded and `idle` after more than 3 minutes idle.
+    Source says this holds indefinitely.
+  - **TUI quit** at about 17:43:13: `thread/status/changed notLoaded` and `thread/closed` came
+    at 17:44:13. An unsubscribed listener received both.
+  - **Others:** ephemeral helper threads went `idle` then `notLoaded` exactly 60 s later
+    (17:25:41 → 17:26:41, 17:28:46 → 17:29:46).
+  - **Unloaded thread:** `turn/start` failed with `-32600 thread not found: 01a1a53b-…`.
+  - **Cold resume:** `thread/resume {excludeTurns:true}` on the `notLoaded` thread succeeded
+    (status `idle`, MCP servers restarted). The following `turn/start` ran to completion (65 s)
+    **after** my connection had closed, so it ran headless.
+  - **After a headless turn:** the thread unloaded about 63 s after that turn completed (17:48:01).
+- **New-thread caveat.** `thread/resume` on a brand-new thread that has had no turn yet fails with
+  `no rollout found for thread id …`. A launcher creates its threads with `thread/start` and is
+  subscribed by that call, so this only matters to outside clients.
+- **Implications for "12 h idle, then a message":**
+  - **Explicit binding to an existing thread:** it works without resume for as long as **some
+    client stays subscribed**, typically the TUI, possibly left running in tmux. Once the last
+    client leaves, the thread unloads within about 60 s of inactivity, and the connector, which
+    never resumes, must treat it as dormant. The hooks and `vecnet inbox` pick up the backlog when
+    someone resumes the session.
+  - **Launcher-spawned thread:** the launcher's own connection stays subscribed (`thread/start`
+    or `thread/resume`), so the thread never unloads during the job. If it was unloaded anyway
+    (daemon restart, launcher crash), the owner can cold-resume it.
+
+### L4. Recognising injected turns: VERIFIED
+
+- `clientUserMessageId` is stored as the user item's `clientId`. This holds for a new turn and
+  for input steered into a running turn: S4's item shows `clientId: "vn.spike-start-while-busy"`,
+  while S1–S3, sent without an id, show `null`.
+- **Where it is visible:**
+  - in `thread/items/list {threadId, turnId}`, where items are wrapped as `{item, turnId,
+    startedAtMs, completedAtMs}`;
+  - in `thread/turns/list {itemsView:"full"}`.
+- **Pitfall.** The default `thread/turns/list` returns `itemsView:"summary"`. That view showed
+  only the first user message and the final answer, and **hid all steered items**. A clientId scan
+  must therefore request `itemsView:"full"` or use `thread/items/list`.
+- `TurnSteerParams` also accepts `clientUserMessageId` (`turn.rs:320-325`), so steers can carry
+  the key too.
+- The Turn object has no trigger or source field. `turnTrigger` is accepted on `turn/start` but is
+  not echoed back. `clientId` plus the fixed stub text are the only markers.
+- `additionalContext` produces no item.
+
+### L5. Daemon restart: SOURCE (not exercised on the shared daemon)
+
+- **Graceful managed shutdown** (SIGTERM/SIGHUP, or `daemon restart`/`update`):
+  - `ShutdownState::update` (`app-server/src/lib.rs:288-308`) waits until **running assistant turns
+    reach 0**. A second signal forces the exit.
+  - The daemon then writes a recovery snapshot of loaded persistent root thread ids plus any
+    interrupted turns (`app-server/src/lib.rs:1068-1078`, `app-server-transport/src/daemon_recovery.rs`).
+  - The next daemon consumes and deletes the snapshot before serving. It cold-resumes those threads
+    in the background (`daemon_thread_recovery.rs:32-50` → `message_processor.rs:804`
+    `thread_resume(ThreadResumeTarget::DaemonRecovery(...))`), continuing interrupted **local**
+    turns.
+  - A 12-hour turn therefore delays a graceful restart until it finishes, unless the restart is
+    forced. A forced restart records the turn as interrupted, and the new daemon continues it.
+- **Crash** (SIGKILL, OOM): no snapshot is written, so nothing is auto-restored and threads come
+  back `notLoaded`. Rollouts persist, so `thread/resume` restores any of them; L3 verified cold
+  resume.
+- **Inference from `UnloadingState`:** a restored thread with no subscriber unloads again 60 s
+  later unless a client reattaches. The TUI's recovery path and a launcher both reattach.
+- **Implication.**
+  - Connectors must reconnect with backoff.
+  - Launcher-owned threads must be resumed by their owner after any restart.
+  - Explicitly bound threads come back only if their TUI reattaches. Otherwise they stay dormant.
+
+### Verdict on the proposed liveness model
+
+| Proposal | Verdict |
+|---|---|
+| Liveness belongs to the thread, not to human activity | **Supported.** Status, unload and steer behaviour are all per thread and need no human. |
+| Explicit TTL at bind time (default 24 h, renewable, max 7 d) | **Supported.** Nothing in Codex conflicts. The TTL is vecnet's own bound. |
+| Dormant if archived | **Supported.** `thread/archived` is broadcast to unsubscribed connections (seen live). |
+| Dormant if `notLoaded` | **Supported.** The thread unloads 60 s after its last subscriber leaves, and `turn/start` then fails. |
+| Dormant after N hours idle with no activity | **Amend: off by default.** An idle thread with a subscriber stays loaded indefinitely. A background-terminal job reads `idle` (L2), so the rule would cut off a live job. The TTL already bounds a binding. Keep N as an opt-in per binding (`--idle-dormant`), counting turns and status changes as activity. |
+| `active` thread live throughout | **Verified** (L1, L2). |
+| wake: steer if busy, start if idle; wake_idle: only when idle; hold: never | **Verified** mechanics (L1; [R] §3–4). |
+| Launcher-spawned threads: implicit binding for the job's `expires_at`, owner may resume | **Supported.** The launcher's connection keeps them loaded, and cold resume works (L3). The connector itself still never resumes. The launcher supplies an `ensureLoaded` hook instead. |
