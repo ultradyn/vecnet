@@ -11,6 +11,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/opapi"
 )
 
 // Admin endpoints (PROTOCOL §2.12). The auth middleware admits only the
@@ -21,6 +22,9 @@ import (
 func (s *server) adminRoutes(mux *http.ServeMux) {
 	s.opRoutes(mux)
 	mux.HandleFunc("POST /v1/admin/principals", s.adminAddPrincipal)
+	mux.HandleFunc("GET /v1/admin/principals", s.adminListPrincipals)
+	mux.HandleFunc("PUT /v1/admin/principals/{id}/limits", s.adminPrincipalLimits)
+	mux.HandleFunc("PUT /v1/admin/principals/{id}/default-scopes", s.adminPrincipalDefaultScopes)
 	mux.HandleFunc("POST /v1/admin/principals/{id}/rotate", s.adminRotatePrincipal)
 	mux.HandleFunc("POST /v1/admin/peers", s.adminAddPeer)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/move", s.adminMovePeer)
@@ -693,4 +697,74 @@ func (s *server) adminCounters(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, c)
+}
+
+// adminPrincipalLimits replaces the operator's principal provisioning limits.
+func (s *server) adminPrincipalLimits(w http.ResponseWriter, r *http.Request) {
+	top, err := readObject(r, []string{"max_peers", "creates_per_hour", "kinds"}, []string{"max_peers", "creates_per_hour", "kinds"})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	max, err := intField(top, "max_peers")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	rate, err := intField(top, "creates_per_hour")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	kinds, err := stringsField(top, "kinds")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.Hub.SetPrincipalLimits(r.Context(), r.PathValue("id"), hub.PrincipalLimits{MaxPeers: max, CreatesPerHour: rate, Kinds: kinds}); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminPrincipalDefaultScopes replaces defaults for subsequently created peers.
+func (s *server) adminPrincipalDefaultScopes(w http.ResponseWriter, r *http.Request) {
+	top, err := readObject(r, []string{"allow", "deny"}, nil)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	allow, err := stringsField(top, "allow")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	deny, err := stringsField(top, "deny")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.Hub.SetPrincipalDefaultScopes(r.Context(), r.PathValue("id"), allow, deny); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminListPrincipals exposes limits and counts without credentials.
+func (s *server) adminListPrincipals(w http.ResponseWriter, r *http.Request) {
+	principals, err := s.Hub.Principals(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	rows := make([]opapi.PrincipalRow, 0, len(principals))
+	for _, p := range principals {
+		rows = append(rows, opapi.PrincipalRow{PrincipalID: p.PrincipalID, Name: p.Name,
+			MaxPeers: p.Limits.MaxPeers, CreatesPerHour: p.Limits.CreatesPerHour, Kinds: p.Limits.Kinds,
+			Active: p.Active, Disabled: p.Disabled, CreatesLastHour: p.CreatesLastHour, ScopedPeers: p.ScopedPeers,
+			DefaultAllow: p.DefaultAllow, DefaultDeny: p.DefaultDeny})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"principals": rows})
 }

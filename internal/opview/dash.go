@@ -63,7 +63,7 @@ func (r *Reader) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 		return nil, err
 	}
 
-	rows, err = r.Hub.DB.QueryContext(ctx, `SELECT p.peer_id, p.prn_id, p.name, p.kind, p.disabled,
+	rows, err = r.Hub.DB.QueryContext(ctx, `SELECT p.created_by, p.peer_id, p.prn_id, p.name, p.kind, p.disabled,
   p.capabilities, p.quota, p.location, p.presence_state, p.presence_at,
   p.reachability, p.reach_via, p.last_seen, p.enrolled_at,
   CASE
@@ -82,7 +82,7 @@ func (r *Reader) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 		var caps, quota, reach string
 		var state *string
 		p := &row.Peer
-		if err := rows.Scan(&p.PeerID, &row.PrincipalID, &p.Name, &p.Kind, &row.Disabled,
+		if err := rows.Scan(&p.CreatedBy, &p.PeerID, &row.PrincipalID, &p.Name, &p.Kind, &row.Disabled,
 			&caps, &quota, &p.Location, &state, &row.PresenceAt, &reach, &row.ReachVia, &p.LastSeen, &p.EnrolledAt, &row.Credential); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("opview: peers: %w", err)
