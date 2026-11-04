@@ -25,7 +25,7 @@ just hub-init              # create the dev hub's operator in .data/; prints the
 just run                   # dev hub on http://127.0.0.1:45752, operator UI at /ui/
 ```
 
-Point the CLI at the dev hub with a profile in `~/.config/vecnet/config.toml` (`hub = "http://127.0.0.1:45752"`, `secret = "vn_operator_…"`), then `vecnet peer add --kind session --name <name>` and `vecnet enrol --hub URL --token - --profile NAME` on the peer's side (paste the token on stdin, or set `VECNET_ENROL_TOKEN`, to keep it out of shell history). `vecnet help` lists every command.
+Point the CLI at the dev hub with a profile in `~/.config/vecnet/config.toml` (`hub = "http://127.0.0.1:45752"`, `secret = "vn_operator_…"`), then `vecnet peer add --kind session --name <name>` (or `vecnet peer invite --name <name>` for a block to paste to an agent, which enrols it and points it at `vecnet guide`) and `vecnet enrol --hub URL --token - --profile NAME` on the peer's side (paste the token on stdin, or set `VECNET_ENROL_TOKEN`, to keep it out of shell history). `vecnet help` lists every command.
 
 `vecnet-hub` reads `VECNET_LISTEN`, `VECNET_DATA_DIR` and `VECNET_PUBLIC_URL` as flag defaults. Production runs on Fly.io: `just fly-deploy`, then `just fly-init` once; see [`docs/DEPLOY.md`](docs/DEPLOY.md) for the volume, backups and the ISA stamp check (`just isa-check`).
 

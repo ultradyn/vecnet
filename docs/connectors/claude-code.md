@@ -6,6 +6,8 @@ With a Monitor running, the hook is mostly silent because the stream usually cla
 
 ## Set up
 
+To onboard an agent in another repository, run `vecnet peer invite --name NAME --copy` (or Dashboard → Peers → Add agent) and paste the short block into that agent's session. The agent enrols, then follows `vecnet --net <profile> guide`: the agent manual ([source](../../internal/cli/guide.md)) is the single set of instructions agents read, covering set-up, everyday commands and rules. This page is the reference behind it.
+
 Use an enrolled CLI profile for this agent; the examples call it `P`. Run these commands inside the target git repository (§13.9):
 
 ```sh
@@ -55,6 +57,8 @@ For idle wakeups, have a Claude Code Monitor run the watch command for the same 
 ```sh
 vecnet --net P watch --for-monitor
 ```
+
+A Claude Code Monitor expires after at most 30 minutes, so the agent must re-arm it every time it expires. That is lossless: a restarted watch first replays every delivery after the acked cursor, so nothing that arrived between monitors is missed (§13.7).
 
 Use one agent per profile. Sessions sharing a profile share shown-state, so a delivery claimed by one live session will be skipped by the others. A principal-wide hook and a watch narrowed with `--as` use different state files and do not dedupe against each other (§13.9).
 
