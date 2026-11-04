@@ -491,6 +491,29 @@ func callPeers(ctx context.Context, s *Server, _ auth.Caller, _ []byte) (any, er
 	return map[string]any{"peers": dir}, nil
 }
 
+func callPeerCreate(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error) {
+	var req hub.CreatePeerRequest
+	if err := decodeArgs(raw, &req); err != nil {
+		return nil, err
+	}
+	return s.Hub.CreatePeer(ctx, c, req)
+}
+
+func callPeerSetDisabled(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error) {
+	var a struct {
+		PeerID   string `json:"peer_id"`
+		Disabled bool   `json:"disabled"`
+	}
+	if err := decodeArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	peer, err := s.Hub.SetOwnPeerDisabled(ctx, c, a.PeerID, a.Disabled)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"peer": peer}, nil
+}
+
 func callGroups(ctx context.Context, s *Server, c auth.Caller, _ []byte) (any, error) {
 	groups, err := s.Hub.ListGroups(ctx, c)
 	if err != nil {
@@ -633,8 +656,8 @@ type toolSpec struct {
 	input             schema
 	meta              map[string]any
 	output            schema
-	// hubValues keeps enums in tools/list, but validates only their string
-	// shape here so the hub checks their semantics in protocol order.
+	// hubValues keeps value constraints in tools/list, but validates only
+	// their string shape here so the hub checks semantics in protocol order.
 	hubValues   []string
 	annotations *mcp.ToolAnnotations
 	precheck    func([]byte) error
@@ -779,6 +802,29 @@ func toolSpecs(defs schema) []toolSpec {
 		description: "List the peer directory: ids, names, presence, reachability and avatar hashes.",
 		input:       object(schema{}),
 		annotations: readAnnotations(), call: callPeers,
+	}, {
+		name:        "vecnet_peer_create",
+		description: "Write: create a peer on the operator's bus under your principal's allowed kinds and limits. Requires a principal credential and idempotency_key; repeating the same key and body returns the original {peer, idempotency_key}. No peer credential is issued.",
+		input: object(schema{
+			"kind":            schema{"type": "string", "enum": slices.Sorted(maps.Keys(hub.PeerKinds))},
+			"name":            schema{"type": "string", "minLength": 1, "maxLength": 128},
+			"idempotency_key": ref("idempotencyKey"),
+		}, "kind", "name", "idempotency_key"),
+		// As in POST /v1/peers, the hub checks authority before values,
+		// then replay before policy and caps (PROTOCOL §18.4).
+		hubValues:   []string{"kind", "name", "idempotency_key"},
+		annotations: writeAnnotations(false), call: callPeerCreate,
+	}, {
+		name:        "vecnet_peer_set_disabled",
+		description: "Write: disable or re-enable a peer on the operator's bus that your principal created and still owns. Requires a principal credential; re-enabling counts toward its active-peer limit. Returns {peer}.",
+		input: object(schema{
+			"peer_id":  ref("peerId"),
+			"disabled": schema{"type": "boolean"},
+		}, "peer_id", "disabled"),
+		// Unknown ids, including malformed ones, get HTTP's not_found;
+		// non-principal callers get its forbidden first.
+		hubValues:   []string{"peer_id"},
+		annotations: writeAnnotations(false), call: callPeerSetDisabled,
 	}, {
 		name:        "vecnet_groups",
 		description: "List the ad hoc groups you belong to, with their members and archive status.",
