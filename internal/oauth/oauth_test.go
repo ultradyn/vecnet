@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1722,5 +1723,57 @@ func TestRefreshRefusesAnotherScope(t *testing.T) {
 	// Refused before it could spend the token.
 	if fresh := b.refresh(tok.RefreshToken); fresh.status != http.StatusOK {
 		t.Fatalf("refresh after the refusal: %d %s", fresh.status, fresh.Error)
+	}
+}
+
+// A CIMD client_id is an attacker-chosen URL that may carry a credential in its
+// path or query. Refresh-token reuse names the client in the log and the
+// append-only audit table by host and hash, never by that URL.
+func TestCIMDRefreshReuseNeverRecordsClientURL(t *testing.T) {
+	env := testhub.Start(t)
+	secret := "vn_peer_" + strings.Repeat("A", 43)
+	doc := `{"client_id":"{self}?k=` + secret + `","client_name":"CIMD reuse","redirect_uris":["` + chatgptRedirect + `"],` +
+		`"grant_types":["authorization_code","refresh_token"],"token_endpoint_auth_method":"none"}`
+	srv, _ := cimdServer(t, env, map[string]string{"/c.json": doc})
+	var logs strings.Builder
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	b := &browser{t: t, env: env, client: srv.URL + "/c.json?k=" + secret, redirect: chatgptRedirect}
+	peer := newDot(t, env, "cimd-reuse")
+	first := b.exchange(b.code(verifierA, linkCode(t, env, peer)), verifierA)
+	if first.status != http.StatusOK {
+		t.Fatalf("CIMD exchange: %d %s", first.status, first.Error)
+	}
+	if second := b.refresh(first.RefreshToken); second.status != http.StatusOK {
+		t.Fatalf("refresh: %d %s", second.status, second.Error)
+	}
+	wantError(t, b.refresh(first.RefreshToken), "invalid_grant") // reuse
+
+	rows, err := env.Hub.DB.Query(`SELECT target_ids FROM audit WHERE action = 'oauth_token_reuse'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var targets string
+		if err := rows.Scan(&targets); err != nil {
+			t.Fatal(err)
+		}
+		n++
+		if strings.Contains(targets, secret) || strings.Contains(targets, "/c.json") {
+			t.Fatalf("audit target names the client URL: %s", targets)
+		}
+		if !strings.Contains(targets, "cimd:") {
+			t.Fatalf("audit target lost the client: %s", targets)
+		}
+	}
+	if n != 1 {
+		t.Fatalf("oauth_token_reuse audit rows = %d, want 1", n)
+	}
+	if strings.Contains(logs.String(), secret) || !strings.Contains(logs.String(), "token reuse") {
+		t.Fatalf("reuse log names the client URL or is missing:\n%s", logs.String())
 	}
 }

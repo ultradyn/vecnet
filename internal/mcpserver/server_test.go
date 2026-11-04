@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptrace"
 	"reflect"
@@ -650,5 +651,29 @@ func TestGetStreamOutlivesServerTimeouts(t *testing.T) {
 	}
 	if n < 10 {
 		t.Fatalf("%d heartbeats in 1.5 s, want at least 10", n)
+	}
+}
+
+// A notification's handler error can quote the request (here a resource URI);
+// the hub log gets the method and numeric code, never that text.
+func TestNotificationErrorNeverLogsBody(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "a1")
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	note := map[string]any{"jsonrpc": "2.0", "method": "resources/read", "params": map[string]any{"uri": "private-body-probe"}}
+	resp, out := do(t, env, call{secret: secret, headers: modern(), body: note})
+	if resp.StatusCode != http.StatusAccepted || len(out) != 0 {
+		t.Fatalf("notification: %d %q, want 202 empty", resp.StatusCode, out)
+	}
+	got := logs.String()
+	if !strings.Contains(got, "mcp: notification handler") {
+		t.Fatalf("the failed notification was not logged at all:\n%s", got)
+	}
+	if strings.Contains(got, "private-body-probe") {
+		t.Fatalf("hub log quotes the request body:\n%s", got)
 	}
 }

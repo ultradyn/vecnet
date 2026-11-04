@@ -2,7 +2,9 @@ package oauth
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -272,8 +274,9 @@ func (s *Server) mintPair(ctx context.Context, tx *sql.Tx, clientID, prn, scope,
 // audit row names who, never the token. Events subscriptions the family's
 // access tokens made stop at the worker's next authorisation check.
 func (s *Server) reuseDetected(ctx context.Context, tx *sql.Tx, hash, prn, clientID string, now time.Time) error {
-	slog.Warn("oauth: token reuse: revoking the family", "principal", prn, "client", clientID)
-	if err := audit.Record(ctx, tx, "hub", "oauth_token_reuse", []string{prn, clientID}, nil); err != nil {
+	client := auditClientID(clientID)
+	slog.Warn("oauth: token reuse: revoking the family", "principal", prn, "client", client)
+	if err := audit.Record(ctx, tx, "hub", "oauth_token_reuse", []string{prn, client}, nil); err != nil {
 		return err
 	}
 	return s.revokeFamily(ctx, tx, hash, now)
@@ -300,4 +303,19 @@ func (s *Server) revokeFamily(ctx context.Context, tx *sql.Tx, hash string, now 
 		return fmt.Errorf("oauth: revoke token family: %w", err)
 	}
 	return nil
+}
+
+// auditClientID names a client in logs and audit rows. A CIMD client_id is an
+// attacker-chosen URL whose path or query may carry a credential, so it is
+// reduced to its host plus a hash of the whole URL; other ids are hub-minted.
+func auditClientID(clientID string) string {
+	if !isCIMD(clientID) {
+		return clientID
+	}
+	sum := sha256.Sum256([]byte(clientID))
+	host := "invalid"
+	if u, err := url.Parse(clientID); err == nil && u.Hostname() != "" {
+		host = u.Hostname()
+	}
+	return "cimd:" + host + ":" + hex.EncodeToString(sum[:8])
 }

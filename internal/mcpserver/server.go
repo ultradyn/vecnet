@@ -376,7 +376,14 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, sess *Session,
 	if req.IsNotification() {
 		if ok {
 			if _, err := h(ctx, sess, req); err != nil {
-				slog.Warn("mcp: notification handler", "method", req.Method, "err", err)
+				// An RPCError message can quote the request body (a URI, an
+				// argument): log the registered method and the numeric code only.
+				var rpc *RPCError
+				if errors.As(err, &rpc) {
+					slog.Warn("mcp: notification handler", "method", req.Method, "code", rpc.Code)
+				} else {
+					slog.Warn("mcp: notification handler", "method", req.Method, "code", ErrInternal)
+				}
 			}
 		}
 		if !st.streamed {
