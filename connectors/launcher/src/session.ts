@@ -107,7 +107,8 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     });
   }
   const cap = Math.min(MAX_TURN_INPUT_BYTES, deps.caps.maxInputBytes ?? Infinity);
-  if (!Number.isSafeInteger(cap) || cap < 4) throw new Error('invalid backend input cap');
+  // Each continuation must fit its quote prefix plus one four-byte UTF-8 character.
+  if (!Number.isSafeInteger(cap) || cap < 6) throw new Error('invalid backend input cap');
   type StoredBatch = {
     input: TurnInput & { batchId: string }; parts: Record<string, number>;
     // Native sends can each create a distinct future turn. The send-time

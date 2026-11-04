@@ -96,6 +96,32 @@ test('spilled inbound text is rehydrated before relay',async t=>{
 test('merged inputs over the cap split: the overflow is queued for the next turn; caps.maxInputBytes lowers the cap',async t=>{
   for(const limit of [96*1024,400]){const s=await setup(t,{attach:false,caps:{maxInputBytes:limit}});const ds=[s.message('a'.repeat(Math.floor(limit*.55))),s.message('b'.repeat(Math.floor(limit*.55)))];for(const d of ds)await s.lane.handleMessage(d);s.lane.attach(s.handle);await tick();assert.equal(s.sends.length,1);assert.ok(s.sends[0].input.items.reduce((n,i)=>n+Buffer.byteLength(i.text),0)<=limit);assert.equal(s.ledger.inputs('job_one',['buffered']).length,1);await s.emit(finished());assert.equal(s.sends.length,2);assert.deepEqual(s.sends.map(send=>send.input.items[0].deliveryId),ds.map(d=>d.delivery_id));}
 });
+for (const maxInputBytes of [4, 5]) {
+  test(`maxInputBytes ${maxInputBytes} is rejected before Unicode fragmentation can stall`, async t => {
+    const s = await setup(t, { attach: false });
+    assert.throws(() => createLane(s.job, {
+      ...s.deps, caps: { ...caps, maxInputBytes },
+    }), /invalid backend input cap/);
+    assert.equal(s.ledger.inputs(s.job.jobId, ['buffered', 'sending', 'sent']).length, 0);
+    assert.equal(s.sends.length, 0);
+  });
+}
+test('the minimum six-byte input cap consumes four-byte Unicode across quoted fragments', async t => {
+  const s = await setup(t, { caps: { maxInputBytes: 6 } });
+  const d = s.message('😀😀');
+  await s.lane.handleMessage(d);
+  const formatted = s.ledger.inputs(s.job.jobId, ['sent'])[0].text;
+  let turns = 0;
+  while (s.ledger.inputs(s.job.jobId, ['consumed']).length === 0 && turns < 100) {
+    await s.emit(finished(`unicode-${++turns}`));
+  }
+  assert.ok(turns > 1 && turns < 100);
+  const fragments = s.sends.flatMap(send => send.input.items.map(item => item.text));
+  assert.ok(fragments.every(text => Buffer.byteLength(text) <= 6 && !text.includes('\uFFFD')));
+  assert.equal(fragments.map((text, i) => i === 0 ? text : text.slice(2)).join(''), formatted);
+  assert.ok(fragments.includes('> 😀'));
+  assert.deepEqual(s.receipts(), [{ delivery_id: d.delivery_id, state: 'processed' }]);
+});
 test('control settle from requester → succeeded ended settled; control from a non-relayed peer ignored',async t=>{
   const s=await setup(t);const d=s.message('do not relay','wake','other');d.message.metadata['launch.control']='settle';await s.lane.handleMessage(d);await s.lane.control('settle','other');assert.equal(s.calls.length,0);assert.equal(s.sends.length,0);assert.equal(s.receipts()[0].note,'not_relayed');await s.lane.control('settle','req');assert.equal(s.statuses()[0].state,'succeeded');assert.equal((s.statuses()[0].output as Record<string,unknown>).ended,'settled');
 });
