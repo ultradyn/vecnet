@@ -93,7 +93,7 @@ try {
     assert(await scopes.textContent() === 'none · others scoped', 'default scopes do not say why they warn');
     assert(await scopes.evaluate(el => el.classList.contains('warn')), 'unscoped defaults are not amber');
     const kinds = prow.locator('td').nth(4);
-    assert(await kinds.locator('span.pill > i.kd.k-pagchat-bot').count() === 1 && await kinds.textContent() === 'pagchat-bot', 'kinds column is not one kind pill');
+    assert(await kinds.locator('span.pill > i.kd.k-pagchat-bot').count() === 1 && await kinds.textContent() === 'pagchat bot', 'kinds column is not one kind pill');
     assert(await prow.locator('td').nth(2).evaluate(el => el.classList.contains('mono')), 'disabled column is not mono');
     assert(await prow.locator('td').nth(3).textContent() === '2/10', 'creates per hour column');
     // The card rebuilds its rows on each peers-tag reload, so a resolved cell

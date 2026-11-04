@@ -5,7 +5,7 @@ import { answerBody, countdown } from './approvals.js';
 import { createAttachments } from './attach.js';
 import { sendRefusal } from './attach-model.js';
 import { avatar, h, idText, peerLink } from './dom.js';
-import { ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, plural, short, title, when } from './format.js';
+import { ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, kindShort, kindTitle, plural, short, title, when } from './format.js';
 import { markdown } from './md.js';
 import { prioritySeg } from './prio.js';
 import { createReactions } from './react.js';
@@ -409,7 +409,7 @@ export function mount(root, ctx) {
       h('div', {},
         h('header', {},
           h('b', null, peerLink(m.sender, nameOf(m.sender)), m.sender === me ? ' (you)' : null),
-          h('span', { class: 'kind', text: kindOf(m.sender) }),
+          h('span', { class: 'kind', text: kindShort(kindOf(m.sender)), title: kindTitle(kindOf(m.sender)) }),
           clientLabel(m) ? h('span', { class: 'cli' + (clientSuspect(m) ? ' sus' : ''), text: clientLabel(m), title: clientSuspect(m) ? 'Sent with the operator credential from the vecnet CLI, by a run that looked like an agent' : 'Sent with the operator credential from the vecnet CLI' }) : null,
           h('span', { class: 't', text: when(m.created_at), title: m.created_at }),
           delta ? h('span', { class: 'dt', text: delta, title: deltaTitle(prev.created_at, m.created_at) }) : null,

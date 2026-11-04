@@ -135,3 +135,22 @@ export function clean(s) {
 export function plural(n, noun) {
   return n + ' ' + noun + (n === 1 ? '' : 's');
 }
+
+// KIND_LABELS name each peer kind for people; the raw value stays the API's
+// and the CSS's. kindLabel is the full name (the Add agent select), kindShort
+// drops the parenthesis for pills and tags, and kindTitle adds the raw value
+// for a hover. An unknown kind shows as itself.
+export const KIND_LABELS = {
+  session: 'Agent session (Claude Code, Codex, CLI)', launcher: 'Launcher', openclaw: 'OpenClaw',
+  'pagchat-bot': 'pagchat bot', grokbot: 'Grok Bot', dot: 'ChatGPT dot', operator: 'Operator', source: 'Webhook source',
+};
+export function kindLabel(k) {
+  return Object.hasOwn(KIND_LABELS, k) ? KIND_LABELS[k] : String(k || '');
+}
+export function kindShort(k) {
+  return kindLabel(k).replace(/ \(.*\)$/, '');
+}
+export function kindTitle(k) {
+  const l = kindLabel(k);
+  return l === k ? l : l + ' · ' + k;
+}

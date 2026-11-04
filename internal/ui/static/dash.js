@@ -8,7 +8,7 @@ import { allThreads, blockedLine, cutSummary, peerRows } from './dash-model.js';
 import { principalRows } from './principals-model.js';
 import { chip, h, idCopy, idText, peerLink } from './dom.js';
 import { closeInvite, inviteButton } from './invite.js';
-import { ago, short, title as threadTitle, when } from './format.js';
+import { ago, kindShort, kindTitle, short, title as threadTitle, when } from './format.js';
 import * as subs from './subs.js';
 
 const RELOAD_MS = 30000;
@@ -142,7 +142,7 @@ export function mount(root, ctx) {
       const reachSub = [p.via, p.seen ? age(p.seen) : ''].filter(Boolean).join(', ');
       return h('tr', { class: p.disabled ? 'off' : null },
         h('td', null, peerLink(p.id, p.name, { cls: 'pn' }), p.disabled ? [' ', chip('disabled', 'bad')] : null, idCell(p.id, 'peer id')),
-        h('td', null, h('span', { class: 'pill' }, h('i', { class: 'kd k-' + p.kind }), p.kind)),
+        h('td', null, h('span', { class: 'pill', title: kindTitle(p.kind) }, h('i', { class: 'kd k-' + p.kind }), kindShort(p.kind))),
         h('td', null, h('span', { class: 'pill' }, h('i', { class: 'pd ' + p.presence.replace('/', '') }), p.presence),
           h('span', { class: 'sub mono', text: presenceAge })),
         h('td', null, h('span', { class: 'pill' }, h('i', { class: 'rch ' + p.reach }), p.reach),
@@ -166,7 +166,7 @@ export function mount(root, ctx) {
       h('td', { class: 'mono sm', text: String(p.disabled) }),
       h('td', { class: 'mono sm', text: p.createsLastHour + '/' + p.createsPerHour }),
       h('td', { class: 'kinds' }, p.kinds.length
-        ? p.kinds.map(k => h('span', { class: 'pill' }, h('i', { class: 'kd k-' + k }), k))
+        ? p.kinds.map(k => h('span', { class: 'pill', title: kindTitle(k) }, h('i', { class: 'kd k-' + k }), kindShort(k)))
         : h('span', { class: 'mono sm none', text: 'none' })),
       h('td', { class: 'mono sm' + (p.unscopedRisk ? ' warn' : ''), text: p.scopes + (p.unscopedRisk ? ' · others scoped' : ''), title: p.unscopedRisk ? 'created peers get no scopes, while other peers of this principal are scoped' : null }))))];
   }
