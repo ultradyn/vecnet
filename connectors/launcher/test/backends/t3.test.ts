@@ -143,6 +143,71 @@ test('pendingRequestCount > 0 → waiting_approval and one progress note',async 
   assert.equal(f.events.filter(x => x.type==='progress').length,1);
 });
 
+test('resuming an evicted run cursor delivers newer empty failed and cancelled runs exactly once',async t => {
+  const f=await fixture(t);
+  await f.update(s => {const e=s.threads[0];e.thread.status='idle';e.thread.activeRunId=null;e.thread.latestRunId='old';
+    e.recentRuns=[{runId:'old',ordinal:50,status:'completed',completedAt:time}];
+    e.items=[{itemId:'old-final',position:10,runId:'old',createdBy:'agent',type:'assistant',text:'old result'}];
+  });
+  const first=(await f.live()).turns()[Symbol.asyncIterator]();
+  const old=await first.next();assert.ok(old.value);const cursor=old.value.cursor;await first.return?.();
+  await f.update(s => {const e=s.threads[0];e.thread.latestRunId='cancelled';
+    e.recentRuns=[{runId:'cancelled',ordinal:52,status:'cancelled',completedAt:time},{runId:'failed',ordinal:51,status:'failed',completedAt:time}];
+    e.items=[];
+  });
+  // Recreate the backend: ordering must survive in the persisted cursor,
+  // independently of message items or an in-memory session cache.
+  const h=await f.live();const abort=new AbortController();
+  f.clock.sleep=async () => {abort.abort();};
+  const delivered=[];
+  for await (const value of h.turns(cursor,abort.signal)) delivered.push(value);
+  assert.deepEqual(delivered.map(x => x.event),[
+    {type:'turn_finished',turnId:'failed',at:time,outcome:'failed',finalText:'',consumed:[]},
+    {type:'turn_finished',turnId:'cancelled',at:time,outcome:'interrupted',finalText:'',consumed:[]},
+  ]);
+  assert.deepEqual(JSON.parse(delivered[1].cursor.value),{p:10,r:'cancelled',o:52});
+  // Even a historical run carrying timeline items must not be replayed.
+  await f.update(s => {const e=s.threads[0];e.recentRuns.push({runId:'historical',ordinal:49,status:'failed',completedAt:time});
+    e.items.push({itemId:'historical-final',position:11,runId:'historical',createdBy:'agent',type:'assistant',text:'already delivered'});
+    e.recentRuns=e.recentRuns.filter(x => x.runId!=='cancelled');
+  });
+  const resumeAbort=new AbortController();f.clock.sleep=async () => {resumeAbort.abort();};
+  const replay=[];
+  for await (const value of (await f.live()).turns(delivered[1].cursor,resumeAbort.signal)) replay.push(value);
+  assert.deepEqual(replay,[]);
+});
+
+test('a legacy cursor recovers run order while its last run is still available',async t => {
+  const f=await fixture(t);
+  await f.update(s => {const e=s.threads[0];e.thread.status='idle';e.thread.activeRunId=null;
+    e.recentRuns=[{runId:'old',ordinal:50,status:'completed',completedAt:time},{runId:'new',ordinal:51,status:'failed',completedAt:time}];
+  });
+  const it=(await f.live()).turns({value:JSON.stringify({p:10,r:'old'})})[Symbol.asyncIterator]();
+  const result=await it.next();assert.ok(result.value);
+  assert.equal(result.value.event.turnId,'new');assert.deepEqual(JSON.parse(result.value.cursor.value),{p:10,r:'new',o:51});
+  await it.return?.();
+});
+
+test('an evicted legacy cursor fails explicitly instead of guessing the delivered run order',async t => {
+  const f=await fixture(t);
+  await f.update(s => {const e=s.threads[0];e.thread.status='idle';e.thread.activeRunId=null;
+    e.recentRuns=[{runId:'new',ordinal:51,status:'failed',completedAt:time}];
+  });
+  const it=(await f.live()).turns({value:JSON.stringify({p:10,r:'old'})})[Symbol.asyncIterator]();
+  await assert.rejects(it.next(),error => {
+    assert.equal((error as Error).message,'t3-bridge cursor_run_unavailable');
+    assert.equal((error as Error & {unreachable:boolean}).unreachable,true);return true;
+  });
+});
+
+test('turn cursors reject invalid durable run ordinals',async t => {
+  const f=await fixture(t);const h=await f.live();
+  for (const o of [-1,0.5,'51',null,Number.MAX_SAFE_INTEGER+1]) {
+    await assert.rejects(h.turns({value:JSON.stringify({p:10,r:'old',o})})[Symbol.asyncIterator]().next(),/invalid_t3_cursor/);
+  }
+  await assert.rejects(h.turns({value:JSON.stringify({p:10,r:null,o:51})})[Symbol.asyncIterator]().next(),/invalid_t3_cursor/);
+});
+
 test('capabilities presets exclude a disabled instance, a hidden model, a stale catalog, a runtime mode the provider lacks and an option value the model does not offer',async t => {
   const f=await fixture(t);const good=f.config.presets.good;
   f.config.presets={good,disabled:{...good,instance:'disabled'},hidden:{...good,model:'hidden'},stale:{...good,instance:'stale'},mode:{...good,instance:'limited',runtime_modes:['full-access']},option:{...good,options:[{id:'effort',value:'impossible'}]},missing:{...good,model:'absent'},readonly:{...good,runtime_modes:['read-only']}};
@@ -171,6 +236,27 @@ test('reattach: settled or archived → none; server down → throws (not none)'
   f.env.FAKE_T3_FAIL='t3_thread_read';await assert.rejects(b.reattach(ref,f.hooks),/server_down/);
 });
 
+test('reattach throws for generic HTTP 404 not_found',async t => {
+  const f=await fixture(t);const b=await f.backend();
+  f.env.FAKE_T3_FAIL='t3_thread_read';f.env.FAKE_T3_ERROR='t3-bridge: t3 HTTP 404: {"code":"not_found"}';
+  await assert.rejects(b.reattach({backend:'t3',host:'test-host',id:'existing'},f.hooks),error => {
+    assert.equal((error as Error & {unreachable:boolean}).unreachable,true);
+    assert.match((error as Error).message,/HTTP 404/);return true;
+  });
+});
+
+test('reattach throws for generic RPC not_found',async t => {
+  const f=await fixture(t);const b=await f.backend();
+  f.env.FAKE_T3_FAIL='t3_thread_read';f.env.FAKE_T3_ERROR='t3-bridge: RPC error: {"code":"not_found"}';
+  await assert.rejects(b.reattach({backend:'t3',host:'test-host',id:'existing'},f.hooks),/RPC error/);
+});
+
+test('reattach returns none for explicit thread_not_found',async t => {
+  const f=await fixture(t);const b=await f.backend();
+  f.env.FAKE_T3_FAIL='t3_thread_read';f.env.FAKE_T3_ERROR='t3-bridge: {"code":"thread_not_found"}';
+  assert.deepEqual(await b.reattach({backend:'t3',host:'test-host',id:'existing'},f.hooks),{found:'none'});
+});
+
 test('findByTag/listOwned follow nextCursor, pass settled false, and see only vl- titles',async t => {
   const f=await fixture(t);f.config.projects!.other={project_id:'other'};
   await f.update(s => {s.pageSize=1;s.threads=[thread('first'),thread('foreign','human vl-tag'),thread('third','vl-job_third task'),thread('other','vl-job_other task','other'),{...thread('settled'),thread:{...thread('settled').thread,settled:true}}];});
@@ -184,8 +270,13 @@ test('findByTag/listOwned follow nextCursor, pass settled false, and see only vl
 test('settle interrupts a running thread then organizes settle',async t => {
   const f=await fixture(t);const h=await f.live();assert.equal(h.park,undefined);
   assert.deepEqual(await h.settle('requested'),{branch:'observed-branch',workspaceKept:true});
-  const calls=(await f.calls()).filter(x => x[2]==='call').map(x => x[3]);assert.ok(calls.indexOf('t3_thread_interrupt')<calls.indexOf('t3_thread_organize'));
-  assert.equal((await f.state()).threads[0].thread.settled,true);assert.equal(h.state().kind,'ended');
+  const calls=(await f.calls()).filter(x => x[2]==='call').map(x => x[3]);
+  const interruptIndex=calls.indexOf('t3_thread_interrupt'),organizeIndex=calls.indexOf('t3_thread_organize');
+  assert.ok(interruptIndex>=0,'settle must interrupt the running thread');
+  assert.ok(organizeIndex>=0,'settle must organize the thread');assert.ok(interruptIndex<organizeIndex);
+  const entry=(await f.state()).threads[0];
+  assert.equal(entry.thread.activeRunId,null);assert.equal(entry.recentRuns.find(x => x.runId==='run-1')?.status,'interrupted');
+  assert.equal(entry.thread.settled,true);assert.equal(h.state().kind,'ended');
 });
 
 test('runtime_mode_escalation_denied surfaces as that error code',async t => {

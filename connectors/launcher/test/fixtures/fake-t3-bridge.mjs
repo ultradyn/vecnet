@@ -9,7 +9,7 @@ const [command, tool, flag, json] = argv.slice(2);
 const name = command === 'call' ? tool : command;
 const supported = ['models','projects','t3_project_list','t3_thread_launch','t3_thread_list','t3_thread_read','t3_thread_send','t3_thread_wait','t3_thread_interrupt','t3_thread_organize'];
 if (!supported.includes(name)) process.exit(2);
-if (process.env.FAKE_T3_FAIL === name) fail('server_down Bearer fixture-secret\nprivate second line');
+if (process.env.FAKE_T3_FAIL === name) fail(process.env.FAKE_T3_ERROR ?? 'server_down Bearer fixture-secret\nprivate second line');
 const state = JSON.parse(readFileSync(process.env.FAKE_T3_STATE, 'utf8'));
 const now = '2026-11-05T00:00:00Z';
 // Fill the fields required by the documented bridge output schemas. Tests

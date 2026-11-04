@@ -43,8 +43,9 @@ export class Bridge {
       // Escalation errors in the real bridge include a preamble; retain just
       // the reason code. Never attach raw stdout/stderr or request bodies.
       const escalation = /\bruntime_mode_escalation_denied\b/.test(result.stderr);
-      // A numeric exit status alone never proves a thread is gone.
-      const notFound = /\b(?:thread_not_found|not_found)\b/.test(first);
+      // HTTP/RPC not_found can refer to the endpoint or another resource.
+      // Only a thread-specific error proves this session is gone.
+      const notFound = /\bthread_not_found\b/.test(first);
       throw new BridgeError(result.code, escalation ? 'runtime_mode_escalation_denied' : this.ctx.redact(first || 't3-bridge failed'), notFound);
     }
     try { return JSON.parse(result.stdout) as T; }

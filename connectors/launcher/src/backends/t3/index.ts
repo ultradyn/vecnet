@@ -96,16 +96,20 @@ class T3Session implements SessionHandle {
         }
         const ordered=[...runs.values()].sort((a,b) => a.ordinal-b.ordinal);
         const last=ordered.find(x => x.runId === cursor.r);
+        // Upgrade a legacy {p,r} cursor while its run remains available. If
+        // already evicted, neither empty items nor opaque run ids prove age;
+        // fail explicitly rather than guessing which results were delivered.
+        if (cursor.r && cursor.o === undefined) {
+          if (!last) throw new BridgeError(-1,'t3-bridge cursor_run_unavailable');
+          cursor={...cursor,o:last.ordinal};
+        }
         for (const run of ordered) {
           const result=outcome(run.status);
-          if (!result || run.runId === cursor.r || (last && run.ordinal <= last.ordinal)) continue;
+          if (!result || run.runId === cursor.r || (cursor.o !== undefined && run.ordinal <= cursor.o)) continue;
           const own=items.filter(x => x.runId === run.runId);
-          // If the old run fell outside recentRuns, positions still prevent
-          // replaying older runs which have no unconsumed timeline items.
-          if (cursor.r && !last && own.length === 0) continue;
           const final=own.filter(x => x.createdBy === 'agent' && /assistant/i.test(x.type)).at(-1);
           const finalText=final ? await this.hydrate(final,signal) : '';
-          cursor={p:own.reduce((p,item) => Math.max(p,item.position),cursor.p),r:run.runId};
+          cursor={p:own.reduce((p,item) => Math.max(p,item.position),cursor.p),r:run.runId,o:run.ordinal};
           yield {cursor:{value:JSON.stringify(cursor)},event:{type:'turn_finished',turnId:run.runId,
             at:run.completedAt ?? this.ctx.now().toISOString(),outcome:result,finalText,consumed:[]}};
           if (signal?.aborted) return;

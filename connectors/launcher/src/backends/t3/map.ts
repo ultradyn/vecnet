@@ -58,12 +58,15 @@ export function refOf(thread: T3Thread, host: string, tag?: string): SessionRef 
   return {backend:'t3',host,id:thread.threadId,extra:{tag:tag ?? thread.title.split(/\s/,1)[0],branch:thread.branch ?? undefined,
     workspace:thread.worktreePath ?? undefined,link:`t3-thread://v1/${thread.threadId}`}};
 }
-export interface Cursor { p: number; r: string | null }
+// Persist the delivered run's ordinal: recentRuns is bounded, and a failed
+// or cancelled run need not have any timeline items to anchor its position.
+export interface Cursor { p: number; r: string | null; o?: number }
 export function parseCursor(value?: string): Cursor {
   if (!value) return {p:0,r:null};
   let cursor: unknown;
   try { cursor = JSON.parse(value); } catch { throw new Error('invalid_t3_cursor'); }
   if (!cursor || typeof cursor !== 'object' || !('p' in cursor) || !Number.isSafeInteger(cursor.p) || (cursor.p as number) < 0 ||
-      !('r' in cursor) || (cursor.r !== null && typeof cursor.r !== 'string')) throw new Error('invalid_t3_cursor');
+      !('r' in cursor) || (cursor.r !== null && typeof cursor.r !== 'string') ||
+      ('o' in cursor && (!Number.isSafeInteger(cursor.o) || (cursor.o as number) < 0 || cursor.r === null))) throw new Error('invalid_t3_cursor');
   return cursor as Cursor;
 }
