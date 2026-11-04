@@ -55,7 +55,7 @@ if [[ -n ${BB_HOST:-} ]]; then
 else
   # x-alpha (48 threads) is preferred once it is back; until then it is left
   # out so no run pays its failed probe. BB_HOSTS="x-alpha x-tall …" restores it.
-  read -r -a hosts <<<"${BB_HOSTS:-x-tall x-p35 x-tuf x-19}"
+  read -r -a hosts <<<"${BB_HOSTS:-x-boss x-tall x-p35 x-tuf x-19}"
   host=""
   # A failed probe of the first box costs up to 6 s (mDNS); remember the
   # fallback for 10 minutes so a run of checks does not pay it each time.

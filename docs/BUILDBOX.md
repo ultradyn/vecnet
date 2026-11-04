@@ -38,8 +38,9 @@ The remote command gets a clean environment (`env -i`): lane-private `HOME`, `TM
 
 ## Box choice and fallback
 
-`BB_HOST=<host>` pins a box. Otherwise the first reachable host in `BB_HOSTS` wins; the default is `x-tall x-p35 x-tuf x-19`. When the first box fails its probe (an mDNS miss costs about 7 s), the fallback is cached for 10 minutes in `$XDG_RUNTIME_DIR/vecnet-bb/host`, so a burst of checks does not pay the probe each time. `BB_HOSTS` is also the host list for `just bb-clean`.
+`BB_HOST=<host>` pins a box. Otherwise the first reachable host in `BB_HOSTS` wins; the default is `x-boss x-tall x-p35 x-tuf x-19`. When the first box fails its probe (an mDNS miss costs about 7 s), the fallback is cached for 10 minutes in `$XDG_RUNTIME_DIR/vecnet-bb/host`, so a burst of checks does not pay the probe each time. `BB_HOSTS` is also the host list for `just bb-clean`.
 
+- **x-boss** (32 threads, ~200 GB free) is the preferred box from 2026-11-05 (Max: "use x-boss for builds instead"); it is first in the default list. x-p35's disk is shared with other projects and filled up that day.
 - **x-alpha** (48 threads) is the preferred box once it is back. It was down on 2026-11-04 for a few days, so it is left out of the default to avoid a failed probe on every run. From xsm, `x-alpha.local` did not resolve, and `x-alpha.lan` (10.100.0.160) and 10.100.0.161 gave no ARP reply. The IPv6 link-local fallback cannot work while xsm is on Wi-Fi. When it returns, put it first: `BB_HOSTS="x-alpha x-tall x-p35 x-tuf"`, or change the default in `scripts/bb/run.sh` and `clean.sh`. The first run bootstraps it.
 - **x-tall** (12 cores, 15 GiB, load about 3): the default. The proof runs below used it.
 - **x-p35** (8 cores, 7.5 GiB free, load under 1 on 2026-11-04): has every required tool; not yet bootstrapped.
