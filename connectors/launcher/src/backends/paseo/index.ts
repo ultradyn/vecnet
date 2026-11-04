@@ -221,10 +221,11 @@ class PaseoSession implements SessionHandle {
         }
         text = finalBlock(read.lines, result.message); cursor.line += read.lines.length;
       }
-      text = this.backend.ctx.redact(text);
       // Bind the hash to the agent generation: identical text and line counts
       // from both sides of a handoff must remain distinguishable on restart.
+      // Hash the raw block so redaction cannot merge distinct completions.
       const last = hash(JSON.stringify([this.ref.id, text])), duplicate = last === cursor.last;
+      text = this.backend.ctx.redact(text);
       cursor.last = last;
       if (!duplicate || this.current.kind !== 'idle') this.lastActivity = this.backend.ctx.now().toISOString();
       this.current = { kind: 'idle', since: this.lastActivity };

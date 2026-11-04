@@ -6,7 +6,7 @@ const state = JSON.parse(readFileSync(process.env.FAKE_PASEO_STATE, 'utf8'));
 const command = args[0];
 const value = flag => args[args.indexOf(flag) + 1];
 const record = { args: ['--json', ...args], cwd: process.cwd() };
-let out = { ok: true }, code = 0;
+let out = { ok: true }, code = 0, malformed = false;
 if (command === 'preset') out = state.presets;
 else if (command === 'launch') {
   record.messageFile = value('--message-file');
@@ -14,6 +14,10 @@ else if (command === 'launch') {
   record.prompt = readFileSync(record.messageFile, 'utf8');
   out = state.launch ?? { agent_id: 'a1', preset: value('--preset'), mode: 'full-access' };
   if (out.agent_id) state.agents.push({ id: out.agent_id, name: value('--title'), cwd: value('--cwd'), status: 'running', archived: false });
+  // The daemon can create the agent before the CLI loses its response.
+  if (state.ambiguousLaunch === 'null') out = { ...out, agent_id: null };
+  if (state.ambiguousLaunch === 'malformed') malformed = true;
+  if (state.ambiguousLaunch === 'nonzero') { code = 1; out = { ok: false }; }
 } else if (command === 'wait') {
   const inner = state.waits.shift() ?? { agentId: args[1], status: state.agents.find(a => a.id === args[1])?.status === 'idle' ? 'idle' : 'timeout' };
   out = { ok: inner.status !== 'error', stdout: JSON.stringify(inner) };
@@ -34,5 +38,5 @@ else if (command === 'settle') {
 } else throw new Error('unexpected command');
 appendFileSync(process.env.FAKE_PASEO_LOG, JSON.stringify(record) + '\n');
 writeFileSync(process.env.FAKE_PASEO_STATE, JSON.stringify(state));
-console.log(JSON.stringify(out));
+console.log(malformed ? '{invalid json' : JSON.stringify(out));
 process.exitCode = code;

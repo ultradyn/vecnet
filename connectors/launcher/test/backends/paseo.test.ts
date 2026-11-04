@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import plugin from '../../src/backends/paseo/index.ts';
 import type { PluginContext, SessionHooks, LaunchSpec, TurnEvent, SessionHandle, TurnCursor } from '../../src/backend.ts';
 const fixture = fileURLToPath(new URL('../fixtures/fake-paseo-bridge.mjs', import.meta.url));
@@ -32,7 +33,8 @@ async function harness(t: TestContext) {
     {name:'cursor', provider_model:'cursor/auto', mode:'auto_accept'},
     {name:'unknown', provider_model:'x/x', mode:null},
   ], agents:[] as Array<Record<string,unknown>>, waits:[] as Array<Record<string,unknown>>, reads:[] as string[][],
-    doctor:{ok:true, checks:[] as Array<{name:string; ok:boolean; detail:string}>}, launch:undefined as Record<string,unknown>|undefined, sendCode:0};
+    doctor:{ok:true, checks:[] as Array<{name:string; ok:boolean; detail:string}>}, launch:undefined as Record<string,unknown>|undefined,
+    ambiguousLaunch:undefined as 'null'|'malformed'|'nonzero'|undefined, sendCode:0};
   await writeFile(logFile, '');
   const saved = new Map<string,string>(), calls:Array<{argv:string[]; timeoutMs:number; env?:Record<string,string>}> = [], events:TurnEvent[] = [], logs:string[] = [];
   let failed = [] as string[], botActive = true;
@@ -81,6 +83,33 @@ test('launch with agent_id null fails; a returned preset different from the requ
     if(result.agent_id) assert.ok(calls.some(x=>x.args[1]==='settle'));
   }
 });
+test('ambiguous launch discovers and settles only the newly created tagged agent and preserves work', async t => {
+  for (const mode of ['null','malformed','nonzero'] as const) {
+    const h=await harness(t); h.state.ambiguousLaunch=mode;
+    const unrelated=[{id:'personal',name:'personal agent',status:'running',archived:false},
+      {id:'other-job',name:'vl-job_test_other other job',status:'running',archived:false}];
+    h.state.agents=structuredClone(unrelated);
+    h.state.launch={agent_id:'lost-response-agent',preset:'sol',mode:'full-access'};
+    const b=await h.create();
+    await assert.rejects(b.launch(h.spec,h.hooks),mode==='null'?/launch_failed/:mode==='malformed'?/invalid_paseo_response/:/paseo_launch_failed/);
+    const calls=await h.entries(), commands=calls.map(x=>x.args[1]);
+    const launch=commands.indexOf('launch'), stop=commands.indexOf('stop'), wait=commands.indexOf('wait'), settle=commands.indexOf('settle');
+    assert.ok(calls.slice(launch+1,stop).some(x=>x.args[1]==='ls' && !x.args.includes('--all')),'recover via live tag lookup');
+    assert.ok(launch<stop && stop<wait && wait<settle,'discover, stop, wait and settle before launch rejects');
+    for (const command of ['stop','wait','settle']) {
+      const matching=calls.filter(x=>x.args[1]===command);
+      assert.equal(matching.length,1); assert.equal(matching[0].args[2],'lost-response-agent');
+    }
+    assert.ok(!calls.some(x=>x.args.includes('--force')));
+    const state=JSON.parse(await readFile(join(h.root,'state.json'),'utf8'));
+    assert.deepEqual(state.agents.filter((a:{id:string})=>a.id!=='lost-response-agent'),unrelated);
+    assert.equal(state.agents.find((a:{id:string})=>a.id==='lost-response-agent').archived,true);
+    const ws=join(h.ws,h.spec.jobId); await access(ws);
+    assert.equal(await h.git('-C',ws,'rev-parse','HEAD'),h.base);
+    assert.equal(await h.git('-C',ws,'branch','--show-current'),'launch/job_test');
+    await assert.rejects(access(calls[launch].messageFile!));
+  }
+});
 test('permissionModes map Paseo mode ids to full-access; a null-mode preset is not offered', async t => {
   const h=await harness(t), caps=await (await h.create()).capabilities();
   assert.deepEqual(caps.permissionModes,['full-access']); assert.deepEqual(caps.presets.map(x=>x.id),['sol','claude','muse','cursor']);
@@ -113,12 +142,46 @@ test('turns: an agentId handoff is adopted, the cursor resets, a note is emitted
   const h=await harness(t); h.state.agents=[{id:'a2',name:'vl-job_test',status:'idle',archived:false}]; h.state.waits=[{agentId:'a2',status:'idle'}]; h.state.reads=[['new answer']]; const b=await h.create(), s=await b.launch(h.spec,h.hooks); const rows=await take(s,2,{value:JSON.stringify({line:99,last:'old'})});
   assert.equal(rows[0].event.type,'progress'); assert.equal(s.ref.id,'a2'); assert.equal((await h.entries()).find(x=>x.args[1]==='read')?.args.at(-1),'0'); assert.ok([...h.saved.values()].some(x=>x.includes('a2'))); assert.equal((await b.findByTag(h.spec.tag))?.id,'a2');
 });
+test('distinct raw completions that redact identically finish both turns and dedupe replay', async t => {
+  const h=await harness(t);
+  h.ctx.redact=s=>s.replace(/https:\/\/example\.invalid\/\S+/g,'https://example.invalid/[redacted]');
+  h.state.waits=[{status:'idle'},{status:'idle'},{status:'idle'},{status:'error',message:'sentinel'}];
+  h.state.reads=[['See https://example.invalid/first'],['See https://example.invalid/second'],['See https://example.invalid/second']];
+  const s=await (await h.create()).launch(h.spec,h.hooks), first=(await take(s,1))[0];
+  await s.send({items:[{deliveryId:'next',messageId:'next',from:'peer',text:'next turn',attachments:[]}]},'start');
+  const second=(await take(s,1,first.cursor))[0];
+  for (const row of [first,second]) {
+    assert.equal(row.event.type,'turn_finished'); if(row.event.type!=='turn_finished') throw Error();
+    assert.equal(row.event.outcome,'completed'); assert.equal(row.event.finalText,'See https://example.invalid/[redacted]');
+  }
+  assert.notEqual(JSON.parse(first.cursor.value).last,JSON.parse(second.cursor.value).last);
+  assert.notEqual('turnId' in first.event && first.event.turnId,'turnId' in second.event && second.event.turnId);
+  const replay=(await take(s,1,second.cursor))[0];
+  assert.equal(replay.event.type,'turn_finished'); if(replay.event.type!=='turn_finished') throw Error();
+  assert.equal(replay.event.outcome,'failed'); assert.equal(replay.event.finalText,'sentinel');
+  assert.equal((await h.entries()).filter(x=>x.args[1]==='read').length,3);
+});
 test('send is at most once: a recorded batch is not resent after a restart', async t => {
-  const h=await harness(t), b=await h.create(), s=await b.launch(h.spec,h.hooks); const input={items:[{deliveryId:'dlv_1',messageId:'msg_1',from:'peer_1',text:'send me',attachments:[]}]};
-  const original=h.ctx.exec; h.ctx.exec=async(argv,opts)=>{if(argv.includes('send')) assert.ok(h.saved.size>1,'batch saved before exec'); return original(argv,opts);};
-  await s.send(input,'start'); const restarted=await plugin.create(h.config,h.ctx); const attached=await restarted.reattach(s.ref,h.hooks); assert.equal(attached.found,'live'); if(attached.found!=='live') throw Error(); await attached.handle.send(input,'start');
+  const h=await harness(t), b=await h.create(), s=await b.launch(h.spec,h.hooks);
+  const input={items:['dlv_1','dlv_extra'].map(deliveryId=>({deliveryId,messageId:`msg_${deliveryId}`,from:'peer_1',text:'send me',attachments:[]}))};
+  const batchId=createHash('sha256').update(JSON.stringify(input.items.map(i=>i.deliveryId))).digest('hex');
+  let boundary:Map<string,string>|undefined;
+  const original=h.ctx.exec; h.ctx.exec=async(argv,opts)=>{
+    if(argv.includes('send')) {
+      assert.equal(h.saved.get(`batch:${h.spec.tag}:${batchId}`),'attempted','specific batch persisted before dispatch');
+      for (const item of input.items) assert.equal(h.saved.get(`delivery:${h.spec.tag}:${item.deliveryId}`),batchId,'each delivery persisted before dispatch');
+      boundary=new Map(h.saved);
+      await original(argv,opts); throw Error('simulated crash at dispatch');
+    }
+    return original(argv,opts);
+  };
+  await assert.rejects(s.send(input,'start'),/paseo_bridge_unreachable/); assert.ok(boundary);
+  h.ctx.exec=original;
+  // Restart with exactly the durable snapshot from before the bridge dispatch.
+  const persisted=boundary, ctx={...h.ctx,store:{get:(k:string)=>persisted.get(k),set:(k:string,v:string)=>{persisted.set(k,v);},delete:(k:string)=>{persisted.delete(k);},keys:(p='')=>[...persisted.keys()].filter(k=>k.startsWith(p))}};
+  const restarted=await plugin.create(h.config,ctx); const attached=await restarted.reattach(s.ref,h.hooks); assert.equal(attached.found,'live'); if(attached.found!=='live') throw Error(); await attached.handle.send(input,'start');
   assert.equal((await h.entries()).filter(x=>x.args[1]==='send').length,1);
-  h.state.sendCode=1; h.state.agents=[{id:'a1',name:h.spec.tag,archived:false,status:'idle'}]; await h.save(); const failedInput={items:[{...input.items[0],deliveryId:'dlv_2'}]}; await assert.rejects(s.send(failedInput,'start')); await attached.handle.send(failedInput,'start'); assert.equal((await h.entries()).filter(x=>x.args[1]==='send').length,2);
+  h.state.sendCode=1; h.state.agents=[{id:'a1',name:h.spec.tag,archived:false,status:'idle'}]; await h.save(); const failedInput={items:[{...input.items[0],deliveryId:'dlv_2'}]}; await assert.rejects(attached.handle.send(failedInput,'start')); await attached.handle.send(failedInput,'start'); assert.equal((await h.entries()).filter(x=>x.args[1]==='send').length,2);
 });
 test('settle stops, waits for idle, records head sha and commits, reports dirty work, never passes --force, keeps the workspace', async t => {
   const h=await harness(t); h.state.waits=[{agentId:'a1',status:'idle'}]; const b=await h.create(), s=await b.launch(h.spec,h.hooks), ws=join(h.ws,h.spec.jobId);
