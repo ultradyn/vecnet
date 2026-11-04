@@ -513,7 +513,10 @@ func (w *watcher) longPoll() error {
 // replay prints the unacked backlog even if another consumer showed it.
 // Only the subsequent live stream consults the shared shown set.
 func (w *watcher) replay() error {
-	for page := 0; page < 100; page++ {
+	for {
+		if err := w.a.ctx.Err(); err != nil {
+			return err
+		}
 		body, err := w.a.poll(w.c, w.cursor, 0)
 		if err != nil {
 			return err

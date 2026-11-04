@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -35,6 +37,14 @@ func hookDelivery(id string) envelope.Event {
 // The stream waits for the test to release frames after the backlog is drained.
 func runDedupeWatch(t *testing.T, backlog []envelope.Event) (string, chan<- []envelope.Event, *hookWatchOutput, func()) {
 	t.Helper()
+	if len(backlog) == 0 {
+		return runDedupeWatchPages(t, nil)
+	}
+	return runDedupeWatchPages(t, [][]envelope.Event{backlog})
+}
+
+func runDedupeWatchPages(t *testing.T, pages [][]envelope.Event) (string, chan<- []envelope.Event, *hookWatchOutput, func()) {
+	t.Helper()
 	env := hookTestEnv(t)
 	frames := make(chan []envelope.Event, 1)
 	opened := make(chan *http.Request, 1)
@@ -53,13 +63,14 @@ func runDedupeWatch(t *testing.T, backlog []envelope.Event) (string, chan<- []en
 				t.Errorf("replay wait = %q", r.URL.RawQuery)
 			}
 			events := []envelope.Event{}
-			if polls == 0 {
-				events = backlog
-			} else if r.URL.Query().Get("after") != "e1.7" {
+			if polls > 0 && r.URL.Query().Get("after") != fmt.Sprintf("page_%d", polls) {
 				t.Errorf("next replay query = %q", r.URL.RawQuery)
 			}
+			if polls < len(pages) {
+				events = pages[polls]
+			}
 			polls++
-			json.NewEncoder(w).Encode(pollBody{Events: events, NextCursor: "e1.7"})
+			json.NewEncoder(w).Encode(pollBody{Events: events, NextCursor: fmt.Sprintf("page_%d", polls)})
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -90,7 +101,7 @@ func runDedupeWatch(t *testing.T, backlog []envelope.Event) (string, chan<- []en
 		t.Fatal(err)
 	}
 	// Replay must ignore a claim made by the hook before the watch starts.
-	if len(backlog) > 0 {
+	if len(pages) > 0 {
 		if err := (stateFile{path: path}).update(context.Background(), func(s *hookState) error { s.claim("dly_A"); return nil }); err != nil {
 			t.Fatal(err)
 		}
@@ -119,7 +130,10 @@ func runDedupeWatch(t *testing.T, backlog []envelope.Event) (string, chan<- []en
 	t.Cleanup(stop)
 	select {
 	case r := <-opened:
-		if r.URL.Query().Get("after") != "e1.7" || r.Header.Get("Last-Event-ID") != "" {
+		if polls != len(pages)+1 {
+			t.Errorf("stream opened before empty replay page: polls=%d, want=%d", polls, len(pages)+1)
+		}
+		if r.URL.Query().Get("after") != fmt.Sprintf("page_%d", len(pages)+1) || r.Header.Get("Last-Event-ID") != "" {
 			t.Errorf("first SSE cursor: query=%q header=%q", r.URL.RawQuery, r.Header.Get("Last-Event-ID"))
 		}
 	case <-time.After(5 * time.Second):
@@ -150,6 +164,59 @@ func TestWatchReplayIgnoresShown(t *testing.T) {
 	s := readHookState(t, path)
 	if len(s.Shown) != 1 || s.Shown[0] != "dly_A" {
 		t.Fatalf("shown state = %+v", s)
+	}
+}
+
+func TestWatchReplayBeyond100Pages(t *testing.T) {
+	// A hook-shown delivery must replay after more than 100 full pages of
+	// other events. Only an empty page ends replay.
+	pages := make([][]envelope.Event, 101)
+	for page := range pages {
+		pages[page] = make([]envelope.Event, 500)
+		for i := range pages[page] {
+			pages[page][i] = envelope.Event{
+				Cursor: fmt.Sprintf("event_%d_%d", page, i), Type: "presence",
+				Data: json.RawMessage(`{"peer_id":"peer_X","state":"idle"}`),
+			}
+		}
+	}
+	pages = append(pages, []envelope.Event{hookDelivery("dly_A")})
+	_, _, out, stop := runDedupeWatchPages(t, pages)
+	stop()
+	if strings.Count(out.String(), "dly_A") != 1 {
+		t.Fatal("hook-shown tail delivery was not replayed exactly once")
+	}
+}
+
+func TestWatchReplayCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stalled := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("after") == "page_1" {
+			close(stalled)
+			<-r.Context().Done()
+			return
+		}
+		json.NewEncoder(w).Encode(pollBody{Events: []envelope.Event{{Type: "presence", Data: json.RawMessage(`{}`)}}, NextCursor: "page_1"})
+	}))
+	defer srv.Close()
+	defer cancel()
+	w := &watcher{a: &app{ctx: ctx, stdout: io.Discard, stderr: io.Discard}, c: newClient(srv.URL, ""), seen: newDedupe(dedupeWindow)}
+	done := make(chan error, 1)
+	go func() { done <- w.replay() }()
+	select {
+	case <-stalled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replay did not request its next page")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || w.replayed {
+			t.Fatalf("cancelled replay: err=%v, replayed=%v", err, w.replayed)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("replay did not stop on cancellation")
 	}
 }
 

@@ -586,13 +586,37 @@ func TestHookInstallPreservesTrailingNewline(t *testing.T) {
 }
 
 func TestHookInstallFallbackToCwd(t *testing.T) {
+	// Git discovery uses the process environment, not the CLI user's getenv.
+	for _, key := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES"} {
+		t.Setenv(key, "") // Restore the inherited value when the test finishes.
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+	}
 	u := installUser(t)
-	root := t.TempDir()
+	parent := t.TempDir()
+	if out, err := exec.Command("git", "-C", parent, "init", "--quiet").CombinedOutput(); err != nil {
+		t.Fatalf("init disposable ancestor repository: %v: %s", err, out)
+	}
+	root := filepath.Join(parent, "cwd")
+	if err := os.Mkdir(root, 0755); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(root)
+	// TMPDIR may itself be inside a checkout. Keep discovery below the
+	// private cwd's parent, including when the caller supplied Git overrides.
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(root))
+	// Fail before --write if Git could target an ancestor's real settings.
+	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").CombinedOutput(); err == nil {
+		t.Fatalf("private cwd unexpectedly belongs to a repository: %s", out)
+	}
 	_, errs := installRun(t, u, "--write", "--profile", "p")
 	path := filepath.Join(root, ".claude", "settings.local.json")
 	if len(settingsCommands(t, readSettings(t, path), "PostToolUse")) != 1 {
 		t.Fatal("missing post-tool hook")
+	}
+	if _, err := os.Stat(filepath.Join(parent, ".claude")); !os.IsNotExist(err) {
+		t.Fatalf("ancestor settings directory touched: %v", err)
 	}
 	if !strings.Contains(errs, "not in a git repository; using "+root) || !strings.Contains(errs, path) {
 		t.Fatalf("missing fallback reason: %q", errs)

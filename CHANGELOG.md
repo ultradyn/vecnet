@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-04: monitor watch replays until an empty page even beyond 100 pages; hook installer docs distinguish new matchers from preserved existing group properties (`internal/cli/watch.go`, PROTOCOL §13.9, `docs/connectors/claude-code.md`).
 - 2026-11-03: vecnet hook and hook install (Claude Code UserPromptSubmit/PostToolUse context, settings.local.json); watch --for-monitor replays its backlog, then dedupes live deliveries through <config dir>/state/<profile>.json (PROTOCOL §13.9).
 - 2026-11-04: reaction wakes are claimed before each Events callback or operator notification attempt (`deliveries.dispatching`, migration 0013, `Hub.BeginDispatch`/`EndDispatch`); an in-flight wake is not superseded, a failed one settles the withdrawal, a notified one becomes `pushed` (PROTOCOL §17.5).
 - 2026-11-04: HTTP and `vecnet_react` enforce the 32-byte reaction emoji body cap before semantic validation; MCP documents optional `op` defaulting to `add` (`internal/httpapi/reactions.go`, `internal/mcpserver/tools.go`, PROTOCOL §4.3).
