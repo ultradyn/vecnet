@@ -25,12 +25,13 @@ const checks = [
   'server/discover',
   'initialize older revision',
   'tools/list',
+  'setup guide and prompt',
   'events/list',
   'invalid Origin',
   'GET without a session',
 ];
 
-test('conformance passes all nine checks with a seeded peer bearer', { timeout: 120000 }, async () => {
+test('conformance passes all ten checks with a seeded peer bearer', { timeout: 120000 }, async () => {
   const env = await bootDemo();
   try {
     const token = Object.values(env.demo.peers).find(peer => peer.secret)?.secret;
@@ -55,7 +56,7 @@ test('conformance fails without revealing an invalid bearer', { timeout: 120000 
     assert.equal(result.code, 1);
     assert.equal(result.stdout.includes('bogus'), false);
     assert.equal(result.stderr.includes('bogus'), false);
-    assert.equal(result.stdout.trim().split('\n').length, 9);
+    assert.equal(result.stdout.trim().split('\n').length, checks.length);
     assert.match(result.stdout, /^FAIL server\/discover$/m);
     assert.equal(result.stderr, '');
   } finally {
