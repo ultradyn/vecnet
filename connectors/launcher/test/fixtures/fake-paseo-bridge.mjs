@@ -19,7 +19,8 @@ else if (command === 'launch') {
   if (state.ambiguousLaunch === 'malformed') malformed = true;
   if (state.ambiguousLaunch === 'nonzero') { code = 1; out = { ok: false }; }
 } else if (command === 'wait') {
-  const inner = state.waits.shift() ?? { agentId: args[1], status: state.agents.find(a => a.id === args[1])?.status === 'idle' ? 'idle' : 'timeout' };
+  const status = state.agents.find(a => a.id === args[1])?.status;
+  const inner = state.waits.shift() ?? { agentId: args[1], status: ['idle', 'error'].includes(status) ? status : 'timeout' };
   out = { ok: inner.status !== 'error', stdout: JSON.stringify(inner) };
   code = inner.status === 'error' ? 1 : 0;
   const agent = state.agents.find(a => a.id === inner.agentId);
@@ -30,7 +31,7 @@ else if (command === 'launch') {
 } else if (command === 'ls') out = state.agents.filter(a => args.includes('--all') || !a.archived);
 else if (command === 'doctor') { out = state.doctor; code = out.ok ? 0 : 1; }
 else if (command === 'send') { state.sends = (state.sends ?? 0) + 1; code = state.sendCode ?? 0; }
-else if (command === 'stop') { const agent = state.agents.find(a => a.id === args[1]); if (agent) agent.status = 'idle'; }
+else if (command === 'stop') { const agent = state.agents.find(a => a.id === args[1]); if (agent?.status === 'running') agent.status = 'idle'; }
 else if (command === 'settle') {
   const agent = state.agents.find(a => a.id === args[1]);
   if (agent?.status === 'running') { code = 1; out = { ok: false, error: 'refusing to settle running agent without --force' }; }
@@ -38,5 +39,6 @@ else if (command === 'settle') {
 } else throw new Error('unexpected command');
 appendFileSync(process.env.FAKE_PASEO_LOG, JSON.stringify(record) + '\n');
 writeFileSync(process.env.FAKE_PASEO_STATE, JSON.stringify(state));
-console.log(malformed ? '{invalid json' : JSON.stringify(out));
+if (command === 'wait' && code === 1) console.error(JSON.stringify({ ok: false, error: JSON.parse(out.stdout).message ?? 'Paseo turn failed' }));
+else console.log(malformed ? '{invalid json' : JSON.stringify(out));
 process.exitCode = code;

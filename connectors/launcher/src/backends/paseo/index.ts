@@ -256,11 +256,18 @@ class PaseoSession implements SessionHandle {
   async settle(_mode: 'wrapup' | 'requested' | 'cancel' | 'lost') {
     const row = (await this.backend.bridge.agents(true)).find(a => a.id === this.ref.id);
     if (!row) throw new Error('paseo_session_missing');
-    if (row.status !== 'idle' && live(row)) await this.interrupt('settle');
-    if (live(row)) {
+    // Paseo stop is a no-op for inactive errors, and wait keeps reporting
+    // their failure. Directory evidence is sufficient to try non-force settle;
+    // the bridge still guards against a turn starting before archival.
+    if (live(row) && row.status !== 'error') {
+      if (row.status !== 'idle') await this.interrupt('settle');
       const waited = await this.backend.bridge.wait(this.ref.id, undefined, 30);
       this.adopt(waited.agentId);
-      if (waited.status !== 'idle') throw new Error('paseo_settle_not_idle');
+      if (waited.status !== 'idle') {
+        const failed = waited.status === 'error'
+          ? (await this.backend.bridge.agents(true)).find(a => a.id === this.ref.id) : undefined;
+        if (failed?.status !== 'error') throw new Error('paseo_settle_not_idle');
+      }
     }
     const extra = this.ref.extra ?? {};
     if (typeof extra.workspace !== 'string' || typeof extra.branch !== 'string' || typeof extra.base !== 'string') throw new Error('paseo_workspace_metadata_missing');

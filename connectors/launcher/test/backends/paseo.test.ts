@@ -69,9 +69,16 @@ async function take(handle:SessionHandle, count:number, after?:TurnCursor) {
   return out;
 }
 test('launch creates worktree launch/<job> from base_ref and passes --cwd <ws> --no-worktree and a 0600 message file that is removed', async t => {
-  const h=await harness(t), b=await h.create(); const s=await b.launch(h.spec,h.hooks);
+  const h=await harness(t);
+  await h.git('branch','selected-base',h.base);
+  await writeFile(join(h.repo,'file'),'newer main'); await h.git('add','file');
+  await h.git('-c','commit.gpgsign=false','commit','-m','advance main');
+  assert.notEqual(await h.git('rev-parse','HEAD'),h.base);
+  h.spec.project.baseRef='selected-base';
+  const b=await h.create(), s=await b.launch(h.spec,h.hooks);
   const ws=join(h.ws,h.spec.jobId); assert.equal(s.ref.backend,'paseo'); assert.equal(s.ref.host,'test-host'); assert.equal(s.ref.extra?.workspace,ws); assert.equal(s.ref.extra?.branch,'launch/job_test'); assert.equal(s.ref.extra?.tag,h.spec.tag);
   assert.equal(await h.git('-C',ws,'rev-parse','HEAD'),h.base); assert.equal(await h.git('-C',ws,'branch','--show-current'),'launch/job_test');
+  assert.equal(await readFile(join(ws,'file'),'utf8'),'base'); assert.equal(s.ref.extra?.base,h.base);
   const call=(await h.entries()).find(x=>x.args[1]==='launch')!; assert.ok(call.args.includes('--no-worktree')); assert.equal(call.args[call.args.indexOf('--cwd')+1],ws); assert.equal(call.args[call.args.indexOf('--service-tier')+1],'priority'); assert.ok(call.args[call.args.indexOf('--title')+1].startsWith('vl-')); assert.equal(call.mode,0o600); assert.equal(call.prompt,'the prompt'); await assert.rejects(access(call.messageFile!));
   assert.ok(h.calls.find(x=>x.argv.includes('launch'))!.timeoutMs>=300_000); assert.equal(s.ref.extra?.preset,'sol'); assert.equal(s.ref.extra?.mode,'full-access');
 });
@@ -366,4 +373,94 @@ test('activity treats an error-status agent as inactive after a failed turn and 
     state.agents[0].status=status; await writeFile(join(h.root,'state.json'),JSON.stringify(state));
     assert.equal((await attached.handle.activity()).turnRunning,true,'unknown states remain conservatively busy');
   }
+});
+
+test('failed turns with inactive error agents settle in every mode and retain dirty work without force', async t => {
+  for (const mode of ['wrapup','requested','cancel','lost'] as const) {
+    const h=await harness(t), b=await h.create(), launched=await b.launch(h.spec,h.hooks);
+    const state=JSON.parse(await readFile(join(h.root,'state.json'),'utf8'));
+    state.agents[0].status='error'; state.waits=[{agentId:'a1',status:'error',message:'agent a1 failed: broken'}];
+    await writeFile(join(h.root,'state.json'),JSON.stringify(state));
+    const attached=await b.reattach(launched.ref,h.hooks);
+    assert.equal(attached.found,'live'); if(attached.found!=='live') throw Error();
+    const s=attached.handle, failure=(await take(s,1))[0];
+    assert.equal(failure.event.type,'turn_finished'); if(failure.event.type!=='turn_finished') throw Error();
+    assert.equal(failure.event.outcome,'failed'); assert.equal(failure.event.finalText,'agent a1 failed: broken');
+    assert.equal((await s.activity()).turnRunning,false);
+    if(mode==='cancel') await s.interrupt('cancel');
+    const ws=join(h.ws,h.spec.jobId); await writeFile(join(ws,'dirty'),'retained failed-turn work');
+    const result=await s.settle(mode);
+    assert.equal(result.branch,'launch/job_test'); assert.equal(result.headSha,h.base);
+    assert.deepEqual(result.commits,[]); assert.equal(result.workspaceKept,true);
+    assert.match(result.summary!,/uncommitted changes left in/);
+    assert.equal(await readFile(join(ws,'dirty'),'utf8'),'retained failed-turn work');
+    assert.equal(await h.git('-C',ws,'branch','--show-current'),'launch/job_test');
+    assert.equal(s.state().kind,'ended');
+    const calls=await h.entries(); assert.equal(calls.filter(x=>x.args[1]==='settle').length,1);
+    assert.ok(!calls.some(x=>x.args.includes('--force')));
+    const settled=JSON.parse(await readFile(join(h.root,'state.json'),'utf8')).agents[0];
+    assert.equal(settled.status,'error','stop cannot turn an inactive error into idle'); assert.equal(settled.archived,true);
+  }
+});
+
+test('settle accepts an error after stop only with fresh inactive directory evidence', async t => {
+  for (const status of ['error','running','unknown',undefined]) {
+    const h=await harness(t), b=await h.create(), s=await b.launch(h.spec,h.hooks), original=h.ctx.exec;
+    h.ctx.exec=async(argv,opts)=>{
+      // A wait failure alone is insufficient evidence that the agent is inactive.
+      if(argv.includes('wait')) return {code:1,stdout:'',stderr:JSON.stringify({ok:false,error:'agent a1 failed: stopped in error'})};
+      const result=await original(argv,opts);
+      if(argv.includes('stop')) {
+        const state=JSON.parse(await readFile(join(h.root,'state.json'),'utf8'));
+        state.agents[0].status=status;
+        await writeFile(join(h.root,'state.json'),JSON.stringify(state));
+      }
+      return result;
+    };
+    if(status==='error') {
+      const result=await s.settle('requested'); assert.equal(result.workspaceKept,true);
+    } else await assert.rejects(s.settle('requested'),/paseo_settle_not_idle/);
+    const calls=await h.entries();
+    assert.equal(calls.filter(x=>x.args[1]==='settle').length,status==='error'?1:0);
+    assert.ok(!calls.some(x=>x.args.includes('--force'))); await access(join(h.ws,h.spec.jobId));
+  }
+});
+
+test('failed-launch cleanup settles an inactive error agent without force and preserves its workspace', async t => {
+  const h=await harness(t); h.state.launch={agent_id:'a1',preset:'cursor-auto-fallback',mode:'auto_accept'};
+  const b=await h.create(), original=h.ctx.exec;
+  h.ctx.exec=async(argv,opts)=>{
+    const result=await original(argv,opts);
+    if(argv.includes('launch')) {
+      const state=JSON.parse(await readFile(join(h.root,'state.json'),'utf8'));
+      state.agents[0].status='error'; await writeFile(join(h.root,'state.json'),JSON.stringify(state));
+    }
+    return result;
+  };
+  await assert.rejects(b.launch(h.spec,h.hooks),/preset_changed/);
+  const calls=await h.entries(); assert.equal(calls.filter(x=>x.args[1]==='settle').length,1);
+  assert.ok(!calls.some(x=>x.args.includes('--force')));
+  const state=JSON.parse(await readFile(join(h.root,'state.json'),'utf8'));
+  assert.equal(state.agents[0].archived,true); assert.equal(state.agents[0].status,'error');
+  const ws=join(h.ws,h.spec.jobId); await access(ws);
+  assert.equal(await h.git('-C',ws,'rev-parse','HEAD'),h.base);
+  assert.equal(await h.git('-C',ws,'branch','--show-current'),'launch/job_test');
+  await assert.rejects(access(calls.find(x=>x.args[1]==='launch')!.messageFile!));
+});
+
+test('inactive error settlement keeps the bridge final guard against an agent becoming active', async t => {
+  const h=await harness(t), b=await h.create(), s=await b.launch(h.spec,h.hooks), original=h.ctx.exec;
+  const state=JSON.parse(await readFile(join(h.root,'state.json'),'utf8'));
+  state.agents[0].status='error'; await writeFile(join(h.root,'state.json'),JSON.stringify(state));
+  h.ctx.exec=async(argv,opts)=>{
+    if(argv.includes('settle')) {
+      const latest=JSON.parse(await readFile(join(h.root,'state.json'),'utf8'));
+      latest.agents[0].status='running'; await writeFile(join(h.root,'state.json'),JSON.stringify(latest));
+    }
+    return original(argv,opts);
+  };
+  await assert.rejects(s.settle('requested'),/paseo_settle_failed/);
+  const latest=JSON.parse(await readFile(join(h.root,'state.json'),'utf8'));
+  assert.equal(latest.agents[0].archived,false);
+  assert.ok(!(await h.entries()).some(x=>x.args.includes('--force'))); await access(join(h.ws,h.spec.jobId));
 });
