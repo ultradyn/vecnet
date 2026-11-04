@@ -19,14 +19,15 @@ var guideText string
 // profileRE is the profile shape the hook prints verbatim (PROTOCOL §13.9).
 var profileRE = regexp.MustCompile(`^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$`)
 
-// cmdGuide prints the agent manual; `--net P` fills P into its examples.
+// cmdGuide prints the agent manual; `--net P` (or $VECNET_PROFILE) fills P
+// into its examples.
 func (a *app) cmdGuide(args []string) error {
 	if len(args) != 0 {
 		return usageErr("usage: vecnet [--net PROFILE] guide")
 	}
 	text := guideText
-	if profileRE.MatchString(a.net) {
-		text = strings.ReplaceAll(text, "<profile>", a.net)
+	if p := a.namedProfile(); profileRE.MatchString(p) {
+		text = strings.ReplaceAll(text, "<profile>", p)
 	}
 	_, err := fmt.Fprint(a.stdout, text)
 	return err

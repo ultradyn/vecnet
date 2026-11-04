@@ -923,7 +923,7 @@ func TestHookInstallPrefersClaudeProjectDir(t *testing.T) {
 	elsewhere := t.TempDir()
 	u.env["CLAUDE_PROJECT_DIR"] = project
 	t.Chdir(elsewhere)
-	_, errs := installRun(t, u, "--write")
+	_, errs := installRun(t, u, "--profile", "p", "--write")
 	path := filepath.Join(project, ".claude", "settings.local.json")
 	if got := settingsCommands(t, readSettings(t, path), "UserPromptSubmit"); len(got) != 1 {
 		t.Fatalf("project settings commands = %v", got)
@@ -956,7 +956,7 @@ func TestHookInstallWarnsInLinkedWorktree(t *testing.T) {
 		}
 	}
 	t.Chdir(wt)
-	_, errs := installRun(t, u, "--write")
+	_, errs := installRun(t, u, "--profile", "p", "--write")
 	if _, err := os.Stat(filepath.Join(wt, ".claude", "settings.local.json")); err != nil {
 		t.Fatalf("worktree settings not written: %v", err)
 	}
@@ -969,7 +969,7 @@ func TestHookInstallWarnsInLinkedWorktree(t *testing.T) {
 	}
 	// A main checkout gets no such warning.
 	t.Chdir(main)
-	if _, errs := installRun(t, u, "--write"); strings.Contains(errs, "linked git worktree") {
+	if _, errs := installRun(t, u, "--profile", "p", "--write"); strings.Contains(errs, "linked git worktree") {
 		t.Fatalf("main checkout warned: %q", errs)
 	}
 }
