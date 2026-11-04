@@ -37,6 +37,10 @@ const (
 	// CounterPushAuthFailed counts routine POSTs refused for a dead key or
 	// a disabled routine (PROTOCOL §13.3).
 	CounterPushAuthFailed = "push_auth_failed"
+	// CounterEventsPushFailed counts failed MCP Events delivery attempts.
+	CounterEventsPushFailed = "events_push_failed"
+	// CounterEventsPaused counts MCP Events pauses caused by delivery or auth failures.
+	CounterEventsPaused = "events_paused"
 )
 
 // PushBackoff is the retry delay after attempt failed (PROTOCOL §3.3):
@@ -308,7 +312,7 @@ func (h *Hub) recordPush(ctx context.Context, d DueDelivery, outcome pushOutcome
 			if err := receipt("dead_letter", note); err != nil {
 				return err
 			}
-			if err := bumpCounter(ctx, tx, CounterDeadLetters); err != nil {
+			if err := BumpCounter(ctx, tx, CounterDeadLetters, 1); err != nil {
 				return err
 			}
 			return audit.Record(ctx, tx, "hub", "dead_letter", []string{d.DeliveryID, msgID, d.Recipient},
@@ -337,7 +341,7 @@ func (h *Hub) recordPush(ctx context.Context, d DueDelivery, outcome pushOutcome
 			if err := receipt("failed", "push_conflict: the receiver holds different bytes for this delivery_id"); err != nil {
 				return err
 			}
-			if err := bumpCounter(ctx, tx, CounterPushConflicts); err != nil {
+			if err := BumpCounter(ctx, tx, CounterPushConflicts, 1); err != nil {
 				return err
 			}
 			return audit.Record(ctx, tx, "hub", "push_conflict", []string{d.DeliveryID, msgID, d.Recipient},
@@ -346,7 +350,7 @@ func (h *Hub) recordPush(ctx context.Context, d DueDelivery, outcome pushOutcome
 			if err := deadLetter(left-1, "push_auth_failed: the routine refused its key or is disabled: HTTP "+strconv.Itoa(status)); err != nil {
 				return err
 			}
-			if err := bumpCounter(ctx, tx, CounterPushAuthFailed); err != nil {
+			if err := BumpCounter(ctx, tx, CounterPushAuthFailed, 1); err != nil {
 				return err
 			}
 			return audit.Record(ctx, tx, "hub", "push_auth_failed", []string{d.DeliveryID, msgID, d.Recipient},
@@ -476,10 +480,13 @@ func (h *Hub) AcceptEventPush(ctx context.Context, deliveryID string, now time.T
 	return nil
 }
 
-// bumpCounter adds one to the dashboard counter name inside tx.
-func bumpCounter(ctx context.Context, tx *sql.Tx, name string) error {
+// BumpCounter adds n to the dashboard counter name inside tx. Zero is a no-op.
+func BumpCounter(ctx context.Context, tx *sql.Tx, name string, n int64) error {
+	if n == 0 {
+		return nil
+	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO counters(name, value) VALUES (?, 1) ON CONFLICT(name) DO UPDATE SET value = value + 1`, name); err != nil {
+		`INSERT INTO counters(name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = value + excluded.value`, name, n); err != nil {
 		return fmt.Errorf("hub: count %s: %w", name, err)
 	}
 	return nil

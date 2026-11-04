@@ -600,22 +600,39 @@ func (st *Store) secrets(ctx context.Context, id string, now time.Time) ([]strin
 // token has expired. Nothing is dropped and the cursor stays.
 func (st *Store) pauseExpiredTokens(ctx context.Context, now time.Time) error {
 	nowS := envelope.FormatTime(now)
-	if _, err := st.DB.ExecContext(ctx,
-		`UPDATE event_subscriptions SET paused_reason = ?, updated_at = ?
-		 WHERE paused_reason IS NULL AND token_expires_at IS NOT NULL AND token_expires_at <= ?`,
-		PausedTokenExpired, nowS, nowS); err != nil {
-		return fmt.Errorf("events: pause expired tokens: %w", err)
-	}
-	return nil
+	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE event_subscriptions SET paused_reason = ?, updated_at = ?
+			 WHERE paused_reason IS NULL AND token_expires_at IS NOT NULL AND token_expires_at <= ?`,
+			PausedTokenExpired, nowS, nowS)
+		if err != nil {
+			return fmt.Errorf("events: pause expired tokens: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("events: pause expired tokens: %w", err)
+		}
+		return hub.BumpCounter(ctx, tx, hub.CounterEventsPaused, n)
+	})
 }
 
 func (st *Store) pause(ctx context.Context, id, reason string, now time.Time) error {
-	if _, err := st.DB.ExecContext(ctx,
-		`UPDATE event_subscriptions SET paused_reason = ?, updated_at = ? WHERE sub_id = ?`,
-		reason, envelope.FormatTime(now), id); err != nil {
-		return fmt.Errorf("events: pause: %w", err)
-	}
-	return nil
+	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE event_subscriptions SET paused_reason = ?, updated_at = ? WHERE sub_id = ? AND paused_reason IS NULL`,
+			reason, envelope.FormatTime(now), id)
+		if err != nil {
+			return fmt.Errorf("events: pause: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("events: pause: %w", err)
+		}
+		if n == 1 && (reason == PausedDeliveryFailed || reason == PausedTokenExpired || reason == PausedUnauthorized) {
+			return hub.BumpCounter(ctx, tx, hub.CounterEventsPaused, 1)
+		}
+		return nil
+	})
 }
 
 // outboxRow is one unsettled event.
@@ -713,6 +730,11 @@ func (st *Store) settle(ctx context.Context, id, eventID, terminal string, statu
 			nowS, term, id, eventID); err != nil {
 			return fmt.Errorf("events: settle: %w", err)
 		}
+		if terminal == "exhausted" {
+			if err := hub.BumpCounter(ctx, tx, hub.CounterEventsPushFailed, 1); err != nil {
+				return err
+			}
+		}
 		return recordResult(ctx, tx, id, status, 0, nil, nowS)
 	})
 }
@@ -744,6 +766,9 @@ func (st *Store) retryLater(ctx context.Context, id, eventID string, attempts, s
 			`UPDATE event_outbox SET attempts = ?, next_attempt_at = ? WHERE sub_id = ? AND event_id = ?`,
 			attempts, nextS, id, eventID); err != nil {
 			return fmt.Errorf("events: retry: %w", err)
+		}
+		if err := hub.BumpCounter(ctx, tx, hub.CounterEventsPushFailed, 1); err != nil {
+			return err
 		}
 		return recordResult(ctx, tx, id, status, attempts, nextS, envelope.FormatTime(now))
 	})

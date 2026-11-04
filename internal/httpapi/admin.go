@@ -705,7 +705,7 @@ func (s *server) adminAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminCounters is GET /v1/admin/counters: {"loop_cut", "rate_limited",
-// "dead_letters", "push_conflicts", "push_auth_failed"}.
+// "dead_letters", "push_conflicts", "push_auth_failed", "events_push_failed", "events_paused"}.
 func (s *server) adminCounters(w http.ResponseWriter, r *http.Request) {
 	c, err := s.Hub.Counters(r.Context())
 	if err != nil {
