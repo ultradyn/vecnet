@@ -796,7 +796,7 @@ Run each check yourself and record it in checks:
 5. \`CGO_ENABLED=0 build2 go build -p 2 -o bin/ ./cmd/...\` then \`readelf -n bin/vecnet-hub | grep -c 'x86 ISA needed'\` prints 0
 6. \`just validate-protocol\` (if python jsonschema is missing, mark ok only when the schema-drift diff part passed, and say so)
 7. \`git status --porcelain\` is empty apart from gitignored files
-8. Every task 1-${NTASKS} has a Plan-Task commit: \`git log --format=%B ${BASE_REF}..HEAD | grep -c '^Plan-Task: '\` and list any missing number.
+8. Every task ${START}-${END} in this invocation has verified Plan-Task evidence: read ${STATUS}/task-NN.json for each two-digit task number NN; require its task number to match, status to be \"passed\", run_stamp to be \"${STAMP}\", and head_sha to be a full commit SHA. Run \`git cat-file -e <head_sha>^{commit}\`, \`git merge-base --is-ancestor <head_sha> HEAD\`, and \`git show -s --format=%B <head_sha>\`; require every command to succeed and the recorded commit to carry the exact trailer \"Plan-Task: NN\". Any missing or mismatched evidence must fail this check; list each affected task. Do not infer coverage from a trailer count or a moving comparison against ${BASE_REF}: tasks may already have merged into ${BASE_REF}, and trailer numbers repeat across plans. Tasks outside ${START}-${END} belong to other invocations.
 ${GATE_CHECKS.map((c, i) => `${9 + i}. ${c}\n`).join('')}Also read the diff of commits with trailer "Plan-Task: review" and list in fix_diff_concerns anything that weakens a test, removes an assertion, or loosens a security check.
 
 pass = every check ok and fix_diff_concerns empty.
