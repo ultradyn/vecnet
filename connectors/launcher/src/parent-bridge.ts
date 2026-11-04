@@ -8,7 +8,7 @@ import type { Directory } from './directory.ts';
 import type { ApprovalRow, JobRow, Ledger, OutboxRow, QuestionRow } from './ledger.ts';
 import type { Outbox } from './outbox.ts';
 import type { ApprovalRoute } from './policy.ts';
-import { approvalOptions, finishPermission } from './contract/permission.ts';
+import { approvalOptions, canonicalPermission, finishPermission } from './contract/permission.ts';
 import { buildApprovalClosed, buildQuestion, parseAnswers, parseDecidedVia, parseDecision } from './contract/metadata.ts';
 import type { LaunchQuestion } from './contract/metadata.ts';
 import { redactText } from './redact.ts';
@@ -218,7 +218,9 @@ export function createParentBridge(deps: ParentBridgeDeps): ParentBridge {
   function requestPermission(job: JobRow, workspaceRoot: string, req: PermissionRequest, signal: AbortSignal): Promise<PermissionDecision> {
     const context = {machineId:cfg.host,jobId:job.jobId,permissionMode:job.permissionMode,preset:job.preset,backend:job.backend,workspaceRoot,home:deps.home};
     let permission = finishPermission({...req.permission,options:req.options},context);
-    const route = deps.route(permission,job);
+    // Route on the complete request, never the published copy: shortening to
+    // the 6 KiB cap can drop a privileged command suffix or a sensitive path.
+    const route = deps.route(canonicalPermission({...req.permission,options:req.options},context),job);
     const withEscalate = route.to !== 'operator' && route.escalateOption;
     // Normalize labels using local surrogate IDs, then restore the opaque IDs.
     // The launcher control gets a distinct ID even if a backend uses 'escalate'.

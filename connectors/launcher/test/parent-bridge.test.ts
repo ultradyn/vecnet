@@ -359,3 +359,22 @@ test('launch.decision is operator-only even for the requester and authorized rel
   }
   assert.deepEqual(await pending,{optionId:'allow-once',decidedBy:'peer_operator'});
 });
+
+test('routing decides on the complete request: a privileged suffix past the 1 KiB display cap still goes to the operator',async t=>{
+  const s=setup(t,{approvals:{to_operator:{presets:['privileged']}}}),p=permission();
+  p.permission.command={line:'echo '+'a'.repeat(7000)+'; sudo id'};p.permission.fidelity={...p.permission.fidelity,command:'line'};
+  const pending=s.hooks.onPermissionRequest(p,signal()),req=s.prompts()[0];
+  assert.deepEqual(req.recipients,['peer_operator']);
+  const published=req.metadata!['launch.permission'] as {command:{line:string};redacted:boolean};
+  assert.ok(!published.command.line.includes('sudo'),'the published copy was shortened');assert.equal(published.redacted,true);
+  s.bridge.abandonAll(s.job.jobId,'session_ended');await pending;
+});
+test('routing decides on the complete request: a sensitive path beyond the first 32 still goes to the operator',async t=>{
+  const s=setup(t,{approvals:{to_operator:{presets:['privileged']}}}),p=permission();
+  p.permission.paths=[...Array.from({length:40},(_,i)=>({path:`dir/${'x'.repeat(150)}-${i}`,access:'write' as const})),{path:'/etc/sudoers',access:'write'}];
+  const pending=s.hooks.onPermissionRequest(p,signal()),req=s.prompts()[0];
+  assert.deepEqual(req.recipients,['peer_operator']);
+  const published=req.metadata!['launch.permission'] as {paths:Array<{path:string}>};
+  assert.ok(published.paths.length<=32 && !published.paths.some(x=>x.path.startsWith('/etc')),'the published copy was shortened');
+  s.bridge.abandonAll(s.job.jobId,'session_ended');await pending;
+});

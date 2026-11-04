@@ -349,6 +349,8 @@ const bypassCases = [
   'env sudo id', 'env FOO=1 sudo id', "bash -c 'sudo id'", 'sh -c "sudo id"', 'eval "sudo id"',
   'bash <<EOF\nsudo id\nEOF', 'echo id | xargs sudo', 'nohup sudo id', 'exec sudo id', 'command sudo id',
   "s''udo id", 's\\udo id', '${X:-sudo} id', 'echo "unterminated\nsudo id',
+  // Backslash-newline is a line continuation: the shell joins the halves.
+  's\\\nudo id', 'su\\\r\ndo id', "bash -c 's\\\nudo id'", 'echo ok; d\\\no\\\nas id', 'pk\\\nexec id', 'env s\\\nu id',
 ].map(line => ({line,privileged:true}));
 // Coordinator decision (2026-11-05): classification fails closed, so every table
 // entry that names a privileged command is privileged, including ones that are

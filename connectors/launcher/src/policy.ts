@@ -82,7 +82,9 @@ export type ApprovalRoute = { to: 'requester' | 'operator' | 'relay'; escalateOp
 // for any classifier: route untrusted requesters with to_operator.requesters.
 const PRIVILEGED_COMMANDS = new Set(['sudo','su','doas','pkexec']);
 function mentionsPrivileged(line: string): boolean {
-  const words = line.replace(/[\\'"`]/g,'').match(/[A-Za-z0-9_.\/~+]+/g) ?? [];
+  // A shell deletes backslash-newline (line continuation) before it splits
+  // words, so `s\<LF>udo` runs sudo: join those first, then drop quoting.
+  const words = line.replace(/\\\r?\n/g,'').replace(/[\\'"`]/g,'').match(/[A-Za-z0-9_.\/~+]+/g) ?? [];
   return words.some(word => PRIVILEGED_COMMANDS.has(basename(word)));
 }
 function within(root: string, path: string): boolean {

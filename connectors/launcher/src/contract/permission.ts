@@ -46,10 +46,17 @@ function truncateJSONText(s: string, budget: number): string {
   }
   return s.slice(0,lo).replace(/[\uD800-\uDBFF]$/,'');
 }
-export function finishPermission(draft: PermissionDraft, ctx: {
+export interface PermissionContext {
   machineId: string; jobId: string; permissionMode: PermissionMode; preset: string;
   backend: string; workspaceRoot: string; home: string;
-}): LaunchPermission {
+}
+/**
+ * The complete canonical permission: paths resolved and classified against the
+ * workspace, nothing redacted or shortened. Routing decides on this object, so
+ * a long command line or path list cannot push a privileged operation past the
+ * published copy's size cap (finishPermission).
+ */
+export function canonicalPermission(draft: PermissionDraft, ctx: PermissionContext): LaunchPermission {
   const root = canonical(ctx.workspaceRoot);
   function path(p: string): string {
     const expanded = p === '~' ? ctx.home : p.startsWith('~/') ? `${ctx.home}/${p.slice(2)}` : p;
@@ -62,16 +69,19 @@ export function finishPermission(draft: PermissionDraft, ctx: {
   };
   const outside = paths?.some(p=>!p.in_workspace) || (command?.cwd !== undefined && !within(root,command.cwd)) ? true :
     !command && draft.fidelity.paths === 'enforced' && paths !== undefined && paths.length > 0 && paths.every(p=>p.in_workspace) ? false : 'unknown';
+  return {
+    ...draft, v:1,machine_id:ctx.machineId,job_id:ctx.jobId,permission_mode:ctx.permissionMode,preset:ctx.preset,backend:ctx.backend,
+    workspace_root:root,outside_workspace:outside,redacted:draft.options.some(o=>redactText(o.label).changed),backend_raw_truncated:false,
+    command,paths,
+  };
+}
+/** The published copy of a permission: redacted and bounded to 6 KiB. Never route on it. */
+export function finishPermission(draft: PermissionDraft, ctx: PermissionContext): LaunchPermission {
   let raw: string;
   try { raw = JSON.stringify(draft.backend_raw); if (raw === undefined) throw new Error(); }
   catch { throw new Error('backend permission must be JSON serialisable'); }
   const sha256 = createHash('sha256').update(raw).digest('hex');
-  const p: LaunchPermission = {
-    ...draft, v:1,machine_id:ctx.machineId,job_id:ctx.jobId,permission_mode:ctx.permissionMode,preset:ctx.preset,backend:ctx.backend,
-    workspace_root:root,outside_workspace:outside,redacted:draft.options.some(o=>redactText(o.label).changed),backend_raw_truncated:false,
-    command,paths,
-    options:[],
-  };
+  const p: LaunchPermission = { ...canonicalPermission(draft,ctx), options:[] };
   // Redact values structurally, never the serialised JSON (a bearer regex could
   // eat quotes and produce invalid JSON). Cover reason, argv and raw keys;
   // option labels are redacted during final normalization below.
