@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-05: amend dot-oauth-xk plan/workflow args with peer-scoped OAuth callers, skew-safe rebind cutoff, no-store-compatible JWKS cache and all-fetch cooldown, pending 0019 and mandatory remote-only runner preflight (`docs/plans/2026-11-05-dot-oauth-xk.md`, `dot-oauth-xk.workflow-args.json`).
 - 2026-11-05: `/mcp` allows the public origin plus configurable exact extra origins (default `https://chatgpt.com`, `--mcp-allowed-origins` / `VECNET_MCP_ALLOWED_ORIGINS`, `none` disables extras), validates before startup/auth and logs allowed foreign origins; `vecnet_whoami` requires stable non-empty profile `id` in schema/results (PROTOCOL §4.1/4.3/4.5/20, dots and DEPLOY).
 
 - 2026-11-05: prepare supervised Grok Bot live tests with MCP-first instructions, bounded inbox paging, safe operator `route list|rotate|remove` (DELETE audits `route_remove` and preserves pull deliveries), and allowlisted MCP initialize/refusal diagnostics with secret canary coverage.

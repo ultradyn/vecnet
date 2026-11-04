@@ -23,33 +23,40 @@
     "Tests never read/write real config: inject VECNET_CONFIG, XDG_CONFIG_HOME, XDG_CACHE_HOME and HOME as temp dirs; never touch ~/.config/vecnet.",
     "JWKS, issuer and callbacks are faked with httptest; never fetch live oauth.xk.io or other hosts in tests. Test TLS trust is injected, not a production bypass.",
     "Edit only your task files; preserve integ-grok Origin/profile work and hub-notices/0019. All builds/tests run through just bb.",
-    "Preflight: integ-grok gaps 1/2 and hub-notices migration 0019 must be on master. This plan owns migration 0020. Follow the plan Global Constraints and Review Focus.",
-    "No live state changes or deployment. Full suite and named failing-first evidence required; no real token fixtures."
+    "Preflight: integ-grok gaps 1/2 landed on merged master 444f50b; hub-notices migration 0019 is still pending and must land before migration tests. This plan owns migration 0020. Follow the plan Global Constraints and Review Focus.",
+    "No live state changes or deployment. Full suite and named failing-first evidence required; no real token fixtures.",
+    "Blocking preflight: coordinator must repair shared workflow rules()/hardcoded ISA gate before invoking this workflow, with failing-first TestRemoteOnlyGateCommands per plan. No local compilation exception; all build/test/ISA/dependency commands use just bb, including built-in gate and merge checks. Do not launch an unpatched runner.",
+    "External caller Kind must be peer bound to exactly binding.PeerID, while OAuthInfo/lease retain binding.PrincipalID. Test isolation from a second peer moved under the SAME principal.",
+    "Verification keys are retained locally up to five minutes even with no-store/max-age=0; shorter positive max-age shortens TTL. Every fetch path obeys the global 30s start interval and failure cooldown; fresh keys work, expired keys never do.",
+    "Binding cutoff is the first whole UTC second strictly after activation sample plus 30s issuer lead; iat >= cutoff has no skew allowance. Test pre-unbind signed tokens with +20s/+30s issuer offsets through real verifier/adapter and renewal."
   ],
   "mergeChecks": [
     "just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
     "just bb just validate-protocol",
     "just bb build2 node --test --test-concurrency=2 scripts/mcp-conformance.test.mjs",
-    "just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-dot-oauth-xk/merge-shots just ui-shots"
+    "just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-dot-oauth-xk/merge-shots just ui-shots",
+    "just bb CGO_ENABLED=0 just isa-check",
+    "just bb build2 node --test --test-concurrency=2 docs/plans/vecnet-core-build.workflow.test.mjs"
   ],
   "gateChecks": [
     "CGO_ENABLED=0 just bb go test -p 2 -count=1 ./...",
     "just bb build2 go vet ./...",
     "just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
-    "just isa-check (prints 0 for both binaries)",
+    "just bb CGO_ENABLED=0 just isa-check (prints 0 for both binaries on build box)",
+    "just bb build2 node --test --test-concurrency=2 docs/plans/vecnet-core-build.workflow.test.mjs",
     "just bb just validate-protocol",
     "just bb build2 node --test --test-concurrency=2 scripts/mcp-conformance.test.mjs",
-    "go list -deps ./cmd/vecnet | grep -c 'modernc.org/sqlite' (prints 0)",
-    "go list -deps ./cmd/vecnet-hub | grep -c 'charm.land' (prints 0)",
+    "just bb build2 go list -deps ./cmd/vecnet | grep -c 'modernc.org/sqlite' (prints 0)",
+    "just bb build2 go list -deps ./cmd/vecnet-hub | grep -c 'charm.land' (prints 0)",
     "just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-dot-oauth-xk/gate-shots just ui-shots",
-    "just bb GOOS=windows CGO_ENABLED=0 go build -o /dev/null ./cmd/vecnet",
+    "just bb GOOS=windows CGO_ENABLED=0 build2 go build -p 2 -o /dev/null ./cmd/vecnet",
     "git diff --name-only master...HEAD -- connectors/ (prints nothing)",
     "Every named failing-first test in the plan exists; all existing local-mode tests still pass; no test uses live issuer/JWKS or real config."
   ],
   "lensFocus": {
     "spec": "Implement option A per docs/plans/2026-11-05-dot-oauth-xk.md, report gaps 3-6/8 only. Verify exact mode metadata/config, ES256 issuer/JWKS/resource/scope, operator prebind/unbind and atomic retirement, typed persisted push leases, shared stack wiring and docs. Respect integ-grok gaps 1/2, hub-notices/0019 and migration 0020.",
-    "security": "Trace token confusion, ES256-only validation, kid/cache/outage/SSRF bounds, exact issuer+subject ownership, explicit replacement and iat/generation replay barrier. Every queued callback/retry must check expiry/revocation/peer ownership/binding and mode generation. No blank-hash bypass, external JWT admin access or local OAuth bypass in external mode. No raw tokens in persistence/output. Upstream revocation bound is honest.",
-    "tests": "Each named test fails before implementation and passes afterward; guard tests preserve existing behavior. Issuer/JWKS/callbacks use httptest and clocks, not live hosts. Config/database are temporary. Test local/off compatibility, external e2e, restart/mode changes, renewal, queued unbind/disable and retries. Run MCP conformance and full existing suite."
+    "security": "Trace token confusion, ES256-only validation, kid/cache/outage/SSRF bounds, exact issuer+subject ownership, explicit replacement and iat/generation replay barrier. Every queued callback/retry must check expiry/revocation/peer ownership/binding and mode generation. No blank-hash bypass, external JWT admin access or local OAuth bypass in external mode. No raw tokens in persistence/output. Upstream revocation bound is honest. Explicitly test same-principal sibling confinement, no-store key retention, global all-path fetch cooldown, and future-iat rebind replay through verifier/adapter/lease renewal.",
+    "tests": "Each named test fails before implementation and passes afterward; guard tests preserve existing behavior. Issuer/JWKS/callbacks use httptest and clocks, not live hosts. Config/database are temporary. Test local/off compatibility, external e2e, restart/mode changes, renewal, queued unbind/disable and retries. Run MCP conformance and full existing suite. Require no-store JWKS and rapid sequential expired-known-kid failure fixtures, +20s/+30s issuer skew replay cases, same-principal sibling isolation and TestRemoteOnlyGateCommands."
   },
   "extraLenses": [],
   "runner": "just bb ",
@@ -105,7 +112,8 @@
         "Tests never read/write real config: inject VECNET_CONFIG, XDG_CONFIG_HOME, XDG_CACHE_HOME and HOME as temp dirs; never touch ~/.config/vecnet.",
         "JWKS, issuer and callbacks are faked with httptest; never fetch live oauth.xk.io or other hosts in tests. Test TLS trust is injected, not a production bypass.",
         "Edit only your task files; preserve integ-grok Origin/profile work and hub-notices/0019. All builds/tests run through just bb.",
-        "Pin ES256/P-256 and exact issuer/resource/scope, reject ID-token confusion and token-supplied keys/URLs. Bound sizes, TTL, refresh and timeout. Never use stale cache after expiry or turn verification infrastructure errors into success."
+        "Pin ES256/P-256 and exact issuer/resource/scope, reject ID-token confusion and token-supplied keys/URLs. Bound sizes, TTL, refresh and timeout. Never use stale cache after expiry or turn verification infrastructure errors into success.",
+        "Cache-Control no-store/max-age=0 does not disable bounded application key retention. Test real-shaped headers, global refresh interval and failure cooldown for known-kid expiry/empty cache as well as unknown kids; no stale verification."
       ]
     },
     {
@@ -120,7 +128,8 @@
         "Tests never read/write real config: inject VECNET_CONFIG, XDG_CONFIG_HOME, XDG_CACHE_HOME and HOME as temp dirs; never touch ~/.config/vecnet.",
         "JWKS, issuer and callbacks are faked with httptest; never fetch live oauth.xk.io or other hosts in tests. Test TLS trust is injected, not a production bypass.",
         "Edit only your task files; preserve integ-grok Origin/profile work and hub-notices/0019. All builds/tests run through just bb.",
-        "Use one transaction for ownership, retirement, audit, generation and lease revocation. Explicit replace only; exact subject is not a peer name. Old token iat must fail after rebind. Move-away/back and disable/enable cannot resurrect a lease."
+        "Use one transaction for ownership, retirement, audit, generation and lease revocation. Explicit replace only; exact subject is not a peer name. Old token iat must fail after rebind. Move-away/back and disable/enable cannot resurrect a lease.",
+        "Cutoff floor(activationUnixSeconds + 30) + 1 excludes bounded future-iat replay with no comparison skew. Task 3 tests hub resolution; Task 6 owns real-verifier/adapter and renewal continuation of TestExternalBindingGeneration."
       ]
     },
     {
@@ -167,7 +176,8 @@
         "Tests never read/write real config: inject VECNET_CONFIG, XDG_CONFIG_HOME, XDG_CACHE_HOME and HOME as temp dirs; never touch ~/.config/vecnet.",
         "JWKS, issuer and callbacks are faked with httptest; never fetch live oauth.xk.io or other hosts in tests. Test TLS trust is injected, not a production bypass.",
         "Edit only your task files; preserve integ-grok Origin/profile work and hub-notices/0019. All builds/tests run through just bb.",
-        "Validate complete config before listen/workers; no fallback. Same constructor wires MCP and Events in production/testhub. External mode disables local AS/tokens and local OAuth push, retains all bearer behavior. Persist mode changes even when switching off; same-config restart keeps leases. Preserve relocation/drain precedence."
+        "Validate complete config before listen/workers; no fallback. Same constructor wires MCP and Events in production/testhub. External mode disables local AS/tokens and local OAuth push, retains all bearer behavior. Persist mode changes even when switching off; same-config restart keeps leases. Preserve relocation/drain precedence.",
+        "External auth returns Kind=peer; OAuthInfo/lease principal remains binding principal. Test same-principal sibling send-as, inbox/ack and resource list/read/subscribe denial, OAuth subscription identity, and signed +20s/+30s pre-unbind token replay/renewal after rebind."
       ]
     },
     {
@@ -184,7 +194,8 @@
         "Tests never read/write real config: inject VECNET_CONFIG, XDG_CONFIG_HOME, XDG_CACHE_HOME and HOME as temp dirs; never touch ~/.config/vecnet.",
         "JWKS, issuer and callbacks are faked with httptest; never fetch live oauth.xk.io or other hosts in tests. Test TLS trust is injected, not a production bypass.",
         "Edit only your task files; preserve integ-grok Origin/profile work and hub-notices/0019. All builds/tests run through just bb.",
-        "docs/connectors/dots.md is documentation, distinct from forbidden connectors/**. Docs must match code and preserve PROTOCOL section 21. Fake integration green is not real ChatGPT acceptance. Ops policy, deployment and browser consent are Max/ops steps, never applied by workers."
+        "docs/connectors/dots.md is documentation, distinct from forbidden connectors/**. Docs must match code and preserve PROTOCOL section 21. Fake integration green is not real ChatGPT acceptance. Ops policy, deployment and browser consent are Max/ops steps, never applied by workers.",
+        "Coordinator runner repair is a blocking preflight, not deferred until this task: re-run TestRemoteOnlyGateCommands, remote ISA check, and all gate/merge checks through just bb; no local compilation."
       ]
     }
   ]
