@@ -485,3 +485,18 @@ test('inactive error settlement keeps the bridge final guard against an agent be
   assert.equal(latest.agents[0].archived,false);
   assert.ok(!(await h.entries()).some(x=>x.args.includes('--force'))); await access(join(h.ws,h.spec.jobId));
 });
+
+test('two turns that end with identical text after separate sends both finish, and replay keeps the second turn id', async t => {
+  const h=await harness(t); h.state.waits=[{status:'idle'},{status:'idle'}]; h.state.reads=[['[User] first','Done'],['[User] second','Done']];
+  const b=await h.create(), s=await b.launch(h.spec,h.hooks);
+  const first=(await take(s,1))[0];
+  await s.send({items:[{deliveryId:'d2',messageId:'d2',from:'peer',text:'next',attachments:[]}]},'start');
+  const second=(await take(s,1,first.cursor))[0];
+  for (const row of [first,second]) { assert.equal(row.event.type,'turn_finished'); if(row.event.type!=='turn_finished') throw Error(); assert.equal(row.event.outcome,'completed'); assert.equal(row.event.finalText,'Done'); }
+  assert.notEqual('turnId' in second.event && second.event.turnId,'turnId' in first.event && first.event.turnId);
+  // A restart replays the same turn from the saved cursor with the same id.
+  h.state.agents=[{id:s.ref.id,name:h.spec.tag,status:'idle',archived:false}]; h.state.waits=[{status:'idle'}]; h.state.reads=[['[User] second','Done']]; await h.save();
+  const attached=await (await plugin.create(h.config,h.ctx)).reattach(s.ref,h.hooks); assert.equal(attached.found,'live'); if(attached.found!=='live') throw Error();
+  const replay=(await take(attached.handle,1,first.cursor))[0];
+  assert.equal('turnId' in replay.event && replay.event.turnId,'turnId' in second.event && second.event.turnId);
+});

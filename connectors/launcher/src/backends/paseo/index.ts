@@ -233,11 +233,12 @@ class PaseoSession implements SessionHandle {
       // Bind the hash to the agent generation: identical text and line counts
       // from both sides of a handoff must remain distinguishable on restart.
       // Hash the raw block so redaction cannot merge distinct completions.
-      // Keep completed hashes compatible with saved cursors; an error with
-      // identical text is a different outcome and must finish its own turn,
-      // and the send generation separates repeated failures across new input.
+      // An error with identical text is a different outcome and must finish
+      // its own turn. The durable send generation separates turns across new
+      // input: repeated idle polls of one turn dedupe, while a second turn
+      // after a new send that ends with the same text is its own completion.
       const sendGen = this.backend.ctx.store.get(`send-gen:${this.ref.extra?.tag ?? this.ref.id}`) ?? '0';
-      const last = hash(JSON.stringify(result.status === 'error' ? [this.ref.id, text, 'failed', sendGen] : [this.ref.id, text]));
+      const last = hash(JSON.stringify(result.status === 'error' ? [this.ref.id, text, 'failed', sendGen] : [this.ref.id, text, sendGen]));
       const duplicate = last === cursor.last;
       text = this.backend.ctx.redact(text);
       cursor.last = last;
