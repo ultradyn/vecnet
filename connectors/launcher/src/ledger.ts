@@ -10,7 +10,7 @@ export type Terminal = "succeeded" | "failed" | "cancelled";
 export interface JobRow {
   jobId: string; threadId: string; launchMessageId: string; requester: string; policyKey: string;
   backend: string; preset: string; permissionMode: PermissionMode; project: string; title: string;
-  input: LaunchInput; tag: string /* vl-<job_id> */; state: JobState;
+  instructions?: string; input: LaunchInput; tag: string /* vl-<job_id> */; state: JobState;
   sessionRef: SessionRef | null; sessionKind: SessionState["kind"] | null; turnCursor: string | null;
   branch: string | null; workspace: string | null; statusSeq: number; terminal: Terminal | null;
   turns: number; lastActivityAt: number; parkedAt: number | null; deadlineAt: number;
