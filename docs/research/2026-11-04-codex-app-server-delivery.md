@@ -266,7 +266,7 @@ sessions).
 2. Stay under 1000 tokens per entry, or truncation cuts the inert block. Use vecnet's own caps, the
    same constraint S3c raised for hooks.
 3. Never send policy, model or cwd fields, and never answer server requests: no subscription for
-   delivery, and if one is ever subscribed, ignore `*/requestApproval`.
+   delivery, and if one is ever subscribed, ignore `*/requestApproval`. (Superseded in part by the keep-loaded addendum: the connector does subscribe to live bound threads, and still never answers.)
 4. Install vecnet's Codex `UserPromptSubmit` hook (if any) knowing it fires on connector-injected
    turns too. The cursor and ack must prevent double delivery.
 
@@ -320,7 +320,7 @@ sessions).
    - a SessionStart hook that reports the thread id.
    Store the binding in the hub. Validate on connect with `thread/read`
    (`canAcceptDirectInput`, cwd matches).
-4. **State.** Do not subscribe. Track idle/active from the global `thread/status/changed`
+4. **State.** Do not subscribe (superseded by the keep-loaded addendum, which subscribes to live bound threads). Track idle/active from the global `thread/status/changed`
    broadcast. On a wake, get the active `turnId` from `thread/read` (or `thread/turns/list`
    `limit:1`).
 5. **Delivery** (wake-priority message M with delivery id D):
@@ -358,3 +358,338 @@ sessions).
 - Same-uid access means any local process can do what the connector does, so this is not a new
   boundary.
 - The restart and recovery behaviour was not exercised.
+
+---
+
+## Addendum 2026-11-04 (evening): liveness for agent-to-agent delivery without a human
+
+**Question (Max).** If a coding job runs for 12 hours, can another agent keep messaging it the
+whole time, with no human involved? Do launcher-spawned agents follow different rules?
+
+**Setup.** As before: a throwaway thread `01a1a53b-68ef-7910-b0cf-23e95e936474`, started in a
+private tmux server with `codex -s read-only -a on-request` in `.scratch/vecnet/codex-spike2`.
+It was archived afterwards and its scratch directory was removed. Nothing was sent to any other
+thread. Other threads appear below only as ids and status transitions, taken from the global
+broadcast.
+
+**Footer finding.** At 200 columns the TUI footer shows the **full** thread id
+(`… · 01a1a53b-68ef-7910-b0cf-23e95e936474`). This closes the open item from the plan.
+
+### L1. Repeated steers into a long turn: VERIFIED
+
+The turn ran `for i in $(seq 1 12); do echo tick $i; sleep 60; done` under read-only, about
+12 minutes. Steers were sent at +2, +5, +8 and +9 min: three `turn/steer` calls plus one
+`turn/start`, which steers.
+
+```
+17:25:37 turn/start -> turn 01a1a53c-081c-...; status active
+17:27:37 turn/steer S1 -> {turnId: 01a1a53c-081c-...}
+17:30:37 turn/steer S2 -> same turnId
+17:33:37 turn/steer S3 -> same turnId
+17:34:37 turn/start S4 (clientUserMessageId "vn.spike-start-while-busy") -> same turn id
+17:37:47 status idle (Worked for 12m 10s); command printed tick 1..12, never restarted
+```
+
+The model's final answer:
+
+```
+DONE-LONG
+1. [vecnet steer S1] ... — Last tick seen: 2.
+2. [vecnet steer S2] ... — Last tick seen: 5.
+3. [vecnet steer S3] ... — Last tick seen: 8.
+4. [vecnet steer S4 via turn/start] ... — Last tick seen: 9.
+```
+
+- **Order and timing.** Every steer landed in send order. The model noticed each within about a
+  minute while the command kept running, shown in the TUI as "Waiting for background terminal".
+- **The command was not disturbed.** The steered text appeared in the TUI as `›` user prompts
+  inside the running turn.
+- **Implication.** A long-running turn can take any number of wake messages over its whole life.
+  Each one costs the model a short wake-up while it polls its terminal.
+
+### L2. Status while busy: VERIFIED. It does not distinguish a background terminal
+
+- During the 12-minute turn there was exactly **one** `active` broadcast at the start and **one**
+  `idle` at the end, with no flapping.
+- **Background terminal after the turn ended** (my thread): a turn running `sleep 150` was
+  interrupted after 12 s. Status went to `idle` and `thread/read` reported `idle`, while
+  `thread/backgroundTerminals/list` (experimental) still listed `{processId, command:"sleep 150",
+  osPid, cpuPercent, rssKb, cwd, itemId}`. `thread/backgroundTerminals/clean` removed it.
+- `ThreadStatus` is `notLoaded | idle | systemError | active{activeFlags}`, and `activeFlags` is
+  only `waitingOnApproval | waitingOnUserInput` (`app-server-protocol/src/protocol/v2/thread.rs:1701-1718`).
+  No status value marks running background work.
+- **Implication.**
+  - A job that keeps running **inside** a turn is `active` throughout.
+  - A job left running in a background terminal after the turn ends reads as `idle`. A wake there
+    starts a new turn, which is correct, because the model can poll the terminal.
+  - Any "idle for N hours" rule would wrongly call that job stale unless it also checks
+    `thread/backgroundTerminals/list`.
+
+### L3. Idle unload: VERIFIED. **60 s after the last subscriber leaves and the thread is inactive**
+
+- **Source.** `UnloadingState` (`app-server/src/request_processors/thread_lifecycle.rs:28-120`)
+  unloads a thread when it has **no subscribers and is not `active`**. The deadline is
+  `max(no-subscriber-since, inactive-since) + thread_unload_delay`.
+  - The default delay is `thread_unload_delay_secs.unwrap_or(60)` (`core/src/config/mod.rs:4143-4144`). Max's `~/.codex/config.toml` does not set it.
+  - There is no memory-pressure or wall-clock eviction while a subscriber exists.
+- **Runtime evidence:**
+  - **TUI attached, idle:** the thread stayed loaded and `idle` after more than 3 minutes idle.
+    Source says this holds indefinitely.
+  - **TUI quit** at about 17:43:13: `thread/status/changed notLoaded` and `thread/closed` came
+    at 17:44:13. An unsubscribed listener received both.
+  - **Others:** ephemeral helper threads went `idle` then `notLoaded` exactly 60 s later
+    (17:25:41 → 17:26:41, 17:28:46 → 17:29:46).
+  - **Unloaded thread:** `turn/start` failed with `-32600 thread not found: 01a1a53b-…`.
+  - **Cold resume:** `thread/resume {excludeTurns:true}` on the `notLoaded` thread succeeded
+    (status `idle`, MCP servers restarted). The following `turn/start` ran to completion (65 s)
+    **after** my connection had closed, so it ran headless.
+  - **After a headless turn:** the thread unloaded about 63 s after that turn completed (17:48:01).
+- **New-thread caveat.** `thread/resume` on a brand-new thread that has had no turn yet fails with
+  `no rollout found for thread id …`. A launcher creates its threads with `thread/start` and is
+  subscribed by that call, so this only matters to outside clients.
+- **Implications for "12 h idle, then a message":**
+  - **Explicit binding to an existing thread:** it works without resume for as long as **some
+    client stays subscribed**, typically the TUI, possibly left running in tmux. Once the last
+    client leaves, the thread unloads within about 60 s of inactivity, and the connector, which
+    never resumes, must treat it as dormant. The hooks and `vecnet inbox` pick up the backlog when
+    someone resumes the session.
+  - **Launcher-spawned thread:** the launcher's own connection stays subscribed (`thread/start`
+    or `thread/resume`), so the thread never unloads during the job. If it was unloaded anyway
+    (daemon restart, launcher crash), the owner can cold-resume it.
+
+### L4. Recognising injected turns: VERIFIED
+
+- `clientUserMessageId` is stored as the user item's `clientId`. This holds for a new turn and
+  for input steered into a running turn: S4's item shows `clientId: "vn.spike-start-while-busy"`,
+  while S1–S3, sent without an id, show `null`.
+- **Where it is visible:**
+  - in `thread/items/list {threadId, turnId}`, where items are wrapped as `{item, turnId,
+    startedAtMs, completedAtMs}`;
+  - in `thread/turns/list {itemsView:"full"}`.
+- **Pitfall.** The default `thread/turns/list` returns `itemsView:"summary"`. That view showed
+  only the first user message and the final answer, and **hid all steered items**. A clientId scan
+  must therefore request `itemsView:"full"` or use `thread/items/list`.
+- `TurnSteerParams` also accepts `clientUserMessageId` (`turn.rs:320-325`), so steers can carry
+  the key too.
+- The Turn object has no trigger or source field. `turnTrigger` is accepted on `turn/start` but is
+  not echoed back. `clientId` plus the fixed stub text are the only markers.
+- `additionalContext` produces no item.
+
+### L5. Daemon restart: SOURCE (not exercised on the shared daemon)
+
+- **Graceful managed shutdown** (SIGTERM/SIGHUP, or `daemon restart`/`update`):
+  - `ShutdownState::update` (`app-server/src/lib.rs:288-308`) waits until **running assistant turns
+    reach 0**. A second signal forces the exit.
+  - The daemon then writes a recovery snapshot of loaded persistent root thread ids plus any
+    interrupted turns (`app-server/src/lib.rs:1068-1078`, `app-server-transport/src/daemon_recovery.rs`).
+  - The next daemon consumes and deletes the snapshot before serving. It cold-resumes those threads
+    in the background (`daemon_thread_recovery.rs:32-50` → `message_processor.rs:804`
+    `thread_resume(ThreadResumeTarget::DaemonRecovery(...))`), continuing interrupted **local**
+    turns.
+  - A 12-hour turn therefore delays a graceful restart until it finishes, unless the restart is
+    forced. A forced restart records the turn as interrupted, and the new daemon continues it.
+- **Crash** (SIGKILL, OOM): no snapshot is written, so nothing is auto-restored and threads come
+  back `notLoaded`. Rollouts persist, so `thread/resume` restores any of them; L3 verified cold
+  resume.
+- **Inference from `UnloadingState`:** a restored thread with no subscriber unloads again 60 s
+  later unless a client reattaches. The TUI's recovery path and a launcher both reattach.
+- **Implication.**
+  - Connectors must reconnect with backoff.
+  - Launcher-owned threads must be resumed by their owner after any restart.
+  - Explicitly bound threads come back only if their TUI reattaches. Otherwise they stay dormant.
+
+### Verdict on the proposed liveness model
+
+| Proposal | Verdict |
+|---|---|
+| Liveness belongs to the thread, not to human activity | **Supported.** Status, unload and steer behaviour are all per thread and need no human. |
+| Explicit TTL at bind time (default 24 h, renewable, max 7 d) | **Supported.** Nothing in Codex conflicts. The TTL is vecnet's own bound. |
+| Dormant if archived | **Supported.** `thread/archived` is broadcast to unsubscribed connections (seen live). |
+| Dormant if `notLoaded` | **Supported.** The thread unloads 60 s after its last subscriber leaves, and `turn/start` then fails. |
+| Dormant after N hours idle with no activity | **Amend: off by default.** An idle thread with a subscriber stays loaded indefinitely. A background-terminal job reads `idle` (L2), so the rule would cut off a live job. The TTL already bounds a binding. Keep N as an opt-in per binding (`--idle-dormant`), counting turns and status changes as activity. |
+| `active` thread live throughout | **Verified** (L1, L2). |
+| wake: steer if busy, start if idle; wake_idle: only when idle; hold: never | **Verified** mechanics (L1; [R] §3–4). |
+| Launcher-spawned threads: implicit binding for the job's `expires_at`, owner may resume | **Supported.** The launcher's connection keeps them loaded, and cold resume works (L3). The connector itself still never resumes. The launcher supplies an `ensureLoaded` hook instead. |
+
+---
+
+## Addendum 2026-11-04 (night): the connector keeps bound threads loaded
+
+**Question.** L3 showed that a thread unloads 60 s after its last subscriber leaves, so an
+explicitly bound thread whose TUI has gone is dormant almost at once. Proposal: while a binding
+is live, the connector itself stays subscribed to the bound thread, which keeps it loaded. It
+unsubscribes on unbind, TTL expiry or archive. Is that sound?
+
+**Setup.** As before, the spike used a throwaway thread, `01a1a56d-bc60-72d1-80f8-f29a68e01f40`.
+It ran `codex -s read-only -a on-request` in `.scratch/vecnet/codex-spike2`, under a private
+`tmux -L codexspike2-71123`. Two test clients ran about 70 lines of Python each, kept in the
+session scratchpad and not committed:
+- a "connector" that subscribed;
+- an "observer" that never subscribed and only read the global broadcasts.
+
+Both clients refused to send any request whose `threadId` was not mine. The thread was archived
+afterwards, and the scratch directory and raw logs were deleted. The tmux server exited with the
+TUI. Other threads were seen only as ids and status values. Source was read at `rust-v0.166.0`, as
+before.
+
+### K1. Subscribing to a loaded thread: VERIFIED. `thread/resume` is the only subscribe, and it is nearly pure
+
+- **No dedicated subscribe method.** The method table has `thread/resume` and `thread/unsubscribe`,
+  and both are stable, but has no `thread/subscribe` (`app-server-protocol/src/protocol/common.rs:561`,
+  `:596`). `codex app-server --help` lists only `daemon`, `proxy`, `generate-ts` and
+  `generate-json-schema`.
+- **On a loaded thread, `thread/resume` attaches the live runtime** (`resume_running_thread`,
+  `app-server/src/request_processors/thread_processor.rs:4628-4921`). The listener adds the
+  connection to the subscriber set. It then sends the response, replays pending server requests
+  and runs the idle lifecycle (`handle_pending_thread_resume_request`,
+  `thread_lifecycle.rs:1019-1265`).
+- **Runtime evidence.** I sent `thread/resume {threadId, excludeTurns:true}` while the TUI was
+  attached and idle:
+  - no turn started, and the TUI pane did not change;
+  - the rollout's size, mtime and line count were unchanged (`218015` bytes, 19 lines);
+  - the only notification was a `thread/goal/cleared` snapshot, which is broadcast to every
+    connection.
+- **What the response returns.** It carries the thread's live `approvalPolicy`,
+  `approvalsReviewer` and `sandbox`. I saw `"on-request"`, `"user"` and `{type:"readOnly"}`.
+  `thread/read` does not return these fields, so this response is the connector's only way to
+  learn the policy.
+- **Side effects that remain.** The connector must design around these:
+  1. **Override fields rebuild the thread.** If the params carry any override (`model`,
+     `sandbox`, `approvalPolicy`, `cwd`, `config`, …) that differs from the live thread, the thread
+     is idle and nobody else is subscribed, the server **shuts the thread down and cold-rebuilds
+     it** with the overrides (`thread_processor.rs:4697-4750`). The connector must send exactly
+     `{threadId, excludeTurns:true}`.
+  2. **`excludeTurns:true` avoids extra work** (SOURCE). It skips building history, and on
+     `historyMode:"paginated"` threads (mine was paginated) it also skips a `persist_thread`
+     write and a deprecation notice (`:4758-4782`).
+  3. **Pending server requests are replayed** to the new subscriber. VERIFIED in K2.
+  4. **The idle lifecycle runs** (`emit_thread_idle_lifecycle_if_idle`, SOURCE). Any queued
+     `thread/queue` items drain into a new turn, as [R] §3 test 8 already showed for "any client
+     resumes". vecnet never queues, so this only happens if another client queued input.
+  5. **The client name changes.** The session's app-server client name becomes the connector's
+     `clientInfo.name` (`set_app_server_client_info`, SOURCE). `turn/start` does the same, and
+     the TUI's next `turn/start` sets it back. The name appears as `client` in hook payloads and
+     also gates the plugin-install tool, which is offered to `codex-tui` only.
+- **Race.** On a thread that is **not** loaded, `thread/resume` cold-loads it. VERIFIED: the
+  cold load started the thread's MCP servers and emitted three `mcpServer/startupStatus/updated`
+  notifications, while the warm attach emitted none.
+  - A thread can unload between the connector's status read and its resume.
+  - A thread that is mid-unload fails the resume with "thread closing"
+    (`thread_closing_for_resume`).
+  - The connector must therefore treat a resume as cold if, after its last status read, it has
+    seen `notLoaded` or `thread/closed` for the thread, or if any `mcpServer/startupStatus/updated`
+    for the thread arrives around the response. When the resume was cold, the connector
+    unsubscribes at once.
+- **Traffic.** A subscription receives the full item stream. One short turn gave about 60
+  messages: 15 `item/agentMessage/delta`, 8 `hook/started`, 8 `hook/completed`, plus `item/*`,
+  token usage and moderation metadata. `initialize.capabilities.optOutNotificationMethods`
+  suppresses exact method names per connection (`app-server-protocol/src/protocol/v1.rs:62-65`;
+  `app-server/src/transport.rs:109-124`), so the connector can opt out of the deltas.
+
+### K2. Approvals with the connector subscribed: VERIFIED
+
+- **TUI attached, connector subscribed and silent.** I asked the TUI to write `b1.txt`.
+  - Both connections received `item/commandExecution/requestApproval` (id 2). The unsubscribed
+    observer received only the `active{waitingOnApproval}` broadcast.
+  - I approved in the TUI 38 s later. The connector received `serverRequest/resolved
+    {requestId:2}`, and the turn completed (`DONE-B1`).
+  - **A silent connector does not block a human who answers in the TUI.** The first answer wins,
+    and any connection may answer (`take_connection_callback`, `outgoing_message.rs:593-611`).
+- **The connector as the only subscriber** (TUI quit with `/quit`). A headless `turn/start` asked
+  for `c1.txt`.
+  - Only the connector received the request (id 3). The status went to
+    `active{waitingOnApproval}`.
+  - **No timeout.** The request was still pending 2 min 40 s later. The source waits on a bare
+    oneshot (`bespoke_event_handling.rs:2038`, `receiver.await`), and `request_user_input` does the
+    same (`core/src/session/mod.rs:3429`, `rx_response.await`). Nothing times out on either side.
+  - **The connector then disconnected.** With zero subscribers the thread **stayed loaded** and
+    `active{waitingOnApproval}` for 95 s and more, because `UnloadingState` never unloads an
+    `active` thread (`thread_lifecycle.rs:56-63`). The approval was 4 min 20 s old at that point.
+  - **A new connection's `thread/resume` replayed the same request** (id 3) at once. Pending
+    requests are kept per thread, not per connection (`outgoing_message.rs:478-497`, `:614-628`).
+    A human who later runs `codex resume` therefore sees the approval and can answer it.
+  - **Blocked steer.** `turn/steer` into the blocked turn was **accepted**
+    (`{turnId: 01a1a572-…}`). After I interrupted that turn to clean up, the steered text was
+    **in neither the turn's items nor the rollout**: `grep` for its `clientUserMessageId` and its
+    marker word found 0 matches. **An accepted steer does not prove delivery.** If the turn
+    ends before the model samples again, the steered input can be lost.
+  - `turn/interrupt` resolved the approval (`serverRequest/resolved {requestId:3}`), and the
+    status went to `idle`.
+- **Policies that never ask.** With `approvalPolicy:"never"`, command, patch and MCP-tool
+  approvals are denied without a request (for example `core/src/mcp_tool_call.rs:1655`). With
+  `approvalsReviewer:"auto_review"` (Guardian), a reviewer agent answers them instead (SOURCE).
+  `request_user_input` is unavailable in Default mode by default and blocks only in Plan mode
+  (`core/src/tools/handlers/request_user_input.rs:83`). MCP-server elicitations and dynamic tool
+  calls were not traced.
+- **Implication.** On an agent-only thread whose policy asks, the first approval hangs the turn
+  **forever**. The thread stays `active` and loaded, and is a memory leak. Every later wake is
+  steered into a turn that cannot reach the model. A warning in the docs is not enough. A binding
+  must either have a policy that never asks, or the binder must declare that a human attends the
+  TUI. Separately, the connector must hold deliveries while `waitingOnApproval` is set.
+
+### K3. Unsubscribe: VERIFIED. The normal 60 s unload proceeds
+
+- **Keep-loaded works.** After the TUI quit at 18:22:50, the thread stayed loaded with the
+  connector as its only subscriber:
+  - it stayed `idle` for 2 min 15 s (to 18:25:05), with no unload;
+  - it then took a headless turn (K2).
+- **Unsubscribe.** `thread/unsubscribe` at 18:31:04 returned `{status:"unsubscribed"}`.
+  `notLoaded` and `thread/closed` followed at **18:32:04, exactly 60 s later**. The thread's two
+  stdio MCP server processes exited.
+- **Disconnecting also unsubscribes** (`ThreadStateManager::remove_connection`, `app-server/src/thread_state.rs:721`, SOURCE). It is
+  covered at runtime by L3 (the TUI quit) and by K2 (an `active` thread was kept loaded only
+  because it was active).
+- **Other return values.** `thread/unsubscribe` returns `notSubscribed` if this connection was not
+  subscribed, and `notLoaded` if the thread is gone (`thread_processor.rs:1126-1157`).
+
+### K4. Memory per loaded thread: VERIFIED for child processes; daemon heap too noisy to attribute
+
+- **Each loaded thread runs its own stdio MCP servers as children of the daemon.** With Max's
+  `~/.codex` config that means `t3-bridge mcp` (node) plus `node_repl`. During the spike the daemon
+  had 29 children, about 12 such pairs for about 20 loaded threads.
+- **Measured children for my thread.** VERIFIED by start time matching my TUI start, and by exit
+  on unload.
+
+| Event | Children | Child RSS |
+|---|---|---|
+| unload | 29 → 27 | −38.7 MB |
+| cold load | 27 → 29 | +69.7 MB at 8 s (`node` 58 MB + `node_repl` 11.5 MB) |
+| cold load, settled | 29 | +66.9 MB at 35 s |
+| steady state (other threads) | | `t3-bridge` 28–42 MB per thread |
+
+- **Daemon RSS.** Samples ranged from 100 MB to 250 MB with about 20 loaded threads. Other
+  sessions were busy, so the per-thread heap cannot be separated out. 250 MB over 20 threads
+  bounds it at roughly 10 MB or less per thread.
+- **Tokens.** An idle loaded thread made no model requests. It ran no turns while kept loaded.
+- **Estimate.** Keeping a thread loaded costs about **40–70 MB** on this config, almost all of it
+  in MCP server processes. The cost depends on the config: more stdio MCP servers, more cost.
+  A default limit of **8 kept-loaded bindings per `CODEX_HOME`** (about 0.5 GB worst case),
+  configurable up to 32, is reasonable.
+
+### K5. Cold resume of `notLoaded` explicit threads: keep it forbidden
+
+- The keep-loaded subscription changes the rule from "never call `thread/resume`" to "call
+  `thread/resume` only to **attach** to a thread that is loaded right now".
+- `notLoaded` explicit threads stay dormant. A cold resume would restart the thread's MCP servers
+  and hooks (K4) and revive a session whose owner closed it.
+- A dormant binding revives on its own when another client loads the thread again. The connector
+  sees `notLoaded → idle` on the global broadcast and re-subscribes, so `codex resume <id>` by a
+  human or an agent restores push delivery with no new rule.
+- **Restarts.**
+  - **Graceful Codex daemon restart.** The daemon restores recovered threads, and a restored thread
+    with no subscriber unloads 60 s later ([R] L5). The connector's reconnect backoff must
+    therefore cap well under 60 s; 15 s is proposed.
+  - **Launcher daemon restart.** Restarting the launcher daemon drops every keep-loaded
+    subscription. Bound threads with no TUI unload unless the launcher is back within about 60 s.
+  - **Crash.** After a crash of either daemon, explicit bindings stay dormant. This is a
+    documented limitation.
+
+### Verdicts
+
+| Question | Verdict |
+|---|---|
+| (a) Pure subscribe to a loaded thread | **`thread/resume {threadId, excludeTurns:true}` with no other field.** No turn or rollout write was seen. It replays pending requests, drains queued items, and changes the session client name. Any override field can cold-rebuild an idle thread. There is no dedicated subscribe method. |
+| (b) Approvals | **The connector can stay silent without blocking a human; the first answer wins.** With the connector as the only subscriber, an approval hangs the turn **forever**: no timeout, the thread stays `active` and loaded, and later steers are accepted but can be lost. Require a policy that never asks, or an explicit `--attended`. Hold deliveries while `waitingOnApproval`. |
+| (c) Unsubscribe | **The 60 s unload proceeds** exactly (VERIFIED), as it does after a disconnect. |
+| (d) Memory and limit | **About 40–70 MB per kept-loaded thread** on Max's config, mostly per-thread stdio MCP servers. Default limit 8 per `CODEX_HOME`, configurable 1–32. |
+| (e) Never resume `notLoaded` explicit threads | **Still right.** Attach only to loaded threads; detect and undo an accidental cold resume. Revive when another client loads the thread. |
