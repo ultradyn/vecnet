@@ -132,6 +132,7 @@ func (h *Hub) Send(ctx context.Context, c auth.Caller, raw []byte, ingress strin
 func (h *Hub) sendAs(ctx context.Context, act actor, ingress string, req *envelope.SendRequest, bodySHA string) (resp *SendResponse, replayed bool, err error) {
 	var notify []string
 	var cut *APIError
+	var pub ActivityEvent // set by a sendTx that stored a message
 	// BEGIN IMMEDIATE (store DSN) serialises the idempotency lookup and
 	// insert; the (sender, key) primary key is the backstop, and a send that
 	// loses on it re-runs once to replay the winner's response. A send that
@@ -139,10 +140,10 @@ func (h *Hub) sendAs(ctx context.Context, act actor, ingress string, req *envelo
 	// (the blob store writes in its own transaction) and re-runs once.
 	idemRetried, spillStored := false, false
 	for {
-		notify, cut = nil, nil
+		notify, cut, pub = nil, nil, ActivityEvent{}
 		err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
 			var e error
-			resp, replayed, notify, e = h.sendTx(ctx, tx, act, req, bodySHA, ingress)
+			resp, replayed, notify, e = h.sendTx(ctx, tx, act, req, bodySHA, ingress, &pub)
 			var ce *cutError
 			if errors.As(e, &ce) {
 				// Commit the cut's counter, audit row and events; the send
@@ -171,6 +172,9 @@ func (h *Hub) sendAs(ctx context.Context, act actor, ingress string, req *envelo
 	}
 	if len(notify) > 0 {
 		h.Log.Notify(notify...)
+	}
+	if cut == nil && !replayed && pub.ThreadID != "" {
+		h.Activity.Publish(pub) // committed: the transaction above returned nil
 	}
 	if act.caller != nil && req.As != "" && req.As != act.caller.PeerID {
 		// The send was authorised for req.As: a principal acting for a peer
@@ -204,7 +208,9 @@ func isIdempotencyConflict(err error) bool {
 }
 
 // sendTx is the transactional body of sendAs.
-func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.SendRequest, bodySHA, ingress string) (*SendResponse, bool, []string, error) {
+// pub receives the activity feed entry for the stored message; sendAs
+// publishes it only after commit.
+func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.SendRequest, bodySHA, ingress string, pub *ActivityEvent) (*SendResponse, bool, []string, error) {
 	nowT := h.Now()
 	now := envelope.FormatTime(nowT)
 
@@ -529,6 +535,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 		}
 		notify = append(notify, operators...)
 	}
+	*pub = messageActivity(thr.ID, msg.MessageID, msg.Sender, msg.Kind, msg.CreatedAt)
 	return resp, false, notify, nil
 }
 

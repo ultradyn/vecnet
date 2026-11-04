@@ -5,6 +5,8 @@
 // them. The sidebar's Other Threads list is the shell's own (see renderOthers).
 // The operator secret stays in localStorage and travels only in
 // Authorization (PROTOCOL §2).
+import { activityAction } from './activity-model.js';
+import { createActivity } from './activity.js';
 import { createApi } from './api.js';
 import * as compose from './compose.js';
 import * as dash from './dash.js';
@@ -20,9 +22,6 @@ import * as thread from './thread.js';
 
 const SECRET_KEY = 'vecnet.ui.secret';
 const PEERS_REFRESH = 60000;
-// Activity in a thread the operator is not in sends the operator no Event
-// (PROTOCOL §2.13), so Other Threads also polls, only while the tab is shown.
-const OTHERS_REFRESH = 30000;
 const CONN_CLASS = { live: 'live', offline: 'off', stopped: 'off' };
 const $ = id => document.getElementById(id);
 
@@ -129,6 +128,10 @@ function start(secret) {
     onUnauthorized: () => { if (session === s) signOut('The hub rejected that secret.'); },
   });
   const store = createStore({ api });
+  // The operator activity feed (PROTOCOL §2.13): one stream per tab, shared
+  // by the sidebar and the dashboard. Activity in threads the operator is not
+  // in reaches it only this way.
+  const activity = createActivity({ api, signal: stop.signal });
   const peers = store.resource('peers', () => api.peers());
   const threads = store.resource('threads', () => api.myThreads({ limit: 200 }));
   // limit pages deliveries; the unread count and `me` do not depend on it.
@@ -165,11 +168,19 @@ function start(secret) {
     const op = ((peers.get() || {}).peers || []).find(p => p.kind === 'operator');
     if (!op) return;
     s.me = op.peer_id;
-    s.ctx = { api, store, me: s.me, nameOf, kindOf, peers, threads, inboxHead, toast, nav: hash => { location.hash = hash; } };
+    s.ctx = { api, store, activity, me: s.me, nameOf, kindOf, peers, threads, inboxHead, toast, nav: hash => { location.hash = hash; } };
     s.offs.push(presence.renderNav($('me'), s.ctx), presence.startHeartbeat(s.ctx));
     // Tagged threads: the operator's own sends and reads re-sort it at once.
+    // The activity feed keeps it live otherwise; Your Threads' own threads
+    // are left to its delivery Events.
     s.others = store.resource('threads', () => api.threads({ excludeParticipant: s.me, limit: s.otherLimit }));
     s.offs.push(s.others.subscribe(() => { if (session === s) renderRoute(s); }));
+    s.offs.push(activity.subscribe(ev => {
+      const mine = new Set(((threads.get() || {}).threads || []).map(t => t.thread_id));
+      const act = activityAction(s.others.get(), ev, mine);
+      if (act && act.reload) s.others.reload();
+      else if (act && act.page) s.others.set(act.page);
+    }));
   };
   const redraw = () => { if (session === s) { ready(); renderRoute(s); } };
 
@@ -185,17 +196,19 @@ function start(secret) {
     peers.subscribe(redraw),
   );
   const refresh = setInterval(() => peers.reload(), PEERS_REFRESH);
+  // A tab shown again re-reads Other Threads, so its relative times are fresh.
   const reloadOthers = () => { if (s.others && !document.hidden) s.others.reload(); };
-  const othersTimer = setInterval(reloadOthers, OTHERS_REFRESH);
   document.addEventListener('visibilitychange', reloadOthers);
-  s.offs.push(() => clearInterval(refresh), () => clearInterval(othersTimer), () => document.removeEventListener('visibilitychange', reloadOthers));
+  s.offs.push(() => clearInterval(refresh), () => document.removeEventListener('visibilitychange', reloadOthers));
   redraw();
 
   // The pump waits for the directory so conn stays "connecting" until the
   // shell can show something, and a rejected secret never reaches the loop.
   // If the hub is down, the pump's first answered poll retries all three views.
   peers.reload().then(() => {
-    if (session === s) store.pump(stop.signal);
+    if (session !== s) return;
+    store.pump(stop.signal);
+    activity.start();
   });
 }
 

@@ -1,6 +1,7 @@
 // Sidebar: You above Your Threads, then Other Threads (threads the operator
-// is not in, newest activity first), in a real browser. Four shots: empty,
-// populated, error, and an other thread opened from the list.
+// is not in, newest activity first, kept live by the operator activity feed),
+// in a real browser. Four shots: empty, populated, error, and an other thread
+// opened from the list.
 import { assert, cleanBuild, withDemo } from './lib.mjs';
 
 const HOSTILE = '<img src=x onerror=alert(1)> ‮pwn';
@@ -8,7 +9,7 @@ const isOthers = url => { const u = new URL(url); return u.pathname === '/v1/adm
 
 try {
   await withDemo({}, async ctx => {
-    const { page, shot, demo, asPeer, advance, allowConsole, countRequests } = ctx;
+    const { page, shot, demo, asPeer, advance, hold, allowConsole, countRequests } = ctx;
     // Chromium logs each non-2xx fetch; this is the failure the script provokes.
     allowConsole(/status of 500/);
     const others = page.locator('#others');
@@ -29,6 +30,9 @@ try {
 
     await page.locator('#conn.live').waitFor();
     await page.locator('#threads a').first().waitFor();
+    // One activity feed per tab, bearer in the header.
+    if (!countRequests(req => new URL(req.url()).pathname === '/v1/admin/activity')) await page.waitForRequest(req => new URL(req.url()).pathname === '/v1/admin/activity');
+    assert(countRequests(req => new URL(req.url()).pathname === '/v1/admin/activity' && req.headers().authorization === `Bearer ${demo.operator_secret}` && !req.url().includes(demo.operator_secret)) === 1, 'expected one activity feed carrying the bearer header');
 
     // Order: nav, You, Your Threads, Other Threads, then connection.
     const groups = await page.locator('nav.side .grp').allTextContents();
@@ -60,13 +64,12 @@ try {
     const pres = await asPeer('operator', 'POST', '/v1/presence', { state: 'working', at: now });
     assert(pres.ok, `operator presence: ${pres.status}`);
 
-    // None of that reaches the operator as an Event. An operator send does
-    // (operator_view), and re-reads both lists and the hub clock.
-    let fresh = drawn();
-    await send('operator', { thread_id: demo.threads.ticket18, content: { text: 'Looking at the sidebar now.' } });
-    await fresh;
-    // The inbox reload in the same batch carries the advanced hub clock.
+    // None of that reaches the operator as an Event; the activity feed does,
+    // and an unknown thread refetches the list. No poll and no operator
+    // action. The presence change re-reads the inbox, which carries the
+    // advanced hub clock for the relative times.
     await others.locator('a', { hasText: 'Classifier rollout plan' }).locator('.ago', { hasText: '2m ago' }).waitFor();
+    await page.waitForFunction(() => document.querySelectorAll('#others a[href^="#thread/"]').length === 4);
     let rows = await rowsOf();
     assert(rows.map(r => r.id).join() === [rollout, hostile, untitled, release].map(t => t.thread_id).join(), `order ${JSON.stringify(rows)}`);
     const mine = await page.locator('#threads a').evaluateAll(as => as.map(a => a.getAttribute('href')));
@@ -80,15 +83,17 @@ try {
     assert(await page.locator('nav.side img').count() === 0, 'a peer string became an element');
     await shot('sb-others-populated');
 
-    // Live: new activity in the oldest thread moves it to the top on the next
-    // poll. The poll also runs when the tab is shown again.
+    // Live: a reply in the oldest (listed) thread arrives on the feed and is
+    // folded in place. The thread list is held, so a re-sort can only come
+    // from the feed, not from a refetch or a poll.
+    const releaseList = await hold(isOthers);
     await send('claw', { thread_id: release.thread_id, content: { text: 'Push route is fine.' } });
-    fresh = drawn();
-    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
-    await fresh;
     await page.waitForFunction(id => document.querySelector('#others a')?.getAttribute('href') === '#thread/' + id, release.thread_id);
     rows = await rowsOf();
     assert(rows[0].count === '4' && /^(now|\d+s ago)$/.test(rows[0].ago), `re-sorted top row ${JSON.stringify(rows[0])}`);
+    assert(rows.slice(1).map(r => r.id).join() === [rollout, hostile, untitled].map(t => t.thread_id).join(), `rest ${JSON.stringify(rows)}`);
+    await releaseList();
+    let fresh;
 
     // Bounded: a page with more behind it offers one more page per click.
     const paged = async route => {

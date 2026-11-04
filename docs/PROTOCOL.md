@@ -277,6 +277,7 @@ in section 2.12 is unchanged.
 | `GET /v1/admin/peers` | none | `{peers: [PeerRow…]}` |
 | `GET /v1/admin/loop-cuts` | `hours` | `{since, hours, total, by_reason, recent}` |
 | `GET /v1/admin/delivery-health` | none | `{blocked, failed}` |
+| `GET /v1/admin/activity` | none | `text/event-stream`: the activity feed below |
 
 `limit` is a positive integer (default 50, capped at 200). `before` is an
 exclusive `dly_` id and `participant` and `exclude_participant` are `peer_` ids;
@@ -361,6 +362,30 @@ sends, repeated reads, unchanged presence heartbeats, and unchanged
 subscriptions emit none. For a changed reaction, it is sent to enabled operator peers that did not receive the `reaction` Event (§17.3). It is not pushed to agents or MCP Events. Data that
 is not an object, a non-string `reason`, or a `thread_id` that is neither a
 string nor null invalidates nothing.
+
+#### Activity feed
+
+`GET /v1/admin/activity` is an operator-only SSE stream (same headers and
+`: hb` heartbeat cadence as section 2.3) of committed thread activity, for
+views of threads the operator is not in, which no Event reaches. It is
+ephemeral and lossy: nothing is stored or replayed, frames carry no `id`,
+and `Last-Event-ID` is ignored. Frames, after `retry: 3000`:
+
+- `event: ready`, `data: {}`: the stream is subscribed. Clients refetch the
+  thread lists they show, then apply later frames.
+- `event: message`, `data: {thread_id, message_id, sender, kind, at}`: a
+  Message was stored (a send, or the hub's approval-expiry notice), published
+  after its transaction commits. `sender` is a peer id (or `hub`); `at` is the
+  message's `created_at`. Metadata only: never a body or a title.
+- `event: thread`, `data: {thread_id, at}`: thread metadata changed (a
+  rename); clients re-read that thread's row.
+- `event: resync`, `data: {}`: this subscriber fell behind (each holds 64
+  frames) and frames were dropped. Clients refetch, as on `ready`.
+
+A reconnect is a new subscription: the client refetches on its `ready`.
+Idempotent replays, rejected sends and rate-limit cuts publish nothing. The
+credential is checked again on each heartbeat; a peer or principal credential
+is 403 `forbidden`.
 
 ---
 

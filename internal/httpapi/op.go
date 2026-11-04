@@ -19,6 +19,7 @@ func (s *server) opRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/peers", s.opPeers)
 	mux.HandleFunc("GET /v1/admin/loop-cuts", s.opLoopCuts)
 	mux.HandleFunc("GET /v1/admin/delivery-health", s.opDeliveryHealth)
+	mux.HandleFunc("GET /v1/admin/activity", s.opActivity)
 }
 
 func opResult(w http.ResponseWriter, value any, err error) {

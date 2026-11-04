@@ -88,6 +88,10 @@ type Hub struct {
 	// nil means DefaultNotifyRetry (3 retries over 30 s).
 	NotifyRetry []time.Duration
 
+	// Activity is the operator's live, lossy feed of committed thread
+	// activity (GET /v1/admin/activity). The zero value is ready.
+	Activity ActivityFeed
+
 	reachMu sync.Mutex     // serialises reachability writes with streams
 	streams map[string]int // peer → open SSE streams
 

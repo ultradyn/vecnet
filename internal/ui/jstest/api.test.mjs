@@ -196,3 +196,20 @@ test('blob resolves to a Blob and errors like every other call', async () => {
   assert.equal(error.status, 404);
   assert.equal(error.code, 'not_found');
 });
+
+test('activity opens the feed with the bearer in a header, never the URL', async () => {
+  const { api, calls } = harness(() => new Response('event: ready\ndata: {}\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+  const r = await api.activity();
+  assert.equal(await r.text(), 'event: ready\ndata: {}\n\n');
+  assert.equal(calls[0].url, '/v1/admin/activity');
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer vn_secret');
+  assert.equal(calls[0].init.headers.Accept, 'text/event-stream');
+  assert.ok(!calls[0].url.includes('vn_secret'));
+  let unauthorized = 0;
+  const denied = harness(() => json(403, { error: { code: 'forbidden', message: 'operator credential required' } }), { onUnauthorized: () => { unauthorized++; } });
+  const e = await denied.api.activity().catch(x => x);
+  assert.ok(e instanceof APIError);
+  assert.equal(e.status, 403);
+  assert.equal(e.code, 'forbidden');
+  assert.equal(unauthorized, 0);
+});
