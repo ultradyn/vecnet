@@ -543,7 +543,7 @@ Implements OpenAI's ChatGPT profile in webhook mode [T02, DOTS]:
 
 For dots the hub is both an OAuth **resource server** and its own minimal **authorization server** [T11]:
 
-- PKCE `S256` advertised and required; CIMD preferred, Dynamic Client Registration (RFC 7591) supported [DOTS §4, R15]. A CIMD URL must use the default https port. Outside the dev override it obeys the egress rules (section 14, invariant 7); the hub runs at most 8 fetches at once and does not retry a failed URL for a minute.
+- PKCE `S256` advertised and required; CIMD preferred, Dynamic Client Registration (RFC 7591) supported [DOTS §4, R15]. A CIMD URL must use the default https port. Outside the dev override it obeys the egress rules (section 14, invariant 7); the hub runs at most 8 fetches at once and does not retry a failed URL for a minute. Every client is public (`token_endpoint_auth_method` `none`). A CIMD document that prefers another method is accepted only if its `token_endpoint_auth_methods_supported` lists `none`, as ChatGPT's does, and is stored as `none`; otherwise it is refused.
 - RFC 8414 authorization-server metadata [R15].
 - RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource`; ChatGPT sends `resource=`; validate `aud`, issuer, expiry and scope on every call, and on each wake and heartbeat of a stream, which has no calls of its own (section 4.2) [DOTS §4, R15].
 - Access tokens live 1 h; refresh tokens live 30 d and rotate on every use [R15]. Presenting a spent refresh token or code revokes its whole family, is audited as `oauth_token_reuse`, and stops the Events subscriptions that family's access tokens made.

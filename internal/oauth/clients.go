@@ -400,7 +400,17 @@ func (s *Server) fetchCIMD(ctx context.Context, id string) (*registration, error
 		return nil, errors.New("oauth: client metadata names another client_id")
 	}
 	if m.AuthMethod != "" && m.AuthMethod != "none" {
-		return nil, errors.New("oauth: client metadata asks for client authentication")
+		// A client that prefers authentication but lists none among the
+		// methods it supports (ChatGPT does) is used as a public client: this
+		// hub advertises only none, and PKCE plus the exact redirect URI bind
+		// the code to it. One that cannot do none is refused.
+		var alt struct {
+			Methods []string `json:"token_endpoint_auth_methods_supported"`
+		}
+		if json.Unmarshal(raw, &alt) != nil || !slices.Contains(alt.Methods, "none") {
+			return nil, errors.New("oauth: client metadata asks for client authentication")
+		}
+		m.AuthMethod = "none"
 	}
 	if len(m.RedirectURIs) > maxRedirectURIs {
 		return nil, errors.New("oauth: client metadata lists too many redirect URIs")
