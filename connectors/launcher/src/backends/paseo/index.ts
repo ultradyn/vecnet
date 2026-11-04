@@ -80,6 +80,7 @@ class PaseoBackend implements Backend {
     this.save(ref); // Keep workspace provenance even if launch returns an ambiguous result.
     const dir = await mkdtemp(join(tmpdir(), 'vl-paseo-'));
     const prompt = join(dir, 'prompt');
+    let settled = false;
     try {
       await writeFile(prompt, spec.prompt, { mode: 0o600 });
       const result = await this.bridge.json<{ agent_id: string | null; preset: string; mode: string | null }>([
@@ -90,12 +91,15 @@ class PaseoBackend implements Backend {
       ref.id = result.agent_id; ref.extra = { ...ref.extra, preset: result.preset, mode: result.mode }; this.save(ref);
       if (result.preset !== preset.preset || result.mode === null || !fullAccessModes.has(result.mode)) {
         await new PaseoSession(this, ref, hooks).settle('lost');
+        settled = true;
         throw new Error('preset_changed');
       }
       return new PaseoSession(this, ref, hooks);
     } catch (error) {
-      if (!ref.id) {
-        const found = await this.findByTag(spec.tag);
+      if (!settled) {
+        // A failed save must not strand an agent whose ID we already know.
+        // The local ref retains workspace provenance even if the store is full.
+        const found = ref.id ? ref : await this.findByTag(spec.tag);
         if (found) await new PaseoSession(this, found, hooks).settle('lost');
       }
       throw error;
@@ -224,7 +228,10 @@ class PaseoSession implements SessionHandle {
       // Bind the hash to the agent generation: identical text and line counts
       // from both sides of a handoff must remain distinguishable on restart.
       // Hash the raw block so redaction cannot merge distinct completions.
-      const last = hash(JSON.stringify([this.ref.id, text])), duplicate = last === cursor.last;
+      // Keep completed hashes compatible with saved cursors; an error with
+      // identical text is a different outcome and must finish its own turn.
+      const last = hash(JSON.stringify(result.status === 'error' ? [this.ref.id, text, 'failed'] : [this.ref.id, text]));
+      const duplicate = last === cursor.last;
       text = this.backend.ctx.redact(text);
       cursor.last = last;
       if (!duplicate || this.current.kind !== 'idle') this.lastActivity = this.backend.ctx.now().toISOString();
@@ -242,7 +249,7 @@ class PaseoSession implements SessionHandle {
   async interrupt(_reason: string) { await this.backend.bridge.json(['stop', this.ref.id]); }
   async activity() {
     const row = (await this.backend.bridge.agents(true)).find(a => a.id === this.ref.id);
-    return { turnRunning: row ? !['idle', 'archived', 'ended', 'settled', 'exited'].includes(row.status ?? '') : true,
+    return { turnRunning: row ? !['idle', 'error', 'archived', 'ended', 'settled', 'exited'].includes(row.status ?? '') : true,
       openApprovals: this.current.kind === 'waiting_approval' ? 1 : 0, queuedInputs: 0,
       backgroundTasks: { known: 0, observable: false }, lastActivityAt: this.lastActivity };
   }

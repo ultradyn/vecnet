@@ -51,7 +51,7 @@ async function harness(t: TestContext) {
       }
       if (argv[0] === 'fake-paseo-bridge') return run([process.execPath, fixture, ...argv.slice(1)], {FAKE_PASEO_STATE:stateFile, FAKE_PASEO_LOG:logFile, ...opts.env}, opts.signal, opts.timeoutMs);
       // PluginContext.exec has no cwd option; doctor uses env -C.
-      if (argv[0] === 'env' && argv.includes('fake-paseo-bridge')) return run(['env','-C',ws, process.execPath, fixture,...argv.slice(argv.indexOf('fake-paseo-bridge')+1)], {FAKE_PASEO_STATE:stateFile, FAKE_PASEO_LOG:logFile}, opts.signal, opts.timeoutMs);
+      if (argv[0] === 'env' && argv.includes('fake-paseo-bridge')) return run([...argv.slice(0,argv.indexOf('fake-paseo-bridge')),process.execPath,fixture,...argv.slice(argv.indexOf('fake-paseo-bridge')+1)], {FAKE_PASEO_STATE:stateFile, FAKE_PASEO_LOG:logFile}, opts.signal, opts.timeoutMs);
       return run(argv, opts.env, opts.signal, opts.timeoutMs);
     },
   };
@@ -80,7 +80,7 @@ test('launch with agent_id null fails; a returned preset different from the requ
     const h=await harness(t); h.state.launch=result; const b=await h.create();
     await assert.rejects(b.launch(h.spec,h.hooks),result.agent_id?/preset_changed/:/launch_failed/);
     await access(join(h.ws,h.spec.jobId)); const calls=await h.entries(); const launch=calls.find(x=>x.args[1]==='launch')!; await assert.rejects(access(launch.messageFile!));
-    if(result.agent_id) assert.ok(calls.some(x=>x.args[1]==='settle'));
+    if(result.agent_id) assert.equal(calls.filter(x=>x.args[1]==='settle').length,1,'preset mismatch settles exactly once');
   }
 });
 test('ambiguous launch discovers and settles only the newly created tagged agent and preserves work', async t => {
@@ -289,5 +289,81 @@ test('handoff cursor generations survive crashes before adoption and after equal
     const attached=await (await plugin.create(h.config,h.ctx)).reattach(ref,h.hooks); assert.equal(attached.found,'live'); if(attached.found!=='live') throw Error();
     const rows=await take(attached.handle,1,cursor), reads=(await h.entries()).filter(x=>x.args[1]==='read');
     assert.equal(reads.at(-1)?.args.at(-1),'1'); assert.equal('outcome' in rows[0].event && rows[0].event.outcome,'failed');
+  }
+});
+
+
+test('failed turn with the preceding completed text is emitted from a saved cursor and dedupes replay', async t => {
+  const h=await harness(t), message='agent a1 failed: same';
+  h.state.waits=[{agentId:'a1',status:'idle'}]; h.state.reads=[[message]];
+  const b=await h.create(), s=await b.launch(h.spec,h.hooks), first=(await take(s,1))[0];
+  assert.equal(first.event.type,'turn_finished');
+  if(first.event.type!=='turn_finished') throw Error();
+  assert.equal(first.event.outcome,'completed'); assert.equal(first.event.finalText,message);
+  await s.send({items:[{deliveryId:'next',messageId:'next',from:'peer',text:'next turn',attachments:[]}]},'start');
+  const original=h.ctx.exec;
+  // The real BridgeError writes a single JSON object to stderr, not stdout.
+  h.ctx.exec=async(argv,opts)=>argv.includes('wait')
+    ? {code:1,stdout:'',stderr:JSON.stringify({ok:false,error:message})} : original(argv,opts);
+  const failure=(await take(s,1,first.cursor))[0];
+  assert.equal(failure.event.type,'turn_finished');
+  if(failure.event.type!=='turn_finished') throw Error();
+  assert.equal(failure.event.outcome,'failed'); assert.equal(failure.event.finalText,message);
+  assert.notEqual(failure.cursor.value,first.cursor.value); assert.notEqual(failure.event.turnId,first.event.turnId);
+  // A restart and replay of the same failed boundary must not post it again.
+  const restarted=await plugin.create(h.config,h.ctx), attached=await restarted.reattach(s.ref,h.hooks);
+  assert.equal(attached.found,'live'); if(attached.found!=='live') throw Error();
+  const iterator=attached.handle.turns(failure.cursor)[Symbol.asyncIterator]();
+  assert.equal((await iterator.next()).done,true);
+});
+
+test('launch persistence failure after receiving the agent ID stops, waits and settles without losing work', async t => {
+  const h=await harness(t), b=await h.create(), original=h.ctx.store.set;
+  let faults=0;
+  h.ctx.store.set=(key,value)=>{
+    if(key===`ref:${h.spec.tag}` && JSON.parse(value).id) { faults++; throw Error('disk full'); }
+    original(key,value);
+  };
+  await assert.rejects(b.launch(h.spec,h.hooks),/disk full/); assert.equal(faults,1);
+  const calls=await h.entries(), commands=calls.map(x=>x.args[1]);
+  assert.equal(commands.filter(x=>x==='settle').length,1,'known agent must be settled after persistence fails');
+  assert.ok(commands.indexOf('launch')<commands.indexOf('stop'));
+  assert.ok(commands.indexOf('stop')<commands.indexOf('wait'));
+  assert.ok(commands.indexOf('wait')<commands.indexOf('settle'));
+  for (const command of ['stop','wait','settle']) {
+    const matching=calls.filter(x=>x.args[1]===command);
+    assert.equal(matching.length,1); assert.equal(matching[0].args[2],'a1');
+  }
+  assert.ok(!calls.some(x=>x.args.includes('--force')));
+  const state=JSON.parse(await readFile(join(h.root,'state.json'),'utf8'));
+  assert.equal(state.agents.find((a:{id:string})=>a.id==='a1').archived,true);
+  const ws=join(h.ws,h.spec.jobId); await access(ws);
+  assert.equal(await h.git('-C',ws,'rev-parse','HEAD'),h.base);
+  assert.equal(await h.git('-C',ws,'branch','--show-current'),'launch/job_test');
+  await assert.rejects(access(calls.find(x=>x.args[1]==='launch')!.messageFile!));
+});
+
+test('activity treats an error-status agent as inactive after a failed turn and on reattach', async t => {
+  const h=await harness(t), b=await h.create(), s=await b.launch(h.spec,h.hooks);
+  const state=JSON.parse(await readFile(join(h.root,'state.json'),'utf8'));
+  state.agents[0].status='error'; state.waits=[{agentId:'a1',status:'error',message:'failed'}];
+  await writeFile(join(h.root,'state.json'),JSON.stringify(state));
+  const failure=(await take(s,1))[0];
+  assert.equal(failure.event.type,'turn_finished');
+  if(failure.event.type!=='turn_finished') throw Error();
+  assert.equal(failure.event.outcome,'failed'); assert.equal(s.state().kind,'idle');
+  assert.equal((await s.activity()).turnRunning,false);
+  const restarted=await plugin.create(h.config,h.ctx), attached=await restarted.reattach(s.ref,h.hooks);
+  assert.equal(attached.found,'live'); if(attached.found!=='live') throw Error();
+  assert.equal((await attached.handle.activity()).turnRunning,false);
+  state.waits=[{agentId:'a1',status:'permission'}];
+  await writeFile(join(h.root,'state.json'),JSON.stringify(state));
+  await take(attached.handle,1);
+  const activity=await attached.handle.activity();
+  assert.equal(activity.turnRunning,false); assert.equal(activity.openApprovals,1);
+  assert.deepEqual(activity.backgroundTasks,{known:0,observable:false});
+  for (const status of ['running','unknown',undefined]) {
+    state.agents[0].status=status; await writeFile(join(h.root,'state.json'),JSON.stringify(state));
+    assert.equal((await attached.handle.activity()).turnRunning,true,'unknown states remain conservatively busy');
   }
 });
