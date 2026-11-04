@@ -233,13 +233,20 @@ func (s *server) longPoll(w http.ResponseWriter, r *http.Request, prn string, ow
 				break hold
 			case <-drain.C():
 				cancel()
-				evs = []envelope.Event{}
-				restarting = &restartHint{RetryAfterMS: drain.RetryAfter().Milliseconds()}
 				break hold
 			case <-s.Stop: // nil (never) unless the server is shutting down
 				cancel()
 				break hold
 			}
+		}
+		// A wake can pass credential checks and reread events after the
+		// announcement. Give the held poll's pinned drain precedence over
+		// every successful exit, preserving its original cursor and hint.
+		select {
+		case <-drain.C():
+			evs = []envelope.Event{}
+			restarting = &restartHint{RetryAfterMS: drain.RetryAfter().Milliseconds()}
+		default:
 		}
 	}
 	next := cur.String()

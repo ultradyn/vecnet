@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -320,5 +321,102 @@ func TestLongPollRestartField(t *testing.T) {
 	}
 	if !s.Drain.Wait(time.Second) {
 		t.Fatal("poll did not leave drain")
+	}
+}
+
+// A wake can park in credential checks while shutdown is announced and a
+// worker commits a delivery. The subsequent nonempty reread must still answer
+// with the held poll's original cursor and its pinned generation's retry hint.
+func TestLongPollRestartOverridesRereadEvents(t *testing.T) {
+	for _, reset := range []bool{false, true} {
+		name := "announced"
+		if reset {
+			name = "reset"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := restartTestServer(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			const owner = "poll-owner"
+			owners := []string{owner}
+			cur, err := s.Hub.Log.Current(ctx, owners)
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, err := s.Hub.Log.Read(ctx, owners, cur, eventsReadLimit)
+			if err != nil || len(first) != 0 {
+				t.Fatalf("initial read = %v, %v; want empty", first, err)
+			}
+			r := httptest.NewRequest("GET", "/v1/events?wait=25", nil).WithContext(ctx)
+			w := httptest.NewRecorder()
+			registered, blocked := make(chan struct{}), make(chan struct{})
+			release, finished := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			defer unblock()
+			calls := 0
+			alive := func(context.Context) bool {
+				calls++
+				switch calls {
+				case 1:
+					close(registered)
+				case 2:
+					close(blocked)
+					select {
+					case <-release:
+					case <-ctx.Done():
+						return false
+					}
+				}
+				return true
+			}
+			go func() {
+				defer close(finished)
+				s.longPoll(w, r, "poll-principal", owners, cur, first, 25*time.Second, alive)
+			}()
+			select {
+			case <-registered:
+			case <-ctx.Done():
+				t.Fatal("long poll did not register")
+			}
+			s.Hub.Log.Notify(owner) // Wake the established hold without an event.
+			select {
+			case <-blocked:
+			case <-ctx.Done():
+				t.Fatal("long poll did not reach its second credential check")
+			}
+			if s.Hub.Log.Waiters(owner) != 1 {
+				t.Fatal("long poll is not registered at the barrier")
+			}
+			s.Drain.Announce(1500 * time.Millisecond)
+			if reset {
+				if s.Drain.Wait(time.Millisecond) {
+					t.Fatal("wait completed while poll was blocked")
+				}
+				s.Drain.Reset()
+				s.Drain.Announce(2500 * time.Millisecond)
+			}
+			err = s.Hub.Log.DB.Tx(ctx, func(tx *sql.Tx) error {
+				_, err := s.Hub.Log.Append(ctx, tx, owner, "delivery", time.Now(), map[string]string{"message": "during drain"})
+				return err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Hub.Log.Notify(owner)
+			if evs, err := s.Hub.Log.Read(ctx, owners, cur, eventsReadLimit); err != nil || len(evs) != 1 {
+				t.Fatalf("committed read = %v, %v; want one event", evs, err)
+			}
+			unblock()
+			select {
+			case <-finished:
+				want := `{"events":[],"next_cursor":"` + cur.String() + `","hub_restarting":{"retry_after_ms":1500}}` + "\n"
+				if w.Code != http.StatusOK || w.Body.String() != want {
+					t.Fatalf("restart poll = %d %s, want %s", w.Code, w.Body, want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("held poll did not finish after the credential check")
+			}
+		})
 	}
 }
