@@ -1,0 +1,500 @@
+{
+ "runStamp": "20261104T11-launcher-hub",
+ "maxFixRounds": 3,
+ "planName": "launcher",
+ "plan": "docs/plans/2026-11-03-launcher.md",
+ "worktree": "/home/xertrov/src/vecnet4/.worktrees/launcher",
+ "branch": "launcher",
+ "baseRef": "master",
+ "statusDir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-launcher",
+ "taskPrefix": "ln",
+ "startTask": 1,
+ "endTask": 5,
+ "finalReview": true,
+ "openBrowser": false,
+ "deps": {
+  "1": [],
+  "2": [],
+  "3": [
+   1,
+   2
+  ],
+  "4": [
+   1,
+   3
+  ],
+  "5": [],
+  "6": [],
+  "7": [
+   6
+  ],
+  "8": [
+   6
+  ],
+  "9": [
+   6,
+   8
+  ],
+  "10": [
+   6,
+   8
+  ],
+  "11": [
+   6,
+   8,
+   9,
+   10
+  ],
+  "12": [
+   6,
+   8,
+   9,
+   10
+  ],
+  "13": [
+   6,
+   8,
+   9
+  ],
+  "14": [
+   6,
+   8,
+   9
+  ],
+  "15": [
+   6,
+   8
+  ],
+  "16": [
+   6,
+   8
+  ],
+  "17": [
+   7,
+   10,
+   11,
+   12,
+   13,
+   14
+  ],
+  "18": [
+   1,
+   17,
+   20
+  ],
+  "19": [
+   3,
+   4,
+   5,
+   15,
+   16,
+   18
+  ],
+  "20": []
+ },
+ "tasks": [
+  {
+   "title": "Hub: `launcher` kind, presence TTL, 7-day `expires_at` cap",
+   "refs": "\u00a72, \u00a76, \u00a712; Review Focus",
+   "race": false,
+   "suite": "./internal/hub/ ./internal/httpapi/ ./internal/store/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations."
+   ]
+  },
+  {
+   "title": "Hub: principal-scoped peer provisioning (issue 28) \u2014 storage and logic",
+   "refs": "issue 28; \u00a72, \u00a714; Review Focus 4",
+   "race": true,
+   "suite": "./internal/hub/ ./internal/store/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Issue 28 wire shapes are frozen with pag-chat (a live consumer): never rename or reshape a field, status or error code from the Global Constraints.",
+    "Migration is 0014_principal_peers.sql (reactions took 0012 and 0013)."
+   ]
+  },
+  {
+   "title": "Hub: issue 28 HTTP, admin and CLI surface",
+   "refs": "issue 28; \u00a713, \u00a715; Review Focus 4",
+   "race": true,
+   "suite": "./internal/httpapi/ ./internal/hub/ ./internal/cli/ ./internal/opview/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Issue 28 wire shapes are frozen with pag-chat (a live consumer): never rename or reshape a field, status or error code from the Global Constraints."
+   ]
+  },
+  {
+   "title": "Operator UI: launcher kind colour, principals card",
+   "refs": "\u00a72.13; Review Focus",
+   "race": false,
+   "suite": "./internal/tui/ ./internal/httpapi/ ./internal/ui/...",
+   "route": "opus",
+   "shots": "ln04",
+   "checks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "build2 node scripts/ui/ln-dash.mjs"
+   ],
+   "reviewChecks": [
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-launcher/review-shots/04 build2 node scripts/ui/ln-dash.mjs"
+   ],
+   "hazards": [
+    "The screen scripts share the two-core build2 slice with other agents, so wait on page state (locators, waitFor), never on elapsed time.",
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "The kind colour and principals card must look like the same product as the existing dashboard (palette, spacing, type)."
+   ]
+  },
+  {
+   "title": "PROTOCOL \u00a718, \u00a75.6 clarification, \u00a713.8 launcher checklist, glossary, changelog",
+   "refs": "\u00a718 (new), \u00a75.6, \u00a713.8",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "opus",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Issue 28 wire shapes are frozen with pag-chat (a live consumer): never rename or reshape a field, status or error code from the Global Constraints.",
+    "Docs plus the CHANGELOG line; PROTOCOL text must match the plan where it fixes copy, and the code from Tasks 1-3."
+   ]
+  },
+  {
+   "title": "Daemon skeleton: packages, wire, ports, backend contract, fakes, recipes",
+   "refs": "[D]; Review Focus",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "sol",
+   "checks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "reviewChecks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Every TypeScript build or test goes through a just ln-* recipe (build2, at most 2 workers). Never run node --test, tsc or pnpm bare.",
+    "Never modify ~/src/t3-bridge or ~/src/paseo-bridge, never pair/re-pair or write any t3-bridge token or config; tests use fakes.",
+    "Task 6 bootstraps the lockfile with the exact dev versions in the plan (network access to the npm registry is needed once); dependencies must stay empty."
+   ]
+  },
+  {
+   "title": "Shared hub client: SSE parser, resumable stream, HTTP client",
+   "refs": "[D]; Review Focus",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "sol",
+   "checks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "reviewChecks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Every TypeScript build or test goes through a just ln-* recipe (build2, at most 2 workers). Never run node --test, tsc or pnpm bare.",
+    "Never modify ~/src/t3-bridge or ~/src/paseo-bridge, never pair/re-pair or write any t3-bridge token or config; tests use fakes."
+   ]
+  },
+  {
+   "title": "Config, launch contracts, schemas, redaction, route check",
+   "refs": "[D]; Review Focus",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "sol",
+   "checks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "reviewChecks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Every TypeScript build or test goes through a just ln-* recipe (build2, at most 2 workers). Never run node --test, tsc or pnpm bare.",
+    "Never modify ~/src/t3-bridge or ~/src/paseo-bridge, never pair/re-pair or write any t3-bridge token or config; tests use fakes."
+   ]
+  },
+  {
+   "title": "Ledger, outbox, job reporter",
+   "refs": "[D]; Review Focus",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "sol",
+   "checks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "reviewChecks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Every TypeScript build or test goes through a just ln-* recipe (build2, at most 2 workers). Never run node --test, tsc or pnpm bare.",
+    "Never modify ~/src/t3-bridge or ~/src/paseo-bridge, never pair/re-pair or write any t3-bridge token or config; tests use fakes."
+   ]
+  },
+  {
+   "title": "Directory cache and policy",
+   "refs": "[D]; Review Focus",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "sol",
+   "checks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "reviewChecks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Every TypeScript build or test goes through a just ln-* recipe (build2, at most 2 workers). Never run node --test, tsc or pnpm bare.",
+    "Never modify ~/src/t3-bridge or ~/src/paseo-bridge, never pair/re-pair or write any t3-bridge token or config; tests use fakes."
+   ]
+  },
+  {
+   "title": "Session lane: relay, priority mapping, turn replies, receipts, controls",
+   "refs": "[D]; Review Focus",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "sol",
+   "checks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "reviewChecks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Every TypeScript build or test goes through a just ln-* recipe (build2, at most 2 workers). Never run node --test, tsc or pnpm bare.",
+    "Never modify ~/src/t3-bridge or ~/src/paseo-bridge, never pair/re-pair or write any t3-bridge token or config; tests use fakes."
+   ]
+  },
+  {
+   "title": "Parent bridge: questions and permission prompts",
+   "refs": "[D]; Review Focus",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "sol",
+   "checks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "reviewChecks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Every TypeScript build or test goes through a just ln-* recipe (build2, at most 2 workers). Never run node --test, tsc or pnpm bare.",
+    "Never modify ~/src/t3-bridge or ~/src/paseo-bridge, never pair/re-pair or write any t3-bridge token or config; tests use fakes."
+   ]
+  },
+  {
+   "title": "Idle clock (park, settle, deadline)",
+   "refs": "[D]; Review Focus",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "sol",
+   "checks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "reviewChecks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Every TypeScript build or test goes through a just ln-* recipe (build2, at most 2 workers). Never run node --test, tsc or pnpm bare.",
+    "Never modify ~/src/t3-bridge or ~/src/paseo-bridge, never pair/re-pair or write any t3-bridge token or config; tests use fakes."
+   ]
+  },
+  {
+   "title": "Launch flow, outcome fence, reattach, sweep",
+   "refs": "[D]; Review Focus",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "sol",
+   "checks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "reviewChecks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Every TypeScript build or test goes through a just ln-* recipe (build2, at most 2 workers). Never run node --test, tsc or pnpm bare.",
+    "Never modify ~/src/t3-bridge or ~/src/paseo-bridge, never pair/re-pair or write any t3-bridge token or config; tests use fakes."
+   ]
+  },
+  {
+   "title": "`t3` backend plugin (through `t3-bridge`, unmodified)",
+   "refs": "[D]; Review Focus",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "sol",
+   "checks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "reviewChecks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Every TypeScript build or test goes through a just ln-* recipe (build2, at most 2 workers). Never run node --test, tsc or pnpm bare.",
+    "Never modify ~/src/t3-bridge or ~/src/paseo-bridge, never pair/re-pair or write any t3-bridge token or config; tests use fakes."
+   ]
+  },
+  {
+   "title": "`paseo` backend plugin (through `paseo-bridge`, unmodified): completion-only turns",
+   "refs": "[D]; Review Focus",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "sol",
+   "checks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "reviewChecks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Every TypeScript build or test goes through a just ln-* recipe (build2, at most 2 workers). Never run node --test, tsc or pnpm bare.",
+    "Never modify ~/src/t3-bridge or ~/src/paseo-bridge, never pair/re-pair or write any t3-bridge token or config; tests use fakes."
+   ]
+  },
+  {
+   "title": "Daemon assembly: ingress, dispatcher, presence, main, systemd unit",
+   "refs": "[D]; Review Focus",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "opus",
+   "checks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "reviewChecks": [
+    "just ln-setup",
+    "just ln-check"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Every TypeScript build or test goes through a just ln-* recipe (build2, at most 2 workers). Never run node --test, tsc or pnpm bare.",
+    "Never modify ~/src/t3-bridge or ~/src/paseo-bridge, never pair/re-pair or write any t3-bridge token or config; tests use fakes."
+   ]
+  },
+  {
+   "title": "End to end against a real hub with a fake backend",
+   "refs": "[D]; Review Focus 1-5",
+   "race": false,
+   "suite": "./internal/envelope/",
+   "route": "opus",
+   "checks": [
+    "just ln-setup",
+    "just ln-check",
+    "just ln-e2e"
+   ],
+   "reviewChecks": [
+    "just ln-setup",
+    "just ln-check",
+    "just ln-e2e"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    "Every TypeScript build or test goes through a just ln-* recipe (build2, at most 2 workers). Never run node --test, tsc or pnpm bare.",
+    "Never modify ~/src/t3-bridge or ~/src/paseo-bridge, never pair/re-pair or write any t3-bridge token or config; tests use fakes."
+   ]
+  },
+  {
+   "title": "Docs, operator guide, rollout and smoke test",
+   "refs": "\u00a718, \u00a75.6, \u00a713.8",
+   "race": false,
+   "suite": "./...",
+   "route": "opus",
+   "checks": [
+    "just ln-setup",
+    "just ln-check",
+    "just ln-e2e",
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-launcher/gate-shots just ui-shots"
+   ],
+   "reviewChecks": [
+    "just ln-setup",
+    "just ln-check",
+    "just ln-e2e",
+    "build2 node --test --test-concurrency=2 internal/ui/jstest/"
+   ],
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations.",
+    ".scratch/vecnet/issues is tracked; edit the worktree copy."
+   ]
+  },
+  {
+   "title": "Hub: a requester's cancel must not consume the recipient's job sequence",
+   "refs": "\u00a75.6; Review Focus 5",
+   "race": true,
+   "suite": "./internal/hub/ ./internal/httpapi/",
+   "route": "sol",
+   "hazards": [
+    "Edit only the files your task lists. If you truly need a one-line hook in a file another task owns, say so in deviations."
+   ]
+  }
+ ],
+ "solRelay": {
+  "run": "/home/xertrov/src/vecnet4/scripts/wf/sol-run.sh",
+  "wait": "/home/xertrov/src/vecnet4/scripts/wf/sol-wait.sh",
+  "dir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-launcher/ccc",
+  "transcripts": "/home/xertrov/.claude-p/projects/-home-xertrov-src-vecnet4/*/subagents/workflows/*/agent-*.jsonl"
+ },
+ "extraRules": [
+  "Node and browser checks run through build2 too: `build2 node ...`. Chromium stays headless. Never run xdg-open or open a window.",
+  "Never touch the dev hub on 45752, the coordinator's preview on 49575, `.data/` or `.demo-data/`. Tmux only through the private `-L oui-<pid>` server, never Max's.",
+  "Read-only reviewers run screen scripts with the SHOTS_DIR their command gives, so committed PNGs stay unchanged.",
+  "No npm or pnpm install except the TypeScript dev dependencies Task 6 pins (through `just ln-setup` after Task 6).",
+  "Never modify ~/src/t3-bridge or ~/src/paseo-bridge, never pair/re-pair or write any t3-bridge token or config; tests use fakes."
+ ],
+ "mergeChecks": [
+  "build2 node --test --test-concurrency=2 internal/ui/jstest/",
+  "[ ! -f connectors/launcher/package.json ] || (just ln-setup && just ln-check)",
+  "SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-launcher/merge-shots just ui-shots (the whole screen gate: a regression halts at the merge that caused it)"
+ ],
+ "gateChecks": [
+  "`build2 node --test --test-concurrency=2 internal/ui/jstest/`",
+  "`just isa-check` prints 0 for both binaries",
+  "`just validate-protocol`",
+  "`build2 go list -deps ./cmd/vecnet | grep -c 'modernc.org/sqlite'` prints 0",
+  "`SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-launcher/gate-shots just ui-shots` exits 0",
+  "Every PNG listed in docs/plans/shots/oui/README.md exists, and every PNG in that directory is listed",
+  "Issue 28 wire shapes match the frozen shapes in the plan Global Constraints field for field (POST/PATCH /v1/peers, created_by, the three error codes and details)"
+ ],
+ "lensFocus": {
+  "spec": "This slice implements Tasks 1-5 of docs/plans/2026-11-03-launcher.md: the launcher peer kind (15 min presence TTL), the 7-day expires_at cap, issue 28 (.scratch/vecnet/issues/28-principal-peer-provisioning.md) in full, the UI kind colour and principals card, and PROTOCOL \u00a718/\u00a75.6/\u00a713.8. Check the frozen issue 28 shapes field by field, default off, active-only cap, creates-per-hour, never-provisionable kinds, ownership on PATCH, created_by, audit.",
+  "security": "Issue 28 cannot widen a principal beyond operator-set limits: default off, operator/source/session/dot never provisionable, cap counts active peers, re-enable counts, creates-per-hour bounds create/disable loops, a principal touches only peers it created and still owns, default scopes copied, every refusal audited.",
+  "tests": "Each named plan test exists and fails without its fix; guard tests are marked; screen scripts wait on state, honour SHOTS_DIR, never bind 45752 or 49575; TypeScript tests use fakeClock and port 0."
+ },
+ "extraLenses": [
+  {
+   "key": "design",
+   "title": "Visual and interaction design",
+   "taste": true,
+   "focus": "Read every ln04-*.png in docs/plans/shots/oui/ with the Read tool beside the existing dashboard shots. The launcher kind colour and the principals card must look like the same product. Flag anything that looks bolted on."
+  }
+ ]
+}

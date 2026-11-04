@@ -11,3 +11,9 @@ The store already uses `_txlock=immediate` and `busy_timeout(5000)` (internal/st
 
 ## Order
 Low priority; investigate before a production deploy.
+
+## Evidence 2026-11-04 13:00-13:04 AEDT
+- codex-llmp (dogfooding) saw a 7.8 s `vecnet thread` read and a receipt+ack sequence over 10 s, with no error responses; a later inbox took 61 ms. Hub log shows SQLITE_BUSY bursts at 13:00:24, 13:01:29, 13:02:17-29 (423 total in the log now).
+- Host at that moment: load average 92/70/57, `/proc/pressure/io` some avg10=41 full avg10=16, cpu some avg10=33. Top CPU users were unrelated (tesseract, cc1plus/compile, Chrome, Paseo) plus two vecnet build workflows in agent-build.slice.
+- Likely mechanism: fsync stalls under I/O pressure keep a write transaction open past busy_timeout(5000), so background loops and requests queue behind it. Check: log tx duration and fsync time; consider WAL with synchronous=NORMAL (if not already), and a quieter retry for background loops.
+- Store runs WAL with synchronous(FULL) (store.go:23-24), so every commit fsyncs. synchronous(NORMAL) in WAL survives process crashes and only risks the last transactions on power loss; that is a durability decision for Max, not a silent fix.
