@@ -283,9 +283,65 @@ const prefixCases = [
     'echo \\>sudo', 'echo "safe && FLAG=1 sudo id"',
   ].map(line => ({line,privileged:false})),
 ];
-const commandCases = [...substitutionCases,...prefixCases];
+const shellSyntaxCases = [
+  ...[
+    (command: string) => `! ${command}`,
+    (command: string) => `{ ${command}; }`,
+    (command: string) => `if true; then ${command}; fi`,
+    (command: string) => `if ${command}; then :; fi`,
+    (command: string) => `if false; then :; elif ${command}; then :; fi`,
+    (command: string) => `if false; then :; else ${command}; fi`,
+    (command: string) => `while ${command}; do :; done`,
+    (command: string) => `until ${command}; do :; done`,
+    (command: string) => `for item in safe; do ${command}; done`,
+    (command: string) => `function check { ${command}; }`,
+    (command: string) => `time -p ${command}`,
+    (command: string) => `case safe in safe) ${command};; esac`,
+    (command: string) => `! { if true; then ${command}; fi; }`,
+    (command: string) => `if ! { ${command}; }; then :; fi`,
+  ].flatMap(compound => ['', 'FLAG="two words" ', '2>/dev/null ', 'FLAG=1 2>&1 '].flatMap(prefix => {
+    const body = compound(`${prefix}sudo id`);
+    return [body, `echo safe && ${body}`, `echo "$(${body})"`, 'echo `' + body + '`'];
+  })).map(line => ({line,privileged:true})),
+  ...['su','doas','pkexec','/usr/bin/sudo'].map(word => ({line:`! { FLAG=1 > /dev/null ${word} id; }`,privileged:true})),
+  ...[
+    'if true; then FLAG="$(sudo id)" echo safe; fi',
+    '! >"$(sudo id)" echo safe',
+    '! echo "$(if true; then FLAG=1 sudo id; fi)"',
+    '{ echo "$(echo safe && ! sudo id)"; }',
+    '! "sudo" id', '{ \\sudo id; }',
+    'echo "$(case safe in (other) :;; (safe|also) sudo id;; esac)"',
+    'echo "$(case safe in safe) case inner in inner) sudo id;; esac;; esac)"',
+    'echo "$(case safe in other) :;& safe) sudo id;;& *) :;; esac)"',
+    'echo "$(case "$(sudo id)" in safe) :;; esac)"',
+    'echo "$(case safe in "$(sudo id)") :;; esac)"',
+    'echo "$(case safe in safe) :;; esac)$(sudo id)"',
+    'time sudo id', 'time ! { sudo id; }', 'function check() { sudo id; }',
+  ].map(line => ({line,privileged:true})),
+  ...['!', '{', 'if', 'then', 'elif', 'else', 'while', 'until', 'do', 'time', 'function'].flatMap(word => [
+    `"${word}" sudo id`, `'${word}' sudo id`, `\\${word} sudo id`,
+    `echo ${word} sudo id`, `>${word} echo sudo`, `FLAG=${word} echo sudo`,
+  ]).map(line => ({line,privileged:false})),
+  ...[
+    'echo "safe && ! sudo id"', "echo 'safe && { sudo id; }'", 'echo "if true; then sudo id; fi"',
+    'echo \'$(if true; then sudo id; fi)\'', 'echo "\\$(echo safe && ! sudo id)"',
+    'echo \\`! sudo id\\`',
+    'echo !sudo id', '!sudo id', '{sudo id; }',
+    'if true; then echo sudo; fi', 'while echo sudo; do :; done',
+    'for item in sudo doas pkexec; do echo "$item"; done',
+    'case sudo in sudo) echo safe;; esac',
+    'echo "$(case sudo in (sudo|doas) echo safe;; esac)"',
+    'echo "$(case safe in safe) echo safe;; sudo) :;; esac)" sudo',
+    'echo "$(case safe in safe) case sudo in sudo) :;; esac;; esac)" sudo',
+    'echo "$(case safe in safe) :;; esac)" sudo',
+    'function sudo { echo safe; }', 'function sudo() { echo safe; }',
+    'time -p echo sudo', 'time -p "!" sudo id',
+    '! FLAG="safe && sudo id" echo safe', '{ >sudo echo safe; }',
+  ].map(line => ({line,privileged:false})),
+];
+const commandCases = [...substitutionCases,...prefixCases,...shellSyntaxCases];
 
-test('classifyPermission: command substitutions and shell prefixes preserve executable position; literals stay inert', async t => {
+test('classifyPermission: substitutions, prefixes and shell syntax preserve executable position; literals stay inert', async t => {
   for (const {line,privileged} of commandCases) {
     await t.test(line, () => {
       const p = permission({kind:'exec',paths:[],command:{line,shell_operators:true},
@@ -295,7 +351,7 @@ test('classifyPermission: command substitutions and shell prefixes preserve exec
   }
 });
 
-test('routeApproval: the privileged preset sends executable substitutions and prefixed commands to the operator', async t => {
+test('routeApproval: the privileged preset sends executable substitutions, prefixes and shell compounds to the operator', async t => {
   const a = await setup();
   a.cfg.approvals.to_operator.presets = ['privileged'];
   for (const {line,privileged} of commandCases) {

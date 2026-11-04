@@ -75,8 +75,10 @@ export type ApprovalRoute = { to: 'requester' | 'operator' | 'relay'; escalateOp
 // This is classification only: no shell evaluation or argv synthesis occurs.
 function commandWords(line: string): string[] {
   const commands: string[] = [];
+  const commandSyntax = new Set(['!', '{', 'if', 'then', 'elif', 'else', 'while', 'until', 'do']);
   const pending = [line];
-  const context = () => ({word:'',started:false,plain:true,assignment:false,redirection:false,quote:'',atCommand:true,parens:0});
+  const context = () => ({word:'',started:false,plain:true,assignment:false,redirection:false,quote:'',atCommand:true,parens:0,
+    functionName:false,timing:false,cases:[] as ('subject' | 'in' | 'pattern' | 'body')[]});
   while (pending.length) {
     const source = pending.pop()!;
     const parents: ReturnType<typeof context>[] = [];
@@ -85,10 +87,27 @@ function commandWords(line: string): string[] {
       if (current.started) {
         // Assignments and redirection operands precede the executable without
         // consuming its position. Their substitutions are still scanned below.
+        const caseIndex = current.cases.length - 1;
+        const casePart = current.cases[caseIndex];
         if (current.redirection) current.redirection = false;
-        else if (!current.assignment) {
+        else if (current.plain && current.word === 'esac' && (casePart === 'pattern' || current.atCommand)) {
+          current.cases.pop(); current.atCommand = false;
+        } else if (casePart === 'subject') current.cases[caseIndex] = 'in';
+        else if (casePart === 'in') {
+          if (current.plain && current.word === 'in') current.cases[caseIndex] = 'pattern';
+        } else if (casePart === 'pattern') { /* Case patterns are data, not executables. */ }
+        else if (current.atCommand && current.plain && current.word === 'case') {
+          current.cases.push('subject'); current.atCommand = false;
+        } else if (current.functionName) current.functionName = false;
+        else if (current.atCommand && current.plain && current.word === 'function') current.functionName = true;
+        else if (current.atCommand && current.plain && current.word === 'time') current.timing = true;
+        else if (current.atCommand && current.plain && current.timing && current.word === '-p') { /* time's option precedes the pipeline. */ }
+        // Only unquoted reserved words at command position open a pipeline or
+        // compound-command body. The same words in arguments, assignment values
+        // or redirection operands stay inert, as do quoted/escaped spellings.
+        else if (!current.assignment && !(current.atCommand && current.plain && commandSyntax.has(current.word))) {
           if (current.atCommand) commands.push(current.word);
-          current.atCommand = false;
+          current.atCommand = false; current.timing = false;
         }
         current.word = ''; current.started = false; current.plain = true; current.assignment = false;
       }
@@ -133,6 +152,21 @@ function commandWords(line: string): string[] {
         continue;
       }
       if (char === "'" || char === '"') { current.quote = char; current.started = true; current.plain = false; continue; }
+      // A case pattern's ')' belongs to the case clause, not to the enclosing
+      // command substitution. Each substitution keeps its own case stack.
+      if (char === ')' && current.cases.at(-1) === 'pattern') {
+        flush();
+        if (current.cases.at(-1) === 'pattern') {
+          current.cases[current.cases.length - 1] = 'body'; current.atCommand = true;
+          continue;
+        }
+      }
+      if (char === '(' && current.cases.at(-1) === 'pattern') { flush(); continue; }
+      if (char === ';' && current.cases.at(-1) === 'body' && /^(?:;;|;&)/.test(source.slice(i))) {
+        flush(); current.cases[current.cases.length - 1] = 'pattern'; current.atCommand = false;
+        i += source[i+1] === ';' && source[i+2] === '&' ? 2 : 1;
+        continue;
+      }
       if (char === ')' && parents.length && current.parens === 0) {
         flush(); current = parents.pop()!;
         continue;
@@ -149,7 +183,7 @@ function commandWords(line: string): string[] {
         continue;
       }
       if (';&|()\n'.includes(char)) {
-        flush(); current.atCommand = true;
+        flush(); current.atCommand = true; current.timing = false;
         if (char === '(') current.parens++;
         if (char === ')' && current.parens > 0) current.parens--;
         continue;
