@@ -52,6 +52,7 @@ messaging:
   reply <message_id> "text" (--wake|--wake-idle|--hold) [--thread ID] [--attach FILE]…
   react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]
        default priority depends on the emoji: ✅ ❓ ❗ wake_idle, others hold
+  mcp                                 stdio MCP relay to the hub's /mcp as this profile [--as X]; needs --net P
   inbox [--since CURSOR] [--ack] [--limit N]
   ack <cursor>
   watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]
@@ -163,7 +164,11 @@ func (a *app) exit(err error) int {
 	var ue *usageError
 	var he *hubError
 	var ne *netError
+	var me *mcpStartupError
 	switch {
+	case errors.As(err, &me):
+		fmt.Fprintln(a.stderr, me)
+		return exitUsage
 	case errors.As(err, &he):
 		fmt.Fprintf(a.stderr, "%s: %s\n", he.Code, he.Message)
 		return exitHub
@@ -412,6 +417,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdInbox(args)
 	case "ack":
 		return a.cmdAck(args)
+	case "mcp":
+		return a.cmdMCP(args)
 	case "watch":
 		return a.cmdWatch(args)
 	case "hook":
