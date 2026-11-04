@@ -63,9 +63,39 @@ func (r *Reader) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 		return nil, err
 	}
 
+	// A peer's own scopes, read once for every peer (PROTOCOL §2.13).
+	scopes := map[string]*opapi.PeerScopes{}
+	rows, err = r.Hub.DB.QueryContext(ctx, `SELECT peer_id, mode, target_id FROM scopes ORDER BY peer_id, mode, target_id`)
+	if err != nil {
+		return nil, fmt.Errorf("opview: peer scopes: %w", err)
+	}
+	for rows.Next() {
+		var peer, mode, target string
+		if err := rows.Scan(&peer, &mode, &target); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("opview: peer scopes: %w", err)
+		}
+		sc := scopes[peer]
+		if sc == nil {
+			sc = &opapi.PeerScopes{Allow: []string{}, Deny: []string{}}
+			scopes[peer] = sc
+		}
+		if mode == "deny" {
+			sc.Deny = append(sc.Deny, target)
+		} else {
+			sc.Allow = append(sc.Allow, target)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	rows, err = r.Hub.DB.QueryContext(ctx, `SELECT p.created_by, p.peer_id, p.prn_id, p.name, p.kind, p.disabled,
   p.capabilities, p.quota, p.location, p.presence_state, p.presence_at,
-  p.reachability, p.reach_via, p.last_seen, p.enrolled_at,
+  p.reachability, p.reach_via, p.last_seen, p.enrolled_at, p.sends_per_min, p.threads_per_hour,
   CASE
    WHEN EXISTS (SELECT 1 FROM credentials c WHERE c.subject_id IN (p.peer_id, p.prn_id) AND c.revoked_at IS NULL) THEN 'active'
    WHEN EXISTS (SELECT 1 FROM credentials c WHERE c.subject_id IN (p.peer_id, p.prn_id)) THEN 'revoked'
@@ -81,9 +111,11 @@ func (r *Reader) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 		var row opapi.PeerRow
 		var caps, quota, reach string
 		var state *string
+		var limits opapi.PeerLimits
 		p := &row.Peer
 		if err := rows.Scan(&p.CreatedBy, &p.PeerID, &row.PrincipalID, &p.Name, &p.Kind, &row.Disabled,
-			&caps, &quota, &p.Location, &state, &row.PresenceAt, &reach, &row.ReachVia, &p.LastSeen, &p.EnrolledAt, &row.Credential); err != nil {
+			&caps, &quota, &p.Location, &state, &row.PresenceAt, &reach, &row.ReachVia, &p.LastSeen, &p.EnrolledAt,
+			&limits.SendsPerMin, &limits.ThreadsPerHour, &row.Credential); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("opview: peers: %w", err)
 		}
@@ -103,6 +135,10 @@ func (r *Reader) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 		}
 		row.Routes = append([]opapi.RouteInfo{}, routes[p.PeerID]...)
 		row.Routes = append(row.Routes, routes[row.PrincipalID]...)
+		row.Limits = &limits
+		if sc := scopes[p.PeerID]; sc != nil {
+			row.Scopes = *sc
+		}
 		out = append(out, row)
 	}
 	if err := rows.Close(); err != nil {

@@ -3,8 +3,8 @@
 // Inbox and chat stay separate: every item links to #thread/<id>. Peer text
 // reaches the page only through h() (§14.2).
 import { answerBody, countdown } from './approvals.js';
-import { avatar, confirmButton, h } from './dom.js';
-import { ago, short, when } from './format.js';
+import { avatar, confirmButton, h, idCopy, idText, peerLink } from './dom.js';
+import { ago, when } from './format.js';
 import { deadLetterParts, follow, heldWhy, sections, withOlder } from './inbox-model.js';
 import * as presence from './presence.js';
 import * as subs from './subs.js';
@@ -108,12 +108,12 @@ export function mount(root, ctx) {
     const el = h('div', { class: 'item apr', 'data-id': a.approval_id },
       avatar(a.requester, ctx),
       h('div', { class: 'main' },
-        h('div', { class: 'who' }, h('span', { text: ctx.nameOf(a.requester) }), ' ', h('span', { class: 'muted', text: 'asks' })),
+        h('div', { class: 'who' }, peerLink(a.requester, ctx.nameOf(a.requester)), ' ', h('span', { class: 'muted', text: 'asks' })),
         h('div', { class: 'q', text: question }),
         a.text && a.text !== question ? h('div', { class: 'ex', text: a.text }) : null,
         h('div', { class: 'opts' }, buttons)),
       h('div', { class: 'rs' }, exp,
-        h('a', { class: 'meta tl', href: '#thread/' + a.thread_id, title: a.thread_id, text: a.thread_title || short(a.thread_id) })));
+        a.thread_title ? h('a', { class: 'meta tl', href: '#thread/' + a.thread_id, title: a.thread_id, text: a.thread_title }) : h('a', { class: 'meta tl', href: '#thread/' + a.thread_id }, idText(a.thread_id))));
     cards.set(a.approval_id, { a, el, buttons, exp });
     paintCard(a.approval_id);
     return el;
@@ -158,13 +158,13 @@ export function mount(root, ctx) {
 
   function deadCard(dl, nowMs) {
     const ctl = controls(dl.delivery_id);
-    const parts = deadLetterParts(dl, nowMs).flatMap((p, i) => [i ? ' · ' : '', h('span', { class: p.cls || null, text: p.text })]);
+    const parts = deadLetterParts(dl, nowMs).flatMap((p, i) => [i ? ' · ' : '', p.id ? idCopy(p.id, 'delivery id', p.cls) : h('span', { class: p.cls || null, text: p.text })]);
     return h('div', { class: 'item dl', 'data-id': dl.delivery_id },
       avatar(dl.recipient, ctx),
       h('div', { class: 'main' },
-        h('div', { class: 'who' }, 'To ', h('span', { text: ctx.nameOf(dl.recipient) }), ' ', h('span', { class: 'muted', text: 'from ' + ctx.nameOf(dl.sender) })),
+        h('div', { class: 'who' }, 'To ', peerLink(dl.recipient, ctx.nameOf(dl.recipient)), ' ', h('span', { class: 'muted' }, 'from ', peerLink(dl.sender, ctx.nameOf(dl.sender)))),
         h('div', { class: 'meta', title: dl.delivery_id }, parts),
-        h('a', { class: 'ex', href: '#thread/' + dl.thread_id, title: dl.thread_id, text: dl.excerpt || short(dl.message_id) }),
+        dl.excerpt ? h('a', { class: 'ex', href: '#thread/' + dl.thread_id, title: dl.thread_id, text: dl.excerpt }) : h('a', { class: 'ex', href: '#thread/' + dl.thread_id, title: dl.thread_id }, idText(dl.message_id)),
         dl.last_error && dl.last_error !== dl.excerpt ? h('div', { class: 'why', text: dl.last_error }) : null),
       h('div', { class: 'rs' }, h('div', { class: 'opts' }, ctl.retry, ctl.discard)));
   }
@@ -180,7 +180,7 @@ export function mount(root, ctx) {
     return h('a', { class: 'item' + (d.read_at ? ' read' : ''), href: '#thread/' + d.thread_id, 'data-id': d.delivery_id, title: d.delivery_id },
       avatar(d.sender, ctx),
       h('div', { class: 'main' },
-        h('div', { class: 'who' }, h('span', { text: ctx.nameOf(d.sender) }), ' ', h('span', { class: 'muted', text: 'in' }), ' ', h('span', { class: 'tl', text: d.thread_title || short(d.thread_id) })),
+        h('div', { class: 'who' }, peerLink(d.sender, ctx.nameOf(d.sender), { nested: true }), ' ', h('span', { class: 'muted', text: 'in' }), ' ', d.thread_title ? h('span', { class: 'tl', text: d.thread_title }) : h('span', { class: 'tl' }, idText(d.thread_id))),
         h('div', { class: 'meta', text: meta.join(' · ') }),
         h('div', { class: 'ex', text: d.excerpt })),
       h('div', { class: 'rs' },

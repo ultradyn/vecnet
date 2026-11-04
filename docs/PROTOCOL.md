@@ -319,9 +319,14 @@ countdowns. View types are defined in `internal/opapi`:
   state is `accepted` or `pushed` and `read_at` is set; otherwise it is state.
 - `PeerRow` carries the section 8 directory entry under `peer`, plus
   `principal_id`, `credential` (`active`, `revoked`, `none`), `disabled`,
-  nullable `presence_at` and `reach_via`, and `routes`. Each route carries
-  `route_id`, kind, host, and nullable `verified_at`; host never contains a
-  path, key or secret. Presence and reachability remain distinct (section 8).
+  nullable `presence_at` and `reach_via`, `routes`, `scopes` and `limits`.
+  Each route carries `route_id`, kind, host, and nullable `verified_at`; host
+  never contains a path, key or secret. `scopes` is the peer's own
+  `{allow, deny}` lists of peer, team and group ids, as set by `PUT
+  /v1/admin/peers/{id}/scopes`; both empty means allow all. `limits` is
+  `{sends_per_min, threads_per_hour}`, as set by `PUT
+  /v1/admin/peers/{id}/limits`, and `null` for a directory source. Presence
+  and reachability remain distinct (section 8).
 - Loop-cut `recent` entries carry `at`, `thread_id`, actor and reason;
   `by_reason` maps reason codes to counts. Delivery-health `blocked` entries
   carry recipient, thread/delivery ids, attempt and waiting counts, nullable

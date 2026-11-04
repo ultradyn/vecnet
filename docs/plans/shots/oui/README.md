@@ -122,3 +122,13 @@ Sidebar screens come from `scripts/ui/sidebar.mjs`. You sits above Your Threads;
 - [sb-others-thread.png](sb-others-thread.png) — An other thread opened from the sidebar: its row lit, the not-a-participant note above the reply box.
 - [sb-untitled-pair.png](sb-untitled-pair.png) — An untitled two-peer thread opened from Other Threads: the header reads `grok-reviewer ↔ claw-ops` in the same muted italic as its lit row.
 - [sb-untitled-group.png](sb-untitled-group.png) — An untitled group the operator is in, opened from Your Threads: `grok-reviewer, pag-hark-sleuth +2`, the operator left out.
+
+Peer detail screens come from `scripts/ui/peer.mjs`. A peer name anywhere in the UI (dashboard rows, thread senders and recipients, the thread aside, inbox cards and rows, the sidebar's participants line, subscriptions) opens `#peer/<id>`: everything the operator views already say about that peer, read-only, each section loading and failing on its own. Ids show short (`peer_…X6Z8B`) but keep the whole id in their text, so selecting and copying never yields the `…`; a copy button appears on hover or keyboard focus. The script also checks the copy under plain http (no Clipboard API), an unknown id, and peer links from the thread, its aside, the inbox and the sidebar.
+
+- [pv-dash-hover.png](pv-dash-hover.png) — Dashboard peers: names are links; the hovered row shows its copy button beside the short id.
+- [pv-progress.png](pv-progress.png) — A peer opened from the dashboard while principals, routes and threads are still loading; the rest has drawn.
+- [pv-success.png](pv-success.png) — codex-hark: full id with its copy button, identity, presence with last heartbeat, scopes as peer links, send limits, its principal.
+- [pv-routes.png](pv-routes.png) — grok-triage: its own push route, blocked and failed deliveries, recent threads with linked participants.
+- [pv-disabled.png](pv-disabled.png) — A disabled peer: dimmed name, disabled chip and note, status disabled.
+- [pv-hostile.png](pv-hostile.png) — The hostile peer's name stays literal text with controls and bidi overrides stripped, in the header and its principal.
+- [pv-error.png](pv-error.png) — The routes read fails: that section shows its error while every other section renders.

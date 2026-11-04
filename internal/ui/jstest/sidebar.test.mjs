@@ -92,12 +92,15 @@ test('yourThreads uses the shared row: title, others, count, last active', () =>
   assert.deepEqual({ ...titled, tip: undefined }, {
     id: 'thr_b', href: '#thread/thr_b', title: 'Release plan', untitled: false,
     people: 'codex-hark, grok-reviewer, pag-sleuth +1', count: '7', active: '3m ago', tip: undefined,
+    ids: ['peer_a', 'peer_b', 'peer_c', 'peer_d'],
   });
   // The tip names the operator as you.
   assert.match(titled.tip, /^Release plan\nyou, codex-hark, grok-reviewer, pag-sleuth, claw-ops\n7 messages · last active /);
   assert.equal(oneToOne.title, 'codex-hark');
   assert.equal(oneToOne.untitled, true);
   assert.equal(oneToOne.people, '2 participants');
+  // A stand-in title's count is plain text: no peer links.
+  assert.deepEqual(oneToOne.ids, []);
   assert.equal(oneToOne.active, '2h ago');
 });
 

@@ -3,7 +3,7 @@
 // Presence and reachability stay two signals (PROTOCOL §8). Downloads go
 // through api.blob, so the bearer never enters a URL (§2, §2.7).
 import { budgetBar, fileRows, participantEntry, presenceLabel, reachLabel, THREAD_BUDGET } from './aside-model.js';
-import { h } from './dom.js';
+import { h, idCopy, peerLink } from './dom.js';
 import { when } from './format.js';
 
 // Long enough for the browser to take the object URL into its download.
@@ -45,7 +45,7 @@ export function mountAside(root, ctx) {
       h('span', { class: 'sig r-' + reach, title: 'reachability: ' + reach },
         h('span', { class: 'dot ' + pres, title: 'presence: ' + pres })),
       h('span', { class: 'who' },
-        h('span', { class: 'nm', text: nameOf(id) + (id === me ? ' (you)' : '') }),
+        h('span', { class: 'nm' }, peerLink(id, nameOf(id)), id === me ? ' (you)' : null),
         h('span', { class: 'sub', text: pres + ' · ' + reach })),
       e && e.disabled ? h('span', { class: 'chip bad', text: 'disabled' }) : null,
       h('span', { class: 'k', text: kindOf(id) }));
@@ -126,7 +126,7 @@ export function mountAside(root, ctx) {
       kids.push(h('h3', {}, 'Files', h('span', { class: 'n', text: String(files.length) })),
         files.length ? h('div', { class: 'files' }, files.map(file)) : h('div', { class: 'none', text: 'No files in this thread.' }));
       kids.push(h('h3', { text: 'Thread' }), dl([
-        ['id', h('span', { class: 'mono', text: t.thread_id })],
+        ['id', idCopy(t.thread_id, 'thread id')],
         ['group', t.group || '—'],
         ['budget', budget(d.row)],
         ['history', t.history_access || 'from_join'],

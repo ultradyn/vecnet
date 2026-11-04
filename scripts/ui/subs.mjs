@@ -75,7 +75,8 @@ try {
     assert(/^expired /.test(shown.paused_token), `paused_token expires: ${shown.paused_token}`);
     // Named assertion: dashboard section has no buttons.
     assert(await section.locator('button, [role=button], input, select, textarea').count() === 0, 'dashboard section has buttons');
-    assert(await page.locator('#view button').count() === 0, 'dashboard has buttons');
+    // Copy-id buttons (dom.js copyButton) only read; nothing else may be a button.
+    assert(await page.locator('#view button:not(.cpy)').count() === 0, 'dashboard has buttons');
     // On the full dashboard the section sits below Peers and Threads; bring it into the shot.
     await scrollIntoViewStable(page, 'section.subs');
     await shot('13-subs-initial');

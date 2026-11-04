@@ -10,10 +10,12 @@ import { createActivity } from './activity.js';
 import { createApi } from './api.js';
 import * as compose from './compose.js';
 import * as dash from './dash.js';
-import { h, toast } from './dom.js';
+import { h, peerLink, toast } from './dom.js';
 import { short } from './format.js';
 import * as inbox from './inbox.js';
 import * as matrix from './matrix.js';
+import { peerHref } from './peer-model.js';
+import * as peer from './peer.js';
 import * as presence from './presence.js';
 import { OTHER_PAGE, nextLimit, otherThreads, yourThreads } from './sidebar-model.js';
 import { createStore } from './store.js';
@@ -29,12 +31,15 @@ const SCREENS = {
   inbox: { screen: inbox, aside: inbox.mountAside },
   thread: { screen: thread, aside: threadAside.mountAside },
   dash: { screen: dash },
+  peer: { screen: peer },
   new: { screen: compose },
 };
 
 function parseRoute(hash) {
   if (hash === '#dash') return { name: 'dash', view: 'dash' };
   if (hash === '#new') return { name: 'new', view: 'new' };
+  const p = hash.match(/^#peer\/([A-Za-z0-9_]+)$/);
+  if (p) return { name: 'peer', view: 'peer', id: p[1] };
   const m = hash.match(/^#(thread|matrix)\/([A-Za-z0-9_]+)$/);
   // #matrix is the thread with its matrix open, so both share one mounted view.
   if (m) return { name: m[1], view: 'thread', id: m[2] };
@@ -72,16 +77,17 @@ function renderNav(s, route) {
     page: mineRes && mineRes.get(), summaries: s.threads.get() ? threads : null,
     error: s.threads.error() || (mineRes && mineRes.error()), me: s.me, nameOf: s.nameOf, now,
   });
-  $('threads').replaceChildren(...(yours.rows.length ? yours.rows.map(r => threadLink(r, route)) : [h('div', { class: 'none', text: yours.note })]));
+  $('threads').replaceChildren(...(yours.rows.length ? yours.rows.map(r => threadLink(r, route, s.nameOf)) : [h('div', { class: 'none', text: yours.note })]));
   renderOthers(s, route, threads, now);
 }
 
 // One sidebar thread row, two lines (sidebar-model threadRow). Peer strings
-// go in as text only (dom.h).
-function threadLink(r, route) {
+// go in as text only (dom.h). A titled row's participants are peer links.
+function threadLink(r, route, nameOf) {
   return h('a', { href: r.href, class: r.id === route.id ? 'on' : '', title: r.tip },
     h('span', { class: 'tt' + (r.untitled ? ' un' : ''), text: r.title }), h('span', { class: 'cnt', text: r.count }),
-    h('span', { class: 'pp', text: r.people }), h('span', { class: 'ago', text: r.active }));
+    r.ids && r.ids.length ? h('span', { class: 'pp' }, peopleLinks(r, nameOf)) : h('span', { class: 'pp', text: r.people }),
+    h('span', { class: 'ago', text: r.active }));
 }
 
 // Other Threads: the newest threads the operator is not in.
@@ -91,11 +97,19 @@ function renderOthers(s, route, mine, now) {
     page: res && res.get(), error: res && res.error(), mine, me: s.me,
     nameOf: s.nameOf, now, limit: s.otherLimit,
   });
-  const rows = v.rows.map(r => threadLink(r, route));
+  const rows = v.rows.map(r => threadLink(r, route, s.nameOf));
   const tail = v.more === 'show'
     ? h('button', { type: 'button', class: 'linkbtn more', text: 'Show more', onclick: () => { s.otherLimit = nextLimit(s.otherLimit); res.reload(); } })
     : v.more === 'dash' ? h('a', { href: '#dash', class: 'more', text: 'All threads on the dashboard' }) : null;
   $('others').replaceChildren(...(rows.length ? rows : [h('div', { class: 'none', text: v.note })]), ...(tail ? [tail] : []));
+}
+
+// The participants line inside a sidebar row: each shown name opens that
+// peer (a span, as the row is already a link; see the click handler below).
+function peopleLinks(r, nameOf) {
+  const ids = r.ids || [];
+  const shown = ids.slice(0, 3);
+  return [...shown.flatMap((id, i) => [i ? ', ' : '', peerLink(id, nameOf(id), { nested: true })]), ids.length > shown.length ? ' +' + (ids.length - shown.length) : ''];
 }
 
 function renderConn(store) {
@@ -112,7 +126,7 @@ function renderRoute(s) {
   const key = route.view + (route.id ? '/' + route.id : '');
   if (key !== s.mounted) {
     s.unmount();
-    const entry = SCREENS[route.view], ctx = { ...s.ctx, threadId: route.id };
+    const entry = SCREENS[route.view], ctx = { ...s.ctx, threadId: route.view === 'thread' ? route.id : undefined, peerId: route.view === 'peer' ? route.id : undefined };
     $('view').replaceChildren();
     $('aside').replaceChildren();
     const offView = entry.screen.mount($('view'), ctx);
@@ -243,6 +257,18 @@ $('login-form').addEventListener('submit', e => {
 });
 $('signout').addEventListener('click', () => signOut(''));
 window.addEventListener('hashchange', () => { if (session) renderRoute(session); });
+// A peer named inside another link (an inbox row, a sidebar row) is a span
+// with data-peer: a plain click on it opens the peer instead of the row.
+// Modified clicks fall through to the row's own link.
+document.addEventListener('click', e => {
+  const el = e.target instanceof Element ? e.target.closest('.plink[data-peer]') : null;
+  if (!el || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const href = peerHref(el.dataset.peer);
+  if (!href) return;
+  e.preventDefault();
+  e.stopPropagation();
+  location.hash = href;
+}, true);
 
 // The local read list was replaced by the hub's read state.
 localStorage.removeItem('vecnet.ui.read');

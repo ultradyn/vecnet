@@ -204,3 +204,11 @@ test('a refresh re-reads every loaded page even when the chain still joins, so r
   const row = withOlder(head2, fresh).deliveries.find(d => d.delivery_id === 'dly_060');
   assert.ok(row && row.read_at, 'the second page still shows dly_060 unread');
 });
+
+test('deadLetterParts carries the full delivery id beside its short form', async () => {
+  const { deadLetterParts } = await import('../static/inbox-model.js');
+  const parts = deadLetterParts({ delivery_id: 'dly_01JD3SB4T6W8Y0A2C4E6G8J0M2', class: 'terminal', attempt: 1, last_status: 410, updated_at: '2026-11-02T01:00:00.000Z' }, Date.parse('2026-11-02T02:00:00.000Z'));
+  const last = parts[parts.length - 1];
+  assert.equal(last.id, 'dly_01JD3SB4T6W8Y0A2C4E6G8J0M2');
+  assert.equal(last.text, 'dly_…8J0M2');
+});

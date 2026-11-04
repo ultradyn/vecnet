@@ -59,7 +59,7 @@ try {
     assert(await dash.locator('.empty.error').count() === 0, 'a section failed on a healthy hub');
 
     // Presence and reachability are separate; unknown is never offline (§8).
-    const peerRow = name => sec('peers').locator('tbody tr', { has: page.locator('td:first-child > span:first-child', { hasText: new RegExp('^' + name + '$') }) });
+    const peerRow = name => sec('peers').locator('tbody tr', { has: page.locator('td:first-child > .pn', { hasText: new RegExp('^' + name + '$') }) });
     const dotRow = peerRow('dot-research');
     assert((await dotRow.locator('td').nth(2).textContent()).startsWith('unknown'), 'dot presence not unknown');
     assert((await dotRow.locator('td').nth(3).textContent()).startsWith('reachable'), 'dot not reachable');
