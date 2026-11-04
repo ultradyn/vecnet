@@ -64,6 +64,7 @@ func (a *app) cmdMCP(args []string) error {
 	if v := a.getenv("VECNET_PROFILE"); v != "" && v != profile {
 		return &mcpStartupError{fmt.Sprintf("this session is profile %s; relay for profile %s refuses", v, profile)}
 	}
+	a.ensureRelayPin(profile, c)
 	relay := mcpRelay{a: a, c: c}
 	scanner := bufio.NewScanner(a.stdin)
 	// Match the hub's 256 KiB request cap, with room for the line delimiter.

@@ -215,6 +215,14 @@ func TestMCPRelayAsBound(t *testing.T) {
 func relayFake(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Old hubs can lack identity; TOFU is best effort before MCP POSTs.
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/hub/identity" {
+			if r.Header.Get("Authorization") != "" {
+				t.Error("identity request carried a credential")
+			}
+			http.NotFound(w, r)
+			return
+		}
 		if r.Method != "POST" || r.URL.Path != "/mcp" || r.Header.Get("Content-Type") != "application/json" || r.Header.Get("Accept") != "application/json, text/event-stream" || r.Header.Get("Authorization") != "Bearer relay-test-secret" {
 			t.Errorf("unexpected relay request: %s %s, content-type=%q accept=%q auth matches=%v", r.Method, r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Accept"), r.Header.Get("Authorization") == "Bearer relay-test-secret")
 		}
