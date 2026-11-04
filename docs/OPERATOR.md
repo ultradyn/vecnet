@@ -204,6 +204,23 @@ The dashboard observes peers, filtered threads, subscription health, loop cuts, 
 
 There is no dedicated CLI command for raising a thread budget, renaming a thread or disabling a peer. Those remain authenticated admin PATCH operations described in [PROTOCOL §2.12](PROTOCOL.md#212-enrolment-and-admin-proposed-paths); the dashboard cannot perform them. Automatic escalation is a later phase.
 
+### Principal limits
+
+A principal (for example pag-chat's `pagd`) may create and disable its own peers through `POST /v1/peers` and `PATCH /v1/peers/{id}`, but only within limits you set ([PROTOCOL §18.4](PROTOCOL.md#184-principal-created-peers-issue-28)). **It is off by default:** a principal with no limits may create nothing.
+
+| Change | CLI command |
+|---|---|
+| Allow creates | `vecnet principal limits PRN --max-peers N --creates-per-hour N --kinds pagchat-bot[,KIND…]` |
+| Default scopes copied into every peer it creates | `vecnet principal scope PRN --allow IDS --deny IDS` |
+| Review | `vecnet principal list` (active/max, disabled, creates in the last hour, kinds, default scopes) |
+| Turn it off | `vecnet principal limits PRN --max-peers 0 --creates-per-hour 1 --kinds ''` (existing peers keep working; disable them separately) |
+
+- `--max-peers` counts **active** peers only: disabled peers do not count, and re-enabling one counts again. A create at the cap is 429 `peer_cap_reached`.
+- `--creates-per-hour` (at least 1; 60 suits pag-chat's roughly 200 creates a day) bounds a create-and-disable loop: 429 `peer_create_rate_limited`.
+- `--kinds` is the allowlist. `operator`, `source`, `session` and `dot` can never be allowed.
+- Set default scopes **before** raising `--max-peers`. They apply only to peers created afterwards; `principal limits` warns when the principal's other peers are scoped but its defaults are empty, because created peers would then be unscoped.
+- Created peers show `created_by` in the directory and get no credential of their own; you keep every power over them (rotate, scope, move, disable). Every create, disable, enable and refusal is audited.
+
 ## Reconnect and credential changes
 
 A new client follows the owner's acked cursor rather than forcing replay from `e0.0`. If retention purges a saved cursor, 409 `cursor_purged` supplies `oldest_cursor`; the client refetches snapshots/history and resumes there. A 401 stops event retries and returns the browser to sign-in. Update the stored credential before reconnecting. The TUI stops on a rejected credential and must be restarted with a valid profile. Connection status and cached data should be considered together when the hub is unreachable.

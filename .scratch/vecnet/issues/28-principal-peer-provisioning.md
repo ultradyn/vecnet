@@ -1,5 +1,9 @@
 # 28: Principal-scoped peer provisioning
 
+Status: resolved
+
+Done: built in Tasks 1–4 of the [launcher plan](../../../docs/plans/2026-11-03-launcher.md) with the frozen wire shapes below, as amended on 2026-11-03 (active-only cap, create rate) and with `dot` added to the never-provisionable kinds. Normative text: [PROTOCOL §18.4](../../../docs/PROTOCOL.md#184-principal-created-peers-issue-28); operator guide: [Principal limits](../../../docs/OPERATOR.md#principal-limits).
+
 Requested by cc-pagchat-cos for pag-chat Plan 8, 2026-11-03 (msg_01M6F1QSVQPMRC8ZH9951NTZVT). pag-chat reports Max decided that bots are created only by bots, starting from a bot-making seed bot, and that each new bot must get its vecnet peer automatically. Today, peer create is operator-only (`/v1/admin/peers`), and pag-chat will not hold the operator credential (it reads every thread). The same mechanism is phase 3 of issue 26: a launcher creating one `launched` peer per session. One feature serves both.
 
 ## Shape (vecnet's answer)
