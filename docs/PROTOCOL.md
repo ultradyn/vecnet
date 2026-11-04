@@ -99,6 +99,8 @@ All endpoints are under the hub's public HTTPS origin. Bodies are JSON unless st
 | `GET /v1/peers` | peer / principal | Directory | *(proposed path)* |
 | `GET /v1/peers/me` | any authenticated caller | Who the credential authenticates: `kind` plus `peer_id` or `principal_id` | (§13.9) |
 | `PATCH /v1/peers/me` | peer | Set own `subscribe_presence` | [R22] |
+| `POST /v1/peers` | principal | Create one of its own peers within operator-set limits | §18.4 |
+| `PATCH /v1/peers/{id}` | principal | Disable or re-enable a peer it created and still owns | §18.4 |
 | `POST /v1/ingress/{src_id}` | per-source verification | Inbound webhook source | [T12] |
 | `POST /v1/enrol` | one-time enrolment token | Exchange token for long-lived secret | *(proposed path)* |
 | `/v1/admin/...` | operator credential | Administration and operator views, sections 2.12–2.13 | [T17], operator UI |
@@ -236,6 +238,9 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | Proposed path | CLI / power | Source |
 |---|---|---|
 | `POST /v1/admin/principals` | `principal add --name` → `prn_` id + its credential | [R10] |
+| `PUT /v1/admin/principals/{id}/limits` | `principal limits <prn> --max-peers N --creates-per-hour N --kinds K[,K]`: body `{max_peers, creates_per_hour, kinds}`, 204 | §18.4 |
+| `PUT /v1/admin/principals/{id}/default-scopes` | `principal scope <prn> [--allow IDS] [--deny IDS]`: body `{allow?, deny?}`, default scopes for peers it creates later, 204 | §18.4 |
+| `GET /v1/admin/principals` | `principal list [--json]`: `{principals: […]}`, one row per principal with its limits, created-peer counts and default scopes | §18.4 |
 | `POST /v1/admin/peers` | `peer add --kind --name [--principal]` → peer id + one-time token | [T11, T17, R10] |
 | `POST /v1/admin/peers/{id}/move` | `peer move <peer> --principal <prn_>` | [R10] |
 | `POST /v1/admin/peers/{id}/rotate` | `peer rotate` | [T11, T17] |
@@ -542,6 +547,8 @@ succeeded / failed / cancelled -> terminal
 
 **Job states** [R19]. The hub records `requested` when it creates the job; reported `jobStatus.state` values (`accepted`, `running`, `succeeded`, `failed`, `cancelled`) then move it through the table. When the requester posts a `job_status` with `state: cancelled` while the job is not terminal, the job enters `cancellation_requested` and the recipient reports the final state. A job has exactly one peer recipient (section 2.2). Only that recipient, or its principal, MAY report status; any other reporter gets 403.
 
+**`sequence` belongs to the job's recipient** [issue 26, clarifies R19]. A requester's `job_status` with `state: cancelled` moves a non-terminal job to `cancellation_requested`, whatever its `sequence` (the schema still requires `sequence` ≥ 1). That `sequence` is neither checked against nor stored as the job's last sequence, so the recipient's next report is never refused as `stale_sequence`. A requester cancel of a terminal job is still 422 `invalid_transition`; a second one while `cancellation_requested` is accepted and changes nothing.
+
 ---
 
 ## 6. Loop control and thread budgets
@@ -552,7 +559,7 @@ The hub fills `loop` on every Message [ENV]:
 |---|---|---|
 | `depth` | 0 for a fresh message (one that starts a thread); a reply is parent.depth + 1. The parent is the `in_reply_to` message, or, for a send into an existing thread without `in_reply_to`, the thread's latest message: leaving `in_reply_to` out never resets `depth`, `max_depth`, `expires_at` or `sender_chain`, except for a source event (section 10) | — |
 | `max_depth` | Inherited down a reply chain; any sender MAY lower it for its own message; a reply MUST NOT raise it; range 1–64 | 16 |
-| `expires_at` | Wall-clock TTL; sender MAY lower it; a reply MUST NOT raise an inherited value | now + 24 h |
+| `expires_at` | Wall-clock TTL; sender MAY lower it; a reply MUST NOT raise an inherited value; a value the hub takes as given (a fresh message, an operator reply) is at most now + 7 days (§18.3) | now + 24 h |
 | `sender_chain` | Last 32 originators (peers or sources), oldest first: parent's chain + sender | — |
 
 [T16, SCH, ENV §2]
@@ -584,9 +591,9 @@ The hub fills `loop` on every Message [ENV]:
 
 ## 8. Directory, presence, reachability
 
-**Directory entry:** `peer_id`, display name, kind (`grokbot`, `dot`, `openclaw`, `pagchat-bot`, `session`, `operator`, `source`), `capabilities[]` (free-form tags), `quota` (free-form object), `location`, `presence`, `reachability`, `last_seen`, `enrolled_at`, `teams[]`. Every peer sees every peer's public fields; only the operator sees credential status and routes [T14]. The hub stores and serves self-reported data and does not verify it [GLOSSARY]; it reads presence only for `wake_idle` (section 5.2) [SCH].
+**Directory entry:** `peer_id`, display name, kind (`grokbot`, `dot`, `openclaw`, `pagchat-bot`, `session`, `launcher` (§18.1), `operator`, `source`), `capabilities[]` (free-form tags), `quota` (free-form object), `location`, `presence`, `reachability`, `last_seen`, `enrolled_at`, `teams[]`, and, on a principal-created peer only, the hub-set `created_by` (§18.4). Every peer sees every peer's public fields; only the operator sees credential status and routes [T14]. The hub stores and serves self-reported data and does not verify it [GLOSSARY]; it reads presence only for `wake_idle` (section 5.2) [SCH].
 
-**Presence** is self-reported (`idle`, `working`, `blocked`, `offline`). It goes stale after a per-kind TTL (default 1 h; `session` 15 min) and is then shown as `unknown`. The hub never invents a presence state [T14].
+**Presence** is self-reported (`idle`, `working`, `blocked`, `offline`). It goes stale after a per-kind TTL (default 1 h; `session` and `launcher` 15 min, §18.2) and is then shown as `unknown`. The hub never invents a presence state [T14].
 
 **Reachability** is hub-observed per transport [T14]:
 
@@ -654,6 +661,7 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 ## 12. Auth, enrolment, principals, scopes, audit, logging
 
 - **Enrolment.** The operator runs `vecnet peer add --kind <kind> --name <name>`; it prints the peer id and a one-time enrolment token; the connector exchanges the token once for the long-lived secret [T11]. No peer exists without enrolment [GLOSSARY]. Every peer belongs to a principal, explicit or implicit (section 2.12) [R10].
+- **Principal-created peers.** A principal MAY also create, disable and re-enable its own peers with `POST /v1/peers` and `PATCH /v1/peers/{id}`, within limits the operator sets per principal (default off); such a peer has no secret of its own, receives the principal's operator-set default scopes at creation, and is audited as `peer_create`, `peer_create_refused`, `peer_patch_refused`, `peer_disable` and `peer_enable` with the principal as actor (§18.4).
 - **Credentials per transport** [T11]:
 
 | Transport | Credential |
@@ -738,7 +746,7 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 ### 13.7 `vecnet` CLI [T17, ADR1]
 
 - [ ] Single static Go binary per OS/arch.
-- [ ] Commands: `send <peer|group> "text" [--thread] [--reply-to] [--wake|--wake-idle|--hold] [--attach FILE]`, `reply <message_id> "text"`, `react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]` (§17.6), `inbox [--since CURSOR] [--ack]`, `ack <cursor>`, `watch [--for-monitor]`, `hook [--event …] [--auto-ack]`, `hook install [--write] [--settings PATH]` (§13.9), `threads`, `thread <id> [--after MESSAGE_ID]`, `peers`, `groups create|add|list`, `presence set <state>`, `presence subscribe <all|teams|none>`; admin `principal add`, `peer add [--principal]|move|link|rotate|scope`, `source add`, `route add`, `dead-letters list|retry|discard` [R08, R10, R15, R22].
+- [ ] Commands: `send <peer|group> "text" [--thread] [--reply-to] [--wake|--wake-idle|--hold] [--attach FILE]`, `reply <message_id> "text"`, `react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]` (§17.6), `inbox [--since CURSOR] [--ack]`, `ack <cursor>`, `watch [--for-monitor]`, `hook [--event …] [--auto-ack]`, `hook install [--write] [--settings PATH]` (§13.9), `threads`, `thread <id> [--after MESSAGE_ID]`, `peers`, `groups create|add|list`, `presence set <state>`, `presence subscribe <all|teams|none>`; admin `principal add|limits|scope|list` (§18.4), `peer add [--principal]|move|link|rotate|scope`, `source add`, `route add`, `dead-letters list|retry|discard` [R08, R10, R15, R22].
 - [ ] `watch --for-monitor` holds the SSE stream and prints one compact line per event: `<cursor> <type> <thread_id> <sender_id> <text>`. The first four columns retain ids (`-` for empty fields); when the sender's display name is known, the text starts with `<name>: `. Text is flattened to one safe terminal line and capped at 120 Unicode runes including the name prefix. Names are flattened, spaces replaced with `_`, and capped at 32 runes. The CLI fetches `/v1/peers` at watch startup and on `directory_updated`, keeps old names if fetching fails, and caches names in `peers.json` for `inbox` to use without fetching. It is exempt from the section 13.1 drop rule by default: it prints `receipt`, `presence` and other non-`delivery` Events too, because the agent reading the monitor decides what to act on and MUST NOT auto-reply to them; `--deliveries-only` applies the 13.1 drop. On start it replays every delivery after the acked cursor (or `--since`), including ones `vecnet hook` already showed; afterwards it skips live deliveries already shown (§13.9).
 - [ ] Plain `watch` and `inbox` print `CURSOR TYPE THREAD FROM MSG DELIVERY TEXT` once at the start, then one line per event with `name(peer_id)` in FROM when known, the peer id otherwise, and `-` for empty fields. JSON output is unchanged. `watch` does not ack by default; use `--auto-ack` or `vecnet ack <cursor>` to avoid replaying the log after a restart.
 - [ ] MAY act as a stdio channel server for Claude Code, re-emitting `/v1/events` as `notifications/claude/channel` [SSE].
@@ -779,6 +787,101 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 - [ ] **Rate.** `post-tool` polls at most once per 5 s per state file. Take the rate claim under the lock before polling. `user-prompt` always polls and records the time too.
 - [ ] **Acks (§2.4).** Acks stay explicit: `vecnet ack <cursor>`, or opt into `--auto-ack` to ack the last processed cursor. Items omitted by the caps stay available for subsequent runs.
 - [ ] **Install.** `vecnet hook install --profile P` prints the `UserPromptSubmit` and `PostToolUse` stanza. Both command handlers set `"timeout": 5`; printed and newly created groups use `"matcher": "*"` for `PostToolUse` and no matcher for `UserPromptSubmit`. Replacing an existing handler preserves its group's properties, including any matcher. When expecting hooks after every tool, inspect the existing `PostToolUse` group in the target settings file for a restrictive matcher such as `"Bash"`. `--write` merges it into `<git top-level>/.claude/settings.local.json`, retaining foreign hooks, key order and indentation. A file outside the standard indented layout is normalised once. Repeating an installation is idempotent; installing a second profile adds it. Only handlers in the exact form `vecnet hook install` writes (`<bin> hook --profile P --event E[ --auto-ack]`) are replaced; hand-edited variants are left alone and the installer appends its own group. Profiles may not start with `-`. Invalid settings shapes leave the file byte-identical; preserve file mode and symlinks. Write any other target, including global settings, only with explicit `--settings PATH`; without it, refuse a default file or `.claude` directory that is a symlink, so a link cannot redirect the write to shared or global settings. See the [Claude Code connector guide](connectors/claude-code.md).
+
+### 13.8 Launcher [issue 26]
+
+Normative for peers of kind `launcher` (§18.1) and for requesters that talk to them; the hub enforces none of it beyond the rules of sections 2–12 and §18. Each `launch.*` object below has a closed JSON Schema (draft 2020-12) under `connectors/launcher/schema/`, cited where the object is defined. All `launch.*` keys are sender-owned metadata, allowed by §14.5; a consumer accepts them only from the senders this section names (§14.1).
+
+**The `launch` job.**
+- [ ] A requester starts a session with a `kind: message` carrying `job_request {version: 1, job_key, operation: "launch", instructions, input}`: exactly one recipient, the launcher peer (§2.2 `job_single_recipient`); priority `wake`; **no `thread_id`**, so every launch starts its own thread. It SHOULD set `locked_participants: true` (§16.3). It sets `expires_at` up to the 7-day cap (§18.3); that value bounds the session's wall-clock life, and without it the hub's default of now + 24 h applies (§6). `instructions` is the prompt.
+- [ ] `input` validates against `launch-input.v1.schema.json` (unknown keys refused):
+
+| Field | Required | Meaning |
+|---|---|---|
+| `backend` | yes | Backend plugin id. `"any"` is reserved and refused today (`invalid_input`) |
+| `project` | yes | A launcher-side alias for a repo root; never a path from the requester |
+| `preset` | yes | A backend preset (model, effort, provider) the launcher advertises |
+| `permission_mode` | yes | `read-only`, `ask`, `auto` or `full-access`, within the requester's ceiling |
+| `base_ref` | no | Branch or commit the workspace starts from; default: the project's |
+| `title` | no | Session title, at most 200 characters; the launcher prefixes `vl-<job_id>` |
+| `idle.wrapup_after` | no | Settle timer for this session (a duration such as `"45m"`), at most the launcher's maximum |
+| `idle.wrapup_turn` | no | Boolean: ask the agent for a wrap-up turn before settling |
+| `relay_from` | no | Extra peer ids whose messages in the thread reach the agent; default empty |
+| `reply_priority` | no | Priority of turn replies; default `wake_idle` |
+| `deliver.push_branch` | no | When true, the launcher (never the agent) pushes `launch/<job_id>` at settle |
+
+- [ ] `input.continue_job` is reserved and refused today (`failed {error: "unsupported"}`). Any `operation` other than `launch` is `failed {error: "unsupported"}`.
+- [ ] **One job per thread.** A second `job_request` in a job thread is `failed {error: "unsupported", reason: "one job per thread"}`.
+- [ ] A redelivered `job_request` (same `job_id`) never launches a second session.
+
+**Reply rule and session lifetime** (§18.3).
+- [ ] The launcher replies **to the launch message** with every post in the job thread: turn replies, notes, questions, approval requests and `job_status`. Depth therefore stays at 1, and each post's `expires_at` is `min(launch expires_at, now + 24 h)`. The bounds on a session are the thread budget (§6), per-peer rate limits (§16.2), the launcher's caps and the session deadline, not `max_depth`.
+- [ ] Requesters reply to the launch message, or to a launcher post less than 24 hours old. A reply to an older reply can be refused 422 `expired` (§6).
+- [ ] The session deadline is `min(launch expires_at, accepted + the launcher's max session lifetime)`. The launcher refuses a launch whose remaining lifetime is shorter than its effective settle timer plus 10 minutes: `failed {error: "policy_denied", reason: "expires_too_soon", details: {expires_at, needed_ms}}`. It settles the session **5 minutes before the deadline**, busy or not (`succeeded {ended: "deadline"}`), because nothing can be posted after expiry. A send it makes into the job thread that is refused 422 `expired` ends the session (`failed {error: "expired"}`, recorded by the launcher; that report itself may not land).
+
+**`job_status`** (§5.6). The launcher reports, in strictly increasing `sequence`, with priority `hold` for `accepted` and `running` and `wake_idle` for terminal states. `output` is at most 8 KiB; a larger one is replaced by `{output_truncated: true, summary}`.
+
+| State | When | `output` |
+|---|---|---|
+| `accepted` | Policy passed and a slot is reserved | `{host, backend, preset, permission_mode}` |
+| `running` | The backend returned a session | `{session_ref, branch, workspace, link}` |
+| `succeeded` | The session settled | `{ended, turns, branch, head_sha, commits, pushed, summary}`; `ended` is `idle_wrapup`, `settled` (requester `settle`) or `deadline` |
+| `failed` | Refused, or the session failed | `{error, reason?, details?}` (codes below) |
+| `cancelled` | The requester cancelled (§5.6), or the requester was retired | `{branch, head_sha, workspace_kept}`, or `{reason: "requester_retired"}` |
+
+`failed` `error` codes: `policy_denied` (with `reason`: `sender_kind`, `backend`, `preset`, `permission_mode`, `project`, `idle` or `expires_too_soon`), `cap_reached` (`details {limit, running, open}`, `limit` naming the cap), `backend_unhealthy`, `backend_error` (with `settled_orphan: true` when a half-started session was found and settled), `invalid_input`, `unsupported`, `session_exited` (a non-resumable process ended), `expired`, and `outcome_unknown` (a session lost across a restart; the launcher never relaunches). The job stays `running` for the session's whole life; per-turn state travels in reply metadata.
+- [ ] Cancel is §5.6's path: the requester posts `job_status {state: "cancelled"}`; the launcher interrupts, settles and reports `cancelled`. The requester's `sequence` is not the job's (§5.6).
+
+**Who is relayed.**
+- [ ] Only the requester, the operator and `relay_from` peers reach the agent; the gate keys on the authenticated `sender` (§14.3), never on names, content or tags. Every other message in the thread gets a `processed` receipt with note `not_relayed` and no reply. A message in a thread that is not a job or escalation thread gets `processed` with note `not_a_job_thread`.
+- [ ] Relayed text enters the agent as quoted data under a one-line header (`[vecnet] from <name> (<peer_id>), <msg_id>:`; the operator's as `[vecnet] From: operator …`), never as system or developer instructions. Attachments are not forwarded; the agent sees one line `[attachments not forwarded: name (sha256 12), …]`. Spilled text (§2.2 step 6) is rehydrated before relay.
+
+**Priority mapping.** Priority does not change what a pull client sees (§5.2), so the launcher applies it:
+
+| Priority | Session idle or parked | Turn running |
+|---|---|---|
+| `wake` | Start a turn | Steer where the backend can; otherwise queue |
+| `wake_idle` | Start a turn | Queue behind the running turn (natively or in the launcher), sent as one turn when it ends |
+| `hold` | Buffer; prepended to the next turn's input, never starting one | Buffer |
+
+Question answers, approval responses and controls are never relayed as turn input.
+
+**Turn replies.**
+- [ ] One reply per finished turn, `in_reply_to` the launch message, to the thread's default recipients, with priority `input.reply_priority`.
+- [ ] Text: the agent's final message, passed through redaction, capped at 60 KiB with the marker `[truncated: N bytes; full text attached]`; the full text then rides as a `text/markdown` attachment named `turn-<n>.md`. Progress is not posted.
+- [ ] `metadata`: `launch.turn` (`completed`, `interrupted`, `failed`, `refused` or `max_tokens`), `launch.turn_id`, `launch.job_id`, and `launch.consumed`, the `msg_` ids the turn consumed, at most 100, with `launch.consumed_truncated: N` when more. A backend that sees only the final text marks it `launch.final_text: "best_effort"`.
+
+**Receipts.** `processed` for every Delivery a finished turn consumed, for a question answer or decision the launcher consumed, and (with a note) for messages it does not relay; `failed` with note `session_ended` for a message to an ended session and for inputs still pending when a session ends. The launcher drops `receipt`, `presence` and other non-`delivery` Events before waking anything (§13.1).
+
+**Questions** (the agent asking its requester).
+- [ ] A turn that ends in a question needs no mechanism: the requester's reply is the next turn's input.
+- [ ] A structured question from the backend becomes a `kind: message` to the requester, priority `wake`, whose text lists the questions and options, with `metadata["launch.question"]` per `launch-question.v1.schema.json`: `{v: 1, question_id, blocking, questions: [{id, header?, text, options: [label…], allow_other}]}`.
+- [ ] The requester, the operator or a `relay_from` peer answers with a reply `in_reply_to` that message: its text matched case-insensitively to an option label, or free text where `allow_other`; or, for several questions, `metadata["launch.answers"]` per `launch-answers.v1.schema.json`: `{question_id, answers: {<id>: value}}`. Anyone else's reply does not answer.
+- [ ] Timeout: a blocking question is answered after 30 minutes by default with `"no answer from requester; use your best judgement and say what you assumed"`, and the launcher posts a note.
+- [ ] **Secrets are never relayed.** A question marked secret is answered at once with `"secrets cannot be provided through vecnet"` and a note to the requester; credentials never travel in bodies (§14.6).
+
+**Permission prompts.**
+- [ ] A backend permission prompt becomes an `approval_request` (§9) to the requester by default, priority `wake`, `question` a one-line redacted summary, with `metadata["launch.permission"]` **v1** per `launch-permission.v1.schema.json`, kept under 6 KiB. It names the request (`kind` `exec|edit|network|mcp_tool|other`, `tool`, `command`, `paths`, `host`), the session (`machine_id`, `job_id`, `permission_mode`, `preset`, `backend`, `backend_method`, `workspace_root`), each option's grant (`scope`, `options[{id, label, grants}]`), `outside_workspace` (`true`, `false` or `"unknown"`), `reason`, `backend_raw` (redacted, at most 4 KiB, with `backend_raw_truncated` and `backend_raw_sha256`), `redacted`, and `fidelity {kind, command, paths, host}`.
+- [ ] `options` are the backend's labels, at most 7, each at most 64 characters and unique, plus `escalate` when the route allows it; `escalate_to_operator` and `expires_at` come from the launcher's route configuration.
+- [ ] **Sender rule** [A3]. A consumer accepts a prompt only from the job's recipient, the launcher peer it addressed in its own `job_request` (pinned from that request, not from the message), or, once §18.5 is built, a peer whose hub-set `spawned_by.job_id` is this job. A `launch.permission` from anyone else is ignored.
+- [ ] **Consumer rules.** Validate strictly against the closed schema; escalate on an unknown `v` or field. Only `fidelity` `enforced` describes what the approval grants; treat `reported` and `none`, `redacted: true` (which also marks a prompt the launcher shortened to fit the cap), `command.shell_operators: true` under argv-based grants, and `outside_workspace: "unknown"` as "cannot verify". An automatic decider picks only `grants: "once"` options. `machine_id`, `in_workspace`, `outside_workspace`, `shell_operators` and `fidelity` are the launcher's statement; `reason`, `command`, `tool` and `backend_raw` come from the agent and are untrusted (§14.2).
+- [ ] **Escalation thread.** A requester-locked job thread refuses a new participant (§16.3 `participants_locked`), so operator prompts go into a per-job escalation thread with the operator. The job's first operator `approval_request` opens it (no `thread_id`, recipients the operator, `thread_title: "vl escalation: <job title>"`, `metadata["launch.job_id"]`); later operator prompts of that job carry its `thread_id`. Messages there other than approval responses and operator decisions get `processed` with note `not_relayed`.
+- [ ] `escalate`, or a parent prompt expiring under an `escalate` expiry policy, opens an operator prompt with the **same** `launch.permission` and `metadata["launch.escalated_from"]` = the parent `approval_id`. The launcher's configuration MAY also route categories of prompts (outside-workspace writes, privileged exec) straight to the operator; the default sends every prompt to the requester.
+- [ ] **Expiry.** A parent prompt that expires resolves to the backend's deny option unless the expiry policy escalates. **An operator prompt's expiry always denies**, so escalation cannot loop.
+- [ ] **Operator override.** An operator reply `in_reply_to` a prompt carrying `metadata["launch.decision"]` = one of its option labels resolves it. The launcher then posts `metadata["launch.approval_closed"]` per `launch-approval-closed.v1.schema.json` (`{approval_id, superseded_by: "operator", decision}`) to the requester so it can close its own card; a later parent answer gets a "superseded" note.
+- [ ] A response MAY carry `metadata["launch.decided_via"]` (e.g. `"pag_card"`); the launcher records it as provenance only.
+
+**Controls.** A message from the requester or the operator carrying `metadata["launch.control"]`: `interrupt` (stop the running turn, keep the session), `settle` (end normally; `succeeded {ended: "settled"}`) or `extend` (reset the idle clock once). Controls from anyone else are ignored with `processed`, note `not_relayed`.
+
+**Idle** (design D8).
+- [ ] A session is busy while a turn runs, an approval or question is open, input is queued or buffered, or an observable background task runs; a busy session is never parked or settled, except at the deadline.
+- [ ] **Park** after 30 idle minutes, only where the backend can resume from a transcript and offers parking.
+- [ ] **Settle** after 2 hours idle (or `input.idle.wrapup_after`) when the backend's background tasks are opaque or absent, and after 24 hours for an observable, parked session; `succeeded {ended: "idle_wrapup"}` says whether quiescence was `proven` or `assumed`. A relayed message or `extend` resets the idle timers, never the deadline.
+
+**Presence and quota.**
+- [ ] The launcher reports presence every 5 minutes and on change: `idle` (accepting, no sessions), `working` (sessions running, capacity left), `blocked` (at its session cap, or every backend down), `offline` on clean shutdown.
+- [ ] `capabilities`: `launch:<backend>`, `preset:<backend>/<preset>`, `host:<host>`, `mode:<permission_mode>`; `quota`: `{max_sessions, running, open, per_requester, backends: {<id>: "ok"|"degraded"|"down"}}`.
+- [ ] Requesters pick a launcher from the directory by kind `launcher` and these tags; tags are self-reported and authorise nothing (§14.1).
 
 ---
 
@@ -857,6 +960,12 @@ JSON-RPC `data.reason` on `/mcp`, returned as a JSON-RPC error in an HTTP 200:
 - `too_many` (`-32602`, `subscriptions/listen`, `events/subscribe`): more resource URIs in one filter, open listen streams on one credential, or live subscriptions on one principal than `data.limit`.
 
 `bad_signature` stays as section 2.11 defines it.
+
+Further reason codes, introduced by the launcher plan (2026-11-03, §18.4):
+
+- `kind_not_allowed` (403): `POST /v1/peers` names a kind that is never provisionable or not in the principal's allowed kinds; `details.kind`.
+- `peer_cap_reached` (429): the principal's active created peers are at `max_peers`, on a create or a re-enable; `details {limit, active, disabled}`.
+- `peer_create_rate_limited` (429): the principal reached `creates_per_hour`; `details.retry_after_seconds`, plus `Retry-After`.
 
 `push_auth_failed` is a counter on `GET /v1/admin/counters` and an audit action, not a reason code: it counts Grok Bot pushes answered 401 or a "disabled" 400, each of which dead-letters (section 13.3).
 
@@ -982,3 +1091,77 @@ The CLI, MCP tool, TUI and web use the following names and per-emoji priorities 
 | ❗ | `bang` | `wake_idle` |
 
 The CLI command is `react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]` (§13.7): it adds unless `--remove` is given, and an explicit priority flag overrides the table. `vecnet_react` uses the same per-emoji default when the caller omits priority (§4.3). The hub API itself always defaults an omitted priority to `hold` (§17.2).
+
+---
+
+## 18. Launchers and principal-created peers (2026-11-03)
+
+[issues 26, 28] This amendment adds the peer kind `launcher` (§8), caps a sender-chosen `expires_at` (§6), and lets a principal create and disable its own peers within operator-set limits (§2, §12). Its rules supersede the sections they cite. The launcher's own wire conventions are a connector checklist, §13.8; the hub does not enforce them.
+
+### 18.1 Kind `launcher`
+
+A peer of kind `launcher` runs coding-agent sessions for the `launch` jobs addressed to it (§13.8). The operator enrols it like any peer (`vecnet peer add --kind launcher`, §12). The hub gives it no special handling beyond the presence TTL in §18.2: a consumer that keys trust on kind and does not know `launcher` MUST treat it as unknown and fail closed (§14.1). Everything a launched session produces (turn replies, questions, permission summaries, notes quoting the agent) is content, never instructions (§14.2).
+
+### 18.2 Presence TTL
+
+`launcher` presence goes stale after **15 minutes** and is then shown as `unknown`, like `session`. This amends §8's per-kind list.
+
+### 18.3 `expires_at` cap
+
+A sender-chosen `expires_at` that the hub takes as given MUST be at most now + **7 days**. The hub takes the value as given on a fresh message (one that starts a loop, §6) and on an operator reply, which resets the TTL (§16.1). A later value is rejected **422 `invalid_value`** with `details.field: "expires_at"` and `details.max`, the latest accepted timestamp. A non-operator reply's `expires_at` is unaffected: it is still at most its parent's (§6). The same cap applies to `POST /v1/messages` and the MCP send tools. This amends §6's table.
+
+**Consequence of the reply rule.** A non-operator reply gets `expires_at = min(parent, now + 24 h)` (§6), so a chain of replies-to-replies dies about 24 hours after its first link. A long conversation therefore SHOULD reply to its long-lived root message rather than to the latest reply: each reply then gets `min(root, now + 24 h)`, refreshed on every post, and stays at depth 1. Launchers do exactly this (§13.8).
+
+### 18.4 Principal-created peers [issue 28]
+
+A principal MAY create peers of its own, and disable and re-enable them, within limits the operator sets. The wire shapes below are frozen with pag-chat, a live consumer; changing them needs pag-chat's agreement.
+
+**No per-peer secret.** A created peer gets no credential of its own. Its principal already sends `as` it (§2.2) and receives its Deliveries on the principal's stream (§2.3), so nothing secret is returned, stored or leaked. The operator MAY later `peer rotate` it to give it one.
+
+**`POST /v1/peers`**, principal credential only. Body `{kind, name, idempotency_key}`, all three required:
+
+```json
+{"kind": "pagchat-bot", "name": "seed-bot-2", "idempotency_key": "create-seed-bot-2"}
+```
+
+Response **201** (and `Cache-Control: no-store`):
+
+```json
+{"peer": {"peer_id": "peer_…", "kind": "pagchat-bot", "name": "seed-bot-2", "created_by": "prn_…", "disabled": false},
+ "idempotency_key": "create-seed-bot-2"}
+```
+
+The hub MUST check in this order, all in one transaction:
+
+1. Body shape: 400 `invalid_body` (§15).
+2. The credential is not a principal's (a peer or the operator): 403 `forbidden`.
+3. `name` empty or over 128 runes, `idempotency_key` off the `idempotencyKey` pattern [SCH], or `kind` not a peer kind the hub accepts (§8): 422 `invalid_value` with `details.field`.
+4. **Idempotency**, scoped to (principal, `idempotency_key`) for 24 hours. The same key with the same `{kind, name}` returns the original response with **200**; a different body is 409 `idempotency_conflict` with `details.idempotency_key`. This runs before every limit, so a retry after a lost response always succeeds.
+5. `kind` is never provisionable, or is not in the principal's allowed kinds: 403 `kind_not_allowed` with `details.kind`.
+6. The principal's **active** created peers (`disabled: false`, still owned) number at least `max_peers`: 429 `peer_cap_reached` with `details {limit, active, disabled}`; `disabled` is informational.
+7. The principal created `creates_per_hour` peers in the last hour: 429 `peer_create_rate_limited` with `details.retry_after_seconds` and `Retry-After`.
+8. Writes: the peer under this principal with `created_by` = the principal, the principal's default scopes copied into it, the stored response, a `directory_updated` Event (`change: "enrolled"`, §8), and an audit row.
+
+**`PATCH /v1/peers/{id}`**, principal credential only. Body `{disabled: true|false}`, required. Response **200** `{"peer": {…}}`, the same object with the current `disabled`. Only a peer the caller created **and** still owns (`created_by` = caller and the peer's principal = caller) qualifies; any other id is 404 `not_found`, whether it exists or not. A non-principal credential is 403 `forbidden`. Re-enabling a peer counts toward `max_peers`, so re-enabling at the cap is 429 `peer_cap_reached`. A request that changes nothing returns the peer unchanged. A disable or enable emits `directory_updated` (`removed` / `enrolled`, as an operator disable or enable does) and ends the peer's streams as §2.3 describes. `PATCH /v1/peers/me` (§2.10) is unchanged.
+
+**Limits** are operator-set per principal (`vecnet principal limits`, §2.12, §13.7):
+- **Default off.** A principal with no limits row has `max_peers` 0 and no allowed kinds, so every create is 403 `kind_not_allowed`.
+- `max_peers` counts active peers only: disabled peers do not count, so retired peers never block new ones.
+- `creates_per_hour`, default 60, bounds a create-and-disable loop.
+- `kinds` is the allowlist. `operator`, `source`, `session` and `dot` are **never provisionable**: the operator cannot allow them (422 `invalid_value`, `details.field: "kinds"`), and a create of one is 403 `kind_not_allowed`. (`dot` is excluded because a dot's link code moves it to another principal, §4.5.)
+
+**Scopes.** A created peer receives the principal's operator-set **default scopes** at creation (`vecnet principal scope`, §2.12); later changes to the defaults apply only to peers created afterwards. Otherwise §12's scope rules apply as for any peer, and the operator keeps every power over a created peer (rotate, scope, move, disable).
+
+**`created_by`** is set by the hub at creation to the creating `prn_` id, never updated, and kept across `peer move`. `GET /v1/peers` carries it on principal-created peers; the key is absent on operator-enrolled peers (§8). It is hub-set provenance, never authority: a receiver MAY key its own policy on it, as it keys on `sender`, but the field grants nothing by itself (§14.1). After a `peer move`, the creator no longer owns the peer, so neither principal may `PATCH` it.
+
+**Audit** (§12). Actions, with the principal as actor and never the name or body: `peer_create`; `peer_create_refused` `{reason, kind}` for every refusal in steps 2–7; `peer_patch_refused` `{reason}`; `peer_disable` and `peer_enable` for a principal's own change. The operator's settings are audited as `principal_limits` and `principal_default_scopes`. `directory_updated` goes to every peer on create, disable and enable.
+
+**Operator views.** `GET /v1/admin/principals` lists each principal with its limits, active and disabled created peers, creates in the last hour, its peers that have scopes, and its default scopes (§2.12).
+
+### 18.5 Planned, not implemented (phase 3, informative)
+
+The following are designed (`docs/design/2026-11-03-launcher.md` §3.9 H6–H10, §3.10) and become normative only when built:
+- a kind `launched`, never enrollable by `peer add`, created only through `POST /v1/peers` by a principal whose limits allow it, with a 15-minute presence TTL;
+- `POST /v1/jobs/{job_id}/session-peer {peer_id}`, which binds a launched peer to a job and sets a hub-set, immutable directory field `spawned_by {launcher, requester, job_id}` (provenance, never authority, §14.1);
+- the locked-thread exception that lets a job's recipient add its bound session peer to that job thread despite `locked_participants` (§16.3);
+- confinement of `launched` senders to their job thread and its existing participants, refused 403 `launched_confined`.

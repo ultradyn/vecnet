@@ -3,14 +3,17 @@ package hub_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
+	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -417,4 +420,114 @@ func TestPlainSendAfterReactionContinuesLoop(t *testing.T) {
 	if l.Depth != 1 || !chainEq(l.SenderChain, []string{f.a, f.a}) {
 		t.Fatalf("plain loop=%+v; reaction became implicit parent", l)
 	}
+}
+
+func TestFreshExpiresAtCappedAt7Days(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	b, _ := env.NewPeer("session", "B")
+	max := envelope.FormatTime(env.Now.Now().Add(7 * 24 * time.Hour))
+	fresh := req("expiry-at-cap", b)
+	fresh["expires_at"] = max
+	sent := mustSend(t, env, aSec, fresh)
+	if got := storedLoop(t, env, sent.MessageID).ExpiresAt; got != max {
+		t.Fatalf("expires_at at cap = %s, want %s", got, max)
+	}
+	fresh = req("expiry-over-cap", b)
+	fresh["expires_at"] = envelope.FormatTime(env.Now.Now().Add(7*24*time.Hour + time.Second))
+	_, details := mustReject(t, env, aSec, fresh, http.StatusUnprocessableEntity, "invalid_value")
+	if details["field"] != "expires_at" || details["max"] != max {
+		t.Fatalf("over-cap details = %v, want field expires_at max %s", details, max)
+	}
+}
+
+func TestOperatorReplyExpiresAtCapped(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	b, _ := env.NewPeer("session", "B")
+	root := mustSend(t, env, aSec, req("operator-expiry-root", b))
+	reply := replyReq("operator-expiry-over", root.ThreadID, root.MessageID)
+	reply["expires_at"] = envelope.FormatTime(env.Now.Now().Add(8 * 24 * time.Hour))
+	_, details := mustReject(t, env, env.OperatorSecret, reply, http.StatusUnprocessableEntity, "invalid_value")
+	max := envelope.FormatTime(env.Now.Now().Add(7 * 24 * time.Hour))
+	if details["field"] != "expires_at" || details["max"] != max {
+		t.Fatalf("operator over-cap details = %v, want field expires_at max %s", details, max)
+	}
+	reply = replyReq("operator-expiry-within", root.ThreadID, root.MessageID)
+	asked := envelope.FormatTime(env.Now.Now().Add(6 * 24 * time.Hour))
+	reply["expires_at"] = asked
+	sent := mustSend(t, env, env.OperatorSecret, reply)
+	if got := storedLoop(t, env, sent.MessageID).ExpiresAt; got != asked {
+		t.Fatalf("operator expires_at = %s, want asked value %s", got, asked)
+	}
+}
+
+func TestReplyExpiresAtNeverRaisedStill(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	b, bSec := env.NewPeer("session", "B")
+	root := mustSend(t, env, aSec, req("reply-expiry-root", b))
+	parentExpiry := storedLoop(t, env, root.MessageID).ExpiresAt
+	reply := replyReq("reply-expiry-over", root.ThreadID, root.MessageID)
+	reply["expires_at"] = envelope.FormatTime(env.Now.Now().Add(30 * 24 * time.Hour))
+	sent := mustSend(t, env, bSec, reply)
+	if got := storedLoop(t, env, sent.MessageID).ExpiresAt; got != parentExpiry {
+		t.Fatalf("reply expires_at = %s, want parent's %s", got, parentExpiry)
+	}
+}
+
+func TestMCPSendHonoursExpiryCap(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	_, aSec := env.NewPeer("session", "A")
+	b, _ := env.NewPeer("session", "B")
+	caller, err := env.Hub.Auth.Resolve(ctx, aSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := req("mcp-expiry-over", b)
+	body["expires_at"] = envelope.FormatTime(env.Now.Now().Add(7*24*time.Hour + time.Second))
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, replayed, err := env.Hub.Send(ctx, caller, raw, "mcp_tool")
+	var api *hub.APIError
+	if !errors.As(err, &api) || api.Status != http.StatusUnprocessableEntity || api.Code != "invalid_value" {
+		t.Fatalf("MCP Send = %v, want 422 invalid_value", err)
+	}
+	if response != nil || replayed {
+		t.Fatalf("rejected MCP Send returned response %+v replayed %v", response, replayed)
+	}
+	_, httpDetails := mustReject(t, env, aSec, body, http.StatusUnprocessableEntity, "invalid_value")
+	max := envelope.FormatTime(env.Now.Now().Add(7 * 24 * time.Hour))
+	if api.Details["field"] != "expires_at" || api.Details["max"] != max || !reflect.DeepEqual(api.Details, httpDetails) {
+		t.Fatalf("MCP details = %v, HTTP details = %v, want field expires_at max %s", api.Details, httpDetails, max)
+	}
+}
+
+func TestRootRepliesOutliveDefaultTTL(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	// Use the existing session kind so this guard exercises the launcher's
+	// reply pattern before the launcher kind itself is implemented.
+	launcher, launcherSec := env.NewPeer("session", "L")
+	start := env.Now.Now()
+	launch := jobReq("root-launch", "launch", "run the job", launcher)
+	launch["expires_at"] = envelope.FormatTime(start.Add(3 * 24 * time.Hour))
+	root := mustSend(t, env, aSec, launch)
+
+	env.Now.Advance(time.Hour)
+	first := mustSend(t, env, launcherSec, replyReq("root-first-reply", root.ThreadID, root.MessageID))
+	if loop := storedLoop(t, env, first.MessageID); loop.ExpiresAt != envelope.FormatTime(start.Add(25*time.Hour)) || loop.Depth != 1 {
+		t.Fatalf("first launcher reply loop = %+v, want expiry start+25h depth 1", loop)
+	}
+	env.Now.Advance(24 * time.Hour) // 25h since launch; the first reply expires now
+	for _, sender := range []struct{ key, secret string }{{"root-launcher-late", launcherSec}, {"root-requester-late", aSec}} {
+		sent := mustSend(t, env, sender.secret, replyReq(sender.key, root.ThreadID, root.MessageID))
+		if loop := storedLoop(t, env, sent.MessageID); loop.ExpiresAt != envelope.FormatTime(start.Add(49*time.Hour)) || loop.Depth != 1 {
+			t.Fatalf("%s loop = %+v, want min(root, now+24h) = start+49h depth 1", sender.key, loop)
+		}
+	}
+	mustReject(t, env, aSec, replyReq("root-expired-child", root.ThreadID, first.MessageID), http.StatusUnprocessableEntity, "expired")
 }

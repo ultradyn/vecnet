@@ -29,6 +29,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/opapi"
 )
 
 // Exit codes.
@@ -71,6 +72,9 @@ messaging:
 
 admin (operator credential):
   principal add --name N
+  principal limits <prn> --max-peers N --creates-per-hour N --kinds K[,K]
+  principal scope <prn> [--allow IDS] [--deny IDS]
+  principal list
   peer add --kind K --name N [--principal PRN]
   peer move <peer> --principal PRN
   peer link <peer>                                    prints a dot's 8-character link code
@@ -1184,18 +1188,117 @@ func (a *app) emitObject(out map[string]any, keys ...string) error {
 }
 
 func (a *app) cmdPrincipal(args []string) error {
-	o, err := parseFlags("principal", args, map[string]flagKind{"name": strFlag})
+	const usage = "usage: vecnet principal add --name N | principal limits <prn> --max-peers N --creates-per-hour N --kinds K[,K] | principal scope <prn> [--allow IDS] [--deny IDS] | principal list"
+	specs := map[string]map[string]flagKind{
+		"add":    {"name": strFlag},
+		"limits": {"max-peers": strFlag, "creates-per-hour": strFlag, "kinds": strFlag},
+		"scope":  {"allow": multiFlag, "deny": multiFlag},
+		"list":   {},
+	}
+	// Parse the complete slice so flag values cannot be mistaken for a
+	// subcommand, and flags may appear before or after any positional.
+	allFlags := map[string]flagKind{}
+	for _, spec := range specs {
+		for name, kind := range spec {
+			allFlags[name] = kind
+		}
+	}
+	o, err := parseFlags("principal", args, allFlags)
 	if err != nil {
 		return err
 	}
-	if len(o.pos) != 1 || o.pos[0] != "add" || o.str("name") == "" {
-		return usageErr("usage: vecnet principal add --name N")
+	if len(o.pos) == 0 {
+		return usageErr(usage)
 	}
-	var out map[string]any
-	if err := a.call(http.MethodPost, "/v1/admin/principals", map[string]string{"name": o.str("name")}, &out); err != nil {
-		return err
+	sub := o.pos[0]
+	spec, ok := specs[sub]
+	if !ok {
+		return usageErr(usage)
 	}
-	return a.emitObject(out, "principal_id", "secret")
+	for name := range o.vals {
+		if _, ok := spec[name]; !ok {
+			return usageErr(fmt.Sprintf("principal %s: unknown flag --%s", sub, name))
+		}
+	}
+	o.pos = o.pos[1:]
+	switch sub {
+	case "add":
+		if len(o.pos) != 0 || o.str("name") == "" {
+			return usageErr(usage)
+		}
+		var out map[string]any
+		if err := a.call(http.MethodPost, "/v1/admin/principals", map[string]string{"name": o.str("name")}, &out); err != nil {
+			return err
+		}
+		return a.emitObject(out, "principal_id", "secret")
+	case "limits":
+		max, errMax := strconv.Atoi(o.str("max-peers"))
+		rate, errRate := strconv.Atoi(o.str("creates-per-hour"))
+		if len(o.pos) != 1 || errMax != nil || errRate != nil || !o.has("kinds") {
+			return usageErr(usage)
+		}
+		id := o.pos[0]
+		body := map[string]any{"max_peers": max, "creates_per_hour": rate, "kinds": o.list("kinds")}
+		if err := a.call(http.MethodPut, "/v1/admin/principals/"+pathEscape(id)+"/limits", body, nil); err != nil {
+			return err
+		}
+		// Read after the update so the warning reflects the operator's current policy.
+		if max > 0 {
+			rows, err := a.principalRows()
+			if err != nil {
+				return err
+			}
+			for _, p := range rows {
+				if p.PrincipalID == id && p.ScopedPeers > 0 && len(p.DefaultAllow) == 0 && len(p.DefaultDeny) == 0 {
+					fmt.Fprintf(a.stderr, "warning: %s has scoped peers but no default scopes; peers it creates will be unscoped (vecnet principal scope)\n", id)
+				}
+			}
+		}
+		return a.ok("limits set for " + id)
+	case "scope":
+		if len(o.pos) != 1 {
+			return usageErr(usage)
+		}
+		body := map[string][]string{"allow": o.list("allow"), "deny": o.list("deny")}
+		if err := a.call(http.MethodPut, "/v1/admin/principals/"+pathEscape(o.pos[0])+"/default-scopes", body, nil); err != nil {
+			return err
+		}
+		return a.ok("scopes set for " + o.pos[0])
+	case "list":
+		if len(o.pos) != 0 {
+			return usageErr(usage)
+		}
+		rows, err := a.principalRows()
+		if err != nil {
+			return err
+		}
+		if a.json {
+			return a.emitValue(rows)
+		}
+		for _, p := range rows {
+			scopes := "none"
+			if len(p.DefaultAllow)+len(p.DefaultDeny) > 0 {
+				scopes = fmt.Sprintf("allow %d deny %d", len(p.DefaultAllow), len(p.DefaultDeny))
+			}
+			fmt.Fprintf(a.stdout, "%s  %s  active %d/%d  disabled %d  creates/h %d/%d  kinds %s  default-scopes %s\n",
+				p.PrincipalID, flatten(p.Name), p.Active, p.MaxPeers, p.Disabled, p.CreatesLastHour, p.CreatesPerHour, strings.Join(p.Kinds, ","), scopes)
+		}
+		return nil
+	}
+	return usageErr(usage)
+}
+
+func (a *app) principalRows() ([]opapi.PrincipalRow, error) {
+	var body struct {
+		Principals []opapi.PrincipalRow `json:"principals"`
+	}
+	if err := a.call(http.MethodGet, "/v1/admin/principals", nil, &body); err != nil {
+		return nil, err
+	}
+	if body.Principals == nil {
+		body.Principals = []opapi.PrincipalRow{}
+	}
+	return body.Principals, nil
 }
 
 func (a *app) cmdPeer(args []string) error {

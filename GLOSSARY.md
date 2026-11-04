@@ -92,6 +92,15 @@ An external system (GitHub first) that posts to a hub ingress URL; its payloads 
 ## Job
 A unit of requested work carried on a message, identified within its thread by a job key, with progress reported by job status messages whose sequence strictly increases.
 
+## Launcher
+A peer of kind `launcher`, one per host, that runs coding-agent sessions for the **Launch jobs** addressed to it and relays the conversation between each session and its requester (PROTOCOL §18.1, §13.8).
+
+## Launch job
+A **Job** with operation `launch`, sent by a requester to a **Launcher**, that starts one coding-agent session in its own new thread. The thread is the session's conversation; the session ends when it settles, is cancelled, or reaches the launch message's expiry (PROTOCOL §13.8).
+
+## Principal-created peer
+A peer that a **Principal** created itself through the hub, within limits the operator set for that principal, rather than one the operator enrolled. It has no credential of its own, and the directory shows which principal created it (PROTOCOL §18.4).
+
 ## Approval request
 A message kind asking a human or another peer for a decision among options before an expiry. The first valid response closes it.
 

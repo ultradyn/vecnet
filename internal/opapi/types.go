@@ -244,6 +244,7 @@ func (v Matrix) MarshalJSON() ([]byte, error) {
 }
 
 type Peer struct {
+	CreatedBy    *string        `json:"created_by,omitempty"`
 	PeerID       string         `json:"peer_id"`
 	Name         string         `json:"name"`
 	Kind         string         `json:"kind"`
@@ -498,3 +499,33 @@ const (
 	HealthPausedOperator = "paused_operator"
 	HealthUnverified     = "unverified"
 )
+
+// PrincipalRow is the operator's provisioning policy and current usage (§18.4).
+type PrincipalRow struct {
+	PrincipalID     string   `json:"principal_id"`
+	Name            string   `json:"name"`
+	MaxPeers        int      `json:"max_peers"`
+	CreatesPerHour  int      `json:"creates_per_hour"`
+	Kinds           []string `json:"kinds"`
+	Active          int      `json:"active"`
+	Disabled        int      `json:"disabled"`
+	CreatesLastHour int      `json:"creates_last_hour"`
+	ScopedPeers     int      `json:"scoped_peers"`
+	DefaultAllow    []string `json:"default_allow"`
+	DefaultDeny     []string `json:"default_deny"`
+}
+
+// MarshalJSON keeps empty collections in PrincipalRow non-null.
+func (v PrincipalRow) MarshalJSON() ([]byte, error) {
+	type plain PrincipalRow
+	if v.Kinds == nil {
+		v.Kinds = []string{}
+	}
+	if v.DefaultAllow == nil {
+		v.DefaultAllow = []string{}
+	}
+	if v.DefaultDeny == nil {
+		v.DefaultDeny = []string{}
+	}
+	return json.Marshal(plain(v))
+}

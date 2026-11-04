@@ -30,14 +30,16 @@ type Config struct {
 	DataDir         string        // holds hub.db and blobs/
 	DefaultMaxDepth int           // loop.max_depth when a send omits it (range 1–64)
 	DefaultTTL      time.Duration // loop.expires_at = now + DefaultTTL when omitted
+	MaxExpiry       time.Duration // latest explicit fresh/operator expires_at is now + MaxExpiry
 	ThreadBudget    int           // budget_remaining of a new thread
 	TextCap         int           // Message content.text bytes before auto-spill
 	SendsPerMin     int           // per-peer send rate limit
 	ThreadsPerHour  int           // per-peer new-thread rate limit
 	BlobTokenTTL    time.Duration // lifetime of a blob URL token
 
-	PresenceTTL        time.Duration // presence staleness for every kind but session (PROTOCOL §8)
-	SessionPresenceTTL time.Duration // presence staleness for kind session
+	PresenceTTL         time.Duration // presence staleness for kinds other than session and launcher (PROTOCOL §8)
+	SessionPresenceTTL  time.Duration // presence staleness for kind session
+	LauncherPresenceTTL time.Duration // presence staleness for kind launcher
 
 	// AllowPrivateEgress is the dev override (--allow-private-egress,
 	// VECNET_ALLOW_PRIVATE_EGRESS=1): push, notify and other outbound URLs
@@ -51,14 +53,16 @@ func DefaultConfig() Config {
 	return Config{
 		DefaultMaxDepth: 32,
 		DefaultTTL:      24 * time.Hour,
+		MaxExpiry:       DefaultMaxExpiry,
 		ThreadBudget:    500,
 		TextCap:         4096,
 		SendsPerMin:     60,
 		ThreadsPerHour:  20,
 		BlobTokenTTL:    7 * 24 * time.Hour,
 
-		PresenceTTL:        DefaultPresenceTTL,
-		SessionPresenceTTL: DefaultSessionPresenceTTL,
+		PresenceTTL:         DefaultPresenceTTL,
+		SessionPresenceTTL:  DefaultSessionPresenceTTL,
+		LauncherPresenceTTL: DefaultLauncherPresenceTTL,
 	}
 }
 
@@ -152,7 +156,7 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 // PeerKinds are the peers.kind values the hub accepts (core-hub plan Task 5).
 var PeerKinds = map[string]bool{
 	"grokbot": true, "dot": true, "openclaw": true, "pagchat-bot": true,
-	"session": true, "operator": true, "source": true,
+	"session": true, "operator": true, "source": true, "launcher": true,
 }
 
 func (h *Hub) nowStr() string { return envelope.FormatTime(h.Now()) }

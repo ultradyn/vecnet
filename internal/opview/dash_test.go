@@ -360,3 +360,34 @@ func TestFailedWindow(t *testing.T) {
 		t.Fatalf("8-day failures still listed: %+v", got.Failed)
 	}
 }
+
+func TestPeersRowCarriesCreatedBy(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	prn, sec := env.NewPrincipal("creator")
+	if err := env.Hub.SetPrincipalLimits(ctx, prn, hub.PrincipalLimits{MaxPeers: 1, CreatesPerHour: 10, Kinds: []string{"pagchat-bot"}}); err != nil {
+		t.Fatal(err)
+	}
+	caller, err := env.Hub.Auth.Resolve(ctx, sec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := env.Hub.CreatePeer(ctx, caller, hub.CreatePeerRequest{Kind: "pagchat-bot", Name: "created", IdempotencyKey: "row"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrolled, _ := env.NewPeer("session", "enrolled")
+	rows := peerRows(t, env)
+	if got := rows[created.Peer.PeerID].Peer.CreatedBy; got == nil || *got != prn {
+		t.Fatalf("created_by: %v", got)
+	}
+	if rows[enrolled].Peer.CreatedBy != nil {
+		t.Fatal("operator-enrolled peer has created_by")
+	}
+	if err := env.Hub.SetPeerDisabled(ctx, created.Peer.PeerID, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := peerRows(t, env)[created.Peer.PeerID].Peer.CreatedBy; got == nil || *got != prn {
+		t.Fatalf("disabled created_by: %v", got)
+	}
+}

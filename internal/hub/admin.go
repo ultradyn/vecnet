@@ -471,35 +471,11 @@ func (h *Hub) SetPeerLimits(ctx context.Context, peerID string, sendsPerMin, thr
 // directory ("removed"); re-enabling brings it back ("enrolled"). The
 // operator peer cannot be disabled (422 invalid_value). Audited.
 func (h *Hub) SetPeerDisabled(ctx context.Context, peerID string, disabled bool) error {
-	changed := false
+	var changed bool
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		changed = false
-		_, kind, was, err := peerRow(ctx, tx, peerID)
-		if err != nil {
-			return err
-		}
-		if kind == "operator" && disabled {
-			return invalidValue("peer_id", "the operator peer cannot be disabled")
-		}
-		if was == disabled {
-			return nil
-		}
-		changed = true
-		v, action, change := 0, "peer_enable", "enrolled"
-		if disabled {
-			v, action, change = 1, "peer_disable", "removed"
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE peers SET disabled = ? WHERE peer_id = ?`, v, peerID); err != nil {
-			return fmt.Errorf("hub: disable peer: %w", err)
-		}
-		fields := enrolledFields
-		if disabled {
-			fields = nil
-		}
-		if err := h.DirectoryUpdated(ctx, tx, peerID, change, fields); err != nil {
-			return err
-		}
-		return audit.Record(ctx, tx, "operator", action, []string{peerID}, nil)
+		var err error
+		changed, err = h.setPeerDisabledTx(ctx, tx, peerID, disabled, "operator")
+		return err
 	})
 	if err != nil {
 		return err
@@ -509,6 +485,39 @@ func (h *Hub) SetPeerDisabled(ctx context.Context, peerID string, disabled bool)
 		h.Log.Notify(peerID) // a disabled peer's open stream notices
 	}
 	return nil
+}
+
+// setPeerDisabledTx shares the operator guard, directory event and audit with
+// principal provisioning. The caller notifies readers after commit.
+func (h *Hub) setPeerDisabledTx(ctx context.Context, tx *sql.Tx, peerID string, disabled bool, actor string) (changed bool, err error) {
+	_, kind, was, err := peerRow(ctx, tx, peerID)
+	if err != nil {
+		return false, err
+	}
+	if kind == "operator" && disabled {
+		return false, invalidValue("peer_id", "the operator peer cannot be disabled")
+	}
+	if was == disabled {
+		return false, nil
+	}
+	v, action, change := 0, "peer_enable", "enrolled"
+	if disabled {
+		v, action, change = 1, "peer_disable", "removed"
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE peers SET disabled = ? WHERE peer_id = ?`, v, peerID); err != nil {
+		return false, fmt.Errorf("hub: disable peer: %w", err)
+	}
+	fields := enrolledFields
+	if disabled {
+		fields = nil
+	}
+	if err := h.DirectoryUpdated(ctx, tx, peerID, change, fields); err != nil {
+		return false, err
+	}
+	if err := audit.Record(ctx, tx, actor, action, []string{peerID}, nil); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // UnarchiveGroup unarchives ad hoc group grpID (PROTOCOL §7, R21) and marks

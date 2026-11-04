@@ -209,3 +209,21 @@ func TestIdleHookFailureDoesNotFailReport(t *testing.T) {
 		t.Fatalf("presence = %q, want idle", p)
 	}
 }
+
+func TestLauncherKindEnrols(t *testing.T) {
+	env := testhub.Start(t)
+	t.Run("unknown kind remains invalid", func(t *testing.T) {
+		_, _, err := env.Hub.AddPeer(context.Background(), "unknown-kind", "unknown", "")
+		var api *hub.APIError
+		if !errors.As(err, &api) || api.Status != http.StatusUnprocessableEntity || api.Code != "invalid_value" || api.Details["field"] != "kind" {
+			t.Fatalf("AddPeer(unknown-kind) = %v, want 422 invalid_value field kind", err)
+		}
+	})
+	t.Run("launcher enrols and appears in directory", func(t *testing.T) {
+		env := testhub.Start(t)
+		peer, _ := env.NewPeer("launcher", "launcher")
+		if entry := directoryEntry(t, env, peer); entry.Kind != "launcher" {
+			t.Fatalf("directory kind = %q, want launcher", entry.Kind)
+		}
+	})
+}
