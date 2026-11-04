@@ -1,11 +1,11 @@
 import { ConfigError, loadConfig } from './config.ts';
 import type { LauncherConfig } from './config.ts';
-import { startDaemon, stderrLog, systemClock } from './daemon.ts';
+import { startDaemon, startFailure, stderrLog, systemClock } from './daemon.ts';
 import { openLedger } from './ledger.ts';
 import { loadBackends, pluginContext } from './plugins.ts';
 import { redactingLog } from './redact.ts';
 
-const USAGE = 'usage: main.ts run --config PATH | main.ts check --config PATH';
+const USAGE = 'usage: main.ts run --config PATH [--accept-cursor-gap] | main.ts check --config PATH';
 
 function fail(message: string, code: number): number {
   process.stderr.write(`${message}\n`);
@@ -37,10 +37,11 @@ async function check(cfg: LauncherConfig): Promise<number> {
 
 async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
-  let path: string | undefined;
+  let path: string | undefined, acceptCursorGap = false;
   for (let i = 0; i < rest.length; i++) {
     if (rest[i] === '--config' && i + 1 < rest.length) path = rest[++i];
     else if (rest[i].startsWith('--config=')) path = rest[i].slice('--config='.length);
+    else if (rest[i] === '--accept-cursor-gap' && command === 'run') acceptCursorGap = true;
     else return fail(USAGE, 2);
   }
   if ((command !== 'run' && command !== 'check') || !path) return fail(USAGE, 2);
@@ -49,7 +50,7 @@ async function main(argv: string[]): Promise<number> {
   try { cfg = await loadConfig(path); }
   catch (err) { return fail(err instanceof ConfigError ? err.message : 'cannot read config', 2); }
   if (command === 'check') return check(cfg);
-  const daemon = await startDaemon({ cfg });
+  const daemon = await startDaemon({ cfg, acceptCursorGap });
   // The daemon also stops itself when its event stream ends for good (auth or
   // disabled); it then sets exit code 1 so systemd's Restart=on-failure applies.
   await Promise.race([daemon.stopped, new Promise<void>(resolve => {
@@ -61,8 +62,10 @@ async function main(argv: string[]): Promise<number> {
   process.exit(typeof process.exitCode === 'number' ? process.exitCode : 0);
 }
 
-main(process.argv.slice(2)).then(code => { process.exitCode = code; }, () => {
-  // Never print the error: it can quote config or credential paths' contents.
-  process.stderr.write('launcher failed to start\n');
-  process.exitCode = 1;
+main(process.argv.slice(2)).then(code => { process.exitCode = code; }, err => {
+  const { line, code } = startFailure(err);
+  process.stderr.write(`${line}\n`);
+  // A plugin child or open handle must not keep a failed start alive, so
+  // systemd's restart policy applies.
+  process.exit(code);
 });

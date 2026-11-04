@@ -8,7 +8,7 @@ import type { Clock, EventStream, HubApi, Log } from '../../hub-client/src/ports
 import { createEventStream } from '../../hub-client/src/stream.ts';
 import type { SendRequest } from '../../hub-client/src/wire.ts';
 import type { Backend, BackendCapabilities, BackendHealth, PermissionMode, SessionHandle, SettleResult } from './backend.ts';
-import { parseDuration } from './config.ts';
+import { ConfigError, parseDuration } from './config.ts';
 import type { LauncherConfig } from './config.ts';
 import { createDirectory } from './directory.ts';
 import { createDispatcher } from './dispatch.ts';
@@ -32,6 +32,36 @@ import { redactingLog } from './redact.ts';
 import { createLane } from './session.ts';
 import type { SessionLane } from './session.ts';
 import { sweep } from './sweep.ts';
+
+/** A refusal whose message is a fixed, safe operator instruction (main prints it). */
+export class DaemonError extends Error {
+  readonly code: string; readonly exitCode: number;
+  constructor(code: string, message: string, exitCode = 1) { super(message); this.name = 'DaemonError'; this.code = code; this.exitCode = exitCode; }
+}
+/** main's startup failure line: only the daemon's own fixed messages and hub error codes, never arbitrary error text. */
+export function startFailure(err: unknown): { line: string; code: number } {
+  if (err instanceof DaemonError) return { line: `launcher failed to start: ${err.message}`, code: err.exitCode };
+  if (err instanceof ConfigError) return { line: `launcher failed to start: ${err.message}`, code: 2 };
+  if (err instanceof HubError) return { line: `launcher failed to start: hub error ${err.status} ${/^[a-z_]{1,64}$/.test(err.code) ? err.code : 'unknown'}`, code: 1 };
+  // Anything else can quote config or credential paths' contents.
+  return { line: 'launcher failed to start', code: 1 };
+}
+/** Exit status of a stop on a durable recovery condition; the unit does not restart on it. */
+export const RECOVERY_EXIT = 3;
+const CURSOR_GAP_HELP = 'cursor_purged: the hub no longer holds events this launcher missed, so deliveries in that gap (launches, controls, inputs) were never admitted. ' +
+  'Check the open job threads and any launches sent to this launcher while it was down, then start once with --accept-cursor-gap.';
+/**
+ * The event stream's 409 cursor_purged hook. The launcher keeps no thread
+ * history it could reconcile from, so it never advances past the gap: it
+ * records a durable recovery condition and rejects, which stops the daemon.
+ */
+export function cursorPurgedHook(kv: { set(k: string, v: string): void }, log: Log, clock: Clock): (a: { oldestCursor: string }) => Promise<void> {
+  return async ({ oldestCursor }) => {
+    kv.set('recovery', JSON.stringify({ reason: 'cursor_purged', oldest_cursor: oldestCursor, at: clock.now() }));
+    log.error('event cursor purged; stopping until the operator accepts the gap', { oldest_cursor: oldestCursor });
+    throw new DaemonError('cursor_purged', CURSOR_GAP_HELP, RECOVERY_EXIT);
+  };
+}
 
 const RETRY_EVERY_MS = 30_000;
 const HOURLY_MS = 3_600_000;
@@ -64,9 +94,9 @@ export async function readCredential(path: string): Promise<string> {
   const file = await open(path, 'r');
   try {
     const stat = await file.stat();
-    if (!stat.isFile() || (stat.mode & 0o7777) !== 0o600) throw new Error('credential must be a regular file with mode 0600');
+    if (!stat.isFile() || (stat.mode & 0o7777) !== 0o600) throw new DaemonError('credential_mode', 'credential must be a regular file with mode 0600');
     const credential = (await file.readFile('utf8')).trim();
-    if (!credential || /\s/.test(credential)) throw new Error('credential file is malformed');
+    if (!credential || /\s/.test(credential)) throw new DaemonError('credential_malformed', 'credential file is malformed');
     return credential;
   } finally { await file.close(); }
 }
@@ -88,7 +118,7 @@ async function whoAmI(hub: HubApi, cfg: LauncherConfig, credential: string | und
     finally { timer.cancel(); }
   }
   const b = body as { kind?: unknown; peer_id?: unknown } | null;
-  if (!b || b.kind !== 'peer' || typeof b.peer_id !== 'string' || !ID.peer.test(b.peer_id)) throw new Error('the credential must authenticate a launcher peer');
+  if (!b || b.kind !== 'peer' || typeof b.peer_id !== 'string' || !ID.peer.test(b.peer_id)) throw new DaemonError('not_a_peer', 'the credential must authenticate a launcher peer');
   return b.peer_id;
 }
 
@@ -98,7 +128,9 @@ const noCaps: BackendCapabilities = { steer: false, queue: 'launcher', interrupt
   backgroundTasks: 'opaque', attachments: false, workspace: 'launcher-dir', branchName: 'backend-chosen', permissionModes: [], presets: [] };
 
 export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream?: EventStream; clock?: Clock; log?: Log;
-  backends?: Map<string, Backend>; beforeRecordRef?: (jobId: string) => void }): Promise<{ stop(): Promise<void>; crash(): void;
+  backends?: Map<string, Backend>; beforeRecordRef?: (jobId: string) => void;
+  /** The operator has checked the gap left by a purged event cursor: resume from the hub's oldest cursor. */
+  acceptCursorGap?: boolean }): Promise<{ stop(): Promise<void>; crash(): void;
   /** Settles once the daemon has stopped, including when it stops itself on a fatal event stream end. */
   stopped: Promise<void> }> {
   const { cfg } = o;
@@ -143,11 +175,27 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
       const stored = daemonKv.get('self');
       let proven: string;
       try { proven = await whoAmI(realHub, cfg, credential, clock); }
-      catch (err) { if (stored && err instanceof HubError && err.status === 0) return stored; throw err; }
-      if (stored && stored !== proven) throw new Error('identity_changed: the ledger belongs to another launcher peer');
+      catch (err) {
+        // The hub being unreachable or briefly failing (a deploy's 502, a 429)
+        // keeps the pinned identity; a refused credential never does.
+        if (stored && err instanceof HubError && err.retryable) return stored;
+        throw err;
+      }
+      if (stored && stored !== proven) throw new DaemonError('identity_changed', 'identity_changed: the ledger belongs to another launcher peer');
       daemonKv.set('self', proven);
       return proven;
     })();
+    // A purged event cursor left a gap no one has checked: refuse to resume past it.
+    const recovery = daemonKv.get('recovery');
+    if (recovery) {
+      if (!o.acceptCursorGap) throw new DaemonError('cursor_purged', CURSOR_GAP_HELP, RECOVERY_EXIT);
+      const oldest = (JSON.parse(recovery) as { oldest_cursor?: unknown }).oldest_cursor;
+      ledger.tx(() => {
+        if (typeof oldest === 'string' && oldest) ledger.setCursor(oldest);
+        daemonKv.delete('recovery');
+      });
+      log.warn('operator accepted the event cursor gap; resuming from the oldest retained cursor');
+    }
 
     // 3. Backends and their health.
     const backends = o.backends ?? await loadBackends(cfg, id => pluginContext({ host: cfg.host, log, ledger, id, clock }));
@@ -223,7 +271,16 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
       const branch = r.branch ?? job.branch;
       if (branch !== `launch/${job.jobId}` || !job.workspace || !job.workspace.startsWith('/')) return { pushed: false };
       try {
-        const res = await exec(['git', '-C', job.workspace, 'push', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], { timeoutMs: PUSH_TIMEOUT_MS });
+        // The agent can edit the workspace's hooks and config: run none of them,
+        // and push to the remote configured in the operator's own checkout.
+        const project = Object.hasOwn(cfg.projects, job.project) ? cfg.projects[job.project] : undefined;
+        if (!project) return { pushed: false };
+        const remote = await exec(['git', '-C', project.repo_root, 'remote', 'get-url', '--push', 'origin'], { timeoutMs: 30_000 });
+        const url = remote.stdout.trim();
+        if (remote.code !== 0 || !url || /\s/.test(url) || url.startsWith('-') || /^ext::/i.test(url)) { log.warn('launch branch push skipped: no usable origin', { jobId: job.jobId }); return { pushed: false }; }
+        const res = await exec(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.sshCommand=ssh', '-c', 'core.fsmonitor=false',
+          '-c', 'protocol.ext.allow=never', '-C', job.workspace,
+          'push', '--no-verify', url, `refs/heads/${branch}:refs/heads/${branch}`], { timeoutMs: PUSH_TIMEOUT_MS, env: { GIT_CONFIG_NOSYSTEM: '1' } });
         if (res.code !== 0) log.warn('launch branch push failed', { jobId: job.jobId, code: res.code });
         return { pushed: res.code === 0 };
       } catch { log.warn('launch branch push failed', { jobId: job.jobId }); return { pushed: false }; }
@@ -363,9 +420,15 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
     for (const key of daemonKv.keys('retire:')) armRetire(key.slice('retire:'.length), Number(daemonKv.get(key)));
     // A requester retired while the daemon was down never leaves a later
     // snapshot: compare the open jobs with the directory loaded at startup.
-    if (directoryLoaded) {
+    // If the startup refresh failed, the first later successful refresh does it.
+    let retiredChecked = false;
+    const checkRetired = () => {
+      if (retiredChecked || dead) return;
+      retiredChecked = true;
       for (const peer of new Set(ledger.openJobs().map(j => j.requester))) if (!dir.get(peer)) retire(peer);
-    }
+    };
+    if (directoryLoaded) checkRetired();
+    dir.onRefreshed?.(checkRetired);
 
     // 10. Outbox, idle clock (tracked on attach), presence, stream, dispatcher.
     const controller = new AbortController();
@@ -400,8 +463,7 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
     const ingress = createIngress({ ledger, hub, log, self, clock, onDirectory: data => { detach(dir.onDirectoryUpdated(data), 'directory refresh'); } });
     const stream = o.stream ?? createEventStream({
       baseUrl: cfg.hub.url, credential: credential!, cursors: ingress.cursors, clock, log,
-      // The launcher keeps no thread history to reconcile: accept the gap, loudly.
-      async onCursorPurged() { log.error('event cursor purged; deliveries in the gap are lost'); },
+      onCursorPurged: cursorPurgedHook(daemonKv, log, clock),
     });
     let stopping: Promise<void> | undefined;
     let markStopped!: () => void;
@@ -414,7 +476,7 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
     }, () => {
       if (dead || signal.aborted) return;
       log.error('event stream failed');
-      process.exitCode = 1;
+      process.exitCode = daemonKv.get('recovery') ? RECOVERY_EXIT : 1;
       void stop();
     }));
     loops.add(dispatcher.run(signal).catch(() => { if (!dead) log.error('dispatcher stopped'); }));

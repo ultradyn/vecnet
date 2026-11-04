@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,10 +8,11 @@ import { fileURLToPath } from 'node:url';
 import type { BackendCapabilities, BackendHealth } from '../src/backend.ts';
 import { createHubClient } from '../../hub-client/src/client.ts';
 import type { HubApi } from '../../hub-client/src/ports.ts';
-import { startDaemon } from '../src/daemon.ts';
+import { cursorPurgedHook, DaemonError, RECOVERY_EXIT, startDaemon, startFailure } from '../src/daemon.ts';
+import { HubError } from '../../hub-client/src/errors.ts';
 import { createFakeBackend } from './fake-backend.ts';
 import { harness, launch, launched, message, settle, until, LAUNCHER, REQUESTER, T0 } from './daemon-harness.ts';
-import { fakeClock } from '../../hub-client/testing/fixtures.ts';
+import { directoryEntry, fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 
 test('a crash after the accept tx and before startLaunch → restart launches exactly once', async t => {
   const h = await harness(t);
@@ -248,4 +249,82 @@ test('the backend-unreachable note is sent after five minutes with no other even
   assert.equal(h.replies(thread).filter(r => r.content.text.startsWith('backend unreachable')).length, 1);
   assert.ok(h.sends().length > before);
   h.inspect(l => assert.equal(l.job(jobId)!.terminal, null));
+});
+
+test('deliver.push_branch pushes only the launch branch to the operator checkout\'s origin, running none of the workspace\'s hooks or remotes', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'launcher-push-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8' }).trim();
+  const bare = join(root, 'origin.git'), decoy = join(root, 'decoy.git'), repo = join(root, 'repo'), marker = join(root, 'hook-ran');
+  git('init', '-q', '--bare', bare); git('init', '-q', '--bare', decoy);
+  git('init', '-q', '-b', 'master', repo); writeFileSync(join(repo, 'f'), 'x'); git('-C', repo, 'add', 'f'); git('-C', repo, 'commit', '-qm', 'base');
+  git('-C', repo, 'remote', 'add', 'origin', bare);
+  const backend = createFakeBackend({ clock: fakeClock(T0) });
+  const launchOriginal = backend.launch.bind(backend);
+  backend.launch = async (spec, hooks, signal) => {
+    const handle = await launchOriginal(spec, hooks, signal);
+    const ws = join(root, `ws-${spec.jobId}`);
+    git('clone', '-q', repo, ws); git('-C', ws, 'checkout', '-qb', spec.branch);
+    // What an agent could plant: a hook, and a remote of its choosing.
+    git('-C', ws, 'remote', 'set-url', 'origin', decoy);
+    writeFileSync(join(ws, '.git', 'hooks', 'pre-push'), `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
+    (handle.ref.extra as Record<string, unknown>).workspace = ws;
+    return handle;
+  };
+  const h = await harness(t, { backend, cfg: { projects: { repo: { repo_root: repo, base_ref: 'master' } } } });
+  const { jobId, thread } = await launched(h, { deliver: { push_branch: true } });
+  const control = message(thread, REQUESTER, 'settle');
+  control.message.metadata['launch.control'] = 'settle';
+  await h.push('delivery', control);
+  await until(() => h.statuses(jobId).some(s => s.state === 'succeeded'), 'succeeded', 20_000);
+  assert.equal((h.statuses(jobId).at(-1)!.output as { pushed: boolean }).pushed, true);
+  assert.match(git('--git-dir', bare, 'show-ref'), new RegExp(`refs/heads/launch/${jobId}`));
+  assert.equal(git('--git-dir', decoy, 'for-each-ref'), '');
+  assert.throws(() => readFileSync(marker), /ENOENT/);
+});
+
+test('a purged event cursor is a durable recovery condition: the hook rejects, restarts refuse, and only --accept-cursor-gap resumes from the oldest cursor', async t => {
+  const h = await harness(t);
+  const log = memoryLog();
+  const kv = new Map<string, string>();
+  await assert.rejects(cursorPurgedHook({ set: (k, v) => { kv.set(k, v); } }, log, h.clock)({ oldestCursor: 'e1.500' }),
+    (err: unknown) => err instanceof DaemonError && err.code === 'cursor_purged' && err.exitCode === RECOVERY_EXIT);
+  assert.equal(JSON.parse(kv.get('recovery')!).oldest_cursor, 'e1.500');
+  // The real daemon records it in its ledger; a restart then refuses to start.
+  h.daemon.crash();
+  h.inspect(l => l.kv('daemon').set('recovery', kv.get('recovery')!));
+  await assert.rejects(h.restart(), (err: unknown) => err instanceof DaemonError && err.code === 'cursor_purged' && /--accept-cursor-gap/.test(err.message));
+  await h.restart({ acceptCursorGap: true });
+  h.inspect(l => { assert.equal(l.kv('daemon').get('recovery'), undefined); assert.equal(l.cursor(), 'e1.500'); });
+  assert.match(startFailure(new DaemonError('cursor_purged', 'cursor_purged: fixed text', RECOVERY_EXIT)).line, /fixed text/);
+  assert.equal(startFailure(new DaemonError('x', 'm', RECOVERY_EXIT)).code, RECOVERY_EXIT);
+  assert.deepEqual(startFailure(new Error('/home/secret/path: vn_peer_x')), { line: 'launcher failed to start', code: 1 });
+  const unit = readFileSync(new URL('../systemd/vecnet-launcher.service', import.meta.url), 'utf8');
+  assert.match(unit, new RegExp(`^RestartPreventExitStatus=${RECOVERY_EXIT}$`, 'm'));
+});
+
+test('a pinned identity survives a hub 5xx or 429 at startup, but not a 401 or a different peer', async t => {
+  const h = await harness(t);
+  for (const status of [502, 503, 429]) await h.restart({ me: async () => { throw new HubError(status, 'whoami_failed'); } });
+  await assert.rejects(h.restart({ me: async () => { throw new HubError(401, 'whoami_failed'); } }), (err: unknown) => err instanceof HubError && err.status === 401);
+  await assert.rejects(h.restart({ me: async () => ({ kind: 'peer', peer_id: 'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8E' }) }),
+    (err: unknown) => err instanceof DaemonError && err.code === 'identity_changed');
+});
+
+test('requesters retired while the daemon was down are found by the first successful refresh after a failed startup refresh', async t => {
+  const h = await harness(t);
+  const { jobId, thread } = await launched(h);
+  h.hub.setPeers([
+    directoryEntry({ peer_id: LAUNCHER, name: 'launcher-test', kind: 'launcher' }),
+    directoryEntry({ peer_id: 'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8D', name: 'operator', kind: 'operator' }),
+  ]);
+  h.hub.failNext('/v1/peers', 401);
+  await h.restart();
+  await settle();
+  assert.equal(h.backend.sessions()[0].interrupts, 0);
+  await h.push('directory_updated', { change: 'updated', peer_id: LAUNCHER });
+  await until(() => h.backend.sessions()[0].interrupts === 1, 'interrupt after the first good refresh');
+  await until(() => h.replies(thread).some(r => /retired/.test(r.content.text)), 'retirement note');
+  h.clock.advance(10 * 60_000);
+  await until(() => h.statuses(jobId).some(s => s.state === 'cancelled'), 'cancelled requester_retired');
 });

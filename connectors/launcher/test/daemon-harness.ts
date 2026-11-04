@@ -97,7 +97,7 @@ export interface Harness {
   presence(): Array<Record<string, unknown>>; peersCalls(): number;
   inspect<T>(fn: (ledger: Ledger) => T): T;
   push(type: EventType, data: unknown): Promise<void>;
-  restart(opts?: { backends?: Map<string, Backend>; beforeRecordRef?: (jobId: string) => void }): Promise<void>;
+  restart(opts?: { backends?: Map<string, Backend>; beforeRecordRef?: (jobId: string) => void; acceptCursorGap?: boolean; me?: () => Promise<unknown> }): Promise<void>;
 }
 
 export async function harness(t: TestContext, opts: { cfg?: Record<string, unknown>; peers?: DirectoryEntry[]; backend?: FakeBackend;
@@ -140,7 +140,8 @@ export async function harness(t: TestContext, opts: { cfg?: Record<string, unkno
     async restart(o = {}) {
       daemon.crash();
       stream = memoryStream(counter);
-      daemon = await startDaemon({ cfg, hub: client, stream, clock, log, backends: o.backends ?? new Map([['fake', backend]]), beforeRecordRef: o.beforeRecordRef });
+      daemon = await startDaemon({ cfg, hub: o.me ? { ...client, me: o.me } as HubApi : client, stream, clock, log, backends: o.backends ?? new Map([['fake', backend]]),
+        beforeRecordRef: o.beforeRecordRef, acceptCursorGap: o.acceptCursorGap });
     },
   };
   t.after(async () => {

@@ -10,6 +10,8 @@ Type=simple
 ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning %h/.local/share/vecnet-launcher/current/launcher/src/main.ts run --config %h/.config/vecnet-launcher/config.json
 Restart=on-failure
 RestartSec=10
+# Exit 3: a durable recovery condition (a purged event cursor); see the guide.
+RestartPreventExitStatus=3
 UMask=0077
 MemoryMax=1G
 

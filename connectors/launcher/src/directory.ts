@@ -12,11 +12,14 @@ export interface Directory {
   ensureKnown(peerId: string, signal?: AbortSignal): Promise<boolean>;
   onDirectoryUpdated(data: unknown): Promise<void>;
   onRemoved(fn: (peerId: string) => void): void;
+  /** Called after every successful refresh, after its removal listeners. */
+  onRefreshed?(fn: () => void): void;
 }
 
 export function createDirectory(deps: { hub: Pick<HubApi, 'peers'>; log: Log }): Directory {
   let entries = new Map<string, DirectoryEntry>();
   const listeners = new Set<(peerId: string) => void>();
+  const refreshed = new Set<() => void>();
   // Serialize snapshots so a slow, older response cannot undo a retirement.
   let pending: Promise<void> = Promise.resolve();
   function refresh(signal?: AbortSignal): Promise<void> {
@@ -36,6 +39,9 @@ export function createDirectory(deps: { hub: Pick<HubApi, 'peers'>; log: Log }):
         try { fn(id); }
         catch { deps.log.warn('directory removal listener failed'); }
       }
+      for (const fn of refreshed) {
+        try { fn(); } catch { deps.log.warn('directory refresh listener failed'); }
+      }
     });
     pending = update.catch(() => {});
     return update;
@@ -54,5 +60,6 @@ export function createDirectory(deps: { hub: Pick<HubApi, 'peers'>; log: Log }):
     },
     async onDirectoryUpdated(_data) { await refresh(); },
     onRemoved(fn) { listeners.add(fn); },
+    onRefreshed(fn) { refreshed.add(fn); },
   };
 }
