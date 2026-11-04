@@ -210,7 +210,8 @@ try {
     }, demo.operator_secret, { polling: 100 });
     await fail('**/v1/**', 503, 'unavailable', 'Hub restarting');
     await page.reload({ waitUntil: 'load' });
-    await page.locator('#conn.off').waitFor();
+    // A planned restart (503) reads as reconnecting, not offline.
+    await page.locator('#conn.retry', { hasText: 'reconnecting' }).waitFor();
     await page.locator('#threads .none', { hasText: 'Threads unavailable' }).waitFor();
     await page.unroute('**/v1/**');
     await page.locator('#conn.live').waitFor();
