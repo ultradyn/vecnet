@@ -72,3 +72,16 @@ test('launch fixtures use unique job keys matching the normative schema', () => 
   for (const key of keys) assert.match(key,pattern);
   assert.equal(new Set(keys).size,keys.length);
 });
+
+test('launch fixtures address only the launcher in a fresh requester-launcher thread', () => {
+  for (const launch of Array.from({length:32},() => launchDelivery({backend:'fake'}))) {
+    assert.equal(launch.message.recipients.length,1);
+    assert.deepEqual(launch.message.recipients,[launch.recipient]);
+    assert.notEqual(launch.message.sender,launch.recipient);
+    assert.deepEqual(launch.thread.participants,[launch.message.sender,launch.recipient]);
+    assert.equal(launch.thread.thread_id,launch.message.thread_id);
+    assert.equal(launch.message.in_reply_to,null);
+    assert.equal(launch.thread.group,null);
+    assert.equal(launch.via,null);
+  }
+});

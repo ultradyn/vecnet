@@ -10,14 +10,36 @@ function files(dir:string):string[] {
 }
 function imports(file:string, source=readFileSync(file,'utf8')):string[] {
   const specs:string[]=[];
-  const trivia=String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*(?:\n|$))*`;
-  // Fail closed on escaped specifiers instead of resolving their raw spelling.
+  // Tokenize before looking for declarations: comments are trivia between any
+  // tokens, and keywords inside strings/comments are not declaration keywords.
+  const tokenPattern=/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|(["'`])(?:\\[\s\S]|(?!\1)[^\\])*\1|[\p{ID_Start}_$][\p{ID_Continue}$]*|[^\s]/gu;
+  const tokens=[...source.matchAll(tokenPattern)]
+    .filter(match => !match[0].startsWith('/*') && !match[0].startsWith('//'))
+    .map(match => ({text:match[0],quote:match[1]}));
   const add=(spec:string) => {
+    // Fail closed on escaped specifiers instead of resolving their raw spelling.
     assert.ok(!spec.includes('\\'),`${file}: import target must be statically checkable (no escapes)`);
     specs.push(spec);
   };
-  const declarations=/\b(?:import|export)\s+(?:type\s+)?(?:[^;"'`()]*?\s+from\s*)?(["'])([^"']+)\1/g;
-  for (const match of source.matchAll(declarations)) add(match[2]);
+  for (let i=0;i<tokens.length;i++) {
+    const keyword=tokens[i].text;
+    if (keyword!=='import' && keyword!=='export') continue;
+    const next=tokens[i+1];
+    if (next?.text==='(' || next?.text==='.') continue;
+    if (keyword==='import' && next?.quote) { add(next.text.slice(1,-1)); continue; }
+    // Re-exports start with {, * or type; other exports have no target.
+    if (keyword==='export' && !['{','*','type'].includes(next?.text ?? '')) continue;
+    let bindings=0;
+    for (let j=i+1;j<tokens.length;j++) {
+      const text=tokens[j].text;
+      if (text==='{') bindings++;
+      if (text==='}') bindings--;
+      if (bindings!==0) continue;
+      if (text===';' || text==='import' || text==='export') break;
+      if (text==='from' && tokens[j+1]?.quote) { add(tokens[j+1].text.slice(1,-1)); break; }
+    }
+  }
+  const trivia=String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*(?:\n|$))*`;
   // Check every call, including ones that do not start with a quoted string.
   // Only a complete literal first argument is safe to pass to the path guard.
   const calls=new RegExp(String.raw`\b(?:import|require)${trivia}\(${trivia}`,'g');
@@ -61,6 +83,21 @@ const importForms=[
   (spec:string) => `import '${spec}';`,
   (spec:string) => `export { value } from '${spec}';`,
   (spec:string) => `export * from "${spec}";`,
+  (spec:string) => `import/*x*/ value from '${spec}';`,
+  (spec:string) => `import value from/*x*/ '${spec}';`,
+  (spec:string) => `export * from/*x*/ '${spec}';`,
+  (spec:string) => `import{value}from'${spec}';`,
+  (spec:string) => `import from from/*target*/'${spec}';`,
+  (spec:string) => `import{from as value}from/*target*/'${spec}';`,
+  (spec:string) => `import{import as value}from/*target*/'${spec}';`,
+  (spec:string) => `export{from as value}from/*target*/'${spec}';`,
+  (spec:string) => `export{value}from'${spec}';`,
+  (spec:string) => `import/*x*/type/*y*/{Value}/*z*/from/*target*/'${spec}';`,
+  (spec:string) => `export/*x*/type/*y*/{Value}/*z*/from/*target*/'${spec}';`,
+  (spec:string) => `export/*x*/*/*y*/as/*z*/values/*a*/from/*b*/'${spec}';`,
+  (spec:string) => `import// declaration\n{value}// binding\nfrom// target\n'${spec}';`,
+  (spec:string) => `export// declaration\n*// binding\nfrom// target\n'${spec}';`,
+  (spec:string) => `import/*side effect*/'${spec}';`,
   (spec:string) => `import('${spec}');`,
   (spec:string) => `import("${spec}");`,
   (spec:string) => 'import(`'+spec+'`);',
@@ -94,10 +131,19 @@ for (const source of [
 ]) test(`plugin guard rejects unchecked dynamic target: ${source}`, () => {
   assert.throws(() => checkPluginImports(pluginFile,source),/statically checkable/);
 });
-test('hub-client never imports from launcher', () => {
+function checkHubImports(file:string, source?:string):void {
   const hub=resolve(root,'../hub-client');
-  for (const file of [...files(resolve(hub,'src')),...files(resolve(hub,'testing')),...files(resolve(hub,'test'))]) for (const spec of imports(file)) {
+  for (const spec of imports(file,source)) {
     assert.ok(!spec.includes('launcher'),`${file}: ${spec}`);
     if (spec.startsWith('.')) { const path=relative(hub,resolve(dirname(file),spec)); assert.ok(path!=='..' && !path.startsWith('../'),`${file}: ${spec}`); }
   }
+}
+for (const [index,form] of importForms.entries()) test(`hub-client guard checks literal import syntax ${index+1}`, () => {
+  const file=resolve(root,'../hub-client/src/client.ts');
+  for (const spec of ['./wire.ts','../testing/fixtures.ts','node:fs']) assert.doesNotThrow(() => checkHubImports(file,form(spec)));
+  for (const spec of ['../../launcher/src/backend.ts','../../outside.ts','@vecnet/launcher']) assert.throws(() => checkHubImports(file,form(spec)));
+});
+test('hub-client never imports from launcher', () => {
+  const hub=resolve(root,'../hub-client');
+  for (const file of [...files(resolve(hub,'src')),...files(resolve(hub,'testing')),...files(resolve(hub,'test'))]) checkHubImports(file);
 });
