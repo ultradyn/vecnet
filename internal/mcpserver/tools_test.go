@@ -465,6 +465,47 @@ func TestToolsListNamesAndHints(t *testing.T) {
 	if _, ok := defs["peerId"]; !ok {
 		t.Errorf("vecnet_send has no $defs/peerId: %v", send["$defs"])
 	}
+	// ChatGPT read the top-level anyOf (thread_id | recipients) as making
+	// thread_id required, so a new conversation looked impossible. The rule
+	// lives in the description and the hub's own validation instead.
+	for _, tool := range tools {
+		for _, k := range []string{"anyOf", "oneOf", "allOf"} {
+			if _, ok := tool.InputSchema[k]; ok {
+				t.Errorf("%s inputSchema has top-level %s", tool.Name, k)
+			}
+		}
+	}
+	if desc := tools[i].Description; !strings.Contains(desc, "recipients") || !strings.Contains(desc, "thread_id") {
+		t.Errorf("vecnet_send description does not say when to use recipients or thread_id: %q", desc)
+	}
+}
+
+// A new conversation needs only recipients; neither recipients nor thread_id
+// is still refused by the hub's validation.
+func TestSendRecipientsOrThread(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "a")
+	b, _ := env.NewPeer("session", "b")
+	var out sendResult
+	toolOK(t, env, aSecret, "vecnet_send", map[string]any{
+		"idempotency_key": "new", "recipients": []string{b}, "priority": "hold",
+		"content": map[string]any{"text": "hello"},
+	}, &out)
+	if out.ThreadID == "" {
+		t.Fatalf("new send made no thread: %+v", out)
+	}
+	status, r := rpc(t, env, aSecret, "tools/call", map[string]any{"name": "vecnet_send", "arguments": map[string]any{
+		"idempotency_key": "neither", "priority": "hold", "content": map[string]any{"text": "to nobody"},
+	}})
+	if status != http.StatusOK {
+		t.Fatalf("neither: HTTP %d", status)
+	}
+	if r.Error == nil {
+		var res toolResult
+		if err := json.Unmarshal(r.Result, &res); err != nil || !res.IsError {
+			t.Fatalf("send with neither recipients nor thread_id succeeded: %s", r.Result)
+		}
+	}
 }
 
 // sendResult is the part of a SendResponse these tests read.

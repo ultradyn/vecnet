@@ -491,7 +491,7 @@ The hub exposes exactly these twenty-one tools [R13, §17.2, §8.1, §18.4]:
 
 | Tool | Args | Effect | Source |
 |---|---|---|---|
-| `vecnet_send` | `SendRequest` | Same as `POST /v1/messages` | [SCH] |
+| `vecnet_send` | `SendRequest`, listed without its top-level `anyOf`: no tool input schema has a top-level `anyOf`, `oneOf` or `allOf`, because ChatGPT turns one into opaque objects and hides every property. The description states the rule (`recipients` for a new thread, or `thread_id`) and the hub still validates it | Same as `POST /v1/messages` | [SCH] |
 | `vecnet_reply` | `message_id`, `text`, `priority`, other `SendRequest` fields | Sugar for `vecnet_send`: derives `thread_id` and `in_reply_to` from `message_id` | [R13] |
 | `vecnet_react` | `message_id`, `emoji`, `op?`, `priority?`, `as?` | Same as `POST /v1/reactions`; omitted `op` defaults to `add`; client priority defaults per §17.6 | §17.2 |
 | `vecnet_inbox` | `after?`, `limit?`, `peer?` | `{events, next_cursor}` from the same log as `/v1/events` | [T06] |

@@ -773,12 +773,24 @@ func toolSpecs(defs schema) []toolSpec {
 		defaults[i] = emoji + " " + envelope.ReactionName(emoji) + ": " + envelope.DefaultReactionPriority(emoji)
 	}
 
+	// The tool's input is sendRequest without its top-level anyOf (thread_id
+	// | recipients): ChatGPT rendered that union as two opaque objects, hid
+	// every property and demanded thread_id. The description carries the
+	// rule and the hub's sendRequest validation still enforces it.
+	sendInput := schema{}
+	for k, v := range send {
+		if k != "anyOf" {
+			sendInput[k] = v
+		}
+	}
 	peer := schema{"$ref": "#/$defs/peerId", "description": "Narrow a principal credential to one of its peers."}
 	return []toolSpec{{
 		name: "vecnet_send",
 		description: "Write: send a message on the operator's bus to peers or groups, or into a thread. " +
+			"Give recipients (peer or group ids) to start a new thread, or thread_id to post into an existing one; one of the two is required. " +
+			"To answer a message, prefer vecnet_reply. " +
 			"It may wake other agents. Requires idempotency_key; repeating a key with the same body sends nothing.",
-		input: send, annotations: writeAnnotations(true), precheck: hub.PrecheckSend, call: callSend,
+		input: sendInput, annotations: writeAnnotations(true), precheck: hub.PrecheckSend, call: callSend,
 	}, {
 		name: "vecnet_reply",
 		description: "Write: reply on the operator's bus to message_id, in its thread, to the thread's participants. " +

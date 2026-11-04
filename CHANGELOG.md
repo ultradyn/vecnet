@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-05: MCP `vecnet_send` input schema drops sendRequest's top-level `anyOf` (ChatGPT rendered it as opaque objects and demanded thread_id); no tool may have a top-level anyOf/oneOf/allOf. internal/mcpserver/tools.go, PROTOCOL §4.3.
 - 2026-11-05: build boxes: x-boss is first in the default `BB_HOSTS` (scripts/bb/run.sh, clean.sh, docs/BUILDBOX.md); pass `BB_HOST=x-boss` in assignments.
 - 2026-11-05: OAuth CIMD accepts a document preferring private_key_jwt when it also lists `none` (ChatGPT's real client.json); stored as a public client. internal/oauth/clients.go, PROTOCOL §4.5.
 - 2026-11-05: amend dot-oauth-xk plan/workflow args with peer-scoped OAuth callers, skew-safe rebind cutoff, no-store-compatible JWKS cache and all-fetch cooldown, pending 0019 and mandatory remote-only runner preflight (`docs/plans/2026-11-05-dot-oauth-xk.md`, `dot-oauth-xk.workflow-args.json`).
