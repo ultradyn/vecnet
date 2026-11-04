@@ -1,4 +1,4 @@
-# 32: Dev hub logs SQLITE_BUSY from background workers
+# 32 (resolved): Dev hub logs SQLITE_BUSY from background workers
 
 Found 2026-11-04 while restarting the dev hub (`.scratch/vecnet/build/devhub.log`). 295 `database is locked (5) (SQLITE_BUSY)` errors between 2026-11-01 and 2026-11-04: `events: step` 126, `push: claim due` 114, `hub: tick expire deliveries` 27, `hub: tick expire approvals` 22. All from background loops; no HTTP request has failed with SQLITE_BUSY in the log (the `internal error` lines are context-canceled client disconnects).
 
@@ -21,3 +21,4 @@ Low priority; investigate before a production deploy.
 ## Decision 2026-11-04 (Max: rec)
 Dev hub switches to `synchronous=NORMAL` via the new `VECNET_SQLITE_SYNCHRONOUS=normal` (default stays `full`; production decided separately). Re-check the SQLITE_BUSY rate after the switch before closing.
 - 2026-11-04 13:29:20 AEDT: dev hub restarted with VECNET_SQLITE_SYNCHRONOUS=normal; SQLITE_BUSY count in devhub.log at restart: 441.
+- 2026-11-04 15:20 AEDT: still 441 after ~110 min on NORMAL (zero new SQLITE_BUSY) through two merge gates and two concurrent builds; host load 15-30. Resolved for the dev hub. Production default stays FULL; revisit only if a deployed hub shows the same stalls.
