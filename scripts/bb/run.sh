@@ -101,8 +101,15 @@ excludes=(--exclude=.git --exclude=node_modules/ --exclude=.worktrees/ --exclude
 # --delete is confined to the lane's own src/; excluded paths (box-side
 # node_modules, bin/) are left alone so installs persist between runs.
 rsync -rlptz --delete --safe-links "${excludes[@]}" -e "ssh ${ssh_opts[*]}" "$ROOT/" "$host:$RL/src/"
+# The wrapper's own files must all arrive: without bin/build2 every recipe and
+# screen script that calls build2 dies on the box with exit 127. (It was once
+# lost to the repo's `bin/` gitignore; .gitignore now re-includes it.)
+for f in remote.sh bootstrap.sh bin/build2; do
+  [[ -f $SELF/$f ]] || die "wrapper file $SELF/$f is missing (is scripts/bb/bin/build2 committed? .gitignore must keep !scripts/bb/bin/)" 78
+done
 rsync -rlptz --delete -e "ssh ${ssh_opts[*]}" "$SELF/" "$host:$RL/bb/"
-ssh "${ssh_opts[@]}" "$host" "bash '$RL/bb/bootstrap.sh' '$lane'" </dev/null
+ssh "${ssh_opts[@]}" "$host" "for f in remote.sh bootstrap.sh; do [ -f '$RL/bb/'\$f ] || { echo \"bb: $host:$RL/bb/\$f missing after sync\" >&2; exit 78; }; done; [ -x '$RL/bb/bin/build2' ] || { echo 'bb: $host:$RL/bb/bin/build2 missing or not executable after sync; recipes calling build2 would exit 127' >&2; exit 78; }; bash '$RL/bb/bootstrap.sh' '$lane'" </dev/null \
+  || die "preflight or bootstrap failed on $host (see above)" 78
 t1=$(now)
 
 # SHOTS_DIR: run against a fresh lane-local dir, then copy it to the
