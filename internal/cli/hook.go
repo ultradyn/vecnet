@@ -145,18 +145,28 @@ func hookSummary(h hookHint, count int, lowerBound bool) string {
 
 // hookForeignNotice is the once-per-session line for a session whose hook
 // does not own the profile. It carries no message content.
-func hookForeignNotice(h hookHint, boundAt time.Time) string {
-	return fmt.Sprintf("vecnet: profile %s's hook belongs to another Claude Code session (bound %s). If this session is profile %s, run: %s. Otherwise ignore this.%s", h.profile, boundAt.UTC().Format("2006-01-02 15:04 UTC"), h.profile, h.rebind, h.config)
+// When this session is itself ambiguous it says so, since that, not the
+// other session, is why a rebind is needed here.
+func hookForeignNotice(h hookHint, boundAt time.Time, o hookOwner) string {
+	also := ""
+	if o.ambiguous() {
+		also = " This session also runs vecnet hooks for several profiles (" + hookProfileList(o.profiles) + "); launching each session with VECNET_PROFILE=<its profile> avoids this."
+	}
+	return fmt.Sprintf("vecnet: profile %s's hook belongs to another Claude Code session (bound %s). If this session is profile %s, run: %s. Otherwise ignore this.%s%s", h.profile, boundAt.UTC().Format("2006-01-02 15:04 UTC"), h.profile, h.rebind, also, h.config)
+}
+
+func hookProfileList(profiles []string) string {
+	names := make([]string, len(profiles))
+	for i, p := range profiles {
+		names[i] = inert(p, 64)
+	}
+	return strings.Join(names, ", ")
 }
 
 // hookAmbiguousNotice is the once-per-session line for an unbound profile
 // whose session runs several profiles' hooks. It carries no message content.
 func hookAmbiguousNotice(h hookHint, profiles []string) string {
-	names := make([]string, len(profiles))
-	for i, p := range profiles {
-		names[i] = inert(p, 64)
-	}
-	return fmt.Sprintf("vecnet: profile %s's hook is not bound to this Claude Code session: the session runs vecnet hooks for several profiles (%s), so the hook cannot tell which one it is. If this session is profile %s, run: %s. Otherwise ignore this. Launching each session with VECNET_PROFILE=<its profile> avoids this.%s", h.profile, strings.Join(names, ", "), h.profile, h.rebind, h.config)
+	return fmt.Sprintf("vecnet: profile %s's hook is not bound to this Claude Code session: the session runs vecnet hooks for several profiles (%s), so the hook cannot tell which one it is. If this session is profile %s, run: %s. Otherwise ignore this. Launching each session with VECNET_PROFILE=<its profile> avoids this.%s", h.profile, hookProfileList(profiles), h.profile, h.rebind, h.config)
 }
 func hookOutput(event, context string) []byte {
 	name := "UserPromptSubmit"
@@ -365,7 +375,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		return hookResult{}
 	}
 	f := stateFile{path: path}
-	owner := hookOwner{session: session, proc: currentProc(a.getenv), declared: strings.TrimSpace(a.getenv("VECNET_PROFILE")) == name}
+	owner := hookOwner{session: session, proc: currentProc(a.getenv), declared: strings.TrimSpace(a.getenv("VECNET_PROFILE")) == name, prompt: event == "user-prompt"}
 	if session != "" {
 		// Unable to tell whether this session runs other profiles' hooks
 		// too, claim nothing rather than guess.
@@ -387,9 +397,21 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		now := nowTime()
 		prev := s.Session
 		switch outcome := s.admit(owner, now); outcome {
+		case admitUnbound:
+			stop = true
+			return errHookForeign // a tool-hook run never binds: silent, untouched
 		case admitForeign, admitAmbiguous:
 			stop = true
-			notice := hookForeignNotice(hint, s.SessionAt)
+			if !owner.prompt {
+				// Tool hooks also fire in subagents and workflow agents, some
+				// with their own session id: stay silent there, and tell only
+				// the top-level session, on its next prompt.
+				if s.Session != prev {
+					return nil // commit the release
+				}
+				return errHookForeign
+			}
+			notice := hookForeignNotice(hint, s.SessionAt, owner)
 			if outcome == admitAmbiguous {
 				notice = hookAmbiguousNotice(hint, owner.profiles)
 				fmt.Fprintf(a.stderr, "vecnet: hook: this Claude Code session runs hooks for several profiles; profile %s claims nothing until %s\n", hint.profile, hint.rebind)

@@ -93,11 +93,26 @@ func (p hookProc) gone() bool {
 	return known && p.Start != "" && start != "" && start != p.Start
 }
 
+// hookBinding is a profile's session binding, kept in bindingPath beside
+// its state file. Session is the owning session_id, SessionAt when it was
+// bound, SessionHow how (bindAuto, bindDeclared or bindRebind), Proc its
+// Claude Code process, RebindUntil the end of a pending `hook rebind`
+// window, and Noticed the sessions already told the profile is not theirs.
+type hookBinding struct {
+	Session     string    `json:"session,omitempty"`
+	SessionAt   time.Time `json:"session_at,omitzero"`
+	SessionHow  string    `json:"session_how,omitempty"`
+	Proc        hookProc  `json:"claude_proc,omitzero"`
+	RebindUntil time.Time `json:"rebind_until,omitzero"`
+	Noticed     []string  `json:"noticed,omitempty"`
+}
+
 // hookOwner is the session a hook run speaks for.
 type hookOwner struct {
 	session  string   // normalised session_id; "" when Claude Code sent none
 	proc     hookProc // its Claude Code process, if known
 	declared bool     // VECNET_PROFILE names this profile
+	prompt   bool     // a UserPromptSubmit run: only the top-level session fires it
 	profiles []string // every profile this session's hooks run (registry)
 }
 
@@ -113,11 +128,18 @@ const (
 	admitRebound                    // took a pending `hook rebind`
 	admitAmbiguous                  // unbound, and this session runs several profiles
 	admitForeign                    // bound to another live session
+	admitUnbound                    // unbound, and not a user-prompt run: never binds
 )
 
 // admit decides whether o may claim deliveries for s, binding or
 // releasing s as needed. The caller holds the state lock, so of two first
 // runs exactly one binds.
+//
+// Invariants: only a user-prompt run binds (subagents and workflow agents
+// fire tool hooks only, sometimes with their own session id), apart from
+// taking an explicit rebind window. Another session never unbinds or takes
+// a bound profile unless its Claude Code process has provably exited. A
+// session releases only an automatic binding of its own, for ambiguity.
 func (s *hookState) admit(o hookOwner, now time.Time) hookAdmit {
 	switch {
 	case o.session == "":
@@ -131,7 +153,7 @@ func (s *hookState) admit(o hookOwner, now time.Time) hookAdmit {
 			s.Proc = o.proc // --resume keeps the id in a new process
 		}
 		return admitOwn
-	case s.Session != "" && s.Proc.same(o.proc):
+	case o.prompt && s.Session != "" && s.Proc.same(o.proc):
 		how := s.SessionHow
 		if how == bindAuto && o.ambiguous() {
 			s.release()
@@ -143,6 +165,9 @@ func (s *hookState) admit(o hookOwner, now time.Time) hookAdmit {
 		s.bindSession(o, bindRebind, now)
 		return admitRebound
 	case s.Session == "" || s.Proc.gone():
+		if !o.prompt {
+			return admitUnbound
+		}
 		if o.ambiguous() {
 			return admitAmbiguous
 		}

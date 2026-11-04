@@ -60,6 +60,8 @@ messaging:
   hook [--event user-prompt|post-tool] [--profile P] [--auto-ack]
        Claude Code hook: always exits 0
   hook install [--profile P] [--write] [--settings PATH] [--auto-ack]
+  hook rebind [--profile P]
+       bind the profile's hook to this Claude Code session (run from its Bash tool)
   threads [--limit N]
   thread <id> [--after MESSAGE_ID] [--limit N]
   peers

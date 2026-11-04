@@ -68,6 +68,12 @@ func readHookState(t *testing.T, path string) hookState {
 	if err := json.Unmarshal(raw, &s); err != nil {
 		t.Fatal(err)
 	}
+	// The session binding lives in its own file (hookBinding).
+	if braw, err := os.ReadFile(bindingPath(path)); err == nil {
+		if err := json.Unmarshal(braw, &s.hookBinding); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return s
 }
 
