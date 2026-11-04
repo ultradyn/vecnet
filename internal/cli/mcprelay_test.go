@@ -303,7 +303,7 @@ func TestMCPRelayStdoutIsJSONOnly(t *testing.T) {
 	secret := "relay-test-secret"
 	u := profileUser(t, strings.Replace(closed.URL, "http://", "http://url-user:url-password@", 1), secret)
 	code, out, errs := relayRun(t, u, strings.Join([]string{relayLine(2, "ping", nil), `not json`, relayCall(3, "vecnet_peers", map[string]any{}), `{"jsonrpc":"2.0","method":"notifications/initialized"}`}, "\n"))
-	if code != 0 || errs != "" {
+	if code != 0 || strings.Count(errs, "hub restarting; reconnecting") != 1 {
 		t.Fatalf("exit=%d stderr=%q", code, errs)
 	}
 	replies := relayReplies(t, out)
