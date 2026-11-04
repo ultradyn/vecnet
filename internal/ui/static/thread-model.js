@@ -38,6 +38,23 @@ export function spillOf(m) {
   return atts[atts.length - 1];
 }
 
+// The hub sets metadata["vecnet.client"] on a CLI send with the operator
+// credential (§2.2 step 11): "Operator on <host> CLI", plus "via ssh" and
+// "(agent suspected)". Peers cannot write vecnet.* keys, so the value is the
+// hub's word; it is still flattened to one line and capped.
+export const CLIENT_LABEL_CAP = 96;
+const CLIENT_UNSAFE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+export function clientLabel(m) {
+  const c = m && m.metadata && m.metadata['vecnet.client'];
+  if (!c || typeof c !== 'object' || c.kind !== 'operator-cli' || typeof c.label !== 'string') return '';
+  return c.label.replace(CLIENT_UNSAFE, ' ').replace(/\s+/g, ' ').trim().slice(0, CLIENT_LABEL_CAP);
+}
+
+// clientSuspect: the hub marked the CLI send agent_suspected (§13.7).
+export function clientSuspect(m) {
+  return !!clientLabel(m) && m.metadata['vecnet.client'].agent_suspected === true;
+}
+
 export function canShowFull(att) {
   if (!att || typeof att.media_type !== 'string') return false;
   return /^text\//i.test(att.media_type) && Number.isFinite(att.size) && att.size >= 0 && att.size <= FULL_TEXT_CAP;

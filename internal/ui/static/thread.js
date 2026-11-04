@@ -9,7 +9,7 @@ import { ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, plural, short, tit
 import { markdown } from './md.js';
 import { prioritySeg } from './prio.js';
 import { createReactions } from './react.js';
-import { budgetBanner, budgetOut, canShowFull, excerpt, FULL_TEXT_CAP, items, replyKey, replySig, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, clientLabel, clientSuspect, excerpt, FULL_TEXT_CAP, items, replyKey, replySig, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
 import { createThumbs } from './thumbs.js';
 
 const PAGE = 200, MAX_PAGES = 50, PIN_SLACK = 80;
@@ -389,6 +389,7 @@ export function mount(root, ctx) {
         h('header', {},
           h('b', null, peerLink(m.sender, nameOf(m.sender)), m.sender === me ? ' (you)' : null),
           h('span', { class: 'kind', text: kindOf(m.sender) }),
+          clientLabel(m) ? h('span', { class: 'cli' + (clientSuspect(m) ? ' sus' : ''), text: clientLabel(m), title: clientSuspect(m) ? 'Sent with the operator credential from the vecnet CLI, by a run that looked like an agent' : 'Sent with the operator credential from the vecnet CLI' }) : null,
           h('span', { class: 't', text: when(m.created_at), title: m.created_at }),
           delta ? h('span', { class: 'dt', text: delta, title: deltaTitle(prev.created_at, m.created_at) }) : null,
           h('span', { class: 'prio ' + m.priority, text: m.priority }),

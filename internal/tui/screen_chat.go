@@ -1760,6 +1760,9 @@ func (l *chatLog) head(msg *envelope.Message) []chatRow {
 	}
 	name := ansi.Truncate(l.names.of(msg.Sender), min(20, l.width/3), "…")
 	segs := chatRow{{chatClock(l.m, msg.CreatedAt) + " ", styleMuted}, glyph, {"<" + name + ">", chatSenderStyle(msg.Sender)}}
+	if label := chatClientLabel(msg); label != "" {
+		segs = append(segs, chatSeg{" [" + ansi.Truncate(label, max(l.width/2, 12), "…") + "]", styleMuted})
+	}
 	if msg.InReplyTo != nil {
 		segs = append(segs, chatSeg{" " + chatReplyMark(l.m, l.names, l.byID, *msg.InReplyTo), styleMuted})
 	}
@@ -1787,6 +1790,18 @@ func (l *chatLog) head(msg *envelope.Message) []chatRow {
 		rows = append(rows, chatRow{{fmt.Sprintf("[+%d lines, e reads it all]", hidden), styleMuted}})
 	}
 	return rows
+}
+
+// chatClientLabel is the hub-set operator CLI label of msg (PROTOCOL §2.2
+// step 11), flattened to one line, or "". Peers cannot write vecnet.* keys,
+// so only the hub's own value shows.
+func chatClientLabel(msg *envelope.Message) string {
+	c, _ := msg.Metadata[envelope.ClientMetadataKey].(map[string]any)
+	if c["kind"] != envelope.ClientKindOperatorCLI {
+		return ""
+	}
+	label, _ := c["label"].(string)
+	return strings.Join(strings.Fields(Clean(label)), " ")
 }
 
 // chatReplyMark names a reply's parent, which may be outside the loaded page.

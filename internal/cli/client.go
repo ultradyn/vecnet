@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/envelope"
 )
 
 // requestTimeout bounds one ordinary request; uploads and streams set their
@@ -46,6 +48,9 @@ type client struct {
 	base   string // hub origin without a trailing slash
 	secret string // "" sends no Authorization header
 	hc     *http.Client
+	// clientHeader is the X-Vecnet-Client value of a bare human run
+	// (operator.go), sent on every request; the hub reads it on sends.
+	clientHeader string
 }
 
 func newClient(base, secret string) *client {
@@ -93,6 +98,9 @@ func (c *client) newRequest(ctx context.Context, method, path string, q url.Valu
 	req.Header.Set("Accept", "application/json")
 	if c.secret != "" {
 		req.Header.Set("Authorization", "Bearer "+c.secret)
+	}
+	if c.clientHeader != "" {
+		req.Header.Set(envelope.ClientHeader, c.clientHeader)
 	}
 	return req, nil
 }

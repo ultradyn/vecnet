@@ -9,6 +9,9 @@ body[data-route=thread] .va .col,body[data-route=matrix] .va .col{max-width:980p
 .va .msg header{display:flex;align-items:center;gap:8px;font-size:13px;flex-wrap:wrap}
 .va .msg header b{font-weight:600}
 .va .msg .kind,.va .msg .t,.va .msg .via{color:var(--dim);font-size:12px}
+/* PROTOCOL §2.2 step 11: the hub-set label of a CLI send with the operator credential */
+.va .msg .cli{font:400 11px var(--mono);color:var(--dim);border:1px solid var(--line);border-radius:4px;padding:0 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52ch}
+.va .msg .cli.sus{color:var(--wake);border-color:#fbbf2455}
 /* issue 25: the gap since the previous message, and the relative time kept with reply */
 .va .msg .dt{font:400 11px var(--mono);color:var(--dim);opacity:.85;margin-left:-3px;cursor:help}
 .va .msg .acts{margin-left:auto;display:inline-flex;align-items:center;gap:10px;flex:none;white-space:nowrap}

@@ -32,7 +32,7 @@ The public URL is the origin the hub writes into attachment `blob_url` links, so
 
    ```toml
    # ~/.config/vecnet/config.toml
-   default = "fly"
+   operator_profile = "fly"   # bare runs from your terminal (OPERATOR.md)
    [profiles.fly]
    hub = "https://vecnet.fly.dev"
    secret = "vn_operator_…"

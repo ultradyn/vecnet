@@ -160,8 +160,11 @@ func TestSmokeBootSendReceive(t *testing.T) {
 	}
 
 	// The operator adds two peers via the CLI package; each enrols.
+	// Profiles are named by VECNET_PROFILE: these runs have no terminal, so
+	// a bare run would be refused as an agent's (PROTOCOL §13.7).
 	op := newCLIUser(t)
-	conf := "default = \"op\"\n\n[profiles.op]\nhub = \"" + base + "\"\nsecret = \"" + opSecret + "\"\n"
+	op.env["VECNET_PROFILE"] = "op"
+	conf := "[profiles.op]\nhub = \"" + base + "\"\nsecret = \"" + opSecret + "\"\n"
 	if err := os.WriteFile(op.env["VECNET_CONFIG"], []byte(conf), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -178,6 +181,7 @@ func TestSmokeBootSendReceive(t *testing.T) {
 			t.Fatalf("peer add --json = %q; want peer_id and enrol_token", out)
 		}
 		u := newCLIUser(t)
+		u.env["VECNET_PROFILE"] = "smoke"
 		u.mustRun("enrol", "--hub", base, "--token", added.EnrolToken, "--profile", "smoke")
 		return added.PeerID, u
 	}

@@ -2890,3 +2890,29 @@ func TestDelayedReactResponseKeepsNewerReactions(t *testing.T) {
 	p.idle()
 	wantFrame(t, chatFrame(t, m), "[check: you, codex]")
 }
+
+// A CLI send with the operator credential carries the hub-set
+// metadata["vecnet.client"]; the log names the terminal beside the sender,
+// cleaned like any other hub-relayed string.
+func TestChatOperatorCLILabel(t *testing.T) {
+	a := chatSeed()
+	cli := chatMsg("msg_01cli", chatOp, "wake", chatAt(7, 6), "sent from my terminal")
+	cli.Metadata = map[string]any{envelope.ClientMetadataKey: map[string]any{
+		"kind": "operator-cli", "host": "x-tall", "ssh": true,
+		"label": "Operator on x-tall CLI via ssh",
+	}}
+	hostile := chatMsg("msg_01cli2", chatOp, "hold", chatAt(7, 7), "second")
+	hostile.Metadata = map[string]any{envelope.ClientMetadataKey: map[string]any{"kind": "operator-cli", "label": "Operator on \x1b[31mevil\nhost CLI"}}
+	other := chatMsg("msg_01cli3", chatOp, "hold", chatAt(7, 8), "third")
+	other.Metadata = map[string]any{envelope.ClientMetadataKey: map[string]any{"kind": "web", "label": "not a CLI"}}
+	th := a.byID[chatHark]
+	th.messages = append(th.messages, cli, hostile, other)
+	m, _ := chatModel(t, a, newClock())
+	frame := chatFrame(t, m)
+	wantFrame(t, frame, "<max> [Operator on x-tall CLI via ssh] sent from my terminal", "[Operator on evil host CLI] second")
+	refuseFrame(t, frame, "not a CLI")
+	assertChatInert(t, m.View().Content)
+	for _, size := range [][2]int{{140, 42}, {80, 24}} {
+		assertFrame(t, plainAt(t, m, size[0], size[1]), size[0], size[1])
+	}
+}

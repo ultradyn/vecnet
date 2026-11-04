@@ -287,7 +287,10 @@ func parseFlags(cmd string, args []string, spec map[string]flagKind) (opts, erro
 }
 
 // connect loads the config and returns a client for the chosen profile,
-// the profile name and the local cache.
+// the profile name and the local cache. The profile is --net, else
+// $VECNET_PROFILE; a run naming neither is bare (resolveBare): refused for
+// an agent, the operator profile with a CLI label for a human. Any run with
+// an operator credential sends the CLI label (operatorLabel).
 func (a *app) connect() (*client, string, cache, error) {
 	path, err := configPath(a.getenv)
 	if err != nil {
@@ -297,7 +300,18 @@ func (a *app) connect() (*client, string, cache, error) {
 	if err != nil {
 		return nil, "", cache{}, err
 	}
-	name, p, err := cfg.profile(a.net)
+	if err := cfg.checkDefault(); err != nil {
+		return nil, "", cache{}, err
+	}
+	name := a.namedProfile()
+	var p Profile
+	var label *envelope.OperatorClient
+	if name != "" {
+		name, p, err = cfg.profile(name)
+		label = a.operatorLabel(p)
+	} else {
+		name, p, label, err = a.resolveBare(cfg)
+	}
 	if err != nil {
 		return nil, "", cache{}, err
 	}
@@ -305,7 +319,11 @@ func (a *app) connect() (*client, string, cache, error) {
 	if err != nil {
 		dir = ""
 	}
-	return newClient(p.Hub, p.Secret), name, cache{dir: dir}, nil
+	c := newClient(p.Hub, p.Secret)
+	if label != nil {
+		c.clientHeader = label.Header()
+	}
+	return c, name, cache{dir: dir}, nil
 }
 
 // peerQuery narrows a principal's stream or ack to --as (PROTOCOL §2.3).
@@ -456,9 +474,6 @@ func (a *app) cmdEnrol(args []string) error {
 		return err
 	}
 	cfg.Profiles[name] = Profile{Hub: strings.TrimRight(hubURL, "/"), Secret: out.Secret, PeerID: out.PeerID}
-	if cfg.Default == "" {
-		cfg.Default = name
-	}
 	if err := saveConfig(path, cfg); err != nil {
 		// The secret was issued once; show it so it is not lost.
 		fmt.Fprintf(a.stderr, "vecnet: could not write %s; the secret for %s is %s\n", path, out.PeerID, out.Secret)

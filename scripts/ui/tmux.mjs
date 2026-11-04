@@ -13,7 +13,9 @@ export async function withTui({ scale = false, command, env: shared, beatEvery }
   let browser, started = false, unregister;
   try {
     const config = join(env.dir, 'config.toml');
-    await writeFile(config, `default = "demo"\n[profiles.demo]\nhub = ${JSON.stringify(env.demo.url)}\nsecret = ${JSON.stringify(env.demo.operator_secret)}\npeer_id = ${JSON.stringify(env.demo.operator_peer)}\n`, { mode: 0o600 });
+    // VECNET_PROFILE names the profile: a bare run under an agent harness
+    // (CLAUDECODE and friends inherited through tmux) would be refused.
+    await writeFile(config, `[profiles.demo]\nhub = ${JSON.stringify(env.demo.url)}\nsecret = ${JSON.stringify(env.demo.operator_secret)}\npeer_id = ${JSON.stringify(env.demo.operator_peer)}\n`, { mode: 0o600 });
     const bin = await buildCLI(env.dir);
     const argv = command || [bin, 'tui'];
     // An argv-based override lets the Task 2 smoke exercise tmux before TUI
@@ -21,7 +23,7 @@ export async function withTui({ scale = false, command, env: shared, beatEvery }
     // Colour is forced on: a harness that exports NO_COLOR would otherwise
     // strip it from every shot.
     const beat = beatEvery === undefined ? '' : ` VECNET_TEST_TUI_BEAT=${quote(beatEvery)}`;
-    const shell = `env -u NO_COLOR COLORTERM=truecolor VECNET_CONFIG=${quote(config)} XDG_CACHE_HOME=${quote(join(env.dir, 'cache'))} XDG_CONFIG_HOME=${quote(join(env.dir, 'config'))} TERM=xterm-256color${beat} ${argv.map(quote).join(' ')}`;
+    const shell = `env -u NO_COLOR COLORTERM=truecolor VECNET_PROFILE=demo VECNET_CONFIG=${quote(config)} XDG_CACHE_HOME=${quote(join(env.dir, 'cache'))} XDG_CONFIG_HOME=${quote(join(env.dir, 'config'))} TERM=xterm-256color${beat} ${argv.map(quote).join(' ')}`;
     await tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'ui', '-x', '140', '-y', '42', shell);
     started = true;
     unregister = registerExitCleanup(() => {
