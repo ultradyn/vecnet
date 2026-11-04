@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/XertroV/vecnet/internal/envelope"
@@ -399,6 +400,31 @@ func TestDashDisabledPeerFlagged(t *testing.T) {
 	m, _ := openDash(t, seededDash(), newClock())
 	dashHas(t, dashRow(t, m, 140, 42, "old-bot"), "disabled")
 	dashHas(t, dashRow(t, m, 80, 24, "old-bot"), "disabled")
+}
+
+// A launcher peer's name takes the launcher kind colour (yellow, #facc15),
+// the same colour the web dashboard gives its kind dot.
+func TestDashLauncherKindStyled(t *testing.T) {
+	want := lipgloss.NewStyle().Foreground(lipgloss.Color("#facc15"))
+	got, ok := styleDashKinds["launcher"]
+	if !ok {
+		t.Fatal("styleDashKinds has no launcher style")
+	}
+	sgr := func(st lipgloss.Style) string { r := st.Render("X"); return r[:strings.Index(r, "X")] }
+	if sgr(got) != sgr(want) {
+		t.Fatalf("launcher style %q, want %q", sgr(got), sgr(want))
+	}
+	f := seededDash()
+	f.peers = append(f.peers, dashPeer("peer_ln", "ln-xsm", "launcher", "working", "connected", 0, map[string]any{"weekly_remaining_pct": 80.0}, "lan:xsm"))
+	m, _ := openDash(t, f, newClock())
+	dashHas(t, dashRow(t, m, 140, 42, "ln-xsm"), "launcher")
+	frame := m.View().Content
+	if !strings.Contains(frame, sgr(want)+"ln-xsm") {
+		t.Errorf("launcher peer is not drawn in the launcher colour:\n%q", frame)
+	}
+	if strings.Contains(frame, sgr(styleText)+"ln-xsm") && sgr(styleText) != "" {
+		t.Error("launcher peer is drawn in the plain text style")
+	}
 }
 
 func TestDashBlockedOnDelivery(t *testing.T) {

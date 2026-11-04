@@ -3,6 +3,7 @@
 // Each section loads and fails on its own. The page reloads on the `peers` tag
 // and every 30 s while mounted. Ages use the hub clock, never the client's.
 import { allThreads, blockedLine, cutSummary, peerRows } from './dash-model.js';
+import { principalRows } from './principals-model.js';
 import { chip, h } from './dom.js';
 import { ago, short, title as threadTitle, when } from './format.js';
 import * as subs from './subs.js';
@@ -46,6 +47,8 @@ export function mount(root, ctx) {
   const res = {
     counters: store.resource('peers', () => api.counters()),
     peers: store.resource('peers', () => api.adminPeers()),
+    // Created peers emit directory_updated, so the peers tag refreshes this.
+    principals: store.resource('peers', () => api.principals()),
     threads: store.resource('threads', () => allThreads(api, THREAD_PAGE)),
     health: store.resource('peers', () => api.deliveryHealth()),
     dead: store.resource('peers', () => api.deadLetters()),
@@ -92,6 +95,7 @@ export function mount(root, ctx) {
       h('p', { class: 'lede', text: 'Read-only view of the hub. Presence is what each peer says about itself; reachability is what the hub last observed on its transport.' }),
       counterLine,
       section('peers', 'd-peers', 'Peers'),
+      section('principals', 'd-principals', 'Principals'),
       section('threads', 'd-threads', 'Threads'),
       section('health', 'd-health', 'Delivery health'),
       section('dead', 'd-dead', 'Dead letters'),
@@ -142,6 +146,20 @@ export function mount(root, ctx) {
         h('td', { class: 'mono sm', text: p.quota }),
         h('td', { class: 'mono sm', text: p.location }));
     }))];
+  }
+
+  // Principals with limits or created peers (§18.4); absent when there are none.
+  function drawPrincipals(value, s) {
+    const rows = principalRows(value.principals);
+    s.count.textContent = String(rows.length);
+    if (!rows.length) return [];
+    return [table(['Principal', 'Active', 'Disabled', 'Creates/h', 'Kinds', 'Default scopes'], rows.map(p => h('tr', null,
+      h('td', null, h('span', { text: p.name }), idCell(p.id)),
+      h('td', { class: 'mono sm' + (p.full ? ' warn' : ''), text: p.active + '/' + p.max, title: p.full ? 'at the peer cap' : null }),
+      h('td', { text: String(p.disabled) }),
+      h('td', { class: 'mono sm', text: p.createsLastHour + '/' + p.createsPerHour }),
+      h('td', { class: 'mono sm', text: p.kinds.join(', ') || 'none' }),
+      h('td', { class: 'mono sm' + (p.unscopedRisk ? ' warn' : ''), text: p.scopes, title: p.unscopedRisk ? 'other peers of this principal are scoped' : null }))))];
   }
 
   function drawThreads(value, s) {
@@ -251,6 +269,9 @@ export function mount(root, ctx) {
   function render() {
     renderCounters();
     fill('peers', res.peers, 'Peers', drawPeers);
+    const pv = res.principals.get();
+    sections.principals.el.hidden = !res.principals.error() && !principalRows(pv && pv.principals).length;
+    if (!sections.principals.el.hidden) fill('principals', res.principals, 'Principals', drawPrincipals);
     fill('threads', res.threads, 'Threads', drawThreads);
     fill('health', res.health, 'Delivery health', drawHealth);
     fill('dead', res.dead, 'Dead letters', drawDead);
