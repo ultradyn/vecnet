@@ -680,3 +680,24 @@ test('a backend input_too_large refusal fails just that input, splits its batch 
   const next=s.message('later');await s.lane.handleMessage(next);
   assert.deepEqual(s.sends.at(-1)!.input.items.map(i=>i.deliveryId),[next.delivery_id]);
 });
+test('a transient interrupt failure during a requester cancel retries on the Clock until the job is cancelled',async t=>{
+  const s=await setup(t);
+  let failures=2;const interrupt=s.handle.interrupt.bind(s.handle);
+  s.handle.interrupt=async reason=>{ if(failures-->0) throw new Error('backend unreachable'); return interrupt(reason); };
+  await s.lane.cancel('req');
+  assert.equal(s.statuses().length,0);assert.equal(s.ledger.job('job_one')!.state,'running');
+  s.clock.advance(1000);await tick();assert.equal(s.statuses().length,0);
+  s.clock.advance(2000);await tick();
+  assert.deepEqual(s.statuses().map(x=>x.state),['cancelled']);assert.deepEqual(s.calls,['interrupt','settle:cancel']);
+});
+test('a cancel whose backend I/O failed before a restart is resumed when the next lane attaches',async t=>{
+  const s=await setup(t);
+  s.handle.interrupt=async()=>{throw new Error('backend unreachable');};
+  await s.lane.cancel('req');await s.lane.stop();
+  assert.equal(s.statuses().length,0);
+  const calls:string[]=[];
+  const next=createLane(s.ledger.job('job_one')!,s.deps);t.after(()=>next.stop());
+  next.attach({...s.handle,async interrupt(){calls.push('interrupt');},async settle(mode){calls.push(`settle:${mode}`);return {workspaceKept:true};}});
+  await tick();
+  assert.deepEqual(calls,['interrupt','settle:cancel']);assert.deepEqual(s.statuses().map(x=>x.state),['cancelled']);
+});

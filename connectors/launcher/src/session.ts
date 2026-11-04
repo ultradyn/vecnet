@@ -74,6 +74,7 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
   let fence: { promise: Promise<void>; release(): void } | undefined;
   let recovery: ReturnType<Clock['timer']> | undefined, recoveryAttempts = 0;
   let streamRetry: ReturnType<Clock['timer']> | undefined, streamAttempts = 0;
+  let cancelRetry: ReturnType<Clock['timer']> | undefined, cancelAttempts = 0;
   const backoff = (attempt: number) => Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));
   const job = () => ledger.job(jobId)!;
   function serial<T>(fn: () => Promise<T> | T): Promise<T> {
@@ -97,6 +98,7 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
   const blocked = () => held || uncertain();
   function cancelRetries() {
     recovery?.cancel(); recovery = undefined;
+    cancelRetry?.cancel(); cancelRetry = undefined;
     streamRetry?.cancel(); streamRetry = undefined;
   }
   function scheduleRecovery() {
@@ -418,6 +420,18 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     await control(command, from);
     ledger.tx(() => { store.set(key, JSON.stringify({ ...decision, state: 'done' })); receipt(id, 'processed'); });
   }
+  async function cancelNow() {
+    if (stopped || job().state === 'ended' || !store.get('cancel')) return;
+    cancelRetry?.cancel(); cancelRetry = undefined;
+    try {
+      await handle?.interrupt('cancel');
+      await end('cancel', 'cancel');
+      store.delete('cancel');
+    } catch {
+      log.warn('session cancel failed; retrying', { jobId });
+      if (!stopped) cancelRetry = clock.timer(backoff(cancelAttempts++), () => { cancelRetry = undefined; void serial(cancelNow).catch(() => {}); });
+    }
+  }
   // The single recovery path: at attach, and on Clock backoff after any
   // rejected send. It resends uncertain batches in their stored order, then
   // releases a held completion, which dispatches next itself; otherwise it
@@ -452,6 +466,8 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
           (state.kind === 'idle' || state.kind === 'parked' || (state.kind === 'ended' && state.resumable));
         if (awaitingTurn) store.set('awaitingTurn', '1');
         ledger.updateJob(jobId, { state: 'running', sessionKind: state.kind === 'ended' && state.resumable ? 'parked' : state.kind });
+        // A cancel recorded before a restart (or a failed attempt) goes first.
+        if (store.get('cancel')) { await cancelNow(); return; }
         await reconcile();
       }).catch(scheduleRecovery);
     },
@@ -519,7 +535,14 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
       });
     },
     control: (c, from) => serial(() => control(c, from)),
-    cancel: by => serial(async () => { if (authorized(by) && !stopped && job().state !== 'ended') { await handle?.interrupt('cancel'); await end('cancel', 'cancel'); } }),
+    // The cancel intent is durable before any backend I/O. A transient
+    // interrupt or settle failure retries on Clock backoff, and a restarted
+    // lane resumes it at attach, until the job reaches a terminal state.
+    cancel: by => serial(async () => {
+      if (!authorized(by) || stopped || job().state === 'ended') return;
+      store.set('cancel', by);
+      await cancelNow();
+    }),
     park: () => serial(async () => { if (!stopped && job().state !== 'ended' && handle?.park) { await handle.park(); ledger.updateJob(jobId, { sessionKind: 'parked', parkedAt: clock.now() }); } }),
     settle: (mode, ended, extra) => serial(() => end(mode, ended, extra)),
     activity: () => serial(async () => ({ ...(handle ? await handle.activity() : { turnRunning: false, openApprovals: 0, queuedInputs: 0, backgroundTasks: { known: 0, observable: false }, lastActivityAt: new Date(job().lastActivityAt).toISOString() }), launcherBuffered: ledger.inputs(jobId, ['buffered', 'sending']).length, lastRelayAt: Number(store.get('lastRelayAt') ?? initial.lastActivityAt) })),
