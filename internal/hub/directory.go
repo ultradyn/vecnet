@@ -18,6 +18,7 @@ import (
 // never carries credential status, hashes, scopes or routes: those are
 // operator-only (§2.10).
 type DirectoryEntry struct {
+	CreatedBy    *string        `json:"created_by,omitempty"`
 	PeerID       string         `json:"peer_id"`
 	Name         string         `json:"name"`
 	Kind         string         `json:"kind"`
@@ -93,7 +94,7 @@ func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
 
 	rows, err = h.DB.QueryContext(ctx,
 		`SELECT peer_id, name, kind, capabilities, quota, location, presence_state, presence_at,
-		        reachability, reach_via, last_seen, enrolled_at
+		        reachability, reach_via, last_seen, enrolled_at, created_by
 		 FROM peers WHERE disabled = 0 ORDER BY peer_id`)
 	if err != nil {
 		return nil, fmt.Errorf("hub: directory: %w", err)
@@ -103,12 +104,12 @@ func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
 	out := []DirectoryEntry{}
 	for rows.Next() {
 		var (
-			e                             DirectoryEntry
-			caps, quota, enrolled, reach  string
-			loc, state, at, via, lastSeen sql.NullString
+			e                                        DirectoryEntry
+			caps, quota, enrolled, reach             string
+			loc, state, at, via, lastSeen, createdBy sql.NullString
 		)
 		if err := rows.Scan(&e.PeerID, &e.Name, &e.Kind, &caps, &quota, &loc, &state, &at,
-			&reach, &via, &lastSeen, &enrolled); err != nil {
+			&reach, &via, &lastSeen, &enrolled, &createdBy); err != nil {
 			return nil, fmt.Errorf("hub: directory: %w", err)
 		}
 		if err := json.Unmarshal([]byte(caps), &e.Capabilities); err != nil || e.Capabilities == nil {
@@ -119,6 +120,7 @@ func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
 		if err := dec.Decode(&e.Quota); err != nil || e.Quota == nil {
 			e.Quota = map[string]any{}
 		}
+		e.CreatedBy = nullable(createdBy)
 		e.Location = nullable(loc)
 		e.LastSeen = nullable(lastSeen)
 		e.Reachability = EffectiveReachability(reach, nullable(via), e.LastSeen, now)

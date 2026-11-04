@@ -244,6 +244,7 @@ func (v Matrix) MarshalJSON() ([]byte, error) {
 }
 
 type Peer struct {
+	CreatedBy    *string        `json:"created_by,omitempty"`
 	PeerID       string         `json:"peer_id"`
 	Name         string         `json:"name"`
 	Kind         string         `json:"kind"`
