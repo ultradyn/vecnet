@@ -583,6 +583,7 @@ func TestAllowedOrigins(t *testing.T) {
 		{"empty", []string{""}, 403},
 		{"path", []string{env.URL + "/path"}, 403},
 		{"slash", []string{env.URL + "/"}, 403},
+		{"bracketed IPv4", []string{strings.Replace(env.URL, "127.0.0.1", "[127.0.0.1]", 1)}, 403},
 		{"userinfo", []string{"https://user@chatgpt.com"}, 403},
 		{"query", []string{env.URL + "?query"}, 403},
 		{"fragment", []string{env.URL + "#fragment"}, 403},
@@ -915,6 +916,7 @@ func TestAllowedOriginsConfig(t *testing.T) {
 		{"none", env.URL, "https://chatgpt.com"},
 		{" https://client.example , HTTPS://OTHER.EXAMPLE:443 ", "https://other.example", "https://chatgpt.com"},
 		{"http://localhost:8080,https://[::1]:8443", "https://[::1]:8443", "https://[::1]"},
+		{"https://[::1]:8443", "https://[::1]:8443", "https://::1:8443"},
 	} {
 		t.Run(tc.config, func(t *testing.T) {
 			origins, err := mcpserver.ParseAllowedOrigins(tc.config)
@@ -942,6 +944,7 @@ func TestAllowedOriginsConfig(t *testing.T) {
 		"https://user@chatgpt.com", "https://chatgpt.com?", "https://chatgpt.com#", "https://chatgpt.com?x=1",
 		"https://chatgpt.com#frag", "chatgpt.com", "ftp://chatgpt.com", "https://", "https://chatgpt.com:",
 		"https://chatgpt.com:0", "https://chatgpt.com:65536", "https://chatgpt.com:bad", "https://[bogus]:443",
+		"https://[127.0.0.1]", "https://::1:443", "https://2001:db8::1:443",
 		"https://a..example", "https://-bad.example", "https://bad_.example", ",", "https://chatgpt.com,", "none,https://chatgpt.com",
 	} {
 		t.Run("invalid/"+config, func(t *testing.T) {
