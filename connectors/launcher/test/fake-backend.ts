@@ -31,6 +31,8 @@ export interface FakeBackend extends Backend {
   sessions(): FakeSession[];
   finishTurn(jobId: string, text: string, outcome?: Finished['outcome']): void;
   startTurn(jobId: string): void;
+  /** An event through hooks.onEvent only, as the t3 plugin reports approval waits. */
+  hookEvent(jobId: string, ev: TurnEvent): void;
   ask(jobId: string, q: AgentQuestion): Promise<QuestionAnswer>;
   requestPermission(jobId: string, r: PermissionRequest): Promise<PermissionDecision>;
   setActivity(jobId: string, partial: Partial<ActivityReport>): void;
@@ -178,6 +180,7 @@ export function createFakeBackend(opts: FakeBackendOptions = {}): FakeBackend {
     sessions: () => [...sessions.values()].map(({ref,spec,state,sent,interrupts,parks,settles}) => structuredClone({ref,spec,state,sent,interrupts,parks,settles})),
     finishTurn(jobId,text,outcome) { finish(session(jobId),text,outcome); },
     startTurn(jobId) { start(session(jobId)); },
+    hookEvent(jobId,ev) { session(jobId); hooks.get(jobId)?.onEvent(structuredClone(ev)); },
     async ask(jobId,q) {
       session(jobId); const sessionHooks = hooks.get(jobId); if (!sessionHooks) throw new Error('fake session has no hooks');
       return sessionHooks.onQuestion(q,new AbortController().signal);

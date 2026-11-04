@@ -207,9 +207,14 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
       return { alias: job.project, repoRoot: p.repo_root, baseRef: job.input.base_ref ?? p.base_ref };
     };
     const launchDeps: LaunchDeps = {
-      ledger, jobs, backends, clock, log, host: cfg.host, cfg, projects, beforeRecordRef: o.beforeRecordRef,
-      hooks: job => bridge.hooksFor(job, job.workspace ?? (Object.hasOwn(cfg.projects, job.project) ? cfg.projects[job.project].repo_root : ''), ev => {
+      ledger, jobs, backends, clock, log, host: cfg.host, cfg, projects, beforeRecordRef: o.beforeRecordRef, kick: () => outbox.kick(),
+      // The session's own workspace, read per prompt from the ledger: the
+      // worktree is recorded only after launch returns. Until then no path is
+      // claimed to be inside it (a placeholder that contains nothing real).
+      hooks: job => bridge.hooksFor(job, () => ledger.job(job.jobId)?.workspace ?? join(cfg.state_dir, 'workspace-pending', job.jobId), ev => {
         if (ev.type === 'state' || ev.type === 'process_exited') changed();
+        // An approval only the backend UI can answer gets a note to the requester.
+        if (ev.type === 'progress') { const lane = lanes.get(job.jobId); if (lane) void lane.notice(ev).catch(() => {}); }
       }),
     };
     const exec = pluginContext({ host: cfg.host, log, ledger, id: 'daemon', clock }).exec;

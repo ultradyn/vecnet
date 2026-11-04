@@ -26,8 +26,12 @@ export interface SessionLane {
   cancel(by: string): Promise<void>;
   park(): Promise<void>; settle(mode: SettleMode, ended: EndReason, extra?: Record<string, unknown>): Promise<void>;
   activity(): Promise<ActivityReport & { launcherBuffered: number; lastRelayAt: number }>;
+  /** A backend event from outside the turn stream (a plugin's hooks.onEvent). */
+  notice(ev: TurnEvent): Promise<void>;
   stop(): Promise<void>;
 }
+/** Plugins report an approval that only their own UI can answer as this progress summary. */
+export const APPROVAL_WAIT = /^waiting for (?:approval|permission) in \S/i;
 const hash = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 24);
 function prefix(s: string, bytes: number): string {
   const data = Buffer.from(s);
@@ -340,11 +344,21 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
       return;
     }
     ledger.tx(() => {
+      approvalWait(ev);
       if (ev.type === 'turn_started') store.set('awaitingTurn', '1');
       ledger.updateJob(jobId, { turnCursor: cursor,
         ...(ev.type === 'state' ? { sessionKind: ev.state.kind } : ev.type === 'turn_started' ? { sessionKind: 'turn_running' as const } : {}),
       });
     });
+  }
+  // One durable note per backend turn when the agent waits on an approval that
+  // only the backend's own UI can answer; ordinary progress stays unposted.
+  function approvalWait(ev: TurnEvent) {
+    if (ev.type !== 'progress' || !APPROVAL_WAIT.test(ev.summary) || stopped || job().state === 'ended') return;
+    const current = job(), key = `vl.nt.${jobId}.approval_wait.${hash(ev.turnId)}.${current.turns}`;
+    const text = redactText(`The agent is ${ev.summary.replace(/[\r\n]+/g, ' ').slice(0, 200)}: approve or deny it in the backend's own interface; vecnet cannot answer this prompt.`).text;
+    outbox.enqueue('send', key, { idempotency_key: key, kind: 'message', thread_id: current.threadId, in_reply_to: current.launchMessageId,
+      recipients: [current.requester], priority: 'wake_idle', content: { text } }, jobId);
   }
   function untilReleased(wait: Promise<void>, signal: AbortSignal) {
     return new Promise<void>(resolve => {
@@ -546,6 +560,7 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     park: () => serial(async () => { if (!stopped && job().state !== 'ended' && handle?.park) { await handle.park(); ledger.updateJob(jobId, { sessionKind: 'parked', parkedAt: clock.now() }); } }),
     settle: (mode, ended, extra) => serial(() => end(mode, ended, extra)),
     activity: () => serial(async () => ({ ...(handle ? await handle.activity() : { turnRunning: false, openApprovals: 0, queuedInputs: 0, backgroundTasks: { known: 0, observable: false }, lastActivityAt: new Date(job().lastActivityAt).toISOString() }), launcherBuffered: ledger.inputs(jobId, ['buffered', 'sending']).length, lastRelayAt: Number(store.get('lastRelayAt') ?? initial.lastActivityAt) })),
+    notice: ev => serial(() => { ledger.tx(() => approvalWait(ev)); }),
     async stop() { stopped = true; cancelRetries(); controller?.abort(); await chain; await pump; },
   };
   return lane;

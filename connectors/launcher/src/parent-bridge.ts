@@ -19,7 +19,8 @@ export interface ParentBridgeDeps {
   route(p: LaunchPermission, job: JobRow): ApprovalRoute;
 }
 export interface ParentBridge {
-  hooksFor(job: JobRow, workspaceRoot: string, onEvent: (ev: TurnEvent) => void): SessionHooks;
+  /** workspaceRoot may be a function: it is read when each prompt arrives, so a session's worktree recorded after launch applies. */
+  hooksFor(job: JobRow, workspaceRoot: string | (() => string), onEvent: (ev: TurnEvent) => void): SessionHooks;
   handleApprovalResponse(d: Delivery): Promise<'consumed' | 'unrelated'>;
   handleThreadReply(d: Delivery): Promise<'consumed' | 'unrelated'>;
   open(jobId: string): { approvals: number; questions: number };
@@ -306,7 +307,7 @@ export function createParentBridge(deps: ParentBridgeDeps): ParentBridge {
   }
   const bridge: ParentBridge = {
     hooksFor(job,workspaceRoot,onEvent) {
-      return {onQuestion:(q,s)=>ask(job,q,s),onPermissionRequest:(r,s)=>requestPermission(job,workspaceRoot,r,s),
+      return {onQuestion:(q,s)=>ask(job,q,s),onPermissionRequest:(r,s)=>requestPermission(job,typeof workspaceRoot === 'function' ? workspaceRoot() : workspaceRoot,r,s),
         onEvent(ev) {try {onEvent(ev);} catch {deps.log.warn('parent bridge event handler failed');}}};
     },
     async handleApprovalResponse(d) {

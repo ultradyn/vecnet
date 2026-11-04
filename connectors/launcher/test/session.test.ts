@@ -701,3 +701,19 @@ test('a cancel whose backend I/O failed before a restart is resumed when the nex
   await tick();
   assert.deepEqual(calls,['interrupt','settle:cancel']);assert.deepEqual(s.statuses().map(x=>x.state),['cancelled']);
 });
+test('an approval wait only the backend UI can answer posts one redacted note per turn to the requester; other progress is not posted',async t=>{
+  const s=await setup(t,{kind:'turn_running'});
+  const notes=()=>s.rows().filter(r=>r.kind==='send' && r.key.startsWith('vl.nt.job_one.approval_wait.')).map(r=>r.payload as SendRequest);
+  await s.emit({type:'progress',turnId:'agent-1',summary:'running tests'});
+  assert.equal(notes().length,0);
+  await s.emit({type:'progress',turnId:'agent-1',summary:'waiting for permission in Paseo'});
+  await s.emit({type:'progress',turnId:'agent-1',summary:'waiting for permission in Paseo'});
+  await s.lane.notice({type:'progress',turnId:'agent-1',summary:'waiting for permission in Paseo'});
+  assert.equal(notes().length,1);
+  const note=notes()[0];
+  assert.equal(note.in_reply_to,'msg_launch');assert.deepEqual(note.recipients,['req']);assert.match(note.content.text,/waiting for permission in Paseo/);
+  // The next turn's wait gets its own note.
+  await s.emit(finished('turn-1'));
+  await s.lane.notice({type:'progress',turnId:'run-2',summary:'waiting for approval in T3 Bearer secret-token'});
+  assert.equal(notes().length,2);assert.ok(!notes()[1].content.text.includes('secret-token'));
+});

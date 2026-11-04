@@ -10,6 +10,8 @@ export interface LaunchDeps {
   ledger: Ledger; jobs: JobReporter; backends: Map<string, Backend>; hooks(job: JobRow): SessionHooks;
   clock: Clock; log: Log; host: string; cfg: LauncherConfig; projects(job: JobRow): ResolvedProject;
   beforeRecordRef?: (jobId: string) => void;
+  /** Wakes the outbox after a direct ledger enqueue (the unreachable note). */
+  kick?: () => void;
 }
 
 interface Pending { since: number; nextAt: number; noted: boolean }
@@ -42,6 +44,8 @@ export function pendingDue(job: JobRow, deps: LaunchDeps): boolean {
       },job.jobId);
       pending.noted = true; store.set(job.jobId,JSON.stringify(pending));
     });
+    // An idle outbox waits for a kick; nothing else may arrive to wake it.
+    deps.kick?.();
   }
   return deps.clock.now() >= pending.nextAt;
 }

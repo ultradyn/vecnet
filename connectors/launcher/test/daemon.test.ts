@@ -10,7 +10,8 @@ import { createHubClient } from '../../hub-client/src/client.ts';
 import type { HubApi } from '../../hub-client/src/ports.ts';
 import { startDaemon } from '../src/daemon.ts';
 import { createFakeBackend } from './fake-backend.ts';
-import { harness, launch, launched, message, settle, until, LAUNCHER, REQUESTER } from './daemon-harness.ts';
+import { harness, launch, launched, message, settle, until, LAUNCHER, REQUESTER, T0 } from './daemon-harness.ts';
+import { fakeClock } from '../../hub-client/testing/fixtures.ts';
 
 test('a crash after the accept tx and before startLaunch → restart launches exactly once', async t => {
   const h = await harness(t);
@@ -204,4 +205,47 @@ test('the systemd unit runs main.ts from the installed tree with the planned lim
   for (const line of ['Restart=on-failure', 'RestartSec=10', 'UMask=0077', 'MemoryMax=1G', 'After=network-online.target t3code.service', 'WantedBy=default.target']) {
     assert.match(unit, new RegExp(`^${line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
   }
+});
+
+test('permission prompts are classified against the session worktree recorded at launch, not the project repo root', async t => {
+  const backend = createFakeBackend({ clock: fakeClock(T0) });
+  const launch = backend.launch.bind(backend);
+  backend.launch = async (spec, hooks, signal) => {
+    const handle = await launch(spec, hooks, signal);
+    (handle.ref.extra as Record<string, unknown>).workspace = `/worktrees/${spec.jobId}`;
+    return handle;
+  };
+  const h = await harness(t, { backend });
+  const { jobId } = await launched(h);
+  const options = [{ id: 'allow', label: 'Allow once', grants: 'once' as const }, { id: 'deny', label: 'Deny', grants: 'deny' as const }];
+  void h.backend.requestPermission(jobId, { requestId: 'p1', summary: 'Write in the main checkout', options, defaultOnExpiry: 'deny',
+    permission: { kind: 'edit', backend_method: 'file/edit', scope: 'once', options, paths: [{ path: '/repo/file', access: 'write' }],
+      fidelity: { kind: 'enforced', command: 'none', paths: 'enforced', host: 'none' }, backend_raw: {} } });
+  await until(() => h.sends().some(s => s.kind === 'approval_request'), 'approval_request');
+  const permission = h.sends().find(s => s.kind === 'approval_request')!.metadata!['launch.permission'] as
+    { workspace_root: string; outside_workspace: unknown; paths: Array<{ in_workspace: boolean }> };
+  assert.equal(permission.workspace_root, `/worktrees/${jobId}`);
+  assert.equal(permission.outside_workspace, true);
+  assert.equal(permission.paths[0].in_workspace, false);
+});
+
+test('a plugin approval wait reported through hooks.onEvent reaches the requester as a note', async t => {
+  const h = await harness(t);
+  const { jobId, thread } = await launched(h);
+  h.backend.hookEvent(jobId, { type: 'progress', turnId: 'run-1', summary: 'waiting for approval in T3' });
+  await until(() => h.replies(thread).some(r => /waiting for approval in T3/.test(r.content.text)), 'approval wait note');
+});
+
+test('the backend-unreachable note is sent after five minutes with no other event to wake the outbox', async t => {
+  const h = await harness(t);
+  const { jobId, thread } = await launched(h);
+  h.backend.failReattach(1000);
+  await h.restart();
+  await settle();
+  const before = h.sends().length;
+  for (let i = 0; i < 11; i++) { h.clock.advance(30_000); await settle(20); }
+  await until(() => h.replies(thread).some(r => r.content.text.startsWith('backend unreachable')), 'unreachable note sent');
+  assert.equal(h.replies(thread).filter(r => r.content.text.startsWith('backend unreachable')).length, 1);
+  assert.ok(h.sends().length > before);
+  h.inspect(l => assert.equal(l.job(jobId)!.terminal, null));
 });
