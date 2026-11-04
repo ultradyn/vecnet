@@ -283,7 +283,16 @@ test('capabilities presets exclude a disabled instance, a hidden model, a stale 
 
 test('health degraded when a preset route fails checkRoute; models --json failure → not ok; version t3-bridge',async t => {
   const f=await fixture(t);f.config.presets.good.route={base_url:'http://127.0.0.1:1234/v1'};f.config.presets.absent={...f.config.presets.good,model:'absent'};
+  let projectList: unknown;
+  const exec=f.ctx.exec;
+  f.ctx.exec=async (argv,opts) => {
+    const result=await exec(argv,opts);
+    if (argv[4]==='t3_project_list' && result.code===0) projectList=JSON.parse(result.stdout);
+    return result;
+  };
   const b=await f.backend(); const health=await b.health();assert.equal(health.version,'t3-bridge');assert.equal(health.ok,true);
+  assert.deepEqual(projectList,{projects:[{id:'project',title:'repo',workspaceRoot:'/repo',
+    defaultModelSelection:null,scripts:[],createdAt:time,updatedAt:time,deletedAt:null}],nextCursor:null});
   assert.ok(health.degraded?.some(x => x.includes('good') && x.includes('route')));assert.ok(health.degraded?.some(x => x.includes('absent')));
   assert.ok((await f.calls()).some(x => x[3]==='t3_project_list'));
   f.env.FAKE_T3_FAIL='models';assert.equal((await b.health()).ok,false);

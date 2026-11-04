@@ -33,7 +33,8 @@ else if (command === 'projects' && tool === '--json') reply(state.projects.map(p
 else if (command === 'call' && flag === '--json') {
   const args = JSON.parse(json);
   const entry = state.threads?.find(x => x.thread.threadId === args.threadId);
-  if (name === 't3_project_list') reply({ projects: state.projects.map(x => ({ id:x.id, title:x.name, workspaceRoot:x.cwd })), nextCursor:null });
+  if (name === 't3_project_list') reply({ projects: state.projects.map(x => ({ id:x.id, title:x.name, workspaceRoot:x.cwd,
+    defaultModelSelection:null, scripts:[], createdAt:now, updatedAt:now, deletedAt:null })), nextCursor:null });
   else if (name === 't3_thread_launch') {
     const id = `thread-${state.threads.length + 1}`;
     state.threads.push({ thread: { threadId:id, projectId:args.projectId, title:args.title, status:'running', activeRunId:'run-1', latestRunId:'run-1', pendingRequestCount:0, archived:false, settled:false, branch:'observed-branch', worktreePath:'/observed/worktree', updatedAt:'2026-11-05T00:00:00Z' }, recentRuns:[{ runId:'run-1', ordinal:1, status:'running' }], items:[] });
