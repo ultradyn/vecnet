@@ -254,3 +254,20 @@ test('an unknown launch-input key holding a synthetic credential never reaches t
   assert.deepEqual(sent.map(s => s.job_status!.output), [{ error: 'invalid_input', reason: '/*: unknown key' }]);
   assert.ok(!JSON.stringify(sent).includes(secret) && !JSON.stringify(sent).includes('A'.repeat(20)));
 });
+
+test('two default requesters each get the default per-requester session cap', async t => {
+  const h = await harness(t, { cfg: { policies: { default: { backends: ['fake'], permission_modes: ['ask'], projects: ['repo'], max_sessions: 1, max_open_sessions: 1, launches_per_hour: 1 } } } });
+  const first = await launched(h);
+  const other = launch(h.clock.now()); other.message.sender = STRANGER;
+  const otherId = other.message.metadata['vecnet.job_id'] as string;
+  await h.push('delivery', other);
+  await until(() => h.statuses(otherId).some(s => s.state === 'running' || s.state === 'failed'), 'second requester result');
+  assert.deepEqual(h.statuses(otherId).map(s => s.state), ['accepted', 'running']);
+  h.inspect(l => { assert.equal(l.job(first.jobId)!.policyKey, REQUESTER); assert.equal(l.job(otherId)!.policyKey, STRANGER); });
+  const again = launch(h.clock.now());
+  const againId = again.message.metadata['vecnet.job_id'] as string;
+  await h.push('delivery', again);
+  await until(() => h.statuses(againId).length > 0, 'refusal');
+  assert.equal(h.statuses(againId)[0].state, 'failed');
+  assert.equal((h.statuses(againId)[0].output as { error: string }).error, 'cap_reached');
+});

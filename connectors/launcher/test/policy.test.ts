@@ -9,7 +9,7 @@ import { parseConfig } from '../src/config.ts';
 import type { LauncherConfig } from '../src/config.ts';
 import { createFakeBackend } from './fake-backend.ts';
 import { createDirectory } from '../src/directory.ts';
-import { policyKeyFor, ceilingFor, gateLaunch, classifyPermission, routeApproval } from '../src/policy.ts';
+import { accountKeyFor, policyKeyFor, ceilingFor, gateLaunch, classifyPermission, routeApproval } from '../src/policy.ts';
 
 const peer = 'peer_00000000000000000000000001';
 const sibling = 'peer_00000000000000000000000002';
@@ -155,7 +155,7 @@ test('gateLaunch: D1 any requester may use full-access by default', async () => 
     a.req.input.permission_mode = 'full-access';
     a.req.input.base_ref = 'topic';
     const original = structuredClone(a.req);
-    assert.deepEqual(gateLaunch(a),{ok:true,key:{key:'default',source:'default'},ceiling:a.cfg.policies.default,
+    assert.deepEqual(gateLaunch(a),{ok:true,key:{key:'default',source:'default'},account:peer,ceiling:a.cfg.policies.default,
       project:{alias:'vecnet4',repoRoot:'/fake/vecnet4',baseRef:'topic'},deadlineAt:Date.parse('2026-11-04T00:00:00Z'),settleMs:7200000});
     assert.deepEqual(a.req,original);
     delete a.req.input.base_ref;
@@ -432,4 +432,19 @@ test('routeApproval relay for a pagd principal: 35 min, no escalate option, esca
   a.cfg.relays.pagd.escalate_to_operator = true;
   const listed = routeApproval(permission(),{requester:sibling,policyKey:'default'},a.dir,a.cfg,'/home/test');
   assert.equal(listed.to,'relay'); assert.equal(listed.escalateOption,true); assert.equal(listed.escalateToOperator,true); assert.equal(listed.onParentExpiry,'escalate');
+});
+
+test('policies.default is a per-requester template: each default requester counts its own sessions and launches', async () => {
+  const a = await setup([directoryEntry({peer_id:peer}),directoryEntry({peer_id:sibling})]);
+  Object.assign(a.cfg.policies.default,{max_sessions:3,max_open_sessions:5,launches_per_hour:30});
+  // peer is at every one of its per-requester limits; that spends none of sibling's.
+  a.counts = {unparked:3,open:5,byKey:{[peer]:{unparked:3,open:5}}};
+  const peerGate = gateLaunch(a);
+  assert.deepEqual(peerGate,{ok:false,error:'cap_reached',details:{limit:'max_sessions',running:3,open:5}});
+  a.sender = sibling; a.req.requester = sibling;
+  const siblingGate = gateLaunch(a);
+  assert.ok(siblingGate.ok); assert.equal(siblingGate.account,sibling); assert.deepEqual(siblingGate.key,{key:'default',source:'default'});
+  assert.equal(accountKeyFor({key:'default',source:'default'},sibling),sibling);
+  assert.equal(accountKeyFor({key:principal,source:'principal'},sibling),principal);
+  assert.equal(accountKeyFor({key:peer,source:'peer'},peer),peer);
 });

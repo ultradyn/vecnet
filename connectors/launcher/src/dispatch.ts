@@ -10,7 +10,7 @@ import type { JobReporter } from './jobs.ts';
 import type { IngressRow, JobRow, Ledger } from './ledger.ts';
 import type { Outbox } from './outbox.ts';
 import type { ParentBridge } from './parent-bridge.ts';
-import { gateLaunch, policyKeyFor } from './policy.ts';
+import { accountKeyFor, gateLaunch, policyKeyFor } from './policy.ts';
 import type { GateResult } from './policy.ts';
 import { relayDecision } from './relay.ts';
 import type { SessionLane } from './session.ts';
@@ -114,15 +114,16 @@ export function createDispatcher(deps: DispatchDeps): { run(signal: AbortSignal)
     const req = parsed.req;
     await dir.ensureKnown(req.requester);
     // No await between the gate and its commit: concurrent lanes cannot both take the last slot.
-    const key = policyKeyFor(req.requester, dir, cfg), now = clock.now();
-    const gate = gateLaunch({ sender: req.requester, req, dir, cfg, counts: ledger.counts(), launchesLastHour: ledger.launchesSince(key.key, now - 3_600_000),
+    const account = accountKeyFor(policyKeyFor(req.requester, dir, cfg), req.requester), now = clock.now();
+    const gate = gateLaunch({ sender: req.requester, req, dir, cfg, counts: ledger.counts(), launchesLastHour: ledger.launchesSince(account, now - 3_600_000),
       backends: deps.backends(), now });
-    if (!gate.ok) { refuse(row, req.jobId, gateFailure(gate), key.key); return; }
+    if (!gate.ok) { refuse(row, req.jobId, gateFailure(gate), account); return; }
     const accepted = ledger.tx(() => {
       if (ledger.job(req.jobId)) { ledger.finishIngress(row.deliveryId, 'done'); return false; }
-      ledger.createJob({ ...jobFields(d, req.jobId, gate.key.key, req.input), state: 'accepted', deadlineAt: gate.deadlineAt,
+      // policyKey is the accounting key (Ledger.counts groups by it).
+      ledger.createJob({ ...jobFields(d, req.jobId, gate.account, req.input), state: 'accepted', deadlineAt: gate.deadlineAt,
         instructions: req.instructions, input: req.input });
-      ledger.noteLaunch(gate.key.key, now);
+      ledger.noteLaunch(gate.account, now);
       jobs.report(req.jobId, 'accepted', { host: deps.host, backend: req.input.backend, preset: req.input.preset, permission_mode: req.input.permission_mode });
       // The launch Delivery has been acted on: its instructions are the session's first input.
       receipt(row.deliveryId, 'processed');

@@ -15,6 +15,13 @@ export function policyKeyFor(peerId: string, dir: Directory, cfg: LauncherConfig
   if (principal !== undefined && Object.hasOwn(cfg.policies, principal)) return {key:principal,source:'principal'};
   return {key:'default',source:'default'};
 }
+/**
+ * The accounting key: whose sessions and launches a limit counts. A peer or
+ * principal policy counts under its own key (a principal's peers share one
+ * pool, as configured); policies.default is a per-requester template, so each
+ * default requester counts under its own peer id.
+ */
+export function accountKeyFor(key: PolicyKey, peerId: string): string { return key.source === 'default' ? peerId : key.key; }
 export function ceilingFor(key: PolicyKey, cfg: LauncherConfig): Ceiling {
   const defaults = cfg.policies.default as Ceiling;
   const entry = Object.hasOwn(cfg.policies, key.key) ? cfg.policies[key.key] : {};
@@ -27,12 +34,12 @@ export function ceilingFor(key: PolicyKey, cfg: LauncherConfig): Ceiling {
     launches_per_hour:entry.launches_per_hour ?? defaults.launches_per_hour,
   };
 }
-export type GateResult = { ok: true; key: PolicyKey; ceiling: Ceiling; project: ResolvedProject; deadlineAt: number; settleMs: number }
+export type GateResult = { ok: true; key: PolicyKey; account: string; ceiling: Ceiling; project: ResolvedProject; deadlineAt: number; settleMs: number }
   | { ok: false; error: 'policy_denied'; reason: string; details?: Record<string, unknown> }
   | { ok: false; error: 'cap_reached'; details: { limit: string; running: number; open: number } }
   | { ok: false; error: 'backend_unhealthy'; reason: string };
 export function gateLaunch(a: { sender: string; req: LaunchRequest; dir: Directory; cfg: LauncherConfig;
-  counts: ReturnType<Ledger['counts']>; launchesLastHour: number;
+  counts: ReturnType<Ledger['counts']>; /** launches counted under accountKeyFor(policyKeyFor(sender), sender) */ launchesLastHour: number;
   backends: Map<string, { caps: BackendCapabilities; health: BackendHealth }>; now: number }): GateResult {
   const deny = (reason: string): GateResult => ({ok:false,error:'policy_denied',reason});
   const kind = a.dir.kindOf(a.sender);
@@ -55,7 +62,8 @@ export function gateLaunch(a: { sender: string; req: LaunchRequest; dir: Directo
   if (!Number.isFinite(deadlineAt) || deadlineAt - a.now < neededMs) return {
     ok:false,error:'policy_denied',reason:'expires_too_soon',details:{expires_at:a.req.expiresAt,needed_ms:neededMs},
   };
-  const local = Object.hasOwn(a.counts.byKey,key.key) ? a.counts.byKey[key.key] : {unparked:0,open:0};
+  const account = accountKeyFor(key,a.sender);
+  const local = Object.hasOwn(a.counts.byKey,account) ? a.counts.byKey[account] : {unparked:0,open:0};
   for (const [limit,used,max,counts] of [
     ['limits.max_sessions',a.counts.unparked,a.cfg.limits.max_sessions,a.counts],
     ['limits.max_open_sessions',a.counts.open,a.cfg.limits.max_open_sessions,a.counts],
@@ -65,7 +73,7 @@ export function gateLaunch(a: { sender: string; req: LaunchRequest; dir: Directo
   ] as const) {
     if (used >= max) return {ok:false,error:'cap_reached',details:{limit,running:counts.unparked,open:counts.open}};
   }
-  return {ok:true,key,ceiling,project:{alias:input.project,repoRoot:project.repo_root,baseRef:input.base_ref ?? project.base_ref},deadlineAt,settleMs};
+  return {ok:true,key,account,ceiling,project:{alias:input.project,repoRoot:project.repo_root,baseRef:input.base_ref ?? project.base_ref},deadlineAt,settleMs};
 }
 
 export type ApprovalRoute = { to: 'requester' | 'operator' | 'relay'; escalateOption: boolean; escalateToOperator: boolean;
