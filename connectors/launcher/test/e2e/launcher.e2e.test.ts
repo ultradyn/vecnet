@@ -408,8 +408,8 @@ test('7. idle park and settle: park at about 2 s, settle at about 4 s, succeeded
     if (!settledAt && s.settles > 0) settledAt = Date.now() - start;
     return settledAt > 0;
   }, 'idle settle', 10_000);
-  // Lower bounds prove the timers; upper bounds only catch a stuck clock, so
-  // they leave room for a loaded build box.
+  // daemon.test.ts pins the 2 s / 4 s boundaries with the injected Clock.
+  // This real-hub smoke check also allows for build-box and HTTP scheduling.
   assert.ok(parkedAt >= 1500 && parkedAt <= 8000, `parked after ${parkedAt} ms`);
   assert.ok(settledAt >= 3500 && settledAt <= 12_000, `settled after ${settledAt} ms`);
   assert.ok(parkedAt < settledAt);

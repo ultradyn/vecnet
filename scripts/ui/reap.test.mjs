@@ -35,12 +35,15 @@ async function setup(t) {
     assert.match(out, /^reaped \d+ demo\(s\), \d+ tmux server\(s\), \d+ dir\(s\)\n$/);
     return out;
   }
-  async function demo(root, suffix, shell = false, data, dataEquals = false) {
+  async function demo(root, suffix, withData = false, data, dataEquals = false) {
     const dir = join(root, `vecnet-ui-build-${suffix}`);
     await mkdir(dir);
     const bin = join(dir, 'demo');
-    await copyFile(shell ? '/bin/sh' : '/usr/bin/sleep', bin);
-    const child = spawn(bin, shell ? ['-c', 'sleep 300; :', ...(dataEquals ? [`--data-dir=${data}`] : ['--data-dir', data])] : ['300'], { detached: true, stdio: 'ignore' });
+    // Multi-call coreutils dispatches by argv[0]: a copied sleep named demo
+    // exits immediately. The shell keeps that argv[0] while waiting; the final
+    // no-op prevents it from replacing itself with sleep.
+    await copyFile('/bin/sh', bin);
+    const child = spawn(bin, ['-c', 'sleep 300; :', ...(withData ? (dataEquals ? [`--data-dir=${data}`] : ['--data-dir', data]) : [])], { detached: true, stdio: 'ignore' });
     const closed = once(child, 'close');
     cleanup(async () => {
       try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }

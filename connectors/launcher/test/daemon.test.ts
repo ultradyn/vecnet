@@ -137,6 +137,47 @@ test('a fatal event stream end stops the daemon: stopped settles, exit code 1, o
   assert.equal(h.presence().filter(p => p.state === 'offline').length, 2);
 });
 
+test('daemon idle clock parks at 2 s and settles at 4 s of logical time', async t => {
+  const h = await harness(t, { cfg: {
+    idle: { park_after: '2s', settle_opaque: '4s', settle_observable: '4s', check_every: '250ms', deadline_margin: '1s' },
+  } });
+  const { jobId } = await launched(h);
+  h.backend.finishTurn(jobId, 'all done');
+  await until(() => h.inspect(l => l.job(jobId)!.sessionKind === 'idle'), 'persisted idle turn');
+  const start = h.clock.now();
+  assert.equal(h.inspect(l => l.job(jobId)!.lastActivityAt), start);
+
+  // Real I/O may take time, but the injected Clock stays fixed while we wait.
+  // Unlike the wall-clock E2E ceiling, a park at 5 s or settle at 7 s cannot pass.
+  h.clock.advance(0);
+  await settle();
+  h.clock.advance(1999);
+  await settle();
+  assert.equal(h.backend.sessions()[0].parks, 0, 'does not park before 2 s');
+  assert.equal(h.backend.sessions()[0].settles, 0);
+  h.clock.advance(1);
+  await until(() => h.inspect(l => l.job(jobId)!.sessionKind === 'parked'), 'park at exactly 2 s');
+  assert.equal(h.clock.now() - start, 2000);
+  assert.equal(h.backend.sessions()[0].parks, 1);
+  assert.equal(h.inspect(l => l.job(jobId)!.parkedAt), start + 2000);
+  await settle();
+
+  h.clock.advance(1999);
+  await settle();
+  assert.equal(h.backend.sessions()[0].settles, 0, 'does not settle before 4 s');
+  h.clock.advance(1);
+  await until(() => h.inspect(l => l.job(jobId)!.state === 'ended'), 'settle at exactly 4 s');
+  assert.equal(h.clock.now() - start, 4000);
+  assert.equal(h.backend.sessions()[0].settles, 1);
+  assert.equal(h.backend.sessions()[0].parks, 1);
+  await until(() => h.statuses(jobId).some(s => s.state === 'succeeded'), 'idle terminal report');
+  const done = h.statuses(jobId).find(s => s.state === 'succeeded')!;
+  const out = done.output as { ended: string; quiescence: string; turns: number };
+  assert.equal(out.ended, 'idle_wrapup');
+  assert.equal(out.quiescence, 'proven');
+  assert.equal(out.turns, 1);
+});
+
 test('stop() posts offline presence and leaves open jobs for the next start', async t => {
   const h = await harness(t);
   const { jobId } = await launched(h);
