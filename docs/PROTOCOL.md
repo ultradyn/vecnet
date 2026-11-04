@@ -708,7 +708,7 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 - **Dots never hold a vecnet secret** [T11]. The hub enforces this (section 2.12), and a link code revokes any peer credential or enrolment token left on the dot from before it did.
 - **CLI profiles:** `~/.config/vecnet/config.toml` holds named profiles, each a hub URL plus a peer, principal or operator credential; `--net` selects; `--as <peer>` picks a principal's peer [T17]. One peer per long-lived agent identity; sessions reuse that identity's stored credential [T17].
 - **Send scopes:** default allow-all among enrolled peers and teams; per-peer allow/deny lists set by the operator; ad hoc group creation respects the same scopes [T11]. Scopes gate sends and group creation only: every peer MAY read the directory, and thread history is readable by participants only [R24] (and by the operator, section 2.8). A send to a team or group is checked per member as if each were addressed directly: a deny on the group or on any member refuses the whole send (403 `scope_denied`, `details.recipient` the member, `details.via` the group); under allow-list scopes each member must be allowed unless the group or team itself is. Group membership is not required to address a group.
-- **Audit:** append-only table of actor (the sending peer id; `operator` for an admin action taken with the operator credential; `hub` for a hub-initiated action), action (`send`, `ack`, `enrol`, `rotate`, group create/change, `purge`, scope change, `event_subscribe` with the callback host only, `subscription_pause`, `oauth_token_reuse`), target ids, timestamp [T11]; loop cuts are also audited [T16].
+- **Audit:** append-only table of actor (the sending peer id; `operator` for an admin action taken with the operator credential; `hub` for a hub-initiated action; the principal's `prn_` id for a principal's own peer provisioning, §18.4), action (`send`, `ack`, `enrol`, `rotate`, group create/change, `purge`, scope change, `event_subscribe` with the callback host only, `subscription_pause`, `oauth_token_reuse`), target ids, timestamp [T11]; loop cuts are also audited [T16].
 - **Logging:** Message bodies and secrets MUST NOT enter logs or audit rows; redaction lives in the logger [T11].
 - **Secrets at rest:** bearer, principal, operator and enrolment secrets are stored only as SHA-256 hashes. Signing keys (route and notify `whsec_`, the blob-token `hub_key`) must be usable for HMAC and so are stored in plaintext, protected by the 0700 data directory.
 
@@ -857,7 +857,7 @@ Normative for peers of kind `launcher` (§18.1) and for requesters that talk to 
 |---|---|---|
 | `accepted` | Policy passed and a slot is reserved | `{host, backend, preset, permission_mode}` |
 | `running` | The backend returned a session | `{session_ref, branch, workspace, link}` |
-| `succeeded` | The session settled | `{ended, turns, branch, head_sha, commits, pushed, summary}`; `ended` is `idle_wrapup`, `settled` (requester `settle`) or `deadline` |
+| `succeeded` | The session settled | `{ended, turns, branch, head_sha, commits, pushed, summary, quiescence?}`; `ended` is `idle_wrapup`, `settled` (requester `settle`) or `deadline`; `quiescence` (`proven` or `assumed`) only with `idle_wrapup` |
 | `failed` | Refused, or the session failed | `{error, reason?, details?}` (codes below) |
 | `cancelled` | The requester cancelled (§5.6), or the requester was retired | `{branch, head_sha, workspace_kept}`, or `{reason: "requester_retired"}` |
 
@@ -890,7 +890,7 @@ Question answers, approval responses and controls are never relayed as turn inpu
 - [ ] A structured question from the backend becomes a `kind: message` to the requester, priority `wake`, whose text lists the questions and options, with `metadata["launch.question"]` per `launch-question.v1.schema.json`: `{v: 1, question_id, blocking, questions: [{id, header?, text, options: [label…], allow_other}]}`.
 - [ ] The requester, the operator or a `relay_from` peer answers with a reply `in_reply_to` that message: its text matched case-insensitively to an option label, or free text where `allow_other`; or, for several questions, `metadata["launch.answers"]` per `launch-answers.v1.schema.json`: `{question_id, answers: {<id>: value}}`. Anyone else's reply does not answer.
 - [ ] Timeout: a blocking question is answered after 30 minutes by default with `"no answer from requester; use your best judgement and say what you assumed"`, and the launcher posts a note.
-- [ ] **Secrets are never relayed.** A question marked secret is answered at once with `"secrets cannot be provided through vecnet"` and a note to the requester; credentials never travel in bodies (§14.6).
+- [ ] **Secrets are never relayed.** A question marked secret is answered at once with `"secrets cannot be provided through vecnet"` and a note to the requester; the launcher never puts a credential in a message body (§12 Logging).
 
 **Permission prompts.**
 - [ ] A backend permission prompt becomes an `approval_request` (§9) to the requester by default, priority `wake`, `question` a one-line redacted summary, with `metadata["launch.permission"]` **v1** per `launch-permission.v1.schema.json`, kept under 6 KiB. It names the request (`kind` `exec|edit|network|mcp_tool|other`, `tool`, `command`, `paths`, `host`), the session (`machine_id`, `job_id`, `permission_mode`, `preset`, `backend`, `backend_method`, `workspace_root`), each option's grant (`scope`, `options[{id, label, grants}]`), `outside_workspace` (`true`, `false` or `"unknown"`), `reason`, `backend_raw` (redacted, at most 4 KiB, with `backend_raw_truncated` and `backend_raw_sha256`), `redacted`, and `fidelity {kind, command, paths, host}`.
@@ -1163,9 +1163,9 @@ Response **201** (and `Cache-Control: no-store`):
  "idempotency_key": "create-seed-bot-2"}
 ```
 
-The hub MUST check in this order, all in one transaction:
+The hub MUST check in this order, steps 2–8 in one transaction:
 
-1. Body shape: 400 `invalid_body` (§15).
+1. Body shape: 400 `invalid_body` (§15). This is the HTTP layer's decode, before the transaction, and is not audited.
 2. The credential is not a principal's (a peer or the operator): 403 `forbidden`.
 3. `name` empty or over 128 runes, `idempotency_key` off the `idempotencyKey` pattern [SCH], or `kind` not a peer kind the hub accepts (§8): 422 `invalid_value` with `details.field`.
 4. **Idempotency**, scoped to (principal, `idempotency_key`) for 24 hours. The same key with the same `{kind, name}` returns the original response with **200**; a different body is 409 `idempotency_conflict` with `details.idempotency_key`. This runs before every limit, so a retry after a lost response always succeeds.
@@ -1174,7 +1174,7 @@ The hub MUST check in this order, all in one transaction:
 7. The principal created `creates_per_hour` peers in the last hour: 429 `peer_create_rate_limited` with `details.retry_after_seconds` and `Retry-After`.
 8. Writes: the peer under this principal with `created_by` = the principal, the principal's default scopes copied into it, the stored response, a `directory_updated` Event (`change: "enrolled"`, §8), and an audit row.
 
-**`PATCH /v1/peers/{id}`**, principal credential only. Body `{disabled: true|false}`, required. Response **200** `{"peer": {…}}`, the same object with the current `disabled`. Only a peer the caller created **and** still owns (`created_by` = caller and the peer's principal = caller) qualifies; any other id is 404 `not_found`, whether it exists or not. A non-principal credential is 403 `forbidden`. Re-enabling a peer counts toward `max_peers`, so re-enabling at the cap is 429 `peer_cap_reached`. A request that changes nothing returns the peer unchanged. A disable or enable emits `directory_updated` (`removed` / `enrolled`, as an operator disable or enable does) and ends the peer's streams as §2.3 describes. `PATCH /v1/peers/me` (§2.10) is unchanged.
+**`PATCH /v1/peers/{id}`**, principal credential only. Body `{disabled: true|false}`, required; a malformed body (for example `{disabled: "yes"}`) is 400 `invalid_body`. Response **200** `{"peer": {…}}`, the same object with the current `disabled`. Only a peer the caller created **and** still owns (`created_by` = caller and the peer's principal = caller) qualifies; any other id is 404 `not_found`, whether it exists or not. A non-principal credential is 403 `forbidden`. Re-enabling a peer counts toward `max_peers`, so re-enabling at the cap is 429 `peer_cap_reached`. A request that changes nothing returns the peer unchanged. A disable or enable emits `directory_updated` (`removed` / `enrolled`, as an operator disable or enable does) and ends the peer's streams as §2.3 describes. `PATCH /v1/peers/me` (§2.10) is unchanged.
 
 **Limits** are operator-set per principal (`vecnet principal limits`, §2.12, §13.7):
 - **Default off.** A principal with no limits row has `max_peers` 0 and no allowed kinds, so every create is 403 `kind_not_allowed`.
@@ -1186,7 +1186,7 @@ The hub MUST check in this order, all in one transaction:
 
 **`created_by`** is set by the hub at creation to the creating `prn_` id, never updated, and kept across `peer move`. `GET /v1/peers` carries it on principal-created peers; the key is absent on operator-enrolled peers (§8). It is hub-set provenance, never authority: a receiver MAY key its own policy on it, as it keys on `sender`, but the field grants nothing by itself (§14.1). After a `peer move`, the creator no longer owns the peer, so neither principal may `PATCH` it.
 
-**Audit** (§12). Actions, with the principal as actor and never the name or body: `peer_create`; `peer_create_refused` `{reason, kind}` for every refusal in steps 2–7; `peer_patch_refused` `{reason}`; `peer_disable` and `peer_enable` for a principal's own change. The operator's settings are audited as `principal_limits` and `principal_default_scopes`. `directory_updated` goes to every peer on create, disable and enable.
+**Audit** (§12). Actions, with the caller as actor (the principal; for a step-2 refusal, the peer id or the operator's principal) and never the name or body: `peer_create`; `peer_create_refused` `{reason, kind}` for every refusal in steps 2–7, where `kind` is the requested kind only when it is a peer kind the hub accepts and otherwise the fixed marker `"(unrecognized)"`, so a credential sent as `kind` never reaches audit (§14 invariant 6); `peer_patch_refused` `{reason}`; `peer_disable` and `peer_enable` for a principal's own change. The operator's settings are audited as `principal_limits` and `principal_default_scopes`. `directory_updated` goes to every peer on create, disable and enable.
 
 **Operator views.** `GET /v1/admin/principals` lists each principal with its limits, active and disabled created peers, creates in the last hour, its peers that have scopes, and its default scopes (§2.12).
 
