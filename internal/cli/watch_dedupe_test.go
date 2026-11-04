@@ -168,11 +168,13 @@ func TestWatchReplayIgnoresShown(t *testing.T) {
 }
 
 func TestWatchReplayBeyond100Pages(t *testing.T) {
-	// A hook-shown delivery must replay after more than 100 full pages of
-	// other events. Only an empty page ends replay.
+	// A hook-shown delivery must replay after more than 100 pages of other
+	// events. Only an empty page ends replay, never a page count or a short
+	// page, so a few events per page exercise the loop; full 500-event pages
+	// would only make the race run print 50 500 lines against the deadline.
 	pages := make([][]envelope.Event, 101)
 	for page := range pages {
-		pages[page] = make([]envelope.Event, 500)
+		pages[page] = make([]envelope.Event, 2)
 		for i := range pages[page] {
 			pages[page][i] = envelope.Event{
 				Cursor: fmt.Sprintf("event_%d_%d", page, i), Type: "presence",
