@@ -41,6 +41,8 @@ const (
 	ConnConnecting = "connecting"
 	ConnLive       = "live"
 	ConnOffline    = "offline, retrying"
+	// ConnRestarting is the hub announcing a restart: expected, so a warning.
+	ConnRestarting = "restarting"
 	ConnRejected   = "credential rejected"
 	ConnDisabled   = "operator disabled"
 )

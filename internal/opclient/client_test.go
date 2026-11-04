@@ -83,6 +83,7 @@ func TestReadsDecode(t *testing.T) {
 		{"subscriptions", "GET", "/v1/admin/subscriptions", "", fixture[[]opapi.Subscription](), func(c *Client) (any, error) { return c.Subscriptions(ctx) }, nil},
 		{"audit", "GET", "/v1/admin/audit", "before=42&limit=7", fixture[opapi.AuditPage](), func(c *Client) (any, error) { return c.Audit(ctx, 7, "42") }, nil},
 		{"counters", "GET", "/v1/admin/counters", "", map[string]int{"loop_cut": 3, "dead_letters": 2}, func(c *Client) (any, error) { return c.Counters(ctx) }, nil},
+		{"notices", "GET", "/v1/hub/notices", "", fixture[[]envelope.HubNotice](), func(c *Client) (any, error) { return c.Notices(ctx) }, func(v any) any { return map[string]any{"notices": v} }},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -529,5 +530,70 @@ func TestClientReact(t *testing.T) {
 	}
 	if n := reacts.Load(); n != 2 {
 		t.Fatalf("%d reaction requests, want 2", n)
+	}
+}
+
+// A long-poll page with hub_restarting is a reconnect hint, not a failure
+// (Review Focus 5): the tail says "restarting", waits retry_after_ms (±20%)
+// with the cursor kept, treats the outage after it as part of the restart, and
+// leaves the failure backoff where it was.
+func TestTailReportsRestarting(t *testing.T) {
+	var calls atomic.Int32
+	var acks atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/ack" {
+			acks.Add(1)
+			w.WriteHeader(204)
+			return
+		}
+		n := calls.Add(1)
+		if n > 1 && r.URL.Query().Get("after") != "e1.5" {
+			t.Errorf("request %d lost the cursor: %s", n, r.URL)
+		}
+		switch n {
+		case 1:
+			fmt.Fprint(w, `{"events":[],"next_cursor":"e1.5","hub_restarting":{"retry_after_ms":1500}}`)
+		case 2, 3:
+			w.WriteHeader(503) // the hub is down while it restarts
+		case 4:
+			eventPage(w, "e1.5", false)
+		case 5:
+			w.WriteHeader(502)
+		default:
+			w.WriteHeader(401)
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "secret")
+	var delays []time.Duration
+	var states []string
+	c.sleep = func(_ context.Context, d time.Duration) error {
+		delays = append(delays, d)
+		return nil
+	}
+	var batches int
+	err := c.Tail(context.Background(), func(Batch) error { batches++; return nil }, func(s string) { states = append(states, s) })
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatal(err)
+	}
+	if len(delays) != 4 {
+		t.Fatalf("delays %v", delays)
+	}
+	if d := delays[0]; d < 1200*time.Millisecond || d > 1800*time.Millisecond {
+		t.Errorf("restart wait %v, want 1.5s ±20%%", d)
+	}
+	// Neither the restart nor the outage that follows it raises the backoff.
+	if want := []time.Duration{time.Second, time.Second, time.Second}; !reflect.DeepEqual(delays[1:], want) {
+		t.Errorf("delays after the restart %v, want %v", delays[1:], want)
+	}
+	want := []string{"connecting", "restarting", "restarting", "restarting", "live", "offline"}
+	if !reflect.DeepEqual(states, want) {
+		t.Fatalf("states %v, want %v", states, want)
+	}
+	if acks.Load() != 0 {
+		t.Errorf("acked %d empty pages", acks.Load())
+	}
+	if batches != 1 {
+		t.Errorf("handled %d batches, want only the live page", batches)
 	}
 }

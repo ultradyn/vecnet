@@ -183,3 +183,10 @@ Composer fit screens come from `scripts/ui/composer-fit.mjs`, which sweeps the v
 - [composer-fit-spill-390.png](composer-fit-spill-390.png) — Spilling on a phone: the byte count ellipsizes between the priority row and Attach and Send.
 - [composer-fit-page-1180.png](composer-fit-page-1180.png) — The whole thread page at 1180 px: the composer in context (hint dropped, one row).
 - [composer-fit-page-390.png](composer-fit-page-390.png) — The whole thread page at phone width.
+
+Hub notice TUI screens come from `scripts/ui/tui-notice.mjs`. An active hub notice takes one ASCII row under the top bar, and the body gives up that row: the most important notice (moving, then restart, then maintenance) with its time, a move's target host, the cleaned message and a count of the others. A hub restart reads as `restarting` in amber, not as offline.
+
+- [nt08-tui-initial.png](nt08-tui-initial.png) — No active notice: no banner row, and the inbox pane sits straight under the top bar.
+- [nt08-tui-progress.png](nt08-tui-progress.png) — The hub announced a restart and is refusing requests: the connection reads `restarting` in amber, and the banner and last data stay.
+- [nt08-tui-success.png](nt08-tui-success.png) — Moving and maintenance notices: `! MOVING hh:mm -> vecnet.xk.io  Moving to Fly tonight  (+1 more)`, three hours out in the shell's time zone.
+- [nt08-tui-error.png](nt08-tui-error.png) — The notice fetch failed: no banner, the command line names the failed reload, and the tail retries.

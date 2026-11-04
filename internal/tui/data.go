@@ -26,6 +26,7 @@ type Data struct {
 	Health   opapi.DeliveryHealth
 	Audit    opapi.AuditPage
 	Counters map[string]int
+	Notices  []envelope.HubNotice // the hub's active notices, oldest first
 	Thread   map[string]*ThreadState
 	Events   []envelope.Event // newest 200, oldest first, for the raw log
 	Errs     map[string]error
@@ -45,8 +46,8 @@ type ThreadState struct {
 }
 
 // TagAll asks Reload for every resource and every opened thread. The other tags
-// are resource keys: opapi.Tags' "inbox", "threads", "peers" and "thread:<id>",
-// and the untagged "subs", "cuts", "health", "audit" and "counters".
+// are resource keys: opapi.Tags' "inbox", "threads", "peers", "notices" and
+// "thread:<id>", and the untagged "subs", "cuts", "health", "audit" and "counters".
 const TagAll = "all"
 
 const (
@@ -63,7 +64,7 @@ const (
 )
 
 var (
-	allKeys = []string{"inbox", "threads", "peers", "subs", "cuts", "health", "audit", "counters"}
+	allKeys = []string{"inbox", "threads", "peers", "subs", "cuts", "health", "audit", "counters", "notices"}
 	// The inbox is event-tagged, but its snapshot also carries the hub's
 	// clock: a minute's reload keeps HubNow right across a quiet spell in
 	// which this client's clock steps (Review Focus 3).
@@ -355,6 +356,15 @@ func (m *Model) fetch(key string) tea.Cmd {
 			v, err := api.Counters(ctx)
 			return loadMsg{key: key, err: err, apply: func(m *Model) { m.Data.Counters = v }}
 		}
+	case "notices":
+		return func() tea.Msg {
+			v, err := api.Notices(ctx)
+			// A hub from before notices has none to show; that is not an error.
+			if isStatus(err, 404) {
+				v, err = nil, nil
+			}
+			return loadMsg{key: key, err: err, apply: func(m *Model) { m.Data.Notices = v }}
+		}
 	}
 	if id, ok := strings.CutPrefix(key, threadPrefix); ok {
 		return m.fetchThread(key, id)
@@ -495,8 +505,11 @@ func (m *Model) onTailStatus(status string) tea.Cmd {
 		m.Conn = ConnLive
 	case "offline":
 		m.Conn = ConnOffline
+	case "restarting":
+		m.Conn = ConnRestarting
 	}
-	if prev == ConnOffline && m.Conn == ConnLive {
+	// Coming back refetches what the outage or restart may have hidden.
+	if (prev == ConnOffline || prev == ConnRestarting) && m.Conn == ConnLive {
 		return m.Reload(TagAll)
 	}
 	return nil

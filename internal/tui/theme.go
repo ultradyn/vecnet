@@ -29,4 +29,5 @@ var (
 	styleModeChip = lipgloss.NewStyle().Foreground(colorText).Background(colorAccent2).Bold(true)
 	styleBorder   = lipgloss.NewStyle().Foreground(colorBorder)
 	styleFocused  = lipgloss.NewStyle().Foreground(colorAccent)
+	styleNotice   = lipgloss.NewStyle().Foreground(colorBg).Background(colorWarn).Bold(true)
 )
