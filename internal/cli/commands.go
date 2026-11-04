@@ -79,6 +79,8 @@ messaging:
        (preferred: keeps it out of shell history and ps); else $VECNET_ENROL_TOKEN
        --name N picks your display name when the invite leaves it open (once);
        the profile then defaults to its lowercase slug
+  profile show | pin [--accept FP] | repoint URL [--force]
+       inspect or pin the hub identity, or verify a new hub URL before repointing
   guide [--net P]                                    the agent manual, filled in for profile P; needs no config
 
 admin (operator credential):
@@ -156,6 +158,8 @@ type app struct {
 
 	net, as string // --net, --as
 	json    bool   // --json
+	inHook  bool   // hooks never TOFU or rewrite trust state
+	inMCP   bool   // stdio relay startup refusals must make no requests
 }
 
 // exit prints err and maps it to an exit code.
@@ -346,6 +350,9 @@ func (a *app) connect() (*client, string, cache, error) {
 	if err := checkHubURL(p.Hub, p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"); err != nil {
 		return nil, "", cache{}, err
 	}
+	if !a.inHook {
+		a.ensurePin(name, p)
+	}
 	dir, err := cacheDir(a.getenv)
 	if err != nil {
 		dir = ""
@@ -414,6 +421,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 	switch cmd {
 	case "enrol", "enroll":
 		return a.cmdEnrol(args)
+	case "profile":
+		return a.cmdProfile(args)
 	case "guide":
 		return a.cmdGuide(args)
 	case "send":
@@ -427,10 +436,12 @@ func (a *app) dispatch(cmd string, args []string) error {
 	case "ack":
 		return a.cmdAck(args)
 	case "mcp":
+		a.inMCP = true
 		return a.cmdMCP(args)
 	case "watch":
 		return a.cmdWatch(args)
 	case "hook":
+		a.inHook = true
 		return a.cmdHook(args)
 	case "threads":
 		return a.cmdThreads(args)
@@ -513,6 +524,14 @@ func (a *app) cmdEnrol(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	unlock, err := lockPath(a.ctx, path+".lock")
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	cfg, err := loadConfig(path)
 	if err != nil {
 		return err
@@ -521,9 +540,10 @@ func (a *app) cmdEnrol(args []string) error {
 		return usageErr(fmt.Sprintf("enrol: profile %q already exists in %s; pass --profile to choose another", name, path))
 	}
 	var out struct {
-		PeerID string `json:"peer_id"`
-		Secret string `json:"secret"`
-		Name   string `json:"name"`
+		PeerID    string `json:"peer_id"`
+		Secret    string `json:"secret"`
+		Name      string `json:"name"`
+		HubPubkey string `json:"hub_pubkey"`
 	}
 	req := map[string]string{"token": tok}
 	if display != "" {
@@ -538,7 +558,7 @@ func (a *app) cmdEnrol(args []string) error {
 		}
 		return err
 	}
-	cfg.Profiles[name] = Profile{Hub: strings.TrimRight(hubURL, "/"), Secret: out.Secret, PeerID: out.PeerID, AllowInsecureHTTP: insecure}
+	cfg.Profiles[name] = Profile{Hub: strings.TrimRight(hubURL, "/"), HubPubkey: out.HubPubkey, Secret: out.Secret, PeerID: out.PeerID, AllowInsecureHTTP: insecure}
 	if err := saveConfig(path, cfg); err != nil {
 		// The secret was issued once; show it so it is not lost.
 		fmt.Fprintf(a.stderr, "vecnet: could not write %s; the secret for %s is %s\n", path, out.PeerID, out.Secret)

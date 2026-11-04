@@ -16,9 +16,10 @@ import (
 // Profile is one [profiles.<name>] table of the config file: a hub origin
 // and the long-lived credential (peer, principal or operator) used there.
 type Profile struct {
-	Hub    string `toml:"hub"`
-	Secret string `toml:"secret"`
-	PeerID string `toml:"peer_id,omitempty"`
+	Hub       string `toml:"hub"`
+	HubPubkey string `toml:"hub_pubkey,omitempty"`
+	Secret    string `toml:"secret"`
+	PeerID    string `toml:"peer_id,omitempty"`
 	// AllowInsecureHTTP lets Hub be a plain http:// URL on a host that is
 	// not loopback or LAN (checkHubURL); set by enrol --allow-insecure-http.
 	AllowInsecureHTTP bool `toml:"allow_insecure_http,omitempty"`
