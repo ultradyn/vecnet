@@ -158,6 +158,8 @@ export interface PluginContext {
           => Promise<{ code: number; stdout: string; stderr: string }>;
   readSecretFile: (path: string) => Promise<string>;
   now: () => Date;
+  /** The daemon's Clock: plugins never create their own timers. Rejects when signal aborts. */
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 export interface Plugin<C = unknown> {

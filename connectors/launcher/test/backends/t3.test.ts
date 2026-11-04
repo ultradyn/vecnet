@@ -46,7 +46,7 @@ async function fixture(t: TestContext) {
   const clock = fakeClock(Date.parse(time));
   const store = new Map<string,string>();
   const ctx: PluginContext & {clock:typeof clock} = {
-    clock, host:'test-host',now:() => new Date(clock.now()),redact:s => redactText(s).text,
+    clock, host:'test-host',now:() => new Date(clock.now()),sleep:(ms,signal) => clock.sleep(ms,signal),redact:s => redactText(s).text,
     checkRoute:route => checkRoute(route,{readFile:async () => 'route-key',fetch:async () => new Response('',{status:503})}),
     log:{info(){},warn(){},error(){}},store:{get:k => store.get(k),set:(k,v) => {store.set(k,v);},delete:k => {store.delete(k);},keys:(prefix='') => [...store.keys()].filter(k => k.startsWith(prefix))},
     readSecretFile:async () => { throw new Error('plugin must not read credentials'); },

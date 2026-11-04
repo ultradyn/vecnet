@@ -70,6 +70,7 @@ export function pluginContext(a: { host: string; log: Log; ledger: Ledger; id: s
   return {
     host: a.host, log, store: a.ledger.kv(`plugin:${a.id}`), readSecretFile,
     now: () => new Date(a.clock.now()),
+    sleep: (ms, signal) => a.clock.sleep(ms, signal),
     redact: s => redactText(s).text,
     checkRoute: (route, signal) => checkRoute(route, { readFile }, signal),
     exec(argv, opts) {

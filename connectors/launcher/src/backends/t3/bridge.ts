@@ -1,13 +1,6 @@
 import type { PluginContext } from '../../backend.ts';
-import { setTimeout as sleep } from 'node:timers/promises';
-
-// Structural Clock seam: plugins cannot import hub-client, and PluginContext
-// currently exposes only now(). Task 17 can supply its shared Clock here.
-export interface PollClock { sleep(ms: number, signal?: AbortSignal): Promise<void> }
-export interface T3Context extends PluginContext { clock?: PollClock }
-export const systemClock: PollClock = {
-  sleep: (ms, signal) => sleep(ms, undefined, { signal }),
-};
+// Every poll sleep goes through PluginContext.sleep, the daemon's Clock.
+export type T3Context = PluginContext;
 
 export class BridgeError extends Error {
   readonly exitCode: number;

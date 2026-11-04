@@ -109,3 +109,16 @@ test('pluginContext: exec scrubs VECNET_* and *_API_KEY from the child env; reda
   assert.doesNotMatch(log.text(), /zzz/);
   assert.equal(ctx.host, 'xsm');
 });
+
+test('pluginContext.sleep runs on the daemon Clock, never a real timer', async t => {
+  const clock = fakeClock(Date.parse('2026-11-05T00:00:00Z')), ledger = openLedger(':memory:', clock);
+  t.after(() => ledger.close());
+  const ctx = pluginContext({ host: 'xsm', log: memoryLog(), ledger, id: 't3', clock });
+  let woke = false;
+  const sleeping = ctx.sleep(3000).then(() => { woke = true; });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(woke, false);
+  clock.advance(3000);
+  await sleeping;
+  assert.equal(woke, true);
+});

@@ -42,7 +42,7 @@ async function harness(t: TestContext) {
     host:'test-host', redact:s => s.replaceAll('SECRET', '[redacted]'), now:() => new Date('2026-11-05T00:00:00Z'),
     store:{get:k=>saved.get(k), set:(k,v)=>{saved.set(k,v);}, delete:k=>{saved.delete(k);}, keys:(p='')=>[...saved.keys()].filter(k=>k.startsWith(p))},
     log:{info:s=>{logs.push(s);}, warn:s=>{logs.push(s);}, error:s=>{logs.push(s);}},
-    checkRoute:async()=>({ok:true, models:['gpt']}), readSecretFile:async()=>{throw new Error('unexpected secret read');},
+    checkRoute:async()=>({ok:true, models:['gpt']}), readSecretFile:async()=>{throw new Error('unexpected secret read');}, sleep:async()=>{throw new Error('unexpected sleep');},
     exec:async(argv, opts)=>{
       calls.push({argv, timeoutMs:opts.timeoutMs, env:opts.env});
       if (argv[0] === 'systemctl') {

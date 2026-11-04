@@ -3,8 +3,8 @@ import type { Backend, BackendCapabilities, BackendHealth, LaunchSpec, Permissio
   SessionHooks, SessionRef, SessionState, TurnCursor, TurnInput, SendMode, SendResult, ActivityReport, SettleMode, SettleResult, TurnEvent } from '../../backend.ts';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
-import { Bridge, BridgeError, systemClock } from './bridge.ts';
-import type { T3Context, PollClock } from './bridge.ts';
+import { Bridge, BridgeError } from './bridge.ts';
+import type { T3Context } from './bridge.ts';
 import { offeredModes, runtimeMode, optionAllowed, outcome, stateOf, refOf, parseCursor } from './map.ts';
 import type { Provider, Snapshot, T3Thread, T3Item, T3Run } from './map.ts';
 
@@ -31,12 +31,10 @@ class T3Session implements SessionHandle {
   private readonly ctx: PluginContext;
   private readonly config: T3Config;
   private readonly hooks: SessionHooks;
-  private readonly clock: PollClock;
   private snapshot: Snapshot;
   private waiting = false;
   constructor(ref: SessionRef, snapshot: Snapshot, bridge: Bridge, ctx: T3Context, config: T3Config, hooks: SessionHooks) {
     this.ref=ref; this.snapshot=snapshot; this.bridge=bridge; this.ctx=ctx; this.config=config; this.hooks=hooks;
-    this.clock=ctx.clock ?? systemClock;
     this.update(snapshot);
   }
   private update(snapshot: Snapshot): void {
@@ -130,7 +128,7 @@ class T3Session implements SessionHandle {
         // running work immediately so no result is held behind the poll timer.
         if (this.state().kind !== 'turn_running') {
           const remaining=(this.config.poll_ms ?? 3_000)-(this.ctx.now().getTime()-started);
-          if (remaining > 0) await this.clock.sleep(remaining,signal);
+          if (remaining > 0) await this.ctx.sleep(remaining,signal);
         }
       }
     } catch (error) { if (!signal?.aborted) throw error; }
