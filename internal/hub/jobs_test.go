@@ -147,8 +147,8 @@ func TestJobStatusSequenceAndAuthz(t *testing.T) {
 	}
 
 	mustSend(t, env, aSec, jobStatus("s6", thr, job, 4, "cancelled"))
-	if state, seq, _, _ := jobRow(t, env, job); state != "cancellation_requested" || seq != 4 {
-		t.Fatalf("after A cancelled seq4: %s %d, want cancellation_requested 4", state, seq)
+	if state, seq, _, _ := jobRow(t, env, job); state != "cancellation_requested" || seq != 2 {
+		t.Fatalf("after A cancelled seq4: %s %d, want cancellation_requested with B's sequence 2", state, seq)
 	}
 	mustReject(t, env, bSec, jobStatus("s7", thr, job, 5, "running"), http.StatusUnprocessableEntity, "invalid_transition")
 	mustSend(t, env, bSec, jobStatus("s8", thr, job, 5, "cancelled"))
@@ -260,5 +260,68 @@ func TestJobStatusFromRecipientPrincipal(t *testing.T) {
 	mustReject(t, env, eveSec, as(jobStatus("s2", thr, job, 2, "running"), e), http.StatusForbidden, "not_recipient")
 	if state, seq, _, _ := jobRow(t, env, job); state != "accepted" || seq != 1 {
 		t.Fatalf("after eve's rejected report: %s %d, want accepted 1", state, seq)
+	}
+}
+
+// jobWithRecipient starts a job from A to B and returns its ids.
+func jobWithRecipient(t *testing.T, env *testhub.Env) (job, thr, aSec, bSec string) {
+	t.Helper()
+	_, aSec = env.NewPeer("session", "A")
+	b, bSec := env.NewPeer("session", "B")
+	sr := mustSend(t, env, aSec, jobReq("j1", "deploy", "deploy it", b))
+	return sr.JobID, sr.ThreadID, aSec, bSec
+}
+
+// The requester's cancel sequence is not the job's (PROTOCOL §5.6): a high
+// one must not make the recipient's next honest report stale.
+func TestRequesterCancelKeepsRecipientSequence(t *testing.T) {
+	env := testhub.Start(t)
+	job, thr, aSec, bSec := jobWithRecipient(t, env)
+	mustSend(t, env, bSec, jobStatus("s1", thr, job, 1, "accepted"))
+	mustSend(t, env, bSec, jobStatus("s2", thr, job, 2, "running"))
+	mustSend(t, env, aSec, jobStatus("c1", thr, job, 100, "cancelled"))
+	if state, seq, _, _ := jobRow(t, env, job); state != "cancellation_requested" || seq != 2 {
+		t.Fatalf("after requester cancelled seq100: %s %d, want cancellation_requested 2", state, seq)
+	}
+	// A second requester cancel is accepted and changes nothing.
+	mustSend(t, env, aSec, jobStatus("c2", thr, job, 1, "cancelled"))
+	if state, seq, _, _ := jobRow(t, env, job); state != "cancellation_requested" || seq != 2 {
+		t.Fatalf("after a second requester cancel: %s %d, want cancellation_requested 2", state, seq)
+	}
+	mustSend(t, env, bSec, jobStatus("s3", thr, job, 3, "cancelled"))
+	if state, seq, _, _ := jobRow(t, env, job); state != "cancelled" || seq != 3 {
+		t.Fatalf("after recipient cancelled seq3: %s %d, want cancelled 3", state, seq)
+	}
+}
+
+func TestRequesterCancelAnySequence(t *testing.T) {
+	env := testhub.Start(t)
+	job, thr, aSec, bSec := jobWithRecipient(t, env)
+	mustSend(t, env, bSec, jobStatus("s1", thr, job, 5, "running"))
+	mustSend(t, env, aSec, jobStatus("c1", thr, job, 1, "cancelled"))
+	if state, seq, _, _ := jobRow(t, env, job); state != "cancellation_requested" || seq != 5 {
+		t.Fatalf("after requester cancelled seq1: %s %d, want cancellation_requested 5", state, seq)
+	}
+}
+
+// (guard)
+func TestRequesterCancelTerminalStillRefused(t *testing.T) {
+	env := testhub.Start(t)
+	job, thr, aSec, bSec := jobWithRecipient(t, env)
+	mustSend(t, env, bSec, jobStatus("s1", thr, job, 1, "succeeded"))
+	mustReject(t, env, aSec, jobStatus("c1", thr, job, 9, "cancelled"), http.StatusUnprocessableEntity, "invalid_transition")
+	if state, seq, _, _ := jobRow(t, env, job); state != "succeeded" || seq != 1 {
+		t.Fatalf("after a refused cancel: %s %d, want succeeded 1", state, seq)
+	}
+}
+
+// (guard)
+func TestRecipientStaleSequenceStillRefused(t *testing.T) {
+	env := testhub.Start(t)
+	job, thr, _, bSec := jobWithRecipient(t, env)
+	mustSend(t, env, bSec, jobStatus("s1", thr, job, 2, "accepted"))
+	_, det := mustReject(t, env, bSec, jobStatus("s2", thr, job, 2, "running"), http.StatusConflict, "stale_sequence")
+	if det["last_sequence"] != float64(2) {
+		t.Fatalf("stale_sequence details.last_sequence = %v, want 2", det["last_sequence"])
 	}
 }

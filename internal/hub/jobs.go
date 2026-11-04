@@ -171,6 +171,11 @@ func prepareJobRequest(ctx context.Context, tx *sql.Tx, snd sender, thr *threadR
 // cancellation_requested; sequence is above the job's last (409
 // stale_sequence); and the state is allowed from the job's state by the
 // transition table (422 invalid_transition).
+//
+// sequence belongs to the recipient: a requester's cancel is neither checked
+// against nor stored as the job's last sequence, so a high one cannot make
+// the recipient's next report stale. A requester cancel of a terminal job is
+// still 422 invalid_transition.
 func prepareJobStatus(ctx context.Context, tx *sql.Tx, c auth.Caller, snd sender, js *envelope.JobStatus) (*kindEffect, error) {
 	var requester, recipient, recipientPrn, state string
 	var lastSeq int64
@@ -203,7 +208,7 @@ func prepareJobStatus(ctx context.Context, tx *sql.Tx, c auth.Caller, snd sender
 	default:
 		return nil, notRecipient()
 	}
-	if js.Sequence <= lastSeq {
+	if !fromRequester && js.Sequence <= lastSeq {
 		e := E(http.StatusConflict, "stale_sequence", "sequence must be greater than the job's last reported sequence")
 		e.Details["job_id"] = js.JobID
 		e.Details["last_sequence"] = lastSeq
@@ -218,10 +223,14 @@ func prepareJobStatus(ctx context.Context, tx *sql.Tx, c auth.Caller, snd sender
 	} else if !jobTransitions[state][js.State] {
 		return nil, invalidTransition(js.JobID, state, js.State)
 	}
+	seq := js.Sequence
+	if fromRequester {
+		seq = lastSeq // the requester's sequence is not the job's
+	}
 	return &kindEffect{jobID: js.JobID, apply: func(ctx context.Context, tx *sql.Tx, _ string, now string) error {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE jobs SET state = ?, last_sequence = ?, updated_at = ? WHERE job_id = ?`,
-			next, js.Sequence, now, js.JobID); err != nil {
+			next, seq, now, js.JobID); err != nil {
 			return fmt.Errorf("hub: update job: %w", err)
 		}
 		return nil
