@@ -1883,7 +1883,7 @@ func TestPeerSetDisabledTool(t *testing.T) {
 		"content": map[string]any{"text": "from provisioned peer"},
 	}
 	toolOK(t, env, secret, "vecnet_send", send, nil)
-	for _, disabled := range []bool{true, true, false, false} {
+	for i, disabled := range []bool{true, true, false, false} {
 		var result map[string]any
 		toolOK(t, env, secret, "vecnet_peer_set_disabled", map[string]any{"peer_id": id, "disabled": disabled}, &result)
 		want := map[string]any{"peer": map[string]any{
@@ -1892,16 +1892,24 @@ func TestPeerSetDisabledTool(t *testing.T) {
 		if !reflect.DeepEqual(result, want) {
 			t.Fatalf("set disabled = %v, want exactly %v", result, want)
 		}
-		fromHTTP := peerToolHTTP(t, env, secret, http.MethodPatch, "/v1/peers/"+id, map[string]any{"disabled": disabled}, http.StatusOK)
-		if !reflect.DeepEqual(result, fromHTTP) {
-			t.Fatalf("tool set disabled = %v, HTTP = %v", result, fromHTTP)
+		// The tool's own effect, before any HTTP request that could supply
+		// it: the stored flag, then a send under a fresh key.
+		var stored bool
+		if err := env.Hub.DB.QueryRow(`SELECT disabled != 0 FROM peers WHERE peer_id = ?`, id).Scan(&stored); err != nil || stored != disabled {
+			t.Fatalf("call %d: stored disabled = %v (%v), want %v", i, stored, err, disabled)
 		}
-		send["idempotency_key"] = "after-disable"
+		send["idempotency_key"] = fmt.Sprintf("after-set-%d", i)
 		if disabled {
+			toolFails(t, env, secret, "vecnet_send", send, "forbidden")
 			peerToolErrorLikeHTTP(t, env, secret, "vecnet_send", send,
 				http.MethodPost, "/v1/messages", send, http.StatusForbidden, "forbidden")
 		} else {
 			toolOK(t, env, secret, "vecnet_send", send, nil)
+		}
+		// Only now compare with the HTTP endpoint, which sets the same value.
+		fromHTTP := peerToolHTTP(t, env, secret, http.MethodPatch, "/v1/peers/"+id, map[string]any{"disabled": disabled}, http.StatusOK)
+		if !reflect.DeepEqual(result, fromHTTP) {
+			t.Fatalf("tool set disabled = %v, HTTP = %v", result, fromHTTP)
 		}
 	}
 }
