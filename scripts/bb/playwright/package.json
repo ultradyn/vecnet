@@ -1,0 +1,8 @@
+{
+  "name": "vecnet-bb-playwright",
+  "private": true,
+  "description": "Build-box pin for the Playwright that scripts/ui/lib.mjs loads; matches the headless-browser-screenshots skill on xsm.",
+  "dependencies": {
+    "playwright": "1.61.1"
+  }
+}
