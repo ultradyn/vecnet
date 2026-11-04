@@ -634,5 +634,5 @@ func hookItemOf(ev envelope.Event, names map[string]string) (hookItem, error) {
 	if err := json.Unmarshal(ev.Data, &d); err != nil {
 		return hookItem{}, err
 	}
-	return hookItem{Cursor: ev.Cursor, Thread: d.Message.ThreadID, From: d.Message.Sender, Name: names[d.Message.Sender], Message: d.Message.MessageID, Delivery: d.DeliveryID, Kind: d.Message.Kind, Text: d.Message.Content.Text, Attachments: len(d.Message.Attachments)}, nil
+	return hookItem{Cursor: ev.Cursor, Thread: d.Message.ThreadID, From: d.Message.Sender, Name: eventFieldsOf(ev).nameOf(names), Message: d.Message.MessageID, Delivery: d.DeliveryID, Kind: d.Message.Kind, Text: d.Message.Content.Text, Attachments: len(d.Message.Attachments)}, nil
 }

@@ -772,3 +772,21 @@ func TestHookBindingMigrates(t *testing.T) {
 		t.Fatalf("state=%s binding=%s err=%v", raw, braw, err)
 	}
 }
+
+// The hook names a sender from the delivery's send-time sender_info, then
+// the cached directory, sanitised either way.
+func TestHookNamesSenderFromSenderInfo(t *testing.T) {
+	raw, _ := json.Marshal(map[string]any{"delivery_id": "dly_1", "message": map[string]any{"message_id": "msg_1", "thread_id": "thr_X", "sender": "peer_h", "kind": "message", "sender_info": map[string]string{"name": "Scout <b>\nX", "kind": "session"}, "content": map[string]string{"text": "hi"}}})
+	withInfo := envelope.Event{Cursor: "e1.1", Type: "delivery", Data: raw}
+	item, err := hookItemOf(withInfo, map[string]string{"peer_h": "Cached"})
+	if err != nil || item.Name != "Scout <b>\nX" {
+		t.Fatalf("name=%q err=%v", item.Name, err)
+	}
+	if ctx := hookContext(newHookHint("p", "", ""), []hookItem{item}, 0, false); !strings.Contains(ctx, `name="Scout_&lt;b&gt;_X"`) {
+		t.Fatalf("sanitised name missing: %q", ctx)
+	}
+	item, _ = hookItemOf(hookEvent(2, "x"), map[string]string{"peer_h": "Cached"})
+	if item.Name != "Cached" {
+		t.Fatalf("fallback name=%q", item.Name)
+	}
+}
