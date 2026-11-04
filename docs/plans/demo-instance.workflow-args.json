@@ -9,7 +9,7 @@
   "statusDir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-demo-instance",
   "taskPrefix": "dm",
   "startTask": 1,
-  "endTask": 10,
+  "endTask": 8,
   "finalReview": true,
   "openBrowser": false,
   "solRelay": {
@@ -25,10 +25,10 @@
     "Never change connectors/**, internal/opseed/**, real fly.toml or real hub credentials/peers/database. Do not deploy to the real app.",
     "Public demo uses a dedicated mux; no httpapi.New or NewStack.Run. Default deny unknown routes/methods. No operator bearer in browser and no implicit UI writes.",
     "Only reviewed actual-session fixtures with digest-bound human approval may launch publicly. Synthetic fixtures are test-only. No automatic export approval or production DB copying.",
-    "Optional live feature remains disabled. Only exact configured free models and OpenRouter allowlisted paths; no tools/paid fallback. Durable 40-attempt/day quota and kill state survive resets.",
-    "Actual website CTA source, fixture approval, model/data-policy verification, Fly organisation/network/quote and DNS are pending operator gates. Report pending accurately; do not invent live acceptance evidence.",
+    "Actual website CTA source, fixture approval, Fly organisation/network/quote and DNS are pending publication gates; model/data-policy checks apply only to the unscheduled live-chat follow-up. Report pending accurately; do not invent live acceptance evidence.",
     "Unconditional code gates use demo-deploy-check --offline and explicit synthetic test paths. Actual approved fixture/network/site-link readiness is a pending publication gate until operator supplied; --public must fail closed without it. Never weaken --public to make the implementation gate green.",
-    "Visitor chat content stays in per-session in-memory hub stores, never replay/disk/WAL; access expires at 30 minutes and deadline cleanup by 31 minutes. No production build with CGO enabled."
+    "Replay-only first launch: immutable allowlisted display DTO snapshots in memory using existing UI contracts; no hub/DB reconstruction, volume, provider key/client, visitor session, activity SSE or progressive scheduler. live_enabled=false always; chat routes absent. Appendices are unscheduled follow-ups.",
+    "Separate known-asset and API budgets. Measure actual-binary cold-load request counts and enforce documented sizing margins. TestDemoColdLoadProductionLimits uses production quotas, cold cache, no mocked assets; dashboard and generation-reset refetch must succeed. Queue/coalesce dynamic reads and bound Retry-After retries."
   ],
   "mergeChecks": [
     "BB_HOST=x-boss BB_JOBS=2 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
@@ -45,16 +45,16 @@
     "Receipt must explicitly distinguish tested preview from pending human capture approval, infrastructure and external CTA edit."
   ],
   "lensFocus": {
-    "spec": "Check the assignment requirements and ten plan tasks: distinct Fly app/network, anonymous all-view access, real sanitised reviewed capture, time shift/progressive truthfulness, optional free-model replies, costs and fail-closed limits. No live actions are authorised by planning.",
-    "security": "Attack public mux route/method fallback, DTO leaks, export strings and IDs, arbitrary URLs/redirects/DNS rebinding/browser media, session isolation, CSRF, free-model price changes, budget races/crashes/reset/UTC rollover and retention snapshots. Verify no real network/config/peers shared.",
-    "tests": "Each named test fails before implementation and proves behaviour; guard normal hub auth. All commands through BB_HOST=x-boss BB_JOBS=2 just bb, fakes only, temp roots, no local builds. Browser journey catches hidden writes, remote loads and false live labels."
+    "spec": "Check the eight launch tasks: isolated Fly app/network, anonymous all-view access, approved actual-session fixture, constant timestamp shift, immutable in-memory UI contracts, no runtime model spend. Chat and progressive replay appendices are excluded from scheduling and launch prerequisites.",
+    "security": "Attack default-deny mux, DTO/export leaks, arbitrary URLs/browser media, unknown asset/API abuse, memory bounds and generation mixing. Prove no authority, hub credentials/store reconstruction, provider client/chat routes or persistent volume. Preserve real auth and network isolation.",
+    "tests": "Each named test fails before implementation and proves behaviour; guard normal hub auth. All commands through BB_HOST=x-boss BB_JOBS=2 just bb, fakes only, temp roots, no local builds. Browser journey catches hidden writes, remote loads and false live labels. Measure cold-load assets/API reads and test unchanged production limits, all dashboard reads and reset refetch against actual binary; no mocked assets. Verify snapshot contracts and old-generation cursor rejection."
   },
   "extraLenses": [
     {
       "key": "design",
       "title": "Demo disclosure and read-only interaction",
       "taste": true,
-      "focus": "Review desktop/mobile dm screenshots and journey: persistent original capture/model/time-shift disclosure, obvious replay vs live, disabled controls explained, accessible focus, no misleading live status or remote assets."
+      "focus": "Review desktop/mobile dm screenshots: persistent original capture/model/time-shift disclosure, Replay snapshot label/reset time, disabled controls explained, accessible focus, no misleading live status or remote assets."
     }
   ],
   "runner": "BB_HOST=x-boss BB_JOBS=2 CGO_ENABLED=0 just bb ",
@@ -71,30 +71,22 @@
       3
     ],
     "5": [
-      4
+      4,
+      6
     ],
     "6": [
       3,
       4
     ],
     "7": [
-      1
+      2,
+      5,
+      6
     ],
     "8": [
-      4,
-      6,
+      2,
+      5,
       7
-    ],
-    "9": [
-      2,
-      5,
-      6,
-      8
-    ],
-    "10": [
-      2,
-      5,
-      9
     ]
   },
   "tasks": [
@@ -125,7 +117,7 @@
       ]
     },
     {
-      "title": "Deterministic fixture loader and replay clock",
+      "title": "Immutable snapshot reader and timestamp shift",
       "refs": "Public demo plan; Global Constraints; Review Focus; PROTOCOL \u00a7\u00a72.12\u20132.13, 12, 14, 20",
       "race": false,
       "suite": "./internal/demoreplay/",
@@ -185,34 +177,6 @@
       ]
     },
     {
-      "title": "Free-model gateway and durable quota kill switch",
-      "refs": "Public demo plan; Global Constraints; Review Focus; PROTOCOL \u00a7\u00a72.12\u20132.13, 12, 14, 20",
-      "race": true,
-      "suite": "./internal/demomodel/",
-      "route": "sol",
-      "checks": [],
-      "hazards": [
-        "Follow only this task Files and Interfaces; shared files change in declared order.",
-        "No live capture/deploy/provider calls; tests use disposable approved-or-synthetic test fixtures and fake transports.",
-        "A real human-approved fixture and actual site edit are publication gates; do not claim them from synthetic tests."
-      ]
-    },
-    {
-      "title": "Optional isolated visitor chat and tool-free agents",
-      "refs": "Public demo plan; Global Constraints; Review Focus; PROTOCOL \u00a7\u00a72.12\u20132.13, 12, 14, 20",
-      "race": true,
-      "suite": "./internal/demochat/ ./internal/demomodel/ ./internal/demoserver/",
-      "route": "sol",
-      "checks": [
-        "BB_HOST=x-boss BB_JOBS=2 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/demo.test.mjs"
-      ],
-      "hazards": [
-        "Follow only this task Files and Interfaces; shared files change in declared order.",
-        "No live capture/deploy/provider calls; tests use disposable approved-or-synthetic test fixtures and fake transports.",
-        "A real human-approved fixture and actual site edit are publication gates; do not claim them from synthetic tests."
-      ]
-    },
-    {
       "title": "Separate Fly packaging and deployment runbook",
       "refs": "Public demo plan; Global Constraints; Review Focus; PROTOCOL \u00a7\u00a72.12\u20132.13, 12, 14, 20",
       "race": false,
@@ -247,7 +211,7 @@
       "shots": "dm",
       "reviewChecks": [
         "BB_HOST=x-boss BB_JOBS=2 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
-        "BB_HOST=x-boss BB_JOBS=2 just bb env SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-demo-instance/review-shots/10 build2 node scripts/ui/demo.mjs"
+        "BB_HOST=x-boss BB_JOBS=2 just bb env SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-demo-instance/review-shots/08 build2 node scripts/ui/demo.mjs"
       ]
     }
   ]
