@@ -33,6 +33,8 @@ export interface SessionLane {
 /** Plugins report an approval that only their own UI can answer as this progress summary. */
 export const APPROVAL_WAIT = /^waiting for (?:approval|permission) in \S/i;
 const hash = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 24);
+export const WRAPUP_PROMPT = '[vecnet] This session is idle and is about to be settled. Commit any work you want to keep on the current branch, ' +
+  'then reply with a short summary of what you did and anything left unfinished.';
 function prefix(s: string, bytes: number): string {
   const data = Buffer.from(s);
   let end = Math.max(0, Math.min(bytes, data.length));
@@ -238,8 +240,33 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     }
     if (selected.length) await sendBatch(selected, mode);
   }
+  // idle.wrapup_turn: one durable wrap-up turn before an idle settle. Its
+  // final text (redacted) becomes the succeeded summary; the settle follows
+  // its completion. The deadline settle never waits for it.
+  type Wrapup = { state: 'sent' | 'done'; extra: Record<string, unknown>; summary?: string };
+  const wrapup = (): Wrapup | undefined => { const w = store.get('wrapup'); return w ? JSON.parse(w) as Wrapup : undefined; };
+  async function startWrapup(extra: Record<string, unknown>): Promise<boolean> {
+    if (!handle) return false;
+    ledger.tx(() => { store.set('wrapup', JSON.stringify({ state: 'sent', extra } satisfies Wrapup)); store.set('awaitingTurn', '1'); });
+    try {
+      await handle.send({ items: [{ deliveryId: `vl-wrapup-${jobId}`, messageId: '', from: deps.self, text: WRAPUP_PROMPT, attachments: [] }],
+        batchId: hash(`wrapup\n${jobId}`) } as TurnInput, 'start');
+    } catch {
+      log.warn('wrap-up turn not sent; settling without it', { jobId });
+      ledger.tx(() => { store.set('wrapup', JSON.stringify({ state: 'done', extra } satisfies Wrapup)); store.set('awaitingTurn', '0'); });
+      return false;
+    }
+    ledger.updateJob(jobId, { sessionKind: 'turn_running', parkedAt: null });
+    sendGeneration++; startPump();
+    return true;
+  }
   async function end(mode: SettleMode, ended: EndReason | 'cancel' | 'session_exited', extra: Record<string, unknown> = {}) {
     if (job().state === 'ended') return;
+    if (mode === 'wrapup' && ended === 'idle_wrapup' && job().input.idle?.wrapup_turn === true) {
+      const w = wrapup();
+      if (w?.state === 'sent') return;                       // the wrap-up turn is still running
+      if (!w && await startWrapup(extra)) return;
+    }
     ledger.updateJob(jobId, { state: 'settling' });
     const result = handle ? await handle.settle(mode) : { workspaceKept: true };
     let pushed = false;
@@ -254,7 +281,7 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
       else if (ended === 'cancel') deps.jobs.report(jobId, 'cancelled', { branch: result.branch ?? job().branch, head_sha: result.headSha, workspace_kept: result.workspaceKept });
       else deps.jobs.report(jobId, 'succeeded', {
         ...extra, ended, turns: job().turns, branch: result.branch ?? job().branch, head_sha: result.headSha,
-        commits: result.commits ?? [], pushed, summary: redactText(result.summary ?? '').text,
+        commits: result.commits ?? [], pushed, summary: redactText(wrapup()?.summary ?? result.summary ?? '').text,
         ...(ended === 'idle_wrapup' ? { quiescence: extra.quiescence ?? (deps.caps.backgroundTasks === 'observable' ? 'proven' : 'assumed') } : {}),
       });
     });
@@ -317,6 +344,13 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
         ledger.updateJob(jobId, { turnCursor: cursor });
       });
       held = false;
+      const w = wrapup();
+      if (fresh && w?.state === 'sent') {
+        // The wrap-up turn finished: settle now, unless new input arrived meanwhile.
+        ledger.tx(() => store.set('wrapup', JSON.stringify({ ...w, state: 'done', summary: prefix(redactText(ev.finalText).text, 4096) } satisfies Wrapup)));
+        if (pending().length === 0) { await end('wrapup', 'idle_wrapup', w.extra); return; }
+        store.delete('wrapup');
+      }
       if (fresh) {
         if (JSON.stringify([...ev.consumed].sort()) !== JSON.stringify([...ids].sort())) log.warn('turn consumed mismatch', { jobId, turn: n });
         deps.onActivity(jobId);

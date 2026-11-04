@@ -717,3 +717,22 @@ test('an approval wait only the backend UI can answer posts one redacted note pe
   await s.lane.notice({type:'progress',turnId:'run-2',summary:'waiting for approval in T3 Bearer secret-token'});
   assert.equal(notes().length,2);assert.ok(!notes()[1].content.text.includes('secret-token'));
 });
+test('idle.wrapup_turn: an idle settle first runs one wrap-up turn, then settles with its redacted text as the summary',async t=>{
+  const s=await setup(t,{input:{idle:{wrapup_turn:true}}});
+  await s.lane.settle('wrapup','idle_wrapup',{quiescence:'proven'});
+  assert.equal(s.sends.length,1);assert.equal(s.sends[0].mode,'start');assert.match(s.sends[0].input.items[0].text,/about to be settled/);
+  assert.deepEqual(s.calls,[]);assert.equal(s.statuses().length,0);
+  // A second idle settle while the wrap-up runs neither resends nor settles.
+  await s.lane.settle('wrapup','idle_wrapup',{quiescence:'proven'});
+  assert.equal(s.sends.length,1);assert.deepEqual(s.calls,[]);
+  await s.emit(finished('wrap','Committed abc. Bearer leaked-token'));
+  assert.deepEqual(s.calls,['settle:wrapup']);
+  const out=s.statuses()[0].output as Record<string,unknown>;
+  assert.equal(s.statuses()[0].state,'succeeded');assert.equal(out.ended,'idle_wrapup');assert.equal(out.quiescence,'proven');
+  assert.equal(out.summary,'Committed abc. Bearer [redacted]');
+  assert.equal(s.replies().length,1,'the wrap-up turn reply is posted like any turn');
+});
+test('without idle.wrapup_turn an idle settle settles at once; the deadline never waits for a wrap-up turn',async t=>{
+  const s=await setup(t);await s.lane.settle('wrapup','idle_wrapup');assert.equal(s.sends.length,0);assert.deepEqual(s.calls,['settle:wrapup']);
+  const d=await setup(t,{input:{idle:{wrapup_turn:true}}});await d.lane.settle('wrapup','deadline');assert.equal(d.sends.length,0);assert.deepEqual(d.calls,['settle:wrapup']);
+});
