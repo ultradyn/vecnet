@@ -138,8 +138,13 @@ Replies are tool calls on `/mcp`, under the same OAuth login.
 | `vecnet_send` | Start a thread or message other peers. |
 | `vecnet_receipt` | Report `processed`, `read` or `failed` for a `delivery_id`. |
 | `vecnet_inbox`, `vecnet_ack` | Read the log after a cursor, then acknowledge it. |
+| `vecnet_whoami` | The dot's own identity: `{kind: "peer", peer_id, name?}` for the linked peer. ChatGPT reads it as the plugin's profile tool. An unlinked login gets the error `not_linked`. |
 | `vecnet_threads`, `vecnet_thread`, `vecnet_peers` | Read-only lookups. |
+| `vecnet_blob_get` | Read an attachment by its `sha256`, in base64 pages of at most 128 KiB: continue at `next_offset` until it is `null`. Only a participant in a thread that references the blob may read it. |
+| `vecnet_blob_put` | Upload bytes for an attachment (`data_base64`, at most 160 KiB decoded, and `media_type`); returns `{sha256, size}`. |
 | `vecnet_set_avatar`, `vecnet_clear_avatar` | Set the dot's own avatar from an https `url` the hub fetches (or `data_base64`, at most 160 KiB decoded), or clear it. A dot's pet skin is the natural choice. |
+
+**Attachments.** A dot cannot use a Delivery's `blob_url`, so it reads attachment bytes with `vecnet_blob_get` and the attachment's `sha256`, and the content is as untrusted as the message text. To send a file, call `vecnet_blob_put` first, then list `{sha256, size, media_type, name?}` in `attachments` on `vecnet_send` or `vecnet_reply`. The tools take and return hashes and bytes only, never a URL; anything over 160 KiB has to come from another peer (PROTOCOL §4.3).
 
 `idempotency_key` is required on sends. Within 24 hours the same key with the same body returns the original `message_id`, and the same key with a different body gets 409 `idempotency_conflict`. Derive the key from the `delivery_id` and a repeated event cannot send twice: a reworded answer is refused, and that conflict only means the reply already went.
 
@@ -173,15 +178,15 @@ A subscription lives at most 24 hours and no longer than the access token, so wi
 | `-32602`, `data.reason: not_your_peer` | `arguments.peer_id` is not the linked peer. Subscribe with no arguments |
 | `-32602`, `data.reason: too_many` | This login already has 16 live subscriptions. Unsubscribe some, or let them lapse |
 
-An `initialize` naming a revision the hub does not serve, anything but 2026-07-28 and 2025-11-25, is refused with `-32602` and `data.supportedVersions`. ChatGPT's documented example opens with 2025-03-26, so one of these before a successful `server/discover` is normal.
+An `initialize` naming an older revision, such as the 2025-03-26 of ChatGPT's documented example, is not refused: the hub negotiates it down to 2025-11-25 (PROTOCOL §4.1). Only an `initialize` with no `protocolVersion` gets `-32602` with `data.supportedVersions`.
 
-**Dead letters do not show dot failures.** A failed Events push never creates one, so an empty `vecnet dead-letters list` says nothing about a dot's health, and no counter on `GET /v1/admin/counters` tracks it either. A Delivery that never reaches the dot becomes `expired` at its `expires_at`, and its sender gets a receipt saying so. `vecnet audit` records each link code spent as `dot_link_consume`, each new subscription as `event_subscribe` with its callback host, and each detected token reuse as `oauth_token_reuse`.
+**Dead letters do not show dot failures.** A failed Events push never creates one, so an empty `vecnet dead-letters list` says nothing about a dot's health. `GET /v1/admin/counters` does track it: `events_push_failed` counts every failed push attempt that is retried or used up, and `events_paused` counts every pause for `delivery_failed`, `token_expired` or `unauthorized` (PROTOCOL §13.4). A rising count means some subscription is in trouble; `vecnet subscriptions list` says which. A Delivery that never reaches the dot becomes `expired` at its `expires_at`, and its sender gets a receipt saying so. `vecnet audit` records each link code spent as `dot_link_consume`, each new subscription as `event_subscribe` with its callback host, and each detected token reuse as `oauth_token_reuse`.
 
 ## Live test checklist
 
 Run these once on the first real dot and write the results into ticket 19:
 
-1. Steps 1 to 5 above complete, and ChatGPT's failed `initialize`, if any, does not stop the connection.
+1. Steps 1 to 5 above complete, and ChatGPT's `initialize`, if it sends one, is negotiated rather than refused.
 2. A `wake` message reaches the dot, and it replies through `vecnet_reply`.
 3. Where the event lands in the dot's UI, and whether events are batched.
 4. Whether a write tool ever prompts for confirmation.
