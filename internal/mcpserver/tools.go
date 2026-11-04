@@ -933,7 +933,7 @@ func toolSpecs(defs schema) []toolSpec {
 			"sha256": schema{"type": "string"},
 			"size":   schema{"type": "integer", "minimum": 0},
 		}, "sha256", "size"),
-		annotations: writeAnnotations(false), call: callBlobPut,
+		annotations: writeAnnotations(false), precheck: precheckBase64(mcpBlobPutMax, blobPutTooLarge), call: callBlobPut,
 	}, {
 		name: "vecnet_blob_get",
 		description: "Read a blob referenced by a message visible to you, in base64 pages of at most 128 KiB. " +
@@ -967,7 +967,7 @@ func toolSpecs(defs schema) []toolSpec {
 				"description": "https URL of an image the hub fetches (public hosts only, no redirects, 2 MiB, 10 s)."},
 			"as": ref("peerId"),
 		}),
-		annotations: writeAnnotations(true), call: callSetAvatar,
+		annotations: writeAnnotations(true), precheck: precheckBase64(mcpAvatarMax, avatarTooLarge), call: callSetAvatar,
 	}, {
 		name:        "vecnet_clear_avatar",
 		description: "Write: remove your avatar on the operator's bus; the directory falls back to your initial.",
@@ -987,6 +987,39 @@ const (
 	mcpBlobGetPage     = 128 << 10
 )
 
+func blobPutTooLarge() error {
+	return base64TooLarge(mcpBlobPutMax, "data_base64 exceeds 160 KiB decoded; use PUT /v1/blobs for larger blobs")
+}
+
+func avatarTooLarge() error {
+	return base64TooLarge(mcpAvatarMax, "data_base64 exceeds 160 KiB decoded; use url for larger images")
+}
+
+func base64TooLarge(limit int, msg string) error {
+	e := hub.E(http.StatusRequestEntityTooLarge, "payload_too_large", msg)
+	e.Details["limit"] = limit
+	return e
+}
+
+// precheckBase64 answers payload_too_large for a data_base64 that decodes
+// past max, before schema validation sees its length. Without it only the
+// first two bytes over the cap would reach the tool's check; anything
+// larger would fail maxLength as -32602 instead (PROTOCOL §4.3).
+func precheckBase64(max int, tooLarge func() error) func(raw []byte) error {
+	return func(raw []byte) error {
+		var a map[string]json.RawMessage
+		var encoded string
+		if json.Unmarshal(raw, &a) != nil || json.Unmarshal(a["data_base64"], &encoded) != nil ||
+			len(encoded) <= mcpAvatarBase64Max {
+			return nil // schema validation and the tool answer the rest
+		}
+		if data, err := decodeBase64(encoded); err == nil && len(data) > max {
+			return tooLarge()
+		}
+		return nil
+	}
+}
+
 func callBlobPut(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error) {
 	var a struct {
 		Data       string    `json:"data_base64"`
@@ -1001,9 +1034,7 @@ func callBlobPut(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any
 		return nil, &envelope.SchemaError{Path: "/data_base64", Message: "data_base64 must be standard base64"}
 	}
 	if len(data) > mcpBlobPutMax {
-		e := hub.E(http.StatusRequestEntityTooLarge, "payload_too_large", "data_base64 exceeds 160 KiB decoded; use PUT /v1/blobs for larger blobs")
-		e.Details["limit"] = mcpBlobPutMax
-		return nil, e
+		return nil, blobPutTooLarge()
 	}
 	m, err := s.Hub.PutBlob(ctx, c, bytes.NewReader(data), a.MediaType, time.Duration(a.TTLSeconds)*time.Second)
 	if err != nil {
@@ -1075,9 +1106,7 @@ func callSetAvatar(ctx context.Context, s *Server, c auth.Caller, raw []byte) (a
 		return nil, &envelope.SchemaError{Path: "/data_base64", Message: "data_base64 must be standard base64"}
 	}
 	if len(data) > mcpAvatarMax {
-		e := hub.E(http.StatusRequestEntityTooLarge, "payload_too_large", "data_base64 exceeds 160 KiB decoded; use url for larger images")
-		e.Details["limit"] = mcpAvatarMax
-		return nil, e
+		return nil, avatarTooLarge()
 	}
 	if sha, err = s.Hub.SetAvatar(ctx, c, a.As, data); err != nil {
 		return nil, err

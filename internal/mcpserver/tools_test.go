@@ -1998,11 +1998,16 @@ func TestBlobPutCap(t *testing.T) {
 	env := testhub.Start(t)
 	_, secret := env.NewPeer("session", "uploader")
 	data := bytes.Repeat([]byte{'x'}, (160<<10)+1)
-	e := toolFails(t, env, secret, "vecnet_blob_put", map[string]any{
-		"data_base64": base64.StdEncoding.EncodeToString(data), "media_type": "text/plain",
-	}, "payload_too_large")
-	if e.Error.Details["limit"] != float64(163840) {
-		t.Fatalf("limit = %v", e.Error.Details["limit"])
+	// From cap+3 the base64 is past maxLength, and a request of 190 KiB
+	// still fits the 256 KiB body: each is payload_too_large, not -32602.
+	for _, n := range []int{160<<10 + 1, 160<<10 + 3, 190 << 10} {
+		over := bytes.Repeat([]byte{'x'}, n)
+		e := toolFails(t, env, secret, "vecnet_blob_put", map[string]any{
+			"data_base64": base64.StdEncoding.EncodeToString(over), "media_type": "text/plain",
+		}, "payload_too_large")
+		if e.Error.Details["limit"] != float64(163840) {
+			t.Fatalf("%d bytes: limit = %v", n, e.Error.Details["limit"])
+		}
 	}
 	sha := fmt.Sprintf("%x", sha256.Sum256(data))
 	resp, body := env.Do(env.OperatorSecret, "GET", "/v1/blobs/"+sha, nil)

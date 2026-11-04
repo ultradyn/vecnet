@@ -103,10 +103,13 @@ func TestSetAvatarToolRefusals(t *testing.T) {
 	}
 	// The cap: 160 KiB decoded. One byte over still fits the 256 KiB /mcp
 	// body as base64, so the hub, not the transport, answers.
-	over := make([]byte, 160<<10+1)
-	copy(over, avatarPNG(t, color.Black))
-	e := toolFails(t, env, aSec, "vecnet_set_avatar", map[string]any{"data_base64": base64.StdEncoding.EncodeToString(over)}, "payload_too_large")
-	if e.Error.Details["limit"] != float64(160<<10) {
-		t.Fatalf("limit = %v", e.Error.Details["limit"])
+	// Past the base64 maxLength (cap+3 on) it is still the tool's answer.
+	for _, n := range []int{160<<10 + 1, 160<<10 + 3, 190 << 10} {
+		over := make([]byte, n)
+		copy(over, avatarPNG(t, color.Black))
+		e := toolFails(t, env, aSec, "vecnet_set_avatar", map[string]any{"data_base64": base64.StdEncoding.EncodeToString(over)}, "payload_too_large")
+		if e.Error.Details["limit"] != float64(160<<10) {
+			t.Fatalf("%d bytes: limit = %v", n, e.Error.Details["limit"])
+		}
 	}
 }
