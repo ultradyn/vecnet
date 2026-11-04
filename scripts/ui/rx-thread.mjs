@@ -67,6 +67,8 @@ try {
       const r = id => document.getElementById('m-' + id).getBoundingClientRect();
       return { h: r(a).height, top: r(b).top, row: document.querySelector(`[id="m-${a}"] .rx-row`).getBoundingClientRect().height };
     }, [q.message_id, target]);
+    // Its receipts row loads on its own; measure only once it is in.
+    await qMsg.locator('.rc span').first().waitFor();
     const g0 = await geo();
     await react('sleuth', q.message_id, CHECK);
     await qMsg.locator('.rx-chip').waitFor();
