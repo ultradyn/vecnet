@@ -24,6 +24,11 @@ const shownWindow = 1024
 // a principal credential) from GET /v1/peers/me, As the --as peer, and Cred
 // a fingerprint of the credential that Caller was verified for. A state
 // without Hub predates binding.
+//
+// Session, SessionAt, SessionHow, Proc and RebindUntil bind the profile's
+// hook to one Claude Code session (PROTOCOL §13.9, issue 38); Noticed
+// lists the sessions already told that it is not theirs (hooksession.go).
+// watch never reads or changes them; it rewrites them unchanged.
 type hookState struct {
 	Hub              string    `json:"hub,omitempty"`
 	Caller           string    `json:"caller,omitempty"`
@@ -32,6 +37,12 @@ type hookState struct {
 	PollCursor       string    `json:"poll_cursor,omitempty"`
 	Shown            []string  `json:"shown"`
 	LastPostToolPoll time.Time `json:"last_post_tool_poll,omitzero"`
+	Session          string    `json:"session,omitempty"`
+	SessionAt        time.Time `json:"session_at,omitzero"`
+	SessionHow       string    `json:"session_how,omitempty"`
+	Proc             hookProc  `json:"claude_proc,omitzero"`
+	RebindUntil      time.Time `json:"rebind_until,omitzero"`
+	Noticed          []string  `json:"noticed,omitempty"`
 }
 
 // normalizeHub canonicalises a hub URL for identity comparison: lower-case

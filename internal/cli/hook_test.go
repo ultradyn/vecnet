@@ -384,6 +384,9 @@ func TestHookStateKeying(t *testing.T) {
 		base string
 	}{{nil, "p.json"}, {[]string{"--as", "peer_1"}, "p@peer_1.json"}, {[]string{"--profile", "q"}, "q.json"}} {
 		env, _ := hookFixture(t, func(w http.ResponseWriter, r *http.Request) { hookPage(w, nil, "e1.9") })
+		if tc.base == "q.json" {
+			env["VECNET_PROFILE"] = "q" // VECNET_PROFILE=p would silence a --profile q hook
+		}
 		runHook(t, env, append([]string{"--event", "user-prompt"}, tc.args...)...)
 		if s := readHookState(t, filepath.Join(filepath.Dir(env["VECNET_CONFIG"]), "state", tc.base)); s.PollCursor != "e1.9" {
 			t.Fatalf("key %s: %+v", tc.base, s)
