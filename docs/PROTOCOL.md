@@ -467,7 +467,7 @@ Rotating a route key issues a new `whsec_`; the old key stays valid for 24 h, an
 
 The hub serves MCP **2026-07-28** (POST-only, no sessions, `server/discover`) and stays dual-era for clients that send `initialize` [SSE, DOTS]. It MUST validate `Origin` (403 if present and invalid) and authenticate every POST [SSE]. `/mcp` is hand-rolled JSON-RPC 2.0 on `net/http`, MCP Events included, because the go-sdk server cannot host MCP Events; the SDK stays as a test client and for wire types ([ADR 0001, MCP amendment](adr/0001-tech-stack.md)) [ADR1].
 
-The hub serves exactly 2026-07-28 and 2025-11-25. An `initialize` naming an older revision is rejected with an error carrying the newest supported version [R12].
+The hub serves exactly 2026-07-28 and 2025-11-25. An `initialize` naming any other non-empty revision (for example 2025-03-26 or 2025-06-18) negotiates down: the hub mints a 2025-11-25 session and answers `protocolVersion: "2025-11-25"`. An `initialize` with no `protocolVersion` is rejected with `-32602`, whose `data.supportedVersions` lists both revisions [R12].
 
 The hub MUST NOT implement MCP `Last-Event-ID` replay for any revision; the cursor tools cover resumption [SSE].
 
