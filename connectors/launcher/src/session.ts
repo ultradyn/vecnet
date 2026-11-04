@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Clock, HubApi, Log } from '../../hub-client/src/ports.ts';
 import type { Delivery, SendRequest } from '../../hub-client/src/wire.ts';
 import { MAX_TURN_INPUT_BYTES } from './backend.ts';
-import type { ActivityReport, BackendCapabilities, SessionHandle, SettleMode, SettleResult, SendMode, TurnEvent, TurnInput } from './backend.ts';
+import type { ActivityReport, BackendCapabilities, SessionHandle, SettleMode, SettleResult, SendMode, SendResult, TurnEvent, TurnInput } from './backend.ts';
 import type { Directory } from './directory.ts';
 import type { Ledger, JobRow, InputRow } from './ledger.ts';
 import type { Outbox } from './outbox.ts';
@@ -64,8 +64,17 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
   // A backend can already be idle while the saved lane still has a running
   // turn. Replay that completion before assigning a counter to any new send.
   let recovering = false;
-  let replaying = false;
-  let attachRetry: ReturnType<Clock['timer']> | undefined;
+  // Uncertain backend I/O has one serialized recovery path. A rejected send
+  // leaves its batch `sending`: the backend may or may not have accepted it.
+  // `reconcile` resends every such batch as stored (same payload, order, mode
+  // and batchId) on Clock backoff. Until it succeeds, completions are fenced
+  // (`held`) so none can commit while a batch it may have consumed is unsure,
+  // and no new batch is dispatched ahead of it.
+  let held = false;
+  let fence: { promise: Promise<void>; release(): void } | undefined;
+  let recovery: ReturnType<Clock['timer']> | undefined, recoveryAttempts = 0;
+  let streamRetry: ReturnType<Clock['timer']> | undefined, streamAttempts = 0;
+  const backoff = (attempt: number) => Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));
   const job = () => ledger.job(jobId)!;
   function serial<T>(fn: () => Promise<T> | T): Promise<T> {
     const work = chain.then(fn).catch(() => {
@@ -84,6 +93,19 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     deps.onActivity(jobId);
   }
   function pending() { return ledger.inputs(jobId, ['buffered', 'sending', 'sent']); }
+  const uncertain = () => ledger.inputs(jobId, ['sending']).length > 0;
+  const blocked = () => held || uncertain();
+  function cancelRetries() {
+    recovery?.cancel(); recovery = undefined;
+    streamRetry?.cancel(); streamRetry = undefined;
+  }
+  function scheduleRecovery() {
+    if (recovery || stopped || !handle || job().state === 'ended') return;
+    recovery = clock.timer(backoff(recoveryAttempts++), () => {
+      recovery = undefined;
+      void serial(reconcile).catch(scheduleRecovery);
+    });
+  }
   const cap = Math.min(MAX_TURN_INPUT_BYTES, deps.caps.maxInputBytes ?? Infinity);
   if (!Number.isSafeInteger(cap) || cap < 4) throw new Error('invalid backend input cap');
   type StoredBatch = {
@@ -135,7 +157,9 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     });
     // The optional structural field is consumed by t3's existing T3TurnInput seam.
     const input = batch.input;
-    const result = await handle.send(input, mode);
+    let result: SendResult;
+    try { result = await handle.send(input, mode); }
+    catch (error) { scheduleRecovery(); throw error; }
     sendGeneration++;
     ledger.tx(() => {
       // A steer may race a backend turn boundary. Prefer its actual send
@@ -148,8 +172,14 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     });
     startPump();
   }
+  // Dispatch from a completion or exit. A failure is already queued for
+  // recovery, so it must not also tear down the turn stream.
+  async function drive() {
+    try { await flush('start'); }
+    catch { log.warn('session lane dispatch failed; retrying', { jobId }); scheduleRecovery(); }
+  }
   async function flush(mode: SendMode) {
-    if (recovering || replaying) return;
+    if (recovering || blocked()) return;
     const buffered = ledger.inputs(jobId, ['buffered']).filter(row => {
       if (mode === 'start') return true;
       // Holds join the next non-hold turn batch, including a native queue,
@@ -189,7 +219,7 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
         ...(ended === 'idle_wrapup' ? { quiescence: extra.quiescence ?? (deps.caps.backgroundTasks === 'observable' ? 'proven' : 'assumed') } : {}),
       });
     });
-    attachRetry?.cancel();
+    cancelRetries();
     controller?.abort(); deps.onEnded(jobId);
   }
   async function control(c: 'interrupt' | 'settle' | 'extend', from: string) {
@@ -198,9 +228,19 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     else if (c === 'settle') await end('requested', 'settled');
     else activity();
   }
-  async function event(ev: TurnEvent, cursor: string) {
+  // A fenced completion returns its release, wrapped: an async function would
+  // otherwise adopt the promise and block the serial chain reconcile needs.
+  async function event(ev: TurnEvent, cursor: string): Promise<{ released: Promise<void> } | undefined> {
     if (stopped || job().state === 'ended') return;
     if (ev.type === 'turn_finished') {
+      if (uncertain()) {
+        // The completion may have consumed the uncertain batch. Hold it,
+        // unprocessed, until reconcile restores that batch to `sent`.
+        held = true;
+        if (!fence) { let release!: () => void; fence = { promise: new Promise<void>(r => { release = r; }), release }; }
+        scheduleRecovery();
+        return { released: fence.promise };
+      }
       const current = job(), n = current.turns + 1;
       const inputs = ledger.inputs(jobId, ['sent']).filter(r => {
         const batch = storedBatch(r);
@@ -237,12 +277,13 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
         }
         ledger.updateJob(jobId, { turnCursor: cursor });
       });
+      held = false;
       if (fresh) {
         if (JSON.stringify([...ev.consumed].sort()) !== JSON.stringify([...ids].sort())) log.warn('turn consumed mismatch', { jobId, turn: n });
         deps.onActivity(jobId);
         if (job().sessionKind === 'idle') {
           recovering = false;
-          await flush('start');
+          await drive();
         }
       }
       return;
@@ -254,7 +295,7 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
           store.set('awaitingTurn', '0');
         });
         recovering = false;
-        await flush('start');
+        await drive();
       }
       else {
         await end('lost', 'session_exited');
@@ -270,21 +311,42 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
       });
     });
   }
+  function untilReleased(wait: Promise<void>, signal: AbortSignal) {
+    return new Promise<void>(resolve => {
+      const done = () => { signal.removeEventListener('abort', done); resolve(); };
+      signal.addEventListener('abort', done, { once: true });
+      if (signal.aborted) done();
+      void wait.then(done);
+    });
+  }
   function startPump() {
-    if (!handle || pump || replaying || stopped || job().state === 'ended') return;
+    if (!handle || pump || stopped || job().state === 'ended') return;
+    streamRetry?.cancel(); streamRetry = undefined;
     const next = handle, signal = controller!.signal, generation = sendGeneration;
+    let failed = false;
     pump = (async () => {
       for await (const item of next.turns(job().turnCursor ? { value: job().turnCursor! } : undefined, signal)) {
         if (signal.aborted) break;
-        await serial(() => event(item.event, item.cursor.value));
+        streamAttempts = 0;
+        let wait = await serial(() => event(item.event, item.cursor.value));
+        while (wait && !signal.aborted) {
+          // Fenced: re-run this same completion once its batch is reconciled.
+          await untilReleased(wait.released, signal);
+          wait = await serial(() => event(item.event, item.cursor.value));
+        }
+        if (signal.aborted) break;
       }
     })().catch(() => {
-      if (!signal.aborted) log.warn('session turn stream failed', { jobId });
+      if (!signal.aborted) { failed = true; log.warn('session turn stream failed; retrying', { jobId }); }
     }).finally(() => {
       pump = undefined;
-      // A wake can race the old iterator returning after a resumable exit.
-      // Start its replacement only after the old iterator has fully closed.
-      if (sendGeneration > generation) startPump();
+      if (signal.aborted || stopped || job().state === 'ended') return;
+      // A failed stream resumes from the last committed cursor on Clock
+      // backoff. A wake can race the old iterator returning after a resumable
+      // exit; start its replacement only after the old iterator has closed.
+      if (failed) {
+        if (!streamRetry) streamRetry = clock.timer(backoff(streamAttempts++), () => { streamRetry = undefined; startPump(); });
+      } else if (sendGeneration > generation) startPump();
     });
   }
   type ControlDecision = { command: 'interrupt' | 'settle' | 'extend'; state: 'claimed' | 'done'; turnSeq: number; turnId?: string };
@@ -323,29 +385,24 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     await control(command, from);
     ledger.tx(() => { store.set(key, JSON.stringify({ ...decision, state: 'done' })); receipt(id, 'processed'); });
   }
-  async function replayAttachment() {
-    if (stopped || job().state === 'ended') return;
-    replaying = true;
+  // The single recovery path: at attach, and on Clock backoff after any
+  // rejected send. It resends uncertain batches in their stored order, then
+  // releases a held completion, which dispatches next itself; otherwise it
+  // re-drives buffered input for an idle session.
+  async function reconcile() {
+    if (!handle || stopped || job().state === 'ended') return;
     const batches = new Map<string, InputRow[]>();
     for (const row of ledger.inputs(jobId, ['sending'])) {
       const key = row.batchId!;
       batches.set(key, [...(batches.get(key) ?? []), row]);
     }
     for (const rows of batches.values()) await sendBatch(rows, rows[0].mode!, true);
-    replaying = false;
-    // The pump must not consume a completion until every uncertain send has
-    // been restored to sent. The recovery fence then reconciles unread turns
-    // before newly buffered input can be dispatched.
+    recoveryAttempts = 0;
+    const waiting = fence; fence = undefined; waiting?.release();
+    // At attach the pump starts only once every uncertain send is restored;
+    // the recovery fence then reconciles unread turns before new dispatch.
     startPump();
-    if (['idle', 'parked'].includes(job().sessionKind!)) await flush('start');
-  }
-  function retryAttachment() {
-    if (stopped || job().state === 'ended') return;
-    replaying = true;
-    attachRetry = clock.timer(1000, () => {
-      attachRetry = undefined;
-      void serial(replayAttachment).catch(retryAttachment);
-    });
+    if (!held && ['idle', 'parked'].includes(job().sessionKind!)) await flush('start');
   }
   const lane: SessionLane = {
     jobId,
@@ -362,8 +419,8 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
           (state.kind === 'idle' || state.kind === 'parked' || (state.kind === 'ended' && state.resumable));
         if (awaitingTurn) store.set('awaitingTurn', '1');
         ledger.updateJob(jobId, { state: 'running', sessionKind: state.kind === 'ended' && state.resumable ? 'parked' : state.kind });
-        await replayAttachment();
-      }).catch(retryAttachment);
+        await reconcile();
+      }).catch(scheduleRecovery);
     },
     handleMessage(d) {
       return serial(async () => {
@@ -411,7 +468,7 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
           remaining = `> ${remaining.slice(chunk.length)}`;
         }
         if (chunks.length) chunks.push(remaining);
-        const planned = planInput(m.priority, handle && !recovering && !replaying ? job().sessionKind ?? 'starting' : 'launching', deps.caps);
+        const planned = planInput(m.priority, handle && !recovering && !blocked() ? job().sessionKind ?? 'starting' : 'launching', deps.caps);
         // No backend seam can amend an already queued batch. Keep next-turn
         // input here until the running turn ends, so later holds can still be
         // prepended. Persisted native batches from older lanes remain replayable.
@@ -433,7 +490,7 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
     park: () => serial(async () => { if (!stopped && job().state !== 'ended' && handle?.park) { await handle.park(); ledger.updateJob(jobId, { sessionKind: 'parked', parkedAt: clock.now() }); } }),
     settle: (mode, ended, extra) => serial(() => end(mode, ended, extra)),
     activity: () => serial(async () => ({ ...(handle ? await handle.activity() : { turnRunning: false, openApprovals: 0, queuedInputs: 0, backgroundTasks: { known: 0, observable: false }, lastActivityAt: new Date(job().lastActivityAt).toISOString() }), launcherBuffered: ledger.inputs(jobId, ['buffered', 'sending']).length, lastRelayAt: Number(store.get('lastRelayAt') ?? initial.lastActivityAt) })),
-    async stop() { stopped = true; attachRetry?.cancel(); controller?.abort(); await chain; await pump; },
+    async stop() { stopped = true; cancelRetries(); controller?.abort(); await chain; await pump; },
   };
   return lane;
 }

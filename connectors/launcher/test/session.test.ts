@@ -534,3 +534,104 @@ test('stopping a lane cancels its pending attach retry', async t => {
   assert.equal(s.ledger.job(s.job.jobId)!.state,'running');
   assert.equal(s.ledger.inputs(s.job.jobId,['sending']).length,1);
 });
+
+const batchOf = (...ids: string[]) => createHash('sha256').update([...ids].sort().join('\n')).digest('hex').slice(0,24);
+
+test('an attach flush accepted remotely but rejected locally is reconciled before its completion commits', async t => {
+  const s = await setup(t, { attach: false }), d = s.message('initial input');
+  assert.equal(await s.lane.handleMessage(d), 'buffered');
+  const send = s.handle.send, attempted: Array<{input: TurnInput; mode: SendMode}> = [];
+  s.handle.send = async (input, mode) => {
+    attempted.push({ input: structuredClone(input), mode });
+    if (attempted.length === 1) { await send(input, mode); throw new Error('lost ack'); }
+    return { mode }; // idempotent replay of an accepted batch
+  };
+  s.lane.attach(s.handle); await tick();
+  assert.equal(s.sends.length, 1);
+  // The completion arrives before the Clock retry; it must wait for the batch.
+  await s.emit(finished('accepted-turn'));
+  assert.equal(s.replies().length, 0); assert.equal(s.receipts().length, 0);
+  s.clock.advance(1000); await tick();
+  assert.equal(attempted.length, 2); assert.deepEqual(attempted[1], attempted[0]);
+  assert.equal(attempted[0].mode, 'start');
+  assert.equal((attempted[0].input as TurnInput & {batchId?: string}).batchId, batchOf(d.delivery_id));
+  assert.equal(s.replies().length, 1);
+  assert.deepEqual(s.replies()[0].metadata!['launch.consumed'], [d.message.message_id]);
+  assert.deepEqual(s.receipts(), [{ delivery_id: d.delivery_id, state: 'processed' }]);
+  assert.equal(s.ledger.inputs(s.job.jobId, ['sending', 'sent']).length, 0);
+});
+
+test('a rejected ordinary send recovers through the Clock without recreating the lane', async t => {
+  const s = await setup(t), d = s.message('retry me');
+  const send = s.handle.send, attempted: Array<{input: TurnInput; mode: SendMode}> = [];
+  s.handle.send = async (input, mode) => {
+    attempted.push({ input: structuredClone(input), mode });
+    if (attempted.length === 1) throw new Error('offline before acceptance');
+    return send(input, mode);
+  };
+  await assert.rejects(s.lane.handleMessage(d));
+  assert.equal(s.ledger.inputs(s.job.jobId, ['sending']).length, 1);
+  s.clock.advance(1000); await tick();
+  assert.equal(attempted.length, 2); assert.deepEqual(attempted[1], attempted[0]);
+  assert.equal((attempted[1].input as TurnInput & {batchId?: string}).batchId, batchOf(d.delivery_id));
+  assert.equal(s.sends.length, 1); assert.equal(s.ledger.inputs(s.job.jobId, ['sent']).length, 1);
+  // The ingress retry finds the durable decision and sends nothing new.
+  assert.equal(await s.lane.handleMessage(d), 'relayed'); assert.equal(attempted.length, 2);
+  await s.emit(finished('recovered'));
+  assert.equal(s.replies().length, 1);
+  assert.deepEqual(s.replies()[0].metadata!['launch.consumed'], [d.message.message_id]);
+  assert.deepEqual(s.receipts(), [{ delivery_id: d.delivery_id, state: 'processed' }]);
+  s.clock.advance(60_000); await tick(); assert.equal(attempted.length, 2);
+});
+
+test('a rejected flush after a finished turn recovers through the Clock in order', async t => {
+  const s = await setup(t, { kind: 'turn_running' }), hold = s.message('held', 'hold'), queued = s.message('next turn', 'wake_idle');
+  await s.lane.handleMessage(hold); await s.lane.handleMessage(queued);
+  const send = s.handle.send, attempted: Array<{input: TurnInput; mode: SendMode}> = [];
+  s.handle.send = async (input, mode) => {
+    attempted.push({ input: structuredClone(input), mode });
+    if (attempted.length <= 2) throw new Error('offline');
+    return send(input, mode);
+  };
+  await s.emit(finished('current'));
+  assert.equal(attempted.length, 1); assert.equal(s.ledger.inputs(s.job.jobId, ['sending']).length, 2);
+  s.clock.advance(1000); await tick(); assert.equal(attempted.length, 2);
+  s.clock.advance(1000); await tick(); assert.equal(attempted.length, 2); // backoff doubles
+  s.clock.advance(1000); await tick(); assert.equal(attempted.length, 3);
+  assert.ok(attempted.every(a => JSON.stringify(a) === JSON.stringify(attempted[0])));
+  assert.deepEqual(s.sends[0].input.items.map(i => i.deliveryId), [hold.delivery_id, queued.delivery_id]);
+  assert.equal(s.sends[0].mode, 'start');
+  await s.emit(finished('next'));
+  assert.deepEqual(s.replies()[1].metadata!['launch.consumed'], [hold.message.message_id, queued.message.message_id]);
+  assert.deepEqual(s.receipts().map(r => r.delivery_id), [hold.delivery_id, queued.delivery_id]);
+});
+
+test('a transient turns() failure retries on the Clock from the committed cursor with one iterator', async t => {
+  const s = await setup(t, { attach: false });
+  s.ledger.addInput({ deliveryId: 'dly_unread', jobId: s.job.jobId, messageId: 'msg_unread', sender: 'req', text: 'before', priority: 'wake', createdAt: 100 });
+  s.ledger.markInputs(['dly_unread'], { state: 'sent', mode: 'start', turnSeq: 0 });
+  const turns = s.handle.turns, cursors: Array<string | undefined> = [];
+  let streams = 0, active = 0, maxActive = 0;
+  s.handle.turns = async function* (after, signal) {
+    const n = ++streams; cursors.push(after?.value); active++; maxActive = Math.max(maxActive, active);
+    try {
+      if (n === 1) throw new Error('offline');
+      for await (const item of turns(after, signal)) { yield item; throw new Error('stream reset'); }
+    } finally { active--; }
+  };
+  s.lane.attach(s.handle); await tick();
+  assert.equal(streams, 1);
+  await s.emit(finished('unread'));
+  assert.equal(s.replies().length, 0);
+  s.clock.advance(1000); await tick();
+  assert.equal(streams, 2);
+  assert.deepEqual(s.replies()[0].metadata!['launch.consumed'], ['msg_unread']);
+  assert.deepEqual(s.receipts(), [{ delivery_id: 'dly_unread', state: 'processed' }]);
+  await s.emit(finished('second'));
+  s.clock.advance(1000); await tick();
+  assert.equal(streams, 3); assert.deepEqual(cursors, [undefined, undefined, '1']);
+  assert.equal(s.replies().length, 2); assert.equal(s.receipts().length, 1); assert.equal(maxActive, 1);
+  // The third iterator failed too; stopping the lane cancels its retry.
+  await s.lane.stop(); s.clock.advance(60_000); await tick();
+  assert.equal(streams, 3); assert.equal(active, 0);
+});
