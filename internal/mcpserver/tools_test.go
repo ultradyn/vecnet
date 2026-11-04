@@ -362,11 +362,12 @@ func TestToolsListNamesAndHints(t *testing.T) {
 	}
 
 	want := []string{
-		"vecnet_ack", "vecnet_clear_avatar", "vecnet_inbox", "vecnet_peers", "vecnet_presence", "vecnet_react", "vecnet_receipt",
+		"vecnet_ack", "vecnet_clear_avatar", "vecnet_group_add", "vecnet_group_create", "vecnet_groups",
+		"vecnet_inbox", "vecnet_peers", "vecnet_presence", "vecnet_presence_subscribe", "vecnet_react", "vecnet_receipt",
 		"vecnet_reply", "vecnet_send", "vecnet_set_avatar", "vecnet_thread", "vecnet_threads", "vecnet_whoami",
 	}
 	var got []string
-	readOnly := map[string]bool{"vecnet_inbox": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true, "vecnet_whoami": true}
+	readOnly := map[string]bool{"vecnet_groups": true, "vecnet_inbox": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true, "vecnet_whoami": true}
 	for _, tool := range tools {
 		got = append(got, tool.Name)
 		if tool.Annotations == nil {
@@ -1472,4 +1473,168 @@ func TestSendToolRefusesReactionKind(t *testing.T) {
 	}); path != "/kind" {
 		t.Fatalf("reaction kind rejected at %q, want /kind", path)
 	}
+}
+
+func TestGroupToolsMatchHTTP(t *testing.T) {
+	env := testhub.Start(t)
+	a, aSecret := env.NewPeer("session", "creator")
+	b, bSecret := env.NewPeer("session", "first member")
+	c, cSecret := env.NewPeer("session", "second member")
+	d, dSecret := env.NewPeer("session", "third member")
+
+	var created map[string]string
+	toolOK(t, env, aSecret, "vecnet_group_create", map[string]any{"members": []string{b, c}}, &created)
+	group := created["group_id"]
+	if len(created) != 1 || !strings.HasPrefix(group, "grp_") {
+		t.Fatalf("create = %v, want exactly {group_id: grp_...}", created)
+	}
+
+	checkGroups := func(wantMembers []string) {
+		t.Helper()
+		var listed, fromHTTP struct {
+			Groups []hub.GroupInfo `json:"groups"`
+		}
+		toolOK(t, env, aSecret, "vecnet_groups", map[string]any{}, &listed)
+		resp, body := env.Do(aSecret, http.MethodGet, "/v1/groups", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /v1/groups = %d: %s", resp.StatusCode, body)
+		}
+		if err := json.Unmarshal(body, &fromHTTP); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(listed, fromHTTP) {
+			t.Fatalf("tool groups = %+v, HTTP groups = %+v", listed, fromHTTP)
+		}
+		slices.Sort(wantMembers)
+		if len(listed.Groups) != 1 {
+			t.Fatalf("groups = %+v, want one group", listed.Groups)
+		}
+		got := listed.Groups[0]
+		if got.GroupID != group || got.CreatedBy != a || got.Archived || !slices.Equal(got.Members, wantMembers) {
+			t.Fatalf("group = %+v, want %s created by %s with members %v, unarchived", got, group, a, wantMembers)
+		}
+	}
+	// The hub includes the creator automatically; two explicit members are
+	// the first two recipients, and adding a third yields three deliveries.
+	checkGroups([]string{a, b, c})
+	var added map[string]any
+	toolOK(t, env, bSecret, "vecnet_group_add", map[string]any{"group_id": group, "members": []string{d}}, &added)
+	if added == nil || len(added) != 0 {
+		t.Fatalf("add result = %v, want {}", added)
+	}
+	checkGroups([]string{a, b, c, d})
+
+	var sent sendResult
+	toolOK(t, env, aSecret, "vecnet_send", map[string]any{
+		"idempotency_key": "group-tool-send", "recipients": []string{group}, "priority": "hold",
+		"content": map[string]any{"text": "hello group"},
+	}, &sent)
+	if !strings.HasPrefix(sent.MessageID, "msg_") {
+		t.Fatalf("send = %+v, want message_id", sent)
+	}
+	var recipients []string
+	for _, delivery := range sent.Deliveries {
+		recipients = append(recipients, delivery.Recipient)
+	}
+	slices.Sort(recipients)
+	wantRecipients := []string{b, c, d}
+	slices.Sort(wantRecipients)
+	if !slices.Equal(recipients, wantRecipients) {
+		t.Fatalf("recipients = %v, want %v", recipients, wantRecipients)
+	}
+	for _, member := range []struct{ id, secret string }{{b, bSecret}, {c, cSecret}, {d, dSecret}} {
+		var inbox inboxResult
+		toolOK(t, env, member.secret, "vecnet_inbox", map[string]any{}, &inbox)
+		deliveries := inbox.deliveries()
+		if len(deliveries) != 1 || deliveries[0].Data.Recipient != member.id || deliveries[0].Data.Message.MessageID != sent.MessageID {
+			t.Fatalf("%s inbox deliveries = %+v, want message %s", member.id, deliveries, sent.MessageID)
+		}
+	}
+}
+
+func TestGroupToolsRejectNonParticipant(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "creator")
+	b, _ := env.NewPeer("session", "member")
+	outsider, outsiderSecret := env.NewPeer("session", "outsider")
+	resp, body := env.Do(aSecret, http.MethodPost, "/v1/groups", map[string]any{"members": []string{b}})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /v1/groups = %d: %s", resp.StatusCode, body)
+	}
+	var created struct {
+		GroupID string `json:"group_id"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil || created.GroupID == "" {
+		t.Fatalf("create body = %s: %v", body, err)
+	}
+	members := map[string]any{"members": []string{outsider}}
+	resp, body = env.Do(outsiderSecret, http.MethodPost, "/v1/groups/"+created.GroupID+"/members", members)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("HTTP add non-participant = %d: %s", resp.StatusCode, body)
+	}
+	var fromHTTP toolErrorBody
+	if err := json.Unmarshal(body, &fromHTTP); err != nil || fromHTTP.Error.Code != "not_member" {
+		t.Fatalf("HTTP error = %s, want not_member: %v", body, err)
+	}
+	fromTool := toolFails(t, env, outsiderSecret, "vecnet_group_add", map[string]any{
+		"group_id": created.GroupID, "members": []string{outsider},
+	}, fromHTTP.Error.Code)
+	if !reflect.DeepEqual(fromTool, fromHTTP) {
+		t.Fatalf("tool error = %+v, HTTP error = %+v", fromTool, fromHTTP)
+	}
+	var listed struct {
+		Groups []hub.GroupInfo `json:"groups"`
+	}
+	toolOK(t, env, outsiderSecret, "vecnet_groups", map[string]any{}, &listed)
+	if listed.Groups == nil || len(listed.Groups) != 0 {
+		t.Fatalf("outsider groups = %+v, want []", listed.Groups)
+	}
+}
+
+func TestPresenceSubscribeTool(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("session", "subscriber")
+	stored := func() string {
+		t.Helper()
+		var value string
+		if err := env.Hub.DB.QueryRow(`SELECT subscribe_presence FROM peers WHERE peer_id = ?`, peer).Scan(&value); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	for _, value := range []string{"none", "all", "teams"} {
+		t.Run(value, func(t *testing.T) {
+			var result map[string]any
+			toolOK(t, env, secret, "vecnet_presence_subscribe", map[string]any{"subscribe": value}, &result)
+			if result == nil || len(result) != 0 {
+				t.Fatalf("subscribe result = %v, want {}", result)
+			}
+			fromTool := stored()
+			if fromTool != value {
+				t.Fatalf("stored subscription = %q, want %q", fromTool, value)
+			}
+			// Change it before PATCH so the HTTP path must persist a change too.
+			reset := "none"
+			if value == reset {
+				reset = "all"
+			}
+			toolOK(t, env, secret, "vecnet_presence_subscribe", map[string]any{"subscribe": reset}, nil)
+			resp, body := env.Do(secret, http.MethodPatch, "/v1/peers/me", map[string]any{"subscribe_presence": value})
+			if resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("PATCH /v1/peers/me = %d: %s", resp.StatusCode, body)
+			}
+			if fromHTTP := stored(); fromHTTP != fromTool {
+				t.Fatalf("tool stored %q, HTTP stored %q", fromTool, fromHTTP)
+			}
+		})
+	}
+	before := stored()
+	if path := invalidPath(t, env, secret, "vecnet_presence_subscribe", map[string]any{"subscribe": "bogus"}); path != "/subscribe" {
+		t.Fatalf("invalid subscription path = %q, want /subscribe", path)
+	}
+	if after := stored(); after != before {
+		t.Fatalf("invalid subscription changed stored state from %q to %q", before, after)
+	}
+	_, principalSecret := env.NewPrincipal("no own peer")
+	toolFails(t, env, principalSecret, "vecnet_presence_subscribe", map[string]any{"subscribe": "none"}, "forbidden")
 }
