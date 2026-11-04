@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "launch-approval-closed.v1.schema.json",
+  "type": "object",
+  "properties": {
+    "approval_id": {
+      "type": "string",
+      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "superseded_by": {
+      "const": "operator"
+    },
+    "decision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    }
+  },
+  "required": [
+    "approval_id",
+    "superseded_by",
+    "decision"
+  ],
+  "additionalProperties": false
+}

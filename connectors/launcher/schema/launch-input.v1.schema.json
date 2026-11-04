@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "launch-input.v1.schema.json",
+  "type": "object",
+  "properties": {
+    "backend": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "not": {
+        "const": "any"
+      }
+    },
+    "project": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "preset": {
+      "type": "string",
+      "minLength": 1
+    },
+    "permission_mode": {
+      "enum": [
+        "read-only",
+        "ask",
+        "auto",
+        "full-access"
+      ]
+    },
+    "base_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "idle": {
+      "type": "object",
+      "properties": {
+        "wrapup_after": {
+          "type": [
+            "string",
+            "integer"
+          ],
+          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d)$",
+          "minimum": 1
+        },
+        "wrapup_turn": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "relay_from": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$"
+      }
+    },
+    "reply_priority": {
+      "enum": [
+        "wake",
+        "wake_idle",
+        "hold"
+      ]
+    },
+    "deliver": {
+      "type": "object",
+      "properties": {
+        "push_branch": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "backend",
+    "project",
+    "preset",
+    "permission_mode"
+  ],
+  "additionalProperties": false
+}

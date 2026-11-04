@@ -1,0 +1,46 @@
+{
+  "v": 1,
+  "kind": "network",
+  "machine_id": "xsm",
+  "job_id": "job_00000000000000000000000000",
+  "permission_mode": "ask",
+  "preset": "sol",
+  "backend": "t3",
+  "backend_method": "test",
+  "paths": [
+    {
+      "path": "/workspace/file",
+      "access": "write",
+      "in_workspace": true
+    }
+  ],
+  "scope": "once",
+  "options": [
+    {
+      "id": "yes",
+      "label": "Allow",
+      "grants": "once"
+    },
+    {
+      "id": "no",
+      "label": "Deny",
+      "grants": "deny"
+    }
+  ],
+  "workspace_root": "/workspace",
+  "outside_workspace": "unknown",
+  "backend_raw": {},
+  "backend_raw_truncated": false,
+  "redacted": false,
+  "fidelity": {
+    "kind": "enforced",
+    "command": "none",
+    "paths": "enforced",
+    "host": "none"
+  },
+  "host": {
+    "name": "example.test",
+    "protocol": "https",
+    "port": 443
+  }
+}
