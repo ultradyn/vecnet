@@ -202,6 +202,8 @@ func (a *app) cmdWatch(args []string) error {
 	if w.forMonitor && !a.json {
 		if path, err := statePath(a.getenv, name, a.as); err == nil {
 			w.shown = &stateFile{path: path}
+			id := a.resolveIdentity(c, nil)
+			w.identity = &id
 		}
 	}
 	// Without --since the first connect leaves out ?after=, so the hub
@@ -226,6 +228,7 @@ type watcher struct {
 	seen       *dedupe
 	pendingAck string
 	shown      *stateFile
+	identity   *hookIdentity // binds shown to this run's hub and caller
 	replayed   bool
 }
 
@@ -562,7 +565,7 @@ func (w *watcher) handle(evType, data string, replay bool) {
 		}
 		if w.forMonitor && !w.a.json && w.shown != nil && f.deliveryID != "" {
 			ctx, cancel := context.WithTimeout(w.a.ctx, 250*time.Millisecond)
-			claimed := w.shown.claimOne(ctx, f.deliveryID)
+			claimed := w.shown.claimFor(ctx, w.identity, f.deliveryID)
 			cancel()
 			if !replay && !claimed {
 				return

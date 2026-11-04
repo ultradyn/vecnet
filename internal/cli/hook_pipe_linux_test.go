@@ -51,7 +51,7 @@ func TestHookPartialPipeAtomicOutput(t *testing.T) {
 	for i := range events {
 		events[i] = hookEvent(i+1, strings.Repeat("界", 400))
 	}
-	if n := len(hookOutput("user-prompt", hookContext("p", func() []hookItem {
+	if n := len(hookOutput("user-prompt", hookContext(newHookHint("p", "", ""), func() []hookItem {
 		items := make([]hookItem, len(events))
 		for i := range items {
 			items[i] = hookItem{Cursor: events[i].Cursor, Text: strings.Repeat("界", 400)}

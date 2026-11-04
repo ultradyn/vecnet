@@ -332,3 +332,35 @@ func TestDirectoryUpdatedOnEnrol(t *testing.T) {
 		t.Fatal("long-poll did not wake on enrolment")
 	}
 }
+
+// GET /v1/peers/me names the authenticated caller, so a client can bind
+// local state to an identity rather than to its config text (PROTOCOL §2.10).
+func TestGetPeersMe(t *testing.T) {
+	env := testhub.Start(t)
+	peer, peerSecret := env.NewPeer("session", "me-peer")
+	prn, prnSecret := env.NewPrincipal("me-principal")
+	for _, tc := range []struct {
+		secret string
+		want   map[string]string
+	}{
+		{peerSecret, map[string]string{"kind": "peer", "peer_id": peer}},
+		{prnSecret, map[string]string{"kind": "principal", "principal_id": prn, "peer_id": ""}},
+	} {
+		resp, body := env.Do(tc.secret, "GET", "/v1/peers/me", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /v1/peers/me = %d; %s", resp.StatusCode, body)
+		}
+		var got map[string]string
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("decode: %v; %s", err, body)
+		}
+		for k, v := range tc.want {
+			if got[k] != v {
+				t.Fatalf("%s = %q, want %q (body %s)", k, got[k], v, body)
+			}
+		}
+	}
+	if resp, _ := env.Do("", "GET", "/v1/peers/me", nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous GET /v1/peers/me = %d, want 401", resp.StatusCode)
+	}
+}
