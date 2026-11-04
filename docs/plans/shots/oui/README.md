@@ -160,3 +160,20 @@ Add agent screens come from `scripts/ui/invite.mjs`. The dashboard's Peers headi
 - [inv-3-error.png](inv-3-error.png) — The hub refuses the create: its code and message under the form, which stays editable.
 - [inv-4-success.png](inv-4-success.png) — The invite shown once: warning, paste block with the hub's public URL and token, profile, peer id and expiry, Copy invite.
 - [inv-5-open.png](inv-5-open.png) — An open-name invite ("Let the agent choose its name at enrol", suggestion `helper bot`): the block has the agent enrol with `--name`, and its profile follows from the name it picks.
+
+Composer fit screens come from `scripts/ui/composer-fit.mjs`, which sweeps the viewport from 320 to 1600 px with short and spilling text and asserts the control row: Attach and Send share one row at the right edge, nothing leaves the bar, and the keyboard hint is either hidden or at most two unclipped lines (it breaks at its `·` separators and is dropped by `fitHint` before anything else moves). Only at phone width, after the hint has gone, does the priority control take its own full-width row.
+
+- [composer-fit-short-1440.png](composer-fit-short-1440.png) — Wide: one row, hint on one line, Send at the right edge.
+- [composer-fit-short-1180.png](composer-fit-short-1180.png) — The hint has no room for two clean lines, so it is dropped; the controls stay on one row.
+- [composer-fit-short-1000.png](composer-fit-short-1000.png) — The hint on two lines, right-aligned, broken at a `·`.
+- [composer-fit-short-860.png](composer-fit-short-860.png) — Narrower: hint dropped, one row.
+- [composer-fit-short-700.png](composer-fit-short-700.png) — Two-line hint again (the aside has collapsed, so the composer is wider).
+- [composer-fit-short-390.png](composer-fit-short-390.png) — Phone: priority control full width on top; bytes, Attach and Send below.
+- [composer-fit-spill-1440.png](composer-fit-spill-1440.png) — Spilling text (`8.8 KiB · spills to message.md`): the hint wraps to two lines first.
+- [composer-fit-spill-1180.png](composer-fit-spill-1180.png) — Spilling, narrower: hint dropped, then the byte count ellipsizes.
+- [composer-fit-spill-1000.png](composer-fit-spill-1000.png) — Spilling: hint dropped, byte count whole.
+- [composer-fit-spill-860.png](composer-fit-spill-860.png) — Spilling: hint dropped, byte count ellipsized, Send on the row.
+- [composer-fit-spill-700.png](composer-fit-spill-700.png) — Spilling: hint dropped, byte count whole.
+- [composer-fit-spill-390.png](composer-fit-spill-390.png) — Spilling on a phone: the byte count ellipsizes between the priority row and Attach and Send.
+- [composer-fit-page-1180.png](composer-fit-page-1180.png) — The whole thread page at 1180 px: the composer in context (hint dropped, one row).
+- [composer-fit-page-390.png](composer-fit-page-390.png) — The whole thread page at phone width.
