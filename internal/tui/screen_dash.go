@@ -44,7 +44,7 @@ var (
 		"openclaw":    lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")),
 		"dot":         lipgloss.NewStyle().Foreground(lipgloss.Color("#f472b6")),
 		"source":      lipgloss.NewStyle().Foreground(lipgloss.Color("#d1d5db")),
-		"launcher":    lipgloss.NewStyle().Foreground(lipgloss.Color("#facc15")),
+		"launcher":    lipgloss.NewStyle().Foreground(lipgloss.Color("#60a5fa")),
 	}
 )
 

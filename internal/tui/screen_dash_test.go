@@ -402,10 +402,11 @@ func TestDashDisabledPeerFlagged(t *testing.T) {
 	dashHas(t, dashRow(t, m, 80, 24, "old-bot"), "disabled")
 }
 
-// A launcher peer's name takes the launcher kind colour (yellow, #facc15),
-// the same colour the web dashboard gives its kind dot.
+// A launcher peer's name takes the launcher kind colour (blue, #60a5fa),
+// the same colour the web dashboard gives its kind dot. No state token uses
+// it, so the kind never reads as a status such as amber "working".
 func TestDashLauncherKindStyled(t *testing.T) {
-	want := lipgloss.NewStyle().Foreground(lipgloss.Color("#facc15"))
+	want := lipgloss.NewStyle().Foreground(lipgloss.Color("#60a5fa"))
 	got, ok := styleDashKinds["launcher"]
 	if !ok {
 		t.Fatal("styleDashKinds has no launcher style")

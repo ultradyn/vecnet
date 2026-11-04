@@ -153,13 +153,16 @@ export function mount(root, ctx) {
     const rows = principalRows(value.principals);
     s.count.textContent = String(rows.length);
     if (!rows.length) return [];
-    return [table(['Principal', 'Active', 'Disabled', 'Creates/h', 'Kinds', 'Default scopes'], rows.map(p => h('tr', null,
+    // Each warning says why in words, not by colour alone; the title adds detail.
+    return [table(['Principal', 'Active/max', 'Disabled', 'Creates/h', 'Kinds', 'Default scopes'], rows.map(p => h('tr', null,
       h('td', null, h('span', { text: p.name }), idCell(p.id)),
-      h('td', { class: 'mono sm' + (p.full ? ' warn' : ''), text: p.active + '/' + p.max, title: p.full ? 'at the peer cap' : null }),
-      h('td', { text: String(p.disabled) }),
+      h('td', { class: 'mono sm' + (p.full ? ' warn' : ''), text: p.active + '/' + p.max + (p.full ? ' · full' : ''), title: p.full ? 'at the peer cap: a create or re-enable is refused' : null }),
+      h('td', { class: 'mono sm', text: String(p.disabled) }),
       h('td', { class: 'mono sm', text: p.createsLastHour + '/' + p.createsPerHour }),
-      h('td', { class: 'mono sm', text: p.kinds.join(', ') || 'none' }),
-      h('td', { class: 'mono sm' + (p.unscopedRisk ? ' warn' : ''), text: p.scopes, title: p.unscopedRisk ? 'other peers of this principal are scoped' : null }))))];
+      h('td', { class: 'kinds' }, p.kinds.length
+        ? p.kinds.map(k => h('span', { class: 'pill' }, h('i', { class: 'kd k-' + k }), k))
+        : h('span', { class: 'mono sm none', text: 'none' })),
+      h('td', { class: 'mono sm' + (p.unscopedRisk ? ' warn' : ''), text: p.scopes + (p.unscopedRisk ? ' · others scoped' : ''), title: p.unscopedRisk ? 'created peers get no scopes, while other peers of this principal are scoped' : null }))))];
   }
 
   function drawThreads(value, s) {

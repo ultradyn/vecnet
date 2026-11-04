@@ -115,6 +115,6 @@ Reaction screens come from `scripts/ui/rx-thread.mjs`. They cover reaction chips
 Launcher Task 4 screens come from `scripts/ui/ln-dash.mjs`, which enrols its own launcher peer and creates one principal with limits at run time. They cover the `launcher` kind colour on web and TUI and the dashboard's Principals card (PROTOCOL §18.4).
 
 - [ln04-dash-empty.png](ln04-dash-empty.png) — No principal has limits or created peers, so the Principals card is absent.
-- [ln04-dash-initial.png](ln04-dash-initial.png) — A working launcher peer with its kind dot in yellow.
-- [ln04-dash-principals.png](ln04-dash-principals.png) — One principal at its `2/2` cap in amber, with default scopes `none` in amber because another of its peers is scoped.
-- [ln04-tui-dash.png](ln04-tui-dash.png) — TUI dashboard with the launcher row in yellow.
+- [ln04-dash-initial.png](ln04-dash-initial.png) — A working launcher peer with its kind dot in blue, under the Peers table heading.
+- [ln04-dash-principals.png](ln04-dash-principals.png) — One principal at its cap, `2/2 · full` in amber, with default scopes `none · others scoped` in amber; allowed kinds drawn as kind pills.
+- [ln04-tui-dash.png](ln04-tui-dash.png) — TUI dashboard with the launcher row in blue.
