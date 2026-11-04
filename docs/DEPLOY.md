@@ -29,7 +29,7 @@ The public URL is the origin the hub writes into attachment `blob_url` links, so
 1. `fly apps create vecnet` (once).
 2. `fly volumes create vecnet_data --region syd --size 1` (once; grow it later with `fly volumes extend`).
 3. `just fly-deploy`, which runs `fly deploy --remote-only` so the image builds on Fly's builder, not on xsm.
-4. `just fly-init`, which runs `fly ssh console -C "/vecnet-hub init --data-dir /data --operator-name Max"`. It prints the operator peer id and secret **once**. Store the secret in a CLI profile:
+4. `just fly-init`, which runs `fly ssh console -C "/vecnet-hub init --data-dir /data --operator-name Max"`. It prints the operator peer id and secret **once**. If `fly ssh` fails with `ssh: unable to authenticate` (seen on the first deploy, 2026-11-04, with no SSH agent running), use the Machines API instead, which needs no SSH: `fly machine exec <machine-id> "/vecnet-hub init --data-dir /data --operator-name Max" -a vecnet` (`fly status` lists the id). Store the secret in a CLI profile:
 
    ```toml
    # ~/.config/vecnet/config.toml
