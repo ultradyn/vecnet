@@ -177,6 +177,11 @@ class PaseoSession implements SessionHandle {
     this.backend.ctx.store.set(key, 'attempted'); // Do not retry even if exec fails after dispatch.
     for (const id of ids) this.backend.ctx.store.set(deliveryKey(id), batchId);
     await this.backend.bridge.json(['send', this.ref.id, '--text', items.map(i => i.text).join('\n\n')]);
+    // Count accepted sends. A failure reported again with no send in between is
+    // the same failure (wait keeps reporting an inactive error); after new input
+    // an identical error text is a new failed turn and must be emitted.
+    const genKey = `send-gen:${tag}`;
+    this.backend.ctx.store.set(genKey, String(Number(this.backend.ctx.store.get(genKey) ?? '0') + 1));
     this.lastActivity = this.backend.ctx.now().toISOString(); this.current = { kind: 'turn_running', turnId: batchId, since: this.lastActivity };
     return { mode: 'start' } as const;
   }
@@ -229,8 +234,10 @@ class PaseoSession implements SessionHandle {
       // from both sides of a handoff must remain distinguishable on restart.
       // Hash the raw block so redaction cannot merge distinct completions.
       // Keep completed hashes compatible with saved cursors; an error with
-      // identical text is a different outcome and must finish its own turn.
-      const last = hash(JSON.stringify(result.status === 'error' ? [this.ref.id, text, 'failed'] : [this.ref.id, text]));
+      // identical text is a different outcome and must finish its own turn,
+      // and the send generation separates repeated failures across new input.
+      const sendGen = this.backend.ctx.store.get(`send-gen:${this.ref.extra?.tag ?? this.ref.id}`) ?? '0';
+      const last = hash(JSON.stringify(result.status === 'error' ? [this.ref.id, text, 'failed', sendGen] : [this.ref.id, text]));
       const duplicate = last === cursor.last;
       text = this.backend.ctx.redact(text);
       cursor.last = last;

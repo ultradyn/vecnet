@@ -324,6 +324,27 @@ test('failed turn with the preceding completed text is emitted from a saved curs
   assert.equal((await iterator.next()).done,true);
 });
 
+test('a second failure with the same text after fresh input is its own failed turn; a re-report without new input stays deduped', async t => {
+  const h=await harness(t), message='agent a1 failed: same failure';
+  h.state.waits=[{agentId:'a1',status:'idle'}]; h.state.reads=[['first answer']];
+  const b=await h.create(), s=await b.launch(h.spec,h.hooks), first=(await take(s,1))[0];
+  const original=h.ctx.exec;
+  h.ctx.exec=async(argv,opts)=>argv.includes('wait')
+    ? {code:1,stdout:'',stderr:JSON.stringify({ok:false,error:message})} : original(argv,opts);
+  await s.send({items:[{deliveryId:'d2',messageId:'d2',from:'peer',text:'second turn',attachments:[]}]},'start');
+  const fail1=(await take(s,1,first.cursor))[0];
+  assert.equal(fail1.event.type,'turn_finished'); if(fail1.event.type!=='turn_finished') throw Error();
+  assert.equal(fail1.event.outcome,'failed');
+  // The bridge accepts another send to an error agent; the same error text is a new failure.
+  await s.send({items:[{deliveryId:'d3',messageId:'d3',from:'peer',text:'third turn',attachments:[]}]},'start');
+  const fail2=(await take(s,1,fail1.cursor))[0];
+  assert.equal(fail2.event.type,'turn_finished'); if(fail2.event.type!=='turn_finished') throw Error();
+  assert.equal(fail2.event.outcome,'failed'); assert.notEqual(fail2.event.turnId,fail1.event.turnId); assert.notEqual(fail2.cursor.value,fail1.cursor.value);
+  // With no new input, the re-reported failure is the same one.
+  const iterator=s.turns(fail2.cursor)[Symbol.asyncIterator]();
+  assert.equal((await iterator.next()).done,true);
+});
+
 test('launch persistence failure after receiving the agent ID stops, waits and settles without losing work', async t => {
   const h=await harness(t), b=await h.create(), original=h.ctx.store.set;
   let faults=0;
