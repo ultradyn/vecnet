@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/ids"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
@@ -279,14 +281,30 @@ func TestRequesterCancelKeepsRecipientSequence(t *testing.T) {
 	job, thr, aSec, bSec := jobWithRecipient(t, env)
 	mustSend(t, env, bSec, jobStatus("s1", thr, job, 1, "accepted"))
 	mustSend(t, env, bSec, jobStatus("s2", thr, job, 2, "running"))
+	env.Now.Advance(time.Second)
 	mustSend(t, env, aSec, jobStatus("c1", thr, job, 100, "cancelled"))
 	if state, seq, _, _ := jobRow(t, env, job); state != "cancellation_requested" || seq != 2 {
 		t.Fatalf("after requester cancelled seq100: %s %d, want cancellation_requested 2", state, seq)
 	}
-	// A second requester cancel is accepted and changes nothing.
+	var cancelledAt string
+	if err := env.Hub.DB.QueryRow(`SELECT updated_at FROM jobs WHERE job_id = ?`, job).Scan(&cancelledAt); err != nil {
+		t.Fatal(err)
+	}
+	if want := envelope.FormatTime(env.Now.Now()); cancelledAt != want {
+		t.Fatalf("first requester cancel updated_at = %s, want %s", cancelledAt, want)
+	}
+	// A second requester cancel is accepted and changes nothing, even the timestamp.
+	env.Now.Advance(time.Second)
 	mustSend(t, env, aSec, jobStatus("c2", thr, job, 1, "cancelled"))
 	if state, seq, _, _ := jobRow(t, env, job); state != "cancellation_requested" || seq != 2 {
 		t.Fatalf("after a second requester cancel: %s %d, want cancellation_requested 2", state, seq)
+	}
+	var repeatedAt string
+	if err := env.Hub.DB.QueryRow(`SELECT updated_at FROM jobs WHERE job_id = ?`, job).Scan(&repeatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if repeatedAt != cancelledAt {
+		t.Fatalf("second requester cancel changed updated_at: got %s, want %s", repeatedAt, cancelledAt)
 	}
 	mustSend(t, env, bSec, jobStatus("s3", thr, job, 3, "cancelled"))
 	if state, seq, _, _ := jobRow(t, env, job); state != "cancelled" || seq != 3 {
