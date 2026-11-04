@@ -124,6 +124,8 @@ export function createDispatcher(deps: DispatchDeps): { run(signal: AbortSignal)
         instructions: req.instructions, input: req.input });
       ledger.noteLaunch(gate.key.key, now);
       jobs.report(req.jobId, 'accepted', { host: deps.host, backend: req.input.backend, preset: req.input.preset, permission_mode: req.input.permission_mode });
+      // The launch Delivery has been acted on: its instructions are the session's first input.
+      receipt(row.deliveryId, 'processed');
       ledger.finishIngress(row.deliveryId, 'done');
       return true;
     });
