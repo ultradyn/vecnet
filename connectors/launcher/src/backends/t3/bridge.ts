@@ -23,6 +23,25 @@ export class BridgeError extends Error {
   }
 }
 
+// Machine codes t3-bridge and the T3 server emit. Anything else is reported
+// only as the generic failure, never as text.
+const KNOWN_CODES = new Set(['runtime_mode_escalation_denied', 'thread_not_found', 'not_found', 'server_down', 'unauthorized',
+  'forbidden', 'rate_limited', 'timeout', 'invalid_request', 'invalid_params', 'project_not_found', 'unknown_target',
+  'target_required', 'no_token', 'no_full_token', 'token_unreadable', 'live_refused', 'outbox_unwritable', 'escalation_denied',
+  'conflict', 'internal_error', 'missing_thread_context', 'ambiguous_thread_context']);
+/** A safe description of a nonzero bridge exit: `t3-bridge [HTTP n] [RPC error] [code]`. */
+export function bridgeFailure(stderr: string): string {
+  // Escalation errors in the real bridge include a preamble; the code alone decides.
+  if (/\bruntime_mode_escalation_denied\b/.test(stderr)) return 'runtime_mode_escalation_denied';
+  const parts = ['t3-bridge'];
+  const http = /\bHTTP (\d{3})\b/.exec(stderr);
+  if (http) parts.push(`HTTP ${http[1]}`);
+  if (/\bRPC error\b/.test(stderr)) parts.push('RPC error');
+  const code = [...stderr.matchAll(/[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[a-z]+/g)].map(m => m[0]).find(w => KNOWN_CODES.has(w));
+  parts.push(code ?? 'failed');
+  return parts.join(' ');
+}
+
 export class Bridge {
   private readonly bin: string;
   private readonly caller: string;
@@ -39,14 +58,14 @@ export class Bridge {
       throw new BridgeError(-1, 't3-bridge execution_failed');
     }
     if (result.code !== 0) {
+      // Never keep raw stdout/stderr: a diagnostic can quote the request,
+      // including prompt prose that no token redaction would catch. Keep only
+      // allowlisted machine codes; the exit status travels separately.
       const first = result.stderr.split(/\r?\n/, 1)[0];
-      // Escalation errors in the real bridge include a preamble; retain just
-      // the reason code. Never attach raw stdout/stderr or request bodies.
-      const escalation = /\bruntime_mode_escalation_denied\b/.test(result.stderr);
       // HTTP/RPC not_found can refer to the endpoint or another resource.
       // Only a thread-specific error proves this session is gone.
       const notFound = /\bthread_not_found\b/.test(first);
-      throw new BridgeError(result.code, escalation ? 'runtime_mode_escalation_denied' : this.ctx.redact(first || 't3-bridge failed'), notFound);
+      throw new BridgeError(result.code, bridgeFailure(result.stderr), notFound);
     }
     try { return JSON.parse(result.stdout) as T; }
     catch { throw new Error('t3-bridge invalid_json'); }

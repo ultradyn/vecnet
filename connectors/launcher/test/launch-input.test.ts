@@ -16,3 +16,11 @@ test('parseLaunchRequest: required fields, unknown key → invalid_input, backen
   const valid={...input,idle:{wrapup_after:'45m',wrapup_turn:true},deliver:{push_branch:true},reply_priority:'hold'};
   assert.deepEqual(validateLaunchInput(valid),[]); assert.equal(parseLaunchRequest(launchDelivery(valid)).ok,true);
 });
+test('an invalid_input reason names only schema-owned fields: an unknown, credential-shaped key is never echoed',()=>{
+  const secret='vn_peer_'+'A'.repeat(43);
+  for (const [x,reason] of [[{...input,[secret]:true},'/*: unknown key'],[{...input,idle:{[secret]:1}},'/idle/*: unknown key'],[{...input,relay_from:[secret]},'/relay_from/0: pattern']] as const) {
+    const r=parseLaunchRequest(launchDelivery(x));
+    assert.equal(r.ok,false); if(r.ok) return;
+    assert.equal(r.reason,reason); assert.ok(!JSON.stringify(r).includes(secret));
+  }
+});

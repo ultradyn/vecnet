@@ -1,6 +1,7 @@
 import type { JobStatusBody } from '../../hub-client/src/wire.ts';
 import type { Ledger, Terminal } from './ledger.ts';
 import type { Outbox } from './outbox.ts';
+import { redactSecrets, redactSecretsIn } from './redact.ts';
 
 export interface JobReporter {
   report(jobId: string, state: JobStatusBody['state'], output?: Record<string, unknown>, text?: string): void;
@@ -13,9 +14,10 @@ export function createJobReporter(deps: { ledger: Ledger; outbox: Outbox }): Job
         const job = ledger.job(jobId);
         if (!job) throw new Error('ledger job not found');
         if (job.terminal !== null) return;
-        let bounded: Record<string, unknown> | undefined = output;
+        // A final safeguard: no report carries a credential, whatever built it.
+        let bounded: Record<string, unknown> | undefined = output === undefined ? undefined : redactSecretsIn(output);
         if (output !== undefined) {
-          const json = JSON.stringify(output);
+          const json = JSON.stringify(bounded);
           if (Buffer.byteLength(json) > 8192) {
             let summary = '';
             for (const char of json) {
@@ -29,7 +31,7 @@ export function createJobReporter(deps: { ledger: Ledger; outbox: Outbox }): Job
         const terminal = state === 'succeeded' || state === 'failed' || state === 'cancelled';
         outbox.enqueue('send', key, {
           idempotency_key: key, kind: 'job_status', thread_id: job.threadId, in_reply_to: job.launchMessageId,
-          priority: terminal ? 'wake_idle' : 'hold', content: { text: text ?? state },
+          priority: terminal ? 'wake_idle' : 'hold', content: { text: redactSecrets(text ?? state) },
           job_status: { job_id: jobId, sequence, state, ...(bounded === undefined ? {} : { output: bounded }) },
         }, jobId);
         if (terminal) {

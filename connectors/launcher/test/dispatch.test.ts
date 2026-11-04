@@ -242,3 +242,15 @@ test('requester message relays to the agent; a stranger gets not_relayed', async
   assert.match(h.backend.sessions()[0].sent[0].items[0].text, /please continue/);
   assert.equal(h.backend.sessions()[0].sent.some(s => s.items.some(i => /something else/.test(i.text))), false);
 });
+
+test('an unknown launch-input key holding a synthetic credential never reaches the failed report', async t => {
+  const h = await harness(t);
+  const secret = 'vn_peer_' + 'A'.repeat(43);
+  const d = launch(h.clock.now(), { [secret]: true });
+  const jobId = d.message.metadata['vecnet.job_id'] as string;
+  await h.push('delivery', d);
+  await until(() => h.statuses(jobId).length > 0, 'failed job_status');
+  const sent = h.sends().filter(s => s.job_status?.job_id === jobId);
+  assert.deepEqual(sent.map(s => s.job_status!.output), [{ error: 'invalid_input', reason: '/*: unknown key' }]);
+  assert.ok(!JSON.stringify(sent).includes(secret) && !JSON.stringify(sent).includes('A'.repeat(20)));
+});

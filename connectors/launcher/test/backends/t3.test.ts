@@ -356,9 +356,20 @@ test('runtime_mode_escalation_denied surfaces as that error code',async t => {
   await assert.rejects(h.send(input(),'start'),{message:'runtime_mode_escalation_denied'});
 });
 
-test('exec failure surfaces the exit code and a redacted stderr line',async t => {
+test('exec failure surfaces the exit code and only an allowlisted machine code, never stderr text',async t => {
   const f=await fixture(t);const h=await f.live();f.env.FAKE_T3_FAIL='t3_thread_send';
-  await assert.rejects(h.send(input(),'start'),error => {assert.equal((error as Error & {exitCode:number}).exitCode,1);assert.equal((error as Error).message,'server_down Bearer [redacted]');return true;});
+  await assert.rejects(h.send(input(),'start'),error => {assert.equal((error as Error & {exitCode:number}).exitCode,1);assert.equal((error as Error).message,'t3-bridge server_down');return true;});
+});
+
+test('a nonzero bridge exit quoting the prompt never puts that prose in the thrown error or a failed launch',async t => {
+  const f=await fixture(t);const b=await f.backend();
+  f.env.FAKE_T3_FAIL='t3_thread_launch';f.env.FAKE_T3_ERROR='invalid request: private prompt prose about the merger\nsecond private line';
+  await assert.rejects(b.launch(spec(),f.hooks),error => {
+    assert.equal((error as Error & {exitCode:number}).exitCode,1);
+    assert.equal((error as Error).message,'t3-bridge failed');
+    assert.ok(!JSON.stringify({message:(error as Error).message,stack:(error as Error).stack}).includes('private'));
+    return true;
+  });
 });
 
 

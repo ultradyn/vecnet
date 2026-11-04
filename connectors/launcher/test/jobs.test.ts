@@ -51,3 +51,14 @@ test('a second terminal report is a no-op', t => {
   assert.equal(l.pendingOutbox(10, 110).length, 1); assert.equal(l.job('job_one')?.statusSeq, 1);
   assert.equal(l.job('job_one')?.terminal, 'failed'); assert.equal(l.job('job_one')?.endedAt, 100);
 });
+
+test('a report never carries a credential in its output keys, values or text, and links survive', () => {
+  const { ledger, reporter } = setup();
+  ledger.createJob(jobRow());
+  const secret = 'vn_peer_' + 'Q'.repeat(43), hook = 'whsec_+' + 'W'.repeat(42) + '=';
+  reporter.report('job_one', 'failed', { error: 'backend_error', reason: `boom ${secret}`, [secret]: [hook], link: 'https://t3.example/thread/1' }, `failed ${hook}`);
+  const row = ledger.pendingOutbox(10, 1e12).map(r => r.payload as SendRequest).find(p => p.job_status)!;
+  const text = JSON.stringify(row);
+  assert.ok(!text.includes('Q'.repeat(20)) && !text.includes('W'.repeat(20)), text);
+  assert.equal((row.job_status!.output as Record<string, unknown>).link, 'https://t3.example/thread/1');
+});

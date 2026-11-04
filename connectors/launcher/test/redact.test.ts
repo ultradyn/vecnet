@@ -16,3 +16,20 @@ test('redactingLog drops body-like meta keys',()=>{
   for(const secret of ['private','body1','body2','body3','body4','body5','body6','body7','nested-secret','whsec_123','crsr_123']) assert.ok(!text.includes(secret));
   assert.deepEqual(inner.entries[0].meta,{nested:{detail:'[redacted]'},detail:'[redacted]'});
 });
+test('redactText masks every hub secret format: standard-Base64 whsec_ keys (+ / =), OAuth vat_/vrt_/vac_ and blob rt_ tokens',()=>{
+  const b64=(s:string)=>s; // deterministic synthetic keys in each real alphabet
+  const secrets=[
+    'whsec_+'+'A'.repeat(42)+'=', 'whsec_/'+'B'.repeat(20)+'+/'+'C'.repeat(20)+'=', 'whsec_'+'D'.repeat(43)+'=',
+    'vat_'+'E'.repeat(43), 'vrt_'+'F_-'.repeat(14)+'G', 'vac_'+'H'.repeat(43), 'rt_'+b64('MTc2Mjg2fHBlZXJfMDF8YWJjZGVm'+'I'.repeat(40)),
+  ];
+  for (const s of secrets) {
+    for (const text of [s,`key=${s} next`,`"${s}"`]) {
+      const r=redactText(text); assert.equal(r.changed,true,text);
+      for (const part of [s,s.slice(6,30)]) assert.ok(!r.text.includes(part),`${text} -> ${r.text}`);
+    }
+  }
+  // Ordinary identifiers are untouched.
+  for (const plain of ['start_time','support_rt_id','private_vat_','the rt_ prefix']) assert.equal(redactText(plain).changed,false,plain);
+  const inner=memoryLog(), log=redactingLog(inner);
+  log.warn('leak '+secrets[0],{detail:secrets[3]}); assert.ok(!inner.text().includes(secrets[0]) && !inner.text().includes(secrets[3]));
+});
