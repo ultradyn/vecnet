@@ -264,6 +264,85 @@ for (const pending of ['probe', 'park'] as const) {
   });
 }
 
+test('a failed idle settlement re-probes busy states before a pre-deadline retry', async () => {
+  const base = input();
+  const busy: Partial<IdleInput>[] = [
+    {sessionKind: 'turn_running'}, {sessionKind: 'waiting_approval'},
+    {openParent: 1}, {launcherBuffered: 1}, {activity: {...base.activity, queuedInputs: 1}},
+    {caps: {resume: 'transcript', backgroundTasks: 'observable'},
+      activity: {...base.activity, backgroundTasks: {known: 1, observable: true}}},
+  ];
+  for (const state of busy) {
+    const clock = fakeClock();
+    const shortCfg = {...cfg, settle_opaque_ms: 10, check_every_ms: 20, deadline_margin_ms: 5};
+    let current = input({canPark: false, deadlineAt: 1_000}), probes = 0;
+    const calls: unknown[] = [];
+    const idle = createIdleClock({clock, cfg: shortCfg, log: memoryLog(), async probe() {
+      probes++; return current;
+    }, async park() { assert.fail('park not offered'); }, async settle(_job, why) {
+      calls.push([clock.now(), why]);
+      if (calls.length === 1) throw new Error('settle failed');
+    }});
+    idle.track('one'); clock.advance(0); await flush(); clock.advance(10); await flush();
+    assert.equal(calls.length, 1);
+    current = {...current, ...state};
+    clock.advance(20); await flush();
+    assert.equal(calls.length, 1, 'a new busy state prevents an idle retry');
+    assert.equal(probes, 3, 'retry checks current activity');
+    clock.advance(965); await flush();
+    assert.deepEqual(calls, [[10, {reason: 'idle', quiescence: 'assumed'}], [995, {reason: 'deadline'}]]);
+    idle.stop();
+  }
+});
+
+for (const pending of [false, true]) {
+  test(`a recent touch resets idle after a failed settlement (pending at touch: ${pending})`, async () => {
+    const clock = fakeClock();
+    const shortCfg = {...cfg, settle_opaque_ms: 10, check_every_ms: 20, deadline_margin_ms: 5};
+    let release!: () => void, probes = 0, active = 0, maximum = 0;
+    const calls: unknown[] = [];
+    const idle = createIdleClock({clock, cfg: shortCfg, log: memoryLog(), async probe() {
+      probes++; return input({canPark: false, deadlineAt: 1_000});
+    }, async park() { assert.fail('park not offered'); }, async settle(_job, why) {
+      active++; maximum = Math.max(maximum, active);
+      calls.push([clock.now(), why]);
+      try {
+        if (calls.length === 1) {
+          if (pending) await new Promise<void>(resolve => { release = resolve; });
+          throw new Error('settle failed');
+        }
+      } finally { active--; }
+    }});
+    idle.track('one'); clock.advance(0); await flush(); clock.advance(10); await flush();
+    clock.advance(15); await flush(); idle.touch('one'); clock.advance(0); await flush();
+    if (pending) {
+      assert.equal(probes, 2, 'touch cannot overlap a pending settlement');
+      release(); await flush(); clock.advance(0); await flush();
+    }
+    clock.advance(5); await flush();
+    assert.deepEqual(calls, [[10, {reason: 'idle', quiescence: 'assumed'}]]);
+    clock.advance(5); await flush();
+    assert.deepEqual(calls, [[10, {reason: 'idle', quiescence: 'assumed'}], [35, {reason: 'idle', quiescence: 'assumed'}]]);
+    assert.equal(maximum, 1);
+    clock.advance(1_000); await flush(); assert.equal(calls.length, 2); idle.stop();
+  });
+}
+
+test('a recent relay resets idle before a failed settlement is retried', async () => {
+  const clock = fakeClock(), current = input({canPark: false, deadlineAt: 1_000});
+  const shortCfg = {...cfg, settle_opaque_ms: 10, check_every_ms: 20, deadline_margin_ms: 5};
+  const calls: number[] = [];
+  const idle = createIdleClock({clock, cfg: shortCfg, log: memoryLog(), async probe() { return current; },
+    async park() { assert.fail('park not offered'); }, async settle() {
+      calls.push(clock.now());
+      if (calls.length === 1) throw new Error('settle failed');
+    }});
+  idle.track('one'); clock.advance(0); await flush(); clock.advance(10); await flush();
+  clock.advance(15); current.lastRelayAt = clock.now();
+  clock.advance(5); await flush(); assert.deepEqual(calls, [10]);
+  clock.advance(5); await flush(); assert.deepEqual(calls, [10, 35]); idle.stop();
+});
+
 test('a failed idle settlement retries at the deadline without re-probing or logging the exception', async () => {
   const clock = fakeClock(), log = memoryLog();
   const shortCfg = {...cfg, settle_opaque_ms: 10, check_every_ms: 100, deadline_margin_ms: 5};
@@ -277,7 +356,7 @@ test('a failed idle settlement retries at the deadline without re-probing or log
   }});
   idle.track('one'); clock.advance(0); await flush(); clock.advance(10); await flush();
   assert.deepEqual(calls, [[10, {reason: 'idle', quiescence: 'assumed'}]]);
-  idle.touch('one'); clock.advance(84); await flush(); assert.equal(calls.length, 1);
+  clock.advance(84); await flush(); assert.equal(calls.length, 1);
   clock.advance(1); await flush();
   assert.deepEqual(calls, [[10, {reason: 'idle', quiescence: 'assumed'}], [95, {reason: 'deadline'}]]);
   assert.equal(probes, 2); assert.equal(log.entries.length, 1);

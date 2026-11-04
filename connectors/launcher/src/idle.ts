@@ -112,6 +112,10 @@ export function createIdleClock(deps: {
       if (live(jobId, job)) untrack(jobId);
     } catch {
       if (live(jobId, job)) {
+        // An idle verdict expires with a failed attempt: retry through probe so
+        // new work and activity timestamps can veto it. Keep deadline attempts
+        // latched to fence any older probe or park still completing.
+        if (why.reason === 'idle') job.settleReason = undefined;
         log.warn('idle clock check failed', { jobId });
         arm(jobId, job, clock.now() + cfg.check_every_ms);
       }
@@ -174,7 +178,7 @@ export function createIdleClock(deps: {
     },
     touch(jobId) {
       const job = jobs.get(jobId);
-      if (!job || stopped || job.settleReason) return;
+      if (!job || stopped || job.settleReason?.reason === 'deadline') return;
       job.touchedAt = clock.now();
       job.touched = true;
       if (!job.running) arm(jobId, job, clock.now());
