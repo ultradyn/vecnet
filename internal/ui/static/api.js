@@ -113,7 +113,7 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     adminPeers: () => get('/v1/admin/peers'),
     inbox: ({ limit, before, unread } = {}) => get('/v1/admin/inbox' + query({ limit, before, unread: unread ? 1 : undefined })),
     myThreads: ({ limit } = {}) => get('/v1/threads' + query({ limit })),
-    threads: ({ participant, limit, cursor } = {}) => get('/v1/admin/threads' + query({ participant, limit, cursor })),
+    threads: ({ participant, excludeParticipant, limit, cursor } = {}) => get('/v1/admin/threads' + query({ participant, exclude_participant: excludeParticipant, limit, cursor })),
     thread: id => get('/v1/admin/threads/' + seg(id)),
     messages: (id, { after, limit } = {}) => get('/v1/threads/' + seg(id) + '/messages' + query({ after, limit })),
     matrix: (id, { after, limit } = {}) => get('/v1/admin/threads/' + seg(id) + '/deliveries' + query({ after, limit })),

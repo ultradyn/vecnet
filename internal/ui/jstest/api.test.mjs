@@ -115,6 +115,7 @@ test('every method calls its route with the secret only in the header', async ()
     [() => api.inbox(), 'GET', '/v1/admin/inbox'],
     [() => api.myThreads({ limit: 200 }), 'GET', '/v1/threads?limit=200'],
     [() => api.threads({ participant: 'peer_1', limit: 5, cursor: 'c/1' }), 'GET', '/v1/admin/threads?participant=peer_1&limit=5&cursor=c%2F1'],
+    [() => api.threads({ excludeParticipant: 'peer_op', limit: 50 }), 'GET', '/v1/admin/threads?exclude_participant=peer_op&limit=50'],
     [() => api.thread('thr_1'), 'GET', '/v1/admin/threads/thr_1'],
     [() => api.messages('thr_1', { after: 'msg_1', limit: 200 }), 'GET', '/v1/threads/thr_1/messages?after=msg_1&limit=200'],
     [() => api.matrix('thr_1', { after: 'msg_1', limit: 10 }), 'GET', '/v1/admin/threads/thr_1/deliveries?after=msg_1&limit=10'],

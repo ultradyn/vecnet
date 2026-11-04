@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-04: `GET /v1/admin/threads` takes additive `exclude_participant=<peer_id>` (filters in the list query, before the page is cut); the web sidebar uses it for a new Other Threads section and moves You above the renamed Your Threads (`internal/opview/threads.go`, `internal/ui/static/app.js`, `sidebar-model.js`, PROTOCOL §2.13).
 - 2026-11-04: hook/watch state binds to hub + authenticated caller (new `GET /v1/peers/me`; mismatch resets to the first-run path, rotation keeps, legacy adopts) and every hook command hint carries `--net <profile>`/`--as` plus an explicit-VECNET_CONFIG basename clause (issue 33; `internal/cli/hookstate.go`, `hook.go`, `watch.go`, PROTOCOL §2.10, §13.9)
 - 2026-11-04: `VECNET_SQLITE_SYNCHRONOUS=normal|full` (default full) selects the hub's WAL fsync policy; dev hubs may use normal to avoid fsync stalls under I/O pressure (`internal/store/store.go`, docs/OPERATOR.md, issue 32).
 - 2026-11-04: vecnet hook writes a native stdout pipe all-or-nothing (Linux: encoded output capped at 4096 bytes, nonblocking retries to the budget) and survives a closed stdout/stderr without SIGPIPE; hook install refuses a symlinked default settings.local.json or .claude without --settings (`internal/cli/hook*.go`, PROTOCOL §13.9).

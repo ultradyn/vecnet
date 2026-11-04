@@ -145,6 +145,9 @@ func (c *Client) Threads(ctx context.Context, q opapi.ThreadQuery) (out opapi.Th
 	if q.Participant != "" {
 		params.Set("participant", q.Participant)
 	}
+	if q.ExcludeParticipant != "" {
+		params.Set("exclude_participant", q.ExcludeParticipant)
+	}
 	err = c.do(ctx, "GET", queryPath("/v1/admin/threads", params), nil, &out)
 	return
 }

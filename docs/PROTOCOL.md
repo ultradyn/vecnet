@@ -271,7 +271,7 @@ in section 2.12 is unchanged.
 |---|---|---|
 | `GET /v1/admin/inbox` | `limit`, `before=<dly_id>`, `unread=1` | `{now, me, approvals, dead_letters, attention, deliveries, unread, next_before}` |
 | `POST /v1/admin/threads/{id}/read` | none; no request body | `{marked}`: number of deliveries marked read for the operator |
-| `GET /v1/admin/threads` | `participant=<peer_id>`, `limit`, `cursor` | `{threads: [ThreadRow…], next}` |
+| `GET /v1/admin/threads` | `participant=<peer_id>`, `exclude_participant=<peer_id>`, `limit`, `cursor` | `{threads: [ThreadRow…], next}` |
 | `GET /v1/admin/threads/{id}` | none | `{now, row: ThreadRow, files, open_approvals}` |
 | `GET /v1/admin/threads/{id}/deliveries` | `after=<msg_id>`, `limit` | `{recipients, rows, next_after}`: the per-message delivery matrix |
 | `GET /v1/admin/peers` | none | `{peers: [PeerRow…]}` |
@@ -279,12 +279,14 @@ in section 2.12 is unchanged.
 | `GET /v1/admin/delivery-health` | none | `{blocked, failed}` |
 
 `limit` is a positive integer (default 50, capped at 200). `before` is an
-exclusive `dly_` id and `participant` is a `peer_` id; if supplied, each must be
-a well-formed id of that type. `cursor` is an opaque thread-list paging token;
+exclusive `dly_` id and `participant` and `exclude_participant` are `peer_` ids;
+if supplied, each must be a well-formed id of that type. `exclude_participant`
+drops threads that peer is in before the page is cut (the web sidebar's Other
+Threads passes the operator's own peer id); the order is unchanged. `cursor` is an opaque thread-list paging token;
 `next` is the token for the next page or `null`. `next_before` and `next_after`
 are the delivery and message ids for the next page, respectively, or `null` at
 the end. `hours` is an integer from 1 through 168, default 24. Invalid `limit`,
-`before`, `participant` or `hours` returns 422 `invalid_value` with
+`before`, `participant`, `exclude_participant` or `hours` returns 422 `invalid_value` with
 `details.field` naming the parameter, before the view is read.
 
 Wire fields use snake_case. List fields are arrays even when empty, never
