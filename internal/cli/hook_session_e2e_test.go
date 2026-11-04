@@ -171,11 +171,18 @@ func TestWatchKeepsHookBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	braw, err := os.ReadFile(filepath.Join(filepath.Dir(a.conf), "state", "p+session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var s struct {
 		Session string   `json:"session"`
 		Shown   []string `json:"shown"`
 	}
-	if err := json.Unmarshal(raw, &s); err != nil || s.Session != "S1" || len(s.Shown) != 1 || s.Shown[0] != sent.Deliveries[0].DeliveryID {
+	if err := json.Unmarshal(braw, &s); err != nil || s.Session != "S1" {
+		t.Fatalf("binding after watch: %s (%v)", braw, err)
+	}
+	if err := json.Unmarshal(raw, &s); err != nil || len(s.Shown) != 1 || s.Shown[0] != sent.Deliveries[0].DeliveryID {
 		t.Fatalf("state after watch: %s (%v)", raw, err)
 	}
 	if again := hook("S1"); again != "" {

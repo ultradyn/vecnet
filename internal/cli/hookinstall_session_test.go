@@ -138,3 +138,34 @@ func TestHookInstallPrefersClaudeProjectDir(t *testing.T) {
 		t.Fatalf("missing CLAUDE_PROJECT_DIR: %q", errs)
 	}
 }
+
+// A worktree nested inside a checkout whose settings already hold vecnet
+// hooks: installing in either warns that one session can load both files.
+func TestHookInstallWarnsNestedCheckouts(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	isolateGitEnv(t)
+	u := installUser(t)
+	main := filepath.Join(t.TempDir(), "main")
+	wt := filepath.Join(main, ".worktrees", "x")
+	gitT(t, "init", "--quiet", main)
+	gitT(t, "-C", main, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "--quiet", "--allow-empty", "-m", "init")
+	gitT(t, "-C", main, "worktree", "add", "--quiet", wt)
+	t.Chdir(main)
+	if _, errs := installRun(t, u, "--profile", "p", "--write"); strings.Contains(errs, "can load both files") {
+		t.Fatalf("no nested hooks yet, but warned: %q", errs)
+	}
+	t.Chdir(wt)
+	_, errs := installRun(t, u, "--profile", "q", "--write")
+	realMain, _ := filepath.EvalSymlinks(main)
+	if !strings.Contains(errs, "is inside "+realMain+", whose .claude/settings.local.json has vecnet hooks for profile(s) p;") || !strings.Contains(errs, "VECNET_PROFILE=<its profile>") {
+		t.Fatalf("inner install: %q", errs)
+	}
+	t.Chdir(main)
+	_, errs = installRun(t, u, "--profile", "p")
+	realWT, _ := filepath.EvalSymlinks(wt)
+	if !strings.Contains(errs, "is the parent of "+realWT+", whose .claude/settings.local.json has vecnet hooks for profile(s) q;") {
+		t.Fatalf("outer install: %q", errs)
+	}
+}

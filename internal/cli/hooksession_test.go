@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -183,7 +184,7 @@ func TestHookSessionFirstClaimRace(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := f.update(ctx, func(s *hookState) error {
-				results[i] = s.admit(hookOwner{session: "S" + strconv.Itoa(i), profiles: []string{"p"}}, time.Now())
+				results[i] = s.admit(hookOwner{session: "S" + strconv.Itoa(i), profiles: []string{"p"}, prompt: true}, time.Now())
 				return nil
 			}); err != nil {
 				t.Error(err)
@@ -532,5 +533,260 @@ func TestSessionRegistryBounded(t *testing.T) {
 	}
 	if strings.Contains(string(raw), `"S0"`) {
 		t.Fatal("oldest session kept")
+	}
+}
+
+// A subagent's or teammate's tool hook carries agent_id and its parent's
+// session_id. It claims nothing, prints nothing, makes no hub request and
+// leaves the binding and registry alone, so the parent's next run shows
+// the delivery (issue 39).
+func TestHookSubagentClaimsNothing(t *testing.T) {
+	for _, tc := range []struct{ name, state string }{{"bound to parent", "S1"}, {"unbound", ""}} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, path, polls := sessionHub(t)
+			noVecnetProfile(env)
+			seedSession(t, path, func(s *hookState) {
+				if tc.state != "" {
+					boundTo(tc.state)(s)
+				}
+			})
+			before, _ := os.ReadFile(path)
+			beforeBinding, _ := os.ReadFile(bindingPath(path))
+			for _, event := range []string{"PostToolUse", "UserPromptSubmit"} {
+				var out, errs bytes.Buffer
+				stdin := `{"hook_event_name":"` + event + `","session_id":"S1","agent_id":"agent-7f3a","agent_type":"Explore","tool_name":"Bash"}`
+				for _, args := range [][]string{{"hook", "--profile", "p", "--event", "post-tool"}, {"hook", "--profile", "p"}} {
+					out.Reset()
+					errs.Reset()
+					if code := RunContext(context.Background(), args, strings.NewReader(stdin), &out, &errs, func(k string) string { return env[k] }); code != 0 || out.Len() != 0 || errs.Len() != 0 {
+						t.Fatalf("%s %v: exit=%d out=%q errs=%q", event, args, code, out.String(), errs.String())
+					}
+				}
+			}
+			if after, _ := os.ReadFile(bindingPath(path)); !bytes.Equal(beforeBinding, after) {
+				t.Fatal("subagent run changed the binding")
+			}
+			if after, _ := os.ReadFile(path); !bytes.Equal(before, after) || polls.Load() != 0 {
+				t.Fatalf("subagent run changed state (%t) or polled (%d)", !bytes.Equal(before, after), polls.Load())
+			}
+			if _, err := os.Stat(sessionsPath(path)); !os.IsNotExist(err) {
+				t.Fatalf("subagent run wrote the registry: %v", err)
+			}
+			// The parent itself (no agent_id) still claims; agent_type alone
+			// (a session started with --agent) is the main thread.
+			if tc.state == "" {
+				runHookAs(t, env, "S1", "p") // binding run
+			}
+			var out, errs bytes.Buffer
+			stdin := `{"hook_event_name":"UserPromptSubmit","session_id":"S1","agent_type":"reviewer"}`
+			RunContext(context.Background(), []string{"hook", "--profile", "p", "--event", "user-prompt"}, strings.NewReader(stdin), &out, &errs, func(k string) string { return env[k] })
+			if !strings.Contains(contextOf(t, out.String()), "secret text") {
+				t.Fatalf("parent missed the delivery: out=%q errs=%q", out.String(), errs.String())
+			}
+		})
+	}
+}
+
+// oldWriter rewrites path as a vecnet from before session binding would
+// (a long-running watch --for-monitor, or a stanza naming an older
+// binary): it knows only the pre-binding fields.
+func oldWriter(t *testing.T, path string) {
+	t.Helper()
+	var old struct {
+		Hub              string    `json:"hub,omitempty"`
+		Caller           string    `json:"caller,omitempty"`
+		As               string    `json:"as,omitempty"`
+		Cred             string    `json:"cred,omitempty"`
+		PollCursor       string    `json:"poll_cursor,omitempty"`
+		Shown            []string  `json:"shown"`
+		LastPostToolPoll time.Time `json:"last_post_tool_poll,omitzero"`
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &old); err != nil {
+		t.Fatal(err)
+	}
+	old.Shown = append(old.Shown, "dly_old_watch")
+	raw, _ = json.Marshal(old)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The reported regression: a top-level session that loads two profiles'
+// stanzas rebinds its profile, an older vecnet then claims a delivery for
+// the same profile, and the binding must still hold.
+func TestHookRebindSurvivesPreBindingWriter(t *testing.T) {
+	env, path, _ := sessionHub(t)
+	noVecnetProfile(env)
+	env["CLAUDE_PID"] = strconv.Itoa(os.Getpid())
+	seedSession(t, path, func(*hookState) {})
+	runHookAs(t, env, "S1", "q") // the session runs both profiles' hooks
+	env["CLAUDE_CODE_SESSION_ID"] = "S1"
+	if code, out, errs := runCLI(env, "hook", "rebind", "--profile", "p"); code != 0 {
+		t.Fatalf("rebind exit=%d out=%q errs=%q", code, out, errs)
+	}
+	delete(env, "CLAUDE_CODE_SESSION_ID")
+	oldWriter(t, path)
+	out, errs := runHookAs(t, env, "S1", "p")
+	if !strings.Contains(contextOf(t, out), "secret text") {
+		t.Fatalf("rebind binding lost after an older writer: out=%q errs=%q", out, errs)
+	}
+}
+
+// runHookEvent runs the hook for one Claude Code event (UserPromptSubmit or
+// PostToolUse) as session, with extra environment, returning stdout+stderr.
+func runHookEvent(t *testing.T, env map[string]string, extra map[string]string, event, session string) (string, string) {
+	t.Helper()
+	flag := map[string]string{"UserPromptSubmit": "user-prompt", "PostToolUse": "post-tool"}[event]
+	stdin := `{"hook_event_name":"` + event + `","session_id":"` + session + `"}`
+	var out, errs bytes.Buffer
+	code := RunContext(context.Background(), []string{"hook", "--profile", "p", "--event", flag}, strings.NewReader(stdin), &out, &errs, func(k string) string {
+		if v, ok := extra[k]; ok {
+			return v
+		}
+		return env[k]
+	})
+	if code != 0 {
+		t.Fatalf("hook exit %d", code)
+	}
+	return out.String(), errs.String()
+}
+
+// A bound profile moves only by an explicit rebind, or when its Claude
+// Code process has provably exited and a user-prompt run binds it anew.
+// Nothing another live session's hook does unbinds or takes it.
+func TestHookBindingMovesOnlyExplicitly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process identity is unknown outside Unix")
+	}
+	host, _ := os.Hostname()
+	self := hookProc{PID: os.Getpid(), Start: procStart(os.Getpid()), Host: host}
+	other := strconv.Itoa(os.Getppid())
+	for _, how := range []string{bindRebind, bindDeclared, bindAuto} {
+		t.Run(how, func(t *testing.T) {
+			env, path, _ := sessionHub(t)
+			noVecnetProfile(env)
+			seedSession(t, path, func(s *hookState) {
+				s.Session, s.SessionAt, s.SessionHow, s.Proc = "S1", time.Now(), how, self
+			})
+			// S2 runs every profile's hook (ambiguous), as subagents and
+			// sibling sessions in a shared directory do.
+			if _, err := registerSession(context.Background(), sessionsPath(path), "S2", "q", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			hostile := []struct {
+				name, event, session string
+				extra                map[string]string
+			}{
+				{"user-prompt", "UserPromptSubmit", "S2", nil},
+				{"post-tool", "PostToolUse", "S2", nil},
+				{"declared", "UserPromptSubmit", "S2", map[string]string{"VECNET_PROFILE": "p"}},
+				{"declared post-tool", "PostToolUse", "S2", map[string]string{"VECNET_PROFILE": "p"}},
+				{"other live process", "UserPromptSubmit", "S3", map[string]string{"CLAUDE_PID": other}},
+				{"post-tool, owner's process", "PostToolUse", "S4", map[string]string{"CLAUDE_PID": strconv.Itoa(os.Getpid())}},
+				{"no session", "UserPromptSubmit", "", nil},
+			}
+			for _, h := range hostile {
+				out, _ := runHookEvent(t, env, h.extra, h.event, h.session)
+				if strings.Contains(out, "secret text") && h.session != "" {
+					t.Fatalf("%s: another session claimed: %q", h.name, out)
+				}
+				if s := readHookState(t, path); s.Session != "S1" || s.SessionHow != how {
+					t.Fatalf("%s: binding moved to %q (%s)", h.name, s.Session, s.SessionHow)
+				}
+			}
+			// An older vecnet rewriting the state file leaves it bound.
+			oldWriter(t, path)
+			if s := readHookState(t, path); s.Session != "S1" {
+				t.Fatalf("older writer unbound it: %+v", s.hookBinding)
+			}
+			// Once the owner's process is provably gone, a tool hook still
+			// never binds; the next top-level prompt does.
+			cmd := exec.Command(os.Args[0], "-test.run=^$")
+			if err := cmd.Run(); err != nil {
+				t.Fatal(err)
+			}
+			seedSession(t, path, func(s *hookState) { s.Proc = hookProc{PID: cmd.ProcessState.Pid(), Host: host} })
+			if out, errs := runHookEvent(t, env, nil, "PostToolUse", "S5"); out != "" || errs != "" {
+				t.Fatalf("post-tool on a dead owner: out=%q errs=%q", out, errs)
+			}
+			if s := readHookState(t, path); s.Session != "S1" {
+				t.Fatalf("post-tool took a dead owner's binding: %+v", s.hookBinding)
+			}
+			runHookEvent(t, env, nil, "UserPromptSubmit", "S5")
+			if s := readHookState(t, path); s.Session != "S5" || s.SessionHow != bindAuto {
+				t.Fatalf("prompt after the owner exited: %+v", s.hookBinding)
+			}
+		})
+	}
+}
+
+// Issue 39 item 4: after install, a subagent (its own session id, tool
+// hooks only) runs first. It binds nothing; the top-level session's first
+// prompt binds; the subagent stays silent afterwards.
+func TestHookSubagentSessionNeverBinds(t *testing.T) {
+	env, path, _ := sessionHub(t)
+	noVecnetProfile(env)
+	seedSession(t, path, func(*hookState) {})
+	for range 3 {
+		if out, errs := runHookEvent(t, env, nil, "PostToolUse", "SUB"); out != "" || errs != "" {
+			t.Fatalf("subagent run: out=%q errs=%q", out, errs)
+		}
+	}
+	if s := readHookState(t, path); s.Session != "" || len(s.Shown) != 0 {
+		t.Fatalf("subagent bound or claimed: %+v", s)
+	}
+	runHookEvent(t, env, nil, "UserPromptSubmit", "TOP") // binds (claims next run)
+	if out, _ := runHookEvent(t, env, nil, "PostToolUse", "TOP"); !strings.Contains(contextOf(t, out), "secret text") {
+		t.Fatalf("top-level tool hook missed the delivery: %q", out)
+	}
+	if out, errs := runHookEvent(t, env, nil, "PostToolUse", "SUB"); out != "" || errs != "" {
+		t.Fatalf("subagent after binding: out=%q errs=%q", out, errs)
+	}
+	if s := readHookState(t, path); s.Session != "TOP" || len(s.Noticed) != 0 {
+		t.Fatalf("state %+v", s.hookBinding)
+	}
+}
+
+// A binding that 8631cc0 kept inside the state file is adopted once, then
+// moved to the binding file.
+func TestHookBindingMigrates(t *testing.T) {
+	env, path, _ := sessionHub(t)
+	noVecnetProfile(env)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"poll_cursor":"e1.0","shown":[],"session":"S1","session_at":"2026-11-04T09:46:00Z","session_how":"rebind"}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := runHookAs(t, env, "S1", "p"); !strings.Contains(contextOf(t, out), "secret text") {
+		t.Fatalf("legacy binding not adopted: %q", out)
+	}
+	raw, _ := os.ReadFile(path)
+	braw, err := os.ReadFile(bindingPath(path))
+	if err != nil || strings.Contains(string(raw), `"session"`) || !strings.Contains(string(braw), `"session":"S1"`) {
+		t.Fatalf("state=%s binding=%s err=%v", raw, braw, err)
+	}
+}
+
+// The hook names a sender from the delivery's send-time sender_info, then
+// the cached directory, sanitised either way.
+func TestHookNamesSenderFromSenderInfo(t *testing.T) {
+	raw, _ := json.Marshal(map[string]any{"delivery_id": "dly_1", "message": map[string]any{"message_id": "msg_1", "thread_id": "thr_X", "sender": "peer_h", "kind": "message", "sender_info": map[string]string{"name": "Scout <b>\nX", "kind": "session"}, "content": map[string]string{"text": "hi"}}})
+	withInfo := envelope.Event{Cursor: "e1.1", Type: "delivery", Data: raw}
+	item, err := hookItemOf(withInfo, map[string]string{"peer_h": "Cached"})
+	if err != nil || item.Name != "Scout <b>\nX" {
+		t.Fatalf("name=%q err=%v", item.Name, err)
+	}
+	if ctx := hookContext(newHookHint("p", "", ""), []hookItem{item}, 0, false); !strings.Contains(ctx, `name="Scout_&lt;b&gt;_X"`) {
+		t.Fatalf("sanitised name missing: %q", ctx)
+	}
+	item, _ = hookItemOf(hookEvent(2, "x"), map[string]string{"peer_h": "Cached"})
+	if item.Name != "Cached" {
+		t.Fatalf("fallback name=%q", item.Name)
 	}
 }

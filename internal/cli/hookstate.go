@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -25,10 +26,10 @@ const shownWindow = 1024
 // a fingerprint of the credential that Caller was verified for. A state
 // without Hub predates binding.
 //
-// Session, SessionAt, SessionHow, Proc and RebindUntil bind the profile's
-// hook to one Claude Code session (PROTOCOL §13.9, issue 38); Noticed
-// lists the sessions already told that it is not theirs (hooksession.go).
-// watch never reads or changes them; it rewrites them unchanged.
+// hookBinding (hooksession.go) binds the profile's hook to one Claude Code
+// session (PROTOCOL §13.9, issue 38). It is stored in its own file beside
+// the state, never in it: a vecnet from before binding rewrites the state
+// file with only the fields it knows, which would silently unbind it.
 type hookState struct {
 	Hub              string    `json:"hub,omitempty"`
 	Caller           string    `json:"caller,omitempty"`
@@ -37,12 +38,13 @@ type hookState struct {
 	PollCursor       string    `json:"poll_cursor,omitempty"`
 	Shown            []string  `json:"shown"`
 	LastPostToolPoll time.Time `json:"last_post_tool_poll,omitzero"`
-	Session          string    `json:"session,omitempty"`
-	SessionAt        time.Time `json:"session_at,omitzero"`
-	SessionHow       string    `json:"session_how,omitempty"`
-	Proc             hookProc  `json:"claude_proc,omitzero"`
-	RebindUntil      time.Time `json:"rebind_until,omitzero"`
-	Noticed          []string  `json:"noticed,omitempty"`
+	hookBinding      `json:"-"`
+}
+
+// bindingPath is the binding file beside a state file: <key>+session.json.
+// '+' never appears in a state key (statePath), so it cannot collide.
+func bindingPath(statePath string) string {
+	return strings.TrimSuffix(statePath, ".json") + "+session.json"
 }
 
 // normalizeHub canonicalises a hub URL for identity comparison: lower-case
@@ -124,8 +126,33 @@ func (f stateFile) update(ctx context.Context, fn func(*hookState) error) error 
 	if json.Unmarshal(raw, &s) != nil {
 		s = hookState{}
 	}
+	// The binding file wins; without one, adopt a binding that 8631cc0
+	// kept inside the state file. A corrupt binding reads as unbound.
+	bpath := bindingPath(f.path)
+	braw, err := os.ReadFile(bpath)
+	switch {
+	case err == nil:
+		if json.Unmarshal(braw, &s.hookBinding) != nil {
+			s.hookBinding = hookBinding{}
+		}
+	case errors.Is(err, os.ErrNotExist):
+		if json.Unmarshal(raw, &s.hookBinding) != nil {
+			s.hookBinding = hookBinding{}
+		}
+	default:
+		return err
+	}
 	if err := fn(&s); err != nil {
 		return err
+	}
+	nb, err := json.Marshal(s.hookBinding)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(nb, braw) {
+		if err := writeFileAtomic(bpath, nb); err != nil {
+			return err
+		}
 	}
 	raw, err = json.Marshal(s)
 	if err != nil {

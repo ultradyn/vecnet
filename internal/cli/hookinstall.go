@@ -157,6 +157,7 @@ func (a *app) cmdHookInstall(args []string) error {
 			a.warn("%s already has vecnet hooks for profile(s) %s; every Claude Code session that reads it runs all of them. Session binding keeps each profile's deliveries in one session, and a session that runs several profiles' hooks binds none of them until its agent runs `vecnet hook rebind --profile P` (PROTOCOL §13.9). Launch each session with its own profile, e.g. VECNET_PROFILE=%s claude, so the other profiles' hooks stay silent there", path, strings.Join(others, ", "), profile)
 		}
 	}
+	a.warnNestedCheckouts(path)
 	if !o.has("write") {
 		stanza, _, err := mergeHookSettings(nil, bin, profile, o.has("auto-ack"))
 		if err != nil {
@@ -212,6 +213,61 @@ func (a *app) cmdHookInstall(args []string) error {
 	}
 	fmt.Fprintf(a.stderr, "wrote %s (UserPromptSubmit, PostToolUse)\n", path)
 	return nil
+}
+
+// warnNestedCheckouts warns when the target's checkout sits inside, or
+// contains, another checkout whose settings.local.json already has vecnet
+// hooks: a Claude Code session in the inner one can load both files, so it
+// runs both sets of hooks (issue 39). Ancestors are found by walking up;
+// nested ones from `git worktree list`. Errors just skip the check.
+func (a *app) warnNestedCheckouts(path string) {
+	if filepath.Base(filepath.Dir(path)) != ".claude" {
+		return
+	}
+	root := filepath.Dir(filepath.Dir(path))
+	home := a.getenv("HOME")
+	report := func(dir, rel string) {
+		raw, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.local.json"))
+		if err != nil {
+			return
+		}
+		if profiles := otherHookProfiles(raw, ""); len(profiles) > 0 {
+			a.warn("%s is %s %s, whose .claude/settings.local.json has vecnet hooks for profile(s) %s; a Claude Code session in the inner checkout can load both files and run both sets of hooks. Launch each session with VECNET_PROFILE=<its profile> (PROTOCOL §13.9)", root, rel, dir, strings.Join(profiles, ", "))
+		}
+	}
+	for dir := filepath.Dir(root); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		if dir != home {
+			report(dir, "inside")
+		}
+	}
+	list, err := a.hookGit(root, "--show-toplevel") // cheap probe: is root in git?
+	if err != nil || list == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "worktree", "list", "--porcelain")
+	cmd.WaitDelay = 100 * time.Millisecond
+	out, err := cmd.Output()
+	if err != nil {
+		return
+	}
+	realRoot := root
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		realRoot = r
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		wt, ok := strings.CutPrefix(line, "worktree ")
+		if !ok {
+			continue
+		}
+		if r, err := filepath.EvalSymlinks(wt); err == nil {
+			wt = r
+		}
+		if strings.HasPrefix(wt, realRoot+string(filepath.Separator)) {
+			report(wt, "the parent of")
+		}
+	}
 }
 
 // hookGit runs one bounded `git -C dir rev-parse <arg>` and returns its
