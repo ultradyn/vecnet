@@ -120,35 +120,23 @@ func (a *app) cmdHookInstall(args []string) error {
 			return usageErr("hook install: --settings must not be empty")
 		}
 		fmt.Fprintf(a.stderr, "settings target %s (explicit --settings)\n", path)
-	} else if pd := a.getenv("CLAUDE_PROJECT_DIR"); pd != "" {
-		// Claude Code reads project settings from the session's project
-		// root, which it exports to the commands it runs.
-		path = filepath.Join(pd, ".claude", "settings.local.json")
-		fmt.Fprintf(a.stderr, "settings target %s (CLAUDE_PROJECT_DIR; personal settings.local.json)\n", path)
 	} else {
 		cwd, err := os.Getwd()
 		if err != nil {
 			return err
 		}
-		out, gitErr := a.git(cwd, "rev-parse", "--show-toplevel")
-		root := strings.TrimSuffix(out, "\n")
-		dirs, _ := a.git(cwd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir")
-		lines := strings.Split(strings.TrimSuffix(dirs, "\n"), "\n")
+		ctx, cancel := context.WithTimeout(a.ctx, 2*time.Second)
+		cmd := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel")
+		// Also bound pipe teardown if a misbehaving git child retains stdout.
+		cmd.WaitDelay = 100 * time.Millisecond
+		rootBytes, gitErr := cmd.Output()
+		cancel()
+		root := strings.TrimSuffix(string(rootBytes), "\n")
 		reason := "git top-level; personal settings.local.json"
 		if gitErr != nil || root == "" {
 			root = cwd
 			reason = "cwd fallback; personal settings.local.json"
 			fmt.Fprintf(a.stderr, "not in a git repository; using %s\n", cwd)
-		} else if len(lines) == 2 && lines[0] != lines[1] {
-			// A linked worktree: Claude Code reads settings from the
-			// session's project root, which is often the main checkout.
-			main := lines[1]
-			if filepath.Base(main) == ".git" {
-				main = filepath.Dir(main)
-			}
-			a.warn("%s is a linked git worktree; Claude Code reads settings from the session's project root, likely the main checkout %s. "+
-				"If the session runs there, rerun with --settings %s (or from a session, where CLAUDE_PROJECT_DIR picks the root)",
-				root, main, filepath.Join(main, ".claude", "settings.local.json"))
 		}
 		path = filepath.Join(root, ".claude", "settings.local.json")
 		fmt.Fprintf(a.stderr, "settings target %s (%s)\n", path, reason)
@@ -518,15 +506,4 @@ func mergeHookSettings(existing []byte, bin, profile string, autoAck bool) (out 
 	root.raw = existing
 	out = root.encode(detectIndent(existing))
 	return out, !bytes.Equal(out, existing), nil
-}
-
-// git runs git -C dir args with a 2 s bound and returns its stdout.
-func (a *app) git(dir string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(a.ctx, 2*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	// Also bound pipe teardown if a misbehaving git child retains stdout.
-	cmd.WaitDelay = 100 * time.Millisecond
-	out, err := cmd.Output()
-	return string(out), err
 }
