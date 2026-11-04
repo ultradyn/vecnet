@@ -165,9 +165,17 @@ func mcpRelayCode(code string) bool {
 
 var errMCPListenEnded = errors.New("subscription stream ended")
 
+// Local response processing (schema/cache/output) is distinct from reading
+// the upstream body, even when a local writer returns EOF or a network error.
+type mcpResponseError struct{ err error }
+
+func (e *mcpResponseError) Error() string { return e.err.Error() }
+func (e *mcpResponseError) Unwrap() error { return e.err }
+
 type mcpExchange struct {
 	status                                *reconnectStatus
 	acked, resuming, completed, delivered bool
+	hadLive                               bool
 }
 
 func (r *mcpRelay) exchange(raw []byte, msg mcpRelayMessage, emit bool) error {
@@ -176,6 +184,7 @@ func (r *mcpRelay) exchange(raw []byte, msg mcpRelayMessage, emit bool) error {
 	}
 	st := &mcpExchange{status: &r.outage}
 	for failures := 1; ; failures++ {
+		st.hadLive = false
 		err := r.exchangeAttempt(raw, msg, emit, st)
 		if err == nil {
 			st.status.live()
@@ -184,8 +193,24 @@ func (r *mcpRelay) exchange(raw []byte, msg mcpRelayMessage, emit bool) error {
 		if r.a.ctx.Err() != nil {
 			return r.a.ctx.Err()
 		}
-		if st.completed || !mcpRetryable(msg, err, st.delivered) {
+		var local *mcpResponseError
+		if errors.As(err, &local) {
 			return err
+		}
+		if st.completed {
+			var network *netError
+			if errors.As(err, &network) {
+				// The final answer already reached stdout.
+				return nil
+			}
+			return err
+		}
+		if !mcpRetryable(msg, err, st.delivered) {
+			return err
+		}
+		if st.hadLive {
+			// This acknowledged stream's close starts a new outage.
+			failures = 1
 		}
 		st.resuming = st.acked
 		// Never print response bodies, URLs, bearer credentials or raw errors.
@@ -313,12 +338,18 @@ func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool, st *mcpExcha
 	if resp.StatusCode == http.StatusNoContent {
 		return errPeerDisabled
 	}
-	handle := func(payload []byte) error {
+	handle := func(payload []byte) (err error) {
+		defer func() {
+			if err != nil {
+				err = &mcpResponseError{err: err}
+			}
+		}()
 		var reply mcpRelayMessage
 		if err := json.Unmarshal(payload, &reply); err != nil || reply.JSONRPC != "2.0" || (len(reply.Result) == 0 && len(reply.Error) == 0 && reply.Method == "") {
 			return errors.New("invalid relay response")
 		}
 		if st != nil && msg.Method == "subscriptions/listen" && reply.Method == "notifications/subscriptions/acknowledged" {
+			st.hadLive = true
 			st.status.live()
 			if st.acked {
 				if st.resuming && emit {
@@ -347,8 +378,8 @@ func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool, st *mcpExcha
 			}
 			st.acked = true
 		}
-		if st != nil && bytes.Equal(bytes.TrimSpace(reply.ID), bytes.TrimSpace(msg.ID)) && len(reply.ID) > 0 {
-			st.completed = true
+		final := bytes.Equal(bytes.TrimSpace(reply.ID), bytes.TrimSpace(msg.ID)) && len(reply.ID) > 0
+		if st != nil && final {
 			st.status.live()
 		}
 		// Only a response to this request may populate cached transport state.
@@ -386,10 +417,15 @@ func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool, st *mcpExcha
 			}
 		}
 		if emit && len(msg.ID) > 0 {
+			if err := r.a.emitJSON(payload); err != nil {
+				return err
+			}
 			if st != nil {
 				st.delivered = true
 			}
-			return r.a.emitJSON(payload)
+		}
+		if st != nil && final {
+			st.completed = true
 		}
 		return nil
 	}
@@ -403,7 +439,7 @@ func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool, st *mcpExcha
 	}
 	payload, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return &netError{err: err}
 	}
 	if len(bytes.TrimSpace(payload)) == 0 {
 		return nil
@@ -443,7 +479,7 @@ func mcpRelaySSE(body io.Reader, handle func([]byte) error) error {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return err
+		return &netError{err: err}
 	}
 	return flush()
 }
