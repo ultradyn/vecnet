@@ -42,6 +42,9 @@ func (h *Hub) RunTickers(ctx context.Context, every time.Duration) {
 // Tick runs one round of RunTickers' jobs; slow adds the hourly ones.
 func (h *Hub) Tick(ctx context.Context, slow bool) {
 	now := h.Now()
+	if _, err := h.ExpireNotices(ctx); err != nil && ctx.Err() == nil {
+		slog.Error("hub: tick expire notices", "err", err)
+	}
 	if _, err := h.ExpireDeliveries(ctx, now); err != nil && ctx.Err() == nil {
 		slog.Error("hub: tick expire deliveries", "err", err)
 	}

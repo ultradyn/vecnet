@@ -158,3 +158,44 @@ func TestTagsOperatorView(t *testing.T) {
 		}
 	}
 }
+
+func TestNoticeTags(t *testing.T) {
+	const notice = `{"notice_id":"ntc_01JD3Q5H0X2Z4B6D8F0H2K4M6P","kind":"maintenance","message":"hello","hub":"https://hub.example","issued_at":"2026-11-05T07:00:00.000Z","expires_at":"2026-11-06T07:00:00.000Z","sig":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`
+	for _, tc := range []struct {
+		data string
+		want []string
+	}{
+		{`{"change":"posted","notice":` + notice + `}`, []string{"notices"}},
+		{`{"change":"cleared","notice":` + strings.TrimSuffix(notice, "}") + `,"cleared_at":"2026-11-05T08:00:00.000Z","cleared_how":"operator"}}`, []string{"notices"}},
+		{`{"change":"posted","notice":{"notice_id":"ntc_test","kind":7,"message":false}}`, []string{}},
+		{`{"change":"cleared","notice":{"notice_id":"ntc_test"}}`, []string{}},
+		{`{`, []string{}}, {`null`, []string{}}, {`[]`, []string{}}, {`{}`, []string{}},
+		{`{"change":"posted","notice":null}`, []string{}}, {`{"change":"posted","notice":{"notice_id":7}}`, []string{}},
+		{`{"change":"unknown","notice":{"notice_id":"ntc_test"}}`, []string{}},
+		{`{"change":"posted","notice":{}}`, []string{}},
+	} {
+		if got := opapi.Tags(envelope.Event{Type: "hub_notice", Data: json.RawMessage(tc.data)}); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v want %v", tc.data, got, tc.want)
+		}
+	}
+	for _, field := range []string{"notice_id", "kind", "message", "hub", "issued_at", "expires_at", "sig"} {
+		for _, remove := range []bool{false, true} {
+			var n map[string]any
+			if err := json.Unmarshal([]byte(notice), &n); err != nil {
+				t.Fatal(err)
+			}
+			if remove {
+				delete(n, field)
+			} else {
+				n[field] = 7
+			}
+			raw, err := json.Marshal(map[string]any{"change": "posted", "notice": n})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := opapi.Tags(envelope.Event{Type: "hub_notice", Data: raw}); len(got) != 0 {
+				t.Errorf("malformed %s (removed %v): got %v", field, remove, got)
+			}
+		}
+	}
+}

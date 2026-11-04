@@ -44,13 +44,19 @@ func Excerpt(m envelope.Message) string {
 func Tags(ev envelope.Event) []string {
 	empty := []string{}
 	switch ev.Type {
-	case "delivery", "receipt", "thread_updated", "presence", "directory_updated", "approval_expired", "operator_view", "reaction":
+	case "delivery", "receipt", "thread_updated", "presence", "directory_updated", "approval_expired", "operator_view", "reaction", "hub_notice":
 	default:
 		return empty
 	}
 	raw := bytes.TrimSpace(ev.Data)
 	if len(raw) == 0 || raw[0] != '{' {
 		return empty
+	}
+	if ev.Type == "hub_notice" {
+		if envelope.Validate("hubNoticeEvent", raw) != nil {
+			return empty
+		}
+		return []string{"notices"}
 	}
 	if ev.Type == "operator_view" {
 		// Match the web client's exact field names; struct decoding also accepts
