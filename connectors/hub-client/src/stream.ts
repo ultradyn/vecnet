@@ -1,3 +1,4 @@
+import { HubError } from './errors.ts';
 import { SseParser } from './sse.ts';
 import type { EventStream, CursorStore, Clock, Log } from './ports.ts';
 import type { VecnetEvent } from './wire.ts';
@@ -6,6 +7,10 @@ export function createEventStream(opts: {
   baseUrl: string; credential: string; cursors: CursorStore; clock: Clock; log: Log;
   fetch?: typeof fetch;
   onState?: (s: 'connected' | 'recovering', detail?: string) => void;
+  // PROTOCOL 2.3/13.1: explicitly reconcile thread history before resuming.
+  // No hook or a rejected hook makes run reject with safe 409 cursor_purged.
+  // Honor signal to stop reconciliation when the caller aborts.
+  onCursorPurged?: (recovery: {oldestCursor: string; signal: AbortSignal}) => Promise<void>;
   silenceMs?: number; maxBackoffMs?: number;
 }): EventStream {
   const fetcher = opts.fetch ?? fetch;
@@ -60,9 +65,16 @@ export function createEventStream(opts: {
             const body: unknown = await abortable(response.json(),connectionSignal);
             const oldest = oldestCursor(body);
             if (oldest !== undefined && recoveryAfter !== oldest) {
-              recoveryAfter = oldest;
-              opts.log.warn('cursor_purged; resuming at oldest cursor');
+              opts.log.warn('cursor_purged; thread-history reconciliation required');
               opts.onState?.('recovering','cursor_purged');
+              // The socket watchdog must not time out explicit history recovery.
+              watchdog?.cancel();
+              controller.abort();
+              if (!opts.onCursorPurged) throw new HubError(409,'cursor_purged');
+              try {await abortable(opts.onCursorPurged({oldestCursor:oldest,signal}),signal);}
+              catch {throw new HubError(409,'cursor_purged');}
+              if (signal.aborted) break;
+              recoveryAfter = oldest;
               resync = true;
             }
           } else if (response.ok) {
@@ -111,7 +123,8 @@ export function createEventStream(opts: {
           } else {
             await response.body?.cancel();
           }
-        } catch {
+        } catch (err) {
+          if (!signal.aborted && err instanceof HubError && err.code === 'cursor_purged') throw err;
           if (!signal.aborted) opts.log.warn('Event stream interrupted');
         } finally {
           watchdog?.cancel();

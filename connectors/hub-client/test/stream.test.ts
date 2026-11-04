@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
 import { createServer } from 'node:http';
+import { HubError } from '../src/errors.ts';
 import { createEventStream } from '../src/stream.ts';
 import { fakeClock, memoryLog, event } from '../testing/fixtures.ts';
 import { startFakeHub } from '../testing/fake-hub.ts';
@@ -9,7 +10,7 @@ import type { VecnetEvent } from '../src/wire.ts';
 const encode = (s: string) => new TextEncoder().encode(s);
 const frame = (cursor: string) => `id: ${cursor}\nevent: delivery\ndata: ${JSON.stringify(event('delivery',{},cursor))}\n\n`;
 async function until(fn: () => boolean) { for (let n=0;n<300;n++) {if (fn()) return; await setImmediate();} assert.fail('condition did not become true'); }
-function harness(steps: Array<string | Response | Error>, initial: string | null = null) {
+function harness(steps: Array<string | Response | Error>, initial: string | null = null, recovery: Pick<Parameters<typeof createEventStream>[0], 'onCursorPurged'> = {}) {
   const clock = fakeClock(), log = memoryLog(), abort = new AbortController();
   const requests: Array<{url: URL; headers: Headers; signal: AbortSignal}> = [], saved: string[] = [], waits: number[] = [];
   let stored = initial, open = 0;
@@ -32,7 +33,7 @@ function harness(steps: Array<string | Response | Error>, initial: string | null
     },cancel() {cleanup();}});
     return new Response(body,{headers:{'Content-Type':'text/event-stream'}});
   };
-  const stream = createEventStream({baseUrl:'http://hub.invalid',credential:'bearer',clock,log,fetch:fetcher,cursors:{async load(){return stored;},async save(c){saved.push(c);stored=c;}}});
+  const stream = createEventStream({...recovery,baseUrl:'http://hub.invalid',credential:'bearer',clock,log,fetch:fetcher,cursors:{async load(){return stored;},async save(c){saved.push(c);stored=c;}}});
   return {clock,log,abort,requests,saved,waits,stream,open:()=>open,async next(n: number) {await until(()=>requests.length>=n);},async retry(n: number) {await until(()=>waits.length>=n);clock.advance(60_000);await until(()=>requests.length>=n+1);}};
 }
 
@@ -85,9 +86,35 @@ test('401 stops without retrying', async () => {
   for(const status of [401,403] as const){const h=harness([new Response(null,{status})]);assert.deepEqual(await h.stream.run(async()=>{},h.abort.signal),{reason:'auth',status});assert.equal(h.requests.length,1);assert.deepEqual(h.waits,[]);}
 });
 test('204 stops', async () => {const h=harness([new Response(null,{status:204})]);assert.deepEqual(await h.stream.run(async()=>{},h.abort.signal),{reason:'disabled'});assert.equal(h.requests.length,1);});
-test('409 cursor_purged resumes after oldest_cursor', async () => {
-  const h=harness([new Response(JSON.stringify({error:{code:'cursor_purged',details:{oldest_cursor:'e2.0'}}}),{status:409})],'e1.9');const run=h.stream.run(async()=>{},h.abort.signal);await h.next(2);
-  assert.equal(h.requests[1]?.url.searchParams.get('after'),'e2.0');assert.equal(h.requests[1]?.headers.get('last-event-id'),null);assert.ok(h.log.text().includes('cursor_purged'));h.abort.abort();await run;
+const purged = () => new Response(JSON.stringify({error:{code:'cursor_purged',details:{oldest_cursor:'e2.0'}}}),{status:409});
+test('409 waits for explicit thread-history reconciliation before oldest_cursor resume', async () => {
+  let release!:()=>void, reconciling=false;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const h=harness([purged()],'e1.9',{async onCursorPurged({oldestCursor,signal}){assert.equal(oldestCursor,'e2.0');assert.equal(signal,h.abort.signal);reconciling=true;await gate;}});
+  const run=h.stream.run(async()=>{},h.abort.signal);
+  try {
+    await h.next(1);await setImmediate();assert.equal(reconciling,true);assert.equal(h.requests.length,1);
+    h.clock.advance(100_000);await setImmediate();assert.equal(h.requests.length,1);assert.deepEqual(h.saved,[]);
+    release();await h.next(2);
+    assert.equal(h.requests[1]?.url.searchParams.get('after'),'e2.0');assert.equal(h.requests[1]?.headers.get('last-event-id'),null);assert.ok(h.log.text().includes('cursor_purged'));
+  } finally {release();h.abort.abort();await run;}
+});
+test('409 without a successful reconciliation path rejects safely without resuming', async () => {
+  for (const recovery of [{},{onCursorPurged:async()=>{throw new Error('private recovery details');}}]) {
+    const h=harness([purged()],'e1.9',recovery);
+    const run=h.stream.run(async()=>{},h.abort.signal);
+    const checked=assert.rejects(run,e=>e instanceof HubError && e.status===409 && e.code==='cursor_purged' && !e.stack?.includes('private recovery details'));
+    try {await h.next(1);await setImmediate();assert.equal(h.requests.length,1);await checked;assert.deepEqual(h.saved,[]);assert.deepEqual(h.waits,[]);}
+    finally {h.abort.abort();await checked;}
+  }
+});
+test('abort during reconciliation stops without another fetch or cursor save', async () => {
+  let reconciling=false;
+  const h=harness([purged()],'e1.9',{async onCursorPurged(){reconciling=true;await new Promise<void>(()=>{});}});
+  const run=h.stream.run(async()=>{},h.abort.signal);
+  try {await h.next(1);await setImmediate();assert.equal(reconciling,true);}
+  finally {h.abort.abort();assert.deepEqual(await run,{reason:'aborted'});}
+  assert.equal(h.requests.length,1);assert.deepEqual(h.saved,[]);
 });
 test('three frameless connects fall back to long-poll and return to SSE', async () => {
   const h=harness(['','','',new Response(JSON.stringify({events:[event('delivery',{},'e1.2')],next_cursor:'e1.2'}),{headers:{'Content-Type':'application/json'}})],'e1.1');const seen:string[]=[];
@@ -122,7 +149,7 @@ test('a slow handler stays serial and persists before a reconnect', async () => 
 });
 test('a repeated cursor_purged refusal backs off rather than spinning', async () => {
   const refusal=()=>new Response(JSON.stringify({error:{code:'cursor_purged',details:{oldest_cursor:'e2.0'}}}),{status:409});
-  const h=harness([refusal(),refusal()],'e1.9');const run=h.stream.run(async()=>{},h.abort.signal);
+  const h=harness([refusal(),refusal()],'e1.9',{async onCursorPurged(){}});const run=h.stream.run(async()=>{},h.abort.signal);
   await until(()=>h.waits.length===1);assert.equal(h.requests.length,2);assert.ok(h.waits[0]!>=1500);h.abort.abort();await run;
 });
 test('aborting a poll batch never saves a cursor beyond the last handled event', async () => {

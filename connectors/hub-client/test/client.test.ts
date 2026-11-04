@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 import { createHubClient } from '../src/client.ts';
 import { HubError } from '../src/errors.ts';
 import { startFakeHub } from '../testing/fake-hub.ts';
-import { directoryEntry } from '../testing/fixtures.ts';
+import { setImmediate } from 'node:timers/promises';
+import { directoryEntry, fakeClock } from '../testing/fixtures.ts';
 import type { SendRequest, SendResponse } from '../src/wire.ts';
 const request: SendRequest = {idempotency_key:'test.1',priority:'wake_idle',content:{text:'hello'},recipients:['peer_test']};
 const response: SendResponse = {message_id:'msg_1',thread_id:'thr_1',deliveries:[],spilled:false};
@@ -101,4 +102,57 @@ test('caller abort cancels an HTTP request without exposing its reason', async (
     abort.abort('secret-credential');
   }));
   await assert.rejects(c.send(request,abort.signal), e => e instanceof HubError && e.status===0 && !String(e).includes('secret-credential'));
+});
+
+test('malformed header credentials only escape as safe HubError', async () => {
+  const sentinel = 'private-header-sentinel';
+  const c = createHubClient({baseUrl:'http://hub.invalid',credential:sentinel+'\r\nsecret',fetch:async()=>assert.fail('invalid headers must not fetch')});
+  await assert.rejects(c.ack('e1.1'), e => e instanceof HubError && e.status===0 && e.code==='network_error' && !String(e).includes(sentinel) && !e.stack?.includes(sentinel));
+});
+test('fetchBlob caps non-2xx bodies before parsing, declared and streamed', async () => {
+  for (const declared of [true,false]) {
+    let cancelled=false;
+    const bytes=new TextEncoder().encode(JSON.stringify({error:{code:'oversize',details:{x:'x'.repeat(100)}}}));
+    const c=fakeClient(async()=>new Response(new ReadableStream<Uint8Array>({
+      start(ctrl){ctrl.enqueue(bytes);void setImmediate().then(()=>{if(!cancelled)ctrl.close();});}, cancel(){cancelled=true;},
+    }),{status:500,headers:declared?{'Content-Length':String(bytes.length)}:{}}));
+    await assert.rejects(c.fetchBlob('/blob',{maxBytes:1}),e=>e instanceof HubError && e.code==='too_large');
+    assert.equal(cancelled,true);
+  }
+});
+test('fetchBlob still parses an error envelope within the byte cap', async () => {
+  const c=fakeClient(async()=>json({error:{code:'not_found',details:{id:'blob_1'}}},404));
+  await assert.rejects(c.fetchBlob('/blob',{maxBytes:256}),e=>e instanceof HubError && e.status===404 && e.code==='not_found' && e.details.id==='blob_1');
+});
+test('a successful response body reset is a safe retryable network error', async () => {
+  const c=fakeClient(async()=>new Response(new ReadableStream({start(ctrl){ctrl.error(new Error('secret-credential reset'));}}),{status:202}));
+  await assert.rejects(c.send(request),e=>e instanceof HubError && e.status===0 && e.code==='network_error' && e.retryable && !e.stack?.includes('secret-credential'));
+});
+test('malformed successful JSON is bad_response at the HTTP status', async () => {
+  await assert.rejects(fakeClient(async()=>new Response('secret-credential invalid JSON',{status:202})).send(request),e=>e instanceof HubError && e.status===202 && e.code==='bad_response' && !e.stack?.includes('secret-credential'));
+});
+test('body deadline and caller abort after headers use fakeClock and clean timers', async () => {
+  for (const cause of ['deadline','caller'] as const) {
+    const clock=fakeClock(), abort=new AbortController();
+    let requestSignal: AbortSignal | undefined;
+    const c=createHubClient({baseUrl:'http://hub.invalid',credential:'secret-credential',clock,timeoutMs:100,fetch:async(_url,init)=>{
+      requestSignal=init?.signal ?? undefined;
+      return new Response(new ReadableStream({start(ctrl){requestSignal?.addEventListener('abort',()=>ctrl.error(new Error('secret-credential abort')),{once:true});}}),{status:202});
+    }});
+    const pending=c.send(request,abort.signal);
+    const checked=assert.rejects(pending,e=>e instanceof HubError && e.status===0 && e.code==='network_error' && e.retryable && !e.stack?.includes('secret-credential'));
+    await setImmediate();
+    try {
+      clock.advance(99);assert.equal(requestSignal?.aborted,false);
+      if (cause==='caller') abort.abort('secret-credential'); else clock.advance(1);
+      assert.equal(requestSignal?.aborted,true);
+    } finally {abort.abort();}
+    await checked;
+  }
+  for (const status of [200,400]) {
+    const clock=fakeClock();let requestSignal: AbortSignal | undefined;
+    const c=createHubClient({baseUrl:'http://hub.invalid',credential:'secret-credential',clock,timeoutMs:100,fetch:async(_url,init)=>{requestSignal=init?.signal ?? undefined;return json(status===200?response:{error:{code:'invalid'}},status);}});
+    if(status===200)await c.send(request);else await assert.rejects(c.send(request),HubError);
+    clock.advance(1000);assert.equal(requestSignal?.aborted,false,'settled requests must cancel deadline timers');
+  }
 });

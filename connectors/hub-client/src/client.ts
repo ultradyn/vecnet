@@ -2,10 +2,10 @@ import { HubError } from './errors.ts';
 import type { Clock, HubApi } from './ports.ts';
 import type { DirectoryEntry, GroupInfo } from './wire.ts';
 
-export function createHubClient(opts: { baseUrl: string; credential: string; fetch?: typeof fetch; timeoutMs?: number }): HubApi {
+export function createHubClient(opts: { baseUrl: string; credential: string; fetch?: typeof fetch; timeoutMs?: number; clock?: Pick<Clock, 'timer'> }): HubApi {
   const fetcher = opts.fetch ?? fetch;
   const base = new URL(opts.baseUrl);
-  const clock: Pick<Clock, 'timer'> = {
+  const clock: Pick<Clock, 'timer'> = opts.clock ?? {
     timer(ms, fn) {
       const timer = setTimeout(fn, ms);
       return {cancel: () => clearTimeout(timer)};
@@ -13,16 +13,18 @@ export function createHubClient(opts: { baseUrl: string; credential: string; fet
   };
 
   async function request<T>(path: string, method: string, body?: BodyInit, mediaType?: string, signal?: AbortSignal, timeoutMs = opts.timeoutMs ?? 30_000): Promise<T> {
-    const headers = new Headers({Authorization:`Bearer ${opts.credential}`});
-    if (mediaType) headers.set('Content-Type', mediaType);
     const deadline = new AbortController();
     const timer = clock.timer(timeoutMs, () => deadline.abort());
     const combined = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
     try {
+      // Header validation can quote the credential, so it shares fetch's safe boundary.
+      const headers = new Headers({Authorization:`Bearer ${opts.credential}`});
+      if (mediaType) headers.set('Content-Type', mediaType);
       const response = await fetcher(new URL(path, base), {method,headers,body,signal:combined,redirect:'error'});
       if (!response.ok) throw await responseError(response);
       if (response.status === 204) return undefined as T;
-      try { return await response.json() as T; }
+      const text = await response.text(); // Transport/abort failures remain status-0 errors.
+      try { return JSON.parse(text) as T; }
       catch { throw new HubError(response.status,'bad_response'); }
     } catch (err) {
       if (err instanceof HubError) throw err;
@@ -49,17 +51,15 @@ export function createHubClient(opts: { baseUrl: string; credential: string; fet
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       try {
         const response = await fetcher(url,{redirect:'error',signal:signal ? AbortSignal.any([signal,deadline.signal]) : deadline.signal});
-        if (!response.ok) throw await responseError(response);
         const length = response.headers.get('Content-Length');
         if (length !== null && Number(length) > maxBytes) {
           try {await response.body?.cancel();} catch { /* Size refusal takes precedence over cleanup. */ }
           throw new HubError(0,'too_large');
         }
-        if (!response.body) return new Uint8Array();
-        reader = response.body.getReader();
+        reader = response.body?.getReader();
         const chunks: Uint8Array[] = [];
         let size = 0;
-        while (true) {
+        while (reader) {
           const {done,value} = await reader.read();
           if (done) break;
           size += value.byteLength;
@@ -69,6 +69,7 @@ export function createHubClient(opts: { baseUrl: string; credential: string; fet
         const result = new Uint8Array(size);
         let offset = 0;
         for (const chunk of chunks) {result.set(chunk,offset);offset+=chunk.byteLength;}
+        if (!response.ok) throw await responseError(response,new TextDecoder().decode(result));
         return result;
       } catch (err) {
         if (err instanceof HubError) throw err;
@@ -81,11 +82,13 @@ export function createHubClient(opts: { baseUrl: string; credential: string; fet
   };
 }
 
-async function responseError(response: Response): Promise<HubError> {
+async function responseError(response: Response, boundedText?: string): Promise<HubError> {
+  // Read failures are network errors; only malformed JSON becomes bad_response.
+  const text = boundedText ?? await response.text();
   let code = 'bad_response';
   let details: Record<string,unknown> = {};
   try {
-    const body: unknown = await response.json();
+    const body: unknown = JSON.parse(text);
     if (body && typeof body === 'object' && 'error' in body) {
       const error = body.error;
       if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') {
