@@ -9,9 +9,10 @@ import (
 	"github.com/XertroV/vecnet/internal/hub"
 )
 
-// postEnrol is POST /v1/enrol {"token"} (PROTOCOL §2.12, §12), with no
-// bearer: it exchanges a one-time enrolment token for the peer's long-lived
-// secret, returned once, as 200 {"peer_id", "secret"}. An unknown or used
+// postEnrol is POST /v1/enrol {"token", "name"?} (PROTOCOL §2.12, §12), with
+// no bearer: it exchanges a one-time enrolment token for the peer's
+// long-lived secret, returned once, as 200 {"peer_id", "secret", "name"}. An
+// invite that left the name open takes it here, once (Hub.Enrol). An unknown or used
 // token is 401 unauthenticated; an unused one past its expiry is 410
 // enrol_token_expired (ask the operator for a new invite); a dot's is 422
 // invalid_value, since a dot never holds a vecnet secret.
@@ -21,7 +22,7 @@ func (s *server) postEnrol(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	top, err := decodeObject(raw, []string{"token"}, []string{"token"})
+	top, err := decodeObject(raw, []string{"token", "name"}, []string{"token"})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -31,7 +32,12 @@ func (s *server) postEnrol(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	peer, secret, err := s.Hub.Auth.Enrol(r.Context(), tok)
+	name, err := stringField(top, "name")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	peer, secret, final, err := s.Hub.Enrol(r.Context(), tok, name)
 	if errors.Is(err, auth.ErrDotBearer) {
 		e := hub.E(http.StatusUnprocessableEntity, "invalid_value", "a dot holds no vecnet secret; run `vecnet peer link` for it")
 		e.Details["field"] = "token"
@@ -47,5 +53,5 @@ func (s *server) postEnrol(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]string{"peer_id": peer, "secret": secret})
+	writeJSON(w, http.StatusOK, map[string]string{"peer_id": peer, "secret": secret, "name": final})
 }

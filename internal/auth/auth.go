@@ -201,70 +201,96 @@ func (r *Resolver) SpendEnrolTokensTx(ctx context.Context, tx *sql.Tx, peerID st
 // ErrEnrolTokenExpired. A dot's token is ErrDotBearer: dots never hold
 // a vecnet secret (PROTOCOL §12). The exchange is audited as "enrol".
 func (r *Resolver) Enrol(ctx context.Context, token string) (peerID, secret string, err error) {
+	if err := r.Spendable(ctx, token); err != nil {
+		return "", "", err
+	}
+	err = r.DB.Tx(ctx, func(tx *sql.Tx) error {
+		var err error
+		peerID, secret, err = r.EnrolTx(ctx, tx, token, nil)
+		return err
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return peerID, secret, nil
+}
+
+// Spendable refuses, by a read alone, a token that is unknown or spent
+// (ErrUnauthenticated). The enrol route is public, so a stream of guesses
+// never queues on the store's write lock; call it before opening the
+// enrolment transaction.
+func (r *Resolver) Spendable(ctx context.Context, token string) error {
+	var spendable bool
+	err := r.DB.QueryRowContext(ctx, `SELECT used_at IS NULL FROM enrol_tokens WHERE token_hash = ?`, HashSecret(token)).Scan(&spendable)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !spendable) {
+		return ErrUnauthenticated
+	}
+	if err != nil {
+		return fmt.Errorf("auth: enrol: %w", err)
+	}
+	return nil
+}
+
+// EnrolTx is Enrol inside tx. claim, when not nil, runs once the token is
+// known good, before the secret is minted; an error from it aborts the
+// enrolment, and the detail it returns goes on the "enrol" audit row.
+func (r *Resolver) EnrolTx(ctx context.Context, tx *sql.Tx, token string, claim func(peerID string) (map[string]any, error)) (peerID, secret string, err error) {
 	if token == "" {
 		return "", "", ErrUnauthenticated
 	}
-	// The route is public: a token that is unknown or spent is refused by a
-	// read, so a stream of guesses never queues on the store's write lock.
-	var spendable bool
-	err = r.DB.QueryRowContext(ctx, `SELECT used_at IS NULL FROM enrol_tokens WHERE token_hash = ?`, HashSecret(token)).Scan(&spendable)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && !spendable) {
+	var expires string
+	var used sql.NullString
+	hash := HashSecret(token)
+	err = tx.QueryRowContext(ctx,
+		`SELECT peer_id, expires_at, used_at FROM enrol_tokens WHERE token_hash = ?`, hash).
+		Scan(&peerID, &expires, &used)
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", ErrUnauthenticated
 	}
 	if err != nil {
 		return "", "", fmt.Errorf("auth: enrol: %w", err)
 	}
-	err = r.DB.Tx(ctx, func(tx *sql.Tx) error {
-		var expires string
-		var used sql.NullString
-		hash := HashSecret(token)
-		err := tx.QueryRowContext(ctx,
-			`SELECT peer_id, expires_at, used_at FROM enrol_tokens WHERE token_hash = ?`, hash).
-			Scan(&peerID, &expires, &used)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrUnauthenticated
-		}
-		if err != nil {
-			return fmt.Errorf("auth: enrol: %w", err)
-		}
-		if used.Valid {
-			return ErrUnauthenticated
-		}
-		exp, err := envelope.ParseTime(expires)
-		if err != nil {
-			return ErrUnauthenticated
-		}
-		if !r.now().Before(exp) {
-			return ErrEnrolTokenExpired
-		}
-		var disabled int
-		var kind string
-		err = tx.QueryRowContext(ctx, `SELECT disabled, kind FROM peers WHERE peer_id = ?`, peerID).Scan(&disabled, &kind)
-		if errors.Is(err, sql.ErrNoRows) || (err == nil && disabled != 0) {
-			return ErrUnauthenticated
-		}
-		if err != nil {
-			return fmt.Errorf("auth: enrol peer: %w", err)
-		}
-		if kind == "dot" {
-			return ErrDotBearer
-		}
-		now := envelope.FormatTime(r.now())
-		res, err := tx.ExecContext(ctx,
-			`UPDATE enrol_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL`, now, hash)
-		if err != nil {
-			return fmt.Errorf("auth: enrol mark used: %w", err)
-		}
-		if n, _ := res.RowsAffected(); n != 1 {
-			return ErrUnauthenticated
-		}
-		secret, err = insertCredential(ctx, tx, "peer", peerID, now)
-		if err != nil {
-			return err
-		}
-		return audit.Record(ctx, tx, peerID, "enrol", []string{peerID}, nil)
-	})
+	if used.Valid {
+		return "", "", ErrUnauthenticated
+	}
+	exp, err := envelope.ParseTime(expires)
 	if err != nil {
+		return "", "", ErrUnauthenticated
+	}
+	if !r.now().Before(exp) {
+		return "", "", ErrEnrolTokenExpired
+	}
+	var disabled int
+	var kind string
+	err = tx.QueryRowContext(ctx, `SELECT disabled, kind FROM peers WHERE peer_id = ?`, peerID).Scan(&disabled, &kind)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && disabled != 0) {
+		return "", "", ErrUnauthenticated
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("auth: enrol peer: %w", err)
+	}
+	if kind == "dot" {
+		return "", "", ErrDotBearer
+	}
+	var detail map[string]any
+	if claim != nil {
+		if detail, err = claim(peerID); err != nil {
+			return "", "", err
+		}
+	}
+	now := envelope.FormatTime(r.now())
+	res, err := tx.ExecContext(ctx,
+		`UPDATE enrol_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL`, now, hash)
+	if err != nil {
+		return "", "", fmt.Errorf("auth: enrol mark used: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return "", "", ErrUnauthenticated
+	}
+	if secret, err = insertCredential(ctx, tx, "peer", peerID, now); err != nil {
+		return "", "", err
+	}
+	if err := audit.Record(ctx, tx, peerID, "enrol", []string{peerID}, detail); err != nil {
 		return "", "", err
 	}
 	return peerID, secret, nil

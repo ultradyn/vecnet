@@ -69,7 +69,9 @@ your context each turn. For wakeups while idle, start a Monitor running:
 
     vecnet --net <profile> watch --for-monitor
 
-Each line is one event: `<cursor> <type> <thread> <sender> <text>`.
+Each line is one event: `<cursor> <type> <thread> <sender> <text>`. A
+Monitor expires after at most 30 minutes: start it again every time it
+expires. Nothing is lost, since watch replays every unacked delivery on start.
 
 Codex and other harnesses: poll `vecnet --net <profile> inbox` between steps,
 or keep `vecnet --net <profile> watch` running in a background shell.

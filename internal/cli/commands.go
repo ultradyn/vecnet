@@ -72,6 +72,8 @@ messaging:
   enrol --hub URL --token (T|-) --profile NAME      "-" reads the token from stdin;
        [--allow-insecure-http]                   http:// is refused off loopback/LAN without it
        (preferred: keeps it out of shell history and ps); else $VECNET_ENROL_TOKEN
+       --name N picks your display name when the invite leaves it open (once);
+       the profile then defaults to its lowercase slug
   guide                                              the agent manual; needs no config
 
 admin (operator credential):
@@ -80,9 +82,10 @@ admin (operator credential):
   principal scope <prn> [--allow IDS] [--deny IDS]
   principal list
   peer add --kind K --name N [--principal PRN]
-  peer invite --name N [--kind K] [--principal PRN] [--ttl 24h] [--profile P]
-       adds the peer and prints a block to paste to the agent (token valid --ttl, max 7d)
-  peer invite <peer> --profile P [--ttl 24h]          re-issues a token for a peer not yet enrolled
+  peer invite [--name N [--open-name]] [--kind K] [--principal PRN] [--ttl 24h] [--profile P]
+       adds the peer and prints a block to paste to the agent (token valid --ttl, max 7d);
+       without --name, or with --open-name, the agent picks its name at enrol
+  peer invite <peer> [--ttl 24h]                      re-issues a token for a peer not yet enrolled
   peer move <peer> --principal PRN
   peer link <peer>                                    prints a dot's 12-character link code
   peer avatar <peer> (FILE|https://URL|--clear)       set or clear any peer's avatar
@@ -453,11 +456,18 @@ func (a *app) dispatch(cmd string, args []string) error {
 // --- enrol ---
 
 func (a *app) cmdEnrol(args []string) error {
-	o, err := parseFlags("enrol", args, map[string]flagKind{"hub": strFlag, "token": strFlag, "profile": strFlag, "allow-insecure-http": boolFlag})
+	o, err := parseFlags("enrol", args, map[string]flagKind{"hub": strFlag, "token": strFlag, "profile": strFlag, "name": strFlag, "allow-insecure-http": boolFlag})
 	if err != nil {
 		return err
 	}
 	hubURL, tok, name := o.str("hub"), o.str("token"), o.str("profile")
+	display := strings.TrimSpace(o.str("name"))
+	// An invite that leaves the name open takes it here; the profile then
+	// defaults to its slug, which must not overwrite another profile.
+	defaulted := name == "" && display != ""
+	if defaulted {
+		name = inviteSlug(display)
+	}
 	// The one-time token is best kept off the command line (shell history,
 	// ps): "--token -" reads it from stdin, and VECNET_ENROL_TOKEN is the
 	// fallback when --token is absent.
@@ -471,7 +481,7 @@ func (a *app) cmdEnrol(args []string) error {
 		tok = strings.TrimSpace(a.getenv("VECNET_ENROL_TOKEN"))
 	}
 	if hubURL == "" || tok == "" || name == "" || len(o.pos) != 0 {
-		return usageErr("usage: vecnet enrol --hub URL --token (T|-) --profile NAME [--allow-insecure-http]  (or $VECNET_ENROL_TOKEN)")
+		return usageErr("usage: vecnet enrol --hub URL --token (T|-) (--profile P | --name N [--profile P]) [--allow-insecure-http]  (or $VECNET_ENROL_TOKEN)")
 	}
 	insecure := o.has("allow-insecure-http")
 	if err := checkHubURL(hubURL, insecure || a.getenv(insecureEnv) == "1"); err != nil {
@@ -485,11 +495,19 @@ func (a *app) cmdEnrol(args []string) error {
 	if err != nil {
 		return err
 	}
+	if _, taken := cfg.Profiles[name]; taken && defaulted {
+		return usageErr(fmt.Sprintf("enrol: profile %q already exists in %s; pass --profile to choose another", name, path))
+	}
 	var out struct {
 		PeerID string `json:"peer_id"`
 		Secret string `json:"secret"`
+		Name   string `json:"name"`
 	}
-	if err := newClient(hubURL, "").do(a.ctx, http.MethodPost, "/v1/enrol", nil, map[string]string{"token": tok}, &out); err != nil {
+	req := map[string]string{"token": tok}
+	if display != "" {
+		req["name"] = display
+	}
+	if err := newClient(hubURL, "").do(a.ctx, http.MethodPost, "/v1/enrol", nil, req, &out); err != nil {
 		return err
 	}
 	cfg.Profiles[name] = Profile{Hub: strings.TrimRight(hubURL, "/"), Secret: out.Secret, PeerID: out.PeerID, AllowInsecureHTTP: insecure}
@@ -499,9 +517,12 @@ func (a *app) cmdEnrol(args []string) error {
 		return err
 	}
 	if a.json {
-		return a.emitValue(map[string]string{"profile": name, "peer_id": out.PeerID, "config": path})
+		return a.emitValue(map[string]string{"profile": name, "peer_id": out.PeerID, "name": out.Name, "config": path})
 	}
 	fmt.Fprintf(a.stdout, "enrolled %s as profile %s (%s)\n", out.PeerID, name, path)
+	if display != "" {
+		fmt.Fprintf(a.stdout, "display name %s; use --net %s on every vecnet command\n", out.Name, name)
+	}
 	return nil
 }
 
@@ -1340,7 +1361,7 @@ func (a *app) cmdPeer(args []string) error {
 		"kind": strFlag, "name": strFlag, "principal": strFlag,
 		"allow": multiFlag, "deny": multiFlag,
 		"sends-per-min": strFlag, "threads-per-hour": strFlag, "clear": boolFlag,
-		"ttl": strFlag, "profile": strFlag,
+		"ttl": strFlag, "profile": strFlag, "open-name": boolFlag,
 	})
 	if err != nil {
 		return err
@@ -1406,7 +1427,7 @@ func (a *app) cmdPeer(args []string) error {
 		}
 		return a.ok("limits set for " + o.pos[1])
 	}
-	return usageErr("usage: vecnet peer add --kind K --name N [--principal PRN] | peer invite --name N [--ttl 24h] | peer move <peer> --principal PRN | " +
+	return usageErr("usage: vecnet peer add --kind K --name N [--principal PRN] | peer invite [--name N] [--ttl 24h] | peer move <peer> --principal PRN | " +
 		"peer link <peer> | peer avatar <peer> (FILE|URL|--clear) | peer rotate <peer> | peer scope <peer> [--allow IDS] [--deny IDS] | peer limits <peer> --sends-per-min N --threads-per-hour N")
 }
 

@@ -3,7 +3,7 @@
 // matches the CLI's (invite-model.js, pinned by internal/cli/testdata/
 // invite.json), enrols for real, and leaves no token behind once closed.
 import { assert, cleanBuild, scrollIntoViewStable, withDemo } from './lib.mjs';
-import { inviteBlock } from '../../internal/ui/static/invite-model.js';
+import { inviteBlock, inviteOpenBlock } from '../../internal/ui/static/invite-model.js';
 
 try {
   await withDemo({}, async ctx => {
@@ -80,6 +80,26 @@ try {
     assert(await dlg.locator('#inv-name').inputValue() === '', 'the form kept the last name');
     await page.keyboard.press('Escape');
     await page.locator('dialog.inv').waitFor({ state: 'detached' });
+
+    // An open name: the agent picks it at enrol; the field is a suggestion.
+    await open.click();
+    await dlg.waitFor();
+    await dlg.getByLabel('Let the agent choose its name at enrol').check();
+    await dlg.locator('label', { hasText: 'Suggested name (optional)' }).waitFor();
+    await dlg.locator('#inv-name').fill('helper bot');
+    const openAnswer = page.waitForResponse(r => r.url().endsWith('/v1/admin/peers') && r.request().method() === 'POST');
+    await dlg.getByRole('button', { name: 'Create invite' }).click();
+    const ores = await (await openAnswer).json();
+    assert(ores.name_open === true && ores.name === 'helper bot', `open answer ${JSON.stringify({ ...ores, enrol_token: '…' })}`);
+    const otext = await dlg.locator('pre.inv-block').textContent();
+    assert(otext === inviteOpenBlock(ores.hub_url, 'helper bot', ores.enrol_token, ores.enrol_expires_at), `open invite text:\n${otext}`);
+    await dlg.locator('.inv-meta', { hasText: 'name and profile chosen at enrol' }).waitFor();
+    await shot('inv-5-open');
+    await dlg.getByRole('button', { name: 'Done' }).click();
+    await page.locator('dialog.inv').waitFor({ state: 'detached' });
+    const named = await fetch(demo.url + '/v1/enrol', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: ores.enrol_token, name: 'Helper Bot 2' }) });
+    assert(named.status === 200 && (await named.json()).name === 'Helper Bot 2', `enrol with a chosen name: ${named.status}`);
+    await peers.locator('tbody tr', { hasText: 'Helper Bot 2' }).waitFor();
   });
-  console.log('Invite passed: form, client and server errors, CLI-identical text, copy, no token kept, enrol once');
+  console.log('Invite passed: form, client and server errors, CLI-identical text, copy, no token kept, enrol once, open name chosen at enrol');
 } finally { await cleanBuild(); }

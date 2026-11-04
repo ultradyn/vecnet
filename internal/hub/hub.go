@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -249,16 +250,37 @@ func (h *Hub) AddPrincipal(ctx context.Context, name string) (prnID, secret stri
 // principal is a 422 invalid_value, and so is kind "operator" under any
 // principal but the operator's.
 func (h *Hub) AddPeer(ctx context.Context, kind, name, prnID string) (peerID, enrolToken string, err error) {
-	peerID, enrolToken, _, err = h.AddPeerTTL(ctx, kind, name, prnID, 0)
+	peerID, enrolToken, _, err = h.AddPeerWith(ctx, AddPeerOpts{Kind: kind, Name: name, PrincipalID: prnID})
 	return peerID, enrolToken, err
 }
 
-// AddPeerTTL is AddPeer with the enrolment token living ttl (0 means
-// auth.DefaultEnrolTTL; see EnrolTTL for the bounds), and returns the
-// token's expiry too (zero for a dot, which gets no token).
-func (h *Hub) AddPeerTTL(ctx context.Context, kind, name, prnID string, ttl time.Duration) (peerID, enrolToken string, expires time.Time, err error) {
+// AddPeerOpts are AddPeerWith's inputs. TTL is the enrolment token's life
+// (0 means auth.DefaultEnrolTTL; checkEnrolTTL has the bounds). NameOpen
+// leaves the display name to the agent at enrol (Hub.Enrol): Name is then an
+// optional suggestion of agent-name shape, and a placeholder when empty.
+type AddPeerOpts struct {
+	Kind, Name, PrincipalID string
+	TTL                     time.Duration
+	NameOpen                bool
+}
+
+// AddPeerWith is AddPeer with options, and returns the token's expiry too
+// (zero for a dot, which gets no token).
+func (h *Hub) AddPeerWith(ctx context.Context, o AddPeerOpts) (peerID, enrolToken string, expires time.Time, err error) {
+	kind, name, prnID, ttl := o.Kind, o.Name, o.PrincipalID, o.TTL
 	if err := checkEnrolTTL(ttl); err != nil {
 		return "", "", time.Time{}, err
+	}
+	peerID = ids.New(ids.Peer)
+	if o.NameOpen {
+		if kind == "dot" || kind == "operator" || kind == "source" {
+			return "", "", time.Time{}, invalidValue("name_open", "only a peer that enrols with a token can choose its name")
+		}
+		if name == "" {
+			name = "invited-" + strings.ToLower(peerID[len(peerID)-6:])
+		} else if !agentNameRE.MatchString(name) {
+			return "", "", time.Time{}, invalidValue("name", "a suggested name is 2 to 32 characters: letters, digits, space, dot, underscore and hyphen, starting and ending with a letter or digit")
+		}
 	}
 	if !PeerKinds[kind] {
 		e := E(http.StatusUnprocessableEntity, "invalid_value", "unknown peer kind")
@@ -305,9 +327,13 @@ func (h *Hub) AddPeerTTL(ctx context.Context, kind, name, prnID string, ttl time
 				return fmt.Errorf("hub: find operator credential: %w", err)
 			}
 		}
-		peerID = ids.New(ids.Peer)
 		if err := h.insertPeer(ctx, tx, peerID, prnID, name, kind, now); err != nil {
 			return err
+		}
+		if o.NameOpen {
+			if _, err := tx.ExecContext(ctx, `UPDATE peers SET name_open = 1 WHERE peer_id = ?`, peerID); err != nil {
+				return fmt.Errorf("hub: open peer name: %w", err)
+			}
 		}
 		// A dot authenticates by OAuth after a link code and never holds a
 		// vecnet secret (PROTOCOL §12), so it gets nothing to enrol with.
@@ -322,7 +348,11 @@ func (h *Hub) AddPeerTTL(ctx context.Context, kind, name, prnID string, ttl time
 		if err := h.DirectoryUpdated(ctx, tx, peerID, "enrolled", enrolledFields); err != nil {
 			return err
 		}
-		return audit.Record(ctx, tx, "operator", "peer_add", []string{peerID, prnID}, map[string]any{"kind": kind})
+		detail := map[string]any{"kind": kind}
+		if o.NameOpen {
+			detail["name_open"] = true
+		}
+		return audit.Record(ctx, tx, "operator", "peer_add", []string{peerID, prnID}, detail)
 	})
 	if err != nil {
 		return "", "", time.Time{}, err

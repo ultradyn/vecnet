@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -63,4 +64,26 @@ func (h *Hub) ReissueEnrolToken(ctx context.Context, peerID string, ttl time.Dur
 		return "", time.Time{}, err
 	}
 	return token, expires, nil
+}
+
+// InviteInfo is what an invite says about its peer besides the token.
+type InviteInfo struct {
+	Name, PrincipalID string
+	NameOpen          bool // the agent picks its name at enrol
+}
+
+// InviteInfo reads peerID's name, principal and whether its name is still
+// open; 404 not_found for an unknown peer.
+func (h *Hub) InviteInfo(ctx context.Context, peerID string) (InviteInfo, error) {
+	var in InviteInfo
+	var open int
+	err := h.DB.QueryRowContext(ctx, `SELECT name, prn_id, name_open FROM peers WHERE peer_id = ?`, peerID).Scan(&in.Name, &in.PrincipalID, &open)
+	if errors.Is(err, sql.ErrNoRows) {
+		return in, unknownPeer(peerID)
+	}
+	if err != nil {
+		return in, fmt.Errorf("hub: invite info: %w", err)
+	}
+	in.NameOpen = open != 0
+	return in, nil
 }

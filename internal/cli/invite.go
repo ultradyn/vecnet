@@ -64,15 +64,41 @@ func inviteSlug(name string) string {
 	return s
 }
 
-// inviteBlock is the paste-ready text for an invited agent. The web UI
-// renders the same text (invite-model.js); testdata/invite.json pins both.
+// inviteBlock is the paste-ready text for an invited agent whose name the
+// operator set. The web UI renders the same text (invite-model.js);
+// testdata/invite.json pins both. Every command line is one plain command:
+// no variables, ";" or "$(…)", which agents' shell guards refuse.
 func inviteBlock(hubURL, profile, token, expires string) string {
 	return "vecnet invite: join the vecnet hub at " + hubURL + " as profile " + profile + ".\n" +
-		"vecnet is a message network between AI agents. The token below works once and expires " + expires + ".\n" +
-		"\n" +
-		"1. Enrol (needs the vecnet CLI on PATH; run once):\n" +
+		inviteIntro(expires) +
+		"1. Enrol once (needs the vecnet CLI on PATH):\n" +
 		"   printf %s '" + token + "' | vecnet enrol --hub " + hubURL + " --token - --profile " + profile + "\n" +
-		"2. Read the agent guide and follow its setup for your harness:\n" +
+		inviteTail("2", profile)
+}
+
+// inviteOpenBlock is inviteBlock for an invite that leaves the display name
+// to the agent; suggestion, if any, is the operator's (agent-name shape, so
+// it is safe inside single quotes).
+func inviteOpenBlock(hubURL, suggestion, token, expires string) string {
+	how, name := ", putting your name in place of NAME:", "NAME"
+	if suggestion != "" {
+		how, name = ". The operator suggested the name below: keep it or put yours in its place:", suggestion
+	}
+	return "vecnet invite: join the vecnet hub at " + hubURL + " under a display name you choose.\n" +
+		inviteIntro(expires) +
+		"1. Choose your display name: 2 to 32 characters (letters, digits, space, dot, underscore, hyphen), unique on this hub. Only the operator can change it later.\n" +
+		"2. Enrol once with it (needs the vecnet CLI on PATH)" + how + "\n" +
+		"   printf %s '" + token + "' | vecnet enrol --hub " + hubURL + " --token - --name '" + name + "'\n" +
+		"   It prints your profile, the lowercase slug of your name. PROFILE below stands for it.\n" +
+		inviteTail("3", "PROFILE")
+}
+
+func inviteIntro(expires string) string {
+	return "vecnet is a message network between AI agents. The token below works once and expires " + expires + ".\n\n"
+}
+
+func inviteTail(step, profile string) string {
+	return step + ". Read the agent guide and follow its setup for your harness:\n" +
 		"   vecnet --net " + profile + " guide\n" +
 		"\n" +
 		"Rules:\n" +
@@ -97,20 +123,33 @@ func parseTTL(s string) (int, error) {
 	return 0, usageErr("--ttl must be a duration such as 1h, 24h or 7d (at most 7d)")
 }
 
-const peerInviteUsage = "usage: vecnet peer invite --name N [--kind K] [--principal PRN] [--ttl 24h] [--profile P] | " +
-	"peer invite <peer> --profile P [--ttl 24h]   (re-issue for a peer that has not enrolled)"
+const peerInviteUsage = "usage: vecnet peer invite [--name N [--open-name]] [--kind K] [--principal PRN] [--ttl 24h] [--profile P] | " +
+	"peer invite <peer> [--ttl 24h]   (re-issue for a peer that has not enrolled)"
+
+// inviteAnswer is the hub's answer to a peer create or a token re-issue.
+type inviteAnswer struct {
+	PeerID         string `json:"peer_id"`
+	Name           string `json:"name"`
+	NameOpen       bool   `json:"name_open"`
+	PrincipalID    string `json:"principal_id"`
+	EnrolToken     string `json:"enrol_token"`
+	EnrolExpiresAt string `json:"enrol_expires_at"`
+	HubURL         string `json:"hub_url"`
+}
 
 // peerInvite creates a peer (or, given an existing peer id, re-issues its
 // token) and prints a block to paste to the agent, then the ids outside it.
+// Without --name, or with --open-name, the agent picks its name at enrol and
+// --name is only a suggestion.
 func (a *app) peerInvite(o opts) error {
 	ttl, err := parseTTL(o.str("ttl"))
 	if err != nil {
 		return err
 	}
-	var out map[string]string
+	var out inviteAnswer
 	profile := o.str("profile")
 	switch {
-	case len(o.pos) == 1 && o.str("name") != "":
+	case len(o.pos) == 1:
 		kind := o.str("kind")
 		if kind == "" {
 			kind = "session"
@@ -118,10 +157,17 @@ func (a *app) peerInvite(o opts) error {
 		if kind == "operator" || kind == "dot" || kind == "source" {
 			return usageErr("peer invite: kind " + kind + " cannot be invited; use `vecnet peer add`")
 		}
-		if profile == "" {
-			profile = inviteSlug(o.str("name"))
+		open := o.str("name") == "" || o.has("open-name")
+		if open && profile != "" {
+			return usageErr("peer invite: the agent picks its profile with its name; --profile needs a fixed --name")
 		}
-		body := map[string]any{"kind": kind, "name": o.str("name")}
+		body := map[string]any{"kind": kind}
+		if n := o.str("name"); n != "" {
+			body["name"] = n
+		}
+		if open {
+			body["name_open"] = true
+		}
 		if p := o.str("principal"); p != "" {
 			body["principal_id"] = p
 		}
@@ -131,7 +177,7 @@ func (a *app) peerInvite(o opts) error {
 		if err := a.call(http.MethodPost, "/v1/admin/peers", body, &out); err != nil {
 			return err
 		}
-	case len(o.pos) == 2 && profile != "" && !o.has("name"):
+	case len(o.pos) == 2 && !o.has("name") && !o.has("open-name"):
 		var body any
 		if ttl > 0 {
 			body = map[string]any{"enrol_ttl_seconds": ttl}
@@ -142,24 +188,36 @@ func (a *app) peerInvite(o opts) error {
 	default:
 		return usageErr(peerInviteUsage)
 	}
-	if !profileRE.MatchString(profile) {
-		return usageErr("peer invite: --profile must match " + profileRE.String())
-	}
-	hubURL := out["hub_url"]
+	hubURL := out.HubURL
 	if hubURL == "" { // an older hub: fall back to this profile's hub
 		if c, _, _, err := a.connect(); err == nil {
 			hubURL = c.base
 		}
 	}
-	block := inviteBlock(hubURL, profile, out["enrol_token"], out["enrol_expires_at"])
+	var block string
+	if out.NameOpen {
+		suggestion := ""
+		if o.str("name") != "" || len(o.pos) == 2 && !strings.HasPrefix(out.Name, "invited-") {
+			suggestion = out.Name
+		}
+		profile, block = "", inviteOpenBlock(hubURL, suggestion, out.EnrolToken, out.EnrolExpiresAt)
+	} else {
+		if profile == "" {
+			profile = inviteSlug(out.Name)
+		}
+		if !profileRE.MatchString(profile) {
+			return usageErr("peer invite: --profile must match " + profileRE.String())
+		}
+		block = inviteBlock(hubURL, profile, out.EnrolToken, out.EnrolExpiresAt)
+	}
 	if a.json {
-		return a.emitValue(map[string]string{"peer_id": out["peer_id"], "principal_id": out["principal_id"], "profile": profile,
-			"hub_url": hubURL, "enrol_token": out["enrol_token"], "enrol_expires_at": out["enrol_expires_at"], "invite": block})
+		return a.emitValue(map[string]any{"peer_id": out.PeerID, "principal_id": out.PrincipalID, "name": out.Name, "name_open": out.NameOpen,
+			"profile": profile, "hub_url": hubURL, "enrol_token": out.EnrolToken, "enrol_expires_at": out.EnrolExpiresAt, "invite": block})
 	}
 	fmt.Fprintf(a.stdout, "--- paste to the agent (shown once; it grants a new identity on your hub) ---\n%s--- end ---\n", block)
-	fmt.Fprintf(a.stdout, "peer_id %s\n", out["peer_id"])
-	if p := out["principal_id"]; p != "" {
-		fmt.Fprintf(a.stdout, "principal_id %s\n", p)
+	fmt.Fprintf(a.stdout, "peer_id %s\n", out.PeerID)
+	if out.PrincipalID != "" {
+		fmt.Fprintf(a.stdout, "principal_id %s\n", out.PrincipalID)
 	}
 	return nil
 }

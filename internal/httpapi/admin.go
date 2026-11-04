@@ -157,14 +157,16 @@ func (s *server) adminRotatePrincipal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"secret": secret})
 }
 
-// adminAddPeer is POST /v1/admin/peers {"kind", "name", "principal_id"?,
-// "enrol_ttl_seconds"?}: 201 {"peer_id", "enrol_token", "enrol_expires_at",
-// "principal_id", "hub_url"}; a dot's enrol_token and enrol_expires_at are "",
-// since it links with `vecnet peer link` instead. Without principal_id the
-// peer gets an implicit principal named like it. hub_url is the hub's public
-// URL, for an invite (PROTOCOL §2.12).
+// adminAddPeer is POST /v1/admin/peers {"kind", "name"?, "principal_id"?,
+// "enrol_ttl_seconds"?, "name_open"?}: 201 {"peer_id", "name", "name_open",
+// "enrol_token", "enrol_expires_at", "principal_id", "hub_url"}; a dot's
+// enrol_token and enrol_expires_at are "", since it links with `vecnet peer
+// link` instead. name is required unless name_open, which leaves it to the
+// agent at enrol (name is then a suggestion). Without principal_id the peer
+// gets an implicit principal named like it. hub_url is the hub's public URL,
+// for an invite (PROTOCOL §2.12).
 func (s *server) adminAddPeer(w http.ResponseWriter, r *http.Request) {
-	top, err := readObject(r, []string{"kind", "name", "principal_id", "enrol_ttl_seconds"}, []string{"kind", "name"})
+	top, err := readObject(r, []string{"kind", "name", "principal_id", "enrol_ttl_seconds", "name_open"}, []string{"kind"})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -176,26 +178,27 @@ func (s *server) adminAddPeer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	open, err := optBool(top, "name_open")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if _, has := top["name"]; !has && !open {
+		writeError(w, &envelope.SchemaError{Path: "/name", Message: "name is required"})
+		return
+	}
 	ttl, err := enrolTTL(top)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	ctx := r.Context()
-	peer, tok, exp, err := s.Hub.AddPeerTTL(ctx, f[0], f[1], f[2], ttl)
+	peer, tok, exp, err := s.Hub.AddPeerWith(ctx, hub.AddPeerOpts{Kind: f[0], Name: f[1], PrincipalID: f[2], TTL: ttl, NameOpen: open})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	prn, err := s.Hub.PeerPrincipal(ctx, peer)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	out := s.inviteBody(peer, tok, exp)
-	out["principal_id"] = prn
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusCreated, out)
+	s.writeInvite(w, r, peer, tok, exp)
 }
 
 // adminMovePeer is POST /v1/admin/peers/{id}/move {"principal_id"}: 204.

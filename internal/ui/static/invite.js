@@ -18,11 +18,20 @@ function openInvite(ctx, onCreated, opener) {
   const name = h('input', { id: 'inv-name', 'aria-required': 'true', maxlength: '80', spellcheck: 'false', autocomplete: 'off', placeholder: 'e.g. web-repo claude' });
   const kind = h('select', { id: 'inv-kind' }, KINDS.map(k => h('option', { value: k, text: k })));
   const ttl = h('select', { id: 'inv-ttl' }, TTLS.map(([label, s]) => h('option', { value: String(s), text: label, selected: s === DEFAULT_TTL })));
+  const openName = h('input', { id: 'inv-open', type: 'checkbox' });
+  const nameLabel = h('label', { for: 'inv-name', text: 'Name' });
+  // An open name: the agent picks it at enrol and the field is a suggestion.
+  openName.addEventListener('change', () => {
+    nameLabel.textContent = openName.checked ? 'Suggested name (optional)' : 'Name';
+    name.setAttribute('aria-required', openName.checked ? 'false' : 'true');
+  });
   const err = h('p', { class: 'err', role: 'alert' });
+  name.addEventListener('input', () => { err.textContent = ''; });
   const create = h('button', { type: 'submit', class: 'btn pri', text: 'Create invite' });
   const cancel = h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: () => close() });
   const form = h('form', { class: 'inv-form', autocomplete: 'off' },
-    h('label', { for: 'inv-name', text: 'Name' }), name,
+    nameLabel, name,
+    h('label', { class: 'inv-chk' }, openName, 'Let the agent choose its name at enrol'),
     h('div', { class: 'inv-row' },
       h('span', null, h('label', { for: 'inv-kind', text: 'Kind' }), kind),
       h('span', null, h('label', { for: 'inv-ttl', text: 'Token valid for' }), ttl)),
@@ -36,12 +45,15 @@ function openInvite(ctx, onCreated, opener) {
   form.addEventListener('submit', async e => {
     e.preventDefault();
     const n = name.value.trim();
-    if (!n) { err.textContent = 'A name is required.'; name.focus(); return; }
+    if (!n && !openName.checked) { err.textContent = 'A name is required.'; name.focus(); return; }
     err.textContent = '';
     create.disabled = true;
     create.textContent = 'Creating…';
+    const body = { kind: kind.value, enrol_ttl_seconds: Number(ttl.value) };
+    if (n) body.name = n;
+    if (openName.checked) body.name_open = true;
     try {
-      const res = await ctx.api.addPeer({ kind: kind.value, name: n, enrol_ttl_seconds: Number(ttl.value) });
+      const res = await ctx.api.addPeer(body);
       if (!dialog.isConnected) return; // closed while it ran
       showResult(invite(n, res, location.origin));
       if (onCreated) onCreated();
@@ -62,7 +74,7 @@ function openInvite(ctx, onCreated, opener) {
     body.replaceChildren(
       h('p', { class: 'inv-warn', role: 'note', text: 'Shown once — it grants a new identity on your hub. Paste it only to the agent it is for.' }),
       text,
-      h('p', { class: 'inv-meta mono' }, 'profile ' + inv.profile + ' · peer ' + inv.peerId + ' · expires ', h('time', { text: inv.expires })),
+      h('p', { class: 'inv-meta mono' }, (inv.open ? 'name and profile chosen at enrol' : 'profile ' + inv.profile) + ' · peer ' + inv.peerId + ' · expires ', h('time', { text: inv.expires })),
       h('div', { class: 'inv-acts' }, h('button', { type: 'button', class: 'btn', text: 'Done', onclick: () => close() }), copy));
     copy.focus();
   }

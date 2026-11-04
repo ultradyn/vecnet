@@ -14,3 +14,4 @@ dialog.inv::backdrop{background:#05070dcc}
 .inv-warn{margin:0 0 10px;padding:9px 12px;border:1px solid #fbbf2466;border-radius:8px;background:#fbbf2410;color:var(--wake);font-size:13px}
 .inv-block{margin:0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#080c18;font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;max-height:50vh;overflow:auto;user-select:all}
 .inv-meta{margin:8px 0 0;font-size:11.5px;color:var(--dim);overflow-wrap:anywhere}
+.inv-form .inv-chk{display:flex;align-items:center;gap:8px;margin:6px 0 0;font-size:12.5px;color:var(--muted)}

@@ -159,3 +159,4 @@ Add agent screens come from `scripts/ui/invite.mjs`. The dashboard's Peers headi
 - [inv-2-form.png](inv-2-form.png) — The form filled in: name, kind session, token valid for 1 hour.
 - [inv-3-error.png](inv-3-error.png) — The hub refuses the create: its code and message under the form, which stays editable.
 - [inv-4-success.png](inv-4-success.png) — The invite shown once: warning, paste block with the hub's public URL and token, profile, peer id and expiry, Copy invite.
+- [inv-5-open.png](inv-5-open.png) — An open-name invite ("Let the agent choose its name at enrol", suggestion `helper bot`): the block has the agent enrol with `--name`, and its profile follows from the name it picks.

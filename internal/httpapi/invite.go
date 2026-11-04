@@ -27,21 +27,41 @@ func enrolTTL(top map[string]json.RawMessage) (time.Duration, error) {
 	return time.Duration(n) * time.Second, nil
 }
 
-// inviteBody is the shared part of a peer-create and a re-issue answer: the
-// peer, its one-time token and expiry ("" for a dot), and the hub's public
-// URL, everything an invite needs.
-func (s *server) inviteBody(peer, tok string, exp time.Time) map[string]string {
+// optBool decodes an optional boolean field; absent is false.
+func optBool(top map[string]json.RawMessage, name string) (bool, error) {
+	raw, has := top[name]
+	if !has {
+		return false, nil
+	}
+	var v bool
+	if json.Unmarshal(raw, &v) != nil {
+		return false, &envelope.SchemaError{Path: "/" + name, Message: name + " must be a boolean"}
+	}
+	return v, nil
+}
+
+// writeInvite answers a peer create or a re-issue with everything an invite
+// needs: the peer, its name and whether the agent picks it, its principal,
+// the one-time token and expiry ("" for a dot), and the hub's public URL.
+func (s *server) writeInvite(w http.ResponseWriter, r *http.Request, peer, tok string, exp time.Time) {
+	info, err := s.Hub.InviteInfo(r.Context(), peer)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	expires := ""
 	if tok != "" {
 		expires = envelope.FormatTime(exp)
 	}
-	return map[string]string{"peer_id": peer, "enrol_token": tok, "enrol_expires_at": expires,
-		"hub_url": strings.TrimRight(s.Hub.Cfg.PublicURL, "/")}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusCreated, map[string]any{"peer_id": peer, "name": info.Name, "name_open": info.NameOpen,
+		"principal_id": info.PrincipalID, "enrol_token": tok, "enrol_expires_at": expires,
+		"hub_url": strings.TrimRight(s.Hub.Cfg.PublicURL, "/")})
 }
 
 // adminReissueEnrol is POST /v1/admin/peers/{id}/enrol-token
 // {"enrol_ttl_seconds"?}: 201 {"peer_id", "enrol_token", "enrol_expires_at",
-// "hub_url"}. It replaces the token of a peer that has not enrolled yet (an
+// "hub_url", "name", "name_open", "principal_id"}. It replaces the token of a peer that has not enrolled yet (an
 // invite that expired or leaked); an enrolled peer is 409 already_enrolled.
 func (s *server) adminReissueEnrol(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(r.Body)
@@ -67,6 +87,5 @@ func (s *server) adminReissueEnrol(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusCreated, s.inviteBody(peer, tok, exp))
+	s.writeInvite(w, r, peer, tok, exp)
 }
