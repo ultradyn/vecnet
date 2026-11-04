@@ -620,7 +620,7 @@ func readAnnotations() *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: boolPtr(false), OpenWorldHint: boolPtr(false)}
 }
 
-// writeAnnotations marks a write. Each one is safe to repeat: a send carries
+// writeAnnotations marks an idempotent write: a send carries
 // an idempotency_key, and acks, receipts and presence converge. openWorld
 // says the write reaches other agents.
 func writeAnnotations(openWorld bool) *mcp.ToolAnnotations {
@@ -791,7 +791,8 @@ func toolSpecs(defs schema) []toolSpec {
 			"members": schema{"type": "array", "items": ref("peerId"), "minItems": 1, "maxItems": 64},
 			"as":      ref("peerId"),
 		}, "members"),
-		annotations: writeAnnotations(false), call: callGroupCreate,
+		// Each call creates a new group, even with identical members.
+		annotations: &mcp.ToolAnnotations{IdempotentHint: false, DestructiveHint: boolPtr(false), OpenWorldHint: boolPtr(false)}, call: callGroupCreate,
 	}, {
 		name:        "vecnet_group_add",
 		description: "Write: add peers you may message to an ad hoc group on the operator's bus. You must already be a member; existing members are ignored.",

@@ -222,7 +222,10 @@ type listedTool struct {
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"inputSchema"`
 	Annotations *struct {
-		ReadOnlyHint bool `json:"readOnlyHint"`
+		ReadOnlyHint    bool  `json:"readOnlyHint"`
+		IdempotentHint  bool  `json:"idempotentHint"`
+		DestructiveHint *bool `json:"destructiveHint"`
+		OpenWorldHint   *bool `json:"openWorldHint"`
 	} `json:"annotations"`
 }
 
@@ -375,6 +378,17 @@ func TestToolsListNamesAndHints(t *testing.T) {
 		}
 		if tool.Annotations.ReadOnlyHint != readOnly[tool.Name] {
 			t.Errorf("%s: readOnlyHint = %v, want %v", tool.Name, tool.Annotations.ReadOnlyHint, readOnly[tool.Name])
+		}
+		if tool.Name == "vecnet_group_create" {
+			if tool.Annotations.IdempotentHint {
+				t.Error("vecnet_group_create: idempotentHint = true, want false: each call creates a new group")
+			}
+			if hint := tool.Annotations.DestructiveHint; hint == nil || *hint {
+				t.Error("vecnet_group_create: destructiveHint must be explicitly false")
+			}
+			if hint := tool.Annotations.OpenWorldHint; hint == nil || *hint {
+				t.Error("vecnet_group_create: openWorldHint must be explicitly false")
+			}
 		}
 		if tool.InputSchema["type"] != "object" {
 			t.Errorf("%s: inputSchema.type = %v", tool.Name, tool.InputSchema["type"])
@@ -1549,6 +1563,45 @@ func TestGroupToolsMatchHTTP(t *testing.T) {
 		if len(deliveries) != 1 || deliveries[0].Data.Recipient != member.id || deliveries[0].Data.Message.MessageID != sent.MessageID {
 			t.Fatalf("%s inbox deliveries = %+v, want message %s", member.id, deliveries, sent.MessageID)
 		}
+	}
+}
+
+func TestGroupCreateRepeatedCallsCreateDistinctGroups(t *testing.T) {
+	env := testhub.Start(t)
+	creator, secret := env.NewPeer("session", "creator")
+	member, _ := env.NewPeer("session", "member")
+	args := map[string]any{"members": []string{member}}
+	var ids []string
+	for range 2 {
+		var created struct {
+			GroupID string `json:"group_id"`
+		}
+		toolOK(t, env, secret, "vecnet_group_create", args, &created)
+		if !strings.HasPrefix(created.GroupID, "grp_") || slices.Contains(ids, created.GroupID) {
+			t.Fatalf("repeated create returned %q after %v, want a fresh group id", created.GroupID, ids)
+		}
+		ids = append(ids, created.GroupID)
+	}
+	var listed struct {
+		Groups []hub.GroupInfo `json:"groups"`
+	}
+	toolOK(t, env, secret, "vecnet_groups", map[string]any{}, &listed)
+	if len(listed.Groups) != len(ids) {
+		t.Fatalf("groups = %+v, want two persistent groups", listed.Groups)
+	}
+	wantMembers := []string{creator, member}
+	slices.Sort(wantMembers)
+	var listedIDs []string
+	for _, group := range listed.Groups {
+		listedIDs = append(listedIDs, group.GroupID)
+		if group.CreatedBy != creator || !slices.Equal(group.Members, wantMembers) {
+			t.Fatalf("group = %+v, want creator %s and members %v", group, creator, wantMembers)
+		}
+	}
+	slices.Sort(ids)
+	slices.Sort(listedIDs)
+	if !slices.Equal(listedIDs, ids) {
+		t.Fatalf("listed group ids = %v, want %v", listedIDs, ids)
 	}
 }
 
