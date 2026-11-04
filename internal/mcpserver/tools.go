@@ -491,6 +491,57 @@ func callPeers(ctx context.Context, s *Server, _ auth.Caller, _ []byte) (any, er
 	return map[string]any{"peers": dir}, nil
 }
 
+func callGroups(ctx context.Context, s *Server, c auth.Caller, _ []byte) (any, error) {
+	groups, err := s.Hub.ListGroups(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"groups": groups}, nil
+}
+
+func callGroupCreate(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error) {
+	var a struct {
+		Members []string `json:"members"`
+		As      string   `json:"as"`
+	}
+	if err := decodeArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	group, err := s.Hub.CreateGroup(ctx, c, a.As, a.Members)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{"group_id": group}, nil
+}
+
+func callGroupAdd(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error) {
+	var a struct {
+		GroupID string   `json:"group_id"`
+		Members []string `json:"members"`
+		As      string   `json:"as"`
+	}
+	if err := decodeArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	if err := s.Hub.AddGroupMembers(ctx, c, a.As, a.GroupID, a.Members); err != nil {
+		return nil, err
+	}
+	return map[string]any{}, nil
+}
+
+func callPresenceSubscribe(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error) {
+	var a struct {
+		Subscribe string `json:"subscribe"`
+	}
+	if err := decodeArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	if err := s.Hub.SetSubscribePresence(ctx, c, a.Subscribe); err != nil {
+		return nil, err
+	}
+	return map[string]any{}, nil
+}
+
 // callWhoami uses the same caller fields as GET /v1/peers/me. An OAuth
 // profile identifies the linked dot peer, and peer profiles add its public
 // directory name. No credential or principal-wide settings are exposed.
@@ -569,7 +620,7 @@ func readAnnotations() *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: boolPtr(false), OpenWorldHint: boolPtr(false)}
 }
 
-// writeAnnotations marks a write. Each one is safe to repeat: a send carries
+// writeAnnotations marks an idempotent write: a send carries
 // an idempotency_key, and acks, receipts and presence converge. openWorld
 // says the write reaches other agents.
 func writeAnnotations(openWorld bool) *mcp.ToolAnnotations {
@@ -697,6 +748,13 @@ func toolSpecs(defs schema) []toolSpec {
 		description: "Write: report your presence on the operator's bus; subscribed peers are told and the directory is updated.",
 		input:       presence, annotations: writeAnnotations(false), call: callPresence,
 	}, {
+		name:        "vecnet_presence_subscribe",
+		description: "Write: set which presence events you receive on the operator's bus: all peers, teammates, or none.",
+		input: object(schema{
+			"subscribe": schema{"type": "string", "enum": []string{"all", "teams", "none"}},
+		}, "subscribe"),
+		annotations: writeAnnotations(false), call: callPresenceSubscribe,
+	}, {
 		name:        "vecnet_threads",
 		description: "List the threads you participate in, newest activity first.",
 		input: object(schema{
@@ -721,6 +779,29 @@ func toolSpecs(defs schema) []toolSpec {
 		description: "List the peer directory: ids, names, presence, reachability and avatar hashes.",
 		input:       object(schema{}),
 		annotations: readAnnotations(), call: callPeers,
+	}, {
+		name:        "vecnet_groups",
+		description: "List the ad hoc groups you belong to, with their members and archive status.",
+		input:       object(schema{}),
+		annotations: readAnnotations(), call: callGroups,
+	}, {
+		name:        "vecnet_group_create",
+		description: "Write: create an ad hoc group on the operator's bus with peers you may message; the creator is included automatically. Returns {group_id}.",
+		input: object(schema{
+			"members": schema{"type": "array", "items": ref("peerId"), "minItems": 1, "maxItems": 64},
+			"as":      ref("peerId"),
+		}, "members"),
+		// Each call creates a new group, even with identical members.
+		annotations: &mcp.ToolAnnotations{IdempotentHint: false, DestructiveHint: boolPtr(false), OpenWorldHint: boolPtr(false)}, call: callGroupCreate,
+	}, {
+		name:        "vecnet_group_add",
+		description: "Write: add peers you may message to an ad hoc group on the operator's bus. You must already be a member; existing members are ignored.",
+		input: object(schema{
+			"group_id": ref("groupId"),
+			"members":  schema{"type": "array", "items": ref("peerId"), "minItems": 1, "maxItems": 64},
+			"as":       ref("peerId"),
+		}, "group_id", "members"),
+		annotations: writeAnnotations(false), call: callGroupAdd,
 	}, {
 		name:        "vecnet_whoami",
 		description: "Read the identity authenticated by this credential, with the peer's public directory name when set.",
