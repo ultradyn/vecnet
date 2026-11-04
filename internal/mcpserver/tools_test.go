@@ -366,7 +366,7 @@ func TestToolsListNamesAndHints(t *testing.T) {
 
 	want := []string{
 		"vecnet_ack", "vecnet_clear_avatar", "vecnet_group_add", "vecnet_group_create", "vecnet_groups",
-		"vecnet_inbox", "vecnet_peers", "vecnet_presence", "vecnet_presence_subscribe", "vecnet_react", "vecnet_receipt",
+		"vecnet_inbox", "vecnet_peer_create", "vecnet_peer_set_disabled", "vecnet_peers", "vecnet_presence", "vecnet_presence_subscribe", "vecnet_react", "vecnet_receipt",
 		"vecnet_reply", "vecnet_send", "vecnet_set_avatar", "vecnet_thread", "vecnet_threads", "vecnet_whoami",
 	}
 	var got []string
@@ -378,6 +378,17 @@ func TestToolsListNamesAndHints(t *testing.T) {
 		}
 		if tool.Annotations.ReadOnlyHint != readOnly[tool.Name] {
 			t.Errorf("%s: readOnlyHint = %v, want %v", tool.Name, tool.Annotations.ReadOnlyHint, readOnly[tool.Name])
+		}
+		if tool.Name == "vecnet_peer_create" || tool.Name == "vecnet_peer_set_disabled" {
+			if !tool.Annotations.IdempotentHint {
+				t.Errorf("%s: idempotentHint = false, want true", tool.Name)
+			}
+			if hint := tool.Annotations.DestructiveHint; hint == nil || *hint {
+				t.Errorf("%s: destructiveHint must be explicitly false", tool.Name)
+			}
+			if hint := tool.Annotations.OpenWorldHint; hint == nil || *hint {
+				t.Errorf("%s: openWorldHint must be explicitly false", tool.Name)
+			}
 		}
 		if tool.Name == "vecnet_group_create" {
 			if tool.Annotations.IdempotentHint {
@@ -1690,4 +1701,202 @@ func TestPresenceSubscribeTool(t *testing.T) {
 	}
 	_, principalSecret := env.NewPrincipal("no own peer")
 	toolFails(t, env, principalSecret, "vecnet_presence_subscribe", map[string]any{"subscribe": "none"}, "forbidden")
+}
+
+// peerToolPrincipal enables the same provisioning policy used by HTTP clients.
+func peerToolPrincipal(t *testing.T, env *testhub.Env, max int) (string, string) {
+	t.Helper()
+	principal, secret := env.NewPrincipal("provisioning host")
+	if err := env.Hub.SetPrincipalLimits(context.Background(), principal, hub.PrincipalLimits{
+		MaxPeers: max, CreatesPerHour: 60, Kinds: []string{"pagchat-bot"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return principal, secret
+}
+
+func peerToolHTTP(t *testing.T, env *testhub.Env, secret, method, path string, args any, status int) map[string]any {
+	t.Helper()
+	resp, body := env.Do(secret, method, path, args)
+	if resp.StatusCode != status {
+		t.Fatalf("%s %s = %d: %s, want %d", method, path, resp.StatusCode, body, status)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("%s %s body = %s: %v", method, path, body, err)
+	}
+	return result
+}
+
+func peerToolErrorLikeHTTP(t *testing.T, env *testhub.Env, secret, tool string, args any, method, path string, body any, status int, code string) toolErrorBody {
+	t.Helper()
+	fromHTTP := peerToolHTTP(t, env, secret, method, path, body, status)
+	fromTool := toolFails(t, env, secret, tool, args, code)
+	var got map[string]any
+	if err := json.Unmarshal([]byte(mustJSON(t, fromTool)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, fromHTTP) {
+		t.Fatalf("%s error = %v, HTTP error = %v", tool, got, fromHTTP)
+	}
+	return fromTool
+}
+
+func TestPeerCreateToolPrincipalOnly(t *testing.T) {
+	env := testhub.Start(t)
+	principal, secret := peerToolPrincipal(t, env, 2)
+	_, peerSecret := env.NewPeer("session", "peer credential")
+	args := map[string]any{"kind": "pagchat-bot", "name": "seed-bot-2", "idempotency_key": "create-seed-bot-2"}
+	for _, tc := range []struct{ name, secret string }{
+		{"peer", peerSecret}, {"operator", env.OperatorSecret}, {"principal", secret},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, r := rpc(t, env, tc.secret, "tools/list", nil)
+			if status != http.StatusOK || r.Error != nil {
+				t.Fatalf("tools/list: %d %+v", status, r.Error)
+			}
+			var listed struct {
+				Tools []listedTool `json:"tools"`
+			}
+			if err := json.Unmarshal(r.Result, &listed); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"vecnet_peer_create", "vecnet_peer_set_disabled"} {
+				if !slices.ContainsFunc(listed.Tools, func(tool listedTool) bool { return tool.Name == name }) {
+					t.Errorf("%s tools/list lacks %s", tc.name, name)
+				}
+			}
+			if tc.name != "principal" {
+				peerToolErrorLikeHTTP(t, env, tc.secret, "vecnet_peer_create", args,
+					http.MethodPost, "/v1/peers", args, http.StatusForbidden, "forbidden")
+				return
+			}
+			var created map[string]any
+			toolOK(t, env, secret, "vecnet_peer_create", args, &created)
+			peer, ok := created["peer"].(map[string]any)
+			if !ok {
+				t.Fatalf("create = %v, want {peer, idempotency_key}", created)
+			}
+			id, _ := peer["peer_id"].(string)
+			if !strings.HasPrefix(id, "peer_") {
+				t.Fatalf("peer_id = %q, want peer_...", id)
+			}
+			want := map[string]any{
+				"peer":            map[string]any{"peer_id": id, "kind": "pagchat-bot", "name": "seed-bot-2", "created_by": principal, "disabled": false},
+				"idempotency_key": "create-seed-bot-2",
+			}
+			if !reflect.DeepEqual(created, want) {
+				t.Fatalf("create = %v, want exactly %v", created, want)
+			}
+			fromHTTP := peerToolHTTP(t, env, secret, http.MethodPost, "/v1/peers", args, http.StatusOK)
+			if !reflect.DeepEqual(created, fromHTTP) {
+				t.Fatalf("tool create = %v, HTTP replay = %v", created, fromHTTP)
+			}
+		})
+	}
+}
+
+func TestPeerCreateToolIdempotentLikeHTTP(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := peerToolPrincipal(t, env, 1)
+	args := map[string]any{"kind": "pagchat-bot", "name": "first bot", "idempotency_key": "first-bot"}
+	var first, replay map[string]any
+	toolOK(t, env, secret, "vecnet_peer_create", args, &first)
+	toolOK(t, env, secret, "vecnet_peer_create", args, &replay)
+	if !reflect.DeepEqual(first, replay) {
+		t.Fatalf("replay = %v, first = %v", replay, first)
+	}
+	peer, ok := first["peer"].(map[string]any)
+	if !ok {
+		t.Fatalf("create = %v, want peer", first)
+	}
+	id, _ := peer["peer_id"].(string)
+	if !strings.HasPrefix(id, "peer_") {
+		t.Fatalf("peer_id = %q, want peer_...", id)
+	}
+	fromHTTP := peerToolHTTP(t, env, secret, http.MethodPost, "/v1/peers", args, http.StatusOK)
+	if !reflect.DeepEqual(first, fromHTTP) {
+		t.Fatalf("tool create = %v, HTTP replay = %v", first, fromHTTP)
+	}
+	conflict := map[string]any{"kind": "pagchat-bot", "name": "different bot", "idempotency_key": "first-bot"}
+	err := peerToolErrorLikeHTTP(t, env, secret, "vecnet_peer_create", conflict,
+		http.MethodPost, "/v1/peers", conflict, http.StatusConflict, "idempotency_conflict")
+	if !reflect.DeepEqual(err.Error.Details, map[string]any{"idempotency_key": "first-bot"}) {
+		t.Fatalf("conflict details = %v", err.Error.Details)
+	}
+	atCap := map[string]any{"kind": "pagchat-bot", "name": "over cap", "idempotency_key": "over-cap"}
+	checkCap := func(disabled float64) {
+		t.Helper()
+		err := peerToolErrorLikeHTTP(t, env, secret, "vecnet_peer_create", atCap,
+			http.MethodPost, "/v1/peers", atCap, http.StatusTooManyRequests, "peer_cap_reached")
+		want := map[string]any{"limit": float64(1), "active": float64(1), "disabled": disabled}
+		if !reflect.DeepEqual(err.Error.Details, want) {
+			t.Fatalf("cap details = %v, want exactly %v", err.Error.Details, want)
+		}
+	}
+	checkCap(0)
+	peerToolHTTP(t, env, secret, http.MethodPatch, "/v1/peers/"+id, map[string]any{"disabled": true}, http.StatusOK)
+	replacement := map[string]any{"kind": "pagchat-bot", "name": "replacement", "idempotency_key": "replacement"}
+	peerToolHTTP(t, env, secret, http.MethodPost, "/v1/peers", replacement, http.StatusCreated)
+	checkCap(1)
+	// Replay wins over both the active-peer cap and the peer's current disabled state.
+	toolOK(t, env, secret, "vecnet_peer_create", args, &replay)
+	if !reflect.DeepEqual(first, replay) {
+		t.Fatalf("replay at cap = %v, original frozen body = %v", replay, first)
+	}
+	err = peerToolErrorLikeHTTP(t, env, secret, "vecnet_peer_set_disabled", map[string]any{"peer_id": id, "disabled": false},
+		http.MethodPatch, "/v1/peers/"+id, map[string]any{"disabled": false}, http.StatusTooManyRequests, "peer_cap_reached")
+	if !reflect.DeepEqual(err.Error.Details, map[string]any{"limit": float64(1), "active": float64(1), "disabled": float64(1)}) {
+		t.Fatalf("re-enable cap details = %v", err.Error.Details)
+	}
+}
+
+func TestPeerSetDisabledTool(t *testing.T) {
+	env := testhub.Start(t)
+	principal, secret := peerToolPrincipal(t, env, 2)
+	_, otherSecret := peerToolPrincipal(t, env, 2)
+	args := map[string]any{"kind": "pagchat-bot", "name": "own bot", "idempotency_key": "own-bot"}
+	created := peerToolHTTP(t, env, secret, http.MethodPost, "/v1/peers", args, http.StatusCreated)
+	id := created["peer"].(map[string]any)["peer_id"].(string)
+	other := peerToolHTTP(t, env, otherSecret, http.MethodPost, "/v1/peers", args, http.StatusCreated)
+	otherID := other["peer"].(map[string]any)["peer_id"].(string)
+	target, peerSecret := env.NewPeer("session", "recipient")
+	for _, tc := range []struct{ name, secret string }{{"peer", peerSecret}, {"operator", env.OperatorSecret}} {
+		t.Run(tc.name, func(t *testing.T) {
+			peerToolErrorLikeHTTP(t, env, tc.secret, "vecnet_peer_set_disabled", map[string]any{"peer_id": id, "disabled": true},
+				http.MethodPatch, "/v1/peers/"+id, map[string]any{"disabled": true}, http.StatusForbidden, "forbidden")
+		})
+	}
+	for _, inaccessible := range []string{otherID, target, "peer_missing"} {
+		t.Run(inaccessible, func(t *testing.T) {
+			peerToolErrorLikeHTTP(t, env, secret, "vecnet_peer_set_disabled", map[string]any{"peer_id": inaccessible, "disabled": true},
+				http.MethodPatch, "/v1/peers/"+inaccessible, map[string]any{"disabled": true}, http.StatusNotFound, "not_found")
+		})
+	}
+	send := map[string]any{
+		"as": id, "recipients": []string{target}, "priority": "hold", "idempotency_key": "before-disable",
+		"content": map[string]any{"text": "from provisioned peer"},
+	}
+	toolOK(t, env, secret, "vecnet_send", send, nil)
+	for _, disabled := range []bool{true, true, false, false} {
+		var result map[string]any
+		toolOK(t, env, secret, "vecnet_peer_set_disabled", map[string]any{"peer_id": id, "disabled": disabled}, &result)
+		want := map[string]any{"peer": map[string]any{
+			"peer_id": id, "kind": "pagchat-bot", "name": "own bot", "created_by": principal, "disabled": disabled,
+		}}
+		if !reflect.DeepEqual(result, want) {
+			t.Fatalf("set disabled = %v, want exactly %v", result, want)
+		}
+		fromHTTP := peerToolHTTP(t, env, secret, http.MethodPatch, "/v1/peers/"+id, map[string]any{"disabled": disabled}, http.StatusOK)
+		if !reflect.DeepEqual(result, fromHTTP) {
+			t.Fatalf("tool set disabled = %v, HTTP = %v", result, fromHTTP)
+		}
+		send["idempotency_key"] = "after-disable"
+		if disabled {
+			peerToolErrorLikeHTTP(t, env, secret, "vecnet_send", send,
+				http.MethodPost, "/v1/messages", send, http.StatusForbidden, "forbidden")
+		} else {
+			toolOK(t, env, secret, "vecnet_send", send, nil)
+		}
+	}
 }
