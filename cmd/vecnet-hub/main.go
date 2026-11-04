@@ -203,6 +203,8 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 		return err
 	case <-ctx.Done():
 	}
+	// Begin draining before Shutdown closes listeners and waits for handlers.
+	closeStop()
 	// The grace period stays under Fly's kill_timeout (fly.toml).
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownGrace)
 	defer cancel()

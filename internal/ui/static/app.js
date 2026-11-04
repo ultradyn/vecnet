@@ -10,6 +10,7 @@ import { createActivity } from './activity.js';
 import { createApi } from './api.js';
 import { avatarHash, createAvatarCache } from './avatar-model.js';
 import * as compose from './compose.js';
+import { connectionState } from './connection-model.js';
 import * as dash from './dash.js';
 import { h, peerLink, toast } from './dom.js';
 import { short } from './format.js';
@@ -25,7 +26,7 @@ import * as thread from './thread.js';
 
 const SECRET_KEY = 'vecnet.ui.secret';
 const PEERS_REFRESH = 60000;
-const CONN_CLASS = { live: 'live', offline: 'off', stopped: 'off' };
+const CONN_CLASS = { live: 'live', reconnecting: 'retry', stopped: 'off' };
 const $ = id => document.getElementById(id);
 
 const SCREENS = {
@@ -118,8 +119,8 @@ function peopleLinks(r, nameOf) {
   return [...shown.flatMap((id, i) => [i ? ', ' : '', peerLink(id, nameOf(id), { nested: true })]), ids.length > shown.length ? ' +' + (ids.length - shown.length) : ''];
 }
 
-function renderConn(store) {
-  const state = store.conn();
+function renderConn(store, activity) {
+  const state = connectionState(store.conn(), activity.conn());
   $('conn').className = 'conn ' + (CONN_CLASS[state] || '');
   $('conn').lastElementChild.textContent = state;
 }
@@ -223,9 +224,10 @@ function start(secret) {
   $('app').hidden = false;
   $('hubname').textContent = location.host;
   $('view').replaceChildren(h('div', { class: 'loading', text: 'Connecting to the hub…' }));
-  renderConn(store);
+  renderConn(store, activity);
   s.offs.push(
-    store.onConn(() => renderConn(store)),
+    store.onConn(() => renderConn(store, activity)),
+    activity.onConn(() => renderConn(store, activity)),
     threads.subscribe(redraw),
     inboxHead.subscribe(redraw),
     peers.subscribe(redraw),

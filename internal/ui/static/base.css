@@ -108,6 +108,7 @@ span,b,time,code,a{unicode-bidi:isolate}
 .conn{display:flex;align-items:center;gap:7px;padding:4px 9px;font:400 11.5px var(--mono);color:var(--dim);margin-top:auto}
 .conn i{width:7px;height:7px;border-radius:50%;background:#64748b}
 .conn.live i{background:var(--ok)}
+.conn.retry i{background:var(--wake)}
 .conn.off i{background:var(--bad)}
 .dot{width:7px;height:7px;border-radius:50%;background:#64748b;flex:none;display:inline-block}
 .dot.idle{background:var(--ok)}.dot.working{background:var(--wake)}.dot.blocked{background:var(--bad)}.dot.offline{background:none;border:1.5px solid #64748b}

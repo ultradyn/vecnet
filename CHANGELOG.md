@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-05: hub restarts drain SSE/MCP streams within bounded shutdown grace; watch, TUI, MCP subscription relay and web UI reconnect quietly with jittered retries and durable cursor recovery, while ambiguous MCP mutations remain explicit errors (PROTOCOL §2.3/2.13/4/13, DEPLOY).
+
 - 2026-11-05: MCP `vecnet_send` input schema drops sendRequest's top-level `anyOf` (ChatGPT rendered it as opaque objects and demanded thread_id); no tool may have a top-level anyOf/oneOf/allOf. internal/mcpserver/tools.go, PROTOCOL §4.3.
 - 2026-11-05: build boxes: x-boss is first in the default `BB_HOSTS` (scripts/bb/run.sh, clean.sh, docs/BUILDBOX.md); pass `BB_HOST=x-boss` in assignments.
 - 2026-11-05: OAuth CIMD accepts a document preferring private_key_jwt when it also lists `none` (ChatGPT's real client.json); stored as a public client. internal/oauth/clients.go, PROTOCOL §4.5.

@@ -181,6 +181,16 @@ SSE stream behaviour [SSE]:
 - Send `: hb` comment every 15 s while idle.
 - Send `Cache-Control: no-store`, `X-Accel-Buffering: no`; disable compression and buffering.
 - Re-check on every wake and heartbeat. A rotated credential, a disabled peer, or a change in the peers the stream reads ends the stream, and a parked long-poll answers empty, so the client's reconnect meets the new state. `peer rotate`, `peer move` and disabling a peer wake a stream at once; the heartbeat bounds anything else at 15 s.
+- On hub shutdown, drain queued Events, send and flush this final transport-control frame, then end the response cleanly:
+
+  ```text
+  event: hub_restarting
+  retry: 1000
+  data: {"retry_after_ms":1000}
+
+  ```
+
+  It has no `id` and is not a durable Event: do not display, ack or advance a cursor for it. Reconnect after a short jittered delay, resuming the last successfully handled cursor. A client may close and reopen as soon as the frame arrives. Parked long-polls return an empty 200 page with their resume cursor. Shutdown gives stalled writers a one-second drain budget; a client unable to read may miss the hint or receive a transport error and MUST still reconnect.
 
 Status codes [SSE]:
 
@@ -189,6 +199,8 @@ Status codes [SSE]:
 | 401 / 403 | Bad or insufficient credential | Stop, re-auth |
 | 204 | Peer disabled | Stop reconnecting |
 | 409 | Cursor from unknown epoch or below retention; the error `details` name the oldest valid cursor | Re-sync thread history explicitly, then resume |
+
+A clean end, unexpected EOF, HTTP/2 stream reset, refused/reset connection or proxy 502/503/504 is a reconnectable outage. Retain the cursor and pending ack across retries; the terminal statuses above still take precedence. Client status and retry timing are specified in section 13.1.
 
 A principal credential receives events for all its peers by default; `?peer=<peer_id>` narrows the stream to one of them [ENV, R05]. The acked cursor is per stream owner and scope: one for the principal-wide stream, one per narrowed peer. Several consumers MAY connect concurrently to the same owner and scope; they receive the same events and share one acked cursor. There are no per-consumer cursors [R05].
 
@@ -404,8 +416,19 @@ and `Last-Event-ID` is ignored. Frames, after `retry: 3000`:
   rename); clients re-read that thread's row.
 - `event: resync`, `data: {}`: this subscriber fell behind (each holds 64
   frames) and frames were dropped. Clients refetch, as on `ready`.
+- `event: hub_restarting`, `retry: 1000`,
+  `data: {"retry_after_ms":1000}`: shutdown control, followed by clean close
+  (subject to the stalled-writer budget in section 2.3). No `id`; never fold
+  it into thread lists. Close/reopen promptly with jittered backoff.
 
 A reconnect is a new subscription: the client refetches on its `ready`.
+There is no activity replay cursor. The web nav shows a subtle amber
+`reconnecting` indicator if either this feed or its durable long-poll pump
+is recovering, and returns to `live` once both recover. Each uses an initial
+0.8–1.2 s delay, exponential backoff with ±20% jitter capped at 30 s, reset
+by `ready` or a successful events page respectively. Activity still reopens
+after 45 s of silence; readers, watchdogs and abort listeners are released
+on each attempt. A 401/403 or disabled 204 stops reconnecting.
 Idempotent replays, rejected sends and rate-limit cuts publish nothing. The
 credential is checked again on each heartbeat; a peer or principal credential
 is 403 `forbidden`.
@@ -480,6 +503,12 @@ The hub serves exactly 2026-07-28 and 2025-11-25. An `initialize` naming any oth
 Every 2026-07-28 result, from `server/discover` to `tools/call` (a tool error included), carries `resultType: "complete"` and `_meta["io.modelcontextprotocol/serverInfo"]` = `{name: "vecnet", version}`, the same object as `serverInfo`; any other `_meta` keys the result has are kept. JSON-RPC errors carry neither, nor do the notifications on a `subscriptions/listen` stream. 2025-11-25 results are unchanged.
 
 The hub MUST NOT implement MCP `Last-Event-ID` replay for any revision; the cursor tools cover resumption [SSE].
+
+On hub shutdown, both legacy GET streams and POST `subscriptions/listen`
+streams close cleanly within the bounded writer-drain budget (section 2.3).
+MCP receives no custom `hub_restarting` event or synthetic final JSON-RPC
+result. Re-establish hints after reconnect, then fetch the durable inbox
+after the saved cursor; hints may repeat or be lost during the gap.
 
 ### 4.2 Inbox resource and hints
 
@@ -786,7 +815,8 @@ Every Message the hub stores carries `sender_info: {name, kind}`, its sender's d
 - [ ] Persist the cursor durably per stream owner; advance only after the handler succeeds.
 - [ ] Parse SSE with a fetch-based parser (Authorization header, comments visible); handle CR/LF/CRLF, multi-line `data`, the `id` NULL rule, empty-`id` reset, empty-data priming events.
 - [ ] Resume with `Last-Event-ID` (or `?after=` on first connect only).
-- [ ] Reconnect after ~45 s of silence; honour `retry`; jittered backoff to ~60 s; stop on 401/403/204; re-sync on 409.
+- [ ] Reconnect after ~45 s of silence; parse SSE `retry` and `hub_restarting` as transport controls, never Events. Use short jittered exponential retries for clean end, unexpected EOF, HTTP/2 reset, refused/reset connections and proxy 502/503/504; retain cursor and owed ack. The CLI watch, MCP relay and TUI start at 0.8–1.2 s with ±20% jitter and a hard 24 s cap; the web UI uses the same initial range with a 30 s cap. These bounded policies override the ordinary `retry:3000` preface. Stop on 401/403/204; re-sync on 409.
+- [ ] Keep outage status separate from event output. Watch writes one calm `hub restarting; reconnecting…` line per outage and one `reconnected` line after a valid stream frame/heartbeat or successful poll, all on stderr (`--for-monitor` stdout keeps its event format). Detailed errors resume after 60 s without recovery. The TUI and web UI retain their views and show `reconnecting`; a successful response restores the TUI, and both web streams must recover for its indicator to read `live`.
 - [ ] Dedupe on `delivery_id` within a bounded window.
 - [ ] Label the sender from `message.sender_info`, not a directory lookup per Delivery; fall back to the directory only when it is absent (§8.2, §14 invariant 10).
 - [ ] Ack via `/v1/ack` per batch; send `processed` receipts where required.
@@ -858,6 +888,8 @@ Every Message the hub stores carries `sender_info: {name, kind}`, its sender's d
   - **Profile.** It resolves the profile like any hub command (`--net`, else `VECNET_PROFILE`; a bare agent run is refused) and serves only that profile. Before reading stdin it exits 1, with one stderr line and nothing on stdout, when the profile holds a `vn_operator_` credential, leading whitespace ignored as the hub ignores it (`vecnet mcp: operator credentials stay on the CLI; enrol a peer or principal profile for MCP`) or when `VECNET_PROFILE` is set and names another profile (`vecnet mcp: this session is profile <V>; relay for profile <P> refuses`), as the hook stays silent in that case (§13.9).
   - **Forwarding.** Each newline-delimited JSON-RPC message on stdin is POSTed to `<hub>/mcp` with the bearer, `Accept: application/json, text/event-stream` and, once a session exists, `Mcp-Session-Id` and `MCP-Protocol-Version`. A 2026-07-28 request, `server/discover` included, gets the revision its `params._meta` names (`io.modelcontextprotocol/protocolVersion`, else `protocolVersion`) as `MCP-Protocol-Version` and no session header; one naming none, sent before any `initialize`, gets the revision `server/discover` answered. Each response, or each `data:` frame of a `text/event-stream` response (lines ending in CR, LF or CRLF, section 13.1; a frame is relayed as soon as its blank line arrives), is written as one line on stdout. No body over 256 KiB, the hub's cap, is sent. A notification gets no output. The client's `initialize` is forwarded unchanged, so the hub negotiates its revision (section 4.1). The relay opens no GET hint stream.
   - **Re-initialise.** On HTTP 404 `session_not_found` (for example after a hub restart) it re-sends the cached `initialize` once, privately, then retries the original message once.
+  - **Reconnect safely.** A failed network dial, before a request is sent, may retry any method. Metadata/read methods (`initialize`, `server/discover`, `ping`, `tools/list`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`) and `subscriptions/listen` retry proxy 502/503/504 and transport/body EOF failures. Ordinary requests are bounded to three attempts and are not replayed after response frames have reached stdout. An ambiguous `tools/call` body failure or proxy error returns a sanitized JSON-RPC error rather than replaying a possible mutation; the caller must reconcile side effects before retrying. Terminal 401/403/204 and invalid response/schema errors do not reconnect indefinitely.
+  - **Subscription recovery.** An unfinished `subscriptions/listen` SSE response owns an indefinite reconnect loop with the section 13.1 backoff. Re-establishment suppresses duplicate subscription acknowledgements and emits one catch-up `notifications/resources/updated` per unique acknowledged URI, preserving subscription `_meta`, so the client fetches its durable inbox cursor. Hints have no exactly-once replay guarantee. Stdout stays JSON-RPC only; one shared outage status and its recovery go to stderr, with sanitized details after 60 s. The relay still opens no GET hint stream.
   - **`--as` binding.** With a global `--as X`, the relay caches the tool catalogue it relays (fetching one if needed). In a `tools/call` of a tool whose input schema has an `as` or `peer` property, that argument is set to X when absent; any other value is answered `-32602` `relay is bound to --as X` and not forwarded. `vecnet_threads`' `participant` is bound the same way, with `me` also accepted. Other tools are forwarded unchanged. Inbox reads through resources are bound too: `resources/read`, `resources/subscribe` and `resources/unsubscribe` accept only `vecnet://peer/X/inbox`, and every URI of a `subscriptions/listen` filter must be it; another peer's or the principal's inbox is answered `-32602` `relay is bound to --as X` and not forwarded. `resources/list` relays only X's inbox.
   - **No secret output.** Stdout carries only JSON-RPC. A hub it cannot reach is answered `-32603` `vecnet relay: hub unreachable`, a hub error envelope `-32603` `vecnet relay: hub answered <status> <code>` (the code only when it is a short lower-case identifier, else `http_<status>`), a line that is not JSON `-32700` with id `null`, and JSON that is not a JSON-RPC 2.0 message `-32600` `Invalid Request` with id `null`. A stdin line longer than 256 KiB + 2 bytes ends the relay with exit 1 (`mcp: cannot read input`) and no answer; a shorter one whose body (after `--as` binding) exceeds 256 KiB is answered `-32602` `relay request exceeds 256 KiB`. Neither stream ever carries the secret, a header, the hub URL's userinfo, a response body or the config's contents. It exits 0 at stdin EOF.
 
@@ -930,6 +962,13 @@ Every Message the hub stores carries `sender_info: {name, kind}`, its sender's d
 - [ ] **Install with MCP (2026-11-05).** `vecnet hook install --profile P --mcp` also writes ` --mcp vecnet-<P>` after any ` --auto-ack` in both handlers, so the hooks name the relay (§13.7) registered under `mcpServerName(P, "")`. The installed hooks never carry `--as`, so it is a usage error (exit 1, file untouched, `claude` never run) when the profile has no MCP name or a global `--as` is set. It prints the registration on stderr, quoted as the hooks are: `MCP registration (local scope: this project only): claude mcp add --scope local vecnet-<P>[ --env VECNET_CONFIG=<absolute path>] -- <bin> --net <P> mcp`, with `--env` only when `VECNET_CONFIG` is set and after the name, since a variadic option before it would take the name. With `--write`, when `claude` is on `PATH`, it runs `claude mcp remove --scope local vecnet-<P>` (failure ignored) and then that `add`, each with a 10 s timeout, in the start directory above, because local-scope MCP config is per project; a failure is reported on stderr, the hooks are still written, and the exit code is that of `hook install`. The warning about another profile's hooks adds that every session there also sees each registered vecnet MCP server's tools.
 
 ### 13.8 Launcher [issue 26]
+
+The launcher remains a connector design checklist, without a compiled
+launcher implementation in this tree. Its outbound pull stream follows
+section 13.1 reconnect and cursor rules; integrations using `watch` inherit
+section 13.7's quiet status behavior. The hook is a separate bounded
+one-shot poll (section 13.9), not an indefinite reconnect loop: its 1500 ms
+budget and persisted poll cursor let a later invocation recover.
 
 Normative for peers of kind `launcher` (§18.1) and for requesters that talk to them; the hub enforces none of it beyond the rules of sections 2–12 and §18. Each `launch.*` object below has a closed JSON Schema (draft 2020-12) under `connectors/launcher/schema/`, cited where the object is defined. All `launch.*` keys are sender-owned metadata, allowed by §14.5; a consumer accepts them only from the senders this section names (§14.1).
 

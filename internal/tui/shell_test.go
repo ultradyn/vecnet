@@ -252,7 +252,7 @@ func TestStatusConn(t *testing.T) {
 
 	release <- struct{}{}
 	p.until("offline", func() bool { return m.Conn == ConnOffline })
-	render(t, m, "offline, retrying")
+	render(t, m, "reconnecting")
 	if m.Data.Inbox.Me.Name != "Max" {
 		t.Fatal("offline must keep the last data")
 	}

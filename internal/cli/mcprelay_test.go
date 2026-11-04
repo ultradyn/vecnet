@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,47 @@ import (
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
+
+func TestMCPRelayFinalResponseBeforeBodyFailure(t *testing.T) {
+	for _, reset := range []bool{false, true} {
+		for _, rpcError := range []bool{false, true} {
+			t.Run(fmt.Sprintf("reset=%t/error=%t", reset, rpcError), func(t *testing.T) {
+				calls := 0
+				srv := relayFake(t, func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					if calls > 1 {
+						relayResult(w, json.RawMessage("5"), map[string]any{"ok": true})
+						return
+					}
+					result := `"result":{"ok":true}`
+					if rpcError {
+						result = `"error":{"code":-32602,"message":"rejected"}`
+					}
+					payload := `data: {"jsonrpc":"2.0","id":4,` + result + "}\n\n"
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.Header().Set("Content-Length", fmt.Sprint(len(payload)+100))
+					fmt.Fprint(w, payload)
+					w.(http.Flusher).Flush()
+					if reset {
+						conn, _, err := w.(http.Hijacker).Hijack()
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						if tcp, ok := conn.(*net.TCPConn); ok {
+							tcp.SetLinger(0)
+						}
+						conn.Close()
+					}
+				})
+				code, out, errs := relayRun(t, profileUser(t, srv.URL, "relay-test-secret"), relayCall(4, "vecnet_send", map[string]any{})+"\n"+relayLine(5, "ping", nil)+"\n")
+				if code != 0 || calls != 2 || strings.Count(out, `"id":4`) != 1 || strings.Count(out, `"id":5`) != 1 {
+					t.Fatalf("code=%d calls=%d stdout=%s stderr=%s", code, calls, out, errs)
+				}
+			})
+		}
+	}
+}
 
 type relayReply struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -303,7 +345,7 @@ func TestMCPRelayStdoutIsJSONOnly(t *testing.T) {
 	secret := "relay-test-secret"
 	u := profileUser(t, strings.Replace(closed.URL, "http://", "http://url-user:url-password@", 1), secret)
 	code, out, errs := relayRun(t, u, strings.Join([]string{relayLine(2, "ping", nil), `not json`, relayCall(3, "vecnet_peers", map[string]any{}), `{"jsonrpc":"2.0","method":"notifications/initialized"}`}, "\n"))
-	if code != 0 || errs != "" {
+	if code != 0 || strings.Count(errs, "hub restarting; reconnecting") != 1 {
 		t.Fatalf("exit=%d stderr=%q", code, errs)
 	}
 	replies := relayReplies(t, out)

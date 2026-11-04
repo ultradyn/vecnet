@@ -13,6 +13,9 @@ import (
 // fails the stream instead of pinning a goroutine.
 const streamWriteTimeout = 30 * time.Second
 
+// streamDrainTimeout stays well inside the hub's 10 s shutdown grace.
+const streamDrainTimeout = time.Second
+
 // ErrStreamClosed is returned by Streamer methods after Close or a failed write.
 var ErrStreamClosed = errors.New("mcpserver: stream closed")
 
@@ -31,6 +34,9 @@ type Streamer struct {
 	hbDone chan struct{}
 	once   sync.Once
 	dOnce  sync.Once
+
+	dmu    sync.Mutex // orders Close's drain deadline with each write
+	closed bool
 }
 
 // Stream starts an SSE response on w: Content-Type text/event-stream,
@@ -52,8 +58,19 @@ func (s *Server) Stream(w http.ResponseWriter, r *http.Request) (*Streamer, erro
 	}
 	w.WriteHeader(http.StatusOK)
 	st := &Streamer{w: w, rc: rc, stop: make(chan struct{}), dead: make(chan struct{}), hbDone: make(chan struct{})}
+	// Arm shutdown before the first write: it too can block on a stalled peer.
+	go func() {
+		select {
+		case <-s.Stop:
+		case <-r.Context().Done():
+		case <-st.stop:
+			return
+		}
+		st.Close()
+	}()
 	if err := st.write("retry: 3000\n\n"); err != nil {
 		close(st.hbDone)
+		st.Close()
 		return nil, err
 	}
 	go st.heartbeat(s.heartbeat())
@@ -85,12 +102,13 @@ func (st *Streamer) write(frame string) error {
 	if st.err != nil {
 		return st.err
 	}
-	select {
-	case <-st.stop:
+	st.dmu.Lock()
+	if st.closed {
+		st.dmu.Unlock()
 		return ErrStreamClosed
-	default:
 	}
 	_ = st.rc.SetWriteDeadline(time.Now().Add(streamWriteTimeout))
+	st.dmu.Unlock()
 	_, err := st.w.Write([]byte(frame))
 	if err == nil {
 		err = st.rc.Flush()
@@ -130,18 +148,24 @@ func (st *Streamer) Comment(text string) error {
 // Done is closed when the stream is closed or a write failed.
 func (st *Streamer) Done() <-chan struct{} { return st.dead }
 
-// Close stops the heartbeat and waits out any Send already writing; later
-// writes fail with ErrStreamClosed. The handler returning ends the HTTP
+// Close stops the heartbeat and bounds any Send already writing by the drain
+// deadline; later writes fail with ErrStreamClosed. The handler returning ends the HTTP
 // response, so it must call Close first: net/http may not be finishing the
 // response while another goroutine writes to it.
 func (st *Streamer) Close() {
 	st.once.Do(func() {
+		st.dmu.Lock()
+		st.closed = true
 		close(st.stop)
+		_ = st.rc.SetWriteDeadline(time.Now().Add(streamDrainTimeout))
+		st.dmu.Unlock()
 		st.dOnce.Do(func() { close(st.dead) })
+		<-st.hbDone
+		st.mu.Lock() // no new write can start once closed is set
+		defer st.mu.Unlock()
+		// net/http still needs to finish the response after the handler returns.
+		_ = st.rc.SetWriteDeadline(time.Time{})
 	})
-	<-st.hbDone
-	st.mu.Lock() // write checks stop under mu, so none starts after this
-	defer st.mu.Unlock()
 }
 
 func oneLine(s string) string {

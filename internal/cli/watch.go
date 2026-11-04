@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"mime"
 	"net/http"
 	"strconv"
@@ -22,8 +21,7 @@ import (
 // Watch timing (PROTOCOL §13.1).
 const (
 	watchSilence      = 45 * time.Second // reconnect after this long without a byte (the hub sends ": hb" every 15 s)
-	watchDefaultRetry = 3 * time.Second  // until the hub's "retry:" field says otherwise
-	watchMaxBackoff   = 60 * time.Second
+	watchDefaultRetry = time.Second
 	watchPollWait     = 25 // long-poll fallback hold, seconds
 	watchSSEFailures  = 3  // consecutive SSE failures before alternating with long-poll
 	dedupeWindow      = 1024
@@ -247,6 +245,18 @@ type watcher struct {
 	shown      *stateFile
 	identity   *hookIdentity // binds shown to this run's hub and caller
 	replayed   bool
+	now        func() time.Time
+	sleep      func(context.Context, time.Duration) bool
+	outage     reconnectStatus
+	hadLive    bool
+	ackOutage  bool // a retryable acknowledgement failure still owes pendingAck
+}
+
+func (w *watcher) pause(d time.Duration) bool {
+	if w.sleep != nil {
+		return w.sleep(w.a.ctx, d)
+	}
+	return sleepCtx(w.a.ctx, d)
 }
 
 // errPeerDisabled is the 204 answer: stop reconnecting (PROTOCOL §2.3).
@@ -270,6 +280,7 @@ func terminal(err error) bool {
 
 func (w *watcher) run() error {
 	ctx := w.a.ctx
+	w.outage = reconnectStatus{out: w.a.stderr, name: "watch", now: w.now}
 	if !w.forMonitor && !w.a.json {
 		fmt.Fprintln(w.a.stdout, inboxHeader)
 	}
@@ -280,12 +291,15 @@ func (w *watcher) run() error {
 			return nil
 		}
 		var err error
+		polled := false
+		w.hadLive = false
 		if w.forMonitor && !w.a.json && !w.replayed {
 			err = w.replay()
 			if err == nil {
 				err = w.stream()
 			}
 		} else if failures >= watchSSEFailures && failures%2 == 1 {
+			polled = true
 			err = w.longPoll()
 		} else {
 			err = w.stream()
@@ -301,18 +315,24 @@ func (w *watcher) run() error {
 			continue
 		}
 		purges = 0
-		switch {
-		case err == nil:
+		if polled && err == nil {
 			failures = 0
-			if !sleepCtx(ctx, w.retry) {
-				return nil
-			}
+			continue // a completed long-poll response is a healthy connection
+		}
+		switch {
 		case terminal(err):
 			return err
 		default:
+			if w.hadLive {
+				failures = 0
+			}
 			failures++
-			fmt.Fprintf(w.a.stderr, "vecnet: watch: %v; reconnecting\n", err)
-			if !sleepCtx(ctx, w.backoff(failures)) {
+			detail := ""
+			if err != nil {
+				detail = err.Error()
+			}
+			w.outage.failed(detail)
+			if !w.pause(w.backoff(failures)) {
 				return nil
 			}
 		}
@@ -345,15 +365,17 @@ func (w *watcher) refreshNames() {
 	}
 }
 
-// backoff is the jittered exponential reconnect delay, from the hub's retry
-// up to watchMaxBackoff.
+// backoff uses the same short restart policy for EOF and transport failures;
+// the hub's ordinary retry preface must not make the first attempt slow.
 func (w *watcher) backoff(failures int) time.Duration {
-	d := max(w.retry, time.Second)
-	for i := 1; i < failures && d < watchMaxBackoff; i++ {
-		d *= 2
+	return reconnectDelay(failures)
+}
+
+func (w *watcher) live() {
+	w.hadLive = true
+	if !w.ackOutage {
+		w.outage.live()
 	}
-	d = min(d, watchMaxBackoff)
-	return d/2 + rand.N(d/2+1)
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {
@@ -416,12 +438,14 @@ func (w *watcher) stream() error {
 			return nil
 		case <-idle.C:
 			return nil // silence: reconnect
-		case err := <-readErr:
-			if errors.Is(err, io.EOF) {
-				return nil
+		case line, ok := <-lines:
+			if !ok {
+				err := <-readErr // all queued lines precede their terminal read error
+				if ctx.Err() != nil || errors.Is(err, io.EOF) {
+					return nil
+				}
+				return &netError{err: err}
 			}
-			return &netError{err: err}
-		case line := <-lines:
 			if !idle.Stop() {
 				select {
 				case <-idle.C:
@@ -430,6 +454,12 @@ func (w *watcher) stream() error {
 			}
 			idle.Reset(watchSilence)
 			if line == "" { // dispatch
+				if evType == "hub_restarting" {
+					return nil // transport control: no event, acknowledgement or cursor
+				}
+				if hasData {
+					w.live()
+				}
 				// Empty data (the hub's priming event) only moves the
 				// cursor; it is not an event (PROTOCOL §13.1).
 				if joined := strings.Join(data, "\n"); hasData && joined != "" {
@@ -443,6 +473,7 @@ func (w *watcher) stream() error {
 				continue
 			}
 			if strings.HasPrefix(line, ":") {
+				w.live()
 				continue // comment, e.g. ": hb"
 			}
 			field, value, _ := strings.Cut(line, ":")
@@ -468,6 +499,17 @@ func (w *watcher) stream() error {
 // readLines splits r into SSE lines (CR, LF or CRLF terminated) onto out,
 // then reports the read error (io.EOF at the end).
 func readLines(ctx context.Context, r io.Reader, out chan<- string, errc chan<- error) {
+	var terminal error
+	defer func() {
+		if terminal == nil {
+			terminal = ctx.Err()
+			if terminal == nil {
+				terminal = io.EOF
+			}
+		}
+		errc <- terminal // every exit publishes its result before closing lines
+		close(out)
+	}()
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64<<10), maxSSELine)
 	sc.Split(splitSSELines)
@@ -478,11 +520,7 @@ func readLines(ctx context.Context, r io.Reader, out chan<- string, errc chan<- 
 			return
 		}
 	}
-	err := sc.Err()
-	if err == nil {
-		err = io.EOF
-	}
-	errc <- err
+	terminal = sc.Err()
 }
 
 // splitSSELines is a bufio.SplitFunc for CR, LF and CRLF line ends.
@@ -516,6 +554,7 @@ func (w *watcher) longPoll() error {
 	if err != nil {
 		return err
 	}
+	w.live()
 	for _, ev := range body.Events {
 		raw, err := json.Marshal(ev)
 		if err != nil {
@@ -613,11 +652,27 @@ func (w *watcher) flushAck() {
 	cur := w.pendingAck
 	if err := w.a.ack(w.c, cur); err != nil {
 		if w.a.ctx.Err() == nil {
-			fmt.Fprintf(w.a.stderr, "vecnet: watch: ack %s: %v\n", cur, err)
+			var network *netError
+			var hub *hubError
+			if errors.As(err, &network) || (errors.As(err, &hub) && (hub.Status == 502 || hub.Status == 503 || hub.Status == 504)) {
+				w.ackOutage = true
+				w.outage.failed(fmt.Sprintf("ack %s: %v", cur, err))
+			} else {
+				fmt.Fprintf(w.a.stderr, "vecnet: watch: ack %s: %v\n", cur, err)
+			}
 		}
 		return
 	}
 	w.pendingAck = ""
+	if w.ackOutage {
+		w.ackOutage = false
+		// Ack success alone cannot establish recovery while the stream is
+		// still unavailable. Conversely, live frames must not announce a
+		// recovery followed by another outage while this ack remains owed.
+		if w.hadLive {
+			w.outage.live()
+		}
+	}
 }
 
 // dedupe remembers the last n delivery ids.

@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,10 +11,12 @@ import (
 	"maps"
 	"math"
 	"mime"
+	"net"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // mcpRelayMaxBodyBytes matches httpapi.MaxBodyBytes without making the CLI
@@ -46,6 +49,9 @@ type mcpRelay struct {
 	discovered string
 	initialize []byte
 	tools      map[string][]string
+	now        func() time.Time
+	sleep      func(context.Context, time.Duration) bool
+	outage     reconnectStatus
 }
 
 func (a *app) cmdMCP(args []string) error {
@@ -157,10 +163,105 @@ func mcpRelayCode(code string) bool {
 	return true
 }
 
-// exchange retries exactly once after session loss. The cached initialize
+var errMCPListenEnded = errors.New("subscription stream ended")
+
+// Local response processing (schema/cache/output) is distinct from reading
+// the upstream body, even when a local writer returns EOF or a network error.
+type mcpResponseError struct{ err error }
+
+func (e *mcpResponseError) Error() string { return e.err.Error() }
+func (e *mcpResponseError) Unwrap() error { return e.err }
+
+type mcpExchange struct {
+	status                                *reconnectStatus
+	acked, resuming, completed, delivered bool
+	hadLive                               bool
+}
+
+func (r *mcpRelay) exchange(raw []byte, msg mcpRelayMessage, emit bool) error {
+	if r.outage.out == nil {
+		r.outage = reconnectStatus{out: r.a.stderr, name: "mcp", now: r.now}
+	}
+	st := &mcpExchange{status: &r.outage}
+	for failures := 1; ; failures++ {
+		st.hadLive = false
+		err := r.exchangeAttempt(raw, msg, emit, st)
+		if err == nil {
+			st.status.live()
+			return nil
+		}
+		if r.a.ctx.Err() != nil {
+			return r.a.ctx.Err()
+		}
+		var local *mcpResponseError
+		if errors.As(err, &local) {
+			return err
+		}
+		if st.completed {
+			var network *netError
+			if errors.As(err, &network) {
+				// The final answer already reached stdout.
+				return nil
+			}
+			return err
+		}
+		if !mcpRetryable(msg, err, st.delivered) {
+			return err
+		}
+		if st.hadLive {
+			// This acknowledged stream's close starts a new outage.
+			failures = 1
+		}
+		st.resuming = st.acked
+		// Never print response bodies, URLs, bearer credentials or raw errors.
+		detail := "hub unavailable"
+		var hub *hubError
+		if errors.As(err, &hub) {
+			detail = fmt.Sprintf("hub answered HTTP %d", hub.Status)
+		}
+		st.status.failed(detail)
+		// One-shot calls must release stdin for later requests. Only the
+		// explicit subscription owns an indefinite reconnecting lifetime.
+		if failures >= 3 && msg.Method != "subscriptions/listen" {
+			return err
+		}
+		pause := r.sleep
+		if pause == nil {
+			pause = sleepCtx
+		}
+		if !pause(r.a.ctx, reconnectDelay(failures)) {
+			return r.a.ctx.Err()
+		}
+	}
+}
+
+func mcpRetryable(msg mcpRelayMessage, err error, delivered bool) bool {
+	// A failed dial sent no request. All later transport failures may have
+	// executed a mutation; even a proxy 502/504 can hide a completed write.
+	var op *net.OpError
+	if errors.As(err, &op) && op.Op == "dial" {
+		return true
+	}
+	safe := false
+	switch msg.Method {
+	case "initialize", "server/discover", "ping", "tools/list", "resources/list", "resources/read", "prompts/list", "prompts/get", "subscriptions/listen":
+		safe = true
+	}
+	if !safe || (delivered && msg.Method != "subscriptions/listen") {
+		return false
+	}
+	var hub *hubError
+	if errors.As(err, &hub) {
+		return hub.Status == 502 || hub.Status == 503 || hub.Status == 504
+	}
+	var network *netError
+	return errors.As(err, &network) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, errMCPListenEnded)
+}
+
+// exchangeAttempt retries exactly once after session loss. The cached initialize
 // is sent privately; its response updates headers without duplicating the
 // client's original initialize response on stdout.
-func (r *mcpRelay) exchange(raw []byte, msg mcpRelayMessage, emit bool) error {
+func (r *mcpRelay) exchangeAttempt(raw []byte, msg mcpRelayMessage, emit bool, st *mcpExchange) error {
 	// Keep the client's raw request intact: a new catalog may remove a
 	// property that the previous catalog caused us to inject.
 	wire := raw
@@ -176,13 +277,13 @@ func (r *mcpRelay) exchange(raw []byte, msg mcpRelayMessage, emit bool) error {
 			return err
 		}
 	}
-	err = r.post(wire, msg, emit)
+	err = r.post(wire, msg, emit, st)
 	var hub *hubError
 	if msg.Method != "initialize" && len(r.initialize) > 0 && errors.As(err, &hub) && hub.Status == 404 && hub.Code == "session_not_found" {
 		r.session, r.version = "", ""
 		var init mcpRelayMessage
 		_ = json.Unmarshal(r.initialize, &init)
-		if err := r.post(r.initialize, init, false); err != nil {
+		if err := r.post(r.initialize, init, false, nil); err != nil {
 			return err
 		}
 		if r.version == "" {
@@ -196,12 +297,12 @@ func (r *mcpRelay) exchange(raw []byte, msg mcpRelayMessage, emit bool) error {
 				return err
 			}
 		}
-		return r.post(wire, msg, emit)
+		return r.post(wire, msg, emit, st)
 	}
 	return err
 }
 
-func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool) error {
+func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool, st *mcpExchange) error {
 	// Binding can add bytes to a legal input line. Check the final body on
 	// every path, including unbound requests and session recovery posts.
 	if len(raw) > mcpRelayMaxBodyBytes {
@@ -234,10 +335,52 @@ func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool) error {
 		return err
 	}
 	defer resp.Body.Close()
-	handle := func(payload []byte) error {
+	if resp.StatusCode == http.StatusNoContent {
+		return errPeerDisabled
+	}
+	handle := func(payload []byte) (err error) {
+		defer func() {
+			if err != nil {
+				err = &mcpResponseError{err: err}
+			}
+		}()
 		var reply mcpRelayMessage
 		if err := json.Unmarshal(payload, &reply); err != nil || reply.JSONRPC != "2.0" || (len(reply.Result) == 0 && len(reply.Error) == 0 && reply.Method == "") {
 			return errors.New("invalid relay response")
+		}
+		if st != nil && msg.Method == "subscriptions/listen" && reply.Method == "notifications/subscriptions/acknowledged" {
+			st.hadLive = true
+			st.status.live()
+			if st.acked {
+				if st.resuming && emit {
+					var p struct {
+						Meta          json.RawMessage `json:"_meta"`
+						Notifications struct {
+							URIs []string `json:"resourceSubscriptions"`
+						} `json:"notifications"`
+					}
+					if json.Unmarshal(reply.Params, &p) != nil {
+						return errors.New("invalid subscription acknowledgement")
+					}
+					slices.Sort(p.Notifications.URIs)
+					for _, uri := range slices.Compact(p.Notifications.URIs) {
+						params := map[string]any{"uri": uri}
+						if len(p.Meta) > 0 {
+							params["_meta"] = p.Meta
+						}
+						if err := r.a.emitValue(map[string]any{"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": params}); err != nil {
+							return err
+						}
+					}
+				}
+				st.resuming = false
+				return nil // the stdio client already received its acknowledgement
+			}
+			st.acked = true
+		}
+		final := bytes.Equal(bytes.TrimSpace(reply.ID), bytes.TrimSpace(msg.ID)) && len(reply.ID) > 0
+		if st != nil && final {
+			st.status.live()
 		}
 		// Only a response to this request may populate cached transport state.
 		if bytes.Equal(bytes.TrimSpace(reply.ID), bytes.TrimSpace(msg.ID)) && len(reply.ID) > 0 && len(reply.Error) == 0 {
@@ -274,17 +417,29 @@ func (r *mcpRelay) post(raw []byte, msg mcpRelayMessage, emit bool) error {
 			}
 		}
 		if emit && len(msg.ID) > 0 {
-			return r.a.emitJSON(payload)
+			if err := r.a.emitJSON(payload); err != nil {
+				return err
+			}
+			if st != nil {
+				st.delivered = true
+			}
+		}
+		if st != nil && final {
+			st.completed = true
 		}
 		return nil
 	}
 	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if mediaType == "text/event-stream" {
-		return mcpRelaySSE(resp.Body, handle)
+		err := mcpRelaySSE(resp.Body, handle)
+		if err == nil && msg.Method == "subscriptions/listen" && st != nil && !st.completed {
+			return errMCPListenEnded
+		}
+		return err
 	}
 	payload, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return &netError{err: err}
 	}
 	if len(bytes.TrimSpace(payload)) == 0 {
 		return nil
@@ -324,7 +479,7 @@ func mcpRelaySSE(body io.Reader, handle func([]byte) error) error {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return err
+		return &netError{err: err}
 	}
 	return flush()
 }
