@@ -196,7 +196,11 @@ test('classifyPermission: sudo after && is privileged; ~/.ssh write is privilege
     }
     assert.ok(classifyPermission(permission({command:{argv:[word,'true'],shell_operators:false}}),'/home/test').includes('privileged_exec'));
   }
-  for (const line of ['echo sudo','echo "sudo"','echo "safe && sudo no"','echo sudoer','echo /usr/bin/sudo']) {
+  // Fail closed: a privileged name anywhere in `line` counts, even as data.
+  for (const line of ['echo sudo','echo "sudo"','echo "safe && sudo no"','echo /usr/bin/sudo']) {
+    assert.ok(classifyPermission(permission({command:{line,shell_operators:false}}),'/home/test').includes('privileged_exec'),line);
+  }
+  for (const line of ['echo sudoer','echo pseudo','ls -la /tmp','echo summary','git status','cat super.txt']) {
     assert.equal(classifyPermission(permission({command:{line,shell_operators:false}}),'/home/test').includes('privileged_exec'),false,line);
   }
   for (const path of ['/etc','/etc/passwd','/usr/bin/file','/home/test/.ssh/key','~/.ssh/key','/home/test/.config/app']) {
@@ -230,18 +234,18 @@ const substitutionCases = [
   {line:'echo "$( (echo safe); sudo id)"',privileged:true},
   {line:'echo "$(echo safe)" && sudo id',privileged:true},
   {line:'echo "$(echo safe)$(sudo id)"',privileged:true},
-  {line:'echo \'$(sudo id)\'',privileged:false},
-  {line:'echo \'`sudo id`\'',privileged:false},
-  {line:'echo "\\$(sudo id)"',privileged:false},
-  {line:'echo \\`sudo id\\`',privileged:false},
-  {line:'echo "\\`sudo id\\`"',privileged:false},
-  {line:'echo "$(echo sudo)"',privileged:false},
-  {line:'echo `echo sudo`',privileged:false},
-  {line:'echo `echo \'$(sudo id)\'`',privileged:false},
-  {line:'echo "$(echo \'$(sudo id)\')"',privileged:false},
-  {line:'echo "$(echo \'`sudo id`\')"',privileged:false},
-  {line:'echo "$(echo \'safe && sudo id\')"',privileged:false},
-  {line:'echo "$(echo safe)" sudo',privileged:false},
+  {line:'echo \'$(sudo id)\'',privileged:true},
+  {line:'echo \'`sudo id`\'',privileged:true},
+  {line:'echo "\\$(sudo id)"',privileged:true},
+  {line:'echo \\`sudo id\\`',privileged:true},
+  {line:'echo "\\`sudo id\\`"',privileged:true},
+  {line:'echo "$(echo sudo)"',privileged:true},
+  {line:'echo `echo sudo`',privileged:true},
+  {line:'echo `echo \'$(sudo id)\'`',privileged:true},
+  {line:'echo "$(echo \'$(sudo id)\')"',privileged:true},
+  {line:'echo "$(echo \'`sudo id`\')"',privileged:true},
+  {line:'echo "$(echo \'safe && sudo id\')"',privileged:true},
+  {line:'echo "$(echo safe)" sudo',privileged:true},
 ];
 
 // Exercise the same shell words at both classification and routing boundaries.
@@ -281,7 +285,7 @@ const prefixCases = [
     'echo "$(>sudo echo safe)"', 'echo "$(FLAG=1 echo sudo)"',
     'echo "$(echo safe)" FLAG=1 sudo id',
     'echo \\>sudo', 'echo "safe && FLAG=1 sudo id"',
-  ].map(line => ({line,privileged:false})),
+  ].map(line => ({line,privileged:true})),
 ];
 const shellSyntaxCases = [
   ...[
@@ -321,7 +325,7 @@ const shellSyntaxCases = [
   ...['!', '{', 'if', 'then', 'elif', 'else', 'while', 'until', 'do', 'time', 'function'].flatMap(word => [
     `"${word}" sudo id`, `'${word}' sudo id`, `\\${word} sudo id`,
     `echo ${word} sudo id`, `>${word} echo sudo`, `FLAG=${word} echo sudo`,
-  ]).map(line => ({line,privileged:false})),
+  ]).map(line => ({line,privileged:true})),
   ...[
     'echo "safe && ! sudo id"', "echo 'safe && { sudo id; }'", 'echo "if true; then sudo id; fi"',
     'echo \'$(if true; then sudo id; fi)\'', 'echo "\\$(echo safe && ! sudo id)"',
@@ -337,11 +341,22 @@ const shellSyntaxCases = [
     'function sudo { echo safe; }', 'function sudo() { echo safe; }',
     'time -p echo sudo', 'time -p "!" sudo id',
     '! FLAG="safe && sudo id" echo safe', '{ >sudo echo safe; }',
-  ].map(line => ({line,privileged:false})),
+  ].map(line => ({line,privileged:true})),
 ];
-const commandCases = [...substitutionCases,...prefixCases,...shellSyntaxCases];
+// Bypasses found against the old shell parser (review round 3 and likely next ones).
+const bypassCases = [
+  'echo safe # "\nsudo id', "echo safe # '\nsudo id", 'echo safe #\nsudo id',
+  'env sudo id', 'env FOO=1 sudo id', "bash -c 'sudo id'", 'sh -c "sudo id"', 'eval "sudo id"',
+  'bash <<EOF\nsudo id\nEOF', 'echo id | xargs sudo', 'nohup sudo id', 'exec sudo id', 'command sudo id',
+  "s''udo id", 's\\udo id', '${X:-sudo} id', 'echo "unterminated\nsudo id',
+].map(line => ({line,privileged:true}));
+// Coordinator decision (2026-11-05): classification fails closed, so every table
+// entry that names a privileged command is privileged, including ones that are
+// only data to a real shell. Only lines that never spell a privileged name stay inert.
+const commandCases = [...substitutionCases,...prefixCases,...shellSyntaxCases,...bypassCases,
+  ...['echo safe','ls /tmp','echo sudoer pseudo','git log --oneline'].map(line => ({line,privileged:false}))];
 
-test('classifyPermission: substitutions, prefixes and shell syntax preserve executable position; literals stay inert', async t => {
+test('classifyPermission: fails closed on any privileged name in line (substitutions, prefixes, shell syntax, comments, wrappers); lines without one stay inert', async t => {
   for (const {line,privileged} of commandCases) {
     await t.test(line, () => {
       const p = permission({kind:'exec',paths:[],command:{line,shell_operators:true},

@@ -71,133 +71,19 @@ export function gateLaunch(a: { sender: string; req: LaunchRequest; dir: Directo
 export type ApprovalRoute = { to: 'requester' | 'operator' | 'relay'; escalateOption: boolean; escalateToOperator: boolean;
   parentExpiresMs: number; onParentExpiry: 'deny' | 'escalate'; categories: ApprovalCategory[] };
 
-// Locate command words without mistaking quoted text or arguments for commands.
-// This is classification only: no shell evaluation or argv synthesis occurs.
-function commandWords(line: string): string[] {
-  const commands: string[] = [];
-  const commandSyntax = new Set(['!', '{', 'if', 'then', 'elif', 'else', 'while', 'until', 'do']);
-  const pending = [line];
-  const context = () => ({word:'',started:false,plain:true,assignment:false,redirection:false,quote:'',atCommand:true,parens:0,
-    functionName:false,timing:false,cases:[] as ('subject' | 'in' | 'pattern' | 'body')[]});
-  while (pending.length) {
-    const source = pending.pop()!;
-    const parents: ReturnType<typeof context>[] = [];
-    let current = context();
-    function flush() {
-      if (current.started) {
-        // Assignments and redirection operands precede the executable without
-        // consuming its position. Their substitutions are still scanned below.
-        const caseIndex = current.cases.length - 1;
-        const casePart = current.cases[caseIndex];
-        if (current.redirection) current.redirection = false;
-        else if (current.plain && current.word === 'esac' && (casePart === 'pattern' || current.atCommand)) {
-          current.cases.pop(); current.atCommand = false;
-        } else if (casePart === 'subject') current.cases[caseIndex] = 'in';
-        else if (casePart === 'in') {
-          if (current.plain && current.word === 'in') current.cases[caseIndex] = 'pattern';
-        } else if (casePart === 'pattern') { /* Case patterns are data, not executables. */ }
-        else if (current.atCommand && current.plain && current.word === 'case') {
-          current.cases.push('subject'); current.atCommand = false;
-        } else if (current.functionName) current.functionName = false;
-        else if (current.atCommand && current.plain && current.word === 'function') current.functionName = true;
-        else if (current.atCommand && current.plain && current.word === 'time') current.timing = true;
-        else if (current.atCommand && current.plain && current.timing && current.word === '-p') { /* time's option precedes the pipeline. */ }
-        // Only unquoted reserved words at command position open a pipeline or
-        // compound-command body. The same words in arguments, assignment values
-        // or redirection operands stay inert, as do quoted/escaped spellings.
-        else if (!current.assignment && !(current.atCommand && current.plain && commandSyntax.has(current.word))) {
-          if (current.atCommand) commands.push(current.word);
-          current.atCommand = false; current.timing = false;
-        }
-        current.word = ''; current.started = false; current.plain = true; current.assignment = false;
-      }
-    }
-    for (let i = 0; i < source.length; i++) {
-      const char = source[i];
-      if (current.quote === "'") {
-        if (char === "'") current.quote = ''; else current.word += char;
-        continue;
-      }
-      if (char === '\\') {
-        const next = source[i+1];
-        if (next !== undefined && (current.quote !== '"' || '$`"\\\n'.includes(next))) {
-          if (next !== '\n') { current.word += next; current.started = true; current.plain = false; }
-          i++;
-        } else { current.word += char; current.started = true; }
-        continue;
-      }
-      if (char === '`') {
-        // Legacy substitutions remove these escapes before parsing their body.
-        let body = '';
-        for (i++; i < source.length && source[i] !== '`'; i++) {
-          if (source[i] === '\\' && i+1 < source.length && '$`\\\n'.includes(source[i+1])) {
-            i++;
-            if (source[i] === '\n') continue;
-          }
-          body += source[i];
-        }
-        pending.push(body);
-        current.word += '`...`'; current.started = true; current.plain = false;
-        continue;
-      }
-      if (char === '$' && source[i+1] === '(') {
-        // Substitutions run even inside double quotes, with independent quoting.
-        // Keep their output opaque in the enclosing word; never synthesise argv.
-        current.word += '$()'; current.started = true; current.plain = false;
-        parents.push(current); current = context(); i++;
-        continue;
-      }
-      if (current.quote) {
-        if (char === current.quote) current.quote = ''; else current.word += char;
-        continue;
-      }
-      if (char === "'" || char === '"') { current.quote = char; current.started = true; current.plain = false; continue; }
-      // A case pattern's ')' belongs to the case clause, not to the enclosing
-      // command substitution. Each substitution keeps its own case stack.
-      if (char === ')' && current.cases.at(-1) === 'pattern') {
-        flush();
-        if (current.cases.at(-1) === 'pattern') {
-          current.cases[current.cases.length - 1] = 'body'; current.atCommand = true;
-          continue;
-        }
-      }
-      if (char === '(' && current.cases.at(-1) === 'pattern') { flush(); continue; }
-      if (char === ';' && current.cases.at(-1) === 'body' && /^(?:;;|;&)/.test(source.slice(i))) {
-        flush(); current.cases[current.cases.length - 1] = 'pattern'; current.atCommand = false;
-        i += source[i+1] === ';' && source[i+2] === '&' ? 2 : 1;
-        continue;
-      }
-      if (char === ')' && parents.length && current.parens === 0) {
-        flush(); current = parents.pop()!;
-        continue;
-      }
-      if (char === '<' || char === '>' || (char === '&' && source[i+1] === '>')) {
-        // Only an adjacent, unquoted IO number belongs to the operator.
-        if (current.plain && /^\d+$/.test(current.word)) {
-          current.word = ''; current.started = false;
-        }
-        flush();
-        const operator = /^(?:&>>?|<<<|<<-|<<|<>|<&|>&|>\||>>|[<>])/.exec(source.slice(i))![0];
-        i += operator.length - 1;
-        current.redirection = true;
-        continue;
-      }
-      if (';&|()\n'.includes(char)) {
-        flush(); current.atCommand = true; current.timing = false;
-        if (char === '(') current.parens++;
-        if (char === ')' && current.parens > 0) current.parens--;
-        continue;
-      }
-      if (/\s/.test(char)) { flush(); continue; }
-      // The name and '=' must be literal shell syntax; quotes or escapes in
-      // the name make this an executable word, even if quote removal yields X=Y.
-      if (char === '=' && current.atCommand && !current.redirection && current.plain &&
-          /^[A-Za-z_][A-Za-z0-9_]*\+?$/.test(current.word)) current.assignment = true;
-      current.word += char; current.started = true;
-    }
-    flush();
-  }
-  return commands;
+// Fail closed (coordinator decision, 2026-11-05): `line` is hostile text, and
+// any hand-written shell parser can be steered around (comments, here-documents,
+// `env`/`bash -c`/`eval` wrappers, quoting tricks). So a privileged command name
+// anywhere in the line counts, whether it is a command word, an argument, quoted,
+// commented or inside a substitution. Quotes and backslashes are removed first,
+// so `s''udo` and `s\udo` still match. A false positive only sends the approval
+// to the operator; a false negative would hide a privileged command from them.
+// Obfuscation that never spells the name (variables, decoding) is out of reach
+// for any classifier: route untrusted requesters with to_operator.requesters.
+const PRIVILEGED_COMMANDS = new Set(['sudo','su','doas','pkexec']);
+function mentionsPrivileged(line: string): boolean {
+  const words = line.replace(/[\\'"`]/g,'').match(/[A-Za-z0-9_.\/~+]+/g) ?? [];
+  return words.some(word => PRIVILEGED_COMMANDS.has(basename(word)));
 }
 function within(root: string, path: string): boolean {
   const rel = relative(root,path);
@@ -206,8 +92,8 @@ function within(root: string, path: string): boolean {
 export function classifyPermission(p: LaunchPermission, home: string): ApprovalCategory[] {
   const categories: ApprovalCategory[] = [p.kind];
   if (p.outside_workspace === true && p.paths?.some(path => ['write','delete','move'].includes(path.access))) categories.push('outside_workspace_writes');
-  const commands = [...(p.command?.argv?.length ? [p.command.argv[0]] : []),...commandWords(p.command?.line ?? '')];
-  const privilegedCommand = commands.some(command => ['sudo','su','doas','pkexec'].includes(basename(command)));
+  const argv0 = p.command?.argv?.length ? p.command.argv[0] : undefined;
+  const privilegedCommand = (argv0 !== undefined && PRIVILEGED_COMMANDS.has(basename(argv0))) || mentionsPrivileged(p.command?.line ?? '');
   const roots = ['/etc','/usr',resolve(home,'.ssh'),resolve(home,'.config')];
   const privilegedPath = p.paths?.some(p => {
     const expanded = p.path.startsWith('~/') ? resolve(home,p.path.slice(2)) : p.path;
