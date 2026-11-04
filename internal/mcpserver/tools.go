@@ -60,7 +60,14 @@ func (s *Server) registerTools() {
 // Shape errors are invalid params (-32602, data.path naming the JSON pointer
 // of the violation). Reaction enum values are checked by the hub in §17.2
 // order; hub rejections are tool-level errors a model can read and act on.
-func (s *Server) toolsCall(ctx context.Context, sess *Session, req *Request) (any, error) {
+func (s *Server) toolsCall(ctx context.Context, sess *Session, req *Request) (result any, err error) {
+	defer func() {
+		if d, _ := ctx.Value(diagKey{}).(*requestDiag); d != nil {
+			if res, ok := result.(*mcp.CallToolResult); ok && res.IsError {
+				d.toolError = true
+			}
+		}
+	}()
 	if req.IsNotification() {
 		return nil, nil // a write with no way to report its outcome is not run
 	}
@@ -841,6 +848,11 @@ func toolSpecs(defs schema) []toolSpec {
 		}),
 		annotations: readAnnotations(), call: callInbox,
 	}, {
+		name:        "vecnet_subscriptions",
+		description: "Read your own peer's active MCP event subscriptions and delivery health. An empty list means event subscription is not active; follow the returned user setup hint and use vecnet_inbox meanwhile. This tool cannot subscribe.",
+		input:       object(schema{}),
+		annotations: readAnnotations(), call: callSubscriptions,
+	}, {
 		name:        "vecnet_ack",
 		description: "Write: acknowledge your inbox on the operator's bus up to and including cursor; deliveries at or before it become accepted and their senders are told.",
 		input:       object(schema{"cursor": ref("cursor"), "peer": peer}, "cursor"),
@@ -1215,9 +1227,9 @@ func listEntry(t *mcp.Tool, meta map[string]any, output schema) map[string]any {
 	if err := json.Unmarshal(raw, &entry); err != nil {
 		panic("mcpserver: decode tool list entry: " + err.Error())
 	}
-	// oauth.Scope is "vecnet"; oauth imports mcpserver, so importing that
-	// package here would create a cycle. The discovery test pins equality.
-	entry["securitySchemes"] = []map[string]any{{"type": "oauth2", "scopes": []string{"vecnet"}}}
+	// Tools use the base vecnet scope; Events write permission is checked
+	// separately at events/subscribe and events/unsubscribe.
+	entry["securitySchemes"] = []map[string]any{{"type": "oauth2", "scopes": []string{ScopeVecnet}}}
 	if meta != nil {
 		entry["_meta"] = meta
 	}

@@ -109,6 +109,7 @@ admin (operator credential):
   team add --name N [--members IDS]
   dead-letters list | dead-letters retry <dly> | dead-letters discard <dly>
   notify set --url URL --filter F [--url URL --filter F]…
+  diag mcp [--peer ID] [--method M] [--limit N] [--follow]
   audit [--limit N]
   tui                                                 the operator's terminal client
 
@@ -463,6 +464,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdDeadLetters(args)
 	case "notify":
 		return a.cmdNotify(args)
+	case "diag":
+		return a.cmdDiag(args)
 	case "audit":
 		return a.cmdAudit(args)
 	case "tui":

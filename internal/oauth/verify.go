@@ -73,11 +73,15 @@ func (a *TokenAuth) Authenticate(ctx context.Context, r *http.Request) (mcpserve
 		return mcpserver.Principal{}, fmt.Errorf("oauth: token expiry: %w", err)
 	}
 	scopes := strings.Fields(scope)
-	if !s.now().Before(exp) || resource != s.resource() || !slices.Contains(scopes, Scope) {
+	if resource != s.resource() || !slices.Contains(scopes, Scope) {
 		return mcpserver.Principal{}, auth.ErrUnauthenticated
 	}
-	return mcpserver.Principal{
+	p := mcpserver.Principal{
 		Caller: auth.Caller{Kind: "principal", PrincipalID: prn, PeerID: peer, PeerKind: peerKind},
 		OAuth:  &mcpserver.OAuthInfo{PrincipalID: prn, ClientID: clientID, Scopes: scopes, Expires: exp, TokenHash: hash},
-	}, nil
+	}
+	if !s.now().Before(exp) {
+		return p, mcpserver.ErrExpiredToken
+	}
+	return p, nil
 }

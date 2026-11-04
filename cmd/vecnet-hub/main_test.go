@@ -108,3 +108,28 @@ func TestMCPAllowedOriginsFlagAndEnv(t *testing.T) {
 		})
 	}
 }
+
+func TestMCPLegacySessionsStartup(t *testing.T) {
+	for _, useFlag := range []bool{false, true} {
+		dir := filepath.Join(t.TempDir(), "unopened")
+		args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir}
+		getenv := noEnv
+		if useFlag {
+			args = append(args, "--mcp-legacy-sessions", "invalid")
+		} else {
+			getenv = func(k string) string {
+				if k == "VECNET_MCP_LEGACY_SESSIONS" {
+					return "invalid"
+				}
+				return ""
+			}
+		}
+		err := run(context.Background(), args, io.Discard, getenv)
+		if err == nil || !strings.Contains(err.Error(), "MCP legacy sessions") {
+			t.Fatalf("invalid config error: %v", err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("invalid config opened data directory: %v", err)
+		}
+	}
+}

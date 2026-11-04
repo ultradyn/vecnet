@@ -11,6 +11,7 @@
 {{- if .Request}}
 <h1>Connect to vecnet</h1>
 <p><strong>{{.ClientName}}</strong> is asking to act for this dot on the vecnet hub. You will be sent back to <strong>{{.RedirectHost}}</strong>.</p>
+<p>Approval lets this application read and send vecnet messages for your dot, and read, create, refresh or remove its event subscriptions (<code>vecnet</code>, <code>events:read</code>, <code>events:write</code>).</p>
 {{- if .NewClient}}
 <p class="error" role="alert">You have not approved this application in this browser before, and its name is its own to choose. Approve only if you started this connection just now.</p>
 {{- end}}

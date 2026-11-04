@@ -19,6 +19,7 @@ import (
 	"github.com/XertroV/vecnet/internal/blob"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/ids"
+	"github.com/XertroV/vecnet/internal/mcpdiag"
 )
 
 // Operator powers behind /v1/admin/... (PROTOCOL §2.12, §5.5, §12). The HTTP
@@ -339,15 +340,41 @@ const PausedOperator = "operator"
 // pauseBearerSubscriptions stops the Events subscriptions the credential of
 // subject made (subject is a peer or principal id). An operator's pause stays
 // the operator's. Paused subscriptions keep their cursor, so nothing is lost.
-func (h *Hub) pauseBearerSubscriptions(ctx context.Context, tx *sql.Tx, subject string) error {
+// Returned identities describe only changed rows; emit them after commit.
+func (h *Hub) pauseBearerSubscriptions(ctx context.Context, tx *sql.Tx, subject string) ([]pausedBearerSubscription, error) {
 	now := h.nowStr()
-	if _, err := tx.ExecContext(ctx,
+	rows, err := tx.QueryContext(ctx,
 		`UPDATE event_subscriptions SET paused_reason = ?, updated_at = ?
-		 WHERE principal_kind = 'vecnet' AND principal_id = ? AND coalesce(paused_reason, '') != ?`,
-		PausedCredentialRotated, now, subject, PausedOperator); err != nil {
-		return fmt.Errorf("hub: pause subscriptions: %w", err)
+		 WHERE principal_kind = 'vecnet' AND principal_id = ? AND coalesce(paused_reason, '') NOT IN (?, ?)
+		 RETURNING sub_id, peer_id`,
+		PausedCredentialRotated, now, subject, PausedOperator, PausedCredentialRotated)
+	if err != nil {
+		return nil, fmt.Errorf("hub: pause subscriptions: %w", err)
 	}
-	return nil
+	defer rows.Close()
+	var paused []pausedBearerSubscription
+	for rows.Next() {
+		var sub pausedBearerSubscription
+		if err := rows.Scan(&sub.id, &sub.peerID); err != nil {
+			return nil, fmt.Errorf("hub: pause subscriptions: %w", err)
+		}
+		paused = append(paused, sub)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hub: pause subscriptions: %w", err)
+	}
+	return paused, nil
+}
+
+type pausedBearerSubscription struct{ id, peerID string }
+
+func logBearerSubscriptionPauses(paused []pausedBearerSubscription) {
+	for _, sub := range paused {
+		mcpdiag.Emit("events.pause", map[string]any{
+			"subscription_id": sub.id, "peer_id": sub.peerID,
+			"reason": PausedCredentialRotated, "result": "paused",
+		})
+	}
 }
 
 // RotatePeer revokes peerID's peer credentials and returns a new secret, once
@@ -356,6 +383,7 @@ func (h *Hub) pauseBearerSubscriptions(ctx context.Context, tx *sql.Tx, subject 
 // unknown peer. Open streams on the old credential end (they wake here).
 func (h *Hub) RotatePeer(ctx context.Context, peerID string) (string, error) {
 	var secret string
+	var paused []pausedBearerSubscription
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		_, kind, _, err := peerRow(ctx, tx, peerID)
 		if err != nil {
@@ -367,11 +395,13 @@ func (h *Hub) RotatePeer(ctx context.Context, peerID string) (string, error) {
 		if secret, err = h.Auth.RotateTx(ctx, tx, "peer", peerID); err != nil {
 			return err
 		}
-		return h.pauseBearerSubscriptions(ctx, tx, peerID)
+		paused, err = h.pauseBearerSubscriptions(ctx, tx, peerID)
+		return err
 	})
 	if err != nil {
 		return "", err
 	}
+	logBearerSubscriptionPauses(paused)
 	h.Log.Notify(peerID)
 	return secret, nil
 }
@@ -382,6 +412,7 @@ func (h *Hub) RotatePeer(ctx context.Context, peerID string) (string, error) {
 // not_found for an unknown principal. Open streams on the old credential end.
 func (h *Hub) RotatePrincipal(ctx context.Context, prnID string) (string, error) {
 	var secret string
+	var paused []pausedBearerSubscription
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		kind := "principal"
 		var isOp bool
@@ -396,7 +427,8 @@ func (h *Hub) RotatePrincipal(ctx context.Context, prnID string) (string, error)
 		if secret, err = h.Auth.RotateTx(ctx, tx, kind, prnID); err != nil {
 			return err
 		}
-		return h.pauseBearerSubscriptions(ctx, tx, prnID)
+		paused, err = h.pauseBearerSubscriptions(ctx, tx, prnID)
+		return err
 	})
 	if errors.Is(err, auth.ErrUnknownSubject) {
 		e := E(http.StatusNotFound, "not_found", "no such principal")
@@ -406,6 +438,7 @@ func (h *Hub) RotatePrincipal(ctx context.Context, prnID string) (string, error)
 	if err != nil {
 		return "", err
 	}
+	logBearerSubscriptionPauses(paused)
 	h.Log.Notify(prnID)
 	return secret, nil
 }

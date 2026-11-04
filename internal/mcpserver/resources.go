@@ -284,7 +284,7 @@ func methodNotInEra(method string) *RPCError {
 }
 
 func (s *Server) resourcesSubscribe(ctx context.Context, sess *Session, req *Request) (any, error) {
-	if sess.Proto != ProtoLegacy {
+	if sess.Proto == ProtoCurrent {
 		return nil, methodNotInEra(req.Method) // 2026-07-28: subscriptions/listen
 	}
 	uri, err := uriParam(req)
@@ -343,7 +343,7 @@ func (s *Server) resourcesSubscribe(ctx context.Context, sess *Session, req *Req
 }
 
 func (s *Server) resourcesUnsubscribe(ctx context.Context, sess *Session, req *Request) (any, error) {
-	if sess.Proto != ProtoLegacy {
+	if sess.Proto == ProtoCurrent {
 		return nil, methodNotInEra(req.Method) // 2026-07-28: subscriptions/listen
 	}
 	uri, err := uriParam(req)
