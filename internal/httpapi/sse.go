@@ -19,16 +19,22 @@ const sseBuffer = 64
 // gets backpressure while a stuck or vanished one is dropped. The log is
 // pull-based: Notify never waits on any of this.
 type sseConn struct {
-	w      http.ResponseWriter
-	rc     *http.ResponseController
-	stall  time.Duration
-	frames chan []byte
-	stop   chan struct{} // closed by close
-	done   chan struct{} // closed when the writer goroutine exits
-	once   sync.Once
+	w        http.ResponseWriter
+	rc       *http.ResponseController
+	stall    time.Duration
+	frames   chan queuedSSEFrame
+	stop     chan struct{} // closed by close
+	done     chan struct{} // closed when the writer goroutine exits
+	once     sync.Once
+	draining <-chan struct{} // cancels producer backpressure on restart; nil is inert
 
 	dmu    sync.Mutex // orders the writer's deadlines with close's
 	closed bool
+}
+
+type queuedSSEFrame struct {
+	data  []byte
+	final bool
 }
 
 // sseWriteTimeout bounds one frame's write and flush. The server's
@@ -61,7 +67,7 @@ func startSSE(w http.ResponseWriter, stall time.Duration) *sseConn {
 		w:      w,
 		rc:     rc,
 		stall:  stall,
-		frames: make(chan []byte, sseBuffer),
+		frames: make(chan queuedSSEFrame, sseBuffer),
 		stop:   make(chan struct{}),
 		done:   make(chan struct{}),
 	}
@@ -84,10 +90,13 @@ func (c *sseConn) writer() {
 			}
 			_ = c.rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
 			c.dmu.Unlock()
-			if _, err := c.w.Write(f); err != nil {
+			if _, err := c.w.Write(f.data); err != nil {
 				return
 			}
 			if err := c.rc.Flush(); err != nil {
+				return
+			}
+			if f.final {
 				return
 			}
 		}
@@ -98,6 +107,19 @@ func (c *sseConn) writer() {
 // when the writer has stopped, ctx is done, or the queue made no room for
 // stall (the consumer is stuck): the handler must then drop the connection.
 func (c *sseConn) send(ctx context.Context, frame []byte) bool {
+	return c.queue(ctx, queuedSSEFrame{data: frame})
+}
+
+func (c *sseConn) queue(ctx context.Context, frame queuedSSEFrame) bool {
+	draining := c.draining
+	if frame.final {
+		draining = nil
+	} // the final frame must survive the announcement
+	select {
+	case <-draining:
+		return false
+	default:
+	}
 	select {
 	case <-c.done:
 		return false
@@ -115,11 +137,27 @@ func (c *sseConn) send(ctx context.Context, frame []byte) bool {
 		return true
 	case <-c.done:
 		return false
+	case <-draining:
+		return false
 	case <-ctx.Done():
 		return false
 	case <-t.C:
 		return false
 	}
+}
+
+// finish queues the final frame behind earlier frames, waits for the writer
+// to flush and exit (or the shared queue/flush budget), then closes it.
+func (c *sseConn) finish(frame []byte, wait time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	if c.queue(ctx, queuedSSEFrame{data: frame, final: true}) {
+		select {
+		case <-c.done:
+		case <-ctx.Done():
+		}
+	}
+	c.close()
 }
 
 // failed is closed when the writer stops on a write error.
@@ -133,7 +171,13 @@ func (c *sseConn) close() {
 		close(c.stop)
 		c.dmu.Lock()
 		c.closed = true
-		_ = c.rc.SetWriteDeadline(time.Now())
+		// A flushed final frame has already stopped the writer. Preserve
+		// its deadline so net/http can write the response terminator.
+		select {
+		case <-c.done:
+		default:
+			_ = c.rc.SetWriteDeadline(time.Now())
+		}
 		c.dmu.Unlock()
 		<-c.done
 	})

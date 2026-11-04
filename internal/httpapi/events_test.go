@@ -741,7 +741,7 @@ func TestSSEEndsOnRotation(t *testing.T) {
 // With no wake at all, the heartbeat finds the rotation.
 func TestSSECredentialCheckedOnHeartbeat(t *testing.T) {
 	env := testhub.Start(t)
-	env.Configure(func(d *httpapi.Deps) { d.Heartbeat = 20 * time.Millisecond })
+	env.Configure(func(d *httpapi.Deps) { d.Drain = nil; d.Heartbeat = 20 * time.Millisecond })
 	b, bSec := env.NewPeer("session", "b")
 	s := openSSE(t, env, bSec, "", nil).start()
 	if _, err := env.Hub.Auth.Rotate(context.Background(), "peer", b); err != nil { // no Notify
@@ -814,5 +814,180 @@ func TestLongPollEndsOnRotation(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("long-poll still parked")
+	}
+}
+
+// readRawFrame preserves every byte, including forbidden id/retry fields.
+func readRawFrame(t *testing.T, br *bufio.Reader) string {
+	t.Helper()
+	type result struct {
+		frame string
+		err   error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		var frame strings.Builder
+		for {
+			line, err := br.ReadString('\n')
+			frame.WriteString(line)
+			if err != nil || line == "\n" {
+				ch <- result{frame.String(), err}
+				return
+			}
+		}
+	}()
+	select {
+	case got := <-ch:
+		if got.err != nil {
+			t.Fatalf("read frame: %v (%q)", got.err, got.frame)
+		}
+		return got.frame
+	case <-time.After(2 * time.Second):
+		t.Fatal("frame timeout")
+	}
+	return ""
+}
+
+func expectRawEOF(t *testing.T, br *bufio.Reader) {
+	t.Helper()
+	type result struct {
+		rest string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() { rest, err := br.ReadString('\n'); ch <- result{rest, err} }()
+	select {
+	case got := <-ch:
+		if got.err != io.EOF || got.rest != "" {
+			t.Fatalf("after final frame = %q, %v; want EOF", got.rest, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream did not end after final frame")
+	}
+}
+
+func TestSSERestartFrame(t *testing.T) {
+	env := testhub.Start(t)
+	d := httpapi.NewDrain()
+	env.Configure(func(deps *httpapi.Deps) { deps.Drain = d })
+	_, sender := env.NewPeer("session", "sender")
+	peer, secret := env.NewPeer("session", "reader")
+	postSend(t, env, sender, sendBody("restart-frame", peer), http.StatusAccepted)
+	page := mustPoll(t, env, secret, "?after="+zeroCursor(env)+"&wait=0")
+	if len(page.Events) != 1 {
+		t.Fatalf("events = %+v, want one delivery", page.Events)
+	}
+	s := openSSE(t, env, secret, "?after="+zeroCursor(env), nil)
+	br := bufio.NewReader(s.resp.Body)
+	if got := readRawFrame(t, br); got != "retry: 3000\n\n" {
+		t.Fatalf("retry = %q", got)
+	}
+	if got := readRawFrame(t, br); got != "id: "+zeroCursor(env)+"\ndata:\n\n" {
+		t.Fatalf("prime = %q", got)
+	}
+	delivery := readRawFrame(t, br)
+	lastID, _, _ := strings.Cut(strings.TrimPrefix(delivery, "id: "), "\n")
+	if lastID != page.Events[0].Cursor || !strings.Contains(delivery, "\nevent: delivery\n") {
+		t.Fatalf("delivery = %q", delivery)
+	}
+	d.Announce(1500 * time.Millisecond)
+	frame := readRawFrame(t, br)
+	if frame != "event: hub_restarting\ndata: {\"retry_after_ms\":1500}\n\n" {
+		t.Fatalf("restart = %q", frame)
+	}
+	// Exact equality above also pins Last-Event-ID: only the delivery had id:.
+	if lastID != page.NextCursor {
+		t.Fatalf("last id = %s, want %s", lastID, page.NextCursor)
+	}
+	expectRawEOF(t, br)
+	if !d.Wait(time.Second) {
+		t.Fatal("drain did not finish")
+	}
+	after := mustPoll(t, env, secret, "?after="+lastID+"&wait=0")
+	if len(after.Events) != 0 || after.NextCursor != lastID {
+		t.Fatalf("restart entered event log: %+v", after)
+	}
+}
+
+func TestDrainResetServesAgain(t *testing.T) {
+	env := testhub.Start(t)
+	d := httpapi.NewDrain()
+	env.Configure(func(deps *httpapi.Deps) { deps.Drain = d })
+	_, sender := env.NewPeer("session", "sender")
+	peer, secret := env.NewPeer("session", "reader")
+	s := openSSE(t, env, secret, "?after=head", nil)
+	br := bufio.NewReader(s.resp.Body)
+	readRawFrame(t, br)
+	readRawFrame(t, br)
+	d.Announce(0)
+	if got := readRawFrame(t, br); got != "event: hub_restarting\ndata: {\"retry_after_ms\":0}\n\n" {
+		t.Fatalf("restart = %q", got)
+	}
+	expectRawEOF(t, br)
+	if !d.Wait(time.Second) {
+		t.Fatal("first generation did not finish")
+	}
+	d.Reset()
+	stream := openSSE(t, env, secret, "?after=head", nil).start()
+	stream.expectPreamble(t, "")
+	sent := postSend(t, env, sender, sendBody("after-restart", peer), http.StatusAccepted)
+	f := stream.nextEvent(t, time.Second)
+	if f.Event != "delivery" || !f.HasID || !strings.Contains(f.Data, sent.MessageID) {
+		t.Fatalf("delivery after reset = %+v", f)
+	}
+}
+
+func TestDrainNilIsInert(t *testing.T) {
+	env := testhub.Start(t)
+	env.Configure(func(d *httpapi.Deps) { d.Drain = nil; d.Heartbeat = 20 * time.Millisecond })
+	_, sender := env.NewPeer("session", "sender")
+	peer, secret := env.NewPeer("session", "reader")
+	s := openSSE(t, env, secret, "?after=head", nil)
+	br := bufio.NewReader(s.resp.Body)
+	cursor := mustPoll(t, env, secret, "?after=head&wait=0").NextCursor
+	if got := readRawFrame(t, br); got != "retry: 3000\n\n" {
+		t.Fatalf("retry = %q", got)
+	}
+	if got := readRawFrame(t, br); got != "id: "+cursor+"\ndata:\n\n" {
+		t.Fatalf("prime = %q", got)
+	}
+	if got := readRawFrame(t, br); got != ": hb\n\n" {
+		t.Fatalf("heartbeat = %q", got)
+	}
+	postSend(t, env, sender, sendBody("nil-drain", peer), http.StatusAccepted)
+	page := mustPoll(t, env, secret, "?after="+cursor+"&wait=0")
+	if len(page.Events) != 1 {
+		t.Fatalf("events = %+v", page.Events)
+	}
+	wantJSON, err := json.Marshal(page.Events[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "id: " + page.NextCursor + "\nevent: delivery\ndata: " + string(wantJSON) + "\n\n"
+	for {
+		got := readRawFrame(t, br)
+		if got == ": hb\n\n" {
+			continue
+		}
+		if got != want {
+			t.Fatalf("delivery bytes = %q, want %q", got, want)
+		}
+		break
+	}
+	resp, body, _ := getEvents(t, env, secret, "?after="+page.NextCursor+"&wait=0", nil)
+	// Legacy empty pages use []; nil drain must preserve that byte shape.
+	if resp.StatusCode != 200 || string(body) != `{"events":[],"next_cursor":"`+page.NextCursor+`"}`+"\n" {
+		t.Fatalf("legacy poll = %d %s", resp.StatusCode, body)
+	}
+	activity := openActivity(t, env, env.OperatorSecret)
+	abr := bufio.NewReader(activity.Body)
+	if got := readRawFrame(t, abr); got != "retry: 3000\n\n" {
+		t.Fatalf("activity retry = %q", got)
+	}
+	if got := readRawFrame(t, abr); got != "event: ready\ndata: {}\n\n" {
+		t.Fatalf("activity ready = %q", got)
+	}
+	if got := readRawFrame(t, abr); got != ": hb\n\n" {
+		t.Fatalf("activity hb = %q", got)
 	}
 }

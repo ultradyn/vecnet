@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -67,6 +68,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 		"development only: let outbound URLs be http and reach private/loopback addresses ($VECNET_ALLOW_PRIVATE_EGRESS=1)")
 	trustFly := fs.Bool("trust-fly-client-ip", getenv("VECNET_TRUST_FLY_CLIENT_IP") == "1",
 		"key the per-client rate limit on the Fly-Client-IP header; only behind Fly's proxy ($VECNET_TRUST_FLY_CLIENT_IP=1)")
+	restartRetry := fs.String("restart-retry-ms", envOr(getenv, "VECNET_RESTART_RETRY_MS", "5000"), "restart reconnect delay in milliseconds, 0..60000 ($VECNET_RESTART_RETRY_MS)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -85,7 +87,14 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unknown subcommand %q", fs.Arg(0))
 	}
-	return serve(ctx, *listen, *dataDir, *publicURL, *devUIDir, *allowPrivate, *trustFly, stdout)
+	retryMS, err := strconv.ParseInt(*restartRetry, 10, 64)
+	if err != nil || retryMS < 0 || retryMS > 60000 {
+		return errors.New("--restart-retry-ms must be an integer in 0..60000")
+	}
+	return serve(ctx, serveConfig{
+		Listen: *listen, DataDir: *dataDir, PublicURL: *publicURL, DevUIDir: *devUIDir,
+		AllowPrivateEgress: *allowPrivate, TrustFly: *trustFly, RestartRetry: time.Duration(retryMS) * time.Millisecond,
+	}, stdout)
 }
 
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
@@ -130,9 +139,16 @@ func runInit(dataDir, name string, w io.Writer) error {
 	return err
 }
 
-// ShutdownGrace bounds http.Server.Shutdown; it must stay below fly.toml's
-// kill_timeout so the store closes before the platform kills the process.
+// ShutdownGrace bounds restart announcement, drain and http.Server.Shutdown.
+// It stays below fly.toml's kill_timeout so the store closes before the
+// platform kills the process.
 const ShutdownGrace = 10 * time.Second
+
+type serveConfig struct {
+	Listen, DataDir, PublicURL, DevUIDir string
+	AllowPrivateEgress, TrustFly         bool
+	RestartRetry                         time.Duration
+}
 
 // serve runs the HTTP server, the push and Events workers and the hub's
 // tickers until ctx is cancelled. It binds listen first, so ":0" picks a free port, and
@@ -141,8 +157,9 @@ const ShutdownGrace = 10 * time.Second
 // devUIDir "" serves the embedded operator UI. allowPrivateEgress is the
 // development-only egress override (hub.Config.AllowPrivateEgress).
 // trustFly keys the per-client limiter on Fly-Client-IP (Deps.TrustFlyClientIP).
-func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, allowPrivateEgress, trustFly bool, stdout io.Writer) error {
-	ln, err := net.Listen("tcp", listen)
+func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
+	publicURL := cfg.PublicURL
+	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err
 	}
@@ -150,14 +167,14 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 	if publicURL == "" {
 		publicURL = "http://" + addr
 	}
-	h, db, err := openHub(dataDir, publicURL, allowPrivateEgress)
+	h, db, err := openHub(cfg.DataDir, publicURL, cfg.AllowPrivateEgress)
 	if err != nil {
 		ln.Close()
 		return err
 	}
 	defer db.Close()
 
-	if allowPrivateEgress {
+	if cfg.AllowPrivateEgress {
 		slog.Warn("vecnet-hub: private egress allowed (development only): outbound URLs may be http and reach private addresses")
 	}
 	stack := httpapi.NewStack(h)
@@ -169,8 +186,9 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 	closeStop := func() { stopOnce.Do(func() { close(stop) }) }
 	defer closeStop()
 	deps := stack.Deps()
-	deps.UIDir, deps.Stop = devUIDir, stop
-	deps.TrustFlyClientIP = trustFly
+	deps.UIDir, deps.Stop = cfg.DevUIDir, stop
+	deps.Drain = httpapi.NewDrain()
+	deps.TrustFlyClientIP = cfg.TrustFly
 	srv := &http.Server{Handler: httpapi.New(deps)}
 	httpapi.ConfigureServer(srv)
 	srv.RegisterOnShutdown(closeStop)
@@ -197,6 +215,8 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 	// The grace period stays under Fly's kill_timeout (fly.toml).
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownGrace)
 	defer cancel()
+	deps.Drain.Announce(cfg.RestartRetry)
+	deps.Drain.Wait(time.Second + 250*time.Millisecond)
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		// Long-lived streams (SSE, long polls) outlasted the grace period.
 		srv.Close()

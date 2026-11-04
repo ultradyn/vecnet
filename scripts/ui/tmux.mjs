@@ -36,7 +36,7 @@ export async function withTui({ scale = false, command, env: shared, beatEvery }
     page.setDefaultTimeout(60000);
     const capture = () => tmux('capture-pane', '-t', 'ui:0.0', '-e', '-p', '-N');
     await fn({
-      demo: env.demo, advance: env.advance, stall: env.stall, clear: env.clear, controlStatus: env.controlStatus, fail: env.fail, asPeer: env.asPeer,
+      demo: env.demo, advance: env.advance, restart: env.restart, stall: env.stall, clear: env.clear, controlStatus: env.controlStatus, fail: env.fail, asPeer: env.asPeer,
       keys: (...keys) => tmux('send-keys', '-t', 'ui:0.0', '--', ...keys),
       waitFor: async text => {
         const until = Date.now() + 60000;
