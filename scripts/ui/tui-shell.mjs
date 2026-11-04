@@ -47,7 +47,7 @@ try {
     await shot('17-tui-success');
 
     await killDemo();
-    await waitFor('offline, retrying');
+    await waitFor('reconnecting'); // a lost hub reads as reconnecting, not offline
     await waitFor('max@vecnet'); // the last data stays on screen
     await shot('17-tui-error');
   });
