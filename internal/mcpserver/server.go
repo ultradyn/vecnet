@@ -11,6 +11,7 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -198,6 +199,35 @@ func staticCapabilities(string) map[string]any {
 
 func serverInfo() map[string]any {
 	return map[string]any{"name": "vecnet", "version": Version}
+}
+
+// completeResult adds the current era's envelope without mutating the
+// handler's result or discarding other metadata.
+func completeResult(res any) (map[string]any, error) {
+	b, err := json.Marshal(res)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	if err := dec.Decode(&result); err != nil {
+		return nil, err
+	}
+	if result == nil {
+		result = map[string]any{}
+	}
+	meta, ok := result["_meta"].(map[string]any)
+	if !ok {
+		if result["_meta"] != nil {
+			return nil, errors.New("mcp: result _meta must be an object")
+		}
+		meta = map[string]any{}
+	}
+	meta["io.modelcontextprotocol/serverInfo"] = serverInfo()
+	result["_meta"] = meta
+	result["resultType"] = "complete"
+	return result, nil
 }
 
 func (s *Server) heartbeat() time.Duration {
@@ -392,6 +422,9 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, sess *Session,
 	if st.streamed {
 		return
 	}
+	if err == nil && sess.Proto == ProtoCurrent {
+		res, err = completeResult(res)
+	}
 	if err != nil {
 		var re *RPCError
 		if !errors.As(err, &re) {
@@ -416,8 +449,8 @@ func unsupportedVersion(requested string) *RPCError {
 		}}
 }
 
-// initialize opens a 2025-11-25 session. An initialize naming 2026-07-28
-// still selects the legacy era, so the answer negotiates 2025-11-25.
+// initialize opens a 2025-11-25 session for any non-empty requested revision.
+// Clients requesting another revision negotiate the legacy era.
 func (s *Server) initialize(w http.ResponseWriter, req *Request, p Principal) {
 	if req.IsNotification() {
 		w.WriteHeader(http.StatusAccepted)
@@ -432,8 +465,8 @@ func (s *Server) initialize(w http.ResponseWriter, req *Request, p Principal) {
 			return
 		}
 	}
-	if !slices.Contains(SupportedVersions, params.ProtocolVersion) {
-		writeRPCError(w, req.ID, unsupportedVersion(params.ProtocolVersion))
+	if params.ProtocolVersion == "" {
+		writeRPCError(w, req.ID, unsupportedVersion(""))
 		return
 	}
 	sess := s.mint(p, ProtoLegacy)
@@ -456,14 +489,19 @@ func (s *Server) discover(w http.ResponseWriter, req *Request) {
 		writeRPCError(w, req.ID, unsupportedVersion(v))
 		return
 	}
-	writeResult(w, req.ID, map[string]any{
+	res, err := completeResult(map[string]any{
 		"protocolVersion":   ProtoCurrent,
 		"supportedVersions": SupportedVersions,
 		"capabilities":      s.Capabilities(ProtoCurrent),
 		"serverInfo":        serverInfo(),
 		"instructions":      Instructions,
-		"_meta":             map[string]any{"io.modelcontextprotocol/serverInfo": serverInfo()},
 	})
+	if err != nil {
+		slog.Error("mcp: discover result", "err", err)
+		writeRPCError(w, req.ID, &RPCError{Code: ErrInternal, Message: "internal error"})
+		return
+	}
+	writeResult(w, req.ID, res)
 }
 
 // get serves the 2025-11-25 session stream. One stream per session: a
