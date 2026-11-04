@@ -259,6 +259,8 @@ type Peer struct {
 	LastSeen     *string        `json:"last_seen"`
 	EnrolledAt   *string        `json:"enrolled_at"`
 	Teams        []string       `json:"teams"`
+	// Avatar is the sha256 of the peer's avatar PNG, or null (PROTOCOL §8.1).
+	Avatar *string `json:"avatar"`
 }
 
 // MarshalJSON keeps empty collections in Peer non-null.

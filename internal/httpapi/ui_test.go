@@ -15,8 +15,9 @@ import (
 )
 
 // uiMaxBytes caps the sum of every file in the UI, which ships with no build
-// step (raised from 60 KiB by operator UI Task 7).
-const uiMaxBytes = 256 << 10
+// step (raised from 60 KiB by operator UI Task 7, and from 256 KiB by peer
+// avatars, when the shell had already reached 262,735 bytes).
+const uiMaxBytes = 320 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

@@ -19,7 +19,7 @@ import (
 // directoryKeys are the public directory fields (PROTOCOL §8); nothing else
 // may appear in a GET /v1/peers entry.
 var directoryKeys = []string{
-	"capabilities", "enrolled_at", "kind", "last_seen", "location", "name",
+	"avatar", "capabilities", "enrolled_at", "kind", "last_seen", "location", "name",
 	"peer_id", "presence", "quota", "reachability", "teams",
 }
 

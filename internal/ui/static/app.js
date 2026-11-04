@@ -8,6 +8,7 @@
 import { activityAction } from './activity-model.js';
 import { createActivity } from './activity.js';
 import { createApi } from './api.js';
+import { avatarHash, createAvatarCache } from './avatar-model.js';
 import * as compose from './compose.js';
 import * as dash from './dash.js';
 import { h, toast } from './dom.js';
@@ -151,6 +152,11 @@ function start(secret) {
   };
   const nameOf = id => { const p = byId().get(id); return p ? p.name : short(id); };
   const kindOf = id => { const p = byId().get(id); return p ? p.kind : (id || '').split('_')[0]; };
+  // Avatar images, one fetch per hash for the session; a hash the directory
+  // stops naming has its object URL revoked.
+  const avatars = createAvatarCache({ api, URL });
+  const avatarOf = id => avatarHash(byId().get(id));
+  const pruneAvatars = () => { const d = peers.get(); if (d) avatars.prune((d.peers || []).map(avatarHash).filter(Boolean)); };
 
   const s = {
     threads, inboxHead, nameOf, store, mine: null, others: null, otherLimit: OTHER_PAGE,
@@ -159,6 +165,7 @@ function start(secret) {
       stop.abort();
       this.unmount();
       for (const off of this.offs) if (typeof off === 'function') off();
+      avatars.release();
       $('view').replaceChildren();
       $('aside').replaceChildren();
       $('me').replaceChildren();
@@ -173,7 +180,7 @@ function start(secret) {
     const op = ((peers.get() || {}).peers || []).find(p => p.kind === 'operator');
     if (!op) return;
     s.me = op.peer_id;
-    s.ctx = { api, store, activity, me: s.me, nameOf, kindOf, peers, threads, inboxHead, toast, nav: hash => { location.hash = hash; } };
+    s.ctx = { api, store, activity, me: s.me, nameOf, kindOf, avatars, avatarOf, peers, threads, inboxHead, toast, nav: hash => { location.hash = hash; } };
     s.offs.push(presence.renderNav($('me'), s.ctx), presence.startHeartbeat(s.ctx));
     // Tagged threads: the operator's own sends and reads re-sort it at once.
     // The activity feed keeps it live otherwise; Your Threads' own threads
@@ -203,6 +210,7 @@ function start(secret) {
     threads.subscribe(redraw),
     inboxHead.subscribe(redraw),
     peers.subscribe(redraw),
+    peers.subscribe(pruneAvatars),
   );
   const refresh = setInterval(() => peers.reload(), PEERS_REFRESH);
   // A tab shown again re-reads Other Threads, so its relative times are fresh.

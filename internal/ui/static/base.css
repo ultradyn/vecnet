@@ -106,6 +106,7 @@ span,b,time,code,a{unicode-bidi:isolate}
 .empty b{color:var(--text);font-weight:600;display:block;margin-bottom:4px}
 .va aside{border-left:1px solid var(--line);padding:40px 22px;overflow:auto;font-size:13px;color:var(--muted);line-height:1.6}
 .va .av{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;font:600 12.5px var(--sans);color:#0b0f19;background:#818cf8}
+.va .av.pic{overflow:hidden}.va .av.pic>img{display:block;width:100%;height:100%;object-fit:cover;border-radius:inherit}
 .va .av.k1{background:#fbbf24}.va .av.k2{background:#34d399}.va .av.k3{background:#38bdf8}.va .av.k4{background:#f472b6}.va .av.k5{background:#fb923c}.va .av.op{background:var(--grad);color:#fff}
 body[data-route=dash] aside,body[data-route=new] aside{display:none}
 .chip{font:500 10.5px/1 var(--mono);padding:3px 6px;border-radius:4px;border:1px solid var(--line2);color:var(--muted);white-space:nowrap}

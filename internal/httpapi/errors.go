@@ -68,7 +68,7 @@ func writeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, auth.ErrUnauthenticated):
 		writeErr(w, http.StatusUnauthorized, "unauthenticated", "missing, unknown or revoked credential", nil)
 	case errors.As(err, &maxErr):
-		writeErr(w, http.StatusRequestEntityTooLarge, "payload_too_large", "request body exceeds 256 KiB",
+		writeErr(w, http.StatusRequestEntityTooLarge, "payload_too_large", "request body exceeds "+strconv.FormatInt(maxErr.Limit>>10, 10)+" KiB",
 			map[string]any{"limit": maxErr.Limit})
 	default:
 		// Errors from the hub carry ids and SQL, never secrets or bodies (§12).

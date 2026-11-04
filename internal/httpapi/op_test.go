@@ -99,7 +99,7 @@ func TestOpHubJSONParity(t *testing.T) {
 		name           string
 		original, copy any
 	}{
-		{"peer", hub.DirectoryEntry{PeerID: "peer_example", Name: "Operator", Kind: "operator", Capabilities: []string{"chat"}, Quota: map[string]any{"left": 42}, Location: &location, Presence: "working", Reachability: "connected", LastSeen: &at, EnrolledAt: &at, Teams: []string{"team_example"}}, opapi.Peer{}},
+		{"peer", hub.DirectoryEntry{PeerID: "peer_example", Name: "Operator", Kind: "operator", Capabilities: []string{"chat"}, Quota: map[string]any{"left": 42}, Location: &location, Presence: "working", Reachability: "connected", LastSeen: &at, EnrolledAt: &at, Teams: []string{"team_example"}, Avatar: &at}, opapi.Peer{}},
 		{"audit", hub.AuditEntry{ID: 42, At: at, Actor: "peer_example", Action: "thread_renamed", Targets: []string{"thr_example"}, Detail: map[string]any{"title": "New"}}, opapi.AuditEntry{}},
 		{"send", hub.SendResponse{MessageID: "msg_example", ThreadID: "thr_example", JobID: "job_example", Spilled: true, Deliveries: []hub.DeliveryRef{{DeliveryID: "dly_example", Recipient: "peer_example", Via: &via, State: "queued"}}}, opapi.SendResult{}},
 		{"send no job", hub.SendResponse{MessageID: "msg_example", ThreadID: "thr_example", Deliveries: []hub.DeliveryRef{}}, opapi.SendResult{}},

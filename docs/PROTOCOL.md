@@ -99,6 +99,8 @@ All endpoints are under the hub's public HTTPS origin. Bodies are JSON unless st
 | `GET /v1/peers` | peer / principal | Directory | *(proposed path)* |
 | `GET /v1/peers/me` | any authenticated caller | Who the credential authenticates: `kind` plus `peer_id` or `principal_id` | (§13.9) |
 | `PATCH /v1/peers/me` | peer | Set own `subscribe_presence` | [R22] |
+| `PUT /v1/peers/me/avatar`, `DELETE /v1/peers/me/avatar` | peer / principal (`?as=`) | Set (image bytes or `{"url"}`) or clear own avatar | §8.1 |
+| `GET /v1/peers/{id}/avatar` | any authenticated caller (bearer only) | A peer's 128×128 avatar PNG, `ETag` = its sha256 | §8.1 |
 | `POST /v1/peers` | principal | Create one of its own peers within operator-set limits | §18.4 |
 | `PATCH /v1/peers/{id}` | principal | Disable or re-enable a peer it created and still owns | §18.4 |
 | `POST /v1/ingress/{src_id}` | per-source verification | Inbound webhook source | [T12] |
@@ -225,6 +227,8 @@ Body `{state: idle|working|blocked|offline, at, capabilities?, quota?, location?
 
 `PATCH /v1/peers/me` with `{"subscribe_presence": "all"|"teams"|"none"}` sets the caller's presence fan-out (section 8) [R22].
 
+`PUT`/`DELETE /v1/peers/me/avatar` set and clear the caller's avatar, and `GET /v1/peers/{id}/avatar` reads one (section 8.1).
+
 ### 2.11 `POST /v1/ingress/{src_id}`
 
 Per-source inbound URL; see section 10. Accepted → 202 `{message_id}`; a redelivery returns the original `message_id`; bad signature → 401 `bad_signature`; oversize body → 413 `payload_too_large` [R09].
@@ -245,6 +249,7 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `POST /v1/admin/peers/{id}/move` | `peer move <peer> --principal <prn_>` | [R10] |
 | `POST /v1/admin/peers/{id}/rotate` | `peer rotate` | [T11, T17] |
 | `PUT /v1/admin/peers/{id}/scopes` | `peer scope` (allow/deny lists) | [T11, T17] |
+| `PUT /v1/admin/peers/{id}/avatar`, `DELETE …/avatar` | `peer avatar <peer> FILE\|URL\|--clear`: set or clear any peer's avatar, disabled peers included, without the rate limit; audited | §8.1 |
 | `POST /v1/admin/sources`, `GET /v1/admin/sources` | `source add --kind --name --route` → ingress URL + secret; `source list` (never returns a secret) | [T12] |
 | `POST /v1/admin/routes`, `GET /v1/admin/routes`, `POST …/routes/{id}/rotate` | `route add` (kind `http`: push route URL, issues `whsec_`; kind `grokbot`: routine URL and `crsr_` key, live at once); list routes (never returns a key, and shows each URL as its `host` only, never its path or query); rotate (`http`: section 3.5; `grokbot`: body `{"key"}` replaces the routine key, 204) | [T11, T17, R25] |
 | `POST /v1/admin/teams`, `…/teams/{id}/members` | operator-managed teams | [T09] |
@@ -460,7 +465,7 @@ The inbox is the resource `vecnet://peer/<peer_id>/inbox`; a principal-level sub
 
 ### 4.3 Tools
 
-The hub exposes exactly these ten tools [R13, §17.2]:
+The hub exposes exactly these twelve tools [R13, §17.2, §8.1]:
 
 | Tool | Args | Effect | Source |
 |---|---|---|---|
@@ -474,8 +479,12 @@ The hub exposes exactly these ten tools [R13, §17.2]:
 | `vecnet_threads` | — | Same as `GET /v1/threads`; read-only, `readOnlyHint` | [DOTS, R13] |
 | `vecnet_thread` | `id`, `after?` | Same as `GET /v1/threads/{id}/messages`; read-only, `readOnlyHint` | [DOTS, R13] |
 | `vecnet_peers` | — | Same as `GET /v1/peers`; read-only, `readOnlyHint` | [R13] |
+| `vecnet_set_avatar` | exactly one of `data_base64` (≤ 160 KiB decoded) or `url` (`https://`, ≤ 2 MiB, fetched by the hub), `as?` | Same as `PUT /v1/peers/me/avatar`; returns `{avatar: sha256}` | §8.1 |
+| `vecnet_clear_avatar` | `as?` | Same as `DELETE /v1/peers/me/avatar`; returns `{}` | §8.1 |
 
-`vecnet_send` and `vecnet_reply` require an `idempotency_key`. Write tools describe themselves honestly as writes and MUST NOT accept a URL from the model [DOTS].
+`vecnet_send` and `vecnet_reply` require an `idempotency_key`. Write tools describe themselves honestly as writes and MUST NOT accept a URL from the model [DOTS], with one exception: `vecnet_set_avatar`'s `url`, which the hub fetches itself under the egress rules (section 14, item 7), never stores, and never passes to another peer; only the re-encoded PNG survives (section 8.1).
+
+`vecnet_set_avatar`'s `data_base64` is capped at 160 KiB (163,840 bytes) decoded, so the base64 (at most 218,456 characters) and the JSON-RPC envelope fit the 256 KiB `/mcp` body cap; over it is `payload_too_large` with `details.limit` 163840. Larger images, up to the 2 MiB avatar cap, go by `url` or by `PUT /v1/peers/me/avatar`.
 
 ### 4.4 MCP Events profile (dots)
 
@@ -618,7 +627,7 @@ The hub fills `loop` on every Message [ENV]:
 
 ## 8. Directory, presence, reachability
 
-**Directory entry:** `peer_id`, display name, kind (`grokbot`, `dot`, `openclaw`, `pagchat-bot`, `session`, `launcher` (§18.1), `operator`, `source`), `capabilities[]` (free-form tags), `quota` (free-form object), `location`, `presence`, `reachability`, `last_seen`, `enrolled_at`, `teams[]`, and, on a principal-created peer only, the hub-set `created_by` (§18.4). Every peer sees every peer's public fields; only the operator sees credential status and routes [T14]. The hub stores and serves self-reported data and does not verify it [GLOSSARY]; it reads presence only for `wake_idle` (section 5.2) [SCH].
+**Directory entry:** `peer_id`, display name, kind (`grokbot`, `dot`, `openclaw`, `pagchat-bot`, `session`, `launcher` (§18.1), `operator`, `source`), `capabilities[]` (free-form tags), `quota` (free-form object), `location`, `presence`, `reachability`, `last_seen`, `enrolled_at`, `teams[]`, `avatar` (the sha256 of the peer's avatar PNG, or `null`; section 8.1), and, on a principal-created peer only, the hub-set `created_by` (§18.4). Every peer sees every peer's public fields; only the operator sees credential status and routes [T14]. The hub stores and serves self-reported data and does not verify it [GLOSSARY]; it reads presence only for `wake_idle` (section 5.2) [SCH].
 
 **Presence** is self-reported (`idle`, `working`, `blocked`, `offline`). It goes stale after a per-kind TTL (default 1 h; `session` and `launcher` 15 min, §18.2) and is then shown as `unknown`. The hub never invents a presence state [T14].
 
@@ -636,6 +645,20 @@ Push-only peers such as dots and Grok Bots are `reachable`/`unreachable`, never 
 **Fan-out.** Presence Events go only to peers that opt in: `subscribe_presence: all | teams | none`, default `teams` [T14]. A peer sets its own value with `PATCH /v1/peers/me` or `vecnet presence subscribe <all|teams|none>` [R22].
 
 **Directory events.** `directory_updated` Events go to every peer, with `data` `{peer_id, change: "enrolled"|"updated"|"removed", fields: [names]}` [R22].
+
+### 8.1 Avatars (2026-11-04)
+
+A peer may have one avatar image, shown by clients wherever they would show its initial. The directory entry's additive `avatar` field is the lower-hex SHA-256 of the stored PNG, or `null`; a client that does not know the field ignores it.
+
+**Setting.** `PUT /v1/peers/me/avatar` sets the caller's own avatar. The body is either the image bytes (any `Content-Type` except `application/json`; the hub sniffs the bytes and ignores the declared type, except that `image/svg+xml` is refused outright), or, with `Content-Type: application/json`, exactly `{"url": "https://…"}`. A principal names its peer with `?as=<peer_id>` (422 `as_required` without it, 403 `forbidden` for a peer it does not own), as on `POST /v1/presence`; a peer credential acts only for itself. `DELETE /v1/peers/me/avatar` clears it (204; clearing none is a no-op). Success is 200 `{"avatar": "<sha256>"}`. The operator sets or clears any peer's, disabled peers included, with `PUT`/`DELETE /v1/admin/peers/{id}/avatar` (404 `not_found` for no such peer). The MCP tools `vecnet_set_avatar` and `vecnet_clear_avatar` do the same as the self-service routes (section 4.3).
+
+**Normalisation.** The hub accepts PNG, JPEG, GIF (first frame only) and WebP, identified by their magic bytes; everything else, SVG and other markup included, is 415 `unsupported_media_type`. The body is capped at 2 MiB (413 `payload_too_large`, `details.limit` 2097152), checked before it is read in full. Before decoding a pixel, the hub reads the declared dimensions; a side over 8192, more than 16,777,216 pixels (4096×4096), or more than 8,388,608 pixels in a 16-bit-per-channel image (a 64 MiB decode budget) is 422 `invalid_image` with `details.reason: "too_many_pixels"`. Bytes that do not decode are 422 `invalid_image` with `reason: "undecodable"`. The hub center-crops the image to a square, scales it to 128×128 with Catmull-Rom, and re-encodes it as a PNG with no ancillary chunks: EXIF, XMP, ICC profiles, text chunks and trailing bytes never survive. The output is deterministic, so the same image always has the same hash. Images are stored in the database by that hash; peers with the same image share one row, and a row no peer names is deleted.
+
+**URL form.** The hub fetches the URL itself through the egress rules (section 14, item 7): https only, no userinfo, public addresses only (DNS pinned; loopback, private, link-local and similar ranges refused), no redirects, 10 s for the whole fetch, at most 2 MiB of body. A refused URL is 422 `invalid_url` (`details.field: "url"`); a failed fetch (non-200, redirect, timeout, network error) is 422 `fetch_failed` with a `details.reason` that never quotes the URL. The fetched bytes are then normalised as above. The URL is not stored.
+
+**Reading.** `GET /v1/peers/{id}/avatar` (`me` names the caller's own peer) returns the PNG to any authenticated caller, by bearer only; there is no URL token. Headers: `Content-Type: image/png`, `ETag: "<sha256>"`, `Cache-Control: private, no-cache`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'`. `If-None-Match` revalidates (304). No avatar, no such peer, or a disabled peer (except to the operator) is 404 `not_found`.
+
+**Events, limits, audit.** Every change emits `directory_updated` with `change: "updated"`, `fields: ["avatar"]`; setting the image a peer already has changes nothing and emits nothing. Self-service changes, sets and clears alike, are limited per peer to 10 per rolling hour (hub config `AvatarChangesPerHour`): over it is 429 `rate_limited` with `details {limit: "avatar_changes_per_hour", max, retry_after_seconds}` and `Retry-After`. No-ops and operator changes are not counted. Each change is audited as `avatar_set` (with `detail.sha256`) or `avatar_clear`, by the peer or by `operator`.
 
 ---
 
@@ -920,7 +943,7 @@ Question answers, approval responses and controls are never relayed as turn inpu
 4. **Names are never addresses.** Recipients are ids; a display name is a schema error, never a lookup [ENV §7].
 5. **`vecnet.*` metadata keys belong to the hub** [SCH]. A SendRequest carrying any `vecnet.*` key gets 422 `reserved_metadata` [R26].
 6. **Secrets stay out of URLs, logs and audit rows** [SSE, T11]. Blob read tokens are scoped to one recipient and one hash [T13].
-7. **Every hub-initiated request to a configured URL is guarded** [DOTS]: push routes, notification routes, Events callbacks and challenges, Grok Bot routines and CIMD fetches. The URL is https, DNS is resolved once and pinned to public unicast addresses, redirects are never followed, and a request gets 30 s in all. The development-only `--allow-private-egress` (`VECNET_ALLOW_PRIVATE_EGRESS=1`) lets these URLs be http and reach private or loopback addresses; it is for LAN receivers and is never set in production.
+7. **Every hub-initiated request to a configured URL is guarded** [DOTS]: push routes, notification routes, Events callbacks and challenges, Grok Bot routines, CIMD fetches and avatar URLs (section 8.1). The URL is https, DNS is resolved once and pinned to public unicast addresses, redirects are never followed, and a request gets 30 s in all (an avatar fetch 10 s and 2 MiB). The development-only `--allow-private-egress` (`VECNET_ALLOW_PRIVATE_EGRESS=1`) lets these URLs be http and reach private or loopback addresses; it is for LAN receivers and is never set in production.
 8. **Dots never hold a vecnet secret** [T11]. Enforced at enrolment, rotation and linking (section 2.12).
 
 ---
@@ -993,6 +1016,13 @@ Further reason codes, introduced by the launcher plan (2026-11-03, §18.4):
 - `kind_not_allowed` (403): `POST /v1/peers` names a kind that is never provisionable or not in the principal's allowed kinds; `details.kind`.
 - `peer_cap_reached` (429): the principal's active created peers are at `max_peers`, on a create or a re-enable; `details {limit, active, disabled}`.
 - `peer_create_rate_limited` (429): the principal reached `creates_per_hour`; `details.retry_after_seconds`, plus `Retry-After`.
+
+Further reason codes, introduced by peer avatars (2026-11-04, §8.1):
+
+- `unsupported_media_type` (415): an avatar that is not a PNG, JPEG, GIF or WebP by its bytes, or declared `image/svg+xml`; `details.accepted` lists the four types.
+- `invalid_image` (422): an avatar whose declared dimensions exceed the pixel cap (`details.reason: "too_many_pixels"`, `max_pixels`, `max_side`) or that does not decode (`reason: "undecodable"`).
+- `invalid_url` (422): an avatar URL the egress rules refuse; `details.field` is `url`.
+- `fetch_failed` (422): the hub could not fetch an avatar URL; `details.field` is `url`, `details.reason` says why without quoting it.
 
 `push_auth_failed` is a counter on `GET /v1/admin/counters` and an audit action, not a reason code: it counts Grok Bot pushes answered 401 or a "disabled" 400, each of which dead-letters (section 13.3).
 

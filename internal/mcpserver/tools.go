@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -560,9 +561,11 @@ func narrowAttachments(defs schema) {
 	attachments["description"] = "Blobs by hash, uploaded first with PUT /v1/blobs using the same bearer; the hub rejects unknown hashes."
 }
 
-// toolSpecs returns the ten tools (PROTOCOL §4.3). defs is the envelope
+// toolSpecs returns the twelve tools (PROTOCOL §4.3). defs is the envelope
 // schema's $defs after narrowAttachments, so vecnet_send's input is
-// $defs/sendRequest and no tool takes a URL.
+// $defs/sendRequest and no message tool takes a URL. vecnet_set_avatar's url
+// is the one exception: the hub fetches it through the egress guard and
+// keeps only the re-encoded PNG (PROTOCOL §8.1).
 func toolSpecs(defs schema) []toolSpec {
 	send := defs["sendRequest"].(schema)
 	sendProps := send["properties"].(schema)
@@ -673,10 +676,100 @@ func toolSpecs(defs schema) []toolSpec {
 		annotations: readAnnotations(), call: callThread,
 	}, {
 		name:        "vecnet_peers",
-		description: "List the peer directory: ids, names, presence and reachability.",
+		description: "List the peer directory: ids, names, presence, reachability and avatar hashes.",
 		input:       object(schema{}),
 		annotations: readAnnotations(), call: callPeers,
+	}, {
+		name: "vecnet_set_avatar",
+		description: "Write: set your avatar on the operator's bus; every peer's directory shows it. " +
+			"Give exactly one of data_base64 (a PNG, JPEG, GIF or WebP image, at most 160 KiB once decoded) " +
+			"or url (an https URL to such an image, at most 2 MiB, that the hub fetches itself; redirects are not followed). " +
+			"The hub center-crops it to a square, resizes it to 128x128 and stores a PNG; the URL is not kept. " +
+			"SVG is refused. Limited to " + strconv.Itoa(hub.DefaultAvatarChangesPerHour) + " changes per hour. Returns {avatar: sha256}.",
+		input: object(schema{
+			"data_base64": schema{"type": "string", "maxLength": mcpAvatarBase64Max,
+				"description": "Standard base64 of the image bytes, at most 160 KiB decoded. For larger images use url."},
+			"url": schema{"type": "string", "maxLength": 2048, "pattern": "^https://",
+				"description": "https URL of an image the hub fetches (public hosts only, no redirects, 2 MiB, 10 s)."},
+			"as": ref("peerId"),
+		}),
+		annotations: writeAnnotations(true), call: callSetAvatar,
+	}, {
+		name:        "vecnet_clear_avatar",
+		description: "Write: remove your avatar on the operator's bus; the directory falls back to your initial.",
+		input:       object(schema{"as": ref("peerId")}),
+		annotations: writeAnnotations(false), call: callClearAvatar,
 	}}
+}
+
+// mcpAvatarMax caps vecnet_set_avatar's decoded data_base64: 160 KiB, the
+// same as the planned vecnet_blob_put (docs/plans/2026-11-04-mcp-first.md),
+// so the whole tools/call stays well under the
+// 256 KiB /mcp body cap (base64 is 4/3 of the bytes: 218,456 characters).
+// Larger images go by url or PUT /v1/peers/me/avatar (2 MiB).
+const (
+	mcpAvatarMax       = 160 << 10
+	mcpAvatarBase64Max = (mcpAvatarMax + 2) / 3 * 4
+)
+
+func callSetAvatar(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error) {
+	var a struct {
+		Data *string `json:"data_base64"`
+		URL  *string `json:"url"`
+		As   string  `json:"as"`
+	}
+	if err := decodeArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	if (a.Data == nil) == (a.URL == nil) {
+		return nil, &envelope.SchemaError{Path: "", Message: "give exactly one of data_base64 or url"}
+	}
+	var sha string
+	if a.URL != nil {
+		var err error
+		if sha, err = s.Hub.SetAvatarURL(ctx, c, a.As, *a.URL); err != nil {
+			return nil, err
+		}
+		return map[string]string{"avatar": sha}, nil
+	}
+	data, err := decodeBase64(*a.Data)
+	if err != nil {
+		return nil, &envelope.SchemaError{Path: "/data_base64", Message: "data_base64 must be standard base64"}
+	}
+	if len(data) > mcpAvatarMax {
+		e := hub.E(http.StatusRequestEntityTooLarge, "payload_too_large", "data_base64 exceeds 160 KiB decoded; use url for larger images")
+		e.Details["limit"] = mcpAvatarMax
+		return nil, e
+	}
+	if sha, err = s.Hub.SetAvatar(ctx, c, a.As, data); err != nil {
+		return nil, err
+	}
+	return map[string]string{"avatar": sha}, nil
+}
+
+// decodeBase64 reads standard base64, padded or not, ignoring ASCII
+// whitespace (models wrap long strings).
+func decodeBase64(s string) ([]byte, error) {
+	s = strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\n' || r == '\r' || r == '\t' {
+			return -1
+		}
+		return r
+	}, s)
+	return base64.RawStdEncoding.DecodeString(strings.TrimRight(s, "="))
+}
+
+func callClearAvatar(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error) {
+	var a struct {
+		As string `json:"as"`
+	}
+	if err := decodeArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	if err := s.Hub.ClearAvatar(ctx, c, a.As); err != nil {
+		return nil, err
+	}
+	return map[string]any{}, nil
 }
 
 // buildTools publishes each spec and compiles its inputSchema. A failure is

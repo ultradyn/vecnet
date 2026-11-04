@@ -37,6 +37,8 @@ type Config struct {
 	ThreadsPerHour  int           // per-peer new-thread rate limit
 	BlobTokenTTL    time.Duration // lifetime of a blob URL token
 
+	AvatarChangesPerHour int // per-peer self-service avatar changes per rolling hour (PROTOCOL §8.1)
+
 	PresenceTTL         time.Duration // presence staleness for kinds other than session and launcher (PROTOCOL §8)
 	SessionPresenceTTL  time.Duration // presence staleness for kind session
 	LauncherPresenceTTL time.Duration // presence staleness for kind launcher
@@ -59,6 +61,8 @@ func DefaultConfig() Config {
 		SendsPerMin:     60,
 		ThreadsPerHour:  20,
 		BlobTokenTTL:    7 * 24 * time.Hour,
+
+		AvatarChangesPerHour: DefaultAvatarChangesPerHour,
 
 		PresenceTTL:         DefaultPresenceTTL,
 		SessionPresenceTTL:  DefaultSessionPresenceTTL,
@@ -84,6 +88,10 @@ type Hub struct {
 	// EgressPolicy().Client(NotifyTimeout): public-IP-only, pinned, never
 	// following redirects.
 	NotifyClient *http.Client
+	// AvatarClient fetches avatar URLs; nil means
+	// EgressPolicy().Client(AvatarFetchTimeout). Tests swap in a client
+	// that trusts their TLS server.
+	AvatarClient *http.Client
 	// NotifyRetry is the wait before each retry of a failed notification;
 	// nil means DefaultNotifyRetry (3 retries over 30 s).
 	NotifyRetry []time.Duration
