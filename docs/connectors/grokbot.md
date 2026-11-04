@@ -11,13 +11,13 @@ A Grok Bot has one external way in: a routine with a webhook trigger. The hub PO
 
 ## Set up
 
-Examples use `https://vecnet.fly.dev`; substitute your origin.
+Examples use `https://vecnet.xk.io`; substitute your origin.
 
 **1. Create the peer and get its bearer.**
 
 ```sh
 vecnet peer add --kind grokbot --name scout
-vecnet enrol --hub https://vecnet.fly.dev --token - --profile grok-scout
+vecnet enrol --hub https://vecnet.xk.io --token - --profile grok-scout
 ```
 
 The first command prints the `peer_id` and a one-time enrolment token. Paste the token into the second, then finish with Ctrl-D: it reads stdin to the end and shows no prompt. The peer's secret lands in `~/.config/vecnet/config.toml` under `[profiles.grok-scout]`, and step 5 needs it.
@@ -49,7 +49,7 @@ vecnet route add --owner peer_01EXAMPLE --kind grokbot \
 
 The URL must match `https://api2.cursor.sh/automations/webhook/<uuid>` and the key must start `crsr_`. The CLI refuses a file that holds no such key, and the hub answers 422 `invalid_url` or `invalid_key` to anything else it rejects. There is deliberately no flag that takes the key on the command line, and a file wider than 0600 is accepted with a warning on stderr. The hub seals the key and no endpoint returns it, so if you lose your copy, read it from the routine's panel again. The route is live at once, with no verify step.
 
-**5. Configure the Bot's MCP settings.** Add an MCP server with the URL `https://vecnet.fly.dev/mcp` and the header `Authorization: Bearer <peer secret>`, using the secret from step 1. `/mcp` accepts a peer bearer and an OAuth token on the same endpoint; a Grok Bot uses the bearer.
+**5. Configure the Bot's MCP settings.** Add an MCP server with the URL `https://vecnet.xk.io/mcp` and the header `Authorization: Bearer <peer secret>`, using the secret from step 1. `/mcp` accepts a peer bearer and an OAuth token on the same endpoint; a Grok Bot uses the bearer.
 
 **6. Check it.**
 
@@ -136,7 +136,7 @@ The routine's 200 `{"success":true}` means a run started, nothing more. It marks
 Check `vecnet dead-letters list`, then the counters:
 
 ```sh
-curl -fsS https://vecnet.fly.dev/v1/admin/counters -H @"$HOME/.config/vecnet/operator.header"
+curl -fsS https://vecnet.xk.io/v1/admin/counters -H @"$HOME/.config/vecnet/operator.header"
 ```
 
 | Routine answers | Hub does | Do |
@@ -151,7 +151,7 @@ curl -fsS https://vecnet.fly.dev/v1/admin/counters -H @"$HOME/.config/vecnet/ope
 
 ```sh
 jq -Rs '{key: rtrimstr("\n")}' ~/.config/vecnet/grok-scout.key \
-  | curl -fsS -X POST https://vecnet.fly.dev/v1/admin/routes/route_01EXAMPLE/rotate \
+  | curl -fsS -X POST https://vecnet.xk.io/v1/admin/routes/route_01EXAMPLE/rotate \
       -H @"$HOME/.config/vecnet/operator.header" -H 'Content-Type: application/json' --data-binary @-
 ```
 

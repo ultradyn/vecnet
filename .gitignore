@@ -20,6 +20,7 @@ backups/
 .scratch/vecnet/build-reactions/
 .scratch/vecnet/build-cli22/
 .scratch/vecnet/build-launcher/
+.scratch/vecnet/build-mcp-first/
 .scratch/vecnet/build-md/
 .scratch/vecnet/build-loopjudge/
 
