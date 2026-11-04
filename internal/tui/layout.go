@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/XertroV/vecnet/internal/envelope"
 )
 
 const (
@@ -110,6 +113,13 @@ func (m *Model) render() string {
 		return block(tooSmall, w, h)
 	}
 	bodyH := h - 3
+	banner := ""
+	if !small {
+		banner = viewNotices(m.Data.Notices, m.HubNow(), m.loc, w)
+	}
+	if banner != "" {
+		bodyH--
+	}
 	var body string
 	switch {
 	case small:
@@ -121,7 +131,11 @@ func (m *Model) render() string {
 	default:
 		body = m.active().View(m, w, bodyH)
 	}
-	return strings.Join([]string{m.viewTop(w), block(body, w, bodyH), m.viewStatus(w), m.viewCommandLine(w)}, "\n")
+	rows := []string{m.viewTop(w)}
+	if banner != "" {
+		rows = append(rows, banner)
+	}
+	return strings.Join(append(rows, block(body, w, bodyH), m.viewStatus(w), m.viewCommandLine(w)), "\n")
 }
 
 // viewTop is `vecnet | 1:inbox 2:chat 3:dash 4:subs` and the hub's state.
@@ -178,7 +192,7 @@ func (m *Model) connStyle() lipgloss.Style {
 	switch m.Conn {
 	case ConnLive:
 		return styleGood
-	case ConnConnecting:
+	case ConnConnecting, ConnRestarting:
 		return styleWarn
 	}
 	return styleBad
@@ -230,4 +244,125 @@ func (m *Model) viewFirstLoad(w, h int) string {
 		line = fmt.Sprintf("first load: waiting on %s (%ds)", strings.Join(pending, ", "), int(waited.Seconds()))
 	}
 	return Pane(m.active().Title(), w, h, true, styleMuted.Render(line))
+}
+
+// noticeRank orders the banner: a move matters most, then a restart, then
+// maintenance. A kind this client does not know comes last.
+var noticeRank = map[string]int{"moving": 0, "restart": 1, "maintenance": 2}
+
+// activeNotice reports whether a listed notice still stands at now. The hub
+// lists only active notices, but one can expire between fetches.
+func activeNotice(n envelope.HubNotice, now time.Time) bool {
+	if n.ClearedAt != "" {
+		return false
+	}
+	exp, err := envelope.ParseTime(n.ExpiresAt)
+	return err != nil || now.Before(exp)
+}
+
+// viewNotices is the one-row banner under the top bar, or "" with no active
+// notice: "! MOVING 02:00 -> vecnet.xk.io  Moving to Fly tonight  (+1 more)".
+// It shows the most important notice and counts the rest. The message is
+// operator text, rendered like peer text: cleaned, flattened to ASCII so every
+// cell width is exact, and cut before the count is.
+func viewNotices(ns []envelope.HubNotice, now time.Time, loc *time.Location, w int) string {
+	var shown *envelope.HubNotice
+	active := 0
+	for i := range ns {
+		n := &ns[i]
+		if !activeNotice(*n, now) {
+			continue
+		}
+		active++
+		if shown == nil || rank(n.Kind) < rank(shown.Kind) {
+			shown = n
+		}
+	}
+	if shown == nil || w <= 0 {
+		return ""
+	}
+	label := "NOTICE"
+	if _, ok := noticeRank[shown.Kind]; ok {
+		label = strings.ToUpper(shown.Kind)
+	}
+	head := "! " + label
+	detail := ""
+	if at, err := envelope.ParseTime(shown.At); shown.At != "" && err == nil {
+		layout := "15:04"
+		if d := at.Sub(now); d >= 24*time.Hour || d <= -24*time.Hour {
+			layout = "Jan 02 15:04"
+		}
+		detail += " " + at.In(loc).Format(layout)
+	}
+	if shown.Kind == "moving" && shown.NewURL != "" {
+		detail += " -> " + asciiLine(hubHost(shown.NewURL))
+	}
+	msg := asciiLine(Clean(shown.Message))
+	more := ""
+	if active > 1 {
+		more = fmt.Sprintf("  (+%d more)", active-1)
+	}
+	// Everything is ASCII from here, so bytes are cells.
+	if msg != "" {
+		room := w - len(head) - len(detail) - 2 - len(more)
+		switch {
+		case room >= len(msg):
+		case room >= 4:
+			msg = strings.TrimRight(msg[:room-3], " ") + "..."
+		default:
+			msg = ""
+		}
+	}
+	line := styleNotice.Render(head) + styleWarn.Render(detail)
+	if msg != "" {
+		line += styleText.Render("  " + msg)
+	}
+	line += styleMuted.Render(more)
+	return fit(line, w)
+}
+
+func rank(kind string) int {
+	if r, ok := noticeRank[kind]; ok {
+		return r
+	}
+	return len(noticeRank)
+}
+
+// asciiReplace spells common typography in ASCII.
+var asciiReplace = map[rune]string{
+	'‐': "-", '‑': "-", '‒': "-", '–': "-", '—': "-", '―': "-", '−': "-",
+	'‘': "'", '’': "'", '‚': "'", '′': "'", '“': `"`, '”': `"`, '„': `"`, '″': `"`,
+	'…': "...", '•': "*", '→': "->", '←': "<-",
+}
+
+// asciiLine makes cleaned one-line text printable ASCII: typography gets its
+// ASCII spelling, other non-ASCII runes become '?', and runs of spaces fold
+// into one, so a banner's width is exactly its byte count.
+func asciiLine(s string) string {
+	var b strings.Builder
+	space := false
+	for _, r := range s {
+		var out string
+		switch {
+		case r == ' ' || unicode.IsSpace(r):
+			if !space && b.Len() > 0 {
+				space = true
+			}
+			continue
+		case r >= 0x21 && r <= 0x7e:
+			out = string(r)
+		case asciiReplace[r] != "":
+			out = asciiReplace[r]
+		case unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Cf, r):
+			continue // combining marks and invisible format runes take no cell
+		default:
+			out = "?"
+		}
+		if space {
+			b.WriteByte(' ')
+			space = false
+		}
+		b.WriteString(out)
+	}
+	return b.String()
 }

@@ -170,6 +170,16 @@ func (c *Client) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 	err := c.do(ctx, "GET", "/v1/admin/peers", nil, &out)
 	return out.Peers, err
 }
+
+// Notices lists the hub's active notices (GET /v1/hub/notices), oldest first.
+// Their messages are operator text, untrusted on every surface.
+func (c *Client) Notices(ctx context.Context) ([]envelope.HubNotice, error) {
+	var out struct {
+		Notices []envelope.HubNotice `json:"notices"`
+	}
+	err := c.do(ctx, "GET", "/v1/hub/notices", nil, &out)
+	return out.Notices, err
+}
 func (c *Client) LoopCuts(ctx context.Context, hours int) (out opapi.LoopCuts, err error) {
 	q := url.Values{}
 	if hours != 0 {

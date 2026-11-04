@@ -44,6 +44,7 @@ type fakeAPI struct {
 	blob     []byte
 	uploads  []fakeUpload // uploads whose bytes the fake read in full
 	reacted  []envelope.ReactionRequest
+	notices  []envelope.HubNotice
 
 	// tail replaces the default Tail, which reports live and blocks.
 	tail func(ctx context.Context, handle func(opclient.Batch) error, status func(string)) error
@@ -123,6 +124,17 @@ func (f *fakeAPI) History(ctx context.Context, _, _ string, _ int) (opapi.Histor
 }
 func (f *fakeAPI) Matrix(ctx context.Context, _, _ string, _ int) (opapi.Matrix, error) {
 	return f.matrix, f.hit(ctx, "Matrix")
+}
+func (f *fakeAPI) Notices(ctx context.Context) ([]envelope.HubNotice, error) {
+	err := f.hit(ctx, "Notices")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]envelope.HubNotice(nil), f.notices...), err
+}
+func (f *fakeAPI) setNotices(ns ...envelope.HubNotice) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.notices = ns
 }
 func (f *fakeAPI) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 	return f.peers, f.hit(ctx, "Peers")
