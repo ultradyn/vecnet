@@ -800,6 +800,13 @@ func TestCIMD(t *testing.T) {
 		"/liar.json":   `{"client_id":"https://elsewhere.example/x.json","redirect_uris":["` + chatgptRedirect + `"]}`,
 		"/secret.json": `{"client_id":"{self}","token_endpoint_auth_method":"client_secret_basic","redirect_uris":["` + chatgptRedirect + `"]}`,
 		"/notjson":     `<html>`,
+		// ChatGPT's real document (2026-11-05): it prefers private_key_jwt but
+		// also lists none, the only method this hub advertises.
+		"/chatgpt.json": `{"client_id":"{self}","client_uri":"https://chatgpt.com/","redirect_uris":["` + chatgptRedirect + `"],` +
+			`"token_endpoint_auth_method":"private_key_jwt","token_endpoint_auth_methods_supported":["none","private_key_jwt"],` +
+			`"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"client_name":"ChatGPT",` +
+			`"token_endpoint_auth_signing_alg":"RS256","jwks_uri":"https://chatgpt.com/oauth/jwks.json"}`,
+		"/pkjwt.json": `{"client_id":"{self}","token_endpoint_auth_method":"private_key_jwt","token_endpoint_auth_methods_supported":["private_key_jwt"],"redirect_uris":["` + chatgptRedirect + `"]}`,
 	})
 
 	b := &browser{t: t, env: env, client: srv.URL + "/good.json", redirect: chatgptRedirect}
@@ -831,7 +838,22 @@ func TestCIMD(t *testing.T) {
 		t.Fatalf("CIMD exchange: %d %s", got.status, got.Error)
 	}
 
-	for _, path := range []string{"/other.json", "/liar.json", "/secret.json", "/notjson", "/missing.json"} {
+	// A document that prefers client authentication but accepts none is a
+	// public client here; the whole flow works and it is stored as "none".
+	cg := &browser{t: t, env: env, client: srv.URL + "/chatgpt.json", redirect: chatgptRedirect}
+	if resp, page := cg.authorize(cg.query(verifierA)); resp.StatusCode != http.StatusOK || !strings.Contains(page, `name="link_code"`) {
+		t.Fatalf("authorize with ChatGPT's document: %d\n%s", resp.StatusCode, page)
+	}
+	if got := cg.exchange(cg.code(verifierA, linkCode(t, env, newDot(t, env, "chatgpt-dot"))), verifierA); got.status != http.StatusOK {
+		t.Fatalf("ChatGPT document exchange: %d %s", got.status, got.Error)
+	}
+	var meta string
+	if err := env.Hub.DB.QueryRow(`SELECT metadata FROM oauth_clients WHERE client_id = ?`, srv.URL+"/chatgpt.json").Scan(&meta); err != nil ||
+		!strings.Contains(meta, `"token_endpoint_auth_method":"none"`) {
+		t.Fatalf("stored ChatGPT client metadata = %s (%v), want auth method none", meta, err)
+	}
+
+	for _, path := range []string{"/other.json", "/liar.json", "/secret.json", "/pkjwt.json", "/notjson", "/missing.json"} {
 		x := &browser{t: t, env: env, client: srv.URL + path, redirect: chatgptRedirect}
 		resp, page := x.authorize(x.query(verifierA))
 		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(page, "invalid_request") {

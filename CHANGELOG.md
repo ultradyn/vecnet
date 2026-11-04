@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-05: OAuth CIMD accepts a document preferring private_key_jwt when it also lists `none` (ChatGPT's real client.json); stored as a public client. internal/oauth/clients.go, PROTOCOL §4.5.
 - 2026-11-05: `/mcp` allows the public origin plus configurable exact extra origins (default `https://chatgpt.com`, `--mcp-allowed-origins` / `VECNET_MCP_ALLOWED_ORIGINS`, `none` disables extras), validates before startup/auth and logs allowed foreign origins; `vecnet_whoami` requires stable non-empty profile `id` in schema/results (PROTOCOL §4.1/4.3/4.5/20, dots and DEPLOY).
 
 - 2026-11-05: prepare supervised Grok Bot live tests with MCP-first instructions, bounded inbox paging, safe operator `route list|rotate|remove` (DELETE audits `route_remove` and preserves pull deliveries), and allowlisted MCP initialize/refusal diagnostics with secret canary coverage.
