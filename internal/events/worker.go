@@ -483,6 +483,8 @@ func (w *Worker) post(ctx context.Context, s Subscription, r outboxRow) (status 
 // subscription's, the Delivery stays readable through vecnet_inbox, and a
 // re-subscribe from the cursor still replays an exhausted row, which a
 // dead_letter would gate. If nothing reaches it, it expires (PROTOCOL §5.1).
+// retryLater and the exhausted settle count each failure in their outbox
+// transaction; pause counts only a transition from an unpaused subscription.
 func (w *Worker) record(ctx context.Context, s Subscription, r outboxRow, status int, retryAfter time.Duration, netErr error) (delivered, stop bool, err error) {
 	now := w.now()
 	w.Hub.ObservePush(ctx, s.PeerID, netErr == nil && status >= 200 && status < 300)
