@@ -410,7 +410,7 @@ export function mount(root, ctx) {
   function render() {
     if (gone) return;
     const t = thread(), all = msgs(), d = detail.get();
-    head.replaceChildren(t ? h('h1', { text: title(t, me, nameOf) }) : h('h1', null, idText(threadId)),
+    head.replaceChildren(t ? h('h1', { class: t.title ? null : 'un', text: title(t, me, nameOf) }) : h('h1', null, idText(threadId)),
       h('div', { class: 'ids', text: threadId + (t ? ' · ' + plural(t.message_count, 'message') : '') }));
     ticks = [];
     agos = [];
