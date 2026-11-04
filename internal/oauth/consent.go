@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/envelope"
@@ -309,11 +311,15 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 	var p *principal
 	var code string
 	var bound string // the peer a link code just bound, to wake its readers
-	if live, err := s.linkCodeWorth(ctx, r); err != nil {
+	switch worth, err := s.linkCodeWorth(ctx, r); {
+	case err != nil:
 		serverError(w, err)
 		return
-	} else if !live {
-		s.retryPage(w, r, req, sealed)
+	case worth == linkLocked:
+		s.lockedPage(w, r, req, sealed, s.Hub.DotLinkLocked())
+		return
+	case worth == linkRefused:
+		s.refuseLink(w, r, req, sealed)
 		return
 	}
 	err := s.DB.Tx(ctx, func(tx *sql.Tx) error {
@@ -330,7 +336,7 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if errors.Is(err, hub.ErrDotLink) {
-		s.retryPage(w, r, req, sealed)
+		s.refuseLink(w, r, req, sealed)
 		return
 	}
 	if err != nil {
@@ -347,27 +353,77 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 	redirectWith(w, r, req.RedirectURI, map[string]string{"code": code, "state": req.State})
 }
 
+// linkWorth is linkCodeWorth's answer.
+type linkWorth int
+
+const (
+	linkLive    linkWorth = iota // a good cookie, or a code that could be spent
+	linkRefused                  // no cookie and no live code
+	linkLocked                   // no cookie, and link codes are locked out (§20.1)
+)
+
 // linkCodeWorth reports whether this request can get anywhere in a write
 // transaction: it has a good cookie or a code that could be spent. This form is
 // public, so a stream of guesses must not take the store's one write lock.
-func (s *Server) linkCodeWorth(ctx context.Context, r *http.Request) (bool, error) {
+// Without a cookie, a lockout refuses every code before it is looked at.
+func (s *Server) linkCodeWorth(ctx context.Context, r *http.Request) (linkWorth, error) {
 	p, err := s.cookiePrincipal(ctx, s.DB, r)
-	if err != nil || p != nil {
-		return p != nil, err
+	if err != nil {
+		return linkRefused, err
 	}
-	return s.Hub.DotLinkLive(ctx, r.PostForm.Get("link_code"))
+	if p != nil {
+		return linkLive, nil
+	}
+	if s.Hub.DotLinkLocked() > 0 {
+		return linkLocked, nil
+	}
+	live, err := s.Hub.DotLinkLive(ctx, r.PostForm.Get("link_code"))
+	if err != nil || !live {
+		return linkRefused, err
+	}
+	return linkLive, nil
+}
+
+// refuseLink answers a refused link code: the retry page, after the refusal
+// is counted (hub.DotLinkFailed) when a code was actually typed. The refusal
+// that spends the budget gets the lockout page instead.
+func (s *Server) refuseLink(w http.ResponseWriter, r *http.Request, req authRequest, sealed string) {
+	if strings.TrimSpace(r.PostForm.Get("link_code")) != "" {
+		if locked := s.Hub.DotLinkFailed(); locked > 0 {
+			s.lockedPage(w, r, req, sealed, locked)
+			return
+		}
+	}
+	s.retryPage(w, r, req, sealed)
 }
 
 // retryPage is the 400 for a link code that was refused: the same form again.
 func (s *Server) retryPage(w http.ResponseWriter, r *http.Request, req authRequest, sealed string) {
+	s.formPage(w, r, req, sealed, http.StatusBadRequest, "That link code is not valid. Ask your operator for a new one.")
+}
+
+// lockedPage is the 429 while link codes are locked out: too many wrong codes
+// were tried, every live code was cancelled, and a new one from the operator
+// ends the lockout.
+func (s *Server) lockedPage(w http.ResponseWriter, r *http.Request, req authRequest, sealed string, retry time.Duration) {
+	secs := int(retry.Round(time.Second) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	s.formPage(w, r, req, sealed, http.StatusTooManyRequests,
+		"Too many wrong link codes were tried, so every link code was cancelled. Ask your operator for a new one.")
+}
+
+func (s *Server) formPage(w http.ResponseWriter, r *http.Request, req authRequest, sealed string, status int, msg string) {
 	c, err := s.storedClient(r.Context(), req.ClientID)
 	if err != nil {
 		serverError(w, err)
 		return
 	}
-	writePage(w, http.StatusBadRequest, page{
+	writePage(w, status, page{
 		ClientName: clientLabel(c), RedirectHost: redirectHost(req.RedirectURI), Request: sealed, NeedCode: true,
-		Error: "That link code is not valid. Ask your operator for a new one.",
+		Error: msg,
 	}, req.RedirectURI)
 }
 

@@ -22,7 +22,7 @@ import (
 
 const routineURL = "https://api2.cursor.sh/automations/webhook/123e4567-e89b-12d3-a456-426614174000"
 
-var linkCodeRe = regexp.MustCompile(`^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$`)
+var linkCodeRe = regexp.MustCompile(`^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}(-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}){2}$`)
 
 // field returns the value of the "key value" line of a command's human output.
 func field(t *testing.T, out, key string) string {
@@ -44,7 +44,7 @@ func TestPeerLinkPrintsCode(t *testing.T) {
 
 	code := field(t, op.mustRun("peer", "link", dot), "code")
 	if !linkCodeRe.MatchString(code) {
-		t.Fatalf("code = %q, want 8 characters of the link alphabet", code)
+		t.Fatalf("code = %q, want 12 characters of the link alphabet in groups of 4", code)
 	}
 	if got, err := env.Hub.ConsumeDotLink(ctx, code); err != nil || got != dot {
 		t.Fatalf("ConsumeDotLink(%q) = %q, %v; want %s", code, got, err, dot)

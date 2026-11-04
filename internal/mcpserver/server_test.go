@@ -599,3 +599,56 @@ func TestSessionBelongsToItsCredential(t *testing.T) {
 		t.Fatalf("DELETE: %d %s, want 204", resp.StatusCode, body)
 	}
 }
+
+// The GET stream keeps flowing after the server's ReadTimeout and
+// WriteTimeout (PROTOCOL §20.3) have passed many times over.
+func TestGetStreamOutlivesServerTimeouts(t *testing.T) {
+	env := testhub.StartWithServer(t, nil, func(srv *http.Server) {
+		httpapi.ConfigureServer(srv)
+		srv.ReadHeaderTimeout, srv.ReadTimeout, srv.WriteTimeout = 300*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond
+	})
+	env.Configure(func(d *httpapi.Deps) { d.Heartbeat = 50 * time.Millisecond })
+	_, secret := env.NewPeer("session", "a1")
+	sid := legacySession(t, env, secret)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, env.URL+"/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Mcp-Session-Id", sid)
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET: %d", resp.StatusCode)
+	}
+	beats := make(chan struct{}, 256)
+	go func() {
+		sc := bufio.NewScanner(resp.Body)
+		for sc.Scan() {
+			if sc.Text() == ": hb" {
+				beats <- struct{}{}
+			}
+		}
+		close(beats)
+	}()
+	start, n := time.Now(), 0
+	for deadline := time.After(1500 * time.Millisecond); ; {
+		select {
+		case _, ok := <-beats:
+			if !ok {
+				t.Fatalf("stream cut after %s and %d heartbeats with 300 ms server timeouts", time.Since(start), n)
+			}
+			n++
+			continue
+		case <-deadline:
+		}
+		break
+	}
+	if n < 10 {
+		t.Fatalf("%d heartbeats in 1.5 s, want at least 10", n)
+	}
+}

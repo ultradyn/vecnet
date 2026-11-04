@@ -183,6 +183,16 @@ func (r *Resolver) Enrol(ctx context.Context, token string) (peerID, secret stri
 	if token == "" {
 		return "", "", ErrUnauthenticated
 	}
+	// The route is public: a token that is unknown or spent is refused by a
+	// read, so a stream of guesses never queues on the store's write lock.
+	var spendable bool
+	err = r.DB.QueryRowContext(ctx, `SELECT used_at IS NULL FROM enrol_tokens WHERE token_hash = ?`, HashSecret(token)).Scan(&spendable)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !spendable) {
+		return "", "", ErrUnauthenticated
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("auth: enrol: %w", err)
+	}
 	err = r.DB.Tx(ctx, func(tx *sql.Tx) error {
 		var expires string
 		var used sql.NullString

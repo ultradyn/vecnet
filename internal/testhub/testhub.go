@@ -84,6 +84,13 @@ func Start(t *testing.T) *Env {
 // after the testhub defaults are set and before the hub is built.
 func StartWith(t *testing.T, cfgFn func(*hub.Config)) *Env {
 	t.Helper()
+	return StartWithServer(t, cfgFn, nil)
+}
+
+// StartWithServer is StartWith with srvFn (when non-nil) adjusting the test
+// server's http.Server, e.g. its timeouts, before it starts.
+func StartWithServer(t *testing.T, cfgFn func(*hub.Config), srvFn func(*http.Server)) *Env {
+	t.Helper()
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "hub.db"))
 	if err != nil {
@@ -94,9 +101,13 @@ func StartWith(t *testing.T, cfgFn func(*hub.Config)) *Env {
 	// The handler is installed after the server exists so Config.PublicURL
 	// can carry the server's real URL; no request arrives before then.
 	env := &Env{T: t, Now: clock}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		(*env.handler.Load()).ServeHTTP(w, r)
 	}))
+	if srvFn != nil {
+		srvFn(srv.Config)
+	}
+	srv.Start()
 
 	cfg := hub.DefaultConfig()
 	cfg.PublicURL = srv.URL
@@ -141,6 +152,9 @@ func StartWith(t *testing.T, cfgFn func(*hub.Config)) *Env {
 // flight keep the old handler; later ones use the new one.
 func (e *Env) Configure(f func(*httpapi.Deps)) {
 	d := e.stack.Deps()
+	// Tests send many anonymous requests from 127.0.0.1; a test of the
+	// per-client limiter sets Deps.Limiter itself.
+	d.Limiter = nil
 	d.Stop = e.stop
 	if f != nil {
 		f(&d)

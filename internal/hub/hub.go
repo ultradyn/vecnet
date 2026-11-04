@@ -100,6 +100,8 @@ type Hub struct {
 	// activity (GET /v1/admin/activity). The zero value is ready.
 	Activity ActivityFeed
 
+	linkGuard linkGuard // refused link codes (DotLinkFailed)
+
 	reachMu sync.Mutex     // serialises reachability writes with streams
 	streams map[string]int // peer → open SSE streams
 

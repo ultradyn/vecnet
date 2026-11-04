@@ -6,6 +6,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/hub"
@@ -44,6 +45,36 @@ type Deps struct {
 	// on disk instead of the embedded copy (vecnet-hub --dev-ui-dir), so an
 	// edit shows on refresh without a rebuild.
 	UIDir string
+
+	// Limiter throttles unauthenticated traffic per client (PROTOCOL
+	// §20.2); nil limits nothing. Stack.Deps sets DefaultLimiter.
+	Limiter *Limiter
+	// TrustFlyClientIP keys Limiter on the Fly-Client-IP header, which only
+	// Fly's proxy can set (vecnet-hub --trust-fly-client-ip). Off, a direct
+	// client could name any address there, so RemoteAddr is used.
+	TrustFlyClientIP bool
+}
+
+// Server timeouts (PROTOCOL §20.3). ReadTimeout bounds reading a whole
+// request, WriteTimeout writing an ordinary response; streams (SSE, long
+// polls, blob transfers) lift or extend both for themselves with an
+// http.ResponseController, so they are not cut. ConfigureServer applies them.
+const (
+	ReadHeaderTimeout = 10 * time.Second
+	ReadTimeout       = 30 * time.Second
+	WriteTimeout      = 60 * time.Second
+	IdleTimeout       = 120 * time.Second
+	// blobTransferTimeout is a blob upload's read or download's write budget:
+	// 25 MiB at about 350 kbit/s.
+	blobTransferTimeout = 10 * time.Minute
+)
+
+// ConfigureServer sets srv's timeouts to the package values.
+func ConfigureServer(srv *http.Server) {
+	srv.ReadHeaderTimeout = ReadHeaderTimeout
+	srv.ReadTimeout = ReadTimeout
+	srv.WriteTimeout = WriteTimeout
+	srv.IdleTimeout = IdleTimeout
 }
 
 // server carries Deps to the route handlers.
@@ -75,7 +106,20 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, hub.E(http.StatusNotFound, "not_found", "no such endpoint"))
 	})
-	return limitBody(authenticate(d.Hub.Auth, d.Hub.TouchReachability, mux))
+	h := throttle(d.Limiter, d.TrustFlyClientIP, limitBody(authenticate(d.Hub.Auth, d.Hub.TouchReachability, d.Limiter, d.TrustFlyClientIP, mux)))
+	if strings.HasPrefix(d.Hub.Cfg.PublicURL, "https://") {
+		h = hsts(h)
+	}
+	return h
+}
+
+// hsts adds Strict-Transport-Security to every response of a hub served over
+// https (PROTOCOL §20.3), so a browser never again tries it in the clear.
+func hsts(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // routes registers the §2.1 endpoints implemented so far; later tasks add

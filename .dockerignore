@@ -13,3 +13,10 @@ build/
 .env.*
 docs/prototypes/
 docs/research/
+# Hub databases and their backups hold meta.hub_key: never in a build context.
+backups/
+.demo-data/
+# ** also matches the root, so these catch a database at any depth.
+**/*.db
+**/*.db-wal
+**/*.db-shm

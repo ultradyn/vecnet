@@ -26,6 +26,23 @@ type sseConn struct {
 	stop   chan struct{} // closed by close
 	done   chan struct{} // closed when the writer goroutine exits
 	once   sync.Once
+
+	dmu    sync.Mutex // orders the writer's deadlines with close's
+	closed bool
+}
+
+// sseWriteTimeout bounds one frame's write and flush. The server's
+// WriteTimeout covers a whole response, which a stream outlives, so each
+// frame gets its own deadline instead (PROTOCOL §20.3).
+const sseWriteTimeout = 30 * time.Second
+
+// holdOpen lifts the server's read deadline for a long-lived response:
+// net/http's background read would otherwise time out at ReadTimeout and
+// cancel the request's context. write is the new write deadline (zero
+// lifts it).
+func holdOpen(rc *http.ResponseController, write time.Time) {
+	_ = rc.SetReadDeadline(time.Time{})
+	_ = rc.SetWriteDeadline(write)
 }
 
 // startSSE writes the SSE response headers (PROTOCOL §2.3) and starts the
@@ -37,10 +54,12 @@ func startSSE(w http.ResponseWriter, stall time.Duration) *sseConn {
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Accel-Buffering", "no")
 	h.Set("Connection", "keep-alive")
+	rc := http.NewResponseController(w)
+	holdOpen(rc, time.Now().Add(sseWriteTimeout))
 	w.WriteHeader(http.StatusOK)
 	c := &sseConn{
 		w:      w,
-		rc:     http.NewResponseController(w),
+		rc:     rc,
 		stall:  stall,
 		frames: make(chan []byte, sseBuffer),
 		stop:   make(chan struct{}),
@@ -58,6 +77,13 @@ func (c *sseConn) writer() {
 		case <-c.stop:
 			return
 		case f := <-c.frames:
+			c.dmu.Lock()
+			if c.closed {
+				c.dmu.Unlock()
+				return
+			}
+			_ = c.rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+			c.dmu.Unlock()
 			if _, err := c.w.Write(f); err != nil {
 				return
 			}
@@ -105,7 +131,10 @@ func (c *sseConn) failed() <-chan struct{} { return c.done }
 func (c *sseConn) close() {
 	c.once.Do(func() {
 		close(c.stop)
+		c.dmu.Lock()
+		c.closed = true
 		_ = c.rc.SetWriteDeadline(time.Now())
+		c.dmu.Unlock()
 		<-c.done
 	})
 }

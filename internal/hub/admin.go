@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/auth"
@@ -134,36 +135,46 @@ func (h *Hub) movePeer(ctx context.Context, tx *sql.Tx, peerID, prnID, actor str
 // DotLinkTTL is how long a link code stays valid (PROTOCOL §4.5, R15).
 const DotLinkTTL = 10 * time.Minute
 
+// A link code is DotLinkLen characters from dotLinkAlphabet (31^12, about
+// 59 bits), shown in groups of four joined by '-' ("ABCD-EFGH-JKMN"). The
+// hyphens, case and spaces are forgiven when it is typed back.
 const (
 	dotLinkAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789" // no I, L, O, 0 or 1
-	dotLinkLen      = 8
+	DotLinkLen      = 12
+	dotLinkGroup    = 4
 )
 
 // ErrDotLink is every refused link code: unknown, used, expired, or naming a
 // peer that is no longer an enabled dot. The cases are not told apart.
 var ErrDotLink = errors.New("hub: invalid link code")
 
-// newDotLinkCode draws dotLinkLen uniform characters from the alphabet.
-func newDotLinkCode() (string, error) {
+// newDotLinkCode draws DotLinkLen uniform characters from the alphabet and
+// returns them as stored and as shown (grouped with hyphens).
+func newDotLinkCode() (stored, shown string, err error) {
 	limit := big.NewInt(int64(len(dotLinkAlphabet)))
-	b := make([]byte, dotLinkLen)
+	b := make([]byte, DotLinkLen)
 	for i := range b {
 		n, err := rand.Int(rand.Reader, limit)
 		if err != nil {
-			return "", fmt.Errorf("hub: link code: %w", err)
+			return "", "", fmt.Errorf("hub: link code: %w", err)
 		}
 		b[i] = dotLinkAlphabet[n.Int64()]
 	}
-	return string(b), nil
+	var groups []string
+	for i := 0; i < len(b); i += dotLinkGroup {
+		groups = append(groups, string(b[i:i+dotLinkGroup]))
+	}
+	return string(b), strings.Join(groups, "-"), nil
 }
 
 // DotLink mints the one-time code that binds a ChatGPT principal to dot peer
-// peerID on first login (PROTOCOL §4.5, R15). The code is returned once and
-// only its hash is stored; it lasts DotLinkTTL. A peer of another kind, or a
-// disabled one, is 422 invalid_value; an unknown peer 404 not_found. Audited
-// as "dot_link".
+// peerID on first login (PROTOCOL §4.5, R15, §20.1). The code is returned
+// once, grouped for reading, and only its hash is stored; it lasts
+// DotLinkTTL. Issuing a code ends a link-code lockout (DotLinkFailed). A peer
+// of another kind, or a disabled one, is 422 invalid_value; an unknown peer
+// 404 not_found. Audited as "dot_link".
 func (h *Hub) DotLink(ctx context.Context, peerID string) (string, error) {
-	code, err := newDotLinkCode()
+	code, shown, err := newDotLinkCode()
 	if err != nil {
 		return "", err
 	}
@@ -191,7 +202,8 @@ func (h *Hub) DotLink(ctx context.Context, peerID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return code, nil
+	h.linkGuard.unlock()
+	return shown, nil
 }
 
 // ConsumeDotLink spends code and returns the peer it names. Any code that
@@ -210,10 +222,15 @@ func (h *Hub) ConsumeDotLink(ctx context.Context, code string) (string, error) {
 }
 
 // normDotLink is code as stored, ok false when it cannot be one. People type
-// these codes, so case and surrounding space are forgiven.
+// these codes, so case, hyphens and spaces are forgiven.
 func normDotLink(code string) (string, bool) {
-	code = strings.ToUpper(strings.TrimSpace(code))
-	if len(code) != dotLinkLen || strings.Trim(code, dotLinkAlphabet) != "" {
+	code = strings.Map(func(r rune) rune {
+		if r == '-' || unicode.IsSpace(r) {
+			return -1
+		}
+		return unicode.ToUpper(r)
+	}, code)
+	if len(code) != DotLinkLen || strings.Trim(code, dotLinkAlphabet) != "" {
 		return "", false
 	}
 	return code, true

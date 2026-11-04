@@ -12,6 +12,7 @@ Every rule here traces to a source, tagged in brackets:
 | `[EX0N]` | `docs/protocol/examples/0N-*` |
 | `[SSE]` `[DOTS]` `[GB]` `[OC]` `[W2M]` | `docs/research/sse-mcp.md`, `dots.md`, `grokbot.md`, `openclaw.md`, `w2m-envelope.md` |
 | `[ADR1]` | `docs/adr/0001-tech-stack.md` |
+| `[AUD]` | `docs/research/2026-11-04-public-deploy-audit.md` (public-deploy audit, section 20) |
 | `[R01]`…`[R27]` | Item NN of `docs/protocol/OPEN-ITEMS-RESOLVED.md` (section 15) |
 
 A rule tagged `[Rnn]` settles a question the other sources left open. A path marked *(proposed path)* is not fixed by any ticket; implement it unless a later ticket changes it.
@@ -258,7 +259,7 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `GET /v1/admin/dead-letters`, `POST …/{dly}/retry`, `POST …/{dly}/discard` | `dead-letters list|retry|discard` | [T10, T17, R18] |
 | `PATCH /v1/admin/threads/{id}` | raise thread budget; rename | [T16, EX06] |
 | `POST /v1/admin/blobs/{sha256}/purge` | purge bytes, keep tombstone | [T13] |
-| `POST /v1/admin/dot-links` | `peer link <peer>` → 8-character link code, valid 10 min, binding a ChatGPT principal to a pre-created dot peer | [T11, R15] |
+| `POST /v1/admin/dot-links` | `peer link <peer>` → 12-character link code shown as `ABCD-EFGH-JKMN` (§20.1), valid 10 min, binding a ChatGPT principal to a pre-created dot peer; issuing one ends a link-code lockout | [T11, R15, AUD] |
 | `PUT /v1/admin/notify` | operator notification webhooks and filters; each route gets its own `whsec_` | [T15, R23] |
 | `GET /v1/admin/audit` | audit log | [T11] |
 | `GET /v1/admin/counters` | delivery and loop counters | [T17] |
@@ -521,7 +522,7 @@ For dots the hub is both an OAuth **resource server** and its own minimal **auth
 - Redirect URIs `https://chatgpt.com/connector_platform_oauth_redirect` and `https://chatgpt.com/connector/oauth/{callback_id}` [DOTS §4].
 - No machine-to-machine grants exist for ChatGPT [DOTS §4].
 
-**Principal binding:** the operator pre-creates a dot peer; on first login the ChatGPT principal is bound to it via a one-time link code; one principal → one dot peer for now, with a binding model that allows several peers per principal later [T11]. The operator runs `vecnet peer link <peer>`, which prints an 8-character code valid for 10 minutes; the consent page on the principal's first login asks for it and binds the principal to that peer [R15]. Consuming a link code moves the dot peer under a new `dot:<name>` principal. Nothing about a ChatGPT login reaches the hub, so a code cannot show that its holder is the account already bound to that peer: each code starts a new account, and any principal bound to that peer before loses its binding, tokens, unspent codes and consent cookie in the same transaction. A returning principal needs no code; its consent cookie identifies it.
+**Principal binding:** the operator pre-creates a dot peer; on first login the ChatGPT principal is bound to it via a one-time link code; one principal → one dot peer for now, with a binding model that allows several peers per principal later [T11]. The operator runs `vecnet peer link <peer>`, which prints a 12-character code (§20.1) valid for 10 minutes; the consent page on the principal's first login asks for it and binds the principal to that peer [R15]. Consuming a link code moves the dot peer under a new `dot:<name>` principal. Nothing about a ChatGPT login reaches the hub, so a code cannot show that its holder is the account already bound to that peer: each code starts a new account, and any principal bound to that peer before loses its binding, tokens, unspent codes and consent cookie in the same transaction. A returning principal needs no code; its consent cookie identifies it.
 
 **Mixed auth.** `/mcp` accepts either a vecnet bearer (peer or principal secret) or an OAuth access token on the same endpoint. A Grok Bot reaches `/mcp` with a peer bearer configured in the Bot's MCP settings [SSE, R15].
 
@@ -957,6 +958,7 @@ Question answers, approval responses and controls are never relayed as turn inpu
 6. **Secrets stay out of URLs, logs and audit rows** [SSE, T11]. Blob read tokens are scoped to one recipient and one hash [T13].
 7. **Every hub-initiated request to a configured URL is guarded** [DOTS]: push routes, notification routes, Events callbacks and challenges, Grok Bot routines, CIMD fetches and avatar URLs (section 8.1). The URL is https, DNS is resolved once and pinned to public unicast addresses, redirects are never followed, and a request gets 30 s in all (an avatar fetch 10 s and 2 MiB). The development-only `--allow-private-egress` (`VECNET_ALLOW_PRIVATE_EGRESS=1`) lets these URLs be http and reach private or loopback addresses; it is for LAN receivers and is never set in production.
 8. **Dots never hold a vecnet secret** [T11]. Enforced at enrolment, rotation and linking (section 2.12).
+9. **Anonymous traffic is bounded** [AUD]. Link-code guesses have a hub-wide budget, unauthenticated routes a per-client limit, junk secrets never take the write lock, and server timeouts bound slow clients (section 20).
 
 ---
 
@@ -1234,3 +1236,59 @@ The following are designed (`docs/design/2026-11-03-launcher.md` §3.9 H6–H10,
 - `POST /v1/jobs/{job_id}/session-peer {peer_id}`, which binds a launched peer to a job and sets a hub-set, immutable directory field `spawned_by {launcher, requester, job_id}` (provenance, never authority, §14.1);
 - the locked-thread exception that lets a job's recipient add its bound session peer to that job thread despite `locked_participants` (§16.3);
 - confinement of `launched` senders to their job thread and its existing participants, refused 403 `launched_confined`.
+
+## 20. Public-deploy hardening (2026-11-04)
+
+The hub may be reachable from the whole internet (Fly, `docs/DEPLOY.md`). Invitation stays the only way in (section 12). This section bounds what an anonymous client can cost: guesses, store write locks, connections and time [AUD].
+
+### 20.1 Link codes
+
+**Format.** A link code is 12 characters from `ABCDEFGHJKMNPQRSTUVWXYZ23456789` (31 symbols, no `I L O 0 1`): 31^12, about 2^59.4. The hub shows it in groups of four joined by `-`, as `ABCD-EFGH-JKMN`. When it is typed back, case, hyphens and whitespace are ignored. Only the SHA-256 of the 12 characters, ungrouped, is stored. It is valid for 10 minutes and usable once (section 4.5).
+
+**Failure budget.** Each link code refused on the consent form (`POST /oauth/authorize` with a non-empty `link_code` and no valid consent cookie) counts against one hub-wide budget: **20 refusals within 10 minutes**, across all clients. The refusal that spends the budget:
+1. burns every live link code issued so far (marks it used), in one transaction with its audit row, before it answers;
+2. starts a **lockout of 10 minutes**, during which every `POST /oauth/authorize` without a valid consent cookie is answered **429** with `Retry-After` and the consent form saying that every link code was cancelled. Codes are not looked up during a lockout, not even the right one.
+
+Issuing a new code (`POST /v1/admin/dot-links`) ends the lockout and resets the count. A returning principal with a valid consent cookie is never locked out. The count and the lockout are in memory; a restart forgets them, and burned codes stay burned.
+
+**Audit.** Actor `hub`; the code itself is never recorded.
+- `dot_link_refused` `{failures_in_window}` for every refusal counted against the budget. It is written after the answer, so a guess never waits on the write lock.
+- `dot_link_lockout` `{failures, codes_burned, locked_until}` when the budget is spent.
+
+Codes typed during a lockout are refused unread and not audited; the per-client limit (20.2) bounds them. A guesser therefore gets at most 19 wrong codes per issued code before it is burned, a chance of about 20/31^12 ≈ 2×10^-17. The cost is that a sustained guesser can keep linking locked; the operator sees `dot_link_lockout` in `vecnet audit` and issues a fresh code once it stops.
+
+### 20.2 Per-client limit on unauthenticated traffic
+
+**Client.** A client is an IP address, with IPv6 cut to its /64. The hub takes it from the TCP peer address by default. It takes it from the `Fly-Client-IP` header only when started with `--trust-fly-client-ip` (`VECNET_TRUST_FLY_CLIENT_IP=1`, set in `fly.toml`), because there Fly's proxy sets the header and every TCP peer is the proxy. Anywhere clients reach the hub directly, the header is the client's own and MUST NOT be trusted. A missing or unparseable header falls back to the TCP peer.
+
+**Bucket.** Each client has a token bucket of **30 tokens, refilled at one every 2 seconds** (30 a minute). The hub remembers at most 65,536 clients; past that it forgets those whose buckets have refilled, or all of them if none has.
+
+| Request | Cost |
+|---|---|
+| `POST /v1/enrol`, `POST /oauth/register`, `GET`/`POST /oauth/authorize`, `POST /oauth/token` | one token each |
+| `/v1/ingress/{src}` (401, 403, 404), `GET /v1/blobs/{sha}?t=` (401, 403, 404), `/mcp` (401) | one token per failure; a client with none left is refused before the handler, except an `/mcp` request that carries `Authorization` |
+| Any other path with a bearer that does not resolve | one token per 401; with none left, 429 instead of the 401 |
+| A credential that resolves; `/healthz`, `/ui`, `/.well-known/*`, `/oauth/consent.css` | free |
+
+So a good credential is never limited by this, even from an address that a broken client has drained. A refused request gets **429 `client_rate_limited`** with `Retry-After` (whole seconds, at least 1) and `details.retry_after_seconds`. The consent form's lockout (20.1) is a separate, HTML 429.
+
+**Read before write.** `POST /v1/enrol` refuses an unknown or spent token, and `POST /oauth/token` an unknown authorization code or refresh token, with a read **before** opening the write transaction, so junk never queues on the store's write lock. A known but spent code or refresh token still goes into the transaction, where reuse revokes its family (section 4.5).
+
+### 20.3 Timeouts, connections and HSTS
+
+**Server timeouts.** `ReadHeaderTimeout` 10 s, `ReadTimeout` 30 s, `WriteTimeout` 60 s, `IdleTimeout` 120 s. A long-lived response lifts them for itself:
+- An SSE stream (`GET /v1/events` as SSE, `GET /v1/admin/activity`, the `/mcp` GET stream and streamed `/mcp` POST responses) clears its read deadline and sets a 30 s write deadline per frame. A client that stops reading is dropped after that.
+- A long poll (`GET /v1/events`, at most 30 s) clears its read deadline and gets the hold plus 30 s to write.
+- `PUT /v1/blobs` gets 10 minutes to read its body; `GET /v1/blobs/{sha}` 10 minutes to write (25 MiB at about 350 kbit/s).
+
+Without the lift, Go's server would cancel the request's context when `ReadTimeout` expires, even after the body was read.
+
+**Fly connections.** `fly.toml` sets `[http_service.concurrency]` to `type = "connections"`, `soft_limit = 250`, `hard_limit = 300`. Fly's default is soft 20 and no hard limit. The explicit hard limit caps what the one machine takes, sized so streams fit: every open stream holds one connection for its whole life. At the hard limit Fly's proxy stops sending the machine new connections and queues them, then answers 503.
+
+**HSTS.** A hub whose public URL is `https://` sends `Strict-Transport-Security: max-age=31536000` on every response (no `includeSubDomains`, no `preload`). A plain-http hub sends none.
+
+### 20.4 The CLI refuses plaintext hubs
+
+`vecnet` refuses an `http://` hub before it sends any credential, unless the host is on the machine or the LAN: a loopback, private (RFC 1918, IPv6 ULA), link-local or CGNAT (`100.64.0.0/10`, e.g. Tailscale) address; `localhost`; a single-label name (`xsm`); or a name under `.localhost`, `.local`, `.lan`, `.home.arpa` or `.internal`. Names are not resolved. Any scheme other than `http` and `https` is refused.
+
+Two opt-ins exist for a plaintext hub elsewhere: `vecnet enrol … --allow-insecure-http`, which records `allow_insecure_http = true` in the profile, and `VECNET_ALLOW_INSECURE_HTTP=1` for one command or shell. A bearer sent over plain http to a public host crosses the internet in the clear, even when the far end redirects to https.

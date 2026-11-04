@@ -21,7 +21,7 @@
 <input type="hidden" name="request" value="{{.Request}}">
 {{- if .NeedCode}}
 <label for="link_code">Link code</label>
-<input id="link_code" name="link_code" required maxlength="8" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus>
+<input id="link_code" name="link_code" required maxlength="24" placeholder="ABCD-EFGH-JKMN" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus>
 <p class="hint">Your operator gets one by running <code>vecnet peer link</code>. It lasts 10 minutes.</p>
 {{- end}}
 <div class="actions">

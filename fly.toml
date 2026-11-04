@@ -11,6 +11,9 @@ kill_timeout = 15
 
 [env]
   VECNET_PUBLIC_URL = "https://vecnet.fly.dev"
+  # Fly's proxy sets Fly-Client-IP; the per-client rate limit keys on it
+  # (PROTOCOL §20.2). Never set this where clients reach the hub directly.
+  VECNET_TRUST_FLY_CLIENT_IP = "1"
 
 [http_service]
   internal_port = 8080
@@ -18,6 +21,21 @@ kill_timeout = 15
   auto_stop_machines = "off"
   auto_start_machines = false
   min_machines_running = 1
+
+  # Fly's default (type connections, soft 20, no hard limit; docs.fly.io
+  # reference/configuration, 2026-11-04) deprioritises the machine at 20, and
+  # every peer's SSE stream or long poll, the operator UI's activity stream and
+  # each ChatGPT /mcp stream holds a connection for its whole life. 300 is about
+  # ten times the expected fleet (peers + UI tabs + dots). An idle stream is a
+  # goroutine and its buffers (tens of KiB), so 300 is under 30 MiB of the
+  # 512 MB machine. At hard_limit Fly queues new connections, then 503s. The
+  # hub's timeouts and per-client limiter (PROTOCOL §20.2, §20.3) keep slow
+  # anonymous requests from holding many. soft_limit only steers traffic
+  # between machines; here it marks "near the cap" in Fly's metrics.
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 250
+    hard_limit = 300
 
 [[mounts]]
   source = "vecnet_data"

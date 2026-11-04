@@ -97,7 +97,13 @@ func bearer(r *http.Request) string {
 // "reachable") sets last_seen (PROTOCOL §8); touch may be nil. A principal
 // acting for a peer with "as" is observed by the hub once "as" is
 // authorised (Send, SetPresence).
-func authenticate(res *auth.Resolver, touch func(ctx context.Context, peerID, value string), next http.Handler) http.Handler {
+//
+// A credential that does not resolve costs its client one token of lim
+// (PROTOCOL §20.2), and a client with none left gets 429 client_rate_limited
+// instead of 401. A credential that resolves is never limited here, so one
+// broken client cannot lock out a good one behind the same address. lim may
+// be nil.
+func authenticate(res *auth.Resolver, touch func(ctx context.Context, peerID, value string), lim *Limiter, trustFly bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isPublic(r) {
 			next.ServeHTTP(w, r)
@@ -107,6 +113,12 @@ func authenticate(res *auth.Resolver, touch func(ctx context.Context, peerID, va
 		if errors.Is(err, auth.ErrPeerDisabled) && r.Method == http.MethodGet && r.URL.Path == "/v1/events" {
 			w.WriteHeader(http.StatusNoContent) // peer disabled: stop reconnecting (PROTOCOL §2.3)
 			return
+		}
+		if errors.Is(err, auth.ErrUnauthenticated) && lim != nil {
+			if ok, wait := lim.Take(clientKey(r, trustFly)); !ok {
+				tooMany(w, wait)
+				return
+			}
 		}
 		if err != nil {
 			writeError(w, err)

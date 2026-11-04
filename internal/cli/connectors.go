@@ -22,8 +22,9 @@ const (
 	maxKeyFile = 4 << 10
 )
 
-// peerLink is `peer link <peer>`: the 8-character code the dot's principal
-// enters on first login (PROTOCOL §4.5).
+// peerLink is `peer link <peer>`: the 12-character code, shown as
+// ABCD-EFGH-JKMN, that the dot's principal enters on first login
+// (PROTOCOL §4.5, §20.1).
 func (a *app) peerLink(peer string) error {
 	var out map[string]any
 	if err := a.call(http.MethodPost, "/v1/admin/dot-links", map[string]string{"peer_id": peer}, &out); err != nil {
