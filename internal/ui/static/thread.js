@@ -240,6 +240,7 @@ export function mount(root, ctx) {
     const n = enc.encode(ta.value).length, el = comp.querySelector('.bytes');
     el.textContent = n > SPILL_BYTES ? bytes(n) + ' · spills to message.md' : n + ' / ' + SPILL_BYTES + ' B';
     el.className = 'bytes' + (n > TEXT_CAP ? ' over' : n > SPILL_BYTES ? ' spill' : '');
+    fitHint(); // the byte count's width changes the hint's room
   }
 
   // gate: Send waits for every upload, and for a spill slot when the text is long.
@@ -248,6 +249,25 @@ export function mount(root, ctx) {
     const btn = comp.querySelector('.send');
     btn.disabled = S.sending || !atts.ready() || !!refusal;
     btn.title = refusal || (!atts.ready() ? 'Waiting for attachments to finish or be removed' : '');
+  }
+
+  // fitHint keeps the composer bar on one row: the keyboard hint may wrap to two
+  // lines at its · breaks, and is dropped (bar.tight) when even that would clip it.
+  // Measured, not a width breakpoint, so the byte count, fonts and zoom all count.
+  let fitQueued = false;
+  function fitHint() {
+    if (fitQueued) return;
+    fitQueued = true;
+    requestAnimationFrame(() => {
+      fitQueued = false;
+      const bar = comp && comp.querySelector('.composer .bar'), hint = bar && bar.querySelector('.hint');
+      if (!hint) return;
+      bar.classList.remove('tight');
+      const cs = getComputedStyle(hint), lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.35;
+      const box = hint.getBoundingClientRect();
+      const clipped = [...hint.children].some(s => { const r = s.getBoundingClientRect(); return r.right > box.right + 1 || r.left < box.left - 1; });
+      if (cs.display === 'none' || hint.scrollHeight > lh * 2 + 1 || clipped) bar.classList.add('tight');
+    });
   }
 
   function composer() {
@@ -263,8 +283,9 @@ export function mount(root, ctx) {
       h('div', { class: 'to', hidden: true }, h('span'), h('button', { type: 'button', title: 'Reply to the thread instead', text: '×', onclick: () => { S.replyTo = ''; render(); } })),
       ta,
       atts.el,
-      h('div', { class: 'bar' }, prio.el, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint', text: 'Drop or paste files · Enter to send · Shift+Enter for a new line' }), pick, btn));
+      h('div', { class: 'bar' }, prio.el, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint' }, h('span', { text: 'Drop or paste files' }), ' · ', h('span', { text: 'Enter to send' }), ' · ', h('span', { text: 'Shift+Enter for a new line' })), pick, btn));
     atts.wire(wrap, ta, pick);
+    new ResizeObserver(fitHint).observe(wrap);
     return h('div', { class: 'composer' }, h('div', { class: 'cbanner', role: 'alert', hidden: true }), wrap);
   }
 

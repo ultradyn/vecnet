@@ -546,3 +546,68 @@ func TestReadSelectedWakeAfterSuperseded(t *testing.T) {
 		})
 	}
 }
+
+// unread_by_thread splits the unread count by thread with the same predicate,
+// so its values always sum to unread (the web sidebar's per-thread counts).
+func TestInboxUnreadByThread(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "Sender")
+	other, _ := env.NewPeer("session", "Other")
+	ctx := context.Background()
+
+	empty := inbox(t, env, opapi.InboxQuery{})
+	if empty.Unread != 0 || empty.UnreadByThread == nil || len(empty.UnreadByThread) != 0 {
+		t.Fatalf("empty inbox: unread %d, by thread %v", empty.Unread, empty.UnreadByThread)
+	}
+	raw, err := json.Marshal(opapi.Inbox{})
+	if err != nil || !strings.Contains(string(raw), `"unread_by_thread":{}`) {
+		t.Fatalf("zero Inbox JSON = %s, %v", raw, err)
+	}
+
+	a := send(t, env, secret, body("a1", "wake", env.OperatorPeer))
+	for _, k := range []string{"a2", "a3"} {
+		b := body(k, "hold", env.OperatorPeer)
+		b["thread_id"] = a.ThreadID
+		send(t, env, secret, b)
+	}
+	bb := send(t, env, secret, body("b1", "wake", env.OperatorPeer))
+	// Not the operator's to read: another peer's thread, and an open approval,
+	// which sits in approvals and never counts as unread.
+	send(t, env, secret, body("d1", "wake", other))
+	_, apr := approval(t, env, secret, "c1", env.Now.Now().Add(time.Hour), env.OperatorPeer)
+	if err := env.Hub.Receipt(ctx, caller(t, env), a.Deliveries[0].DeliveryID, "read", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	sum := func(m map[string]int) (n int) {
+		for _, v := range m {
+			n += v
+		}
+		return n
+	}
+	got := inbox(t, env, opapi.InboxQuery{})
+	want := map[string]int{a.ThreadID: 2, bb.ThreadID: 1}
+	if !reflect.DeepEqual(got.UnreadByThread, want) || got.Unread != 3 || sum(got.UnreadByThread) != got.Unread {
+		t.Fatalf("unread %d, by thread %v; want 3, %v", got.Unread, got.UnreadByThread, want)
+	}
+	// Paging and the unread filter cut the delivery page, not the counts.
+	if paged := inbox(t, env, opapi.InboxQuery{Limit: 1, UnreadOnly: true}); !reflect.DeepEqual(paged.UnreadByThread, want) || paged.Unread != 3 {
+		t.Fatalf("paged: unread %d, by thread %v", paged.Unread, paged.UnreadByThread)
+	}
+
+	// Reading a thread drops it from the map; the rest are untouched.
+	if res, err := opview.New(env.Hub).MarkThreadRead(ctx, caller(t, env), a.ThreadID); err != nil || res.Marked != 2 {
+		t.Fatalf("MarkThreadRead = %+v, %v", res, err)
+	}
+	got = inbox(t, env, opapi.InboxQuery{})
+	if want := map[string]int{bb.ThreadID: 1}; !reflect.DeepEqual(got.UnreadByThread, want) || got.Unread != 1 {
+		t.Fatalf("after read: unread %d, by thread %v", got.Unread, got.UnreadByThread)
+	}
+
+	// At expiry the approval's delivery becomes an ordinary unread one.
+	env.Now.Advance(time.Hour)
+	got = inbox(t, env, opapi.InboxQuery{})
+	if want := map[string]int{bb.ThreadID: 1, apr.ThreadID: 1}; !reflect.DeepEqual(got.UnreadByThread, want) || got.Unread != 2 || sum(got.UnreadByThread) != got.Unread {
+		t.Fatalf("after expiry: unread %d, by thread %v", got.Unread, got.UnreadByThread)
+	}
+}

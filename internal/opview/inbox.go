@@ -48,10 +48,29 @@ func (r *Reader) Inbox(ctx context.Context, c auth.Caller, q opapi.InboxQuery) (
 	// receipt followed: answering must not raise the unread count.
 	const unread = ` AND d.read_at IS NULL AND NOT EXISTS (
   SELECT 1 FROM approvals a WHERE a.msg_id = d.msg_id AND a.decided_by = d.recipient)`
-	if err := r.Hub.DB.QueryRowContext(ctx,
-		`SELECT count(*) FROM deliveries d WHERE `+visible+unread, c.PeerID, out.Now).
-		Scan(&out.Unread); err != nil {
+	// One grouped read gives both the total and its per-thread split, so the
+	// two always agree (the web sidebar's per-thread counts sum to the badge).
+	byThread, err := r.Hub.DB.QueryContext(ctx,
+		`SELECT d.thr_id, count(*) FROM deliveries d WHERE `+visible+unread+` GROUP BY d.thr_id`, c.PeerID, out.Now)
+	if err != nil {
 		return out, fmt.Errorf("opview: inbox unread: %w", err)
+	}
+	defer byThread.Close()
+	out.UnreadByThread = map[string]int{}
+	for byThread.Next() {
+		var thr string
+		var n int
+		if err := byThread.Scan(&thr, &n); err != nil {
+			return out, fmt.Errorf("opview: inbox unread: %w", err)
+		}
+		out.UnreadByThread[thr] = n
+		out.Unread += n
+	}
+	if err := byThread.Err(); err != nil {
+		return out, fmt.Errorf("opview: inbox unread: %w", err)
+	}
+	if err := byThread.Close(); err != nil {
+		return out, fmt.Errorf("opview: close inbox unread: %w", err)
 	}
 	limit := q.Limit
 	if limit <= 0 {

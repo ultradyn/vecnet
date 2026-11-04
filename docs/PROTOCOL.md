@@ -280,7 +280,7 @@ in section 2.12 is unchanged.
 
 | Method and path | Query parameters | Response |
 |---|---|---|
-| `GET /v1/admin/inbox` | `limit`, `before=<dly_id>`, `unread=1` | `{now, me, approvals, dead_letters, attention, deliveries, unread, next_before}` |
+| `GET /v1/admin/inbox` | `limit`, `before=<dly_id>`, `unread=1` | `{now, me, approvals, dead_letters, attention, deliveries, unread, unread_by_thread, next_before}` |
 | `POST /v1/admin/threads/{id}/read` | none; no request body | `{marked}`: number of deliveries marked read for the operator |
 | `GET /v1/admin/threads` | `participant=<peer_id>`, `exclude_participant=<peer_id>`, `limit`, `cursor` | `{threads: [ThreadRow…], next}` |
 | `GET /v1/admin/threads/{id}` | none | `{now, row: ThreadRow, files, open_approvals}` |
@@ -319,7 +319,13 @@ countdowns. View types are defined in `internal/opapi`:
   priority, `section` (`woke` or `held`), state, creation time, excerpt,
   nullable `read_at`, and an attachment count. `unread` is the unread count.
   An approval request the operator answered counts as read: its `read_at` is
-  the answer's time unless a read receipt came first.
+  the answer's time unless a read receipt came first. `unread_by_thread`
+  (2026-11-05) splits `unread` by thread: an object from `thr_` id to that
+  thread's unread count, listing only threads with at least one, `{}` when
+  none. It is read with the same predicate in the same query, so its values
+  always sum to `unread`; like `unread`, it ignores `limit`, `before` and
+  `unread=1`. The web sidebar shows it per Your Threads row. It changes
+  exactly when `unread` does, so the `inbox` tag keeps it fresh.
 - `ThreadRow` keeps the section 2.8 `ThreadSummary` under the named `thread`
   field, alongside `created_by`, `created_at`, `last_message_at`, and nullable
   `cut` (`reason`, `at`). A detail's files carry `sha256`, name, media type,
