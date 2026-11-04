@@ -75,7 +75,9 @@ func noteDiagProtocol(r *http.Request, version string) {
 func (d *requestDiag) log(s *Server, w *diagResponse, r *http.Request) {
 	refused := w.status == http.StatusForbidden || w.status == http.StatusBadRequest ||
 		w.status == http.StatusNotFound || w.status == http.StatusNotAcceptable
-	if !d.initialize && !refused {
+	origin := normOrigin(r.Header.Get("Origin"))
+	foreignAllowed := origin != "" && origin != normOrigin(s.PublicOrigin) && s.originOK(r)
+	if !d.initialize && !refused && !foreignAllowed {
 		return
 	}
 	// A successful initialize mints a legacy session. Do not retain its id.
@@ -103,7 +105,7 @@ func (d *requestDiag) log(s *Server, w *diagResponse, r *http.Request) {
 		"session_present", len(r.Header.Values(hdrSessionID)) != 0,
 		"caller_kind", kind,
 	}
-	if origin := normOrigin(r.Header.Get("Origin")); origin != "" && origin != normOrigin(s.PublicOrigin) {
+	if origin != "" && origin != normOrigin(s.PublicOrigin) {
 		fields = append(fields, "origin", diagTruncate(origin, 100))
 	}
 	if kind != "unauthenticated" && d.principal.Caller.PeerID != "" {
@@ -111,6 +113,8 @@ func (d *requestDiag) log(s *Server, w *diagResponse, r *http.Request) {
 	}
 	if refused {
 		slog.Warn("mcp: request refused", fields...)
+	} else if !d.initialize && foreignAllowed {
+		slog.Info("mcp: allowed foreign origin", fields...)
 	} else {
 		slog.Info("mcp: initialize", fields...)
 	}

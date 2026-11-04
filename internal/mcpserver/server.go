@@ -102,10 +102,12 @@ type Handler func(ctx context.Context, s *Session, req *Request) (result any, er
 type Server struct {
 	Hub          *hub.Hub
 	Auth         Authenticator
-	PublicOrigin string        // scheme://host[:port] of Cfg.PublicURL; a present Origin must equal it
-	Heartbeat    time.Duration // ": hb" interval; zero means DefaultHeartbeat
-	SessionTTL   time.Duration // idle 2025 session lifetime; zero means DefaultSessionTTL
-	Now          func() time.Time
+	PublicOrigin string // scheme://host[:port] of Cfg.PublicURL; always allowed
+	// AllowedOrigins are extra normalized exact origins; nil uses https://chatgpt.com.
+	AllowedOrigins []string
+	Heartbeat      time.Duration // ": hb" interval; zero means DefaultHeartbeat
+	SessionTTL     time.Duration // idle 2025 session lifetime; zero means DefaultSessionTTL
+	Now            func() time.Time
 
 	// Touch records a reachability observation for an authenticated peer
 	// credential (PROTOCOL §8), as httpapi's bearer middleware does; nil
@@ -259,7 +261,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w = dw
 	defer diag.log(s, dw, r)
 	if !s.originOK(r) {
-		httpErr(w, http.StatusForbidden, "forbidden", "Origin is not this hub's public origin")
+		httpErr(w, http.StatusForbidden, "forbidden", "Origin is not allowed")
 		return
 	}
 	switch r.Method {
@@ -705,16 +707,6 @@ func metaVersion(req *Request) string {
 		}
 	}
 	return ""
-}
-
-// originOK: no Origin header passes; a present one must equal PublicOrigin.
-func (s *Server) originOK(r *http.Request) bool {
-	vals := r.Header.Values("Origin")
-	if len(vals) == 0 {
-		return true
-	}
-	want := normOrigin(s.PublicOrigin)
-	return len(vals) == 1 && want != "" && normOrigin(vals[0]) == want
 }
 
 // normOrigin reduces a URL to scheme://host[:port], lower-cased, default

@@ -87,7 +87,7 @@ func TestMCPInitializeDiagnostics(t *testing.T) {
 			}
 			w := diagRequest(s, http.MethodPost, body, map[string]string{
 				"Accept":         "application/json," + strings.Repeat("界", 110),
-				"Origin":         "HTTPS://HUB.EXAMPLE:443/",
+				"Origin":         "HTTPS://HUB.EXAMPLE:443",
 				"Mcp-Session-Id": "session-canary-do-not-log",
 			})
 			if w.Code != http.StatusOK {
@@ -217,5 +217,32 @@ func TestMCPRefusalNegotiatedDiagnostics(t *testing.T) {
 	}
 	if strings.Contains(output.String(), session) {
 		t.Error("diagnostics leaked the real session id")
+	}
+}
+
+func TestMCPAllowedForeignOriginDiagnostics(t *testing.T) {
+	for _, method := range []string{"initialize", "ping"} {
+		t.Run(method, func(t *testing.T) {
+			capture, output := captureDiag(t)
+			s := mcpserver.New(nil, diagAuth{mcpserver.Principal{Caller: auth.Caller{Kind: "peer", PeerID: "peer_diag"}}}, "https://hub.example")
+			body := initialize(1, mcpserver.ProtoLegacy)
+			if method == "ping" {
+				body = map[string]any{"jsonrpc": "2.0", "id": 1, "method": "ping"}
+			}
+			w := diagRequest(s, http.MethodPost, body, map[string]string{
+				"Origin": "https://chatgpt.com", "MCP-Protocol-Version": mcpserver.ProtoCurrent,
+			})
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", w.Code, w.Body)
+			}
+			if len(capture.records) != 1 {
+				t.Fatalf("records = %d, want 1; %s", len(capture.records), output)
+			}
+			fields := diagFields(capture.records[0])
+			if fields["origin"] != "https://chatgpt.com" || fields["origin_present"] != true {
+				t.Errorf("foreign origin diagnostics: %v", fields)
+			}
+			assertDiagNoSecrets(t, output.String())
+		})
 	}
 }

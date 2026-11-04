@@ -16,6 +16,7 @@ func newMCP(d Deps) *mcpserver.Server {
 		chain = append(chain, &oauth.TokenAuth{S: d.OAuth})
 	}
 	m := mcpserver.New(d.Hub, chain, d.Hub.Cfg.PublicURL)
+	m.AllowedOrigins = d.MCPAllowedOrigins
 	if d.OAuth != nil {
 		m.ResolveDotPeer = d.OAuth.ResolveDotPeer
 	}
