@@ -1,0 +1,29 @@
+/* Peer detail (#peer/<id>): the dashboard's dense tables (it reuses .dash),
+   plus a header and three fact cards. */
+body[data-route=peer] .va .col{max-width:1120px}
+.pv .crumb{font-size:12px;color:var(--dim);margin:0 0 10px}
+.pv .crumb a{color:var(--dim)}
+.pv .crumb a:hover{color:var(--text)}
+.pv-head h1{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.pv-head h1 .nm{overflow-wrap:anywhere}
+.pv-head h1 .pill{font-weight:400;color:var(--muted)}
+.pv-head h1 .chip{font-size:11px}
+.pv-head .pv-id{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted)}
+.pv-head .pv-id .pid{user-select:all;-webkit-user-select:all;overflow-wrap:anywhere}
+.pv-head.off h1 .nm{color:var(--muted)}
+.pv-head .note{margin:8px 0 0}
+.pv .chip.bad{color:var(--bad);border-color:#fb718560}
+.pv-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:20px}
+.pv-grid>.dash-sec{margin:0;border:1px solid var(--line);border-radius:9px;background:#0c1120;padding:4px 14px 12px}
+.pv-grid h2{margin:10px 0 8px}
+.pv-kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 14px;margin:0;font-size:13px}
+.pv-kv dt{color:var(--dim);font-size:12px;padding-top:1px}
+.pv-kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.pv-kv dd .sub{display:block;font-size:11px;color:var(--dim)}
+.pv .ids,.pv .chips{display:flex;flex-wrap:wrap;gap:4px 10px}
+.pv .sc .k{font:11px var(--mono);color:var(--dim)}
+.pv .muted{color:var(--dim)}
+.pv td .idc,.pv dd .idc{vertical-align:middle}
+.pv td .idc.sub,.pv td>.idc:not(:first-child){display:flex}
+.pv .pps .plink{white-space:nowrap}
+@media (max-width:1100px){.pv-grid{grid-template-columns:1fr}}

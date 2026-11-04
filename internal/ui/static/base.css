@@ -105,11 +105,34 @@ span,b,time,code,a{unicode-bidi:isolate}
 .va aside{border-left:1px solid var(--line);padding:40px 22px;overflow:auto;font-size:13px;color:var(--muted);line-height:1.6}
 .va .av{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;font:600 12.5px var(--sans);color:#0b0f19;background:#818cf8}
 .va .av.k1{background:#fbbf24}.va .av.k2{background:#34d399}.va .av.k3{background:#38bdf8}.va .av.k4{background:#f472b6}.va .av.k5{background:#fb923c}.va .av.op{background:var(--grad);color:#fff}
-body[data-route=dash] aside,body[data-route=new] aside{display:none}
+body[data-route=dash] aside,body[data-route=new] aside,body[data-route=peer] aside{display:none}
 .chip{font:500 10.5px/1 var(--mono);padding:3px 6px;border-radius:4px;border:1px solid var(--line2);color:var(--muted);white-space:nowrap}
 .btn.armed{border-color:#fb718580;color:var(--bad)}
+
+/* ids (dom.js idText): the whole id is in the text and the middle is a
+   zero-size run, so a selection copies the full id. The ellipsis is
+   generated content, which is never selected or copied. */
+.idv{font-family:var(--mono);white-space:nowrap;user-select:all;-webkit-user-select:all;cursor:text}
+.idv .im{font-size:0;letter-spacing:0}
+.idv .it::before{content:'\2026'}
+/* copy buttons: quiet until the row is hovered or the button has focus */
+.idc{display:inline-flex;align-items:center;gap:4px;max-width:100%}
+.cpy{position:relative;flex:none;width:20px;height:18px;padding:0;border:1px solid transparent;border-radius:4px;background:none;color:var(--dim);opacity:0;transition:opacity .12s}
+.cpy::before,.cpy::after{content:'';position:absolute;width:7px;height:8px;border:1.3px solid currentColor;border-radius:2px}
+.cpy::before{left:5px;top:3px}
+.cpy::after{left:8px;top:6px;background:var(--bg)}
+.cpy:hover{color:var(--text);border-color:var(--line2)}
+.idc:hover .cpy,.pv-id .cpy,.cpy:focus-visible,.cpy.done{opacity:1}
+.cpy.done{color:var(--ok)}
+.cpy.done::before{left:6px;top:2px;width:5px;height:9px;border-width:0 1.6px 1.6px 0;border-radius:0;transform:rotate(45deg)}
+.cpy.done::after{display:none}
+@media (hover:none){.cpy{opacity:.7}}
+.copybuf{position:fixed;top:0;left:-9999px;opacity:0}
+/* peer links (dom.js peerLink): the name, underlined only on hover */
+a.plink,span.plink{color:inherit;text-decoration:none;cursor:pointer;border-bottom:1px dotted #a5b4fc66}
+a.plink:hover,span.plink:hover{color:var(--violet);border-bottom-color:var(--violet)}
 .empty.error{border-color:#fb718580}
 
-@media (min-width:1101px){body[data-route=dash] .va,body[data-route=new] .va{grid-template-columns:240px minmax(0,1fr)}}
+@media (min-width:1101px){body[data-route=dash] .va,body[data-route=new] .va,body[data-route=peer] .va{grid-template-columns:240px minmax(0,1fr)}}
 @media (max-width:1100px){.va{grid-template-columns:220px minmax(0,1fr)}.va aside{display:none}}
 @media (max-width:720px){.va{grid-template-columns:1fr;height:auto;min-height:100vh}.va .side{border-right:0;border-bottom:1px solid var(--line)}.va main{padding:24px 16px}}

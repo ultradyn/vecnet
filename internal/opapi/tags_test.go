@@ -111,7 +111,7 @@ func TestThreadRowJSONKeepsSiblings(t *testing.T) {
 }
 
 func TestWireSlicesNeverNull(t *testing.T) {
-	values := []any{opapi.PrincipalRow{}, opapi.OpenApproval{}, opapi.Inbox{}, opapi.ThreadPage{}, opapi.ThreadApproval{}, opapi.ThreadDetail{}, opapi.MatrixCell{}, opapi.MatrixRow{}, opapi.Matrix{}, opapi.Peer{}, opapi.PeerRow{}, opapi.LoopCuts{}, opapi.DeliveryHealth{}, opapi.AuditEntry{}, opapi.AuditPage{}, opapi.History{}, opapi.SendResult{}, opapi.ReactionResult{}}
+	values := []any{opapi.PrincipalRow{}, opapi.OpenApproval{}, opapi.Inbox{}, opapi.ThreadPage{}, opapi.ThreadApproval{}, opapi.ThreadDetail{}, opapi.MatrixCell{}, opapi.MatrixRow{}, opapi.Matrix{}, opapi.Peer{}, opapi.PeerRow{}, opapi.PeerScopes{}, opapi.LoopCuts{}, opapi.DeliveryHealth{}, opapi.AuditEntry{}, opapi.AuditPage{}, opapi.History{}, opapi.SendResult{}, opapi.ReactionResult{}}
 	for _, value := range values {
 		raw, err := json.Marshal(value)
 		if err != nil {

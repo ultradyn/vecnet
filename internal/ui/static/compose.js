@@ -4,8 +4,7 @@
 // Attachments (picker, drop onto the form, paste into the text) are
 // attach.js's chip row; the send carries their hashes once all are uploaded.
 import { createAttachments } from './attach.js';
-import { avatar, h } from './dom.js';
-import { short } from './format.js';
+import { avatar, h, idText } from './dom.js';
 import { prioritySeg } from './prio.js';
 import { buildSend, canSend, counter, eligible, errorText, keepKey, keyFor, matches, sendRefusal } from './compose-model.js';
 
@@ -98,7 +97,7 @@ export function mount(root, ctx) {
           avatar(p.peer_id, { nameOf, kindOf }),
           h('span', { class: 'nm', text: p.name }),
           h('span', { class: 'kd', text: p.kind }),
-          h('span', { class: 'id', text: short(p.peer_id) }));
+          idText(p.peer_id, 'id'));
       }));
     }
   }

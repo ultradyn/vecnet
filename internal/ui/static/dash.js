@@ -4,7 +4,7 @@
 // and every 30 s while mounted. Ages use the hub clock, never the client's.
 import { activityAction } from './activity-model.js';
 import { allThreads, blockedLine, cutSummary, peerRows } from './dash-model.js';
-import { chip, h } from './dom.js';
+import { chip, h, idCopy, idText, peerLink } from './dom.js';
 import { ago, short, title as threadTitle, when } from './format.js';
 import * as subs from './subs.js';
 
@@ -19,9 +19,10 @@ const COUNTER_LABELS = { dead_letters: 'dead-lettered' };
 
 const errText = e => (e && e.message) || String(e);
 
-// A full id lives in the title; the cell shows the short form.
-function idCell(id) {
-  return h('span', { class: 'sub mono', text: short(id), title: id });
+// The cell shows the short form, but the whole id is in its text (a copy
+// is whole) and its title, with a copy button on hover (dom.js idCopy).
+function idCell(id, what) {
+  return h('span', { class: 'sub mono' }, idCopy(id, what));
 }
 
 function table(heads, rows) {
@@ -69,6 +70,7 @@ export function mount(root, ctx) {
     return row ? threadTitle(row.thread, ctx.me, peerName) : short(id);
   };
   const threadLink = id => h('a', { href: '#thread/' + id, text: threadName(id), title: id });
+  const peerCell = id => peerLink(id, peerName(id));
 
   // The audit tail keeps every entry it has shown, so "Load older" pages on
   // from the oldest one and a reload of the head does not drop them.
@@ -132,7 +134,7 @@ export function mount(root, ctx) {
       const presenceAge = p.presence === 'n/a' ? '' : p.presenceAt ? age(p.presenceAt) : 'never reported';
       const reachSub = [p.via, p.seen ? age(p.seen) : ''].filter(Boolean).join(', ');
       return h('tr', { class: p.disabled ? 'off' : null },
-        h('td', null, h('span', { text: p.name }), p.disabled ? [' ', chip('disabled', 'bad')] : null, idCell(p.id)),
+        h('td', null, peerLink(p.id, p.name, { cls: 'pn' }), p.disabled ? [' ', chip('disabled', 'bad')] : null, idCell(p.id, 'peer id')),
         h('td', null, h('span', { class: 'pill' }, h('i', { class: 'kd k-' + p.kind }), p.kind)),
         h('td', null, h('span', { class: 'pill' }, h('i', { class: 'pd ' + p.presence.replace('/', '') }), p.presence),
           h('span', { class: 'sub mono', text: presenceAge })),
@@ -152,8 +154,8 @@ export function mount(root, ctx) {
     return [table(['Thread', 'Participants', 'Messages', 'Budget left', 'Last activity', 'Cut'], rows.map(r => {
       const t = r.thread || {}, parts = t.participants || [];
       return h('tr', null,
-        h('td', null, h('a', { href: '#thread/' + t.thread_id, class: 'tl', text: threadTitle(t, ctx.me, peerName) }), idCell(t.thread_id)),
-        h('td', null, h('span', { text: String(parts.length) }), h('span', { class: 'sub', text: parts.map(peerName).join(', ') })),
+        h('td', null, h('a', { href: '#thread/' + t.thread_id, class: 'tl', text: threadTitle(t, ctx.me, peerName) }), idCell(t.thread_id, 'thread id')),
+        h('td', null, h('span', { text: String(parts.length) }), h('span', { class: 'sub' }, parts.flatMap((id, i) => [i ? ', ' : '', peerCell(id)]))),
         h('td', { text: String(t.message_count ?? 0) }),
         h('td', { text: t.budget_remaining === null || t.budget_remaining === undefined ? 'unlimited' : String(t.budget_remaining), class: t.budget_remaining === 0 ? 'bad' : null }),
         h('td', { text: age(r.last_message_at), title: r.last_message_at || '' }),
@@ -179,8 +181,8 @@ export function mount(root, ctx) {
       h('p', { class: 'note', text: 'Failed deliveries are final: the protocol does not retry them.' }),
       failed.length
         ? table(['Delivery', 'To', 'Thread', 'Status', 'Error', 'When'], failed.map(f => h('tr', null,
-          h('td', null, idCell(f.delivery_id)),
-          h('td', { text: peerName(f.recipient) }),
+          h('td', null, idCell(f.delivery_id, 'delivery id')),
+          h('td', null, peerCell(f.recipient)),
           h('td', null, threadLink(f.thread_id)),
           h('td', { class: 'bad mono', text: f.last_status === null || f.last_status === undefined ? '—' : String(f.last_status) }),
           h('td', { class: 'sm', text: f.last_error || '' }),
@@ -195,8 +197,8 @@ export function mount(root, ctx) {
     const note = h('p', { class: 'note' }, 'Read-only here. ', h('a', { href: '#inbox', text: 'Act on these in Inbox' }), '.');
     if (!rows.length) return [note, none('No dead letters.')];
     return [note, table(['Delivery', 'To', 'Thread', 'Attempts', 'Status', 'Error', 'When'], rows.map(d => h('tr', null,
-      h('td', null, idCell(d.delivery_id)),
-      h('td', { text: peerName(d.recipient) }),
+      h('td', null, idCell(d.delivery_id, 'delivery id')),
+      h('td', null, peerCell(d.recipient)),
       h('td', null, threadLink(d.thread_id)),
       h('td', { text: String(d.attempt ?? 0) }),
       h('td', { class: 'bad mono', text: d.last_status === null || d.last_status === undefined ? '—' : String(d.last_status) }),
@@ -221,9 +223,9 @@ export function mount(root, ctx) {
     out.push(entries.length
       ? h('div', { class: 'audit mono' }, entries.map(e => h('div', { class: 'ln' },
         h('time', { class: 't', text: when(e.at, nowMs()), title: e.at }),
-        h('span', { class: 'actor', text: peerName(e.actor), title: e.actor }),
+        h('span', { class: 'actor' }, peerLink(e.actor, peerName(e.actor))),
         h('span', { class: 'act', text: e.action }),
-        h('span', { class: 't' }, (e.target_ids || []).map(id => h('span', { class: 'tg', text: short(id), title: id }))))))
+        h('span', { class: 't' }, (e.target_ids || []).map(id => idText(id, 'tg'))))))
       : none('No audit entries.'));
     if (audit.err) out.push(h('p', { class: 'err', text: 'Could not load older entries: ' + errText(audit.err) }));
     if (next) out.push(h('button', { type: 'button', class: 'btn older', disabled: audit.busy, text: audit.busy ? 'Loading…' : 'Load older', onclick: loadOlder }));

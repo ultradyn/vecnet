@@ -10,10 +10,12 @@ import { createActivity } from './activity.js';
 import { createApi } from './api.js';
 import * as compose from './compose.js';
 import * as dash from './dash.js';
-import { h, toast } from './dom.js';
+import { h, peerLink, toast } from './dom.js';
 import { short, title } from './format.js';
 import * as inbox from './inbox.js';
 import * as matrix from './matrix.js';
+import { peerHref } from './peer-model.js';
+import * as peer from './peer.js';
 import * as presence from './presence.js';
 import { OTHER_PAGE, nextLimit, otherThreads } from './sidebar-model.js';
 import { createStore } from './store.js';
@@ -29,12 +31,15 @@ const SCREENS = {
   inbox: { screen: inbox, aside: inbox.mountAside },
   thread: { screen: thread, aside: threadAside.mountAside },
   dash: { screen: dash },
+  peer: { screen: peer },
   new: { screen: compose },
 };
 
 function parseRoute(hash) {
   if (hash === '#dash') return { name: 'dash', view: 'dash' };
   if (hash === '#new') return { name: 'new', view: 'new' };
+  const p = hash.match(/^#peer\/([A-Za-z0-9_]+)$/);
+  if (p) return { name: 'peer', view: 'peer', id: p[1] };
   const m = hash.match(/^#(thread|matrix)\/([A-Za-z0-9_]+)$/);
   // #matrix is the thread with its matrix open, so both share one mounted view.
   if (m) return { name: m[1], view: 'thread', id: m[2] };
@@ -87,11 +92,19 @@ function renderOthers(s, route, mine) {
   });
   const rows = v.rows.map(r => h('a', { href: r.href, class: r.id === route.id ? 'on' : '', title: r.tip },
     h('span', { class: 'tt' + (r.untitled ? ' un' : ''), text: r.title }), h('span', { class: 'cnt', text: r.count }),
-    h('span', { class: 'pp', text: r.people }), h('span', { class: 'ago', text: r.active })));
+    h('span', { class: 'pp' }, peopleLinks(r, s.nameOf)), h('span', { class: 'ago', text: r.active })));
   const tail = v.more === 'show'
     ? h('button', { type: 'button', class: 'linkbtn more', text: 'Show more', onclick: () => { s.otherLimit = nextLimit(s.otherLimit); res.reload(); } })
     : v.more === 'dash' ? h('a', { href: '#dash', class: 'more', text: 'All threads on the dashboard' }) : null;
   $('others').replaceChildren(...(rows.length ? rows : [h('div', { class: 'none', text: v.note })]), ...(tail ? [tail] : []));
+}
+
+// The participants line inside a sidebar row: each shown name opens that
+// peer (a span, as the row is already a link; see the click handler below).
+function peopleLinks(r, nameOf) {
+  const ids = r.ids || [];
+  const shown = ids.slice(0, 3);
+  return [...shown.flatMap((id, i) => [i ? ', ' : '', peerLink(id, nameOf(id), { nested: true })]), ids.length > shown.length ? ' +' + (ids.length - shown.length) : ''];
 }
 
 function renderConn(store) {
@@ -108,7 +121,7 @@ function renderRoute(s) {
   const key = route.view + (route.id ? '/' + route.id : '');
   if (key !== s.mounted) {
     s.unmount();
-    const entry = SCREENS[route.view], ctx = { ...s.ctx, threadId: route.id };
+    const entry = SCREENS[route.view], ctx = { ...s.ctx, threadId: route.view === 'thread' ? route.id : undefined, peerId: route.view === 'peer' ? route.id : undefined };
     $('view').replaceChildren();
     $('aside').replaceChildren();
     const offView = entry.screen.mount($('view'), ctx);
@@ -234,6 +247,18 @@ $('login-form').addEventListener('submit', e => {
 });
 $('signout').addEventListener('click', () => signOut(''));
 window.addEventListener('hashchange', () => { if (session) renderRoute(session); });
+// A peer named inside another link (an inbox row, a sidebar row) is a span
+// with data-peer: a plain click on it opens the peer instead of the row.
+// Modified clicks fall through to the row's own link.
+document.addEventListener('click', e => {
+  const el = e.target instanceof Element ? e.target.closest('.plink[data-peer]') : null;
+  if (!el || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const href = peerHref(el.dataset.peer);
+  if (!href) return;
+  e.preventDefault();
+  e.stopPropagation();
+  location.hash = href;
+}, true);
 
 // The local read list was replaced by the hub's read state.
 localStorage.removeItem('vecnet.ui.read');

@@ -2,8 +2,8 @@
 // reads; the inbox's attention list is where Resume lives, and only for items
 // the hub marks `action: "resume"` (Review Focus 5). Every hub-supplied string
 // becomes text through h().
-import { h } from './dom.js';
-import { ago, short, when } from './format.js';
+import { h, idText, peerLink } from './dom.js';
+import { ago, when } from './format.js';
 import { chip, expiresIn } from './subs-model.js';
 
 const TICK = 15000;
@@ -55,7 +55,7 @@ function row(s, ctx, now) {
   const ok = s.health === 'ok';
   const note = s.health_note || '';
   const tr = h('tr', { class: 'sub' + (ok ? '' : ' warn'), 'data-sub': s.sub_id, 'data-health': s.health || '', title: note || null },
-    h('td', { class: 'peer', title: s.peer_id + ' · ' + s.sub_id, text: ctx.nameOf(s.peer_id) }),
+    h('td', { class: 'peer', title: s.peer_id + ' · ' + s.sub_id }, peerLink(s.peer_id, ctx.nameOf(s.peer_id))),
     h('td', { class: 'host mono', text: dash(s.url) }),
     h('td', {}, healthChip(s.health)),
     h('td', { class: 'exp', title: expiresTitle(s, now), text: dash(expiresIn(s.expires_at, now)) }),
@@ -132,7 +132,7 @@ function attentionItem(item, state) {
     healthChip(item.health),
     h('div', { class: 'body' },
       h('div', { class: 'sum', text: item.summary || '' }),
-      h('div', { class: 'meta', title: id }, (item.kind || 'subscription') + ' · ' + short(id) + (item.at ? ' · ' + ago(item.at, hubNow(state.ctx)) : '')),
+      h('div', { class: 'meta', title: id }, (item.kind || 'subscription') + ' · ', idText(id), item.at ? ' · ' + ago(item.at, hubNow(state.ctx)) : ''),
       failed ? h('p', { class: 'err', role: 'alert', text: 'Resume failed: ' + failed }) : null),
     action);
 }

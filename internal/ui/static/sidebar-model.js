@@ -50,6 +50,7 @@ export function otherThreads({ page, error, mine, me, nameOf, now, limit = OTHER
       title,
       untitled: !t.title,
       people: peopleLine(t.participants, nameOf),
+      ids: (t.participants || []).slice(), // for the per-name peer links
       count: count === null ? '' : String(count),
       active: ago(r.last_message_at, now),
       tip,

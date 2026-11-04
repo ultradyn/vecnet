@@ -70,7 +70,18 @@ export function bytes(n) {
 }
 
 export function short(id) {
-  return id && id.length > 14 ? id.slice(0, id.indexOf('_') + 1) + '…' + id.slice(-5) : (id || '?');
+  const p = idParts(id);
+  return p.mid ? p.head + '…' + p.tail : p.head;
+}
+
+// idParts splits an id for display: head and tail are what short() shows
+// either side of its ellipsis, and mid is the elided rest. head + mid + tail
+// is the whole id, so a page can keep the full id in its text and hide only
+// mid (dom.js idText), and a selection then copies the id, never the "…".
+export function idParts(id) {
+  if (!id || id.length <= 14) return { head: id || '?', mid: '', tail: '' };
+  const cut = id.indexOf('_') + 1;
+  return { head: id.slice(0, cut), mid: id.slice(cut, -5), tail: id.slice(-5) };
 }
 
 export function title(thread, me, nameOf) {
