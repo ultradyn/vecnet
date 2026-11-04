@@ -52,7 +52,7 @@ async function metadata(path) {
   requireCheck(response.status === 200);
   return JSON.parse(body);
 }
-async function rpc(method, params = {}, { legacy = false, errorExpected = false } = {}) {
+async function rpc(method, params = {}, { legacy = false } = {}) {
   const requestID = ++id;
   const { response, body } = await request('/mcp', {
     authenticated: true,
@@ -70,10 +70,6 @@ async function rpc(method, params = {}, { legacy = false, errorExpected = false 
   requireCheck(response.status === 200);
   const message = JSON.parse(body);
   requireCheck(message.jsonrpc === '2.0' && message.id === requestID);
-  if (errorExpected) {
-    requireCheck(object(message.error) && message.result === undefined);
-    return message.error;
-  }
   requireCheck(message.error === undefined && object(message.result));
   return message.result;
 }
@@ -104,14 +100,11 @@ await check('server/discover', async () => {
   requireCheck(object(result.capabilities?.events) && result.resultType === 'complete');
 });
 await check('initialize older revision', async () => {
-  // PROTOCOL §4.1 requires rejection carrying the newest supported version.
-  // Task 9 instead asks for legacy negotiation; leave that conflict visible
-  // until the coordinator resolves the protocol contract.
-  const error = await rpc('initialize', {
+  const result = await rpc('initialize', {
     protocolVersion: '2025-03-26', capabilities: {},
     clientInfo: { name: 'vecnet-mcp-conformance', version: '1' },
-  }, { legacy: true, errorExpected: true });
-  requireCheck(Array.isArray(error.data?.supportedVersions) && error.data.supportedVersions.includes(current));
+  }, { legacy: true });
+  requireCheck(result.protocolVersion === '2025-11-25');
 });
 await check('tools/list', async () => {
   const result = await rpc('tools/list');
