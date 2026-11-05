@@ -676,7 +676,10 @@ func TestR2HeadDownloadTransportBounds(t *testing.T) {
 			})}
 			jar, _ := cookiejar.New(nil)
 			source.Jar = jar
-			adapter, err := NewR2Objects(R2ObjectsConfig{Endpoint: r2VectorEndpoint, Bucket: "vecnet-blobs-test", Namespace: r2TestNamespace, AccessID: "VECTORACCESS", Secret: "vector-secret-not-live", Now: func() time.Time { return now }, Lookup: func(context.Context, string) (R2Object, error) { return object, nil }, Client: source})
+			// Local httptest origin as the URL target; the injected transport answers in-process.
+			origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("injected transport bypassed") }))
+			defer origin.Close()
+			adapter, err := NewR2Objects(R2ObjectsConfig{Endpoint: origin.URL, Bucket: "vecnet-blobs-test", Namespace: r2TestNamespace, AccessID: "VECTORACCESS", Secret: "vector-secret-not-live", Now: func() time.Time { return now }, Lookup: func(context.Context, string) (R2Object, error) { return object, nil }, Client: source})
 			if err != nil {
 				t.Fatal("injected transport rejected")
 			}
