@@ -94,7 +94,7 @@ test('restartState: hub_restarting → restarting; ready → none; tick past unt
   // A bad retry hint counts as zero.
   assert.equal(restartState(none, { frame: 'hub_restarting', retryAfterMs: 'soon', at: NOW }).until, NOW);
   // The lines the banner shows.
-  assert.deepEqual(restartLine(r, NOW + 1200), { tone: 'warn', text: 'Hub restarting: reconnecting in 4 s' });
+  assert.deepEqual(restartLine(r, NOW + 1200), { tone: 'warn', text: 'Hub restarting: reconnecting in 4 s', lead: 'Hub restarting: reconnecting', tail: ' in 4 s' });
   assert.match(restartLine(u, NOW + 40000).text, /^Hub unreachable since \d\d:\d\d$/);
   assert.equal(restartLine(u, NOW).tone, 'bad');
   assert.equal(restartLine(none, NOW), null);
@@ -129,4 +129,48 @@ test('moving link uses new_url host as text and rel=noopener', () => {
   assert.equal(x.attrs['aria-label'], 'Dismiss notice');
   x.on.click();
   assert.deepEqual(dismissed, [items[0].id]);
+});
+
+test('banner updates in place: ticks keep rows, focus and the live text', () => {
+  const prev = globalThis.document;
+  const doc = { createElement: tag => new El(tag), activeElement: null };
+  globalThis.document = doc;
+  try {
+    const root = new El('div');
+    const r = restartState(undefined, { frame: 'hub_restarting', retryAfterMs: 5000, at: NOW });
+    const ns = [notice('moving', { at: iso(3 * 3600e3) }), notice('maintenance', { at: iso(5 * 60e3) })];
+    renderBanner(root, { items: bannerItems(ns, NOW), restart: r, now: NOW });
+    const [restartRow, movingRow, maintRow] = root.kids;
+    const [x] = find(movingRow, e => e.tag === 'button');
+    doc.activeElement = x; // a keyboard user has tabbed to the dismiss button
+    // One second later (countdown) and one minute later (relative times).
+    renderBanner(root, { items: bannerItems(ns, NOW + 1000), restart: r, now: NOW + 1000 });
+    renderBanner(root, { items: bannerItems(ns, NOW + 60e3), restart: r, now: NOW + 4000 });
+    assert.deepEqual(root.kids, [restartRow, movingRow, maintRow], 'rows rebuilt on a tick');
+    assert.equal(find(root, e => e.tag === 'button')[0], x);
+    assert.equal(doc.activeElement, x);
+    // The countdown changed, but only inside an aria-hidden span.
+    assert.match(restartRow.textContent, /^Hub restarting: reconnecting in 1 s$/);
+    const [tx] = find(restartRow, e => e.className === 'tx');
+    assert.equal(tx.kids[0], 'Hub restarting: reconnecting');
+    assert.equal(tx.kids[1].attrs['aria-hidden'], 'true');
+    // The relative time moved on, the clock time is the same text node owner.
+    assert.match(maintRow.textContent, /in 4m/);
+    const [rel] = find(maintRow, e => e.attrs['aria-hidden'] === 'true' && /^in /.test(e.textContent));
+    assert.ok(rel, 'relative time is aria-hidden');
+    // A new notice adds a row and keeps the others; the focused button is refocused.
+    let refocused = 0;
+    x.focus = () => { refocused++; };
+    x.contains = () => false;
+    for (const el of [restartRow, movingRow, maintRow]) el.contains = node => find(el, e => e === node).length > 0;
+    const more = [...ns, notice('restart')];
+    renderBanner(root, { items: bannerItems(more, NOW + 60e3), restart: r, now: NOW + 4000 });
+    assert.equal(root.kids.length, 4);
+    assert.equal(root.kids[1], movingRow);
+    assert.equal(refocused, 1);
+    // Ready clears the restart row only.
+    renderBanner(root, { items: bannerItems(more, NOW + 60e3), restart: restartState(r, { frame: 'ready' }), now: NOW + 5000 });
+    assert.equal(root.kids[0], movingRow);
+    assert.equal(root.kids.length, 3);
+  } finally { globalThis.document = prev; }
 });

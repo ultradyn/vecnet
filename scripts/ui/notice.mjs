@@ -36,6 +36,11 @@ try {
       assert(response.status === 201, `post ${body.kind} notice: ${response.status}`);
       return (await response.json()).notice;
     };
+    // The connection state stays on screen beside the banner (sticky footer).
+    const connInView = async name => {
+      const box = await conn.evaluate(el => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, h: innerHeight }; });
+      assert(box.top >= 0 && box.bottom <= box.h, `${name}: #conn is off screen: ${JSON.stringify(box)}`);
+    };
     const phone = async name => {
       await page.setViewportSize({ width: 390, height: 844 });
       const width = await page.evaluate(() => document.documentElement.scrollWidth);
@@ -74,6 +79,7 @@ try {
     assert(await link.textContent() === 'vecnet.xk.io', 'moving link text is not the host');
     assert(await link.getAttribute('href') === 'https://vecnet.xk.io', 'moving link href');
     assert((await link.getAttribute('rel')).split(' ').includes('noopener'), 'moving link lacks rel=noopener');
+    await connInView('nt09-success-desktop');
     await shot('nt09-success-desktop');
     await phone('nt09-success-phone');
 
@@ -86,6 +92,7 @@ try {
     await conn.locator('span', { hasText: /^restarting$/ }).waitFor();
     assert(await page.locator('#conn.warn').count() === 1, 'conn is not amber while restarting');
     assert(await rows.count() === 3, 'notices hidden by the restart row');
+    await connInView('nt09-progress-desktop');
     await shot('nt09-progress-desktop');
     await phone('nt09-progress-phone');
     await releaseActivity();
@@ -103,6 +110,7 @@ try {
     await unreachable.waitFor();
     assert(await page.locator('.ntc.bad').count() === 1, 'unreachable row is not red');
     await conn.locator('span', { hasText: /^offline$/ }).waitFor();
+    await connInView('nt09-error-desktop');
     await shot('nt09-error-desktop');
   });
   console.log('notice banner passed: none, hostile text, moving + maintenance (desktop, phone), restarting, unreachable');

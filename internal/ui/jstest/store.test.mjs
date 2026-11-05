@@ -10,7 +10,7 @@ const api401 = () => new APIError(401, 'unauthenticated', 'no');
 // A fake hub. `script` holds one entry per /v1/events call: a value is
 // returned, an Error is thrown, a function is called. When the script runs out
 // the pump is aborted, so a run ends without the test having to stop it.
-function hub(script, { onAck = () => {} } = {}) {
+function hub(script, { onAck = () => {}, random } = {}) {
   const calls = [], acks = [], sleeps = [];
   const controller = new AbortController();
   const api = {
@@ -25,7 +25,7 @@ function hub(script, { onAck = () => {} } = {}) {
     },
     ack: async cursor => { await onAck(cursor); acks.push(cursor); return null; },
   };
-  const store = createStore({ api, sleep: async ms => { sleeps.push(ms); } });
+  const store = createStore({ api, sleep: async ms => { sleeps.push(ms); }, random });
   return { api, store, calls, acks, sleeps, controller, run: () => store.pump(controller.signal) };
 }
 
@@ -625,4 +625,18 @@ test('the pump passes on a long-poll hub_restarting hint, and null for each plai
   await h.run();
   off();
   assert.deepEqual(seen.slice(0, 4), [null, 5000, null, null]);
+});
+
+test('the pump waits about retry_after_ms after a hint and does not grow the backoff while the hub restarts', async () => {
+  const unavailable = () => new APIError(503, 'unavailable', 'restarting');
+  const h = hub([
+    { events: [], next_cursor: 'e1.1' },
+    { events: [], next_cursor: 'e1.1', hub_restarting: { retry_after_ms: 5000 } },
+    unavailable(), unavailable(), unavailable(),
+    { events: [], next_cursor: 'e1.1' },
+  ], { random: () => 0 });
+  await h.run();
+  // 5000 × 0.8 (the jitter's bottom), then the first backoff each time.
+  assert.deepEqual(h.sleeps, [4000, 1000, 1000, 1000]);
+  assert.deepEqual(h.calls.slice(1).map(c => c.after), ['e1.1', 'e1.1', 'e1.1', 'e1.1', 'e1.1', 'e1.1']);
 });

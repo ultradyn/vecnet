@@ -74,7 +74,9 @@ span,b,time,code,a{unicode-bidi:isolate}
 
 /* layout */
 .va{display:grid;grid-template-columns:240px minmax(0,1fr) 300px;height:100vh}
-.va .side{border-right:1px solid var(--line);padding:20px 10px 24px;overflow:auto;background:#0c1120;display:flex;flex-direction:column}
+.va .side{border-right:1px solid var(--line);padding:20px 10px 0;overflow:auto;background:#0c1120;display:flex;flex-direction:column}
+/* The connection state and Sign out stay in view however long the lists get. */
+.va .side .foot{margin-top:auto;position:sticky;bottom:0;padding:8px 0 24px;background:#0c1120;display:flex;flex-direction:column}
 .va .side .brand{padding:2px 8px 18px}
 .va .brand .hub{margin-left:auto;font:400 11px var(--mono);color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}
 .va .nav a{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:6px 9px;border-radius:6px;color:var(--muted);text-decoration:none;font-size:13.5px}
@@ -105,7 +107,7 @@ span,b,time,code,a{unicode-bidi:isolate}
 .va .nav .more{display:block;color:var(--dim);font-size:12px;padding:6px 9px;text-decoration:none}
 .va .nav .more:hover{color:var(--text)}
 .va .me{display:flex;align-items:center;gap:8px;padding:6px 9px;font-size:13px;color:var(--muted)}
-.conn{display:flex;align-items:center;gap:7px;padding:4px 9px;font:400 11.5px var(--mono);color:var(--dim);margin-top:auto}
+.conn{display:flex;align-items:center;gap:7px;padding:4px 9px;font:400 11.5px var(--mono);color:var(--dim)}
 .conn i{width:7px;height:7px;border-radius:50%;background:#64748b}
 .conn.live i{background:var(--ok)}
 .conn.off i{background:var(--bad)}

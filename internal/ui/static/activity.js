@@ -18,7 +18,7 @@ function waitFor(ms, signal) {
   });
 }
 
-export function createActivity({ api, signal, sleep = waitFor }) {
+export function createActivity({ api, signal, sleep = waitFor, random = Math.random }) {
   const subs = new Set();
   const emit = ev => {
     for (const fn of [...subs]) {
@@ -31,7 +31,7 @@ export function createActivity({ api, signal, sleep = waitFor }) {
       const conn = new AbortController();
       const cut = () => conn.abort();
       signal.addEventListener('abort', cut, { once: true });
-      let watchdog;
+      let watchdog, restartMs = null;
       const arm = () => { clearTimeout(watchdog); watchdog = setTimeout(cut, SILENT_MS); };
       try {
         const r = await api.activity({ signal: conn.signal });
@@ -40,6 +40,10 @@ export function createActivity({ api, signal, sleep = waitFor }) {
           let data;
           try { data = JSON.parse(f.data || '{}'); } catch { return; }
           if (f.event === 'ready') backoff = BACKOFF_FIRST;
+          if (f.event === 'hub_restarting') {
+            const ms = data && data.retry_after_ms;
+            restartMs = Number.isFinite(ms) ? Math.min(Math.max(ms, 0), 60000) : 0;
+          }
           emit({ type: f.event, data });
         });
         const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
@@ -58,6 +62,13 @@ export function createActivity({ api, signal, sleep = waitFor }) {
         signal.removeEventListener('abort', cut);
       }
       if (signal.aborted) return;
+      if (restartMs !== null) {
+        // An announced restart (PROTOCOL §21.3): wait about the hint,
+        // jittered ±20%, and start the backoff afresh rather than count it.
+        await sleep(Math.round(restartMs * (0.8 + 0.4 * random())), signal);
+        backoff = BACKOFF_FIRST;
+        continue;
+      }
       await sleep(backoff, signal);
       backoff = Math.min(backoff * 2, BACKOFF_MAX);
     }

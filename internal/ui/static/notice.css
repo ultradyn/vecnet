@@ -5,12 +5,13 @@
 .notices{grid-column:1/-1;grid-row:1;border-bottom:1px solid var(--line);background:#0c1120}
 .ntc{--c:var(--violet);display:flex;align-items:flex-start;gap:12px;padding:8px 14px 8px 17px;border-left:3px solid var(--c);font-size:13px;line-height:20px;color:var(--muted)}
 .ntc+.ntc{border-top:1px solid var(--line)}
-.ntc.k-restart,.ntc.warn{--c:var(--wake)}.ntc.k-maintenance{--c:var(--widle)}.ntc.bad{--c:var(--bad)}
+.ntc.k-restart,.ntc.warn{--c:var(--wake)}.ntc.k-maintenance{--c:var(--muted)}.ntc.bad{--c:var(--bad)}
 .ntc .nb{flex:1;min-width:0;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3}
 .ntc .nb>*{margin-right:8px}
-.ntc .lb{display:inline-block;font:600 10.5px/1 var(--mono);letter-spacing:.04em;text-transform:uppercase;padding:3px 6px;border-radius:4px;color:var(--c);border:1px solid color-mix(in srgb,var(--c) 40%,transparent);background:color-mix(in srgb,var(--c) 8%,transparent);vertical-align:1px}
+/* the label is the shell's .chip, tinted by kind */
+.ntc .lb{display:inline-block;text-transform:lowercase;color:var(--c);border-color:color-mix(in srgb,var(--c) 40%,transparent);background:color-mix(in srgb,var(--c) 8%,transparent);vertical-align:1px}
 .ntc .wh{font:400 12px var(--mono);color:var(--dim)}
-.ntc .to{color:var(--dim)}
+.ntc .to{color:var(--dim);white-space:nowrap}
 .ntc .to a{color:var(--violet);text-decoration:none;border-bottom:1px dotted #a5b4fc66;font-weight:500}
 .ntc .to a:hover{color:var(--text);border-bottom-color:var(--text)}
 .ntc .tx{color:var(--text)}
@@ -18,7 +19,9 @@
 .ntc i{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--c);vertical-align:1px}
 .ntc .x{flex:none;width:24px;height:24px;margin:-2px -4px 0 0;padding:0;border:0;border-radius:5px;background:none;color:var(--dim);font-size:17px;line-height:1}
 .ntc .x:hover{color:var(--text);background:#151c33}
-.conn.warn{color:var(--wake)}.conn.warn i{background:var(--wake)}
+.conn.warn i{background:var(--wake)}
 /* the thread panel's toggle is fixed top right below 1100 px */
 @media (max-width:1100px){body[data-route=thread] .ntc,body[data-route=matrix] .ntc{padding-right:112px}}
-@media (max-width:720px){.va:has(>.notices:not([hidden])){grid-template-rows:auto auto 1fr}.ntc{padding:8px 10px 8px 13px;gap:8px}}
+@media (max-width:720px){.va:has(>.notices:not([hidden])){grid-template-rows:auto auto 1fr}.ntc{padding:8px 10px 8px 13px;gap:8px}
+  /* a comfortable touch target; the glyph stays where it was */
+  .ntc .x{width:40px;height:40px;margin:-10px -10px -10px -6px}}

@@ -46,9 +46,13 @@ export function bannerItems(notices, now) {
     .map(n => {
       const iso = n.at || n.issued_at, t = Date.parse(iso);
       const host = n.kind === 'moving' ? hostOf(n.new_url) : '';
+      const ok = !Number.isNaN(t);
       return {
         id: n.notice_id, kind: String(n.kind), label: LABEL[n.kind] || 'Notice',
-        when: Number.isNaN(t) ? '' : rel(t, now) + ' · ' + clock(iso, now),
+        when: ok ? rel(t, now) + ' · ' + clock(iso, now) : '',
+        // when's two parts: the relative one changes as time passes, the
+        // clock time only with the notice.
+        rel: ok ? rel(t, now) : '', abs: ok ? clock(iso, now) : '',
         host, url: host ? n.new_url : '', text: String(n.message ?? ''),
       };
     });
@@ -66,9 +70,15 @@ export function restartState(state, input) {
   return s;
 }
 
+// restartLine: text is lead + tail. Only tail (the countdown) changes from
+// one tick to the next, so the banner keeps it out of the live region.
 export function restartLine(s, now) {
   if (!s || s.phase === 'none') return null;
-  if (s.phase === 'unreachable') return { tone: 'bad', text: 'Hub unreachable since ' + clock(new Date(s.since).toISOString(), now) };
+  if (s.phase === 'unreachable') {
+    const text = 'Hub unreachable since ' + clock(new Date(s.since).toISOString(), now);
+    return { tone: 'bad', text, lead: text, tail: '' };
+  }
   const n = Math.ceil((s.until - now) / 1000);
-  return { tone: 'warn', text: n > 0 ? `Hub restarting: reconnecting in ${n} s` : 'Hub restarting: reconnecting…' };
+  const lead = 'Hub restarting: reconnecting', tail = n > 0 ? ` in ${n} s` : '…';
+  return { tone: 'warn', text: lead + tail, lead, tail };
 }

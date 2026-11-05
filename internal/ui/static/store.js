@@ -2,6 +2,9 @@
 import { isNoticeEvent, validNotice } from './notice-model.js';
 
 const WAIT = 25, BACKOFF_FIRST = 1000, BACKOFF_MAX = 30000;
+// After a restart hint, failures within its retry_after_ms plus this grace are
+// the restart, not an outage (PROTOCOL §21.3).
+const GRACE_MS = 30000;
 
 const THREAD_TAGS = {
   delivery: ['inbox', 'threads'],
@@ -43,7 +46,7 @@ function waitFor(ms, signal) {
   });
 }
 
-export function createStore({ api, now = Date.now, sleep = waitFor }) {
+export function createStore({ api, now = Date.now, sleep = waitFor, random = Math.random }) {
   const live = new Set();       // resources invalidation reaches
   const inflight = new Set();   // running load cycles
   const connWatchers = new Set();
@@ -201,7 +204,7 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
       else if (signal) signal.addEventListener('abort', resolve, { once: true });
     });
     const resync = () => Promise.race([settled(), interrupted]);
-    let after, first = true, owed, backoff = BACKOFF_FIRST;
+    let after, first = true, owed, backoff = BACKOFF_FIRST, quietUntil = 0;
     let unshown; // { cursor, rs }: a batch whose snapshots have not all loaded
     while (!aborted()) {
       try {
@@ -227,7 +230,15 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
         for (const fn of [...restartWatchers]) fn(ms);
         after = page.next_cursor || after;
         const events = page.events || [];
-        if (!events.length) continue;
+        if (!events.length) {
+          // Wait about the hint, jittered ±20%, before polling again; until
+          // the hub is back (and 30 s more) failures do not grow the backoff.
+          if (ms !== null) {
+            quietUntil = now() + ms + GRACE_MS;
+            await sleep(Math.round(Math.max(0, ms) * (0.8 + 0.4 * random())), signal);
+          }
+          continue;
+        }
         const rs = invalidate(...events.flatMap(tagsFor));
         await resync();
         if (aborted()) break;
@@ -252,7 +263,7 @@ export function createStore({ api, now = Date.now, sleep = waitFor }) {
         // off all the same.
         if (!unshown) setConn('offline');
         await sleep(backoff, signal);
-        backoff = Math.min(backoff * 2, BACKOFF_MAX);
+        backoff = now() < quietUntil ? BACKOFF_FIRST : Math.min(backoff * 2, BACKOFF_MAX);
       }
     }
     setConn('stopped');

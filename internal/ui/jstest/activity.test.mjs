@@ -97,3 +97,22 @@ test('createActivity emits each frame, reopens after the stream ends, and stops 
   // A connection that reached ready resets the backoff.
   assert.deepEqual(sleeps, [1000, 1000]);
 });
+
+test('createActivity waits about retry_after_ms after hub_restarting and resets the backoff', async () => {
+  const { createActivity } = await import('../static/activity.js');
+  const stop = new AbortController();
+  let calls = 0;
+  const api = {
+    activity: async () => {
+      calls++;
+      if (calls === 1) return new Response('event: ready\ndata: {}\n\nevent: hub_restarting\ndata: {"retry_after_ms":5000}\n\n');
+      if (calls === 2) throw new Error('refused while the hub restarts');
+      throw Object.assign(new Error('forbidden'), { status: 403 });
+    },
+  };
+  const sleeps = [];
+  const feed = createActivity({ api, signal: stop.signal, sleep: async ms => { sleeps.push(ms); }, random: () => 1 });
+  await feed.start();
+  // 5000 × 1.2 (the jitter's top), then the first backoff, not a doubled one.
+  assert.deepEqual(sleeps, [6000, 1000]);
+});
