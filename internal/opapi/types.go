@@ -1,12 +1,13 @@
 // Package opapi defines the operator API's wire contract (PROTOCOL §2.13).
-// Its only project dependency is envelope; readers and clients can use these
-// types without importing the hub. Nullable fields remain explicit JSON nulls.
+// Its project dependencies are SQLite-free wire packages; readers and clients
+// can use these types without importing the hub. Nullable fields remain explicit JSON nulls.
 package opapi
 
 import (
 	"encoding/json"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/prefs"
 )
 
 type Me struct {
@@ -571,3 +572,11 @@ func (v PrincipalRow) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(plain(v))
 }
+
+// Preferences is the complete operator-only preferences GET/PATCH response.
+// Its ETag travels in the HTTP header rather than in the JSON body.
+type Preferences = prefs.Snapshot
+type Preference = prefs.Descriptor
+type PreferencesPatch = prefs.Patch
+type PreferencesPreview = prefs.Preview
+type PreferenceErrorDetails = prefs.ErrorDetails
