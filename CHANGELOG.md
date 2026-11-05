@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-05: Credential-gated stdlib R2 spike selects SHA-256 from real x-boss tests, records signed length/create-only/HEAD/Range/600s expiry evidence and blocked full-header CORS/browser/lifecycle gates (`internal/tools/r2spike`, `docs/plans/receipts/2026-11-05-r2-spike.md`).
 - 2026-11-05: R2 keys are class-first (`attachments/v1/exp/<class>/<hub_namespace>/<blob_id>`, `attachments/v1/keep/<hub_namespace>/<blob_id>`), requiring six lifecycle rules total across hubs; record coordinator-verified bucket rules and protected env-file spike input (`docs/plans/2026-11-05-r2-blobs.md`).
 - 2026-11-05: R2 blobs plan v4 sets GET URLs to 600s with repeatable authorized get, shared 30/60s mint limiting and metering, preserves 300s PUTs, and reconciles reported exp-1d/multipart-abort bucket rules with namespaced keys (`docs/plans/2026-11-05-r2-blobs.md`).
 - 2026-11-05: R2 blobs plan consumes shared blobs.expiry preferences with configurable/off retention, immutable retention prefixes, hosted operator confirmation and retained-storage quota; replaces broad lifecycle rules and drops custom-domain Worker work (`docs/plans/2026-11-05-r2-blobs.md`).
