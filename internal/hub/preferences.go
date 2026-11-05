@@ -39,9 +39,11 @@ type Preferences struct {
 
 	// Task 4 installs these before requests start. Authorization runs inside
 	// the writer transaction and may persist activation/approval boundaries.
+	// Its result contains server-derived approved risk codes, never confirmation
+	// strings or other client-supplied approval material.
 	// With no hook, dangerous or retrospective writes fail closed.
 	PreviewHook    func(context.Context, auth.Caller, prefs.Snapshot, prefs.Patch) (prefs.Preview, error)
-	AuthorizePatch func(context.Context, *sql.Tx, auth.Caller, prefs.Snapshot, prefs.Snapshot, prefs.Patch) error
+	AuthorizePatch func(context.Context, *sql.Tx, auth.Caller, prefs.Snapshot, prefs.Snapshot, prefs.Patch) ([]string, error)
 }
 
 func preferenceError(code string) error { return &prefs.Error{Code: code} }
@@ -355,8 +357,10 @@ func (p *Preferences) PatchPreferences(ctx context.Context, caller auth.Caller, 
 		if len(changed) == 0 {
 			return nil
 		}
+		approvedRisks := []string{}
 		if p.AuthorizePatch != nil {
-			if err := p.AuthorizePatch(ctx, tx, caller, before, next, patch); err != nil {
+			approvedRisks, err = p.AuthorizePatch(ctx, tx, caller, before, next, patch)
+			if err != nil {
 				return err
 			}
 		} else if len(preferenceRisks(before, next)) > 0 || len(patch.Confirm) > 0 {
@@ -386,7 +390,7 @@ func (p *Preferences) PatchPreferences(ctx context.Context, caller auth.Caller, 
 		if _, err := tx.ExecContext(ctx, `UPDATE hub_preferences_state SET revision=? WHERE id=1`, next.Revision); err != nil {
 			return err
 		}
-		return audit.Record(ctx, tx, "operator", "prefs_changed", changed, map[string]any{"revision": next.Revision, "changes": changes, "approved_risks": append([]string{}, patch.Confirm...)})
+		return audit.Record(ctx, tx, "operator", "prefs_changed", changed, map[string]any{"revision": next.Revision, "changes": changes, "approved_risks": append([]string{}, approvedRisks...)})
 	})
 	if err != nil {
 		return prefs.Snapshot{}, sanitizePreferenceError(err)

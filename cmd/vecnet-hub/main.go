@@ -291,7 +291,9 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 		if d.Type == prefs.TypeDuration {
 			def = (time.Duration(n) * time.Second).String()
 		}
-		fs.String(b.flag, envOr(getenv, b.env, def), d.Description+" ($"+b.env+")")
+		// Usage can run before validation (help or any parser error). Only safe
+		// built-in defaults may enter flag metadata; resolve the environment below.
+		fs.String(b.flag, def, d.Description+" ($"+b.env+")")
 	}
 	return func() (hub.Config, error) {
 		cfg := hub.DefaultConfig()
@@ -300,13 +302,15 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 		fs.Visit(func(f *flag.Flag) { visited[f.Name] = true })
 		for _, b := range bindings {
 			origin := ""
-			if getenv(b.env) != "" {
+			raw := fs.Lookup(b.flag).Value.String()
+			if environment := getenv(b.env); environment != "" {
 				origin = b.env
+				raw = environment
 			}
 			if visited[b.flag] {
 				origin = "--" + b.flag
+				raw = fs.Lookup(b.flag).Value.String()
 			}
-			raw := fs.Lookup(b.flag).Value.String()
 			d, _ := prefs.Lookup(b.key)
 			var n int64
 			var err error

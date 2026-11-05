@@ -3,6 +3,8 @@ package hub_test
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -411,16 +413,16 @@ func TestPreferencesConfirmationSeamsFailClosed(t *testing.T) {
 	_, err = h.Preferences.PatchPreferences(context.Background(), prefsOperator, s.ETag, p)
 	prefsCode(t, err, prefs.CodeConfirmationRequired)
 	prefsAuditCount(t, h, 0)
-	h.Preferences.AuthorizePatch = func(ctx context.Context, tx *sql.Tx, caller auth.Caller, before, after prefs.Snapshot, patch prefs.Patch) error {
+	h.Preferences.AuthorizePatch = func(ctx context.Context, tx *sql.Tx, caller auth.Caller, before, after prefs.Snapshot, patch prefs.Patch) ([]string, error) {
 		if before.Revision != 0 || after.Revision != 1 {
 			t.Fatal("authorization has wrong generations")
 		}
 		// A later-task hook shares the value/audit transaction. Its write must roll
 		// back when it refuses authorization.
 		if _, err := tx.ExecContext(ctx, `INSERT INTO hub_preference_activations VALUES(1,'presence.default_ttl','now',NULL,NULL,NULL,'synthetic-digest')`); err != nil {
-			return err
+			return nil, err
 		}
-		return &prefs.Error{Code: prefs.CodeConfirmationStale}
+		return nil, &prefs.Error{Code: prefs.CodeConfirmationStale}
 	}
 	_, err = h.Preferences.PatchPreferences(context.Background(), prefsOperator, s.ETag, p)
 	prefsCode(t, err, prefs.CodeConfirmationStale)
@@ -430,6 +432,60 @@ func TestPreferencesConfirmationSeamsFailClosed(t *testing.T) {
 	}
 	if h.Preferences.Current().Revision != 0 {
 		t.Fatal("failed hook published")
+	}
+}
+
+func TestPreferencesSuccessfulConfirmationAuditExcludesTokens(t *testing.T) {
+	h, _ := preferencesHub(t, hub.DefaultConfig())
+	s := readPrefs(t, h)
+	confirmations := []string{"synthetic-confirmation-one", "synthetic-confirmation-\"two<&>"}
+	hookCalled := false
+	h.Preferences.AuthorizePatch = func(ctx context.Context, tx *sql.Tx, caller auth.Caller, before, after prefs.Snapshot, patch prefs.Patch) ([]string, error) {
+		hookCalled = true
+		if len(patch.Confirm) != len(confirmations) || patch.Confirm[0] != confirmations[0] || patch.Confirm[1] != confirmations[1] {
+			t.Fatal("authorization did not receive the confirmations")
+		}
+		return []string{"presence_shortened"}, nil
+	}
+	next := patchPrefs(t, h, s, prefs.Patch{Set: map[string]prefs.Value{"presence.default_ttl": prefs.Duration(1800)}, Confirm: confirmations})
+	if !hookCalled || next.Revision != 1 {
+		t.Fatal("successful authorization did not commit")
+	}
+	prefsAuditCount(t, h, 1)
+	var row string
+	if err := h.DB.QueryRow(`SELECT at || actor || action || target_ids || detail FROM audit WHERE action='prefs_changed'`).Scan(&row); err != nil {
+		t.Fatal(err)
+	}
+	for _, confirmation := range confirmations {
+		escaped, err := json.Marshal(confirmation)
+		if err != nil {
+			t.Fatal("cannot encode synthetic confirmation")
+		}
+		for _, encoding := range []string{
+			confirmation, string(escaped[1 : len(escaped)-1]),
+			base64.StdEncoding.EncodeToString([]byte(confirmation)),
+			base64.RawStdEncoding.EncodeToString([]byte(confirmation)),
+			base64.URLEncoding.EncodeToString([]byte(confirmation)),
+			base64.RawURLEncoding.EncodeToString([]byte(confirmation)),
+			hex.EncodeToString([]byte(confirmation)),
+		} {
+			if strings.Contains(row, encoding) {
+				t.Fatal("confirmation material entered an audit row")
+			}
+		}
+	}
+	var detail string
+	if err := h.DB.QueryRow(`SELECT detail FROM audit WHERE action='prefs_changed'`).Scan(&detail); err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		ApprovedRisks []string `json:"approved_risks"`
+	}
+	if err := json.Unmarshal([]byte(detail), &record); err != nil {
+		t.Fatal("invalid audit detail")
+	}
+	if len(record.ApprovedRisks) != 1 || record.ApprovedRisks[0] != "presence_shortened" {
+		t.Fatal("audit must contain only the approved server-derived risk codes")
 	}
 }
 func TestPreferencesRevisionMonotonicityAndConcurrentPublication(t *testing.T) {

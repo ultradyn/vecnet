@@ -190,7 +190,14 @@ func TestOAuthRedirectsFlagAndEnv(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				// Drain before Close so the transport reuses the connection rather
+				// than racing replacement dials against the next request/shutdown.
+				// A new connection with no headers can hold Shutdown past 2 s.
+				_, readErr := io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
 				want := http.StatusCreated
 				if uri == "https://connector.example/callback" {
 					want = tc.want
@@ -285,7 +292,7 @@ func TestPreferenceBootstrapFlagsAndEnvironment(t *testing.T) {
 		want      int64
 		origin    string
 	}{
-		{"default", "", nil, 500, ""}, {"env", "700", nil, 700, "VECNET_THREAD_BUDGET"}, {"flag", "700", []string{"--thread-budget", "800"}, 800, "--thread-budget"}, {"equal env", "500", nil, 500, "VECNET_THREAD_BUDGET"}, {"equal flag", "700", []string{"--thread-budget", "500"}, 500, "--thread-budget"},
+		{"default", "", nil, 500, ""}, {"env", "700", nil, 700, "VECNET_THREAD_BUDGET"}, {"flag", "700", []string{"--thread-budget", "800"}, 800, "--thread-budget"}, {"equal env", "500", nil, 500, "VECNET_THREAD_BUDGET"}, {"equal flag", "700", []string{"--thread-budget", "500"}, 500, "--thread-budget"}, {"flag overrides invalid env", "synthetic-invalid-environment", []string{"--thread-budget", "500"}, 500, "--thread-budget"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
@@ -326,6 +333,48 @@ func TestPreferenceBootstrapFlagsAndEnvironment(t *testing.T) {
 				t.Fatalf("bootstrap = %+v", e)
 			}
 		})
+	}
+}
+
+func TestPreferenceFlagDiagnosticsExcludeEnvironment(t *testing.T) {
+	for _, name := range []string{"presence-ttl", "session-presence-ttl", "launcher-presence-ttl", "default-max-depth", "default-ttl", "thread-budget", "sends-per-minute", "threads-per-hour", "creates-per-hour"} {
+		for _, arg := range []string{"--help", "--unknown-option"} {
+			t.Run(name+"/"+arg, func(t *testing.T) {
+				const rejected = "synthetic-invalid-environment-<>&\""
+				env := "VECNET_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+				getenv := func(key string) string {
+					if key == env {
+						return rejected
+					}
+					return ""
+				}
+				// Capture run's real flag diagnostics, including its default usage.
+				file, err := os.CreateTemp(t.TempDir(), "stderr")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer file.Close()
+				func() {
+					previous := os.Stderr
+					os.Stderr = file
+					defer func() { os.Stderr = previous }()
+					err = run(context.Background(), []string{arg}, io.Discard, getenv)
+				}()
+				if err == nil {
+					t.Fatal("missing flag diagnostic")
+				}
+				output, readErr := os.ReadFile(file.Name())
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if !bytes.Contains(output, []byte("Usage of vecnet-hub:")) || !bytes.Contains(output, []byte("-"+name)) {
+					t.Fatal("missing preference flag usage")
+				}
+				if bytes.Contains(output, []byte("synthetic-invalid-environment")) || strings.Contains(err.Error(), "synthetic-invalid-environment") {
+					t.Fatal("rejected environment value entered flag diagnostics")
+				}
+			})
+		}
 	}
 }
 func TestPreferenceBootstrapRejectsInvalidBeforeOpeningStore(t *testing.T) {
