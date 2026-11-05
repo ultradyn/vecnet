@@ -456,15 +456,18 @@ func (s *Store) GC(ctx context.Context) (removed int, err error) {
 	if err != nil {
 		return 0, err
 	}
+	var cleanupErr error
 	for _, sha := range append(purged, shas...) {
 		if !ValidSHA(sha) {
 			continue
 		}
 		if err := os.Remove(s.path(sha)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return len(shas), fmt.Errorf("blob: gc remove: %w", err)
+			// Ordinary rows are already deleted; attempt every file even when
+			// another removal fails so an unrelated purge cannot orphan them.
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("blob: gc remove: %w", err))
 		}
 	}
-	return len(shas), nil
+	return len(shas), cleanupErr
 }
 
 // Purge removes sha's bytes and leaves a tombstone (purged_at), so later
