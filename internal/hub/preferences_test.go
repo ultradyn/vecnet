@@ -159,7 +159,7 @@ func TestPreferencesConcurrentMultiKeyCAS(t *testing.T) {
 	initial := readPrefs(t, h)
 	var wg sync.WaitGroup
 	results := make(chan error, 2)
-	for _, n := range []int64{600, 700} {
+	for _, n := range []int64{700, 800} {
 		wg.Go(func() {
 			_, err := h.Preferences.PatchPreferences(context.Background(), prefsOperator, initial.ETag, prefs.Patch{Set: map[string]prefs.Value{"agents.thread_budget": prefs.Int(n), "rates.sends_per_minute": prefs.Int(n / 10)}})
 			results <- err
@@ -181,6 +181,10 @@ func TestPreferencesConcurrentMultiKeyCAS(t *testing.T) {
 	s := readPrefs(t, h)
 	budget, _ := s.Get("agents.thread_budget")
 	n, _ := budget.Value.Int64()
+	if n != 700 && n != 800 {
+		t.Fatal("budget did not match either contender")
+	}
+	prefValue(t, s, "agents.thread_budget", n, prefs.SourceStored, "")
 	prefValue(t, s, "rates.sends_per_minute", n/10, prefs.SourceStored, "")
 	if s.Revision != 1 {
 		t.Fatal("CAS revision")
@@ -330,18 +334,42 @@ func TestPreferencesAuditTypedValuesAndConsistentTransactionRead(t *testing.T) {
 	if c.Key != "agents.thread_budget" || c.Operation != "set" || old != 500 || next != 600 || c.Old.Source != prefs.SourceDefault || c.New.Source != prefs.SourceStored {
 		t.Fatalf("audit %s", detail)
 	}
-	if err := h.DB.Tx(context.Background(), func(tx *sql.Tx) error {
-		loaded, err := h.Preferences.LoadSnapshot(context.Background(), tx)
-		if err != nil {
-			return err
-		}
-		if loaded.ETag != s.ETag {
-			t.Fatal("transaction snapshot differs")
-		}
-		return nil
-	}); err != nil {
+	tx, err := h.DB.BeginTx(context.Background(), nil)
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE hub_preferences SET value_json='750' WHERE key='agents.thread_budget'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE hub_preferences_state SET revision=? WHERE id=1`, s.Revision+1); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := h.Preferences.LoadSnapshot(context.Background(), tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Revision != s.Revision+1 || loaded.ETag == s.ETag {
+		t.Fatal("transaction snapshot did not observe uncommitted revision")
+	}
+	prefValue(t, loaded, "agents.thread_budget", 750, prefs.SourceStored, "")
+	if h.Preferences.Current().ETag != s.ETag {
+		t.Fatal("transaction read published uncommitted snapshot")
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	standalone, err := h.Preferences.LoadSnapshot(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, committed := range []prefs.Snapshot{standalone, h.Preferences.Current()} {
+		if committed.Revision != s.Revision || committed.ETag != s.ETag {
+			t.Fatal("rollback changed committed snapshot")
+		}
+		prefValue(t, committed, "agents.thread_budget", 600, prefs.SourceStored, "")
+	}
+	prefsAuditCount(t, h, 1)
 }
 func TestPreferencesCrashAfterCommitRecovers(t *testing.T) {
 	h, path := preferencesHub(t, hub.DefaultConfig())
@@ -533,4 +561,144 @@ func TestPreferencesRevisionMonotonicityAndConcurrentPublication(t *testing.T) {
 	}
 	prefValue(t, s, "agents.thread_budget", 506, prefs.SourceStored, "")
 	prefsAuditCount(t, h, 6)
+}
+
+func TestPreferencesConfigDurationsValidatedBeforeConversion(t *testing.T) {
+	fields := []struct {
+		key   string
+		set   func(*hub.Config, time.Duration)
+		valid time.Duration
+		max   time.Duration
+	}{
+		{"events.refresh_interval", func(c *hub.Config, d time.Duration) { c.EventsRefreshInterval = d }, 2 * time.Minute, 24 * time.Hour},
+		{"presence.default_ttl", func(c *hub.Config, d time.Duration) { c.PresenceTTL = d }, 2 * time.Minute, 24 * time.Hour},
+		{"presence.session_ttl", func(c *hub.Config, d time.Duration) { c.SessionPresenceTTL = d }, 2 * time.Minute, 24 * time.Hour},
+		{"presence.launcher_ttl", func(c *hub.Config, d time.Duration) { c.LauncherPresenceTTL = d }, 2 * time.Minute, 24 * time.Hour},
+		{"agents.default_ttl", func(c *hub.Config, d time.Duration) { c.DefaultTTL = d }, 2 * time.Minute, 7 * 24 * time.Hour},
+		{"agents.max_expiry", func(c *hub.Config, d time.Duration) { c.MaxExpiry = d }, 2 * 24 * time.Hour, 7 * 24 * time.Hour},
+	}
+	for _, field := range fields {
+		t.Run(field.key, func(t *testing.T) {
+			for _, tc := range []struct {
+				name     string
+				duration time.Duration
+				invalid  bool
+			}{
+				{"subsecond", 500 * time.Millisecond, true},
+				{"fractional_second", field.valid + 500*time.Millisecond, true},
+				{"negative_subsecond", -500 * time.Millisecond, true},
+				{"negative_whole_second", -time.Second, true},
+				{"above_maximum", field.max + time.Second, true},
+				{"above_maximum_fractional", field.max + 500*time.Millisecond, true},
+				{"zero_unset", 0, false},
+				{"whole_seconds", field.valid, false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					cfg := hub.DefaultConfig()
+					cfg.DataDir = t.TempDir()
+					field.set(&cfg, tc.duration)
+					db, err := store.Open(filepath.Join(cfg.DataDir, "hub.db"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer db.Close()
+					h, err := hub.New(db, cfg, nil)
+					if tc.invalid {
+						prefsCode(t, err, prefs.CodeInvalidValue)
+						var pe *prefs.Error
+						if !errors.As(err, &pe) || pe.Details.Field != field.key {
+							t.Fatalf("duration validation did not identify %s: %v", field.key, err)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					if field.key == "agents.max_expiry" {
+						return
+					}
+					want, source := int64(tc.duration/time.Second), prefs.SourceFlag
+					if tc.duration == 0 {
+						d, err := prefs.Lookup(field.key)
+						if err != nil {
+							t.Fatal(err)
+						}
+						want, _ = d.Default.Int64()
+						source = prefs.SourceDefault
+					}
+					prefValue(t, h.Preferences.Current(), field.key, want, source, "")
+				})
+			}
+		})
+	}
+}
+
+func TestPreferencesCommitFailureDoesNotPublish(t *testing.T) {
+	h, _ := preferencesHub(t, hub.DefaultConfig())
+	s := readPrefs(t, h)
+	for _, statement := range []string{
+		`CREATE TABLE prefs_commit_parent (id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE prefs_commit_child (parent_id INTEGER REFERENCES prefs_commit_parent(id) DEFERRABLE INITIALLY DEFERRED)`,
+	} {
+		if _, err := h.DB.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wake := h.Preferences.Subscribe(ctx)
+	blockCommit, hookSucceeded := true, false
+	h.Preferences.AuthorizePatch = func(ctx context.Context, tx *sql.Tx, caller auth.Caller, before, after prefs.Snapshot, patch prefs.Patch) ([]string, error) {
+		if blockCommit {
+			// This statement succeeds. The missing parent is checked at COMMIT,
+			// after the preference, revision and audit statements have succeeded.
+			if _, err := tx.ExecContext(ctx, `INSERT INTO prefs_commit_child VALUES (1)`); err != nil {
+				return nil, err
+			}
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO hub_preference_activations VALUES (?, 'presence.default_ttl', 'now', NULL, NULL, NULL, 'synthetic-digest')`, after.Revision)
+		hookSucceeded = err == nil
+		return []string{"presence_shortened"}, err
+	}
+	patch := prefs.Patch{Set: map[string]prefs.Value{"presence.default_ttl": prefs.Duration(1800), "agents.thread_budget": prefs.Int(700)}}
+	_, err := h.Preferences.PatchPreferences(ctx, prefsOperator, s.ETag, patch)
+	prefsCode(t, err, prefs.CodeStorageUnavailable)
+	if !hookSucceeded {
+		t.Fatal("authorization statements failed before commit")
+	}
+	for _, snapshot := range []prefs.Snapshot{readPrefs(t, h), h.Preferences.Current()} {
+		if snapshot.ETag != s.ETag || snapshot.Revision != s.Revision {
+			t.Fatal("failed commit published a revision")
+		}
+		prefValue(t, snapshot, "presence.default_ttl", 3600, prefs.SourceDefault, "")
+		prefValue(t, snapshot, "agents.thread_budget", 500, prefs.SourceDefault, "")
+	}
+	for _, table := range []string{"hub_preferences", "hub_preference_activations", "prefs_commit_child"} {
+		var count int
+		if err := h.DB.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("failed commit left rows in %s: %d %v", table, count, err)
+		}
+	}
+	prefsAuditCount(t, h, 0)
+	select {
+	case <-wake:
+		t.Fatal("failed commit sent a wakeup")
+	default:
+	}
+	// The same ETag remains usable after rollback; only a successful retry
+	// may publish the next snapshot and notify subscribers.
+	blockCommit = false
+	next := patchPrefs(t, h, s, patch)
+	if next.Revision != s.Revision+1 || h.Preferences.Current().ETag != next.ETag {
+		t.Fatal("retry did not publish the committed generation")
+	}
+	select {
+	case revision := <-wake:
+		if revision != next.Revision {
+			t.Fatal("retry notified the wrong revision")
+		}
+	default:
+		t.Fatal("successful retry did not notify")
+	}
+	prefsAuditCount(t, h, 1)
 }

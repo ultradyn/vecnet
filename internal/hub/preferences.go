@@ -48,8 +48,34 @@ type Preferences struct {
 
 func preferenceError(code string) error { return &prefs.Error{Code: code} }
 
+// preferenceBootstrapSeconds validates the original duration before conversion.
+// Exactly zero retains Config's unset semantics; truncation must never make a
+// nonzero duration look unset or silently change its effective value.
+func preferenceBootstrapSeconds(key string, value time.Duration, min, max int64) (int64, error) {
+	if value == 0 {
+		return 0, nil
+	}
+	constraint := ""
+	switch {
+	case value < 0:
+		constraint = "nonnegative"
+	case value%time.Second != 0:
+		constraint = "whole_seconds"
+	case value < time.Duration(min)*time.Second || value > time.Duration(max)*time.Second:
+		constraint = "range"
+	}
+	if constraint != "" {
+		return 0, &prefs.Error{Code: prefs.CodeInvalidValue, Details: prefs.ErrorDetails{Field: key, Constraint: constraint}}
+	}
+	return int64(value / time.Second), nil
+}
+
 func newPreferences(db *store.DB, cfg Config, now func() time.Time) (*Preferences, error) {
-	p := &Preferences{db: db, now: now, bootstrap: map[string]prefs.Effective{}, maxExpiry: int64(cfg.MaxExpiry / time.Second), subscribers: map[chan uint64]struct{}{}}
+	maxExpiry, err := preferenceBootstrapSeconds("agents.max_expiry", cfg.MaxExpiry, 1, prefs.MaxExpirySeconds)
+	if err != nil {
+		return nil, err
+	}
+	p := &Preferences{db: db, now: now, bootstrap: map[string]prefs.Effective{}, maxExpiry: maxExpiry, subscribers: map[chan uint64]struct{}{}}
 	if p.maxExpiry == 0 {
 		p.maxExpiry = prefs.MaxExpirySeconds
 	}
@@ -59,16 +85,28 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time) (*Preference
 	// Programmatic Config values remain a supported bootstrap surface. Explicit
 	// flag/env provenance, including values equal to defaults, takes precedence.
 	configured := map[string]prefs.Value{
-		"events.refresh_interval":       prefs.Duration(int64(cfg.EventsRefreshInterval / time.Second)),
-		"presence.default_ttl":          prefs.Duration(int64(cfg.PresenceTTL / time.Second)),
-		"presence.session_ttl":          prefs.Duration(int64(cfg.SessionPresenceTTL / time.Second)),
-		"presence.launcher_ttl":         prefs.Duration(int64(cfg.LauncherPresenceTTL / time.Second)),
 		"agents.default_max_depth":      prefs.Int(int64(cfg.DefaultMaxDepth)),
-		"agents.default_ttl":            prefs.Duration(int64(cfg.DefaultTTL / time.Second)),
 		"agents.thread_budget":          prefs.Int(int64(cfg.ThreadBudget)),
 		"rates.sends_per_minute":        prefs.Int(int64(cfg.SendsPerMin)),
 		"rates.threads_per_hour":        prefs.Int(int64(cfg.ThreadsPerHour)),
 		"provisioning.creates_per_hour": prefs.Int(int64(cfg.CreatesPerHour)),
+	}
+	for _, duration := range []struct {
+		key   string
+		value time.Duration
+	}{
+		{"events.refresh_interval", cfg.EventsRefreshInterval},
+		{"presence.default_ttl", cfg.PresenceTTL},
+		{"presence.session_ttl", cfg.SessionPresenceTTL},
+		{"presence.launcher_ttl", cfg.LauncherPresenceTTL},
+		{"agents.default_ttl", cfg.DefaultTTL},
+	} {
+		d, _ := prefs.Lookup(duration.key)
+		seconds, err := preferenceBootstrapSeconds(duration.key, duration.value, *d.Min, *d.Max)
+		if err != nil {
+			return nil, err
+		}
+		configured[duration.key] = prefs.Duration(seconds)
 	}
 	for key, v := range configured {
 		d, _ := prefs.Lookup(key)
