@@ -19,6 +19,9 @@ func (h *Hub) checkR2Attachment(ctx context.Context, tx *sql.Tx, snd sender, a *
 		return E(422, "unknown_blob", "unknown attachment")
 	}
 	if !o.SHA256Verified {
+		if o.ExpiresAt != nil && !h.Now().Before(*o.ExpiresAt) {
+			return h.blobTransferError(blob.ErrR2Expired)
+		}
 		return h.blobTransferError(blob.ErrR2Incomplete)
 	}
 	var purged int

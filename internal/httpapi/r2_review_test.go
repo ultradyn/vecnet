@@ -80,6 +80,77 @@ func TestR2HTTPHashOnlyStatusRequiresIDWithoutExistenceLeak(t *testing.T) {
 	}
 }
 
+func TestR2HTTPUnverifiedGrantSendExpiry(t *testing.T) {
+	for _, purged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("purged=%t", purged), func(t *testing.T) {
+			f := newR2HTTP(t)
+			e := f.env
+			_, owner := e.NewPeer("session", "uploader")
+			_, stranger := e.NewPeer("session", "stranger")
+			recipient, _ := e.NewPeer("session", "recipient")
+			resp, raw := f.request(t, owner, "POST", "/v1/blobs/uploads", blobwire.UploadRequest{Size: 3, SHA256: shaOf("abc"), MediaType: "text/plain"}, "unverified-expiry")
+			if resp.StatusCode != 201 {
+				t.Fatalf("reserve status = %d, want 201", resp.StatusCode)
+			}
+			var g blobwire.UploadGrant
+			if err := json.Unmarshal(raw, &g); err != nil {
+				t.Fatal(err)
+			}
+			if g.RetentionClass != "1d" || g.ExpiresAt == nil || g.SHA256Verified == nil || *g.SHA256Verified {
+				t.Fatal("expected an unverified default one-day grant")
+			}
+			if purged {
+				if err := e.Hub.PurgeBlob(context.Background(), g.SHA256); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// No PUT, completion or cleanup: send must use the recorded deadline,
+			// and an unverified claim must never disclose a hash purge tombstone.
+			for _, phase := range []struct {
+				name    string
+				advance time.Duration
+				status  int
+				code    string
+			}{
+				{"before", 24*time.Hour - time.Millisecond, 409, "upload_incomplete"},
+				{"at", time.Millisecond, 410, "blob_expired"},
+				{"after", time.Millisecond, 410, "blob_expired"},
+			} {
+				e.Now.Advance(phase.advance)
+				t.Run(phase.name, func(t *testing.T) {
+					for _, caller := range []struct {
+						name   string
+						secret string
+						status int
+						code   string
+					}{
+						{"owner", owner, phase.status, phase.code},
+						{"stranger", stranger, 422, "unknown_blob"},
+					} {
+						t.Run(caller.name, func(t *testing.T) {
+							message := map[string]any{"idempotency_key": phase.name + "-" + caller.name, "priority": "hold", "recipients": []string{recipient}, "content": map[string]any{"text": "unverified attachment"}, "attachments": []any{map[string]any{"blob_id": g.BlobID, "sha256": g.SHA256, "size": 3, "media_type": "text/plain", "retention_class": g.RetentionClass, "expires_at": g.ExpiresAt}}}
+							resp, raw := f.request(t, caller.secret, "POST", "/v1/messages", message, "")
+							if resp.StatusCode != caller.status {
+								t.Errorf("send status = %d, want %d", resp.StatusCode, caller.status)
+							}
+							for _, table := range []string{"messages", "blob_object_refs", "blob_refs", "durable_blob_refs"} {
+								var count int
+								if err := e.Hub.DB.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil {
+									t.Fatal(err)
+								}
+								if count != 0 {
+									t.Errorf("rejected send inserted %s rows: %d", table, count)
+								}
+							}
+							requireCode(t, raw, caller.code)
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestR2HTTPUnknownLengthJSONOverflow(t *testing.T) {
 	f := newR2HTTP(t)
 	secret := f.env.OperatorSecret
