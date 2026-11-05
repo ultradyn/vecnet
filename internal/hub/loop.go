@@ -9,6 +9,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/prefs"
 )
 
 // SenderChainCap is how many originators loop.sender_chain keeps (PROTOCOL §6).
@@ -34,7 +35,7 @@ type cutError struct{ api *APIError }
 func (c *cutError) Error() string { return c.api.Error() }
 func (c *cutError) Unwrap() error { return c.api }
 
-// buildLoop fills Message.loop for a send by senderID (of peer kind
+// buildLoopSnapshot fills Message.loop for a send by senderID (of peer kind
 // senderKind) replying to parent (nil for a fresh message) at now
 // (PROTOCOL §6, §16.1):
 //
@@ -59,10 +60,10 @@ func (c *cutError) Unwrap() error { return c.api }
 // future), and 422 max_depth_exceeded when depth would exceed max_depth.
 // An explicit fresh or operator expires_at beyond the cap returns 422
 // invalid_value with details.field "expires_at" and details.max set to the cap.
-func (h *Hub) buildLoop(parent *envelope.Message, senderID, senderKind string, req *envelope.SendRequest, now time.Time) (envelope.Loop, *APIError) {
-	ttl := now.Add(h.Cfg.DefaultTTL)
+func (h *Hub) buildLoopSnapshot(snapshot prefs.Snapshot, parent *envelope.Message, senderID, senderKind string, req *envelope.SendRequest, now time.Time) (envelope.Loop, *APIError) {
+	ttl := now.Add(preferenceDuration(snapshot, "agents.default_ttl"))
 	expires := ttl
-	l := envelope.Loop{MaxDepth: h.Cfg.DefaultMaxDepth}
+	l := envelope.Loop{MaxDepth: preferenceNumber(snapshot, "agents.default_max_depth")}
 	operator := senderKind == "operator"
 	if parent != nil {
 		pExp, err := envelope.ParseTime(parent.Loop.ExpiresAt)

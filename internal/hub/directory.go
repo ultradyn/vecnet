@@ -71,6 +71,10 @@ var enrolledFields = []string{"name", "kind", "enrolled_at"}
 // ordered by source id (PROTOCOL §2.10, §8, §10). A source reports no
 // presence and the hub observes no transport for it, so both are "unknown".
 func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
+	snapshot, err := h.Preferences.LoadSnapshot(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
 	sources, err := h.directorySources(ctx)
 	if err != nil {
 		return nil, err
@@ -130,7 +134,7 @@ func (h *Hub) Directory(ctx context.Context) ([]DirectoryEntry, error) {
 		e.LastSeen = nullable(lastSeen)
 		e.Reachability = EffectiveReachability(reach, nullable(via), e.LastSeen, now)
 		e.EnrolledAt = &enrolled
-		e.Presence = h.EffectivePresence(PresenceRow{Kind: e.Kind, State: nullable(state), At: nullable(at)}, now)
+		e.Presence = EffectivePresenceSnapshot(snapshot, PresenceRow{Kind: e.Kind, State: nullable(state), At: nullable(at)}, now)
 		e.Teams = teams[e.PeerID]
 		if e.Teams == nil {
 			e.Teams = []string{}

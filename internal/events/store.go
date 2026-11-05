@@ -7,10 +7,12 @@ package events
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"sync"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/ids"
+	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
@@ -77,8 +80,8 @@ var (
 // (PROTOCOL §4.4).
 var DefaultTypes = []string{"delivery"}
 
-// Subscription is one row of event_subscriptions. The id is a routing
-// handle, not a credential.
+// Subscription is one row of event_subscriptions with its worker schedule.
+// The id is a routing handle, not a credential.
 type Subscription struct {
 	ID, PrincipalKind, PrincipalID, PeerID, Name, URL string
 	Arguments                                         map[string]any
@@ -88,11 +91,12 @@ type Subscription struct {
 	Verified                                          bool
 	PausedReason                                      string
 
-	RefreshBefore *time.Time // the exact deadline returned by the last successful subscribe
-	VerifiedAt    *time.Time // the last passed challenge; nil when one is due
-	TokenExpires  *time.Time // nil for a vecnet bearer, whose credential has no expiry
-	TokenHash     string     // the subscribing OAuth access token's hash; "" for a vecnet bearer
-	Truncated     bool       // events were skipped as purged since the last events/subscribe
+	RefreshBefore     *time.Time // deadline returned by the last successful subscription
+	NextRefreshBefore *time.Time // mutable worker schedule; never projected as client advice
+	VerifiedAt        *time.Time // the last passed challenge; nil when one is due
+	TokenExpires      *time.Time // nil for a vecnet bearer, whose credential has no expiry
+	TokenHash         string     // the subscribing OAuth access token's hash; "" for a vecnet bearer
+	Truncated         bool       // events were skipped as purged since the last events/subscribe
 }
 
 // Store is the subscription table. Key is meta.hub_key, under which the
@@ -107,6 +111,10 @@ type Store struct {
 	verifications  map[verificationKey]time.Time
 	callbackOnce   sync.Once
 	callbackLocks  [64]chan struct{}
+
+	// Protect against overlapping Step and publication wakes. The applied
+	// scheduling policy is checkpointed with its deadlines in the database.
+	refreshMu sync.Mutex
 }
 
 // NewStore returns the Store of hub h.
@@ -160,7 +168,9 @@ const (
 // new challenge passes. Either way expires is now+ttl, clamped to MaxTTL
 // (ttl <= 0 means MaxTTL) and to tokenExp; a zero tokenExp is a credential
 // that does not expire. s.Cursor applies only to a new row. ErrTooMany when a
-// new or lapsed row would take the principal past MaxPerPrincipal.
+// new or lapsed row would take the principal past MaxPerPrincipal. Refresh
+// scheduling here changes only the worker deadline; SetRefreshBefore saves
+// client advice after a successful subscription.
 func (st *Store) Upsert(ctx context.Context, s Subscription, secret string, ttl time.Duration, tokenExp time.Time) (Subscription, bool, error) {
 	args, err := canonicalArgs(s.Arguments)
 	if err != nil {
@@ -200,6 +210,19 @@ func (st *Store) Upsert(ctx context.Context, s Subscription, secret string, ttl 
 	var created bool
 	err = st.DB.Tx(ctx, func(tx *sql.Tx) error {
 		id, created = "", false
+		interval := RefreshInterval
+		if st.hub != nil {
+			snapshot, err := st.hub.Preferences.LoadSnapshot(ctx, tx)
+			if err != nil {
+				return err
+			}
+			e, err := snapshot.Get("events.refresh_interval")
+			if err != nil {
+				return err
+			}
+			n, _ := e.Value.Int64()
+			interval = time.Duration(n) * time.Second
+		}
 		var oldSealed string
 		var lapsed bool
 		err := tx.QueryRowContext(ctx,
@@ -234,7 +257,7 @@ func (st *Store) Upsert(ctx context.Context, s Subscription, secret string, ttl 
 			if err != nil {
 				return fmt.Errorf("events: create subscription: %w", err)
 			}
-			return nil
+			return saveRefreshSchedule(ctx, tx, id, interval, RefreshDeadline(now, expires, interval))
 		}
 		old, err := hub.UnsealWith(st.Key, oldSealed)
 		if err != nil {
@@ -258,7 +281,10 @@ func (st *Store) Upsert(ctx context.Context, s Subscription, secret string, ttl 
 			envelope.FormatTime(now.Add(-ChallengeMaxAge)), id, string(old) != secret); err != nil {
 			return fmt.Errorf("events: refresh subscription: %w", err)
 		}
-		return clearBackoff(ctx, tx, id)
+		if err := clearBackoff(ctx, tx, id); err != nil {
+			return err
+		}
+		return saveRefreshSchedule(ctx, tx, id, interval, RefreshDeadline(now, expires, interval))
 	})
 	if err != nil {
 		return Subscription{}, false, err
@@ -285,6 +311,13 @@ func (st *Store) Delete(ctx context.Context, principalKind, principalID, url, na
 	}
 	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM meta WHERE key IN (
+			 SELECT 'events_refresh_schedule:' || sub_id FROM event_subscriptions
+			 WHERE principal_kind = ? AND principal_id = ? AND url = ? AND name = ? AND arguments = ?)`,
+			principalKind, principalID, url, name, canon); err != nil {
+			return fmt.Errorf("events: delete refresh schedule: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM event_outbox WHERE sub_id IN (
 			   SELECT sub_id FROM event_subscriptions
 			   WHERE principal_kind = ? AND principal_id = ? AND url = ? AND name = ? AND arguments = ?)`,
@@ -302,14 +335,15 @@ func (st *Store) Delete(ctx context.Context, principalKind, principalID, url, na
 }
 
 const subColumns = `sub_id, principal_kind, principal_id, peer_id, name, arguments, url, cursor_epoch, cursor_seq,
-	truncated, types, expires_at, verified_at, paused_reason, token_expires_at, token_hash, refresh_before_at`
+	truncated, types, expires_at, verified_at, paused_reason, token_expires_at, token_hash, refresh_before_at,
+	(SELECT value FROM meta WHERE key = 'events_refresh_schedule:' || event_subscriptions.sub_id)`
 
 func scanSub(row interface{ Scan(...any) error }) (Subscription, error) {
 	var s Subscription
 	var args, types string
-	var expires, verified, paused, token, tokenHash, refresh *string
+	var expires, verified, paused, token, tokenHash, refresh, schedule *string
 	if err := row.Scan(&s.ID, &s.PrincipalKind, &s.PrincipalID, &s.PeerID, &s.Name, &args, &s.URL,
-		&s.Cursor.Epoch, &s.Cursor.Seq, &s.Truncated, &types, &expires, &verified, &paused, &token, &tokenHash, &refresh); err != nil {
+		&s.Cursor.Epoch, &s.Cursor.Seq, &s.Truncated, &types, &expires, &verified, &paused, &token, &tokenHash, &refresh, &schedule); err != nil {
 		return Subscription{}, err
 	}
 	if err := json.Unmarshal([]byte(args), &s.Arguments); err != nil {
@@ -324,6 +358,13 @@ func scanSub(row interface{ Scan(...any) error }) (Subscription, error) {
 	}
 	if s.RefreshBefore, err = parseOptTime(refresh); err != nil {
 		return Subscription{}, err
+	}
+	if schedule != nil {
+		var saved refreshSchedule
+		if err := json.Unmarshal([]byte(*schedule), &saved); err != nil {
+			return Subscription{}, fmt.Errorf("events: stored refresh schedule: %w", err)
+		}
+		s.NextRefreshBefore = &saved.Next
 	}
 	if s.TokenExpires, err = parseOptTime(token); err != nil {
 		return Subscription{}, err
@@ -920,11 +961,195 @@ func RefreshDeadline(now, expires time.Time, interval time.Duration) time.Time {
 	return deadline
 }
 
-// SetRefreshBefore preserves the deadline handed to the client for status reads.
+// SetRefreshBefore preserves legacy caller advice unless an explicit preference
+// overrides it. The returned MCP advice must use this same policy seam when its
+// owning caller is migrated; this store never mutates shared hub Config.
 func (st *Store) SetRefreshBefore(ctx context.Context, id string, deadline time.Time) error {
-	_, err := st.DB.ExecContext(ctx, `UPDATE event_subscriptions SET refresh_before_at = ? WHERE sub_id = ?`, envelope.FormatTime(deadline), id)
+	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		interval := RefreshInterval
+		if st.hub != nil {
+			snapshot, err := st.hub.Preferences.LoadSnapshot(ctx, tx)
+			if err != nil {
+				return err
+			}
+			e, err := snapshot.Get("events.refresh_interval")
+			if err != nil {
+				return err
+			}
+			n, _ := e.Value.Int64()
+			interval = time.Duration(n) * time.Second
+			// Preserve the legacy caller's supplied default when no explicit
+			// bootstrap/stored policy exists. An override always wins.
+			if e.Source != prefs.SourceDefault {
+				var raw string
+				if err := tx.QueryRowContext(ctx, `SELECT expires_at FROM event_subscriptions WHERE sub_id = ?`, id).Scan(&raw); err != nil {
+					return err
+				}
+				expires, err := envelope.ParseTime(raw)
+				if err != nil {
+					return err
+				}
+				deadline = RefreshDeadline(st.now(), expires, interval)
+			}
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE event_subscriptions SET refresh_before_at = ? WHERE sub_id = ?`, envelope.FormatTime(deadline), id)
+		if err != nil {
+			return fmt.Errorf("events: save refresh deadline: %w", err)
+		}
+		if count, err := result.RowsAffected(); err != nil || count == 0 {
+			return err // preserve the legacy no-op for a missing default-policy row
+		}
+		return saveRefreshSchedule(ctx, tx, id, interval, deadline)
+	})
+}
+
+// refreshSchedule is consumer state in the existing meta table, never a second
+// preference store. Policy is derived only from LoadSnapshot. Each subscribe
+// transaction records the policy it actually used, so A -> B -> A coalescing
+// cannot hide rows materialized under B between worker passes.
+type refreshSchedule struct {
+	Policy string    `json:"policy"`
+	Next   time.Time `json:"next"`
+}
+
+const refreshSchedulePrefix = "events_refresh_schedule:"
+
+func refreshPolicy(interval time.Duration) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("refresh-v1:%d", int64(interval/time.Second)))))
+}
+
+func saveRefreshSchedule(ctx context.Context, tx *sql.Tx, id string, interval time.Duration, next time.Time) error {
+	encoded, err := json.Marshal(refreshSchedule{Policy: refreshPolicy(interval), Next: next})
 	if err != nil {
-		return fmt.Errorf("events: save refresh deadline: %w", err)
+		return err
 	}
-	return nil
+	_, err = tx.ExecContext(ctx, `INSERT INTO meta(key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, refreshSchedulePrefix+id, string(encoded))
+	return err
+}
+
+// refreshSchedules consumes one committed snapshot. A burst collapses to the
+// newest cadence; unrelated preference writes do not slide deadlines. Wakes
+// update only worker schedules: PROTOCOL section 4.4 preserves client-returned
+// advice for status reads until re-subscription. No callback, lease renewal,
+// cursor move or backoff reset occurs here.
+func (st *Store) refreshSchedules(ctx context.Context) error {
+	if st.hub == nil {
+		return nil
+	}
+	st.refreshMu.Lock()
+	defer st.refreshMu.Unlock()
+	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		snapshot, err := st.hub.Preferences.LoadSnapshot(ctx, tx)
+		if err != nil {
+			return err
+		}
+		e, err := snapshot.Get("events.refresh_interval")
+		if err != nil {
+			return err
+		}
+		n, _ := e.Value.Int64()
+		interval := time.Duration(n) * time.Second
+		// Keep the earlier global checkpoint, but never use it to skip rows:
+		// subscribe paths can apply an intermediate cadence between passes.
+		// Per-subscription policy and deadline commit atomically below.
+		const checkpointKey = "events_refresh_schedule_policy"
+		fingerprint := refreshPolicy(interval)
+		var applied string
+		err = tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, checkpointKey).Scan(&applied)
+		missing := errors.Is(err, sql.ErrNoRows)
+		if err != nil && !missing {
+			return err
+		}
+		now := st.now()
+		rows, err := tx.QueryContext(ctx, `SELECT sub_id, expires_at, coalesce(last_refresh_at, created_at), refresh_before_at,
+			(SELECT value FROM meta WHERE key = 'events_refresh_schedule:' || event_subscriptions.sub_id)
+			FROM event_subscriptions WHERE expires_at > ? ORDER BY sub_id`, envelope.FormatTime(now))
+		if err != nil {
+			return err
+		}
+		type schedule struct {
+			id string
+			at time.Time
+		}
+		var pending []schedule
+		for rows.Next() {
+			var id, raw, anchorRaw string
+			var previous, state *string
+			if err := rows.Scan(&id, &raw, &anchorRaw, &previous, &state); err != nil {
+				rows.Close()
+				return err
+			}
+			expires, err := envelope.ParseTime(raw)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			if state != nil {
+				var saved refreshSchedule
+				if err := json.Unmarshal([]byte(*state), &saved); err != nil {
+					rows.Close()
+					return fmt.Errorf("events: stored refresh schedule: %w", err)
+				}
+				if saved.Policy == fingerprint {
+					continue
+				}
+			}
+			// Spread the next worker deadlines within 30 seconds (or 10% of
+			// the cadence), always capped by the unchanged lease margin.
+			hash := fnv.New64a()
+			_, _ = hash.Write([]byte(id))
+			spread := min(30*time.Second, interval/10)
+			jitter := time.Duration(hash.Sum64() % uint64(spread))
+			if state == nil && previous != nil {
+				// Bootstrap per-row state without sliding matching legacy advice.
+				// Later passes use the saved row policy, including after Reset.
+				anchor, err := envelope.ParseTime(anchorRaw)
+				if err != nil {
+					rows.Close()
+					return err
+				}
+				if e.UpdatedAt != "" {
+					updated, err := envelope.ParseTime(e.UpdatedAt)
+					if err != nil {
+						rows.Close()
+						return err
+					}
+					if updated.After(anchor) {
+						anchor = updated
+					}
+				}
+				old, err := envelope.ParseTime(*previous)
+				if err != nil {
+					rows.Close()
+					return err
+				}
+				first := RefreshDeadline(anchor, expires, interval)
+				last := RefreshDeadline(anchor, expires, interval+spread)
+				if !old.Before(first) && !old.After(last) {
+					pending = append(pending, schedule{id, old})
+					continue
+				}
+			}
+			pending = append(pending, schedule{id, RefreshDeadline(now, expires, interval+jitter)})
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, p := range pending {
+			if err := saveRefreshSchedule(ctx, tx, p.id, interval, p.at); err != nil {
+				return err
+			}
+		}
+		if !missing && applied == fingerprint {
+			return nil
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO meta(key, value) VALUES (?, ?)
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`, checkpointKey, fingerprint)
+		return err
+	})
 }

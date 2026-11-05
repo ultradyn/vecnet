@@ -87,6 +87,12 @@ func (h *Hub) React(ctx context.Context, c auth.Caller, req envelope.ReactionReq
 }
 
 func (h *Hub) reactTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req envelope.ReactionRequest, ingress string) (*ReactResponse, []string, error) {
+	// The loop deadline and presence gating must share the persisted revision,
+	// including when a preference commit has not yet published Current.
+	snapshot, err := h.Preferences.LoadSnapshot(ctx, tx)
+	if err != nil {
+		return nil, nil, err
+	}
 	snd, err := resolveSender(ctx, tx, c, req.As)
 	if err != nil {
 		return nil, nil, err
@@ -146,7 +152,7 @@ func (h *Hub) reactTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req envelo
 					return nil, nil, err
 				}
 				var apiErr *APIError
-				loop, apiErr = h.buildLoop(msg, snd.peer, snd.kind, &envelope.SendRequest{}, now)
+				loop, apiErr = h.buildLoopSnapshot(snapshot, msg, snd.peer, snd.kind, &envelope.SendRequest{}, now)
 				if apiErr != nil {
 					if err := h.countCut(ctx, tx, CounterLoopCut, snd.peer, []string{thr}, map[string]any{"reason": apiErr.Code, "via": "reaction"}); err != nil {
 						return nil, nil, err
@@ -201,7 +207,7 @@ func (h *Hub) reactTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req envelo
 					return nil, nil, err
 				}
 			}
-			refs, notify, err := h.fanOut(ctx, tx, thread, &wake, msgJSON, targets, nil, ingress, wake.Loop.ExpiresAt, now)
+			refs, notify, err := h.fanOut(ctx, tx, thread, &wake, msgJSON, targets, nil, ingress, wake.Loop.ExpiresAt, now, snapshot)
 			if err != nil {
 				return nil, nil, err
 			}
