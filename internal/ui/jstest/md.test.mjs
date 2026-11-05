@@ -106,3 +106,21 @@ test('angle-bracket autolinks', () => {
   assert.equal(links[0].kids[0].v, 'https://xsm.hornbill-boa.ts.net:29044');
   assert.ok(out.some(k => k.t === 'text' && k.v.includes('<b>bold</b> and <javascript:x>')));
 });
+
+test('malformed percent escapes in mailto targets stay literal text, never throw', () => {
+  // Invalid escapes and invalid UTF-8 make decodeURIComponent throw URIError.
+  for (const target of ['mailto:%zz@example.com', 'mailto:%C3%28@example.com', 'mailto:%E0%A4%A@example.com', 'mailto:max@%ZZexample.com']) {
+    assert.equal(safeHref(target), null, target);
+    for (const src of ['[x](' + target + ')', '<' + target + '>', '[' + target + '](https://example.com/)', '![x](' + target + ')']) {
+      let out;
+      assert.doesNotThrow(() => { out = inline(src); }, src);
+      if (!src.startsWith('[' + target + ']')) assert.ok(out.every(k => k.t !== 'a'), src);
+      assert.doesNotThrow(() => parse('before\n\n' + src + '\n\nafter'), src);
+    }
+  }
+  // A label that is a malformed mailto still links to its real target, and shows the host.
+  const [a] = inline('[mailto:%zz@example.com](https://example.com/)');
+  assert.deepEqual([a.t, a.href], ['a', 'https://example.com/']);
+  assert.equal(needsHost(a), true);
+  assert.equal(safeHref('mailto:%41x@example.com').host, 'Ax@example.com', 'valid escapes still decode');
+});
