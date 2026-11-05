@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventpayload"
 	"github.com/XertroV/vecnet/internal/store"
 )
@@ -35,7 +36,15 @@ func TestPayloadReferenceReplacementGuards(t *testing.T) {
 			}
 			defer db.Close()
 			ctx := context.Background()
+			msgID := "msg_test"
 			body := `{"message_id":"msg_test","attachments":[],"text":"synthetic-original"}`
+			if tc.snapshot {
+				msgID = "msg_00000000000000000000000001"
+				body = `{"schema_version":1,"message_id":"msg_00000000000000000000000001","thread_id":"thr_00000000000000000000000001","in_reply_to":null,"origin":null,"kind":"message","sender":"hub","recipients":["peer_00000000000000000000000001"],"priority":"hold","created_at":"2026-11-05T00:00:00.000Z","content":{"text":"synthetic-original"},"attachments":[],"metadata":{},"loop":{"depth":0,"max_depth":8,"expires_at":"2026-11-06T00:00:00.000Z","sender_chain":[]}}`
+				if envelope.Validate("message", []byte(body)) != nil {
+					t.Fatal("snapshot fixture must satisfy Message schema")
+				}
+			}
 			if !tc.snapshot {
 				if _, err := db.Exec(`INSERT INTO messages(msg_id,thr_id,seq,sender,kind,created_at,body) VALUES ('msg_test','thr_test',1,'hub','message','now',?)`, body); err != nil {
 					t.Fatal(err)
@@ -50,7 +59,7 @@ func TestPayloadReferenceReplacementGuards(t *testing.T) {
 			var p eventpayload.StoredPayload
 			err = db.Tx(ctx, func(tx *sql.Tx) error {
 				var err error
-				p, err = eventpayload.EncodeDelivery(ctx, tx, "msg_test", []byte(wire))
+				p, err = eventpayload.EncodeDelivery(ctx, tx, msgID, []byte(wire))
 				if err != nil {
 					return err
 				}
