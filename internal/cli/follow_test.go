@@ -96,8 +96,13 @@ func refusedMove(t *testing.T, mode string) {
 	if err := key.SignNotice(&n); err != nil {
 		t.Fatal(err)
 	}
+	var altCalls *atomic.Int32
 	if mode == "signature" {
-		n.NewURL = target.URL + "/tampered"
+		// The altered destination is a real hub with the pinned key, so only
+		// the notice signature check can refuse it.
+		var alt *httptest.Server
+		alt, altCalls = identityStub(t, key, nil)
+		n.NewURL = alt.URL
 	}
 	body := fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = \"secret\"\n", source.URL, key.Pubkey())
 	path, env := pinTestEnv(t, body)
@@ -116,6 +121,9 @@ func refusedMove(t *testing.T, mode string) {
 	}
 	if (mode == "signature" || mode == "replay") && calls.Load() != 0 {
 		t.Fatalf("unverified target contacted: %d", calls.Load())
+	}
+	if mode == "signature" && (altCalls.Load() != 0 || !strings.Contains(errs, "signature")) {
+		t.Fatalf("altered destination contacted %d times: %s", altCalls.Load(), errs)
 	}
 }
 func TestFollowRefusesBadSignature(t *testing.T)      { refusedMove(t, "signature") }
