@@ -16,8 +16,9 @@ import (
 
 // uiMaxBytes caps the sum of every file in the UI, which ships with no build
 // step (raised from 60 KiB by operator UI Task 7; to 320 KiB on 2026-11-04
-// when the sidebar, activity feed and peer view took it past 256 KiB).
-const uiMaxBytes = 320 << 10
+// when the sidebar, activity feed and peer view took it past 256 KiB; to
+// 336 KiB on 2026-11-05 for the favicon set, about 9 KiB of it images).
+const uiMaxBytes = 336 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
@@ -25,7 +26,9 @@ var (
 	styleTag    = regexp.MustCompile(`(?i)<style\b`)
 	styleAttr   = regexp.MustCompile(`(?i)<[^>]+\sstyle\s*=`)
 	handlerAttr = regexp.MustCompile(`(?i)<[^>]+\son[a-z]+\s*=`)
-	stylesheet  = regexp.MustCompile(`(?i)<link\b[^>]*\bhref\s*=\s*"([^"]+)"`)
+	linkTag     = regexp.MustCompile(`(?i)<link\b[^>]*\bhref\s*=\s*"([^"]+)"`)
+	stylesheet  = regexp.MustCompile(`(?i)<link\b[^>]*\brel\s*=\s*"stylesheet"[^>]*\bhref\s*=\s*"([^"]+)"`)
+	iconLink    = regexp.MustCompile(`(?i)<link\b[^>]*\brel\s*=\s*"(?:icon|apple-touch-icon)"[^>]*\bhref\s*=\s*"([^"]+)"`)
 	moduleType  = regexp.MustCompile(`(?i)\btype\s*=\s*"module"`)
 	// Bodies are untrusted (PROTOCOL §14.2), so nothing may parse a string into
 	// markup or code.
@@ -99,7 +102,7 @@ func TestUIServedAndCSPNoInline(t *testing.T) {
 			t.Fatalf("inline markup the CSP blocks (%s): %.120s", re, page[loc[0]:])
 		}
 	}
-	for _, m := range stylesheet.FindAllStringSubmatch(page, -1) {
+	for _, m := range linkTag.FindAllStringSubmatch(page, -1) {
 		assets = append(assets, m[1])
 	}
 
@@ -119,6 +122,10 @@ func TestUIServedAndCSPNoInline(t *testing.T) {
 			t.Fatalf("GET /ui/%s Content-Type = %q, want text/javascript", a, ct)
 		case strings.HasSuffix(a, ".css") && !strings.HasPrefix(ct, "text/css"):
 			t.Fatalf("GET /ui/%s Content-Type = %q, want text/css", a, ct)
+		case strings.HasSuffix(a, ".svg") && ct != "image/svg+xml":
+			t.Fatalf("GET /ui/%s Content-Type = %q, want image/svg+xml", a, ct)
+		case strings.HasSuffix(a, ".png") && ct != "image/png":
+			t.Fatalf("GET /ui/%s Content-Type = %q, want image/png", a, ct)
 		}
 		if resp.Header.Get("X-Content-Type-Options") != "nosniff" {
 			t.Fatalf("GET /ui/%s lacks X-Content-Type-Options: nosniff", a)
@@ -293,6 +300,57 @@ func TestUIStaticNoInline(t *testing.T) {
 		}
 		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, want) {
 			t.Errorf("GET /ui/%s Content-Type = %q, want %s", target, ct, want)
+		}
+	}
+}
+
+// TestUIIcons: the page links an SVG favicon, a 32 px PNG fallback and a
+// 180 px apple-touch-icon, and base.css draws logo.svg as the brand mark;
+// each is served with its image type, every image in static/ is one of them,
+// and the SVGs are inert (no script, no external refs).
+func TestUIIcons(t *testing.T) {
+	env := testhub.Start(t)
+	files := staticFiles(t)
+	page := string(files["index.html"])
+	want := map[string]string{"favicon.svg": "image/svg+xml", "favicon-32.png": "image/png", "apple-touch-icon.png": "image/png"}
+	linked := map[string]bool{}
+	for _, m := range iconLink.FindAllStringSubmatch(page, -1) {
+		linked[m[1]] = true
+	}
+	if !strings.Contains(string(files["base.css"]), "url(logo.svg)") {
+		t.Error("base.css does not draw logo.svg")
+	}
+	linked["logo.svg"] = true
+	want["logo.svg"] = "image/svg+xml"
+	for name, ct := range want {
+		if !linked[name] {
+			t.Errorf("index.html does not link icon %s", name)
+		}
+		resp, body := env.Do("", "GET", "/ui/"+name, nil)
+		if resp.StatusCode != http.StatusOK || len(body) == 0 {
+			t.Errorf("GET /ui/%s = %d (%d bytes), want 200", name, resp.StatusCode, len(body))
+		}
+		if got := resp.Header.Get("Content-Type"); got != ct {
+			t.Errorf("GET /ui/%s Content-Type = %q, want %s", name, got, ct)
+		}
+		mustCSP(t, resp, "GET /ui/"+name)
+	}
+	for name := range files {
+		if (strings.HasSuffix(name, ".svg") || strings.HasSuffix(name, ".png")) && want[name] == "" {
+			t.Errorf("image %s is not one of the linked icons", name)
+		}
+	}
+	for _, name := range []string{"favicon.svg", "logo.svg"} {
+		svg := strings.ReplaceAll(string(files[name]), `xmlns="http://www.w3.org/2000/svg"`, "")
+		for _, bad := range []string{"<script", "foreignObject", "http://", "https://", "xlink:href", "<style"} {
+			if strings.Contains(svg, bad) {
+				t.Errorf("%s contains %q", name, bad)
+			}
+		}
+	}
+	for _, name := range []string{"favicon-32.png", "apple-touch-icon.png"} {
+		if !strings.HasPrefix(string(files[name]), "\x89PNG\r\n\x1a\n") {
+			t.Errorf("%s is not a PNG", name)
 		}
 	}
 }

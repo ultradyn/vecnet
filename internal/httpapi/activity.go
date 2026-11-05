@@ -33,7 +33,7 @@ func (s *server) opActivity(w http.ResponseWriter, r *http.Request) {
 	token := bearer(r)
 	sub := s.Hub.Activity.Subscribe(ctx)
 	conn := startSSE(w, s.sseStall())
-	defer conn.close()
+	defer conn.closeForShutdown(r.Context(), s.Stop)
 	if !conn.send(ctx, []byte("retry: 3000\n\n")) || !conn.send(ctx, []byte("event: ready\ndata: {}\n\n")) {
 		return
 	}

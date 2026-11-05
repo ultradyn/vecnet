@@ -273,50 +273,262 @@ func TestInitializeLegacyMintsSession(t *testing.T) {
 	}
 }
 
-func TestInitializeOldVersionRejected(t *testing.T) {
+func TestInitializeNegotiatesOlderVersion(t *testing.T) {
 	env := testhub.Start(t)
 	_, secret := env.NewPeer("session", "a1")
-
-	var reused []bool
-	trace := &httptrace.ClientTrace{GotConn: func(i httptrace.GotConnInfo) { reused = append(reused, i.Reused) }}
-	cl := &http.Client{Transport: &http.Transport{}}
-	defer cl.CloseIdleConnections()
-	traced := &http.Client{Transport: traceRT{base: cl.Transport, trace: trace}}
-
-	resp, body := do(t, env, call{secret: secret, client: traced, body: initialize(1, "2025-03-26"),
-		headers: map[string]string{"Accept": "application/json, text/event-stream"}})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status %d %s, want 200 with a JSON-RPC error", resp.StatusCode, body)
+	toolNames := func(t *testing.T, headers map[string]string) []string {
+		t.Helper()
+		resp, body := do(t, env, call{secret: secret, headers: headers,
+			body: map[string]any{"jsonrpc": "2.0", "id": 3, "method": "tools/list"}})
+		r := decodeRPC(t, body)
+		if resp.StatusCode != http.StatusOK || r.Error != nil {
+			t.Fatalf("tools/list: %d %s", resp.StatusCode, body)
+		}
+		var res struct {
+			Tools []struct{ Name string } `json:"tools"`
+		}
+		if err := json.Unmarshal(r.Result, &res); err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, tool := range res.Tools {
+			names = append(names, tool.Name)
+		}
+		return names
 	}
-	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
-		t.Fatalf("rejected initialize minted session %q", sid)
+	want := toolNames(t, modern())
+	for _, version := range []string{"2025-03-26", "2025-06-18"} {
+		t.Run(version, func(t *testing.T) {
+			var reused []bool
+			trace := &httptrace.ClientTrace{GotConn: func(i httptrace.GotConnInfo) { reused = append(reused, i.Reused) }}
+			cl := &http.Client{Transport: &http.Transport{}}
+			defer cl.CloseIdleConnections()
+			traced := &http.Client{Transport: traceRT{base: cl.Transport, trace: trace}}
+			resp, body := do(t, env, call{secret: secret, client: traced, body: initialize(1, version),
+				headers: map[string]string{"Accept": "application/json, text/event-stream"}})
+			r := decodeRPC(t, body)
+			if resp.StatusCode != http.StatusOK || r.Error != nil {
+				t.Fatalf("negotiated initialize: %d %s", resp.StatusCode, body)
+			}
+			sid := resp.Header.Get("Mcp-Session-Id")
+			if sid == "" {
+				t.Fatal("negotiated initialize did not mint a session")
+			}
+			var result struct {
+				ProtocolVersion string `json:"protocolVersion"`
+			}
+			if err := json.Unmarshal(r.Result, &result); err != nil {
+				t.Fatal(err)
+			}
+			wantVersion := version
+			if version == "2025-03-26" {
+				wantVersion = mcpserver.ProtoLegacy
+			} // March requires batch reception, which /mcp does not implement.
+			if result.ProtocolVersion != wantVersion {
+				t.Fatalf("protocolVersion = %q, want %s", result.ProtocolVersion, wantVersion)
+			}
+			headers := map[string]string{"Mcp-Session-Id": sid, "MCP-Protocol-Version": wantVersion, "Accept": "application/json, text/event-stream"}
+			got := toolNames(t, headers)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("legacy tool names = %v, current = %v", got, want)
+			}
+			resp, body = do(t, env, call{secret: secret, headers: headers,
+				body: map[string]any{"jsonrpc": "2.0", "id": 4, "method": "resources/list"}})
+			r = decodeRPC(t, body)
+			var resources struct {
+				Resources []struct {
+					URI string `json:"uri"`
+				} `json:"resources"`
+			}
+			if resp.StatusCode != http.StatusOK || r.Error != nil || json.Unmarshal(r.Result, &resources) != nil || len(resources.Resources) == 0 {
+				t.Fatalf("resources/list: %d %s", resp.StatusCode, body)
+			}
+			for _, method := range []string{"resources/subscribe", "resources/unsubscribe"} {
+				resp, body = do(t, env, call{secret: secret, headers: headers, body: map[string]any{"jsonrpc": "2.0", "id": 5, "method": method,
+					"params": map[string]any{"uri": resources.Resources[0].URI}}})
+				if r := decodeRPC(t, body); resp.StatusCode != http.StatusOK || r.Error != nil {
+					t.Fatalf("%s: %d %s", method, resp.StatusCode, body)
+				}
+			}
+			resp, body = do(t, env, call{secret: secret, client: traced, headers: modern(),
+				body: discover(2, "io.modelcontextprotocol/protocolVersion", mcpserver.ProtoCurrent)})
+			r = decodeRPC(t, body)
+			if resp.StatusCode != http.StatusOK || r.Error != nil || !strings.Contains(string(r.Result), `"protocolVersion":"2026-07-28"`) {
+				t.Fatalf("discover: %d %s", resp.StatusCode, body)
+			}
+			if len(reused) != 2 || !reused[1] {
+				t.Fatalf("connection reuse = %v, want discover on initialize's connection", reused)
+			}
+		})
 	}
+}
+
+func TestInitializeEmptyVersionRejected(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "a1")
+	for _, absent := range []bool{true, false} {
+		req := initialize(1, "")
+		if absent {
+			delete(req["params"].(map[string]any), "protocolVersion")
+		}
+		resp, body := do(t, env, call{secret: secret, body: req,
+			headers: map[string]string{"Accept": "application/json, text/event-stream"}})
+		r := decodeRPC(t, body)
+		if resp.StatusCode != http.StatusOK || r.Error == nil || r.Error.Code != -32602 {
+			t.Fatalf("absent=%v: initialize: %d %s", absent, resp.StatusCode, body)
+		}
+		if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+			t.Fatalf("absent=%v: rejected initialize minted session %q", absent, sid)
+		}
+		var data struct {
+			SupportedVersions []string `json:"supportedVersions"`
+		}
+		if err := json.Unmarshal(r.Error.Data, &data); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(data.SupportedVersions, mcpserver.SupportedVersions) {
+			t.Fatalf("supportedVersions = %v, want %v", data.SupportedVersions, mcpserver.SupportedVersions)
+		}
+	}
+}
+
+func TestCurrentResultsCarryResultType(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "a1")
+	for _, method := range []string{"server/discover", "tools/list", "tools/call", "events/list"} {
+		t.Run(method, func(t *testing.T) {
+			req := map[string]any{"jsonrpc": "2.0", "id": 1, "method": method}
+			switch method {
+			case "server/discover":
+				req = discover(1, "protocolVersion", mcpserver.ProtoCurrent)
+			case "tools/call":
+				req["params"] = map[string]any{"name": "vecnet_peers", "arguments": map[string]any{}}
+			}
+			resp, body := do(t, env, call{secret: secret, headers: modern(), body: req})
+			r := decodeRPC(t, body)
+			if resp.StatusCode != http.StatusOK || r.Error != nil {
+				t.Fatalf("%s: %d %s", method, resp.StatusCode, body)
+			}
+			var result map[string]any
+			if err := json.Unmarshal(r.Result, &result); err != nil {
+				t.Fatal(err)
+			}
+			if result["resultType"] != "complete" {
+				t.Errorf("resultType = %v, want complete", result["resultType"])
+			}
+			meta, _ := result["_meta"].(map[string]any)
+			info, _ := meta["io.modelcontextprotocol/serverInfo"].(map[string]any)
+			if info["name"] != "vecnet" {
+				t.Errorf("_meta serverInfo.name = %v, want vecnet", info["name"])
+			}
+		})
+	}
+}
+
+func TestLegacyResultsUnchanged(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "a1")
+	sid := legacySession(t, env, secret)
+	for _, method := range []string{"tools/list", "tools/call"} {
+		t.Run(method, func(t *testing.T) {
+			req := map[string]any{"jsonrpc": "2.0", "id": 2, "method": method}
+			if method == "tools/call" {
+				req["params"] = map[string]any{"name": "vecnet_peers", "arguments": map[string]any{}}
+			}
+			resp, body := do(t, env, call{secret: secret, headers: map[string]string{
+				"Mcp-Session-Id": sid, "Accept": "application/json, text/event-stream",
+			}, body: req})
+			r := decodeRPC(t, body)
+			if resp.StatusCode != http.StatusOK || r.Error != nil {
+				t.Fatalf("%s: %d %s", method, resp.StatusCode, body)
+			}
+			var result map[string]any
+			if err := json.Unmarshal(r.Result, &result); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := result["resultType"]; ok {
+				t.Fatalf("legacy result has resultType: %s", r.Result)
+			}
+			if _, ok := result["_meta"]; ok {
+				t.Fatalf("legacy result has _meta: %s", r.Result)
+			}
+		})
+	}
+}
+
+func TestCurrentResultPreservesHandlerMetadata(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "a1")
+	srv, front := ownFront(t, env)
+	meta := map[string]any{
+		"example/trace":                      "retained",
+		"io.modelcontextprotocol/serverInfo": map[string]any{"name": "stale"},
+	}
+	srv.Register("test/metadata", func(context.Context, *mcpserver.Session, *mcpserver.Request) (any, error) {
+		return map[string]any{"_meta": meta, "value": int64(9007199254740993)}, nil
+	})
+	resp, body := do(t, front, call{secret: secret, headers: modern(),
+		body: map[string]any{"jsonrpc": "2.0", "id": 1, "method": "test/metadata"}})
 	r := decodeRPC(t, body)
-	if r.Error == nil || r.Error.Code != -32602 {
-		t.Fatalf("error = %+v, want -32602", r.Error)
+	if resp.StatusCode != http.StatusOK || r.Error != nil {
+		t.Fatalf("metadata result: %d %s", resp.StatusCode, body)
 	}
-	var data struct {
-		SupportedVersions []string `json:"supportedVersions"`
+	var result struct {
+		ResultType string                     `json:"resultType"`
+		Meta       map[string]json.RawMessage `json:"_meta"`
+		Value      int64                      `json:"value"`
 	}
-	if err := json.Unmarshal(r.Error.Data, &data); err != nil {
-		t.Fatalf("data %s: %v", r.Error.Data, err)
+	if err := json.Unmarshal(r.Result, &result); err != nil {
+		t.Fatal(err)
 	}
-	if want := []string{"2026-07-28", "2025-11-25"}; !reflect.DeepEqual(data.SupportedVersions, want) {
-		t.Fatalf("supportedVersions = %v, want %v", data.SupportedVersions, want)
+	if result.ResultType != "complete" || result.Value != 9007199254740993 {
+		t.Fatalf("completed result changed payload: %s", r.Result)
 	}
+	if string(result.Meta["example/trace"]) != `"retained"` {
+		t.Fatalf("handler metadata lost: %s", r.Result)
+	}
+	var info struct{ Name string }
+	if err := json.Unmarshal(result.Meta["io.modelcontextprotocol/serverInfo"], &info); err != nil || info.Name != "vecnet" {
+		t.Fatalf("serverInfo = %s, err %v", result.Meta["io.modelcontextprotocol/serverInfo"], err)
+	}
+	if len(meta) != 2 || meta["io.modelcontextprotocol/serverInfo"].(map[string]any)["name"] != "stale" {
+		t.Fatalf("handler's metadata was mutated: %v", meta)
+	}
+}
 
-	// The client retries with 2026-07-28 server/discover on the same connection.
-	resp, body = do(t, env, call{secret: secret, client: traced, headers: modern(),
-		body: discover(2, "io.modelcontextprotocol/protocolVersion", mcpserver.ProtoCurrent)})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("discover: %d %s", resp.StatusCode, body)
-	}
-	r = decodeRPC(t, body)
-	if r.Error != nil || !strings.Contains(string(r.Result), `"protocolVersion":"2026-07-28"`) {
-		t.Fatalf("discover result %s err %+v", r.Result, r.Error)
-	}
-	if len(reused) != 2 || !reused[1] {
-		t.Fatalf("connection reuse = %v, want the discover on the initialize's connection", reused)
+func TestCurrentErrorsAndStreamsUnchanged(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "a1")
+	srv, front := ownFront(t, env)
+	srv.Register("test/error", func(context.Context, *mcpserver.Session, *mcpserver.Request) (any, error) {
+		return nil, &mcpserver.RPCError{Code: -32602, Message: "invalid test", Data: map[string]any{"reason": "test"}}
+	})
+	srv.Register("test/stream", func(ctx context.Context, _ *mcpserver.Session, _ *mcpserver.Request) (any, error) {
+		w, r, ok := mcpserver.HTTPFromContext(ctx)
+		if !ok {
+			return nil, &mcpserver.RPCError{Code: -32603, Message: "handler has no HTTP context"}
+		}
+		st, err := srv.Stream(w, r)
+		if err != nil {
+			return nil, err
+		}
+		defer st.Close()
+		return nil, st.Send("", "message", map[string]any{"result": map[string]any{"streamed": true}})
+	})
+	for _, tc := range []struct {
+		method string
+		want   string
+	}{
+		{"test/error", "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"invalid test\",\"data\":{\"reason\":\"test\"}}}\n"},
+		{"test/stream", "retry: 3000\n\nevent: message\ndata: {\"result\":{\"streamed\":true}}\n\n"},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			resp, body := do(t, front, call{secret: secret, headers: modern(),
+				body: map[string]any{"jsonrpc": "2.0", "id": 1, "method": tc.method}})
+			if resp.StatusCode != http.StatusOK || string(body) != tc.want {
+				t.Fatalf("response = %d %q, want 200 %q", resp.StatusCode, body, tc.want)
+			}
+		})
 	}
 }
 
@@ -374,6 +586,69 @@ func TestOriginAndAuth(t *testing.T) {
 	}
 	if r := decodeRPC(t, out); r.Error != nil {
 		t.Fatalf("principal discover error %+v", r.Error)
+	}
+}
+
+func TestAllowedOrigins(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "origins")
+	for _, tc := range []struct {
+		name    string
+		origins []string
+		status  int
+	}{
+		{"absent", nil, 200},
+		{"own", []string{env.URL}, 200},
+		{"chatgpt", []string{"https://chatgpt.com"}, 200},
+		{"unlisted", []string{"https://evil.example"}, 403},
+		{"multiple", []string{env.URL, "https://chatgpt.com"}, 403},
+		{"joined", []string{env.URL + " https://chatgpt.com"}, 403},
+		{"null", []string{"null"}, 403},
+		{"empty", []string{""}, 403},
+		{"path", []string{env.URL + "/path"}, 403},
+		{"slash", []string{env.URL + "/"}, 403},
+		{"bracketed IPv4", []string{strings.Replace(env.URL, "127.0.0.1", "[127.0.0.1]", 1)}, 403},
+		{"userinfo", []string{"https://user@chatgpt.com"}, 403},
+		{"query", []string{env.URL + "?query"}, 403},
+		{"fragment", []string{env.URL + "#fragment"}, 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, env.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+secret)
+			req.Header.Set("Content-Type", "application/json")
+			for k, v := range modern() {
+				req.Header.Set(k, v)
+			}
+			for _, v := range tc.origins {
+				req.Header.Add("Origin", v)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.status)
+			}
+		})
+	}
+	for _, origin := range []string{"https://chatgpt.com", "https://evil.example"} {
+		headers := modern()
+		headers["Origin"] = origin
+		resp, body := do(t, env, call{headers: headers, body: discover(1, "protocolVersion", mcpserver.ProtoCurrent)})
+		want := http.StatusForbidden
+		if origin == "https://chatgpt.com" {
+			want = http.StatusUnauthorized
+		}
+		if resp.StatusCode != want {
+			t.Fatalf("anonymous %s: %d %s, want %d", origin, resp.StatusCode, body, want)
+		}
+		if want == http.StatusUnauthorized && !strings.Contains(resp.Header.Get("WWW-Authenticate"), `resource_metadata="`+env.URL+`/.well-known/oauth-protected-resource"`) {
+			t.Fatalf("missing discovery challenge: %v", resp.Header)
+		}
 	}
 }
 
@@ -553,7 +828,7 @@ func TestUnknownMethod(t *testing.T) {
 	_, secret := env.NewPeer("session", "a1")
 	req := map[string]any{"jsonrpc": "2.0", "id": "x1", "method": "no/such/method"}
 	resp, out := do(t, env, call{secret: secret, headers: modern(), body: req})
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("%d %s", resp.StatusCode, out)
 	}
 	r := decodeRPC(t, out)
@@ -675,5 +950,55 @@ func TestNotificationErrorNeverLogsBody(t *testing.T) {
 	}
 	if strings.Contains(got, "private-body-probe") {
 		t.Fatalf("hub log quotes the request body:\n%s", got)
+	}
+}
+
+func TestAllowedOriginsConfig(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "origin config")
+	for _, tc := range []struct {
+		config          string
+		allowed, denied string
+	}{
+		{"", "https://chatgpt.com", "https://client.example"},
+		{"none", env.URL, "https://chatgpt.com"},
+		{" https://client.example , HTTPS://OTHER.EXAMPLE:443 ", "https://other.example", "https://chatgpt.com"},
+		{"http://localhost:8080,https://[::1]:8443", "https://[::1]:8443", "https://[::1]"},
+		{"https://[::1]:8443", "https://[::1]:8443", "https://::1:8443"},
+	} {
+		t.Run(tc.config, func(t *testing.T) {
+			origins, err := mcpserver.ParseAllowedOrigins(tc.config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			env.Configure(func(d *httpapi.Deps) { d.MCPAllowedOrigins = origins })
+			for _, tc := range []struct {
+				origin string
+				status int
+			}{
+				{env.URL, 200}, {tc.allowed, 200}, {tc.denied, 403},
+			} {
+				headers := modern()
+				headers["Origin"] = tc.origin
+				resp, body := do(t, env, call{secret: secret, headers: headers, body: discover(1, "protocolVersion", mcpserver.ProtoCurrent)})
+				if resp.StatusCode != tc.status {
+					t.Errorf("%s: %d %s, want %d", tc.origin, resp.StatusCode, body, tc.status)
+				}
+			}
+		})
+	}
+	for _, config := range []string{
+		"null", "*", "https://*.example", "https://chatgpt.com/", "https://chatgpt.com/path",
+		"https://user@chatgpt.com", "https://chatgpt.com?", "https://chatgpt.com#", "https://chatgpt.com?x=1",
+		"https://chatgpt.com#frag", "chatgpt.com", "ftp://chatgpt.com", "https://", "https://chatgpt.com:",
+		"https://chatgpt.com:0", "https://chatgpt.com:65536", "https://chatgpt.com:bad", "https://[bogus]:443",
+		"https://[127.0.0.1]", "https://::1:443", "https://2001:db8::1:443",
+		"https://a..example", "https://-bad.example", "https://bad_.example", ",", "https://chatgpt.com,", "none,https://chatgpt.com",
+	} {
+		t.Run("invalid/"+config, func(t *testing.T) {
+			if _, err := mcpserver.ParseAllowedOrigins(config); err == nil {
+				t.Fatalf("accepted malformed config %q", config)
+			}
+		})
 	}
 }

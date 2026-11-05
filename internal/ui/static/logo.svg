@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="6 10.5 78 78" fill="none">
+<!-- The vecnet mark without its tile, cropped: the .logo brand mark (base.css). favicon.svg is the same mark on a dark tile. -->
+<defs>
+<linearGradient id="vn-logo-l" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0" stop-color="#00F0FF" stop-opacity=".9"/><stop offset="1" stop-color="#00F0FF" stop-opacity=".3"/></linearGradient>
+<linearGradient id="vn-logo-r" x1="100%" y1="0%" x2="0%" y2="100%"><stop offset="0" stop-color="#7F00FF" stop-opacity=".9"/><stop offset="1" stop-color="#7F00FF" stop-opacity=".3"/></linearGradient>
+<filter id="vn-logo-glow" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="0" stdDeviation="3" flood-color="#00F0FF" flood-opacity=".4"/></filter>
+</defs>
+<g transform="rotate(-12 50 50) scale(-1 1) translate(-100 0)" filter="url(#vn-logo-glow)">
+<path d="M25 25 50 80 45 35Z" fill="url(#vn-logo-l)"/>
+<path d="M25 25 50 80" stroke="url(#vn-logo-l)" stroke-width="4" stroke-linecap="round"/>
+<path d="M75 25 50 80 55 35Z" fill="url(#vn-logo-r)"/>
+<path d="M75 25 50 80" stroke="url(#vn-logo-r)" stroke-width="4" stroke-linecap="round"/>
+<g stroke="#fff"><path d="M25 25 50 80M75 25 50 80" stroke-width=".5" stroke-opacity=".8"/><path d="M45 35 50 80M55 35 50 80" stroke-width=".2" stroke-opacity=".4"/></g>
+</g>
+</svg>

@@ -337,3 +337,20 @@ func TestGuideCommand(t *testing.T) {
 		t.Fatalf("guide extra: %d", code)
 	}
 }
+
+// The guide teaches MCP first, with the CLI as the fallback.
+func TestGuideNamesMCPTools(t *testing.T) {
+	lookup := func(name string) (Profile, bool) {
+		return Profile{Hub: "https://vecnet.example.net/", PeerID: "peer_01TESTGUIDE"}, name == "scout"
+	}
+	g := renderGuide("scout", lookup)
+	for _, s := range []string{"mcp__vecnet-scout__vecnet_reply", "vecnet --net scout mcp", "vecnet hook install --profile scout --mcp --write", "vecnet --net scout inbox"} {
+		if !strings.Contains(g, s) {
+			t.Errorf("guide lacks %q", s)
+		}
+	}
+	// MCP is named before the everyday CLI commands it replaces.
+	if m, c := strings.Index(g, "mcp__vecnet-scout__vecnet_reply"), strings.Index(g, "## 2. Everyday"); m < 0 || m > c {
+		t.Errorf("MCP tools are not named before the CLI section: %d %d", m, c)
+	}
+}

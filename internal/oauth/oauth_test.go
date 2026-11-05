@@ -276,6 +276,72 @@ func linkCode(t *testing.T, env *testhub.Env, peer string) string {
 	return out.Code
 }
 
+func TestAuthorizeRedirectCarriesIss(t *testing.T) {
+	for _, action := range []string{"approve", "deny", "invalid scope"} {
+		t.Run(action, func(t *testing.T) {
+			env := testhub.Start(t)
+			b := newBrowser(t, env)
+			q := b.query(verifierA)
+			if action == "invalid scope" {
+				q.Set("scope", "other")
+			}
+			resp, body := b.authorize(q)
+			if action != "invalid scope" {
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("authorize: %d %s", resp.StatusCode, body)
+				}
+				request := sealedRequest(t, body)
+				if action == "approve" {
+					peer := newDot(t, env, "iss-dot")
+					resp, body = b.consent(request, linkCode(t, env, peer))
+				} else {
+					resp, body = postForm(t, env, "/oauth/authorize", url.Values{"request": {request}}, nil)
+				}
+			}
+			if resp.StatusCode != http.StatusFound {
+				t.Fatalf("redirect: %d %s", resp.StatusCode, body)
+			}
+			loc, err := url.Parse(resp.Header.Get("Location"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			query := loc.Query()
+			if query.Get("iss") != env.OAuth.Issuer || query.Get("state") != "st-123" {
+				t.Errorf("redirect iss/state = %v, want iss %s and state st-123", query, env.OAuth.Issuer)
+			}
+			switch action {
+			case "approve":
+				if query.Get("code") == "" || query.Get("error") != "" {
+					t.Fatalf("approve redirect = %v", query)
+				}
+			case "deny":
+				if query.Get("error") != "access_denied" || query.Get("code") != "" {
+					t.Fatalf("deny redirect = %v", query)
+				}
+			case "invalid scope":
+				if query.Get("error") != "invalid_scope" || query.Get("code") != "" {
+					t.Fatalf("scope redirect = %v", query)
+				}
+			}
+		})
+	}
+}
+
+func TestASMetadataAdvertisesIss(t *testing.T) {
+	env := testhub.Start(t)
+	resp, body := env.Do("", "GET", "/.well-known/oauth-authorization-server", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("metadata: %d %s", resp.StatusCode, body)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(body, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["authorization_response_iss_parameter_supported"] != true {
+		t.Fatalf("authorization_response_iss_parameter_supported = %v, want true", metadata["authorization_response_iss_parameter_supported"])
+	}
+}
+
 // login runs the whole first-login flow and returns the browser, its peer
 // and a fresh token pair.
 func login(t *testing.T, env *testhub.Env) (*browser, string, tokens) {
@@ -410,7 +476,7 @@ func TestMetadataDocuments(t *testing.T) {
 		!slices.Equal(as.GrantTypes, []string{"authorization_code", "refresh_token"}) ||
 		!slices.Equal(as.ChallengeMethods, []string{"S256"}) ||
 		!slices.Equal(as.AuthMethods, []string{"none"}) ||
-		!slices.Equal(as.Scopes, []string{"vecnet"}) || !as.CIMD {
+		!slices.Equal(as.Scopes, strings.Fields(oauth.AuthorizationScopes)) || !as.CIMD {
 		t.Fatalf("AS capabilities: %s", body)
 	}
 
@@ -431,7 +497,7 @@ func TestMetadataDocuments(t *testing.T) {
 			t.Fatalf("resource metadata %s: %v", body, err)
 		}
 		if rs.Resource != env.URL+"/mcp" || !slices.Equal(rs.AS, []string{env.URL}) ||
-			!slices.Equal(rs.Scopes, []string{"vecnet"}) || !slices.Equal(rs.Bearer, []string{"header"}) {
+			!slices.Equal(rs.Scopes, strings.Fields(oauth.AuthorizationScopes)) || !slices.Equal(rs.Bearer, []string{"header"}) {
 			t.Fatalf("resource metadata: %s", body)
 		}
 	}
@@ -489,7 +555,7 @@ func TestDCRAndFullCodeFlow(t *testing.T) {
 		t.Fatalf("exchange: %d %s", got.status, got.Error)
 	}
 	if !strings.HasPrefix(got.AccessToken, "vat_") || !strings.HasPrefix(got.RefreshToken, "vrt_") ||
-		got.TokenType != "Bearer" || got.ExpiresIn != 3600 || got.Scope != "vecnet" {
+		got.TokenType != "Bearer" || got.ExpiresIn != 3600 || got.Scope != oauth.AuthorizationScopes {
 		t.Fatalf("token response: %+v", got)
 	}
 	if got.header.Get("Cache-Control") != "no-store" {
@@ -570,7 +636,7 @@ func TestRefreshRotation(t *testing.T) {
 	}
 	if second.AccessToken == first.AccessToken || second.RefreshToken == first.RefreshToken ||
 		!strings.HasPrefix(second.AccessToken, "vat_") || !strings.HasPrefix(second.RefreshToken, "vrt_") ||
-		second.ExpiresIn != 3600 || second.Scope != "vecnet" {
+		second.ExpiresIn != 3600 || second.Scope != oauth.AuthorizationScopes {
 		t.Fatalf("refresh response: %+v (first %+v)", second, first)
 	}
 	if second.header.Get("Cache-Control") != "no-store" {
@@ -735,6 +801,13 @@ func TestCIMD(t *testing.T) {
 		"/liar.json":   `{"client_id":"https://elsewhere.example/x.json","redirect_uris":["` + chatgptRedirect + `"]}`,
 		"/secret.json": `{"client_id":"{self}","token_endpoint_auth_method":"client_secret_basic","redirect_uris":["` + chatgptRedirect + `"]}`,
 		"/notjson":     `<html>`,
+		// ChatGPT's real document (2026-11-05): it prefers private_key_jwt but
+		// also lists none, the only method this hub advertises.
+		"/chatgpt.json": `{"client_id":"{self}","client_uri":"https://chatgpt.com/","redirect_uris":["` + chatgptRedirect + `"],` +
+			`"token_endpoint_auth_method":"private_key_jwt","token_endpoint_auth_methods_supported":["none","private_key_jwt"],` +
+			`"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"client_name":"ChatGPT",` +
+			`"token_endpoint_auth_signing_alg":"RS256","jwks_uri":"https://chatgpt.com/oauth/jwks.json"}`,
+		"/pkjwt.json": `{"client_id":"{self}","token_endpoint_auth_method":"private_key_jwt","token_endpoint_auth_methods_supported":["private_key_jwt"],"redirect_uris":["` + chatgptRedirect + `"]}`,
 	})
 
 	b := &browser{t: t, env: env, client: srv.URL + "/good.json", redirect: chatgptRedirect}
@@ -766,7 +839,22 @@ func TestCIMD(t *testing.T) {
 		t.Fatalf("CIMD exchange: %d %s", got.status, got.Error)
 	}
 
-	for _, path := range []string{"/other.json", "/liar.json", "/secret.json", "/notjson", "/missing.json"} {
+	// A document that prefers client authentication but accepts none is a
+	// public client here; the whole flow works and it is stored as "none".
+	cg := &browser{t: t, env: env, client: srv.URL + "/chatgpt.json", redirect: chatgptRedirect}
+	if resp, page := cg.authorize(cg.query(verifierA)); resp.StatusCode != http.StatusOK || !strings.Contains(page, `name="link_code"`) {
+		t.Fatalf("authorize with ChatGPT's document: %d\n%s", resp.StatusCode, page)
+	}
+	if got := cg.exchange(cg.code(verifierA, linkCode(t, env, newDot(t, env, "chatgpt-dot"))), verifierA); got.status != http.StatusOK {
+		t.Fatalf("ChatGPT document exchange: %d %s", got.status, got.Error)
+	}
+	var meta string
+	if err := env.Hub.DB.QueryRow(`SELECT metadata FROM oauth_clients WHERE client_id = ?`, srv.URL+"/chatgpt.json").Scan(&meta); err != nil ||
+		!strings.Contains(meta, `"token_endpoint_auth_method":"none"`) {
+		t.Fatalf("stored ChatGPT client metadata = %s (%v), want auth method none", meta, err)
+	}
+
+	for _, path := range []string{"/other.json", "/liar.json", "/secret.json", "/pkjwt.json", "/notjson", "/missing.json"} {
 		x := &browser{t: t, env: env, client: srv.URL + path, redirect: chatgptRedirect}
 		resp, page := x.authorize(x.query(verifierA))
 		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(page, "invalid_request") {
@@ -1775,5 +1863,53 @@ func TestCIMDRefreshReuseNeverRecordsClientURL(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), secret) || !strings.Contains(logs.String(), "token reuse") {
 		t.Fatalf("reuse log names the client URL or is missing:\n%s", logs.String())
+	}
+}
+
+// A Cursor-hosted Grok Bot can complete DCR + PKCE using its own peer kind.
+func TestGrokbotOAuthLink(t *testing.T) {
+	env := testhub.Start(t)
+	peer, oldBearer := env.NewPeer("grokbot", "oauth-grok")
+	redirect := "https://www.cursor.com/agents/mcp/oauth/callback"
+	b := &browser{t: t, env: env, client: register(t, env, redirect), redirect: redirect}
+	tok := b.exchange(b.code(verifierA, linkCode(t, env, peer)), verifierA)
+	if tok.status != http.StatusOK {
+		t.Fatalf("exchange: HTTP %d", tok.status)
+	}
+	me := tool(t, env, tok.AccessToken, "vecnet_whoami", map[string]any{})
+	if me["kind"] != "peer" || me["id"] != peer || me["peer_id"] != peer {
+		t.Fatalf("wrong linked identity: %v", me)
+	}
+	guide := tool(t, env, tok.AccessToken, "vecnet_guide", map[string]any{})
+	text, _ := guide["text"].(string)
+	if guide["caller_kind"] != "grokbot" || !strings.Contains(text, "webhook-triggered Grok Bot routine") {
+		t.Fatal("wrong Grok Bot guide")
+	}
+	for _, forbidden := range []string{"ChatGPT", "Work chat", "Cloud", "Rescan"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("Grok Bot guide contains %q", forbidden)
+		}
+	}
+	// Binding revokes the previous bearer just as it does for dots.
+	if resp, _ := env.Do(oldBearer, "GET", "/v1/peers/me", nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old bearer: HTTP %d", resp.StatusCode)
+	}
+	// The normal OAuth inbox and send handlers retain their existing semantics.
+	recipient, _ := env.NewPeer("session", "grok-recipient")
+	sendAs(t, env, tok.AccessToken, "grok-oauth-send", recipient)
+	tool(t, env, tok.AccessToken, "vecnet_inbox", map[string]any{})
+	fresh := b.refresh(tok.RefreshToken)
+	if fresh.status != http.StatusOK {
+		t.Fatalf("refresh: HTTP %d", fresh.status)
+	}
+	me = tool(t, env, fresh.AccessToken, "vecnet_whoami", map[string]any{})
+	if me["id"] != peer {
+		t.Fatal("refresh changed linked identity")
+	}
+	if err := env.Hub.SetPeerDisabled(context.Background(), peer, true); err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := discover(t, env, fresh.AccessToken); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("disabled OAuth peer: HTTP %d", resp.StatusCode)
 	}
 }

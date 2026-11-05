@@ -4,7 +4,7 @@
 // participant). Peer-supplied strings become text through h(). Ages use the
 // hub clock.
 import { chip, copyButton, h, idCopy, idText, peerLink } from './dom.js';
-import { ago, fullWhen, plural, title as threadTitle, when } from './format.js';
+import { ago, fullWhen, kindShort, kindTitle, plural, title as threadTitle, when } from './format.js';
 import { findPeer, peerFacts, peerHealth, peerRoutes, peerSubs, peerThreads, principalFacts, scopeTarget } from './peer-model.js';
 import { chip as subChip, expiresIn } from './subs-model.js';
 
@@ -17,6 +17,7 @@ function failure(label, err) {
   return h('div', { class: 'empty error' }, h('b', { text: label + ' unavailable' }), errText(err));
 }
 function none(text) { return h('p', { class: 'none', text }); }
+function kindPill(k) { return h('span', { class: 'pill', title: k ? kindTitle(k) : null }, h('i', { class: 'kd k-' + k }), k ? kindShort(k) : 'unknown'); }
 function table(heads, rows) {
   return h('table', null,
     h('thead', null, h('tr', null, heads.map(t => h('th', { text: t })))),
@@ -112,7 +113,7 @@ export function mount(root, ctx) {
     head.className = 'pv-head' + (f.disabled ? ' off' : '');
     head.replaceChildren(...[
       h('h1', null, h('span', { class: 'nm', text: f.name || '(no name)' }),
-        h('span', { class: 'pill' }, h('i', { class: 'kd k-' + f.kind }), f.kind || 'unknown'),
+        kindPill(f.kind),
         f.disabled ? chip('disabled', 'bad') : null),
       h('div', { class: 'pv-id' }, h('span', { class: 'mono pid', text: f.id }), copyButton(f.id, 'peer id')),
       f.disabled ? h('p', { class: 'note bad', text: 'Disabled: this peer cannot use the hub until an operator enables it.' }) : null,
@@ -138,7 +139,7 @@ export function mount(root, ctx) {
     if (!f) return [none('No peer row.')];
     return [kv([
       ['Peer id', idCopy(f.id, 'peer id')],
-      ['Kind', h('span', { class: 'pill' }, h('i', { class: 'kd k-' + f.kind }), f.kind || 'unknown')],
+      ['Kind', kindPill(f.kind)],
       ['Principal', principalCell(f.principalId)],
       ['Created by', createdByCell(f.createdBy)],
       ['Enrolled', time(f.enrolled)],
@@ -195,7 +196,7 @@ export function mount(root, ctx) {
       ['Principal id', idCopy(p.id, 'principal id')],
       ['Peers it created', (p.active ?? 0) + ' active · ' + (p.disabled ?? 0) + ' disabled'],
       ['Create limits', 'max ' + dash(p.maxPeers) + ' peers · ' + dash(p.createsPerHour) + ' / hour (' + dash(p.createsLastHour) + ' in the last hour)'],
-      ['Kinds it may create', p.kinds.length ? h('span', { class: 'chips' }, p.kinds.map(k => chip(k))) : '—'],
+      ['Kinds it may create', p.kinds.length ? h('span', { class: 'chips' }, p.kinds.map(k => h('span', { class: 'chip', text: kindShort(k), title: kindTitle(k) }))) : '—'],
       ['Default allow', p.defaultAllow.length ? scopeList(p.defaultAllow) : '—'],
       ['Default deny', p.defaultDeny.length ? scopeList(p.defaultDeny) : '—'],
     ])];

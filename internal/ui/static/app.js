@@ -10,10 +10,12 @@ import { createActivity } from './activity.js';
 import { createApi } from './api.js';
 import { avatarHash, createAvatarCache } from './avatar-model.js';
 import * as compose from './compose.js';
+import { connectionState } from './connection-model.js';
 import * as dash from './dash.js';
 import { h, peerLink, toast } from './dom.js';
 import { short } from './format.js';
 import * as inbox from './inbox.js';
+import { closeInvite, openInvite } from './invite.js';
 import * as matrix from './matrix.js';
 import { peerHref } from './peer-model.js';
 import * as peer from './peer.js';
@@ -25,7 +27,7 @@ import * as thread from './thread.js';
 
 const SECRET_KEY = 'vecnet.ui.secret';
 const PEERS_REFRESH = 60000;
-const CONN_CLASS = { live: 'live', offline: 'off', stopped: 'off' };
+const CONN_CLASS = { live: 'live', reconnecting: 'retry', stopped: 'off' };
 const $ = id => document.getElementById(id);
 
 const SCREENS = {
@@ -73,6 +75,7 @@ function renderNav(s, route) {
   $('nav-inbox').className = route.name === 'inbox' ? 'on' : '';
   $('nav-new').className = route.name === 'new' ? 'on' : '';
   $('nav-dash').className = route.name === 'dash' ? 'on' : '';
+  $('nav-add').disabled = !s.ctx; // the invite needs the session's api
   const now = s.store.hubNow(), mineRes = s.mine;
   const yours = yourThreads({
     page: mineRes && mineRes.get(), summaries: s.threads.get() ? threads : null,
@@ -118,8 +121,8 @@ function peopleLinks(r, nameOf) {
   return [...shown.flatMap((id, i) => [i ? ', ' : '', peerLink(id, nameOf(id), { nested: true })]), ids.length > shown.length ? ' +' + (ids.length - shown.length) : ''];
 }
 
-function renderConn(store) {
-  const state = store.conn();
+function renderConn(store, activity) {
+  const state = connectionState(store.conn(), activity.conn());
   $('conn').className = 'conn ' + (CONN_CLASS[state] || '');
   $('conn').lastElementChild.textContent = state;
 }
@@ -182,6 +185,7 @@ function start(secret) {
     me: '', ctx: null, mounted: '', matrixHash: '', unmount: () => {}, offs: [],
     close() {
       stop.abort();
+      closeInvite(); // a shown token goes with the session
       this.unmount();
       for (const off of this.offs) if (typeof off === 'function') off();
       avatars.release();
@@ -223,9 +227,10 @@ function start(secret) {
   $('app').hidden = false;
   $('hubname').textContent = location.host;
   $('view').replaceChildren(h('div', { class: 'loading', text: 'Connecting to the hub…' }));
-  renderConn(store);
+  renderConn(store, activity);
   s.offs.push(
-    store.onConn(() => renderConn(store)),
+    store.onConn(() => renderConn(store, activity)),
+    activity.onConn(() => renderConn(store, activity)),
     threads.subscribe(redraw),
     inboxHead.subscribe(redraw),
     peers.subscribe(redraw),
@@ -269,6 +274,13 @@ $('login-form').addEventListener('submit', e => {
   if (secret) signIn(secret);
 });
 $('signout').addEventListener('click', () => signOut(''));
+// Add agent from any view: the invite dialog opens over the current screen,
+// which stays mounted. A created peer reloads the shared directory; the
+// dashboard follows the hub's directory_updated event.
+$('nav-add').addEventListener('click', e => {
+  const s = session;
+  if (s && s.ctx) openInvite(s.ctx, () => s.ctx.peers.reload(), e.currentTarget);
+});
 window.addEventListener('hashchange', () => { if (session) renderRoute(session); });
 // A peer named inside another link (an inbox row, a sidebar row) is a span
 // with data-peer: a plain click on it opens the peer instead of the row.

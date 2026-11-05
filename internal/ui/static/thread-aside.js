@@ -4,7 +4,7 @@
 // through api.blob, so the bearer never enters a URL (§2, §2.7).
 import { budgetBar, fileRows, participantEntry, presenceLabel, reachLabel, THREAD_BUDGET } from './aside-model.js';
 import { h, idCopy, peerLink } from './dom.js';
-import { when } from './format.js';
+import { kindShort, kindTitle, when } from './format.js';
 
 // Long enough for the browser to take the object URL into its download.
 const REVOKE_AFTER = 1000;
@@ -48,7 +48,7 @@ export function mountAside(root, ctx) {
         h('span', { class: 'nm' }, peerLink(id, nameOf(id)), id === me ? ' (you)' : null),
         h('span', { class: 'sub', text: pres + ' · ' + reach })),
       e && e.disabled ? h('span', { class: 'chip bad', text: 'disabled' }) : null,
-      h('span', { class: 'k', text: kindOf(id) }));
+      h('span', { class: 'k', text: kindShort(kindOf(id)), title: kindTitle(kindOf(id)) }));
   }
 
   async function download(f) {

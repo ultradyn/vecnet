@@ -23,12 +23,12 @@ type sseConn struct {
 	rc     *http.ResponseController
 	stall  time.Duration
 	frames chan []byte
-	stop   chan struct{} // closed by close
 	done   chan struct{} // closed when the writer goroutine exits
 	once   sync.Once
 
 	dmu    sync.Mutex // orders the writer's deadlines with close's
-	closed bool
+	closed bool       // close owns the write deadline while draining
+	final  []byte
 }
 
 // sseWriteTimeout bounds one frame's write and flush. The server's
@@ -43,6 +43,28 @@ const sseWriteTimeout = 30 * time.Second
 func holdOpen(rc *http.ResponseController, write time.Time) {
 	_ = rc.SetReadDeadline(time.Time{})
 	_ = rc.SetWriteDeadline(write)
+}
+
+// drainWritesOnStop shortens a long poll's write deadline on shutdown, even
+// when it has already left its wait and is blocked writing JSON. Join the
+// watcher before returning the handler so it cannot touch a reused connection.
+func drainWritesOnStop(rc *http.ResponseController, stop <-chan struct{}) func() {
+	if stop == nil {
+		return func() {}
+	}
+	finished, joined := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(joined)
+		select {
+		case <-stop:
+			_ = rc.SetWriteDeadline(time.Now().Add(streamDrainTimeout))
+		case <-finished:
+		}
+	}()
+	return func() {
+		close(finished)
+		<-joined
+	}
 }
 
 // startSSE writes the SSE response headers (PROTOCOL §2.3) and starts the
@@ -62,36 +84,35 @@ func startSSE(w http.ResponseWriter, stall time.Duration) *sseConn {
 		rc:     rc,
 		stall:  stall,
 		frames: make(chan []byte, sseBuffer),
-		stop:   make(chan struct{}),
 		done:   make(chan struct{}),
 	}
 	go c.writer()
 	return c
 }
 
-// writer writes and flushes each frame until close or a write error.
+// writer drains queued frames and the optional final frame before returning.
 func (c *sseConn) writer() {
 	defer close(c.done)
-	for {
-		select {
-		case <-c.stop:
+	for f := range c.frames {
+		if !c.write(f) {
 			return
-		case f := <-c.frames:
-			c.dmu.Lock()
-			if c.closed {
-				c.dmu.Unlock()
-				return
-			}
-			_ = c.rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
-			c.dmu.Unlock()
-			if _, err := c.w.Write(f); err != nil {
-				return
-			}
-			if err := c.rc.Flush(); err != nil {
-				return
-			}
 		}
 	}
+	if len(c.final) > 0 {
+		c.write(c.final)
+	}
+}
+
+func (c *sseConn) write(frame []byte) bool {
+	c.dmu.Lock()
+	if !c.closed {
+		_ = c.rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+	}
+	c.dmu.Unlock()
+	if _, err := c.w.Write(frame); err != nil {
+		return false
+	}
+	return c.rc.Flush() == nil
 }
 
 // send queues one frame, waiting while the queue is full. It reports false
@@ -125,16 +146,46 @@ func (c *sseConn) send(ctx context.Context, frame []byte) bool {
 // failed is closed when the writer stops on a write error.
 func (c *sseConn) failed() <-chan struct{} { return c.done }
 
-// close stops the writer and waits for it. A write stuck on a connection
-// whose peer stopped reading is cut by a write deadline in the past, which
-// also makes net/http drop the connection rather than reuse it.
-func (c *sseConn) close() {
+// streamDrainTimeout leaves ample time inside the hub's 10 s shutdown grace
+// for net/http to finish the response and for the store to close.
+const streamDrainTimeout = time.Second
+
+// close drains healthy writers before returning. An expired deadline at handler
+// return prevents net/http from writing its chunk terminator / HTTP2 END_STREAM,
+// so always lift it after the writer has exited.
+func (c *sseConn) close() { c.finish(nil) }
+
+func (c *sseConn) closeForShutdown(ctx context.Context, stop <-chan struct{}) {
+	if ctx.Err() == nil {
+		select {
+		case <-stop:
+			// No id: the restart hint must not advance the delivery cursor.
+			c.finish([]byte("event: hub_restarting\nretry: 1000\ndata: {\"retry_after_ms\":1000}\n\n"))
+			return
+		default:
+		}
+	}
+	c.close()
+}
+
+func (c *sseConn) finish(final []byte) {
 	c.once.Do(func() {
-		close(c.stop)
 		c.dmu.Lock()
 		c.closed = true
-		_ = c.rc.SetWriteDeadline(time.Now())
+		c.final = final
+		_ = c.rc.SetWriteDeadline(time.Now().Add(streamDrainTimeout))
 		c.dmu.Unlock()
-		<-c.done
+		close(c.frames)
+		timer := time.NewTimer(streamDrainTimeout)
+		defer timer.Stop()
+		select {
+		case <-c.done:
+		case <-timer.C:
+			// Also interrupts writers whose deadline support needs an explicit
+			// expired deadline, rather than its own timer.
+			_ = c.rc.SetWriteDeadline(time.Now())
+			<-c.done
+		}
+		_ = c.rc.SetWriteDeadline(time.Time{})
 	})
 }

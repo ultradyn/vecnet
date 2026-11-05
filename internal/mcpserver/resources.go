@@ -211,6 +211,10 @@ func (s *Server) resourcesRead(ctx context.Context, sess *Session, req *Request)
 	if err != nil {
 		return nil, err
 	}
+	// Like vecnet_inbox, an MCP read carries no blob_url token (§4.3).
+	if evs, err = withoutBlobURLs(evs); err != nil {
+		return nil, err
+	}
 	text, err := json.Marshal(map[string]any{"events": evs, "next_cursor": next})
 	if err != nil {
 		return nil, err
@@ -280,7 +284,7 @@ func methodNotInEra(method string) *RPCError {
 }
 
 func (s *Server) resourcesSubscribe(ctx context.Context, sess *Session, req *Request) (any, error) {
-	if sess.Proto != ProtoLegacy {
+	if sess.Proto == ProtoCurrent {
 		return nil, methodNotInEra(req.Method) // 2026-07-28: subscriptions/listen
 	}
 	uri, err := uriParam(req)
@@ -339,7 +343,7 @@ func (s *Server) resourcesSubscribe(ctx context.Context, sess *Session, req *Req
 }
 
 func (s *Server) resourcesUnsubscribe(ctx context.Context, sess *Session, req *Request) (any, error) {
-	if sess.Proto != ProtoLegacy {
+	if sess.Proto == ProtoCurrent {
 		return nil, methodNotInEra(req.Method) // 2026-07-28: subscriptions/listen
 	}
 	uri, err := uriParam(req)

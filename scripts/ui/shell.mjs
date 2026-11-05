@@ -1,5 +1,6 @@
-// Task 7: sign-in, the shell, the event pump and reply, in a real browser.
-import { assert, cleanBuild, withDemo } from './lib.mjs';
+// Task 7: sign-in, the shell, the event pump and reply, in a real browser;
+// also the favicon set and brand mark.
+import { assert, cleanBuild, shotPath, withDemo } from './lib.mjs';
 
 const OPERATOR_INBOX = { name: 'Operator inbox', exact: true };
 
@@ -14,6 +15,32 @@ try {
 
     await page.getByRole('heading', OPERATOR_INBOX).waitFor();
     await shot('07-shell-initial');
+
+    // The favicon set: linked (SVG first choice, PNG fallbacks), served as
+    // images, the brand mark on the card, and each rendered at tab sizes on
+    // a dark and a light tab strip, plus the home-screen tile.
+    const icons = await page.locator('link[rel=icon], link[rel=apple-touch-icon]').evaluateAll(ls => ls.map(l => ({ rel: l.rel, href: l.href, sizes: l.getAttribute('sizes') || '' })));
+    assert(icons.map(i => `${i.rel}:${i.href.split('/').pop()}:${i.sizes}`).join() === 'icon:favicon-32.png:32x32,icon:favicon.svg:,apple-touch-icon:apple-touch-icon.png:180x180', `icon links ${JSON.stringify(icons)}`);
+    for (const i of icons) {
+      const r = await fetch(i.href);
+      const want = i.href.endsWith('.svg') ? 'image/svg+xml' : 'image/png';
+      assert(r.ok && r.headers.get('content-type') === want, `${i.href}: ${r.status} ${r.headers.get('content-type')}`);
+    }
+    assert(/logo\.svg/.test(await page.locator('#login .logo').evaluate(el => getComputedStyle(el).backgroundImage)), 'the brand mark is not the logo');
+    const sheet = await page.context().newPage();
+    try {
+      const u = name => `${demo.url}/ui/${name}`;
+      const tab = (bg, fg) => `<div class="tab" style="background:${bg};color:${fg}">` +
+        ['favicon.svg', 'favicon-32.png'].map(n => `<span><img src="${u(n)}" width="16" height="16">vecnet · operator inbox</span>`).join('') +
+        `<span><img src="${u('favicon.svg')}" width="32" height="32"><img src="${u('favicon-32.png')}" width="32" height="32"></span></div>`;
+      await sheet.setContent(`<body style="margin:0;font:12px system-ui,sans-serif"><div id="sheet" style="display:inline-flex;gap:18px;align-items:center;padding:18px;background:#0b0f19">` +
+        `<div style="display:flex;flex-direction:column;gap:10px">${tab('#202124', '#e8eaed')}${tab('#dee1e6', '#3c4043')}</div>` +
+        `<img src="${u('apple-touch-icon.png')}" width="90" height="90" style="border-radius:20px">` +
+        `<img src="${u('favicon.svg')}" width="128" height="128"></div>` +
+        `<style>.tab{display:flex;gap:16px;align-items:center;padding:8px 12px;border-radius:8px}.tab span{display:flex;gap:8px;align-items:center}</style></body>`);
+      await sheet.waitForFunction(() => [...document.images].every(i => i.complete && i.naturalWidth > 0));
+      await sheet.locator('#sheet').screenshot({ path: await shotPath('07-shell-favicon') });
+    } finally { await sheet.close(); }
 
     // A wrong secret stays on the card, is not stored, and starts no loop.
     await page.locator('#secret').fill('vn_operator_wrong');
@@ -183,7 +210,8 @@ try {
     }, demo.operator_secret, { polling: 100 });
     await fail('**/v1/**', 503, 'unavailable', 'Hub restarting');
     await page.reload({ waitUntil: 'load' });
-    await page.locator('#conn.off').waitFor();
+    // A planned restart (503) reads as reconnecting, not offline.
+    await page.locator('#conn.retry', { hasText: 'reconnecting' }).waitFor();
     await page.locator('#threads .none', { hasText: 'Threads unavailable' }).waitFor();
     await page.unroute('**/v1/**');
     await page.locator('#conn.live').waitFor();

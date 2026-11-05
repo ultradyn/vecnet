@@ -70,7 +70,7 @@ span,b,time,code,a{unicode-bidi:isolate}
 .card .btn{padding:9px 12px;margin-top:4px}
 .err{color:var(--bad);font-size:13px;min-height:1em;margin:0}
 .brand{display:flex;align-items:center;gap:9px;font-weight:600;font-size:14.5px}
-.logo{width:18px;height:18px;border-radius:5px;background:var(--grad);flex:none}
+.logo{width:22px;height:22px;background:url(logo.svg) center/contain no-repeat;flex:none}
 
 /* layout */
 .va{display:grid;grid-template-columns:240px minmax(0,1fr) 300px;height:100vh}
@@ -84,6 +84,12 @@ span,b,time,code,a{unicode-bidi:isolate}
 .va .nav .tt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .va .nav .cnt{font:500 11px var(--mono);color:var(--dim);flex:none}
 .va .nav .cnt.hot{color:#0b0f19;background:var(--wake);border-radius:9px;padding:1px 6px}
+/* Add agent (invite.js): an action, not a route, so a quiet dashed button
+   under the route links. It opens the dialog over whatever view is showing. */
+.va .nav .nav-add{display:flex;align-items:center;gap:8px;width:100%;margin:6px 0 0;padding:6px 9px;border:1px dashed var(--line2);border-radius:6px;background:none;color:var(--muted);font-size:13.5px;text-align:left}
+.va .nav .nav-add:hover:not(:disabled){border-style:solid;border-color:#6366f1;background:#141a2e;color:var(--text)}
+.va .nav .nav-add:disabled{opacity:.45;cursor:default}
+.nav-add .plus{width:16px;height:16px;flex:none;border-radius:4px;background:linear-gradient(#fff,#fff) center/8px 1.5px no-repeat,linear-gradient(#fff,#fff) center/1.5px 8px no-repeat,var(--grad)}
 .va .nav .none{font-size:12.5px;color:var(--dim);padding:4px 9px}
 .va .grp{font-size:12px;color:var(--dim);padding:20px 9px 6px}
 /* Thread rows (Your Threads and Other Threads): title and count, then
@@ -108,6 +114,7 @@ span,b,time,code,a{unicode-bidi:isolate}
 .conn{display:flex;align-items:center;gap:7px;padding:4px 9px;font:400 11.5px var(--mono);color:var(--dim);margin-top:auto}
 .conn i{width:7px;height:7px;border-radius:50%;background:#64748b}
 .conn.live i{background:var(--ok)}
+.conn.retry i{background:var(--wake)}
 .conn.off i{background:var(--bad)}
 .dot{width:7px;height:7px;border-radius:50%;background:#64748b;flex:none;display:inline-block}
 .dot.idle{background:var(--ok)}.dot.working{background:var(--wake)}.dot.blocked{background:var(--bad)}.dot.offline{background:none;border:1.5px solid #64748b}

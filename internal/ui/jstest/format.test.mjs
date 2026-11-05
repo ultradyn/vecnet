@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PRIORITY_HELP, ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, plural, quotaLabel, short, standInTitle, title, when } from '../static/format.js';
+import { PRIORITY_HELP, ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, kindLabel, kindShort, kindTitle, plural, quotaLabel, short, standInTitle, title, when } from '../static/format.js';
 
 test('when is 24-hour local today, with the date on other days, and survives midnight', () => {
   const noon = new Date(2026, 10, 2, 14, 5, 0).getTime();
@@ -152,4 +152,19 @@ test('fullWhen is the full local date and time', () => {
 test('PRIORITY_HELP covers every priority', () => {
   assert.deepEqual(Object.keys(PRIORITY_HELP).sort(), ['hold', 'wake', 'wake_idle']);
   for (const v of Object.values(PRIORITY_HELP)) assert.ok(v.length > 20 && !/[<>]/.test(v));
+});
+
+test('peer kinds read as people say them; the raw value stays for hovers and unknowns', () => {
+  assert.equal(kindLabel('session'), 'Agent session (Claude Code, Codex, CLI)');
+  assert.equal(kindShort('session'), 'Agent session');
+  assert.equal(kindShort('grokbot'), 'Grok Bot');
+  assert.equal(kindShort('pagchat-bot'), 'pagchat bot');
+  assert.equal(kindShort('dot'), 'ChatGPT dot');
+  assert.equal(kindTitle('dot'), 'ChatGPT dot · dot');
+  // Unknown kinds, and inherited property names, show as themselves.
+  assert.equal(kindLabel('webhookish'), 'webhookish');
+  assert.equal(kindShort('constructor'), 'constructor');
+  assert.equal(kindTitle('peer'), 'peer');
+  assert.equal(kindLabel(''), '');
+  assert.equal(kindShort(undefined), '');
 });

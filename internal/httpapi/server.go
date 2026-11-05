@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/mcpserver"
 	"github.com/XertroV/vecnet/internal/oauth"
 	"github.com/XertroV/vecnet/internal/opview"
 	"github.com/XertroV/vecnet/internal/ui"
@@ -26,6 +27,14 @@ type Deps struct {
 	// OAuth, when non-nil, serves the OAuth endpoints and accepts its access
 	// tokens on /mcp (PROTOCOL §4.5).
 	OAuth *oauth.Server
+
+	// MCPAllowedOrigins are validated, normalized extra /mcp origins. Nil
+	// defaults to https://chatgpt.com; an empty non-nil slice allows only
+	// the public origin (vecnet-hub --mcp-allowed-origins none).
+	MCPAllowedOrigins []string
+
+	// MCPLegacySessions accepts on (default), off-for-oauth, or off.
+	MCPLegacySessions string
 
 	// GET /v1/events timing; zero means the package default. Tests shorten
 	// them instead of sleeping.
@@ -107,6 +116,7 @@ func New(d Deps) http.Handler {
 		writeError(w, hub.E(http.StatusNotFound, "not_found", "no such endpoint"))
 	})
 	h := throttle(d.Limiter, d.TrustFlyClientIP, limitBody(authenticate(d.Hub.Auth, d.Hub.TouchReachability, d.Limiter, d.TrustFlyClientIP, mux)))
+	h = mcpserver.ObserveHTTP(oauth.ObserveHTTP(h))
 	if strings.HasPrefix(d.Hub.Cfg.PublicURL, "https://") {
 		h = hsts(h)
 	}
@@ -147,6 +157,7 @@ func (s *server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/enrol", s.postEnrol)
 	mux.HandleFunc("POST /v1/ingress/{src_id}", s.postIngress)
 	mux.Handle("/mcp", newMCP(s.Deps)) // every method; mcpserver answers 405 itself
+	mux.HandleFunc("GET /v1/diag/mcp", s.getMCPDiag)
 	s.oauthRoutes(mux)
 	s.adminRoutes(mux)
 }

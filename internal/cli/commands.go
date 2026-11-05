@@ -53,14 +53,16 @@ messaging:
   reply <message_id> "text" (--wake|--wake-idle|--hold) [--thread ID] [--attach FILE]…
   react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]
        default priority depends on the emoji: ✅ ❓ ❗ wake_idle, others hold
+  mcp                                 stdio MCP relay to the hub's /mcp as this profile [--as X]; needs --net P
   inbox [--since CURSOR] [--ack] [--limit N]
   ack <cursor>
   watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]
        does not ack; use --auto-ack or vecnet ack <cursor> to avoid replaying
        the log after a restart
-  hook [--event user-prompt|post-tool] [--profile P] [--auto-ack]
-       Claude Code hook: always exits 0
-  hook install [--profile P] [--write] [--settings PATH] [--auto-ack]
+  hook [--event user-prompt|post-tool] [--profile P] [--auto-ack] [--mcp vecnet-P]
+       Claude Code hook: always exits 0; --mcp names the registered MCP server in its hints
+  hook install [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp]
+       --mcp: the hooks name MCP server vecnet-P, and --write registers it (claude mcp add)
   hook rebind [--profile P]
        bind the profile's hook to this Claude Code session (run from its Bash tool)
   threads [--limit N]
@@ -91,13 +93,14 @@ admin (operator credential):
        --open-name, the agent picks its name at enrol
   peer invite <peer> [--ttl 24h] [--copy]             re-issues a token for a peer not yet enrolled
   peer move <peer> --principal PRN
-  peer link <peer>                                    prints a dot's 12-character link code
+  peer link <peer>                                    prints a peer's 12-character OAuth link code
   peer avatar <peer> (FILE|https://URL|--clear)       set or clear any peer's avatar
   peer rotate <peer>
   peer scope <peer> [--allow IDS] [--deny IDS]        IDS: comma-separated or repeated
   peer limits <peer> --sends-per-min N --threads-per-hour N
   route add --owner ID --url URL | route verify <route_id>
   route add --owner ID --kind grokbot --url URL --key-file PATH
+  route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>
        the crsr_ key is read only from a file, 0600, never from argv
   source add --kind github --name N --route ID [--events A,B] [--priority P]
        prints the ingress URL and the secret, once
@@ -106,6 +109,7 @@ admin (operator credential):
   team add --name N [--members IDS]
   dead-letters list | dead-letters retry <dly> | dead-letters discard <dly>
   notify set --url URL --filter F [--url URL --filter F]…
+  diag mcp [--peer ID] [--method M] [--limit N] [--follow]
   audit [--limit N]
   tui                                                 the operator's terminal client
 
@@ -165,7 +169,11 @@ func (a *app) exit(err error) int {
 	var he *hubError
 	var ne *netError
 	var re *refusedError
+	var me *mcpStartupError
 	switch {
+	case errors.As(err, &me):
+		fmt.Fprintln(a.stderr, me)
+		return exitUsage
 	case errors.As(err, &he):
 		fmt.Fprintf(a.stderr, "%s: %s\n", he.Code, he.Message)
 		if he.Hint != "" {
@@ -420,6 +428,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdInbox(args)
 	case "ack":
 		return a.cmdAck(args)
+	case "mcp":
+		return a.cmdMCP(args)
 	case "watch":
 		return a.cmdWatch(args)
 	case "hook":
@@ -454,6 +464,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdDeadLetters(args)
 	case "notify":
 		return a.cmdNotify(args)
+	case "diag":
+		return a.cmdDiag(args)
 	case "audit":
 		return a.cmdAudit(args)
 	case "tui":
@@ -1487,6 +1499,49 @@ func (a *app) cmdRoute(args []string) error {
 			return err
 		}
 		return a.emitObject(out, "route_id", "whsec")
+	case len(o.pos) == 1 && o.pos[0] == "list":
+		items, err := a.getList("/v1/admin/routes", nil, "routes")
+		if err != nil {
+			return err
+		}
+		if a.json {
+			return a.emitList(items)
+		}
+		for _, item := range items {
+			var route struct {
+				RouteID     string  `json:"route_id"`
+				OwnerKind   string  `json:"owner_kind"`
+				OwnerID     string  `json:"owner_id"`
+				Kind        string  `json:"kind"`
+				Host        string  `json:"host"`
+				VerifiedAt  *string `json:"verified_at"`
+				RunsPerHour int     `json:"runs_per_hour"`
+			}
+			if err := json.Unmarshal(item, &route); err != nil {
+				return err
+			}
+			verified := "-"
+			if route.VerifiedAt != nil {
+				verified = *route.VerifiedAt
+			}
+			fmt.Fprintf(a.stdout, "%s owner=%s:%s kind=%s host=%s verified_at=%s runs_per_hour=%d\n",
+				route.RouteID, route.OwnerKind, route.OwnerID, route.Kind, flatten(route.Host), verified, route.RunsPerHour)
+		}
+		return nil
+	case len(o.pos) == 2 && o.pos[0] == "rotate" && o.str("key-file") != "":
+		key, err := a.readKeyFile(o.str("key-file"))
+		if err != nil {
+			return err
+		}
+		if err := a.call(http.MethodPost, "/v1/admin/routes/"+pathEscape(o.pos[1])+"/rotate", map[string]string{"key": key}, nil); err != nil {
+			return err
+		}
+		return a.ok("rotated " + o.pos[1])
+	case len(o.pos) == 2 && o.pos[0] == "remove":
+		if err := a.call(http.MethodDelete, "/v1/admin/routes/"+pathEscape(o.pos[1]), nil, nil); err != nil {
+			return err
+		}
+		return a.ok("removed " + o.pos[1])
 	case len(o.pos) == 2 && o.pos[0] == "verify":
 		if err := a.call(http.MethodPost, "/v1/admin/routes/"+pathEscape(o.pos[1])+"/verify", nil, nil); err != nil {
 			return err
@@ -1494,7 +1549,7 @@ func (a *app) cmdRoute(args []string) error {
 		return a.ok("verified " + o.pos[1])
 	}
 	return usageErr("usage: vecnet route add --owner ID --url URL | " +
-		"route add --owner ID --kind grokbot --url URL --key-file PATH | route verify <route_id>")
+		"route add --owner ID --kind grokbot --url URL --key-file PATH | route verify <route_id> | route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>")
 }
 
 func (a *app) cmdTeam(args []string) error {

@@ -5,6 +5,7 @@
 // attach.js's chip row; the send carries their hashes once all are uploaded.
 import { createAttachments } from './attach.js';
 import { avatar, h, idText } from './dom.js';
+import { kindShort } from './format.js';
 import { prioritySeg } from './prio.js';
 import { buildSend, canSend, counter, eligible, errorText, keepKey, keyFor, matches, sendRefusal } from './compose-model.js';
 
@@ -96,7 +97,7 @@ export function mount(root, ctx) {
         return h('button', { type: 'button', class: 'opt' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false', title: p.peer_id, onclick: () => toggle(p.peer_id) },
           avatar(p.peer_id, ctx),
           h('span', { class: 'nm', text: p.name }),
-          h('span', { class: 'kd', text: p.kind }),
+          h('span', { class: 'kd', text: kindShort(p.kind) }),
           idText(p.peer_id, 'id'));
       }));
     }

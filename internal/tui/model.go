@@ -40,7 +40,7 @@ func (m Mode) String() string {
 const (
 	ConnConnecting = "connecting"
 	ConnLive       = "live"
-	ConnOffline    = "offline, retrying"
+	ConnOffline    = "reconnecting"
 	ConnRejected   = "credential rejected"
 	ConnDisabled   = "operator disabled"
 )

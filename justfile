@@ -144,3 +144,7 @@ ln-install:
     ln -sfn "$dest" "$HOME/.local/share/vecnet-launcher/current"
     install -Dm0644 connectors/launcher/systemd/vecnet-launcher.service "$HOME/.config/systemd/user/vecnet-launcher.service"
     echo "installed $dest; run: systemctl --user daemon-reload"
+
+# Check a deployed hub's MCP and OAuth contracts (bearer in VECNET_MCP_TOKEN).
+mcp-conformance ORIGIN:
+    node scripts/mcp-conformance.mjs {{quote(ORIGIN)}}

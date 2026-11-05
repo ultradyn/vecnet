@@ -40,16 +40,29 @@ func hookShellWord(bin string) string {
 	return "'" + strings.ReplaceAll(bin, "'", `'"'"'`) + "'"
 }
 
-func hookCommand(bin, profile, event string, autoAck bool) string {
+// hookCommand is an installed handler's command; mcp, when not empty, is
+// the MCP server name its hints name (`hook install --mcp`).
+func hookCommand(bin, profile, event string, autoAck bool, mcp string) string {
 	command := hookShellWord(bin) + " hook --profile " + profile + " --event " + event
 	if autoAck {
 		command += " --auto-ack"
 	}
+	if mcp != "" {
+		command += " --mcp " + mcp
+	}
 	return command
 }
 
-// hookOwnedCommand matches exactly the commands hookCommand can emit.
-var hookOwnedCommand = regexp.MustCompile(`^([A-Za-z0-9/._-]+|'(?:[^']|'"'"')*') hook --profile ([^ ]+) --event ([^ ]+)( --auto-ack)?$`)
+// hookOwnedCommand matches exactly the commands hookCommand can emit, so a
+// re-run with or without --mcp replaces them in place.
+var hookOwnedCommand = regexp.MustCompile(`^([A-Za-z0-9/._-]+|'(?:[^']|'"'"')*') hook --profile ([^ ]+) --event ([^ ]+)( --auto-ack)?( --mcp vecnet-[A-Za-z0-9_-]{1,24})?$`)
+
+// errHookInstallMCP refuses `hook install --mcp` for a profile with no MCP
+// server name, or under a global --as the installed hooks never carry.
+var errHookInstallMCP = usageErr("hook install --mcp: profile must be 1-24 letters, digits, _ or - (MCP server names), and the installed hooks never take --as")
+
+// hookClaudeTimeout bounds each `claude mcp` run of `hook install --mcp --write`.
+var hookClaudeTimeout = 10 * time.Second
 
 // defaultBin returns a persistent executable path when it is the vecnet
 // binary. Test executables and go-run binaries use PATH's vecnet instead.
@@ -74,7 +87,7 @@ func defaultBin(exe string) (bin, warning string) {
 
 func (a *app) cmdHookInstall(args []string) error {
 	o, err := parseFlags("hook install", args, map[string]flagKind{
-		"profile": strFlag, "write": boolFlag, "settings": strFlag, "auto-ack": boolFlag, "bin": strFlag,
+		"profile": strFlag, "write": boolFlag, "settings": strFlag, "auto-ack": boolFlag, "bin": strFlag, "mcp": boolFlag,
 	})
 	if err != nil {
 		return err
@@ -96,6 +109,12 @@ func (a *app) cmdHookInstall(args []string) error {
 	if !hookInstallProfile.MatchString(profile) {
 		return usageErr("hook install: profile must match [A-Za-z0-9._][A-Za-z0-9._-]{0,63}")
 	}
+	mcp := ""
+	if o.has("mcp") {
+		if mcp = mcpServerName(profile, ""); mcp == "" || a.as != "" {
+			return errHookInstallMCP
+		}
+	}
 	bin := o.str("bin")
 	if o.has("bin") {
 		if bin == "" {
@@ -116,28 +135,32 @@ func (a *app) cmdHookInstall(args []string) error {
 		}
 	}
 	path := o.str("settings")
+	// The start directory picks the default target, and is where `claude
+	// mcp` registers a local-scope server. Claude Code exports
+	// CLAUDE_PROJECT_DIR, the directory the session started in, to hooks;
+	// it stays put when the session's cwd moves.
+	cwd, cwdErr := os.Getwd()
+	start, from := cwd, "cwd"
+	projectDir := a.getenv("CLAUDE_PROJECT_DIR")
+	projectOK := false
+	if projectDir != "" {
+		if info, err := os.Stat(projectDir); err == nil && info.IsDir() {
+			start, from, projectOK = projectDir, "CLAUDE_PROJECT_DIR", true
+		}
+	}
+	if cwdErr != nil && !projectOK && (!o.has("settings") || mcp != "") {
+		return cwdErr
+	}
 	if o.has("settings") {
 		if path == "" {
 			return usageErr("hook install: --settings must not be empty")
 		}
 		fmt.Fprintf(a.stderr, "settings target %s (explicit --settings)\n", path)
 	} else {
-		start, err := os.Getwd()
-		if err != nil {
-			return err
-		}
-		from := "cwd"
-		// Claude Code exports CLAUDE_PROJECT_DIR, the directory the session
-		// started in, to hooks; it stays put when the session's cwd moves.
-		if dir := a.getenv("CLAUDE_PROJECT_DIR"); dir != "" {
-			if info, err := os.Stat(dir); err == nil && info.IsDir() {
-				if dir != start {
-					fmt.Fprintf(a.stderr, "using CLAUDE_PROJECT_DIR %s rather than the current directory\n", dir)
-				}
-				start, from = dir, "CLAUDE_PROJECT_DIR"
-			} else {
-				a.warn("CLAUDE_PROJECT_DIR %s is not a directory; using the current directory", dir)
-			}
+		if projectOK && projectDir != cwd {
+			fmt.Fprintf(a.stderr, "using CLAUDE_PROJECT_DIR %s rather than the current directory\n", projectDir)
+		} else if !projectOK && projectDir != "" {
+			a.warn("CLAUDE_PROJECT_DIR %s is not a directory; using the current directory", projectDir)
 		}
 		root, gitErr := a.hookGit(start, "--show-toplevel")
 		reason := from + " git top-level; personal settings.local.json"
@@ -154,12 +177,28 @@ func (a *app) cmdHookInstall(args []string) error {
 	}
 	if raw, err := os.ReadFile(path); err == nil {
 		if others := otherHookProfiles(raw, profile); len(others) > 0 {
-			a.warn("%s already has vecnet hooks for profile(s) %s; every Claude Code session that reads it runs all of them. Session binding keeps each profile's deliveries in one session, and a session that runs several profiles' hooks binds none of them until its agent runs `vecnet hook rebind --profile P` (PROTOCOL §13.9). Launch each session with its own profile, e.g. VECNET_PROFILE=%s claude, so the other profiles' hooks stay silent there", path, strings.Join(others, ", "), profile)
+			also := ""
+			if mcp != "" {
+				also = "; every session there also sees each registered vecnet MCP server's tools"
+			}
+			a.warn("%s already has vecnet hooks for profile(s) %s; every Claude Code session that reads it runs all of them. Session binding keeps each profile's deliveries in one session, and a session that runs several profiles' hooks binds none of them until its agent runs `vecnet hook rebind --profile P` (PROTOCOL §13.9). Launch each session with its own profile, e.g. VECNET_PROFILE=%s claude, so the other profiles' hooks stay silent there%s", path, strings.Join(others, ", "), profile, also)
 		}
 	}
 	a.warnNestedCheckouts(path)
+	var register []string
+	if mcp != "" {
+		register = []string{"mcp", "add", "--scope", "local", mcp}
+		// --env follows the name: a variadic option before it would take it.
+		if conf := a.getenv("VECNET_CONFIG"); conf != "" {
+			if abs, err := filepath.Abs(conf); err == nil {
+				conf = abs
+			}
+			register = append(register, "--env", "VECNET_CONFIG="+conf)
+		}
+		register = append(register, "--", bin, "--net", profile, "mcp")
+	}
 	if !o.has("write") {
-		stanza, _, err := mergeHookSettings(nil, bin, profile, o.has("auto-ack"))
+		stanza, _, err := mergeHookSettings(nil, bin, profile, o.has("auto-ack"), mcp)
 		if err != nil {
 			return err
 		}
@@ -167,6 +206,9 @@ func (a *app) cmdHookInstall(args []string) error {
 			return err
 		}
 		fmt.Fprintf(a.stderr, "would merge into %s; rerun with --write\n", path)
+		if register != nil {
+			a.printMCPRegistration(register)
+		}
 		return nil
 	}
 	if !o.has("settings") {
@@ -200,19 +242,69 @@ func (a *app) cmdHookInstall(args []string) error {
 		}
 		mode = info.Mode()
 	}
-	merged, changed, err := mergeHookSettings(existing, bin, profile, o.has("auto-ack"))
+	merged, changed, err := mergeHookSettings(existing, bin, profile, o.has("auto-ack"), mcp)
 	if err != nil {
 		return err
 	}
 	if !changed {
 		fmt.Fprintf(a.stderr, "unchanged %s\n", path)
-		return nil
+	} else {
+		if err := writeHookSettings(target, merged, mode); err != nil {
+			return err
+		}
+		fmt.Fprintf(a.stderr, "wrote %s (UserPromptSubmit, PostToolUse)\n", path)
 	}
-	if err := writeHookSettings(target, merged, mode); err != nil {
+	if register != nil {
+		a.printMCPRegistration(register)
+		a.registerMCP(start, mcp, register)
+	}
+	return nil
+}
+
+// printMCPRegistration prints the `claude mcp add` command for argv on
+// stderr, shell-quoted as the hooks are.
+func (a *app) printMCPRegistration(argv []string) {
+	words := make([]string, len(argv))
+	for i, w := range argv {
+		if conf, ok := strings.CutPrefix(w, "VECNET_CONFIG="); ok {
+			words[i] = "VECNET_CONFIG=" + hookShellWord(conf)
+		} else {
+			words[i] = hookShellWord(w)
+		}
+	}
+	fmt.Fprintf(a.stderr, "MCP registration (local scope: this project only): claude %s\n", strings.Join(words, " "))
+}
+
+// registerMCP replaces the local-scope MCP server name in dir's project
+// config with the add argv, when claude is on PATH. Local-scope MCP config
+// is per project, so claude runs in the installer's start directory. A
+// failure is reported; the hooks are already written.
+func (a *app) registerMCP(dir, name string, add []string) {
+	claude, err := exec.LookPath("claude")
+	if err != nil {
+		a.warn("claude is not on PATH; run the command above to register MCP server %s", name)
+		return
+	}
+	run := func(argv []string) error {
+		ctx, cancel := context.WithTimeout(a.ctx, hookClaudeTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, claude, argv...)
+		cmd.Dir = dir
+		cmd.WaitDelay = 100 * time.Millisecond
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			if msg := strings.TrimSpace(string(out)); msg != "" {
+				return fmt.Errorf("%w: %s", err, inert(msg, 200))
+			}
+		}
 		return err
 	}
-	fmt.Fprintf(a.stderr, "wrote %s (UserPromptSubmit, PostToolUse)\n", path)
-	return nil
+	_ = run([]string{"mcp", "remove", "--scope", "local", name}) // absent is fine
+	if err := run(add); err != nil {
+		a.warn("claude mcp add failed (%v); run the command above to register MCP server %s", err, name)
+		return
+	}
+	fmt.Fprintf(a.stderr, "registered MCP server %s (local scope, %s)\n", name, dir)
 }
 
 // warnNestedCheckouts warns when the target's checkout sits inside, or
@@ -588,7 +680,7 @@ func oursHook(handler *jsonNode, bin, profile, event string) bool {
 	return base == "vecnet" || base == "vecnet.exe" || word == bin
 }
 
-func mergeHookSettings(existing []byte, bin, profile string, autoAck bool) (out []byte, changed bool, err error) {
+func mergeHookSettings(existing []byte, bin, profile string, autoAck bool, mcp string) (out []byte, changed bool, err error) {
 	src := existing
 	if len(bytes.TrimSpace(src)) == 0 {
 		src = []byte("{}")
@@ -624,7 +716,7 @@ func mergeHookSettings(existing []byte, bin, profile string, autoAck bool) (out 
 			hooks.appendMember(event.key, groups)
 		}
 		// Ordered structs determine every new node's key order.
-		raw, err := json.Marshal(hookGroup{Matcher: event.matcher, Hooks: []hookHandler{{Type: "command", Command: hookCommand(bin, profile, event.name, autoAck), Timeout: 5}}})
+		raw, err := json.Marshal(hookGroup{Matcher: event.matcher, Hooks: []hookHandler{{Type: "command", Command: hookCommand(bin, profile, event.name, autoAck, mcp), Timeout: 5}}})
 		if err != nil {
 			return nil, false, err
 		}

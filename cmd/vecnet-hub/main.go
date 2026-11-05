@@ -5,6 +5,10 @@
 //
 // VECNET_LISTEN, VECNET_DATA_DIR and VECNET_PUBLIC_URL, when set, replace
 // the defaults of --listen, --data-dir and --public-url; flags still win.
+// VECNET_MCP_ALLOWED_ORIGINS defaults --mcp-allowed-origins: comma-separated
+// extra exact origins, empty for https://chatgpt.com, none for public origin only.
+// VECNET_OAUTH_REDIRECTS defaults --oauth-redirects: comma-separated redirect
+// patterns appended to the built-in OAuth redirects.
 // VECNET_ALLOW_PRIVATE_EGRESS=1 is the default of --allow-private-egress,
 // a development-only override that lets push and notify URLs be http and
 // reach private or loopback addresses (PROTOCOL §14.7).
@@ -32,6 +36,8 @@ import (
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/logging"
+	"github.com/XertroV/vecnet/internal/mcpserver"
+	"github.com/XertroV/vecnet/internal/oauth"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
@@ -62,6 +68,9 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	listen := fs.String("listen", envOr(getenv, "VECNET_LISTEN", "127.0.0.1:45752"), "address to listen on ($VECNET_LISTEN)")
 	dataDir := fs.String("data-dir", envOr(getenv, "VECNET_DATA_DIR", "/data"), "directory holding hub.db and blobs/ ($VECNET_DATA_DIR)")
 	publicURL := fs.String("public-url", getenv("VECNET_PUBLIC_URL"), "externally visible origin ($VECNET_PUBLIC_URL; default http://<listen address>)")
+	mcpOrigins := fs.String("mcp-allowed-origins", getenv("VECNET_MCP_ALLOWED_ORIGINS"), "extra /mcp origins, comma-separated; empty defaults to https://chatgpt.com, none allows public origin only ($VECNET_MCP_ALLOWED_ORIGINS)")
+	mcpLegacy := fs.String("mcp-legacy-sessions", envOr(getenv, "VECNET_MCP_LEGACY_SESSIONS", "on"), "legacy MCP sessions: on, off-for-oauth, off ($VECNET_MCP_LEGACY_SESSIONS)")
+	oauthRedirects := fs.String("oauth-redirects", getenv("VECNET_OAUTH_REDIRECTS"), "extra OAuth redirect patterns, comma-separated, appended to defaults ($VECNET_OAUTH_REDIRECTS)")
 	devUIDir := fs.String("dev-ui-dir", "", "serve the operator UI from this directory instead of the embedded copy (development)")
 	allowPrivate := fs.Bool("allow-private-egress", getenv("VECNET_ALLOW_PRIVATE_EGRESS") == "1",
 		"development only: let outbound URLs be http and reach private/loopback addresses ($VECNET_ALLOW_PRIVATE_EGRESS=1)")
@@ -85,7 +94,19 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unknown subcommand %q", fs.Arg(0))
 	}
-	return serve(ctx, *listen, *dataDir, *publicURL, *devUIDir, *allowPrivate, *trustFly, stdout)
+	origins, err := mcpserver.ParseAllowedOrigins(*mcpOrigins)
+	if err != nil {
+		return err
+	}
+	legacy, err := mcpserver.ParseLegacySessions(*mcpLegacy)
+	if err != nil {
+		return err
+	}
+	redirects, err := oauth.ParseAllowedRedirects(*oauthRedirects)
+	if err != nil {
+		return err
+	}
+	return serve(ctx, *listen, *dataDir, *publicURL, *devUIDir, *allowPrivate, *trustFly, origins, redirects, stdout, legacy)
 }
 
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
@@ -141,7 +162,7 @@ const ShutdownGrace = 10 * time.Second
 // devUIDir "" serves the embedded operator UI. allowPrivateEgress is the
 // development-only egress override (hub.Config.AllowPrivateEgress).
 // trustFly keys the per-client limiter on Fly-Client-IP (Deps.TrustFlyClientIP).
-func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, allowPrivateEgress, trustFly bool, stdout io.Writer) error {
+func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, allowPrivateEgress, trustFly bool, mcpOrigins, oauthRedirects []string, stdout io.Writer, mcpLegacy ...string) error {
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return err
@@ -161,6 +182,7 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 		slog.Warn("vecnet-hub: private egress allowed (development only): outbound URLs may be http and reach private addresses")
 	}
 	stack := httpapi.NewStack(h)
+	stack.OAuth.AllowedRedirects = oauthRedirects
 	// Shutdown does not cancel request contexts, so long-lived SSE streams
 	// and long-polls watch stop instead; closing it on shutdown lets them
 	// end at once rather than hold the whole grace period.
@@ -171,6 +193,10 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 	deps := stack.Deps()
 	deps.UIDir, deps.Stop = devUIDir, stop
 	deps.TrustFlyClientIP = trustFly
+	deps.MCPAllowedOrigins = mcpOrigins
+	if len(mcpLegacy) > 0 {
+		deps.MCPLegacySessions = mcpLegacy[0]
+	}
 	srv := &http.Server{Handler: httpapi.New(deps)}
 	httpapi.ConfigureServer(srv)
 	srv.RegisterOnShutdown(closeStop)
@@ -194,6 +220,8 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 		return err
 	case <-ctx.Done():
 	}
+	// Begin draining before Shutdown closes listeners and waits for handlers.
+	closeStop()
 	// The grace period stays under Fly's kill_timeout (fly.toml).
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownGrace)
 	defer cancel()

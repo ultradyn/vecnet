@@ -39,6 +39,7 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/sources/{id}/disable", s.adminDisableSource)
 	mux.HandleFunc("POST /v1/admin/routes", s.adminAddRoute)
 	mux.HandleFunc("GET /v1/admin/routes", s.adminListRoutes)
+	mux.HandleFunc("DELETE /v1/admin/routes/{id}", s.adminRemoveRoute)
 	mux.HandleFunc("POST /v1/admin/routes/{id}/rotate", s.adminRotateRoute)
 	mux.HandleFunc("POST /v1/admin/routes/{id}/verify", s.adminVerifyRoute)
 	mux.HandleFunc("POST /v1/admin/teams", s.adminAddTeam)
@@ -385,6 +386,20 @@ func (s *server) adminListRoutes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"routes": routes})
 }
 
+// adminRemoveRoute is DELETE /v1/admin/routes/{id}: 204, or 404 for an
+// unknown route. Pending deliveries remain available through pull.
+func (s *server) adminRemoveRoute(w http.ResponseWriter, r *http.Request) {
+	if err := readNoBody(r); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.Hub.RemoveRoute(r.Context(), r.PathValue("id")); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // adminRotateRoute is POST /v1/admin/routes/{id}/rotate. An http route takes
 // no body and is 200 {"whsec"}; the old key stays valid for 24 h (PROTOCOL
 // §3.5). A grokbot route takes {"key": "crsr_…"} and is 204: the new key
@@ -705,7 +720,7 @@ func (s *server) adminAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminCounters is GET /v1/admin/counters: {"loop_cut", "rate_limited",
-// "dead_letters", "push_conflicts", "push_auth_failed"}.
+// "dead_letters", "push_conflicts", "push_auth_failed", "events_push_failed", "events_paused"}.
 func (s *server) adminCounters(w http.ResponseWriter, r *http.Request) {
 	c, err := s.Hub.Counters(r.Context())
 	if err != nil {

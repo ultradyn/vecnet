@@ -15,3 +15,19 @@ dialog.inv::backdrop{background:#05070dcc}
 .inv-block{margin:0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#080c18;font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;max-height:50vh;overflow:auto;user-select:all}
 .inv-meta{margin:8px 0 0;font-size:11.5px;color:var(--dim);overflow-wrap:anywhere}
 .inv-form .inv-chk{display:flex;align-items:center;gap:8px;margin:6px 0 0;font-size:12.5px;color:var(--muted)}
+/* The ChatGPT dot panel: MCP URL, numbered steps, the link code. */
+.inv .inv-sub{display:block;font-size:12px;color:var(--dim);margin:0 0 4px}
+.inv-url-row,.inv-code-row{display:flex;gap:8px;align-items:center}
+.inv-code-row{flex-wrap:wrap}
+.inv-url-row .btn,.inv-code-row .btn{white-space:nowrap}
+.inv-url{flex:1;min-width:0;background:#080c18;border:1px solid var(--line);border-radius:7px;padding:8px 10px;font-size:12.5px;color:var(--text)}
+.inv-steps{margin:14px 0 0;padding:0 0 0 20px;display:flex;flex-direction:column;gap:8px;font-size:13px;line-height:1.5;color:var(--muted)}
+.inv-steps li::marker{color:var(--dim);font:500 12px var(--mono)}
+.inv-steps b{color:var(--text);font-weight:600}
+.inv-code{margin:8px 0 2px}
+.inv-code-val{padding:8px 14px;border:1px solid #6366f166;border-radius:8px;background:#080c18;font-size:22px;font-weight:600;letter-spacing:.08em;color:#fff;white-space:nowrap;user-select:all}
+.inv-code .inv-meta{margin-top:6px}
+.inv-code .err{margin:0 0 6px}
+.inv-pending{font-size:12.5px;color:var(--dim)}
+.inv-link{background:none;border:0;padding:0;color:var(--violet);font:inherit;text-decoration:underline;text-underline-offset:2px}
+.inv-note{margin:12px 0 0;padding:8px 12px;border-left:2px solid var(--line2);font-size:12.5px;line-height:1.5;color:var(--muted)}

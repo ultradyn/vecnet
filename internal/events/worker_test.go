@@ -188,6 +188,270 @@ func TestOutageQueuesAndDrains(t *testing.T) {
 	}
 }
 
+func wantEventsCounters(t *testing.T, env *testhub.Env, failed, paused int) {
+	t.Helper()
+	counters, err := env.Hub.Counters(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]int{"events_push_failed": failed, "events_paused": paused} {
+		if got, ok := counters[name]; !ok || got != want {
+			t.Errorf("counter %s = %d (present %v), want %d", name, got, ok, want)
+		}
+	}
+}
+
+func TestEventsPushFailureCounted(t *testing.T) {
+	for _, status := range []int{http.StatusInternalServerError, http.StatusUnauthorized, http.StatusTemporaryRedirect, 0} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			env := testhub.Start(t)
+			dot, _ := env.NewPeer("dot", "d")
+			sender, secret := env.NewPeer("session", "s")
+			cb := testhub.NewCallback(t)
+			subscribe(t, env, cb, dot, nil, time.Time{})
+			cb.OnPost(func(n int, w http.ResponseWriter) {
+				if n != 1 {
+					return
+				}
+				if status != 0 {
+					w.WriteHeader(status)
+					return
+				}
+				// Close without a response to exercise a real transport failure.
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				_ = conn.Close()
+			})
+			dly := send(t, env, secret, dot, "failure", "wake", "retry me")
+			if n := step(t, env); n != 0 {
+				t.Fatalf("failed Step sent %d, want 0", n)
+			}
+			wantEventsCounters(t, env, 1, 0)
+			env.Now.Advance(3 * time.Second)
+			if n := step(t, env); n != 1 {
+				t.Fatalf("successful retry sent %d, want 1", n)
+			}
+			wantEventsCounters(t, env, 1, 0)
+			posts := wantPosts(t, cb, 2)
+			if posts[0].ID != dly || posts[1].ID != dly {
+				t.Fatalf("retry changed delivery: %+v", posts)
+			}
+			evs, err := env.Hub.Log.Read(context.Background(), []string{sender}, eventlog.Cursor{Epoch: env.Hub.Log.Epoch()}, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			accepted := 0
+			for _, ev := range evs {
+				if ev.Type != "receipt" {
+					continue
+				}
+				var receipt venv.Receipt
+				if err := json.Unmarshal(ev.Data, &receipt); err != nil {
+					t.Fatal(err)
+				}
+				if receipt.DeliveryID == dly && receipt.State == "accepted" && receipt.By == "hub" {
+					accepted++
+				}
+			}
+			if accepted != 1 {
+				t.Fatalf("accepted receipts = %d, want 1", accepted)
+			}
+		})
+	}
+}
+
+func TestEventsPauseCounted(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	dot, _ := env.NewPeer("dot", "d")
+	_, sender := env.NewPeer("session", "s")
+	cb := testhub.NewCallback(t)
+	sub := subscribe(t, env, cb, dot, nil, time.Time{})
+	cb.OnPost(func(_ int, w http.ResponseWriter) { w.WriteHeader(http.StatusInternalServerError) })
+	send(t, env, sender, dot, "exhaust", "wake", "retry me")
+	for attempt := 1; attempt <= hub.PushAttempts; attempt++ {
+		if n := step(t, env); n != 0 {
+			t.Fatalf("failed Step sent %d, want 0", n)
+		}
+		wantPosts(t, cb, attempt)
+		paused := 0
+		wantReason := ""
+		if attempt == hub.PushAttempts {
+			paused, wantReason = 1, events.PausedDeliveryFailed
+		}
+		wantEventsCounters(t, env, attempt, paused)
+		if got := get(t, env, sub.ID).PausedReason; got != wantReason {
+			t.Fatalf("after attempt %d paused = %q, want %q", attempt, got, wantReason)
+		}
+		env.Now.Advance(5 * time.Minute)
+	}
+	step(t, env)
+	wantPosts(t, cb, hub.PushAttempts)
+	wantEventsCounters(t, env, 8, 1)
+
+	expiring := subscribe(t, env, testhub.NewCallback(t), dot, nil, env.Now.Now().Add(time.Hour))
+	operator := subscribe(t, env, testhub.NewCallback(t), dot, nil, env.Now.Now().Add(time.Hour))
+	if err := env.Events.Store.Pause(ctx, operator.ID); err != nil {
+		t.Fatal(err)
+	}
+	wantEventsCounters(t, env, 8, 1)
+	env.Now.Advance(2 * time.Hour)
+	step(t, env)
+	if got := get(t, env, expiring.ID).PausedReason; got != events.PausedTokenExpired {
+		t.Fatalf("expired token paused = %q", got)
+	}
+	if got := get(t, env, operator.ID).PausedReason; got != events.PausedOperator {
+		t.Fatalf("operator pause overwritten: %q", got)
+	}
+	wantEventsCounters(t, env, 8, 2)
+	step(t, env)
+	wantEventsCounters(t, env, 8, 2)
+}
+
+func TestEventsCountersTerminalResponses(t *testing.T) {
+	for _, status := range []int{http.StatusGone, http.StatusRequestEntityTooLarge} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			env := testhub.Start(t)
+			dot, _ := env.NewPeer("dot", "d")
+			_, sender := env.NewPeer("session", "s")
+			cb := testhub.NewCallback(t)
+			subscribe(t, env, cb, dot, nil, time.Time{})
+			cb.OnPost(func(_ int, w http.ResponseWriter) { w.WriteHeader(status) })
+			send(t, env, sender, dot, "terminal", "wake", "no retry")
+			step(t, env)
+			env.Now.Advance(time.Hour)
+			step(t, env)
+			wantPosts(t, cb, 1)
+			wantEventsCounters(t, env, 0, 0)
+		})
+	}
+}
+
+func TestEventsCountersAuthPauses(t *testing.T) {
+	t.Run("bulk expiry and credential rotation", func(t *testing.T) {
+		env := testhub.Start(t)
+		dot, _ := env.NewPeer("dot", "d")
+		var subs []events.Subscription
+		for range 2 {
+			subs = append(subs, subscribe(t, env, testhub.NewCallback(t), dot, nil, env.Now.Now().Add(time.Hour)))
+		}
+		session, _ := env.NewPeer("session", "s")
+		rotated := subscribe(t, env, testhub.NewCallback(t), session, nil, time.Time{})
+		if _, err := env.Hub.RotatePeer(context.Background(), session); err != nil {
+			t.Fatal(err)
+		}
+		if got := get(t, env, rotated.ID).PausedReason; got != events.PausedCredentialRotated {
+			t.Fatalf("rotated subscription pause = %q", got)
+		}
+		wantEventsCounters(t, env, 0, 0)
+		env.Now.Advance(2 * time.Hour)
+		step(t, env)
+		for _, sub := range subs {
+			if got := get(t, env, sub.ID).PausedReason; got != events.PausedTokenExpired {
+				t.Fatalf("expired subscription pause = %q", got)
+			}
+		}
+		wantEventsCounters(t, env, 0, 2)
+		step(t, env)
+		wantEventsCounters(t, env, 0, 2)
+	})
+	t.Run("unauthorized", func(t *testing.T) {
+		env := testhub.Start(t)
+		dot, _ := env.NewPeer("dot", "d")
+		_, sender := env.NewPeer("session", "s")
+		cb := testhub.NewCallback(t)
+		sub := subscribe(t, env, cb, dot, nil, time.Time{})
+		send(t, env, sender, dot, "unauthorized", "wake", "a")
+		if err := env.Hub.SetPeerDisabled(context.Background(), dot, true); err != nil {
+			t.Fatal(err)
+		}
+		step(t, env)
+		if got := get(t, env, sub.ID).PausedReason; got != events.PausedUnauthorized {
+			t.Fatalf("disabled subscription pause = %q", got)
+		}
+		wantPosts(t, cb, 0)
+		wantEventsCounters(t, env, 0, 1)
+		step(t, env)
+		wantEventsCounters(t, env, 0, 1)
+	})
+	for _, operatorPause := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mid-drain expiry operator=%v", operatorPause), func(t *testing.T) {
+			env := testhub.Start(t)
+			dot, _ := env.NewPeer("dot", "d")
+			_, sender := env.NewPeer("session", "s")
+			cb := testhub.NewCallback(t)
+			sub := subscribe(t, env, cb, dot, nil, env.Now.Now().Add(time.Hour))
+			cb.OnPost(func(_ int, _ http.ResponseWriter) {
+				if operatorPause {
+					if err := env.Events.Store.Pause(context.Background(), sub.ID); err != nil {
+						t.Error(err)
+					}
+				}
+				env.Now.Advance(2 * time.Hour)
+			})
+			send(t, env, sender, dot, "one", "wake", "a")
+			send(t, env, sender, dot, "two", "wake", "b")
+			step(t, env)
+			wantPosts(t, cb, 1)
+			wantReason, wantPaused := events.PausedTokenExpired, 1
+			if operatorPause {
+				wantReason, wantPaused = events.PausedOperator, 0
+			}
+			if got := get(t, env, sub.ID).PausedReason; got != wantReason {
+				t.Fatalf("mid-drain pause = %q, want %q", got, wantReason)
+			}
+			wantEventsCounters(t, env, 0, wantPaused)
+			step(t, env)
+			wantEventsCounters(t, env, 0, wantPaused)
+		})
+	}
+}
+
+func TestEventsCountersFailureTransactional(t *testing.T) {
+	for _, priorAttempts := range []int{0, hub.PushAttempts - 1} {
+		t.Run(fmt.Sprint(priorAttempts), func(t *testing.T) {
+			env := testhub.Start(t)
+			dot, _ := env.NewPeer("dot", "d")
+			_, sender := env.NewPeer("session", "s")
+			cb := testhub.NewCallback(t)
+			sub := subscribe(t, env, cb, dot, nil, time.Time{})
+			cb.OnPost(func(_ int, w http.ResponseWriter) { w.WriteHeader(http.StatusInternalServerError) })
+			dly := send(t, env, sender, dot, "rollback", "wake", "a")
+			for range priorAttempts {
+				step(t, env)
+				env.Now.Advance(5 * time.Minute)
+			}
+			// Fail either INSERT or UPSERT of the counter; the outbox must roll back too.
+			if _, err := env.Hub.DB.Exec(`CREATE TRIGGER reject_counter BEFORE INSERT ON counters
+				WHEN NEW.name = 'events_push_failed' BEGIN SELECT RAISE(ABORT, 'counter unavailable'); END`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := env.Events.Step(context.Background()); err == nil || !strings.Contains(err.Error(), "counter unavailable") {
+				t.Fatalf("Step with unavailable counter = %v", err)
+			}
+			if attempts, done, _ := outbox(t, env, sub.ID, dly); attempts != priorAttempts || done {
+				t.Fatalf("failed transaction persisted outbox: attempts %d, done %v", attempts, done)
+			}
+			if got := get(t, env, sub.ID).PausedReason; got != "" {
+				t.Fatalf("failed transaction paused subscription: %q", got)
+			}
+			wantEventsCounters(t, env, priorAttempts, 0)
+			if _, err := env.Hub.DB.Exec(`DROP TRIGGER reject_counter`); err != nil {
+				t.Fatal(err)
+			}
+			step(t, env)
+			paused := 0
+			if priorAttempts == hub.PushAttempts-1 {
+				paused = 1
+			}
+			wantEventsCounters(t, env, priorAttempts+1, paused)
+		})
+	}
+}
+
 func TestOutageQueuesWhileNoLiveSubscription(t *testing.T) {
 	env := testhub.Start(t)
 	dot, _ := env.NewPeer("dot", "d")

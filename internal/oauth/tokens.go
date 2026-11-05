@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/audit"
@@ -54,6 +56,9 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	form := r.PostForm
+	if form.Get("grant_type") == "refresh_token" {
+		oauthKind(w, "oauth.refresh")
+	}
 	if repeated(form) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "a parameter was given twice")
 		return
@@ -80,9 +85,9 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	case errors.As(err, &te):
 		writeOAuthError(w, http.StatusBadRequest, te.code, te.description)
 	case err != nil:
-		slog.Error("oauth: token", "err", err)
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "internal")
 	default:
+		oauthScopes(w, strings.Fields(resp.Scope))
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Pragma", "no-cache")
 		writeJSON(w, http.StatusOK, resp)
@@ -174,7 +179,7 @@ func (s *Server) refresh(ctx context.Context, form url.Values) (*tokenResponse, 
 		return nil, &tokenError{"invalid_request", "refresh_token is required"}
 	}
 	if !scopeOK(form.Get("scope")) {
-		return nil, &tokenError{"invalid_scope", "only scope vecnet is supported"}
+		return nil, &tokenError{"invalid_scope", "only vecnet, events:read and events:write scopes are supported"}
 	}
 	hash := auth.HashSecret(presented)
 	if known, err := s.known(ctx, `SELECT EXISTS (SELECT 1 FROM oauth_tokens WHERE token_hash = ? AND kind = 'refresh')`, hash); err != nil {
@@ -203,6 +208,21 @@ func (s *Server) refresh(ctx context.Context, form url.Values) (*tokenResponse, 
 		if clientID != "" && clientID != wantClient {
 			refused = badGrant("this token was issued to another client")
 			return nil
+		}
+		// RFC 6749 6: refresh may narrow the original grant, never elevate it.
+		if requested := strings.Fields(form.Get("scope")); len(requested) > 0 {
+			granted := strings.Fields(scope)
+			if !slices.Contains(requested, Scope) {
+				refused = &tokenError{"invalid_scope", "scope must retain vecnet"}
+				return nil
+			}
+			for _, name := range requested {
+				if !slices.Contains(granted, name) {
+					refused = &tokenError{"invalid_scope", "scope exceeds the original grant; authorize again"}
+					return nil
+				}
+			}
+			scope = strings.Join(requested, " ")
 		}
 		now := s.now()
 		if revoked.Valid {

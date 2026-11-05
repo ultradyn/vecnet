@@ -131,7 +131,7 @@ try {
     assert(await clip() === id('codex'), 'header copy');
     const text = sel => pv.locator(sel).innerText();
     const identity = await text('.pv-identity');
-    assert(/Kind\s+session/.test(identity) && /Credential\s+active/.test(identity) && /enabled/.test(identity), `identity: ${identity}`);
+    assert(/Kind\s+Agent session/.test(identity) && /Credential\s+active/.test(identity) && /enabled/.test(identity), `identity: ${identity}`);
     const presence = await text('.pv-presence');
     assert(/working/.test(presence) && /Capabilities\s+demo/.test(presence) && /Location\s+demo/.test(presence), `presence: ${presence}`);
     const access = await text('.pv-access');
