@@ -185,6 +185,16 @@ func (h *Hub) spillError(err error) error {
 func (h *Hub) checkAttachments(ctx context.Context, tx *sql.Tx, snd sender, atts []envelope.Attachment) (hosted map[string]bool, err error) {
 	hosted = map[string]bool{}
 	for i, a := range atts {
+		if a.BlobID != "" {
+			if h.Blobs.Transfers == nil {
+				return nil, E(422, "unknown_blob", "unknown attachment")
+			}
+			if err := h.checkR2Attachment(ctx, tx, snd, &atts[i]); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
 		var size int64
 		qerr := tx.QueryRowContext(ctx,
 			`SELECT b.size FROM blobs b WHERE b.sha256 = ?1 AND b.purged_at IS NULL
@@ -205,8 +215,14 @@ func (h *Hub) checkAttachments(ctx context.Context, tx *sql.Tx, snd sender, atts
 		}
 		switch {
 		case errors.Is(qerr, sql.ErrNoRows):
+			// PROTOCOL section 11: a reference-only origin remains external even
+			// when its hash coincides with an R2 object. Never probe or fetch it.
 			if a.OriginURL != "" {
 				continue
+			}
+			if h.Cfg.BlobBackend == "r2" {
+				// Uniform for known and unknown hashes: presence is not a capability.
+				return nil, E(422, "blob_id_required", "blob_id is required for remote attachments")
 			}
 			e := E(http.StatusUnprocessableEntity, "unknown_blob", "attachment hash not uploaded and no origin_url")
 			e.Details["path"] = fmt.Sprintf("/attachments/%d/sha256", i)
@@ -239,7 +255,7 @@ func (h *Hub) deliveryBlobURLs(msg envelope.Message, recipient string, hosted ma
 	atts := make([]envelope.Attachment, len(msg.Attachments))
 	for i, a := range msg.Attachments {
 		a.BlobURL = ""
-		if hosted[a.SHA256] {
+		if a.BlobID == "" && hosted[a.SHA256] {
 			a.BlobURL = h.Blobs.URL(h.Cfg.PublicURL, recipient, a.SHA256, exp)
 		}
 		atts[i] = a

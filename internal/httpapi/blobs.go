@@ -1,11 +1,15 @@
 package httpapi
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/hub"
 )
 
@@ -24,6 +28,10 @@ func isBlobUpload(r *http.Request) bool {
 // streamed into the store; Content-Type is the media type. 201
 // {"sha256","size"}.
 func (s *server) putBlob(w http.ResponseWriter, r *http.Request) {
+	if s.Hub.Cfg.BlobBackend == "r2" {
+		writeError(w, hub.E(409, "direct_upload_required", "use POST /v1/blobs/uploads"))
+		return
+	}
 	var ttl time.Duration
 	if r.URL.Query().Has("ttl") {
 		secs, err := strconv.ParseInt(r.URL.Query().Get("ttl"), 10, 64)
@@ -74,6 +82,22 @@ func (s *server) getBlob(w http.ResponseWriter, r *http.Request) {
 		c := callerFrom(r.Context())
 		caller = &c
 	}
+	id := r.URL.Query().Get("b")
+	if id != "" {
+		if !s.blobOriginAllowed(w, r) {
+			return
+		}
+		grant, err := s.Hub.BlobDownload(r.Context(), caller, r.URL.Query().Get("t"), r.PathValue("sha"), id)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		// Set Location directly: http.Redirect writes the capability into HTML.
+		w.Header().Set("Location", grant.URL)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+		return
+	}
 	f, m, err := s.Hub.ReadBlob(r.Context(), caller, r.URL.Query().Get("t"), r.PathValue("sha"))
 	if err != nil {
 		writeError(w, err)
@@ -91,4 +115,103 @@ func (s *server) getBlob(w http.ResponseWriter, r *http.Request) {
 	// A 25 MiB download may take longer than the server's WriteTimeout (§20.3).
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(blobTransferTimeout))
 	http.ServeContent(w, r, "", time.Time{}, f)
+}
+
+func (s *server) createBlobUpload(w http.ResponseWriter, r *http.Request) {
+	if !s.blobOriginAllowed(w, r) {
+		return
+	}
+	var in blobwire.UploadRequest
+	if err := decodeBlobJSON(r, &in); err != nil {
+		writeError(w, err)
+		return
+	}
+	grant, err := s.Hub.CreateBlobUpload(r.Context(), callerFrom(r.Context()), r.Header.Get("Idempotency-Key"), in)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, 201, grant)
+}
+func decodeBlobJSON(r *http.Request, in any) error {
+	d := json.NewDecoder(r.Body)
+	d.DisallowUnknownFields()
+	if err := d.Decode(in); err != nil {
+		return hub.E(400, "invalid_body", "invalid blob request")
+	}
+	if err := d.Decode(new(any)); err != io.EOF {
+		return hub.E(400, "invalid_body", "invalid blob request")
+	}
+	return nil
+}
+func (s *server) completeBlobUpload(w http.ResponseWriter, r *http.Request) {
+	if !s.blobOriginAllowed(w, r) {
+		return
+	}
+	in := struct{}{}
+	if err := decodeBlobJSON(r, &in); err != nil {
+		writeError(w, err)
+		return
+	}
+	ref, err := s.Hub.CompleteBlobUpload(r.Context(), callerFrom(r.Context()), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, 200, ref)
+}
+func (s *server) downloadBlob(w http.ResponseWriter, r *http.Request) {
+	if !s.blobOriginAllowed(w, r) {
+		return
+	}
+	var caller *auth.Caller
+	if isPublic(r) {
+		if r.Header.Get("Authorization") != "" {
+			c, err := s.Hub.Auth.Resolve(r.Context(), bearer(r))
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			caller = &c
+		}
+	} else {
+		c := callerFrom(r.Context())
+		caller = &c
+	}
+	grant, err := s.Hub.BlobDownload(r.Context(), caller, r.URL.Query().Get("t"), r.PathValue("sha"), r.URL.Query().Get("blob_id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, 200, grant)
+}
+func (s *server) blobStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.blobOriginAllowed(w, r) {
+		return
+	}
+	status, err := s.Hub.BlobStatus(r.Context(), callerFrom(r.Context()), r.PathValue("sha"), r.URL.Query().Get("blob_id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, 200, status)
+}
+
+// Direct capabilities are readable only by the hub origin in browser contexts.
+// Native clients omit Origin; R2 CORS remains an independent provider gate.
+func (s *server) blobOriginAllowed(w http.ResponseWriter, r *http.Request) bool {
+	origins := r.Header.Values("Origin")
+	if len(origins) == 0 {
+		return true
+	}
+	u, err := url.Parse(s.Hub.Cfg.PublicURL)
+	if err != nil || len(origins) != 1 || origins[0] != u.Scheme+"://"+u.Host {
+		writeError(w, hub.E(403, "forbidden", "origin refused"))
+		return false
+	}
+	return true
 }

@@ -54,6 +54,11 @@ func (h *Hub) Tick(ctx context.Context, slow bool) {
 	if err := h.releaseStaleHeld(ctx, now); err != nil && ctx.Err() == nil {
 		slog.Error("hub: tick release held", "err", err)
 	}
+	if h.Blobs.Transfers != nil {
+		if err := h.Blobs.Transfers.Tick(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("hub: tick remote blob cleanup failed")
+		}
+	}
 	if !slow {
 		return
 	}

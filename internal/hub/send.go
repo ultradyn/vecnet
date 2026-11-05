@@ -123,7 +123,7 @@ func (h *Hub) SendVia(ctx context.Context, c auth.Caller, raw []byte, ingress st
 	if err := PrecheckSend(raw); err != nil {
 		return nil, false, err
 	}
-	if err := envelope.Validate("sendRequest", raw); err != nil {
+	if err := h.validateBlobSend(raw); err != nil {
 		return nil, false, err
 	}
 	req, err := decodeSendRequest(raw)
@@ -532,6 +532,13 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 			sha := msg.Attachments[len(msg.Attachments)-1].SHA256
 			if err := blob.PinDurable(ctx, tx, "spill", sha, msg.MessageID); err != nil {
 				return nil, false, nil, err
+			}
+		}
+	}
+	for _, a := range msg.Attachments {
+		if a.BlobID != "" {
+			if err := h.Blobs.Transfers.AddReference(ctx, tx, a.BlobID, a.SHA256, msg.MessageID); err != nil {
+				return nil, false, nil, h.blobTransferError(err)
 			}
 		}
 	}
