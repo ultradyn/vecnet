@@ -82,6 +82,10 @@ ui-demo *ARGS:
 test-ui:
     build2 node --test --test-concurrency=2 internal/ui/jstest/
 
+# Opt-in live Codex hook check, coordinator-run on a prepared build box only.
+codex-smoke: build
+    build2 node scripts/codex/hook-smoke.mjs
+
 # Screen scripts run serially; helpers are not executable checks.
 ui-shots:
     #!/usr/bin/env bash
