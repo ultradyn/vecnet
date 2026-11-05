@@ -6,9 +6,11 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver (pure Go, CGO_ENABLED=0)
 )
@@ -119,4 +121,41 @@ func (db *DB) SetMeta(ctx context.Context, key, value string) error {
 		return fmt.Errorf("store: set meta %q: %w", key, err)
 	}
 	return nil
+}
+
+// ReadSnapshot runs fn on a pinned connection in a deferred, read-only SQLite
+// transaction. Explicit BEGIN DEFERRED avoids inheriting the writer path's
+// _txlock=immediate default. The driver also supports a deferred ReadOnly
+// BeginTx, but that option does not enforce read-only SQL; query_only does.
+// Close event rows before querying bodies through the same connection.
+func (db *DB) ReadSnapshot(ctx context.Context, fn func(q *sql.Conn) error) (err error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("store: read connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(ctx, "PRAGMA query_only=ON"); err != nil {
+		// Cancellation can race a pragma that already took effect. Discard
+		// this connection rather than risk leaking query_only into the pool.
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		return fmt.Errorf("store: read-only: %w", err)
+	}
+	defer func() {
+		// A canceled request must not return a transaction or query_only connection
+		// to the pool. A broken cleanup discards the connection instead.
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, rollbackErr := conn.ExecContext(cleanup, "ROLLBACK")
+		_, resetErr := conn.ExecContext(cleanup, "PRAGMA query_only=OFF")
+		if rollbackErr != nil || resetErr != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			if err == nil {
+				err = fmt.Errorf("store: read snapshot cleanup failed")
+			}
+		}
+	}()
+	if _, err = conn.ExecContext(ctx, "BEGIN DEFERRED"); err != nil {
+		return fmt.Errorf("store: read begin: %w", err)
+	}
+	return fn(conn)
 }
