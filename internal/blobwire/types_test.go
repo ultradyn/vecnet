@@ -2,6 +2,7 @@ package blobwire
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -67,20 +68,42 @@ func TestR2WireDeadlinesAndLegacyOmission(t *testing.T) {
 			}
 		})
 	}
-	for _, value := range []any{Ref{SHA256: ref.SHA256, Size: 7}, UploadGrant{Ref: Ref{SHA256: ref.SHA256, Size: 7}}, DownloadGrant{SHA256: ref.SHA256, LocalPath: "/tmp/file"}, State{State: "available"}} {
-		b, err := json.Marshal(value)
-		if err != nil {
-			t.Fatal("legacy marshal failed")
-		}
-		var m map[string]any
-		if json.Unmarshal(b, &m) != nil {
-			t.Fatal("invalid JSON")
-		}
-		for _, field := range []string{"blob_id", "retention_class", "expires_at", "object_expires_at", "sha256_verified", "integrity"} {
-			if _, ok := m[field]; ok {
-				t.Errorf("legacy added %s", field)
+}
+
+// TestLegacyWireShapesPreserved: legacy disk values serialize to exactly their
+// pre-R2 field sets, with every stable field preserved and no R2 field added.
+func TestLegacyWireShapesPreserved(t *testing.T) {
+	sha := strings.Repeat("a", 64)
+	for _, tt := range []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{"ref", Ref{SHA256: sha, Size: 7}, `{"sha256":"` + sha + `","size":7}`},
+		{"upload", UploadGrant{
+			Ref:         Ref{SHA256: sha, Size: 7},
+			Upload:      Request{Method: "PUT", URL: "/v1/blobs", Headers: map[string]string{"Content-Type": "text/plain"}, ExpiresAt: "2026-11-05T00:05:00.000Z"},
+			CompleteURL: "/v1/blobs/" + sha + "/complete",
+		}, `{"sha256":"` + sha + `","size":7,"upload":{"method":"PUT","url":"/v1/blobs","headers":{"Content-Type":"text/plain"},"expires_at":"2026-11-05T00:05:00.000Z"},"complete_url":"/v1/blobs/` + sha + `/complete"}`},
+		{"download_url", DownloadGrant{SHA256: sha, Size: 7, URL: "/v1/blobs/" + sha, Method: "GET", MediaType: "text/plain", ExpiresAt: "2026-11-05T00:10:00.000Z"},
+			`{"sha256":"` + sha + `","size":7,"url":"/v1/blobs/` + sha + `","method":"GET","media_type":"text/plain","expires_at":"2026-11-05T00:10:00.000Z"}`},
+		{"download_local", DownloadGrant{SHA256: sha, Size: 7, LocalPath: "/tmp/file", MediaType: "text/plain"},
+			`{"sha256":"` + sha + `","size":7,"local_path":"/tmp/file","media_type":"text/plain"}`},
+		{"state", State{State: "available"}, `{"state":"available"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := json.Marshal(tt.value)
+			if err != nil {
+				t.Fatal("legacy marshal failed")
 			}
-		}
+			var got, want map[string]any
+			if json.Unmarshal(b, &got) != nil || json.Unmarshal([]byte(tt.want), &want) != nil {
+				t.Fatal("invalid JSON")
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("legacy wire = %s, want %s", b, tt.want)
+			}
+		})
 	}
 }
 
@@ -95,6 +118,23 @@ func TestR2UploadRequestRejectsUnknownAndRecordedFields(t *testing.T) {
 	var req UploadRequest
 	if json.Unmarshal([]byte(base+`}`), &req) != nil {
 		t.Fatal("valid upload request rejected")
+	}
+	want := UploadRequest{Size: 7, SHA256: strings.Repeat("a", 64), MediaType: "text/plain"}
+	if req != want {
+		t.Fatalf("decoded upload request = %+v, want %+v", req, want)
+	}
+	// Decoding replaces a populated receiver; omitted fields do not survive.
+	populated := UploadRequest{Size: 99, SHA256: strings.Repeat("b", 64), MediaType: "image/png"}
+	if json.Unmarshal([]byte(`{"size":7,"sha256":"`+strings.Repeat("a", 64)+`"}`), &populated) != nil {
+		t.Fatal("valid partial upload request rejected")
+	}
+	if populated != (UploadRequest{Size: 7, SHA256: strings.Repeat("a", 64)}) {
+		t.Fatalf("populated receiver = %+v, want full replacement", populated)
+	}
+	// A rejected request leaves the receiver unchanged.
+	kept := want
+	if json.Unmarshal([]byte(base+`,"uploader":"other"}`), &kept) == nil || kept != want {
+		t.Fatal("rejected upload request modified the receiver")
 	}
 }
 
