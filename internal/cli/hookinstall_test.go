@@ -1424,6 +1424,62 @@ func TestHookInstallCodexRefusesUnknownTrackingStatus(t *testing.T) {
 	}
 }
 
+// A failed repository probe is not proof that cwd is outside git: refuse
+// the default target, leave a tracked file byte-identical, and still honour
+// an explicit --settings.
+func TestHookInstallCodexRefusesFailedDiscovery(t *testing.T) {
+	stubs := map[string]string{
+		"missing": "",
+		"dubious": "#!/bin/sh\necho \"fatal: detected dubious ownership in repository at '$2'\" >&2\nexit 128\n",
+		"crash":   "#!/bin/sh\necho 'error: unexpected failure' >&2\nexit 1\n",
+		"empty":   "#!/bin/sh\nexit 0\n",
+		"timeout": "#!/bin/sh\nexec sleep 5\n",
+	}
+	for name, stub := range stubs {
+		t.Run(name, func(t *testing.T) {
+			u, root := codexInstallRepo(t)
+			path := filepath.Join(root, ".codex", "hooks.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("{}\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			gitT(t, "add", "--", ".codex/hooks.json")
+			gitT(t, "-c", "commit.gpgsign=false", "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "tracked hooks")
+			binDir := t.TempDir()
+			if stub != "" {
+				if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(stub), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sleep, err := exec.LookPath("sleep")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(sleep, filepath.Join(binDir, "sleep")); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir)
+			code, out, errs := u.run("hook", "install", "--client", "codex", "--profile", "p", "--write")
+			want := "hook install: cannot tell whether " + path + " is tracked by git"
+			if code != 1 || out != "" || !strings.Contains(errs, want) || !strings.Contains(errs, "pass --settings "+path) {
+				t.Fatalf("exit=%d out=%q errs=%q", code, out, errs)
+			}
+			if strings.Contains(errs, "not in a git repository") {
+				t.Fatalf("failed probe reported as a non-repository: %q", errs)
+			}
+			if got, err := os.ReadFile(path); err != nil || string(got) != "{}\n" {
+				t.Fatalf("tracked file changed: %q %v", got, err)
+			}
+			installRun(t, u, "--client", "codex", "--profile", "p", "--write", "--settings", path)
+			if len(settingsCommands(t, readSettings(t, path), "SessionStart")) != 1 {
+				t.Fatal("explicit settings did not override guard")
+			}
+		})
+	}
+}
+
 func TestHookInstallCodexFallbackToCwd(t *testing.T) {
 	isolateGitEnv(t)
 	u := installUser(t)

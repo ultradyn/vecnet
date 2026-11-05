@@ -195,6 +195,10 @@ func (a *app) cmdHookInstall(args []string) error {
 		return cwdErr
 	}
 	codexRoot := ""
+	// codexUnknown records a repository-discovery failure that is not git's
+	// own "not a git repository" answer (git missing, timed out, refused the
+	// repository): the default target's tracking status is then unknown.
+	var codexUnknown error
 	if o.has("settings") {
 		if path == "" {
 			return usageErr("hook install: --settings must not be empty")
@@ -204,9 +208,17 @@ func (a *app) cmdHookInstall(args []string) error {
 		root, gitErr := a.hookGit(cwd, "--show-toplevel")
 		reason := "git top-level; Codex project hooks"
 		if gitErr != nil || root == "" {
+			if hookNotGitRepo(gitErr) {
+				fmt.Fprintf(a.stderr, "not in a git repository; using %s\n", cwd)
+			} else {
+				codexUnknown = gitErr
+				if codexUnknown == nil {
+					codexUnknown = errors.New("git printed no top-level")
+				}
+				fmt.Fprintf(a.stderr, "could not determine the git repository (%v); using %s\n", hookGitReason(codexUnknown), cwd)
+			}
 			root = cwd
 			reason = "cwd fallback; Codex project hooks"
-			fmt.Fprintf(a.stderr, "not in a git repository; using %s\n", cwd)
 		} else {
 			codexRoot = root
 		}
@@ -275,6 +287,9 @@ func (a *app) cmdHookInstall(args []string) error {
 		return nil
 	}
 	if !o.has("settings") {
+		if codexUnknown != nil {
+			return fmt.Errorf("hook install: cannot tell whether %s is tracked by git (repository discovery failed: %s); writing it could share your profile with everyone; pass --settings %s to write it anyway", path, hookGitReason(codexUnknown), path)
+		}
 		if codexRoot != "" {
 			if err := a.checkCodexUntracked(codexRoot, path); err != nil {
 				return err
@@ -444,10 +459,34 @@ func (a *app) hookGit(dir, arg string) (string, error) {
 	ctx, cancel := context.WithTimeout(a.ctx, 2*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", arg)
+	// Untranslated messages, so hookNotGitRepo can recognise git's answer.
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	// Also bound pipe teardown if a misbehaving git child retains stdout.
 	cmd.WaitDelay = 100 * time.Millisecond
 	out, err := cmd.Output()
+	if err != nil && ctx.Err() != nil {
+		err = fmt.Errorf("git timed out: %w", ctx.Err())
+	}
 	return strings.TrimSuffix(string(out), "\n"), err
+}
+
+// hookNotGitRepo reports whether err is git's own answer that the directory
+// is outside every repository. Any other failure (git missing, a timeout, a
+// refused repository such as dubious ownership) leaves the answer unknown.
+func hookNotGitRepo(err error) bool {
+	var exit *exec.ExitError
+	return errors.As(err, &exit) && exit.ExitCode() == 128 && bytes.Contains(exit.Stderr, []byte("not a git repository"))
+}
+
+// hookGitReason is a one-line description of a failed git probe.
+func hookGitReason(err error) string {
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		if line, _, _ := strings.Cut(strings.TrimSpace(string(exit.Stderr)), "\n"); line != "" {
+			return line
+		}
+	}
+	return err.Error()
 }
 
 // checkCodexUntracked allows only git's explicit untracked result. Discovery
