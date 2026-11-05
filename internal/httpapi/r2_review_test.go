@@ -3,14 +3,18 @@ package httpapi_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/blob"
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
 )
@@ -23,13 +27,20 @@ func TestR2HTTPHashOnlyStatusRequiresIDWithoutExistenceLeak(t *testing.T) {
 	for role, secret := range map[string]string{"owner": owner, "peer": stranger, "operator": f.env.OperatorSecret} {
 		t.Run(role, func(t *testing.T) {
 			for _, sha := range []string{g.SHA256, shaOf("unknown")} {
-				resp, raw := f.request(t, secret, "GET", "/v1/blobs/"+sha+"/status", nil, "")
-				if resp.StatusCode != 422 {
-					t.Fatalf("hash-only status = %d, want 422", resp.StatusCode)
-				}
-				requireCode(t, raw, "blob_id_required")
-				if strings.Contains(string(raw), "size") || strings.Contains(string(raw), "expires_at") {
-					t.Fatal("missing ID disclosed state")
+				for _, suffix := range []string{"/status", ""} {
+					resp, raw := f.request(t, secret, "GET", "/v1/blobs/"+sha+suffix, nil, "")
+					if resp.StatusCode != 422 {
+						t.Errorf("hash-only %q = %d, want 422", suffix, resp.StatusCode)
+					}
+					requireCode(t, raw, "blob_id_required")
+					for _, field := range []string{"size", "expires_at", "url", "retention_class", "state"} {
+						if strings.Contains(string(raw), `"`+field+`"`) {
+							t.Errorf("missing ID disclosed %s", field)
+						}
+					}
+					if resp.Header.Get("Location") != "" {
+						t.Error("missing ID redirected to a capability")
+					}
 				}
 			}
 		})
@@ -45,6 +56,10 @@ func TestR2HTTPHashOnlyStatusRequiresIDWithoutExistenceLeak(t *testing.T) {
 	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"state":"available"`) {
 		t.Fatal("grandfathered disk status changed")
 	}
+	resp, raw = f.request(t, f.env.OperatorSecret, "GET", "/v1/blobs/"+old.SHA256, nil, "")
+	if resp.StatusCode != 200 || string(raw) != "grandfathered status" {
+		t.Fatal("grandfathered disk legacy streaming changed")
+	}
 	// Auto-spilled durable message data also keeps its hash-only status.
 	recipient, recipientSecret := f.env.NewPeer("session", "durable reader")
 	resp, _ = f.request(t, owner, "POST", "/v1/messages", map[string]any{"idempotency_key": "durable-status", "priority": "hold", "recipients": []string{recipient}, "content": map[string]any{"text": strings.Repeat("x", 5000)}}, "")
@@ -54,6 +69,14 @@ func TestR2HTTPHashOnlyStatusRequiresIDWithoutExistenceLeak(t *testing.T) {
 	resp, raw = f.request(t, recipientSecret, "GET", "/v1/blobs/"+shaOf(strings.Repeat("x", 5000))+"/status", nil, "")
 	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"state":"available"`) {
 		t.Fatal("durable status changed")
+	}
+	resp, raw = f.request(t, recipientSecret, "GET", "/v1/blobs/"+shaOf(strings.Repeat("x", 5000)), nil, "")
+	if resp.StatusCode != 200 || string(raw) != strings.Repeat("x", 5000) {
+		t.Fatal("durable legacy streaming changed")
+	}
+	resp, _ = f.request(t, "", "GET", "/v1/blobs/"+g.SHA256, nil, "")
+	if resp.StatusCode != 401 {
+		t.Error("legacy GET must authenticate before requiring ID")
 	}
 }
 
@@ -107,13 +130,19 @@ func TestR2HTTPDiskRollbackPreservesRemoteDiscoveryAndRead(t *testing.T) {
 	if resp.StatusCode != 202 {
 		t.Fatal("retained send failed")
 	}
+	// Durable message bytes survive the same restart and remain attachable.
+	durableText := strings.Repeat("d", 5000)
+	resp, _ = f.request(t, owner, "POST", "/v1/messages", map[string]any{"idempotency_key": "rollback-durable", "priority": "hold", "recipients": []string{recipient}, "content": map[string]any{"text": durableText}}, "")
+	if resp.StatusCode != 202 {
+		t.Fatal("pre-restart durable spill failed")
+	}
 	f.env.Hub.Cfg.BlobBackend = "disk"
 	f.env = f.env.CloneDB(t) // restart in disk mode with retained remote credentials and references
 	for role, secret := range map[string]string{"owner": owner, "peer": reader, "operator": f.env.OperatorSecret} {
 		t.Run(role, func(t *testing.T) {
 			for _, sha := range []string{g.SHA256, shaOf("unknown rollback object")} {
-				for _, route := range []string{"status", "download"} {
-					resp, raw := f.request(t, secret, "GET", "/v1/blobs/"+sha+"/"+route, nil, "")
+				for _, route := range []string{"status", "download", ""} {
+					resp, raw := f.request(t, secret, "GET", "/v1/blobs/"+sha+strings.TrimSuffix("/"+route, "/"), nil, "")
 					if resp.StatusCode != 422 {
 						t.Errorf("rollback hash-only %s = %d, want 422", route, resp.StatusCode)
 					}
@@ -127,7 +156,34 @@ func TestR2HTTPDiskRollbackPreservesRemoteDiscoveryAndRead(t *testing.T) {
 			}
 		})
 	}
-	resp, raw := f.request(t, reader, "GET", "/v1/blob-capabilities", nil, "")
+	for i, sha := range []string{g.SHA256, shaOf("unknown rollback object")} {
+		attachment := map[string]any{"sha256": sha, "size": 3, "media_type": "text/plain"}
+		message := map[string]any{"idempotency_key": fmt.Sprintf("hash-only-rollback-%d", i), "priority": "hold", "recipients": []string{recipient}, "content": map[string]any{"text": "hash-only"}, "attachments": []any{attachment}}
+		resp, raw := f.request(t, owner, "POST", "/v1/messages", message, "")
+		if resp.StatusCode != 422 {
+			t.Errorf("rollback hash-only send = %d, want 422", resp.StatusCode)
+		}
+		requireCode(t, raw, "blob_id_required")
+		for _, field := range []string{"size", "expires_at", "url", "retention_class", "state"} {
+			if strings.Contains(string(raw), `"`+field+`"`) {
+				t.Errorf("hash-only send disclosed %s", field)
+			}
+		}
+		attachment["origin_url"] = "https://never-fetch.invalid/rollback"
+		resp, _ = f.request(t, owner, "POST", "/v1/messages", message, "")
+		if resp.StatusCode != 202 {
+			t.Error("disk rollback rejected reference-only origin")
+		}
+	}
+	resp, _ = f.request(t, owner, "POST", "/v1/messages", map[string]any{"idempotency_key": "rollback-durable-reference", "priority": "hold", "recipients": []string{recipient}, "content": map[string]any{"text": "durable reference"}, "attachments": []any{map[string]any{"sha256": shaOf(durableText), "size": len(durableText), "media_type": "text/markdown"}}}, "")
+	if resp.StatusCode != 202 {
+		t.Fatal("disk rollback rejected successful durable attachment")
+	}
+	resp, raw := f.request(t, reader, "GET", "/v1/blobs/"+shaOf(durableText), nil, "")
+	if resp.StatusCode != 200 || string(raw) != durableText {
+		t.Fatal("disk rollback changed durable legacy streaming")
+	}
+	resp, raw = f.request(t, reader, "GET", "/v1/blob-capabilities", nil, "")
 	var caps struct {
 		Backend    string   `json:"backend"`
 		UploadMode string   `json:"upload_mode"`
@@ -136,8 +192,8 @@ func TestR2HTTPDiskRollbackPreservesRemoteDiscoveryAndRead(t *testing.T) {
 	if json.Unmarshal(raw, &caps) != nil || resp.StatusCode != 200 || caps.Backend != "disk" || caps.UploadMode != "legacy" || len(caps.Origins) != 1 || caps.Origins[0] != fakeOrigin {
 		t.Fatal("rollback discovery omitted trusted remote origin or disk upload mode")
 	}
-	for _, route := range []string{"status", "download"} {
-		resp, _ := f.request(t, "", "GET", "/v1/blobs/"+g.SHA256+"/"+route, nil, "")
+	for _, route := range []string{"status", "download", ""} {
+		resp, _ := f.request(t, "", "GET", "/v1/blobs/"+g.SHA256+strings.TrimSuffix("/"+route, "/"), nil, "")
 		if resp.StatusCode != 401 && resp.StatusCode != 403 {
 			t.Error("missing ID must authenticate before disclosing an error")
 		}
@@ -167,6 +223,10 @@ func TestR2HTTPDiskRollbackPreservesRemoteDiscoveryAndRead(t *testing.T) {
 	resp, raw = f.request(t, f.env.OperatorSecret, "GET", localGrant.LocalPath, nil, "")
 	if resp.StatusCode != 200 || string(raw) != "new local upload" {
 		t.Fatal("local read failed")
+	}
+	resp, _ = f.request(t, owner, "POST", "/v1/messages", map[string]any{"idempotency_key": "rollback-local-send", "priority": "hold", "recipients": []string{recipient}, "content": map[string]any{"text": "local"}, "attachments": []any{map[string]any{"sha256": local.SHA256, "size": local.Size, "media_type": "text/plain"}}}, "")
+	if resp.StatusCode != 202 {
+		t.Fatal("disk rollback rejected successful local attachment")
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -378,5 +438,70 @@ func TestR2HTTPDownloadRechecksEligibilityAfterProviderWait(t *testing.T) {
 				t.Errorf("eligibility change issued=%d, byte GETs=%d", issued, gets)
 			}
 		})
+	}
+}
+
+// Fake-only HTTP quota coverage; this does not establish provider acceptance.
+func TestR2HTTPUploadDailyQuotaRetryUntilUTCMidnight(t *testing.T) {
+	f := newR2HTTP(t)
+	f.env.Hub.Cfg.R2.StorageQuotaBytes = 1 << 30
+	f.env = f.env.CloneDB(t)
+	_, secret := f.env.NewPeer("session", "quota uploader")
+	now := f.env.Now.Now().UTC()
+	start := time.Date(now.Year(), now.Month(), now.Day()+1, 23, 54, 0, 250000000, time.UTC)
+	f.env.Now.Advance(start.Sub(now))
+	in := blobwire.UploadRequest{Size: blob.DefaultMaxSize, SHA256: shaOf("quota reservation"), MediaType: "text/plain"}
+	// Twenty full reservations exhaust the default daily quota without moving
+	// object bytes. Expire their PUT deadlines so the active-grant cap cannot
+	// mask the daily-quota response.
+	for i := 0; i < 20; i++ {
+		resp, _ := f.request(t, secret, "POST", "/v1/blobs/uploads", in, fmt.Sprintf("daily-%d", i))
+		if resp.StatusCode != 201 {
+			t.Fatalf("reservation %d = %d, want 201", i, resp.StatusCode)
+		}
+	}
+	f.env.Now.Advance(5*time.Minute + 17*time.Second)
+	for i, retry := range []int{43, 13} {
+		resp, raw := f.request(t, secret, "POST", "/v1/blobs/uploads", in, fmt.Sprintf("over-daily-%d", i))
+		requireR2QuotaResponse(t, resp, raw, "upload_quota_exceeded", retry)
+		if i == 0 {
+			f.env.Now.Advance(30 * time.Second)
+		}
+	}
+	f.env.Now.Advance(13 * time.Second)
+	resp, _ := f.request(t, secret, "POST", "/v1/blobs/uploads", in, "next-utc-day")
+	if resp.StatusCode != 201 {
+		t.Fatalf("new UTC day reservation = %d, want 201", resp.StatusCode)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.calls) != 0 {
+		t.Fatal("quota-only grant requests contacted fake S3")
+	}
+}
+
+func requireR2QuotaResponse(t *testing.T, resp *http.Response, raw []byte, code string, retry int) {
+	t.Helper()
+	if resp.StatusCode != 429 {
+		t.Fatalf("quota response = %d, want 429", resp.StatusCode)
+	}
+	requireCode(t, raw, code)
+	var body struct {
+		Error struct {
+			Details struct {
+				RetryAfterSeconds int `json:"retry_after_seconds"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(raw, &body) != nil || body.Error.Details.RetryAfterSeconds != retry || resp.Header.Get("Retry-After") != strconv.Itoa(retry) {
+		t.Fatalf("quota retry header/detail must both equal %d", retry)
+	}
+	for _, field := range []string{"url", "upload", "size", "expires_at"} {
+		if strings.Contains(string(raw), `"`+field+`"`) {
+			t.Errorf("quota refusal disclosed %s", field)
+		}
+	}
+	if resp.Header.Get("Location") != "" {
+		t.Error("quota refusal redirected to a capability")
 	}
 }

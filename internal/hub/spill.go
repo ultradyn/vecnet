@@ -220,7 +220,8 @@ func (h *Hub) checkAttachments(ctx context.Context, tx *sql.Tx, snd sender, atts
 			if a.OriginURL != "" {
 				continue
 			}
-			if h.Cfg.BlobBackend == "r2" {
+			if h.Blobs.Transfers != nil {
+				// Retained remote transfers still require IDs after disk rollback.
 				// Uniform for known and unknown hashes: presence is not a capability.
 				return nil, E(422, "blob_id_required", "blob_id is required for remote attachments")
 			}

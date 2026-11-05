@@ -217,10 +217,7 @@ func (h *Hub) BlobDownload(ctx context.Context, c *auth.Caller, token, sha, id s
 	if id == "" {
 		f, m, err := h.ReadBlob(ctx, c, token, sha)
 		if err != nil {
-			if h.blobIDRequired(ctx, c, err) {
-				return blobwire.DownloadGrant{}, E(422, "blob_id_required", "blob_id is required for remote downloads")
-			}
-			return blobwire.DownloadGrant{}, err
+			return blobwire.DownloadGrant{}, h.BlobReadError(ctx, c, err)
 		}
 		f.Close()
 		return blobwire.DownloadGrant{SHA256: sha, Size: m.Size, MediaType: m.MediaType, LocalPath: "/v1/blobs/" + sha}, nil
@@ -270,11 +267,15 @@ func (h *Hub) BlobDownload(ctx context.Context, c *auth.Caller, token, sha, id s
 	return blobwire.DownloadGrant{BlobID: id, SHA256: sha, SHA256Verified: &verified, Integrity: &blobwire.Integrity{Algorithm: "sha256", Value: sha, Verified: verified}, Size: o.Size, URL: request.URL, Method: request.Method, ExpiresAt: request.ExpiresAt, ObjectExpiresAt: expiry, MediaType: o.MediaType, RetentionClass: o.RetentionClass}, nil
 }
 
-// blobIDRequired maps failed hash-only lookups uniformly for authenticated remote-transfer
-// callers, without querying remote metadata or changing successful local reads.
-func (h *Hub) blobIDRequired(ctx context.Context, c *auth.Caller, err error) bool {
+// BlobReadError maps failed hash-only transfer lookups uniformly for authenticated
+// callers while remote transfers remain configured. Successful local reads and
+// the underlying ReadBlob authorization/error contract remain unchanged.
+func (h *Hub) BlobReadError(ctx context.Context, c *auth.Caller, err error) error {
 	var apiErr *APIError
-	return h.Blobs.Transfers != nil && c != nil && h.callerActive(ctx, h.DB, *c) && errors.As(err, &apiErr) && (apiErr.Code == "forbidden" || apiErr.Code == "unknown_blob")
+	if h.Blobs.Transfers != nil && c != nil && errors.As(err, &apiErr) && (apiErr.Code == "forbidden" || apiErr.Code == "unknown_blob") && h.callerActive(ctx, h.DB, *c) {
+		return E(422, "blob_id_required", "blob_id is required for remote reads")
+	}
+	return err
 }
 
 func (h *Hub) BlobStatus(ctx context.Context, c auth.Caller, sha, id string) (blobwire.State, error) {
@@ -284,10 +285,7 @@ func (h *Hub) BlobStatus(ctx context.Context, c auth.Caller, sha, id string) (bl
 	if id == "" {
 		f, _, err := h.ReadBlob(ctx, &c, "", sha)
 		if err != nil {
-			if h.blobIDRequired(ctx, &c, err) {
-				return blobwire.State{}, E(422, "blob_id_required", "blob_id is required for remote status")
-			}
-			return blobwire.State{}, err
+			return blobwire.State{}, h.BlobReadError(ctx, &c, err)
 		}
 		f.Close()
 		return blobwire.State{State: "available"}, nil

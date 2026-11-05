@@ -101,7 +101,7 @@ func (s *server) getBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	f, m, err := s.Hub.ReadBlob(r.Context(), caller, r.URL.Query().Get("t"), r.PathValue("sha"))
 	if err != nil {
-		writeError(w, err)
+		writeError(w, s.Hub.BlobReadError(r.Context(), caller, err))
 		return
 	}
 	defer f.Close()

@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -669,31 +668,26 @@ func TestR2HTTPQuotaRestartStrictBodyAndCapabilities(t *testing.T) {
 	}
 	// Restart below existing usage must preserve object metadata and references,
 	// reject new grants, and still permit downloads without provider writes.
-	cfg := e.Hub.Cfg
-	cfg.R2.StorageQuotaBytes = 2
-	restarted, err := hub.New(e.Hub.DB, cfg, e.Now.Now)
-	if err != nil {
-		t.Fatal(err)
+	e.Hub.Cfg.R2.StorageQuotaBytes = 2
+	f.env = e.CloneDB(t)
+	e = f.env
+	f.mu.Lock()
+	before := map[string]int{}
+	for method, count := range f.calls {
+		before[method] = count
 	}
-	c, err := restarted.Auth.Resolve(context.Background(), secret)
-	if err != nil {
-		t.Fatal(err)
+	f.mu.Unlock()
+	resp, raw = f.request(t, secret, "POST", "/v1/blobs/uploads", blobwire.UploadRequest{Size: 3, SHA256: g.SHA256, MediaType: "text/plain"}, "over-limit")
+	requireR2QuotaResponse(t, resp, raw, "blob_storage_quota_exceeded", 1)
+	f.mu.Lock()
+	for method, count := range f.calls {
+		if count != before[method] {
+			t.Error("storage quota refusal contacted fake S3")
+		}
 	}
-	_, err = restarted.CreateBlobUpload(context.Background(), c, "over-limit", blobwire.UploadRequest{Size: 3, SHA256: g.SHA256, MediaType: "text/plain"})
-	var apiErr *hub.APIError
-	if !errors.As(err, &apiErr) || apiErr.Code != "blob_storage_quota_exceeded" || apiErr.Status != 429 || apiErr.Details["retry_after_seconds"] == nil {
-		t.Fatal("over-limit restart accepted grant")
-	}
-	if _, err = restarted.BlobDownload(context.Background(), &c, "", g.SHA256, g.BlobID); err != nil {
-		t.Fatal("over-limit restart lost read")
-	}
-	reader, err := restarted.Auth.Resolve(context.Background(), recipientSecret)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = restarted.BlobDownload(context.Background(), &reader, "", g.SHA256, g.BlobID); err != nil {
-		t.Fatal("over-limit restart deleted reference access")
-	}
+	f.mu.Unlock()
+	f.download(t, secret, g)
+	f.download(t, recipientSecret, g)
 
 	resp, raw = f.request(t, secret, "POST", g.CompleteURL, map[string]any{"url": "https://foreign.invalid"}, "")
 	if resp.StatusCode != 400 {
@@ -703,7 +697,7 @@ func TestR2HTTPQuotaRestartStrictBodyAndCapabilities(t *testing.T) {
 	req, _ := http.NewRequest("POST", e.URL+"/v1/blobs/uploads", strings.NewReader(`{}`))
 	req.Header.Set("Origin", "https://foreign.invalid")
 	req.Header.Set("Authorization", "Bearer "+secret)
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal("origin request failed")
 	}
