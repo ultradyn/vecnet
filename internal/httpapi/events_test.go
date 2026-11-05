@@ -513,9 +513,11 @@ func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
 	s := openSSE(t, env, bSec, "", nil)
 	waitStreams(t, 1)
 
-	// Race instrumentation adds substantial per-send SQLite work. Bound each
-	// request independently and allow the aggregate enough room for that work;
-	// the interleaved control still detects stream-specific slowdown.
+	// Coordinator decision (2026-11-05): the stream-specific guarantee is the
+	// per-send deadlock watchdog plus the interleaved no-stream comparison
+	// below. The absolute aggregate is only a coarse ceiling for stalls
+	// shared by both paths; 5s flaked under -race on loaded build boxes, so
+	// it is 30s. Other branches converge on this version at integration.
 	const n, perSend, aggregate = 200, 5 * time.Second, 30 * time.Second
 	send := func(key, to string, budget time.Duration) time.Duration {
 		t.Helper()
