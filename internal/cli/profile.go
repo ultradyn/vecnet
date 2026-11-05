@@ -33,18 +33,18 @@ func (a *app) profileSelection() (path, name string, p Profile, err error) {
 }
 func (a *app) cmdProfile(args []string) error {
 	if len(args) == 0 {
-		return usageErr("usage: vecnet profile show|pin|repoint URL")
+		return usageErr("usage: vecnet profile show|pin|repoint URL|follow")
 	}
 	var flags map[string]flagKind
 	switch args[0] {
-	case "show":
+	case "show", "follow":
 		flags = map[string]flagKind{}
 	case "pin":
 		flags = map[string]flagKind{"accept": strFlag}
 	case "repoint":
 		flags = map[string]flagKind{"force": boolFlag}
 	default:
-		return usageErr("usage: vecnet profile show|pin|repoint URL")
+		return usageErr("usage: vecnet profile show|pin|repoint URL|follow")
 	}
 	o, err := parseFlags("profile "+args[0], args[1:], flags)
 	if err != nil {
@@ -55,11 +55,25 @@ func (a *app) cmdProfile(args []string) error {
 		want = 1
 	}
 	if len(o.pos) != want {
-		return usageErr("usage: vecnet profile show|pin [--accept FP]|repoint URL [--force]")
+		return usageErr("usage: vecnet profile show|pin [--accept FP]|repoint URL [--force]|follow")
 	}
 	path, name, p, err := a.profileSelection()
 	if err != nil {
 		return err
+	}
+	if args[0] == "follow" {
+		c := newClient(p.Hub, p.Secret)
+		notices, err := a.activeNotices(c)
+		if err != nil {
+			return err
+		}
+		for i := len(notices) - 1; i >= 0; i-- {
+			if notices[i].Kind == "moving" {
+				_, err = a.follow(a.ctx, name, p, notices[i])
+				return err
+			}
+		}
+		return &relocationError{Code: "relocation_unverified", Reason: "hub has no active moving notice"}
 	}
 	pin, how := a.effectivePin(name, p)
 	if args[0] == "show" {

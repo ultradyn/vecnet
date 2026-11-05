@@ -1,0 +1,516 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/testhub"
+)
+
+func followConfig(t *testing.T, e *testhub.Env) (string, func(string) string) {
+	t.Helper()
+	return pinTestEnv(t, fmt.Sprintf("# keep\n[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n", e.URL, e.Hub.IdentityKey().Pubkey(), e.OperatorSecret))
+}
+func TestFollowOn410(t *testing.T) {
+	a := testhub.Start(t)
+	b := a.CloneDB(t)
+	path, env := followConfig(t, a)
+	before := pinRead(t, path)
+	a.Relocate(t, b.URL)
+	code, out, errs := pinRun(env, "--net", "p", "peers")
+	if code != 0 || !strings.Contains(out, b.OperatorPeer) {
+		t.Fatalf("%d %s %s", code, out, errs)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil || cfg.Profiles["p"].Hub != b.URL || cfg.Profiles["p"].HubPubkey != a.Hub.IdentityKey().Pubkey() {
+		t.Fatalf("config %+v %v", cfg, err)
+	}
+	if !bytes.Equal(pinRead(t, path+".bak"), before) || strings.Count(strings.TrimSpace(errs), "\n") != 0 || !strings.Contains(errs, "verified") {
+		t.Fatalf("backup or move output: %q", errs)
+	}
+	pp, _ := pinsPath(env)
+	records, err := readPins(pp)
+	if err != nil || records["p"].LastMove == nil || records["p"].LastMove.To != b.URL {
+		t.Fatalf("move record: %+v %v", records, err)
+	}
+}
+func TestFollowAllProfilesSameHub(t *testing.T) {
+	a := testhub.Start(t)
+	b := a.CloneDB(t)
+	c := testhub.Start(t)
+	r := fmt.Sprintf("[profiles.r]\n# untouched r\nhub = %q # keep\nsecret = %q\n", c.URL, c.OperatorSecret)
+	body := fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n[profiles.q]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n", a.URL, a.Hub.IdentityKey().Pubkey(), a.OperatorSecret, a.URL+"/", a.Hub.IdentityKey().Pubkey(), a.OperatorSecret) + r
+	path, env := pinTestEnv(t, body)
+	a.Relocate(t, b.URL)
+	if code, _, errs := pinRun(env, "peers"); code != 0 {
+		t.Fatalf("%d %s", code, errs)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil || cfg.Profiles["p"].Hub != b.URL || cfg.Profiles["q"].Hub != b.URL || !strings.HasSuffix(string(pinRead(t, path)), r) {
+		t.Fatalf("profiles: %+v %v", cfg, err)
+	}
+}
+
+func refusedMove(t *testing.T, mode string) {
+	t.Helper()
+	key := testIdentityKey(t, "1")
+	other := testIdentityKey(t, "2")
+	targetKey := key
+	if mode == "key" {
+		targetKey = other
+	}
+	target, calls := identityStub(t, targetKey, nil)
+	destination := target.URL
+	if mode == "public" {
+		upstream, _ := url.Parse(target.URL)
+		proxy := httptest.NewServer(httputil.NewSingleHostReverseProxy(upstream))
+		t.Cleanup(proxy.Close)
+		destination = proxy.URL
+	}
+	var n envelope.HubNotice
+	var source *httptest.Server
+	source = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/hub/identity" {
+			sig, _ := key.SignChallenge(source.URL, r.URL.Query().Get("challenge"))
+			json.NewEncoder(w).Encode(envelope.HubIdentity{Pubkey: key.Pubkey(), PublicURL: source.URL, ChallengeSig: sig})
+			return
+		}
+		w.WriteHeader(410)
+		json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "hub_moved", "message": "moved", "details": map[string]any{"notice": n}}})
+	}))
+	defer source.Close()
+	n = envelope.HubNotice{NoticeID: "ntc_01ARZ3NDEKTSV4RRFFQ69G5FAV", Kind: "moving", Hub: source.URL, NewURL: destination, Message: "move", IssuedAt: envelope.FormatTime(time.Now().Add(-time.Second)), ExpiresAt: envelope.FormatTime(time.Now().Add(time.Hour))}
+	if err := key.SignNotice(&n); err != nil {
+		t.Fatal(err)
+	}
+	if mode == "signature" {
+		n.NewURL = target.URL + "/tampered"
+	}
+	body := fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = \"secret\"\n", source.URL, key.Pubkey())
+	path, env := pinTestEnv(t, body)
+	if mode == "replay" {
+		a := &app{ctx: context.Background(), getenv: env}
+		if err := a.updatePins(func(m map[string]pinRecord) error {
+			m["p"] = pinRecord{Hub: source.URL, Pubkey: key.Pubkey(), LastMove: &moveRecord{IssuedAt: n.IssuedAt}}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, _, errs := pinRun(env, "peers")
+	if code != 1 || !strings.Contains(errs, "relocation_unverified") || string(pinRead(t, path)) != body {
+		t.Fatalf("%s: %d %s config=%s", mode, code, errs, pinRead(t, path))
+	}
+	if (mode == "signature" || mode == "replay") && calls.Load() != 0 {
+		t.Fatalf("unverified target contacted: %d", calls.Load())
+	}
+}
+func TestFollowRefusesBadSignature(t *testing.T)      { refusedMove(t, "signature") }
+func TestFollowRefusesKeyMismatch(t *testing.T)       { refusedMove(t, "key") }
+func TestFollowRefusesPublicURLMismatch(t *testing.T) { refusedMove(t, "public") }
+func TestFollowRefusesReplay(t *testing.T)            { refusedMove(t, "replay") }
+func TestNoFollowEnv(t *testing.T) {
+	a := testhub.Start(t)
+	b := a.CloneDB(t)
+	path, base := followConfig(t, a)
+	before := pinRead(t, path)
+	a.Relocate(t, b.URL)
+	env := func(k string) string {
+		if k == "VECNET_NO_FOLLOW" {
+			return "1"
+		}
+		return base(k)
+	}
+	if code, _, errs := pinRun(env, "peers"); code != 1 || !strings.Contains(errs, "vecnet --net p profile follow") || !bytes.Equal(before, pinRead(t, path)) {
+		t.Fatalf("%d %s", code, errs)
+	}
+	if code, _, errs := pinRun(env, "profile", "follow"); code != 0 {
+		t.Fatalf("explicit follow: %d %s", code, errs)
+	}
+	cfg, _ := loadConfig(path)
+	if cfg.Profiles["p"].Hub != b.URL {
+		t.Fatal(cfg)
+	}
+}
+func TestDispatchNoRetryAfterStdin(t *testing.T) {
+	a := testhub.Start(t)
+	id, _ := a.NewPeer("session", "Receiver")
+	b := a.CloneDB(t)
+	path, env := followConfig(t, a)
+	a.Relocate(t, b.URL)
+	var out, errs bytes.Buffer
+	code := Run([]string{"send", id, "-", "--hold"}, strings.NewReader("never resend"), &out, &errs, env)
+	if code != 1 || !strings.Contains(errs.String(), "re-run the command") {
+		t.Fatalf("%d %s", code, errs.String())
+	}
+	cfg, _ := loadConfig(path)
+	if cfg.Profiles["p"].Hub != b.URL {
+		t.Fatal(cfg)
+	}
+	resp, raw := b.Do(b.OperatorSecret, "GET", "/v1/threads", nil)
+	var threads struct {
+		Threads []json.RawMessage `json:"threads"`
+	}
+	if resp.StatusCode != 200 || json.Unmarshal(raw, &threads) != nil || len(threads.Threads) != 0 {
+		t.Fatalf("resent: %s", raw)
+	}
+}
+
+// These watchers exercise the CLI boundary, with isolated config and output.
+type noticeOutput struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *noticeOutput) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+func (b *noticeOutput) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.b.String() }
+func awaitNotice(t *testing.T, condition func() bool, max time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(max)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for watch condition")
+}
+func runNoticeWatch(t *testing.T, env func(string) string) (*noticeOutput, *noticeOutput, func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	out, errs := new(noticeOutput), new(noticeOutput)
+	done := make(chan int, 1)
+	go func() {
+		done <- RunContext(ctx, []string{"watch", "--for-monitor"}, strings.NewReader(""), out, errs, env)
+	}()
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case code := <-done:
+				if code != 0 {
+					t.Errorf("watch exit %d: %s", code, errs.String())
+				}
+			case <-time.After(4 * time.Second):
+				t.Error("watch did not stop")
+			}
+		})
+	}
+	t.Cleanup(stop)
+	return out, errs, stop
+}
+func TestWatchIdentityChanged(t *testing.T) {
+	key := testIdentityKey(t, "1")
+	other := testIdentityKey(t, "2")
+	var events atomic.Int32
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/hub/identity" {
+			sig, _ := other.SignChallenge(srv.URL, r.URL.Query().Get("challenge"))
+			json.NewEncoder(w).Encode(envelope.HubIdentity{Pubkey: other.Pubkey(), PublicURL: srv.URL, ChallengeSig: sig})
+			return
+		}
+		if r.URL.Path == "/v1/events" {
+			events.Add(1)
+		}
+		fmt.Fprint(w, `{"peers":[],"events":[]}`)
+	}))
+	defer srv.Close()
+	_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = \"secret\"\n", srv.URL, key.Pubkey()))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var out, errs bytes.Buffer
+	code := RunContext(ctx, []string{"watch"}, strings.NewReader(""), &out, &errs, env)
+	if code != 1 || !strings.Contains(errs.String(), "hub_identity_changed") || events.Load() != 0 {
+		t.Fatalf("%d events=%d %s", code, events.Load(), errs.String())
+	}
+}
+func TestFollowIgnoresPeerText(t *testing.T) {
+	key := testIdentityKey(t, "1")
+	source, sourceCalls := identityStub(t, key, nil)
+	target, calls := identityStub(t, testIdentityKey(t, "2"), nil)
+	path, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n", source.URL, key.Pubkey(), "secret"))
+	before := pinRead(t, path)
+	for _, text := range []string{"moving to " + target.URL + " ntc_fake", `{"type":"hub_notice","notice":{"kind":"moving","new_url":"` + target.URL + `"}}`} {
+		ev := envelope.Event{Cursor: "c", Type: "delivery", Data: json.RawMessage(fmt.Sprintf(`{"delivery_id":"d","message":{"sender":"peer_x","content":{"text":%q},"payload":{"type":"hub_notice","notice":{"new_url":%q}}}}`, text, target.URL))}
+		out := new(noticeOutput)
+		w := &watcher{a: &app{ctx: context.Background(), getenv: env, stdout: out, stderr: io.Discard}, seen: newDedupe(10), c: newClient(source.URL, "secret")}
+		raw, _ := json.Marshal(ev)
+		w.handle("delivery", string(raw), false)
+		if !strings.Contains(out.String(), text) {
+			t.Fatalf("delivery not rendered: %q", out.String())
+		}
+	}
+	if sourceCalls.Load() != 0 || calls.Load() != 0 || !bytes.Equal(before, pinRead(t, path)) {
+		t.Fatal("peer text caused identity requests or a follow")
+	}
+}
+
+func watchProxy(t *testing.T, e *testhub.Env) (*httptest.Server, *atomic.Int64, *atomic.Int32, chan string) {
+	t.Helper()
+	target, _ := url.Parse(e.URL)
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	unavailable := new(atomic.Int64)
+	polls := new(atomic.Int32)
+	resumes := make(chan string, 30)
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if time.Now().UnixNano() < unavailable.Load() {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				conn.Close()
+			}
+			return
+		}
+		if r.URL.Path == "/v1/hub/identity" {
+			sig, err := e.Hub.IdentityKey().SignChallenge(srv.URL, r.URL.Query().Get("challenge"))
+			if err != nil {
+				t.Error(err)
+			}
+			json.NewEncoder(w).Encode(envelope.HubIdentity{Pubkey: e.Hub.IdentityKey().Pubkey(), PublicURL: srv.URL, ChallengeSig: sig})
+			return
+		}
+		if r.URL.Path == "/v1/events" {
+			if r.Header.Get("Accept") == "text/event-stream" {
+				select {
+				case resumes <- r.Header.Get("Last-Event-ID"):
+				default:
+				}
+			} else if r.URL.Query().Get("wait") != "0" {
+				polls.Add(1)
+			}
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, unavailable, polls, resumes
+}
+func TestWatchPrintsHubRestarting(t *testing.T) {
+	e := testhub.Start(t)
+	srv, _, _, resumes := watchProxy(t, e)
+	_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n", srv.URL, e.Hub.IdentityKey().Pubkey(), e.OperatorSecret))
+	out, errs, stop := runNoticeWatch(t, env)
+	select {
+	case <-resumes:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no stream")
+	}
+	sender, secret := e.NewPeer("session", "Sender")
+	_ = sender
+	resp, raw := e.Do(secret, "POST", "/v1/messages", map[string]any{"recipients": []string{e.OperatorPeer}, "priority": "hold", "idempotency_key": fmt.Sprint(time.Now().UnixNano()), "content": map[string]string{"text": "before restart"}})
+	if resp.StatusCode != 202 {
+		t.Fatalf("send: %d %s", resp.StatusCode, raw)
+	}
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "before restart") }, 5*time.Second)
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	cursor := strings.Fields(lines[len(lines)-1])[0]
+	e.Drain.Announce(time.Second)
+	awaitNotice(t, func() bool {
+		return strings.Contains(out.String(), "- hub_restarting - hub hub: restarting; reconnecting in ~1s")
+	}, 5*time.Second)
+	e.Drain.Reset()
+	select {
+	case resume := <-resumes:
+		if resume != cursor {
+			t.Fatalf("Last-Event-ID=%q want %q", resume, cursor)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no reconnect")
+	}
+	resp, raw = e.Do(secret, "POST", "/v1/messages", map[string]any{"recipients": []string{e.OperatorPeer}, "priority": "hold", "idempotency_key": fmt.Sprint(time.Now().UnixNano()), "content": map[string]string{"text": "after restart"}})
+	if resp.StatusCode != 202 {
+		t.Fatalf("send: %d %s", resp.StatusCode, raw)
+	}
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "after restart") }, 5*time.Second)
+	stop()
+	if strings.Contains(errs.String(), "reconnecting") {
+		t.Fatalf("restart counted as failure: %s", errs.String())
+	}
+}
+func TestWatchRestartGraceNoFallback(t *testing.T) {
+	e := testhub.Start(t)
+	srv, unavailable, polls, resumes := watchProxy(t, e)
+	_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n", srv.URL, e.Hub.IdentityKey().Pubkey(), e.OperatorSecret))
+	out, errs, stop := runNoticeWatch(t, env)
+	select {
+	case <-resumes:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no stream")
+	}
+	e.Drain.Announce(time.Second)
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "hub hub: restarting; reconnecting") }, 5*time.Second)
+	unavailable.Store(time.Now().Add(3 * time.Second).UnixNano())
+	e.Drain.Reset()
+	select {
+	case <-resumes:
+	case <-time.After(9 * time.Second):
+		t.Fatal("no resumed SSE")
+	}
+	stop()
+	if polls.Load() != 0 || strings.TrimSpace(errs.String()) == "" || strings.Count(strings.TrimSpace(errs.String()), "\n") > 0 || strings.Contains(errs.String(), "reconnecting") {
+		t.Fatalf("fallback=%d stderr=%q", polls.Load(), errs.String())
+	}
+}
+func TestWatchFollowsAtTime(t *testing.T) {
+	a := testhub.Start(t)
+	b := a.CloneDB(t)
+	srv, _, _, resumes := watchProxy(t, a)
+	a.Hub.Cfg.PublicURL = srv.URL
+	path, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n", srv.URL, a.Hub.IdentityKey().Pubkey(), a.OperatorSecret))
+	out, _, stop := runNoticeWatch(t, env)
+	select {
+	case <-resumes:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no initial stream")
+	}
+	// A notice posted while connected must refresh the active list and arm its timer.
+	at := envelope.FormatTime(time.Now().Add(time.Second))
+	resp, raw := a.Do(a.OperatorSecret, "POST", "/v1/admin/notices", map[string]any{"kind": "moving", "message": "Move now", "at": at, "new_url": b.URL})
+	if resp.StatusCode != 201 {
+		t.Fatalf("notice: %d %s", resp.StatusCode, raw)
+	}
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "- hub_moved - hub hub:") }, 34*time.Second)
+	cfg, _ := loadConfig(path)
+	if cfg.Profiles["p"].Hub != b.URL {
+		t.Fatalf("not followed: %+v", cfg)
+	}
+	_, secret := b.NewPeer("session", "New sender")
+	resp, raw = b.Do(secret, "POST", "/v1/messages", map[string]any{"recipients": []string{b.OperatorPeer}, "priority": "hold", "idempotency_key": fmt.Sprint(time.Now().UnixNano()), "content": map[string]string{"text": "delivery at B"}})
+	if resp.StatusCode != 202 {
+		t.Fatalf("send: %d %s", resp.StatusCode, raw)
+	}
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "delivery at B") }, 5*time.Second)
+	stop()
+}
+
+func TestWatchStartupMovingNotice(t *testing.T) {
+	a := testhub.Start(t)
+	b := a.CloneDB(t)
+	path, env := followConfig(t, a)
+	resp, raw := a.Do(a.OperatorSecret, "POST", "/v1/admin/notices", map[string]any{"kind": "moving", "message": "already scheduled", "at": envelope.FormatTime(time.Now().Add(-31 * time.Second)), "new_url": b.URL})
+	if resp.StatusCode != 201 {
+		t.Fatalf("notice: %d %s", resp.StatusCode, raw)
+	}
+	out, _, stop := runNoticeWatch(t, env)
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "hub_moved") }, 5*time.Second)
+	stop()
+	cfg, err := loadConfig(path)
+	if err != nil || cfg.Profiles["p"].Hub != b.URL {
+		t.Fatalf("%+v %v", cfg, err)
+	}
+}
+
+func TestWatchLongPollRestartHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/events" || r.URL.Query().Get("wait") != "25" || r.URL.Query().Get("after") != "previous" {
+			t.Errorf("unexpected request: %s", r.URL)
+		}
+		fmt.Fprint(w, `{"events":[],"next_cursor":"last","hub_restarting":{"retry_after_ms":1000}}`)
+	}))
+	defer srv.Close()
+	out, errs := new(noticeOutput), new(noticeOutput)
+	w := &watcher{a: &app{ctx: context.Background(), stdout: out, stderr: errs}, c: newClient(srv.URL, ""), cursor: "previous", forMonitor: true}
+	before := time.Now()
+	if err := w.longPoll(); err != errRestarting {
+		t.Fatalf("restart outcome: %v", err)
+	}
+	if w.cursor != "last" || w.restartUntil.Before(before.Add(61*time.Second)) || w.restartDelay < 800*time.Millisecond || w.restartDelay > 1200*time.Millisecond || !strings.Contains(out.String(), "- hub_restarting - hub hub: restarting; reconnecting in ~1s") || errs.String() != "" {
+		t.Fatalf("cursor=%s delay=%s grace=%s stdout=%q stderr=%q", w.cursor, w.restartDelay, w.restartUntil, out.String(), errs.String())
+	}
+}
+
+func TestWatchFollowOn410(t *testing.T) {
+	a := testhub.Start(t)
+	b := a.CloneDB(t)
+	path, env := followConfig(t, a)
+	a.Relocate(t, b.URL)
+	out, _, stop := runNoticeWatch(t, env)
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "- hub_moved - hub hub:") }, 5*time.Second)
+	stop()
+	cfg, err := loadConfig(path)
+	if err != nil || cfg.Profiles["p"].Hub != b.URL {
+		t.Fatalf("%+v %v", cfg, err)
+	}
+}
+
+func TestWatchIdentityRotation(t *testing.T) {
+	old, next := testIdentityKey(t, "1"), testIdentityKey(t, "2")
+	at := envelope.FormatTime(time.Now())
+	srv, _ := identityStub(t, next, func(doc *envelope.HubIdentity) {
+		doc.Previous = &envelope.HubKeyPrevious{Pubkey: old.Pubkey(), RotatedAt: at, Endorsement: old.Endorse(next.Pubkey(), at)}
+	})
+	path, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = \"secret\"\n", srv.URL, old.Pubkey()))
+	// The fixture's events endpoint answers 404, after successful identity proof.
+	code, _, errs := pinRun(env, "watch")
+	cfg, err := loadConfig(path)
+	if code != 2 || strings.Contains(errs, "hub_identity_changed") || err != nil || cfg.Profiles["p"].HubPubkey != next.Pubkey() {
+		t.Fatalf("rotation: %d %+v %v %s", code, cfg, err, errs)
+	}
+	pp, _ := pinsPath(env)
+	pins, err := readPins(pp)
+	if err != nil || pins["p"].How != "rotation" || pins["p"].Pubkey != next.Pubkey() {
+		t.Fatalf("rotation pin: %+v %v", pins, err)
+	}
+}
+
+func TestFollowAcceptsEndorsedRotation(t *testing.T) {
+	old, next := testIdentityKey(t, "1"), testIdentityKey(t, "2")
+	at := envelope.FormatTime(time.Now())
+	source, sourceCalls := identityStub(t, old, nil)
+	target, _ := identityStub(t, next, func(doc *envelope.HubIdentity) {
+		doc.Previous = &envelope.HubKeyPrevious{Pubkey: old.Pubkey(), RotatedAt: at, Endorsement: old.Endorse(next.Pubkey(), at)}
+	})
+	path, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = \"secret\"\n", source.URL, old.Pubkey()))
+	n := envelope.HubNotice{NoticeID: "ntc_01ARZ3NDEKTSV4RRFFQ69G5FAV", Kind: "moving", Hub: source.URL, NewURL: target.URL, Message: "move", IssuedAt: at, ExpiresAt: envelope.FormatTime(time.Now().Add(time.Hour))}
+	if err := old.SignNotice(&n); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{ctx: context.Background(), getenv: env, stdout: io.Discard, stderr: io.Discard}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.follow(a.ctx, "p", cfg.Profiles["p"], n)
+	if err != nil || got != target.URL {
+		t.Fatalf("endorsed destination: %q %v", got, err)
+	}
+	cfg, err = loadConfig(path)
+	if err != nil || cfg.Profiles["p"].Hub != target.URL || cfg.Profiles["p"].HubPubkey != old.Pubkey() || sourceCalls.Load() != 0 {
+		t.Fatalf("move config: %+v %v source probes=%d", cfg, err, sourceCalls.Load())
+	}
+}
+
+func TestWatchRestartFrameBeforeEOF(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Buffer enough comments that the reader can reach EOF while complete
+		// frame lines are still queued for the SSE dispatcher.
+		fmt.Fprint(w, strings.Repeat(": hb\n", 100)+"event: hub_restarting\ndata: {\"retry_after_ms\":1000}\n\n")
+	}))
+	defer srv.Close()
+	for i := 0; i < 32; i++ {
+		out := new(noticeOutput)
+		w := &watcher{a: &app{ctx: context.Background(), stdout: out, stderr: io.Discard}, c: newClient(srv.URL, ""), forMonitor: true}
+		if err := w.stream(); err != errRestarting || !strings.Contains(out.String(), "- hub_restarting - hub hub:") {
+			t.Fatalf("frame dropped before EOF on attempt %d: %v %q", i, err, out.String())
+		}
+	}
+}

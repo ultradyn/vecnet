@@ -79,11 +79,13 @@ messaging:
        (preferred: keeps it out of shell history and ps); else $VECNET_ENROL_TOKEN
        --name N picks your display name when the invite leaves it open (once);
        the profile then defaults to its lowercase slug
-  profile show | pin [--accept FP] | repoint URL [--force]
+  profile show | pin [--accept FP] | repoint URL [--force] | follow
        inspect or pin the hub identity, or verify a new hub URL before repointing
   guide [--net P]                                    the agent manual, filled in for profile P; needs no config
 
 admin (operator credential):
+  notice post --kind K --message TEXT [--at TIME] [--new-url URL] [--expires DUR|TIME]
+  notice list | clear (ID | --kind K)
   principal add --name N
   principal limits <prn> --max-peers N --creates-per-hour N --kinds K[,K]
   principal scope <prn> [--allow IDS] [--deny IDS]
@@ -156,10 +158,11 @@ type app struct {
 	stdout, stderr io.Writer
 	getenv         func(string) string
 
-	net, as string // --net, --as
-	json    bool   // --json
-	inHook  bool   // hooks never TOFU or rewrite trust state
-	inMCP   bool   // stdio relay startup refusals must make no requests
+	net, as       string // --net, --as
+	json          bool   // --json
+	inHook        bool   // hooks never TOFU or rewrite trust state
+	stdinConsumed bool   // a retry cannot consume stdin again
+	inMCP         bool   // stdio relay startup refusals must make no requests
 }
 
 // exit prints err and maps it to an exit code.
@@ -419,9 +422,29 @@ func (a *app) ok(human string) error {
 
 // dispatch runs one command.
 func (a *app) dispatch(cmd string, args []string) error {
+	err := a.dispatchOnce(cmd, args)
+	if cmd == "watch" || cmd == "hook" || cmd == "mcp" || cmd == "profile" {
+		return err
+	}
+	followed, followErr := a.followFailure(err)
+	if !followed {
+		return err
+	}
+	if followErr != nil {
+		return followErr
+	}
+	if a.stdinConsumed {
+		return usageErr("hub followed; re-run the command (stdin was consumed)")
+	}
+	return a.dispatchOnce(cmd, args)
+}
+
+func (a *app) dispatchOnce(cmd string, args []string) error {
 	switch cmd {
 	case "enrol", "enroll":
 		return a.cmdEnrol(args)
+	case "notice":
+		return a.cmdNotice(args)
 	case "profile":
 		return a.cmdProfile(args)
 	case "guide":
@@ -623,6 +646,7 @@ func (a *app) readText(text string) (string, error) {
 	if text != "-" {
 		return text, nil
 	}
+	a.stdinConsumed = true
 	b, err := io.ReadAll(a.stdin)
 	if err != nil {
 		return "", fmt.Errorf("read stdin: %w", err)
@@ -873,8 +897,9 @@ func (a *app) upload(c *client, path string) (envelope.Attachment, error) {
 
 // pollBody is the long-poll response of GET /v1/events.
 type pollBody struct {
-	Events     []envelope.Event `json:"events"`
-	NextCursor string           `json:"next_cursor"`
+	Events        []envelope.Event `json:"events"`
+	NextCursor    string           `json:"next_cursor"`
+	HubRestarting *restartHint     `json:"hub_restarting,omitempty"`
 }
 
 // poll reads the stream once (wait seconds) after cursor. An empty cursor

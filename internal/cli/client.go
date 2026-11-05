@@ -61,7 +61,7 @@ type client struct {
 }
 
 func newClient(base, secret string) *client {
-	return &client{base: strings.TrimRight(base, "/"), secret: secret, hc: &http.Client{}}
+	return &client{base: strings.TrimRight(base, "/"), secret: secret, hc: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 
 // rawBody is a request body sent as-is with its content type.
