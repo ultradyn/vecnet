@@ -121,11 +121,16 @@ func (h *Hub) applySpill(ctx context.Context, tx *sql.Tx, msg *envelope.Message,
 	}
 	sum := sha256.Sum256([]byte(fullText))
 	sha := hex.EncodeToString(sum[:])
+	if h.Blobs.Transfers != nil {
+		if _, err := h.Blobs.PutMessageData(ctx, tx, SpillUploader, "spill", spillMediaType, []byte(fullText)); err != nil {
+			return h.spillError(err)
+		}
+	}
 	ok, err := h.Blobs.Exists(ctx, tx, sha)
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !ok && h.Blobs.Transfers == nil {
 		return &needSpillError{text: fullText}
 	}
 	msg.Attachments = append(msg.Attachments, envelope.Attachment{
@@ -145,6 +150,10 @@ func (h *Hub) applySpill(ctx context.Context, tx *sql.Tx, msg *envelope.Message,
 // transaction. Quota and purge failures map as for PUT /v1/blobs.
 func (h *Hub) putSpill(ctx context.Context, text string) error {
 	_, err := h.Blobs.Put(ctx, SpillUploader, strings.NewReader(text), spillMediaType, 0)
+	return h.spillError(err)
+}
+
+func (h *Hub) spillError(err error) error {
 	switch {
 	case err == nil:
 		return nil
@@ -186,6 +195,14 @@ func (h *Hub) checkAttachments(ctx context.Context, tx *sql.Tx, snd sender, atts
 			                   JOIN thread_participants tp ON tp.thr_id = m.thr_id
 			                   WHERE br.sha256 = b.sha256 AND tp.peer_id = ?2 AND `+visibleSQL+`))`,
 			a.SHA256, snd.peer, snd.prn).Scan(&size)
+
+		if errors.Is(qerr, sql.ErrNoRows) {
+			qerr = tx.QueryRowContext(ctx, `SELECT length(p.bytes) FROM durable_blob_payloads p
+                WHERE p.sha256=?1 AND NOT EXISTS(SELECT 1 FROM blob_purge_tombstones WHERE sha256=p.sha256)
+                AND EXISTS(SELECT 1 FROM durable_blob_refs br JOIN messages m ON m.msg_id=br.msg_id
+                JOIN threads t ON t.thr_id=m.thr_id JOIN thread_participants tp ON tp.thr_id=m.thr_id
+                WHERE br.sha256=p.sha256 AND br.purpose=p.purpose AND tp.peer_id=?2 AND `+visibleSQL+`) LIMIT 1`, a.SHA256, snd.peer).Scan(&size)
+		}
 		switch {
 		case errors.Is(qerr, sql.ErrNoRows):
 			if a.OriginURL != "" {

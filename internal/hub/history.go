@@ -343,9 +343,8 @@ func (h *Hub) HostedAttachments(ctx context.Context, msgs []envelope.Message) (m
 		return out, nil
 	}
 	rows, err := h.DB.QueryContext(ctx,
-		`SELECT br.msg_id, br.sha256 FROM blob_refs br
-		 JOIN blobs b ON b.sha256 = br.sha256
-		 WHERE b.purged_at IS NULL AND br.msg_id IN (?`+strings.Repeat(",?", len(ids)-1)+`)`, ids...)
+		`SELECT br.msg_id, br.sha256 FROM (SELECT r.msg_id,r.sha256 FROM blob_refs r JOIN blobs b ON b.sha256=r.sha256 WHERE b.purged_at IS NULL UNION SELECT r.msg_id,r.sha256 FROM durable_blob_refs r JOIN durable_blob_payloads p ON p.sha256=r.sha256 AND p.purpose=r.purpose WHERE NOT EXISTS(SELECT 1 FROM blob_purge_tombstones t WHERE t.sha256=r.sha256)) br
+		 WHERE br.msg_id IN (?`+strings.Repeat(",?", len(ids)-1)+`)`, ids...)
 	if err != nil {
 		return nil, fmt.Errorf("hub: hosted attachments: %w", err)
 	}
@@ -386,7 +385,7 @@ func (h *Hub) CanSeeBlob(ctx context.Context, peerID, sha string) (bool, error) 
 func (h *Hub) blobVisible(ctx context.Context, peerID, prnID, sha string) (bool, error) {
 	var n int
 	err := h.DB.QueryRowContext(ctx,
-		`SELECT count(*) FROM blob_refs br
+		`SELECT count(*) FROM (SELECT msg_id,sha256 FROM blob_refs UNION SELECT msg_id,sha256 FROM durable_blob_refs) br
 		 JOIN messages m ON m.msg_id = br.msg_id
 		 JOIN threads t ON t.thr_id = m.thr_id
 		 JOIN thread_participants tp ON tp.thr_id = m.thr_id

@@ -50,6 +50,9 @@ type Meta struct {
 // Store is the blob store. MaxSize and DailyQuota may be lowered after Open
 // (tests do); Now is the hub clock.
 type Store struct {
+	// Transfers is nil for the default disk backend; hub wiring owns installation.
+	Transfers *Transfers
+
 	Root       string // <data>/blobs
 	DB         *store.DB
 	Key        []byte // meta.hub_key, keys read tokens
@@ -142,7 +145,7 @@ func (s *Store) q(tx *sql.Tx) querier {
 
 func usedQuota(ctx context.Context, q querier, uploader, day string) (int64, error) {
 	var used int64
-	err := q.QueryRowContext(ctx, `SELECT bytes FROM blob_quota WHERE peer_id = ? AND day = ?`, uploader, day).Scan(&used)
+	err := q.QueryRowContext(ctx, `SELECT coalesce((SELECT bytes FROM blob_quota WHERE peer_id=?1 AND day=?2),0)+coalesce((SELECT reserved_bytes+accepted_bytes+abandoned_bytes+rejected_bytes FROM blob_r2_quota WHERE uploader=?1 AND day=?2),0)`, uploader, day).Scan(&used)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -253,6 +256,13 @@ func (s *Store) Put(ctx context.Context, uploader string, r io.Reader, mediaType
 		if used+n > s.DailyQuota {
 			return ErrQuota
 		}
+		purgedHash, err := r2Tombstone(ctx, tx, m.SHA256)
+		if err != nil {
+			return err
+		}
+		if purgedHash {
+			return ErrPurged
+		}
 		var size int64
 		var media string
 		var purged sql.NullString
@@ -328,6 +338,9 @@ func (s *Store) place(tmp, sha string, kept *bool) error {
 func (s *Store) Open(ctx context.Context, sha string) (io.ReadSeekCloser, Meta, error) {
 	if !ValidSHA(sha) {
 		return nil, Meta{}, ErrNotFound
+	}
+	if f, m, err := s.openDurable(ctx, sha); !errors.Is(err, ErrNotFound) {
+		return f, m, err
 	}
 	m := Meta{SHA256: sha}
 	var purged sql.NullString
@@ -445,6 +458,23 @@ func (s *Store) Purge(ctx context.Context, sha string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	durable, err := s.purgeDurable(ctx, sha)
+	if err != nil {
+		return err
+	}
+	remote := false
+	if s.Transfers != nil {
+		var n int
+		if err := s.DB.QueryRowContext(ctx, `SELECT count(*) FROM blob_objects WHERE sha256=?`, sha).Scan(&n); err != nil {
+			return err
+		}
+		remote = n > 0
+		if remote {
+			if err := s.Transfers.PurgeHash(ctx, sha); err != nil {
+				return err
+			}
+		}
+	}
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE blobs SET purged_at = coalesce(purged_at, ?) WHERE sha256 = ?`, envelope.FormatTime(s.Now()), sha)
 	if err != nil {
@@ -452,7 +482,7 @@ func (s *Store) Purge(ctx context.Context, sha string) error {
 	}
 	if n, err := res.RowsAffected(); err != nil {
 		return fmt.Errorf("blob: purge: %w", err)
-	} else if n == 0 {
+	} else if n == 0 && !durable && !remote {
 		return ErrNotFound
 	}
 	if err := os.Remove(s.path(sha)); err != nil && !errors.Is(err, os.ErrNotExist) {

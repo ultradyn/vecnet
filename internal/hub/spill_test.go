@@ -1,16 +1,24 @@
 package hub_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	"github.com/XertroV/vecnet/internal/blob"
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/testhub"
@@ -510,5 +518,167 @@ func TestFifteenAttachmentsPlusSpill(t *testing.T) {
 	spill := m.Attachments[15]
 	if spill.SHA256 != shaHex(long) || spill.Size != 5000 || spill.MediaType != "text/markdown" || spill.Name != "message.md" || spill.BlobURL == "" {
 		t.Fatalf("last attachment = %+v, want the spill", spill)
+	}
+}
+
+// enableR2Durable installs the task's injected transfer seam in a test hub.
+// It deliberately installs no preference adapters or public upload/download
+// routes. All provider traffic uses a fake TLS httptest endpoint.
+func enableR2Durable(t *testing.T, env *testhub.Env) *blob.Transfers {
+	t.Helper()
+	var transfers *blob.Transfers
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "DELETE" {
+			w.WriteHeader(204)
+			return
+		}
+		if r.Method != "HEAD" {
+			w.WriteHeader(405)
+			return
+		}
+		key := strings.TrimPrefix(r.URL.Path, "/test-bucket/")
+		o, err := transfers.Lookup(r.Context(), key)
+		if err != nil {
+			w.WriteHeader(404)
+			return
+		}
+		digest, _ := hex.DecodeString(o.SHA256)
+		checksum := base64.StdEncoding.EncodeToString(digest)
+		w.Header().Set("Content-Length", strconv.FormatInt(o.Size, 10))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", "attachment")
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Set("X-Amz-Meta-Vecnet-Checksum-Profile", "sha256")
+		w.Header().Set("X-Amz-Meta-Vecnet-Checksum", checksum)
+		w.Header().Set("X-Amz-Checksum-Sha256", checksum)
+		w.Header().Set("ETag", `"fake-etag"`)
+	}))
+	t.Cleanup(server.Close)
+	objects, err := blob.NewR2Objects(blob.R2ObjectsConfig{Endpoint: server.URL, Bucket: "test-bucket", Namespace: "0123456789abcdef0123456789abcdef", AccessID: "fake-access", Secret: "fake-secret", Client: server.Client(), Now: env.Now.Now, Lookup: func(ctx context.Context, key string) (blob.R2Object, error) { return transfers.Lookup(ctx, key) }})
+	if err != nil {
+		t.Fatal("fake R2 initialization failed")
+	}
+	transfers, err = blob.NewTransfers(blob.TransfersConfig{DB: env.Hub.DB, Now: env.Now.Now, Namespace: "0123456789abcdef0123456789abcdef", Preferences: env.Hub.Preferences, Objects: objects, StorageQuota: 1024, SignPUT: func(ctx context.Context, o blob.R2Object) (blobwire.Request, error) {
+		digest, _ := hex.DecodeString(o.SHA256)
+		checksum := base64.StdEncoding.EncodeToString(digest)
+		h := http.Header{"Content-Length": {strconv.FormatInt(o.Size, 10)}, "Content-Type": {"application/octet-stream"}, "Content-Disposition": {"attachment"}, "Cache-Control": {"private, no-store"}, "If-None-Match": {"*"}, "X-Amz-Checksum-Sha256": {checksum}, "X-Amz-Meta-Vecnet-Checksum-Profile": {"sha256"}, "X-Amz-Meta-Vecnet-Checksum": {checksum}}
+		u, err := blob.PresignPUT(server.URL, "test-bucket", o.ObjectKey, "fake-access", "fake-secret", o.IssuedAt, blob.R2UploadTTL, h)
+		return blobwire.Request{Method: "PUT", URL: u, ExpiresAt: o.UploadDeadline.Format(time.RFC3339Nano)}, err
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.Hub.Blobs.Transfers = transfers
+	return transfers
+}
+
+func TestR2SpillSurvivesAttachmentExpiry(t *testing.T) {
+	env := testhub.Start(t)
+	transfers := enableR2Durable(t, env)
+	ctx := context.Background()
+	_, aSec := env.NewPeer("session", "A")
+	b, bSec := env.NewPeer("session", "B")
+	_, outsider := env.NewPeer("session", "outsider")
+
+	avatarSHA, err := env.Hub.AdminSetAvatar(ctx, b, r2AvatarPNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var avatarBefore []byte
+	if err := env.Hub.DB.QueryRow(`SELECT png FROM avatars WHERE sha256=?`, avatarSHA).Scan(&avatarBefore); err != nil {
+		t.Fatal(err)
+	}
+	full := strings.Repeat("x", 8<<10)
+	body := req("r2-spill", b)
+	body["content"] = map[string]any{"text": full}
+	sr := mustSend(t, env, aSec, body)
+	m := onlyDelivery(t, env, b)
+	before := storedBody(t, env, sr.MessageID)
+	if !sr.Spilled || !m.Content.Truncated || len(m.Attachments) != 1 || m.Attachments[0].SHA256 != shaHex(full) {
+		t.Fatal("spill representation changed")
+	}
+	// Public R2 attachment sends are Task 4. Exercise the produced reference
+	// transaction seam on this retained Message, without weakening its send guard.
+	grant, err := transfers.Reserve(ctx, env.OperatorPeer, "file", blobwire.UploadRequest{Size: 3, SHA256: shaHex("abc"), MediaType: "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = transfers.Complete(ctx, env.OperatorPeer, grant.BlobID); err != nil {
+		t.Fatal(err)
+	}
+	if err = env.Hub.DB.Tx(ctx, func(tx *sql.Tx) error {
+		return transfers.AddReference(ctx, tx, grant.BlobID, grant.SHA256, sr.MessageID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err = env.Hub.DB.QueryRow(`SELECT count(*) FROM blobs WHERE sha256=?`, shaHex(full)).Scan(&n); err != nil || n != 0 {
+		t.Fatal("R2 spill touched disk metadata")
+	}
+	if err = env.Hub.DB.QueryRow(`SELECT count(*) FROM durable_blob_refs WHERE msg_id=? AND purpose='spill'`, sr.MessageID).Scan(&n); err != nil || n != 1 {
+		t.Fatal("spill not purpose-pinned")
+	}
+	env.Now.Advance(25 * time.Hour)
+	if err = transfers.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	state, err := transfers.State(ctx, grant.BlobID)
+	if err != nil || state.State != "expired" {
+		t.Fatal("file survived logical deadline")
+	}
+
+	var avatarAfter []byte
+	if err := env.Hub.DB.QueryRow(`SELECT png FROM avatars WHERE sha256=?`, avatarSHA).Scan(&avatarAfter); err != nil || !bytes.Equal(avatarBefore, avatarAfter) {
+		t.Fatal("attachment expiry changed avatar PNG")
+	}
+	if storedBody(t, env, sr.MessageID) != before {
+		t.Fatal("expiry rewrote original preview")
+	}
+	resp, data := env.Do(bSec, "GET", "/v1/blobs/"+shaHex(full), nil)
+	if resp.StatusCode != 200 || string(data) != full {
+		t.Fatal("authorized DB spill read lost full text")
+	}
+	resp, _ = env.Do(outsider, "GET", "/v1/blobs/"+shaHex(full), nil)
+	if resp.StatusCode != 403 {
+		t.Fatal("durable hash became a capability")
+	}
+	sha, tok := blobToken(t, env, m.Attachments[0].BlobURL)
+	resp, data = env.Do("", "GET", "/v1/blobs/"+sha+"?t="+tok, nil)
+	if resp.StatusCode != 200 || string(data) != full {
+		t.Fatal("legacy spill token no longer resolves DB bytes")
+	}
+	hosted, err := env.Hub.HostedAttachments(ctx, []envelope.Message{m})
+	if err != nil || len(hosted[sr.MessageID]) != 1 {
+		t.Fatal("durable history lost hosted projection")
+	}
+}
+
+func TestR2SpillQuotaRollbackAndPurge(t *testing.T) {
+	env := testhub.Start(t)
+	transfers := enableR2Durable(t, env)
+	ctx := context.Background()
+	_, aSec := env.NewPeer("session", "A")
+	b, _ := env.NewPeer("session", "B")
+	full := strings.Repeat("x", 8<<10)
+	env.Hub.Blobs.DailyQuota = int64(len(full) - 1)
+	body := req("quota", b)
+	body["content"] = map[string]any{"text": full}
+	resp, _ := env.Do(aSec, "POST", "/v1/messages", body)
+	if resp.StatusCode != 429 {
+		t.Fatalf("text quota status=%d", resp.StatusCode)
+	}
+	var n int
+	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM durable_blob_payloads`).Scan(&n); err != nil || n != 0 {
+		t.Fatal("failed spill left durable bytes")
+	}
+	env.Hub.Blobs.DailyQuota = 500 << 20
+	mustSend(t, env, aSec, body)
+	if err := transfers.PurgeHash(ctx, shaHex(full)); err != nil {
+		t.Fatal(err)
+	}
+	body["idempotency_key"] = "purged"
+	resp, _ = env.Do(aSec, "POST", "/v1/messages", body)
+	if resp.StatusCode != 410 {
+		t.Fatal("purged spill restored")
 	}
 }
