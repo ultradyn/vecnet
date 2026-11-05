@@ -21,6 +21,9 @@ import (
 // adminRoutes registers the /v1/admin/... endpoints.
 func (s *server) adminRoutes(mux *http.ServeMux) {
 	s.opRoutes(mux)
+	mux.HandleFunc("GET /v1/admin/prefs", s.adminGetPreferences)
+	mux.HandleFunc("PATCH /v1/admin/prefs", s.adminPatchPreferences)
+	mux.HandleFunc("POST /v1/admin/prefs/preview", s.adminPreviewPreferences)
 	mux.HandleFunc("POST /v1/admin/principals", s.adminAddPrincipal)
 	mux.HandleFunc("GET /v1/admin/principals", s.adminListPrincipals)
 	mux.HandleFunc("PUT /v1/admin/principals/{id}/limits", s.adminPrincipalLimits)

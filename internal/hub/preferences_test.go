@@ -548,8 +548,8 @@ func TestPreferencesConfirmationSeamsFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.BaseRevision != 0 || len(preview.Risks) != 1 || preview.Risks[0].Code != "presence_shortened" || preview.ConfirmToken != "" {
-		t.Fatal("missing safe preview seam")
+	if preview.BaseRevision != 0 || len(preview.Risks) != 1 || preview.Risks[0].Code != "presence_shortened" || preview.ConfirmToken == "" {
+		t.Fatal("missing bound preview confirmation")
 	}
 	_, err = h.Preferences.PatchPreferences(context.Background(), prefsOperator, s.ETag, p)
 	prefsCode(t, err, prefs.CodeConfirmationRequired)

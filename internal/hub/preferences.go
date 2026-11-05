@@ -37,12 +37,16 @@ type Preferences struct {
 	current     atomic.Pointer[prefs.Snapshot]
 	subMu       sync.Mutex
 	subscribers map[chan uint64]struct{}
+	previewKey  []byte
+	// Policy is an optional verified consumer adapter, installed before serving.
+	Policy PreferencePreviewPolicy
 
-	// Task 4 installs these before requests start. Authorization runs inside
+	// Optional consumer overrides are installed before requests start. Without
+	// them the shared preview/confirmation implementation applies. Authorization runs inside
 	// the writer transaction and may persist activation/approval boundaries.
 	// Its result contains server-derived approved risk codes, never confirmation
 	// strings or other client-supplied approval material.
-	// With no hook, dangerous or retrospective writes fail closed.
+	// Retrospective writes also require a verified Policy adapter.
 	PreviewHook    func(context.Context, auth.Caller, prefs.Snapshot, prefs.Patch) (prefs.Preview, error)
 	AuthorizePatch func(context.Context, *sql.Tx, auth.Caller, prefs.Snapshot, prefs.Snapshot, prefs.Patch) ([]string, error)
 }
@@ -81,6 +85,9 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 		return nil, err
 	}
 	p := &Preferences{db: db, now: now, bootstrap: map[string]prefs.Effective{}, maxExpiry: maxExpiry, installed: map[string]bool{}, subscribers: map[chan uint64]struct{}{}}
+	if err := p.loadPreviewKey(); err != nil {
+		return nil, err
+	}
 	if p.maxExpiry == 0 {
 		p.maxExpiry = prefs.MaxExpirySeconds
 	}
@@ -152,6 +159,7 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 		}
 		e.Value = normalizePreference(d, e.Value)
 		e.Revision = 0
+		e.UpdatedAt, e.UpdatedBy = "", ""
 		p.bootstrap[key] = e
 	}
 	values := map[string]prefs.Value{}
@@ -216,20 +224,20 @@ func (p *Preferences) LoadSnapshot(ctx context.Context, tx *sql.Tx) (prefs.Snaps
 	return s, nil
 }
 
-func (p *Preferences) load(ctx context.Context, tx *sql.Tx) (prefs.Snapshot, map[string]prefs.Value, error) {
+func (p *Preferences) load(ctx context.Context, tx *sql.Tx) (prefs.Snapshot, map[string]prefs.Effective, error) {
 	var revision uint64
 	if err := tx.QueryRowContext(ctx, `SELECT revision FROM hub_preferences_state WHERE id=1`).Scan(&revision); err != nil {
 		return prefs.Snapshot{}, nil, preferenceError(prefs.CodeStorageUnavailable)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT key,value_json FROM hub_preferences ORDER BY key`)
+	rows, err := tx.QueryContext(ctx, `SELECT key,value_json,updated_at,updated_by FROM hub_preferences ORDER BY key`)
 	if err != nil {
 		return prefs.Snapshot{}, nil, preferenceError(prefs.CodeStorageUnavailable)
 	}
 	defer rows.Close()
-	stored := map[string]prefs.Value{}
+	stored := map[string]prefs.Effective{}
 	for rows.Next() {
-		var key, raw string
-		if err := rows.Scan(&key, &raw); err != nil {
+		var key, raw, updatedAt, updatedBy string
+		if err := rows.Scan(&key, &raw, &updatedAt, &updatedBy); err != nil {
 			return prefs.Snapshot{}, nil, preferenceError(prefs.CodeStorageUnavailable)
 		}
 		d, err := prefs.Lookup(key)
@@ -246,7 +254,7 @@ func (p *Preferences) load(ctx context.Context, tx *sql.Tx) (prefs.Snapshot, map
 		if err := prefs.Validate(d, value); err != nil {
 			return prefs.Snapshot{}, nil, err
 		}
-		stored[key] = normalizePreference(d, value)
+		stored[key] = prefs.Effective{Value: normalizePreference(d, value), Source: prefs.SourceStored, UpdatedAt: updatedAt, UpdatedBy: updatedBy}
 	}
 	if err := rows.Err(); err != nil {
 		return prefs.Snapshot{}, nil, preferenceError(prefs.CodeStorageUnavailable)
@@ -262,7 +270,7 @@ func normalizePreference(d prefs.Definition, v prefs.Value) prefs.Value {
 	}
 	return v
 }
-func (p *Preferences) snapshot(revision uint64, stored map[string]prefs.Value) (prefs.Snapshot, error) {
+func (p *Preferences) snapshot(revision uint64, stored map[string]prefs.Effective) (prefs.Snapshot, error) {
 	values := map[string]prefs.Effective{}
 	policy := map[string]prefs.Value{}
 	for key, e := range p.bootstrap {
@@ -270,8 +278,8 @@ func (p *Preferences) snapshot(revision uint64, stored map[string]prefs.Value) (
 		policy[key] = e.Value
 	}
 	for key, v := range stored {
-		values[key] = prefs.Effective{Value: v, Source: prefs.SourceStored}
-		policy[key] = v
+		values[key] = v
+		policy[key] = v.Value
 	}
 	if err := prefs.ValidatePolicy(policy, p.maxExpiry); err != nil {
 		return prefs.Snapshot{}, err
@@ -311,7 +319,16 @@ func (p *Preferences) ReadPreferences(ctx context.Context, caller auth.Caller) (
 	return p.LoadSnapshot(ctx, nil)
 }
 func preferenceMatch(expected string, s prefs.Snapshot) error {
-	if expected == "" || expected == "*" || strings.HasPrefix(expected, "W/") || strings.Contains(expected, ",") || !strings.HasPrefix(expected, "\"prefs-") || !strings.HasSuffix(expected, "\"") {
+	valid := len(expected) >= 2 && expected[0] == '"' && expected[len(expected)-1] == '"'
+	if valid {
+		for _, b := range []byte(expected[1 : len(expected)-1]) {
+			if b == '"' || b < 0x21 || b == 0x7f {
+				valid = false
+				break
+			}
+		}
+	}
+	if !valid {
 		return preferenceError(prefs.CodePreconditionRequired)
 	}
 	if expected != s.ETag {
@@ -319,11 +336,12 @@ func preferenceMatch(expected string, s prefs.Snapshot) error {
 	}
 	return nil
 }
-func (p *Preferences) prospective(s prefs.Snapshot, stored map[string]prefs.Value, patch prefs.Patch) (prefs.Snapshot, []string, error) {
+
+func (p *Preferences) prospective(s prefs.Snapshot, stored map[string]prefs.Effective, patch prefs.Patch) (prefs.Snapshot, []string, error) {
 	if err := patch.Validate(); err != nil {
 		return prefs.Snapshot{}, nil, err
 	}
-	if patch.ApplyExisting && p.AuthorizePatch == nil {
+	if patch.ApplyExisting && p.AuthorizePatch == nil && p.Policy == nil {
 		return prefs.Snapshot{}, nil, preferenceError(prefs.CodeUnavailable)
 	}
 	changed := []string{}
@@ -342,8 +360,8 @@ func (p *Preferences) prospective(s prefs.Snapshot, stored map[string]prefs.Valu
 			set = false
 		}
 		if set {
-			if !exists || old != next {
-				stored[key] = next
+			if !exists || old.Value != next {
+				stored[key] = prefs.Effective{Value: next, Source: prefs.SourceStored, UpdatedAt: envelope.FormatTime(p.now()), UpdatedBy: "operator"}
 				changed = append(changed, key)
 			}
 		} else if exists {
@@ -361,38 +379,43 @@ func (p *Preferences) prospective(s prefs.Snapshot, stored map[string]prefs.Valu
 	return next, changed, err
 }
 
-// PreviewPreferences provides the validated core seam. Task 4 supplies the
-// bound preview/confirmation implementation through PreviewHook.
+// PreviewPreferences validates a read-only proposal, then collects estimates
+// and signs its exact confirmation bounds without holding a DB transaction.
 func (p *Preferences) PreviewPreferences(ctx context.Context, caller auth.Caller, expectedETag string, patch prefs.Patch) (prefs.Preview, error) {
 	if err := preferenceAuthority(caller); err != nil {
 		return prefs.Preview{}, err
 	}
-	var before, after prefs.Snapshot
-	err := p.db.Tx(ctx, func(tx *sql.Tx) error {
-		var stored map[string]prefs.Value
-		var err error
-		before, stored, err = p.load(ctx, tx)
-		if err != nil {
-			return err
-		}
-		if err := preferenceMatch(expectedETag, before); err != nil {
-			return err
-		}
-		after, _, err = p.prospective(before, stored, patch)
-		return err
-	})
+	// A read snapshot never acquires the serialized writer transaction. Impact
+	// estimation happens only after this transaction is closed.
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return prefs.Preview{}, preferenceError(prefs.CodeStorageUnavailable)
+	}
+	defer tx.Rollback()
+	before, stored, err := p.load(ctx, tx)
 	if err != nil {
 		return prefs.Preview{}, sanitizePreferenceError(err)
+	}
+	if err := preferenceMatch(expectedETag, before); err != nil {
+		return prefs.Preview{}, err
+	}
+	after, _, err := p.prospective(before, stored, patch)
+	if err != nil {
+		return prefs.Preview{}, sanitizePreferenceError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return prefs.Preview{}, preferenceError(prefs.CodeStorageUnavailable)
 	}
 	if p.PreviewHook != nil {
 		return p.PreviewHook(ctx, caller, before, patch)
 	}
-	return prefs.Preview{BaseRevision: before.Revision, Risks: preferenceRisks(before, after)}, nil
+	return p.previewConfirmation(ctx, caller, before, after, patch)
 }
+
 func preferenceRisks(before, after prefs.Snapshot) []prefs.Risk {
 	risks := []prefs.Risk{}
 	for _, d := range after.Descriptors() {
-		if len(d.Danger) == 0 {
+		if !strings.HasPrefix(d.Key, "presence.") || len(d.Danger) == 0 {
 			continue
 		}
 		old, _ := before.Get(d.Key)
@@ -405,6 +428,9 @@ func preferenceRisks(before, after prefs.Snapshot) []prefs.Risk {
 	return risks
 }
 func sanitizePreferenceError(err error) error {
+	if err == nil {
+		return nil
+	}
 	var pe *prefs.Error
 	var api *APIError
 	if errors.As(err, &pe) || errors.As(err, &api) {
@@ -434,7 +460,12 @@ func (p *Preferences) PatchPreferences(ctx context.Context, caller auth.Caller, 
 			return err
 		}
 		if len(changed) == 0 && !patch.ApplyExisting {
-			return nil
+			// Supplied approvals must still be valid, but an ordinary no-op
+			// cannot activate policy or invoke a persistent authorization hook.
+			if len(patch.Confirm) > 0 {
+				_, err = p.validateConfirmation(ctx, caller, before, next, patch)
+			}
+			return err
 		}
 		approvedRisks := []string{}
 		if p.AuthorizePatch != nil {
@@ -442,19 +473,22 @@ func (p *Preferences) PatchPreferences(ctx context.Context, caller auth.Caller, 
 			if err != nil {
 				return err
 			}
-		} else if len(preferenceRisks(before, next)) > 0 || len(patch.Confirm) > 0 {
-			return preferenceError(prefs.CodeConfirmationRequired)
+		} else {
+			approvedRisks, err = p.authorizeConfirmation(ctx, tx, caller, before, next, patch)
+			if err != nil {
+				return err
+			}
 		}
 		changes := make([]any, 0, len(changed))
 		for _, key := range changed {
 			operation := "reset"
 			if value, ok := stored[key]; ok {
 				operation = "set"
-				raw, err := json.Marshal(value)
+				raw, err := json.Marshal(value.Value)
 				if err != nil {
 					return err
 				}
-				if _, err := tx.ExecContext(ctx, `INSERT INTO hub_preferences(key,value_json,updated_at,updated_by) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by`, key, string(raw), envelope.FormatTime(p.now()), "operator"); err != nil {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO hub_preferences(key,value_json,updated_at,updated_by) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by`, key, string(raw), value.UpdatedAt, value.UpdatedBy); err != nil {
 					return err
 				}
 			} else {

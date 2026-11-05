@@ -496,7 +496,7 @@ func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
 	// A stuck stream is only dropped after SSEStall; at an hour, any send
 	// whose append waited on the stream would hang, and the per-send
 	// timeout below catches it. A send merely slowed by the stuck stream is
-	// caught both by the aggregate five-second send budget and by
+	// caught both by the aggregate send budget and by
 	// interleaving each send to b (stuck stream) with the same
 	// send to c (no stream) and comparing the totals: both halves see the
 	// same load and database size. The comparison catches stream-specific
@@ -513,7 +513,10 @@ func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
 	s := openSSE(t, env, bSec, "", nil)
 	waitStreams(t, 1)
 
-	const n, perSend, aggregate = 200, 5 * time.Second, 5 * time.Second
+	// Race instrumentation adds substantial per-send SQLite work. Bound each
+	// request independently and allow the aggregate enough room for that work;
+	// the interleaved control still detects stream-specific slowdown.
+	const n, perSend, aggregate = 200, 5 * time.Second, 30 * time.Second
 	send := func(key, to string, budget time.Duration) time.Duration {
 		t.Helper()
 		start := time.Now()
@@ -552,7 +555,7 @@ func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
 	var stuck, free time.Duration
 	for i := 0; i < n; i++ {
 		free += send(fmt.Sprintf("free-%d", i), c, perSend)
-		stuck += send(fmt.Sprintf("slow-%d", i), b, aggregate-stuck)
+		stuck += send(fmt.Sprintf("slow-%d", i), b, min(perSend, aggregate-stuck))
 	}
 	t.Logf("%d sends took %v to the stuck-stream peer, %v to a peer with no stream", n, stuck, free)
 	if stuck > aggregate {

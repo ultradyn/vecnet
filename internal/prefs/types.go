@@ -38,19 +38,23 @@ func (s *Source) UnmarshalJSON(data []byte) error {
 
 // Effective is a value with provenance at one snapshot's revision.
 type Effective struct {
-	Value    Value  `json:"value"`
-	Source   Source `json:"source"`
-	Origin   string `json:"origin"`
-	Revision uint64 `json:"revision"`
+	Value     Value  `json:"value"`
+	Source    Source `json:"source"`
+	Origin    string `json:"origin"`
+	Revision  uint64 `json:"revision"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	UpdatedBy string `json:"updated_by,omitempty"`
 }
 
 // Descriptor is the public GET row. Revision belongs to the enclosing snapshot;
 // maintenance-only definition fields never appear on the wire.
 type Descriptor struct {
 	Definition
-	Value  Value  `json:"value"`
-	Source Source `json:"source"`
-	Origin string `json:"origin"`
+	Value     Value  `json:"value"`
+	Source    Source `json:"source"`
+	Origin    string `json:"origin"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	UpdatedBy string `json:"updated_by,omitempty"`
 }
 
 func (d Descriptor) MarshalJSON() ([]byte, error) {
@@ -96,7 +100,7 @@ func NewSnapshot(revision uint64, etag string, definitions []Definition, values 
 		if err := validateProvenance(def.Key, e.Source, e.Origin); err != nil {
 			return Snapshot{}, err
 		}
-		s.preferences = append(s.preferences, Descriptor{Definition: cloneDefinition(def), Value: normalize(def, e.Value), Source: e.Source, Origin: e.Origin})
+		s.preferences = append(s.preferences, Descriptor{Definition: cloneDefinition(def), Value: normalize(def, e.Value), Source: e.Source, Origin: e.Origin, UpdatedAt: e.UpdatedAt, UpdatedBy: e.UpdatedBy})
 	}
 	for key := range values {
 		if !seen[key] {
@@ -146,7 +150,7 @@ func (s Snapshot) Get(key string) (Effective, error) {
 		return Effective{}, unknownKey()
 	}
 	d := s.preferences[i]
-	return Effective{Value: d.Value, Source: d.Source, Origin: d.Origin, Revision: s.Revision}, nil
+	return Effective{Value: d.Value, Source: d.Source, Origin: d.Origin, Revision: s.Revision, UpdatedAt: d.UpdatedAt, UpdatedBy: d.UpdatedBy}, nil
 }
 
 // Descriptors returns copies for clients which need metadata. Editing these
@@ -186,7 +190,7 @@ func (s *Snapshot) UnmarshalJSON(data []byte) error {
 		}
 		d.Default = normalize(d.Definition, d.Default)
 		defs = append(defs, d.Definition)
-		values[d.Key] = Effective{Value: d.Value, Source: d.Source, Origin: d.Origin}
+		values[d.Key] = Effective{Value: d.Value, Source: d.Source, Origin: d.Origin, UpdatedAt: d.UpdatedAt, UpdatedBy: d.UpdatedBy}
 	}
 	next, err := NewSnapshot(wire.Revision, "", defs, values)
 	if err != nil {
