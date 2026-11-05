@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-05: R2 blobs plan v4 sets GET URLs to 600s with repeatable authorized get, shared 30/60s mint limiting and metering, preserves 300s PUTs, and reconciles reported exp-1d/multipart-abort bucket rules with namespaced keys (`docs/plans/2026-11-05-r2-blobs.md`).
 - 2026-11-05: R2 blobs plan consumes shared blobs.expiry preferences with configurable/off retention, immutable retention prefixes, hosted operator confirmation and retained-storage quota; replaces broad lifecycle rules and drops custom-domain Worker work (`docs/plans/2026-11-05-r2-blobs.md`).
 - 2026-11-05: dot setup uses the verified ChatGPT task trigger, recommended inbox/reply instruction, same-chat runs and event-scope reconnect guidance across the MCP guide/status hint, connector docs and invite UI (`internal/mcpserver`, `docs/PROTOCOL.md`, `docs/connectors/dots.md`, `internal/ui/static/invite-model.js`).
 - 2026-11-05: MCP serverInfo.version is now a real build stamp (`just version`: UTC date.time+commit) set via ldflags in `just build` and the Dockerfile `VECNET_VERSION` build arg; `just fly-deploy` passes it so ChatGPT sees a new version each deploy.
