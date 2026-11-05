@@ -58,10 +58,7 @@ func (s *Transfers) PurgeHash(ctx context.Context, sha string) error {
 		if _, err := tx.ExecContext(ctx, `UPDATE blobs SET purged_at=coalesce(purged_at,?) WHERE sha256=?`, r2Time(now), sha); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM durable_blob_refs WHERE sha256=?`, sha); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM durable_blob_payloads WHERE sha256=?`, sha); err != nil {
+		if err := eraseDurable(ctx, tx, sha); err != nil {
 			return err
 		}
 		rows, err := tx.QueryContext(ctx, `SELECT blob_id FROM blob_objects WHERE sha256=?`, sha)

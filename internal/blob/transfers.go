@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/blobwire"
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/ids"
 	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/store"
@@ -173,15 +174,8 @@ func (s *Transfers) Reserve(ctx context.Context, uploader, idem string, in blobw
 			if !s.cfg.Now().Before(o.UploadDeadline) {
 				return ErrR2GrantExpired
 			}
-			if err := r2ObjectAvailable(o, s.cfg.Now()); err != nil {
+			if err := s.completionCheck(ctx, tx, o, false); err != nil {
 				return err
-			}
-			purged, err := r2Tombstone(ctx, tx, o.SHA256)
-			if err != nil {
-				return err
-			}
-			if purged {
-				return ErrR2Purged
 			}
 			grant, err = s.grant(ctx, o)
 			return err
@@ -210,13 +204,9 @@ func (s *Transfers) Reserve(ctx context.Context, uploader, idem string, in blobw
 		if err != nil {
 			return ErrR2Preferences
 		}
-		purged, err := r2Tombstone(ctx, tx, in.SHA256)
-		if err != nil {
-			return err
-		}
-		if purged {
-			return ErrR2Purged
-		}
+		// A claimed hash is not proof of possession. Issue the same isolated,
+		// quota-charged grant for purged and unknown hashes; completion enforces
+		// the tombstone only after the checksum evidence has been checked.
 		var active int
 		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM blob_objects WHERE uploader=? AND state='pending' AND julianday(upload_deadline)>julianday(?)`, uploader, r2Time(now)).Scan(&active); err != nil {
 			return err
@@ -282,7 +272,7 @@ func r2Ref(o R2Object) blobwire.Ref {
 	verified := o.SHA256Verified
 	var exp *string
 	if o.ExpiresAt != nil {
-		v := r2Time(*o.ExpiresAt)
+		v := envelope.FormatTime(*o.ExpiresAt)
 		exp = &v
 	}
 	return blobwire.Ref{BlobID: o.BlobID, SHA256: o.SHA256, SHA256Verified: &verified, Integrity: &blobwire.Integrity{Algorithm: "sha256", Value: o.SHA256, Verified: verified}, Size: o.Size, RetentionClass: o.RetentionClass, ExpiresAt: exp}
@@ -296,6 +286,7 @@ func (s *Transfers) grant(ctx context.Context, o R2Object) (blobwire.UploadGrant
 	if err != nil || !end.Equal(o.UploadDeadline) || request.Method != "PUT" || request.URL == "" {
 		return blobwire.UploadGrant{}, ErrR2Signing
 	}
+	request.ExpiresAt = envelope.FormatTime(end)
 	return blobwire.UploadGrant{Ref: r2Ref(o), Upload: request, CompleteURL: "/v1/blobs/uploads/" + o.BlobID + "/complete"}, nil
 }
 
@@ -368,7 +359,7 @@ func (s *Transfers) Complete(ctx context.Context, uploader, blobID string) (blob
 		if err = s.eligible(ctx, tx, uploader); err != nil {
 			return err
 		}
-		return s.completable(ctx, tx, o)
+		return s.completionCheck(ctx, tx, o, false)
 	})
 	if err != nil {
 		return blobwire.Ref{}, err
@@ -422,7 +413,10 @@ func (s *Transfers) Complete(ctx context.Context, uploader, blobID string) (blob
 		if err = s.eligible(ctx, tx, uploader); err != nil {
 			return err
 		}
-		if err = s.completable(ctx, tx, current); err != nil {
+		// The production HEAD adapter can report purge only after matching
+		// immutable checksum evidence (or for a previously verified object).
+		proofChecked := headErr == nil || errors.Is(headErr, ErrR2Purged)
+		if err = s.completionCheck(ctx, tx, current, proofChecked); err != nil {
 			return err
 		}
 		if current.State == "complete" {
@@ -431,7 +425,7 @@ func (s *Transfers) Complete(ctx context.Context, uploader, blobID string) (blob
 		}
 		if headErr != nil {
 			outcome = headErr
-			if errors.Is(headErr, ErrR2Proof) {
+			if errors.Is(headErr, ErrR2Proof) && current.State == "pending" {
 				return s.terminal(ctx, tx, current, "rejected", s.cfg.Now())
 			}
 			return nil
@@ -472,6 +466,19 @@ func (s *Transfers) Complete(ctx context.Context, uploader, blobID string) (blob
 	return result, nil
 }
 func (s *Transfers) completable(ctx context.Context, tx *sql.Tx, o R2Object) error {
+	return s.completionCheck(ctx, tx, o, true)
+}
+
+func (s *Transfers) completionCheck(ctx context.Context, tx *sql.Tx, o R2Object, proofChecked bool) error {
+	if !o.SHA256Verified && !proofChecked {
+		if err := r2CompletionAvailable(o, s.cfg.Now()); err != nil {
+			return err
+		}
+		if !s.cfg.Now().Before(o.UploadDeadline) {
+			return ErrR2GrantExpired
+		}
+		return nil
+	}
 	p, err := r2Tombstone(ctx, tx, o.SHA256)
 	if err != nil {
 		return err
@@ -490,18 +497,23 @@ func (s *Transfers) completable(ctx context.Context, tx *sql.Tx, o R2Object) err
 
 // State projects metadata for an already-authorized hub caller. Its signature
 // intentionally carries no credential; adapters must authorize before calling.
+// An unverified grant conveys no possession of its claimed hash, so it cannot
+// expose a hash tombstone through this projection either.
 func (s *Transfers) State(ctx context.Context, blobID string) (blobwire.State, error) {
 	o, err := r2ReadObject(ctx, s.cfg.DB, `blob_id=?`, blobID)
 	if err != nil {
 		return blobwire.State{}, err
 	}
-	p, err := r2Tombstone(ctx, s.cfg.DB, o.SHA256)
-	if err != nil {
-		return blobwire.State{}, err
+	var p bool
+	if o.SHA256Verified {
+		p, err = r2Tombstone(ctx, s.cfg.DB, o.SHA256)
+		if err != nil {
+			return blobwire.State{}, err
+		}
 	}
 	state := "unavailable"
 	switch {
-	case p || o.State == "purged":
+	case o.SHA256Verified && (p || o.State == "purged"):
 		state = "purged"
 	case o.State == "expired" || o.ExpiresAt != nil && !s.cfg.Now().Before(*o.ExpiresAt):
 		state = "expired"
@@ -522,6 +534,9 @@ func (s *Transfers) AddReference(ctx context.Context, tx *sql.Tx, blobID, sha, m
 	o, err := r2ReadObject(ctx, tx, `blob_id=? AND sha256=?`, blobID, sha)
 	if err != nil {
 		return err
+	}
+	if !o.SHA256Verified {
+		return ErrR2Incomplete
 	}
 	if err = s.completable(ctx, tx, o); err != nil {
 		return err

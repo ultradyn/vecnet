@@ -1,10 +1,12 @@
 package blob_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,7 +18,9 @@ import (
 
 	"github.com/XertroV/vecnet/internal/blob"
 	"github.com/XertroV/vecnet/internal/blobwire"
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/testhub"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // These tests exercise real SQLite transactions, the merged preference reader,
@@ -169,6 +173,138 @@ func (f *transferFixture) charge(t *testing.T, reserved, retained int64) {
 	}
 }
 
+func TestR2ReservationDoesNotDisclosePurge(t *testing.T) {
+	for _, purgeDuringGrant := range []bool{false, true} {
+		t.Run(fmt.Sprint(purgeDuringGrant), func(t *testing.T) {
+			f := newTransfers(t)
+			ctx := context.Background()
+			outsider, _ := f.env.NewPeer("session", "outsider")
+			purgedSHA := hexSHA([]byte("abc"))
+			if !purgeDuringGrant {
+				if err := f.s.PurgeHash(ctx, purgedSHA); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, sha := range []string{purgedSHA, hexSHA([]byte("xyz"))} {
+				in := blobwire.UploadRequest{Size: 3, SHA256: sha, MediaType: "text/plain"}
+				grant, err := f.s.Reserve(ctx, outsider, sha, in)
+				if err != nil {
+					t.Fatalf("first reservation disclosed hash state: %v", err)
+				}
+				if purgeDuringGrant && sha == purgedSHA {
+					if err := f.s.PurgeHash(ctx, sha); err != nil {
+						t.Fatal(err)
+					}
+				}
+				replay, err := f.s.Reserve(ctx, outsider, sha, in)
+				if err != nil || replay.BlobID != grant.BlobID {
+					t.Fatalf("unverified replay disclosed hash state: %v", err)
+				}
+				state, err := f.s.State(ctx, grant.BlobID)
+				if err != nil || state.State != "unavailable" {
+					t.Errorf("unverified state disclosed purge: state=%s err=%v", state.State, err)
+				}
+				if err := f.env.Hub.DB.Tx(ctx, func(tx *sql.Tx) error {
+					return f.s.AddReference(ctx, tx, grant.BlobID, sha, "not-a-message")
+				}); !errors.Is(err, blob.ErrR2Incomplete) {
+					t.Errorf("unverified attach must fail without disclosing purge: %v", err)
+				}
+				if _, err := f.s.Complete(ctx, outsider, grant.BlobID); !errors.Is(err, blob.ErrR2Incomplete) {
+					t.Fatalf("completion without possession: want incomplete, got %v", err)
+				}
+				bad, err := f.s.Reserve(ctx, outsider, sha+"-bad-proof", in)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.upload(t, bad)
+				o := f.object(t, bad.BlobID)
+				f.mu.Lock()
+				f.objects[o.ObjectKey].Set("X-Amz-Checksum-Sha256", "invalid")
+				f.mu.Unlock()
+				if _, err := f.s.Complete(ctx, outsider, bad.BlobID); !errors.Is(err, blob.ErrR2Proof) {
+					t.Fatalf("invalid proof disclosed hash state: %v", err)
+				}
+				f.upload(t, grant)
+				_, err = f.s.Complete(ctx, outsider, grant.BlobID)
+				if sha == purgedSHA {
+					if !errors.Is(err, blob.ErrR2Purged) {
+						t.Fatalf("verified possession must encounter purge: %v", err)
+					}
+					if f.object(t, grant.BlobID).SHA256Verified {
+						t.Fatal("purged grant became verified")
+					}
+				} else if err != nil {
+					t.Fatalf("unknown hash completion: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestR2WireTimestampsAreCanonical(t *testing.T) {
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(envelope.SchemaJSON()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource("urn:vecnet:envelope:1", doc); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile("urn:vecnet:envelope:1#/$defs/attachment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fraction := range []time.Duration{0, 120 * time.Millisecond, 123456789 * time.Nanosecond} {
+		t.Run(fraction.String(), func(t *testing.T) {
+			f := newTransfers(t)
+			f.env.Now.Advance(fraction - time.Duration(f.env.Now.Now().Nanosecond()))
+			grant := f.reserve(t, "timestamp", 3)
+			checkTime := func(label, value string, want time.Time) {
+				t.Helper()
+				got, err := envelope.ParseTime(value)
+				if err != nil || !got.Equal(want.Truncate(time.Millisecond)) {
+					t.Errorf("%s must use canonical millisecond UTC", label)
+				}
+			}
+			checkRef := func(label string, ref blobwire.Ref) {
+				t.Helper()
+				if ref.ExpiresAt == nil {
+					t.Fatal("expiring reference has no deadline")
+				}
+				checkTime(label, *ref.ExpiresAt, f.env.Now.Now().Add(24*time.Hour))
+				raw, err := json.Marshal(ref)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var attachment map[string]any
+				if err := json.Unmarshal(raw, &attachment); err != nil {
+					t.Fatal(err)
+				}
+				attachment["media_type"] = "text/plain"
+				if err := schema.Validate(attachment); err != nil {
+					t.Errorf("%s reference violates envelope schema: %v", label, err)
+				}
+			}
+			checkRef("reserve", grant.Ref)
+			checkTime("upload", grant.Upload.ExpiresAt, f.env.Now.Now().Add(blob.R2UploadTTL))
+			f.upload(t, grant)
+			ref, err := f.s.Complete(context.Background(), f.env.OperatorPeer, grant.BlobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkRef("complete", ref)
+			state, err := f.s.State(context.Background(), grant.BlobID)
+			if err != nil || state.ExpiresAt == nil {
+				t.Fatal("state missing reference deadline")
+			}
+			checkTime("state", *state.ExpiresAt, f.env.Now.Now().Add(24*time.Hour))
+			replay := f.reserve(t, "timestamp", 3)
+			checkRef("replay", replay.Ref)
+			checkTime("replay upload", replay.Upload.ExpiresAt, f.env.Now.Now().Add(blob.R2UploadTTL))
+		})
+	}
+}
+
 func TestR2ConcurrentDailyAndStorageReservations(t *testing.T) {
 	for _, storage := range []bool{false, true} {
 		t.Run(fmt.Sprint(storage), func(t *testing.T) {
@@ -315,8 +451,10 @@ func TestR2DeletionSafetyReplayAndRestart(t *testing.T) {
 	if n := f.number(t, `SELECT count(*) FROM blob_usage_events WHERE kind='storage_released'`); n != 1 {
 		t.Fatal("release not idempotent")
 	}
-	if _, err := f.s.Complete(context.Background(), f.env.OperatorPeer, g.BlobID); !errors.Is(err, blob.ErrR2Purged) {
-		t.Fatal("purge resurrected")
+	// No verified possession was recorded before deletion. The expired grant
+	// must stay unusable without revealing the hash's purge state.
+	if _, err := f.s.Complete(context.Background(), f.env.OperatorPeer, g.BlobID); !errors.Is(err, blob.ErrR2GrantExpired) {
+		t.Fatal("deleted unverified grant must remain expired")
 	}
 }
 func TestR2ProofAndPurgeRaces(t *testing.T) {

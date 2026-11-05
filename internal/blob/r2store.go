@@ -157,6 +157,19 @@ func r2ObjectAvailable(object R2Object, now time.Time) error {
 	return nil
 }
 
+// An unverified uploader has only claimed a hash, so its completion probe must
+// not reveal a tombstone before HEAD establishes possession. This exception is
+// only for the pre-proof check; downloads and the post-proof check stay strict.
+func r2CompletionAvailable(object R2Object, now time.Time) error {
+	if !object.SHA256Verified {
+		object.PurgedAt = nil
+		if object.State == "purged" {
+			object.State = "pending"
+		}
+	}
+	return r2ObjectAvailable(object, now)
+}
+
 func (s *R2Objects) Head(ctx context.Context, key string) (ObjectProof, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -164,7 +177,7 @@ func (s *R2Objects) Head(ctx context.Context, key string) (ObjectProof, error) {
 	if err != nil {
 		return ObjectProof{}, err
 	}
-	if err = r2ObjectAvailable(object, s.now()); err != nil {
+	if err = r2CompletionAvailable(object, s.now()); err != nil {
 		return ObjectProof{}, err
 	}
 	response, err := s.private(ctx, http.MethodHead, key)

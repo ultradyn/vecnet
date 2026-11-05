@@ -132,18 +132,26 @@ func (s *Store) purgeDurable(ctx context.Context, sha string) (bool, error) {
 		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM durable_blob_payloads WHERE sha256=?`, sha).Scan(&n); err != nil {
 			return err
 		}
-		found = n > 0
+		purged, err := r2Tombstone(ctx, tx, sha)
+		if err != nil {
+			return err
+		}
+		found = n > 0 || purged
 		if !found {
 			return nil
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO blob_purge_tombstones(sha256,purged_at,actor) VALUES(?,?,'operator') ON CONFLICT DO NOTHING`, sha, r2Time(s.Now())); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM durable_blob_refs WHERE sha256=?`, sha); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx, `DELETE FROM durable_blob_payloads WHERE sha256=?`, sha)
-		return err
+		return eraseDurable(ctx, tx, sha)
 	})
 	return found, err
+}
+
+// Keep the FK target and retained-message references for access-before-state
+// checks. The permanent hash tombstone prevents reads or rewrites of this stub;
+// ordinary last-reference GC removes it when its messages are gone.
+func eraseDurable(ctx context.Context, tx *sql.Tx, sha string) error {
+	_, err := tx.ExecContext(ctx, `UPDATE durable_blob_payloads SET bytes=x'' WHERE sha256=?`, sha)
+	return err
 }

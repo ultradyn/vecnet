@@ -682,3 +682,111 @@ func TestR2SpillQuotaRollbackAndPurge(t *testing.T) {
 		t.Fatal("purged spill restored")
 	}
 }
+
+func TestR2DurablePurgePreservesReadAuthorization(t *testing.T) {
+	for _, purpose := range []string{"spill", "source_raw"} {
+		for _, entry := range []string{"store", "transfers"} {
+			t.Run(purpose+"/"+entry, func(t *testing.T) {
+				env := testhub.Start(t)
+				transfers := enableR2Durable(t, env)
+				ctx := context.Background()
+				prn, principalSecret := env.NewPrincipal("recipient")
+				b, enrollment, err := env.Hub.AddPeer(ctx, "session", "recipient", prn)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, bearer, err := env.Hub.Auth.Enrol(ctx, enrollment)
+				if err != nil {
+					t.Fatal("synthetic enrollment failed")
+				}
+				_, sender := env.NewPeer("session", "sender")
+				_, outsider := env.NewPeer("session", "outsider")
+				_, outsiderPrincipal := env.NewPrincipal("outsider")
+				full := strings.Repeat("x", 8<<10)
+				var msgID string
+				if purpose == "spill" {
+					body := req("purge", b)
+					body["content"] = map[string]any{"text": full}
+					msgID = mustSend(t, env, sender, body).MessageID
+				} else {
+					full = `{"event":"synthetic"}`
+					src, _, _, err := env.Hub.AddSource(ctx, "github", "source", b, nil, "")
+					if err != nil {
+						t.Fatal(err)
+					}
+					msgID, _, err = env.Hub.IngestSource(ctx, hub.SourceMessage{SrcID: src, ProviderDeliveryID: "one", OriginThreadID: "issue/1", OriginEventID: "one", EventName: "issues.opened", Summary: "source text", Raw: []byte(full), MediaType: "application/json"})
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				sha := shaHex(full)
+				before := storedBody(t, env, msgID)
+				m := onlyDelivery(t, env, b)
+				_, token := blobToken(t, env, m.Attachments[0].BlobURL)
+				late, lateBearer := env.NewPeer("session", "late participant")
+				join := req("join-after-durable", late)
+				join["thread_id"] = m.ThreadID
+				mustSend(t, env, bearer, join)
+				for _, secret := range []string{bearer, principalSecret} {
+					resp, data := env.Do(secret, "GET", "/v1/blobs/"+sha, nil)
+					if resp.StatusCode != 200 || string(data) != full {
+						t.Fatal("authorized durable read failed before purge")
+					}
+				}
+				purge := env.Hub.Blobs.Purge
+				if entry == "transfers" {
+					purge = transfers.PurgeHash
+				}
+				for round := range 2 {
+					if err := purge(ctx, sha); err != nil {
+						t.Errorf("purge round %d: %v", round, err)
+					}
+					if err := env.Hub.Blobs.Purge(ctx, sha); err != nil {
+						t.Errorf("repeated Store.Purge round %d: %v", round, err)
+					}
+					for _, secret := range []string{bearer, principalSecret} {
+						resp, raw := env.Do(secret, "GET", "/v1/blobs/"+sha, nil)
+						if resp.StatusCode != 410 || !bytes.Contains(raw, []byte(`"blob_purged"`)) {
+							t.Errorf("authorized read after purge: status=%d, want 410 blob_purged", resp.StatusCode)
+						}
+					}
+					resp, _ := env.Do("", "GET", "/v1/blobs/"+sha+"?t="+token, nil)
+					if resp.StatusCode != 410 {
+						t.Errorf("delivery token after purge: status=%d", resp.StatusCode)
+					}
+					for _, secret := range []string{outsider, outsiderPrincipal, lateBearer} {
+						resp, _ := env.Do(secret, "GET", "/v1/blobs/"+sha, nil)
+						if resp.StatusCode != 403 {
+							t.Errorf("outsider learned purge state: status=%d", resp.StatusCode)
+						}
+					}
+					var refs, payloads, size int
+					if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM durable_blob_refs WHERE msg_id=? AND sha256=? AND purpose=?`, msgID, sha, purpose).Scan(&refs); err != nil {
+						t.Fatal(err)
+					}
+					if err := env.Hub.DB.QueryRow(`SELECT count(*),coalesce(sum(length(bytes)),0) FROM durable_blob_payloads WHERE sha256=?`, sha).Scan(&payloads, &size); err != nil {
+						t.Fatal(err)
+					}
+					if refs != 1 || payloads != 1 || size != 0 {
+						t.Errorf("purge must retain authorization with empty stub: refs=%d payloads=%d bytes=%d", refs, payloads, size)
+					}
+					if storedBody(t, env, msgID) != before {
+						t.Fatal("purge rewrote retained message")
+					}
+					if err := transfers.Tick(ctx); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := env.Hub.DB.Exec(`DELETE FROM messages WHERE msg_id=?`, msgID); err != nil {
+					t.Fatal(err)
+				}
+				if err := transfers.Tick(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if err := env.Hub.Blobs.Purge(ctx, sha); err != nil {
+					t.Errorf("permanent tombstone must keep purge idempotent after last-ref GC: %v", err)
+				}
+			})
+		}
+	}
+}
