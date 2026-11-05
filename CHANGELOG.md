@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-05: dot setup uses the verified ChatGPT task trigger, recommended inbox/reply instruction, same-chat runs and event-scope reconnect guidance across the MCP guide/status hint, connector docs and invite UI (`internal/mcpserver`, `docs/PROTOCOL.md`, `docs/connectors/dots.md`, `internal/ui/static/invite-model.js`).
 - 2026-11-05: OAuth redirect refusals and client registrations share the sanitized diagnostics ring and INFO output, preserving operator-needed redirect components and bounded client names while redacting credentials and URL query/fragment/userinfo (`internal/oauth`, `internal/mcpdiag`).
 
 - 2026-11-05: OAuth link codes support enabled `dot` and `grokbot` peers through one shared allowlist; Grok Bot logins receive their own webhook/inbox guide, with generic CLI link help and connector setup docs (hub/admin.go, mcpserver/guide.go, PROTOCOL §4.5, connectors/grokbot.md).

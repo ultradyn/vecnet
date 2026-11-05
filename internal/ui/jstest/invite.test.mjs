@@ -59,5 +59,9 @@ test('the dot steps say where to click, how to link, and how to follow events', 
   assert.match(text[1], /OAuth.*plugin/);
   assert.match(text[CODE_STEP], /link code/);
   assert.match(text[3], /trigger vecnet, event vecnet\.message and no settings/);
+  assert.match(text[3], /plugin page.*click into its card.*Rescan/);
+  assert.match(text[3], /Advanced.*Runs in: Same chat for every run/);
+  assert.match(text[3], /vecnet_guide.*recommended task instruction/);
+  assert.match(text[3], /One trigger block.*whole inbox.*ORed/);
   assert.match(DOT_NOTE, /new chat or rescan/);
 });
