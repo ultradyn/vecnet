@@ -291,16 +291,25 @@ func TestStatusConn(t *testing.T) {
 // the top bar says so, the last data stays, and ctrl+l loads nothing.
 func TestStatusConnDisabled(t *testing.T) {
 	f := seeded()
+	// The disable waits for the first load, so the last data is there to keep.
+	disable := make(chan struct{})
 	f.tail = func(ctx context.Context, _ func(opclient.Batch) error, status func(string)) error {
 		status("live")
+		select {
+		case <-disable:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		return opclient.ErrDisabled
 	}
 	m := newTestModel(t, f, newClock())
 	m.screens = staticScreens()
 	p := newPump(t, m)
 	p.run(m.Init())
-	p.until("disabled", func() bool { return m.Conn == ConnDisabled })
 	p.until("first load", func() bool { return !m.firstLoading() })
+	p.idle()
+	close(disable)
+	p.until("disabled", func() bool { return m.Conn == ConnDisabled })
 	p.idle()
 	for _, size := range [][2]int{{140, 42}, {80, 24}} {
 		if line := strings.Split(plainAt(t, m, size[0], size[1]), "\n")[0]; !strings.Contains(line, "operator disabled") {
@@ -318,6 +327,37 @@ func TestStatusConnDisabled(t *testing.T) {
 	}
 	if !strings.Contains(m.toast.text, "restart with a valid profile") {
 		t.Fatalf("toast %q", m.toast.text)
+	}
+}
+
+// A disable that lands before the first reload runs suppresses every load; the
+// first load must still settle, or the body would wait on it forever.
+func TestStatusConnDisabledBeforeFirstLoad(t *testing.T) {
+	for _, done := range []error{opclient.ErrDisabled, opclient.ErrUnauthorized} {
+		t.Run(done.Error(), func(t *testing.T) {
+			f := seeded()
+			m := newTestModel(t, f, newClock())
+			m.screens = staticScreens()
+			p := newPump(t, m)
+			// Init's commands are not run, so the order is fixed: the tail ends
+			// before the first reload message is handled.
+			_ = m.Init()
+			p.send(tailDoneMsg{err: done})
+			if !m.stopped() {
+				t.Fatalf("Conn = %q", m.Conn)
+			}
+			p.send(reloadMsg{tags: []string{TagAll}})
+			if m.firstLoading() {
+				t.Fatalf("first load still open: %v", m.first)
+			}
+			if len(m.inflight) != 0 || f.count("Inbox") != 0 {
+				t.Fatalf("loads after stop: %d", f.count("Inbox"))
+			}
+			frame := plainAt(t, m, 140, 42)
+			if strings.Contains(frame, "connecting to") || strings.Contains(frame, "first load: waiting") {
+				t.Fatalf("body still waits on the first load:\n%s", frame)
+			}
+		})
 	}
 }
 

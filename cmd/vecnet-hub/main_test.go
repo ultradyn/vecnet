@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -21,6 +22,7 @@ import (
 	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/hubid"
+	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/store"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
@@ -670,7 +672,14 @@ func TestOAuthRedirectsFlagAndEnv(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				// Drain before Close so the transport reuses the connection rather
+				// than racing replacement dials against the next request/shutdown.
+				// A new connection with no headers can hold Shutdown past 2 s.
+				_, readErr := io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
 				want := http.StatusCreated
 				if uri == "https://connector.example/callback" {
 					want = tc.want
@@ -755,5 +764,158 @@ func TestEventsRefreshIntervalFlagAndEnv(t *testing.T) {
 				t.Fatalf("refresh interval differs from %s by %s", tc.want, delta)
 			}
 		})
+	}
+}
+
+func TestPreferenceBootstrapFlagsAndEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name, env string
+		args      []string
+		want      int64
+		origin    string
+	}{
+		{"default", "", nil, 500, ""}, {"env", "700", nil, 700, "VECNET_THREAD_BUDGET"}, {"flag", "700", []string{"--thread-budget", "800"}, 800, "--thread-budget"}, {"equal env", "500", nil, 500, "VECNET_THREAD_BUDGET"}, {"equal flag", "700", []string{"--thread-budget", "500"}, 500, "--thread-budget"}, {"flag overrides invalid env", "synthetic-invalid-environment", []string{"--thread-budget", "500"}, 500, "--thread-budget"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
+			resolve := registerPreferenceFlags(fs, func(key string) string {
+				if key == "VECNET_THREAD_BUDGET" {
+					return tc.env
+				}
+				return ""
+			})
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := resolve()
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			h, db, err := openHub(dir, "", false, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			s, err := h.Preferences.LoadSnapshot(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e, err := s.Get("agents.thread_budget")
+			if err != nil {
+				t.Fatal(err)
+			}
+			n, _ := e.Value.Int64()
+			source := prefs.SourceFlag
+			if tc.origin == "" {
+				source = prefs.SourceDefault
+			}
+			if n != tc.want || e.Source != source || e.Origin != tc.origin {
+				t.Fatalf("bootstrap = %+v", e)
+			}
+		})
+	}
+}
+
+func TestPreferenceFlagDiagnosticsExcludeEnvironment(t *testing.T) {
+	for _, name := range []string{"events-refresh-interval", "presence-ttl", "session-presence-ttl", "launcher-presence-ttl", "default-max-depth", "default-ttl", "thread-budget", "sends-per-minute", "threads-per-hour", "creates-per-hour"} {
+		for _, arg := range []string{"--help", "--unknown-option"} {
+			t.Run(name+"/"+arg, func(t *testing.T) {
+				const rejected = "synthetic-invalid-environment-<>&\""
+				env := "VECNET_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+				getenv := func(key string) string {
+					if key == env {
+						return rejected
+					}
+					return ""
+				}
+				// Capture run's real flag diagnostics, including its default usage.
+				file, err := os.CreateTemp(t.TempDir(), "stderr")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer file.Close()
+				func() {
+					previous := os.Stderr
+					os.Stderr = file
+					defer func() { os.Stderr = previous }()
+					err = run(context.Background(), []string{arg}, io.Discard, getenv)
+				}()
+				if err == nil {
+					t.Fatal("missing flag diagnostic")
+				}
+				output, readErr := os.ReadFile(file.Name())
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if !bytes.Contains(output, []byte("Usage of vecnet-hub:")) || !bytes.Contains(output, []byte("-"+name)) {
+					t.Fatal("missing preference flag usage")
+				}
+				if bytes.Contains(output, []byte("synthetic-invalid-environment")) || strings.Contains(err.Error(), "synthetic-invalid-environment") {
+					t.Fatal("rejected environment value entered flag diagnostics")
+				}
+			})
+		}
+	}
+}
+func TestPreferenceBootstrapRejectsInvalidBeforeOpeningStore(t *testing.T) {
+	for _, arg := range []string{"--thread-budget=synthetic-secret", "--presence-ttl=59s", "--default-ttl=1.5s", "--default-max-depth=65", "--creates-per-hour=0", "--session-presence-ttl=-1m", "--launcher-presence-ttl=25h"} {
+		dir := filepath.Join(t.TempDir(), "unopened")
+		err := run(context.Background(), []string{"--listen", "127.0.0.1:0", "--data-dir", dir, arg}, io.Discard, noEnv)
+		if err == nil || strings.Contains(err.Error(), "synthetic-secret") {
+			t.Fatalf("unsafe or missing bootstrap rejection: %v", err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("opened store on invalid bootstrap: %v", err)
+		}
+	}
+}
+
+func TestPreferenceBootstrapAllEnabledFlags(t *testing.T) {
+	for _, tc := range []struct {
+		flag, key, raw string
+		want           int64
+	}{
+		{"events-refresh-interval", "events.refresh_interval", "7m", 420},
+		{"presence-ttl", "presence.default_ttl", "2h", 7200},
+		{"session-presence-ttl", "presence.session_ttl", "30m", 1800},
+		{"launcher-presence-ttl", "presence.launcher_ttl", "45m", 2700},
+		{"default-max-depth", "agents.default_max_depth", "40", 40},
+		{"default-ttl", "agents.default_ttl", "48h", 172800},
+		{"thread-budget", "agents.thread_budget", "700", 700},
+		{"sends-per-minute", "rates.sends_per_minute", "80", 80},
+		{"threads-per-hour", "rates.threads_per_hour", "30", 30},
+		{"creates-per-hour", "provisioning.creates_per_hour", "90", 90},
+	} {
+		for _, fromEnv := range []bool{false, true} {
+			t.Run(tc.flag+map[bool]string{false: "/flag", true: "/env"}[fromEnv], func(t *testing.T) {
+				env := "VECNET_" + strings.ToUpper(strings.ReplaceAll(tc.flag, "-", "_"))
+				fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
+				resolve := registerPreferenceFlags(fs, func(key string) string {
+					if fromEnv && key == env {
+						return tc.raw
+					}
+					return ""
+				})
+				args := []string{}
+				origin := env
+				if !fromEnv {
+					args = []string{"--" + tc.flag, tc.raw}
+					origin = "--" + tc.flag
+				}
+				if err := fs.Parse(args); err != nil {
+					t.Fatal(err)
+				}
+				cfg, err := resolve()
+				if err != nil {
+					t.Fatal(err)
+				}
+				e := cfg.PreferenceBootstrap[tc.key]
+				n, _ := e.Value.Int64()
+				if n != tc.want || e.Source != prefs.SourceFlag || e.Origin != origin {
+					t.Fatalf("bootstrap = %+v", e)
+				}
+			})
+		}
 	}
 }

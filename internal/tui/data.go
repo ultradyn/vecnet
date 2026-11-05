@@ -149,6 +149,11 @@ func (m *Model) expand(tags []string) []string {
 func (m *Model) startLoads(tags []string, ack chan<- error) tea.Cmd {
 	keys := m.expand(tags)
 	if m.stopped() {
+		// A stop can land before the first reload runs; the suppressed keys
+		// will never load, so the first load must not wait on them.
+		for _, key := range keys {
+			delete(m.first, key)
+		}
 		keys = nil
 	}
 	var cmds []tea.Cmd

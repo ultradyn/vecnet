@@ -1,0 +1,266 @@
+{
+  "_notes": "Slice 1 of the hub-preferences plan (build order step 1: prefs Tasks 1 -> 2 -> 4). vecnet-core-build.workflow.mjs only runs a contiguous startTask..endTask range and has no skipTasks support, so this slice is startTask 1, endTask 2. Task 4 runs as the NEXT slice (startTask 4, endTask 4, new runStamp e.g. 20261105T??-hub-prefs-t4) on the same worktree/branch once Tasks 1-2 are merged into prefs-build; deps outside the range count as merged, so Task 4 needs only Task 2. Caveat: preflight check 4 requires a 'Plan-Task: 03' commit reachable from HEAD before a startTask=4 run; trailer numbers repeat across plans and master already carries older 'Plan-Task: 03' commits, so the check passes vacuously and does not prove prefs Task 3 ran (that is acceptable here: Task 4 must not wait for Task 3). Task 3 core (runtime/presence adapters) is a later slice (startTask 3, endTask 3) that needs a core-only scope override; its DB/R2 adapter parts and Tasks 5-8 are later slices still. Before ANY run: the plan and build-order docs live only on branch plans-1105 (not yet on master), and the workflow reads ${worktree}/docs/plans/2026-11-05-hub-preferences.md, so merge plans-1105 into master (or base prefs-build on it) first. mergeChecks/gateChecks below are for the backend slices (Tasks 1-4); fields starting with '_' are ignored by the script and only record what later slices should change.",
+  "_laterSlices": {
+    "task3_core": "Run startTask 3, endTask 3 only with an extraRules line restricting it to runtime/presence/request-default/rate/provisioning adapters; DB/R2 adapter slices of Task 3 follow their companion consumers. The workflow cannot split one task: a Plan-Task: 03 commit makes a later Task 3 run return already_done, so the DB/R2 adapter work needs either explicit Plan-Task trailers per slice (coordinator decision) or a hand-driven slice.",
+    "ui_slices_tasks_6_7": "Add back to mergeChecks: `just bb build2 node --test --test-concurrency=2 internal/ui/jstest/` and `just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-prefs/merge-shots just ui-shots`. Add to gateChecks: the jstest command, `just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-prefs/gate-shots just ui-shots` exits 0, and 'Every PNG listed in docs/plans/shots/oui/README.md exists, and every PNG in that directory is listed'. Drop the backend-only 'no internal/ui/ or scripts/ui/ changes' gate check.",
+    "ui_extraLenses": [
+      {
+        "key": "design",
+        "title": "Visual and interaction design",
+        "taste": true,
+        "focus": "Read every prefs-*.png in docs/plans/shots/oui/ with the Read tool beside the selected prototype (/home/xertrov/src/vecnet4/docs/plans/prototypes/prefs-settings/index.html, README.md and its shots/) and the existing 07-shell-*, 08-inbox-* shots. List (A/Ledger) is the default and Policy (D) the header toggle; both must look like the same product as the shell (palette, spacing, type, focus rings), keep source badges truthful (default|flag|stored), keep flag/env rows visibly read-only, keep Save/Undo reachable at 390x844 with no horizontal scroll, and make danger dialogs specific rather than generic or more alarming than their state."
+      }
+    ]
+  },
+  "runStamp": "20261105T15-hub-prefs",
+  "maxFixRounds": 3,
+  "planName": "hub-prefs",
+  "plan": "docs/plans/2026-11-05-hub-preferences.md",
+  "worktree": "/home/xertrov/src/vecnet4/.worktrees/prefs-build",
+  "branch": "prefs-build",
+  "baseRef": "master",
+  "statusDir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-prefs",
+  "taskPrefix": "pf",
+  "startTask": 1,
+  "endTask": 2,
+  "finalReview": true,
+  "openBrowser": false,
+  "solRelay": {
+    "run": "/home/xertrov/src/vecnet4/scripts/wf/sol-run.sh",
+    "wait": "/home/xertrov/src/vecnet4/scripts/wf/sol-wait.sh",
+    "dir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-prefs/ccc",
+    "transcripts": "/home/xertrov/.claude/projects/-home-xertrov-src-vecnet4/*/subagents/workflows/*/agent-*.jsonl"
+  },
+  "extraRules": [
+    "No npm or pnpm install. Playwright comes from the existing install through scripts/ui/lib.mjs.",
+    "Node and browser checks run through build2 too: `build2 node ...`. Chromium stays headless. Never run xdg-open or open a window.",
+    "Never touch the dev hub on 45752, the coordinator's preview on 49575, `.data/` or `.demo-data/`. Tmux only through the private `-L oui-<pid>` server, never Max's.",
+    "Read-only reviewers run screen scripts with the SHOTS_DIR their command gives, so committed PNGs stay unchanged.",
+    "Never read or write ~/.config/vecnet/, ~/.cache/vecnet/, ~/.claude.json, ~/.claude/ or ~/.codex/; tests use temp HOME/XDG_CONFIG_HOME/XDG_CACHE_HOME/VECNET_CONFIG dirs through the injected getenv.",
+    "Never touch connectors/** or internal/mcpserver/**. Admin parity (docs/plans/2026-11-05-admin-parity.md) exclusively owns the vecnet_prefs_list/get/set MCP tools and the admin:prefs capability; this plan adds no MCP tool, capability or OAuth scope. Until admin parity lands every preference surface is operator-only.",
+    "Tests, vet, node tests and screen scripts run on a build box via `just bb <cmd>` (docs/BUILDBOX.md), never on xsm. Only gofmt, git, `just isa-check` and `go list` run locally. Never run two ui-shots on the same box at once; if a screen check flakes, rerun it once before treating it as a regression.",
+    "Migrations: the plan adds exactly ONE preferences migration, allocated at the next free number at build time. Inspect internal/store/migrations/ in your worktree when you create it: master currently ends at 0020 and branch hub-notices takes 0021, so expect 0021 if hub-notices has not merged into your base, 0022 if it has. Record the actual filename in your step file and deviations. Never reserve a literal number, rename or edit a shipped migration, or change its checksum. If a merge finds the number taken, renumber the unshipped prefs file and its tests in that merge.",
+    "No new Go or JS dependencies. internal/prefs imports the standard library only (database/sql is fine for the narrow reader interface). internal/prefs, internal/opapi, internal/opclient and internal/cli must stay SQLite-free: `go list -deps ./cmd/vecnet` never gains modernc.org/sqlite or internal/store.",
+    "The companion plans (db-compaction, r2-blobs, admin-parity) are plans, not code: read them with `git show plan-db-compaction:docs/plans/2026-11-05-db-compaction.md` etc. only where your task cites them, and never implement their work. Build only against merged code on your base.",
+    "Branch hub-notices also edits internal/hub/hub.go, cmd/vecnet-hub/main.go, internal/opapi/types.go, internal/httpapi/admin.go and internal/store/migrations/. Keep prefs edits to those files small and additive so a later rebase or merge stays mechanical.",
+    "Never log, audit, print or put in a URL a preview/confirmation token, credential, signed URL or raw rejected request value. audit.Record refuses detail keys text, body, secret and token at any depth, so never name an audit detail key after those."
+  ],
+  "mergeChecks": [
+    "just bb just validate-protocol",
+    "build2 go list -deps ./cmd/vecnet | grep -c -E 'modernc.org/sqlite|github.com/XertroV/vecnet/internal/store' (must print 0)",
+    "just bb GOOS=windows CGO_ENABLED=0 go build -o /dev/null ./cmd/vecnet",
+    "git diff --name-only --diff-filter=MDR master...HEAD -- internal/store/migrations/ (must print nothing: shipped migrations are never edited, renamed or deleted)"
+  ],
+  "gateChecks": [
+    "`just isa-check` prints 0 for both binaries",
+    "`just bb just validate-protocol`",
+    "`build2 go list -deps ./cmd/vecnet | grep -c -E 'modernc.org/sqlite|github.com/XertroV/vecnet/internal/store'` prints 0",
+    "`build2 go list -f '{{join .Imports \"\\n\"}}' ./internal/prefs | grep -c '\\.'` prints 0 (internal/prefs imports the standard library only)",
+    "`build2 go list -deps ./cmd/vecnet-hub | grep -c 'charm.land'` prints 0",
+    "`just bb GOOS=windows CGO_ENABLED=0 go build -o /dev/null ./cmd/vecnet`",
+    "`git diff --name-only master...HEAD -- connectors/ internal/mcpserver/` prints nothing",
+    "`git diff --name-only --diff-filter=MDR master...HEAD -- internal/store/migrations/` prints nothing, and `git diff --name-only --diff-filter=A master...HEAD -- internal/store/migrations/` prints at most one file, named `<NNNN>_hub_preferences.sql` with NNNN the next free number after the base's highest migration",
+    "Backend slices only (endTask <= 4): `git diff --name-only master...HEAD -- internal/ui/ scripts/ui/ docs/plans/shots/` prints nothing"
+  ],
+  "lensFocus": {
+    "spec": "This run implements docs/plans/2026-11-05-hub-preferences.md, only the tasks in this invocation's range (slice 1 = Tasks 1-2, slice 2 = Task 4); later tasks are out of scope, so do not flag their absence. Check: registry keys, types, built-in defaults, ranges, zero/disabled rules, groups (retention_storage, files, notifications_presence, agents_defaults) and Now/Gated/Later classification exactly per Decisions 4, verified against merged hub.DefaultConfig, DefaultMaxExpiry and events.RefreshInterval; blobs.expiry is enum 1h|6h|12h|1d|7d|30d|off default 1d (no duration, no zero); appearance and the R2 storage quota are NOT registry keys; Gated keys report unavailable and reject writes until their adapter exists; Later keys are editable:false with a reason. Exported seam names and signatures exactly as Decisions 1: prefs.Source/Definition/Value/Effective{Value,Source,Origin,Revision}/Snapshot{Revision,ETag}/Patch{Set,Reset,Confirm,ApplyExisting}/Preview, Snapshot.Get, prefs.Validate, (*hub.Preferences).LoadSnapshot(ctx, tx)/Subscribe(ctx)/private notify, Read/Preview/PatchPreferences(ctx, caller, expectedETag, patch). Sources exactly default|flag|stored (env is flag + origin); precedence built-in < env < explicit flag < stored; reset reveals the bootstrap layer; saving the inherited built-in default normalizes to reset and shows default; no-op writes create no revision or audit. One next-free migration with the three STRICT tables of Decisions 2, revision seeded 0. Strong ETag \"prefs-<rev>-<digest>\" covering DB revision plus bootstrap values, registry version and deployment generation; If-Match rules. When Task 4 is in range: routes, status codes and error codes exactly per the Decisions 5 table, existing error envelope, Cache-Control: no-store, preview read-only, apply_existing only for DB retention keys.",
+    "security": "Operator-only authority rechecked inside the hub preferences service, not only by /v1/admin middleware: principal, peer, dot/OAuth and delegated/as-peer callers can neither read nor write, and no client-supplied peer_id or scope exists. Registry never exposes secrets, URLs, origins with credentials, bootstrap-only settings (listen, data dir, public URL, egress, proxies, OAuth redirects, MCP origins, blob backend/credentials, identity keys, hosted limits) or an arbitrary config dump. Audit rows, logs and error details carry only known keys and reason codes, never raw rejected values, request bodies, preview tokens or credentials. Preview tokens: HMAC under a key derived from meta.hub_key with its own domain separator (like seal.go's sealInfo), bound to caller, canonical patch, ETag, deployment generation, risk set and impact bounds, five-minute expiry, never in URLs, logs, audit or CLI JSON; a token alone grants no authority. Strict JSON decoding (unknown and duplicate fields, duplicate keys, fractions, negatives, null, overflow, 16 KiB, 64 keys). PATCH, preview and confirm never delete data or queue a trim. CLI binary stays SQLite-free. No MCP tool, capability or OAuth scope added (admin parity owns them).",
+    "tests": "Tests use t.TempDir databases, temp HOME/XDG/VECNET_CONFIG through injected getenv, the FakeClock and no sleeps as synchronisation. Pinned: two simultaneous PATCHes with the same ETag, exactly one wins and the other gets the conflict; restart keeps stored overrides and a changed flag/default invalidates the ETag without a DB revision change; storage/audit failure rolls back values, revision and audit together; fresh, upgrade and reopen migrations with unchanged shipped checksums; Subscribe delivers latest-only, coalesces bursts, fires only after commit and closes on cancel with no goroutine leak under -race; explicit flag equal to the built-in reports flag; invalid persisted value fails startup with key and code only. Migration tests look up the prefs migration by name suffix, not a hard-coded number, so a renumber at merge does not break them. Review Focus 1, 2 and 6 are each pinned by a test that fails without the behaviour."
+  },
+  "extraLenses": [],
+  "runner": "BB_HOST=x-tall just bb ",
+  "deps": {
+    "1": [],
+    "2": [
+      1
+    ],
+    "3": [
+      2
+    ],
+    "4": [
+      2
+    ],
+    "5": [
+      3,
+      4
+    ],
+    "6": [
+      3,
+      4
+    ],
+    "7": [
+      3,
+      5,
+      6
+    ],
+    "8": [
+      7
+    ]
+  },
+  "tasks": [
+    {
+      "title": "Registry, metadata and shared wire contract (`internal/prefs`, opapi DTOs)",
+      "refs": "Plan Decisions 1, 4, 5 (GET field names); Task 1 Interfaces; Global Constraints (SQLite-free); PROTOCOL \u00a72.12, \u00a76, \u00a78, \u00a716.2, \u00a718.2, \u00a718.3 (existing caps)",
+      "race": false,
+      "suite": "./internal/prefs/ ./internal/opapi/",
+      "route": "sol",
+      "checks": [
+        "build2 go list -deps ./cmd/vecnet | grep -c -E 'modernc.org/sqlite|github.com/XertroV/vecnet/internal/store' (must print 0)"
+      ],
+      "hazards": [
+        "Edit only internal/prefs/{registry.go,value.go,types.go,registry_test.go,value_test.go}, internal/opapi/types.go and opapi round-trip fixtures under internal/opapi/testdata/. No persistence, hub, HTTP or CLI code in this task.",
+        "internal/prefs imports the standard library only; never internal/store, internal/hub, internal/audit or modernc.org/sqlite. opapi exposes preference DTOs from this package without pulling in SQLite.",
+        "Exported names exactly as Decisions 1: `type Source string` with constants for exactly default, flag, stored (no env, saved, edited or inherited source); `Definition`; `Value` (tagged bool/int64/enum, never map[string]any); `Effective struct { Value Value; Source Source; Origin string; Revision uint64 }`; `Snapshot` with `Revision uint64` and `ETag string`; `func (s Snapshot) Get(key string) (Effective, error)` whose Effective.Revision equals the Snapshot's; `func Validate(def Definition, value Value) error`; `Patch{Set map[string]Value; Reset []string; Confirm []string; ApplyExisting bool}`; typed `Preview` DTO matching the Decisions 5 preview shape.",
+        "Types are only bool, int, duration and enum. Durations are nonnegative whole seconds encoded as JSON integers. Strict decoding rejects fractions, negatives, null, overflow, wrong types, unknown keys and duplicate keys; encoding/json silently keeps the last duplicate, so detect duplicates with a token-level decoder. No float, string, URL, secret or arbitrary JSON preference types.",
+        "Registry contents exactly per the Decisions 4 table: Now = events.refresh_interval, presence.default_ttl/session_ttl/launcher_ttl, agents.default_max_depth/default_ttl/thread_budget, rates.sends_per_minute/threads_per_hour, provisioning.creates_per_hour; Gated = retention.ack_events, retention.history, retention.archive_mode, blobs.expiry; Later = provisioning.max_peers, rates.anonymous_burst/anonymous_refill, rates.avatar_changes_per_hour, agents.max_expiry, agents.text_cap, files.read_token_ttl as editable:false with a reason. Gated keys are present but unavailable (editable:false + unavailable_reason) until Task 3 installs their consumer.",
+        "blobs.expiry is enum 1h|6h|12h|1d|7d|30d|off with default 1d: not a duration and no zero. Theme/density are browser-only and NOT registry keys. The R2 storage quota is bootstrap-only and NOT a preference.",
+        "Zero is valid only for keys that declare disabled_value (retention.ack_events, retention.history, provisioning.max_peers). Cross-key rule: agents.default_ttl <= the configured MaxExpiry.",
+        "Verify every default and bound against merged code (hub.DefaultConfig: DefaultMaxDepth 32, DefaultTTL 24h, ThreadBudget 500, SendsPerMin 60, ThreadsPerHour 20, presence TTL constants, DefaultMaxExpiry; events.RefreshInterval 30m with 1m..24h). Where an existing hard cap is narrower than the plan's proposed range, use the narrower bound and record a deviation.",
+        "Wire descriptor field names exactly as the Decisions 5 GET example (key, type, value, source, origin, default, min, max, unit, label, description, group, settable_by, editable, runtime, danger) plus allowed_values, disabled_value, unavailable_reason. Group ids retention_storage, files, notifications_presence, agents_defaults; settable_by operator. Metadata order is deterministic and stable."
+      ]
+    },
+    {
+      "title": "One migration, fallback resolution and transactional writes (`hub.Preferences` core)",
+      "refs": "Plan Decisions 1, 2, 3 (publication paragraph), 4 (bootstrap flags); Task 2 Interfaces; Review Focus 1, 2, 6; PROTOCOL \u00a712 (audit)",
+      "race": true,
+      "suite": "./internal/prefs/ ./internal/store/ ./internal/audit/ ./internal/hub/ ./cmd/vecnet-hub/",
+      "route": "sol",
+      "checks": [
+        "just isa-check"
+      ],
+      "hazards": [
+        "Edit only: one new internal/store/migrations/<NNNN>_hub_preferences.sql plus migration tests in internal/store, internal/hub/{preferences.go,preferences_test.go}, internal/hub/hub.go, cmd/vecnet-hub/{main.go,main_test.go}. Use internal/audit.Record; do not change the audit package.",
+        "Migration number: inspect internal/store/migrations/ at build time and take the next free number (0021 if hub-notices is not in your base, 0022 if it is); record the actual filename. Never reserve a number or touch a shipped migration. Tests find the file by its _hub_preferences.sql suffix.",
+        "Schema exactly per Decisions 2: STRICT hub_preferences(key TEXT PRIMARY KEY, value_json TEXT NOT NULL CHECK(json_valid(value_json)), updated_at TEXT NOT NULL, updated_by TEXT NOT NULL); STRICT hub_preferences_state(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL CHECK(revision>=0)) seeded with revision 0; STRICT hub_preference_activations(revision, key, effective_from, not_before, cutoff_at, high_water, approval_digest, PRIMARY KEY(revision,key)). This is the only prefs migration ever; DB/R2 never add preference tables.",
+        "Hub-only service `*hub.Preferences` in internal/hub/preferences.go with exactly: LoadSnapshot(ctx context.Context, tx *sql.Tx) (prefs.Snapshot, error) (nil tx opens a consistent standalone read), Subscribe(ctx context.Context) <-chan uint64 (capacity-one latest-revision wakeup, closed on cancel), private notify(revision uint64) fired only after commit, and ReadPreferences/PreviewPreferences/PatchPreferences(ctx, caller, expectedETag, patch). HMAC preview tokens and confirmation belong to Task 4: leave a seam, do not build them here.",
+        "One preference store: no prefs.Get/Set/RetentionSnapshot helpers, no second table or cache, and never mutate Hub.Cfg from a write. Install the new immutable snapshot through atomic.Pointer after commit and before returning, serialized with writes so an older snapshot can never overwrite a newer one. Consumers (tickers, presence, send, provision) are Task 3: do not wire them here.",
+        "Precedence built-in < env < explicitly supplied flag < stored override. Detect explicit flags with flag.Visit and env presence through the injected getenv; an explicit flag or env value equal to the built-in still reports source flag, with Origin naming the flag or env var. Never INSERT defaults at startup; a restart never overwrites stored overrides.",
+        "Normalization: setting a value equal to the built-in when the inherited bootstrap layer is default removes the override (source default); when a flag/env layer differs, an override equal to the built-in is stored and Reset reveals flag. A patch that changes neither stored state nor effective source creates no revision and no audit row.",
+        "Writes run in store.DB.Tx (IMMEDIATE): recheck If-Match inside the transaction, validate the complete prospective snapshot, write values, bump revision and call audit.Record(ctx, tx, actor, \"prefs_changed\", keys, detail) with typed old/new values and sources, operation and revision, all in one transaction. Any failure leaves no values, revision or audit row. Strong ETag \"prefs-<rev>-<digest>\" over DB revision plus a canonical hash of effective bootstrap values, registry version and deployment policy generation; reject `*`, weak (W/) and multiple tags.",
+        "The service rechecks operator authority itself: principal, peer, dot/OAuth and as-peer callers are refused regardless of route middleware. No client-supplied peer_id or scope.",
+        "Bootstrap flags only for the Now keys listed in Decisions 4 (--presence-ttl, --session-presence-ttl, --launcher-presence-ttl, --default-max-depth, --default-ttl, --thread-budget, --sends-per-minute, --threads-per-hour, --creates-per-hour with matching VECNET_ env names). Keep the existing --events-refresh-interval / VECNET_EVENTS_REFRESH_INTERVAL flag, its Go-duration syntax (30m) and default byte-identical; new duration flags accept the same syntax. Retention/blobs flags arrive with their Task 3 adapters. Validate bootstrap values before use.",
+        "An invalid or unsupported persisted value fails startup with key and reason code only (no raw value) and points at the recovery runbook; never a silent destructive fallback. Startup loads stored state before any worker starts."
+      ]
+    },
+    {
+      "title": "Runtime consumers, safe activation and companion adapters",
+      "refs": "Plan Decisions 3, 4; Task 3 Interfaces; Review Focus 2-5; PROTOCOL \u00a76, \u00a78, \u00a711, \u00a716.2, \u00a718.2, \u00a718.4; companion plans db-compaction and r2-blobs (git show)",
+      "race": true,
+      "suite": "./internal/hub/ ./internal/events/ ./internal/httpapi/ ./cmd/vecnet-hub/",
+      "route": "sol",
+      "checks": [],
+      "hazards": [
+        "Edit only the files Task 3 lists (internal/hub/{preferences_runtime*,preferences_retention*}.go, hub.go, tickers.go, presence.go, loop.go, send.go, provision.go, internal/events/{worker.go,store.go}); companion files only in serialized companion-owned commits after those companions are merged on your base.",
+        "Scope by slice: the core slice wires only runtime/presence/request-default/rate/provisioning consumers. DB retention and R2 expiry adapters are built only once the DB and R2 consumers exist on master; until then their keys stay unavailable and writes return prefs_unavailable. Never fake an adapter to satisfy acceptance.",
+        "Consumers call Preferences.LoadSnapshot(ctx, tx) then snapshot.Get(key), once per operation; never write h.Cfg from a request and never add another preference store or retention projection store.",
+        "Worker loops select on ctx.Done(), their timer and Subscribe(ctx); stop and drain timers safely, reread on the next iteration, use the FakeClock and leak no goroutines. Events refresh updates the next schedule of existing subscriptions without changing lease/expiry or causing a catch-up storm.",
+        "Request defaults affect only newly created messages/threads; existing expires_at, max_depth, budgets and explicit peer/principal limits stay frozen. Rate defaults apply to new peers only (insertPeer copies them); creates_per_hour replaces the DefaultCreatesPerHour fallback but explicit principal rows win.",
+        "Retention: every new or shorter policy records effective_from; retrospective work needs the Task 4 preview/confirm, a persisted not_before at the next nightly sweep (maintenance config, default 02:00 UTC, not a preference) and fixed cutoff/high-water in hub_preference_activations. Wakeups and confirm never trigger deletion; each bounded deletion slice rechecks authorization and revision inside its transaction. Archive mode keeps ack pruning at 7 days unless retention.ack_events=0.",
+        "R2: map the blobs.expiry enum to seconds only in the transfer adapter; off is class keep with expires_at null and object_expires_at null; no expiry_disabled or expiry_policy_version field; PUT 300s, GET up to 600s, never the old 120s GET cap. Existing object deadlines never change. Configure no real provider resources.",
+        "No additional migration. Companion retention/blobs bootstrap flags (--retention-ack-events, --retention-history, --retention-archive-mode, --blobs-expiry and VECNET_ equivalents) map to the same registry; document any compatibility alias instead of a second config path."
+      ]
+    },
+    {
+      "title": "Operator HTTP API, preview and confirmation (`/v1/admin/prefs`)",
+      "refs": "Plan Decisions 1 (authority), 2 (ETag), 5 (routes, errors); Task 4 Interfaces; Review Focus 1, 3, 6; PROTOCOL \u00a72.12, \u00a712, \u00a714, \u00a715",
+      "race": true,
+      "suite": "./internal/httpapi/ ./internal/hub/ ./internal/prefs/ ./internal/opapi/",
+      "route": "sol",
+      "checks": [
+        "just bb just validate-protocol"
+      ],
+      "hazards": [
+        "Edit only internal/httpapi/{prefs.go,prefs_test.go}, route registration in internal/httpapi/admin.go, focused auth/middleware tests, opapi DTO additions if needed (additive to Task 1's types), and the preview-token code/tests in internal/hub/preferences*.go. Do not edit docs/PROTOCOL.md or CHANGELOG.md (Task 8 owns them).",
+        "Routes exactly: GET /v1/admin/prefs (200, ETag, Cache-Control: no-store), PATCH /v1/admin/prefs (application/json, If-Match), POST /v1/admin/prefs/preview (same body, If-Match, read-only). Handlers translate HTTP only and call the hub service; no handler touches SQL.",
+        "Status and error codes exactly per the Decisions 5 table: 400 invalid_body, existing 401, 403 forbidden (no values disclosed), 413 payload_too_large (16 KiB), 415 unsupported_media_type, 422 prefs_unknown_key / prefs_invalid_value (known key and constraint only, never the raw value), 409 prefs_unavailable / prefs_policy_locked / prefs_confirmation_required / prefs_confirmation_stale, 428 prefs_precondition_required, 412 prefs_revision_conflict, 503 prefs_storage_unavailable. Use the existing writeError envelope {error:{code,message,details}} with empty details as {}; confirm the shipped envelope in fixtures.",
+        "PATCH body {set, reset, confirm, apply_existing}: at least one set/reset, no key in both, at most 64 keys; strict decoding rejects unknown and duplicate fields, duplicate keys, fractions, negatives, overflow, null and wrong types. confirm is an array of server-issued preview tokens, never a boolean or force. Reject If-Match `*`, weak and multiple tags.",
+        "Operator-only: existing /v1/admin middleware AND the hub service recheck; principal, peer, dot/OAuth and as-peer callers get 403. No client-supplied peer_id or scope, and no MCP tool or capability (admin parity owns them).",
+        "Preview tokens: five-minute HMAC with its own domain separator under a key derived from meta.hub_key (follow seal.go's separation), bound to caller, canonical patch, ETag, deployment generation, risk set and impact bounds (including impact.not_before for retrospective DB work). Never in URLs, logs or audit rows; a token alone grants no authority; replay after commit fails the ETag check.",
+        "Preview never mutates preferences, revision or data and takes no long DB lock; estimates are labelled. apply_existing is valid only for DB retention keys and always needs preview/confirmation; with the DB adapter absent it returns prefs_unavailable. Uninstalled consumers stay unavailable: Task 4 does not wait for Task 3 adapters."
+      ]
+    },
+    {
+      "title": "CLI `vecnet prefs` and read-only TUI Preferences view",
+      "refs": "Plan Decisions 6 (CLI, TUI paragraphs), 5; Task 5 Interfaces; Review Focus 1, 6; PROTOCOL \u00a713.1, \u00a713.7",
+      "race": false,
+      "suite": "./internal/opclient/ ./internal/cli/ ./internal/tui/ ./internal/opapi/",
+      "route": "sol",
+      "checks": [
+        "just bb GOOS=windows CGO_ENABLED=0 go build -o /dev/null ./cmd/vecnet",
+        "build2 go list -deps ./cmd/vecnet | grep -c -E 'modernc.org/sqlite|github.com/XertroV/vecnet/internal/store' (must print 0)"
+      ],
+      "hazards": [
+        "Edit only internal/opclient/**, internal/cli/** prefs command files and CLI dispatch, internal/tui/** API/navigation and the new preferences screen/tests/goldens. Never internal/cli/hook*.go or internal/cli/guide.md. Serialize any opapi DTO change.",
+        "Tests never touch the real config: set VECNET_CONFIG, XDG_CONFIG_HOME, XDG_CACHE_HOME and HOME to t.TempDir() through the app's getenv; never read or write ~/.config/vecnet/ or ~/.cache/vecnet/.",
+        "Commands: `vecnet prefs list|get KEY|set KEY VALUE [--json]`, `set --reset KEY` (VALUE prohibited), `set KEY VALUE --preview [--apply-existing]`, repeated `--confirm-risk CODE` for noninteractive automation. Unexpected or new risks abort. No generic --yes. One GET ETag per PATCH and never an automatic retry after 412.",
+        "Exit codes: 0 success, 1 validation/conflict/refusal, 2 usage. JSON mode returns structured codes and never preview tokens; tokens live in memory only. No config-file rewrite and no raw server body printing.",
+        "TUI is read-only: :prefs view, grouped list with value/source/status, help pane, refresh; only GET; forbidden and older-hub 404 show unavailable; all text through the existing TUI cleaning. Inspect the merged keymap before binding any key.",
+        "CLI binary stays SQLite-free; go list check above must print 0."
+      ]
+    },
+    {
+      "title": "Settings page, shared draft model and local appearance (web UI)",
+      "refs": "Plan Design decision (Max, 2026-11-05); Decisions 6 (web, draft, danger, appearance paragraphs), 5; Task 6 Interfaces; Review Focus 7",
+      "race": false,
+      "suite": "./internal/httpapi/ ./internal/ui/...",
+      "route": "opus",
+      "checks": [
+        "just bb build2 node --test --test-concurrency=2 internal/ui/jstest/"
+      ],
+      "hazards": [
+        "The screen scripts share the two-core build2 slice with other agents, so wait on page state (locators, waitFor) and the hold and release helpers, never on elapsed time.",
+        "Edit only internal/ui/static/{settings.js,settings-model.js,appearance.js}, matching tests in internal/ui/jstest/, and app.js, index.html, api.js and the existing stylesheet(s). Never two Settings stores or mutation paths.",
+        "Follow Max's selected prototype at /home/xertrov/src/vecnet4/docs/plans/prototypes/prefs-settings/ (README.md, index.html; untracked, main checkout, read-only): List (A/Ledger) default, header toggle to Policy (D), remembered only as list|policy in localStorage vecnet.ui.settingsView with try/catch and List fallback. Both views are projections of one draft store: edits, dirty state, Save/Undo, errors, source badges and confirmation state survive the toggle. The prototype's 'archive retains acknowledged events' claim and its prices/growth figures are superseded placeholders.",
+        "Source badges are exactly the wire sources default, flag, stored (prototype 'saved' maps to stored; 'edited' is a draft state). Flag/env rows are read-only in both views. Saving the inherited built-in default is sent as a reset; the badge comes from the server response, never invented locally. Archive mode leaves the ack-events lane active at 7 days.",
+        "Drafts never go to localStorage or URLs; preview tokens never persist. 412 keeps the draft and shows reload/compare; server errors keep the draft; dirty navigation warns. Danger dialogs are focus-trapped and specific (archive off, blob expiry off, shorter presence TTL); apply_existing is a separate unchecked choice with its own preview.",
+        "Appearance (theme system|dark|light, density comfortable|compact) lives in vecnet.ui.appearance.v1 with its own Apply/Undo, never a hub PATCH; corrupt or blocked storage falls back to defaults; storage events sync tabs; no theme flash.",
+        "All labels, help and errors render with textContent; phone width stacks rows with Save/Undo reachable and no horizontal overflow; progress and errors via aria-live."
+      ]
+    },
+    {
+      "title": "Real browser/CLI journeys and 32-shot Settings receipt",
+      "refs": "Plan Task 7; Decisions 6; Review Focus 7",
+      "race": false,
+      "suite": "./internal/httpapi/ ./internal/ui/...",
+      "route": "opus",
+      "shots": "prefs",
+      "checks": [
+        "just bb build2 node scripts/ui/prefs.mjs",
+        "just bb build2 node scripts/ui/shots-index.mjs"
+      ],
+      "reviewChecks": [
+        "just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-prefs/review-shots/07 build2 node scripts/ui/prefs.mjs"
+      ],
+      "hazards": [
+        "The screen scripts share the two-core build2 slice with other agents, so wait on page state (locators, waitFor, pane text) and the hold and release helpers, never on elapsed time.",
+        "Edit only scripts/ui/prefs.mjs, docs/plans/shots/oui/README.md, the generated shots index and the prefs-*.png artifacts (plus a private TUI prefs shot only if needed via the existing tmux harness).",
+        "Exactly 32 shots: views list|policy x states initial|dirty|saving|saved|error|confirm-archive|confirm-trim|confirm-files x sizes desk (1440x900) / phone (390x844), named prefs-<view>-<state>-<desk|phone>.png and listed individually in the README/index.",
+        "Use withDemo, a real disposable hub, the authenticated API and the actual CLI. States come from real fixture edits and deterministic request holds/failures, never prototype query params or DOM label injection. The 412 state uses a real competing operator PATCH.",
+        "Inspect every PNG at native size. Run fixture-only ui-shots once for whole-nav regression; never regenerate unrelated goldens. No real credentials or provider calls."
+      ]
+    },
+    {
+      "title": "PROTOCOL \u00a7 Hub preferences, operator runbook, changelog and whole-surface acceptance",
+      "refs": "Plan Decisions 1-6; Task 8; Review Focus 1-7; PROTOCOL \u00a72.12, \u00a78, \u00a711, \u00a714, \u00a715",
+      "race": false,
+      "suite": "./...",
+      "route": "opus",
+      "checks": [
+        "just bb just validate-protocol",
+        "just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
+        "just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-prefs/gate-shots just ui-shots"
+      ],
+      "reviewChecks": [
+        "just bb just validate-protocol",
+        "just bb build2 node --test --test-concurrency=2 internal/ui/jstest/"
+      ],
+      "hazards": [
+        "Edit only docs/PROTOCOL.md, docs/OPERATOR.md, docs/DEPLOY.md, protocol examples/schema tooling, README.md, CHANGELOG.md and a new implementation receipt.",
+        "Add \u00a7 Hub preferences as the next free subsection under the operator API section after rebasing; never hardcode or renumber hub-notices' or other plans' sections. Add, never reorder or rewrite, other plans' PROTOCOL text.",
+        "PROTOCOL text must match the merged code exactly: keys, implemented flag/env names, sources default|flag|stored, precedence/reset, ETag/If-Match, error table, preview/confirm and next-nightly not_before.",
+        "Receipt records the actual migration filename, companion commits, prototype pick (List A default + Policy D toggle) and test/shot evidence. CHANGELOG gets one dated line.",
+        "Rollback runbook: an older binary blindly running GC is unsafe; recovery of an invalid stored key only through a stopped-hub, backed-up maintenance procedure, never a remote force bypass."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+ "snapshot": {
+  "revision": 12,
+  "preferences": [{
+   "key":"events.refresh_interval", "type":"duration", "value":1800,
+   "source":"flag", "origin":"VECNET_EVENTS_REFRESH_INTERVAL", "default":1800,
+   "min":60, "max":86400, "unit":"seconds", "label":"Events refresh interval",
+   "description":"Refresh cadence for MCP Events subscriptions.",
+   "group":"notifications_presence", "settable_by":"operator",
+   "editable":true, "runtime":"live", "danger":[]
+  }]
+ },
+ "patch": {"set":{"events.refresh_interval":600},"reset":[],"confirm":[],"apply_existing":false},
+ "preview": {
+  "base_revision":12,
+  "risks":[{"code":"retention_shortened","keys":["retention.ack_events"],"message":"Shorter retention requires approval."}],
+  "impact":{"cutoff_at":"2026-10-29T15:00:00.000Z","high_water":42,"not_before":"2026-11-06T02:00:00.000Z","eligible":0,"pinned":3,"estimated_bytes":0},
+  "confirm_token":"", "expires_at":"2026-11-05T15:05:00.000Z"
+ },
+ "storage_preview": {
+  "base_revision":12,
+  "risks":[{"code":"blob_expiry_off","keys":["blobs.expiry"],"message":"New attachments have no disaster expiry."}],
+  "impact":{"estimated_bytes":0,"storage":{"retained_bytes":600,"reserved_bytes":100,"used_bytes":700,"limit_bytes":5368709120}},
+  "confirm_token":"", "expires_at":"2026-11-05T15:05:00.000Z"
+ },
+ "details":{"field":"agents.default_ttl","constraint":"max_expiry"}
+}

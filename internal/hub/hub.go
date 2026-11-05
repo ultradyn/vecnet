@@ -22,12 +22,18 @@ import (
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/ids"
+	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
 // Config holds the hub's tunables. DefaultConfig returns the Global
 // Constraints values of the core-hub plan (PROTOCOL §2.2, §6, §16).
 type Config struct {
+	// PreferenceBootstrap captures explicit nonsecret flag/env provenance.
+	PreferenceBootstrap        map[string]prefs.Effective
+	PreferencePolicyGeneration string // immutable deployment policy identity
+	CreatesPerHour             int    // provisioning fallback; Task 3 installs its consumer
+
 	PublicURL       string        // externally visible origin, no trailing slash
 	DataDir         string        // holds hub.db and blobs/
 	DefaultMaxDepth int           // loop.max_depth when a send omits it (range 1–64)
@@ -58,6 +64,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		DefaultMaxDepth: 32,
+		CreatesPerHour:  DefaultCreatesPerHour,
 		DefaultTTL:      24 * time.Hour,
 		MaxExpiry:       DefaultMaxExpiry,
 		ThreadBudget:    500,
@@ -76,6 +83,8 @@ func DefaultConfig() Config {
 
 // Hub is the service.
 type Hub struct {
+	Preferences *Preferences
+
 	DB    *store.DB
 	Log   *eventlog.Log
 	Blobs *blob.Store
@@ -172,6 +181,10 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	h := &Hub{DB: db, Log: log, Blobs: blobs, Auth: &auth.Resolver{DB: db, Now: now}, Cfg: cfg, Now: now,
 		streams: map[string]int{}, notifySem: make(chan struct{}, MaxNotifyInFlight)}
 	if err := h.loadIdentity(context.Background()); err != nil {
+		return nil, err
+	}
+	h.Preferences, err = newPreferences(db, cfg, now)
+	if err != nil {
 		return nil, err
 	}
 	h.IdleHook = h.OnIdle // release held wake_idle deliveries (PROTOCOL §5.2)
