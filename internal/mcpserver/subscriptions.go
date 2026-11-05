@@ -13,7 +13,7 @@ import (
 	"github.com/XertroV/vecnet/internal/hub"
 )
 
-const subscriptionSetupHint = "Event subscription is not active. You, the model, cannot subscribe: there is no model tool for it. Tell the user: Open the vecnet plugin page in ChatGPT and confirm vecnet.message appears beside the tools (if missing, Rescan). Then in a Work chat (web, or desktop with Work + Cloud) or a dot, ask: \"Subscribe to the vecnet.message event from the vecnet plugin with no arguments, and when an event arrives, read it and reply via vecnet.\" Workspace controls for plugins and event-triggered tasks must allow it. Never claim you subscribed. Use vecnet_inbox meanwhile, and call vecnet_subscriptions again to confirm."
+var subscriptionSetupHint = "Event subscription is not active. " + fmt.Sprintf(guideDotSubscribe, events.Name) + " Never claim you subscribed. Use vecnet_inbox meanwhile, and call vecnet_subscriptions again to confirm. " + guideDotReconnect
 
 type subscriptionStatus struct {
 	ID             string         `json:"id"`

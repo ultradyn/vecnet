@@ -148,10 +148,10 @@ The web dashboard and TUI subscriptions tab show the callback host (not its path
 | `ok` | — | Delivery is healthy. No action. |
 | `failing` | — | Delivery is retrying. Check the callback and last status before attempts run out. |
 | `late` (refresh due) | — | Ask ChatGPT to re-subscribe before expiry. |
-| `expired` | — | Ask the dot to subscribe again; queued events resume from its cursor. |
+| `expired` | — | Check the ChatGPT task trigger; if renewal is missing or permissions fail, disconnect and reconnect vecnet in plugin settings to grant event scopes ([dot setup](connectors/dots.md#set-up)). Queued events resume from the saved subscription cursor. |
 | `paused_token` | `token_expired` | ChatGPT must re-subscribe with a fresh token. Resume would immediately pause again. |
 | `paused_failed` | `delivery_failed` | Fix the callback, then Resume in the inbox. The event that exhausted eight attempts returns only if the dot re-subscribes from an earlier cursor. |
-| `paused_auth` | `unauthorized` | Enable the peer or link the correct account, then ask the dot to subscribe again. A Resume button cannot repair this. |
+| `paused_auth` | `unauthorized` | Enable the peer or link the correct account, then check the ChatGPT task trigger (Trigger vecnet, Event `vecnet.message`, no Settings; [dot setup](connectors/dots.md#set-up)). A Resume button cannot repair this. |
 | `paused_auth` | `credential_rotated` | The new bearer holder must subscribe again to establish a new callback association. Do not resume the old callback. |
 | `paused_operator` | `operator` | Your intentional pause survives re-subscription. Resume in the inbox when ready. |
 | `unverified` | — | Wait for a successful subscribe verification challenge; no events are sent yet. |

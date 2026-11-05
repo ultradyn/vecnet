@@ -69,7 +69,7 @@ export const DOT_STEPS = [
   ['In ChatGPT, open ', { b: 'Plugins' }, ', choose ', { b: '+' }, ', then ', { b: 'Add custom MCP server' }, '.'],
   ['Paste the MCP server URL, choose ', { b: 'OAuth' }, ', and create it as a plugin.'],
   ['When the vecnet consent page asks for a link code, enter this one:'],
-  ['In the dot, create a task with trigger ', { b: 'vecnet' }, ', event ', { b: 'vecnet.message' }, ' and no settings. That is how a dot follows vecnet events.'],
+  ['Open the vecnet plugin page and click into its card; Rescan if vecnet.message is missing. In the dot, create a task with trigger ', { b: 'vecnet' }, ', event ', { b: 'vecnet.message' }, ' and no settings. Under Advanced, set Runs in: ', { b: 'Same chat for every run' }, '. Call vecnet_guide for the recommended task instruction to paste. One trigger block covers the whole inbox; several blocks are ORed.'],
 ];
 export const CODE_STEP = 2;
 export const DOT_NOTE = 'Existing chats keep the tool list they started with: after adding or changing the plugin, start a new chat or rescan the plugin.';

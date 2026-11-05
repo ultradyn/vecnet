@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-05: dot setup uses the verified ChatGPT task trigger, recommended inbox/reply instruction, same-chat runs and event-scope reconnect guidance across the MCP guide/status hint, connector docs and invite UI (`internal/mcpserver`, `docs/PROTOCOL.md`, `docs/connectors/dots.md`, `internal/ui/static/invite-model.js`).
 - 2026-11-05: MCP serverInfo.version is now a real build stamp (`just version`: UTC date.time+commit) set via ldflags in `just build` and the Dockerfile `VECNET_VERSION` build arg; `just fly-deploy` passes it so ChatGPT sees a new version each deploy.
 - 2026-11-05: MCP Events asks clients to refresh every 30 minutes or before lease expiry, configurable with `VECNET_EVENTS_REFRESH_INTERVAL` / `--events-refresh-interval` (1m..24h); subscription and operator status preserve the returned deadline.
 - 2026-11-05: merge launcher with master MCP/OAuth diagnostics and event scopes; retain method/code-only notification warnings and CIMD audit redaction; fill the previously reserved migration 0015 with a no-op so existing migration names/checksums remain stable (`internal/mcpserver`, `internal/oauth`, `internal/store/migrations`).
