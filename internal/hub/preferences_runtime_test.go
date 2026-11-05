@@ -234,15 +234,16 @@ func runtimeSubscription(t *testing.T, env *testhub.Env, identity ...string) eve
 		t.Fatal(err)
 	}
 	effective, err := env.Hub.Preferences.Current().Get("events.refresh_interval")
-	if err != nil || effective.Source != prefs.SourceDefault && s.RefreshBefore == nil {
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _ := effective.Value.Int64()
+	if s.NextRefreshBefore == nil || !s.NextRefreshBefore.Equal(env.Now.Now().Add(time.Duration(n)*time.Second)) {
 		t.Fatal("Upsert did not apply explicit refresh policy", err)
 	}
-	if s.RefreshBefore == nil {
-		// Match the successful subscribe path for an inherited default. A
-		// stored override must already have been applied by Upsert itself.
-		if err := env.Events.Store.SetRefreshBefore(context.Background(), s.ID, env.Now.Now().Add(30*time.Minute)); err != nil {
-			t.Fatal(err)
-		}
+	// Match the successful subscribe path, which alone saves client advice.
+	if err := env.Events.Store.SetRefreshBefore(context.Background(), s.ID, env.Now.Now().Add(30*time.Minute)); err != nil {
+		t.Fatal(err)
 	}
 	got, err := env.Events.Store.Get(context.Background(), s.ID)
 	if err != nil {

@@ -168,7 +168,9 @@ const (
 // new challenge passes. Either way expires is now+ttl, clamped to MaxTTL
 // (ttl <= 0 means MaxTTL) and to tokenExp; a zero tokenExp is a credential
 // that does not expire. s.Cursor applies only to a new row. ErrTooMany when a
-// new or lapsed row would take the principal past MaxPerPrincipal.
+// new or lapsed row would take the principal past MaxPerPrincipal. Refresh
+// scheduling here changes only the worker deadline; SetRefreshBefore saves
+// client advice after a successful subscription.
 func (st *Store) Upsert(ctx context.Context, s Subscription, secret string, ttl time.Duration, tokenExp time.Time) (Subscription, bool, error) {
 	args, err := canonicalArgs(s.Arguments)
 	if err != nil {
@@ -208,11 +210,6 @@ func (st *Store) Upsert(ctx context.Context, s Subscription, secret string, ttl 
 	var created bool
 	err = st.DB.Tx(ctx, func(tx *sql.Tx) error {
 		id, created = "", false
-		// Raw store callers historically leave advice unset, so legacy health
-		// projections can use the lease margin. The successful subscribe caller
-		// persists its default through SetRefreshBefore. Explicit preferences
-		// are applied here too, without requiring an MCP dependency.
-		var refresh any
 		interval := RefreshInterval
 		if st.hub != nil {
 			snapshot, err := st.hub.Preferences.LoadSnapshot(ctx, tx)
@@ -225,9 +222,6 @@ func (st *Store) Upsert(ctx context.Context, s Subscription, secret string, ttl 
 			}
 			n, _ := e.Value.Int64()
 			interval = time.Duration(n) * time.Second
-			if e.Source != prefs.SourceDefault {
-				refresh = envelope.FormatTime(RefreshDeadline(now, expires, interval))
-			}
 		}
 		var oldSealed string
 		var lapsed bool
@@ -256,10 +250,10 @@ func (st *Store) Upsert(ctx context.Context, s Subscription, secret string, ttl 
 			_, err = tx.ExecContext(ctx,
 				`INSERT INTO event_subscriptions(sub_id, principal_kind, principal_id, peer_id, name, arguments, url,
 				                                 secret_enc, cursor_epoch, cursor_seq, types, expires_at,
-				                                 token_expires_at, token_hash, created_at, updated_at, refresh_before_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				                                 token_expires_at, token_hash, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				id, s.PrincipalKind, s.PrincipalID, s.PeerID, s.Name, args, s.URL,
-				sealed, s.Cursor.Epoch, s.Cursor.Seq, string(typesJSON), expiresS, tokenExpires, tokenHash, nowS, nowS, refresh)
+				sealed, s.Cursor.Epoch, s.Cursor.Seq, string(typesJSON), expiresS, tokenExpires, tokenHash, nowS, nowS)
 			if err != nil {
 				return fmt.Errorf("events: create subscription: %w", err)
 			}
@@ -281,11 +275,10 @@ func (st *Store) Upsert(ctx context.Context, s Subscription, secret string, ttl 
 			                                token_hash = ?6, last_refresh_at = ?7,
 			                                paused_reason = CASE WHEN paused_reason = ?8 THEN paused_reason END,
 			                                verified_at = CASE WHEN expires_at <= ?7 OR verified_at <= ?9 OR ?11 THEN NULL ELSE verified_at END,
-			                                attempts = 0, next_attempt_at = NULL, updated_at = ?7,
-			                                refresh_before_at = coalesce(?12, refresh_before_at)
+			                                attempts = 0, next_attempt_at = NULL, updated_at = ?7
 			 WHERE sub_id = ?10`,
 			s.PeerID, sealed, string(typesJSON), expiresS, tokenExpires, tokenHash, nowS, PausedOperator,
-			envelope.FormatTime(now.Add(-ChallengeMaxAge)), id, string(old) != secret, refresh); err != nil {
+			envelope.FormatTime(now.Add(-ChallengeMaxAge)), id, string(old) != secret); err != nil {
 			return fmt.Errorf("events: refresh subscription: %w", err)
 		}
 		if err := clearBackoff(ctx, tx, id); err != nil {
