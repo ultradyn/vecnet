@@ -24,14 +24,16 @@ const checks = [
   'authorization-server metadata',
   'server/discover',
   'initialize older revision',
+  'initialize supported older revision',
   'tools/list',
   'setup guide and prompt',
   'events/list',
+  'subscription status',
   'invalid Origin',
   'GET without a session',
 ];
 
-test('conformance passes all ten checks with a seeded peer bearer', { timeout: 120000 }, async () => {
+test('conformance passes all twelve checks with a seeded peer bearer', { timeout: 120000 }, async () => {
   const env = await bootDemo();
   try {
     const token = Object.values(env.demo.peers).find(peer => peer.secret)?.secret;
