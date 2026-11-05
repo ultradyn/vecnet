@@ -222,6 +222,8 @@ func hookOutput(event, context string) []byte {
 	name := "UserPromptSubmit"
 	if event == "post-tool" {
 		name = "PostToolUse"
+	} else if event == "session-start" {
+		name = "SessionStart"
 	}
 	var raw bytes.Buffer
 	encoder := json.NewEncoder(&raw)
@@ -399,11 +401,13 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			event = "user-prompt"
 		case "PostToolUse":
 			event = "post-tool"
+		case "SessionStart":
+			event = "session-start"
 		default:
 			return hookResult{}
 		}
 	}
-	if event != "user-prompt" && event != "post-tool" {
+	if event != "user-prompt" && event != "post-tool" && event != "session-start" {
 		return hookResult{}
 	}
 	fits := func(context string) bool {

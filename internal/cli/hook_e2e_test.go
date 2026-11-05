@@ -196,3 +196,42 @@ func TestHookAndWatchShowOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestHookCodexStdinShapes(t *testing.T) {
+	env := testhub.Start(t)
+	aID, aSec := env.NewPeer("session", "A")
+	_, bSec := env.NewPeer("session", "B")
+	a, b := hookUser(t, env.URL, aSec), hookUser(t, env.URL, bSec)
+	for _, u := range []*user{a, b} {
+		u.env["CODEX_HOME"] = filepath.Join(t.TempDir(), "codex")
+	}
+	run := func(input string) string {
+		t.Helper()
+		var out, errs bytes.Buffer
+		if code := cli.RunContext(context.Background(), []string{"hook"}, strings.NewReader(input), &out, &errs, a.getenv); code != 0 {
+			t.Fatalf("exit=%d stderr=%q", code, errs.String())
+		}
+		return out.String()
+	}
+	if out := run(`{"hook_event_name":"UserPromptSubmit","session_id":"s1"}`); out != "" {
+		t.Fatalf("seed printed %q", out)
+	}
+	b.send(aID, "codex hello", "--wake")
+	out := run(`{"session_id":"s1","transcript_path":"/x","cwd":"/w","hook_event_name":"SessionStart","model":"m","source":"resume","permission_mode":"default"}`)
+	ctx := hookE2EContext(t, out, "SessionStart")
+	for _, want := range []string{`text="codex hello"`, "vecnet --net "} {
+		if !strings.Contains(ctx, want) {
+			t.Fatalf("missing %q in %q", want, ctx)
+		}
+	}
+	raw, err := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "shell_command", "tool_input": map[string]any{}, "tool_response": strings.Repeat("x", 900*1024)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) >= 1<<20 {
+		t.Fatalf("fixture exceeds stdin cap: %d", len(raw))
+	}
+	if out := run(string(raw)); out != "" {
+		t.Fatalf("post-tool repeated delivery: %q", out)
+	}
+}
