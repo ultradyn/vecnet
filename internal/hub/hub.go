@@ -46,6 +46,11 @@ type Config struct {
 	EventRetentionLimits  eventlog.RetentionLimits
 	RetentionSweepHourUTC int // nightly activation schedule; DefaultConfig uses 02:00 UTC
 
+	// DefaultConfig marks AckedEventRetention as set, so assigning zero disables
+	// pruning. Literal Configs can mark an explicit zero here; without this bit
+	// a zero duration is unset. Nonzero durations are always explicit.
+	AckedEventRetentionSet bool
+
 	// Online backfill is independently opt-in; zero limits use defaults.
 	BackfillEnabled    bool
 	BackfillLimits     BackfillLimits
@@ -92,6 +97,8 @@ func DefaultConfig() Config {
 		SendsPerMin:           60,
 		ThreadsPerHour:        20,
 		BlobTokenTTL:          7 * 24 * time.Hour,
+
+		AckedEventRetentionSet: true,
 
 		AvatarChangesPerHour: DefaultAvatarChangesPerHour,
 

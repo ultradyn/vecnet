@@ -121,6 +121,13 @@ func callbackError(reason string) *RPCError {
 	return &RPCError{Code: ErrCodeCallback, Message: "CallbackEndpointError", Data: map[string]any{"reason": reason}}
 }
 
+func subscriptionReplayError(err error) error {
+	if errors.Is(err, events.ErrReplayUnavailable) {
+		return invalidReason("replay_unavailable", "legacy callback bytes unavailable; see operator subscription recovery")
+	}
+	return err
+}
+
 // eventArguments validates arguments against the inputSchema and returns
 // them decoded, with arguments absent or null meaning {}.
 func eventArguments(raw json.RawMessage) (map[string]any, error) {
@@ -390,7 +397,7 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 	}
 	if move {
 		if err := s.Events.SetCursor(ctx, sub.ID, cur, clientHas); err != nil {
-			return nil, err
+			return nil, subscriptionReplayError(err)
 		}
 	} else if sub.Truncated {
 		if err := s.Events.ClearTruncated(ctx, sub.ID); err != nil {
@@ -413,14 +420,14 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 
 	replay, err := s.Events.ReplayCursor(ctx, sub.ID, cur)
 	if err != nil {
-		return nil, err
+		return nil, subscriptionReplayError(err)
 	}
 	// A purge can commit between validation and replay. Report the newer
 	// owner floor using the existing truncated response, retaining exact outbox copies.
 	if replay.Seq > cur.Seq {
 		truncated = true
 		if err := s.Events.SetCursor(ctx, sub.ID, replay, false); err != nil {
-			return nil, err
+			return nil, subscriptionReplayError(err)
 		}
 	}
 	// The live events.refresh_interval preference sets the advice; only this

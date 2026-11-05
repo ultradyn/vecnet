@@ -58,6 +58,9 @@ type eventRuleBoundary struct {
 	AfterSeconds        int64  `json:"after_seconds"`
 	PolicyTag           string `json:"policy_tag"`
 	BootstrapGeneration uint64 `json:"bootstrap_generation,omitempty"`
+	// Bootstrap protection does not mutate the shared preference revision.
+	// It is ordered after the activation at that revision, before future Saves.
+	BootstrapTransition bool `json:"bootstrap_transition,omitempty"`
 	// Hard expiry is a separate class: disabled classes receive no authority.
 	HardDuration time.Duration `json:"hard_duration_ns,omitempty"`
 	HardCutoffAt string        `json:"hard_cutoff_at,omitempty"`
@@ -91,7 +94,7 @@ func loadEventBoundariesKey(ctx context.Context, tx *sql.Tx, key string) ([]even
 	var revision uint64
 	var seq int64
 	for _, v := range b {
-		if v.Revision <= revision || v.FromSeq < seq || v.BeforeSeconds < 0 || v.AfterSeconds < 0 || v.HardDuration < 0 {
+		if v.Revision < revision || v.Revision == revision && !v.BootstrapTransition || v.FromSeq < seq || v.BeforeSeconds < 0 || v.AfterSeconds < 0 || v.HardDuration < 0 {
 			return nil, errors.New("retention: invalid_activation_projection")
 		}
 		revision = v.Revision
@@ -439,6 +442,12 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 					seconds = 0
 				}
 				for _, b := range bounds {
+					// Every boundary's previous rule matters, including an unknown
+					// prior projection (zero means retain indefinitely). Earlier
+					// protective changes cannot be lost at a later shortening.
+					if b.BeforeSeconds == 0 || seconds != 0 && b.BeforeSeconds > seconds {
+						seconds = b.BeforeSeconds
+					}
 					// A protective change applies immediately, including to older rows.
 					if b.AfterSeconds == 0 || seconds != 0 && b.AfterSeconds > seconds || seq > b.FromSeq {
 						seconds = b.AfterSeconds
@@ -616,6 +625,30 @@ func (h *Hub) initializeEventRetention(ctx context.Context) error {
 					b.Generation++
 					b.AckFromSeq = high
 				} else {
+					// A longer/disabled bootstrap protects existing rows too.
+					// Persist it in the same ordered ledger as runtime activations,
+					// so a subsequent prospective Save retains that historical rule.
+					bounds, err := loadEventBoundaries(ctx, tx)
+					if err != nil {
+						return err
+					}
+					b.Generation++
+					bounds = append(bounds, eventRuleBoundary{
+						Revision: s.Revision, FromSeq: high,
+						BeforeSeconds: approved, AfterSeconds: seconds,
+						PolicyTag: eventPolicyTag(p.Ack), BootstrapGeneration: b.Generation,
+						BootstrapTransition: true,
+					})
+					raw, err := json.Marshal(bounds)
+					if err != nil {
+						return err
+					}
+					if _, err := tx.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, eventRetentionProjectionKey, string(raw)); err != nil {
+						return err
+					}
+					if _, err := tx.ExecContext(ctx, `UPDATE hub_preference_activations SET not_before=NULL,cutoff_at=NULL,high_water=NULL WHERE key='retention.ack_events'`); err != nil {
+						return err
+					}
 					b.AckPending = false
 					b.ApprovedAckSeconds = &seconds
 				}
