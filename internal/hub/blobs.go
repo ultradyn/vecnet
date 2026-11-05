@@ -22,6 +22,9 @@ import (
 // → 429 upload_quota_exceeded with retry_after_seconds until the next UTC
 // midnight; re-uploading purged bytes → 410 blob_purged.
 func (h *Hub) PutBlob(ctx context.Context, c auth.Caller, r io.Reader, mediaType string, ttl time.Duration) (blob.Meta, error) {
+	if h.Cfg.BlobBackend == "r2" {
+		return blob.Meta{}, E(409, "direct_upload_required", "use the upload grant API")
+	}
 	uploader := c.PeerID
 	if uploader == "" {
 		uploader = c.PrincipalID

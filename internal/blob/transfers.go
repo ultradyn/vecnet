@@ -585,3 +585,9 @@ func r2TransferError(err error) error {
 	}
 	return ErrR2Unavailable
 }
+
+// ReadR2Object returns metadata for trusted hub authorization. The caller must
+// authorize before exposing any field or state error to an external caller.
+func ReadR2Object(ctx context.Context, q querier, id string) (R2Object, error) {
+	return r2ReadObject(ctx, q, "blob_id=?", id)
+}

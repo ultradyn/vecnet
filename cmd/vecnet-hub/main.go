@@ -96,6 +96,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	relocatedTo := fs.String("relocated-to", getenv("VECNET_RELOCATED_TO"), "answer hub_moved without workers at the old hub ($VECNET_RELOCATED_TO)")
 	restartRetry := fs.String("restart-retry-ms", envOr(getenv, "VECNET_RESTART_RETRY_MS", "5000"), "restart reconnect delay in milliseconds, 0..60000 ($VECNET_RESTART_RETRY_MS)")
 	resolvePreferences := registerPreferenceFlags(fs, getenv)
+	resolveBlobs := registerBlobFlags(fs, getenv)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -134,6 +135,9 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 		if errors.As(err, &pe) && pe.Details.Field == "events.refresh_interval" {
 			return fmt.Errorf("events refresh interval must be a whole-second Go duration between 1m and 24h: %w", err)
 		}
+		return err
+	}
+	if err := resolveBlobs(&preferenceConfig); err != nil {
 		return err
 	}
 	origins, err := mcpserver.ParseAllowedOrigins(*mcpOrigins)
@@ -328,6 +332,11 @@ type serveConfig struct {
 // development-only egress override (hub.Config.AllowPrivateEgress).
 // trustFly keys the per-client limiter on Fly-Client-IP (Deps.TrustFlyClientIP).
 func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
+	if cfg.Bootstrap != nil {
+		if err := hub.ValidateBlobConfig(*cfg.Bootstrap); err != nil {
+			return err
+		}
+	}
 	publicURL := cfg.PublicURL
 	var target string
 	if cfg.RelocatedTo != "" {

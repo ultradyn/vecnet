@@ -638,9 +638,11 @@ func TestR2SpillSurvivesAttachmentExpiry(t *testing.T) {
 	if resp.StatusCode != 200 || string(data) != full {
 		t.Fatal("authorized DB spill read lost full text")
 	}
-	resp, _ = env.Do(outsider, "GET", "/v1/blobs/"+shaHex(full), nil)
-	if resp.StatusCode != 403 {
-		t.Fatal("durable hash became a capability")
+	resp, data = env.Do(outsider, "GET", "/v1/blobs/"+shaHex(full), nil)
+	// Task 4 maps authenticated failed hash-only HTTP reads uniformly while
+	// remote transfers are configured; a durable hash still grants no access.
+	if resp.StatusCode != 422 || !bytes.Contains(data, []byte(`"blob_id_required"`)) || bytes.Contains(data, []byte(`"size"`)) || bytes.Contains(data, []byte(`"state"`)) {
+		t.Fatal("durable hash disclosed bytes or state")
 	}
 	sha, tok := blobToken(t, env, m.Attachments[0].BlobURL)
 	resp, data = env.Do("", "GET", "/v1/blobs/"+sha+"?t="+tok, nil)
@@ -755,9 +757,13 @@ func TestR2DurablePurgePreservesReadAuthorization(t *testing.T) {
 						t.Errorf("delivery token after purge: status=%d", resp.StatusCode)
 					}
 					for _, secret := range []string{outsider, outsiderPrincipal, lateBearer} {
-						resp, _ := env.Do(secret, "GET", "/v1/blobs/"+sha, nil)
-						if resp.StatusCode != 403 {
-							t.Errorf("outsider learned purge state: status=%d", resp.StatusCode)
+						// Known durable and unknown hashes share the authenticated
+						// missing-ID error; neither discloses a purge tombstone.
+						for _, hash := range []string{sha, shaHex("unknown durable payload")} {
+							resp, raw := env.Do(secret, "GET", "/v1/blobs/"+hash, nil)
+							if resp.StatusCode != 422 || !bytes.Contains(raw, []byte(`"blob_id_required"`)) || bytes.Contains(raw, []byte(`"blob_purged"`)) || bytes.Contains(raw, []byte(`"size"`)) || bytes.Contains(raw, []byte(`"state"`)) {
+								t.Errorf("outsider learned purge state: status=%d", resp.StatusCode)
+							}
 						}
 					}
 					var refs, payloads, size int

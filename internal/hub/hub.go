@@ -17,6 +17,7 @@ import (
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/blob"
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/egress"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
@@ -53,6 +54,8 @@ type Config struct {
 	TextCap         int           // Message content.text bytes before auto-spill
 	SendsPerMin     int           // per-peer send rate limit
 	ThreadsPerHour  int           // per-peer new-thread rate limit
+	BlobBackend     string
+	R2              R2Config
 	BlobTokenTTL    time.Duration // lifetime of a blob URL token
 
 	EventsRefreshInterval time.Duration // MCP Events refresh cadence; zero uses the 30-minute default
@@ -82,6 +85,8 @@ func DefaultConfig() Config {
 		SendsPerMin:     60,
 		ThreadsPerHour:  20,
 		BlobTokenTTL:    7 * 24 * time.Hour,
+		BlobBackend:     "disk",
+		R2:              R2Config{ChecksumProfile: "sha256", StorageQuotaBytes: 5 << 30},
 
 		AvatarChangesPerHour: DefaultAvatarChangesPerHour,
 
@@ -94,6 +99,11 @@ func DefaultConfig() Config {
 // Hub is the service.
 type Hub struct {
 	Preferences *Preferences
+	// BlobSignDownload signs only stored objects. Nil disables remote downloads.
+	BlobSignDownload func(context.Context, blob.R2Object) (blobwire.Request, error)
+	// BlobGrantUsage optionally observes sanitized persisted issuance/denial events.
+	BlobGrantUsage func(BlobGrantEvent)
+	blobMints      blobMintBudget
 
 	DB    *store.DB
 	Log   *eventlog.Log
@@ -161,6 +171,9 @@ func invalidURL(field string, err error) *APIError {
 // New builds a Hub over an opened store; the blob store lives under
 // Cfg.DataDir/blobs, so DataDir is required. A nil now means time.Now.
 func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
+	if err := ValidateBlobConfig(cfg); err != nil {
+		return nil, err
+	}
 	if db == nil {
 		return nil, errors.New("hub: nil store")
 	}
@@ -198,6 +211,9 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	}
 	h.Preferences, err = newPreferences(db, cfg, now)
 	if err != nil {
+		return nil, err
+	}
+	if err := h.initR2(); err != nil {
 		return nil, err
 	}
 	h.IdleHook = h.OnIdle // release held wake_idle deliveries (PROTOCOL §5.2)

@@ -68,7 +68,7 @@ func isPublic(r *http.Request) bool {
 		return true
 	case p == "/ui" || strings.HasPrefix(p, "/ui/"):
 		return true
-	case strings.HasPrefix(p, "/v1/blobs/") && r.URL.Query().Has("t"):
+	case (r.Method == http.MethodGet || r.Method == http.MethodHead) && strings.HasPrefix(p, "/v1/blobs/") && !strings.HasPrefix(p, "/v1/blobs/uploads/") && r.URL.Query().Has("t"):
 		return true
 	}
 	return false

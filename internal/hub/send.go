@@ -535,6 +535,13 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 			}
 		}
 	}
+	for _, a := range msg.Attachments {
+		if a.BlobID != "" {
+			if err := h.Blobs.Transfers.AddReference(ctx, tx, a.BlobID, a.SHA256, msg.MessageID); err != nil {
+				return nil, false, nil, h.blobTransferError(err)
+			}
+		}
+	}
 	for sha := range hosted {
 		if h.Blobs.Transfers != nil && (sourceRawSHA == sha || msg.Content.Truncated && msg.Attachments[len(msg.Attachments)-1].SHA256 == sha) {
 			continue
