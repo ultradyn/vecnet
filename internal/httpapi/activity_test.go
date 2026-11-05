@@ -126,7 +126,7 @@ func TestActivityRestartFrame(t *testing.T) {
 		t.Fatalf("ready = %q", got)
 	}
 	d.Announce(1500 * time.Millisecond)
-	if got := readRawFrame(t, br); got != "event: hub_restarting\ndata: {\"retry_after_ms\":1500}\n\n" {
+	if got := readRawFrame(t, br); got != "event: hub_restarting\nretry: 1500\ndata: {\"retry_after_ms\":1500}\n\n" {
 		t.Fatalf("restart = %q", got)
 	}
 	expectRawEOF(t, br)

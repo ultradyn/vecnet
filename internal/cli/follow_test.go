@@ -342,7 +342,10 @@ func TestWatchRestartHintClamped(t *testing.T) {
 		t.Fatalf("delay %v grace until %v", w.restartDelay, time.Until(w.restartUntil))
 	}
 }
-func TestWatchPrintsHubRestarting(t *testing.T) {
+
+// A restart announcement is a quiet transport hint (master's quiet reconnect,
+// PROTOCOL §21.3): the watch resumes from its cursor and prints nothing.
+func TestWatchHubRestartingQuietResume(t *testing.T) {
 	e := testhub.Start(t)
 	srv, _, _, resumes := watchProxy(t, e)
 	_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n", srv.URL, e.Hub.IdentityKey().Pubkey(), e.OperatorSecret))
@@ -362,9 +365,10 @@ func TestWatchPrintsHubRestarting(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	cursor := strings.Fields(lines[len(lines)-1])[0]
 	e.Drain.Announce(time.Second)
-	awaitNotice(t, func() bool {
-		return strings.Contains(out.String(), "- hub_restarting - hub hub: restarting; reconnecting in ~1s")
-	}, 5*time.Second)
+	// The watch's stream has received its final frame and ended.
+	if !e.Drain.Wait(5 * time.Second) {
+		t.Fatal("stream did not end on the restart announcement")
+	}
 	e.Drain.Reset()
 	select {
 	case resume := <-resumes:
@@ -383,6 +387,9 @@ func TestWatchPrintsHubRestarting(t *testing.T) {
 	if strings.Contains(errs.String(), "reconnecting") {
 		t.Fatalf("restart counted as failure: %s", errs.String())
 	}
+	if strings.Contains(out.String(), "hub_restarting") || strings.Contains(out.String(), "restarting") {
+		t.Fatalf("restart control reached stdout: %s", out.String())
+	}
 }
 func TestWatchRestartGraceNoFallback(t *testing.T) {
 	e := testhub.Start(t)
@@ -395,7 +402,9 @@ func TestWatchRestartGraceNoFallback(t *testing.T) {
 		t.Fatal("no stream")
 	}
 	e.Drain.Announce(time.Second)
-	awaitNotice(t, func() bool { return strings.Contains(out.String(), "hub hub: restarting; reconnecting") }, 5*time.Second)
+	if !e.Drain.Wait(5 * time.Second) {
+		t.Fatal("stream did not end on the restart announcement")
+	}
 	unavailable.Store(time.Now().Add(3 * time.Second).UnixNano())
 	e.Drain.Reset()
 	select {
@@ -404,8 +413,10 @@ func TestWatchRestartGraceNoFallback(t *testing.T) {
 		t.Fatal("no resumed SSE")
 	}
 	stop()
-	if polls.Load() != 0 || strings.TrimSpace(errs.String()) == "" || strings.Count(strings.TrimSpace(errs.String()), "\n") > 0 || strings.Contains(errs.String(), "reconnecting") {
-		t.Fatalf("fallback=%d stderr=%q", polls.Load(), errs.String())
+	// A 3 s outage inside the restart grace stays on SSE and, being under
+	// the quiet window, says nothing on either stream.
+	if polls.Load() != 0 || errs.String() != "" || strings.Contains(out.String(), "hub_restarting") {
+		t.Fatalf("fallback=%d stderr=%q stdout=%q", polls.Load(), errs.String(), out.String())
 	}
 }
 
@@ -489,7 +500,7 @@ func TestWatchLongPollRestartHint(t *testing.T) {
 	if err := w.longPoll(); err != errRestarting {
 		t.Fatalf("restart outcome: %v", err)
 	}
-	if w.cursor != "last" || w.restartUntil.Before(before.Add(61*time.Second)) || w.restartDelay < 800*time.Millisecond || w.restartDelay > 1200*time.Millisecond || !strings.Contains(out.String(), "- hub_restarting - hub hub: restarting; reconnecting in ~1s") || errs.String() != "" {
+	if w.cursor != "last" || w.restartUntil.Before(before.Add(61*time.Second)) || w.restartDelay < 800*time.Millisecond || w.restartDelay > 1200*time.Millisecond || strings.Contains(out.String(), "hub_restarting") || errs.String() != "" {
 		t.Fatalf("cursor=%s delay=%s grace=%s stdout=%q stderr=%q", w.cursor, w.restartDelay, w.restartUntil, out.String(), errs.String())
 	}
 }
@@ -566,8 +577,10 @@ func TestWatchRestartFrameBeforeEOF(t *testing.T) {
 	for i := 0; i < 32; i++ {
 		out := new(noticeOutput)
 		w := &watcher{a: &app{ctx: context.Background(), stdout: out, stderr: io.Discard}, c: newClient(srv.URL, ""), forMonitor: true}
-		if err := w.stream(); err != errRestarting || !strings.Contains(out.String(), "- hub_restarting - hub hub:") {
-			t.Fatalf("frame dropped before EOF on attempt %d: %v %q", i, err, out.String())
+		// errRestarting and the hinted delay prove the frame was dispatched;
+		// the control itself never reaches stdout.
+		if err := w.stream(); err != errRestarting || w.restartDelay < 800*time.Millisecond || w.restartDelay > 1200*time.Millisecond || strings.Contains(out.String(), "hub_restarting") {
+			t.Fatalf("frame dropped before EOF on attempt %d: %v delay=%v %q", i, err, w.restartDelay, out.String())
 		}
 	}
 }

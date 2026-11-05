@@ -7,6 +7,13 @@
 // VECNET_LISTEN, VECNET_DATA_DIR, VECNET_PUBLIC_URL and VECNET_RELOCATED_TO
 // replace the corresponding flag defaults; flags still win. --relocated-to
 // serves the old hub without workers and answers hub_moved for ordinary routes.
+// VECNET_RESTART_RETRY_MS defaults --restart-retry-ms (5000; 0..60000), the
+// reconnect hint streams get when the hub restarts.
+// VECNET_MCP_ALLOWED_ORIGINS defaults --mcp-allowed-origins: comma-separated
+// extra exact origins, empty for https://chatgpt.com, none for public origin only.
+// VECNET_EVENTS_REFRESH_INTERVAL defaults --events-refresh-interval (30m; 1m..24h).
+// VECNET_OAUTH_REDIRECTS defaults --oauth-redirects: comma-separated redirect
+// patterns appended to the built-in OAuth redirects.
 // VECNET_ALLOW_PRIVATE_EGRESS=1 is the default of --allow-private-egress,
 // a development-only override that lets push and notify URLs be http and
 // reach private or loopback addresses (PROTOCOL §14.7).
@@ -34,10 +41,13 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/logging"
+	"github.com/XertroV/vecnet/internal/mcpserver"
+	"github.com/XertroV/vecnet/internal/oauth"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
@@ -68,6 +78,10 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	listen := fs.String("listen", envOr(getenv, "VECNET_LISTEN", "127.0.0.1:45752"), "address to listen on ($VECNET_LISTEN)")
 	dataDir := fs.String("data-dir", envOr(getenv, "VECNET_DATA_DIR", "/data"), "directory holding hub.db and blobs/ ($VECNET_DATA_DIR)")
 	publicURL := fs.String("public-url", getenv("VECNET_PUBLIC_URL"), "externally visible origin ($VECNET_PUBLIC_URL; default http://<listen address>)")
+	mcpOrigins := fs.String("mcp-allowed-origins", getenv("VECNET_MCP_ALLOWED_ORIGINS"), "extra /mcp origins, comma-separated; empty defaults to https://chatgpt.com, none allows public origin only ($VECNET_MCP_ALLOWED_ORIGINS)")
+	mcpLegacy := fs.String("mcp-legacy-sessions", envOr(getenv, "VECNET_MCP_LEGACY_SESSIONS", "on"), "legacy MCP sessions: on, off-for-oauth, off ($VECNET_MCP_LEGACY_SESSIONS)")
+	oauthRedirects := fs.String("oauth-redirects", getenv("VECNET_OAUTH_REDIRECTS"), "extra OAuth redirect patterns, comma-separated, appended to defaults ($VECNET_OAUTH_REDIRECTS)")
+	eventsRefresh := fs.String("events-refresh-interval", envOr(getenv, "VECNET_EVENTS_REFRESH_INTERVAL", events.RefreshInterval.String()), "MCP Events refresh interval, 1m..24h ($VECNET_EVENTS_REFRESH_INTERVAL; default 30m)")
 	devUIDir := fs.String("dev-ui-dir", "", "serve the operator UI from this directory instead of the embedded copy (development)")
 	allowPrivate := fs.Bool("allow-private-egress", getenv("VECNET_ALLOW_PRIVATE_EGRESS") == "1",
 		"development only: let outbound URLs be http and reach private/loopback addresses ($VECNET_ALLOW_PRIVATE_EGRESS=1)")
@@ -100,9 +114,26 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if err != nil || retryMS < 0 || retryMS > 60000 {
 		return errors.New("--restart-retry-ms must be an integer in 0..60000")
 	}
+	refreshInterval, err := time.ParseDuration(*eventsRefresh)
+	if err != nil || refreshInterval < time.Minute || refreshInterval > 24*time.Hour {
+		return errors.New("events refresh interval must be a Go duration between 1m and 24h")
+	}
+	origins, err := mcpserver.ParseAllowedOrigins(*mcpOrigins)
+	if err != nil {
+		return err
+	}
+	legacy, err := mcpserver.ParseLegacySessions(*mcpLegacy)
+	if err != nil {
+		return err
+	}
+	redirects, err := oauth.ParseAllowedRedirects(*oauthRedirects)
+	if err != nil {
+		return err
+	}
 	return serve(ctx, serveConfig{
 		Listen: *listen, DataDir: *dataDir, PublicURL: *publicURL, DevUIDir: *devUIDir, RelocatedTo: *relocatedTo,
 		AllowPrivateEgress: *allowPrivate, TrustFly: *trustFly, RestartRetry: time.Duration(retryMS) * time.Millisecond,
+		MCPOrigins: origins, OAuthRedirects: redirects, RefreshInterval: refreshInterval, MCPLegacySessions: legacy,
 	}, stdout)
 }
 
@@ -248,6 +279,9 @@ type serveConfig struct {
 	RelocatedTo                          string
 	AllowPrivateEgress, TrustFly         bool
 	RestartRetry                         time.Duration
+	MCPOrigins, OAuthRedirects           []string
+	RefreshInterval                      time.Duration
+	MCPLegacySessions                    string
 }
 
 // serve runs until ctx is cancelled. Relocated mode serves a signed move
@@ -305,7 +339,9 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	if cfg.AllowPrivateEgress {
 		slog.Warn("vecnet-hub: private egress allowed (development only): outbound URLs may be http and reach private addresses")
 	}
+	h.Cfg.EventsRefreshInterval = cfg.RefreshInterval
 	stack := httpapi.NewStack(h)
+	stack.OAuth.AllowedRedirects = cfg.OAuthRedirects
 	// Shutdown does not cancel request contexts, so long-lived SSE streams
 	// and long-polls watch stop instead; closing it on shutdown lets them
 	// end at once rather than hold the whole grace period.
@@ -317,6 +353,8 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	deps.UIDir, deps.Stop = cfg.DevUIDir, stop
 	deps.Drain = httpapi.NewDrain()
 	deps.TrustFlyClientIP = cfg.TrustFly
+	deps.MCPAllowedOrigins = cfg.MCPOrigins
+	deps.MCPLegacySessions = cfg.MCPLegacySessions
 	var handler http.Handler
 	if target != "" {
 		// EnsureMovingNotice also re-signs, as the hub, a stored notice that
@@ -363,8 +401,14 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	// The grace period stays under Fly's kill_timeout (fly.toml).
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownGrace)
 	defer cancel()
+	// Announce first, so event and activity streams end with hub_restarting
+	// carrying the configured hint (and held long-polls answer with it), and
+	// give them a moment to flush. Then close stop, which ends every other
+	// long-lived response (MCP streams), before Shutdown closes listeners
+	// and waits for handlers.
 	deps.Drain.Announce(cfg.RestartRetry)
 	deps.Drain.Wait(time.Second + 250*time.Millisecond)
+	closeStop()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		// Long-lived streams (SSE, long polls) outlasted the grace period.
 		srv.Close()

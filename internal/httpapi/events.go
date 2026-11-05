@@ -105,7 +105,9 @@ func (s *server) getEvents(w http.ResponseWriter, r *http.Request) {
 	if !sse {
 		// A long poll holds the request for up to wait: lift the server's
 		// read deadline and give the write the hold plus a margin (§20.3).
-		holdOpen(http.NewResponseController(w), time.Now().Add(wait+sseWriteTimeout))
+		rc := http.NewResponseController(w)
+		holdOpen(rc, time.Now().Add(wait+sseWriteTimeout))
+		defer drainWritesOnStop(rc, s.Stop)()
 	}
 	// The first read validates the cursor (409 before any 200 is written).
 	first, err := s.Hub.Log.Read(ctx, owners, cur, eventsReadLimit)
@@ -240,13 +242,19 @@ func (s *server) longPoll(w http.ResponseWriter, r *http.Request, prn string, ow
 			}
 		}
 		// A wake can pass credential checks and reread events after the
-		// announcement. Give the held poll's pinned drain precedence over
-		// every successful exit, preserving its original cursor and hint.
+		// announcement. Give the held poll's pinned drain (or shutdown, which
+		// carries the default hint) precedence over every successful exit,
+		// preserving its original cursor and hint.
+		restart := true
 		select {
 		case <-drain.C():
+		case <-s.Stop:
+		default:
+			restart = false
+		}
+		if restart {
 			evs = []envelope.Event{}
 			restarting = &restartHint{RetryAfterMS: drain.RetryAfter().Milliseconds()}
-		default:
 		}
 	}
 	next := cur.String()
@@ -280,27 +288,22 @@ func (s *server) streamSSE(w http.ResponseWriter, r *http.Request, prn string, o
 	// The stream ends when the client goes away or the server shuts down.
 	ctx, stop := context.WithCancel(r.Context())
 	defer stop()
-	if s.Stop != nil {
-		go func() {
-			select {
-			case <-s.Stop:
-				stop()
-			case <-ctx.Done():
-			}
-		}()
-	}
-	conn := startSSE(w, s.sseStall())
-	defer conn.close()
-	conn.draining = drain.C()
-	// A drain can also interrupt send while the replay queue is full. In
-	// that case the handler exits before reaching its idle select.
-	defer func() {
+	// A restart (Drain announcement or shutdown) ends the stream at once,
+	// rather than holding the whole grace period.
+	restart, release := restartSignal(drain, s.Stop)
+	defer release()
+	go func() {
 		select {
-		case <-conn.draining:
-			conn.finish(restartFrame(drain.RetryAfter()), drainFlush)
-		default:
+		case <-restart:
+			stop()
+		case <-ctx.Done():
 		}
 	}()
+	conn := startSSE(w, s.sseStall())
+	conn.draining = restart
+	// The final frame also covers a restart that interrupts send while the
+	// queue is full, before the handler reaches its idle select.
+	defer conn.closeForRestart(r.Context(), restart, drain.RetryAfter)
 
 	if !conn.send(ctx, []byte("retry: 3000\n\n")) || !conn.send(ctx, []byte("id: "+cur.String()+"\ndata:\n\n")) {
 		return

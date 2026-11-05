@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/audit"
@@ -30,14 +31,14 @@ const (
 	// RefreshMargin is how long before expiry ChatGPT should re-subscribe.
 	// The operator snapshot and events/subscribe use the same deadline.
 	RefreshMargin = 10 * time.Minute
+	// RefreshInterval is the default cadence for clients to re-subscribe.
+	RefreshInterval = 30 * time.Minute
 	// SecretOverlap is how long the previous secret keeps signing after a
 	// refresh supplies a new one.
 	SecretOverlap = 10 * time.Minute
-	// ChallengeMaxAge bounds how long a passed challenge stands
-	// (docs/research/dots.md §2): one refresh cycle. A refresh inside it needs
-	// no new challenge, even with a new secret: a pass is per principal and
-	// URL, and the old secret still signs through the overlap.
-	ChallengeMaxAge = MaxTTL
+	// ChallengeMaxAge bounds verification reuse for an unchanged signing key.
+	// Rotating the key always invalidates a row's previous verification.
+	ChallengeMaxAge = 5 * time.Minute
 	// MaxPerPrincipal bounds one principal's live subscriptions, since each is
 	// served by every worker Step.
 	MaxPerPrincipal = 16
@@ -87,10 +88,11 @@ type Subscription struct {
 	Verified                                          bool
 	PausedReason                                      string
 
-	VerifiedAt   *time.Time // the last passed challenge; nil when one is due
-	TokenExpires *time.Time // nil for a vecnet bearer, whose credential has no expiry
-	TokenHash    string     // the subscribing OAuth access token's hash; "" for a vecnet bearer
-	Truncated    bool       // events were skipped as purged since the last events/subscribe
+	RefreshBefore *time.Time // the exact deadline returned by the last successful subscribe
+	VerifiedAt    *time.Time // the last passed challenge; nil when one is due
+	TokenExpires  *time.Time // nil for a vecnet bearer, whose credential has no expiry
+	TokenHash     string     // the subscribing OAuth access token's hash; "" for a vecnet bearer
+	Truncated     bool       // events were skipped as purged since the last events/subscribe
 }
 
 // Store is the subscription table. Key is meta.hub_key, under which the
@@ -100,6 +102,11 @@ type Store struct {
 	DB  *store.DB
 	Key []byte
 	Now func() time.Time
+
+	verificationMu sync.Mutex
+	verifications  map[verificationKey]time.Time
+	callbackOnce   sync.Once
+	callbackLocks  [64]chan struct{}
 }
 
 // NewStore returns the Store of hub h.
@@ -147,7 +154,7 @@ const (
 // name, arguments). A refresh keeps the cursor, rotates the secret (the old
 // one signs too for SecretOverlap), clears paused_reason (except
 // PausedOperator) and any backoff, and moves peer_id, types, the token hash
-// and the expiries to s's. It keeps the verification too, unless the row had
+// and the expiries to s's. It keeps verification only for the unchanged secret, unless the row had
 // lapsed or its pass is older than ChallengeMaxAge: then verified_at clears
 // here, in one write with the new expiry, so the worker sends nothing until a
 // new challenge passes. Either way expires is now+ttl, clamped to MaxTTL
@@ -244,11 +251,11 @@ func (st *Store) Upsert(ctx context.Context, s Subscription, secret string, ttl 
 			`UPDATE event_subscriptions SET peer_id = ?1, secret_enc = ?2, types = ?3, expires_at = ?4, token_expires_at = ?5,
 			                                token_hash = ?6, last_refresh_at = ?7,
 			                                paused_reason = CASE WHEN paused_reason = ?8 THEN paused_reason END,
-			                                verified_at = CASE WHEN expires_at <= ?7 OR verified_at <= ?9 THEN NULL ELSE verified_at END,
+			                                verified_at = CASE WHEN expires_at <= ?7 OR verified_at <= ?9 OR ?11 THEN NULL ELSE verified_at END,
 			                                attempts = 0, next_attempt_at = NULL, updated_at = ?7
 			 WHERE sub_id = ?10`,
 			s.PeerID, sealed, string(typesJSON), expiresS, tokenExpires, tokenHash, nowS, PausedOperator,
-			envelope.FormatTime(now.Add(-ChallengeMaxAge)), id); err != nil {
+			envelope.FormatTime(now.Add(-ChallengeMaxAge)), id, string(old) != secret); err != nil {
 			return fmt.Errorf("events: refresh subscription: %w", err)
 		}
 		return clearBackoff(ctx, tx, id)
@@ -295,14 +302,14 @@ func (st *Store) Delete(ctx context.Context, principalKind, principalID, url, na
 }
 
 const subColumns = `sub_id, principal_kind, principal_id, peer_id, name, arguments, url, cursor_epoch, cursor_seq,
-	truncated, types, expires_at, verified_at, paused_reason, token_expires_at, token_hash`
+	truncated, types, expires_at, verified_at, paused_reason, token_expires_at, token_hash, refresh_before_at`
 
 func scanSub(row interface{ Scan(...any) error }) (Subscription, error) {
 	var s Subscription
 	var args, types string
-	var expires, verified, paused, token, tokenHash *string
+	var expires, verified, paused, token, tokenHash, refresh *string
 	if err := row.Scan(&s.ID, &s.PrincipalKind, &s.PrincipalID, &s.PeerID, &s.Name, &args, &s.URL,
-		&s.Cursor.Epoch, &s.Cursor.Seq, &s.Truncated, &types, &expires, &verified, &paused, &token, &tokenHash); err != nil {
+		&s.Cursor.Epoch, &s.Cursor.Seq, &s.Truncated, &types, &expires, &verified, &paused, &token, &tokenHash, &refresh); err != nil {
 		return Subscription{}, err
 	}
 	if err := json.Unmarshal([]byte(args), &s.Arguments); err != nil {
@@ -313,6 +320,9 @@ func scanSub(row interface{ Scan(...any) error }) (Subscription, error) {
 	}
 	var err error
 	if s.Expires, err = parseOptTime(expires); err != nil {
+		return Subscription{}, err
+	}
+	if s.RefreshBefore, err = parseOptTime(refresh); err != nil {
 		return Subscription{}, err
 	}
 	if s.TokenExpires, err = parseOptTime(token); err != nil {
@@ -340,6 +350,19 @@ func parseOptTime(s *string) (*time.Time, error) {
 		return nil, fmt.Errorf("events: stored time: %w", err)
 	}
 	return &t, nil
+}
+
+// Find returns the caller-scoped subscription matching the canonical key.
+func (st *Store) Find(ctx context.Context, kind, principal, callback, name string, args map[string]any) (Subscription, error) {
+	canon, err := canonicalArgs(args)
+	if err != nil {
+		return Subscription{}, err
+	}
+	sub, err := scanSub(st.DB.QueryRowContext(ctx, `SELECT `+subColumns+` FROM event_subscriptions WHERE principal_kind = ? AND principal_id = ? AND url = ? AND name = ? AND arguments = ?`, kind, principal, callback, name, canon))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Subscription{}, ErrNotFound
+	}
+	return sub, err
 }
 
 // Get returns one subscription, or ErrNotFound.
@@ -386,9 +409,14 @@ func (st *Store) Active(ctx context.Context, now time.Time) ([]Subscription, err
 
 // MarkVerified records a passed challenge.
 func (st *Store) MarkVerified(ctx context.Context, id string) error {
+	return st.MarkVerifiedAt(ctx, id, st.now())
+}
+
+// MarkVerifiedAt retains the original verification time when reusing a cached pass.
+func (st *Store) MarkVerifiedAt(ctx context.Context, id string, verified time.Time) error {
 	now := envelope.FormatTime(st.now())
 	if _, err := st.DB.ExecContext(ctx,
-		`UPDATE event_subscriptions SET verified_at = ?, updated_at = ? WHERE sub_id = ?`, now, now, id); err != nil {
+		`UPDATE event_subscriptions SET verified_at = ?, updated_at = ? WHERE sub_id = ?`, envelope.FormatTime(verified), now, id); err != nil {
 		return fmt.Errorf("events: mark verified: %w", err)
 	}
 	return nil
@@ -450,7 +478,9 @@ func (st *Store) ClearTruncated(ctx context.Context, id string) error {
 // the cursor stays, and only Resume lifts it. ErrNotFound when id has no row.
 func (st *Store) Pause(ctx context.Context, id string) error {
 	var notify []string
+	changed := false
 	err := st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		changed = false
 		var paused sql.NullString
 		if err := tx.QueryRowContext(ctx, `SELECT paused_reason FROM event_subscriptions WHERE sub_id = ?`, id).Scan(&paused); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -473,7 +503,8 @@ func (st *Store) Pause(ctx context.Context, id string) error {
 		if err := audit.Record(ctx, tx, "operator", "subscription_pause", []string{id}, nil); err != nil {
 			return err
 		}
-		if st.hub != nil && paused.String != PausedOperator {
+		changed = paused.String != PausedOperator
+		if st.hub != nil && changed {
 			notify, err = st.hub.NoteOperatorSubscription(ctx, tx)
 			return err
 		}
@@ -481,6 +512,11 @@ func (st *Store) Pause(ctx context.Context, id string) error {
 	})
 	if err == nil && len(notify) > 0 {
 		st.hub.Log.Notify(notify...)
+	}
+	if err == nil && changed {
+		if sub, getErr := st.Get(ctx, id); getErr == nil {
+			LogLifecycle("events.pause", sub, map[string]any{"reason": PausedOperator, "result": "paused"})
+		}
 	}
 	return err
 }
@@ -533,19 +569,19 @@ func (st *Store) Resume(ctx context.Context, id string) error {
 // Health is a subscription's row as the operator sees it. A callback path can
 // carry a credential: whoever displays URL shows its host only.
 type Health struct {
-	ID, PrincipalKind, PrincipalID, PeerID, URL, Name string
-	Cursor                                            eventlog.Cursor
-	ExpiresAt, VerifiedAt, PausedReason               *string
-	LastRefreshAt, LastDeliveryAt                     *string
-	LastStatus                                        *int
-	Attempts                                          int
+	ID, PrincipalKind, PrincipalID, PeerID, URL, Name  string
+	Cursor                                             eventlog.Cursor
+	ExpiresAt, VerifiedAt, PausedReason, RefreshBefore *string
+	LastRefreshAt, LastDeliveryAt                      *string
+	LastStatus                                         *int
+	Attempts                                           int
 }
 
 // ListHealth returns every subscription for the operator.
 func (st *Store) ListHealth(ctx context.Context) ([]Health, error) {
 	rows, err := st.DB.QueryContext(ctx,
 		`SELECT sub_id, principal_kind, principal_id, peer_id, url, name, cursor_epoch, cursor_seq,
-		        expires_at, verified_at, paused_reason, last_refresh_at, last_delivery_at, last_status, attempts
+		        expires_at, verified_at, paused_reason, last_refresh_at, last_delivery_at, last_status, attempts, refresh_before_at
 		 FROM event_subscriptions ORDER BY sub_id`)
 	if err != nil {
 		return nil, fmt.Errorf("events: list health: %w", err)
@@ -556,7 +592,7 @@ func (st *Store) ListHealth(ctx context.Context) ([]Health, error) {
 		var h Health
 		if err := rows.Scan(&h.ID, &h.PrincipalKind, &h.PrincipalID, &h.PeerID, &h.URL, &h.Name,
 			&h.Cursor.Epoch, &h.Cursor.Seq, &h.ExpiresAt, &h.VerifiedAt, &h.PausedReason,
-			&h.LastRefreshAt, &h.LastDeliveryAt, &h.LastStatus, &h.Attempts); err != nil {
+			&h.LastRefreshAt, &h.LastDeliveryAt, &h.LastStatus, &h.Attempts, &h.RefreshBefore); err != nil {
 			return nil, fmt.Errorf("events: list health: %w", err)
 		}
 		out = append(out, h)
@@ -600,7 +636,26 @@ func (st *Store) secrets(ctx context.Context, id string, now time.Time) ([]strin
 // token has expired. Nothing is dropped and the cursor stays.
 func (st *Store) pauseExpiredTokens(ctx context.Context, now time.Time) error {
 	nowS := envelope.FormatTime(now)
-	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+	var changed []Subscription
+	err := st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		changed = nil
+		rows, err := tx.QueryContext(ctx, `SELECT `+subColumns+` FROM event_subscriptions WHERE paused_reason IS NULL AND token_expires_at IS NOT NULL AND token_expires_at <= ?`, nowS)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			sub, err := scanSub(rows)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			changed = append(changed, sub)
+		}
+		scanErr := rows.Err()
+		rows.Close()
+		if scanErr != nil {
+			return scanErr
+		}
 		res, err := tx.ExecContext(ctx,
 			`UPDATE event_subscriptions SET paused_reason = ?, updated_at = ?
 			 WHERE paused_reason IS NULL AND token_expires_at IS NOT NULL AND token_expires_at <= ?`,
@@ -614,10 +669,17 @@ func (st *Store) pauseExpiredTokens(ctx context.Context, now time.Time) error {
 		}
 		return hub.BumpCounter(ctx, tx, hub.CounterEventsPaused, n)
 	})
+	if err == nil {
+		for _, sub := range changed {
+			LogLifecycle("events.pause", sub, map[string]any{"reason": PausedTokenExpired, "result": "paused"})
+		}
+	}
+	return err
 }
 
 func (st *Store) pause(ctx context.Context, id, reason string, now time.Time) error {
-	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+	changed := false
+	err := st.DB.Tx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE event_subscriptions SET paused_reason = ?, updated_at = ? WHERE sub_id = ? AND paused_reason IS NULL`,
 			reason, envelope.FormatTime(now), id)
@@ -628,11 +690,18 @@ func (st *Store) pause(ctx context.Context, id, reason string, now time.Time) er
 		if err != nil {
 			return fmt.Errorf("events: pause: %w", err)
 		}
+		changed = n == 1
 		if n == 1 && (reason == PausedDeliveryFailed || reason == PausedTokenExpired || reason == PausedUnauthorized) {
 			return hub.BumpCounter(ctx, tx, hub.CounterEventsPaused, 1)
 		}
 		return nil
 	})
+	if err == nil && changed {
+		if sub, getErr := st.Get(ctx, id); getErr == nil {
+			LogLifecycle("events.pause", sub, map[string]any{"reason": reason, "result": "paused"})
+		}
+	}
+	return err
 }
 
 // outboxRow is one unsettled event.
@@ -833,4 +902,29 @@ func (st *Store) peerAuthorised(ctx context.Context, s Subscription) (bool, erro
 		}
 	}
 	return s.PrincipalKind != KindVecnet || s.PrincipalID == s.PeerID || s.PrincipalID == prn, nil
+}
+
+// RefreshDeadline asks clients to refresh periodically and before lease expiry.
+// A short lease must never hand back a time already in the past.
+func RefreshDeadline(now, expires time.Time, interval time.Duration) time.Time {
+	if interval <= 0 {
+		interval = RefreshInterval
+	}
+	deadline := expires.Add(-RefreshMargin)
+	if periodic := now.Add(interval); periodic.Before(deadline) {
+		deadline = periodic
+	}
+	if deadline.Before(now) {
+		deadline = now
+	}
+	return deadline
+}
+
+// SetRefreshBefore preserves the deadline handed to the client for status reads.
+func (st *Store) SetRefreshBefore(ctx context.Context, id string, deadline time.Time) error {
+	_, err := st.DB.ExecContext(ctx, `UPDATE event_subscriptions SET refresh_before_at = ? WHERE sub_id = ?`, envelope.FormatTime(deadline), id)
+	if err != nil {
+		return fmt.Errorf("events: save refresh deadline: %w", err)
+	}
+	return nil
 }

@@ -23,8 +23,7 @@ import (
 // Watch timing (PROTOCOL §13.1).
 const (
 	watchSilence      = 45 * time.Second // reconnect after this long without a byte (the hub sends ": hb" every 15 s)
-	watchDefaultRetry = 3 * time.Second  // until the hub's "retry:" field says otherwise
-	watchMaxBackoff   = 60 * time.Second
+	watchDefaultRetry = time.Second
 	watchPollWait     = 25 // long-poll fallback hold, seconds
 	watchSSEFailures  = 3  // consecutive SSE failures before alternating with long-poll
 	dedupeWindow      = 1024
@@ -62,7 +61,7 @@ func eventFieldsOf(ev envelope.Event) eventFields {
 	switch ev.Type {
 	case "hub_notice":
 		return noticeEventFields(ev.Data)
-	case "hub_restarting", "hub_moved", "relocation_unverified":
+	case "hub_moved", "relocation_unverified":
 		var body struct {
 			Text string `json:"text"`
 		}
@@ -246,23 +245,22 @@ type watcher struct {
 
 	forMonitor, autoAck, deliveriesOnly bool
 
-	cursor        string        // last event id seen ("" until the hub names one: start at the acked cursor)
-	connected     bool          // a stream was open before: resume with Last-Event-ID, not ?after=
-	retry         time.Duration // the hub's "retry:" value
-	seen          *dedupe
-	pendingAck    string
-	shown         *stateFile
-	identity      *hookIdentity // binds shown to this run's hub and caller
-	replayed      bool
-	name          string
-	profile       Profile
-	move          *envelope.HubNotice
-	moveTimer     *time.Timer
-	moveC         <-chan time.Time
-	moveDue       time.Time
-	restartUntil  time.Time
-	restartDelay  time.Duration
-	restartWarned bool
+	cursor       string        // last event id seen ("" until the hub names one: start at the acked cursor)
+	connected    bool          // a stream was open before: resume with Last-Event-ID, not ?after=
+	retry        time.Duration // the hub's "retry:" value
+	seen         *dedupe
+	pendingAck   string
+	shown        *stateFile
+	identity     *hookIdentity // binds shown to this run's hub and caller
+	replayed     bool
+	name         string
+	profile      Profile
+	move         *envelope.HubNotice
+	moveTimer    *time.Timer
+	moveC        <-chan time.Time
+	moveDue      time.Time
+	restartUntil time.Time     // restart grace: failures until then neither back off nor fall back
+	restartDelay time.Duration // the hub's jittered retry_after_ms hint
 
 	initialized      bool   // names, notices and hook identity fetched from the current hub
 	announceMove     bool   // print the hub_moved line after the next verified connection
@@ -270,14 +268,47 @@ type watcher struct {
 	unverifiedWarned bool   // the unpinned-identity warning is printed once per watch
 	followWarned     string // the notice whose unreachable destination was reported
 	followAttempts   int    // consecutive scheduled follows that found the destination unreachable
+
+	// Reconnect reporting (PROTOCOL §13.1): quiet for brief outages.
+	now       func() time.Time
+	sleep     func(context.Context, time.Duration) bool
+	outage    reconnectStatus
+	hadLive   bool
+	ackOutage bool // a retryable acknowledgement failure still owes pendingAck
+}
+
+func (w *watcher) clock() time.Time {
+	if w.now != nil {
+		return w.now()
+	}
+	return time.Now()
+}
+
+// pause waits d, returning early (true) when a scheduled move falls due and
+// false when the watch is cancelled. Tests replace it with sleep.
+func (w *watcher) pause(d time.Duration) bool {
+	if w.sleep != nil {
+		return w.sleep(w.a.ctx, d)
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-w.a.ctx.Done():
+		return false
+	case <-w.moveC:
+		return true
+	case <-timer.C:
+		return true
+	}
 }
 
 // moveJitter spreads a scheduled follow over 0-30 s after the notice's at
 // (Task 7); tests replace it to follow without waiting.
 var moveJitter = func() time.Duration { return rand.N(30*time.Second + 1) }
 
-// The reconnect backoff starts from the hub's retry (watchStartRetry until the
-// hub names one) and never drops below watchMinBackoff; tests shorten both.
+// watchStartRetry is the retry before the hub names one; watchMinBackoff is
+// where the reconnect backoff starts and the floor of a restart-grace retry.
+// Tests shorten both.
 var (
 	watchStartRetry = watchDefaultRetry
 	watchMinBackoff = time.Second
@@ -309,6 +340,7 @@ var errMoveUnavailable = errors.New("move destination unavailable")
 func (w *watcher) run() error {
 	ctx := w.a.ctx
 	defer w.stopMoveTimer()
+	w.outage = reconnectStatus{out: w.a.stderr, name: "watch", now: w.now}
 	if !w.forMonitor && !w.a.json {
 		fmt.Fprintln(w.a.stdout, inboxHeader)
 	}
@@ -318,6 +350,8 @@ func (w *watcher) run() error {
 			return nil
 		}
 		var err error
+		polled := false
+		w.hadLive = false
 		if !w.moveDue.IsZero() && !time.Now().Before(w.moveDue) {
 			err = errMoveDue
 		}
@@ -346,6 +380,7 @@ func (w *watcher) run() error {
 					err = w.stream()
 				}
 			} else if failures >= watchSSEFailures && failures%2 == 1 {
+				polled = true
 				err = w.longPoll()
 			} else {
 				err = w.stream()
@@ -386,39 +421,53 @@ func (w *watcher) run() error {
 			continue
 		}
 		purges = 0
+		if polled && err == nil {
+			failures = 0
+			continue // a completed long-poll response is a healthy connection
+		}
 		var identityErr *relocationError
 		switch {
 		case errors.Is(err, errRestarting):
+			// The hub announced a restart (PROTOCOL §21.3): a reconnect hint,
+			// not a failure. Wait about the hinted time without a word; the
+			// outage clock starts here, so only a restart that stays away
+			// past the quiet window is reported.
 			failures = 0
+			w.outage.failed("")
 			if !w.pause(w.restartDelay) {
 				return nil
 			}
 		case errors.As(err, &identityErr):
 			return err
-		case err == nil:
-			failures = 0
-			if !w.pause(w.retry) {
-				return nil
-			}
 		case terminal(err):
 			return err
-		case time.Now().Before(w.restartUntil):
-			if !w.restartWarned {
-				fmt.Fprintln(w.a.stderr, "vecnet: watch: hub restarting; waiting for it to return")
-				w.restartWarned = true
-			}
+		case w.clock().Before(w.restartUntil):
+			// Within the restart grace, failures neither grow the backoff nor
+			// switch to long-poll; they are reported like any outage.
 			failures = 0
-			if !w.pause(max(w.restartDelay, time.Second)) {
+			w.outage.failed(errDetail(err))
+			if !w.pause(max(w.restartDelay, watchMinBackoff)) {
 				return nil
 			}
 		default:
+			if w.hadLive {
+				failures = 0
+			}
 			failures++
-			fmt.Fprintf(w.a.stderr, "vecnet: watch: %v; reconnecting\n", err)
+			w.outage.failed(errDetail(err))
 			if !w.pause(w.backoff(failures)) {
 				return nil
 			}
 		}
 	}
+}
+
+// errDetail is err's text for reconnect reporting ("" for a clean end).
+func errDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // Identity proofs are public and checked before any stream, replay or poll.
@@ -603,10 +652,8 @@ func (w *watcher) restarting(h restartHint) {
 	// Bound untrusted transport delays to §21.3's 0-60000 ms before
 	// converting milliseconds to a duration.
 	d := time.Duration(max(int64(0), min(h.RetryAfterMS, int64(time.Minute/time.Millisecond)))) * time.Millisecond
-	w.restartUntil = time.Now().Add(d + time.Minute)
+	w.restartUntil = w.clock().Add(d + time.Minute)
 	w.restartDelay = d*8/10 + rand.N(d*4/10+1)
-	w.restartWarned = false
-	w.systemLine("hub_restarting", fmt.Sprintf("restarting; reconnecting in ~%gs", d.Seconds()))
 }
 
 func (w *watcher) stopMoveTimer() {
@@ -781,15 +828,20 @@ func (w *watcher) refreshNames() {
 	}
 }
 
-// backoff is the jittered exponential reconnect delay, from the hub's retry
-// up to watchMaxBackoff.
+// backoff uses the same short restart policy for EOF and transport failures;
+// the hub's ordinary retry preface must not make the first attempt slow.
 func (w *watcher) backoff(failures int) time.Duration {
-	d := max(w.retry, watchMinBackoff)
-	for i := 1; i < failures && d < watchMaxBackoff; i++ {
-		d *= 2
+	return reconnectDelayFrom(watchMinBackoff, failures)
+}
+
+// live records a healthy frame: it ends an outage (unless an acknowledgement
+// is still owed) and any restart grace, since the hub is back.
+func (w *watcher) live() {
+	w.hadLive = true
+	w.restartUntil = time.Time{}
+	if !w.ackOutage {
+		w.outage.live()
 	}
-	d = min(d, watchMaxBackoff)
-	return d/2 + rand.N(d/2+1)
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {
@@ -841,21 +893,12 @@ func (w *watcher) stream() error {
 	idle := time.NewTimer(watchSilence)
 	defer idle.Stop()
 	var (
-		data           []string
-		hasData        bool
-		idBuf          = w.cursor
-		evType         string
-		pendingReadErr error
+		data    []string
+		hasData bool
+		idBuf   = w.cursor
+		evType  string
 	)
 	for {
-		// A reader may reach EOF with complete frame lines still buffered.
-		// Dispatch those lines before acting on its terminal read result.
-		if pendingReadErr != nil && len(lines) == 0 {
-			if errors.Is(pendingReadErr, io.EOF) {
-				return nil
-			}
-			return &netError{err: pendingReadErr}
-		}
 		select {
 		case <-ctx.Done():
 			return nil
@@ -863,10 +906,14 @@ func (w *watcher) stream() error {
 			return errMoveDue
 		case <-idle.C:
 			return nil // silence: reconnect
-		case err := <-readErr:
-			pendingReadErr = err
-			readErr = nil
-		case line := <-lines:
+		case line, ok := <-lines:
+			if !ok {
+				err := <-readErr // all queued lines precede their terminal read error
+				if ctx.Err() != nil || errors.Is(err, io.EOF) {
+					return nil
+				}
+				return &netError{err: err}
+			}
 			if !idle.Stop() {
 				select {
 				case <-idle.C:
@@ -875,19 +922,27 @@ func (w *watcher) stream() error {
 			}
 			idle.Reset(watchSilence)
 			if line == "" { // dispatch
+				if evType == "hub_restarting" {
+					// Transport control (PROTOCOL §21.3): no event,
+					// acknowledgement or cursor, and never printed. A
+					// retry_after_ms hint is honoured; without one the
+					// ordinary reconnect policy applies.
+					var h struct {
+						RetryAfterMS *int64 `json:"retry_after_ms"`
+					}
+					if json.Unmarshal([]byte(strings.Join(data, "\n")), &h) == nil && h.RetryAfterMS != nil {
+						w.restarting(restartHint{RetryAfterMS: *h.RetryAfterMS})
+						return errRestarting
+					}
+					return nil
+				}
+				if hasData {
+					w.live()
+				}
 				// Empty data (the hub's priming event) only moves the
 				// cursor; it is not an event (PROTOCOL §13.1).
 				if joined := strings.Join(data, "\n"); hasData && joined != "" {
-					if evType == "hub_restarting" {
-						var h restartHint
-						if json.Unmarshal([]byte(joined), &h) == nil {
-							w.cursor = idBuf
-							w.restarting(h)
-							return errRestarting
-						}
-					} else {
-						w.handle(evType, joined, false)
-					}
+					w.handle(evType, joined, false)
 				}
 				w.cursor = idBuf
 				data, hasData, evType = nil, false, ""
@@ -897,6 +952,7 @@ func (w *watcher) stream() error {
 				continue
 			}
 			if strings.HasPrefix(line, ":") {
+				w.live()
 				continue // comment, e.g. ": hb"
 			}
 			field, value, _ := strings.Cut(line, ":")
@@ -922,6 +978,17 @@ func (w *watcher) stream() error {
 // readLines splits r into SSE lines (CR, LF or CRLF terminated) onto out,
 // then reports the read error (io.EOF at the end).
 func readLines(ctx context.Context, r io.Reader, out chan<- string, errc chan<- error) {
+	var terminal error
+	defer func() {
+		if terminal == nil {
+			terminal = ctx.Err()
+			if terminal == nil {
+				terminal = io.EOF
+			}
+		}
+		errc <- terminal // every exit publishes its result before closing lines
+		close(out)
+	}()
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64<<10), maxSSELine)
 	sc.Split(splitSSELines)
@@ -932,11 +999,7 @@ func readLines(ctx context.Context, r io.Reader, out chan<- string, errc chan<- 
 			return
 		}
 	}
-	err := sc.Err()
-	if err == nil {
-		err = io.EOF
-	}
-	errc <- err
+	terminal = sc.Err()
 }
 
 // splitSSELines is a bufio.SplitFunc for CR, LF and CRLF line ends.
@@ -970,6 +1033,7 @@ func (w *watcher) longPoll() error {
 	if err != nil {
 		return err
 	}
+	w.live()
 	for _, ev := range body.Events {
 		raw, err := json.Marshal(ev)
 		if err != nil {
@@ -1081,11 +1145,27 @@ func (w *watcher) flushAck() {
 	cur := w.pendingAck
 	if err := w.a.ack(w.c, cur); err != nil {
 		if w.a.ctx.Err() == nil {
-			fmt.Fprintf(w.a.stderr, "vecnet: watch: ack %s: %v\n", cur, err)
+			var network *netError
+			var hub *hubError
+			if errors.As(err, &network) || (errors.As(err, &hub) && (hub.Status == 502 || hub.Status == 503 || hub.Status == 504)) {
+				w.ackOutage = true
+				w.outage.failed(fmt.Sprintf("ack %s: %v", cur, err))
+			} else {
+				fmt.Fprintf(w.a.stderr, "vecnet: watch: ack %s: %v\n", cur, err)
+			}
 		}
 		return
 	}
 	w.pendingAck = ""
+	if w.ackOutage {
+		w.ackOutage = false
+		// Ack success alone cannot establish recovery while the stream is
+		// still unavailable. Conversely, live frames must not announce a
+		// recovery followed by another outage while this ack remains owed.
+		if w.hadLive {
+			w.outage.live()
+		}
+	}
 }
 
 // dedupe remembers the last n delivery ids.
@@ -1130,17 +1210,4 @@ func (w *watcher) poll(wait int) (pollBody, error) {
 
 type restartHint struct {
 	RetryAfterMS int64 `json:"retry_after_ms"`
-}
-
-func (w *watcher) pause(delay time.Duration) bool {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-w.a.ctx.Done():
-		return false
-	case <-w.moveC:
-		return true
-	case <-timer.C:
-		return true
-	}
 }

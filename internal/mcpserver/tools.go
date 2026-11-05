@@ -60,7 +60,14 @@ func (s *Server) registerTools() {
 // Shape errors are invalid params (-32602, data.path naming the JSON pointer
 // of the violation). Reaction enum values are checked by the hub in §17.2
 // order; hub rejections are tool-level errors a model can read and act on.
-func (s *Server) toolsCall(ctx context.Context, sess *Session, req *Request) (any, error) {
+func (s *Server) toolsCall(ctx context.Context, sess *Session, req *Request) (result any, err error) {
+	defer func() {
+		if d, _ := ctx.Value(diagKey{}).(*requestDiag); d != nil {
+			if res, ok := result.(*mcp.CallToolResult); ok && res.IsError {
+				d.toolError = true
+			}
+		}
+	}()
 	if req.IsNotification() {
 		return nil, nil // a write with no way to report its outcome is not run
 	}
@@ -138,7 +145,11 @@ func invalidArguments(name string, err error) error {
 	if !errors.As(err, &se) {
 		return err
 	}
-	return &RPCError{Code: ErrInvalidParams, Message: "invalid arguments for " + name + ": " + se.Message,
+	hint := ""
+	if name == "vecnet_send" || name == "vecnet_reply" {
+		hint = guideSendErrorHint
+	}
+	return &RPCError{Code: ErrInvalidParams, Message: "invalid arguments for " + name + ": " + se.Message + hint,
 		Data: map[string]any{"path": se.Path}}
 }
 
@@ -154,8 +165,12 @@ func toolOutcome(name string, res any, err error) (any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mcp: marshal tool result: %w", err)
 		}
+		text := string(b)
+		if guide, ok := res.(guideResult); ok {
+			text = guide.Text
+		}
 		return &mcp.CallToolResult{
-			Content:           []mcp.Content{&mcp.TextContent{Text: string(b)}},
+			Content:           []mcp.Content{&mcp.TextContent{Text: text}},
 			StructuredContent: json.RawMessage(b),
 		}, nil
 	case errors.As(err, &api):
@@ -624,8 +639,10 @@ func callPresenceSubscribe(ctx context.Context, s *Server, c auth.Caller, raw []
 }
 
 // callWhoami uses the same caller fields as GET /v1/peers/me. An OAuth
-// profile identifies the linked dot peer, and peer profiles add its public
-// directory name. No credential or principal-wide settings are exposed.
+// profile identifies the linked peer, and peer profiles add its public
+// directory name. The required profile id is the stable peer/principal id,
+// or "operator" when no operator peer exists. No credential or principal-wide
+// settings are exposed.
 func callWhoami(ctx context.Context, s *Server, c auth.Caller, _ []byte) (any, error) {
 	if p := PrincipalFromContext(ctx); p.OAuth != nil {
 		peer := c.PeerID
@@ -637,14 +654,14 @@ func callWhoami(ctx context.Context, s *Server, c auth.Caller, _ []byte) (any, e
 			}
 		}
 		if peer == "" {
-			return nil, hub.E(http.StatusForbidden, "not_linked", "this account is not linked to a dot peer")
+			return nil, hub.E(http.StatusForbidden, "not_linked", "this account is not linked to a peer")
 		}
 		c.Kind, c.PeerID = "peer", peer
 	}
 	me := map[string]string{"kind": c.Kind}
 	switch c.Kind {
 	case "peer":
-		me["peer_id"] = c.PeerID
+		me["id"], me["peer_id"] = c.PeerID, c.PeerID
 		dir, err := s.Hub.Directory(ctx)
 		if err != nil {
 			return nil, err
@@ -658,7 +675,15 @@ func callWhoami(ctx context.Context, s *Server, c auth.Caller, _ []byte) (any, e
 			}
 		}
 	case "principal":
-		me["principal_id"] = c.PrincipalID
+		me["id"], me["principal_id"] = c.PrincipalID, c.PrincipalID
+	case "operator":
+		me["id"] = c.PeerID
+		if me["id"] == "" {
+			me["id"] = "operator"
+		}
+	}
+	if me["id"] == "" {
+		return nil, errors.New("mcp: authenticated profile has no stable id")
 	}
 	return me, nil
 }
@@ -763,12 +788,24 @@ func toolSpecs(defs schema) []toolSpec {
 		defaults[i] = emoji + " " + envelope.ReactionName(emoji) + ": " + envelope.DefaultReactionPriority(emoji)
 	}
 
+	// The tool's input is sendRequest without its top-level anyOf (thread_id
+	// | recipients): ChatGPT rendered that union as two opaque objects, hid
+	// every property and demanded thread_id. The description carries the
+	// rule and the hub's sendRequest validation still enforces it.
+	sendInput := schema{}
+	for k, v := range send {
+		if k != "anyOf" {
+			sendInput[k] = v
+		}
+	}
 	peer := schema{"$ref": "#/$defs/peerId", "description": "Narrow a principal credential to one of its peers."}
 	return []toolSpec{{
 		name: "vecnet_send",
 		description: "Write: send a message on the operator's bus to peers or groups, or into a thread. " +
+			"Give recipients (peer or group ids) to start a new thread, or thread_id to post into an existing one; one of the two is required. " +
+			"To answer a message, prefer vecnet_reply. " +
 			"It may wake other agents. Requires idempotency_key; repeating a key with the same body sends nothing.",
-		input: send, annotations: writeAnnotations(true), precheck: hub.PrecheckSend, call: callSend,
+		input: sendInput, annotations: writeAnnotations(true), precheck: hub.PrecheckSend, call: callSend,
 	}, {
 		name: "vecnet_reply",
 		description: "Write: reply on the operator's bus to message_id, in its thread, to the thread's participants. " +
@@ -810,6 +847,11 @@ func toolSpecs(defs schema) []toolSpec {
 			"peer":  peer,
 		}),
 		annotations: readAnnotations(), call: callInbox,
+	}, {
+		name:        "vecnet_subscriptions",
+		description: "Read your own peer's active MCP event subscriptions and delivery health. An empty list means event subscription is not active; follow the returned user setup hint and use vecnet_inbox meanwhile. This tool cannot subscribe.",
+		input:       object(schema{}),
+		annotations: readAnnotations(), call: callSubscriptions,
 	}, {
 		name:        "vecnet_ack",
 		description: "Write: acknowledge your inbox on the operator's bus up to and including cursor; deliveries at or before it become accepted and their senders are told.",
@@ -912,11 +954,12 @@ func toolSpecs(defs schema) []toolSpec {
 		input:       object(schema{}),
 		meta:        map[string]any{"openai/profile": true},
 		output: object(schema{
+			"id":           schema{"type": "string", "minLength": 1},
 			"kind":         schema{"enum": []string{"peer", "principal", "operator"}},
 			"peer_id":      schema{"type": "string"},
 			"principal_id": schema{"type": "string"},
 			"name":         schema{"type": "string"},
-		}, "kind"),
+		}, "kind", "id"),
 		annotations: readAnnotations(), call: callWhoami,
 	}, {
 		name: "vecnet_blob_put",
@@ -1150,7 +1193,7 @@ func buildTools() *toolTable {
 	}
 	narrowAttachments(doc.Defs)
 	t := &toolTable{byName: map[string]*tool{}}
-	for _, spec := range toolSpecs(doc.Defs) {
+	for _, spec := range append(toolSpecs(doc.Defs), guideSpec()) {
 		input, sch, err := compileInput(spec.name, spec.input, doc.Defs)
 		if err != nil {
 			panic("mcpserver: tool " + spec.name + ": " + err.Error())
@@ -1184,9 +1227,9 @@ func listEntry(t *mcp.Tool, meta map[string]any, output schema) map[string]any {
 	if err := json.Unmarshal(raw, &entry); err != nil {
 		panic("mcpserver: decode tool list entry: " + err.Error())
 	}
-	// oauth.Scope is "vecnet"; oauth imports mcpserver, so importing that
-	// package here would create a cycle. The discovery test pins equality.
-	entry["securitySchemes"] = []map[string]any{{"type": "oauth2", "scopes": []string{"vecnet"}}}
+	// Tools use the base vecnet scope; Events write permission is checked
+	// separately at events/subscribe and events/unsubscribe.
+	entry["securitySchemes"] = []map[string]any{{"type": "oauth2", "scopes": []string{ScopeVecnet}}}
 	if meta != nil {
 		entry["_meta"] = meta
 	}

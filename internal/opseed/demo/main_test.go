@@ -495,7 +495,7 @@ func TestDemoRestartControl(t *testing.T) {
 	if string(body) != "{\"streams\":1}\n" {
 		t.Fatalf("restart result = %s", body)
 	}
-	if got := frame(br); got != "event: hub_restarting\ndata: {\"retry_after_ms\":1500}\n\n" {
+	if got := frame(br); got != "event: hub_restarting\nretry: 1500\ndata: {\"retry_after_ms\":1500}\n\n" {
 		t.Fatalf("restart frame = %q", got)
 	}
 	if rest, err := io.ReadAll(br); err != nil || len(rest) != 0 {

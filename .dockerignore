@@ -20,3 +20,4 @@ backups/
 **/*.db
 **/*.db-wal
 **/*.db-shm
+connectors/

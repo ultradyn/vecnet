@@ -10,7 +10,7 @@ const api401 = () => new APIError(401, 'unauthenticated', 'no');
 // A fake hub. `script` holds one entry per /v1/events call: a value is
 // returned, an Error is thrown, a function is called. When the script runs out
 // the pump is aborted, so a run ends without the test having to stop it.
-function hub(script, { onAck = () => {}, random } = {}) {
+function hub(script, { onAck = () => {}, random = () => 0.5 } = {}) {
   const calls = [], acks = [], sleeps = [];
   const controller = new AbortController();
   const api = {
@@ -25,7 +25,7 @@ function hub(script, { onAck = () => {}, random } = {}) {
     },
     ack: async cursor => { await onAck(cursor); acks.push(cursor); return null; },
   };
-  const store = createStore({ api, sleep: async ms => { sleeps.push(ms); }, random });
+  const store = createStore({ api, random, sleep: async ms => { sleeps.push(ms); } });
   return { api, store, calls, acks, sleeps, controller, run: () => store.pump(controller.signal) };
 }
 
@@ -91,6 +91,21 @@ test('a first call that fails is retried without after', async () => {
   assert.deepEqual(calls[0], { wait: 0 });
   assert.deepEqual(calls[1], { wait: 0 });
   assert.deepEqual(calls[2], { after: 'e3.4', wait: 25 });
+});
+
+test('503 reconnect keeps the last cursor and shows one reconnecting state per outage', async () => {
+  const h = hub([
+    { events: [delivery('thr_1')], next_cursor: 'e3.4' },
+    new APIError(503, 'unavailable', 'restarting'),
+    new APIError(0, 'network', 'reset'),
+    { events: [delivery('thr_2')], next_cursor: 'e3.5' },
+  ]);
+  const seen = [];
+  h.store.onConn(state => seen.push(state));
+  await h.run();
+  assert.deepEqual(h.calls.slice(1, 4), Array(3).fill({ after: 'e3.4', wait: 25 }));
+  assert.deepEqual(h.acks, ['e3.4', 'e3.5']);
+  assert.deepEqual(seen, ['live', 'reconnecting', 'live', 'stopped']);
 });
 
 test('batch: invalidates, awaits reload, then acks; ack never precedes settled', async () => {
@@ -229,14 +244,14 @@ test('a 200 with no readable body backs off and retries; only a real 204 stops',
     if (!replies.length) { controller.abort(); throw new DOMException('stopped', 'AbortError'); }
     return replies.shift()();
   };
-  const store = createStore({ api: createApi({ secret: 's', fetch }), sleep: async ms => { sleeps.push(ms); } });
+  const store = createStore({ api: createApi({ secret: 's', fetch }), random: () => 0.5, sleep: async ms => { sleeps.push(ms); } });
   store.onConn(state => conns.push(state));
   await store.pump(controller.signal);
   assert.deepEqual(sleeps, [1000, 2000, 4000, 8000, 16000]);
   assert.equal(urls.length, 7);
   for (const url of urls.slice(0, 6)) assert.equal(url, '/v1/events?wait=0');
   assert.equal(urls[6], '/v1/events?after=e1.1&wait=25');
-  assert.deepEqual(conns, ['offline', 'live', 'stopped']);
+  assert.deepEqual(conns, ['reconnecting', 'live', 'stopped']);
 });
 
 test('a poll that answers retries what failed, with no event to prompt it', async () => {
@@ -328,16 +343,33 @@ test('5xx backs off 1,2,4…30 s with fake sleep; success resets', async () => {
   ]);
   await h.run();
   assert.deepEqual(h.sleeps, [1000, 2000, 4000, 8000, 16000, 30000, 30000, 1000, 2000]);
-  assert.deepEqual(states, ['offline', 'offline', 'live']);
+  assert.deepEqual(states, ['reconnecting', 'reconnecting', 'live']);
 });
 
-test('conn goes connecting, live, offline, live, and the watcher hears each change', async () => {
+test('reconnect delays have bounded jitter, cap at 30 s and reset after recovery', async () => {
+  const delays = [];
+  for (const random of [() => 0, () => 1]) {
+    const down = () => new APIError(503, 'unavailable', 'restarting');
+    const h = hub([
+      ...Array.from({ length: 8 }, down),
+      { events: [], next_cursor: 'e1.1' }, down(),
+    ], { random });
+    await h.run();
+    assert.ok(h.sleeps[0] >= 800 && h.sleeps[0] <= 1200);
+    assert.ok(h.sleeps.every(ms => ms >= 800 && ms <= 30000));
+    assert.equal(h.sleeps[8], h.sleeps[0]);
+    delays.push(h.sleeps[0]);
+  }
+  assert.deepEqual(delays, [800, 1200]);
+});
+
+test('conn goes connecting, live, reconnecting, live, and the watcher hears each change', async () => {
   const h = hub([{ events: [], next_cursor: 'e1.1' }, new APIError(0, 'network', 'down'), { events: [], next_cursor: 'e1.1' }]);
   const seen = [];
   const off = h.store.onConn(state => seen.push(state));
   await h.run();
   off();
-  assert.deepEqual(seen, ['live', 'offline', 'live', 'stopped']);
+  assert.deepEqual(seen, ['live', 'reconnecting', 'live', 'stopped']);
 });
 
 test('aborting stops the loop, parks nothing and does not ack', async () => {
@@ -636,7 +668,8 @@ test('the pump waits about retry_after_ms after a hint and does not grow the bac
     { events: [], next_cursor: 'e1.1' },
   ], { random: () => 0 });
   await h.run();
-  // 5000 × 0.8 (the jitter's bottom), then the first backoff each time.
-  assert.deepEqual(h.sleeps, [4000, 1000, 1000, 1000]);
+  // 5000 × 0.8 (the jitter's bottom), then the first backoff each time,
+  // also at the jitter's bottom (1000 × 0.8: master's retryDelay).
+  assert.deepEqual(h.sleeps, [4000, 800, 800, 800]);
   assert.deepEqual(h.calls.slice(1).map(c => c.after), ['e1.1', 'e1.1', 'e1.1', 'e1.1', 'e1.1', 'e1.1']);
 });

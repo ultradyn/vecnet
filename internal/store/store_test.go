@@ -595,7 +595,9 @@ func TestMigration0018BackfillsSenderInfo(t *testing.T) {
 	}
 }
 
-func TestMigration0019SeedsIdentity(t *testing.T) {
+// Migration 0021 (numbered 0019 on the hub-notices branch, renumbered at its
+// merge after master took 0019 and 0020).
+func TestMigration0021SeedsIdentity(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "hub.db")
 	db, err := store.Open(path)
@@ -645,5 +647,36 @@ func TestMigration0019SeedsIdentity(t *testing.T) {
 		if err != nil || got != want {
 			t.Fatalf("reopened %s = %q, %v; want %q", name, got, err, want)
 		}
+	}
+}
+
+// A hub already at master's 0020 upgrades by applying only 0021, which seeds
+// a fresh identity and the notices table and keeps the earlier migrations.
+func TestMigration0021UpgradesFrom0020(t *testing.T) {
+	ctx := context.Background()
+	db := openTemp(t)
+	for _, q := range []string{
+		`DELETE FROM schema_migrations WHERE name = '0021_hub_identity_notices.sql'`,
+		`DELETE FROM meta WHERE key IN ('hub_identity_seed', 'hub_identity_created_at')`,
+		`DROP TABLE hub_notices`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	applied, err := store.Migrate(ctx, db.DB)
+	if err != nil || !reflect.DeepEqual(applied, []string{"0021_hub_identity_notices.sql"}) {
+		t.Fatalf("upgrade applied %v, %v; want only 0021", applied, err)
+	}
+	seed, err := db.Meta(ctx, "hub_identity_seed")
+	if err != nil || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(seed) {
+		t.Fatalf("identity seed = %q, %v", seed, err)
+	}
+	var n int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE name IN ('0019_event_subscription_status.sql', '0020_event_refresh_before.sql', '0021_hub_identity_notices.sql')`).Scan(&n); err != nil || n != 3 {
+		t.Fatalf("recorded 0019-0021 = %d, %v", n, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_list WHERE name='hub_notices' AND strict=1`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("STRICT hub_notices: %d, %v", n, err)
 	}
 }

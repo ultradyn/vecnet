@@ -22,19 +22,14 @@ type sseConn struct {
 	w        http.ResponseWriter
 	rc       *http.ResponseController
 	stall    time.Duration
-	frames   chan queuedSSEFrame
-	stop     chan struct{} // closed by close
+	frames   chan []byte
 	done     chan struct{} // closed when the writer goroutine exits
 	once     sync.Once
-	draining <-chan struct{} // cancels producer backpressure on restart; nil is inert
+	draining <-chan struct{} // the hub is restarting: stop waiting for queue space; nil is inert
 
 	dmu    sync.Mutex // orders the writer's deadlines with close's
-	closed bool
-}
-
-type queuedSSEFrame struct {
-	data  []byte
-	final bool
+	closed bool       // close owns the write deadline while draining
+	final  []byte
 }
 
 // sseWriteTimeout bounds one frame's write and flush. The server's
@@ -49,6 +44,28 @@ const sseWriteTimeout = 30 * time.Second
 func holdOpen(rc *http.ResponseController, write time.Time) {
 	_ = rc.SetReadDeadline(time.Time{})
 	_ = rc.SetWriteDeadline(write)
+}
+
+// drainWritesOnStop shortens a long poll's write deadline on shutdown, even
+// when it has already left its wait and is blocked writing JSON. Join the
+// watcher before returning the handler so it cannot touch a reused connection.
+func drainWritesOnStop(rc *http.ResponseController, stop <-chan struct{}) func() {
+	if stop == nil {
+		return func() {}
+	}
+	finished, joined := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(joined)
+		select {
+		case <-stop:
+			_ = rc.SetWriteDeadline(time.Now().Add(streamDrainTimeout))
+		case <-finished:
+		}
+	}()
+	return func() {
+		close(finished)
+		<-joined
+	}
 }
 
 // startSSE writes the SSE response headers (PROTOCOL §2.3) and starts the
@@ -67,60 +84,46 @@ func startSSE(w http.ResponseWriter, stall time.Duration) *sseConn {
 		w:      w,
 		rc:     rc,
 		stall:  stall,
-		frames: make(chan queuedSSEFrame, sseBuffer),
-		stop:   make(chan struct{}),
+		frames: make(chan []byte, sseBuffer),
 		done:   make(chan struct{}),
 	}
 	go c.writer()
 	return c
 }
 
-// writer writes and flushes each frame until close or a write error.
+// writer drains queued frames and the optional final frame before returning.
 func (c *sseConn) writer() {
 	defer close(c.done)
-	for {
-		select {
-		case <-c.stop:
+	for f := range c.frames {
+		if !c.write(f) {
 			return
-		case f := <-c.frames:
-			c.dmu.Lock()
-			if c.closed {
-				c.dmu.Unlock()
-				return
-			}
-			_ = c.rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
-			c.dmu.Unlock()
-			if _, err := c.w.Write(f.data); err != nil {
-				return
-			}
-			if err := c.rc.Flush(); err != nil {
-				return
-			}
-			if f.final {
-				return
-			}
 		}
 	}
+	if len(c.final) > 0 {
+		c.write(c.final)
+	}
+}
+
+func (c *sseConn) write(frame []byte) bool {
+	c.dmu.Lock()
+	if !c.closed {
+		_ = c.rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+	}
+	c.dmu.Unlock()
+	if _, err := c.w.Write(frame); err != nil {
+		return false
+	}
+	return c.rc.Flush() == nil
 }
 
 // send queues one frame, waiting while the queue is full. It reports false
-// when the writer has stopped, ctx is done, or the queue made no room for
-// stall (the consumer is stuck): the handler must then drop the connection.
+// when the writer has stopped, ctx is done, the hub is restarting (draining),
+// or the queue made no room for stall (the consumer is stuck): the handler
+// must then drop the connection.
 func (c *sseConn) send(ctx context.Context, frame []byte) bool {
-	return c.queue(ctx, queuedSSEFrame{data: frame})
-}
-
-func (c *sseConn) queue(ctx context.Context, frame queuedSSEFrame) bool {
-	draining := c.draining
-	if frame.final {
-		draining = nil
-	} // the final frame must survive the announcement
 	select {
-	case <-draining:
+	case <-c.draining:
 		return false
-	default:
-	}
-	select {
 	case <-c.done:
 		return false
 	default:
@@ -137,7 +140,7 @@ func (c *sseConn) queue(ctx context.Context, frame queuedSSEFrame) bool {
 		return true
 	case <-c.done:
 		return false
-	case <-draining:
+	case <-c.draining:
 		return false
 	case <-ctx.Done():
 		return false
@@ -146,39 +149,55 @@ func (c *sseConn) queue(ctx context.Context, frame queuedSSEFrame) bool {
 	}
 }
 
-// finish queues the final frame behind earlier frames, waits for the writer
-// to flush and exit (or the shared queue/flush budget), then closes it.
-func (c *sseConn) finish(frame []byte, wait time.Duration) {
-	ctx, cancel := context.WithTimeout(context.Background(), wait)
-	defer cancel()
-	if c.queue(ctx, queuedSSEFrame{data: frame, final: true}) {
+// failed is closed when the writer stops on a write error.
+func (c *sseConn) failed() <-chan struct{} { return c.done }
+
+// streamDrainTimeout leaves ample time inside the hub's 10 s shutdown grace
+// for net/http to finish the response and for the store to close.
+const streamDrainTimeout = time.Second
+
+// close drains healthy writers before returning. An expired deadline at handler
+// return prevents net/http from writing its chunk terminator / HTTP2 END_STREAM,
+// so always lift it after the writer has exited.
+func (c *sseConn) close() { c.finish(nil, streamDrainTimeout) }
+
+// closeForRestart ends the stream. When the hub is restarting (restart is
+// closed, by a Drain announcement or by shutdown) and the client is still
+// there, the last frame is hub_restarting with the joined generation's retry
+// hint (PROTOCOL §21.3); otherwise the stream just ends.
+func (c *sseConn) closeForRestart(ctx context.Context, restart <-chan struct{}, retry func() time.Duration) {
+	if ctx.Err() == nil {
 		select {
-		case <-c.done:
-		case <-ctx.Done():
+		case <-restart:
+			c.finish(restartFrame(retry()), streamDrainTimeout)
+			return
+		default:
 		}
 	}
 	c.close()
 }
 
-// failed is closed when the writer stops on a write error.
-func (c *sseConn) failed() <-chan struct{} { return c.done }
-
-// close stops the writer and waits for it. A write stuck on a connection
-// whose peer stopped reading is cut by a write deadline in the past, which
-// also makes net/http drop the connection rather than reuse it.
-func (c *sseConn) close() {
+// finish queues final (nil for none) behind the frames already queued, waits
+// up to wait for the writer to flush them and exit, then cuts a stuck writer
+// with an expired deadline. It runs once; later calls are no-ops.
+func (c *sseConn) finish(final []byte, wait time.Duration) {
 	c.once.Do(func() {
-		close(c.stop)
 		c.dmu.Lock()
 		c.closed = true
-		// A flushed final frame has already stopped the writer. Preserve
-		// its deadline so net/http can write the response terminator.
+		c.final = final
+		_ = c.rc.SetWriteDeadline(time.Now().Add(wait))
+		c.dmu.Unlock()
+		close(c.frames)
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
 		select {
 		case <-c.done:
-		default:
+		case <-timer.C:
+			// Also interrupts writers whose deadline support needs an explicit
+			// expired deadline, rather than its own timer.
 			_ = c.rc.SetWriteDeadline(time.Now())
+			<-c.done
 		}
-		c.dmu.Unlock()
-		<-c.done
+		_ = c.rc.SetWriteDeadline(time.Time{})
 	})
 }

@@ -8,8 +8,11 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ENV CGO_ENABLED=0
-RUN go build -trimpath -ldflags="-s -w" -o /out/vecnet-hub ./cmd/vecnet-hub \
- && go build -trimpath -ldflags="-s -w" -o /out/vecnet ./cmd/vecnet
+# VECNET_VERSION becomes MCP serverInfo.version; clients such as ChatGPT key
+# cached tool lists on it, so `just fly-deploy` passes a fresh value each deploy.
+ARG VECNET_VERSION=dev
+RUN go build -trimpath -ldflags="-s -w -X github.com/XertroV/vecnet/internal/mcpserver.Version=${VECNET_VERSION}" -o /out/vecnet-hub ./cmd/vecnet-hub \
+ && go build -trimpath -ldflags="-s -w -X github.com/XertroV/vecnet/internal/mcpserver.Version=${VECNET_VERSION}" -o /out/vecnet ./cmd/vecnet
 
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt

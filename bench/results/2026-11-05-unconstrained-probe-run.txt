@@ -1,0 +1,8 @@
+CGO_ENABLED=0 build2 go build -p 2 -o bin/vecnet-bench ./bench
+bin/vecnet-bench -mode unconstrained -duration 10s -min-sends 500 -workers 4 -idle-window 32s -idle-counts 0,100,1000,5000 -blob-repeats 3 -out bench/results/2026-11-05-unconstrained.json
+benchmark: unconstrained sends 200B fanout=1
+2026/11/05 13:49:43 ERROR events: step err="store: begin: database is locked (5) (SQLITE_BUSY)"
+benchmark: unconstrained sends 200B fanout=2
+2026/11/05 13:49:54 ERROR internal error err="store: begin: database is locked (5) (SQLITE_BUSY)"
+benchmark failed: POST /v1/messages: HTTP 500
+error: Recipe `bench` failed on line 23 with exit code 1

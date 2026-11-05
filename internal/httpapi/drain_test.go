@@ -138,7 +138,7 @@ func TestDrainFinishFlushesQueuedFrames(t *testing.T) {
 		t.Fatal("preamble send failed")
 	}
 	c.finish(restartFrame(1500*time.Millisecond), time.Second)
-	want := "event: ready\ndata: {}\n\nevent: hub_restarting\ndata: {\"retry_after_ms\":1500}\n\n"
+	want := "event: ready\ndata: {}\n\nevent: hub_restarting\nretry: 1500\ndata: {\"retry_after_ms\":1500}\n\n"
 	if w.Body.String() != want || !w.Flushed {
 		t.Fatalf("flushed bytes = %q, flushed=%v", w.Body.String(), w.Flushed)
 	}
@@ -271,7 +271,7 @@ func TestRestartKeepsGenerationAcrossReset(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("old handler missed its announcement after Reset")
 			}
-			want := "event: hub_restarting\ndata: {\"retry_after_ms\":1500}\n\n"
+			want := "event: hub_restarting\nretry: 1500\ndata: {\"retry_after_ms\":1500}\n\n"
 			if mode == "long_poll" {
 				want = "\"hub_restarting\":{\"retry_after_ms\":1500}"
 			}

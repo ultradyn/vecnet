@@ -83,7 +83,7 @@ test('createActivity emits each frame, reopens after the stream ends, and stops 
     },
   };
   const sleeps = [];
-  const feed = createActivity({ api, signal: stop.signal, sleep: async ms => { sleeps.push(ms); } });
+  const feed = createActivity({ api, signal: stop.signal, random: () => 0.5, sleep: async ms => { sleeps.push(ms); } });
   const seen = [];
   feed.subscribe(ev => seen.push(ev));
   await feed.start();
@@ -110,9 +110,124 @@ test('createActivity waits about retry_after_ms after hub_restarting and resets 
       throw Object.assign(new Error('forbidden'), { status: 403 });
     },
   };
-  const sleeps = [];
+  const sleeps = [], restarts = [], seen = [];
   const feed = createActivity({ api, signal: stop.signal, sleep: async ms => { sleeps.push(ms); }, random: () => 1 });
+  feed.onRestart(ms => restarts.push(ms));
+  feed.subscribe(ev => seen.push(ev.type));
   await feed.start();
-  // 5000 × 1.2 (the jitter's top), then the first backoff, not a doubled one.
-  assert.deepEqual(sleeps, [6000, 1000]);
+  // 5000 × 1.2 (the jitter's top), then the first backoff, not a doubled
+  // one: 1000 × 1.2, since master's retryDelay jitters every backoff.
+  assert.deepEqual(sleeps, [6000, 1200]);
+  // The hint reaches the restart banner through onRestart, never subscribers.
+  assert.deepEqual(restarts, [5000]);
+  assert.deepEqual(seen, ['ready']);
+});
+
+test('activity restart reconnects without server EOF, releases the reader and refetches on ready', { timeout: 2000 }, async t => {
+  const { createActivity } = await import('../static/activity.js');
+  const stop = new AbortController();
+  t.after(() => stop.abort());
+  let calls = 0, cancelled = 0;
+  const signals = [], bodies = [];
+  const api = {
+    activity: async ({ signal }) => {
+      signals.push(signal);
+      if (++calls === 3) throw Object.assign(new Error('forbidden'), { status: 403 });
+      const body = calls === 1 ? new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('event: ready\ndata: {}\n\nevent: hub_restarting\nretry: 1000\ndata: {"retry_after_ms":1000}\n\nevent: message\ndata: {"thread_id":"stale"}\n\n'));
+        },
+        cancel() { cancelled++; },
+      }) : new Response('event: ready\ndata: {}\n\nevent: resync\ndata: {}\n\n').body;
+      bodies.push(body);
+      return new Response(body);
+    },
+  };
+  const sleeps = [], states = [], seen = [];
+  const feed = createActivity({ api, signal: stop.signal, random: () => 0.5, sleep: async ms => { sleeps.push(ms); } });
+  feed.onConn(state => states.push(state));
+  feed.subscribe(ev => seen.push(ev));
+  await feed.start();
+  assert.equal(calls, 3);
+  assert.equal(cancelled, 1);
+  assert.ok(signals.every(signal => signal.aborted));
+  assert.ok(bodies.every(body => !body.locked));
+  assert.deepEqual(sleeps, [1000, 1000]);
+  assert.deepEqual(states, ['live', 'reconnecting', 'live', 'reconnecting', 'stopped']);
+  assert.equal(feed.conn(), 'stopped');
+  assert.deepEqual(seen, [
+    { type: 'ready', data: {} }, { type: 'ready', data: {} }, { type: 'resync', data: {} },
+  ]);
+});
+
+test('activity retries proxy outages with bounded jitter; credentials and disabled status are terminal', async () => {
+  const { createActivity } = await import('../static/activity.js');
+  const { createApi } = await import('../static/api.js');
+  for (const status of [401, 403, 204]) {
+    const stop = new AbortController();
+    let calls = 0, unauthorized = 0;
+    const api = createApi({ secret: 's', onUnauthorized: () => unauthorized++, fetch: async () => {
+      calls++;
+      return new Response(null, { status });
+    } });
+    const sleeps = [];
+    const feed = createActivity({ api, signal: stop.signal, sleep: async ms => sleeps.push(ms) });
+    await feed.start();
+    assert.equal(calls, 1);
+    assert.equal(feed.conn(), 'stopped');
+    assert.deepEqual(sleeps, []);
+    assert.equal(unauthorized, status === 401 ? 1 : 0);
+  }
+  const delays = [];
+  for (const random of [() => 0, () => 1]) {
+    const stop = new AbortController();
+    let calls = 0;
+    const sleeps = [];
+    const api = { activity: async () => {
+      if (++calls === 9) throw Object.assign(new Error('forbidden'), { status: 403 });
+      throw Object.assign(new Error('proxy unavailable'), { status: 503 });
+    } };
+    await createActivity({ api, signal: stop.signal, random, sleep: async ms => sleeps.push(ms) }).start();
+    assert.equal(sleeps.length, 8);
+    assert.ok(sleeps.every(ms => ms >= 800 && ms <= 30000));
+    delays.push(sleeps[0]);
+  }
+  assert.deepEqual(delays, [800, 1200]);
+});
+
+test('connection indicator shows activity-only reconnects until both streams recover', async () => {
+  const { connectionState } = await import('../static/connection-model.js');
+  assert.equal(connectionState('live', 'reconnecting'), 'reconnecting');
+  assert.equal(connectionState('reconnecting', 'live'), 'reconnecting');
+  assert.equal(connectionState('live', 'connecting'), 'connecting');
+  assert.equal(connectionState('live', 'live'), 'live');
+  assert.equal(connectionState('stopped', 'live'), 'stopped');
+  assert.equal(connectionState('live', 'stopped'), 'stopped');
+});
+
+test('silent activity reconnect releases its pending read and cancels the watchdog on stop', { timeout: 2000 }, async t => {
+  const { createActivity } = await import('../static/activity.js');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const stop = new AbortController();
+  t.after(() => stop.abort());
+  let ready, cancelled = 0, attempts = 0, connSignal;
+  const opened = new Promise(resolve => { ready = resolve; });
+  const body = new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode('event: ready\ndata: {}\n\n')); },
+    cancel() { cancelled++; },
+  });
+  const feed = createActivity({
+    api: { activity: async ({ signal }) => { attempts++; connSignal = signal; return new Response(body); } },
+    signal: stop.signal,
+    sleep: async () => { assert.ok(connSignal.aborted); assert.equal(body.locked, false); stop.abort(); },
+  });
+  feed.subscribe(ev => { if (ev.type === 'ready') ready(); });
+  const running = feed.start();
+  await opened;
+  t.mock.timers.tick(45000);
+  await running;
+  t.mock.timers.tick(90000);
+  assert.equal(cancelled, 1);
+  assert.equal(attempts, 1);
+  assert.equal(feed.conn(), 'stopped');
 });

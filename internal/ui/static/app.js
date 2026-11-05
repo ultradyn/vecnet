@@ -10,10 +10,12 @@ import { createActivity } from './activity.js';
 import { createApi } from './api.js';
 import { avatarHash, createAvatarCache } from './avatar-model.js';
 import * as compose from './compose.js';
+import { connectionState } from './connection-model.js';
 import * as dash from './dash.js';
 import { h, peerLink, toast } from './dom.js';
 import { short } from './format.js';
 import * as inbox from './inbox.js';
+import { closeInvite, openInvite } from './invite.js';
 import * as matrix from './matrix.js';
 import { createNotices } from './notice.js';
 import { peerHref } from './peer-model.js';
@@ -26,7 +28,7 @@ import * as thread from './thread.js';
 
 const SECRET_KEY = 'vecnet.ui.secret';
 const PEERS_REFRESH = 60000;
-const CONN_CLASS = { live: 'live', offline: 'off', stopped: 'off', restarting: 'warn' };
+const CONN_CLASS = { live: 'live', reconnecting: 'retry', stopped: 'off', restarting: 'warn' };
 const $ = id => document.getElementById(id);
 
 const SCREENS = {
@@ -74,6 +76,7 @@ function renderNav(s, route) {
   $('nav-inbox').className = route.name === 'inbox' ? 'on' : '';
   $('nav-new').className = route.name === 'new' ? 'on' : '';
   $('nav-dash').className = route.name === 'dash' ? 'on' : '';
+  $('nav-add').disabled = !s.ctx; // the invite needs the session's api
   const now = s.store.hubNow(), mineRes = s.mine;
   const yours = yourThreads({
     page: mineRes && mineRes.get(), summaries: s.threads.get() ? threads : null,
@@ -119,9 +122,10 @@ function peopleLinks(r, nameOf) {
   return [...shown.flatMap((id, i) => [i ? ', ' : '', peerLink(id, nameOf(id), { nested: true })]), ids.length > shown.length ? ' +' + (ids.length - shown.length) : ''];
 }
 
-// An announced restart reads as restarting, not offline, until it runs out.
-function renderConn(store, notices) {
-  const state = notices && notices.phase() === 'restarting' ? 'restarting' : store.conn();
+// An announced restart reads as restarting (amber) until it runs out; other
+// outages of either stream read as reconnecting.
+function renderConn(store, activity, notices) {
+  const state = notices && notices.phase() === 'restarting' ? 'restarting' : connectionState(store.conn(), activity.conn());
   $('conn').className = 'conn ' + (CONN_CLASS[state] || '');
   $('conn').lastElementChild.textContent = state;
 }
@@ -158,7 +162,7 @@ function start(secret) {
   // by the sidebar and the dashboard. Activity in threads the operator is not
   // in reaches it only this way.
   const activity = createActivity({ api, signal: stop.signal });
-  const notices = createNotices({ api, store, root: $('notices'), onPhase: () => renderConn(store, notices) });
+  const notices = createNotices({ api, store, root: $('notices'), onPhase: () => renderConn(store, activity, notices) });
   const peers = store.resource('peers', () => api.peers());
   const threads = store.resource('threads', () => api.myThreads({ limit: 200 }));
   // limit pages deliveries; the unread count and `me` do not depend on it.
@@ -185,6 +189,7 @@ function start(secret) {
     me: '', ctx: null, mounted: '', matrixHash: '', unmount: () => {}, offs: [],
     close() {
       stop.abort();
+      closeInvite(); // a shown token goes with the session
       this.unmount();
       for (const off of this.offs) if (typeof off === 'function') off();
       avatars.release();
@@ -226,10 +231,12 @@ function start(secret) {
   $('app').hidden = false;
   $('hubname').textContent = location.host;
   $('view').replaceChildren(h('div', { class: 'loading', text: 'Connecting to the hub…' }));
-  renderConn(store, notices);
+  renderConn(store, activity, notices);
   s.offs.push(
-    store.onConn(() => renderConn(store, notices)),
+    store.onConn(() => renderConn(store, activity, notices)),
+    activity.onConn(() => renderConn(store, activity, notices)),
     store.onRestart(ms => notices.poll(ms)),
+    activity.onRestart(ms => notices.poll(ms)),
     activity.subscribe(ev => notices.activity(ev)),
     () => notices.close(),
     threads.subscribe(redraw),
@@ -275,6 +282,13 @@ $('login-form').addEventListener('submit', e => {
   if (secret) signIn(secret);
 });
 $('signout').addEventListener('click', () => signOut(''));
+// Add agent from any view: the invite dialog opens over the current screen,
+// which stays mounted. A created peer reloads the shared directory; the
+// dashboard follows the hub's directory_updated event.
+$('nav-add').addEventListener('click', e => {
+  const s = session;
+  if (s && s.ctx) openInvite(s.ctx, () => s.ctx.peers.reload(), e.currentTarget);
+});
 window.addEventListener('hashchange', () => { if (session) renderRoute(session); });
 // A peer named inside another link (an inbox row, a sidebar row) is a span
 // with data-peer: a plain click on it opens the peer instead of the row.

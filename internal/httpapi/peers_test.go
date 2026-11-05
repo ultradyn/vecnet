@@ -85,6 +85,10 @@ func TestDirectoryVisibleToAll(t *testing.T) {
 	a, aSec := env.NewPeer("grokbot", "alpha")
 	b, bSec := env.NewPeer("session", "bravo")
 	c, cSec := env.NewPeer("session", "charlie")
+	dot, dotSec := env.NewPeer("dot", "delta")
+	if dotSec != "" {
+		t.Fatal("dot fixture must have no long-lived credential")
+	}
 	_, prnSec := env.NewPrincipal("pc")
 
 	// A push route for A: its URL and whsec are operator-only.
@@ -111,7 +115,7 @@ func TestDirectoryVisibleToAll(t *testing.T) {
 		}
 	}
 
-	want := []string{env.OperatorPeer, a, b, c}
+	want := []string{env.OperatorPeer, a, b, c, dot}
 	slices.Sort(want)
 	for name, secret := range map[string]string{"a": aSec, "c": cSec, "principal": prnSec, "operator": env.OperatorSecret} {
 		dir, body := getPeers(t, env, secret)
@@ -139,6 +143,9 @@ func TestDirectoryVisibleToAll(t *testing.T) {
 			if strings.Contains(lower, strings.ToLower(bad)) {
 				t.Fatalf("%s: GET /v1/peers leaks %q: %s", name, bad, body)
 			}
+		}
+		if k := str(t, dir[dot]["kind"]); k != "dot" {
+			t.Fatalf("%s: dot entry kind = %q, want dot", name, k)
 		}
 		if k := str(t, dir[env.OperatorPeer]["kind"]); k != "operator" {
 			t.Fatalf("operator entry kind = %q", k)

@@ -121,7 +121,7 @@
   - **Fingerprint:** `SHA256:<base64 std, unpadded, of sha256(pub)>`.
 - **Untrusted text.** Notice `message` is operator text but is rendered like peer text: `Clean` in the TUI, `textContent` in the web UI, `flatten`/`unbidi` and the rune cap in the CLI, `inert` in the hook. No client acts on any text. Only the signed structured fields (`kind`, `new_url`, `at`) drive behaviour.
 - **Wire stability.** Every Event type, frame and field already shipped stays byte-identical. A test marked **(guard)** passes before its task and must keep passing; every other listed test must fail first.
-- **Numbering.** Migration **0019**, PROTOCOL **§21**, id prefix **`ntc_`**. Reason codes:
+- **Numbering.** Migration **0019** (renumbered **0021** when the branch merged with master, which had taken 0019 and 0020), PROTOCOL **§21**, id prefix **`ntc_`**. Reason codes:
   - `hub_moved` (410, hub);
   - `relocation_unverified` (client outcome, exit 1);
   - `hub_identity_changed` (client outcome, exit 1).
@@ -131,7 +131,7 @@
 1. **No redirect to an unverified hub.** Pinned by:
    - Task 7: `TestFollowRefusesBadSignature`, `TestFollowRefusesKeyMismatch`, `TestFollowRefusesPublicURLMismatch`, `TestFollowIgnoresPeerText`, `TestFollowRefusesReplay`.
    - Task 6: `TestVerifyHubChecks`, `TestProfileRepointRefusesWithoutForce`.
-2. **The identity key is stable, separate and backed up with the database.** Pinned by `TestMigration0019SeedsIdentity` (Task 1), and by `TestHubIdentityStableAcrossRestart` and `TestRotateIdentityEndorses` (Task 3).
+2. **The identity key is stable, separate and backed up with the database.** Pinned by `TestMigration0021SeedsIdentity` (Task 1), and by `TestHubIdentityStableAcrossRestart` and `TestRotateIdentityEndorses` (Task 3).
 3. **Max's config survives.** Pinned by Task 6's `TestTOFUNeverWritesConfig`, `TestEditProfilePreservesCommentsAndUnknownKeys` and `TestEditProfileRefusesUnsafe`, and by Task 7's `TestFollowAllProfilesSameHub`.
 4. **Relocated hub semantics.** Pinned by Task 5's `TestRelocatedAnswers410`, `TestRelocatedRunsNoWorkers` and `TestRelocatedServesIdentityAndNotices`.
 5. **A restart is announced and not counted as failure.** Pinned by:
@@ -153,7 +153,7 @@
 
 **Files:**
 - Create `internal/hubid/hubid.go`, `hubid_test.go`.
-- Create `internal/store/migrations/0019_hub_identity_notices.sql`.
+- Create `internal/store/migrations/0021_hub_identity_notices.sql`.
 - Modify `internal/store/store_test.go`.
 - Modify `internal/envelope/types.go`, `schema.json` (and the identical `docs/protocol/envelope.schema.json`), `validate_test.go`.
 - Create `docs/protocol/examples/11-hub-notice-event.json`.
@@ -233,7 +233,7 @@ func TestPubkeyAndFingerprintFormat(t *testing.T)  // Pubkey has prefix "ed25519
 func TestNormalizeURL(t *testing.T)                // table: HTTPS://Hub.Example:443/ → https://hub.example; http://x:80 → http://x; userinfo, query, fragment, ftp: → error
 func TestValidChallenge(t *testing.T)              // 15 or 65 bytes, padding, '+' → false; 16 and 64 bytes → true
 func TestHubNoticeEventSchema(t *testing.T)        // envelope: example 11 validates; an Event with type hub_notice validates; a notice with an unknown field fails
-func TestMigration0019SeedsIdentity(t *testing.T)  // store: migrate fresh → 64-hex seed and created_at; two fresh DBs differ; seed != hub_key; reopening keeps it; hub_notices accepts kind moving and rejects kind "other"
+func TestMigration0021SeedsIdentity(t *testing.T)  // store: migrate fresh → 64-hex seed and created_at; two fresh DBs differ; seed != hub_key; reopening keeps it; hub_notices accepts kind moving and rejects kind "other"
 func TestNoticeIDPrefix(t *testing.T)              // ids.New(ids.Ntc) starts "ntc_" and validates
 ```
 

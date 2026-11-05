@@ -1,0 +1,601 @@
+import { createHash } from 'node:crypto';
+import type { Clock, HubApi, Log } from '../../hub-client/src/ports.ts';
+import type { Delivery, SendRequest } from '../../hub-client/src/wire.ts';
+import { MAX_TURN_INPUT_BYTES } from './backend.ts';
+import type { ActivityReport, BackendCapabilities, SessionHandle, SettleMode, SettleResult, SendMode, SendResult, TurnEvent, TurnInput } from './backend.ts';
+import type { Directory } from './directory.ts';
+import type { Ledger, JobRow, InputRow } from './ledger.ts';
+import type { Outbox } from './outbox.ts';
+import type { JobReporter } from './jobs.ts';
+import { planInput } from './input-plan.ts';
+import { formatRelayed, relayDecision } from './relay.ts';
+import { redactText } from './redact.ts';
+
+export type EndReason = 'idle_wrapup' | 'settled' | 'deadline' | 'requester_retired' | 'expired';
+export interface LaneDeps {
+  ledger: Ledger; outbox: Outbox; jobs: JobReporter; dir: Pick<Directory, 'name' | 'isOperator' | 'operatorPeerId'>;
+  hub: Pick<HubApi, 'fetchBlob' | 'putBlob'>; clock: Clock; log: Log; self: string; caps: BackendCapabilities;
+  deliver(job: JobRow, r: SettleResult): Promise<{ pushed: boolean }>;
+  onActivity(jobId: string): void; onEnded(jobId: string): void;
+}
+export interface SessionLane {
+  readonly jobId: string;
+  attach(handle: SessionHandle): void;
+  handleMessage(d: Delivery): Promise<'relayed' | 'buffered' | 'not_relayed' | 'refused'>;
+  control(c: 'interrupt' | 'settle' | 'extend', from: string): Promise<void>;
+  cancel(by: string): Promise<void>;
+  park(): Promise<void>; settle(mode: SettleMode, ended: EndReason, extra?: Record<string, unknown>): Promise<void>;
+  activity(): Promise<ActivityReport & { launcherBuffered: number; lastRelayAt: number }>;
+  /** A backend event from outside the turn stream (a plugin's hooks.onEvent). */
+  notice(ev: TurnEvent): Promise<void>;
+  stop(): Promise<void>;
+}
+/** Plugins report an approval that only their own UI can answer as this progress summary. */
+export const APPROVAL_WAIT = /^waiting for (?:approval|permission) in \S/i;
+const hash = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 24);
+export const WRAPUP_PROMPT = '[vecnet] This session is idle and is about to be settled. Commit any work you want to keep on the current branch, ' +
+  'then reply with a short summary of what you did and anything left unfinished.';
+function prefix(s: string, bytes: number): string {
+  const data = Buffer.from(s);
+  let end = Math.max(0, Math.min(bytes, data.length));
+  while (end > 0 && end < data.length && (data[end] & 0xc0) === 0x80) end--;
+  return data.subarray(0, end).toString('utf8');
+}
+export function turnReply(job: JobRow, n: number, ev: Extract<TurnEvent, { type: 'turn_finished' }>, consumed: string[], redact: typeof redactText): { req: SendRequest; fullText?: string } {
+  const full = redact(ev.finalText).text;
+  const size = Buffer.byteLength(full), cap = 60 * 1024;
+  const marker = `\n[truncated: ${size} bytes; full text attached]`;
+  const key = `vl.tr.${job.jobId}.${hash(ev.turnId)}`;
+  return {
+    req: { idempotency_key: key, kind: 'message', thread_id: job.threadId, in_reply_to: job.launchMessageId,
+      priority: job.input.reply_priority ?? 'wake_idle', content: { text: size > cap ? prefix(full, cap - Buffer.byteLength(marker)) + marker : full },
+      metadata: { 'launch.turn': ev.outcome, 'launch.turn_id': ev.turnId, 'launch.job_id': job.jobId,
+        'launch.consumed': consumed.slice(0, 100), ...(consumed.length > 100 ? { 'launch.consumed_truncated': consumed.length - 100 } : {}),
+        ...(job.backend === 'paseo' ? { 'launch.final_text': 'best_effort' } : {}),
+      },
+    }, ...(size > cap ? { fullText: full } : {}),
+  };
+}
+
+export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
+  const { ledger, outbox, clock, log } = deps;
+  const jobId = initial.jobId;
+  const store = ledger.kv(`lane:${jobId}`);
+  let handle: SessionHandle | undefined;
+  let chain: Promise<unknown> = Promise.resolve();
+  let stopped = false;
+  let controller: AbortController | undefined;
+  let pump: Promise<void> | undefined;
+  let sendGeneration = 0;
+  // A backend can already be idle while the saved lane still has a running
+  // turn. Replay that completion before assigning a counter to any new send.
+  let recovering = false;
+  // Uncertain backend I/O has one serialized recovery path. A rejected send
+  // leaves its batch `sending`: the backend may or may not have accepted it.
+  // `reconcile` resends every such batch as stored (same payload, order, mode
+  // and batchId) on Clock backoff. Until it succeeds, completions are fenced
+  // (`held`) so none can commit while a batch it may have consumed is unsure,
+  // and no new batch is dispatched ahead of it.
+  let held = false;
+  let fence: { promise: Promise<void>; release(): void } | undefined;
+  let recovery: ReturnType<Clock['timer']> | undefined, recoveryAttempts = 0;
+  let streamRetry: ReturnType<Clock['timer']> | undefined, streamAttempts = 0;
+  let cancelRetry: ReturnType<Clock['timer']> | undefined, cancelAttempts = 0;
+  const backoff = (attempt: number) => Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));
+  const job = () => ledger.job(jobId)!;
+  function serial<T>(fn: () => Promise<T> | T): Promise<T> {
+    const work = chain.then(fn).catch(() => {
+      log.warn('session lane operation failed', { jobId });
+      throw new Error('session lane operation failed');
+    });
+    chain = work.catch(() => {});
+    return work;
+  }
+  const authorized = (from: string) => from === deps.self || from === job().requester || deps.dir.isOperator(from);
+  function receipt(id: string, state: 'processed' | 'failed', note?: string) {
+    outbox.enqueue('receipt', `vl.rc.${id}.${state}`, { delivery_id: id, state, ...(note ? { note } : {}) }, jobId);
+  }
+  function activity() {
+    ledger.updateJob(jobId, { lastActivityAt: clock.now() });
+    deps.onActivity(jobId);
+  }
+  function pending() { return ledger.inputs(jobId, ['buffered', 'sending', 'sent']); }
+  const uncertain = () => ledger.inputs(jobId, ['sending']).length > 0;
+  const blocked = () => held || uncertain();
+  function cancelRetries() {
+    recovery?.cancel(); recovery = undefined;
+    cancelRetry?.cancel(); cancelRetry = undefined;
+    streamRetry?.cancel(); streamRetry = undefined;
+  }
+  function scheduleRecovery() {
+    if (recovery || stopped || !handle || job().state === 'ended') return;
+    recovery = clock.timer(backoff(recoveryAttempts++), () => {
+      recovery = undefined;
+      void serial(reconcile).catch(scheduleRecovery);
+    });
+  }
+  const cap = Math.min(MAX_TURN_INPUT_BYTES, deps.caps.maxInputBytes ?? Infinity);
+  // Each continuation must fit its quote prefix plus one four-byte UTF-8 character.
+  if (!Number.isSafeInteger(cap) || cap < 6) throw new Error('invalid backend input cap');
+  type StoredBatch = {
+    input: TurnInput & { batchId: string }; parts: Record<string, number>;
+    // Native sends can each create a distinct future turn. The send-time
+    // counter alone cannot distinguish those batches, nor an active successor
+    // from unread completions. Keep ownership alongside the durable payload.
+    targetTurnSeq?: number; targetTurnId?: string;
+  };
+  function storedBatch(row: InputRow): StoredBatch | undefined {
+    const saved = row.batchId && store.get(`batch:${row.batchId}`);
+    return saved ? JSON.parse(saved) as StoredBatch : undefined;
+  }
+  function parts(row: InputRow): string[] | undefined {
+    const saved = store.get(`parts:${row.deliveryId}`);
+    return saved === undefined ? undefined : JSON.parse(saved) as string[];
+  }
+  function position(id: string) { return Number(store.get(`part:${id}`) ?? 0); }
+  function inputItem(row: InputRow): TurnInput['items'][number] {
+    const chunks = parts(row), part = position(row.deliveryId);
+    return { deliveryId: chunks ? `${row.deliveryId}.part.${part + 1}` : row.deliveryId,
+      messageId: row.messageId, from: row.sender, text: chunks ? chunks[part] : row.text, attachments: [] };
+  }
+  async function sendBatch(rows: InputRow[], mode: SendMode, replay = false) {
+    if (!handle || rows.length === 0 || stopped) return;
+    const ids = rows.map(r => r.deliveryId);
+    const items = rows.map(inputItem);
+    const batchId = replay ? rows[0].batchId! : hash(items.map(i => i.deliveryId).sort().join('\n'));
+    // Persist the actual ordered payload: ledger insertion order differs from
+    // send order when holds have been prepended. Fragment ids stay backend-local;
+    // hub metadata and receipts always use the original opaque hub ids.
+    const saved = replay ? store.get(`batch:${batchId}`) : undefined;
+    const batch: StoredBatch = saved ? JSON.parse(saved) as StoredBatch : {
+      input: { batchId, items }, parts: Object.fromEntries(rows.filter(r => parts(r)).map(r => [r.deliveryId, position(r.deliveryId) + 1])),
+    };
+    if (!replay && mode === 'queue') {
+      const queuedTargets = pending().filter(r => r.mode === 'queue')
+        .map(r => storedBatch(r)?.targetTurnSeq ?? (r.turnSeq ?? job().turns) + 2);
+      batch.targetTurnSeq = Math.max(job().turns + 1, ...queuedTargets) + 1;
+    }
+    if (!replay && mode === 'steer') {
+      const state = handle.state();
+      if (state.kind === 'turn_running' && state.turnId) batch.targetTurnId = state.turnId;
+    }
+    if (!replay) ledger.tx(() => {
+      ledger.markInputs(ids, { state: 'sending', mode, batchId, turnSeq: job().turns });
+      store.set(`batch:${batchId}`, JSON.stringify(batch));
+      if (mode !== 'queue') store.set('awaitingTurn', '1');
+    });
+    // The optional structural field is consumed by t3's existing T3TurnInput seam.
+    const input = batch.input;
+    let result: SendResult;
+    try { result = await handle.send(input, mode); }
+    catch (error) {
+      // A deterministic pre-dispatch refusal is not uncertain backend I/O:
+      // retrying the same batch would block the lane forever.
+      if (error instanceof Error && error.message === 'input_too_large') { await rejectTooLarge(rows, mode, replay); return; }
+      scheduleRecovery(); throw error;
+    }
+    sendGeneration++;
+    ledger.tx(() => {
+      // A steer may race a backend turn boundary. Prefer its actual send
+      // result, also on an idempotent retry after a crash, over the snapshot.
+      if (mode === 'steer' && result.turnId) batch.targetTurnId = result.turnId;
+      store.set(`batch:${batchId}`, JSON.stringify(batch));
+      ledger.markInputs(ids, { state: 'sent' });
+      for (const [id, part] of Object.entries(batch.parts)) store.set(`part:${id}`, String(part));
+      if (mode === 'start') ledger.updateJob(jobId, { sessionKind: 'turn_running', parkedAt: null });
+    });
+    startPump();
+  }
+  // The backend refused the batch before dispatch (t3 checks the serialized
+  // request size, which JSON escaping can push past the lane's byte cap).
+  // A batch of several inputs is split: the first is retried alone and the
+  // rest go back to the buffer. A single input that still does not fit fails
+  // with input_too_large, and dispatch continues with the next.
+  async function rejectTooLarge(rows: InputRow[], mode: SendMode, replay: boolean) {
+    const kind = job().sessionKind ?? '';
+    const awaiting = ['turn_running', 'waiting_approval', 'starting'].includes(kind) ? '1' : '0';
+    if (rows.length > 1) {
+      const first = rows[0];
+      ledger.tx(() => {
+        ledger.markInputs(rows.map(r => r.deliveryId), { state: 'buffered', mode: null, batchId: null, turnSeq: null });
+        store.set('awaitingTurn', awaiting);
+      });
+      log.warn('backend refused a batch as too large; splitting it', { jobId, inputs: rows.length });
+      await sendBatch([ledger.inputs(jobId, ['buffered']).find(r => r.deliveryId === first.deliveryId)!], mode);
+      return;
+    }
+    ledger.tx(() => {
+      receipt(rows[0].deliveryId, 'failed', 'input_too_large');
+      ledger.markInputs([rows[0].deliveryId], { state: 'failed' });
+      store.set('awaitingTurn', awaiting);
+    });
+    log.warn('backend refused an input as too large', { jobId });
+    // reconcile releases any held completion and re-drives the buffer itself.
+    if (!replay) await flush(mode);
+  }
+  // Dispatch from a completion or exit. A failure is already queued for
+  // recovery, so it must not also tear down the turn stream.
+  async function drive() {
+    try { await flush('start'); }
+    catch { log.warn('session lane dispatch failed; retrying', { jobId }); scheduleRecovery(); }
+  }
+  async function flush(mode: SendMode) {
+    if (recovering || blocked()) return;
+    const buffered = ledger.inputs(jobId, ['buffered']).filter(row => {
+      if (mode === 'start') return true;
+      // Holds join the next non-hold turn batch, including a native queue,
+      // while a steer must leave both holds and launcher-queued rows alone.
+      const intent = store.get(`plan:${row.deliveryId}`);
+      return mode === 'steer' ? intent === 'steer' : intent === 'queue-native' || row.priority === 'hold';
+    });
+    // Holds may join a turn batch, but never initiate one by themselves.
+    if (!buffered.some(r => r.priority !== 'hold')) return;
+    const ordered = [...buffered.filter(r => r.priority === 'hold'), ...buffered.filter(r => r.priority !== 'hold')];
+    const selected: InputRow[] = [];
+    let bytes = 0;
+    for (const row of ordered) {
+      const size = Buffer.byteLength(inputItem(row).text) + (selected.length ? 2 : 0);
+      if (bytes + size > cap) break;
+      bytes += size; selected.push(row);
+    }
+    if (selected.length) await sendBatch(selected, mode);
+  }
+  // idle.wrapup_turn: one durable wrap-up turn before an idle settle. Its
+  // final text (redacted) becomes the succeeded summary; the settle follows
+  // its completion. The deadline settle never waits for it.
+  type Wrapup = { state: 'sent' | 'done'; extra: Record<string, unknown>; summary?: string };
+  const wrapup = (): Wrapup | undefined => { const w = store.get('wrapup'); return w ? JSON.parse(w) as Wrapup : undefined; };
+  async function startWrapup(extra: Record<string, unknown>): Promise<boolean> {
+    if (!handle) return false;
+    ledger.tx(() => { store.set('wrapup', JSON.stringify({ state: 'sent', extra } satisfies Wrapup)); store.set('awaitingTurn', '1'); });
+    try {
+      await handle.send({ items: [{ deliveryId: `vl-wrapup-${jobId}`, messageId: '', from: deps.self, text: WRAPUP_PROMPT, attachments: [] }],
+        batchId: hash(`wrapup\n${jobId}`) } as TurnInput, 'start');
+    } catch {
+      log.warn('wrap-up turn not sent; settling without it', { jobId });
+      ledger.tx(() => { store.set('wrapup', JSON.stringify({ state: 'done', extra } satisfies Wrapup)); store.set('awaitingTurn', '0'); });
+      return false;
+    }
+    ledger.updateJob(jobId, { sessionKind: 'turn_running', parkedAt: null });
+    sendGeneration++; startPump();
+    return true;
+  }
+  async function end(mode: SettleMode, ended: EndReason | 'cancel' | 'session_exited', extra: Record<string, unknown> = {}) {
+    if (job().state === 'ended') return;
+    if (mode === 'wrapup' && ended === 'idle_wrapup' && job().input.idle?.wrapup_turn === true) {
+      const w = wrapup();
+      if (w?.state === 'sent') return;                       // the wrap-up turn is still running
+      if (!w && await startWrapup(extra)) return;
+    }
+    ledger.updateJob(jobId, { state: 'settling' });
+    const result = handle ? await handle.settle(mode) : { workspaceKept: true };
+    let pushed = false;
+    if (job().input.deliver?.push_branch && !['cancel', 'expired', 'requester_retired', 'session_exited'].includes(ended)) pushed = (await deps.deliver(job(), result)).pushed;
+    ledger.tx(() => {
+      const inputs = pending();
+      for (const row of inputs) receipt(row.deliveryId, 'failed', 'session_ended');
+      ledger.markInputs(inputs.map(r => r.deliveryId), { state: 'failed' });
+      ledger.updateJob(jobId, { sessionKind: 'ended' });
+      if (ended === 'expired' || ended === 'session_exited') deps.jobs.report(jobId, 'failed', { error: ended });
+      else if (ended === 'requester_retired') deps.jobs.report(jobId, 'cancelled', { reason: ended });
+      else if (ended === 'cancel') deps.jobs.report(jobId, 'cancelled', { branch: result.branch ?? job().branch, head_sha: result.headSha, workspace_kept: result.workspaceKept });
+      else deps.jobs.report(jobId, 'succeeded', {
+        ...extra, ended, turns: job().turns, branch: result.branch ?? job().branch, head_sha: result.headSha,
+        commits: result.commits ?? [], pushed, summary: redactText(wrapup()?.summary ?? result.summary ?? '').text,
+        ...(ended === 'idle_wrapup' ? { quiescence: extra.quiescence ?? (deps.caps.backgroundTasks === 'observable' ? 'proven' : 'assumed') } : {}),
+      });
+    });
+    cancelRetries();
+    controller?.abort(); deps.onEnded(jobId);
+  }
+  async function control(c: 'interrupt' | 'settle' | 'extend', from: string) {
+    if (!authorized(from) || stopped || job().state === 'ended') return;
+    if (c === 'interrupt') await handle?.interrupt('requested');
+    else if (c === 'settle') await end('requested', 'settled');
+    else activity();
+  }
+  // A fenced completion returns its release, wrapped: an async function would
+  // otherwise adopt the promise and block the serial chain reconcile needs.
+  async function event(ev: TurnEvent, cursor: string): Promise<{ released: Promise<void> } | undefined> {
+    if (stopped || job().state === 'ended') return;
+    if (ev.type === 'turn_finished') {
+      if (uncertain()) {
+        // The completion may have consumed the uncertain batch. Hold it,
+        // unprocessed, until reconcile restores that batch to `sent`.
+        held = true;
+        if (!fence) { let release!: () => void; fence = { promise: new Promise<void>(r => { release = r; }), release }; }
+        scheduleRecovery();
+        return { released: fence.promise };
+      }
+      const current = job(), n = current.turns + 1;
+      const inputs = ledger.inputs(jobId, ['sent']).filter(r => {
+        const batch = storedBatch(r);
+        if (batch?.targetTurnId) return batch.targetTurnId === ev.turnId;
+        if (batch?.targetTurnSeq !== undefined) return batch.targetTurnSeq === n;
+        // Older ledgers and backends without turn identity retain the
+        // counter rule; new native queue batches have distinct targets.
+        return r.turnSeq !== null && (r.mode === 'queue' ? r.turnSeq < n - 1 : r.turnSeq <= n - 1);
+      });
+      const continuing = inputs.filter(r => { const chunks = parts(r); return chunks && position(r.deliveryId) < chunks.length; });
+      const consumed = inputs.filter(r => !continuing.includes(r));
+      const ids = consumed.map(r => r.deliveryId);
+      const reply = turnReply(current, n, ev, consumed.map(r => r.messageId), redactText);
+      // Upload outside the synchronous transaction. A crash here may orphan a
+      // content-addressed blob, but can never publish a reply without its turn row.
+      if (!store.get(`turn:${hash(ev.turnId)}`) && reply.fullText !== undefined) {
+        try {
+          const blob = await deps.hub.putBlob(Buffer.from(reply.fullText), 'text/markdown', controller?.signal);
+          reply.req.attachments = [{ ...blob, media_type: 'text/markdown', name: `turn-${n}.md` }];
+        } catch { log.warn('turn text attachment upload failed', { jobId }); }
+      }
+      let fresh = false;
+      ledger.tx(() => {
+        fresh = ledger.recordTurn(jobId, ev.turnId, ev.outcome);
+        if (fresh) {
+          outbox.enqueue('send', reply.req.idempotency_key, reply.req, jobId);
+          for (const id of ids) receipt(id, 'processed');
+          ledger.markInputs(ids, { state: 'consumed' });
+          ledger.markInputs(continuing.map(r => r.deliveryId), { state: 'buffered', mode: null, batchId: null, turnSeq: null });
+          store.set(`turn:${hash(ev.turnId)}`, String(n));
+          const outstandingTurn = ledger.inputs(jobId, ['sent']).some(r => r.mode === 'queue' || !!storedBatch(r)?.targetTurnId);
+          ledger.updateJob(jobId, { turns: n, lastActivityAt: clock.now(), sessionKind: outstandingTurn ? 'turn_running' : 'idle' });
+          store.set('awaitingTurn', outstandingTurn ? '1' : '0');
+        }
+        ledger.updateJob(jobId, { turnCursor: cursor });
+      });
+      held = false;
+      const w = wrapup();
+      if (fresh && w?.state === 'sent') {
+        // The wrap-up turn finished: settle now, unless new input arrived meanwhile.
+        ledger.tx(() => store.set('wrapup', JSON.stringify({ ...w, state: 'done', summary: prefix(redactText(ev.finalText).text, 4096) } satisfies Wrapup)));
+        if (pending().length === 0) { await end('wrapup', 'idle_wrapup', w.extra); return; }
+        store.delete('wrapup');
+      }
+      if (fresh) {
+        if (JSON.stringify([...ev.consumed].sort()) !== JSON.stringify([...ids].sort())) log.warn('turn consumed mismatch', { jobId, turn: n });
+        deps.onActivity(jobId);
+        if (job().sessionKind === 'idle') {
+          recovering = false;
+          await drive();
+        }
+      }
+      return;
+    }
+    if (ev.type === 'process_exited') {
+      if (ev.resumable) {
+        ledger.tx(() => {
+          ledger.updateJob(jobId, { turnCursor: cursor, sessionKind: 'parked', parkedAt: clock.now() });
+          store.set('awaitingTurn', '0');
+        });
+        recovering = false;
+        await drive();
+      }
+      else {
+        await end('lost', 'session_exited');
+        // A failed settle must leave this event replayable after a restart.
+        ledger.updateJob(jobId, { turnCursor: cursor });
+      }
+      return;
+    }
+    ledger.tx(() => {
+      approvalWait(ev);
+      if (ev.type === 'turn_started') store.set('awaitingTurn', '1');
+      ledger.updateJob(jobId, { turnCursor: cursor,
+        ...(ev.type === 'state' ? { sessionKind: ev.state.kind } : ev.type === 'turn_started' ? { sessionKind: 'turn_running' as const } : {}),
+      });
+    });
+  }
+  // One durable note per backend turn when the agent waits on an approval that
+  // only the backend's own UI can answer; ordinary progress stays unposted.
+  function approvalWait(ev: TurnEvent) {
+    if (ev.type !== 'progress' || !APPROVAL_WAIT.test(ev.summary) || stopped || job().state === 'ended') return;
+    const current = job(), key = `vl.nt.${jobId}.approval_wait.${hash(ev.turnId)}.${current.turns}`;
+    const text = redactText(`The agent is ${ev.summary.replace(/[\r\n]+/g, ' ').slice(0, 200)}: approve or deny it in the backend's own interface; vecnet cannot answer this prompt.`).text;
+    outbox.enqueue('send', key, { idempotency_key: key, kind: 'message', thread_id: current.threadId, in_reply_to: current.launchMessageId,
+      recipients: [current.requester], priority: 'wake_idle', content: { text } }, jobId);
+  }
+  function untilReleased(wait: Promise<void>, signal: AbortSignal) {
+    return new Promise<void>(resolve => {
+      const done = () => { signal.removeEventListener('abort', done); resolve(); };
+      signal.addEventListener('abort', done, { once: true });
+      if (signal.aborted) done();
+      void wait.then(done);
+    });
+  }
+  function startPump() {
+    if (!handle || pump || stopped || job().state === 'ended') return;
+    streamRetry?.cancel(); streamRetry = undefined;
+    const next = handle, signal = controller!.signal, generation = sendGeneration;
+    let failed = false;
+    pump = (async () => {
+      for await (const item of next.turns(job().turnCursor ? { value: job().turnCursor! } : undefined, signal)) {
+        if (signal.aborted) break;
+        streamAttempts = 0;
+        let wait = await serial(() => event(item.event, item.cursor.value));
+        while (wait && !signal.aborted) {
+          // Fenced: re-run this same completion once its batch is reconciled.
+          await untilReleased(wait.released, signal);
+          wait = await serial(() => event(item.event, item.cursor.value));
+        }
+        if (signal.aborted) break;
+      }
+    })().catch(() => {
+      if (!signal.aborted) { failed = true; log.warn('session turn stream failed; retrying', { jobId }); }
+    }).finally(() => {
+      pump = undefined;
+      if (signal.aborted || stopped || job().state === 'ended') return;
+      // A failed stream resumes from the last committed cursor on Clock
+      // backoff. A wake can race the old iterator returning after a resumable
+      // exit; start its replacement only after the old iterator has closed.
+      if (failed) {
+        if (!streamRetry) streamRetry = clock.timer(backoff(streamAttempts++), () => { streamRetry = undefined; startPump(); });
+      } else if (sendGeneration > generation) startPump();
+    });
+  }
+  type ControlDecision = { command: 'interrupt' | 'settle' | 'extend'; state: 'claimed' | 'done'; turnSeq: number; turnId?: string };
+  async function deliveryControl(id: string, command: ControlDecision['command'], from: string) {
+    const key = `control:${id}`, saved = store.get(key);
+    if (saved) {
+      const decision = JSON.parse(saved) as ControlDecision;
+      if (decision.state === 'done') return;
+      // Interrupt has no backend idempotency token. Fence an uncertain retry
+      // to the same positively identified turn, never to whichever turn is
+      // running after restart. Without that identity prefer at-most-once.
+      const state = handle?.state();
+      if (decision.command === 'settle') await control('settle', from);
+      else if (decision.command === 'interrupt' && decision.turnId && decision.turnSeq === job().turns &&
+          state?.kind === 'turn_running' && state.turnId === decision.turnId) await control('interrupt', from);
+      ledger.tx(() => { store.set(key, JSON.stringify({ ...decision, state: 'done' })); receipt(id, 'processed'); });
+      return;
+    }
+    const state = handle?.state();
+    const decision: ControlDecision = { command, state: 'claimed', turnSeq: job().turns,
+      ...(state?.kind === 'turn_running' ? { turnId: state.turnId } : {}) };
+    if (!authorized(from)) {
+      ledger.tx(() => { store.set(key, JSON.stringify({ ...decision, state: 'done' })); receipt(id, 'processed', 'not_relayed'); });
+      return;
+    }
+    if (command === 'extend') {
+      ledger.tx(() => {
+        ledger.updateJob(jobId, { lastActivityAt: clock.now() });
+        store.set(key, JSON.stringify({ ...decision, state: 'done' }));
+        receipt(id, 'processed');
+      });
+      deps.onActivity(jobId);
+      return;
+    }
+    store.set(key, JSON.stringify(decision));
+    await control(command, from);
+    ledger.tx(() => { store.set(key, JSON.stringify({ ...decision, state: 'done' })); receipt(id, 'processed'); });
+  }
+  async function cancelNow() {
+    if (stopped || job().state === 'ended' || !store.get('cancel')) return;
+    cancelRetry?.cancel(); cancelRetry = undefined;
+    try {
+      await handle?.interrupt('cancel');
+      await end('cancel', 'cancel');
+      store.delete('cancel');
+    } catch {
+      log.warn('session cancel failed; retrying', { jobId });
+      if (!stopped) cancelRetry = clock.timer(backoff(cancelAttempts++), () => { cancelRetry = undefined; void serial(cancelNow).catch(() => {}); });
+    }
+  }
+  // The single recovery path: at attach, and on Clock backoff after any
+  // rejected send. It resends uncertain batches in their stored order, then
+  // releases a held completion, which dispatches next itself; otherwise it
+  // re-drives buffered input for an idle session.
+  async function reconcile() {
+    if (!handle || stopped || job().state === 'ended') return;
+    const batches = new Map<string, InputRow[]>();
+    for (const row of ledger.inputs(jobId, ['sending'])) {
+      const key = row.batchId!;
+      batches.set(key, [...(batches.get(key) ?? []), row]);
+    }
+    for (const rows of batches.values()) await sendBatch(rows, rows[0].mode!, true);
+    recoveryAttempts = 0;
+    const waiting = fence; fence = undefined; waiting?.release();
+    // At attach the pump starts only once every uncertain send is restored;
+    // the recovery fence then reconciles unread turns before new dispatch.
+    startPump();
+    if (!held && ['idle', 'parked'].includes(job().sessionKind!)) await flush('start');
+  }
+  const lane: SessionLane = {
+    jobId,
+    attach(next) {
+      if (stopped || job().state === 'ended') return;
+      if (handle) throw new Error('session lane already attached');
+      handle = next;
+      controller = new AbortController();
+      void serial(async () => {
+        const state = next.state();
+        const awaitingTurn = store.get('awaitingTurn') === '1' ||
+          ['turn_running', 'waiting_approval', 'starting'].includes(job().sessionKind ?? '');
+        recovering = awaitingTurn &&
+          (state.kind === 'idle' || state.kind === 'parked' || (state.kind === 'ended' && state.resumable));
+        if (awaitingTurn) store.set('awaitingTurn', '1');
+        ledger.updateJob(jobId, { state: 'running', sessionKind: state.kind === 'ended' && state.resumable ? 'parked' : state.kind });
+        // A cancel recorded before a restart (or a failed attempt) goes first.
+        if (store.get('cancel')) { await cancelNow(); return; }
+        await reconcile();
+      }).catch(scheduleRecovery);
+    },
+    handleMessage(d) {
+      return serial(async () => {
+        const m = d.message;
+        const decision = relayDecision(m.sender, job(), deps.self, id => deps.dir.isOperator(id));
+        if (!decision.relay || m.thread_id !== job().threadId) { receipt(d.delivery_id, 'processed', 'not_relayed'); return 'not_relayed'; }
+        const command = m.metadata['launch.control'];
+        if ((command === 'interrupt' || command === 'settle' || command === 'extend') && store.get(`control:${d.delivery_id}`)) {
+          await deliveryControl(d.delivery_id, command, m.sender);
+          return authorized(m.sender) ? 'relayed' : 'not_relayed';
+        }
+        // A queued ingress can be retried after its turn and even after
+        // settle. Its durable input decision takes precedence over refusing
+        // fresh input to the now-ended session, preserving the original receipt.
+        const existing = ledger.inputs(jobId, ['buffered', 'sending', 'sent', 'consumed', 'failed']).find(r => r.deliveryId === d.delivery_id);
+        if (existing) return existing.state === 'failed' ? 'refused' : existing.state === 'buffered' ? 'buffered' : 'relayed';
+        if (stopped || job().state === 'ended' || job().sessionKind === 'ended') { receipt(d.delivery_id, 'failed', 'session_ended'); return 'refused'; }
+        if (command === 'interrupt' || command === 'settle' || command === 'extend') {
+          const allowed = authorized(m.sender);
+          await deliveryControl(d.delivery_id, command, m.sender);
+          return allowed ? 'relayed' : 'not_relayed';
+        }
+        // Structured parent-bridge traffic is consumed by Task 12 upstream.
+        if (m.kind !== 'message' || m.job_request || m.metadata['launch.answers'] || m.metadata['launch.decision']) { receipt(d.delivery_id, 'processed', 'not_relayed'); return 'not_relayed'; }
+        let text = m.content.text;
+        let attachments = m.attachments;
+        if (m.content.truncated) {
+          // The hub appends its spill after user attachments; prefer the last
+          // matching name so a requester cannot shadow it with a same-name file.
+          const spill = attachments.findLast(a => a.name === 'message.md' && a.media_type === 'text/markdown');
+          if (!spill?.blob_url) throw new Error('spilled input attachment missing');
+          const bytes = await deps.hub.fetchBlob(spill.blob_url, { maxBytes: 256 * 1024, signal: controller?.signal });
+          if (bytes.length > 256 * 1024) throw new Error('spilled input exceeds limit');
+          text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+          attachments = attachments.filter(a => a !== spill);
+        }
+        const formatted = formatRelayed({ role: decision.role, name: m.sender_info?.name ?? deps.dir.name(m.sender), peerId: m.sender, messageId: m.message_id, text, attachments });
+        const chunks: string[] = [];
+        let remaining = formatted;
+        while (Buffer.byteLength(remaining) > cap) {
+          const chunk = prefix(remaining, cap);
+          if (chunk.length === 0) throw new Error('backend input cap too small');
+          chunks.push(chunk);
+          // Keep a fragment that starts inside a line visibly quoted as data.
+          remaining = `> ${remaining.slice(chunk.length)}`;
+        }
+        if (chunks.length) chunks.push(remaining);
+        const planned = planInput(m.priority, handle && !recovering && !blocked() ? job().sessionKind ?? 'starting' : 'launching', deps.caps);
+        // No backend seam can amend an already queued batch. Keep next-turn
+        // input here until the running turn ends, so later holds can still be
+        // prepended. Persisted native batches from older lanes remain replayable.
+        const plan = planned === 'queue-native' ? 'queue-launcher' : planned;
+        ledger.tx(() => {
+          ledger.addInput({ deliveryId: d.delivery_id, jobId, messageId: m.message_id, sender: m.sender, text: formatted, priority: m.priority, createdAt: clock.now() });
+          if (chunks.length) store.set(`parts:${d.delivery_id}`, JSON.stringify(chunks));
+          store.set(`plan:${d.delivery_id}`, plan);
+          store.set('lastRelayAt', String(clock.now()));
+          ledger.updateJob(jobId, { lastActivityAt: clock.now() });
+        });
+        deps.onActivity(jobId);
+        if (plan === 'start' || plan === 'steer') await flush(plan);
+        return plan === 'buffer' || plan === 'queue-launcher' ? 'buffered' : 'relayed';
+      });
+    },
+    control: (c, from) => serial(() => control(c, from)),
+    // The cancel intent is durable before any backend I/O. A transient
+    // interrupt or settle failure retries on Clock backoff, and a restarted
+    // lane resumes it at attach, until the job reaches a terminal state.
+    cancel: by => serial(async () => {
+      if (!authorized(by) || stopped || job().state === 'ended') return;
+      store.set('cancel', by);
+      await cancelNow();
+    }),
+    park: () => serial(async () => { if (!stopped && job().state !== 'ended' && handle?.park) { await handle.park(); ledger.updateJob(jobId, { sessionKind: 'parked', parkedAt: clock.now() }); } }),
+    settle: (mode, ended, extra) => serial(() => end(mode, ended, extra)),
+    activity: () => serial(async () => ({ ...(handle ? await handle.activity() : { turnRunning: false, openApprovals: 0, queuedInputs: 0, backgroundTasks: { known: 0, observable: false }, lastActivityAt: new Date(job().lastActivityAt).toISOString() }), launcherBuffered: ledger.inputs(jobId, ['buffered', 'sending']).length, lastRelayAt: Number(store.get('lastRelayAt') ?? initial.lastActivityAt) })),
+    notice: ev => serial(() => { ledger.tx(() => approvalWait(ev)); }),
+    async stop() { stopped = true; cancelRetries(); controller?.abort(); await chain; await pump; },
+  };
+  return lane;
+}

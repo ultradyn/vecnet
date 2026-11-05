@@ -40,7 +40,7 @@ func (m Mode) String() string {
 const (
 	ConnConnecting = "connecting"
 	ConnLive       = "live"
-	ConnOffline    = "offline, retrying"
+	ConnOffline    = "reconnecting"
 	// ConnRestarting is the hub announcing a restart: expected, so a warning.
 	ConnRestarting = "restarting"
 	ConnRejected   = "credential rejected"

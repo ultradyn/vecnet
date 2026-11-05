@@ -23,7 +23,7 @@ const (
 )
 
 // peerLink is `peer link <peer>`: the 12-character code, shown as
-// ABCD-EFGH-JKMN, that the dot's principal enters on first login
+// ABCD-EFGH-JKMN, that the peer's OAuth principal enters on first login
 // (PROTOCOL §4.5, §20.1).
 func (a *app) peerLink(peer string) error {
 	var out map[string]any
@@ -72,8 +72,11 @@ func (a *app) readKeyFile(path string) (string, error) {
 		return "", err
 	}
 	key := strings.TrimSpace(string(raw))
+	if strings.HasPrefix(strings.ToLower(key), "bearer ") {
+		return "", usageErr("route: key file must hold the raw crsr_ key, without Bearer")
+	}
 	if len(raw) > maxKeyFile || !strings.HasPrefix(key, grokbotKeyPrefix) {
-		return "", usageErr("route add: " + path + " does not hold a " + grokbotKeyPrefix + " key")
+		return "", usageErr("route: " + path + " does not hold a " + grokbotKeyPrefix + " key")
 	}
 	info, err := f.Stat()
 	if err != nil {

@@ -7,11 +7,20 @@ default:
 
 # Build both binaries into bin/
 build:
-    CGO_ENABLED=0 build2 go build -p 2 -o bin/ ./cmd/...
+    CGO_ENABLED=0 build2 go build -p 2 -ldflags "-X github.com/XertroV/vecnet/internal/mcpserver.Version=$(just version)" -o bin/ ./cmd/...
+
+# Build version (MCP serverInfo.version): UTC date.time + short commit (+dirty)
+version:
+    @echo "$(date -u +%Y.%m%d.%H%M)+$(git rev-parse --short HEAD)$(git diff --quiet HEAD -- 2>/dev/null || echo .dirty)"
 
 # Run the test suite (two threads, via build2)
 test:
     build2 go test -p 2 ./...
+
+# Isolated hub benchmark; invoke via BB_HOST=x-boss BB_JOBS=2 just bb GOMAXPROCS=2 just bench ...
+bench *ARGS:
+    CGO_ENABLED=0 build2 go build -p 2 -o bin/vecnet-bench ./bench
+    bin/vecnet-bench {{ARGS}}
 
 # Run the dev hub on the generated port; extra flags pass through
 # (e.g. `just run --dev-ui-dir internal/ui/static` serves the operator UI from disk)
@@ -28,7 +37,7 @@ hub-init NAME="Max":
 
 # Deploy to Fly (builds the image remotely from Dockerfile; Max runs this, tests never do)
 fly-deploy:
-    fly deploy --remote-only
+    ~/.fly/bin/flyctl deploy --remote-only -a vecnet --yes --build-arg VECNET_VERSION=$(just version)
 
 # Create the operator on the deployed hub (prints the secret once)
 fly-init:
@@ -97,6 +106,53 @@ bb-clean LANE:
 
 tui *ARGS:
     CGO_ENABLED=0 build2 go run -p 2 ./cmd/vecnet tui {{ARGS}}
+
+# launcher: first-time setup in a worktree (dev dependencies only)
+ln-setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd connectors/launcher
+    manager=(pnpm)
+    command -v pnpm >/dev/null 2>&1 || manager=(corepack pnpm)
+    build2 "${manager[@]}" install --frozen-lockfile --child-concurrency=2
+
+# launcher + hub-client: type-check
+ln-typecheck:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd connectors/launcher
+    manager=(pnpm)
+    command -v pnpm >/dev/null 2>&1 || manager=(corepack pnpm)
+    GOMAXPROCS=2 build2 "${manager[@]}" exec tsc -p tsconfig.json
+
+# launcher + hub-client: unit tests; pass files to narrow
+ln-test *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    shopt -s nullglob
+    files=({{ARGS}})
+    [ ${#files[@]} -gt 0 ] || files=(connectors/hub-client/test/*.test.ts connectors/launcher/test/*.test.ts connectors/launcher/test/backends/*.test.ts)
+    build2 node --disable-warning=ExperimentalWarning --test --test-concurrency=2 "${files[@]}"
+
+ln-check: ln-typecheck ln-test
+
+# launcher: end to end against a real hub and fake backend
+ln-e2e: build
+    build2 node --disable-warning=ExperimentalWarning --test --test-concurrency=1 connectors/launcher/test/e2e/*.test.ts
+
+ln-run *ARGS:
+    node --disable-warning=ExperimentalWarning connectors/launcher/src/main.ts {{ARGS}}
+
+# coordinator/Max only; never enables the unit
+ln-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dest="$HOME/.local/share/vecnet-launcher/$(git rev-parse --short HEAD)"
+    mkdir -p "$dest"
+    rsync -a --delete --exclude node_modules connectors/hub-client connectors/launcher "$dest/"
+    ln -sfn "$dest" "$HOME/.local/share/vecnet-launcher/current"
+    install -Dm0644 connectors/launcher/systemd/vecnet-launcher.service "$HOME/.config/systemd/user/vecnet-launcher.service"
+    echo "installed $dest; run: systemctl --user daemon-reload"
 
 # Check a deployed hub's MCP and OAuth contracts (bearer in VECNET_MCP_TOKEN).
 mcp-conformance ORIGIN:

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/XertroV/vecnet/internal/blob"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/ids"
+	"github.com/XertroV/vecnet/internal/mcpdiag"
 )
 
 // Operator powers behind /v1/admin/... (PROTOCOL §2.12, §5.5, §12). The HTTP
@@ -144,8 +146,16 @@ const (
 	dotLinkGroup    = 4
 )
 
+// oauthLinkKinds is the space-separated allowlist for issuing and consuming
+// OAuth link codes. Keep both checks on this single list as new clients join.
+const oauthLinkKinds = "dot grokbot"
+
+func oauthLinkKind(kind string) bool {
+	return slices.Contains(strings.Fields(oauthLinkKinds), kind)
+}
+
 // ErrDotLink is every refused link code: unknown, used, expired, or naming a
-// peer that is no longer an enabled dot. The cases are not told apart.
+// peer that is no longer enabled or eligible for OAuth linking. The cases are not told apart.
 var ErrDotLink = errors.New("hub: invalid link code")
 
 // newDotLinkCode draws DotLinkLen uniform characters from the alphabet and
@@ -167,7 +177,7 @@ func newDotLinkCode() (stored, shown string, err error) {
 	return string(b), strings.Join(groups, "-"), nil
 }
 
-// DotLink mints the one-time code that binds a ChatGPT principal to dot peer
+// DotLink mints the one-time code that binds an OAuth principal to eligible peer
 // peerID on first login (PROTOCOL §4.5, R15, §20.1). The code is returned
 // once, grouped for reading, and only its hash is stored; it lasts
 // DotLinkTTL. Issuing a code ends a link-code lockout (DotLinkFailed). A peer
@@ -183,8 +193,8 @@ func (h *Hub) DotLink(ctx context.Context, peerID string) (string, error) {
 		if err != nil {
 			return err
 		}
-		if kind != "dot" {
-			return invalidValue("peer_id", "only a dot peer can be linked")
+		if !oauthLinkKind(kind) {
+			return invalidValue("peer_id", "only a dot or grokbot peer can be linked")
 		}
 		if disabled {
 			return invalidValue("peer_id", "the peer is disabled")
@@ -282,7 +292,7 @@ func (h *Hub) ConsumeDotLinkTx(ctx context.Context, tx *sql.Tx, code string) (st
 	if err != nil {
 		return "", err
 	}
-	if kind != "dot" || disabled {
+	if !oauthLinkKind(kind) || disabled {
 		return "", ErrDotLink
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE dot_links SET used_at = ? WHERE code_hash = ? AND used_at IS NULL`, h.nowStr(), hash)
@@ -298,7 +308,7 @@ func (h *Hub) ConsumeDotLinkTx(ctx context.Context, tx *sql.Tx, code string) (st
 	return peerID, nil
 }
 
-// BindDotPrincipalTx moves dot peer peerID under a new principal named "dot:"
+// BindDotPrincipalTx moves an OAuth-linkable peer peerID under a new principal named "dot:"
 // + the peer's name, inside tx, on the authority of the operator's link code
 // (PROTOCOL §2.12, §4.5), and ends any bearer left on it. It returns the
 // principal. After commit, wake readers with Log.Notify(peerID, prnID).
@@ -318,8 +328,8 @@ func (h *Hub) BindDotPrincipalTx(ctx context.Context, tx *sql.Tx, peerID string)
 	if err := h.movePeer(ctx, tx, peerID, prnID, "hub"); err != nil {
 		return "", err
 	}
-	// A link code cuts off whoever had this dot, and a bearer from before dots
-	// lost them would survive it.
+	// A link code cuts off whoever had this peer, including any bearer or
+	// enrolment token from before the OAuth binding.
 	if err := h.Auth.RevokePeerCredentialsTx(ctx, tx, peerID); err != nil {
 		return "", err
 	}
@@ -339,15 +349,41 @@ const PausedOperator = "operator"
 // pauseBearerSubscriptions stops the Events subscriptions the credential of
 // subject made (subject is a peer or principal id). An operator's pause stays
 // the operator's. Paused subscriptions keep their cursor, so nothing is lost.
-func (h *Hub) pauseBearerSubscriptions(ctx context.Context, tx *sql.Tx, subject string) error {
+// Returned identities describe only changed rows; emit them after commit.
+func (h *Hub) pauseBearerSubscriptions(ctx context.Context, tx *sql.Tx, subject string) ([]pausedBearerSubscription, error) {
 	now := h.nowStr()
-	if _, err := tx.ExecContext(ctx,
+	rows, err := tx.QueryContext(ctx,
 		`UPDATE event_subscriptions SET paused_reason = ?, updated_at = ?
-		 WHERE principal_kind = 'vecnet' AND principal_id = ? AND coalesce(paused_reason, '') != ?`,
-		PausedCredentialRotated, now, subject, PausedOperator); err != nil {
-		return fmt.Errorf("hub: pause subscriptions: %w", err)
+		 WHERE principal_kind = 'vecnet' AND principal_id = ? AND coalesce(paused_reason, '') NOT IN (?, ?)
+		 RETURNING sub_id, peer_id`,
+		PausedCredentialRotated, now, subject, PausedOperator, PausedCredentialRotated)
+	if err != nil {
+		return nil, fmt.Errorf("hub: pause subscriptions: %w", err)
 	}
-	return nil
+	defer rows.Close()
+	var paused []pausedBearerSubscription
+	for rows.Next() {
+		var sub pausedBearerSubscription
+		if err := rows.Scan(&sub.id, &sub.peerID); err != nil {
+			return nil, fmt.Errorf("hub: pause subscriptions: %w", err)
+		}
+		paused = append(paused, sub)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hub: pause subscriptions: %w", err)
+	}
+	return paused, nil
+}
+
+type pausedBearerSubscription struct{ id, peerID string }
+
+func logBearerSubscriptionPauses(paused []pausedBearerSubscription) {
+	for _, sub := range paused {
+		mcpdiag.Emit("events.pause", map[string]any{
+			"subscription_id": sub.id, "peer_id": sub.peerID,
+			"reason": PausedCredentialRotated, "result": "paused",
+		})
+	}
 }
 
 // RotatePeer revokes peerID's peer credentials and returns a new secret, once
@@ -356,6 +392,7 @@ func (h *Hub) pauseBearerSubscriptions(ctx context.Context, tx *sql.Tx, subject 
 // unknown peer. Open streams on the old credential end (they wake here).
 func (h *Hub) RotatePeer(ctx context.Context, peerID string) (string, error) {
 	var secret string
+	var paused []pausedBearerSubscription
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		_, kind, _, err := peerRow(ctx, tx, peerID)
 		if err != nil {
@@ -367,11 +404,13 @@ func (h *Hub) RotatePeer(ctx context.Context, peerID string) (string, error) {
 		if secret, err = h.Auth.RotateTx(ctx, tx, "peer", peerID); err != nil {
 			return err
 		}
-		return h.pauseBearerSubscriptions(ctx, tx, peerID)
+		paused, err = h.pauseBearerSubscriptions(ctx, tx, peerID)
+		return err
 	})
 	if err != nil {
 		return "", err
 	}
+	logBearerSubscriptionPauses(paused)
 	h.Log.Notify(peerID)
 	return secret, nil
 }
@@ -382,6 +421,7 @@ func (h *Hub) RotatePeer(ctx context.Context, peerID string) (string, error) {
 // not_found for an unknown principal. Open streams on the old credential end.
 func (h *Hub) RotatePrincipal(ctx context.Context, prnID string) (string, error) {
 	var secret string
+	var paused []pausedBearerSubscription
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		kind := "principal"
 		var isOp bool
@@ -396,7 +436,8 @@ func (h *Hub) RotatePrincipal(ctx context.Context, prnID string) (string, error)
 		if secret, err = h.Auth.RotateTx(ctx, tx, kind, prnID); err != nil {
 			return err
 		}
-		return h.pauseBearerSubscriptions(ctx, tx, prnID)
+		paused, err = h.pauseBearerSubscriptions(ctx, tx, prnID)
+		return err
 	})
 	if errors.Is(err, auth.ErrUnknownSubject) {
 		e := E(http.StatusNotFound, "not_found", "no such principal")
@@ -406,6 +447,7 @@ func (h *Hub) RotatePrincipal(ctx context.Context, prnID string) (string, error)
 	if err != nil {
 		return "", err
 	}
+	logBearerSubscriptionPauses(paused)
 	h.Log.Notify(prnID)
 	return secret, nil
 }

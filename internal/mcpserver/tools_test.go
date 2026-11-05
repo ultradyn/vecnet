@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/auth"
 	venv "github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
@@ -279,7 +280,8 @@ func TestToolsListSecuritySchemes(t *testing.T) {
 					"kind":    map[string]any{"enum": []any{"peer", "principal", "operator"}},
 					"peer_id": map[string]any{"type": "string"}, "principal_id": map[string]any{"type": "string"},
 					"name": map[string]any{"type": "string"},
-				}, "required": []any{"kind"}, "additionalProperties": false}
+					"id":   map[string]any{"type": "string", "minLength": float64(1)},
+				}, "required": []any{"kind", "id"}, "additionalProperties": false}
 				if !reflect.DeepEqual(tool["outputSchema"], wantOutput) {
 					t.Errorf("whoami outputSchema = %v, want %v", tool["outputSchema"], wantOutput)
 				}
@@ -299,9 +301,9 @@ func TestWhoamiIdentity(t *testing.T) {
 		name, secret string
 		want         map[string]string
 	}{
-		{"peer", secret, map[string]string{"kind": "peer", "peer_id": peer, "name": "Profile name"}},
-		{"principal", prnSecret, map[string]string{"kind": "principal", "principal_id": prn}},
-		{"operator", env.OperatorSecret, map[string]string{"kind": "operator"}},
+		{"peer", secret, map[string]string{"id": peer, "kind": "peer", "peer_id": peer, "name": "Profile name"}},
+		{"principal", prnSecret, map[string]string{"id": prn, "kind": "principal", "principal_id": prn}},
+		{"operator", env.OperatorSecret, map[string]string{"id": env.OperatorPeer, "kind": "operator"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var got map[string]string
@@ -317,6 +319,7 @@ func TestWhoamiIdentity(t *testing.T) {
 			if name := tc.want["name"]; name != "" {
 				me["name"] = name
 			}
+			me["id"] = tc.want["id"]
 			if !reflect.DeepEqual(got, me) {
 				t.Fatalf("whoami = %v, HTTP identity plus name = %v", got, me)
 			}
@@ -338,7 +341,7 @@ func TestWhoamiIdentity(t *testing.T) {
 		})
 		var got map[string]string
 		toolOK(t, front, "oauth-token", "vecnet_whoami", map[string]any{}, &got)
-		want := map[string]string{"kind": "peer", "peer_id": dot, "name": "Bound dot"}
+		want := map[string]string{"id": dot, "kind": "peer", "peer_id": dot, "name": "Bound dot"}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("OAuth whoami = %v, want %v", got, want)
 		}
@@ -369,12 +372,12 @@ func TestToolsListNamesAndHints(t *testing.T) {
 	}
 
 	want := []string{
-		"vecnet_ack", "vecnet_blob_get", "vecnet_blob_put", "vecnet_clear_avatar", "vecnet_group_add", "vecnet_group_create", "vecnet_groups",
+		"vecnet_ack", "vecnet_blob_get", "vecnet_blob_put", "vecnet_clear_avatar", "vecnet_group_add", "vecnet_group_create", "vecnet_groups", "vecnet_guide",
 		"vecnet_inbox", "vecnet_peer_create", "vecnet_peer_set_disabled", "vecnet_peers", "vecnet_presence", "vecnet_presence_subscribe", "vecnet_react", "vecnet_receipt",
-		"vecnet_reply", "vecnet_send", "vecnet_set_avatar", "vecnet_thread", "vecnet_threads", "vecnet_whoami",
+		"vecnet_reply", "vecnet_send", "vecnet_set_avatar", "vecnet_subscriptions", "vecnet_thread", "vecnet_threads", "vecnet_whoami",
 	}
 	var got []string
-	readOnly := map[string]bool{"vecnet_blob_get": true, "vecnet_groups": true, "vecnet_inbox": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true, "vecnet_whoami": true}
+	readOnly := map[string]bool{"vecnet_guide": true, "vecnet_blob_get": true, "vecnet_groups": true, "vecnet_inbox": true, "vecnet_subscriptions": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true, "vecnet_whoami": true}
 	for _, tool := range tools {
 		got = append(got, tool.Name)
 		if tool.Annotations == nil {
@@ -461,6 +464,47 @@ func TestToolsListNamesAndHints(t *testing.T) {
 	defs, _ := send["$defs"].(map[string]any)
 	if _, ok := defs["peerId"]; !ok {
 		t.Errorf("vecnet_send has no $defs/peerId: %v", send["$defs"])
+	}
+	// ChatGPT read the top-level anyOf (thread_id | recipients) as making
+	// thread_id required, so a new conversation looked impossible. The rule
+	// lives in the description and the hub's own validation instead.
+	for _, tool := range tools {
+		for _, k := range []string{"anyOf", "oneOf", "allOf"} {
+			if _, ok := tool.InputSchema[k]; ok {
+				t.Errorf("%s inputSchema has top-level %s", tool.Name, k)
+			}
+		}
+	}
+	if desc := tools[i].Description; !strings.Contains(desc, "recipients") || !strings.Contains(desc, "thread_id") {
+		t.Errorf("vecnet_send description does not say when to use recipients or thread_id: %q", desc)
+	}
+}
+
+// A new conversation needs only recipients; neither recipients nor thread_id
+// is still refused by the hub's validation.
+func TestSendRecipientsOrThread(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSecret := env.NewPeer("session", "a")
+	b, _ := env.NewPeer("session", "b")
+	var out sendResult
+	toolOK(t, env, aSecret, "vecnet_send", map[string]any{
+		"idempotency_key": "new", "recipients": []string{b}, "priority": "hold",
+		"content": map[string]any{"text": "hello"},
+	}, &out)
+	if out.ThreadID == "" {
+		t.Fatalf("new send made no thread: %+v", out)
+	}
+	status, r := rpc(t, env, aSecret, "tools/call", map[string]any{"name": "vecnet_send", "arguments": map[string]any{
+		"idempotency_key": "neither", "priority": "hold", "content": map[string]any{"text": "to nobody"},
+	}})
+	if status != http.StatusOK {
+		t.Fatalf("neither: HTTP %d", status)
+	}
+	if r.Error == nil {
+		var res toolResult
+		if err := json.Unmarshal(r.Result, &res); err != nil || !res.IsError {
+			t.Fatalf("send with neither recipients nor thread_id succeeded: %s", r.Result)
+		}
 	}
 }
 
@@ -2163,5 +2207,50 @@ func TestBlobToolsTakeNoURL(t *testing.T) {
 		}); path != "/attachments/0/"+key {
 			t.Fatalf("send accepts attachment %s: %q", key, path)
 		}
+	}
+}
+
+func TestWhoamiStableID(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("session", "Before rename")
+	var first, second, renamed map[string]string
+	toolOK(t, env, secret, "vecnet_whoami", map[string]any{}, &first)
+	rotated, err := env.Hub.RotatePeer(context.Background(), peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated == secret {
+		t.Fatal("rotation did not mint a second credential")
+	}
+	toolOK(t, env, rotated, "vecnet_whoami", map[string]any{}, &second)
+	// No rename API exists; change the directory fixture, then observe whoami.
+	if _, err := env.Hub.DB.Exec(`UPDATE peers SET name = ? WHERE peer_id = ?`, "After rename", peer); err != nil {
+		t.Fatal(err)
+	}
+	toolOK(t, env, rotated, "vecnet_whoami", map[string]any{}, &renamed)
+	for _, got := range []map[string]string{first, second, renamed} {
+		if got["id"] != peer {
+			t.Errorf("profile id = %q, want stable peer %s", got["id"], peer)
+		}
+	}
+	if first["name"] != "Before rename" || renamed["name"] != "After rename" {
+		t.Fatalf("rename not visible: %v -> %v", first, renamed)
+	}
+	other, otherSecret := env.NewPeer("session", "Different peer")
+	var distinct map[string]string
+	toolOK(t, env, otherSecret, "vecnet_whoami", map[string]any{}, &distinct)
+	if distinct["id"] != other || distinct["id"] == renamed["id"] {
+		t.Fatalf("distinct peer ids: %v and %v", renamed, distinct)
+	}
+}
+
+func TestWhoamiOperatorFallback(t *testing.T) {
+	env := testhub.Start(t)
+	front := eventsFront(t, env, diagAuth{mcpserver.Principal{Caller: auth.Caller{Kind: "operator"}}}, nil)
+	var got map[string]string
+	toolOK(t, front, "operator-test-token", "vecnet_whoami", map[string]any{}, &got)
+	want := map[string]string{"kind": "operator", "id": "operator"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("operator without peer = %v, want %v", got, want)
 	}
 }

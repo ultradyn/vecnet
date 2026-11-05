@@ -201,8 +201,17 @@ func TestTailBackoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second, time.Second}
-	if !reflect.DeepEqual(delays, want) {
-		t.Fatalf("delays %v want %v", delays, want)
+	if reflect.DeepEqual(delays, want) {
+		t.Fatalf("retries have no jitter: %v", delays)
+	}
+	if len(delays) != len(want) {
+		t.Fatalf("delays %v", delays)
+	}
+	for i, d := range delays {
+		base := min(want[i], 20*time.Second)
+		if d < base*4/5 || d > base*6/5 {
+			t.Fatalf("delay %d = %v, base %v", i, d, base)
+		}
 	}
 	if len(states) == 0 || states[0] != "connecting" {
 		t.Fatalf("states %v", states)

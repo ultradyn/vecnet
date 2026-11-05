@@ -6,8 +6,10 @@ import (
 	"time"
 )
 
-const DefaultRestartRetry = 5 * time.Second
-const drainFlush = time.Second
+// DefaultRestartRetry is the hint a stream gets when the server shuts down
+// (Deps.Stop) without announcing a Drain first. vecnet-hub always announces
+// --restart-retry-ms (default 5000) before shutting down.
+const DefaultRestartRetry = time.Second
 
 // Drain announces a transport-only restart to the current generation of
 // streams. The zero value is usable; a nil Drain never announces anything.
@@ -163,6 +165,34 @@ func (d *Drain) Reset() {
 	d.generation = newDrainGeneration()
 }
 
+// restartFrame is the stream's last frame on a restart (PROTOCOL §21.3). It
+// has no id, so it never moves the delivery cursor; retry: matches
+// retry_after_ms so a plain EventSource waits as long as the hint says.
 func restartFrame(retry time.Duration) []byte {
-	return []byte(fmt.Sprintf("event: hub_restarting\ndata: {\"retry_after_ms\":%d}\n\n", retry.Milliseconds()))
+	ms := retry.Milliseconds()
+	return []byte(fmt.Sprintf("event: hub_restarting\nretry: %d\ndata: {\"retry_after_ms\":%d}\n\n", ms, ms))
+}
+
+// restartSignal closes when the joined generation announces a restart or the
+// server begins shutting down (stop), whichever comes first. release stops
+// the watcher; call it before the handler returns.
+func restartSignal(h drainHandle, stop <-chan struct{}) (restart <-chan struct{}, release func()) {
+	if stop == nil {
+		return h.C(), func() {}
+	}
+	out, quit, joined := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(joined)
+		select {
+		case <-h.C():
+			close(out)
+		case <-stop:
+			close(out)
+		case <-quit:
+		}
+	}()
+	return out, func() {
+		close(quit)
+		<-joined
+	}
 }

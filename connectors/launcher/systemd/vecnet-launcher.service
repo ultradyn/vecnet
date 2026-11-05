@@ -1,0 +1,19 @@
+# vecnet launcher daemon: a systemd --user unit (Max's uid on xsm; in P2 also on
+# the build boxes). Installed by `just ln-install`, which never enables it.
+# A slow T3 start is handled by reattach's unreachable retry, not by ordering.
+[Unit]
+Description=vecnet launcher daemon (runs coding-agent sessions for launch jobs)
+After=network-online.target t3code.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning %h/.local/share/vecnet-launcher/current/launcher/src/main.ts run --config %h/.config/vecnet-launcher/config.json
+Restart=on-failure
+RestartSec=10
+# Exit 3: a durable recovery condition (a purged event cursor); see the guide.
+RestartPreventExitStatus=3
+UMask=0077
+MemoryMax=1G
+
+[Install]
+WantedBy=default.target

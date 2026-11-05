@@ -130,6 +130,7 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     peers: () => get('/v1/peers'),
     adminPeers: () => get('/v1/admin/peers'),
     addPeer: body => post('/v1/admin/peers', { body }),
+    dotLink: peerId => post('/v1/admin/dot-links', { body: { peer_id: peerId } }),
     principals: () => get('/v1/admin/principals'),
     routes: () => get('/v1/admin/routes'),
     inbox: ({ limit, before, unread } = {}) => get('/v1/admin/inbox' + query({ limit, before, unread: unread ? 1 : undefined })),

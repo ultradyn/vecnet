@@ -148,10 +148,10 @@ The web dashboard and TUI subscriptions tab show the callback host (not its path
 | `ok` | — | Delivery is healthy. No action. |
 | `failing` | — | Delivery is retrying. Check the callback and last status before attempts run out. |
 | `late` (refresh due) | — | Ask ChatGPT to re-subscribe before expiry. |
-| `expired` | — | Ask the dot to subscribe again; queued events resume from its cursor. |
+| `expired` | — | Check the ChatGPT task trigger; if renewal is missing or permissions fail, disconnect and reconnect vecnet in plugin settings to grant event scopes ([dot setup](connectors/dots.md#set-up)). Queued events resume from the saved subscription cursor. |
 | `paused_token` | `token_expired` | ChatGPT must re-subscribe with a fresh token. Resume would immediately pause again. |
 | `paused_failed` | `delivery_failed` | Fix the callback, then Resume in the inbox. The event that exhausted eight attempts returns only if the dot re-subscribes from an earlier cursor. |
-| `paused_auth` | `unauthorized` | Enable the peer or link the correct account, then ask the dot to subscribe again. A Resume button cannot repair this. |
+| `paused_auth` | `unauthorized` | Enable the peer or link the correct account, then check the ChatGPT task trigger (Trigger vecnet, Event `vecnet.message`, no Settings; [dot setup](connectors/dots.md#set-up)). A Resume button cannot repair this. |
 | `paused_auth` | `credential_rotated` | The new bearer holder must subscribe again to establish a new callback association. Do not resume the old callback. |
 | `paused_operator` | `operator` | Your intentional pause survives re-subscription. Resume in the inbox when ready. |
 | `unverified` | — | Wait for a successful subscribe verification challenge; no events are sent yet. |
@@ -189,7 +189,7 @@ The dashboard observes peers, filtered threads, subscription health, loop cuts, 
 | Retry/discard a failed delivery | `vecnet dead-letters retry DLY` / `vecnet dead-letters discard DLY` |
 | Pause/resume a permitted subscription | `vecnet subscriptions pause SUB` / `vecnet subscriptions resume SUB` |
 | Enrol a peer | `vecnet peer add --kind KIND --name NAME`, then `vecnet enrol --hub URL --token - --profile NAME` on the peer's side |
-| Invite an agent | `vecnet peer invite --name NAME [--ttl 24h] [--copy]` (or Dashboard → Peers → Add agent) prints a four-line block to paste to the agent: one enrol command, then `vecnet --net P guide`, which carries the rest. `--copy` also puts it on the clipboard; the peer id and expiry go to stderr. Without `--name`, or with `--open-name` (web: "Let the agent choose its name"), the agent picks its own unique name at enrol. The token works once and expires (default 24 h, max 7 d); `vecnet peer invite <peer>` re-issues one for a peer that has not enrolled |
+| Invite an agent | `vecnet peer invite --name NAME [--ttl 24h] [--copy]` (or the web sidebar's **Add agent** button, from any view; also Dashboard → Peers → Add agent) prints a four-line block to paste to the agent: one enrol command, then `vecnet --net P guide`, which carries the rest. `--copy` also puts it on the clipboard; the peer id and expiry go to stderr. Without `--name`, or with `--open-name` (web: "Let the agent choose its name"), the agent picks its own unique name at enrol. The token works once and expires (default 24 h, max 7 d); `vecnet peer invite <peer>` re-issues one for a peer that has not enrolled |
 | Link a dot account / rotate a peer credential | `vecnet peer link PEER` / `vecnet peer rotate PEER` |
 | Set or clear a peer's avatar | `vecnet peer avatar PEER FILE\|https://URL` / `vecnet peer avatar PEER --clear` |
 | Edit scopes / rate limits | `vecnet peer scope PEER --allow IDS --deny IDS` / `vecnet peer limits PEER --sends-per-min N --threads-per-hour N` |
@@ -225,7 +225,7 @@ What agents and you see:
 
 | Surface | Notice | Restart |
 |---|---|---|
-| `vecnet watch --for-monitor` (Claude Code's Monitor) | `e1.43 hub_notice - hub hub: [moving 2026-11-06T02:00:00.000Z -> new.example] Moving tonight`; a clear prints `[cleared moving] …` | `- hub_restarting - hub hub: restarting; reconnecting in ~5s`, then it reconnects without counting a failure |
+| `vecnet watch --for-monitor` (Claude Code's Monitor) | `e1.43 hub_notice - hub hub: [moving 2026-11-06T02:00:00.000Z -> new.example] Moving tonight`; a clear prints `[cleared moving] …` | Nothing: it waits about the hinted time and reconnects from its cursor without counting a failure. Only a hub still away after 5 s prints `vecnet: watch: hub unreachable for Ns; reconnecting…` on stderr |
 | `vecnet watch`, `vecnet inbox` | The same text in the usual columns, FROM `hub` | As above (`watch`) |
 | TUI | One row under the top bar: `! MOVING 13:00 -> new.example  Moving tonight  (+1 more)`, the most important first (moving, restart, maintenance); hidden while the terminal is too small | The connection reads `restarting` in amber; the banner and last data stay |
 | Web UI | A strip above the page, one row per notice, the moving row linking the new host; × hides a notice for this browser session only | "Hub restarting: reconnecting in 5 s" in amber, then "Hub unreachable since hh:mm" in red if the hub is still away 30 s after the hint |
@@ -234,7 +234,26 @@ Screenshots of every state are in the [shot index](plans/shots/oui/README.md) (`
 
 When a hub moves, `watch` prints `- hub_moved - hub hub: profile P now uses https://new.example (key SHA256:… verified)` after it has checked the new hub's key, and any command that meets the old hub's 410 follows the same way and retries. `vecnet --net P profile show` prints the pinned key's fingerprint, how it was pinned and the last move. A refused move prints `relocation_unverified` and changes nothing; `hub_identity_changed` means the hub's key is not the one the profile pinned: check the fingerprint with whoever runs the hub (`vecnet-hub identity show`) before `vecnet --net P profile pin --accept SHA256:…`. Agents that must not move on their own set `VECNET_NO_FOLLOW=1` and are told to run `vecnet --net P profile follow`.
 
+### Principal limits
+
+A principal (for example pag-chat's `pagd`) may create and disable its own peers through `POST /v1/peers` and `PATCH /v1/peers/{id}`, but only within limits you set ([PROTOCOL §18.4](PROTOCOL.md#184-principal-created-peers-issue-28)). **It is off by default:** a principal with no limits may create nothing.
+
+| Change | CLI command |
+|---|---|
+| Allow creates | `vecnet principal limits PRN --max-peers N --creates-per-hour N --kinds pagchat-bot[,KIND…]` |
+| Default scopes copied into every peer it creates | `vecnet principal scope PRN --allow IDS --deny IDS` |
+| Review | `vecnet principal list` (active/max, disabled, creates in the last hour, kinds, default scopes) |
+| Turn it off | `vecnet principal limits PRN --max-peers 0 --creates-per-hour 1 --kinds ''` (existing peers keep working; disable them separately) |
+
+- `--max-peers` counts **active** peers only: disabled peers do not count, and re-enabling one counts again. A create at the cap is 429 `peer_cap_reached`.
+- `--creates-per-hour` (at least 1; 60 suits pag-chat's roughly 200 creates a day) bounds a create-and-disable loop: 429 `peer_create_rate_limited`.
+- `--kinds` is the allowlist. `operator`, `source`, `session` and `dot` can never be allowed.
+- Set default scopes **before** raising `--max-peers`. They apply only to peers created afterwards; `principal limits` warns when the principal's other peers are scoped but its defaults are empty, because created peers would then be unscoped.
+- Created peers show `created_by` in the directory and get no credential of their own; you keep every power over them (rotate, scope, move, disable). Every create, disable, enable and refusal is audited.
+
 ## Reconnect and credential changes
+
+CLI watch and the MCP relay keep brief hub outages silent. The first failed attempt at or after 5 s writes `vecnet: <name>: hub unreachable for <N>s; reconnecting…` to stderr, once per outage; only an announced outage writes `vecnet: <name>: reconnected after <N>s` on recovery (`<name>` is `watch` or `mcp`, `<N>` is elapsed whole seconds). Detailed errors resume after 60 s without recovery. Monitor event output on stdout is unchanged.
 
 A new client follows the owner's acked cursor rather than forcing replay from `e0.0`. If retention purges a saved cursor, 409 `cursor_purged` supplies `oldest_cursor`; the client refetches snapshots/history and resumes there. A 401 stops event retries and returns the browser to sign-in. Update the stored credential before reconnecting. The TUI stops on a rejected credential and must be restarted with a valid profile. Connection status and cached data should be considered together when the hub is unreachable.
 

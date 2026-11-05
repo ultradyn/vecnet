@@ -29,7 +29,12 @@ const (
 	ReasonChallengeFailed = "challenge_failed"
 	ReasonTimeout         = "timeout"
 	ReasonInvalidURL      = "invalid_url"
+	ReasonHTTP4xx         = "http_4xx"
+	ReasonHTTP5xx         = "http_5xx"
 )
+
+// ChallengeTimeout bounds the complete callback proof, including reading its response.
+const ChallengeTimeout = 15 * time.Second
 
 // verifyPrefix tags the webhook-id of a verification challenge.
 const verifyPrefix ids.Prefix = "vrf"
@@ -45,7 +50,22 @@ func (e ErrChallenge) Error() string { return "events: challenge: " + e.Reason }
 // {"challenge":<same>}. client must be an egress.Policy client, which refuses
 // redirects; now is the hub's clock, for the signature. Any failure is an
 // ErrChallenge.
-func Challenge(ctx context.Context, client *http.Client, s Subscription, secret string, now time.Time) error {
+func Challenge(ctx context.Context, client *http.Client, s Subscription, secret string, now time.Time) (err error) {
+	started := time.Now()
+	status := 0
+	defer func() {
+		result, reason := "verified", ""
+		if err != nil {
+			result, reason = "failed", "internal_error"
+			var failed ErrChallenge
+			if errors.As(err, &failed) {
+				reason = failed.Reason
+			}
+		}
+		LogLifecycle("events.verification", s, map[string]any{"method": "events/subscribe", "http_status": status, "duration_ms": time.Since(started).Milliseconds(), "result": result, "reason": reason})
+	}()
+	ctx, cancel := context.WithTimeout(ctx, ChallengeTimeout)
+	defer cancel()
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return fmt.Errorf("events: challenge: %w", err)
@@ -70,12 +90,26 @@ func Challenge(ctx context.Context, client *http.Client, s Subscription, secret 
 	req.Header.Set(webhook.HeaderSignature, sig)
 	req.Header.Set(HeaderSubscription, s.ID)
 	resp, err := client.Do(req)
+	if resp != nil {
+		status = resp.StatusCode
+	}
 	if err != nil {
+		// CheckRedirect failures return the last response alongside the error.
+		// Its body is normally already closed by http.Client; close defensively.
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
 		return ErrChallenge{Reason: challengeReason(err)}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ErrChallenge{Reason: ReasonChallengeFailed}
+		reason := ReasonChallengeFailed
+		if resp.StatusCode >= 500 {
+			reason = ReasonHTTP5xx
+		} else if resp.StatusCode >= 400 {
+			reason = ReasonHTTP4xx
+		}
+		return ErrChallenge{Reason: reason}
 	}
 	answer, err := io.ReadAll(io.LimitReader(resp.Body, hub.PushResponseCap))
 	if err != nil {

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -19,8 +18,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/egress"
 	"github.com/XertroV/vecnet/internal/envelope"
-	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/mcpdiag"
 )
 
 // Limits on client registration, which anyone may attempt. maxClients is the
@@ -122,7 +122,7 @@ func (m *registration) check() error {
 		}
 	}
 	if !scopeOK(m.Scope) {
-		return errors.New("only scope vecnet is supported")
+		return errors.New("only vecnet, events:read and events:write scopes are supported")
 	}
 	if len(m.ClientName) > maxClientName {
 		return errors.New("client_name is too long")
@@ -154,6 +154,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, u := range m.RedirectURIs {
 		if !s.redirectAllowed(u) {
+			logRedirectRefused(u, m.ClientName, "/oauth/register")
 			writeOAuthError(w, http.StatusBadRequest, "invalid_redirect_uri", "a redirect URI is not allowed")
 			return
 		}
@@ -167,17 +168,22 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		m.ResponseType = []string{"code"}
 	}
 	if m.Scope == "" {
-		m.Scope = Scope
+		m.Scope = AuthorizationScopes
 	}
 	switch err := s.storeClient(r.Context(), "dcr", &m); {
 	case errors.Is(err, errTooManyClients):
 		writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "registration is closed for now")
 		return
 	case err != nil:
-		slog.Error("oauth: register", "err", err)
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "internal")
 		return
 	}
+	hosts := make([]string, 0, len(m.RedirectURIs))
+	for _, uri := range m.RedirectURIs {
+		u, _ := url.Parse(uri) // each URI passed redirectAllowed
+		hosts = append(hosts, u.Host)
+	}
+	mcpdiag.Emit("oauth.client_registered", map[string]any{"client_id_prefix": m.ClientID[:12], "redirect_hosts": hosts, "client_name": m.ClientName, "endpoint": "/oauth/register"})
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"client_id":                  m.ClientID,
@@ -341,8 +347,7 @@ func (s *Server) loadClient(ctx context.Context, id string) (*client, error) {
 	m, err := s.fetchCIMD(ctx, id)
 	s.cimd.leave(id, err == nil, s.now())
 	if err != nil {
-		// The URL is attacker-chosen and may carry a credential: never logged.
-		slog.Warn("oauth: client metadata document refused", "err", hub.EgressErr(err))
+		// fetchCIMD emits one sanitized outcome without the attacker-chosen URL.
 		return nil, errUnknownClient
 	}
 	if err := s.storeClient(ctx, "cimd", m); err != nil {
@@ -357,12 +362,24 @@ func (s *Server) loadClient(ctx context.Context, id string) (*client, error) {
 // with Events callbacks, only the default https port will do, so this is no
 // probe of a host's other ports; the dev override waives that for local
 // servers.
-func (s *Server) fetchCIMD(ctx context.Context, id string) (*registration, error) {
+func (s *Server) fetchCIMD(ctx context.Context, id string) (result *registration, resultErr error) {
+	started := time.Now()
+	reason, status, host := "invalid_metadata", 0, ""
+	defer func() {
+		outcome := "rejected"
+		if resultErr == nil {
+			outcome, reason = "success", "ok"
+		}
+		mcpdiag.Emit("oauth.cimd", map[string]any{"http_method": "GET", "http_status": status, "duration_ms": time.Since(started).Milliseconds(), "outcome": outcome, "reason": reason, "cimd_host": host})
+	}()
 	u, err := s.Egress.CheckURL(id)
 	if err != nil {
+		reason = "egress_refused"
 		return nil, err
 	}
+	host = u.Hostname()
 	if port := u.Port(); !s.Egress.AllowPrivate && port != "" && port != "443" {
+		reason = "egress_refused"
 		return nil, errors.New("oauth: client metadata URL must use the default https port")
 	}
 	if u.Path == "" || u.Path == "/" || slices.ContainsFunc(strings.Split(u.Path, "/"), func(seg string) bool {
@@ -378,11 +395,24 @@ func (s *Server) fetchCIMD(ctx context.Context, id string) (*registration, error
 	hc := s.Egress.Client(cimdTimeout)
 	defer hc.CloseIdleConnections()
 	resp, err := hc.Do(req)
+	if resp != nil {
+		status = resp.StatusCode
+	}
 	if err != nil {
+		reason = "fetch_failed"
+		var timeout interface{ Timeout() bool }
+		if errors.As(err, &timeout) && timeout.Timeout() {
+			reason = "timeout"
+		}
+		if errors.Is(err, egress.ErrPrivateAddress) || errors.Is(err, egress.ErrRedirect) {
+			reason = "egress_refused"
+		}
 		return nil, err
 	}
+	status = resp.StatusCode
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		reason = "http_error"
 		return nil, fmt.Errorf("oauth: client metadata status %d", resp.StatusCode)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxClientBytes+1))
@@ -400,7 +430,17 @@ func (s *Server) fetchCIMD(ctx context.Context, id string) (*registration, error
 		return nil, errors.New("oauth: client metadata names another client_id")
 	}
 	if m.AuthMethod != "" && m.AuthMethod != "none" {
-		return nil, errors.New("oauth: client metadata asks for client authentication")
+		// A client that prefers authentication but lists none among the
+		// methods it supports (ChatGPT does) is used as a public client: this
+		// hub advertises only none, and PKCE plus the exact redirect URI bind
+		// the code to it. One that cannot do none is refused.
+		var alt struct {
+			Methods []string `json:"token_endpoint_auth_methods_supported"`
+		}
+		if json.Unmarshal(raw, &alt) != nil || !slices.Contains(alt.Methods, "none") {
+			return nil, errors.New("oauth: client metadata asks for client authentication")
+		}
+		m.AuthMethod = "none"
 	}
 	if len(m.RedirectURIs) > maxRedirectURIs {
 		return nil, errors.New("oauth: client metadata lists too many redirect URIs")

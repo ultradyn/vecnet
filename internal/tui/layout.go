@@ -193,7 +193,7 @@ func (m *Model) connStyle() lipgloss.Style {
 	switch m.Conn {
 	case ConnLive:
 		return styleGood
-	case ConnConnecting, ConnRestarting:
+	case ConnConnecting, ConnOffline, ConnRestarting:
 		return styleWarn
 	}
 	return styleBad

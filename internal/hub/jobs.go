@@ -168,14 +168,15 @@ func prepareJobRequest(ctx context.Context, tx *sql.Tx, snd sender, thr *threadR
 // exists (404 unknown_job); the reporter is the job's recipient or a
 // credential of its principal (403 not_recipient), except that the
 // requester may report cancelled, which moves a job that is not terminal to
-// cancellation_requested; sequence is above the job's last (409
+// cancellation_requested; a recipient's sequence is above the job's last (409
 // stale_sequence); and the state is allowed from the job's state by the
 // transition table (422 invalid_transition).
 //
 // sequence belongs to the recipient: a requester's cancel is neither checked
 // against nor stored as the job's last sequence, so a high one cannot make
 // the recipient's next report stale. A requester cancel of a terminal job is
-// still 422 invalid_transition.
+// still 422 invalid_transition; another while cancellation_requested leaves
+// the job unchanged.
 func prepareJobStatus(ctx context.Context, tx *sql.Tx, c auth.Caller, snd sender, js *envelope.JobStatus) (*kindEffect, error) {
 	var requester, recipient, recipientPrn, state string
 	var lastSeq int64
@@ -214,23 +215,29 @@ func prepareJobStatus(ctx context.Context, tx *sql.Tx, c auth.Caller, snd sender
 		e.Details["last_sequence"] = lastSeq
 		return nil, e
 	}
-	next := js.State
 	if fromRequester {
-		next = JobCancellationRequested
 		if jobTerminal(state) {
 			return nil, invalidTransition(js.JobID, state, js.State)
 		}
-	} else if !jobTransitions[state][js.State] {
-		return nil, invalidTransition(js.JobID, state, js.State)
+		if state == JobCancellationRequested {
+			return &kindEffect{jobID: js.JobID}, nil
+		}
+		return &kindEffect{jobID: js.JobID, apply: func(ctx context.Context, tx *sql.Tx, _ string, now string) error {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE jobs SET state = ?, updated_at = ? WHERE job_id = ?`,
+				JobCancellationRequested, now, js.JobID); err != nil {
+				return fmt.Errorf("hub: update job: %w", err)
+			}
+			return nil
+		}}, nil
 	}
-	seq := js.Sequence
-	if fromRequester {
-		seq = lastSeq // the requester's sequence is not the job's
+	if !jobTransitions[state][js.State] {
+		return nil, invalidTransition(js.JobID, state, js.State)
 	}
 	return &kindEffect{jobID: js.JobID, apply: func(ctx context.Context, tx *sql.Tx, _ string, now string) error {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE jobs SET state = ?, last_sequence = ?, updated_at = ? WHERE job_id = ?`,
-			next, seq, now, js.JobID); err != nil {
+			js.State, js.Sequence, now, js.JobID); err != nil {
 			return fmt.Errorf("hub: update job: %w", err)
 		}
 		return nil

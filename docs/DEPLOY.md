@@ -19,12 +19,15 @@ The hub runs as one always-on Fly.io machine (`shared-cpu-1x`, 512 MB) with a vo
 | `--listen` | `VECNET_LISTEN` | `127.0.0.1:45752` |
 | `--data-dir` | `VECNET_DATA_DIR` | `/data` |
 | `--public-url` | `VECNET_PUBLIC_URL` | `http://<bound listen address>` |
+| `--mcp-allowed-origins` | `VECNET_MCP_ALLOWED_ORIGINS` | extra `/mcp` origin `https://chatgpt.com`; `none` for public origin only |
 | `--allow-private-egress` | `VECNET_ALLOW_PRIVATE_EGRESS=1` | off; development only, see [Connectors](#connectors) |
 | `--trust-fly-client-ip` | `VECNET_TRUST_FLY_CLIENT_IP=1` | off; on in `fly.toml`, see [Public exposure](#public-exposure) |
 | `--restart-retry-ms` | `VECNET_RESTART_RETRY_MS` | `5000` (0–60000); the reconnect hint sent on shutdown, see [Restarts](#restarts) |
 | `--relocated-to` | `VECNET_RELOCATED_TO` | unset; set only on a hub that has moved, see [Moving a hub](#moving-a-hub) |
 
 The public URL is the origin the hub writes into attachment `blob_url` links, so on Fly it must be the `https://` address clients use. The image's entrypoint sets `--listen` and `--data-dir`; `fly.toml` sets `VECNET_PUBLIC_URL`. On start the hub prints `vecnet-hub listening on http://<addr> (public url <url>)`.
+
+`--mcp-allowed-origins` replaces the extra-origin set with comma-separated exact HTTP(S) origins, for example `https://chatgpt.com,https://client.example:8443`. Empty (including an empty flag overriding the environment) restores `https://chatgpt.com`; literal `none` disables extras. The public origin is always allowed. Each entry must be `scheme://host[:port]`: no path or trailing slash, userinfo, query, fragment, wildcard or `null`. Surrounding list-entry whitespace is trimmed, case and default ports are normalized, and a malformed entry aborts startup before opening the listener or store. No CORS headers or OPTIONS support are added. The setting applies only to `/mcp`; OAuth endpoints retain their existing checks.
 
 ## First deploy
 
@@ -46,6 +49,34 @@ The public URL is the origin the hub writes into attachment `blob_url` links, so
 
 Later deploys are `just fly-deploy` only. The hub migrates its database on start.
 
+On SIGTERM/SIGINT the hub announces the restart before HTTP shutdown
+([Restarts](#restarts)). Events and operator activity SSE drain queued
+frames, flush a final `hub_restarting` control frame (`retry:` and
+`retry_after_ms` both the configured hint, default 5000 ms; no cursor id),
+then close normally. MCP GET and `subscriptions/listen` streams close
+without a custom event or fabricated RPC result; parked long-polls return
+an empty page with their resume cursor and a `hub_restarting` field. Each stalled writer has a one-second
+drain budget, so an unreadable connection may still end with a transport
+error. HTTP shutdown has a 10 s grace period, below the existing Fly
+`kill_timeout = 15`; the current signal, timeout and proxy configuration
+remain unchanged.
+
+A single-machine deploy can still leave a brief Fly proxy 502/503/504 or
+connection-refused window while the replacement starts. Watch, TUI and the
+web UI retry quietly with jittered backoff and preserve their durable
+cursor; the web activity feed refetches on `ready`. Watch and the MCP relay
+keep brief outages silent. The first failed attempt at or after 5 s emits
+`vecnet: <name>: hub unreachable for <N>s; reconnecting…` on stderr, once
+per outage; only an announced outage emits
+`vecnet: <name>: reconnected after <N>s` on recovery (`<name>` is `watch`
+or `mcp`, `<N>` is elapsed whole seconds). Monitor stdout stays unchanged;
+the UI shows `reconnecting` without a page reload. MCP subscription hints
+reconnect and trigger durable inbox catch-up; ordinary MCP requests retry
+only when safe and within a three-attempt bound (PROTOCOL section 13.7).
+Ambiguous mutations require caller reconciliation. A disabled peer or
+refused credential still stops retries. Real outages remain visible through
+watch/relay diagnostics after 60 s.
+
 ## Custom domain
 
 The public origin is `https://vecnet.xk.io`, not `vecnet.fly.dev`, so the hub can move host without changing the URL clients, OAuth tokens and `blob_url` links are bound to. Set it up once, before any dot links (2026-11-05):
@@ -59,7 +90,7 @@ The public origin is `https://vecnet.xk.io`, not `vecnet.fly.dev`, so the hub ca
 3. `fly certs check vecnet.xk.io -a vecnet` shows `Issued`.
 4. `fly.toml` sets `VECNET_PUBLIC_URL = "https://vecnet.xk.io"`; `just fly-deploy`.
 
-`VECNET_PUBLIC_URL` is the OAuth issuer and the `/mcp` audience, and a request with any other `Origin` gets 403. So browsers and dots must use the custom domain. The CLI sends no `Origin`, so `vecnet.fly.dev` still works for it, but profiles should use `https://vecnet.xk.io`. To change domain later, follow [A new domain for the same hub](#a-new-domain-for-the-same-hub), then re-link dots: their tokens name the old issuer.
+`VECNET_PUBLIC_URL` is the OAuth issuer and the `/mcp` audience, so clients must use the configured custom domain. A present `/mcp` `Origin` must be that public origin or an allowed extra origin (default `https://chatgpt.com`); any other origin gets 403 before authentication. The CLI sends no `Origin`, so `vecnet.fly.dev` still works for it, but profiles should use `https://vecnet.xk.io`. To change domain later, follow [A new domain for the same hub](#a-new-domain-for-the-same-hub), then re-link dots: their tokens name the old issuer.
 
 ## Public exposure
 
@@ -76,7 +107,9 @@ The hub is invite-only on the open internet: every way in needs a secret the ope
 
 **Public HTTPS is required for dots.** ChatGPT reaches `/mcp`, the OAuth endpoints and the metadata documents over the public internet, and OpenAI's Secure MCP Tunnel is not supported. The hub's custom domain `https://vecnet.xk.io` (served by Fly) is enough. Grok Bots (for `/mcp`) and GitHub webhooks (for `/v1/ingress/…`) need the same public origin.
 
-**`VECNET_PUBLIC_URL` must be that exact origin.** It is more than a link prefix here: it is the OAuth issuer, it sets the `/mcp` token audience, and a request carrying any other `Origin` header gets 403.
+**`VECNET_PUBLIC_URL` must be that exact origin.** It is more than a link prefix here: it is the OAuth issuer, it sets the `/mcp` token audience, and it is always allowed by the `/mcp` Origin guard. Extra origins come from `VECNET_MCP_ALLOWED_ORIGINS` (default `https://chatgpt.com`), independently of issuer and audience. An allowed Origin without credentials still receives the 401 discovery challenge.
+
+**Dot profile and acceptance.** `vecnet_whoami` returns a required stable `id` in structured content: the linked dot's peer id, independent of access-token refresh and display name. Linking another account to that same peer keeps the profile id while revoking the previous account's tokens. The hub still uses built-in OAuth and operator-issued link codes. Live ChatGPT installation and event acceptance remain pending operator work; follow the [dot checklist](connectors/dots.md#live-test-checklist), recording requested/negotiated protocol, whether an Origin was sent, profile identity and confirmation prompts. `fly logs` records allowed foreign origins, including ordinary `/mcp` requests, using the existing sanitized diagnostics.
 
 **`VECNET_ALLOW_PRIVATE_EGRESS` is dev-only.** By default every outbound POST (push routes, notification routes, Events callbacks, Grok Bot routines, CIMD fetches) is https, resolved once to a public unicast address, pinned to it, and never follows a redirect. `--allow-private-egress`, or the variable set to `1`, lets those URLs be http and reach private or loopback addresses so LAN receivers work on xsm. It also lifts the port 443 rule on Events callbacks and CIMD fetches. It removes the hub's protection against being pointed at internal services, so never set it on Fly; `fly.toml` does not.
 
@@ -84,7 +117,7 @@ Connector setup is in [`docs/connectors/`](connectors/): [dots](connectors/dots.
 
 ## Restarts
 
-`just fly-deploy` (Fly stops the old machine with SIGINT) and `systemctl restart` (SIGTERM) both make the hub announce the restart before it shuts down ([PROTOCOL §21.3](PROTOCOL.md#213-restart-frame-and-long-poll-field)). Every open event stream and the operator's activity stream gets one last frame, `event: hub_restarting` with `{"retry_after_ms":5000}`, and a held long-poll answers with a `hub_restarting` field. Clients then wait about that long and reconnect without counting a failure: `vecnet watch` prints `hub_restarting … reconnecting in ~5s`, and the TUI and web UI show "restarting" rather than offline. The hub waits up to 1.25 s for the frames to flush, inside its 10 s shutdown grace, which stays under `fly.toml`'s `kill_timeout = 15`.
+`just fly-deploy` (Fly stops the old machine with SIGINT) and `systemctl restart` (SIGTERM) both make the hub announce the restart before it shuts down ([PROTOCOL §21.3](PROTOCOL.md#213-restart-frame-and-long-poll-field)). Every open event stream and the operator's activity stream gets one last frame, `event: hub_restarting` with `{"retry_after_ms":5000}`, and a held long-poll answers with a `hub_restarting` field. Clients then wait about that long and reconnect without counting a failure. `vecnet watch` and the MCP relay say nothing unless the hub is still away after 5 s (see above); the TUI and web UI show "restarting" rather than reconnecting. The hub waits up to 1.25 s for the frames to flush, then closes MCP streams and shuts down, all inside its 10 s shutdown grace, which stays under `fly.toml`'s `kill_timeout = 15`.
 
 `VECNET_RESTART_RETRY_MS` (or `--restart-retry-ms`, 0–60000) sets the hint. The default 5 s suits Fly, where the new machine is usually serving within a few seconds; raise it for a host that takes longer to come back, so clients do not retry into a dead port.
 

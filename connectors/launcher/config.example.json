@@ -1,0 +1,16 @@
+{
+  "host": "xsm",
+  "hub": { "url": "http://127.0.0.1:8080", "credential_file": "/home/xertrov/.config/vecnet-launcher/credential" },
+  "state_dir": "/home/xertrov/.local/state/vecnet-launcher",
+  "backends": [{ "id": "t3", "module": "./backends/t3/index.ts", "config": {} }],
+  "_disabled_backends": [{ "id": "paseo", "module": "./backends/paseo/index.ts", "config": {} }],
+  "projects": { "vecnet4": { "repo_root": "/home/xertrov/src/vecnet4", "base_ref": "master" } },
+  "limits": { "max_sessions": 6, "max_open_sessions": 24, "max_idle_wrapup_ms": "8h", "max_session_lifetime_ms": "72h", "workspace_retention_ms": "7d" },
+  "policies": { "default": { "backends": ["t3", "paseo"], "permission_modes": ["read-only", "ask", "auto", "full-access"], "projects": ["vecnet4"], "max_sessions": 3, "max_open_sessions": 12, "launches_per_hour": 30 } },
+  "approvals": { "route": "requester", "parent_expires_ms": "15m", "on_parent_expiry": "deny", "operator_expires_ms": "60m", "to_operator": { "presets": ["none"], "categories": [], "requesters": [] } },
+  "relays": {},
+  "questions": { "blocking_timeout_ms": "30m" },
+  "idle": { "park_after_ms": "30m", "settle_opaque_ms": "2h", "settle_observable_ms": "24h", "check_every_ms": "60s", "deadline_margin_ms": "5m" },
+  "presence": { "heartbeat_ms": "5m" },
+  "wake_interrupts": false
+}

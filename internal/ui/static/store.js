@@ -1,4 +1,5 @@
 // Cached views, the event pump and the hub clock. No DOM: covered by node.
+import { retryDelay } from './connection-model.js';
 import { isNoticeEvent, validNotice } from './notice-model.js';
 
 const WAIT = 25, BACKOFF_FIRST = 1000, BACKOFF_MAX = 30000;
@@ -258,8 +259,9 @@ export function createStore({ api, now = Date.now, sleep = waitFor, random = Mat
         // A snapshot that failed while the hub answers events is not the
         // stream going offline: the resource shows its own error. It backs
         // off all the same.
-        if (!unshown) setConn('offline');
-        await sleep(backoff, signal);
+        if (!unshown) setConn('reconnecting');
+        await sleep(retryDelay(backoff, random), signal);
+        // Inside a restart's grace, failures do not grow the backoff.
         backoff = now() < quietUntil ? BACKOFF_FIRST : Math.min(backoff * 2, BACKOFF_MAX);
       }
     }

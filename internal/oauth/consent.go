@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
@@ -66,6 +65,9 @@ func writePage(w http.ResponseWriter, status int, p page, redirectURI string) {
 	if u, err := url.Parse(redirectURI); err == nil && u.Host != "" {
 		formAction += " " + u.Scheme + "://" + u.Host
 	}
+	if p.Code != "" {
+		oauthReason(w, p.Code)
+	}
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Content-Security-Policy", "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action "+formAction)
@@ -75,7 +77,7 @@ func writePage(w http.ResponseWriter, status int, p page, redirectURI string) {
 	h.Set("X-Frame-Options", "DENY")
 	w.WriteHeader(status)
 	if err := consentPage.Execute(w, p); err != nil {
-		slog.Error("oauth: render consent page", "err", err)
+		oauthReason(w, "server_error")
 	}
 }
 
@@ -86,7 +88,6 @@ func deadEnd(w http.ResponseWriter, code, message string) {
 }
 
 func serverError(w http.ResponseWriter, err error) {
-	slog.Error("oauth: authorize", "err", err)
 	writePage(w, http.StatusInternalServerError, page{Code: "server_error", Error: "Something went wrong on the hub."}, "")
 }
 
@@ -202,6 +203,9 @@ func redirectWith(w http.ResponseWriter, r *http.Request, uri string, params map
 		deadEnd(w, "invalid_request", "The redirect address is not valid.")
 		return
 	}
+	if reason := params["error"]; reason != "" {
+		oauthReason(w, reason)
+	}
 	q := u.Query()
 	for k, v := range params {
 		if v != "" {
@@ -240,6 +244,7 @@ func (s *Server) getAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !slices.Contains(c.Redirects, redirectURI) || !s.redirectAllowed(redirectURI) {
+		logRedirectRefused(redirectURI, c.Name, "/oauth/authorize")
 		deadEnd(w, "invalid_request", "This redirect address is not registered for the application.")
 		return
 	}
@@ -264,9 +269,9 @@ func (s *Server) getAuthorize(w http.ResponseWriter, r *http.Request) {
 		refuse("invalid_target")
 		return
 	}
-	if scope == "" {
-		scope = Scope
-	}
+	// Fresh consent grants the complete dot capability set, including when an
+	// older client still asks only for vecnet. Refresh never adds these scopes.
+	scope = AuthorizationScopes
 	sealed, err := s.seal(authRequest{
 		Purpose: purposeRequest, ClientID: clientID, RedirectURI: redirectURI, Scope: scope,
 		Challenge: q.Get("code_challenge"), Resource: s.resource(), State: state,
@@ -281,6 +286,7 @@ func (s *Server) getAuthorize(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
+	oauthReason(w, "consent_required")
 	writePage(w, http.StatusOK, page{
 		ClientName: clientLabel(c), RedirectHost: redirectHost(redirectURI), Request: sealed, NeedCode: p == nil,
 		NewClient: p != nil && !p.approved(clientID),
@@ -350,6 +356,12 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
+	if bound != "" {
+		oauthReason(w, "linked")
+	} else {
+		oauthReason(w, "authorized")
+	}
+	oauthScopes(w, strings.Fields(req.Scope))
 	redirectWith(w, r, req.RedirectURI, map[string]string{"code": code, "state": req.State, "iss": s.Issuer})
 }
 
@@ -399,6 +411,7 @@ func (s *Server) refuseLink(w http.ResponseWriter, r *http.Request, req authRequ
 
 // retryPage is the 400 for a link code that was refused: the same form again.
 func (s *Server) retryPage(w http.ResponseWriter, r *http.Request, req authRequest, sealed string) {
+	oauthReason(w, "link_invalid")
 	s.formPage(w, r, req, sealed, http.StatusBadRequest, "That link code is not valid. Ask your operator for a new one.")
 }
 
@@ -410,6 +423,7 @@ func (s *Server) lockedPage(w http.ResponseWriter, r *http.Request, req authRequ
 	if secs < 1 {
 		secs = 1
 	}
+	oauthReason(w, "link_locked")
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
 	s.formPage(w, r, req, sealed, http.StatusTooManyRequests,
 		"Too many wrong link codes were tried, so every link code was cancelled. Ask your operator for a new one.")

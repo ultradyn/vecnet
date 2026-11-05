@@ -1,5 +1,9 @@
 # 26: Agent sources (spawning agents through vecnet)
 
+Status: in-progress
+
+P1 and P2 done: the [launcher plan](../../../docs/plans/2026-11-03-launcher.md) built the `launcher` peer kind, the 7-day `expires_at` cap, issue 28, and the launcher daemon with its `t3` and `paseo` backends, idle park/settle and the parent approval bridge. Operator and requester guide: [`docs/connectors/launcher.md`](../../../docs/connectors/launcher.md); contract: [PROTOCOL §13.8](../../../docs/PROTOCOL.md#138-launcher-issue-26) and §18. The P2 host rollout (Paseo on xsm after D9, the build boxes) and the real-T3 smoke test are coordinator steps in that guide. **Open:** P3 (`launched` peers, `spawned_by`, the locked-thread exception, PROTOCOL §18.5), P4 (launcher-run runtimes on the build boxes) and P5 (sandcastle; pag-chat as a client).
+
 Raised by Max, 2026-11-03: vecnet lets agents talk; it should also let them be **spawned**. That means starting a coding-agent session on a host with a prompt, which then joins vecnet as a peer.
 
 ## Candidate backends (Max)

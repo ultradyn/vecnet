@@ -23,29 +23,24 @@ func (s *server) opActivity(w http.ResponseWriter, r *http.Request) {
 	defer activeStreams.Add(-1)
 	ctx, stop := context.WithCancel(r.Context())
 	defer stop()
-	if s.Stop != nil {
-		go func() {
-			select {
-			case <-s.Stop:
-				stop()
-			case <-ctx.Done():
-			}
-		}()
-	}
+	// A restart (Drain announcement or shutdown) ends the stream at once,
+	// rather than holding the whole grace period.
+	restart, release := restartSignal(drain, s.Stop)
+	defer release()
+	go func() {
+		select {
+		case <-restart:
+			stop()
+		case <-ctx.Done():
+		}
+	}()
 	token := bearer(r)
 	sub := s.Hub.Activity.Subscribe(ctx)
 	conn := startSSE(w, s.sseStall())
-	defer conn.close()
-	conn.draining = drain.C()
-	// A drain can also interrupt send while the replay queue is full. In
-	// that case the handler exits before reaching its idle select.
-	defer func() {
-		select {
-		case <-conn.draining:
-			conn.finish(restartFrame(drain.RetryAfter()), drainFlush)
-		default:
-		}
-	}()
+	conn.draining = restart
+	// The final frame also covers a restart that interrupts send while the
+	// queue is full, before the handler reaches its idle select.
+	defer conn.closeForRestart(r.Context(), restart, drain.RetryAfter)
 	if !conn.send(ctx, []byte("retry: 3000\n\n")) || !conn.send(ctx, []byte("event: ready\ndata: {}\n\n")) {
 		return
 	}

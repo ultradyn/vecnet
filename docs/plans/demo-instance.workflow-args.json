@@ -1,0 +1,218 @@
+{
+  "runStamp": "20261105T00-demo-instance",
+  "maxFixRounds": 3,
+  "planName": "demo-instance",
+  "plan": "docs/plans/2026-11-05-demo-instance.md",
+  "worktree": "/home/xertrov/src/vecnet4/.worktrees/demo-instance",
+  "branch": "demo-instance",
+  "baseRef": "master",
+  "statusDir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-demo-instance",
+  "taskPrefix": "dm",
+  "startTask": 1,
+  "endTask": 8,
+  "finalReview": true,
+  "openBrowser": false,
+  "solRelay": {
+    "run": "/home/xertrov/src/vecnet4/scripts/wf/sol-run.sh",
+    "wait": "/home/xertrov/src/vecnet4/scripts/wf/sol-wait.sh",
+    "dir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-demo-instance/ccc",
+    "transcripts": "/home/xertrov/.claude/projects/-home-xertrov-src-vecnet4/*/subagents/workflows/*/agent-*.jsonl"
+  },
+  "extraRules": [
+    "All builds, tests, vet, node checks, protocol validation, ISA builds and screenshots run via BB_HOST=x-boss BB_JOBS=2 just bb. This overrides generic workflow rules and final-gate examples that permit local ISA builds or unprefixed build2/validate-protocol. Production CGO_ENABLED=0; race checks only CGO_ENABLED=1 CC=/usr/bin/gcc on x-boss. Go -p 2, Node --test-concurrency=2.",
+    "No attn, no live changes, no capture or secrets access without a separately authorised operator step. Never read secrets/, *.secret, .data/, env files or ~/.config/vecnet. Never touch dev hub 45752 or preview 49575.",
+    "No npm or pnpm install; headless Chromium through scripts/ui/lib.mjs only. Isolated SHOTS_DIR; never open windows.",
+    "Never change connectors/**, internal/opseed/**, real fly.toml or real hub credentials/peers/database. Do not deploy to the real app.",
+    "Public demo uses a dedicated mux; no httpapi.New or NewStack.Run. Default deny unknown routes/methods. No operator bearer in browser and no implicit UI writes.",
+    "Only reviewed actual-session fixtures with digest-bound human approval may launch publicly. Synthetic fixtures are test-only. No automatic export approval or production DB copying.",
+    "Actual website CTA source, fixture approval, Fly organisation/network/quote and DNS are pending publication gates; model/data-policy checks apply only to the unscheduled live-chat follow-up. Report pending accurately; do not invent live acceptance evidence.",
+    "Unconditional code gates use demo-deploy-check --offline and explicit synthetic test paths. Actual approved fixture/network/site-link readiness is a pending publication gate until operator supplied; --public must fail closed without it. Never weaken --public to make the implementation gate green.",
+    "Replay-only first launch: immutable allowlisted display DTO snapshots in memory using existing UI contracts; no hub/DB reconstruction, volume, provider key/client, visitor session, activity SSE or progressive scheduler. live_enabled=false always; chat routes absent. Appendices are unscheduled follow-ups.",
+    "Separate known-asset and API budgets. Measure actual-binary cold-load request counts and enforce documented sizing margins. TestDemoColdLoadProductionLimits uses production quotas, cold cache, no mocked assets; dashboard and generation-reset refetch must succeed. Queue/coalesce dynamic reads and bound Retry-After retries."
+  ],
+  "mergeChecks": [
+    "BB_HOST=x-boss BB_JOBS=2 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
+    "BB_HOST=x-boss BB_JOBS=2 just bb just validate-protocol"
+  ],
+  "gateChecks": [
+    "BB_HOST=x-boss BB_JOBS=2 just bb env CGO_ENABLED=0 go test -p 2 ./...",
+    "BB_HOST=x-boss BB_JOBS=2 just bb env CGO_ENABLED=0 go vet ./...",
+    "BB_HOST=x-boss BB_JOBS=2 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/ scripts/demo-deploy-check.test.mjs",
+    "BB_HOST=x-boss BB_JOBS=2 just bb just validate-protocol",
+    "BB_HOST=x-boss BB_JOBS=2 just bb build2 node scripts/ui/demo.mjs",
+    "BB_HOST=x-boss BB_JOBS=2 just bb just demo-deploy-check --offline",
+    "git diff master...HEAD -- fly.toml internal/opseed/ connectors/ must be empty",
+    "Receipt must explicitly distinguish tested preview from pending human capture approval, infrastructure and external CTA edit."
+  ],
+  "lensFocus": {
+    "spec": "Check the eight launch tasks: isolated Fly app/network, anonymous all-view access, approved actual-session fixture, constant timestamp shift, immutable in-memory UI contracts, no runtime model spend. Chat and progressive replay appendices are excluded from scheduling and launch prerequisites.",
+    "security": "Attack default-deny mux, DTO/export leaks, arbitrary URLs/browser media, unknown asset/API abuse, memory bounds and generation mixing. Prove no authority, hub credentials/store reconstruction, provider client/chat routes or persistent volume. Preserve real auth and network isolation.",
+    "tests": "Each named test fails before implementation and proves behaviour; guard normal hub auth. All commands through BB_HOST=x-boss BB_JOBS=2 just bb, fakes only, temp roots, no local builds. Browser journey catches hidden writes, remote loads and false live labels. Measure cold-load assets/API reads and test unchanged production limits, all dashboard reads and reset refetch against actual binary; no mocked assets. Verify snapshot contracts and old-generation cursor rejection."
+  },
+  "extraLenses": [
+    {
+      "key": "design",
+      "title": "Demo disclosure and read-only interaction",
+      "taste": true,
+      "focus": "Review desktop/mobile dm screenshots: persistent original capture/model/time-shift disclosure, Replay snapshot label/reset time, disabled controls explained, accessible focus, no misleading live status or remote assets."
+    }
+  ],
+  "runner": "BB_HOST=x-boss BB_JOBS=2 CGO_ENABLED=0 just bb ",
+  "deps": {
+    "1": [],
+    "2": [
+      1
+    ],
+    "3": [
+      1
+    ],
+    "4": [
+      1,
+      3
+    ],
+    "5": [
+      4,
+      6
+    ],
+    "6": [
+      3,
+      4
+    ],
+    "7": [
+      2,
+      5,
+      6
+    ],
+    "8": [
+      2,
+      5,
+      7
+    ]
+  },
+  "tasks": [
+    {
+      "title": "Versioned fixture and provenance contract",
+      "refs": "Public demo plan; Global Constraints; Review Focus; PROTOCOL \u00a7\u00a72.12\u20132.13, 12, 14, 20",
+      "race": false,
+      "suite": "./internal/demofixture/",
+      "route": "sol",
+      "checks": [],
+      "hazards": [
+        "Follow only this task Files and Interfaces; shared files change in declared order.",
+        "No live capture/deploy/provider calls; tests use disposable approved-or-synthetic test fixtures and fake transports.",
+        "A real human-approved fixture and actual site edit are publication gates; do not claim them from synthetic tests."
+      ]
+    },
+    {
+      "title": "Offline session exporter and publication review",
+      "refs": "Public demo plan; Global Constraints; Review Focus; PROTOCOL \u00a7\u00a72.12\u20132.13, 12, 14, 20",
+      "race": false,
+      "suite": "./cmd/vecnet-demo-export/ ./internal/demofixture/",
+      "route": "sol",
+      "checks": [],
+      "hazards": [
+        "Follow only this task Files and Interfaces; shared files change in declared order.",
+        "No live capture/deploy/provider calls; tests use disposable approved-or-synthetic test fixtures and fake transports.",
+        "A real human-approved fixture and actual site edit are publication gates; do not claim them from synthetic tests."
+      ]
+    },
+    {
+      "title": "Immutable snapshot reader and timestamp shift",
+      "refs": "Public demo plan; Global Constraints; Review Focus; PROTOCOL \u00a7\u00a72.12\u20132.13, 12, 14, 20",
+      "race": false,
+      "suite": "./internal/demoreplay/",
+      "route": "sol",
+      "checks": [],
+      "hazards": [
+        "Follow only this task Files and Interfaces; shared files change in declared order.",
+        "No live capture/deploy/provider calls; tests use disposable approved-or-synthetic test fixtures and fake transports.",
+        "A real human-approved fixture and actual site edit are publication gates; do not claim them from synthetic tests."
+      ]
+    },
+    {
+      "title": "Anonymous read-only demo server boundary",
+      "refs": "Public demo plan; Global Constraints; Review Focus; PROTOCOL \u00a7\u00a72.12\u20132.13, 12, 14, 20",
+      "race": false,
+      "suite": "./internal/demoserver/ ./internal/httpapi/",
+      "route": "sol",
+      "checks": [],
+      "hazards": [
+        "Follow only this task Files and Interfaces; shared files change in declared order.",
+        "No live capture/deploy/provider calls; tests use disposable approved-or-synthetic test fixtures and fake transports.",
+        "A real human-approved fixture and actual site edit are publication gates; do not claim them from synthetic tests."
+      ]
+    },
+    {
+      "title": "Demo UI adapter, disclosure and visual journey",
+      "refs": "Public demo plan; Global Constraints; Review Focus; PROTOCOL \u00a7\u00a72.12\u20132.13, 12, 14, 20",
+      "race": false,
+      "suite": "./internal/ui/...",
+      "route": "opus",
+      "checks": [
+        "BB_HOST=x-boss BB_JOBS=2 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
+        "BB_HOST=x-boss BB_JOBS=2 just bb build2 node scripts/ui/demo.mjs"
+      ],
+      "hazards": [
+        "Follow only this task Files and Interfaces; shared files change in declared order.",
+        "No live capture/deploy/provider calls; tests use disposable approved-or-synthetic test fixtures and fake transports.",
+        "A real human-approved fixture and actual site edit are publication gates; do not claim them from synthetic tests."
+      ],
+      "shots": "dm",
+      "reviewChecks": [
+        "BB_HOST=x-boss BB_JOBS=2 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
+        "BB_HOST=x-boss BB_JOBS=2 just bb env SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-demo-instance/review-shots/05 build2 node scripts/ui/demo.mjs"
+      ]
+    },
+    {
+      "title": "Isolated runtime, reset lifecycle and no-egress preview",
+      "refs": "Public demo plan; Global Constraints; Review Focus; PROTOCOL \u00a7\u00a72.12\u20132.13, 12, 14, 20",
+      "race": true,
+      "suite": "./internal/demoruntime/ ./internal/demoserver/ ./cmd/vecnet-demo/",
+      "route": "sol",
+      "checks": [],
+      "hazards": [
+        "Follow only this task Files and Interfaces; shared files change in declared order.",
+        "No live capture/deploy/provider calls; tests use disposable approved-or-synthetic test fixtures and fake transports.",
+        "A real human-approved fixture and actual site edit are publication gates; do not claim them from synthetic tests."
+      ]
+    },
+    {
+      "title": "Separate Fly packaging and deployment runbook",
+      "refs": "Public demo plan; Global Constraints; Review Focus; PROTOCOL \u00a7\u00a72.12\u20132.13, 12, 14, 20",
+      "race": false,
+      "suite": "./cmd/vecnet-demo/ ./internal/demoruntime/",
+      "route": "sol",
+      "checks": [
+        "BB_HOST=x-boss BB_JOBS=2 just bb build2 node --test --test-concurrency=2 scripts/demo-deploy-check.test.mjs",
+        "BB_HOST=x-boss BB_JOBS=2 just bb just demo-deploy-check --offline"
+      ],
+      "hazards": [
+        "Follow only this task Files and Interfaces; shared files change in declared order.",
+        "No live capture/deploy/provider calls; tests use disposable approved-or-synthetic test fixtures and fake transports.",
+        "A real human-approved fixture and actual site edit are publication gates; do not claim them from synthetic tests."
+      ]
+    },
+    {
+      "title": "Documentation, CTA handoff and full acceptance gate",
+      "refs": "Public demo plan; Global Constraints; Review Focus; PROTOCOL \u00a7\u00a72.12\u20132.13, 12, 14, 20",
+      "race": false,
+      "suite": "./...",
+      "route": "opus",
+      "checks": [
+        "BB_HOST=x-boss BB_JOBS=2 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/ scripts/demo-deploy-check.test.mjs",
+        "BB_HOST=x-boss BB_JOBS=2 just bb just validate-protocol",
+        "BB_HOST=x-boss BB_JOBS=2 just bb build2 node scripts/ui/demo.mjs"
+      ],
+      "hazards": [
+        "Follow only this task Files and Interfaces; shared files change in declared order.",
+        "No live capture/deploy/provider calls; tests use disposable approved-or-synthetic test fixtures and fake transports.",
+        "A real human-approved fixture and actual site edit are publication gates; do not claim them from synthetic tests."
+      ],
+      "shots": "dm",
+      "reviewChecks": [
+        "BB_HOST=x-boss BB_JOBS=2 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
+        "BB_HOST=x-boss BB_JOBS=2 just bb env SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-demo-instance/review-shots/08 build2 node scripts/ui/demo.mjs"
+      ]
+    }
+  ]
+}

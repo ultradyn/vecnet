@@ -97,14 +97,23 @@ await check('authorization-server metadata', async () => {
 });
 await check('server/discover', async () => {
   const result = await rpc('server/discover');
-  requireCheck(object(result.capabilities?.events) && result.resultType === 'complete');
+  requireCheck(object(result.capabilities?.events) && object(result.capabilities?.prompts) && result.resultType === 'complete');
+  requireCheck(result.instructions?.includes('vecnet_guide'));
 });
 await check('initialize older revision', async () => {
   const result = await rpc('initialize', {
     protocolVersion: '2025-03-26', capabilities: {},
     clientInfo: { name: 'vecnet-mcp-conformance', version: '1' },
   }, { legacy: true });
+  // March requires JSON-RPC batch reception; this server negotiates fallback.
   requireCheck(result.protocolVersion === '2025-11-25');
+});
+await check('initialize supported older revision', async () => {
+  const result = await rpc('initialize', {
+    protocolVersion: '2025-06-18', capabilities: {},
+    clientInfo: { name: 'vecnet-mcp-conformance', version: '1' },
+  }, { legacy: true });
+  requireCheck(result.protocolVersion === '2025-06-18');
 });
 await check('tools/list', async () => {
   const result = await rpc('tools/list');
@@ -112,12 +121,37 @@ await check('tools/list', async () => {
   requireCheck(result.tools.every(tool => Array.isArray(tool.securitySchemes) && tool.securitySchemes.length > 0));
   const whoami = result.tools.find(tool => tool.name === 'vecnet_whoami');
   requireCheck(whoami?._meta?.['openai/profile'] === true);
+  const guide = result.tools.find(tool => tool.name === 'vecnet_guide');
+  requireCheck(guide?.annotations?.readOnlyHint === true && guide.annotations.openWorldHint === false);
+  requireCheck(object(guide.outputSchema));
+  const subscriptions = result.tools.find(tool => tool.name === 'vecnet_subscriptions');
+  requireCheck(subscriptions?.annotations?.readOnlyHint === true && object(subscriptions.inputSchema));
+});
+await check('setup guide and prompt', async () => {
+  const guide = await rpc('tools/call', { name: 'vecnet_guide' });
+  requireCheck(guide.isError !== true && guide.structuredContent?.topic === 'start');
+  requireCheck(guide.content?.[0]?.type === 'text' && guide.content[0].text === guide.structuredContent.text);
+  const prompts = await rpc('prompts/list');
+  requireCheck(prompts.prompts?.some(prompt => prompt.name === 'vecnet_setup'));
+  const prompt = await rpc('prompts/get', { name: 'vecnet_setup' });
+  requireCheck(prompt.messages?.[0]?.role === 'user'
+    && prompt.messages[0].content?.text === guide.structuredContent.text);
 });
 await check('events/list', async () => {
   const result = await rpc('events/list');
   requireCheck(Array.isArray(result.events));
   const event = result.events.find(event => event.name === 'vecnet.message');
   requireCheck(Array.isArray(event?.delivery) && event.delivery.length === 1 && event.delivery[0] === 'webhook');
+  const simple = value => !object(value) && !Array.isArray(value) ||
+    Object.entries(value).every(([key, child]) => !['$ref', '$defs', 'anyOf', 'oneOf', 'allOf'].includes(key) && simple(child));
+  requireCheck(simple(event));
+});
+await check('subscription status', async () => {
+  const result = await rpc('tools/call', { name: 'vecnet_subscriptions' });
+  requireCheck(result.isError !== true && Array.isArray(result.structuredContent?.subscriptions));
+  for (const sub of result.structuredContent.subscriptions) {
+    requireCheck(typeof sub.callback_host === 'string' && !('url' in sub) && !('secret' in sub));
+  }
 });
 await check('invalid Origin', async () => {
   // Skip after a rejected bearer so a broken Origin guard cannot spend a
