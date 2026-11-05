@@ -29,12 +29,13 @@ import (
 )
 
 type observation struct {
-	Name   string `json:"name"`
-	At     string `json:"at"`
-	Status string `json:"status"`
-	HTTP   int    `json:"http,omitempty"`
-	Code   string `json:"provider_code,omitempty"`
-	Note   string `json:"note,omitempty"`
+	Name      string `json:"name"`
+	At        string `json:"at"`
+	Status    string `json:"status"`
+	HTTP      int    `json:"http,omitempty"`
+	Code      string `json:"provider_code,omitempty"`
+	Transport string `json:"transport,omitempty"`
+	Note      string `json:"note,omitempty"`
 }
 type report struct {
 	Started      string            `json:"started"`
@@ -44,12 +45,14 @@ type report struct {
 	Gates        map[string]string `json:"gates"`
 	Observations []observation     `json:"observations"`
 	Fixtures     []string          `json:"retained_fixtures"`
+	Followups    []report          `json:"followups,omitempty"`
 }
 type response struct {
-	status  int
-	code    string
-	headers http.Header
-	body    []byte
+	status    int
+	code      string
+	transport string
+	headers   http.Header
+	body      []byte
 }
 type runner struct {
 	c                     credential
@@ -59,6 +62,7 @@ type runner struct {
 	keep                  map[string]bool
 	expPrefix, keepPrefix string
 	lastPut               time.Time
+	baseline              *report
 }
 
 var netDialer = net.Dialer{Timeout: 10 * time.Second}
@@ -78,8 +82,11 @@ func main() {
 		os.Exit(2)
 	}
 	replacePrevious := false
+	followup := false
 	if len(os.Args) == 2 && os.Args[1] == "--replace-previous-fixtures" {
 		replacePrevious = true
+	} else if len(os.Args) == 2 && os.Args[1] == "--cors-browser-followup" {
+		followup = true
 	} else if len(os.Args) != 1 {
 		fmt.Fprintln(os.Stderr, "unknown spike arguments")
 		os.Exit(2)
@@ -97,10 +104,18 @@ func main() {
 	runID := time.Now().UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(id[:])
 	r := &runner{c: c, client: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &http.Transport{Proxy: nil, ForceAttemptHTTP2: false}}, keys: map[string]bool{}, keep: map[string]bool{}, expPrefix: "attachments/v1/exp/1h/spike-" + runID + "/", keepPrefix: "attachments/v1/keep/spike-" + runID + "/"}
 	r.report = report{Started: stamp(), RunID: runID, Profile: "STOP", Gates: map[string]string{}}
+	if followup && !r.loadBaseline() {
+		fmt.Fprintln(os.Stderr, "completed baseline receipt rejected; no network access attempted")
+		os.Exit(2)
+	}
 	if replacePrevious && !r.replacePreviousFixtures() {
 		os.Exit(2)
 	}
-	r.run()
+	if followup {
+		r.runFollowup()
+	} else {
+		r.run()
+	}
 	r.report.Finished = stamp()
 	r.save()
 	fmt.Printf("spike finished; selected_checksum_profile=%s; sanitized receipt=%s\n", r.report.Profile, reportPath)
@@ -112,7 +127,7 @@ func main() {
 }
 func stamp() string { return time.Now().UTC().Format(time.RFC3339) }
 func (r *runner) save() {
-	b, err := json.MarshalIndent(r.report, "", "  ")
+	b, err := json.MarshalIndent(r.combinedReport(), "", "  ")
 	if err != nil {
 		return
 	}
@@ -129,9 +144,9 @@ func (r *runner) record(name string, ok bool, x response, note string) bool {
 		status = "PASS"
 	}
 	r.report.Gates[name] = status
-	r.report.Observations = append(r.report.Observations, observation{name, stamp(), status, x.status, x.code, note})
+	r.report.Observations = append(r.report.Observations, observation{Name: name, At: stamp(), Status: status, HTTP: x.status, Code: x.code, Transport: x.transport, Note: note})
 	r.save()
-	fmt.Printf("%s %s http=%d code=%s\n", name, status, x.status, x.code)
+	fmt.Printf("%s %s http=%d code=%s transport=%s\n", name, status, x.status, x.code, x.transport)
 	return ok
 }
 func (r *runner) outstanding(name, note string) {
@@ -304,6 +319,15 @@ func (r *runner) raw(u string, h http.Header, b []byte, omitLength, chunked bool
 		conn.CloseWrite()
 	}
 	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "PUT"})
+	if err != nil {
+		code := "RawReadFailure"
+		if os.IsTimeout(err) {
+			code = "RawReadTimeout"
+		} else if err == io.EOF || err == io.ErrUnexpectedEOF {
+			code = "RawPeerClosed"
+		}
+		return response{transport: code}
+	}
 	return readResponse(resp, err)
 }
 func (r *runner) bindings(profile string, b []byte) bool {
@@ -446,7 +470,7 @@ func (r *runner) cors(profile, key string) {
 	h := http.Header{}
 	h.Set("Origin", "https://disallowed.invalid")
 	h.Set("Access-Control-Request-Method", "PUT")
-	h.Set("Access-Control-Request-Headers", headers)
+	h.Set("Access-Control-Request-Headers", full)
 	x := r.call("OPTIONS", u, h, nil)
 	r.record("cors_disallowed_origin", x.status > 0 && x.headers.Get("Access-Control-Allow-Origin") == "", x, "raw OPTIONS cannot establish browser enforcement")
 	get, _, _ := presign(r.c, "GET", key, nil, time.Now(), 600, nil)
@@ -455,7 +479,10 @@ func (r *runner) cors(profile, key string) {
 	x = r.call("GET", get, h, nil)
 	exposed := x.headers.Get("Access-Control-Expose-Headers")
 	r.record("cors_get_exposure", success(x) && x.headers.Get("Access-Control-Allow-Origin") == "https://vecnet.xk.io" && containsHeader(exposed, "etag") && containsHeader(exposed, "content-length") && containsHeader(exposed, "x-amz-checksum-sha256"), x, "ETag/length/checksum exposure checked")
-	r.record("cors_range_exposure", containsHeader(exposed, "content-range") && containsHeader(exposed, "accept-ranges"), x, "required range response headers exposed")
+	h.Set("Range", "bytes=0-5")
+	x = r.call("GET", get, h, nil)
+	exposed = x.headers.Get("Access-Control-Expose-Headers")
+	r.record("cors_range_exposure", x.status == 206 && x.headers.Get("Content-Range") != "" && x.headers.Get("Accept-Ranges") == "bytes" && containsHeader(exposed, "content-range") && containsHeader(exposed, "accept-ranges"), x, "actual Range 206 exposes Content-Range and Accept-Ranges")
 }
 func containsHeader(list, value string) bool {
 	for _, s := range strings.Split(list, ",") {
