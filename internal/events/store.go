@@ -472,25 +472,32 @@ func (st *Store) MarkVerifiedAt(ctx context.Context, id string, verified time.Ti
 //
 // clientHas says the client named cur as the position it holds, which wins
 // (ChatGPT passes its last saved cursor): undelivered rows at or before it go
-// too. Hub-reported cursors never pass an undelivered row (ReplayCursor), so
-// such a row is one the client got and the hub did not hear about. Without
-// clientHas, as when a purged cursor is replaced, those rows stay queued.
+// too, except copies at/below the owner floor. ReplayCursor must clamp to
+// that floor even when an outstanding copy survives a purge, so echoing it
+// does not prove callback acceptance. Without clientHas, as when a purged
+// cursor is replaced, undelivered rows stay queued.
 func (st *Store) SetCursor(ctx context.Context, id string, cur eventlog.Cursor, clientHas bool) error {
 	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		var floor int64
+		if err := tx.QueryRowContext(ctx, `SELECT coalesce((SELECT r.purged_through_seq
+			FROM event_subscriptions s JOIN event_retention r ON r.owner=s.peer_id WHERE s.sub_id=?),0)`, id).Scan(&floor); err != nil {
+			return fmt.Errorf("events: rewind floor: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM event_outbox WHERE sub_id = ?1 AND (
-			   (seq > ?2 AND done_at IS NOT NULL AND NOT `+neverRetried+` AND coalesce(terminal,'') != 'exhausted') OR (?3 AND seq <= ?2 AND `+undelivered+`))`,
-			id, cur.Seq, clientHas); err != nil {
+			   (seq > ?2 AND done_at IS NOT NULL AND NOT `+neverRetried+` AND coalesce(terminal,'') != 'exhausted') OR (?3 AND seq <= ?2 AND seq > ?4 AND `+undelivered+`))`,
+			id, cur.Seq, clientHas, floor); err != nil {
 			return fmt.Errorf("events: rewind outbox: %w", err)
 		}
 		// Exhaustion is retryable on explicit resubscription. Parked rows must
 		// rearm even behind the reported cursor; their delivery gate still applies.
+		// Copies surviving at/below the floor also need explicit rearming.
 		// Reuse the durable body:
 		// a legacy callback may differ from the current hydrated log event.
 		// Older erased bodies cannot be reconstructed with proof of equality.
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE event_outbox SET done_at=NULL, terminal=NULL, attempts=0, next_attempt_at=NULL
-			 WHERE sub_id=? AND (seq>? OR parked=1) AND terminal='exhausted' AND body!=''`, id, cur.Seq); err != nil {
+			 WHERE sub_id=? AND (seq>? OR seq<=? OR parked=1) AND terminal='exhausted' AND body!=''`, id, cur.Seq, floor); err != nil {
 			return fmt.Errorf("events: rearm outbox: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -773,14 +780,20 @@ type outboxRow struct {
 
 // enqueue inserts rows and advances the cursor from `from` to `to` in one
 // transaction. A cursor no longer at `from` means a refresh moved it during
-// the read: the batch is stale, and nothing is written.
+// the read: the batch is stale, and nothing is written. Recheck liveness and
+// the owner floor in the same writer transaction: a pause can release the
+// subscription's retention pin while tail still holds a buffered log page.
 func (st *Store) enqueue(ctx context.Context, id string, from, to eventlog.Cursor, rows []outboxRow, now time.Time) error {
 	nowS := envelope.FormatTime(now)
 	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE event_subscriptions SET cursor_epoch = ?, cursor_seq = ?, updated_at = ?
-			 WHERE sub_id = ? AND cursor_epoch = ? AND cursor_seq = ?`,
-			to.Epoch, to.Seq, nowS, id, from.Epoch, from.Seq)
+			 WHERE sub_id = ? AND cursor_epoch = ? AND cursor_seq = ?
+			 AND paused_reason IS NULL AND verified_at IS NOT NULL
+			 AND (expires_at IS NULL OR expires_at > ?)
+			 AND (token_expires_at IS NULL OR token_expires_at > ?)
+			 AND cursor_seq >= coalesce((SELECT purged_through_seq FROM event_retention WHERE owner=event_subscriptions.peer_id),0)`,
+			to.Epoch, to.Seq, nowS, id, from.Epoch, from.Seq, nowS, nowS)
 		if err != nil {
 			return fmt.Errorf("events: advance cursor: %w", err)
 		}

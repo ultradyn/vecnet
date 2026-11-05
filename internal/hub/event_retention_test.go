@@ -264,13 +264,27 @@ func TestRetentionArchiveSuppressesHardExpiryButNotAcknowledged(t *testing.T) {
 	cfg := hub.DefaultConfig()
 	cfg.UnackedEventRetention = 30 * 24 * time.Hour
 	h, _, clock := preferencesHubClock(t, cfg)
-	retentionConfirm(t, h, prefs.Patch{Set: map[string]prefs.Value{"retention.archive_mode": prefs.Bool(true)}})
-	a := retentionEvent(t, h, "peer_ack", clock.Now().Add(-40*24*time.Hour))
-	retentionEvent(t, h, "peer_unacked", clock.Now().Add(-40*24*time.Hour))
+	// Authorize hard30d through the shared service first. Create candidates
+	// after activation so neither pending approval nor prior-row bounds can
+	// independently protect the archive fixture.
+	retentionConfirm(t, h, prefs.Patch{Set: map[string]prefs.Value{"retention.archive_mode": prefs.Bool(false)}, ApplyExisting: true})
+	aged := clock.Now().Add(-40 * 24 * time.Hour)
+	control := retentionEvent(t, h, "peer_control", aged)
+	retentionRun(t, h)
+	retentionFloor(t, h, "peer_control", control.Seq)
+	a := retentionEvent(t, h, "peer_ack", aged)
+	u := retentionEvent(t, h, "peer_unacked", aged)
 	retentionAck(t, h, "peer_ack", "*", a)
+	retentionConfirm(t, h, prefs.Patch{Set: map[string]prefs.Value{"retention.archive_mode": prefs.Bool(true)}})
 	retentionRun(t, h)
 	retentionFloor(t, h, "peer_ack", a.Seq)
 	retentionFloor(t, h, "peer_unacked", 0)
+	// Leaving archive confirms that the exact preserved prefix is otherwise
+	// eligible once the newly approved nightly activation becomes effective.
+	retentionConfirm(t, h, prefs.Patch{Set: map[string]prefs.Value{"retention.archive_mode": prefs.Bool(false)}, ApplyExisting: true})
+	clock.Advance(24 * time.Hour)
+	retentionRun(t, h)
+	retentionFloor(t, h, "peer_unacked", u.Seq)
 }
 func TestRetentionPurgeAckAndReadRace(t *testing.T) {
 	for _, boundary := range []string{"floor", "events", "hydration"} {
