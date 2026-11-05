@@ -373,7 +373,9 @@ func (h *Hub) BackfillDeliverySlice(ctx context.Context, limits BackfillLimits) 
 	query := `SELECT e.seq,e.data FROM events e WHERE e.seq>? AND e.seq<=? AND e.type='delivery' AND e.payload_format='inline' ORDER BY e.seq LIMIT ?`
 	if limits.RescanExceptions {
 		lower, upper = out.RescanLastSeq, out.RescanHighSeq
-		query = `SELECT e.seq,e.data FROM delivery_backfill_exceptions x JOIN events e ON e.seq=x.seq WHERE x.seq>? AND x.seq<=? AND e.type='delivery' AND e.payload_format='inline' ORDER BY x.seq LIMIT ?`
+		// Bound examined exception keys before fetching events. Exceptions survive
+		// pruning, so limiting eligible join results would not bound this scan.
+		query = `SELECT seq FROM delivery_backfill_exceptions WHERE seq>? AND seq<=? ORDER BY seq LIMIT ?`
 	}
 	rows, e := tx.QueryContext(ctx, query, lower, upper, limits.Rows)
 	if e != nil {
@@ -387,7 +389,12 @@ func (h *Hub) BackfillDeliverySlice(ctx context.Context, limits BackfillLimits) 
 	var selectedBytes int64
 	for rows.Next() {
 		var r row
-		if e = rows.Scan(&r.seq, &r.data); e != nil {
+		if limits.RescanExceptions {
+			e = rows.Scan(&r.seq)
+		} else {
+			e = rows.Scan(&r.seq, &r.data)
+		}
+		if e != nil {
 			rows.Close()
 			return out, e
 		}
@@ -408,12 +415,27 @@ func (h *Hub) BackfillDeliverySlice(ctx context.Context, limits BackfillLimits) 
 	if closeErr != nil {
 		return out, closeErr
 	}
-	for _, r := range candidates {
-		if out.Processed > 0 && h.Now().Sub(start) >= limits.Target {
+	for i, r := range candidates {
+		if i > 0 && (h.Now().Sub(start) >= limits.Target || out.SourceBytes >= limits.Bytes) {
 			break
 		}
 		if err = ctx.Err(); err != nil {
 			return out, err
+		}
+		if limits.RescanExceptions {
+			e := tx.QueryRowContext(ctx, `SELECT data FROM events WHERE seq=? AND type='delivery' AND payload_format='inline'`, r.seq).Scan(&r.data)
+			if errors.Is(e, sql.ErrNoRows) {
+				// Keep diagnostics for missing/ineligible events, but checkpoint the
+				// examined key so it cannot stall or bypass the bounded rescan.
+				out.RescanLastSeq = r.seq
+				continue
+			}
+			if e != nil {
+				return out, e
+			}
+			if out.Processed > 0 && int64(len(r.data)) > limits.Bytes-out.SourceBytes {
+				break
+			}
 		}
 		var wire struct {
 			Message struct {
@@ -538,7 +560,7 @@ func (h *Hub) BackfillDeliverySlice(ctx context.Context, limits BackfillLimits) 
 	}
 	var remaining bool
 	if limits.RescanExceptions {
-		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_backfill_exceptions x JOIN events e ON e.seq=x.seq WHERE x.seq>? AND x.seq<=? AND e.type='delivery' AND e.payload_format='inline')`, out.RescanLastSeq, out.RescanHighSeq).Scan(&remaining)
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_backfill_exceptions WHERE seq>? AND seq<=?)`, out.RescanLastSeq, out.RescanHighSeq).Scan(&remaining)
 	} else {
 		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE seq>? AND seq<=? AND type='delivery' AND payload_format='inline')`, out.LastSeq, out.HighSeq).Scan(&remaining)
 	}
