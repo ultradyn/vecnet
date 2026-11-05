@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base64"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -14,11 +14,14 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/store"
 )
 
 const r2TestNamespace = "0123456789abcdef0123456789abcdef"
@@ -38,7 +41,7 @@ func r2TestObject(t *testing.T, class string) R2Object {
 	if err != nil {
 		t.Fatal("fixture retention invalid")
 	}
-	return R2Object{BlobID: "blo_00000000000000000000000001", Backend: "r2", ObjectKey: key, SHA256: hex.EncodeToString(digest[:]), Size: 7, IssuedAt: r2VectorNow, UploadDeadline: r2VectorNow.Add(R2UploadTTL), RetentionClass: class, ExpiresAt: expiry, ChecksumProfile: "sha256", ExpectedChecksum: base64.StdEncoding.EncodeToString(digest[:]), State: "pending"}
+	return R2Object{BlobID: "blo_00000000000000000000000001", Backend: "r2", ObjectKey: key, SHA256: hex.EncodeToString(digest[:]), Size: 7, IssuedAt: r2VectorNow, UploadDeadline: r2VectorNow.Add(R2UploadTTL), RetentionClass: class, ExpiresAt: expiry, ChecksumProfile: "sha256", ExpectedChecksum: hex.EncodeToString(digest[:]), State: "pending"}
 }
 
 func r2ProofHeaders() http.Header {
@@ -65,6 +68,157 @@ func r2TestAdapter(t *testing.T, object *R2Object, now *time.Time, handler http.
 		t.Fatal("adapter construction failed")
 	}
 	return adapter, server
+}
+
+// Exercise the actual migration contract, rather than an in-memory grant with
+// a checksum representation that SQLite cannot store. The S3 server is fake;
+// these checks are not provider acceptance.
+func TestR2HeadDownloadPersistedGrant(t *testing.T) {
+	for _, class := range []string{"1h", "keep"} {
+		for _, provider := range []bool{true, false} {
+			t.Run(class+"/provider_"+strconv.FormatBool(provider), func(t *testing.T) {
+				ctx := context.Background()
+				db, err := store.Open(filepath.Join(t.TempDir(), "r2.db"))
+				if err != nil {
+					t.Fatal("temporary database setup failed")
+				}
+				defer db.Close()
+				object := r2TestObject(t, class)
+				now := r2VectorNow
+				pref := class
+				if class == "keep" {
+					pref = "off"
+				}
+				var expiry any
+				if object.ExpiresAt != nil {
+					expiry = object.ExpiresAt.Format(time.RFC3339Nano)
+				}
+				_, err = db.ExecContext(ctx, `INSERT INTO blob_objects
+					(blob_id,sha256,object_key,uploader,size,media_type,issued_at,upload_deadline,
+					retention_class,expiry_pref_value,expiry_pref_source,expiry_pref_revision,
+					expires_at,checksum_profile,expected_checksum,state)
+					VALUES(?,?,?,'synthetic-uploader',?,'text/plain',?,?,?,?,'default',0,?,'sha256',?,'pending')`,
+					object.BlobID, object.SHA256, object.ObjectKey, object.Size,
+					object.IssuedAt.Format(time.RFC3339Nano), object.UploadDeadline.Format(time.RFC3339Nano),
+					class, pref, expiry, object.SHA256)
+				if err != nil {
+					t.Fatal("schema-valid pending grant insert failed")
+				}
+				lookup := func(ctx context.Context, key string) (R2Object, error) {
+					var got R2Object
+					var issued, deadline string
+					var expires, attach, verified, purged, deleted sql.NullString
+					var algorithm, digest, etag sql.NullString
+					var size sql.NullInt64
+					err := db.QueryRowContext(ctx, `SELECT blob_id,sha256,backend,object_key,uploader,size,
+						media_type,issued_at,upload_deadline,retention_class,expiry_pref_value,
+						expiry_pref_source,expiry_pref_revision,expires_at,first_attach_deadline,
+						checksum_profile,expected_checksum,state,sha256_verified,verified_algorithm,
+						verified_digest,verified_size,etag,verified_at,purged_at,deletion_confirmed_at,
+						storage_charge_state FROM blob_objects WHERE object_key=?`, key).Scan(
+						&got.BlobID, &got.SHA256, &got.Backend, &got.ObjectKey, &got.Uploader, &got.Size,
+						&got.MediaType, &issued, &deadline, &got.RetentionClass, &got.ExpiryPrefValue,
+						&got.ExpiryPrefSource, &got.ExpiryPrefRevision, &expires, &attach,
+						&got.ChecksumProfile, &got.ExpectedChecksum, &got.State, &got.SHA256Verified,
+						&algorithm, &digest, &size, &etag, &verified, &purged, &deleted, &got.StorageChargeState)
+					if err != nil {
+						return R2Object{}, err
+					}
+					if got.IssuedAt, err = time.Parse(time.RFC3339Nano, issued); err != nil {
+						return R2Object{}, err
+					}
+					if got.UploadDeadline, err = time.Parse(time.RFC3339Nano, deadline); err != nil {
+						return R2Object{}, err
+					}
+					for _, item := range []struct {
+						value  sql.NullString
+						target **time.Time
+					}{
+						{expires, &got.ExpiresAt}, {attach, &got.FirstAttachDeadline},
+						{verified, &got.VerifiedAt}, {purged, &got.PurgedAt}, {deleted, &got.DeletionConfirmedAt},
+					} {
+						if item.value.Valid {
+							parsed, err := time.Parse(time.RFC3339Nano, item.value.String)
+							if err != nil {
+								return R2Object{}, err
+							}
+							*item.target = &parsed
+						}
+					}
+					got.VerifiedAlgorithm, got.VerifiedDigest, got.ETag = algorithm.String, digest.String, etag.String
+					if size.Valid {
+						got.VerifiedSize = &size.Int64
+					}
+					return got, nil
+				}
+				heads, deletes, gets := 0, 0, 0
+				adapter, _ := r2TestAdapter(t, &object, &now, func(w http.ResponseWriter, r *http.Request) {
+					switch r.Method {
+					case http.MethodHead:
+						heads++
+						for k, vs := range r2ProofHeaders() {
+							for _, v := range vs {
+								w.Header().Add(k, v)
+							}
+						}
+						if !provider {
+							w.Header().Del("X-Amz-Checksum-Sha256")
+						}
+					case http.MethodDelete:
+						deletes++
+						if deletes == 1 {
+							w.WriteHeader(http.StatusNoContent)
+						} else {
+							w.WriteHeader(http.StatusNotFound)
+						}
+					default:
+						gets++
+						w.WriteHeader(http.StatusMethodNotAllowed)
+					}
+				})
+				adapter.lookup = lookup
+				for _, state := range []string{"pending", "complete"} {
+					stored, err := lookup(ctx, object.ObjectKey)
+					if err != nil || stored.ExpectedChecksum != object.SHA256 || stored.State != state || stored.SHA256Verified != (state == "complete") {
+						t.Fatal("persisted grant did not round-trip unchanged")
+					}
+					proof, err := adapter.Head(ctx, object.ObjectKey)
+					if err != nil || !proof.SHA256Verified || proof.Length != stored.Size {
+						t.Fatal("HEAD rejected matching persisted " + state + " grant")
+					}
+					if state == "pending" {
+						if request, err := adapter.Download(ctx, object.ObjectKey, now, stored.ExpiresAt); !errors.Is(err, ErrR2Incomplete) || request.URL != "" {
+							t.Fatal("pending grant yielded download capability; values suppressed")
+						}
+						_, err = db.ExecContext(ctx, `UPDATE blob_objects SET state='complete',sha256_verified=1,
+							verified_algorithm='sha256',verified_digest=sha256,verified_size=?,etag=?,verified_at=?,
+							storage_charge_state='retained' WHERE object_key=? AND state='pending'`,
+							proof.Length, proof.ETag, now.Format(time.RFC3339Nano), object.ObjectKey)
+						if err != nil {
+							t.Fatal("schema-valid completion update failed")
+						}
+					} else {
+						request, err := adapter.Download(ctx, object.ObjectKey, now, stored.ExpiresAt)
+						if err != nil || request.Method != http.MethodGet || request.URL == "" {
+							t.Fatal("eligible persisted grant download failed; values suppressed")
+						}
+						parsed, err := url.Parse(request.URL)
+						if err != nil || parsed.Path != "/vecnet-blobs-test/"+stored.ObjectKey || parsed.Query().Get("X-Amz-Expires") != "600" {
+							t.Fatal("persisted download scope/TTL mismatch; values suppressed")
+						}
+					}
+				}
+				for i := 0; i < 2; i++ {
+					if err := adapter.Delete(ctx, object.ObjectKey); err != nil {
+						t.Fatal("persisted grant delete was not idempotent")
+					}
+				}
+				if heads != 2 || deletes != 2 || gets != 0 {
+					t.Fatal("persisted grant must only send HEAD/DELETE to fake S3")
+				}
+			})
+		}
+	}
 }
 
 func TestR2HeadProof(t *testing.T) {
@@ -104,7 +258,7 @@ func TestR2HeadProof(t *testing.T) {
 				t.Fatal("pending grant already verified")
 			}
 			proof, err := adapter.Head(context.Background(), object.ObjectKey)
-			if err != nil || !proof.SHA256Verified || proof.Length != 7 || proof.ETag != `"opaque-single-put-etag"` || proof.ChecksumProfile != "sha256" || proof.Metadata.Get("X-Amz-Meta-Vecnet-Checksum") != object.ExpectedChecksum {
+			if err != nil || !proof.SHA256Verified || proof.Length != 7 || proof.ETag != `"opaque-single-put-etag"` || proof.ChecksumProfile != "sha256" || proof.Metadata.Get("X-Amz-Meta-Vecnet-Checksum") != r2ProofHeaders().Get("X-Amz-Meta-Vecnet-Checksum") {
 				t.Fatal("matching completion evidence rejected")
 			}
 			if (proof.ProviderChecksum != "") != provider {
@@ -420,7 +574,7 @@ func (r *r2TestReader) Read(p []byte) (int, error) {
 }
 
 func TestR2HeadDownloadTransportBounds(t *testing.T) {
-	for _, name := range []string{"large_error", "malformed_xml", "unknown_code", "transport_error", "large_header", "success_body"} {
+	for _, name := range []string{"large_error", "malformed_xml", "unknown_code", "transport_error", "large_header", "large_header_204", "success_body"} {
 		t.Run(name, func(t *testing.T) {
 			object := r2TestObject(t, "1h")
 			now := r2VectorNow
@@ -434,7 +588,10 @@ func TestR2HeadDownloadTransportBounds(t *testing.T) {
 				switch name {
 				case "transport_error":
 					return nil, errors.New("https://invalid.test/?X-Amz-Signature=sensitive-synthetic-marker credential-looking-value")
-				case "large_header":
+				case "large_header", "large_header_204":
+					if name == "large_header_204" {
+						status = http.StatusNoContent
+					}
 					headers.Set("X-Amz-Meta-Big", strings.Repeat("x", 20000))
 				case "success_body":
 					status = 200
@@ -465,6 +622,9 @@ func TestR2HeadDownloadTransportBounds(t *testing.T) {
 				var typed *R2ProviderError
 				if err == nil || !errors.As(err, &typed) || strings.Contains(err.Error(), "sensitive-synthetic-marker") || strings.Contains(err.Error(), "https:") || strings.Contains(err.Error(), "X-Amz-") {
 					t.Fatal("untrusted error escaped sanitization")
+				}
+				if (name == "large_header" || name == "large_header_204") && (typed.Code != "response_too_large" || reader.read != 0) {
+					t.Fatal("oversized headers must be rejected before reading any body")
 				}
 				if reader.read > 16385 {
 					t.Fatal("provider error read exceeded bound")

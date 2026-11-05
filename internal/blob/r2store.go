@@ -136,8 +136,9 @@ func (s *R2Objects) stored(ctx context.Context, key string) (R2Object, error) {
 			return R2Object{}, ErrR2Metadata
 		}
 	}
+	// Persisted expected_checksum is the same lowercase hex digest as sha256.
 	digest, err := hex.DecodeString(object.SHA256)
-	if err != nil || len(digest) != sha256.Size || hex.EncodeToString(digest) != object.SHA256 || base64.StdEncoding.EncodeToString(digest) != object.ExpectedChecksum {
+	if err != nil || len(digest) != sha256.Size || hex.EncodeToString(digest) != object.SHA256 || object.ExpectedChecksum != object.SHA256 {
 		return R2Object{}, ErrR2Metadata
 	}
 	return object, nil
@@ -196,6 +197,13 @@ func (s *R2Objects) Head(ctx context.Context, key string) (ObjectProof, error) {
 }
 
 func r2CheckProof(response *http.Response, object R2Object) (ObjectProof, error) {
+	digest, err := hex.DecodeString(object.ExpectedChecksum)
+	if err != nil || len(digest) != sha256.Size {
+		return ObjectProof{}, ErrR2Proof
+	}
+	// S3 checksum headers and signed metadata use base64, independently of the
+	// validated persisted hex representation. Never rewrite the stored grant.
+	checksum := base64.StdEncoding.EncodeToString(digest)
 	if !r2BoundedHeaders(response.Header) {
 		return ObjectProof{}, ErrR2Proof
 	}
@@ -207,7 +215,7 @@ func r2CheckProof(response *http.Response, object R2Object) (ObjectProof, error)
 		}
 		return values[0]
 	}
-	if single("Content-Length") != strconv.FormatInt(object.Size, 10) || single("Content-Type") != "application/octet-stream" || single("Content-Disposition") != "attachment" || single("Cache-Control") != "private, no-store" || single("X-Amz-Meta-Vecnet-Checksum-Profile") != "sha256" || single("X-Amz-Meta-Vecnet-Checksum") != object.ExpectedChecksum {
+	if single("Content-Length") != strconv.FormatInt(object.Size, 10) || single("Content-Type") != "application/octet-stream" || single("Content-Disposition") != "attachment" || single("Cache-Control") != "private, no-store" || single("X-Amz-Meta-Vecnet-Checksum-Profile") != "sha256" || single("X-Amz-Meta-Vecnet-Checksum") != checksum {
 		return ObjectProof{}, ErrR2Proof
 	}
 	etag := single("ETag")
@@ -215,7 +223,7 @@ func r2CheckProof(response *http.Response, object R2Object) (ObjectProof, error)
 		return ObjectProof{}, ErrR2Proof
 	}
 	provider := single("X-Amz-Checksum-Sha256")
-	if values, present := h[http.CanonicalHeaderKey("X-Amz-Checksum-Sha256")]; present && (len(values) != 1 || provider != object.ExpectedChecksum) {
+	if values, present := h[http.CanonicalHeaderKey("X-Amz-Checksum-Sha256")]; present && (len(values) != 1 || provider != checksum) {
 		return ObjectProof{}, ErrR2Proof
 	}
 	// Provider checksum is preferred. Its absence falls back to signed immutable
