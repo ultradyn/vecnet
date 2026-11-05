@@ -62,7 +62,7 @@ messaging:
        the log after a restart
   hook [--event user-prompt|post-tool|session-start] [--profile P] [--auto-ack] [--mcp vecnet-P]
        Claude Code / Codex hook: always exits 0; --mcp names the registered MCP server in its hints
-  hook install [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp]
+  hook install [--client claude|codex] [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp] (--mcp: Claude-only)
        --mcp: the hooks name MCP server vecnet-P, and --write registers it (claude mcp add)
   hook rebind [--profile P]
        bind the profile's hook to this Claude Code session (run from its Bash tool)
