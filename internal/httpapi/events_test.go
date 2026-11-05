@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/httpapi"
+	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -491,79 +493,131 @@ func TestPrincipalStreamAndNarrow(t *testing.T) {
 	mustErr(t, resp, body, http.StatusForbidden, "not_your_peer")
 }
 
+// stalledDeliveryWriter lets the real SSE handler prime the stream, then
+// blocks its first Delivery write until the test releases it. Channels prove
+// the writer is stalled without depending on TCP buffer sizes or send rate.
+type stalledDeliveryWriter struct {
+	*httptest.ResponseRecorder
+	primed  chan struct{}
+	blocked chan struct{}
+	release chan struct{}
+}
+
+func (w *stalledDeliveryWriter) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), "\nevent: delivery\n") {
+		close(w.blocked)
+		<-w.release
+		return 0, io.ErrClosedPipe
+	}
+	n, err := w.ResponseRecorder.Write(p)
+	if strings.HasPrefix(string(p), "retry:") {
+		close(w.primed)
+	}
+	return n, err
+}
+
 func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
-	env := testhub.Start(t)
-	// A stuck stream is only dropped after SSEStall; at an hour, any send
-	// whose append waited on the stream would hang, and the per-send
-	// timeout below catches it. A send merely slowed by the stuck stream is
-	// caught both by the aggregate five-second send budget and by
-	// interleaving each send to b (stuck stream) with the same
-	// send to c (no stream) and comparing the totals: both halves see the
-	// same load and database size. The comparison catches stream-specific
-	// stalls; the absolute budget also catches stalls shared by both paths.
-	env.Configure(func(d *httpapi.Deps) { d.SSEStall = time.Hour })
-	a, aSec := env.NewPeer("grokbot", "a")
-	b, bSec := env.NewPeer("session", "b")
-	c, _ := env.NewPeer("dot", "c")
-	env.SetLimits(a, 10000, 10000)
+	for _, mode := range []struct {
+		name string
+		refs bool
+	}{{"inline", false}, {"reference", true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			env := testhub.StartWith(t, func(cfg *hub.Config) {
+				cfg.DeliveryReferences = mode.refs
+			})
+			a, aSec := env.NewPeer("grokbot", "a")
+			b, bSec := env.NewPeer("session", "b")
+			c, _ := env.NewPeer("dot", "c")
+			env.SetLimits(a, 10000, 10000)
 
-	// Open a stream and never read from it.
-	s := openSSE(t, env, bSec, "", nil)
-	waitStreams(t, 1)
+			// Serve the production handler against a controlled writer. Keep
+			// stall/heartbeat timers out of the test: only cancellation or
+			// releasing the writer should end this stream.
+			handler := httpapi.New(httpapi.Deps{
+				Hub: env.Hub, SSEStall: time.Hour, Heartbeat: time.Hour,
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			req := httptest.NewRequest("GET", "/v1/events?after=head", nil).WithContext(ctx)
+			req.Header.Set("Accept", "text/event-stream")
+			req.Header.Set("Authorization", "Bearer "+bSec)
+			w := &stalledDeliveryWriter{
+				ResponseRecorder: httptest.NewRecorder(),
+				primed:           make(chan struct{}), blocked: make(chan struct{}), release: make(chan struct{}),
+			}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				handler.ServeHTTP(w, req)
+			}()
+			t.Cleanup(func() {
+				cancel()
+				close(w.release)
+				select {
+				case <-done:
+				case <-time.After(10 * time.Second):
+					t.Error("SSE handler did not exit after releasing its writer")
+				}
+			})
+			await := func(ch <-chan struct{}, what string) {
+				t.Helper()
+				select {
+				case <-ch:
+				case <-done:
+					t.Fatalf("SSE handler exited before %s", what)
+				case <-time.After(10 * time.Second):
+					t.Fatalf("SSE handler did not reach %s", what)
+				}
+			}
+			await(w.primed, "priming frame")
 
-	const n, perSend, aggregate = 200, 5 * time.Second, 5 * time.Second
-	send := func(key, to string, budget time.Duration) time.Duration {
-		t.Helper()
-		start := time.Now()
-		if budget <= 0 {
-			t.Fatalf("aggregate send budget exhausted before %s", key)
-		}
-		body := sendBody(key, to)
-		body["content"] = map[string]any{"text": strings.Repeat("x", 4000)}
-		j, err := json.Marshal(body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), budget)
-		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, "POST", env.URL+"/v1/messages", strings.NewReader(string(j)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+aSec)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("send %s did not finish within %v: %v", key, budget, err)
-		}
-		raw, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		took := time.Since(start)
-		if err != nil {
-			t.Fatalf("send %s: read body: %v", key, err)
-		}
-		if resp.StatusCode != http.StatusAccepted {
-			t.Fatalf("send %s = %d; %s", key, resp.StatusCode, raw)
-		}
-		return took
-	}
-	var stuck, free time.Duration
-	for i := 0; i < n; i++ {
-		free += send(fmt.Sprintf("free-%d", i), c, perSend)
-		stuck += send(fmt.Sprintf("slow-%d", i), b, aggregate-stuck)
-	}
-	t.Logf("%d sends took %v to the stuck-stream peer, %v to a peer with no stream", n, stuck, free)
-	if stuck > aggregate {
-		t.Fatalf("%d sends to a stuck SSE consumer took %v, want <= %v total", n, stuck, aggregate)
-	}
-	if limit := 2*free + time.Second; stuck > limit {
-		t.Fatalf("%d sends to a stuck SSE consumer took %v, want <= %v (2x the %v of the same sends to a peer with no stream, + 1s)", n, stuck, limit, free)
-	}
+			send := func(key, to string) {
+				t.Helper()
+				body := sendBody(key, to)
+				body["content"] = map[string]any{"text": strings.Repeat("x", 4000)}
+				j, err := json.Marshal(body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// This is a deadlock watchdog per request, not a shared
+				// throughput budget that race instrumentation can exhaust.
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				req, err := http.NewRequestWithContext(ctx, "POST", env.URL+"/v1/messages", strings.NewReader(string(j)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Authorization", "Bearer "+aSec)
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatalf("send %s blocked while SSE writer was stalled: %v", key, err)
+				}
+				_, err = io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				if err != nil {
+					t.Fatalf("send %s: read response: %v", key, err)
+				}
+				if resp.StatusCode != http.StatusAccepted {
+					t.Fatalf("send %s = %d, want %d", key, resp.StatusCode, http.StatusAccepted)
+				}
+			}
+			send("seed", b)
+			await(w.blocked, "stalled Delivery write")
 
-	// The handler goroutine exits once the client goes away.
-	s.cancel()
-	s.resp.Body.Close()
-	waitStreams(t, 0)
+			// Exceed the 64-frame SSE queue while its writer is known to be
+			// blocked. Same-owner and unrelated sends must both commit even
+			// when the log reader is backpressured by the full queue.
+			for i := 0; i < 200; i++ {
+				send(fmt.Sprintf("slow-%d", i), b)
+			}
+			send("free", c)
+			select {
+			case <-done:
+				t.Fatal("SSE stream ended instead of remaining stalled during sends")
+			default:
+			}
+		})
+	}
 }
 
 // TestSSEReplaysLargeBacklogOnOneConnection: an actively reading client that

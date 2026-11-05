@@ -16,6 +16,8 @@ import (
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/eventlog"
+	"github.com/XertroV/vecnet/internal/eventpayload"
 	"github.com/XertroV/vecnet/internal/ids"
 )
 
@@ -604,6 +606,14 @@ func (h *Hub) insertMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg
 func (h *Hub) fanOut(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envelope.Message, msgJSON []byte,
 	targets []target, hosted map[string]bool, ingress, dlyExpires string, nowT time.Time) ([]DeliveryRef, []string, error) {
 	now := envelope.FormatTime(nowT)
+	// Latch replay immutability in the very transaction publishing references.
+	// Disabling new writes later must never unfreeze previously replayable bodies.
+	if h.Cfg.DeliveryReferences {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO meta(key, value) VALUES ('event_payload_refs_enabled', '1')
+         ON CONFLICT(key) DO UPDATE SET value = '1' WHERE meta.value != '1'`); err != nil {
+			return nil, nil, fmt.Errorf("hub: enable delivery references: %w", err)
+		}
+	}
 	threadJSON, err := json.Marshal(thr.summary())
 	if err != nil {
 		return nil, nil, fmt.Errorf("hub: encode thread summary: %w", err)
@@ -638,12 +648,30 @@ func (h *Hub) fanOut(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envel
 		if err != nil {
 			return nil, nil, err
 		}
-		cur, err := h.Log.Append(ctx, tx, t.peer, "delivery", nowT, json.RawMessage(data))
-		if err != nil {
-			return nil, nil, err
+		sum := sha256.Sum256(data) // the complete frozen Delivery, never the reference
+		var cur eventlog.Cursor
+		if h.Cfg.DeliveryReferences {
+			p, err := eventpayload.EncodeDelivery(ctx, tx, msg.MessageID, data)
+			if err != nil {
+				return nil, nil, err
+			}
+			res, err := tx.ExecContext(ctx, `INSERT INTO events(owner, type, at, data, payload_format, msg_id, snapshot_id)
+             VALUES (?, 'delivery', ?, ?, ?, ?, NULLIF(?, ''))`, t.peer, now, string(p.Data), p.Format, p.MsgID, p.SnapshotID)
+			if err != nil {
+				return nil, nil, fmt.Errorf("hub: append delivery reference: %w", err)
+			}
+			seq, err := res.LastInsertId()
+			if err != nil {
+				return nil, nil, fmt.Errorf("hub: delivery reference seq: %w", err)
+			}
+			cur = eventlog.Cursor{Epoch: h.Log.Epoch(), Seq: seq}
+		} else {
+			cur, err = h.Log.Append(ctx, tx, t.peer, "delivery", nowT, json.RawMessage(data))
+			if err != nil {
+				return nil, nil, err
+			}
 		}
 		alsoVia, _ := json.Marshal(append([]string{}, t.alsoVia...))
-		sum := sha256.Sum256(data)
 		gate := delivery{recipient: t.peer, priority: msg.Priority}
 		if err := h.GateWakeIdle(ctx, tx, &gate); err != nil {
 			return nil, nil, err

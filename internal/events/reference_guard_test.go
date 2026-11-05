@@ -111,11 +111,13 @@ func guardEnv(t *testing.T) (*testhub.Env, []guardFixture) {
 		guardExec(t, env, `INSERT INTO deliveries(dly_id,msg_id,thr_id,recipient,also_via,priority,state,attempts_left,expires_at,created_at,updated_at,event_seq,body_sha256) VALUES (?,?,?,?,'[]','wake','queued',8,?,?,?,?,?)`, ids.DeliveryID, m.MessageID, m.ThreadID, ids.Recipient, m.Loop.ExpiresAt, guardAt, guardAt, i+1, f.SHA256)
 	}
 	guardExec(t, env, `INSERT INTO reactions(msg_id,peer_id,emoji,created_at) VALUES (?,?,?,?)`, "msg_00000000000000000000000001", guardA, "👍", guardAt)
+	prepareReferenceStorage(t, env)
 	return env, fs
 }
 
 func guardBytes(t *testing.T, name string, got []byte) {
 	t.Helper()
+	assertPublicStorageKeys(t, got)
 	path := "testdata/reference_guard/" + name
 	want, err := os.ReadFile(path)
 	if err != nil {
@@ -271,6 +273,7 @@ func TestReferenceGuardLegacyOutbox0018(t *testing.T) {
 	}
 	guardBytes(t, "legacy-outbox-before-0018.json", posts[0].Body)
 	guardExec(t, env, `UPDATE events SET data=json_set(events.data,'$.message.sender_info',json(json_extract(m.body,'$.sender_info'))) FROM messages m WHERE events.seq=9 AND m.msg_id=json_extract(events.data,'$.message.message_id')`)
+	hydrateReferenceStorage(t, env)
 	env.Now.Advance(time.Minute)
 	step(t, env)
 	posts = cb.Posts()

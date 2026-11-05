@@ -27,6 +27,10 @@ import (
 // Config holds the hub's tunables. DefaultConfig returns the Global
 // Constraints values of the core-hub plan (PROTOCOL §2.2, §6, §16).
 type Config struct {
+	// DeliveryReferences enables new reference writes; the dual reader is always active.
+	// Leave false for deployment stage 1. Once enabled, replay bodies stay immutable.
+	DeliveryReferences bool
+
 	PublicURL       string        // externally visible origin, no trailing slash
 	DataDir         string        // holds hub.db and blobs/
 	DefaultMaxDepth int           // loop.max_depth when a send omits it (range 1–64)
