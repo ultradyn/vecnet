@@ -191,6 +191,24 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 	return p, nil
 }
 
+// bindRetentionGeneration runs only during hub construction, before workers or
+// requests can observe Preferences. Retention's persisted bootstrap generation
+// is part of the shared ETag/confirmation domain; returning to the same flags
+// cannot revive an unused preview from an earlier destructive transition.
+func (p *Preferences) bindRetentionGeneration(ctx context.Context, generation uint64) error {
+	if generation == 0 {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:retention:%d", p.digest, generation)))
+	p.digest = hex.EncodeToString(sum[:])
+	snapshot, err := p.LoadSnapshot(ctx, nil)
+	if err != nil {
+		return err
+	}
+	p.current.Store(&snapshot)
+	return nil
+}
+
 func preferenceStartupError(err error) error {
 	var e *prefs.Error
 	if errors.As(err, &e) {
