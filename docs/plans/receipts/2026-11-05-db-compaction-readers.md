@@ -141,3 +141,44 @@ Completion results:
 - Offline CLI dependency check: no sqlite/store/eventpayload.
 - All 138 additions are new guard tests, their fixtures/manifests, or this receipt.
   Existing production files, migrations, tests and goldens are unchanged.
+
+## Review round 1 corrections
+
+The real-send guard now selects delivery metadata and the event sequence,
+then reads the matching public Delivery with `Log.Read`. It checks that
+Event's cursor/type, compares its exact bytes with the original send
+fixture and `deliveries.body_sha256`, and uses those same public bytes for
+the held-release assertion. It no longer treats `events.data` as a public
+Delivery. All original fixtures and their manifests remain byte-for-byte
+unchanged.
+
+`TestReferenceGuardMCPInboxBytes` additionally freezes the untouched
+`resources/read` JSON-RPC `Result` bytes for peer, principal and empty
+scopes in `internal/mcpserver/testdata/reference_guard/resources-read/`.
+The new directory has its own `SHA256SUMS`; the original text fixtures,
+token-stripping assertions and original manifest are preserved. These
+three fixtures pin `contents`, `uri`, `mimeType`, the encoded text and the
+wrapper's field ordering/escaping, rather than only decoded resource text.
+
+Fixture provenance: the temporary
+`TestReferenceGuardCaptureResourceResults` called the unchanged production
+resource reader on x-boss at `cd99ba6007a6bebae0fcc2cef41a2a3d9457cce2`
+(with guard-only round 1 edits). Production bytes remain those of the
+original `fcc71a10e9c2bf7c496983b7cb0dc363f6382d16` baseline. The temporary
+capture test was removed before validation/commit; committed tests have
+no fixture-writing or update mode.
+
+The MCP guards use local HTTP, RPC, resource and live-notification helpers;
+the operator-notification guard uses local route setup. Their failure
+branches report only fixed reason strings, status/error codes, counts,
+byte lengths and hashes. They never format a response body, route, URL,
+signing key or raw transport/decoder error. Existing shared helpers and
+production code are unchanged.
+
+Round 1 mutation proof changed one expected byte in 14 fixtures: all nine
+send variants, one operator notification, the listen acknowledgement and
+all three new resource results. All four affected guard tests failed,
+including every send/resource scope subtest. The originals were restored
+and all 127 fixtures passed their manifests before the completion suite.
+Evidence and required validation results are in `task-01.fix-r1.json` and
+`ccc/task-01.fix-r1.*` beneath the task's build-db scratch directory.

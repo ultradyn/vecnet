@@ -1,25 +1,26 @@
 package hub_test
 
 import (
-	"context"
-	"github.com/XertroV/vecnet/internal/eventlog"
-	"github.com/XertroV/vecnet/internal/webhook"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"sync"
-	"time"
-
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/testhub"
-	"os"
-	"testing"
+	"github.com/XertroV/vecnet/internal/webhook"
 )
 
 // These baseline fixtures are frozen at fcc71a10e9c2bf7c496983b7cb0dc363f6382d16.
@@ -249,11 +250,66 @@ func TestReferenceGuardWebhookAttempts(t *testing.T) {
 	}
 }
 
+// Guard-local setup never reports response bytes, URLs, credentials or
+// transport errors (which can contain the request URL).
+func guardHTTP(t *testing.T, env *testhub.Env, secret, method, path string, body any) (*http.Response, []byte) {
+	t.Helper()
+	var raw []byte
+	if b, ok := body.([]byte); ok {
+		raw = b
+	} else if body != nil {
+		var err error
+		raw, err = json.Marshal(body)
+		if err != nil {
+			t.Fatal("guard HTTP request encode failed")
+		}
+	}
+	req, err := http.NewRequest(method, env.URL+path, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal("guard HTTP request creation failed")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal("guard HTTP transport failed")
+	}
+	defer resp.Body.Close()
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal("guard HTTP response read failed")
+	}
+	return resp, out
+}
+
+func guardPutNotify(t *testing.T, env *testhub.Env, url string) {
+	t.Helper()
+	resp, raw := guardHTTP(t, env, env.OperatorSecret, http.MethodPut, "/v1/admin/notify", map[string]any{
+		"routes": []map[string]string{{"url": url, "filter": "wake"}},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("notification setup failed: status=%d bytes=%d sha256=%x", resp.StatusCode, len(raw), sha256.Sum256(raw))
+	}
+	var result struct {
+		Routes []struct{ ID, URL, Filter, Whsec string }
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("notification setup decode failed: bytes=%d sha256=%x", len(raw), sha256.Sum256(raw))
+	}
+	if len(result.Routes) != 1 {
+		t.Fatalf("notification setup route count=%d", len(result.Routes))
+	}
+	route := result.Routes[0]
+	if route.ID == "" || route.URL != url || route.Filter != "wake" || !strings.HasPrefix(route.Whsec, "whsec_") {
+		t.Fatal("notification setup route invalid")
+	}
+}
+
 func TestReferenceGuardOperatorNotifications(t *testing.T) {
 	env, fs := guardEnv(t)
 	guardExec(t, env, `UPDATE peers SET kind='operator' WHERE peer_id=?`, guardB)
 	rcv := newNotifyReceiver(t)
-	putNotify(t, env, map[string]string{"url": rcv.srv.URL, "filter": "wake"})
+	guardPutNotify(t, env, rcv.srv.URL)
 	// Replaying the send's post-commit notification hook must read exact data.
 	for i, f := range fs {
 		if f.Type != "delivery" {
@@ -300,7 +356,7 @@ func TestReferenceGuardFanOutSendBytes(t *testing.T) {
 			if name == "attachments" {
 				hosted := []byte("synthetic hosted bytes")
 				sha := fmt.Sprintf("%x", sha256.Sum256(hosted))
-				resp, _ := env.Do(guardSecret+guardA, "PUT", "/v1/blobs", hosted)
+				resp, _ := guardHTTP(t, env, guardSecret+guardA, "PUT", "/v1/blobs", hosted)
 				if resp.StatusCode != http.StatusCreated {
 					t.Fatal("fixture upload failed")
 				}
@@ -349,7 +405,7 @@ func TestReferenceGuardFanOutSendBytes(t *testing.T) {
 				if name == "reaction" {
 					bindings["$PARENT_ID"] = msgID
 					body := map[string]any{"message_id": msgID, "emoji": "👍", "op": "add", "priority": "wake"}
-					resp, reactionRaw := env.Do(guardSecret+guardB, "POST", "/v1/reactions", body)
+					resp, reactionRaw := guardHTTP(t, env, guardSecret+guardB, "POST", "/v1/reactions", body)
 					if resp.StatusCode != 200 {
 						var failure struct{ Error struct{ Code string } }
 						if err := json.Unmarshal(reactionRaw, &failure); err != nil {
@@ -362,17 +418,28 @@ func TestReferenceGuardFanOutSendBytes(t *testing.T) {
 					}
 				}
 			}
-			var dly, thr, body, sum string
-			if err := env.Hub.DB.QueryRow(`SELECT d.dly_id,d.thr_id,e.data,d.body_sha256 FROM deliveries d JOIN events e ON e.seq=d.event_seq WHERE d.msg_id=? ORDER BY d.event_seq DESC LIMIT 1`, msgID).Scan(&dly, &thr, &body, &sum); err != nil {
-				t.Fatal(err)
+			var dly, thr, recipient, sum string
+			var eventSeq int64
+			if err := env.Hub.DB.QueryRow(`SELECT dly_id,thr_id,recipient,event_seq,body_sha256 FROM deliveries WHERE msg_id=? ORDER BY event_seq DESC LIMIT 1`, msgID).Scan(&dly, &thr, &recipient, &eventSeq, &sum); err != nil {
+				t.Fatal("delivery metadata read failed")
 			}
+			// Assert the public replay contract, independent of the event's
+			// internal inline/reference storage representation.
+			evs, err := env.Hub.Log.Read(ctx, []string{recipient}, eventlog.Cursor{Epoch: env.Hub.Log.Epoch(), Seq: eventSeq - 1}, 1)
+			if err != nil {
+				t.Fatalf("delivery replay failed: seq=%d", eventSeq)
+			}
+			if len(evs) != 1 || evs[0].Type != "delivery" || evs[0].Cursor != (eventlog.Cursor{Epoch: env.Hub.Log.Epoch(), Seq: eventSeq}).String() {
+				t.Fatalf("delivery replay mismatch: seq=%d count=%d", eventSeq, len(evs))
+			}
+			body := evs[0].Data
 			bindings["$MESSAGE_ID"] = msgID
 			bindings["$DELIVERY_ID"] = dly
 			bindings["$THREAD_ID"] = thr
-			if sum != fmt.Sprintf("%x", sha256.Sum256([]byte(body))) {
+			if sum != fmt.Sprintf("%x", sha256.Sum256(body)) {
 				t.Fatal("fanout delivery hash changed")
 			}
-			guardSendTemplate(t, "send-"+name+".json", []byte(body), bindings)
+			guardSendTemplate(t, "send-"+name+".json", body, bindings)
 			if name == "held_release" {
 				guardExec(t, env, `INSERT INTO routes(route_id,owner_kind,owner_id,kind,url,verified_at,created_at) VALUES ('guard-held-route','peer',?,'http','https://push.example/guard',?,?)`, guardB, guardAt, guardAt)
 				guardExec(t, env, `UPDATE deliveries SET route_id='guard-held-route' WHERE dly_id=?`, dly)
@@ -388,7 +455,7 @@ func TestReferenceGuardFanOutSendBytes(t *testing.T) {
 					t.Fatal(err)
 				}
 				due, err = env.Hub.ClaimDue(ctx, env.Now.Now(), 100)
-				if err != nil || len(due) != 1 || !bytes.Equal(due[0].Body, []byte(body)) {
+				if err != nil || len(due) != 1 || !bytes.Equal(due[0].Body, body) {
 					t.Fatal("released wake_idle bytes changed")
 				}
 			}

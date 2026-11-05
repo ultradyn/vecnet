@@ -1,23 +1,24 @@
 package mcpserver_test
 
 import (
-	"context"
-	"database/sql"
-	"time"
-
-	"net/http"
-	"strings"
-
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
 	"github.com/XertroV/vecnet/internal/auth"
 	venv "github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/mcpserver"
 	"github.com/XertroV/vecnet/internal/testhub"
-	"os"
-	"testing"
 )
 
 // These baseline fixtures are frozen at fcc71a10e9c2bf7c496983b7cb0dc363f6382d16.
@@ -127,6 +128,122 @@ func guardBytes(t *testing.T, name string, got []byte) {
 	}
 }
 
+// Guard helpers deliberately omit payloads, URLs, tokens and raw errors
+// from every failure diagnostic, including malformed protocol responses.
+func guardRequest(t *testing.T, ctx context.Context, env *testhub.Env, secret, method, path string, body any) *http.Response {
+	t.Helper()
+	var raw []byte
+	if body != nil {
+		var err error
+		raw, err = json.Marshal(body)
+		if err != nil {
+			t.Fatal("guard HTTP request encode failed")
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, method, env.URL+path, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal("guard HTTP request creation failed")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+secret)
+	if path == "/mcp" {
+		req.Header.Set("MCP-Protocol-Version", mcpserver.ProtoCurrent)
+		req.Header.Set("Accept", "application/json, text/event-stream")
+	} else {
+		req.Header.Set("Accept", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal("guard HTTP transport failed")
+	}
+	return resp
+}
+
+func guardHTTP(t *testing.T, env *testhub.Env, secret, method, path string, body any) (*http.Response, []byte) {
+	t.Helper()
+	resp := guardRequest(t, context.Background(), env, secret, method, path, body)
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal("guard HTTP response read failed")
+	}
+	return resp, raw
+}
+
+func guardRPC(t *testing.T, env *testhub.Env, secret, method string, params any) rpcResp {
+	t.Helper()
+	resp, raw := guardHTTP(t, env, secret, http.MethodPost, "/mcp", map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": method, "params": params,
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("guard RPC HTTP failure: status=%d bytes=%d sha256=%x", resp.StatusCode, len(raw), sha256.Sum256(raw))
+	}
+	var r rpcResp
+	if err := json.Unmarshal(raw, &r); err != nil || r.JSONRPC != "2.0" {
+		t.Fatalf("guard RPC decode failed: bytes=%d sha256=%x", len(raw), sha256.Sum256(raw))
+	}
+	if r.Error != nil {
+		t.Fatalf("guard RPC error: code=%d", r.Error.Code)
+	}
+	return r
+}
+
+func guardResource(t *testing.T, env *testhub.Env, secret, uri string) (json.RawMessage, string) {
+	t.Helper()
+	r := guardRPC(t, env, secret, "resources/read", map[string]any{"uri": uri})
+	var result struct {
+		Contents []struct {
+			Text string `json:"text"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(r.Result, &result); err != nil {
+		t.Fatalf("guard resource decode failed: bytes=%d sha256=%x", len(r.Result), sha256.Sum256(r.Result))
+	}
+	if len(result.Contents) != 1 {
+		t.Fatalf("guard resource contents count=%d", len(result.Contents))
+	}
+	return r.Result, result.Contents[0].Text
+}
+
+func guardListen(t *testing.T, ctx context.Context, env *testhub.Env, secret string, uris []string) (*http.Response, <-chan frame) {
+	t.Helper()
+	resp := guardRequest(t, ctx, env, secret, http.MethodPost, "/mcp", map[string]any{
+		"jsonrpc": "2.0", "id": 9, "method": "subscriptions/listen",
+		"params": map[string]any{"resourceSubscriptions": uris},
+	})
+	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		resp.Body.Close()
+		t.Fatalf("guard listen failed: status=%d", resp.StatusCode)
+	}
+	ch := make(chan frame, 64)
+	go readFrames(resp.Body, ch)
+	return resp, ch
+}
+
+func guardNextMessage(t *testing.T, frames <-chan frame, within time.Duration) (json.RawMessage, bool) {
+	t.Helper()
+	deadline := time.NewTimer(within)
+	defer deadline.Stop()
+	for {
+		select {
+		case f, ok := <-frames:
+			if !ok {
+				return nil, false
+			}
+			if f.data == nil {
+				continue
+			}
+			var n notif
+			if err := json.Unmarshal(f.data, &n); err != nil {
+				t.Fatalf("guard notification decode failed: bytes=%d sha256=%x", len(f.data), sha256.Sum256(f.data))
+			}
+			return f.data, true
+		case <-deadline.C:
+			return nil, false
+		}
+	}
+}
+
 func TestReferenceGuardMCPInboxBytes(t *testing.T) {
 	env, _ := guardEnv(t)
 	for _, tc := range []struct{ name, secret, uri string }{
@@ -135,21 +252,19 @@ func TestReferenceGuardMCPInboxBytes(t *testing.T) {
 		{"empty", guardSecret + guardA, peerURI(guardA)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			status, r := rpc(t, env, tc.secret, "tools/call", map[string]any{"name": "vecnet_inbox", "arguments": map[string]any{}})
-			if status != http.StatusOK || r.Error != nil {
-				t.Fatal("inbox tool failed")
-			}
+			r := guardRPC(t, env, tc.secret, "tools/call", map[string]any{"name": "vecnet_inbox", "arguments": map[string]any{}})
 			guardBytes(t, "tool-"+tc.name+".json", r.Result)
-			resource := inboxText(t, env, tc.secret, tc.uri)
+			result, resource := guardResource(t, env, tc.secret, tc.uri)
+			guardBytes(t, "resources-read/"+tc.name+".json", result)
 			guardBytes(t, "resource-"+tc.name+".json", []byte(resource))
-			for _, body := range []string{string(r.Result), resource} {
+			for _, body := range []string{string(r.Result), string(result), resource} {
 				if strings.Contains(body, "blob_url") || strings.Contains(body, "?t=") {
 					t.Fatal("MCP inbox leaked blob token")
 				}
 			}
 		})
 	}
-	resp, raw := env.Do(guardSecret+guardB, "GET", "/v1/events?wait=0", nil)
+	resp, raw := guardHTTP(t, env, guardSecret+guardB, "GET", "/v1/events?wait=0", nil)
 	if resp.StatusCode != 200 || !strings.Contains(string(raw), "?t=synthetic.guard.token") {
 		t.Fatal("raw HTTP lost frozen blob URL")
 	}
@@ -159,9 +274,9 @@ func TestReferenceGuardMCPInboxNotifications(t *testing.T) {
 	env, _ := guardEnv(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	resp, frames := listen(t, ctx, env, http.DefaultClient, guardSecret+guardB, []string{peerURI(guardB)})
+	resp, frames := guardListen(t, ctx, env, guardSecret+guardB, []string{peerURI(guardB)})
 	defer resp.Body.Close()
-	_, raw, ok := nextMessage(t, frames, 5*time.Second)
+	raw, ok := guardNextMessage(t, frames, 5*time.Second)
 	if !ok {
 		t.Fatal("listen acknowledgement missing")
 	}
@@ -174,7 +289,7 @@ func TestReferenceGuardMCPInboxNotifications(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.Hub.Log.Notify(guardB)
-	_, raw, ok = nextMessage(t, frames, 5*time.Second)
+	raw, ok = guardNextMessage(t, frames, 5*time.Second)
 	if !ok {
 		t.Fatal("inbox notification missing")
 	}
