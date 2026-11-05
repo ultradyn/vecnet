@@ -401,6 +401,10 @@ func TestWatchRestartGraceNoFallback(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no stream")
 	}
+	// A delivered event proves the stream has joined the drain, so the
+	// announcement reaches it (it replaces waiting for a stdout restart line).
+	holdMessage(t, e, e.OperatorPeer, "stream live")
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "stream live") }, 5*time.Second)
 	e.Drain.Announce(time.Second)
 	if !e.Drain.Wait(5 * time.Second) {
 		t.Fatal("stream did not end on the restart announcement")
@@ -410,7 +414,7 @@ func TestWatchRestartGraceNoFallback(t *testing.T) {
 	select {
 	case <-resumes:
 	case <-time.After(9 * time.Second):
-		t.Fatal("no resumed SSE")
+		t.Fatalf("no resumed SSE; stdout=%q stderr=%q", out.String(), errs.String())
 	}
 	stop()
 	// A 3 s outage inside the restart grace stays on SSE and, being under

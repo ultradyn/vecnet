@@ -77,8 +77,10 @@ func TestWatchFiniteRestartPreservesLastEvent(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		var out, errs bytes.Buffer
 		w := watcher{a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: newClient(srv.URL, "test"), forMonitor: true, seen: newDedupe(1024)}
-		if err := w.stream(); err != nil {
-			t.Fatal(err)
+		// The restart frame carries a retry_after_ms hint, so the stream ends
+		// with errRestarting (the hint is honoured, PROTOCOL §21.3).
+		if err := w.stream(); !errors.Is(err, errRestarting) {
+			t.Fatalf("stream end = %v, want errRestarting", err)
 		}
 		if w.cursor != "e1.20" || strings.Count(out.String(), " presence ") != 20 || strings.Contains(out.String(), "hub_restarting") {
 			t.Fatalf("finite stream cursor=%q output=%q", w.cursor, out.String())
@@ -118,7 +120,7 @@ func TestWatchQuietOutageAndRecovery(t *testing.T) {
 				}))
 				defer srv.Close()
 				var out, errs bytes.Buffer
-				w := watcher{a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: newClient(srv.URL, "test"), forMonitor: true, replayed: true, seen: newDedupe(1024), retry: watchDefaultRetry}
+				w := watcher{identityOff: true, a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: newClient(srv.URL, "test"), forMonitor: true, replayed: true, seen: newDedupe(1024), retry: watchDefaultRetry}
 				now := time.Unix(100, 0)
 				w.now = func() time.Time { return now }
 				var delays []time.Duration
@@ -193,7 +195,7 @@ func TestWatchPurgedCursorThenAuthStops(t *testing.T) {
 	}))
 	defer srv.Close()
 	var out, errs bytes.Buffer
-	w := watcher{a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: newClient(srv.URL, "test"), forMonitor: true, replayed: true, connected: true, cursor: "e1.9", seen: newDedupe(1024)}
+	w := watcher{identityOff: true, a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: newClient(srv.URL, "test"), forMonitor: true, replayed: true, connected: true, cursor: "e1.9", seen: newDedupe(1024)}
 	err := w.run()
 	if !terminal(err) || calls != 2 || !strings.Contains(errs.String(), "cursor_purged") || strings.Contains(errs.String(), "reconnect") {
 		t.Fatalf("calls=%d err=%v stderr=%q", calls, err, errs.String())
@@ -221,7 +223,7 @@ func TestWatchSuccessfulPollIsRecovery(t *testing.T) {
 	defer srv.Close()
 	var out, errs bytes.Buffer
 	now := time.Unix(100, 0)
-	w := watcher{a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: newClient(srv.URL, "test"), forMonitor: true, replayed: true, seen: newDedupe(1024), now: func() time.Time { return now }, sleep: func(context.Context, time.Duration) bool { now = now.Add(6 * time.Second); return true }}
+	w := watcher{identityOff: true, a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: newClient(srv.URL, "test"), forMonitor: true, replayed: true, seen: newDedupe(1024), now: func() time.Time { return now }, sleep: func(context.Context, time.Duration) bool { now = now.Add(6 * time.Second); return true }}
 	if err := w.run(); !terminal(err) {
 		t.Fatal(err)
 	}

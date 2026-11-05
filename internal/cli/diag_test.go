@@ -25,6 +25,11 @@ func TestDiagMCPFiltersAndFollow(t *testing.T) {
 			defer cancel()
 			var calls atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// A pre-identity hub: the CLI's TOFU probe gets 404 (PROTOCOL §21.1).
+				if r.URL.Path == "/v1/hub/identity" {
+					http.NotFound(w, r)
+					return
+				}
 				if r.URL.Path != "/v1/diag/mcp" || r.URL.Query().Get("peer") != "peer_test" || r.URL.Query().Get("method") != "events/subscribe" || r.URL.Query().Get("limit") != "2" {
 					t.Errorf("request query: %s", r.URL)
 				}
@@ -104,6 +109,11 @@ func diagMCPFollowBurst(t *testing.T, initiallyEmpty bool) {
 	var drainedAt []time.Time
 	var drainMu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A pre-identity hub: the CLI's TOFU probe gets 404 (PROTOCOL §21.1).
+		if r.URL.Path == "/v1/hub/identity" {
+			http.NotFound(w, r)
+			return
+		}
 		call := calls.Add(1)
 		if call == 2 {
 			for i := 0; i < 5; i++ {

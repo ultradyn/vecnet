@@ -582,9 +582,14 @@ func TestTailReportsRestarting(t *testing.T) {
 	if d := delays[0]; d < 1200*time.Millisecond || d > 1800*time.Millisecond {
 		t.Errorf("restart wait %v, want 1.5s ±20%%", d)
 	}
-	// Neither the restart nor the outage that follows it raises the backoff.
-	if want := []time.Duration{time.Second, time.Second, time.Second}; !reflect.DeepEqual(delays[1:], want) {
-		t.Errorf("delays after the restart %v, want %v", delays[1:], want)
+	// Neither the restart nor the outage that follows it raises the backoff:
+	// the grace retries are exactly 1 s, and the failure after the live page
+	// is the base backoff with master's ±20% jitter (a raised one is >= 1.6 s).
+	if want := []time.Duration{time.Second, time.Second}; !reflect.DeepEqual(delays[1:3], want) {
+		t.Errorf("delays after the restart %v, want %v", delays[1:3], want)
+	}
+	if d := delays[3]; d < 800*time.Millisecond || d > 1200*time.Millisecond {
+		t.Errorf("backoff after the live page %v, want 1s ±20%%", d)
 	}
 	want := []string{"connecting", "restarting", "restarting", "restarting", "live", "offline"}
 	if !reflect.DeepEqual(states, want) {

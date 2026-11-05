@@ -245,6 +245,12 @@ type watcher struct {
 
 	forMonitor, autoAck, deliveriesOnly bool
 
+	// identityOff skips the per-connection hub identity proof and the moving
+	// notice refresh. Only unit tests of the reconnect loop set it: they talk
+	// to a bare handler with no profile. cmdWatch never does, so a real watch
+	// always verifies (zero value: on).
+	identityOff bool
+
 	cursor       string        // last event id seen ("" until the hub names one: start at the acked cursor)
 	connected    bool          // a stream was open before: resume with Last-Event-ID, not ?after=
 	retry        time.Duration // the hub's "retry:" value
@@ -355,7 +361,7 @@ func (w *watcher) run() error {
 		if !w.moveDue.IsZero() && !time.Now().Before(w.moveDue) {
 			err = errMoveDue
 		}
-		if err == nil {
+		if err == nil && !w.identityOff {
 			err = w.verifyConnection()
 		}
 		verified := err == nil
@@ -371,7 +377,9 @@ func (w *watcher) run() error {
 					w.identity = &id
 				}
 				w.refreshNames()
-				w.refreshMoving()
+				if !w.identityOff {
+					w.refreshMoving()
+				}
 				w.initialized = true
 			}
 			if w.forMonitor && !w.a.json && !w.replayed {

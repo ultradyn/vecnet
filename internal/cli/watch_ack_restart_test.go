@@ -48,7 +48,7 @@ func TestWatchAutoAckQuietOutage(t *testing.T) {
 					var out, errs bytes.Buffer
 					c := newClient("http://localhost", "test")
 					now := time.Unix(100, 0)
-					w := watcher{a: &app{ctx: ctx, stdout: &out, stderr: &errs}, c: c, autoAck: true,
+					w := watcher{identityOff: true, a: &app{ctx: ctx, stdout: &out, stderr: &errs}, c: c, autoAck: true,
 						forMonitor: monitor, replayed: true, connected: true, cursor: "e1.7", seen: newDedupe(1024),
 						now: func() time.Time { return now }}
 					// Deliberately begin with an already handled, owed delivery.
@@ -179,7 +179,7 @@ func TestWatchAutoAckKeepsRefusalDiagnostics(t *testing.T) {
 				}
 				return &http.Response{StatusCode: code, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
 			})
-			w := watcher{a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: c,
+			w := watcher{identityOff: true, a: &app{ctx: context.Background(), stdout: &out, stderr: &errs}, c: c,
 				autoAck: true, forMonitor: true, replayed: true, pendingAck: "e1.7"}
 			if err := w.run(); !errors.Is(err, errPeerDisabled) || acks != 1 || w.pendingAck != "e1.7" {
 				t.Fatalf("err=%v acks=%d pending=%q", err, acks, w.pendingAck)
@@ -197,7 +197,7 @@ func TestWatchAutoAckStreamRecovery(t *testing.T) {
 	out, errs := new(hookWatchOutput), new(hookWatchOutput)
 	c := newClient("http://localhost", "test")
 	now := time.Unix(100, 0)
-	w := watcher{a: &app{ctx: ctx, stdout: out, stderr: errs}, c: c, autoAck: true,
+	w := watcher{identityOff: true, a: &app{ctx: ctx, stdout: out, stderr: errs}, c: c, autoAck: true,
 		forMonitor: true, replayed: true, connected: true, cursor: "e1.7", seen: newDedupe(1024),
 		now:   func() time.Time { return now },
 		sleep: func(context.Context, time.Duration) bool { now = now.Add(6 * time.Second); return true }}
