@@ -3,6 +3,7 @@ package prefs_test
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"reflect"
 	"strings"
@@ -127,6 +128,7 @@ func TestPreferenceWireFixtures(t *testing.T) {
 		Snapshot opapi.Preferences            `json:"snapshot"`
 		Patch    opapi.PreferencesPatch       `json:"patch"`
 		Preview  opapi.PreferencesPreview     `json:"preview"`
+		Storage  opapi.PreferencesPreview     `json:"storage_preview"`
 		Details  opapi.PreferenceErrorDetails `json:"details"`
 	}
 	if err := json.Unmarshal(raw, &fixture); err != nil {
@@ -158,6 +160,33 @@ func TestPreferenceWireFixtures(t *testing.T) {
 	}
 	if fixture.Preview.Impact.HighWater == nil || *fixture.Preview.Impact.HighWater != 42 || fixture.Preview.Impact.NotBefore != "2026-11-06T02:00:00.000Z" {
 		t.Fatal("preview boundaries lost")
+	}
+	if fixture.Preview.Impact.Storage != nil {
+		t.Fatal("storage figures must stay absent when not reported")
+	}
+	wantStorage := prefs.StorageUsage{RetainedBytes: 600, ReservedBytes: 100, UsedBytes: 700, LimitBytes: 5368709120}
+	if got := fixture.Storage.Impact.Storage; got == nil || *got != wantStorage || !got.Valid() {
+		t.Fatalf("storage figures lost: %+v", got)
+	}
+}
+
+func TestStorageUsageValid(t *testing.T) {
+	for _, tc := range []struct {
+		s    prefs.StorageUsage
+		want bool
+	}{
+		{prefs.StorageUsage{RetainedBytes: 0, ReservedBytes: 0, UsedBytes: 0, LimitBytes: 1}, true},
+		{prefs.StorageUsage{RetainedBytes: 2000, ReservedBytes: 0, UsedBytes: 2000, LimitBytes: 1024}, true},
+		{prefs.StorageUsage{LimitBytes: 0}, false},
+		{prefs.StorageUsage{LimitBytes: -1}, false},
+		{prefs.StorageUsage{RetainedBytes: 1, ReservedBytes: 1, UsedBytes: 3, LimitBytes: 10}, false},
+		{prefs.StorageUsage{RetainedBytes: -1, ReservedBytes: 2, UsedBytes: 1, LimitBytes: 10}, false},
+		{prefs.StorageUsage{RetainedBytes: 2, ReservedBytes: -1, UsedBytes: 1, LimitBytes: 10}, false},
+		{prefs.StorageUsage{RetainedBytes: math.MaxInt64, ReservedBytes: 1, UsedBytes: math.MinInt64, LimitBytes: 10}, false},
+	} {
+		if got := tc.s.Valid(); got != tc.want {
+			t.Errorf("%+v Valid = %v", tc.s, got)
+		}
 	}
 }
 

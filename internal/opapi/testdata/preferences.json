@@ -17,5 +17,11 @@
   "impact":{"cutoff_at":"2026-10-29T15:00:00.000Z","high_water":42,"not_before":"2026-11-06T02:00:00.000Z","eligible":0,"pinned":3,"estimated_bytes":0},
   "confirm_token":"", "expires_at":"2026-11-05T15:05:00.000Z"
  },
+ "storage_preview": {
+  "base_revision":12,
+  "risks":[{"code":"blob_expiry_off","keys":["blobs.expiry"],"message":"New attachments have no disaster expiry."}],
+  "impact":{"estimated_bytes":0,"storage":{"retained_bytes":600,"reserved_bytes":100,"used_bytes":700,"limit_bytes":5368709120}},
+  "confirm_token":"", "expires_at":"2026-11-05T15:05:00.000Z"
+ },
  "details":{"field":"agents.default_ttl","constraint":"max_expiry"}
 }

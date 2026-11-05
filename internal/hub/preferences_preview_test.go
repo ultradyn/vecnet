@@ -140,6 +140,7 @@ type syntheticPreferencePolicy struct {
 	fail            bool
 	notBefore       string
 	impact          prefs.Impact
+	activated       prefs.Impact
 }
 
 func (a *syntheticPreferencePolicy) Check(_ context.Context, _, _ prefs.Snapshot, p prefs.Patch) error {
@@ -153,6 +154,7 @@ func (a *syntheticPreferencePolicy) Preview(_ context.Context, _, _ prefs.Snapsh
 }
 func (a *syntheticPreferencePolicy) Activate(ctx context.Context, tx *sql.Tx, _, after prefs.Snapshot, p prefs.Patch, impact prefs.Impact, digest string) error {
 	a.activationCalls++
+	a.activated = impact
 	if p.ApplyExisting && impact.NotBefore != a.notBefore {
 		return &prefs.Error{Code: prefs.CodeConfirmationStale}
 	}
@@ -247,12 +249,48 @@ func TestPreferencesHostedLocksAndVerifiedOff(t *testing.T) {
 	prefsCode(t, err, prefs.CodePolicyLocked)
 	a.quota = 1024
 	zero := int64(0)
-	a.impact = prefs.Impact{Eligible: &zero, Pinned: &zero, EstimatedBytes: &zero}
+	// The cost confirmation needs the verified retained/reserved/used/limit
+	// figures: absent, inconsistent or unlimited figures cannot be approved.
+	for _, storage := range []*prefs.StorageUsage{
+		nil,
+		{RetainedBytes: 600, ReservedBytes: 100, UsedBytes: 700, LimitBytes: 0},
+		{RetainedBytes: 600, ReservedBytes: 100, UsedBytes: 700, LimitBytes: -1},
+		{RetainedBytes: 600, ReservedBytes: 100, UsedBytes: 650, LimitBytes: 1024},
+		{RetainedBytes: -1, ReservedBytes: 100, UsedBytes: 99, LimitBytes: 1024},
+		{RetainedBytes: 1 << 62, ReservedBytes: 1 << 62, UsedBytes: -(1 << 63), LimitBytes: 1024},
+	} {
+		a.impact = prefs.Impact{Eligible: &zero, Pinned: &zero, EstimatedBytes: &zero, Storage: storage}
+		_, err = p.PreviewPreferences(context.Background(), prefsOperator, s.ETag, patch)
+		prefsCode(t, err, prefs.CodeUnavailable)
+	}
+	figures := prefs.StorageUsage{RetainedBytes: 600, ReservedBytes: 100, UsedBytes: 700, LimitBytes: 1024}
+	a.impact = prefs.Impact{Eligible: &zero, Pinned: &zero, EstimatedBytes: &zero, Storage: &figures}
 	assertUnconfirmedPreferencePatch(t, h, p, a, s, patch)
 	out := previewPrefs(t, p, prefsOperator, s, patch)
 	if len(out.Risks) != 1 || out.Risks[0].Code != "blob_expiry_off" || out.Impact.EstimatedBytes == nil {
 		t.Fatal("missing storage cost risk/estimate")
 	}
+	if out.Impact.Storage == nil || *out.Impact.Storage != figures {
+		t.Fatalf("preview omitted the storage figures: %+v", out.Impact.Storage)
+	}
+	// Over-limit usage is shown, not refused: lowering the quota stops new
+	// grants without deleting retained objects.
+	over := prefs.StorageUsage{RetainedBytes: 2000, ReservedBytes: 0, UsedBytes: 2000, LimitBytes: 1024}
+	a.impact.Storage = &over
+	if o := previewPrefs(t, p, prefsOperator, s, patch); *o.Impact.Storage != over {
+		t.Fatal("over-limit figures lost")
+	}
+	// The signed approval binds the figures the operator reviewed; a later
+	// estimate from the policy cannot replace them, and a forged token fails.
+	parts := strings.Split(out.ConfirmToken, ".")
+	raw, _ := base64.RawURLEncoding.DecodeString(parts[0])
+	forged := strings.Replace(string(raw), `"used_bytes":700`, `"used_bytes":701`, 1)
+	if forged == string(raw) {
+		t.Fatal("approval does not carry the storage figures")
+	}
+	patch.Confirm = []string{base64.RawURLEncoding.EncodeToString([]byte(forged)) + "." + parts[1]}
+	_, err = p.PatchPreferences(context.Background(), prefsOperator, s.ETag, patch)
+	prefsCode(t, err, prefs.CodeConfirmationStale)
 	patch.Confirm = []string{out.ConfirmToken}
 	a.locked = true
 	_, err = p.PatchPreferences(context.Background(), prefsOperator, s.ETag, patch)
@@ -261,6 +299,9 @@ func TestPreferencesHostedLocksAndVerifiedOff(t *testing.T) {
 	next, err := p.PatchPreferences(context.Background(), prefsOperator, s.ETag, patch)
 	if err != nil || next.Revision != 1 {
 		t.Fatal("verified off confirmation failed")
+	}
+	if a.activated.Storage == nil || *a.activated.Storage != figures {
+		t.Fatalf("activation did not receive the approved figures: %+v", a.activated.Storage)
 	}
 	prefsAuditCount(t, h, 1)
 	assertApprovedPreferenceRisk(t, h, "blob_expiry_off")

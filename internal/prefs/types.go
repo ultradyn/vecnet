@@ -3,6 +3,7 @@ package prefs
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"sort"
 	"strings"
 )
@@ -349,12 +350,36 @@ type Risk struct {
 // Impact's optional counts are estimates. Pointers preserve present zero vs
 // absent. Timestamps and high-water bounds belong to the confirmation service.
 type Impact struct {
-	CutoffAt       string `json:"cutoff_at,omitempty"`
-	HighWater      *int64 `json:"high_water,omitempty"`
-	NotBefore      string `json:"not_before,omitempty"`
-	Eligible       *int64 `json:"eligible,omitempty"`
-	Pinned         *int64 `json:"pinned,omitempty"`
-	EstimatedBytes *int64 `json:"estimated_bytes,omitempty"`
+	CutoffAt       string        `json:"cutoff_at,omitempty"`
+	HighWater      *int64        `json:"high_water,omitempty"`
+	NotBefore      string        `json:"not_before,omitempty"`
+	Eligible       *int64        `json:"eligible,omitempty"`
+	Pinned         *int64        `json:"pinned,omitempty"`
+	EstimatedBytes *int64        `json:"estimated_bytes,omitempty"`
+	Storage        *StorageUsage `json:"storage,omitempty"`
+}
+
+// StorageUsage is the hub-wide retained-storage estimate a hosted blob policy
+// reports for operator review (R2 plan: used = reserved + retained, against a
+// finite positive limit). Used may exceed Limit after the limit is lowered;
+// that blocks new grants but deletes nothing.
+type StorageUsage struct {
+	RetainedBytes int64 `json:"retained_bytes"`
+	ReservedBytes int64 `json:"reserved_bytes"`
+	UsedBytes     int64 `json:"used_bytes"`
+	LimitBytes    int64 `json:"limit_bytes"`
+}
+
+// Valid reports whether every figure is nonnegative, Used is exactly
+// Retained+Reserved without overflow, and Limit is finite and positive.
+func (s StorageUsage) Valid() bool {
+	if s.RetainedBytes < 0 || s.ReservedBytes < 0 || s.LimitBytes <= 0 {
+		return false
+	}
+	if s.RetainedBytes > math.MaxInt64-s.ReservedBytes {
+		return false
+	}
+	return s.UsedBytes == s.RetainedBytes+s.ReservedBytes
 }
 
 type Preview struct {

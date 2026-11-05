@@ -167,7 +167,7 @@ func confirmationRisks(before, after prefs.Snapshot, patch prefs.Patch) []prefs.
 			now, _ := next.Value.Enum()
 			if now == "off" && was != now {
 				code = "blob_expiry_off"
-				message = "New attachments have no disaster expiry; retained and reserved storage incurs cost within the verified finite quota. Estimates are not guarantees."
+				message = "New attachments have no disaster expiry; retained and reserved storage incurs cost within the verified finite quota shown as retained, reserved, used and limit bytes. Estimates are not guarantees."
 			}
 		}
 		if code != "" {
@@ -185,11 +185,32 @@ func confirmationRisks(before, after prefs.Snapshot, patch prefs.Patch) []prefs.
 	})
 	return risks
 }
-func validPreviewImpact(impact prefs.Impact, existing bool, now time.Time) bool {
+
+// hasRisk reports whether risks carry code.
+func hasRisk(risks []prefs.Risk, code string) bool {
+	for _, risk := range risks {
+		if risk.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+// validPreviewImpact checks the policy's estimates before they are signed and
+// again when an approval is redeemed. Hosted blob expiry off must carry the
+// verified retained/reserved/used/limit figures, so the operator confirms the
+// storage cost against a finite positive quota rather than generic text.
+func validPreviewImpact(impact prefs.Impact, risks []prefs.Risk, existing bool, now time.Time) bool {
 	for _, count := range []*int64{impact.HighWater, impact.Eligible, impact.Pinned, impact.EstimatedBytes} {
 		if count != nil && *count < 0 {
 			return false
 		}
+	}
+	if impact.Storage != nil && !impact.Storage.Valid() {
+		return false
+	}
+	if impact.Storage == nil && hasRisk(risks, "blob_expiry_off") {
+		return false
 	}
 	if existing {
 		if impact.CutoffAt == "" || impact.HighWater == nil || impact.NotBefore == "" {
@@ -220,14 +241,14 @@ func (p *Preferences) previewConfirmation(ctx context.Context, caller auth.Calle
 			return prefs.Preview{}, sanitizePreferenceError(err)
 		}
 	}
-	if !validPreviewImpact(impact, patch.ApplyExisting, p.now()) {
+	risks := confirmationRisks(before, after, patch)
+	if !validPreviewImpact(impact, risks, patch.ApplyExisting, p.now()) {
 		return prefs.Preview{}, preferenceError(prefs.CodeUnavailable)
 	}
 	digest, err := canonicalPreferencePatch(patch)
 	if err != nil {
 		return prefs.Preview{}, err
 	}
-	risks := confirmationRisks(before, after, patch)
 	issued := p.now().UTC().Truncate(time.Millisecond)
 	expires := issued.Add(preferencePreviewTTL)
 	a := preferenceApproval{caller, digest, before.ETag, p.digest, risks, impact, envelope.FormatTime(issued), envelope.FormatTime(expires)}
@@ -270,7 +291,7 @@ func (p *Preferences) validateConfirmation(ctx context.Context, caller auth.Call
 		}
 		actual, _ := json.Marshal(risks)
 		approved, _ := json.Marshal(a.Risks)
-		if a.Caller != caller || a.PatchDigest != digest || a.ETag != before.ETag || a.Generation != p.digest || !bytes.Equal(actual, approved) || !validPreviewImpact(a.Impact, patch.ApplyExisting, p.now()) {
+		if a.Caller != caller || a.PatchDigest != digest || a.ETag != before.ETag || a.Generation != p.digest || !bytes.Equal(actual, approved) || !validPreviewImpact(a.Impact, risks, patch.ApplyExisting, p.now()) {
 			return preferenceConfirmation{}, preferenceError(prefs.CodeConfirmationStale)
 		}
 		impact = a.Impact
