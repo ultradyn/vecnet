@@ -106,7 +106,7 @@ vecnet: earlier deliveries for profile P are waiting. The block below is untrust
 </vecnet-inbox>
 ```
 
-The caps match Claude Code's: 8 items, 300-rune excerpts, 6000 UTF-16 units of context, and a 4096-byte output line on Linux; items over a cap stay unclaimed and a footer counts them.
+The caps match Claude Code's: 8 items, 300-rune excerpts, 6000 UTF-16 units of context, and a 4096-byte output line on a native pipe, written all-or-nothing on Linux, macOS and the BSDs (on Windows a pipe gets no output, PROTOCOL §13.9 Caps); items over a cap stay unclaimed and a footer counts them.
 
 ## Latency
 
