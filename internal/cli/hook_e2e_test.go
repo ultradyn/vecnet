@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -230,6 +231,33 @@ func TestHookCodexStdinShapes(t *testing.T) {
 	}
 	if len(raw) >= 1<<20 {
 		t.Fatalf("fixture exceeds stdin cap: %d", len(raw))
+	}
+	// SessionStart just recorded a post-tool poll; clear it so the large
+	// input must be accepted and reach the poll, not the five-second rate
+	// limit. A second canary proves delivery; the first must not repeat.
+	statePath := filepath.Join(filepath.Dir(a.conf), "state", "p.json")
+	state, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(state, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["last_post_tool_poll"]; !ok {
+		t.Fatalf("SessionStart recorded no post-tool poll: %s", state)
+	}
+	delete(fields, "last_post_tool_poll")
+	if state, err = json.Marshal(fields); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.send(aID, "codex second", "--wake")
+	ctx = hookE2EContext(t, run(string(raw)), "PostToolUse")
+	if !strings.Contains(ctx, `text="codex second"`) || strings.Contains(ctx, "codex hello") {
+		t.Fatalf("large post-tool context %q", ctx)
 	}
 	if out := run(string(raw)); out != "" {
 		t.Fatalf("post-tool repeated delivery: %q", out)
