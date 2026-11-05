@@ -35,6 +35,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -254,7 +255,35 @@ func openStore(dataDir string) (*store.DB, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
+	if err := privateDataDir(dataDir); err != nil {
+		return nil, err
+	}
 	return store.Open(filepath.Join(dataDir, "hub.db"))
+}
+
+// privateDataDir makes dir private before hub.db is opened: the database
+// holds plaintext signing keys (hub_key, route and notify whsec_ keys)
+// protected only by the 0700 data directory (PROTOCOL §12, Secrets at
+// rest). MkdirAll keeps an existing directory's mode, such as a volume
+// mount's 0755, so group and other bits are cleared here; a directory this
+// process cannot chmod is refused. Windows has no such mode bits.
+func privateDataDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("data dir: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("data dir %s is not a directory", dir)
+	}
+	perm := info.Mode().Perm()
+	if runtime.GOOS == "windows" || perm&0o077 == 0 {
+		return nil
+	}
+	if err := os.Chmod(dir, perm&^0o077); err != nil {
+		return fmt.Errorf("data dir %s is %v, readable beyond its owner, and cannot be made private (%w); chmod 700 it", dir, perm, err)
+	}
+	slog.Warn("vecnet-hub: data dir was readable beyond its owner; made it private", "dir", dir, "was", perm.String(), "now", (perm &^ 0o077).String())
+	return nil
 }
 
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
