@@ -2,21 +2,22 @@ package httpapi_test
 
 import (
 	"bufio"
-	"context"
-	"github.com/XertroV/vecnet/internal/eventlog"
-	"net/http"
-	"time"
-
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"github.com/XertroV/vecnet/internal/auth"
-	"github.com/XertroV/vecnet/internal/envelope"
-	"github.com/XertroV/vecnet/internal/hub"
-	"github.com/XertroV/vecnet/internal/testhub"
+	"io"
+	"net/http"
 	"os"
 	"testing"
+	"time"
+
+	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/eventlog"
+	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/testhub"
 )
 
 // These baseline fixtures are frozen at fcc71a10e9c2bf7c496983b7cb0dc363f6382d16.
@@ -126,6 +127,52 @@ func guardBytes(t *testing.T, name string, got []byte) {
 	}
 }
 
+// Guard-local transport helpers keep raw errors, endpoints and payloads out of
+// diagnostics, including request creation, transport and response-read failures.
+func guardRequest(t *testing.T, ctx context.Context, env *testhub.Env, secret, method, path, accept string, body any) *http.Response {
+	t.Helper()
+	var raw []byte
+	if body != nil {
+		var err error
+		raw, err = json.Marshal(body)
+		if err != nil {
+			t.Fatal("reason=guard_http_request_encode")
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, method, env.URL+path, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal("reason=guard_http_request_create")
+	}
+	req.Header.Set("Accept", accept)
+	req.Header.Set("Authorization", "Bearer "+secret)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal("reason=guard_http_transport")
+	}
+	return resp
+}
+
+func guardHTTP(t *testing.T, env *testhub.Env, secret, method, path string, body any) (*http.Response, []byte) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp := guardRequest(t, ctx, env, secret, method, path, "application/json", body)
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reason=guard_http_response_read status=%d bytes=%d sha256=%x", resp.StatusCode, len(raw), sha256.Sum256(raw))
+	}
+	return resp, raw
+}
+
+func guardPoll(t *testing.T, env *testhub.Env, secret, query string) (*http.Response, []byte) {
+	t.Helper()
+	return guardHTTP(t, env, secret, http.MethodGet, "/v1/events"+query, nil)
+}
+
 func TestReferenceGuardHTTPPollAndSSE(t *testing.T) {
 	env, _ := guardEnv(t)
 	for _, tc := range []struct{ name, secret, query string }{
@@ -138,32 +185,19 @@ func TestReferenceGuardHTTPPollAndSSE(t *testing.T) {
 		{"future", guardSecret + guardB, "?after=e1.99&wait=0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			resp, body, _ := getEvents(t, env, tc.secret, tc.query, nil)
-			want := 200
-			if tc.name == "future" {
-				want = 200
-			}
-			if resp == nil || resp.StatusCode != want {
-				t.Fatalf("status changed: want=%d", want)
+			resp, body := guardPoll(t, env, tc.secret, tc.query)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("reason=guard_poll_status status=%d bytes=%d sha256=%x", resp.StatusCode, len(body), sha256.Sum256(body))
 			}
 			guardBytes(t, "poll-"+tc.name+".json", body)
 		})
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "GET", env.URL+"/v1/events?after=e1.0", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+guardSecret+guardPrn)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := guardRequest(t, ctx, env, guardSecret+guardPrn, http.MethodGet, "/v1/events?after=e1.0", "text/event-stream", nil)
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatal("SSE status changed")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("reason=guard_sse_status status=%d", resp.StatusCode)
 	}
 	rd := bufio.NewReader(resp.Body)
 	var wire bytes.Buffer
@@ -172,7 +206,7 @@ func TestReferenceGuardHTTPPollAndSSE(t *testing.T) {
 		for {
 			line, err := rd.ReadString('\n')
 			if err != nil {
-				t.Fatal("SSE read failed")
+				t.Fatalf("reason=guard_sse_read count=%d bytes=%d", frame, wire.Len())
 			}
 			wire.WriteString(line)
 			if line == "\n" {
@@ -190,9 +224,9 @@ func TestReferenceGuardAckScopes(t *testing.T) {
 		{guardSecret + guardPrn, "/v1/ack?peer=" + guardB, "e1.8"},
 		{guardSecret + guardB, "/v1/ack", "e1.2"},
 	} {
-		resp, _ := env.Do(tc.secret, "POST", tc.path, map[string]string{"cursor": tc.cursor})
-		if resp.StatusCode != 204 {
-			t.Fatal("ack failed")
+		resp, body := guardHTTP(t, env, tc.secret, http.MethodPost, tc.path, map[string]string{"cursor": tc.cursor})
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("reason=guard_ack_status status=%d bytes=%d sha256=%x", resp.StatusCode, len(body), sha256.Sum256(body))
 		}
 	}
 	for _, tc := range []struct {
