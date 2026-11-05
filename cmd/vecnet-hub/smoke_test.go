@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"io"
 	"net"
@@ -82,13 +83,21 @@ var listenLine = regexp.MustCompile(`listening on (http://127\.0\.0\.[0-9]+:([0-
 type bootedHub struct {
 	base, port string
 	out        *lockedBuffer
-	stop       func() error // cancel and wait (≤ 2 s); later calls return the first result
+	stop       func() error // cancel and wait (≤ stopWatchdog); later calls return the first result
 }
+
+// stopWatchdog bounds how long bootHub's stop waits for run to return after
+// ctx is cancelled. It is a deadlock watchdog, not a latency budget: serve may
+// legitimately spend up to ShutdownGrace in http.Server.Shutdown, and loaded
+// or -race runs of the full suite took over 2 s, so the margin sits above it.
+const stopWatchdog = ShutdownGrace + 5*time.Second
 
 // bootHub runs run(ctx, args, getenv) in a goroutine and waits for its
 // listening line. A t.Cleanup, registered at once (so it runs before the
 // caller's earlier t.TempDir removal), stops the hub and waits for it, so no
-// failure path leaks a serving hub that holds the data dir.
+// failure path leaks a serving hub that holds the data dir. Even when the
+// watchdog fires, stop keeps waiting (up to another ShutdownGrace) to join
+// the run goroutine before the data dir is removed.
 func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -102,8 +111,12 @@ func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub
 			cancel()
 			select {
 			case stopErr = <-done:
-			case <-time.After(2 * time.Second):
-				stopErr = errors.New("run did not return within 2 s of ctx cancel")
+			case <-time.After(stopWatchdog):
+				stopErr = fmt.Errorf("run did not return within %s of ctx cancel", stopWatchdog)
+				select { // still join before the caller's TempDir cleanup
+				case <-done:
+				case <-time.After(ShutdownGrace):
+				}
 			}
 		})
 		return stopErr
@@ -247,7 +260,8 @@ func TestSmokeBootSendReceive(t *testing.T) {
 		t.Fatalf("read the stream preamble: %v", err)
 	}
 
-	// Cancelling ctx shuts the hub down within 2 s, cleanly, stream and all.
+	// Cancelling ctx shuts the hub down cleanly, stream and all (bounded by
+	// the stopWatchdog deadlock watchdog, not a latency budget).
 	if err := hb.stop(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		t.Fatalf("run after cancel = %v, want nil", err)
 	}
