@@ -30,6 +30,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -40,6 +42,7 @@ import (
 	"github.com/XertroV/vecnet/internal/logging"
 	"github.com/XertroV/vecnet/internal/mcpserver"
 	"github.com/XertroV/vecnet/internal/oauth"
+	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
@@ -79,6 +82,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 		"development only: let outbound URLs be http and reach private/loopback addresses ($VECNET_ALLOW_PRIVATE_EGRESS=1)")
 	trustFly := fs.Bool("trust-fly-client-ip", getenv("VECNET_TRUST_FLY_CLIENT_IP") == "1",
 		"key the per-client rate limit on the Fly-Client-IP header; only behind Fly's proxy ($VECNET_TRUST_FLY_CLIENT_IP=1)")
+	resolvePreferences := registerPreferenceFlags(fs, getenv)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -101,6 +105,10 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if err != nil || refreshInterval < time.Minute || refreshInterval > 24*time.Hour {
 		return errors.New("events refresh interval must be a Go duration between 1m and 24h")
 	}
+	preferenceConfig, err := resolvePreferences()
+	if err != nil {
+		return err
+	}
 	origins, err := mcpserver.ParseAllowedOrigins(*mcpOrigins)
 	if err != nil {
 		return err
@@ -113,11 +121,11 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if err != nil {
 		return err
 	}
-	return serve(ctx, *listen, *dataDir, *publicURL, *devUIDir, *allowPrivate, *trustFly, origins, redirects, stdout, refreshInterval, legacy)
+	return serveConfigured(ctx, *listen, *dataDir, *publicURL, *devUIDir, *allowPrivate, *trustFly, origins, redirects, stdout, refreshInterval, preferenceConfig, legacy)
 }
 
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
-func openHub(dataDir, publicURL string, allowPrivateEgress bool) (*hub.Hub, *store.DB, error) {
+func openHub(dataDir, publicURL string, allowPrivateEgress bool, bootstrap ...hub.Config) (*hub.Hub, *store.DB, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, nil, fmt.Errorf("create data dir: %w", err)
 	}
@@ -126,6 +134,9 @@ func openHub(dataDir, publicURL string, allowPrivateEgress bool) (*hub.Hub, *sto
 		return nil, nil, err
 	}
 	cfg := hub.DefaultConfig()
+	if len(bootstrap) > 0 {
+		cfg = bootstrap[0]
+	}
 	cfg.DataDir = dataDir
 	cfg.PublicURL = publicURL
 	cfg.AllowPrivateEgress = allowPrivateEgress
@@ -170,6 +181,12 @@ const ShutdownGrace = 10 * time.Second
 // development-only egress override (hub.Config.AllowPrivateEgress).
 // trustFly keys the per-client limiter on Fly-Client-IP (Deps.TrustFlyClientIP).
 func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, allowPrivateEgress, trustFly bool, mcpOrigins, oauthRedirects []string, stdout io.Writer, refreshInterval time.Duration, mcpLegacy ...string) error {
+	cfg := hub.DefaultConfig()
+	cfg.EventsRefreshInterval = refreshInterval
+	return serveConfigured(ctx, listen, dataDir, publicURL, devUIDir, allowPrivateEgress, trustFly, mcpOrigins, oauthRedirects, stdout, refreshInterval, cfg, mcpLegacy...)
+}
+
+func serveConfigured(ctx context.Context, listen, dataDir, publicURL, devUIDir string, allowPrivateEgress, trustFly bool, mcpOrigins, oauthRedirects []string, stdout io.Writer, refreshInterval time.Duration, cfg hub.Config, mcpLegacy ...string) error {
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return err
@@ -178,7 +195,8 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 	if publicURL == "" {
 		publicURL = "http://" + addr
 	}
-	h, db, err := openHub(dataDir, publicURL, allowPrivateEgress)
+	cfg.EventsRefreshInterval = refreshInterval
+	h, db, err := openHub(dataDir, publicURL, allowPrivateEgress, cfg)
 	if err != nil {
 		ln.Close()
 		return err
@@ -188,7 +206,6 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 	if allowPrivateEgress {
 		slog.Warn("vecnet-hub: private egress allowed (development only): outbound URLs may be http and reach private addresses")
 	}
-	h.Cfg.EventsRefreshInterval = refreshInterval
 	stack := httpapi.NewStack(h)
 	stack.OAuth.AllowedRedirects = oauthRedirects
 	// Shutdown does not cancel request contexts, so long-lived SSE streams
@@ -239,4 +256,110 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 		return err
 	}
 	return nil
+}
+
+// registerPreferenceFlags captures explicit visits separately from values, so
+// configuring a built-in value still carries flag/environment provenance.
+// String flags defer scalar parsing until resolution to avoid echoing rejected
+// values in flag package errors. getenv is injected; empty means absent under
+// the existing run contract (func(string) string cannot distinguish unset).
+func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func() (hub.Config, error) {
+	type binding struct {
+		key, flag, env string
+	}
+	bindings := []binding{
+		{key: "events.refresh_interval", flag: "events-refresh-interval"},
+		{key: "presence.default_ttl", flag: "presence-ttl"},
+		{key: "presence.session_ttl", flag: "session-presence-ttl"},
+		{key: "presence.launcher_ttl", flag: "launcher-presence-ttl"},
+		{key: "agents.default_max_depth", flag: "default-max-depth"},
+		{key: "agents.default_ttl", flag: "default-ttl"},
+		{key: "agents.thread_budget", flag: "thread-budget"},
+		{key: "rates.sends_per_minute", flag: "sends-per-minute"},
+		{key: "rates.threads_per_hour", flag: "threads-per-hour"},
+		{key: "provisioning.creates_per_hour", flag: "creates-per-hour"},
+	}
+	for i := range bindings {
+		b := &bindings[i]
+		b.env = "VECNET_" + strings.ToUpper(strings.ReplaceAll(b.flag, "-", "_"))
+		if b.flag == "events-refresh-interval" {
+			continue
+		}
+		d, _ := prefs.Lookup(b.key)
+		n, _ := d.Default.Int64()
+		def := strconv.FormatInt(n, 10)
+		if d.Type == prefs.TypeDuration {
+			def = (time.Duration(n) * time.Second).String()
+		}
+		// Usage can run before validation (help or any parser error). Only safe
+		// built-in defaults may enter flag metadata; resolve the environment below.
+		fs.String(b.flag, def, d.Description+" ($"+b.env+")")
+	}
+	return func() (hub.Config, error) {
+		cfg := hub.DefaultConfig()
+		cfg.PreferenceBootstrap = map[string]prefs.Effective{}
+		visited := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { visited[f.Name] = true })
+		for _, b := range bindings {
+			origin := ""
+			raw := fs.Lookup(b.flag).Value.String()
+			if environment := getenv(b.env); environment != "" {
+				origin = b.env
+				raw = environment
+			}
+			if visited[b.flag] {
+				origin = "--" + b.flag
+				raw = fs.Lookup(b.flag).Value.String()
+			}
+			d, _ := prefs.Lookup(b.key)
+			var n int64
+			var err error
+			if d.Type == prefs.TypeDuration {
+				var duration time.Duration
+				duration, err = time.ParseDuration(raw)
+				if err != nil || duration%time.Second != 0 {
+					return cfg, &prefs.Error{Code: prefs.CodeInvalidValue, Details: prefs.ErrorDetails{Field: b.key, Constraint: "whole_seconds"}}
+				}
+				n = int64(duration / time.Second)
+			} else {
+				n, err = strconv.ParseInt(raw, 10, 64)
+			}
+			if err != nil {
+				return cfg, &prefs.Error{Code: prefs.CodeInvalidValue, Details: prefs.ErrorDetails{Field: b.key, Constraint: "integer"}}
+			}
+			value := prefs.Int(n)
+			if d.Type == prefs.TypeDuration {
+				value = prefs.Duration(n)
+			}
+			if err := prefs.Validate(d, value); err != nil {
+				return cfg, err
+			}
+			if origin != "" {
+				cfg.PreferenceBootstrap[b.key] = prefs.Effective{Value: value, Source: prefs.SourceFlag, Origin: origin}
+			}
+			switch b.key {
+			case "events.refresh_interval":
+				cfg.EventsRefreshInterval = time.Duration(n) * time.Second
+			case "presence.default_ttl":
+				cfg.PresenceTTL = time.Duration(n) * time.Second
+			case "presence.session_ttl":
+				cfg.SessionPresenceTTL = time.Duration(n) * time.Second
+			case "presence.launcher_ttl":
+				cfg.LauncherPresenceTTL = time.Duration(n) * time.Second
+			case "agents.default_max_depth":
+				cfg.DefaultMaxDepth = int(n)
+			case "agents.default_ttl":
+				cfg.DefaultTTL = time.Duration(n) * time.Second
+			case "agents.thread_budget":
+				cfg.ThreadBudget = int(n)
+			case "rates.sends_per_minute":
+				cfg.SendsPerMin = int(n)
+			case "rates.threads_per_hour":
+				cfg.ThreadsPerHour = int(n)
+			case "provisioning.creates_per_hour":
+				cfg.CreatesPerHour = int(n)
+			}
+		}
+		return cfg, nil
+	}
 }
