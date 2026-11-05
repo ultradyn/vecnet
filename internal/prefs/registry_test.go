@@ -113,6 +113,26 @@ func TestRegistryDefaultsAndBounds(t *testing.T) {
 	}
 }
 
+func TestProvisioningMaxPeersZeroSemantics(t *testing.T) {
+	d, err := prefs.Lookup("provisioning.max_peers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "Zero disables provisioning under that policy, even with allowed kinds. Absent principal policy still permits no provisioning. Explicit principal policies remain authoritative."
+	if d.Description != want || d.Help != want {
+		t.Fatalf("zero provisioning semantics: description=%q help=%q; want %q", d.Description, d.Help, want)
+	}
+	if d.Default != prefs.Int(0) || d.DisabledValue == nil || *d.DisabledValue != 0 {
+		t.Fatal("zero must remain the default and explicitly disable provisioning")
+	}
+	if err := prefs.Validate(d, prefs.Int(0)); err != nil {
+		t.Fatalf("zero must remain valid: %v", err)
+	}
+	if d.Editable || d.Runtime != "bootstrap" || d.UnavailableReason == "" {
+		t.Fatal("provisioning.max_peers must remain deferred and read-only")
+	}
+}
+
 func TestRegistryMetadataOrder(t *testing.T) {
 	defs := prefs.Definitions()
 	keys := make([]string, len(defs))
