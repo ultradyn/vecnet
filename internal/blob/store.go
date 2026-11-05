@@ -145,7 +145,7 @@ func (s *Store) q(tx *sql.Tx) querier {
 
 func usedQuota(ctx context.Context, q querier, uploader, day string) (int64, error) {
 	var used int64
-	err := q.QueryRowContext(ctx, `SELECT coalesce((SELECT bytes FROM blob_quota WHERE peer_id=?1 AND day=?2),0)+coalesce((SELECT reserved_bytes+accepted_bytes+abandoned_bytes+rejected_bytes FROM blob_r2_quota WHERE uploader=?1 AND day=?2),0)`, uploader, day).Scan(&used)
+	err := q.QueryRowContext(ctx, `SELECT coalesce((SELECT sum(bytes) FROM blob_quota WHERE peer_id IN (?1,'durable:spill:'||?1,'durable:source_raw:'||?1) AND day=?2),0)+coalesce((SELECT reserved_bytes+accepted_bytes+abandoned_bytes+rejected_bytes FROM blob_r2_quota WHERE uploader=?1 AND day=?2),0)`, uploader, day).Scan(&used)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -400,14 +400,32 @@ func (s *Store) Pin(ctx context.Context, tx *sql.Tx, sha, msgID string) error {
 
 // GC deletes every unreferenced, unpurged blob uploaded more than
 // UnreferencedGrace ago or whose TTL has passed: its row, then its file.
-// Purge tombstones are kept.
+// Purge tombstones are kept and also durably schedule disk removal. Retry
+// their filesystem deletion on every GC, independently of retained references.
 func (s *Store) GC(ctx context.Context) (removed int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.Now()
-	var shas []string
+	var shas, purged []string
 	err = s.DB.Tx(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx,
+		rows, err := tx.QueryContext(ctx, `SELECT sha256 FROM blobs WHERE purged_at IS NOT NULL`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var sha string
+			if err := rows.Scan(&sha); err != nil {
+				rows.Close()
+				return err
+			}
+			purged = append(purged, sha)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		rows, err = tx.QueryContext(ctx,
 			`DELETE FROM blobs
 			 WHERE purged_at IS NULL
 			   AND NOT EXISTS (SELECT 1 FROM blob_refs r WHERE r.sha256 = blobs.sha256)
@@ -438,7 +456,7 @@ func (s *Store) GC(ctx context.Context) (removed int, err error) {
 	if err != nil {
 		return 0, err
 	}
-	for _, sha := range shas {
+	for _, sha := range append(purged, shas...) {
 		if !ValidSHA(sha) {
 			continue
 		}
@@ -458,32 +476,8 @@ func (s *Store) Purge(ctx context.Context, sha string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	durable, err := s.purgeDurable(ctx, sha)
-	if err != nil {
+	if err := purgeHash(ctx, s.DB, sha, s.Now(), true); err != nil {
 		return err
-	}
-	remote := false
-	if s.Transfers != nil {
-		var n int
-		if err := s.DB.QueryRowContext(ctx, `SELECT count(*) FROM blob_objects WHERE sha256=?`, sha).Scan(&n); err != nil {
-			return err
-		}
-		remote = n > 0
-		if remote {
-			if err := s.Transfers.PurgeHash(ctx, sha); err != nil {
-				return err
-			}
-		}
-	}
-	res, err := s.DB.ExecContext(ctx,
-		`UPDATE blobs SET purged_at = coalesce(purged_at, ?) WHERE sha256 = ?`, envelope.FormatTime(s.Now()), sha)
-	if err != nil {
-		return fmt.Errorf("blob: purge: %w", err)
-	}
-	if n, err := res.RowsAffected(); err != nil {
-		return fmt.Errorf("blob: purge: %w", err)
-	} else if n == 0 && !durable && !remote {
-		return ErrNotFound
 	}
 	if err := os.Remove(s.path(sha)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("blob: purge remove: %w", err)

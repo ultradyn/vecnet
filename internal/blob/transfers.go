@@ -207,8 +207,11 @@ func (s *Transfers) Reserve(ctx context.Context, uploader, idem string, in blobw
 		// A claimed hash is not proof of possession. Issue the same isolated,
 		// quota-charged grant for purged and unknown hashes; completion enforces
 		// the tombstone only after the checksum evidence has been checked.
+		// Every unverified, still-usable presign holds its slot through its
+		// original deadline, including purged/rejected grants. Terminal state
+		// cannot reveal a concealed purge through subsequent admission.
 		var active int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM blob_objects WHERE uploader=? AND state='pending' AND julianday(upload_deadline)>julianday(?)`, uploader, r2Time(now)).Scan(&active); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM blob_objects WHERE uploader=? AND sha256_verified=0 AND julianday(upload_deadline)>julianday(?)`, uploader, r2Time(now)).Scan(&active); err != nil {
 			return err
 		}
 		if active >= 20 {
@@ -426,7 +429,7 @@ func (s *Transfers) Complete(ctx context.Context, uploader, blobID string) (blob
 		if headErr != nil {
 			outcome = headErr
 			if errors.Is(headErr, ErrR2Proof) && current.State == "pending" {
-				return s.terminal(ctx, tx, current, "rejected", s.cfg.Now())
+				return r2Terminal(ctx, tx, current, "rejected", s.cfg.Now())
 			}
 			return nil
 		}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/ids"
+	"github.com/XertroV/vecnet/internal/store"
 )
 
 // Ledger entries contain stable IDs, counters and timestamps only. A transition
@@ -16,7 +17,7 @@ func r2Usage(ctx context.Context, tx *sql.Tx, o R2Object, kind string, now time.
 	_, err := tx.ExecContext(ctx, `INSERT INTO blob_usage_events(event_id,blob_id,uploader,day,kind,byte_count,at) VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`, ids.New(ids.Blo), o.BlobID, o.Uploader, quotaDay(o.IssuedAt), kind, o.Size, r2Time(now))
 	return err
 }
-func (s *Transfers) terminal(ctx context.Context, tx *sql.Tx, o R2Object, state string, now time.Time) error {
+func r2Terminal(ctx context.Context, tx *sql.Tx, o R2Object, state string, now time.Time) error {
 	if o.State == "purged" {
 		state = "purged"
 	}
@@ -47,11 +48,31 @@ func (s *Transfers) terminal(ctx context.Context, tx *sql.Tx, o R2Object, state 
 }
 
 func (s *Transfers) PurgeHash(ctx context.Context, sha string) error {
+	return purgeHash(ctx, s.cfg.DB, sha, s.cfg.Now(), false)
+}
+
+// Both purge entry points publish the tombstone, mark every incarnation and
+// erase durable bytes under one writer lock. A disk purged_at row is also a
+// persistent deletion request consumed by Store.GC, even without Transfers
+// installed after rollback. R2 jobs retain their presign safety window.
+func purgeHash(ctx context.Context, db *store.DB, sha string, now time.Time, requireKnown bool) error {
 	if !ValidSHA(sha) {
 		return ErrNotFound
 	}
-	return s.cfg.DB.Tx(ctx, func(tx *sql.Tx) error {
-		now := s.cfg.Now()
+	return db.Tx(ctx, func(tx *sql.Tx) error {
+		if requireKnown {
+			var found bool
+			if err := tx.QueryRowContext(ctx, `SELECT
+                EXISTS(SELECT 1 FROM blobs WHERE sha256=?1) OR
+                EXISTS(SELECT 1 FROM durable_blob_payloads WHERE sha256=?1) OR
+                EXISTS(SELECT 1 FROM blob_objects WHERE sha256=?1) OR
+                EXISTS(SELECT 1 FROM blob_purge_tombstones WHERE sha256=?1)`, sha).Scan(&found); err != nil {
+				return err
+			}
+			if !found {
+				return ErrNotFound
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO blob_purge_tombstones(sha256,purged_at,actor) VALUES(?,?,'operator') ON CONFLICT DO NOTHING`, sha, r2Time(now)); err != nil {
 			return err
 		}
@@ -87,7 +108,7 @@ func (s *Transfers) PurgeHash(ctx context.Context, sha string) error {
 			if o.State == "purged" {
 				continue
 			}
-			if err = s.terminal(ctx, tx, o, "purged", now); err != nil {
+			if err = r2Terminal(ctx, tx, o, "purged", now); err != nil {
 				return err
 			}
 		}
@@ -148,7 +169,7 @@ func (s *Transfers) Tick(ctx context.Context) error {
 					return err
 				}
 			}
-			if err = s.terminal(ctx, tx, o, state, now); err != nil {
+			if err = r2Terminal(ctx, tx, o, state, now); err != nil {
 				return err
 			}
 		}

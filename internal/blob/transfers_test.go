@@ -809,3 +809,38 @@ func TestR2RetainedStorageBlocksNewGrantsDuringDeletionOutage(t *testing.T) {
 		t.Fatal("confirmed deletion did not free capacity")
 	}
 }
+
+// Admission must not expose a hash tombstone to an uploader that has never
+// uploaded bytes or seen a reference, even when its active slots are full.
+func TestR2ActiveGrantCapDoesNotDiscloseConcurrentPurge(t *testing.T) {
+	for _, purge := range []bool{false, true} {
+		t.Run(fmt.Sprint(purge), func(t *testing.T) {
+			f := newTransfers(t)
+			ctx := context.Background()
+			for i := range 20 {
+				request := blobwire.UploadRequest{Size: 1, SHA256: hexSHA([]byte(fmt.Sprint(i))), MediaType: "text/plain"}
+				if _, err := f.s.Reserve(ctx, f.env.OperatorPeer, fmt.Sprint(i), request); err != nil {
+					t.Fatal(err)
+				}
+			}
+			request := blobwire.UploadRequest{Size: 1, SHA256: hexSHA([]byte("new")), MediaType: "text/plain"}
+			for _, phase := range []string{"before", "after", "restart"} {
+				if phase == "after" && purge {
+					if err := f.s.PurgeHash(ctx, hexSHA([]byte("0"))); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if phase == "restart" {
+					f.restart(t)
+				}
+				if _, err := f.s.Reserve(ctx, f.env.OperatorPeer, "overflow", request); !errors.Is(err, blob.ErrR2Busy) {
+					t.Errorf("%s: admission at cap = %v, want upload_busy", phase, err)
+				}
+			}
+			f.env.Now.Advance(blob.R2UploadTTL)
+			if _, err := f.s.Reserve(ctx, f.env.OperatorPeer, "after-deadline", request); err != nil {
+				t.Fatalf("original deadline did not release slots: %v", err)
+			}
+		})
+	}
+}

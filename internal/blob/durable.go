@@ -73,7 +73,10 @@ func (s *Store) PutMessageData(ctx context.Context, tx *sql.Tx, uploader, purpos
 			return Meta{SHA256: sha, Size: int64(len(data)), MediaType: media}, nil
 		}
 	}
-	used, err := usedQuota(ctx, tx, subject, day)
+	// Preserve the legacy hub/source daily allowance across cutover, while
+	// keeping new remote attachment reservations out of this message budget.
+	var used int64
+	err := tx.QueryRowContext(ctx, `SELECT coalesce(sum(bytes),0) FROM blob_quota WHERE peer_id IN (?,?) AND day=?`, uploader, subject, day).Scan(&used)
 	if err != nil {
 		return Meta{}, err
 	}
@@ -124,28 +127,6 @@ func (s *Store) openDurable(ctx context.Context, sha string) (io.ReadSeekCloser,
 		return nil, Meta{}, err
 	}
 	return durableReader{bytes.NewReader(data)}, Meta{SHA256: sha, Size: int64(len(data)), MediaType: media}, nil
-}
-func (s *Store) purgeDurable(ctx context.Context, sha string) (bool, error) {
-	var found bool
-	err := s.DB.Tx(ctx, func(tx *sql.Tx) error {
-		var n int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM durable_blob_payloads WHERE sha256=?`, sha).Scan(&n); err != nil {
-			return err
-		}
-		purged, err := r2Tombstone(ctx, tx, sha)
-		if err != nil {
-			return err
-		}
-		found = n > 0 || purged
-		if !found {
-			return nil
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO blob_purge_tombstones(sha256,purged_at,actor) VALUES(?,?,'operator') ON CONFLICT DO NOTHING`, sha, r2Time(s.Now())); err != nil {
-			return err
-		}
-		return eraseDurable(ctx, tx, sha)
-	})
-	return found, err
 }
 
 // Keep the FK target and retained-message references for access-before-state
