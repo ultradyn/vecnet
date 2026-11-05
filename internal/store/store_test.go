@@ -680,3 +680,46 @@ func TestMigration0021UpgradesFrom0020(t *testing.T) {
 		t.Fatalf("STRICT hub_notices: %d, %v", n, err)
 	}
 }
+
+// Migration 0022 (numbered 0021 on the prefs-build branch, renumbered at its
+// merge after hub-notices took 0021). A hub already at 0021 upgrades by
+// applying only 0022, which creates the preference tables at revision 0 and
+// keeps the identity 0021 seeded.
+func TestMigration0022UpgradesFrom0021(t *testing.T) {
+	ctx := context.Background()
+	db := openTemp(t)
+	seed, err := db.Meta(ctx, "hub_identity_seed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`DELETE FROM schema_migrations WHERE name = '0022_hub_preferences.sql'`,
+		`DROP TABLE hub_preference_activations`,
+		`DROP TABLE hub_preferences_state`,
+		`DROP TABLE hub_preferences`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	applied, err := store.Migrate(ctx, db.DB)
+	if err != nil || !reflect.DeepEqual(applied, []string{"0022_hub_preferences.sql"}) {
+		t.Fatalf("upgrade applied %v, %v; want only 0022", applied, err)
+	}
+	var n int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE name IN ('0020_event_refresh_before.sql', '0021_hub_identity_notices.sql', '0022_hub_preferences.sql')`).Scan(&n); err != nil || n != 3 {
+		t.Fatalf("recorded 0020-0022 = %d, %v", n, err)
+	}
+	for _, name := range []string{"hub_preferences", "hub_preferences_state", "hub_preference_activations"} {
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_list WHERE name=? AND strict=1`, name).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("STRICT %s: %d, %v", name, n, err)
+		}
+	}
+	var revision int
+	if err := db.QueryRowContext(ctx, `SELECT revision FROM hub_preferences_state WHERE id=1`).Scan(&revision); err != nil || revision != 0 {
+		t.Fatalf("initial revision = %d, %v", revision, err)
+	}
+	if got, err := db.Meta(ctx, "hub_identity_seed"); err != nil || got != seed {
+		t.Fatalf("identity seed changed across 0022: %v", err)
+	}
+}

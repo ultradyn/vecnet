@@ -36,18 +36,19 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
-	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/logging"
 	"github.com/XertroV/vecnet/internal/mcpserver"
 	"github.com/XertroV/vecnet/internal/oauth"
+	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
@@ -81,7 +82,6 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	mcpOrigins := fs.String("mcp-allowed-origins", getenv("VECNET_MCP_ALLOWED_ORIGINS"), "extra /mcp origins, comma-separated; empty defaults to https://chatgpt.com, none allows public origin only ($VECNET_MCP_ALLOWED_ORIGINS)")
 	mcpLegacy := fs.String("mcp-legacy-sessions", envOr(getenv, "VECNET_MCP_LEGACY_SESSIONS", "on"), "legacy MCP sessions: on, off-for-oauth, off ($VECNET_MCP_LEGACY_SESSIONS)")
 	oauthRedirects := fs.String("oauth-redirects", getenv("VECNET_OAUTH_REDIRECTS"), "extra OAuth redirect patterns, comma-separated, appended to defaults ($VECNET_OAUTH_REDIRECTS)")
-	eventsRefresh := fs.String("events-refresh-interval", envOr(getenv, "VECNET_EVENTS_REFRESH_INTERVAL", events.RefreshInterval.String()), "MCP Events refresh interval, 1m..24h ($VECNET_EVENTS_REFRESH_INTERVAL; default 30m)")
 	devUIDir := fs.String("dev-ui-dir", "", "serve the operator UI from this directory instead of the embedded copy (development)")
 	allowPrivate := fs.Bool("allow-private-egress", getenv("VECNET_ALLOW_PRIVATE_EGRESS") == "1",
 		"development only: let outbound URLs be http and reach private/loopback addresses ($VECNET_ALLOW_PRIVATE_EGRESS=1)")
@@ -89,6 +89,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 		"key the per-client rate limit on the Fly-Client-IP header; only behind Fly's proxy ($VECNET_TRUST_FLY_CLIENT_IP=1)")
 	relocatedTo := fs.String("relocated-to", getenv("VECNET_RELOCATED_TO"), "answer hub_moved without workers at the old hub ($VECNET_RELOCATED_TO)")
 	restartRetry := fs.String("restart-retry-ms", envOr(getenv, "VECNET_RESTART_RETRY_MS", "5000"), "restart reconnect delay in milliseconds, 0..60000 ($VECNET_RESTART_RETRY_MS)")
+	resolvePreferences := registerPreferenceFlags(fs, getenv)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -114,9 +115,16 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if err != nil || retryMS < 0 || retryMS > 60000 {
 		return errors.New("--restart-retry-ms must be an integer in 0..60000")
 	}
-	refreshInterval, err := time.ParseDuration(*eventsRefresh)
-	if err != nil || refreshInterval < time.Minute || refreshInterval > 24*time.Hour {
-		return errors.New("events refresh interval must be a Go duration between 1m and 24h")
+	// --events-refresh-interval is registered and resolved with the other
+	// preference flags: its environment value never enters flag metadata, so
+	// usage and parser errors cannot echo it.
+	preferenceConfig, err := resolvePreferences()
+	if err != nil {
+		var pe *prefs.Error
+		if errors.As(err, &pe) && pe.Details.Field == "events.refresh_interval" {
+			return fmt.Errorf("events refresh interval must be a whole-second Go duration between 1m and 24h: %w", err)
+		}
+		return err
 	}
 	origins, err := mcpserver.ParseAllowedOrigins(*mcpOrigins)
 	if err != nil {
@@ -133,7 +141,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	return serve(ctx, serveConfig{
 		Listen: *listen, DataDir: *dataDir, PublicURL: *publicURL, DevUIDir: *devUIDir, RelocatedTo: *relocatedTo,
 		AllowPrivateEgress: *allowPrivate, TrustFly: *trustFly, RestartRetry: time.Duration(retryMS) * time.Millisecond,
-		MCPOrigins: origins, OAuthRedirects: redirects, RefreshInterval: refreshInterval, MCPLegacySessions: legacy,
+		MCPOrigins: origins, OAuthRedirects: redirects, RefreshInterval: preferenceConfig.EventsRefreshInterval, MCPLegacySessions: legacy,
+		Bootstrap: &preferenceConfig,
 	}, stdout)
 }
 
@@ -231,12 +240,15 @@ func openStore(dataDir string) (*store.DB, error) {
 }
 
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
-func openHub(dataDir, publicURL string, allowPrivateEgress bool) (*hub.Hub, *store.DB, error) {
+func openHub(dataDir, publicURL string, allowPrivateEgress bool, bootstrap ...hub.Config) (*hub.Hub, *store.DB, error) {
 	db, err := openStore(dataDir)
 	if err != nil {
 		return nil, nil, err
 	}
 	cfg := hub.DefaultConfig()
+	if len(bootstrap) > 0 {
+		cfg = bootstrap[0]
+	}
 	cfg.DataDir = dataDir
 	cfg.PublicURL = publicURL
 	cfg.AllowPrivateEgress = allowPrivateEgress
@@ -282,6 +294,9 @@ type serveConfig struct {
 	MCPOrigins, OAuthRedirects           []string
 	RefreshInterval                      time.Duration
 	MCPLegacySessions                    string
+	// Bootstrap is the hub.Config resolved from the preference flags; nil
+	// means hub.DefaultConfig(). RefreshInterval still wins for Events.
+	Bootstrap *hub.Config
 }
 
 // serve runs until ctx is cancelled. Relocated mode serves a signed move
@@ -329,7 +344,14 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 			return errors.New("--relocated-to must differ from --public-url")
 		}
 	}
-	h, db, err := openHub(cfg.DataDir, publicURL, cfg.AllowPrivateEgress)
+	// Preference flags resolve into the bootstrap Config before hub.New, so
+	// the preference service records their flag/environment provenance.
+	bootstrap := hub.DefaultConfig()
+	if cfg.Bootstrap != nil {
+		bootstrap = *cfg.Bootstrap
+	}
+	bootstrap.EventsRefreshInterval = cfg.RefreshInterval
+	h, db, err := openHub(cfg.DataDir, publicURL, cfg.AllowPrivateEgress, bootstrap)
 	if err != nil {
 		ln.Close()
 		return err
@@ -339,7 +361,6 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	if cfg.AllowPrivateEgress {
 		slog.Warn("vecnet-hub: private egress allowed (development only): outbound URLs may be http and reach private addresses")
 	}
-	h.Cfg.EventsRefreshInterval = cfg.RefreshInterval
 	stack := httpapi.NewStack(h)
 	stack.OAuth.AllowedRedirects = cfg.OAuthRedirects
 	// Shutdown does not cancel request contexts, so long-lived SSE streams
@@ -415,4 +436,107 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 		return err
 	}
 	return nil
+}
+
+// registerPreferenceFlags captures explicit visits separately from values, so
+// configuring a built-in value still carries flag/environment provenance.
+// String flags defer scalar parsing until resolution to avoid echoing rejected
+// values in flag package errors. getenv is injected; empty means absent under
+// the existing run contract (func(string) string cannot distinguish unset).
+func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func() (hub.Config, error) {
+	type binding struct {
+		key, flag, env string
+	}
+	bindings := []binding{
+		{key: "events.refresh_interval", flag: "events-refresh-interval"},
+		{key: "presence.default_ttl", flag: "presence-ttl"},
+		{key: "presence.session_ttl", flag: "session-presence-ttl"},
+		{key: "presence.launcher_ttl", flag: "launcher-presence-ttl"},
+		{key: "agents.default_max_depth", flag: "default-max-depth"},
+		{key: "agents.default_ttl", flag: "default-ttl"},
+		{key: "agents.thread_budget", flag: "thread-budget"},
+		{key: "rates.sends_per_minute", flag: "sends-per-minute"},
+		{key: "rates.threads_per_hour", flag: "threads-per-hour"},
+		{key: "provisioning.creates_per_hour", flag: "creates-per-hour"},
+	}
+	for i := range bindings {
+		b := &bindings[i]
+		b.env = "VECNET_" + strings.ToUpper(strings.ReplaceAll(b.flag, "-", "_"))
+		d, _ := prefs.Lookup(b.key)
+		n, _ := d.Default.Int64()
+		def := strconv.FormatInt(n, 10)
+		if d.Type == prefs.TypeDuration {
+			def = (time.Duration(n) * time.Second).String()
+		}
+		// Usage can run before validation (help or any parser error). Only safe
+		// built-in defaults may enter flag metadata; resolve the environment below.
+		fs.String(b.flag, def, d.Description+" ($"+b.env+")")
+	}
+	return func() (hub.Config, error) {
+		cfg := hub.DefaultConfig()
+		cfg.PreferenceBootstrap = map[string]prefs.Effective{}
+		visited := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { visited[f.Name] = true })
+		for _, b := range bindings {
+			origin := ""
+			raw := fs.Lookup(b.flag).Value.String()
+			if environment := getenv(b.env); environment != "" {
+				origin = b.env
+				raw = environment
+			}
+			if visited[b.flag] {
+				origin = "--" + b.flag
+				raw = fs.Lookup(b.flag).Value.String()
+			}
+			d, _ := prefs.Lookup(b.key)
+			var n int64
+			var err error
+			if d.Type == prefs.TypeDuration {
+				var duration time.Duration
+				duration, err = time.ParseDuration(raw)
+				if err != nil || duration%time.Second != 0 {
+					return cfg, &prefs.Error{Code: prefs.CodeInvalidValue, Details: prefs.ErrorDetails{Field: b.key, Constraint: "whole_seconds"}}
+				}
+				n = int64(duration / time.Second)
+			} else {
+				n, err = strconv.ParseInt(raw, 10, 64)
+			}
+			if err != nil {
+				return cfg, &prefs.Error{Code: prefs.CodeInvalidValue, Details: prefs.ErrorDetails{Field: b.key, Constraint: "integer"}}
+			}
+			value := prefs.Int(n)
+			if d.Type == prefs.TypeDuration {
+				value = prefs.Duration(n)
+			}
+			if err := prefs.Validate(d, value); err != nil {
+				return cfg, err
+			}
+			if origin != "" {
+				cfg.PreferenceBootstrap[b.key] = prefs.Effective{Value: value, Source: prefs.SourceFlag, Origin: origin}
+			}
+			switch b.key {
+			case "events.refresh_interval":
+				cfg.EventsRefreshInterval = time.Duration(n) * time.Second
+			case "presence.default_ttl":
+				cfg.PresenceTTL = time.Duration(n) * time.Second
+			case "presence.session_ttl":
+				cfg.SessionPresenceTTL = time.Duration(n) * time.Second
+			case "presence.launcher_ttl":
+				cfg.LauncherPresenceTTL = time.Duration(n) * time.Second
+			case "agents.default_max_depth":
+				cfg.DefaultMaxDepth = int(n)
+			case "agents.default_ttl":
+				cfg.DefaultTTL = time.Duration(n) * time.Second
+			case "agents.thread_budget":
+				cfg.ThreadBudget = int(n)
+			case "rates.sends_per_minute":
+				cfg.SendsPerMin = int(n)
+			case "rates.threads_per_hour":
+				cfg.ThreadsPerHour = int(n)
+			case "provisioning.creates_per_hour":
+				cfg.CreatesPerHour = int(n)
+			}
+		}
+		return cfg, nil
+	}
 }
