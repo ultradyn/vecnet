@@ -11,7 +11,7 @@ const isOthers = url => { const u = new URL(url); return u.pathname === '/v1/adm
 
 try {
   await withDemo({}, async ctx => {
-    const { page, shot, demo, asPeer, advance, hold, allowConsole, countRequests } = ctx;
+    const { page, shot, demo, asPeer, advance, hold, allowConsole, countRequests, quiet } = ctx;
     // Chromium logs each non-2xx fetch; this is the failure the script provokes.
     allowConsole(/status of 500/);
     const others = page.locator('#others');
@@ -51,6 +51,7 @@ try {
     // Empty: every seeded thread includes the operator.
     await others.locator('.none', { hasText: 'No other threads' }).waitFor();
     assert(countRequests(req => isOthers(req.url()) && new URL(req.url()).searchParams.get('exclude_participant') === demo.operator_peer) >= 1, 'Other Threads did not exclude the operator');
+    await quiet();
     await showOthers();
     await shot('sb-others-empty');
 
@@ -80,6 +81,18 @@ try {
     const solo = await send('codex', { recipients: [demo.operator_peer], content: { text: 'Quick one: is the gate green?' } });
     const huddle = await send('grok', { recipients: [demo.operator_peer, p('sleuth'), p('claw'), p('digest')], content: { text: 'Huddle on the push route.' } });
     const { now } = await advance('2m');
+    // The jump also lapses the seeded subscriptions' tokens; the events worker
+    // pauses them on its next step (expired and late read paused · token).
+    // Wait for that before the presence report below re-reads the inbox the
+    // shots show behind the sidebar, or a slow step leaves one reading expired.
+    for (let tries = 0; ; tries++) {
+      const r = await asPeer('operator', 'GET', '/v1/admin/subscriptions');
+      assert(r.ok, `subscriptions: ${r.status}`);
+      const subs = await r.json();
+      if (!subs.some(sub => sub.health === 'expired' || sub.health === 'late')) break;
+      assert(tries < 600, `the events worker never paused the lapsed subscriptions: ${subs.map(sub => sub.health).join()}`);
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
     // The jump outlives the seeded presence; report it again at the new hub time.
     const pres = await asPeer('operator', 'POST', '/v1/presence', { state: 'working', at: now });
     assert(pres.ok, `operator presence: ${pres.status}`);
@@ -103,6 +116,10 @@ try {
     // Peer text is text: the hostile title neither makes an element nor keeps its bidi override.
     assert(ho.title === '<img src=x onerror=alert(1)> pwn', `hostile title ${JSON.stringify(ho.title)}`);
     assert(await page.locator('nav.side img').count() === 0, 'a peer string became an element');
+    // The clock jump outlived the seeded presence, so You and the inbox aside
+    // read "presence unknown" until the directory is re-read after the report.
+    await page.locator('#me .who', { hasText: /^max is working$/ }).waitFor();
+    await quiet();
     await showOthers();
     await shot('sb-others-populated');
 
@@ -114,11 +131,13 @@ try {
     assert(hu.un && hu.title === 'grok-reviewer, pag-hark-sleuth +2' && hu.people === '5 participants' && hu.count === '1' && hu.ago === '2m ago', `huddle row ${JSON.stringify(hu)}`);
     assert(so.un && so.title === 'codex-hark' && so.people === '2 participants' && so.ago === '2m ago', `1:1 row ${JSON.stringify(so)}`);
     assert(yours.filter(r => !r.un).every(r => r.ago && !r.people.split(', ').includes('max')), `titled rows ${JSON.stringify(yours)}`);
+    await quiet();
     await page.locator('nav.side').evaluate(el => { el.scrollTop = 0; });
     await shot('sb-yours-rows');
     // The whole sidebar in one frame, so the two lists can be compared.
     const tall = await page.locator('nav.side').evaluate(el => el.scrollHeight);
     await page.setViewportSize({ width: 1440, height: tall });
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await shot('sb-threads-full');
     await page.setViewportSize({ width: 1440, height: 900 });
 
@@ -163,6 +182,7 @@ try {
     await others.locator('a.on', { hasText: 'Classifier rollout plan' }).waitFor();
     assert(await page.locator('#threads a.on').count() === 0, 'Your Threads lit a thread the operator is not in');
     await page.locator('#aside .pp', { hasText: 'pag-hark-sleuth' }).first().waitFor();
+    await quiet();
     await showOthers();
     await shot('sb-others-thread');
 
@@ -173,6 +193,9 @@ try {
       await page.locator('.thead h1.un', { hasText: stand }).waitFor();
       assert(await page.locator('.thead h1').textContent() === stand, `header ${await page.locator('.thead h1').textContent()}`);
       await list.locator('a.on .tt.un', { hasText: stand }).waitFor();
+      // Receipts come from the delivery matrix, a load of its own.
+      await page.locator('#view .msg', { hasText: text }).locator('.rc span').first().waitFor();
+      await quiet();
       await shot(name);
     };
     await opened(others, 'grok-reviewer ↔ claw-ops', 'Can you look at the push route?', 'sb-untitled-pair');
@@ -188,6 +211,7 @@ try {
     await others.locator('.none', { hasText: 'Other threads unavailable' }).waitFor();
     await page.locator('#threads a').first().waitFor();
     assert(await others.locator('a[href^="#thread/"]').count() === 0, 'error state still lists threads');
+    await quiet();
     await shot('sb-others-error');
 
     // Recovery on the next poll.

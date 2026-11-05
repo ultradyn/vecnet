@@ -4,7 +4,7 @@ import { assert, cleanBuild, withDemo } from './lib.mjs';
 
 try {
   await withDemo({}, async ctx => {
-    const { page, shot, demo, asPeer, allowConsole, countRequests } = ctx;
+    const { page, shot, demo, asPeer, allowConsole, countRequests, quiet, ignore } = ctx;
     const hark = demo.threads.hark, quota = demo.threads.quota;
     // Chromium logs every non-2xx fetch and every aborted request as a console
     // error. These are the ones this script provokes on purpose.
@@ -75,6 +75,7 @@ try {
     const col = await page.locator('#view').boundingBox();
     assert(col.width > 760, `reading column is only ${col.width}px`);
     assert(countRequests(isRead) === 1, `opening the thread sent ${countRequests(isRead)} read POSTs`);
+    await quiet();
     await shot('09-thread-initial');
 
     // live delivery from asPeer appears without reload
@@ -141,6 +142,9 @@ try {
     await ta.press('Enter');
     await page.locator('.composer .send:disabled').waitFor();
     await ta.press('Enter'); // a second press while held sends nothing
+    const unheld = ignore(req => req.method() === 'POST' && req.url().endsWith('/v1/messages'));
+    await quiet();
+    unheld();
     await shot('09-thread-progress');
     release();
     await page.locator('.composer .cbanner', { hasText: 'network:' }).waitFor();
@@ -173,21 +177,33 @@ try {
     assert(await sentMsg.locator('.rc span', { hasText: 'max' }).count() === 0, 'the sender has a receipt marker on its own message');
     await page.locator('#toast.on').waitFor({ state: 'hidden' });
     await page.evaluate(() => Promise.all(document.getElementById('toast').getAnimations().map(a => a.finished)));
+    await quiet();
     await shot('09-thread-success');
 
     // The quota thread's budget is exhausted: a banner names it, the text stays.
+    const quotaRead = page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith(`/v1/admin/threads/${quota}/read`));
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, quota);
     await page.locator('.msg .txt', { hasText: 'exhausted its message budget' }).waitFor();
+    // Opening marks it read: the receipt moves from accepted to read once the
+    // POST lands and the matrix reloads.
+    assert((await quotaRead).ok(), 'the quota thread read POST failed');
+    await page.locator('.msg .rc .st-read', { hasText: 'max read' }).waitFor();
     // The snapshot already says the budget is spent: the banner shows before a send.
     await page.locator('.composer .cbanner.budget', { hasText: 'you raise the budget' }).waitFor();
     const ask = 'Can we raise the budget on this one?';
     await ta.fill(ask);
+    // The banner is already up, so it proves nothing about the send: wait for
+    // the hub's refusal and Send to come back.
+    const refused = page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith('/v1/messages'));
     await ta.press('Enter');
+    assert(!(await refused).ok(), 'the send into a spent thread was not refused');
     const banner = page.locator('.composer .cbanner.budget');
     await banner.waitFor();
+    await page.locator('.composer .send:enabled').waitFor();
     assert(/budget/i.test(await banner.textContent()), 'the banner does not name the budget');
     assert(await ta.inputValue() === ask, 'the text was lost on thread_budget_exhausted');
     assert(dialogs === 0, 'a body opened a dialog');
+    await quiet();
     await shot('09-thread-error');
 
     // An open approval is answered inline with one POST (Task 8 rules).

@@ -12,7 +12,7 @@ const CODE = /^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
 
 try {
   await withDemo({}, async ctx => {
-    const { page, shot, demo, allowConsole } = ctx;
+    const { page, shot, demo, allowConsole, quiet } = ctx;
     allowConsole(/status of 422/);
     allowConsole(/status of 503/);
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
@@ -201,6 +201,11 @@ try {
     await draft.fill('draft kept under the dialog');
     await page.evaluate(() => { document.querySelector('.composer textarea').dataset.mounted = 'nav-add'; });
     assert(await navAdd.isEnabled(), 'sidebar Add agent is disabled once signed in');
+    // The thread's detail (aside, open approvals) and receipts load apart from
+    // its first message: wait for all of them, and for the list's last redraw
+    // to pin it to the bottom.
+    await page.locator('#aside h3', { hasText: 'Participants' }).waitFor();
+    await quiet();
     await shot('inv-6-nav');
     await navAdd.focus();
     await page.keyboard.press('Enter');

@@ -15,7 +15,7 @@ function newId(prefix) {
 
 try {
   await withDemo({}, async ctx => {
-    const { page, shot, demo, asPeer, advance, hold, allowConsole, countRequests } = ctx;
+    const { page, shot, demo, asPeer, advance, hold, allowConsole, countRequests, quiet } = ctx;
     // Chromium logs every non-2xx fetch as a console error. The late answer is
     // the only one this script provokes on purpose.
     allowConsole(/status of 422/);
@@ -62,6 +62,7 @@ try {
     assert(await page.locator('#view .item', { hasText: 'sent as hold: kept for your next look' }).count() > 0, 'held rows explain why');
     const onPage = await page.locator('aside .onpage a').allTextContents();
     assert(onPage.join('|') === 'Needs a decision|Failed deliveries|Subscriptions|Woke you|Held', `on this page: ${onPage.join('|')}`);
+    await quiet();
     await shot('08-inbox-initial');
 
     // ---- double-click sends one POST (progress, then success) ----
@@ -72,12 +73,14 @@ try {
       await sent;
       assert(await enabledIn(card(aprA)) === 0, 'options stayed enabled while the answer was in flight');
       assert(posts(aprA) === 1, `double-click sent ${posts(aprA)} POSTs`);
+      await quiet();
       await shot('08-inbox-progress');
       await releasePost();
       await page.locator('#toast.on', { hasText: 'Answered “yes”' }).waitFor();
       assert(await card(aprA).count() === 0, 'answered card is still listed');
       assert(await page.locator('#inbox-approvals .n').textContent() === '1 open', 'approval count did not drop');
       await toastSettled();
+      await quiet();
       await shot('08-inbox-success');
       assert(posts(aprA) === 1, `double-click sent ${posts(aprA)} POSTs in all`);
       console.log('ok - double-click sends one POST');
@@ -107,6 +110,7 @@ try {
       assert(await page.locator('#toast').textContent() === 'Already closed', 'late click was reported as landed');
       assert(posts(aprB) === 1, `late click sent ${posts(aprB)} POSTs`);
       await toastSettled();
+      await quiet();
       await shot('08-inbox-error');
       assert(posts(aprB) === 1, `late click was retried: ${posts(aprB)} POSTs`);
       await releaseEvents();
@@ -243,10 +247,19 @@ try {
       const more = page.getByRole('button', { name: 'Load older', exact: true });
       await page.locator('#view a.item', { hasText: 'Older note 59' }).waitFor();
       await more.waitFor();
+      // A head reload while the older page is in flight drops that page and
+      // offers "Load older" again from the new tail (inbox.js loadOlder), and
+      // the hub's sweeps keep moving the head for a while after the clock
+      // jumps. So click once the page has drawn every snapshot it asked for,
+      // and again only if the click was spent on a head that then moved.
+      for (let tries = 0; ; tries++) {
+        await quiet();
+        if (!await more.count()) break;
+        assert(tries < 5, '"Load older" never took: the inbox head kept moving');
+        await more.click();
+      }
       const before = await hubRows();
       assert(before.length > 50 && before.length <= 100, `${before.length} deliveries; the check wants two pages`);
-      await more.click();
-      await more.waitFor({ state: 'detached' });
       await page.locator(`#view a.item[data-id="${before[before.length - 1]}"]`).waitFor();
       await matchHub(before, 'older page did not join the head');
 
