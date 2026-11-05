@@ -378,6 +378,15 @@ func noMoveJitter(t *testing.T) {
 	moveJitter = func() time.Duration { return 0 }
 	t.Cleanup(func() { moveJitter = saved })
 }
+
+// fastWatchBackoff shortens reconnect backoff so outage tests do not wait on
+// the real 1-60 s schedule. No test in this package calls t.Parallel.
+func fastWatchBackoff(t *testing.T) {
+	t.Helper()
+	retry, floor := watchStartRetry, watchMinBackoff
+	watchStartRetry, watchMinBackoff = 50*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { watchStartRetry, watchMinBackoff = retry, floor })
+}
 func TestWatchFollowsAtTime(t *testing.T) {
 	noMoveJitter(t)
 	a := testhub.Start(t)
@@ -643,6 +652,7 @@ func identityFlakyProxy(t *testing.T, e *testhub.Env, statuses ...int) *httptest
 func TestWatchIdentityOutageRetries(t *testing.T) {
 	for _, status := range []int{http.StatusServiceUnavailable, http.StatusTooManyRequests} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			fastWatchBackoff(t)
 			e := testhub.Start(t)
 			srv := identityFlakyProxy(t, e, status)
 			_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n", srv.URL, e.Hub.IdentityKey().Pubkey(), e.OperatorSecret))
@@ -678,5 +688,127 @@ func TestWatchUnpinnedAliasURL(t *testing.T) {
 	pp, _ := pinsPath(env)
 	if records, err := readPins(pp); err != nil || records["p"].Pubkey != "" {
 		t.Fatalf("alias URL pinned: %+v %v", records, err)
+	}
+}
+
+// DEPLOY.md: a profile enrolled through an alias URL (not the hub's
+// public_url) is pinned from the enrol answer. Its watch proves the pinned key
+// with a fresh challenge signed for the served public_url, and connects.
+func TestWatchPinnedAliasURL(t *testing.T) {
+	e := testhub.Start(t)
+	target, _ := url.Parse(e.URL)
+	alias := httptest.NewServer(httputil.NewSingleHostReverseProxy(target))
+	t.Cleanup(alias.Close)
+	path, env := pinTestEnv(t, fmt.Sprintf("[profiles.op]\nhub = %q\nsecret = %q\n", e.URL, e.OperatorSecret))
+	code, out, errs := pinRun(env, "--net", "op", "--json", "peer", "add", "--kind", "session", "--name", "Alias")
+	var added struct {
+		PeerID     string `json:"peer_id"`
+		EnrolToken string `json:"enrol_token"`
+	}
+	if code != 0 || json.Unmarshal([]byte(out), &added) != nil {
+		t.Fatalf("peer add: %d %s %s", code, out, errs)
+	}
+	if code, _, errs := pinRun(env, "enrol", "--hub", alias.URL, "--token", added.EnrolToken, "--profile", "p"); code != 0 {
+		t.Fatalf("enrol: %d %s", code, errs)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil || cfg.Profiles["p"].Hub != alias.URL || cfg.Profiles["p"].HubPubkey != e.Hub.IdentityKey().Pubkey() {
+		t.Fatalf("enrol profile: %+v %v", cfg.Profiles["p"], err)
+	}
+	if code, _, errs := pinRun(env, "peers"); code != 0 {
+		t.Fatalf("peers: %d %s", code, errs)
+	}
+	holdMessage(t, e, added.PeerID, "via pinned alias")
+	watchOut, watchErrs, stop := runNoticeWatch(t, env)
+	awaitNotice(t, func() bool { return strings.Contains(watchOut.String(), "via pinned alias") }, 5*time.Second)
+	stop()
+	if strings.Contains(watchErrs.String(), "hub_identity") {
+		t.Fatalf("stderr: %q", watchErrs.String())
+	}
+}
+
+// The alias tolerance covers the URL only: a pinned alias serving another key
+// still exits hub_identity_changed before any bearer request.
+func TestWatchPinnedAliasKeyMismatch(t *testing.T) {
+	e := testhub.Start(t)
+	target, _ := url.Parse(e.URL)
+	var events atomic.Int32
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	alias := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/events" {
+			events.Add(1)
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(alias.Close)
+	_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n", alias.URL, testIdentityKey(t, "2").Pubkey(), e.OperatorSecret))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var out, errs bytes.Buffer
+	code := RunContext(ctx, []string{"watch"}, strings.NewReader(""), &out, &errs, env)
+	if code != 1 || !strings.Contains(errs.String(), "hub_identity_changed") || events.Load() != 0 {
+		t.Fatalf("%d events=%d %s", code, events.Load(), errs.String())
+	}
+}
+
+// A scheduled follow whose destination is not reachable yet (DNS lag on a
+// domain move) is an outage: one relocation_unverified line, the watch stays
+// on the old hub, and the follow retries until the destination comes up.
+func TestWatchScheduledFollowWaitsForDestination(t *testing.T) {
+	noMoveJitter(t)
+	fastWatchBackoff(t)
+	a := testhub.Start(t)
+	// The destination refuses connections until B exists; B is cloned only
+	// after the watch has seen A's later events, so its cursor stays valid.
+	var b atomic.Pointer[testhub.Env]
+	var dest *httptest.Server
+	dest = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hub := b.Load()
+		if hub == nil {
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				conn.Close()
+			}
+			return
+		}
+		if r.URL.Path == "/v1/hub/identity" {
+			sig, err := hub.Hub.IdentityKey().SignChallenge(dest.URL, r.URL.Query().Get("challenge"))
+			if err != nil {
+				t.Error(err)
+			}
+			json.NewEncoder(w).Encode(envelope.HubIdentity{Pubkey: hub.Hub.IdentityKey().Pubkey(), PublicURL: dest.URL, ChallengeSig: sig})
+			return
+		}
+		target, _ := url.Parse(hub.URL)
+		httputil.NewSingleHostReverseProxy(target).ServeHTTP(w, r)
+	}))
+	t.Cleanup(dest.Close)
+	path, env := followConfig(t, a)
+	out, errs, stop := runNoticeWatch(t, env)
+	holdMessage(t, a, a.OperatorPeer, "connected at A")
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "connected at A") }, 5*time.Second)
+	resp, raw := a.Do(a.OperatorSecret, "POST", "/v1/admin/notices", map[string]any{"kind": "moving", "message": "Move soon", "at": envelope.FormatTime(time.Now().Add(time.Second)), "new_url": dest.URL})
+	if resp.StatusCode != 201 {
+		t.Fatalf("notice: %d %s", resp.StatusCode, raw)
+	}
+	awaitNotice(t, func() bool {
+		return strings.Contains(out.String(), "- relocation_unverified - hub hub: not following "+dest.URL+": hub identity unavailable")
+	}, 5*time.Second)
+	holdMessage(t, a, a.OperatorPeer, "still at A")
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "still at A") }, 5*time.Second)
+	time.Sleep(time.Second) // several retries fail before the destination comes up
+	b.Store(a.CloneDB(t))
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "- hub_moved - hub hub:") }, 10*time.Second)
+	cfg, err := loadConfig(path)
+	if err != nil || cfg.Profiles["p"].Hub != dest.URL {
+		t.Fatalf("not followed: %+v %v", cfg.Profiles["p"], err)
+	}
+	holdMessage(t, b.Load(), a.OperatorPeer, "delivery at B")
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "delivery at B") }, 5*time.Second)
+	stop()
+	if n := strings.Count(out.String(), "relocation_unverified"); n != 1 {
+		t.Fatalf("relocation_unverified printed %d times: %q", n, out.String())
+	}
+	if strings.Contains(errs.String(), "relocation_unverified") {
+		t.Fatalf("stderr: %q", errs.String())
 	}
 }

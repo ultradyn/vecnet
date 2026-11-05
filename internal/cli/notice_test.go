@@ -25,6 +25,9 @@ func TestNoticePostListClear(t *testing.T) {
 	if code, out, errs := pinRun(env, "--json", "notice", "list"); code != 0 || strings.TrimSpace(out) != "[]" {
 		t.Fatalf("empty list: %d %q %s", code, out, errs)
 	}
+	if code, out, errs := pinRun(env, "notice", "clear", "--kind", "maintenance"); code != 0 || strings.TrimSpace(out) != "no active maintenance notice" {
+		t.Fatalf("clear with nothing active: %d %q %s", code, out, errs)
+	}
 	_, secret := e.NewPeer("session", "peer")
 	_, peerEnv := pinTestEnv(t, "[profiles.p]\nhub = \""+e.URL+"\"\nsecret = \""+secret+"\"\n")
 	if code, _, errs := pinRun(peerEnv, "notice", "post", "--kind", "maintenance", "--message", "No"); code != 1 || !strings.Contains(errs, "forbidden") {

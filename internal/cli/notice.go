@@ -133,6 +133,9 @@ func (a *app) cmdNotice(args []string) error {
 					ids = append(ids, n.NoticeID)
 				}
 			}
+			if len(ids) == 0 {
+				return a.ok("no active " + o.str("kind") + " notice")
+			}
 		}
 		for _, id := range ids {
 			if err = c.do(a.ctx, http.MethodPost, "/v1/admin/notices/"+pathEscape(id)+"/clear", nil, nil, nil); err != nil {

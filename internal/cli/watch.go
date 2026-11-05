@@ -223,7 +223,7 @@ func (a *app) cmdWatch(args []string) error {
 		a: a, c: c, ch: ch, name: name,
 		names:      ch.peerNames(),
 		forMonitor: o.has("for-monitor"), autoAck: o.has("auto-ack"), deliveriesOnly: o.has("deliveries-only"),
-		retry: watchDefaultRetry, seen: newDedupe(dedupeWindow),
+		retry: watchStartRetry, seen: newDedupe(dedupeWindow),
 	}
 	if w.forMonitor && !a.json {
 		if path, err := statePath(a.getenv, name, a.as); err == nil {
@@ -268,11 +268,20 @@ type watcher struct {
 	announceMove     bool   // print the hub_moved line after the next verified connection
 	pin              string // the key the current hub last proved ("" while unpinned)
 	unverifiedWarned bool   // the unpinned-identity warning is printed once per watch
+	followWarned     string // the notice whose unreachable destination was reported
+	followAttempts   int    // consecutive scheduled follows that found the destination unreachable
 }
 
 // moveJitter spreads a scheduled follow over 0-30 s after the notice's at
 // (Task 7); tests replace it to follow without waiting.
 var moveJitter = func() time.Duration { return rand.N(30*time.Second + 1) }
+
+// The reconnect backoff starts from the hub's retry (watchStartRetry until the
+// hub names one) and never drops below watchMinBackoff; tests shorten both.
+var (
+	watchStartRetry = watchDefaultRetry
+	watchMinBackoff = time.Second
+)
 
 // errPeerDisabled is the 204 answer: stop reconnecting (PROTOCOL §2.3).
 var errPeerDisabled = &hubError{Status: http.StatusNoContent, Code: "peer_disabled", Message: "the hub reports this peer disabled; not reconnecting"}
@@ -295,6 +304,7 @@ func terminal(err error) bool {
 
 var errRestarting = errors.New("hub restarting")
 var errMoveDue = errors.New("moving notice due")
+var errMoveUnavailable = errors.New("move destination unavailable")
 
 func (w *watcher) run() error {
 	ctx := w.a.ctx
@@ -351,7 +361,7 @@ func (w *watcher) run() error {
 			n := w.move
 			w.stopMoveTimer()
 			if n != nil {
-				if err = w.followNotice(*n); err != nil {
+				if err = w.followNotice(*n, true); err != nil {
 					return err
 				}
 			}
@@ -359,11 +369,15 @@ func (w *watcher) run() error {
 			continue
 		}
 		if followed, followErr := w.followError(err); followed {
-			if followErr != nil {
+			switch {
+			case errors.Is(followErr, errMoveUnavailable):
+				err = followErr // back off and retry like any outage
+			case followErr != nil:
 				return followErr
+			default:
+				failures = 0
+				continue
 			}
-			failures = 0
-			continue
 		}
 		if oldest, ok := oldestCursor(err); ok && purges < 2 {
 			fmt.Fprintf(w.a.stderr, "cursor_purged: resuming from %s; re-sync threads with `vecnet thread <id>`\n", oldest)
@@ -424,7 +438,13 @@ func (w *watcher) verifyConnection() error {
 	}
 	w.name, w.profile = name, p
 	pin, _ := w.a.effectivePin(name, p)
-	doc, rotated, err := verifyHub(w.a.ctx, p.Hub, pin, p.AllowInsecureHTTP || w.a.getenv(insecureEnv) == "1")
+	// A pinned profile may name an alias of the hub (DEPLOY.md: enrol through
+	// vecnet.fly.dev pins the key from the enrol answer): prove the pinned key
+	// with a fresh challenge for the served public_url, and exit only on a key
+	// mismatch. Unpinned profiles and a just-followed hub keep the strict
+	// public_url check; follow targets and repoint always use it.
+	matchURL := pin == "" || w.announceMove
+	doc, rotated, err := verifyHubAt(w.a.ctx, p.Hub, pin, p.AllowInsecureHTTP || w.a.getenv(insecureEnv) == "1", matchURL)
 	if err != nil {
 		var re *relocationError
 		if !errors.As(err, &re) {
@@ -608,6 +628,14 @@ func (w *watcher) refreshMoving() {
 			moving = &copy
 		}
 	}
+	own, _ := hubid.NormalizeURL(w.profile.Hub)
+	if moving != nil {
+		// The move that brought this watch here, still listed by the new hub
+		// (its database was copied from the old one), is already done.
+		if next, e := hubid.NormalizeURL(moving.NewURL); e == nil && next == own {
+			moving = nil
+		}
+	}
 	if moving == nil {
 		w.stopMoveTimer()
 		w.move = nil
@@ -627,8 +655,11 @@ func (w *watcher) refreshMoving() {
 	}
 	pin, _ := w.a.effectivePin(w.name, w.profile)
 	source, e := hubid.NormalizeURL(moving.Hub)
-	own, _ := hubid.NormalizeURL(w.profile.Hub)
-	if e != nil || source != own || hubid.VerifyNotice(pin, *moving) != nil {
+	if e != nil || source != own {
+		w.systemLine("relocation_unverified", "not following "+moving.NewURL+": notice does not describe this hub moving")
+		return
+	}
+	if hubid.VerifyNotice(pin, *moving) != nil {
 		w.systemLine("relocation_unverified", "not following "+moving.NewURL+": invalid moving notice signature")
 		return
 	}
@@ -645,12 +676,19 @@ func (w *watcher) refreshMoving() {
 	w.moveC = w.moveTimer.C
 }
 
-func (w *watcher) followNotice(n envelope.HubNotice) error {
+// followNotice follows n (scheduled: its timer fired; otherwise a 410). A
+// destination that is not reachable yet (DNS lag on a domain move, a proxy
+// 502) is an outage, not a refusal: the line prints once per notice and the
+// follow retries with backoff (PROTOCOL §13.1), a scheduled one while the
+// watch stays on the current hub. Refusals (signature, key, public_url,
+// replay) end the watch.
+func (w *watcher) followNotice(n envelope.HubNotice, scheduled bool) error {
 	next, err := w.a.follow(w.a.ctx, w.name, w.profile, n)
 	if err != nil {
 		// Another watch or command on this hub may already have followed it
 		// for every profile there (Decision 6): adopt that move.
 		if w.adoptFollowed(&n) {
+			w.followAttempts = 0
 			return nil
 		}
 		reason := err.Error()
@@ -658,9 +696,26 @@ func (w *watcher) followNotice(n envelope.HubNotice) error {
 		if errors.As(err, &re) {
 			reason = re.Reason
 		}
-		w.systemLine("relocation_unverified", "not following "+n.NewURL+": "+reason)
-		return err
+		transient := re != nil && (re.Reason == "hub identity unavailable" || re.Reason == "hub did not serve an identity")
+		if !transient || w.followWarned != n.NoticeID {
+			w.systemLine("relocation_unverified", "not following "+n.NewURL+": "+reason)
+		}
+		if !transient {
+			return err
+		}
+		w.followWarned = n.NoticeID
+		if !scheduled {
+			return errMoveUnavailable
+		}
+		w.followAttempts++
+		copy := n
+		w.move = &copy
+		w.moveDue = time.Now().Add(w.backoff(w.followAttempts))
+		w.moveTimer = time.NewTimer(time.Until(w.moveDue))
+		w.moveC = w.moveTimer.C
+		return nil
 	}
+	w.followAttempts = 0
 	w.switchHub(next)
 	return nil
 }
@@ -678,7 +733,7 @@ func (w *watcher) followError(err error) (bool, error) {
 		return true, &relocationError{Code: "relocation_unverified", Reason: "hub returned an invalid moving notice"}
 	}
 	w.stopMoveTimer()
-	return true, w.followNotice(n)
+	return true, w.followNotice(n, false)
 }
 
 // refreshNames keeps the previous directory if fetching or decoding fails.
@@ -710,7 +765,7 @@ func (w *watcher) refreshNames() {
 // backoff is the jittered exponential reconnect delay, from the hub's retry
 // up to watchMaxBackoff.
 func (w *watcher) backoff(failures int) time.Duration {
-	d := max(w.retry, time.Second)
+	d := max(w.retry, watchMinBackoff)
 	for i := 1; i < failures && d < watchMaxBackoff; i++ {
 		d *= 2
 	}
