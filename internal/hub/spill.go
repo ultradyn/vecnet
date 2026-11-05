@@ -176,16 +176,6 @@ func (h *Hub) putSpill(ctx context.Context, text string) error {
 func (h *Hub) checkAttachments(ctx context.Context, tx *sql.Tx, snd sender, atts []envelope.Attachment) (hosted map[string]bool, err error) {
 	hosted = map[string]bool{}
 	for i, a := range atts {
-		if a.BlobID != "" {
-			// An R2 reference (blob_id) names a persisted object grant, which
-			// this disk pipeline cannot resolve: neither the SHA lookup nor the
-			// origin_url fallback may admit it, or the stored Message would
-			// carry an unverified R2 identity (and a disk blob_url). Grant-aware
-			// authorization arrives with the R2 send pipeline.
-			e := E(http.StatusUnprocessableEntity, "unknown_blob", "attachment blob_id does not name an available object")
-			e.Details["path"] = fmt.Sprintf("/attachments/%d/blob_id", i)
-			return nil, e
-		}
 		var size int64
 		qerr := tx.QueryRowContext(ctx,
 			`SELECT b.size FROM blobs b WHERE b.sha256 = ?1 AND b.purged_at IS NULL

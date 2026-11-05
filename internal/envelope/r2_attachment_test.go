@@ -53,7 +53,7 @@ func TestR2AttachmentSchemaAndServerVerification(t *testing.T) {
 			attachment["expires_at"] = saved
 			req := loadExample(t, "01-send-request.json")
 			req["attachments"] = []any{attachment}
-			if envelope.Validate("sendRequest", mustJSON(t, req)) == nil {
+			if envelope.Validate("attachmentReference", mustJSON(t, attachment)) == nil {
 				t.Fatal("send accepted server verification assertions")
 			}
 			verification := map[string]any{
@@ -65,17 +65,20 @@ func TestR2AttachmentSchemaAndServerVerification(t *testing.T) {
 			for _, field := range []string{"sha256_verified", "integrity"} {
 				t.Run("send_"+field+"_only", func(t *testing.T) {
 					attachment[field] = verification[field]
-					if envelope.Validate("sendRequest", mustJSON(t, req)) == nil {
+					if envelope.Validate("attachmentReference", mustJSON(t, attachment)) == nil {
 						t.Errorf("send accepted server-only %s assertion", field)
 					}
 					delete(attachment, field)
 				})
 			}
-			if err := envelope.Validate("sendRequest", mustJSON(t, req)); err != nil {
+			if err := envelope.Validate("attachmentReference", mustJSON(t, attachment)); err != nil {
 				t.Fatalf("reference-only send rejected: %v", err)
 			}
+			if err := envelope.Validate("sendRequest", mustJSON(t, req)); err == nil {
+				t.Fatal("disk-only send accepted an unresolved R2 reference")
+			}
 			attachment["content_md5"] = "fake"
-			if envelope.Validate("sendRequest", mustJSON(t, req)) == nil {
+			if envelope.Validate("attachmentReference", mustJSON(t, attachment)) == nil {
 				t.Fatal("send accepted parked checksum field")
 			}
 		})
@@ -163,7 +166,7 @@ func TestR2AttachmentTypedRoundTripAllClasses(t *testing.T) {
 }
 
 // TestR2AttachmentForbidsBlobURL: an R2 reference is a stable reference only;
-// a blob_url beside blob_id is rejected in Messages, Deliveries and sends,
+// a blob_url beside blob_id is rejected in Messages, Deliveries and future send references,
 // while a legacy disk attachment keeps its blob_url.
 func TestR2AttachmentForbidsBlobURL(t *testing.T) {
 	const harmless = "https://vecnet.example/v1/blobs/synthetic"
@@ -197,11 +200,14 @@ func TestR2AttachmentForbidsBlobURL(t *testing.T) {
 			delete(ref, "sha256_verified")
 			delete(ref, "integrity")
 			send["attachments"] = []any{ref}
-			if err := envelope.Validate("sendRequest", mustJSON(t, send)); err != nil {
+			if err := envelope.Validate("attachmentReference", mustJSON(t, ref)); err != nil {
 				t.Fatalf("send reference control rejected: %v", err)
 			}
-			ref["blob_url"] = harmless
 			if envelope.Validate("sendRequest", mustJSON(t, send)) == nil {
+				t.Error("disk-only send accepted an unresolved R2 reference")
+			}
+			ref["blob_url"] = harmless
+			if envelope.Validate("attachmentReference", mustJSON(t, ref)) == nil {
 				t.Error("send accepted blob_url on an R2 reference")
 			}
 		})

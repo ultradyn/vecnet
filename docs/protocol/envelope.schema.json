@@ -321,6 +321,16 @@
         }
       ]
     },
+    "attachmentReference": {
+      "$comment": "Shared reference contract for grant-aware sends in Task 4. The active disk-only sendRequest rejects blob_id until that integration exists.",
+      "$ref": "#/$defs/attachment",
+      "not": {
+        "anyOf": [
+          { "required": ["sha256_verified"] },
+          { "required": ["integrity"] }
+        ]
+      }
+    },
     "loop": {
       "type": "object",
       "additionalProperties": false,
@@ -1143,12 +1153,9 @@
           "type": "array",
           "maxItems": 16,
           "items": {
-            "$ref": "#/$defs/attachment",
-            "not": {
-              "anyOf": [
-                { "required": ["sha256_verified"] },
-                { "required": ["integrity"] }
-              ]
+            "$ref": "#/$defs/attachmentReference",
+            "properties": {
+              "blob_id": false
             }
           },
           "description": "Hosted bytes are uploaded first with PUT /v1/blobs using the same bearer (returns {sha256,size}); the hub rejects unknown hashes unless origin_url is set."

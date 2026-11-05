@@ -494,15 +494,13 @@ func TestPrincipalStreamAndNarrow(t *testing.T) {
 func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
 	env := testhub.Start(t)
 	// A stuck stream is only dropped after SSEStall; at an hour, any send
-	// whose append waited on the stream would hang, and the generous
-	// per-send deadlock watchdog below catches it. A send merely slowed by
-	// the stuck stream is caught by interleaving each send to b (stuck
-	// stream) with the same send to c (no stream) and comparing the totals:
-	// both halves see the same load and database size, so the comparison
-	// isolates stream-specific stalls. There is deliberately no absolute
-	// wall-clock budget: under -race or a loaded build box, 200
-	// database-backed sends legitimately exceed any fixed few seconds, and
-	// a shared budget shrank later sends' deadlines to milliseconds.
+	// whose append waited on the stream would hang, and the per-send
+	// timeout below catches it. A send merely slowed by the stuck stream is
+	// caught both by the aggregate five-second send budget and by
+	// interleaving each send to b (stuck stream) with the same
+	// send to c (no stream) and comparing the totals: both halves see the
+	// same load and database size. The comparison catches stream-specific
+	// stalls; the absolute budget also catches stalls shared by both paths.
 	env.Configure(func(d *httpapi.Deps) { d.SSEStall = time.Hour })
 	a, aSec := env.NewPeer("grokbot", "a")
 	b, bSec := env.NewPeer("session", "b")
@@ -513,10 +511,13 @@ func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
 	s := openSSE(t, env, bSec, "", nil)
 	waitStreams(t, 1)
 
-	const n, perSend = 200, 30 * time.Second
+	const n, perSend, aggregate = 200, 5 * time.Second, 5 * time.Second
 	send := func(key, to string, budget time.Duration) time.Duration {
 		t.Helper()
 		start := time.Now()
+		if budget <= 0 {
+			t.Fatalf("aggregate send budget exhausted before %s", key)
+		}
 		body := sendBody(key, to)
 		body["content"] = map[string]any{"text": strings.Repeat("x", 4000)}
 		j, err := json.Marshal(body)
@@ -549,9 +550,12 @@ func TestSlowSSEConsumerDoesNotBlockSend(t *testing.T) {
 	var stuck, free time.Duration
 	for i := 0; i < n; i++ {
 		free += send(fmt.Sprintf("free-%d", i), c, perSend)
-		stuck += send(fmt.Sprintf("slow-%d", i), b, perSend)
+		stuck += send(fmt.Sprintf("slow-%d", i), b, aggregate-stuck)
 	}
 	t.Logf("%d sends took %v to the stuck-stream peer, %v to a peer with no stream", n, stuck, free)
+	if stuck > aggregate {
+		t.Fatalf("%d sends to a stuck SSE consumer took %v, want <= %v total", n, stuck, aggregate)
+	}
 	if limit := 2*free + time.Second; stuck > limit {
 		t.Fatalf("%d sends to a stuck SSE consumer took %v, want <= %v (2x the %v of the same sends to a peer with no stream, + 1s)", n, stuck, limit, free)
 	}
