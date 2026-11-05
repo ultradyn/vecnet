@@ -59,7 +59,7 @@ func callSubscriptions(ctx context.Context, s *Server, c auth.Caller, _ []byte) 
 	now := s.now()
 	rows, err := s.Events.DB.QueryContext(ctx,
 		`SELECT sub_id, name, arguments, created_at, expires_at, paused_reason,
-		        last_delivery_at, last_status, url, verified_at IS NOT NULL
+		        last_delivery_at, last_status, url, verified_at IS NOT NULL, refresh_before_at
 		 FROM event_subscriptions WHERE peer_id = ? AND (expires_at IS NULL OR expires_at > ?)
 		 ORDER BY created_at, sub_id`, peer, envelope.FormatTime(now))
 	if err != nil {
@@ -70,21 +70,18 @@ func callSubscriptions(ctx context.Context, s *Server, c auth.Caller, _ []byte) 
 		var sub subscriptionStatus
 		var arguments, callback string
 		if err := rows.Scan(&sub.ID, &sub.Name, &arguments, &sub.CreatedAt, &sub.ExpiresAt, &sub.PausedReason,
-			&sub.LastDeliveryAt, &sub.LastStatus, &callback, &sub.Verified); err != nil {
+			&sub.LastDeliveryAt, &sub.LastStatus, &callback, &sub.Verified, &sub.RefreshBefore); err != nil {
 			return nil, fmt.Errorf("mcp: subscription status: %w", err)
 		}
 		if err := json.Unmarshal([]byte(arguments), &sub.Arguments); err != nil {
 			return nil, fmt.Errorf("mcp: subscription arguments: %w", err)
 		}
-		if sub.ExpiresAt != nil {
+		if sub.RefreshBefore == nil && sub.ExpiresAt != nil {
 			expires, err := envelope.ParseTime(*sub.ExpiresAt)
 			if err != nil {
 				return nil, fmt.Errorf("mcp: subscription expiry: %w", err)
 			}
 			refresh := expires.Add(-events.RefreshMargin)
-			if refresh.Before(now) {
-				refresh = now
-			}
 			formatted := envelope.FormatTime(refresh)
 			sub.RefreshBefore = &formatted
 		}

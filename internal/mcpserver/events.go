@@ -415,9 +415,9 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 	if err != nil {
 		return nil, err
 	}
-	refresh := sub.Expires.Add(-events.RefreshMargin)
-	if now := s.now(); refresh.Before(now) {
-		refresh = now // a TTL under the margin must not hand back a time already past
+	refresh := events.RefreshDeadline(s.now(), *sub.Expires, s.Hub.Cfg.EventsRefreshInterval)
+	if err := s.Events.SetRefreshBefore(ctx, sub.ID, refresh); err != nil {
+		return nil, err
 	}
 	lifecycle, outcome := "events.refresh", "refreshed"
 	if created {

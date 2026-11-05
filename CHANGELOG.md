@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-05: MCP Events asks clients to refresh every 30 minutes or before lease expiry, configurable with `VECNET_EVENTS_REFRESH_INTERVAL` / `--events-refresh-interval` (1m..24h); subscription and operator status preserve the returned deadline.
+
 - 2026-11-05: OAuth redirect refusals and client registrations share the sanitized diagnostics ring and INFO output, preserving operator-needed redirect components and bounded client names while redacting credentials and URL query/fragment/userinfo (`internal/oauth`, `internal/mcpdiag`).
 
 - 2026-11-05: OAuth link codes support enabled `dot` and `grokbot` peers through one shared allowlist; Grok Bot logins receive their own webhook/inbox guide, with generic CLI link help and connector setup docs (hub/admin.go, mcpserver/guide.go, PROTOCOL §4.5, connectors/grokbot.md).

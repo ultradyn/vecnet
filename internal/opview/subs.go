@@ -30,7 +30,7 @@ func (r *Reader) Subscriptions(ctx context.Context) ([]opapi.Subscription, error
 			SubID: h.ID, Principal: h.PrincipalKind + ":" + h.PrincipalID, PeerID: h.PeerID,
 			URL: host, Name: h.Name, Cursor: h.Cursor.String(), ExpiresAt: h.ExpiresAt,
 			VerifiedAt: h.VerifiedAt, PausedReason: h.PausedReason, LastRefreshAt: h.LastRefreshAt,
-			LastDeliveryAt: h.LastDeliveryAt, LastStatus: h.LastStatus, Attempts: h.Attempts,
+			LastDeliveryAt: h.LastDeliveryAt, LastStatus: h.LastStatus, Attempts: h.Attempts, RefreshBefore: h.RefreshBefore,
 		}
 		var expires *time.Time
 		if h.ExpiresAt != nil {
@@ -40,15 +40,25 @@ func (r *Reader) Subscriptions(ctx context.Context) ([]opapi.Subscription, error
 			}
 			expires = &at
 			deadline := envelope.FormatTime(at.Add(-events.RefreshMargin))
-			s.RefreshBefore = &deadline
+			if s.RefreshBefore == nil {
+				s.RefreshBefore = &deadline
+			}
 		}
-		s.Health, s.HealthNote = subscriptionHealth(h, expires, now)
+		var refresh *time.Time
+		if s.RefreshBefore != nil {
+			at, err := envelope.ParseTime(*s.RefreshBefore)
+			if err != nil {
+				return nil, fmt.Errorf("operator subscription %s refresh: %w", h.ID, err)
+			}
+			refresh = &at
+		}
+		s.Health, s.HealthNote = subscriptionHealth(h, expires, refresh, now)
 		out = append(out, s)
 	}
 	return out, nil
 }
 
-func subscriptionHealth(h events.Health, expires *time.Time, now time.Time) (string, string) {
+func subscriptionHealth(h events.Health, expires, refresh *time.Time, now time.Time) (string, string) {
 	if h.PausedReason != nil {
 		switch *h.PausedReason {
 		case events.PausedTokenExpired:
@@ -72,7 +82,7 @@ func subscriptionHealth(h events.Health, expires *time.Time, now time.Time) (str
 		if !now.Before(*expires) {
 			return opapi.HealthExpired, "The subscription expired. Ask the dot to subscribe again; queued events resume from its cursor."
 		}
-		if !now.Before(expires.Add(-events.RefreshMargin)) {
+		if refresh != nil && !now.Before(*refresh) {
 			return opapi.HealthLate, "Refresh is due. ChatGPT must re-subscribe before expiry to keep delivery flowing."
 		}
 	}
