@@ -23,7 +23,7 @@ codex: trust these hooks in /hooks before they run; new or changed hooks are ski
 codex: project hooks load only in a trusted project; to keep this file personal, list .codex/hooks.json in .git/info/exclude
 ```
 
-The installer refuses the default target when git tracks `.codex/hooks.json` (or git cannot say that it is untracked), because the hooks name your profile and committing them would share it with everyone. The file is left byte-identical; pass `--settings <path>` to write it anyway. It also refuses a `.codex` directory or `hooks.json` that is a symlink, so a link cannot redirect the write. It never edits `.gitignore`, `.git/info/exclude` or Codex's trust state. To keep the file out of commits, add it to the repository's exclude file yourself:
+The installer refuses the default target when git tracks `.codex/hooks.json`, when git cannot say that it is untracked, or when repository discovery itself fails (git missing, timed out, or refusing the repository, for example over dubious ownership; only git's own "not a git repository" answer selects the current-directory target), because the hooks name your profile and committing them would share it with everyone. The file is left byte-identical; pass `--settings <path>` to write it anyway. It also refuses a `.codex` directory or `hooks.json` that is a symlink, so a link cannot redirect the write. It never edits `.gitignore`, `.git/info/exclude` or Codex's trust state. To keep the file out of commits, add it to the repository's exclude file yourself:
 
 ```sh
 echo .codex/hooks.json >> "$(git rev-parse --git-path info/exclude)"
