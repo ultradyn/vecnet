@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
@@ -453,8 +454,8 @@ func TestR2DownloadTTLAndRemint(t *testing.T) {
 			if err != nil {
 				t.Fatal("capability parse failed; suppressed")
 			}
-			deadline, err := time.Parse(time.RFC3339Nano, first.ExpiresAt)
-			if err != nil || !deadline.Equal(now.Add(600*time.Second)) || first.Method != "GET" || len(first.Headers) != 0 || u.Query().Get("X-Amz-Expires") != "600" || u.Query().Get("X-Amz-SignedHeaders") != "host" || u.Path != "/vecnet-blobs-test/"+object.ObjectKey {
+			deadline, err := envelope.ParseTime(first.ExpiresAt)
+			if err != nil || first.ExpiresAt != "2026-11-05T03:14:05.000Z" || !deadline.Equal(now.Add(600*time.Second)) || first.Method != "GET" || len(first.Headers) != 0 || u.Query().Get("X-Amz-Expires") != "600" || u.Query().Get("X-Amz-SignedHeaders") != "host" || u.Path != "/vecnet-blobs-test/"+object.ObjectKey {
 				t.Fatal("download scope/deadline mismatch; capability suppressed")
 			}
 			now = now.Add(601 * time.Second)
@@ -465,6 +466,10 @@ func TestR2DownloadTTLAndRemint(t *testing.T) {
 			u, err = url.Parse(second.URL)
 			if err != nil || u.Query().Get("X-Amz-Date") != "20261105T031406Z" {
 				t.Fatal("new mint did not use supplied clock")
+			}
+			deadline, err = envelope.ParseTime(second.ExpiresAt)
+			if err != nil || second.ExpiresAt != "2026-11-05T03:24:06.000Z" || !deadline.Equal(now.Add(600*time.Second)) {
+				t.Fatal("new mint wire deadline mismatch; capability suppressed")
 			}
 			if class == "keep" {
 				if object.ExpiresAt != nil {
@@ -491,9 +496,9 @@ func TestR2DownloadTTLAndRemint(t *testing.T) {
 					if err != nil || e != nil || u.Query().Get("X-Amz-Expires") != want {
 						t.Fatal("finite deadline not floored/capped")
 					}
-					end, e := time.Parse(time.RFC3339Nano, req.ExpiresAt)
-					if e != nil || end.After(*object.ExpiresAt) {
-						t.Fatal("capability outlived object")
+					end, e := envelope.ParseTime(req.ExpiresAt)
+					if e != nil || !strings.HasSuffix(req.ExpiresAt, ".000Z") || end.After(*object.ExpiresAt) {
+						t.Fatal("capability wire deadline invalid or outlived object")
 					}
 				}
 			}

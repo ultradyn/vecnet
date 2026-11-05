@@ -288,7 +288,8 @@ func (s *R2Objects) Download(ctx context.Context, key string, now time.Time, obj
 	}
 	// SigV4 timestamps have whole-second resolution. Report that actual deadline,
 	// which may be earlier than now+ttl when the injected clock has fractions.
-	return blobwire.Request{Method: http.MethodGet, URL: signed, Headers: map[string]string{}, ExpiresAt: now.UTC().Truncate(time.Second).Add(ttl).Format(time.RFC3339Nano)}, nil
+	// The wire timestamp still requires fixed millisecond UTC precision.
+	return blobwire.Request{Method: http.MethodGet, URL: signed, Headers: map[string]string{}, ExpiresAt: now.UTC().Truncate(time.Second).Add(ttl).Format("2006-01-02T15:04:05.000Z")}, nil
 }
 
 func (s *R2Objects) private(ctx context.Context, method, key string) (*http.Response, error) {
