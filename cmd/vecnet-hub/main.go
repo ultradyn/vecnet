@@ -36,7 +36,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/logging"
@@ -76,7 +75,6 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	mcpOrigins := fs.String("mcp-allowed-origins", getenv("VECNET_MCP_ALLOWED_ORIGINS"), "extra /mcp origins, comma-separated; empty defaults to https://chatgpt.com, none allows public origin only ($VECNET_MCP_ALLOWED_ORIGINS)")
 	mcpLegacy := fs.String("mcp-legacy-sessions", envOr(getenv, "VECNET_MCP_LEGACY_SESSIONS", "on"), "legacy MCP sessions: on, off-for-oauth, off ($VECNET_MCP_LEGACY_SESSIONS)")
 	oauthRedirects := fs.String("oauth-redirects", getenv("VECNET_OAUTH_REDIRECTS"), "extra OAuth redirect patterns, comma-separated, appended to defaults ($VECNET_OAUTH_REDIRECTS)")
-	eventsRefresh := fs.String("events-refresh-interval", envOr(getenv, "VECNET_EVENTS_REFRESH_INTERVAL", events.RefreshInterval.String()), "MCP Events refresh interval, 1m..24h ($VECNET_EVENTS_REFRESH_INTERVAL; default 30m)")
 	devUIDir := fs.String("dev-ui-dir", "", "serve the operator UI from this directory instead of the embedded copy (development)")
 	allowPrivate := fs.Bool("allow-private-egress", getenv("VECNET_ALLOW_PRIVATE_EGRESS") == "1",
 		"development only: let outbound URLs be http and reach private/loopback addresses ($VECNET_ALLOW_PRIVATE_EGRESS=1)")
@@ -101,12 +99,15 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unknown subcommand %q", fs.Arg(0))
 	}
-	refreshInterval, err := time.ParseDuration(*eventsRefresh)
-	if err != nil || refreshInterval < time.Minute || refreshInterval > 24*time.Hour {
-		return errors.New("events refresh interval must be a Go duration between 1m and 24h")
-	}
+	// --events-refresh-interval is registered and resolved with the other
+	// preference flags: its environment value never enters flag metadata, so
+	// usage and parser errors cannot echo it.
 	preferenceConfig, err := resolvePreferences()
 	if err != nil {
+		var pe *prefs.Error
+		if errors.As(err, &pe) && pe.Details.Field == "events.refresh_interval" {
+			return fmt.Errorf("events refresh interval must be a whole-second Go duration between 1m and 24h: %w", err)
+		}
 		return err
 	}
 	origins, err := mcpserver.ParseAllowedOrigins(*mcpOrigins)
@@ -121,7 +122,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if err != nil {
 		return err
 	}
-	return serveConfigured(ctx, *listen, *dataDir, *publicURL, *devUIDir, *allowPrivate, *trustFly, origins, redirects, stdout, refreshInterval, preferenceConfig, legacy)
+	return serveConfigured(ctx, *listen, *dataDir, *publicURL, *devUIDir, *allowPrivate, *trustFly, origins, redirects, stdout, preferenceConfig.EventsRefreshInterval, preferenceConfig, legacy)
 }
 
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
@@ -282,9 +283,6 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 	for i := range bindings {
 		b := &bindings[i]
 		b.env = "VECNET_" + strings.ToUpper(strings.ReplaceAll(b.flag, "-", "_"))
-		if b.flag == "events-refresh-interval" {
-			continue
-		}
 		d, _ := prefs.Lookup(b.key)
 		n, _ := d.Default.Int64()
 		def := strconv.FormatInt(n, 10)

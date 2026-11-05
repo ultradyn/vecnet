@@ -296,7 +296,6 @@ func TestPreferenceBootstrapFlagsAndEnvironment(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
-			fs.String("events-refresh-interval", "30m", "")
 			resolve := registerPreferenceFlags(fs, func(key string) string {
 				if key == "VECNET_THREAD_BUDGET" {
 					return tc.env
@@ -337,7 +336,7 @@ func TestPreferenceBootstrapFlagsAndEnvironment(t *testing.T) {
 }
 
 func TestPreferenceFlagDiagnosticsExcludeEnvironment(t *testing.T) {
-	for _, name := range []string{"presence-ttl", "session-presence-ttl", "launcher-presence-ttl", "default-max-depth", "default-ttl", "thread-budget", "sends-per-minute", "threads-per-hour", "creates-per-hour"} {
+	for _, name := range []string{"events-refresh-interval", "presence-ttl", "session-presence-ttl", "launcher-presence-ttl", "default-max-depth", "default-ttl", "thread-budget", "sends-per-minute", "threads-per-hour", "creates-per-hour"} {
 		for _, arg := range []string{"--help", "--unknown-option"} {
 			t.Run(name+"/"+arg, func(t *testing.T) {
 				const rejected = "synthetic-invalid-environment-<>&\""
@@ -395,6 +394,7 @@ func TestPreferenceBootstrapAllEnabledFlags(t *testing.T) {
 		flag, key, raw string
 		want           int64
 	}{
+		{"events-refresh-interval", "events.refresh_interval", "7m", 420},
 		{"presence-ttl", "presence.default_ttl", "2h", 7200},
 		{"session-presence-ttl", "presence.session_ttl", "30m", 1800},
 		{"launcher-presence-ttl", "presence.launcher_ttl", "45m", 2700},
@@ -409,7 +409,6 @@ func TestPreferenceBootstrapAllEnabledFlags(t *testing.T) {
 			t.Run(tc.flag+map[bool]string{false: "/flag", true: "/env"}[fromEnv], func(t *testing.T) {
 				env := "VECNET_" + strings.ToUpper(strings.ReplaceAll(tc.flag, "-", "_"))
 				fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
-				fs.String("events-refresh-interval", "30m", "")
 				resolve := registerPreferenceFlags(fs, func(key string) string {
 					if fromEnv && key == env {
 						return tc.raw
