@@ -22,6 +22,8 @@ import (
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/store"
 	"github.com/XertroV/vecnet/internal/testhub"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 func backfillEnv(t *testing.T) (*testhub.Env, []guardFixture) {
@@ -230,8 +232,10 @@ func TestBackfillCancellationRollsBackWholeSlice(t *testing.T) {
 func TestBackfillRealReaderCheckpointPressure(t *testing.T) {
 	env, _ := backfillEnv(t)
 	h := env.Hub
+	// Only the checkpoint probe is real: the injected 1 TiB capacity probe
+	// stays, so low host disk can never produce this pause instead of the
+	// reader holding the WAL.
 	h.Cfg.BackfillCheckpoint = nil
-	h.Cfg.BackfillCapacity = nil
 	conn, err := h.DB.Conn(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -246,8 +250,8 @@ func TestBackfillRealReaderCheckpointPressure(t *testing.T) {
 	}
 	guardExec(t, env, `INSERT INTO events(owner,type,at,data) VALUES (?,'presence',?,'{}')`, guardB, guardAt)
 	p := slice(t, h, hub.BackfillLimits{Rows: 1})
-	if p.PausedReason != "wal_pressure" || p.Converted != 0 {
-		t.Fatalf("reader did not pause: %+v", p)
+	if p.PausedReason != "wal_pressure" || p.Converted != 0 || p.AvailableBytes != 1<<40 || p.WALBytes != 0 {
+		t.Fatalf("reader did not pause the checkpoint probe: %+v", p)
 	}
 	if _, err = conn.ExecContext(context.Background(), `ROLLBACK`); err != nil {
 		t.Fatal(err)
@@ -535,29 +539,119 @@ func TestBackfillCapacityWALLocksAndFull(t *testing.T) {
 	t.Run("sqlite_full", func(t *testing.T) {
 		env, _ := backfillEnv(t)
 		h := env.Hub
+		// max_page_count and the pre-update hook are per connection.
 		h.DB.SetMaxOpenConns(1)
-		// Make conversion require a large legacy snapshot, then cap actual SQLite allocation.
+		// seq 1 converts with a legacy snapshot, seq 2 becomes a durable
+		// exception, and only seq 3 needs a snapshot too large for the page cap:
+		// SQLITE_FULL arrives after earlier work in the same slice.
 		guardExec(t, env, `UPDATE messages SET body=json_set(body,'$.sender_info.name','canonical')`)
-		guardExec(t, env, `UPDATE events SET data=json_set(data,'$.message.metadata.synthetic',?) WHERE seq=1`, strings.Repeat("x", 512<<10))
-		guardExec(t, env, `DELETE FROM deliveries WHERE event_seq=1`)
+		guardExec(t, env, `UPDATE deliveries SET body_sha256='bad' WHERE event_seq=2`)
+		guardExec(t, env, `UPDATE events SET data=json_set(data,'$.message.metadata.synthetic',?) WHERE seq=3`, strings.Repeat("x", 512<<10))
+		guardExec(t, env, `DELETE FROM deliveries WHERE event_seq=3`)
+		before := backfillState(t, h)
 		var pages int
 		if err := h.DB.QueryRow(`PRAGMA page_count`).Scan(&pages); err != nil {
 			t.Fatal(err)
 		}
-		guardExec(t, env, fmt.Sprintf(`PRAGMA max_page_count=%d`, pages))
-		p := slice(t, h, hub.BackfillLimits{Rows: 1})
-		if p.PausedReason != "sqlite_full" || p.Converted != 0 {
+		guardExec(t, env, fmt.Sprintf(`PRAGMA max_page_count=%d`, pages+2))
+		type write struct {
+			op    int32
+			table string
+			rowid int64
+		}
+		var writes []write
+		hook := func(fn sqlite.PreUpdateHookFn) {
+			t.Helper()
+			conn, err := h.DB.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			if err := conn.Raw(func(raw any) error {
+				raw.(sqlite.HookRegisterer).RegisterPreUpdateHook(fn)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		hook(func(d sqlite.SQLitePreUpdateData) {
+			writes = append(writes, write{d.Op, d.TableName, d.NewRowID})
+		})
+		p := slice(t, h, hub.BackfillLimits{Rows: 3})
+		hook(nil)
+		if p.PausedReason != "sqlite_full" || p.Converted != 0 || p.Failed != 0 || len(p.Seqs) != 0 {
 			t.Fatalf("SQLITE_FULL not paused: %+v", p)
 		}
-		if backfillCount(t, h, `SELECT count(*) FROM events WHERE payload_format!='inline'`) != 0 || backfillCount(t, h, `SELECT count(*) FROM event_message_snapshots`) != 0 || backfillCount(t, h, `SELECT count(*) FROM meta WHERE key='delivery_backfill_v1'`) != 0 {
-			t.Fatal("SQLITE_FULL committed partial slice")
+		var converted1, exception2, snapshot, touched3 bool
+		for _, w := range writes {
+			converted1 = converted1 || (w.op == sqlite3.SQLITE_UPDATE && w.table == "events" && w.rowid == 1)
+			exception2 = exception2 || (w.op == sqlite3.SQLITE_INSERT && w.table == "delivery_backfill_exceptions" && w.rowid == 2)
+			snapshot = snapshot || (w.op == sqlite3.SQLITE_INSERT && w.table == "event_message_snapshots")
+			touched3 = touched3 || (w.table == "events" && w.rowid == 3)
+		}
+		if !converted1 || !exception2 || !snapshot || touched3 {
+			t.Fatalf("the failing slice did not convert seq 1, record seq 2 and write a snapshot before seq 3 failed: %+v", writes)
+		}
+		// Reopen: the committed state is exactly the pre-slice state.
+		db, err := store.Open(filepath.Join(h.Cfg.DataDir, "hub.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		after := backfillStateDB(t, db)
+		db.Close()
+		if after != before {
+			t.Fatalf("SQLITE_FULL committed partial slice work:\nbefore %s\nafter  %s", before, after)
 		}
 		guardExec(t, env, `PRAGMA max_page_count=1073741823`)
-		if p := slice(t, h, hub.BackfillLimits{Rows: 1}); p.Converted != 1 {
-			t.Fatalf("capacity relief did not resume: %+v", p)
+		p = slice(t, h, hub.BackfillLimits{Rows: 3})
+		if p.Converted != 2 || p.Failed != 1 || p.LastSeq != 3 || fmt.Sprint(p.Seqs) != "[1 2 3]" || p.PausedReason != "" {
+			t.Fatalf("capacity relief did not resume exactly where the failed slice began: %+v", p)
+		}
+		if backfillCount(t, h, `SELECT count(*) FROM delivery_backfill_exceptions WHERE seq=2 AND reason='delivery_hash_mismatch'`) != 1 ||
+			backfillCount(t, h, `SELECT count(*) FROM events WHERE seq IN (1,3) AND payload_format='delivery_ref_v1'`) != 2 {
+			t.Fatal("resumed slice did not redo the rolled-back work")
 		}
 	})
 }
+
+// backfillState is a digest of every row a slice may write: event formats and
+// bytes, snapshots, durable exceptions and the committed checkpoint.
+func backfillState(t *testing.T, h *hub.Hub) string {
+	t.Helper()
+	return backfillStateDB(t, h.DB)
+}
+
+func backfillStateDB(t *testing.T, db *store.DB) string {
+	t.Helper()
+	var out strings.Builder
+	for _, q := range []string{
+		`SELECT seq||':'||payload_format||':'||coalesce(msg_id,'')||':'||coalesce(snapshot_id,'')||':'||length(data)||':'||hex(substr(data,1,64)) FROM events ORDER BY seq`,
+		`SELECT snapshot_id||':'||msg_id||':'||body_sha256 FROM event_message_snapshots ORDER BY snapshot_id`,
+		`SELECT seq||':'||reason FROM delivery_backfill_exceptions ORDER BY seq`,
+		`SELECT key||':'||value FROM meta WHERE key IN ('delivery_backfill_v1','event_payload_refs_enabled') ORDER BY key`,
+	} {
+		rows, err := db.Query(q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var v string
+			if err := rows.Scan(&v); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			out.WriteString(v)
+			out.WriteByte(';')
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		rows.Close()
+		out.WriteByte('|')
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(out.String())))
+}
+
 func TestBackfillBackupRestoresSnapshotsAndCheckpoint(t *testing.T) {
 	env, fs := backfillEnv(t)
 	h := env.Hub
