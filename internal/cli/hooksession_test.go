@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -584,6 +585,76 @@ func TestHookSubagentClaimsNothing(t *testing.T) {
 				t.Fatalf("parent missed the delivery: out=%q errs=%q", out.String(), errs.String())
 			}
 		})
+	}
+}
+
+// failingReader returns its bytes, then a read error.
+type failingReader struct{ data []byte }
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, errors.New("stdin read failed")
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+// Installed hooks always pass --event. Nonempty stdin that cannot be read
+// or decoded (a Codex tool_response over the 1 MiB cap, truncated JSON, a
+// read error) is not a manual run: the identity it carried, including a
+// foreign session_id or a subagent's agent_id, is unknown, so the run
+// claims nothing, prints nothing, polls nothing and leaves state, binding
+// and registry alone.
+func TestHookUnusableStdinClaimsNothing(t *testing.T) {
+	big, err := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": "S2", "agent_id": "agent-7f3a", "tool_name": "shell_command", "tool_response": strings.Repeat("x", 1<<20)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := map[string]func() io.Reader{
+		"oversized": func() io.Reader { return bytes.NewReader(big) },
+		"truncated": func() io.Reader {
+			return strings.NewReader(`{"hook_event_name":"PostToolUse","session_id":"S2","agent_id":"agent-7f3a"`)
+		},
+		"not json": func() io.Reader { return strings.NewReader("session S2\n") },
+		"read error": func() io.Reader {
+			return &failingReader{data: []byte(`{"hook_event_name":"PostToolUse","session_id":"S2"`)}
+		},
+	}
+	for name, input := range inputs {
+		t.Run(name, func(t *testing.T) {
+			env, path, polls := sessionHub(t)
+			noVecnetProfile(env)
+			seedSession(t, path, boundTo("S1"))
+			before, _ := os.ReadFile(path)
+			beforeBinding, _ := os.ReadFile(bindingPath(path))
+			for _, event := range []string{"post-tool", "user-prompt", "session-start"} {
+				var out, errs bytes.Buffer
+				if code := RunContext(context.Background(), []string{"hook", "--profile", "p", "--event", event}, input(), &out, &errs, func(k string) string { return env[k] }); code != 0 || out.Len() != 0 || errs.Len() != 0 {
+					t.Fatalf("%s: exit=%d out=%q errs=%q", event, code, out.String(), errs.String())
+				}
+			}
+			if after, _ := os.ReadFile(bindingPath(path)); !bytes.Equal(beforeBinding, after) {
+				t.Fatal("unusable stdin changed the binding")
+			}
+			if after, _ := os.ReadFile(path); !bytes.Equal(before, after) || polls.Load() != 0 {
+				t.Fatalf("unusable stdin changed state (%t) or polled (%d)", !bytes.Equal(before, after), polls.Load())
+			}
+			if _, err := os.Stat(sessionsPath(path)); !os.IsNotExist(err) {
+				t.Fatalf("unusable stdin wrote the registry: %v", err)
+			}
+		})
+	}
+	// Empty or whitespace-only stdin is still a manual run without a session.
+	for _, stdin := range []string{"", " \n"} {
+		env, path, _ := sessionHub(t)
+		noVecnetProfile(env)
+		seedSession(t, path, boundTo("S1"))
+		var out, errs bytes.Buffer
+		RunContext(context.Background(), []string{"hook", "--profile", "p", "--event", "user-prompt"}, strings.NewReader(stdin), &out, &errs, func(k string) string { return env[k] })
+		if !strings.Contains(contextOf(t, out.String()), "secret text") {
+			t.Fatalf("manual run %q missed the delivery: out=%q errs=%q", stdin, out.String(), errs.String())
+		}
 	}
 }
 
