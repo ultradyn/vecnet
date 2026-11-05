@@ -77,10 +77,13 @@ type BackfillException struct {
 
 // BackfillProgress contains only bounded ids, counts, byte totals and codes.
 // Counts describe this slice; totals and checkpoints survive restart atomically.
-// PausedReason is empty, disabled, low_headroom, wal_pressure, lock_pressure or
-// sqlite_full. BytesRemoved is the event JSON delta; it excludes new snapshot,
-// index and WAL allocation and is not a physical disk-savings measurement.
-// LastSliceNanos is the injected clock's elapsed conversion time before commit.
+// PausedReason is empty, disabled, low_headroom, wal_pressure, lock_pressure,
+// sqlite_full or exception_reconciliation. BytesRemoved is the event JSON delta;
+// it excludes new snapshot, index and WAL allocation and is not a physical
+// disk-savings measurement.
+// LastSliceNanos includes transaction completion in the returned/live status.
+// The durable checkpoint retains the elapsed time sampled before its own write
+// and commit; their final duration is available only in the running process.
 type BackfillProgress struct {
 	Enabled               bool                `json:"enabled"`
 	HighSeq               int64               `json:"high_seq"`
@@ -106,6 +109,8 @@ type BackfillProgress struct {
 	Done                  bool                `json:"done"`
 	DryRun                bool                `json:"dry_run"`
 	Seqs                  []int64             `json:"seqs"`
+	ExceptionCountPending bool                `json:"exception_count_pending,omitempty"`
+	ExceptionCountSeq     int64               `json:"exception_count_seq,omitempty"`
 	ExceptionCount        int64               `json:"exception_count"`
 	Exceptions            []BackfillException `json:"exceptions"`
 }
@@ -152,7 +157,7 @@ func backfillLoad(ctx context.Context, q interface {
 	if err != nil {
 		return p, false, err
 	}
-	if json.Unmarshal(raw, &p) != nil || p.LastSeq < 0 || p.HighSeq < p.LastSeq {
+	if json.Unmarshal(raw, &p) != nil || p.LastSeq < 0 || p.HighSeq < p.LastSeq || p.ExceptionCount < 0 || p.ExceptionCountSeq < 0 {
 		return p, false, errors.New("backfill: checkpoint_invalid")
 	}
 	return p, true, nil
@@ -280,6 +285,9 @@ func (h *Hub) BackfillDeliverySlice(ctx context.Context, limits BackfillLimits) 
 			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		}
 	}()
+	start := h.Now()
+	// Run after commit/rollback, including the checkpoint write and commit work.
+	defer func() { out.LastSliceNanos = h.Now().Sub(start).Nanoseconds() }()
 	tx, e := conn.BeginTx(ctx, nil)
 	if e != nil {
 		if ctx.Err() != nil {
@@ -305,6 +313,8 @@ func (h *Hub) BackfillDeliverySlice(ctx context.Context, limits BackfillLimits) 
 	out.RescanHighSeq, out.RescanLastSeq, out.Rescanning = old.RescanHighSeq, old.RescanLastSeq, old.Rescanning
 	out.TotalConverted, out.TotalSkipped = old.TotalConverted, old.TotalSkipped
 	out.TotalFailed = old.TotalFailed
+	out.ExceptionCount = old.ExceptionCount
+	out.ExceptionCountPending, out.ExceptionCountSeq = old.ExceptionCountPending, old.ExceptionCountSeq
 	// Any error below rolls back, and reports no uncommitted counts or ids.
 	defer func() {
 		if err == nil {
@@ -334,11 +344,23 @@ func (h *Hub) BackfillDeliverySlice(ctx context.Context, limits BackfillLimits) 
 			err = errors.New("backfill: slice_failed")
 		}
 	}()
-	start := h.Now()
 	if !exists {
 		if err = tx.QueryRowContext(ctx, `SELECT coalesce(max(seq),0) FROM events`).Scan(&out.HighSeq); err != nil {
 			return out, err
 		}
+		// Normally exceptions and their exact count already share a checkpoint.
+		// If metadata is absent (e.g. a manual repair), reconcile separately in
+		// bounded seq ranges before converting any events. Never COUNT the table.
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_backfill_exceptions)`).Scan(&out.ExceptionCountPending); err != nil {
+			return out, err
+		}
+	}
+	if out.ExceptionCountPending {
+		if err = backfillReconcileCount(ctx, tx, &out, limits, h.Now, start); err != nil {
+			return out, err
+		}
+		out.PausedReason = "exception_reconciliation"
+		return out, backfillSave(ctx, tx, &out, limits.DryRun, false, h.Now, start)
 	}
 	if limits.RescanExceptions && !out.Rescanning {
 		out.Rescanning = true
@@ -459,8 +481,19 @@ func (h *Hub) BackfillDeliverySlice(ctx context.Context, limits BackfillLimits) 
 			}
 		}
 		if reason != "" {
-			if _, err = tx.ExecContext(ctx, `INSERT INTO delivery_backfill_exceptions(seq,reason) VALUES (?,?) ON CONFLICT(seq) DO UPDATE SET reason=excluded.reason`, r.seq, reason); err != nil {
-				return out, err
+			result, e := tx.ExecContext(ctx, `INSERT INTO delivery_backfill_exceptions(seq,reason) VALUES (?,?) ON CONFLICT(seq) DO NOTHING`, r.seq, reason)
+			if e != nil {
+				return out, e
+			}
+			n, e := result.RowsAffected()
+			if e != nil {
+				return out, e
+			}
+			out.ExceptionCount += n
+			if n == 0 {
+				if _, err = tx.ExecContext(ctx, `UPDATE delivery_backfill_exceptions SET reason=? WHERE seq=?`, reason, r.seq); err != nil {
+					return out, err
+				}
 			}
 			if reason == "delivery_hash_mismatch" {
 				out.Failed++
@@ -481,9 +514,15 @@ func (h *Hub) BackfillDeliverySlice(ctx context.Context, limits BackfillLimits) 
 			if n != 1 {
 				return out, errors.New("backfill: conflicting_mutation")
 			}
-			if _, err = tx.ExecContext(ctx, `DELETE FROM delivery_backfill_exceptions WHERE seq=?`, r.seq); err != nil {
+			result, err = tx.ExecContext(ctx, `DELETE FROM delivery_backfill_exceptions WHERE seq=?`, r.seq)
+			if err != nil {
 				return out, err
 			}
+			n, err = result.RowsAffected()
+			if err != nil {
+				return out, err
+			}
+			out.ExceptionCount -= n
 			out.Converted++
 			out.StoredBytes += int64(len(p.Data))
 			out.BytesRemoved += int64(len(r.data) - len(p.Data))
@@ -518,29 +557,62 @@ func (h *Hub) BackfillDeliverySlice(ctx context.Context, limits BackfillLimits) 
 	out.TotalConverted += int64(out.Converted)
 	out.TotalSkipped += int64(out.Skipped)
 	out.TotalFailed += int64(out.Failed)
-	out.LastSliceNanos = h.Now().Sub(start).Nanoseconds()
-	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM delivery_backfill_exceptions`).Scan(&out.ExceptionCount); err != nil {
-		return out, err
+	return out, backfillSave(ctx, tx, &out, limits.DryRun, true, h.Now, start)
+}
+
+// Reconciliation is a separate, resumable phase only for a missing checkpoint.
+// Normal slices and status reuse the counter committed with exception mutations.
+func backfillReconcileCount(ctx context.Context, tx *sql.Tx, out *BackfillProgress, limits BackfillLimits, now func() time.Time, start time.Time) error {
+	rows, err := tx.QueryContext(ctx, `SELECT seq FROM delivery_backfill_exceptions WHERE seq>? ORDER BY seq LIMIT ?`, out.ExceptionCountSeq, limits.Rows)
+	if err != nil {
+		return err
 	}
-	if limits.DryRun {
-		return out, nil
+	n := 0
+	for rows.Next() {
+		if n > 0 && now().Sub(start) >= limits.Target {
+			break
+		}
+		if err := rows.Scan(&out.ExceptionCountSeq); err != nil {
+			rows.Close()
+			return err
+		}
+		out.ExceptionCount++
+		n++
 	}
-	data, e := json.Marshal(out)
-	if e != nil {
-		return out, e
+	err = rows.Err()
+	closeErr := rows.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_backfill_exceptions WHERE seq>?)`, out.ExceptionCountSeq).Scan(&out.ExceptionCountPending)
+}
+
+func backfillSave(ctx context.Context, tx *sql.Tx, out *BackfillProgress, dryRun, enableRefs bool, now func() time.Time, start time.Time) error {
+	out.LastSliceNanos = now().Sub(start).Nanoseconds()
+	if dryRun {
+		return nil
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		return err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, backfillMetaKey, string(data)); err != nil {
-		return out, err
+		return err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES ('event_payload_refs_enabled','1') ON CONFLICT(key) DO UPDATE SET value='1'`); err != nil {
-		return out, err
+	if enableRefs {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES ('event_payload_refs_enabled','1') ON CONFLICT(key) DO UPDATE SET value='1'`); err != nil {
+			return err
+		}
 	}
-	err = tx.Commit()
-	return out, err
+	return tx.Commit()
 }
 
 // BackfillDeliveryStatus is an operator-only diagnostic seam. Exception details
-// are capped at 100; ExceptionCount always reports the full durable count.
+// are capped at 100. ExceptionCount is exact unless ExceptionCountPending marks
+// a bounded reconciliation after a missing checkpoint; no status call recounts.
 func (h *Hub) BackfillDeliveryStatus(ctx context.Context, c auth.Caller) (BackfillProgress, error) {
 	if c.Kind != "operator" {
 		return BackfillProgress{}, E(403, "forbidden", "operator required")
@@ -550,12 +622,15 @@ func (h *Hub) BackfillDeliveryStatus(ctx context.Context, c auth.Caller) (Backfi
 	var out BackfillProgress
 	err := h.DB.ReadSnapshot(ctx, func(q *sql.Conn) error {
 		var err error
-		out, _, err = backfillLoad(ctx, q)
+		var exists bool
+		out, exists, err = backfillLoad(ctx, q)
 		if err != nil {
 			return err
 		}
-		if err = q.QueryRowContext(ctx, `SELECT count(*) FROM delivery_backfill_exceptions`).Scan(&out.ExceptionCount); err != nil {
-			return err
+		if !exists {
+			if err = q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM delivery_backfill_exceptions)`).Scan(&out.ExceptionCountPending); err != nil {
+				return err
+			}
 		}
 		rows, err := q.QueryContext(ctx, `SELECT seq,reason FROM delivery_backfill_exceptions ORDER BY seq LIMIT 100`)
 		if err != nil {
@@ -575,6 +650,9 @@ func (h *Hub) BackfillDeliveryStatus(ctx context.Context, c auth.Caller) (Backfi
 		return out, errors.New("backfill: status_failed")
 	}
 	out.Enabled = h.Cfg.BackfillEnabled
+	if h.backfillLast.Enabled && !h.backfillLast.DryRun {
+		out.LastSliceNanos = h.backfillLast.LastSliceNanos
+	}
 	if h.backfillLast.PausedReason != "" {
 		out.PausedReason = h.backfillLast.PausedReason
 		out.AvailableBytes = h.backfillLast.AvailableBytes
