@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -138,9 +139,17 @@ func decodeBlobJSON(r *http.Request, in any) error {
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(in); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return err
+		}
 		return hub.E(400, "invalid_body", "invalid blob request")
 	}
 	if err := d.Decode(new(any)); err != io.EOF {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return err
+		}
 		return hub.E(400, "invalid_body", "invalid blob request")
 	}
 	return nil

@@ -3,60 +3,12 @@ package hub
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
-	"errors"
-	"fmt"
 
 	"github.com/XertroV/vecnet/internal/blob"
 	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 )
 
-// validateBlobSend retains the disk schema and validates direct references
-// against the existing strict attachmentReference contract. Only validated R2
-// fields are removed from the copy used for legacy request validation; the
-// original bytes remain the canonical request and stored Message input.
-func (h *Hub) validateBlobSend(raw []byte) error {
-	if h.Blobs.Transfers == nil {
-		return envelope.Validate("sendRequest", raw)
-	}
-	var top map[string]json.RawMessage
-	if json.Unmarshal(raw, &top) != nil {
-		return envelope.Validate("sendRequest", raw)
-	}
-	var atts []json.RawMessage
-	if json.Unmarshal(top["attachments"], &atts) != nil {
-		return envelope.Validate("sendRequest", raw)
-	}
-	changed := false
-	for i, rawAtt := range atts {
-		var a map[string]json.RawMessage
-		if json.Unmarshal(rawAtt, &a) != nil {
-			continue
-		}
-		if _, ok := a["blob_id"]; !ok {
-			continue
-		}
-		if err := envelope.Validate("attachmentReference", rawAtt); err != nil {
-			var e *envelope.SchemaError
-			if errors.As(err, &e) {
-				return &envelope.SchemaError{Path: fmt.Sprintf("/attachments/%d", i) + e.Path, Message: e.Message}
-			}
-			return err
-		}
-		delete(a, "blob_id")
-		delete(a, "retention_class")
-		delete(a, "expires_at")
-		atts[i], _ = json.Marshal(a)
-		changed = true
-	}
-	if !changed {
-		return envelope.Validate("sendRequest", raw)
-	}
-	top["attachments"], _ = json.Marshal(atts)
-	copyRaw, _ := json.Marshal(top)
-	return envelope.Validate("sendRequest", copyRaw)
-}
 func (h *Hub) checkR2Attachment(ctx context.Context, tx *sql.Tx, snd sender, a *envelope.Attachment) error {
 	o, err := blob.ReadR2Object(ctx, tx, a.BlobID)
 	allowed := err == nil && (o.Uploader == snd.peer || snd.prn != "" && o.Uploader == snd.prn)

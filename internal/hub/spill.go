@@ -187,7 +187,7 @@ func (h *Hub) checkAttachments(ctx context.Context, tx *sql.Tx, snd sender, atts
 	for i, a := range atts {
 		if a.BlobID != "" {
 			if h.Blobs.Transfers == nil {
-				return nil, E(422, "unknown_blob", "unknown attachment")
+				return nil, &envelope.SchemaError{Path: fmt.Sprintf("/attachments/%d/blob_id", i), Message: "remote attachments are unavailable"}
 			}
 			if err := h.checkR2Attachment(ctx, tx, snd, &atts[i]); err != nil {
 				return nil, err

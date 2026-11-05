@@ -240,9 +240,13 @@ func (f *r2HTTPFixture) request(t *testing.T, secret, method, path string, body 
 	}
 	return resp, raw
 }
-func (f *r2HTTPFixture) upload(t *testing.T, secret, key string) blobwire.UploadGrant {
+func (f *r2HTTPFixture) upload(t *testing.T, secret, key string, contents ...string) blobwire.UploadGrant {
 	t.Helper()
-	in := blobwire.UploadRequest{Size: 3, SHA256: shaOf("abc"), MediaType: "text/plain"}
+	data := "abc"
+	if len(contents) > 0 {
+		data = contents[0]
+	}
+	in := blobwire.UploadRequest{Size: int64(len(data)), SHA256: shaOf(data), MediaType: "text/plain"}
 	resp, raw := f.request(t, secret, "POST", "/v1/blobs/uploads", in, key)
 	if resp.StatusCode != 201 {
 		t.Fatalf("upload grant status %d", resp.StatusCode)
@@ -254,7 +258,7 @@ func (f *r2HTTPFixture) upload(t *testing.T, secret, key string) blobwire.Upload
 	if g.SHA256Verified == nil || *g.SHA256Verified || g.Integrity == nil || g.Integrity.Verified {
 		t.Fatal("pending upload marked verified")
 	}
-	req, err := http.NewRequest("PUT", g.Upload.URL, strings.NewReader("abc"))
+	req, err := http.NewRequest("PUT", g.Upload.URL, strings.NewReader(data))
 	if err != nil {
 		t.Fatal("invalid upload URL")
 	}
@@ -398,10 +402,13 @@ func TestR2HTTPGrantFlowAuthorizationAndRemint(t *testing.T) {
 func TestR2HTTPMintBudgetSharedAcrossSurfacesAndCredentials(t *testing.T) {
 	f := newR2HTTP(t)
 	e := f.env
-	peer, secret := e.NewPeer("session", "a")
-	_, other := e.NewPeer("session", "b")
-	g := f.upload(t, secret, "limits")
-	// A second live credential names the same peer, without revoking the first.
+	peer, secret := e.NewPeer("session", "recipient and uploader")
+	_, other := e.NewPeer("session", "other identity")
+	grants := []blobwire.UploadGrant{f.upload(t, secret, "limits-a"), f.upload(t, secret, "limits-b", "xyz")}
+	if grants[0].SHA256 == grants[1].SHA256 || grants[0].BlobID == grants[1].BlobID {
+		t.Fatal("budget fixtures must have distinct identities and hashes")
+	}
+	// A second live bearer and v2 delivery tokens resolve to the same peer.
 	second, hash := auth.NewSecret("peer")
 	if _, err := e.Hub.DB.Exec(`INSERT INTO credentials(cred_id,kind,subject_id,secret_hash,created_at) VALUES('second','peer',?,?,?)`, peer, hash, e.Now.Now().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
@@ -410,31 +417,93 @@ func TestR2HTTPMintBudgetSharedAcrossSurfacesAndCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 30; i++ {
-		switch i % 3 {
+	mint := func(i int) {
+		t.Helper()
+		g := grants[i%2]
+		path := "/v1/blobs/" + g.SHA256
+		switch i % 4 {
 		case 0:
-			f.download(t, secret, g)
+			resp, _ := f.request(t, secret, "GET", path+"/download?blob_id="+g.BlobID, nil, "")
+			if resp.StatusCode != 200 {
+				t.Fatalf("HTTP mint = %d", resp.StatusCode)
+			}
 		case 1:
-			resp, _ := f.request(t, second, "GET", "/v1/blobs/"+g.SHA256+"?b="+g.BlobID, nil, "")
+			resp, _ := f.request(t, second, "GET", path+"?b="+g.BlobID, nil, "")
 			if resp.StatusCode != 307 {
-				t.Fatal("legacy redirect failed")
+				t.Fatal("legacy mint failed")
 			}
 		case 2:
 			if _, err := e.Hub.BlobDownload(context.Background(), &caller, "", g.SHA256, g.BlobID); err != nil {
-				t.Fatal(err)
+				t.Fatal("common wrapper mint failed")
+			}
+		case 3:
+			token := e.Hub.Blobs.TokenV2(peer, g.SHA256, g.BlobID, e.Now.Now().Add(time.Hour))
+			resp, _ := f.request(t, "", "GET", path+"/download?blob_id="+g.BlobID+"&t="+url.QueryEscape(token), nil, "")
+			if resp.StatusCode != 200 {
+				t.Fatal("recipient-token mint failed")
 			}
 		}
 	}
-	resp, raw := f.request(t, second, "GET", "/v1/blobs/"+g.SHA256+"/download?blob_id="+g.BlobID, nil, "")
-	if resp.StatusCode != 429 || resp.Header.Get("Retry-After") == "" || strings.Contains(string(raw), "url\":") {
-		t.Fatal("31st shared mint not refused safely")
+	denied := func(secret string, g blobwire.UploadGrant, token string, retry int) {
+		t.Helper()
+		path := "/v1/blobs/" + g.SHA256 + "/download?blob_id=" + g.BlobID
+		if token != "" {
+			path += "&t=" + url.QueryEscape(token)
+		}
+		resp, raw := f.request(t, secret, "GET", path, nil, "")
+		var result struct {
+			Error struct {
+				Details struct {
+					Retry int `json:"retry_after_seconds"`
+				} `json:"details"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(raw, &result) != nil {
+			t.Fatal("limit error decode failed")
+		}
+		if resp.StatusCode != 429 || resp.Header.Get("Retry-After") != strconv.Itoa(retry) || result.Error.Details.Retry != retry || strings.Contains(string(raw), `"url"`) || strings.Contains(string(raw), "X-Amz-") || resp.Header.Get("Location") != "" {
+			t.Fatalf("unsafe or incorrect limit response: status=%d retry=%s detail=%d", resp.StatusCode, resp.Header.Get("Retry-After"), result.Error.Details.Retry)
+		}
+		requireCode(t, raw, "blob_url_rate_limited")
 	}
-	requireCode(t, raw, "blob_url_rate_limited")
-	// Independent uploader peer receives its own budget across the same hash.
+	for i := 0; i < 15; i++ {
+		mint(i)
+	}
+	e.Now.Advance(30 * time.Second)
+	for i := 15; i < 30; i++ {
+		mint(i)
+	}
+	token := e.Hub.Blobs.TokenV2(peer, grants[1].SHA256, grants[1].BlobID, e.Now.Now().Add(time.Hour))
+	denied(second, grants[0], "", 30)
+	denied("", grants[1], token, 30)
+	// Another peer has its own budget even for the same content hash.
 	otherGrant := f.upload(t, other, "other")
 	f.download(t, other, otherGrant)
-	e.Now.Advance(time.Minute)
-	f.download(t, secret, g)
+	e.Now.Advance(29 * time.Second)
+	denied(secret, grants[1], "", 1)
+	e.Now.Advance(time.Second)
+	// Only the 15 t=0 calls expire at t=60. A fixed-window reset would
+	// wrongly permit the next call; a per-object bucket would never deny it.
+	for i := 30; i < 45; i++ {
+		mint(i)
+	}
+	denied(second, grants[0], "", 30)
+	denied("", grants[1], token, 30)
+	e.Now.Advance(30 * time.Second)
+	for i := 45; i < 60; i++ {
+		mint(i)
+	}
+	denied(secret, grants[0], "", 30)
+	var issued, refused int
+	if err := e.Hub.DB.QueryRow(`SELECT count(*) FROM blob_usage_events WHERE caller_identity=? AND kind='download_grant_issued'`, peer).Scan(&issued); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Hub.DB.QueryRow(`SELECT count(*) FROM blob_usage_events WHERE caller_identity=? AND kind='download_grant_rate_limited'`, peer).Scan(&refused); err != nil {
+		t.Fatal(err)
+	}
+	if issued != 60 || refused != 6 {
+		t.Fatalf("mint metering = %d issued, %d refused", issued, refused)
+	}
 }
 func TestR2HTTPCompletionWaitRevocationAndProviderErrors(t *testing.T) {
 	for _, change := range []string{"disable", "revoke", "purge", "expire", "provider"} {

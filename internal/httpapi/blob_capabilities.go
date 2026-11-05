@@ -17,6 +17,10 @@ func (s *server) blobCapabilities(w http.ResponseWriter, r *http.Request) {
 		backend = "disk"
 	}
 	result := map[string]any{"backend": backend, "upload_mode": "legacy", "max_size": s.Hub.Blobs.MaxSize, "daily_quota": s.Hub.Blobs.DailyQuota, "mcp_transfer_mode": "base64", "mcp_remote_bytes": false}
+	// Retained remote references remain readable when new uploads use disk.
+	if s.Hub.Blobs.Transfers != nil {
+		result["download_origins"] = []string{"https://" + s.Hub.Cfg.R2.AccountID + ".r2.cloudflarestorage.com"}
+	}
 	if backend == "r2" {
 		snapshot, err := s.Hub.Preferences.LoadSnapshot(r.Context(), nil)
 		if err != nil {
@@ -33,18 +37,18 @@ func (s *server) blobCapabilities(w http.ResponseWriter, r *http.Request) {
 			writeError(w, hub.E(503, "blob_preferences_unavailable", "preferences unavailable"))
 			return
 		}
-		_, expiry, err := blob.R2Retention(value, s.Hub.Now())
+		now := s.Hub.Now()
+		_, expiry, err := blob.R2Retention(value, now)
 		if err != nil {
 			writeError(w, hub.E(503, "blob_preferences_unavailable", "preferences unavailable"))
 			return
 		}
 		var seconds any
 		if expiry != nil {
-			seconds = int64(expiry.Sub(s.Hub.Now()).Seconds())
+			seconds = int64(expiry.Sub(now).Seconds())
 		}
 		result["retention"] = map[string]any{"value": value, "source": effective.Source, "revision": effective.Revision, "allowed_values": []string{"1h", "6h", "12h", "1d", "7d", "30d", "off"}, "seconds": seconds}
 		result["upload_mode"] = "direct"
-		result["download_origins"] = []string{"https://" + s.Hub.Cfg.R2.AccountID + ".r2.cloudflarestorage.com"}
 		result["checksum_profile"] = "sha256"
 		result["mcp_transfer_mode"] = "signed_urls"
 	}

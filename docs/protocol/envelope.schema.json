@@ -322,7 +322,7 @@
       ]
     },
     "attachmentReference": {
-      "$comment": "Shared reference contract for grant-aware sends in Task 4. The active disk-only sendRequest rejects blob_id until that integration exists.",
+      "$comment": "Grant-aware send references omit server verification fields. Backend authorization rejects unavailable remote references.",
       "$ref": "#/$defs/attachment",
       "not": {
         "anyOf": [
@@ -1343,12 +1343,9 @@
           "type": "array",
           "maxItems": 16,
           "items": {
-            "$ref": "#/$defs/attachmentReference",
-            "properties": {
-              "blob_id": false
-            }
+            "$ref": "#/$defs/attachmentReference"
           },
-          "description": "Hosted bytes are uploaded first with PUT /v1/blobs using the same bearer (returns {sha256,size}); the hub rejects unknown hashes unless origin_url is set."
+          "description": "Upload hosted bytes first using the configured backend: disk PUT returns {sha256,size}; direct upload completion returns a blob_id reference with immutable retention fields. The hub authorizes each reference and rejects unknown disk hashes unless origin_url is set."
         },
         "metadata": {
           "type": "object",

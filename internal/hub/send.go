@@ -123,7 +123,7 @@ func (h *Hub) SendVia(ctx context.Context, c auth.Caller, raw []byte, ingress st
 	if err := PrecheckSend(raw); err != nil {
 		return nil, false, err
 	}
-	if err := h.validateBlobSend(raw); err != nil {
+	if err := envelope.Validate("sendRequest", raw); err != nil {
 		return nil, false, err
 	}
 	req, err := decodeSendRequest(raw)
