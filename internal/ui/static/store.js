@@ -2,9 +2,7 @@
 import { isNoticeEvent, validNotice } from './notice-model.js';
 
 const WAIT = 25, BACKOFF_FIRST = 1000, BACKOFF_MAX = 30000;
-// After a restart hint, failures within its retry_after_ms plus this grace are
-// the restart, not an outage (PROTOCOL §21.3).
-const GRACE_MS = 30000;
+const GRACE_MS = 30000; // after a restart hint (PROTOCOL §21.3)
 
 const THREAD_TAGS = {
   delivery: ['inbox', 'threads'],
@@ -231,8 +229,7 @@ export function createStore({ api, now = Date.now, sleep = waitFor, random = Mat
         after = page.next_cursor || after;
         const events = page.events || [];
         if (!events.length) {
-          // Wait about the hint, jittered ±20%, before polling again; until
-          // the hub is back (and 30 s more) failures do not grow the backoff.
+          // Wait the hint ±20%; meanwhile failures do not grow the backoff.
           if (ms !== null) {
             quietUntil = now() + ms + GRACE_MS;
             await sleep(Math.round(Math.max(0, ms) * (0.8 + 0.4 * random())), signal);

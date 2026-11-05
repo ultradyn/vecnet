@@ -16,8 +16,9 @@ import (
 
 // uiMaxBytes caps the sum of every file in the UI, which ships with no build
 // step (raised from 60 KiB by operator UI Task 7; to 320 KiB on 2026-11-04
-// when the sidebar, activity feed and peer view took it past 256 KiB).
-const uiMaxBytes = 320 << 10
+// when the sidebar, activity feed and peer view took it past 256 KiB; to
+// 336 KiB on 2026-11-05 for the favicon set, about 9 KiB of it images).
+const uiMaxBytes = 336 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

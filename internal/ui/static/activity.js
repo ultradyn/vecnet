@@ -63,8 +63,7 @@ export function createActivity({ api, signal, sleep = waitFor, random = Math.ran
       }
       if (signal.aborted) return;
       if (restartMs !== null) {
-        // An announced restart (PROTOCOL §21.3): wait about the hint,
-        // jittered ±20%, and start the backoff afresh rather than count it.
+        // A restart (§21.3): wait the hint ±20%, not a failure backoff.
         await sleep(Math.round(restartMs * (0.8 + 0.4 * random())), signal);
         backoff = BACKOFF_FIRST;
         continue;

@@ -50,8 +50,6 @@ export function bannerItems(notices, now) {
       return {
         id: n.notice_id, kind: String(n.kind), label: LABEL[n.kind] || 'Notice',
         when: ok ? rel(t, now) + ' · ' + clock(iso, now) : '',
-        // when's two parts: the relative one changes as time passes, the
-        // clock time only with the notice.
         rel: ok ? rel(t, now) : '', abs: ok ? clock(iso, now) : '',
         host, url: host ? n.new_url : '', text: String(n.message ?? ''),
       };
@@ -70,8 +68,7 @@ export function restartState(state, input) {
   return s;
 }
 
-// restartLine: text is lead + tail. Only tail (the countdown) changes from
-// one tick to the next, so the banner keeps it out of the live region.
+// text = lead + tail; only tail (the countdown) changes per tick.
 export function restartLine(s, now) {
   if (!s || s.phase === 'none') return null;
   if (s.phase === 'unreachable') {
