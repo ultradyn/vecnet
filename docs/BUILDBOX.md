@@ -35,6 +35,16 @@ Commands are argv, not a shell string: use `bash -c '…'` for `||`, `&&`, pipes
 
 Everything runs under `nice -n 10` with `timeout $BB_TIMEOUT` (default 7200 s). `-race` needs cgo: pass `CGO_ENABLED=1 CC=/usr/bin/gcc`; every candidate box has gcc at `/usr/bin/gcc`.
 
+For the full blob/hub race gate on x-p35, allow an explicit 45-minute package
+timeout. The existing hub backfill fixtures insert 100,000 unrelated events and
+deliveries repeatedly; race instrumentation of pure-Go SQLite can exceed Go's
+default 10-minute package timeout. Keep their bounded-scan assertions and run
+both full packages to completion:
+
+```sh
+BB_HOST=x-p35 BB_JOBS=4 just bb CGO_ENABLED=1 CC=/usr/bin/gcc build2 go test -race -p 2 -count=1 -timeout=45m ./internal/blob/ ./internal/hub/
+```
+
 The remote command gets a clean environment (`env -i`): lane-private `HOME`, `TMPDIR` and `TMUX_TMPDIR`, shared `GOCACHE`/`GOMODCACHE`, `GOTOOLCHAIN=local`, and `VECNET_BB=1`. Nothing reads or writes the box user's dotfiles.
 
 ## Box choice and fallback

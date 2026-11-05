@@ -50,6 +50,9 @@ type Meta struct {
 // Store is the blob store. MaxSize and DailyQuota may be lowered after Open
 // (tests do); Now is the hub clock.
 type Store struct {
+	// Transfers is nil for the default disk backend; hub wiring owns installation.
+	Transfers *Transfers
+
 	Root       string // <data>/blobs
 	DB         *store.DB
 	Key        []byte // meta.hub_key, keys read tokens
@@ -142,7 +145,7 @@ func (s *Store) q(tx *sql.Tx) querier {
 
 func usedQuota(ctx context.Context, q querier, uploader, day string) (int64, error) {
 	var used int64
-	err := q.QueryRowContext(ctx, `SELECT bytes FROM blob_quota WHERE peer_id = ? AND day = ?`, uploader, day).Scan(&used)
+	err := q.QueryRowContext(ctx, `SELECT coalesce((SELECT sum(bytes) FROM blob_quota WHERE peer_id IN (?1,'durable:spill:'||?1,'durable:source_raw:'||?1) AND day=?2),0)+coalesce((SELECT reserved_bytes+accepted_bytes+abandoned_bytes+rejected_bytes FROM blob_r2_quota WHERE uploader=?1 AND day=?2),0)`, uploader, day).Scan(&used)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -253,6 +256,13 @@ func (s *Store) Put(ctx context.Context, uploader string, r io.Reader, mediaType
 		if used+n > s.DailyQuota {
 			return ErrQuota
 		}
+		purgedHash, err := r2Tombstone(ctx, tx, m.SHA256)
+		if err != nil {
+			return err
+		}
+		if purgedHash {
+			return ErrPurged
+		}
 		var size int64
 		var media string
 		var purged sql.NullString
@@ -329,6 +339,9 @@ func (s *Store) Open(ctx context.Context, sha string) (io.ReadSeekCloser, Meta, 
 	if !ValidSHA(sha) {
 		return nil, Meta{}, ErrNotFound
 	}
+	if f, m, err := s.openDurable(ctx, sha); !errors.Is(err, ErrNotFound) {
+		return f, m, err
+	}
 	m := Meta{SHA256: sha}
 	var purged sql.NullString
 	err := s.DB.QueryRowContext(ctx, `SELECT size, media_type, purged_at FROM blobs WHERE sha256 = ?`, sha).
@@ -387,14 +400,32 @@ func (s *Store) Pin(ctx context.Context, tx *sql.Tx, sha, msgID string) error {
 
 // GC deletes every unreferenced, unpurged blob uploaded more than
 // UnreferencedGrace ago or whose TTL has passed: its row, then its file.
-// Purge tombstones are kept.
+// Purge tombstones are kept and also durably schedule disk removal. Retry
+// their filesystem deletion on every GC, independently of retained references.
 func (s *Store) GC(ctx context.Context) (removed int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.Now()
-	var shas []string
+	var shas, purged []string
 	err = s.DB.Tx(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx,
+		rows, err := tx.QueryContext(ctx, `SELECT sha256 FROM blobs WHERE purged_at IS NOT NULL`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var sha string
+			if err := rows.Scan(&sha); err != nil {
+				rows.Close()
+				return err
+			}
+			purged = append(purged, sha)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		rows, err = tx.QueryContext(ctx,
 			`DELETE FROM blobs
 			 WHERE purged_at IS NULL
 			   AND NOT EXISTS (SELECT 1 FROM blob_refs r WHERE r.sha256 = blobs.sha256)
@@ -425,15 +456,18 @@ func (s *Store) GC(ctx context.Context) (removed int, err error) {
 	if err != nil {
 		return 0, err
 	}
-	for _, sha := range shas {
+	var cleanupErr error
+	for _, sha := range append(purged, shas...) {
 		if !ValidSHA(sha) {
 			continue
 		}
 		if err := os.Remove(s.path(sha)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return len(shas), fmt.Errorf("blob: gc remove: %w", err)
+			// Ordinary rows are already deleted; attempt every file even when
+			// another removal fails so an unrelated purge cannot orphan them.
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("blob: gc remove: %w", err))
 		}
 	}
-	return len(shas), nil
+	return len(shas), cleanupErr
 }
 
 // Purge removes sha's bytes and leaves a tombstone (purged_at), so later
@@ -445,15 +479,8 @@ func (s *Store) Purge(ctx context.Context, sha string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.DB.ExecContext(ctx,
-		`UPDATE blobs SET purged_at = coalesce(purged_at, ?) WHERE sha256 = ?`, envelope.FormatTime(s.Now()), sha)
-	if err != nil {
-		return fmt.Errorf("blob: purge: %w", err)
-	}
-	if n, err := res.RowsAffected(); err != nil {
-		return fmt.Errorf("blob: purge: %w", err)
-	} else if n == 0 {
-		return ErrNotFound
+	if err := purgeHash(ctx, s.DB, sha, s.Now(), true); err != nil {
+		return err
 	}
 	if err := os.Remove(s.path(sha)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("blob: purge remove: %w", err)
