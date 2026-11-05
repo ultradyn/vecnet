@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -133,11 +134,12 @@ func TestPreferencesPreviewReadOnlyAndNoWriterLock(t *testing.T) {
 // provider or data deletion implementation. Check runs inside PATCH's writer;
 // Preview runs after the read transaction; Activate shares the atomic commit.
 type syntheticPreferencePolicy struct {
-	locked    bool
-	quota     int64
-	fail      bool
-	notBefore string
-	impact    prefs.Impact
+	activationCalls int
+	locked          bool
+	quota           int64
+	fail            bool
+	notBefore       string
+	impact          prefs.Impact
 }
 
 func (a *syntheticPreferencePolicy) Check(_ context.Context, _, _ prefs.Snapshot, p prefs.Patch) error {
@@ -150,6 +152,7 @@ func (a *syntheticPreferencePolicy) Preview(_ context.Context, _, _ prefs.Snapsh
 	return a.impact, nil
 }
 func (a *syntheticPreferencePolicy) Activate(ctx context.Context, tx *sql.Tx, _, after prefs.Snapshot, p prefs.Patch, impact prefs.Impact, digest string) error {
+	a.activationCalls++
 	if p.ApplyExisting && impact.NotBefore != a.notBefore {
 		return &prefs.Error{Code: prefs.CodeConfirmationStale}
 	}
@@ -176,6 +179,60 @@ func installedPreviewPrefs(t *testing.T, h *hub.Hub, adapter *syntheticPreferenc
 	p.Policy = adapter
 	return p
 }
+
+// A rejected approval must have no persistent or published side effects,
+// including adapter calls that would not insert a retention activation row.
+func assertUnconfirmedPreferencePatch(t *testing.T, h *hub.Hub, p *hub.Preferences, a *syntheticPreferencePolicy, s prefs.Snapshot, patch prefs.Patch) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	updates := p.Subscribe(ctx)
+	counts := func() [3]int {
+		t.Helper()
+		var out [3]int
+		for i, query := range []string{`SELECT count(*) FROM hub_preferences`, `SELECT count(*) FROM hub_preference_activations`, `SELECT count(*) FROM audit`} {
+			if err := h.DB.QueryRow(query).Scan(&out[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return out
+	}
+	beforeCounts, beforeCalls := counts(), a.activationCalls
+	_, err := p.PatchPreferences(ctx, prefsOperator, s.ETag, patch)
+	prefsCode(t, err, prefs.CodeConfirmationRequired)
+	persisted, err := p.LoadSnapshot(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, snapshot := range []prefs.Snapshot{persisted, p.Current()} {
+		if snapshot.Revision != s.Revision || snapshot.ETag != s.ETag || !reflect.DeepEqual(snapshot.Descriptors(), s.Descriptors()) {
+			t.Fatal("unconfirmed patch changed persisted or published preferences")
+		}
+	}
+	if counts() != beforeCounts || a.activationCalls != beforeCalls {
+		t.Fatal("unconfirmed patch changed preferences, activations or audit")
+	}
+	select {
+	case <-updates:
+		t.Fatal("unconfirmed patch notified subscriber")
+	default:
+	}
+}
+
+func assertApprovedPreferenceRisk(t *testing.T, h *hub.Hub, want string) {
+	t.Helper()
+	var detail string
+	if err := h.DB.QueryRow(`SELECT detail FROM audit WHERE action='prefs_changed'`).Scan(&detail); err != nil {
+		t.Fatal(err)
+	}
+	var row struct {
+		Approved []string `json:"approved_risks"`
+	}
+	if json.Unmarshal([]byte(detail), &row) != nil || !reflect.DeepEqual(row.Approved, []string{want}) {
+		t.Fatal("confirmed change did not audit the exact approved risk")
+	}
+}
+
 func TestPreferencesHostedLocksAndVerifiedOff(t *testing.T) {
 	h, _ := preferencesHub(t, hub.DefaultConfig())
 	a := &syntheticPreferencePolicy{locked: true, quota: 1024}
@@ -191,6 +248,7 @@ func TestPreferencesHostedLocksAndVerifiedOff(t *testing.T) {
 	a.quota = 1024
 	zero := int64(0)
 	a.impact = prefs.Impact{Eligible: &zero, Pinned: &zero, EstimatedBytes: &zero}
+	assertUnconfirmedPreferencePatch(t, h, p, a, s, patch)
 	out := previewPrefs(t, p, prefsOperator, s, patch)
 	if len(out.Risks) != 1 || out.Risks[0].Code != "blob_expiry_off" || out.Impact.EstimatedBytes == nil {
 		t.Fatal("missing storage cost risk/estimate")
@@ -204,6 +262,8 @@ func TestPreferencesHostedLocksAndVerifiedOff(t *testing.T) {
 	if err != nil || next.Revision != 1 {
 		t.Fatal("verified off confirmation failed")
 	}
+	prefsAuditCount(t, h, 1)
+	assertApprovedPreferenceRisk(t, h, "blob_expiry_off")
 	retro := prefs.Patch{Set: patch.Set, ApplyExisting: true}
 	_, err = p.PreviewPreferences(context.Background(), prefsOperator, next.ETag, retro)
 	prefsCode(t, err, prefs.CodeInvalidValue)
@@ -220,8 +280,13 @@ func TestPreferencesApplyExistingFixedBoundsAndAtomicActivation(t *testing.T) {
 			a := &syntheticPreferencePolicy{notBefore: notBefore, impact: prefs.Impact{CutoffAt: envelope.FormatTime(clock.Now()), HighWater: &high, NotBefore: notBefore, Eligible: &zero, Pinned: &zero, EstimatedBytes: &zero}}
 			p := installedPreviewPrefs(t, h, a, "retention.history")
 			s := p.Current()
+			prefValue(t, s, "retention.history", 0, prefs.SourceDefault, "")
 			patch := prefs.Patch{Set: map[string]prefs.Value{"retention.history": prefs.Duration(0)}, ApplyExisting: true}
+			assertUnconfirmedPreferencePatch(t, h, p, a, s, patch)
 			out := previewPrefs(t, p, prefsOperator, s, patch)
+			if len(out.Risks) != 1 || out.Risks[0].Code != "retention_apply_existing" || !reflect.DeepEqual(out.Risks[0].Keys, []string{"retention.history"}) {
+				t.Fatal("unchanged policy preview omitted the retrospective risk")
+			}
 			if out.Impact.NotBefore != notBefore || *out.Impact.HighWater != 42 {
 				t.Fatal("preview lost bounded approval")
 			}
@@ -256,6 +321,7 @@ func TestPreferencesApplyExistingFixedBoundsAndAtomicActivation(t *testing.T) {
 					t.Fatal("unchanged policy approval not atomic")
 				}
 				prefsAuditCount(t, h, 1)
+				assertApprovedPreferenceRisk(t, h, "retention_apply_existing")
 				var nb, cut, digest string
 				var hi int64
 				if err := h.DB.QueryRow(`SELECT not_before,cutoff_at,high_water,approval_digest FROM hub_preference_activations`).Scan(&nb, &cut, &hi, &digest); err != nil {

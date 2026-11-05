@@ -7,10 +7,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/auth"
@@ -251,6 +253,56 @@ func TestPreferencesHTTPStrictBodiesAndPreconditions(t *testing.T) {
 		t.Fatal("failed requests mutated preferences")
 	}
 }
+func TestPreferencesHTTPTruncatedBody(t *testing.T) {
+	for _, method := range []string{http.MethodPatch, http.MethodPost} {
+		for _, c := range []struct{ name, body string }{
+			{"partial_json", `{"set":{"agents.thread_budget":`},
+			{"complete_json", `{"set":{"agents.thread_budget":600}}`},
+		} {
+			t.Run(method+"/"+c.name, func(t *testing.T) {
+				e := testhub.Start(t)
+				beforeWire, tag := prefsGET(t, e)
+				before := e.Hub.Preferences.Current()
+				var auditBefore int
+				if err := e.Hub.DB.QueryRow(`SELECT count(*) FROM audit`).Scan(&auditBefore); err != nil {
+					t.Fatal(err)
+				}
+				path := "/v1/admin/prefs"
+				if method == http.MethodPost {
+					path += "/preview"
+				}
+				// Even a complete JSON prefix is invalid when the transport
+				// reports that the declared request body was truncated.
+				req := httptest.NewRequest(method, path, io.MultiReader(strings.NewReader(c.body), iotest.ErrReader(io.ErrUnexpectedEOF)))
+				req.Header.Set("Authorization", "Bearer "+e.OperatorSecret)
+				req.Header.Set("If-Match", tag)
+				req.Header.Set("Content-Type", "application/json")
+				response := httptest.NewRecorder()
+				httpapi.New(httpapi.NewStack(e.Hub).Deps()).ServeHTTP(response, req)
+				const want = `{"error":{"code":"invalid_body","message":"Invalid preference request.","details":{}}}` + "\n"
+				if response.Code != http.StatusBadRequest || response.Body.String() != want {
+					t.Errorf("truncated request did not return the sanitized 400 envelope (status=%d)", response.Code)
+				}
+				after, afterTag := prefsGET(t, e)
+				persisted, err := e.Hub.Preferences.LoadSnapshot(context.Background(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if afterTag != tag || !reflect.DeepEqual(beforeWire.Descriptors(), after.Descriptors()) || persisted.ETag != tag || !reflect.DeepEqual(before.Descriptors(), persisted.Descriptors()) || e.Hub.Preferences.Current().ETag != tag {
+					t.Fatal("truncated request changed persisted or published preferences")
+				}
+				var auditAfter int
+				if err := e.Hub.DB.QueryRow(`SELECT count(*) FROM audit`).Scan(&auditAfter); err != nil {
+					t.Fatal(err)
+				}
+				if auditAfter != auditBefore {
+					t.Fatal("truncated request changed audit")
+				}
+			})
+		}
+	}
+}
+
 func TestPreferencesHTTPConcurrentPatches(t *testing.T) {
 	e := testhub.Start(t)
 	_, tag := prefsGET(t, e)

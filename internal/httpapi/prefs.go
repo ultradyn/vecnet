@@ -70,7 +70,11 @@ func readPreferencePatch(w http.ResponseWriter, r *http.Request) (string, prefs.
 	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, prefs.MaxPatchBytes))
 	if err != nil {
-		return "", patch, err
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return "", patch, err
+		}
+		return "", patch, &prefs.Error{Code: prefs.CodeInvalidBody}
 	}
 	if err := json.Unmarshal(raw, &patch); err != nil {
 		var pe *prefs.Error
