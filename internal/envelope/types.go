@@ -10,6 +10,8 @@ package envelope
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/blobwire"
 )
 
 // SchemaVersion is the schema_version carried by Message and Delivery.
@@ -47,12 +49,29 @@ type Origin struct {
 
 // Attachment references blob bytes by hash ($defs/attachment).
 type Attachment struct {
-	SHA256    string `json:"sha256"`
-	Size      int64  `json:"size"`
-	MediaType string `json:"media_type"`
-	Name      string `json:"name,omitempty"`
-	OriginURL string `json:"origin_url,omitempty"`
-	BlobURL   string `json:"blob_url,omitempty"`
+	BlobID         string              `json:"blob_id,omitempty"`
+	RetentionClass string              `json:"retention_class,omitempty"`
+	ExpiresAt      *string             `json:"expires_at"`
+	SHA256Verified *bool               `json:"sha256_verified,omitempty"`
+	Integrity      *blobwire.Integrity `json:"integrity,omitempty"`
+	SHA256         string              `json:"sha256"`
+	Size           int64               `json:"size"`
+	MediaType      string              `json:"media_type"`
+	Name           string              `json:"name,omitempty"`
+	OriginURL      string              `json:"origin_url,omitempty"`
+	BlobURL        string              `json:"blob_url,omitempty"`
+}
+
+// MarshalJSON preserves legacy disk bytes while emitting null for kept R2 objects.
+func (a Attachment) MarshalJSON() ([]byte, error) {
+	type plain Attachment
+	if a.BlobID != "" {
+		return json.Marshal(plain(a))
+	}
+	return json.Marshal(struct {
+		plain
+		ExpiresAt *string `json:"expires_at,omitempty"`
+	}{plain: plain(a)})
 }
 
 // Loop is the hub-set loop-control block of a Message ($defs/loop).

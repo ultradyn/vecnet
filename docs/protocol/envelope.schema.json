@@ -184,7 +184,151 @@
           "format": "uri",
           "maxLength": 2048,
           "description": "Set by the hub on Delivery only: a read URL carrying a token scoped to this recipient and this hash, valid 7 days. Absent if the bytes are not hosted."
+        },
+        "blob_id": {
+          "type": "string",
+          "pattern": "^blo_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "description": "Opaque random R2 object identity; confers no authority."
+        },
+        "retention_class": {
+          "enum": [
+            "1h",
+            "6h",
+            "12h",
+            "1d",
+            "7d",
+            "30d",
+            "keep"
+          ]
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Recorded logical object deadline; null for keep."
+        },
+        "sha256_verified": {
+          "type": "boolean",
+          "description": "Server-recorded checksum evidence, never a caller assertion."
+        },
+        "integrity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "algorithm",
+            "value",
+            "verified"
+          ],
+          "properties": {
+            "algorithm": {
+              "const": "sha256"
+            },
+            "value": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "verified": {
+              "type": "boolean"
+            }
+          }
         }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "blob_id"
+            ]
+          },
+          "then": {
+            "required": [
+              "retention_class",
+              "expires_at"
+            ],
+            "properties": {
+              "size": {
+                "minimum": 1
+              }
+            },
+            "not": {
+              "required": [
+                "blob_url"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "retention_class"
+            ],
+            "properties": {
+              "retention_class": {
+                "const": "keep"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "expires_at": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "expires_at": {
+                "$ref": "#/$defs/timestamp"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {
+                "required": [
+                  "retention_class"
+                ]
+              },
+              {
+                "required": [
+                  "expires_at"
+                ]
+              },
+              {
+                "required": [
+                  "sha256_verified"
+                ]
+              },
+              {
+                "required": [
+                  "integrity"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "required": [
+              "blob_id"
+            ]
+          }
+        }
+      ]
+    },
+    "attachmentReference": {
+      "$comment": "Shared reference contract for grant-aware sends in Task 4. The active disk-only sendRequest rejects blob_id until that integration exists.",
+      "$ref": "#/$defs/attachment",
+      "not": {
+        "anyOf": [
+          { "required": ["sha256_verified"] },
+          { "required": ["integrity"] }
+        ]
       }
     },
     "loop": {
@@ -506,7 +650,9 @@
           "type": "array",
           "maxItems": 16,
           "items": {
-            "$ref": "#/$defs/attachment"
+            "$ref": "#/$defs/attachment",
+            "if": { "required": ["blob_id"] },
+            "then": { "required": ["sha256_verified", "integrity"] }
           }
         },
         "metadata": {
@@ -1197,7 +1343,10 @@
           "type": "array",
           "maxItems": 16,
           "items": {
-            "$ref": "#/$defs/attachment"
+            "$ref": "#/$defs/attachmentReference",
+            "properties": {
+              "blob_id": false
+            }
           },
           "description": "Hosted bytes are uploaded first with PUT /v1/blobs using the same bearer (returns {sha256,size}); the hub rejects unknown hashes unless origin_url is set."
         },

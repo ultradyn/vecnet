@@ -11,7 +11,9 @@ import (
 // TestMigration0024UpgradesFrom0022: a database at master's 0022 (hub
 // preferences) upgrades through the DB-compaction migrations 0023 (event
 // payload references) and 0024 (backfill exceptions) without touching
-// existing event bytes, the hub identity or the preferences state.
+// existing event bytes, the hub identity or the preferences state. Migrate
+// applies every later migration too (0025 R2 blobs since the r2 merge); its
+// own upgrade guard is TestMigration0025UpgradesFrom0024.
 func TestMigration0024UpgradesFrom0022(t *testing.T) {
 	ctx := context.Background()
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "upgrade.db")+"?"+dsnParams)
@@ -48,8 +50,8 @@ func TestMigration0024UpgradesFrom0022(t *testing.T) {
 	}
 
 	applied, err := Migrate(ctx, db)
-	if err != nil || !reflect.DeepEqual(applied, []string{"0023_event_payload_refs.sql", "0024_backfill_exceptions.sql"}) {
-		t.Fatalf("upgrade applied %v, %v; want only 0023 and 0024", applied, err)
+	if err != nil || !reflect.DeepEqual(applied, []string{"0023_event_payload_refs.sql", "0024_backfill_exceptions.sql", "0025_r2_blobs.sql"}) {
+		t.Fatalf("upgrade applied %v, %v; want only 0023, 0024 and 0025", applied, err)
 	}
 	var n int
 	if err := db.QueryRow(`SELECT count(*) FROM schema_migrations WHERE name IN ('0021_hub_identity_notices.sql', '0022_hub_preferences.sql', '0023_event_payload_refs.sql', '0024_backfill_exceptions.sql')`).Scan(&n); err != nil || n != 4 {
