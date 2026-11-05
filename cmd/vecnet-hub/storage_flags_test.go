@@ -34,14 +34,18 @@ func TestStorageSwitchesIndependent(t *testing.T) {
 				t.Helper()
 				resp, out := hubDo(t, method, hb.base+path, opSecret, body)
 				if resp.StatusCode/100 != 2 {
-					t.Fatalf("%s %s: %d %s", method, path, resp.StatusCode, out)
+					t.Fatalf("%s %s: %d", method, path, resp.StatusCode)
 				}
 				return out
 			}
 			var status struct {
 				Enabled bool `json:"enabled"`
 			}
-			if err := json.Unmarshal(admin(http.MethodGet, "/v1/admin/storage/backfill", nil), &status); err != nil || status.Enabled != tc.backfill {
+			resp, out := hubDo(t, http.MethodGet, hb.base+"/v1/admin/storage/backfill", opSecret, nil)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET /v1/admin/storage/backfill: %d, want %d", resp.StatusCode, http.StatusOK)
+			}
+			if err := json.Unmarshal(out, &status); err != nil || status.Enabled != tc.backfill {
 				t.Fatalf("backfill enabled = %v (%v), want %v", status.Enabled, err, tc.backfill)
 			}
 			var sender, recipient struct {

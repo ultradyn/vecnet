@@ -3,6 +3,7 @@ package hub_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,6 +77,48 @@ func addUnrelatedHistory(t *testing.T, h *hub.Hub, tag string, n int) {
 	}
 }
 
+// assertBackfillQueryPlans keeps the named/covering-index contract alongside
+// the production page-work checks. These statements mirror the candidate,
+// completion and authoritative-hash queries in BackfillDeliverySlice; no
+// INDEXED BY hint may force the planner to select the required access path.
+func assertBackfillQueryPlans(t *testing.T, h *hub.Hub, last, high int64) {
+	t.Helper()
+	for _, q := range []struct {
+		name string
+		sql  string
+		args []any
+		want string
+	}{
+		{"candidate", `SELECT e.seq,e.data FROM events e WHERE e.seq>? AND e.seq<=? AND e.type='delivery' AND e.payload_format='inline' ORDER BY e.seq LIMIT ?`, []any{0, high, 1}, "SEARCH e USING INDEX events_backfill_inline_delivery_seq (seq>? AND seq<?)"},
+		{"completion", `SELECT EXISTS(SELECT 1 FROM events WHERE seq>? AND seq<=? AND type='delivery' AND payload_format='inline')`, []any{last, high}, "SEARCH events USING COVERING INDEX events_backfill_inline_delivery_seq (seq>? AND seq<?)"},
+		{"delivery_hash", `SELECT body_sha256 FROM deliveries WHERE event_seq=?`, []any{last}, "SEARCH deliveries USING COVERING INDEX deliveries_event_seq_hash (event_seq=?)"},
+	} {
+		rows, err := h.DB.Query("EXPLAIN QUERY PLAN "+q.sql, q.args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		indexed := false
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			t.Logf("%s: %s", q.name, detail)
+			indexed = indexed || strings.Contains(detail, q.want)
+		}
+		err = rows.Err()
+		closeErr := rows.Close()
+		if err != nil || closeErr != nil {
+			t.Fatal("query plan failed", err, closeErr)
+		}
+		if !indexed {
+			t.Errorf("%s query plan must contain %q", q.name, q.want)
+		}
+	}
+}
+
 // Both forward queries (candidate and completion) must range-search the
 // partial eligibility index, and a candidate's authoritative hash lookup must
 // use the delivery event_seq index: unrelated presence events, converted
@@ -107,6 +150,7 @@ func TestBackfillSparseAndEmptyEligibilityUsesBoundedScan(t *testing.T) {
 				if err := h.DB.QueryRow(`SELECT max(seq) FROM events`).Scan(&high); err != nil {
 					t.Fatal(err)
 				}
+				assertBackfillQueryPlans(t, h, candidateSeq, high)
 				start := time.Now()
 				p, pages := slicePageReads(t, h, hub.BackfillLimits{Rows: 1})
 				elapsed := time.Since(start)
@@ -147,6 +191,7 @@ func TestBackfillDeliveryHashLookupUsesEventSeqIndex(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		assertBackfillQueryPlans(t, h, 1, 1)
 		p, pages := slicePageReads(t, h, hub.BackfillLimits{Rows: 1})
 		if p.Converted != 1 || p.LastSeq != 1 {
 			t.Fatalf("hash-verified conversion failed: %+v", p)
