@@ -9,9 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/events"
+	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/mcpdiag"
 	"github.com/XertroV/vecnet/internal/mcpserver"
+	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/testhub"
 	"github.com/XertroV/vecnet/internal/webhook"
 )
@@ -265,8 +268,8 @@ func TestChallengeRedirectDiagnosticsRetainStatus(t *testing.T) {
 }
 
 func TestRefreshDeadlineStatusDoesNotSlide(t *testing.T) {
-	env := testhub.Start(t)
-	env.Hub.Cfg.EventsRefreshInterval = 7 * time.Minute
+	// The bootstrap layer (flag/env) supplies the first cadence.
+	env := testhub.StartWith(t, func(c *hub.Config) { c.EventsRefreshInterval = 7 * time.Minute })
 	_, bearer := env.NewPeer("session", "refresh-status")
 	cb := testhub.NewCallback(t)
 	params := subParams(cb.URL, webhook.NewSecret(), nil)
@@ -275,9 +278,9 @@ func TestRefreshDeadlineStatusDoesNotSlide(t *testing.T) {
 	if first.RefreshBefore == nil || *first.RefreshBefore != want {
 		t.Fatalf("custom interval = %v, want %s", first.RefreshBefore, want)
 	}
-	// The original deadline survives passing time and a configuration change.
+	// The original deadline survives passing time and a live preference save.
 	env.Now.Advance(8 * time.Minute)
-	env.Hub.Cfg.EventsRefreshInterval = time.Hour
+	setRefreshInterval(t, env, 3600)
 	var status subscriptionStatusResult
 	toolOK(t, env, bearer, "vecnet_subscriptions", nil, &status)
 	if len(status.Subscriptions) != 1 || status.Subscriptions[0].RefreshBefore == nil || *status.Subscriptions[0].RefreshBefore != want {
@@ -287,5 +290,62 @@ func TestRefreshDeadlineStatusDoesNotSlide(t *testing.T) {
 	want = env.Now.Now().Add(time.Hour).Format("2006-01-02T15:04:05.000Z")
 	if refreshed.ID != first.ID || refreshed.RefreshBefore == nil || *refreshed.RefreshBefore != want {
 		t.Fatalf("refresh did not replace deadline: %+v", refreshed)
+	}
+}
+
+// A live 1800-to-600 save governs the next successful events/subscribe
+// response, while a failed re-subscription keeps the advice already returned.
+func TestSubscribeAdviceFollowsLiveRefreshPreference(t *testing.T) {
+	env := testhub.Start(t)
+	_, bearer := env.NewPeer("session", "refresh-live")
+	cb := testhub.NewCallback(t)
+	params := subParams(cb.URL, webhook.NewSecret(), nil)
+	first := subscribeOK(t, env, bearer, params)
+	want := env.Now.Now().Add(30 * time.Minute).Format("2006-01-02T15:04:05.000Z")
+	if first.RefreshBefore == nil || *first.RefreshBefore != want {
+		t.Fatalf("default advice = %v, want %s", first.RefreshBefore, want)
+	}
+	env.Now.Advance(2 * time.Minute)
+	setRefreshInterval(t, env, 600)
+
+	// A new secret needs a fresh challenge; a failed one changes no advice.
+	cb.OnChallenge(func(_ string, w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"challenge":"wrong"}`))
+	})
+	failed := subParams(cb.URL, webhook.NewSecret(), nil)
+	if reply := rpc2026(t, env, bearer, "events/subscribe", failed); reply.Error == nil || errReason(t, reply) != "challenge_failed" {
+		t.Fatal("wrong challenge answer was accepted")
+	}
+	var status subscriptionStatusResult
+	toolOK(t, env, bearer, "vecnet_subscriptions", nil, &status)
+	if len(status.Subscriptions) != 1 || status.Subscriptions[0].RefreshBefore == nil || *status.Subscriptions[0].RefreshBefore != want {
+		t.Fatalf("failed refresh replaced advice: %+v", status)
+	}
+
+	cb.OnChallenge(nil)
+	refreshed := subscribeOK(t, env, bearer, failed)
+	want = env.Now.Now().Add(10 * time.Minute).Format("2006-01-02T15:04:05.000Z")
+	if refreshed.ID != first.ID || refreshed.RefreshBefore == nil || *refreshed.RefreshBefore != want {
+		t.Fatalf("live preference not applied: %+v, want %s", refreshed, want)
+	}
+	toolOK(t, env, bearer, "vecnet_subscriptions", nil, &status)
+	if len(status.Subscriptions) != 1 || status.Subscriptions[0].RefreshBefore == nil || *status.Subscriptions[0].RefreshBefore != want {
+		t.Fatalf("status does not show returned advice: %+v", status)
+	}
+}
+
+func setRefreshInterval(t *testing.T, env *testhub.Env, seconds int64) {
+	t.Helper()
+	ctx := context.Background()
+	operator := auth.Caller{Kind: "operator", PeerKind: "operator"}
+	snapshot, err := env.Hub.Preferences.ReadPreferences(ctx, operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.Hub.Preferences.PatchPreferences(ctx, operator, snapshot.ETag, prefs.Patch{
+		Set: map[string]prefs.Value{"events.refresh_interval": prefs.Duration(seconds)},
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
