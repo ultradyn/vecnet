@@ -5,7 +5,12 @@
   "selected_checksum_profile": "sha256",
   "gates": {
     "account_billing_checkout": "OUTSTANDING",
-    "browser_put_get": "OUTSTANDING",
+    "browser_disallowed_origin": "PASS",
+    "browser_get": "PASS",
+    "browser_head_evidence": "PASS",
+    "browser_put": "PASS",
+    "browser_put_get": "PASS",
+    "browser_range": "PASS",
     "checksum_profile": "PASS",
     "chunked_same_size": "PASS",
     "chunked_wrong_size": "PASS",
@@ -18,17 +23,17 @@
     "cors_get_exposure": "PASS",
     "cors_origin_1_get_range": "PASS",
     "cors_origin_1_head": "PASS",
-    "cors_origin_1_put_full": "FAIL",
+    "cors_origin_1_put_full": "PASS",
     "cors_origin_1_put_minimal": "PASS",
     "cors_origin_2_get_range": "PASS",
     "cors_origin_2_head": "PASS",
-    "cors_origin_2_put_full": "FAIL",
+    "cors_origin_2_put_full": "PASS",
     "cors_origin_2_put_minimal": "PASS",
     "cors_origin_3_get_range": "PASS",
     "cors_origin_3_head": "PASS",
-    "cors_origin_3_put_full": "FAIL",
+    "cors_origin_3_put_full": "PASS",
     "cors_origin_3_put_minimal": "PASS",
-    "cors_range_exposure": "FAIL",
+    "cors_range_exposure": "PASS",
     "create_only_race": "PASS",
     "create_only_replay": "PASS",
     "credential_scope": "PASS",
@@ -41,13 +46,16 @@
     "get_short_before_expiry": "PASS",
     "initial_cleanup": "PASS",
     "keep_get_600": "PASS",
-    "length_body_mismatch": "OUTSTANDING",
+    "length_body_fewer": "PASS",
+    "length_body_mismatch": "PASS",
+    "length_body_more": "PASS",
     "length_changed": "PASS",
     "length_missing": "PASS",
     "lifecycle_configuration": "PASS",
     "lifecycle_fixture_false": "PASS",
     "lifecycle_fixture_true": "PASS",
     "lifecycle_real_deletion": "OUTSTANDING",
+    "lifecycle_witnesses_preserved": "PASS",
     "md5_body_mismatch": "PASS",
     "md5_head_evidence": "PASS",
     "md5_header_changed": "PASS",
@@ -488,10 +496,800 @@
       "at": "2026-11-05T03:05:32Z",
       "status": "PASS",
       "note": "deleted and HEAD-confirmed 17 exact allocated keys after upload TTL+60s; retained 2 lifecycle fixtures"
+    },
+    {
+      "name": "cors_configuration",
+      "at": "2026-11-05T03:12:06Z",
+      "status": "PASS",
+      "note": "coordinator-verified updated policy via wrangler 2026-11-05; this run validates behavior, not bucket administration"
+    },
+    {
+      "name": "browser_put_get",
+      "at": "2026-11-05T03:12:06Z",
+      "status": "FAIL",
+      "note": "allowed loopback port unavailable; no listener replaced"
+    },
+    {
+      "name": "browser_head_evidence",
+      "at": "2026-11-05T03:12:06Z",
+      "status": "FAIL",
+      "http": 404,
+      "note": "browser supplied exact signed Content-Length; HEAD size/provider SHA/metadata confirmed"
+    },
+    {
+      "name": "cors_origin_1_put_minimal",
+      "at": "2026-11-05T03:12:06Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_1_put_full",
+      "at": "2026-11-05T03:12:06Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_1_get_range",
+      "at": "2026-11-05T03:12:06Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_1_head",
+      "at": "2026-11-05T03:12:06Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_2_put_minimal",
+      "at": "2026-11-05T03:12:06Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_2_put_full",
+      "at": "2026-11-05T03:12:06Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_2_get_range",
+      "at": "2026-11-05T03:12:06Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_2_head",
+      "at": "2026-11-05T03:12:06Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_3_put_minimal",
+      "at": "2026-11-05T03:12:06Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_3_put_full",
+      "at": "2026-11-05T03:12:06Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_3_get_range",
+      "at": "2026-11-05T03:12:06Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_3_head",
+      "at": "2026-11-05T03:12:07Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_disallowed_origin",
+      "at": "2026-11-05T03:12:07Z",
+      "status": "PASS",
+      "http": 403,
+      "provider_code": "Unauthorized",
+      "note": "raw OPTIONS cannot establish browser enforcement"
+    },
+    {
+      "name": "cors_get_exposure",
+      "at": "2026-11-05T03:12:07Z",
+      "status": "FAIL",
+      "http": 404,
+      "provider_code": "NoSuchKey",
+      "note": "ETag/length/checksum exposure checked"
+    },
+    {
+      "name": "cors_range_exposure",
+      "at": "2026-11-05T03:12:07Z",
+      "status": "PASS",
+      "http": 404,
+      "provider_code": "NoSuchKey",
+      "note": "required range response headers exposed"
+    },
+    {
+      "name": "length_body_fewer",
+      "at": "2026-11-05T03:12:07Z",
+      "status": "PASS",
+      "note": "raw TLS write completed; checksum matches actual bytes, signed length differs; HEAD absence=true; transport category is not a provider rejection code",
+      "transport": "RawPeerClosed"
+    },
+    {
+      "name": "length_body_more",
+      "at": "2026-11-05T03:12:07Z",
+      "status": "PASS",
+      "http": 400,
+      "provider_code": "BadDigest",
+      "note": "raw TLS write completed; checksum matches actual bytes, signed length differs; HEAD absence=true; transport category is not a provider rejection code"
+    },
+    {
+      "name": "length_body_mismatch",
+      "at": "2026-11-05T03:18:07Z",
+      "status": "PASS",
+      "note": "fewer/more raw probes: no object immediately or after PUT TTL+60s before deletion; no unobserved provider error code inferred"
+    },
+    {
+      "name": "initial_cleanup",
+      "at": "2026-11-05T03:18:08Z",
+      "status": "PASS",
+      "note": "deleted all allocated non-fixture keys; final delete and HEAD absence follows upload TTL+60s"
+    },
+    {
+      "name": "cleanup",
+      "at": "2026-11-05T03:18:09Z",
+      "status": "PASS",
+      "note": "deleted and HEAD-confirmed 3 exact allocated keys after upload TTL+60s; retained 0 lifecycle fixtures"
+    },
+    {
+      "name": "lifecycle_witnesses_preserved",
+      "at": "2026-11-05T03:18:09Z",
+      "status": "PASS",
+      "note": "original two lifecycle keys remain in baseline receipt; follow-up allocated/deleted only three browser-* keys in its own new exp/1h namespace"
+    },
+    {
+      "name": "cors_configuration",
+      "at": "2026-11-05T03:18:20Z",
+      "status": "PASS",
+      "note": "coordinator-verified updated policy via wrangler 2026-11-05; this run validates behavior, not bucket administration"
+    },
+    {
+      "name": "browser_put",
+      "at": "2026-11-05T03:18:21Z",
+      "status": "PASS",
+      "http": 200,
+      "note": "Blob PUT with browser-supplied signed Content-Length; JS matching ETag=true SHA checksum=true"
+    },
+    {
+      "name": "browser_get",
+      "at": "2026-11-05T03:18:21Z",
+      "status": "PASS",
+      "http": 200,
+      "note": "JS exact full bytes=true ETag=true Content-Length=true; optional GET SHA checksum match=true (PUT checksum is mandatory)"
+    },
+    {
+      "name": "browser_range",
+      "at": "2026-11-05T03:18:21Z",
+      "status": "PASS",
+      "http": 206,
+      "note": "JS read exact partial bytes, Content-Range and Accept-Ranges"
+    },
+    {
+      "name": "browser_disallowed_origin",
+      "at": "2026-11-05T03:18:21Z",
+      "status": "PASS",
+      "note": "separate disallowed loopback origin: GET and full-header PUT both rejected by browser fetch as TypeError"
+    },
+    {
+      "name": "browser_put_get",
+      "at": "2026-11-05T03:18:21Z",
+      "status": "PASS",
+      "note": "headless Chromium 149.0.7827.55 on x-boss; allowed origin http://localhost:45752 (local resolver override); no cookie/bearer credentials, console capture, trace or HAR"
+    },
+    {
+      "name": "browser_head_evidence",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 200,
+      "note": "browser supplied exact signed Content-Length; HEAD size/provider SHA/metadata confirmed"
+    },
+    {
+      "name": "cors_origin_1_put_minimal",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_1_put_full",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_1_get_range",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_1_head",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_2_put_minimal",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_2_put_full",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_2_get_range",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_2_head",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_3_put_minimal",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_3_put_full",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_3_get_range",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_origin_3_head",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 204,
+      "note": "raw OPTIONS; allowed methods/headers checked"
+    },
+    {
+      "name": "cors_disallowed_origin",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 403,
+      "provider_code": "Unauthorized",
+      "note": "raw OPTIONS cannot establish browser enforcement"
+    },
+    {
+      "name": "cors_get_exposure",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 200,
+      "note": "ETag/length/checksum exposure checked"
+    },
+    {
+      "name": "cors_range_exposure",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "http": 206,
+      "note": "actual Range 206 exposes Content-Range and Accept-Ranges"
+    },
+    {
+      "name": "length_body_fewer",
+      "at": "2026-11-05T03:18:22Z",
+      "status": "PASS",
+      "transport": "RawPeerClosed",
+      "note": "raw TLS write completed; checksum matches actual bytes, signed length differs; HEAD absence=true; transport category is not a provider rejection code"
+    },
+    {
+      "name": "length_body_more",
+      "at": "2026-11-05T03:18:23Z",
+      "status": "PASS",
+      "http": 400,
+      "provider_code": "BadDigest",
+      "note": "raw TLS write completed; checksum matches actual bytes, signed length differs; HEAD absence=true; transport category is not a provider rejection code"
+    },
+    {
+      "name": "length_body_mismatch",
+      "at": "2026-11-05T03:24:23Z",
+      "status": "PASS",
+      "note": "fewer/more raw probes: no object immediately or after PUT TTL+60s before deletion; no unobserved provider error code inferred"
+    },
+    {
+      "name": "initial_cleanup",
+      "at": "2026-11-05T03:24:23Z",
+      "status": "PASS",
+      "note": "deleted all allocated non-fixture keys; final delete and HEAD absence follows upload TTL+60s"
+    },
+    {
+      "name": "cleanup",
+      "at": "2026-11-05T03:24:24Z",
+      "status": "PASS",
+      "note": "deleted and HEAD-confirmed 3 exact allocated keys after upload TTL+60s; retained 0 lifecycle fixtures"
+    },
+    {
+      "name": "lifecycle_witnesses_preserved",
+      "at": "2026-11-05T03:24:24Z",
+      "status": "PASS",
+      "note": "original two lifecycle keys remain in baseline receipt; follow-up allocated/deleted only three browser-* keys in its own new exp/1h namespace"
     }
   ],
   "retained_fixtures": [
     "attachments/v1/exp/1h/spike-20261105T025511Z-4cecd40c6f14cf36/lifecycle-exp-1h",
     "attachments/v1/keep/spike-20261105T025511Z-4cecd40c6f14cf36/lifecycle-keep"
+  ],
+  "followups": [
+    {
+      "started": "2026-11-05T03:12:06Z",
+      "finished": "2026-11-05T03:18:09Z",
+      "run_id": "20261105T031206Z-615dc81beffc643b",
+      "selected_checksum_profile": "sha256",
+      "gates": {
+        "browser_head_evidence": "FAIL",
+        "browser_put_get": "FAIL",
+        "cleanup": "PASS",
+        "cors_configuration": "PASS",
+        "cors_disallowed_origin": "PASS",
+        "cors_get_exposure": "FAIL",
+        "cors_origin_1_get_range": "PASS",
+        "cors_origin_1_head": "PASS",
+        "cors_origin_1_put_full": "PASS",
+        "cors_origin_1_put_minimal": "PASS",
+        "cors_origin_2_get_range": "PASS",
+        "cors_origin_2_head": "PASS",
+        "cors_origin_2_put_full": "PASS",
+        "cors_origin_2_put_minimal": "PASS",
+        "cors_origin_3_get_range": "PASS",
+        "cors_origin_3_head": "PASS",
+        "cors_origin_3_put_full": "PASS",
+        "cors_origin_3_put_minimal": "PASS",
+        "cors_range_exposure": "PASS",
+        "initial_cleanup": "PASS",
+        "length_body_fewer": "PASS",
+        "length_body_mismatch": "PASS",
+        "length_body_more": "PASS",
+        "lifecycle_witnesses_preserved": "PASS"
+      },
+      "observations": [
+        {
+          "name": "cors_configuration",
+          "at": "2026-11-05T03:12:06Z",
+          "status": "PASS",
+          "note": "coordinator-verified updated policy via wrangler 2026-11-05; this run validates behavior, not bucket administration"
+        },
+        {
+          "name": "browser_put_get",
+          "at": "2026-11-05T03:12:06Z",
+          "status": "FAIL",
+          "note": "allowed loopback port unavailable; no listener replaced"
+        },
+        {
+          "name": "browser_head_evidence",
+          "at": "2026-11-05T03:12:06Z",
+          "status": "FAIL",
+          "http": 404,
+          "note": "browser supplied exact signed Content-Length; HEAD size/provider SHA/metadata confirmed"
+        },
+        {
+          "name": "cors_origin_1_put_minimal",
+          "at": "2026-11-05T03:12:06Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_1_put_full",
+          "at": "2026-11-05T03:12:06Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_1_get_range",
+          "at": "2026-11-05T03:12:06Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_1_head",
+          "at": "2026-11-05T03:12:06Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_2_put_minimal",
+          "at": "2026-11-05T03:12:06Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_2_put_full",
+          "at": "2026-11-05T03:12:06Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_2_get_range",
+          "at": "2026-11-05T03:12:06Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_2_head",
+          "at": "2026-11-05T03:12:06Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_3_put_minimal",
+          "at": "2026-11-05T03:12:06Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_3_put_full",
+          "at": "2026-11-05T03:12:06Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_3_get_range",
+          "at": "2026-11-05T03:12:06Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_3_head",
+          "at": "2026-11-05T03:12:07Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_disallowed_origin",
+          "at": "2026-11-05T03:12:07Z",
+          "status": "PASS",
+          "http": 403,
+          "provider_code": "Unauthorized",
+          "note": "raw OPTIONS cannot establish browser enforcement"
+        },
+        {
+          "name": "cors_get_exposure",
+          "at": "2026-11-05T03:12:07Z",
+          "status": "FAIL",
+          "http": 404,
+          "provider_code": "NoSuchKey",
+          "note": "ETag/length/checksum exposure checked"
+        },
+        {
+          "name": "cors_range_exposure",
+          "at": "2026-11-05T03:12:07Z",
+          "status": "PASS",
+          "http": 404,
+          "provider_code": "NoSuchKey",
+          "note": "required range response headers exposed"
+        },
+        {
+          "name": "length_body_fewer",
+          "at": "2026-11-05T03:12:07Z",
+          "status": "PASS",
+          "note": "raw TLS write completed; checksum matches actual bytes, signed length differs; HEAD absence=true; transport category is not a provider rejection code",
+          "transport": "RawPeerClosed"
+        },
+        {
+          "name": "length_body_more",
+          "at": "2026-11-05T03:12:07Z",
+          "status": "PASS",
+          "http": 400,
+          "provider_code": "BadDigest",
+          "note": "raw TLS write completed; checksum matches actual bytes, signed length differs; HEAD absence=true; transport category is not a provider rejection code"
+        },
+        {
+          "name": "length_body_mismatch",
+          "at": "2026-11-05T03:18:07Z",
+          "status": "PASS",
+          "note": "fewer/more raw probes: no object immediately or after PUT TTL+60s before deletion; no unobserved provider error code inferred"
+        },
+        {
+          "name": "initial_cleanup",
+          "at": "2026-11-05T03:18:08Z",
+          "status": "PASS",
+          "note": "deleted all allocated non-fixture keys; final delete and HEAD absence follows upload TTL+60s"
+        },
+        {
+          "name": "cleanup",
+          "at": "2026-11-05T03:18:09Z",
+          "status": "PASS",
+          "note": "deleted and HEAD-confirmed 3 exact allocated keys after upload TTL+60s; retained 0 lifecycle fixtures"
+        },
+        {
+          "name": "lifecycle_witnesses_preserved",
+          "at": "2026-11-05T03:18:09Z",
+          "status": "PASS",
+          "note": "original two lifecycle keys remain in baseline receipt; follow-up allocated/deleted only three browser-* keys in its own new exp/1h namespace"
+        }
+      ],
+      "retained_fixtures": null
+    },
+    {
+      "started": "2026-11-05T03:18:20Z",
+      "finished": "2026-11-05T03:24:24Z",
+      "run_id": "20261105T031820Z-7e9b58589662aff0",
+      "selected_checksum_profile": "sha256",
+      "gates": {
+        "browser_disallowed_origin": "PASS",
+        "browser_get": "PASS",
+        "browser_head_evidence": "PASS",
+        "browser_put": "PASS",
+        "browser_put_get": "PASS",
+        "browser_range": "PASS",
+        "cleanup": "PASS",
+        "cors_configuration": "PASS",
+        "cors_disallowed_origin": "PASS",
+        "cors_get_exposure": "PASS",
+        "cors_origin_1_get_range": "PASS",
+        "cors_origin_1_head": "PASS",
+        "cors_origin_1_put_full": "PASS",
+        "cors_origin_1_put_minimal": "PASS",
+        "cors_origin_2_get_range": "PASS",
+        "cors_origin_2_head": "PASS",
+        "cors_origin_2_put_full": "PASS",
+        "cors_origin_2_put_minimal": "PASS",
+        "cors_origin_3_get_range": "PASS",
+        "cors_origin_3_head": "PASS",
+        "cors_origin_3_put_full": "PASS",
+        "cors_origin_3_put_minimal": "PASS",
+        "cors_range_exposure": "PASS",
+        "initial_cleanup": "PASS",
+        "length_body_fewer": "PASS",
+        "length_body_mismatch": "PASS",
+        "length_body_more": "PASS",
+        "lifecycle_witnesses_preserved": "PASS"
+      },
+      "observations": [
+        {
+          "name": "cors_configuration",
+          "at": "2026-11-05T03:18:20Z",
+          "status": "PASS",
+          "note": "coordinator-verified updated policy via wrangler 2026-11-05; this run validates behavior, not bucket administration"
+        },
+        {
+          "name": "browser_put",
+          "at": "2026-11-05T03:18:21Z",
+          "status": "PASS",
+          "http": 200,
+          "note": "Blob PUT with browser-supplied signed Content-Length; JS matching ETag=true SHA checksum=true"
+        },
+        {
+          "name": "browser_get",
+          "at": "2026-11-05T03:18:21Z",
+          "status": "PASS",
+          "http": 200,
+          "note": "JS exact full bytes=true ETag=true Content-Length=true; optional GET SHA checksum match=true (PUT checksum is mandatory)"
+        },
+        {
+          "name": "browser_range",
+          "at": "2026-11-05T03:18:21Z",
+          "status": "PASS",
+          "http": 206,
+          "note": "JS read exact partial bytes, Content-Range and Accept-Ranges"
+        },
+        {
+          "name": "browser_disallowed_origin",
+          "at": "2026-11-05T03:18:21Z",
+          "status": "PASS",
+          "note": "separate disallowed loopback origin: GET and full-header PUT both rejected by browser fetch as TypeError"
+        },
+        {
+          "name": "browser_put_get",
+          "at": "2026-11-05T03:18:21Z",
+          "status": "PASS",
+          "note": "headless Chromium 149.0.7827.55 on x-boss; allowed origin http://localhost:45752 (local resolver override); no cookie/bearer credentials, console capture, trace or HAR"
+        },
+        {
+          "name": "browser_head_evidence",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 200,
+          "note": "browser supplied exact signed Content-Length; HEAD size/provider SHA/metadata confirmed"
+        },
+        {
+          "name": "cors_origin_1_put_minimal",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_1_put_full",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_1_get_range",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_1_head",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_2_put_minimal",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_2_put_full",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_2_get_range",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_2_head",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_3_put_minimal",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_3_put_full",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_3_get_range",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_origin_3_head",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 204,
+          "note": "raw OPTIONS; allowed methods/headers checked"
+        },
+        {
+          "name": "cors_disallowed_origin",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 403,
+          "provider_code": "Unauthorized",
+          "note": "raw OPTIONS cannot establish browser enforcement"
+        },
+        {
+          "name": "cors_get_exposure",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 200,
+          "note": "ETag/length/checksum exposure checked"
+        },
+        {
+          "name": "cors_range_exposure",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "http": 206,
+          "note": "actual Range 206 exposes Content-Range and Accept-Ranges"
+        },
+        {
+          "name": "length_body_fewer",
+          "at": "2026-11-05T03:18:22Z",
+          "status": "PASS",
+          "transport": "RawPeerClosed",
+          "note": "raw TLS write completed; checksum matches actual bytes, signed length differs; HEAD absence=true; transport category is not a provider rejection code"
+        },
+        {
+          "name": "length_body_more",
+          "at": "2026-11-05T03:18:23Z",
+          "status": "PASS",
+          "http": 400,
+          "provider_code": "BadDigest",
+          "note": "raw TLS write completed; checksum matches actual bytes, signed length differs; HEAD absence=true; transport category is not a provider rejection code"
+        },
+        {
+          "name": "length_body_mismatch",
+          "at": "2026-11-05T03:24:23Z",
+          "status": "PASS",
+          "note": "fewer/more raw probes: no object immediately or after PUT TTL+60s before deletion; no unobserved provider error code inferred"
+        },
+        {
+          "name": "initial_cleanup",
+          "at": "2026-11-05T03:24:23Z",
+          "status": "PASS",
+          "note": "deleted all allocated non-fixture keys; final delete and HEAD absence follows upload TTL+60s"
+        },
+        {
+          "name": "cleanup",
+          "at": "2026-11-05T03:24:24Z",
+          "status": "PASS",
+          "note": "deleted and HEAD-confirmed 3 exact allocated keys after upload TTL+60s; retained 0 lifecycle fixtures"
+        },
+        {
+          "name": "lifecycle_witnesses_preserved",
+          "at": "2026-11-05T03:24:24Z",
+          "status": "PASS",
+          "note": "original two lifecycle keys remain in baseline receipt; follow-up allocated/deleted only three browser-* keys in its own new exp/1h namespace"
+        }
+      ],
+      "retained_fixtures": null
+    }
   ]
 }

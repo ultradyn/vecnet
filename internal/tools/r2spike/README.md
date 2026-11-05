@@ -60,3 +60,39 @@ failed binding or CORS gate. A valid exact-size chunked request may be normalize
 by R2; the security probe gives a wrong-size chunked body a matching checksum
 while preserving the original signed length, so checksum rejection alone cannot
 hide a length bypass.
+
+## CORS and browser follow-up
+
+After an operator updates CORS, rerun only CORS/browser/raw framing acceptance:
+
+```sh
+BB_HOST=x-boss BB_JOBS=2 just bb GOMAXPROCS=2 env \
+  VECNET_R2_SPIKE_CREDENTIALS_FILE=/home/xertrov/bb-src/vecnet-r2-cred/r2-test.env \
+  go run -tags spike ./internal/tools/r2spike --cors-browser-followup
+```
+
+This mode requires the completed SHA-256 baseline receipt and preserves its two
+exact lifecycle witnesses and real 600-second GET evidence. Current gates are
+overlaid in the top-level JSON; appended observations and dated `followups`
+retain the history. It does not repeat the GET TTL test or create new lifecycle
+witnesses. It creates only `browser-*` keys in a fresh exp/1h run namespace.
+
+The wrapper provides Playwright/Chromium on x-boss. The Go harness serves a tiny
+static page on loopback port 45752, using `http://localhost:45752` or the allowed
+`http://xsm:45752` origin with a browser-local resolver override if the first
+address is occupied. It never replaces an existing listener. A second ephemeral
+loopback port supplies a disallowed origin. Grants pass only through a random
+same-origin loopback endpoint with no-store responses; no presigns appear in
+argv, environment, files, console capture, HAR or traces. The JavaScript helper
+returns typed status/boolean results; exception text and child stderr are
+suppressed. The browser sends no bearer token/cookies and sets Content-Length
+itself from the Blob. PUT ETag/checksum and GET bytes/ETag/length/Range exposure are
+checked from JavaScript (GET checksum return is also probed), with an independent signed HEAD confirming size/SHA.
+
+Raw fewer/more-byte probes sign a checksum matching the actual transmitted bytes
+but a different Content-Length. A completed raw write followed by no object is
+the diagnostic acceptance criterion; connection closure/read timeout is recorded
+as transport evidence, never invented as a provider error. HEAD is repeated after
+PUT TTL+60s **before deletion** to catch delayed creation. All three allocated
+keys are then deleted and HEAD-confirmed. The mode still takes about six minutes
+for that upload replay safety window.
