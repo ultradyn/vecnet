@@ -260,3 +260,25 @@ func TestR2SignerRejectsAmbiguousHeadersAndSortsQuery(t *testing.T) {
 		t.Fatal("AWS query order or encoding mismatch")
 	}
 }
+
+func TestR2SignPrivateMethodPathHeaderBinding(t *testing.T) {
+	base, err := r2PrivateRequest("HEAD", r2VectorEndpoint, "vecnet-blobs-test", "attachments/v1/keep/vector/blob", "VECTORACCESS", "vector-secret-not-live", r2VectorNow)
+	if err != nil {
+		t.Fatal("private HEAD signing failed")
+	}
+	original := base.Header.Get("Authorization")
+	for _, tc := range []struct{ method, key string }{{"DELETE", "attachments/v1/keep/vector/blob"}, {"HEAD", "attachments/v1/keep/vector/other"}} {
+		request, err := r2PrivateRequest(tc.method, r2VectorEndpoint, "vecnet-blobs-test", tc.key, "VECTORACCESS", "vector-secret-not-live", r2VectorNow)
+		if err != nil || request.Header.Get("Authorization") == original {
+			t.Fatal("private method/key not signature-bound; values suppressed")
+		}
+	}
+	if base.URL.RawQuery != "" || base.Header.Get("X-Amz-Checksum-Mode") != "ENABLED" || !strings.Contains(original, "host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date") {
+		t.Fatal("HEAD checksum evidence request not signed privately")
+	}
+	for _, method := range []string{"GET", "PUT", "POST"} {
+		if _, err := r2PrivateRequest(method, r2VectorEndpoint, "vecnet-blobs-test", "key", "VECTORACCESS", "vector-secret-not-live", r2VectorNow); err == nil {
+			t.Fatal("private signer permitted body transfer method")
+		}
+	}
+}
