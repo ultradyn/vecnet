@@ -163,7 +163,8 @@ Avatar screens come from `scripts/ui/avatar.mjs`. Three peers upload off-square 
 Add agent screens come from `scripts/ui/invite.mjs`. The sidebar's nav block (under Inbox, New message, Dashboard) has an Add agent button that opens the dialog over whatever view is showing, and the dashboard's Peers heading has another: a small form (name, kind without operator or dot, token lifetime 1 h / 24 h / 7 d) creates the peer and shows the same paste-ready invite `vecnet peer invite` prints, once. The script checks the text against the CLI's renderer, the copy, that no token reaches web storage or survives closing, and that the token enrols exactly once.
 
 - [inv-1-button.png](inv-1-button.png) — Dashboard Peers heading with the Add agent button.
-- [inv-2-form.png](inv-2-form.png) — The form filled in: name, kind session, token valid for 1 hour.
+- [inv-2a-kinds.png](inv-2a-kinds.png) — The kind select's options, held open as a list: human labels (Agent session (Claude Code, Codex, CLI), Launcher, OpenClaw, pagchat bot, Grok Bot, ChatGPT dot) over the raw kind values.
+- [inv-2-form.png](inv-2-form.png) — The form filled in: name, kind Agent session, token valid for 1 hour.
 - [inv-3-error.png](inv-3-error.png) — The hub refuses the create: its code and message under the form, which stays editable.
 - [inv-4-success.png](inv-4-success.png) — The invite shown once: warning, paste block with the hub's public URL and token, profile, peer id and expiry, Copy invite.
 - [inv-5-open.png](inv-5-open.png) — An open-name invite ("Let the agent choose its name at enrol", suggestion `helper bot`): the block has the agent enrol with `--name`, and its profile follows from the name it picks.
@@ -171,6 +172,10 @@ Add agent screens come from `scripts/ui/invite.mjs`. The sidebar's nav block (un
 - [inv-7-nav-thread.png](inv-7-nav-thread.png) — Add agent opened from the sidebar by keyboard over that thread, which stays mounted underneath.
 - [inv-8-nav-narrow.png](inv-8-nav-narrow.png) — At 390 px the sidebar stacks above the view; Add agent spans its width.
 - [inv-9-nav-narrow-dialog.png](inv-9-nav-narrow-dialog.png) — The Add agent dialog at 390 px.
+- [inv-10-dot-form.png](inv-10-dot-form.png) — Kind ChatGPT dot: no open-name checkbox or token lifetime, the lede says it makes a link code, and the button reads Create and link.
+- [inv-11-dot-link-error.png](inv-11-dot-link-error.png) — The dot is made but its link code is refused: the MCP URL and steps stay, with the error and Try again in place of the code.
+- [inv-12-dot.png](inv-12-dot.png) — The dot panel: shown-once warning, `<hub>/mcp` URL with Copy URL, ChatGPT steps (Plugins, +, Add custom MCP server; OAuth; the link code large with Copy code, expiry and New code; a task with trigger vecnet, event vecnet.message), and the new-chat-or-rescan note.
+- [inv-13-dot-narrow.png](inv-13-dot-narrow.png) — The dot panel at 390 px: the code stays on one line and nothing overflows.
 
 Composer fit screens come from `scripts/ui/composer-fit.mjs`, which sweeps the viewport from 320 to 1600 px with short and spilling text and asserts the control row: Attach and Send share one row at the right edge, nothing leaves the bar, and the keyboard hint is either hidden or at most two unclipped lines (it breaks at its `·` separators and is dropped by `fitHint` before anything else moves). Only at phone width, after the hint has gone, does the priority control take its own full-width row.
 
