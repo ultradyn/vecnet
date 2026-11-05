@@ -175,6 +175,13 @@ func (e *relocationError) Error() string { return e.Code + ": " + e.Reason }
 // verifyHub uses only public identity data. No redirects or bearer credentials
 // can escape to a candidate destination. An empty pin performs first-use proof.
 func verifyHub(ctx context.Context, rawURL, pin string, allowInsecure bool) (doc envelope.HubIdentity, rotated bool, err error) {
+	return verifyHubAt(ctx, rawURL, pin, allowInsecure, true)
+}
+
+// verifyHubAt with matchURL false accepts a served public_url other than
+// rawURL (a pinned profile on an alias URL); the challenge proof is still
+// checked against the served public_url and the key against the pin.
+func verifyHubAt(ctx context.Context, rawURL, pin string, allowInsecure, matchURL bool) (doc envelope.HubIdentity, rotated bool, err error) {
 	refuse := func(reason string) (envelope.HubIdentity, bool, error) {
 		return envelope.HubIdentity{}, false, &relocationError{Code: "relocation_unverified", Reason: reason}
 	}
@@ -211,7 +218,7 @@ func verifyHub(ctx context.Context, rawURL, pin string, allowInsecure bool) (doc
 		return refuse("invalid hub identity response")
 	}
 	publicURL, e := hubid.NormalizeURL(doc.PublicURL)
-	if e != nil || publicURL != normalized {
+	if e != nil || matchURL && publicURL != normalized {
 		return refuse("hub public URL does not match destination")
 	}
 	if err = hubid.VerifyChallenge(doc.Pubkey, doc.PublicURL, encoded, doc.ChallengeSig); err != nil {

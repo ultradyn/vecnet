@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubid"
 )
 
 // Watch timing (PROTOCOL §13.1).
@@ -59,6 +60,14 @@ func (f eventFields) nameOf(names map[string]string) string {
 func eventFieldsOf(ev envelope.Event) eventFields {
 	var f eventFields
 	switch ev.Type {
+	case "hub_notice":
+		return noticeEventFields(ev.Data)
+	case "hub_restarting", "hub_moved", "relocation_unverified":
+		var body struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal(ev.Data, &body)
+		return eventFields{sender: "hub", senderName: "hub", text: body.Text}
 	case "delivery":
 		var d struct {
 			DeliveryID string `json:"delivery_id"`
@@ -173,7 +182,7 @@ func monitorLine(ev envelope.Event, names map[string]string) string {
 		text = name + ": " + text
 	}
 	text = firstRunes(text, monitorTextRunes)
-	return strings.TrimRight(fmt.Sprintf("%s %s %s %s %s", ev.Cursor, ev.Type, dash(f.thread), dash(f.sender), text), " ")
+	return strings.TrimRight(fmt.Sprintf("%s %s %s %s %s", dash(ev.Cursor), ev.Type, dash(f.thread), dash(f.sender), text), " ")
 }
 
 // inboxLine is the human line of `inbox` and plain `watch`:
@@ -183,14 +192,14 @@ func monitorLine(ev envelope.Event, names map[string]string) string {
 func inboxLine(ev envelope.Event, names map[string]string) string {
 	f := eventFieldsOf(ev)
 	from := f.sender
-	if name := peerName(f.nameOf(names)); name != "" {
+	if name := peerName(f.nameOf(names)); name != "" && f.sender != "hub" {
 		from = name + "(" + f.sender + ")"
 	}
 	text := unbidi(flatten(f.text))
 	if f.attachments > 0 {
 		text += fmt.Sprintf(" [+%d attachment(s)]", f.attachments)
 	}
-	return fmt.Sprintf("%s %s %s %s %s %s %s", ev.Cursor, ev.Type, dash(f.thread), dash(from),
+	return fmt.Sprintf("%s %s %s %s %s %s %s", dash(ev.Cursor), ev.Type, dash(f.thread), dash(from),
 		dash(f.messageID), dash(f.deliveryID), dash(text))
 }
 
@@ -211,16 +220,14 @@ func (a *app) cmdWatch(args []string) error {
 		return err
 	}
 	w := &watcher{
-		a: a, c: c, ch: ch,
+		a: a, c: c, ch: ch, name: name,
 		names:      ch.peerNames(),
 		forMonitor: o.has("for-monitor"), autoAck: o.has("auto-ack"), deliveriesOnly: o.has("deliveries-only"),
-		retry: watchDefaultRetry, seen: newDedupe(dedupeWindow),
+		retry: watchStartRetry, seen: newDedupe(dedupeWindow),
 	}
 	if w.forMonitor && !a.json {
 		if path, err := statePath(a.getenv, name, a.as); err == nil {
 			w.shown = &stateFile{path: path}
-			id := a.resolveIdentity(c, nil)
-			w.identity = &id
 		}
 	}
 	// Without --since the first connect leaves out ?after=, so the hub
@@ -239,15 +246,42 @@ type watcher struct {
 
 	forMonitor, autoAck, deliveriesOnly bool
 
-	cursor     string        // last event id seen ("" until the hub names one: start at the acked cursor)
-	connected  bool          // a stream was open before: resume with Last-Event-ID, not ?after=
-	retry      time.Duration // the hub's "retry:" value
-	seen       *dedupe
-	pendingAck string
-	shown      *stateFile
-	identity   *hookIdentity // binds shown to this run's hub and caller
-	replayed   bool
+	cursor        string        // last event id seen ("" until the hub names one: start at the acked cursor)
+	connected     bool          // a stream was open before: resume with Last-Event-ID, not ?after=
+	retry         time.Duration // the hub's "retry:" value
+	seen          *dedupe
+	pendingAck    string
+	shown         *stateFile
+	identity      *hookIdentity // binds shown to this run's hub and caller
+	replayed      bool
+	name          string
+	profile       Profile
+	move          *envelope.HubNotice
+	moveTimer     *time.Timer
+	moveC         <-chan time.Time
+	moveDue       time.Time
+	restartUntil  time.Time
+	restartDelay  time.Duration
+	restartWarned bool
+
+	initialized      bool   // names, notices and hook identity fetched from the current hub
+	announceMove     bool   // print the hub_moved line after the next verified connection
+	pin              string // the key the current hub last proved ("" while unpinned)
+	unverifiedWarned bool   // the unpinned-identity warning is printed once per watch
+	followWarned     string // the notice whose unreachable destination was reported
+	followAttempts   int    // consecutive scheduled follows that found the destination unreachable
 }
+
+// moveJitter spreads a scheduled follow over 0-30 s after the notice's at
+// (Task 7); tests replace it to follow without waiting.
+var moveJitter = func() time.Duration { return rand.N(30*time.Second + 1) }
+
+// The reconnect backoff starts from the hub's retry (watchStartRetry until the
+// hub names one) and never drops below watchMinBackoff; tests shorten both.
+var (
+	watchStartRetry = watchDefaultRetry
+	watchMinBackoff = time.Second
+)
 
 // errPeerDisabled is the 204 answer: stop reconnecting (PROTOCOL §2.3).
 var errPeerDisabled = &hubError{Status: http.StatusNoContent, Code: "peer_disabled", Message: "the hub reports this peer disabled; not reconnecting"}
@@ -268,31 +302,82 @@ func terminal(err error) bool {
 	return he.Status >= 400 && he.Status < 500
 }
 
+var errRestarting = errors.New("hub restarting")
+var errMoveDue = errors.New("moving notice due")
+var errMoveUnavailable = errors.New("move destination unavailable")
+
 func (w *watcher) run() error {
 	ctx := w.a.ctx
+	defer w.stopMoveTimer()
 	if !w.forMonitor && !w.a.json {
 		fmt.Fprintln(w.a.stdout, inboxHeader)
 	}
-	w.refreshNames()
 	failures, purges := 0, 0
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
 		var err error
-		if w.forMonitor && !w.a.json && !w.replayed {
-			err = w.replay()
-			if err == nil {
+		if !w.moveDue.IsZero() && !time.Now().Before(w.moveDue) {
+			err = errMoveDue
+		}
+		if err == nil {
+			err = w.verifyConnection()
+		}
+		verified := err == nil
+		if verified {
+			if w.announceMove {
+				w.announceMove = false
+				fp, _ := hubid.Fingerprint(w.pin)
+				w.systemLine("hub_moved", fmt.Sprintf("profile %s now uses %s (key %s verified)", w.name, w.c.base, fp))
+			}
+			if !w.initialized {
+				if w.shown != nil {
+					id := w.a.resolveIdentity(w.c, nil)
+					w.identity = &id
+				}
+				w.refreshNames()
+				w.refreshMoving()
+				w.initialized = true
+			}
+			if w.forMonitor && !w.a.json && !w.replayed {
+				err = w.replay()
+				if err == nil {
+					err = w.stream()
+				}
+			} else if failures >= watchSSEFailures && failures%2 == 1 {
+				err = w.longPoll()
+			} else {
 				err = w.stream()
 			}
-		} else if failures >= watchSSEFailures && failures%2 == 1 {
-			err = w.longPoll()
-		} else {
-			err = w.stream()
 		}
-		w.flushAck()
+		if verified {
+			w.flushAck()
+		}
 		if ctx.Err() != nil {
 			return nil
+		}
+		if errors.Is(err, errMoveDue) {
+			n := w.move
+			w.stopMoveTimer()
+			if n != nil {
+				if err = w.followNotice(*n, true); err != nil {
+					return err
+				}
+			}
+			failures = 0
+			continue
+		}
+		if followed, followErr := w.followError(err); followed {
+			switch {
+			case errors.Is(followErr, errMoveUnavailable):
+				err = followErr // back off and retry like any outage
+			case followErr != nil:
+				return followErr
+			default:
+				failures = 0
+				continue
+			}
 		}
 		if oldest, ok := oldestCursor(err); ok && purges < 2 {
 			fmt.Fprintf(w.a.stderr, "cursor_purged: resuming from %s; re-sync threads with `vecnet thread <id>`\n", oldest)
@@ -301,22 +386,354 @@ func (w *watcher) run() error {
 			continue
 		}
 		purges = 0
+		var identityErr *relocationError
 		switch {
+		case errors.Is(err, errRestarting):
+			failures = 0
+			if !w.pause(w.restartDelay) {
+				return nil
+			}
+		case errors.As(err, &identityErr):
+			return err
 		case err == nil:
 			failures = 0
-			if !sleepCtx(ctx, w.retry) {
+			if !w.pause(w.retry) {
 				return nil
 			}
 		case terminal(err):
 			return err
+		case time.Now().Before(w.restartUntil):
+			if !w.restartWarned {
+				fmt.Fprintln(w.a.stderr, "vecnet: watch: hub restarting; waiting for it to return")
+				w.restartWarned = true
+			}
+			failures = 0
+			if !w.pause(max(w.restartDelay, time.Second)) {
+				return nil
+			}
 		default:
 			failures++
 			fmt.Fprintf(w.a.stderr, "vecnet: watch: %v; reconnecting\n", err)
-			if !sleepCtx(ctx, w.backoff(failures)) {
+			if !w.pause(w.backoff(failures)) {
 				return nil
 			}
 		}
 	}
+}
+
+// Identity proofs are public and checked before any stream, replay or poll.
+// Old hubs with no identity endpoint remain usable only while unpinned.
+func (w *watcher) verifyConnection() error {
+	_, name, p, err := w.a.profileSelection()
+	if err != nil {
+		return err
+	}
+	expected, e := hubid.NormalizeURL(p.Hub)
+	connected, ce := hubid.NormalizeURL(w.c.base)
+	if e == nil && ce == nil && expected != connected && p.Secret == w.c.secret && w.adoptFollowed(nil) {
+		connected = expected
+	}
+	if e != nil || ce != nil || expected != connected || p.Secret != w.c.secret {
+		return &relocationError{Code: "profile_changed", Reason: "watch profile changed; re-run the command"}
+	}
+	w.name, w.profile = name, p
+	pin, _ := w.a.effectivePin(name, p)
+	// A pinned profile may name an alias of the hub (DEPLOY.md: enrol through
+	// vecnet.fly.dev pins the key from the enrol answer): prove the pinned key
+	// with a fresh challenge for the served public_url, and exit only on a key
+	// mismatch. Unpinned profiles and a just-followed hub keep the strict
+	// public_url check; follow targets and repoint always use it.
+	matchURL := pin == "" || w.announceMove
+	doc, rotated, err := verifyHubAt(w.a.ctx, p.Hub, pin, p.AllowInsecureHTTP || w.a.getenv(insecureEnv) == "1", matchURL)
+	if err != nil {
+		var re *relocationError
+		if !errors.As(err, &re) {
+			return err
+		}
+		switch re.Reason {
+		case "hub key does not match the pin":
+			// The only identity change: the bearer never reaches this hub.
+			return &relocationError{Code: "hub_identity_changed", Reason: "hub key does not match the pin; verify the fingerprint before reconnecting"}
+		case "hub identity unavailable", "hub did not serve an identity":
+			if pin == "" && re.Reason == "hub did not serve an identity" && w.legacyIdentity(p.Hub) {
+				w.pin = ""
+				return nil
+			}
+			// Proxy 502/503, the unauthenticated limiter's 429 and transport
+			// errors are outages: back off and retry (PROTOCOL §13.1).
+			return fmt.Errorf("hub identity unavailable")
+		}
+		if pin != "" {
+			if re.Reason == "invalid hub identity response" {
+				return fmt.Errorf("hub identity unavailable")
+			}
+			return &relocationError{Code: "hub_identity_unverified", Reason: re.Reason}
+		}
+		// Unpinned: as one-shot commands do (ensurePin), keep the legacy
+		// behaviour, e.g. a profile on an alias URL the hub's public_url does
+		// not name. Nothing is pinned, so nothing can be enforced yet.
+		if !w.unverifiedWarned {
+			fmt.Fprintf(w.a.stderr, "vecnet: watch: hub identity not verified (%s); continuing unpinned\n", re.Reason)
+			w.unverifiedWarned = true
+		}
+		w.pin = ""
+		return nil
+	}
+	w.pin = doc.Pubkey
+	if pin == "" {
+		if err := w.a.updatePins(func(records map[string]pinRecord) error {
+			current, _ := w.a.effectivePin(name, p)
+			if current != "" && current != doc.Pubkey {
+				return fmt.Errorf("pin changed during identity verification")
+			}
+			r := records[name]
+			r.Hub, r.Pubkey, r.How, r.PinnedAt = expected, doc.Pubkey, "tofu", time.Now().UTC().Format(time.RFC3339Nano)
+			r.TofuTriedAt = ""
+			records[name] = r
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	if rotated {
+		path, e := configPath(w.a.getenv)
+		if e != nil {
+			return e
+		}
+		normalized, _ := hubid.NormalizeURL(p.Hub)
+		err = w.a.editProfileSnapshot(path, name, p, pin, map[string]string{"hub_pubkey": doc.Pubkey}, func(records map[string]pinRecord) {
+			r := records[name]
+			r.Hub, r.Pubkey, r.How = normalized, doc.Pubkey, "rotation"
+			r.PinnedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			r.TofuTriedAt = ""
+			records[name] = r
+		})
+		if err != nil {
+			return err
+		}
+		w.profile.HubPubkey = doc.Pubkey
+	}
+	return nil
+}
+
+var errPinsReadOnly = errors.New("pins read only")
+
+// adoptFollowed accepts a move another vecnet process already made for this
+// profile (Decision 6 rewrites every profile on the hub): the config names
+// the recorded destination, pins.json records a move from the hub this watch
+// uses (for n, that very notice) with the pin this watch last verified, and
+// the secret is unchanged. Config and pins are read under the pins lock, which
+// follow holds while it writes both. The watch then switches hubs; the next
+// verifyConnection proves the new hub against the pin before any bearer use.
+func (w *watcher) adoptFollowed(n *envelope.HubNotice) bool {
+	var (
+		r       pinRecord
+		name    string
+		p       Profile
+		profErr error
+	)
+	err := w.a.updatePins(func(records map[string]pinRecord) error {
+		_, name, p, profErr = w.a.profileSelection()
+		r = records[name]
+		return errPinsReadOnly
+	})
+	if !errors.Is(err, errPinsReadOnly) || profErr != nil || name != w.name || p.Secret != w.c.secret {
+		return false
+	}
+	hub, e1 := hubid.NormalizeURL(p.Hub)
+	from, e2 := hubid.NormalizeURL(w.c.base)
+	m := r.LastMove
+	if e1 != nil || e2 != nil || hub == from || m == nil || m.From != from || m.To != hub || r.Hub != hub || r.Pubkey == "" {
+		return false
+	}
+	if w.pin != "" && r.Pubkey != w.pin {
+		return false
+	}
+	if n != nil {
+		next, e := hubid.NormalizeURL(n.NewURL)
+		if e != nil || next != hub || m.NoticeID != n.NoticeID {
+			return false
+		}
+	}
+	w.switchHub(p.Hub)
+	return true
+}
+
+// switchHub points the watch at a followed hub. Names, notices and the hook
+// identity are refetched, and the move announced, only after the next
+// verified connection.
+func (w *watcher) switchHub(hub string) {
+	w.c.base = strings.TrimRight(hub, "/")
+	w.stopMoveTimer()
+	w.move = nil
+	w.initialized = false
+	w.announceMove = true
+}
+
+func (w *watcher) legacyIdentity(hub string) bool {
+	ctx, cancel := context.WithTimeout(w.a.ctx, 2*time.Second)
+	defer cancel()
+	c := newClient(hub, "")
+	req, err := c.newRequest(ctx, http.MethodGet, "/v1/hub/identity", nil, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusNotFound
+}
+
+func (w *watcher) systemLine(kind, text string) {
+	data, _ := json.Marshal(map[string]string{"text": text})
+	ev := envelope.Event{Type: kind, Data: data}
+	switch {
+	case w.a.json:
+		_ = w.a.emitValue(ev)
+	case w.forMonitor:
+		fmt.Fprintln(w.a.stdout, monitorLine(ev, nil))
+	default:
+		fmt.Fprintln(w.a.stdout, inboxLine(ev, nil))
+	}
+}
+
+func (w *watcher) restarting(h restartHint) {
+	// Bound untrusted transport delays before converting milliseconds to a duration.
+	d := time.Duration(max(int64(0), min(h.RetryAfterMS, int64((24*time.Hour)/time.Millisecond)))) * time.Millisecond
+	w.restartUntil = time.Now().Add(d + time.Minute)
+	w.restartDelay = d*8/10 + rand.N(d*4/10+1)
+	w.restartWarned = false
+	w.systemLine("hub_restarting", fmt.Sprintf("restarting; reconnecting in ~%gs", d.Seconds()))
+}
+
+func (w *watcher) stopMoveTimer() {
+	if w.moveTimer != nil {
+		w.moveTimer.Stop()
+	}
+	w.moveTimer, w.moveC = nil, nil
+	w.moveDue = time.Time{}
+}
+
+func (w *watcher) refreshMoving() {
+	notices, err := w.a.activeNotices(w.c)
+	if err != nil {
+		return
+	}
+	var moving *envelope.HubNotice
+	for _, n := range notices {
+		if n.Kind == "moving" {
+			copy := n
+			moving = &copy
+		}
+	}
+	own, _ := hubid.NormalizeURL(w.profile.Hub)
+	if moving != nil {
+		// The move that brought this watch here, still listed by the new hub
+		// (its database was copied from the old one), is already done.
+		if next, e := hubid.NormalizeURL(moving.NewURL); e == nil && next == own {
+			moving = nil
+		}
+	}
+	if moving == nil {
+		w.stopMoveTimer()
+		w.move = nil
+		return
+	}
+	if w.move != nil && w.move.NoticeID == moving.NoticeID {
+		return
+	}
+	w.stopMoveTimer()
+	w.move = moving
+	if w.a.getenv("VECNET_NO_FOLLOW") == "1" {
+		fmt.Fprintf(w.a.stderr, "hub moving; run `vecnet --net %s profile follow`\n", peerName(w.name))
+		return
+	}
+	if moving.At == "" {
+		return
+	}
+	pin, _ := w.a.effectivePin(w.name, w.profile)
+	source, e := hubid.NormalizeURL(moving.Hub)
+	if e != nil || source != own {
+		w.systemLine("relocation_unverified", "not following "+moving.NewURL+": notice does not describe this hub moving")
+		return
+	}
+	if hubid.VerifyNotice(pin, *moving) != nil {
+		w.systemLine("relocation_unverified", "not following "+moving.NewURL+": invalid moving notice signature")
+		return
+	}
+	at, e := envelope.ParseTime(moving.At)
+	if e != nil {
+		return
+	}
+	expiry, e := envelope.ParseTime(moving.ExpiresAt)
+	if e != nil || !expiry.After(time.Now()) || moving.ClearedAt != "" {
+		return
+	}
+	w.moveDue = at.Add(moveJitter())
+	w.moveTimer = time.NewTimer(max(time.Duration(0), time.Until(w.moveDue)))
+	w.moveC = w.moveTimer.C
+}
+
+// followNotice follows n (scheduled: its timer fired; otherwise a 410). A
+// destination that is not reachable yet (DNS lag on a domain move, a proxy
+// 502) is an outage, not a refusal: the line prints once per notice and the
+// follow retries with backoff (PROTOCOL §13.1), a scheduled one while the
+// watch stays on the current hub. Refusals (signature, key, public_url,
+// replay) end the watch.
+func (w *watcher) followNotice(n envelope.HubNotice, scheduled bool) error {
+	next, err := w.a.follow(w.a.ctx, w.name, w.profile, n)
+	if err != nil {
+		// Another watch or command on this hub may already have followed it
+		// for every profile there (Decision 6): adopt that move.
+		if w.adoptFollowed(&n) {
+			w.followAttempts = 0
+			return nil
+		}
+		reason := err.Error()
+		var re *relocationError
+		if errors.As(err, &re) {
+			reason = re.Reason
+		}
+		transient := re != nil && (re.Reason == "hub identity unavailable" || re.Reason == "hub did not serve an identity")
+		if !transient || w.followWarned != n.NoticeID {
+			w.systemLine("relocation_unverified", "not following "+n.NewURL+": "+reason)
+		}
+		if !transient {
+			return err
+		}
+		w.followWarned = n.NoticeID
+		if !scheduled {
+			return errMoveUnavailable
+		}
+		w.followAttempts++
+		copy := n
+		w.move = &copy
+		w.moveDue = time.Now().Add(w.backoff(w.followAttempts))
+		w.moveTimer = time.NewTimer(time.Until(w.moveDue))
+		w.moveC = w.moveTimer.C
+		return nil
+	}
+	w.followAttempts = 0
+	w.switchHub(next)
+	return nil
+}
+
+func (w *watcher) followError(err error) (bool, error) {
+	var he *hubError
+	if !errors.As(err, &he) || he.Status != http.StatusGone || he.Code != "hub_moved" {
+		return false, err
+	}
+	if w.a.getenv("VECNET_NO_FOLLOW") == "1" {
+		return true, &relocationError{Code: "relocation_unverified", Reason: fmt.Sprintf("hub moved; run `vecnet --net %s profile follow`", peerName(w.name))}
+	}
+	n, ok := movedNotice(err)
+	if !ok {
+		return true, &relocationError{Code: "relocation_unverified", Reason: "hub returned an invalid moving notice"}
+	}
+	w.stopMoveTimer()
+	return true, w.followNotice(n, false)
 }
 
 // refreshNames keeps the previous directory if fetching or decoding fails.
@@ -348,7 +765,7 @@ func (w *watcher) refreshNames() {
 // backoff is the jittered exponential reconnect delay, from the hub's retry
 // up to watchMaxBackoff.
 func (w *watcher) backoff(failures int) time.Duration {
-	d := max(w.retry, time.Second)
+	d := max(w.retry, watchMinBackoff)
 	for i := 1; i < failures && d < watchMaxBackoff; i++ {
 		d *= 2
 	}
@@ -389,7 +806,7 @@ func (w *watcher) stream() error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { cancel(); resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNoContent {
 		return errPeerDisabled
 	}
@@ -405,22 +822,31 @@ func (w *watcher) stream() error {
 	idle := time.NewTimer(watchSilence)
 	defer idle.Stop()
 	var (
-		data    []string
-		hasData bool
-		idBuf   = w.cursor
-		evType  string
+		data           []string
+		hasData        bool
+		idBuf          = w.cursor
+		evType         string
+		pendingReadErr error
 	)
 	for {
+		// A reader may reach EOF with complete frame lines still buffered.
+		// Dispatch those lines before acting on its terminal read result.
+		if pendingReadErr != nil && len(lines) == 0 {
+			if errors.Is(pendingReadErr, io.EOF) {
+				return nil
+			}
+			return &netError{err: pendingReadErr}
+		}
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-w.moveC:
+			return errMoveDue
 		case <-idle.C:
 			return nil // silence: reconnect
 		case err := <-readErr:
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			return &netError{err: err}
+			pendingReadErr = err
+			readErr = nil
 		case line := <-lines:
 			if !idle.Stop() {
 				select {
@@ -433,7 +859,16 @@ func (w *watcher) stream() error {
 				// Empty data (the hub's priming event) only moves the
 				// cursor; it is not an event (PROTOCOL §13.1).
 				if joined := strings.Join(data, "\n"); hasData && joined != "" {
-					w.handle(evType, joined, false)
+					if evType == "hub_restarting" {
+						var h restartHint
+						if json.Unmarshal([]byte(joined), &h) == nil {
+							w.cursor = idBuf
+							w.restarting(h)
+							return errRestarting
+						}
+					} else {
+						w.handle(evType, joined, false)
+					}
 				}
 				w.cursor = idBuf
 				data, hasData, evType = nil, false, ""
@@ -512,7 +947,7 @@ func splitSSELines(data []byte, atEOF bool) (int, []byte, error) {
 
 // longPoll is the fallback after repeated SSE failures: one long-poll read.
 func (w *watcher) longPoll() error {
-	body, err := w.a.poll(w.c, w.cursor, watchPollWait)
+	body, err := w.poll(watchPollWait)
 	if err != nil {
 		return err
 	}
@@ -527,6 +962,10 @@ func (w *watcher) longPoll() error {
 	if body.NextCursor != "" {
 		w.cursor = body.NextCursor
 	}
+	if body.HubRestarting != nil {
+		w.restarting(*body.HubRestarting)
+		return errRestarting
+	}
 	return nil
 }
 
@@ -537,7 +976,7 @@ func (w *watcher) replay() error {
 		if err := w.a.ctx.Err(); err != nil {
 			return err
 		}
-		body, err := w.a.poll(w.c, w.cursor, 0)
+		body, err := w.poll(0)
 		if err != nil {
 			return err
 		}
@@ -549,6 +988,10 @@ func (w *watcher) replay() error {
 			w.handle(ev.Type, string(raw), true)
 		}
 		w.cursor = body.NextCursor
+		if body.HubRestarting != nil {
+			w.restarting(*body.HubRestarting)
+			return errRestarting
+		}
 		if len(body.Events) == 0 {
 			break
 		}
@@ -568,6 +1011,12 @@ func (w *watcher) handle(evType, data string, replay bool) {
 	}
 	if ev.Type == "" {
 		ev.Type = evType
+	}
+	if ev.Type == "hub_notice" {
+		var n envelope.HubNoticeEvent
+		if json.Unmarshal(ev.Data, &n) == nil && n.Notice.Kind == "moving" {
+			w.refreshMoving()
+		}
 	}
 	if ev.Type == "directory_updated" {
 		w.refreshNames()
@@ -643,4 +1092,36 @@ func (d *dedupe) add(id string) bool {
 	d.next = (d.next + 1) % len(d.ring)
 	d.set[id] = struct{}{}
 	return true
+}
+
+// poll also lets a scheduled move interrupt a fallback's held request.
+func (w *watcher) poll(wait int) (pollBody, error) {
+	worker := *w.a
+	if !w.moveDue.IsZero() {
+		ctx, cancel := context.WithDeadline(w.a.ctx, w.moveDue)
+		defer cancel()
+		worker.ctx = ctx
+	}
+	body, err := worker.poll(w.c, w.cursor, wait)
+	if err != nil && !w.moveDue.IsZero() && !time.Now().Before(w.moveDue) {
+		return body, errMoveDue
+	}
+	return body, err
+}
+
+type restartHint struct {
+	RetryAfterMS int64 `json:"retry_after_ms"`
+}
+
+func (w *watcher) pause(delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-w.a.ctx.Done():
+		return false
+	case <-w.moveC:
+		return true
+	case <-timer.C:
+		return true
+	}
 }
