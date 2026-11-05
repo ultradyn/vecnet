@@ -38,6 +38,8 @@ type Config struct {
 	ThreadsPerHour  int           // per-peer new-thread rate limit
 	BlobTokenTTL    time.Duration // lifetime of a blob URL token
 
+	EventsRefreshInterval time.Duration // MCP Events refresh cadence; zero uses the 30-minute default
+
 	AvatarChangesPerHour int // per-peer self-service avatar changes per rolling hour (PROTOCOL §8.1)
 
 	PresenceTTL         time.Duration // presence staleness for kinds other than session and launcher (PROTOCOL §8)

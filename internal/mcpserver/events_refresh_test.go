@@ -263,3 +263,29 @@ func TestChallengeRedirectDiagnosticsRetainStatus(t *testing.T) {
 	}
 	t.Fatal("refused redirect diagnostic omitted HTTP 302 status")
 }
+
+func TestRefreshDeadlineStatusDoesNotSlide(t *testing.T) {
+	env := testhub.Start(t)
+	env.Hub.Cfg.EventsRefreshInterval = 7 * time.Minute
+	_, bearer := env.NewPeer("session", "refresh-status")
+	cb := testhub.NewCallback(t)
+	params := subParams(cb.URL, webhook.NewSecret(), nil)
+	first := subscribeOK(t, env, bearer, params)
+	want := env.Now.Now().Add(7 * time.Minute).Format("2006-01-02T15:04:05.000Z")
+	if first.RefreshBefore == nil || *first.RefreshBefore != want {
+		t.Fatalf("custom interval = %v, want %s", first.RefreshBefore, want)
+	}
+	// The original deadline survives passing time and a configuration change.
+	env.Now.Advance(8 * time.Minute)
+	env.Hub.Cfg.EventsRefreshInterval = time.Hour
+	var status subscriptionStatusResult
+	toolOK(t, env, bearer, "vecnet_subscriptions", nil, &status)
+	if len(status.Subscriptions) != 1 || status.Subscriptions[0].RefreshBefore == nil || *status.Subscriptions[0].RefreshBefore != want {
+		t.Fatalf("status deadline slid: %+v", status)
+	}
+	refreshed := subscribeOK(t, env, bearer, params)
+	want = env.Now.Now().Add(time.Hour).Format("2006-01-02T15:04:05.000Z")
+	if refreshed.ID != first.ID || refreshed.RefreshBefore == nil || *refreshed.RefreshBefore != want {
+		t.Fatalf("refresh did not replace deadline: %+v", refreshed)
+	}
+}

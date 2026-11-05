@@ -7,6 +7,7 @@
 // the defaults of --listen, --data-dir and --public-url; flags still win.
 // VECNET_MCP_ALLOWED_ORIGINS defaults --mcp-allowed-origins: comma-separated
 // extra exact origins, empty for https://chatgpt.com, none for public origin only.
+// VECNET_EVENTS_REFRESH_INTERVAL defaults --events-refresh-interval (30m; 1m..24h).
 // VECNET_OAUTH_REDIRECTS defaults --oauth-redirects: comma-separated redirect
 // patterns appended to the built-in OAuth redirects.
 // VECNET_ALLOW_PRIVATE_EGRESS=1 is the default of --allow-private-egress,
@@ -33,6 +34,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/logging"
@@ -71,6 +73,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	mcpOrigins := fs.String("mcp-allowed-origins", getenv("VECNET_MCP_ALLOWED_ORIGINS"), "extra /mcp origins, comma-separated; empty defaults to https://chatgpt.com, none allows public origin only ($VECNET_MCP_ALLOWED_ORIGINS)")
 	mcpLegacy := fs.String("mcp-legacy-sessions", envOr(getenv, "VECNET_MCP_LEGACY_SESSIONS", "on"), "legacy MCP sessions: on, off-for-oauth, off ($VECNET_MCP_LEGACY_SESSIONS)")
 	oauthRedirects := fs.String("oauth-redirects", getenv("VECNET_OAUTH_REDIRECTS"), "extra OAuth redirect patterns, comma-separated, appended to defaults ($VECNET_OAUTH_REDIRECTS)")
+	eventsRefresh := fs.String("events-refresh-interval", envOr(getenv, "VECNET_EVENTS_REFRESH_INTERVAL", events.RefreshInterval.String()), "MCP Events refresh interval, 1m..24h ($VECNET_EVENTS_REFRESH_INTERVAL; default 30m)")
 	devUIDir := fs.String("dev-ui-dir", "", "serve the operator UI from this directory instead of the embedded copy (development)")
 	allowPrivate := fs.Bool("allow-private-egress", getenv("VECNET_ALLOW_PRIVATE_EGRESS") == "1",
 		"development only: let outbound URLs be http and reach private/loopback addresses ($VECNET_ALLOW_PRIVATE_EGRESS=1)")
@@ -94,6 +97,10 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unknown subcommand %q", fs.Arg(0))
 	}
+	refreshInterval, err := time.ParseDuration(*eventsRefresh)
+	if err != nil || refreshInterval < time.Minute || refreshInterval > 24*time.Hour {
+		return errors.New("events refresh interval must be a Go duration between 1m and 24h")
+	}
 	origins, err := mcpserver.ParseAllowedOrigins(*mcpOrigins)
 	if err != nil {
 		return err
@@ -106,7 +113,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if err != nil {
 		return err
 	}
-	return serve(ctx, *listen, *dataDir, *publicURL, *devUIDir, *allowPrivate, *trustFly, origins, redirects, stdout, legacy)
+	return serve(ctx, *listen, *dataDir, *publicURL, *devUIDir, *allowPrivate, *trustFly, origins, redirects, stdout, refreshInterval, legacy)
 }
 
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
@@ -162,7 +169,7 @@ const ShutdownGrace = 10 * time.Second
 // devUIDir "" serves the embedded operator UI. allowPrivateEgress is the
 // development-only egress override (hub.Config.AllowPrivateEgress).
 // trustFly keys the per-client limiter on Fly-Client-IP (Deps.TrustFlyClientIP).
-func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, allowPrivateEgress, trustFly bool, mcpOrigins, oauthRedirects []string, stdout io.Writer, mcpLegacy ...string) error {
+func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, allowPrivateEgress, trustFly bool, mcpOrigins, oauthRedirects []string, stdout io.Writer, refreshInterval time.Duration, mcpLegacy ...string) error {
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return err
@@ -181,6 +188,7 @@ func serve(ctx context.Context, listen, dataDir, publicURL, devUIDir string, all
 	if allowPrivateEgress {
 		slog.Warn("vecnet-hub: private egress allowed (development only): outbound URLs may be http and reach private addresses")
 	}
+	h.Cfg.EventsRefreshInterval = refreshInterval
 	stack := httpapi.NewStack(h)
 	stack.OAuth.AllowedRedirects = oauthRedirects
 	// Shutdown does not cancel request contexts, so long-lived SSE streams

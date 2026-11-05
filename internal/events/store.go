@@ -31,6 +31,8 @@ const (
 	// RefreshMargin is how long before expiry ChatGPT should re-subscribe.
 	// The operator snapshot and events/subscribe use the same deadline.
 	RefreshMargin = 10 * time.Minute
+	// RefreshInterval is the default cadence for clients to re-subscribe.
+	RefreshInterval = 30 * time.Minute
 	// SecretOverlap is how long the previous secret keeps signing after a
 	// refresh supplies a new one.
 	SecretOverlap = 10 * time.Minute
@@ -86,10 +88,11 @@ type Subscription struct {
 	Verified                                          bool
 	PausedReason                                      string
 
-	VerifiedAt   *time.Time // the last passed challenge; nil when one is due
-	TokenExpires *time.Time // nil for a vecnet bearer, whose credential has no expiry
-	TokenHash    string     // the subscribing OAuth access token's hash; "" for a vecnet bearer
-	Truncated    bool       // events were skipped as purged since the last events/subscribe
+	RefreshBefore *time.Time // the exact deadline returned by the last successful subscribe
+	VerifiedAt    *time.Time // the last passed challenge; nil when one is due
+	TokenExpires  *time.Time // nil for a vecnet bearer, whose credential has no expiry
+	TokenHash     string     // the subscribing OAuth access token's hash; "" for a vecnet bearer
+	Truncated     bool       // events were skipped as purged since the last events/subscribe
 }
 
 // Store is the subscription table. Key is meta.hub_key, under which the
@@ -299,14 +302,14 @@ func (st *Store) Delete(ctx context.Context, principalKind, principalID, url, na
 }
 
 const subColumns = `sub_id, principal_kind, principal_id, peer_id, name, arguments, url, cursor_epoch, cursor_seq,
-	truncated, types, expires_at, verified_at, paused_reason, token_expires_at, token_hash`
+	truncated, types, expires_at, verified_at, paused_reason, token_expires_at, token_hash, refresh_before_at`
 
 func scanSub(row interface{ Scan(...any) error }) (Subscription, error) {
 	var s Subscription
 	var args, types string
-	var expires, verified, paused, token, tokenHash *string
+	var expires, verified, paused, token, tokenHash, refresh *string
 	if err := row.Scan(&s.ID, &s.PrincipalKind, &s.PrincipalID, &s.PeerID, &s.Name, &args, &s.URL,
-		&s.Cursor.Epoch, &s.Cursor.Seq, &s.Truncated, &types, &expires, &verified, &paused, &token, &tokenHash); err != nil {
+		&s.Cursor.Epoch, &s.Cursor.Seq, &s.Truncated, &types, &expires, &verified, &paused, &token, &tokenHash, &refresh); err != nil {
 		return Subscription{}, err
 	}
 	if err := json.Unmarshal([]byte(args), &s.Arguments); err != nil {
@@ -317,6 +320,9 @@ func scanSub(row interface{ Scan(...any) error }) (Subscription, error) {
 	}
 	var err error
 	if s.Expires, err = parseOptTime(expires); err != nil {
+		return Subscription{}, err
+	}
+	if s.RefreshBefore, err = parseOptTime(refresh); err != nil {
 		return Subscription{}, err
 	}
 	if s.TokenExpires, err = parseOptTime(token); err != nil {
@@ -563,19 +569,19 @@ func (st *Store) Resume(ctx context.Context, id string) error {
 // Health is a subscription's row as the operator sees it. A callback path can
 // carry a credential: whoever displays URL shows its host only.
 type Health struct {
-	ID, PrincipalKind, PrincipalID, PeerID, URL, Name string
-	Cursor                                            eventlog.Cursor
-	ExpiresAt, VerifiedAt, PausedReason               *string
-	LastRefreshAt, LastDeliveryAt                     *string
-	LastStatus                                        *int
-	Attempts                                          int
+	ID, PrincipalKind, PrincipalID, PeerID, URL, Name  string
+	Cursor                                             eventlog.Cursor
+	ExpiresAt, VerifiedAt, PausedReason, RefreshBefore *string
+	LastRefreshAt, LastDeliveryAt                      *string
+	LastStatus                                         *int
+	Attempts                                           int
 }
 
 // ListHealth returns every subscription for the operator.
 func (st *Store) ListHealth(ctx context.Context) ([]Health, error) {
 	rows, err := st.DB.QueryContext(ctx,
 		`SELECT sub_id, principal_kind, principal_id, peer_id, url, name, cursor_epoch, cursor_seq,
-		        expires_at, verified_at, paused_reason, last_refresh_at, last_delivery_at, last_status, attempts
+		        expires_at, verified_at, paused_reason, last_refresh_at, last_delivery_at, last_status, attempts, refresh_before_at
 		 FROM event_subscriptions ORDER BY sub_id`)
 	if err != nil {
 		return nil, fmt.Errorf("events: list health: %w", err)
@@ -586,7 +592,7 @@ func (st *Store) ListHealth(ctx context.Context) ([]Health, error) {
 		var h Health
 		if err := rows.Scan(&h.ID, &h.PrincipalKind, &h.PrincipalID, &h.PeerID, &h.URL, &h.Name,
 			&h.Cursor.Epoch, &h.Cursor.Seq, &h.ExpiresAt, &h.VerifiedAt, &h.PausedReason,
-			&h.LastRefreshAt, &h.LastDeliveryAt, &h.LastStatus, &h.Attempts); err != nil {
+			&h.LastRefreshAt, &h.LastDeliveryAt, &h.LastStatus, &h.Attempts, &h.RefreshBefore); err != nil {
 			return nil, fmt.Errorf("events: list health: %w", err)
 		}
 		out = append(out, h)
@@ -896,4 +902,29 @@ func (st *Store) peerAuthorised(ctx context.Context, s Subscription) (bool, erro
 		}
 	}
 	return s.PrincipalKind != KindVecnet || s.PrincipalID == s.PeerID || s.PrincipalID == prn, nil
+}
+
+// RefreshDeadline asks clients to refresh periodically and before lease expiry.
+// A short lease must never hand back a time already in the past.
+func RefreshDeadline(now, expires time.Time, interval time.Duration) time.Time {
+	if interval <= 0 {
+		interval = RefreshInterval
+	}
+	deadline := expires.Add(-RefreshMargin)
+	if periodic := now.Add(interval); periodic.Before(deadline) {
+		deadline = periodic
+	}
+	if deadline.Before(now) {
+		deadline = now
+	}
+	return deadline
+}
+
+// SetRefreshBefore preserves the deadline handed to the client for status reads.
+func (st *Store) SetRefreshBefore(ctx context.Context, id string, deadline time.Time) error {
+	_, err := st.DB.ExecContext(ctx, `UPDATE event_subscriptions SET refresh_before_at = ? WHERE sub_id = ?`, envelope.FormatTime(deadline), id)
+	if err != nil {
+		return fmt.Errorf("events: save refresh deadline: %w", err)
+	}
+	return nil
 }

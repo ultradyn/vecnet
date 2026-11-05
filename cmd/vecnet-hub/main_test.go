@@ -11,6 +11,10 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/XertroV/vecnet/internal/events"
+	"github.com/XertroV/vecnet/internal/testhub"
 )
 
 func TestInitPrintsSecretOnce(t *testing.T) {
@@ -192,6 +196,81 @@ func TestOAuthRedirectsFlagAndEnv(t *testing.T) {
 				if resp.StatusCode != want {
 					t.Fatalf("register %s: %d, want %d", uri, resp.StatusCode, want)
 				}
+			}
+		})
+	}
+}
+
+func TestEventsRefreshIntervalValidation(t *testing.T) {
+	for _, source := range []string{"env", "flag"} {
+		for _, value := range []string{"invalid", "0", "-1m", "59s", "24h1s"} {
+			t.Run(source+"/"+value, func(t *testing.T) {
+				dir := filepath.Join(t.TempDir(), "unopened")
+				args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir}
+				getenv := noEnv
+				if source == "flag" {
+					args = append(args, "--events-refresh-interval", value)
+				} else {
+					getenv = func(key string) string {
+						if key == "VECNET_EVENTS_REFRESH_INTERVAL" {
+							return value
+						}
+						return ""
+					}
+				}
+				err := run(context.Background(), args, io.Discard, getenv)
+				if err == nil || !strings.Contains(err.Error(), "events refresh interval") {
+					t.Fatalf("startup error = %v", err)
+				}
+				if _, err := os.Stat(dir); !os.IsNotExist(err) {
+					t.Fatalf("invalid interval opened data directory: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestEventsRefreshIntervalFlagAndEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name, env string
+		flags     []string
+		want      time.Duration
+	}{
+		{"default", "", nil, 30 * time.Minute},
+		{"env minimum", "1m", nil, time.Minute},
+		{"env maximum", "24h", nil, 24*time.Hour - events.RefreshMargin},
+		{"flag", "", []string{"--events-refresh-interval", "7m"}, 7 * time.Minute},
+		{"flag wins over invalid env", "invalid", []string{"--events-refresh-interval", "8m"}, 8 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var out bytes.Buffer
+			if err := runInit(dir, "Max", &out); err != nil {
+				t.Fatal(err)
+			}
+			bearer := regexp.MustCompile(`vn_operator_\S+`).FindString(out.String())
+			args := append([]string{"--listen", "127.0.0.1:0", "--data-dir", dir, "--allow-private-egress"}, tc.flags...)
+			h := bootHub(t, args, func(key string) string {
+				if key == "VECNET_EVENTS_REFRESH_INTERVAL" {
+					return tc.env
+				}
+				return ""
+			})
+			cb := testhub.NewCallback(t)
+			subscribeSmoke(t, h.base, bearer, cb.URL)
+			resp, raw := hubDo(t, http.MethodGet, h.base+"/v1/admin/subscriptions", bearer, nil)
+			var result []struct {
+				RefreshBefore string `json:"refresh_before"`
+			}
+			if resp.StatusCode != 200 || json.Unmarshal(raw, &result) != nil || len(result) != 1 {
+				t.Fatalf("subscriptions: %d %s", resp.StatusCode, raw)
+			}
+			deadline, err := time.Parse(time.RFC3339Nano, result[0].RefreshBefore)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if delta := time.Until(deadline) - tc.want; delta < -5*time.Second || delta > 5*time.Second {
+				t.Fatalf("refresh interval differs from %s by %s", tc.want, delta)
 			}
 		})
 	}

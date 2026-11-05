@@ -282,7 +282,7 @@ func TestSubscribeChallengeAndDeliver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refreshBefore %q: %v", *res.RefreshBefore, err)
 	}
-	if want := env.Now.Now().Add(23*time.Hour + 50*time.Minute); !rb.Equal(want) {
+	if want := env.Now.Now().Add(30 * time.Minute); !rb.Equal(want) {
 		t.Fatalf("refreshBefore = %v, want %v", rb, want)
 	}
 	if _, err := eventlog.ParseCursor(res.Cursor); err != nil {
@@ -717,8 +717,8 @@ func TestSubscribeOAuthPrincipal(t *testing.T) {
 	if res.RefreshBefore == nil {
 		t.Fatal("refreshBefore is null")
 	}
-	if rb, err := venv.ParseTime(*res.RefreshBefore); err != nil || !rb.Equal(expiry.Add(-10*time.Minute)) {
-		t.Fatalf("refreshBefore = %v, %v; want token expiry - 10 min", rb, err)
+	if rb, err := venv.ParseTime(*res.RefreshBefore); err != nil || !rb.Equal(env.Now.Now().Add(30*time.Minute)) {
+		t.Fatalf("refreshBefore = %v, %v; want now + 30 min", rb, err)
 	}
 	s, err := events.NewStore(env.Hub).Get(context.Background(), res.ID)
 	if err != nil {
@@ -730,6 +730,23 @@ func TestSubscribeOAuthPrincipal(t *testing.T) {
 	if s.Expires == nil || !s.Expires.Equal(expiry) {
 		t.Fatalf("expires = %v, want the token's %v", s.Expires, expiry)
 	}
+	for _, tc := range []struct{ remaining, want time.Duration }{
+		{time.Hour, 30 * time.Minute},
+		{35 * time.Minute, 25 * time.Minute},
+		{5 * time.Minute, 0},
+	} {
+		expiry = env.Now.Now().Add(tc.remaining)
+		got := subscribeOK(t, front, "any", subParams(cb.URL, webhook.NewSecret(), nil))
+		want := venv.FormatTime(env.Now.Now().Add(tc.want))
+		if got.RefreshBefore == nil || *got.RefreshBefore != want {
+			t.Fatalf("token remaining %s: refreshBefore = %v, want %s", tc.remaining, got.RefreshBefore, want)
+		}
+		stored, err := events.NewStore(env.Hub).Get(context.Background(), got.ID)
+		if err != nil || stored.Expires == nil || !stored.Expires.Equal(expiry) {
+			t.Fatalf("token remaining %s: lease = %v, err = %v", tc.remaining, stored.Expires, err)
+		}
+	}
+
 }
 
 func TestSubscribeTtlClamp(t *testing.T) {
@@ -758,6 +775,9 @@ func TestSubscribeTtlClamp(t *testing.T) {
 			t.Fatalf("%s: refreshBefore is null", c.name)
 		}
 		want := now.Add(c.want - 10*time.Minute)
+		if interval := now.Add(30 * time.Minute); interval.Before(want) {
+			want = interval
+		}
 		if want.Before(now) {
 			want = now
 		}

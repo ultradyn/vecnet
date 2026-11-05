@@ -173,16 +173,23 @@ func TestRefreshBeforeMatchesSubscribe(t *testing.T) {
 	for _, ttl := range []time.Duration{24 * time.Hour, 5 * time.Minute} {
 		id, refresh := subscribeRPC(t, env, bearer, cb.URL, ttl)
 		got := subscription(t, env, id)
-		want := envelope.FormatTime(env.Now.Now().Add(ttl - events.RefreshMargin))
-		// Under the margin the subscribe reply clamps to now, so a dot is never
-		// handed a time already past; the operator view keeps the raw deadline.
-		wantReply := want
-		if ttl < events.RefreshMargin {
-			wantReply = envelope.FormatTime(env.Now.Now())
+		wantAt := env.Now.Now().Add(ttl - events.RefreshMargin)
+		if periodic := env.Now.Now().Add(30 * time.Minute); periodic.Before(wantAt) {
+			wantAt = periodic
 		}
-		if got.RefreshBefore == nil || *got.RefreshBefore != want || refresh != wantReply {
+		if wantAt.Before(env.Now.Now()) {
+			wantAt = env.Now.Now()
+		}
+		want := envelope.FormatTime(wantAt)
+		// Status must preserve the handed-out deadline even after it passes.
+		env.Now.Advance(time.Minute)
+		env.Hub.Cfg.EventsRefreshInterval = 2 * time.Hour
+		got = subscription(t, env, id)
+		if got.RefreshBefore == nil || *got.RefreshBefore != want || refresh != want {
 			t.Fatalf("ttl=%s snapshot=%v subscribe=%q want=%q", ttl, got.RefreshBefore, refresh, want)
 		}
+		env.Now.Advance(-time.Minute)
+		env.Hub.Cfg.EventsRefreshInterval = 0
 		if got.ExpiresAt == nil || *got.ExpiresAt != envelope.FormatTime(env.Now.Now().Add(ttl)) {
 			t.Fatalf("expiry=%v", got.ExpiresAt)
 		}
