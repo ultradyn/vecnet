@@ -36,6 +36,11 @@ func TestEnrolSaveFailureNeverPrintsSecret(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// enrol takes the config lock before contacting the hub; pre-create the
+	// lock file so only the save after the credential is issued fails.
+	if err := os.WriteFile(u.conf+".lock", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
 	}
