@@ -237,7 +237,10 @@ func TestRestartKeepsGenerationAcrossReset(t *testing.T) {
 			if strings.HasSuffix(mode, "setup") {
 				w = &restartBarrierWriter{recorder, entered, release}
 			}
-			alive := func(context.Context) bool { close(entered); <-release; return true }
+			// sseTail calls alive again on each later wake or tick; only the
+			// first call is the barrier.
+			var enterOnce sync.Once
+			alive := func(context.Context) bool { enterOnce.Do(func() { close(entered) }); <-release; return true }
 			finished := make(chan struct{})
 			go func() {
 				defer close(finished)
