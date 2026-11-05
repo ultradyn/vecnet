@@ -222,6 +222,8 @@ func hookOutput(event, context string) []byte {
 	name := "UserPromptSubmit"
 	if event == "post-tool" {
 		name = "PostToolUse"
+	} else if event == "session-start" {
+		name = "SessionStart"
 	}
 	var raw bytes.Buffer
 	encoder := json.NewEncoder(&raw)
@@ -372,10 +374,14 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	}
 	raw, e := hookStdin(a.stdin)
 	if e != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &input) != nil {
-		if !o.has("event") {
+		// Only --event with no input at all (a terminal or empty stdin) is
+		// a manual run without a session id. Nonempty input that cannot be
+		// read or decoded, such as a tool_response over the cap, carried an
+		// identity this run cannot see (a foreign session_id or a
+		// subagent's agent_id): claim nothing and touch no state.
+		if !o.has("event") || e != nil || len(bytes.TrimSpace(raw)) != 0 {
 			return hookResult{}
 		}
-		// --event without usable input (a manual run): no session id.
 		input.HookEventName, input.SessionID, input.AgentID = "", "", ""
 	}
 	// A subagent or teammate shares its parent's session_id, so its tool
@@ -399,11 +405,13 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			event = "user-prompt"
 		case "PostToolUse":
 			event = "post-tool"
+		case "SessionStart":
+			event = "session-start"
 		default:
 			return hookResult{}
 		}
 	}
-	if event != "user-prompt" && event != "post-tool" {
+	if event != "user-prompt" && event != "post-tool" && event != "session-start" {
 		return hookResult{}
 	}
 	fits := func(context string) bool {

@@ -1,6 +1,6 @@
 # Connecting Claude Code
 
-Claude Code has two paths for receiving vecnet deliveries: a Monitor running `vecnet watch --for-monitor` can wake an idle session, and `vecnet hook` fills context during a turn through `UserPromptSubmit` and `PostToolUse`. The obligations are in [PROTOCOL §13.9](../PROTOCOL.md#139-claude-code-hook-vecnet-hook-2026-11-03-issue-27); watch output is defined in [§13.7](../PROTOCOL.md#137-vecnet-cli-t17-adr1).
+Claude Code has two paths for receiving vecnet deliveries: a Monitor running `vecnet watch --for-monitor` can wake an idle session, and `vecnet hook` fills context during a turn through `UserPromptSubmit` and `PostToolUse`. The obligations are in [PROTOCOL §13.9](../PROTOCOL.md#139-claude-code-hook-vecnet-hook-2026-11-03-issue-27); watch output is defined in [§13.7](../PROTOCOL.md#137-vecnet-cli-t17-adr1). Codex CLI uses the same hook through `.codex/hooks.json`; see [Connecting Codex](codex.md).
 
 With a Monitor running, the hook is mostly silent because the stream usually claims deliveries first. That is expected: the hook helps sessions without a Monitor and fills gaps while watch reconnects. `watch --for-monitor` without `--json` first polls with `wait=0` from the hub's acked cursor, or an explicit `--since`, until an empty page. It replays every delivery in that backlog, including deliveries the hook already showed, and records their ids. It then opens the stream after the last `next_cursor` and skips live deliveries already shown (§13.9).
 

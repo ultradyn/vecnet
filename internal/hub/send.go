@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -119,6 +120,11 @@ func (h *Hub) SendVia(ctx context.Context, c auth.Caller, raw []byte, ingress st
 	}
 	if !ingresses[ingress] {
 		return nil, false, fmt.Errorf("hub: send: unknown ingress %q", ingress)
+	}
+	// Every later check reads one value per member name; a repeated name
+	// would let the struct decoder merge an unchecked earlier value back in.
+	if err := checkRepeatedNames(raw); err != nil {
+		return nil, false, err
 	}
 	if err := PrecheckSend(raw); err != nil {
 		return nil, false, err
@@ -926,6 +932,62 @@ func checkRecipientNames(raw []byte) error {
 		if prefix == ids.Src {
 			return unknownRecipient(s) // sources cannot receive messages (§10)
 		}
+	}
+	return nil
+}
+
+// pointerEscape escapes one JSON Pointer reference token (RFC 6901).
+var pointerEscape = strings.NewReplacer("~", "~0", "/", "~1")
+
+// checkRepeatedNames refuses a body that repeats a member name in any
+// object. The byte caps, the schema and the idempotency hash see a repeated
+// name's last value, but encoding/json's struct decoder merges an earlier
+// object's map entries and fields into the result, so oversized or extra
+// metadata could pass the checks and still be stored. A body that is not
+// JSON is left to the checks that follow.
+func checkRepeatedNames(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var walk func(path string) error
+	walk = func(path string) error {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch tok {
+		case json.Delim('{'):
+			seen := map[string]bool{}
+			for dec.More() {
+				key, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				name, _ := key.(string)
+				member := path + "/" + pointerEscape.Replace(name)
+				if seen[name] {
+					return &envelope.SchemaError{Path: member, Message: fmt.Sprintf("member name %q is repeated", name)}
+				}
+				seen[name] = true
+				if err := walk(member); err != nil {
+					return err
+				}
+			}
+			_, err = dec.Token()
+			return err
+		case json.Delim('['):
+			for i := 0; dec.More(); i++ {
+				if err := walk(path + "/" + strconv.Itoa(i)); err != nil {
+					return err
+				}
+			}
+			_, err = dec.Token()
+			return err
+		}
+		return nil
+	}
+	var schemaErr *envelope.SchemaError
+	if err := walk(""); errors.As(err, &schemaErr) {
+		return err
 	}
 	return nil
 }
