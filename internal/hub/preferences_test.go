@@ -14,14 +14,25 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/store"
+	"github.com/XertroV/vecnet/internal/testhub"
 )
 
 var prefsOperator = auth.Caller{Kind: "operator", PeerKind: "operator"}
 
+// prefsEpoch starts every preference fixture's FakeClock. Restarts reuse the
+// first hub's clock through h.Now.
+var prefsEpoch = time.Date(2026, 11, 5, 1, 2, 3, 0, time.UTC)
+
 func preferencesHub(t *testing.T, cfg hub.Config) (*hub.Hub, string) {
+	t.Helper()
+	h, path, _ := preferencesHubClock(t, cfg)
+	return h, path
+}
+func preferencesHubClock(t *testing.T, cfg hub.Config) (*hub.Hub, string, *testhub.FakeClock) {
 	t.Helper()
 	dir := t.TempDir()
 	cfg.DataDir = dir
@@ -31,11 +42,12 @@ func preferencesHub(t *testing.T, cfg hub.Config) (*hub.Hub, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	h, err := hub.New(db, cfg, nil)
+	clock := testhub.NewFakeClock(prefsEpoch)
+	h, err := hub.New(db, cfg, clock.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return h, path
+	return h, path, clock
 }
 func readPrefs(t *testing.T, h *hub.Hub) prefs.Snapshot {
 	t.Helper()
@@ -101,7 +113,7 @@ func TestPreferencesPrecedenceResetAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	again, err := hub.New(db, cfg, nil)
+	again, err := hub.New(db, cfg, h.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,15 +268,34 @@ func TestPreferencesETagsAuthorityAndPolicy(t *testing.T) {
 	prefsAuditCount(t, h, 0)
 }
 func TestPreferencesInvalidPersistedStateFailsStartupWithoutExposure(t *testing.T) {
-	for _, tc := range []struct{ key, value, code string }{{"agents.thread_budget", "10001", prefs.CodeInvalidValue}, {"agents.thread_budget", `"synthetic-secret"`, prefs.CodeInvalidValue}, {"synthetic-secret", "1", prefs.CodeUnknownKey}, {"retention.history", "0", prefs.CodeUnavailable}} {
+	// field is the known registry key the diagnostic must name; an unknown
+	// input key is never echoed, so its field is empty.
+	for _, tc := range []struct{ key, value, code, field string }{
+		{"agents.thread_budget", "10001", prefs.CodeInvalidValue, "agents.thread_budget"},
+		{"agents.thread_budget", `"synthetic-secret"`, prefs.CodeInvalidValue, "agents.thread_budget"},
+		{"synthetic-secret", "1", prefs.CodeUnknownKey, ""},
+		{"retention.history", "0", prefs.CodeUnavailable, "retention.history"},
+	} {
 		t.Run(tc.code+tc.key, func(t *testing.T) {
 			h, _ := preferencesHub(t, hub.DefaultConfig())
 			if _, err := h.DB.Exec(`INSERT INTO hub_preferences VALUES (?, ?, 'now', 'operator')`, tc.key, tc.value); err != nil {
 				t.Fatal(err)
 			}
-			_, err := hub.New(h.DB, h.Cfg, nil)
-			if err == nil || !strings.Contains(err.Error(), tc.code) || !strings.Contains(err.Error(), "runbook") || strings.Contains(err.Error(), "synthetic-secret") {
-				t.Fatalf("unsafe or missing startup diagnostic: %v", err)
+			_, err := hub.New(h.DB, h.Cfg, h.Now)
+			if err == nil {
+				t.Fatal("invalid persisted state started")
+			}
+			msg := err.Error()
+			if want := "preferences startup: " + tc.field + " " + tc.code; !strings.HasPrefix(msg, want) {
+				t.Fatalf("startup diagnostic %q, want prefix %q", msg, want)
+			}
+			if !strings.Contains(msg, "runbook") {
+				t.Fatalf("startup diagnostic lacks recovery runbook: %q", msg)
+			}
+			for _, rejected := range []string{"synthetic-secret", "10001"} {
+				if strings.Contains(msg, rejected) {
+					t.Fatalf("startup diagnostic echoed rejected input: %q", msg)
+				}
 			}
 		})
 	}
@@ -303,6 +334,88 @@ func TestPreferencesLatestWakeupCancellationAndPublication(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("cancel did not close subscription")
+	}
+	// Closure happens after removal under the fan-out lock, so a later commit
+	// must not send to the closed channel.
+	if n := h.Preferences.SubscriberCount(); n != 0 {
+		t.Fatalf("canceled subscription still registered: %d", n)
+	}
+	s = patchPrefs(t, h, s, prefs.Patch{Set: map[string]prefs.Value{"agents.thread_budget": prefs.Int(900)}})
+	if s.Revision != 4 {
+		t.Fatalf("revision after canceled subscription = %d, want 4", s.Revision)
+	}
+}
+
+func TestPreferencesSubscribeCancelRacesPublication(t *testing.T) {
+	h, _ := preferencesHub(t, hub.DefaultConfig())
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, ok := <-h.Preferences.Subscribe(canceled); ok {
+		t.Fatal("already-canceled subscription delivered a wakeup")
+	}
+	if n := h.Preferences.SubscriberCount(); n != 0 {
+		t.Fatalf("already-canceled subscription registered: %d", n)
+	}
+	const subscribers, rounds, patches = 8, 25, 40
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, subscribers+1)
+	for i := 0; i < subscribers; i++ {
+		wg.Go(func() {
+			<-start
+			for r := 0; r < rounds; r++ {
+				ctx, cancel := context.WithCancel(context.Background())
+				wake := h.Preferences.Subscribe(ctx)
+				if r%2 == 0 {
+					select {
+					case <-wake:
+					default:
+					}
+				}
+				cancel()
+				// Drain until closed: the cancellation goroutine has then removed
+				// the channel from the fan-out set.
+				timeout := time.After(5 * time.Second)
+				for open := true; open; {
+					select {
+					case _, open = <-wake:
+					case <-timeout:
+						errs <- errors.New("cancel did not close subscription")
+						return
+					}
+				}
+			}
+		})
+	}
+	wg.Go(func() {
+		<-start
+		for n := 0; n < patches; n++ {
+			s, err := h.Preferences.ReadPreferences(context.Background(), prefsOperator)
+			if err == nil {
+				_, err = h.Preferences.PatchPreferences(context.Background(), prefsOperator, s.ETag, prefs.Patch{Set: map[string]prefs.Value{"agents.thread_budget": prefs.Int(int64(600 + n))}})
+			}
+			if err != nil {
+				errs <- err
+				return
+			}
+		}
+	})
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	if n := h.Preferences.SubscriberCount(); n != 0 {
+		t.Fatalf("subscriptions leaked: %d", n)
+	}
+	s := readPrefs(t, h)
+	if s.Revision != patches {
+		t.Fatalf("revision = %d, want %d", s.Revision, patches)
+	}
+	next := patchPrefs(t, h, s, prefs.Patch{Set: map[string]prefs.Value{"agents.thread_budget": prefs.Int(999)}})
+	if next.Revision != patches+1 {
+		t.Fatal("commit after canceled subscriptions failed")
 	}
 }
 func TestPreferencesAuditTypedValuesAndConsistentTransactionRead(t *testing.T) {
@@ -387,7 +500,7 @@ func TestPreferencesCrashAfterCommitRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	again, err := hub.New(db, h.Cfg, nil)
+	again, err := hub.New(db, h.Cfg, h.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +531,7 @@ func TestPreferencesCompletePolicyAndBootstrapGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	again, err := hub.New(db, cfg, nil)
+	again, err := hub.New(db, cfg, h.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,6 +689,7 @@ func TestPreferencesConfigDurationsValidatedBeforeConversion(t *testing.T) {
 		{"presence.launcher_ttl", func(c *hub.Config, d time.Duration) { c.LauncherPresenceTTL = d }, 2 * time.Minute, 24 * time.Hour},
 		{"agents.default_ttl", func(c *hub.Config, d time.Duration) { c.DefaultTTL = d }, 2 * time.Minute, 7 * 24 * time.Hour},
 		{"agents.max_expiry", func(c *hub.Config, d time.Duration) { c.MaxExpiry = d }, 2 * 24 * time.Hour, 7 * 24 * time.Hour},
+		{"files.read_token_ttl", func(c *hub.Config, d time.Duration) { c.BlobTokenTTL = d }, 2 * time.Minute, 7 * 24 * time.Hour},
 	}
 	for _, field := range fields {
 		t.Run(field.key, func(t *testing.T) {
@@ -602,7 +716,7 @@ func TestPreferencesConfigDurationsValidatedBeforeConversion(t *testing.T) {
 						t.Fatal(err)
 					}
 					defer db.Close()
-					h, err := hub.New(db, cfg, nil)
+					h, err := hub.New(db, cfg, testhub.NewFakeClock(prefsEpoch).Now)
 					if tc.invalid {
 						prefsCode(t, err, prefs.CodeInvalidValue)
 						var pe *prefs.Error
@@ -613,9 +727,6 @@ func TestPreferencesConfigDurationsValidatedBeforeConversion(t *testing.T) {
 					}
 					if err != nil {
 						t.Fatal(err)
-					}
-					if field.key == "agents.max_expiry" {
-						return
 					}
 					want, source := int64(tc.duration/time.Second), prefs.SourceFlag
 					if tc.duration == 0 {
@@ -701,4 +812,176 @@ func TestPreferencesCommitFailureDoesNotPublish(t *testing.T) {
 		t.Fatal("successful retry did not notify")
 	}
 	prefsAuditCount(t, h, 1)
+}
+
+func TestPreferencesPersistInjectedClock(t *testing.T) {
+	h, _, clock := preferencesHubClock(t, hub.DefaultConfig())
+	updatedAt := func() string {
+		t.Helper()
+		var at string
+		if err := h.DB.QueryRow(`SELECT updated_at FROM hub_preferences WHERE key='agents.thread_budget'`).Scan(&at); err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+	s := patchPrefs(t, h, readPrefs(t, h), prefs.Patch{Set: map[string]prefs.Value{"agents.thread_budget": prefs.Int(600)}})
+	if got, want := updatedAt(), envelope.FormatTime(prefsEpoch); got != want {
+		t.Fatalf("updated_at = %s, want injected %s", got, want)
+	}
+	clock.Advance(90 * time.Minute)
+	patchPrefs(t, h, s, prefs.Patch{Set: map[string]prefs.Value{"agents.thread_budget": prefs.Int(700)}})
+	if got, want := updatedAt(), envelope.FormatTime(prefsEpoch.Add(90*time.Minute)); got != want {
+		t.Fatalf("updated_at = %s, want advanced %s", got, want)
+	}
+}
+
+func TestPreferencesReadOnlyConfigFieldsResolve(t *testing.T) {
+	h, path := preferencesHub(t, hub.DefaultConfig())
+	defaults := readPrefs(t, h)
+	for _, tc := range []struct {
+		key  string
+		want int64
+	}{{"agents.max_expiry", 604800}, {"agents.text_cap", 4096}, {"files.read_token_ttl", 604800}, {"rates.avatar_changes_per_hour", 10}} {
+		prefValue(t, defaults, tc.key, tc.want, prefs.SourceDefault, "")
+	}
+	cfg := hub.DefaultConfig()
+	cfg.DataDir = h.Cfg.DataDir
+	cfg.MaxExpiry = 24 * time.Hour
+	cfg.TextCap = 2048
+	cfg.BlobTokenTTL = time.Hour
+	cfg.AvatarChangesPerHour = 3
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	again, err := hub.New(db, cfg, h.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := readPrefs(t, again)
+	for _, tc := range []struct {
+		key  string
+		want int64
+	}{{"agents.max_expiry", 86400}, {"agents.text_cap", 2048}, {"files.read_token_ttl", 3600}, {"rates.avatar_changes_per_hour", 3}} {
+		prefValue(t, s, tc.key, tc.want, prefs.SourceFlag, "")
+		_, err = again.Preferences.PatchPreferences(context.Background(), prefsOperator, s.ETag, prefs.Patch{Reset: []string{tc.key}})
+		prefsCode(t, err, prefs.CodeUnavailable)
+	}
+	for _, d := range s.Descriptors() {
+		switch d.Key {
+		case "agents.max_expiry", "agents.text_cap", "files.read_token_ttl", "rates.avatar_changes_per_hour":
+			if d.Editable {
+				t.Fatalf("%s became writable", d.Key)
+			}
+		}
+	}
+	if s.Revision != defaults.Revision || s.ETag == defaults.ETag {
+		t.Fatal("read-only bootstrap change must invalidate the ETag without a revision")
+	}
+}
+
+func TestPreferencesApplyExistingAuthorizesWithoutValueDelta(t *testing.T) {
+	ctx := context.Background()
+	cfg := hub.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	db, err := store.Open(filepath.Join(cfg.DataDir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	clock := testhub.NewFakeClock(prefsEpoch)
+	p, err := hub.NewPreferences(db, cfg, clock.Now, "retention.history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	audits := func(want int) {
+		t.Helper()
+		var n int
+		if err := db.QueryRow(`SELECT count(*) FROM audit WHERE action='prefs_changed'`).Scan(&n); err != nil || n != want {
+			t.Fatalf("audits = %d (%v), want %d", n, err, want)
+		}
+	}
+	s, err := p.ReadPreferences(ctx, prefsOperator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range s.Descriptors() {
+		if d.Key == "retention.history" && (!d.Editable || d.Runtime != "live") {
+			t.Fatalf("installed adapter not live: %+v", d.Definition)
+		}
+		if d.Key == "retention.ack_events" && d.Editable {
+			t.Fatal("uninstalled adapter became writable")
+		}
+	}
+	unchanged := prefs.Patch{Set: map[string]prefs.Value{"retention.history": prefs.Duration(0)}, ApplyExisting: true}
+	// Without the Task 4 hook, apply_existing fails closed.
+	_, err = p.PatchPreferences(ctx, prefsOperator, s.ETag, unchanged)
+	prefsCode(t, err, prefs.CodeUnavailable)
+	// An ordinary unchanged value remains a no-op.
+	same, err := p.PatchPreferences(ctx, prefsOperator, s.ETag, prefs.Patch{Set: unchanged.Set})
+	if err != nil || same.ETag != s.ETag || same.Revision != 0 {
+		t.Fatalf("ordinary no-op revised: %+v %v", same, err)
+	}
+	audits(0)
+	calls := 0
+	p.AuthorizePatch = func(ctx context.Context, tx *sql.Tx, caller auth.Caller, before, after prefs.Snapshot, patch prefs.Patch) ([]string, error) {
+		calls++
+		if before.Revision != 0 || after.Revision != 1 || !patch.ApplyExisting {
+			t.Fatalf("authorization generations %d -> %d apply_existing=%v", before.Revision, after.Revision, patch.ApplyExisting)
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO hub_preference_activations VALUES(?, 'retention.history', ?, ?, ?, 42, 'synthetic-digest')`,
+			after.Revision, envelope.FormatTime(clock.Now()), envelope.FormatTime(clock.Now().Add(24*time.Hour)), envelope.FormatTime(clock.Now()))
+		return []string{"retention_shortened"}, err
+	}
+	wakeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	wake := p.Subscribe(wakeCtx)
+	next, err := p.PatchPreferences(ctx, prefsOperator, s.ETag, unchanged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || next.Revision != 1 || next.ETag == s.ETag || p.Current().Revision != 1 {
+		t.Fatalf("activation-only authorization not committed: calls=%d revision=%d", calls, next.Revision)
+	}
+	prefValue(t, next, "retention.history", 0, prefs.SourceDefault, "")
+	var activations int
+	if err := db.QueryRow(`SELECT count(*) FROM hub_preference_activations WHERE revision=1 AND key='retention.history'`).Scan(&activations); err != nil || activations != 1 {
+		t.Fatalf("activation rows = %d (%v)", activations, err)
+	}
+	audits(1)
+	var targets, detail string
+	if err := db.QueryRow(`SELECT target_ids, detail FROM audit WHERE action='prefs_changed'`).Scan(&targets, &detail); err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		Revision      uint64   `json:"revision"`
+		Changes       []any    `json:"changes"`
+		ApprovedRisks []string `json:"approved_risks"`
+		ApplyExisting bool     `json:"apply_existing"`
+	}
+	if err := json.Unmarshal([]byte(detail), &record); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(targets, "retention.history") || record.Revision != 1 || len(record.Changes) != 0 || !record.ApplyExisting || len(record.ApprovedRisks) != 1 {
+		t.Fatalf("activation audit %s %s", targets, detail)
+	}
+	select {
+	case rev := <-wake:
+		if rev != 1 {
+			t.Fatalf("wakeup %d", rev)
+		}
+	default:
+		t.Fatal("activation-only commit did not notify")
+	}
+	// apply_existing is limited to DB retention keys.
+	_, err = p.PatchPreferences(ctx, prefsOperator, next.ETag, prefs.Patch{Set: map[string]prefs.Value{"agents.thread_budget": prefs.Int(600)}, ApplyExisting: true})
+	prefsCode(t, err, prefs.CodeInvalidValue)
+	var pe *prefs.Error
+	if !errors.As(err, &pe) || pe.Details.Field != "agents.thread_budget" {
+		t.Fatalf("apply_existing refusal did not name the key: %v", err)
+	}
+	if calls != 1 {
+		t.Fatal("refused apply_existing reached authorization")
+	}
 }

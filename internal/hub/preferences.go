@@ -32,6 +32,7 @@ type Preferences struct {
 	bootstrap   map[string]prefs.Effective
 	digest      string
 	maxExpiry   int64
+	installed   map[string]bool
 	writeMu     sync.Mutex
 	current     atomic.Pointer[prefs.Snapshot]
 	subMu       sync.Mutex
@@ -70,26 +71,44 @@ func preferenceBootstrapSeconds(key string, value time.Duration, min, max int64)
 	return int64(value / time.Second), nil
 }
 
-func newPreferences(db *store.DB, cfg Config, now func() time.Time) (*Preferences, error) {
+// newPreferences builds the service. installed names gated keys whose
+// runtime adapter is present (Task 3 supplies them at construction, so the
+// startup load accepts their stored rows); every other gated key stays
+// unavailable and writes to it fail closed.
+func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ...string) (*Preferences, error) {
 	maxExpiry, err := preferenceBootstrapSeconds("agents.max_expiry", cfg.MaxExpiry, 1, prefs.MaxExpirySeconds)
 	if err != nil {
 		return nil, err
 	}
-	p := &Preferences{db: db, now: now, bootstrap: map[string]prefs.Effective{}, maxExpiry: maxExpiry, subscribers: map[chan uint64]struct{}{}}
+	p := &Preferences{db: db, now: now, bootstrap: map[string]prefs.Effective{}, maxExpiry: maxExpiry, installed: map[string]bool{}, subscribers: map[chan uint64]struct{}{}}
 	if p.maxExpiry == 0 {
 		p.maxExpiry = prefs.MaxExpirySeconds
+	}
+	for _, key := range installed {
+		d, err := prefs.Lookup(key)
+		if err != nil {
+			return nil, err
+		}
+		if d.Runtime != "unavailable" {
+			return nil, preferenceError(prefs.CodeUnavailable)
+		}
+		p.installed[key] = true
 	}
 	for _, d := range prefs.Definitions() {
 		p.bootstrap[d.Key] = prefs.Effective{Value: d.Default, Source: prefs.SourceDefault}
 	}
 	// Programmatic Config values remain a supported bootstrap surface. Explicit
 	// flag/env provenance, including values equal to defaults, takes precedence.
+	// Read-only descriptors for existing Config fields (text cap, avatar rate,
+	// max expiry, blob token lifetime) report the value the hub enforces.
 	configured := map[string]prefs.Value{
 		"agents.default_max_depth":      prefs.Int(int64(cfg.DefaultMaxDepth)),
 		"agents.thread_budget":          prefs.Int(int64(cfg.ThreadBudget)),
 		"rates.sends_per_minute":        prefs.Int(int64(cfg.SendsPerMin)),
 		"rates.threads_per_hour":        prefs.Int(int64(cfg.ThreadsPerHour)),
 		"provisioning.creates_per_hour": prefs.Int(int64(cfg.CreatesPerHour)),
+		"agents.text_cap":               prefs.Int(int64(cfg.TextCap)),
+		"rates.avatar_changes_per_hour": prefs.Int(int64(cfg.AvatarChangesPerHour)),
 	}
 	for _, duration := range []struct {
 		key   string
@@ -100,6 +119,8 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time) (*Preference
 		{"presence.session_ttl", cfg.SessionPresenceTTL},
 		{"presence.launcher_ttl", cfg.LauncherPresenceTTL},
 		{"agents.default_ttl", cfg.DefaultTTL},
+		{"agents.max_expiry", cfg.MaxExpiry},
+		{"files.read_token_ttl", cfg.BlobTokenTTL},
 	} {
 		d, _ := prefs.Lookup(duration.key)
 		seconds, err := preferenceBootstrapSeconds(duration.key, duration.value, *d.Min, *d.Max)
@@ -146,7 +167,8 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time) (*Preference
 		Registry  string
 		Policy    string
 		MaxExpiry int64
-	}{p.bootstrap, prefs.RegistryVersion, cfg.PreferencePolicyGeneration, p.maxExpiry})
+		Installed map[string]bool
+	}{p.bootstrap, prefs.RegistryVersion, cfg.PreferencePolicyGeneration, p.maxExpiry, p.installed})
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +236,7 @@ func (p *Preferences) load(ctx context.Context, tx *sql.Tx) (prefs.Snapshot, map
 		if err != nil {
 			return prefs.Snapshot{}, nil, err
 		}
-		if !d.Editable {
+		if !p.editable(d) {
 			return prefs.Snapshot{}, nil, &prefs.Error{Code: prefs.CodeUnavailable, Details: prefs.ErrorDetails{Field: key}}
 		}
 		var value prefs.Value
@@ -254,8 +276,28 @@ func (p *Preferences) snapshot(revision uint64, stored map[string]prefs.Value) (
 	if err := prefs.ValidatePolicy(policy, p.maxExpiry); err != nil {
 		return prefs.Snapshot{}, err
 	}
-	return prefs.NewSnapshot(revision, fmt.Sprintf("\"prefs-%d-%s\"", revision, p.digest), prefs.Definitions(), values)
+	return prefs.NewSnapshot(revision, fmt.Sprintf("\"prefs-%d-%s\"", revision, p.digest), p.definitions(), values)
 }
+
+// editable reports runtime writability: available keys, or gated keys whose
+// adapter was installed at construction.
+func (p *Preferences) editable(d prefs.Definition) bool { return d.Editable || p.installed[d.Key] }
+
+// definitions are the registry copies this hub publishes, with installed
+// gated keys shown as live.
+func (p *Preferences) definitions() []prefs.Definition {
+	defs := prefs.Definitions()
+	for i := range defs {
+		if p.installed[defs[i].Key] {
+			defs[i].Editable, defs[i].Runtime, defs[i].UnavailableReason = true, "live", ""
+		}
+	}
+	return defs
+}
+
+// applyExistingKey reports whether apply_existing may authorize existing-data
+// work for key: only DB retention keys (plan Decision 5).
+func applyExistingKey(key string) bool { return strings.HasPrefix(key, "retention.") }
 func preferenceAuthority(caller auth.Caller) error {
 	if caller.Kind != "operator" || caller.PeerKind != "" && caller.PeerKind != "operator" {
 		return E(http.StatusForbidden, "forbidden", "Operator credential required.")
@@ -284,17 +326,14 @@ func (p *Preferences) prospective(s prefs.Snapshot, stored map[string]prefs.Valu
 	if patch.ApplyExisting && p.AuthorizePatch == nil {
 		return prefs.Snapshot{}, nil, preferenceError(prefs.CodeUnavailable)
 	}
-	keys := make([]string, 0, len(patch.Set)+len(patch.Reset))
-	for key := range patch.Set {
-		keys = append(keys, key)
-	}
-	keys = append(keys, patch.Reset...)
-	sort.Strings(keys)
 	changed := []string{}
-	for _, key := range keys {
+	for _, key := range preferencePatchKeys(patch) {
 		d, _ := prefs.Lookup(key)
-		if !d.Editable {
+		if !p.editable(d) {
 			return prefs.Snapshot{}, nil, &prefs.Error{Code: prefs.CodeUnavailable, Details: prefs.ErrorDetails{Field: key}}
+		}
+		if patch.ApplyExisting && !applyExistingKey(key) {
+			return prefs.Snapshot{}, nil, &prefs.Error{Code: prefs.CodeInvalidValue, Details: prefs.ErrorDetails{Field: key, Constraint: "apply_existing"}}
 		}
 		old, exists := stored[key]
 		next, set := patch.Set[key]
@@ -312,8 +351,10 @@ func (p *Preferences) prospective(s prefs.Snapshot, stored map[string]prefs.Valu
 			changed = append(changed, key)
 		}
 	}
+	// An apply_existing authorization is a revision of its own even without a
+	// value delta: it records activation boundaries and an audit entry.
 	revision := s.Revision
-	if len(changed) > 0 {
+	if len(changed) > 0 || patch.ApplyExisting {
 		revision++
 	}
 	next, err := p.snapshot(revision, stored)
@@ -392,7 +433,7 @@ func (p *Preferences) PatchPreferences(ctx context.Context, caller auth.Caller, 
 		if err != nil {
 			return err
 		}
-		if len(changed) == 0 {
+		if len(changed) == 0 && !patch.ApplyExisting {
 			return nil
 		}
 		approvedRisks := []string{}
@@ -428,16 +469,31 @@ func (p *Preferences) PatchPreferences(ctx context.Context, caller auth.Caller, 
 		if _, err := tx.ExecContext(ctx, `UPDATE hub_preferences_state SET revision=? WHERE id=1`, next.Revision); err != nil {
 			return err
 		}
-		return audit.Record(ctx, tx, "operator", "prefs_changed", changed, map[string]any{"revision": next.Revision, "changes": changes, "approved_risks": append([]string{}, approvedRisks...)})
+		targets := changed
+		if len(targets) == 0 {
+			targets = preferencePatchKeys(patch)
+		}
+		return audit.Record(ctx, tx, "operator", "prefs_changed", targets, map[string]any{"revision": next.Revision, "changes": changes, "approved_risks": append([]string{}, approvedRisks...), "apply_existing": patch.ApplyExisting})
 	})
 	if err != nil {
 		return prefs.Snapshot{}, sanitizePreferenceError(err)
 	}
 	p.current.Store(&next)
-	if len(changed) > 0 {
+	if len(changed) > 0 || patch.ApplyExisting {
 		p.notify(next.Revision)
 	}
 	return next, nil
+}
+
+// preferencePatchKeys returns the patch's set and reset keys in order.
+func preferencePatchKeys(patch prefs.Patch) []string {
+	out := make([]string, 0, len(patch.Set)+len(patch.Reset))
+	for key := range patch.Set {
+		out = append(out, key)
+	}
+	out = append(out, patch.Reset...)
+	sort.Strings(out)
+	return out
 }
 
 // Subscribe returns a capacity-one latest-generation wakeup. Cancellation

@@ -63,6 +63,9 @@ func (c *FakeClock) Now() time.Time {
 	return c.t
 }
 
+// NewFakeClock returns a FakeClock stopped at start.
+func NewFakeClock(start time.Time) *FakeClock { return &FakeClock{t: start} }
+
 // Advance moves the clock forward by d.
 func (c *FakeClock) Advance(d time.Duration) {
 	c.mu.Lock()
