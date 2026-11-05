@@ -121,6 +121,7 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 		key   string
 		value time.Duration
 	}{
+		{"retention.ack_events", cfg.AckedEventRetention},
 		{"events.refresh_interval", cfg.EventsRefreshInterval},
 		{"presence.default_ttl", cfg.PresenceTTL},
 		{"presence.session_ttl", cfg.SessionPresenceTTL},
@@ -148,7 +149,7 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 		if err != nil {
 			return nil, err
 		}
-		if !d.Editable {
+		if !d.Editable && !p.installed[key] {
 			return nil, preferenceError(prefs.CodeUnavailable)
 		}
 		if e.Source != prefs.SourceFlag {
@@ -171,12 +172,13 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 	}
 	// encoding/json orders map keys, producing a canonical bounded scalar input.
 	canonical, err := json.Marshal(struct {
-		Bootstrap map[string]prefs.Effective
-		Registry  string
-		Policy    string
-		MaxExpiry int64
-		Installed map[string]bool
-	}{p.bootstrap, prefs.RegistryVersion, cfg.PreferencePolicyGeneration, p.maxExpiry, p.installed})
+		Bootstrap          map[string]prefs.Effective
+		Registry           string
+		Policy             string
+		MaxExpiry          int64
+		Installed          map[string]bool
+		HardEventRetention time.Duration
+	}{p.bootstrap, prefs.RegistryVersion, cfg.PreferencePolicyGeneration, p.maxExpiry, p.installed, cfg.UnackedEventRetention})
 	if err != nil {
 		return nil, err
 	}
@@ -188,6 +190,24 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 	}
 	p.current.Store(&snapshot)
 	return p, nil
+}
+
+// bindRetentionGeneration runs only during hub construction, before workers or
+// requests can observe Preferences. Retention's persisted bootstrap generation
+// is part of the shared ETag/confirmation domain; returning to the same flags
+// cannot revive an unused preview from an earlier destructive transition.
+func (p *Preferences) bindRetentionGeneration(ctx context.Context, generation uint64) error {
+	if generation == 0 {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:retention:%d", p.digest, generation)))
+	p.digest = hex.EncodeToString(sum[:])
+	snapshot, err := p.LoadSnapshot(ctx, nil)
+	if err != nil {
+		return err
+	}
+	p.current.Store(&snapshot)
+	return nil
 }
 
 func preferenceStartupError(err error) error {

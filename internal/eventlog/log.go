@@ -42,7 +42,8 @@ var ErrInvalidCursor = errors.New("eventlog: invalid cursor")
 
 // ErrCursorPurged reports a cursor from another epoch or below retention
 // (PROTOCOL §2.3, HTTP 409). Oldest is the oldest valid cursor in the live
-// epoch; reading after it misses nothing still retained.
+// epoch for the requested owners. A merged stream may retain older entries
+// for a narrowed owner below its combined safe floor.
 type ErrCursorPurged struct{ Oldest Cursor }
 
 func (e ErrCursorPurged) Error() string {
@@ -173,8 +174,8 @@ func oldestValid(ctx context.Context, q execer) (int64, error) {
 	return seq, nil
 }
 
-// Oldest returns the oldest valid cursor: reading after it yields every
-// retained event.
+// Oldest reports the global oldest retained position for diagnostics only.
+// Availability decisions must use OldestFor with the stream's current owners.
 func (l *Log) Oldest(ctx context.Context) (Cursor, error) {
 	seq, err := oldestValid(ctx, l.DB)
 	if err != nil {
@@ -212,7 +213,7 @@ func (l *Log) Read(ctx context.Context, owners []string, after Cursor, limit int
 	// Pin metadata, event bytes and immutable bodies to one deferred read snapshot.
 	// Never use the writer transaction path or borrow another pool connection.
 	err := l.DB.ReadSnapshot(ctx, func(q *sql.Conn) error {
-		oldest, err := oldestValid(ctx, q)
+		oldest, err := floorFor(ctx, q, owners)
 		if err != nil {
 			return err
 		}
@@ -286,23 +287,27 @@ func placeholders(n int) string {
 // retention floor so the result is always a valid Read cursor.
 func (l *Log) Current(ctx context.Context, owners []string) (Cursor, error) {
 	var seq int64
-	if len(owners) > 0 {
+	err := l.DB.ReadSnapshot(ctx, func(q *sql.Conn) error {
+		floor, err := floorFor(ctx, q, owners)
+		if err != nil {
+			return err
+		}
+		seq = floor
+		if len(owners) == 0 {
+			return nil
+		}
 		args := make([]any, len(owners))
 		for i, o := range owners {
 			args[i] = o
 		}
-		err := l.DB.QueryRowContext(ctx,
-			`SELECT coalesce(max(seq), 0) FROM events WHERE owner IN (`+placeholders(len(owners))+`)`,
-			args...).Scan(&seq)
-		if err != nil {
-			return Cursor{}, fmt.Errorf("eventlog: current: %w", err)
+		var head int64
+		if err := q.QueryRowContext(ctx, `SELECT coalesce(max(seq),0) FROM events WHERE owner IN (`+placeholders(len(owners))+`)`, args...).Scan(&head); err != nil {
+			return err
 		}
-	}
-	oldest, err := oldestValid(ctx, l.DB)
-	if err != nil {
-		return Cursor{}, err
-	}
-	return Cursor{Epoch: l.epoch, Seq: max(seq, oldest)}, nil
+		seq = max(seq, head)
+		return nil
+	})
+	return Cursor{Epoch: l.epoch, Seq: seq}, err
 }
 
 // Notify wakes every Wait touching any of owners. Call it after the
@@ -381,7 +386,37 @@ func (l *Log) Ack(ctx context.Context, tx *sql.Tx, owner, scope string, c Cursor
 		return errors.New("eventlog: ack needs an owner and a scope")
 	}
 	if c.Epoch != l.epoch {
-		oldest, err := oldestValid(ctx, l.via(tx))
+		owners := []string{owner}
+		if scope != "*" {
+			owners = []string{scope}
+		} else if strings.HasPrefix(owner, "prn_") {
+			q := `SELECT peer_id FROM peers WHERE prn_id = ?`
+			var rows *sql.Rows
+			var err error
+			if tx != nil {
+				rows, err = tx.QueryContext(ctx, q, owner)
+			} else {
+				rows, err = l.DB.QueryContext(ctx, q, owner)
+			}
+			if err != nil {
+				return err
+			}
+			owners = nil
+			for rows.Next() {
+				var peer string
+				if err := rows.Scan(&peer); err != nil {
+					rows.Close()
+					return err
+				}
+				owners = append(owners, peer)
+			}
+			err = rows.Err()
+			rows.Close()
+			if err != nil {
+				return err
+			}
+		}
+		oldest, err := floorFor(ctx, l.via(tx), owners)
 		if err != nil {
 			return err
 		}
@@ -391,10 +426,10 @@ func (l *Log) Ack(ctx context.Context, tx *sql.Tx, owner, scope string, c Cursor
 		return fmt.Errorf("%w: negative seq %d", ErrInvalidCursor, c.Seq)
 	}
 	_, err := l.via(tx).ExecContext(ctx,
-		`INSERT INTO acks(owner, scope, seq, acked_at) VALUES (?, ?, ?, ?)
-		 ON CONFLICT(owner, scope) DO UPDATE SET seq = excluded.seq, acked_at = excluded.acked_at
-		 WHERE excluded.seq > acks.seq`,
-		owner, scope, c.Seq, time.Now().UTC().Format("2006-01-02T15:04:05.000Z"))
+		`INSERT INTO acks(owner, scope, seq, acked_at, epoch) VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(owner, scope) DO UPDATE SET seq = excluded.seq, acked_at = excluded.acked_at, epoch = excluded.epoch
+		 WHERE excluded.epoch != acks.epoch OR excluded.seq > acks.seq`,
+		owner, scope, c.Seq, time.Now().UTC().Format("2006-01-02T15:04:05.000Z"), c.Epoch)
 	if err != nil {
 		return fmt.Errorf("eventlog: ack: %w", err)
 	}
@@ -404,13 +439,13 @@ func (l *Log) Ack(ctx context.Context, tx *sql.Tx, owner, scope string, c Cursor
 // Acked returns the acked cursor of (owner, scope); ok is false when nothing
 // has been acked yet.
 func (l *Log) Acked(ctx context.Context, owner, scope string) (Cursor, bool, error) {
-	var seq int64
-	err := l.DB.QueryRowContext(ctx, `SELECT seq FROM acks WHERE owner = ? AND scope = ?`, owner, scope).Scan(&seq)
+	var seq, epoch int64
+	err := l.DB.QueryRowContext(ctx, `SELECT seq,epoch FROM acks WHERE owner = ? AND scope = ?`, owner, scope).Scan(&seq, &epoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Cursor{}, false, nil
 	}
 	if err != nil {
 		return Cursor{}, false, fmt.Errorf("eventlog: acked: %w", err)
 	}
-	return Cursor{Epoch: l.epoch, Seq: seq}, true, nil
+	return Cursor{Epoch: epoch, Seq: seq}, true, nil
 }

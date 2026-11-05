@@ -264,7 +264,8 @@ func TestPreferencesETagsAuthorityAndPolicy(t *testing.T) {
 	_, err := h.Preferences.PatchPreferences(context.Background(), prefsOperator, s.ETag, prefs.Patch{Set: map[string]prefs.Value{"agents.thread_budget": prefs.Int(10001)}})
 	prefsCode(t, err, prefs.CodeInvalidValue)
 	_, err = h.Preferences.PatchPreferences(context.Background(), prefsOperator, s.ETag, prefs.Patch{ApplyExisting: true, Set: p.Set})
-	prefsCode(t, err, prefs.CodeUnavailable)
+	// A verified DB adapter is now installed; non-retention work remains invalid.
+	prefsCode(t, err, prefs.CodeInvalidValue)
 	prefsAuditCount(t, h, 0)
 }
 func TestPreferencesInvalidPersistedStateFailsStartupWithoutExposure(t *testing.T) {

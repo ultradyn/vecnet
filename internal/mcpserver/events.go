@@ -415,6 +415,14 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 	if err != nil {
 		return nil, err
 	}
+	// A purge can commit between validation and replay. Report the newer
+	// owner floor using the existing truncated response, retaining exact outbox copies.
+	if replay.Seq > cur.Seq {
+		truncated = true
+		if err := s.Events.SetCursor(ctx, sub.ID, replay, false); err != nil {
+			return nil, err
+		}
+	}
 	// The live events.refresh_interval preference sets the advice; only this
 	// successful subscription replaces the previously returned deadline.
 	refresh, err := s.Events.SaveRefreshAdvice(ctx, sub.ID)

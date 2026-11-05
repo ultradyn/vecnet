@@ -179,11 +179,7 @@ func (w *Worker) Step(ctx context.Context) (int, error) {
 		})
 	}
 	wg.Wait()
-	oldest, err := w.Log.Oldest(ctx)
-	if err != nil {
-		return int(sent.Load()), err
-	}
-	if err := w.Store.pruneDone(ctx, now.Add(-doneRetention), oldest); err != nil {
+	if err := w.Store.pruneDone(ctx, now.Add(-doneRetention)); err != nil {
 		return int(sent.Load()), err
 	}
 	return int(sent.Load()), errors.Join(errs...)
