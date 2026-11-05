@@ -218,7 +218,12 @@ func EncodeDelivery(ctx context.Context, tx Transaction, msgID string, wire []by
 		// Deterministic identity; UNIQUE(msg_id,body_sha256) is authoritative. Full
 		// bytes are checked even when a hash matches, never trusting hash equality.
 		r.SnapshotID = "snap_" + digest([]byte(msgID+":"+r.BodySHA256))
-		_, err = tx.ExecContext(ctx, `INSERT INTO event_message_snapshots(snapshot_id,msg_id,body_sha256,body) VALUES (?,?,?,?) ON CONFLICT(msg_id,body_sha256) DO NOTHING`, r.SnapshotID, msgID, r.BodySHA256, string(base))
+		// Skip existing dedup keys before BEFORE INSERT guards run. An existing
+		// snapshot may have a different id; never let REPLACE discard that identity.
+		// The read below still checks its complete bytes, including hash collisions.
+		_, err = tx.ExecContext(ctx, `INSERT INTO event_message_snapshots(snapshot_id,msg_id,body_sha256,body)
+ SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM event_message_snapshots WHERE msg_id=? AND body_sha256=?)
+ ON CONFLICT(msg_id,body_sha256) DO NOTHING`, r.SnapshotID, msgID, r.BodySHA256, string(base), msgID, r.BodySHA256)
 		if err != nil {
 			return StoredPayload{}, storage("snapshot_insert")
 		}
@@ -298,6 +303,26 @@ func compose(r reference, base []byte) ([]byte, error) {
 // owned by the caller. Each lookup binds at most 200 keys, independent of fanout.
 // Callers must close event rows before calling and use one consistent snapshot.
 func HydrateBatch(ctx context.Context, q Queryer, rows []StoredPayload) ([][]byte, error) {
+	return hydrateBatch(ctx, q, rows, nil)
+}
+
+// workingBody owns the single scanned source buffer until composition finishes.
+// Its observer accounts only retained source bytes, excluding returned wires and
+// temporary parser/composition allocations. Keeping the buffer in this scope
+// makes release deterministic on success and every error path.
+type workingBody struct {
+	bytes   []byte
+	observe func(int)
+}
+
+func (b *workingBody) release() {
+	b.bytes = nil
+	if b.observe != nil {
+		b.observe(0)
+	}
+}
+
+func hydrateBatch(ctx context.Context, q Queryer, rows []StoredPayload, observe func(int)) ([][]byte, error) {
 	out := make([][]byte, len(rows))
 	refs := make([]reference, len(rows))
 	groups := [2]map[string][]int{make(map[string][]int), make(map[string][]int)}
@@ -346,28 +371,38 @@ func HydrateBatch(ctx context.Context, q Queryer, rows []StoredPayload) ([][]byt
 				defer result.Close()
 				seen := 0
 				for result.Next() {
-					var key, id string
-					var storedHash sql.NullString
-					var body []byte
-					if err := result.Scan(&key, &id, &storedHash, &body); err != nil {
-						return storage("body_scan")
+					err := func() error {
+						var key, id string
+						var storedHash sql.NullString
+						body := workingBody{observe: observe}
+						defer body.release()
+						if err := result.Scan(&key, &id, &storedHash, &body.bytes); err != nil {
+							return storage("body_scan")
+						}
+						if body.observe != nil {
+							body.observe(len(body.bytes))
+						}
+						hash := digest(body.bytes)
+						if kind == 1 && (!storedHash.Valid || storedHash.String != hash) {
+							return storage("snapshot_hash_mismatch")
+						}
+						for _, i := range groups[kind][key] {
+							r := refs[i]
+							if id != r.MsgID || hash != r.BodySHA256 {
+								return storage("body_hash_mismatch")
+							}
+							wire, err := compose(r, body.bytes)
+							if err != nil {
+								return err
+							}
+							out[i] = wire
+						}
+						return nil
+					}()
+					if err != nil {
+						return err
 					}
 					seen++
-					hash := digest(body)
-					if kind == 1 && (!storedHash.Valid || storedHash.String != hash) {
-						return storage("snapshot_hash_mismatch")
-					}
-					for _, i := range groups[kind][key] {
-						r := refs[i]
-						if id != r.MsgID || hash != r.BodySHA256 {
-							return storage("body_hash_mismatch")
-						}
-						wire, err := compose(r, body)
-						if err != nil {
-							return err
-						}
-						out[i] = wire
-					}
 				}
 				if result.Err() != nil {
 					return storage("body_rows")

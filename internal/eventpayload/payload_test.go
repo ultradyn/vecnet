@@ -113,6 +113,32 @@ func TestAttachmentPatchesAndSnapshotDedup(t *testing.T) {
 	}
 	roundtrip(t, db, missing, `{"message":{"message_id":"msg_missing","attachments":[],"unknown":true}}`)
 }
+
+func TestSnapshotDedupPreservesExistingIdentity(t *testing.T) {
+	db := openDB(t)
+	const body = `{"message_id":"msg_legacy","attachments":[],"text":"synthetic-original"}`
+	sum := sha256.Sum256([]byte(body))
+	if _, err := db.Exec(`INSERT INTO event_message_snapshots(snapshot_id,msg_id,body_sha256,body) VALUES ('snap_existing','msg_legacy',?,?)`, hex.EncodeToString(sum[:]), body); err != nil {
+		t.Fatal(err)
+	}
+	wire := `{"message":` + body + `}`
+	first := encode(t, db, "msg_legacy", wire)
+	if first.SnapshotID != "snap_existing" {
+		t.Fatal("dedup changed existing snapshot identity")
+	}
+	if _, err := db.Exec(`INSERT INTO events(owner,type,at,data,payload_format,msg_id,snapshot_id) VALUES ('peer_test','delivery','now',?,?,?,?)`, string(first.Data), first.Format, first.MsgID, first.SnapshotID); err != nil {
+		t.Fatal(err)
+	}
+	second := encode(t, db, "msg_legacy", wire)
+	if second.SnapshotID != first.SnapshotID {
+		t.Fatal("pinned snapshot not deduplicated")
+	}
+	if _, err := db.Exec(`INSERT OR REPLACE INTO event_message_snapshots SELECT * FROM event_message_snapshots`); err != nil {
+		t.Fatal("identical snapshot replacement rejected", err)
+	}
+	roundtrip(t, db, first, wire)
+	roundtrip(t, db, second, wire)
+}
 func TestNotConvertiblePreservesInline(t *testing.T) {
 	db := openDB(t)
 	for _, wire := range []string{`{`, `{"message":null}`, `{"message":{},"message":{}}`, `{"message":{"message_id":"msg_test","message_id":"msg_other"}}`, `{"message":{"message_id":"msg_other"}}`, `{"message":{"message_id":"msg_test","attachments":null}}`, `{"message":{"message_id":"msg_test","attachments":{}}}`, `{"message":{"message_id":"msg_test"},"mess\u0061ge":{}}`} {
@@ -129,6 +155,76 @@ func TestNotConvertiblePreservesInline(t *testing.T) {
 		})
 		if err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+func TestDuplicateCriticalKeysPreserveInline(t *testing.T) {
+	db := openDB(t)
+	const body = `{"message_id":"msg_test","attachments":[]}`
+	put(t, db, "msg_test", body, 1)
+	for _, tc := range []struct{ name, wire string }{
+		{"message_equal", `{"message":` + body + `,"message":` + body + `}`},
+		{"message_escaped", `{"message":` + body + `,"mess\u0061ge":` + body + `}`},
+		{"message_id_equal", `{"message":{"message_id":"msg_test","message_id":"msg_test","attachments":[]}}`},
+		{"message_id_escaped", `{"message":{"message_id":"msg_test","message_\u0069d":"msg_test","attachments":[]}}`},
+		{"attachments_equal", `{"message":{"message_id":"msg_test","attachments":[],"attachments":[]}}`},
+		{"attachments_escaped", `{"message":{"message_id":"msg_test","attachments":[],"attachm\u0065nts":[]}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := db.Tx(context.Background(), func(tx *sql.Tx) error {
+				p, err := eventpayload.EncodeDelivery(context.Background(), tx, "msg_test", []byte(tc.wire))
+				var nc *eventpayload.NotConvertibleError
+				if !errors.Is(err, eventpayload.ErrNotConvertible) || !errors.As(err, &nc) || nc.Reason != "duplicate_key" {
+					t.Fatal("duplicate critical key did not yield duplicate_key")
+				}
+				if p.Format != eventpayload.Inline || !bytes.Equal(p.Data, []byte(tc.wire)) || p.MsgID != "" || p.SnapshotID != "" {
+					t.Fatal("duplicate fallback changed inline bytes or identity")
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestDuplicateCompleteReferenceRejectedWithoutPartialPage(t *testing.T) {
+	db := openDB(t)
+	const body = `{"message_id":"msg_test","attachments":[]}`
+	put(t, db, "msg_test", body, 1)
+	wire := `{"message":` + body + `}`
+	p := encode(t, db, "msg_test", wire)
+	roundtrip(t, db, p, wire)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(p.Data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range fields {
+		for _, escaped := range []bool{false, true} {
+			name := key
+			spelling := key
+			if escaped {
+				name += "_escaped"
+				spelling = fmt.Sprintf(`\u%04x%s`, key[0], key[1:])
+			}
+			t.Run(name, func(t *testing.T) {
+				duplicate := p
+				duplicate.Data = []byte(string(p.Data[:len(p.Data)-1]) + `,"` + spelling + `":` + string(value) + `}`)
+				err := db.ReadSnapshot(context.Background(), func(c *sql.Conn) error {
+					q := &countingQuery{q: c}
+					got, err := eventpayload.HydrateBatch(context.Background(), q, []eventpayload.StoredPayload{p, duplicate})
+					var se *eventpayload.StorageError
+					if !errors.As(err, &se) || se.Reason != "reference_invalid" || got != nil || q.calls != 0 {
+						t.Fatal("complete duplicate reference accepted or returned a partial page")
+					}
+					return nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			})
 		}
 	}
 }
@@ -187,9 +283,13 @@ func TestMalformedMissingAndCorruptBodiesNoPartialPage(t *testing.T) {
 type countingQuery struct {
 	q              *sql.Conn
 	calls, maxKeys int
+	beforeQuery    func()
 }
 
 func (q *countingQuery) QueryContext(ctx context.Context, s string, args ...any) (*sql.Rows, error) {
+	if q.beforeQuery != nil {
+		q.beforeQuery()
+	}
 	q.calls++
 	if len(args) > q.maxKeys {
 		q.maxKeys = len(args)
@@ -201,10 +301,12 @@ func TestBatchQueriesInputOrderAndBoundedBodyCache(t *testing.T) {
 	const count = 405
 	refs := make([]eventpayload.StoredPayload, 0, count*2)
 	wires := make([]string, 0, count*2)
+	totalBodyBytes := 0
 	err := db.Tx(context.Background(), func(tx *sql.Tx) error {
 		for i := 0; i < count; i++ {
 			id := fmt.Sprintf("msg_%d", i)
 			body := fmt.Sprintf(`{"message_id":%q,"attachments":[],"text":%q}`, id, strings.Repeat("x", 24000))
+			totalBodyBytes += len(body)
 			put(t, tx, id, body, i+1)
 			wire := `{"message":` + body + `}`
 			p, err := eventpayload.EncodeDelivery(context.Background(), tx, id, []byte(wire))
@@ -226,22 +328,96 @@ func TestBatchQueriesInputOrderAndBoundedBodyCache(t *testing.T) {
 	}
 	refs = append(refs, refs...)
 	wires = append(wires, wires...)
+	const bodyCeiling = 8 << 20
+	if totalBodyBytes <= bodyCeiling {
+		t.Fatal("fixture must exceed the working-body ceiling")
+	}
 	err = db.ReadSnapshot(context.Background(), func(c *sql.Conn) error {
-		q := &countingQuery{q: c}
-		got, err := eventpayload.HydrateBatch(context.Background(), q, refs)
-		if err != nil {
-			return err
-		}
-		if q.calls != 3 || q.maxKeys > 200 {
-			t.Fatalf("queries=%d max keys=%d", q.calls, q.maxKeys)
-		}
-		if len(got) != len(wires) {
-			t.Fatal("result size")
-		}
-		for i := range got {
-			if string(got[i]) != wires[i] {
-				t.Fatal("batch order or bytes changed")
+		current, peak, acquisitions, releases, acquiredBytes := 0, 0, 0, 0, 0
+		observe := func(retained int) {
+			if retained > 0 {
+				if current != 0 {
+					t.Fatal("previous streaming body was not released")
+				}
+				acquisitions++
+				acquiredBytes += retained
+			} else {
+				releases++
 			}
+			current = retained
+			peak = max(peak, current)
+			if current > bodyCeiling {
+				t.Fatal("working-body retention exceeded 8 MiB")
+			}
+		}
+		// Keep the observer across calls. Outputs intentionally remain live while
+		// checking that only the working bodies are counted and released.
+		var previous [][]byte
+		for call := 1; call <= 2; call++ {
+			q := &countingQuery{q: c, beforeQuery: func() {
+				if current != 0 {
+					t.Fatal("working bodies retained across query chunks")
+				}
+			}}
+			got, err := eventpayload.HydrateBatchWithBodyObserverForTest(context.Background(), q, refs, observe)
+			if err != nil {
+				return err
+			}
+			if q.calls != 3 || q.maxKeys > 200 {
+				t.Fatalf("queries=%d max keys=%d", q.calls, q.maxKeys)
+			}
+			if current != 0 || peak == 0 || acquisitions != call*count || releases != acquisitions || acquiredBytes != call*totalBodyBytes {
+				t.Fatalf("body retention current=%d peak=%d acquired=%d released=%d bytes=%d", current, peak, acquisitions, releases, acquiredBytes)
+			}
+			if len(got) != len(wires) {
+				t.Fatal("result size")
+			}
+			for i := range got {
+				if string(got[i]) != wires[i] || (previous != nil && !bytes.Equal(previous[i], got[i])) {
+					t.Fatal("batch order or bytes changed")
+				}
+			}
+			previous = got
+		}
+		t.Logf("unique_body_bytes=%d peak_retained_body_bytes=%d acquisitions=%d releases=%d", totalBodyBytes, peak, acquisitions, releases)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkingBodyReleasedOnHydrationError(t *testing.T) {
+	db := openDB(t)
+	const body = `{"message_id":"msg_test","attachments":[]}`
+	put(t, db, "msg_test", body, 1)
+	wire := `{"message":` + body + `}`
+	p := encode(t, db, "msg_test", wire)
+	corrupt := p
+	var fields map[string]any
+	if err := json.Unmarshal(p.Data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["body_sha256"] = strings.Repeat("0", 64)
+	corrupt.Data, _ = json.Marshal(fields)
+	err := db.ReadSnapshot(context.Background(), func(q *sql.Conn) error {
+		current, acquisitions, releases := 0, 0, 0
+		observe := func(retained int) {
+			current = retained
+			if retained > 0 {
+				acquisitions++
+			} else {
+				releases++
+			}
+		}
+		got, err := eventpayload.HydrateBatchWithBodyObserverForTest(context.Background(), q, []eventpayload.StoredPayload{p, corrupt}, observe)
+		var se *eventpayload.StorageError
+		if !errors.As(err, &se) || se.Reason != "body_hash_mismatch" || got != nil || current != 0 || acquisitions != 1 || releases != 1 {
+			t.Fatal("error returned partial output or retained working body")
+		}
+		got, err = eventpayload.HydrateBatchWithBodyObserverForTest(context.Background(), q, []eventpayload.StoredPayload{p}, observe)
+		if err != nil || len(got) != 1 || string(got[0]) != wire || current != 0 || acquisitions != 2 || releases != 2 {
+			t.Fatal("working body leaked across error and subsequent call")
 		}
 		return nil
 	})
