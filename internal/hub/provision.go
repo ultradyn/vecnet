@@ -155,7 +155,11 @@ func (h *Hub) createPeerTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req C
 	if result != nil {
 		return result, nil
 	}
-	limits, err := principalLimitsTx(ctx, tx, c.PrincipalID)
+	snapshot, err := h.Preferences.LoadSnapshot(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	limits, err := principalLimitsTx(ctx, tx, c.PrincipalID, preferenceNumber(snapshot, "provisioning.creates_per_hour"))
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +184,7 @@ func (h *Hub) createPeerTx(ctx context.Context, tx *sql.Tx, c auth.Caller, req C
 	}
 	peer := ids.New(ids.Peer)
 	at := envelope.FormatTime(now)
-	if err := h.insertPeer(ctx, tx, peer, c.PrincipalID, req.Name, req.Kind, at); err != nil {
+	if err := h.insertPeer(ctx, tx, peer, c.PrincipalID, req.Name, req.Kind, at, snapshot); err != nil {
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE peers SET created_by = ? WHERE peer_id = ?`, c.PrincipalID, peer); err != nil {
@@ -239,8 +243,8 @@ func (h *Hub) peerCreateKeyLookup(ctx context.Context, tx *sql.Tx, prn, key, has
 	return &result, nil
 }
 
-func principalLimitsTx(ctx context.Context, tx *sql.Tx, prn string) (PrincipalLimits, error) {
-	l := PrincipalLimits{CreatesPerHour: DefaultCreatesPerHour, Kinds: []string{}}
+func principalLimitsTx(ctx context.Context, tx *sql.Tx, prn string, createsPerHour int) (PrincipalLimits, error) {
+	l := PrincipalLimits{CreatesPerHour: createsPerHour, Kinds: []string{}}
 	var kinds string
 	err := tx.QueryRowContext(ctx, `SELECT max_peers,creates_per_hour,kinds FROM principal_limits WHERE prn_id = ?`, prn).Scan(&l.MaxPeers, &l.CreatesPerHour, &kinds)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -302,7 +306,11 @@ func (h *Hub) SetOwnPeerDisabled(ctx context.Context, c auth.Caller, peerID stri
 			return nil
 		}
 		if !disabled {
-			l, err := principalLimitsTx(ctx, tx, c.PrincipalID)
+			snapshot, err := h.Preferences.LoadSnapshot(ctx, tx)
+			if err != nil {
+				return err
+			}
+			l, err := principalLimitsTx(ctx, tx, c.PrincipalID, preferenceNumber(snapshot, "provisioning.creates_per_hour"))
 			if err != nil {
 				return err
 			}
@@ -436,6 +444,10 @@ func (h *Hub) SetPrincipalDefaultScopes(ctx context.Context, prnID string, allow
 func (h *Hub) Principals(ctx context.Context) ([]PrincipalInfo, error) {
 	out := []PrincipalInfo{}
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		snapshot, err := h.Preferences.LoadSnapshot(ctx, tx)
+		if err != nil {
+			return err
+		}
 		rows, err := tx.QueryContext(ctx, `SELECT p.prn_id,p.name,
    (SELECT count(*) FROM peers x WHERE x.prn_id=p.prn_id AND x.created_by=p.prn_id AND x.disabled=0),
    (SELECT count(*) FROM peers x WHERE x.prn_id=p.prn_id AND x.created_by=p.prn_id AND x.disabled=1),
@@ -461,7 +473,7 @@ func (h *Hub) Principals(ctx context.Context) ([]PrincipalInfo, error) {
 		}
 		for i := range out {
 			p := &out[i]
-			p.Limits, err = principalLimitsTx(ctx, tx, p.PrincipalID)
+			p.Limits, err = principalLimitsTx(ctx, tx, p.PrincipalID, preferenceNumber(snapshot, "provisioning.creates_per_hour"))
 			if err != nil {
 				return err
 			}

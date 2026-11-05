@@ -32,7 +32,7 @@ type Config struct {
 	// PreferenceBootstrap captures explicit nonsecret flag/env provenance.
 	PreferenceBootstrap        map[string]prefs.Effective
 	PreferencePolicyGeneration string // immutable deployment policy identity
-	CreatesPerHour             int    // provisioning fallback; Task 3 installs its consumer
+	CreatesPerHour             int    // bootstrap provisioning fallback
 
 	PublicURL       string        // externally visible origin, no trailing slash
 	DataDir         string        // holds hub.db and blobs/
@@ -393,16 +393,21 @@ func insertPrincipal(ctx context.Context, tx *sql.Tx, prn, name, now string) err
 	return nil
 }
 
-// insertPeer inserts a peer row whose rate limits are Cfg.SendsPerMin and
-// Cfg.ThreadsPerHour (the column defaults, 60 and 20, when those are unset).
-func (h *Hub) insertPeer(ctx context.Context, tx *sql.Tx, peer, prn, name, kind, now string) error {
-	perMin, perHour := h.Cfg.SendsPerMin, h.Cfg.ThreadsPerHour
-	if perMin <= 0 {
-		perMin = 60
+// insertPeer copies the current rate defaults into a new peer. Existing peers
+// retain their own policy. Provisioning passes its operation's snapshot.
+func (h *Hub) insertPeer(ctx context.Context, tx *sql.Tx, peer, prn, name, kind, now string, snapshots ...prefs.Snapshot) error {
+	var snapshot prefs.Snapshot
+	if len(snapshots) > 0 {
+		snapshot = snapshots[0]
+	} else {
+		var err error
+		snapshot, err = h.Preferences.LoadSnapshot(ctx, tx)
+		if err != nil {
+			return err
+		}
 	}
-	if perHour <= 0 {
-		perHour = 20
-	}
+	perMin := preferenceNumber(snapshot, "rates.sends_per_minute")
+	perHour := preferenceNumber(snapshot, "rates.threads_per_hour")
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO peers(peer_id, prn_id, name, kind, enrolled_at, sends_per_min, threads_per_hour)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
