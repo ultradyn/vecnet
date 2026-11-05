@@ -483,12 +483,14 @@ func (st *Store) SetCursor(ctx context.Context, id string, cur eventlog.Cursor, 
 			id, cur.Seq, clientHas); err != nil {
 			return fmt.Errorf("events: rewind outbox: %w", err)
 		}
-		// Exhaustion is retryable on explicit rewind. Reuse the durable body:
+		// Exhaustion is retryable on explicit resubscription. Parked rows must
+		// rearm even behind the reported cursor; their delivery gate still applies.
+		// Reuse the durable body:
 		// a legacy callback may differ from the current hydrated log event.
 		// Older erased bodies cannot be reconstructed with proof of equality.
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE event_outbox SET done_at=NULL, terminal=NULL, attempts=0, next_attempt_at=NULL
-			 WHERE sub_id=? AND seq>? AND terminal='exhausted' AND body!=''`, id, cur.Seq); err != nil {
+			 WHERE sub_id=? AND (seq>? OR parked=1) AND terminal='exhausted' AND body!=''`, id, cur.Seq); err != nil {
 			return fmt.Errorf("events: rearm outbox: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
