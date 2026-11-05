@@ -368,3 +368,56 @@ func TestPreferencesPreviewTokenDoesNotGrantServiceAuthority(t *testing.T) {
 	}
 	prefsAuditCount(t, h, 0)
 }
+
+func TestPreferencesConfirmedOrdinaryNoopDoesNotActivate(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(map[bool]string{false: "policy", true: "legacy_hook"}[legacy], func(t *testing.T) {
+			h, _ := preferencesHub(t, hub.DefaultConfig())
+			a := &syntheticPreferencePolicy{}
+			p := installedPreviewPrefs(t, h, a, "retention.history")
+			s := p.Current()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			updates := p.Subscribe(ctx)
+			patch := prefs.Patch{Set: map[string]prefs.Value{"retention.history": prefs.Duration(0)}}
+			preview := previewPrefs(t, p, prefsOperator, s, patch)
+			patch.Confirm = []string{preview.ConfirmToken}
+			hookCalled := false
+			if legacy {
+				p.AuthorizePatch = func(context.Context, *sql.Tx, auth.Caller, prefs.Snapshot, prefs.Snapshot, prefs.Patch) ([]string, error) {
+					hookCalled = true
+					return nil, nil
+				}
+			}
+			for range 2 {
+				next, err := p.PatchPreferences(ctx, prefsOperator, s.ETag, patch)
+				if err != nil {
+					t.Fatal("confirmed no-op failed")
+				}
+				var activations int
+				if err := h.DB.QueryRow(`SELECT count(*) FROM hub_preference_activations`).Scan(&activations); err != nil {
+					t.Fatal(err)
+				}
+				if activations != 0 || hookCalled {
+					t.Fatal("confirmed ordinary no-op invoked persistent activation")
+				}
+				persisted, err := p.LoadSnapshot(ctx, nil)
+				if err != nil || next.Revision != s.Revision || next.ETag != s.ETag || persisted.ETag != s.ETag || p.Current().ETag != s.ETag {
+					t.Fatal("confirmed no-op changed snapshot")
+				}
+				prefsAuditCount(t, h, 0)
+				select {
+				case <-updates:
+					t.Fatal("confirmed no-op notified subscriber")
+				default:
+				}
+			}
+			patch.Confirm = []string{"invalid-confirmation"}
+			_, err := p.PatchPreferences(ctx, prefsOperator, s.ETag, patch)
+			prefsCode(t, err, prefs.CodeConfirmationStale)
+			if hookCalled {
+				t.Fatal("invalid no-op confirmation invoked authorization hook")
+			}
+		})
+	}
+}

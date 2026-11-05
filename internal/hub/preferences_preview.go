@@ -237,43 +237,45 @@ func (p *Preferences) previewConfirmation(ctx context.Context, caller auth.Calle
 	}
 	return prefs.Preview{BaseRevision: before.Revision, Risks: risks, Impact: impact, ConfirmToken: token, ExpiresAt: a.ExpiresAt}, nil
 }
-func (p *Preferences) authorizeConfirmation(ctx context.Context, tx *sql.Tx, caller auth.Caller, before, after prefs.Snapshot, patch prefs.Patch) ([]string, error) {
+
+// Validating an approval is read-only; persistent activation is a separate
+// step reserved for preference changes and explicit apply_existing approvals.
+type preferenceConfirmation struct {
+	codes  []string
+	impact prefs.Impact
+	digest string
+}
+
+func (p *Preferences) validateConfirmation(ctx context.Context, caller auth.Caller, before, after prefs.Snapshot, patch prefs.Patch) (preferenceConfirmation, error) {
 	if err := p.checkPreviewPolicy(ctx, before, after, patch); err != nil {
-		return nil, err
+		return preferenceConfirmation{}, err
 	}
 	risks := confirmationRisks(before, after, patch)
 	impact := prefs.Impact{}
 	approvalDigest := ""
 	if len(patch.Confirm) == 0 && len(risks) > 0 {
-		return nil, preferenceError(prefs.CodeConfirmationRequired)
+		return preferenceConfirmation{}, preferenceError(prefs.CodeConfirmationRequired)
 	}
 	if len(patch.Confirm) > 0 {
 		if len(patch.Confirm) != 1 {
-			return nil, preferenceError(prefs.CodeConfirmationStale)
+			return preferenceConfirmation{}, preferenceError(prefs.CodeConfirmationStale)
 		}
 		a, err := p.openApproval(patch.Confirm[0])
 		if err != nil {
-			return nil, err
+			return preferenceConfirmation{}, err
 		}
 		digest, err := canonicalPreferencePatch(patch)
 		if err != nil {
-			return nil, err
+			return preferenceConfirmation{}, err
 		}
 		actual, _ := json.Marshal(risks)
 		approved, _ := json.Marshal(a.Risks)
 		if a.Caller != caller || a.PatchDigest != digest || a.ETag != before.ETag || a.Generation != p.digest || !bytes.Equal(actual, approved) || !validPreviewImpact(a.Impact, patch.ApplyExisting, p.now()) {
-			return nil, preferenceError(prefs.CodeConfirmationStale)
+			return preferenceConfirmation{}, preferenceError(prefs.CodeConfirmationStale)
 		}
 		impact = a.Impact
 		sum := sha256.Sum256([]byte(patch.Confirm[0]))
 		approvalDigest = hex.EncodeToString(sum[:])
-	}
-	if p.Policy != nil {
-		proposal := patch
-		proposal.Confirm = nil
-		if err := p.Policy.Activate(ctx, tx, before, after, proposal, impact, approvalDigest); err != nil {
-			return nil, sanitizePreferenceError(err)
-		}
 	}
 	codes := []string{}
 	for _, risk := range risks {
@@ -281,5 +283,20 @@ func (p *Preferences) authorizeConfirmation(ctx context.Context, tx *sql.Tx, cal
 			codes = append(codes, risk.Code)
 		}
 	}
-	return codes, nil
+	return preferenceConfirmation{codes: codes, impact: impact, digest: approvalDigest}, nil
+}
+
+func (p *Preferences) authorizeConfirmation(ctx context.Context, tx *sql.Tx, caller auth.Caller, before, after prefs.Snapshot, patch prefs.Patch) ([]string, error) {
+	approval, err := p.validateConfirmation(ctx, caller, before, after, patch)
+	if err != nil {
+		return nil, err
+	}
+	if p.Policy != nil {
+		proposal := patch
+		proposal.Confirm = nil
+		if err := p.Policy.Activate(ctx, tx, before, after, proposal, approval.impact, approval.digest); err != nil {
+			return nil, sanitizePreferenceError(err)
+		}
+	}
+	return approval.codes, nil
 }
