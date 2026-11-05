@@ -12,6 +12,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/prefs"
 )
 
 // Presence staleness defaults (PROTOCOL §8): a report older than its
@@ -54,7 +55,14 @@ func (h *Hub) EffectivePresence(p PresenceRow, now time.Time) string {
 	// called inside transactions. Use the immutable committed publication rather
 	// than opening a nested DB read. Transactional operations pass their snapshot
 	// directly to effectivePresence.
-	return effectivePresence(h.Preferences.Current(), p, now)
+	return EffectivePresenceSnapshot(h.Preferences.Current(), p, now)
+}
+
+// EffectivePresenceSnapshot projects a row using the operation's captured
+// preference snapshot. Batch readers load once before iterating; callers in a
+// transaction pass their transaction's snapshot without opening a nested read.
+func EffectivePresenceSnapshot(s prefs.Snapshot, p PresenceRow, now time.Time) string {
+	return effectivePresence(s, p, now)
 }
 
 // SetPresence stores a presence report for the caller's peer (asPeer names

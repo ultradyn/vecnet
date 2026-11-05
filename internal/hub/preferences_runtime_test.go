@@ -303,6 +303,89 @@ func TestPreferencesRuntimeUnchangedRefreshAdviceSurvivesWorkerStart(t *testing.
 	}
 }
 
+// Both reset and a delayed consumer application used to lose their scheduling
+// anchor on restart, moving an already applied deadline forward each time.
+func TestPreferencesRuntimeAppliedRefreshSurvivesRestart(t *testing.T) {
+	for _, reset := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reset=%t", reset), func(t *testing.T) {
+			env := testhub.Start(t)
+			sub := runtimeSubscription(t, env)
+			env.Now.Advance(5 * time.Minute)
+			runtimePatch(t, env.Hub, map[string]prefs.Value{"events.refresh_interval": prefs.Duration(600)})
+			if reset {
+				if _, err := env.Events.Step(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				env.Now.Advance(5 * time.Minute)
+				patchPrefs(t, env.Hub, readPrefs(t, env.Hub), prefs.Patch{Reset: []string{"events.refresh_interval"}})
+			} else {
+				// The worker observes the committed change seven minutes late.
+				env.Now.Advance(7 * time.Minute)
+			}
+			if _, err := env.Events.Step(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			applied, err := env.Events.Store.Get(context.Background(), sub.ID)
+			if err != nil || applied.RefreshBefore == nil {
+				t.Fatal("missing applied advice", err)
+			}
+			for i := 0; i < 2; i++ {
+				env.Now.Advance(5 * time.Minute)
+				// Rebuild the hub and worker over the same durable store, so no
+				// publication or process-local scheduling cache survives.
+				h, err := hub.New(env.Hub.DB, env.Hub.Cfg, env.Now.Now)
+				if err != nil {
+					t.Fatal(err)
+				}
+				restarted := &events.Worker{Hub: h}
+				if _, err := restarted.Step(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				got, err := restarted.Store.Get(context.Background(), sub.ID)
+				if err != nil || got.RefreshBefore == nil || !got.RefreshBefore.Equal(*applied.RefreshBefore) {
+					t.Fatalf("restart %d slid applied advice from %v to %v: %v", i+1, applied.RefreshBefore, got.RefreshBefore, err)
+				}
+			}
+		})
+	}
+}
+
+func TestPreferencesRuntimeRefreshCheckpointIsAtomic(t *testing.T) {
+	env := testhub.Start(t)
+	sub := runtimeSubscription(t, env)
+	if _, err := env.Events.Step(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	env.Now.Advance(5 * time.Minute)
+	runtimePatch(t, env.Hub, map[string]prefs.Value{"events.refresh_interval": prefs.Duration(600)})
+	// Abort the checkpoint write after deadlines have been updated. A failed
+	// application must roll back both, and a new worker must retry the change.
+	if _, err := env.Hub.DB.Exec(`CREATE TRIGGER fail_refresh_checkpoint BEFORE INSERT ON meta
+		WHEN NEW.key = 'events_refresh_schedule_policy'
+		BEGIN SELECT RAISE(ABORT, 'fixture checkpoint failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.Events.Step(context.Background()); err == nil {
+		t.Fatal("checkpoint failure did not abort refresh application")
+	}
+	got, err := env.Events.Store.Get(context.Background(), sub.ID)
+	if err != nil || got.RefreshBefore == nil || !got.RefreshBefore.Equal(*sub.RefreshBefore) {
+		t.Fatal("checkpoint failure committed a partial schedule", err)
+	}
+	if _, err := env.Hub.DB.Exec(`DROP TRIGGER fail_refresh_checkpoint`); err != nil {
+		t.Fatal(err)
+	}
+	env.Now.Advance(5 * time.Minute)
+	restarted := &events.Worker{Hub: env.Hub}
+	if _, err := restarted.Step(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, err = restarted.Store.Get(context.Background(), sub.ID)
+	if err != nil || got.RefreshBefore == nil || got.RefreshBefore.Before(env.Now.Now().Add(10*time.Minute)) || got.RefreshBefore.After(env.Now.Now().Add(11*time.Minute)) {
+		t.Fatal("new worker did not recover the rolled-back schedule", err)
+	}
+}
+
 func TestPreferencesRuntimeWakeDoesNotDispatchOrResetBackoff(t *testing.T) {
 	env := testhub.Start(t)
 	peer, _ := env.NewPeer("session", "subscriber")

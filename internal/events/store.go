@@ -7,6 +7,7 @@ package events
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -110,11 +111,9 @@ type Store struct {
 	callbackOnce   sync.Once
 	callbackLocks  [64]chan struct{}
 
-	// Only a scheduling cache; preferences and deadlines remain in their one
-	// existing stores. Protect against overlapping Step and publication wakes.
-	refreshMu       sync.Mutex
-	refreshLoaded   bool
-	refreshInterval time.Duration
+	// Protect against overlapping Step and publication wakes. The applied
+	// scheduling policy is checkpointed with its deadlines in the database.
+	refreshMu sync.Mutex
 }
 
 // NewStore returns the Store of hub h.
@@ -993,8 +992,7 @@ func (st *Store) refreshSchedules(ctx context.Context) error {
 	}
 	st.refreshMu.Lock()
 	defer st.refreshMu.Unlock()
-	var interval time.Duration
-	err := st.DB.Tx(ctx, func(tx *sql.Tx) error {
+	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
 		snapshot, err := st.hub.Preferences.LoadSnapshot(ctx, tx)
 		if err != nil {
 			return err
@@ -1004,8 +1002,20 @@ func (st *Store) refreshSchedules(ctx context.Context) error {
 			return err
 		}
 		n, _ := e.Value.Int64()
-		interval = time.Duration(n) * time.Second
-		if st.refreshLoaded && interval == st.refreshInterval {
+		interval := time.Duration(n) * time.Second
+		// This is a consumer checkpoint, not a preference value or source:
+		// policy always comes from LoadSnapshot. Commit the fingerprint with
+		// every affected deadline so Reset, delayed application and process
+		// restarts cannot apply the same effective cadence more than once.
+		const checkpointKey = "events_refresh_schedule_policy"
+		fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("refresh-v1:%d", n))))
+		var applied string
+		err = tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, checkpointKey).Scan(&applied)
+		missing := errors.Is(err, sql.ErrNoRows)
+		if err != nil && !missing {
+			return err
+		}
+		if !missing && applied == fingerprint {
 			return nil
 		}
 		now := st.now()
@@ -1036,11 +1046,10 @@ func (st *Store) refreshSchedules(ctx context.Context) error {
 			_, _ = hash.Write([]byte(id))
 			spread := min(30*time.Second, interval/10)
 			jitter := time.Duration(hash.Sum64() % uint64(spread))
-			if !st.refreshLoaded && previous != nil {
-				// Keep advice that already matches the current policy on a
-				// worker restart. The subscription's last refresh and the
-				// preference's committed timestamp are existing durable anchors;
-				// no second policy store or migration is needed.
+			if missing && previous != nil {
+				// Bootstrap the checkpoint without sliding existing matching
+				// subscribe advice. Once a policy is applied, the durable
+				// checkpoint above replaces this legacy deadline inference.
 				anchor, err := envelope.ParseTime(anchorRaw)
 				if err != nil {
 					rows.Close()
@@ -1081,10 +1090,8 @@ func (st *Store) refreshSchedules(ctx context.Context) error {
 				return err
 			}
 		}
-		return nil
+		_, err = tx.ExecContext(ctx, `INSERT INTO meta(key, value) VALUES (?, ?)
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`, checkpointKey, fingerprint)
+		return err
 	})
-	if err == nil {
-		st.refreshLoaded, st.refreshInterval = true, interval
-	}
-	return err
 }
