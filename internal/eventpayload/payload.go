@@ -215,6 +215,9 @@ func EncodeDelivery(ctx context.Context, tx Transaction, msgID string, wire []by
 		return fallback("invalid_shape")
 	}
 	if !bytes.Equal(base, canonical) {
+		if !supportedSnapshotMessage(embedded) {
+			return fallback("invalid_shape")
+		}
 		// Deterministic identity; UNIQUE(msg_id,body_sha256) is authoritative. Full
 		// bytes are checked even when a hash matches, never trusting hash equality.
 		r.SnapshotID = "snap_" + digest([]byte(msgID+":"+r.BodySHA256))

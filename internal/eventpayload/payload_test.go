@@ -82,11 +82,11 @@ func TestExactCompositionNestedEscapedAndLegacyBytes(t *testing.T) {
 }
 func TestAttachmentPatchesAndSnapshotDedup(t *testing.T) {
 	db := openDB(t)
-	canonical := `{"message_id":"msg_test","attachments":[{"sha256":"abc"}],"text":"original"}`
-	put(t, db, "msg_test", canonical, 1)
-	embedded := `{"message_id":"msg_test","attachments":[ {"sha256":"abc","url":"https://synthetic.invalid/?token=frozen"} ],"text":"original"}`
+	canonical := `{"message_id":"msg_00000000000000000000000001","attachments":[{"sha256":"abc"}],"text":"original"}`
+	put(t, db, "msg_00000000000000000000000001", canonical, 1)
+	embedded := `{"message_id":"msg_00000000000000000000000001","attachments":[ {"sha256":"abc","url":"https://synthetic.invalid/?token=frozen"} ],"text":"original"}`
 	wire := `{"delivery_id":"dly_test","message":` + embedded + `,"thread":{"title":"before rename"}}`
-	p := encode(t, db, "msg_test", wire)
+	p := encode(t, db, "msg_00000000000000000000000001", wire)
 	if p.SnapshotID != "" {
 		t.Fatal("attachment override created snapshot")
 	}
@@ -95,10 +95,10 @@ func TestAttachmentPatchesAndSnapshotDedup(t *testing.T) {
 		t.Fatal("missing frozen attachment override")
 	}
 	// migration 0018 and legacy formatting may differ from today's Message.
-	legacy := `{ "message_id":"msg_test", "attachments":[], "sender_info":{"name":"before"}, "unknown":2.00 }`
+	legacy := `{ "unknown":2.00, "sender_info":{"name":"before","kind":"hub"}, ` + snapshotMessage(snapshotMessageID)[1:]
 	legacyWire := `{"message":` + legacy + `}`
-	first := encode(t, db, "msg_test", legacyWire)
-	second := encode(t, db, "msg_test", legacyWire)
+	first := encode(t, db, snapshotMessageID, legacyWire)
+	second := encode(t, db, snapshotMessageID, legacyWire)
 	if first.SnapshotID == "" || first.SnapshotID != second.SnapshotID {
 		t.Fatal("snapshot not deduplicated")
 	}
@@ -107,29 +107,30 @@ func TestAttachmentPatchesAndSnapshotDedup(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM event_message_snapshots`).Scan(&n); err != nil || n != 1 {
 		t.Fatal("snapshot count", n, err)
 	}
-	missing := encode(t, db, "msg_missing", `{"message":{"message_id":"msg_missing","attachments":[],"unknown":true}}`)
+	missingWire := `{"message":` + snapshotMessage("msg_00000000000000000000000002") + `}`
+	missing := encode(t, db, "msg_00000000000000000000000002", missingWire)
 	if missing.SnapshotID == "" {
 		t.Fatal("missing canonical body requires snapshot")
 	}
-	roundtrip(t, db, missing, `{"message":{"message_id":"msg_missing","attachments":[],"unknown":true}}`)
+	roundtrip(t, db, missing, missingWire)
 }
 
 func TestSnapshotDedupPreservesExistingIdentity(t *testing.T) {
 	db := openDB(t)
-	const body = `{"message_id":"msg_legacy","attachments":[],"text":"synthetic-original"}`
+	body := snapshotMessage(snapshotMessageID)
 	sum := sha256.Sum256([]byte(body))
-	if _, err := db.Exec(`INSERT INTO event_message_snapshots(snapshot_id,msg_id,body_sha256,body) VALUES ('snap_existing','msg_legacy',?,?)`, hex.EncodeToString(sum[:]), body); err != nil {
+	if _, err := db.Exec(`INSERT INTO event_message_snapshots(snapshot_id,msg_id,body_sha256,body) VALUES ('snap_existing',?,?,?)`, snapshotMessageID, hex.EncodeToString(sum[:]), body); err != nil {
 		t.Fatal(err)
 	}
 	wire := `{"message":` + body + `}`
-	first := encode(t, db, "msg_legacy", wire)
+	first := encode(t, db, snapshotMessageID, wire)
 	if first.SnapshotID != "snap_existing" {
 		t.Fatal("dedup changed existing snapshot identity")
 	}
 	if _, err := db.Exec(`INSERT INTO events(owner,type,at,data,payload_format,msg_id,snapshot_id) VALUES ('peer_test','delivery','now',?,?,?,?)`, string(first.Data), first.Format, first.MsgID, first.SnapshotID); err != nil {
 		t.Fatal(err)
 	}
-	second := encode(t, db, "msg_legacy", wire)
+	second := encode(t, db, snapshotMessageID, wire)
 	if second.SnapshotID != first.SnapshotID {
 		t.Fatal("pinned snapshot not deduplicated")
 	}
@@ -482,14 +483,14 @@ func TestPassedWriterTransactionAndFourConnectionPool(t *testing.T) {
 
 func TestSnapshotHashMatchVerifiesFullBytes(t *testing.T) {
 	db := openDB(t)
-	body := `{"message_id":"msg_legacy","attachments":[],"text":"synthetic-original"}`
+	body := snapshotMessage(snapshotMessageID)
 	sum := sha256.Sum256([]byte(body))
 	hash := hex.EncodeToString(sum[:])
-	if _, err := db.Exec(`INSERT INTO event_message_snapshots(snapshot_id,msg_id,body_sha256,body) VALUES ('snap_bad','msg_legacy',?,'{}')`, hash); err != nil {
+	if _, err := db.Exec(`INSERT INTO event_message_snapshots(snapshot_id,msg_id,body_sha256,body) VALUES ('snap_bad',?,?,'{}')`, snapshotMessageID, hash); err != nil {
 		t.Fatal(err)
 	}
 	err := db.Tx(context.Background(), func(tx *sql.Tx) error {
-		_, err := eventpayload.EncodeDelivery(context.Background(), tx, "msg_legacy", []byte(`{"message":`+body+`}`))
+		_, err := eventpayload.EncodeDelivery(context.Background(), tx, snapshotMessageID, []byte(`{"message":`+body+`}`))
 		return err
 	})
 	var se *eventpayload.StorageError
@@ -573,8 +574,8 @@ func TestSnapshotQueriesChunkedOnlyWhenNeeded(t *testing.T) {
 	var wires []string
 	err := db.Tx(context.Background(), func(tx *sql.Tx) error {
 		for i := 0; i < 201; i++ {
-			id := fmt.Sprintf("msg_snapshot%d", i)
-			wire := fmt.Sprintf(`{"message":{"message_id":%q,"attachments":[],"legacy":1.50}}`, id)
+			id := fmt.Sprintf("msg_%026d", i)
+			wire := `{"message":` + snapshotMessage(id) + `}`
 			p, err := eventpayload.EncodeDelivery(context.Background(), tx, id, []byte(wire))
 			if err != nil {
 				return err
@@ -650,8 +651,8 @@ func TestInvalidUTF8StaysInline(t *testing.T) {
 
 func TestSnapshotsPinnedUntilReferencingEventsDeleted(t *testing.T) {
 	db := openDB(t)
-	wire := `{"message":{"message_id":"msg_legacy","attachments":[],"text":"synthetic"}}`
-	p := encode(t, db, "msg_legacy", wire)
+	wire := `{"message":` + snapshotMessage(snapshotMessageID) + `}`
+	p := encode(t, db, snapshotMessageID, wire)
 	if _, err := db.Exec(`INSERT INTO events(owner,type,at,data,payload_format,msg_id,snapshot_id) VALUES ('peer_test','delivery','now',?,?,?,?)`, string(p.Data), p.Format, p.MsgID, p.SnapshotID); err != nil {
 		t.Fatal(err)
 	}
@@ -668,12 +669,12 @@ func TestSnapshotsPinnedUntilReferencingEventsDeleted(t *testing.T) {
 
 func TestMixedFormatsHydrateInInputOrder(t *testing.T) {
 	db := openDB(t)
-	body := `{"message_id":"msg_test","attachments":[]}`
-	put(t, db, "msg_test", body, 1)
+	body := snapshotMessage(snapshotMessageID)
+	put(t, db, snapshotMessageID, body, 1)
 	wire := `{"message":` + body + `}`
-	canonical := encode(t, db, "msg_test", wire)
-	legacyWire := `{"message":{"message_id":"msg_test","attachments":[],"legacy":1.50}}`
-	snapshot := encode(t, db, "msg_test", legacyWire)
+	canonical := encode(t, db, snapshotMessageID, wire)
+	legacyWire := `{"message":{ "legacy":1.50, ` + body[1:] + `}`
+	snapshot := encode(t, db, snapshotMessageID, legacyWire)
 	inline := eventpayload.StoredPayload{Format: eventpayload.Inline, Data: []byte(` {"receipt":true} `)}
 	refs := []eventpayload.StoredPayload{snapshot, inline, canonical, snapshot, canonical}
 	wants := []string{legacyWire, string(inline.Data), wire, legacyWire, wire}
@@ -700,7 +701,7 @@ func TestMixedFormatsHydrateInInputOrder(t *testing.T) {
 	if _, err := db.Exec(`DELETE FROM event_message_snapshots`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO event_message_snapshots(snapshot_id,msg_id,body_sha256,body) VALUES (?,?,?,?)`, snapshot.SnapshotID, snapshot.MsgID, strings.Repeat("0", 64), `{"message_id":"msg_test","attachments":[],"legacy":1.50}`); err != nil {
+	if _, err := db.Exec(`INSERT INTO event_message_snapshots(snapshot_id,msg_id,body_sha256,body) VALUES (?,?,?,?)`, snapshot.SnapshotID, snapshot.MsgID, strings.Repeat("0", 64), body); err != nil {
 		t.Fatal(err)
 	}
 	err = db.ReadSnapshot(context.Background(), func(q *sql.Conn) error {
