@@ -17,11 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/BurntSushi/toml"
-
 	"github.com/XertroV/vecnet/internal/cli"
-	"github.com/XertroV/vecnet/internal/envelope"
-	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -29,7 +25,6 @@ import (
 // cancellation closes the watch cleanly before its test hub is shut down.
 func startWatch(t *testing.T, u *user, args ...string) (*syncBuffer, func()) {
 	t.Helper()
-	watchProxyIdentityFixture(t, u)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	var out, errb syncBuffer
 	done := make(chan int, 1)
@@ -55,71 +50,6 @@ func startWatch(t *testing.T, u *user, args ...string) (*syncBuffer, func()) {
 	}
 	t.Cleanup(stop)
 	return &out, stop
-}
-
-// watchProxyIdentityFixture adapts old unpinned proxy fixtures which expose
-// the upstream identity's public_url. Real clients correctly reject that URL
-// mismatch. Give those fixtures a canonical identity at an outer proxy while
-// retaining their existing event and directory interception paths.
-func watchProxyIdentityFixture(t *testing.T, u *user) {
-	t.Helper()
-	raw, err := os.ReadFile(u.conf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cfg cli.Config
-	if _, err = toml.Decode(string(raw), &cfg); err != nil {
-		t.Fatal(err)
-	}
-	p := cfg.Profiles["p"]
-	if p.HubPubkey != "" {
-		return
-	}
-	hc := &http.Client{Timeout: time.Second}
-	resp, err := hc.Get(p.Hub + "/v1/hub/identity")
-	if err != nil {
-		return
-	}
-	var doc envelope.HubIdentity
-	err = json.NewDecoder(resp.Body).Decode(&doc)
-	resp.Body.Close()
-	if err != nil || resp.StatusCode != http.StatusOK || doc.PublicURL == "" || doc.PublicURL == p.Hub {
-		return
-	}
-	target, err := url.Parse(p.Hub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	key, err := hubid.KeyFromSeedHex(strings.Repeat("1", 64))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/hub/identity" {
-			sig := ""
-			if challenge := r.URL.Query().Get("challenge"); challenge != "" {
-				var err error
-				sig, err = key.SignChallenge(srv.URL, challenge)
-				if err != nil {
-					t.Error(err)
-				}
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(envelope.HubIdentity{Pubkey: key.Pubkey(), PublicURL: srv.URL, ChallengeSig: sig})
-			return
-		}
-		proxy.ServeHTTP(w, r)
-	}))
-	t.Cleanup(srv.Close)
-	updated := strings.Replace(string(raw), fmt.Sprintf("hub = %q", p.Hub), fmt.Sprintf("hub = %q", srv.URL), 1)
-	if updated == string(raw) {
-		t.Fatal("proxy fixture lacks an explicit hub line")
-	}
-	if err := os.WriteFile(u.conf, []byte(updated), 0600); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // monitorOutput serves a wire-format delivery and a directory with a fixed
@@ -325,7 +255,6 @@ func TestPeerNameFetchFailureKeepsWatching(t *testing.T) {
 				proxy.ServeHTTP(w, r)
 			}))
 			t.Cleanup(srv.Close)
-			env.Hub.Cfg.PublicURL = srv.URL
 			a := profileUser(t, srv.URL, aSec)
 			b := profileUser(t, env.URL, bSec)
 			out, stop := startWatch(t, a, "watch", "--for-monitor", "--deliveries-only")

@@ -263,7 +263,16 @@ type watcher struct {
 	restartUntil  time.Time
 	restartDelay  time.Duration
 	restartWarned bool
+
+	initialized      bool   // names, notices and hook identity fetched from the current hub
+	announceMove     bool   // print the hub_moved line after the next verified connection
+	pin              string // the key the current hub last proved ("" while unpinned)
+	unverifiedWarned bool   // the unpinned-identity warning is printed once per watch
 }
+
+// moveJitter spreads a scheduled follow over 0-30 s after the notice's at
+// (Task 7); tests replace it to follow without waiting.
+var moveJitter = func() time.Duration { return rand.N(30*time.Second + 1) }
 
 // errPeerDisabled is the 204 answer: stop reconnecting (PROTOCOL §2.3).
 var errPeerDisabled = &hubError{Status: http.StatusNoContent, Code: "peer_disabled", Message: "the hub reports this peer disabled; not reconnecting"}
@@ -293,7 +302,6 @@ func (w *watcher) run() error {
 	if !w.forMonitor && !w.a.json {
 		fmt.Fprintln(w.a.stdout, inboxHeader)
 	}
-	initialized := false
 	failures, purges := 0, 0
 	for {
 		if ctx.Err() != nil {
@@ -308,14 +316,19 @@ func (w *watcher) run() error {
 		}
 		verified := err == nil
 		if verified {
-			if !initialized {
+			if w.announceMove {
+				w.announceMove = false
+				fp, _ := hubid.Fingerprint(w.pin)
+				w.systemLine("hub_moved", fmt.Sprintf("profile %s now uses %s (key %s verified)", w.name, w.c.base, fp))
+			}
+			if !w.initialized {
 				if w.shown != nil {
 					id := w.a.resolveIdentity(w.c, nil)
 					w.identity = &id
 				}
 				w.refreshNames()
 				w.refreshMoving()
-				initialized = true
+				w.initialized = true
 			}
 			if w.forMonitor && !w.a.json && !w.replayed {
 				err = w.replay()
@@ -403,24 +416,50 @@ func (w *watcher) verifyConnection() error {
 	}
 	expected, e := hubid.NormalizeURL(p.Hub)
 	connected, ce := hubid.NormalizeURL(w.c.base)
+	if e == nil && ce == nil && expected != connected && p.Secret == w.c.secret && w.adoptFollowed(nil) {
+		connected = expected
+	}
 	if e != nil || ce != nil || expected != connected || p.Secret != w.c.secret {
-		return &relocationError{Code: "hub_identity_changed", Reason: "watch profile changed; re-run the command"}
+		return &relocationError{Code: "profile_changed", Reason: "watch profile changed; re-run the command"}
 	}
 	w.name, w.profile = name, p
 	pin, _ := w.a.effectivePin(name, p)
 	doc, rotated, err := verifyHub(w.a.ctx, p.Hub, pin, p.AllowInsecureHTTP || w.a.getenv(insecureEnv) == "1")
 	if err != nil {
 		var re *relocationError
-		if errors.As(err, &re) && doc.Pubkey == "" {
-			if re.Reason == "hub did not serve an identity" && pin == "" && w.legacyIdentity(p.Hub) {
+		if !errors.As(err, &re) {
+			return err
+		}
+		switch re.Reason {
+		case "hub key does not match the pin":
+			// The only identity change: the bearer never reaches this hub.
+			return &relocationError{Code: "hub_identity_changed", Reason: "hub key does not match the pin; verify the fingerprint before reconnecting"}
+		case "hub identity unavailable", "hub did not serve an identity":
+			if pin == "" && re.Reason == "hub did not serve an identity" && w.legacyIdentity(p.Hub) {
+				w.pin = ""
 				return nil
 			}
-			if re.Reason == "hub identity unavailable" || time.Now().Before(w.restartUntil) && re.Reason == "hub did not serve an identity" {
+			// Proxy 502/503, the unauthenticated limiter's 429 and transport
+			// errors are outages: back off and retry (PROTOCOL §13.1).
+			return fmt.Errorf("hub identity unavailable")
+		}
+		if pin != "" {
+			if re.Reason == "invalid hub identity response" {
 				return fmt.Errorf("hub identity unavailable")
 			}
+			return &relocationError{Code: "hub_identity_unverified", Reason: re.Reason}
 		}
-		return &relocationError{Code: "hub_identity_changed", Reason: "hub identity check failed; verify the fingerprint before reconnecting"}
+		// Unpinned: as one-shot commands do (ensurePin), keep the legacy
+		// behaviour, e.g. a profile on an alias URL the hub's public_url does
+		// not name. Nothing is pinned, so nothing can be enforced yet.
+		if !w.unverifiedWarned {
+			fmt.Fprintf(w.a.stderr, "vecnet: watch: hub identity not verified (%s); continuing unpinned\n", re.Reason)
+			w.unverifiedWarned = true
+		}
+		w.pin = ""
+		return nil
 	}
+	w.pin = doc.Pubkey
 	if pin == "" {
 		if err := w.a.updatePins(func(records map[string]pinRecord) error {
 			current, _ := w.a.effectivePin(name, p)
@@ -455,6 +494,60 @@ func (w *watcher) verifyConnection() error {
 		w.profile.HubPubkey = doc.Pubkey
 	}
 	return nil
+}
+
+var errPinsReadOnly = errors.New("pins read only")
+
+// adoptFollowed accepts a move another vecnet process already made for this
+// profile (Decision 6 rewrites every profile on the hub): the config names
+// the recorded destination, pins.json records a move from the hub this watch
+// uses (for n, that very notice) with the pin this watch last verified, and
+// the secret is unchanged. Config and pins are read under the pins lock, which
+// follow holds while it writes both. The watch then switches hubs; the next
+// verifyConnection proves the new hub against the pin before any bearer use.
+func (w *watcher) adoptFollowed(n *envelope.HubNotice) bool {
+	var (
+		r       pinRecord
+		name    string
+		p       Profile
+		profErr error
+	)
+	err := w.a.updatePins(func(records map[string]pinRecord) error {
+		_, name, p, profErr = w.a.profileSelection()
+		r = records[name]
+		return errPinsReadOnly
+	})
+	if !errors.Is(err, errPinsReadOnly) || profErr != nil || name != w.name || p.Secret != w.c.secret {
+		return false
+	}
+	hub, e1 := hubid.NormalizeURL(p.Hub)
+	from, e2 := hubid.NormalizeURL(w.c.base)
+	m := r.LastMove
+	if e1 != nil || e2 != nil || hub == from || m == nil || m.From != from || m.To != hub || r.Hub != hub || r.Pubkey == "" {
+		return false
+	}
+	if w.pin != "" && r.Pubkey != w.pin {
+		return false
+	}
+	if n != nil {
+		next, e := hubid.NormalizeURL(n.NewURL)
+		if e != nil || next != hub || m.NoticeID != n.NoticeID {
+			return false
+		}
+	}
+	w.switchHub(p.Hub)
+	return true
+}
+
+// switchHub points the watch at a followed hub. Names, notices and the hook
+// identity are refetched, and the move announced, only after the next
+// verified connection.
+func (w *watcher) switchHub(hub string) {
+	w.c.base = strings.TrimRight(hub, "/")
+	w.stopMoveTimer()
+	w.move = nil
+	w.initialized = false
+	w.announceMove = true
 }
 
 func (w *watcher) legacyIdentity(hub string) bool {
@@ -547,7 +640,7 @@ func (w *watcher) refreshMoving() {
 	if e != nil || !expiry.After(time.Now()) || moving.ClearedAt != "" {
 		return
 	}
-	w.moveDue = at.Add(rand.N(30*time.Second + 1))
+	w.moveDue = at.Add(moveJitter())
 	w.moveTimer = time.NewTimer(max(time.Duration(0), time.Until(w.moveDue)))
 	w.moveC = w.moveTimer.C
 }
@@ -555,23 +648,20 @@ func (w *watcher) refreshMoving() {
 func (w *watcher) followNotice(n envelope.HubNotice) error {
 	next, err := w.a.follow(w.a.ctx, w.name, w.profile, n)
 	if err != nil {
-		w.systemLine("relocation_unverified", "not following "+n.NewURL+": "+err.Error())
+		// Another watch or command on this hub may already have followed it
+		// for every profile there (Decision 6): adopt that move.
+		if w.adoptFollowed(&n) {
+			return nil
+		}
+		reason := err.Error()
+		var re *relocationError
+		if errors.As(err, &re) {
+			reason = re.Reason
+		}
+		w.systemLine("relocation_unverified", "not following "+n.NewURL+": "+reason)
 		return err
 	}
-	w.c.base = next
-	_, _, w.profile, err = w.a.profileSelection()
-	if err != nil {
-		return err
-	}
-	fp, _ := hubid.Fingerprint(w.profile.HubPubkey)
-	w.systemLine("hub_moved", fmt.Sprintf("profile %s now uses %s (key %s verified)", w.name, next, fp))
-	w.move = nil
-	if w.shown != nil {
-		id := w.a.resolveIdentity(w.c, nil)
-		w.identity = &id
-	}
-	w.refreshNames()
-	w.refreshMoving()
+	w.switchHub(next)
 	return nil
 }
 

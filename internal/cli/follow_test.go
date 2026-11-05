@@ -192,13 +192,14 @@ func awaitNotice(t *testing.T, condition func() bool, max time.Duration) {
 	}
 	t.Fatal("timed out waiting for watch condition")
 }
-func runNoticeWatch(t *testing.T, env func(string) string) (*noticeOutput, *noticeOutput, func()) {
+func runNoticeWatch(t *testing.T, env func(string) string, global ...string) (*noticeOutput, *noticeOutput, func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	out, errs := new(noticeOutput), new(noticeOutput)
 	done := make(chan int, 1)
+	args := append(append([]string{}, global...), "watch", "--for-monitor")
 	go func() {
-		done <- RunContext(ctx, []string{"watch", "--for-monitor"}, strings.NewReader(""), out, errs, env)
+		done <- RunContext(ctx, args, strings.NewReader(""), out, errs, env)
 	}()
 	var once sync.Once
 	stop := func() {
@@ -369,7 +370,16 @@ func TestWatchRestartGraceNoFallback(t *testing.T) {
 		t.Fatalf("fallback=%d stderr=%q", polls.Load(), errs.String())
 	}
 }
+
+// noMoveJitter follows a scheduled move at its at, without the 0-30 s spread.
+func noMoveJitter(t *testing.T) {
+	t.Helper()
+	saved := moveJitter
+	moveJitter = func() time.Duration { return 0 }
+	t.Cleanup(func() { moveJitter = saved })
+}
 func TestWatchFollowsAtTime(t *testing.T) {
+	noMoveJitter(t)
 	a := testhub.Start(t)
 	b := a.CloneDB(t)
 	srv, _, _, resumes := watchProxy(t, a)
@@ -387,7 +397,7 @@ func TestWatchFollowsAtTime(t *testing.T) {
 	if resp.StatusCode != 201 {
 		t.Fatalf("notice: %d %s", resp.StatusCode, raw)
 	}
-	awaitNotice(t, func() bool { return strings.Contains(out.String(), "- hub_moved - hub hub:") }, 34*time.Second)
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "- hub_moved - hub hub:") }, 10*time.Second)
 	cfg, _ := loadConfig(path)
 	if cfg.Profiles["p"].Hub != b.URL {
 		t.Fatalf("not followed: %+v", cfg)
@@ -512,5 +522,161 @@ func TestWatchRestartFrameBeforeEOF(t *testing.T) {
 		if err := w.stream(); err != errRestarting || !strings.Contains(out.String(), "- hub_restarting - hub hub:") {
 			t.Fatalf("frame dropped before EOF on attempt %d: %v %q", i, err, out.String())
 		}
+	}
+}
+
+// holdMessage queues a hold-priority delivery from a new peer to recipient.
+func holdMessage(t *testing.T, e *testhub.Env, recipient, text string) {
+	t.Helper()
+	_, secret := e.NewPeer("session", "Sender "+text)
+	resp, raw := e.Do(secret, "POST", "/v1/messages", map[string]any{"recipients": []string{recipient}, "priority": "hold", "idempotency_key": fmt.Sprint(time.Now().UnixNano()), "content": map[string]string{"text": text}})
+	if resp.StatusCode != 202 {
+		t.Fatalf("send: %d %s", resp.StatusCode, raw)
+	}
+}
+
+// Decision 6: one follow rewrites every profile on the hub, so the other
+// watches on that hub adopt the move instead of refusing it as a replay.
+func TestTwoWatchesFollowAtTime(t *testing.T) {
+	noMoveJitter(t)
+	a := testhub.Start(t)
+	qID, qSecret := a.NewPeer("session", "Q")
+	b := a.CloneDB(t)
+	key := a.Hub.IdentityKey().Pubkey()
+	path, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n[profiles.q]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n", a.URL, key, a.OperatorSecret, a.URL, key, qSecret))
+	resp, raw := a.Do(a.OperatorSecret, "POST", "/v1/admin/notices", map[string]any{"kind": "moving", "message": "Move now", "at": envelope.FormatTime(time.Now().Add(2 * time.Second)), "new_url": b.URL})
+	if resp.StatusCode != 201 {
+		t.Fatalf("notice: %d %s", resp.StatusCode, raw)
+	}
+	pOut, pErr, pStop := runNoticeWatch(t, env, "--net", "p")
+	qOut, qErr, qStop := runNoticeWatch(t, env, "--net", "q")
+	for name, out := range map[string]*noticeOutput{"p": pOut, "q": qOut} {
+		want := "- hub_moved - hub hub: profile " + name + " now uses " + b.URL
+		awaitNotice(t, func() bool { return strings.Contains(out.String(), want) }, 10*time.Second)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil || cfg.Profiles["p"].Hub != b.URL || cfg.Profiles["q"].Hub != b.URL {
+		t.Fatalf("profiles: %+v %v", cfg, err)
+	}
+	holdMessage(t, b, b.OperatorPeer, "p at B")
+	holdMessage(t, b, qID, "q at B")
+	awaitNotice(t, func() bool { return strings.Contains(pOut.String(), "p at B") }, 5*time.Second)
+	awaitNotice(t, func() bool { return strings.Contains(qOut.String(), "q at B") }, 5*time.Second)
+	pStop()
+	qStop()
+	if strings.Contains(pErr.String()+qErr.String(), "relocation_unverified") {
+		t.Fatalf("refused an adopted move: p=%q q=%q", pErr.String(), qErr.String())
+	}
+}
+
+// A watch whose profile another command already followed switches to the
+// recorded destination on its next reconnect, after verifying it.
+func TestWatchAdoptsFollowByOtherCommand(t *testing.T) {
+	a := testhub.Start(t)
+	_, qSecret := a.NewPeer("session", "Q")
+	// B is a copy of A taken after this event, as a real move copies a frozen hub.
+	holdMessage(t, a, a.OperatorPeer, "before move")
+	b := a.CloneDB(t)
+	key := a.Hub.IdentityKey().Pubkey()
+	path, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n[profiles.q]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n", a.URL, key, a.OperatorSecret, a.URL, key, qSecret))
+	out, errs, stop := runNoticeWatch(t, env, "--net", "p")
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("stdout=%q stderr=%q", out.String(), errs.String())
+		}
+	})
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "before move") }, 5*time.Second)
+	a.Relocate(t, b.URL)
+	if code, _, e := pinRun(env, "--net", "q", "peers"); code != 0 {
+		t.Fatalf("q follow: %d %s", code, e)
+	}
+	if cfg, err := loadConfig(path); err != nil || cfg.Profiles["p"].Hub != b.URL {
+		t.Fatalf("p not rewritten: %+v %v", cfg, err)
+	}
+	a.Drain.Announce(time.Second)
+	awaitNotice(t, func() bool {
+		return strings.Contains(out.String(), "- hub_moved - hub hub: profile p now uses "+b.URL)
+	}, 10*time.Second)
+	holdMessage(t, b, b.OperatorPeer, "after move")
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "after move") }, 5*time.Second)
+	stop()
+	if strings.Contains(errs.String(), "identity") || strings.Contains(errs.String(), "profile_changed") {
+		t.Fatalf("stderr: %q", errs.String())
+	}
+}
+
+// identityFlakyProxy fronts e and answers /v1/hub/identity with the given
+// statuses first, then with a valid proof for the proxy's own URL.
+func identityFlakyProxy(t *testing.T, e *testhub.Env, statuses ...int) *httptest.Server {
+	t.Helper()
+	target, _ := url.Parse(e.URL)
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	var mu sync.Mutex
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/hub/identity" {
+			mu.Lock()
+			var status int
+			if len(statuses) > 0 {
+				status, statuses = statuses[0], statuses[1:]
+			}
+			mu.Unlock()
+			if status != 0 {
+				http.Error(w, "upstream unavailable", status)
+				return
+			}
+			sig, err := e.Hub.IdentityKey().SignChallenge(srv.URL, r.URL.Query().Get("challenge"))
+			if err != nil {
+				t.Error(err)
+			}
+			json.NewEncoder(w).Encode(envelope.HubIdentity{Pubkey: e.Hub.IdentityKey().Pubkey(), PublicURL: srv.URL, ChallengeSig: sig})
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// A proxy 503 or limiter 429 on the identity endpoint is an outage, not an
+// identity change: the pinned watch backs off and resumes.
+func TestWatchIdentityOutageRetries(t *testing.T) {
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusTooManyRequests} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			e := testhub.Start(t)
+			srv := identityFlakyProxy(t, e, status)
+			_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n", srv.URL, e.Hub.IdentityKey().Pubkey(), e.OperatorSecret))
+			holdMessage(t, e, e.OperatorPeer, "after outage")
+			out, errs, stop := runNoticeWatch(t, env)
+			awaitNotice(t, func() bool { return strings.Contains(out.String(), "after outage") }, 8*time.Second)
+			stop()
+			if strings.Contains(errs.String(), "hub_identity_changed") {
+				t.Fatalf("outage counted as identity change: %q", errs.String())
+			}
+		})
+	}
+}
+
+// DEPLOY.md: an unpinned profile on an alias URL (not the hub's public_url)
+// keeps working for watch as for one-shot commands, with one warning and no pin.
+func TestWatchUnpinnedAliasURL(t *testing.T) {
+	e := testhub.Start(t)
+	target, _ := url.Parse(e.URL)
+	alias := httptest.NewServer(httputil.NewSingleHostReverseProxy(target))
+	t.Cleanup(alias.Close)
+	_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nsecret = %q\n", alias.URL, e.OperatorSecret))
+	if code, _, errs := pinRun(env, "peers"); code != 0 {
+		t.Fatalf("peers: %d %s", code, errs)
+	}
+	holdMessage(t, e, e.OperatorPeer, "via alias")
+	out, errs, stop := runNoticeWatch(t, env)
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "via alias") }, 5*time.Second)
+	stop()
+	if strings.Count(errs.String(), "hub identity not verified") != 1 || strings.Contains(errs.String(), "hub_identity_changed") {
+		t.Fatalf("stderr: %q", errs.String())
+	}
+	pp, _ := pinsPath(env)
+	if records, err := readPins(pp); err != nil || records["p"].Pubkey != "" {
+		t.Fatalf("alias URL pinned: %+v %v", records, err)
 	}
 }
