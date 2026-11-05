@@ -66,6 +66,9 @@ messaging:
        --mcp: the hooks name MCP server vecnet-P, and --write registers it (claude mcp add)
   hook rebind [--profile P]
        bind the profile's hook to this Claude Code session (run from its Bash tool)
+  codex bind --thread UUID [--codex-home DIR] [--ttl DUR] [--idle-dormant DUR] [--attended] [--renew]
+       opt in to app-server delivery; ttl defaults to 24h (1h–168h); unattended needs -a never or auto reviewer
+  codex unbind [--thread UUID] | codex bindings [--json]
   threads [--limit N]
   thread <id> [--after MESSAGE_ID] [--limit N]
   peers
@@ -473,6 +476,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 	case "hook":
 		a.inHook = true
 		return a.cmdHook(args)
+	case "codex":
+		return a.cmdCodex(args, time.Now)
 	case "threads":
 		return a.cmdThreads(args)
 	case "thread":
