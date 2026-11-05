@@ -128,9 +128,11 @@ test('batch: invalidates, awaits reload, then acks; ack never precedes settled',
   assert.equal(resource.loading(), true);
   gate.resolve();
   await running;
-  assert.deepEqual(order, ['load', 'loaded', 'ack e1.1']);
+  await h.store.settled();
+  // The thread is loaded once more after the ack, which accepted its delivery.
+  assert.deepEqual(order, ['load', 'loaded', 'ack e1.1', 'load', 'loaded']);
   assert.deepEqual(h.acks, ['e1.1']);
-  assert.equal(resource.get(), 1);
+  assert.equal(resource.get(), 2);
 });
 
 test('a batch of unknown events still acks and reloads nothing', async () => {
@@ -151,7 +153,51 @@ test('a batch reloads only the tags it names', async () => {
   h.store.resource('thread:thr_2', async () => loads.two++);
   h.store.resource('peers', async () => loads.peers++);
   await h.run();
-  assert.deepEqual(loads, { inbox: 1, threads: 1, one: 1, two: 0, peers: 0 });
+  await h.store.settled();
+  // thread:thr_1 loads again after the ack that accepted its delivery.
+  assert.deepEqual(loads, { inbox: 1, threads: 1, one: 2, two: 0, peers: 0 });
+});
+
+// The delivery matrix race (scripts/ui/matrix.mjs): a batch's snapshots load
+// before its ack, by design, so they show the operator's own deliveries as
+// queued; the ack then makes them accepted, and the hub logs no event to the
+// operator for that. Without a reload after the ack the open views stay stale.
+test('a paid ack reloads the threads its delivery events named, after the ack', async () => {
+  let state = 'queued';
+  const order = [];
+  const h = hub([{ events: [delivery('thr_1'), { type: 'operator_view', data: { reason: 'read', thread_id: 'thr_2' } }], next_cursor: 'e1.1' }], {
+    onAck: cursor => { order.push('ack ' + cursor); state = 'accepted'; },
+  });
+  const one = h.store.resource('thread:thr_1', async () => { order.push('load one ' + state); return state; });
+  const two = h.store.resource('thread:thr_2', async () => { order.push('load two ' + state); return state; });
+  await h.run();
+  await h.store.settled();
+  assert.equal(one.get(), 'accepted', 'the thread view still shows the delivery as it was before the ack');
+  // thr_2 had no delivery in the batch: the ack changed nothing there.
+  assert.deepEqual(order, ['load one queued', 'load two queued', 'ack e1.1', 'load one accepted']);
+  assert.equal(two.get(), 'queued');
+});
+
+test('a refused ack leaves its threads for the next paid ack, which covers them', async () => {
+  let refuse = true;
+  const acked = [];
+  const h = hub([
+    { events: [delivery('thr_1')], next_cursor: 'e1.1' },
+    { events: [delivery('thr_2')], next_cursor: 'e1.2' },
+  ], {
+    onAck: cursor => {
+      if (refuse) { refuse = false; throw new APIError(422, 'invalid_value', 'no'); }
+      acked.push(cursor);
+    },
+  });
+  const loads = { one: 0, two: 0 };
+  h.store.resource('thread:thr_1', async () => loads.one++);
+  h.store.resource('thread:thr_2', async () => loads.two++);
+  await h.run();
+  await h.store.settled();
+  assert.deepEqual(acked, ['e1.2']);
+  // thr_1: its batch, then after the e1.2 ack. thr_2: its batch, then after the ack.
+  assert.deepEqual(loads, { one: 2, two: 2 });
 });
 
 test('a failed ack is retried before the next poll, and a batch is acked once', async () => {
@@ -306,10 +352,11 @@ test('a batch whose snapshot fails is not acked until the snapshot loads, then e
   });
   await h.run();
   await h.store.settled();
-  assert.deepEqual(ackedAt, [0]);
+  // The third load is the reload after the ack, which accepted the delivery.
+  assert.deepEqual(ackedAt, [0, 1]);
   assert.deepEqual(h.acks, ['e1.5']);
-  assert.equal(loads, 2);
-  assert.equal(history.get(), 2);
+  assert.equal(loads, 3);
+  assert.equal(history.get(), 3);
   assert.equal(history.error(), null);
   assert.deepEqual(h.sleeps, [1000]);
 });
