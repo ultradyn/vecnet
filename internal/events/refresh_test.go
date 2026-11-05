@@ -10,6 +10,7 @@ import (
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/events"
+	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/opview"
 	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/testhub"
@@ -132,5 +133,103 @@ func TestFailedRefreshPreservesSuccessfulAdvice(t *testing.T) {
 	wantSchedule = env.Now.Now().Add(10 * time.Minute)
 	if got.NextRefreshBefore == nil || !got.NextRefreshBefore.Equal(wantSchedule) {
 		t.Fatalf("successful subscribe changed worker cadence: %v, want %v", got.NextRefreshBefore, wantSchedule)
+	}
+}
+
+// The advice a successful events/subscribe returns follows the live
+// events.refresh_interval preference: a saved override applies to the next
+// subscription without restart, survives restart over the bootstrap default,
+// and a failed save leaves the previously returned advice untouched.
+func TestSaveRefreshAdviceUsesLivePreference(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	st := events.NewStore(env.Hub)
+	cb := testhub.NewCallback(t)
+	peer, _ := env.NewPeer("session", "advice")
+	cur, err := env.Hub.Log.Current(ctx, []string{peer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := events.Subscription{
+		PrincipalKind: events.KindVecnet, PrincipalID: peer, PeerID: peer,
+		Name: events.Name, URL: cb.URL, Cursor: cur,
+	}
+	secret := webhook.NewSecret()
+	sub, _, err := st.Upsert(ctx, spec, secret, 6*time.Hour, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := func(s *events.Store, want time.Time) {
+		t.Helper()
+		got, err := s.Get(ctx, sub.ID)
+		if err != nil || got.RefreshBefore == nil || !got.RefreshBefore.Equal(want) {
+			t.Fatalf("saved advice = %v, %v; want %v", got.RefreshBefore, err, want)
+		}
+		views, err := opview.New(env.Hub).Subscriptions(ctx)
+		if err != nil || len(views) != 1 || views[0].RefreshBefore == nil || *views[0].RefreshBefore != envelope.FormatTime(want) {
+			t.Fatalf("operator status advice = %+v, %v; want %v", views, err, want)
+		}
+	}
+
+	// Bootstrap default: 1800 seconds.
+	advice, err := st.SaveRefreshAdvice(ctx, sub.ID)
+	if want := env.Now.Now().Add(30 * time.Minute); err != nil || !advice.Equal(want) {
+		t.Fatalf("default advice = %v, %v; want %v", advice, err, want)
+	}
+	saved(st, advice)
+
+	// A live save to 600 seconds changes the next subscription's advice, but
+	// not the advice already returned until that subscription succeeds.
+	env.Now.Advance(2 * time.Minute)
+	operator := auth.Caller{Kind: "operator", PeerKind: "operator"}
+	snapshot, err := env.Hub.Preferences.ReadPreferences(ctx, operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.Hub.Preferences.PatchPreferences(ctx, operator, snapshot.ETag, prefs.Patch{
+		Set: map[string]prefs.Value{"events.refresh_interval": prefs.Duration(600)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	saved(st, advice)
+	if _, _, err := st.Upsert(ctx, spec, secret, 6*time.Hour, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	saved(st, advice)
+	live, err := st.SaveRefreshAdvice(ctx, sub.ID)
+	if want := env.Now.Now().Add(10 * time.Minute); err != nil || !live.Equal(want) {
+		t.Fatalf("live advice = %v, %v; want %v", live, err, want)
+	}
+	saved(st, live)
+
+	// A missing subscription changes nothing and reports ErrNotFound.
+	if _, err := st.SaveRefreshAdvice(ctx, "sub_missing"); !errors.Is(err, events.ErrNotFound) {
+		t.Fatalf("missing subscription err = %v, want ErrNotFound", err)
+	}
+	saved(st, live)
+
+	// Restart over the same store with the bootstrap default still 1800: the
+	// stored override keeps governing new advice.
+	env.Now.Advance(3 * time.Minute)
+	h, err := hub.New(env.Hub.DB, env.Hub.Cfg, env.Now.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := events.NewStore(h)
+	saved(restarted, live)
+	again, err := restarted.SaveRefreshAdvice(ctx, sub.ID)
+	if want := env.Now.Now().Add(10 * time.Minute); err != nil || !again.Equal(want) {
+		t.Fatalf("restarted advice = %v, %v; want %v", again, err, want)
+	}
+	saved(restarted, again)
+
+	// The lease margin still caps the advice.
+	short, _, err := restarted.Upsert(ctx, spec, secret, 15*time.Minute, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capped, err := restarted.SaveRefreshAdvice(ctx, sub.ID)
+	if want := short.Expires.Add(-events.RefreshMargin); err != nil || !capped.Equal(want) {
+		t.Fatalf("short-lease advice = %v, %v; want %v", capped, err, want)
 	}
 }

@@ -962,7 +962,8 @@ func RefreshDeadline(now, expires time.Time, interval time.Duration) time.Time {
 
 // SetRefreshBefore saves the exact advice returned by a successful subscribe.
 // The worker schedule independently uses the captured preference and lease.
-// Subscribe callers can use RefreshDeadline to calculate the advice they return.
+// New subscribe callers should use SaveRefreshAdvice, which derives the advice
+// from the live events.refresh_interval preference instead of a caller value.
 func (st *Store) SetRefreshBefore(ctx context.Context, id string, deadline time.Time) error {
 	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
 		interval := RefreshInterval
@@ -995,6 +996,66 @@ func (st *Store) SetRefreshBefore(ctx context.Context, id string, deadline time.
 		}
 		return saveRefreshSchedule(ctx, tx, id, interval, RefreshDeadline(st.now(), expires, interval))
 	})
+}
+
+// SaveRefreshAdvice computes, saves and returns the refreshBefore advice for a
+// successful events/subscribe of id. One transaction captures the live
+// events.refresh_interval preference (the bootstrap layer when no override is
+// stored), the lease expiry and the clock, so the returned advice, the saved
+// status deadline and the worker schedule agree. Callers invoke it only after
+// the subscription succeeded: until then the previously returned advice stays
+// saved (PROTOCOL section 4.4). ErrNotFound when id has no row; nothing changes.
+func (st *Store) SaveRefreshAdvice(ctx context.Context, id string) (time.Time, error) {
+	var deadline time.Time
+	err := st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		interval, err := st.refreshInterval(ctx, tx)
+		if err != nil {
+			return err
+		}
+		var raw string
+		err = tx.QueryRowContext(ctx, `SELECT expires_at FROM event_subscriptions WHERE sub_id = ?`, id).Scan(&raw)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("events: read subscription lease: %w", err)
+		}
+		expires, err := envelope.ParseTime(raw)
+		if err != nil {
+			return err
+		}
+		deadline = RefreshDeadline(st.now(), expires, interval)
+		if _, err := tx.ExecContext(ctx, `UPDATE event_subscriptions SET refresh_before_at = ? WHERE sub_id = ?`,
+			envelope.FormatTime(deadline), id); err != nil {
+			return fmt.Errorf("events: save refresh deadline: %w", err)
+		}
+		return saveRefreshSchedule(ctx, tx, id, interval, deadline)
+	})
+	if err != nil {
+		return time.Time{}, err
+	}
+	return deadline, nil
+}
+
+// refreshInterval reads events.refresh_interval from the snapshot visible to
+// tx. A Store without a hub uses the protocol default.
+func (st *Store) refreshInterval(ctx context.Context, tx *sql.Tx) (time.Duration, error) {
+	if st.hub == nil {
+		return RefreshInterval, nil
+	}
+	snapshot, err := st.hub.Preferences.LoadSnapshot(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	e, err := snapshot.Get("events.refresh_interval")
+	if err != nil {
+		return 0, err
+	}
+	n, ok := e.Value.Int64()
+	if !ok || n <= 0 {
+		return 0, fmt.Errorf("events: invalid events.refresh_interval preference")
+	}
+	return time.Duration(n) * time.Second, nil
 }
 
 // refreshSchedule is consumer state in the existing meta table, never a second
