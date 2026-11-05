@@ -278,6 +278,49 @@ func TestEnsureMovingNotice(t *testing.T) {
 	}
 }
 
+// After an offline rotation the stored moving notice no longer verifies:
+// relocated mode re-signs it with the same fields, as the hub (§21.2, §21.4).
+func TestEnsureMovingNoticeResignsAfterRotation(t *testing.T) {
+	e := testhub.Start(t)
+	ctx := context.Background()
+	stored := postNotice(t, e, hub.NoticeRequest{Kind: "moving", Message: "Operator move", NewURL: "https://next.example",
+		At: envelope.FormatTime(e.Now.Now().Add(time.Hour))})
+	if _, _, err := hub.RotateIdentity(ctx, e.Hub.DB, e.Now.Now()); err != nil {
+		t.Fatal(err)
+	}
+	next, err := hub.New(e.Hub.DB, e.Hub.Cfg, e.Now.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := next.EnsureMovingNotice(ctx, "https://next.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hubid.VerifyNotice(next.IdentityKey().Pubkey(), n); err != nil {
+		t.Fatalf("replacement does not verify: %v", err)
+	}
+	if n.NoticeID == stored.NoticeID || n.Message != stored.Message || n.At != stored.At || n.ExpiresAt != stored.ExpiresAt || n.NewURL != stored.NewURL {
+		t.Fatalf("replacement lost fields: %+v vs %+v", n, stored)
+	}
+	var postActor, clearActor, createdBy string
+	if err := e.Hub.DB.QueryRow(`SELECT actor FROM audit WHERE action='notice_post' ORDER BY id DESC LIMIT 1`).Scan(&postActor); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Hub.DB.QueryRow(`SELECT actor FROM audit WHERE action='notice_clear' ORDER BY id DESC LIMIT 1`).Scan(&clearActor); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Hub.DB.QueryRow(`SELECT created_by FROM hub_notices WHERE notice_id=?`, n.NoticeID).Scan(&createdBy); err != nil {
+		t.Fatal(err)
+	}
+	if postActor != "hub" || clearActor != "hub" || createdBy != "hub" {
+		t.Fatalf("actors: post=%s clear=%s created_by=%s", postActor, clearActor, createdBy)
+	}
+	again, err := next.EnsureMovingNotice(ctx, "https://next.example")
+	if err != nil || again != n {
+		t.Fatalf("verifying notice not reused: %+v %v", again, err)
+	}
+}
+
 func TestNoticeDefaults(t *testing.T) {
 	for _, kind := range []string{"maintenance", "restart", "moving"} {
 		t.Run(kind, func(t *testing.T) {

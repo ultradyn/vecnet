@@ -187,7 +187,10 @@ func TestRelocatedRunsNoWorkers(t *testing.T) {
 	if !strings.Contains(boot.out.String(), "vecnet-hub relocated: answering hub_moved → https://next.example\n") {
 		t.Fatalf("announcement: %s", boot.out.String())
 	}
-	time.Sleep(3 * hub.DefaultTickInterval)
+	// The push worker claims due work at once (push.Worker starts with a zero
+	// timer), so a relocated hub that started workers would call back within
+	// milliseconds; two seconds leaves ample margin on a loaded box.
+	time.Sleep(2 * time.Second)
 	if got := callback.Requests(); got != 0 {
 		t.Fatalf("relocated workers delivered %d callbacks", got)
 	}
@@ -506,6 +509,16 @@ func TestRelocatedAfterIdentityRotation(t *testing.T) {
 	var activeID string
 	if err := db.QueryRow(`SELECT notice_id FROM hub_notices WHERE cleared_at IS NULL AND kind='moving'`).Scan(&activeID); err != nil || activeID != got.NoticeID {
 		t.Fatalf("restart replaced valid notice: %s %v", activeID, err)
+	}
+	var postActor, clearActor string
+	if err := db.QueryRow(`SELECT actor FROM audit WHERE action='notice_post' ORDER BY id DESC LIMIT 1`).Scan(&postActor); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT actor FROM audit WHERE action='notice_clear' ORDER BY id DESC LIMIT 1`).Scan(&clearActor); err != nil {
+		t.Fatal(err)
+	}
+	if postActor != "hub" || clearActor != "hub" {
+		t.Fatalf("relocated re-sign audit actors: post=%s clear=%s", postActor, clearActor)
 	}
 	if servedIdentity(t, next.base).Pubkey != doc.Pubkey {
 		t.Fatal("restart changed identity")

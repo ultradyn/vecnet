@@ -33,7 +33,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
@@ -320,21 +319,11 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	deps.TrustFlyClientIP = cfg.TrustFly
 	var handler http.Handler
 	if target != "" {
+		// EnsureMovingNotice also re-signs, as the hub, a stored notice that
+		// an offline rotation left unverifiable.
 		notice, err := h.EnsureMovingNotice(ctx, target)
 		if err != nil {
 			return err
-		}
-		// An offline rotation leaves stored notices signed by the old key.
-		// Replace only an unverifiable notice, atomically updating the active
-		// notice and its Events while preserving the operator's move fields.
-		if err := hubid.VerifyNotice(h.IdentityKey().Pubkey(), notice); err != nil {
-			notice, err = h.PostNotice(ctx, auth.Caller{Kind: "operator"}, hub.NoticeRequest{
-				Kind: notice.Kind, Message: notice.Message, At: notice.At,
-				ExpiresAt: notice.ExpiresAt, NewURL: notice.NewURL,
-			})
-			if err != nil {
-				return err
-			}
 		}
 		handler = httpapi.Relocated(deps, notice)
 	} else {

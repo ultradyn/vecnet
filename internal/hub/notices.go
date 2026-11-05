@@ -258,6 +258,9 @@ func (h *Hub) ClearOnBoot(ctx context.Context) (int, error) {
 
 // EnsureMovingNotice is atomic even when several startup callers race. An
 // expired notice is replaced so relocated mode always has a live announcement.
+// A stored notice that no longer verifies under the current key (an offline
+// rotation) is re-signed with the same fields, in the same transaction, with
+// actor hub (PROTOCOL §21.2, §21.4).
 func (h *Hub) EnsureMovingNotice(ctx context.Context, newURL string) (envelope.HubNotice, error) {
 	n, err := h.prepareNotice(NoticeRequest{Kind: "moving", Message: "This hub has moved.", At: h.nowStr(), NewURL: newURL})
 	if err != nil {
@@ -267,10 +270,17 @@ func (h *Hub) EnsureMovingNotice(ctx context.Context, newURL string) (envelope.H
 	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		existing, err := scanNotice(tx.QueryRowContext(ctx, `SELECT `+noticeColumns+` FROM hub_notices WHERE cleared_at IS NULL AND expires_at > ? AND kind='moving' AND new_url=? ORDER BY issued_at LIMIT 1`, h.nowStr(), n.NewURL))
 		if err == nil {
-			n = existing
-			return nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
+			if hubid.VerifyNotice(h.IdentityKey().Pubkey(), existing) == nil {
+				n = existing
+				return nil
+			}
+			resigned, err := h.prepareNotice(NoticeRequest{Kind: existing.Kind, Message: existing.Message, At: existing.At,
+				ExpiresAt: existing.ExpiresAt, NewURL: existing.NewURL})
+			if err != nil {
+				return err
+			}
+			n = resigned
+		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
 		if err := h.insertNotice(ctx, tx, n, "hub"); err != nil {
