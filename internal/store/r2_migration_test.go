@@ -171,3 +171,101 @@ func TestR2MigrationConstraintsAndTables(t *testing.T) {
 		}
 	}
 }
+
+// r2EvidenceID names the one valid pending R2 row that r2EvidenceDB inserts;
+// r2CompleteValid completes it with valid verification evidence.
+const r2EvidenceID = "blo_00000000000000000000000004"
+
+const r2CompleteValid = `UPDATE blob_objects SET state='complete', sha256_verified=1, verified_algorithm='sha256', verified_digest=sha256, verified_size=size, etag='"synthetic-etag"', verified_at='2026-11-05T00:01:00.000Z'`
+
+func r2EvidenceDB(t *testing.T) (*sql.DB, string) {
+	t.Helper()
+	db, m := r2MigrationDB(t)
+	if _, err := applyOne(context.Background(), db, m); err != nil {
+		t.Fatal(err)
+	}
+	hash := strings.Repeat("c", 64)
+	key := "attachments/v1/exp/1h/0123456789abcdef0123456789abcdef/" + r2EvidenceID
+	if _, err := db.Exec(r2InsertObject, r2EvidenceID, hash, key, "1h", "1h", "2026-11-05T01:00:00.000Z", hash); err != nil {
+		t.Fatal(err)
+	}
+	return db, hash
+}
+
+// TestR2MigrationVerificationEvidenceCheck: the evidence-consistency CHECK is
+// exercised on its own. Each negative starts from a row whose state guards
+// are already satisfied (completed and verified, or pending and unverified),
+// so only the evidence CHECK can reject it.
+func TestR2MigrationVerificationEvidenceCheck(t *testing.T) {
+	t.Run("complete_evidence_fields", func(t *testing.T) {
+		db, _ := r2EvidenceDB(t)
+		if _, err := db.Exec(r2CompleteValid); err != nil {
+			t.Fatalf("valid completion rejected: %v", err)
+		}
+		other := strings.Repeat("d", 64)
+		for _, stmt := range []string{
+			`UPDATE blob_objects SET verified_algorithm=NULL`,
+			`UPDATE blob_objects SET verified_algorithm='md5'`,
+			`UPDATE blob_objects SET verified_digest=NULL`,
+			`UPDATE blob_objects SET verified_digest='` + other + `'`,
+			`UPDATE blob_objects SET verified_size=NULL`,
+			`UPDATE blob_objects SET verified_size=8`,
+			`UPDATE blob_objects SET etag=NULL`,
+			`UPDATE blob_objects SET etag=''`,
+			`UPDATE blob_objects SET verified_at=NULL`,
+			`UPDATE blob_objects SET verified_at='not-a-time'`,
+		} {
+			if _, err := db.Exec(stmt); err == nil {
+				t.Errorf("corrupt verification evidence accepted: %s", stmt)
+			}
+		}
+		var verified int
+		var etag string
+		if err := db.QueryRow(`SELECT sha256_verified, etag FROM blob_objects WHERE blob_id=?`, r2EvidenceID).Scan(&verified, &etag); err != nil || verified != 1 || etag != `"synthetic-etag"` {
+			t.Fatal("rejected corruption changed the completed row")
+		}
+	})
+	t.Run("complete_without_evidence", func(t *testing.T) {
+		db, _ := r2EvidenceDB(t)
+		if _, err := db.Exec(`UPDATE blob_objects SET state='complete', sha256_verified=1`); err == nil {
+			t.Fatal("pending -> complete with sha256_verified=1 but no evidence accepted")
+		}
+	})
+	t.Run("unverified_with_evidence", func(t *testing.T) {
+		db, _ := r2EvidenceDB(t)
+		for _, stmt := range []string{
+			`UPDATE blob_objects SET verified_algorithm='sha256'`,
+			`UPDATE blob_objects SET etag='"synthetic-etag"'`,
+			`UPDATE blob_objects SET verified_at='2026-11-05T00:01:00.000Z'`,
+		} {
+			if _, err := db.Exec(stmt); err == nil {
+				t.Errorf("unverified row accepted evidence: %s", stmt)
+			}
+		}
+	})
+}
+
+// TestR2MigrationObjectRefForeignKeys: blob_object_refs has independent
+// foreign keys to messages and blob_objects, and cascades on message delete.
+func TestR2MigrationObjectRefForeignKeys(t *testing.T) {
+	db, hash := r2EvidenceDB(t)
+	if _, err := db.Exec(`INSERT INTO messages(msg_id,thr_id,seq,sender,kind,created_at,body) VALUES('msg_r2ref','thr_r2ref',1,'synthetic-sender','message','2026-11-05T00:00:00.000Z','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO blob_object_refs VALUES('msg_r2ref', ?, ?)`, r2EvidenceID, hash); err != nil {
+		t.Fatalf("valid reference rejected: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO blob_object_refs VALUES('msg_absent', ?, ?)`, r2EvidenceID, hash); err == nil || !strings.Contains(err.Error(), "FOREIGN KEY") {
+		t.Errorf("missing message with a valid object: err = %v, want a foreign key error", err)
+	}
+	if _, err := db.Exec(`INSERT INTO blob_object_refs VALUES('msg_r2ref', 'blo_00000000000000000000000005', ?)`, hash); err == nil || !strings.Contains(err.Error(), "FOREIGN KEY") {
+		t.Errorf("valid message with a missing object: err = %v, want a foreign key error", err)
+	}
+	if _, err := db.Exec(`DELETE FROM messages WHERE msg_id='msg_r2ref'`); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM blob_object_refs`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("blob_object_refs after message delete = %d, want 0 (cascade)", n)
+	}
+}
