@@ -35,25 +35,26 @@ export async function withTui({ scale = false, command, env: shared, beatEvery }
     const page = await browser.newPage({ viewport: { width: 1240, height: Math.ceil(42 * LINE) + 32 }, colorScheme: 'dark' });
     page.setDefaultTimeout(60000);
     const capture = () => tmux('capture-pane', '-t', 'ui:0.0', '-e', '-p', '-N');
+    const plainText = output => output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
+    const matches = (plain, text) => Array.isArray(text) ? text.every(t => matches(plain, t))
+      : text instanceof RegExp ? text.test(plain) : plain.includes(text);
+    const waitFor = async text => {
+      const until = Date.now() + 60000;
+      while (Date.now() < until) {
+        const output = await capture();
+        if (matches(plainText(output), text)) return output;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      throw new Error(`tmux text did not appear: ${String(text)}`);
+    };
     await fn({
       demo: env.demo, advance: env.advance, restart: env.restart, stall: env.stall, clear: env.clear, controlStatus: env.controlStatus, fail: env.fail, asPeer: env.asPeer,
       keys: (...keys) => tmux('send-keys', '-t', 'ui:0.0', '--', ...keys),
-      waitFor: async text => {
-        const until = Date.now() + 60000;
-        while (Date.now() < until) {
-          const output = await capture();
-          const plain = output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
-          if (text instanceof RegExp ? text.test(plain) : plain.includes(text)) return;
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-        throw new Error(`tmux text did not appear (length ${String(text).length})`);
-      },
-      // must, when given, is text the captured frame has to hold: a state that
-      // lasts only a moment fails the run instead of saving the next state
-      // under its name.
+      waitFor,
+      // Match all required state in one frame and rasterize that very frame.
+      // A toast can expire between a separate wait and the next capture.
       shot: async (name, must) => {
-        const output = await capture();
-        if (must) assert(output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').includes(must), `${name}: the frame no longer shows ${JSON.stringify(must)}`);
+        const output = must ? await waitFor(must) : await capture();
         await page.setContent(ansiHTML(output), { waitUntil: 'load' });
         await page.evaluate(() => document.fonts.ready);
         const size = await page.locator('pre').boundingBox();
