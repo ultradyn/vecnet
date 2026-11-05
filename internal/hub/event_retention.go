@@ -61,6 +61,7 @@ type eventRuleBoundary struct {
 	// Hard expiry is a separate class: disabled classes receive no authority.
 	HardDuration time.Duration `json:"hard_duration_ns,omitempty"`
 	HardCutoffAt string        `json:"hard_cutoff_at,omitempty"`
+	AckCutoffAt  string        `json:"ack_cutoff_at,omitempty"`
 }
 
 func eventPolicyTag(e prefs.Effective) string {
@@ -275,22 +276,16 @@ func (a *EventRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, before
 				bootstrap.HardPending = false
 			}
 			boundary := eventRuleBoundary{Revision: after.Revision, FromSeq: from, BeforeSeconds: was, AfterSeconds: seconds, PolicyTag: eventPolicyTag(next), BootstrapGeneration: bootstrap.Generation}
-			if key == "retention.archive_mode" && seconds == 0 && p.ApplyExisting && a.Hub.Cfg.UnackedEventRetention > 0 {
-				boundary.HardDuration = a.Hub.Cfg.UnackedEventRetention
-				// Impact's common cutoff uses the youngest enabled class. Derive
-				// this class's fixed cutoff from that signed preview instant,
-				// never from the (possibly later) activation or sweep clock.
-				cutoff, err := envelope.ParseTime(impact.CutoffAt)
+			if p.ApplyExisting {
+				if key == "retention.ack_events" && seconds > 0 {
+					boundary.AckCutoffAt, err = a.classPreviewCutoff(after, impact, time.Duration(seconds)*time.Second)
+				} else if key == "retention.archive_mode" && seconds == 0 && a.Hub.Cfg.UnackedEventRetention > 0 {
+					boundary.HardDuration = a.Hub.Cfg.UnackedEventRetention
+					boundary.HardCutoffAt, err = a.classPreviewCutoff(after, impact, boundary.HardDuration)
+				}
 				if err != nil {
-					return preferenceError(prefs.CodeConfirmationStale)
+					return err
 				}
-				ack, _ := after.Get("retention.ack_events")
-				ackSeconds, _ := ack.Value.Int64()
-				age := boundary.HardDuration
-				if ackSeconds > 0 {
-					age = min(age, time.Duration(ackSeconds)*time.Second)
-				}
-				boundary.HardCutoffAt = envelope.FormatTime(cutoff.Add(age - boundary.HardDuration))
 			}
 			bounds = append(bounds, boundary)
 			// Only a new shared activation (or a protective value change) can
@@ -313,6 +308,28 @@ func (a *EventRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, before
 		}
 	}
 	return saveRetentionBootstrap(ctx, tx, bootstrap)
+}
+
+// The signed impact carries the youngest enabled class's cutoff. Recover its
+// preview instant, then fix each enabled class's own bound at that instant.
+// Never let rows age into a previous approval, or invent bounds on upgrade.
+func (a *EventRetentionAdapter) classPreviewCutoff(after prefs.Snapshot, impact prefs.Impact, classAge time.Duration) (string, error) {
+	cutoff, err := envelope.ParseTime(impact.CutoffAt)
+	if err != nil {
+		return "", preferenceError(prefs.CodeConfirmationStale)
+	}
+	policy, err := retentionPolicy(after)
+	if err != nil {
+		return "", err
+	}
+	seconds, _ := policy.Ack.Value.Int64()
+	age := time.Duration(seconds) * time.Second
+	archive, _ := policy.Archive.Value.Bool()
+	hard := a.Hub.Cfg.UnackedEventRetention
+	if !archive && hard > 0 && (age == 0 || hard < age) {
+		age = hard
+	}
+	return envelope.FormatTime(cutoff.Add(age - classAge)), nil
 }
 
 type EventRetentionStatus struct {
@@ -428,7 +445,7 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 					}
 				}
 			}
-			if nb.Valid && cutoff.Valid && high.Valid && nowStr >= nb.String && seq <= high.Int64 && envelope.FormatTime(at) <= cutoff.String {
+			if len(bounds) > 0 && bounds[len(bounds)-1].AckCutoffAt != "" && nb.Valid && cutoff.Valid && high.Valid && nowStr >= nb.String && seq <= high.Int64 && envelope.FormatTime(at) <= bounds[len(bounds)-1].AckCutoffAt {
 				seconds = ackSeconds
 			}
 			return time.Duration(seconds) * time.Second, true
@@ -615,7 +632,7 @@ func (h *Hub) initializeEventRetention(ctx context.Context) error {
 		if hard < 0 {
 			return errors.New("retention: invalid_hard_duration")
 		}
-		if !errors.Is(err, sql.ErrNoRows) && (b.HardDuration == nil || *b.HardDuration != hard) {
+		if b.HardDuration == nil || *b.HardDuration != hard {
 			// Every hard config change invalidates previews and old retrospective
 			// grants, even a disable/re-enable cycle back to the same duration.
 			b.Generation++

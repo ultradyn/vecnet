@@ -3,8 +3,6 @@ package hub_test
 import (
 	"bytes"
 	"context"
-	"database/sql"
-	"errors"
 	"net/http"
 	"sync"
 	"testing"
@@ -275,45 +273,8 @@ func TestRetentionArchiveSuppressesHardExpiryButNotAcknowledged(t *testing.T) {
 	retentionFloor(t, h, "peer_unacked", 0)
 }
 func TestRetentionPurgeAckAndReadRace(t *testing.T) {
-	env := testhub.Start(t)
-	h := env.Hub
-	p, secret := env.NewPeer("session", "race")
-	caller, err := h.Auth.Resolve(context.Background(), secret)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := retentionEvent(t, h, p, h.Now().Add(-9*24*time.Hour))
-	retentionAck(t, h, p, "*", c)
-	var wg sync.WaitGroup
-	errs := make(chan error, 3)
-	wg.Go(func() { _, err := h.PruneEventSlice(context.Background()); errs <- err })
-	wg.Go(func() { errs <- h.Ack(context.Background(), caller, "", c) })
-	wg.Go(func() {
-		_, err := h.Log.Read(context.Background(), []string{p}, eventlog.Cursor{Epoch: c.Epoch}, 100)
-		var purged eventlog.ErrCursorPurged
-		if errors.As(err, &purged) {
-			err = nil
-		}
-		errs <- err
-	})
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	retentionFloor(t, h, p, c.Seq)
-	// A rolled-back delete cannot leak its floor.
-	err = h.DB.Tx(context.Background(), func(tx *sql.Tx) error {
-		_, err := tx.Exec(`DELETE FROM events`)
-		if err != nil {
-			return err
-		}
-		return errors.New("rollback")
-	})
-	if err == nil {
-		t.Fatal("expected rollback")
+	for _, boundary := range []string{"floor", "events", "hydration"} {
+		t.Run(boundary, func(t *testing.T) { retentionReadPurgeInterleaving(t, boundary) })
 	}
 }
 
@@ -419,36 +380,9 @@ func TestRetentionBootstrapRestartCannotAuthorizeDeletion(t *testing.T) {
 	retentionFloor(t, exited, "peer_unacked", 0)
 }
 func TestRetentionPolicyWritesSerializeWithDeletion(t *testing.T) {
-	h, _, clock := preferencesHubClock(t, hub.DefaultConfig())
-	p := "peer_synthetic"
-	c := retentionEvent(t, h, p, clock.Now().Add(-9*24*time.Hour))
-	retentionAck(t, h, p, "*", c)
-	ctx := context.Background()
-	tx, err := h.DB.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback()
-	// The protective policy commits while a deletion slice waits on this writer.
-	if _, err := tx.Exec(`INSERT INTO hub_preferences VALUES('retention.ack_events','0',?,'synthetic')`, envelope.FormatTime(clock.Now())); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(`UPDATE hub_preferences_state SET revision=revision+1`); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() { _, err := h.PruneEventSlice(ctx); done <- err }()
-	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	retentionFloor(t, h, p, 0)
-	if h.EventRetentionStatus().Policy.Revision != 1 {
-		t.Fatal("slice used stale revision")
-	}
+	retentionPolicyWriterInterleaving(t)
 }
+
 func TestRetentionPurgeBackfillAndPushRace(t *testing.T) {
 	env := testhub.StartWith(t, func(cfg *hub.Config) {
 		cfg.BackfillEnabled = true
@@ -588,6 +522,8 @@ func TestRetentionMixedNoopArchiveDoesNotBlockHardExpiry(t *testing.T) {
 	cfg := hub.DefaultConfig()
 	cfg.UnackedEventRetention = 30 * 24 * time.Hour
 	h, _, clock := preferencesHubClock(t, cfg)
+	// First authorize this hard class; the later mixed no-op must preserve it.
+	retentionConfirm(t, h, prefs.Patch{Set: map[string]prefs.Value{"retention.archive_mode": prefs.Bool(false)}, ApplyExisting: true})
 	c := retentionEvent(t, h, "peer_synthetic", clock.Now().Add(-40*24*time.Hour))
 	retentionConfirm(t, h, prefs.Patch{Set: map[string]prefs.Value{"retention.archive_mode": prefs.Bool(false), "agents.thread_budget": prefs.Int(600)}})
 	retentionRun(t, h)

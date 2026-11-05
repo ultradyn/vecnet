@@ -67,6 +67,7 @@ func TestOwnerRetentionTerminalSuppressionAndHardTruncation(t *testing.T) {
 
 func TestRetentionHardExpiryResubscribeReportsTruncation(t *testing.T) {
 	env := testhub.StartWith(t, func(cfg *hub.Config) { cfg.UnackedEventRetention = 30 * 24 * time.Hour })
+	approveHardRetention(t, env.Hub)
 	dot, _ := env.NewPeer("dot", "recipient")
 	cb := testhub.NewCallback(t)
 	sub := subscribe(t, env, cb, dot, nil, time.Time{})
