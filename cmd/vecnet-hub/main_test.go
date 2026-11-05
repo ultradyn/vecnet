@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -16,6 +17,55 @@ import (
 	"github.com/XertroV/vecnet/internal/events"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
+
+func TestBackfillLimitsRejectBeforeOpeningStore(t *testing.T) {
+	for _, flags := range [][]string{{"--storage-backfill-rows=-1"}, {"--storage-backfill-bytes=-1"}, {"--storage-backfill-target=-1ms"}, {"--storage-backfill-bytes=9223372036854775807"}} {
+		dir := filepath.Join(t.TempDir(), "unopened")
+		args := append([]string{"--data-dir", dir, "--listen", "127.0.0.1:0"}, flags...)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := run(ctx, args, io.Discard, noEnv); err == nil || !strings.Contains(err.Error(), "invalid_limits") {
+			t.Fatalf("invalid backfill limits accepted: %v", err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatal("invalid limits opened store")
+		}
+	}
+}
+
+func TestBackfillBootstrapSwitchesIndependent(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			dir := t.TempDir()
+			var out bytes.Buffer
+			if err := runInit(dir, "Synthetic operator", &out); err != nil {
+				t.Fatal(err)
+			}
+			secret := regexp.MustCompile(`vn_operator_[A-Za-z0-9_-]+`).FindString(out.String())
+			if secret == "" {
+				t.Fatal("synthetic init credential missing")
+			}
+			args := []string{"--data-dir", dir, "--listen", "127.0.0.1:0", "--delivery-references=true", "--storage-backfill=" + fmt.Sprint(enabled), "--storage-backfill-rows=2", "--storage-backfill-bytes=2048", "--storage-backfill-target=5ms"}
+			boot := bootHub(t, args, noEnv)
+			req, err := http.NewRequest("GET", boot.base+"/v1/admin/storage/backfill", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+secret)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			var status struct {
+				Enabled bool `json:"enabled"`
+			}
+			if resp.StatusCode != 200 || json.NewDecoder(resp.Body).Decode(&status) != nil || status.Enabled != enabled {
+				t.Fatalf("bootstrap status=%d enabled=%v", resp.StatusCode, status.Enabled)
+			}
+		})
+	}
+}
 
 func TestInitPrintsSecretOnce(t *testing.T) {
 	dir := t.TempDir()
