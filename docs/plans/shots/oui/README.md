@@ -190,3 +190,12 @@ Hub notice TUI screens come from `scripts/ui/tui-notice.mjs`. An active hub noti
 - [nt08-tui-progress.png](nt08-tui-progress.png) — The hub announced a restart and is refusing requests: the connection reads `restarting` in amber, and the banner and last data stay.
 - [nt08-tui-success.png](nt08-tui-success.png) — Moving and maintenance notices: `! MOVING hh:mm -> vecnet.xk.io  Moving to Fly tonight  (+1 more)`, three hours out in the shell's time zone.
 - [nt08-tui-error.png](nt08-tui-error.png) — The notice fetch failed: no banner, the command line names the failed reload, and the tail retries.
+
+Hub notice web screens come from `scripts/ui/notice.mjs`. Active hub notices take a full-width strip over the shell, one row each, most important first (moving, then restart, then maintenance): a kind chip, the time (relative and local), a move's target host as a link, and the operator's message as plain text, each row at most three lines and dismissible for the session. An announced hub restart adds an amber row and turns the sidebar connection amber `restarting`; with no reconnect by the retry hint plus 30 s it turns red, "Hub unreachable since hh:mm".
+
+- [nt09-initial.png](nt09-initial.png) — No active notice: no strip, the shell as before.
+- [nt09-success-desktop.png](nt09-success-desktop.png) — Moving and maintenance notices at 1440 px: the moving row links `vecnet.xk.io`.
+- [nt09-success-phone.png](nt09-success-phone.png) — The same at 390 px: rows wrap (at most three lines) above the sidebar, with no sideways scroll.
+- [nt09-progress-desktop.png](nt09-progress-desktop.png) — The hub announced a restart (`retry_after_ms` 5000) and the reconnects are held: "Hub restarting: reconnecting in 5 s" in amber over the notices.
+- [nt09-progress-phone.png](nt09-progress-phone.png) — The restarting row at phone width.
+- [nt09-error-desktop.png](nt09-error-desktop.png) — A restart followed by an outage (every `/v1/` request 503): past the hint plus 30 s the row reads "Hub unreachable since hh:mm" in red, and the notices stay.
