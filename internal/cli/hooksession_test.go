@@ -790,3 +790,168 @@ func TestHookNamesSenderFromSenderInfo(t *testing.T) {
 		t.Fatalf("fallback name=%q", item.Name)
 	}
 }
+
+func TestHookSessionStartAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name                                           string
+		declared, existing, foreign, ambiguous, rebind bool
+	}{
+		{name: "fresh unbound"}, {name: "existing unbound", existing: true},
+		{name: "declared prompt binding", declared: true, existing: true},
+		{name: "automatic prompt binding", existing: true},
+		{name: "foreign", existing: true, foreign: true},
+		{name: "ambiguous", existing: true, ambiguous: true},
+		{name: "explicit rebind window", existing: true, foreign: true, rebind: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, path, polls := sessionHub(t)
+			env["CODEX_HOME"] = filepath.Join(t.TempDir(), "codex")
+			if !tc.declared {
+				noVecnetProfile(env)
+			}
+			if tc.existing {
+				seedSession(t, path, func(s *hookState) {
+					if tc.foreign {
+						boundTo("other")(s)
+					}
+				})
+			}
+			if tc.ambiguous {
+				if _, err := registerSession(context.Background(), sessionsPath(path), "s1", "q", hookNow()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.rebind {
+				if code, out, errs := runCLI(env, "hook", "rebind", "--profile", "p"); code != 0 {
+					t.Fatalf("rebind: exit=%d out=%q stderr=%q", code, out, errs)
+				}
+			}
+			before, beforeErr := os.ReadFile(path)
+			beforeBinding, _ := os.ReadFile(bindingPath(path))
+			out, errs := runHookStdin(t, env, `{"hook_event_name":"SessionStart","session_id":"s1","source":"startup"}`, "hook", "--profile", "p")
+			if tc.rebind {
+				if !strings.Contains(contextOf(t, out), `text="secret text"`) || polls.Load() != 1 {
+					t.Fatalf("rebound start: out=%q stderr=%q polls=%d", out, errs, polls.Load())
+				}
+				if s := readHookState(t, path); s.Session != "s1" || s.SessionHow != bindRebind || !s.RebindUntil.IsZero() {
+					t.Fatalf("binding=%+v", s.hookBinding)
+				}
+				return
+			}
+			if out != "" || errs != "" || polls.Load() != 0 {
+				t.Fatalf("unadmitted start: out=%q stderr=%q polls=%d", out, errs, polls.Load())
+			}
+			after, afterErr := os.ReadFile(path)
+			afterBinding, _ := os.ReadFile(bindingPath(path))
+			if !bytes.Equal(before, after) || !bytes.Equal(beforeBinding, afterBinding) || errors.Is(beforeErr, os.ErrNotExist) != errors.Is(afterErr, os.ErrNotExist) {
+				t.Fatal("unadmitted start changed state or binding")
+			}
+			if tc.foreign || tc.ambiguous {
+				return
+			}
+			// Only a prompt may establish the binding. Declared prompts claim at
+			// once; automatic prompts on an existing cursor defer the first claim.
+			prompt, _ := runHookAs(t, env, "s1", "p")
+			s := readHookState(t, path)
+			wantHow := bindAuto
+			if tc.declared {
+				wantHow = bindDeclared
+			}
+			if s.Session != "s1" || s.SessionHow != wantHow {
+				t.Fatalf("prompt binding=%+v", s.hookBinding)
+			}
+			if tc.declared {
+				if !strings.Contains(contextOf(t, prompt), `text="secret text"`) || polls.Load() != 1 {
+					t.Fatalf("declared prompt failed to claim: %q polls=%d", prompt, polls.Load())
+				}
+				// Leave a new delivery for the already admitted SessionStart.
+				seedSession(t, path, func(s *hookState) { s.Shown = nil; s.PollCursor = "e1.0" })
+			} else if tc.existing && (prompt != "" || polls.Load() != 0) {
+				t.Fatalf("automatic prompt claimed too early: %q polls=%d", prompt, polls.Load())
+			}
+			beforePolls := polls.Load()
+			out, _ = runHookStdin(t, env, `{"hook_event_name":"SessionStart","session_id":"s1","source":"resume"}`, "hook", "--profile", "p")
+			if !strings.Contains(contextOf(t, out), `text="secret text"`) || !strings.Contains(out, `"hookEventName":"SessionStart"`) || polls.Load() != beforePolls+1 {
+				t.Fatalf("admitted start: out=%q polls=%d", out, polls.Load())
+			}
+		})
+	}
+}
+
+func TestHookSessionStartAgentIDSkip(t *testing.T) {
+	for _, bound := range []bool{false, true} {
+		t.Run(strconv.FormatBool(bound), func(t *testing.T) {
+			var requests atomic.Int32
+			env, path := hookFixtureRaw(t, func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				t.Errorf("unexpected request: %s", r.URL)
+				w.WriteHeader(500)
+			})
+			env["CODEX_HOME"] = filepath.Join(t.TempDir(), "codex")
+			if bound {
+				seedSession(t, path, boundTo("s1"))
+			}
+			before, _ := os.ReadFile(path)
+			binding, _ := os.ReadFile(bindingPath(path))
+			for _, args := range [][]string{{"hook", "--profile", "p"}, {"hook", "--profile", "p", "--event", "session-start"}} {
+				out, errs := runHookStdin(t, env, `{"hook_event_name":"SessionStart","session_id":"s1","agent_id":"agent-7","source":"resume"}`, args...)
+				if out != "" || errs != "" || requests.Load() != 0 {
+					t.Fatalf("out=%q stderr=%q requests=%d", out, errs, requests.Load())
+				}
+			}
+			if after, _ := os.ReadFile(path); !bytes.Equal(before, after) {
+				t.Fatal("agent changed state")
+			}
+			if after, _ := os.ReadFile(bindingPath(path)); !bytes.Equal(binding, after) {
+				t.Fatal("agent changed binding")
+			}
+			if _, err := os.Stat(sessionsPath(path)); !os.IsNotExist(err) {
+				t.Fatalf("agent touched registry: %v", err)
+			}
+			if !bound {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("agent created state: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestHookSessionStartMCPHints(t *testing.T) {
+	for _, summary := range []bool{false, true} {
+		for _, mcp := range []string{"", "vecnet-p", "vecnet-q"} {
+			t.Run(strconv.FormatBool(summary)+"/"+mcp, func(t *testing.T) {
+				var want string
+				for _, event := range []string{"user-prompt", "session-start"} {
+					env, path := hookFixture(t, func(w http.ResponseWriter, r *http.Request) {
+						if r.URL.Query().Get("after") == "head" {
+							hookPage(w, nil, "e1.0")
+						} else {
+							hookPage(w, []envelope.Event{hookEvent(1, "secret text")}, "e1.1")
+						}
+					})
+					env["CODEX_HOME"] = filepath.Join(t.TempDir(), "codex")
+					seedSession(t, path, func(s *hookState) {
+						boundTo("s1")(s)
+						if summary {
+							s.PollCursor = ""
+						}
+					})
+					out, _ := runHookStdin(t, env, `{"session_id":"s1"}`, "hook", "--profile", "p", "--event", event, "--mcp", mcp)
+					ctx := contextOf(t, out)
+					if (mcp == "vecnet-p") != strings.Contains(ctx, "MCP server vecnet-p") {
+						t.Fatalf("mcp=%q context=%q", mcp, ctx)
+					}
+					if !strings.Contains(ctx, "vecnet --net p ") || !strings.Contains(ctx, "Commands need the same VECNET_CONFIG (v.toml).") {
+						t.Fatalf("qualification lost: %q", ctx)
+					}
+					if want == "" {
+						want = ctx
+					} else if ctx != want {
+						t.Fatalf("start context=%q, prompt context=%q", ctx, want)
+					}
+				}
+			})
+		}
+	}
+}
