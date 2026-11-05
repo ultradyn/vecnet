@@ -283,21 +283,31 @@ func TestPreferencesRuntimeRefreshCoalescesWithoutLeaseOrCatchup(t *testing.T) {
 	if err != nil || again.NextRefreshBefore == nil || !again.NextRefreshBefore.Equal(deadline) {
 		t.Fatal("unchanged generation slid the refresh deadline", err)
 	}
-	// New subscriptions and the legacy SetRefreshBefore seam must also use
-	// the stored cadence, even if their caller supplies the old config default.
+	// The worker uses the stored cadence independently of the exact advice
+	// returned by the successful subscribe caller.
 	fresh := runtimeSubscription(t, env, "fresh")
 	if fresh.ID == before.ID {
 		t.Fatal("new-subscription acceptance reused the existing subscription")
 	}
-	if fresh.RefreshBefore == nil || fresh.RefreshBefore.Before(env.Now.Now().Add(20*time.Minute)) || fresh.RefreshBefore.After(env.Now.Now().Add(21*time.Minute)) {
-		t.Fatalf("new subscription ignored stored refresh cadence: %v", fresh.RefreshBefore)
+	if fresh.RefreshBefore == nil || !fresh.RefreshBefore.Equal(env.Now.Now().Add(30*time.Minute)) {
+		t.Fatalf("saved advice differs from successful subscribe advice: %v", fresh.RefreshBefore)
 	}
-	if err := env.Events.Store.SetRefreshBefore(context.Background(), fresh.ID, env.Now.Now().Add(30*time.Minute)); err != nil {
+	if fresh.NextRefreshBefore == nil || !fresh.NextRefreshBefore.Equal(env.Now.Now().Add(20*time.Minute)) {
+		t.Fatalf("new subscription ignored stored worker cadence: %v", fresh.NextRefreshBefore)
+	}
+	advice := env.Now.Now().Add(25 * time.Minute)
+	if err := env.Events.Store.SetRefreshBefore(context.Background(), fresh.ID, advice); err != nil {
 		t.Fatal(err)
 	}
 	got, err := env.Events.Store.Get(context.Background(), fresh.ID)
-	if err != nil || got.RefreshBefore == nil || !got.RefreshBefore.Equal(*fresh.RefreshBefore) {
-		t.Fatal("legacy deadline setter bypassed stored cadence", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RefreshBefore == nil || !got.RefreshBefore.Equal(advice) {
+		t.Fatalf("deadline setter changed supplied client advice: %v, want %v", got.RefreshBefore, advice)
+	}
+	if got.NextRefreshBefore == nil || !got.NextRefreshBefore.Equal(*fresh.NextRefreshBefore) {
+		t.Fatalf("client advice changed worker cadence: %v, want %v", got.NextRefreshBefore, fresh.NextRefreshBefore)
 	}
 }
 
@@ -702,8 +712,11 @@ func TestPreferencesRuntimeRefreshPreservesClientDeadline(t *testing.T) {
 				t.Fatal("worker schedule did not adopt new policy")
 			}
 			refreshed := runtimeSubscription(t, env)
-			if !runtimeDeadlineInWindow(refreshed.RefreshBefore, env.Now.Now(), 10*time.Minute) {
-				t.Fatal("re-subscribe did not replace client advice")
+			if refreshed.RefreshBefore == nil || !refreshed.RefreshBefore.Equal(env.Now.Now().Add(30*time.Minute)) {
+				t.Fatal("re-subscribe did not save the supplied client advice")
+			}
+			if refreshed.NextRefreshBefore == nil || !refreshed.NextRefreshBefore.Equal(env.Now.Now().Add(10*time.Minute)) {
+				t.Fatal("re-subscribe did not preserve stored worker cadence")
 			}
 			health, err = env.Events.Store.ListHealth(context.Background())
 			if err != nil || len(health) != 1 || health[0].RefreshBefore == nil || *health[0].RefreshBefore != envelope.FormatTime(*refreshed.RefreshBefore) {
