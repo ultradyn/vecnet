@@ -46,6 +46,28 @@ func runtimeEventually(t *testing.T, check func() bool) {
 	}
 }
 
+// Register before launching workers so every Fatal path cancels and joins.
+// Closed completion channels make the explicit join and cleanup idempotent.
+func runtimeWorkerCleanup(t *testing.T, cancel context.CancelFunc, done ...<-chan struct{}) func() {
+	t.Helper()
+	stop := func() {
+		t.Helper()
+		cancel()
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for _, ch := range done {
+			select {
+			case <-ch:
+			case <-timer.C:
+				t.Error("runtime worker did not stop on cancellation")
+				return
+			}
+		}
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
 func TestPreferencesRuntimePresenceChangesWithoutRestart(t *testing.T) {
 	h, _, clock := preferencesHubClock(t, hub.DefaultConfig())
 	state, at := "working", envelope.FormatTime(clock.Now())
@@ -101,7 +123,7 @@ func TestPreferencesRuntimeRequestDefaultsRemainFrozen(t *testing.T) {
 	}
 }
 
-func TestPreferencesRuntimeSingleOperationSnapshot(t *testing.T) {
+func TestPreferencesRuntimeConcurrentRequestDefaults(t *testing.T) {
 	env := testhub.Start(t)
 	_, secret := env.NewPeer("session", "A")
 	b, _ := env.NewPeer("session", "B")
@@ -420,23 +442,15 @@ func TestPreferencesRuntimeWakeDoesNotDispatchOrResetBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	env.Events.Interval = time.Hour
+	stop := runtimeWorkerCleanup(t, cancel, done)
 	go func() { _ = env.Events.Run(ctx); close(done) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("events worker did not stop")
-		}
-	})
 	runtimeEventually(t, func() bool { return env.Hub.Preferences.SubscriberCount() == 1 })
 	runtimePatch(t, env.Hub, map[string]prefs.Value{"events.refresh_interval": prefs.Duration(600)})
 	runtimeEventually(t, func() bool {
 		got, err := env.Events.Store.Get(context.Background(), sub.ID)
 		return err == nil && got.RefreshBefore != nil && got.RefreshBefore.Before(env.Now.Now().Add(11*time.Minute))
 	})
-	cancel()
-	<-done
+	stop()
 	after, err := env.Events.Store.ListHealth(context.Background())
 	if err != nil || len(after) != 1 {
 		t.Fatal("health after publication", err)
@@ -459,11 +473,11 @@ func TestPreferencesRuntimeWorkersApplyPublicationAndCancel(t *testing.T) {
 	msg := mustSend(t, env, env.OperatorSecret, body)
 	env.Now.Advance(2 * time.Minute)
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{}, 2)
+	eventsDone, tickersDone := make(chan struct{}), make(chan struct{})
+	stop := runtimeWorkerCleanup(t, cancel, eventsDone, tickersDone)
 	env.Events.Interval = time.Hour
-	go func() { _ = env.Events.Run(ctx); done <- struct{}{} }()
-	go func() { env.Hub.RunTickers(ctx, time.Hour); done <- struct{}{} }()
-	t.Cleanup(cancel)
+	go func() { _ = env.Events.Run(ctx); close(eventsDone) }()
+	go func() { env.Hub.RunTickers(ctx, time.Hour); close(tickersDone) }()
 	runtimeEventually(t, func() bool { return env.Hub.Preferences.SubscriberCount() == 2 })
 	runtimePatch(t, env.Hub, map[string]prefs.Value{"presence.session_ttl": prefs.Duration(60), "events.refresh_interval": prefs.Duration(600)})
 	runtimeEventually(t, func() bool {
@@ -472,14 +486,7 @@ func TestPreferencesRuntimeWorkersApplyPublicationAndCancel(t *testing.T) {
 		err2 := env.Hub.DB.QueryRow(`SELECT held FROM deliveries WHERE msg_id=? AND recipient=?`, msg.MessageID, peer).Scan(&held)
 		return err == nil && err2 == nil && held == 0 && got.RefreshBefore != nil && got.RefreshBefore.Before(env.Now.Now().Add(11*time.Minute))
 	})
-	cancel()
-	for range 2 {
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("worker did not stop on cancellation")
-		}
-	}
+	stop()
 	runtimeEventually(t, func() bool { return env.Hub.Preferences.SubscriberCount() == 0 })
 	// Publications after worker shutdown cannot revive a worker or hit a closed channel.
 	runtimePatch(t, env.Hub, map[string]prefs.Value{"events.refresh_interval": prefs.Duration(700)})
@@ -510,9 +517,10 @@ func TestPreferencesRuntimePublicationRacesWorkerCancellation(t *testing.T) {
 	env.Events.Interval = time.Hour
 	for i := 0; i < 8; i++ {
 		ctx, cancel := context.WithCancel(context.Background())
-		done := make(chan struct{}, 2)
-		go func() { _ = env.Events.Run(ctx); done <- struct{}{} }()
-		go func() { env.Hub.RunTickers(ctx, time.Hour); done <- struct{}{} }()
+		eventsDone, tickersDone := make(chan struct{}), make(chan struct{})
+		stop := runtimeWorkerCleanup(t, cancel, eventsDone, tickersDone)
+		go func() { _ = env.Events.Run(ctx); close(eventsDone) }()
+		go func() { env.Hub.RunTickers(ctx, time.Hour); close(tickersDone) }()
 		runtimeEventually(t, func() bool { return env.Hub.Preferences.SubscriberCount() == 2 })
 		s := readPrefs(t, env.Hub)
 		written := make(chan error, 1)
@@ -520,16 +528,14 @@ func TestPreferencesRuntimePublicationRacesWorkerCancellation(t *testing.T) {
 			_, err := env.Hub.Preferences.PatchPreferences(context.Background(), prefsOperator, s.ETag, prefs.Patch{Set: map[string]prefs.Value{"events.refresh_interval": prefs.Duration(int64(600 + i))}})
 			written <- err
 		}()
-		cancel()
-		for range 2 {
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatal("publication/cancel race stranded a worker")
+		stop()
+		select {
+		case err := <-written:
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
-		if err := <-written; err != nil {
-			t.Fatal(err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("publication/cancel race stranded the preference writer")
 		}
 		runtimeEventually(t, func() bool { return env.Hub.Preferences.SubscriberCount() == 0 })
 	}
