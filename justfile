@@ -17,6 +17,11 @@ version:
 test:
     build2 go test -p 2 ./...
 
+# Isolated hub benchmark; invoke via BB_HOST=x-boss BB_JOBS=2 just bb GOMAXPROCS=2 just bench ...
+bench *ARGS:
+    CGO_ENABLED=0 build2 go build -p 2 -o bin/vecnet-bench ./bench
+    bin/vecnet-bench {{ARGS}}
+
 # Run the dev hub on the generated port; extra flags pass through
 # (e.g. `just run --dev-ui-dir internal/ui/static` serves the operator UI from disk)
 run *ARGS:
