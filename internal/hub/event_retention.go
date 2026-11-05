@@ -189,6 +189,9 @@ func (a *EventRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, before
 		}
 		old, _ := before.Get(key)
 		next, _ := after.Get(key)
+		// Confirmation describes the actual snapshot transition. Historical
+		// fallback rules below must not hide a real, confirmed archive exit.
+		archiveExit := key == "retention.archive_mode" && old.Value == prefs.Bool(true) && next.Value == prefs.Bool(false)
 		// Effective.Revision changes for every key when any preference changes.
 		// A touched no-op key must not activate or cancel a retention rule.
 		if old.Value == next.Value && old.Source == next.Source && old.Origin == next.Origin && !p.ApplyExisting {
@@ -273,7 +276,7 @@ func (a *EventRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, before
 					return errors.New("retention: invalid_activation_boundary")
 				}
 			}
-			if key == "retention.archive_mode" && seconds == 0 && (was != 0 || p.ApplyExisting) {
+			if key == "retention.archive_mode" && seconds == 0 && (archiveExit || p.ApplyExisting) {
 				// A true archive exit is confirmed by the shared service, even
 				// prospectively. A source-only false Save is not confirmation.
 				bootstrap.HardPending = false
@@ -652,12 +655,61 @@ func (h *Hub) initializeEventRetention(ctx context.Context) error {
 					b.AckPending = false
 					b.ApprovedAckSeconds = &seconds
 				}
+			} else if !b.AckPending && seconds == *b.ApprovedAckSeconds {
+				// Equal approved durations need no new deletion authority when
+				// only bootstrap provenance changes (for example env -> flag).
+				// Retag the existing rule without changing its history, fixed
+				// retrospective bounds, or bootstrap confirmation generation.
+				bounds, err := loadEventBoundaries(ctx, tx)
+				if err != nil {
+					return err
+				}
+				if len(bounds) > 0 {
+					latest := &bounds[len(bounds)-1]
+					if latest.AfterSeconds == seconds && latest.PolicyTag != eventPolicyTag(p.Ack) {
+						latest.PolicyTag = eventPolicyTag(p.Ack)
+						raw, err := json.Marshal(bounds)
+						if err != nil {
+							return err
+						}
+						if _, err := tx.ExecContext(ctx, `UPDATE meta SET value=? WHERE key=?`, string(raw), eventRetentionProjectionKey); err != nil {
+							return err
+						}
+					}
+				}
 			}
 			if b.Archive && !archive {
 				b.ArchivePending = true
 				b.Generation++
 				b.ArchiveFromSeq = high
 			} else if archive {
+				if !b.Archive {
+					// Bootstrap archive enablement is protective. Record it so
+					// later prospective exits retain the true previous rule, and
+					// cancel retrospective grants from an earlier archive exit.
+					projectionKey := eventRetentionProjectionKey + "_archive"
+					bounds, err := loadEventBoundariesKey(ctx, tx, projectionKey)
+					if err != nil {
+						return err
+					}
+					b.Generation++
+					bounds = append(bounds, eventRuleBoundary{
+						Revision: s.Revision, FromSeq: high,
+						BeforeSeconds: 0, AfterSeconds: 1,
+						PolicyTag: eventPolicyTag(p.Archive), BootstrapGeneration: b.Generation,
+						BootstrapTransition: true,
+					})
+					raw, err := json.Marshal(bounds)
+					if err != nil {
+						return err
+					}
+					if _, err := tx.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, projectionKey, string(raw)); err != nil {
+						return err
+					}
+					if _, err := tx.ExecContext(ctx, `UPDATE hub_preference_activations SET not_before=NULL,cutoff_at=NULL,high_water=NULL WHERE key='retention.archive_mode'`); err != nil {
+						return err
+					}
+				}
 				b.ArchivePending = false
 			}
 		}
