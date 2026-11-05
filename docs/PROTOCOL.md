@@ -115,7 +115,7 @@ All endpoints are under the hub's public HTTPS origin. Bodies are JSON unless st
 
 ### 2.2 `POST /v1/messages`
 
-Request: a `SendRequest` [SCH]. Requires `idempotency_key`, `priority`, `content`, and at least one of `thread_id` / `recipients`.
+Request: a `SendRequest` [SCH]. Requires `idempotency_key`, `priority`, `content`, and at least one of `thread_id` / `recipients`. A body that repeats a member name in any object is 400 `invalid_body` with `details.path` naming the repeat, before any other check: the caps and the schema must judge the same value that is stored.
 
 The hub MUST:
 
