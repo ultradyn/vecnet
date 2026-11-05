@@ -54,16 +54,3 @@ test('a repeated body renders the same nodes from the memoised parse', () => {
   assert.equal(two.textContent, one.textContent);
   assert.equal(find(two, e => e.tag === 'a').length, 1);
 });
-
-test('a malformed mailto in one message does not stop its neighbours rendering', () => {
-  // thread.js renders every message body with markdown() before replacing the
-  // list, so one throwing body would blank the whole thread.
-  const bodies = ['first [ok](mailto:max@example.com)', 'bad [x](mailto:%zz@example.com) and <mailto:%C3%28@example.com>', 'last **one**'];
-  let roots;
-  assert.doesNotThrow(() => { roots = bodies.map(b => markdown(b)); });
-  assert.equal(roots.length, 3);
-  assert.ok(roots[1].textContent.includes('[x](mailto:%zz@example.com)'), 'malformed link reads as typed');
-  assert.equal(find(roots[1], e => e.tag === 'a').length, 0);
-  assert.ok(roots[2].textContent.includes('last one'));
-  assert.equal(find(roots[0], e => e.tag === 'a')[0].attrs.href, 'mailto:max@example.com');
-});

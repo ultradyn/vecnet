@@ -25,10 +25,7 @@ export function safeHref(raw) {
   try { u = new URL(s); } catch { return null; }
   if (!SCHEMES.has(u.protocol)) return null;
   if (u.protocol === 'mailto:') {
-    // A malformed escape or invalid UTF-8 makes decoding throw: refuse the
-    // link so it stays literal text instead of aborting the whole render.
-    let addr;
-    try { addr = decodeURIComponent(u.pathname || ''); } catch { return null; }
+    const addr = decodeURIComponent(u.pathname || '');
     if (!/^[^@\s]+@[^@\s]+$/.test(addr)) return null;
     return { href: u.href, host: addr };
   }
