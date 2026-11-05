@@ -94,6 +94,23 @@ ui-shots:
     done
     build2 node scripts/ui/shots-index.mjs
 
+# Run screen scripts N times each, run i into $SHOTS_DIR/<script>/run-<i>, to
+# check their PNGs agree. UI_CPU_THROTTLE=4 slows the browser to expose load races.
+# e.g. just bb SHOTS_DIR=.scratch/vecnet/mine/rep just ui-repeat 3 sidebar thread
+ui-repeat N +SCRIPTS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    base="${SHOTS_DIR:-.scratch/ui-repeat}"
+    bash scripts/ui/reap-demos.sh
+    failed=0
+    for s in {{SCRIPTS}}; do
+        for i in $(seq 1 {{N}}); do
+            if SHOTS_DIR="$base/$s/run-$i" build2 node "scripts/ui/$s.mjs"; then echo "ui-repeat: ok $s run-$i"
+            else echo "ui-repeat: FAIL $s run-$i"; failed=$((failed + 1)); fi
+        done
+    done
+    exit $((failed > 0))
+
 # Run a command on a build box against this worktree: sync, run, stream,
 # pull back SHOTS_DIR + files it wrote, exit with its status (docs/BUILDBOX.md)
 [positional-arguments]

@@ -14,6 +14,7 @@ just bb go test -count=1 ./...
 just bb CGO_ENABLED=1 CC=/usr/bin/gcc go test -race ./internal/hub/
 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/
 just bb SHOTS_DIR=.scratch/vecnet/mine/shots just ui-shots
+just bb UI_CPU_THROTTLE=4 SHOTS_DIR=.scratch/vecnet/mine/rep just ui-repeat 3 sidebar thread
 just bb just validate-protocol
 just bb bash -c '[ ! -f connectors/launcher/package.json ] || (just ln-setup && just ln-check)'
 ```

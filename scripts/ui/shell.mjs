@@ -6,7 +6,7 @@ const OPERATOR_INBOX = { name: 'Operator inbox', exact: true };
 
 try {
   await withDemo({ signedIn: false }, async ctx => {
-    const { page, shot, demo, asPeer, hold, allowConsole, countRequests, fail } = ctx;
+    const { page, shot, demo, asPeer, hold, allowConsole, countRequests, fail, quiet } = ctx;
     // Chromium logs every non-2xx fetch as a console error. These are the ones
     // this script provokes: the bad secret, and the views other tasks fill in.
     allowConsole(/status of 401/);
@@ -14,6 +14,7 @@ try {
     allowConsole(/status of 503/);
 
     await page.getByRole('heading', OPERATOR_INBOX).waitFor();
+    await quiet();
     await shot('07-shell-initial');
 
     // The favicon set: linked (SVG first choice, PNG fallbacks), served as
@@ -49,6 +50,7 @@ try {
     assert(await page.locator('#login').isVisible(), 'bad secret left the login card');
     assert(await page.evaluate(() => localStorage.getItem('vecnet.ui.secret')) === null, 'bad secret was stored');
     assert(countRequests('/v1/events') === 0, 'bad secret started the event loop');
+    await quiet();
     await shot('07-shell-error');
 
     // A stale read list from the old page is removed on load.
@@ -67,6 +69,10 @@ try {
     assert(await page.locator('#conn').textContent() === 'connecting', 'shell is not connecting while the directory is held');
     assert(countRequests('/v1/events') === 0, 'pump started before the directory answered');
     assert(await page.evaluate(() => localStorage.getItem('vecnet.ui.read')) === null, 'vecnet.ui.read survived');
+    // The thread lists and inbox count load beside the held directory: the
+    // shot waits for them (and for nothing but /v1/peers to be in flight).
+    await page.locator('#threads a', { hasText: 'hark B196' }).waitFor();
+    await quiet();
     await shot('07-shell-progress');
     await release();
 
@@ -170,6 +176,7 @@ try {
     // The toast sits over the top message, so the shot waits for it to slide out.
     await page.locator('#toast.on').waitFor({ state: 'hidden' });
     await page.evaluate(() => Promise.all(document.getElementById('toast').getAnimations().map(a => a.finished)));
+    await quiet();
     await shot('07-shell-success');
 
     // A peer's message wakes the parked long-poll and reaches the open thread

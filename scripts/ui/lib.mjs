@@ -197,6 +197,60 @@ export async function bootDemo({ scale = false } = {}) {
   finally { clearTimeout(timer); lines.close(); child.stdout.resume(); }
 }
 
+// Requests that stay open by design: the operator activity stream, and the
+// event pump's parked long-poll (any wait other than 0). quiet() ignores them.
+export function longLived(url) {
+  const u = new URL(url);
+  if (u.pathname === '/v1/admin/activity') return true;
+  return u.pathname === '/v1/events' && (u.searchParams.get('wait') || '0') !== '0';
+}
+
+// networkQuiet tracks the page's requests so a screen can wait for the data
+// it shows to have landed: nothing in flight but long-lived streams and
+// requests the script itself is holding, for idleMs and two frames after it
+// (the response's render, and any request that render starts). A shot taken
+// after it shows every snapshot the view had asked for.
+export function networkQuiet(page) {
+  const open = new Set(), ignored = [];
+  const track = req => { if (!longLived(req.url())) open.add(req); };
+  const done = req => open.delete(req);
+  page.on('request', track);
+  page.on('requestfinished', done);
+  page.on('requestfailed', done);
+  const busy = () => [...open].filter(req => !ignored.some(match => match(req)));
+  const frames = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  async function quiet({ idleMs = 150, timeout = 60000 } = {}) {
+    const deadline = Date.now() + timeout;
+    for (let still = 0; ;) {
+      if (Date.now() > deadline) throw new Error(`network never went quiet: ${busy().map(req => req.method() + ' ' + new URL(req.url()).pathname).join(', ')}`);
+      if (busy().length) { still = 0; await new Promise(resolve => setTimeout(resolve, 25)); continue; }
+      if (still >= idleMs) {
+        await frames();
+        if (!busy().length) return;
+        still = 0;
+        continue;
+      }
+      await new Promise(resolve => setTimeout(resolve, 25));
+      still += 25;
+    }
+  }
+  // ignore(match) leaves requests the script holds on purpose out of quiet();
+  // the returned function puts them back.
+  const ignore = match => { ignored.push(match); return () => { const i = ignored.indexOf(match); if (i >= 0) ignored.splice(i, 1); }; };
+  return { quiet, ignore, busy };
+}
+
+// UI_CPU_THROTTLE=<n> slows the page's main thread n× (Chromium's DevTools
+// throttle), so a screen's load races show up on an idle box too: a script
+// that passes throttled does not depend on the browser keeping up.
+async function throttle(context, page) {
+  const rate = Number(process.env.UI_CPU_THROTTLE || 0);
+  if (!(rate > 1)) return;
+  const cdp = await context.newCDPSession(page);
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate });
+  console.log(`browser CPU throttled ${rate}x (UI_CPU_THROTTLE)`);
+}
+
 export async function withDemo({ scale = false, signedIn = true } = {}, fn) {
   const env = await bootDemo({ scale });
   let browser;
@@ -205,7 +259,9 @@ export async function withDemo({ scale = false, signedIn = true } = {}, fn) {
     browser = await (await chromium()).launch({ headless: true });
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
     const page = await context.newPage();
+    await throttle(context, page);
     page.setDefaultTimeout(60000);
+    const net = networkQuiet(page);
     page.on('console', msg => { if (msg.type() === 'error') errors.push(msg.text()); });
     page.on('pageerror', error => errors.push(error.message));
     await page.addInitScript(({ secret }) => {
@@ -219,13 +275,18 @@ export async function withDemo({ scale = false, signedIn = true } = {}, fn) {
       allowConsole: regex => allowed.push(regex),
       countRequests: filter => requests.filter(req => typeof filter === 'function' ? filter(req) : filter instanceof RegExp ? filter.test(req.url()) : req.url().includes(filter)).length,
       shot: async name => { await page.evaluate(() => document.fonts.ready); await page.screenshot({ path: await shotPath(name) }); },
+      // quiet() waits for every snapshot in flight to land and draw (see
+      // networkQuiet); ignore(req => bool) exempts a request held on purpose.
+      quiet: net.quiet, ignore: net.ignore,
       hold: async glob => {
         let release;
         const gate = new Promise(resolve => { release = resolve; });
-        const handler = async route => { await gate; await route.continue(); };
+        const gated = new Set();
+        const handler = async route => { gated.add(route.request()); await gate; await route.continue(); };
+        const unignore = net.ignore(req => gated.has(req));
         await page.route(glob, handler);
         let released = false;
-        const unblock = async () => { if (!released) { released = true; release(); await page.unroute(glob, handler); } };
+        const unblock = async () => { if (!released) { released = true; unignore(); release(); await page.unroute(glob, handler); } };
         held.push(unblock);
         return unblock;
       },
