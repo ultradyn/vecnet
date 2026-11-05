@@ -38,6 +38,14 @@ type Config struct {
 	// Leave false for deployment stage 1. Once enabled, replay bodies stay immutable.
 	DeliveryReferences bool
 
+	// Event retention is independently enabled for staged rollout. Explicit
+	// PruneEventSlice calls still execute one bounded slice for maintenance.
+	EventRetentionEnabled bool
+	AckedEventRetention   time.Duration
+	UnackedEventRetention time.Duration
+	EventRetentionLimits  eventlog.RetentionLimits
+	RetentionSweepHourUTC int // nightly activation schedule; DefaultConfig uses 02:00 UTC
+
 	// Online backfill is independently opt-in; zero limits use defaults.
 	BackfillEnabled    bool
 	BackfillLimits     BackfillLimits
@@ -73,15 +81,17 @@ type Config struct {
 // DefaultConfig returns the plan's defaults; PublicURL and DataDir are empty.
 func DefaultConfig() Config {
 	return Config{
-		DefaultMaxDepth: 32,
-		CreatesPerHour:  DefaultCreatesPerHour,
-		DefaultTTL:      24 * time.Hour,
-		MaxExpiry:       DefaultMaxExpiry,
-		ThreadBudget:    500,
-		TextCap:         4096,
-		SendsPerMin:     60,
-		ThreadsPerHour:  20,
-		BlobTokenTTL:    7 * 24 * time.Hour,
+		DefaultMaxDepth:       32,
+		AckedEventRetention:   7 * 24 * time.Hour,
+		RetentionSweepHourUTC: 2,
+		CreatesPerHour:        DefaultCreatesPerHour,
+		DefaultTTL:            24 * time.Hour,
+		MaxExpiry:             DefaultMaxExpiry,
+		ThreadBudget:          500,
+		TextCap:               4096,
+		SendsPerMin:           60,
+		ThreadsPerHour:        20,
+		BlobTokenTTL:          7 * 24 * time.Hour,
 
 		AvatarChangesPerHour: DefaultAvatarChangesPerHour,
 
@@ -127,6 +137,9 @@ type Hub struct {
 	// activity (GET /v1/admin/activity). The zero value is ready.
 	Activity ActivityFeed
 
+	retentionMu   sync.Mutex
+	retentionLast EventRetentionStatus
+
 	backfillMu   sync.Mutex
 	backfillLast BackfillProgress
 
@@ -164,6 +177,9 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	if db == nil {
 		return nil, errors.New("hub: nil store")
 	}
+	if cfg.UnackedEventRetention < 0 || cfg.EventRetentionLimits.Rows < 0 || cfg.EventRetentionLimits.Bytes < 0 || cfg.EventRetentionLimits.Target < 0 || cfg.RetentionSweepHourUTC < 0 || cfg.RetentionSweepHourUTC > 23 {
+		return nil, errors.New("hub: invalid_retention_config")
+	}
 	if cfg.DataDir == "" {
 		return nil, errors.New("hub: Config.DataDir is required")
 	}
@@ -196,8 +212,12 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	if err := h.loadIdentity(context.Background()); err != nil {
 		return nil, err
 	}
-	h.Preferences, err = newPreferences(db, cfg, now)
+	h.Preferences, err = newPreferences(db, cfg, now, "retention.ack_events", "retention.archive_mode")
 	if err != nil {
+		return nil, err
+	}
+	h.Preferences.Policy = &EventRetentionAdapter{Hub: h}
+	if err := h.initializeEventRetention(context.Background()); err != nil {
 		return nil, err
 	}
 	h.IdleHook = h.OnIdle // release held wake_idle deliveries (PROTOCOL §5.2)

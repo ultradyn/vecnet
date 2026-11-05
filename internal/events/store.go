@@ -496,13 +496,18 @@ func (st *Store) SetCursor(ctx context.Context, id string, cur eventlog.Cursor, 
 // and a client that later passed it back would be saying it holds them.
 func (st *Store) ReplayCursor(ctx context.Context, id string, cur eventlog.Cursor) (eventlog.Cursor, error) {
 	var oldest *int64
+	var floor int64
 	if err := st.DB.QueryRowContext(ctx,
-		`SELECT min(seq) FROM event_outbox WHERE sub_id = ? AND `+undelivered, id).Scan(&oldest); err != nil {
+		`SELECT (SELECT min(seq) FROM event_outbox WHERE sub_id=?1 AND `+undelivered+`),
+  coalesce((SELECT r.purged_through_seq FROM event_subscriptions s JOIN event_retention r ON r.owner=s.peer_id WHERE s.sub_id=?1),0)`, id).Scan(&oldest, &floor); err != nil {
 		return eventlog.Cursor{}, fmt.Errorf("events: replay cursor: %w", err)
 	}
 	if oldest != nil && *oldest-1 < cur.Seq {
 		cur.Seq = *oldest - 1
 	}
+	// A hard/legacy purge may have passed an exact retained callback copy.
+	// Replay must never report a cursor below the owning peer's safe floor.
+	cur.Seq = max(cur.Seq, floor)
 	return cur, nil
 }
 
@@ -899,10 +904,10 @@ func recordResult(ctx context.Context, tx *sql.Tx, id string, status, attempts i
 // pruneDone forgets rows settled before cutoff. A row refused for good lasts
 // until the log has purged its event: a rewind can still read it again until
 // then, however old it is, and only this row stops it being retried.
-func (st *Store) pruneDone(ctx context.Context, cutoff time.Time, oldest eventlog.Cursor) error {
+func (st *Store) pruneDone(ctx context.Context, cutoff time.Time) error {
 	if _, err := st.DB.ExecContext(ctx,
-		`DELETE FROM event_outbox WHERE done_at IS NOT NULL AND done_at < ? AND (NOT `+neverRetried+` OR seq <= ?)`,
-		envelope.FormatTime(cutoff), oldest.Seq); err != nil {
+		`DELETE FROM event_outbox WHERE done_at IS NOT NULL AND done_at < ? AND (NOT `+neverRetried+` OR seq <= coalesce((SELECT r.purged_through_seq FROM event_subscriptions s JOIN event_retention r ON r.owner=s.peer_id WHERE s.sub_id=event_outbox.sub_id),0)) AND coalesce(terminal,'') != 'exhausted' AND parked=0`,
+		envelope.FormatTime(cutoff)); err != nil {
 		return fmt.Errorf("events: prune outbox: %w", err)
 	}
 	return nil

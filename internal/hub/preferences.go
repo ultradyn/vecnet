@@ -121,6 +121,7 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 		key   string
 		value time.Duration
 	}{
+		{"retention.ack_events", cfg.AckedEventRetention},
 		{"events.refresh_interval", cfg.EventsRefreshInterval},
 		{"presence.default_ttl", cfg.PresenceTTL},
 		{"presence.session_ttl", cfg.SessionPresenceTTL},
@@ -148,7 +149,7 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 		if err != nil {
 			return nil, err
 		}
-		if !d.Editable {
+		if !d.Editable && !p.installed[key] {
 			return nil, preferenceError(prefs.CodeUnavailable)
 		}
 		if e.Source != prefs.SourceFlag {

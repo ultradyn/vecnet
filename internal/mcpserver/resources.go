@@ -256,7 +256,7 @@ func (s *Server) inboxTail(ctx context.Context, owners []string) ([]envelope.Eve
 // tailStart returns the cursor just before owners' inboxTailSize-th newest
 // event, clamped to the retention floor.
 func (s *Server) tailStart(ctx context.Context, owners []string) (eventlog.Cursor, error) {
-	after, err := s.Hub.Log.Oldest(ctx)
+	after, err := s.Hub.Log.OldestFor(ctx, owners)
 	if err != nil || len(owners) == 0 {
 		return after, err
 	}

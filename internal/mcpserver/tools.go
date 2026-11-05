@@ -415,7 +415,7 @@ func (s *Server) inboxCursor(ctx context.Context, after string, owners []string,
 		if err != nil || ok {
 			return c, err
 		}
-		return s.Hub.Log.Oldest(ctx)
+		return s.Hub.Log.OldestFor(ctx, owners)
 	}
 	return parseCursor("/after", after)
 }
