@@ -1,8 +1,10 @@
 package blob
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -25,8 +27,32 @@ func r2VectorHeaders() http.Header {
 	return h
 }
 
+// r2RefSignature is a test-only SigV4 reference calculation, written apart
+// from the production signer: it hashes the literal canonical request,
+// requires that hash to be the one the literal string-to-sign carries, then
+// derives the signing key and signs that literal with crypto/hmac. Expected
+// signatures are computed here at run time, so no signature is committed.
+func r2RefSignature(t *testing.T, secret, date, canonical, stringToSign string) string {
+	t.Helper()
+	digest := sha256.Sum256([]byte(canonical))
+	if !strings.HasSuffix(stringToSign, "\n"+hex.EncodeToString(digest[:])) {
+		t.Fatal("literal string-to-sign does not carry the literal canonical hash; values suppressed")
+	}
+	mac := func(key []byte, value string) []byte {
+		h := hmac.New(sha256.New, key)
+		h.Write([]byte(value))
+		return h.Sum(nil)
+	}
+	key := []byte("AWS4" + secret)
+	for _, part := range []string{date, "auto", "s3", "aws4_request"} {
+		key = mac(key, part)
+	}
+	return hex.EncodeToString(mac(key, stringToSign))
+}
+
 func TestR2CanonicalPUTVector(t *testing.T) {
-	// Literal accepted spike vector, independently calculated with Python hmac/hashlib.
+	// Literal accepted spike canonical request and string-to-sign (independently
+	// calculated with Python hmac/hashlib); the signature is recomputed below.
 	const wantCanonical = `PUT
 /vecnet-blobs-test/attachments/v1/exp/1h/vector/blob
 X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=VECTORACCESS%2F20261105%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261105T030405Z&X-Amz-Expires=300&X-Amz-SignedHeaders=cache-control%3Bcontent-disposition%3Bcontent-length%3Bcontent-type%3Bhost%3Bif-none-match%3Bx-amz-checksum-sha256%3Bx-amz-meta-vecnet-checksum%3Bx-amz-meta-vecnet-checksum-profile
@@ -54,8 +80,8 @@ b2f7c4ce90a2ffb4b313d01ae44322eef9fb52523745c6e09a7129c8bbce74b3`
 	if err != nil {
 		t.Fatal("vector URL parse failed")
 	}
-	if u.Query().Get("X-Amz-Signature") != "e6ca8ef5f955a2a6ae9e339c3ea31f8a1d88a99a208aab0d52a9ea093c77e9d1" {
-		t.Fatal("literal independent signature mismatch")
+	if !hmac.Equal([]byte(u.Query().Get("X-Amz-Signature")), []byte(r2RefSignature(t, "vector-secret-not-live", "20261105", wantCanonical, wantStringToSign))) {
+		t.Fatal("independent reference signature mismatch; values suppressed")
 	}
 	public, err := PresignPUT(r2VectorEndpoint, "vecnet-blobs-test", "attachments/v1/exp/1h/vector/blob", "VECTORACCESS", "vector-secret-not-live", r2VectorNow, 300*time.Second, r2VectorHeaders())
 	if err != nil || public != signed {
@@ -64,8 +90,9 @@ b2f7c4ce90a2ffb4b313d01ae44322eef9fb52523745c6e09a7129c8bbce74b3`
 }
 
 func TestR2CanonicalGETVector(t *testing.T) {
-	// Offline vector independently calculated with Python hmac/hashlib. These
-	// literals pin GET and the exact object key; no provider call is involved.
+	// Offline canonical/string-to-sign vector independently calculated with
+	// Python hmac/hashlib. These literals pin GET and the exact object key; the
+	// signature is recomputed by r2RefSignature. No provider call is involved.
 	const wantCanonical = `GET
 /vecnet-blobs-test/folder/a%20b%2Bc/%CE%BB//d
 X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=VECTORACCESS%2F20261105%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261105T030405Z&X-Amz-Expires=600&X-Amz-SignedHeaders=host
@@ -77,11 +104,11 @@ UNSIGNED-PAYLOAD`
 20261105T030405Z
 20261105/auto/s3/aws4_request
 6e8752ab2c9245808be31b0e4085a1ab830b1f335dd1c9801a13596ade97c4f7`
-	const wantSignature = "44e77479a75cf80d84b995c5364977333fb4e5cf9adf18ffed5b2c24b076a489"
 	signed, canonical, stringToSign, err := r2Presign("GET", r2VectorEndpoint, "vecnet-blobs-test", "folder/a b+c/λ//d", "VECTORACCESS", "vector-secret-not-live", r2VectorNow, 600*time.Second, nil)
 	if err != nil || canonical != wantCanonical || stringToSign != wantStringToSign {
 		t.Fatal("literal GET canonical/string-to-sign vector mismatch; values suppressed")
 	}
+	wantSignature := r2RefSignature(t, "vector-secret-not-live", "20261105", wantCanonical, wantStringToSign)
 	public, err := PresignGET(r2VectorEndpoint, "vecnet-blobs-test", "folder/a b+c/λ//d", "VECTORACCESS", "vector-secret-not-live", r2VectorNow, 600*time.Second)
 	if err != nil || public != signed {
 		t.Fatal("public GET signer differs from independent vector; values suppressed")

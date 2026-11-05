@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -295,6 +296,16 @@ func TestR2HeadProofRejectsMismatch(t *testing.T) {
 		{"duplicate_type", func(h http.Header) { h.Add("Content-Type", "text/html") }},
 		{"duplicate_checksum", func(h http.Header) { h.Add("X-Amz-Checksum-Sha256", h.Get("X-Amz-Checksum-Sha256")) }},
 		{"oversized_metadata", func(h http.Header) { h.Set("X-Amz-Meta-Untrusted", strings.Repeat("x", 20000)) }},
+		// Agreeing, well-formed evidence for another object's digest: the proof
+		// must bind to the persisted grant, not to header self-consistency.
+		{"both_checksums_other_digest", func(h http.Header) {
+			h.Set("X-Amz-Checksum-Sha256", r2OtherChecksum)
+			h.Set("X-Amz-Meta-Vecnet-Checksum", r2OtherChecksum)
+		}},
+		{"metadata_other_digest_no_provider", func(h http.Header) {
+			h.Del("X-Amz-Checksum-Sha256")
+			h.Set("X-Amz-Meta-Vecnet-Checksum", r2OtherChecksum)
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -313,18 +324,53 @@ func TestR2HeadProofRejectsMismatch(t *testing.T) {
 			if err == nil || proof.SHA256Verified || object.SHA256Verified {
 				t.Fatal("invalid metadata established verification")
 			}
+			if strings.Contains(tc.name, "other_digest") {
+				if !errors.Is(err, ErrR2Proof) || proof.Metadata != nil || proof.ETag != "" {
+					t.Fatalf("Head error = %v, want %v with no proof", err, ErrR2Proof)
+				}
+			}
 		})
 	}
 }
 
+// r2OtherChecksum is a valid base64 SHA-256 of bytes other than the fixture's.
+var r2OtherChecksum = func() string {
+	d := sha256.Sum256([]byte("another object"))
+	return base64.StdEncoding.EncodeToString(d[:])
+}()
+
 func TestR2HeadDownloadStoredGrantOnly(t *testing.T) {
-	for _, name := range []string{"foreign_namespace", "prefix_class", "key_blob_id", "traversal", "request_key", "expired", "purged", "class_deadline", "unsupported_profile", "digest_binding"} {
-		t.Run(name, func(t *testing.T) {
+	// Every case starts from a completed, verified grant, so Download's own
+	// pending/unverified guard cannot mask the metadata check under test. The
+	// "valid" control proves the unmodified fixture reaches the provider (HEAD)
+	// and mints a URL (Download); each negative changes one field.
+	other := sha256.Sum256([]byte("other"))
+	for _, tc := range []struct {
+		name string
+		want error
+	}{
+		{"valid", nil},
+		{"foreign_namespace", ErrR2Metadata},
+		{"prefix_class", ErrR2Metadata},
+		{"key_blob_id", ErrR2Metadata},
+		{"traversal", ErrR2Metadata},
+		{"request_key", ErrR2Metadata},
+		{"expired", ErrR2Expired},
+		{"purged", ErrR2Purged},
+		{"class_deadline", ErrR2Metadata},
+		{"unsupported_profile", ErrR2Metadata},
+		{"digest_binding", ErrR2Metadata},
+		{"expected_checksum", ErrR2Metadata},
+		{"backend", ErrR2Metadata},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			object := r2TestObject(t, "1h")
+			object.State = "complete"
+			object.SHA256Verified = true
 			now := r2VectorNow
 			calls := 0
 			key := object.ObjectKey
-			switch name {
+			switch tc.name {
 			case "foreign_namespace":
 				object.ObjectKey = strings.Replace(key, r2TestNamespace, strings.Repeat("f", 32), 1)
 				key = object.ObjectKey
@@ -347,15 +393,35 @@ func TestR2HeadDownloadStoredGrantOnly(t *testing.T) {
 				object.ChecksumProfile = "unknown"
 			case "digest_binding":
 				object.SHA256 = strings.Repeat("0", 64)
+			case "expected_checksum":
+				object.ExpectedChecksum = hex.EncodeToString(other[:])
+			case "backend":
+				object.Backend = "disk"
 			}
-			adapter, _ := r2TestAdapter(t, &object, &now, func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(500) })
-			proof, err := adapter.Head(context.Background(), key)
-			if err == nil || proof.SHA256Verified {
-				t.Fatal("invalid persisted grant permitted completion")
+			adapter, _ := r2TestAdapter(t, &object, &now, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				for k, vs := range r2ProofHeaders() {
+					for _, v := range vs {
+						w.Header().Add(k, v)
+					}
+				}
+			})
+			proof, headErr := adapter.Head(context.Background(), key)
+			request, downloadErr := adapter.Download(context.Background(), key, now, object.ExpiresAt)
+			if tc.want == nil {
+				if headErr != nil || !proof.SHA256Verified || calls != 1 {
+					t.Fatal("valid control grant did not complete through the provider")
+				}
+				if downloadErr != nil || request.URL == "" {
+					t.Fatal("valid control grant did not mint a download URL")
+				}
+				return
 			}
-			request, err := adapter.Download(context.Background(), key, now, object.ExpiresAt)
-			if err == nil || request.URL != "" {
-				t.Fatal("invalid persisted grant yielded URL; suppressed")
+			if !errors.Is(headErr, tc.want) || proof.SHA256Verified {
+				t.Fatalf("Head error = %v, want %v without verification", headErr, tc.want)
+			}
+			if !errors.Is(downloadErr, tc.want) || request.URL != "" {
+				t.Fatalf("Download error = %v, want %v with an empty URL (URL suppressed)", downloadErr, tc.want)
 			}
 			if calls != 0 {
 				t.Fatal("invalid grant reached provider")
@@ -712,6 +778,59 @@ func TestR2HeadProofPrivateSignatureTampering(t *testing.T) {
 			}
 			if calls != 1 {
 				t.Fatal("private signature test did not reach fake exactly once")
+			}
+		})
+	}
+}
+
+// TestR2DeletePrivateSignatureTampering: cleanup DELETE carries a correct
+// header SigV4 signature, verified by the independent reference above, and
+// any change to its method, path, host, date or payload-hash header breaks it.
+// The S3 server is an in-process fake; this is not provider acceptance.
+func TestR2DeletePrivateSignatureTampering(t *testing.T) {
+	for _, name := range []string{"valid", "method", "path", "host", "date", "payload_hash"} {
+		t.Run(name, func(t *testing.T) {
+			object := r2TestObject(t, "1h")
+			now := r2VectorNow
+			calls, deletes := 0, 0
+			adapter, server := r2TestAdapter(t, &object, &now, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if !r2TestPrivateValid(r) {
+					w.WriteHeader(403)
+					return
+				}
+				if r.Method == "DELETE" {
+					deletes++
+				}
+				w.WriteHeader(204)
+			})
+			underlying := server.Client().Transport
+			adapter.client.Transport = r2TestRoundTripper(func(r *http.Request) (*http.Response, error) {
+				request := r.Clone(r.Context())
+				switch name {
+				case "method":
+					request.Method = "HEAD"
+				case "path":
+					request.URL.Path += "-changed"
+				case "host":
+					request.Host = "other.invalid"
+				case "date":
+					request.Header.Set("X-Amz-Date", "20261105T030406Z")
+				case "payload_hash":
+					request.Header.Set("X-Amz-Content-Sha256", strings.Repeat("0", 64))
+				}
+				return underlying.RoundTrip(request)
+			})
+			err := adapter.Delete(context.Background(), object.ObjectKey)
+			if name == "valid" {
+				if err != nil || deletes != 1 {
+					t.Fatal("independently verified DELETE signature rejected")
+				}
+			} else if err == nil || deletes != 0 {
+				t.Fatal("tampered private DELETE accepted")
+			}
+			if calls != 1 {
+				t.Fatal("private DELETE signature test did not reach fake exactly once")
 			}
 		})
 	}
