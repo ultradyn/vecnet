@@ -1090,6 +1090,20 @@ func inboxEventText(ev envelope.Event, peers inboxPeers) string {
 			return raw
 		}
 		return strings.TrimSpace(peers.name(d.PeerID) + " " + Clean(d.Change) + " " + Clean(strings.Join(d.Fields, ", ")))
+	case "hub_notice":
+		var e envelope.HubNoticeEvent
+		if json.Unmarshal(ev.Data, &e) != nil {
+			return raw
+		}
+		n := e.Notice
+		text := Clean(e.Change) + " " + Clean(n.Kind) + " " + inboxShort(n.NoticeID)
+		if n.Kind == "moving" && n.NewURL != "" {
+			text += " → " + Clean(hubHost(n.NewURL))
+		}
+		if n.Message != "" {
+			text += " " + Clean(n.Message)
+		}
+		return text
 	}
 	return raw
 }

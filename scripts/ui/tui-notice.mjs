@@ -46,7 +46,7 @@ try {
     await waitFor(' live ');
     await waitFor(': command  ? help'); // the failure's toast has run its course
     await post({ ...moving, at: at(3) });
-    await waitFor(/! MOVING \d\d:\d\d -> vecnet\.xk\.io {2}Moving to Fly tonight {2}\(\+1 more\)/);
+    await waitFor(/! MOVING in \S+ (\w{3} \d\d )?\d\d:\d\d -> vecnet\.xk\.io {2}Moving to Fly tonight {2}\(\+1 more\)/);
     await shot('nt08-tui-success', '(+1 more)');
 
     // A restart: the parked long-poll answers with hub_restarting, and the hub

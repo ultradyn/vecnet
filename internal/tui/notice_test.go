@@ -105,7 +105,7 @@ func TestNoticeBanner80x24(t *testing.T) {
 	frame := plainAt(t, m, 80, 24)
 	assertBannerBody(t, m, frame, 80, 24)
 	banner := strings.Split(frame, "\n")[1]
-	if want := "! MOVING 02:00 -> vecnet.xk.io  Moving to Fly tonight"; strings.TrimRight(banner, " ") != want {
+	if want := "! MOVING in 18h Nov 03 02:00 -> vecnet.xk.io  Moving to Fly tonight"; strings.TrimRight(banner, " ") != want {
 		t.Fatalf("banner %q, want %q", banner, want)
 	}
 	if strings.Contains(banner, "more") {
@@ -124,7 +124,7 @@ func TestNoticeBanner140x42(t *testing.T) {
 	frame := plainAt(t, m, 140, 42)
 	assertBannerBody(t, m, frame, 140, 42)
 	banner := strings.Split(frame, "\n")[1]
-	if want := "! MOVING 02:00 -> vecnet.xk.io  Moving to Fly tonight  (+1 more)"; strings.TrimRight(banner, " ") != want {
+	if want := "! MOVING in 18h Nov 03 02:00 -> vecnet.xk.io  Moving to Fly tonight  (+1 more)"; strings.TrimRight(banner, " ") != want {
 		t.Fatalf("banner %q, want %q", banner, want)
 	}
 	noticeGolden(t, "notice-two-140x42", frame)
@@ -132,18 +132,18 @@ func TestNoticeBanner140x42(t *testing.T) {
 	// Priority is moving > restart > maintenance, whatever the list order.
 	restart := noticeAt("ntc_01JD3S6G8J0M2P4R6T8V0X0003", "restart", "Kernel update", 20*time.Minute, "")
 	got := ansi.Strip(viewNotices([]envelope.HubNotice{maintenanceNotice(), restart}, fixedNow, time.UTC, 140))
-	if want := "! RESTART 08:01  Kernel update  (+1 more)"; strings.TrimRight(got, " ") != want {
+	if want := "! RESTART in 20m 08:01  Kernel update  (+1 more)"; strings.TrimRight(got, " ") != want {
 		t.Fatalf("restart banner %q, want %q", got, want)
 	}
 	got = ansi.Strip(viewNotices([]envelope.HubNotice{maintenanceNotice()}, fixedNow, time.UTC, 140))
-	if want := "! MAINTENANCE 09:41  Database vacuum, expect slow reads"; strings.TrimRight(got, " ") != want {
+	if want := "! MAINTENANCE in 2h 09:41  Database vacuum, expect slow reads"; strings.TrimRight(got, " ") != want {
 		t.Fatalf("maintenance banner %q, want %q", got, want)
 	}
 	// A long message gives way before the count does.
 	long := movingNotice()
 	long.Message = strings.Repeat("word ", 40)
 	got = ansi.Strip(viewNotices([]envelope.HubNotice{maintenanceNotice(), long}, fixedNow, time.UTC, 80))
-	if lipgloss.Width(got) != 80 || !strings.HasSuffix(strings.TrimRight(got, " "), "...  (+1 more)") || !strings.HasPrefix(got, "! MOVING 02:00 -> vecnet.xk.io  word word") {
+	if lipgloss.Width(got) != 80 || !strings.HasSuffix(strings.TrimRight(got, " "), "...  (+1 more)") || !strings.HasPrefix(got, "! MOVING in 18h Nov 03 02:00 -> vecnet.xk.io  word word") {
 		t.Fatalf("narrow banner %q", got)
 	}
 }
@@ -268,7 +268,7 @@ func TestNoticeEventsRefresh(t *testing.T) {
 	if f.count("Notices") != 1 || f.count("Inbox") != 0 {
 		t.Fatalf("posted: Notices %d Inbox %d, want one Notices call only", f.count("Notices"), f.count("Inbox"))
 	}
-	if line := strings.Split(plainAt(t, m, 140, 42), "\n")[1]; !strings.HasPrefix(line, "! MOVING 02:00 -> vecnet.xk.io") {
+	if line := strings.Split(plainAt(t, m, 140, 42), "\n")[1]; !strings.HasPrefix(line, "! MOVING in 18h Nov 03 02:00 -> vecnet.xk.io") {
 		t.Fatalf("no banner after the post: %q", line)
 	}
 
@@ -350,4 +350,19 @@ func TestRestartingConnState(t *testing.T) {
 	release <- struct{}{}
 	p.until("live", func() bool { return m.Conn == ConnLive })
 	p.loaded(f, "Inbox", "Threads", "Peers", "Notices")
+}
+
+// The event log humanises hub_notice like every other type, with the
+// operator's message cleaned.
+func TestNoticeEventLogLine(t *testing.T) {
+	n := movingNotice()
+	n.Message = "Moving\x1b[2J to Fly‮ tonight"
+	got := inboxEventText(event(t, "e1.1", "hub_notice", envelope.HubNoticeEvent{Change: "posted", Notice: n}), inboxPeers{})
+	if !strings.HasPrefix(got, "posted moving ntc_") || !strings.Contains(got, " → vecnet.xk.io Moving") || strings.ContainsAny(got, "\x1b‮{") {
+		t.Fatalf("hub_notice line %q", got)
+	}
+	got = inboxEventText(event(t, "e1.2", "hub_notice", envelope.HubNoticeEvent{Change: "cleared", Notice: maintenanceNotice()}), inboxPeers{})
+	if !strings.HasPrefix(got, "cleared maintenance ntc_") || strings.Contains(got, "→") || !strings.HasSuffix(got, "Database vacuum, expect slow reads") {
+		t.Fatalf("hub_notice line %q", got)
+	}
 }

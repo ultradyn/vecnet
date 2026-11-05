@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 	"unicode"
@@ -288,11 +289,14 @@ func viewNotices(ns []envelope.HubNotice, now time.Time, loc *time.Location, w i
 	head := "! " + label
 	detail := ""
 	if at, err := envelope.ParseTime(shown.At); shown.At != "" && err == nil {
+		// As the web banner: relative, then the clock time, dated unless
+		// it is today, so 01:55 at 23:02 does not read as already past.
+		local, today := at.In(loc), now.In(loc)
 		layout := "15:04"
-		if d := at.Sub(now); d >= 24*time.Hour || d <= -24*time.Hour {
+		if local.YearDay() != today.YearDay() || local.Year() != today.Year() {
 			layout = "Jan 02 15:04"
 		}
-		detail += " " + at.In(loc).Format(layout)
+		detail += " " + relTime(at.Sub(now)) + " " + local.Format(layout)
 	}
 	if shown.Kind == "moving" && shown.NewURL != "" {
 		detail += " -> " + asciiLine(hubHost(shown.NewURL))
@@ -313,12 +317,48 @@ func viewNotices(ns []envelope.HubNotice, now time.Time, loc *time.Location, w i
 			msg = ""
 		}
 	}
-	line := styleNotice.Render(head) + styleWarn.Render(detail)
+	// Coloured by kind like the web chips, bold text rather than an inverse
+	// block: a planned maintenance must not read as an alarm.
+	headStyle, detailStyle := noticeStyles(shown.Kind)
+	line := headStyle.Render(head) + detailStyle.Render(detail)
 	if msg != "" {
 		line += styleText.Render("  " + msg)
 	}
 	line += styleMuted.Render(more)
 	return fit(line, w)
+}
+
+func noticeStyles(kind string) (head, detail lipgloss.Style) {
+	switch kind {
+	case "moving":
+		return styleAccent, lipgloss.NewStyle().Foreground(colorAccent2)
+	case "restart":
+		return styleWarn.Bold(true), styleWarn
+	default:
+		return styleText.Bold(true), styleMuted
+	}
+}
+
+// relTime is the web banner's relative time: in 5m, 3h ago, in 2d.
+func relTime(d time.Duration) string {
+	a := d.Abs()
+	var u string
+	switch {
+	case a < time.Second:
+		return "now"
+	case a < time.Minute:
+		u = fmt.Sprintf("%ds", int(a.Round(time.Second)/time.Second))
+	case a < time.Hour:
+		u = fmt.Sprintf("%dm", int(a/time.Minute))
+	case a < 24*time.Hour:
+		u = fmt.Sprintf("%dh", int(math.Round(a.Hours())))
+	default:
+		u = fmt.Sprintf("%dd", int(math.Round(a.Hours()/24)))
+	}
+	if d > 0 {
+		return "in " + u
+	}
+	return u + " ago"
 }
 
 func rank(kind string) int {
