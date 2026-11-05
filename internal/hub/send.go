@@ -19,6 +19,7 @@ import (
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/eventpayload"
 	"github.com/XertroV/vecnet/internal/ids"
+	"github.com/XertroV/vecnet/internal/prefs"
 )
 
 // SendResponse is the body of a 202 (or replayed 200) POST /v1/messages
@@ -233,6 +234,10 @@ func isIdempotencyConflict(err error) bool {
 // pub receives the activity feed entry for the stored message; sendAs
 // publishes it only after commit.
 func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.SendRequest, bodySHA, ingress string, pub *ActivityEvent) (*SendResponse, bool, []string, error) {
+	snapshot, err := h.Preferences.LoadSnapshot(ctx, tx)
+	if err != nil {
+		return nil, false, nil, err
+	}
 	nowT := h.Now()
 	now := envelope.FormatTime(nowT)
 
@@ -266,8 +271,6 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 			return nil, false, nil, &cutError{apiErr}
 		}
 	}
-	var err error
-
 	// Thread: load an existing one, or prepare a new one.
 	var thr *threadRow
 	if req.ThreadID != nil {
@@ -327,8 +330,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 			g := addressed[0]
 			thr.Group = &g
 		}
-		if h.Cfg.ThreadBudget > 0 {
-			b := h.Cfg.ThreadBudget
+		if b := preferenceNumber(snapshot, "agents.thread_budget"); b > 0 {
 			thr.Budget = &b
 		}
 		thr.isNew = true
@@ -405,7 +407,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 	// Loop control (PROTOCOL §2.2 step 5, §6, §16.1): depth, max_depth and
 	// expiry, then the thread budget. A cut is counted, audited and
 	// committed; the send writes nothing else.
-	loop, apiErr := h.buildLoop(parent, snd.peer, snd.kind, req, nowT)
+	loop, apiErr := h.buildLoopSnapshot(snapshot, parent, snd.peer, snd.kind, req, nowT)
 	var cutNotify []string
 	if apiErr == nil {
 		if apiErr, err = h.checkBudget(ctx, tx, thr, nowT); err != nil {
@@ -521,7 +523,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 	}
 
 	// One Delivery per recipient peer, each appended to that peer's log.
-	refs, notify, err := h.fanOut(ctx, tx, thr, &msg, msgJSON, targets, hosted, ingress, msg.Loop.ExpiresAt, nowT)
+	refs, notify, err := h.fanOut(ctx, tx, thr, &msg, msgJSON, targets, hosted, ingress, msg.Loop.ExpiresAt, nowT, snapshot)
 	if err != nil {
 		return nil, false, nil, err
 	}
@@ -604,7 +606,13 @@ func (h *Hub) insertMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg
 // raising the thread's loop.expires_at. It returns the response refs and
 // the peers to wake.
 func (h *Hub) fanOut(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envelope.Message, msgJSON []byte,
-	targets []target, hosted map[string]bool, ingress, dlyExpires string, nowT time.Time) ([]DeliveryRef, []string, error) {
+	targets []target, hosted map[string]bool, ingress, dlyExpires string, nowT time.Time, snapshots ...prefs.Snapshot) ([]DeliveryRef, []string, error) {
+	var snapshot prefs.Snapshot
+	if len(snapshots) > 0 {
+		snapshot = snapshots[0]
+	} else {
+		snapshot = h.Preferences.Current()
+	}
 	now := envelope.FormatTime(nowT)
 	// Latch replay immutability in the very transaction publishing references.
 	// Disabling new writes later must never unfreeze previously replayable bodies.
@@ -673,7 +681,7 @@ func (h *Hub) fanOut(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envel
 		}
 		alsoVia, _ := json.Marshal(append([]string{}, t.alsoVia...))
 		gate := delivery{recipient: t.peer, priority: msg.Priority}
-		if err := h.GateWakeIdle(ctx, tx, &gate); err != nil {
+		if err := h.gateWakeIdleSnapshot(ctx, tx, &gate, snapshot, nowT); err != nil {
 			return nil, nil, err
 		}
 		held := 0

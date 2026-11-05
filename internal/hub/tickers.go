@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"time"
@@ -24,17 +25,41 @@ const SlowTickEvery = 120
 // ArchiveIdleGroups and Blobs.GC. Errors are logged and the next tick runs.
 // Tests pass a short interval and drive the hub's clock.
 func (h *Hub) RunTickers(ctx context.Context, every time.Duration) {
+	if ctx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	wake := h.Preferences.Subscribe(ctx)
+	if err := h.releaseStaleHeld(ctx, h.Now()); err != nil && ctx.Err() == nil {
+		slog.Error("hub: initial release held", "err", err)
+	}
 	if every <= 0 {
 		every = DefaultTickInterval
 	}
 	t := time.NewTicker(every)
 	defer t.Stop()
-	for n := 1; ; n++ {
+	n := 0
+	for {
+		if ctx.Err() != nil {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
+		case _, ok := <-wake:
+			if !ok {
+				return
+			}
+			// A preference wake only re-evaluates presence. It must never
+			// advance slow housekeeping or run deletion jobs.
+			if err := h.releaseStaleHeld(ctx, h.Now()); err != nil && ctx.Err() == nil {
+				slog.Error("hub: preferences release held", "err", err)
+			}
+			continue
 		case <-t.C:
 		}
+		n++
 		h.Tick(ctx, n%SlowTickEvery == 0)
 	}
 }
@@ -73,37 +98,48 @@ func (h *Hub) Tick(ctx context.Context, slow bool) {
 	}
 }
 
-// releaseStaleHeld calls OnIdle for each peer that holds wake_idle
-// deliveries and whose effective presence at now is idle or unknown: that
-// is, whose presence went stale (or idle without a report) since they were
-// held.
+// releaseStaleHeld evaluates presence and releases eligible held deliveries in
+// one writer transaction. A longer TTL, new presence report or newly held send
+// cannot commit between the policy read and the release.
 func (h *Hub) releaseStaleHeld(ctx context.Context, now time.Time) error {
-	rows, err := h.DB.QueryContext(ctx,
-		`SELECT p.peer_id, p.kind, p.presence_state, p.presence_at FROM peers p
-		 WHERE EXISTS (SELECT 1 FROM deliveries d WHERE d.recipient = p.peer_id AND d.held = 1 AND d.state = 'queued')`)
-	if err != nil {
-		return fmt.Errorf("hub: held peers: %w", err)
-	}
-	var release []string
-	for rows.Next() {
-		var peer string
-		var p PresenceRow
-		if err := rows.Scan(&peer, &p.Kind, &p.State, &p.At); err != nil {
+	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		snapshot, err := h.Preferences.LoadSnapshot(ctx, tx)
+		if err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx,
+			`SELECT p.peer_id, p.kind, p.presence_state, p.presence_at FROM peers p
+    WHERE EXISTS (SELECT 1 FROM deliveries d WHERE d.recipient = p.peer_id AND d.held = 1 AND d.state = 'queued')`)
+		if err != nil {
+			return fmt.Errorf("hub: held peers: %w", err)
+		}
+		var release []string
+		for rows.Next() {
+			var peer string
+			var p PresenceRow
+			if err := rows.Scan(&peer, &p.Kind, &p.State, &p.At); err != nil {
+				rows.Close()
+				return fmt.Errorf("hub: held peers: %w", err)
+			}
+			switch effectivePresence(snapshot, p, now) {
+			case "idle", "unknown":
+				release = append(release, peer)
+			}
+		}
+		if err := rows.Err(); err != nil {
 			rows.Close()
 			return fmt.Errorf("hub: held peers: %w", err)
 		}
-		switch h.EffectivePresence(p, now) {
-		case "idle", "unknown":
-			release = append(release, peer)
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("hub: held peers: %w", err)
 		}
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("hub: held peers: %w", err)
-	}
-	for _, peer := range release {
-		if err := h.OnIdle(ctx, peer); err != nil {
-			return err
+		for _, peer := range release {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE deliveries SET held = 0, updated_at = ? WHERE recipient = ? AND held = 1 AND state = 'queued'`,
+				envelope.FormatTime(now), peer); err != nil {
+				return fmt.Errorf("hub: release held deliveries: %w", err)
+			}
 		}
-	}
-	return nil
+		return nil
+	})
 }

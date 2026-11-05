@@ -95,6 +95,17 @@ func (w *Worker) now() time.Time {
 // Run calls Step every Interval until ctx ends. Errors are logged and the
 // next interval runs.
 func (w *Worker) Run(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return nil
+	}
+	w.init()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	wake := w.Hub.Preferences.Subscribe(ctx)
+	// Subscribe before the initial read so a concurrent commit cannot be lost.
+	if err := w.Store.refreshSchedules(ctx); err != nil && ctx.Err() == nil {
+		slog.Error("events: initial refresh schedules", "err", err)
+	}
 	interval := w.Interval
 	if interval <= 0 {
 		interval = DefaultInterval
@@ -102,9 +113,20 @@ func (w *Worker) Run(ctx context.Context) error {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
+		if ctx.Err() != nil {
+			return nil
+		}
 		select {
 		case <-ctx.Done():
 			return nil
+		case _, ok := <-wake:
+			if !ok {
+				return nil
+			}
+			if err := w.Store.refreshSchedules(ctx); err != nil && ctx.Err() == nil {
+				slog.Error("events: refresh preference schedules", "err", err)
+			}
+			continue
 		case <-t.C:
 		}
 		if _, err := w.Step(ctx); err != nil && ctx.Err() == nil {
@@ -120,6 +142,9 @@ func (w *Worker) Step(ctx context.Context) (int, error) {
 	w.init()
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if err := w.Store.refreshSchedules(ctx); err != nil {
+		return 0, err
+	}
 	now := w.now()
 	if err := w.Store.expire(ctx, now); err != nil {
 		return 0, err

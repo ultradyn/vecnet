@@ -16,6 +16,10 @@ import (
 // Peers includes disabled peers as well as the enabled public directory.
 // Credentials and route keys are never selected; only their status is read.
 func (r *Reader) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
+	snapshot, err := r.Hub.Preferences.LoadSnapshot(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
 	teams := map[string][]string{}
 	rows, err := r.Hub.DB.QueryContext(ctx, `SELECT peer_id, team_id FROM team_members ORDER BY peer_id, team_id`)
 	if err != nil {
@@ -127,7 +131,7 @@ func (r *Reader) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 		if err := dec.Decode(&p.Quota); err != nil || p.Quota == nil {
 			p.Quota = map[string]any{}
 		}
-		p.Presence = r.Hub.EffectivePresence(hub.PresenceRow{Kind: p.Kind, State: state, At: row.PresenceAt}, now)
+		p.Presence = hub.EffectivePresenceSnapshot(snapshot, hub.PresenceRow{Kind: p.Kind, State: state, At: row.PresenceAt}, now)
 		p.Reachability = hub.EffectiveReachability(reach, row.ReachVia, p.LastSeen, now)
 		p.Teams = teams[p.PeerID]
 		if p.Teams == nil {

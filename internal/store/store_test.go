@@ -692,8 +692,32 @@ func TestMigration0022UpgradesFrom0021(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Locate the unshipped preferences migration by suffix so a renumber at
+	// merge time does not silently leave this fixture testing nothing.
+	rows, err := db.QueryContext(ctx, `SELECT name FROM schema_migrations WHERE name LIKE '%\_hub\_preferences.sql' ESCAPE '\'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		found = append(found, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	if len(found) != 1 {
+		t.Fatalf("preferences migrations recorded = %v; want exactly one *_hub_preferences.sql", found)
+	}
+	prefsMig := found[0]
+	if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE name = ?`, prefsMig); err != nil {
+		t.Fatalf("delete %s record: %v", prefsMig, err)
+	}
 	for _, q := range []string{
-		`DELETE FROM schema_migrations WHERE name = '0022_hub_preferences.sql'`,
 		`DROP TABLE hub_preference_activations`,
 		`DROP TABLE hub_preferences_state`,
 		`DROP TABLE hub_preferences`,
@@ -703,12 +727,12 @@ func TestMigration0022UpgradesFrom0021(t *testing.T) {
 		}
 	}
 	applied, err := store.Migrate(ctx, db.DB)
-	if err != nil || !reflect.DeepEqual(applied, []string{"0022_hub_preferences.sql"}) {
-		t.Fatalf("upgrade applied %v, %v; want only 0022", applied, err)
+	if err != nil || !reflect.DeepEqual(applied, []string{prefsMig}) {
+		t.Fatalf("upgrade applied %v, %v; want only %s", applied, err, prefsMig)
 	}
 	var n int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE name IN ('0020_event_refresh_before.sql', '0021_hub_identity_notices.sql', '0022_hub_preferences.sql')`).Scan(&n); err != nil || n != 3 {
-		t.Fatalf("recorded 0020-0022 = %d, %v", n, err)
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE name IN ('0020_event_refresh_before.sql', '0021_hub_identity_notices.sql', ?)`, prefsMig).Scan(&n); err != nil || n != 3 {
+		t.Fatalf("recorded 0020, 0021 and %s = %d, %v", prefsMig, n, err)
 	}
 	for _, name := range []string{"hub_preferences", "hub_preferences_state", "hub_preference_activations"} {
 		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_list WHERE name=? AND strict=1`, name).Scan(&n); err != nil || n != 1 {

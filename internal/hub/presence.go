@@ -12,6 +12,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/prefs"
 )
 
 // Presence staleness defaults (PROTOCOL §8): a report older than its
@@ -45,39 +46,23 @@ type PresenceRow struct {
 	At    *string
 }
 
-// presenceTTL is the staleness TTL for a peer of kind.
-func (h *Hub) presenceTTL(kind string) time.Duration {
-	if kind == "launcher" {
-		if h.Cfg.LauncherPresenceTTL > 0 {
-			return h.Cfg.LauncherPresenceTTL
-		}
-		return DefaultLauncherPresenceTTL
-	}
-	if kind == "session" {
-		if h.Cfg.SessionPresenceTTL > 0 {
-			return h.Cfg.SessionPresenceTTL
-		}
-		return DefaultSessionPresenceTTL
-	}
-	if h.Cfg.PresenceTTL > 0 {
-		return h.Cfg.PresenceTTL
-	}
-	return DefaultPresenceTTL
-}
-
 // EffectivePresence is the presence the hub shows for p at now: the stored
 // state, or "unknown" when there is none or presence_at is older than the
 // kind's TTL (1 h; 15 min for session and launcher). The hub never invents a state
 // (PROTOCOL §8).
 func (h *Hub) EffectivePresence(p PresenceRow, now time.Time) string {
-	if p.State == nil || *p.State == "" || p.At == nil {
-		return "unknown"
-	}
-	at, err := envelope.ParseTime(*p.At)
-	if err != nil || now.Sub(at) > h.presenceTTL(p.Kind) {
-		return "unknown"
-	}
-	return *p.State
+	// This legacy projection has no context/transaction parameter and is also
+	// called inside transactions. Use the immutable committed publication rather
+	// than opening a nested DB read. Transactional operations pass their snapshot
+	// directly to effectivePresence.
+	return EffectivePresenceSnapshot(h.Preferences.Current(), p, now)
+}
+
+// EffectivePresenceSnapshot projects a row using the operation's captured
+// preference snapshot. Batch readers load once before iterating; callers in a
+// transaction pass their transaction's snapshot without opening a nested read.
+func EffectivePresenceSnapshot(s prefs.Snapshot, p PresenceRow, now time.Time) string {
+	return effectivePresence(s, p, now)
 }
 
 // SetPresence stores a presence report for the caller's peer (asPeer names
@@ -95,6 +80,10 @@ func (h *Hub) SetPresence(ctx context.Context, c auth.Caller, asPeer string, p P
 	dirChanged, stale := false, false
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		notify, dirChanged, stale = nil, false, false
+		snapshot, err := h.Preferences.LoadSnapshot(ctx, tx)
+		if err != nil {
+			return err
+		}
 		snd, err := resolveSender(ctx, tx, c, asPeer)
 		if err != nil {
 			return err
@@ -186,8 +175,8 @@ func (h *Hub) SetPresence(ctx context.Context, c auth.Caller, asPeer string, p P
 		}
 		notify = subs
 		if snd.kind == "operator" &&
-			h.EffectivePresence(PresenceRow{Kind: snd.kind, State: oldState, At: oldAt}, nowT) !=
-				h.EffectivePresence(PresenceRow{Kind: snd.kind, State: &p.State, At: &pres.At}, nowT) {
+			effectivePresence(snapshot, PresenceRow{Kind: snd.kind, State: oldState, At: oldAt}, nowT) !=
+				effectivePresence(snapshot, PresenceRow{Kind: snd.kind, State: &p.State, At: &pres.At}, nowT) {
 			operators, err := h.noteOperatorView(ctx, tx, "presence", "")
 			if err != nil {
 				return err

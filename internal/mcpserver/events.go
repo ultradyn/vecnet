@@ -415,8 +415,10 @@ func (s *Server) eventsSubscribe(ctx context.Context, _ *Session, req *Request) 
 	if err != nil {
 		return nil, err
 	}
-	refresh := events.RefreshDeadline(s.now(), *sub.Expires, s.Hub.Cfg.EventsRefreshInterval)
-	if err := s.Events.SetRefreshBefore(ctx, sub.ID, refresh); err != nil {
+	// The live events.refresh_interval preference sets the advice; only this
+	// successful subscription replaces the previously returned deadline.
+	refresh, err := s.Events.SaveRefreshAdvice(ctx, sub.ID)
+	if err != nil {
 		return nil, err
 	}
 	lifecycle, outcome := "events.refresh", "refreshed"
