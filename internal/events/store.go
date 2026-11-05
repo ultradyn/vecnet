@@ -464,9 +464,11 @@ func (st *Store) MarkVerifiedAt(ctx context.Context, id string, verified time.Ti
 
 // SetCursor moves a subscription to cur, which the caller vouches is retained,
 // and clears the truncated flag, now reported. The worker reads everything
-// after cur again, so outbox rows past it go, keeping order, except the ones
+// after cur again. Permanently delivered rows past it go, except the ones
 // the callback refused for good: those stay settled, so reading them again
 // changes nothing and a rewind never retries a 410 or 413 (PROTOCOL §4.4).
+// Pending rows keep their exact bytes and retry budget. Retryable exhausted
+// rows are rearmed in place with their exact frozen bytes.
 //
 // clientHas says the client named cur as the position it holds, which wins
 // (ChatGPT passes its last saved cursor): undelivered rows at or before it go
@@ -477,9 +479,17 @@ func (st *Store) SetCursor(ctx context.Context, id string, cur eventlog.Cursor, 
 	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM event_outbox WHERE sub_id = ?1 AND (
-			   (seq > ?2 AND NOT `+neverRetried+`) OR (?3 AND seq <= ?2 AND `+undelivered+`))`,
+			   (seq > ?2 AND done_at IS NOT NULL AND NOT `+neverRetried+` AND coalesce(terminal,'') != 'exhausted') OR (?3 AND seq <= ?2 AND `+undelivered+`))`,
 			id, cur.Seq, clientHas); err != nil {
 			return fmt.Errorf("events: rewind outbox: %w", err)
+		}
+		// Exhaustion is retryable on explicit rewind. Reuse the durable body:
+		// a legacy callback may differ from the current hydrated log event.
+		// Older erased bodies cannot be reconstructed with proof of equality.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE event_outbox SET done_at=NULL, terminal=NULL, attempts=0, next_attempt_at=NULL
+			 WHERE sub_id=? AND seq>? AND terminal='exhausted' AND body!=''`, id, cur.Seq); err != nil {
+			return fmt.Errorf("events: rearm outbox: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE event_subscriptions SET cursor_epoch = ?, cursor_seq = ?, truncated = 0, updated_at = ? WHERE sub_id = ?`,
@@ -831,7 +841,8 @@ func (st *Store) pending(ctx context.Context, id string, limit int) ([]outboxRow
 
 // settle closes a row (terminal "" for a delivery) and records the response.
 // status 0 is a network failure and leaves last_status NULL. A settled row's
-// body is never sent again, so it is cleared: a replay reads the log.
+// body is cleared only for permanent settlement. Retryable exhaustion keeps
+// the exact bytes for an explicit replay, including legacy callback envelopes.
 func (st *Store) settle(ctx context.Context, id, eventID, terminal string, status int, now time.Time) error {
 	nowS := envelope.FormatTime(now)
 	var term any
@@ -840,8 +851,10 @@ func (st *Store) settle(ctx context.Context, id, eventID, terminal string, statu
 	}
 	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE event_outbox SET done_at = ?, terminal = ?, next_attempt_at = NULL, body = '' WHERE sub_id = ? AND event_id = ?`,
-			nowS, term, id, eventID); err != nil {
+			`UPDATE event_outbox SET done_at = ?, terminal = ?, next_attempt_at = NULL,
+             body = CASE WHEN ? = 'exhausted' THEN body ELSE '' END,
+             parked = CASE WHEN ? = 'exhausted' THEN parked ELSE 0 END WHERE sub_id = ? AND event_id = ?`,
+			nowS, term, terminal, terminal, id, eventID); err != nil {
 			return fmt.Errorf("events: settle: %w", err)
 		}
 		if terminal == "exhausted" {
@@ -859,7 +872,7 @@ func (st *Store) withdraw(ctx context.Context, id, eventID string, now time.Time
 	nowS := envelope.FormatTime(now)
 	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE event_outbox SET done_at = ?, terminal = ?, next_attempt_at = NULL, body = '' WHERE sub_id = ? AND event_id = ?`,
+			`UPDATE event_outbox SET done_at = ?, terminal = ?, next_attempt_at = NULL, body = '', parked=0 WHERE sub_id = ? AND event_id = ?`,
 			nowS, terminalGated, id, eventID); err != nil {
 			return fmt.Errorf("events: withdraw: %w", err)
 		}
@@ -906,7 +919,7 @@ func recordResult(ctx context.Context, tx *sql.Tx, id string, status, attempts i
 // then, however old it is, and only this row stops it being retried.
 func (st *Store) pruneDone(ctx context.Context, cutoff time.Time) error {
 	if _, err := st.DB.ExecContext(ctx,
-		`DELETE FROM event_outbox WHERE done_at IS NOT NULL AND done_at < ? AND (NOT `+neverRetried+` OR seq <= coalesce((SELECT r.purged_through_seq FROM event_subscriptions s JOIN event_retention r ON r.owner=s.peer_id WHERE s.sub_id=event_outbox.sub_id),0)) AND coalesce(terminal,'') != 'exhausted' AND parked=0`,
+		`DELETE FROM event_outbox WHERE done_at IS NOT NULL AND done_at < ? AND (NOT `+neverRetried+` OR seq <= coalesce((SELECT r.purged_through_seq FROM event_subscriptions s JOIN event_retention r ON r.owner=s.peer_id WHERE s.sub_id=event_outbox.sub_id),0)) AND coalesce(terminal,'') != 'exhausted'`,
 		envelope.FormatTime(cutoff)); err != nil {
 		return fmt.Errorf("events: prune outbox: %w", err)
 	}

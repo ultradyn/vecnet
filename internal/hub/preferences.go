@@ -172,12 +172,13 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 	}
 	// encoding/json orders map keys, producing a canonical bounded scalar input.
 	canonical, err := json.Marshal(struct {
-		Bootstrap map[string]prefs.Effective
-		Registry  string
-		Policy    string
-		MaxExpiry int64
-		Installed map[string]bool
-	}{p.bootstrap, prefs.RegistryVersion, cfg.PreferencePolicyGeneration, p.maxExpiry, p.installed})
+		Bootstrap          map[string]prefs.Effective
+		Registry           string
+		Policy             string
+		MaxExpiry          int64
+		Installed          map[string]bool
+		HardEventRetention time.Duration
+	}{p.bootstrap, prefs.RegistryVersion, cfg.PreferencePolicyGeneration, p.maxExpiry, p.installed, cfg.UnackedEventRetention})
 	if err != nil {
 		return nil, err
 	}

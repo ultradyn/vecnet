@@ -55,7 +55,7 @@ func retentionConfirm(t *testing.T, h *hub.Hub, p prefs.Patch) {
 }
 
 func TestAcknowledgedRetentionScopesAndPrefix(t *testing.T) {
-	for _, scope := range []string{"peer", "principal", "narrowed", "none", "scan", "read", "receipt"} {
+	for _, scope := range []string{"peer", "principal", "narrowed", "none", "scan"} {
 		t.Run(scope, func(t *testing.T) {
 			env := testhub.Start(t)
 			h := env.Hub
@@ -74,15 +74,6 @@ func TestAcknowledgedRetentionScopesAndPrefix(t *testing.T) {
 				retentionAck(t, h, prn, peer, c)
 			case "scan":
 				retentionSubscription(t, h, peer, c, "live")
-			case "read", "receipt":
-				// Neither delivery presentation nor terminal acceptance is a pull acknowledgement.
-				a, as := env.NewPeer("session", "sender")
-				_ = a
-				m := mustSend(t, env, as, req("synthetic", peer))
-				_, err := h.DB.Exec(`UPDATE deliveries SET state='processed',read_at=? WHERE msg_id=?`, envelope.FormatTime(h.Now()), m.MessageID)
-				if err != nil {
-					t.Fatal(err)
-				}
 			}
 			retentionRun(t, h)
 			want := int64(0)

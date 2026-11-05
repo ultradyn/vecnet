@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/eventlog"
 )
@@ -72,11 +74,21 @@ func TestOwnerRetentionInterleavedFloors(t *testing.T) {
 
 func TestRetentionReadSnapshotSurvivesConcurrentPurge(t *testing.T) {
 	l, db := openLog(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	c := appendOne(t, l, db, peerA, 1)
 	purgedSnapshot := make(chan struct{})
 	ready, done := make(chan struct{}), make(chan error, 1)
+	finished := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(purgedSnapshot) }) }
+	defer func() {
+		release()
+		cancel()
+		<-finished
+	}()
 	go func() {
+		defer close(finished)
 		done <- db.ReadSnapshot(ctx, func(q *sql.Conn) error {
 			var n int
 			if err := q.QueryRowContext(ctx, `SELECT count(*) FROM events`).Scan(&n); err != nil {
@@ -84,7 +96,11 @@ func TestRetentionReadSnapshotSurvivesConcurrentPurge(t *testing.T) {
 			}
 			close(ready)
 			// The other writer commits while this reader pins the WAL snapshot.
-			<-purgedSnapshot
+			select {
+			case <-purgedSnapshot:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 			var floor int64
 			if err := q.QueryRowContext(ctx, `SELECT coalesce(max(purged_through_seq),0) FROM event_retention`).Scan(&floor); err != nil {
 				return err
@@ -101,11 +117,17 @@ func TestRetentionReadSnapshotSurvivesConcurrentPurge(t *testing.T) {
 			return nil
 		})
 	}()
-	<-ready
-	if _, err := db.Exec(`DELETE FROM events WHERE owner=?`, peerA); err != nil {
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("reader failed before readiness: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM events WHERE owner=?`, peerA); err != nil {
 		t.Fatal(err)
 	}
-	close(purgedSnapshot)
+	release()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
