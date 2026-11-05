@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"sync"
 	"time"
@@ -31,6 +33,22 @@ func TestEnrolPinsHubPubkey(t *testing.T) {
 	}
 	if cfg.Profiles["p"].HubPubkey != e.Hub.IdentityKey().Pubkey() {
 		t.Fatalf("enrol did not pin: %+v", cfg)
+	}
+}
+// A malformed hub_pubkey in the enrol answer is not written as the config
+// pin (which would win over the sidecar forever); TOFU applies instead.
+func TestEnrolIgnoresMalformedHubPubkey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"peer_id": "pr_x", "secret": "vn_secret", "name": "x", "hub_pubkey": "ed25519:not-a-key"})
+	}))
+	t.Cleanup(srv.Close)
+	path, env := pinTestEnv(t, "")
+	if code, _, errs := pinRun(env, "enrol", "--hub", srv.URL, "--token", "vn_enrol_tok", "--profile", "p"); code != 0 {
+		t.Fatalf("%d %s", code, errs)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil || cfg.Profiles["p"].Secret != "vn_secret" || cfg.Profiles["p"].HubPubkey != "" {
+		t.Fatalf("profile: %+v %v", cfg.Profiles["p"], err)
 	}
 }
 func pinnedUser(t *testing.T, e *testhub.Env) (string, func(string) string) {

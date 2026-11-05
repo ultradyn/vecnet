@@ -30,6 +30,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
 
@@ -423,7 +424,10 @@ func (a *app) ok(human string) error {
 // dispatch runs one command.
 func (a *app) dispatch(cmd string, args []string) error {
 	err := a.dispatchOnce(cmd, args)
-	if cmd == "watch" || cmd == "hook" || cmd == "mcp" || cmd == "profile" {
+	// enrol has no profile yet (a 410 there must not follow another one);
+	// guide makes no hub request.
+	switch cmd {
+	case "watch", "hook", "mcp", "profile", "enrol", "enroll", "guide":
 		return err
 	}
 	followed, followErr := a.followFailure(err)
@@ -580,9 +584,24 @@ func (a *app) cmdEnrol(args []string) error {
 		if errors.As(err, &he) && he.Status == http.StatusUnauthorized {
 			he.Hint = enrolUnauthHint
 		}
+		// A relocated hub (410 hub_moved) cannot enrol, and there is no
+		// profile to follow yet: point at the new hub instead.
+		if errors.As(err, &he) && he.Status == http.StatusGone && he.Code == "hub_moved" {
+			if raw, ok := he.Details["new_url"].(string); ok {
+				if next, e := hubid.NormalizeURL(raw); e == nil {
+					he.Hint = "hub moved to " + next + "; ask for an invite there"
+				}
+			}
+		}
 		return err
 	}
-	cfg.Profiles[name] = Profile{Hub: strings.TrimRight(hubURL, "/"), HubPubkey: out.HubPubkey, Secret: out.Secret, PeerID: out.PeerID, AllowInsecureHTTP: insecure}
+	// Only a canonical key becomes the config pin, which always wins over
+	// the sidecar; otherwise the first command pins by first use (§21.5).
+	pin := out.HubPubkey
+	if _, e := hubid.DecodePubkey(pin); e != nil {
+		pin = ""
+	}
+	cfg.Profiles[name] = Profile{Hub: strings.TrimRight(hubURL, "/"), HubPubkey: pin, Secret: out.Secret, PeerID: out.PeerID, AllowInsecureHTTP: insecure}
 	if err := saveConfig(path, cfg); err != nil {
 		// The secret was issued once; show it so it is not lost.
 		fmt.Fprintf(a.stderr, "vecnet: could not write %s; the secret for %s is %s\n", path, out.PeerID, out.Secret)

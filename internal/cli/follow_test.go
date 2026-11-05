@@ -43,8 +43,28 @@ func TestFollowOn410(t *testing.T) {
 	}
 	pp, _ := pinsPath(env)
 	records, err := readPins(pp)
-	if err != nil || records["p"].LastMove == nil || records["p"].LastMove.To != b.URL {
+	if err != nil || records["p"].LastMove == nil || records["p"].LastMove.To != b.URL || records["p"].How != "follow" {
 		t.Fatalf("move record: %+v %v", records, err)
+	}
+}
+// enrol has no profile to follow: a 410 from a relocated hub leaves every
+// profile alone and hints at the new hub (§21.5 When to follow, item 1).
+func TestEnrolOn410DoesNotFollow(t *testing.T) {
+	a := testhub.Start(t)
+	_, tok, err := a.Hub.AddPeer(context.Background(), "session", "late-enrol", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := a.CloneDB(t)
+	path, env := followConfig(t, a)
+	before := pinRead(t, path)
+	a.Relocate(t, b.URL)
+	code, _, errs := pinRun(env, "enrol", "--hub", a.URL, "--token", tok, "--profile", "q")
+	if code != 2 || !strings.Contains(errs, "hub_moved") || !strings.Contains(errs, "hub moved to "+b.URL+"; ask for an invite there") {
+		t.Fatalf("%d %s", code, errs)
+	}
+	if !bytes.Equal(before, pinRead(t, path)) || strings.Contains(errs, "now uses") {
+		t.Fatalf("enrol followed another profile: %s\n%s", pinRead(t, path), errs)
 	}
 }
 func TestFollowAllProfilesSameHub(t *testing.T) {
@@ -311,6 +331,14 @@ func watchProxy(t *testing.T, e *testhub.Env) (*httptest.Server, *atomic.Int64, 
 	}))
 	t.Cleanup(srv.Close)
 	return srv, unavailable, polls, resumes
+}
+// retry_after_ms is 0-60000 (§21.3): a larger hint waits at most a jittered minute.
+func TestWatchRestartHintClamped(t *testing.T) {
+	w := &watcher{a: &app{stdout: io.Discard, stderr: io.Discard}}
+	w.restarting(restartHint{RetryAfterMS: 24 * 3600 * 1000})
+	if w.restartDelay > 72*time.Second || time.Until(w.restartUntil) > 2*time.Minute+time.Second {
+		t.Fatalf("delay %v grace until %v", w.restartDelay, time.Until(w.restartUntil))
+	}
 }
 func TestWatchPrintsHubRestarting(t *testing.T) {
 	e := testhub.Start(t)
@@ -735,6 +763,52 @@ func TestWatchPinnedAliasURL(t *testing.T) {
 	}
 }
 
+// A pinned alias profile cannot follow a move (the notice names the hub's
+// public_url): watch prints one relocation_unverified line with the repoint
+// hint, keeps running and never follows.
+func TestWatchPinnedAliasMovingNoticeHint(t *testing.T) {
+	noMoveJitter(t)
+	e := testhub.Start(t)
+	b := e.CloneDB(t)
+	target, _ := url.Parse(e.URL)
+	alias := httptest.NewServer(httputil.NewSingleHostReverseProxy(target))
+	t.Cleanup(alias.Close)
+	path, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nhub_pubkey = %q\nsecret = %q\n", alias.URL, e.Hub.IdentityKey().Pubkey(), e.OperatorSecret))
+	resp, raw := e.Do(e.OperatorSecret, "POST", "/v1/admin/notices", map[string]any{"kind": "moving", "message": "Moving", "at": envelope.FormatTime(time.Now().Add(-31 * time.Second)), "new_url": b.URL})
+	if resp.StatusCode != 201 {
+		t.Fatalf("notice: %d %s", resp.StatusCode, raw)
+	}
+	var posted struct{ Notice envelope.HubNotice }
+	if err := json.Unmarshal(raw, &posted); err != nil || posted.Notice.Hub == "" {
+		t.Fatalf("notice body: %s %v", raw, err)
+	}
+	own := posted.Notice.Hub
+	out, errs, stop := runNoticeWatch(t, env)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("stdout: %s\nstderr: %s", out.String(), errs.String())
+		}
+	})
+	want := "- relocation_unverified - hub hub: not following " + b.URL + ": notice names hub " + own + "\n"
+	hint := "profile p uses an alias of " + own + "; run `vecnet --net p profile repoint " + own + "` to follow its moves"
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), want) && strings.Contains(errs.String(), hint) }, 5*time.Second)
+	// A later moving Event for the same notice does not repeat the line.
+	resp, raw = e.Do(e.OperatorSecret, "POST", "/v1/admin/notices", map[string]any{"kind": "maintenance", "message": "unrelated"})
+	if resp.StatusCode != 201 {
+		t.Fatalf("notice: %d %s", resp.StatusCode, raw)
+	}
+	holdMessage(t, e, e.OperatorPeer, "still at the alias")
+	awaitNotice(t, func() bool { return strings.Contains(out.String(), "still at the alias") }, 5*time.Second)
+	stop()
+	if n := strings.Count(out.String(), "relocation_unverified"); n != 1 {
+		t.Fatalf("relocation_unverified printed %d times: %q", n, out.String())
+	}
+	cfg, err := loadConfig(path)
+	if err != nil || cfg.Profiles["p"].Hub != alias.URL || strings.Contains(errs.String(), "relocation_unverified") {
+		t.Fatalf("followed or exited: %+v %v %q", cfg.Profiles["p"], err, errs.String())
+	}
+}
+
 // The alias tolerance covers the URL only: a pinned alias serving another key
 // still exits hub_identity_changed before any bearer request.
 func TestWatchPinnedAliasKeyMismatch(t *testing.T) {
@@ -769,10 +843,12 @@ func TestWatchScheduledFollowWaitsForDestination(t *testing.T) {
 	// The destination refuses connections until B exists; B is cloned only
 	// after the watch has seen A's later events, so its cursor stays valid.
 	var b atomic.Pointer[testhub.Env]
+	var refused atomic.Int32
 	var dest *httptest.Server
 	dest = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hub := b.Load()
 		if hub == nil {
+			refused.Add(1)
 			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
 				conn.Close()
 			}
@@ -803,7 +879,7 @@ func TestWatchScheduledFollowWaitsForDestination(t *testing.T) {
 	}, 5*time.Second)
 	holdMessage(t, a, a.OperatorPeer, "still at A")
 	awaitNotice(t, func() bool { return strings.Contains(out.String(), "still at A") }, 5*time.Second)
-	time.Sleep(time.Second) // several retries fail before the destination comes up
+	awaitNotice(t, func() bool { return refused.Load() >= 2 }, 10*time.Second) // at least one retry fails before the destination comes up
 	b.Store(a.CloneDB(t))
 	awaitNotice(t, func() bool { return strings.Contains(out.String(), "- hub_moved - hub hub:") }, 10*time.Second)
 	cfg, err := loadConfig(path)

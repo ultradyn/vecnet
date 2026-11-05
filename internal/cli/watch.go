@@ -600,8 +600,9 @@ func (w *watcher) systemLine(kind, text string) {
 }
 
 func (w *watcher) restarting(h restartHint) {
-	// Bound untrusted transport delays before converting milliseconds to a duration.
-	d := time.Duration(max(int64(0), min(h.RetryAfterMS, int64((24*time.Hour)/time.Millisecond)))) * time.Millisecond
+	// Bound untrusted transport delays to §21.3's 0-60000 ms before
+	// converting milliseconds to a duration.
+	d := time.Duration(max(int64(0), min(h.RetryAfterMS, int64(time.Minute/time.Millisecond)))) * time.Millisecond
 	w.restartUntil = time.Now().Add(d + time.Minute)
 	w.restartDelay = d*8/10 + rand.N(d*4/10+1)
 	w.restartWarned = false
@@ -653,14 +654,32 @@ func (w *watcher) refreshMoving() {
 	if moving.At == "" {
 		return
 	}
+	// A notice this watch cannot follow is printed once (w.move remembers it)
+	// and ignored: the hub still serves, and if it does relocate, the 410
+	// runs the full follow checks and a refusal then ends the watch (§13.7).
 	pin, _ := w.a.effectivePin(w.name, w.profile)
-	source, e := hubid.NormalizeURL(moving.Hub)
-	if e != nil || source != own {
-		w.systemLine("relocation_unverified", "not following "+moving.NewURL+": notice does not describe this hub moving")
+	if pin == "" {
+		// verifyConnection pins every hub that first use can pin, so an
+		// unpinned profile here names an alias or a pre-§21 hub: follow
+		// could not pin the old hub either (§21.5 step 2).
+		w.systemLine("relocation_unverified", "not following "+moving.NewURL+": this hub is not pinned")
 		return
 	}
 	if hubid.VerifyNotice(pin, *moving) != nil {
 		w.systemLine("relocation_unverified", "not following "+moving.NewURL+": invalid moving notice signature")
+		return
+	}
+	source, e := hubid.NormalizeURL(moving.Hub)
+	if e != nil || source != own {
+		if e != nil {
+			w.systemLine("relocation_unverified", "not following "+moving.NewURL+": notice does not describe this hub moving")
+			return
+		}
+		// Signed by the pinned key: the profile names an alias of the hub's
+		// public_url (DEPLOY.md), which a follow never accepts.
+		w.systemLine("relocation_unverified", "not following "+moving.NewURL+": notice names hub "+source)
+		fmt.Fprintf(w.a.stderr, "vecnet: watch: profile %s uses an alias of %s; run `vecnet --net %s profile repoint %s` to follow its moves\n",
+			peerName(w.name), source, peerName(w.name), source)
 		return
 	}
 	at, e := envelope.ParseTime(moving.At)

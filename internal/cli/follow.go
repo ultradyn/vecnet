@@ -45,7 +45,7 @@ func (a *app) follow(ctx context.Context, name string, p Profile, n envelope.Hub
 	if err != nil || next == old {
 		return refuse("invalid or unchanged destination")
 	}
-	pin, how := a.effectivePin(name, p)
+	pin, _ := a.effectivePin(name, p)
 	snapshotPin := pin
 	allow := p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"
 	if pin == "" {
@@ -53,7 +53,7 @@ func (a *app) follow(ctx context.Context, name string, p Profile, n envelope.Hub
 		if e != nil {
 			return refuse("cannot pin the old hub")
 		}
-		pin, how = doc.Pubkey, "tofu"
+		pin = doc.Pubkey
 	}
 	if hubid.VerifyNotice(pin, n) != nil {
 		return refuse("invalid moving notice signature")
@@ -126,7 +126,9 @@ func (a *app) follow(ctx context.Context, name string, p Profile, n envelope.Hub
 		}
 		for profile := range edits {
 			r := current[profile]
-			r.Hub, r.Pubkey, r.How = next, pin, how
+			// Every rewritten profile records the move, whatever pinned the
+			// old hub (§21.5 The pin).
+			r.Hub, r.Pubkey, r.How = next, pin, "follow"
 			r.TofuTriedAt = ""
 			if r.PinnedAt == "" {
 				r.PinnedAt = time.Now().UTC().Format(time.RFC3339Nano)
