@@ -93,7 +93,7 @@ admin (operator credential):
        --open-name, the agent picks its name at enrol
   peer invite <peer> [--ttl 24h] [--copy]             re-issues a token for a peer not yet enrolled
   peer move <peer> --principal PRN
-  peer link <peer>                                    prints a dot's 12-character link code
+  peer link <peer>                                    prints a peer's 12-character OAuth link code
   peer avatar <peer> (FILE|https://URL|--clear)       set or clear any peer's avatar
   peer rotate <peer>
   peer scope <peer> [--allow IDS] [--deny IDS]        IDS: comma-separated or repeated
@@ -109,6 +109,7 @@ admin (operator credential):
   team add --name N [--members IDS]
   dead-letters list | dead-letters retry <dly> | dead-letters discard <dly>
   notify set --url URL --filter F [--url URL --filter F]…
+  diag mcp [--peer ID] [--method M] [--limit N] [--follow]
   audit [--limit N]
   tui                                                 the operator's terminal client
 
@@ -463,6 +464,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdDeadLetters(args)
 	case "notify":
 		return a.cmdNotify(args)
+	case "diag":
+		return a.cmdDiag(args)
 	case "audit":
 		return a.cmdAudit(args)
 	case "tui":

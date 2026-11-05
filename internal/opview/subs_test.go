@@ -209,6 +209,14 @@ func TestLastRefreshOnResubscribe(t *testing.T) {
 	if got := subscription(t, env, sub.ID); got.LastRefreshAt == nil || *got.LastRefreshAt != want {
 		t.Fatalf("refresh=%v want=%s", got.LastRefreshAt, want)
 	}
+	// Upsert reserves the refreshed row; a changed key requires a new callback
+	// proof before delivery. Complete that handshake in this store-level fixture.
+	if refreshed.Verified {
+		t.Fatal("secret rotation retained verification")
+	}
+	if err := store.MarkVerified(context.Background(), sub.ID); err != nil {
+		t.Fatal(err)
+	}
 	env.Now.Advance(time.Minute)
 	resp, raw := env.Do(env.OperatorSecret, "POST", "/v1/messages", map[string]any{"idempotency_key": "health-delivery", "priority": "wake", "recipients": []string{sub.PeerID}, "content": map[string]any{"text": "test"}})
 	if resp.StatusCode != 202 {

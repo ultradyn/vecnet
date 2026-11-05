@@ -105,7 +105,15 @@ await check('initialize older revision', async () => {
     protocolVersion: '2025-03-26', capabilities: {},
     clientInfo: { name: 'vecnet-mcp-conformance', version: '1' },
   }, { legacy: true });
+  // March requires JSON-RPC batch reception; this server negotiates fallback.
   requireCheck(result.protocolVersion === '2025-11-25');
+});
+await check('initialize supported older revision', async () => {
+  const result = await rpc('initialize', {
+    protocolVersion: '2025-06-18', capabilities: {},
+    clientInfo: { name: 'vecnet-mcp-conformance', version: '1' },
+  }, { legacy: true });
+  requireCheck(result.protocolVersion === '2025-06-18');
 });
 await check('tools/list', async () => {
   const result = await rpc('tools/list');
@@ -116,6 +124,8 @@ await check('tools/list', async () => {
   const guide = result.tools.find(tool => tool.name === 'vecnet_guide');
   requireCheck(guide?.annotations?.readOnlyHint === true && guide.annotations.openWorldHint === false);
   requireCheck(object(guide.outputSchema));
+  const subscriptions = result.tools.find(tool => tool.name === 'vecnet_subscriptions');
+  requireCheck(subscriptions?.annotations?.readOnlyHint === true && object(subscriptions.inputSchema));
 });
 await check('setup guide and prompt', async () => {
   const guide = await rpc('tools/call', { name: 'vecnet_guide' });
@@ -132,6 +142,16 @@ await check('events/list', async () => {
   requireCheck(Array.isArray(result.events));
   const event = result.events.find(event => event.name === 'vecnet.message');
   requireCheck(Array.isArray(event?.delivery) && event.delivery.length === 1 && event.delivery[0] === 'webhook');
+  const simple = value => !object(value) && !Array.isArray(value) ||
+    Object.entries(value).every(([key, child]) => !['$ref', '$defs', 'anyOf', 'oneOf', 'allOf'].includes(key) && simple(child));
+  requireCheck(simple(event));
+});
+await check('subscription status', async () => {
+  const result = await rpc('tools/call', { name: 'vecnet_subscriptions' });
+  requireCheck(result.isError !== true && Array.isArray(result.structuredContent?.subscriptions));
+  for (const sub of result.structuredContent.subscriptions) {
+    requireCheck(typeof sub.callback_host === 'string' && !('url' in sub) && !('secret' in sub));
+  }
 });
 await check('invalid Origin', async () => {
   // Skip after a rejected bearer so a broken Origin guard cannot spend a

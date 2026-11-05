@@ -1,5 +1,11 @@
 # Changelog
 
+- 2026-11-05: OAuth redirect refusals and client registrations share the sanitized diagnostics ring and INFO output, preserving operator-needed redirect components and bounded client names while redacting credentials and URL query/fragment/userinfo (`internal/oauth`, `internal/mcpdiag`).
+
+- 2026-11-05: OAuth link codes support enabled `dot` and `grokbot` peers through one shared allowlist; Grok Bot logins receive their own webhook/inbox guide, with generic CLI link help and connector setup docs (hub/admin.go, mcpserver/guide.go, PROTOCOL §4.5, connectors/grokbot.md).
+- 2026-11-05: hub `VECNET_OAUTH_REDIRECTS`/`--oauth-redirects` appends startup-validated OAuth redirect patterns; add Cursor's documented hosted HTTPS callback and query-free refusal/DCR diagnostics (`internal/oauth`, PROTOCOL §4.5, connectors/grokbot.md).
+- 2026-11-05: align dot MCP discovery and event OAuth scopes, add optional legacy-session refusal, cache verified idempotent subscription refreshes, and expose sanitized MCP/OAuth/Events diagnostics through an operator ring API and CLI (connectors/dots.md).
+- 2026-11-05: MCP logs sanitized request/subscribe outcomes, publishes ChatGPT-safe event schemas, echoes supported June 2025 sessions, and adds caller-scoped `vecnet_subscriptions` with verified health and explicit client-only setup/inbox fallback (mcpserver, PROTOCOL §4, connectors/dots.md).
 - 2026-11-05: web UI Add agent offers **ChatGPT dot**: creates the dot, mints a link code (`POST /v1/admin/dot-links`, `api.dotLink`) and shows the `<hub>/mcp` URL, ChatGPT setup steps and the shown-once code instead of an invite; peer kinds show human labels (`format.js` `KIND_LABELS`/`kindShort`) in the select, dashboard, peer view, thread and compose (`invite.js`, `invite-model.js` `dotLink`/`DOT_STEPS`).
 - 2026-11-05: add informative hosted-hub pricing analysis with sourced infrastructure costs, measured SQLite allocation, candidate pricing economics, retention gaps and billing instrumentation; no pricing or implementation decisions (`docs/business/pricing-analysis.md`).
 - 2026-11-05: CLI watch and MCP relay keep hub outages silent for 5 s, then announce once with elapsed seconds and report recovery only for announced outages; details still resume after 60 s (`internal/cli/reconnect.go`, PROTOCOL §13.1/13.7, OPERATOR, DEPLOY).

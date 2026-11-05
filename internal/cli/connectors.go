@@ -23,7 +23,7 @@ const (
 )
 
 // peerLink is `peer link <peer>`: the 12-character code, shown as
-// ABCD-EFGH-JKMN, that the dot's principal enters on first login
+// ABCD-EFGH-JKMN, that the peer's OAuth principal enters on first login
 // (PROTOCOL §4.5, §20.1).
 func (a *app) peerLink(peer string) error {
 	var out map[string]any

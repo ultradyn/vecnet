@@ -168,16 +168,35 @@ func TestEventsListShape(t *testing.T) {
 	if e.InputSchema.AdditionalProperties == nil || *e.InputSchema.AdditionalProperties {
 		t.Fatalf("inputSchema is not strict: %+v", e.InputSchema)
 	}
-	if _, ok := e.InputSchema.Defs["peerId"]; !ok {
-		t.Fatalf("inputSchema does not carry $defs/peerId: %+v", e.InputSchema)
-	}
-	ev, ok := e.PayloadSchema.Defs["event"]
-	if !ok {
-		t.Fatalf("payloadSchema has no $defs/event: %+v", e.PayloadSchema)
-	}
 	for _, p := range []string{"cursor", "type", "at", "data"} {
-		if _, ok := ev.Properties[p]; !ok {
-			t.Fatalf("payloadSchema event lacks %s: %+v", p, ev)
+		if _, ok := e.PayloadSchema.Properties[p]; !ok {
+			t.Fatalf("payloadSchema event lacks %s: %+v", p, e.PayloadSchema)
+		}
+	}
+	var listed any
+	if err := json.Unmarshal(r.Result, &listed); err != nil {
+		t.Fatal(err)
+	}
+	assertSimpleEventSchema(t, listed)
+}
+
+// assertSimpleEventSchema rejects compatibility hazards at every depth,
+// including definitions that a shallow top-level schema check would miss.
+func assertSimpleEventSchema(t *testing.T, value any) {
+	t.Helper()
+	switch node := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"$ref", "$defs", "anyOf", "oneOf", "allOf"} {
+			if _, ok := node[key]; ok {
+				t.Errorf("events/list contains unsupported schema keyword %s", key)
+			}
+		}
+		for _, child := range node {
+			assertSimpleEventSchema(t, child)
+		}
+	case []any:
+		for _, child := range node {
+			assertSimpleEventSchema(t, child)
 		}
 	}
 }
@@ -437,8 +456,8 @@ func TestChallengeFailure(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"challenge": c})
 	})
 	r = rpc2026(t, env, secret, "events/subscribe", subParams(cb3.URL, webhook.NewSecret(), nil))
-	if r.Error == nil || errReason(t, r) != "challenge_failed" {
-		t.Fatalf("500 with a correct echo: %+v, want challenge_failed", r.Error)
+	if r.Error == nil || errReason(t, r) != "http_5xx" {
+		t.Fatalf("500 with a correct echo: %+v, want http_5xx", r.Error)
 	}
 
 	cb4 := testhub.NewCallback(t)
@@ -487,8 +506,8 @@ func TestRefreshKeepsCursorRotatesSecret(t *testing.T) {
 	if again.Cursor != firstCursor || again.Truncated {
 		t.Fatalf("refresh = %+v, want cursor %s, not truncated", again, firstCursor)
 	}
-	if n := len(cb.Challenges()); n != 1 {
-		t.Fatalf("challenges = %d; a refresh of a verified subscription needs none", n)
+	if n := len(cb.Challenges()); n != 2 {
+		t.Fatalf("challenges = %d; a rotated secret must verify independently", n)
 	}
 	stepEvents(t, env)
 	posts = cb.Posts()
@@ -652,7 +671,7 @@ type fakeOAuth struct {
 func (f fakeOAuth) Authenticate(context.Context, *http.Request) (mcpserver.Principal, error) {
 	return mcpserver.Principal{
 		Caller: auth.Caller{Kind: "principal", PrincipalID: f.prn},
-		OAuth:  &mcpserver.OAuthInfo{PrincipalID: f.prn, Expires: f.expires()},
+		OAuth:  &mcpserver.OAuthInfo{PrincipalID: f.prn, Expires: f.expires(), Scopes: []string{"vecnet", "events:read", "events:write"}},
 	}, nil
 }
 
@@ -746,7 +765,7 @@ func TestSubscribeTtlClamp(t *testing.T) {
 			t.Fatalf("%s: refreshBefore = %v, %v", c.name, rb, err)
 		}
 	}
-	for _, ttl := range []any{0, -5, "soon"} {
+	for _, ttl := range []any{0, -5, 0.5, 1.5, "soon"} {
 		cb := testhub.NewCallback(t)
 		r := rpc2026(t, env, secret, "events/subscribe", subParams(cb.URL, webhook.NewSecret(), map[string]any{"ttlMs": ttl}))
 		if r.Error == nil || r.Error.Code != mcpserver.ErrInvalidParams {
@@ -766,6 +785,8 @@ func TestSubscribeParamsStrict(t *testing.T) {
 		"argument":      subParams(cb.URL, whsec, map[string]any{"arguments": map[string]any{"color": "red"}}),
 		"type":          subParams(cb.URL, whsec, map[string]any{"arguments": map[string]any{"types": []string{"presence"}}}),
 		"empty types":   subParams(cb.URL, whsec, map[string]any{"arguments": map[string]any{"types": []string{}}}),
+		"repeat types":  subParams(cb.URL, whsec, map[string]any{"arguments": map[string]any{"types": []string{"delivery", "delivery"}}}),
+		"peer":          subParams(cb.URL, whsec, map[string]any{"arguments": map[string]any{"peer_id": "nope"}}),
 		"thread":        subParams(cb.URL, whsec, map[string]any{"arguments": map[string]any{"thread_id": "nope"}}),
 		"cursor":        subParams(cb.URL, whsec, map[string]any{"cursor": "1.2"}),
 		"future cursor": subParams(cb.URL, whsec, map[string]any{"cursor": fmt.Sprintf("e%d.999999", env.Hub.Log.Epoch())}),
@@ -1142,7 +1163,7 @@ func TestDefaultChallengeClientRefusesLoopback(t *testing.T) {
 
 // A passed challenge stands for ChallengeMaxAge. Past it a re-subscribe sends a
 // signed challenge, and failing that keeps the row, its cursor and its queue
-// while delivering nothing. A new secret alone needs no challenge.
+// while delivering nothing. A new secret must verify independently.
 func TestChallengeAgesOut(t *testing.T) {
 	env := testhub.Start(t)
 	dot, dotSecret := env.NewPeer("session", "d")
@@ -1154,20 +1175,19 @@ func TestChallengeAgesOut(t *testing.T) {
 	stepEvents(t, env)
 	seen := decodeEvent(t, cb.Posts()[0].Body).Cursor
 
-	// Inside the bound: a refresh with a new secret, no challenge.
-	env.Now.Advance(events.ChallengeMaxAge - time.Hour)
-	key = webhook.NewSecret()
+	// Inside the bound: an unchanged key reuses the original proof.
+	env.Now.Advance(events.ChallengeMaxAge - time.Minute)
 	subscribeOK(t, env, dotSecret, subParams(cb.URL, key, nil))
 	if n := len(cb.Challenges()); n != 1 {
 		t.Fatalf("challenges inside the bound = %d, want 1", n)
 	}
 
 	// Past it, against a callback that no longer answers.
-	env.Now.Advance(2 * time.Hour)
+	env.Now.Advance(2 * time.Minute)
 	cb.OnChallenge(func(_ string, w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) })
 	r := rpc2026(t, env, dotSecret, "events/subscribe", subParams(cb.URL, key, nil))
-	if r.Error == nil || r.Error.Code != mcpserver.ErrCodeCallback || errReason(t, r) != "challenge_failed" {
-		t.Fatalf("re-subscribe past the bound = %+v / %s, want -32015 challenge_failed", r.Error, r.Result)
+	if r.Error == nil || r.Error.Code != mcpserver.ErrCodeCallback || errReason(t, r) != "http_4xx" {
+		t.Fatalf("re-subscribe past the bound = %+v / %s, want -32015 http_4xx", r.Error, r.Result)
 	}
 	chs := cb.Challenges()
 	if len(chs) != 2 {
@@ -1206,8 +1226,8 @@ func TestChallengeAgesOut(t *testing.T) {
 	}
 }
 
-// A row that lapsed proves itself again however recent its last pass was, and
-// the worker sends nothing while that challenge is outstanding.
+// A lapsed row with an expired callback proof must verify again, and the
+// worker sends nothing while that challenge is outstanding.
 func TestLapsedSubscriptionChallengesAgain(t *testing.T) {
 	env := testhub.Start(t)
 	dot, dotSecret := env.NewPeer("session", "d")
@@ -1215,7 +1235,7 @@ func TestLapsedSubscriptionChallengesAgain(t *testing.T) {
 	cb := testhub.NewCallback(t)
 	key := webhook.NewSecret()
 	subscribeOK(t, env, dotSecret, subParams(cb.URL, key, map[string]any{"ttlMs": 60000}))
-	env.Now.Advance(2 * time.Minute)
+	env.Now.Advance(events.ChallengeMaxAge + time.Minute)
 	sendPriority(t, env, sender, dot, "during", "wake")
 	cb.OnChallenge(func(c string, w http.ResponseWriter, _ *http.Request) {
 		stepEvents(t, env) // a Step that lands mid-challenge

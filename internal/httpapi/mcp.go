@@ -17,6 +17,7 @@ func newMCP(d Deps) *mcpserver.Server {
 	}
 	m := mcpserver.New(d.Hub, chain, d.Hub.Cfg.PublicURL)
 	m.AllowedOrigins = d.MCPAllowedOrigins
+	m.LegacySessions = d.MCPLegacySessions
 	if d.OAuth != nil {
 		m.ResolveDotPeer = d.OAuth.ResolveDotPeer
 	}

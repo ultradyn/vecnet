@@ -475,7 +475,7 @@ func TestMetadataDocuments(t *testing.T) {
 		!slices.Equal(as.GrantTypes, []string{"authorization_code", "refresh_token"}) ||
 		!slices.Equal(as.ChallengeMethods, []string{"S256"}) ||
 		!slices.Equal(as.AuthMethods, []string{"none"}) ||
-		!slices.Equal(as.Scopes, []string{"vecnet"}) || !as.CIMD {
+		!slices.Equal(as.Scopes, strings.Fields(oauth.AuthorizationScopes)) || !as.CIMD {
 		t.Fatalf("AS capabilities: %s", body)
 	}
 
@@ -496,7 +496,7 @@ func TestMetadataDocuments(t *testing.T) {
 			t.Fatalf("resource metadata %s: %v", body, err)
 		}
 		if rs.Resource != env.URL+"/mcp" || !slices.Equal(rs.AS, []string{env.URL}) ||
-			!slices.Equal(rs.Scopes, []string{"vecnet"}) || !slices.Equal(rs.Bearer, []string{"header"}) {
+			!slices.Equal(rs.Scopes, strings.Fields(oauth.AuthorizationScopes)) || !slices.Equal(rs.Bearer, []string{"header"}) {
 			t.Fatalf("resource metadata: %s", body)
 		}
 	}
@@ -554,7 +554,7 @@ func TestDCRAndFullCodeFlow(t *testing.T) {
 		t.Fatalf("exchange: %d %s", got.status, got.Error)
 	}
 	if !strings.HasPrefix(got.AccessToken, "vat_") || !strings.HasPrefix(got.RefreshToken, "vrt_") ||
-		got.TokenType != "Bearer" || got.ExpiresIn != 3600 || got.Scope != "vecnet" {
+		got.TokenType != "Bearer" || got.ExpiresIn != 3600 || got.Scope != oauth.AuthorizationScopes {
 		t.Fatalf("token response: %+v", got)
 	}
 	if got.header.Get("Cache-Control") != "no-store" {
@@ -635,7 +635,7 @@ func TestRefreshRotation(t *testing.T) {
 	}
 	if second.AccessToken == first.AccessToken || second.RefreshToken == first.RefreshToken ||
 		!strings.HasPrefix(second.AccessToken, "vat_") || !strings.HasPrefix(second.RefreshToken, "vrt_") ||
-		second.ExpiresIn != 3600 || second.Scope != "vecnet" {
+		second.ExpiresIn != 3600 || second.Scope != oauth.AuthorizationScopes {
 		t.Fatalf("refresh response: %+v (first %+v)", second, first)
 	}
 	if second.header.Get("Cache-Control") != "no-store" {
@@ -1810,5 +1810,53 @@ func TestRefreshRefusesAnotherScope(t *testing.T) {
 	// Refused before it could spend the token.
 	if fresh := b.refresh(tok.RefreshToken); fresh.status != http.StatusOK {
 		t.Fatalf("refresh after the refusal: %d %s", fresh.status, fresh.Error)
+	}
+}
+
+// A Cursor-hosted Grok Bot can complete DCR + PKCE using its own peer kind.
+func TestGrokbotOAuthLink(t *testing.T) {
+	env := testhub.Start(t)
+	peer, oldBearer := env.NewPeer("grokbot", "oauth-grok")
+	redirect := "https://www.cursor.com/agents/mcp/oauth/callback"
+	b := &browser{t: t, env: env, client: register(t, env, redirect), redirect: redirect}
+	tok := b.exchange(b.code(verifierA, linkCode(t, env, peer)), verifierA)
+	if tok.status != http.StatusOK {
+		t.Fatalf("exchange: HTTP %d", tok.status)
+	}
+	me := tool(t, env, tok.AccessToken, "vecnet_whoami", map[string]any{})
+	if me["kind"] != "peer" || me["id"] != peer || me["peer_id"] != peer {
+		t.Fatalf("wrong linked identity: %v", me)
+	}
+	guide := tool(t, env, tok.AccessToken, "vecnet_guide", map[string]any{})
+	text, _ := guide["text"].(string)
+	if guide["caller_kind"] != "grokbot" || !strings.Contains(text, "webhook-triggered Grok Bot routine") {
+		t.Fatal("wrong Grok Bot guide")
+	}
+	for _, forbidden := range []string{"ChatGPT", "Work chat", "Cloud", "Rescan"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("Grok Bot guide contains %q", forbidden)
+		}
+	}
+	// Binding revokes the previous bearer just as it does for dots.
+	if resp, _ := env.Do(oldBearer, "GET", "/v1/peers/me", nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old bearer: HTTP %d", resp.StatusCode)
+	}
+	// The normal OAuth inbox and send handlers retain their existing semantics.
+	recipient, _ := env.NewPeer("session", "grok-recipient")
+	sendAs(t, env, tok.AccessToken, "grok-oauth-send", recipient)
+	tool(t, env, tok.AccessToken, "vecnet_inbox", map[string]any{})
+	fresh := b.refresh(tok.RefreshToken)
+	if fresh.status != http.StatusOK {
+		t.Fatalf("refresh: HTTP %d", fresh.status)
+	}
+	me = tool(t, env, fresh.AccessToken, "vecnet_whoami", map[string]any{})
+	if me["id"] != peer {
+		t.Fatal("refresh changed linked identity")
+	}
+	if err := env.Hub.SetPeerDisabled(context.Background(), peer, true); err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := discover(t, env, fresh.AccessToken); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("disabled OAuth peer: HTTP %d", resp.StatusCode)
 	}
 }

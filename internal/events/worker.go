@@ -121,6 +121,9 @@ func (w *Worker) Step(ctx context.Context) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	now := w.now()
+	if err := w.Store.expire(ctx, now); err != nil {
+		return 0, err
+	}
 	if err := w.Store.pauseExpiredTokens(ctx, now); err != nil {
 		return 0, err
 	}
@@ -368,7 +371,25 @@ func (w *Worker) drain(ctx context.Context, sub Subscription) (int, error) {
 				continue
 			}
 		}
+		attemptStarted := time.Now()
 		status, retryAfter, netErr := w.post(ctx, s, r)
+		result, reason := "delivered", ""
+		retry, dead := false, false
+		if netErr != nil || status < 200 || status >= 300 {
+			result, retry = "retry", true
+			if netErr != nil {
+				reason = challengeReason(netErr)
+			}
+			if status == http.StatusGone || status == http.StatusRequestEntityTooLarge {
+				result, retry, dead, reason = "dead", false, true, "http_"+strconv.Itoa(status)
+			} else if r.attempts+1 >= hub.PushAttempts {
+				result, retry, dead, reason = "dead", false, true, "exhausted"
+			}
+			if ctx.Err() != nil {
+				result, reason, retry, dead = "cancelled", "cancelled", false, false
+			}
+		}
+		LogLifecycle("events.delivery", s, map[string]any{"event_id": r.eventID, "http_status": status, "duration_ms": time.Since(attemptStarted).Milliseconds(), "result": result, "reason": reason, "retry": retry, "dead": dead})
 		var delivered, stop bool
 		if netErr == nil || ctx.Err() == nil {
 			delivered, stop, err = w.record(context.WithoutCancel(ctx), s, r, status, retryAfter, netErr)
@@ -502,9 +523,7 @@ func (w *Worker) record(ctx context.Context, s Subscription, r outboxRow, status
 	case netErr == nil && (status == http.StatusGone || status == http.StatusRequestEntityTooLarge):
 		return false, false, w.Store.settle(ctx, s.ID, r.eventID, "http_"+strconv.Itoa(status), status, now)
 	}
-	if netErr != nil {
-		slog.Warn("events: callback failed", "subscription", s.ID, "event", r.eventID, "err", hub.EgressErr(netErr))
-	}
+
 	attempts := r.attempts + 1
 	if attempts >= hub.PushAttempts {
 		if err := w.Store.settle(ctx, s.ID, r.eventID, "exhausted", status, now); err != nil {
