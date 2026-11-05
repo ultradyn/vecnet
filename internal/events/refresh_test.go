@@ -124,5 +124,13 @@ func TestFailedRefreshPreservesSuccessfulAdvice(t *testing.T) {
 	if err := st.SetRefreshBefore(ctx, sub.ID, env.Now.Now().Add(30*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	assertAdvice(env.Now.Now().Add(10*time.Minute), true)
+	assertAdvice(env.Now.Now().Add(30*time.Minute), true)
+	got, err := st.Get(ctx, sub.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSchedule = env.Now.Now().Add(10 * time.Minute)
+	if got.NextRefreshBefore == nil || !got.NextRefreshBefore.Equal(wantSchedule) {
+		t.Fatalf("successful subscribe changed worker cadence: %v, want %v", got.NextRefreshBefore, wantSchedule)
+	}
 }

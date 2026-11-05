@@ -21,7 +21,6 @@ import (
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/ids"
-	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
@@ -961,9 +960,9 @@ func RefreshDeadline(now, expires time.Time, interval time.Duration) time.Time {
 	return deadline
 }
 
-// SetRefreshBefore preserves legacy caller advice unless an explicit preference
-// overrides it. The returned MCP advice must use this same policy seam when its
-// owning caller is migrated; this store never mutates shared hub Config.
+// SetRefreshBefore saves the exact advice returned by a successful subscribe.
+// The worker schedule independently uses the captured preference and lease.
+// Subscribe callers can use RefreshDeadline to calculate the advice they return.
 func (st *Store) SetRefreshBefore(ctx context.Context, id string, deadline time.Time) error {
 	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
 		interval := RefreshInterval
@@ -978,28 +977,23 @@ func (st *Store) SetRefreshBefore(ctx context.Context, id string, deadline time.
 			}
 			n, _ := e.Value.Int64()
 			interval = time.Duration(n) * time.Second
-			// Preserve the legacy caller's supplied default when no explicit
-			// bootstrap/stored policy exists. An override always wins.
-			if e.Source != prefs.SourceDefault {
-				var raw string
-				if err := tx.QueryRowContext(ctx, `SELECT expires_at FROM event_subscriptions WHERE sub_id = ?`, id).Scan(&raw); err != nil {
-					return err
-				}
-				expires, err := envelope.ParseTime(raw)
-				if err != nil {
-					return err
-				}
-				deadline = RefreshDeadline(st.now(), expires, interval)
-			}
 		}
 		result, err := tx.ExecContext(ctx, `UPDATE event_subscriptions SET refresh_before_at = ? WHERE sub_id = ?`, envelope.FormatTime(deadline), id)
 		if err != nil {
 			return fmt.Errorf("events: save refresh deadline: %w", err)
 		}
 		if count, err := result.RowsAffected(); err != nil || count == 0 {
-			return err // preserve the legacy no-op for a missing default-policy row
+			return err // preserve the legacy no-op for a missing row
 		}
-		return saveRefreshSchedule(ctx, tx, id, interval, deadline)
+		var raw string
+		if err := tx.QueryRowContext(ctx, `SELECT expires_at FROM event_subscriptions WHERE sub_id = ?`, id).Scan(&raw); err != nil {
+			return err
+		}
+		expires, err := envelope.ParseTime(raw)
+		if err != nil {
+			return err
+		}
+		return saveRefreshSchedule(ctx, tx, id, interval, RefreshDeadline(st.now(), expires, interval))
 	})
 }
 
