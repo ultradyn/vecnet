@@ -78,6 +78,13 @@ func restartWait(ms int64) time.Duration {
 // and restartGrace have passed, failures to reach the hub still report
 // "restarting" and retry at the base backoff; the next page reports "live".
 func (c *Client) Tail(ctx context.Context, handle func(Batch) error, status func(string)) error {
+	return c.TailWithAck(ctx, handle, status, nil)
+}
+
+// TailWithAck is Tail with a notification after each successful acknowledgement.
+// accepted runs before the next batch, so views loaded by handle can refetch
+// receipts that the ack itself changed. Refused acks do not notify.
+func (c *Client) TailWithAck(ctx context.Context, handle func(Batch) error, status func(string), accepted func(string)) error {
 	report := func(s string) {
 		if status != nil {
 			status(s)
@@ -139,6 +146,9 @@ func (c *Client) Tail(ctx context.Context, handle func(Batch) error, status func
 			}
 			if err == nil && len(page.Events) > 0 {
 				err = c.Ack(ctx, page.Cursor)
+				if err == nil && accepted != nil {
+					accepted(page.Cursor)
+				}
 			}
 			if err == nil {
 				cursor = page.Cursor

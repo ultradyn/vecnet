@@ -275,7 +275,7 @@ func TestTailBackoff(t *testing.T) {
 func TestTailRetriesHandleAndAck(t *testing.T) {
 	for _, fail := range []string{"handle", "ack"} {
 		t.Run(fail, func(t *testing.T) {
-			var polls, handles, acks int
+			var polls, handles, acks, accepted int
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/v1/ack" {
 					acks++
@@ -299,13 +299,21 @@ func TestTailRetriesHandleAndAck(t *testing.T) {
 			defer srv.Close()
 			c := New(srv.URL, "secret")
 			c.sleep = func(context.Context, time.Duration) error { return nil }
-			err := c.Tail(context.Background(), func(Batch) error {
+			err := c.TailWithAck(context.Background(), func(Batch) error {
 				handles++
 				if fail == "handle" && handles == 1 {
 					return errors.New("reload failed")
 				}
 				return nil
-			}, nil)
+			}, nil, func(cursor string) {
+				accepted++
+				if cursor != "e2.9" || acks == 0 || (fail == "ack" && acks == 1) {
+					t.Errorf("accepted callback before paid ack: cursor=%s acks=%d", cursor, acks)
+				}
+			})
+			if accepted != 1 {
+				t.Fatalf("accepted callbacks=%d, want one successful ack only", accepted)
+			}
 			if !errors.Is(err, ErrUnauthorized) || handles != 2 {
 				t.Fatalf("err=%v handles=%d", err, handles)
 			}

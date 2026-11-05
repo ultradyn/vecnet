@@ -232,7 +232,7 @@ func (f *fakeAPI) uploaded() []fakeUpload {
 	return append([]fakeUpload(nil), f.uploads...)
 }
 
-func (f *fakeAPI) Tail(ctx context.Context, handle func(opclient.Batch) error, status func(string)) error {
+func (f *fakeAPI) TailWithAck(ctx context.Context, handle func(opclient.Batch) error, status func(string), accepted func(string)) error {
 	f.mu.Lock()
 	f.calls["Tail"]++
 	tail := f.tail

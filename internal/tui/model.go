@@ -108,12 +108,13 @@ type Model struct {
 	fatal       error
 
 	// Load bookkeeping; see data.go.
-	inflight map[string]bool
-	dirty    map[string]bool
-	waiters  []*waiter
-	first    map[string]bool
-	tailCh   chan tea.Msg
-	stopTail context.CancelFunc
+	inflight  map[string]bool
+	dirty     map[string]bool
+	waiters   []*waiter
+	first     map[string]bool
+	tailCh    chan tea.Msg
+	accepting map[string]bool // delivery thread tags not yet covered by a paid ack
+	stopTail  context.CancelFunc
 }
 
 func newModel(ctx context.Context, o Options) *Model {
@@ -144,6 +145,7 @@ func newModel(ctx context.Context, o Options) *Model {
 		inflight:  map[string]bool{},
 		dirty:     map[string]bool{},
 		first:     map[string]bool{},
+		accepting: map[string]bool{},
 		tailCh:    make(chan tea.Msg),
 		stopTail:  func() {},
 	}
@@ -178,6 +180,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.onTailStatus(msg.status), m.listenTail())
 	case tailBatchMsg:
 		return m, tea.Batch(m.onTailBatch(msg), m.listenTail())
+	case tailAckMsg:
+		return m, tea.Batch(m.onTailAck(), m.listenTail())
 	case tailDoneMsg:
 		return m, m.onTailDone(msg.err)
 	}

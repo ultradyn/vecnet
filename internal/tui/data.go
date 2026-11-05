@@ -87,6 +87,7 @@ type (
 		batch opclient.Batch
 		ack   chan<- error
 	}
+	tailAckMsg  struct{}
 	tailDoneMsg struct{ err error }
 )
 
@@ -481,7 +482,8 @@ func (m *Model) startTail() tea.Cmd {
 			}
 		}
 		status := func(s string) { send(tailStatusMsg{status: s}) }
-		return tailDoneMsg{err: api.Tail(ctx, handle, status)}
+		accepted := func(string) { send(tailAckMsg{}) }
+		return tailDoneMsg{err: api.TailWithAck(ctx, handle, status, accepted)}
 	}
 }
 
@@ -523,7 +525,15 @@ func (m *Model) onTailStatus(status string) tea.Cmd {
 func (m *Model) onTailBatch(msg tailBatchMsg) tea.Cmd {
 	tags := []string{}
 	for _, ev := range msg.batch.Events {
-		tags = append(tags, opapi.Tags(ev)...)
+		eventTags := opapi.Tags(ev)
+		tags = append(tags, eventTags...)
+		if ev.Type == "delivery" {
+			for _, tag := range eventTags {
+				if strings.HasPrefix(tag, threadPrefix) {
+					m.accepting[tag] = true
+				}
+			}
+		}
 		m.remember(ev)
 		switch ev.Type {
 		case "reaction":
@@ -552,6 +562,18 @@ func (m *Model) onTailBatch(msg tailBatchMsg) tea.Cmd {
 		tags = append(tags, TagAll)
 	}
 	return m.startLoads(tags, msg.ack)
+}
+
+// onTailAck corrects snapshots loaded before the ack accepted our deliveries.
+// The hub sends us no event for our own ack. Keep tags across refused acks:
+// the next successful one covers all earlier deliveries too.
+func (m *Model) onTailAck() tea.Cmd {
+	tags := make([]string, 0, len(m.accepting))
+	for tag := range m.accepting {
+		tags = append(tags, tag)
+	}
+	clear(m.accepting)
+	return m.startLoads(tags, nil)
 }
 
 // rewindTo marks a held message whose reactions changed, so the thread's next
