@@ -238,7 +238,11 @@ func TestOAuthRedirectsFlagAndEnv(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				_, readErr := io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
+				if readErr != nil {
+					t.Fatal("OAuth registration response did not drain")
+				}
 				want := http.StatusCreated
 				if uri == "https://connector.example/callback" {
 					want = tc.want
