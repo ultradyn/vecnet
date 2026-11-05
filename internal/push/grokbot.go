@@ -39,7 +39,7 @@ func (w *Worker) pushGrokbot(ctx context.Context, d hub.DueDelivery) {
 
 	key, err := w.Hub.GrokbotKey(ctx, d.RouteID)
 	if err == nil && len(d.Body) > hub.MaxPushBody {
-		err = fmt.Errorf("push: body is %d bytes, over the %d-byte cap", len(d.Body), hub.MaxPushBody)
+		err = &hub.OutboundError{Reason: "body_too_large", Err: fmt.Errorf("push: body is %d bytes, over the %d-byte cap", len(d.Body), hub.MaxPushBody)}
 	}
 	if err != nil { // nothing went out
 		release()

@@ -285,7 +285,7 @@ func (h *Hub) postNotifyOnce(ctx context.Context, client *http.Client, r NotifyR
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, PushResponseCap))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return errors.New("HTTP " + strconv.Itoa(resp.StatusCode))
+		return HTTPStatusError(resp.StatusCode)
 	}
 	return nil
 }
