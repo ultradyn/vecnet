@@ -730,6 +730,10 @@ func TestR2InvalidAdapterProofCannotComplete(t *testing.T) {
 
 func TestR2CutoverAndRollbackKeepCombinedQuota(t *testing.T) {
 	f := newTransfers(t)
+	// Keep abandonment within the issue day; crossing midnight correctly
+	// resets the daily quota instead of preserving the exhausted balance.
+	now := f.env.Now.Now()
+	f.env.Now.Advance(now.Truncate(24 * time.Hour).Add(12 * time.Hour).Sub(now))
 	f.cfg.DailyQuota = 5
 	f.restart(t)
 	f.env.Hub.Blobs.DailyQuota = 5
