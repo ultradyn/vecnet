@@ -1,9 +1,11 @@
 package hub_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -465,26 +467,59 @@ func TestRetentionPurgeBackfillAndPushRace(t *testing.T) {
 		cfg.BackfillCheckpoint = func(context.Context) (hub.BackfillCheckpoint, error) { return hub.BackfillCheckpoint{}, nil }
 	})
 	h := env.Hub
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 	_, as := env.NewPeer("session", "sender")
 	p, _ := env.NewPeer("session", "recipient")
-	m := mustSend(t, env, as, req("synthetic", p))
-	var seq int64
-	if err := h.DB.QueryRow(`SELECT event_seq FROM deliveries WHERE msg_id=?`, m.MessageID).Scan(&seq); err != nil {
+	callback := testhub.NewCallback(t)
+	route, _, err := h.AddRoute(ctx, "peer", p, callback.URL)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.DB.Exec(`UPDATE deliveries SET state='accepted' WHERE msg_id=?`, m.MessageID); err != nil {
+	if err := env.Worker.Verify(ctx, route); err != nil {
+		t.Fatal(err)
+	}
+	// Install a confirmed prospective 1h policy so this delivery is old
+	// enough to prune while remaining within its original 24h TTL.
+	retentionConfirm(t, h, prefs.Patch{Set: map[string]prefs.Value{"retention.ack_events": prefs.Duration(3600)}})
+	m := mustSend(t, env, as, req("synthetic", p))
+	var seq int64
+	var frozen []byte
+	if err := h.DB.QueryRow(`SELECT d.event_seq,e.data FROM deliveries d JOIN events e ON e.seq=d.event_seq WHERE d.msg_id=?`, m.MessageID).Scan(&seq, &frozen); err != nil {
 		t.Fatal(err)
 	}
 	retentionAck(t, h, p, "*", eventlog.Cursor{Epoch: h.Log.Epoch(), Seq: seq})
-	env.Now.Advance(8 * 24 * time.Hour)
-	var wg sync.WaitGroup
-	errs := make(chan error, 3)
-	wg.Go(func() { _, err := h.PruneEventSlice(context.Background()); errs <- err })
-	wg.Go(func() {
-		_, err := h.BackfillDeliverySlice(context.Background(), hub.BackfillLimits{Rows: 1})
-		errs <- err
+	env.Now.Advance(2 * time.Hour)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	callback.OnPost(func(_ int, w http.ResponseWriter) {
+		close(entered)
+		select {
+		case <-release:
+			w.WriteHeader(http.StatusOK)
+		case <-ctx.Done():
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
 	})
-	wg.Go(func() { _, err := env.Worker.Step(context.Background()); errs <- err })
+	type pushResult struct {
+		sent int
+		err  error
+	}
+	pushed := make(chan pushResult, 1)
+	go func() { sent, err := env.Worker.Step(ctx); pushed <- pushResult{sent, err} }()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("queued delivery never reached callback")
+	}
+	// The push is now actually in flight. Backfill and pruning race while
+	// its receiver holds the response, making the pin assertion deterministic.
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Go(func() { _, err := h.PruneEventSlice(ctx); errs <- err })
+	wg.Go(func() { _, err := h.BackfillDeliverySlice(ctx, hub.BackfillLimits{Rows: 1}); errs <- err })
 	wg.Wait()
 	close(errs)
 	for err := range errs {
@@ -492,6 +527,29 @@ func TestRetentionPurgeBackfillAndPushRace(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	retentionFloor(t, h, p, 0)
+	var retained int
+	if err := h.DB.QueryRow(`SELECT count(*) FROM events WHERE seq=?`, seq).Scan(&retained); err != nil || retained != 1 {
+		t.Fatal("in-flight push lost its frozen event")
+	}
+	posts := callback.Posts()
+	if len(posts) != 1 || !bytes.Equal(posts[0].Body, frozen) {
+		t.Fatal("callback did not receive the frozen delivery bytes")
+	}
+	unblock()
+	select {
+	case result := <-pushed:
+		if result.err != nil || result.sent != 1 {
+			t.Fatalf("actual pushes=%d err=%v", result.sent, result.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("push did not settle")
+	}
+	var state string
+	if err := h.DB.QueryRow(`SELECT state FROM deliveries WHERE msg_id=?`, m.MessageID).Scan(&state); err != nil || state != "accepted" {
+		t.Fatal("push did not accept the delivery")
+	}
+	retentionRun(t, h)
 	retentionFloor(t, h, p, seq)
 	var body string
 	if err := h.DB.QueryRow(`SELECT body FROM messages WHERE msg_id=?`, m.MessageID).Scan(&body); err != nil || body == "" {

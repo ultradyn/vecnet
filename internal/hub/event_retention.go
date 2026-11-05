@@ -52,11 +52,12 @@ func retentionPolicy(s prefs.Snapshot) (RetentionPolicy, error) {
 // prospective-only policy edits. Preferences remain solely in hub_preferences;
 // signed retrospective bounds remain solely in hub_preference_activations.
 type eventRuleBoundary struct {
-	Revision      uint64 `json:"revision"`
-	FromSeq       int64  `json:"from_seq"`
-	BeforeSeconds int64  `json:"before_seconds"`
-	AfterSeconds  int64  `json:"after_seconds"`
-	PolicyTag     string `json:"policy_tag"`
+	Revision            uint64 `json:"revision"`
+	FromSeq             int64  `json:"from_seq"`
+	BeforeSeconds       int64  `json:"before_seconds"`
+	AfterSeconds        int64  `json:"after_seconds"`
+	PolicyTag           string `json:"policy_tag"`
+	BootstrapGeneration uint64 `json:"bootstrap_generation,omitempty"`
 }
 
 func eventPolicyTag(e prefs.Effective) string {
@@ -170,6 +171,10 @@ func (a *EventRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, before
 			return preferenceError(prefs.CodeConfirmationStale)
 		}
 	}
+	bootstrap, err := loadRetentionBootstrap(ctx, tx)
+	if err != nil {
+		return err
+	}
 	now := envelope.FormatTime(a.Hub.Now())
 	for _, key := range keys {
 		if key != "retention.ack_events" && key != "retention.archive_mode" {
@@ -181,6 +186,29 @@ func (a *EventRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, before
 		// A touched no-op key must not activate or cancel a retention rule.
 		if old.Value == next.Value && old.Source == next.Source && old.Origin == next.Origin && !p.ApplyExisting {
 			continue
+		}
+		// A source-only Save carries no shared confirmation for a pending
+		// bootstrap transition. Preserve both its pending generation and prior
+		// eligibility ledger; provenance is not deletion authority.
+		pending := key == "retention.ack_events" && bootstrap.AckPending || key == "retention.archive_mode" && bootstrap.ArchivePending
+		if pending && !p.ApplyExisting {
+			if old.Value == next.Value {
+				continue
+			}
+			if key == "retention.ack_events" {
+				was, _ := old.Value.Int64()
+				seconds, _ := next.Value.Int64()
+				approved := *bootstrap.ApprovedAckSeconds
+				stillShorter := seconds > 0 && (approved == 0 || seconds < approved)
+				// Only a visible shortening receives the shared service's
+				// retention_shortened confirmation. Partial lengthening of
+				// an unapproved value must keep the transition pending.
+				confirmedShortening := seconds > 0 && (was == 0 || seconds < was)
+				if stillShorter && !confirmedShortening {
+					bootstrap.AckSeconds = seconds
+					continue
+				}
+			}
 		}
 		// Any policy edit invalidates unused incompatible retrospective approval.
 		if _, err := tx.ExecContext(ctx, `UPDATE hub_preference_activations SET not_before=NULL,cutoff_at=NULL,high_water=NULL WHERE key=?`, key); err != nil {
@@ -207,8 +235,8 @@ func (a *EventRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, before
 				return err
 			}
 			was, _ := old.Value.Int64()
-			if key == "retention.ack_events" && len(bounds) == 0 && was > 0 && was < defaultAckSeconds {
-				was = 0
+			if key == "retention.ack_events" && len(bounds) == 0 {
+				was = *bootstrap.ApprovedAckSeconds
 			}
 			seconds, _ := next.Value.Int64()
 			if key == "retention.archive_mode" {
@@ -223,10 +251,32 @@ func (a *EventRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, before
 			}
 			// A changed bootstrap cannot authorize shorter historical rules on restart.
 			// If the prior projection no longer matches the snapshot, retain indefinitely.
-			if len(bounds) > 0 && bounds[len(bounds)-1].PolicyTag != eventPolicyTag(old) {
+			if len(bounds) > 0 && bounds[len(bounds)-1].PolicyTag != eventPolicyTag(old) && !pending {
 				was = 0
 			}
-			bounds = append(bounds, eventRuleBoundary{after.Revision, from, was, seconds, eventPolicyTag(next)})
+			if pending {
+				if key == "retention.archive_mode" {
+					was = 1
+				}
+				transition := bootstrap.AckFromSeq
+				if key == "retention.archive_mode" {
+					transition = bootstrap.ArchiveFromSeq
+				}
+				if from < transition {
+					return errors.New("retention: invalid_activation_boundary")
+				}
+			}
+			bounds = append(bounds, eventRuleBoundary{Revision: after.Revision, FromSeq: from, BeforeSeconds: was, AfterSeconds: seconds, PolicyTag: eventPolicyTag(next), BootstrapGeneration: bootstrap.Generation})
+			// Only a new shared activation (or a protective value change) can
+			// resolve this pending generation, atomically with its boundary.
+			if key == "retention.ack_events" {
+				bootstrap.AckPending = false
+				bootstrap.AckSeconds = seconds
+				bootstrap.ApprovedAckSeconds = &seconds
+			} else {
+				bootstrap.ArchivePending = false
+				bootstrap.Archive = seconds != 0
+			}
 			raw, err := json.Marshal(bounds)
 			if err != nil {
 				return err
@@ -236,7 +286,7 @@ func (a *EventRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, before
 			}
 		}
 	}
-	return nil
+	return saveRetentionBootstrap(ctx, tx, bootstrap)
 }
 
 type EventRetentionStatus struct {
@@ -304,7 +354,7 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 		// Nondefault shorter bootstrap without confirmation is never destructive.
 		authorized := len(bounds) == 0 && (ackSeconds == 0 || ackSeconds >= defaultAckSeconds) && !bootstrap.AckPending
 		if len(bounds) > 0 {
-			authorized = bounds[len(bounds)-1].PolicyTag == tag
+			authorized = !bootstrap.AckPending && bounds[len(bounds)-1].PolicyTag == tag
 		}
 		if !authorized {
 			result.Reason = "activation_required"
@@ -361,7 +411,7 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 			if archive {
 				return false
 			}
-			if bootstrap.ArchivePending && (len(archiveBounds) == 0 || archiveBounds[len(archiveBounds)-1].PolicyTag != eventPolicyTag(policy.Archive)) {
+			if bootstrap.ArchivePending {
 				return false
 			}
 			if len(archiveBounds) == 0 {
@@ -436,13 +486,17 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 
 // Bootstrap changes must not bypass the prefs confirmation service merely by
 // restarting. This checkpoint is consumer activation metadata, not a preference
-// layer: every value still comes from LoadSnapshot. A matching confirmed
-// boundary supersedes a pending bootstrap; otherwise destructive work stops.
+// layer: every value still comes from LoadSnapshot. Only a fresh shared
+// activation can supersede a pending generation; matching old tags cannot.
 type eventRetentionBootstrap struct {
-	AckSeconds     int64 `json:"ack_seconds"`
-	Archive        bool  `json:"archive"`
-	AckPending     bool  `json:"ack_pending"`
-	ArchivePending bool  `json:"archive_pending"`
+	ApprovedAckSeconds *int64 `json:"approved_ack_seconds"`
+	Generation         uint64 `json:"generation"`
+	AckFromSeq         int64  `json:"ack_from_seq"`
+	ArchiveFromSeq     int64  `json:"archive_from_seq"`
+	AckSeconds         int64  `json:"ack_seconds"`
+	Archive            bool   `json:"archive"`
+	AckPending         bool   `json:"ack_pending"`
+	ArchivePending     bool   `json:"archive_pending"`
 }
 
 const eventRetentionBootstrapKey = "event_retention_bootstrap_v1"
@@ -457,10 +511,31 @@ func loadRetentionBootstrap(ctx context.Context, tx *sql.Tx) (eventRetentionBoot
 	if json.Unmarshal([]byte(raw), &b) != nil || b.AckSeconds < 0 {
 		return b, errors.New("retention: invalid_bootstrap_checkpoint")
 	}
+	// Older checkpoints did not retain the approved duration. An unresolved
+	// old transition has no provable prior rule, so retain indefinitely.
+	if b.ApprovedAckSeconds == nil {
+		approved := b.AckSeconds
+		if b.AckPending {
+			approved = 0
+		}
+		b.ApprovedAckSeconds = &approved
+	}
+	if *b.ApprovedAckSeconds < 0 || b.AckFromSeq < 0 || b.ArchiveFromSeq < 0 {
+		return b, errors.New("retention: invalid_bootstrap_checkpoint")
+	}
 	return b, nil
 }
+func saveRetentionBootstrap(ctx context.Context, tx *sql.Tx, b eventRetentionBootstrap) error {
+	raw, err := json.Marshal(b)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, eventRetentionBootstrapKey, string(raw))
+	return err
+}
 func (h *Hub) initializeEventRetention(ctx context.Context) error {
-	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
+	var generation uint64
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		s, err := h.Preferences.LoadSnapshot(ctx, tx)
 		if err != nil {
 			return err
@@ -475,24 +550,50 @@ func (h *Hub) initializeEventRetention(ctx context.Context) error {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if err == nil {
-			if seconds > 0 && (b.AckSeconds == 0 || seconds < b.AckSeconds) {
+		var high int64
+		if err := tx.QueryRowContext(ctx, `SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='events'),0)`).Scan(&high); err != nil {
+			return err
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			approved := seconds
+			if seconds > 0 && seconds < defaultAckSeconds {
 				b.AckPending = true
+				approved = 0
+				b.Generation++
+				b.AckFromSeq = high
+			}
+			b.ApprovedAckSeconds = &approved
+		} else {
+			if seconds != b.AckSeconds {
+				approved := *b.ApprovedAckSeconds
+				if seconds > 0 && (approved == 0 || seconds < approved) {
+					b.AckPending = true
+					b.Generation++
+					b.AckFromSeq = high
+				} else {
+					b.AckPending = false
+					b.ApprovedAckSeconds = &seconds
+				}
 			}
 			if b.Archive && !archive {
 				b.ArchivePending = true
+				b.Generation++
+				b.ArchiveFromSeq = high
+			} else if archive {
+				b.ArchivePending = false
 			}
-		} else if seconds > 0 && seconds < defaultAckSeconds {
-			b.AckPending = true
 		}
 		b.AckSeconds, b.Archive = seconds, archive
-		raw, err := json.Marshal(b)
-		if err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, eventRetentionBootstrapKey, string(raw))
-		return err
+		generation = b.Generation
+		return saveRetentionBootstrap(ctx, tx, b)
 	})
+	if err != nil {
+		return err
+	}
+	// Startup completes before serving. The shared service binds its ETag
+	// and signed previews to this persisted generation, including after a
+	// bootstrap cycle returns to an otherwise identical configuration.
+	return h.Preferences.bindRetentionGeneration(ctx, generation)
 }
 
 // Wakeups refresh observable status only. They are never deletion authority.

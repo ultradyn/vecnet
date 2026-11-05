@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/testhub"
@@ -17,20 +18,36 @@ func TestOwnerRetentionHTTPMergedNarrowedAndDefaultAck(t *testing.T) {
 	prn, secret := env.NewPrincipal("synthetic")
 	a := adminAddPeer(t, env, map[string]any{"kind": "session", "name": "a", "principal_id": prn}).PeerID
 	b := adminAddPeer(t, env, map[string]any{"kind": "session", "name": "b", "principal_id": prn}).PeerID
-	// Existing admin helper returns the id string.
-	appendEvent := func(owner string) eventlog.Cursor {
-		c, err := env.Hub.Log.Append(ctx, nil, owner, "thread_updated", env.Hub.Now(), map[string]any{"thread_id": "thr_synthetic"})
-		if err != nil {
+	_, sender := env.NewPeer("session", "sender")
+	first := postSend(t, env, sender, sendBody("retained-before-floor", b), http.StatusAccepted)
+	pruned := postSend(t, env, sender, sendBody("pruned-owner", a), http.StatusAccepted)
+	lastMessage := postSend(t, env, sender, sendBody("retained-after-floor", b), http.StatusAccepted)
+	cursorFor := func(id string) eventlog.Cursor {
+		var seq int64
+		if err := env.Hub.DB.QueryRow(`SELECT event_seq FROM deliveries WHERE msg_id=?`, id).Scan(&seq); err != nil {
 			t.Fatal(err)
 		}
-		return c
+		return eventlog.Cursor{Epoch: env.Hub.Log.Epoch(), Seq: seq}
 	}
-	appendEvent(b)
-	floor := appendEvent(a)
-	last := appendEvent(b)
-	if _, err := env.Hub.DB.Exec(`DELETE FROM events WHERE owner=?`, a); err != nil {
+	before := cursorFor(first.MessageID)
+	floor := cursorFor(pruned.MessageID)
+	last := cursorFor(lastMessage.MessageID)
+	if before.Seq >= floor.Seq {
+		t.Fatal("history fixture must predate the merged floor")
+	}
+	// Ack and settle only A. B's older queued delivery remains pinned, so
+	// pruning A advances the merged floor beyond B's retained history.
+	if _, err := env.Hub.DB.Exec(`UPDATE deliveries SET state='accepted' WHERE msg_id=?`, pruned.MessageID); err != nil {
 		t.Fatal(err)
 	}
+	if err := env.Hub.Log.Ack(ctx, nil, a, "*", floor); err != nil {
+		t.Fatal(err)
+	}
+	env.Now.Advance(8 * 24 * time.Hour)
+	if _, err := env.Hub.PruneEventSlice(ctx); err != nil {
+		t.Fatal(err)
+	}
+
 	resp, body, _ := getEvents(t, env, secret, "?after=e1.0&wait=0", nil)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("gap status=%d", resp.StatusCode)
@@ -54,8 +71,23 @@ func TestOwnerRetentionHTTPMergedNarrowedAndDefaultAck(t *testing.T) {
 		t.Fatal("fresh merged stream did not start at safe floor")
 	}
 	page = mustPoll(t, env, secret, fmt.Sprintf("?peer=%s&after=e1.0&wait=0", b))
-	if len(page.Events) != 2 {
-		t.Fatal("narrowed owner cannot recover retained events")
+	foundBefore, foundLast := false, false
+	for _, event := range page.Events {
+		foundBefore = foundBefore || event.Cursor == before.String()
+		foundLast = foundLast || event.Cursor == last.String()
+	}
+	if !foundBefore || !foundLast {
+		t.Fatal("narrowed owner cannot recover retained delivery events")
+	}
+	// Protocol 2.3 recovery explicitly resyncs retained Message history,
+	// including messages whose delivery cursor is below the combined floor.
+	recovered := history(t, env, secret, first.ThreadID, "")
+	if len(recovered.Messages) != 1 || recovered.Messages[0].MessageID != first.MessageID || recovered.Messages[0].Content.Text != "hi retained-before-floor" {
+		t.Fatal("history resync lost the retained Message below the merged floor")
+	}
+	recovered = history(t, env, secret, pruned.ThreadID, "")
+	if len(recovered.Messages) != 1 || recovered.Messages[0].MessageID != pruned.MessageID {
+		t.Fatal("event pruning removed Message history")
 	}
 	if err := env.Hub.Log.Ack(ctx, nil, prn, "*", eventlog.Cursor{Epoch: 1}); err != nil {
 		t.Fatal(err)

@@ -168,7 +168,7 @@ func (l *Log) effectiveAck(ctx context.Context, q execer, owner string) (int64, 
 func (l *Log) retentionPinned(ctx context.Context, q execer, owner string, seq int64, now time.Time) (bool, error) {
 	var pinned bool
 	err := q.QueryRowContext(ctx, `SELECT
-   EXISTS(SELECT 1 FROM deliveries d WHERE d.event_seq=? AND (d.state IN ('queued','pushed') OR d.held=1 OR d.dispatching>0)) OR
+   EXISTS(SELECT 1 FROM deliveries d WHERE d.event_seq=? AND (d.state IN ('queued','pushed','dead_letter') OR d.held=1 OR d.dispatching>0)) OR
    EXISTS(SELECT 1 FROM event_outbox o JOIN event_subscriptions s ON s.sub_id=o.sub_id WHERE s.peer_id=? AND o.seq=? AND (o.done_at IS NULL OR o.parked=1 OR o.terminal='exhausted')) OR
    EXISTS(SELECT 1 FROM event_subscriptions s WHERE s.peer_id=?
      AND s.verified_at IS NOT NULL AND s.paused_reason IS NULL
