@@ -21,6 +21,7 @@ import (
 // adminRoutes registers the /v1/admin/... endpoints.
 func (s *server) adminRoutes(mux *http.ServeMux) {
 	s.opRoutes(mux)
+	mux.HandleFunc("GET /v1/admin/storage/backfill", s.adminBackfillStatus)
 	mux.HandleFunc("POST /v1/admin/principals", s.adminAddPrincipal)
 	mux.HandleFunc("GET /v1/admin/principals", s.adminListPrincipals)
 	mux.HandleFunc("PUT /v1/admin/principals/{id}/limits", s.adminPrincipalLimits)
@@ -798,4 +799,15 @@ func (s *server) adminListPrincipals(w http.ResponseWriter, r *http.Request) {
 			DefaultAllow: p.DefaultAllow, DefaultDeny: p.DefaultDeny})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"principals": rows})
+}
+
+// adminBackfillStatus returns content-free migration progress.
+func (s *server) adminBackfillStatus(w http.ResponseWriter, r *http.Request) {
+	p, err := s.Hub.BackfillDeliveryStatus(r.Context(), callerFrom(r.Context()))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, p)
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"io"
 	"net"
@@ -78,11 +79,14 @@ func (u *cliUser) mustRun(args ...string) string {
 
 var listenLine = regexp.MustCompile(`listening on (http://127\.0\.0\.[0-9]+:([0-9]+))`)
 
+// Leave time for graceful HTTP shutdown, background workers and store close.
+const smokeShutdownBudget = ShutdownGrace + 5*time.Second
+
 // bootedHub is a hub run in a goroutine by bootHub.
 type bootedHub struct {
 	base, port string
 	out        *lockedBuffer
-	stop       func() error // cancel and wait (≤ 2 s); later calls return the first result
+	stop       func() error // cancel and wait (≤ smokeShutdownBudget); later calls return the first result
 }
 
 // bootHub runs run(ctx, args, getenv) in a goroutine and waits for its
@@ -102,8 +106,8 @@ func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub
 			cancel()
 			select {
 			case stopErr = <-done:
-			case <-time.After(2 * time.Second):
-				stopErr = errors.New("run did not return within 2 s of ctx cancel")
+			case <-time.After(smokeShutdownBudget):
+				stopErr = fmt.Errorf("run did not return within %s of ctx cancel", smokeShutdownBudget)
 			}
 		})
 		return stopErr
@@ -128,6 +132,47 @@ func bootHub(t *testing.T, args []string, getenv func(string) string) *bootedHub
 			t.Fatalf("no listening line within 5 s; output:\n%s", out.String())
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A newly accepted connection may be waiting for request headers when
+// shutdown begins. net/http drains it within ShutdownGrace, which exceeds
+// the old harness deadline. A second connection's completed request proves
+// the listener has accepted the first one; no scheduler sleeps are needed.
+func TestBootHubShutdownWaitsForAcceptedConnection(t *testing.T) {
+	h := bootHub(t, []string{"--listen", "127.0.0.1:0", "--data-dir", t.TempDir()}, noEnv)
+	conn, err := net.Dial("tcp", "127.0.0.1:"+h.port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := io.WriteString(conn, "GET /healthz HTTP/1.1\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	transport := &http.Transport{DisableKeepAlives: true}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	resp, err := client.Get(h.base + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if readErr != nil || resp.StatusCode != http.StatusOK {
+		t.Fatal("acceptance barrier failed")
+	}
+	if err := h.stop(); err != nil {
+		t.Fatalf("shutdown did not wait for accepted connection: %v", err)
+	}
+	if err := h.stop(); err != nil {
+		t.Fatalf("repeated stop: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var b [1]byte
+	if _, err := conn.Read(b[:]); !errors.Is(err, io.EOF) {
+		t.Fatal("shutdown left accepted connection open")
 	}
 }
 
