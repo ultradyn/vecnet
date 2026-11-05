@@ -22,6 +22,18 @@ CREATE TABLE event_message_snapshots (
  UNIQUE(msg_id, body_sha256)
 ) STRICT;
 
+-- REPLACE may skip DELETE triggers (recursive_triggers defaults to OFF).
+-- Check every conflicting key before SQLite can discard an immutable row.
+CREATE TRIGGER event_snapshot_insert_immutable BEFORE INSERT ON event_message_snapshots
+WHEN EXISTS (
+ SELECT 1 FROM event_message_snapshots AS old
+ WHERE (old.snapshot_id = NEW.snapshot_id OR
+        (old.msg_id = NEW.msg_id AND old.body_sha256 = NEW.body_sha256))
+   AND (old.snapshot_id IS NOT NEW.snapshot_id OR old.msg_id IS NOT NEW.msg_id
+        OR old.body_sha256 IS NOT NEW.body_sha256 OR old.body IS NOT NEW.body)
+)
+BEGIN SELECT RAISE(ABORT, 'event_snapshot_immutable'); END;
+
 CREATE TRIGGER event_snapshot_immutable BEFORE UPDATE ON event_message_snapshots
 WHEN NEW.snapshot_id IS NOT OLD.snapshot_id OR NEW.msg_id IS NOT OLD.msg_id
  OR NEW.body_sha256 IS NOT OLD.body_sha256 OR NEW.body IS NOT OLD.body
@@ -29,10 +41,32 @@ BEGIN SELECT RAISE(ABORT, 'event_snapshot_immutable'); END;
 
 -- Task 3 sets this flag atomically with enabling reference writes. It is not
 -- set here: legacy migration 0018 and pre-cutover behavior must still work.
+CREATE TRIGGER messages_replay_insert_immutable BEFORE INSERT ON messages
+WHEN EXISTS (
+ SELECT 1 FROM messages AS old
+ WHERE (old.msg_id = NEW.msg_id OR (old.thr_id = NEW.thr_id AND old.seq = NEW.seq))
+   AND (old.msg_id IS NOT NEW.msg_id OR old.body IS NOT NEW.body)
+   AND ((SELECT value FROM meta WHERE key = 'event_payload_refs_enabled') = '1'
+        OR EXISTS (SELECT 1 FROM events WHERE msg_id = old.msg_id AND snapshot_id IS NULL))
+)
+BEGIN SELECT RAISE(ABORT, 'message_replay_immutable'); END;
+
 CREATE TRIGGER messages_replay_immutable BEFORE UPDATE OF body, msg_id ON messages
 WHEN (NEW.body IS NOT OLD.body OR NEW.msg_id IS NOT OLD.msg_id)
  AND ((SELECT value FROM meta WHERE key = 'event_payload_refs_enabled') = '1'
       OR EXISTS (SELECT 1 FROM events WHERE msg_id = OLD.msg_id AND snapshot_id IS NULL))
+BEGIN SELECT RAISE(ABORT, 'message_replay_immutable'); END;
+
+-- UPDATE OR REPLACE can also discard a different row through either key.
+CREATE TRIGGER messages_replay_update_conflict BEFORE UPDATE OF msg_id, thr_id, seq ON messages
+WHEN EXISTS (
+ SELECT 1 FROM messages AS existing
+ WHERE existing.msg_id IS NOT OLD.msg_id
+   AND (existing.msg_id = NEW.msg_id OR (existing.thr_id = NEW.thr_id AND existing.seq = NEW.seq))
+   AND (existing.msg_id IS NOT NEW.msg_id OR existing.body IS NOT NEW.body)
+   AND ((SELECT value FROM meta WHERE key = 'event_payload_refs_enabled') = '1'
+        OR EXISTS (SELECT 1 FROM events WHERE msg_id = existing.msg_id AND snapshot_id IS NULL))
+)
 BEGIN SELECT RAISE(ABORT, 'message_replay_immutable'); END;
 
 CREATE TRIGGER messages_replay_pinned BEFORE DELETE ON messages
