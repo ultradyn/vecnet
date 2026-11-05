@@ -115,11 +115,13 @@ func guardEnv(t *testing.T) (*testhub.Env, []guardFixture) {
 		guardExec(t, env, `INSERT INTO deliveries(dly_id,msg_id,thr_id,recipient,also_via,priority,state,attempts_left,expires_at,created_at,updated_at,event_seq,body_sha256) VALUES (?,?,?,?,'[]','wake','queued',8,?,?,?,?,?)`, ids.DeliveryID, m.MessageID, m.ThreadID, ids.Recipient, m.Loop.ExpiresAt, guardAt, guardAt, i+1, f.SHA256)
 	}
 	guardExec(t, env, `INSERT INTO reactions(msg_id,peer_id,emoji,created_at) VALUES (?,?,?,?)`, "msg_00000000000000000000000001", guardA, "👍", guardAt)
+	prepareReferenceStorage(t, env)
 	return env, fs
 }
 
 func guardBytes(t *testing.T, name string, got []byte) {
 	t.Helper()
+	assertPublicStorageKeys(t, got)
 	path := "testdata/reference_guard/" + name
 	want, err := os.ReadFile(path)
 	if err != nil {
@@ -418,6 +420,7 @@ func TestReferenceGuardFanOutSendBytes(t *testing.T) {
 					}
 				}
 			}
+			assertReferenceWrites(t, env, msgID)
 			var dly, thr, recipient, sum string
 			var eventSeq int64
 			if err := env.Hub.DB.QueryRow(`SELECT dly_id,thr_id,recipient,event_seq,body_sha256 FROM deliveries WHERE msg_id=? ORDER BY event_seq DESC LIMIT 1`, msgID).Scan(&dly, &thr, &recipient, &eventSeq, &sum); err != nil {
