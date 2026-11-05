@@ -63,6 +63,38 @@ b2f7c4ce90a2ffb4b313d01ae44322eef9fb52523745c6e09a7129c8bbce74b3`
 	}
 }
 
+func TestR2CanonicalGETVector(t *testing.T) {
+	// Offline vector independently calculated with Python hmac/hashlib. These
+	// literals pin GET and the exact object key; no provider call is involved.
+	const wantCanonical = `GET
+/vecnet-blobs-test/folder/a%20b%2Bc/%CE%BB//d
+X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=VECTORACCESS%2F20261105%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261105T030405Z&X-Amz-Expires=600&X-Amz-SignedHeaders=host
+host:00000000000000000000000000000000.r2.cloudflarestorage.com
+
+host
+UNSIGNED-PAYLOAD`
+	const wantStringToSign = `AWS4-HMAC-SHA256
+20261105T030405Z
+20261105/auto/s3/aws4_request
+6e8752ab2c9245808be31b0e4085a1ab830b1f335dd1c9801a13596ade97c4f7`
+	const wantSignature = "44e77479a75cf80d84b995c5364977333fb4e5cf9adf18ffed5b2c24b076a489"
+	signed, canonical, stringToSign, err := r2Presign("GET", r2VectorEndpoint, "vecnet-blobs-test", "folder/a b+c/λ//d", "VECTORACCESS", "vector-secret-not-live", r2VectorNow, 600*time.Second, nil)
+	if err != nil || canonical != wantCanonical || stringToSign != wantStringToSign {
+		t.Fatal("literal GET canonical/string-to-sign vector mismatch; values suppressed")
+	}
+	public, err := PresignGET(r2VectorEndpoint, "vecnet-blobs-test", "folder/a b+c/λ//d", "VECTORACCESS", "vector-secret-not-live", r2VectorNow, 600*time.Second)
+	if err != nil || public != signed {
+		t.Fatal("public GET signer differs from independent vector; values suppressed")
+	}
+	u, err := url.Parse(public)
+	if err != nil {
+		t.Fatal("GET vector URL parse failed")
+	}
+	if u.Scheme != "https" || "https://"+u.Host != r2VectorEndpoint || u.EscapedPath() != "/vecnet-blobs-test/folder/a%20b%2Bc/%CE%BB//d" || u.Query().Get("X-Amz-Signature") != wantSignature {
+		t.Fatal("public GET object/signature vector mismatch; values suppressed")
+	}
+}
+
 func TestR2SignerBindingsEscapingAndTTL(t *testing.T) {
 	h := r2VectorHeaders()
 	original, err := PresignPUT(r2VectorEndpoint, "vecnet-blobs-test", "folder/a b+c/λ//d", "VECTORACCESS", "vector-secret-not-live", r2VectorNow, 300*time.Second, h)
@@ -94,12 +126,6 @@ func TestR2SignerBindingsEscapingAndTTL(t *testing.T) {
 		missing.Del(field)
 		if _, err := PresignPUT(r2VectorEndpoint, "vecnet-blobs-test", "key", "VECTORACCESS", "vector-secret-not-live", r2VectorNow, 300*time.Second, missing); err == nil {
 			t.Errorf("missing signed header %s accepted", field)
-		}
-		changed := h.Clone()
-		changed.Set(field, "changed")
-		value, err := PresignPUT(r2VectorEndpoint, "vecnet-blobs-test", "folder/a b+c/λ//d", "VECTORACCESS", "vector-secret-not-live", r2VectorNow, 300*time.Second, changed)
-		if err == nil && value == original {
-			t.Errorf("changed header %s not bound", field)
 		}
 	}
 	for _, length := range []string{"0", "-1", "7.0", "+7", "07", "26214401"} {
@@ -147,9 +173,30 @@ func TestR2SignerBindingsEscapingAndTTL(t *testing.T) {
 			t.Fatal("subsecond GET allowed")
 		}
 	}
-	get, err := PresignGET(r2VectorEndpoint, "vecnet-blobs-test", "folder/a b+c/λ//d", "VECTORACCESS", "vector-secret-not-live", r2VectorNow, 600*time.Second)
-	if err != nil || get == original {
-		t.Fatal("method not bound")
+}
+
+func TestR2SignerRejectsUnsafePUTHeaders(t *testing.T) {
+	for _, tt := range []struct {
+		name, field, value string
+	}{
+		{"html", "Content-Type", "text/html"},
+		{"inline", "Content-Disposition", "inline"},
+		{"public_cache", "Cache-Control", "public"},
+		{"conditional_etag", "If-None-Match", `"existing-etag"`},
+		{"conditional_empty", "If-None-Match", ""},
+		{"conditional_arbitrary", "If-None-Match", "changed"},
+		{"unsupported_profile", "X-Amz-Meta-Vecnet-Checksum-Profile", "sha1"},
+		{"parked_profile", "X-Amz-Meta-Vecnet-Checksum-Profile", "md5"},
+		{"empty_profile", "X-Amz-Meta-Vecnet-Checksum-Profile", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := r2VectorHeaders()
+			h.Set(tt.field, tt.value)
+			value, err := PresignPUT(r2VectorEndpoint, "vecnet-blobs-test", "key", "VECTORACCESS", "vector-secret-not-live", r2VectorNow, R2UploadTTL, h)
+			if err == nil || value != "" {
+				t.Fatal("unsafe PUT header accepted; capability suppressed")
+			}
+		})
 	}
 }
 

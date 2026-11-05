@@ -56,8 +56,21 @@ func TestR2AttachmentSchemaAndServerVerification(t *testing.T) {
 			if envelope.Validate("sendRequest", mustJSON(t, req)) == nil {
 				t.Fatal("send accepted server verification assertions")
 			}
+			verification := map[string]any{
+				"sha256_verified": attachment["sha256_verified"],
+				"integrity":       attachment["integrity"],
+			}
 			delete(attachment, "sha256_verified")
 			delete(attachment, "integrity")
+			for _, field := range []string{"sha256_verified", "integrity"} {
+				t.Run("send_"+field+"_only", func(t *testing.T) {
+					attachment[field] = verification[field]
+					if envelope.Validate("sendRequest", mustJSON(t, req)) == nil {
+						t.Errorf("send accepted server-only %s assertion", field)
+					}
+					delete(attachment, field)
+				})
+			}
 			if err := envelope.Validate("sendRequest", mustJSON(t, req)); err != nil {
 				t.Fatalf("reference-only send rejected: %v", err)
 			}
