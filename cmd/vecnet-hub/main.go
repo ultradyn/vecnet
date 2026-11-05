@@ -82,6 +82,12 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	mcpOrigins := fs.String("mcp-allowed-origins", getenv("VECNET_MCP_ALLOWED_ORIGINS"), "extra /mcp origins, comma-separated; empty defaults to https://chatgpt.com, none allows public origin only ($VECNET_MCP_ALLOWED_ORIGINS)")
 	mcpLegacy := fs.String("mcp-legacy-sessions", envOr(getenv, "VECNET_MCP_LEGACY_SESSIONS", "on"), "legacy MCP sessions: on, off-for-oauth, off ($VECNET_MCP_LEGACY_SESSIONS)")
 	oauthRedirects := fs.String("oauth-redirects", getenv("VECNET_OAUTH_REDIRECTS"), "extra OAuth redirect patterns, comma-separated, appended to defaults ($VECNET_OAUTH_REDIRECTS)")
+	references := fs.Bool("delivery-references", false, "enable reference writes (rollback requires a dual reader)")
+	backfill := fs.Bool("storage-backfill", false, "enable bounded legacy Delivery backfill on slow ticks")
+	defaults := hub.DefaultBackfillLimits()
+	backfillRows := fs.Int("storage-backfill-rows", defaults.Rows, "maximum events per backfill slice")
+	backfillBytes := fs.Int64("storage-backfill-bytes", defaults.Bytes, "source JSON byte budget per backfill slice")
+	backfillTarget := fs.Duration("storage-backfill-target", defaults.Target, "target writer time per backfill slice")
 	devUIDir := fs.String("dev-ui-dir", "", "serve the operator UI from this directory instead of the embedded copy (development)")
 	allowPrivate := fs.Bool("allow-private-egress", getenv("VECNET_ALLOW_PRIVATE_EGRESS") == "1",
 		"development only: let outbound URLs be http and reach private/loopback addresses ($VECNET_ALLOW_PRIVATE_EGRESS=1)")
@@ -110,6 +116,10 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	}
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unknown subcommand %q", fs.Arg(0))
+	}
+	storage := storageOptions{references: *references, backfill: *backfill, limits: hub.BackfillLimits{Rows: *backfillRows, Bytes: *backfillBytes, Target: *backfillTarget}}
+	if err := hub.ValidateBackfillLimits(storage.limits); err != nil {
+		return err
 	}
 	retryMS, err := strconv.ParseInt(*restartRetry, 10, 64)
 	if err != nil || retryMS < 0 || retryMS > 60000 {
@@ -142,8 +152,16 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 		Listen: *listen, DataDir: *dataDir, PublicURL: *publicURL, DevUIDir: *devUIDir, RelocatedTo: *relocatedTo,
 		AllowPrivateEgress: *allowPrivate, TrustFly: *trustFly, RestartRetry: time.Duration(retryMS) * time.Millisecond,
 		MCPOrigins: origins, OAuthRedirects: redirects, RefreshInterval: preferenceConfig.EventsRefreshInterval, MCPLegacySessions: legacy,
-		Bootstrap: &preferenceConfig,
+		Bootstrap: &preferenceConfig, Storage: storage,
 	}, stdout)
+}
+
+// storageOptions are the DB-compaction switches: reference writes and the
+// bounded online backfill. They are deployment flags, not preferences.
+type storageOptions struct {
+	references bool
+	backfill   bool
+	limits     hub.BackfillLimits
 }
 
 // runIdentity reads identity metadata or rotates the database-backed key offline.
@@ -295,8 +313,10 @@ type serveConfig struct {
 	RefreshInterval                      time.Duration
 	MCPLegacySessions                    string
 	// Bootstrap is the hub.Config resolved from the preference flags; nil
-	// means hub.DefaultConfig(). RefreshInterval still wins for Events.
+	// means hub.DefaultConfig(). RefreshInterval still wins for Events, and
+	// Storage sets the reference-write and backfill switches.
 	Bootstrap *hub.Config
+	Storage   storageOptions
 }
 
 // serve runs until ctx is cancelled. Relocated mode serves a signed move
@@ -351,6 +371,9 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 		bootstrap = *cfg.Bootstrap
 	}
 	bootstrap.EventsRefreshInterval = cfg.RefreshInterval
+	bootstrap.DeliveryReferences = cfg.Storage.references
+	bootstrap.BackfillEnabled = cfg.Storage.backfill
+	bootstrap.BackfillLimits = cfg.Storage.limits
 	h, db, err := openHub(cfg.DataDir, publicURL, cfg.AllowPrivateEgress, bootstrap)
 	if err != nil {
 		ln.Close()

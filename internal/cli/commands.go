@@ -607,8 +607,9 @@ func (a *app) cmdEnrol(args []string) error {
 	}
 	cfg.Profiles[name] = Profile{Hub: strings.TrimRight(hubURL, "/"), HubPubkey: pin, Secret: out.Secret, PeerID: out.PeerID, AllowInsecureHTTP: insecure}
 	if err := saveConfig(path, cfg); err != nil {
-		// The secret was issued once; show it so it is not lost.
-		fmt.Fprintf(a.stderr, "vecnet: could not write %s; the secret for %s is %s\n", path, out.PeerID, out.Secret)
+		// The secret was issued once and is never printed (PROTOCOL §12, §14
+		// inv. 6): name the peer and how to get a fresh credential instead.
+		fmt.Fprintf(a.stderr, "vecnet: could not write %s; %s is enrolled but its secret was not saved and is not shown. Fix the config path, then ask the operator to rotate the secret (vecnet peer rotate %s) and save the new one with --profile %s\n", path, out.PeerID, out.PeerID, name)
 		return err
 	}
 	if a.json {

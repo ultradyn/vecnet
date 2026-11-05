@@ -34,6 +34,16 @@ type Config struct {
 	PreferencePolicyGeneration string // immutable deployment policy identity
 	CreatesPerHour             int    // provisioning fallback; Task 3 installs its consumer
 
+	// DeliveryReferences enables new reference writes; the dual reader is always active.
+	// Leave false for deployment stage 1. Once enabled, replay bodies stay immutable.
+	DeliveryReferences bool
+
+	// Online backfill is independently opt-in; zero limits use defaults.
+	BackfillEnabled    bool
+	BackfillLimits     BackfillLimits
+	BackfillCapacity   func(context.Context) (BackfillCapacity, error)
+	BackfillCheckpoint func(context.Context) (BackfillCheckpoint, error)
+
 	PublicURL       string        // externally visible origin, no trailing slash
 	DataDir         string        // holds hub.db and blobs/
 	DefaultMaxDepth int           // loop.max_depth when a send omits it (range 1–64)
@@ -116,6 +126,9 @@ type Hub struct {
 	// Activity is the operator's live, lossy feed of committed thread
 	// activity (GET /v1/admin/activity). The zero value is ready.
 	Activity ActivityFeed
+
+	backfillMu   sync.Mutex
+	backfillLast BackfillProgress
 
 	linkGuard linkGuard // refused link codes (DotLinkFailed)
 

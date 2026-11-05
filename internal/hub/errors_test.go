@@ -2,14 +2,17 @@ package hub_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/egress"
 	"github.com/XertroV/vecnet/internal/hub"
 )
 
@@ -46,12 +49,12 @@ func TestEgressErrHidesURL(t *testing.T) {
 func TestEgressErrDropsReceiverText(t *testing.T) {
 	const marker = "PRIVATEMESSAGEMARKER"
 	const credential = "whsec_syntheticcredentialmarker"
+	// The fixed reason codes EgressErr can produce for a transport failure.
 	allowed := map[string]bool{
-		"timeout": true, "canceled": true, "redirect refused": true, "destination refused": true,
-		"scheme refused": true, "userinfo refused": true, "invalid url": true,
-		"network error": true, "network error: protocol error": true, "network error: connection closed": true,
-		"network error: connection refused": true, "network error: connection reset": true,
-		"network error: dns lookup failed": true, "network error: tls failure": true,
+		"timeout": true, "canceled": true, "redirect_refused": true, "private_address": true,
+		"scheme_refused": true, "userinfo_refused": true, "invalid_url": true,
+		"dns_error": true, "tls_error": true, "connection_refused": true, "connection_reset": true,
+		"connection_closed": true, "network_error": true, "request_failed": true,
 	}
 	for name, response := range map[string]string{
 		"malformed location": "HTTP/1.1 302 Found\r\nLocation: /" + marker + "%zz-" + credential + "\r\nContent-Length: 0\r\n\r\n",
@@ -100,5 +103,38 @@ func TestEgressErrDropsReceiverText(t *testing.T) {
 				t.Fatalf("EgressErr = %q, want an allowlisted reason without receiver text", got)
 			}
 		})
+	}
+}
+
+// TestEgressErrIsAFixedReasonCode: a malformed redirect Location is quoted
+// whole in net/http's error (before CheckRedirect runs), so the receiver
+// controls that text; EgressErr reports only a fixed reason code.
+func TestEgressErrIsAFixedReasonCode(t *testing.T) {
+	const loc = "http://SECRETUSER:SECRETPW@bad host/SECRETBODY?token=SECRETTOKEN"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", loc)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+	_, err := http.Get(srv.URL + "/hook?token=SECRETQUERY")
+	if err == nil || !strings.Contains(err.Error(), "SECRETTOKEN") {
+		t.Fatalf("precondition: raw error %v does not quote the Location", err)
+	}
+	if got := hub.EgressErr(err); got != "request_failed" {
+		t.Fatalf("EgressErr(malformed Location) = %q, want request_failed", got)
+	}
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("wrap SECRET: %w", egress.ErrRedirect), "redirect_refused"},
+		{fmt.Errorf("wrap SECRET: %w", context.DeadlineExceeded), "timeout"},
+		{hub.HTTPStatusError(503), "HTTP 503"},
+		{&hub.OutboundError{Reason: "no_active_key", Err: errors.New("SECRET")}, "no_active_key"},
+		{errors.New("SECRET body text"), "request_failed"},
+	} {
+		if got := hub.EgressErr(tc.err); got != tc.want {
+			t.Errorf("EgressErr(%T) = %q, want %q", tc.err, got, tc.want)
+		}
 	}
 }

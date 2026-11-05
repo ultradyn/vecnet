@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/url"
+	"strconv"
 	"syscall"
 
 	"github.com/XertroV/vecnet/internal/egress"
@@ -33,80 +33,89 @@ func E(status int, code, msg string) *APIError {
 	return &APIError{Status: status, Code: code, Message: msg, Details: map[string]any{}}
 }
 
-// EgressErr describes a failed outbound request (push, notify, verify) for
-// logs, deliveries.last_error and API details. Transport failures reduce to
-// an allowlisted reason ("timeout", "redirect refused", "network error:
-// protocol error", ...): the target URL may carry a credential, and the
-// HTTP client quotes receiver-controlled bytes (a malformed Location or
-// status line) that could reflect message text or secrets (PROTOCOL §12
-// Logging, §14 inv. 6). Errors without a transport cause are hub-authored
-// (for example a refused challenge echo) and pass through, bounded.
+// OutboundError is an outbound failure that names its own fixed reason
+// code. Reason must be a constant code or a status line ("HTTP 503"): it is
+// what EgressErr reports, while Err (which may name the URL) is only for
+// errors.Is/As.
+type OutboundError struct {
+	Reason string
+	Err    error
+}
+
+func (e *OutboundError) Error() string {
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return e.Reason
+}
+
+func (e *OutboundError) Unwrap() error { return e.Err }
+
+// HTTPStatusError is the OutboundError for a receiver that answered status.
+func HTTPStatusError(status int) error {
+	return &OutboundError{Reason: "HTTP " + strconv.Itoa(status)}
+}
+
+// EgressErr describes a failed outbound request (push, notify, verify,
+// avatar fetch) for logs, deliveries.last_error and API details as a fixed
+// reason code. It never renders the error's text: notification and push
+// URLs often carry a credential in their path or query, and a transport
+// error can quote the URL or a receiver-chosen header such as a malformed
+// redirect Location (PROTOCOL §12 Logging, §14 inv. 6). Errors it cannot
+// classify are "request_failed".
 func EgressErr(err error) string {
 	if err == nil {
 		return ""
 	}
-	if reason, ok := egressReason(err); ok {
-		return reason
+	var oe *OutboundError
+	if errors.As(err, &oe) && oe.Reason != "" {
+		return oe.Reason
 	}
-	msg := err.Error()
-	if len(msg) > maxEgressErr {
-		msg = msg[:maxEgressErr]
-	}
-	return msg
-}
-
-// maxEgressErr bounds a passed-through hub-authored error.
-const maxEgressErr = 256
-
-// egressReason classifies a transport failure without reading its text.
-func egressReason(err error) (string, bool) {
-	for _, refused := range []struct {
-		err    error
-		reason string
+	for _, c := range []struct {
+		target error
+		code   string
 	}{
-		{egress.ErrRedirect, "redirect refused"},
-		{egress.ErrPrivateAddress, "destination refused"},
-		{egress.ErrScheme, "scheme refused"},
-		{egress.ErrUserinfo, "userinfo refused"},
-		{egress.ErrInvalidURL, "invalid url"},
-		{context.DeadlineExceeded, "timeout"},
+		{egress.ErrRedirect, "redirect_refused"},
+		{egress.ErrPrivateAddress, "private_address"},
+		{egress.ErrScheme, "scheme_refused"},
+		{egress.ErrUserinfo, "userinfo_refused"},
+		{egress.ErrInvalidURL, "invalid_url"},
 		{context.Canceled, "canceled"},
+		{context.DeadlineExceeded, "timeout"},
 	} {
-		if errors.Is(err, refused.err) {
-			return refused.reason, true
+		if errors.Is(err, c.target) {
+			return c.code
 		}
 	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return "timeout", true
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return "timeout"
 	}
 	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "dns_error"
+	}
+	var certErr *tls.CertificateVerificationError
 	var recordErr tls.RecordHeaderError
 	var alertErr tls.AlertError
-	var verifyErr *tls.CertificateVerificationError
-	var authorityErr x509.UnknownAuthorityError
+	var unknownAuthority x509.UnknownAuthorityError
 	var hostnameErr x509.HostnameError
-	var invalidErr x509.CertificateInvalidError
-	var opErr *net.OpError
-	var ue *url.Error
-	switch {
-	case errors.As(err, &dnsErr):
-		return "network error: dns lookup failed", true
-	case errors.Is(err, syscall.ECONNREFUSED):
-		return "network error: connection refused", true
-	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE):
-		return "network error: connection reset", true
-	case errors.As(err, &recordErr), errors.As(err, &alertErr), errors.As(err, &verifyErr),
-		errors.As(err, &authorityErr), errors.As(err, &hostnameErr), errors.As(err, &invalidErr):
-		return "network error: tls failure", true
-	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-		return "network error: connection closed", true
-	case errors.As(err, &opErr):
-		return "network error", true
-	case errors.As(err, &ue):
-		// Malformed responses and redirects, HTTP/2 errors: their text can
-		// quote the receiver.
-		return "network error: protocol error", true
+	var invalidCert x509.CertificateInvalidError
+	if errors.As(err, &certErr) || errors.As(err, &recordErr) || errors.As(err, &alertErr) ||
+		errors.As(err, &unknownAuthority) || errors.As(err, &hostnameErr) || errors.As(err, &invalidCert) {
+		return "tls_error"
 	}
-	return "", false
+	switch {
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection_refused"
+	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE):
+		return "connection_reset"
+	case errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF):
+		return "connection_closed"
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return "network_error"
+	}
+	return "request_failed"
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
+	"github.com/XertroV/vecnet/internal/eventpayload"
 	"github.com/XertroV/vecnet/internal/ids"
 	"github.com/XertroV/vecnet/internal/webhook"
 )
@@ -284,7 +285,7 @@ func (h *Hub) postNotifyOnce(ctx context.Context, client *http.Client, r NotifyR
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, PushResponseCap))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return errors.New("HTTP " + strconv.Itoa(resp.StatusCode))
+		return HTTPStatusError(resp.StatusCode)
 	}
 	return nil
 }
@@ -298,45 +299,72 @@ func (h *Hub) notifyOperatorDeliveries(ctx context.Context, msgID string) {
 	if err := h.DB.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM notify_routes)`).Scan(&has); err != nil || !has {
 		return
 	}
-	rows, err := h.DB.QueryContext(ctx,
-		`SELECT e.seq, e.type, e.at, e.data, d.priority, m.kind
-		 FROM deliveries d
-		 JOIN peers p ON p.peer_id = d.recipient AND p.kind = 'operator'
-		 JOIN events e ON e.seq = d.event_seq
-		 JOIN messages m ON m.msg_id = d.msg_id
-		 WHERE d.msg_id = ? AND d.state != 'superseded'
-		 ORDER BY e.seq`, msgID)
-	if err != nil {
-		slog.Error("hub: operator notifications", "err", err)
-		return
-	}
 	type pending struct {
 		ev      envelope.Event
 		classes []string
 	}
 	var out []pending
-	for rows.Next() {
-		var seq int64
-		var ev envelope.Event
-		var data, priority, kind string
-		if err := rows.Scan(&seq, &ev.Type, &ev.At, &data, &priority, &kind); err != nil {
-			slog.Error("hub: operator notifications", "err", err)
-			break
+	err := h.DB.ReadSnapshot(ctx, func(q *sql.Conn) error {
+		rows, err := q.QueryContext(ctx, `SELECT e.seq, e.type, e.at, e.data, d.priority, m.kind,
+             e.payload_format, coalesce(e.msg_id, ''), coalesce(e.snapshot_id, ''), d.body_sha256
+         FROM deliveries d
+         JOIN peers p ON p.peer_id = d.recipient AND p.kind = 'operator'
+         JOIN events e ON e.seq = d.event_seq
+         JOIN messages m ON m.msg_id = d.msg_id
+         WHERE d.msg_id = ? AND d.state != 'superseded' ORDER BY e.seq`, msgID)
+		if err != nil {
+			return errors.New("operator_notification_query")
 		}
-		ev.Cursor = eventlog.Cursor{Epoch: h.Log.Epoch(), Seq: seq}.String()
-		ev.Data = json.RawMessage(data)
-		var classes []string
-		if priority == "wake" {
-			classes = append(classes, NotifyWake)
+		var payloads []eventpayload.StoredPayload
+		for rows.Next() {
+			var seq int64
+			var ev envelope.Event
+			var p eventpayload.StoredPayload
+			var priority, kind string
+			if err := rows.Scan(&seq, &ev.Type, &ev.At, &p.Data, &priority, &kind, &p.Format, &p.MsgID, &p.SnapshotID, &p.BodySHA256); err != nil {
+				rows.Close()
+				return errors.New("operator_notification_scan")
+			}
+			ev.Cursor = eventlog.Cursor{Epoch: h.Log.Epoch(), Seq: seq}.String()
+			var classes []string
+			if priority == "wake" {
+				classes = append(classes, NotifyWake)
+			}
+			if kind == "approval_request" {
+				classes = append(classes, NotifyApprovals)
+			}
+			if len(classes) > 0 {
+				out = append(out, pending{ev, classes})
+				payloads = append(payloads, p)
+			}
 		}
-		if kind == "approval_request" {
-			classes = append(classes, NotifyApprovals)
+		if err := rows.Close(); err != nil {
+			return errors.New("operator_notification_close")
 		}
-		if len(classes) > 0 {
-			out = append(out, pending{ev, classes})
+		if err := rows.Err(); err != nil {
+			return errors.New("operator_notification_rows")
 		}
+		for _, p := range payloads {
+			if p.Format == eventpayload.DeliveryRefV1 && p.BodySHA256 == "" {
+				return &eventpayload.StorageError{Reason: "delivery_hash_mismatch"}
+			}
+		}
+		bodies, err := eventpayload.HydrateBatch(ctx, q, payloads)
+		if err != nil {
+			return err
+		}
+		for i, body := range bodies {
+			out[i].ev.Data = json.RawMessage(body)
+		}
+		return nil
+	})
+	if err != nil {
+		// IDs and reason codes only; never include row data, tokens or destinations.
+		slog.Error("hub: operator notifications", "msg_id", msgID, "reason", "payload_read_failed")
+		return
 	}
-	rows.Close()
+	// Release the snapshot before dispatching; the existing notification renderer
+	// and per-attempt reaction dispatch gate remain authoritative.
 	for _, p := range out {
 		h.notify(ctx, p.ev, p.classes...)
 	}

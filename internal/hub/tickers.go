@@ -63,6 +63,11 @@ func (h *Hub) Tick(ctx context.Context, slow bool) {
 	if _, err := h.ArchiveIdleGroups(ctx, now); err != nil && ctx.Err() == nil {
 		slog.Error("hub: tick archive groups", "err", err)
 	}
+	if h.Cfg.BackfillEnabled {
+		if _, err := h.BackfillDeliverySlice(ctx, h.Cfg.BackfillLimits); err != nil && ctx.Err() == nil {
+			slog.Error("hub: backfill slice", "reason", "slice_failed")
+		}
+	}
 	if _, err := h.Blobs.GC(ctx); err != nil && ctx.Err() == nil {
 		slog.Error("hub: tick blob gc", "err", err)
 	}

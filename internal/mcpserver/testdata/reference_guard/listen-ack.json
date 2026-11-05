@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":9,"subscriptionId":9},"notifications":{"resourceSubscriptions":["vecnet://peer/peer_00000000000000000000000002/inbox"]}}}

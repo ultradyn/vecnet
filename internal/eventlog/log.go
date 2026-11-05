@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/eventpayload"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
@@ -201,58 +202,77 @@ func (l *Log) Read(ctx context.Context, owners []string, after Cursor, limit int
 	if after == Head {
 		return []envelope.Event{}, nil
 	}
-	if after.Epoch != l.epoch {
-		oldest, err := oldestValid(ctx, l.DB)
-		if err != nil {
-			return nil, err
-		}
-		return nil, ErrCursorPurged{Oldest: Cursor{Epoch: l.epoch, Seq: oldest}}
-	}
-	if after.Seq < 0 {
+	if after.Epoch == l.epoch && after.Seq < 0 {
 		return nil, fmt.Errorf("%w: negative seq %d", ErrInvalidCursor, after.Seq)
 	}
 	if limit <= 0 || limit > MaxReadLimit {
 		limit = MaxReadLimit
 	}
 	out := []envelope.Event{}
-	if len(owners) > 0 {
+	// Pin metadata, event bytes and immutable bodies to one deferred read snapshot.
+	// Never use the writer transaction path or borrow another pool connection.
+	err := l.DB.ReadSnapshot(ctx, func(q *sql.Conn) error {
+		oldest, err := oldestValid(ctx, q)
+		if err != nil {
+			return err
+		}
+		if after.Epoch != l.epoch || after.Seq < oldest {
+			return ErrCursorPurged{Oldest: Cursor{Epoch: l.epoch, Seq: oldest}}
+		}
+		if len(owners) == 0 {
+			return nil
+		}
 		args := make([]any, 0, len(owners)+2)
 		for _, o := range owners {
 			args = append(args, o)
 		}
 		args = append(args, after.Seq, limit)
-		rows, err := l.DB.QueryContext(ctx,
-			`SELECT seq, type, at, data FROM events WHERE owner IN (`+placeholders(len(owners))+`)
-			 AND seq > ? ORDER BY seq LIMIT ?`, args...)
+		rows, err := q.QueryContext(ctx, `SELECT e.seq, e.type, e.at, e.data, e.payload_format,
+             coalesce(e.msg_id, ''), coalesce(e.snapshot_id, ''),
+             (SELECT d.body_sha256 FROM deliveries d WHERE d.msg_id = e.msg_id AND d.event_seq = e.seq)
+         FROM events e WHERE e.owner IN (`+placeholders(len(owners))+`)
+         AND e.seq > ? ORDER BY e.seq LIMIT ?`, args...)
 		if err != nil {
-			return nil, fmt.Errorf("eventlog: read: %w", err)
+			return fmt.Errorf("eventlog: read: %w", err)
 		}
-		defer rows.Close()
+		var payloads []eventpayload.StoredPayload
 		for rows.Next() {
-			var (
-				seq  int64
-				ev   envelope.Event
-				data string
-			)
-			if err := rows.Scan(&seq, &ev.Type, &ev.At, &data); err != nil {
-				return nil, fmt.Errorf("eventlog: read: %w", err)
+			var seq int64
+			var ev envelope.Event
+			var p eventpayload.StoredPayload
+			var deliveryHash sql.NullString
+			if err := rows.Scan(&seq, &ev.Type, &ev.At, &p.Data, &p.Format, &p.MsgID, &p.SnapshotID, &deliveryHash); err != nil {
+				rows.Close()
+				return fmt.Errorf("eventlog: read: %w", err)
 			}
+			// NULL means no delivery row; an existing empty hash is corruption,
+			// not permission to skip the frozen delivery digest check.
+			if p.Format == eventpayload.DeliveryRefV1 && deliveryHash.Valid && deliveryHash.String == "" {
+				rows.Close()
+				return &eventpayload.StorageError{Reason: "delivery_hash_mismatch"}
+			}
+			p.BodySHA256 = deliveryHash.String
 			ev.Cursor = Cursor{Epoch: l.epoch, Seq: seq}.String()
-			ev.Data = json.RawMessage(data)
 			out = append(out, ev)
+			payloads = append(payloads, p)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("eventlog: read: %w", err)
 		}
 		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("eventlog: read: %w", err)
+			return fmt.Errorf("eventlog: read: %w", err)
 		}
-	}
-	// Checked after the query: a purge racing the read is still caught, since
-	// the retention floor only ever rises.
-	oldest, err := oldestValid(ctx, l.DB)
+		bodies, err := eventpayload.HydrateBatch(ctx, q, payloads)
+		if err != nil {
+			return err
+		}
+		for i, body := range bodies {
+			out[i].Data = json.RawMessage(body)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	if after.Seq < oldest {
-		return nil, ErrCursorPurged{Oldest: Cursor{Epoch: l.epoch, Seq: oldest}}
 	}
 	return out, nil
 }

@@ -27,6 +27,21 @@ import (
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
+func TestBackfillLimitsRejectBeforeOpeningStore(t *testing.T) {
+	for _, flags := range [][]string{{"--storage-backfill-rows=-1"}, {"--storage-backfill-bytes=-1"}, {"--storage-backfill-target=-1ms"}, {"--storage-backfill-bytes=9223372036854775807"}} {
+		dir := filepath.Join(t.TempDir(), "unopened")
+		args := append([]string{"--data-dir", dir, "--listen", "127.0.0.1:0"}, flags...)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := run(ctx, args, io.Discard, noEnv); err == nil || !strings.Contains(err.Error(), "invalid_limits") {
+			t.Fatalf("invalid backfill limits accepted: %v", err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatal("invalid limits opened store")
+		}
+	}
+}
+
 func TestInitPrintsSecretOnce(t *testing.T) {
 	dir := t.TempDir()
 	var first, second bytes.Buffer

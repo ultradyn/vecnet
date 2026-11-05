@@ -171,10 +171,10 @@ func (w *Worker) Push(ctx context.Context, d hub.DueDelivery) {
 // (≤ 4 KiB) is copied into it; otherwise it is discarded.
 func (w *Worker) post(ctx context.Context, url, id string, keys []string, body []byte, attempt int, sink *bytes.Buffer) (status int, retryAfter time.Duration, err error) {
 	if len(body) > hub.MaxPushBody {
-		return 0, 0, fmt.Errorf("push: body is %d bytes, over the %d-byte cap", len(body), hub.MaxPushBody)
+		return 0, 0, &hub.OutboundError{Reason: "body_too_large", Err: fmt.Errorf("push: body is %d bytes, over the %d-byte cap", len(body), hub.MaxPushBody)}
 	}
 	if len(keys) == 0 {
-		return 0, 0, errors.New("push: route has no active key")
+		return 0, 0, &hub.OutboundError{Reason: "no_active_key", Err: errors.New("push: route has no active key")}
 	}
 	now := w.now()
 	sig, err := webhook.SignAll(keys, id, now, body)
@@ -247,13 +247,13 @@ func (w *Worker) Verify(ctx context.Context, routeID string) error {
 		return fmt.Errorf("push: verify %s: %w", routeID, err)
 	}
 	if status < 200 || status >= 300 {
-		return fmt.Errorf("%w: HTTP %d", ErrChallenge, status)
+		return &hub.OutboundError{Reason: fmt.Sprintf("challenge_failed: HTTP %d", status), Err: fmt.Errorf("%w: HTTP %d", ErrChallenge, status)}
 	}
 	var echo struct {
 		Challenge string `json:"challenge"`
 	}
 	if err := json.Unmarshal(answer.Bytes(), &echo); err != nil || echo.Challenge != challenge {
-		return fmt.Errorf("%w: wrong or missing echo", ErrChallenge)
+		return &hub.OutboundError{Reason: "challenge_failed: wrong or missing echo", Err: fmt.Errorf("%w: wrong or missing echo", ErrChallenge)}
 	}
 	if err := w.Hub.MarkRouteVerified(ctx, routeID); err != nil {
 		return err

@@ -14,6 +14,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/eventpayload"
 )
 
 // Push delivery state machine (PROTOCOL §3.3, §3.4, §5.1, §5.2, §5.5).
@@ -93,7 +94,7 @@ func (h *Hub) ClaimDue(ctx context.Context, now time.Time, limit int) ([]DueDeli
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		out = nil
 		rows, err := tx.QueryContext(ctx,
-			`SELECT d.dly_id, d.recipient, d.thr_id, d.route_id, r.url, r.kind, d.attempt, e.data
+			`SELECT d.dly_id, d.recipient, d.thr_id, d.route_id, r.url, r.kind, d.attempt, e.data, e.payload_format, coalesce(e.msg_id,''), coalesce(e.snapshot_id,''), d.body_sha256
 			 FROM deliveries d
 			 JOIN routes r ON r.route_id = d.route_id
 			 JOIN events e ON e.seq = d.event_seq
@@ -111,14 +112,15 @@ func (h *Hub) ClaimDue(ctx context.Context, now time.Time, limit int) ([]DueDeli
 		if err != nil {
 			return fmt.Errorf("hub: claim due: %w", err)
 		}
+		var payloads []eventpayload.StoredPayload
 		for rows.Next() {
 			var d DueDelivery
-			var body string
-			if err := rows.Scan(&d.DeliveryID, &d.Recipient, &d.ThreadID, &d.RouteID, &d.URL, &d.Kind, &d.Attempt, &body); err != nil {
+			var p eventpayload.StoredPayload
+			if err := rows.Scan(&d.DeliveryID, &d.Recipient, &d.ThreadID, &d.RouteID, &d.URL, &d.Kind, &d.Attempt, &p.Data, &p.Format, &p.MsgID, &p.SnapshotID, &p.BodySHA256); err != nil {
 				rows.Close()
 				return fmt.Errorf("hub: claim due: %w", err)
 			}
-			d.Body = []byte(body)
+			payloads = append(payloads, p)
 			d.Attempt++
 			out = append(out, d)
 		}
@@ -127,6 +129,20 @@ func (h *Hub) ClaimDue(ctx context.Context, now time.Time, limit int) ([]DueDeli
 		}
 		if err := rows.Err(); err != nil {
 			return fmt.Errorf("hub: claim due: %w", err)
+		}
+		// Event iterators are closed; reuse this writer transaction even with a
+		// one-connection pool. Hydration failure rolls back the entire claim.
+		for _, p := range payloads {
+			if p.Format == eventpayload.DeliveryRefV1 && p.BodySHA256 == "" {
+				return &eventpayload.StorageError{Reason: "delivery_hash_mismatch"}
+			}
+		}
+		bodies, err := eventpayload.HydrateBatch(ctx, tx, payloads)
+		if err != nil {
+			return err
+		}
+		for i, body := range bodies {
+			out[i].Body = body
 		}
 		lease := envelope.FormatTime(now.Add(PushLease))
 		keys := map[string][]string{}
