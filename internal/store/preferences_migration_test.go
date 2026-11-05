@@ -121,6 +121,7 @@ func TestPreferencesPreservesShippedMigrationChecksums(t *testing.T) {
 		"0018_sender_info.sql":               "c1ccdbb738504dd411caec9f358d7d900c3f41a24bd351e4f3d19580fe163cdf",
 		"0019_event_subscription_status.sql": "4a8a9112b508d0393619b354f4bfad44f4157abc0ef37294624ac6106c3a71a8",
 		"0020_event_refresh_before.sql":      "2ac7dd14e99ea10f8864c896a772b71a5d06fd6664343e6cd66b8c2044082bc2",
+		"0021_hub_identity_notices.sql":      "04f0dedf59460225d3aeb803b42d16b1c09938495310ee85e19ae151b914962c",
 	}
 	migs, err := loadMigrations()
 	if err != nil {
