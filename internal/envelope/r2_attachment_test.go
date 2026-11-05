@@ -113,3 +113,97 @@ func TestR2AttachmentWireAndDiskCompatibility(t *testing.T) {
 		t.Fatal("R2 roundtrip lost recorded fields/null")
 	}
 }
+
+// TestR2AttachmentTypedRoundTripAllClasses: every retention class survives a
+// typed envelope.Attachment round trip with its exact class, deadline (null
+// only for keep) and stable reference fields, and the serialized attachment
+// validates inside a real Message and Delivery.
+func TestR2AttachmentTypedRoundTripAllClasses(t *testing.T) {
+	for _, class := range []string{"1h", "6h", "12h", "1d", "7d", "30d", "keep"} {
+		t.Run(class, func(t *testing.T) {
+			fixture := r2AttachmentFixture(class)
+			var a envelope.Attachment
+			if err := json.Unmarshal(mustJSON(t, fixture), &a); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(mustJSON(t, a), &got); err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			for _, key := range []string{"blob_id", "sha256", "size", "media_type", "retention_class", "sha256_verified"} {
+				if got[key] != fixture[key] && !(key == "size" && got[key] == float64(7)) {
+					t.Errorf("%s = %v, want %v", key, got[key], fixture[key])
+				}
+			}
+			end, ok := got["expires_at"]
+			if !ok {
+				t.Fatal("expires_at omitted")
+			}
+			if class == "keep" && end != nil {
+				t.Fatalf("keep expires_at = %v, want null", end)
+			}
+			if class != "keep" && end != fixture["expires_at"] {
+				t.Fatalf("expires_at = %v, want %v", end, fixture["expires_at"])
+			}
+			integ, _ := got["integrity"].(map[string]any)
+			if integ["algorithm"] != "sha256" || integ["value"] != strings.Repeat("a", 64) || integ["verified"] != true {
+				t.Fatalf("integrity = %v", got["integrity"])
+			}
+			delivery := loadExample(t, "02-delivery-direct.json")
+			message := delivery["message"].(map[string]any)
+			message["attachments"] = []any{got}
+			if err := envelope.Validate("message", mustJSON(t, message)); err != nil {
+				t.Fatalf("serialized R2 attachment rejected in message: %v", err)
+			}
+			if err := envelope.Validate("delivery", mustJSON(t, delivery)); err != nil {
+				t.Fatalf("serialized R2 attachment rejected in delivery: %v", err)
+			}
+		})
+	}
+}
+
+// TestR2AttachmentForbidsBlobURL: an R2 reference is a stable reference only;
+// a blob_url beside blob_id is rejected in Messages, Deliveries and sends,
+// while a legacy disk attachment keeps its blob_url.
+func TestR2AttachmentForbidsBlobURL(t *testing.T) {
+	const harmless = "https://vecnet.example/v1/blobs/synthetic"
+	delivery := loadExample(t, "02-delivery-direct.json")
+	message := delivery["message"].(map[string]any)
+	legacy := message["attachments"].([]any)[0].(map[string]any)
+	if _, ok := legacy["blob_url"]; !ok || legacy["blob_id"] != nil {
+		t.Fatal("legacy disk fixture must carry blob_url and no blob_id")
+	}
+	if err := envelope.Validate("delivery", mustJSON(t, delivery)); err != nil {
+		t.Fatalf("legacy disk blob_url rejected: %v", err)
+	}
+	for _, class := range []string{"1d", "keep"} {
+		t.Run(class, func(t *testing.T) {
+			delivery := loadExample(t, "02-delivery-direct.json")
+			message := delivery["message"].(map[string]any)
+			attachment := r2AttachmentFixture(class)
+			message["attachments"] = []any{attachment}
+			if err := envelope.Validate("delivery", mustJSON(t, delivery)); err != nil {
+				t.Fatalf("R2 control rejected: %v", err)
+			}
+			attachment["blob_url"] = harmless
+			if envelope.Validate("message", mustJSON(t, message)) == nil {
+				t.Error("message accepted blob_url on an R2 attachment")
+			}
+			if envelope.Validate("delivery", mustJSON(t, delivery)) == nil {
+				t.Error("delivery accepted blob_url on an R2 attachment")
+			}
+			send := loadExample(t, "01-send-request.json")
+			ref := r2AttachmentFixture(class)
+			delete(ref, "sha256_verified")
+			delete(ref, "integrity")
+			send["attachments"] = []any{ref}
+			if err := envelope.Validate("sendRequest", mustJSON(t, send)); err != nil {
+				t.Fatalf("send reference control rejected: %v", err)
+			}
+			ref["blob_url"] = harmless
+			if envelope.Validate("sendRequest", mustJSON(t, send)) == nil {
+				t.Error("send accepted blob_url on an R2 reference")
+			}
+		})
+	}
+}
