@@ -15,6 +15,7 @@ func installUser(t *testing.T) *user {
 	t.Helper()
 	u := profileUser(t, "http://127.0.0.1:1", "vn_peer_unused")
 	u.env["XDG_CONFIG_HOME"] = filepath.Join(filepath.Dir(u.conf), "xdg")
+	u.env["CODEX_HOME"] = filepath.Join(filepath.Dir(u.conf), "codex")
 	return u
 }
 func installRun(t *testing.T, u *user, args ...string) (string, string) {
@@ -1096,5 +1097,345 @@ func TestHookInstallMCPRefusesUnnameable(t *testing.T) {
 				t.Fatalf("claude ran: %q", runs)
 			}
 		})
+	}
+}
+
+// Codex installer tests exercise the CLI and disposable files only. All
+// client/config/cache paths come from installUser's private environment.
+func codexInstallRepo(t *testing.T) (*user, string) {
+	t.Helper()
+	isolateGitEnv(t)
+	u := installUser(t)
+	root := filepath.Join(t.TempDir(), "codex repo ")
+	gitT(t, "init", "--quiet", root)
+	t.Chdir(root)
+	return u, root
+}
+
+func TestHookInstallCodexPrintsStanza(t *testing.T) {
+	u, root := codexInstallRepo(t)
+	code, out, errs := u.run("hook", "install", "--client", "codex", "--profile", "p", "--bin", "/opt/vecnet")
+	if code != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, out, errs)
+	}
+	hooks := decodeSettings(t, []byte(out))["hooks"].(map[string]any)
+	if len(hooks) != 3 {
+		t.Fatalf("installed events=%v", hooks)
+	}
+	for event, name := range map[string]string{"SessionStart": "session-start", "UserPromptSubmit": "user-prompt", "PostToolUse": "post-tool"} {
+		groups, ok := hooks[event].([]any)
+		if !ok || len(groups) != 1 {
+			t.Fatalf("%s groups=%v", event, hooks[event])
+		}
+		group := groups[0].(map[string]any)
+		want := map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "/opt/vecnet hook --profile p --event " + name, "timeout": float64(5), "additionalContextLimit": float64(18000)}}}
+		if event == "PostToolUse" {
+			want["matcher"] = "*"
+		}
+		if !reflect.DeepEqual(group, want) {
+			t.Fatalf("%s group=%v want=%v", event, group, want)
+		}
+	}
+	for _, event := range []string{"Stop", "SubagentStop", "Interrupt", "SessionEnd", "SubagentStart", "PreToolUse"} {
+		if _, ok := hooks[event]; ok {
+			t.Fatalf("installed forbidden event %s", event)
+		}
+	}
+	for _, want := range []string{"git top-level; Codex project hooks", "codex: trust these hooks in /hooks before they run; new or changed hooks are skipped until trusted", "codex: project hooks load only in a trusted project; to keep this file personal, list .codex/hooks.json in .git/info/exclude"} {
+		if !strings.Contains(errs, want) {
+			t.Fatalf("missing %q: %q", want, errs)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".codex")); !os.IsNotExist(err) {
+		t.Fatalf("dry run wrote .codex: %v", err)
+	}
+}
+
+func TestHookInstallCodexDefaultTarget(t *testing.T) {
+	u, root := codexInstallRepo(t)
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(sub)
+	out, errs := installRun(t, u, "--client", "codex", "--write")
+	path := filepath.Join(root, ".codex", "hooks.json")
+	for _, event := range []string{"SessionStart", "UserPromptSubmit", "PostToolUse"} {
+		if len(settingsCommands(t, readSettings(t, path), event)) != 1 {
+			t.Fatalf("missing %s", event)
+		}
+	}
+	for _, want := range []string{"wrote " + path + " (SessionStart, UserPromptSubmit, PostToolUse)", "/hooks", ".git/info/exclude"} {
+		if !strings.Contains(errs, want) {
+			t.Fatalf("missing %q: %q", want, errs)
+		}
+	}
+	if out != "" {
+		t.Fatalf("write stdout=%q", out)
+	}
+	for _, path := range []string{filepath.Join(root, ".claude"), filepath.Join(sub, ".codex"), filepath.Join(root, ".git", "info", "exclude")} {
+		if strings.HasSuffix(path, "exclude") {
+			if body, err := os.ReadFile(path); err == nil && strings.Contains(string(body), ".codex/hooks.json") {
+				t.Fatal("installer edited git excludes")
+			}
+		} else if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("unexpected target %s: %v", path, err)
+		}
+	}
+	before := string(readSettings(t, path))
+	_, errs = installRun(t, u, "--client", "codex", "--write")
+	if !strings.Contains(errs, "unchanged "+path) || string(readSettings(t, path)) != before {
+		t.Fatalf("not idempotent: %q", errs)
+	}
+}
+
+func TestHookInstallCodexRefusesTrackedDefault(t *testing.T) {
+	u, root := codexInstallRepo(t)
+	path := filepath.Join(root, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{}\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, "add", "--", ".codex/hooks.json")
+	gitT(t, "-c", "commit.gpgsign=false", "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "tracked hooks")
+	// A dry run may describe even a tracked target, but must not write it.
+	installRun(t, u, "--client", "codex", "--profile", "p")
+	code, out, errs := u.run("hook", "install", "--client", "codex", "--profile", "p", "--write")
+	want := "hook install: " + path + " is tracked by git (or its status is unknown); writing it would share your profile with everyone; pass --settings " + path + " to write it anyway"
+	if code != 1 || out != "" || !strings.Contains(errs, want) {
+		t.Fatalf("exit=%d out=%q errs=%q", code, out, errs)
+	}
+	if got := string(readSettings(t, path)); got != "{}\n" {
+		t.Fatalf("tracked file changed: %q", got)
+	}
+	installRun(t, u, "--client", "codex", "--profile", "p", "--write", "--settings", path)
+	if len(settingsCommands(t, readSettings(t, path), "SessionStart")) != 1 {
+		t.Fatal("explicit settings did not override guard")
+	}
+	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0640 {
+		t.Fatalf("mode=%v err=%v", st, err)
+	}
+}
+
+func TestHookInstallCodexRefusesSymlinkDefault(t *testing.T) {
+	for _, fileLink := range []bool{false, true} {
+		t.Run(fmt.Sprint(fileLink), func(t *testing.T) {
+			u, root := codexInstallRepo(t)
+			target := filepath.Join(t.TempDir(), "hooks.json")
+			if err := os.WriteFile(target, []byte("{}\n"), 0640); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(root, ".codex")
+			to := filepath.Dir(target)
+			if fileLink {
+				if err := os.Mkdir(link, 0755); err != nil {
+					t.Fatal(err)
+				}
+				link = filepath.Join(link, "hooks.json")
+				to = target
+			}
+			if err := os.Symlink(to, link); err != nil {
+				t.Fatal(err)
+			}
+			code, out, errs := u.run("hook", "install", "--client", "codex", "--profile", "p", "--write")
+			if code != 1 || out != "" || !strings.Contains(errs, "the project .codex/hooks.json") {
+				t.Fatalf("exit=%d out=%q errs=%q", code, out, errs)
+			}
+			if got, err := os.Readlink(link); err != nil || got != to {
+				t.Fatalf("link=%q err=%v", got, err)
+			}
+			if string(readSettings(t, target)) != "{}\n" {
+				t.Fatal("symlink target changed")
+			}
+		})
+	}
+}
+
+func TestHookInstallCodexPreservesForeign(t *testing.T) {
+	u := installUser(t)
+	const before = `{
+  "description": "personal \u0068ooks",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "c2c hook"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+    ],
+    "PostToolUse": [
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "dcg"
+          }
+        ]
+      }
+    ]
+  }
+}
+`
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	if err := os.WriteFile(path, []byte(before), 0640); err != nil {
+		t.Fatal(err)
+	}
+	installRun(t, u, "--client", "codex", "--profile", "p", "--write", "--settings", path)
+	after := string(readSettings(t, path))
+	b, a := decodeSettings(t, []byte(before)), decodeSettings(t, []byte(after))
+	bh, ah := b["hooks"].(map[string]any), a["hooks"].(map[string]any)
+	if !reflect.DeepEqual(b["description"], a["description"]) || !reflect.DeepEqual(bh["PreToolUse"], ah["PreToolUse"]) || !reflect.DeepEqual(bh["SessionStart"].([]any)[0], ah["SessionStart"].([]any)[0]) {
+		t.Fatal("foreign keys or groups changed")
+	}
+	// Every original line survives in order; additions may only put a
+	// comma after an existing closing bracket/brace.
+	lines := strings.Split(after, "\n")
+	next, commas := 0, 0
+	for _, line := range strings.Split(before, "\n") {
+		found := false
+		for next < len(lines) {
+			got := lines[next]
+			next++
+			if got == line {
+				found = true
+				break
+			}
+			if got == line+"," {
+				commas++
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("original line removed/reordered: %q\n%s", line, after)
+		}
+	}
+	if commas != 1 {
+		t.Fatalf("changed %d commas, want one", commas)
+	}
+	_, errs := installRun(t, u, "--client", "codex", "--profile", "q", "--write", "--settings", path)
+	for _, want := range []string{"VECNET_PROFILE=q codex", "Session binding", "vecnet hook rebind --profile P"} {
+		if !strings.Contains(errs, want) {
+			t.Fatalf("missing %q: %q", want, errs)
+		}
+	}
+	for event, name := range map[string]string{"SessionStart": "session-start", "UserPromptSubmit": "user-prompt", "PostToolUse": "post-tool"} {
+		if got := settingsCommands(t, readSettings(t, path), event); !reflect.DeepEqual(got, []string{"vecnet hook --profile p --event " + name, "vecnet hook --profile q --event " + name}) {
+			t.Fatalf("%s commands=%v", event, got)
+		}
+	}
+}
+
+func TestHookInstallRejectsUnknownClient(t *testing.T) {
+	u, root := codexInstallRepo(t)
+	path := filepath.Join(root, "missing.json")
+	code, out, errs := u.run("hook", "install", "--client", "cursor", "--profile", "p", "--write", "--settings", path)
+	if code != 1 || out != "" || !strings.Contains(errs, "hook install: --client must be claude or codex") {
+		t.Fatalf("exit=%d out=%q errs=%q", code, out, errs)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("file written: %v", err)
+	}
+}
+
+func TestHookInstallCodexRejectsMCP(t *testing.T) {
+	u, root := codexInstallRepo(t)
+	binDir := t.TempDir()
+	marker := filepath.Join(binDir, "client-ran")
+	for _, client := range []string{"claude", "codex"} {
+		if err := os.WriteFile(filepath.Join(binDir, client), []byte("#!/bin/sh\n: > '"+marker+"'\nexit 99\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	path := filepath.Join(root, "absent", "hooks.json")
+	for _, write := range []bool{false, true} {
+		args := []string{"hook", "install", "--client", "codex", "--mcp", "--profile", "p", "--settings", path}
+		if write {
+			args = append(args, "--write")
+		}
+		code, out, errs := u.run(args...)
+		if code != 1 || out != "" || !strings.Contains(errs, "hook install: --mcp registration is supported only for --client claude") {
+			t.Fatalf("exit=%d out=%q errs=%q", code, out, errs)
+		}
+	}
+	for _, path := range []string{marker, filepath.Dir(path)} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("file/client side effect at %s: %v", path, err)
+		}
+	}
+}
+
+func TestHookInstallCodexIgnoresClaudeProjectDir(t *testing.T) {
+	for _, projectExists := range []bool{false, true} {
+		t.Run(fmt.Sprint(projectExists), func(t *testing.T) {
+			u, root := codexInstallRepo(t)
+			other := filepath.Join(t.TempDir(), "claude-project")
+			if projectExists {
+				gitT(t, "init", "--quiet", other)
+			}
+			u.env["CLAUDE_PROJECT_DIR"] = other
+			_, errs := installRun(t, u, "--client", "codex", "--write")
+			readSettings(t, filepath.Join(root, ".codex", "hooks.json"))
+			if strings.Contains(errs, "CLAUDE_PROJECT_DIR") || strings.Contains(errs, "Claude Code") {
+				t.Fatalf("Claude advice leaked: %q", errs)
+			}
+			for _, path := range []string{filepath.Join(other, ".codex"), filepath.Join(other, ".claude")} {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("Claude project touched: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestHookInstallCodexRefusesUnknownTrackingStatus(t *testing.T) {
+	for _, exit := range []string{"0", "2", "128"} {
+		t.Run(exit, func(t *testing.T) {
+			u, root := codexInstallRepo(t)
+			binDir := t.TempDir()
+			// Git's process boundary: successful discovery, then tracked (0)
+			// or unknown (2/128) status, all of which must refuse writes.
+			stub := "#!/bin/sh\ncase \"$3\" in\nrev-parse) printf '%s\\n' \"$2\";;\nls-files) exit " + exit + ";;\n*) exit 99;;\nesac\n"
+			if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(stub), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			path := filepath.Join(root, ".codex", "hooks.json")
+			code, out, errs := u.run("hook", "install", "--client", "codex", "--profile", "p", "--write")
+			if code != 1 || out != "" || !strings.Contains(errs, "tracked by git (or its status is unknown)") {
+				t.Fatalf("exit=%d out=%q errs=%q", code, out, errs)
+			}
+			if _, err := os.Lstat(filepath.Dir(path)); !os.IsNotExist(err) {
+				t.Fatalf("unknown-status target written: %v", err)
+			}
+		})
+	}
+}
+
+func TestHookInstallCodexFallbackToCwd(t *testing.T) {
+	isolateGitEnv(t)
+	u := installUser(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(root))
+	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").CombinedOutput(); err == nil {
+		t.Fatalf("private cwd is inside git: %s", out)
+	}
+	_, errs := installRun(t, u, "--client", "codex", "--write")
+	readSettings(t, filepath.Join(root, ".codex", "hooks.json"))
+	if !strings.Contains(errs, "cwd fallback; Codex project hooks") {
+		t.Fatalf("missing fallback reason: %q", errs)
 	}
 }
