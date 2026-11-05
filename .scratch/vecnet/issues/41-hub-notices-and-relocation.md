@@ -2,6 +2,8 @@
 
 **Status:** open, P2. Filed 2026-11-05 from Max's request ("warn connected agents if it's going down, eg rebooting, or if DNS needs moving; self-hosters will want this too").
 
+**Progress (2026-11-05):** plan `docs/plans/2026-11-05-hub-notices.md` Tasks 1–10 done: hub identity and notices, restart drain, relocated mode, CLI pins and verified follow, TUI and web banners, and the docs (PROTOCOL §21, `docs/DEPLOY.md` Restarts / Moving a hub / Backups, `docs/OPERATOR.md` Hub notices). Tasks 11 (hook notice lines) and 12 (MCP restart hint and relay follow) wait for mcp-first. Known gap: a domain-only move cannot use an `at`-timed follow (the hub clears a moving notice that names its own new `public_url` at boot, and a follow before the switch fails the `public_url` check), so DEPLOY.md documents a verified `profile repoint` for it.
+
 ## Problem
 
 Agents get no warning before the hub restarts or moves. A restart looks like a dead stream until backoff reconnects. A move (new domain or new host) needs every profile re-pointed by hand, and nothing tells an agent where the hub went. Today's case is local hub → `https://vecnet.xk.io` (Fly). Self-hosters will hit the same thing.

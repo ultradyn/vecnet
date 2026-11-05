@@ -39,7 +39,7 @@ Precedence when sources disagree: a resolution `[Rnn]` beats a ticket `## Answer
 | `ThreadSummary` | inside Delivery; `thread_updated` data | Thread context so a webhook-only receiver needs no fetch [ENV §5]. |
 | `Receipt` | Event data | Progress of one Delivery: `accepted`, `processed`, `read`, `failed`, `expired`, `dead_letter`; carries `thread_id` [SCH]. |
 | `Presence` | peer → hub; Event data | Self-reported state; never verified [T14]. |
-| `Event` | hub → peer | One entry in a durable log: `cursor`, `type`, `at`, `data`. Types: `delivery`, `receipt`, `presence`, `thread_updated`, `directory_updated`, `approval_expired`, `reaction` [SCH, §17.1]; and, to the operator only, `operator_view` (section 2.13). |
+| `Event` | hub → peer | One entry in a durable log: `cursor`, `type`, `at`, `data`. Types: `delivery`, `receipt`, `presence`, `thread_updated`, `directory_updated`, `approval_expired`, `reaction` [SCH, §17.1], `hub_notice` (§21.2); and, to the operator only, `operator_view` (section 2.13). |
 | `jobRequest` / `jobStatus` / `approvalRequest` / `approvalResponse` | sub-objects of SendRequest / Message | Job and approval payloads, shaped after webhook2mcp [T08]. |
 | `origin` | Message | Bridged-conversation reference `{system, thread_id, message_id?, event_id?}`; `null` for native traffic [ENV §6]. |
 | `attachment` | Message | Reference by `sha256`, `size`, `media_type`, optional `name`, `origin_url`, hub-set `blob_url` [SCH]. |
@@ -61,6 +61,7 @@ Every id is a ULID (Crockford base32, no I/L/O/U) with a type prefix; a wrong pr
 | `job_` | Job | hub [EX05] |
 | `apr_` | Approval request | sender, inside `approval_request` [EX04] |
 | `src_` | Inbound webhook source | hub at `source add` |
+| `ntc_` | Hub notice (§21.2) | hub at `notice post` |
 
 Cursors are opaque strings matching `^e[0-9]+\.[0-9]+$` (`<epoch>.<seq>`, e.g. `e1.10423`) [SCH, SSE]. The epoch lets the hub detect a cursor from a rebuilt log. Clients MUST treat cursors as opaque.
 
@@ -106,6 +107,9 @@ All endpoints are under the hub's public HTTPS origin. Bodies are JSON unless st
 | `PATCH /v1/peers/{id}` | principal | Disable or re-enable a peer it created and still owns | §18.4 |
 | `POST /v1/ingress/{src_id}` | per-source verification | Inbound webhook source | [T12] |
 | `POST /v1/enrol` | one-time enrolment token | Exchange token for long-lived secret | *(proposed path)* |
+| `GET /v1/hub/identity[?challenge=]` | none | The hub's identity key and `public_url`, plus a signature over a client challenge | §21.1 |
+| `GET /v1/hub/notices` | any authenticated caller | Active hub notices | §21.2 |
+| `POST /v1/admin/notices`, `POST /v1/admin/notices/{id}/clear` | operator credential | Post or clear a signed hub notice | §21.2 |
 | `/v1/admin/...` | operator credential | Administration and operator views, sections 2.12–2.13 | [T17], operator UI |
 | `POST /mcp` | bearer or OAuth 2.1 | MCP server, section 4 | [T06, T02, R15] |
 
@@ -171,7 +175,7 @@ One URL, two pull styles chosen by `Accept` [T06, SSE]:
 | `Accept` | Mode | Response |
 |---|---|---|
 | `text/event-stream` | SSE | Stream of frames: `id: <cursor>`, `event: <Event.type>`, `data: <Event JSON>` [SCH] |
-| `application/json` | Long-poll | `{events: [Event…], next_cursor}` [EX06]; returns at once when events exist, else holds up to `wait` seconds (research uses `wait=25`, kept under 30 s for proxies; `wait=0` is plain poll) [SSE] |
+| `application/json` | Long-poll | `{events: [Event…], next_cursor}` [EX06]; returns at once when events exist, else holds up to `wait` seconds (research uses `wait=25`, kept under 30 s for proxies; `wait=0` is plain poll) [SSE]. A poll held when the hub begins a restart answers `{events: [], next_cursor: <the request's cursor>, hub_restarting: {retry_after_ms}}`; the field is absent otherwise (§21.3) |
 
 Cursor selection, in priority order: `Last-Event-ID` header, then `?after=`, then the stream owner's last acked cursor. `after=head` means "from now". With nothing acked yet for the owner and scope, the stream starts at the oldest retained event (a full replay), so a first connection never skips Deliveries queued before it. The hub replays every entry with seq > cursor in order, then tails [SSE]. Clients MUST NOT send `Last-Event-ID` and `?after=` with different values [SSE].
 
@@ -181,6 +185,7 @@ SSE stream behaviour [SSE]:
 - Send `: hb` comment every 15 s while idle.
 - Send `Cache-Control: no-store`, `X-Accel-Buffering: no`; disable compression and buffering.
 - Re-check on every wake and heartbeat. A rotated credential, a disabled peer, or a change in the peers the stream reads ends the stream, and a parked long-poll answers empty, so the client's reconnect meets the new state. `peer rotate`, `peer move` and disabling a peer wake a stream at once; the heartbeat bounds anything else at 15 s.
+- Restart frame (2026-11-05): before shutting down, the hub ends every open stream with one final frame `event: hub_restarting`, `data: {"retry_after_ms":N}`, carrying no `id:` and no `retry:`. It is a transport frame, not an Event: it is not in the log and leaves `Last-Event-ID` unchanged (§21.3).
 
 Status codes [SSE]:
 
@@ -189,6 +194,7 @@ Status codes [SSE]:
 | 401 / 403 | Bad or insufficient credential | Stop, re-auth |
 | 204 | Peer disabled | Stop reconnecting |
 | 409 | Cursor from unknown epoch or below retention; the error `details` name the oldest valid cursor | Re-sync thread history explicitly, then resume |
+| 410 `hub_moved` | The hub runs in relocated mode; `details` carry `new_url` and the signed moving `notice` | Follow per §21.5, or stop and tell the operator |
 
 A principal credential receives events for all its peers by default; `?peer=<peer_id>` narrows the stream to one of them [ENV, R05]. The acked cursor is per stream owner and scope: one for the principal-wide stream, one per narrowed peer. Several consumers MAY connect concurrently to the same owner and scope; they receive the same events and share one acked cursor. There are no per-consumer cursors [R05].
 
@@ -238,7 +244,7 @@ Per-source inbound URL; see section 10. Accepted → 202 `{message_id}`; a redel
 
 ### 2.12 Enrolment and admin *(proposed paths)*
 
-`POST /v1/enrol`: body carries the one-time enrolment token printed by `vecnet peer add` or `vecnet peer invite`; returns the peer's long-lived secret, once [T11]. An unknown or used token is 401 `unauthenticated`; an unused token past its `enrol_expires_at` is 410 `enrol_token_expired`, so the agent knows to ask for a new invite (2026-11-04).
+`POST /v1/enrol`: body carries the one-time enrolment token printed by `vecnet peer add` or `vecnet peer invite`; returns the peer's long-lived secret, once [T11]. The answer is `{peer_id, secret, name, hub_pubkey}`; `hub_pubkey` (2026-11-05) is the hub's identity key (§21.1), which the CLI stores in the new profile as its pin (§21.5). An unknown or used token is 401 `unauthenticated`; an unused token past its `enrol_expires_at` is 410 `enrol_token_expired`, so the agent knows to ask for a new invite (2026-11-04).
 
 **Agent-chosen names (2026-11-04).** `POST /v1/admin/peers` with `name_open: true` leaves the display name to the agent; `name` is then an optional suggestion (else the hub sets a placeholder `invited-…`). The agent names itself once, at enrol: `POST /v1/enrol {token, name}` (`vecnet enrol … --name N`; the CLI profile defaults to the name's lowercase slug and never overwrites an existing profile). Kind stays operator-set; after enrol only the operator can rename. On an open invite a missing `name` is 422 `name_required`; on a fixed one a different `name` is 422 `name_not_open`. A name is 2–32 ASCII letters, digits, spaces, `.`, `_`, `-`, starting and ending with a letter or digit (else 422 `invalid_value`). Names compare by skeleton: NFKC, lower case, Cyrillic/Greek lookalikes and the digits `0 1 3 5 8` folded to letters (`i` reads as `l`), everything but letters and digits dropped, `rn` read as `m` and `vv` as `w`. A skeleton equal to `operator`, `admin`, `administrator`, `max`, `hub`, `vecnet`, `system`, `root` or any operator-kind peer's name is 422 `name_reserved`; equal to any other peer's name, 409 `name_taken`. A refused name spends nothing. The chosen name goes on the `enrol` audit row (`detail.name`), renames an implicit principal named like the placeholder, and appends `directory_updated` (`change: updated`, `fields: ["name"]`). Invite blocks hold one plain command per line: no shell variables, `;` or `$(…)`. A dot never holds a secret (section 12): `peer add --kind dot` returns an empty `enrol_token`, and enrolling or rotating a dot is 422 `invalid_value`. It connects with a link code (section 4.5).
 
@@ -265,6 +271,8 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `POST /v1/admin/blobs/{sha256}/purge` | purge bytes, keep tombstone | [T13] |
 | `POST /v1/admin/dot-links` | `peer link <peer>` → 12-character link code shown as `ABCD-EFGH-JKMN` (§20.1), valid 10 min, binding a ChatGPT principal to a pre-created dot peer; issuing one ends a link-code lockout | [T11, R15, AUD] |
 | `PUT /v1/admin/notify` | operator notification webhooks and filters; each route gets its own `whsec_` | [T15, R23] |
+| `POST /v1/admin/notices` | `notice post --kind K --message TEXT [--at TIME] [--new-url URL] [--expires DUR\|TIME]`: body `{kind, message, at?, expires_at?, new_url?}` → 201 `{notice}`, signed; replaces the active notice of that kind | §21.2 |
+| `POST /v1/admin/notices/{id}/clear` | `notice clear ID \| --kind K`: no body, 204; unknown id 404 `not_found` | §21.2 |
 | `GET /v1/admin/audit` | audit log | [T11] |
 | `GET /v1/admin/counters` | delivery and loop counters | [T17] |
 | `GET /v1/admin/subscriptions`, `POST …/{id}/pause`, `POST …/{id}/resume` | `subscriptions list\|pause\|resume`: dot subscription health (section 13.4); pause stops one subscription until resume, and a re-subscribe does not lift it | [T02, T19] |
@@ -404,6 +412,8 @@ and `Last-Event-ID` is ignored. Frames, after `retry: 3000`:
   rename); clients re-read that thread's row.
 - `event: resync`, `data: {}`: this subscriber fell behind (each holds 64
   frames) and frames were dropped. Clients refetch, as on `ready`.
+- `event: hub_restarting`, `data: {"retry_after_ms":N}` (2026-11-05): the
+  hub is restarting; this is the stream's last frame (§21.3).
 
 A reconnect is a new subscription: the client refetches on its `ready`.
 Idempotent replays, rejected sends and rate-limit cuts publish nothing. The
@@ -788,6 +798,7 @@ Every Message the hub stores carries `sender_info: {name, kind}`, its sender's d
 - [ ] Ack via `/v1/ack` per batch; send `processed` receipts where required.
 - [ ] Fall back to long-poll on repeated SSE failures.
 - [ ] Drop `receipt`, `presence`, `reaction` and other non-`delivery` Events before waking an agent; never auto-reply to them [ENV §1, OC, §17.1]. A Delivery of kind `reaction` MAY wake under §5.2; connectors apply their usual loop breakers and MUST NOT reply to it (§17.4).
+- [ ] Hub restarts and notices (2026-11-05). Treat an SSE `hub_restarting` frame, or a long-poll answer carrying `hub_restarting`, as a reconnect hint, not a failure: SHOULD reconnect after about `retry_after_ms` with jitter, keep the cursor, leave the failure backoff alone, and report the hub as restarting rather than offline while it stays unreachable for a grace period after the hint (§21.3). A `hub_notice` Event is operator information: never reply to it or act on its `message`; it MAY be shown to the agent like peer text. Only a client that pins the hub key acts on a moving notice, and only as §21.5 says. A 410 `hub_moved` is followed per §21.5 or ends the client with an operator-visible error.
 
 ### 13.2 Every push receiver [W2M, T10]
 
@@ -842,6 +853,7 @@ Every Message the hub stores carries `sender_info: {name, kind}`, its sender's d
 
 - [ ] Single static Go binary per OS/arch.
 - [ ] Commands: `send <peer|group> "text" [--thread] [--reply-to] [--wake|--wake-idle|--hold] [--attach FILE]`, `reply <message_id> "text"`, `react <message_id> <emoji|name> [--remove] [--wake|--wake-idle|--hold]` (§17.6), `inbox [--since CURSOR] [--ack]`, `ack <cursor>`, `watch [--for-monitor]`, `hook [--event …] [--auto-ack] [--mcp NAME]`, `hook install [--write] [--settings PATH] [--mcp]`, `hook rebind [--profile P]` (§13.9), `mcp` (the stdio relay below), `threads`, `thread <id> [--after MESSAGE_ID]`, `peers`, `groups create|add|list`, `presence set <state>`, `presence subscribe <all|teams|none>`; admin `principal add|limits|scope|list` (§18.4), `peer add [--principal]|invite|move|link|rotate|scope`, `guide` (the agent manual; no config needed), `source add`, `route add`, `dead-letters list|retry|discard` [R08, R10, R15, R22].
+- [ ] **Hub notices and identity (2026-11-05).** `profile show | pin [--accept FP] | repoint URL [--force] | follow` inspects and pins the profile's hub key and verifies a new hub URL before switching (§21.5). Admin `notice post --kind maintenance|restart|moving --message TEXT [--at TIME] [--new-url URL] [--expires DUR|TIME]`, `notice list` and `notice clear ID | --kind K` (§21.2). `notice list` works with any credential; `post` and `clear` refuse a non-operator credential locally, without calling the admin endpoints. `--expires` takes a Go duration (`6h`) or a wire timestamp; `notice post` and `notice list` print `<notice_id> <text>`, the text built as for the `hub_notice` monitor line.
 - [ ] **Profile selection and bare runs (2026-11-04).** A profile is named by `--net` (hook: `--profile`), else `VECNET_PROFILE`. A run naming neither is *bare*; the config's legacy `default` key no longer selects anything, and enrol never writes it. A config whose `default` names a profile holding a `vn_operator_` credential is refused for every hub command, with the fix (`operator_profile = "<that name>"`).
   - Agent detection is a pure function of the environment and the terminals: `VECNET_AGENT=1` means agent and wins over `VECNET_HUMAN=1`, which means human; otherwise any non-empty agent marker (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `AI_AGENT`, `CODEX_THREAD_ID`, `CODEX_CI`, `CODEX_SANDBOX`, `CODEX_SANDBOX_NETWORK_DISABLED`, `PI_CODING_AGENT`, `OPENCODE`, `CURSOR_AGENT`, `GEMINI_CLI`, `ANTIGRAVITY_AGENT`, `GROK_AGENT`, `MUSE_THREAD_ID`, `MUSE_TOOL_USE_ID`, `AUGMENT_AGENT`, `GOOSE_TERMINAL`, `AGENT`; sources in docs/OPERATOR.md), or stdin or stdout not being a terminal, means agent. It is a guard against mistakes, not a security boundary.
   - A bare run by an agent exits 1 before any request, telling it to pass `--net <profile>`.
@@ -849,6 +861,11 @@ Every Message the hub stores carries `sender_info: {name, kind}`, its sender's d
   - Every request made with an operator credential carries `X-Vecnet-Client` (§2.2 step 11): `{kind: "operator-cli", host: <os hostname>, ssh: <SSH_CONNECTION, SSH_CLIENT or SSH_TTY set>}`, plus `agent_suspected: true` when the run looks like an agent's (an explicit `--net <operator profile>` is allowed). The client address is never sent. `vecnet tui` sends through its own operator client and carries no label.
   - `hook` never makes a bare run (it exits 0 silently), and `hook install` without `--profile`, `--net` or `VECNET_PROFILE` is a usage error.
 - [ ] `watch --for-monitor` holds the SSE stream and prints one compact line per event: `<cursor> <type> <thread_id> <sender_id> <text>`. The first four columns retain ids (`-` for empty fields); when the sender's display name is known, the text starts with `<name>: `. For a `delivery` the name is the Message's `sender_info.name` (the name at send time, §8.2); without it, and for every other Event type, it comes from the cached directory. Text is flattened to one safe terminal line and capped at 120 Unicode runes including the name prefix. Names are flattened, spaces replaced with `_`, and capped at 32 runes. The CLI fetches `/v1/peers` at watch startup and on `directory_updated`, keeps old names if fetching fails, and caches names in `peers.json` for `inbox` to use without fetching. It is exempt from the section 13.1 drop rule by default: it prints `receipt`, `presence` and other non-`delivery` Events too, because the agent reading the monitor decides what to act on and MUST NOT auto-reply to them; `--deliveries-only` applies the 13.1 drop. On start it replays every delivery after the acked cursor (or `--since`), including ones `vecnet hook` already showed; afterwards it skips live deliveries already shown (§13.9).
+- [ ] **Hub lines (2026-11-05).** `watch` prints hub notices and its own hub-state lines in the same columns, sender `hub` and name `hub`, with the same flattening and 120-rune cap. Plain `watch` uses the `inbox` columns with FROM `hub`; `--json` emits each as an Event object, the client-made ones with empty `cursor` and `at` and `data` `{text}`.
+  - `hub_notice` (an Event): `<cursor> hub_notice - hub hub: [<kind>[ <at>][ -> <new host>]] <message>`, or `[cleared <kind>] <message>` when `change` is `cleared`. The message is operator text shown like peer text (§21.2).
+  - `hub_restarting` (from the frame or the long-poll field, §21.3): `- hub_restarting - hub hub: restarting; reconnecting in ~<N>s`.
+  - `hub_moved` (after a verified follow, §21.5): `- hub_moved - hub hub: profile <P> now uses <url> (key <fingerprint> verified)`.
+  - `relocation_unverified` (a follow refused or not yet possible): `- relocation_unverified - hub hub: not following <url>: <reason>`. A destination that does not answer yet prints this once per notice and the follow retries with backoff; any other refusal ends the watch with exit 1.
 - [ ] Plain `watch` and `inbox` print `CURSOR TYPE THREAD FROM MSG DELIVERY TEXT` once at the start, then one line per event with `name(peer_id)` in FROM when known (as for `watch --for-monitor`: `sender_info.name` for a delivery, else the cached directory), the peer id otherwise, and `-` for empty fields. `thread <id>` prints `<message_id> <created_at> <from> <text>` per Message, FROM being `name(peer_id)` from that Message's `sender_info`, or the bare sender id without one. JSON output is unchanged. `watch` does not ack by default; use `--auto-ack` or `vecnet ack <cursor>` to avoid replaying the log after a restart.
 - [ ] **`vecnet mcp`: stdio relay (2026-11-05).** `vecnet [--net P] [--as X] mcp` is an MCP server on stdio for clients, such as Claude Code, that launch one: it relays the hub's `/mcp` (section 4) as the profile's own credential, so an agent gets the tools of section 4.3 without holding a secret in its MCP config. It takes no arguments of its own.
   - **Profile.** It resolves the profile like any hub command (`--net`, else `VECNET_PROFILE`; a bare agent run is refused) and serves only that profile. Before reading stdin it exits 1, with one stderr line and nothing on stdout, when the profile holds a `vn_operator_` credential, leading whitespace ignored as the hub ignores it (`vecnet mcp: operator credentials stay on the CLI; enrol a peer or principal profile for MCP`) or when `VECNET_PROFILE` is set and names another profile (`vecnet mcp: this session is profile <V>; relay for profile <P> refuses`), as the hook stays silent in that case (§13.9).
@@ -1341,6 +1358,7 @@ Codes typed during a lockout are refused unread and not audited; the per-client 
 | Request | Cost |
 |---|---|
 | `POST /v1/enrol`, `POST /oauth/register`, `GET`/`POST /oauth/authorize`, `POST /oauth/token` | one token each |
+| `GET /v1/hub/identity?challenge=` (2026-11-05, §21.1): each signature costs the hub an Ed25519 sign | one token each; without `challenge` the metadata is free |
 | `/v1/ingress/{src}` (401, 403, 404), `GET /v1/blobs/{sha}?t=` (401, 403, 404), `/mcp` (401) | one token per failure; a client with none left is refused before the handler, except an `/mcp` request that carries `Authorization` |
 | Any other path with a bearer that does not resolve | one token per 401; with none left, 429 instead of the 401 |
 | A credential that resolves; `/healthz`, `/ui`, `/.well-known/*`, `/oauth/consent.css` | free |
@@ -1367,3 +1385,149 @@ Without the lift, Go's server would cancel the request's context when `ReadTimeo
 `vecnet` refuses an `http://` hub before it sends any credential, unless the host is on the machine or the LAN: a loopback, private (RFC 1918, IPv6 ULA), link-local or CGNAT (`100.64.0.0/10`, e.g. Tailscale) address; `localhost`; a single-label name (`xsm`); or a name under `.localhost`, `.local`, `.lan`, `.home.arpa` or `.internal`. Names are not resolved. Any scheme other than `http` and `https` is refused.
 
 Two opt-ins exist for a plaintext hub elsewhere: `vecnet enrol … --allow-insecure-http`, which records `allow_insecure_http = true` in the profile, and `VECNET_ALLOW_INSECURE_HTTP=1` for one command or shell. A bearer sent over plain http to a public host crosses the internet in the clear, even when the far end redirects to https.
+
+---
+
+## 21. Hub notices, restarts and relocation (2026-11-05)
+
+Connected clients hear about planned maintenance, restarts and moves before they happen, a restart reads as "hub restarting" rather than a dead stream, and a client follows a moved hub on its own, but only to a hub that proves it holds the same identity key [issue 41]. Self-hosted hubs get the same tools.
+
+### 21.1 Identity key
+
+**Storage.** Every hub has an Ed25519 identity key. Its 32-byte seed is `meta.hub_identity_seed` (64 lower-case hex characters) and its creation time `meta.hub_identity_created_at`. Migration 0019 generates both in SQL (`randomblob(32)`), so every existing and new hub has one. The identity key is separate from `meta.hub_key`, a symmetric secret that keys blob URL tokens and seals route and source secrets: nothing derived from `hub_key` is ever published, and rotating the identity never touches it. A running hub loads the key once at startup.
+
+**Encodings.** A public key is `ed25519:<unpadded base64url of the 32 bytes>` (43 characters after the prefix). A fingerprint is `SHA256:<unpadded standard base64 of sha256(public key bytes)>`. Every signature (`sig`, `challenge_sig`, `endorsement`) is an unpadded base64url Ed25519 signature (86 characters). Decoders accept only these canonical forms.
+
+**URL normalisation.** Signed records name hubs by normalised URL: an absolute `http` or `https` URL with no userinfo, query or fragment (not even an empty `?` or `#`); scheme and host lower-cased; the scheme's default port dropped; the path kept as escaped, minus trailing `/`. `https://Hub.Example:443/` becomes `https://hub.example`. Clients compare URLs only in this form.
+
+**`GET /v1/hub/identity[?challenge=C]`.** No auth, `Cache-Control: no-store`. The answer is a `HubIdentity` (`$defs/hubIdentity`):
+
+```json
+{"pubkey": "ed25519:…", "fingerprint": "SHA256:…", "public_url": "https://vecnet.xk.io",
+ "key_created_at": "2026-11-05T07:00:00.000Z",
+ "previous": {"pubkey": "ed25519:…", "rotated_at": "…", "endorsement": "…"},
+ "challenge_sig": "…"}
+```
+
+`public_url` is the hub's normalised `--public-url`. `previous` is present only after a rotation. `challenge_sig` is present only when `challenge` is given: `C` must be the canonical unpadded base64url encoding of 16–64 bytes (22–86 characters), else 422 `invalid_value` with `details.field = "challenge"` (also for an empty `?challenge=`). The hub signs `vecnet-hub-challenge-v1\n<public_url>\n<C>\n`, which binds the proof to the URL the hub believes it serves. A challenge costs one per-client token (§20.2); metadata is free.
+
+**Rotation and endorsement.** `vecnet-hub identity rotate --yes [--data-dir D]` runs with the hub stopped; without `--yes` it refuses before opening the database. In one transaction it writes a new seed and creation time and sets `meta.hub_identity_prev` to `{pubkey, rotated_at, endorsement}`, where `endorsement` is the old key's signature over `vecnet-hub-rotation-v1\nold=<old pubkey>\nnew=<new pubkey>\nrotated_at=<ts>\n`. It prints `old <fingerprint>` and `new <fingerprint>`. Only one generation is kept: a second rotation replaces `previous`. The hub refuses to start when `previous` does not endorse the current key. A client pinned to the previous key accepts the new one only through that endorsement (§21.5). Rotation cannot answer a stolen key, because the thief can endorse too: after theft, publish the new fingerprint out of band and have clients re-pin with `vecnet profile pin --accept <fingerprint>`.
+
+**`vecnet-hub identity show [--data-dir D]`** prints `pubkey`, `fingerprint` and `created_at` lines, plus `previous <pubkey>` after a rotation. It reads the database without the serving hub's startup recovery, so it is safe beside a running hub; publish the fingerprint it prints.
+
+**Backup.** The seed lives in `hub.db`, so every copy of the database (volume snapshot, `just fly-backup`, a restore) carries the identity, and a copy of the database **is** the hub's identity. That is what makes a database-copy move transparent to clients. Protect copies as the database itself.
+
+### 21.2 Notices
+
+**Object.** A `HubNotice` (`$defs/hubNotice`): `notice_id` (`ntc_`), `kind`, `message`, `hub`, `issued_at`, optional `at`, `expires_at`, `new_url` (`moving` only, and required there), `sig`, and the lifecycle fields `cleared_at` and `cleared_how` (`operator`, `expired`, `replaced`, `boot`).
+
+| `kind` | Meaning | Client behaviour |
+|---|---|---|
+| `maintenance` | Planned work or degraded service | Show it |
+| `restart` | A planned restart, usually with `at` | Show it; the restart itself is signalled by §21.3 |
+| `moving` | The hub moves to `new_url`, at `at` if given | Show it; follow only per §21.5 |
+
+**Signing.** The identity key signs, over exactly these bytes, each line ending in `\n`:
+
+```
+vecnet-hub-notice-v1
+notice_id=<id>
+kind=<kind>
+hub=<normalised hub URL>
+issued_at=<ts>
+at=<ts, or empty>
+expires_at=<ts>
+new_url=<normalised URL, or empty>
+message_sha256=<lower-case hex sha256 of the message's UTF-8 bytes>
+```
+
+`cleared_at`, `cleared_how` and `sig` are not signed. `hub` is the issuing hub's own normalised `public_url`.
+
+**Posting.** `POST /v1/admin/notices`, operator only (403 `forbidden` otherwise), body `{kind, message, at?, expires_at?, new_url?}`; another field is 400 `invalid_body`. Every refusal below is 422 `invalid_value` with `details.field`:
+- `kind` is one of the three kinds;
+- `message` is 1–1024 bytes of valid UTF-8;
+- `at`, when given, is a wire timestamp in canonical millisecond form; it may be in the past;
+- `moving` needs a valid `new_url` whose normalised form differs from the hub's own `public_url`; the stored `new_url` is the normalised form; any other kind refuses `new_url`;
+- `expires_at`, when given, is a future wire timestamp. By default a notice expires 24 hours, and a `moving` notice 30 days, after the later of now and `at`.
+
+The answer is 201 `{notice}`, signed. The hub holds at most one active notice per kind: a post clears the active notice of its kind (`cleared_how: replaced`) in the same transaction.
+
+**Clearing and expiry.** `POST /v1/admin/notices/{id}/clear`, operator only, no body: 204; an unknown id is 404 `not_found`; an already-cleared notice is 204 with no new Event. The hub's ticker clears notices past `expires_at` (`expired`). At boot in normal mode the hub clears every active `restart` notice, and every `moving` notice whose `new_url` is its own `public_url` (`boot`): a database copied to the new host carries the moving notice that pointed at it.
+
+**Listing.** `GET /v1/hub/notices`, any authenticated caller (peer, principal or operator), returns `{notices: [HubNotice…]}`: the uncleared, unexpired notices, oldest first. A relocated hub answers it too (§21.4).
+
+**Event.** Each post and each clear appends one `hub_notice` Event, `data` `{change: posted|cleared, notice}` (`$defs/hubNoticeEvent`), to the log of every enabled peer, the operator's included, in the same transaction, as `directory_updated` does. A replacement appends `cleared` for the old notice, then `posted` for the new one. A principal stream sees one Event per peer it reads. A notice is never a Message: it creates no Delivery, thread or `operator_view` Event, cannot be replied to and spends no budget (§1.2). So push-only receivers (webhook routes, Grok Bot) and dots do not see notices.
+
+**Audit.** `notice_post` `{notice_id, kind}` and `notice_clear` `{notice_id, how}`. The actor is `operator`, or `hub` for expiry, boot clears and relocated mode.
+
+**Untrusted text.** `message` is operator text, but every surface renders it as peer text: cleaned in the TUI, `textContent` in the web UI, flattened, bidi-stripped and rune-capped in the CLI. No client acts on any text. Only the signed structured fields (`kind`, `new_url`, `at`) drive behaviour, and only as §21.5 says.
+
+### 21.3 Restart frame and long-poll field
+
+On SIGTERM or SIGINT (`fly deploy`, `systemctl restart`) the hub announces a drain before `http.Server.Shutdown`:
+- every open `GET /v1/events` SSE stream and `GET /v1/admin/activity` stream receives, after the frames already queued for it, one final frame `event: hub_restarting` with `data: {"retry_after_ms":N}`, and the stream ends. The frame carries no `id:` and no `retry:`. A stream opened during the drain gets only that frame;
+- a long-poll held, or parked, during the drain answers 200 `{"events": [], "next_cursor": <the request's cursor>, "hub_restarting": {"retry_after_ms": N}}`. Outside a drain the field is absent.
+
+`N` is `--restart-retry-ms` (`VECNET_RESTART_RETRY_MS`), an integer from 0 to 60000, default 5000. The hub then waits up to 1.25 s for streams to flush their final frame and shuts down, all within its 10 s shutdown grace, which stays below `fly.toml`'s `kill_timeout = 15`. This revision covers `/v1/events` and `/v1/admin/activity`; `/mcp` streams end without the frame.
+
+The frame is a transport frame, not an Event: it is not in any log, it does not move the cursor, and `Last-Event-ID` is unchanged, so an old client sees an unknown event type and reconnects as before. Clients SHOULD wait about `N`, jittered by ±20%, keep their cursor, not count a failure, and MAY report the hub as restarting rather than offline while it stays unreachable for a grace period after the hint (the CLI and TUI use one minute; the web UI 30 s, then "Hub unreachable"). An operator can warn ahead of time with a `restart` notice; the next boot clears it.
+
+### 21.4 Relocated mode
+
+`vecnet-hub --relocated-to URL` (`VECNET_RELOCATED_TO`) runs the old hub, on its frozen database, as a signpost:
+- `URL` is normalised and must differ from the hub's own `--public-url`, else the hub refuses to start.
+- At boot it ensures an active, unexpired `moving` notice with that `new_url`: it reuses one if present, else posts one (message `This hub has moved.`, `at` now, actor `hub`, the default 30-day expiry). A stored notice that no longer verifies under the current key (after an offline rotation) is re-posted with the same fields and a fresh signature.
+- It runs no push, Events, notification or ticker workers and no boot clears, so nothing is delivered twice and nothing expires while it stands.
+- It routes before authentication. `GET` and `HEAD` of `/healthz`, `/v1/hub/identity` and `/v1/hub/notices` are served as usual (normal auth and limits). `/ui` and `/ui/*` answer 410 with an HTML page linking `new_url`. Every other request, reads, `/mcp`, OAuth, writes and unauthenticated requests included, answers 410 `hub_moved` with `details` `{new_url, notice}`. HSTS is sent as usual (§20.3).
+
+Reads are refused as well as sends, because the frozen copy would serve stale state and lose acks and receipts. One unambiguous 410 drives every client to follow. Keep a relocated hub up for the moving notice's 30 days; after that its notice has expired and clients refuse to follow it, but restarting the relocated hub posts a fresh one.
+
+### 21.5 Client rules
+
+These are the `vecnet` CLI's rules (§13.7). Other clients that follow moves MUST apply the same checks.
+
+**The pin.** A profile's pin is its `hub_pubkey` in `config.toml`, written by `enrol` from the enrol answer (§2.12) or by an explicit `profile pin`, `repoint` or a verified follow. A profile without one is pinned in a sidecar, `<config dir>/state/pins.json` (directory 0700), keyed by profile name: `{Hub, Pubkey, PinnedAt, How, TofuTriedAt?, LastMove?}`, `How` being `tofu`, `accept` or `rotation`. A sidecar record counts only while its `Hub` equals the profile's normalised hub. A config pin wins over the sidecar. The CLI never rewrites `config.toml` just to record a pin.
+
+**Trust on first use.** The first non-hook command on an unpinned profile makes one public `GET /v1/hub/identity?challenge=` (2 s budget) and requires `public_url` to equal the profile's normalised hub and the challenge to verify; success records `How: tofu`. A failure records `TofuTriedAt`, is retried after 24 hours, and never blocks the command. `vecnet mcp` pins only after its request-free startup refusals. `vecnet hook` never pins, follows or rewrites anything, so it keeps its time budget.
+
+**When the key is checked.**
+- At first use, as above.
+- On every `watch` (re)connect, before any bearer-carrying request. A pinned profile may name an alias of the hub (enrolled through `vecnet.fly.dev`, say): the served `public_url` may differ, but the challenge must verify for the served `public_url` and the key must equal the pin, or carry a `previous` endorsement by the pin, one generation back, in which case the CLI updates `hub_pubkey` (`How: rotation`). A different key ends the watch with exit 1 `hub_identity_changed` and the bearer never reaches that hub; an invalid proof ends it with exit 1 `hub_identity_unverified`. An identity request that fails, or is answered other than 200, is an outage: back off and retry (§13.1). An unpinned profile is pinned by first use when the served `public_url` matches and the proof verifies; otherwise it warns once and continues unpinned, and a hub that answers 404 (from before §21) also stays unpinned.
+- When following, and on `profile pin` and `profile repoint`.
+- One-shot commands are not checked each time: TLS authenticates the URL, and the pin exists to make moves safe.
+
+**When to follow.** Only:
+1. on 410 `hub_moved` from a one-shot command (`hook` and `mcp` do not follow). It follows, then runs the command once more; when it read stdin it exits 1 with `hub followed; re-run the command` instead;
+2. in `watch`, when an active moving notice's `at` has passed, plus a random 0–30 s so clients do not arrive together. `watch` reads the notices from `GET /v1/hub/notices` after each verified connection and on each moving `hub_notice` Event;
+3. on an explicit `vecnet profile follow`, which follows the newest active moving notice.
+
+A moving notice without `at` is information until the 410. A destination that does not answer yet (DNS still propagating, a proxy 502) is an outage: `watch` prints one `relocation_unverified` line per notice and retries with backoff.
+
+**What a follow checks.** All of these, or nothing changes:
+1. the notice is `moving`, its `hub` equals the profile's normalised hub, and its `new_url` differs;
+2. `sig` verifies against the pin (an unpinned profile first pins the old hub by first use);
+3. the notice is neither cleared nor expired;
+4. its `issued_at` is later than the last move this profile followed (`LastMove.IssuedAt`), so a replayed notice is refused;
+5. `new_url` serves an identity whose `public_url` equals `new_url`, which signs a fresh client challenge, with a key equal to the pin or endorsed by it one generation back.
+
+Any failure is exit 1 `relocation_unverified` with the reason.
+
+**Config edits.** A follow rewrites `hub` and `hub_pubkey` in every profile whose normalised hub is the old hub and whose effective pin is the verified pin, and no other profile. The edit is line-level: comments, order and unknown keys survive. It refuses multi-line strings, duplicate tables or keys and implicit profile tables, re-decodes the result and compares it with the intended change before an atomic replace, and first writes the original to `config.toml.bak`. It runs under the config and pins locks, and is refused (retry the command) when either changed during verification. The sidecar records `LastMove {From, To, NoticeID, IssuedAt}`. The CLI prints `profile <P> now uses <url> (key <fingerprint> verified)`.
+
+**Manual commands.** `profile show` prints the profile, hub, pin fingerprint and how it was pinned, and the last move. `profile pin` verifies the hub with no pin and records its key; if a different key was pinned it refuses with `hub_identity_changed` unless `--accept` equals the served fingerprint (an `--accept` that does not match is also `hub_identity_changed`). `profile repoint URL` needs a pin, verifies `URL` as step 5 above, then rewrites `hub`; `--force` skips verification and drops the pin, so the next command pins by first use.
+
+**`VECNET_NO_FOLLOW=1`** turns automatic following off. A 410 then exits 1 `relocation_unverified` with `hub moved; run \`vecnet --net <P> profile follow\``, and `watch` prints `hub moving; run \`vecnet --net <P> profile follow\`` when it sees a moving notice.
+
+**Peer text is never parsed for moves.** Only a signed notice, from `GET /v1/hub/notices`, a `hub_notice` Event or a 410's `details`, can move a profile, and only after the checks above.
+
+### 21.6 Reason codes
+
+| Code | Where | Cause | Action |
+|---|---|---|---|
+| `hub_moved` | hub, 410 | The hub runs in relocated mode; `details` carry `new_url` and the signed `notice` | Follow per §21.5 |
+| `relocation_unverified` | client, exit 1 | A follow or repoint check failed, the hub sent an invalid moving notice, there is no active moving notice to follow, or `VECNET_NO_FOLLOW=1` | Nothing was changed; check the notice and the new hub, or run `profile follow` |
+| `hub_identity_changed` | client, exit 1 | The hub's key is not the pin or endorsed by it (`watch`), or `profile pin` met a new key without a matching `--accept` | Confirm the fingerprint out of band, then `vecnet profile pin --accept <fingerprint>` |
+| `hub_identity_unverified` | client, exit 1 (`watch`) | A pinned hub served an identity that does not prove its key | Check the hub; nothing was sent to it |
+| `profile_changed` | client, exit 1 (`watch`) | The watched profile's hub or secret changed while it ran | Re-run `watch` |
+
+Posting and clearing notices use the existing `invalid_value`, `invalid_body`, `forbidden` and `not_found`.
