@@ -1,5 +1,6 @@
 // Package mcpdiag stores only allowlisted, sanitized operator diagnostics.
-// It never retains request bodies, credentials, callback paths, or errors.
+// It never retains request bodies, credentials or errors. Refused OAuth
+// redirects expose sanitized callback paths so operators can allow them.
 package mcpdiag
 
 import (
@@ -42,7 +43,7 @@ var shared Buffer
 func Emit(kind string, fields map[string]any) { shared.Emit(kind, fields) }
 func Snapshot(f Filter) []Record              { return shared.Snapshot(f) }
 
-var kinds = words("mcp.request oauth.request oauth.metadata oauth.register oauth.cimd oauth.authorize oauth.token oauth.refresh oauth.consent oauth.link events.subscribe_parsed events.verification events.activation events.refresh events.expiry events.pause events.unsubscribe events.delivery")
+var kinds = words("mcp.request oauth.request oauth.metadata oauth.register oauth.client_registered oauth.redirect_refused oauth.cimd oauth.authorize oauth.token oauth.refresh oauth.consent oauth.link events.subscribe_parsed events.verification events.activation events.refresh events.expiry events.pause events.unsubscribe events.delivery")
 var codes = words("ok error none invalid expired insufficient_scope success rejected failed pending verified cached refused active refreshed paused unsubscribed delivered retry dead not_attempted challenge_failed http_4xx http_5xx timeout invalid_url internal_error egress_refused token_expired delivery_failed unauthorized credential_rotated operator exhausted http_410 http_413 cancelled invalid_params invalid_request invalid_client_metadata invalid_redirect_uri temporarily_unavailable server_error unsupported_response_type invalid_scope invalid_target access_denied invalid_grant unsupported_grant_type consent_required link_invalid link_locked linked authorized fetch_failed http_error invalid_metadata rate_limited payload_too_large forbidden method_not_allowed not_found not_linked not_your_peer peer_required peer_disabled too_many unknown")
 
 // Body-supplied names are fixed protocol vocabulary, never free-form text.
@@ -65,6 +66,7 @@ func (b *Buffer) Emit(kind string, fields map[string]any) {
 		return
 	}
 	safe := sanitize(fields)
+	sanitizeOAuthMetadata(kind, fields, safe)
 	b.mu.Lock()
 	b.next++
 	rec := Record{Sequence: b.next, Time: time.Now().UTC(), Kind: kind, Fields: safe}
@@ -87,6 +89,51 @@ func (b *Buffer) Emit(kind string, fields map[string]any) {
 		message = "mcp: request"
 	}
 	slog.Info(message, attrs...)
+}
+
+// Only these record kinds admit redirect details. Ordinary HTTP paths keep
+// their fixed allowlist, and Events callback paths remain private.
+func sanitizeOAuthMetadata(kind string, in, out map[string]any) {
+	if kind != "oauth.redirect_refused" && kind != "oauth.client_registered" {
+		return
+	}
+	if endpoint, ok := in["endpoint"].(string); ok && (endpoint == "/oauth/register" || endpoint == "/oauth/authorize") {
+		out["endpoint"] = endpoint
+	}
+	if name, ok := in["client_name"].(string); ok {
+		out["client_name"] = clean(name, 80)
+	}
+	if kind == "oauth.client_registered" {
+		if prefix, ok := in["client_id_prefix"].(string); ok && strings.HasPrefix(prefix, "dcr_") {
+			out["client_id_prefix"] = clean(prefix, 12)
+		}
+		if hosts, ok := in["redirect_hosts"].([]string); ok {
+			safe := []string{}
+			for _, h := range hosts {
+				if len(safe) == 16 {
+					break
+				}
+				safe = append(safe, host(h))
+			}
+			out["redirect_hosts"] = safe
+		}
+		return
+	}
+	// Cut before parsing so even malformed query escapes cannot reach either
+	// destination. Never emit parse errors, which may contain the entire URI.
+	uri, _ := in["redirect_uri"].(string)
+	uri, _, _ = strings.Cut(uri, "#")
+	uri, _, _ = strings.Cut(uri, "?")
+	out["scheme"], out["host"], out["path"] = "", "", ""
+	if u, err := url.Parse(uri); err == nil && u.Opaque == "" {
+		out["scheme"], out["host"] = clean(u.Scheme, 32), host(u.Host)
+		// Redact decoded paths too, so percent-encoded token prefixes cannot
+		// evade redaction. Keep the original escaped spelling when unchanged.
+		if path := logging.Redact(u.Path); path != u.Path {
+			u.Path, u.RawPath = path, ""
+		}
+		out["path"] = u.EscapedPath()
+	}
 }
 func (b *Buffer) Snapshot(f Filter) []Record {
 	b.mu.Lock()
@@ -240,6 +287,10 @@ func clean(s string, n int) string {
 		if strings.Contains(p, "://") {
 			if u, e := url.Parse(p); e == nil && u.Hostname() != "" {
 				parts[i] = u.Scheme + "://" + u.Hostname()
+			} else {
+				// Malformed URLs may still contain userinfo and queries.
+				// A parser failure must not preserve the original text.
+				parts[i] = "[invalid-url]"
 			}
 		}
 	}

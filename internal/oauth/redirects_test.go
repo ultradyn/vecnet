@@ -1,7 +1,6 @@
 package oauth_test
 
 import (
-	"bytes"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -9,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/XertroV/vecnet/internal/mcpdiag"
 	"github.com/XertroV/vecnet/internal/oauth"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
@@ -85,10 +85,11 @@ func TestConfiguredRedirectPatterns(t *testing.T) {
 
 func TestRedirectDiagnosticsRedactURLs(t *testing.T) {
 	env := testhub.Start(t)
-	var logs bytes.Buffer
+	var logs oauthLogBuffer
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(previous) })
+	start := lastOAuthSequence()
 
 	name := strings.Repeat("n", 100)
 	for _, uri := range []string{
@@ -111,25 +112,52 @@ func TestRedirectDiagnosticsRedactURLs(t *testing.T) {
 	if resp, _ := b.authorize(q); resp.StatusCode != http.StatusBadRequest || resp.Header.Get("Location") != "" {
 		t.Fatalf("authorize refusal: %d", resp.StatusCode)
 	}
-	for _, secret := range []string{"QUERY_SECRET", "FRAGMENT_SECRET", "USERINFO_SECRET", id, name} {
-		if strings.Contains(logs.String(), secret) {
-			t.Fatalf("diagnostic leaked %q", secret)
+	records := []mcpdiag.Record{}
+	for _, record := range mcpdiag.Snapshot(mcpdiag.Filter{After: start}) {
+		if record.Kind == "oauth.redirect_refused" || record.Kind == "oauth.client_registered" {
+			records = append(records, record)
 		}
 	}
-	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("got %d diagnostics, want 5: %s", len(lines), logs.String())
+	ring, err := json.Marshal(records)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i, line := range lines {
+	for i, secret := range []string{"QUERY_SECRET", "FRAGMENT_SECRET", "USERINFO_SECRET", id, name} {
+		if strings.Contains(logs.String()+string(ring), secret) {
+			t.Fatalf("diagnostic leaked canary %d", i)
+		}
+	}
+	// Endpoint completion lines interleave with these operational records.
+	lines := []map[string]any{}
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
 		var record map[string]any
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
 			t.Fatal(err)
+		}
+		if record["msg"] == "oauth.redirect_refused" || record["msg"] == "oauth.client_registered" {
+			lines = append(lines, record)
+		}
+	}
+	if len(lines) != 5 || len(records) != 5 {
+		t.Fatalf("got %d INFO and %d ring diagnostics, want 5 each", len(lines), len(records))
+	}
+	for i, record := range lines {
+		if record["msg"] != records[i].Kind {
+			t.Fatal("INFO and ring record kinds differ")
+		}
+		for key, value := range records[i].Fields {
+			logged, _ := json.Marshal(record[key])
+			stored, _ := json.Marshal(value)
+			if string(logged) != string(stored) {
+				t.Fatalf("INFO and ring field %s differ", key)
+			}
 		}
 		if record["level"] != "INFO" {
 			t.Fatalf("diagnostic level: %v", record)
 		}
 		if i == 3 {
-			if record["client_id_prefix"] != id[:12] || !strings.Contains(line, "accepted.example") || strings.Contains(line, "/callback") {
+			line, _ := json.Marshal(record)
+			if record["msg"] != "oauth.client_registered" || record["endpoint"] != "/oauth/register" || record["client_id_prefix"] != id[:12] || !strings.Contains(string(line), "accepted.example") || strings.Contains(string(line), "/callback") {
 				t.Fatalf("registration diagnostic: %v", record)
 			}
 			continue
@@ -138,11 +166,14 @@ func TestRedirectDiagnosticsRedactURLs(t *testing.T) {
 		if i == 4 {
 			endpoint = "/oauth/authorize"
 		}
-		if record["msg"] != "oauth: redirect refused" || record["endpoint"] != endpoint {
+		if record["msg"] != "oauth.redirect_refused" || record["endpoint"] != endpoint {
 			t.Fatalf("refusal diagnostic: %v", record)
 		}
 		if i < 2 && (record["scheme"] != "https" || record["host"] != "refused.example" || record["path"] != "/callback" || record["client_name"] != name[:80]) {
 			t.Fatalf("missing redirect components or name truncation: %v", record)
+		}
+		if i == 2 && (record["scheme"] != "" || record["host"] != "" || record["path"] != "") {
+			t.Fatal("malformed redirect should not expose URL components")
 		}
 	}
 }

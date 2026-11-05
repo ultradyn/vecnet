@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-05: OAuth redirect refusals and client registrations share the sanitized diagnostics ring and INFO output, preserving operator-needed redirect components and bounded client names while redacting credentials and URL query/fragment/userinfo (`internal/oauth`, `internal/mcpdiag`).
+
 - 2026-11-05: OAuth link codes support enabled `dot` and `grokbot` peers through one shared allowlist; Grok Bot logins receive their own webhook/inbox guide, with generic CLI link help and connector setup docs (hub/admin.go, mcpserver/guide.go, PROTOCOL §4.5, connectors/grokbot.md).
 - 2026-11-05: hub `VECNET_OAUTH_REDIRECTS`/`--oauth-redirects` appends startup-validated OAuth redirect patterns; add Cursor's documented hosted HTTPS callback and query-free refusal/DCR diagnostics (`internal/oauth`, PROTOCOL §4.5, connectors/grokbot.md).
 - 2026-11-05: align dot MCP discovery and event OAuth scopes, add optional legacy-session refusal, cache verified idempotent subscription refreshes, and expose sanitized MCP/OAuth/Events diagnostics through an operator ring API and CLI (connectors/dots.md).

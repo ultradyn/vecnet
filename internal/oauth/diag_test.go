@@ -37,7 +37,8 @@ func lastOAuthSequence() uint64 {
 }
 
 // Both destinations receive the same allowlisted facts. Response bodies and
-// authorize form/redirect details never pass through a diagnostic buffer.
+// authorize forms never pass through a diagnostic buffer. Dedicated redirect
+// diagnostics intentionally retain sanitized paths and client display names.
 func TestOAuthEndpointDiagnosticsRedacted(t *testing.T) {
 	env := testhub.Start(t)
 	var logs oauthLogBuffer
@@ -52,7 +53,7 @@ func TestOAuthEndpointDiagnosticsRedacted(t *testing.T) {
 		records := mcpdiag.Snapshot(mcpdiag.Filter{After: after})
 		found := []mcpdiag.Record{}
 		for _, rec := range records {
-			if strings.HasPrefix(rec.Kind, "oauth.") {
+			if rec.Kind == kind {
 				found = append(found, rec)
 			}
 		}
@@ -89,7 +90,15 @@ func TestOAuthEndpointDiagnosticsRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	both := string(data) + logs.String()
-	for index, canary := range []string{"vat_token-canary", "private-callback-canary", "whsec_secret-canary", "message-text-canary", "vac_code-canary", "client-canary", "verifier-canary", "vrt_refresh-canary", "sealed-form-canary", "link-code-canary", "state-canary", "scope-canary", tok.AccessToken, tok.RefreshToken} {
+	// private-callback-canary (redirect path) and message-text-canary
+	// (client_name) are operator-needed metadata, not secrets. They must be
+	// visible in the dedicated refusal record in both destinations.
+	for _, metadata := range []string{"private-callback-canary", "message-text-canary"} {
+		if !strings.Contains(string(data), metadata) || !strings.Contains(logs.String(), metadata) {
+			t.Error("OAuth redirect diagnostic lost operator metadata")
+		}
+	}
+	for index, canary := range []string{"vat_token-canary", "whsec_secret-canary", "vac_code-canary", "client-canary", "verifier-canary", "vrt_refresh-canary", "sealed-form-canary", "link-code-canary", "state-canary", "scope-canary", tok.AccessToken, tok.RefreshToken} {
 		if strings.Contains(both, canary) {
 			t.Errorf("OAuth diagnostics leaked canary %d", index)
 		}

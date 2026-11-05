@@ -149,3 +149,89 @@ func TestExplicitZeroCursorReadsFirstUnreadPage(t *testing.T) {
 		t.Fatalf("initial snapshot not latest records: %+v", initial)
 	}
 }
+
+func TestOAuthRedirectMetadataSanitizedBeforeBothDestinations(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	var b Buffer
+	b.Emit("oauth.redirect_refused", map[string]any{
+		"redirect_uri": "https://user:USERINFO_CANARY@refused.example:8443/callback/%76at_path_canary?QUERY_CANARY=one#FRAGMENT_CANARY",
+		"client_name":  "Connector\n\twhsec_name_canary https://user:pass@example.com/private-name-path?NAME_QUERY_CANARY=one",
+		"endpoint":     "/oauth/authorize", "code_verifier": "VERIFIER_CANARY", "state": "STATE_CANARY", "client_secret": "CLIENT_SECRET_CANARY",
+	})
+	b.Emit("oauth.client_registered", map[string]any{
+		"client_id_prefix": "dcr_12345678private-client-id-tail", "redirect_hosts": []string{"accepted.example:8443", "bad.example/private-host-path", "vat_host_canary"},
+		"client_name": strings.Repeat("界", 100), "endpoint": "/oauth/register",
+	})
+	records := b.Snapshot(Filter{})
+	if len(records) != 2 {
+		t.Fatalf("got %d records, want 2", len(records))
+	}
+	raw, _ := json.Marshal(records)
+	for i, canary := range []string{"USERINFO_CANARY", "QUERY_CANARY", "FRAGMENT_CANARY", "vat_path_canary", "whsec_name_canary", "private-name-path", "NAME_QUERY_CANARY", "VERIFIER_CANARY", "STATE_CANARY", "CLIENT_SECRET_CANARY", "private-client-id-tail", "private-host-path", "vat_host_canary"} {
+		if strings.Contains(string(raw)+logs.String(), canary) {
+			t.Errorf("OAuth metadata leaked canary %d", i)
+		}
+	}
+	refused := records[0].Fields
+	if refused["scheme"] != "https" || refused["host"] != "refused.example:8443" || !strings.HasPrefix(refused["path"].(string), "/callback/") || refused["endpoint"] != "/oauth/authorize" {
+		t.Error("refused redirect lost required components")
+	}
+	if strings.ContainsAny(refused["client_name"].(string), "\n\t") {
+		t.Error("client name retained controls")
+	}
+	if records[1].Fields["client_id_prefix"] != "dcr_12345678" || len([]rune(records[1].Fields["client_name"].(string))) != 80 {
+		t.Error("registration metadata was not bounded")
+	}
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != len(records) {
+		t.Fatalf("got %d INFO lines, want %d", len(lines), len(records))
+	}
+	for i, line := range lines {
+		var logged map[string]any
+		if err := json.Unmarshal([]byte(line), &logged); err != nil {
+			t.Fatal(err)
+		}
+		if logged["level"] != "INFO" || logged["msg"] != records[i].Kind {
+			t.Error("wrong INFO level or record kind")
+		}
+		delete(logged, "time")
+		delete(logged, "level")
+		delete(logged, "msg")
+		logFields, _ := json.Marshal(logged)
+		ringFields, _ := json.Marshal(records[i].Fields)
+		if string(logFields) != string(ringFields) {
+			t.Error("ring and INFO fields differ")
+		}
+	}
+	// Callback paths remain private for all other record kinds.
+	b.Emit("events.delivery", map[string]any{"redirect_uri": "https://example.com/private-callback", "path": "/private-callback", "redirect_hosts": []string{"example.com"}, "endpoint": "/oauth/register"})
+	if len(b.Snapshot(Filter{Limit: 1})[0].Fields) != 0 {
+		t.Error("OAuth metadata exception leaked into Events")
+	}
+}
+
+func TestOAuthClientNameDropsMalformedURLs(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	var b Buffer
+	for _, kind := range []string{"oauth.redirect_refused", "oauth.client_registered"} {
+		for _, name := range []string{
+			"Connector https://u:PASS_CANARY@x.example/%zz?QUERY_CANARY=1",
+			"Connector https://x.example:bad/private-path",
+			"Connector https:///missing-host?MISSING_HOST_CANARY=1",
+		} {
+			b.Emit(kind, map[string]any{"client_name": name})
+		}
+	}
+	raw, _ := json.Marshal(b.Snapshot(Filter{}))
+	for i, canary := range []string{"PASS_CANARY", "QUERY_CANARY", "private-path", "MISSING_HOST_CANARY"} {
+		if strings.Contains(string(raw)+logs.String(), canary) {
+			t.Errorf("malformed client-name URL leaked canary %d", i)
+		}
+	}
+}

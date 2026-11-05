@@ -2,11 +2,12 @@ package oauth
 
 import (
 	"fmt"
-	"log/slog"
 	"net"
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/XertroV/vecnet/internal/mcpdiag"
 )
 
 // ParseAllowedRedirects appends comma-separated operator patterns to the
@@ -52,19 +53,8 @@ func validRedirectPattern(entry string) bool {
 	return !strings.HasSuffix(u.Host, ":") && (u.Port() == "" || validPort(u.Port()))
 }
 
-// logRedirectRefused deliberately drops query, fragment and userinfo. A URL
-// parse error is never logged: net/url errors can contain the complete input.
+// logRedirectRefused shares the ring's sanitization boundary with INFO logs.
+// The raw URI is only an input; the diagnostic retains safe components.
 func logRedirectRefused(uri, clientName, endpoint string) {
-	uri, _, _ = strings.Cut(uri, "#")
-	uri, _, _ = strings.Cut(uri, "?")
-	var scheme, host, path string
-	if u, err := url.Parse(uri); err == nil {
-		scheme, host, path = u.Scheme, u.Host, u.EscapedPath()
-	}
-	name := []rune(clientName)
-	if len(name) > 80 {
-		name = name[:80]
-	}
-	slog.Info("oauth: redirect refused", "scheme", scheme, "host", host, "path", path,
-		"client_name", string(name), "endpoint", endpoint)
+	mcpdiag.Emit("oauth.redirect_refused", map[string]any{"redirect_uri": uri, "client_name": clientName, "endpoint": endpoint})
 }

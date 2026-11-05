@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -184,7 +183,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		u, _ := url.Parse(uri) // each URI passed redirectAllowed
 		hosts = append(hosts, u.Host)
 	}
-	slog.Info("oauth: client registered", "client_id_prefix", m.ClientID[:12], "redirect_hosts", hosts)
+	mcpdiag.Emit("oauth.client_registered", map[string]any{"client_id_prefix": m.ClientID[:12], "redirect_hosts": hosts, "client_name": m.ClientName, "endpoint": "/oauth/register"})
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"client_id":                  m.ClientID,
