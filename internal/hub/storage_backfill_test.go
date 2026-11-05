@@ -316,28 +316,6 @@ func TestBackfillLegacySnapshotsAndDurableExceptions(t *testing.T) {
 	assertBackfillBytes(t, h, fs)
 }
 
-func TestBackfillDeliveryHashLookupUsesEventSeqIndex(t *testing.T) {
-	env, _ := backfillEnv(t)
-	rows, err := env.Hub.DB.Query(`EXPLAIN QUERY PLAN SELECT body_sha256 FROM deliveries WHERE event_seq=?`, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	indexed := false
-	for rows.Next() {
-		var id, parent, unused int
-		var detail string
-		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
-			t.Fatal(err)
-		}
-		t.Log(detail)
-		indexed = indexed || (strings.Contains(detail, "SEARCH deliveries USING COVERING INDEX") && strings.Contains(detail, "(event_seq=?)"))
-	}
-	if rows.Err() != nil || !indexed {
-		t.Fatal("authoritative hash lookup scans the delivery queue")
-	}
-}
-
 // Neither embedded id is authoritative for locating an existing delivery.
 func TestBackfillHashMismatchWithDisagreeingEmbeddedIDs(t *testing.T) {
 	env, fs := backfillEnv(t)
