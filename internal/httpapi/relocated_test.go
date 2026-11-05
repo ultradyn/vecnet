@@ -107,6 +107,9 @@ func TestRelocatedUIPage(t *testing.T) {
 			if rr.Code != 410 || !strings.HasPrefix(rr.Header().Get("Content-Type"), "text/html") || !strings.Contains(body, `<a href="`+html.EscapeString(newURL)+`">`) || strings.Contains(strings.ToLower(body), "<script") || !strings.Contains(strings.ToLower(body), "moved") {
 				t.Fatalf("UI %s: %d %s", path, rr.Code, body)
 			}
+			if rr.Header().Get("Content-Security-Policy") != "default-src 'none'; frame-ancestors 'none'" || rr.Header().Get("X-Content-Type-Options") != "nosniff" {
+				t.Fatalf("UI %s headers: %v", path, rr.Header())
+			}
 		}
 	}
 }

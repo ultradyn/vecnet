@@ -31,6 +31,8 @@ func Relocated(d Deps, n envelope.HubNotice) http.Handler {
 			}
 			if r.URL.Path == "/ui" || strings.HasPrefix(r.URL.Path, "/ui/") {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+				w.Header().Set("X-Content-Type-Options", "nosniff")
 				w.WriteHeader(http.StatusGone)
 				target := html.EscapeString(n.NewURL)
 				fmt.Fprintf(w, `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Hub moved</title></head><body><h1>This hub moved</h1><p>This hub moved to <a href="%s">%s</a>.</p></body></html>`, target, target)

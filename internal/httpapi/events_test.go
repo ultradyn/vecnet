@@ -937,6 +937,7 @@ func TestDrainResetServesAgain(t *testing.T) {
 	}
 }
 
+// (guard) Deps.Drain nil: streams, long-polls and activity keep today's bytes.
 func TestDrainNilIsInert(t *testing.T) {
 	env := testhub.Start(t)
 	env.Configure(func(d *httpapi.Deps) { d.Drain = nil; d.Heartbeat = 20 * time.Millisecond })
