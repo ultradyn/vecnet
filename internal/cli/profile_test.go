@@ -35,6 +35,7 @@ func TestEnrolPinsHubPubkey(t *testing.T) {
 		t.Fatalf("enrol did not pin: %+v", cfg)
 	}
 }
+
 // A malformed hub_pubkey in the enrol answer is not written as the config
 // pin (which would win over the sidecar forever); TOFU applies instead.
 func TestEnrolIgnoresMalformedHubPubkey(t *testing.T) {

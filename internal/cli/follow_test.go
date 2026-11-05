@@ -47,6 +47,7 @@ func TestFollowOn410(t *testing.T) {
 		t.Fatalf("move record: %+v %v", records, err)
 	}
 }
+
 // enrol has no profile to follow: a 410 from a relocated hub leaves every
 // profile alone and hints at the new hub (§21.5 When to follow, item 1).
 func TestEnrolOn410DoesNotFollow(t *testing.T) {
@@ -332,6 +333,7 @@ func watchProxy(t *testing.T, e *testhub.Env) (*httptest.Server, *atomic.Int64, 
 	t.Cleanup(srv.Close)
 	return srv, unavailable, polls, resumes
 }
+
 // retry_after_ms is 0-60000 (§21.3): a larger hint waits at most a jittered minute.
 func TestWatchRestartHintClamped(t *testing.T) {
 	w := &watcher{a: &app{stdout: io.Discard, stderr: io.Discard}}
