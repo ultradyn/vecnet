@@ -108,13 +108,19 @@ export function withOlder(inbox, pages) {
 // With refresh, every loaded page is read again from the head's tail even when
 // the chain still joins: a read in another client changes read_at, not the
 // cursors, and the older pages must show it too.
-export async function follow(inbox, pages, fetchPage, { refresh = false } = {}) {
-  const k = refresh && pages.length ? 0 : chainBreak(inbox, pages);
-  if (k < 0) return { pages, error: null };
+//
+// count is how many pages to end with (default: as many as are loaded); past
+// the loaded ones, pages are read on from the end of the chain until it ends.
+export async function follow(inbox, pages, fetchPage, { refresh = false, count = pages.length } = {}) {
+  let k = refresh && pages.length ? 0 : chainBreak(inbox, pages);
+  if (k < 0) {
+    if (pages.length >= count) return { pages, error: null };
+    k = pages.length;
+  }
   const next = pages.slice(0, k);
   let before = k ? next[k - 1].next_before ?? null : inbox.next_before ?? null;
   try {
-    while (next.length < pages.length && before) {
+    while (next.length < count && before) {
       const page = await fetchPage(before);
       next.push({ ...page, before });
       before = page.next_before ?? null;
@@ -123,4 +129,45 @@ export async function follow(inbox, pages, fetchPage, { refresh = false } = {}) 
     return { pages: next, error };
   }
   return { pages: next, error: null };
+}
+
+// olderPager owns the "Load older" pages under a head that reloads. request()
+// asks for one page more than is loaded; sync(head) brings the pages in line
+// with head: on a new head it re-reads every loaded page (follow, refresh),
+// and it reads on for any page asked for. A newer head supersedes a pass in
+// flight, and the pass that replaces it reads every page asked for, so a click
+// that lands while the head reloads is applied under the new head, never
+// dropped. sync resolves to { error } once the pages are in line (a failed
+// read is reported once and asks for nothing more), or null when the pass was
+// superseded or another pass for the same head is already running.
+export function olderPager(fetchPage) {
+  const superseded = new Error('superseded');
+  let pages = [], wanted = 0, synced = null, running = null;
+  const pending = head => !!head && (wanted > pages.length || (pages.length > 0 && synced !== head));
+  async function sync(head) {
+    if (!pending(head) || running === head) return null;
+    running = head;
+    const count = Math.max(wanted, pages.length);
+    const read = before => { if (running !== head) throw superseded; return fetchPage(before); };
+    const { pages: got, error } = await follow(head, pages, read, { refresh: synced !== head, count });
+    if (running !== head || error === superseded) return null;
+    running = null;
+    pages = got;
+    synced = head;
+    // Pages asked for during the pass are still owed; the rest are settled,
+    // whether they were read, ran past the end of the chain, or failed.
+    wanted = got.length + Math.max(0, wanted - count);
+    return { error: error || null };
+  }
+  return {
+    pages: () => pages,
+    pending,
+    // request is one click: false while a click is still owed.
+    request() {
+      if (wanted > pages.length) return false;
+      wanted = pages.length + 1;
+      return true;
+    },
+    sync,
+  };
 }

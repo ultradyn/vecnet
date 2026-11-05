@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chainBreak, deadLetterLine, follow, heldWhy, sections, withOlder } from '../static/inbox-model.js';
+import { chainBreak, deadLetterLine, follow, heldWhy, olderPager, sections, withOlder } from '../static/inbox-model.js';
 
 const delivery = (id, section, priority, extra = {}) => ({
   delivery_id: id, message_id: 'msg_' + id, thread_id: 'thr_1', thread_title: 't', sender: 'peer_a',
@@ -211,4 +211,122 @@ test('deadLetterParts carries the full delivery id beside its short form', async
   const last = parts[parts.length - 1];
   assert.equal(last.id, 'dly_01JD3SB4T6W8Y0A2C4E6G8J0M2');
   assert.equal(last.text, 'dly_…8J0M2');
+});
+
+test('follow with a count reads pages past the loaded ones, from the end of the chain', async () => {
+  const hub = fakeHub(160);
+  const head = hub.page(50);
+  const reads = [];
+  const fetchPage = before => { reads.push(before); return hub.page(50, before); };
+  const one = await follow(head, [], fetchPage, { count: 1 });
+  assert.deepEqual(reads, [head.next_before]);
+  assert.equal(one.pages.length, 1);
+  const two = await follow(head, one.pages, fetchPage, { count: 2 });
+  assert.deepEqual(reads, [head.next_before, one.pages[0].next_before], 'a joined page was read again');
+  assertNoGap(hub, withOlder(head, two.pages));
+  // The chain ends before the count: it stops at the last page.
+  const all = await follow(head, two.pages, fetchPage, { count: 9 });
+  assert.equal(all.pages.length, 3);
+  assert.equal(withOlder(head, all.pages).next_before, null);
+});
+
+// A page read that waits for release(), as a slow hub does.
+function gatedFetch(hub) {
+  const waiting = [];
+  const fetchPage = before => new Promise(resolve => waiting.push({ before, go: () => resolve(hub.page(50, before)) }));
+  return { fetchPage, waiting, release: () => { for (const w of waiting.splice(0)) w.go(); } };
+}
+const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('Load older asked for while the head reloads is applied under the new head, not dropped', async () => {
+  const hub = fakeHub(120);
+  const head = hub.page(50);
+  const gate = gatedFetch(hub);
+  const pager = olderPager(gate.fetchPage);
+  assert.equal(pager.pending(head), false);
+  assert.equal(pager.request(), true);
+  assert.equal(pager.request(), false, 'a second click while one is pending asked again');
+  assert.equal(pager.pending(head), true);
+  const first = pager.sync(head);
+  await tick();
+  assert.deepEqual(gate.waiting.map(w => w.before), [head.next_before]);
+  // A delivery lands and the head reloads before the older page answers.
+  hub.deliver();
+  const head2 = hub.page(50);
+  assert.equal(pager.pending(head2), true);
+  const second = pager.sync(head2);
+  gate.release();
+  assert.equal(await first, null, 'the pass under the old head still applied');
+  await tick();
+  gate.release();
+  const done = await second;
+  assert.deepEqual(done, { error: null });
+  assert.equal(pager.pending(head2), false);
+  const shown = withOlder(head2, pager.pages());
+  assertNoGap(hub, shown);
+  assert.equal(shown.deliveries.length, 100);
+});
+
+test('a click during a head-follow pass is read once that pass ends', async () => {
+  const hub = fakeHub(200);
+  const head = hub.page(50);
+  const gate = gatedFetch(hub);
+  const pager = olderPager(gate.fetchPage);
+  pager.request();
+  const p0 = pager.sync(head);
+  await tick(); gate.release();
+  assert.deepEqual(await p0, { error: null });
+  hub.deliver();
+  const head2 = hub.page(50);
+  // The new head re-reads the loaded page; the operator clicks meanwhile.
+  const p1 = pager.sync(head2);
+  assert.equal(pager.request(), true);
+  assert.equal(await pager.sync(head2), null, 'a second pass ran for the same head');
+  await tick(); gate.release();
+  assert.deepEqual(await p1, { error: null });
+  assert.equal(pager.pages().length, 1);
+  assert.equal(pager.pending(head2), true, 'the click was forgotten');
+  const p2 = pager.sync(head2);
+  await tick();
+  assert.deepEqual(gate.waiting.map(w => w.before), [pager.pages()[0].next_before], 'the loaded page was read again for a click');
+  gate.release();
+  assert.deepEqual(await p2, { error: null });
+  assert.equal(pager.pending(head2), false);
+  const shown = withOlder(head2, pager.pages());
+  assertNoGap(hub, shown);
+  assert.equal(shown.deliveries.length, 150);
+});
+
+test('the pager settles when the chain ends or a read fails, and a new head refreshes loaded pages', async () => {
+  const hub = fakeHub(60);
+  const head = hub.page(50);
+  let fail = false;
+  const reads = [];
+  const pager = olderPager(async before => {
+    reads.push(before);
+    if (fail) throw Object.assign(new Error('hub down'), { code: 'unavailable' });
+    return hub.page(50, before);
+  });
+  pager.request();
+  assert.deepEqual(await pager.sync(head), { error: null });
+  assert.equal(withOlder(head, pager.pages()).next_before, null);
+  // Nothing is behind the last page: a further request reads nothing and settles.
+  pager.request();
+  assert.deepEqual(await pager.sync(head), { error: null });
+  assert.equal(pager.pending(head), false, 'a request past the end stays pending and would loop');
+  assert.equal(reads.length, 1);
+  // Another client reads a row on the older page; the new head re-reads it.
+  hub.read('dly_005');
+  const head2 = hub.page(50);
+  assert.equal(pager.pending(head2), true);
+  assert.deepEqual(await pager.sync(head2), { error: null });
+  assert.ok(withOlder(head2, pager.pages()).deliveries.find(d => d.delivery_id === 'dly_005').read_at);
+  // A failed read reports once and settles; the page that joined stays.
+  hub.deliver();
+  const head3 = hub.page(50);
+  fail = true;
+  const r = await pager.sync(head3);
+  assert.equal(r.error.code, 'unavailable');
+  assert.equal(pager.pending(head3), false);
+  assertNoGap(hub, withOlder(head3, pager.pages()));
 });

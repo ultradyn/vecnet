@@ -120,6 +120,8 @@ try {
     assert(await retry.isEnabled(), 'Resume did not come back after a failure');
     assert((await hubSubs()).find(s => s.sub_id === byHealth.paused_failed.sub_id).paused_reason === 'delivery_failed', 'failed resume changed the hub');
     await page.locator('#toast.on', { hasText: 'Resume failed' }).waitFor();
+    // The toast slides in: shoot it once it has landed, not mid-slide.
+    await page.evaluate(() => Promise.all(document.getElementById('toast').getAnimations().map(a => a.finished)));
     await shot('13-subs-error');
     await page.unroute(RESUME);
 
@@ -135,6 +137,7 @@ try {
     assert(sent() === before + 1, `held Resume sent ${sent() - before} requests`);
     assert(await item('paused_failed').locator('.err').count() === 0, 'old error survived a new attempt');
     await page.locator('#toast.on').waitFor({ state: 'hidden' });
+    await page.evaluate(() => Promise.all(document.getElementById('toast').getAnimations().map(a => a.finished)));
     await shot('13-subs-progress');
     await release();
 

@@ -5,7 +5,7 @@
 import { answerBody, countdown } from './approvals.js';
 import { avatar, confirmButton, h, idCopy, idText, peerLink } from './dom.js';
 import { ago, when } from './format.js';
-import { deadLetterParts, follow, heldWhy, sections, withOlder } from './inbox-model.js';
+import { deadLetterParts, heldWhy, olderPager, sections, withOlder } from './inbox-model.js';
 import * as presence from './presence.js';
 import * as subs from './subs.js';
 
@@ -32,11 +32,11 @@ export function mount(root, ctx) {
   const dlControls = new Map(); // delivery_id → { retry, discard }
   const dlBusy = new Set();
   // "Load older" pages, each with the cursor it was read with. They follow
-  // the head: a reload that shifts it re-reads them before the page redraws.
-  let older = [];
-  // followed is the head the older pages were last read under. Every new head
-  // re-reads them, because a read elsewhere changes read_at, not the cursors.
-  let olderBusy = false, following = null, followed = null, shown = {}, alive = true;
+  // the head: every new head re-reads them before the page redraws, because a
+  // reload that shifts it moves their cursors and a read elsewhere changes
+  // read_at (inbox-model.js olderPager).
+  const older = olderPager(before => alive ? api.inbox({ limit: PAGE, before }) : Promise.reject(new Error('inbox closed')));
+  let shown = {}, alive = true;
 
   const attention = h('div', { class: 'attention', id: sectionId('attention') });
   const banner = h('div', { class: 'banner error', role: 'alert', hidden: true });
@@ -188,40 +188,23 @@ export function mount(root, ctx) {
         d.read_at ? h('span', { class: 'meta', text: 'read' }) : h('span', { class: 'new', title: 'unread' })));
   }
 
-  async function loadOlder(before, btn) {
-    if (olderBusy) return;
-    olderBusy = true;
+  // "Load older" asks the pager for one more page and redraws once it is in
+  // line with the head. A head that reloads meanwhile does not drop the click:
+  // the pass under the new head reads every page asked for.
+  function loadOlder(btn) {
     btn.disabled = true;
-    try {
-      const page = await api.inbox({ limit: PAGE, before });
-      // A head reload meanwhile may have moved the tail; the redraw offers
-      // "Load older" again from wherever it is now.
-      const tail = older.length ? older[older.length - 1].next_before : (inbox.get() || {}).next_before;
-      if (!following && tail === before) { older = [...older, { ...page, before }]; followed = inbox.get(); }
-      render(true);
-    } catch (e) {
-      btn.disabled = false;
-      ctx.toast(describe(e), true);
-    } finally { olderBusy = false; }
+    if (older.request()) render(true);
   }
 
-  // The head reloaded: read the older pages again from its tail, then redraw
-  // once, so no row goes missing between them, their read state is current,
-  // and the page does not shrink and regrow meanwhile. A newer head cancels
-  // this pass and starts its own.
-  async function followHead(value) {
-    if (following === value) return;
-    following = value;
-    const stale = () => !alive || following !== value;
-    const { pages, error } = await follow(value, older, async before => {
-      if (stale()) throw stale;
-      return api.inbox({ limit: PAGE, before });
-    }, { refresh: true });
-    if (stale()) return;
-    following = null;
-    followed = value;
-    older = pages;
-    if (error) ctx.toast(describe(error), true);
+  // Bring the older pages in line with the head: on a new head every loaded
+  // page is read again from its tail (so no row goes missing between them and
+  // their read state is current), and any page asked for is read on. One
+  // redraw at the end, so the page does not shrink and regrow meanwhile. A
+  // newer head cancels this pass and starts its own.
+  async function syncOlder(value) {
+    const done = await older.sync(value);
+    if (!done || !alive) return;
+    if (done.error) ctx.toast(describe(done.error), true);
     render(true);
   }
 
@@ -253,9 +236,8 @@ export function mount(root, ctx) {
       return;
     }
 
-    if (older.length && followed !== value) { followHead(value); return; }
-    following = null;
-    const data = withOlder(value, older), nowMs = store.hubNow();
+    if (older.pending(value)) { syncOlder(value); return; }
+    const data = withOlder(value, older.pages()), nowMs = store.hubNow();
     const byKey = new Map(sections(data).map(s => [s.key, s]));
     const live = new Set((data.approvals || []).map(a => a.approval_id));
     for (const [id, state] of answering) if (!live.has(id) && state !== 'sending') answering.delete(id);
@@ -277,7 +259,7 @@ export function mount(root, ctx) {
     }
     if (data.next_before) {
       const btn = h('button', { type: 'button', class: 'btn more', text: 'Load older' });
-      btn.addEventListener('click', () => loadOlder(data.next_before, btn));
+      btn.addEventListener('click', () => loadOlder(btn));
       out.push(btn);
     }
     if (!byKey.size) out.push(h('div', { class: 'empty' }, h('b', { text: 'Nothing needs you' }), 'No decisions, failed deliveries or messages are waiting.'));

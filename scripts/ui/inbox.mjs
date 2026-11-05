@@ -247,17 +247,29 @@ try {
       const more = page.getByRole('button', { name: 'Load older', exact: true });
       await page.locator('#view a.item', { hasText: 'Older note 59' }).waitFor();
       await more.waitFor();
-      // A head reload while the older page is in flight drops that page and
-      // offers "Load older" again from the new tail (inbox.js loadOlder), and
-      // the hub's sweeps keep moving the head for a while after the clock
-      // jumps. So click once the page has drawn every snapshot it asked for,
-      // and again only if the click was spent on a head that then moved.
-      for (let tries = 0; ; tries++) {
-        await quiet();
-        if (!await more.count()) break;
-        assert(tries < 5, '"Load older" never took: the inbox head kept moving');
+      // One click loads the older page even when the head reloads while that
+      // page is in flight: hold its read, move the head with a new delivery,
+      // then let it answer. The pass under the new head reads the page the
+      // click asked for (inbox-model.js olderPager), so the button goes.
+      const olderRead = url => url.pathname.endsWith('/v1/admin/inbox') && url.searchParams.has('before');
+      let releaseOlder, heldOlder = false;
+      const olderGate = new Promise(resolve => { releaseOlder = resolve; });
+      const gateOlder = async route => {
+        if (!heldOlder) { heldOlder = true; await olderGate; }
+        await route.continue();
+      };
+      await page.route(olderRead, gateOlder);
+      try {
+        const asked = page.waitForRequest(req => olderRead(new URL(req.url())));
         await more.click();
-      }
+        await asked;
+        const headReload = page.waitForResponse(r => { const u = new URL(r.url()); return u.pathname.endsWith('/v1/admin/inbox') && !u.searchParams.has('before') && r.ok(); });
+        await advance('61m');
+        await say('inbox-older-mid', 'Arrived mid-load');
+        await headReload;
+      } finally { releaseOlder(); }
+      await more.waitFor({ state: 'detached' });
+      await page.unroute(olderRead, gateOlder);
       const before = await hubRows();
       assert(before.length > 50 && before.length <= 100, `${before.length} deliveries; the check wants two pages`);
       await page.locator(`#view a.item[data-id="${before[before.length - 1]}"]`).waitFor();
