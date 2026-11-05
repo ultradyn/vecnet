@@ -208,4 +208,4 @@ Hub notice web screens come from `scripts/ui/notice.mjs`. Active hub notices tak
 - [nt09-success-phone.png](nt09-success-phone.png) — The same at 390 px: rows wrap (at most three lines) above the sidebar, with no sideways scroll.
 - [nt09-progress-desktop.png](nt09-progress-desktop.png) — The hub announced a restart (`retry_after_ms` 5000) and the reconnects are held: "Hub restarting: reconnecting in 5 s" in amber over the notices.
 - [nt09-progress-phone.png](nt09-progress-phone.png) — The restarting row at phone width.
-- [nt09-error-desktop.png](nt09-error-desktop.png) — A restart followed by an outage (every `/v1/` request 503): past the hint plus 30 s the row reads "Hub unreachable since hh:mm" in red, and the notices stay.
+- [nt09-error-desktop.png](nt09-error-desktop.png) — A restart followed by an outage (every `/v1/` request 503): past the hint plus 30 s the row reads "Hub unreachable since hh:mm" in red, the connection reads `reconnecting`, and the notices stay.

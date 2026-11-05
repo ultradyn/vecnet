@@ -109,7 +109,9 @@ try {
     const unreachable = rows.filter({ hasText: /^Hub unreachable since \d\d:\d\d$/ });
     await unreachable.waitFor();
     assert(await page.locator('.ntc.bad').count() === 1, 'unreachable row is not red');
-    await conn.locator('span', { hasText: /^offline$/ }).waitFor();
+    // master's quiet reconnect: an outage reads as reconnecting (#conn.retry), not offline.
+    await conn.locator('span', { hasText: /^reconnecting$/ }).waitFor();
+    assert(await page.locator('#conn.retry').count() === 1, 'conn is not reconnecting after the restart grace');
     await connInView('nt09-error-desktop');
     await shot('nt09-error-desktop');
   });
