@@ -109,6 +109,24 @@ func TestR2HTTPDiskRollbackPreservesRemoteDiscoveryAndRead(t *testing.T) {
 	}
 	f.env.Hub.Cfg.BlobBackend = "disk"
 	f.env = f.env.CloneDB(t) // restart in disk mode with retained remote credentials and references
+	for role, secret := range map[string]string{"owner": owner, "peer": reader, "operator": f.env.OperatorSecret} {
+		t.Run(role, func(t *testing.T) {
+			for _, sha := range []string{g.SHA256, shaOf("unknown rollback object")} {
+				for _, route := range []string{"status", "download"} {
+					resp, raw := f.request(t, secret, "GET", "/v1/blobs/"+sha+"/"+route, nil, "")
+					if resp.StatusCode != 422 {
+						t.Errorf("rollback hash-only %s = %d, want 422", route, resp.StatusCode)
+					}
+					requireCode(t, raw, "blob_id_required")
+					for _, field := range []string{"size", "expires_at", "url", "retention_class", "state"} {
+						if strings.Contains(string(raw), `"`+field+`"`) {
+							t.Errorf("missing ID disclosed %s", field)
+						}
+					}
+				}
+			}
+		})
+	}
 	resp, raw := f.request(t, reader, "GET", "/v1/blob-capabilities", nil, "")
 	var caps struct {
 		Backend    string   `json:"backend"`
@@ -117,6 +135,12 @@ func TestR2HTTPDiskRollbackPreservesRemoteDiscoveryAndRead(t *testing.T) {
 	}
 	if json.Unmarshal(raw, &caps) != nil || resp.StatusCode != 200 || caps.Backend != "disk" || caps.UploadMode != "legacy" || len(caps.Origins) != 1 || caps.Origins[0] != fakeOrigin {
 		t.Fatal("rollback discovery omitted trusted remote origin or disk upload mode")
+	}
+	for _, route := range []string{"status", "download"} {
+		resp, _ := f.request(t, "", "GET", "/v1/blobs/"+g.SHA256+"/"+route, nil, "")
+		if resp.StatusCode != 401 && resp.StatusCode != 403 {
+			t.Error("missing ID must authenticate before disclosing an error")
+		}
 	}
 	grant := f.download(t, reader, g)
 	u, err := url.Parse(grant.URL)
@@ -135,6 +159,10 @@ func TestR2HTTPDiskRollbackPreservesRemoteDiscoveryAndRead(t *testing.T) {
 	}
 	if json.Unmarshal(raw, &localGrant) != nil || resp.StatusCode != 200 || localGrant.LocalPath == "" || localGrant.URL != "" {
 		t.Fatal("new disk upload was not local")
+	}
+	resp, raw = f.request(t, f.env.OperatorSecret, "GET", "/v1/blobs/"+local.SHA256+"/status", nil, "")
+	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"state":"available"`) {
+		t.Fatal("disk rollback changed successful hash-only status")
 	}
 	resp, raw = f.request(t, f.env.OperatorSecret, "GET", localGrant.LocalPath, nil, "")
 	if resp.StatusCode != 200 || string(raw) != "new local upload" {
@@ -233,5 +261,122 @@ func TestR2HTTPCapabilityRetentionExactWithAdvancingClock(t *testing.T) {
 	}
 	if caps.Retention.Seconds == nil || *caps.Retention.Seconds != 86400 {
 		t.Fatal("1d retention seconds must equal 86400 with an advancing clock")
+	}
+}
+
+// These are offline fake-provider regressions, not provider acceptance.
+func TestR2HTTPDownloadProviderLossAndOutage(t *testing.T) {
+	for _, failure := range []string{"missing", "outage"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newR2HTTP(t)
+			_, owner := f.env.NewPeer("session", "owner")
+			_, stranger := f.env.NewPeer("session", "stranger")
+			g := f.upload(t, owner, "provider-loss")
+			f.mu.Lock()
+			heads := f.calls["HEAD"]
+			if failure == "missing" {
+				clear(f.objects)
+			} else {
+				f.headFailure = true
+			}
+			f.mu.Unlock()
+			for _, route := range []string{"/download?blob_id=", "?b="} {
+				resp, raw := f.request(t, stranger, "GET", "/v1/blobs/"+g.SHA256+route+g.BlobID, nil, "")
+				if resp.StatusCode != 403 {
+					t.Fatal("provider failure leaked to unauthorized peer")
+				}
+				requireCode(t, raw, "forbidden")
+			}
+			f.mu.Lock()
+			unauthorizedHeads := f.calls["HEAD"]
+			f.mu.Unlock()
+			if unauthorizedHeads != heads {
+				t.Fatal("unauthorized download probed provider")
+			}
+			for _, route := range []string{"/download?blob_id=", "?b="} {
+				resp, raw := f.request(t, owner, "GET", "/v1/blobs/"+g.SHA256+route+g.BlobID, nil, "")
+				if resp.StatusCode != 503 {
+					t.Errorf("provider %s grant = %d, want 503", failure, resp.StatusCode)
+				}
+				requireCode(t, raw, "blob_unavailable")
+				if resp.Header.Get("Location") != "" {
+					t.Error("provider failure returned redirect capability")
+				}
+				for _, marker := range []string{`"url"`, "X-Amz-", "FAKEACCESS", "fake-signing-secret", fakeAccount} {
+					if strings.Contains(string(raw), marker) {
+						t.Error("provider failure leaked capability or provider detail")
+					}
+				}
+			}
+			var issued int
+			if err := f.env.Hub.DB.QueryRow(`SELECT count(*) FROM blob_usage_events WHERE blob_id=? AND kind='download_grant_issued'`, g.BlobID).Scan(&issued); err != nil {
+				t.Fatal("usage lookup failed")
+			}
+			f.mu.Lock()
+			gets, probed := f.calls["GET"], f.calls["HEAD"] > heads
+			f.mu.Unlock()
+			if issued != 0 || gets != 0 || !probed {
+				t.Errorf("provider failure issued=%d byte GETs=%d probed=%t", issued, gets, probed)
+			}
+		})
+	}
+}
+
+func TestR2HTTPDownloadRechecksEligibilityAfterProviderWait(t *testing.T) {
+	for _, change := range []string{"disable", "revoke", "purge", "expire"} {
+		t.Run(change, func(t *testing.T) {
+			f := newR2HTTP(t)
+			peer, owner := f.env.NewPeer("session", "owner")
+			g := f.upload(t, owner, "download-wait")
+			var changed atomic.Bool
+			f.mu.Lock()
+			f.headWait = func() {
+				if changed.Swap(true) {
+					return
+				}
+				var err error
+				switch change {
+				case "disable":
+					_, err = f.env.Hub.DB.Exec(`UPDATE peers SET disabled=1 WHERE peer_id=?`, peer)
+				case "revoke":
+					_, err = f.env.Hub.DB.Exec(`UPDATE credentials SET revoked_at=? WHERE subject_id=?`, f.env.Now.Now().Format(time.RFC3339Nano), peer)
+				case "purge":
+					err = f.env.Hub.PurgeBlob(context.Background(), g.SHA256)
+				case "expire":
+					f.env.Now.Advance(24 * time.Hour)
+				}
+				if err != nil {
+					t.Error("provider-wait state change failed")
+				}
+			}
+			// A simultaneous outage must not hide the authoritative post-wait
+			// authorization/expiry/purge result behind provider availability.
+			f.headFailure = true
+			f.mu.Unlock()
+			resp, raw := f.request(t, owner, "GET", "/v1/blobs/"+g.SHA256+"/download?blob_id="+g.BlobID, nil, "")
+			code, status := "forbidden", 403
+			if change == "expire" {
+				code, status = "blob_expired", 410
+			} else if change == "purge" {
+				code, status = "blob_purged", 410
+			}
+			if resp.StatusCode != status || !changed.Load() {
+				t.Errorf("post-wait %s = %d, want %d; wait reached=%t", change, resp.StatusCode, status, changed.Load())
+			}
+			requireCode(t, raw, code)
+			if strings.Contains(string(raw), `"url"`) || resp.Header.Get("Location") != "" {
+				t.Error("eligibility change returned capability")
+			}
+			var issued int
+			if err := f.env.Hub.DB.QueryRow(`SELECT count(*) FROM blob_usage_events WHERE blob_id=? AND kind='download_grant_issued'`, g.BlobID).Scan(&issued); err != nil {
+				t.Fatal("usage lookup failed")
+			}
+			f.mu.Lock()
+			gets := f.calls["GET"]
+			f.mu.Unlock()
+			if issued != 0 || gets != 0 {
+				t.Errorf("eligibility change issued=%d, byte GETs=%d", issued, gets)
+			}
+		})
 	}
 }

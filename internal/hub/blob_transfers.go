@@ -243,16 +243,16 @@ func (h *Hub) BlobDownload(ctx context.Context, c *auth.Caller, token, sha, id s
 	if h.BlobSignDownload == nil {
 		return blobwire.DownloadGrant{}, E(503, "blob_unavailable", "blob unavailable")
 	}
-	request, err := h.BlobSignDownload(ctx, o)
-	if err != nil {
-		return blobwire.DownloadGrant{}, h.blobTransferError(err)
-	}
+	request, signErr := h.BlobSignDownload(ctx, o)
 	o, _, err = h.authorizeBlobObject(ctx, c, token, sha, id, false)
 	if err != nil {
 		return blobwire.DownloadGrant{}, err
 	}
 	if err = h.blobObjectReady(ctx, o); err != nil {
 		return blobwire.DownloadGrant{}, err
+	}
+	if signErr != nil {
+		return blobwire.DownloadGrant{}, h.blobTransferError(signErr)
 	}
 	deadline, err := time.Parse(time.RFC3339Nano, request.ExpiresAt)
 	if err != nil || request.Method != "GET" || request.URL == "" || !h.Now().Before(deadline) || deadline.After(h.Now().Add(blob.R2DownloadMaxTTL)) || o.ExpiresAt != nil && deadline.After(*o.ExpiresAt) {
@@ -270,11 +270,11 @@ func (h *Hub) BlobDownload(ctx context.Context, c *auth.Caller, token, sha, id s
 	return blobwire.DownloadGrant{BlobID: id, SHA256: sha, SHA256Verified: &verified, Integrity: &blobwire.Integrity{Algorithm: "sha256", Value: sha, Verified: verified}, Size: o.Size, URL: request.URL, Method: request.Method, ExpiresAt: request.ExpiresAt, ObjectExpiresAt: expiry, MediaType: o.MediaType, RetentionClass: o.RetentionClass}, nil
 }
 
-// blobIDRequired maps failed hash-only lookups uniformly for authenticated R2
+// blobIDRequired maps failed hash-only lookups uniformly for authenticated remote-transfer
 // callers, without querying remote metadata or changing successful local reads.
 func (h *Hub) blobIDRequired(ctx context.Context, c *auth.Caller, err error) bool {
 	var apiErr *APIError
-	return h.Cfg.BlobBackend == "r2" && c != nil && h.callerActive(ctx, h.DB, *c) && errors.As(err, &apiErr) && (apiErr.Code == "forbidden" || apiErr.Code == "unknown_blob")
+	return h.Blobs.Transfers != nil && c != nil && h.callerActive(ctx, h.DB, *c) && errors.As(err, &apiErr) && (apiErr.Code == "forbidden" || apiErr.Code == "unknown_blob")
 }
 
 func (h *Hub) BlobStatus(ctx context.Context, c auth.Caller, sha, id string) (blobwire.State, error) {

@@ -86,7 +86,7 @@ func (h *Hub) initR2() error {
 	var transfers *blob.Transfers
 	client := r.Client
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = h.EgressPolicy().Client(30 * time.Second)
 	}
 	objects, err := blob.NewR2Objects(blob.R2ObjectsConfig{Endpoint: r.Endpoint, Bucket: r.Bucket, Namespace: ns, AccessID: r.AccessKeyID, Secret: r.SecretAccessKey, Client: client, Now: h.Now, Lookup: func(ctx context.Context, key string) (blob.R2Object, error) { return transfers.Lookup(ctx, key) }})
 	if err != nil {
@@ -123,6 +123,11 @@ func (h *Hub) initR2() error {
 	}
 	h.Blobs.Transfers = transfers
 	h.BlobSignDownload = func(ctx context.Context, o blob.R2Object) (blobwire.Request, error) {
+		// Probe metadata only, after the common wrapper admits the mint. Missing
+		// provider bytes must not produce a capability for a completed DB row.
+		if _, err := objects.Head(ctx, o.ObjectKey); err != nil {
+			return blobwire.Request{}, blob.ErrR2Unavailable
+		}
 		return objects.Download(ctx, o.ObjectKey, h.Now(), o.ExpiresAt)
 	}
 	return nil
