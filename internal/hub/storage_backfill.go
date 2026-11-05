@@ -402,10 +402,11 @@ func (h *Hub) BackfillDeliverySlice(ctx context.Context, limits BackfillLimits) 
 		if json.Unmarshal(r.data, &wire) != nil || wire.Message.ID == "" {
 			reason = "invalid_shape"
 		}
-		// Use the existing deliveries_msg index, rather than scanning the queue
-		// once per legacy event. Check before EncodeDelivery inserts a snapshot.
+		// The event sequence is authoritative even if embedded ids disagree.
+		// Use the event-sequence index and check every linked hash before
+		// EncodeDelivery can insert a snapshot.
 		if reason == "" {
-			hashes, e := tx.QueryContext(ctx, `SELECT body_sha256 FROM deliveries WHERE msg_id=? AND event_seq=?`, wire.Message.ID, r.seq)
+			hashes, e := tx.QueryContext(ctx, `SELECT body_sha256 FROM deliveries WHERE event_seq=?`, r.seq)
 			if e != nil {
 				return out, e
 			}

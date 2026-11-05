@@ -3,6 +3,7 @@ package hub_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -11,11 +12,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/eventpayload"
 	"github.com/XertroV/vecnet/internal/hub"
@@ -310,6 +311,66 @@ func TestBackfillLegacySnapshotsAndDurableExceptions(t *testing.T) {
 	}
 	assertBackfillBytes(t, h, fs)
 }
+
+func TestBackfillDeliveryHashLookupUsesEventSeqIndex(t *testing.T) {
+	env, _ := backfillEnv(t)
+	rows, err := env.Hub.DB.Query(`EXPLAIN QUERY PLAN SELECT body_sha256 FROM deliveries WHERE event_seq=?`, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	indexed := false
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		t.Log(detail)
+		indexed = indexed || (strings.Contains(detail, "SEARCH deliveries USING COVERING INDEX") && strings.Contains(detail, "(event_seq=?)"))
+	}
+	if rows.Err() != nil || !indexed {
+		t.Fatal("authoritative hash lookup scans the delivery queue")
+	}
+}
+
+// Neither embedded id is authoritative for locating an existing delivery.
+func TestBackfillHashMismatchWithDisagreeingEmbeddedIDs(t *testing.T) {
+	env, fs := backfillEnv(t)
+	h := env.Hub
+	original := strings.ReplaceAll(fs[0].Data, "msg_00000000000000000000000001", "msg_00000000000000000000000099")
+	original = strings.ReplaceAll(original, "dly_00000000000000000000000001", "dly_00000000000000000000000099")
+	if original == fs[0].Data || strings.Contains(original, "msg_00000000000000000000000001") || strings.Contains(original, "dly_00000000000000000000000001") {
+		t.Fatal("synthetic embedded ids did not change")
+	}
+	guardExec(t, env, `UPDATE events SET data=? WHERE seq=1`, original)
+	p := slice(t, h, hub.BackfillLimits{Rows: 1})
+	if p.Converted != 0 || p.Failed != 1 || p.LastSeq != 1 {
+		t.Fatalf("linked hash mismatch bypassed: converted=%d failed=%d last_seq=%d", p.Converted, p.Failed, p.LastSeq)
+	}
+	var data, format, hash string
+	if err := h.DB.QueryRow(`SELECT data,payload_format FROM events WHERE seq=1`).Scan(&data, &format); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.DB.QueryRow(`SELECT body_sha256 FROM deliveries WHERE event_seq=1`).Scan(&hash); err != nil {
+		t.Fatal(err)
+	}
+	if data != original || format != eventpayload.Inline || hash != fs[0].SHA256 {
+		t.Fatal("exception changed original bytes, format or delivery hash")
+	}
+	if backfillCount(t, h, `SELECT count(*) FROM delivery_backfill_exceptions WHERE seq=1 AND reason='delivery_hash_mismatch'`) != 1 || backfillCount(t, h, `SELECT count(*) FROM event_message_snapshots`) != 0 {
+		t.Fatal("hash mismatch lacks durable exception or created a snapshot")
+	}
+	restarted, err := hub.New(h.DB, h.Cfg, env.Now.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := restarted.BackfillDeliveryStatus(context.Background(), auth.Caller{Kind: "operator"})
+	if err != nil || status.LastSeq != 1 || status.TotalFailed != 1 || len(status.Exceptions) != 1 || status.Exceptions[0].Reason != "delivery_hash_mismatch" {
+		t.Fatal("hash exception did not survive restart")
+	}
+}
+
 func TestBackfillBudgetsDryRunAndCancellation(t *testing.T) {
 	t.Run("rows", func(t *testing.T) {
 		env, _ := backfillEnv(t)
@@ -320,9 +381,18 @@ func TestBackfillBudgetsDryRunAndCancellation(t *testing.T) {
 	})
 	t.Run("bytes", func(t *testing.T) {
 		env, fs := backfillEnv(t)
-		p := slice(t, env.Hub, hub.BackfillLimits{Bytes: int64(len(fs[0].Data))})
-		if p.Processed != 1 || p.SourceBytes != int64(len(fs[0].Data)) {
-			t.Fatalf("byte budget: %+v", p)
+		// Leave space after the first row, but too little for the second.
+		limit := int64(len(fs[0].Data) + len(fs[1].Data)/2)
+		p := slice(t, env.Hub, hub.BackfillLimits{Bytes: limit})
+		if p.Processed != 1 || p.SourceBytes != int64(len(fs[0].Data)) || p.LastSeq != 1 || p.Done {
+			t.Fatalf("cumulative byte budget: %+v", p)
+		}
+		if backfillCount(t, env.Hub, `SELECT count(*) FROM events WHERE seq=2 AND payload_format='inline'`) != 1 {
+			t.Fatal("overflow row converted in first slice")
+		}
+		next := slice(t, env.Hub, hub.BackfillLimits{Rows: 1, Bytes: limit})
+		if next.Converted != 1 || len(next.Seqs) != 1 || next.Seqs[0] != 2 || next.SourceBytes != int64(len(fs[1].Data)) {
+			t.Fatal("deferred overflow row was not converted next")
 		}
 	})
 	t.Run("oversize", func(t *testing.T) {
@@ -424,6 +494,32 @@ func TestBackfillCapacityWALLocksAndFull(t *testing.T) {
 			}
 		})
 	}
+	t.Run("configured_byte_reserve", func(t *testing.T) {
+		env, _ := backfillEnv(t)
+		h := env.Hub
+		const wal = int64(3 << 20)
+		const required = int64(128<<20) + wal
+		available := required - 1
+		h.Cfg.BackfillCapacity = func(context.Context) (hub.BackfillCapacity, error) {
+			return hub.BackfillCapacity{AvailableBytes: available, WALBytes: wal}, nil
+		}
+		limits := hub.BackfillLimits{Rows: 1, Bytes: 32 << 20}
+		for _, capacity := range []int64{required - 1, required} {
+			available = capacity
+			p := slice(t, h, limits)
+			if p.RequiredHeadroomBytes != required || p.PausedReason != "wal_pressure" || p.Processed != 0 {
+				t.Fatalf("configured reserve did not pause at capacity=%d: %+v", capacity, p)
+			}
+			if backfillCount(t, h, `SELECT count(*) FROM meta WHERE key='delivery_backfill_v1'`) != 0 || backfillCount(t, h, `SELECT count(*) FROM events WHERE payload_format!='inline'`) != 0 {
+				t.Fatal("capacity pause persisted work")
+			}
+		}
+		available = required + 1
+		p := slice(t, h, limits)
+		if p.RequiredHeadroomBytes != required || p.PausedReason != "" || p.Converted != 1 || p.LastSeq != 1 {
+			t.Fatalf("capacity relief did not resume above threshold: %+v", p)
+		}
+	})
 	t.Run("writer_lock", func(t *testing.T) {
 		env, _ := backfillEnv(t)
 		tx, err := env.Hub.DB.BeginTx(context.Background(), nil)
@@ -462,12 +558,32 @@ func TestBackfillCapacityWALLocksAndFull(t *testing.T) {
 		}
 	})
 }
-func TestBackfillBackupRestoreAndConcurrentTraffic(t *testing.T) {
+func TestBackfillBackupRestoresSnapshotsAndCheckpoint(t *testing.T) {
 	env, fs := backfillEnv(t)
 	h := env.Hub
+	// Force the first committed conversion to depend on a legacy snapshot.
+	guardExec(t, env, `UPDATE messages SET body=json_set(body,'$.sender_info.name','canonical changed') WHERE msg_id='msg_00000000000000000000000001'`)
 	first := slice(t, h, hub.BackfillLimits{Rows: 1})
+	if first.Converted != 1 || first.LastSeq != 1 || first.Done {
+		t.Fatal("backup setup did not commit one unfinished slice")
+	}
+	var snapshotID, snapshotBody, checkpoint string
+	if err := h.DB.QueryRow(`SELECT s.snapshot_id,s.body FROM events e JOIN event_message_snapshots s ON s.snapshot_id=e.snapshot_id WHERE e.seq=1`).Scan(&snapshotID, &snapshotBody); err != nil {
+		t.Fatal("first conversion did not require a snapshot")
+	}
+	var wire struct{ Message json.RawMessage }
+	if err := json.Unmarshal([]byte(fs[0].Data), &wire); err != nil || !bytes.Equal(wire.Message, []byte(snapshotBody)) {
+		t.Fatal("snapshot does not contain the exact legacy Message bytes")
+	}
+	if err := h.DB.QueryRow(`SELECT value FROM meta WHERE key='delivery_backfill_v1'`).Scan(&checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	// This row must survive restore but remain outside the captured scan. A
+	// lost checkpoint would recapture a different high-water and convert it.
+	guardExec(t, env, `INSERT INTO events(owner,type,at,data) VALUES (?,'delivery',?,?)`, guardB, guardAt, fs[0].Data)
 	backup := filepath.Join(t.TempDir(), "backup.db")
-	// Quiesce writers, checkpoint, and copy a consistent disposable database.
+	// There are no concurrent writers in this test: checkpoint then copy the
+	// quiesced main database, including committed snapshots and metadata.
 	if _, err := h.DB.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
 		t.Fatal(err)
 	}
@@ -489,54 +605,164 @@ func TestBackfillBackupRestoreAndConcurrentTraffic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertBackfillBytes(t, restored, fs)
-	p := finishBackfill(t, restored)
-	if p.HighSeq != first.HighSeq {
-		t.Fatal("backup high-water changed")
+	var restoredCheckpoint, restoredSnapshot string
+	if err := db.QueryRow(`SELECT value FROM meta WHERE key='delivery_backfill_v1'`).Scan(&restoredCheckpoint); err != nil || restoredCheckpoint != checkpoint {
+		t.Fatal("backup did not restore the exact committed checkpoint")
+	}
+	status, err := restored.BackfillDeliveryStatus(context.Background(), auth.Caller{Kind: "operator"})
+	if err != nil || status.HighSeq != first.HighSeq || status.LastSeq != first.LastSeq || status.TotalConverted != 1 {
+		t.Fatal("restored progress differs before resumption")
+	}
+	if err := db.QueryRow(`SELECT body FROM event_message_snapshots WHERE snapshot_id=?`, snapshotID).Scan(&restoredSnapshot); err != nil || restoredSnapshot != snapshotBody {
+		t.Fatal("backup did not restore snapshot bytes")
 	}
 	assertBackfillBytes(t, restored, fs)
-	h.Cfg.DeliveryReferences = true
-	var wg sync.WaitGroup
-	errs := make(chan error, 2)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		for range 10 {
-			if _, err := h.Log.Read(context.Background(), []string{guardB}, eventlog.Cursor{Epoch: 1}, 100); err != nil {
-				errs <- err
-				return
-			}
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		for i := range 10 {
-			if _, _, err := h.Send(context.Background(), auth.Caller{Kind: "peer", PeerID: guardA, PrincipalID: guardPrn}, []byte(fmt.Sprintf(`{"idempotency_key":"backfill-concurrent-%d","recipients":["%s"],"priority":"hold","content":{"text":"synthetic concurrent send"}}`, i, guardB)), "http_send"); err != nil {
-				errs <- err
-				return
-			}
-		}
-	}()
-	var worst time.Duration
+	remaining := backfillCount(t, restored, `SELECT count(*) FROM events WHERE type='delivery' AND payload_format='inline' AND seq<=`+fmt.Sprint(first.HighSeq))
+	converted := 0
 	for range 100 {
-		start := time.Now()
-		p = slice(t, h, hub.BackfillLimits{Rows: 2})
-		if d := time.Since(start); d > worst {
-			worst = d
+		p := slice(t, restored, hub.BackfillLimits{Rows: 2})
+		for _, seq := range p.Seqs {
+			if seq <= first.LastSeq || seq > first.HighSeq {
+				t.Fatal("resume processed a row outside the persisted checkpoint")
+			}
+		}
+		converted += p.Converted
+		if p.HighSeq != first.HighSeq || p.Failed != 0 || p.Skipped != 0 {
+			t.Fatal("restore changed high-water or introduced exceptions")
 		}
 		if p.Done {
 			break
 		}
 	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		t.Fatal(err)
+	status, err = restored.BackfillDeliveryStatus(context.Background(), auth.Caller{Kind: "operator"})
+	if err != nil || !status.Done || status.LastSeq != first.HighSeq || converted != remaining || status.TotalConverted != int64(remaining+1) {
+		t.Fatal("resume did not convert exactly the remaining captured rows")
 	}
-	if !p.Done || p.HighSeq != first.HighSeq {
-		t.Fatal("concurrent writes moved high-water")
+	var postCapture string
+	if err := db.QueryRow(`SELECT data FROM events WHERE seq=? AND payload_format='inline'`, len(fs)+1).Scan(&postCapture); err != nil || postCapture != fs[0].Data {
+		t.Fatal("restore/resume changed post-capture row")
+	}
+	assertBackfillBytes(t, restored, fs)
+}
+
+func TestBackfillConcurrentTrafficBetweenUnfinishedSlices(t *testing.T) {
+	env, fs := backfillEnv(t)
+	h := env.Hub
+	h.Cfg.DeliveryReferences = true
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	expected := make(map[string]envelope.Event)
+	owners := []string{}
+	seenOwner := make(map[string]bool)
+	for i, f := range fs {
+		cursor := fmt.Sprintf("e1.%d", i+1)
+		expected[cursor] = envelope.Event{Cursor: cursor, Type: f.Type, At: f.At, Data: json.RawMessage(f.Data)}
+		if !seenOwner[f.Owner] {
+			owners = append(owners, f.Owner)
+			seenOwner[f.Owner] = true
+		}
+	}
+	type sentDelivery struct {
+		seq  int64
+		hash string
+	}
+	var sent []sentDelivery
+	var worst time.Duration
+	runSlice := func() hub.BackfillProgress {
+		start := time.Now()
+		p := slice(t, h, hub.BackfillLimits{Rows: 1})
+		worst = max(worst, time.Since(start))
+		return p
+	}
+	first := runSlice()
+	p := first
+	trafficRounds := 0
+	for !p.Done && trafficRounds < 100 {
+		// Acknowledge sends and a complete read before allowing the next
+		// conversion slice. Scheduling cannot defer traffic until completion.
+		type sendResult struct {
+			response *hub.SendResponse
+			err      error
+		}
+		sendDone := make(chan sendResult, 1)
+		go func(round int) {
+			response, _, err := h.Send(ctx, auth.Caller{Kind: "peer", PeerID: guardA, PrincipalID: guardPrn}, []byte(fmt.Sprintf(`{"idempotency_key":"backfill-concurrent-%d","recipients":["%s"],"priority":"hold","content":{"text":"synthetic concurrent send"}}`, round, guardB)), "http_send")
+			sendDone <- sendResult{response, err}
+		}(trafficRounds)
+		result := <-sendDone
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.response == nil || len(result.response.Deliveries) != 1 {
+			t.Fatal("send returned no delivery")
+		}
+		delivery := result.response.Deliveries[0]
+		var seq int64
+		var hash, at string
+		var stored eventpayload.StoredPayload
+		if err := h.DB.QueryRow(`SELECT e.seq,e.at,e.payload_format,e.data,coalesce(e.msg_id,''),coalesce(e.snapshot_id,''),d.body_sha256 FROM deliveries d JOIN events e ON e.seq=d.event_seq WHERE d.dly_id=?`, delivery.DeliveryID).Scan(&seq, &at, &stored.Format, &stored.Data, &stored.MsgID, &stored.SnapshotID, &hash); err != nil {
+			t.Fatal(err)
+		}
+		if seq <= first.HighSeq || stored.Format != eventpayload.DeliveryRefV1 || stored.MsgID != result.response.MessageID || delivery.Recipient != guardB {
+			t.Fatal("concurrent send did not create a reference above captured high-water")
+		}
+		body, err := eventpayload.HydrateBatch(ctx, h.DB, []eventpayload.StoredPayload{stored})
+		if err != nil || fmt.Sprintf("%x", sha256.Sum256(body[0])) != hash {
+			t.Fatal("concurrent send hash differs from exact delivery bytes")
+		}
+		cursor := fmt.Sprintf("e1.%d", seq)
+		expected[cursor] = envelope.Event{Cursor: cursor, Type: "delivery", At: at, Data: body[0]}
+		sent = append(sent, sentDelivery{seq, hash})
+		type readResult struct {
+			events []envelope.Event
+			err    error
+		}
+		readDone := make(chan readResult, 1)
+		go func() {
+			events, err := h.Log.Read(ctx, owners, eventlog.Cursor{Epoch: 1}, 100)
+			readDone <- readResult{events, err}
+		}()
+		page := <-readDone
+		if page.err != nil {
+			t.Fatal(page.err)
+		}
+		if len(page.events) != len(expected) {
+			t.Fatalf("incomplete traffic read: events=%d expected=%d", len(page.events), len(expected))
+		}
+		var previous int64
+		for _, event := range page.events {
+			want, ok := expected[event.Cursor]
+			cur, err := eventlog.ParseCursor(event.Cursor)
+			if err != nil || cur.Seq <= previous || !ok || event.Type != want.Type || event.At != want.At || !bytes.Equal(event.Data, want.Data) {
+				t.Fatal("traffic read changed sequence, metadata or exact bytes")
+			}
+			previous = cur.Seq
+		}
+		trafficRounds++
+		p = runSlice()
+		if p.HighSeq != first.HighSeq {
+			t.Fatal("traffic extended captured high-water")
+		}
+	}
+	if !p.Done || trafficRounds < 2 {
+		t.Fatal("traffic did not interleave with unfinished slices")
 	}
 	assertBackfillBytes(t, h, fs)
+	for i, f := range fs {
+		if f.Type != "delivery" {
+			continue
+		}
+		var hash string
+		if err := h.DB.QueryRow(`SELECT body_sha256 FROM deliveries WHERE event_seq=?`, i+1).Scan(&hash); err != nil || hash != f.SHA256 {
+			t.Fatalf("original delivery sequence/hash changed at seq=%d", i+1)
+		}
+	}
+	for _, d := range sent {
+		var hash, format string
+		if err := h.DB.QueryRow(`SELECT d.body_sha256,e.payload_format FROM deliveries d JOIN events e ON e.seq=d.event_seq WHERE e.seq=?`, d.seq).Scan(&hash, &format); err != nil || hash != d.hash || format != eventpayload.DeliveryRefV1 {
+			t.Fatalf("concurrent delivery sequence/hash changed at seq=%d", d.seq)
+		}
+	}
 	var integrity string
 	if err := h.DB.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
 		t.Fatal("integrity failed")
@@ -549,7 +775,7 @@ func TestBackfillBackupRestoreAndConcurrentTraffic(t *testing.T) {
 	if rows.Next() || rows.Err() != nil {
 		t.Fatal("foreign key violation")
 	}
-	t.Logf("worst_slice_duration=%s required_headroom_bytes=%d", worst, p.RequiredHeadroomBytes)
+	t.Logf("traffic_rounds=%d worst_slice_duration=%s required_headroom_bytes=%d", trafficRounds, worst, p.RequiredHeadroomBytes)
 }
 func TestBackfillOperatorStatusAndTicker(t *testing.T) {
 	env, _ := backfillEnv(t)
