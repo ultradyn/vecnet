@@ -4,7 +4,7 @@ _Researched 2026-11-06. Docs only. No hub was contacted, no token was minted, an
 
 **Question.** What does vecnet already treat as an account, and how do comparable systems do a browser guest link, a scoped token, and Office 365 sign-in on a small Go server?
 
-**Verdict.** Vecnet has one operator credential, three credential kinds, and per-peer send scopes. A send scope does not hide the directory, and nothing in the hub is a relying party for a human identity provider. Guest access, team-scoped accounts, and Office 365 sign-in are new. The choices that follow are in [`docs/plans/2026-11-06-accounts-scope.md`](../plans/2026-11-06-accounts-scope.md), each as an option for the chief of staff. This note does not pick them.
+**Verdict.** Vecnet has one operator credential, three credential kinds, and per-peer send scopes. A send scope does not hide the directory, and nothing in the hub is a relying party for a human identity provider. Guest access, team-scoped accounts, and Office 365 sign-in are new. The choices are in [`docs/plans/2026-11-06-accounts-scope.md`](../plans/2026-11-06-accounts-scope.md). CoS recorded D1–D8 there on 2026-11-06; amendments 1–6 are in that plan's tasks. This note does not pick them and adds no further research.
 
 Labels: **SOURCE** = read in this checkout at `2574ec4ce7fe0cade2ea4217693e6695fb230191`. **DOCUMENTED** = a public page fetched 2026-11-06, not exercised.
 
