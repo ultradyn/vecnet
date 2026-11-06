@@ -39,7 +39,7 @@ async function setup(t: TestContext, opts: {attach?: boolean; kind?: SessionStat
   };
   let delivered=0, activities=0, ended=0;
   const blobs: Array<{bytes:Uint8Array;mediaType:string}> = [], fetched:string[]=[];
-  const deps: LaneDeps = {ledger,outbox,jobs:createJobReporter({ledger,outbox}),dir:{name:id=>id,isOperator:id=>id==='op',operatorPeerId:()=> 'op'},hub:{async fetchBlob(url,options){fetched.push(url);assert.equal(options.maxBytes,256*1024);return Buffer.from('full spilled text');},async putBlob(bytes,mediaType){blobs.push({bytes,mediaType});return {sha256:'a'.repeat(64),size:bytes.length};}},clock,log,self:'self',caps:{...caps,...opts.caps},async deliver(){delivered++;return {pushed:true};},onActivity(){activities++;},onEnded(){ended++;}};
+  const deps: LaneDeps = {ledger,outbox,jobs:createJobReporter({ledger,outbox}),dir:{name:id=>id,isOperator:id=>id==='op',operatorPeerId:()=> 'op'},hub:{async fetchBlob(locator,options){fetched.push(typeof locator==='string'?locator:locator.blob_id);assert.equal(options.maxBytes,256*1024);return Buffer.from('full spilled text');},async putBlob(bytes,mediaType){blobs.push({bytes,mediaType});return {sha256:'a'.repeat(64),size:bytes.length};}},clock,log,self:'self',caps:{...caps,...opts.caps},async deliver(){delivered++;return {pushed:true};},onActivity(){activities++;},onEnded(){ended++;}};
   const lane=createLane(job,deps);
   if(opts.attach!==false)lane.attach(handle);
   t.after(async()=>{await lane.stop();ledger.close();});
@@ -89,6 +89,34 @@ test('a crash between marking sending and send: attach resends the same batch wi
   const ids=ds.map(d=>d.delivery_id),batchId=createHash('sha256').update([...ids].sort().join('\n')).digest('hex').slice(0,24);
   s.ledger.markInputs(ids,{state:'sending',mode:'start',batchId,turnSeq:0});s.lane.attach(s.handle);await tick();
   assert.equal(s.sends.length,1);assert.deepEqual(s.sends[0].input.items.map(i=>i.deliveryId),ids);assert.equal((s.sends[0].input as TurnInput & { batchId?: string }).batchId,batchId);assert.deepEqual(s.sends[0].batchIds,[batchId,batchId]);assert.equal(s.ledger.inputs('job_one',['sent']).length,2);
+});
+test('a direct upload reference is attached without a transfer URL',async t=>{
+  const s=await setup(t);
+  s.deps.hub.putBlob=async(bytes,mediaType)=>{s.blobs.push({bytes,mediaType});return {sha256:'c'.repeat(64),size:bytes.length,blob_id:'blo_00000000000000000000000001',retention_class:'keep',expires_at:null,sha256_verified:true,integrity:{algorithm:'sha256',value:'c'.repeat(64),verified:true}};};
+  await s.emit(finished('direct','x'.repeat(100*1024)));
+  const attachment=s.replies()[0].attachments?.[0];
+  assert.equal(attachment?.blob_id,'blo_00000000000000000000000001');
+  assert.equal(attachment?.sha256_verified,true);
+  assert.equal(attachment?.integrity?.verified,true);
+  assert.equal(attachment?.expires_at,null);
+  assert.equal('url' in (attachment ?? {}), false);
+  assert.equal(attachment?.blob_url, undefined);
+});
+test('expired spilled text is a nonfatal status and origin_url is never fetched',async t=>{
+  const s=await setup(t);
+  const {HubError}=await import('../../hub-client/src/errors.ts');
+  s.deps.hub.fetchBlob=async()=>{throw new HubError(410,'blob_expired');};
+  const expired=s.message('preview');
+  expired.message.content.truncated=true;
+  expired.message.metadata['vecnet.spilled']=true;
+  expired.message.attachments=[{name:'message.md',sha256:'b'.repeat(64),size:40,media_type:'text/markdown',blob_id:'blo_00000000000000000000000001'}];
+  await s.lane.handleMessage(expired);
+  assert.match(s.sends[0].input.items[0].text,/\[attachment blob_expired\]/);
+  const foreign=s.message('link');
+  foreign.message.attachments=[{name:'remote.bin',sha256:'d'.repeat(64),size:4,media_type:'application/octet-stream',origin_url:'http://169.254.169.254/latest'}];
+  s.fetched.length=0;
+  await s.lane.handleMessage(foreign);
+  assert.deepEqual(s.fetched,[]);
 });
 test('spilled inbound text is rehydrated before relay',async t=>{
   const s=await setup(t),d=s.message('preview');d.message.content.truncated=true;d.message.metadata['vecnet.spilled']=true;d.message.attachments=[{name:'message.md',sha256:'b'.repeat(64),size:40,media_type:'text/markdown',blob_url:'https://hub/blob?t=secret'}];await s.lane.handleMessage(d);assert.deepEqual(s.fetched,['https://hub/blob?t=secret']);assert.match(s.sends[0].input.items[0].text,/> full spilled text/);assert.ok(!s.sends[0].input.items[0].text.includes('preview'));

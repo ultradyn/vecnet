@@ -372,12 +372,12 @@ func TestToolsListNamesAndHints(t *testing.T) {
 	}
 
 	want := []string{
-		"vecnet_ack", "vecnet_blob_get", "vecnet_blob_put", "vecnet_clear_avatar", "vecnet_group_add", "vecnet_group_create", "vecnet_groups", "vecnet_guide",
+		"vecnet_ack", "vecnet_blob_get", "vecnet_blob_put", "vecnet_blob_status", "vecnet_clear_avatar", "vecnet_group_add", "vecnet_group_create", "vecnet_groups", "vecnet_guide",
 		"vecnet_inbox", "vecnet_peer_create", "vecnet_peer_set_disabled", "vecnet_peers", "vecnet_presence", "vecnet_presence_subscribe", "vecnet_react", "vecnet_receipt",
 		"vecnet_reply", "vecnet_send", "vecnet_set_avatar", "vecnet_subscriptions", "vecnet_thread", "vecnet_threads", "vecnet_whoami",
 	}
 	var got []string
-	readOnly := map[string]bool{"vecnet_guide": true, "vecnet_blob_get": true, "vecnet_groups": true, "vecnet_inbox": true, "vecnet_subscriptions": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true, "vecnet_whoami": true}
+	readOnly := map[string]bool{"vecnet_guide": true, "vecnet_blob_get": true, "vecnet_blob_status": true, "vecnet_groups": true, "vecnet_inbox": true, "vecnet_subscriptions": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true, "vecnet_whoami": true}
 	for _, tool := range tools {
 		got = append(got, tool.Name)
 		if tool.Annotations == nil {
@@ -2152,17 +2152,28 @@ func TestBlobToolsTakeNoURL(t *testing.T) {
 		if tool.InputSchema["additionalProperties"] != false {
 			t.Fatalf("%s input is not closed", name)
 		}
-		names := map[string]bool{}
-		propertyNames(tool.InputSchema, names)
-		if name != "vecnet_send" {
-			if tool.OutputSchema["additionalProperties"] != false {
-				t.Fatalf("%s output is not closed", name)
-			}
-			propertyNames(tool.OutputSchema, names)
+		if name != "vecnet_send" && tool.OutputSchema["additionalProperties"] != false {
+			t.Fatalf("%s output is not closed", name)
 		}
-		for key := range names {
+		inputNames := map[string]bool{}
+		propertyNames(tool.InputSchema, inputNames)
+		for key := range inputNames {
 			if strings.Contains(strings.ToLower(key), "url") {
-				t.Errorf("%s schema exposes %s", name, key)
+				t.Errorf("%s input schema exposes %s", name, key)
+			}
+		}
+		if name != "vecnet_send" {
+			outputNames := map[string]bool{}
+			propertyNames(tool.OutputSchema, outputNames)
+			for key := range outputNames {
+				if !strings.Contains(strings.ToLower(key), "url") {
+					continue
+				}
+				// Explicit put/get results are the only URL-bearing MCP schemas.
+				if (name == "vecnet_blob_put" || name == "vecnet_blob_get") && (key == "url" || key == "complete_url") {
+					continue
+				}
+				t.Errorf("%s output schema exposes %s", name, key)
 			}
 		}
 		if name == "vecnet_blob_put" {

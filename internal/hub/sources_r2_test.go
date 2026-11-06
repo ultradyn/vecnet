@@ -1,8 +1,12 @@
 package hub_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +68,46 @@ func TestIngestSourceR2DurableAndReplay(t *testing.T) {
 	}
 	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM durable_blob_payloads`).Scan(&count); err != nil || count != 0 {
 		t.Fatal("last durable ref GC leaked source bytes")
+	}
+}
+
+func TestIngestSourceDoesNotFetchOriginURL(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits++ }))
+	defer srv.Close()
+	env := testhub.Start(t)
+	enableR2Durable(t, env)
+	ctx := context.Background()
+	target, _ := env.NewPeer("session", "target")
+	src, _, _, err := env.Hub.AddSource(ctx, "github", "source", target, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(`{"origin_url":"` + srv.URL + `/secret","html_url":"` + srv.URL + `/issue"}`)
+	id, dropped, err := env.Hub.IngestSource(ctx, hub.SourceMessage{SrcID: src, ProviderDeliveryID: "origin", OriginThreadID: "issue/9", OriginEventID: "event/9", EventName: "issues.opened", Summary: "source text", Raw: raw, MediaType: "application/json"})
+	if err != nil || dropped || id == "" || hits != 0 {
+		t.Fatal("source ingress fetched an origin URL or failed")
+	}
+	var body string
+	if err := env.Hub.DB.QueryRow(`SELECT body FROM messages WHERE msg_id=?`, id).Scan(&body); err != nil {
+		t.Fatal(err)
+	}
+	var msg struct {
+		Metadata map[string]any `json:"metadata"`
+	}
+	if json.Unmarshal([]byte(body), &msg) != nil || msg.Metadata["vecnet.source_kind"] != "github" || msg.Metadata["vecnet.event"] != "issues.opened" {
+		t.Fatal("source provenance missing")
+	}
+	var count int
+	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM durable_blob_payloads WHERE purpose='source_raw'`).Scan(&count); err != nil || count != 1 {
+		t.Fatal("source raw was not durable")
+	}
+	if strings.Contains(body, "blob_url") || strings.Contains(body, "X-Amz-") {
+		t.Fatal("source message carried a transfer URL")
+	}
+	var stored []byte
+	if err := env.Hub.DB.QueryRow(`SELECT bytes FROM durable_blob_payloads WHERE purpose='source_raw'`).Scan(&stored); err != nil || !bytes.Equal(stored, raw) {
+		t.Fatal("durable source bytes changed")
 	}
 }
 

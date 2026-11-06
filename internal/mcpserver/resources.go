@@ -211,7 +211,10 @@ func (s *Server) resourcesRead(ctx context.Context, sess *Session, req *Request)
 	if err != nil {
 		return nil, err
 	}
-	// Like vecnet_inbox, an MCP read carries no blob_url token (§4.3).
+	// Like vecnet_inbox, an MCP read carries metadata and no transfer URL (§4.3).
+	if evs, err = s.Hub.ProjectEventBlobStates(ctx, sess.Principal.Caller, evs); err != nil {
+		return nil, err
+	}
 	if evs, err = withoutBlobURLs(evs); err != nil {
 		return nil, err
 	}

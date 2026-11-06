@@ -162,7 +162,11 @@ Handle events in order, at most 20 events per run:
   spill (metadata["vecnet.spilled"]==true), find the text/markdown attachment
   named message.md and read its sha256 with vecnet_blob_get, limit=4096,
   offset=0 then next_offset until null. Decode the base64 pages. Permit at
-  most 16 pages / 64 KiB total. If the spill is missing or ambiguous, data
+  most 16 pages / 64 KiB total. Remote file attachments carry blob_id and no
+  URL: call vecnet_blob_get with sha256 and blob_id, then fetch that
+  short-lived URL yourself. URLs are short-lived; call get again whenever you
+  need the file, as long as it hasn't expired. Never fetch origin_url.
+  If the spill is missing or ambiguous, data
   is still incomplete, an attachment is required but unsupported, or a
   bound is exceeded, stop without receipt or ack and ask Max to handle it.
 - For ordinary supported messages, decide the answer from the complete data.
