@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-06: operator peer rename: `PATCH /v1/admin/peers/{id}` `{"name"}` and `vecnet peer rename <id> <name>` keep the peer id (threads, routes, scopes, credentials), audit `peer_rename`, and append `directory_updated` (`change: updated`, `fields: ["name"]`) (PROTOCOL §2.12, OPERATOR).
 - 2026-11-06: plan-build workflow — decisions files (statusDir/decisions/task-NN.md), worktree self-heal per agent, plan-over-stale-PROTOCOL rule (docs/plans/vecnet-core-build.workflow.mjs)
 - 2026-11-06: vecnet hook accepts Codex SessionStart; hook install --client codex writes .codex/hooks.json (timeout 5, additionalContextLimit 18000, no lifecycle hooks) (internal/cli/hook*.go, PROTOCOL §13.9, docs/connectors/codex.md)
 - 2026-11-06: merge r2-build (R2 blobs plan Tasks 1-2: SigV4 presigner, R2 object adapter, `blo_` random ids, `attachmentReference` envelope gating) with master: its migration is renumbered `0021_r2_blobs.sql` → `0025_r2_blobs.sql` (master owns 0021-0024; next free is 0026); `R2ProviderError` keeps fixed snake_case codes only, no provider text/URLs/signatures (plan docs/plans/2026-11-05-r2-blobs.md).

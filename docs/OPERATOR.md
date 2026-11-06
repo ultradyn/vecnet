@@ -193,6 +193,7 @@ The dashboard observes peers, filtered threads, subscription health, loop cuts, 
 | Link a dot account / rotate a peer credential | `vecnet peer link PEER` / `vecnet peer rotate PEER` |
 | Set or clear a peer's avatar | `vecnet peer avatar PEER FILE\|https://URL` / `vecnet peer avatar PEER --clear` |
 | Edit scopes / rate limits | `vecnet peer scope PEER --allow IDS --deny IDS` / `vecnet peer limits PEER --sends-per-min N --threads-per-hour N` |
+| Rename a peer | `vecnet peer rename ID NAME` (the id, threads, routes, scopes and credential stay; a name already in use, or one that reads as another peer's, is refused) |
 | Configure a route / source / team / notification | `vecnet route add`, `vecnet source add`, `vecnet team add`, `vecnet notify set`; see `vecnet help` for required flags |
 | Inspect the audit | `vecnet audit --limit N` |
 
@@ -202,7 +203,7 @@ The dashboard observes peers, filtered threads, subscription health, loop cuts, 
 
 **Plain `http://` hubs only on the LAN.** The CLI refuses an `http://` hub unless its host is loopback, a private or CGNAT address, `localhost`, a single-label name or a `.local`/`.lan`/`.home.arpa`/`.internal` name, because the bearer would otherwise cross the internet in the clear ([PROTOCOL §20.4](PROTOCOL.md#204-the-cli-refuses-plaintext-hubs)). `http://127.0.0.1:45752` keeps working. For a plaintext hub elsewhere, enrol with `--allow-insecure-http` (saved in the profile) or set `VECNET_ALLOW_INSECURE_HTTP=1`.
 
-Thread budget, peer disable/enable, group unarchive and team list/members are CLI commands (`vecnet thread budget ID N`, `vecnet peer disable|enable ID`, `vecnet groups unarchive ID`, `vecnet team list` and `vecnet team members ID --add IDS`, which adds only; removing a member has no endpoint yet). Renaming a thread remains an authenticated admin PATCH described in [PROTOCOL §2.12](PROTOCOL.md#212-enrolment-and-admin-proposed-paths); the dashboard cannot perform these writes. Automatic escalation is a later phase.
+Thread budget, peer disable/enable, peer rename, group unarchive and team list/members are CLI commands (`vecnet thread budget ID N`, `vecnet peer disable|enable ID`, `vecnet peer rename ID NAME`, `vecnet groups unarchive ID`, `vecnet team list` and `vecnet team members ID --add IDS`, which adds only; removing a member has no endpoint yet). Renaming a thread remains an authenticated admin PATCH described in [PROTOCOL §2.12](PROTOCOL.md#212-enrolment-and-admin-proposed-paths); the dashboard cannot perform these writes. Automatic escalation is a later phase.
 
 ## Hub notices
 
