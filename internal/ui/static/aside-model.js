@@ -63,7 +63,12 @@ export function fileRows(files, refs = null, nowMs = Date.now()) {
     };
     if (!f.blob_id) return row;
     const ref = (refs && refs.get(f.blob_id)) || null;
-    const v = blobView({ sha256: f.sha256, ...(ref ? ref.att : {}), blob_id: f.blob_id, purged: !!f.purged }, ref ? ref.state : null, nowMs);
+    // No reference yet: there is no recorded deadline, so the row is unknown
+    // rather than an available download. A history reference may still carry
+    // a null projection; its class and deadline stay on att.
+    const att = { sha256: f.sha256, ...(ref ? ref.att : {}), blob_id: f.blob_id, purged: !!f.purged };
+    const state = ref ? ref.state : { state: 'unknown' };
+    const v = blobView(att, state, nowMs);
     return {
       ...row, blobId: f.blob_id, state: v.state, cls: v.cls, expiresAt: v.expiresAt, kept: v.keep,
       verified: v.verified, trust: ref ? v.trust : '', purged: v.state === 'purged', disabled: !v.canDownload, note: v.label,

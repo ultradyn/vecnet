@@ -516,15 +516,21 @@ test('R2 upload: new uploads take the retention in force at grant time; earlier 
 test('R2 model: send references carry blob_id, class and deadline, never verification fields; ready waits for verification', () => {
   const ref = { blob_id: 'blo_00000000000000000000000001', sha256: sha('a'), sha256_verified: true, integrity: { algorithm: 'sha256', value: sha('a'), verified: true }, size: 3, retention_class: 'keep', expires_at: null };
   const r2 = { id: 'u1', name: 'a.txt', size: 3, media_type: 'text/plain', state: 'done', ...ref };
-  const timed = { ...r2, id: 'u2', blob_id: 'blo_00000000000000000000000002', retention_class: '1d', expires_at: '2026-11-07T10:00:00.000Z' };
-  assert.deepEqual(toAttachments([r2, timed, done('b')]), [
+  // A fixed clock strictly before the recorded deadline. toAttachments and
+  // ready otherwise use Date.now(), so this assertion would fail for good
+  // once that day arrives.
+  const timedDeadline = '2026-11-07T10:00:00.000Z';
+  const liveAt = Date.parse(timedDeadline) - 1;
+  const timed = { ...r2, id: 'u2', blob_id: 'blo_00000000000000000000000002', retention_class: '1d', expires_at: timedDeadline };
+  assert.deepEqual(toAttachments([r2, timed, done('b')], liveAt), [
     { blob_id: ref.blob_id, sha256: sha('a'), size: 3, media_type: 'text/plain', name: 'a.txt', retention_class: 'keep', expires_at: null },
-    { blob_id: timed.blob_id, sha256: sha('a'), size: 3, media_type: 'text/plain', name: 'a.txt', retention_class: '1d', expires_at: '2026-11-07T10:00:00.000Z' },
+    { blob_id: timed.blob_id, sha256: sha('a'), size: 3, media_type: 'text/plain', name: 'a.txt', retention_class: '1d', expires_at: timedDeadline },
     { sha256: sha('b'), size: 3, media_type: 'text/plain', name: 'b.txt' },
   ]);
-  assert.equal(ready([r2]), true);
-  for (const state of ['hashing', 'verifying', 'uploading', 'queued']) assert.equal(ready([{ ...r2, state }]), false, state);
-  assert.equal(ready([{ ...r2, sha256_verified: false, integrity: { ...ref.integrity, verified: false } }]), false, 'a pending grant is not sendable');
+  assert.equal(ready([timed], liveAt), true, 'a finite deadline still in the future is sendable');
+  assert.equal(ready([r2], liveAt), true);
+  for (const state of ['hashing', 'verifying', 'uploading', 'queued']) assert.equal(ready([{ ...r2, state }], liveAt), false, state);
+  assert.equal(ready([{ ...r2, sha256_verified: false, integrity: { ...ref.integrity, verified: false } }], liveAt), false, 'a pending grant is not sendable');
   // A completed draft stops being sendable at its recorded deadline. The
   // clock is the caller's (the hub clock), not whichever instant this runs.
   const deadline = '2026-11-06T10:00:00.000Z';
@@ -536,7 +542,8 @@ test('R2 model: send references carry blob_id, class and deadline, never verific
   assert.deepEqual(toAttachments([expiring], at), [], 'Send must not carry the expired ref');
   assert.equal(ready([{ ...expiring, retention_class: 'keep', expires_at: null }], at), true, 'keep has no deadline');
   // The same bytes under a new grant are a different attachment.
-  assert.notEqual(signature([r2]), signature([{ ...r2, blob_id: 'blo_00000000000000000000000009' }]));
+  assert.notEqual(signature([timed], liveAt), signature([{ ...timed, blob_id: 'blo_00000000000000000000000009' }], liveAt));
+  assert.equal(signature([expiring], at), '', 'an expired ref leaves the signature');
 });
 
 test('R2 model: retry keeps the grant key unless the hub says it is spent', () => {

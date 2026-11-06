@@ -463,10 +463,11 @@ export function createSettingsStore({ api, appearance, storage }) {
     }
   }
 
-  // refresh re-reads on focus, visibility or Reload (what a reconnect looks
-  // like to this page). A clean page takes new preference values; a dirty
-  // one keeps every typed edit and shows a notice instead. Prefs 304 is
-  // quiet for the rows, and the storage meter is read either way.
+  // refresh re-reads on focus, visibility, Reload, or a live reconnect
+  // while Settings is mounted. A clean page takes new preference values; a
+  // dirty one keeps every typed edit and shows a notice instead. Prefs 304
+  // is quiet for the rows, and the storage meter is read either way. A busy
+  // confirm or save reads only the meter.
   // quiet: a failed re-read leaves the current message alone.
   async function refresh({ quiet = false } = {}) {
     if (st.phase !== 'ready') return load();

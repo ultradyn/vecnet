@@ -182,12 +182,18 @@ export function blobView(att, state, nowMs = Date.now()) {
   const keep = cls === 'keep';
   const recorded = att.expires_at !== undefined ? att.expires_at : s.expires_at;
   const expiresAt = keep ? null : typeof recorded === 'string' && Number.isFinite(Date.parse(recorded)) ? recorded : null;
-  let st = ['available', 'expired', 'purged', 'unavailable'].includes(s.state) ? s.state : 'available';
+  // pending: a metadata read is in flight. unknown: it failed, or no
+  // projection exists. Neither is the hub's "unavailable" (storage down,
+  // still downloadable until the recorded deadline).
+  const NAMED = ['available', 'expired', 'purged', 'unavailable', 'pending', 'unknown'];
+  let st = NAMED.includes(s.state) ? s.state : 'available';
   if (att.purged) st = 'purged';
   if ((st === 'available' || st === 'unavailable') && expiresAt && Date.parse(expiresAt) <= nowMs) st = 'expired';
   const trusted = verified(att.sha256, s.sha256_verified !== undefined ? s : att);
   let label;
-  if (st === 'expired') label = expiredText(cls);
+  if (st === 'pending') label = 'Status pending';
+  else if (st === 'unknown') label = 'Status unknown';
+  else if (st === 'expired') label = expiredText(cls);
   else if (st === 'purged') label = PURGED_TEXT;
   else if (st === 'unavailable') label = 'Storage unavailable';
   else if (keep) label = KEPT_TEXT;

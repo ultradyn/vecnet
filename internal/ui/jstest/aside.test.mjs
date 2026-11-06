@@ -206,6 +206,30 @@ test('trust: a pending or unverified checksum is never shown as verified', () =>
   assert.equal(blobView({ sha256: 'd'.repeat(64) }, null, NOW), null);
 });
 
+test('pending and unknown metadata are not downloadable; unavailable still is until its deadline', () => {
+  const id = 'blo_0000000000000000000000000d';
+  const file = r2file(id);
+  const pend = fileRows([file], new Map([[id, { att: {}, state: { state: 'pending' } }]]), NOW)[0];
+  assert.equal(pend.state, 'pending');
+  assert.equal(pend.note, 'Status pending');
+  assert.equal(pend.disabled, true);
+  assert.equal(pend.expiresAt, null);
+  const unk = fileRows([file], new Map([[id, { att: {}, state: { state: 'unknown' } }]]), NOW)[0];
+  assert.equal(unk.state, 'unknown');
+  assert.equal(unk.note, 'Status unknown');
+  assert.equal(unk.disabled, true);
+  // No reference at all is the same gap: not a download with an empty label.
+  const bare = fileRows([file], new Map(), NOW)[0];
+  assert.equal(bare.state, 'unknown');
+  assert.equal(bare.disabled, true);
+  assert.match(bare.note, /unknown/i);
+  const at = '2026-11-06T10:20:00.000Z';
+  const down = fileRows([file], new Map([refOf(id, { retention_class: '1h', expires_at: at, ...verified(true) }, { state: 'unavailable', retention_class: '1h', expires_at: at, ...verified(true) })]), NOW)[0];
+  assert.equal(down.state, 'unavailable');
+  assert.equal(down.disabled, false);
+  assert.equal(down.note, 'Storage unavailable');
+});
+
 test('download errors: expired and purged differ; a rate limit shows its retry delay; nothing echoes a URL', () => {
   assert.equal(downloadErrorText(new APIError(410, 'blob_expired', ''), NOW, '1d'), 'Attachment expired (24-hour retention)');
   assert.equal(downloadErrorText(new APIError(410, 'blob_purged', ''), NOW, '1d'), 'Attachment purged from the hub');
@@ -314,9 +338,16 @@ test('file metadata that fails once is fetched again on refresh and then sticks'
   globalThis.document = { createElement: tag => new AsideEl(tag) };
   try {
     const world = asideWorld({ files: [r2file(id, { sha256: sha })], refs: new Map(), hubNow: () => NOW, api });
+    const pending = findEl(world.root, e => e.attrs['data-blob'] === id)[0];
+    assert.match(pending.className, /s-pending/, pending.className);
+    assert.match(pending.textContent, /Status pending/);
+    assert.equal(pending.attrs.disabled, '', 'a pending read is not downloadable');
     await tick();
     assert.equal(calls, 1, 'the miss asks once');
     const before = findEl(world.root, e => e.attrs['data-blob'] === id)[0];
+    assert.match(before.className, /s-unknown/, before.className);
+    assert.match(before.textContent, /Status unknown/);
+    assert.equal(before.attrs.disabled, '', 'a failed read is not downloadable');
     assert.doesNotMatch(before.textContent, /Kept while referenced/);
     world.detail.reload();
     await tick();
@@ -332,8 +363,9 @@ test('file metadata that fails once is fetched again on refresh and then sticks'
   }
 });
 
-test('file metadata retries when the hub reconnects, and stops after three failures', async () => {
+test('file metadata retries on refresh and reconnect, once per signal, and can recover after three failures', async () => {
   const id = 'blo_0000000000000000000000000c';
+  const sha = 'd'.repeat(64);
   let started = 0;
   let open;
   const pending = new Promise(r => { open = r; });
@@ -342,18 +374,24 @@ test('file metadata retries when the hub reconnects, and stops after three failu
       started++;
       // The first read stays in flight so a redraw cannot start a second one.
       if (started === 1) return pending.then(() => { throw new APIError(503, 'blob_unavailable', 'storage unavailable'); });
-      return Promise.reject(new APIError(503, 'blob_unavailable', 'storage unavailable'));
+      if (started < 5) return Promise.reject(new APIError(503, 'blob_unavailable', 'storage unavailable'));
+      return Promise.resolve({ state: 'available', retention_class: 'keep', expires_at: null, sha256_verified: true, integrity: { algorithm: 'sha256', value: sha, verified: true } });
     },
   };
   const prev = globalThis.document;
   globalThis.document = { createElement: tag => new AsideEl(tag) };
   try {
-    const world = asideWorld({ files: [r2file(id)], refs: new Map(), hubNow: () => NOW, api });
+    const world = asideWorld({ files: [r2file(id, { sha256: sha })], refs: new Map(), hubNow: () => NOW, api });
+    const row = () => findEl(world.root, e => e.attrs['data-blob'] === id)[0];
+    assert.match(row().className, /s-pending/);
+    assert.equal(row().attrs.disabled, '');
     world.detail.reload();
     assert.equal(started, 1, 'an in-flight read is not asked twice');
     open();
     await tick();
     assert.equal(started, 1, 'the failure is cached rather than retried on its own redraw');
+    assert.match(row().textContent, /Status unknown/);
+    assert.equal(row().attrs.disabled, '', 'a failed read is not an available download');
     for (const fn of world.conns) fn('reconnecting');
     await tick();
     assert.equal(started, 1, 'reconnecting does not retry');
@@ -363,10 +401,30 @@ test('file metadata retries when the hub reconnects, and stops after three failu
     world.detail.reload();
     await tick();
     assert.equal(started, 3);
+    await tick();
+    assert.equal(started, 3, 'the third failure does not ask again by itself');
+    assert.match(row().className, /s-unknown/);
+    // The old three-try ceiling must not stick for the rest of the mount.
+    // Each later refresh or live reconnect is one attempt, and a rejection
+    // does not chain into the next one.
+    world.detail.reload();
+    await tick();
+    assert.equal(started, 4, 'a later refresh retries once after three failures');
+    await tick();
+    assert.equal(started, 4, 'that failure does not chain into another read');
+    for (const fn of world.conns) fn('reconnecting');
+    await tick();
+    assert.equal(started, 4, 'reconnecting is not a retry');
+    for (const fn of world.conns) fn('live');
+    await tick();
+    assert.equal(started, 5, 'a later live reconnect retries once');
+    const after = row();
+    assert.match(after.textContent, /Kept while referenced/);
+    assert.equal(after.attrs.disabled, undefined, 'a recovered file is downloadable');
     world.detail.reload();
     for (const fn of world.conns) fn('live');
     await tick();
-    assert.equal(started, 3, 'retries stop after three failures');
+    assert.equal(started, 5, 'a successful read is not asked again');
     world.off();
   } finally {
     globalThis.document = prev;

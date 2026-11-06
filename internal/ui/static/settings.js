@@ -633,6 +633,13 @@ export function mount(root, ctx) {
   const onFocus = () => store.refresh();
   const onVisible = () => { if (!document.hidden) store.refresh(); };
   const onBefore = e => { if (store.dirtyKeys().length) { e.preventDefault(); e.returnValue = ''; } };
+  // Focus and visibility are not a reconnect. While this screen is mounted,
+  // the shared connection's transition to live re-reads through refresh(),
+  // including the meter-only path when a confirmation or save is busy.
+  let offConn = () => {};
+  if (ctx.store && typeof ctx.store.onConn === 'function') {
+    offConn = ctx.store.onConn(state => { if (state === 'live') store.refresh(); });
+  }
   window.addEventListener('focus', onFocus);
   document.addEventListener('visibilitychange', onVisible);
   window.addEventListener('beforeunload', onBefore);
@@ -642,6 +649,7 @@ export function mount(root, ctx) {
 
   return () => {
     off();
+    offConn();
     store.destroy();
     window.removeEventListener('focus', onFocus);
     document.removeEventListener('visibilitychange', onVisible);

@@ -23,8 +23,8 @@ export function mountAside(root, ctx) {
   const admin = store.resource('peers', () => api.adminPeers());
   const S = { busy: new Set(), open: false, ended: new Map(), meta: new Map() };
   // A metadata miss is not a cached answer. Refresh and a live reconnect
-  // may ask again, a few times, and an in-flight read is not asked twice.
-  const STATUS_TRIES = 3;
+  // each ask once more, including after earlier failures, and an in-flight
+  // read is not asked twice. The rejection itself never starts another read.
   let retryMeta = false;
   const urls = new Set();
   let gone = false, expiryTimer = 0;
@@ -33,9 +33,18 @@ export function mountAside(root, ctx) {
   const refsNow = () => {
     const out = new Map((refsFeed && refsFeed.get()) || []);
     // A file outside the loaded history: its own metadata-only status.
+    // Pending and failed reads are a status too. Omitting them makes the
+    // row look available, with a download and no deadline.
     for (const [id, entry] of S.meta) {
-      const st = entry && entry.phase === 'ready' ? entry.value : null;
-      if (st && typeof st === 'object' && !out.has(id)) out.set(id, { att: { retention_class: st.retention_class, expires_at: st.expires_at === undefined ? null : st.expires_at, sha256_verified: st.sha256_verified, integrity: st.integrity }, state: st });
+      if (!entry || out.has(id)) continue;
+      if (entry.phase === 'ready' && entry.value && typeof entry.value === 'object') {
+        const st = entry.value;
+        out.set(id, { att: { retention_class: st.retention_class, expires_at: st.expires_at === undefined ? null : st.expires_at, sha256_verified: st.sha256_verified, integrity: st.integrity }, state: st });
+      } else if (entry.phase === 'inflight') {
+        out.set(id, { att: {}, state: { state: 'pending' } });
+      } else {
+        out.set(id, { att: {}, state: { state: 'unknown' } });
+      }
     }
     // A 410 seen here wins until the hub's next page says the same.
     for (const [id, state] of S.ended) {
@@ -48,7 +57,9 @@ export function mountAside(root, ctx) {
   // statusFor asks the hub for an R2 file the loaded history does not
   // reference (older than its pages): metadata only, no link minted.
   // In flight, a recorded answer and a terminal expiry are not asked again.
-  // A failure is, on the next refresh or live reconnect, up to STATUS_TRIES.
+  // A failure waits for the next refresh or live reconnect: one attempt
+  // per signal, with no ceiling that sticks for the rest of the mount,
+  // and the rejection itself does not count as that signal.
   function statusFor(files) {
     if (refsFeed && !refsFeed.loaded()) return;
     const known = (refsFeed && refsFeed.get()) || new Map();
@@ -58,10 +69,8 @@ export function mountAside(root, ctx) {
       if (!f.blob_id || known.has(f.blob_id)) continue;
       const cur = S.meta.get(f.blob_id);
       if (cur && (cur.phase === 'inflight' || cur.phase === 'ready')) continue;
-      const tries = (cur && cur.tries) || 0;
-      if (tries >= STATUS_TRIES) continue;
       if (cur && cur.phase === 'failed' && !retry) continue;
-      const nextTries = tries + 1;
+      const nextTries = ((cur && cur.tries) || 0) + 1;
       S.meta.set(f.blob_id, { phase: 'inflight', tries: nextTries });
       api.blobStatus(f.sha256, f.blob_id).then(st => {
         if (gone) return;

@@ -5,6 +5,7 @@ import {
   LANES, loadView, lockOf, parseDuration, parseField, rememberView, timingOf, visibleRows,
   BLOB_NEW_ONLY, blobOffText, storageView, validStorage,
 } from '../static/settings-model.js';
+import { mount as mountSettings } from '../static/settings.js';
 import { fakeHub, memStorage, rows } from './settings-fixture.mjs';
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -910,4 +911,239 @@ test('a failed storage refresh shows unavailable and leaves the prefs ETag, draf
   assert.equal(v.unavailable, true);
   assert.equal(v.tone, 'unavailable');
   assert.match(v.text, /unavailable/i);
+});
+
+// A document large enough for the mounted Settings screen. Installed only
+// around that test; other files keep their own document shim.
+class StEl {
+  constructor(tag) {
+    this.tag = tag;
+    this.attrs = {};
+    this.kids = [];
+    this.className = '';
+    this.on = {};
+    this.id = '';
+    this.value = '';
+    this.disabled = false;
+    this.checked = false;
+    this.open = false;
+    this.hidden = false;
+    this.parent = null;
+    this.style = {};
+    this.dataset = {};
+  }
+  set textContent(v) { this.kids = [String(v)]; }
+  get textContent() { return this.kids.map(k => typeof k === 'string' ? k : k.textContent).join(''); }
+  setAttribute(k, v) {
+    const s = String(v);
+    this.attrs[k] = s;
+    if (k === 'id') this.id = s;
+    if (k === 'class') this.className = s;
+    if (k === 'disabled') this.disabled = true;
+  }
+  getAttribute(k) { return Object.hasOwn(this.attrs, k) ? this.attrs[k] : null; }
+  addEventListener(type, fn) { (this.on[type] ||= []).push(fn); }
+  append(...xs) {
+    for (const x of xs) {
+      if (x === null || x === undefined || x === false) continue;
+      if (typeof x !== 'string') x.parent = this;
+      this.kids.push(x);
+    }
+  }
+  replaceChildren(...xs) {
+    for (const k of this.kids) if (k && k.parent === this) k.parent = null;
+    this.kids = [];
+    this.append(...xs);
+  }
+  remove() {
+    const p = this.parent;
+    if (!p) return;
+    p.kids = p.kids.filter(k => k !== this);
+    this.parent = null;
+  }
+  get children() { return this.kids.filter(k => typeof k !== 'string'); }
+  contains(node) {
+    if (!node) return false;
+    if (node === this) return true;
+    return this.kids.some(k => k === node || (k && k.contains && k.contains(node)));
+  }
+  querySelector(sel) {
+    const acc = [];
+    const walk = el => {
+      if (!(el instanceof StEl)) return;
+      acc.push(el);
+      for (const k of el.kids) walk(k);
+    };
+    for (const k of this.kids) walk(k);
+    const cls = sel.startsWith('.') && !sel.includes(' ') && !sel.includes('[') ? sel.slice(1) : '';
+    if (cls) return acc.find(el => el.className.split(/\s+/).includes(cls)) || null;
+    const attr = sel.match(/^\[([^\s=~]+)="(.*)"\]$/);
+    if (attr) {
+      const val = attr[2].replace(/\\(.)/g, '$1');
+      return acc.find(el => el.attrs[attr[1]] === val) || null;
+    }
+    return null;
+  }
+  before(...nodes) { this.insert(nodes.flat().filter(n => n != null), 0); }
+  after(...nodes) { this.insert(nodes.flat().filter(n => n != null), 1); }
+  insert(nodes, offset) {
+    const p = this.parent;
+    if (!p) throw new Error('insert without parent');
+    const i = p.kids.indexOf(this);
+    for (const n of nodes) if (typeof n !== 'string') n.parent = p;
+    p.kids.splice(i + offset, 0, ...nodes);
+  }
+  replaceWith(node) {
+    const p = this.parent;
+    if (!p) return;
+    const i = p.kids.indexOf(this);
+    if (typeof node !== 'string') node.parent = p;
+    p.kids.splice(i, 1, node);
+    this.parent = null;
+  }
+  focus() {}
+  scrollIntoView() {}
+  showModal() { this.open = true; }
+  close() {
+    if (!this.open) return;
+    this.open = false;
+    for (const fn of this.on.close || []) fn();
+  }
+  classList = {
+    add: (...xs) => {
+      const have = new Set(this.className.split(/\s+/).filter(Boolean));
+      for (const x of xs) have.add(x);
+      this.className = [...have].join(' ');
+    },
+    remove: (...xs) => {
+      const drop = new Set(xs);
+      this.className = this.className.split(/\s+/).filter(c => c && !drop.has(c)).join(' ');
+    },
+    toggle: (token, force) => {
+      const has = this.className.split(/\s+/).includes(token);
+      const on = force === undefined ? !has : !!force;
+      if (on) this.classList.add(token); else this.classList.remove(token);
+      return on;
+    },
+  };
+}
+const walkSt = (el, pred, out = []) => {
+  if (el instanceof StEl) { if (pred(el)) out.push(el); for (const k of el.kids) walkSt(k, pred, out); }
+  return out;
+};
+
+test('mounted settings re-reads storage when the connection goes live, with no focus or visibility event', async () => {
+  const hub = fakeHub({ preferences: r2Rows(), storage: storage(GiB, 5 * GiB, GiB / 4) });
+  const conns = [];
+  const fired = { focus: 0, visibilitychange: 0 };
+  const listeners = { focus: [], visibilitychange: [], beforeunload: [] };
+  const listen = (type, fn) => {
+    const wrapped = (...args) => { fired[type] = (fired[type] || 0) + 1; return fn(...args); };
+    (listeners[type] ||= []).push(wrapped);
+    return wrapped;
+  };
+  const unlisten = (type, fn) => {
+    const bag = listeners[type] || [];
+    const i = bag.indexOf(fn);
+    if (i >= 0) bag.splice(i, 1);
+  };
+  const prevDoc = globalThis.document;
+  const prevWin = globalThis.window;
+  const prevCSS = globalThis.CSS;
+  const prevLoc = globalThis.location;
+  const body = new StEl('body');
+  const doc = {
+    hidden: true,
+    activeElement: null,
+    body,
+    createElement: tag => new StEl(tag),
+    addEventListener: listen,
+    removeEventListener: unlisten,
+    getElementById() { return null; },
+  };
+  const win = {
+    localStorage: memStorage(),
+    addEventListener: listen,
+    removeEventListener: unlisten,
+  };
+  globalThis.document = doc;
+  globalThis.window = win;
+  globalThis.location = { host: 'hub.test' };
+  if (!globalThis.CSS) globalThis.CSS = { escape: s => String(s).replace(/[^a-zA-Z0-9_-]/g, ch => '\\' + ch) };
+  const root = new StEl('div');
+  let off = () => {};
+  try {
+    const conn = {
+      onConn(fn) {
+        conns.push(fn);
+        return () => { const i = conns.indexOf(fn); if (i >= 0) conns.splice(i, 1); };
+      },
+    };
+    off = mountSettings(root, {
+      api: hub.api,
+      store: conn,
+      appearance: { get: () => ({ theme: 'system', density: 'comfortable' }), set: () => ({ persisted: true }), subscribe: () => () => {} },
+      toast() {},
+      setLeaveGuard() {},
+    });
+    await flush();
+    const field = fk => walkSt(root, e => e.attrs['data-fk'] === fk)[0];
+    const fire = (fk, type, value) => {
+      const el = field(fk);
+      assert.ok(el, fk);
+      for (const fn of el.on[type] || []) fn({ target: { value } });
+    };
+    fire('st-events-refresh-interval', 'input', '10m');
+    fire('st-blobs-expiry', 'change', 'off');
+    for (const fn of field('save').on.click || []) fn();
+    const dialog = () => walkSt(body, e => e.tag === 'dialog')[0];
+    for (let i = 0; i < 10 && !(dialog() && dialog().open); i++) await flush();
+    assert.equal(dialog().open, true, 'confirmation is open');
+    assert.match(dialog().textContent, /Keep new attachments forever/);
+    assert.equal(field('st-events-refresh-interval').value, '10m');
+    assert.equal(field('st-blobs-expiry').value, 'off');
+    const meter = () => walkSt(root, e => e.className.split(/\s+/).includes('st-sto-t'))[0];
+    assert.match(meter().textContent, /1\.1 GB used of 5\.4 GB/);
+    const gets = () => hub.calls.filter(c => c.op === 'get').length;
+    const storages = () => hub.calls.filter(c => c.op === 'storage').length;
+    const etag = `"prefs-${hub.revision}-g1"`;
+    assert.ok(hub.calls.some(c => c.op === 'preview' && c.tag === etag), 'the confirmation is bound to the current ETag');
+    const got = gets(), stored = storages(), revision = hub.revision;
+    const marker = hub.calls.length;
+    assert.equal(fired.focus, 0);
+    assert.equal(fired.visibilitychange, 0);
+    assert.ok(listeners.focus.length >= 1 && listeners.visibilitychange.length >= 1);
+    hub.storage = storage(2 * GiB, 5 * GiB, GiB / 8);
+    for (const fn of conns) fn('reconnecting');
+    await flush();
+    await flush();
+    assert.equal(hub.calls.length, marker, 'reconnecting does not read');
+    assert.match(meter().textContent, /1\.1 GB used of 5\.4 GB/);
+    for (const fn of conns) fn('live');
+    await flush();
+    await flush();
+    assert.deepEqual(hub.calls.slice(marker).map(c => c.op), ['storage'], 'a live transition reads the meter once and does not re-read prefs');
+    assert.equal(gets(), got);
+    assert.equal(storages(), stored + 1);
+    assert.equal(hub.revision, revision);
+    assert.match(meter().textContent, /2\.1 GB used of 5\.4 GB/);
+    assert.equal(dialog().open, true, 'the confirmation stays open');
+    assert.match(dialog().textContent, /Keep new attachments forever/);
+    assert.equal(field('st-events-refresh-interval').value, '10m', 'the draft stays');
+    assert.equal(field('st-blobs-expiry').value, 'off', 'the draft stays');
+    assert.equal(fired.focus, 0, 'focus was not the trigger');
+    assert.equal(fired.visibilitychange, 0, 'visibility was not the trigger');
+    off();
+    off = () => {};
+    assert.equal(conns.length, 0, 'unmount drops the connection subscription');
+    for (const fn of conns) fn('live');
+    await flush();
+    assert.equal(storages(), stored + 1, 'a live event after unmount does not read again');
+  } finally {
+    off();
+    globalThis.document = prevDoc;
+    globalThis.window = prevWin;
+    globalThis.CSS = prevCSS;
+    globalThis.location = prevLoc;
+  }
 });
