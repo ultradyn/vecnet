@@ -164,6 +164,19 @@ Peer message actions come from `scripts/ui/peer-actions.mjs`. Beside a peer's na
 - [pv-quick-compose-grokbot.png](pv-quick-compose-grokbot.png) — New message from grok-reviewer's page: the peer picked, `wake_idle` selected, the message field focused.
 - [pv-quick-compose-none.png](pv-quick-compose-none.png) — Start thread from dot-research's page: the peer picked at `wake`, a first message typed.
 
+Peer Invite card screens come from `scripts/ui/invite-card.mjs` (#67), at 1440 px (`-desk`) and 390 px (`-phone`). A peer that enrols with a token and holds no live credential shows an Invite card under its name: the invite's state from `GET /v1/admin/peers/{id}/enrol-token` (never the token), New invite (re-issue: the previous token stops enrolling) with the token lifetime, and Revoke invite (two clicks; `DELETE …/enrol-token`). New invite opens Add agent's own copy panel with the same paste block byte for byte; the token is only in that block's text, never an attribute, URL, web storage or request, and leaves the page on Done, on a revoke, or when the peer enrols and the card closes. Enrolled peers, dots, sources and the operator have no card and cost no invite read. The shots show a fake token (`vn_enrol_EXAMPLE-not-a-real-token-…`) swapped into the re-issue answer; the script checks the real one is refused once replaced or revoked.
+
+- [pvi-1-pending-desk.png](pvi-1-pending-desk.png) — web-repo claude has not enrolled: Invite `pending` with its expiry, Valid for 24 hours, New invite and Revoke invite; Identity reads Enrolled: not yet · added.
+- [pvi-1-pending-phone.png](pvi-1-pending-phone.png) — The pending card at 390 px.
+- [pvi-2-copied-desk.png](pvi-2-copied-desk.png) — After New invite and Copy invite: "The previous invite no longer works.", the shown-once warning, the paste block (fake token), profile, peer and expiry, Done and Copied.
+- [pvi-2-copied-phone.png](pvi-2-copied-phone.png) — The copy panel at 390 px: the block wraps and nothing scrolls sideways.
+- [pvi-3-revoked-desk.png](pvi-3-revoked-desk.png) — After Revoke invite and Confirm revoke: `revoked`, its token no longer enrols, New invite only, "Invite revoked."
+- [pvi-3-revoked-phone.png](pvi-3-revoked-phone.png) — The revoked card at 390 px.
+- [pvi-4-error-desk.png](pvi-4-error-desk.png) — A refused re-issue: "Could not issue a new invite: demo_failure: Demo failure" under the actions; the card is unchanged and New invite works again.
+- [pvi-4-error-phone.png](pvi-4-error-phone.png) — The refused re-issue at 390 px.
+- [pvi-5-none-desk.png](pvi-5-none-desk.png) — No live invite: late claude's invite `expired` a minute ago, so the card offers New invite and no Revoke.
+- [pvi-5-none-phone.png](pvi-5-none-phone.png) — The expired card at 390 px.
+
 Operator CLI label screens come from `scripts/ui/cli-label.mjs`, which runs the real `vecnet` binary under `env -i` (a pty from script(1) where a terminal is needed). A bare run with no profile is refused without a terminal or with an agent marker set; from a terminal it sends from the operator peer with a hub-set label.
 
 - [cli-label-thread-desktop.png](cli-label-thread-desktop.png) — Three operator CLI sends: `Operator on <host> CLI`, the same `via ssh`, and an explicit `--net` operator send from an agent-looking run marked `(agent suspected)` in amber; codex-hark's reply goes to the operator.

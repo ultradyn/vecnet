@@ -70,6 +70,12 @@ func TestInviteRevokeAndStatus(t *testing.T) {
 	if code, _, _ := cliRun(t, opDir, "", "--net", "op", "invite", "frob", peer); code != 1 {
 		t.Fatalf("invite frob: exit %d", code)
 	}
+	for _, flag := range [][]string{{"--kind", "session"}, {"--principal", "prn_x"}, {"--ttl", "1h"}, {"--copy"}} {
+		args := append([]string{"--net", "op", "peer", "invite", "revoke", peer}, flag...)
+		if code, _, _ := cliRun(t, opDir, "", args...); code != 1 {
+			t.Fatalf("peer invite revoke %v: exit %d, want 1", flag, code)
+		}
+	}
 	if code, _, errs := cliRun(t, opDir, "", "--net", "op", "invite", "revoke", "peer_nope"); code != 2 || !strings.HasPrefix(errs, "not_found: ") {
 		t.Fatalf("revoke unknown peer: %d %s", code, errs)
 	}

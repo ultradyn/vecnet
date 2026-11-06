@@ -94,17 +94,16 @@ type rowQuerier interface {
 // inviteStatus derives peerID's InviteStatus, which must exist, at now.
 func inviteStatus(ctx context.Context, q rowQuerier, peerID string, now time.Time) (InviteStatus, error) {
 	st := InviteStatus{PeerID: peerID}
+	// One statement, so one snapshot: a re-issue or revoke landing between
+	// two reads cannot mix states.
 	var live, ever, linked int
-	if err := q.QueryRowContext(ctx, `SELECT
-		(SELECT count(*) FROM credentials WHERE kind = 'peer' AND subject_id = ? AND revoked_at IS NULL),
-		(SELECT count(*) FROM credentials WHERE kind = 'peer' AND subject_id = ?),
-		(SELECT count(*) FROM oauth_principals WHERE peer_id = ?)`, peerID, peerID, peerID).Scan(&live, &ever, &linked); err != nil {
-		return st, fmt.Errorf("hub: invite status: %w", err)
-	}
 	var unspent, spent sql.NullString
 	if err := q.QueryRowContext(ctx, `SELECT
-		(SELECT max(expires_at) FROM enrol_tokens WHERE peer_id = ? AND used_at IS NULL),
-		(SELECT max(used_at) FROM enrol_tokens WHERE peer_id = ? AND used_at IS NOT NULL)`, peerID, peerID).Scan(&unspent, &spent); err != nil {
+		(SELECT count(*) FROM credentials WHERE kind = 'peer' AND subject_id = ?1 AND revoked_at IS NULL),
+		(SELECT count(*) FROM credentials WHERE kind = 'peer' AND subject_id = ?1),
+		(SELECT count(*) FROM oauth_principals WHERE peer_id = ?1),
+		(SELECT max(expires_at) FROM enrol_tokens WHERE peer_id = ?1 AND used_at IS NULL),
+		(SELECT max(used_at) FROM enrol_tokens WHERE peer_id = ?1 AND used_at IS NOT NULL)`, peerID).Scan(&live, &ever, &linked, &unspent, &spent); err != nil {
 		return st, fmt.Errorf("hub: invite status: %w", err)
 	}
 	switch {

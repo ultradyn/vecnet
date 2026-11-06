@@ -22,8 +22,10 @@ import (
 // restart banners (about 13 KiB) on top of master's sidebar threads, unread
 // counts and composer growth put the merged UI at about 354 KB; to 480 KiB on
 // 2026-11-06 for hub preferences Task 6: the Settings page, its draft model,
-// stylesheet and local appearance, about 106 KB, put the UI at about 483 KB).
-const uiMaxBytes = 480 << 10
+// stylesheet and local appearance, about 106 KB, put the UI at about 483 KB;
+// to 512 KiB on 2026-11-07 for the peer page's Invite card (#67), about 13 KB,
+// which put the UI at about 496 KB).
+const uiMaxBytes = 512 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

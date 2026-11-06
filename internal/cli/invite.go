@@ -199,7 +199,7 @@ func (a *app) peerInvite(o opts) error {
 	suggested := false
 	switch {
 	case len(o.pos) >= 2 && (o.pos[1] == "status" || o.pos[1] == "revoke"):
-		if len(o.pos) != 3 || o.has("name") || o.has("open-name") || o.has("ttl") || o.has("profile") || o.has("copy") {
+		if len(o.pos) != 3 || len(o.vals) != 0 {
 			return usageErr(inviteUsage)
 		}
 		return a.inviteState(o.pos[1], o.pos[2])
