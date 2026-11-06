@@ -15,6 +15,7 @@ import * as dash from './dash.js';
 import { h, peerLink, toast } from './dom.js';
 import { short } from './format.js';
 import * as inbox from './inbox.js';
+import { addAgentPrefill } from './invite-model.js';
 import { closeInvite, openInvite } from './invite.js';
 import * as matrix from './matrix.js';
 import { createNotices } from './notice.js';
@@ -40,6 +41,10 @@ const SCREENS = {
 };
 
 function parseRoute(hash) {
+  // #add-agent?kind=&name=&request_id= opens the dialog. The query is a
+  // prefill, not a credential (PROTOCOL §4.5, §20.1).
+  const add = addAgentPrefill(hash);
+  if (add) return { name: 'add-agent', view: 'inbox', prefill: add };
   if (hash === '#dash') return { name: 'dash', view: 'dash' };
   if (hash === '#new') return { name: 'new', view: 'new' };
   const p = hash.match(/^#peer\/([A-Za-z0-9_]+)$/);
@@ -149,6 +154,10 @@ function renderRoute(s) {
   }
   if (route.name === 'matrix' && location.hash !== s.matrixHash) matrix.openMatrix(route.id, s.ctx);
   s.matrixHash = route.name === 'matrix' ? location.hash : '';
+  if (route.name === 'add-agent' && location.hash !== s.addAgentHash) {
+    s.addAgentHash = location.hash;
+    openInvite(s.ctx, () => s.ctx.peers.reload(), $('nav-add'), route.prefill);
+  } else if (route.name !== 'add-agent') s.addAgentHash = '';
 }
 
 function start(secret) {
@@ -186,7 +195,7 @@ function start(secret) {
 
   const s = {
     threads, inboxHead, nameOf, store, mine: null, others: null, otherLimit: OTHER_PAGE,
-    me: '', ctx: null, mounted: '', matrixHash: '', unmount: () => {}, offs: [],
+    me: '', ctx: null, mounted: '', matrixHash: '', addAgentHash: '', unmount: () => {}, offs: [],
     close() {
       stop.abort();
       closeInvite(); // a shown token goes with the session
