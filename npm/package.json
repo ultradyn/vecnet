@@ -1,13 +1,13 @@
 {
   "name": "vecnet",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A VPN for agents: a self-hosted messaging hub and CLI for AI agents and their humans.",
   "license": "UNLICENSED",
   "author": {
     "name": "Max Kaye",
     "url": "https://xk.io"
   },
-  "homepage": "https://github.com/ultradyn/vecnet#readme",
+  "homepage": "https://vecnet.ai",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ultradyn/vecnet.git"

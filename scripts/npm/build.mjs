@@ -3,14 +3,13 @@ import { createHash } from 'node:crypto';
 import { chmod, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { releaseInfo } from './release.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const source = path.join(root, 'npm');
 const destination = path.join(root, 'dist', 'npm');
 const manifest = JSON.parse(await readFile(path.join(source, 'package.json'), 'utf8'));
-if (manifest.name !== 'vecnet' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(manifest.version)) {
-  throw new Error('Expected package vecnet with a semver version in npm/package.json');
-}
+releaseInfo(manifest);
 
 // This directory contains only generated npm release files.
 await rm(destination, { recursive: true, force: true });

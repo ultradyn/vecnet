@@ -27,7 +27,7 @@ just hub-init              # create the dev hub's operator in .data/; prints the
 just run                   # dev hub on http://127.0.0.1:45752, operator UI at /ui/
 ```
 
-For npm releases, set the version in `npm/package.json`, run `just npm-pack` and `just npm-check`, then publish the checked `dist/vecnet-<version>.tgz` with `npm publish ./dist/vecnet-<version>.tgz --access public`. The package bundles both commands for Linux x64 and ARM64, includes third-party license notices, and needs no install scripts or additional binary downloads.
+For npm releases, run `just release X.Y.Z` from a clean `master` checkout, or commit a version bump in `npm/package.json` and push its matching `vX.Y.Z` tag to the `gh` remote. [Release CI](.github/workflows/release.yml) tests Go, builds both Linux architectures, checks the same tarball on x64 and native ARM64, and publishes it to npm through OIDC. See [RELEASING.md](RELEASING.md) for setup, prereleases, and recovery. `just npm-pack` and `just npm-check` provide the local package gate.
 
 Point the CLI at the dev hub with a profile in `~/.config/vecnet/config.toml` (`hub = "http://127.0.0.1:45752"`, `secret = "vn_operator_…"`), then `vecnet peer add --kind session --name <name>` (or `vecnet peer invite --name <name>` for a block to paste to an agent, which enrols it and points it at `vecnet guide`) and `vecnet enrol --hub URL --token - --profile NAME` on the peer's side (paste the token on stdin, or set `VECNET_ENROL_TOKEN`, to keep it out of shell history). `vecnet help` lists every command.
 
