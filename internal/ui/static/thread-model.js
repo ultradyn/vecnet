@@ -162,3 +162,53 @@ export function replyKey(pending, { text, prio, replyTo, sig }, mint) {
   if (pending && pending.text === text && pending.prio === prio && pending.replyTo === replyTo && pending.sig === sig) return pending;
   return { key: mint(), text, prio, replyTo, sig };
 }
+
+// unreadOf lists { message_id, delivery_id } for each message whose
+// delivery to me (§2.13 matrix) has no read_at (CoS unread ruling), as the
+// inbox counts (opview/inbox.go): not superseded; an approval only once
+// closed (answered, or expired by now) and not by me (or answered here).
+export function unreadOf(messages, matrix, { me, now, openApprovals, answered } = {}) {
+  if (!matrix || !me) return [];
+  const list = messages || [];
+  const mine = new Map();
+  for (const row of matrix.rows || []) {
+    for (const c of row.cells || []) if (c && c.recipient === me) mine.set(row.message_id, c);
+  }
+  const open = new Set((openApprovals || []).map(a => a.approval_id));
+  const by = new Map(); // approval id -> who answered first
+  for (const m of list) {
+    const r = m.approval_response;
+    if (r && !by.has(r.approval_id)) by.set(r.approval_id, m.sender);
+  }
+  for (const id of answered || []) if (!by.has(id)) by.set(id, me);
+  const out = [];
+  for (const m of list) {
+    const c = mine.get(m.message_id);
+    if (!c || !c.delivery_id || c.read_at || c.state === 'superseded') continue;
+    const req = m.approval_request;
+    if (req) {
+      const who = by.get(req.approval_id), end = Date.parse(req.expires_at);
+      if (who === me || open.has(req.approval_id) || (who === undefined && !(end <= now))) continue;
+    }
+    out.push({ message_id: m.message_id, delivery_id: c.delivery_id });
+  }
+  return out;
+}
+
+// opening: a thread opens at its first unread under New, else at the bottom.
+export function opening(unread) {
+  const first = (unread || [])[0];
+  return first ? { divider: first.message_id, at: first.message_id } : { divider: null, at: 'bottom' };
+}
+
+// nextDivider places New for messages turning unread while open (fresh:
+// live arrivals). New marks only the unseen: fresh messages move it (above
+// the oldest unseen) unless watched arriving (page active, view at the
+// bottom) or New still marks unread messages not yet seen.
+export function nextDivider({ divider, unread, fresh, seen, watching }) {
+  if (!fresh || !fresh.length || watching) return divider;
+  const isFresh = new Set(fresh.map(u => u.message_id));
+  const unseen = (unread || []).filter(u => isFresh.has(u.message_id) || !seen(u.message_id));
+  if (divider && unseen.some(u => !isFresh.has(u.message_id))) return divider;
+  return (unseen[0] || fresh[0]).message_id; // the oldest unseen, so none sits above New
+}

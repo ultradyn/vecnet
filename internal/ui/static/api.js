@@ -140,6 +140,8 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     messages: (id, { after, limit } = {}) => get('/v1/threads/' + seg(id) + '/messages' + query({ after, limit })),
     matrix: (id, { after, limit } = {}) => get('/v1/admin/threads/' + seg(id) + '/deliveries' + query({ after, limit })),
     readThread: id => post('/v1/admin/threads/' + seg(id) + '/read'),
+    // One delivery's receipt (PROTOCOL §2.5): the thread view posts 'read'.
+    receipt: (deliveryId, state) => post('/v1/receipts', { body: { delivery_id: deliveryId, state } }),
     // signal lets a sign-out end a parked long-poll at once.
     activity,
     events: ({ after, wait, signal } = {}) => get('/v1/events' + query({ after, wait }), { signal }),
