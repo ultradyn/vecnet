@@ -70,7 +70,7 @@ The connector never reloads a thread on its own. How delivery comes back depends
 - **Expired:** `codex bind --thread <id> --renew` (or bind again).
 - **Over the limit:** unbind another binding on that Codex home, or raise `VECNET_CODEX_MAX_BINDINGS` in the launcher daemon's environment and restart it.
 - **Identity changed:** `codex unbind`, then a fresh `codex bind`; resuming or renewing does not clear it.
-- **Archived:** unarchive the thread, then bind again.
+- **Archived:** unarchive the thread, then `codex unbind` and a fresh `codex bind` (re-binding an existing binding is a no-op).
 - **Idle-dormant:** any new activity in the thread (a turn from its TUI or another client) revives it.
 
 In every case the thread must also be loaded (`codex resume <id>` if it is not).
