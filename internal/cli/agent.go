@@ -122,11 +122,17 @@ func (a *app) agentAdd(o opts) error {
 	}
 	id := o.str("request-id")
 	if id == "" {
+		id = a.retainedRequestID
+	}
+	if id == "" {
 		id = "req-" + ulid.Make().String()
 	}
 	if !requestIDRE.MatchString(id) {
 		return usageErr("agent add: --request-id must be 1 to 128 characters: letters, digits, and . _ : -")
 	}
+	// Keep this id for a relocation redispatch of the same command. A new
+	// id after a verified follow would create a second peer.
+	a.retainedRequestID = id
 	body := map[string]any{
 		"kind": spec.Kind, "spec_version": spec.SpecVersion, "request_id": id, "inputs": inputs,
 	}
@@ -260,8 +266,9 @@ func shellQuote(s string) (string, bool) {
 }
 
 // ambiguousAgentSubmit reports an outcome that may already be committed.
-// It is wider than retryAgent: bad_response and a request deadline are not
-// redriven, and they still need the same-id recovery instructions.
+// It is wider than retryAgent: bad_response, a request deadline and
+// cancellation are not redriven, and they still need the same-id recovery
+// instructions.
 func ambiguousAgentSubmit(err error) bool {
 	if err == nil {
 		return false
@@ -269,7 +276,7 @@ func ambiguousAgentSubmit(err error) bool {
 	if retryAgent(err) {
 		return true
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
 	}
 	var he *hubError

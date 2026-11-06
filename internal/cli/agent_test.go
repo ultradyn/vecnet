@@ -20,7 +20,9 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/cli"
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/onboarding"
+	"github.com/XertroV/vecnet/internal/testhub"
 )
 
 // Task 5 acceptance (docs/plans/2026-11-06-agent-onboarding-kinds.md).
@@ -441,7 +443,7 @@ func TestAgentCLIParity(t *testing.T) {
 			"--key-file", writeModeFile(t, "key", "crsr_hosted\n", 0o600),
 			"--request-id", "req-hosted")
 		if code != 0 {
-			t.Fatalf("hosted add: exit %d\n%s%s", code, out, errs)
+			t.Fatal(linkFailureDiag("hosted add", out, errs))
 		}
 		in, _ = h.posts()[0]["inputs"].(map[string]any)
 		if _, ok := in["skip_mcp"]; ok && in["skip_mcp"] != false {
@@ -775,6 +777,230 @@ func TestAgentCLIRequestIDRecovery(t *testing.T) {
 			}
 		}
 	})
+
+	// Cancellation after the hub has accepted the POST is not retried, and it
+	// can still follow a commit, so the same-id instructions have to be printed.
+	t.Run("(t5 I1 r3 canceled) canceling an accepted submit still prints recovery", func(t *testing.T) {
+		h := newAgentHub(t, func() []onboarding.KindSpec { return onboarding.Specs() })
+		var mu sync.Mutex
+		var posted []string
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		h.onAny = func(r *http.Request, w http.ResponseWriter, body []byte) bool {
+			if r.Method != http.MethodPost || r.URL.Path != "/v1/admin/agents" {
+				return false
+			}
+			var payload map[string]any
+			_ = json.Unmarshal(body, &payload)
+			id, _ := payload["request_id"].(string)
+			mu.Lock()
+			posted = append(posted, id)
+			mu.Unlock()
+			cancel()
+			<-r.Context().Done()
+			return true
+		}
+		u := agentOperator(t, h.srv.URL)
+		var out, errb bytes.Buffer
+		code := cli.RunContext(ctx, []string{
+			"agent", "add", "--kind", "session", "--name", "Canceled", "--request-id", "req-canceled-1",
+		}, strings.NewReader(""), &out, &errb, u.getenv)
+		mu.Lock()
+		got := append([]string(nil), posted...)
+		mu.Unlock()
+		if len(got) != 1 || got[0] != "req-canceled-1" {
+			t.Fatalf("posts = %v, want one attempt and no automatic retry", got)
+		}
+		if code == 0 || out.Len() != 0 {
+			t.Fatalf("canceled submit: exit %d stdout %q", code, out.String())
+		}
+		errs := errb.String()
+		for _, want := range []string{
+			"request_id req-canceled-1",
+			"was not answered",
+			"may already be committed",
+			"agent status",
+			"--request-id",
+			"req-canceled-1",
+		} {
+			if !strings.Contains(errs, want) {
+				t.Fatalf("recovery instructions missing %q\n%s", want, errs)
+			}
+		}
+	})
+}
+
+// (t5 I1 r3 relocation) A committed submit whose response is lost, then a
+// same-id retry that receives a signed 410, must keep that generated id
+// when the verified follow redispatches the command. A second id creates
+// a second peer on the hub that was moved to.
+func TestAgentCLIRelocationRequestID(t *testing.T) {
+	t.Run("(t5 I1 r3 relocation) lost response then signed move keeps one id and one peer", func(t *testing.T) {
+		origin := testhub.Start(t)
+		key := origin.Hub.IdentityKey()
+		var (
+			mu      sync.Mutex
+			posts   int
+			movedTo *testhub.Env
+			front   *httptest.Server
+		)
+		front = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			if r.Method == http.MethodGet && r.URL.Path == "/v1/hub/identity" {
+				sig, err := key.SignChallenge(front.URL, r.URL.Query().Get("challenge"))
+				if err != nil {
+					writeHubProblem(w, http.StatusBadRequest, "invalid_value", "challenge")
+					return
+				}
+				writeJSONMap(w, http.StatusOK, envelope.HubIdentity{
+					Pubkey: key.Pubkey(), PublicURL: front.URL, ChallengeSig: sig,
+				})
+				return
+			}
+			if r.Method == http.MethodPost && r.URL.Path == "/v1/admin/agents" {
+				mu.Lock()
+				posts++
+				n := posts
+				mu.Unlock()
+				if n == 1 {
+					status, hdr, raw, err := proxyHub(origin.URL, r, body)
+					if err != nil || status < 200 || status > 299 {
+						writeHubProblem(w, http.StatusBadGateway, "unavailable", "origin did not commit")
+						return
+					}
+					_ = hdr
+					_ = raw
+					movedTo = origin.CloneDB(t)
+					writeHubProblem(w, http.StatusServiceUnavailable, "unavailable", "lost response")
+					return
+				}
+				if movedTo == nil {
+					writeHubProblem(w, http.StatusBadGateway, "unavailable", "no destination")
+					return
+				}
+				notice := envelope.HubNotice{
+					NoticeID:  "ntc_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+					Kind:      "moving",
+					Hub:       front.URL,
+					NewURL:    movedTo.URL,
+					Message:   "move",
+					IssuedAt:  envelope.FormatTime(time.Now().Add(-time.Second)),
+					ExpiresAt: envelope.FormatTime(time.Now().Add(time.Hour)),
+				}
+				if err := key.SignNotice(&notice); err != nil {
+					writeHubProblem(w, http.StatusBadGateway, "unavailable", "notice")
+					return
+				}
+				writeJSONMap(w, http.StatusGone, map[string]any{
+					"error": map[string]any{
+						"code":    "hub_moved",
+						"message": "this hub moved to " + movedTo.URL,
+						"details": map[string]any{"notice": notice},
+					},
+				})
+				return
+			}
+			status, hdr, raw, err := proxyHub(origin.URL, r, body)
+			if err != nil {
+				writeHubProblem(w, http.StatusBadGateway, "unavailable", "origin unreachable")
+				return
+			}
+			if hdr.Get("Content-Type") != "" {
+				w.Header().Set("Content-Type", hdr.Get("Content-Type"))
+			}
+			w.WriteHeader(status)
+			_, _ = w.Write(raw)
+		}))
+		t.Cleanup(front.Close)
+
+		u := newUser(t)
+		u.env["VECNET_PROFILE"] = "p"
+		if err := os.MkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		cfg := fmt.Sprintf("[profiles.p]\nhub = %q\nsecret = %q\nhub_pubkey = %q\n", front.URL, origin.OperatorSecret, key.Pubkey())
+		if err := os.WriteFile(u.conf, []byte(cfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		code, out, errs := u.run("agent", "add", "--kind", "session", "--open-name")
+		if code != 0 {
+			t.Fatalf("relocated add: exit %d\n%s", code, errs)
+		}
+		ids := exposedRequestIDs(errs)
+		if len(ids) < 2 || ids[0] == "" {
+			t.Fatalf("exposed request ids = %v\n%s", ids, errs)
+		}
+		for _, id := range ids {
+			if id != ids[0] {
+				t.Fatalf("relocation redispatch changed the request id: %v", ids)
+			}
+		}
+		if movedTo == nil {
+			t.Fatal("move did not clone the committed hub")
+		}
+		peers := sessionPeerIDs(t, movedTo)
+		if len(peers) != 1 {
+			t.Fatalf("session peers after verified follow = %d, want 1 (%v)", len(peers), peers)
+		}
+		if !strings.Contains(out, peers[0]) || !strings.Contains(out, ids[0]) {
+			t.Fatal("result did not show the one peer and the original request id")
+		}
+	})
+}
+
+func proxyHub(dest string, r *http.Request, body []byte) (int, http.Header, []byte, error) {
+	req, err := http.NewRequest(r.Method, dest+r.URL.RequestURI(), bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	req.Header = r.Header.Clone()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, resp.Header, raw, err
+}
+
+func exposedRequestIDs(errs string) []string {
+	var ids []string
+	for _, line := range strings.Split(errs, "\n") {
+		const prefix = "request_id "
+		if strings.HasPrefix(line, prefix) {
+			id, _, _ := strings.Cut(strings.TrimPrefix(line, prefix), " ")
+			if id != "" {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
+func sessionPeerIDs(t *testing.T, env *testhub.Env) []string {
+	t.Helper()
+	resp, raw := env.Do(env.OperatorSecret, http.MethodGet, "/v1/admin/peers", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list peers: %d", resp.StatusCode)
+	}
+	var body struct {
+		Peers []struct {
+			Peer struct {
+				PeerID string `json:"peer_id"`
+				Kind   string `json:"kind"`
+			} `json:"peer"`
+		} `json:"peers"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, row := range body.Peers {
+		if row.Peer.Kind == "session" {
+			ids = append(ids, row.Peer.PeerID)
+		}
+	}
+	return ids
 }
 
 // (t5 M-profile) The recovery command has to carry the profile that submitted,
@@ -1002,6 +1228,54 @@ func TestAgentCLIDiagnosticRedaction(t *testing.T) {
 			t.Error("diagnostics still dump values with a map format")
 		}
 	})
+
+	// (t5 M1 link r3) A link code other than the fixture must not appear in
+	// the fresh-link or direct peer-link failure text.
+	t.Run("(t5 M1 link r3) varied link codes stay out of failure diagnostics", func(t *testing.T) {
+		const code = "WXYZ-2345-6789"
+		h := newAgentHub(t, func() []onboarding.KindSpec { return onboarding.Specs() })
+		h.linkCode = code
+		h.peers = map[string]string{"peer_fresh": "none", "peer_live": "active"}
+		u := agentOperator(t, h.srv.URL)
+		exit, out, errs := u.run("agent", "link", "peer_fresh")
+		if exit != 0 {
+			t.Fatalf("fresh link: exit %d", exit)
+		}
+		if !strings.Contains(out, code) {
+			t.Fatal("fresh link did not return the varied code")
+		}
+		if strings.Contains(linkFailureDiag("fresh link output", out, errs), code) {
+			t.Fatal("fresh link diagnostic disclosed the varied link code")
+		}
+		exit, out, errs = u.run("peer", "link", "peer_live")
+		if exit != 0 {
+			t.Fatalf("peer link: exit %d", exit)
+		}
+		if !strings.Contains(out, code) {
+			t.Fatal("peer link did not return the varied code")
+		}
+		if strings.Contains(linkFailureDiag("peer link output", out, errs), code) {
+			t.Fatal("peer link diagnostic disclosed the varied link code")
+		}
+		raw, err := os.ReadFile("agent_test.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fresh := "fresh link output: %" + "s%" + "s"
+		peer := "peer link output: %" + "s\""
+		for i, line := range strings.Split(string(raw), "\n") {
+			if strings.Contains(line, fresh) || strings.Contains(line, peer) {
+				t.Errorf("line %d still prints raw link output", i+1)
+			}
+		}
+	})
+}
+
+// linkFailureDiag is the failure text for a link command. The streams are
+// accepted so callers can keep the assertion inputs, and they are not
+// formatted: stdout and stderr carry the link code whenever linking worked.
+func linkFailureDiag(label, _, _ string) string {
+	return label
 }
 
 func agentHitDiag(hits []agentHit) string {
@@ -1172,7 +1446,7 @@ func TestAgentCLIBearerRevoke(t *testing.T) {
 			t.Fatal("unconfirmed link called peer link")
 		}
 		if !strings.Contains(out+errs, "revoked") || !strings.Contains(out+errs, "peer_live") {
-			t.Fatalf("warning missing:\n%s%s", out, errs)
+			t.Fatal(linkFailureDiag("unconfirmed link warning", out, errs))
 		}
 		if strings.Contains(out+errs, "ABCD-EFGH-JKMN") {
 			t.Fatal("unconfirmed link printed a code")
@@ -1209,7 +1483,7 @@ func TestAgentCLIBearerRevoke(t *testing.T) {
 			t.Fatalf("fresh link: exit %d calls %d %s", code, len(h.paths("/v1/admin/dot-links")), errs)
 		}
 		if !strings.Contains(out, "ABCD-EFGH-JKMN") {
-			t.Fatalf("fresh link output: %s%s", out, errs)
+			t.Fatal(linkFailureDiag("fresh link output", out, errs))
 		}
 	})
 
@@ -1248,7 +1522,7 @@ func TestAgentCLIBearerRevoke(t *testing.T) {
 			t.Fatal("unconfirmed add printed the key or a link code")
 		}
 		if !strings.Contains(out+errs, "revoked") || !strings.Contains(out+errs, "peer_grok") {
-			t.Fatalf("add warning missing:\n%s%s", out, errs)
+			t.Fatal(linkFailureDiag("unconfirmed add warning", out, errs))
 		}
 
 		h = newAgentHub(t, func() []onboarding.KindSpec { return onboarding.Specs() })
@@ -1297,7 +1571,7 @@ func TestAgentCLIBearerRevoke(t *testing.T) {
 			t.Fatalf("peer link calls: links %d peer-list %d", len(h.paths("/v1/admin/dot-links")), len(h.paths("/v1/admin/peers")))
 		}
 		if !strings.Contains(out, "ABCD-EFGH-JKMN") {
-			t.Fatalf("peer link output: %s", out)
+			t.Fatal(linkFailureDiag("peer link output", out, errs))
 		}
 	})
 
@@ -1408,6 +1682,7 @@ type agentHub struct {
 	peers    map[string]string
 	onPost   func(n int, body map[string]any, w http.ResponseWriter)
 	onStatus func(id string, w http.ResponseWriter)
+	linkCode string
 	onAny    func(r *http.Request, w http.ResponseWriter, body []byte) bool
 	postsN   int
 }
@@ -1467,7 +1742,11 @@ func (h *agentHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSONMap(w, http.StatusOK, map[string]any{"peers": rows})
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/dot-links":
-		writeJSONMap(w, http.StatusCreated, map[string]string{"code": "ABCD-EFGH-JKMN", "expires_at": "2026-11-06T00:10:00.000Z"})
+		code := h.linkCode
+		if code == "" {
+			code = "ABCD-EFGH-JKMN"
+		}
+		writeJSONMap(w, http.StatusCreated, map[string]string{"code": code, "expires_at": "2026-11-06T00:10:00.000Z"})
 	default:
 		writeHubProblem(w, http.StatusNotFound, "not_found", "no such path")
 	}

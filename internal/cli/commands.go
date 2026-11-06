@@ -178,6 +178,9 @@ type app struct {
 	inHook        bool   // hooks never TOFU or rewrite trust state
 	stdinConsumed bool   // a retry cannot consume stdin again
 	inMCP         bool   // stdio relay startup refusals must make no requests
+	// retainedRequestID is the agent-add id for this process, generated or
+	// explicit, so a verified hub follow redispatches the same submission.
+	retainedRequestID string
 }
 
 // exit prints err and maps it to an exit code.
@@ -454,7 +457,28 @@ func (a *app) dispatch(cmd string, args []string) error {
 	if a.stdinConsumed {
 		return usageErr("hub followed; re-run the command (stdin was consumed)")
 	}
-	return a.dispatchOnce(cmd, args)
+	return a.dispatchOnce(cmd, a.withRetainedRequestID(cmd, args))
+}
+
+// withRetainedRequestID puts the id from the first attempt back on a
+// redispatched agent command. Without it, agent add generates a new id
+// after a signed 410 and the follow creates a second peer.
+func (a *app) withRetainedRequestID(cmd string, args []string) []string {
+	if cmd != "agent" || a.retainedRequestID == "" || hasRequestIDFlag(args) {
+		return args
+	}
+	out := make([]string, len(args), len(args)+2)
+	copy(out, args)
+	return append(out, "--request-id", a.retainedRequestID)
+}
+
+func hasRequestIDFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--request-id" || strings.HasPrefix(arg, "--request-id=") {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *app) dispatchOnce(cmd string, args []string) error {
