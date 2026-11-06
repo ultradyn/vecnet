@@ -1549,36 +1549,48 @@ func chatShort(id string) string {
 
 // chatLogTitle fits a pane w wide: the title gives way, so the budget stays.
 func chatLogTitle(m *Model, w int) string {
-	title, facts, cut := chatLogTitleParts(m, w)
-	return title + facts + cut
+	p := chatLogTitleParts(m, w)
+	return p.title + p.facts + p.budget + p.cut
 }
 
 // chatLogTitleRich is chatLogTitle styled: the thread's title as the focused
-// pane's title, its id and budget muted, a loop cut in error.
+// pane's title, its id muted, the budget in its §5.5 role, a loop cut in error.
 func chatLogTitleRich(m *Model, w int) string {
 	th := m.th
-	title, facts, cut := chatLogTitleParts(m, w)
-	out := PaneTitle(th, true).Render(title) + th.Fg(theme.Muted).Render(facts)
-	if cut != "" {
-		out += th.Fg(theme.Error).Render(cut)
+	p := chatLogTitleParts(m, w)
+	out := PaneTitle(th, true).Render(p.title) + th.Fg(theme.Muted).Render(p.facts)
+	if p.budget != "" {
+		out += th.Fg(p.budgetRole).Render(p.budget)
+	}
+	if p.cut != "" {
+		out += th.Fg(theme.Error).Render(p.cut)
 	}
 	return out
 }
 
-func chatLogTitleParts(m *Model, w int) (title, facts, cut string) {
+// chatTitleParts is the log pane's title in its roles: the thread's title,
+// its id and the budget label (muted), the budget (the §5.5 thread budget
+// map) and a loop cut (error).
+type chatTitleParts struct {
+	title, facts, budget, cut string
+	budgetRole                theme.Role
+}
+
+func chatLogTitleParts(m *Model, w int) chatTitleParts {
 	row := chatRowOf(m, m.CurrentThread)
 	if row == nil {
-		return "chat", "", ""
+		return chatTitleParts{title: "chat"}
 	}
-	budget := "unlimited"
+	p := chatTitleParts{budget: "unlimited", budgetRole: theme.Muted}
 	if b := row.Thread.BudgetRemaining; b != nil {
-		budget = fmt.Sprint(*b)
+		p.budget, p.budgetRole = fmt.Sprint(*b), theme.Budget(*b, false)
 	}
-	facts = fmt.Sprintf("  %s · budget %s", chatShort(row.Thread.ThreadID), budget)
+	p.facts = fmt.Sprintf("  %s · budget ", chatShort(row.Thread.ThreadID))
 	if row.Cut != nil {
-		cut = " · cut " + Clean(row.Cut.Reason)
+		p.cut = " · cut " + Clean(row.Cut.Reason)
 	}
-	return ansi.Truncate(chatTitleOf(row.Thread), max(w-5-lipgloss.Width(facts+cut), 8), "…"), facts, cut
+	p.title = ansi.Truncate(chatTitleOf(row.Thread), max(w-5-lipgloss.Width(p.facts+p.budget+p.cut), 8), "…")
+	return p
 }
 
 // chatSeg is a run of cleaned text in one role. The role comes from the field

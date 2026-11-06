@@ -294,6 +294,11 @@ func TestStateMaps(t *testing.T) {
 	check("quota 44", theme.Quota(44, 25, 10), theme.Success)
 	check("quota 20", theme.Quota(20, 25, 10), theme.Warn)
 	check("quota 3", theme.Quota(3, 25, 10), theme.Error)
+	// The bounds are inclusive: 25 % or less is warn, 10 % or less is error.
+	check("quota 25.1", theme.Quota(25.1, 25, 10), theme.Success)
+	check("quota 25", theme.Quota(25, 25, 10), theme.Warn)
+	check("quota 10.1", theme.Quota(10.1, 25, 10), theme.Warn)
+	check("quota 10", theme.Quota(10, 25, 10), theme.Error)
 	check("count 0", theme.Count(0, theme.Error), theme.Muted)
 	check("count 3", theme.Count(3, theme.Error), theme.Error)
 	check("http 409", theme.HTTPStatus(409), theme.Error)

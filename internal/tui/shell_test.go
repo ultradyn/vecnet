@@ -931,3 +931,25 @@ func TestProgramQuits(t *testing.T) {
 		t.Fatal("q did not exit within 2 s")
 	}
 }
+
+// A hint pair's key is its leading run of key words: `[ ]` and `( )` are one
+// key, a narrow all-keys string is all key, and a pair of prose has no key
+// (design §7.5).
+func TestHintLineKeys(t *testing.T) {
+	th := theme.New(theme.TrueColor, true)
+	key, word := th.Fg(theme.Text).Render, th.Fg(theme.Muted).Render
+	for _, tc := range []struct{ hints, want string }{
+		{"i write  [ ] thread  ( ) who", key("i") + word(" write") + "  " + key("[ ]") + word(" thread") + "  " + key("( )") + word(" who")},
+		{"i [ ] j/k R a e m s f o n ( ) :react", key("i [ ] j/k R a e m s f o n ( ) :react")},
+		{"j/k pgup/pgdn esc", key("j/k pgup/pgdn esc")},
+		{"digit answers  other keys cancel", key("digit") + word(" answers") + "  " + word("other keys cancel")},
+		{"y discard  any other key cancels", key("y") + word(" discard") + "  " + word("any other key cancels")},
+		{"j/k move  read-only", key("j/k") + word(" move") + "  " + word("read-only")},
+		{"1-4 tabs  : command  ctrl+u/d log  enter open", key("1-4") + word(" tabs") + "  " + key(":") + word(" command") + "  " + key("ctrl+u/d") + word(" log") + "  " + key("enter") + word(" open")},
+		{"f file  :react  … more", key("f") + word(" file") + "  " + key(":react") + "  " + word("… more")},
+	} {
+		if got := hintLine(th, tc.hints); got != tc.want {
+			t.Errorf("%q:\n got %q\nwant %q", tc.hints, got, tc.want)
+		}
+	}
+}

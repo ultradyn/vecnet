@@ -428,22 +428,51 @@ func (m *Model) viewStatus(w int) string {
 	return fit(chip+"  "+fit(hintLine(th, m.active().Hints()), room)+who, w)
 }
 
-// hintLine draws a Hints() string: each pair is separated by two spaces and
-// starts with its key, which is text; the words after it are muted (§7.5).
+// hintLine draws a Hints() string: pairs are separated by two spaces, and a
+// pair's key is its leading run of key words, in text; the words after it are
+// muted (§7.5). So `[ ] thread` keys `[ ]`, a narrow all-keys string is all
+// key, and `other keys cancel` has no key.
 func hintLine(th *theme.Theme, hints string) string {
 	var b strings.Builder
 	for i, pair := range strings.Split(hints, "  ") {
 		if i > 0 {
 			b.WriteString("  ")
 		}
-		key, rest, ok := strings.Cut(pair, " ")
-		if !ok {
-			b.WriteString(th.Fg(theme.Muted).Render(pair))
-			continue
+		words := strings.Split(pair, " ")
+		n := 0
+		for n < len(words) && hintKey(words[n]) {
+			n++
 		}
-		b.WriteString(th.Fg(theme.Text).Render(key) + th.Fg(theme.Muted).Render(" "+rest))
+		key, rest := strings.Join(words[:n], " "), strings.Join(words[n:], " ")
+		if key != "" {
+			b.WriteString(th.Fg(theme.Text).Render(key))
+			if rest != "" {
+				rest = " " + rest
+			}
+		}
+		if rest != "" {
+			b.WriteString(th.Fg(theme.Muted).Render(rest))
+		}
 	}
 	return b.String()
+}
+
+// hintKeyNames are the named keys Hints() strings use.
+var hintKeyNames = map[string]bool{"enter": true, "esc": true, "tab": true, "space": true, "digit": true}
+
+// hintKey reports whether a Hints() word names a key: one printable ASCII
+// character, an alternation or chord (`j/k`, `ctrl+u/d`), a digit range
+// (`1-4`), a command (`:react`) or a named key.
+func hintKey(w string) bool {
+	switch {
+	case len(w) == 1:
+		return w[0] > ' ' && w[0] < 0x7f
+	case strings.ContainsAny(w, "/+"), strings.HasPrefix(w, ":"):
+		return true
+	case len(w) == 3 && w[1] == '-' && unicode.IsDigit(rune(w[0])) && unicode.IsDigit(rune(w[2])):
+		return true
+	}
+	return hintKeyNames[w]
 }
 
 // viewCommandLine is the last row: the command being typed, a confirmation, a

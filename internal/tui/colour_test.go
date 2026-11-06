@@ -320,3 +320,34 @@ func TestNoColourLiteralsOutsideTheme(t *testing.T) {
 }
 
 func ansiStrip(s string) string { return sgrAt.ReplaceAllString(s, "") }
+
+// An HTTP status takes the §5.5 map wherever it shows: 400 and above is
+// error, any other code is text, and none sent takes the cell's none role.
+func TestStatusRoles(t *testing.T) {
+	code := func(n int) *int { return &n }
+	for _, tc := range []struct {
+		code *int
+		want theme.Role
+	}{{nil, theme.Muted}, {code(101), theme.Text}, {code(200), theme.Text}, {code(302), theme.Text}, {code(399), theme.Text}, {code(400), theme.Error}, {code(503), theme.Error}} {
+		if got := statusRole(tc.code, theme.Muted); got != tc.want {
+			t.Errorf("%v: %v, want %v", tc.code, got, tc.want)
+		}
+	}
+	if got := statusRole(nil, theme.Dim); got != theme.Dim {
+		t.Errorf("none: %v, want dim", got)
+	}
+
+	// The inbox list shows a dead letter with no status as the detail does.
+	th := theme.New(theme.TrueColor, true)
+	for _, s := range colourScreens(t) {
+		if s.name != "inbox" {
+			continue
+		}
+		frame := s.render(th)
+		for _, want := range []string{th.Fg(theme.Muted).Render("---"), th.Fg(theme.Error).Render("503")} {
+			if !strings.Contains(frame, want) {
+				t.Errorf("inbox: %q not in the frame", want)
+			}
+		}
+	}
+}

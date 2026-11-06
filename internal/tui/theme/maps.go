@@ -110,13 +110,13 @@ func EventType(t string) Role {
 	return Info
 }
 
-// Quota is a remaining-quota level: below lowAt → error, below warnAt →
-// warn, otherwise success.
+// Quota is a remaining-quota level: lowAt or less → error, warnAt or less →
+// warn, otherwise success (§5.5: "25 % or less → warn; 10 % or less → error").
 func Quota(pct, warnAt, lowAt float64) Role {
 	switch {
-	case pct < lowAt:
+	case pct <= lowAt:
 		return Error
-	case pct < warnAt:
+	case pct <= warnAt:
 		return Warn
 	}
 	return Success

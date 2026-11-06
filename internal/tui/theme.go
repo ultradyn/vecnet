@@ -37,3 +37,13 @@ func selPad(th *theme.Theme, line string, w int, sel bool) string {
 	}
 	return fitFill(line, w, th.Sel(theme.Text))
 }
+
+// statusRole is an HTTP status cell's role, one map on every screen (design
+// §5.5): 400 and above is error, any other code is text, and none sent takes
+// the cell's none role.
+func statusRole(code *int, none theme.Role) theme.Role {
+	if code == nil {
+		return none
+	}
+	return theme.HTTPStatus(*code)
+}

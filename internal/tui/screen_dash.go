@@ -872,8 +872,7 @@ func dashHealthLines(m *Model, names dashNames, inner, limit int) []string {
 		if f.LastError != nil && *f.LastError != "" {
 			reason = Clean(*f.LastError)
 		}
-		// A failed delivery is an error whatever its status says.
-		lines = append(lines, th.Fg(theme.Error).Render(status)+" "+th.Fg(theme.Text).Render(names.peer(f.Recipient))+" "+th.Fg(theme.Muted).Render(reason))
+		lines = append(lines, th.Fg(statusRole(f.LastStatus, theme.Muted)).Render(status)+" "+th.Fg(theme.Text).Render(names.peer(f.Recipient))+" "+th.Fg(theme.Muted).Render(reason))
 	}
 	return lines
 }

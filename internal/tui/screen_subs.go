@@ -356,17 +356,9 @@ func subsStatus(status *int) string {
 	return strconv.Itoa(*status)
 }
 
-// subsStatusRole is the last status's role: none attempted is dim, anything
-// outside 2xx is an error (a callback that redirects did not take the event).
-func subsStatusRole(status *int) theme.Role {
-	switch {
-	case status == nil:
-		return theme.Dim
-	case *status < 200 || *status >= 300:
-		return theme.Error
-	}
-	return theme.Text
-}
+// subsStatusRole is the last status's role: none attempted is dim, like the
+// table's other empty cells; a code takes the §5.5 map.
+func subsStatusRole(status *int) theme.Role { return statusRole(status, theme.Dim) }
 
 // viewDetail is the selected row's health_note, then every fact the table may
 // have dropped. The note comes first, so a short pane still shows it.

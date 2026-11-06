@@ -724,7 +724,7 @@ func (s *inboxScreen) viewRow(row inboxRow, selected bool, peers inboxPeers, m *
 		if d.LastStatus != nil {
 			status = fmt.Sprint(*d.LastStatus)
 		}
-		text = []inboxCell{{theme.Error, status, 3}, {theme.Muted, inboxClass(d.Class), textW - 4}}
+		text = []inboxCell{{statusRole(d.LastStatus, theme.Muted), status, 3}, {theme.Muted, inboxClass(d.Class), textW - 4}}
 		tail.text = inboxTries(d.Attempt)
 	case row.sub != nil:
 		a := row.sub
@@ -985,10 +985,6 @@ func (s *inboxScreen) viewDeadLetter(d opapi.DeadLetter, peers inboxPeers, m *Mo
 		status = fmt.Sprint(*d.LastStatus)
 	}
 	th := m.th
-	statusRole := theme.Muted
-	if d.LastStatus != nil {
-		statusRole = theme.HTTPStatus(*d.LastStatus)
-	}
 	lines := []string{
 		th.Fg(theme.Error).Render("dead_letter") + "  " + th.Fg(theme.Muted).Render(inboxClass(d.Class)),
 		"",
@@ -998,7 +994,7 @@ func (s *inboxScreen) viewDeadLetter(d opapi.DeadLetter, peers inboxPeers, m *Mo
 		inboxFieldAs(th, "message", Clean(d.MessageID), theme.Dim),
 		inboxFieldAs(th, "delivery", Clean(d.DeliveryID), theme.Dim),
 		inboxFieldAs(th, "attempts", fmt.Sprint(d.Attempt), theme.Warn),
-		inboxFieldAs(th, "status", status, statusRole),
+		inboxFieldAs(th, "status", status, statusRole(d.LastStatus, theme.Muted)),
 		inboxField(th, "updated", inboxClock(d.UpdatedAt, "15:04:05", m)),
 		"",
 	}
