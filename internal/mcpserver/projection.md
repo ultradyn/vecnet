@@ -27,7 +27,12 @@ tool descriptions and 83 property descriptions, so its exception remains accepte
 All tool descriptions are at most 177 bytes. Property descriptions are at most
 70 bytes except the 99-byte priority guidance, which preserves the required
 choice, immediate wake cost, and hold behavior. The explicit allowlist is unchanged.
-The regression budgets freeze the achieved total plus 10% and each tool plus 15%.
+Round three uses **19,655 bytes**, up 180 bytes from its starting head
+(19,475 after the reaction-priority correction). Paging bounds add 107 bytes,
+cursor kinds add 70, and timestamp wording adds 3. The total pin increases
+from 19,499 to 19,655 (+156); individual pins match the measured tool sizes,
+including the existing reaction reduction. The regression budgets retain the
+achieved total plus 10% and each tool plus 15%.
 
 Annotations and all four output contracts remain. The minimal OAuth
 `securitySchemes` declaration is retained for ChatGPT account linking, even

@@ -30,22 +30,22 @@ func TestToolsBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("tools/list: %d bytes", len(compact))
-	// Plain-language wording fits the accepted 19,500-byte discovery cap.
-	// Retain the achieved-size regression allowance from round one.
-	const achievedTotal = 19499
+	// Round three adds paging bounds and cursor/timestamp wording. Freeze
+	// only the measured growth; retain the existing regression allowances.
+	const achievedTotal = 19655
 	if budget := achievedTotal * 110 / 100; len(compact) > budget {
 		t.Errorf("tools/list: %d bytes exceeds budget %d (achieved %d + 10%%)", len(compact), budget, achievedTotal)
 	}
 	// Freeze each achieved size independently so one tool cannot silently
 	// consume another's savings. A new tool needs an explicit baseline.
 	achieved := map[string]int{
-		"vecnet_send": 2816, "vecnet_reply": 1686, "vecnet_react": 868,
-		"vecnet_inbox": 651, "vecnet_subscriptions": 432, "vecnet_ack": 610,
-		"vecnet_receipt": 610, "vecnet_presence": 1027, "vecnet_presence_subscribe": 514,
-		"vecnet_threads": 745, "vecnet_thread": 632, "vecnet_peers": 370,
+		"vecnet_send": 2826, "vecnet_reply": 1696, "vecnet_react": 844,
+		"vecnet_inbox": 706, "vecnet_subscriptions": 432, "vecnet_ack": 624,
+		"vecnet_receipt": 610, "vecnet_presence": 1005, "vecnet_presence_subscribe": 514,
+		"vecnet_threads": 791, "vecnet_thread": 670, "vecnet_peers": 370,
 		"vecnet_peer_create": 747, "vecnet_peer_set_disabled": 555, "vecnet_groups": 389,
 		"vecnet_group_create": 627, "vecnet_group_add": 613, "vecnet_whoami": 726,
-		"vecnet_blob_put": 873, "vecnet_blob_get": 1311, "vecnet_set_avatar": 670,
+		"vecnet_blob_put": 873, "vecnet_blob_get": 1340, "vecnet_set_avatar": 670,
 		"vecnet_clear_avatar": 459, "vecnet_guide": 1534,
 	}
 	for _, raw := range result.Tools {
