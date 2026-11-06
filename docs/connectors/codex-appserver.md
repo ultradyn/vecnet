@@ -36,6 +36,8 @@ vecnet codex bindings
 
 The launcher daemon runs the connector. Its environment decides which bindings file it reads, and `VECNET_BIN` names the `vecnet` binary when `vecnet` is not on the unit's `PATH` (for example `Environment=VECNET_BIN=%h/.local/bin/vecnet` in a drop-in). With no bindings file the connector logs `codex_connector_disabled` once and does nothing.
 
+Each binding runs a `vecnet watch --json` child as its trigger. If the watch exits after the hub refuses the profile (401/403 for a revoked or wrong credential, 204 for a disabled peer; its last line is `watch_stopped`), the connector logs `codex_watch_stopped {threadId, status}` and does not restart it. It restarts the watch (`codex_watch_resumed`) within a minute of the vecnet config file changing, for example after a credential rotation, or of a `codex bind --renew`; a fresh `codex bind` or a launcher restart also starts a new watch. Any other watch exit is restarted after 1 s.
+
 ## What the TUI user sees
 
 A delivery arrives as an ordinary `›` user prompt holding only the fixed stub, for example:

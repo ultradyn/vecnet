@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
+import { statSync } from 'node:fs';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
 import type { KeyValue } from '../backend.ts';
@@ -30,6 +32,12 @@ export interface Engine {
   start(): void; stop(): Promise<void>; state(): 'connecting' | 'ready' | 'unreachable' | 'refused_version';
   liveness(): Liveness; subscribed(): boolean; setOverLimit(over: boolean): void;
 }
+/** The Go CLI's `configPath`: VECNET_CONFIG, else XDG_CONFIG_HOME, else HOME. It holds the profiles' credentials. */
+export function vecnetConfigPath(env: Record<string, string | undefined>): string | undefined {
+  return env.VECNET_CONFIG ? env.VECNET_CONFIG
+    : env.XDG_CONFIG_HOME ? join(env.XDG_CONFIG_HOME, 'vecnet', 'config.toml')
+    : env.HOME ? join(env.HOME, '.config', 'vecnet', 'config.toml') : undefined;
+}
 type RecordValue = Record<string, any>;
 type Batch = { stub: string; entries: { key: string; value: string }[]; deliveries: string[] };
 const obj = (x: unknown): RecordValue => x !== null && typeof x === 'object' && !Array.isArray(x) ? x as RecordValue : {};
@@ -43,6 +51,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   // launcher's helper intentionally preserves ordinary non-secret variables.
   const env = Object.fromEntries(Object.entries(scrubEnv(d.env, envKeys)).filter(([k]) => envKeys.includes(k)));
   const baseArgs = ['--net', b.profile, ...(b.as ? ['--as', b.as] : [])];
+  const configPath = vecnetConfigPath(env);
   let running = false, rpc: CodexRpc | undefined, watch: ChildProcess | undefined;
   let connectionState: ReturnType<Engine['state']> = 'connecting';
   let status: unknown = { type: 'notLoaded' }, attached = false, archived = false, overLimit = false;
@@ -510,29 +519,59 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (kv.get('inflight:' + key)) { await releaseUnsentClaim(nonce); return; }
     write(row); kv.delete('claiming:' + nonce); await transmit(row, batch);
   }
+  function configSignature(): string {
+    if (configPath === undefined) return 'unlocatable';
+    try { const st = statSync(configPath); return [st.dev, st.ino, st.size, st.mtimeMs, st.ctimeMs].join(':'); }
+    catch { return 'missing'; }
+  }
   function startWatch() {
     if (!running) return;
-    watch = spawn(d.vecnetBin, [...baseArgs, 'watch', '--json'], { env, stdio: ['ignore', 'pipe', 'ignore'] });
-    const reader = createInterface({ input: watch.stdout! });
+    const child = spawn(d.vecnetBin, [...baseArgs, 'watch', '--json'], { env, stdio: ['ignore', 'pipe', 'ignore'] });
+    watch = child;
+    // Set from the watch's own last line: it hit 401/403/204 (or another
+    // terminal 4xx) and will not reconnect (PROTOCOL §13.1).
+    let stoppedStatus: number | undefined;
+    const reader = createInterface({ input: child.stdout! });
     reader.on('line', line => {
       if (Buffer.byteLength(line) > 1_048_576) return;
       try {
         const event = obj(JSON.parse(line)), p = obj(obj(event.data).message).priority;
         if (event.type === 'delivery' && (p === 'wake' || p === 'wake_idle')) arm();
+        const status = obj(event.data).status;
+        if (event.type === 'watch_stopped' && event.cursor === '' && Number.isInteger(status) && status >= 200 && status < 500) stoppedStatus = status;
       } catch { /* The watch stream is a trigger, never turn input. */ }
     });
-    watch.on('error', () => { log.warn('codex_watch_unreachable', { threadId: b.threadId }); });
-    watch.once('close', () => { reader.close(); watch = undefined; if (running) {
+    child.on('error', () => { log.warn('codex_watch_unreachable', { threadId: b.threadId }); });
+    // 'close' follows the end of stdout, so the stop line has been read.
+    child.once('close', () => {
+      reader.close();
+      if (watch === child) watch = undefined;
+      if (!running) return;
+      if (stoppedStatus !== undefined) {
+        // Respawning would only repeat the refused request every second.
+        // Resume on a credential/config change or a binding renewal.
+        watchStopped = { config: configSignature(), expiresAt: b.expiresAt };
+        log.warn('codex_watch_stopped', { threadId: b.threadId, status: stoppedStatus });
+        return;
+      }
       const timer = clock.timer(1000, () => { watchRetry = undefined; startWatch(); }); watchRetry = timer;
-    } });
+    });
   }
   let watchRetry: { cancel(): void } | undefined;
+  let watchStopped: { config: string; expiresAt: number } | undefined;
+  function resumeWatch() {
+    if (!running || !watchStopped || watch || watchRetry) return;
+    if (configSignature() === watchStopped.config && b.expiresAt === watchStopped.expiresAt) return;
+    watchStopped = undefined;
+    log.info('codex_watch_resumed', { threadId: b.threadId });
+    startWatch();
+  }
   function heartbeat() {
-    minute = clock.timer(60_000, () => { enqueue(reconcile); if (running) heartbeat(); });
+    minute = clock.timer(60_000, () => { enqueue(reconcile); resumeWatch(); if (running) heartbeat(); });
   }
   return {
     start() { if (running) { enqueue(async () => { await recover(); arm(0); }); return; }
-      running = true; reconnect = undefined; gap = undefined; claimRecovery = undefined; warmCheck = undefined; historyRetry = undefined; historyRetryIndex = 0; startWatch(); heartbeat();
+      running = true; reconnect = undefined; gap = undefined; claimRecovery = undefined; warmCheck = undefined; historyRetry = undefined; historyRetryIndex = 0; watchStopped = undefined; startWatch(); heartbeat();
       // Unsent claims need only Go, including when Codex is unreachable or
       // refused by the version gate. Release them before any RPC recovery.
       enqueue(async () => { await recoverClaims(); await connect(); }); },

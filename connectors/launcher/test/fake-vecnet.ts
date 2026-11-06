@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync } from 'node:fs';
 
 // Every path comes from the test's private environment; no home defaults.
 const file = process.env.FAKE_VECNET_PLAN;
@@ -10,9 +10,18 @@ const acknowledge = (data: object) => appendFileSync(plan.trace, JSON.stringify(
 appendFileSync(plan.trace, JSON.stringify({ argv, env: process.env }) + '\n');
 const flag = (s: string) => argv[argv.indexOf(s) + 1];
 if (argv.includes('watch')) {
-  let seen = 0, revision = -1;
+  let seen = 0, revision = -1, ending = false;
   const tick = () => {
+    if (ending) return;
     const p = read();
+    // A one-shot crash: a recoverable process failure with no stop line.
+    if (p.watchCrash && existsSync(p.watchCrash)) { ending = true; unlinkSync(p.watchCrash); process.exit(1); }
+    // A terminal hub answer (401/403/204): the Go watch's last line, then exit 2.
+    if (p.watchStop) {
+      ending = true;
+      process.stdout.write(JSON.stringify({ type: 'watch_stopped', cursor: '', at: '', data: { text: 'not reconnecting: hub answered HTTP ' + p.watchStop, status: p.watchStop } }) + '\n', () => process.exit(2));
+      return;
+    }
     for (const e of (p.events ?? []).slice(seen)) process.stdout.write(JSON.stringify(e) + '\n');
     seen = (p.events ?? []).length;
     if (revision !== p.revision) {

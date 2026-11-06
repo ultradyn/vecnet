@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
 import type { KeyValue } from '../backend.ts';
 import { redactingLog } from '../redact.ts';
-import { createEngine } from './engine.ts';
+import { createEngine, vecnetConfigPath } from './engine.ts';
 import type { Binding, Engine } from './engine.ts';
 import { openCodexRpc } from './rpc.ts';
 
@@ -25,9 +25,7 @@ const threadPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 /** The same path as the Go CLI's `codexBindingsPath`, unless VECNET_CODEX_BINDINGS names one. */
 export function codexBindingsPath(env: NodeJS.ProcessEnv): string | undefined {
   if (env.VECNET_CODEX_BINDINGS) return env.VECNET_CODEX_BINDINGS;
-  const config = env.VECNET_CONFIG ? env.VECNET_CONFIG
-    : env.XDG_CONFIG_HOME ? join(env.XDG_CONFIG_HOME, 'vecnet', 'config.toml')
-    : env.HOME ? join(env.HOME, '.config', 'vecnet', 'config.toml') : undefined;
+  const config = vecnetConfigPath(env);
   return config === undefined ? undefined : join(dirname(config), 'codex', 'bindings.json');
 }
 

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, renameSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, renameSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,7 +60,7 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
   const map = new Map<string, string>();
   const kv: KeyValue = { get: k => map.get(k), set: (k, v) => { map.set(k, v); }, delete: k => { map.delete(k); }, keys: (p = '') => [...map.keys()].filter(k => k.startsWith(p)) };
   const config = join(dir, 'plan.json'), trace = join(dir, 'trace.jsonl'), claims = join(dir, 'claims.json');
-  const plan = { trace, claims, stub, items: (options.claiming ? [{ id: 'w1', priority: 'wake' }] : []) as Item[], events: [] as unknown[], refused: '', revision: 0, hookGate: '', hookFailure: '', releaseFailure: options.releaseFailure ?? false };
+  const plan = { trace, claims, stub, items: (options.claiming ? [{ id: 'w1', priority: 'wake' }] : []) as Item[], events: [] as unknown[], refused: '', revision: 0, hookGate: '', hookFailure: '', releaseFailure: options.releaseFailure ?? false, watchStop: 0, watchCrash: '' };
   writeFileSync(trace, ''); writeFileSync(claims, '{}');
   const save = () => { plan.revision++; writeFileSync(config + '.next', JSON.stringify(plan)); renameSync(config + '.next', config); }; save();
   const bin = join(dir, 'vecnet');
@@ -1183,4 +1183,39 @@ test('launcher binding can ensure a thread after a closed broadcast', async t =>
   h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' } }); h.fake.notify('thread/closed', { threadId: 'thread' }); await h.sync();
   await h.tick(minute); await h.wake(); await eventually(() => h.sends().length === 1);
   assert.equal(ensures, 1); assert.equal(h.sends()[0].method, 'turn/start');
+});
+
+test('terminal watch exit stops respawning until the config or binding changes', async t => {
+  const h = await harness(t);
+  const watches = () => h.records().filter(r => !r.ack && r.argv.includes('watch')).length;
+  const stopped = () => h.log.entries.filter(e => e.msg === 'codex_watch_stopped');
+  const advanceUntil = async (fn: () => boolean, what: string) => eventually(() => { if (fn()) return true; h.clock.advance(1000); return false; }, what);
+  assert.equal(watches(), 1);
+  // A crash without a stop line is a recoverable process failure: respawn after 1 s.
+  const crash = join(dirname(h.plan.trace), 'watch-crash');
+  writeFileSync(crash, ''); h.plan.watchCrash = crash; h.save();
+  await eventually(() => !existsSync(crash), 'watch crashed');
+  await advanceUntil(() => watches() === 2, 'watch respawned after a crash');
+  assert.equal(stopped().length, 0);
+  // A 401 stop line: the watch is not respawned, however long the engine runs.
+  h.plan.watchStop = 401; h.save();
+  await eventually(() => stopped().length === 1, 'terminal stop logged');
+  assert.deepEqual(stopped()[0].meta, { threadId: 'thread', status: 401 });
+  for (let i = 0; i < 5; i++) await h.tick(minute);
+  assert.equal(watches(), 2, 'no respawn after 401');
+  // A credential/config change resumes the watch at the next minute check.
+  h.plan.watchStop = 0; h.save();
+  await advanceUntil(() => watches() === 3, 'watch resumed after the config changed');
+  // 204 (disabled) likewise stops; a binding renewal resumes it.
+  h.plan.watchStop = 204; h.save();
+  await eventually(() => stopped().length === 2, 'disabled stop logged');
+  for (let i = 0; i < 3; i++) await h.tick(minute);
+  assert.equal(watches(), 3, 'no respawn after 204');
+  // The config is unchanged (it still answers 204), so only the renewal
+  // resumes the watch, which then stops again on the same answer.
+  h.binding.expiresAt += hour;
+  await advanceUntil(() => watches() === 4, 'watch resumed after a binding renewal');
+  await eventually(() => stopped().length === 3, 'stopped again');
+  for (let i = 0; i < 3; i++) await h.tick(minute);
+  assert.equal(watches(), 4);
 });
