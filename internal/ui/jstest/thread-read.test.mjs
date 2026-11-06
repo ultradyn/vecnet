@@ -137,6 +137,27 @@ test('leaving before the second is up resets the dwell', async t => {
   assert.deepEqual(api.posts, [['dly_msg_7', 'read']]);
 });
 
+test('a tail that remains in view after the message was visible enough is read; a tail that was only a sliver is not', async t => {
+  const { api, reader } = setup(t);
+  // Short view, or a message with little room below it: scrolling to the end
+  // leaves the top above the root and the rest under 60%. It never goes fully
+  // out, so the old "left through the top" rule never fires and the dwell has
+  // already been cancelled. A human did scroll past it.
+  reader.view('msg_7', visible);
+  reader.view('msg_7', { intersecting: true, enough: false, above: false, pastTop: true });
+  assert.ok(reader.seen('msg_7'));
+  // Still filling the view (top already above the root): that is the dwell, not a pass.
+  reader.view('msg_8', { intersecting: true, enough: true, pastTop: true });
+  t.mock.timers.tick(DWELL_MS - 1);
+  assert.ok(!reader.seen('msg_8'));
+  // Never enough, then only a tail: a sliver, not a read.
+  reader.view('msg_9', { intersecting: true, enough: false, above: true, pastTop: true });
+  t.mock.timers.tick(BATCH_MS);
+  await settle();
+  assert.ok(!reader.seen('msg_9'));
+  assert.deepEqual(api.posts, [['dly_msg_7', 'read']]);
+});
+
 test('scrolled past going down counts as seen; leaving through the bottom, or a sliver swept off, does not', async t => {
   const { api, reader } = setup(t);
   reader.view('msg_7', visible);

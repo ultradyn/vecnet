@@ -77,7 +77,9 @@ try {
     assert(await unreadIn() === TEXTS.length - READ, 'the fixture is not six unread');
 
     const row = page.locator(`#threads a[href="#thread/${thread}"]`);
-    const pill = async () => (await row.locator('.ur').count()) ? (await row.locator('.ur').textContent()) : '';
+    // One non-waiting read: count-then-textContent races the pill's removal and
+    // textContent would then wait its full timeout for an element that is gone.
+    const pill = async () => (await row.locator('.ur').allTextContents())[0] ?? '';
     const pillIs = async (want, why) => {
       const deadline = Date.now() + 30000;
       for (let got = await pill(); got !== want; got = await pill()) {

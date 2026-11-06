@@ -21,10 +21,11 @@ const (
 // checkRate enforces peerID's per-peer limits at now (PROTOCOL §16.2): the
 // messages it sent in the last 60 s against peers.sends_per_min, and, when
 // the send would create a thread, the threads it created in the last hour
-// against peers.threads_per_hour. Exceeding either is 429 rate_limited with
-// details.retry_after_seconds (the HTTP layer adds Retry-After): the whole
-// seconds until enough of the window's entries age out to admit one more.
-// Windows use the hub clock (h.Now), never time.Now.
+// against peers.threads_per_hour. Exceeding either is 429 rate_limited.
+// details carries limit, max and retry_after_seconds (the HTTP layer adds
+// Retry-After) and message repeats them: the whole seconds until enough of
+// the window's entries age out to admit one more. Windows use the hub clock
+// (h.Now), never time.Now.
 func (h *Hub) checkRate(ctx context.Context, tx *sql.Tx, peerID string, newThread bool, now time.Time) (*APIError, error) {
 	var perMin, perHour int
 	err := tx.QueryRowContext(ctx, `SELECT sends_per_min, threads_per_hour FROM peers WHERE peer_id = ?`, peerID).
@@ -37,8 +38,8 @@ func (h *Hub) checkRate(ctx context.Context, tx *sql.Tx, peerID string, newThrea
 
 // rateVerdict runs the two windows of PROTOCOL §16.2 for actor, a peer or a
 // source, against its limits: messages in the last 60 s, then, when the send
-// would create a thread, threads created in the last hour. what names the
-// limit in the error message.
+// would create a thread, threads created in the last hour. what is the scope
+// named in the error message ("per-peer" or "per-source").
 func rateVerdict(ctx context.Context, tx *sql.Tx, what, actor string, perMin, perHour int, newThread bool, now time.Time) (*APIError, error) {
 	retry, err := windowRetry(ctx, tx,
 		`SELECT created_at FROM messages WHERE sender = ?1 AND kind != 'reaction' AND created_at > ?2 UNION ALL SELECT at AS created_at FROM reaction_ops WHERE peer_id = ?1 AND at > ?2 ORDER BY created_at`,
@@ -59,11 +60,57 @@ func rateVerdict(ctx context.Context, tx *sql.Tx, what, actor string, perMin, pe
 	if retry == 0 {
 		return nil, nil
 	}
-	e := E(http.StatusTooManyRequests, "rate_limited", what+" rate limit exceeded")
+	e := E(http.StatusTooManyRequests, "rate_limited", rateLimitMessage(what, limit, window, retry))
 	e.Details["limit"] = limit
 	e.Details["max"] = window
 	e.Details["retry_after_seconds"] = retry
 	return e, nil
+}
+
+// rateLimitMessage is the 429 text (PROTOCOL §16.2). It repeats details.limit,
+// details.max and a rendering of details.retry_after_seconds so a caller that
+// only reads message can tell a send cap from a new-thread cap.
+func rateLimitMessage(what, limit string, max, retry int) string {
+	return fmt.Sprintf("%s rate limit exceeded: %s %d (%s); retry in %s",
+		what, limit, max, rateLimitGloss(limit), retryHint(retry))
+}
+
+func rateLimitGloss(limit string) string {
+	switch limit {
+	case "sends_per_min":
+		return "sends in the last minute"
+	case "threads_per_hour":
+		return "new threads in the last hour"
+	default:
+		return limit
+	}
+}
+
+// retryHint renders a wait of seconds. Under a minute it is Ns. Below an
+// hour it is Nm, rounded up. From an hour it is Nh, or NhNm with the leftover
+// minutes rounded up (a leftover that rounds to 60 minutes carries into the
+// hour). Rounding is up, so the hint is never a shorter wait than
+// retry_after_seconds.
+func retryHint(seconds int) string {
+	if seconds < 1 {
+		seconds = 1
+	}
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	if seconds < 3600 {
+		return fmt.Sprintf("%dm", (seconds+59)/60)
+	}
+	hours := seconds / 3600
+	rem := seconds % 3600
+	if rem == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+	mins := (rem + 59) / 60
+	if mins == 60 {
+		return fmt.Sprintf("%dh", hours+1)
+	}
+	return fmt.Sprintf("%dh%dm", hours, mins)
 }
 
 // countRateCut records a rate-limit rejection of actor: a dashboard counter

@@ -147,6 +147,10 @@ func hookInboxTool(h hookHint) string {
 }
 
 func hookContext(h hookHint, items []hookItem, more int, lowerBound bool) string {
+	return hookContextN(h, items, more, lowerBound, hookTextRunes)
+}
+
+func hookContextN(h hookHint, items []hookItem, more int, lowerBound bool, textRunes int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "vecnet: %d new message(s) for profile %s. %s %s%s\n<vecnet-inbox untrusted=\"true\">\n", len(items), h.profile, hookTrust, hookReplyClause(h), h.config)
 	for _, item := range items {
@@ -165,7 +169,7 @@ func hookContext(h hookHint, items []hookItem, more int, lowerBound bool) string
 		if item.Attachments > 0 {
 			fmt.Fprintf(&b, " attachments=%d", item.Attachments)
 		}
-		fmt.Fprintf(&b, " text=\"%s\"\n", inert(item.Text, hookTextRunes))
+		fmt.Fprintf(&b, " text=\"%s\"\n", inert(item.Text, textRunes))
 	}
 	b.WriteString("</vecnet-inbox>")
 	if more > 0 {
@@ -352,7 +356,7 @@ func hookWrite(ctx context.Context, w io.Writer, data []byte) error {
 // the encoded output in bytes as well as the context in UTF-16 units.
 func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(), publish func([]byte) error, limit int) hookResult {
 	ctx := a.ctx
-	o, e := parseFlags("hook", args, map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag, "mcp": strFlag})
+	o, e := parseFlags("hook", args, map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag, "mcp": strFlag, "release": boolFlag, "claim": strFlag, "priorities": strFlag, "expect-hub": strFlag, "expect-caller": strFlag})
 	if e != nil || len(o.pos) != 0 {
 		return hookResult{}
 	}
@@ -363,6 +367,9 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	}
 	if o.has("profile") {
 		a.net = o.str("profile")
+	}
+	if o.has("release") || o.str("event") == "app-server" {
+		return a.hookAppServer(o, afterPoll, publish, limit)
 	}
 	event := o.str("event")
 	// Claude Code sends JSON on stdin even when --event names the event; its

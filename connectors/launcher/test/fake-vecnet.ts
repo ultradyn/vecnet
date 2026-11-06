@@ -1,0 +1,64 @@
+#!/usr/bin/env node
+import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync } from 'node:fs';
+
+// Every path comes from the test's private environment; no home defaults.
+const file = process.env.FAKE_VECNET_PLAN;
+if (!file) throw new Error('fake vecnet requires a plan');
+const read = () => JSON.parse(readFileSync(file, 'utf8'));
+const plan = read(), argv = process.argv.slice(2);
+const acknowledge = (data: object) => appendFileSync(plan.trace, JSON.stringify({ ...data, ack: true }) + '\n');
+appendFileSync(plan.trace, JSON.stringify({ argv, env: process.env }) + '\n');
+const flag = (s: string) => argv[argv.indexOf(s) + 1];
+if (argv.includes('watch')) {
+  let seen = 0, revision = -1, ending = false;
+  const tick = () => {
+    if (ending) return;
+    const p = read();
+    // A one-shot crash: a recoverable process failure with no stop line.
+    if (p.watchCrash && existsSync(p.watchCrash)) { ending = true; unlinkSync(p.watchCrash); process.exit(1); }
+    // A terminal hub answer (401/403/204): the Go watch's last line, then exit 2.
+    if (p.watchStop) {
+      ending = true;
+      process.stdout.write(JSON.stringify({ type: 'watch_stopped', cursor: '', at: '', data: { text: 'not reconnecting: hub answered HTTP ' + p.watchStop, status: p.watchStop } }) + '\n', () => process.exit(2));
+      return;
+    }
+    for (const e of (p.events ?? []).slice(seen)) process.stdout.write(JSON.stringify(e) + '\n');
+    seen = (p.events ?? []).length;
+    if (revision !== p.revision) {
+      revision = p.revision;
+      const published = revision;
+      process.stdout.write('', () => acknowledge({ watchRevision: published }));
+    }
+  };
+  tick(); setInterval(tick, 10);
+} else if (argv.includes('hook')) {
+  let claims: Record<string, string[]> = {};
+  try { claims = JSON.parse(readFileSync(plan.claims, 'utf8')); } catch {}
+  const nonce = flag('--claim');
+  if (argv.includes('--release')) {
+    if (plan.releaseFailure) process.exit(1);
+    delete claims[nonce]; writeFileSync(plan.claims, JSON.stringify(claims));
+    console.log(JSON.stringify({ version: 1, released: true }));
+  } else if (flag('--event') === 'user-prompt') {
+    const claimed = new Set(Object.values(claims).flat());
+    console.log(JSON.stringify({ deliveries: (plan.items ?? []).filter((i: { id: string }) => !claimed.has(i.id)).map((i: { id: string }) => i.id) }));
+  } else if (plan.refused) {
+    console.log(JSON.stringify({ version: 1, refused: plan.refused, deliveries: [] }));
+  } else {
+    const priorities = flag('--priorities').split(',').filter(p => p !== 'hold');
+    const claimed = new Set(Object.values(claims).flat());
+    const items = (plan.items ?? []).filter((i: { id: string; priority: string }) => !claimed.has(i.id) && priorities.includes(i.priority)).slice(0, 8);
+    claims[nonce] = items.map((i: { id: string }) => i.id);
+    writeFileSync(plan.claims, JSON.stringify(claims));
+    acknowledge({ hookClaimed: nonce });
+    if (plan.hookFailure === 'exit') process.exit(1);
+    if (plan.hookFailure === 'invalid') { console.log('{'); process.exit(0); }
+    if (plan.hookGate) await new Promise<void>(resolve => {
+      const gate = setInterval(() => { if (existsSync(plan.hookGate)) { clearInterval(gate); resolve(); } }, 10);
+    });
+    console.log(JSON.stringify({ version: 1, stub: plan.stub, pointer: false,
+      deliveries: claims[nonce], entries: items.map((i: { id: string; value?: string }) => ({ key: 'vecnet_' + i.id, value: i.value ?? '<vecnet-inbox untrusted="true">peer</vecnet-inbox>' })),
+      more: 0 }));
+  }
+  acknowledge({ hook: argv, nonce, released: argv.includes('--release') });
+} else process.exitCode = 2;
