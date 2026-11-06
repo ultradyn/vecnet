@@ -23,6 +23,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
@@ -114,7 +115,8 @@ type chatAtt struct {
 	id     int
 	name   string // cleaned, at most chatAttNameMax characters
 	size   int64
-	sha    string // set once the hub has the bytes
+	ref    envelope.Attachment // complete stable reference
+	sha    string              // set once the hub has the bytes
 	media  string
 	state  chatAttState
 	err    string             // why a failed upload failed
@@ -205,8 +207,9 @@ type (
 		err     error
 	}
 	chatSavedMsg struct {
-		name string
-		err  error
+		blobID string
+		name   string
+		err    error
 	}
 	chatReadMsg struct {
 		thread string
@@ -606,7 +609,9 @@ func (s *chatScreen) send(m *Model, d *chatDraft) tea.Cmd {
 	d.attempt, d.sending = attempt, true
 	req := envelope.SendRequest{IdempotencyKey: d.key, ThreadID: &id, Priority: attempt.prio, Content: envelope.SendContent{Text: attempt.text}}
 	for _, att := range d.atts {
-		req.Attachments = append(req.Attachments, envelope.Attachment{SHA256: att.sha, Size: att.size, MediaType: att.media, Name: att.name})
+		ref := envelope.Attachment{BlobID: att.ref.BlobID, RetentionClass: att.ref.RetentionClass, ExpiresAt: att.ref.ExpiresAt, OriginURL: att.ref.OriginURL}
+		ref.SHA256, ref.Size, ref.MediaType, ref.Name = att.sha, att.size, att.media, att.name
+		req.Attachments = append(req.Attachments, ref)
 	}
 	if attempt.reply != "" {
 		req.InReplyTo = &attempt.reply
@@ -626,7 +631,7 @@ func (s *chatScreen) send(m *Model, d *chatDraft) tea.Cmd {
 func chatShas(atts []chatAtt) string {
 	parts := make([]string, len(atts))
 	for i, att := range atts {
-		parts[i] = fmt.Sprintf("%s %d %q %q", att.sha, att.size, att.media, att.name)
+		parts[i] = fmt.Sprintf("%s %s %d %q %q", att.ref.BlobID, att.sha, att.size, att.media, att.name)
 		if att.state != chatAttDone {
 			parts[i] = "chip:" + strconv.Itoa(att.id)
 		}
@@ -791,7 +796,15 @@ func (s *chatScreen) commandAttach(m *Model, args []string) tea.Cmd {
 	return func() tea.Msg {
 		defer cancel()
 		defer f.Close()
-		up, err := api.Upload(ctx, &chatCounter{r: f, n: att.read}, att.size, att.media, att.name)
+		var up envelope.Attachment
+		var err error
+		if progressAPI, ok := api.(interface {
+			UploadWithProgress(context.Context, io.Reader, int64, string, string, func(int64)) (envelope.Attachment, error)
+		}); ok {
+			up, err = progressAPI.UploadWithProgress(ctx, f, att.size, att.media, att.name, func(n int64) { att.read.Store(n) })
+		} else {
+			up, err = api.Upload(ctx, &chatCounter{r: f, n: att.read}, att.size, att.media, att.name)
+		}
 		return chatUploadedMsg{thread: id, id: att.id, att: up, err: err}
 	}
 }
@@ -900,6 +913,7 @@ func (s *chatScreen) onUploaded(msg chatUploadedMsg, m *Model) {
 		m.Toast(fmt.Sprintf("upload of %s failed: %s; :detach %d removes it", att.name, att.err, i+1), true)
 		return
 	}
+	att.ref = msg.att
 	att.state, att.sha, att.size, att.media = chatAttDone, msg.att.SHA256, msg.att.Size, msg.att.MediaType
 }
 
@@ -1322,6 +1336,10 @@ func (s *chatScreen) expand(m *Model, st *ThreadState) tea.Cmd {
 		s.overlay = chatPager
 		return nil
 	}
+	if state := chatAttachmentState(m, st, att); state == "expired" || state == "purged" {
+		m.Toast("refused: [attachment "+state+": "+Clean(att.Name)+"]", true)
+		return nil
+	}
 	if !chatIsText(att.MediaType) {
 		m.Toast("refused: "+att.MediaType+" is not text", true)
 		return nil
@@ -1334,7 +1352,7 @@ func (s *chatScreen) expand(m *Model, st *ThreadState) tea.Cmd {
 	s.overlay = chatPager
 	api, ctx, id, sha := m.API, m.ctx, picked.MessageID, att.SHA256
 	return func() tea.Msg {
-		data, media, err := api.Blob(ctx, sha, chatExpandMax)
+		data, media, err := api.BlobWithOptions(ctx, sha, chatExpandMax, opclient.BlobOptions{BlobID: att.BlobID})
 		return chatBlobMsg{message: id, data: data, media: media, err: err}
 	}
 }
@@ -1365,15 +1383,19 @@ func (s *chatScreen) save(m *Model, st *ThreadState) tea.Cmd {
 		return nil
 	}
 	att := picked.Attachments[min(s.fileIdx, len(picked.Attachments)-1)]
-	if slices.ContainsFunc(st.Detail.Files, func(f opapi.ThreadFile) bool { return f.SHA256 == att.SHA256 && f.Purged }) {
+	if state := chatAttachmentState(m, st, att); state == "expired" || state == "purged" {
+		m.Toast("refused: [attachment "+state+": "+Clean(att.Name)+"]", true)
+		return nil
+	}
+	if att.BlobID == "" && slices.ContainsFunc(st.Detail.Files, func(f opapi.ThreadFile) bool { return f.SHA256 == att.SHA256 && f.Purged }) {
 		m.Toast("refused: that file was purged", true)
 		return nil
 	}
 	api, ctx := m.API, m.ctx
 	return func() tea.Msg {
-		data, _, err := api.Blob(ctx, att.SHA256, chatBlobMax)
+		data, _, err := api.BlobWithOptions(ctx, att.SHA256, chatBlobMax, opclient.BlobOptions{BlobID: att.BlobID})
 		if err != nil {
-			return chatSavedMsg{err: err}
+			return chatSavedMsg{blobID: att.BlobID, err: err}
 		}
 		name, err := chatWrite(chatSaveName(att.Name, att.SHA256), data)
 		return chatSavedMsg{name: name, err: err}
@@ -1382,6 +1404,17 @@ func (s *chatScreen) save(m *Model, st *ThreadState) tea.Cmd {
 
 func (s *chatScreen) onSaved(msg chatSavedMsg, m *Model) {
 	if msg.err != nil {
+		var e *opclient.Error
+		if msg.blobID != "" && errors.As(msg.err, &e) && (e.Code == "blob_expired" || e.Code == "blob_purged") {
+			for _, st := range m.Data.Thread {
+				if st.BlobStates == nil {
+					st.BlobStates = map[string]blobwire.State{}
+				}
+				state := st.BlobStates[msg.blobID]
+				state.State = strings.TrimPrefix(e.Code, "blob_")
+				st.BlobStates[msg.blobID] = state
+			}
+		}
 		m.Toast("save failed: "+msg.err.Error(), true)
 		return
 	}
@@ -1675,6 +1708,7 @@ func chatReceipt(display string) (string, lipgloss.Style) {
 
 // chatLog is what drawing the log needs, gathered once a frame.
 type chatLog struct {
+	st      *ThreadState
 	s       *chatScreen
 	m       *Model
 	names   chatPeers
@@ -1688,7 +1722,7 @@ type chatLog struct {
 }
 
 func (s *chatScreen) newChatLog(m *Model, st *ThreadState, w, h int) *chatLog {
-	l := &chatLog{s: s, m: m, names: chatNames(m), width: w, body: max(h-8, chatPreview), gap: h >= 30,
+	l := &chatLog{st: st, s: s, m: m, names: chatNames(m), width: w, body: max(h-8, chatPreview), gap: h >= 30,
 		byID:    chatMessages(st),
 		cells:   make(map[string][]opapi.MatrixCell, len(st.Matrix.Rows)),
 		open:    make(map[string]opapi.ThreadApproval, len(st.Detail.OpenApprovals)),
@@ -1832,12 +1866,24 @@ func (l *chatLog) files(msg *envelope.Message, selected bool) []chatRow {
 		if name == "" {
 			name = chatShort(att.SHA256)
 		}
-		if spilled && att.SHA256 == spill.SHA256 {
+		if spilled && att.SHA256 == spill.SHA256 && att.BlobID == spill.BlobID {
 			extra := max(att.Size-int64(len(msg.Content.Text)), 0)
 			rows = append(rows, chatRow{{chatIndent[1:] + mark, styleMuted}, {fmt.Sprintf("[+%s spilled → %s]", chatSize(extra), name), styleMuted}})
 			continue
 		}
-		rows = append(rows, chatRow{{chatIndent[1:] + mark, styleMuted}, {"file " + name, styleCyan}, {" " + chatSize(att.Size), styleMuted}})
+		label := "file " + name
+		state := chatAttachmentState(l.m, l.st, att)
+		if state == "expired" || state == "purged" {
+			label = "[attachment " + state + ": " + name + "]"
+		}
+		retention := chatRetention(att.RetentionClass)
+		if state == "expired" {
+			retention = "Attachment expired (" + retention + ")"
+		}
+		if retention != "" {
+			retention = " · " + retention
+		}
+		rows = append(rows, chatRow{{chatIndent[1:] + mark, styleMuted}, {label, styleCyan}, {" " + chatSize(att.Size) + retention, styleMuted}})
 	}
 	return rows
 }
@@ -2132,6 +2178,17 @@ func (s *chatScreen) viewWho(m *Model, st *ThreadState, w, h int) string {
 			if f.Purged {
 				size = "purged"
 			}
+			for _, msg := range st.Messages {
+				if msg.MessageID == f.MessageID {
+					for _, att := range msg.Attachments {
+						if (f.BlobID != "" && att.BlobID == f.BlobID) || (f.BlobID == "" && att.BlobID == "" && att.SHA256 == f.SHA256) {
+							if state := chatAttachmentState(m, st, att); state == "expired" || state == "purged" {
+								size = state
+							}
+						}
+					}
+				}
+			}
 			name := Clean(f.Name)
 			if name == "" {
 				name = chatShort(f.SHA256)
@@ -2282,4 +2339,40 @@ func (s *chatScreen) viewReader(w, h int) string {
 	end := min(r.top+r.rows, len(r.lines))
 	title := fmt.Sprintf("%s · lines %d-%d of %d", r.title, r.top+1, end, len(r.lines))
 	return Pane(title, w, h, true, styleText.Render(strings.Join(r.lines[r.top:end], "\n")))
+}
+
+func chatAttachmentState(m *Model, st *ThreadState, a envelope.Attachment) string {
+	if a.BlobID == "" {
+		return ""
+	}
+	state := ""
+	if st != nil {
+		state = st.BlobStates[a.BlobID].State
+	}
+	if state == "purged" {
+		return state
+	}
+	if a.ExpiresAt != nil && chatExpired(m, *a.ExpiresAt) {
+		return "expired"
+	}
+	return state
+}
+func chatRetention(class string) string {
+	switch class {
+	case "1h":
+		return "1-hour retention"
+	case "6h":
+		return "6-hour retention"
+	case "12h":
+		return "12-hour retention"
+	case "1d":
+		return "24-hour retention"
+	case "7d":
+		return "7-day retention"
+	case "30d":
+		return "30-day retention"
+	case "keep":
+		return "Kept while referenced"
+	}
+	return ""
 }

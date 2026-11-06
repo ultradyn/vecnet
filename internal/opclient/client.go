@@ -6,14 +6,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/XertroV/vecnet/internal/blobclient"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
@@ -159,6 +163,13 @@ func (c *Client) History(ctx context.Context, id, after string, limit int) (out 
 	err = c.do(ctx, "GET", queryPath("/v1/threads/"+url.PathEscape(id)+"/messages", pageQuery(limit, "after", after)), nil, &out)
 	return
 }
+
+// BlobStatus refreshes reference metadata without minting a transfer URL or
+// consuming the download grant budget.
+func (c *Client) BlobStatus(ctx context.Context, sha, id string) (out blobwire.State, err error) {
+	err = c.do(ctx, "GET", queryPath("/v1/blobs/"+url.PathEscape(sha)+"/status", url.Values{"blob_id": {id}}), nil, &out)
+	return
+}
 func (c *Client) Matrix(ctx context.Context, id, after string, limit int) (out opapi.Matrix, err error) {
 	err = c.do(ctx, "GET", queryPath(threadPath(id)+"/deliveries", pageQuery(limit, "after", after)), nil, &out)
 	return
@@ -214,6 +225,15 @@ func (c *Client) DiscardDeadLetter(ctx context.Context, dly string) error {
 	return c.do(ctx, "POST", "/v1/admin/dead-letters/"+url.PathEscape(dly)+"/discard", nil, nil)
 }
 func (c *Client) Send(ctx context.Context, r envelope.SendRequest) (out opapi.SendResult, err error) {
+	// Send accepts only caller-owned reference metadata; upload proof remains
+	// available to the UI on the original attachment.
+	if r.Attachments != nil {
+		refs := make([]envelope.Attachment, len(r.Attachments))
+		for i, att := range r.Attachments {
+			refs[i] = envelope.Attachment{BlobID: att.BlobID, SHA256: att.SHA256, Size: att.Size, MediaType: att.MediaType, Name: att.Name, OriginURL: att.OriginURL, ExpiresAt: att.ExpiresAt, RetentionClass: att.RetentionClass}
+		}
+		r.Attachments = refs
+	}
 	err = c.do(ctx, "POST", "/v1/messages", r, &out)
 	return
 }
@@ -247,9 +267,57 @@ func (c *Client) Ack(ctx context.Context, cursor string) error {
 	}{cursor}, nil)
 }
 
-// Upload streams bytes under the caller's context, without the short timeout
-// used for JSON requests. Unreferenced uploads expire after one day.
+// Upload transfers under the caller's context. Disk uploads retain their
+// one-day unreferenced TTL; R2 grants record their own retention class.
 func (c *Client) Upload(ctx context.Context, r io.Reader, size int64, mediaType, name string) (envelope.Attachment, error) {
+	return c.UploadWithProgress(ctx, r, size, mediaType, name, nil)
+}
+
+// UploadWithProgress reports PUT bytes only, excluding hashing and spooling.
+func (c *Client) UploadWithProgress(ctx context.Context, r io.Reader, size int64, mediaType, name string, progress func(int64)) (envelope.Attachment, error) {
+	bc := c.blobs()
+	bc.Progress = progress
+	caps, err := bc.Discover(ctx)
+	if err != nil {
+		return envelope.Attachment{}, transferError(err)
+	}
+	if caps.Backend == "r2" {
+		if size <= 0 || size > blobclient.MaxSize || size > caps.MaxSize {
+			return envelope.Attachment{}, &Error{Status: 413, Code: "blob_too_large", Message: "blob exceeds upload limit"}
+		}
+		seeker, ok := r.(io.ReadSeeker)
+		if !ok {
+			f, err := os.CreateTemp("", "vecnet-upload-*")
+			if err != nil {
+				return envelope.Attachment{}, fmt.Errorf("cannot spool upload")
+			}
+			defer os.Remove(f.Name())
+			defer f.Close()
+			n, err := io.Copy(f, io.LimitReader(&contextReader{ctx: ctx, r: r}, size+1))
+			if err != nil {
+				if ctx.Err() != nil {
+					return envelope.Attachment{}, ctx.Err()
+				}
+				return envelope.Attachment{}, transferError(&blobclient.Error{Code: "blob_read_failed"})
+			}
+			if n != size {
+				return envelope.Attachment{}, fmt.Errorf("upload size changed")
+			}
+			seeker = f
+		}
+		ref, err := bc.Upload(ctx, seeker, size, mediaType, "")
+		if err != nil {
+			return envelope.Attachment{}, transferError(err)
+		}
+		if mediaType == "" {
+			mediaType = "application/octet-stream"
+		}
+		return envelope.Attachment{BlobID: ref.BlobID, SHA256: ref.SHA256, Size: ref.Size, MediaType: mediaType, Name: name, ExpiresAt: ref.ExpiresAt, RetentionClass: ref.RetentionClass, SHA256Verified: ref.SHA256Verified, Integrity: ref.Integrity}, nil
+	}
+	if progress != nil {
+		r = &uploadProgressReader{r: r, report: progress}
+	}
+
 	if size < 0 {
 		return envelope.Attachment{}, fmt.Errorf("upload size must be nonnegative")
 	}
@@ -314,4 +382,62 @@ func (c *Client) Blob(ctx context.Context, sha string, max int64) ([]byte, strin
 		return nil, "", err
 	}
 	return data, resp.Header.Get("Content-Type"), nil
+}
+
+// BlobOptions adds generation identity without changing legacy disk callers.
+type BlobOptions struct{ BlobID string }
+
+func (c *Client) BlobWithOptions(ctx context.Context, sha string, max int64, opts BlobOptions) ([]byte, string, error) {
+	if opts.BlobID == "" {
+		return c.Blob(ctx, sha, max)
+	}
+	b, g, err := c.blobs().Download(ctx, sha, opts.BlobID, max)
+	return b, g.MediaType, transferError(err)
+}
+
+type blobTransport struct{ c *Client }
+
+func (t blobTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r := req.Clone(req.Context())
+	r.Header.Set("Authorization", "Bearer "+t.c.secret)
+	rt := t.c.uploadHC.Transport
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	return rt.RoundTrip(r)
+}
+func (c *Client) blobs() *blobclient.Client {
+	return blobclient.New(c.base, blobTransport{c}, nil, nil)
+}
+func transferError(err error) error {
+	var e *blobclient.Error
+	if errors.As(err, &e) {
+		return &Error{Status: e.Status, Code: e.Code, Message: e.Error(), Details: map[string]any{"retry_after_seconds": float64(e.RetryAfterSeconds)}}
+	}
+	return err
+}
+
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r *contextReader) Read(b []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(b)
+}
+
+type uploadProgressReader struct {
+	r      io.Reader
+	n      int64
+	report func(int64)
+}
+
+func (r *uploadProgressReader) Read(b []byte) (int, error) {
+	n, e := r.r.Read(b)
+	r.n += int64(n)
+	r.report(r.n)
+	return n, e
 }

@@ -165,6 +165,7 @@ func (v ThreadPage) MarshalJSON() ([]byte, error) {
 }
 
 type ThreadFile struct {
+	BlobID    string `json:"blob_id,omitempty"`
 	SHA256    string `json:"sha256"`
 	Name      string `json:"name"`
 	MediaType string `json:"media_type"`
