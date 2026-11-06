@@ -81,6 +81,31 @@ export async function scrollIntoViewStable(page, selector, { frames = 3, timeout
 }
 export async function scrollMessageIntoView(page, id) { return scrollIntoViewStable(page, `[id="m-${id}"]`); }
 
+// readThrough reads an open thread as the operator would (CoS unread ruling:
+// a message is read once 60% visible for a second, or scrolled past going
+// down): it scrolls the thread from where it opened to the bottom in steps
+// smaller than the view, so every message passes through it, then waits for
+// unread() (the hub's unread count for the thread) to reach zero. Opening a
+// thread no longer marks it read.
+export async function readThrough(page, unread, { timeout = 30000 } = {}) {
+  await page.evaluate(async () => {
+    const main = document.getElementById('main');
+    const frames = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    for (let i = 0; i < 400; i++) {
+      const before = main.scrollTop;
+      main.scrollTop = before + Math.max(80, Math.floor(main.clientHeight * 0.4));
+      await frames();
+      await frames();
+      if (main.scrollTop === before) break;
+    }
+  });
+  const deadline = Date.now() + timeout;
+  for (let left = await unread(); left > 0; left = await unread()) {
+    assert(Date.now() < deadline, `the thread still has ${left} unread after reading through it`);
+    await page.waitForTimeout(100);
+  }
+}
+
 // png encodes a w×h 8-bit RGB image whose pixel colours come from px(x, y),
 // for image fixtures built at run time (no binaries are committed).
 export function png(w, h, px) {

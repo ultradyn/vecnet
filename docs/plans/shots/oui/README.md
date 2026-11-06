@@ -137,6 +137,14 @@ Sidebar unread screens come from `scripts/ui/sidebar-unread.mjs`. Each Your Thre
 - [sb-unread-narrow.png](sb-unread-narrow.png) — 1000 px, where the sidebar narrows to 220 px: titles ellipsize and the pills keep their place.
 - [sb-unread-phone.png](sb-unread-phone.png) — 390 px, one column: Your Threads at full width with the long title, the pills, the zero rows, and an Other Threads row with no pill.
 
+Thread unread screens come from `scripts/ui/thread-unread.mjs` (CoS unread ruling). A thread opens at the operator's first unread message under a New divider in the unread tint, not at the bottom; each unread message has a thin amber bar until it is seen. A message is read on its own, by one read receipt for its delivery (batched over 500 ms), once 60% of it has been on screen for a second or it is scrolled past going down, and only while the page is visible and focused. Opening never marks the whole thread read. The fixture is a fourteen-message thread whose first eight the operator read earlier.
+
+- [tu-open.png](tu-open.png) — Opened (unfocused, so nothing is read yet) with six unread: New sits near the top above the first unread, the end of what was read above it; the sidebar pill reads 6.
+- [tu-open-phone.png](tu-open-phone.png) — The same opening at 390 px, where the page scrolls: New at the top.
+- [tu-partial.png](tu-partial.png) — Focused, then scrolled 260 px: what was on screen for a second or scrolled past reads `max read`, the last messages below are still unread, and the pill reads 2.
+- [tu-live.png](tu-live.png) — An arrival while the window was unfocused: unread until seen, New moved above it (the old New was all read), the pill reads 1. An arrival watched at the bottom is read as it lands and keeps New where it was.
+- [tu-none.png](tu-none.png) — Nothing unread: the thread opens at the bottom, as before, with no New.
+
 Peer detail screens come from `scripts/ui/peer.mjs`. A peer name anywhere in the UI (dashboard rows, thread senders and recipients, the thread aside, inbox cards and rows, the sidebar's participants line, subscriptions) opens `#peer/<id>`: everything the operator views already say about that peer, read-only, each section loading and failing on its own. Ids show short (`peer_…X6Z8B`) but keep the whole id in their text, so selecting and copying never yields the `…`; a copy button appears on hover or keyboard focus. The script also checks the copy under plain http (no Clipboard API), an unknown id, and peer links from the thread, its aside, the inbox and the sidebar.
 
 - [pv-dash-hover.png](pv-dash-hover.png) — Dashboard peers: names are links; the hovered row shows its copy button beside the short id.
