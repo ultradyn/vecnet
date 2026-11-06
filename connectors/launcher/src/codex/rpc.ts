@@ -53,7 +53,9 @@ export async function openCodexRpc(o: { codexHome: string; euid: number; log: Lo
     const m = value as Record<string, unknown>;
     if (typeof m.method === 'string') {
       if (Object.hasOwn(m, 'id')) {
-        log.info('codex_server_request_ignored', { method: m.method }); return;
+        log.info('codex_server_request_ignored', { method: m.method });
+        for (const fn of notifications) fn('vecnet/serverRequest', { requestId: m.id, method: m.method });
+        return;
       }
       for (const fn of notifications) fn(m.method, m.params);
       return;

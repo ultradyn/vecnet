@@ -1,0 +1,407 @@
+import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
+import { createInterface } from 'node:readline';
+import type { Clock, Log } from '../../../hub-client/src/ports.ts';
+import type { KeyValue } from '../backend.ts';
+import { planInput } from '../input-plan.ts';
+import { redactingLog, scrubEnv } from '../redact.ts';
+import { openCodexRpc, CodexRpcError } from './rpc.ts';
+import type { CodexRpc } from './rpc.ts';
+import { buildThreadResume, buildThreadUnsubscribe, buildTurnStart, buildTurnSteer, buildTurnsPage, mapStatus, parseResumePolicy } from './protocol.ts';
+
+export interface Binding {
+  profile: string; as?: string; hub: string; caller: string; codexHome: string; threadId: string;
+  createdAt: number; expiresAt: number; idleDormantMs?: number;
+  attended: boolean; origin: 'explicit' | 'launcher'; ensureLoaded?: () => Promise<boolean>;
+}
+export type DormantReason = 'expired' | 'archived' | 'not_loaded' | 'idle_stale' | 'approval_policy' |
+  'waiting_approval' | 'waiting_input' | 'over_limit' | 'identity_changed';
+export type InflightRow = {
+  threadId: string; key: string; claim: string; deliveries: string[]; method: 'turn/start' | 'turn/steer';
+  attemptTurnId: string | null; priorTurnId: string | null; acceptedAt: number | null; state: 'sending' | 'pending' | 'unresolved';
+};
+export type Liveness = { live: true } | { live: false; reason: DormantReason };
+export interface EngineDeps {
+  clock: Clock; log: Log; kv: KeyValue; vecnetBin: string; env: Record<string, string>;
+  openRpc: typeof openCodexRpc; euid: number; debounceMs?: number; minGapMs?: number;
+}
+export interface Engine {
+  start(): void; stop(): Promise<void>; state(): 'connecting' | 'ready' | 'unreachable' | 'refused_version';
+  liveness(): Liveness; subscribed(): boolean; setOverLimit(over: boolean): void;
+}
+type RecordValue = Record<string, any>;
+type Batch = { stub: string; entries: { key: string; value: string }[]; deliveries: string[] };
+const obj = (x: unknown): RecordValue => x !== null && typeof x === 'object' && !Array.isArray(x) ? x as RecordValue : {};
+const timeout = 5000, blockedMs = 600_000;
+
+/** One serial delivery lane. Only Go renders peer input and claims delivery ids. */
+export function createEngine(b: Binding, d: EngineDeps): Engine {
+  const log = redactingLog(d.log), { clock, kv } = d;
+  const envKeys = ['HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR', 'VECNET_CONFIG'];
+  // scrubEnv removes credential-bearing names; intersect separately because the
+  // launcher's helper intentionally preserves ordinary non-secret variables.
+  const env = Object.fromEntries(Object.entries(scrubEnv(d.env, envKeys)).filter(([k]) => envKeys.includes(k)));
+  const baseArgs = ['--net', b.profile, ...(b.as ? ['--as', b.as] : [])];
+  let running = false, rpc: CodexRpc | undefined, watch: ChildProcess | undefined;
+  let connectionState: ReturnType<Engine['state']> = 'connecting';
+  let status: unknown = { type: 'notLoaded' }, attached = false, archived = false, overLimit = false;
+  let policyDenied = false, identityChanged = false, lastActivity = clock.now(), lastEnsure = -Infinity;
+  let lastPush = -Infinity, retryIndex = 0, closedEpoch = 0, resumeAt = -Infinity, attaching = false;
+  let cold = false, queue: Promise<void> = Promise.resolve();
+  let debounce: { cancel(): void } | undefined, gap: { cancel(): void } | undefined;
+  let reconnect: { cancel(): void } | undefined, minute: { cancel(): void } | undefined;
+  const children = new Set<ChildProcess>();
+  const unresolvedLogged = new Set<string>(), pendingLogged = new Set<string>();
+  const receipts = new Set<string>(), waitingRetry = new Map<string, Batch>(), waitForIdle = new Set<string>();
+  const blockedRequests = new Map<string | number, { method: string; at: number; logged: boolean }>();
+  let waitingSince: number | undefined, blockedLogged = false;
+
+  function enqueue(fn: () => Promise<void>) {
+    queue = queue.then(async () => { if (running) await fn(); }).catch(() => { log.warn('codex_engine_operation_failed', { threadId: b.threadId }); });
+  }
+  function rows(): InflightRow[] {
+    return kv.keys('inflight:').map(key => JSON.parse(kv.get(key)!) as InflightRow).filter(row => row.threadId === b.threadId);
+  }
+  const write = (r: InflightRow) => kv.set('inflight:' + r.key, JSON.stringify(r));
+  function clear(r: InflightRow) { kv.delete('inflight:' + r.key); kv.delete('diagnostic:unresolved:' + r.key); waitingRetry.delete(r.key); waitForIdle.delete(r.key); receipts.delete(r.key); unresolvedLogged.delete(r.key); pendingLogged.delete(r.key); }
+  function reason(requireSubscription = true): DormantReason | undefined {
+    if (identityChanged) return 'identity_changed';
+    if (clock.now() >= b.expiresAt) return 'expired';
+    if (archived) return 'archived';
+    if (overLimit) return 'over_limit';
+    if (policyDenied) return 'approval_policy';
+    const s = mapStatus(status);
+    if (cold || s === 'not_loaded' || s === 'unknown' || !running || !rpc) return 'not_loaded';
+    if (s === 'idle' && b.idleDormantMs !== undefined && clock.now() - lastActivity >= b.idleDormantMs) return 'idle_stale';
+    if (s === 'waiting_approval' || s === 'waiting_input') return s;
+    if (requireSubscription && !attached) return 'not_loaded';
+    return undefined;
+  }
+  function liveness(): Liveness { const r = reason(); return r ? { live: false, reason: r } : { live: true }; }
+  async function call<T = RecordValue>(method: Parameters<CodexRpc['call']>[0], params: unknown): Promise<T> {
+    if (!rpc) throw new CodexRpcError(-1, 'unreachable', true);
+    return rpc.call<T>(method, params, timeout);
+  }
+  function runHook(args: string[]): Promise<unknown> {
+    if (!running) return Promise.reject(new Error('engine_stopped'));
+    return new Promise((resolve, reject) => {
+      const child = spawn(d.vecnetBin, [...baseArgs, 'hook', ...args], { env, stdio: ['ignore', 'pipe', 'ignore'] });
+      children.add(child); let text = '', tooLarge = false;
+      child.stdout!.setEncoding('utf8');
+      child.stdout!.on('data', (part: string) => { text += part; if (Buffer.byteLength(text) > 1_048_576) { tooLarge = true; child.kill(); } });
+      const timer = clock.timer(timeout, () => child.kill());
+      child.once('error', () => { timer.cancel(); children.delete(child); reject(new Error('hook_failed')); });
+      child.once('close', code => {
+        timer.cancel(); children.delete(child);
+        if (code !== 0 || tooLarge) { reject(new Error('hook_failed')); return; }
+        try { resolve(JSON.parse(text)); } catch { reject(new Error('hook_invalid_output')); }
+      });
+    });
+  }
+  async function release(claim: string) {
+    await runHook(['--release', '--claim', claim]);
+  }
+  async function unsubscribe() {
+    if (!attached && !attaching) return;
+    attached = false; attaching = false;
+    try { await call('thread/unsubscribe', buildThreadUnsubscribe(b.threadId)); }
+    catch { const previous = rpc; rpc = undefined; previous?.close(); retry(); }
+  }
+  function retry() {
+    if (!running || reconnect || connectionState === 'refused_version') return;
+    const ms = [1000, 2000, 4000, 8000, 15000][Math.min(retryIndex++, 4)];
+    reconnect = clock.timer(ms, () => { reconnect = undefined; enqueue(connect); });
+  }
+  function disconnected(connection: CodexRpc) {
+    if (rpc !== connection) return;
+    rpc = undefined; attached = false; attaching = false; connectionState = 'unreachable'; retry();
+  }
+  function arm(ms = d.debounceMs ?? 500) {
+    if (!running) return;
+    debounce?.cancel();
+    debounce = clock.timer(ms, () => { debounce = undefined; enqueue(async () => { await reconcile(); await push(); }); });
+  }
+  function updateStatus(value: unknown) {
+    const before = mapStatus(status); status = value; lastActivity = clock.now();
+    const s = mapStatus(status);
+    if (s === 'not_loaded') { closedEpoch++; attached = false; }
+    else if (s !== 'unknown' && !attaching && clock.now() - resumeAt > 2000) cold = false;
+    if (s === 'waiting_approval' || s === 'waiting_input') {
+      if (waitingSince === undefined) { waitingSince = clock.now(); blockedLogged = false; }
+    } else { waitingSince = undefined; blockedLogged = false; }
+    if (s === 'idle' || (before !== s && (s === 'turn_running'))) arm(0);
+  }
+  function notice(method: string, raw: unknown) {
+    const p = obj(raw);
+    if (method === 'vecnet/serverRequest') {
+      if ((typeof p.requestId === 'string' || typeof p.requestId === 'number') && typeof p.method === 'string' && !blockedRequests.has(p.requestId)) {
+        blockedRequests.set(p.requestId, { method: p.method, at: clock.now(), logged: false });
+      }
+      return;
+    }
+    if (method === 'serverRequest/resolved') blockedRequests.delete(p.requestId);
+    if (p.threadId !== b.threadId && obj(p.thread).id !== b.threadId) return;
+    if (method === 'thread/status/changed') updateStatus(p.status);
+    if (method === 'thread/closed') { updateStatus({ type: 'notLoaded' }); cold = true; }
+    if (method === 'thread/archived') archived = true;
+    if (method === 'turn/started') { lastActivity = clock.now(); updateStatus({ type: 'active', activeFlags: [] }); }
+    if (method === 'mcpServer/startupStatus/updated' && (attaching || clock.now() - resumeAt <= 2000)) cold = true;
+    if ((method === 'item/started' || method === 'item/completed') && obj(p.item).type === 'userMessage' && typeof p.item.clientId === 'string') {
+      const key = p.item.clientId;
+      // A receipt may arrive before the RPC's acceptance response.
+      if (kv.get('inflight:' + key)) {
+        receipts.add(key);
+        const r = JSON.parse(kv.get('inflight:' + key)!) as InflightRow;
+        if (r.state !== 'sending') clear(r);
+      }
+    }
+    enqueue(async () => {
+      await reconcile();
+      if (method === 'turn/completed') {
+        const id = obj(p.turn).id ?? p.turnId;
+        for (const r of rows()) if (!waitingRetry.has(r.key) && (r.attemptTurnId === id || r.state === 'unresolved')) await scan(r);
+      }
+    });
+  }
+  async function reconcile() {
+    if (!rpc || !running) return;
+    let r = reason(false);
+    if (r === 'not_loaded' && b.origin === 'launcher' && b.ensureLoaded && clock.now() - lastEnsure >= 60_000 &&
+      mapStatus(status) === 'not_loaded') {
+      lastEnsure = clock.now();
+      if (await b.ensureLoaded()) {
+        const read = await call('thread/read', { threadId: b.threadId });
+        // The launcher owns loading; this fresh read establishes a new warm
+        // status checkpoint even when an earlier subscription was cold.
+        if (mapStatus(obj(read.thread).status) !== 'not_loaded' && mapStatus(obj(read.thread).status) !== 'unknown') cold = false;
+        updateStatus(obj(read.thread).status); archived = obj(read.thread).archived === true;
+      }
+      r = reason(false);
+    }
+    if (r && r !== 'waiting_approval' && r !== 'waiting_input') { await unsubscribe(); return; }
+    if (!attached) {
+      const s = mapStatus(status);
+      if (!['idle', 'turn_running', 'waiting_approval', 'waiting_input'].includes(s)) return;
+      const epoch = closedEpoch; attaching = true;
+      try {
+        const result = await call('thread/resume', buildThreadResume(b.threadId));
+        resumeAt = clock.now(); attached = true; attaching = false;
+        if (closedEpoch !== epoch || cold) { cold = true; await unsubscribe(); return; }
+        if (parseResumePolicy(result).asks && !b.attended) { policyDenied = true; await unsubscribe(); return; }
+      } catch (e) {
+        attaching = false;
+        if (e instanceof CodexRpcError && /thread (?:is )?closing|thread not found/.test(e.message)) { cold = true; status = { type: 'notLoaded' }; }
+        else throw e;
+      }
+    }
+    if (cold) await unsubscribe();
+    if (waitingSince !== undefined && clock.now() - waitingSince >= blockedMs) {
+      if (!blockedRequests.size && !blockedLogged) {
+        blockedLogged = true; log.warn('codex_binding_blocked', { threadId: b.threadId, method: 'unknown' });
+      }
+      for (const request of blockedRequests.values()) if (!request.logged && clock.now() - request.at >= blockedMs) {
+        request.logged = true; log.warn('codex_binding_blocked', { threadId: b.threadId, method: request.method });
+      }
+    }
+    for (const row of rows()) if (row.acceptedAt !== null && clock.now() - row.acceptedAt >= blockedMs && !pendingLogged.has(row.key)) {
+      pendingLogged.add(row.key); log.warn('codex_receipt_pending', { threadId: b.threadId });
+    }
+  }
+  async function latest(): Promise<RecordValue | undefined> {
+    const result = await call('thread/turns/list', { threadId: b.threadId, limit: 1 });
+    return Array.isArray(result.data) ? result.data[0] : undefined;
+  }
+  async function scan(r: InflightRow) {
+    if (!kv.get('inflight:' + r.key)) return;
+    let cursor: string | undefined, reached = false, inProgress = false;
+    try {
+      for (let page = 0; page < 20; page++) {
+        const result = await call('thread/turns/list', buildTurnsPage(b.threadId, cursor));
+        // A subscription receipt can settle this row while the scan awaits I/O.
+        if (!kv.get('inflight:' + r.key) || receipts.has(r.key)) { clear(r); return; }
+        if (!Array.isArray(result.data)) break;
+        for (const turn of result.data) {
+          if (Array.isArray(turn.items) && turn.items.some((item: RecordValue) => item.type === 'userMessage' && item.clientId === r.key)) { clear(r); return; }
+          // priorTurnId predates this start; its own inProgress state is outside
+          // the attempted interval. attemptTurnId, by contrast, is included.
+          if (!r.attemptTurnId && r.priorTurnId !== null && turn.id === r.priorTurnId) { reached = true; break; }
+          if (turn.status === 'inProgress') inProgress = true;
+          if (r.attemptTurnId !== null && turn.id === r.attemptTurnId) { reached = true; break; }
+        }
+        if (reached) break;
+        if (result.nextCursor === null || result.nextCursor === undefined) {
+          reached = r.attemptTurnId === null && r.priorTurnId === null; break;
+        }
+        if (typeof result.nextCursor !== 'string') break;
+        cursor = result.nextCursor;
+      }
+    } catch { /* A partial scan never proves absence. */ }
+    if (!kv.get('inflight:' + r.key) || receipts.has(r.key)) { clear(r); return; }
+    if (reached && !inProgress) { await release(r.claim); clear(r); return; }
+    r.state = 'unresolved'; write(r);
+    if (!unresolvedLogged.has(r.key) && !kv.get('diagnostic:unresolved:' + r.key)) {
+      unresolvedLogged.add(r.key); kv.set('diagnostic:unresolved:' + r.key, '1'); log.warn('codex_delivery_unresolved', { threadId: b.threadId });
+    }
+  }
+  async function recover() {
+    const inflight = rows(), owned = new Set(inflight.map(r => r.claim));
+    for (const key of kv.keys('claiming:')) {
+      const r = obj(JSON.parse(kv.get(key)!)); if (r.threadId !== b.threadId) continue;
+      const claim = key.slice('claiming:'.length);
+      if (!owned.has(claim)) await release(claim);
+      kv.delete(key);
+    }
+    for (const r of inflight) if (!waitingRetry.has(r.key)) await scan(r);
+  }
+  async function connect() {
+    if (!running || rpc) return;
+    connectionState = 'connecting'; policyDenied = false; cold = false;
+    try {
+      const connection = await d.openRpc({ codexHome: b.codexHome, euid: d.euid, log, timeoutMs: timeout });
+      if (!running) { connection.close(); return; }
+      rpc = connection;
+      connection.onClose(() => disconnected(connection));
+      connection.onNotification(notice);
+      const read = await call('thread/read', { threadId: b.threadId });
+      updateStatus(obj(read.thread).status); archived = obj(read.thread).archived === true;
+      const turn = await latest();
+      const at = turn?.completedAt ?? turn?.startedAt;
+      if (typeof at === 'number' && Number.isFinite(at)) lastActivity = at * 1000;
+      else if (typeof at === 'string' && Number.isFinite(Date.parse(at))) lastActivity = Date.parse(at);
+      await reconcile(); await recover();
+      if (!rpc) return;
+      connectionState = 'ready'; retryIndex = 0; arm(0);
+    } catch (e) {
+      const connection = rpc; rpc = undefined; attached = false; attaching = false; connection?.close();
+      connectionState = e instanceof CodexRpcError && e.message === 'refused_version' ? 'refused_version' : 'unreachable';
+      retry();
+    }
+  }
+  async function transmit(r: InflightRow, batch: Batch) {
+    let mismatches = 0, fallback = false;
+    while (running && rpc) {
+      if (!liveness().live) { waitingRetry.set(r.key, batch); return; }
+      const entries = fallback ? [] : batch.entries;
+      const pointer = `vecnet: messages remain available. Run vecnet --net ${b.profile}${b.as ? ' --as ' + b.as : ''} inbox.`;
+      const input = { threadId: b.threadId, stub: fallback ? pointer : batch.stub, entries, key: r.key };
+      write(r);
+      try {
+        lastPush = clock.now();
+        const result = r.method === 'turn/steer' ? await call('turn/steer', buildTurnSteer({ ...input, expectedTurnId: r.attemptTurnId! })) :
+          await call('turn/start', buildTurnStart(input));
+        r.acceptedAt = clock.now(); r.state = 'pending';
+        if (r.method === 'turn/start') {
+          const id = obj(result.turn).id;
+          if (typeof id === 'string') {
+            if (id === r.priorTurnId) log.warn('codex_start_steered', { threadId: b.threadId });
+            r.attemptTurnId = id;
+          }
+        }
+        waitingRetry.delete(r.key);
+        if (receipts.has(r.key)) clear(r); else write(r);
+        return;
+      } catch (e) {
+        if (!(e instanceof CodexRpcError) || e.ambiguous) {
+          r.state = 'unresolved'; write(r);
+          const connection = rpc; rpc = undefined; attached = false; connection?.close(); connectionState = 'unreachable'; retry(); return;
+        }
+        if (r.method === 'turn/steer' && e.code === -32600 && /mismatch|expectedTurnId/i.test(e.message)) {
+          if (mismatches++ === 0) {
+            const turn = await latest();
+            if (turn?.status === 'inProgress' && typeof turn.id === 'string') { r.attemptTurnId = turn.id; continue; }
+          }
+          waitingRetry.set(r.key, batch); waitForIdle.add(r.key); return;
+        }
+        if (/thread (?:is )?closing|thread not found/.test(e.message)) {
+          cold = true; status = { type: 'notLoaded' }; closedEpoch++;
+          await unsubscribe(); await release(r.claim); clear(r); return;
+        }
+        if (!fallback && /additionalContext/.test(e.message)) { fallback = true; continue; }
+        await release(r.claim); clear(r); return;
+      }
+    }
+  }
+  async function push() {
+    if (connectionState !== 'ready' || !liveness().live) return;
+    const wait = Math.max(lastPush + (d.minGapMs ?? 5000), resumeAt + 2000) - clock.now();
+    if (wait > 0) {
+      if (!gap) gap = clock.timer(wait, () => { gap = undefined; enqueue(push); });
+      return;
+    }
+    for (const r of rows()) {
+      const batch = waitingRetry.get(r.key);
+      if (batch) {
+        const state = mapStatus(status);
+        if (waitForIdle.has(r.key) && state !== 'idle') return;
+        const turn = await latest();
+        if (!liveness().live) return;
+        if (state === 'turn_running' && turn?.status !== 'inProgress') return;
+        r.method = state === 'idle' ? 'turn/start' : 'turn/steer';
+        r.attemptTurnId = state === 'idle' ? null : turn!.id; r.priorTurnId = state === 'idle' ? turn?.id ?? null : null;
+        await transmit(r, batch); return;
+      }
+    }
+    const s = mapStatus(status);
+    if (s !== 'idle' && s !== 'turn_running') return;
+    const action = s === 'idle' ? 'start' : 'steer';
+    const priorities = (['wake', 'wake_idle'] as const).filter(p => planInput(p, s, { steer: true, queue: 'launcher' }) === action);
+    const turn = await latest();
+    if (!liveness().live || (action === 'steer' && (turn?.status !== 'inProgress' || typeof turn.id !== 'string'))) return;
+    const nonce = randomBytes(12).toString('hex');
+    kv.set('claiming:' + nonce, JSON.stringify({ threadId: b.threadId, at: clock.now() }));
+    const output = obj(await runHook(['--event', 'app-server', '--claim', nonce, '--priorities', priorities.join(','), '--expect-hub', b.hub, '--expect-caller', b.caller]));
+    if (output.refused === 'identity_changed') {
+      kv.delete('claiming:' + nonce); identityChanged = true; await unsubscribe();
+      log.warn('codex_binding_identity_changed', { threadId: b.threadId }); return;
+    }
+    if (!Array.isArray(output.deliveries) || !output.deliveries.every((id: unknown) => typeof id === 'string') ||
+      !Array.isArray(output.entries ?? []) || (output.entries ?? []).some((e: unknown) => typeof obj(e).key !== 'string' || typeof obj(e).value !== 'string' || Buffer.byteLength(obj(e).value) > 1000)) {
+      await release(nonce); kv.delete('claiming:' + nonce); return;
+    }
+    const batch: Batch = { deliveries: output.deliveries, stub: typeof output.stub === 'string' ? output.stub : '', entries: output.entries ?? [] };
+    if (!batch.deliveries.length && !batch.entries.some(e => e.key === 'vecnet_summary')) { kv.delete('claiming:' + nonce); return; }
+    const key = 'vn.' + createHash('sha256').update(b.threadId + '\n' + [...batch.deliveries].sort().join(',')).digest('hex').slice(0, 24);
+    const row: InflightRow = { threadId: b.threadId, key, claim: nonce, deliveries: batch.deliveries, method: action === 'start' ? 'turn/start' : 'turn/steer',
+      attemptTurnId: action === 'steer' ? turn!.id : null, priorTurnId: action === 'start' ? turn?.id ?? null : null, acceptedAt: null, state: 'sending' };
+    // Do not overwrite an unresolved attempt if a summary produces its key again.
+    if (kv.get('inflight:' + key)) { await release(nonce); kv.delete('claiming:' + nonce); return; }
+    write(row); kv.delete('claiming:' + nonce); await transmit(row, batch);
+  }
+  function startWatch() {
+    if (!running) return;
+    watch = spawn(d.vecnetBin, [...baseArgs, 'watch', '--json'], { env, stdio: ['ignore', 'pipe', 'ignore'] });
+    const reader = createInterface({ input: watch.stdout! });
+    reader.on('line', line => {
+      if (Buffer.byteLength(line) > 1_048_576) return;
+      try {
+        const event = obj(JSON.parse(line)), p = obj(obj(event.data).message).priority;
+        if (event.type === 'delivery' && (p === 'wake' || p === 'wake_idle')) arm();
+      } catch { /* The watch stream is a trigger, never turn input. */ }
+    });
+    watch.on('error', () => { log.warn('codex_watch_unreachable', { threadId: b.threadId }); });
+    watch.once('close', () => { reader.close(); watch = undefined; if (running) {
+      const timer = clock.timer(1000, () => { watchRetry = undefined; startWatch(); }); watchRetry = timer;
+    } });
+  }
+  let watchRetry: { cancel(): void } | undefined;
+  function heartbeat() {
+    minute = clock.timer(60_000, () => { enqueue(reconcile); if (running) heartbeat(); });
+  }
+  return {
+    start() { if (running) { enqueue(async () => { await recover(); arm(0); }); return; }
+      running = true; reconnect = undefined; gap = undefined; startWatch(); heartbeat(); enqueue(connect); },
+    async stop() {
+      if (!running) return;
+      running = false; debounce?.cancel(); gap?.cancel(); reconnect?.cancel(); minute?.cancel(); watchRetry?.cancel();
+      const child = watch; watch = undefined;
+      const exits = [...children, ...(child ? [child] : [])].map(c => new Promise<void>(resolve => {
+        if (c.exitCode !== null || c.signalCode !== null) { resolve(); return; }
+        c.once('close', () => resolve()); c.kill();
+      }));
+      await queue; await unsubscribe(); const connection = rpc; rpc = undefined; connection?.close(); await Promise.all(exits);
+    },
+    state: () => connectionState, liveness, subscribed: () => attached,
+    setOverLimit(value) { overLimit = value; enqueue(async () => { await reconcile(); if (!value) arm(0); }); },
+  };
+}
