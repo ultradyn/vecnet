@@ -169,10 +169,28 @@ async function smoke({ codex, tmux, home, stateDir }) {
     if (started.code !== 0) throw new Error(`tmux: ${started.stderr.trim()}`);
     tmuxStarted = true;
     const pane = async () => (await t('capture-pane', '-p', '-J', '-S', '-400', '-t', 'smoke')).stdout;
+    // Codex 0.167 treats fast typed text as a paste burst and swallows an Enter
+    // sent straight after it, leaving the prompt in the composer. Pause, press
+    // Enter, and press again while the composer still holds the text.
+    const submit = async (text, { check = true } = {}) => {
+      await t('send-keys', '-t', 'smoke', '-l', text);
+      const head = text.slice(0, 30);
+      const inComposer = async () => {
+        const last = (await pane()).split('\n').filter(l => l.trimStart().startsWith('›')).pop() ?? '';
+        return last.includes(head);
+      };
+      for (let i = 0; i < 4; i++) {
+        await sleep(1000);
+        await t('send-keys', '-t', 'smoke', 'Enter');
+        if (!check) return;
+        await sleep(2000);
+        if (!(await inComposer())) return;
+      }
+      throw new Error('the Codex TUI kept the prompt in its composer after 4 Enter presses');
+    };
     await until('Codex TUI ready', async () => (await pane()).includes('›'), 60_000);
     if (/trust/i.test(await pane())) throw new Error('Codex asks about trusting the smoke directory; trust it once by hand, then re-run');
-    await t('send-keys', '-t', 'smoke', '-l', PROMPT);
-    await t('send-keys', '-t', 'smoke', 'Enter');
+    await submit(PROMPT);
     const cwd = realpathSync(ws);
     threadId = await until('the one new thread with this cwd', async () => {
       const fresh = (await obs.loaded()).filter(id => !before.has(id));
@@ -251,8 +269,7 @@ async function smoke({ codex, tmux, home, stateDir }) {
     console.log('PASS: untrusted context reached the model, peer text stayed inert, delivery unacked');
 
     // Step 8: keep-loaded after the TUI quits.
-    await t('send-keys', '-t', 'smoke', '-l', '/quit');
-    await t('send-keys', '-t', 'smoke', 'Enter');
+    await submit('/quit', { check: false });
     await sleep(75_000);
     if (!(await obs.loaded()).includes(threadId)) throw new Error('keep-loaded: the thread unloaded after the TUI quit');
     console.log('PASS: thread still loaded 75 s after the TUI quit');
@@ -273,6 +290,14 @@ async function smoke({ codex, tmux, home, stateDir }) {
     console.log('PASS: unbind released the thread (notLoaded)');
     console.log('PASS: codex app-server smoke');
     return 0;
+  } catch (error) {
+    // Show where the Codex TUI stopped before cleanup kills its tmux server.
+    if (tmuxStarted) {
+      const shot = await t('capture-pane', '-p', '-J', '-S', '-60', '-t', 'smoke').catch(() => undefined);
+      const lines = (shot?.stdout ?? '').split('\n').filter(l => l.trim()).slice(-40);
+      if (lines.length) console.error(`--- Codex TUI pane at failure ---\n${lines.join('\n')}\n--- end pane ---`);
+    }
+    throw error;
   } finally {
     // Step 11: clean up everything this run made, and only that.
     const steps = [];
