@@ -352,6 +352,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   }
 
   function showSafe(safe, note) {
+    lede.textContent = 'Status for this request. One-time text is not shown again.';
     clearSecrets();
     body.replaceChildren(
       h('p', { class: 'inv-note', text: note }),
@@ -476,6 +477,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   }
 
   function showGrok(res, vals) {
+    lede.textContent = 'The bot is not connected yet. Whoami is the proof, after the setup message names this peer.';
     const safe = statusSafe(res);
     const skipMCP = vals.skip_mcp === true;
     const slot = h('div', { class: 'inv-code', 'aria-live': 'polite' });
