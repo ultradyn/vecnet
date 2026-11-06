@@ -99,6 +99,18 @@ admin (operator credential):
   peer invite <peer> [--ttl 24h] [--copy]             re-issues a token for a peer not yet enrolled
   peer move <peer> --principal PRN
   peer link <peer>                                    prints a peer's 12-character OAuth link code
+  agent kinds [--kind KIND]
+       onboarding kinds and prompt templates from the hub
+  agent add --kind KIND [--name N] [--open-name] [--ttl 24h] [--principal PRN]
+       [--url URL] [--key-file PATH] [--connector-name NAME] [--skip-mcp]
+       [--request-id ID] [--confirm-revoke]
+       one hub submit; a routine key is read only from --key-file, never argv or the environment
+       --skip-mcp selects CLI bearer and does not request a link
+       the guided link revokes a live bearer and asks for --confirm-revoke first
+  agent link <peer> [--confirm-revoke]
+       guided link step, with the same bearer warning before peer link
+  agent status REQUEST_ID
+       safe onboarding status; queued is not connected
   peer avatar <peer> (FILE|https://URL|--clear)       set or clear any peer's avatar
   peer rotate <peer>
   peer scope <peer> [--allow IDS] [--deny IDS]        IDS: comma-separated or repeated
@@ -491,6 +503,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdPrincipal(args)
 	case "peer":
 		return a.cmdPeer(args)
+	case "agent":
+		return a.cmdAgent(args)
 	case "route":
 		return a.cmdRoute(args)
 	case "source":
