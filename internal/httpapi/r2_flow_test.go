@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -534,8 +535,21 @@ func TestR2HTTPCompletionWaitRevocationAndProviderErrors(t *testing.T) {
 			if put.StatusCode != 200 {
 				t.Fatal("signed PUT rejected")
 			}
+			ledger := func() [5]int64 {
+				var out [5]int64
+				if err := e.Hub.DB.QueryRow(`SELECT (SELECT coalesce(sum(reserved_bytes),0) FROM blob_r2_quota),(SELECT coalesce(sum(accepted_bytes),0) FROM blob_r2_quota),(SELECT storage_reserved_bytes FROM blob_r2_storage),(SELECT retained_bytes FROM blob_r2_storage),(SELECT count(*) FROM blob_usage_events WHERE kind='verified')`).Scan(&out[0], &out[1], &out[2], &out[3], &out[4]); err != nil {
+					t.Fatal("ledger read failed")
+				}
+				return out
+			}
+			before := ledger()
+			if before != [5]int64{3, 0, 3, 0, 0} {
+				t.Fatalf("pending ledger = %v", before)
+			}
+			var ran atomic.Bool
 			f.mu.Lock()
 			f.headWait = func() {
+				ran.Store(true)
 				switch change {
 				case "disable":
 					_, err = e.Hub.DB.Exec(`UPDATE peers SET disabled=1 WHERE peer_id=?`, peer)
@@ -558,6 +572,30 @@ func TestR2HTTPCompletionWaitRevocationAndProviderErrors(t *testing.T) {
 			}
 			if change == "provider" {
 				requireCode(t, raw, "blob_unavailable")
+			}
+			if change != "provider" && !ran.Load() {
+				t.Fatal("eligibility change did not run during the completion HEAD")
+			}
+			if change == "disable" || change == "revoke" {
+				if resp.StatusCode != 403 {
+					t.Fatalf("revoked completion status %d, want 403", resp.StatusCode)
+				}
+				requireCode(t, raw, "forbidden")
+			}
+			if change == "disable" || change == "revoke" || change == "provider" {
+				// The credential recheck must refuse at the completion CAS, not only
+				// in the outer wrapper: nothing may commit verification or charges.
+				var state string
+				var verified int
+				if err := e.Hub.DB.QueryRow(`SELECT state,sha256_verified FROM blob_objects WHERE blob_id=?`, g.BlobID).Scan(&state, &verified); err != nil {
+					t.Fatal("grant read failed")
+				}
+				if state != "pending" || verified != 0 {
+					t.Fatalf("refused completion committed state=%s verified=%d", state, verified)
+				}
+				if after := ledger(); after != before {
+					t.Fatalf("refused completion moved ledgers %v -> %v", before, after)
+				}
 			}
 			f.mu.Lock()
 			gets := f.calls["GET"]
@@ -783,7 +821,7 @@ func TestR2GrandfatheredDiskReadStaysLocal(t *testing.T) {
 		t.Fatal("grandfathered bytes changed")
 	}
 	token := e.Hub.Blobs.Token(e.OperatorPeer, old.SHA256, e.Now.Now().Add(time.Hour))
-	resp, raw = e.Do("", "HEAD", grant.LocalPath+"?t="+url.QueryEscape(token), nil)
+	resp, raw = f.request(t, "", "HEAD", grant.LocalPath+"?t="+url.QueryEscape(token), nil, "")
 	if resp.StatusCode != 200 || len(raw) != 0 {
 		t.Fatal("legacy disk HEAD token compatibility changed")
 	}

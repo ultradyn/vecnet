@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -286,13 +287,20 @@ func (e *Env) Do(secret, method, path string, body any) (*http.Response, []byte)
 	default:
 		j, err := json.Marshal(b)
 		if err != nil {
-			e.T.Fatalf("testhub: marshal body: %v", err)
+			e.T.Fatalf("testhub: marshal %T body failed", b)
 		}
 		r = bytes.NewReader(j)
 	}
+	// Paths may carry capabilities (?t=<token>), and net/http errors repeat
+	// the request URL: failure diagnostics show only the method and the path
+	// without its query, never a raw error (PROTOCOL §12, §14 invariant 6).
+	shown, _, hasQuery := strings.Cut(path, "?")
+	if hasQuery {
+		shown += "?<redacted>"
+	}
 	req, err := http.NewRequest(method, e.URL+path, r)
 	if err != nil {
-		e.T.Fatalf("testhub: new request: %v", err)
+		e.T.Fatalf("testhub: new request %s %s failed", method, shown)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -302,12 +310,12 @@ func (e *Env) Do(secret, method, path string, body any) (*http.Response, []byte)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		e.T.Fatalf("testhub: %s %s: %v", method, path, err)
+		e.T.Fatalf("testhub: %s %s: transport failed", method, shown)
 	}
 	defer resp.Body.Close()
 	out, err := io.ReadAll(resp.Body)
 	if err != nil {
-		e.T.Fatalf("testhub: read %s %s: %v", method, path, err)
+		e.T.Fatalf("testhub: read %s %s: response read failed", method, shown)
 	}
 	return resp, out
 }
