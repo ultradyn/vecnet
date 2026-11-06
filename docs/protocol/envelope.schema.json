@@ -322,7 +322,7 @@
       ]
     },
     "attachmentReference": {
-      "$comment": "Shared reference contract for grant-aware sends in Task 4. The active disk-only sendRequest rejects blob_id until that integration exists.",
+      "$comment": "Grant-aware send references omit server verification fields. Backend authorization rejects unavailable remote references.",
       "$ref": "#/$defs/attachment",
       "not": {
         "anyOf": [
@@ -1183,6 +1183,138 @@
         }
       }
     },
+    "blobStates": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^blo_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+        "description": "Opaque random R2 object identity; confers no authority."
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "state",
+          "retention_class",
+          "expires_at",
+          "sha256_verified",
+          "integrity"
+        ],
+        "properties": {
+          "state": {
+            "enum": [
+              "available",
+              "expired",
+              "purged",
+              "unavailable"
+            ]
+          },
+          "retention_class": {
+            "enum": [
+              "1h",
+              "6h",
+              "12h",
+              "1d",
+              "7d",
+              "30d",
+              "keep"
+            ]
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Recorded logical object deadline; null for keep."
+          },
+          "sha256_verified": {
+            "type": "boolean",
+            "description": "Server-recorded checksum evidence, never a caller assertion."
+          },
+          "integrity": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "algorithm",
+              "value",
+              "verified"
+            ],
+            "properties": {
+              "algorithm": {
+                "const": "sha256"
+              },
+              "value": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "verified": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "retention_class": {
+                  "const": "keep"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "expires_at": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "expires_at": {
+                  "$ref": "#/$defs/timestamp"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "sha256_verified": {
+                  "const": true
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "integrity": {
+                  "properties": {
+                    "verified": {
+                      "const": true
+                    }
+                  }
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "integrity": {
+                  "properties": {
+                    "verified": {
+                      "const": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
     "event": {
       "type": "object",
       "description": "One entry in a peer's (or principal's) durable log. SSE: id = cursor, event = type, data = this object. Long-poll and MCP vecnet_inbox return arrays of these.",
@@ -1194,6 +1326,7 @@
         "data"
       ],
       "properties": {
+        "blob_states": { "$ref": "#/$defs/blobStates" },
         "cursor": {
           "$ref": "#/$defs/cursor"
         },
@@ -1343,12 +1476,9 @@
           "type": "array",
           "maxItems": 16,
           "items": {
-            "$ref": "#/$defs/attachmentReference",
-            "properties": {
-              "blob_id": false
-            }
+            "$ref": "#/$defs/attachmentReference"
           },
-          "description": "Hosted bytes are uploaded first with PUT /v1/blobs using the same bearer (returns {sha256,size}); the hub rejects unknown hashes unless origin_url is set."
+          "description": "Upload hosted bytes first using the configured backend: disk PUT returns {sha256,size}; direct upload completion returns a blob_id reference with immutable retention fields. The hub authorizes each reference and rejects unknown disk hashes unless origin_url is set."
         },
         "metadata": {
           "type": "object",

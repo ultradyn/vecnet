@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
 )
@@ -17,8 +18,9 @@ type threadsBody struct {
 
 // historyBody is the GET /v1/threads/{id}/messages response.
 type historyBody struct {
-	Messages  []envelope.Message `json:"messages"`
-	NextAfter *string            `json:"next_after"`
+	BlobStates map[string]blobwire.State `json:"blob_states,omitempty"`
+	Messages   []envelope.Message        `json:"messages"`
+	NextAfter  *string                   `json:"next_after"`
 	// HostedBlobs is set for the operator only, as {} when nothing on the
 	// page is hosted: message id -> the sha256s of its attachments the hub
 	// hosts (Hub.HostedAttachments).
@@ -88,7 +90,12 @@ func (s *server) getThreadMessages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	body := historyBody{Messages: msgs, NextAfter: next}
+	states, err := s.Hub.ProjectBlobStates(r.Context(), callerFrom(r.Context()), msgs)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	body := historyBody{Messages: msgs, NextAfter: next, BlobStates: states}
 	if c := callerFrom(r.Context()); c.Kind == "operator" {
 		// The operator UI shows hosted images inline: an attachment that
 		// also names an origin_url may still have hosted bytes, which a

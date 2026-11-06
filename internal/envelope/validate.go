@@ -68,8 +68,8 @@ func (e *SchemaError) Error() string {
 // Validate checks raw JSON against $defs/<def> of the embedded schema.
 // def is one of "sendRequest", "delivery", "event", "receipt", "presence",
 // "threadSummary", "message", "reaction", "reactionEvent", "reactionRequest",
-// "attachmentReference". The latter validates future grant-aware references;
-// the active disk-only sendRequest rejects blob_id until Task 4 integration.
+// "attachmentReference". Send requests admit grant-aware references;
+// backend availability and ownership are checked by the hub.
 // A violation, including malformed JSON or
 // trailing data, is returned as *SchemaError; an unknown def is a plain error.
 func Validate(def string, raw []byte) error {

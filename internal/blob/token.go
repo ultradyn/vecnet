@@ -67,3 +67,36 @@ func (s *Store) VerifyToken(tok, sha string, now time.Time) (recipient string, o
 func (s *Store) URL(publicURL, recipient, sha string, exp time.Time) string {
 	return publicURL + "/v1/blobs/" + sha + "?t=" + s.Token(recipient, sha, exp)
 }
+
+// TokenV2 binds a delivery capability to an exact object incarnation. V1 disk
+// tokens and v2 R2 tokens have disjoint payload formats and MAC domains.
+func (s *Store) TokenV2(recipient, sha, id string, exp time.Time) string {
+	payload := []byte("v2|" + strconv.FormatInt(exp.Unix(), 10) + "|" + recipient + "|" + sha + "|" + id)
+	return TokenPrefix + tokenEnc.EncodeToString(append(append(payload, '|'), s.mac(payload)...))
+}
+func (s *Store) VerifyTokenV2(tok, sha, id string, now time.Time) (string, bool) {
+	if !ValidSHA(sha) || id == "" {
+		return "", false
+	}
+	enc, ok := strings.CutPrefix(tok, TokenPrefix)
+	if !ok {
+		return "", false
+	}
+	raw, err := tokenEnc.DecodeString(enc)
+	if err != nil || len(raw) < sha256.Size+1 {
+		return "", false
+	}
+	payload := raw[:len(raw)-sha256.Size-1]
+	if raw[len(payload)] != '|' || !hmac.Equal(raw[len(raw)-sha256.Size:], s.mac(payload)) {
+		return "", false
+	}
+	p := strings.Split(string(payload), "|")
+	if len(p) != 5 || p[0] != "v2" || p[2] == "" || p[3] != sha || p[4] != id {
+		return "", false
+	}
+	exp, err := strconv.ParseInt(p[1], 10, 64)
+	if err != nil || !now.Before(time.Unix(exp, 0)) {
+		return "", false
+	}
+	return p[2], true
+}
