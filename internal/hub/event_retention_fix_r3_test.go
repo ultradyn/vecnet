@@ -82,7 +82,7 @@ func TestRetentionArchiveProvenanceResetPreservesApprovalAndPending(t *testing.T
 			// Compare all historical eligibility/authority metadata; only the
 			// latest projection's provenance tag may change on this Reset.
 			queries := []string{
-				`SELECT json_remove(value,'$[#-1].policy_tag') FROM meta WHERE key='event_retention_projection_v1_archive'`,
+				`SELECT json_remove(value,'$[#-1].policy_tag') FROM meta WHERE key='event_retention_projection_v2_archive'`,
 				`SELECT value FROM meta WHERE key='event_retention_bootstrap_v1'`,
 				`SELECT json_group_array(json_array(revision,effective_from,not_before,cutoff_at,high_water,approval_digest)) FROM (SELECT * FROM hub_preference_activations WHERE key='retention.archive_mode' ORDER BY revision)`,
 			}
@@ -101,7 +101,7 @@ func TestRetentionArchiveProvenanceResetPreservesApprovalAndPending(t *testing.T
 			}
 			// The Reset must also publish the new provenance to the ledger.
 			var tag string
-			if err := h.DB.QueryRow(`SELECT json_extract(value,'$[#-1].policy_tag') FROM meta WHERE key='event_retention_projection_v1_archive'`).Scan(&tag); err != nil {
+			if err := h.DB.QueryRow(`SELECT json_extract(value,'$[#-1].policy_tag') FROM meta WHERE key='event_retention_projection_v2_archive'`).Scan(&tag); err != nil {
 				t.Fatal(err)
 			}
 			var provenance struct {

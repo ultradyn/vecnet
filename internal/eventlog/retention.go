@@ -12,6 +12,13 @@ import (
 // floorFor is shared by read snapshots and writer transactions. Missing owners
 // have never been purged. A scalar merged cursor uses the most protective floor.
 func floorFor(ctx context.Context, q execer, owners []string) (int64, error) {
+	var initialized string
+	if err := q.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='event_retention_init_done'`).Scan(&initialized); err != nil {
+		return 0, err
+	}
+	if initialized != "1" {
+		return 0, errors.New("eventlog: retention_initialization_pending")
+	}
 	var floor int64
 	for start := 0; start < len(owners); start += 200 {
 		end := min(start+200, len(owners))
@@ -160,21 +167,54 @@ func (l *Log) PrunePrefix(ctx context.Context, tx *sql.Tx, owner string, now tim
 }
 
 func (l *Log) effectiveAck(ctx context.Context, q execer, owner string) (int64, error) {
+	// Resolve the current principal once, then probe only the three accepted
+	// scopes by their full primary key. An OR/correlated-EXISTS over acks
+	// scans unrelated acknowledgement history while holding the writer lock.
+	var principal string
+	err := q.QueryRowContext(ctx, `SELECT prn_id FROM peers WHERE peer_id=?`, owner).Scan(&principal)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	var high int64
+	if err := q.QueryRowContext(ctx, `SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='events'),0)`).Scan(&high); err != nil {
+		return 0, err
+	}
+	scopes := [][2]string{{owner, "*"}}
+	if err == nil {
+		scopes = append(scopes, [2]string{principal, "*"}, [2]string{principal, owner})
+	}
 	var ack int64
-	err := q.QueryRowContext(ctx, `SELECT coalesce(max(a.seq),0) FROM acks a WHERE a.epoch=? AND a.seq <= coalesce((SELECT seq FROM sqlite_sequence WHERE name='events'),0) AND (
- (a.owner=? AND a.scope='*') OR EXISTS(SELECT 1 FROM peers p WHERE p.peer_id=? AND p.prn_id=a.owner AND a.scope IN ('*',p.peer_id)))`, l.epoch, owner, owner).Scan(&ack)
-	return ack, err
+	for _, scope := range scopes {
+		var seq int64
+		if err := q.QueryRowContext(ctx, `SELECT coalesce(max(seq),0) FROM acks WHERE owner=? AND scope=? AND epoch=? AND seq<=?`, scope[0], scope[1], l.epoch, high).Scan(&seq); err != nil {
+			return 0, err
+		}
+		ack = max(ack, seq)
+	}
+	return ack, nil
 }
 func (l *Log) retentionPinned(ctx context.Context, q execer, owner string, seq int64, now time.Time) (bool, error) {
+	// seq is globally unique. Every retained retry copy pins that candidate,
+	// including a copy whose subscription was later rebound or removed. No
+	// historical subscription enumeration is needed to establish this pin.
 	var pinned bool
-	err := q.QueryRowContext(ctx, `SELECT
+	// A moved peer may have arbitrarily many still-live former-principal
+	// subscriptions. Probe only its peer credential, current principal and
+	// current OAuth binding, each capped by the subscription store. CROSS JOIN
+	// keeps the three constant scopes outside the indexed subscription seek.
+	err := q.QueryRowContext(ctx, `WITH scopes(kind,id) AS (VALUES
+     ('vecnet',?),
+     ('vecnet',(SELECT prn_id FROM peers WHERE peer_id=?)),
+     ('oauth',(SELECT o.prn_id FROM oauth_principals o JOIN peers p ON p.peer_id=o.peer_id AND p.prn_id=o.prn_id WHERE o.peer_id=?))
+   ) SELECT
    EXISTS(SELECT 1 FROM deliveries d WHERE d.event_seq=? AND (d.state IN ('queued','pushed','dead_letter') OR d.held=1 OR d.dispatching>0)) OR
-   EXISTS(SELECT 1 FROM event_outbox o JOIN event_subscriptions s ON s.sub_id=o.sub_id WHERE s.peer_id=? AND o.seq=? AND (o.done_at IS NULL OR o.terminal='exhausted')) OR
-   EXISTS(SELECT 1 FROM event_subscriptions s WHERE s.peer_id=?
+   EXISTS(SELECT 1 FROM event_outbox o INDEXED BY event_outbox_retention_candidate WHERE o.seq=? AND (o.done_at IS NULL OR o.terminal='exhausted')) OR
+   EXISTS(SELECT 1 FROM scopes CROSS JOIN event_subscriptions s INDEXED BY event_subscriptions_retention_identity WHERE s.peer_id=?
+     AND s.principal_kind=scopes.kind AND s.principal_id=scopes.id
      AND s.verified_at IS NOT NULL AND s.paused_reason IS NULL
-     AND (s.expires_at IS NULL OR s.expires_at>?) AND (s.token_expires_at IS NULL OR s.token_expires_at>?)
+     AND min(coalesce(s.expires_at,'9999'),coalesce(s.token_expires_at,'9999'))>?
      AND (s.cursor_epoch!=? OR s.cursor_seq<?)
-     AND NOT EXISTS(SELECT 1 FROM event_outbox o WHERE o.sub_id=s.sub_id AND o.seq=?))`, seq, owner, seq, owner, envelope.FormatTime(now), envelope.FormatTime(now), l.epoch, seq, seq).Scan(&pinned)
+     AND NOT EXISTS(SELECT 1 FROM event_outbox o WHERE o.sub_id=s.sub_id AND o.seq=?))`, owner, owner, owner, seq, seq, owner, envelope.FormatTime(now), l.epoch, seq, seq).Scan(&pinned)
 	return pinned, err
 }
 

@@ -9,11 +9,14 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/eventlog"
+	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
 func TestOwnerRetentionHTTPMergedNarrowedAndDefaultAck(t *testing.T) {
-	env := testhub.Start(t)
+	env := testhub.StartWith(t, func(cfg *hub.Config) {
+		cfg.EventRetentionLimits = eventlog.RetentionLimits{Rows: 10000, Bytes: 64 << 20, Target: time.Minute}
+	})
 	ctx := context.Background()
 	prn, secret := env.NewPrincipal("synthetic")
 	a := adminAddPeer(t, env, map[string]any{"kind": "session", "name": "a", "principal_id": prn}).PeerID
@@ -46,6 +49,11 @@ func TestOwnerRetentionHTTPMergedNarrowedAndDefaultAck(t *testing.T) {
 	env.Now.Advance(8 * 24 * time.Hour)
 	if _, err := env.Hub.PruneEventSlice(ctx); err != nil {
 		t.Fatal(err)
+	}
+
+	gotFloor, err := env.Hub.Log.OldestFor(ctx, []string{a})
+	if err != nil || gotFloor != floor {
+		t.Fatalf("fixture floor=%v want=%v err=%v", gotFloor, floor, err)
 	}
 
 	resp, body, _ := getEvents(t, env, secret, "?after=e1.0&wait=0", nil)

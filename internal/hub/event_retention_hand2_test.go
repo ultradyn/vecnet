@@ -35,7 +35,7 @@ func TestRetentionHardGrantSurvivesAckBootstrapIncrease(t *testing.T) {
 			if tc.legacy {
 				// Model the previous binary: no dedicated hard generation, and
 				// archive boundaries stamped with the shared generation.
-				if _, err := h.DB.Exec(`UPDATE meta SET value=json_set(value,'$[0].bootstrap_generation',(SELECT json_extract(value,'$.generation') FROM meta WHERE key='event_retention_bootstrap_v1')) WHERE key='event_retention_projection_v1_archive'`); err != nil {
+				if _, err := h.DB.Exec(`UPDATE meta SET value=json_set(value,'$[0].bootstrap_generation',(SELECT json_extract(value,'$.generation') FROM meta WHERE key='event_retention_bootstrap_v1')) WHERE key='event_retention_projection_v2_archive'`); err != nil {
 					t.Fatal(err)
 				}
 				if _, err := h.DB.Exec(`UPDATE meta SET value=json_remove(value,'$.hard_generation') WHERE key='event_retention_bootstrap_v1'`); err != nil {

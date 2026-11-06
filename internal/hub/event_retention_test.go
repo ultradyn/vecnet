@@ -36,8 +36,17 @@ func retentionFloor(t *testing.T, h *hub.Hub, owner string, want int64) {
 		t.Fatalf("floor=%v err=%v want seq=%d", c, err, want)
 	}
 }
+
+// These small behavioral fixtures need their eligible cleanup completed. Keep
+// explicit partial-slice tests on their own limits and restore caller settings.
+func retentionFixtureLimits() eventlog.RetentionLimits {
+	return eventlog.RetentionLimits{Rows: 10000, Bytes: 64 << 20, Target: time.Minute}
+}
 func retentionRun(t *testing.T, h *hub.Hub) {
 	t.Helper()
+	old := h.Cfg.EventRetentionLimits
+	h.Cfg.EventRetentionLimits = retentionFixtureLimits()
+	defer func() { h.Cfg.EventRetentionLimits = old }()
 	if _, err := h.PruneEventSlice(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -399,6 +408,7 @@ func TestRetentionPolicyWritesSerializeWithDeletion(t *testing.T) {
 
 func TestRetentionPurgeBackfillAndPushRace(t *testing.T) {
 	env := testhub.StartWith(t, func(cfg *hub.Config) {
+		cfg.EventRetentionLimits = retentionFixtureLimits()
 		cfg.BackfillEnabled = true
 		cfg.BackfillCapacity = func(context.Context) (hub.BackfillCapacity, error) {
 			return hub.BackfillCapacity{AvailableBytes: 1 << 40}, nil
