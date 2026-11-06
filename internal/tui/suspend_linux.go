@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -26,6 +27,25 @@ func suspendDefault() {
 	if rtSigaction(syscall.SIGTSTP, &dfl, &savedStop) == nil {
 		haveSavedStop = true
 	}
+}
+
+// raiseStop unblocks SIGTSTP on this thread and sends it here. With SIG_DFL
+// installed, the kernel stops the process before the syscall returns.
+func raiseStop() error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := unblockTSTP(); err != nil {
+		return err
+	}
+	tid, _, errno := syscall.RawSyscall(syscall.SYS_GETTID, 0, 0, 0)
+	if errno != 0 {
+		return errno
+	}
+	_, _, errno = syscall.RawSyscall(syscall.SYS_TGKILL, uintptr(syscall.Getpid()), tid, uintptr(syscall.SIGTSTP))
+	if errno != 0 {
+		return errno
+	}
+	return nil
 }
 
 func unblockTSTP() error {

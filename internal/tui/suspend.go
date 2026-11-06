@@ -60,10 +60,16 @@ func (w *stopWatch) disarm() {
 		return
 	}
 	w.armed = false
-	// Leave the Go listener registered. Swapping the kernel handler to the
-	// default is what lets the following SIGTSTP stop the process; signal.Reset
-	// leaves Go's handler in place and that handler swallows the signal once
-	// it has been enabled.
+	// Drop the Go subscription first so this signal cannot be queued again.
+	// signal.Stop does not put the kernel disposition back: once Notify has
+	// installed Go's handler, Reset and Stop leave it there, and that handler
+	// swallows SIGTSTP instead of stopping the process. suspendDefault installs
+	// SIG_DFL for the raise that follows.
+	signal.Stop(w.ch)
+	select {
+	case <-w.ch:
+	default:
+	}
 	suspendDefault()
 }
 
@@ -101,8 +107,10 @@ func doSuspend() tea.Msg {
 			return nil
 		}
 	}
-	_ = unblockTSTP()
-	_ = syscall.Kill(syscall.Getpid(), syscall.SIGTSTP)
+	// raiseStop targets this thread and does not return until SIGCONT. A
+	// process-directed kill can return while the signal is still pending;
+	// restoring the Go handler in that window swallows SIGTSTP.
+	_ = raiseStop()
 	restoreStopHandler()
 	if p != nil {
 		_ = p.RestoreTerminal()

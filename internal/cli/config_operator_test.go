@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -231,7 +232,72 @@ func TestOperatorProfileRefusesMissingProfileUnderLock(t *testing.T) {
 	if string(got) != updated {
 		t.Fatalf("file\n got %q\nwant %q", got, updated)
 	}
+
+	// An empty profile map, a zero-byte file, and a removed file used to skip
+	// the membership check and install the name the picker still held.
+	for _, tc := range []struct {
+		name    string
+		body    *string
+		missing bool
+	}{
+		{name: "empty map", body: strPtr("title = \"keep\"\n")},
+		{name: "zero byte", body: strPtr("")},
+		{name: "removed", missing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.toml")
+			original := "operator_profile = \"old\"\n[profiles.fly]\nhub = \"https://h\"\nsecret = \"vn_operator_FLY\"\n"
+			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			unlock, err := lockPath(ctx, path+".lock")
+			if err != nil {
+				t.Fatal(err)
+			}
+			errc := make(chan error, 1)
+			go func() { errc <- setOperatorProfile(path, "fly") }()
+			time.Sleep(30 * time.Millisecond)
+			if tc.missing {
+				if err := os.Remove(path); err != nil {
+					unlock()
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, []byte(*tc.body), 0o600); err != nil {
+				unlock()
+				t.Fatal(err)
+			}
+			unlock()
+			err = <-errc
+			if err == nil {
+				t.Fatal("dangling operator_profile was written")
+			}
+			if strings.Contains(err.Error(), "vn_operator") || strings.Contains(err.Error(), "secret") {
+				t.Fatal("refusal quoted the config")
+			}
+			if tc.missing {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("removed file came back: %v", err)
+				}
+				return
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != *tc.body {
+				t.Fatal("latest file state was replaced")
+			}
+			if bytes.Contains(got, []byte("operator_profile")) && *tc.body == "" {
+				t.Fatal("zero-byte file gained an operator_profile")
+			}
+		})
+	}
 }
+
+func strPtr(s string) *string { return &s }
 
 func TestCommitOperatorProfileRefusesStaleBytes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
