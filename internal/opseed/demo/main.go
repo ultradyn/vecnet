@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 	"github.com/XertroV/vecnet/internal/httpapi"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/opseed"
+	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
@@ -294,6 +296,38 @@ func main() {
 	}
 }
 
+// prefFlags collects --pref-flag KEY=VALUE@ORIGIN: an int or duration
+// (seconds) preference with flag provenance, as cmd/vecnet-hub records an
+// explicit flag or environment value. Screens use it to show a real
+// read-only flag row; the hub validates it at start-up like any other.
+type prefFlags map[string]prefs.Effective
+
+func (p prefFlags) String() string { return "" }
+func (p prefFlags) Set(s string) error {
+	kv, origin, ok := strings.Cut(s, "@")
+	key, raw, ok2 := strings.Cut(kv, "=")
+	if !ok || !ok2 || origin == "" {
+		return errors.New("want KEY=VALUE@ORIGIN")
+	}
+	d, err := prefs.Lookup(key)
+	if err != nil {
+		return err
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return err
+	}
+	switch d.Type {
+	case prefs.TypeInt:
+		p[key] = prefs.Effective{Value: prefs.Int(n), Source: prefs.SourceFlag, Origin: origin}
+	case prefs.TypeDuration:
+		p[key] = prefs.Effective{Value: prefs.Duration(n), Source: prefs.SourceFlag, Origin: origin}
+	default:
+		return errors.New("only int and duration preferences")
+	}
+	return nil
+}
+
 func run(ctx context.Context, args []string, stdin io.Reader, out io.Writer) error {
 	fs := flag.NewFlagSet("demo", flag.ContinueOnError)
 	listen := fs.String("listen", "127.0.0.1:0", "loopback address")
@@ -302,6 +336,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, out io.Writer) err
 	scale := fs.Bool("scale", false, "include large threads")
 	reset := fs.Bool("reset", false, "reset this demo's saved data")
 	exitOnEOF := fs.Bool("exit-on-stdin-eof", false, "shut down when stdin closes")
+	prefFlag := prefFlags{}
+	fs.Var(prefFlag, "pref-flag", "start-up preference with flag provenance, KEY=VALUE@ORIGIN (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -374,6 +410,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, out io.Writer) err
 	cfg.DataDir = *dir
 	cfg.PublicURL = url
 	cfg.AllowPrivateEgress = true
+	if len(prefFlag) > 0 {
+		cfg.PreferenceBootstrap = map[string]prefs.Effective(prefFlag)
+	}
 	h, err := hub.New(db, cfg, c.now)
 	if err != nil {
 		return err
