@@ -58,7 +58,7 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
   const map = new Map<string, string>();
   const kv: KeyValue = { get: k => map.get(k), set: (k, v) => { map.set(k, v); }, delete: k => { map.delete(k); }, keys: (p = '') => [...map.keys()].filter(k => k.startsWith(p)) };
   const config = join(dir, 'plan.json'), trace = join(dir, 'trace.jsonl'), claims = join(dir, 'claims.json');
-  const plan = { trace, claims, stub, items: (options.claiming ? [{ id: 'w1', priority: 'wake' }] : []) as Item[], events: [] as unknown[], refused: '', revision: 0, hookGate: '' };
+  const plan = { trace, claims, stub, items: (options.claiming ? [{ id: 'w1', priority: 'wake' }] : []) as Item[], events: [] as unknown[], refused: '', revision: 0, hookGate: '', hookFailure: '', releaseFailure: false };
   writeFileSync(trace, ''); writeFileSync(claims, '{}');
   const save = () => { plan.revision++; writeFileSync(config + '.next', JSON.stringify(plan)); renameSync(config + '.next', config); }; save();
   const bin = join(dir, 'vecnet');
@@ -290,6 +290,32 @@ test('crash between claim and inflight write releases on restart', async t => {
   await eventually(() => h.sends().length === 1);
   assert.deepEqual(Object.keys((h.sends()[0].params as any).additionalContext), ['vecnet_w1']); await h.tick(); assert.equal(h.sends().length, 1);
 });
+for (const failure of ['exit', 'invalid']) test(`hook ${failure} after durable claim is recovered without restarting`, async t => {
+  const h = await harness(t), opens = h.opens, baseline = h.records().length;
+  h.plan.hookFailure = failure; h.save(); await h.wake();
+  const claimed = h.records().slice(baseline).find(r => r.hookClaimed)?.hookClaimed;
+  assert.ok(claimed); assert.equal(h.sends().length, 0);
+  h.plan.hookFailure = ''; h.save(); await h.tick(2000);
+  await eventually(() => h.sends().length === 1, 'original delivery recovered by the running engine');
+  assert.ok(h.releases().some(r => r.argv.includes(claimed)));
+  assert.equal(h.kv.keys('claiming:').length, 0); assert.equal(h.opens, opens);
+  assert.deepEqual(Object.keys((h.sends()[0].params as any).additionalContext), ['vecnet_w1']);
+  await h.tick(2 * minute); assert.equal(h.sends().length, 1);
+});
+test('failed release retains the unsent claim and retries recovery without restarting', async t => {
+  const h = await harness(t), opens = h.opens, baseline = h.records().length;
+  h.plan.hookFailure = 'exit'; h.plan.releaseFailure = true; h.save(); await h.wake();
+  const claimed = h.records().slice(baseline).find(r => r.hookClaimed)?.hookClaimed;
+  assert.ok(claimed); assert.ok(h.kv.get('claiming:' + claimed));
+  assert.equal(h.rows().length, 0); assert.equal(h.sends().length, 0);
+  assert.ok(h.releases().some(r => r.argv.includes(claimed)), 'release was attempted before retaining the claim');
+  h.plan.hookFailure = ''; h.plan.releaseFailure = false; h.save(); await h.tick(2000);
+  await eventually(() => h.sends().length === 1, 'scheduled recovery reoffers the existing delivery');
+  assert.ok(h.releases().filter(r => r.argv.includes(claimed)).length >= 2);
+  assert.equal(h.kv.keys('claiming:').length, 0); assert.equal(h.opens, opens);
+  assert.deepEqual(Object.keys((h.sends()[0].params as any).additionalContext), ['vecnet_w1']);
+  await h.tick(2 * minute); assert.equal(h.sends().length, 1);
+});
 test('definite rejection releases claims', async t => {
   const h = await harness(t); h.fake.failNext('turn/start', { code: -32602, message: 'invalid input' }); await h.wake();
   await eventually(() => h.releases().length === 1); assert.equal(h.rows().length, 0);
@@ -376,8 +402,11 @@ test('accidental cold resume is undone at once', async t => {
   const h = await harness(t, { wrap: rpc => ({ ...rpc, async call<T>(m: AllowedMethod, p: unknown, timeout: number): Promise<T> {
     if (m === 'thread/resume') { fakeControl?.(); } return rpc.call<T>(m, p, timeout);
   } }) });
-  await h.engine.stop(); fakeControl = () => h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' } });
-  await h.restart(); await eventually(() => !h.engine.subscribed()); await h.wake();
+  await h.engine.stop(); const baseline = h.fake.requests.length; fakeControl = () => h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' } });
+  await h.restart(); await eventually(() => !h.engine.subscribed());
+  const resume = h.fake.requests.slice(baseline).find(r => r.method === 'thread/resume'); assert.ok(resume);
+  assert.ok(h.fake.requests.slice(baseline).some(r => r.method === 'thread/unsubscribe' && r.conn === resume.conn));
+  assert.deepEqual(h.fake.subscribers('thread'), []); await h.wake();
   assert.deepEqual(h.engine.liveness(), { live: false, reason: 'not_loaded' }); assert.equal(h.sends().length, 0);
 });
 test('re-subscribes when another client reloads the thread', async t => {
@@ -385,15 +414,37 @@ test('re-subscribes when another client reloads the thread', async t => {
   h.fake.attachOther('thread'); h.fake.setThread({ id: 'thread', status: { type: 'idle' } }); await h.sync(); await h.wake();
   await eventually(() => h.sends().length === 1); assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, 1);
 });
+test('close and external reload inside the resume guard eventually delivers without another broadcast', async t => {
+  let reads = 0;
+  const h = await harness(t, { wrap: rpc => ({ ...rpc, async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+    if (method === 'thread/read') reads++;
+    return rpc.call<T>(method, params, ms);
+  } }) });
+  h.disconnect(); await h.sync(); await h.tick(1000);
+  await eventually(() => h.engine.state() === 'ready'); await h.sync();
+  const resumes = h.fake.requests.filter(r => r.method === 'thread/resume').length;
+  h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' } });
+  h.fake.notify('thread/closed', { threadId: 'thread' }); await h.sync();
+  h.fake.attachOther('thread'); h.fake.setThread({ id: 'thread', status: { type: 'idle' } }); await h.sync();
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'not_loaded' });
+  const beforeCheck = reads; await h.wake(); await h.tick(2000);
+  assert.ok(reads > beforeCheck, 'engine must re-read the thread after the guard');
+  await eventually(() => h.sends().length === 1, 'loaded broadcast in guard must lead to a fresh warm attachment');
+  assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, resumes + 1);
+  assert.equal(h.fake.subscribers('thread').length, 1); assert.deepEqual(h.engine.liveness(), { live: true });
+  await h.tick(minute); assert.equal(h.sends().length, 1);
+});
 test('re-subscribes after reconnect within the unload window', async t => {
   const h = await harness(t); h.fake.detachOther('thread'); h.disconnect(); await h.sync(); await h.tick(1000); await h.loaded();
   assert.ok(h.clock.now() < minute); assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, 2); assert.equal(h.engine.subscribed(), true);
 });
 test('asking policy without attended unsubscribes and sends nothing', async t => {
   for (const [policy, reviewer, allowed] of [['on-request', 'user', false], ['never', 'user', true], ['on-request', 'auto_review', true]] as const) {
-    const h = await harness(t); h.fake.setThread({ id: 'thread', status: { type: 'idle' }, approvalPolicy: policy, approvalsReviewer: reviewer }); await h.restart();
+    const h = await harness(t); h.fake.setThread({ id: 'thread', status: { type: 'idle' }, approvalPolicy: policy, approvalsReviewer: reviewer }); await h.engine.stop(); const baseline = h.fake.requests.length; await h.restart();
     await h.wake(); assert.equal(h.engine.subscribed(), allowed);
-    if (!allowed) { assert.deepEqual(h.engine.liveness(), { live: false, reason: 'approval_policy' }); assert.equal(h.sends().length, 0); assert.ok(h.fake.requests.some(r => r.method === 'thread/unsubscribe')); }
+    if (!allowed) { assert.deepEqual(h.engine.liveness(), { live: false, reason: 'approval_policy' }); assert.equal(h.sends().length, 0); const resume = h.fake.requests.slice(baseline).find(r => r.method === 'thread/resume'); assert.ok(resume);
+      assert.ok(h.fake.requests.slice(baseline).some(r => r.method === 'thread/unsubscribe' && r.conn === resume.conn));
+      assert.deepEqual(h.fake.subscribers('thread'), []); }
     else await eventually(() => h.sends().length === 1);
   }
 });
@@ -456,12 +507,16 @@ test('distinct blocked request ids log once each, including after replay', async
 });
 test('late startup notification suppresses pushes during the cold-resume guard', async t => {
   const h = await harness(t); await h.engine.stop();
+  const baseline = h.fake.requests.length;
   const engine = createEngine(h.binding, h.deps); engine.start(); t.after(() => engine.stop());
   await eventually(() => engine.state() === 'ready');
   h.plan.items.push({ id: 'w1', priority: 'wake' }); h.save();
   h.clock.advance(1000); await h.sync(); assert.equal(h.sends().length, 0);
   h.fake.notify('mcpServer/startupStatus/updated', { threadId: 'thread' }); await h.sync();
   assert.deepEqual(engine.liveness(), { live: false, reason: 'not_loaded' }); assert.equal(engine.subscribed(), false);
+  const resume = h.fake.requests.slice(baseline).find(r => r.method === 'thread/resume'); assert.ok(resume);
+  assert.ok(h.fake.requests.slice(baseline).some(r => r.method === 'thread/unsubscribe' && r.conn === resume.conn));
+  assert.deepEqual(h.fake.subscribers('thread'), []);
   h.clock.advance(2000); await h.sync(); assert.equal(h.sends().length, 0);
 });
 test('over limit unsubscribes and clearing the limit permits a new subscription', async t => {

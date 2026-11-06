@@ -27,6 +27,7 @@ if (argv.includes('watch')) {
   try { claims = JSON.parse(readFileSync(plan.claims, 'utf8')); } catch {}
   const nonce = flag('--claim');
   if (argv.includes('--release')) {
+    if (plan.releaseFailure) process.exit(1);
     delete claims[nonce]; writeFileSync(plan.claims, JSON.stringify(claims));
     console.log(JSON.stringify({ version: 1, released: true }));
   } else if (plan.refused) {
@@ -38,6 +39,8 @@ if (argv.includes('watch')) {
     claims[nonce] = items.map((i: { id: string }) => i.id);
     writeFileSync(plan.claims, JSON.stringify(claims));
     acknowledge({ hookClaimed: nonce });
+    if (plan.hookFailure === 'exit') process.exit(1);
+    if (plan.hookFailure === 'invalid') { console.log('{'); process.exit(0); }
     if (plan.hookGate) await new Promise<void>(resolve => {
       const gate = setInterval(() => { if (existsSync(plan.hookGate)) { clearInterval(gate); resolve(); } }, 10);
     });

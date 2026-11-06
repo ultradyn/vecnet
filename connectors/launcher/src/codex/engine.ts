@@ -51,6 +51,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   let cold = false, queue: Promise<void> = Promise.resolve();
   let debounce: { cancel(): void } | undefined, gap: { cancel(): void } | undefined;
   let reconnect: { cancel(): void } | undefined, minute: { cancel(): void } | undefined;
+  let claimRecovery: { cancel(): void } | undefined, warmCheck: { cancel(): void } | undefined;
   const children = new Set<ChildProcess>();
   const unresolvedLogged = new Set<string>(), pendingLogged = new Set<string>();
   const receipts = new Set<string>(), waitingRetry = new Map<string, Batch>(), waitForIdle = new Set<string>();
@@ -102,6 +103,26 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   async function release(claim: string) {
     await runHook(['--release', '--claim', claim]);
   }
+  function scheduleClaimRecovery() {
+    if (!running || claimRecovery) return;
+    claimRecovery = clock.timer(1000, () => {
+      claimRecovery = undefined;
+      enqueue(async () => { await recoverClaims(); arm(0); });
+    });
+  }
+  async function releaseUnsentClaim(claim: string) {
+    try { await release(claim); kv.delete('claiming:' + claim); }
+    catch { log.warn('codex_claim_release_failed', { threadId: b.threadId }); scheduleClaimRecovery(); }
+  }
+  async function recoverClaims() {
+    const owned = new Set(rows().map(r => r.claim));
+    for (const key of kv.keys('claiming:')) {
+      const r = obj(JSON.parse(kv.get(key)!)); if (r.threadId !== b.threadId) continue;
+      const claim = key.slice('claiming:'.length);
+      if (owned.has(claim)) kv.delete(key);
+      else await releaseUnsentClaim(claim);
+    }
+  }
   async function unsubscribe() {
     if (!attached && !attaching) return;
     attached = false; attaching = false;
@@ -122,11 +143,33 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     debounce?.cancel();
     debounce = clock.timer(ms, () => { debounce = undefined; enqueue(async () => { await reconcile(); await push(); }); });
   }
+  function scheduleWarmCheck(ms = Math.max(1, resumeAt + 2001 - clock.now())) {
+    if (!running || warmCheck) return;
+    warmCheck = clock.timer(ms, () => {
+      warmCheck = undefined;
+      enqueue(async () => {
+        if (!rpc || !cold) return;
+        if (clock.now() - resumeAt <= 2000) { scheduleWarmCheck(); return; }
+        const epoch = closedEpoch;
+        try {
+          const read = await call('thread/read', { threadId: b.threadId });
+          if (closedEpoch !== epoch) return;
+          const next = obj(read.thread).status, s = mapStatus(next);
+          if (s !== 'not_loaded' && s !== 'unknown') cold = false;
+          updateStatus(next); archived = obj(read.thread).archived === true;
+          await reconcile(); arm(0);
+        } catch { scheduleWarmCheck(1000); }
+      });
+    });
+  }
   function updateStatus(value: unknown) {
     const before = mapStatus(status); status = value; lastActivity = clock.now();
     const s = mapStatus(status);
     if (s === 'not_loaded') { closedEpoch++; attached = false; }
-    else if (s !== 'unknown' && !attaching && clock.now() - resumeAt > 2000) cold = false;
+    else if (s !== 'unknown') {
+      if (!attaching && clock.now() - resumeAt > 2000) cold = false;
+      else if (cold) scheduleWarmCheck();
+    }
     if (s === 'waiting_approval' || s === 'waiting_input') {
       if (waitingSince === undefined) { waitingSince = clock.now(); blockedLogged = false; }
     } else { waitingSince = undefined; blockedLogged = false; }
@@ -245,14 +288,8 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     }
   }
   async function recover() {
-    const inflight = rows(), owned = new Set(inflight.map(r => r.claim));
-    for (const key of kv.keys('claiming:')) {
-      const r = obj(JSON.parse(kv.get(key)!)); if (r.threadId !== b.threadId) continue;
-      const claim = key.slice('claiming:'.length);
-      if (!owned.has(claim)) await release(claim);
-      kv.delete(key);
-    }
-    for (const r of inflight) if (!waitingRetry.has(r.key)) await scan(r);
+    await recoverClaims();
+    for (const r of rows()) if (!waitingRetry.has(r.key)) await scan(r);
   }
   async function connect() {
     if (!running || rpc) return;
@@ -359,14 +396,22 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (!liveness().live || (action === 'steer' && (turn?.status !== 'inProgress' || typeof turn.id !== 'string'))) return;
     const nonce = randomBytes(12).toString('hex');
     kv.set('claiming:' + nonce, JSON.stringify({ threadId: b.threadId, at: clock.now() }));
-    const output = obj(await runHook(['--event', 'app-server', '--claim', nonce, '--priorities', priorities.join(','), '--expect-hub', b.hub, '--expect-caller', b.caller]));
+    let output: RecordValue;
+    try {
+      output = obj(await runHook(['--event', 'app-server', '--claim', nonce, '--priorities', priorities.join(','), '--expect-hub', b.hub, '--expect-caller', b.caller]));
+    } catch {
+      // Go may have committed the claim before its output was lost. No turn
+      // RPC can have happened yet, so this exact nonce is safe to release.
+      log.warn('codex_hook_failed', { threadId: b.threadId });
+      await releaseUnsentClaim(nonce); arm(1000); return;
+    }
     if (output.refused === 'identity_changed') {
       kv.delete('claiming:' + nonce); identityChanged = true; await unsubscribe();
       log.warn('codex_binding_identity_changed', { threadId: b.threadId }); return;
     }
     if (!Array.isArray(output.deliveries) || !output.deliveries.every((id: unknown) => typeof id === 'string') ||
       !Array.isArray(output.entries ?? []) || (output.entries ?? []).some((e: unknown) => typeof obj(e).key !== 'string' || typeof obj(e).value !== 'string' || Buffer.byteLength(obj(e).value) > 1000)) {
-      await release(nonce); kv.delete('claiming:' + nonce); return;
+      await releaseUnsentClaim(nonce); return;
     }
     const batch: Batch = { deliveries: output.deliveries, stub: typeof output.stub === 'string' ? output.stub : '', entries: output.entries ?? [] };
     if (!batch.deliveries.length && !batch.entries.some(e => e.key === 'vecnet_summary')) { kv.delete('claiming:' + nonce); return; }
@@ -374,7 +419,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     const row: InflightRow = { threadId: b.threadId, key, claim: nonce, deliveries: batch.deliveries, method: action === 'start' ? 'turn/start' : 'turn/steer',
       attemptTurnId: action === 'steer' ? turn!.id : null, priorTurnId: action === 'start' ? turn?.id ?? null : null, acceptedAt: null, state: 'sending' };
     // Do not overwrite an unresolved attempt if a summary produces its key again.
-    if (kv.get('inflight:' + key)) { await release(nonce); kv.delete('claiming:' + nonce); return; }
+    if (kv.get('inflight:' + key)) { await releaseUnsentClaim(nonce); return; }
     write(row); kv.delete('claiming:' + nonce); await transmit(row, batch);
   }
   function startWatch() {
@@ -399,10 +444,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   }
   return {
     start() { if (running) { enqueue(async () => { await recover(); arm(0); }); return; }
-      running = true; reconnect = undefined; gap = undefined; startWatch(); heartbeat(); enqueue(connect); },
+      running = true; reconnect = undefined; gap = undefined; claimRecovery = undefined; warmCheck = undefined; startWatch(); heartbeat(); enqueue(connect); },
     async stop() {
       if (!running) return;
-      running = false; debounce?.cancel(); gap?.cancel(); reconnect?.cancel(); minute?.cancel(); watchRetry?.cancel();
+      running = false; debounce?.cancel(); gap?.cancel(); reconnect?.cancel(); minute?.cancel(); watchRetry?.cancel(); claimRecovery?.cancel(); warmCheck?.cancel();
       const child = watch; watch = undefined;
       const exits = [...children, ...(child ? [child] : [])].map(c => new Promise<void>(resolve => {
         if (c.exitCode !== null || c.signalCode !== null) { resolve(); return; }
