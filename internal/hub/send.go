@@ -40,7 +40,7 @@ type DeliveryRef struct {
 	State      string  `json:"state"`
 }
 
-// IdempotencyWindow is how long an idempotency_key is remembered per sender
+// IdempotencyWindow is the default and minimum lifetime of a send key per sender
 // (PROTOCOL §2.2, R03).
 const IdempotencyWindow = 24 * time.Hour
 
@@ -740,6 +740,57 @@ func resolveSender(ctx context.Context, tx *sql.Tx, c auth.Caller, as string) (s
 	return s, nil
 }
 
+// ErrInvalidIdempotencyWindow rejects finite send-key lifetimes below 24 h.
+var ErrInvalidIdempotencyWindow = errors.New("hub: invalid_idempotency_window")
+
+// IdempotencyExpiry reports only maintenance metadata. A zero Cutoff means
+// keys are retained forever. Deleted is returned only after a successful commit.
+type IdempotencyExpiry struct {
+	Deleted int64
+	Cutoff  time.Time
+}
+
+// idempotencyCutoff is shared by lookup and cleanup. Persisted timestamps have
+// millisecond precision, so both paths compare against the same normalized time.
+// Only keys strictly older than this cutoff expire; equality still replays.
+func (h *Hub) idempotencyCutoff(now time.Time) time.Time {
+	if h.Cfg.IdempotencyWindow == 0 {
+		return time.Time{}
+	}
+	return now.Add(-h.Cfg.IdempotencyWindow).UTC().Truncate(time.Millisecond)
+}
+
+// ExpireIdempotency removes one indexed, bounded slice of expired send keys.
+// limit <= 0 uses 100 rows; larger requests are capped at 1000. The same
+// BEGIN IMMEDIATE writer path as Send serializes pruning with replay/reuse.
+func (h *Hub) ExpireIdempotency(ctx context.Context, limit int) (IdempotencyExpiry, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	var result IdempotencyExpiry
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		result.Cutoff = h.idempotencyCutoff(h.Now())
+		if result.Cutoff.IsZero() {
+			return nil
+		}
+		deleted, err := tx.ExecContext(ctx, `DELETE FROM idempotency WHERE rowid IN (
+			SELECT rowid FROM idempotency WHERE created_at < ? ORDER BY created_at LIMIT ?
+		)`, envelope.FormatTime(result.Cutoff), limit)
+		if err != nil {
+			return fmt.Errorf("hub: idempotency cleanup: %w", err)
+		}
+		result.Deleted, err = deleted.RowsAffected()
+		return err
+	})
+	if err != nil {
+		return IdempotencyExpiry{}, err
+	}
+	return result, nil
+}
+
 // idempotencyLookup returns the stored response for (sender, key) when the
 // body matches (ok true), 409 idempotency_conflict when it differs, and
 // (nil, false, nil) when the key is unused or its row is older than the
@@ -754,7 +805,7 @@ func (h *Hub) idempotencyLookup(ctx context.Context, tx *sql.Tx, sender, key, bo
 	if err != nil {
 		return nil, false, fmt.Errorf("hub: idempotency lookup: %w", err)
 	}
-	if at, perr := envelope.ParseTime(created); perr != nil || now.Sub(at) >= IdempotencyWindow {
+	if cutoff := h.idempotencyCutoff(now); !cutoff.IsZero() && created < envelope.FormatTime(cutoff) {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM idempotency WHERE sender = ? AND key = ?`, sender, key); err != nil {
 			return nil, false, fmt.Errorf("hub: idempotency expire: %w", err)
 		}

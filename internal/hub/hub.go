@@ -29,6 +29,12 @@ import (
 // Config holds the hub's tunables. DefaultConfig returns the Global
 // Constraints values of the core-hub plan (PROTOCOL §2.2, §6, §16).
 type Config struct {
+	// IdempotencyWindow keeps send keys for at least 24 h; an explicit zero
+	// keeps them forever. DefaultConfig marks the field set so assigning zero
+	// disables expiry. In literal Configs, zero without Set uses the default.
+	IdempotencyWindow    time.Duration
+	IdempotencyWindowSet bool
+
 	// PreferenceBootstrap captures explicit nonsecret flag/env provenance.
 	PreferenceBootstrap        map[string]prefs.Effective
 	PreferencePolicyGeneration string // immutable deployment policy identity
@@ -86,6 +92,8 @@ type Config struct {
 // DefaultConfig returns the plan's defaults; PublicURL and DataDir are empty.
 func DefaultConfig() Config {
 	return Config{
+		IdempotencyWindow:     IdempotencyWindow,
+		IdempotencyWindowSet:  true,
 		DefaultMaxDepth:       32,
 		AckedEventRetention:   7 * 24 * time.Hour,
 		RetentionSweepHourUTC: 2,
@@ -186,6 +194,12 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	}
 	if cfg.UnackedEventRetention < 0 || cfg.EventRetentionLimits.Rows < 0 || cfg.EventRetentionLimits.Bytes < 0 || cfg.EventRetentionLimits.Target < 0 || cfg.RetentionSweepHourUTC < 0 || cfg.RetentionSweepHourUTC > 23 {
 		return nil, errors.New("hub: invalid_retention_config")
+	}
+	if cfg.IdempotencyWindow == 0 && !cfg.IdempotencyWindowSet {
+		cfg.IdempotencyWindow = IdempotencyWindow
+	}
+	if cfg.IdempotencyWindow != 0 && cfg.IdempotencyWindow < IdempotencyWindow {
+		return nil, ErrInvalidIdempotencyWindow
 	}
 	if cfg.DataDir == "" {
 		return nil, errors.New("hub: Config.DataDir is required")
