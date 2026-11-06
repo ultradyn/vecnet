@@ -159,6 +159,8 @@ The web dashboard and TUI subscriptions tab show the callback host (not its path
 
 Subscription health never changes the peer's presence. The TUI subs tab and web dashboard are read-only; actionable Resume controls live in the inbox.
 
+An upgrade can expose `events/subscribe` error `replay_unavailable`: an older binary erased the frozen callback body after exhausting retries. The hub preserves that outbox row and its event-retention pin and refuses to report successful resumption, including for `cursor: head`. Resume cannot recover those bytes. Keep the subscription while investigating; never reconstruct its callback from the current event without proof that the bytes match the original. If no exact copy can be recovered, explicitly re-sync the affected thread history in the client and record its receipt of the missing information. Only then have the subscription holder unsubscribe that subscription and subscribe again from the agreed cursor. Unsubscribe discards its durable queue, so record and reconcile all outstanding events before doing so; this is an explicit recovery with possible loss of original callback bytes, not an automatic retry.
+
 ## TUI keys
 
 | Where | Keys | Action |

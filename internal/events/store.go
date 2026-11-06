@@ -73,6 +73,10 @@ var (
 	ErrNotFound = errors.New("events: no such subscription")
 	// ErrTooMany reports a principal at MaxPerPrincipal live subscriptions.
 	ErrTooMany = errors.New("events: too many subscriptions")
+	// ErrReplayUnavailable means an older binary erased an exhausted callback's
+	// frozen body. Keep its pin and require explicit recovery; current event
+	// hydration cannot prove equality. See docs/OPERATOR.md subscription health.
+	ErrReplayUnavailable = errors.New("events: replay_unavailable")
 )
 
 // DefaultTypes is what a subscription receives when its arguments list none
@@ -478,6 +482,9 @@ func (st *Store) MarkVerifiedAt(ctx context.Context, id string, verified time.Ti
 // cursor is replaced, undelivered rows stay queued.
 func (st *Store) SetCursor(ctx context.Context, id string, cur eventlog.Cursor, clientHas bool) error {
 	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
+		if err := checkReplayAvailable(ctx, tx, id); err != nil {
+			return err
+		}
 		var floor int64
 		if err := tx.QueryRowContext(ctx, `SELECT coalesce((SELECT r.purged_through_seq
 			FROM event_subscriptions s JOIN event_retention r ON r.owner=s.peer_id WHERE s.sub_id=?),0)`, id).Scan(&floor); err != nil {
@@ -514,6 +521,9 @@ func (st *Store) SetCursor(ctx context.Context, id string, cur eventlog.Cursor, 
 // first. The tail cursor alone would pass rows that are queued or given up on,
 // and a client that later passed it back would be saying it holds them.
 func (st *Store) ReplayCursor(ctx context.Context, id string, cur eventlog.Cursor) (eventlog.Cursor, error) {
+	if err := checkReplayAvailable(ctx, st.DB, id); err != nil {
+		return eventlog.Cursor{}, err
+	}
 	var oldest *int64
 	var floor int64
 	if err := st.DB.QueryRowContext(ctx,
@@ -528,6 +538,21 @@ func (st *Store) ReplayCursor(ctx context.Context, id string, cur eventlog.Curso
 	// Replay must never report a cursor below the owning peer's safe floor.
 	cur.Seq = max(cur.Seq, floor)
 	return cur, nil
+}
+
+// Check before moving or acknowledging a cursor, including head: a legacy
+// exhausted row must not be deleted as if the client had received its bytes.
+func checkReplayAvailable(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, id string) error {
+	var unavailable bool
+	if err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM event_outbox WHERE sub_id=? AND terminal='exhausted' AND body='')`, id).Scan(&unavailable); err != nil {
+		return fmt.Errorf("events: check replay: %w", err)
+	}
+	if unavailable {
+		return ErrReplayUnavailable
+	}
+	return nil
 }
 
 // ClearTruncated marks the truncated flag reported to the client.

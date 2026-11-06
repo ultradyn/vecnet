@@ -497,8 +497,12 @@ func TestRetentionPurgeBackfillAndPushRace(t *testing.T) {
 }
 
 func TestRetentionPreferenceWakeRefreshesStatusWithoutTrim(t *testing.T) {
-	h, _, clock := preferencesHubClock(t, hub.DefaultConfig())
-	c := retentionEvent(t, h, "peer_synthetic", clock.Now().Add(-2*time.Hour))
+	cfg := hub.DefaultConfig()
+	cfg.EventRetentionEnabled = true
+	h, _, clock := preferencesHubClock(t, cfg)
+	// Already eligible under the approved default, independent of any new
+	// confirmation or future not_before. A wake-triggered slice would delete it.
+	c := retentionEvent(t, h, "peer_synthetic", clock.Now().Add(-8*24*time.Hour))
 	retentionAck(t, h, "peer_synthetic", "*", c)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -506,9 +510,19 @@ func TestRetentionPreferenceWakeRefreshesStatusWithoutTrim(t *testing.T) {
 	stop := runtimeWorkerCleanup(t, cancel, done)
 	defer stop()
 	runtimeEventually(t, func() bool { return h.EventRetentionStatus().Policy.Ack.Source == prefs.SourceDefault })
-	retentionConfirm(t, h, prefs.Patch{Set: map[string]prefs.Value{"retention.ack_events": prefs.Duration(3600)}, ApplyExisting: true})
+	retentionConfirm(t, h, prefs.Patch{Set: map[string]prefs.Value{"agents.thread_budget": prefs.Int(600)}})
 	runtimeEventually(t, func() bool { return h.EventRetentionStatus().Policy.Revision == 1 })
+	// A second observed wake proves the first wake branch has finished,
+	// including any accidental maintenance after its status publication.
+	retentionConfirm(t, h, prefs.Patch{Set: map[string]prefs.Value{"agents.thread_budget": prefs.Int(700)}})
+	runtimeEventually(t, func() bool { return h.EventRetentionStatus().Policy.Revision == 2 })
+	stop()
 	retentionFloor(t, h, "peer_synthetic", 0)
+	status, err := h.PruneEventSlice(context.Background())
+	if err != nil || status.Deleted != 1 {
+		t.Fatalf("explicit slice deleted=%d err=%v; want 1", status.Deleted, err)
+	}
+	retentionFloor(t, h, "peer_synthetic", c.Seq)
 }
 
 func TestRetentionPreviewCountsPinnedPrefix(t *testing.T) {

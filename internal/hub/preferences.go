@@ -54,8 +54,9 @@ type Preferences struct {
 func preferenceError(code string) error { return &prefs.Error{Code: code} }
 
 // preferenceBootstrapSeconds validates the original duration before conversion.
-// Exactly zero retains Config's unset semantics; truncation must never make a
-// nonzero duration look unset or silently change its effective value.
+// Zero is preserved for the caller to interpret: retention uses it to disable
+// expiry, while older Config fields use it as unset. Truncation must never
+// make a nonzero duration look unset or silently change its effective value.
 func preferenceBootstrapSeconds(key string, value time.Duration, min, max int64) (int64, error) {
 	if value == 0 {
 		return 0, nil
@@ -140,7 +141,7 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 	for key, v := range configured {
 		d, _ := prefs.Lookup(key)
 		n, _ := v.Int64()
-		if v != d.Default && n != 0 {
+		if v != d.Default && (n != 0 || key == "retention.ack_events" && cfg.AckedEventRetentionSet) {
 			p.bootstrap[key] = prefs.Effective{Value: v, Source: prefs.SourceFlag}
 		}
 	}
