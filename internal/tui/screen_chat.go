@@ -276,9 +276,9 @@ func (s *chatScreen) Hints() string {
 		return "j/k scroll  pgup/pgdn page  esc close"
 	}
 	if s.narrow {
-		return "i [ ] j/k R a e m s f o :react"
+		return "i [ ] j/k R a e m s f o n ( ) :react"
 	}
-	return "i write  [ ] thread  j/k select  o other  R reply  a answer  e expand  m matrix  s save  f file  :react"
+	return "i write  [ ] thread  j/k select  o other  n more  ( ) who  R reply  a answer  e expand  m matrix  s save  f file  :react"
 }
 
 // Update also registers :msg: the first message is the first moment a screen
@@ -357,6 +357,7 @@ func (s *chatScreen) track(m *Model) {
 	if s.thread == m.CurrentThread {
 		return
 	}
+	s.followList = true
 	s.thread, s.sel, s.follow, s.top, s.fileIdx, s.overlay, s.whoFrom = m.CurrentThread, "", true, 0, 0, chatNoOverlay, 0
 	delete(s.readFailed, m.CurrentThread) // reopening retries a failed mark
 	if s.prompt != nil {
@@ -498,8 +499,13 @@ func (s *chatScreen) onKey(msg tea.KeyPressMsg, m *Model) tea.Cmd {
 	case "]":
 		return s.step(m, 1)
 	case "o":
-		s.othersOpen = !s.othersOpen
-		s.followList = true
+		s.toggleOthers()
+	case "n":
+		return s.moreOthers(m)
+	case "(":
+		s.Wheel("chat.who", false, m)
+	case ")":
+		s.Wheel("chat.who", true, m)
 	case "ctrl+u":
 		s.Wheel("chat.list", false, m)
 	case "ctrl+d":
@@ -1466,8 +1472,10 @@ func (s *chatScreen) View(m *Model, w, h int) string {
 	st := m.Data.Thread[m.CurrentThread]
 	switch {
 	case s.overlay == chatMatrix && st != nil:
+		m.addHit(m.hitX, m.hitY, w, h, hitScroll, "chat.matrix")
 		return s.viewMatrix(m, st, w, h)
 	case s.overlay == chatPager:
+		m.addHit(m.hitX, m.hitY, w, h, hitScroll, "chat.pager")
 		return s.viewReader(w, h)
 	}
 	paneH := h - 1

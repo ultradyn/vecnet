@@ -166,16 +166,16 @@ Subscription health never changes the peer's presence. The TUI subs tab and web 
 | Global, normal mode | `1`–`4` | Inbox, chat, dashboard, subscriptions. |
 | Global | `?`, `Ctrl+L`, `:` | Help, reload all views, command line. Help also lists the current tab's hints and commands. |
 | Global | click, wheel, `M`, `:mouse off` | Click a tab, row or button. The wheel scrolls the pane under the pointer. `M` or `:mouse off` releases mouse capture; `:mouse on` takes it back. Shift+drag selects text with the terminal. The keyboard still does everything the mouse does. |
-| Normal mode | `q`, `Ctrl+C`, `Ctrl+Q` | Quit. In insert mode Ctrl+C/Ctrl+Q ask before discarding the draft; `y` confirms. Literal `q` types text in insert mode. |
+| Normal mode | `q`, `Ctrl+C`, `Ctrl+Q`, `Ctrl+Z` | Quit. In insert mode Ctrl+C/Ctrl+Q ask before discarding the draft; `y` confirms. Literal `q` types text in insert mode. Ctrl+Z suspends the client and releases mouse capture until it continues. |
 | Inbox | `j`/`k` or arrows; Enter | Move and open the selected thread. |
-| Inbox | `a`, then option digit | Answer selected approval; any other key cancels. |
+| Inbox | `a`, then option digit | Answer selected approval; any other key cancels. Ctrl+U and Ctrl+D scroll the event log (older, then back toward the latest), as does the wheel. |
 | Inbox | `r`, `x`, `p` | Retry delivery/resume eligible subscription; confirm discard with `y`; toggle idle/working. |
-| Chat, normal mode | `[`/`]`, `j`/`k`, `o`, Ctrl+U/Ctrl+D | Previous/next thread (the selection scrolls into view); select messages; collapse Other Threads for this session; scroll the thread list. The list also scrolls with the wheel. |
+| Chat, normal mode | `[`/`]`, `j`/`k`, `o`, `n`, `(`/`)`, Ctrl+U/Ctrl+D | Previous/next thread (the selection scrolls into view); select messages; collapse Other Threads for this session; Show more, or open the unfiltered dashboard once Other Threads is at its 200-thread cap; scroll the participant pane; scroll the thread list. The list, the message log, the participant pane, the delivery matrix and the text pager also scroll with the wheel. |
 | Chat, normal mode | `i`, `R`, `a` | Write, reply to selected message, answer approval. |
 | Chat, insert mode | Enter, Tab, Esc | Send, cycle priority, leave insert mode. |
 | Chat | `m`, `e`, `f`, `s` | Matrix, expanded text pager, files, save attachment. |
 | Matrix / pager | `j`/`k`, `h`/`l` (matrix), PgUp/PgDn (pager), Esc | Scroll rows/recipients or pages; close. |
-| Dashboard | `j`/`k`, Enter, Tab, Esc | Select peer/thread, open peer threads/thread, change pane, return to peers. |
+| Dashboard | `j`/`k`, `n`, Enter, Tab, Esc | Select peer/thread, next unfiltered thread page, open peer threads/thread, change pane, return to peers. `n` from a full Other Threads list opens this unfiltered list and clears a peer narrowing. |
 | Subscriptions | `j`/`k` | Select row for details. |
 | Command line | Tab, Up/Down, Enter, Esc | Complete command names, browse history, run, cancel. Arguments split on whitespace; there is no shell quoting or execution. |
 

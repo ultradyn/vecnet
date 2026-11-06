@@ -5,6 +5,10 @@ import tea "charm.land/bubbletea/v2"
 // updateKey is the single place a key is routed. See Mode for who gets what.
 func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
+	if key == "ctrl+z" {
+		disarmStop()
+		return doSuspend
+	}
 	if m.confirmQuit {
 		m.confirmQuit = false
 		if key == "y" {

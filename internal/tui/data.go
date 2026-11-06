@@ -21,17 +21,19 @@ type Data struct {
 	Inbox   opapi.Inbox
 	Threads opapi.ThreadPage
 	// Mine is GET /v1/admin/threads?participant=<me> (Your Threads). Others is
-	// the same list with exclude_participant=<me> (Other Threads). Until MineKnown
-	// the chat list stands in with Threads. The dashboard keeps Threads.
-	Mine, Others           opapi.ThreadPage
-	MineKnown, OthersKnown bool
-	Peers                  []opapi.PeerRow
-	Subs                   []opapi.Subscription
-	Cuts                   opapi.LoopCuts
-	Health                 opapi.DeliveryHealth
-	Audit                  opapi.AuditPage
-	Counters               map[string]int
-	Notices                []envelope.HubNotice // the hub's active notices, oldest first
+	// the same list with exclude_participant=<me> (Other Threads). ThreadsKnown
+	// is set only after a successful unfiltered page, and that page is a
+	// fallback only once the operator's identity is known. The dashboard keeps
+	// Threads.
+	Mine, Others                         opapi.ThreadPage
+	MineKnown, OthersKnown, ThreadsKnown bool
+	Peers                                []opapi.PeerRow
+	Subs                                 []opapi.Subscription
+	Cuts                                 opapi.LoopCuts
+	Health                               opapi.DeliveryHealth
+	Audit                                opapi.AuditPage
+	Counters                             map[string]int
+	Notices                              []envelope.HubNotice // the hub's active notices, oldest first
 	// Prefs is the last successful preferences snapshot. PrefsKnown is set
 	// once a GET has been applied. PrefsNote explains a 404 or 403, which the
 	// preferences screen shows as unavailable rather than as a failed load.
@@ -359,7 +361,10 @@ func (m *Model) fetch(key string) tea.Cmd {
 	case "threads":
 		return func() tea.Msg {
 			v, err := api.Threads(ctx, opapi.ThreadQuery{Limit: pageLimit})
-			return loadMsg{key: key, err: err, apply: func(m *Model) { m.Data.Threads = v }}
+			return loadMsg{key: key, err: err, apply: func(m *Model) {
+				m.Data.Threads = v
+				m.Data.ThreadsKnown = true
+			}}
 		}
 	case "mine":
 		me := m.Data.Inbox.Me.PeerID

@@ -38,5 +38,5 @@
 │                                                                           ││                                                             │
 │                                                                           ││                                                             │
 └───────────────────────────────────────────────────────────────────────────┘└─────────────────────────────────────────────────────────────┘
- NORMAL   j/k move  a answer  r retry  x discard  p presence  enter open  ? help                           max@vecnet · working · prio wake 
+ NORMAL   j/k move  a answer  r retry  x discard  p presence  enter open  ctrl+u/d log  ? help             max@vecnet · working · prio wake 
 : command  ? help  Shift+drag selects text                                                                                                  

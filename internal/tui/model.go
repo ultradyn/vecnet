@@ -180,6 +180,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		return m, m.updateKey(msg)
+	case tea.ResumeMsg:
+		armStop()
 	case tea.MouseClickMsg, tea.MouseWheelMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
 		return m, m.updateMouse(msg)
 	case tea.PasteMsg:

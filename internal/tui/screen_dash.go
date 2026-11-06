@@ -65,6 +65,11 @@ type dashScreen struct {
 	peerRowAt    int
 	threadVis    []string
 	threadRowAt  int
+	// extra is the unfiltered pages fetched after Data.Threads. extraBase is
+	// the snapshot those pages belong to; a newer snapshot drops them.
+	extra     []opapi.ThreadRow
+	extraNext *string
+	extraBase string
 }
 
 // dashNarrow is the thread pane narrowed to one peer. The shell's Data.Threads
@@ -91,7 +96,7 @@ func (d *dashScreen) Title() string { return "dash" }
 
 func (d *dashScreen) Hints() string {
 	if d.focus == dashOnThreads {
-		return "j/k thread  enter open  esc peers"
+		return "j/k thread  n page  enter open  esc peers"
 	}
 	return "j/k peer  enter threads  tab pane"
 }
@@ -106,8 +111,17 @@ func (d *dashScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 		}
 	case dashThreadsMsg:
 		return d.onNarrow(msg, m)
+	case dashPageMsg:
+		d.onPage(msg)
 	}
 	return nil
+}
+
+// dashPageMsg is one more unfiltered cursor page.
+type dashPageMsg struct {
+	base string
+	page opapi.ThreadPage
+	err  error
 }
 
 func (d *dashScreen) onKey(key string, m *Model) tea.Cmd {
@@ -125,6 +139,10 @@ func (d *dashScreen) onKey(key string, m *Model) tea.Cmd {
 	case "esc":
 		d.narrow = nil
 		d.focus = dashOnPeers
+	case "n":
+		if d.focus == dashOnThreads && d.narrow == nil {
+			return d.loadMore(m)
+		}
 	case "enter":
 		if d.focus == dashOnThreads {
 			rows := d.threadRows(m)
@@ -174,12 +192,73 @@ func (d *dashScreen) threadIndex(rows []opapi.ThreadRow) int {
 	return max(slices.IndexFunc(rows, func(r opapi.ThreadRow) bool { return r.Thread.ThreadID == d.thread }), 0)
 }
 
-// threadPage is what the thread pane lists.
+// threadPage is what the thread pane lists. Unfiltered, that is the hub page
+// plus every cursor page `n` has fetched for this snapshot.
 func (d *dashScreen) threadPage(m *Model) opapi.ThreadPage {
 	if d.narrow != nil {
 		return d.narrow.page
 	}
-	return m.Data.Threads
+	page := m.Data.Threads
+	if d.extraBase != threadSnap(page) || len(d.extra) == 0 {
+		return page
+	}
+	out := page
+	out.Threads = append(append([]opapi.ThreadRow{}, page.Threads...), d.extra...)
+	out.Next = d.extraNext
+	return out
+}
+
+func threadSnap(page opapi.ThreadPage) string {
+	id := ""
+	if len(page.Threads) > 0 {
+		id = page.Threads[0].Thread.ThreadID
+	}
+	next := ""
+	if page.Next != nil {
+		next = *page.Next
+	}
+	return fmt.Sprintf("%s/%d/%s", id, len(page.Threads), next)
+}
+
+// loadMore fetches the next unfiltered cursor page. A peer narrowing is a
+// different query and stays on its own load.
+func (d *dashScreen) loadMore(m *Model) tea.Cmd {
+	if d.narrow != nil || m.stopped() {
+		return nil
+	}
+	page := d.threadPage(m)
+	if page.Next == nil || *page.Next == "" {
+		return nil
+	}
+	cursor := *page.Next
+	base := threadSnap(m.Data.Threads)
+	api, ctx := m.API, m.ctx
+	return func() tea.Msg {
+		v, err := api.Threads(ctx, opapi.ThreadQuery{Limit: pageLimit, Cursor: cursor})
+		return dashPageMsg{base: base, page: v, err: err}
+	}
+}
+
+func (d *dashScreen) onPage(msg dashPageMsg) {
+	if msg.err != nil {
+		return
+	}
+	// A page fetched for a snapshot this screen has since left is dropped.
+	if d.extraBase != "" && d.extraBase != msg.base {
+		return
+	}
+	d.extraBase = msg.base
+	seen := map[string]bool{}
+	for _, row := range d.extra {
+		seen[row.Thread.ThreadID] = true
+	}
+	for _, row := range msg.page.Threads {
+		if seen[row.Thread.ThreadID] {
+			continue
+		}
+		d.extra = append(d.extra, row)
+	}
+	d.extraNext = msg.page.Next
 }
 
 func (d *dashScreen) threadRows(m *Model) []opapi.ThreadRow { return d.threadPage(m).Threads }

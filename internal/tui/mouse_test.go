@@ -177,13 +177,14 @@ func TestChatListMatchesSidebar(t *testing.T) {
 	if strings.Index(frame, "newer other") > strings.Index(frame, "older other") {
 		t.Fatalf("Other Threads is not newest first:\n%s", frame)
 	}
-	if !strings.Contains(frame, "older yours 5") || strings.Contains(frame, "newer other 9") {
+	flat := strings.Join(strings.Fields(frame), " ")
+	if !strings.Contains(flat, "older yours 5") || strings.Contains(flat, "newer other 9") {
 		t.Fatalf("unread badges:\n%s", frame)
 	}
 	chat := m.screens[1].(*chatScreen)
 	chat.othersOpen = false
 	collapsed := plainAt(t, m, 140, 42)
-	if strings.Contains(collapsed, "newer other") || !strings.Contains(collapsed, "Other Threads +") {
+	if strings.Contains(collapsed, "newer other") || !strings.Contains(collapsed, "Other Threads ▸") {
 		t.Fatalf("collapsed:\n%s", collapsed)
 	}
 	if strings.Index(collapsed, "older yours") > strings.Index(collapsed, "newer yours") {

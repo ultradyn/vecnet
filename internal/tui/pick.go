@@ -31,6 +31,7 @@ type pickModel struct {
 	choices []ProfileChoice
 	cursor  int
 	top     int
+	follow  bool // keyboard selection owns the viewport; the wheel clears it
 	confirm bool
 	mouse   bool
 	w, h    int
@@ -69,6 +70,10 @@ func (p *pickModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (p *pickModel) onKey(key string) tea.Cmd {
+	if key == "ctrl+z" {
+		disarmStop()
+		return doSuspend
+	}
 	if p.confirm {
 		switch key {
 		case "y":
@@ -89,10 +94,12 @@ func (p *pickModel) onKey(key string) tea.Cmd {
 	case "j", "down":
 		if p.cursor < len(p.choices)-1 {
 			p.cursor++
+			p.follow = true
 		}
 	case "k", "up":
 		if p.cursor > 0 {
 			p.cursor--
+			p.follow = true
 		}
 	case "enter":
 		p.confirm = true
@@ -147,6 +154,7 @@ func strconvAtoi(s string) (int, error) {
 }
 
 func (p *pickModel) scroll(d int) {
+	p.follow = false
 	p.top += d
 	if p.top < 0 {
 		p.top = 0
@@ -170,7 +178,7 @@ func (p *pickModel) View() tea.View {
 	var lines []string
 	add := func(s string) { lines = append(lines, fit(s, w)) }
 	if p.confirm {
-		name := p.choices[p.cursor].Name
+		name := Clean(p.choices[p.cursor].Name)
 		hub := profileHubLabel(name, p.choices[p.cursor].Hub)
 		add(styleBrand.Render(" vecnet ") + styleMuted.Render(" confirm"))
 		add("")
@@ -193,11 +201,13 @@ func (p *pickModel) View() tea.View {
 		add("")
 		add(styleMuted.Render(fit("name", 16) + " hub"))
 		room := max(h-8, 1)
-		if p.cursor < p.top {
-			p.top = p.cursor
-		}
-		if p.cursor >= p.top+room {
-			p.top = p.cursor - room + 1
+		if p.follow {
+			if p.cursor < p.top {
+				p.top = p.cursor
+			}
+			if p.cursor >= p.top+room {
+				p.top = p.cursor - room + 1
+			}
 		}
 		for i := p.top; i < len(p.choices) && i < p.top+room; i++ {
 			c := p.choices[i]
@@ -207,7 +217,7 @@ func (p *pickModel) View() tea.View {
 				mark = "> "
 				style = styleText.Background(colorPick)
 			}
-			label := mark + fit(c.Name, 16) + " " + hubHost(c.Hub)
+			label := mark + fit(Clean(c.Name), 16) + " " + hubHost(c.Hub)
 			if loopbackHost(hubHost(c.Hub)) {
 				label += " local"
 			}
@@ -246,7 +256,7 @@ func Pick(ctx context.Context, choices []ProfileChoice, in io.Reader, out io.Wri
 	if out != nil {
 		opts = append(opts, tea.WithOutput(out))
 	}
-	final, err := tea.NewProgram(m, opts...).Run()
+	final, err := runProgram(m, opts...)
 	if final != nil {
 		if got, ok := final.(*pickModel); ok {
 			if err == nil || errors.Is(err, tea.ErrInterrupted) {

@@ -52,7 +52,7 @@ func TestWriteShots(t *testing.T) {
 		sideThreadRow("thr_other_new", "quota review", []string{chatDot}, "2026-11-04T12:00:00Z"),
 	}
 	grouped := plainAt(t, list, 140, 42)
-	if !strings.Contains(grouped, "Your Threads") || !strings.Contains(grouped, "Other Threads -") || !strings.Contains(grouped, "quota review") || !strings.Contains(grouped, "hark B196") {
+	if !strings.Contains(grouped, "Your Threads") || !strings.Contains(grouped, "Other Threads ▾") || !strings.Contains(grouped, "quota review") || !strings.Contains(grouped, "hark B196") {
 		t.Fatalf("grouped frame:\n%s", grouped)
 	}
 	if strings.Index(grouped, "quota review") > strings.Index(grouped, "staging notes") {
