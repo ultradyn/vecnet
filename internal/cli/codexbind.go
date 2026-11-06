@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -48,6 +50,36 @@ func codexBindDuration(o opts, name string, def time.Duration) (time.Duration, e
 		return 0, usageErr("--" + name + " must be a duration from 1h to 168h")
 	}
 	return d, nil
+}
+
+// codexBindCaller preserves hub errors so dispatch can verify and follow a
+// relocation. Transport failures and unusable identities still exit 1 for bind.
+func (a *app) codexBindCaller(c *client) (string, error) {
+	ctx, cancel := context.WithTimeout(a.ctx, 2*time.Second)
+	defer cancel()
+	var me struct {
+		Kind        string `json:"kind"`
+		PeerID      string `json:"peer_id"`
+		PrincipalID string `json:"principal_id"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/peers/me", nil, nil, &me); err != nil {
+		var he *hubError
+		if errors.As(err, &he) {
+			return "", err
+		}
+		return "", usageErr("cannot resolve binding identity from hub")
+	}
+	var caller string
+	switch me.Kind {
+	case "peer":
+		caller = me.PeerID
+	case "principal":
+		caller = me.PrincipalID
+	}
+	if !hookID.MatchString(caller) {
+		return "", usageErr("cannot resolve binding identity from hub")
+	}
+	return caller, nil
 }
 
 // cmdCodex takes its clock at the command boundary so expiry and renewal are
@@ -132,12 +164,13 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 		if err := checkHubURL(p.Hub, p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"); err != nil {
 			return err
 		}
-		// Binding only verifies the authenticated caller. It never changes hub
-		// trust, the hook's session binding or any Codex settings.
+		// Bind is a non-hook command: record best-effort first-use trust before
+		// looking up the authenticated caller, as ordinary hub commands do.
+		a.ensurePin(name, p)
 		c := newClient(p.Hub, p.Secret)
-		caller := a.whoami(c)
-		if caller == "" {
-			return usageErr("cannot resolve binding identity from hub")
+		caller, err := a.codexBindCaller(c)
+		if err != nil {
+			return err
 		}
 		binding = codexBinding{Profile: name, As: a.as, Hub: normalizeHub(p.Hub), Caller: caller, CodexHome: home, ThreadID: thread, CreatedAt: now, ExpiresAt: now.Add(ttl), IdleDormantHours: idle.Hours(), Attended: o.has("attended")}
 	}

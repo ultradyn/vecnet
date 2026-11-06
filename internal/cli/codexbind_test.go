@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/XertroV/vecnet/internal/envelope"
 )
 
 const bindT1 = "01234567-89ab-cdef-0123-456789abcdef"
@@ -298,7 +300,11 @@ func TestCodexBindRecordsIdentity(t *testing.T) {
 	f.peer.Store("peer_B")
 	f.rejected("identity changed since bind; unbind and bind again", "bind", "--thread", bindT1, "--renew")
 	f.server.Close()
-	f.rejected("identity", "--net", "q", "bind", "--thread", bindT2)
+	before := f.raw()
+	code, _, errs := pinRun(func(k string) string { return f.env[k] }, "--net", "q", "codex", "bind", "--thread", bindT2)
+	if code != 1 || !strings.Contains(errs, "identity") || !bytes.Equal(before, f.raw()) {
+		t.Fatalf("unreachable bind: exit %d stderr %q", code, errs)
+	}
 }
 func TestCodexBindCanonicalHome(t *testing.T) {
 	f := newBindFixture(t)
@@ -346,6 +352,215 @@ func TestCodexBindLimit(t *testing.T) {
 			f.bind("p9", bindID(9))
 			if len(f.entries()) != n+2 {
 				t.Fatal("expiry did not free a slot")
+			}
+		})
+	}
+}
+
+// These regressions use real dispatch so automatic follow and its retry are
+// exercised, with every path and environment lookup confined to the fixture.
+func TestCodexBindTOFU(t *testing.T) {
+	for _, verified := range []bool{true, false} {
+		t.Run(fmt.Sprintf("verified=%t", verified), func(t *testing.T) {
+			f := newBindFixture(t)
+			key := testIdentityKey(t, "1")
+			var identityCalls, callerCalls atomic.Int32
+			var srv *httptest.Server
+			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/hub/identity":
+					identityCalls.Add(1)
+					if r.Header.Get("Authorization") != "" {
+						t.Error("identity challenge carried credentials")
+					}
+					if !verified {
+						http.NotFound(w, r)
+						return
+					}
+					sig, err := key.SignChallenge(srv.URL, r.URL.Query().Get("challenge"))
+					if err != nil {
+						t.Error(err)
+					}
+					_ = json.NewEncoder(w).Encode(envelope.HubIdentity{Pubkey: key.Pubkey(), PublicURL: srv.URL, ChallengeSig: sig})
+				case "/v1/peers/me":
+					callerCalls.Add(1)
+					pp, _ := pinsPath(func(k string) string { return f.env[k] })
+					records, err := readPins(pp)
+					if err != nil || records["p"].Hub != srv.URL {
+						t.Errorf("identity lookup preceded TOFU bookkeeping: records=%+v err=%v", records, err)
+					}
+					_ = json.NewEncoder(w).Encode(map[string]string{"kind": "peer", "peer_id": "peer_A"})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			f.config(srv.URL)
+			before := pinRead(t, f.env["VECNET_CONFIG"])
+			for i := 0; i < 2; i++ {
+				if code, _, errs := pinRun(func(k string) string { return f.env[k] }, "codex", "bind", "--thread", bindT1); code != 0 {
+					t.Fatalf("exit %d: %s", code, errs)
+				}
+			}
+			if identityCalls.Load() != 1 || callerCalls.Load() != 2 {
+				t.Fatalf("identity calls=%d caller calls=%d", identityCalls.Load(), callerCalls.Load())
+			}
+			pp, _ := pinsPath(func(k string) string { return f.env[k] })
+			records, err := readPins(pp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := records["p"]
+			if verified {
+				if r.Pubkey != key.Pubkey() || r.How != "tofu" || r.PinnedAt == "" || r.TofuTriedAt != "" {
+					t.Fatalf("missing verified pin: %+v", r)
+				}
+			} else if r.Pubkey != "" || r.TofuTriedAt == "" {
+				t.Fatalf("missing failed-attempt record: %+v", r)
+			}
+			if !bytes.Equal(before, pinRead(t, f.env["VECNET_CONFIG"])) {
+				t.Fatal("TOFU rewrote config")
+			}
+		})
+	}
+}
+
+func TestCodexBindFollowsSignedMove(t *testing.T) {
+	for _, mode := range []string{"follow", "no-follow", "bad-signature"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newBindFixture(t)
+			key := testIdentityKey(t, "1")
+			var targetIdentity, targetCaller, sourceCaller atomic.Int32
+			var target *httptest.Server
+			target = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/hub/identity":
+					targetIdentity.Add(1)
+					if r.Header.Get("Authorization") != "" {
+						t.Error("destination verification carried credentials")
+					}
+					sig, err := key.SignChallenge(target.URL, r.URL.Query().Get("challenge"))
+					if err != nil {
+						t.Error(err)
+					}
+					_ = json.NewEncoder(w).Encode(envelope.HubIdentity{Pubkey: key.Pubkey(), PublicURL: target.URL, ChallengeSig: sig})
+				case "/v1/peers/me":
+					targetCaller.Add(1)
+					if targetIdentity.Load() != 1 || r.Header.Get("Authorization") != "Bearer vn_peer_test" {
+						t.Error("retry did not authenticate after destination verification")
+					}
+					_ = json.NewEncoder(w).Encode(map[string]string{"kind": "peer", "peer_id": "peer_A"})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(target.Close)
+			var notice envelope.HubNotice
+			var source *httptest.Server
+			source = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/hub/identity" {
+					if r.Header.Get("Authorization") != "" {
+						t.Error("source verification carried credentials")
+					}
+					sig, err := key.SignChallenge(source.URL, r.URL.Query().Get("challenge"))
+					if err != nil {
+						t.Error(err)
+					}
+					_ = json.NewEncoder(w).Encode(envelope.HubIdentity{Pubkey: key.Pubkey(), PublicURL: source.URL, ChallengeSig: sig})
+					return
+				}
+				if r.URL.Path == "/v1/peers/me" {
+					sourceCaller.Add(1)
+					w.WriteHeader(http.StatusGone)
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "hub_moved", "message": "moved", "details": map[string]any{"notice": notice}}})
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			t.Cleanup(source.Close)
+			notice = envelope.HubNotice{NoticeID: "ntc_01ARZ3NDEKTSV4RRFFQ69G5FAV", Kind: "moving", Hub: source.URL, NewURL: target.URL, Message: "move", IssuedAt: envelope.FormatTime(time.Now().Add(-time.Second)), ExpiresAt: envelope.FormatTime(time.Now().Add(time.Hour))}
+			if err := key.SignNotice(&notice); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "bad-signature" {
+				notice.Sig = "invalid"
+			}
+			if mode == "no-follow" {
+				f.env["VECNET_NO_FOLLOW"] = "1"
+			}
+			f.config(source.URL)
+			before := pinRead(t, f.env["VECNET_CONFIG"])
+			code, _, errs := pinRun(func(k string) string { return f.env[k] }, "codex", "bind", "--thread", bindT1)
+			if sourceCaller.Load() != 1 {
+				t.Fatalf("source identity calls=%d", sourceCaller.Load())
+			}
+			if mode != "follow" {
+				hint := "signature"
+				if mode == "no-follow" {
+					hint = "hub moved; run `vecnet --net p profile follow`"
+				}
+				if code != 1 || !strings.Contains(errs, "relocation_unverified") || !strings.Contains(errs, hint) {
+					t.Fatalf("exit %d: %s", code, errs)
+				}
+				if targetIdentity.Load() != 0 || targetCaller.Load() != 0 || !bytes.Equal(before, pinRead(t, f.env["VECNET_CONFIG"])) {
+					t.Fatal("refused move contacted destination or changed config")
+				}
+				if _, err := os.Stat(f.path); !os.IsNotExist(err) {
+					t.Fatalf("refused bind wrote bindings: %v", err)
+				}
+				return
+			}
+			if code != 0 || targetIdentity.Load() != 1 || targetCaller.Load() != 1 || !strings.Contains(errs, "profile p now uses "+target.URL) {
+				t.Fatalf("exit %d, destination identity=%d caller=%d: %s", code, targetIdentity.Load(), targetCaller.Load(), errs)
+			}
+			cfg, err := loadConfig(f.env["VECNET_CONFIG"])
+			if err != nil || cfg.Profiles["p"].Hub != target.URL || cfg.Profiles["p"].HubPubkey != key.Pubkey() {
+				t.Fatalf("move not recorded in config: %+v %v", cfg.Profiles["p"], err)
+			}
+			entry := f.entries()[0]
+			if bindValue[string](t, entry, "hub") != target.URL || bindValue[string](t, entry, "caller") != "peer_A" {
+				t.Fatalf("binding did not use retried identity: %s", f.raw())
+			}
+			pp, _ := pinsPath(func(k string) string { return f.env[k] })
+			records, err := readPins(pp)
+			r := records["p"]
+			if err != nil || r.How != "follow" || r.LastMove == nil || r.LastMove.From != source.URL || r.LastMove.To != target.URL || r.LastMove.NoticeID != notice.NoticeID {
+				t.Fatalf("move not recorded in sidecar: %+v %v", r, err)
+			}
+		})
+	}
+}
+
+func TestCodexBindCallerKinds(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, caller string
+	}{
+		{"principal", `{"kind":"principal","principal_id":"principal_A"}`, "principal_A"},
+		{"operator", `{"kind":"operator"}`, ""},
+		{"missing peer", `{"kind":"peer"}`, ""},
+		{"invalid peer", `{"kind":"peer","peer_id":"../unsafe"}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newBindFixture(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/peers/me" {
+					_, _ = fmt.Fprint(w, tc.body)
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			f.config(srv.URL)
+			code, _, errs := pinRun(func(k string) string { return f.env[k] }, "codex", "bind", "--thread", bindT1)
+			if tc.caller == "" {
+				if code != 1 || !strings.Contains(errs, "cannot resolve binding identity") {
+					t.Fatalf("exit %d: %s", code, errs)
+				}
+				if _, err := os.Stat(f.path); !os.IsNotExist(err) {
+					t.Fatalf("unusable identity wrote bindings: %v", err)
+				}
+			} else if code != 0 || bindValue[string](t, f.entries()[0], "caller") != tc.caller {
+				t.Fatalf("principal identity: exit %d: %s", code, errs)
 			}
 		})
 	}
