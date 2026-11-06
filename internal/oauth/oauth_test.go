@@ -717,8 +717,13 @@ func TestReturningPrincipalSkipsLinkCode(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("authorize: %d %s", resp.StatusCode, page)
 	}
-	if strings.Contains(page, "link_code") || !strings.Contains(page, "Approve") {
+	// The page names the peer it would approve and offers a link code. Approve
+	// with the code omitted still reuses the cookie (PROTOCOL §4.5).
+	if !strings.Contains(page, peer) || !strings.Contains(page, "my-dot") || !strings.Contains(page, "use a link code instead") || !strings.Contains(page, "Approve") {
 		t.Fatalf("returning page:\n%s", page)
+	}
+	if strings.Contains(page, `name="link_code" required`) {
+		t.Fatalf("returning page requires a link code:\n%s", page)
 	}
 	second := b.exchange(b.code(verifierB, ""), verifierB)
 	if second.status != http.StatusOK {
@@ -760,8 +765,151 @@ func TestReturningPrincipalSkipsLinkCode(t *testing.T) {
 
 	// The cookie lasts 30 days.
 	env.Now.Advance(30*24*time.Hour + time.Minute)
-	if _, page := b.authorize(b.query(verifierA)); !strings.Contains(page, `name="link_code"`) {
+	if _, page := b.authorize(b.query(verifierA)); !strings.Contains(page, `name="link_code" required`) {
 		t.Fatalf("expired cookie still recognised:\n%s", page)
+	}
+}
+
+// TestConsentCodePrecedesCookie: a browser that already holds bot A's consent
+// cookie can submit bot B's link code. The code wins, whoami returns B, and
+// the cookie is replaced with B (Decisions §5, PROTOCOL §§4.5 and 20.1).
+func TestConsentCodePrecedesCookie(t *testing.T) {
+	env := testhub.Start(t)
+	redirect := "https://www.cursor.com/agents/mcp/oauth/callback"
+	peerA, _ := env.NewPeer("grokbot", "bot-a")
+	a := &browser{t: t, env: env, client: register(t, env, redirect), redirect: redirect}
+	tokA := a.exchange(a.code(verifierA, linkCode(t, env, peerA)), verifierA)
+	if tokA.status != http.StatusOK {
+		t.Fatalf("exchange A: %d %s", tokA.status, tokA.Error)
+	}
+	if a.cookie == nil {
+		t.Fatal("no consent cookie for A")
+	}
+	cookieA := a.cookie.Value
+
+	wantPeer := func(access, peer string) {
+		t.Helper()
+		me := tool(t, env, access, "vecnet_whoami", map[string]any{})
+		if me["kind"] != "peer" || me["id"] != peer || me["peer_id"] != peer {
+			t.Fatalf("whoami = %v, want kind peer id/peer_id %s", me, peer)
+		}
+	}
+	wantPeer(tokA.AccessToken, peerA)
+
+	// A new client in the same browser: the page shows A and offers a code.
+	b := &browser{t: t, env: env, client: register(t, env, redirect), redirect: redirect, cookie: a.cookie}
+	resp, page := b.authorize(b.query(verifierB))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("authorize: %d %s", resp.StatusCode, page)
+	}
+	if !strings.Contains(page, "bot-a") || !strings.Contains(page, peerA) || !strings.Contains(page, "use a link code instead") {
+		t.Fatalf("consent page:\n%s", page)
+	}
+	if strings.Contains(page, `name="link_code" required`) {
+		t.Fatalf("returning page requires a link code:\n%s", page)
+	}
+	request := sealedRequest(t, page)
+
+	// A wrong code is refused. The live cookie is not a fallback, and the
+	// refusal does not spend the §20.1 budget (that counts only with no cookie).
+	resp, bad := b.consent(request, "ZZZZZZZZ")
+	if resp.StatusCode != http.StatusBadRequest || resp.Header.Get("Location") != "" || len(resp.Cookies()) != 0 {
+		t.Fatalf("wrong code: %d cookies=%d location=%q\n%s", resp.StatusCode, len(resp.Cookies()), resp.Header.Get("Location"), bad)
+	}
+	if !strings.Contains(bad, "bot-a") || !strings.Contains(bad, peerA) || !strings.Contains(bad, "use a link code instead") {
+		t.Fatalf("wrong-code page:\n%s", bad)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var n int
+		if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM audit WHERE action = 'dot_link_refused'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("dot_link_refused rows = %d, want 0 with a live cookie", n)
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Approve with no code, and a blank code, still reuse A's cookie.
+	still := b.exchange(b.code(verifierB, ""), verifierB)
+	if still.status != http.StatusOK {
+		t.Fatalf("approve without code: %d %s", still.status, still.Error)
+	}
+	wantPeer(still.AccessToken, peerA)
+	blank := b.exchange(b.code(verifierB, "   "), verifierB)
+	if blank.status != http.StatusOK {
+		t.Fatalf("blank code: %d %s", blank.status, blank.Error)
+	}
+	wantPeer(blank.AccessToken, peerA)
+
+	// Bot B's code is bound even though the browser still holds A's cookie.
+	peerB, _ := env.NewPeer("grokbot", "bot-b")
+	resp, page = b.authorize(b.query(verifierA))
+	if resp.StatusCode != http.StatusOK || !strings.Contains(page, "bot-a") || !strings.Contains(page, peerA) || !strings.Contains(page, "use a link code instead") {
+		t.Fatalf("page before B's code:\n%s", page)
+	}
+	before := b.cookie.Value
+	resp, body := b.consent(sealedRequest(t, page), linkCode(t, env, peerB))
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("consent with B's code: %d %s", resp.StatusCode, body)
+	}
+	var replaced *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == cookieName {
+			replaced = c
+		}
+	}
+	if replaced == nil || replaced.Value == "" || replaced.Value == before || replaced.Value == cookieA {
+		t.Fatalf("replacement cookie = %v, A's was kept", replaced)
+	}
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokB := b.exchange(loc.Query().Get("code"), verifierA)
+	if tokB.status != http.StatusOK {
+		t.Fatalf("exchange B: %d %s", tokB.status, tokB.Error)
+	}
+	wantPeer(tokB.AccessToken, peerB)
+
+	// The next consent in this browser uses the replacement cookie and approves B.
+	b.cookie = replaced
+	resp, page = b.authorize(b.query(verifierB))
+	if resp.StatusCode != http.StatusOK || !strings.Contains(page, "bot-b") || !strings.Contains(page, peerB) || strings.Contains(page, peerA) {
+		t.Fatalf("next consent after replacement:\n%s", page)
+	}
+	next := b.exchange(b.code(verifierB, ""), verifierB)
+	if next.status != http.StatusOK {
+		t.Fatalf("approve with replacement cookie: %d %s", next.status, next.Error)
+	}
+	wantPeer(next.AccessToken, peerB)
+
+	// A's own token and the pre-replacement cookie still name A. Linking B
+	// must not retire an unrelated connector.
+	wantPeer(tokA.AccessToken, peerA)
+	held := &browser{t: t, env: env, client: b.client, redirect: redirect, cookie: &http.Cookie{Name: cookieName, Value: cookieA}}
+	resp, page = held.authorize(held.query(verifierB))
+	if resp.StatusCode != http.StatusOK || !strings.Contains(page, "bot-a") || !strings.Contains(page, peerA) {
+		t.Fatalf("pre-replacement cookie:\n%s", page)
+	}
+	heldTok := held.exchange(held.code(verifierB, ""), verifierB)
+	if heldTok.status != http.StatusOK {
+		t.Fatalf("pre-replacement cookie approve: %d %s", heldTok.status, heldTok.Error)
+	}
+	wantPeer(heldTok.AccessToken, peerA)
+
+	// No cookie still requires a code, and approve alone is refused.
+	none := &browser{t: t, env: env, client: b.client, redirect: redirect}
+	resp, page = none.authorize(none.query(verifierA))
+	if resp.StatusCode != http.StatusOK || !strings.Contains(page, `name="link_code" required`) {
+		t.Fatalf("absent cookie:\n%s", page)
+	}
+	if resp, body := none.consent(sealedRequest(t, page), ""); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("absent cookie approve without code: %d %s", resp.StatusCode, body)
 	}
 }
 

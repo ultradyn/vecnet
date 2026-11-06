@@ -39,11 +39,14 @@ var consentCSSBody []byte
 var consentPage = template.Must(template.New("consent").Parse(consentHTML))
 
 // page is what consent.html renders: a consent form when Request is set, else
-// a dead end showing Code and Error.
+// a dead end showing Code and Error. PeerName and PeerID name the peer a
+// returning cookie would approve. NeedCode is a first login; a returning
+// page leaves it false and still offers a link code.
 type page struct {
 	ClientName, RedirectHost string
 	Request                  string
 	NeedCode                 bool
+	PeerName, PeerID         string
 	NewClient                bool // a returning principal, and a client it has not approved here
 	Error, Code              string
 }
@@ -129,9 +132,10 @@ func (s *Server) openRequest(sealed string) (req authRequest, ok bool) {
 	return req, req.Purpose == purposeRequest && s.now().UnixMilli() < req.ExpiresMs
 }
 
-// principal is a bound OAuth principal.
+// principal is a bound OAuth principal and the peer the consent page names.
 type principal struct {
 	PrnID, Subject string
+	PeerID, Name   string
 }
 
 // subjectFor is the subject of a principal first approved through clientID.
@@ -167,8 +171,8 @@ func (s *Server) cookiePrincipal(ctx context.Context, q querier, r *http.Request
 	}
 	p := principal{Subject: sub.Subject}
 	err = q.QueryRowContext(ctx,
-		`SELECT o.prn_id FROM oauth_principals o JOIN peers p ON p.peer_id = o.peer_id
-		 WHERE o.subject = ? AND p.disabled = 0 AND p.prn_id = o.prn_id`, sub.Subject).Scan(&p.PrnID)
+		`SELECT o.prn_id, p.peer_id, p.name FROM oauth_principals o JOIN peers p ON p.peer_id = o.peer_id
+		 WHERE o.subject = ? AND p.disabled = 0 AND p.prn_id = o.prn_id`, sub.Subject).Scan(&p.PrnID, &p.PeerID, &p.Name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -218,8 +222,9 @@ func redirectWith(w http.ResponseWriter, r *http.Request, uri string, params map
 	http.Redirect(w, r, u.String(), http.StatusFound)
 }
 
-// getAuthorize validates the request and shows the consent page: a link code
-// field at first login, Approve alone for a returning principal.
+// getAuthorize validates the request and shows the consent page. A first login
+// asks for a link code. A returning principal is shown by peer name and id
+// and may approve as that peer, or use a link code instead (PROTOCOL §4.5).
 func (s *Server) getAuthorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if repeated(q) {
@@ -287,17 +292,24 @@ func (s *Server) getAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	oauthReason(w, "consent_required")
-	writePage(w, http.StatusOK, page{
+	pg := page{
 		ClientName: clientLabel(c), RedirectHost: redirectHost(redirectURI), Request: sealed, NeedCode: p == nil,
 		NewClient: p != nil && !p.approved(clientID),
-	}, redirectURI)
+	}
+	if p != nil {
+		pg.PeerName, pg.PeerID = p.Name, p.PeerID
+	}
+	writePage(w, http.StatusOK, pg, redirectURI)
 }
 
 // postAuthorize is the consent form: deny, approve as a returning principal,
-// or spend a link code. A link code, its principal and the authorization code
-// commit together, so a failure leaves the link code unspent. The cookie is
-// read in the same transaction, so a link code committing first leaves its
-// account's cookie unable to mint another code.
+// or spend a link code. A non-empty link_code is bound and the cookie
+// principal is ignored; on success setConsentCookie stores that new subject
+// (PROTOCOL §4.5). An empty code still approves the cookie's own peer. A link
+// code, its principal and the authorization code commit together, so a failure
+// leaves the link code unspent. The cookie path reads the cookie in the same
+// transaction, so a link code that retires that principal first leaves the
+// cookie unable to mint another code.
 func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil || repeated(r.PostForm) {
 		deadEnd(w, "invalid_request", "The form could not be read.")
@@ -328,15 +340,18 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.refuseLink(w, r, req, sealed)
 		return
 	}
+	submitted := strings.TrimSpace(r.PostForm.Get("link_code")) != ""
 	err := s.DB.Tx(ctx, func(tx *sql.Tx) error {
 		var err error
-		if p, err = s.cookiePrincipal(ctx, tx, r); err != nil {
-			return err
-		}
-		if p == nil {
+		if submitted {
 			if p, bound, err = s.bindLink(ctx, tx, req.ClientID, r.PostForm.Get("link_code")); err != nil {
 				return err
 			}
+		} else if p, err = s.cookiePrincipal(ctx, tx, r); err != nil {
+			return err
+		}
+		if p == nil {
+			return hub.ErrDotLink
 		}
 		code, err = s.mintCode(ctx, tx, req, p.PrnID)
 		return err
@@ -369,19 +384,33 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 type linkWorth int
 
 const (
-	linkLive    linkWorth = iota // a good cookie, or a code that could be spent
-	linkRefused                  // no cookie and no live code
+	linkLive    linkWorth = iota // an empty code with a good cookie, or a code that could be spent
+	linkRefused                  // a code that is not live, or no cookie and no code
 	linkLocked                   // no cookie, and link codes are locked out (§20.1)
 )
 
 // linkCodeWorth reports whether this request can get anywhere in a write
-// transaction: it has a good cookie or a code that could be spent. This form is
-// public, so a stream of guesses must not take the store's one write lock.
-// Without a cookie, a lockout refuses every code before it is looked at.
+// transaction. A non-empty link code is worth a transaction only when it
+// could be spent; a consent cookie does not stand in for it. An empty code
+// is worth a transaction only when the cookie names a live principal. This
+// form is public, so a stream of guesses must not take the store's one write
+// lock. Without a cookie, a lockout refuses every code before it is looked at
+// (PROTOCOL §20.1). A returning principal is never locked out.
 func (s *Server) linkCodeWorth(ctx context.Context, r *http.Request) (linkWorth, error) {
+	code := strings.TrimSpace(r.PostForm.Get("link_code"))
 	p, err := s.cookiePrincipal(ctx, s.DB, r)
 	if err != nil {
 		return linkRefused, err
+	}
+	if code != "" {
+		if p == nil && s.Hub.DotLinkLocked() > 0 {
+			return linkLocked, nil
+		}
+		live, err := s.Hub.DotLinkLive(ctx, code)
+		if err != nil || !live {
+			return linkRefused, err
+		}
+		return linkLive, nil
 	}
 	if p != nil {
 		return linkLive, nil
@@ -389,21 +418,26 @@ func (s *Server) linkCodeWorth(ctx context.Context, r *http.Request) (linkWorth,
 	if s.Hub.DotLinkLocked() > 0 {
 		return linkLocked, nil
 	}
-	live, err := s.Hub.DotLinkLive(ctx, r.PostForm.Get("link_code"))
-	if err != nil || !live {
-		return linkRefused, err
-	}
-	return linkLive, nil
+	return linkRefused, nil
 }
 
 // refuseLink answers a refused link code: the retry page, after the refusal
-// is counted (hub.DotLinkFailed) when a code was actually typed. The refusal
-// that spends the budget gets the lockout page instead.
+// is counted (hub.DotLinkFailed) when a code was typed and no valid consent
+// cookie is present (PROTOCOL §20.1). A wrong code with a live cookie is
+// refused without falling back to that cookie and without spending the budget.
+// The refusal that spends the budget gets the lockout page instead.
 func (s *Server) refuseLink(w http.ResponseWriter, r *http.Request, req authRequest, sealed string) {
 	if strings.TrimSpace(r.PostForm.Get("link_code")) != "" {
-		if locked := s.Hub.DotLinkFailed(); locked > 0 {
-			s.lockedPage(w, r, req, sealed, locked)
+		p, err := s.cookiePrincipal(r.Context(), s.DB, r)
+		if err != nil {
+			serverError(w, err)
 			return
+		}
+		if p == nil {
+			if locked := s.Hub.DotLinkFailed(); locked > 0 {
+				s.lockedPage(w, r, req, sealed, locked)
+				return
+			}
 		}
 	}
 	s.retryPage(w, r, req, sealed)
@@ -435,10 +469,18 @@ func (s *Server) formPage(w http.ResponseWriter, r *http.Request, req authReques
 		serverError(w, err)
 		return
 	}
-	writePage(w, status, page{
+	pg := page{
 		ClientName: clientLabel(c), RedirectHost: redirectHost(req.RedirectURI), Request: sealed, NeedCode: true,
 		Error: msg,
-	}, req.RedirectURI)
+	}
+	if p, err := s.cookiePrincipal(r.Context(), s.DB, r); err != nil {
+		serverError(w, err)
+		return
+	} else if p != nil {
+		pg.NeedCode = false
+		pg.PeerName, pg.PeerID = p.Name, p.PeerID
+	}
+	writePage(w, status, pg, req.RedirectURI)
 }
 
 // bindLink spends a link code and binds its peer to a new principal, which it
@@ -446,7 +488,8 @@ func (s *Server) formPage(w http.ResponseWriter, r *http.Request, req authReques
 // code cannot show that its holder is the account already bound to the peer:
 // each code starts a new account and ends the one before it (retirePrincipal).
 // That is also how an operator re-homes a dot or cuts an account off. A
-// returning account never gets here, its cookie answers for it.
+// returning account gets here only when the form submits a link code; the
+// cookie principal is ignored, and a successful bind replaces the cookie.
 func (s *Server) bindLink(ctx context.Context, tx *sql.Tx, clientID, linkCode string) (*principal, string, error) {
 	peer, err := s.Hub.ConsumeDotLinkTx(ctx, tx, linkCode)
 	if err != nil {
