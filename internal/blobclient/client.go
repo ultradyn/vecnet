@@ -62,6 +62,20 @@ func (e *Error) Error() string {
 }
 func failure(code string) error { return &Error{Code: code} }
 
+// Read the bounded body before parsing: a decoder can both hide wire errors
+// behind JSON errors and accept a complete JSON value before a disconnect.
+func hubJSON(r io.Reader, out any) error {
+	const limit = 64 << 10
+	b, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return &Error{Code: "blob_unavailable", HubTransport: true}
+	}
+	if len(b) > limit || json.Unmarshal(b, out) != nil {
+		return failure("bad_response")
+	}
+	return nil
+}
+
 // Client's transports must be independent: hub may add authentication; transfer
 // must not. New disables redirects and supplies no cookie jar to either client.
 // Configure Now before using the client; nil means the system clock.
@@ -129,7 +143,12 @@ func responseError(resp *http.Response) error {
 			} `json:"details"`
 		} `json:"error"`
 	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&env) == nil {
+	err := hubJSON(resp.Body, &env)
+	var bodyErr *Error
+	if errors.As(err, &bodyErr) && bodyErr.HubTransport {
+		return err
+	}
+	if err == nil {
 		if reasonCode.MatchString(env.Error.Code) {
 			e.Code = env.Error.Code
 		}
@@ -204,10 +223,7 @@ func (c *Client) json(ctx context.Context, method, path, idem string, in, out an
 		return responseError(resp)
 	}
 	defer resp.Body.Close()
-	if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(out) != nil {
-		return failure("bad_response")
-	}
-	return nil
+	return hubJSON(resp.Body, out)
 }
 func validSHA(s string) bool {
 	b, err := hex.DecodeString(s)
@@ -291,8 +307,8 @@ func (c *Client) Upload(ctx context.Context, r io.ReadSeeker, size int64, media,
 			return zero, responseError(resp)
 		}
 		defer resp.Body.Close()
-		if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&zero) != nil {
-			return blobwire.Ref{}, failure("bad_response")
+		if err := hubJSON(resp.Body, &zero); err != nil {
+			return blobwire.Ref{}, err
 		}
 		return zero, nil
 	}
@@ -417,7 +433,8 @@ func (c *Client) DownloadTo(ctx context.Context, w io.Writer, sha, id string, ma
 			return zero, err
 		}
 		var resp *http.Response
-		if legacy || g.LocalPath != "" {
+		hubBody := legacy || g.LocalPath != ""
+		if hubBody {
 			if !legacy && (id != "" || g.LocalPath != path || g.BlobID != "" || g.SHA256 != sha || g.URL != "") {
 				return zero, failure("bad_response")
 			}
@@ -463,12 +480,13 @@ func (c *Client) DownloadTo(ctx context.Context, w io.Writer, sha, id string, ma
 			return zero, failure("blob_too_large")
 		}
 		h := sha256.New()
-		n, copyErr := io.Copy(io.MultiWriter(w, h), io.LimitReader(resp.Body, max))
+		body := &bodyReader{Reader: resp.Body}
+		n, copyErr := io.Copy(io.MultiWriter(w, h), io.LimitReader(body, max))
 		var extra [1]byte
-		extraN, extraErr := io.ReadFull(resp.Body, extra[:])
+		extraN, extraErr := io.ReadFull(body, extra[:])
 		resp.Body.Close()
 		if copyErr != nil || extraErr != nil && extraErr != io.EOF {
-			return zero, failure("blob_unavailable")
+			return zero, &Error{Code: "blob_unavailable", HubTransport: hubBody && body.err != nil}
 		}
 		if extraN != 0 {
 			return zero, failure("blob_too_large")
@@ -482,6 +500,20 @@ func (c *Client) DownloadTo(ctx context.Context, w io.Writer, sha, id string, ma
 		return g, nil
 	}
 	return zero, failure("blob_capability_expired")
+}
+
+// Keep source read errors distinct from local destination write failures.
+type bodyReader struct {
+	io.Reader
+	err error
+}
+
+func (r *bodyReader) Read(b []byte) (int, error) {
+	n, err := r.Reader.Read(b)
+	if err != nil && err != io.EOF {
+		r.err = err
+	}
+	return n, err
 }
 
 type progressReader struct {

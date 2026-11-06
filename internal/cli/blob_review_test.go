@@ -102,6 +102,122 @@ func reviewArgs(t *testing.T, command string) []string {
 	}
 	return []string{"send", reviewPeer, "hello", "--hold", "--attach", path}
 }
+
+func TestBlobTransfersResponseBodyFailures(t *testing.T) {
+	for _, command := range []string{"get", "send", "reply"} {
+		stages := []string{"discovery", "grant"}
+		if command == "get" {
+			stages = append(stages, "disk-get", "disk-local-get", "provider-get")
+		} else {
+			stages = append(stages, "completion", "disk-upload")
+		}
+		for _, stage := range stages {
+			for _, mode := range []string{"disconnect", "malformed-json", "complete-json-disconnect"} {
+				if strings.HasSuffix(stage, "get") && mode != "disconnect" {
+					continue // Byte bodies have no JSON validation.
+				}
+				for _, jsonOutput := range []bool{false, true} {
+					t.Run(command+"/"+stage+"/"+mode+"/json="+strconv.FormatBool(jsonOutput), func(t *testing.T) {
+						srv, _, sends := reviewBlobHub(t, time.Now)
+						original := srv.Config.Handler
+						failures := 0
+						srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							path := r.URL.Path
+							fail := stage == "discovery" && path == "/v1/blob-capabilities" ||
+								stage == "grant" && (path == "/v1/blobs/uploads" || strings.HasSuffix(path, "/download")) ||
+								stage == "completion" && strings.HasSuffix(path, "/complete") ||
+								stage == "disk-upload" && path == "/v1/blobs" ||
+								(stage == "disk-get" || stage == "disk-local-get") && path == "/v1/blobs/"+reviewSHA ||
+								stage == "provider-get" && path == "/object"
+							if fail {
+								failures++
+								body := "{"
+								if mode == "complete-json-disconnect" {
+									body = "{}"
+								}
+								if mode != "malformed-json" {
+									// The server closes with fewer bytes than promised.
+									w.Header().Set("Content-Length", "100")
+								}
+								if _, err := io.WriteString(w, body); err != nil {
+									t.Errorf("write body fixture: %v", err)
+								}
+								return
+							}
+							if strings.HasPrefix(stage, "disk-") {
+								if path == "/v1/blob-capabilities" || strings.HasSuffix(path, "/download") {
+									if stage == "disk-local-get" {
+										value := any(map[string]any{"backend": "disk", "max_size": 25 << 20})
+										if strings.HasSuffix(path, "/download") {
+											value = blobwire.DownloadGrant{SHA256: reviewSHA, Size: 3, LocalPath: "/v1/blobs/" + reviewSHA}
+										}
+										if err := json.NewEncoder(w).Encode(value); err != nil {
+											t.Errorf("encode disk fixture: %v", err)
+										}
+									} else {
+										w.WriteHeader(http.StatusNotFound) // Old-hub disk fallback.
+									}
+									return
+								}
+							}
+							original.ServeHTTP(w, r)
+						})
+						const secret = "fake-private-hub-secret"
+						_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub=%q\nsecret=%q\n", srv.URL, secret))
+						args := reviewArgs(t, command)
+						dir := t.TempDir()
+						if command == "get" {
+							args = []string{"blob", "get", reviewSHA, "--out", filepath.Join(dir, "saved")}
+							if !strings.HasPrefix(stage, "disk-") {
+								args = append(args, "--blob-id", reviewID)
+							}
+						}
+						if jsonOutput {
+							args = append(args, "--json")
+						}
+						t.Setenv("TMPDIR", dir)
+						code, out, errs := pinRun(env, args...)
+						wantExit, reason := 3, "blob_unavailable"
+						if mode == "malformed-json" {
+							wantExit, reason = 1, "bad_response"
+						} else if stage == "provider-get" {
+							wantExit = 1
+						}
+						wantErr := "vecnet: " + reason + "\n"
+						if wantExit == 3 {
+							wantErr = "vecnet: network: " + reason + "\n"
+						}
+						if code != wantExit || errs != wantErr {
+							t.Errorf("exit=%d stderr=%q; want exit=%d stderr=%q", code, errs, wantExit, wantErr)
+						}
+						if command == "get" && jsonOutput {
+							var wire struct {
+								Error struct{ Code string } `json:"error"`
+							}
+							if json.Unmarshal([]byte(out), &wire) != nil || wire.Error.Code != reason {
+								t.Error("missing sanitized machine-readable failure")
+							}
+						} else if out != "" {
+							t.Error("failed transfer reported output")
+						}
+						for _, forbidden := range []string{srv.URL, secret, "cap=", "unexpected EOF", "Authorization"} {
+							if strings.Contains(out+errs, forbidden) {
+								t.Error("failure leaked transport details")
+							}
+						}
+						if failures != 1 || *sends != 0 {
+							t.Errorf("failed requests=%d sends=%d; want 1 and 0", failures, *sends)
+						}
+						if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+							t.Error("failure left output or spool")
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
 func TestR2CLISendReferenceSchema(t *testing.T) {
 	for _, cmd := range []string{"send", "reply"} {
 		t.Run(cmd, func(t *testing.T) {

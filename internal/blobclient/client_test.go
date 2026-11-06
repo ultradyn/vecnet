@@ -198,7 +198,12 @@ func newFixture(t *testing.T) *fixture {
 			if f.completion != nil {
 				ref = *f.completion
 			}
-			json.NewEncoder(w).Encode(ref)
+			// Ref.MarshalJSON rejects some deliberately malformed completion
+			// fixtures. Send their fields unchanged to exercise client validation.
+			type rawRef blobwire.Ref
+			if err := json.NewEncoder(w).Encode(rawRef(ref)); err != nil {
+				t.Errorf("encode completion fixture: %v", err)
+			}
 		default:
 			f.mints++
 			if f.hubCode != "" {
