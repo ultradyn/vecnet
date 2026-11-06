@@ -168,6 +168,9 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 		// looking up the authenticated caller, as ordinary hub commands do.
 		a.ensurePin(name, p)
 		c := newClient(p.Hub, p.Secret)
+		if label := a.operatorLabel(p); label != nil {
+			c.clientHeader = label.Header()
+		}
 		caller, err := a.codexBindCaller(c)
 		if err != nil {
 			return err

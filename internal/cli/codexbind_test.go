@@ -531,6 +531,49 @@ func TestCodexBindFollowsSignedMove(t *testing.T) {
 	}
 }
 
+func TestCodexBindOperatorClientLabel(t *testing.T) {
+	for _, agent := range []bool{false, true} {
+		t.Run(fmt.Sprintf("agent=%t", agent), func(t *testing.T) {
+			f := newBindFixture(t)
+			f.env["VECNET_HUMAN"] = "1"
+			if agent {
+				f.env["VECNET_AGENT"] = "1"
+			}
+			var callerCalls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/peers/me" {
+					http.NotFound(w, r)
+					return
+				}
+				callerCalls.Add(1)
+				if got := r.Header.Get("Authorization"); got != "Bearer vn_operator_test" {
+					t.Errorf("authorization=%q", got)
+				}
+				var label envelope.OperatorClient
+				if err := json.Unmarshal([]byte(r.Header.Get(envelope.ClientHeader)), &label); err != nil {
+					t.Errorf("invalid operator client label: %v", err)
+				} else if label.Kind != envelope.ClientKindOperatorCLI || label.Host == "" || label.AgentSuspected != agent {
+					t.Errorf("operator client label=%+v, want operator-cli with agent_suspected=%t", label, agent)
+				}
+				_, _ = fmt.Fprint(w, `{"kind":"operator"}`)
+			}))
+			t.Cleanup(srv.Close)
+			if err := saveConfig(f.env["VECNET_CONFIG"], Config{Profiles: map[string]Profile{
+				"p": {Hub: srv.URL, Secret: "vn_operator_test"},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			code, _, errs := pinRun(func(k string) string { return f.env[k] }, "--net", "p", "codex", "bind", "--thread", bindT1)
+			if code != 1 || !strings.Contains(errs, "cannot resolve binding identity") || callerCalls.Load() != 1 {
+				t.Fatalf("exit %d, caller calls=%d: %s", code, callerCalls.Load(), errs)
+			}
+			if _, err := os.Stat(f.path); !os.IsNotExist(err) {
+				t.Fatalf("operator identity wrote bindings: %v", err)
+			}
+		})
+	}
+}
+
 func TestCodexBindCallerKinds(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, caller string
