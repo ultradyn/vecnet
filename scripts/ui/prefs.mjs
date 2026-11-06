@@ -153,6 +153,19 @@ try {
     assert(await page.locator(sid('agents.default_max_depth')).getAttribute('aria-invalid') === 'true', 'aria-invalid missing');
     await page.locator('.st-bar .st-jump').click();
     assert(await page.evaluate(() => document.activeElement && document.activeElement.id) === 'st-agents-default-max-depth', 'Show did not focus the invalid field');
+    // Show reveals the invalid row when the search, the Flags filter or both hide it.
+    const filters = {
+      search: () => page.locator('.st-q').fill('presence'),
+      flags: () => page.locator('[data-fk=only-flags]').click(),
+      'search and flags': async () => { await page.locator('[data-fk=only-flags]').click(); await page.locator('.st-q').fill('refresh'); },
+    };
+    for (const [name, hide] of Object.entries(filters)) {
+      await hide();
+      assert(await page.locator('[data-row="agents.default_max_depth"]').count() === 0, `${name}: the invalid row is not hidden`);
+      await page.locator('.st-bar .st-jump').click();
+      assert(await page.evaluate(() => document.activeElement && document.activeElement.id) === 'st-agents-default-max-depth', `${name}: Show did not reveal and focus the invalid field`);
+      assert(await page.locator('.st-q').inputValue() === '' && await page.locator('[data-fk=only-all][aria-pressed=true]').count() === 1, `${name}: Show left the filter on`);
+    }
     await both('invalid', { list: () => into('[data-row="agents.default_max_depth"]'), policy: async () => { await open('agents.default_max_depth'); await into('#drawer-st-agents-default-max-depth'); } });
     await view('list');
     await page.locator(sid('agents.default_max_depth')).fill('24');
@@ -281,6 +294,29 @@ try {
     await page.waitForFunction(() => location.hash === '#settings');
     assert(asked.includes('1 unsaved change'), `leave prompt: ${asked}`);
     assert(await page.locator(sid('agents.default_max_depth')).inputValue() === '30', 'staying lost the draft');
+    // A resource landing after the hash changes but before its hashchange
+    // event runs redraws the route too; it must ask, not unmount the draft.
+    // Injected order: pushState moves the hash without a hashchange event
+    // (the state a click leaves until its queued event runs), then a real
+    // Other Threads reload lands and redraws; the late event is sent after.
+    let prompts = 0;
+    asked = '';
+    const onLeave = d => { prompts++; asked = d.message(); d.dismiss(); };
+    page.on('dialog', onLeave);
+    const others = page.waitForResponse(r => { const u = new URL(r.url()); return u.pathname === '/v1/admin/threads' && u.searchParams.has('exclude_participant'); });
+    await page.evaluate(() => history.pushState(null, '', '#inbox'));
+    assert(prompts === 0 && await page.locator('body[data-route=settings]').count() === 1, 'the hash move alone ran the route');
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await others;
+    await page.waitForFunction(() => location.hash === '#settings' || document.body.dataset.route !== 'settings');
+    assert(await page.locator('body[data-route=settings]').count() === 1, 'a background redraw unmounted dirty Settings without asking');
+    assert(prompts === 1 && asked.includes('1 unsaved change'), `background redraw leave prompt: ${prompts} ${asked}`);
+    assert(await page.evaluate(() => location.hash) === '#settings', 'staying did not restore #settings');
+    await page.evaluate(() => dispatchEvent(new HashChangeEvent('hashchange')));
+    await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+    page.off('dialog', onLeave);
+    assert(prompts === 1, `the late hashchange asked again (${prompts} prompts)`);
+    assert(await page.locator('body[data-route=settings]').count() === 1 && await page.locator(sid('agents.default_max_depth')).inputValue() === '30', 'staying lost the Settings mount or its draft');
     await page.locator('.st-bar [data-fk=undo]').click();
 
     // ---------- appearance: local Apply, no hub request, other tabs follow ----------

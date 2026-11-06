@@ -263,6 +263,27 @@ export function describeLoad(e) {
   return { code: (e && e.code) || 'error', text: (e && e.message) || 'The hub could not load settings.' };
 }
 
+// The risk codes this page can describe (internal/hub/preferences_preview.go).
+// A preview naming any other risk, or a risk without a code, is refused
+// whole: the operator cannot approve a consequence the page cannot explain.
+export const RISK_CODES = ['archive_disabled', 'blob_expiry_off', 'presence_shortened', 'retention_apply_existing', 'retention_shortened'];
+
+// unknownRisks: the names of a preview's risks this page cannot describe;
+// `unnamed` stands for a risk with no code. Empty when every risk is known.
+export function unknownRisks(preview) {
+  const risks = preview && Array.isArray(preview.risks) ? preview.risks : [];
+  return risks.filter(r => !r || typeof r !== 'object' || !RISK_CODES.includes(r.code))
+    .map(r => (r && typeof r.code === 'string' && r.code ? r.code : 'unnamed'));
+}
+
+// previewRefusal: why a risky preview cannot be confirmed here, or ''.
+export function previewRefusal(preview) {
+  const unknown = [...new Set(unknownRisks(preview))];
+  if (unknown.length) return `Not saved: the hub flagged ${unknown.length === 1 ? 'a risk' : 'risks'} this page cannot describe (${unknown.join(', ')}), so the change cannot be confirmed here. Nothing was saved; your edits are kept. This page may be older than the hub: reload it, or review the change with vecnet prefs.`;
+  if (!preview || typeof preview.confirm_token !== 'string' || !preview.confirm_token) return 'Not saved: the hub asked for a confirmation without a token to confirm it with. Nothing was saved; your edits are kept.';
+  return '';
+}
+
 const FIELD_ERROR = {
   prefs_invalid_value: 'The hub refused this value.',
   prefs_unknown_key: 'The hub does not know this setting.',
@@ -506,9 +527,22 @@ export function createSettingsStore({ api, appearance, storage }) {
     }
     if (!live()) return;
     if (!p || !Array.isArray(p.risks) || !p.risks.length) return commit(patch, null, applyExisting, true);
+    // Checked before the token is exposed: a risk this page cannot describe
+    // is never offered for confirmation.
+    const refusal = previewRefusal(p);
+    if (refusal) return refuse(refusal);
     st.busy = 'confirming';
     st.confirm = { patch, preview: p, applyExisting, keys: patchKeys(patch) };
     say('Confirmation needed before saving.');
+  }
+
+  // refuse drops a preview that cannot be confirmed here, with its token.
+  // The draft stays for the operator to change or keep.
+  function refuse(text) {
+    st.busy = '';
+    st.confirm = null;
+    st.saveError = { code: 'prefs_risk_unknown', text };
+    say(text);
   }
 
   async function commit(patch, token, applyExisting = false, previewed = !!token) {
@@ -556,6 +590,9 @@ export function createSettingsStore({ api, appearance, storage }) {
   async function confirm({ applyExisting = false } = {}) {
     const c = st.confirm;
     if (!c || st.busy !== 'confirming') return;
+    // The same check as preview, again before the token is redeemed.
+    const refusal = previewRefusal(c.preview);
+    if (refusal) { refuse(refusal); emit(); return; }
     if (applyExisting && !c.applyExisting) { st.confirm = null; await preview(c.patch, true); emit(); return; }
     await commit(c.patch, c.preview.confirm_token, c.applyExisting);
     emit();
@@ -593,7 +630,25 @@ export function createSettingsStore({ api, appearance, storage }) {
     emit();
   }
   function setOpen(key) { st.open = st.open === key ? '' : key || ''; emit(); }
-  function takeFocus() { const f = st.focus; st.focus = ''; return f; }
+  // showField asks the view to bring one field into view and focus it.
+  function showField(key) {
+    if (!rowOf(key)) return;
+    st.focus = key;
+    emit();
+  }
+  // takeFocus hands the view the field to focus, once. In List, a field the
+  // search or the All / Customised / Flags filter hides is revealed first by
+  // clearing both, so Show and Save can always reach the field to fix.
+  function takeFocus() {
+    const f = st.focus;
+    st.focus = '';
+    if (f && st.view === 'list' && rowOf(f) && !visibleRows(self).some(r => r.key === f)) {
+      st.q = '';
+      st.only = 'all';
+      say('Cleared the search and filter to show the setting to fix.');
+    }
+    return f;
+  }
 
   // ---------- appearance: local to this browser ----------
   function setAppearance(field, v) {
@@ -633,12 +688,13 @@ export function createSettingsStore({ api, appearance, storage }) {
     st.draft.clear();
   }
 
-  return {
+  const self = {
     state: st, load, refresh, edit, resetKey, revert, undo, save, confirm, cancelConfirm, adoptNewer,
-    setView, setFilter, setOpen, takeFocus, setAppearance, applyAppearance, undoAppearance, appearanceDirty,
+    setView, setFilter, setOpen, showField, takeFocus, setAppearance, applyAppearance, undoAppearance, appearanceDirty,
     value, input, errors, source, dirtyKeys, rowOf, destroy,
     subscribe(fn) { subs.add(fn); return () => subs.delete(fn); },
   };
+  return self;
 }
 
 // changedKeys: keys whose value or source differs between two row lists.

@@ -141,13 +141,24 @@ function renderConn(store, activity, notices) {
   $('conn').lastElementChild.textContent = state;
 }
 
+const routeKey = route => route.view + (route.id ? '/' + route.id : '');
+
+// renderRoute draws location.hash, whoever calls it: the hashchange listener
+// or a resource redraw that lands after a hash change but before its event.
+// So the leave guard lives here, ahead of shownHash and the unmount: a dirty
+// screen asks before any caller replaces it, and staying puts the shown hash
+// back without a new history entry, leaving the late event nothing to do.
 function renderRoute(s) {
-  const route = parseRoute(location.hash);
+  let route = parseRoute(location.hash);
+  if (s.ctx && s.mounted && routeKey(route) !== s.mounted && !leaving(s)) {
+    history.replaceState(null, '', s.shownHash || '#settings');
+    route = parseRoute(location.hash);
+  }
   document.body.dataset.route = route.name;
   s.shownHash = location.hash;
   renderNav(s, route);
   if (!s.ctx) return; // the directory has not named the operator yet
-  const key = route.view + (route.id ? '/' + route.id : '');
+  const key = routeKey(route);
   if (key !== s.mounted) {
     s.unmount();
     const entry = SCREENS[route.view], ctx = { ...s.ctx, threadId: route.view === 'thread' ? route.id : undefined, peerId: route.view === 'peer' ? route.id : undefined };
@@ -313,17 +324,9 @@ $('nav-add').addEventListener('click', e => {
   const s = session;
   if (s && s.ctx) openInvite(s.ctx, () => s.ctx.peers.reload(), e.currentTarget);
 });
-window.addEventListener('hashchange', () => {
-  const s = session;
-  if (!s) return;
-  // A dirty Settings page asks before another route unmounts it; staying
-  // puts its hash back without a second render.
-  if (s.shownHash !== undefined && parseRoute(location.hash).view !== parseRoute(s.shownHash).view && !leaving(s)) {
-    history.replaceState(null, '', s.shownHash || '#settings');
-    return;
-  }
-  renderRoute(s);
-});
+// A dirty Settings page asks before another route unmounts it: renderRoute
+// holds the leave guard for every caller.
+window.addEventListener('hashchange', () => { if (session) renderRoute(session); });
 // A peer named inside another link (an inbox row, a sidebar row) is a span
 // with data-peer: a plain click on it opens the peer instead of the row.
 // Modified clicks fall through to the row's own link.

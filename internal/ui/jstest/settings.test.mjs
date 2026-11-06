@@ -361,16 +361,112 @@ test('dangerous cancel writes nothing and keeps the draft; confirm sends the tok
 });
 
 test('a 409 confirmation_required from PATCH falls back to preview and the dialog', async () => {
-  const { hub, store, st } = await ready();
-  // The hub knows a risk the page did not predict.
-  hub.extraRisks = patch => (patch.set && patch.set['events.refresh_interval'] ? [{ code: 'future_risk', keys: ['events.refresh_interval'], message: 'A risk this page has no copy for.' }] : []);
-  store.edit('events.refresh_interval', '10m');
+  // The hub names a risk this page knows but did not predict: the row it
+  // drew lists no danger.
+  const pre = rows().map(r => (r.key === 'presence.default_ttl' ? { ...r, danger: [] } : r));
+  const { hub, store, st } = await ready({ hub: { preferences: pre } });
+  store.edit('presence.default_ttl', '30m');
   await store.save();
   assert.deepEqual(hub.calls.filter(c => c.op !== 'get').map(c => c.op), ['patch', 'preview']);
   assert.equal(st.busy, 'confirming');
-  assert.equal(st.confirm.preview.risks[0].code, 'future_risk');
+  assert.equal(st.confirm.preview.risks[0].code, 'presence_shortened');
   await store.confirm();
-  assert.equal(store.source('events.refresh_interval'), 'stored');
+  assert.equal(store.source('presence.default_ttl'), 'stored');
+});
+
+// ---------- risks this page cannot describe are refused, never confirmed ----------
+
+const confirming = hub => hub.calls.filter(c => c.op === 'patch' && c.patch.confirm);
+const futureRisk = key => ({ code: 'future_risk', keys: [key], message: 'A risk this page has no copy for.' });
+
+test('a preview naming a risk this page cannot describe is refused and its token never sent', async () => {
+  const { hub, store, st } = await ready();
+  hub.extraRisks = patch => (patch.set && patch.set['events.refresh_interval'] ? [futureRisk('events.refresh_interval')] : []);
+  store.edit('events.refresh_interval', '10m');
+  await store.save();
+  assert.deepEqual(hub.calls.filter(c => c.op !== 'get').map(c => c.op), ['patch', 'preview'], 'the unconfirmed PATCH is refused by the hub, then previewed');
+  assert.equal(st.confirm, null, 'no confirmation is offered');
+  assert.equal(st.busy, '');
+  assert.match(st.saveError.text, /cannot describe \(future_risk\)/);
+  assert.match(st.saveError.text, /Nothing was saved; your edits are kept/);
+  assert.match(st.announce.text, /cannot describe/);
+  assert.deepEqual(store.dirtyKeys(), ['events.refresh_interval'], 'the draft is kept');
+  await store.confirm();
+  assert.equal(confirming(hub).length, 0, 'no confirming PATCH');
+  assert.equal(row(st, 'events.refresh_interval').source, 'default');
+});
+
+test('one unknown risk among known ones refuses the whole proposal', async () => {
+  const { hub, store, st } = await ready();
+  hub.extraRisks = patch => (patch.set && patch.set['presence.default_ttl'] ? [futureRisk('presence.default_ttl')] : []);
+  store.edit('presence.default_ttl', '30m');
+  await store.save();
+  assert.deepEqual(hub.calls.filter(c => c.op !== 'get').map(c => c.op), ['preview'], 'previewed before any write');
+  assert.equal(st.confirm, null);
+  assert.match(st.saveError.text, /\(future_risk\)/);
+  assert.doesNotMatch(st.saveError.text, /presence_shortened/, 'only the unknown risk is named');
+  await store.confirm();
+  assert.equal(hub.calls.filter(c => c.op === 'patch').length, 0, 'nothing is written');
+  assert.deepEqual(store.dirtyKeys(), ['presence.default_ttl']);
+});
+
+test('a risk with no code, an empty or non-string code, or no object at all is refused', async () => {
+  const bad = [{ keys: ['presence.default_ttl'], message: 'unnamed' }, { code: '', keys: [] }, { code: 42 }, null, 'presence_shortened'];
+  for (const risk of bad) {
+    const { hub, store, st } = await ready();
+    hub.extraRisks = () => [risk];
+    store.edit('presence.default_ttl', '30m');
+    await store.save();
+    const what = JSON.stringify(risk);
+    assert.equal(st.confirm, null, what);
+    assert.equal(st.busy, '', what);
+    assert.match(st.saveError.text, /cannot describe \(unnamed\)/, what);
+    await store.confirm();
+    assert.equal(hub.calls.filter(c => c.op === 'patch').length, 0, what);
+    assert.deepEqual(store.dirtyKeys(), ['presence.default_ttl'], what);
+  }
+});
+
+test('a preview with risks but no token is refused', async () => {
+  const { hub, store, st } = await ready();
+  const preview = hub.api.previewPrefs;
+  hub.api.previewPrefs = async (...a) => ({ ...(await preview(...a)), confirm_token: '' });
+  store.edit('presence.default_ttl', '30m');
+  await store.save();
+  assert.equal(st.confirm, null);
+  assert.match(st.saveError.text, /Not saved/);
+  assert.equal(hub.calls.filter(c => c.op === 'patch').length, 0);
+  assert.deepEqual(store.dirtyKeys(), ['presence.default_ttl']);
+});
+
+test('confirm checks the risks again before redeeming the token', async () => {
+  const { hub, store, st } = await ready();
+  store.edit('presence.default_ttl', '30m');
+  await store.save();
+  assert.equal(st.busy, 'confirming');
+  // However the held preview came to name an unknown risk, Confirm refuses it.
+  st.confirm.preview.risks.push(futureRisk('presence.default_ttl'));
+  await store.confirm();
+  assert.equal(hub.calls.filter(c => c.op === 'patch').length, 0, 'no confirming PATCH');
+  assert.equal(st.confirm, null);
+  assert.equal(st.busy, '');
+  assert.match(st.saveError.text, /\(future_risk\)/);
+  assert.deepEqual(store.dirtyKeys(), ['presence.default_ttl']);
+});
+
+test('an unknown risk in the apply-existing preview is refused too', async () => {
+  const pre = rows({ installed: true }).map(r => (r.key === 'retention.archive_mode' ? { ...r, value: true, source: 'stored' } : r));
+  const { hub, store, st } = await ready({ hub: { preferences: pre } });
+  hub.extraRisks = patch => (patch.apply_existing ? [futureRisk('retention.archive_mode')] : []);
+  store.edit('retention.archive_mode', false);
+  await store.save();
+  assert.equal(st.confirm.preview.risks[0].code, 'archive_disabled');
+  await store.confirm({ applyExisting: true });
+  assert.equal(hub.calls.filter(c => c.op === 'preview').length, 2);
+  assert.equal(st.confirm, null);
+  assert.match(st.saveError.text, /\(future_risk\)/);
+  assert.equal(hub.calls.filter(c => c.op === 'patch').length, 0);
+  assert.deepEqual(store.dirtyKeys(), ['retention.archive_mode']);
 });
 
 test('a hub that demands a confirmation it never describes cannot loop', async () => {
@@ -528,6 +624,40 @@ test('List search and the All / Customised / Flags filter', async () => {
   assert.deepEqual(visibleRows(store).map(r => r.key), ['presence.default_ttl', 'presence.session_ttl']);
   store.setFilter({ q: 'nothing like this' });
   assert.deepEqual(visibleRows(store), []);
+});
+
+test('Show reveals an invalid field that the List search or Flags filter hides', async () => {
+  const pre = rows().map(r => (r.key === 'events.refresh_interval' ? { ...r, source: 'flag', origin: 'VECNET_EVENTS_REFRESH_INTERVAL', value: 900 } : r));
+  const { store, st } = await ready({ hub: { preferences: pre } });
+  const key = 'agents.default_max_depth';
+  const shown = () => visibleRows(store).some(r => r.key === key);
+  store.edit(key, '99');
+  for (const filter of [{ q: 'presence' }, { only: 'flags' }, { q: 'refresh', only: 'flags' }]) {
+    const what = JSON.stringify(filter);
+    store.setFilter({ q: '', only: 'all', ...filter });
+    assert.equal(shown(), false, `${what} hides the row`);
+    store.showField(key);
+    assert.equal(store.takeFocus(), key, what);
+    assert.equal(shown(), true, `${what}: Show reveals the row`);
+    assert.equal(st.q, '', what);
+    assert.equal(st.only, 'all', what);
+  }
+  // Save's own focus request reveals the field the same way.
+  store.setFilter({ only: 'flags' });
+  await store.save();
+  assert.equal(store.takeFocus(), key);
+  assert.equal(shown(), true, 'Save reveals the field it asks to fix');
+  // A filter that already shows the field is left alone.
+  store.setFilter({ q: 'depth', only: 'all' });
+  store.showField(key);
+  store.takeFocus();
+  assert.equal(st.q, 'depth');
+  // Policy draws every row; its filter state is not the List's to clear.
+  store.setFilter({ q: 'presence' });
+  store.setView('policy');
+  store.showField(key);
+  assert.equal(store.takeFocus(), key);
+  assert.equal(st.q, 'presence');
 });
 
 // ---------- lifecycle and appearance ----------
