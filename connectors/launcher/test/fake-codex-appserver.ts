@@ -47,7 +47,7 @@ const typeOf = (status: unknown): unknown => typeof status === 'string' ? status
 const paramsOf = (p: unknown): Params => p !== null && typeof p === 'object' && !Array.isArray(p) ? p as Params : {};
 
 /** A local-only Codex protocol simulator. It never starts a child process. */
-export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; unloadDelayMs?: number }): Promise<FakeCodex> {
+export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; unloadDelayMs?: number; coldResumeIdleDelayMs?: number }): Promise<FakeCodex> {
   // dir is always supplied by the test; there is no real-home fallback.
   const clock: Pick<Clock, 'now' | 'timer'> = o.clock ?? {
     now: () => Date.now(), timer(ms, fn) { const id = setTimeout(fn, ms); return { cancel: () => clearTimeout(id) }; },
@@ -146,7 +146,15 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
       if (Object.keys(args).some(k => k !== 'threadId' && k !== 'excludeTurns')) overrides.push({ threadId: t.id, params: m.params, conn: p.id });
       const cold = typeOf(t.status) === 'notLoaded';
       t.members.add(p.id);
-      if (cold) status(t, { type: 'idle' }); else schedule(t);
+      if (cold && o.coldResumeIdleDelayMs) {
+        // Keep the response warm while placing this resume's own broadcast
+        // after it, as a real app-server may do.
+        t.status = { type: 'idle' };
+        const timer = clock.timer(o.coldResumeIdleDelayMs, () => {
+          timers.delete(timer); if (!stopped) status(t, { type: 'idle' });
+        });
+        timers.add(timer);
+      } else if (cold) status(t, { type: 'idle' }); else schedule(t);
       respond({ thread: snapshot(t, args.excludeTurns !== true), approvalPolicy: t.approvalPolicy ?? 'never',
         approvalsReviewer: t.approvalsReviewer ?? 'user', sandbox: { type: 'workspaceWrite' } });
       if (cold) sendNotice(p, 'mcpServer/startupStatus/updated', { threadId: t.id, name: 'fake', status: 'ready' });
