@@ -168,7 +168,7 @@ Subscription health never changes the peer's presence. The TUI subs tab and web 
 | Global, normal mode | `1`–`4` | Inbox, chat, dashboard, subscriptions. |
 | Global | `?`, `Ctrl+L`, `:` | Help, reload all views, command line. Help also lists the current tab's hints and commands. |
 | Global | click, wheel, `M`, `:mouse off` | Click a tab, row or button. The wheel scrolls the pane under the pointer. `M` or `:mouse off` releases mouse capture; `:mouse on` takes it back. Shift+drag selects text with the terminal. The keyboard still does everything the mouse does. |
-| Normal mode | `q`, `Ctrl+C`, `Ctrl+Q`, `Ctrl+Z` | Quit. In insert mode Ctrl+C/Ctrl+Q ask before discarding the draft; `y` confirms. Literal `q` types text in insert mode. Ctrl+Z suspends the client and releases mouse capture until it continues. |
+| Normal mode | `q`, `Ctrl+C`, `Ctrl+Q`, `Ctrl+Z` | Quit. In insert mode Ctrl+C/Ctrl+Q ask before discarding the draft; `y` confirms. Literal `q` types text in insert mode. Ctrl+Z suspends the client and releases mouse capture until it continues. A stop signal from another process is not handled. |
 | Inbox | `j`/`k` or arrows; Enter | Move and open the selected thread. |
 | Inbox | `a`, then option digit | Answer selected approval; any other key cancels. Ctrl+U and Ctrl+D scroll the event log (older, then back toward the latest), as does the wheel. |
 | Inbox | `r`, `x`, `p` | Retry delivery/resume eligible subscription; confirm discard with `y`; toggle idle/working. |

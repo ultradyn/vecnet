@@ -183,8 +183,10 @@ func TestOpeningAThreadRevealsIt(t *testing.T) {
 func TestShowMoreAndDashboardHandoff(t *testing.T) {
 	api := newFake()
 	next := "page-2"
+	staleCur := "stale-page"
 	api.byCursor = map[string]opapi.ThreadPage{
-		"page-2": {Threads: []opapi.ThreadRow{mineRow("thr_page2", "page two thread", []string{"peer_z"}, "2026-11-02T04:41:00Z", 1)}},
+		"page-2":     {Threads: []opapi.ThreadRow{mineRow("thr_page2", "page two thread", []string{"peer_z"}, "2026-11-02T04:41:00Z", 1)}, Next: &staleCur},
+		"stale-page": {Threads: []opapi.ThreadRow{mineRow("thr_stale", "stale thread", []string{"peer_z"}, "2026-11-02T04:41:00Z", 1)}},
 	}
 	m := newTestModel(t, api, newClock())
 	m.Tab = tabChat
@@ -228,6 +230,50 @@ func TestShowMoreAndDashboardHandoff(t *testing.T) {
 	if len(queries) != 1 || queries[0].Cursor != "page-2" || queries[0].Participant != "" {
 		t.Fatalf("query %+v", queries)
 	}
+
+	// A cursor fetch started against the first snapshot, then a new first page
+	// arrives, then that old response. The new snapshot must still paginate.
+	stale := dash.onKey("n", m)
+	if stale == nil {
+		t.Fatal("n did not ask for the following cursor page")
+	}
+	freshCur := "page-3"
+	m.Data.Threads = opapi.ThreadPage{Threads: []opapi.ThreadRow{mineRow("thr_hub2", "hub page two", []string{"peer_me"}, "2026-11-02T05:00:00Z", 1)}, Next: &freshCur}
+	api.byCursor["page-3"] = opapi.ThreadPage{Threads: []opapi.ThreadRow{mineRow("thr_page3", "page three thread", []string{"peer_z"}, "2026-11-02T05:00:00Z", 1)}}
+	if cmd := dash.Update(Loaded{Key: "threads"}, m); cmd != nil {
+		t.Fatal("an unfiltered refresh started a narrowed load")
+	}
+	if hasThread(dash.threadRows(m), "thr_page2") {
+		t.Fatal("the previous snapshot's extra page survived the refresh")
+	}
+	fresh := dash.onKey("n", m)
+	if fresh == nil {
+		t.Fatal("n did not ask for a page of the refreshed snapshot")
+	}
+	dash.Update(fresh(), m)
+	dash.Update(stale(), m)
+	if hasThread(dash.threadRows(m), "thr_stale") {
+		t.Fatal("a late page from the previous snapshot was applied")
+	}
+	if !hasThread(dash.threadRows(m), "thr_page3") || !hasThread(dash.threadRows(m), "thr_hub2") {
+		t.Fatal("the refreshed snapshot lost its next page")
+	}
+	again := dash.onKey("n", m)
+	if again != nil {
+		t.Fatal("a late old response left a cursor the refreshed snapshot does not have")
+	}
+	api.mu.Lock()
+	queries = append([]opapi.ThreadQuery(nil), api.threadQueries...)
+	api.mu.Unlock()
+	var sawFresh bool
+	for _, q := range queries {
+		if q.Cursor == "page-3" && q.Participant == "" {
+			sawFresh = true
+		}
+	}
+	if !sawFresh {
+		t.Fatalf("refreshed queries %+v", queries)
+	}
 }
 
 func TestMouseTabsDeferToModal(t *testing.T) {
@@ -262,6 +308,63 @@ func TestMouseTabsDeferToModal(t *testing.T) {
 	if !m.confirmQuit || m.Tab != tabInbox {
 		t.Fatal("click during quit confirmation changed tabs")
 	}
+
+	// The capped-list dashboard handoff is a button, not a tab. It has to
+	// leave the composer, an approval and quit confirmation where they are.
+	m.confirmQuit = false
+	m.Tab = tabChat
+	m.Mode = ModeNormal
+	chat.thread = "thr_old"
+	m.CurrentThread = "thr_old"
+	chat.prompt = nil
+	showDashHandoff(t, m)
+	m.Mode = ModeInsert
+	chat.draft("thr_old").text = "keep this draft"
+	plainAt(t, m, 140, 42)
+	clickHit(t, m, "other-dash")
+	if m.Tab != tabChat || m.Mode != ModeInsert || chat.draft("thr_old").text != "keep this draft" {
+		t.Fatalf("dashboard handoff during composition: tab %d mode %v draft %q", m.Tab, m.Mode, chat.draft("thr_old").text)
+	}
+
+	chat.prompt = &opapi.OpenApproval{ApprovalID: "apr_1", Question: "ship it?", Options: []string{"yes"}}
+	plainAt(t, m, 140, 42)
+	clickHit(t, m, "other-dash")
+	if m.Tab != tabChat || m.Mode != ModeInsert || chat.prompt == nil || chat.prompt.Question != "ship it?" || chat.draft("thr_old").text != "keep this draft" {
+		t.Fatal("dashboard handoff during an approval changed ownership")
+	}
+
+	chat.prompt = nil
+	m.Mode = ModeCommand
+	m.Input = "thread thr_old"
+	plainAt(t, m, 140, 42)
+	clickHit(t, m, "other-dash")
+	if m.Tab != tabChat || m.Mode != ModeCommand || m.Input != "thread thr_old" {
+		t.Fatalf("dashboard handoff during a command: tab %d mode %v input %q", m.Tab, m.Mode, m.Input)
+	}
+
+	m.Mode = ModeNormal
+	m.Input = ""
+	m.confirmQuit = true
+	plainAt(t, m, 140, 42)
+	clickHit(t, m, "other-dash")
+	if !m.confirmQuit || m.Tab != tabChat || m.Mode != ModeNormal {
+		t.Fatal("dashboard handoff during quit confirmation changed ownership")
+	}
+}
+
+func showDashHandoff(t *testing.T, m *Model) {
+	t.Helper()
+	chat := m.screens[tabChat].(*chatScreen)
+	chat.othersOpen = true
+	chat.otherLimit = otherMax
+	chat.followList = false
+	chat.listTop = 1 << 20
+	m.Data.OthersKnown = true
+	m.Data.Others.Threads = make([]opapi.ThreadRow, otherMax+1)
+	for i := range m.Data.Others.Threads {
+		m.Data.Others.Threads[i] = mineRow(fmt.Sprintf("thr_o_%03d", i), fmt.Sprintf("other %03d", i), []string{"peer_x"}, "2026-11-02T04:41:00Z", 1)
+	}
+	plainAt(t, m, 140, 42)
 }
 
 func TestHeaderBudgetsHostAndLocal(t *testing.T) {
@@ -417,8 +520,8 @@ func TestWhoScrollAndSuspendKey(t *testing.T) {
 	if strings.Contains(frame, "who-peer-00") || !strings.Contains(frame, "who-peer-29") {
 		t.Fatalf("participant pane:\n%s", frame)
 	}
-	if cmd := m.updateKey(keyPress("ctrl+z")); cmd == nil {
-		t.Fatal("ctrl+z produced no command")
+	if _, cmd := m.Update(keyPress("ctrl+z")); !isCmd(cmd, tea.Suspend) {
+		t.Fatal("ctrl+z did not return tea.Suspend")
 	}
 }
 

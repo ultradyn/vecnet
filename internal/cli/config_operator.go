@@ -17,7 +17,7 @@ func setOperatorProfileLocked(path, name, quoted string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return writeFileAtomic(path, []byte("operator_profile = "+quoted+"\n"))
+			return missingOperatorProfile(name)
 		}
 		return fmt.Errorf("read config %s: %w", path, err)
 	}
@@ -29,9 +29,9 @@ func setOperatorProfileLocked(path, name, quoted string) error {
 		return fmt.Errorf("read config %s: %w", path, err)
 	}
 	if len(raw) == 0 {
-		return commitOperatorProfile(path, info, raw, []byte("operator_profile = "+quoted+"\n"))
+		return missingOperatorProfile(name)
 	}
-	out, err := rewriteOperatorProfile(raw, name, quoted)
+	out, err := rewriteOperatorProfile(path, raw, name, quoted)
 	if err != nil {
 		return err
 	}
@@ -62,23 +62,25 @@ func commitOperatorProfile(path string, info os.FileInfo, raw, out []byte) error
 // rewriteOperatorProfile replaces only the value span of each root
 // operator_profile assignment. Nested keys, comments and every other byte
 // stay. A non-string root value is refused and nothing is returned to write.
-func rewriteOperatorProfile(raw []byte, name, quoted string) ([]byte, error) {
+func missingOperatorProfile(name string) error {
+	return usageErr(fmt.Sprintf("operator_profile %q is not a profile in the config", name))
+}
+
+func rewriteOperatorProfile(path string, raw []byte, name, quoted string) ([]byte, error) {
 	var before Config
 	beforeMD, err := toml.Decode(string(raw), &before)
 	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+		return nil, configParseErr(path, err)
 	}
 	if before.Profiles == nil {
 		before.Profiles = map[string]Profile{}
 	}
-	if len(before.Profiles) > 0 {
-		if _, ok := before.Profiles[name]; !ok {
-			return nil, usageErr(fmt.Sprintf("operator_profile %q is not a profile in the config", name))
-		}
+	if _, ok := before.Profiles[name]; !ok {
+		return nil, missingOperatorProfile(name)
 	}
 	var tree map[string]any
 	if _, err = toml.Decode(string(raw), &tree); err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+		return nil, configParseErr(path, err)
 	}
 	spans, bad, err := rootOperatorProfileSpans(raw)
 	if err != nil {
@@ -130,7 +132,7 @@ func rewriteOperatorProfile(raw []byte, name, quoted string) ([]byte, error) {
 	var after Config
 	afterMD, err := toml.Decode(string(out), &after)
 	if err != nil {
-		return nil, fmt.Errorf("operator_profile rewrite is not valid TOML: %w", err)
+		return nil, configParseErr(path, err)
 	}
 	if after.OperatorProfile != name {
 		return nil, fmt.Errorf("operator_profile rewrite did not set %q", name)
@@ -140,10 +142,10 @@ func rewriteOperatorProfile(raw []byte, name, quoted string) ([]byte, error) {
 	}
 	var beforeTree, afterTree map[string]any
 	if _, err = toml.Decode(string(raw), &beforeTree); err != nil {
-		return nil, err
+		return nil, configParseErr(path, err)
 	}
 	if _, err = toml.Decode(string(out), &afterTree); err != nil {
-		return nil, err
+		return nil, configParseErr(path, err)
 	}
 	delete(beforeTree, "operator_profile")
 	delete(afterTree, "operator_profile")
@@ -284,7 +286,7 @@ func parseQuotedKey(raw []byte, i int) (string, int, error) {
 	}
 	var decoded map[string]string
 	if _, err = toml.Decode("k = "+string(raw[i:end]), &decoded); err != nil {
-		return "", i, err
+		return "", i, configParseErr("", err)
 	}
 	return decoded["k"], end, nil
 }

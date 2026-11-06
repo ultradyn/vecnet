@@ -5,9 +5,10 @@ import tea "charm.land/bubbletea/v2"
 // updateKey is the single place a key is routed. See Mode for who gets what.
 func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
+	// Ctrl+Z suspends where Bubble Tea can stop the process. On Windows the
+	// request is a no-op. A stop signal from another process is not handled.
 	if key == "ctrl+z" {
-		disarmStop()
-		return doSuspend
+		return tea.Suspend
 	}
 	if m.confirmQuit {
 		m.confirmQuit = false

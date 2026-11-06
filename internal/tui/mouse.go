@@ -105,6 +105,12 @@ func (m *Model) clickAt(x, y int) tea.Cmd {
 		m.Tab = n
 		return nil
 	}
+	// A composer, prompt, command line or quit confirmation owns the screen.
+	// Buttons and rows change that ownership (open a thread, hand the capped
+	// list to the dashboard), so they wait, the same way a tab click does.
+	if m.modalOwned() {
+		return nil
+	}
 	for _, kind := range []hitKind{hitButton, hitRow} {
 		h, ok := m.hitAt(x, y, kind)
 		if !ok {

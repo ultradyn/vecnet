@@ -386,6 +386,8 @@ func (s *chatScreen) openDashboard(m *Model) {
 		return
 	}
 	d.narrow = nil
+	d.pageGen++
+	d.generationSnap = ""
 	d.extra = nil
 	d.extraNext = nil
 	d.extraBase = ""

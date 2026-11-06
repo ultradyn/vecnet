@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,15 +37,11 @@ func TestSetOperatorProfileRewritesOneLine(t *testing.T) {
 	}
 
 	bare := filepath.Join(dir, "missing.toml")
-	if err := setOperatorProfile(bare, "operator"); err != nil {
-		t.Fatal(err)
+	if err := setOperatorProfile(bare, "operator"); err == nil {
+		t.Fatal("missing file installed a dangling operator_profile")
 	}
-	b, err := os.ReadFile(bare)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(b) != "operator_profile = \"operator\"\n" {
-		t.Fatalf("missing file: %q", b)
+	if _, err := os.Lstat(bare); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing file was created: %v", err)
 	}
 
 	crlf := filepath.Join(dir, "crlf.toml")
@@ -52,15 +49,15 @@ func TestSetOperatorProfileRewritesOneLine(t *testing.T) {
 	if err := os.WriteFile(crlf, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := setOperatorProfile(crlf, "operator"); err != nil {
-		t.Fatal(err)
+	if err := setOperatorProfile(crlf, "operator"); err == nil {
+		t.Fatal("a file with no profiles installed a dangling operator_profile")
 	}
 	got, err = os.ReadFile(crlf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "operator_profile = \"operator\"\r\n"+body {
-		t.Fatalf("insert: %q", got)
+	if string(got) != body {
+		t.Fatal("file with no profiles was rewritten")
 	}
 	if err := setOperatorProfile(path, "not a name"); err == nil {
 		t.Fatal("a bad profile name was written")
@@ -213,6 +210,75 @@ func TestChooseTUIProfile(t *testing.T) {
 			t.Fatalf("err %v", err)
 		}
 	})
+}
+
+func TestChooseTUIProfileRedactsMalformedConfigError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	original := "operator_profile = \"fly\"\n\n[profiles.fly]\nhub = \"https://hub.example\"\nsecret = \"vn_operator_OK\"\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "vn_operator_SUPERSECRETCREDENTIAL99"
+	// A credential followed by a broken Unicode escape. The pinned TOML
+	// decoder quotes the whole string it was lexing, which is this secret.
+	malformed := "operator_profile = \"fly\"\n\n[profiles.fly]\nhub = \"https://hub.example\"\nsecret = \"" + secret + "\\uZZZZ\"\n"
+	getenv := func(k string) string {
+		if k == "VECNET_CONFIG" {
+			return path
+		}
+		if k == "VECNET_HUMAN" {
+			return "1"
+		}
+		return ""
+	}
+	restore := pickOperator
+	t.Cleanup(func() { pickOperator = restore })
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	a := &app{ctx: context.Background(), stdin: strings.NewReader(""), stdout: stdout, stderr: stderr, getenv: getenv}
+	pickOperator = func(context.Context, []tui.ProfileChoice, io.Reader, io.Writer) (tui.PickResult, error) {
+		if err := os.WriteFile(path, []byte(malformed), 0o600); err != nil {
+			return tui.PickResult{}, err
+		}
+		return tui.PickResult{Name: "fly", MakeDefault: true}, nil
+	}
+	err := a.chooseTUIProfile(true)
+	if err == nil {
+		t.Fatal("malformed config was accepted")
+	}
+	if a.net != "" {
+		t.Fatal("a vanished config still selected a profile")
+	}
+	a.exit(err)
+	got, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if string(got) != malformed {
+		t.Fatal("malformed config was rewritten")
+	}
+	for _, stream := range []struct {
+		name string
+		text string
+	}{
+		{"error", err.Error()},
+		{"stdout", stdout.String()},
+		{"stderr", stderr.String()},
+		{"log", logs.String()},
+	} {
+		if strings.Contains(stream.text, secret) || strings.Contains(stream.text, "\\uZZZZ") || strings.Contains(stream.text, "SUPERSECRET") {
+			t.Fatalf("%s contains credential bytes", stream.name)
+		}
+	}
+	// operator_profile, a blank line, the table, the hub, then the secret.
+	if err.Error() != "config.toml: parse error at line 5" {
+		t.Fatalf("redacted form = %q", strings.ReplaceAll(err.Error(), secret, "REDACTED"))
+	}
 }
 
 func sprintfChoices(in []tui.ProfileChoice) string {

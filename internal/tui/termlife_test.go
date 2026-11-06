@@ -1,3 +1,5 @@
+//go:build linux
+
 package tui
 
 import (
@@ -15,14 +17,14 @@ import (
 )
 
 // TestTerminalLifecycle drives the shared program runner on a real pty.
-// Exit, a caught panic, and suspend/resume each have to drop mouse capture,
-// and resume has to put it back.
+// Exit and a caught panic each have to drop mouse capture. Ctrl+Z suspend
+// is covered in the model tests; a stop from another process is not handled.
 func TestTerminalLifecycle(t *testing.T) {
 	if os.Getenv("VN_TUI_PTY") == "child" {
 		runProbeChild()
 		return
 	}
-	for _, mode := range []string{"exit", "panic", "suspend"} {
+	for _, mode := range []string{"exit", "panic"} {
 		t.Run(mode, func(t *testing.T) {
 			master, slave := openPty(t)
 			defer master.Close()
@@ -71,31 +73,6 @@ func TestTerminalLifecycle(t *testing.T) {
 				if cmd.ProcessState.ExitCode() == 0 {
 					t.Fatal("a caught panic exited 0")
 				}
-			case "suspend":
-				if _, err := master.Write([]byte{0x1a}); err != nil {
-					t.Fatal(err)
-				}
-				cap.until(t, "\x1b[?1002l", 3*time.Second)
-				// A host that honours SIGTSTP stays stopped until SIGCONT.
-				// One that does not continues immediately and restores capture.
-				deadline := time.Now().Add(300 * time.Millisecond)
-				for time.Now().Before(deadline) && !taskStopped(cmd.Process.Pid) && cap.count("\x1b[?1002h") < 2 {
-					time.Sleep(20 * time.Millisecond)
-				}
-				if taskStopped(cmd.Process.Pid) {
-					if err := cmd.Process.Signal(syscall.SIGCONT); err != nil {
-						t.Fatal(err)
-					}
-				}
-				cap.untilCount(t, "\x1b[?1002h", 2, 3*time.Second)
-				if _, err := master.Write([]byte("q")); err != nil {
-					t.Fatal(err)
-				}
-				cap.untilCount(t, "\x1b[?1002l", 2, 3*time.Second)
-				waitCmd(t, cmd, 3*time.Second)
-				if !mouseOrder(cap.text(), false) {
-					t.Fatalf("suspend/resume mouse sequence: %q", cap.text())
-				}
 			}
 		})
 	}
@@ -121,9 +98,6 @@ func (mouseProbe) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return mouseProbe{}, nil
 	}
 	switch key.String() {
-	case "ctrl+z":
-		disarmStop()
-		return mouseProbe{}, doSuspend
 	case "!":
 		if os.Getenv("VN_TUI_PTY_MODE") == "panic" {
 			panic("probe")
@@ -220,23 +194,6 @@ func (p *ptyCapture) untilCount(t *testing.T, needle string, n int, d time.Durat
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %d×%q; so far %q", n, needle, p.text())
-}
-
-func taskStopped(pid int) bool {
-	entries, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", pid))
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%s/stat", pid, entry.Name()))
-		if err != nil {
-			continue
-		}
-		if i := bytes.LastIndex(stat, []byte(")")); i >= 0 && i+2 < len(stat) && (stat[i+2] == 'T' || stat[i+2] == 't') {
-			return true
-		}
-	}
-	return false
 }
 
 func waitCmd(t *testing.T, cmd *exec.Cmd, d time.Duration) {

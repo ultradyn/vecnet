@@ -50,9 +50,13 @@ type dashScreen struct {
 	threadRowAt  int
 	// extra is the unfiltered pages fetched after Data.Threads. extraBase is
 	// the snapshot those pages belong to; a newer snapshot drops them.
-	extra     []opapi.ThreadRow
-	extraNext *string
-	extraBase string
+	// pageGen is that snapshot's generation. Cursor requests carry it, and a
+	// response from an older generation is dropped even when extraBase is empty.
+	extra          []opapi.ThreadRow
+	extraNext      *string
+	extraBase      string
+	pageGen        uint64
+	generationSnap string
 }
 
 // dashNarrow is the thread pane narrowed to one peer. The shell's Data.Threads
@@ -90,6 +94,7 @@ func (d *dashScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 		return d.onKey(msg.String(), m)
 	case Loaded:
 		if msg.Key == "threads" && msg.Err == nil {
+			d.noteFirstPage(m.Data.Threads)
 			return d.loadNarrow(m)
 		}
 	case dashThreadsMsg:
@@ -100,9 +105,11 @@ func (d *dashScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 	return nil
 }
 
-// dashPageMsg is one more unfiltered cursor page.
+// dashPageMsg is one more unfiltered cursor page. gen is the first-page
+// generation the request was made for.
 type dashPageMsg struct {
 	base string
+	gen  uint64
 	page opapi.ThreadPage
 	err  error
 }
@@ -215,19 +222,46 @@ func (d *dashScreen) loadMore(m *Model) tea.Cmd {
 	}
 	cursor := *page.Next
 	base := threadSnap(m.Data.Threads)
+	gen := d.pageGen
 	api, ctx := m.API, m.ctx
 	return func() tea.Msg {
 		v, err := api.Threads(ctx, opapi.ThreadQuery{Limit: pageLimit, Cursor: cursor})
-		return dashPageMsg{base: base, page: v, err: err}
+		return dashPageMsg{base: base, gen: gen, page: v, err: err}
 	}
 }
 
+// noteFirstPage starts a generation when the hub's first page is a different
+// snapshot. Extras fetched for the previous one are dropped, including a
+// response that has not arrived yet.
+func (d *dashScreen) noteFirstPage(page opapi.ThreadPage) {
+	snap := threadSnap(page)
+	if d.generationSnap != "" && snap == d.generationSnap {
+		return
+	}
+	if d.generationSnap == "" && (d.extraBase == "" || d.extraBase == snap) {
+		d.generationSnap = snap
+		if d.extraBase == "" {
+			d.extraBase = snap
+		}
+		return
+	}
+	d.pageGen++
+	d.generationSnap = snap
+	d.extra = nil
+	d.extraNext = nil
+	d.extraBase = ""
+}
+
 func (d *dashScreen) onPage(msg dashPageMsg) {
-	if msg.err != nil {
+	if msg.err != nil || msg.gen != d.pageGen {
 		return
 	}
 	// A page fetched for a snapshot this screen has since left is dropped.
-	if d.extraBase != "" && d.extraBase != msg.base {
+	cur := d.generationSnap
+	if cur == "" {
+		cur = d.extraBase
+	}
+	if cur != "" && msg.base != cur {
 		return
 	}
 	d.extraBase = msg.base
