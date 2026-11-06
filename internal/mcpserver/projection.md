@@ -56,3 +56,10 @@ convert to UTC. HTTP and envelope wire formats remain unchanged. The frozen
 validation fixture stays unchanged; the equivalence table records these
 formerly refused inputs separately. Arbitrary metadata and payloads are not
 timestamp arguments and are preserved.
+
+Top-level tool argument `_meta` is discarded as protocol metadata before
+prechecks, normalization, validation and handling; diagnostics record only a
+boolean presence flag. This branch has no `clamp_rewrites`/`original_value`
+builder. Validation error data contains only the path and omits original
+values entirely, including scalars. Regression tests guard against composite
+echoes and ensure nested application metadata is preserved.

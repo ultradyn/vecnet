@@ -185,7 +185,7 @@ func sanitize(in map[string]any) map[string]any {
 			case float64:
 				out[k] = n
 			}
-		case "session_present", "origin_present", "secret_present", "secret_valid_shape", "cursor_present", "cursor_null", "retry", "dead":
+		case "session_present", "origin_present", "secret_present", "secret_valid_shape", "cursor_present", "cursor_null", "retry", "dead", "tool_arguments_meta_present":
 			if x, ok := v.(bool); ok {
 				out[k] = x
 			}

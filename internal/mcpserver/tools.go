@@ -86,6 +86,18 @@ func (s *Server) toolsCall(ctx context.Context, sess *Session, req *Request) (re
 	if len(raw) == 0 || bytes.Equal(raw, nullID) {
 		raw = []byte("{}")
 	}
+	// Some clients inject protocol metadata into tool arguments. It is never
+	// a vecnet field and must not reach prechecks, validation or handlers.
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) == nil {
+		if _, present := fields["_meta"]; present {
+			delete(fields, "_meta")
+			raw = encodeFields(fields)
+			if d, _ := ctx.Value(diagKey{}).(*requestDiag); d != nil {
+				d.toolArgumentsMetaPresent = true
+			}
+		}
+	}
 	raw = normalizeToolTimestamps(p.Name, raw)
 	if t.precheck != nil {
 		if err := t.precheck(raw); err != nil {
@@ -150,6 +162,8 @@ func invalidArguments(name string, err error) error {
 	if name == "vecnet_send" || name == "vecnet_reply" {
 		hint = guideSendErrorHint
 	}
+	// Report the path only. In particular, never add original_value or the
+	// containing arguments object to error data (including clamp diagnostics).
 	return &RPCError{Code: ErrInvalidParams, Message: "invalid arguments for " + name + ": " + se.Message + hint,
 		Data: map[string]any{"path": se.Path}}
 }
