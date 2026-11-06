@@ -137,7 +137,7 @@ The hub is already an OAuth authorization server for agents. Human login is a re
 | B. A plus `github.com/crewjam/saml/samlsp` | Same principal mapping from a configured persistent name identifier, not from an email attribute. Add this only after Max says the tenant will not register an OIDC app |
 | C. Dex, or any full identity server, beside the hub | A second process. Dex's SAML connector is documented as unmaintained and likely vulnerable. The ADR's host is one small binary |
 
-**Recorded: A. Q9 (`msg_01M6R7TEWT08XY5WPFB9VW3TKT`, verified `msg_01M6R88JJQ3BHES9V468MQM3RN`) is A: OIDC only. SAML is off this plan. D5 B is not built.** The library letter is unchanged by the Q1 ruling. The colleague-onboarding ruling (`msg_01M6R3Z36F5EP5AJX5HGK9JE0B`, 2026-11-06) and the Microsoft amendment (`msg_01M6R41NDY7J8P7HNMKFB7MAX8`, 2026-11-06) say what A means for a colleague. D5 stays A: `github.com/coreos/go-oidc/v3/oidc` for Google and Microsoft, plus `golang.org/x/oauth2` for GitHub. SAML is off this plan (Q9 A, `msg_01M6R7TEWT08XY5WPFB9VW3TKT`, verified `msg_01M6R88JJQ3BHES9V468MQM3RN`). A guest does not sign in here. Do not route agent MCP OAuth through this login. Colleague sessions use the operator-cookie design (amendments 2 and 3) on a separate row from the operator session (Task 5 owns the operator row; Task 3b owns the colleague row). Colleague sessions get no admin, no any-thread read, and no `read_all_threads`. Their agents still enrol with the existing bearer or the existing link code. Q8 A (`msg_01M6R7TEWT08XY5WPFB9VW3TKT`, verified `msg_01M6R88JJQ3BHES9V468MQM3RN`): the colleague may also provision their own agents, bounded by the colleague's reach plus the colleague.
+**Recorded: A. Q9 (`msg_01M6R7TEWT08XY5WPFB9VW3TKT`, 2026-11-06, about 22:00 AEDT; verified `msg_01M6R88JJQ3BHES9V468MQM3RN`) is A: OIDC only. SAML is off this plan. D5 B is not built.** This supersedes the earlier record "A, and B only if Max's question 9 says SAML is the only door." The Q1 ruling did not change the library. Q9 does: SAML stays off. The colleague-onboarding ruling (`msg_01M6R3Z36F5EP5AJX5HGK9JE0B`, 2026-11-06) and the Microsoft amendment (`msg_01M6R41NDY7J8P7HNMKFB7MAX8`, 2026-11-06) say what A means for a colleague. D5 stays A: `github.com/coreos/go-oidc/v3/oidc` for Google and Microsoft, plus `golang.org/x/oauth2` for GitHub. SAML is off this plan (Q9 A, `msg_01M6R7TEWT08XY5WPFB9VW3TKT`, verified `msg_01M6R88JJQ3BHES9V468MQM3RN`). A guest does not sign in here. Do not route agent MCP OAuth through this login. Colleague sessions use the operator-cookie design (amendments 2 and 3) on a separate row from the operator session (Task 5 owns the operator row; Task 3b owns the colleague row). Colleague sessions get no admin, no any-thread read, and no `read_all_threads`. Their agents still enrol with the existing bearer or the existing link code. Q8 A (`msg_01M6R7TEWT08XY5WPFB9VW3TKT`, verified `msg_01M6R88JJQ3BHES9V468MQM3RN`): the colleague may also provision their own agents, bounded by the colleague's reach plus the colleague.
 
 NOW, option 1, invite only. Max issues one one-time colleague invite. The cap is 7 days. It is single use. It carries the Q7 agent picks. The colleague opens the invite and signs in with Google, GitHub, or Microsoft. Redeem binds the external identity to a new human principal and creates the invite grants. There is no self-signup. Sign-in with no valid invite and no bound identity answers "ask the person who invited you for a link" and creates no principal.
 
@@ -310,7 +310,7 @@ Any-thread read. Max, verbatim: `for operators, yes, for agents/bots, not by def
 
 Fly deploys. Max's verbatim line is under "Max's answers". This plan does not assign deploy ownership. That answer changes no schema and no task.
 
-**Q8, Q9, and Q10, `msg_01M6R7TEWT08XY5WPFB9VW3TKT`.** Verified `msg_01M6R88JJQ3BHES9V468MQM3RN`. All three are answered. None stays blank.
+**Q8, Q9, and Q10, `msg_01M6R7TEWT08XY5WPFB9VW3TKT`.** 2026-11-06, about 22:00 AEDT. Verified `msg_01M6R88JJQ3BHES9V468MQM3RN`. All three are answered. None stays blank. Q9 supersedes the earlier "D5 A, and B only if question 9 says SAML." SAML stays off.
 
 Q8 A. Max, verbatim: `q8: A (like we assume it's a company vecnet or whatever so people are meant to use it for all their agents)`. The colleague adds their own agents, self-serve. Those agents belong to the colleague's account. There is no default per-colleague agent cap. A company hub is meant to carry all of a person's agents. Invariant from D2 and Q7: a colleague's agents reach only what the colleague can reach, plus the colleague. Self-adding never creates new access. Existing per-peer rate limits apply. The operator can still disable, rename, or remove any agent. Folded into D3, D7, amendment 1, Task 1, Task 3, and Task 3b. No new task.
 
@@ -397,15 +397,15 @@ Fly deploys, 2026-11-06, about 21:50 AEDT. Verbatim. This is a Max answer. It is
 
 Operational handoff: Fly deploys go to the conductor long term; both may deploy for a while and keep in touch.
 
-8. **Answered.** CoS ruling: `msg_01M6R7TEWT08XY5WPFB9VW3TKT`. Verified `msg_01M6R88JJQ3BHES9V468MQM3RN`.
+8. **Answered.** 2026-11-06, about 22:00 AEDT. CoS ruling: `msg_01M6R7TEWT08XY5WPFB9VW3TKT`. Verified `msg_01M6R88JJQ3BHES9V468MQM3RN`.
 
 > q8: A (like we assume it's a company vecnet or whatever so people are meant to use it for all their agents)
 
-9. **Answered.** CoS ruling: `msg_01M6R7TEWT08XY5WPFB9VW3TKT`. Verified `msg_01M6R88JJQ3BHES9V468MQM3RN`.
+9. **Answered.** 2026-11-06, about 22:00 AEDT. CoS ruling: `msg_01M6R7TEWT08XY5WPFB9VW3TKT`. Verified `msg_01M6R88JJQ3BHES9V468MQM3RN`. Q9 supersedes the earlier "D5 A, and B only if question 9 says SAML." SAML stays off.
 
 > q9: yeah they ccan do, i mean we can add anything in the m365 admin console
 
-10. **Answered.** CoS ruling: `msg_01M6R7TEWT08XY5WPFB9VW3TKT`. Verified `msg_01M6R88JJQ3BHES9V468MQM3RN`.
+10. **Answered.** 2026-11-06, about 22:00 AEDT. CoS ruling: `msg_01M6R7TEWT08XY5WPFB9VW3TKT`. Verified `msg_01M6R88JJQ3BHES9V468MQM3RN`.
 
 > q10: A rec
 
