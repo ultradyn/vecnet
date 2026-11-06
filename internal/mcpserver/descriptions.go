@@ -86,6 +86,7 @@ var toolPropertyDescriptions = map[string]map[string]string{
 	"vecnet_inbox":       {"after": "Omit for the last ack cursor. Use head to start from now."},
 	"vecnet_thread":      {"id": "Thread ID.", "after": "next_after from the previous page."},
 	"vecnet_threads":     {"cursor": "next from the previous page."},
+	"vecnet_react":       {"priority": "Optional. The default depends on the emoji. wake costs the recipient a run."},
 	"vecnet_peer_create": {"kind": "Allowed peer kind.", "idempotency_key": "Unique value per peer creation. Reuse only to retry the same request."},
 	"vecnet_blob_get":    {"limit": "Maximum bytes per page, up to 128 KiB.", "offset": "Byte offset. Continue with next_offset from the previous page."},
 	"vecnet_guide":       {"subscribe": "Client setup instructions."},
