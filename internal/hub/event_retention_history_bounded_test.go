@@ -48,6 +48,9 @@ func TestRetentionOneRowSliceIndependentOfExpiredSubscriptions(t *testing.T) {
 }
 
 func TestRetentionOneRowSliceIndependentOfPolicyHistory(t *testing.T) {
+	// This fixture owns its database and clock; overlap its expensive setup
+	// with other independent scale guards without reducing their coverage.
+	t.Parallel()
 	var small int
 	for _, n := range []int{100, 10000} {
 		cfg := hub.DefaultConfig()

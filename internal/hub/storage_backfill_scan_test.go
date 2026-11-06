@@ -127,28 +127,39 @@ func assertBackfillQueryPlans(t *testing.T, h *hub.Hub, last, high int64) {
 // own page work at two history sizes, so it fails if production bypasses
 // either index (for example with NOT INDEXED) even though results match.
 func TestBackfillSparseAndEmptyEligibilityUsesBoundedScan(t *testing.T) {
-	for _, sparse := range []bool{false, true} {
-		t.Run(fmt.Sprintf("sparse_%t", sparse), func(t *testing.T) {
-			reads := map[int]int{}
-			for _, unrelated := range []int{1000, 100000} {
-				env, fs := backfillEnv(t)
-				h := env.Hub
-				// Existing reference deliveries must also be excluded from the
-				// forward scan, without changing their frozen replay bytes.
-				finishBackfill(t, h)
+	t.Parallel()
+	reads := map[bool]map[int]int{false: {}, true: {}}
+	for _, unrelated := range []int{1000, 100000} {
+		env, fs := backfillEnv(t)
+		h := env.Hub
+		// Build the expensive disposable history once for both cases. The empty
+		// slice changes only its checkpoint; replacing the midpoint presence
+		// event then exercises the sparse slice over exactly the same indexes.
+		finishBackfill(t, h)
+		beforeEvents := backfillCount(t, h, `SELECT count(*) FROM events`)
+		beforeDeliveries := backfillCount(t, h, `SELECT count(*) FROM deliveries`)
+		addUnrelatedHistory(t, h, "a", unrelated)
+		guardExec(t, env, `INSERT INTO events(owner,type,at,data) VALUES (?,'presence',?,'{}')`, guardB, guardAt)
+		var candidateSeq int64
+		if err := h.DB.QueryRow(`SELECT max(seq) FROM events`).Scan(&candidateSeq); err != nil {
+			t.Fatal(err)
+		}
+		addUnrelatedHistory(t, h, "b", unrelated)
+		if got := backfillCount(t, h, `SELECT count(*) FROM events`); got != beforeEvents+2*unrelated+1 {
+			t.Fatalf("history events=%d want=%d", got, beforeEvents+2*unrelated+1)
+		}
+		if got := backfillCount(t, h, `SELECT count(*) FROM deliveries`); got != beforeDeliveries+2*unrelated {
+			t.Fatalf("history deliveries=%d want=%d", got, beforeDeliveries+2*unrelated)
+		}
+		var high int64
+		if err := h.DB.QueryRow(`SELECT max(seq) FROM events`).Scan(&high); err != nil {
+			t.Fatal(err)
+		}
+		for _, sparse := range []bool{false, true} {
+			t.Run(fmt.Sprintf("unrelated_%d/sparse_%t", unrelated, sparse), func(t *testing.T) {
 				guardExec(t, env, `DELETE FROM meta WHERE key='delivery_backfill_v1'`)
-				addUnrelatedHistory(t, h, "a", unrelated)
-				var candidateSeq int64
 				if sparse {
-					guardExec(t, env, `INSERT INTO events(owner,type,at,data) VALUES (?,'delivery',?,?)`, guardB, guardAt, fs[0].Data)
-					if err := h.DB.QueryRow(`SELECT max(seq) FROM events`).Scan(&candidateSeq); err != nil {
-						t.Fatal(err)
-					}
-				}
-				addUnrelatedHistory(t, h, "b", unrelated)
-				var high int64
-				if err := h.DB.QueryRow(`SELECT max(seq) FROM events`).Scan(&high); err != nil {
-					t.Fatal(err)
+					guardExec(t, env, `UPDATE events SET type='delivery',data=? WHERE seq=?`, fs[0].Data, candidateSeq)
 				}
 				assertBackfillQueryPlans(t, h, candidateSeq, high)
 				start := time.Now()
@@ -165,19 +176,22 @@ func TestBackfillSparseAndEmptyEligibilityUsesBoundedScan(t *testing.T) {
 					t.Fatal("sparse candidate sequence changed")
 				}
 				assertBackfillBytes(t, h, fs)
-				reads[unrelated] = pages
+				reads[sparse][unrelated] = pages
 				t.Logf("unrelated_events=%d unrelated_deliveries=%d converted=%d slice_pages=%d worst_slice_duration=%s required_headroom_bytes=%d", 2*unrelated, 2*unrelated, p.Converted, pages, elapsed, p.RequiredHeadroomBytes)
-			}
-			if reads[100000] > reads[1000]+boundedPageSlack {
-				t.Fatalf("slice page work grew with unrelated history: %d pages at 2k unrelated rows, %d at 200k; the slice scans ineligible rows instead of range-searching its indexes", reads[1000], reads[100000])
-			}
-		})
+			})
+		}
+	}
+	for sparse, pages := range reads {
+		if pages[100000] > pages[1000]+boundedPageSlack {
+			t.Errorf("sparse=%t slice page work grew with unrelated history: %d pages at 2k unrelated rows, %d at 200k; the slice scans ineligible rows instead of range-searching its indexes", sparse, pages[1000], pages[100000])
+		}
 	}
 }
 
 // The authoritative hash lookup for a candidate reads deliveries by
 // event_seq through its index: a larger delivery queue adds no page work.
 func TestBackfillDeliveryHashLookupUsesEventSeqIndex(t *testing.T) {
+	t.Parallel()
 	reads := map[int]int{}
 	for _, unrelated := range []int{0, 50000} {
 		env, fs := backfillEnv(t)

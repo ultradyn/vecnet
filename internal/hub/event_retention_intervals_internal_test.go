@@ -17,6 +17,9 @@ import (
 // protective/prospective histories, repeated boundaries and large sequence IDs.
 // This model intentionally retains the old ordered evaluation, not tree logic.
 func TestRetentionIndexedIntervalsPreserveHistoricalRules(t *testing.T) {
+	// This fixture owns its database and clock; overlap its expensive setup
+	// with other independent scale guards without reducing their coverage.
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "hub.db"))
 	if err != nil {

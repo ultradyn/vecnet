@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/testhub"
@@ -17,7 +18,10 @@ func TestRetentionExhaustedParkedResubscribeAtReportedCursor(t *testing.T) {
 	for _, outcome := range []string{"success", "ack", "expiry"} {
 		t.Run(outcome, func(t *testing.T) {
 			ctx := context.Background()
-			env := testhub.Start(t)
+			env := testhub.StartWith(t, func(cfg *hub.Config) {
+				// This checks settled callback pins, not wall-clock slice limits.
+				cfg.EventRetentionLimits = eventlog.RetentionLimits{Target: time.Minute}
+			})
 			peer, secret := env.NewPeer("session", "recipient")
 			_, sender := env.NewPeer("session", "sender")
 			cb := testhub.NewCallback(t)

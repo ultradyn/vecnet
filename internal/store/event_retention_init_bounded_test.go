@@ -122,8 +122,8 @@ func TestRetentionFloorInitializationCheckpointRollbackAndReopen(t *testing.T) {
 	// Simulate an interrupted post-DDL startup, with peer-only and orphan-event
 	// owners. A legacy-path deletion during initialization must never lower a floor.
 	if _, err := db.Exec(`INSERT INTO principals(prn_id,name,created_at) VALUES('prn_synthetic','synthetic','2026-01-01T00:00:00.000Z');
- INSERT INTO peers(peer_id,prn_id,name,kind,enrolled_at) VALUES('peer_a','prn_synthetic','synthetic','session','2026-01-01T00:00:00.000Z'),('peer_c','prn_synthetic','synthetic','session','2026-01-01T00:00:00.000Z');
- INSERT INTO events(seq,owner,type,at,data) VALUES(10,'peer_b','presence','2026-01-01T00:00:00.000Z','{}'),(11,'peer_d','presence','2026-01-01T00:00:00.000Z','{}');
+ INSERT INTO peers(peer_id,prn_id,name,kind,enrolled_at) VALUES('peer_a','prn_synthetic','synthetic','session','2026-01-01T00:00:00.000Z'),('peer_c','prn_synthetic','synthetic','session','2026-01-01T00:00:00.000Z'),('peer_e','prn_synthetic','synthetic','session','2026-01-01T00:00:00.000Z');
+ INSERT INTO events(seq,owner,type,at,data) VALUES(10,'peer_b','presence','2026-01-01T00:00:00.000Z','{}'),(11,'peer_d','presence','2026-01-01T00:00:00.000Z','{}'),(12,'peer_e','presence','2026-01-01T00:00:00.000Z','{}');
  UPDATE meta SET value='7' WHERE key='event_retention_legacy_floor';
  UPDATE meta SET value='' WHERE key='event_retention_init_owner';
  UPDATE meta SET value='0' WHERE key='event_retention_init_done';
@@ -151,7 +151,7 @@ func TestRetentionFloorInitializationCheckpointRollbackAndReopen(t *testing.T) {
 	if err := db.QueryRow(`SELECT value FROM meta WHERE key='event_retention_init_owner'`).Scan(&last); err != nil || last != "peer_a" {
 		t.Fatal("missing committed owner checkpoint", err)
 	}
-	if _, err := db.Exec(`DELETE FROM events WHERE owner='peer_d'`); err != nil {
+	if _, err := db.Exec(`DELETE FROM events WHERE owner IN ('peer_d','peer_e')`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -163,7 +163,9 @@ func TestRetentionFloorInitializationCheckpointRollbackAndReopen(t *testing.T) {
 	}
 	// The retained orphan peer_b needs the event-index seek. peer_d vanished
 	// from both discovery inputs, but its higher trigger floor must survive.
-	for owner, want := range map[string]int{"peer_a": 7, "peer_b": 7, "peer_c": 7, "peer_d": 11} {
+	// peer_e is still enrolled: initialization must revisit its existing floor
+	// and preserve it instead of overwriting it with the lower legacy floor.
+	for owner, want := range map[string]int{"peer_a": 7, "peer_b": 7, "peer_c": 7, "peer_d": 11, "peer_e": 12} {
 		var got int
 		if err := db.QueryRow(`SELECT purged_through_seq FROM event_retention WHERE owner=?`, owner).Scan(&got); err != nil || got != want {
 			t.Fatalf("owner=%s floor=%d want=%d err=%v", owner, got, want, err)
