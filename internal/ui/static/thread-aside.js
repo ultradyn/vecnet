@@ -21,7 +21,11 @@ export function mountAside(root, ctx) {
   const { api, store, threadId, nameOf, kindOf, me, toast } = ctx;
   const detail = store.resource('thread:' + threadId, () => api.thread(threadId));
   const admin = store.resource('peers', () => api.adminPeers());
-  const S = { busy: new Set(), open: false, ended: new Map(), status: new Map() };
+  const S = { busy: new Set(), open: false, ended: new Map(), meta: new Map() };
+  // A metadata miss is not a cached answer. Refresh and a live reconnect
+  // may ask again, a few times, and an in-flight read is not asked twice.
+  const STATUS_TRIES = 3;
+  let retryMeta = false;
   const urls = new Set();
   let gone = false, expiryTimer = 0;
   // The thread view's R2 references (thread.js), when it is mounted beside us.
@@ -29,8 +33,9 @@ export function mountAside(root, ctx) {
   const refsNow = () => {
     const out = new Map((refsFeed && refsFeed.get()) || []);
     // A file outside the loaded history: its own metadata-only status.
-    for (const [id, st] of S.status) {
-      if (st && !out.has(id)) out.set(id, { att: { retention_class: st.retention_class, expires_at: st.expires_at === undefined ? null : st.expires_at, sha256_verified: st.sha256_verified, integrity: st.integrity }, state: st });
+    for (const [id, entry] of S.meta) {
+      const st = entry && entry.phase === 'ready' ? entry.value : null;
+      if (st && typeof st === 'object' && !out.has(id)) out.set(id, { att: { retention_class: st.retention_class, expires_at: st.expires_at === undefined ? null : st.expires_at, sha256_verified: st.sha256_verified, integrity: st.integrity }, state: st });
     }
     // A 410 seen here wins until the hub's next page says the same.
     for (const [id, state] of S.ended) {
@@ -40,23 +45,42 @@ export function mountAside(root, ctx) {
     return out;
   };
   const keyOf = f => f.blobId || f.sha256;
-  // statusFor asks the hub once for an R2 file the loaded history does not
+  // statusFor asks the hub for an R2 file the loaded history does not
   // reference (older than its pages): metadata only, no link minted.
+  // In flight, a recorded answer and a terminal expiry are not asked again.
+  // A failure is, on the next refresh or live reconnect, up to STATUS_TRIES.
   function statusFor(files) {
     if (refsFeed && !refsFeed.loaded()) return;
     const known = (refsFeed && refsFeed.get()) || new Map();
+    const retry = retryMeta;
+    retryMeta = false;
     for (const f of files) {
-      if (!f.blob_id || known.has(f.blob_id) || S.status.has(f.blob_id)) continue;
-      S.status.set(f.blob_id, null);
+      if (!f.blob_id || known.has(f.blob_id)) continue;
+      const cur = S.meta.get(f.blob_id);
+      if (cur && (cur.phase === 'inflight' || cur.phase === 'ready')) continue;
+      const tries = (cur && cur.tries) || 0;
+      if (tries >= STATUS_TRIES) continue;
+      if (cur && cur.phase === 'failed' && !retry) continue;
+      const nextTries = tries + 1;
+      S.meta.set(f.blob_id, { phase: 'inflight', tries: nextTries });
       api.blobStatus(f.sha256, f.blob_id).then(st => {
         if (gone) return;
-        S.status.set(f.blob_id, st && typeof st === 'object' ? st : null);
+        S.meta.set(f.blob_id, { phase: 'ready', tries: nextTries, value: st && typeof st === 'object' ? st : null });
         render(true);
       }, e => {
         if (gone) return;
-        if (e && (e.code === 'blob_expired' || e.code === 'blob_purged')) { S.status.set(f.blob_id, { state: e.code === 'blob_expired' ? 'expired' : 'purged' }); render(true); }
+        if (e && (e.code === 'blob_expired' || e.code === 'blob_purged')) {
+          S.meta.set(f.blob_id, { phase: 'ready', tries: nextTries, value: { state: e.code === 'blob_expired' ? 'expired' : 'purged' } });
+        } else {
+          S.meta.set(f.blob_id, { phase: 'failed', tries: nextTries });
+        }
+        render(true);
       });
     }
+  }
+  function askAgain() {
+    retryMeta = true;
+    render(true);
   }
 
   const toggle = h('button', { type: 'button', class: 'aside-toggle btn', 'aria-expanded': 'false', 'aria-controls': 'aside-body', text: 'Details' });
@@ -207,7 +231,11 @@ export function mountAside(root, ctx) {
 
   render(true);
   const redraw = () => render();
-  const off = [detail.subscribe(redraw), admin.subscribe(redraw), ctx.peers.subscribe(redraw)];
+  // A new thread snapshot is a refresh: failed metadata may be asked again.
+  // render() itself still skips a notification that carries no new value, so
+  // a load's start does not rebuild a focused file button.
+  const off = [detail.subscribe(() => { retryMeta = true; render(); }), admin.subscribe(redraw), ctx.peers.subscribe(redraw)];
+  if (store.onConn) off.push(store.onConn(state => { if (state === 'live') askAgain(); }));
   // New history: the projection is current again, so local 410s give way.
   if (refsFeed) off.push(refsFeed.subscribe(() => { S.ended.clear(); render(true); }));
   return () => {

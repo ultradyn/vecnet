@@ -275,6 +275,16 @@ export function validStorage(s) {
 // storageView: the meter both views draw. near at 90%, full at the limit;
 // a limit lowered below use reads over the limit, and nothing is deleted.
 export function storageView(storage) {
+  // A failed live read is not "no adapter": both views already draw whatever
+  // this returns, and the Policy forecast's placeholder is the other case.
+  if (storage && storage.unavailable === true) {
+    return {
+      unavailable: true, tone: 'unavailable', percent: 0, text: 'Storage unavailable',
+      note: 'Storage figures could not be read just now. Nothing was changed; reload to try again.',
+      retained_bytes: 0, reserved_bytes: 0, used_bytes: 0, limit_bytes: 1,
+      parts: ['Retained', 'Reserved', 'Used', 'Limit'].map(label => ({ label, value: 'unavailable' })),
+    };
+  }
   const s = validStorage(storage);
   if (!s) return null;
   const used = s.used_bytes, limit = s.limit_bytes, ratio = used / limit;
@@ -359,13 +369,19 @@ export function createSettingsStore({ api, appearance, storage }) {
   const say = text => { st.announce = { text, n: st.announce.n + 1 }; };
   const rowOf = key => st.rows.find(r => r.key === key);
   const live = () => !dead;
+  // The prefs ETag does not cover blob usage. Once a snapshot has shown the
+  // meter, later re-reads ask the live counter even when prefs answers 304.
+  let sawStorage = false;
+  const storageSig = s => !s ? '' : s.unavailable ? 'unavailable' : FIGURES.map(k => s[k]).join(',');
 
   function adopt(body, etag) {
     st.rows = body.preferences.slice();
     st.revision = body.revision || 0;
     st.etag = etag || '';
     // Storage figures come only with an operator's R2 snapshot.
-    st.storage = validStorage(body.storage);
+    const storage = validStorage(body.storage);
+    st.storage = storage;
+    if (storage) sawStorage = true;
     // A draft for a row that became locked or vanished cannot be saved.
     for (const key of [...st.draft.keys()]) {
       const row = rowOf(key);
@@ -432,12 +448,34 @@ export function createSettingsStore({ api, appearance, storage }) {
     emit();
   }
 
-  // refresh re-reads on focus or Reload. A clean page takes the new values; a
-  // dirty one keeps every typed edit and shows a notice instead.
+  // refreshMeter reads retained/reserved/used/limit on their own. A miss
+  // shows unavailable and does not touch the prefs ETag, the draft or a
+  // confirmation that is already open.
+  async function refreshMeter() {
+    if (!sawStorage || typeof api.blobStorage !== 'function') return;
+    try {
+      const body = await api.blobStorage({ signal: ctl.signal });
+      if (!live()) return;
+      st.storage = validStorage(body && body.storage) || { unavailable: true };
+    } catch (e) {
+      if (!live() || aborted(e)) return;
+      st.storage = { unavailable: true };
+    }
+  }
+
+  // refresh re-reads on focus, visibility or Reload (what a reconnect looks
+  // like to this page). A clean page takes new preference values; a dirty
+  // one keeps every typed edit and shows a notice instead. Prefs 304 is
+  // quiet for the rows, and the storage meter is read either way.
   // quiet: a failed re-read leaves the current message alone.
   async function refresh({ quiet = false } = {}) {
     if (st.phase !== 'ready') return load();
-    if (st.busy) return;
+    if (st.busy) {
+      const before = storageSig(st.storage);
+      await refreshMeter();
+      if (live() && storageSig(st.storage) !== before) emit();
+      return;
+    }
     let r;
     try { r = await api.prefs({ etag: st.etag, signal: ctl.signal }); } catch (e) {
       if (!live() || aborted(e) || quiet) return;
@@ -445,20 +483,26 @@ export function createSettingsStore({ api, appearance, storage }) {
       emit();
       return;
     }
-    if (!live() || r.status === 304 || !r.body || r.etag === st.etag || !validSnapshot(r.body)) return;
-    if (st.busy) return;
-    if (!dirtyKeys().length) {
-      adopt(r.body, r.etag);
-      st.newer = null;
-      say('Settings reloaded from the hub.');
-    } else {
-      // A pending conflict stays a conflict: Save stays blocked until the
-      // operator adopts the latest values or discards the draft.
-      const reason = st.newer && st.newer.reason === 'conflict' ? 'conflict' : 'update';
-      st.newer = { reason, body: r.body, etag: r.etag, changed: changedKeys(st.rows, r.body.preferences) };
-      say('Settings changed on the hub. Your edits are kept until you choose.');
+    if (!live()) return;
+    const unchanged = r.status === 304 || !r.body || r.etag === st.etag || !validSnapshot(r.body);
+    if (!unchanged) {
+      if (st.busy) return;
+      if (!dirtyKeys().length) {
+        adopt(r.body, r.etag);
+        st.newer = null;
+        say('Settings reloaded from the hub.');
+      } else {
+        // A pending conflict stays a conflict: Save stays blocked until the
+        // operator adopts the latest values or discards the draft.
+        const reason = st.newer && st.newer.reason === 'conflict' ? 'conflict' : 'update';
+        st.newer = { reason, body: r.body, etag: r.etag, changed: changedKeys(st.rows, r.body.preferences) };
+        say('Settings changed on the hub. Your edits are kept until you choose.');
+      }
     }
-    emit();
+    const before = storageSig(st.storage);
+    await refreshMeter();
+    if (!live()) return;
+    if (!unchanged || storageSig(st.storage) !== before) emit();
   }
 
   function edit(key, value) {

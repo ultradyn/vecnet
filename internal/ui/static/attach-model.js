@@ -63,28 +63,38 @@ export function refusalText({ name, reason }) {
 // verified: the hub recorded provider verification for exactly this digest.
 const verified = (sha, r) => !!r && r.sha256_verified === true && !!r.integrity && r.integrity.algorithm === 'sha256' && r.integrity.verified === true && r.integrity.value === sha;
 
-// A chip is done once its upload resolved; an R2 chip also needs the hub's
-// recorded verification, so a pending grant is never sent.
-const isDone = it => it.state === 'done' && !!it.sha256 && (!it.blob_id || verified(it.sha256, it));
+// attachmentExpired: an R2 chip whose recorded object deadline has arrived
+// on the caller's clock (the hub clock). keep, and a disk chip, have none.
+export function attachmentExpired(it, nowMs = Date.now()) {
+  if (!it || !it.blob_id || it.expires_at == null) return false;
+  const at = Date.parse(it.expires_at);
+  return Number.isFinite(at) && at <= nowMs;
+}
 
-// ready: nothing queued, hashing, uploading, verifying or failed.
-export function ready(items) {
-  return (items || []).every(isDone);
+// A chip is done once its upload resolved; an R2 chip also needs the hub's
+// recorded verification, so a pending grant is never sent. A deadline that
+// has passed is not sendable either: the draft re-uploads under a new grant.
+const isDone = (it, nowMs) => it.state === 'done' && !!it.sha256 && (!it.blob_id || verified(it.sha256, it)) && !attachmentExpired(it, nowMs);
+
+// ready: nothing queued, hashing, uploading, verifying, failed or expired.
+export function ready(items, nowMs = Date.now()) {
+  return (items || []).every(it => isDone(it, nowMs));
 }
 
 // toAttachments: the send's references. An R2 one names its grant, recorded
 // class and deadline (null for keep); the verification fields stay out,
 // since a send reference may not assert them (envelope attachmentReference).
-export function toAttachments(items) {
-  return (items || []).filter(isDone).map(it => (it.blob_id
+// An expired ref is left out, so Send cannot carry it.
+export function toAttachments(items, nowMs = Date.now()) {
+  return (items || []).filter(it => isDone(it, nowMs)).map(it => (it.blob_id
     ? { blob_id: it.blob_id, sha256: it.sha256, size: it.size, media_type: it.media_type, name: it.name, retention_class: it.retention_class, expires_at: it.expires_at ?? null }
     : { sha256: it.sha256, size: it.size, media_type: it.media_type, name: it.name }));
 }
 
 // signature is the attachments' part of a send's idempotency signature: the
 // same bytes under a new grant are a different attachment.
-export function signature(items) {
-  return toAttachments(items).map(a => (a.blob_id ? a.blob_id + ':' : '') + a.sha256).join(',');
+export function signature(items, nowMs = Date.now()) {
+  return toAttachments(items, nowMs).map(a => (a.blob_id ? a.blob_id + ':' : '') + a.sha256).join(',');
 }
 
 // retryKey: the idempotency key a Retry reuses, or null for a fresh grant.
@@ -190,12 +200,13 @@ export function blobView(att, state, nowMs = Date.now()) {
   };
 }
 
-// nextExpiry: when the earliest still-available file expires (ms), for a
-// redraw timer; null when none will (keep files never schedule one).
+// nextExpiry: when the earliest file that is still downloadable expires (ms),
+// for a redraw timer; null when none will. Unavailable stays downloadable
+// until its deadline, so it schedules too; keep files never do.
 export function nextExpiry(views, nowMs = Date.now()) {
   let next = null;
   for (const v of views || []) {
-    if (!v || v.state !== 'available' || !v.expiresAt) continue;
+    if (!v || (v.state !== 'available' && v.state !== 'unavailable') || !v.expiresAt) continue;
     const at = Date.parse(v.expiresAt);
     if (at > nowMs && (next === null || at < next)) next = at;
   }

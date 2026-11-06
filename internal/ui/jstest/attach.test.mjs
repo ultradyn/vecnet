@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { APIError, createApi } from '../static/api.js';
+import { createAttachments } from '../static/attach.js';
 import { fakeR2, fileOf, settle, until } from './r2-fixture.mjs';
 import {
   MAX_ATTACHMENTS, MAX_BYTES, SPILL_SLOT, attachmentName, canAdd, errorText, mediaTypeOf, ready, retryKey, sendRefusal, signature, toAttachments,
@@ -524,6 +525,16 @@ test('R2 model: send references carry blob_id, class and deadline, never verific
   assert.equal(ready([r2]), true);
   for (const state of ['hashing', 'verifying', 'uploading', 'queued']) assert.equal(ready([{ ...r2, state }]), false, state);
   assert.equal(ready([{ ...r2, sha256_verified: false, integrity: { ...ref.integrity, verified: false } }]), false, 'a pending grant is not sendable');
+  // A completed draft stops being sendable at its recorded deadline. The
+  // clock is the caller's (the hub clock), not whichever instant this runs.
+  const deadline = '2026-11-06T10:00:00.000Z';
+  const expiring = { ...timed, expires_at: deadline };
+  const before = Date.parse(deadline) - 1, at = Date.parse(deadline);
+  assert.equal(ready([expiring], before), true);
+  assert.equal(toAttachments([expiring], before).length, 1);
+  assert.equal(ready([expiring], at), false, 'at the deadline that ref is not sendable');
+  assert.deepEqual(toAttachments([expiring], at), [], 'Send must not carry the expired ref');
+  assert.equal(ready([{ ...expiring, retention_class: 'keep', expires_at: null }], at), true, 'keep has no deadline');
   // The same bytes under a new grant are a different attachment.
   assert.notEqual(signature([r2]), signature([{ ...r2, blob_id: 'blo_00000000000000000000000009' }]));
 });
@@ -584,4 +595,69 @@ test('R2 upload: capabilities with no transfer origin are refused before any gra
   const err = await r2Api(f).upload(fileOf('abc')).catch(e => e);
   assert.equal(err.code, 'bad_response');
   assert.equal(f.hubCalls('POST').length, 0, 'no grant, so no reservation');
+});
+
+// Enough of a document for attach.js to build chips. Installed only for this test.
+class ChipEl {
+  constructor(tag) { this.tag = tag; this.attrs = {}; this.kids = []; this.className = ''; this.hidden = false; this.on = {}; this.style = { setProperty() {} }; }
+  set textContent(v) { this.kids = [String(v)]; }
+  get textContent() { return this.kids.map(k => typeof k === 'string' ? k : k.textContent).join(''); }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  addEventListener(type, fn) { (this.on[type] ||= []).push(fn); }
+  append(...xs) { for (const x of xs) this.kids.push(x); }
+  replaceChildren(...xs) { this.kids = []; this.append(...xs); }
+  remove() {}
+}
+const walk = (el, pred, out = []) => {
+  if (el instanceof ChipEl) { if (pred(el)) out.push(el); for (const k of el.kids) walk(k, pred, out); }
+  return out;
+};
+
+test('a draft crosses its deadline on the hub clock: Send loses the ref and Re-upload starts a fresh grant', async () => {
+  // The hub clock runs three minutes ahead of this machine. A check against
+  // Date.now() would still see the file as live after the timer fires.
+  const skew = 180000;
+  const clock = () => Date.now() + skew;
+  const prev = globalThis.document;
+  globalThis.document = { createElement: tag => new ChipEl(tag) };
+  const file = { name: 'notes.txt', size: 4, type: 'text/plain' };
+  const keys = [], files = [];
+  let n = 0;
+  const sha = 'ab'.repeat(32);
+  const verified = { sha256: sha, sha256_verified: true, integrity: { algorithm: 'sha256', value: sha, verified: true } };
+  const api = {
+    upload(body, opts) {
+      n++;
+      keys.push(opts.idempotencyKey);
+      files.push(body);
+      const life = n === 1 ? 250 : 60000;
+      const id = 'blo_' + String(n).padStart(26, '0');
+      return Promise.resolve({ blob_id: id, ...verified, size: body.size, retention_class: '1h', expires_at: new Date(clock() + life).toISOString() });
+    },
+  };
+  let changes = 0;
+  try {
+    const atts = createAttachments({ api, now: clock, onChange: () => { changes++; } });
+    atts.add([file]);
+    await new Promise(r => setTimeout(r, 30));
+    assert.equal(atts.ready(), true, 'the upload is sendable before its deadline');
+    assert.equal(atts.toAttachments().length, 1);
+    const sentBefore = changes;
+    await new Promise(r => setTimeout(r, 900));
+    assert.ok(changes > sentBefore, 'crossing the deadline redraws the composer');
+    assert.equal(atts.ready(), false, 'Send is blocked for the expired ref');
+    assert.deepEqual(atts.toAttachments(), [], 'the expired ref is not sent');
+    const [again] = walk(atts.el, e => e.tag === 'button' && e.textContent === 'Re-upload');
+    assert.ok(again, 'the chip offers re-upload from the file it still holds');
+    again.on.click.forEach(fn => fn());
+    await new Promise(r => setTimeout(r, 30));
+    assert.equal(files.length, 2);
+    assert.equal(files[0], files[1], 're-upload uses the retained File');
+    assert.ok(keys[0] && keys[1] && keys[0] !== keys[1], 'the new grant gets a fresh idempotency key');
+    assert.equal(atts.ready(), true);
+    assert.equal(atts.toAttachments()[0].blob_id.endsWith('2'), true);
+    atts.destroy();
+  } finally {
+    globalThis.document = prev;
+  }
 });

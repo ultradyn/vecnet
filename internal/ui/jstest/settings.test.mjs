@@ -865,3 +865,49 @@ test('storage: retained, reserved, used and limit from the snapshot; near-limit 
     assert.equal(validStorage(bad), null, JSON.stringify(bad));
   }
 });
+
+test('storage meter updates on refresh when blob usage changes but the preference ETag does not', async () => {
+  // Focus, visibility and a reconnect all re-read through refresh(). The prefs
+  // ETag is the preference revision plus the bootstrap digest, so a 304 is
+  // normal while retained/reserved/used move. The meter has to follow anyway.
+  const { hub, st, store } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB, 5 * GiB, GiB / 4) } });
+  const etag = st.etag, revision = hub.revision;
+  store.edit('events.refresh_interval', '10m');
+  const next = storage(2 * GiB, 5 * GiB, GiB / 8);
+  hub.storage = next;
+  await store.refresh();
+  assert.equal(hub.revision, revision, 'preference revision stays put');
+  assert.ok(hub.calls.some(c => c.op === 'get' && c.tag === etag), 'prefs re-read is conditional');
+  assert.ok(hub.calls.some(c => c.op === 'storage'), 'the meter reads blob storage on its own');
+  assert.equal(st.etag, etag, 'the prefs ETag is kept');
+  assert.equal(store.input('events.refresh_interval'), '10m');
+  assert.deepEqual(store.dirtyKeys(), ['events.refresh_interval']);
+  assert.equal(st.confirm, null);
+  assert.equal(st.newer, null);
+  assert.deepEqual(st.storage, next);
+  assert.equal(storageView(st.storage).tone, 'ok');
+});
+
+test('a failed storage refresh shows unavailable and leaves the prefs ETag, draft and confirmation', async () => {
+  const { hub, st, store } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB) } });
+  const etag = st.etag;
+  store.edit('blobs.expiry', 'off');
+  await store.save();
+  assert.equal(st.busy, 'confirming');
+  const confirm = st.confirm;
+  const gets = hub.calls.filter(c => c.op === 'get').length;
+  hub.storage = storage(3 * GiB);
+  hub.fail = { storage: Object.assign(new Error('storage unavailable'), { status: 503, code: 'blob_unavailable' }), sticky: true };
+  await store.refresh();
+  assert.equal(st.etag, etag);
+  assert.equal(st.confirm, confirm, 'the open confirmation is the same one');
+  assert.equal(st.busy, 'confirming');
+  assert.equal(store.value('blobs.expiry'), 'off');
+  assert.deepEqual(store.dirtyKeys(), ['blobs.expiry']);
+  assert.equal(hub.calls.filter(c => c.op === 'get').length, gets, 'a busy page does not re-read prefs');
+  assert.equal(st.storage.unavailable, true);
+  const v = storageView(st.storage);
+  assert.equal(v.unavailable, true);
+  assert.equal(v.tone, 'unavailable');
+  assert.match(v.text, /unavailable/i);
+});

@@ -110,7 +110,7 @@ export function mount(root, ctx) {
   let gone = false, ticks = [], agos = [];
   // Reply attachments, and the thread's inline thumbnails: a settled fetch or
   // an upload's change draws again.
-  const atts = createAttachments({ api, onChange: () => render() });
+  const atts = createAttachments({ api, onChange: () => render(), now: () => store.hubNow() });
   const thumbs = createThumbs({ api, onReady: () => render() });
   // R2 references for the Files panel beside this thread (thread-aside.js):
   // blob id -> { att, state } from the loaded history. Messages carry the

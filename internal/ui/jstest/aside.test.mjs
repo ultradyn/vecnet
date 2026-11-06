@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { budgetBar, fileRows, participantEntry, presenceLabel, reachLabel } from '../static/aside-model.js';
 import { blobView, downloadErrorText, nextExpiry } from '../static/attach-model.js';
 import { APIError } from '../static/api.js';
+import { mountAside } from '../static/thread-aside.js';
 
 test('unknown presence with reachable reads unknown, never offline', () => {
   // A push-only peer (a dot, a Grok Bot) never reports presence: the hub
@@ -175,6 +176,18 @@ test('the local clock expires a file at its recorded deadline before the hub say
   ];
   assert.equal(nextExpiry(views, NOW), Date.parse('2026-11-06T10:45:00.000Z'));
   assert.equal(nextExpiry([views[0]], NOW), null, 'keep has no expiry timer');
+  // Unavailable still has a download until its deadline, so the timer has to
+  // redraw it then; otherwise the row stays downloadable forever.
+  const at = '2026-11-06T10:20:00.000Z';
+  const unavailable = blobView(
+    { blob_id: 'blo_u', sha256: 'd'.repeat(64), retention_class: '1h', expires_at: at, ...verified(true) },
+    { state: 'unavailable', retention_class: '1h', expires_at: at, ...verified(true) },
+    NOW,
+  );
+  assert.equal(unavailable.state, 'unavailable');
+  assert.equal(unavailable.canDownload, true);
+  assert.equal(nextExpiry([unavailable], NOW), Date.parse(at));
+  assert.equal(nextExpiry([unavailable], Date.parse(at)), null, 'a deadline that has arrived is not scheduled again');
 });
 
 test('trust: a pending or unverified checksum is never shown as verified', () => {
@@ -201,4 +214,161 @@ test('download errors: expired and purged differ; a rate limit shows its retry d
   assert.match(downloadErrorText(new APIError(0, 'blob_checksum_mismatch', ''), NOW), /integrity|checksum/i);
   assert.match(downloadErrorText(new APIError(0, 'storage_unreachable', ''), NOW), /storage/i);
   assert.match(downloadErrorText(new APIError(503, 'blob_unavailable', ''), NOW), /unavailable/i);
+});
+
+// A document large enough for the Files panel. Installed only around a mount.
+class AsideEl {
+  constructor(tag) { this.tag = tag; this.attrs = {}; this.kids = []; this.className = ''; this.on = {}; this.style = { setProperty() {} }; }
+  set textContent(v) { this.kids = [String(v)]; }
+  get textContent() { return this.kids.map(k => typeof k === 'string' ? k : k.textContent).join(''); }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  addEventListener(type, fn) { (this.on[type] ||= []).push(fn); }
+  append(...xs) { for (const x of xs) this.kids.push(x); }
+  replaceChildren(...xs) { this.kids = []; this.append(...xs); }
+  remove() {}
+  classList = { toggle() {}, add() {}, remove() {} };
+}
+const findEl = (el, pred, out = []) => {
+  if (el instanceof AsideEl) { if (pred(el)) out.push(el); for (const k of el.kids) findEl(k, pred, out); }
+  return out;
+};
+const tick = () => new Promise(r => setTimeout(r, 0));
+function loaded(value) {
+  const subs = new Set();
+  return {
+    get: () => value, error: () => null,
+    subscribe(fn) { subs.add(fn); return () => subs.delete(fn); },
+    reload() {
+      // A real reload replaces the snapshot, which is what makes the panel redraw.
+      if (value && typeof value === 'object') value = { ...value };
+      for (const fn of [...subs]) fn();
+    },
+  };
+}
+function asideWorld({ files, refs, hubNow, api }) {
+  const detail = loaded({
+    files,
+    row: { thread: { thread_id: 'thr_x', participants: [], group: '', history_access: 'from_join', locked_participants: false, budget_remaining: null }, cut: null },
+  });
+  const conns = [];
+  let n = 0;
+  const admin = loaded({ peers: [] });
+  const store = {
+    resource() { return n++ ? admin : detail; },
+    hubNow,
+    onConn(fn) { conns.push(fn); return () => {}; },
+  };
+  const root = new AsideEl('aside');
+  const off = mountAside(root, {
+    api, store, threadId: 'thr_x', me: 'peer_op', nameOf: id => id, kindOf: () => 'peer', toast() {},
+    peers: loaded({ peers: [] }),
+    blobRefs: { get: () => refs, loaded: () => true, subscribe: () => () => {} },
+  });
+  return { root, detail, conns, off };
+}
+
+test('the mounted aside timer expires an unavailable file on the hub clock and disables download', async () => {
+  // Five minutes ahead of this machine, so a browser-clock check would not
+  // have reached the deadline when the timer fires.
+  const skew = 5 * 60 * 1000;
+  const hubNow = () => Date.now() + skew;
+  const id = 'blo_0000000000000000000000000a';
+  const exp = new Date(hubNow() + 80).toISOString();
+  const att = { retention_class: '1h', expires_at: exp, ...verified(true) };
+  const refs = new Map([refOf(id, att, { state: 'unavailable', retention_class: '1h', expires_at: exp, ...verified(true) })]);
+  const prev = globalThis.document;
+  globalThis.document = { createElement: tag => new AsideEl(tag) };
+  try {
+    const world = asideWorld({
+      files: [r2file(id)], refs, hubNow,
+      api: { blobStatus: () => Promise.reject(new Error('unused')), thread: () => Promise.reject(new Error('unused')), adminPeers: () => Promise.reject(new Error('unused')) },
+    });
+    const button = () => findEl(world.root, e => e.tag === 'button' && e.attrs['data-blob'] === id)[0];
+    const first = button();
+    assert.ok(first, 'the file is listed');
+    assert.equal(first.attrs.disabled, undefined, 'unavailable is still downloadable before the deadline');
+    assert.match(first.className, /s-unavailable/);
+    await new Promise(r => setTimeout(r, 700));
+    const later = button();
+    assert.match(later.className, /s-expired/);
+    assert.equal(later.attrs.disabled, '', 'the deadline disables download');
+    assert.match(later.textContent, /Attachment expired \(1-hour retention\)/);
+    world.off();
+  } finally {
+    globalThis.document = prev;
+  }
+});
+
+test('file metadata that fails once is fetched again on refresh and then sticks', async () => {
+  const id = 'blo_0000000000000000000000000b';
+  const sha = 'd'.repeat(64);
+  let calls = 0;
+  const api = {
+    blobStatus() {
+      calls++;
+      if (calls === 1) return Promise.reject(new APIError(0, 'network', 'hub unreachable'));
+      return Promise.resolve({ state: 'available', retention_class: 'keep', expires_at: null, sha256_verified: true, integrity: { algorithm: 'sha256', value: sha, verified: true } });
+    },
+  };
+  const prev = globalThis.document;
+  globalThis.document = { createElement: tag => new AsideEl(tag) };
+  try {
+    const world = asideWorld({ files: [r2file(id, { sha256: sha })], refs: new Map(), hubNow: () => NOW, api });
+    await tick();
+    assert.equal(calls, 1, 'the miss asks once');
+    const before = findEl(world.root, e => e.attrs['data-blob'] === id)[0];
+    assert.doesNotMatch(before.textContent, /Kept while referenced/);
+    world.detail.reload();
+    await tick();
+    assert.equal(calls, 2, 'refresh retries the failed read');
+    const after = findEl(world.root, e => e.attrs['data-blob'] === id)[0];
+    assert.match(after.textContent, /Kept while referenced/);
+    world.detail.reload();
+    await tick();
+    assert.equal(calls, 2, 'a successful read is not asked again');
+    world.off();
+  } finally {
+    globalThis.document = prev;
+  }
+});
+
+test('file metadata retries when the hub reconnects, and stops after three failures', async () => {
+  const id = 'blo_0000000000000000000000000c';
+  let started = 0;
+  let open;
+  const pending = new Promise(r => { open = r; });
+  const api = {
+    blobStatus() {
+      started++;
+      // The first read stays in flight so a redraw cannot start a second one.
+      if (started === 1) return pending.then(() => { throw new APIError(503, 'blob_unavailable', 'storage unavailable'); });
+      return Promise.reject(new APIError(503, 'blob_unavailable', 'storage unavailable'));
+    },
+  };
+  const prev = globalThis.document;
+  globalThis.document = { createElement: tag => new AsideEl(tag) };
+  try {
+    const world = asideWorld({ files: [r2file(id)], refs: new Map(), hubNow: () => NOW, api });
+    world.detail.reload();
+    assert.equal(started, 1, 'an in-flight read is not asked twice');
+    open();
+    await tick();
+    assert.equal(started, 1, 'the failure is cached rather than retried on its own redraw');
+    for (const fn of world.conns) fn('reconnecting');
+    await tick();
+    assert.equal(started, 1, 'reconnecting does not retry');
+    for (const fn of world.conns) fn('live');
+    await tick();
+    assert.equal(started, 2, 'a live connection retries the failed read');
+    world.detail.reload();
+    await tick();
+    assert.equal(started, 3);
+    world.detail.reload();
+    for (const fn of world.conns) fn('live');
+    await tick();
+    assert.equal(started, 3, 'retries stop after three failures');
+    world.off();
+  } finally {
+    globalThis.document = prev;
+  }
 });

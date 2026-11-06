@@ -72,6 +72,15 @@ export function fakeHub({ preferences = rows(), revision = 3, storage = null } =
       const impact = r.some(x => x && x.code === 'blob_expiry_off') && hub.storage ? { storage: { ...hub.storage } } : {};
       return { base_revision: hub.revision, risks: r, impact, confirm_token: 'tok:' + digest(patch), expires_at: '2026-11-06T10:00:00.000Z' };
     },
+    async blobStorage() {
+      hub.calls.push({ op: 'storage' });
+      if (hub.fail && hub.fail.storage) {
+        const f = hub.fail.storage;
+        if (!hub.fail.sticky) hub.fail = null;
+        throw f;
+      }
+      return { storage: hub.storage ? { ...hub.storage } : null };
+    },
     async patchPrefs(patch, tag) {
       hub.calls.push({ op: 'patch', patch: structuredClone(patch), tag });
       if (hub.fail && hub.fail.patch) { const f = hub.fail.patch; if (!hub.fail.sticky) hub.fail = null; throw f; }

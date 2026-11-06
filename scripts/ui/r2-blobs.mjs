@@ -11,7 +11,8 @@
 // Shots: r2-<state>-<1440|390>.png in docs/plans/shots/oui: compose-progress
 // (queued, uploading, verifying), compose-done (ready, failed), thread-states
 // and files (available, expired, kept, purged), fulltext (a spilled message
-// still expands), settings-retention, settings-off-confirm, settings-quota-full.
+// still expands, and an R2 attachment's deadline does not disable that
+// expansion), settings-retention, settings-off-confirm, settings-quota-full.
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
@@ -102,7 +103,7 @@ try {
     skew = hubAt - Date.now();
     s3 = await fakeS3(hubOrigin);
     const grants = new Map(), byKey = new Map();
-    const R = { retention: '1d', storage: { retained_bytes: 1932735283, reserved_bytes: 107374182, used_bytes: 2040109465, limit_bytes: 5 * GiB }, full: new Set(), blocked: new Set(), rate: 0, completeGate: null };
+    const R = { retention: '1d', storage: { retained_bytes: 1932735283, reserved_bytes: 107374182, used_bytes: 2040109465, limit_bytes: 5 * GiB }, full: new Set(), blocked: new Set(), rate: 0, completeGate: null, durable: false };
     const json = (route, status, body, headers = {}) => route.fulfill({ status, contentType: 'application/json', headers: { 'Cache-Control': 'no-store', ...headers }, body: JSON.stringify(body) });
     const err = (route, status, code, details = {}, headers = {}) => json(route, status, { error: { code, message: code.replace(/_/g, ' '), details } }, headers);
     const keyFor = (cls, id) => 'attachments/v1/' + (cls === 'keep' ? 'keep/ns/' : `exp/${cls}/ns/`) + id;
@@ -191,6 +192,51 @@ try {
     await page.route(u => new URL(u).pathname === `/v1/admin/threads/${thr}`, async route => {
       const response = await route.fetch(), j = await response.json();
       if (Array.isArray(j.files)) j.files.push(...files.map(g => ({ blob_id: g.id, sha256: g.sha256, name: g.name, media_type: g.media, message_id: MSG, sender: sender || j.files[0]?.sender || '', created_at: new Date(hubNow() - 120000).toISOString(), size: g.size, spilled: false, purged: g.state === 'purged' })));
+      await route.fulfill({ response, json: j });
+    });
+
+    // A durable spill (SQLite text, not an R2 object) beside an expiring R2
+    // attachment. The deadline is stamped when the page actually loads it,
+    // after the disk-spill shot, so that shot is unchanged.
+    const DURABLE_MSG = 'msg_01R2DURABLE00000000000001';
+    const durableBody = 'Durable full text stays readable after the attachment expires.\n' + 'kept line\n'.repeat(40);
+    const durableSha = sha(Buffer.from(durableBody));
+    const held = {};
+    const expiringGrant = () => {
+      if (!held.g) held.g = seedFile('session-trace.txt', 'text/plain', 'session trace bytes\n'.repeat(12), '1h', 'available', 12000);
+      return held.g;
+    };
+    // Metadata for the file if the panel asks before history publishes it,
+    // so the real disk hub is never asked for a fixture id (that would 404).
+    await page.route(u => R.durable && held.g && new URL(u).pathname === `/v1/blobs/${held.g.sha256}/status`, route => json(route, 200, stateOf(held.g)));
+    await page.route(u => R.durable && new URL(u).pathname === `/v1/blobs/${durableSha}`, route => {
+      return route.fulfill({ status: 200, contentType: 'text/markdown', body: durableBody, headers: { 'Cache-Control': 'private, no-store' } });
+    });
+    await page.route(u => R.durable && new URL(u).pathname === `/v1/threads/${demo.threads.hark}/messages`, async route => {
+      const response = await route.fetch();
+      const j = await response.json();
+      const g = expiringGrant();
+      if (!j.next_after && Array.isArray(j.messages) && !j.messages.some(m => m.message_id === DURABLE_MSG)) {
+        const tpl = j.messages.find(m => m.kind === 'message' && !m.approval_request && !m.job_request && !m.job_status) || j.messages[0];
+        j.messages.push({
+          ...tpl, message_id: DURABLE_MSG, created_at: new Date(hubNow() - 60000).toISOString(),
+          content: { text: 'Preview only. The rest is durable.', truncated: true },
+          metadata: { 'vecnet.spilled': true },
+          attachments: [att(g), { sha256: durableSha, size: Buffer.byteLength(durableBody), media_type: 'text/markdown', name: 'message.md' }],
+          approval_request: undefined, approval_response: undefined, job_request: undefined, job_status: undefined,
+          reactions: undefined, in_reply_to: undefined,
+        });
+        j.blob_states = { ...(j.blob_states || {}), [g.id]: stateOf(g) };
+      }
+      await route.fulfill({ response, json: j });
+    });
+    await page.route(u => R.durable && new URL(u).pathname === `/v1/admin/threads/${demo.threads.hark}`, async route => {
+      const response = await route.fetch();
+      const j = await response.json();
+      const g = expiringGrant();
+      if (Array.isArray(j.files) && !j.files.some(f => f.blob_id === g.id)) {
+        j.files.push({ blob_id: g.id, sha256: g.sha256, name: g.name, media_type: g.media, message_id: DURABLE_MSG, sender: j.files[0]?.sender || '', created_at: new Date(hubNow() - 60000).toISOString(), size: g.size, spilled: false, purged: false });
+      }
       await route.fulfill({ response, json: j });
     });
 
@@ -342,6 +388,32 @@ try {
     await show.click();
     await page.locator('.full').first().waitFor();
     await both('fulltext', async () => { await page.locator('.full').first().scrollIntoViewIfNeeded(); });
+
+    // The same thread, reloaded with a durable spill plus an R2 attachment
+    // whose deadline is a few seconds out. After it crosses, download is
+    // disabled and Show full text still expands the durable body.
+    R.durable = true;
+    await page.reload({ waitUntil: 'load' });
+    await page.locator('#conn.live').waitFor();
+    await go(`#thread/${demo.threads.hark}`);
+    const durable = page.locator(`[id="m-${DURABLE_MSG}"]`);
+    await durable.waitFor();
+    const chip = durable.locator('.att.r2', { hasText: 'session-trace.txt' });
+    await chip.waitFor();
+    assert(!/expired/i.test(await chip.innerText()), 'the attachment is live when the thread opens: ' + await chip.innerText());
+    const fileBtn = page.locator(`aside .file.r2[data-blob="${held.g.id}"]`);
+    await fileBtn.waitFor();
+    assert(await fileBtn.isEnabled(), 'download is enabled before the deadline');
+    await page.waitForFunction(({ id, msg }) => {
+      const b = document.querySelector(`aside .file.r2[data-blob="${id}"]`);
+      const chip = document.querySelector(`[id="m-${msg}"] .att.r2`);
+      return b && b.disabled && b.className.includes('s-expired') && chip && /expired/i.test(chip.textContent);
+    }, { id: held.g.id, msg: DURABLE_MSG }, { timeout: 20000 });
+    await durable.locator('button.showfull').click();
+    const full = durable.locator('.full');
+    await full.waitFor();
+    assert((await full.innerText()).includes('Durable full text stays readable'), 'durable full text still expands');
+    assert(await fileBtn.isDisabled(), 'the expired attachment stays disabled while the text is open');
 
     // ---------- Settings: retention selector, off confirmation, quota full ----------
     await go('#settings');

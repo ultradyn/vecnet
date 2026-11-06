@@ -18,8 +18,13 @@ const newKey = () => 'ui-blob-' + Array.from(crypto.getRandomValues(new Uint8Arr
 
 const hasFiles = dt => !!dt && (Array.from(dt.types || []).includes('Files') || !!(dt.files && dt.files.length));
 
-export function createAttachments({ api, onChange }) {
-  let list = [], seq = 0, dead = false, guarded = false, picking = false, notify = onChange || (() => {});
+export function createAttachments({ api, onChange, now } = {}) {
+  let list = [], seq = 0, dead = false, guarded = false, picking = false, notify = onChange || (() => {}), expiryTimer = 0;
+  // Deadlines are the hub's clock, the same one transfer grants are judged on.
+  const clock = () => {
+    const t = typeof now === 'function' ? now() : Date.now();
+    return Number.isFinite(t) ? t : Date.now();
+  };
   const offs = [];
   const chips = h('div', { class: 'up-list' });
   const note = h('p', { class: 'up-note', role: 'status' });
@@ -32,12 +37,17 @@ export function createAttachments({ api, onChange }) {
 
   // draw rebuilds one chip for its state; progress only moves the bar.
   function draw(it) {
+    const expired = it.state === 'done' && model.attachmentExpired(it, clock());
     const kids = [h('span', { class: 'up-nm', text: it.name, title: it.name }), h('span', { class: 'up-sz', text: bytes(it.size) })];
-    if (it.state === 'done') {
+    if (it.state === 'done' && !expired) {
       kids.push(h('span', { class: 'up-ok', text: '✓', 'aria-label': 'uploaded' }));
       // A direct upload says how long its file lives, from its own grant.
-      const v = model.blobView(it, null, Date.now());
+      const v = model.blobView(it, null, clock());
       if (v && v.label) kids.push(h('span', { class: 'up-ret' + (v.keep ? ' keep' : ''), text: v.keep ? 'kept' : v.label.replace(/^Expires /, 'expires '), title: v.label + ' · ' + v.trust }));
+    }
+    if (expired) {
+      kids.push(h('span', { class: 'up-exp', text: model.expiredText(it.retention_class) }));
+      kids.push(h('button', { type: 'button', class: 'linkbtn', text: 'Re-upload', onclick: () => reupload(it) }));
     }
     if (it.state !== 'failed') kids.push(h('button', { type: 'button', class: 'up-x', text: '×', 'aria-label': 'Remove ' + it.name, onclick: () => remove(it) }));
     it.bar = it.label = null;
@@ -58,7 +68,7 @@ export function createAttachments({ api, onChange }) {
         h('button', { type: 'button', class: 'linkbtn', text: 'Retry', onclick: () => retry(it) }),
         h('button', { type: 'button', class: 'linkbtn', text: 'Remove', onclick: () => remove(it) })));
     }
-    it.node.className = 'up-chip up-' + it.state;
+    it.node.className = 'up-chip up-' + (expired ? 'expired' : it.state);
     it.node.replaceChildren(...kids);
   }
 
@@ -108,6 +118,47 @@ export function createAttachments({ api, onChange }) {
   function settled(it) {
     draw(it);
     pump();
+    armExpiry();
+    changed();
+  }
+
+  // armExpiry redraws a finished chip when its object deadline arrives, on
+  // the hub clock, so Send drops that ref before the operator can send it.
+  function armExpiry() {
+    clearTimeout(expiryTimer);
+    expiryTimer = 0;
+    if (dead) return;
+    const t = clock();
+    let next = null;
+    for (const it of list) {
+      if (it.state !== 'done' || !it.expires_at) continue;
+      const at = Date.parse(it.expires_at);
+      if (Number.isFinite(at) && at > t && (next === null || at < next)) next = at;
+    }
+    if (next === null) return;
+    expiryTimer = setTimeout(() => {
+      expiryTimer = 0;
+      if (dead) return;
+      const now = clock();
+      let hit = false;
+      for (const it of list) if (it.state === 'done' && model.attachmentExpired(it, now)) { hit = true; draw(it); }
+      if (hit) changed();
+      armExpiry();
+    }, Math.min(Math.max(0, next - t), 6 * 3600 * 1000));
+  }
+
+  // reupload keeps the File the operator picked and asks for a new grant.
+  // The spent idempotency key must not be replayed: that grant is expired.
+  function reupload(it) {
+    if (dead || !list.includes(it) || !it.file) return;
+    Object.assign(it, {
+      state: 'queued', error: '', progressed: false, loaded: 0, total: it.size, ctrl: null,
+      sha256: undefined, blob_id: undefined, sha256_verified: undefined, integrity: undefined,
+      retention_class: undefined, expires_at: undefined, idem: newKey(),
+    });
+    draw(it);
+    pump();
+    armExpiry();
     changed();
   }
 
@@ -129,6 +180,7 @@ export function createAttachments({ api, onChange }) {
     list = list.filter(x => x !== it);
     it.node.remove();
     pump();
+    armExpiry();
     changed();
   }
 
@@ -212,6 +264,7 @@ export function createAttachments({ api, onChange }) {
   }
 
   function destroy() {
+    clearTimeout(expiryTimer);
     for (const it of list) if (it.ctrl) it.ctrl.abort();
     dead = true;
     list = [];
@@ -222,8 +275,8 @@ export function createAttachments({ api, onChange }) {
 
   return {
     el, add, clear, items, wire, destroy,
-    ready: () => model.ready(list),
-    toAttachments: () => model.toAttachments(list),
-    signature: () => model.signature(list),
+    ready: () => model.ready(list, clock()),
+    toAttachments: () => model.toAttachments(list, clock()),
+    signature: () => model.signature(list, clock()),
   };
 }
