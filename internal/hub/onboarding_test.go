@@ -244,41 +244,23 @@ func TestOnboardLegacyKinds(t *testing.T) {
 		}
 	})
 
-	t.Run("grokbot fails closed", func(t *testing.T) {
+	t.Run("grokbot rejects bad input", func(t *testing.T) {
 		var raw [8]byte
 		if _, err := rand.Read(raw[:]); err != nil {
 			t.Fatal(err)
 		}
 		key := "crsr_" + hex.EncodeToString(raw[:])
-		url := "https://api2.cursor.sh/automations/webhook/01234567-89ab-cdef-0123-456789abcdef"
 		peersBefore := countRows(t, env, `SELECT count(*) FROM peers`)
 		routesBefore := countRows(t, env, `SELECT count(*) FROM routes`)
 		metaBefore := onboardKeys(t, env)
-		auditBefore := countRows(t, env, `SELECT count(*) FROM audit`)
-		res, err := env.Hub.OnboardAgent(ctx, op, onboardReq("grokbot", "grok-closed", map[string]any{
-			"name": "Gateway", "webhook_url": url, "webhook_key": "Bearer " + key,
-		}))
-		if !onboardStatus(t, err, http.StatusUnprocessableEntity, "unsupported_action") {
-			t.Fatal(err)
-		}
-		if res.PeerID != "" || res.HumanOutput != "" || res.RouteID != "" {
-			t.Fatal("unavailable grok submit returned resource ids")
-		}
-		if countRows(t, env, `SELECT count(*) FROM peers`) != peersBefore || countRows(t, env, `SELECT count(*) FROM routes`) != routesBefore || !reflect.DeepEqual(onboardKeys(t, env), metaBefore) || countRows(t, env, `SELECT count(*) FROM audit`) != auditBefore {
-			t.Fatal("unavailable grok submit had a side effect")
-		}
-		blob := strings.Join(onboardValues(t, env), "\n") + err.Error()
-		if strings.Contains(blob, key) || strings.Contains(blob, url) {
-			t.Fatal("grok refusal stored or echoed the routine url or key")
-		}
 		badURL := "https://evil.example/hook"
 		if _, err := env.Hub.OnboardAgent(ctx, op, onboardReq("grokbot", "grok-bad-url", map[string]any{
 			"name": "Gateway", "webhook_url": badURL, "webhook_key": key,
 		})); err == nil || strings.Contains(err.Error(), "evil.example") || strings.Contains(err.Error(), key) {
 			t.Fatal("invalid grok input leaked or was accepted")
 		}
-		if countRows(t, env, `SELECT count(*) FROM peers`) != peersBefore {
-			t.Fatal("invalid grok input created a peer")
+		if countRows(t, env, `SELECT count(*) FROM peers`) != peersBefore || countRows(t, env, `SELECT count(*) FROM routes`) != routesBefore || !reflect.DeepEqual(onboardKeys(t, env), metaBefore) {
+			t.Fatal("invalid grok input created a peer, route or receipt")
 		}
 	})
 

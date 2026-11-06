@@ -2,7 +2,7 @@ package hub
 
 // Caller-aware onboarding. Kinds, validation and prompt text come from
 // internal/onboarding. This file dispatches the legacy invite and link
-// actions and keeps grokbot_setup closed until Task 3 assigns grokbotSetup.
+// actions. grokbot_setup is grokbotOnboard, registered below.
 // PROTOCOL §§2.12–2.13, 4.5, 8, 12, 16.2 and 20.1.
 
 import (
@@ -29,19 +29,26 @@ const (
 // does not export it.
 var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
-// grokbotSetup is the grokbot_setup transaction body. Task 3 assigns it.
-// Nil fails closed: OnboardAgent returns unsupported_action and writes nothing.
-var grokbotSetup func(ctx context.Context, h *Hub, tx *sql.Tx, n onboarding.Normalized) (onboarding.SubmitResult, []string, error)
+// grokbotSetup is the grokbot_setup transaction body. init registers
+// grokbotOnboard. Nil fails closed: OnboardAgent returns unsupported_action
+// and writes nothing. The string result is the setup message created_at,
+// which the activity feed must use (PROTOCOL §2.13).
+var grokbotSetup func(ctx context.Context, h *Hub, tx *sql.Tx, n onboarding.Normalized) (onboarding.SubmitResult, []string, string, error)
+
+func init() {
+	grokbotSetup = grokbotOnboard
+}
 
 type onboardQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 type onboardOutcome struct {
-	result onboarding.SubmitResult
-	human  string
-	notify []string
-	unlock bool
+	result   onboarding.SubmitResult
+	human    string
+	notify   []string
+	unlock   bool
+	activity *ActivityEvent
 }
 
 // OnboardingKinds lists the Add agent specs for an operator. Listing does
@@ -123,6 +130,9 @@ func (h *Hub) onboardCommit(ctx context.Context, c auth.Caller, n onboarding.Nor
 			h.Log.Notify(out.notify...)
 		}
 		h.notifyEnabled(ctx)
+		if out.activity != nil {
+			h.Activity.Publish(*out.activity)
+		}
 		out.result.HumanOutput = out.human
 	}
 	return out.result, nil
@@ -234,7 +244,7 @@ func (h *Hub) onboardGrok(ctx context.Context, tx *sql.Tx, n onboarding.Normaliz
 	if grokbotSetup == nil {
 		return onboardOutcome{}, onboardUnavailable()
 	}
-	res, notify, err := grokbotSetup(ctx, h, tx, n)
+	res, notify, createdAt, err := grokbotSetup(ctx, h, tx, n)
 	if err != nil {
 		return onboardOutcome{}, err
 	}
@@ -251,7 +261,15 @@ func (h *Hub) onboardGrok(ctx context.Context, tx *sql.Tx, n onboarding.Normaliz
 	if err := h.saveOnboardReceipt(ctx, tx, subject, n, digest, res); err != nil {
 		return onboardOutcome{}, err
 	}
-	return onboardOutcome{result: res, notify: notify}, nil
+	var activity *ActivityEvent
+	if res.Setup != nil && res.Setup.MessageID != "" {
+		if createdAt == "" {
+			return onboardOutcome{}, errors.New("hub: setup activity missing message created_at")
+		}
+		ev := messageActivity(res.Setup.ThreadID, res.Setup.MessageID, HubSender, "message", createdAt)
+		activity = &ev
+	}
+	return onboardOutcome{result: res, notify: notify, activity: activity}, nil
 }
 
 func (h *Hub) finishOnboard(ctx context.Context, tx *sql.Tx, n onboarding.Normalized, spec onboarding.KindSpec, subject, digest, peerID, prn, routeID string) (onboarding.SubmitResult, error) {
