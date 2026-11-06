@@ -30,6 +30,9 @@ if (argv.includes('watch')) {
     if (plan.releaseFailure) process.exit(1);
     delete claims[nonce]; writeFileSync(plan.claims, JSON.stringify(claims));
     console.log(JSON.stringify({ version: 1, released: true }));
+  } else if (flag('--event') === 'user-prompt') {
+    const claimed = new Set(Object.values(claims).flat());
+    console.log(JSON.stringify({ deliveries: (plan.items ?? []).filter((i: { id: string }) => !claimed.has(i.id)).map((i: { id: string }) => i.id) }));
   } else if (plan.refused) {
     console.log(JSON.stringify({ version: 1, refused: plan.refused, deliveries: [] }));
   } else {

@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { execFileSync } from 'node:child_process';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, renameSync } from 'node:fs';
@@ -37,7 +38,7 @@ function checkRequests(requests: typeof allRequests) {
   }
 }
 type Item = { id: string; priority: string; value?: string };
-async function harness(t: TestContext, options: { binding?: Partial<Binding>; status?: unknown; wrap?: (rpc: CodexRpc) => CodexRpc; seed?: InflightRow; claiming?: string; unreachable?: boolean; history?: number; coldResumeIdleDelayMs?: number } = {}) {
+async function harness(t: TestContext, options: { binding?: Partial<Binding>; status?: unknown; wrap?: (rpc: CodexRpc) => CodexRpc; seed?: InflightRow; claiming?: string; unreachable?: boolean; refusedVersion?: boolean; releaseFailure?: boolean; history?: number; coldResumeIdleDelayMs?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vn-e-')), clock = fakeClock(), log = memoryLog();
   let activity = 0, pendingRpcs = 0, pendingHooks = 0, watchArms = 0;
   const timer = clock.timer;
@@ -51,6 +52,7 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
     return { cancel() { done(); alarm.cancel(); } };
   };
   const fake = await startFakeCodexAppServer({ dir, clock, coldResumeIdleDelayMs: options.coldResumeIdleDelayMs });
+  if (options.refusedVersion) fake.setVersion('0.0.0');
   fake.setThread({ id: 'thread', status: options.status ?? { type: 'idle' },
     ...((options.status as { type?: string })?.type === 'active' ? { activeTurnId: 'active' } : {}) });
   fake.attachOther('thread');
@@ -58,7 +60,7 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
   const map = new Map<string, string>();
   const kv: KeyValue = { get: k => map.get(k), set: (k, v) => { map.set(k, v); }, delete: k => { map.delete(k); }, keys: (p = '') => [...map.keys()].filter(k => k.startsWith(p)) };
   const config = join(dir, 'plan.json'), trace = join(dir, 'trace.jsonl'), claims = join(dir, 'claims.json');
-  const plan = { trace, claims, stub, items: (options.claiming ? [{ id: 'w1', priority: 'wake' }] : []) as Item[], events: [] as unknown[], refused: '', revision: 0, hookGate: '', hookFailure: '', releaseFailure: false };
+  const plan = { trace, claims, stub, items: (options.claiming ? [{ id: 'w1', priority: 'wake' }] : []) as Item[], events: [] as unknown[], refused: '', revision: 0, hookGate: '', hookFailure: '', releaseFailure: options.releaseFailure ?? false };
   writeFileSync(trace, ''); writeFileSync(claims, '{}');
   const save = () => { plan.revision++; writeFileSync(config + '.next', JSON.stringify(plan)); renameSync(config + '.next', config); }; save();
   const bin = join(dir, 'vecnet');
@@ -130,7 +132,9 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
     rmSync(dir, { recursive: true, force: true });
   });
   engine.start();
-  if (!options.unreachable) await loaded(); else await eventually(() => engine.state() === 'unreachable');
+  if (options.refusedVersion) await eventually(() => engine.state() === 'refused_version');
+  else if (options.unreachable) await eventually(() => engine.state() === 'unreachable');
+  else await loaded();
   return { fake, clock, log, kv, plan, save, binding, deps, records, hooks, releases, sends, rows, tick, wake, loaded, sync,
     get engine() { return engine; }, get opens() { return opens; }, disconnect() { current!.close(); },
     async restart() { await engine.stop(); engine = makeEngine(); watching = true; engine.start(); await loaded(); } };
@@ -138,6 +142,131 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
 const active = { type: 'active', activeFlags: [] };
 const row = (patch: Partial<InflightRow> = {}): InflightRow => ({ threadId: 'thread', key: 'vn.seed', claim: '123456789012345678901234', deliveries: ['w1'],
   method: 'turn/steer', attemptTurnId: 'active', priorTurnId: null, acceptedAt: 0, state: 'pending', ...patch });
+
+// Round-three probes, exercised through the fake wire and real hook children.
+for (const failures of [1, 2]) test(`hand2 wire mismatch ${failures} preserves the claim and bounds recovery`, async t => {
+  let h: Awaited<ReturnType<typeof harness>>;
+  let claim: string | undefined;
+  const attempts: InflightRow[] = [];
+  h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      if (method === 'turn/steer') {
+        const inflight = h.rows()[0]; attempts.push({ ...inflight });
+        claim ??= inflight.claim;
+        if (attempts.length === 1) h.fake.setThread({ id: 'thread', status: active, activeTurnId: 'new-active' });
+      }
+      return rpc.call<T>(method, params, ms);
+    },
+  }) });
+  const baseline = h.fake.requests.length, opens = h.opens;
+  for (let i = 0; i < failures; i++) h.fake.failNext('turn/steer', {
+    code: -32600, message: 'expected active turn id `old-turn` but found `new-turn`',
+  });
+  await h.wake(); await h.tick(2 * minute);
+  assert.equal(h.sends().length, 2, 'exactly one re-read and retry before waiting for idle');
+  assert.deepEqual(h.sends().map(r => r.method), ['turn/steer', 'turn/steer']);
+  assert.deepEqual(h.sends().map(r => (r.params as any).expectedTurnId), ['active', 'new-active']);
+  const key = (h.sends()[0].params as any).clientUserMessageId;
+  assert.ok(key); assert.equal((h.sends()[1].params as any).clientUserMessageId, key);
+  assert.ok(attempts.every(r => r.key === key && r.claim === claim));
+  const requests = h.fake.requests.slice(baseline), first = requests.findIndex(r => r.method === 'turn/steer');
+  const second = requests.findIndex((r, i) => i > first && r.method === 'turn/steer');
+  assert.equal(requests.slice(first + 1, second).filter(r => r.method === 'thread/turns/list').length, 1);
+  if (failures === 2) {
+    assert.equal(h.rows()[0].claim, claim);
+    h.fake.setThread({ id: 'thread', status: { type: 'idle' } }); await h.sync(); await h.tick();
+    assert.deepEqual(h.sends().map(r => r.method), ['turn/steer', 'turn/steer', 'turn/start']);
+    assert.equal((h.sends()[2].params as any).clientUserMessageId, key);
+  }
+  assert.equal(h.records().filter(r => r.hookClaimed === claim).length, 1);
+  assert.equal(h.rows().length, 0); assert.equal(h.releases().length, 0);
+  assert.equal(h.opens, opens); assert.equal(h.plan.events.length, 1);
+});
+
+for (const releaseFailure of [false, true]) test(`hand2 expiry after gated claim releases unsent delivery with release failure ${releaseFailure}`, async t => {
+  const h = await harness(t, { binding: { expiresAt: 5000 } });
+  h.plan.hookGate = join(dirname(h.deps.env.VECNET_CONFIG), 'expiry-gate');
+  h.plan.releaseFailure = releaseFailure; h.save();
+  const before = h.records().filter(r => r.hookClaimed).length;
+  const wake = h.wake();
+  await eventually(() => h.records().filter(r => r.hookClaimed).length > before, 'claim committed before expiry');
+  const claim = h.records().filter(r => r.hookClaimed).at(-1)!.hookClaimed!;
+  h.clock.advance(h.binding.expiresAt - h.clock.now() + 1);
+  writeFileSync(h.plan.hookGate, 'open'); await wake;
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'expired' });
+  assert.equal(h.sends().length, 0);
+  assert.equal(h.releases().length, 1, 'expiry initiates release immediately');
+  assert.equal(h.releases()[0].argv[h.releases()[0].argv.indexOf('--claim') + 1], claim);
+  if (releaseFailure) {
+    assert.ok(h.kv.get('releasing:' + claim), 'failed release remains durable');
+    assert.equal(h.rows().length, 1);
+    h.plan.releaseFailure = false; h.save(); await h.restart();
+    assert.equal(h.releases().filter(r => r.argv.includes(claim)).length, 2);
+  }
+  await h.tick(2 * minute);
+  assert.equal(h.rows().length, 0); assert.equal(h.kv.keys('releasing:').length, 0);
+  assert.equal(h.kv.keys('claiming:').length, 0); assert.equal(h.sends().length, 0);
+  const ordinary = JSON.parse(execFileSync(h.deps.vecnetBin, ['--net', 'test', '--as', 'peer', 'hook', '--event', 'user-prompt'], {
+    env: { HOME: h.deps.env.HOME, PATH: h.deps.env.PATH, VECNET_CONFIG: h.deps.env.VECNET_CONFIG }, encoding: 'utf8',
+  }));
+  assert.deepEqual(ordinary.deliveries, ['w1'], 'ordinary hooks can see the original delivery again');
+});
+
+test('hand2 expiry releases a definitely rejected steer waiting for idle', async t => {
+  const h = await harness(t, { status: active, binding: { expiresAt: 5000 } });
+  for (let i = 0; i < 2; i++) h.fake.failNext('turn/steer', { code: -32600, message: 'expectedTurnId mismatch' });
+  await h.wake(); const rejected = h.rows()[0]; assert.ok(rejected);
+  await h.tick(minute);
+  assert.equal(h.releases().length, 1); assert.ok(h.releases()[0].argv.includes(rejected.claim));
+  assert.equal(h.rows().length, 0); assert.equal(h.sends().length, 2);
+});
+
+test('hand2 expiry never releases an accepted steer without a receipt', async t => {
+  const h = await harness(t, { status: active, binding: { expiresAt: 5000 } });
+  h.fake.withholdNextItem(); await h.wake();
+  await h.tick(2 * minute);
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'expired' });
+  assert.equal(h.rows().length, 1); assert.equal(h.releases().length, 0); assert.equal(h.sends().length, 1);
+});
+
+test('hand2 identity refusal survives recreation and renewal until an explicit rebind', async t => {
+  const h = await harness(t);
+  h.plan.refused = 'identity_changed'; h.save(); await h.wake();
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'identity_changed' });
+  h.plan.refused = ''; h.save();
+  const hooks = h.hooks().length, subscriptions = h.fake.requests.filter(r => r.method === 'thread/resume').length;
+  await h.restart(); await h.tick(2 * minute);
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'identity_changed' });
+  h.binding.expiresAt += hour; await h.restart(); await h.tick(2 * minute);
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'identity_changed' }, 'TTL renewal retains the binding generation');
+  assert.equal(h.hooks().length, hooks); assert.equal(h.sends().length, 0);
+  assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, subscriptions);
+  h.binding.createdAt = h.clock.now(); await h.restart(); await h.tick();
+  assert.deepEqual(h.engine.liveness(), { live: true }); assert.equal(h.sends().length, 1);
+  assert.deepEqual(Object.keys((h.sends()[0].params as any).additionalContext), ['vecnet_w1']);
+  assert.equal(h.plan.events.length, 1, 'fresh bind delivers the original queued wake');
+});
+
+for (const policy of ['never', 'on-request']) test(`hand2 independent reload rechecks policy ${policy} without reconnecting`, async t => {
+  const h = await harness(t);
+  h.fake.setThread({ id: 'thread', status: { type: 'idle' }, approvalPolicy: 'on-request' });
+  await h.restart(); await h.wake();
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'approval_policy' });
+  const opens = h.opens, subscriptions = h.fake.requests.filter(r => r.method === 'thread/resume').length;
+  // A loaded status alone is not an independent reload and must not loop on resume.
+  h.fake.setThread({ id: 'thread', status: { type: 'idle' }, approvalPolicy: policy });
+  await h.sync(); await h.tick();
+  assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, subscriptions);
+  h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' }, approvalPolicy: policy }); await h.sync();
+  h.fake.setThread({ id: 'thread', status: { type: 'idle' }, approvalPolicy: policy }); await h.sync();
+  await h.tick(2000); await h.tick(2 * minute);
+  assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, subscriptions + 1, 'new policy is read from a guarded warm resume');
+  assert.equal(h.opens, opens);
+  assert.deepEqual(h.engine.liveness(), policy === 'never' ? { live: true } : { live: false, reason: 'approval_policy' });
+  assert.equal(h.engine.subscribed(), policy === 'never'); assert.equal(h.sends().length, policy === 'never' ? 1 : 0);
+  if (policy === 'never') assert.deepEqual(Object.keys((h.sends()[0].params as any).additionalContext), ['vecnet_w1']);
+  assert.equal(h.plan.events.length, 1);
+});
 
 test('ambiguous mismatch-to-idle retry scans history before any retransmission', async t => {
   let h: Awaited<ReturnType<typeof harness>>;
@@ -210,6 +339,40 @@ test('active wake steers with the active turn id', async t => {
   const h = await harness(t, { status: active }); await h.wake(); await eventually(() => h.sends().length === 1);
   assert.equal(h.sends()[0].method, 'turn/steer'); assert.equal((h.sends()[0].params as any).expectedTurnId, 'active');
 });
+for (const state of ['idle', 'active']) for (const failures of [1, 7]) test(`${state} fresh wake survives ${failures} transient history read failures without another trigger`, async t => {
+  const h = await harness(t, { status: state === 'active' ? active : { type: 'idle' } });
+  const opens = h.opens, subscriptions = h.fake.requests.filter(r => r.method === 'thread/resume').length;
+  const reads = () => h.fake.requests.filter(r => r.method === 'thread/turns/list').length;
+  const before = reads(), claims = h.records().filter(r => r.hookClaimed).length;
+  for (let i = 0; i < failures; i++) h.fake.failNext('thread/turns/list', { code: -32603, message: 'temporary history read failure' });
+  await h.wake();
+  assert.equal(reads(), before + 1, 'the original wake fails its first history read');
+  assert.equal(h.sends().length, 0); assert.equal(h.rows().length, 0);
+  assert.equal(h.kv.keys('claiming:').length, 0);
+  assert.equal(h.records().filter(r => r.hookClaimed).length, claims, 'no claim before the checkpoint read succeeds');
+  for (let i = 0; i < failures; i++) {
+    const delayMs = [1000, 2000, 4000, 8000, 15000][Math.min(i, 4)];
+    await h.tick(delayMs - 50);
+    assert.equal(reads(), before + i + 1, 'history retry waits for its backoff');
+    await h.tick(50);
+    if (i + 1 < failures) {
+      assert.equal(reads(), before + i + 2, 'one independent retry at each bounded backoff step');
+      assert.equal(h.sends().length, 0);
+    } else assert.equal(h.sends().length, 1, 'the successful retry delivers the original wake');
+  }
+  await h.tick(2 * minute);
+  assert.equal(h.sends().length, 1, 'original wake delivered exactly once');
+  assert.equal(h.sends()[0].method, state === 'active' ? 'turn/steer' : 'turn/start');
+  assert.deepEqual(Object.keys((h.sends()[0].params as any).additionalContext), ['vecnet_w1']);
+  const claimed = JSON.parse(readFileSync(h.plan.claims, 'utf8')) as Record<string, string[]>;
+  const deliveryClaims = Object.keys(claimed).filter(nonce => claimed[nonce].includes('w1'));
+  assert.equal(deliveryClaims.length, 1, 'one delivery-bearing claim, regardless of empty status-triggered polls');
+  assert.equal(h.records().filter(r => r.hookClaimed === deliveryClaims[0]).length, 1);
+  assert.equal(h.rows().length, 0); assert.equal(h.releases().length, 0);
+  assert.equal(h.opens, opens, 'no reconnect or restart');
+  assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, subscriptions);
+  assert.equal(h.plan.events.length, 1, 'no further watch event or status broadcast');
+});
 test('steer mismatch re-reads once then waits for idle', async t => {
   const h = await harness(t, { status: active });
   h.fake.failNext('turn/steer', { code: -32600, message: 'expectedTurnId mismatch' }); h.fake.failNext('turn/steer', { code: -32600, message: 'expectedTurnId mismatch' });
@@ -218,6 +381,43 @@ test('steer mismatch re-reads once then waits for idle', async t => {
   h.fake.setThread({ id: 'thread', status: { type: 'idle' } }); await h.sync(); await h.tick(); await eventually(() => h.sends().length === 3);
   assert.equal(h.sends()[2].method, 'turn/start'); assert.equal((h.sends()[2].params as any).clientUserMessageId, key);
   assert.ok(h.fake.requests.filter(r => r.method === 'thread/turns/list').length >= 4);
+});
+for (const failures of [1, 7]) test(`idle mismatch retry survives ${failures} transient history read failures without another trigger`, async t => {
+  const h = await harness(t, { status: active });
+  const opens = h.opens;
+  h.fake.failNext('turn/steer', { code: -32600, message: 'expectedTurnId mismatch' });
+  h.fake.failNext('turn/steer', { code: -32600, message: 'expectedTurnId mismatch' });
+  await h.wake();
+  assert.equal(h.sends().length, 2);
+  const original = h.rows()[0]; assert.ok(original);
+  assert.equal(original.acceptedAt, null);
+  for (let i = 0; i < failures; i++) h.fake.failNext('thread/turns/list', { code: -32603, message: 'temporary history read failure' });
+  const reads = () => h.fake.requests.filter(r => r.method === 'thread/turns/list').length;
+  const before = reads();
+  h.fake.setThread({ id: 'thread', status: { type: 'idle' } });
+  await h.sync(); await h.tick();
+  assert.equal(reads(), before + 1, 'first idle history read failed');
+  assert.deepEqual(h.rows()[0], original, 'failed read retains the claim and checkpoint');
+  for (let i = 0; i < failures; i++) {
+    const delayMs = [1000, 2000, 4000, 8000, 15000][Math.min(i, 4)];
+    await h.tick(delayMs - 50);
+    assert.equal(reads(), before + i + 1, 'history retry waits for its backoff');
+    await h.tick(50);
+    if (i + 1 < failures) {
+      assert.equal(reads(), before + i + 2, 'one history retry at each bounded backoff step');
+      assert.deepEqual(h.rows()[0], original);
+    } else assert.equal(h.sends().length, 3, 'the successful history retry starts the original delivery');
+  }
+  await h.tick(2 * minute);
+  assert.deepEqual(h.sends().map(r => r.method), ['turn/steer', 'turn/steer', 'turn/start']);
+  const start = h.sends()[2].params as any;
+  assert.equal(start.clientUserMessageId, original.key);
+  assert.deepEqual(start.additionalContext, (h.sends()[0].params as any).additionalContext);
+  assert.equal(h.rows().length, 0); assert.equal(h.releases().length, 0);
+  assert.equal(h.opens, opens, 'no reconnect or restart');
+  assert.equal(h.plan.events.length, 1, 'no new watch event');
+  const originalClaims = h.records().filter(r => r.hookClaimed === original.claim);
+  assert.equal(originalClaims.length, 1, 'original delivery was claimed once');
 });
 test('failed mismatch re-read retries the original delivery on idle without restarting', async t => {
   let h: Awaited<ReturnType<typeof harness>>, failRead = false;
@@ -277,8 +477,16 @@ function ambiguousAfterAccept(after?: (rpc: CodexRpc, key: string) => Promise<vo
   } });
 }
 test('ambiguous send is resolved by clientId without resending', async t => {
-  const h = await harness(t, { wrap: ambiguousAfterAccept() }); await h.wake(); await h.tick(1000); await h.loaded();
-  await eventually(() => h.rows().length === 0); assert.equal(h.sends().length, 1); assert.equal(h.releases().length, 0);
+  let h: Awaited<ReturnType<typeof harness>>;
+  h = await harness(t, { wrap: ambiguousAfterAccept(async (rpc, key) => {
+    rpc.close(); h.fake.recordLater(key, h.clock.now()); h.clock.advance(0);
+  }) });
+  h.fake.withholdNextItem(); await h.wake();
+  assert.equal(h.rows().length, 1, 'no live receipt settled the disconnected send');
+  await h.tick(1000); await h.loaded();
+  await eventually(() => h.rows().length === 0);
+  assert.ok(h.fake.requests.some(r => r.method === 'thread/turns/list' && (r.params as any).itemsView === 'full'));
+  assert.equal(h.sends().length, 1); assert.equal(h.releases().length, 0);
 });
 test('ambiguous send with no clientId releases', async t => {
   const h = await harness(t); h.fake.failNext('turn/start', 'drop'); await h.wake(); await h.tick(1000); await h.loaded();
@@ -317,6 +525,27 @@ test('crash between claim and inflight write releases on restart', async t => {
   await eventually(() => h.sends().length === 1);
   assert.deepEqual(Object.keys((h.sends()[0].params as any).additionalContext), ['vecnet_w1']); await h.tick(); assert.equal(h.sends().length, 1);
 });
+for (const unavailable of ['unreachable', 'refused_version']) for (const releaseFailure of [false, true]) test(`startup orphan cleanup under ${unavailable} with release failure ${releaseFailure}`, async t => {
+  const claim = '123456789012345678901234';
+  const h = await harness(t, { claiming: claim, unreachable: unavailable === 'unreachable', refusedVersion: unavailable === 'refused_version', releaseFailure });
+  await h.sync();
+  assert.equal(h.releases().length, 1, 'release runs without a successful Codex connection');
+  assert.ok(h.releases()[0].argv.includes(claim), 'release uses the exact orphan nonce');
+  if (releaseFailure) {
+    assert.ok(h.kv.get('claiming:' + claim), 'failed release keeps the orphan durable');
+    assert.deepEqual(JSON.parse(readFileSync(h.plan.claims, 'utf8')), { [claim]: ['w1'] });
+    h.plan.releaseFailure = false; h.save();
+    await h.tick(1000);
+    assert.equal(h.releases().length, 2, 'release retries independently of Codex');
+    assert.ok(h.releases()[1].argv.includes(claim));
+  }
+  await h.tick(2 * minute);
+  assert.equal(h.kv.keys('claiming:').length, 0); assert.equal(h.rows().length, 0);
+  assert.deepEqual(JSON.parse(readFileSync(h.plan.claims, 'utf8')), {});
+  assert.equal(h.sends().length, 0); assert.equal(h.engine.state(), unavailable);
+  assert.equal(h.fake.requests.filter(r => r.method === 'thread/read' || r.method === 'thread/turns/list').length, 0);
+  if (unavailable === 'refused_version') assert.equal(h.opens, 1, 'refused version remains terminal');
+});
 for (const failure of ['exit', 'invalid']) test(`hook ${failure} after durable claim is recovered without restarting`, async t => {
   const h = await harness(t), opens = h.opens, baseline = h.records().length;
   h.plan.hookFailure = failure; h.save(); await h.wake();
@@ -344,8 +573,15 @@ test('failed release retains the unsent claim and retries recovery without resta
   await h.tick(2 * minute); assert.equal(h.sends().length, 1);
 });
 test('definite rejection releases claims', async t => {
-  const h = await harness(t); h.fake.failNext('turn/start', { code: -32602, message: 'invalid input' }); await h.wake();
+  const h = await harness(t), baseline = h.hooks().length;
+  h.fake.failNext('turn/start', { code: -32602, message: 'invalid input' }); await h.wake();
   await eventually(() => h.releases().length === 1); assert.equal(h.rows().length, 0);
+  const claimArgs = h.hooks().slice(baseline).find(r => r.argv.includes('--event') && r.argv.includes('--claim'))!.argv;
+  const claim = claimArgs[claimArgs.indexOf('--claim') + 1], releaseArgs = h.releases()[0].argv;
+  assert.equal(releaseArgs[releaseArgs.indexOf('--claim') + 1], claim);
+  await h.restart();
+  assert.equal(h.sends().length, 2, 'the released delivery can be claimed and sent again');
+  assert.deepEqual(Object.keys((h.sends()[1].params as any).additionalContext), ['vecnet_w1']);
 });
 test('additionalContext rejection falls back to the pointer stub once', async t => {
   const h = await harness(t); h.fake.failNext('turn/start', { code: -32602, message: 'additionalContext rejected' }); await h.wake();
@@ -476,6 +712,85 @@ for (const idleDelayMs of [0, 1, 3000]) test(`rejected cold resume cannot use it
   h.fake.attachOther('thread'); h.fake.setThread({ id: 'thread', status: { type: 'idle' } });
   await h.sync(); await h.tick(2000);
   assert.equal(h.sends().length, 1); assert.deepEqual(h.engine.liveness(), { live: true });
+});
+for (const idleDelayMs of [0, 1, 3000]) for (const evidence of ['active status', 'new turn']) {
+  test(`independent ${evidence} revives a rejected cold resume before unload (idle delay ${idleDelayMs} ms)`, async t => {
+    let closeBeforeResume: (() => void) | undefined;
+    let suppressActiveStatus = false;
+    const h = await harness(t, { coldResumeIdleDelayMs: idleDelayMs, wrap: rpc => ({ ...rpc,
+      onNotification(fn) { rpc.onNotification((method, params) => {
+        if (suppressActiveStatus && method === 'thread/status/changed' && (params as any).status?.type === 'active') return;
+        fn(method, params);
+      }); },
+      async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+        if (method === 'thread/resume') closeBeforeResume?.();
+        return rpc.call<T>(method, params, ms);
+      },
+    }) });
+    await h.engine.stop(); h.fake.detachOther('thread');
+    closeBeforeResume = () => {
+      closeBeforeResume = undefined;
+      h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' } });
+      h.fake.notify('thread/closed', { threadId: 'thread' });
+    };
+    await h.restart(); await h.tick(3000); await h.wake();
+    assert.deepEqual(h.engine.liveness(), { live: false, reason: 'not_loaded' });
+    assert.equal(h.sends().length, 0); assert.deepEqual(h.fake.subscribers('thread'), []);
+    const baseline = h.fake.requests.length;
+    // The other client holds the thread before its 60-second unload deadline.
+    h.fake.attachOther('thread'); suppressActiveStatus = evidence === 'new turn';
+    h.fake.setThread({ id: 'thread', status: active, activeTurnId: 'external' });
+    if (evidence === 'new turn') h.fake.notify('turn/started', { threadId: 'thread', turn: { id: 'external' } });
+    await h.sync(); await h.tick(2000);
+    assert.deepEqual(h.engine.liveness(), { live: true });
+    assert.equal(h.engine.subscribed(), true);
+    assert.equal(h.fake.requests.slice(baseline).filter(r => r.method === 'thread/resume').length, 1);
+    assert.equal(h.sends().length, 1, 'queued delivery steers without another watch event or unload');
+    assert.equal(h.sends()[0].method, 'turn/steer');
+    assert.equal((h.sends()[0].params as any).expectedTurnId, 'external');
+    await h.tick(2 * minute);
+    assert.deepEqual(h.engine.liveness(), { live: true }); assert.equal(h.sends().length, 1);
+  });
+}
+for (const evidence of ['active status', 'new turn']) test(`independent ${evidence} during the cold-resume guard waits for a fresh warm subscription`, async t => {
+  let h: Awaited<ReturnType<typeof harness>>;
+  let closeBeforeResume: (() => void) | undefined, revive: (() => void) | undefined;
+  let suppressActiveStatus = false;
+  const resumeTimes: number[] = [];
+  h = await harness(t, { wrap: rpc => ({ ...rpc,
+    onNotification(fn) { rpc.onNotification((method, params) => {
+      if (suppressActiveStatus && method === 'thread/status/changed' && (params as any).status?.type === 'active') return;
+      fn(method, params);
+    }); },
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      if (method === 'thread/resume') closeBeforeResume?.();
+      const result = await rpc.call<T>(method, params, ms);
+      if (method === 'thread/resume' && h) resumeTimes.push(h.clock.now());
+      if (method === 'thread/unsubscribe') { const fn = revive; revive = undefined; fn?.(); }
+      return result;
+    },
+  }) });
+  await h.engine.stop(); h.fake.detachOther('thread'); resumeTimes.length = 0;
+  h.plan.items.push({ id: 'w1', priority: 'wake' }); h.save();
+  closeBeforeResume = () => {
+    closeBeforeResume = undefined;
+    h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' } });
+    h.fake.notify('thread/closed', { threadId: 'thread' });
+    revive = () => {
+      h.fake.attachOther('thread'); suppressActiveStatus = evidence === 'new turn';
+      h.fake.setThread({ id: 'thread', status: active, activeTurnId: 'external' });
+      if (evidence === 'new turn') h.fake.notify('turn/started', { threadId: 'thread', turn: { id: 'external' } });
+    };
+  };
+  await h.restart();
+  assert.equal(resumeTimes.length, 2, 'a fresh subscription follows the rejected one');
+  assert.ok(resumeTimes[1] - resumeTimes[0] > 2000, 'the rejected resume guard finishes before reattaching');
+  assert.equal(h.sends().length, 0, 'the fresh subscription has its own startup guard');
+  await h.tick(2000);
+  assert.deepEqual(h.engine.liveness(), { live: true }); assert.equal(h.engine.subscribed(), true);
+  assert.equal(h.sends().length, 1); assert.equal(h.sends()[0].method, 'turn/steer');
+  assert.equal((h.sends()[0].params as any).expectedTurnId, 'external');
+  assert.equal(h.plan.events.length, 0, 'no watch event was needed');
 });
 test('re-subscribes when another client reloads the thread', async t => {
   const h = await harness(t, { status: { type: 'notLoaded' } }); assert.equal(h.engine.subscribed(), false);
