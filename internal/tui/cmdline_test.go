@@ -332,7 +332,7 @@ func TestCompletionAndHistory(t *testing.T) {
 	t.Run("tab finds every registered command", func(t *testing.T) {
 		m, p, _ := cmdModel(t, newClock())
 		m.Commands["msg"] = Command{Help: "<peer> <text>  new thread"}
-		p.press(":", "m")
+		p.press(":", "m", "s")
 		keyTab(p)
 		wantInput(t, m, "msg ")
 		if _, ok := m.Commands["msg"]; !ok {

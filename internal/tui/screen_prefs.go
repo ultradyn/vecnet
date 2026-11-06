@@ -49,6 +49,7 @@ func (s *prefsScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 }
 
 func (s *prefsScreen) View(m *Model, w, h int) string {
+	m.addHit(m.hitX, m.hitY, w, h, hitScroll, "prefs.list")
 	var body string
 	switch {
 	case m.Data.PrefsNote != "":
@@ -78,6 +79,7 @@ func (s *prefsScreen) list(m *Model, width, height int) string {
 	help := s.helpLines(rows, width)
 	lines := make([]string, 0, height)
 	need := len(listLines) + 1 + len(help)
+	from, n := 0, len(listLines)
 	if need <= height {
 		lines = append(lines, listLines...)
 		lines = append(lines, "")
@@ -90,16 +92,70 @@ func (s *prefsScreen) list(m *Model, width, height int) string {
 		}
 		s.offset = prefsScroll(s.offset, selLine, listN, len(listLines))
 		end := min(s.offset+listN, len(listLines))
+		from, n = s.offset, end-s.offset
 		lines = append(lines, listLines[s.offset:end]...)
 		if helpN > 0 {
 			lines = append(lines, "")
 			lines = append(lines, help[:helpN]...)
 		}
 	}
+	s.notePrefHits(m, rows, from, n, width)
 	for i, line := range lines {
 		lines[i] = fit(line, width)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (s *prefsScreen) Click(id string, m *Model) tea.Cmd {
+	n, err := strconv.Atoi(strings.TrimPrefix(id, "pref:"))
+	if err != nil {
+		return nil
+	}
+	rows := prefRows(m.Data.Prefs)
+	if n >= 0 && n < len(rows) {
+		s.sel = n
+	}
+	return nil
+}
+
+func (s *prefsScreen) Wheel(id string, down bool, m *Model) {
+	if id != "prefs.list" {
+		return
+	}
+	rows := prefRows(m.Data.Prefs)
+	if down {
+		if s.sel < len(rows)-1 {
+			s.sel++
+		}
+		return
+	}
+	if s.sel > 0 {
+		s.sel--
+	}
+}
+
+func (s *prefsScreen) notePrefHits(m *Model, rows []prefs.Descriptor, from, n, width int) {
+	indexes := prefLineIndexes(rows)
+	for i := 0; i < n; i++ {
+		idx := from + i
+		if idx < 0 || idx >= len(indexes) || indexes[idx] < 0 {
+			continue
+		}
+		m.addHit(m.hitX+1, m.hitY+1+i, width, 1, hitRow, fmt.Sprintf("pref:%d", indexes[idx]))
+	}
+}
+
+func prefLineIndexes(rows []prefs.Descriptor) []int {
+	out := make([]int, 0, len(rows)+4)
+	last := ""
+	for i, d := range rows {
+		if d.Group != last {
+			last = d.Group
+			out = append(out, -1)
+		}
+		out = append(out, i)
+	}
+	return out
 }
 
 func (s *prefsScreen) prefListLines(rows []prefs.Descriptor) []string {

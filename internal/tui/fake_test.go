@@ -381,10 +381,12 @@ func (p *pump) until(what string, cond func() bool) {
 	}
 }
 
-// idle waits until no resource is loading.
+// idle waits until no resource is loading and every load result already queued
+// has been applied. A follow-up load is started from the message that finishes
+// the one before it, so the queue has to be empty too.
 func (p *pump) idle() {
 	p.t.Helper()
-	p.until("loads to finish", func() bool { return len(p.m.inflight) == 0 })
+	p.until("loads to finish", func() bool { return len(p.m.inflight) == 0 && len(p.msgs) == 0 })
 }
 
 // loaded waits until each method has been called and its load has landed.

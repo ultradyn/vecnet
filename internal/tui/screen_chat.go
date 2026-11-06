@@ -226,6 +226,15 @@ type chatScreen struct {
 	top     int    // first message drawn
 	fileIdx int    // which of the selected message's files s saves
 
+	// othersOpen is the Other Threads section. It lasts for this session only.
+	othersOpen bool
+	otherLimit int
+	listTop    int
+	listH      int
+	listN      int
+	followList bool
+	whoFrom    int
+
 	drafts map[string]*chatDraft
 	readTo map[string]string // newest message each thread was marked read at, once the hub said so
 	// readAsk is the mark in flight per thread, and readFailed the newest
@@ -247,7 +256,7 @@ type chatScreen struct {
 }
 
 func newChatScreen() Screen {
-	return &chatScreen{follow: true, drafts: map[string]*chatDraft{}, readTo: map[string]string{}, readAsk: map[string]string{}, readFailed: map[string]string{}, answers: map[string]chatAnswerState{}, newKeys: map[chatNewAttempt]string{}}
+	return &chatScreen{follow: true, othersOpen: true, otherLimit: otherPage, followList: true, drafts: map[string]*chatDraft{}, readTo: map[string]string{}, readAsk: map[string]string{}, readFailed: map[string]string{}, answers: map[string]chatAnswerState{}, newKeys: map[chatNewAttempt]string{}}
 }
 
 func (s *chatScreen) Title() string { return "chat" }
@@ -267,9 +276,9 @@ func (s *chatScreen) Hints() string {
 		return "j/k scroll  pgup/pgdn page  esc close"
 	}
 	if s.narrow {
-		return "i [ ] j/k R a e m s f :react"
+		return "i [ ] j/k R a e m s f o :react"
 	}
-	return "i write  [ ] thread  j/k select  R reply  a answer  e expand  m matrix  s save  f file  :react"
+	return "i write  [ ] thread  j/k select  o other  R reply  a answer  e expand  m matrix  s save  f file  :react"
 }
 
 // Update also registers :msg: the first message is the first moment a screen
@@ -348,7 +357,7 @@ func (s *chatScreen) track(m *Model) {
 	if s.thread == m.CurrentThread {
 		return
 	}
-	s.thread, s.sel, s.follow, s.top, s.fileIdx, s.overlay = m.CurrentThread, "", true, 0, 0, chatNoOverlay
+	s.thread, s.sel, s.follow, s.top, s.fileIdx, s.overlay, s.whoFrom = m.CurrentThread, "", true, 0, 0, chatNoOverlay, 0
 	delete(s.readFailed, m.CurrentThread) // reopening retries a failed mark
 	if s.prompt != nil {
 		s.prompt = nil
@@ -363,8 +372,11 @@ func (s *chatScreen) sync(m *Model) tea.Cmd {
 	if m.active() != s || m.Help || m.stopped() {
 		return nil
 	}
-	if rows := m.Data.Threads.Threads; m.CurrentThread == "" && len(rows) > 0 {
-		return m.OpenThread(rows[0].Thread.ThreadID)
+	if m.CurrentThread == "" {
+		if ids := s.selectable(m); len(ids) > 0 {
+			s.followList = true
+			return m.OpenThread(ids[0])
+		}
 	}
 	st := m.Data.Thread[m.CurrentThread]
 	if st == nil || st.Loading || len(st.Messages) == 0 {
@@ -444,14 +456,22 @@ func (s *chatScreen) move(st *ThreadState, by int) {
 
 // step opens the thread by places from the current one in the list.
 func (s *chatScreen) step(m *Model, by int) tea.Cmd {
-	rows := m.Data.Threads.Threads
-	i := slices.IndexFunc(rows, func(r opapi.ThreadRow) bool { return r.Thread.ThreadID == m.CurrentThread })
+	ids := s.selectable(m)
+	i := slices.Index(ids, m.CurrentThread)
 	next := i + by
-	if next < 0 || next >= len(rows) {
+	if i < 0 {
+		if by < 0 {
+			next = len(ids) - 1
+		} else {
+			next = 0
+		}
+	}
+	if next < 0 || next >= len(ids) {
 		return nil
 	}
-	cmd := m.OpenThread(rows[next].Thread.ThreadID)
+	cmd := m.OpenThread(ids[next])
 	s.track(m)
+	s.followList = true
 	return cmd
 }
 
@@ -477,6 +497,13 @@ func (s *chatScreen) onKey(msg tea.KeyPressMsg, m *Model) tea.Cmd {
 		return s.step(m, -1)
 	case "]":
 		return s.step(m, 1)
+	case "o":
+		s.othersOpen = !s.othersOpen
+		s.followList = true
+	case "ctrl+u":
+		s.Wheel("chat.list", false, m)
+	case "ctrl+d":
+		s.Wheel("chat.list", true, m)
 	case "j", "down":
 		s.move(st, 1)
 	case "k", "up":
@@ -1451,9 +1478,11 @@ func (s *chatScreen) View(m *Model, w, h int) string {
 	listW := min(max(w*25/140, 14), 30)
 	whoW := min(max(w*30/140, 22), 34)
 	logW := w - listW - whoW
-	list := Pane("threads [ ]", listW, paneH, false, s.viewList(m, listW-2, paneH-2))
+	list := Pane("threads [ ]", listW, paneH, false, s.renderList(m, listW, paneH))
 	log := Pane(chatLogTitle(m, logW), logW, paneH, true, s.viewLog(m, st, logW-2, paneH-2))
 	who := Pane("who", whoW, paneH, false, s.viewWho(m, st, whoW-2, paneH-2))
+	m.addHit(m.hitX+listW, m.hitY, logW, paneH, hitScroll, "chat.log")
+	m.addHit(m.hitX+listW+logW, m.hitY, whoW, paneH, hitScroll, "chat.who")
 	out := lipgloss.JoinHorizontal(lipgloss.Top, list, log, who) + "\n"
 	if chips != "" {
 		out += chips + "\n"
@@ -1539,26 +1568,6 @@ func chatLogTitle(m *Model, w int) string {
 		facts += " · cut " + Clean(row.Cut.Reason)
 	}
 	return ansi.Truncate(chatTitleOf(row.Thread), max(w-5-lipgloss.Width(facts), 8), "…") + facts
-}
-
-func (s *chatScreen) viewList(m *Model, w, h int) string {
-	rows := m.Data.Threads.Threads
-	if len(rows) == 0 {
-		return styleMuted.Render("no threads yet")
-	}
-	current := max(slices.IndexFunc(rows, func(r opapi.ThreadRow) bool { return r.Thread.ThreadID == m.CurrentThread }), 0)
-	first := max(current-h+1, 0)
-	lines := make([]string, 0, h)
-	for i := first; i < len(rows) && i < first+h; i++ {
-		text := fmt.Sprintf("%d %s", i+1, chatTitleOf(rows[i].Thread))
-		text = fit(ansi.Truncate(text, w, "…"), w)
-		if rows[i].Thread.ThreadID == m.CurrentThread {
-			lines = append(lines, styleText.Background(colorPick).Render(text))
-		} else {
-			lines = append(lines, styleText.Render(text))
-		}
-	}
-	return strings.Join(lines, "\n")
 }
 
 // chatSeg is a run of cleaned text in one style.
@@ -2112,6 +2121,14 @@ func (s *chatScreen) viewWho(m *Model, st *ThreadState, w, h int) string {
 		filesRows = shownFiles + 2
 	}
 	participants := row.Thread.Participants
+	maxFrom := max(len(participants)-1, 0)
+	if s.whoFrom < 0 {
+		s.whoFrom = 0
+	}
+	if s.whoFrom > maxFrom {
+		s.whoFrom = maxFrom
+	}
+	participants = participants[s.whoFrom:]
 	room := max(h-1-filesRows, 1)
 	shownPeers := min(len(participants), room)
 	if shownPeers < len(participants) {

@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"math"
+	"net"
 	"strings"
 	"time"
 	"unicode"
@@ -107,6 +108,7 @@ func (m *Model) render() string {
 	if w <= 0 || h <= 0 {
 		return ""
 	}
+	m.hits = m.hits[:0]
 	small := w < minW || h < minH
 	// Below four rows there is no body row between the bars, so the too-small
 	// line takes the whole frame.
@@ -120,6 +122,10 @@ func (m *Model) render() string {
 	}
 	if banner != "" {
 		bodyH--
+	}
+	m.hitX, m.hitY = 0, 1
+	if banner != "" {
+		m.hitY = 2
 	}
 	var body string
 	switch {
@@ -139,51 +145,157 @@ func (m *Model) render() string {
 	return strings.Join(append(rows, block(body, w, bodyH), m.viewStatus(w), m.viewCommandLine(w)), "\n")
 }
 
-// viewTop is `vecnet | 1:inbox 2:chat 3:dash 4:subs` and the hub's state.
+// viewTop is `vecnet | 1:inbox 2:chat 3:dash 4:subs` and, always, the profile
+// and hub. The profile line is never the thing that drops: connection, counts
+// and the clock give way first, in the same order they used to after the hub.
 func (m *Model) viewTop(w int) string {
 	var left strings.Builder
-	left.WriteString(styleBrand.Render(" vecnet ") + styleMuted.Render("| "))
+	cell := 0
+	write := func(s string) {
+		left.WriteString(s)
+		cell += lipgloss.Width(s)
+	}
+	write(styleBrand.Render(" vecnet "))
+	write(styleMuted.Render("| "))
 	for i, s := range m.screens {
 		if i > 0 {
-			left.WriteString(" ")
+			write(" ")
 		}
 		label := fmt.Sprintf("%d:%s", i+1, s.Title())
+		var styled string
 		if i == m.Tab && !m.prefsOn {
-			left.WriteString(styleTabOn.Render(label))
+			styled = styleTabOn.Render(label)
 		} else {
-			left.WriteString(styleMuted.Render(label))
+			styled = styleMuted.Render(label)
 		}
+		m.addHit(cell, 0, lipgloss.Width(styled), 1, hitTab, fmt.Sprint(i))
+		write(styled)
 	}
 	if m.prefsOn {
-		left.WriteString(" ")
-		left.WriteString(styleTabOn.Render("prefs"))
+		write(" ")
+		write(styleTabOn.Render("prefs"))
 	}
 	apr, dlq := len(m.Data.Inbox.Approvals), len(m.Data.Inbox.DeadLetters)
-	// Dropped from the front as the bar narrows, so the connection state and
-	// what needs the operator survive at 80 columns.
-	parts := []string{
-		styleMuted.Render("hub " + hubHost(m.Hub)),
+	// Display order after the profile: conn, apr, dlq, cuts, clock.
+	// The connection state stays, as it did before the profile took the hub's
+	// old slot. Cuts, the clock, dlq and apr give way first.
+	extras := []string{
+		m.connStyle().Render(m.Conn),
+		countStyle(apr, styleWarn).Render(fmt.Sprintf("apr %d", apr)),
+		countStyle(dlq, styleBad).Render(fmt.Sprintf("dlq %d", dlq)),
 		styleMuted.Render(fmt.Sprintf("cuts/24h %d", m.Data.Cuts.Total)),
 		styleText.Render(m.HubNow().In(m.loc).Format("15:04:05")),
-		countStyle(dlq, styleBad).Render(fmt.Sprintf("dlq %d", dlq)),
-		countStyle(apr, styleWarn).Render(fmt.Sprintf("apr %d", apr)),
-		m.connStyle().Render(m.Conn),
 	}
-	order := []int{0, 5, 4, 3, 1, 2} // left to right: hub, conn, apr, dlq, cuts, clock
-	room := w - lipgloss.Width(left.String()) - 1
-	for drop := 0; drop < len(parts); drop++ {
-		var shown []string
-		for _, i := range order {
-			if i >= drop {
-				shown = append(shown, parts[i])
+	display := []int{0, 1, 2, 3, 4}
+	survive := []int{0, 1, 2, 4, 3} // conn, apr, dlq, clock, cuts
+	leftPlain := left.String()
+	leftW := lipgloss.Width(leftPlain)
+	// Two columns stay between the tabs and the profile, so an 80-column bar
+	// never glues the profile name onto "4:subs".
+	const headerGap = 2
+	place := func(label string, minKeep int) (string, bool) {
+		id := styleMuted.Render(label)
+		for n := len(survive); n >= minKeep; n-- {
+			keep := map[int]bool{}
+			for _, i := range survive[:n] {
+				keep[i] = true
+			}
+			shown := []string{id}
+			for _, i := range display {
+				if keep[i] {
+					shown = append(shown, extras[i])
+				}
+			}
+			right := strings.Join(shown, "  ") + "  "
+			if rw := lipgloss.Width(right); leftW+headerGap+rw <= w {
+				return leftPlain + strings.Repeat(" ", w-leftW-rw) + right, true
 			}
 		}
-		right := strings.Join(shown, "  ") + " "
-		if width := lipgloss.Width(right); width <= room {
-			return left.String() + strings.Repeat(" ", w-lipgloss.Width(left.String())-width) + right
-		}
+		return "", false
 	}
-	return fit(left.String(), w)
+	full := profileHubLabel(m.Profile, m.Hub)
+	if line, ok := place(full, 1); ok {
+		return line
+	}
+	// The short form still has the profile and the host. It is how a long
+	// connection state fits beside them at 80 columns.
+	compact := compactHubLabel(m.Profile, m.Hub)
+	if line, ok := place(compact, 1); ok {
+		return line
+	}
+	// The connection state stays on the right. A :port gives up cells before
+	// the host name does.
+	tail := "  " + extras[0] + "  "
+	room := w - leftW - headerGap - lipgloss.Width(tail)
+	label := shrinkHubLabel(compact, room)
+	right := styleMuted.Render(label) + tail
+	if gap := w - leftW - lipgloss.Width(right); gap >= headerGap {
+		return leftPlain + strings.Repeat(" ", gap) + right
+	}
+	return fit(leftPlain+"  "+right, w)
+}
+
+// shrinkHubLabel fits a compact profile·host label into room cells. A trailing
+// :port goes first, so the host name is still readable beside a long
+// connection state.
+func shrinkHubLabel(label string, room int) string {
+	if room < 1 {
+		return ""
+	}
+	if lipgloss.Width(label) <= room {
+		return label
+	}
+	if i := strings.LastIndex(label, ":"); i > 0 {
+		if cut := label[:i]; lipgloss.Width(cut) <= room {
+			return cut
+		}
+		label = label[:i]
+	}
+	return ansi.Truncate(label, room, "…")
+}
+
+// profileHubLabel is the header's profile and hub. A loopback hub is marked
+// local so a dev hub cannot be mistaken for the one on Fly.
+func profileHubLabel(profile, hub string) string {
+	name := Clean(profile)
+	if name == "" {
+		name = "profile"
+	}
+	host := hubHost(hub)
+	label := name + " · hub " + host
+	if loopbackHost(host) {
+		label += " local"
+	}
+	return label
+}
+
+// compactHubLabel is profileHubLabel without the word hub, for a full bar.
+func compactHubLabel(profile, hub string) string {
+	name := Clean(profile)
+	if name == "" {
+		name = "profile"
+	}
+	host := hubHost(hub)
+	label := name + "·" + host
+	if loopbackHost(host) {
+		label += " local"
+	}
+	return label
+}
+
+// loopbackHost reports a loopback host, with or without a port. LAN addresses
+// are not local: only 127.0.0.0/8, ::1 and the name localhost.
+func loopbackHost(host string) bool {
+	h := host
+	if name, _, err := net.SplitHostPort(host); err == nil {
+		h = name
+	}
+	h = strings.Trim(h, "[]")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
 func countStyle(n int, hot lipgloss.Style) lipgloss.Style {
@@ -232,7 +344,7 @@ func (m *Model) viewCommandLine(w int) string {
 		}
 		return fit(styleGood.Render(m.toast.text), w)
 	}
-	return fit(styleMuted.Render(": command  ? help"), w)
+	return fit(styleMuted.Render(": command  ? help  Shift+drag selects text"), w)
 }
 
 // viewFirstLoad holds the body until the first load ends. It says connecting

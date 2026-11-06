@@ -1,4 +1,4 @@
- vecnet | 1:inbox 2:chat 3:dash 4:subs live  apr 2  dlq 3  cuts/24h 7  07:41:00 
+ vecnet | 1:inbox 2:chat 3:dash 4:subs       home · hub hub.example:8443  live  
 ┌─ inbox ──────────────────────────────────────────────────────────────────────┐
 │body of inbox                                                                 │
 │                                                                              │
@@ -21,4 +21,4 @@
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
  NORMAL   j/k move  a answer                   max@vecnet · working · prio wake 
-: command  ? help                                                               
+: command  ? help  Shift+drag selects text                                      

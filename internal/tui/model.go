@@ -87,6 +87,13 @@ type Model struct {
 	Profile, Hub string
 	// Prio is the priority a new message from this client would carry.
 	Prio string
+	// mouse is terminal mouse capture. M or :mouse off releases it. Shift+drag
+	// stays the terminal's native selection; this client draws none of its own.
+	mouse bool
+	// OtherLimit is how many Other Threads the chat list asks the hub for.
+	OtherLimit int
+	hits       []hit
+	hitX, hitY int
 	// Input is the command line's text; cmdline.go owns editing it.
 	Input string
 	// Help replaces the body with viewHelp.
@@ -132,27 +139,29 @@ func newModel(ctx context.Context, o Options) *Model {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	return &Model{
-		beatEvery: beatEvery,
-		slowEvery: min(slowEvery, beatEvery),
-		API:       o.API,
-		Profile:   o.Profile,
-		Hub:       o.Hub,
-		Now:       now,
-		Conn:      ConnConnecting,
-		Prio:      "wake",
-		Commands:  map[string]Command{},
-		Data:      Data{Thread: map[string]*ThreadState{}, Errs: map[string]error{}},
-		screens:   []Screen{newInboxScreen(), newChatScreen(), newDashScreen(), newSubsScreen()},
-		prefs:     &prefsScreen{},
-		loc:       time.Local,
-		ctx:       ctx,
-		cancel:    cancel,
-		inflight:  map[string]bool{},
-		dirty:     map[string]bool{},
-		first:     map[string]bool{},
-		accepting: map[string]bool{},
-		tailCh:    make(chan tea.Msg),
-		stopTail:  func() {},
+		beatEvery:  beatEvery,
+		slowEvery:  min(slowEvery, beatEvery),
+		API:        o.API,
+		Profile:    o.Profile,
+		Hub:        o.Hub,
+		mouse:      true,
+		OtherLimit: otherPage,
+		Now:        now,
+		Conn:       ConnConnecting,
+		Prio:       "wake",
+		Commands:   map[string]Command{},
+		Data:       Data{Thread: map[string]*ThreadState{}, Errs: map[string]error{}},
+		screens:    []Screen{newInboxScreen(), newChatScreen(), newDashScreen(), newSubsScreen()},
+		prefs:      &prefsScreen{},
+		loc:        time.Local,
+		ctx:        ctx,
+		cancel:     cancel,
+		inflight:   map[string]bool{},
+		dirty:      map[string]bool{},
+		first:      map[string]bool{},
+		accepting:  map[string]bool{},
+		tailCh:     make(chan tea.Msg),
+		stopTail:   func() {},
 	}
 }
 
@@ -171,6 +180,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		return m, m.updateKey(msg)
+	case tea.MouseClickMsg, tea.MouseWheelMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
+		return m, m.updateMouse(msg)
 	case tea.PasteMsg:
 		return m, m.updatePaste(msg)
 	case tea.WindowSizeMsg:
@@ -214,6 +225,9 @@ func (m *Model) View() tea.View {
 	v.AltScreen = true
 	v.BackgroundColor = colorBg
 	v.ForegroundColor = colorText
+	if m.mouse {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	return v
 }
 

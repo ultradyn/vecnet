@@ -1,4 +1,4 @@
- vecnet | 1:inbox 2:chat 3:dash 4:subs                                       hub hub.example:8443  live  apr 2  dlq 3  cuts/24h 0  07:41:00 
+ vecnet | 1:inbox 2:chat 3:dash 4:subs                               home · hub hub.example:8443  live  apr 2  dlq 3  cuts/24h 0  07:41:00  
 ┌─ inbox 12 items · 2 unread · apr 2 · dlq 3 ───────────────────────────────┐┌─ detail ────────────────────────────────────────────────────┐
 │ APR  07:52 dot-research    Spend about 20% of my weekly quota… exp 11:39  ││ dead_letter  retries exhausted                              │
 │ APR  07:59 claw-ops        Push classifier fix to hark master… exp 18:59  ││                                                             │
@@ -39,4 +39,4 @@
 │                                                                           ││                                                             │
 └───────────────────────────────────────────────────────────────────────────┘└─────────────────────────────────────────────────────────────┘
  NORMAL   j/k move  a answer  r retry  x discard  p presence  enter open  ? help                           max@vecnet · working · prio wake 
-: command  ? help                                                                                                                           
+: command  ? help  Shift+drag selects text                                                                                                  

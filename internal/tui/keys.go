@@ -49,6 +49,14 @@ func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "ctrl+l":
 		return m.reloadAll()
+	case "M":
+		// One key releases capture. :mouse on takes it back. Insert mode never
+		// reaches here, so M still types in a composer.
+		if m.mouse {
+			m.mouse = false
+			m.Toast("mouse off; :mouse on captures again. Shift+drag selects text", false)
+		}
+		return nil
 	}
 	return m.active().Update(msg, m)
 }

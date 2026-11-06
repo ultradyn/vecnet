@@ -8,9 +8,14 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/XertroV/vecnet/internal/tui"
 )
 
 // Profile is one [profiles.<name>] table of the config file: a hub origin
@@ -114,6 +119,89 @@ func (c Config) profile(name string) (string, Profile, error) {
 		return "", Profile{}, usageErr(fmt.Sprintf("profile %q needs hub and secret", name))
 	}
 	return name, p, nil
+}
+
+var (
+	operatorProfileName   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+	operatorProfileAssign = regexp.MustCompile(`^[ \t]*operator_profile[ \t]*=`)
+)
+
+// setOperatorProfile rewrites only the operator_profile assignment. Comments,
+// secrets and every other line stay byte for byte. A missing assignment is
+// inserted at the top. A missing file becomes that one line.
+func setOperatorProfile(path, name string) error {
+	if !operatorProfileName.MatchString(name) {
+		return usageErr(fmt.Sprintf("operator_profile %q is not a profile name", name))
+	}
+	repl := "operator_profile = " + strconv.Quote(name)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return writeFileAtomic(path, []byte(repl+"\n"))
+		}
+		return fmt.Errorf("read config %s: %w", path, err)
+	}
+	if len(raw) == 0 {
+		return writeFileAtomic(path, []byte(repl+"\n"))
+	}
+	type line struct {
+		body string
+		nl   string
+	}
+	var lines []line
+	rest := string(raw)
+	for rest != "" {
+		i := strings.IndexByte(rest, '\n')
+		if i < 0 {
+			lines = append(lines, line{body: rest})
+			break
+		}
+		body := rest[:i]
+		nl := "\n"
+		if strings.HasSuffix(body, "\r") {
+			body = strings.TrimSuffix(body, "\r")
+			nl = "\r\n"
+		}
+		lines = append(lines, line{body: body, nl: nl})
+		rest = rest[i+1:]
+	}
+	found := false
+	var b strings.Builder
+	for _, ln := range lines {
+		body := ln.body
+		if operatorProfileAssign.MatchString(body) {
+			found = true
+			body = repl
+		}
+		b.WriteString(body)
+		b.WriteString(ln.nl)
+	}
+	out := b.String()
+	if !found {
+		head := repl + "\n"
+		if bytes.Contains(raw, []byte("\r\n")) {
+			head = repl + "\r\n"
+		}
+		out = head + string(raw)
+	}
+	return writeFileAtomic(path, []byte(out))
+}
+
+// operatorProfiles lists profiles that hold an operator credential, by name.
+// The secret never leaves this process: a choice is a name and a hub host.
+func operatorProfiles(c Config) []tui.ProfileChoice {
+	names := make([]string, 0, len(c.Profiles))
+	for name, p := range c.Profiles {
+		if isOperatorSecret(p.Secret) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	out := make([]tui.ProfileChoice, len(names))
+	for i, name := range names {
+		out[i] = tui.ProfileChoice{Name: name, Hub: c.Profiles[name].Hub}
+	}
+	return out
 }
 
 // writeFileAtomic writes data to a temp file beside path and renames it

@@ -1,4 +1,4 @@
- vecnet | 1:inbox 2:chat 3:dash 4:subs 8           live  apr 2  dlq 3  07:41:00 
+ vecnet | 1:inbox 2:chat 3:dash 4:subs 8     home · hub hub.example:8443  live  
 ┌─ subs · 9 rows ──────────────────────────────────────────────────────────────┐
 │  peer         health           expires in           last refresh  last status│
 │  fine-dot     ok               1h 0m                02/11 07:36   200        │
@@ -21,4 +21,4 @@
 │verified 02/11/2026 06:41:00  last delivery 02/11/2026 07:40:00               │
 └──────────────────────────────────────────────────────────────────────────────┘
  NORMAL   j/k move  read-only                  max@vecnet · working · prio wake 
-: command  ? help                                                               
+: command  ? help  Shift+drag selects text                                      

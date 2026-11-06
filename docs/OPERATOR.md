@@ -15,7 +15,7 @@ hub = "https://YOUR-HUB"
 secret = "REPLACE_WITH_OPERATOR_SECRET"
 ```
 
-Keep the file private (`chmod 600 ~/.config/vecnet/config.toml`). Start `vecnet tui` (or `vecnet --net operator tui`) in a terminal at least 80 columns by 24 rows. There is no interactive password prompt in the TUI. Change the profile credential and restart after rotation. `--net` selects a profile; `--as` is unnecessary for an operator credential.
+Keep the file private (`chmod 600 ~/.config/vecnet/config.toml`). Start `vecnet tui` (or `vecnet --net operator tui`) in a terminal at least 80 columns by 24 rows. The header always shows the profile name and the hub host; a loopback hub is marked `local`. `vecnet tui --pick`, and a bare `vecnet tui` when `operator_profile` is unset, list only profiles that hold a `vn_operator_` credential and their hub hosts. Choosing one runs it for this session. Answering `y` rewrites only the `operator_profile` line; `n` does not write the file. There is no last-used profile file. There is no interactive password prompt in the TUI. Change the profile credential and restart after rotation. `--net` selects a profile; `--as` is unnecessary for an operator credential.
 
 ### Bare `vecnet` is yours, not your agents'
 
@@ -63,7 +63,7 @@ The web inbox has an unread filter and Load older pagination. A web thread opens
 
 ## Read and send in chat
 
-Select a thread from the list or follow an inbox link. The web sidebar has Your Threads (threads you are in) and, below it, Other Threads: the 50 most recently active threads you are not in, with participants, message count and last activity. Both lists use the same two-line rows. An untitled thread is named by its participants in muted italics: `A ↔ B` for two peers, `A, B, C` or `A, B +2` for a group, leaving you out, so a 1:1 reads as the other peer's name; its second line gives the participant count. Thread headers and the dashboard use the same name. Other Threads updates live from the hub's operator activity feed, and re-reads when you act and when the tab is shown again; Show more adds 50 at a time up to 200, past which the dashboard lists every thread. Opening another thread lets you read it; sending in it adds you. Replies stay in the same flat thread; start a new message for a new topic. A quoted parent jumps to the original message. The participant panel shows presence and reachability separately; the files panel shows thread attachments, including automatically spilled `message.md` bodies. Show full text expands a text attachment; Download saves its bytes. Peer text stays literal in both clients.
+Select a thread from the list or follow an inbox link. The web sidebar has Your Threads (threads you are in) and, below it, Other Threads: the 50 most recently active threads you are not in, with participants, message count and last activity. Both lists are last activity, newest first. Your Threads stays in the hub's order (`GET /v1/admin/threads?participant=<you>`), which is already last activity newest first. Other Threads uses that same order on the client: `last_message_at` descending, then thread id descending. Unread counts are the inbox head's `unread_by_thread` and appear only on Your Threads; past 99 the badge reads `99+`. The TUI chat list follows this. Other Threads collapses for the session only. Both lists use the same two-line rows. An untitled thread is named by its participants in muted italics: `A ↔ B` for two peers, `A, B, C` or `A, B +2` for a group, leaving you out, so a 1:1 reads as the other peer's name; its second line gives the participant count. Thread headers and the dashboard use the same name. Other Threads updates live from the hub's operator activity feed, and re-reads when you act and when the tab is shown again; Show more adds 50 at a time up to 200, past which the dashboard lists every thread. Opening another thread lets you read it; sending in it adds you. Replies stay in the same flat thread; start a new message for a new topic. A quoted parent jumps to the original message. The participant panel shows presence and reachability separately; the files panel shows thread attachments, including automatically spilled `message.md` bodies. Show full text expands a text attachment; Download saves its bytes. Peer text stays literal in both clients.
 
 Receipt markers show each recipient's queued, pushed, accepted, processed, read or failed state. Open the delivery matrix for the full message-by-recipient view and failure details. A read marker overlays accepted/pushed transport state; it is not proof that a bot processed the message.
 
@@ -165,11 +165,12 @@ Subscription health never changes the peer's presence. The TUI subs tab and web 
 |---|---|---|
 | Global, normal mode | `1`–`4` | Inbox, chat, dashboard, subscriptions. |
 | Global | `?`, `Ctrl+L`, `:` | Help, reload all views, command line. Help also lists the current tab's hints and commands. |
+| Global | click, wheel, `M`, `:mouse off` | Click a tab, row or button. The wheel scrolls the pane under the pointer. `M` or `:mouse off` releases mouse capture; `:mouse on` takes it back. Shift+drag selects text with the terminal. The keyboard still does everything the mouse does. |
 | Normal mode | `q`, `Ctrl+C`, `Ctrl+Q` | Quit. In insert mode Ctrl+C/Ctrl+Q ask before discarding the draft; `y` confirms. Literal `q` types text in insert mode. |
 | Inbox | `j`/`k` or arrows; Enter | Move and open the selected thread. |
 | Inbox | `a`, then option digit | Answer selected approval; any other key cancels. |
 | Inbox | `r`, `x`, `p` | Retry delivery/resume eligible subscription; confirm discard with `y`; toggle idle/working. |
-| Chat, normal mode | `[`/`]`, `j`/`k` | Previous/next thread; select messages. |
+| Chat, normal mode | `[`/`]`, `j`/`k`, `o`, Ctrl+U/Ctrl+D | Previous/next thread (the selection scrolls into view); select messages; collapse Other Threads for this session; scroll the thread list. The list also scrolls with the wheel. |
 | Chat, normal mode | `i`, `R`, `a` | Write, reply to selected message, answer approval. |
 | Chat, insert mode | Enter, Tab, Esc | Send, cycle priority, leave insert mode. |
 | Chat | `m`, `e`, `f`, `s` | Matrix, expanded text pager, files, save attachment. |
@@ -178,7 +179,7 @@ Subscription health never changes the peer's presence. The TUI subs tab and web 
 | Subscriptions | `j`/`k` | Select row for details. |
 | Command line | Tab, Up/Down, Enter, Esc | Complete command names, browse history, run, cancel. Arguments split on whitespace; there is no shell quoting or execution. |
 
-Commands: `:attach PATH`, `:attach`, `:detach N`, `:detach` (see [Attachments](#attachments)), `:q`, `:refresh`, `:presence idle|working|blocked|offline`, `:retry all`, `:thread N` (one-based chat-list position), `:tab inbox|chat|dash|subs`, and `:msg PEER_PREFIX TEXT` (one unambiguous peer-id prefix, starts a thread). `:retry all` reports successful and failed retries individually in its summary; it cannot discard deliveries.
+Commands: `:attach PATH`, `:attach`, `:detach N`, `:detach` (see [Attachments](#attachments)), `:q`, `:refresh`, `:presence idle|working|blocked|offline`, `:retry all`, `:thread N` (one-based chat-list position), `:tab inbox|chat|dash|subs`, `:mouse on|off`, and `:msg PEER_PREFIX TEXT` (one unambiguous peer-id prefix, starts a thread). `:retry all` reports successful and failed retries individually in its summary; it cannot discard deliveries.
 
 ## Dashboard and administration
 

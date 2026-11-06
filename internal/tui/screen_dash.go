@@ -61,6 +61,10 @@ type dashScreen struct {
 	focus        dashFocus
 	peer, thread string
 	narrow       *dashNarrow
+	peerVis      []string
+	peerRowAt    int
+	threadVis    []string
+	threadRowAt  int
 }
 
 // dashNarrow is the thread pane narrowed to one peer. The shell's Data.Threads
@@ -284,11 +288,53 @@ func (d *dashScreen) View(m *Model, w, h int) string {
 	top, topH := d.viewPeers(m, w, h)
 	bottomH := h - topH
 	threadsW, healthW, auditW := (w+2)/3, (w+1)/3, w/3
+	threads := d.viewThreads(m, names, threadsW, bottomH)
+	d.noteHits(m, w, topH, threadsW, bottomH)
 	return top + "\n" + lipgloss.JoinHorizontal(lipgloss.Top,
-		d.viewThreads(m, names, threadsW, bottomH),
+		threads,
 		viewDashHealth(m, names, healthW, bottomH),
 		viewDashAudit(m, names, auditW, bottomH),
 	)
+}
+
+func (d *dashScreen) noteHits(m *Model, w, topH, threadsW, bottomH int) {
+	m.addHit(m.hitX, m.hitY, w, topH, hitScroll, "dash.peers")
+	for i, id := range d.peerVis {
+		m.addHit(m.hitX+1, m.hitY+1+d.peerRowAt+i, max(w-2, 1), 1, hitRow, "peer:"+id)
+	}
+	m.addHit(m.hitX, m.hitY+topH, threadsW, bottomH, hitScroll, "dash.threads")
+	for i, id := range d.threadVis {
+		m.addHit(m.hitX+1, m.hitY+topH+1+d.threadRowAt+i, max(threadsW-2, 1), 1, hitRow, "thread:"+id)
+	}
+}
+
+func (d *dashScreen) Click(id string, m *Model) tea.Cmd {
+	if pid, ok := strings.CutPrefix(id, "peer:"); ok {
+		d.peer = pid
+		d.focus = dashOnPeers
+		return nil
+	}
+	if tid, ok := strings.CutPrefix(id, "thread:"); ok {
+		d.thread = tid
+		d.focus = dashOnThreads
+		return nil
+	}
+	return nil
+}
+
+func (d *dashScreen) Wheel(id string, down bool, m *Model) {
+	by := 1
+	if !down {
+		by = -1
+	}
+	switch id {
+	case "dash.peers":
+		d.focus = dashOnPeers
+		d.move(m, by)
+	case "dash.threads":
+		d.focus = dashOnThreads
+		d.move(m, by)
+	}
 }
 
 // dashTitle tags a pane title while one of its resources is loading.
@@ -594,6 +640,7 @@ func (d *dashScreen) viewPeers(m *Model, w, h int) (string, int) {
 	height := min(len(failure)+1+max(len(peers), 1)+2, h*3/5)
 	title := dashTitle(m, fmt.Sprintf("peers · %d", len(peers)), "peers") + " · presence is self-reported, reach is hub-observed"
 	lines := slices.Clone(failure)
+	d.peerVis = d.peerVis[:0]
 	switch {
 	case len(peers) > 0:
 		cols := dashColsFor(inner)
@@ -601,7 +648,9 @@ func (d *dashScreen) viewPeers(m *Model, w, h int) (string, int) {
 		size := max(height-2-len(lines), 1)
 		cursor := d.peerIndex(m)
 		start := dashWindow(cursor, len(peers), size)
+		d.peerRowAt = len(lines)
 		for i := start; i < min(start+size, len(peers)); i++ {
+			d.peerVis = append(d.peerVis, peers[i].Peer.PeerID)
 			lines = append(lines, dashPeerLine(m, cols, peers[i], i == cursor))
 		}
 	case failure == nil:
@@ -649,12 +698,15 @@ func (d *dashScreen) viewThreads(m *Model, names dashNames, w, h int) string {
 		title = label + " · loading"
 	}
 	lines := slices.Clone(failure)
+	d.threadVis = d.threadVis[:0]
 	switch {
 	case len(rows) > 0:
 		size := max(h-2-len(lines), 1)
 		cursor := d.threadIndex(rows)
 		start := dashWindow(cursor, len(rows), size)
+		d.threadRowAt = len(lines)
 		for i := start; i < min(start+size, len(rows)); i++ {
+			d.threadVis = append(d.threadVis, rows[i].Thread.ThreadID)
 			lines = append(lines, d.threadLine(m, names, rows[i], inner, d.focus == dashOnThreads && i == cursor))
 		}
 	case !done && failure == nil:

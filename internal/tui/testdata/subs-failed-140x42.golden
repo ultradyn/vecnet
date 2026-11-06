@@ -1,4 +1,4 @@
- vecnet | 1:inbox 2:chat 3:dash 4:subs 8                                     hub hub.example:8443  live  apr 2  dlq 3  cuts/24h 7  07:41:00 
+ vecnet | 1:inbox 2:chat 3:dash 4:subs 8                             home · hub hub.example:8443  live  apr 2  dlq 3  cuts/24h 7  07:41:00  
 ┌─ subs · 9 rows ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │load failed: hub said no; showing the last data                                                                                           │
 │  peer               host                        health           expires in           last refresh  last status  attempts  cursor        │
