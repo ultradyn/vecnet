@@ -13,6 +13,10 @@ import (
 	"time"
 )
 
+func unsafeCodexBindings(path, why string) error {
+	return usageErr("unsafe codex bindings file " + path + ": " + why + "; make it yours with mode 0600 (and check its rows), or remove it")
+}
+
 // codexBindingsPath is shared with the launcher connector's default path.
 func codexBindingsPath(getenv func(string) string) (string, error) {
 	config, err := configPath(getenv)
@@ -197,7 +201,7 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	}
 	defer unlock()
 	file := codexBindingsFile{Version: 1, Bindings: []codexBinding{}}
-	raw, err := os.ReadFile(path)
+	raw, err := readCodexBindings(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -288,14 +292,29 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 			if err != nil || limit < 1 || limit > 32 {
 				limit = 8
 			}
-			count := 0
+			// Stored homes were canonical at bind time but may since have become
+			// symlinks (a moved home), so resolve both sides. A stored home that
+			// no longer resolves keeps its slot: it might be this home.
+			count, unresolved := 0, 0
 			for _, b := range file.Bindings {
-				if b.CodexHome == binding.CodexHome && now.Before(b.ExpiresAt) {
+				if !now.Before(b.ExpiresAt) {
+					continue
+				}
+				home, err := filepath.EvalSymlinks(b.CodexHome)
+				switch {
+				case err != nil:
+					count++
+					unresolved++
+				case filepath.Clean(home) == binding.CodexHome:
 					count++
 				}
 			}
 			if count >= limit {
-				return usageErr(fmt.Sprintf("binding limit %d reached for %s; unbind one or raise VECNET_CODEX_MAX_BINDINGS", limit, binding.CodexHome))
+				msg := fmt.Sprintf("binding limit %d reached for %s; unbind one or raise VECNET_CODEX_MAX_BINDINGS", limit, binding.CodexHome)
+				if unresolved > 0 {
+					msg += fmt.Sprintf(" (%d counted binding(s) have a codex_home that no longer resolves; see `vecnet codex bindings`)", unresolved)
+				}
+				return usageErr(msg)
 			}
 			file.Bindings = append(file.Bindings, binding)
 		}

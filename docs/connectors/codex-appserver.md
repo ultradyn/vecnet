@@ -32,7 +32,7 @@ vecnet codex bindings
 - A binding lasts 24 h by default; `--ttl` takes 1 h to 168 h, and `--renew` extends it (again at most 168 h from now). Each thread, and each `profile@as`, has at most one binding.
 - The binding records the profile's hub and authenticated peer. If the profile later points at another hub or peer, delivery stops (`identity_changed`) until you bind again.
 - `--idle-dormant` (off by default) stops delivery after the thread has been idle that long. Background-terminal jobs read as idle, so leave it off for those.
-- Bindings live in `<config dir>/codex/bindings.json` (mode 0600), beside your vecnet config. The connector reads the file every 10 s, so bind, unbind and renew take effect within about 10 s. It refuses a file that is group- or world-accessible, or owned by another user. `VECNET_CODEX_BINDINGS` names another file (tests and the smoke use it).
+- Bindings live in `<config dir>/codex/bindings.json` (mode 0600), beside your vecnet config. The connector reads the file every 10 s, so bind, unbind and renew take effect within about 10 s. It refuses a file that is group- or world-accessible, or owned by another user. `codex bind`, `unbind` and `bindings` likewise refuse, and leave untouched, an existing file that is not a regular file, is owned by another user, or is group- or world-writable, so rows someone else could have edited never become opt-ins; an owner-owned 0644 file is accepted and rewritten 0600. `VECNET_CODEX_BINDINGS` names another file (tests and the smoke use it).
 
 The launcher daemon runs the connector. Its environment decides which bindings file it reads, and `VECNET_BIN` names the `vecnet` binary when `vecnet` is not on the unit's `PATH` (for example `Environment=VECNET_BIN=%h/.local/bin/vecnet` in a drop-in). With no bindings file the connector logs `codex_connector_disabled` once and does nothing.
 
@@ -77,7 +77,7 @@ The connector never answers an approval or a question, and never changes a threa
 
 ## Limits
 
-- At most 8 explicit bindings per Codex home are kept loaded (`VECNET_CODEX_MAX_BINDINGS`, 1 to 32). The oldest bindings by creation time win; the rest log `codex_binding_over_limit` and get nothing until a slot frees up. Homes are compared after resolving symlinks, so an alias cannot get round the limit. `codex bind` refuses a binding beyond the limit too.
+- At most 8 explicit bindings per Codex home are kept loaded (`VECNET_CODEX_MAX_BINDINGS`, 1 to 32). The oldest bindings by creation time win; the rest log `codex_binding_over_limit` and get nothing until a slot frees up. Homes are compared after resolving symlinks, so an alias cannot get round the limit. `codex bind` refuses a binding beyond the limit too; it resolves the homes already in the file as well (a home moved and replaced by a symlink still counts against its target), and a recorded home that no longer resolves keeps its slot until it is unbound or expires.
 - Launcher bindings (Codex jobs the launcher itself runs, a later launcher plugin) are held in memory only, never written to the bindings file, and do not count towards the limit. They end at the job's deadline or when the launcher removes them.
 - One delivery is delivered at most once: the connector claims it in the same shown-state the hooks use, and settles each send by its receipt in Codex's history, never by a timeout.
 
