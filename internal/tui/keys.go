@@ -5,6 +5,11 @@ import tea "charm.land/bubbletea/v2"
 // updateKey is the single place a key is routed. See Mode for who gets what.
 func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
+	// Ctrl+Z suspends where Bubble Tea can stop the process. On Windows the
+	// request is a no-op. A stop signal from another process is not handled.
+	if key == "ctrl+z" {
+		return tea.Suspend
+	}
 	if m.confirmQuit {
 		m.confirmQuit = false
 		if key == "y" {
@@ -49,6 +54,14 @@ func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "ctrl+l":
 		return m.reloadAll()
+	case "M":
+		// One key releases capture. :mouse on takes it back. Insert mode never
+		// reaches here, so M still types in a composer.
+		if m.mouse {
+			m.mouse = false
+			m.Toast("mouse off; :mouse on captures again. Shift+drag selects text", false)
+		}
+		return nil
 	}
 	return m.active().Update(msg, m)
 }

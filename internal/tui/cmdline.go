@@ -12,6 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -67,6 +68,7 @@ func builtinCommands() map[string]Command {
 		"retry":    {Help: "all  retry every listed dead letter", Run: runRetry},
 		"thread":   {Help: "<n>  nth thread in the chat list", Run: runThread},
 		"tab":      {Help: "<name>  switch tab", Run: runTab},
+		"mouse":    {Help: "on|off  release; Shift+drag selects text", Run: runMouse},
 	}
 }
 
@@ -332,12 +334,12 @@ func runThread(m *Model, args []string) tea.Cmd {
 	if err != nil {
 		return usage(m, "thread")
 	}
-	rows := m.Data.Threads.Threads
-	if n < 1 || n > len(rows) {
-		m.Toast(fmt.Sprintf("no thread %d: the chat list has %d", n, len(rows)), true)
+	ids := chatSelectableIDs(m)
+	if n < 1 || n > len(ids) {
+		m.Toast(fmt.Sprintf("no thread %d: the chat list has %d", n, len(ids)), true)
 		return nil
 	}
-	return m.OpenThread(rows[n-1].Thread.ThreadID)
+	return m.OpenThread(ids[n-1])
 }
 
 func runTab(m *Model, args []string) tea.Cmd {
@@ -362,7 +364,7 @@ var helpKeys = []helpRow{
 	{"1-4", "switch tab"},
 	{"q", "quit"},
 	{":", "command line"},
-	{"?", "this help; any key closes it"},
+	{"?", "help; M releases mouse; Shift+drag selects text"},
 	{"ctrl+l", "reload everything"},
 }
 
@@ -384,17 +386,17 @@ func viewHelp(m *Model) string {
 		for _, row := range rows {
 			width = max(width, lipgloss.Width(row.key))
 		}
-		lines := []string{styleAccent.Render(title)}
+		lines := []string{sectionLabel(m.th, title)}
 		for _, row := range rows {
-			lines = append(lines, "  "+styleText.Render(fit(row.key, width))+"  "+styleMuted.Render(row.text))
+			lines = append(lines, "  "+m.th.Fg(theme.Text).Render(fit(row.key, width))+"  "+m.th.Fg(theme.Muted).Render(row.text))
 		}
 		return lines
 	}
 	hints := ansi.Wordwrap(m.active().Hints(), max(m.W-4, minW-4), "")
 	lines := section("global keys", helpKeys)
-	lines = append(lines, "", styleAccent.Render(m.active().Title()))
+	lines = append(lines, sectionLabel(m.th, m.active().Title()))
 	for _, hint := range strings.Split(hints, "\n") {
-		lines = append(lines, "  "+styleMuted.Render(hint))
+		lines = append(lines, "  "+m.th.Fg(theme.Muted).Render(hint))
 	}
 	lines = append(lines, section("commands", commands)...)
 	return strings.Join(lines, "\n")

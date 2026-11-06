@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"io/fs"
 	"mime"
@@ -17,6 +16,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -26,6 +26,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 const (
@@ -57,23 +58,7 @@ const (
 	chatHintsWide = 140       // width at which every word of the hints still fits
 )
 
-var (
-	chatPrios = []string{"wake", "wake_idle", "hold"}
-	colorCyan = lipgloss.Color("#22d3ee")
-	colorPick = lipgloss.Color("#1e2a4a")
-	styleCyan = lipgloss.NewStyle().Foreground(colorCyan)
-	// styleAccepted is accepted's violet, as on the web and in a-chat.png, so
-	// accepted and processed differ by colour as well as by glyph.
-	styleAccepted = lipgloss.NewStyle().Foreground(lipgloss.Color("#818cf8"))
-	styleSender   = []lipgloss.Style{
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#818cf8")).Bold(true),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#34d399")).Bold(true),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#a3e635")).Bold(true),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")).Bold(true),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#c084fc")).Bold(true),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#22d3ee")).Bold(true),
-	}
-)
+var chatPrios = []string{"wake", "wake_idle", "hold"}
 
 type chatOverlay int
 
@@ -226,6 +211,15 @@ type chatScreen struct {
 	top     int    // first message drawn
 	fileIdx int    // which of the selected message's files s saves
 
+	// othersOpen is the Other Threads section. It lasts for this session only.
+	othersOpen bool
+	otherLimit int
+	listTop    int
+	listH      int
+	listN      int
+	followList bool
+	whoFrom    int
+
 	drafts map[string]*chatDraft
 	readTo map[string]string // newest message each thread was marked read at, once the hub said so
 	// readAsk is the mark in flight per thread, and readFailed the newest
@@ -247,7 +241,7 @@ type chatScreen struct {
 }
 
 func newChatScreen() Screen {
-	return &chatScreen{follow: true, drafts: map[string]*chatDraft{}, readTo: map[string]string{}, readAsk: map[string]string{}, readFailed: map[string]string{}, answers: map[string]chatAnswerState{}, newKeys: map[chatNewAttempt]string{}}
+	return &chatScreen{follow: true, othersOpen: true, otherLimit: otherPage, followList: true, drafts: map[string]*chatDraft{}, readTo: map[string]string{}, readAsk: map[string]string{}, readFailed: map[string]string{}, answers: map[string]chatAnswerState{}, newKeys: map[chatNewAttempt]string{}}
 }
 
 func (s *chatScreen) Title() string { return "chat" }
@@ -267,9 +261,9 @@ func (s *chatScreen) Hints() string {
 		return "j/k scroll  pgup/pgdn page  esc close"
 	}
 	if s.narrow {
-		return "i [ ] j/k R a e m s f :react"
+		return "i [ ] j/k R a e m s f o n ( ) :react"
 	}
-	return "i write  [ ] thread  j/k select  R reply  a answer  e expand  m matrix  s save  f file  :react"
+	return "i write  [ ] thread  j/k select  o other  n more  ( ) who  R reply  a answer  e expand  m matrix  s save  f file  :react"
 }
 
 // Update also registers :msg: the first message is the first moment a screen
@@ -348,7 +342,8 @@ func (s *chatScreen) track(m *Model) {
 	if s.thread == m.CurrentThread {
 		return
 	}
-	s.thread, s.sel, s.follow, s.top, s.fileIdx, s.overlay = m.CurrentThread, "", true, 0, 0, chatNoOverlay
+	s.followList = true
+	s.thread, s.sel, s.follow, s.top, s.fileIdx, s.overlay, s.whoFrom = m.CurrentThread, "", true, 0, 0, chatNoOverlay, 0
 	delete(s.readFailed, m.CurrentThread) // reopening retries a failed mark
 	if s.prompt != nil {
 		s.prompt = nil
@@ -363,8 +358,11 @@ func (s *chatScreen) sync(m *Model) tea.Cmd {
 	if m.active() != s || m.Help || m.stopped() {
 		return nil
 	}
-	if rows := m.Data.Threads.Threads; m.CurrentThread == "" && len(rows) > 0 {
-		return m.OpenThread(rows[0].Thread.ThreadID)
+	if m.CurrentThread == "" {
+		if ids := s.selectable(m); len(ids) > 0 {
+			s.followList = true
+			return m.OpenThread(ids[0])
+		}
 	}
 	st := m.Data.Thread[m.CurrentThread]
 	if st == nil || st.Loading || len(st.Messages) == 0 {
@@ -444,14 +442,22 @@ func (s *chatScreen) move(st *ThreadState, by int) {
 
 // step opens the thread by places from the current one in the list.
 func (s *chatScreen) step(m *Model, by int) tea.Cmd {
-	rows := m.Data.Threads.Threads
-	i := slices.IndexFunc(rows, func(r opapi.ThreadRow) bool { return r.Thread.ThreadID == m.CurrentThread })
+	ids := s.selectable(m)
+	i := slices.Index(ids, m.CurrentThread)
 	next := i + by
-	if next < 0 || next >= len(rows) {
+	if i < 0 {
+		if by < 0 {
+			next = len(ids) - 1
+		} else {
+			next = 0
+		}
+	}
+	if next < 0 || next >= len(ids) {
 		return nil
 	}
-	cmd := m.OpenThread(rows[next].Thread.ThreadID)
+	cmd := m.OpenThread(ids[next])
 	s.track(m)
+	s.followList = true
 	return cmd
 }
 
@@ -477,6 +483,18 @@ func (s *chatScreen) onKey(msg tea.KeyPressMsg, m *Model) tea.Cmd {
 		return s.step(m, -1)
 	case "]":
 		return s.step(m, 1)
+	case "o":
+		s.toggleOthers()
+	case "n":
+		return s.moreOthers(m)
+	case "(":
+		s.Wheel("chat.who", false, m)
+	case ")":
+		s.Wheel("chat.who", true, m)
+	case "ctrl+u":
+		s.Wheel("chat.list", false, m)
+	case "ctrl+d":
+		s.Wheel("chat.list", true, m)
 	case "j", "down":
 		s.move(st, 1)
 	case "k", "up":
@@ -689,6 +707,10 @@ func chatSendError(m *Model, id string, err error) string {
 
 // chatSendWhy is what went wrong, with no promise about what a key does.
 func chatSendWhy(m *Model, id string, err error) string {
+	return chatSendWhyText(m, id, err)
+}
+
+func chatSendWhyText(m *Model, id string, err error) string {
 	var e *opclient.Error
 	switch {
 	case !errors.As(err, &e):
@@ -713,6 +735,10 @@ func chatSendWhy(m *Model, id string, err error) string {
 
 // chatUploadWhy is what a chip says about a failed upload.
 func chatUploadWhy(m *Model, err error) string {
+	return chatUploadWhyText(m, err)
+}
+
+func chatUploadWhyText(m *Model, err error) string {
 	var e *opclient.Error
 	switch {
 	case !errors.As(err, &e):
@@ -870,14 +896,15 @@ func (a *chatAtt) chip(nameMax int) string {
 	return fmt.Sprintf("[..] %s %d%%", name, pct)
 }
 
-func (a *chatAtt) style() lipgloss.Style {
+// role is the chip's state: uploaded, failed, or still going.
+func (a *chatAtt) role() theme.Role {
 	switch a.state {
 	case chatAttDone:
-		return styleGood
+		return theme.Success
 	case chatAttFailed:
-		return styleBad
+		return theme.Error
 	}
-	return styleWarn
+	return theme.Warn
 }
 
 // onUploaded lands an upload on its chip, if the chip is still there.
@@ -1439,9 +1466,11 @@ func (s *chatScreen) View(m *Model, w, h int) string {
 	st := m.Data.Thread[m.CurrentThread]
 	switch {
 	case s.overlay == chatMatrix && st != nil:
+		m.addHit(m.hitX, m.hitY, w, h, hitScroll, "chat.matrix")
 		return s.viewMatrix(m, st, w, h)
 	case s.overlay == chatPager:
-		return s.viewReader(w, h)
+		m.addHit(m.hitX, m.hitY, w, h, hitScroll, "chat.pager")
+		return s.viewReader(m.th, w, h)
 	}
 	paneH := h - 1
 	chips := s.viewChips(m, w)
@@ -1451,9 +1480,11 @@ func (s *chatScreen) View(m *Model, w, h int) string {
 	listW := min(max(w*25/140, 14), 30)
 	whoW := min(max(w*30/140, 22), 34)
 	logW := w - listW - whoW
-	list := Pane("threads [ ]", listW, paneH, false, s.viewList(m, listW-2, paneH-2))
-	log := Pane(chatLogTitle(m, logW), logW, paneH, true, s.viewLog(m, st, logW-2, paneH-2))
-	who := Pane("who", whoW, paneH, false, s.viewWho(m, st, whoW-2, paneH-2))
+	list := Pane(m.th, "threads [ ]", listW, paneH, false, s.renderList(m, listW, paneH))
+	log := PaneRich(m.th, chatLogTitleRich(m, logW), logW, paneH, true, s.viewLog(m, st, logW-2, paneH-2))
+	who := Pane(m.th, "who", whoW, paneH, false, s.viewWho(m, st, whoW-2, paneH-2))
+	m.addHit(m.hitX+listW, m.hitY, logW, paneH, hitScroll, "chat.log")
+	m.addHit(m.hitX+listW+logW, m.hitY, whoW, paneH, hitScroll, "chat.who")
 	out := lipgloss.JoinHorizontal(lipgloss.Top, list, log, who) + "\n"
 	if chips != "" {
 		out += chips + "\n"
@@ -1483,12 +1514,12 @@ func (s *chatScreen) viewChips(m *Model, w int) string {
 		}
 		if used+len(sep)+lipgloss.Width(text)+len(more) > w {
 			if i > 0 {
-				b.WriteString(styleMuted.Render(fmt.Sprintf("%s+%d more", gap, len(d.atts)-i)))
+				b.WriteString(m.th.Fg(theme.Muted).Render(fmt.Sprintf("%s+%d more", gap, len(d.atts)-i)))
 				break
 			}
 			text = ansi.Truncate(text, max(w-len(more), 1), "...")
 		}
-		b.WriteString(sep + d.atts[i].style().Render(text))
+		b.WriteString(sep + m.th.Fg(d.atts[i].role()).Render(text))
 		used += len(sep) + lipgloss.Width(text)
 	}
 	return fit(b.String(), w)
@@ -1526,66 +1557,127 @@ func chatShort(id string) string {
 
 // chatLogTitle fits a pane w wide: the title gives way, so the budget stays.
 func chatLogTitle(m *Model, w int) string {
+	p := chatLogTitleParts(m, w)
+	return p.title + p.facts + p.budget + p.cut
+}
+
+// chatLogTitleRich is chatLogTitle styled: the thread's title as the focused
+// pane's title, its id muted, the budget in its §5.5 role, a loop cut in error.
+func chatLogTitleRich(m *Model, w int) string {
+	th := m.th
+	p := chatLogTitleParts(m, w)
+	out := PaneTitle(th, true).Render(p.title) + th.Fg(theme.Muted).Render(p.facts)
+	if p.budget != "" {
+		out += th.Fg(p.budgetRole).Render(p.budget)
+	}
+	if p.cut != "" {
+		out += th.Fg(theme.Error).Render(p.cut)
+	}
+	return out
+}
+
+// chatTitleParts is the log pane's title in its roles: the thread's title,
+// its id and the budget label (muted), the budget (the §5.5 thread budget
+// map) and a loop cut (error).
+type chatTitleParts struct {
+	title, facts, budget, cut string
+	budgetRole                theme.Role
+}
+
+func chatLogTitleParts(m *Model, w int) chatTitleParts {
 	row := chatRowOf(m, m.CurrentThread)
 	if row == nil {
-		return "chat"
+		return chatTitleParts{title: "chat"}
 	}
-	budget := "unlimited"
+	p := chatTitleParts{budget: "unlimited", budgetRole: theme.Muted}
 	if b := row.Thread.BudgetRemaining; b != nil {
-		budget = fmt.Sprint(*b)
+		p.budget, p.budgetRole = fmt.Sprint(*b), theme.Budget(*b, false)
 	}
-	facts := fmt.Sprintf("  %s · budget %s", chatShort(row.Thread.ThreadID), budget)
+	p.facts = fmt.Sprintf("  %s · budget ", chatShort(row.Thread.ThreadID))
 	if row.Cut != nil {
-		facts += " · cut " + Clean(row.Cut.Reason)
+		p.cut = " · cut " + Clean(row.Cut.Reason)
 	}
-	return ansi.Truncate(chatTitleOf(row.Thread), max(w-5-lipgloss.Width(facts), 8), "…") + facts
+	p.title = ansi.Truncate(chatTitleOf(row.Thread), max(w-5-lipgloss.Width(p.facts+p.budget+p.cut), 8), "…")
+	return p
 }
 
-func (s *chatScreen) viewList(m *Model, w, h int) string {
-	rows := m.Data.Threads.Threads
-	if len(rows) == 0 {
-		return styleMuted.Render("no threads yet")
-	}
-	current := max(slices.IndexFunc(rows, func(r opapi.ThreadRow) bool { return r.Thread.ThreadID == m.CurrentThread }), 0)
-	first := max(current-h+1, 0)
-	lines := make([]string, 0, h)
-	for i := first; i < len(rows) && i < first+h; i++ {
-		text := fmt.Sprintf("%d %s", i+1, chatTitleOf(rows[i].Thread))
-		text = fit(ansi.Truncate(text, w, "…"), w)
-		if rows[i].Thread.ThreadID == m.CurrentThread {
-			lines = append(lines, styleText.Background(colorPick).Render(text))
-		} else {
-			lines = append(lines, styleText.Render(text))
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-// chatSeg is a run of cleaned text in one style.
+// chatSeg is a run of cleaned text in one role. The role comes from the field
+// the text sits in, never from what it says (design §6.8).
 type chatSeg struct {
-	text  string
-	style lipgloss.Style
+	text string
+	role theme.Role
+	bold bool // a sender's name
 }
 
-// chatRow is one line of the log. Selection shades the whole line, so it has to
+// chatRow is one line of the log. Selection fills the whole line, so it has to
 // be applied per segment: a style's reset would end an outer background.
 type chatRow []chatSeg
 
-func (r chatRow) render(w int, selected bool) string {
+func (r chatRow) render(th *theme.Theme, w int, selected bool) string {
 	var b strings.Builder
 	used := 0
 	for _, seg := range r {
-		style := seg.style
-		if selected {
-			style = style.Background(colorPick)
+		style := th.On(selected, seg.role)
+		if seg.bold {
+			style = style.Bold(true)
 		}
 		b.WriteString(style.Render(seg.text))
 		used += lipgloss.Width(seg.text)
 	}
-	if selected && used < w && len(r) > 0 { // a gap between messages stays unshaded
-		b.WriteString(lipgloss.NewStyle().Background(colorPick).Render(strings.Repeat(" ", w-used)))
+	if selected && used < w && len(r) > 0 { // a gap between messages stays unfilled
+		b.WriteString(th.Sel(theme.Text).Render(strings.Repeat(" ", w-used)))
 	}
 	return b.String()
+}
+
+// chatWrapSegs wraps segs as one text, w wide, and gives each wrapped cell the
+// role of the segment it came from. ansi.Wrap only drops or breaks at spaces,
+// so the wrapped runes are the source's in order.
+func chatWrapSegs(segs []chatSeg, width int) []chatRow {
+	type cell struct {
+		r   rune
+		seg int
+	}
+	var flat []cell
+	var plain strings.Builder
+	for i, seg := range segs {
+		for _, r := range seg.text {
+			flat = append(flat, cell{r, i})
+		}
+		plain.WriteString(seg.text)
+	}
+	lines := chatWrap(plain.String(), 0, width)
+	rows := make([]chatRow, 0, len(lines))
+	p := 0
+	for _, line := range lines {
+		var row chatRow
+		cur := -1
+		var buf strings.Builder
+		flush := func() {
+			if buf.Len() > 0 && cur >= 0 {
+				row = append(row, chatSeg{text: buf.String(), role: segs[cur].role, bold: segs[cur].bold})
+			}
+			buf.Reset()
+		}
+		for _, r := range line {
+			for p < len(flat) && flat[p].r != r && unicode.IsSpace(flat[p].r) {
+				p++
+			}
+			seg := max(cur, 0)
+			if p < len(flat) && flat[p].r == r {
+				seg = flat[p].seg
+				p++
+			}
+			if seg != cur {
+				flush()
+				cur = seg
+			}
+			buf.WriteRune(r)
+		}
+		flush()
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 // chatPeers maps peer ids to cleaned display names.
@@ -1612,10 +1704,10 @@ func (p chatPeers) short(id string) string {
 	return ansi.Truncate(name, 8, "")
 }
 
-func chatSenderStyle(id string) lipgloss.Style {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(id))
-	return styleSender[h.Sum32()%uint32(len(styleSender))]
+// chatSender is a sender's name segment: bold, in the identity hue of the
+// hub-assigned peer id (design §5.4).
+func chatSender(id, text string) chatSeg {
+	return chatSeg{text: text, role: theme.Sender(id), bold: true}
 }
 
 func chatSize(n int64) string {
@@ -1659,22 +1751,24 @@ func chatWrap(text string, lead, width int) []string {
 	return lines
 }
 
-func chatReceipt(display string) (string, lipgloss.Style) {
+// chatReceipt is a receipt display's glyph and its role (design §5.5).
+func chatReceipt(display string) (string, theme.Role) {
+	role := theme.Receipt(display)
 	switch display {
 	case "queued":
-		return "·", styleMuted
+		return "·", role
 	case "pushed":
-		return "›", styleMuted
+		return "›", role
 	case "accepted":
-		return "✓", styleAccepted
+		return "✓", role
 	case "processed":
-		return "✓✓", styleGood
+		return "✓✓", role
 	case "read":
-		return "●", styleText
+		return "●", role
 	case "failed", "dead_letter", "expired":
-		return "✗", styleBad
+		return "✗", role
 	}
-	return "?", styleMuted
+	return "?", theme.Muted
 }
 
 // chatLog is what drawing the log needs, gathered once a frame.
@@ -1750,27 +1844,27 @@ func (l *chatLog) system(msg *envelope.Message) []chatRow {
 		text = "approval expired"
 	}
 	line := strings.ReplaceAll(fmt.Sprintf("-- %s %s", chatClock(l.m, msg.CreatedAt), text), "\n", " ")
-	return []chatRow{{{ansi.Truncate(line, l.width, "…"), styleMuted}}}
+	return []chatRow{{{text: ansi.Truncate(line, l.width, "…"), role: theme.Muted}}}
 }
 
 // head is the time, priority glyph, sender and reply marker, then the text.
 func (l *chatLog) head(msg *envelope.Message) []chatRow {
-	glyph := chatSeg{" ", styleMuted}
+	glyph := chatSeg{text: " ", role: theme.Muted}
 	switch msg.Priority {
 	case "wake":
-		glyph = chatSeg{"!", styleWarn}
+		glyph = chatSeg{text: "!", role: theme.Priority("wake")}
 	case "wake_idle":
-		glyph = chatSeg{"~", styleCyan}
+		glyph = chatSeg{text: "~", role: theme.Priority("wake_idle")}
 	}
 	name := ansi.Truncate(l.names.of(msg.Sender), min(20, l.width/3), "…")
-	segs := chatRow{{chatClock(l.m, msg.CreatedAt) + " ", styleMuted}, glyph, {"<" + name + ">", chatSenderStyle(msg.Sender)}}
+	segs := chatRow{{text: chatClock(l.m, msg.CreatedAt) + " ", role: theme.Muted}, glyph, chatSender(msg.Sender, "<"+name+">")}
 	if label := chatClientLabel(msg); label != "" {
-		segs = append(segs, chatSeg{" [" + ansi.Truncate(label, max(l.width/2, 12), "…") + "]", styleMuted})
+		segs = append(segs, chatSeg{text: " [" + ansi.Truncate(label, max(l.width/2, 12), "…") + "]", role: theme.Muted})
 	}
 	if msg.InReplyTo != nil {
-		segs = append(segs, chatSeg{" " + chatReplyMark(l.m, l.names, l.byID, *msg.InReplyTo), styleMuted})
+		segs = append(segs, chatSeg{text: " " + chatReplyMark(l.m, l.names, l.byID, *msg.InReplyTo), role: theme.Muted})
 	}
-	segs = append(segs, chatSeg{" ", styleText})
+	segs = append(segs, chatSeg{text: " ", role: theme.Text})
 	lead := 0
 	for _, seg := range segs {
 		lead += lipgloss.Width(seg.text)
@@ -1786,12 +1880,12 @@ func (l *chatLog) head(msg *envelope.Message) []chatRow {
 		lines = lines[:limit]
 		lines[limit-1] = ansi.Truncate(lines[limit-1], l.width-1, "") + "…"
 	}
-	rows := []chatRow{append(segs, chatSeg{lines[0], styleText})}
+	rows := []chatRow{append(segs, chatSeg{text: lines[0], role: theme.Text})}
 	for _, line := range lines[1:] {
-		rows = append(rows, chatRow{{line, styleText}})
+		rows = append(rows, chatRow{{text: line, role: theme.Text}})
 	}
 	if hidden > 0 && !spilled {
-		rows = append(rows, chatRow{{fmt.Sprintf("[+%d lines, e reads it all]", hidden), styleMuted}})
+		rows = append(rows, chatRow{{text: fmt.Sprintf("[+%d lines, e reads it all]", hidden), role: theme.Muted}})
 	}
 	return rows
 }
@@ -1838,23 +1932,27 @@ func (l *chatLog) files(msg *envelope.Message, selected bool) []chatRow {
 		}
 		if spilled && att.SHA256 == spill.SHA256 {
 			extra := max(att.Size-int64(len(msg.Content.Text)), 0)
-			rows = append(rows, chatRow{{chatIndent[1:] + mark, styleMuted}, {fmt.Sprintf("[+%s spilled → %s]", chatSize(extra), name), styleMuted}})
+			rows = append(rows, chatRow{{text: chatIndent[1:], role: theme.Text}, {text: mark, role: theme.Accent},
+				{text: fmt.Sprintf("[+%s spilled → ", chatSize(extra)), role: theme.Muted}, {text: name, role: theme.Info}, {text: "]", role: theme.Muted}})
 			continue
 		}
-		rows = append(rows, chatRow{{chatIndent[1:] + mark, styleMuted}, {"file " + name, styleCyan}, {" " + chatSize(att.Size), styleMuted}})
+		rows = append(rows, chatRow{{text: chatIndent[1:], role: theme.Text}, {text: mark, role: theme.Accent},
+			{text: "file " + name, role: theme.Info}, {text: " " + chatSize(att.Size), role: theme.Muted}})
 	}
 	return rows
 }
 
 func (l *chatLog) job(msg *envelope.Message) []chatRow {
 	var rows []chatRow
+	// A job's state is whatever the peer wrote, so it gets the neutral info
+	// role: colouring it by its words would let a peer pick the colour (§6.8).
 	if r := msg.JobRequest; r != nil {
-		rows = append(rows, chatRow{{chatIndent, styleMuted}, {"job request " + Clean(r.Operation), styleGood}, {" key " + Clean(r.JobKey), styleMuted}})
+		rows = append(rows, chatRow{{text: chatIndent, role: theme.Text}, {text: "job request " + Clean(r.Operation), role: theme.Info}, {text: " key " + Clean(r.JobKey), role: theme.Muted}})
 	}
 	if r := msg.JobStatus; r != nil {
-		row := chatRow{{chatIndent, styleMuted}, {fmt.Sprintf("job %s %s seq %d", chatShort(r.JobID), Clean(r.State), r.Sequence), styleGood}}
+		row := chatRow{{text: chatIndent, role: theme.Text}, {text: fmt.Sprintf("job %s %s seq %d", chatShort(r.JobID), Clean(r.State), r.Sequence), role: theme.Info}}
 		if len(r.Output) > 0 {
-			row = append(row, chatSeg{" " + Clean(string(r.Output)), styleMuted})
+			row = append(row, chatSeg{text: " " + Clean(string(r.Output)), role: theme.Muted})
 		}
 		rows = append(rows, row)
 	}
@@ -1872,12 +1970,15 @@ func (l *chatLog) approval(msg *envelope.Message) []chatRow {
 	for i, option := range req.Options {
 		options[i] = Clean(option)
 	}
-	text, tail := "? "+Clean(req.Question), ""
+	// The `?` gutter is accent, the question bold, each digit an action and
+	// a live countdown a warning (design §5.1, §6.3); the rest is quiet.
+	segs := []chatSeg{{text: "?", role: theme.Accent}, {text: " ", role: theme.Text}, {text: Clean(req.Question), role: theme.Bold}}
+	tail, tailRole := "", theme.Muted
 	a, open := l.open[msg.MessageID]
 	state := l.s.answers[req.ApprovalID]
 	switch {
 	case state == chatAnswering:
-		tail = "answering"
+		tail, tailRole = "answering", theme.Accent
 	case state == chatAnswered:
 		tail = "answered"
 	case state == chatClosed:
@@ -1892,16 +1993,17 @@ func (l *chatLog) approval(msg *envelope.Message) []chatRow {
 		tail = "expired"
 	case a.AddressedToMe:
 		for i, option := range options {
-			text += fmt.Sprintf(" [%d]%s", i+1, option)
+			segs = append(segs, chatSeg{text: " ", role: theme.Text}, chatSeg{text: fmt.Sprintf("[%d]", i+1), role: theme.Action}, chatSeg{text: option, role: theme.Text})
 		}
-		tail = l.countdown(a.ExpiresAt)
+		tail, tailRole = l.countdown(a.ExpiresAt), theme.Warn
 	default:
-		text += " " + strings.Join(options, " / ")
+		segs = append(segs, chatSeg{text: " " + strings.Join(options, " / "), role: theme.Text})
 		tail = "read-only " + l.countdown(a.ExpiresAt)
 	}
+	segs = append(segs, chatSeg{text: " ", role: theme.Text}, chatSeg{text: tail, role: tailRole})
 	var rows []chatRow
-	for _, line := range chatWrap(text+" "+tail, 0, l.width-len(chatIndent)) {
-		rows = append(rows, chatRow{{chatIndent + line, styleAccent}})
+	for _, row := range chatWrapSegs(segs, l.width-len(chatIndent)) {
+		rows = append(rows, append(chatRow{{text: chatIndent, role: theme.Text}}, row...))
 	}
 	return rows
 }
@@ -1927,16 +2029,17 @@ func (l *chatLog) receipts(msg *envelope.Message) chatRow {
 	if len(cells) == 0 {
 		return nil
 	}
-	row := chatRow{{chatIndent, styleMuted}}
+	row := chatRow{{text: chatIndent, role: theme.Text}}
 	used := len(chatIndent)
 	for i, cell := range cells {
-		glyph, style := chatReceipt(Clean(cell.Display))
-		text := l.names.short(cell.Recipient) + glyph + " "
+		glyph, role := chatReceipt(Clean(cell.Display))
+		who := l.names.short(cell.Recipient)
+		text := who + glyph + " "
 		if used+lipgloss.Width(text)+8 > l.width && i < len(cells)-1 {
-			return append(row, chatSeg{fmt.Sprintf("+%d more", len(cells)-i), styleMuted})
+			return append(row, chatSeg{text: fmt.Sprintf("+%d more", len(cells)-i), role: theme.Muted})
 		}
 		used += lipgloss.Width(text)
-		row = append(row, chatSeg{text, style})
+		row = append(row, chatSeg{text: who, role: theme.Muted}, chatSeg{text: glyph, role: role}, chatSeg{text: " ", role: theme.Text})
 	}
 	return row
 }
@@ -1950,7 +2053,7 @@ func (l *chatLog) reactions(msg *envelope.Message, selected bool) chatRow {
 		return nil
 	}
 	me := l.m.Data.Inbox.Me.PeerID
-	row := chatRow{{chatIndent, styleMuted}}
+	row := chatRow{{text: chatIndent, role: theme.Text}}
 	used := len(chatIndent)
 	for i, g := range msg.Reactions {
 		name := envelope.ReactionName(g.Emoji)
@@ -1975,9 +2078,9 @@ func (l *chatLog) reactions(msg *envelope.Message, selected bool) chatRow {
 			}
 			text = fmt.Sprintf("[%s %d%s]", name, len(g.Peers), mark)
 		}
-		style := styleMuted
+		role := theme.Muted
 		if mine {
-			style = styleCyan
+			role = theme.Info
 		}
 		sep := ""
 		if i > 0 {
@@ -1989,12 +2092,12 @@ func (l *chatLog) reactions(msg *envelope.Message, selected bool) chatRow {
 		}
 		if lipgloss.Width(text) > room {
 			if i > 0 {
-				return append(row, chatSeg{fmt.Sprintf(" +%d more", len(msg.Reactions)-i), styleMuted})
+				return append(row, chatSeg{text: fmt.Sprintf(" +%d more", len(msg.Reactions)-i), role: theme.Muted})
 			}
 			text = ansi.Truncate(text, max(room, 0), "…")
 		}
 		used += len(sep) + lipgloss.Width(text)
-		row = append(row, chatSeg{sep, styleMuted}, chatSeg{text, style})
+		row = append(row, chatSeg{text: sep, role: theme.Muted}, chatSeg{text: text, role: role})
 	}
 	return row
 }
@@ -2028,17 +2131,18 @@ func (s *chatScreen) window(n, picked, h int, height func(int) int) int {
 
 func (s *chatScreen) viewLog(m *Model, st *ThreadState, w, h int) string {
 	id := m.CurrentThread
+	muted := m.th.Fg(theme.Muted)
 	switch {
 	case id == "" && len(m.Data.Threads.Threads) == 0:
-		return styleMuted.Render("no threads yet: :msg <peer> <text> starts one")
+		return muted.Render("no threads yet: :msg <peer> <text> starts one")
 	case st == nil || st.Loading:
-		return styleMuted.Render("loading")
+		return muted.Render("loading")
 	}
 	if err := m.Data.Errs[threadPrefix+id]; err != nil && len(st.Messages) == 0 {
-		return styleBad.Render(ansi.Truncate(Clean("could not load: "+err.Error()), w, "…"))
+		return m.th.Fg(theme.Error).Render(ansi.Truncate(Clean("could not load: "+err.Error()), w, "…"))
 	}
 	if len(st.Messages) == 0 {
-		return styleMuted.Render("no messages yet")
+		return muted.Render("no messages yet")
 	}
 	l := s.newChatLog(m, st, w, h)
 	picked := s.index(st)
@@ -2055,36 +2159,38 @@ func (s *chatScreen) viewLog(m *Model, st *ThreadState, w, h int) string {
 	lines := make([]string, 0, h)
 	for i := s.top; i < len(st.Messages) && len(lines) < h; i++ {
 		for _, row := range rowsOf(i) {
-			lines = append(lines, row.render(w, i == picked))
+			lines = append(lines, row.render(m.th, w, i == picked))
 		}
 	}
 	return strings.Join(lines[:min(len(lines), h)], "\n")
 }
 
-func chatPresence(state string) (string, lipgloss.Style) {
+// chatPresence is self-reported presence in four cells, in its role.
+func chatPresence(state string) (string, theme.Role) {
 	switch state {
 	case "working":
-		return "work", styleWarn
+		return "work", theme.Presence(state)
 	case "idle":
-		return "idle", styleGood
+		return "idle", theme.Presence(state)
 	case "blocked":
-		return "blkd", styleBad
+		return "blkd", theme.Presence(state)
 	case "offline":
-		return "off", styleMuted
+		return "off", theme.Presence(state)
 	}
-	return "unkn", styleMuted // anything unrecognised, and never offline (§8)
+	return "unkn", theme.Presence("") // anything unrecognised, and never offline (§8)
 }
 
-func chatReach(state string) (string, lipgloss.Style) {
+// chatReach is hub-observed reachability in five cells, in its role.
+func chatReach(state string) (string, theme.Role) {
 	switch state {
 	case "connected":
-		return "conn", styleGood
+		return "conn", theme.Reach(state)
 	case "reachable":
-		return "reach", styleGood
+		return "reach", theme.Reach(state)
 	case "unreachable":
-		return "unrch", styleBad
+		return "unrch", theme.Reach(state)
 	}
-	return "unkn", styleMuted
+	return "unkn", theme.Reach("")
 }
 
 // viewWho is the participants, the thread's files and, when there is room, the
@@ -2112,25 +2218,35 @@ func (s *chatScreen) viewWho(m *Model, st *ThreadState, w, h int) string {
 		filesRows = shownFiles + 2
 	}
 	participants := row.Thread.Participants
+	maxFrom := max(len(participants)-1, 0)
+	if s.whoFrom < 0 {
+		s.whoFrom = 0
+	}
+	if s.whoFrom > maxFrom {
+		s.whoFrom = maxFrom
+	}
+	participants = participants[s.whoFrom:]
 	room := max(h-1-filesRows, 1)
 	shownPeers := min(len(participants), room)
 	if shownPeers < len(participants) {
 		shownPeers = room - 1 // the last row says how many are left out
 	}
 
-	lines := []string{styleMuted.Render(fit("peer", 2+nameW) + " " + fit("pres", presenceW) + " reach")}
+	th := m.th
+	muted := th.Fg(theme.Muted)
+	lines := []string{muted.Render(fit("peer", 2+nameW) + " " + fit("pres", presenceW) + " reach")}
 	for _, id := range participants[:shownPeers] {
 		p := peers[id]
-		presence, presenceStyle := chatPresence(p.Presence)
-		reach, reachStyle := chatReach(p.Reachability)
+		presence, presenceRole := chatPresence(p.Presence)
+		reach, reachRole := chatReach(p.Reachability)
 		name := fit(ansi.Truncate(names.of(id), nameW, "…"), nameW)
-		lines = append(lines, chatSenderStyle(id).Render("■")+" "+styleText.Render(name)+" "+presenceStyle.Render(fit(presence, presenceW))+" "+reachStyle.Render(reach))
+		lines = append(lines, th.Fg(theme.Sender(id)).Render("■")+" "+th.Fg(theme.Text).Render(name)+" "+th.Fg(presenceRole).Render(fit(presence, presenceW))+" "+th.Fg(reachRole).Render(reach))
 	}
 	if extra := len(participants) - shownPeers; extra > 0 {
-		lines = append(lines, styleMuted.Render(fmt.Sprintf("+%d more", extra)))
+		lines = append(lines, muted.Render(fmt.Sprintf("+%d more", extra)))
 	}
 	if shownFiles > 0 {
-		lines = append(lines, "", styleMuted.Render("files:"))
+		lines = append(lines, "", muted.Render("files:"))
 		for _, f := range files[len(files)-shownFiles:] {
 			size := chatSize(f.Size)
 			if f.Purged {
@@ -2140,23 +2256,27 @@ func (s *chatScreen) viewWho(m *Model, st *ThreadState, w, h int) string {
 			if name == "" {
 				name = chatShort(f.SHA256)
 			}
-			lines = append(lines, styleCyan.Render(ansi.Truncate(name, max(w-lipgloss.Width(size)-1, 1), "…"))+" "+styleMuted.Render(size))
+			lines = append(lines, th.Fg(theme.Info).Render(ansi.Truncate(name, max(w-lipgloss.Width(size)-1, 1), "…"))+" "+muted.Render(size))
 		}
 	}
 	if g := row.Thread.Group; g != nil {
-		lines = append(lines, "", styleMuted.Render("ad hoc group:"), styleText.Render(ansi.Truncate(Clean(*g), w, "…")))
+		lines = append(lines, "", muted.Render("ad hoc group:"), th.Fg(theme.Text).Render(ansi.Truncate(Clean(*g), w, "…")))
+	}
+	// Each legend glyph in its role, its word muted, as the log draws them.
+	key := func(glyph string, r theme.Role, word string) string {
+		return th.Fg(r).Render(glyph) + muted.Render(" "+word)
 	}
 	legend := []string{
 		"",
-		styleMuted.Render("receipts:"),
-		styleMuted.Render("· queued  › pushed"),
-		styleAccepted.Render("✓ accepted"),
-		styleGood.Render("✓✓ processed"),
-		styleText.Render("● read") + "  " + styleBad.Render("✗ dead"),
+		muted.Render("receipts:"),
+		key("·", theme.Receipt("queued"), "queued") + "  " + key("›", theme.Receipt("pushed"), "pushed"),
+		key("✓", theme.Receipt("accepted"), "accepted"),
+		key("✓✓", theme.Receipt("processed"), "processed"),
+		key("●", theme.Receipt("read"), "read") + "  " + key("✗", theme.Receipt("dead_letter"), "dead"),
 		"",
-		styleMuted.Render("priority:"),
-		styleWarn.Render("! wake") + "  " + styleCyan.Render("~ wake_idle"),
-		styleMuted.Render("  hold"),
+		muted.Render("priority:"),
+		key("!", theme.Priority("wake"), "wake") + "  " + key("~", theme.Priority("wake_idle"), "wake_idle"),
+		muted.Render("  hold"),
 	}
 	if len(lines)+len(legend) <= h {
 		lines = append(lines, legend...)
@@ -2167,24 +2287,27 @@ func (s *chatScreen) viewWho(m *Model, st *ThreadState, w, h int) string {
 // viewComposer is the last body row: the answer prompt, why a :msg failed, or
 // the thread's label and the draft, with a byte counter once there is one.
 func (s *chatScreen) viewComposer(m *Model, st *ThreadState, w int) string {
+	th := m.th
+	muted := th.Fg(theme.Muted)
 	if s.prompt != nil {
-		return s.viewPrompt(w)
+		return s.viewPrompt(th, w)
 	}
 	if s.msgErr != "" && m.Mode == ModeCommand {
-		return fit(styleBad.Render(s.msgErr), w)
+		return fit(th.Fg(theme.Error).Render(s.msgErr), w)
 	}
 	id := m.CurrentThread
 	if id == "" {
-		return fit(styleMuted.Render("no thread open"), w)
+		return fit(muted.Render("no thread open"), w)
 	}
 	title := "thread"
 	if row := chatRowOf(m, id); row != nil {
 		title = chatTitleOf(row.Thread)
 	}
-	label := styleAccent.Render(ansi.Truncate(title, 24, "…")) + styleMuted.Render(" › ")
+	// The thread's name is muted and the composer's › is accent (design §8.3).
+	label := muted.Render(ansi.Truncate(title, 24, "…")) + " " + th.Fg(theme.Accent).Render("›") + " "
 	d := s.draft(id)
 	if d.reply != "" && st != nil {
-		label += styleMuted.Render(chatReplyMark(m, chatNames(m), chatMessages(st), d.reply) + " ")
+		label += muted.Render(chatReplyMark(m, chatNames(m), chatMessages(st), d.reply) + " ")
 	}
 	status := ""
 	if n := len(d.text); n > 0 {
@@ -2204,20 +2327,20 @@ func (s *chatScreen) viewComposer(m *Model, st *ThreadState, w int) string {
 		if over := lipgloss.Width(text) + 1 - room; over > 0 { // the end being typed stays in view
 			text = ansi.TruncateLeft(text, over+1, "…")
 		}
-		body = styleText.Render(text) + styleAccent.Render("█")
+		body = th.Fg(theme.Text).Render(text) + th.Fg(theme.Accent).Render("█")
 	case text != "":
-		body = styleText.Render(ansi.Truncate(text, room, "…"))
+		body = th.Fg(theme.Text).Render(ansi.Truncate(text, room, "…"))
 	case st != nil && st.Detail.Row.Thread.ThreadID == id && !slices.Contains(st.Detail.Row.Thread.Participants, m.Data.Inbox.Me.PeerID):
-		body = styleMuted.Render(ansi.Truncate("i to write: sending joins you to this thread", room, "…"))
+		body = muted.Render(ansi.Truncate("i to write: sending joins you to this thread", room, "…"))
 	default:
-		body = styleMuted.Render(ansi.Truncate("i to write, or :msg <peer> <text>", room, "…"))
+		body = muted.Render(ansi.Truncate("i to write, or :msg <peer> <text>", room, "…"))
 	}
-	return fit(fit(label+body, w-lipgloss.Width(status)-1)+" "+styleMuted.Render(status), w)
+	return fit(fit(label+body, w-lipgloss.Width(status)-1)+" "+muted.Render(status), w)
 }
 
 // viewPrompt names what the digit answers. The question gives way to the
 // options, but never entirely: they mean nothing without it.
-func (s *chatScreen) viewPrompt(w int) string {
+func (s *chatScreen) viewPrompt(th *theme.Theme, w int) string {
 	const head, gap = "answer: ", "  "
 	options := make([]string, len(s.prompt.Options))
 	for i, option := range s.prompt.Options {
@@ -2226,7 +2349,7 @@ func (s *chatScreen) viewPrompt(w int) string {
 	listed := strings.Join(options, gap)
 	room := max(w-len(head)-len(gap)-lipgloss.Width(listed), w/3)
 	question := ansi.Truncate(Clean(s.prompt.Question), room, "…")
-	return fit(styleWarn.Render(head)+styleText.Render(question+gap+listed), w)
+	return fit(th.Fg(theme.Accent).Render(head)+th.Fg(theme.Bold).Render(question)+th.Fg(theme.Text).Render(gap+listed), w)
 }
 
 // viewMatrix is one row per message and one column per recipient, showing each
@@ -2243,38 +2366,39 @@ func (s *chatScreen) viewMatrix(m *Model, st *ThreadState, w, h int) string {
 	title := fmt.Sprintf("delivery matrix · recipients %d-%d of %d · rows %d-%d of %d",
 		min(s.matrixX+1, len(mx.Recipients)), s.matrixX+len(shown), len(mx.Recipients),
 		min(s.matrixY+1, len(mx.Rows)), min(s.matrixY+rows, len(mx.Rows)), len(mx.Rows))
+	th := m.th
 	if len(mx.Rows) == 0 {
-		return Pane(title, w, h, true, styleMuted.Render("no deliveries in this thread"))
+		return Pane(th, title, w, h, true, th.Fg(theme.Muted).Render("no deliveries in this thread"))
 	}
 	var head strings.Builder
 	head.WriteString(fit("time", chatMatrixDay) + fit("sender", chatMatrixWho))
 	for _, id := range shown {
 		head.WriteString(fit(ansi.Truncate(names.of(id), chatMatrixBox-1, "…"), chatMatrixBox))
 	}
-	lines := []string{styleMuted.Render(head.String())}
+	lines := []string{th.Fg(theme.Muted).Render(head.String())}
 	for _, row := range mx.Rows[s.matrixY:min(s.matrixY+rows, len(mx.Rows))] {
 		var line strings.Builder
-		line.WriteString(styleMuted.Render(fit(chatClock(m, row.CreatedAt), chatMatrixDay)))
-		line.WriteString(chatSenderStyle(row.Sender).Render(fit(ansi.Truncate(names.of(row.Sender), chatMatrixWho-1, "…"), chatMatrixWho)))
+		line.WriteString(th.Fg(theme.Muted).Render(fit(chatClock(m, row.CreatedAt), chatMatrixDay)))
+		line.WriteString(th.Fg(theme.Sender(row.Sender)).Bold(true).Render(fit(ansi.Truncate(names.of(row.Sender), chatMatrixWho-1, "…"), chatMatrixWho)))
 		for _, id := range shown {
-			text, style := "-", styleMuted
+			text, role := "-", theme.Dim
 			if i := slices.IndexFunc(row.Cells, func(c opapi.MatrixCell) bool { return c.Recipient == id }); i >= 0 {
 				text = Clean(row.Cells[i].Display)
-				_, style = chatReceipt(text)
+				_, role = chatReceipt(text)
 			}
-			line.WriteString(style.Render(fit(ansi.Truncate(text, chatMatrixBox-1, "…"), chatMatrixBox)))
+			line.WriteString(th.Fg(role).Render(fit(ansi.Truncate(text, chatMatrixBox-1, "…"), chatMatrixBox)))
 		}
 		lines = append(lines, line.String())
 	}
-	return Pane(title, w, h, true, strings.Join(lines, "\n"))
+	return Pane(th, title, w, h, true, strings.Join(lines, "\n"))
 }
 
 // viewReader shows a message's full text. The wrapped lines are kept, because
 // a body can be a mebibyte and frames are not.
-func (s *chatScreen) viewReader(w, h int) string {
+func (s *chatScreen) viewReader(th *theme.Theme, w, h int) string {
 	r := &s.reader
 	if r.loading {
-		return Pane(r.title, w, h, true, styleMuted.Render("loading"))
+		return Pane(th, r.title, w, h, true, th.Fg(theme.Muted).Render("loading"))
 	}
 	inner := w - 2
 	if r.width != inner {
@@ -2285,5 +2409,5 @@ func (s *chatScreen) viewReader(w, h int) string {
 	r.top = min(max(r.top, 0), max(len(r.lines)-r.rows, 0))
 	end := min(r.top+r.rows, len(r.lines))
 	title := fmt.Sprintf("%s · lines %d-%d of %d", r.title, r.top+1, end, len(r.lines))
-	return Pane(title, w, h, true, styleText.Render(strings.Join(r.lines[r.top:end], "\n")))
+	return Pane(th, title, w, h, true, th.Fg(theme.Text).Render(strings.Join(r.lines[r.top:end], "\n")))
 }

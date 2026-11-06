@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 var _ tea.Model = (*Model)(nil)
@@ -85,8 +86,21 @@ type Model struct {
 	Commands      map[string]Command
 
 	Profile, Hub string
+	// th is every colour the frame draws (docs/design/tui-color.md). Run
+	// detects its rung; a tea.BackgroundColorMsg swaps the dark or light set.
+	th *theme.Theme
+	// askBg sends tea.RequestBackgroundColor at start: the rung has a dark
+	// and a light set and VECNET_TUI_BG did not pick one.
+	askBg bool
 	// Prio is the priority a new message from this client would carry.
 	Prio string
+	// mouse is terminal mouse capture. M or :mouse off releases it. Shift+drag
+	// stays the terminal's native selection; this client draws none of its own.
+	mouse bool
+	// OtherLimit is how many Other Threads the chat list asks the hub for.
+	OtherLimit int
+	hits       []hit
+	hitX, hitY int
 	// Input is the command line's text; cmdline.go owns editing it.
 	Input string
 	// Help replaces the body with viewHelp.
@@ -132,27 +146,30 @@ func newModel(ctx context.Context, o Options) *Model {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	return &Model{
-		beatEvery: beatEvery,
-		slowEvery: min(slowEvery, beatEvery),
-		API:       o.API,
-		Profile:   o.Profile,
-		Hub:       o.Hub,
-		Now:       now,
-		Conn:      ConnConnecting,
-		Prio:      "wake",
-		Commands:  map[string]Command{},
-		Data:      Data{Thread: map[string]*ThreadState{}, Errs: map[string]error{}},
-		screens:   []Screen{newInboxScreen(), newChatScreen(), newDashScreen(), newSubsScreen()},
-		prefs:     &prefsScreen{},
-		loc:       time.Local,
-		ctx:       ctx,
-		cancel:    cancel,
-		inflight:  map[string]bool{},
-		dirty:     map[string]bool{},
-		first:     map[string]bool{},
-		accepting: map[string]bool{},
-		tailCh:    make(chan tea.Msg),
-		stopTail:  func() {},
+		beatEvery:  beatEvery,
+		slowEvery:  min(slowEvery, beatEvery),
+		API:        o.API,
+		Profile:    o.Profile,
+		Hub:        o.Hub,
+		th:         theme.New(theme.TrueColor, true),
+		mouse:      true,
+		OtherLimit: otherPage,
+		Now:        now,
+		Conn:       ConnConnecting,
+		Prio:       "wake",
+		Commands:   map[string]Command{},
+		Data:       Data{Thread: map[string]*ThreadState{}, Errs: map[string]error{}},
+		screens:    []Screen{newInboxScreen(), newChatScreen(), newDashScreen(), newSubsScreen()},
+		prefs:      &prefsScreen{},
+		loc:        time.Local,
+		ctx:        ctx,
+		cancel:     cancel,
+		inflight:   map[string]bool{},
+		dirty:      map[string]bool{},
+		first:      map[string]bool{},
+		accepting:  map[string]bool{},
+		tailCh:     make(chan tea.Msg),
+		stopTail:   func() {},
 	}
 }
 
@@ -162,7 +179,11 @@ func (m *Model) Init() tea.Cmd {
 	for _, key := range allKeys {
 		m.first[key] = true
 	}
-	return tea.Batch(m.Reload(TagAll), m.startTail(), m.listenTail(), tick())
+	cmds := []tea.Cmd{m.Reload(TagAll), m.startTail(), m.listenTail(), tick()}
+	if m.askBg {
+		cmds = append(cmds, tea.RequestBackgroundColor)
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update routes one message. Shell messages stop here; anything else reaches
@@ -171,10 +192,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		return m, m.updateKey(msg)
+	case tea.ResumeMsg:
+		// Bubble Tea has restored the terminal. ClearScreen forces a full
+		// redraw, which re-applies the mouse mode declared by View.
+		return m, tea.ClearScreen
+	case tea.MouseClickMsg, tea.MouseWheelMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
+		return m, m.updateMouse(msg)
 	case tea.PasteMsg:
 		return m, m.updatePaste(msg)
 	case tea.WindowSizeMsg:
 		m.W, m.H = msg.Width, msg.Height
+	case tea.BackgroundColorMsg:
+		// Only an asked-for answer counts: VECNET_TUI_BG wins over the terminal.
+		if m.askBg {
+			m.th = theme.New(m.th.Profile(), msg.IsDark())
+		}
+		return m, nil
 	case tickMsg:
 		return m, m.onTick()
 	case reloadMsg:
@@ -208,12 +241,14 @@ func (m *Model) active() Screen {
 	return m.screens[m.Tab]
 }
 
-// View draws the full-screen frame.
+// View draws the full-screen frame. It sets no frame background or
+// foreground: the terminal's own show everywhere but the fills (design C2).
 func (m *Model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
-	v.BackgroundColor = colorBg
-	v.ForegroundColor = colorText
+	if m.mouse {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	return v
 }
 

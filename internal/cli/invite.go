@@ -59,7 +59,7 @@ func renderGuide(profile string, lookup func(string) (Profile, bool)) string {
 	}
 	r := []string{"<profile>", profile}
 	if p, ok := lookup(profile); ok {
-		if hub := strings.TrimRight(p.Hub, "/"); safeURL(hub) {
+		if hub, ok := printableHub(p.Hub, p.AllowInsecureHTTP); ok && safeURL(hub) {
 			r = append(r, "<hub>", hub)
 		}
 		if peerIDRE.MatchString(p.PeerID) {

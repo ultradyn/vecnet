@@ -48,7 +48,7 @@ try {
     await waitFor(' live ');
     await keys('2');
     await waitFor('threads [ ]');
-    await openThread(hark, '─ hark B196: radio end-phrase bug');
+    await openThread(hark, '━ hark B196: radio end-phrase bug');
     await waitFor(text);
 
     // Initial: the operator message is the newest, so it is selected and

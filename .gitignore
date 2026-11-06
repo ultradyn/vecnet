@@ -28,3 +28,4 @@ backups/
 .scratch/vecnet/build-hook-hygiene/
 .scratch/vecnet/bb-lane/
 !scripts/bb/bin/
+!npm/bin/
