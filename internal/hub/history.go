@@ -222,7 +222,7 @@ func (h *Hub) ThreadMessages(ctx context.Context, c auth.Caller, thrID, afterMsg
 		}
 		if afterMsgID != "" {
 			var seq int
-			err := tx.QueryRowContext(ctx, `SELECT seq FROM messages WHERE msg_id = ? AND thr_id = ?`, afterMsgID, thrID).Scan(&seq)
+			err := tx.QueryRowContext(ctx, `SELECT seq FROM messages WHERE msg_id = ?1 AND thr_id = ?2 UNION ALL SELECT seq FROM message_history_locators WHERE msg_id=?1 AND thr_id=?2 LIMIT 1`, afterMsgID, thrID).Scan(&seq)
 			if errors.Is(err, sql.ErrNoRows) {
 				e := E(http.StatusUnprocessableEntity, "not_in_thread", "after is not a message of this thread")
 				e.Details["after"] = afterMsgID
@@ -233,8 +233,12 @@ func (h *Hub) ThreadMessages(ctx context.Context, c auth.Caller, thrID, afterMsg
 			}
 			from = max(from, seq)
 		}
+		visibility, err := h.HistoryVisibilitySQL(ctx, tx)
+		if err != nil {
+			return err
+		}
 		rows, err := tx.QueryContext(ctx,
-			`SELECT body FROM messages WHERE thr_id = ? AND seq > ? AND kind != 'reaction' ORDER BY seq LIMIT ?`, thrID, from, limit+1)
+			`SELECT m.body FROM messages m WHERE m.thr_id = ? AND m.seq > ? AND m.kind != 'reaction' AND `+visibility+` ORDER BY m.seq LIMIT ?`, thrID, from, limit+1)
 		if err != nil {
 			return fmt.Errorf("hub: history: %w", err)
 		}

@@ -119,7 +119,10 @@ func TestPreferencesHTTPMetadataAndConditionalRead(t *testing.T) {
 			}
 			found = true
 		}
-		if d.Key == "retention.history" && (d.Editable || d.UnavailableReason == "") {
+		if d.Key == "retention.history" && (!d.Editable || d.Runtime != "live" || d.UnavailableReason != "") {
+			t.Fatal("installed history adapter is not live")
+		}
+		if d.Key == "blobs.expiry" && (d.Editable || d.UnavailableReason == "") {
 			t.Fatal("missing adapter became editable")
 		}
 	}
@@ -219,7 +222,7 @@ func TestPreferencesHTTPStrictBodiesAndPreconditions(t *testing.T) {
 			{`{"set":{"agents.thread_budget":true}}`, tag, "application/json", 422, "prefs_invalid_value"},
 			{`{"set":{"agents.thread_budget":"request-canary"}}`, tag, "application/json", 422, "prefs_invalid_value"},
 			{`{"set":{"request-canary":600}}`, tag, "application/json", 422, "prefs_unknown_key"},
-			{`{"set":{"retention.history":86400}}`, tag, "application/json", 409, "prefs_unavailable"},
+			{`{"set":{"blobs.expiry":"off"}}`, tag, "application/json", 409, "prefs_unavailable"},
 			{`{"set":{"presence.default_ttl":1800}}`, tag, "application/json", 200, ""},
 		}
 		for i, c := range cases {

@@ -496,7 +496,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 		}
 	}
 	var lastSeq int
-	if err := tx.QueryRowContext(ctx, `SELECT coalesce(max(seq), 0) FROM messages WHERE thr_id = ?`, thr.ID).Scan(&lastSeq); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT max(last_allocated_seq,coalesce((SELECT max(seq) FROM messages WHERE thr_id=threads.thr_id),0)) FROM threads WHERE thr_id = ?`, thr.ID).Scan(&lastSeq); err != nil {
 		return nil, false, nil, fmt.Errorf("hub: last seq: %w", err)
 	}
 	if err := addParticipants(ctx, tx, thr.ID, joiners, lastSeq, now); err != nil {
@@ -570,7 +570,7 @@ const maxMessageRecipients = 32
 // thr's counters are updated in place so its summary reflects the message.
 func (h *Hub) insertMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envelope.Message, msgJSON []byte, jobID, aprID string, countBudget bool) error {
 	var seq int
-	if err := tx.QueryRowContext(ctx, `SELECT coalesce(max(seq), 0) + 1 FROM messages WHERE thr_id = ?`, thr.ID).Scan(&seq); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT max(last_allocated_seq,coalesce((SELECT max(seq) FROM messages WHERE thr_id=threads.thr_id),0))+1 FROM threads WHERE thr_id = ?`, thr.ID).Scan(&seq); err != nil {
 		return fmt.Errorf("hub: next seq: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -590,8 +590,8 @@ func (h *Hub) insertMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg
 		budget = *thr.Budget
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE threads SET message_count = ?, budget_remaining = ?, last_message_at = ? WHERE thr_id = ?`,
-		thr.MessageCount, budget, msg.CreatedAt, thr.ID); err != nil {
+		`UPDATE threads SET message_count = ?, budget_remaining = ?, last_message_at = max(last_message_at,?), last_allocated_seq = ? WHERE thr_id = ?`,
+		thr.MessageCount, budget, msg.CreatedAt, seq, thr.ID); err != nil {
 		return fmt.Errorf("hub: update thread: %w", err)
 	}
 	return nil
@@ -698,6 +698,13 @@ func (h *Hub) fanOut(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envel
 		}
 		refs = append(refs, DeliveryRef{DeliveryID: dly, Recipient: t.peer, Via: t.via, State: "queued"})
 		notify = append(notify, t.peer)
+	}
+	// A message's final fan-out sequence is its immutable position in the
+	// shared preview high-water domain, including inline legacy writes.
+	if len(refs) > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE messages SET history_event_seq=(SELECT seq FROM sqlite_sequence WHERE name='events') WHERE msg_id=? AND history_event_seq IS NULL`, msg.MessageID); err != nil {
+			return nil, nil, err
+		}
 	}
 	return refs, notify, nil
 }

@@ -154,6 +154,7 @@ func (a *EventRetentionAdapter) Preview(ctx context.Context, _, after prefs.Snap
 	if hardAge > 0 && (cutoffAge == 0 || hardAge < cutoffAge) {
 		cutoffAge = hardAge
 	}
+	cutoffAge = retentionPreviewAge(policy, a.Hub.Cfg.UnackedEventRetention)
 	cutoff := envelope.FormatTime(now.Add(-cutoffAge))
 	var high, eligible, pinned, bytes int64
 	err = a.Hub.DB.ReadSnapshot(ctx, func(q *sql.Conn) error {
@@ -356,13 +357,7 @@ func (a *EventRetentionAdapter) classPreviewCutoff(after prefs.Snapshot, impact 
 	if err != nil {
 		return "", err
 	}
-	seconds, _ := policy.Ack.Value.Int64()
-	age := time.Duration(seconds) * time.Second
-	archive, _ := policy.Archive.Value.Bool()
-	hard := a.Hub.Cfg.UnackedEventRetention
-	if !archive && hard > 0 && (age == 0 || hard < age) {
-		age = hard
-	}
+	age := retentionPreviewAge(policy, a.Hub.Cfg.UnackedEventRetention)
 	return envelope.FormatTime(cutoff.Add(age - classAge)), nil
 }
 

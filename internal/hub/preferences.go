@@ -112,6 +112,7 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 	configured := map[string]prefs.Value{
 		"agents.default_max_depth":      prefs.Int(int64(cfg.DefaultMaxDepth)),
 		"agents.thread_budget":          prefs.Int(int64(cfg.ThreadBudget)),
+		"retention.archive_mode":        prefs.Bool(cfg.ArchiveMode),
 		"rates.sends_per_minute":        prefs.Int(int64(cfg.SendsPerMin)),
 		"rates.threads_per_hour":        prefs.Int(int64(cfg.ThreadsPerHour)),
 		"provisioning.creates_per_hour": prefs.Int(int64(cfg.CreatesPerHour)),
@@ -123,6 +124,7 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 		value time.Duration
 	}{
 		{"retention.ack_events", cfg.AckedEventRetention},
+		{"retention.history", cfg.MessageHistoryRetention},
 		{"events.refresh_interval", cfg.EventsRefreshInterval},
 		{"presence.default_ttl", cfg.PresenceTTL},
 		{"presence.session_ttl", cfg.SessionPresenceTTL},
@@ -141,7 +143,7 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 	for key, v := range configured {
 		d, _ := prefs.Lookup(key)
 		n, _ := v.Int64()
-		if v != d.Default && (n != 0 || key == "retention.ack_events" && cfg.AckedEventRetentionSet) {
+		if v != d.Default && (n != 0 || key == "retention.archive_mode" || key == "retention.ack_events" && cfg.AckedEventRetentionSet) {
 			p.bootstrap[key] = prefs.Effective{Value: v, Source: prefs.SourceFlag}
 		}
 	}
