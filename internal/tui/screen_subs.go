@@ -82,6 +82,10 @@ func (s *subsScreen) Title() string {
 	return "subs"
 }
 
+// Badge is the tab's attention count, rows not ok: the header draws it in
+// unread when the tab is not active (design §5.5 header counts).
+func (s *subsScreen) Badge() (string, int) { return "subs", s.bad }
+
 // Hints names no action: resume works only for some paused rows, and the
 // selected row's note says what to do.
 func (s *subsScreen) Hints() string { return "j/k move  read-only" }
