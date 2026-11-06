@@ -8,16 +8,16 @@ import (
 // This file holds the few drawing helpers more than one screen shares; it
 // holds no colour value of its own.
 
-// sectionHead is a section label: bold, so it keeps its meaning under
+// sectionLabel is a section label: bold, so it keeps its meaning under
 // NO_COLOR (design §6.3, §6.6).
-func sectionHead(th *theme.Theme, label string) string {
+func sectionLabel(th *theme.Theme, label string) string {
 	return th.Fg(theme.Bold).Render(label)
 }
 
 // sectionBar is a `▌` section header: the bar in accent, the label bold.
 // Both stay under NO_COLOR (design §6.6).
 func sectionBar(th *theme.Theme, label string) string {
-	return th.Fg(theme.Accent).Render("▌") + sectionHead(th, label)
+	return th.Fg(theme.Accent).Render("▌") + sectionLabel(th, label)
 }
 
 // selMark is a list row's marker column: `>` in accent on the selected row

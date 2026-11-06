@@ -11,50 +11,46 @@ import (
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
+	"github.com/XertroV/vecnet/internal/tui/theme"
+	"github.com/XertroV/vecnet/internal/tui/theme/themetest"
 )
 
 func TestSidebarColourProfiles(t *testing.T) {
 	row := sideRow{Title: "older yours", Unread: 5, UnreadText: "5"}
-	paint := func() string {
-		return sectionHead("Other Threads", "▾", 2, 40) + "\n" + sectionRule(40) + "\n" + sideTitleLine(row, 40, false)
+	paint := func(p theme.Profile) string {
+		th := theme.New(p, true)
+		return sectionHead(th, "Other Threads", "▾", 2, 40) + "\n" + sectionRule(th, 40) + "\n" + sideTitleLine(th, row, 40, false)
 	}
-	t.Setenv("NO_COLOR", "")
-	t.Setenv("COLORTERM", "truecolor")
-	t.Setenv("TERM", "xterm-256color")
-	raw := paint()
+	raw := paint(theme.TrueColor)
 	if !strings.Contains(raw, "▌") || !strings.Contains(raw, "─") {
 		t.Fatal("section header lost its bar or rule")
 	}
 	if !strings.Contains(raw, "38;2;251;191;36") {
 		t.Fatalf("unread is not wake amber:\n%s", raw)
 	}
-	if !strings.Contains(raw, "\x1b[38;2;99;102;241m") {
-		t.Fatal("section bar is not the accent colour")
+	if !strings.Contains(raw, "\x1b[38;2;168;85;247m▌") {
+		t.Fatalf("section bar is not the accent colour:\n%q", raw)
 	}
 	if !boldOn(raw) {
 		t.Fatal("unread title is not bold")
 	}
 
-	t.Setenv("COLORTERM", "")
-	t.Setenv("TERM", "xterm-256color")
-	raw = paint()
-	if strings.Contains(raw, "38;2;251;191;36") || !strings.Contains(raw, "38;5;") {
-		t.Fatalf("256-colour profile did not downsample:\n%s", raw)
+	raw = paint(theme.ANSI256)
+	if strings.Contains(raw, "38;2;") || !strings.Contains(raw, "38;5;") {
+		t.Fatalf("256-colour rung kept truecolor:\n%s", raw)
 	}
 
-	t.Setenv("TERM", "xterm")
-	raw = paint()
+	raw = paint(theme.ANSI16)
 	if strings.Contains(raw, "38;2;") || strings.Contains(raw, "38;5;") {
-		t.Fatalf("16-colour profile kept a high-colour sequence:\n%s", raw)
+		t.Fatalf("16-colour rung kept a high-colour sequence:\n%s", raw)
 	}
 	if !strings.Contains(plain(raw), "▌") {
 		t.Fatal("16-colour header dropped the bar")
 	}
 
-	t.Setenv("NO_COLOR", "1")
-	raw = paint()
-	if strings.Contains(raw, "38;2;") || strings.Contains(raw, "38;5;") || strings.Contains(raw, "\x1b[3") {
-		t.Fatalf("NO_COLOR kept colour:\n%s", raw)
+	raw = paint(theme.NoColor)
+	if bad := themetest.Violations(theme.NoColor, raw); len(bad) > 0 {
+		t.Fatalf("NO_COLOR kept colour: %v\n%q", bad, raw)
 	}
 	if !boldOn(raw) || !strings.Contains(plain(raw), "▌") || !strings.Contains(plain(raw), "─") {
 		t.Fatalf("NO_COLOR dropped bold or the header glyphs:\n%s", raw)

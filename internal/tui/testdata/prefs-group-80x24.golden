@@ -1,24 +1,24 @@
  vecnet | 1:inbox 2:chat 3:dash 4:subs prefs       home·hub.example:8443  live  
-┌─ preferences ────────────────────────────────────────────────────────────────┐
-│Retention & storage                                                           │
-│> retention.ack_events             7d       default  unavailable              │
-│Files                                                                         │
-│  blobs.expiry                     1d       default  unavailable              │
-│Notifications/presence                                                        │
-│  events.refresh_interval          30m      flag     live                     │
-│  presence.default_ttl             1h       stored   live                     │
-│Agents defaults                                                               │
-│  agents.thread_budget             500      default  live                     │
-│                                                                              │
-│Acknowledged event retention                                                  │
-│Keep acknowledged operational events for this long; zero disables pruning.    │
-│Owner floors and pins still apply.                                            │
-│3600..31536000 seconds                                                        │
-│source default                                                                │
-│unavailable                                                                   │
-│lock: DB retention adapter is not installed.                                  │
-│                                                                              │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+┏━ preferences ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃Retention & storage                                                           ┃
+┃> retention.ack_events             7d       default  unavailable              ┃
+┃Files                                                                         ┃
+┃  blobs.expiry                     1d       default  unavailable              ┃
+┃Notifications/presence                                                        ┃
+┃  events.refresh_interval          30m      flag     live                     ┃
+┃  presence.default_ttl             1h       stored   live                     ┃
+┃Agents defaults                                                               ┃
+┃  agents.thread_budget             500      default  live                     ┃
+┃                                                                              ┃
+┃Acknowledged event retention                                                  ┃
+┃Keep acknowledged operational events for this long; zero disables pruning.    ┃
+┃Owner floors and pins still apply.                                            ┃
+┃3600..31536000 seconds                                                        ┃
+┃source default                                                                ┃
+┃unavailable                                                                   ┃
+┃lock: DB retention adapter is not installed.                                  ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
  NORMAL   j/k move  r refresh                  max@vecnet · working · prio wake 
 : command  ? help  Shift+drag selects text                                      

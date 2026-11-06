@@ -15,6 +15,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 const tabBar = "vecnet | 1:inbox 2:chat 3:dash 4:subs"
@@ -829,16 +830,17 @@ func TestViewIsAltScreen(t *testing.T) {
 }
 
 func TestPane(t *testing.T) {
-	got := Pane("title", 20, 5, true, "one\ntwo\nthree\nfour\nfive")
+	th := theme.New(theme.TrueColor, true)
+	got := Pane(th, "title", 20, 5, true, "one\ntwo\nthree\nfour\nfive")
 	assertFrame(t, got, 20, 5)
 	if !strings.Contains(got, "title") || !strings.Contains(got, "three") || strings.Contains(got, "four") {
 		t.Fatalf("pane:\n%s", got)
 	}
-	assertFrame(t, Pane("a title much longer than its pane", 12, 3, false, strings.Repeat("wide 日本語 ", 10)), 12, 3)
-	assertFrame(t, Pane("t", 12, 4, false, "tab\there"), 12, 4)
-	assertFrame(t, Pane("t", 10, 2, false, "x"), 10, 2)
-	assertFrame(t, Pane("t", 10, 3, false, "x"), 10, 3)
-	if got := Pane("t", 1, 1, true, "x"); got != "" {
+	assertFrame(t, Pane(th, "a title much longer than its pane", 12, 3, false, strings.Repeat("wide 日本語 ", 10)), 12, 3)
+	assertFrame(t, Pane(th, "t", 12, 4, false, "tab\there"), 12, 4)
+	assertFrame(t, Pane(th, "t", 10, 2, false, "x"), 10, 2)
+	assertFrame(t, Pane(th, "t", 10, 3, false, "x"), 10, 3)
+	if got := Pane(th, "t", 1, 1, true, "x"); got != "" {
 		t.Fatalf("degenerate pane: %q", got)
 	}
 }

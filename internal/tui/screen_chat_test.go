@@ -2584,7 +2584,8 @@ func TestReactionChipsRow(t *testing.T) {
 	if chips < 0 || chips+1 >= len(lines) || !strings.Contains(lines[chips+1], "grok✓✓") || !strings.Contains(lines[chips+1], "max●") {
 		t.Fatalf("the chips row is not right above the root's receipts:\n%s", frame)
 	}
-	if !strings.Contains(lines[chips], "│"+chatIndent+"[+1 2]") && !strings.Contains(lines[chips], " "+chatIndent+"[+1 2]") {
+	// The log is the focused pane, so its border is heavy.
+	if !strings.Contains(lines[chips], "┃"+chatIndent+"[+1 2]") && !strings.Contains(lines[chips], " "+chatIndent+"[+1 2]") {
 		t.Fatalf("chips row is not indented by chatIndent: %q", lines[chips])
 	}
 	refuseFrame(t, frame, "[+1: ", "[check: ")

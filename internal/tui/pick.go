@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -37,16 +38,28 @@ type pickModel struct {
 	w, h    int
 	hits    []hit
 	result  PickResult
+	// th is the picker's own theme, from the same Detect as the shell's.
+	th    *theme.Theme
+	askBg bool
 }
 
 func newPick(choices []ProfileChoice) *pickModel {
-	return &pickModel{choices: choices, mouse: true, w: 80, h: 24}
+	return &pickModel{choices: choices, mouse: true, w: 80, h: 24, th: theme.New(theme.TrueColor, true)}
 }
 
-func (p *pickModel) Init() tea.Cmd { return nil }
+func (p *pickModel) Init() tea.Cmd {
+	if p.askBg {
+		return tea.RequestBackgroundColor
+	}
+	return nil
+}
 
 func (p *pickModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.BackgroundColorMsg:
+		if p.askBg {
+			p.th = theme.New(p.th.Profile(), msg.IsDark())
+		}
 	case tea.WindowSizeMsg:
 		p.w, p.h = msg.Width, msg.Height
 	case tea.KeyPressMsg:
@@ -175,31 +188,35 @@ func (p *pickModel) View() tea.View {
 	if h < 1 {
 		h = 24
 	}
+	th := p.th
+	muted, text := th.Fg(theme.Muted), th.Fg(theme.Text)
 	var lines []string
 	add := func(s string) { lines = append(lines, fit(s, w)) }
 	if p.confirm {
-		name := Clean(p.choices[p.cursor].Name)
-		hub := profileHubLabel(name, p.choices[p.cursor].Hub)
-		add(styleBrand.Render(" vecnet ") + styleMuted.Render(" confirm"))
+		c := p.choices[p.cursor]
+		name := Clean(c.Name)
+		hub := profileHubLabel(name, c.Hub)
+		add(th.Brand(" vecnet ") + muted.Render(" confirm"))
 		add("")
-		add(styleText.Render("run " + name + " for this session"))
-		add(styleMuted.Render(hub))
+		add(text.Render("run " + name + " for this session"))
+		add(hubLabelStyled(th, hub, loopbackHost(hubHost(c.Hub)), false))
 		add("")
-		add(styleText.Render("make this the default operator_profile?"))
+		add(text.Render("make this the default operator_profile?"))
 		y := len(lines)
-		yes := styleGood.Render(" y ")
-		no := styleWarn.Render(" n ")
-		add(yes + styleMuted.Render(" make default   ") + no + styleMuted.Render(" this session only   ") + styleMuted.Render("esc back  q cancel"))
+		// Neither choice is a warning: both keys are actions (design §7.6).
+		yes := th.Fg(theme.Action).Render(" y ")
+		no := th.Fg(theme.Action).Render(" n ")
+		add(yes + muted.Render(" make default   ") + no + muted.Render(" this session only   ") + muted.Render("esc back  q cancel"))
 		p.hits = append(p.hits,
 			hit{x: 0, y: y, w: lipgloss.Width(yes), h: 1, kind: hitButton, id: "y"},
 			hit{x: lipgloss.Width(yes + " make default   "), y: y, w: lipgloss.Width(no), h: 1, kind: hitButton, id: "n"},
 		)
 		add("")
-		add(styleMuted.Render("Shift+drag selects text"))
+		add(muted.Render("Shift+drag selects text"))
 	} else {
-		add(styleBrand.Render(" vecnet ") + styleMuted.Render(" choose an operator profile"))
+		add(th.Brand(" vecnet ") + muted.Render(" choose an operator profile"))
 		add("")
-		add(styleMuted.Render(fit("name", 16) + " hub"))
+		add(muted.Render(fit("name", 16) + " hub"))
 		room := max(h-8, 1)
 		if p.follow {
 			if p.cursor < p.top {
@@ -211,23 +228,19 @@ func (p *pickModel) View() tea.View {
 		}
 		for i := p.top; i < len(p.choices) && i < p.top+room; i++ {
 			c := p.choices[i]
-			mark := "  "
-			style := styleText
-			if i == p.cursor {
-				mark = "> "
-				style = styleText.Background(colorPick)
-			}
-			label := mark + fit(Clean(c.Name), 16) + " " + hubHost(c.Hub)
+			sel := i == p.cursor
+			row := th.On(sel, theme.Text)
+			label := selMark(th, sel) + row.Render(" "+fit(Clean(c.Name), 16)+" "+hubHost(c.Hub))
 			if loopbackHost(hubHost(c.Hub)) {
-				label += " local"
+				label += row.Render(" ") + th.On(sel, theme.Warn).Render("local")
 			}
 			y := len(lines)
-			add(style.Render(ansi.Truncate(label, w, "")))
+			add(selPad(th, ansi.Truncate(label, w, ""), w, sel))
 			p.hits = append(p.hits, hit{x: 0, y: y, w: w, h: 1, kind: hitRow, id: fmt.Sprintf("%d", i)})
 		}
 		add("")
-		add(styleMuted.Render("j/k move  enter choose  q cancel  click a row"))
-		add(styleMuted.Render("Shift+drag selects text"))
+		add(muted.Render("j/k move  enter choose  q cancel  click a row"))
+		add(muted.Render("Shift+drag selects text"))
 	}
 	for len(lines) < h {
 		lines = append(lines, fit("", w))
@@ -249,7 +262,8 @@ func Pick(ctx context.Context, choices []ProfileChoice, in io.Reader, out io.Wri
 		return PickResult{}, errors.New("tui: no operator profile to choose")
 	}
 	m := newPick(choices)
-	opts := []tea.ProgramOption{tea.WithContext(ctx)}
+	m.th, m.askBg = detectTheme(out)
+	opts := []tea.ProgramOption{tea.WithContext(ctx), tea.WithColorProfile(m.th.Profile())}
 	if in != nil {
 		opts = append(opts, tea.WithInput(in))
 	}
