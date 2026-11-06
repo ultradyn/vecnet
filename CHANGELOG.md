@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-06: MCP timestamp arguments accept RFC 3339 seconds/fractions and UTC/offsets, normalized to hub UTC milliseconds before validation; HTTP and envelope formats stay unchanged (internal/mcpserver).
 - 2026-11-06: MCP paging descriptions distinguish message IDs, inbox/ack event cursors and opaque thread-list cursors (internal/mcpserver/descriptions.go).
 - 2026-11-06: MCP discovery advertises the existing inbox/thread/threads page limits and blob byte limits without changing validation or clamping (internal/mcpserver).
 - 2026-11-06: MCP discovery descriptions use plain sentences with explicit priority, retry, identity, ack and paging guidance within a 19,500-byte catalog cap (internal/mcpserver).

@@ -3,13 +3,16 @@
 `tools.go` builds and compiles the original input schemas, including the existing
 hub-value exceptions, before calling `projectTool` on the discovery entry. The
 projection copies that entry and changes only `tools/list`. It never changes the
-envelope schema, prechecks, argument normalization, handlers or their validators.
+envelope schema, prechecks, handlers or their validators. Round three adds a
+separate MCP ingress adapter that normalizes RFC 3339 timestamp arguments to
+canonical UTC milliseconds before those original checks.
 An omitted discovery property is still accepted or rejected exactly as before.
 
 The listing retains common call shapes, required fields, enums and defaults.
 `origin` is omitted because MCP ingress ignores it. Attachment verification
 evidence is omitted because callers cannot supply it. References are inlined.
-String syntax, numeric and size limits, attachment retention conditions, and
+Paging minimum/maximum bounds stay visible and come from the call schemas.
+Other string syntax, numeric and size limits, attachment retention conditions, and
 job/approval payload details are documented by `vecnet_guide` on demand. The
 base64 character cap stays visible for upload clients. Output schemas retain all
 their original validation keywords. The property-name allowlist has 15 entries.
@@ -44,3 +47,12 @@ numeric boundaries, unknown properties, missing required fields, and values
 whose semantic rejection belongs to the hub. A separate wire test verifies that
 a supplied valid origin is still ignored and an invalid origin is still refused.
 Output validation contracts are compared in full after removing descriptions.
+
+Round three explicitly accepts RFC 3339 timestamp spellings previously refused
+without milliseconds or UTC Z: threads.since, presence.at, send/reply.expires_at,
+send/reply attachments[].expires_at, and send.approval_request.expires_at.
+Fractional seconds are optional and truncate to milliseconds; numeric offsets
+convert to UTC. HTTP and envelope wire formats remain unchanged. The frozen
+validation fixture stays unchanged; the equivalence table records these
+formerly refused inputs separately. Arbitrary metadata and payloads are not
+timestamp arguments and are preserved.

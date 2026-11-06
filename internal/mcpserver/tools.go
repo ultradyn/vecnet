@@ -86,6 +86,7 @@ func (s *Server) toolsCall(ctx context.Context, sess *Session, req *Request) (re
 	if len(raw) == 0 || bytes.Equal(raw, nullID) {
 		raw = []byte("{}")
 	}
+	raw = normalizeToolTimestamps(p.Name, raw)
 	if t.precheck != nil {
 		if err := t.precheck(raw); err != nil {
 			return toolOutcome(p.Name, nil, err)

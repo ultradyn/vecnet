@@ -86,6 +86,22 @@ func TestProjectionCallValidationEquivalent(t *testing.T) {
 	if len(table) != len(before) || len(table) != len(tools().byName) {
 		t.Fatalf("tool coverage: cases=%d before=%d after=%d", len(table), len(before), len(tools().byName))
 	}
+	// Round three's only timestamp acceptance change: valid RFC3339 inputs
+	// formerly refused for spelling now normalize before the original schema.
+	// Keep the frozen fixture unchanged so these exceptions remain explicit.
+	normalizedAccepted := map[string][]string{
+		"vecnet_threads":  {`{"since":"2030-01-02T03:04:05Z"}`, `{"since":"2030-01-02T13:04:05.123456+10:00"}`},
+		"vecnet_presence": {`{"state":"idle","at":"2030-01-02T03:04:05Z"}`, `{"state":"idle","at":"2030-01-01T21:34:05.1-05:30"}`},
+		"vecnet_send": {
+			withField(send, "expires_at", `"2030-01-02T03:04:05Z"`),
+			withField(send, "approval_request", `{"approval_id":"apr_00000000000000000000000001","question":"Proceed?","options":["yes","no"],"expires_at":"2030-01-02T13:04:05+10:00"}`),
+			withField(send, "attachments", `[{"sha256":"`+strings.Repeat("a", 64)+`","size":1,"media_type":"text/plain","blob_id":"blo_00000000000000000000000001","retention_class":"1h","expires_at":"2030-01-02T03:04:05.123456Z"}]`),
+		},
+		"vecnet_reply": {
+			withField(reply, "expires_at", `"2030-01-02T13:04:05+10:00"`),
+			withField(reply, "attachments", `[{"sha256":"`+strings.Repeat("a", 64)+`","size":1,"media_type":"text/plain","blob_id":"blo_00000000000000000000000001","retention_class":"1h","expires_at":"2030-01-02T03:04:05Z"}]`),
+		},
+	}
 	for name, tc := range table {
 		t.Run(name, func(t *testing.T) {
 			doc, ok := before[name]
@@ -120,6 +136,16 @@ func TestProjectionCallValidationEquivalent(t *testing.T) {
 			}
 			for i, raw := range append(tc.invalid, `[]`, `null`, `{"unexpected":true}`) {
 				check(fmt.Sprintf("invalid-%d", i), raw, false)
+			}
+			for i, raw := range normalizedAccepted[name] {
+				check(fmt.Sprintf("formerly-refused-timestamp-%d", i), raw, false)
+				value, err := jsonschema.UnmarshalJSON(bytes.NewReader(normalizeToolTimestamps(name, []byte(raw))))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := envelope.ValidateValue(current.schema, value); err != nil {
+					t.Errorf("normalized timestamp %d refused: %v", i, err)
+				}
 			}
 			// Check every required field independently, even for tools with
 			// many optional parameters. All zero-argument tools still have
