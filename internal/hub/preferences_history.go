@@ -130,6 +130,7 @@ type historyActivation struct {
 	Pending         bool   `json:"pending"`
 	ArchivePending  bool   `json:"archive_pending"`
 	Generation      uint64 `json:"generation"`
+	MarkGeneration  uint64 `json:"mark_generation"`
 	Revision        uint64 `json:"revision"`
 	ActivationKey   string `json:"activation_key,omitempty"`
 	CutoffAt        string `json:"cutoff_at,omitempty"`
@@ -146,6 +147,13 @@ func readHistoryActivation(ctx context.Context, q interface {
 	}
 	if json.Unmarshal([]byte(raw), &a) != nil || a.Seconds < 0 || a.ApprovedSeconds < 0 {
 		return a, errors.New("retention: invalid_history_activation")
+	}
+	// Older projections used the activation revision for expiry marks. Adopt
+	// that value so an upgrade alone preserves existing marks. Revision still
+	// identifies prefs-owned approvals; marks also need to track bootstrap
+	// transitions, which do not advance the preference revision.
+	if a.MarkGeneration == 0 {
+		a.MarkGeneration = a.Revision
 	}
 	for _, seconds := range []int64{a.Seconds, a.ApprovedSeconds} {
 		d, _ := prefs.Lookup("retention.history")
@@ -251,6 +259,7 @@ func (h *Hub) initializeHistoryRetention(ctx context.Context) error {
 			}
 		} else if seconds != a.Seconds || archive != a.Archive {
 			a.Generation++
+			a.MarkGeneration++
 			a.ActivationKey = ""
 			a.CutoffAt = ""
 			if seconds != a.Seconds {
@@ -383,6 +392,10 @@ func (a *HistoryRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, befo
 			state.ActivationKey = "retention.archive_mode"
 		}
 	}
+	// Unrelated and provenance-only saves returned above. A semantic policy
+	// change or a new existing-data authorization invalidates prior marks in
+	// the same transaction as the new policy, without performing any deletion.
+	state.MarkGeneration++
 	state.Seconds, state.Archive, state.Revision = seconds, archive, after.Revision
 	return saveHistoryActivation(ctx, tx, state)
 }
