@@ -80,6 +80,8 @@ type inboxScreen struct {
 	locks    map[string]*inboxLock
 	nextBeat time.Time
 	logTop   int
+	logN     int // events the log can show
+	logH     int // rows the log pane has
 }
 
 func newInboxScreen() Screen { return &inboxScreen{locks: map[string]*inboxLock{}} }
@@ -91,7 +93,7 @@ func (s *inboxScreen) Hints() string {
 	case s.prompt == nil && s.compact:
 		return "a answer  r retry  x drop  p status"
 	case s.prompt == nil:
-		return "j/k move  a answer  r retry  x discard  p presence  enter open  ? help"
+		return "j/k move  a answer  r retry  x discard  p presence  enter open  ctrl+u/d log  ? help"
 	case s.prompt.answer != nil:
 		return fmt.Sprintf("1-%d answer  any other key cancels", len(s.prompt.answer.Options))
 	}
@@ -179,6 +181,12 @@ func (s *inboxScreen) onKey(msg tea.KeyPressMsg, m *Model) tea.Cmd {
 		return nil
 	case "p":
 		return s.togglePresence(m)
+	case "ctrl+u":
+		s.scrollLog(false)
+		return nil
+	case "ctrl+d":
+		s.scrollLog(true)
+		return nil
 	}
 	if len(rows) == 0 {
 		return nil
@@ -653,10 +661,28 @@ func (s *inboxScreen) Wheel(id string, down bool, m *Model) {
 		rows := s.rows(m)
 		s.moveTo(rows, s.cursor(rows)+by)
 	case "inbox.log":
-		s.logTop += by
-		if s.logTop < 0 {
-			s.logTop = 0
-		}
+		// Wheel down returns toward the latest events. Wheel up reveals older ones.
+		s.scrollLog(down)
+	}
+}
+
+// scrollLog moves the event log. towardLatest decreases the offset into the
+// newest-first list. The offset stays inside a full or partial window.
+func (s *inboxScreen) scrollLog(towardLatest bool) {
+	if towardLatest {
+		s.logTop--
+	} else {
+		s.logTop++
+	}
+	if s.logTop < 0 {
+		s.logTop = 0
+	}
+	maxTop := 0
+	if s.logH > 0 {
+		maxTop = max(s.logN-s.logH, 0)
+	}
+	if s.logTop > maxTop {
+		s.logTop = maxTop
 	}
 }
 
@@ -1061,11 +1087,17 @@ func (s *inboxScreen) viewInboxLog(peers inboxPeers, m *Model, w, h int) string 
 			evs = append(evs, m.Data.Events[i])
 		}
 	}
+	s.logN = len(evs)
+	s.logH = h
+	maxTop := 0
+	if h > 0 {
+		maxTop = max(len(evs)-h, 0)
+	}
 	if s.logTop < 0 {
 		s.logTop = 0
 	}
-	if s.logTop > len(evs) {
-		s.logTop = len(evs)
+	if s.logTop > maxTop {
+		s.logTop = maxTop
 	}
 	lines := make([]string, 0, h)
 	for i := s.logTop; i < len(evs) && len(lines) < h; i++ {

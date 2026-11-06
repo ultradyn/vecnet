@@ -2,16 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
-	"strconv"
-	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -121,70 +120,29 @@ func (c Config) profile(name string) (string, Profile, error) {
 	return name, p, nil
 }
 
-var (
-	operatorProfileName   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
-	operatorProfileAssign = regexp.MustCompile(`^[ \t]*operator_profile[ \t]*=`)
-)
-
-// setOperatorProfile rewrites only the operator_profile assignment. Comments,
-// secrets and every other line stay byte for byte. A missing assignment is
+// setOperatorProfile rewrites only the root operator_profile value. Comments,
+// secrets and every other byte stay as they were. A missing assignment is
 // inserted at the top. A missing file becomes that one line.
+//
+// The whole reread, check and replace run under the config lock (the same
+// path+".lock" editProfiles uses). A symlink is refused, and the file is not
+// replaced if its bytes changed under the lock.
 func setOperatorProfile(path, name string) error {
-	if !operatorProfileName.MatchString(name) {
-		return usageErr(fmt.Sprintf("operator_profile %q is not a profile name", name))
+	if name == "" {
+		return usageErr("operator_profile name is empty")
 	}
-	repl := "operator_profile = " + strconv.Quote(name)
-	raw, err := os.ReadFile(path)
+	quoted, err := profileString(name)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return writeFileAtomic(path, []byte(repl+"\n"))
-		}
-		return fmt.Errorf("read config %s: %w", path, err)
+		return err
 	}
-	if len(raw) == 0 {
-		return writeFileAtomic(path, []byte(repl+"\n"))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	unlock, err := lockPath(ctx, path+".lock")
+	if err != nil {
+		return err
 	}
-	type line struct {
-		body string
-		nl   string
-	}
-	var lines []line
-	rest := string(raw)
-	for rest != "" {
-		i := strings.IndexByte(rest, '\n')
-		if i < 0 {
-			lines = append(lines, line{body: rest})
-			break
-		}
-		body := rest[:i]
-		nl := "\n"
-		if strings.HasSuffix(body, "\r") {
-			body = strings.TrimSuffix(body, "\r")
-			nl = "\r\n"
-		}
-		lines = append(lines, line{body: body, nl: nl})
-		rest = rest[i+1:]
-	}
-	found := false
-	var b strings.Builder
-	for _, ln := range lines {
-		body := ln.body
-		if operatorProfileAssign.MatchString(body) {
-			found = true
-			body = repl
-		}
-		b.WriteString(body)
-		b.WriteString(ln.nl)
-	}
-	out := b.String()
-	if !found {
-		head := repl + "\n"
-		if bytes.Contains(raw, []byte("\r\n")) {
-			head = repl + "\r\n"
-		}
-		out = head + string(raw)
-	}
-	return writeFileAtomic(path, []byte(out))
+	defer unlock()
+	return setOperatorProfileLocked(path, name, quoted)
 }
 
 // operatorProfiles lists profiles that hold an operator credential, by name.

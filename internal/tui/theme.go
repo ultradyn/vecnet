@@ -1,10 +1,6 @@
 package tui
 
 import (
-	"strings"
-
-	"charm.land/lipgloss/v2"
-
 	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
@@ -16,6 +12,12 @@ import (
 // NO_COLOR (design §6.3, §6.6).
 func sectionHead(th *theme.Theme, label string) string {
 	return th.Fg(theme.Bold).Render(label)
+}
+
+// sectionBar is a `▌` section header: the bar in accent, the label bold.
+// Both stay under NO_COLOR (design §6.6).
+func sectionBar(th *theme.Theme, label string) string {
+	return th.Fg(theme.Accent).Render("▌") + sectionHead(th, label)
 }
 
 // selMark is a list row's marker column: `>` in accent on the selected row
@@ -34,28 +36,4 @@ func selPad(th *theme.Theme, line string, w int, sel bool) string {
 		return fit(line, w)
 	}
 	return fitFill(line, w, th.Sel(theme.Text))
-}
-
-// paint is s in st, or nothing for an empty s: a run of styled segments
-// never carries an empty SGR pair.
-func paint(st lipgloss.Style, s string) string {
-	if s == "" {
-		return ""
-	}
-	return st.Render(s)
-}
-
-// joinStyled renders parts in order, each in its own style, so one segment's
-// reset cannot leak into the next (design §6.8).
-func joinStyled(parts ...styled) string {
-	var b strings.Builder
-	for _, p := range parts {
-		b.WriteString(paint(p.st, p.s))
-	}
-	return b.String()
-}
-
-type styled struct {
-	st lipgloss.Style
-	s  string
 }

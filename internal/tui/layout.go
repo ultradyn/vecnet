@@ -272,11 +272,11 @@ func (m *Model) viewTop(w int) string {
 	if line, ok := place(compact, 1); ok {
 		return line
 	}
-	// The connection state stays on the right. A :port gives up cells before
-	// the host name does.
+	// The connection state stays on the right. The profile gives up cells
+	// first, then the port. The host and a loopback marker stay visible.
 	tail := sep + extras[0] + sep
 	room := w - leftW - headerGap - lipgloss.Width(tail)
-	label := shrinkHubLabel(compact, room)
+	label := budgetHubLabel(m.Profile, m.Hub, room)
 	right := m.hubLabel(label, true) + tail
 	if g := w - leftW - lipgloss.Width(right); g >= headerGap {
 		return leftPlain + gap(g) + right
@@ -303,23 +303,62 @@ func hubLabelStyled(th *theme.Theme, label string, local, onBar bool) string {
 	return role(theme.Muted).Render(label)
 }
 
-// shrinkHubLabel fits a compact profile·host label into room cells. A trailing
-// :port goes first, so the host name is still readable beside a long
-// connection state.
-func shrinkHubLabel(label string, room int) string {
+// budgetHubLabel fits profile, host, an optional port and the loopback marker
+// into room cells. The profile is truncated first and the port is dropped
+// next, so the host and the local marker stay on the line.
+func budgetHubLabel(profile, hub string, room int) string {
 	if room < 1 {
 		return ""
 	}
-	if lipgloss.Width(label) <= room {
-		return label
+	name := Clean(profile)
+	if name == "" {
+		name = "profile"
 	}
-	if i := strings.LastIndex(label, ":"); i > 0 {
-		if cut := label[:i]; lipgloss.Width(cut) <= room {
-			return cut
+	raw := hubHost(hub)
+	host, port, err := net.SplitHostPort(raw)
+	if err != nil {
+		host, port = raw, ""
+	}
+	show := host
+	if strings.Contains(host, ":") {
+		show = "[" + host + "]"
+	}
+	local := ""
+	if loopbackHost(raw) {
+		local = " local"
+	}
+	portS := ""
+	if port != "" {
+		portS = ":" + port
+	}
+	const sep = "·"
+	join := func(n, h, p, loc string) string { return n + sep + h + p + loc }
+	if full := join(name, show, portS, local); lipgloss.Width(full) <= room {
+		return full
+	}
+	if noPort := join(name, show, "", local); lipgloss.Width(noPort) <= room {
+		return noPort
+	}
+	tail := sep + show + local
+	if lw := lipgloss.Width(tail); lw < room && show != "" {
+		return join(ansi.Truncate(name, room-lw, "…"), show, "", local)
+	}
+	if local != "" && lipgloss.Width(show)+lipgloss.Width(local) <= room && show != "" {
+		return show + local
+	}
+	if local != "" && lipgloss.Width(local) < room && show != "" {
+		h := ansi.Truncate(show, room-lipgloss.Width(local), "…")
+		if h == "" {
+			h = ansi.Truncate(show, 1, "")
 		}
-		label = label[:i]
+		if got := h + local; lipgloss.Width(got) <= room {
+			return got
+		}
 	}
-	return ansi.Truncate(label, room, "…")
+	if show == "" {
+		return ansi.Truncate(name, room, "…")
+	}
+	return ansi.Truncate(show, room, "…")
 }
 
 // profileHubLabel is the header's profile and hub. A loopback hub is marked

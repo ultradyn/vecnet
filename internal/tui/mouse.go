@@ -85,8 +85,17 @@ func (m *Model) updateMouse(msg tea.Msg) tea.Cmd {
 	}
 }
 
+// modalOwned is a composer, a command line or a quit confirmation. Keys do
+// not change tabs in those states, and neither does a click.
+func (m *Model) modalOwned() bool {
+	return m.confirmQuit || m.Mode == ModeInsert || m.Mode == ModeCommand
+}
+
 func (m *Model) clickAt(x, y int) tea.Cmd {
 	if h, ok := m.hitAt(x, y, hitTab); ok {
+		if m.modalOwned() {
+			return nil
+		}
 		n, err := strconv.Atoi(h.id)
 		if err != nil || n < 0 || n >= len(m.screens) {
 			return nil

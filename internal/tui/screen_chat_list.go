@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -27,11 +28,11 @@ func (s *chatScreen) groups(m *Model) (yours, others sideList) {
 	case m.Data.MineKnown:
 		p := sidePageOf(m.Data.Mine)
 		page = &p
-	case !m.first["threads"]:
-		rows := m.Data.Threads.Threads
-		if me != "" {
-			rows = sideFilter(rows, me, true)
-		}
+	case m.Data.ThreadsKnown && me != "":
+		// An unfiltered page is not "yours" until the operator is known.
+		// A failed first load leaves ThreadsKnown false, so it stays an error
+		// rather than an empty successful list.
+		rows := sideFilter(m.Data.Threads.Threads, me, true)
 		p := sidePageOf(opapi.ThreadPage{Threads: rows})
 		page = &p
 	}
@@ -46,13 +47,8 @@ func (s *chatScreen) groups(m *Model) (yours, others sideList) {
 	case m.Data.OthersKnown:
 		p := sidePageOf(m.Data.Others)
 		op = &p
-	case !m.first["threads"]:
-		rows := m.Data.Threads.Threads
-		if me != "" {
-			rows = sideFilter(rows, me, false)
-		} else {
-			rows = nil
-		}
+	case m.Data.ThreadsKnown && me != "":
+		rows := sideFilter(m.Data.Threads.Threads, me, false)
 		p := sidePageOf(opapi.ThreadPage{Threads: rows})
 		op = &p
 	}
@@ -155,30 +151,34 @@ func chatSelectableIDs(m *Model) []string {
 func (s *chatScreen) listLines(m *Model, w int) []chatListLine {
 	yours, others := s.groups(m)
 	var lines []chatListLine
-	head := func(text, btn string) {
-		lines = append(lines, chatListLine{text: styleAccent.Render(fit(text, w)), btn: btn})
-	}
 	note := func(text string) {
 		lines = append(lines, chatListLine{text: styleMuted.Render(fit(text, w))})
 	}
 	rowLines := func(rows []sideRow) {
 		for _, r := range rows {
 			on := r.ID == m.CurrentThread
-			lines = append(lines, chatListLine{text: sidePaint(sideTitleLine(r, w), w, on), id: r.ID})
-			lines = append(lines, chatListLine{text: sidePaint(sideMetaLine(r, w), w, on), id: r.ID})
+			lines = append(lines, chatListLine{text: sideTitleLine(r, w, on), id: r.ID})
+			lines = append(lines, chatListLine{text: sideMetaLine(r, w, on), id: r.ID})
 		}
 	}
-	head("Your Threads", "")
+	section := func(label, mark, btn string, n int) {
+		lines = append(lines,
+			chatListLine{text: fit("", w)},
+			chatListLine{text: sectionHead(label, mark, n, w), btn: btn},
+			chatListLine{text: sectionRule(w), btn: btn},
+		)
+	}
+	section("Your Threads", "", "", len(yours.Rows))
 	if len(yours.Rows) == 0 {
 		note(yours.Note)
 	} else {
 		rowLines(yours.Rows)
 	}
-	mark := " -"
+	mark := "▾"
 	if !s.othersOpen {
-		mark = " +"
+		mark = "▸"
 	}
-	head(ansi.Truncate("Other Threads"+mark, w, ""), "other-toggle")
+	section("Other Threads", mark, "other-toggle", len(others.Rows))
 	if s.othersOpen {
 		if len(others.Rows) == 0 {
 			note(others.Note)
@@ -195,39 +195,103 @@ func (s *chatScreen) listLines(m *Model, w int) []chatListLine {
 	return lines
 }
 
-func sideTitleLine(r sideRow, w int) string {
-	title := Clean(r.Title)
-	if r.UnreadText == "" {
-		return ansi.Truncate(title, w, "…")
+// sectionHead is the accent bar, a bold label, the collapse mark and a
+// right-aligned count. The label gives up cells before the bar, the mark or
+// the count do. Colour is foreground only.
+func sectionHead(label, mark string, n, w int) string {
+	if w < 1 {
+		return ""
 	}
-	badge := r.UnreadText
+	bar := fg(colorAccent, false).Render("▌")
+	count := strconv.Itoa(n)
+	markPart := ""
+	if mark != "" {
+		markPart = " " + mark
+	}
+	// bar, the space after it, the mark, and the space before the count.
+	fixed := 2 + lipgloss.Width(markPart) + 1 + lipgloss.Width(count)
+	room := max(w-fixed, 0)
+	lab := ansi.Truncate(label, room, "")
+	gap := w - fixed - lipgloss.Width(lab)
+	if gap < 0 {
+		gap = 0
+	}
+	body := fg(colorText, true).Render(lab + markPart)
+	return bar + " " + body + strings.Repeat(" ", gap) + fg(colorMuted, false).Render(" "+count)
+}
+
+func sectionRule(w int) string {
+	if w < 1 {
+		return ""
+	}
+	return fg(colorMuted, false).Render(strings.Repeat("─", w))
+}
+
+// sideTitleLine keeps the unread badge, or else the message count, and
+// truncates the title into whatever room is left.
+func sideTitleLine(r sideRow, w int, on bool) string {
+	title := Clean(r.Title)
+	titleStyle := fg(colorText, false)
+	var badge string
+	badgeStyle := fg(colorMuted, false)
+	switch {
+	case r.Unread > 0 && r.UnreadText != "":
+		titleStyle = fg(colorText, true)
+		badge, badgeStyle = r.UnreadText, fg(colorWake, true)
+	case r.Count != "":
+		badge = r.Count
+	}
+	if badge == "" {
+		return paintFit(titleStyle, title, w, on)
+	}
 	bw := lipgloss.Width(badge) + 1
 	if bw >= w {
-		return ansi.Truncate(badge, w, "")
+		return paintFit(badgeStyle, badge, w, on)
 	}
-	return ansi.Truncate(title, w-bw, "…") + " " + badge
+	return paintFit(titleStyle, ansi.Truncate(title, w-bw, "…"), w-bw, on) + paintFit(badgeStyle, " "+badge, bw, on)
 }
 
-func sideMetaLine(r sideRow, w int) string {
-	parts := []string{}
-	if p := Clean(r.People); p != "" {
-		parts = append(parts, p)
+// sideMetaLine reserves the activity time and truncates the participant text
+// into the cells that remain. The message count lives on the title line.
+func sideMetaLine(r sideRow, w int, on bool) string {
+	people, active := Clean(r.People), Clean(r.Active)
+	muted := fg(colorMuted, false)
+	if active == "" {
+		return paintFit(muted, people, w, on)
 	}
-	if r.Active != "" {
-		parts = append(parts, r.Active)
+	aw := lipgloss.Width(active)
+	if aw >= w {
+		return paintFit(muted, active, w, on)
 	}
-	if r.Count != "" {
-		parts = append(parts, r.Count)
+	room := w - aw - 1
+	if people == "" || room < 1 {
+		return paintFit(muted, active, w, on)
 	}
-	return ansi.Truncate(strings.Join(parts, " · "), w, "…")
-}
-
-func sidePaint(text string, w int, on bool) string {
-	text = fit(text, w)
+	shown := ansi.Truncate(people, room, "…")
+	gap := room - lipgloss.Width(shown)
+	if gap < 0 {
+		gap = 0
+	}
+	gapStyle := muted
 	if on {
-		return styleText.Background(colorPick).Render(text)
+		gapStyle = muted.Background(colorPick)
 	}
-	return styleText.Render(text)
+	return paintFit(muted, shown, lipgloss.Width(shown), on) + gapStyle.Render(strings.Repeat(" ", gap)) + paintFit(muted, " "+active, aw+1, on)
+}
+
+func paintFit(st lipgloss.Style, text string, w int, on bool) string {
+	if w < 1 {
+		return ""
+	}
+	text = ansi.Truncate(text, w, "")
+	pad := w - lipgloss.Width(text)
+	if pad < 0 {
+		pad = 0
+	}
+	if on {
+		return st.Background(colorPick).Render(text + strings.Repeat(" ", pad))
+	}
+	return st.Render(text) + strings.Repeat(" ", pad)
 }
 
 // renderList draws the thread list and records click and wheel targets for it.
@@ -287,20 +351,54 @@ func (s *chatScreen) reveal(id string, lines []chatListLine, h int) {
 	}
 }
 
-func (s *chatScreen) Click(id string, m *Model) tea.Cmd {
-	switch id {
-	case "other-toggle":
-		s.othersOpen = !s.othersOpen
+// toggleOthers collapses or expands Other Threads. The mouse and `o` share it.
+func (s *chatScreen) toggleOthers() {
+	s.othersOpen = !s.othersOpen
+	s.followList = true
+}
+
+// moreOthers is Show more until the 200-thread cap, then the dashboard handoff.
+// The mouse buttons and `n` share it.
+func (s *chatScreen) moreOthers(m *Model) tea.Cmd {
+	if !s.othersOpen {
 		return nil
-	case "other-more":
+	}
+	_, others := s.groups(m)
+	switch others.More {
+	case "show":
 		s.otherLimit = nextLimit(s.otherLimit)
 		m.OtherLimit = s.otherLimit
 		s.followList = true
 		return m.Reload("other")
-	case "other-dash":
-		m.prefsOn = false
-		m.Tab = tabDash
+	case "dash":
+		s.openDashboard(m)
+	}
+	return nil
+}
+
+// openDashboard leaves chat for an unfiltered dashboard that can walk every
+// cursor page. A peer narrowing left from an earlier visit is cleared.
+func (s *chatScreen) openDashboard(m *Model) {
+	m.prefsOn = false
+	m.Tab = tabDash
+	d, ok := m.screens[tabDash].(*dashScreen)
+	if !ok {
+		return
+	}
+	d.narrow = nil
+	d.extra = nil
+	d.extraNext = nil
+	d.extraBase = ""
+	d.focus = dashOnThreads
+}
+
+func (s *chatScreen) Click(id string, m *Model) tea.Cmd {
+	switch id {
+	case "other-toggle":
+		s.toggleOthers()
 		return nil
+	case "other-more", "other-dash":
+		return s.moreOthers(m)
 	}
 	if tid, ok := strings.CutPrefix(id, "thread:"); ok {
 		s.followList = true
@@ -318,6 +416,7 @@ func (s *chatScreen) Wheel(id string, down bool, m *Model) {
 	}
 	switch id {
 	case "chat.list":
+		s.followList = false
 		step := 3 * by
 		maxTop := max(s.listN-s.listH, 0)
 		s.listTop = min(max(s.listTop+step, 0), maxTop)
@@ -327,6 +426,18 @@ func (s *chatScreen) Wheel(id string, down bool, m *Model) {
 		s.whoFrom += by
 		if s.whoFrom < 0 {
 			s.whoFrom = 0
+		}
+	case "chat.matrix":
+		if down {
+			s.matrixY++
+		} else {
+			s.matrixY--
+		}
+	case "chat.pager":
+		if down {
+			s.reader.top++
+		} else {
+			s.reader.top--
 		}
 	}
 }
