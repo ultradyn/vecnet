@@ -33,18 +33,19 @@ type grokDescriptor struct {
 
 // grokbotOnboard is the grokbot_setup body. Validation and sealing happen
 // before any insert. The caller saves the receipt in this same transaction
-// and publishes notifications after commit.
-func grokbotOnboard(ctx context.Context, h *Hub, tx *sql.Tx, n onboarding.Normalized) (onboarding.SubmitResult, []string, error) {
+// and publishes notifications after commit. createdAt is the setup
+// message's created_at; the activity feed uses that same value.
+func grokbotOnboard(ctx context.Context, h *Hub, tx *sql.Tx, n onboarding.Normalized) (onboarding.SubmitResult, []string, string, error) {
 	sealed, err := h.prepareGrokbotRoute(n.WebhookURL, n.WebhookKey, true)
 	if err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	operator, err := grokOperatorPeer(ctx, tx)
 	if err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	if err := grokConnectorFree(ctx, tx, n.ConnectorName); err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	mode := onboarding.CredentialHostedOAuth
 	if n.SkipMCP {
@@ -57,38 +58,38 @@ func grokbotOnboard(ctx context.Context, h *Hub, tx *sql.Tx, n onboarding.Normal
 	hubURL := strings.TrimRight(h.Cfg.PublicURL, "/")
 	text, err := grokSetupText(n, mode, hubURL, peerID, thrID)
 	if err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	snapshot, err := h.Preferences.LoadSnapshot(ctx, tx)
 	if err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	nowT := h.Now()
 	now := envelope.FormatTime(nowT)
 
 	if err := insertGrokDescriptor(ctx, tx, n.ConnectorName, peerID, mode); err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	if err := insertPrincipal(ctx, tx, prnID, n.Name, now); err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	if err := h.insertPeer(ctx, tx, peerID, prnID, n.Name, n.Kind, now, snapshot); err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	if err := h.DirectoryUpdated(ctx, tx, peerID, "enrolled", enrolledFields); err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	if err := audit.Record(ctx, tx, operator, "peer_add", []string{peerID, prnID}, map[string]any{
 		"kind": n.Kind, "request_id": n.RequestID, "credential_mode": mode,
 	}); err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	routeID, _, err := h.insertRoute(ctx, tx, newRoute{
 		ownerKind: "peer", ownerID: peerID, kind: RouteKindGrokbot, url: n.WebhookURL,
 		keyEnc: sealed, verified: true,
 	})
 	if err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 
 	title := grokSetupTitle
@@ -120,35 +121,35 @@ func grokbotOnboard(ctx context.Context, h *Hub, tx *sql.Tx, n onboarding.Normal
 	}
 	msgJSON, err := json.Marshal(msg)
 	if err != nil {
-		return onboarding.SubmitResult{}, nil, fmt.Errorf("hub: encode setup message: %w", err)
+		return onboarding.SubmitResult{}, nil, "", fmt.Errorf("hub: encode setup message: %w", err)
 	}
 	if strings.Contains(string(msgJSON), n.WebhookKey) || strings.Contains(string(msgJSON), n.WebhookURL) {
-		return onboarding.SubmitResult{}, nil, errors.New("hub: setup message would contain a routine secret")
+		return onboarding.SubmitResult{}, nil, "", errors.New("hub: setup message would contain a routine secret")
 	}
 	if err := insertThread(ctx, tx, thr, now); err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	if err := addParticipants(ctx, tx, thrID, []string{operator, peerID}, 0, now); err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	if err := h.insertMessage(ctx, tx, thr, &msg, msgJSON, "", "", false); err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	refs, notify, err := h.fanOut(ctx, tx, thr, &msg, msgJSON, []target{{peer: peerID}}, nil, "hub", expires, nowT, snapshot)
 	if err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	if len(refs) != 1 || refs[0].Recipient != peerID {
-		return onboarding.SubmitResult{}, nil, errors.New("hub: setup delivery was not queued for the bot")
+		return onboarding.SubmitResult{}, nil, "", errors.New("hub: setup delivery was not queued for the bot")
 	}
 	operators, err := h.noteOperatorView(ctx, tx, "sent", thrID)
 	if err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	if err := audit.Record(ctx, tx, HubSender, "grokbot_setup", []string{peerID, thrID, msgID, refs[0].DeliveryID}, map[string]any{
 		"request_id": n.RequestID, "credential_mode": mode, "connector_name": n.ConnectorName, "deliveries": 1,
 	}); err != nil {
-		return onboarding.SubmitResult{}, nil, err
+		return onboarding.SubmitResult{}, nil, "", err
 	}
 	res := onboarding.SubmitResult{
 		PeerID: peerID, PrincipalID: prnID, RouteID: routeID, ConnectorName: n.ConnectorName,
@@ -157,7 +158,7 @@ func grokbotOnboard(ctx context.Context, h *Hub, tx *sql.Tx, n onboarding.Normal
 			ThreadID: thrID, MessageID: msgID, DeliveryID: refs[0].DeliveryID, State: onboarding.SetupQueued,
 		},
 	}
-	return res, uniqueNotify(append(append(notify, prnID), operators...)), nil
+	return res, uniqueNotify(append(append(notify, prnID), operators...)), now, nil
 }
 
 func grokSetupText(n onboarding.Normalized, mode, hubURL, peerID, thrID string) (string, error) {

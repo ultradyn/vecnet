@@ -31,8 +31,9 @@ var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
 // grokbotSetup is the grokbot_setup transaction body. init registers
 // grokbotOnboard. Nil fails closed: OnboardAgent returns unsupported_action
-// and writes nothing.
-var grokbotSetup func(ctx context.Context, h *Hub, tx *sql.Tx, n onboarding.Normalized) (onboarding.SubmitResult, []string, error)
+// and writes nothing. The string result is the setup message created_at,
+// which the activity feed must use (PROTOCOL §2.13).
+var grokbotSetup func(ctx context.Context, h *Hub, tx *sql.Tx, n onboarding.Normalized) (onboarding.SubmitResult, []string, string, error)
 
 func init() {
 	grokbotSetup = grokbotOnboard
@@ -243,7 +244,7 @@ func (h *Hub) onboardGrok(ctx context.Context, tx *sql.Tx, n onboarding.Normaliz
 	if grokbotSetup == nil {
 		return onboardOutcome{}, onboardUnavailable()
 	}
-	res, notify, err := grokbotSetup(ctx, h, tx, n)
+	res, notify, createdAt, err := grokbotSetup(ctx, h, tx, n)
 	if err != nil {
 		return onboardOutcome{}, err
 	}
@@ -262,7 +263,10 @@ func (h *Hub) onboardGrok(ctx context.Context, tx *sql.Tx, n onboarding.Normaliz
 	}
 	var activity *ActivityEvent
 	if res.Setup != nil && res.Setup.MessageID != "" {
-		ev := messageActivity(res.Setup.ThreadID, res.Setup.MessageID, HubSender, "message", h.nowStr())
+		if createdAt == "" {
+			return onboardOutcome{}, errors.New("hub: setup activity missing message created_at")
+		}
+		ev := messageActivity(res.Setup.ThreadID, res.Setup.MessageID, HubSender, "message", createdAt)
 		activity = &ev
 	}
 	return onboardOutcome{result: res, notify: notify, activity: activity}, nil

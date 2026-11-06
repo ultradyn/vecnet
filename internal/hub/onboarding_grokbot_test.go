@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
@@ -40,37 +41,43 @@ func TestGrokbotOnboardingAtomicReplay(t *testing.T) {
 		}
 
 		boundaries := []struct {
-			name string
-			sql  string
+			name, finding, sql string
 		}{
-			{"connector", `CREATE TRIGGER grok_fail_connector BEFORE INSERT ON meta WHEN NEW.key LIKE 'onboarding.v1/connector/%' BEGIN SELECT RAISE(ABORT,'injected'); END`},
-			{"principal", `CREATE TRIGGER grok_fail_principal BEFORE INSERT ON principals BEGIN SELECT RAISE(ABORT,'injected'); END`},
-			{"peer", `CREATE TRIGGER grok_fail_peer BEFORE INSERT ON peers BEGIN SELECT RAISE(ABORT,'injected'); END`},
-			{"directory", `CREATE TRIGGER grok_fail_directory BEFORE INSERT ON events WHEN NEW.type='directory_updated' BEGIN SELECT RAISE(ABORT,'injected'); END`},
-			{"peer_add", `CREATE TRIGGER grok_fail_peer_add BEFORE INSERT ON audit WHEN NEW.action='peer_add' BEGIN SELECT RAISE(ABORT,'injected'); END`},
-			{"route", `CREATE TRIGGER grok_fail_route BEFORE INSERT ON routes BEGIN SELECT RAISE(ABORT,'injected'); END`},
-			{"route_add", `CREATE TRIGGER grok_fail_route_add BEFORE INSERT ON audit WHEN NEW.action='route_add' BEGIN SELECT RAISE(ABORT,'injected'); END`},
-			{"thread", `CREATE TRIGGER grok_fail_thread BEFORE INSERT ON threads BEGIN SELECT RAISE(ABORT,'injected'); END`},
-			{"participant", `CREATE TRIGGER grok_fail_participant BEFORE INSERT ON thread_participants BEGIN SELECT RAISE(ABORT,'injected'); END`},
-			{"message", `CREATE TRIGGER grok_fail_message BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT,'injected'); END`},
-			{"delivery_event", `CREATE TRIGGER grok_fail_delivery_event BEFORE INSERT ON events WHEN NEW.type='delivery' BEGIN SELECT RAISE(ABORT,'injected'); END`},
-			{"delivery", `CREATE TRIGGER grok_fail_delivery BEFORE INSERT ON deliveries BEGIN SELECT RAISE(ABORT,'injected'); END`},
-			{"operator_view", `CREATE TRIGGER grok_fail_operator_view BEFORE INSERT ON events WHEN NEW.type='operator_view' BEGIN SELECT RAISE(ABORT,'injected'); END`},
-			{"setup_audit", `CREATE TRIGGER grok_fail_setup_audit BEFORE INSERT ON audit WHEN NEW.action='grokbot_setup' BEGIN SELECT RAISE(ABORT,'injected'); END`},
-			{"receipt", `CREATE TRIGGER grok_fail_receipt BEFORE INSERT ON meta WHEN NEW.key LIKE 'onboarding.v1/%' AND NEW.key NOT LIKE 'onboarding.v1/connector/%' BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"connector", "", `CREATE TRIGGER grok_fail_connector BEFORE INSERT ON meta WHEN NEW.key LIKE 'onboarding.v1/connector/%' BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"principal", "", `CREATE TRIGGER grok_fail_principal BEFORE INSERT ON principals BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"peer", "", `CREATE TRIGGER grok_fail_peer BEFORE INSERT ON peers BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"directory", "", `CREATE TRIGGER grok_fail_directory BEFORE INSERT ON events WHEN NEW.type='directory_updated' BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"peer_add", "", `CREATE TRIGGER grok_fail_peer_add BEFORE INSERT ON audit WHEN NEW.action='peer_add' BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"route", "", `CREATE TRIGGER grok_fail_route BEFORE INSERT ON routes BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"assign-route", "t3 I1", `CREATE TRIGGER grok_fail_assign_route BEFORE UPDATE OF route_id ON peers BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"route_add", "", `CREATE TRIGGER grok_fail_route_add BEFORE INSERT ON audit WHEN NEW.action='route_add' BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"thread", "", `CREATE TRIGGER grok_fail_thread BEFORE INSERT ON threads BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"participant", "", `CREATE TRIGGER grok_fail_participant BEFORE INSERT ON thread_participants BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"message", "", `CREATE TRIGGER grok_fail_message BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"thread-counters", "t3 I1", `CREATE TRIGGER grok_fail_thread_counters BEFORE UPDATE OF message_count ON threads BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"delivery_event", "", `CREATE TRIGGER grok_fail_delivery_event BEFORE INSERT ON events WHEN NEW.type='delivery' BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"delivery", "", `CREATE TRIGGER grok_fail_delivery BEFORE INSERT ON deliveries BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"operator_view", "", `CREATE TRIGGER grok_fail_operator_view BEFORE INSERT ON events WHEN NEW.type='operator_view' BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"setup_audit", "", `CREATE TRIGGER grok_fail_setup_audit BEFORE INSERT ON audit WHEN NEW.action='grokbot_setup' BEGIN SELECT RAISE(ABORT,'injected'); END`},
+			{"receipt", "", `CREATE TRIGGER grok_fail_receipt BEFORE INSERT ON meta WHEN NEW.key LIKE 'onboarding.v1/%' AND NEW.key NOT LIKE 'onboarding.v1/connector/%' BEGIN SELECT RAISE(ABORT,'injected'); END`},
 		}
 		for _, b := range boundaries {
-			t.Run(b.name, func(t *testing.T) {
+			title := b.name
+			if b.finding != "" {
+				title = b.name + " (" + b.finding + ")"
+			}
+			t.Run(title, func(t *testing.T) {
 				installTrigger(t, env, b.sql)
 				snap := grokCensus(t, env)
 				bKey := fakeRoutineKey(t)
 				bURL := fakeRoutineURL(t)
 				req := grokReq("boundary-"+b.name, "Boundary "+b.name, bURL, "Bearer "+bKey, "", false)
-				_, err := env.Hub.OnboardAgent(ctx, op, req)
+				res, err := env.Hub.OnboardAgent(ctx, op, req)
 				if err == nil || !strings.Contains(err.Error(), "injected") {
 					t.Fatalf("boundary %s did not fail on the injected write", b.name)
 				}
-				assertNoRoutineSecret(t, env, b.name, onboarding.SubmitResult{}, err, []string{bKey, bURL, "Bearer " + bKey})
+				assertEmptyOnboardResult(t, res)
+				assertNoRoutineSecret(t, env, b.name, res, err, []string{bKey, bURL, "Bearer " + bKey})
 				if !reflectCensus(t, env, snap) {
 					t.Fatalf("boundary %s left a remnant", b.name)
 				}
@@ -403,6 +410,52 @@ func TestGrokbotSetupHubDelivery(t *testing.T) {
 	})
 }
 
+// Activity at is the setup message created_at (PROTOCOL §2.13), including when
+// the hub clock moves between the insert and the after-commit publish.
+func TestGrokbotSetupActivityAt(t *testing.T) {
+	t.Run("(t3 I2)", func(t *testing.T) {
+		env := testhub.Start(t)
+		ctx := context.Background()
+		op := operatorCaller(t, env)
+		start := env.Now.Now()
+		var ticks int
+		env.Hub.Now = func() time.Time {
+			ticks++
+			return start.Add(time.Duration(ticks) * time.Millisecond)
+		}
+		sub := env.Hub.Activity.Subscribe(ctx)
+		key := fakeRoutineKey(t)
+		url := fakeRoutineURL(t)
+		res := mustOnboard(t, env, op, grokReq("grok-activity-at", "Clock Bot", url, key, "", false))
+		if res.Setup == nil {
+			t.Fatal("missing setup")
+		}
+		var created, body string
+		if err := env.Hub.DB.QueryRow(`SELECT created_at, body FROM messages WHERE msg_id=?`, res.Setup.MessageID).Scan(&created, &body); err != nil {
+			t.Fatal(err)
+		}
+		var msg envelope.Message
+		if err := json.Unmarshal([]byte(body), &msg); err != nil {
+			t.Fatal(err)
+		}
+		if msg.CreatedAt != created {
+			t.Fatalf("message body created_at %s, row %s", msg.CreatedAt, created)
+		}
+		if ticks < 2 {
+			t.Fatal("clock did not advance during submit")
+		}
+		select {
+		case ev := <-sub.C:
+			if ev.Type != "message" || ev.MessageID != res.Setup.MessageID || ev.At != created {
+				t.Fatalf("activity at %q, want message created_at %q", ev.At, created)
+			}
+		default:
+			t.Fatal("setup commit did not publish activity")
+		}
+		assertNoRoutineSecret(t, env, "activity-at", res, nil, []string{key, url})
+	})
+}
+
 func grokReq(id, name, url, key, connector string, skip bool) onboarding.SubmitRequest {
 	in := map[string]any{"name": name, "webhook_url": url, "webhook_key": key}
 	if connector != "" {
@@ -473,6 +526,13 @@ func installTrigger(t *testing.T, env *testhub.Env, sql string) {
 			t.Errorf("drop trigger %s: %v", name, err)
 		}
 	})
+}
+
+func assertEmptyOnboardResult(t *testing.T, res onboarding.SubmitResult) {
+	t.Helper()
+	if res.RequestID != "" || res.Kind != "" || res.PeerID != "" || res.PrincipalID != "" || res.RouteID != "" || res.ConnectorName != "" || res.AuthState != "" || res.Status != "" || res.WebPath != "" || res.HumanOutput != "" || res.Setup != nil || len(res.SendDefaults) != 0 {
+		t.Fatal("failed submit returned resource ids, setup ids, or human output")
+	}
 }
 
 func assertNoRoutineSecret(t *testing.T, env *testhub.Env, label string, res onboarding.SubmitResult, err error, secrets []string) {
