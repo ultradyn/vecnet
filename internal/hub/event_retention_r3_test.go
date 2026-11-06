@@ -191,7 +191,10 @@ func setProtectiveRetention(t *testing.T, tx *sql.Tx, now time.Time) {
 }
 
 func retentionReadPurgeInterleaving(t *testing.T, boundary string) {
-	env := testhub.StartWith(t, func(cfg *hub.Config) { cfg.DeliveryReferences = true })
+	env := testhub.StartWith(t, func(cfg *hub.Config) {
+		cfg.DeliveryReferences = true
+		cfg.EventRetentionLimits = retentionFixtureLimits()
+	})
 	h := env.Hub
 	peer, secret := env.NewPeer("session", "reader")
 	_, sender := env.NewPeer("session", "sender")

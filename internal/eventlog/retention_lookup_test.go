@@ -93,7 +93,7 @@ func TestRetentionPopulatedLookupPlans(t *testing.T) {
 				if strings.Contains(detail, "event_outbox_retention_candidate (seq=?)") {
 					candidateSeeks++
 				}
-				if strings.Contains(detail, "event_subscriptions_retention_live (peer_id=? AND <expr>>?)") {
+				if strings.Contains(detail, "event_subscriptions_retention_identity (peer_id=? AND principal_kind=? AND principal_id=? AND <expr>>?)") {
 					liveSeeks++
 				}
 				if strings.Contains(detail, "event_outbox_retention_seq (sub_id=? AND seq=?)") {

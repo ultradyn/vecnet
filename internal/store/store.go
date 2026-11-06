@@ -74,7 +74,12 @@ func Open(path string) (*DB, error) {
 		sqldb.Close()
 		return nil, err
 	}
-	return &DB{sqldb}, nil
+	db := &DB{sqldb}
+	if err := db.initializeEventRetention(context.Background()); err != nil {
+		sqldb.Close()
+		return nil, err
+	}
+	return db, nil
 }
 
 // Tx runs fn inside one transaction (BEGIN IMMEDIATE via the DSN). It commits
