@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math/big"
 	"net/http"
 	"regexp"
 	"slices"
@@ -984,32 +985,8 @@ func toolSpecs(defs schema) []toolSpec {
 			"Then call phase \"complete\" with blob_id. data_base64 is rejected before decoding and is never forwarded. " +
 			"Checksum trust stays unverified until complete. " + blobURLGuide + " " +
 			"At most 30 URL mints per peer per rolling 60 seconds; blob_url_rate_limited returns retry_after_seconds and no URL. Treat every URL as sensitive.",
-		input: object(schema{
-			"phase":           schema{"type": "string", "enum": []string{"grant", "complete"}, "description": "R2 only. grant issues the upload capability; complete verifies it. Omit for a disk base64 upload."},
-			"data_base64":     schema{"type": "string", "maxLength": mcpAvatarBase64Max, "description": "Disk only. Standard base64 of at most 160 KiB decoded."},
-			"media_type":      schema{"type": "string"},
-			"ttl_seconds":     schema{"type": "integer", "minimum": 0, "maximum": 1 << 31},
-			"size":            schema{"type": "integer", "minimum": 1, "maximum": 25 << 20},
-			"sha256":          schema{"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"},
-			"idempotency_key": schema{"type": "string", "minLength": 1, "maxLength": 256},
-			"blob_id":         schema{"type": "string", "minLength": 1, "maxLength": 64},
-		}),
-		output: object(schema{
-			"blob_id":         schema{"type": "string"},
-			"sha256":          schema{"type": "string"},
-			"sha256_verified": schema{"type": "boolean"},
-			"integrity":       integritySchema(),
-			"size":            schema{"type": "integer", "minimum": 0},
-			"retention_class": schema{"type": "string", "enum": []string{"1h", "6h", "12h", "1d", "7d", "30d", "keep"}},
-			"expires_at":      schema{"type": []string{"string", "null"}},
-			"upload": object(schema{
-				"method":     schema{"type": "string", "const": "PUT"},
-				"url":        schema{"type": "string", "description": "Sensitive short-lived PUT capability. Do not log, store or paste it. Dummy shape only: https://example.invalid/object"},
-				"headers":    schema{"type": "object", "additionalProperties": schema{"type": "string"}, "description": "Sensitive signed headers the host must send, including Content-Length, If-None-Match and x-amz-checksum-sha256."},
-				"expires_at": schema{"type": "string"},
-			}),
-			"complete_url": schema{"type": "string", "description": "Authenticated completion path. Not a file URL."},
-		}, "sha256", "size"),
+		input:       blobPutInput(),
+		output:      blobPutOutput(),
 		annotations: writeAnnotations(false), precheck: precheckBase64(mcpBlobPutMax, blobPutTooLarge), call: callBlobPut,
 	}, {
 		name: "vecnet_blob_get",
@@ -1140,6 +1117,74 @@ func integritySchema() schema {
 	}, "algorithm", "value", "verified")
 }
 
+func forbid(names ...string) schema {
+	alts := make([]any, 0, len(names))
+	for _, name := range names {
+		alts = append(alts, schema{"required": []string{name}})
+	}
+	if len(alts) == 1 {
+		return schema{"not": alts[0]}
+	}
+	return schema{"not": schema{"anyOf": alts}}
+}
+
+func withForbid(base schema, names ...string) schema {
+	for key, value := range forbid(names...) {
+		base[key] = value
+	}
+	return base
+}
+
+// blobPutInput keeps one property list and distinguishes disk, grant, and
+// complete with if/then so tools/list does not repeat the object three times.
+func blobPutInput() schema {
+	input := object(schema{
+		"phase":           schema{"type": "string", "enum": []string{"grant", "complete"}, "description": "R2 only. grant issues the upload capability; complete verifies it. Omit for a disk base64 upload."},
+		"data_base64":     schema{"type": "string", "maxLength": mcpAvatarBase64Max, "description": "Disk only. Standard base64 of at most 160 KiB decoded."},
+		"media_type":      schema{"type": "string"},
+		"ttl_seconds":     schema{"type": "integer", "minimum": 0, "maximum": 1 << 31},
+		"size":            schema{"type": "integer", "minimum": 1, "maximum": 25 << 20},
+		"sha256":          schema{"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"},
+		"idempotency_key": schema{"type": "string", "minLength": 1, "maxLength": 256},
+		"blob_id":         schema{"type": "string", "minLength": 1, "maxLength": 64},
+	})
+	input["if"] = schema{"properties": schema{"phase": schema{"const": "grant"}}, "required": []string{"phase"}}
+	input["then"] = withForbid(schema{"required": []string{"size", "sha256", "media_type", "idempotency_key"}}, "data_base64", "blob_id", "ttl_seconds")
+	input["else"] = schema{
+		"if":   schema{"properties": schema{"phase": schema{"const": "complete"}}, "required": []string{"phase"}},
+		"then": withForbid(schema{"required": []string{"blob_id"}}, "data_base64", "size", "sha256", "media_type", "idempotency_key", "ttl_seconds"),
+		"else": withForbid(schema{"required": []string{"data_base64", "media_type"}}, "size", "sha256", "idempotency_key", "blob_id"),
+	}
+	return input
+}
+
+func blobPutOutput() schema {
+	output := object(schema{
+		"blob_id":         schema{"type": "string"},
+		"sha256":          schema{"type": "string"},
+		"sha256_verified": schema{"type": "boolean"},
+		"integrity":       integritySchema(),
+		"size":            schema{"type": "integer", "minimum": 0},
+		"retention_class": schema{"type": "string", "enum": []string{"1h", "6h", "12h", "1d", "7d", "30d", "keep"}},
+		"expires_at":      schema{"type": []string{"string", "null"}},
+		"upload": object(schema{
+			"method":     schema{"type": "string", "const": "PUT"},
+			"url":        schema{"type": "string", "description": "Sensitive short-lived PUT capability. Do not log, store or paste it. Dummy shape only: https://example.invalid/object"},
+			"headers":    schema{"type": "object", "additionalProperties": schema{"type": "string"}, "description": "Sensitive signed headers the host must send, including Content-Length, If-None-Match and x-amz-checksum-sha256."},
+			"expires_at": schema{"type": "string"},
+		}),
+		"complete_url": schema{"type": "string", "description": "Authenticated completion path. Not a file URL."},
+	}, "sha256", "size")
+	output["if"] = schema{"required": []string{"upload"}}
+	output["then"] = schema{"required": []string{"blob_id", "sha256", "sha256_verified", "integrity", "size", "retention_class", "expires_at", "upload", "complete_url"}}
+	output["else"] = schema{
+		"if":   schema{"required": []string{"blob_id"}},
+		"then": withForbid(schema{"required": []string{"blob_id", "sha256", "sha256_verified", "integrity", "size", "retention_class", "expires_at"}}, "upload", "complete_url"),
+		"else": withForbid(schema{"required": []string{"sha256", "size"}}, "blob_id", "upload", "complete_url", "sha256_verified", "integrity", "retention_class", "expires_at"),
+	}
+	return output
+}
+
 // rejectDirectBase64 refuses hosted file bytes on an R2 hub before base64
 // decoding. The host uploads through the grant URL instead.
 func (s *Server) rejectDirectBase64(name string, raw []byte) error {
@@ -1162,7 +1207,6 @@ func callBlobPut(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any
 		Data       string    `json:"data_base64"`
 		MediaType  string    `json:"media_type"`
 		TTLSeconds pageLimit `json:"ttl_seconds"`
-		Size       *int64    `json:"size"`
 		SHA256     string    `json:"sha256"`
 		Idem       string    `json:"idempotency_key"`
 		BlobID     string    `json:"blob_id"`
@@ -1170,35 +1214,90 @@ func callBlobPut(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any
 	if err := decodeArgs(raw, &a); err != nil {
 		return nil, err
 	}
-	if a.Phase == "grant" || a.Phase == "complete" || (s.Hub.Cfg.BlobBackend == "r2" && a.Data == "") {
-		switch a.Phase {
-		case "grant":
-			if a.Size == nil {
-				return nil, &envelope.SchemaError{Path: "/size", Message: "size is required for phase grant"}
-			}
-			return s.Hub.CreateBlobUpload(ctx, c, a.Idem, blobwire.UploadRequest{Size: *a.Size, SHA256: a.SHA256, MediaType: a.MediaType})
-		case "complete":
-			if a.BlobID == "" {
-				return nil, &envelope.SchemaError{Path: "/blob_id", Message: "blob_id is required for phase complete"}
-			}
-			return s.Hub.CompleteBlobUpload(ctx, c, a.BlobID)
-		default:
-			return nil, &envelope.SchemaError{Path: "/phase", Message: "R2 upload requires phase grant, then phase complete"}
-		}
-	}
-	data, err := decodeBase64(a.Data)
-	if err != nil {
-		return nil, &envelope.SchemaError{Path: "/data_base64", Message: "data_base64 must be standard base64"}
-	}
-	if len(data) > mcpBlobPutMax {
-		return nil, blobPutTooLarge()
-	}
-	m, err := s.Hub.PutBlob(ctx, c, bytes.NewReader(data), a.MediaType, time.Duration(a.TTLSeconds)*time.Second)
+	// size stays out of the struct: encoding/json rejects 3.0 and 3e0 for int64
+	// after JSON Schema has already accepted those integral spellings.
+	size, err := integralField(raw, "size")
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"sha256": m.SHA256, "size": m.Size}, nil
+	switch a.Phase {
+	case "grant":
+		if size == nil || a.SHA256 == "" || a.MediaType == "" || a.Idem == "" || a.Data != "" || a.BlobID != "" || a.TTLSeconds != 0 {
+			return nil, &envelope.SchemaError{Path: "/phase", Message: "phase grant requires size, sha256, media_type, and idempotency_key"}
+		}
+		return s.Hub.CreateBlobUpload(ctx, c, a.Idem, blobwire.UploadRequest{Size: *size, SHA256: a.SHA256, MediaType: a.MediaType})
+	case "complete":
+		if a.BlobID == "" || a.Data != "" || size != nil || a.SHA256 != "" || a.MediaType != "" || a.Idem != "" || a.TTLSeconds != 0 {
+			return nil, &envelope.SchemaError{Path: "/blob_id", Message: "phase complete requires only blob_id"}
+		}
+		return s.Hub.CompleteBlobUpload(ctx, c, a.BlobID)
+	case "":
+		if a.Data == "" || a.MediaType == "" || size != nil || a.SHA256 != "" || a.Idem != "" || a.BlobID != "" {
+			return nil, &envelope.SchemaError{Path: "/data_base64", Message: "data_base64 and media_type are required"}
+		}
+		data, err := decodeBase64(a.Data)
+		if err != nil {
+			return nil, &envelope.SchemaError{Path: "/data_base64", Message: "data_base64 must be standard base64"}
+		}
+		if len(data) > mcpBlobPutMax {
+			return nil, blobPutTooLarge()
+		}
+		m, err := s.Hub.PutBlob(ctx, c, bytes.NewReader(data), a.MediaType, time.Duration(a.TTLSeconds)*time.Second)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"sha256": m.SHA256, "size": m.Size}, nil
+	default:
+		return nil, &envelope.SchemaError{Path: "/phase", Message: "R2 upload requires phase grant, then phase complete"}
+	}
 }
+
+// integralField reads one JSON number that is mathematically an integer,
+// including the 3.0 and 3e0 spellings JSON Schema accepts. A fraction is an
+// invalid argument rather than an internal error.
+func integralField(raw []byte, name string) (*int64, error) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return nil, &envelope.SchemaError{Path: "", Message: "arguments must be an object"}
+	}
+	encoded, ok := fields[name]
+	if !ok {
+		return nil, nil
+	}
+	value, err := parseIntegral(encoded)
+	if err != nil {
+		return nil, &envelope.SchemaError{Path: "/" + name, Message: name + " must be an integer"}
+	}
+	return &value, nil
+}
+
+func parseIntegral(raw []byte) (int64, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] == '"' || raw[0] == 'n' || raw[0] == 't' || raw[0] == 'f' || raw[0] == '[' || raw[0] == '{' {
+		return 0, errNotIntegral
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var number json.Number
+	if err := dec.Decode(&number); err != nil {
+		return 0, errNotIntegral
+	}
+	var extra struct{}
+	if err := dec.Decode(&extra); err != io.EOF {
+		return 0, errNotIntegral
+	}
+	parsed, _, err := big.ParseFloat(number.String(), 10, 256, big.ToNearestEven)
+	if err != nil || !parsed.IsInt() {
+		return 0, errNotIntegral
+	}
+	value, accuracy := parsed.Int64()
+	if accuracy != big.Exact {
+		return 0, errNotIntegral
+	}
+	return value, nil
+}
+
+var errNotIntegral = errors.New("mcpserver: not an integral json number")
 
 func callBlobGet(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error) {
 	var fields map[string]json.RawMessage
@@ -1228,7 +1327,7 @@ func callBlobGet(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any
 	}
 	f, m, err := s.Hub.ReadBlob(ctx, &c, "", a.SHA256)
 	if err != nil {
-		return nil, err
+		return nil, s.Hub.BlobReadError(ctx, &c, err)
 	}
 	defer f.Close()
 	offset := int64(a.Offset)

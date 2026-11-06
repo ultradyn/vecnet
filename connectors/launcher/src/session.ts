@@ -326,7 +326,16 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
       if (!store.get(`turn:${hash(ev.turnId)}`) && reply.fullText !== undefined) {
         try {
           const blob = await deps.hub.putBlob(Buffer.from(reply.fullText), 'text/markdown', controller?.signal);
-          reply.req.attachments = [{ ...blob, media_type: 'text/markdown', name: `turn-${n}.md` }];
+          // SendRequest attachments omit server-owned proof. sha256_verified and integrity stay on the BlobRef only.
+          const attachment: NonNullable<SendRequest['attachments']>[number] = {
+            sha256: blob.sha256, size: blob.size, media_type: 'text/markdown', name: `turn-${n}.md`,
+          };
+          if (blob.blob_id) {
+            attachment.blob_id = blob.blob_id;
+            attachment.expires_at = blob.expires_at ?? null;
+          }
+          if (blob.retention_class) attachment.retention_class = blob.retention_class;
+          reply.req.attachments = [attachment];
         } catch { log.warn('turn text attachment upload failed', { jobId }); }
       }
       let fresh = false;

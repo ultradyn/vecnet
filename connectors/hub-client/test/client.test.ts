@@ -94,7 +94,9 @@ test('request deadlines default to 30 s, are configurable, and uploads get 300 s
   const timer = clock.timer.bind(clock);
   clock.timer = (ms,fn) => {scheduled.push(ms);return timer(ms,fn);};
   t.mock.method(globalThis,'setTimeout',()=>assert.fail('HTTP deadline tests must use the injected Clock'));
-  const c = fakeClient(async () => json({peers:[],sha256:'abc',size:0}),undefined,clock);
+  const c = fakeClient(async (url) => new URL(String(url)).pathname === '/v1/blob-capabilities'
+    ? json({backend:'disk',upload_mode:'legacy',mcp_transfer_mode:'base64',download_origins:[]})
+    : json({peers:[],sha256:'abc',size:0}),undefined,clock);
   await c.peers();await c.putBlob(new Uint8Array(),'text/plain');
   await fakeClient(async () => json({peers:[]}),1234,clock).peers();
   assert.deepEqual(scheduled,[30_000,30_000,300_000,1234]);

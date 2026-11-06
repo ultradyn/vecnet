@@ -12,15 +12,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
+
 	"github.com/XertroV/vecnet/internal/blob"
+	venv "github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/logging"
+	"github.com/XertroV/vecnet/internal/mcpserver"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -275,16 +280,42 @@ func TestR2SharedMintLimitAndMetadataSurfaces(t *testing.T) {
 	if resp.StatusCode != http.StatusTooManyRequests || bytes.Contains(body, []byte("http")) || !bytes.Contains(body, []byte("blob_url_rate_limited")) {
 		t.Fatalf("shared HTTP denial: %d %s", resp.StatusCode, body)
 	}
-	var inbox struct {
-		Events []json.RawMessage `json:"events"`
-	}
+	var inbox any
 	toolOK(t, env, reader, "vecnet_inbox", map[string]any{}, &inbox)
-	var hist map[string]any
+	var hist any
 	toolOK(t, env, reader, "vecnet_thread", map[string]any{"id": threadID}, &hist)
 	_, resource := rpc(t, env, reader, "resources/read", map[string]any{"uri": "vecnet://peer/" + recipient + "/inbox"})
-	for _, raw := range []string{mustJSON(t, inbox), mustJSON(t, hist), string(resource.Result)} {
+	var resourceBody struct {
+		Contents []struct {
+			Text string `json:"text"`
+		} `json:"contents"`
+	}
+	if json.Unmarshal(resource.Result, &resourceBody) != nil || len(resourceBody.Contents) != 1 {
+		t.Fatalf("resource: %s", resource.Result)
+	}
+	var resourceJSON any
+	if json.Unmarshal([]byte(resourceBody.Contents[0].Text), &resourceJSON) != nil {
+		t.Fatal("resource text")
+	}
+	for _, raw := range []string{mustJSON(t, inbox), mustJSON(t, hist), resourceBody.Contents[0].Text} {
 		if strings.Contains(raw, "X-Amz-") || strings.Contains(raw, "blob_url") || strings.Contains(raw, r2FakeOrigin) {
 			t.Fatalf("metadata surface carried a transfer URL: %s", raw)
+		}
+	}
+	for _, surface := range []struct {
+		name string
+		body any
+	}{{"inbox", inbox}, {"thread", hist}, {"resource", resourceJSON}} {
+		state := findBlobState(surface.body, id)
+		var integrity map[string]any
+		if state != nil {
+			integrity, _ = state["integrity"].(map[string]any)
+		}
+		if state == nil || state["state"] != "available" || state["retention_class"] != done["retention_class"] || state["expires_at"] != done["expires_at"] || state["sha256_verified"] != true || integrity["algorithm"] != "sha256" || integrity["value"] != sha || integrity["verified"] != true {
+			t.Fatalf("%s projection missing state, expiry, or checksum: %v", surface.name, state)
+		}
+		if strings.Contains(mustJSON(t, state), "http") {
+			t.Fatalf("%s projection carried a URL: %v", surface.name, state)
 		}
 	}
 }
@@ -339,16 +370,30 @@ type r2MCP struct {
 type countingTransport struct {
 	base http.RoundTripper
 	n    *int64
+	t    *testing.T
 }
 
 func (t countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if r.Method == http.MethodPut || r.Method == http.MethodGet {
-		*t.n += r.ContentLength
-		if *t.n < 0 {
-			*t.n = 0
-		}
+	provider := r.Method == http.MethodPut || r.Method == http.MethodGet
+	if provider {
+		// A hub-side provider transfer is a failure even when the request
+		// body is empty and the bytes are only in the response.
+		t.t.Errorf("hub client issued provider %s", r.Method)
+		*t.n++
 	}
-	return t.base.RoundTrip(r)
+	resp, err := t.base.RoundTrip(r)
+	if err != nil || resp == nil || !provider {
+		return resp, err
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		t.t.Errorf("hub provider response: %v", readErr)
+		return resp, readErr
+	}
+	*t.n += int64(len(body))
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	return resp, nil
 }
 
 type r2Rewrite struct {
@@ -444,7 +489,7 @@ func newR2MCPQuota(t *testing.T, quota int64) *r2MCP {
 	target, _ := url.Parse(srv.URL)
 	tlsTransport := srv.Client().Transport
 	rewrite := r2Rewrite{base: tlsTransport, target: target}
-	hubClient := &http.Client{Transport: countingTransport{base: rewrite, n: &f.files}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	hubClient := &http.Client{Transport: countingTransport{base: rewrite, n: &f.files, t: t}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	f.host = &http.Client{Transport: rewrite, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	f.env = testhub.StartWith(t, func(c *hub.Config) {
 		c.BlobBackend = "r2"
@@ -579,5 +624,212 @@ func assertNoSecretLeak(t *testing.T, raw string) {
 	t.Helper()
 	if strings.Contains(raw, "fake-signing-secret") {
 		t.Fatal("result exposed the signing secret")
+	}
+}
+
+func findBlobState(v any, id string) map[string]any {
+	switch x := v.(type) {
+	case map[string]any:
+		if states, ok := x["blob_states"].(map[string]any); ok {
+			if state, ok := states[id].(map[string]any); ok {
+				return state
+			}
+		}
+		for _, child := range x {
+			if state := findBlobState(child, id); state != nil {
+				return state
+			}
+		}
+	case []any:
+		for _, child := range x {
+			if state := findBlobState(child, id); state != nil {
+				return state
+			}
+		}
+	}
+	return nil
+}
+
+func blobPutOutputSchema(t *testing.T, env *testhub.Env, secret string) *jsonschema.Schema {
+	t.Helper()
+	status, r := rpc(t, env, secret, "tools/list", nil)
+	var listed struct {
+		Tools []listedTool `json:"tools"`
+	}
+	if status != http.StatusOK || r.Error != nil || json.Unmarshal(r.Result, &listed) != nil {
+		t.Fatalf("tools/list: %d %s", status, r.Result)
+	}
+	i := slices.IndexFunc(listed.Tools, func(tool listedTool) bool { return tool.Name == "vecnet_blob_put" })
+	if i < 0 {
+		t.Fatal("missing vecnet_blob_put")
+	}
+	raw, err := json.Marshal(listed.Tools[i].OutputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := jsonschema.NewCompiler()
+	if err := c.AddResource("urn:vecnet:blob-put-output", doc); err != nil {
+		t.Fatal(err)
+	}
+	sch, err := c.Compile("urn:vecnet:blob-put-output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sch
+}
+
+func schemaAccepts(t *testing.T, sch *jsonschema.Schema, body string) error {
+	t.Helper()
+	value, err := jsonschema.UnmarshalJSON(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return venv.ValidateValue(sch, value)
+}
+
+func TestBlobPutPhaseSchema(t *testing.T) {
+	disk := testhub.Start(t)
+	_, secret := disk.NewPeer("session", "uploader")
+	status, empty := rpc(t, disk, secret, "tools/call", map[string]any{"name": "vecnet_blob_put", "arguments": map[string]any{}})
+	if status != http.StatusOK || empty.Error == nil || empty.Error.Code != mcpserver.ErrInvalidParams {
+		t.Fatalf("empty args: HTTP %d %+v result %s", status, empty.Error, empty.Result)
+	}
+	var blobs int
+	if err := disk.Hub.DB.QueryRow(`SELECT count(*) FROM blobs`).Scan(&blobs); err != nil || blobs != 0 {
+		t.Fatalf("empty args created %d blobs (%v)", blobs, err)
+	}
+	if path := invalidPath(t, disk, secret, "vecnet_blob_put", map[string]any{"data_base64": "YQ=="}); path != "/media_type" && path != "" {
+		t.Fatalf("disk missing media_type path %q", path)
+	}
+	sha := strings.Repeat("ab", 32)
+	invalidPath(t, disk, secret, "vecnet_blob_put", map[string]any{
+		"phase": "grant", "size": 3, "sha256": sha, "media_type": "text/plain", "idempotency_key": "mix", "data_base64": "YQ==",
+	})
+	invalidPath(t, disk, secret, "vecnet_blob_put", map[string]any{
+		"phase": "complete", "blob_id": "blo_00000000000000000000000001", "size": 3,
+	})
+
+	f := newR2MCP(t)
+	_, sender := f.env.NewPeer("session", "sender")
+	for _, args := range []map[string]any{
+		{"phase": "grant", "sha256": sha, "media_type": "text/plain", "idempotency_key": "no-size"},
+		{"phase": "grant", "size": 3, "sha256": sha, "idempotency_key": "no-type"},
+		{"phase": "grant", "size": 3, "sha256": sha, "media_type": "text/plain"},
+		{"phase": "complete"},
+		{"phase": "grant", "size": 3, "sha256": sha, "media_type": "text/plain", "idempotency_key": "with-id", "blob_id": "blo_00000000000000000000000001"},
+		{"phase": "complete", "blob_id": "blo_00000000000000000000000001", "media_type": "text/plain"},
+	} {
+		invalidPath(t, f.env, sender, "vecnet_blob_put", args)
+	}
+	e := toolFails(t, f.env, sender, "vecnet_blob_put", map[string]any{
+		"phase": "grant", "size": 3, "sha256": sha, "media_type": "text/plain", "idempotency_key": "bytes", "data_base64": "YQ==",
+	}, "direct_upload_required")
+	if strings.Contains(mustJSON(t, e), "YQ==") || f.hubFileBytes() != 0 {
+		t.Fatal("mixed R2 data_base64 was decoded or proxied")
+	}
+	sch := blobPutOutputSchema(t, f.env, sender)
+	if err := schemaAccepts(t, sch, `{"sha256":"`+sha+`","size":1,"upload":{"method":"PUT","url":"https://example.invalid/object","headers":{},"expires_at":"2026-11-06T00:05:00.000Z"}}`); err == nil {
+		t.Fatal("output schema accepted a disk result mixed with an upload capability")
+	}
+	if err := schemaAccepts(t, sch, `{"sha256":"`+sha+`","size":2}`); err != nil {
+		t.Fatal(err)
+	}
+	grant := `{"blob_id":"blo_00000000000000000000000001","sha256":"` + sha + `","sha256_verified":false,"integrity":{"algorithm":"sha256","value":"` + sha + `","verified":false},"size":3,"retention_class":"1d","expires_at":"2026-11-07T00:00:00.000Z","upload":{"method":"PUT","url":"https://example.invalid/object","headers":{"If-None-Match":"*"},"expires_at":"2026-11-06T00:05:00.000Z"},"complete_url":"/v1/blobs/uploads/blo_00000000000000000000000001/complete"}`
+	if err := schemaAccepts(t, sch, grant); err != nil {
+		t.Fatal(err)
+	}
+	complete := `{"blob_id":"blo_00000000000000000000000001","sha256":"` + sha + `","sha256_verified":true,"integrity":{"algorithm":"sha256","value":"` + sha + `","verified":true},"size":3,"retention_class":"1d","expires_at":"2026-11-07T00:00:00.000Z"}`
+	if err := schemaAccepts(t, sch, complete); err != nil {
+		t.Fatal(err)
+	}
+	if err := schemaAccepts(t, sch, strings.TrimSuffix(complete, "}")+`,"upload":{"method":"PUT","url":"https://example.invalid/object","headers":{},"expires_at":"2026-11-06T00:05:00.000Z"}}`); err == nil {
+		t.Fatal("output schema accepted a completion mixed with an upload capability")
+	}
+	var diskPut map[string]any
+	toolOK(t, disk, secret, "vecnet_blob_put", map[string]any{"data_base64": "YQ==", "media_type": "text/plain"}, &diskPut)
+	if err := schemaAccepts(t, sch, mustJSON(t, diskPut)); err != nil {
+		t.Fatalf("disk put result: %v %s", err, mustJSON(t, diskPut))
+	}
+	var live map[string]any
+	toolOK(t, f.env, sender, "vecnet_blob_put", map[string]any{
+		"phase": "grant", "size": 3, "sha256": sha, "media_type": "text/plain", "idempotency_key": "live-schema",
+	}, &live)
+	if err := schemaAccepts(t, sch, mustJSON(t, live)); err != nil {
+		t.Fatalf("live grant result: %v %s", err, mustJSON(t, live))
+	}
+}
+
+func TestR2GrantSizeIntegralNotation(t *testing.T) {
+	f := newR2MCP(t)
+	_, sender := f.env.NewPeer("session", "sender")
+	sha := strings.Repeat("cd", 32)
+	for _, tc := range []struct{ name, size string }{{"int", "3"}, {"decimal", "3.0"}, {"exponent", "3e0"}} {
+		args := fmt.Sprintf(`{"phase":"grant","size":%s,"sha256":"%s","media_type":"text/plain","idempotency_key":"size-%s"}`, tc.size, sha, tc.name)
+		status, r := rpcVerbatim(t, f.env, sender, "vecnet_blob_put", args)
+		if status != http.StatusOK || r.Error != nil {
+			t.Fatalf("size %s: HTTP %d %+v", tc.size, status, r.Error)
+		}
+		var res toolResult
+		if json.Unmarshal(r.Result, &res) != nil || res.IsError {
+			t.Fatalf("size %s tool error %s", tc.size, r.Result)
+		}
+		var grant map[string]any
+		if json.Unmarshal(res.StructuredContent, &grant) != nil || grant["upload"] == nil {
+			t.Fatalf("size %s did not issue a capability: %s", tc.size, res.StructuredContent)
+		}
+	}
+	args := fmt.Sprintf(`{"phase":"grant","size":3.5,"sha256":"%s","media_type":"text/plain","idempotency_key":"fraction"}`, sha)
+	status, r := rpcVerbatim(t, f.env, sender, "vecnet_blob_put", args)
+	if status != http.StatusOK || r.Error == nil || r.Error.Code != mcpserver.ErrInvalidParams || r.Error.Code == mcpserver.ErrInternal {
+		t.Fatalf("fractional size: HTTP %d %+v", status, r.Error)
+	}
+	var objects int
+	if err := f.env.Hub.DB.QueryRow(`SELECT count(*) FROM blob_objects`).Scan(&objects); err != nil || objects != 3 {
+		t.Fatalf("fractional size changed object count to %d (%v)", objects, err)
+	}
+}
+
+func TestR2HashOnlyReadMapsBlobIDRequired(t *testing.T) {
+	f := newR2MCP(t)
+	env := f.env
+	_, owner := env.NewPeer("session", "owner")
+	recipient, reader := env.NewPeer("session", "recipient")
+	_, outsider := env.NewPeer("session", "outsider")
+	payload := []byte("abc")
+	sum := sha256.Sum256(payload)
+	sha := fmt.Sprintf("%x", sum[:])
+	unknown := strings.Repeat("ef", 32)
+	var grant map[string]any
+	toolOK(t, env, owner, "vecnet_blob_put", map[string]any{
+		"phase": "grant", "size": len(payload), "sha256": sha, "media_type": "text/plain", "idempotency_key": "hash-only",
+	}, &grant)
+	f.hostPut(t, grant["upload"].(map[string]any)["url"].(string), grant["upload"].(map[string]any)["headers"].(map[string]any), payload)
+	var done map[string]any
+	toolOK(t, env, owner, "vecnet_blob_put", map[string]any{"phase": "complete", "blob_id": grant["blob_id"]}, &done)
+	toolOK(t, env, owner, "vecnet_send", map[string]any{
+		"idempotency_key": "hash-send", "recipients": []string{recipient}, "priority": "hold", "content": map[string]any{"text": "file"},
+		"attachments": []any{map[string]any{"blob_id": done["blob_id"], "sha256": sha, "size": len(payload), "media_type": "text/plain", "retention_class": done["retention_class"], "expires_at": done["expires_at"]}},
+	}, nil)
+	for _, tc := range []struct{ name, secret string }{{"owner", owner}, {"recipient", reader}, {"operator", env.OperatorSecret}, {"outsider", outsider}} {
+		for _, hash := range []string{sha, unknown} {
+			got := toolFails(t, env, tc.secret, "vecnet_blob_get", map[string]any{"sha256": hash}, "blob_id_required")
+			if strings.Contains(mustJSON(t, got), "http") || strings.Contains(got.Error.Message, "url") {
+				t.Fatalf("%s %s disclosed a capability", tc.name, hash)
+			}
+		}
+	}
+	disk := testhub.Start(t)
+	_, uploader := disk.NewPeer("session", "uploader")
+	var put map[string]any
+	toolOK(t, disk, uploader, "vecnet_blob_put", map[string]any{"data_base64": "aGk=", "media_type": "text/plain"}, &put)
+	var page map[string]any
+	toolOK(t, disk, disk.OperatorSecret, "vecnet_blob_get", map[string]any{"sha256": put["sha256"]}, &page)
+	data, err := base64.StdEncoding.DecodeString(fmt.Sprint(page["data"]))
+	if err != nil || page["encoding"] != "base64" || string(data) != "hi" || page["url"] != nil {
+		t.Fatalf("disk hash-only read lost its base64 page: %v", page)
 	}
 }
