@@ -52,6 +52,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   let debounce: { cancel(): void } | undefined, gap: { cancel(): void } | undefined;
   let reconnect: { cancel(): void } | undefined, minute: { cancel(): void } | undefined;
   let claimRecovery: { cancel(): void } | undefined, warmCheck: { cancel(): void } | undefined;
+  let historyRetry: { cancel(): void } | undefined, historyRetryIndex = 0;
   const children = new Set<ChildProcess>();
   const unresolvedLogged = new Set<string>(), pendingLogged = new Set<string>();
   const receipts = new Set<string>(), waitingRetry = new Map<string, Batch>(), waitForIdle = new Set<string>();
@@ -154,6 +155,11 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (!running) return;
     debounce?.cancel();
     debounce = clock.timer(ms, () => { debounce = undefined; enqueue(async () => { await reconcile(); await push(); }); });
+  }
+  function scheduleHistoryRetry() {
+    if (!running || historyRetry) return;
+    const ms = [1000, 2000, 4000, 8000, 15000][Math.min(historyRetryIndex++, 4)];
+    historyRetry = clock.timer(ms, () => { historyRetry = undefined; enqueue(push); });
   }
   function scheduleWarmCheck(ms = Math.max(1, resumeAt + 2001 - clock.now())) {
     if (!running || warmCheck) return;
@@ -404,7 +410,15 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       if (batch) {
         const state = mapStatus(status);
         if (waitForIdle.has(r.key) && state !== 'idle') return;
-        const turn = await latest();
+        let turn: RecordValue | undefined;
+        try { turn = await latest(); }
+        catch {
+          // This batch is unsent or definitely rejected. Keep its claim and
+          // key, and retry the checkpoint read even if no new event arrives.
+          log.warn('codex_engine_operation_failed', { threadId: b.threadId });
+          scheduleHistoryRetry(); return;
+        }
+        historyRetry?.cancel(); historyRetry = undefined; historyRetryIndex = 0;
         if (!liveness().live) return;
         if (state === 'turn_running' && turn?.status !== 'inProgress') return;
         r.method = state === 'idle' ? 'turn/start' : 'turn/steer';
@@ -468,10 +482,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   }
   return {
     start() { if (running) { enqueue(async () => { await recover(); arm(0); }); return; }
-      running = true; reconnect = undefined; gap = undefined; claimRecovery = undefined; warmCheck = undefined; startWatch(); heartbeat(); enqueue(connect); },
+      running = true; reconnect = undefined; gap = undefined; claimRecovery = undefined; warmCheck = undefined; historyRetry = undefined; historyRetryIndex = 0; startWatch(); heartbeat(); enqueue(connect); },
     async stop() {
       if (!running) return;
-      running = false; debounce?.cancel(); gap?.cancel(); reconnect?.cancel(); minute?.cancel(); watchRetry?.cancel(); claimRecovery?.cancel(); warmCheck?.cancel();
+      running = false; debounce?.cancel(); gap?.cancel(); reconnect?.cancel(); minute?.cancel(); watchRetry?.cancel(); claimRecovery?.cancel(); warmCheck?.cancel(); historyRetry?.cancel();
       const child = watch; watch = undefined;
       const exits = [...children, ...(child ? [child] : [])].map(c => new Promise<void>(resolve => {
         if (c.exitCode !== null || c.signalCode !== null) { resolve(); return; }

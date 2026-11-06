@@ -219,6 +219,43 @@ test('steer mismatch re-reads once then waits for idle', async t => {
   assert.equal(h.sends()[2].method, 'turn/start'); assert.equal((h.sends()[2].params as any).clientUserMessageId, key);
   assert.ok(h.fake.requests.filter(r => r.method === 'thread/turns/list').length >= 4);
 });
+for (const failures of [1, 7]) test(`idle mismatch retry survives ${failures} transient history read failures without another trigger`, async t => {
+  const h = await harness(t, { status: active });
+  const opens = h.opens;
+  h.fake.failNext('turn/steer', { code: -32600, message: 'expectedTurnId mismatch' });
+  h.fake.failNext('turn/steer', { code: -32600, message: 'expectedTurnId mismatch' });
+  await h.wake();
+  assert.equal(h.sends().length, 2);
+  const original = h.rows()[0]; assert.ok(original);
+  assert.equal(original.acceptedAt, null);
+  for (let i = 0; i < failures; i++) h.fake.failNext('thread/turns/list', { code: -32603, message: 'temporary history read failure' });
+  const reads = () => h.fake.requests.filter(r => r.method === 'thread/turns/list').length;
+  const before = reads();
+  h.fake.setThread({ id: 'thread', status: { type: 'idle' } });
+  await h.sync(); await h.tick();
+  assert.equal(reads(), before + 1, 'first idle history read failed');
+  assert.deepEqual(h.rows()[0], original, 'failed read retains the claim and checkpoint');
+  for (let i = 0; i < failures; i++) {
+    const delayMs = [1000, 2000, 4000, 8000, 15000][Math.min(i, 4)];
+    await h.tick(delayMs - 50);
+    assert.equal(reads(), before + i + 1, 'history retry waits for its backoff');
+    await h.tick(50);
+    if (i + 1 < failures) {
+      assert.equal(reads(), before + i + 2, 'one history retry at each bounded backoff step');
+      assert.deepEqual(h.rows()[0], original);
+    } else assert.equal(h.sends().length, 3, 'the successful history retry starts the original delivery');
+  }
+  await h.tick(2 * minute);
+  assert.deepEqual(h.sends().map(r => r.method), ['turn/steer', 'turn/steer', 'turn/start']);
+  const start = h.sends()[2].params as any;
+  assert.equal(start.clientUserMessageId, original.key);
+  assert.deepEqual(start.additionalContext, (h.sends()[0].params as any).additionalContext);
+  assert.equal(h.rows().length, 0); assert.equal(h.releases().length, 0);
+  assert.equal(h.opens, opens, 'no reconnect or restart');
+  assert.equal(h.plan.events.length, 1, 'no new watch event');
+  const originalClaims = h.records().filter(r => r.hookClaimed === original.claim);
+  assert.equal(originalClaims.length, 1, 'original delivery was claimed once');
+});
 test('failed mismatch re-read retries the original delivery on idle without restarting', async t => {
   let h: Awaited<ReturnType<typeof harness>>, failRead = false;
   h = await harness(t, { status: active, wrap: rpc => ({ ...rpc, async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
