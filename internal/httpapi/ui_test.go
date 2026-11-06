@@ -20,8 +20,11 @@ import (
 // 336 KiB on 2026-11-05 for the favicon set, about 9 KiB of it images; to
 // 368 KiB on 2026-11-05 when hub-notices merged with master: its hub notice and
 // restart banners (about 13 KiB) on top of master's sidebar threads, unread
-// counts and composer growth put the merged UI at about 354 KB).
-const uiMaxBytes = 368 << 10
+// counts and composer growth put the merged UI at about 354 KB; to 416 KiB on
+// 2026-11-07 on build/agent-onboarding for the Add agent onboarding UI (#46,
+// about 30 KB of invite.js), which put this branch at about 407 KB. Master's
+// own cap differs; re-size this at the master merge.)
+const uiMaxBytes = 416 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
