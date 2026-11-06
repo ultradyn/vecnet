@@ -150,6 +150,10 @@ func (h *Hub) resultFromReceipt(ctx context.Context, tx *sql.Tx, rec onboardReco
 	}, nil
 }
 
+// deriveAuthState reports this peer's own credential readiness. An OAuth
+// token counts only when oauth_principals names this peer and that row's
+// principal is still the peer's principal. A token for another peer that
+// shares the principal does not verify this one (Decisions §1).
 func (h *Hub) deriveAuthState(ctx context.Context, tx *sql.Tx, peerID string) (string, error) {
 	now := h.nowStr()
 	var cred, token, link, oauth, peer int
@@ -159,8 +163,10 @@ func (h *Hub) deriveAuthState(ctx context.Context, tx *sql.Tx, peerID string) (s
 		  (SELECT count(*) FROM credentials WHERE kind='peer' AND subject_id=? AND revoked_at IS NULL),
 		  (SELECT count(*) FROM enrol_tokens WHERE peer_id=? AND used_at IS NULL AND expires_at>?),
 		  (SELECT count(*) FROM dot_links WHERE peer_id=? AND used_at IS NULL AND expires_at>?),
-		  (SELECT count(*) FROM oauth_tokens t JOIN peers p ON p.prn_id=t.principal_id
-		    WHERE p.peer_id=? AND t.revoked_at IS NULL AND t.expires_at>?)`,
+		  (SELECT count(*) FROM oauth_tokens t
+		    JOIN oauth_principals o ON o.prn_id = t.principal_id
+		    JOIN peers p ON p.peer_id = o.peer_id AND p.prn_id = o.prn_id
+		    WHERE o.peer_id = ? AND t.revoked_at IS NULL AND t.expires_at > ?)`,
 		peerID, peerID, peerID, now, peerID, now, peerID, now).Scan(&peer, &cred, &token, &link, &oauth)
 	if err != nil {
 		return "", fmt.Errorf("hub: onboarding auth state: %w", err)

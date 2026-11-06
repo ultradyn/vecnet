@@ -284,6 +284,84 @@ func TestOnboardingReceiptIsolation(t *testing.T) {
 	}
 }
 
+// TestOnboardingOwnBinding pins Decisions §1: a live OAuth token verifies
+// only the peer oauth_principals names, and only while that row's principal
+// is still the peer's principal. A session or dot created under an
+// already-linked dot's principal stays pending until its own credential or
+// binding exists.
+func TestOnboardingOwnBinding(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	op := operatorCaller(t, env)
+	older := mustOnboard(t, env, op, onboardReq("dot", "older-dot", map[string]any{"name": "Older Dot"}))
+	now := envelope.FormatTime(env.Now.Now())
+	exp := envelope.FormatTime(env.Now.Now().Add(time.Hour))
+	if _, err := env.Hub.DB.Exec(`INSERT INTO oauth_principals(prn_id, subject, peer_id, created_at) VALUES (?,?,?,?)`,
+		older.PrincipalID, "oauth:older-dot", older.PeerID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.Hub.DB.Exec(`INSERT INTO oauth_tokens(token_hash, kind, client_id, principal_id, scope, resource, expires_at, created_at) VALUES (?,'access','client',?,'vecnet','http://127.0.0.1/mcp',?,?)`,
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", older.PrincipalID, exp, now); err != nil {
+		t.Fatal(err)
+	}
+
+	session := mustOnboard(t, env, op, onboardReq("session", "shared-session", map[string]any{
+		"name": "Shared Session", "principal_id": older.PrincipalID,
+	}))
+	if session.AuthState != onboarding.AuthPending {
+		t.Fatalf("session auth_state = %s, want pending while only the older dot is linked", session.AuthState)
+	}
+	got, err := env.Hub.OnboardingStatus(ctx, op, "shared-session")
+	if err != nil || got.AuthState != onboarding.AuthPending || got.PeerID != session.PeerID {
+		t.Fatalf("session status = %+v %v", got, err)
+	}
+
+	shared := mustOnboard(t, env, op, onboardReq("dot", "shared-dot", map[string]any{
+		"name": "Shared Dot", "principal_id": older.PrincipalID,
+	}))
+	if shared.AuthState != onboarding.AuthPending {
+		t.Fatalf("dot auth_state = %s, want pending until its own binding", shared.AuthState)
+	}
+	got, err = env.Hub.OnboardingStatus(ctx, op, "shared-dot")
+	if err != nil || got.AuthState != onboarding.AuthPending || got.PeerID != shared.PeerID {
+		t.Fatalf("dot status = %+v %v", got, err)
+	}
+
+	enrolled, _, err := env.Hub.Auth.Enrol(ctx, enrolToken(session.HumanOutput))
+	if err != nil || enrolled != session.PeerID {
+		t.Fatalf("enrol own session: %v", err)
+	}
+	got, err = env.Hub.OnboardingStatus(ctx, op, "shared-session")
+	if err != nil || got.AuthState != onboarding.AuthVerified {
+		t.Fatalf("session after its own enrol = %+v %v", got, err)
+	}
+	got, err = env.Hub.OnboardingStatus(ctx, op, "shared-dot")
+	if err != nil || got.AuthState != onboarding.AuthPending {
+		t.Fatalf("dot before its own binding = %+v %v", got, err)
+	}
+
+	ownPrn, _ := env.NewPrincipal("dot:Shared Dot")
+	if _, err := env.Hub.DB.Exec(`UPDATE peers SET prn_id=? WHERE peer_id=?`, ownPrn, shared.PeerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.Hub.DB.Exec(`INSERT INTO oauth_principals(prn_id, subject, peer_id, created_at) VALUES (?,?,?,?)`,
+		ownPrn, "oauth:shared-dot", shared.PeerID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.Hub.DB.Exec(`INSERT INTO oauth_tokens(token_hash, kind, client_id, principal_id, scope, resource, expires_at, created_at) VALUES (?,'access','client',?,'vecnet','http://127.0.0.1/mcp',?,?)`,
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ownPrn, exp, now); err != nil {
+		t.Fatal(err)
+	}
+	got, err = env.Hub.OnboardingStatus(ctx, op, "shared-dot")
+	if err != nil || got.AuthState != onboarding.AuthVerified || got.PeerID != shared.PeerID {
+		t.Fatalf("dot after its own binding = %+v %v", got, err)
+	}
+	var bound string
+	if err := env.Hub.DB.QueryRow(`SELECT peer_id FROM oauth_principals WHERE prn_id=?`, older.PrincipalID).Scan(&bound); err != nil || bound != older.PeerID {
+		t.Fatalf("older binding moved to %s (%v)", bound, err)
+	}
+}
+
 func onboardValue(t *testing.T, env *testhub.Env, key string) string {
 	t.Helper()
 	var value string
