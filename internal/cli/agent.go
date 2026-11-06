@@ -6,6 +6,7 @@ package cli
 // Send and reply still require an explicit priority; nothing here supplies one.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -219,14 +220,60 @@ func (a *app) exposeAgentRequestID(id string) error {
 	return err
 }
 
-// noteLostAgentSubmit tells the operator how to recover one id after the
-// bounded redispatch still has no answer. A definite hub rejection is unchanged.
+// noteLostAgentSubmit tells the operator how to recover one id when the
+// submit's outcome is ambiguous. Retry eligibility is separate: a malformed
+// success or a deadline is not redriven, but either can follow a commit.
+// A definite hub rejection is unchanged.
 func (a *app) noteLostAgentSubmit(id string, err error) error {
-	if err == nil || !retryAgent(err) {
+	if err == nil || !ambiguousAgentSubmit(err) {
 		return err
 	}
-	fmt.Fprintf(a.stderr, "request_id %s was not answered and may already be committed; recover with `vecnet agent status %s` or the same agent add with --request-id %s\n", id, id, id)
+	fmt.Fprintf(a.stderr, "request_id %s was not answered and may already be committed; recover with %s\n", id, a.agentRecoveryHint(id))
 	return err
+}
+
+// agentRecoveryHint is the copy-paste status command and the same-id retry.
+// The selected profile (--net, else VECNET_PROFILE) is single-quoted into
+// both so a later run does not refuse or query another hub. A value that
+// cannot be quoted safely is not interpolated; the operator must pass the
+// original --net selection.
+func (a *app) agentRecoveryHint(id string) string {
+	profile := a.namedProfile()
+	if profile == "" {
+		return fmt.Sprintf("`vecnet agent status %s` or the same agent add with --request-id %s", id, id)
+	}
+	qp, okP := shellQuote(profile)
+	qid, okID := shellQuote(id)
+	if !okP || !okID {
+		return fmt.Sprintf("`vecnet agent status %s` or the same agent add with --request-id %s; pass the original --net selection", id, id)
+	}
+	return fmt.Sprintf("`vecnet --net %s agent status %s` or the same agent add with --net %s --request-id %s", qp, qid, qp, qid)
+}
+
+// shellQuote returns a single-quoted POSIX word. Control characters are
+// refused so the one-line hint cannot embed a break.
+func shellQuote(s string) (string, bool) {
+	if strings.IndexFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return "", false
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'", true
+}
+
+// ambiguousAgentSubmit reports an outcome that may already be committed.
+// It is wider than retryAgent: bad_response and a request deadline are not
+// redriven, and they still need the same-id recovery instructions.
+func ambiguousAgentSubmit(err error) bool {
+	if err == nil {
+		return false
+	}
+	if retryAgent(err) {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var he *hubError
+	return errors.As(err, &he) && he.Code == "bad_response"
 }
 
 func (a *app) postAgent(body, out any) error {

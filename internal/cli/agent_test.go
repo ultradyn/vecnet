@@ -2,17 +2,22 @@ package cli_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/cli"
 	"github.com/XertroV/vecnet/internal/onboarding"
@@ -101,8 +106,14 @@ func TestAgentCLIParity(t *testing.T) {
 			t.Fatalf("payload kind/spec/request = %v %v %v", body["kind"], body["spec_version"], body["request_id"])
 		}
 		in, _ := body["inputs"].(map[string]any)
-		if in["name"] != "Scout" || in["principal_id"] != "prn_test" || in["enrol_ttl_seconds"] != float64(3600) {
-			t.Fatalf("session inputs = %#v", in)
+		if in["name"] != "Scout" {
+			t.Fatal("session inputs: name")
+		}
+		if in["principal_id"] != "prn_test" {
+			t.Fatal("session inputs: principal_id")
+		}
+		if in["enrol_ttl_seconds"] != float64(3600) {
+			t.Fatal("session inputs: enrol_ttl_seconds")
 		}
 		if _, ok := in["name_open"]; ok {
 			t.Fatal("name_open was sent without --open-name")
@@ -137,8 +148,11 @@ func TestAgentCLIParity(t *testing.T) {
 			t.Fatalf("open add: exit %d %s", code, errs)
 		}
 		in, _ = h2.posts()[0]["inputs"].(map[string]any)
-		if in["name"] != "helper bot" || in["name_open"] != true {
-			t.Fatalf("open inputs = %#v", in)
+		if in["name"] != "helper bot" {
+			t.Fatal("open inputs: name")
+		}
+		if in["name_open"] != true {
+			t.Fatal("open inputs: name_open")
 		}
 	})
 
@@ -386,8 +400,14 @@ func TestAgentCLIParity(t *testing.T) {
 			t.Fatal("skip-mcp printed the routine key")
 		}
 		in, _ := h.posts()[0]["inputs"].(map[string]any)
-		if in["skip_mcp"] != true || in["connector_name"] != "vecnet-helper" || in["webhook_key"] != "crsr_skipmcp" {
-			t.Fatalf("skip-mcp inputs = %#v", redactInputs(in))
+		if in["skip_mcp"] != true {
+			t.Fatal("skip-mcp inputs: skip_mcp")
+		}
+		if in["connector_name"] != "vecnet-helper" {
+			t.Fatal("skip-mcp inputs: connector_name")
+		}
+		if in["webhook_key"] != "crsr_skipmcp" {
+			t.Fatal("skip-mcp inputs: webhook_key")
 		}
 		if !connectorPattern.MatchString("vecnet-helper") {
 			t.Fatal("test connector does not match the locked pattern")
@@ -425,13 +445,13 @@ func TestAgentCLIParity(t *testing.T) {
 		}
 		in, _ = h.posts()[0]["inputs"].(map[string]any)
 		if _, ok := in["skip_mcp"]; ok && in["skip_mcp"] != false {
-			t.Fatalf("hosted inputs set skip_mcp = %#v", in["skip_mcp"])
+			t.Fatal("hosted inputs set skip_mcp")
 		}
 		if len(h.paths("/v1/admin/dot-links")) != 1 {
 			t.Fatalf("hosted OAuth link calls = %d", len(h.paths("/v1/admin/dot-links")))
 		}
 		if !strings.Contains(out+errs, "hosted OAuth") || strings.Contains(out+errs, "CLI bearer") {
-			t.Fatalf("hosted explanation:\n%s%s", out, errs)
+			t.Fatal("hosted explanation missing hosted OAuth or also described CLI bearer")
 		}
 	})
 
@@ -613,8 +633,8 @@ func TestAgentCLIRequestIDRecovery(t *testing.T) {
 			"request_id " + id,
 			"was not answered",
 			"may already be committed",
-			"vecnet agent status " + id,
-			"--request-id " + id,
+			"vecnet --net 'p' agent status '" + id + "'",
+			"--request-id '" + id + "'",
 		} {
 			if !strings.Contains(errs, want) {
 				t.Fatalf("recovery instructions missing %q", want)
@@ -661,6 +681,253 @@ func TestAgentCLIRequestIDRecovery(t *testing.T) {
 			}
 		}
 	})
+
+	// A 503 followed by a malformed HTTP 200 is not retryable on the second
+	// attempt, and a deadline is not retried at all. Both can follow a commit,
+	// so both still need the same-id status instructions.
+	t.Run("(t5 I1 r2 mixed) malformed success after a retry still prints recovery", func(t *testing.T) {
+		h := newAgentHub(t, func() []onboarding.KindSpec { return onboarding.Specs() })
+		var mu sync.Mutex
+		var posted []string
+		h.onPost = func(n int, body map[string]any, w http.ResponseWriter) {
+			id, _ := body["request_id"].(string)
+			mu.Lock()
+			posted = append(posted, id)
+			attempt := len(posted)
+			mu.Unlock()
+			if attempt == 1 {
+				writeHubProblem(w, http.StatusServiceUnavailable, "unavailable", "lost response")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"request_id":`)
+		}
+		u := agentOperator(t, h.srv.URL)
+		code, out, errs := u.run("agent", "add", "--kind", "session", "--name", "Mixed", "--request-id", "req-mixed-1")
+		mu.Lock()
+		got := append([]string(nil), posted...)
+		mu.Unlock()
+		if len(got) != 2 || got[0] != "req-mixed-1" || got[1] != "req-mixed-1" {
+			t.Fatalf("posts = %v, want two attempts with one id", got)
+		}
+		if code == 0 || out != "" {
+			t.Fatalf("mixed submit: exit %d stdout %q", code, out)
+		}
+		for _, want := range []string{
+			"request_id req-mixed-1",
+			"was not answered",
+			"may already be committed",
+			"agent status",
+			"--request-id",
+			"req-mixed-1",
+		} {
+			if !strings.Contains(errs, want) {
+				t.Fatalf("recovery instructions missing %q\n%s", want, errs)
+			}
+		}
+	})
+
+	t.Run("(t5 I1 r2 deadline) a request deadline still prints recovery", func(t *testing.T) {
+		h := newAgentHub(t, func() []onboarding.KindSpec { return onboarding.Specs() })
+		var mu sync.Mutex
+		var posted []string
+		h.onAny = func(r *http.Request, w http.ResponseWriter, body []byte) bool {
+			if r.Method != http.MethodPost || r.URL.Path != "/v1/admin/agents" {
+				return false
+			}
+			var payload map[string]any
+			_ = json.Unmarshal(body, &payload)
+			id, _ := payload["request_id"].(string)
+			mu.Lock()
+			posted = append(posted, id)
+			mu.Unlock()
+			<-r.Context().Done()
+			return true
+		}
+		u := agentOperator(t, h.srv.URL)
+		ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+		defer cancel()
+		var out, errb bytes.Buffer
+		code := cli.RunContext(ctx, []string{
+			"agent", "add", "--kind", "session", "--name", "Deadline", "--request-id", "req-deadline-1",
+		}, strings.NewReader(""), &out, &errb, u.getenv)
+		mu.Lock()
+		got := append([]string(nil), posted...)
+		mu.Unlock()
+		if len(got) != 1 || got[0] != "req-deadline-1" {
+			t.Fatalf("posts = %v, want one attempt with the exposed id", got)
+		}
+		if code == 0 || out.Len() != 0 {
+			t.Fatalf("deadline submit: exit %d stdout %q", code, out.String())
+		}
+		errs := errb.String()
+		for _, want := range []string{
+			"request_id req-deadline-1",
+			"was not answered",
+			"may already be committed",
+			"agent status",
+			"--request-id",
+			"req-deadline-1",
+		} {
+			if !strings.Contains(errs, want) {
+				t.Fatalf("recovery instructions missing %q\n%s", want, errs)
+			}
+		}
+	})
+}
+
+// (t5 M-profile) The recovery command has to carry the profile that submitted,
+// quoted so a shell copies it as one word. A bare follow-up must not refuse
+// in an agent run or query the human operator profile.
+func TestAgentCLIRecoveryProfile(t *testing.T) {
+	t.Run("(t5 M-profile) recovery command keeps the selected profile", func(t *testing.T) {
+		const profile = "sec'ond"
+		const reqID = "req-profile-1"
+		secondary := newAgentHub(t, func() []onboarding.KindSpec { return onboarding.Specs() })
+		operator := newAgentHub(t, func() []onboarding.KindSpec { return onboarding.Specs() })
+		var mu sync.Mutex
+		var posted []string
+		secondary.onPost = func(n int, body map[string]any, w http.ResponseWriter) {
+			id, _ := body["request_id"].(string)
+			mu.Lock()
+			posted = append(posted, id)
+			mu.Unlock()
+			writeHubProblem(w, http.StatusServiceUnavailable, "unavailable", "lost response")
+		}
+		secondary.onStatus = func(id string, w http.ResponseWriter) {
+			if id != reqID {
+				writeHubProblem(w, http.StatusNotFound, "not_found", "no such request")
+				return
+			}
+			writeJSONMap(w, http.StatusOK, map[string]any{
+				"request_id": id, "kind": "session", "peer_id": "peer_secondary",
+				"principal_id": "prn_secondary", "auth_state": "unlinked", "status": "replayed",
+			})
+		}
+		u := newUser(t)
+		u.env["VECNET_AGENT"] = "1"
+		writeAgentProfiles(t, u, "op", map[string]string{
+			"op":    operator.srv.URL,
+			profile: secondary.srv.URL,
+		})
+		code, out, errs := u.run("--net", profile, "agent", "add", "--kind", "session", "--name", "Kept", "--request-id", reqID)
+		mu.Lock()
+		gotPosted := append([]string(nil), posted...)
+		mu.Unlock()
+		if len(gotPosted) != 2 || gotPosted[0] != reqID || gotPosted[1] != reqID {
+			t.Fatalf("posts = %v, want two attempts with one id", gotPosted)
+		}
+		if code == 0 || out != "" {
+			t.Fatalf("profile add: exit %d stdout %q", code, out)
+		}
+		statusCmd := firstBacktick(errs)
+		words := shellSplit(t, statusCmd)
+		if len(words) == 0 || words[0] != "vecnet" {
+			t.Fatalf("status command = %q", statusCmd)
+		}
+		if got := flagValue(words, "--net"); got != profile {
+			t.Fatalf("status command profile = %q, want %q\n%s", got, profile, errs)
+		}
+		if !containsArg(words, reqID) {
+			t.Fatalf("status command dropped the request id: %q", statusCmd)
+		}
+		if strings.Count(errs, "--net") < 2 {
+			t.Fatal("same-id add recovery dropped --net")
+		}
+		code, statusOut, statusErr := u.run(words[1:]...)
+		if code != 0 {
+			t.Fatalf("copied status command: exit %d\n%s", code, statusErr)
+		}
+		if !strings.Contains(statusOut, reqID) || !strings.Contains(statusOut, "peer_secondary") {
+			t.Fatal("copied status command did not read the selected profile")
+		}
+		if n := len(operator.paths("/v1/admin/agents/onboarding/" + reqID)); n != 0 {
+			t.Fatalf("copied status command queried the operator hub %d times", n)
+		}
+		if n := len(secondary.paths("/v1/admin/agents/onboarding/" + reqID)); n != 1 {
+			t.Fatalf("selected profile status calls = %d, want 1", n)
+		}
+	})
+}
+
+func writeAgentProfiles(t *testing.T, u *user, operator string, profiles map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(u.conf), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	if operator != "" {
+		fmt.Fprintf(&b, "operator_profile = %q\n", operator)
+	}
+	names := make([]string, 0, len(profiles))
+	for name := range profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Fprintf(&b, "[profiles.%s]\nhub = %q\nsecret = %q\nhub_pubkey = \"ed25519:test\"\n", tomlProfileKey(name), profiles[name], "vn_operator_test")
+	}
+	if err := os.WriteFile(u.conf, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func tomlProfileKey(name string) string {
+	if profileKeyRE.MatchString(name) {
+		return name
+	}
+	return strconv.Quote(name)
+}
+
+var profileKeyRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+func firstBacktick(s string) string {
+	i := strings.IndexByte(s, '`')
+	if i < 0 {
+		return ""
+	}
+	rest := s[i+1:]
+	j := strings.IndexByte(rest, '`')
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
+}
+
+func shellSplit(t *testing.T, cmdline string) []string {
+	t.Helper()
+	if cmdline == "" {
+		t.Fatal("recovery command was empty")
+	}
+	script := "set -- " + cmdline + "\nprintf '%s\\0' \"$@\""
+	out, err := exec.Command("sh", "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("recovery command is not safe shell: %v\n%s", err, out)
+	}
+	parts := strings.Split(string(out), "\x00")
+	if len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	return parts
+}
+
+func flagValue(args []string, name string) string {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == name {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 // (t5 M1) Exact assertions stay. Failure output may name the method, path
@@ -700,6 +967,39 @@ func TestAgentCLIDiagnosticRedaction(t *testing.T) {
 			if strings.Contains(line, call) && (strings.Contains(line, dump) || strings.Contains(line, block)) {
 				t.Errorf("diagnostic at line %d still prints a fixture", i+1)
 			}
+		}
+	})
+
+	// (t5 M1 link) Confirmed-link and hosted-mode failures must not print the
+	// streams. Those streams hold the fake hub's link code whenever linking
+	// succeeded, so an unrelated assertion would disclose it.
+	t.Run("(t5 M1 link)", func(t *testing.T) {
+		raw, err := os.ReadFile("agent_test.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		call := "t.Fatal" + "f"
+		streams := "\\n%" + "s%" + "s"
+		hosted := "hosted explanation"
+		confirmed := "confirmed link output"
+		for i, line := range strings.Split(string(raw), "\n") {
+			if strings.Contains(line, call) && strings.Contains(line, streams) &&
+				(strings.Contains(line, hosted) || strings.Contains(line, confirmed)) {
+				t.Errorf("line %d prints raw stdout and stderr from a link", i+1)
+			}
+		}
+	})
+
+	// (t5 M1 inputs) Exact field checks stay. Failure text must not dump the
+	// captured input map, including a copy that only redacts URL and key.
+	t.Run("(t5 M1 inputs)", func(t *testing.T) {
+		raw, err := os.ReadFile("agent_test.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		verb := "%#" + "v"
+		if strings.Contains(string(raw), verb) {
+			t.Error("diagnostics still dump values with a map format")
 		}
 	})
 }
@@ -892,7 +1192,7 @@ func TestAgentCLIBearerRevoke(t *testing.T) {
 			t.Fatalf("confirmed link body = %s", agentHitDiag(links))
 		}
 		if !strings.Contains(out+errs, "ABCD-EFGH-JKMN") || !strings.Contains(out+errs, "revoked") {
-			t.Fatalf("confirmed link output:\n%s%s", out, errs)
+			t.Fatal("confirmed link output missing the link code or the revoke warning")
 		}
 		code, _, errs = u.run("agent", "link", "peer_live", "--keep-bearer")
 		if code == 0 || len(h.paths("/v1/admin/dot-links")) != 1 {
@@ -1065,18 +1365,6 @@ func createdResult(body map[string]any, peer, human string) map[string]any {
 		res["human_output"] = human
 	}
 	return res
-}
-
-func redactInputs(in map[string]any) map[string]any {
-	out := map[string]any{}
-	for k, v := range in {
-		if k == "webhook_key" || k == "webhook_url" {
-			out[k] = "redacted"
-			continue
-		}
-		out[k] = v
-	}
-	return out
 }
 
 // snapBuf is a stderr buffer the hub handler can read while the CLI is
