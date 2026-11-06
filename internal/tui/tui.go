@@ -46,6 +46,8 @@ type API interface {
 	Blob(ctx context.Context, sha string, max int64) ([]byte, string, error)
 	Upload(ctx context.Context, r io.Reader, size int64, mediaType, name string) (envelope.Attachment, error)
 	TailWithAck(ctx context.Context, handle func(opclient.Batch) error, status func(string), accepted func(string)) error
+	// Preferences is the read-only GET /v1/admin/prefs. The TUI never patches.
+	Preferences(ctx context.Context) (opapi.Preferences, error)
 }
 
 // Options configures Run. Now, In and Out default to the system clock and the

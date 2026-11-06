@@ -148,11 +148,15 @@ func (m *Model) viewTop(w int) string {
 			left.WriteString(" ")
 		}
 		label := fmt.Sprintf("%d:%s", i+1, s.Title())
-		if i == m.Tab {
+		if i == m.Tab && !m.prefsOn {
 			left.WriteString(styleTabOn.Render(label))
 		} else {
 			left.WriteString(styleMuted.Render(label))
 		}
+	}
+	if m.prefsOn {
+		left.WriteString(" ")
+		left.WriteString(styleTabOn.Render("prefs"))
 	}
 	apr, dlq := len(m.Data.Inbox.Approvals), len(m.Data.Inbox.DeadLetters)
 	// Dropped from the front as the bar narrows, so the connection state and

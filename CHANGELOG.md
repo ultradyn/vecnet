@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-06: allow Codex app-server 0.167.0 alongside 0.166.0 after schema comparison and throwaway-thread re-verification of wake, steer, trust/policy, approvals, subscription and 60 s unload (`connectors/launcher/src/codex/discover.ts`, `docs/research/2026-11-04-codex-app-server-delivery.md`, `docs/connectors/codex-appserver.md`).
 - 2026-11-06: operator peer rename: `PATCH /v1/admin/peers/{id}` `{"name"}` and `vecnet peer rename <id> <name>` keep the peer id (threads, routes, scopes, credentials), audit `peer_rename`, and append `directory_updated` (`change: updated`, `fields: ["name"]`) (PROTOCOL §2.12, OPERATOR).
 - 2026-11-06: launcher daemon runs the Codex app-server connector (`startCodexConnector`: one engine per `vecnet codex bind` binding, file re-read every 10 s and refused if group/world-accessible, limit 8 per canonical Codex home via `VECNET_CODEX_MAX_BINDINGS`, in-memory launcher bindings; `VECNET_CODEX_BINDINGS`, `VECNET_BIN`); `startDaemon` takes `env`; opt-in coordinator-only `just codex-appserver-smoke` (connectors/launcher/src/codex/connector.ts, PROTOCOL §13.9, docs/connectors/codex-appserver.md).
 - 2026-11-06: plan-build workflow — decisions files (statusDir/decisions/task-NN.md), worktree self-heal per agent, plan-over-stale-PROTOCOL rule (docs/plans/vecnet-core-build.workflow.mjs)
