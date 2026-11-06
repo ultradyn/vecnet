@@ -271,10 +271,27 @@ func (c *Client) directURL(raw, deadline string, ttl time.Duration, origins []st
 // Upload hashes once, rewinds, sends the exact signed body, and completes only
 // after a successful PUT. A changed source cannot produce a completed reference.
 func (c *Client) Upload(ctx context.Context, r io.ReadSeeker, size int64, media, idem string) (blobwire.Ref, error) {
-	var zero blobwire.Ref
 	caps, err := c.Discover(ctx)
 	if err != nil {
-		return zero, err
+		return blobwire.Ref{}, err
+	}
+	return c.UploadUsing(ctx, caps, r, size, media, idem)
+}
+
+// UploadUsing transfers with a capability snapshot already returned by Discover.
+// It does not discover again, so an observed R2 hub cannot fall back to a hub
+// PUT when a later capabilities response is missing.
+func (c *Client) UploadUsing(ctx context.Context, caps Capabilities, r io.ReadSeeker, size int64, media, idem string) (blobwire.Ref, error) {
+	var zero blobwire.Ref
+	var err error
+	if caps.Backend != "disk" && caps.Backend != "r2" {
+		return zero, failure("bad_response")
+	}
+	if caps.Backend == "r2" && caps.ChecksumProfile != "sha256" {
+		return zero, failure("bad_response")
+	}
+	if caps.MaxSize <= 0 || caps.MaxSize > MaxSize {
+		caps.MaxSize = MaxSize
 	}
 	if size < 0 || size > caps.MaxSize || caps.Backend == "r2" && size == 0 {
 		return zero, failure("payload_too_large")
