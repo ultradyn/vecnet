@@ -8,6 +8,7 @@ import type { Clock, EventStream, HubApi, Log } from '../../hub-client/src/ports
 import { createEventStream } from '../../hub-client/src/stream.ts';
 import type { SendRequest } from '../../hub-client/src/wire.ts';
 import type { Backend, BackendCapabilities, BackendHealth, PermissionMode, SessionHandle, SettleResult } from './backend.ts';
+import { startCodexConnector } from './codex/connector.ts';
 import { ConfigError, parseDuration } from './config.ts';
 import type { LauncherConfig } from './config.ts';
 import { createDirectory } from './directory.ts';
@@ -130,7 +131,9 @@ const noCaps: BackendCapabilities = { steer: false, queue: 'launcher', interrupt
 export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream?: EventStream; clock?: Clock; log?: Log;
   backends?: Map<string, Backend>; beforeRecordRef?: (jobId: string) => void;
   /** The operator has checked the gap left by a purged event cursor: resume from the hub's oldest cursor. */
-  acceptCursorGap?: boolean }): Promise<{ stop(): Promise<void>; crash(): void;
+  acceptCursorGap?: boolean;
+  /** Environment for the Codex app-server connector (its bindings file, vecnet binary); default process.env. */
+  env?: NodeJS.ProcessEnv }): Promise<{ stop(): Promise<void>; crash(): void;
   /** Settles once the daemon has stopped, including when it stops itself on a fatal event stream end. */
   stopped: Promise<void> }> {
   const { cfg } = o;
@@ -501,6 +504,9 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
     });
     every(cfg.presence.heartbeat_ms, async () => { await refreshHealth(); changed(); });
 
+    // 12. The Codex app-server connector: opt-in bindings only; no file, no engine.
+    const codex = startCodexConnector({ kv: ledger.kv('codex'), clock, log, env: o.env ?? process.env });
+
     function halt() {
       dead = true;
       controller.abort();
@@ -515,6 +521,8 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
         idle.stop();
         await Promise.allSettled([...loops]);
         await Promise.allSettled([...lanes.values()].map(l => l.stop()));
+        // Before the ledger closes: engines release unsent claims and unsubscribe.
+        await codex.stop().catch(() => {});
         await presence!.stop();
         halt();
         try { ledger.close(); } catch { /* already closed */ }
@@ -530,6 +538,7 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
         halt();
         stopping = Promise.resolve();
         for (const lane of lanes.values()) void lane.stop().catch(() => {});
+        void codex.stop().catch(() => {});
         void presence?.stop().catch(() => {});
         try { ledger.close(); } catch { /* already closed */ }
         markStopped();
