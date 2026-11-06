@@ -833,3 +833,65 @@ func TestR2HashOnlyReadMapsBlobIDRequired(t *testing.T) {
 		t.Fatalf("disk hash-only read lost its base64 page: %v", page)
 	}
 }
+
+func TestDiskBlobPutAcceptsExplicitEmptyData(t *testing.T) {
+	disk := testhub.Start(t)
+	_, secret := disk.NewPeer("session", "uploader")
+	var put map[string]any
+	toolOK(t, disk, secret, "vecnet_blob_put", map[string]any{"data_base64": "", "media_type": "text/plain"}, &put)
+	const emptySHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	if put["sha256"] != emptySHA || put["size"] != float64(0) {
+		t.Fatalf("explicit empty data_base64: %v", put)
+	}
+	var page map[string]any
+	toolOK(t, disk, disk.OperatorSecret, "vecnet_blob_get", map[string]any{"sha256": put["sha256"]}, &page)
+	raw, err := base64.StdEncoding.DecodeString(fmt.Sprint(page["data"]))
+	if err != nil || len(raw) != 0 || page["media_type"] != "text/plain" || page["size"] != float64(0) {
+		t.Fatalf("empty disk body: %v %v", err, page)
+	}
+}
+
+func TestDiskBlobPutDefaultsEmptyMediaType(t *testing.T) {
+	disk := testhub.Start(t)
+	_, secret := disk.NewPeer("session", "uploader")
+	var put map[string]any
+	toolOK(t, disk, secret, "vecnet_blob_put", map[string]any{"data_base64": "YQ==", "media_type": ""}, &put)
+	var page map[string]any
+	toolOK(t, disk, disk.OperatorSecret, "vecnet_blob_get", map[string]any{"sha256": put["sha256"]}, &page)
+	raw, err := base64.StdEncoding.DecodeString(fmt.Sprint(page["data"]))
+	if err != nil || string(raw) != "a" || page["media_type"] != "application/octet-stream" {
+		t.Fatalf("empty media_type did not default: %v %v", err, page)
+	}
+}
+
+func TestBlobPutUploadRequiresCapabilityFields(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "schema")
+	sch := blobPutOutputSchema(t, env, secret)
+	sha := strings.Repeat("ab", 32)
+	const grant = `{"blob_id":"blo_00000000000000000000000001","sha256":"%s","sha256_verified":false,"integrity":{"algorithm":"sha256","value":"%s","verified":false},"size":3,"retention_class":"1d","expires_at":"2026-11-07T00:00:00.000Z","upload":{%s},"complete_url":"/v1/blobs/uploads/blo_00000000000000000000000001/complete"}`
+	fields := []struct{ name, json string }{
+		{"method", `"method":"PUT"`},
+		{"url", `"url":"https://example.invalid/object"`},
+		{"headers", `"headers":{"If-None-Match":"*"}`},
+		{"expires_at", `"expires_at":"2026-11-06T00:05:00.000Z"`},
+	}
+	var all []string
+	for _, field := range fields {
+		all = append(all, field.json)
+	}
+	if err := schemaAccepts(t, sch, fmt.Sprintf(grant, sha, sha, strings.Join(all, ","))); err != nil {
+		t.Fatal(err)
+	}
+	for _, missing := range fields {
+		var kept []string
+		for _, field := range fields {
+			if field.name != missing.name {
+				kept = append(kept, field.json)
+			}
+		}
+		if err := schemaAccepts(t, sch, fmt.Sprintf(grant, sha, sha, strings.Join(kept, ","))); err == nil {
+			t.Fatalf("upload missing %s was accepted", missing.name)
+		}
+	}
+}
