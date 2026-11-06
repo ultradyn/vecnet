@@ -569,7 +569,13 @@ func TestSourceRateLimit(t *testing.T) {
 	ghDeliver(t, env, s, "issue_comment", "r-2", body)
 
 	resp, raw := ghPost(t, env, s.SourceID, ghHeaders(s.Secret, "issue_comment", "r-3", body), body, nil)
-	mustErr(t, resp, raw, http.StatusTooManyRequests, "rate_limited")
+	e := mustErr(t, resp, raw, http.StatusTooManyRequests, "rate_limited")
+	if e.Error.Message != "per-source rate limit exceeded: sends_per_min 2 (sends in the last minute); retry in 1m" {
+		t.Fatalf("message = %q", e.Error.Message)
+	}
+	if e.Error.Details["limit"] != "sends_per_min" || e.Error.Details["max"] != float64(2) {
+		t.Fatalf("details = %v", e.Error.Details)
+	}
 	if secs, err := strconv.Atoi(resp.Header.Get("Retry-After")); err != nil || secs < 1 {
 		t.Fatalf("Retry-After = %q", resp.Header.Get("Retry-After"))
 	}
@@ -602,7 +608,10 @@ func TestSourceThreadRateLimit(t *testing.T) {
 	body := commentOn(t, 197)
 	resp, raw := ghPost(t, env, s.SourceID, ghHeaders(s.Secret, "issue_comment", "h-3", body), body, nil)
 	e := mustErr(t, resp, raw, http.StatusTooManyRequests, "rate_limited")
-	if e.Error.Details["limit"] != "threads_per_hour" {
+	if e.Error.Message != "per-source rate limit exceeded: threads_per_hour 1 (new threads in the last hour); retry in 1h" {
+		t.Fatalf("message = %q", e.Error.Message)
+	}
+	if e.Error.Details["limit"] != "threads_per_hour" || e.Error.Details["max"] != float64(1) {
 		t.Fatalf("details = %v", e.Error.Details)
 	}
 	if n := rowCount(t, env, `SELECT count(*) FROM blob_quota WHERE peer_id = ?`, s.SourceID); n != 1 {
