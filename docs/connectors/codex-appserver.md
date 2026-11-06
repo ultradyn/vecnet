@@ -63,7 +63,17 @@ While a binding is live, the connector stays subscribed to its thread, so the th
 - the binding's identity changing;
 - the launcher daemon being down for more than about 60 s. Stopping the daemon closes its connection, so bound threads with no TUI go dormant unless it comes back within about a minute.
 
-After any of these, `codex resume <id>` loads the thread again, and the connector subscribes again by itself. The connector never reloads a thread on its own.
+The connector never reloads a thread on its own. How delivery comes back depends on why it stopped:
+
+- **Thread unloaded** (the TUI and every other client left, for example while the daemon was down): `codex resume <id>` loads it again, and the connector subscribes again by itself, provided the binding is still valid and the launcher daemon is running.
+- **Unbound:** `vecnet --net P codex bind --thread <id>` again.
+- **Expired:** `codex bind --thread <id> --renew` (or bind again).
+- **Over the limit:** unbind another binding on that Codex home, or raise `VECNET_CODEX_MAX_BINDINGS` in the launcher daemon's environment and restart it.
+- **Identity changed:** `codex unbind`, then a fresh `codex bind`; resuming or renewing does not clear it.
+- **Archived:** unarchive the thread, then bind again.
+- **Idle-dormant:** any new activity in the thread (a turn from its TUI or another client) revives it.
+
+In every case the thread must also be loaded (`codex resume <id>` if it is not).
 
 Each kept-loaded thread keeps its own MCP servers running, about 40–70 MB per thread on a typical config ([R] K4).
 
