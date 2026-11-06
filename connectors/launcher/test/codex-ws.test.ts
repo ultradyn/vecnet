@@ -294,7 +294,7 @@ test('handshake failures, cancellation and local close settle promptly', { timeo
   for (const mode of ['http', 'silent'] as const) {
     await t.test(mode, async sub => {
       const s = await wireServer(sub, mode);
-      await assert.rejects(connectUnixWebSocket(s.path, { ...opts, timeoutMs: 30 }), mode === 'http' ? /non-101/ : /timeout/);
+      await assert.rejects(connectUnixWebSocket(s.path, mode === 'silent' ? { ...opts, timeoutMs: 30 } : opts), mode === 'http' ? /non-101/ : /timeout/);
     });
   }
   await t.test('abort during handshake', async sub => {
