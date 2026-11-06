@@ -17,7 +17,7 @@ import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { KeyValue } from '../src/backend.ts';
 
 const minute = 60_000, hour = 60 * minute;
-const stub = 'vecnet: new messages attached as untrusted context. Run vecnet --net test inbox.';
+const stub = 'vecnet: new messages attached as untrusted context.';
 const allRequests: { method: string; params: unknown }[] = [];
 async function eventually(fn: () => boolean, description = 'condition') {
   for (let i = 0; i < 500; i++) { if (fn()) return; await delay(10); }
@@ -181,6 +181,144 @@ for (const failures of [1, 2]) test(`hand2 wire mismatch ${failures} preserves t
   assert.equal(h.records().filter(r => r.hookClaimed === claim).length, 1);
   assert.equal(h.rows().length, 0); assert.equal(h.releases().length, 0);
   assert.equal(h.opens, opens); assert.equal(h.plan.events.length, 1);
+});
+
+for (const releaseFailure of [false, true]) test(`over limit releases rejected retries for ordinary hooks with release failure ${releaseFailure}`, async t => {
+  const h = await harness(t, { status: active });
+  for (let i = 0; i < 2; i++) h.fake.failNext('turn/steer', { code: -32600, message: 'expectedTurnId mismatch' });
+  await h.wake(); const rejected = h.rows()[0]; assert.ok(rejected);
+  const other = row({ threadId: 'other', key: 'vn.other', claim: 'other' });
+  h.kv.set('inflight:' + other.key, JSON.stringify(other));
+  h.plan.releaseFailure = releaseFailure; h.save();
+  h.engine.setOverLimit(true); await h.sync();
+  assert.equal(h.engine.subscribed(), false);
+  assert.equal(h.releases().length, 1, 'disabling delivery initiates durable cleanup');
+  if (releaseFailure) {
+    assert.ok(h.kv.get('releasing:' + rejected.claim));
+    assert.ok(h.kv.get('inflight:' + rejected.key));
+    h.plan.releaseFailure = false; h.save(); await h.tick(1000);
+  }
+  await h.tick(2 * minute);
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'over_limit' });
+  assert.equal(h.sends().length, 2, 'no turn RPC after the two rejected attempts');
+  assert.ok(h.releases().every(r => r.argv.includes(rejected.claim)));
+  assert.equal(h.kv.get('inflight:' + rejected.key), undefined);
+  assert.equal(h.kv.get('releasing:' + rejected.claim), undefined);
+  assert.equal(h.kv.get('inflight:' + other.key), JSON.stringify(other));
+  const ordinary = JSON.parse(execFileSync(h.deps.vecnetBin, ['--net', 'test', '--as', 'peer', 'hook', '--event', 'user-prompt'], {
+    env: { HOME: h.deps.env.HOME, PATH: h.deps.env.PATH, VECNET_CONFIG: h.deps.env.VECNET_CONFIG }, encoding: 'utf8',
+  }));
+  assert.deepEqual(ordinary.deliveries, ['w1'], 'ordinary hooks see the original delivery');
+});
+for (const outcome of ['accepted', 'ambiguous']) test(`over limit preserves ${outcome} inflight for receipt recovery`, async t => {
+  const h = await harness(t, { status: active });
+  h.fake.withholdNextItem();
+  if (outcome === 'ambiguous') h.fake.failNext('turn/steer', 'drop');
+  await h.wake(); const inflight = h.rows()[0]; assert.ok(inflight);
+  h.engine.setOverLimit(true); await h.sync(); await h.tick(2 * minute);
+  assert.equal(h.releases().length, 0); assert.equal(h.sends().length, 1);
+  assert.ok(h.kv.get('inflight:' + inflight.key));
+});
+
+test('unbind during a durable gated claim releases it for ordinary hooks', async t => {
+  const h = await harness(t);
+  h.plan.hookGate = join(dirname(h.deps.env.VECNET_CONFIG), 'unbind-gate'); h.save();
+  const before = h.records().filter(r => r.hookClaimed).length;
+  const wake = h.wake();
+  await eventually(() => h.records().filter(r => r.hookClaimed).length > before, 'claim committed before unbind');
+  const claim = h.records().filter(r => r.hookClaimed).at(-1)!.hookClaimed!;
+  assert.ok(h.kv.get('claiming:' + claim));
+  await h.engine.stop(); await wake;
+  assert.equal(h.sends().length, 0, 'unbind must not send the claimed delivery');
+  assert.equal(h.releases().length, 1, 'unbind must release a claim never sent');
+  assert.ok(h.releases()[0].argv.includes(claim));
+  assert.equal(h.kv.keys('claiming:').length, 0); assert.equal(h.rows().length, 0);
+  assert.equal(h.engine.subscribed(), false);
+  const ordinary = JSON.parse(execFileSync(h.deps.vecnetBin, ['--net', 'test', '--as', 'peer', 'hook', '--event', 'user-prompt'], {
+    env: { HOME: h.deps.env.HOME, PATH: h.deps.env.PATH, VECNET_CONFIG: h.deps.env.VECNET_CONFIG }, encoding: 'utf8',
+  }));
+  assert.deepEqual(ordinary.deliveries, ['w1'], 'ordinary hooks can see the original delivery after unbind');
+});
+
+test('unbind releases definitely rejected retries and preserves other threads claims', async t => {
+  const h = await harness(t, { status: active });
+  for (let i = 0; i < 2; i++) h.fake.failNext('turn/steer', { code: -32600, message: 'expectedTurnId mismatch' });
+  await h.wake(); const rejected = h.rows()[0]; assert.ok(rejected);
+  h.kv.set('claiming:other', JSON.stringify({ threadId: 'other', at: h.clock.now() }));
+  const other = row({ threadId: 'other', key: 'vn.other', claim: 'other-releasing' });
+  h.kv.set('inflight:' + other.key, JSON.stringify(other));
+  h.kv.set('releasing:' + other.claim, JSON.stringify(other));
+  await h.engine.stop();
+  assert.equal(h.sends().length, 2, 'unbind does not retry a rejected RPC');
+  assert.equal(h.releases().length, 1); assert.ok(h.releases()[0].argv.includes(rejected.claim));
+  assert.equal(h.kv.get('inflight:' + rejected.key), undefined);
+  assert.ok(h.kv.get('claiming:other'));
+  assert.equal(h.kv.get('inflight:' + other.key), JSON.stringify(other));
+  assert.equal(h.kv.get('releasing:' + other.claim), JSON.stringify(other));
+  const ordinary = JSON.parse(execFileSync(h.deps.vecnetBin, ['--net', 'test', '--as', 'peer', 'hook', '--event', 'user-prompt'], {
+    env: { HOME: h.deps.env.HOME, PATH: h.deps.env.PATH, VECNET_CONFIG: h.deps.env.VECNET_CONFIG }, encoding: 'utf8',
+  }));
+  assert.deepEqual(ordinary.deliveries, ['w1']);
+});
+
+for (const outcome of ['accepted', 'ambiguous']) test(`unbind preserves ${outcome} inflight delivery for receipt recovery`, async t => {
+  let finish!: () => void, entered = false;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  t.after(() => finish());
+  const h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      const result = await rpc.call<T>(method, params, ms);
+      if (method === 'turn/steer') {
+        entered = true; await gate;
+        if (outcome === 'ambiguous') throw new CodexRpcError(-1, 'connection_closed', true);
+      }
+      return result;
+    },
+  }) });
+  h.fake.withholdNextItem(); const wake = h.wake();
+  await eventually(() => entered, 'turn RPC accepted before unbind');
+  assert.equal(h.rows()[0].state, 'sending');
+  const stopped = h.engine.stop(); finish(); await stopped; await wake;
+  const pending = h.rows()[0]; assert.ok(pending);
+  assert.equal(pending.state, outcome === 'accepted' ? 'pending' : 'unresolved');
+  assert.deepEqual(h.rows(), [pending]); assert.equal(h.releases().length, 0); assert.equal(h.sends().length, 1);
+  const ordinary = JSON.parse(execFileSync(h.deps.vecnetBin, ['--net', 'test', '--as', 'peer', 'hook', '--event', 'user-prompt'], {
+    env: { HOME: h.deps.env.HOME, PATH: h.deps.env.PATH, VECNET_CONFIG: h.deps.env.VECNET_CONFIG }, encoding: 'utf8',
+  }));
+  assert.deepEqual(ordinary.deliveries, [], 'uncertain delivery stays claimed');
+});
+
+test('unbind during a definite context rejection releases instead of sending the fallback', async t => {
+  let finish!: () => void, entered = false;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  t.after(() => finish());
+  const h = await harness(t, { wrap: rpc => ({ ...rpc,
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      try { return await rpc.call<T>(method, params, ms); }
+      finally { if (method === 'turn/start') { entered = true; await gate; } }
+    },
+  }) });
+  h.fake.failNext('turn/start', { code: -32602, message: 'additionalContext unsupported' });
+  const wake = h.wake(); await eventually(() => entered, 'definite rejection before unbind');
+  const rejected = h.rows()[0]; assert.ok(rejected);
+  const stopped = h.engine.stop(); finish(); await stopped; await wake;
+  assert.equal(h.sends().length, 1, 'unbind prevents the fallback turn RPC');
+  assert.equal(h.releases().length, 1); assert.ok(h.releases()[0].argv.includes(rejected.claim));
+  assert.equal(h.rows().length, 0);
+});
+
+test('unbind drains a failed release and retains cleanup state if it still fails', async t => {
+  const h = await harness(t, { releaseFailure: true });
+  h.fake.failNext('turn/start', { code: -32602, message: 'invalid input' });
+  await h.wake(); const rejected = h.rows()[0]; assert.ok(rejected);
+  assert.ok(h.kv.get('releasing:' + rejected.claim));
+  await h.engine.stop();
+  assert.equal(h.releases().length, 2, 'stop retries the durable release');
+  assert.deepEqual(h.rows(), [rejected]); assert.ok(h.kv.get('releasing:' + rejected.claim));
+  h.plan.releaseFailure = false; h.save();
+  await h.restart();
+  assert.equal(h.kv.get('releasing:' + rejected.claim), undefined);
+  assert.equal(h.rows().length, 0);
 });
 
 for (const releaseFailure of [false, true]) test(`hand2 expiry after gated claim releases unsent delivery with release failure ${releaseFailure}`, async t => {
@@ -586,7 +724,10 @@ test('definite rejection releases claims', async t => {
 test('additionalContext rejection falls back to the pointer stub once', async t => {
   const h = await harness(t); h.fake.failNext('turn/start', { code: -32602, message: 'additionalContext rejected' }); await h.wake();
   await eventually(() => h.sends().length === 2); const a = h.sends()[0].params as any, b = h.sends()[1].params as any;
-  assert.equal(b.additionalContext, undefined); assert.match(b.input[0].text, /inbox/); assert.equal(b.clientUserMessageId, a.clientUserMessageId); assert.equal(h.releases().length, 0);
+  assert.deepEqual(a.input, [{ type: 'text', text: stub }]);
+  assert.deepEqual(b.input, [{ type: 'text', text: 'vecnet: messages remain available. Run vecnet --net test --as peer inbox.' }]);
+  assert.equal(b.additionalContext, undefined); assert.equal(b.clientUserMessageId, a.clientUserMessageId);
+  await h.tick(2 * minute); assert.equal(h.sends().length, 2); assert.equal(h.releases().length, 0);
 });
 test('restart with an inflight key recovers once', async t => {
   const h = await harness(t, { status: active }); h.fake.withholdNextItem(); await h.wake(); await eventually(() => h.rows().length === 1);
@@ -752,15 +893,76 @@ for (const idleDelayMs of [0, 1, 3000]) for (const evidence of ['active status',
     assert.deepEqual(h.engine.liveness(), { live: true }); assert.equal(h.sends().length, 1);
   });
 }
-for (const evidence of ['active status', 'new turn']) test(`independent ${evidence} during the cold-resume guard waits for a fresh warm subscription`, async t => {
+for (const startupDelayMs of [0, 1000]) for (const evidence of ['active status', 'new turn']) test(`independent ${evidence} before the pending resume continuation revives without another broadcast (startup delay ${startupDelayMs} ms)`, async t => {
   let h: Awaited<ReturnType<typeof harness>>;
-  let closeBeforeResume: (() => void) | undefined, revive: (() => void) | undefined;
-  let suppressActiveStatus = false;
+  let rejectNext = false, suppressActiveStatus = false, consumed = false, delayStartup = false;
   const resumeTimes: number[] = [];
   h = await harness(t, { wrap: rpc => ({ ...rpc,
     onNotification(fn) { rpc.onNotification((method, params) => {
       if (suppressActiveStatus && method === 'thread/status/changed' && (params as any).status?.type === 'active') return;
+      if (delayStartup && startupDelayMs && method === 'mcpServer/startupStatus/updated') {
+        delayStartup = false; h.clock.timer(startupDelayMs, () => fn(method, params)); return;
+      }
       fn(method, params);
+      if ((evidence === 'active status' && method === 'thread/status/changed' && (params as any).status?.type === 'active') ||
+          (evidence === 'new turn' && method === 'turn/started')) consumed = true;
+    }); },
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      const reject = method === 'thread/resume' && rejectNext;
+      if (reject) {
+        rejectNext = false; delayStartup = true;
+        h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' } });
+        h.fake.notify('thread/closed', { threadId: 'thread' });
+      }
+      const result = await rpc.call<T>(method, params, ms);
+      if (method === 'thread/resume' && h) resumeTimes.push(h.clock.now());
+      if (reject) {
+        h.fake.attachOther('thread'); suppressActiveStatus = evidence === 'new turn';
+        h.fake.setThread({ id: 'thread', status: active, activeTurnId: 'external' });
+        if (evidence === 'new turn') h.fake.notify('turn/started', { threadId: 'thread', turn: { id: 'external' } });
+        // A wire round trip consumes all earlier notifications before the
+        // engine's awaited resume continuation can run.
+        await rpc.call('thread/read', { threadId: 'thread' }, ms);
+        assert.equal(consumed, true, 'independent activity consumed while attachment is pending');
+      }
+      return result;
+    },
+  }) });
+  await h.engine.stop(); h.fake.detachOther('thread'); resumeTimes.length = 0;
+  const baseline = h.fake.requests.length;
+  h.plan.items.push({ id: 'w1', priority: 'wake' }); h.save(); rejectNext = true;
+  await h.restart();
+  assert.equal(resumeTimes.length, 2, 'a fresh warm subscription follows the cold rejection');
+  assert.ok(resumeTimes[1] - resumeTimes[0] > 2000, 'the rejected subscription keeps its full cold guard');
+  assert.ok(h.fake.requests.slice(baseline).some(r => r.method === 'thread/unsubscribe'));
+  assert.equal(h.sends().length, 0, 'the fresh warm subscription also has a cold guard');
+  await h.tick(2000); await h.tick(2 * minute);
+  assert.deepEqual(h.engine.liveness(), { live: true }); assert.equal(h.engine.subscribed(), true);
+  assert.equal(h.sends().length, 1); assert.equal(h.sends()[0].method, 'turn/steer');
+  assert.equal((h.sends()[0].params as any).expectedTurnId, 'external');
+  assert.equal(h.plan.events.length, 0, 'no later watch event or status broadcast needed');
+});
+for (const startupDelayMs of [0, 1000]) for (const evidence of ['active status', 'new turn']) test(`independent ${evidence} after unsubscribe survives startup delay ${startupDelayMs} ms and waits for a fresh warm subscription`, async t => {
+  let h: Awaited<ReturnType<typeof harness>>;
+  let closeBeforeResume: (() => void) | undefined, revive: (() => void) | undefined;
+  let suppressActiveStatus = false, delayStartup = false;
+  let startupAt: number | undefined, activityAt: number | undefined;
+  const resumeTimes: number[] = [];
+  h = await harness(t, { wrap: rpc => ({ ...rpc,
+    onNotification(fn) { rpc.onNotification((method, params) => {
+      if (suppressActiveStatus && method === 'thread/status/changed' && (params as any).status?.type === 'active') return;
+      if (delayStartup && method === 'mcpServer/startupStatus/updated') {
+        delayStartup = false;
+        if (startupDelayMs) {
+          h.clock.timer(startupDelayMs, () => { startupAt = h.clock.now(); fn(method, params); }); return;
+        }
+      }
+      fn(method, params);
+      if ((evidence === 'active status' && method === 'thread/status/changed' && (params as any).status?.type === 'active') ||
+          (evidence === 'new turn' && method === 'turn/started')) {
+        assert.equal(h.engine.subscribed(), false, 'activity arrives after the rejected subscription is removed');
+        activityAt = h.clock.now();
+      }
     }); },
     async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
       if (method === 'thread/resume') closeBeforeResume?.();
@@ -773,7 +975,7 @@ for (const evidence of ['active status', 'new turn']) test(`independent ${eviden
   await h.engine.stop(); h.fake.detachOther('thread'); resumeTimes.length = 0;
   h.plan.items.push({ id: 'w1', priority: 'wake' }); h.save();
   closeBeforeResume = () => {
-    closeBeforeResume = undefined;
+    closeBeforeResume = undefined; delayStartup = true;
     h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' } });
     h.fake.notify('thread/closed', { threadId: 'thread' });
     revive = () => {
@@ -783,6 +985,8 @@ for (const evidence of ['active status', 'new turn']) test(`independent ${eviden
     };
   };
   await h.restart();
+  assert.ok(activityAt !== undefined, 'independent activity reached the engine');
+  if (startupDelayMs) assert.ok(startupAt! > activityAt, 'startup arrives after independent activity');
   assert.equal(resumeTimes.length, 2, 'a fresh subscription follows the rejected one');
   assert.ok(resumeTimes[1] - resumeTimes[0] > 2000, 'the rejected resume guard finishes before reattaching');
   assert.equal(h.sends().length, 0, 'the fresh subscription has its own startup guard');
@@ -790,6 +994,10 @@ for (const evidence of ['active status', 'new turn']) test(`independent ${eviden
   assert.deepEqual(h.engine.liveness(), { live: true }); assert.equal(h.engine.subscribed(), true);
   assert.equal(h.sends().length, 1); assert.equal(h.sends()[0].method, 'turn/steer');
   assert.equal((h.sends()[0].params as any).expectedTurnId, 'external');
+  await h.tick(2 * minute);
+  assert.deepEqual(h.engine.liveness(), { live: true }); assert.equal(h.engine.subscribed(), true);
+  assert.equal(h.sends().length, 1, 'quiet thread delivers once without later activity');
+  assert.equal(resumeTimes.length, 2, 'no further resumes after recovery');
   assert.equal(h.plan.events.length, 0, 'no watch event was needed');
 });
 test('re-subscribes when another client reloads the thread', async t => {
@@ -942,7 +1150,7 @@ test('definite rejection cleanup survives restart while the target turn remains 
   assert.equal(h.rows().length, 0, 'definite rejection needs no completed-turn absence scan');
   assert.equal(h.sends().length, 2); assert.equal((h.sends()[1].params as any).clientUserMessageId, rejected.key);
   assert.deepEqual(Object.keys((h.sends()[1].params as any).additionalContext), ['vecnet_w1']);
-  assert.equal(h.releases().filter(r => r.argv.includes(rejected.claim)).length, 2);
+  assert.equal(h.releases().filter(r => r.argv.includes(rejected.claim)).length, 3, 'initial failure, shutdown retry, then restart recovery');
   assert.equal(h.kv.keys('releasing:').length, 0); assert.equal(h.plan.events.length, 1);
 });
 test('thread closing rejection makes the binding not loaded', async t => {

@@ -54,7 +54,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   if (refusedGeneration !== undefined && refusedGeneration !== generation) kv.delete(identityKey);
   let policyDenied = false, identityChanged = refusedGeneration === generation, lastActivity = clock.now(), lastEnsure = -Infinity;
   let lastPush = -Infinity, retryIndex = 0, closedEpoch = 0, resumeAt = -Infinity, attaching = false;
-  let cold = false, rejectedResume = false, queue: Promise<void> = Promise.resolve();
+  let cold = false, rejectedResume = false, independentResumeActivity = false, queue: Promise<void> = Promise.resolve();
   let debounce: { cancel(): void } | undefined, gap: { cancel(): void } | undefined;
   let reconnect: { cancel(): void } | undefined, minute: { cancel(): void } | undefined;
   let claimRecovery: { cancel(): void } | undefined, warmCheck: { cancel(): void } | undefined;
@@ -91,8 +91,8 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (!rpc) throw new CodexRpcError(-1, 'unreachable', true);
     return rpc.call<T>(method, params, timeout);
   }
-  function runHook(args: string[]): Promise<unknown> {
-    if (!running) return Promise.reject(new Error('engine_stopped'));
+  function runHook(args: string[], cleanup = false): Promise<unknown> {
+    if (!running && !cleanup) return Promise.reject(new Error('engine_stopped'));
     return new Promise((resolve, reject) => {
       const child = spawn(d.vecnetBin, [...baseArgs, 'hook', ...args], { env, stdio: ['ignore', 'pipe', 'ignore'] });
       children.add(child); let text = '', tooLarge = false;
@@ -108,7 +108,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     });
   }
   async function release(claim: string) {
-    await runHook(['--release', '--claim', claim]);
+    // Releasing known-unsent claims must remain possible while stop drains
+    // the delivery lane, after new claims and turn RPCs have been disabled.
+    await runHook(['--release', '--claim', claim], true);
   }
   function scheduleClaimRecovery() {
     if (!running || claimRecovery) return;
@@ -129,10 +131,11 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     try { await release(r.claim); clear(r); }
     catch { log.warn('codex_claim_release_failed', { threadId: b.threadId }); scheduleClaimRecovery(); }
   }
-  async function releaseExpiredRetries() {
-    if (clock.now() < b.expiresAt) return;
+  async function releaseDormantRetries() {
+    const dormant = reason(false);
+    if (!dormant || dormant === 'waiting_approval' || dormant === 'waiting_input') return;
     // Only these batches are known unsent or definitely rejected. Pending and
-    // ambiguous attempts still require receipt/checkpoint recovery after expiry.
+    // ambiguous attempts still require receipt/checkpoint recovery while dormant.
     for (const r of rows()) if (waitingRetry.has(r.key)) await releaseInflight(r);
   }
   async function recoverClaims() {
@@ -196,10 +199,14 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     const before = mapStatus(status); status = value; lastActivity = clock.now();
     const s = mapStatus(status);
     if (s === 'not_loaded') {
-      closedEpoch++; attached = false;
+      closedEpoch++; attached = false; independentResumeActivity = false;
       if (!attaching) rejectedResume = false;
     }
-    else if (s !== 'unknown' && !attaching) {
+    // Retain independent activity through the entire resume guard, including
+    // after unsubscribe. A delayed startup must not erase this evidence, and
+    // a cold resume's own idle broadcast must never supply it.
+    if (s === 'turn_running' || s === 'waiting_approval' || s === 'waiting_input') independentResumeActivity = true;
+    if (!attaching && s !== 'not_loaded' && s !== 'unknown') {
       // A later external unload/load cycle invalidates the old policy verdict.
       // Resume still checks the current policy before allowing any delivery.
       if (before === 'not_loaded') policyDenied = false;
@@ -232,7 +239,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (method === 'thread/archived') archived = true;
     if (method === 'turn/started') { lastActivity = clock.now(); updateStatus({ type: 'active', activeFlags: [] }); }
     if (method === 'mcpServer/startupStatus/updated' && (attaching || clock.now() - resumeAt <= 2000)) {
-      cold = true; rejectedResume = true;
+      cold = true; rejectedResume = !independentResumeActivity;
+      // A delayed startup notice still rejects the subscription, but must not
+      // erase independent activity consumed during or after its pending resume.
+      if (!rejectedResume) scheduleWarmCheck();
     }
     if ((method === 'item/started' || method === 'item/completed') && obj(p.item).type === 'userMessage' && typeof p.item.clientId === 'string') {
       const key = p.item.clientId;
@@ -253,7 +263,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   }
   async function reconcile() {
     if (!running) return;
-    await releaseExpiredRetries();
+    await releaseDormantRetries();
     if (!rpc) return;
     let r = reason(false);
     if (r === 'not_loaded' && b.origin === 'launcher' && b.ensureLoaded && clock.now() - lastEnsure >= 60_000 &&
@@ -274,11 +284,19 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (!attached) {
       const s = mapStatus(status);
       if (!['idle', 'turn_running', 'waiting_approval', 'waiting_input'].includes(s)) return;
-      const epoch = closedEpoch; attaching = true;
+      const epoch = closedEpoch; attaching = true; independentResumeActivity = false;
       try {
         const result = await call('thread/resume', buildThreadResume(b.threadId));
         resumeAt = clock.now(); attached = true; attaching = false;
-        if (closedEpoch !== epoch || cold) { cold = true; rejectedResume = true; await unsubscribe(); return; }
+        if (closedEpoch !== epoch || cold) {
+          cold = true; rejectedResume = !independentResumeActivity;
+          await unsubscribe();
+          // Re-read only after the rejected resume's guard. Independent active
+          // status/turn activity permits a fresh warm attach, even if no later
+          // broadcast arrives; the cold resume's own idle never permits it.
+          if (!rejectedResume) scheduleWarmCheck();
+          return;
+        }
         if (parseResumePolicy(result).asks && !b.attended) { policyDenied = true; await unsubscribe(); return; }
       } catch (e) {
         attaching = false;
@@ -367,12 +385,11 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     let mismatches = 0, fallback = false;
     while (running && rpc) {
       if (!liveness().live) {
-        if (clock.now() >= b.expiresAt) { await releaseInflight(r); return; }
         waitingRetry.set(r.key, batch);
         // An idle claim can contain wake_idle. Deferral must preserve its
         // eligibility even if a waiting flag subsequently clears to active.
         if (r.method === 'turn/start') waitForIdle.add(r.key);
-        return;
+        await releaseDormantRetries(); return;
       }
       const entries = fallback ? [] : batch.entries;
       const pointer = `vecnet: messages remain available. Run vecnet --net ${b.profile}${b.as ? ' --as ' + b.as : ''} inbox.`;
@@ -408,7 +425,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
               if (turn?.status === 'inProgress' && typeof turn.id === 'string') { r.attemptTurnId = turn.id; continue; }
             } catch { /* The steer was rejected; retain this batch for idle. */ }
           }
-          waitingRetry.set(r.key, batch); waitForIdle.add(r.key); await releaseExpiredRetries(); return;
+          waitingRetry.set(r.key, batch); waitForIdle.add(r.key); await releaseDormantRetries(); return;
         }
         if (/thread (?:is )?closing|thread not found/.test(e.message)) {
           cold = true; status = { type: 'notLoaded' }; closedEpoch++;
@@ -418,6 +435,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         await releaseInflight(r); return;
       }
     }
+    // The hook or a definite-rejection retry may finish after stop disabled
+    // this lane. No ambiguous or accepted attempt falls through to here.
+    waitingRetry.set(r.key, batch);
   }
   async function push() {
     if (connectionState !== 'ready' || !liveness().live) return;
@@ -524,7 +544,12 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         if (c.exitCode !== null || c.signalCode !== null) { resolve(); return; }
         c.once('close', () => resolve()); c.kill();
       }));
-      await queue; await unsubscribe(); const connection = rpc; rpc = undefined; connection?.close(); await Promise.all(exits);
+      await queue; await Promise.all(exits);
+      // Drain the killed claim before releasing its nonce: Go may still be
+      // committing it. Keep accepted/ambiguous inflight rows for recovery.
+      await recoverClaims();
+      for (const r of rows()) if (waitingRetry.has(r.key)) await releaseInflight(r);
+      await unsubscribe(); const connection = rpc; rpc = undefined; connection?.close();
     },
     state: () => connectionState, liveness, subscribed: () => attached,
     setOverLimit(value) { overLimit = value; enqueue(async () => { await reconcile(); if (!value) arm(0); }); },
