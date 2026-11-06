@@ -301,6 +301,9 @@ func (a *EventRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, before
 				bootstrap.HardPending = false
 			}
 			boundary := eventRuleBoundary{Revision: after.Revision, FromSeq: from, BeforeSeconds: was, AfterSeconds: seconds, PolicyTag: eventPolicyTag(next), BootstrapGeneration: bootstrap.Generation}
+			if key == "retention.archive_mode" {
+				boundary.BootstrapGeneration = *bootstrap.HardGeneration
+			}
 			if p.ApplyExisting {
 				if key == "retention.ack_events" && seconds > 0 {
 					boundary.AckCutoffAt, err = a.classPreviewCutoff(after, impact, time.Duration(seconds)*time.Second)
@@ -424,7 +427,7 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 		if len(bounds) > 0 {
 			authorized = !bootstrap.AckPending && bounds[len(bounds)-1].PolicyTag == tag
 		}
-		if !authorized {
+		if !authorized && (hard == 0 || bootstrap.ArchivePending || bootstrap.HardPending) {
 			result.Reason = "activation_required"
 			return nil
 		}
@@ -451,7 +454,9 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 		now := h.Now()
 		nowStr := envelope.FormatTime(now)
 		rule := func(seq int64, at time.Time) (time.Duration, bool) {
-			if ackSeconds == 0 {
+			// Pending ack policy must not block independently authorized hard expiry.
+			// A zero age retains acknowledged rows while hardAllowed gates the rest.
+			if !authorized || ackSeconds == 0 {
 				return 0, true
 			}
 			seconds := ackSeconds
@@ -494,7 +499,7 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 			latest := archiveBounds[len(archiveBounds)-1]
 			// Archive exits protect earlier rows unless this exact exit approved them.
 			if latest.AfterSeconds == 0 && seq <= latest.FromSeq {
-				return latest.HardDuration == hard && latest.BootstrapGeneration == bootstrap.Generation && latest.HardCutoffAt != "" && archiveNB.Valid && archiveHigh.Valid && archiveCutoff.Valid && nowStr >= archiveNB.String && seq <= archiveHigh.Int64 && envelope.FormatTime(at) <= latest.HardCutoffAt
+				return latest.HardDuration == hard && latest.BootstrapGeneration == *bootstrap.HardGeneration && latest.HardCutoffAt != "" && archiveNB.Valid && archiveHigh.Valid && archiveCutoff.Valid && nowStr >= archiveNB.String && seq <= archiveHigh.Int64 && envelope.FormatTime(at) <= latest.HardCutoffAt
 			}
 			return true
 		}
@@ -567,12 +572,15 @@ type eventRetentionBootstrap struct {
 	HardDuration       *time.Duration `json:"hard_duration_ns,omitempty"`
 	HardPending        bool           `json:"hard_pending,omitempty"`
 	Generation         uint64         `json:"generation"`
-	AckFromSeq         int64          `json:"ack_from_seq"`
-	ArchiveFromSeq     int64          `json:"archive_from_seq"`
-	AckSeconds         int64          `json:"ack_seconds"`
-	Archive            bool           `json:"archive"`
-	AckPending         bool           `json:"ack_pending"`
-	ArchivePending     bool           `json:"archive_pending"`
+	// HardGeneration changes only with archive/hard bootstrap policy. Generation
+	// still invalidates shared previews and ETags for every retention change.
+	HardGeneration *uint64 `json:"hard_generation,omitempty"`
+	AckFromSeq     int64   `json:"ack_from_seq"`
+	ArchiveFromSeq int64   `json:"archive_from_seq"`
+	AckSeconds     int64   `json:"ack_seconds"`
+	Archive        bool    `json:"archive"`
+	AckPending     bool    `json:"ack_pending"`
+	ArchivePending bool    `json:"archive_pending"`
 }
 
 const eventRetentionBootstrapKey = "event_retention_bootstrap_v1"
@@ -586,6 +594,12 @@ func loadRetentionBootstrap(ctx context.Context, tx *sql.Tx) (eventRetentionBoot
 	}
 	if json.Unmarshal([]byte(raw), &b) != nil || b.AckSeconds < 0 {
 		return b, errors.New("retention: invalid_bootstrap_checkpoint")
+	}
+	// Legacy archive boundaries used the shared generation. Adopt that domain
+	// before any new ack-only change, without reviving mismatched old grants.
+	if b.HardGeneration == nil {
+		generation := b.Generation
+		b.HardGeneration = &generation
 	}
 	// Older checkpoints did not retain the approved duration. An unresolved
 	// old transition has no provable prior rule, so retain indefinitely.
@@ -631,6 +645,8 @@ func (h *Hub) initializeEventRetention(ctx context.Context) error {
 			return err
 		}
 		if errors.Is(err, sql.ErrNoRows) {
+			hardGeneration := uint64(0)
+			b.HardGeneration = &hardGeneration
 			approved := seconds
 			if seconds > 0 && seconds < defaultAckSeconds {
 				b.AckPending = true
@@ -700,6 +716,7 @@ func (h *Hub) initializeEventRetention(ctx context.Context) error {
 			if b.Archive && !archive {
 				b.ArchivePending = true
 				b.Generation++
+				*b.HardGeneration++
 				b.ArchiveFromSeq = high
 			} else if archive {
 				if !b.Archive {
@@ -712,10 +729,11 @@ func (h *Hub) initializeEventRetention(ctx context.Context) error {
 						return err
 					}
 					b.Generation++
+					*b.HardGeneration++
 					bounds = append(bounds, eventRuleBoundary{
 						Revision: s.Revision, FromSeq: high,
 						BeforeSeconds: 0, AfterSeconds: 1,
-						PolicyTag: eventPolicyTag(p.Archive), BootstrapGeneration: b.Generation,
+						PolicyTag: eventPolicyTag(p.Archive), BootstrapGeneration: *b.HardGeneration,
 						BootstrapTransition: true,
 					})
 					raw, err := json.Marshal(bounds)
@@ -740,6 +758,7 @@ func (h *Hub) initializeEventRetention(ctx context.Context) error {
 			// Every hard config change invalidates previews and old retrospective
 			// grants, even a disable/re-enable cycle back to the same duration.
 			b.Generation++
+			*b.HardGeneration++
 			if hard > 0 && (b.HardDuration == nil || *b.HardDuration == 0 || hard < *b.HardDuration) {
 				b.HardPending = true
 			} else if hard == 0 {
