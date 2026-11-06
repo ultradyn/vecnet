@@ -189,7 +189,7 @@ const NTASKS = TASKS.length - 1
 if (END > NTASKS) throw new Error(`endTask ${END} exceeds ${NTASKS} tasks`)
 const routed = (n, preset) => (TASKS[n].route === 'sol' ? preset : undefined)
 const checkList = cmds => cmds.map(c => `\`${c}\``).join(', ')
-const suiteCmds = n => `\`${RUN}build2 go test -p 2 -count=1 ${TASKS[n].suite}\`${TASKS[n].checks.length ? `, ${checkList(TASKS[n].checks)}` : ''}`
+const suiteCmds = n => `\`${RUN}build2 go test -timeout 30m -p 2 -count=1 ${TASKS[n].suite}\`${TASKS[n].checks.length ? `, ${checkList(TASKS[n].checks)}` : ''}`
 
 // ---------------------------------------------------------------- shared prompt text
 const GROUPS = Array.isArray(A.parallelGroups) ? A.parallelGroups : [[18, 19]] // tasks that may run side by side in their own worktrees, merged afterwards
@@ -221,7 +221,7 @@ MANDATORY WORKTREE PREPARATION for Task ${nn(n)} (before any cd into ${wt}, sour
 function rules(wt, branch, taskNumbers = []) {
   return `RULES (apply to every command you run):
 - Work only in the worktree ${wt} on branch ${branch}. Your shell cwd resets between calls, so start every Bash command with \`cd ${wt} && \`.
-- Builds via build2, two threads: \`${RUN}build2 go test -p 2 ...\`, \`CGO_ENABLED=0 build2 go build -p 2 ...\`, \`${RUN}build2 go vet ./...\`. Never a bare \`go test\` or \`go build\`.${RUN ? ` Tests, vet and mod checks run on the build box: prefix them with \`${RUN.trim()}\` exactly as written in these instructions (env assignments go after it; use \`${RUN.trim()} bash -c '…'\` for compound commands). Builds for the ISA check, \`go list\` checks, git, gofmt and file reads stay local.` : ''}
+- Builds via build2, two threads: \`${RUN}build2 go test -timeout 30m -p 2 ...\`, \`CGO_ENABLED=0 build2 go build -p 2 ...\`, \`${RUN}build2 go vet ./...\`. Never a bare \`go test\` or \`go build\`.${RUN ? ` Tests, vet and mod checks run on the build box: prefix them with \`${RUN.trim()}\` exactly as written in these instructions (env assignments go after it; use \`${RUN.trim()} bash -c '…'\` for compound commands). Builds for the ISA check, \`go list\` checks, git, gofmt and file reads stay local.` : ''}
 - Never use attn. You report only through your return value and the status files.
 - Never run destructive git (reset --hard, checkout -- ., restore on others' files, clean, stash drop, rebase, push, branch -D) and never modify the main checkout at ${REPO} except files under ${STATUS}.
 - Network: only \`go get\` / \`go mod download\` of modules the plan names. No docker, no fly, no other downloads.
@@ -512,8 +512,8 @@ The work under review is \`git -C ${wt} diff ${impl.base_sha}..HEAD\` (commits w
 
 CHECKS
 1. Run, yourself, and record each command in commands_run:
-   - \`${RUN}build2 go test -p 2 -count=1 ${TASKS[n].suite}\`${TASKS[n].reviewChecks.length ? `, ${checkList(TASKS[n].reviewChecks)}` : ''} (tests_passed: every one must pass)
-${TASKS[n].reviewChecks.length ? `   - Run the last of those commands a second time; a failure on the second run sets repeat_runs_passed false.\n` : ''}   - \`${RUN}build2 go test -p 2 -count=3 <packages with changed _test.go files>\` (if no _test.go changed, skip this command)${TASKS[n].race ? ` and \`${RUN}CGO_ENABLED=1 CC=/usr/bin/gcc build2 go test -race -p 2 <same packages>\` (if cgo is unavailable, say so in test_output_tail and judge repeat_runs_passed on -count=3 alone)` : ''} (repeat_runs_passed)
+   - \`${RUN}build2 go test -timeout 30m -p 2 -count=1 ${TASKS[n].suite}\`${TASKS[n].reviewChecks.length ? `, ${checkList(TASKS[n].reviewChecks)}` : ''} (tests_passed: every one must pass)
+${TASKS[n].reviewChecks.length ? `   - Run the last of those commands a second time; a failure on the second run sets repeat_runs_passed false.\n` : ''}   - \`${RUN}build2 go test -timeout 30m -p 2 -count=3 <packages with changed _test.go files>\` (if no _test.go changed, skip this command)${TASKS[n].race ? ` and \`${RUN}CGO_ENABLED=1 CC=/usr/bin/gcc build2 go test -race -timeout 40m -p 2 <same packages>\` (if cgo is unavailable, say so in test_output_tail and judge repeat_runs_passed on -count=3 alone)` : ''} (repeat_runs_passed)
    - \`${RUN}build2 go vet ./...\` (vet_clean) and \`gofmt -l .\` (gofmt_clean: prints nothing)
 2. Interfaces: every item in the task's Interfaces block exists with the stated package, name, signature, status code and reason code. Use \`go doc -all ./internal/<pkg>\` and the source.
 3. Tests: every test named in Step 1 exists under that name, is not a stub, and asserts the full behaviour its plan comment describes. Flag sleeps used as synchronisation, real clocks where the FakeClock is meant, fixed ports, writes outside t.TempDir(), and goroutine leaks.
@@ -584,7 +584,7 @@ Check and report:
 3. \`go version\` is at least 1.26; \`command -v build2\` succeeds; ${PLAN} and ${PROTO} exist.
 4. For every task number t < ${START}: a commit with trailer \`Plan-Task: NN\` (two-digit) is reachable from HEAD (\`git log HEAD --grep '^Plan-Task: NN$'\`; earlier tasks may already be merged into ${BASE_REF}, so search the whole history, not only ${BASE_REF}..HEAD). A missing one sets ok=false: the base would be incomplete.
 5. passed_tasks: every t in ${START}..${END} whose ${STATUS}/task-NN.json has status "passed" AND whose Plan-Task commit is on the branch.
-6. Baseline: if go.mod exists, run \`${RUN}build2 go test -p 2 -count=1 ./...\`. Failure sets ok=false (never build on a red base). If go.mod does not exist, report "no-module-yet" (only valid when ${START} == 1).
+6. Baseline: if go.mod exists, run \`${RUN}build2 go test -timeout 30m -p 2 -count=1 ./...\`. Failure sets ok=false (never build on a red base). If go.mod does not exist, report "no-module-yet" (only valid when ${START} == 1).
 
 Write the JSON you return to ${STATUS}/preflight-${STAMP}.json (mkdir -p first).
 Return the JSON described by the output schema.`, { label: 'Preflight', phase: 'Preflight', schema: PREFLIGHT_SCHEMA, effort: 'low', sol: 'sol-coder' })
@@ -684,7 +684,7 @@ async function mergeUnit(unit) {
   const merge = await call(`Merge the parallel group ${label} back into ${BRANCH} for the vecnet ${PLAN_NAME} build.
 ${rules(WT, BRANCH, unit)}
 Branches to merge, in this order: ${unit.map(taskBranch).join(', ')} (worktrees ${unit.map(taskWT).join(', ')}).
-Procedure: cd ${WT}; for each branch run \`git merge --no-ff <branch>\`; resolve any conflict by keeping BOTH tasks' behaviour (typical conflicts: route registration in internal/httpapi/server.go, justfile recipes, go.mod/go.sum, README). Never drop a test or an endpoint to make a merge clean. After all merges run \`${RUN}build2 go test -p 2 -count=1 ./...\`, \`${RUN}build2 go vet ./...\`, \`gofmt -l .\`${MERGE_CHECKS.length ? `, ${checkList(MERGE_CHECKS)}` : ''}; fix merge-induced failures with a follow-up commit carrying trailer "Plan-Task: merge". Then, only after \`git -C <path> status --porcelain\` is empty, remove each task worktree with \`git -C ${REPO} worktree remove <path>\`. Leave the task branches in place; the coordinator deletes them.
+Procedure: cd ${WT}; for each branch run \`git merge --no-ff <branch>\`; resolve any conflict by keeping BOTH tasks' behaviour (typical conflicts: route registration in internal/httpapi/server.go, justfile recipes, go.mod/go.sum, README). Never drop a test or an endpoint to make a merge clean. After all merges run \`${RUN}build2 go test -timeout 30m -p 2 -count=1 ./...\`, \`${RUN}build2 go vet ./...\`, \`gofmt -l .\`${MERGE_CHECKS.length ? `, ${checkList(MERGE_CHECKS)}` : ''}; fix merge-induced failures with a follow-up commit carrying trailer "Plan-Task: merge". Then, only after \`git -C <path> status --porcelain\` is empty, remove each task worktree with \`git -C ${REPO} worktree remove <path>\`. Leave the task branches in place; the coordinator deletes them.
 Return {ok, head_sha, merged:[task numbers], conflicts_resolved:[files], tests_passed, notes}. ok is true only when every branch merged and the suite passed.`,
     { label: `merge ${label}`, phase: `Task ${nn(unit[unit.length - 1])}`, schema: MERGE_SCHEMA, sol: 'sol-coder', prepare: unit.map(n => taskPreparation(n, taskWT(n), taskBranch(n))).join('\n\n') })
   if (!merge || !merge.ok || !merge.tests_passed) { halt(unit[unit.length - 1], `merge of ${label} failed: ${merge ? merge.notes : 'no result'}`); return false }
@@ -752,7 +752,7 @@ const LENSES = [
   { key: 'security', title: 'Security invariants',
     focus: `PROTOCOL.md §14 (all eight invariants), §12 and the plan's Global Constraints, across every handler: sender always from the credential plus as; names never resolved as addresses; vecnet.* metadata rejected; secrets hashed, compared safely, never in URLs, logs (grep every log/slog/fmt.Print call site) or audit rows; blob tokens scoped to one recipient and one sha with expiry; no redirect following in push and notify clients; body limits on every route; authz on every handler (operator-only admin, not_recipient, not_participant, not_your_peer, not_member, scopes); SQL built only with placeholders; blob paths immune to traversal; the operator UI's CSP and secret handling. Note SSRF exposure of push routes as a finding with the right severity for a single-operator hub. Do not run the test suite.` },
   { key: 'tests', title: 'Test quality and flakiness',
-    focus: `Test quality across the branch. Run \`${RUN}build2 go test -p 2 -count=2 ./...\` and \`${RUN}CGO_ENABLED=1 CC=/usr/bin/gcc build2 go test -race -p 2 ./...\` (report if cgo is unavailable). Find: plan tests left as stubs or asserting less than their plan comment; sleeps used as synchronisation; real clocks where the FakeClock is meant; fixed ports; writes outside t.TempDir(), especially the CLI touching ~/.config or ~/.cache; goroutine or server leaks; tests that pass vacuously. Confirm Review Focus 1-5 in ${PLAN} are each pinned by a test that would fail if the behaviour regressed (reason it through or mutate locally WITHOUT saving: you are read-only).` },
+    focus: `Test quality across the branch. Run \`${RUN}build2 go test -timeout 30m -p 2 -count=2 ./...\` and \`${RUN}CGO_ENABLED=1 CC=/usr/bin/gcc build2 go test -race -timeout 40m -p 2 ./...\` (report if cgo is unavailable). Find: plan tests left as stubs or asserting less than their plan comment; sleeps used as synchronisation; real clocks where the FakeClock is meant; fixed ports; writes outside t.TempDir(), especially the CLI touching ~/.config or ~/.cache; goroutine or server leaks; tests that pass vacuously. Confirm Review Focus 1-5 in ${PLAN} are each pinned by a test that would fail if the behaviour regressed (reason it through or mutate locally WITHOUT saving: you are read-only).` },
 ]
 if (Array.isArray(A.extraLenses)) LENSES.push(...A.extraLenses) // {key, title, focus, taste}: taste lenses stay on Opus
 
@@ -803,7 +803,7 @@ ${JSON.stringify(minorBranch.concat(deferredWithIds), null, 1)}
 PROCEDURE
 1. For each finding, confirm it is real before changing code. For behaviour bugs, write a failing test first, then fix. A finding that is wrong goes in rejected with evidence.
 2. Every id above appears exactly once in fixed or rejected.
-3. Run \`${RUN}build2 go test -p 2 -count=1 ./...\`, \`${RUN}build2 go vet ./...\`, \`gofmt -l .\`.
+3. Run \`${RUN}build2 go test -timeout 30m -p 2 -count=1 ./...\`, \`${RUN}build2 go vet ./...\`, \`gofmt -l .\`.
 4. Commit in small logical commits, each with trailer "Plan-Task: review".
 5. Write the JSON you return to ${STATUS}/branch-fix-${STAMP}.json.
 
@@ -826,7 +826,7 @@ ${RULES}
 - You are READ-ONLY on the worktree: do not edit, stage or commit anything.
 
 Run each check yourself and record it in checks:
-1. \`${RUN}build2 go test -p 2 -count=1 ./...\`
+1. \`${RUN}build2 go test -timeout 30m -p 2 -count=1 ./...\`
 2. \`${RUN}build2 go vet ./...\`
 3. \`gofmt -l .\` prints nothing
 4. \`${RUN}build2 go mod tidy -diff\` prints nothing (skip with a note if unsupported)
