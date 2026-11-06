@@ -14,7 +14,7 @@ import (
 const DefaultTickInterval = 30 * time.Second
 
 // SlowTickEvery is how many ticks pass between the slow housekeeping jobs
-// (ArchiveIdleGroups, Blobs.GC): every 120th tick, an hour at 30 s.
+// (idempotency expiry, ArchiveIdleGroups, Blobs.GC): every 120th tick, an hour at 30 s.
 const SlowTickEvery = 120
 
 // RunTickers runs the hub's periodic jobs every `every` (DefaultTickInterval
@@ -22,7 +22,7 @@ const SlowTickEvery = 120
 // hub's now, then OnIdle for every peer holding wake_idle deliveries whose
 // presence is now idle or unknown (a report that just went stale counts as
 // unknown, PROTOCOL §5.2, §8); every SlowTickEvery-th tick also
-// ArchiveIdleGroups and Blobs.GC. Errors are logged and the next tick runs.
+// bounded idempotency expiry, ArchiveIdleGroups and Blobs.GC. Errors are logged and the next tick runs.
 // Tests pass a short interval and drive the hub's clock.
 func (h *Hub) RunTickers(ctx context.Context, every time.Duration) {
 	if ctx.Err() != nil {
@@ -87,6 +87,9 @@ func (h *Hub) Tick(ctx context.Context, slow bool) {
 	}
 	if !slow {
 		return
+	}
+	if _, err := h.ExpireIdempotency(ctx, 0); err != nil && ctx.Err() == nil {
+		slog.Error("hub: idempotency expiry", "reason", "slice_failed")
 	}
 	if _, err := h.DB.ExecContext(ctx, `DELETE FROM reaction_ops WHERE at < ?`, envelope.FormatTime(now.Add(-time.Hour))); err != nil && ctx.Err() == nil {
 		slog.Error("hub: tick prune reaction ops", "err", err)
