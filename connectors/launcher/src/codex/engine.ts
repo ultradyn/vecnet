@@ -187,12 +187,15 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       closedEpoch++; attached = false;
       if (!attaching) rejectedResume = false;
     }
-    // A rejected cold resume can emit its own loaded status before or after
-    // its response, even beyond the startup guard. Require a subsequent
-    // unload/load transition before that attachment may recover.
-    else if (s !== 'unknown' && !attaching && !rejectedResume) {
-      if (clock.now() - resumeAt > 2000) cold = false;
-      else if (cold) scheduleWarmCheck();
+    else if (s !== 'unknown' && !attaching) {
+      // A cold resume can emit its own idle broadcast even after the guard.
+      // Active status (including waiting flags), or turn/started mapped to
+      // active, proves independent activity and permits a fresh warm attach.
+      if (s === 'turn_running' || s === 'waiting_approval' || s === 'waiting_input') rejectedResume = false;
+      if (!rejectedResume) {
+        if (clock.now() - resumeAt > 2000) cold = false;
+        else if (cold) scheduleWarmCheck();
+      }
     }
     if (s === 'waiting_approval' || s === 'waiting_input') {
       if (waitingSince === undefined) { waitingSince = clock.now(); blockedLogged = false; }

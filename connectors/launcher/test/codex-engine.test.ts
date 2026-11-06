@@ -314,8 +314,16 @@ function ambiguousAfterAccept(after?: (rpc: CodexRpc, key: string) => Promise<vo
   } });
 }
 test('ambiguous send is resolved by clientId without resending', async t => {
-  const h = await harness(t, { wrap: ambiguousAfterAccept() }); await h.wake(); await h.tick(1000); await h.loaded();
-  await eventually(() => h.rows().length === 0); assert.equal(h.sends().length, 1); assert.equal(h.releases().length, 0);
+  let h: Awaited<ReturnType<typeof harness>>;
+  h = await harness(t, { wrap: ambiguousAfterAccept(async (rpc, key) => {
+    rpc.close(); h.fake.recordLater(key, h.clock.now()); h.clock.advance(0);
+  }) });
+  h.fake.withholdNextItem(); await h.wake();
+  assert.equal(h.rows().length, 1, 'no live receipt settled the disconnected send');
+  await h.tick(1000); await h.loaded();
+  await eventually(() => h.rows().length === 0);
+  assert.ok(h.fake.requests.some(r => r.method === 'thread/turns/list' && (r.params as any).itemsView === 'full'));
+  assert.equal(h.sends().length, 1); assert.equal(h.releases().length, 0);
 });
 test('ambiguous send with no clientId releases', async t => {
   const h = await harness(t); h.fake.failNext('turn/start', 'drop'); await h.wake(); await h.tick(1000); await h.loaded();
@@ -381,8 +389,15 @@ test('failed release retains the unsent claim and retries recovery without resta
   await h.tick(2 * minute); assert.equal(h.sends().length, 1);
 });
 test('definite rejection releases claims', async t => {
-  const h = await harness(t); h.fake.failNext('turn/start', { code: -32602, message: 'invalid input' }); await h.wake();
+  const h = await harness(t), baseline = h.hooks().length;
+  h.fake.failNext('turn/start', { code: -32602, message: 'invalid input' }); await h.wake();
   await eventually(() => h.releases().length === 1); assert.equal(h.rows().length, 0);
+  const claimArgs = h.hooks().slice(baseline).find(r => r.argv.includes('--event') && r.argv.includes('--claim'))!.argv;
+  const claim = claimArgs[claimArgs.indexOf('--claim') + 1], releaseArgs = h.releases()[0].argv;
+  assert.equal(releaseArgs[releaseArgs.indexOf('--claim') + 1], claim);
+  await h.restart();
+  assert.equal(h.sends().length, 2, 'the released delivery can be claimed and sent again');
+  assert.deepEqual(Object.keys((h.sends()[1].params as any).additionalContext), ['vecnet_w1']);
 });
 test('additionalContext rejection falls back to the pointer stub once', async t => {
   const h = await harness(t); h.fake.failNext('turn/start', { code: -32602, message: 'additionalContext rejected' }); await h.wake();
@@ -513,6 +528,85 @@ for (const idleDelayMs of [0, 1, 3000]) test(`rejected cold resume cannot use it
   h.fake.attachOther('thread'); h.fake.setThread({ id: 'thread', status: { type: 'idle' } });
   await h.sync(); await h.tick(2000);
   assert.equal(h.sends().length, 1); assert.deepEqual(h.engine.liveness(), { live: true });
+});
+for (const idleDelayMs of [0, 1, 3000]) for (const evidence of ['active status', 'new turn']) {
+  test(`independent ${evidence} revives a rejected cold resume before unload (idle delay ${idleDelayMs} ms)`, async t => {
+    let closeBeforeResume: (() => void) | undefined;
+    let suppressActiveStatus = false;
+    const h = await harness(t, { coldResumeIdleDelayMs: idleDelayMs, wrap: rpc => ({ ...rpc,
+      onNotification(fn) { rpc.onNotification((method, params) => {
+        if (suppressActiveStatus && method === 'thread/status/changed' && (params as any).status?.type === 'active') return;
+        fn(method, params);
+      }); },
+      async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+        if (method === 'thread/resume') closeBeforeResume?.();
+        return rpc.call<T>(method, params, ms);
+      },
+    }) });
+    await h.engine.stop(); h.fake.detachOther('thread');
+    closeBeforeResume = () => {
+      closeBeforeResume = undefined;
+      h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' } });
+      h.fake.notify('thread/closed', { threadId: 'thread' });
+    };
+    await h.restart(); await h.tick(3000); await h.wake();
+    assert.deepEqual(h.engine.liveness(), { live: false, reason: 'not_loaded' });
+    assert.equal(h.sends().length, 0); assert.deepEqual(h.fake.subscribers('thread'), []);
+    const baseline = h.fake.requests.length;
+    // The other client holds the thread before its 60-second unload deadline.
+    h.fake.attachOther('thread'); suppressActiveStatus = evidence === 'new turn';
+    h.fake.setThread({ id: 'thread', status: active, activeTurnId: 'external' });
+    if (evidence === 'new turn') h.fake.notify('turn/started', { threadId: 'thread', turn: { id: 'external' } });
+    await h.sync(); await h.tick(2000);
+    assert.deepEqual(h.engine.liveness(), { live: true });
+    assert.equal(h.engine.subscribed(), true);
+    assert.equal(h.fake.requests.slice(baseline).filter(r => r.method === 'thread/resume').length, 1);
+    assert.equal(h.sends().length, 1, 'queued delivery steers without another watch event or unload');
+    assert.equal(h.sends()[0].method, 'turn/steer');
+    assert.equal((h.sends()[0].params as any).expectedTurnId, 'external');
+    await h.tick(2 * minute);
+    assert.deepEqual(h.engine.liveness(), { live: true }); assert.equal(h.sends().length, 1);
+  });
+}
+for (const evidence of ['active status', 'new turn']) test(`independent ${evidence} during the cold-resume guard waits for a fresh warm subscription`, async t => {
+  let h: Awaited<ReturnType<typeof harness>>;
+  let closeBeforeResume: (() => void) | undefined, revive: (() => void) | undefined;
+  let suppressActiveStatus = false;
+  const resumeTimes: number[] = [];
+  h = await harness(t, { wrap: rpc => ({ ...rpc,
+    onNotification(fn) { rpc.onNotification((method, params) => {
+      if (suppressActiveStatus && method === 'thread/status/changed' && (params as any).status?.type === 'active') return;
+      fn(method, params);
+    }); },
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      if (method === 'thread/resume') closeBeforeResume?.();
+      const result = await rpc.call<T>(method, params, ms);
+      if (method === 'thread/resume' && h) resumeTimes.push(h.clock.now());
+      if (method === 'thread/unsubscribe') { const fn = revive; revive = undefined; fn?.(); }
+      return result;
+    },
+  }) });
+  await h.engine.stop(); h.fake.detachOther('thread'); resumeTimes.length = 0;
+  h.plan.items.push({ id: 'w1', priority: 'wake' }); h.save();
+  closeBeforeResume = () => {
+    closeBeforeResume = undefined;
+    h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' } });
+    h.fake.notify('thread/closed', { threadId: 'thread' });
+    revive = () => {
+      h.fake.attachOther('thread'); suppressActiveStatus = evidence === 'new turn';
+      h.fake.setThread({ id: 'thread', status: active, activeTurnId: 'external' });
+      if (evidence === 'new turn') h.fake.notify('turn/started', { threadId: 'thread', turn: { id: 'external' } });
+    };
+  };
+  await h.restart();
+  assert.equal(resumeTimes.length, 2, 'a fresh subscription follows the rejected one');
+  assert.ok(resumeTimes[1] - resumeTimes[0] > 2000, 'the rejected resume guard finishes before reattaching');
+  assert.equal(h.sends().length, 0, 'the fresh subscription has its own startup guard');
+  await h.tick(2000);
+  assert.deepEqual(h.engine.liveness(), { live: true }); assert.equal(h.engine.subscribed(), true);
+  assert.equal(h.sends().length, 1); assert.equal(h.sends()[0].method, 'turn/steer');
+  assert.equal((h.sends()[0].params as any).expectedTurnId, 'external');
+  assert.equal(h.plan.events.length, 0, 'no watch event was needed');
 });
 test('re-subscribes when another client reloads the thread', async t => {
   const h = await harness(t, { status: { type: 'notLoaded' } }); assert.equal(h.engine.subscribed(), false);
