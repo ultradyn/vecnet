@@ -137,15 +137,32 @@ Sidebar unread screens come from `scripts/ui/sidebar-unread.mjs`. Each Your Thre
 - [sb-unread-narrow.png](sb-unread-narrow.png) — 1000 px, where the sidebar narrows to 220 px: titles ellipsize and the pills keep their place.
 - [sb-unread-phone.png](sb-unread-phone.png) — 390 px, one column: Your Threads at full width with the long title, the pills, the zero rows, and an Other Threads row with no pill.
 
+Thread unread screens come from `scripts/ui/thread-unread.mjs` (CoS unread ruling). A thread opens at the operator's first unread message under a New divider in the unread tint, not at the bottom; each unread message has a thin amber bar until it is seen. A message is read on its own, by one read receipt for its delivery (batched over 500 ms), once 60% of it has been on screen for a second or it is scrolled past going down, and only while the page is visible and focused. Opening never marks the whole thread read. The fixture is a fourteen-message thread whose first eight the operator read earlier.
+
+- [tu-open.png](tu-open.png) — Opened (unfocused, so nothing is read yet) with six unread: New sits near the top above the first unread, the end of what was read above it; the sidebar pill reads 6.
+- [tu-open-phone.png](tu-open-phone.png) — The same opening at 390 px, where the page scrolls: New at the top.
+- [tu-partial.png](tu-partial.png) — Focused, then scrolled 260 px: what was on screen for a second or scrolled past reads `max read`, the last messages below are still unread, and the pill reads 2.
+- [tu-live.png](tu-live.png) — An arrival while the window was unfocused: unread until seen, New moved above it (the old New was all read), the pill reads 1. An arrival watched at the bottom is read as it lands and keeps New where it was.
+- [tu-none.png](tu-none.png) — Nothing unread: the thread opens at the bottom, as before, with no New.
+
 Peer detail screens come from `scripts/ui/peer.mjs`. A peer name anywhere in the UI (dashboard rows, thread senders and recipients, the thread aside, inbox cards and rows, the sidebar's participants line, subscriptions) opens `#peer/<id>`: everything the operator views already say about that peer, read-only, each section loading and failing on its own. Ids show short (`peer_…X6Z8B`) but keep the whole id in their text, so selecting and copying never yields the `…`; a copy button appears on hover or keyboard focus. The script also checks the copy under plain http (no Clipboard API), an unknown id, and peer links from the thread, its aside, the inbox and the sidebar.
 
 - [pv-dash-hover.png](pv-dash-hover.png) — Dashboard peers: names are links; the hovered row shows its copy button beside the short id.
-- [pv-progress.png](pv-progress.png) — A peer opened from the dashboard while principals, routes and threads are still loading; the rest has drawn.
-- [pv-success.png](pv-success.png) — codex-hark: full id with its copy button, identity, presence with last heartbeat, scopes as peer links, send limits, its principal.
+- [pv-progress.png](pv-progress.png) — A peer opened from the dashboard while principals, routes and threads are still loading; the rest has drawn, and the quick link waits (checking…) beside New message.
+- [pv-success.png](pv-success.png) — codex-hark: Open thread and New message beside the name, full id with its copy button, identity, presence with last heartbeat, scopes as peer links, send limits, its principal.
 - [pv-routes.png](pv-routes.png) — grok-triage: its own push route, blocked and failed deliveries, recent threads with linked participants.
 - [pv-disabled.png](pv-disabled.png) — A disabled peer: dimmed name, disabled chip and note, status disabled.
 - [pv-hostile.png](pv-hostile.png) — The hostile peer's name stays literal text with controls and bidi overrides stripped, in the header and its principal.
 - [pv-error.png](pv-error.png) — The routes read fails: that section shows its error while every other section renders.
+
+Peer message actions come from `scripts/ui/peer-actions.mjs`. Beside a peer's name, the quick link opens the operator's newest-activity thread with that peer (from the peer's `GET /v1/admin/threads?participant=` page), or New message prefilled to the peer when they share none; New message is always beside it, and opens at `wake_idle` for a Grok Bot. The script also checks that a redraw, or a newer thread replacing the link, keeps keyboard focus, that a modified click (a new tab) hands over no draft, that a later New message starts empty, that the prefilled send makes the thread the quick link then finds, and that a source and the operator's own page offer neither action.
+
+- [pv-quick-thread.png](pv-quick-thread.png) — grok-reviewer (a Grok Bot) shares hark B196 with the operator: Open thread names it with its age; New message says `wake_idle`.
+- [pv-quick-hover.png](pv-quick-hover.png) — The pointer on Open thread: the primary action brightens.
+- [pv-quick-focus.png](pv-quick-focus.png) — Keyboard focus on New message after Tab, kept through a presence redraw (presence now working) and when grok-reviewer's new thread, Review follow-up, becomes the one Open thread names.
+- [pv-quick-none.png](pv-quick-none.png) — dot-research shares no thread with the operator: the quick link reads Start thread (none with you yet), beside New message.
+- [pv-quick-compose-grokbot.png](pv-quick-compose-grokbot.png) — New message from grok-reviewer's page: the peer picked, `wake_idle` selected, the message field focused.
+- [pv-quick-compose-none.png](pv-quick-compose-none.png) — Start thread from dot-research's page: the peer picked at `wake`, a first message typed.
 
 Operator CLI label screens come from `scripts/ui/cli-label.mjs`, which runs the real `vecnet` binary under `env -i` (a pty from script(1) where a terminal is needed). A bare run with no profile is refused without a terminal or with an agent marker set; from a terminal it sends from the operator peer with a hub-set label.
 

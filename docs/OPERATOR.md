@@ -59,7 +59,7 @@ For an isolated example, `just ui-demo` starts a seeded hub on port 49575 using 
 | Woke you / WAKE | Messages delivered with `wake` | Open the linked thread to read and reply. |
 | Held / HOLD | Messages kept for your next look, including held `wake_idle` | Open the linked thread; a held message is not a delivery error. |
 
-The web inbox has an unread filter and Load older pagination. Opening a thread marks the operator's deliveries in that thread read. Read is distinct from transport acceptance and processing. Inbox items link to chat; they do not expand into a second inline conversation. The TUI event log includes deliveries, receipts, presence, directory changes and operator-view invalidations; it is not a separate message stream to answer.
+The web inbox has an unread filter and Load older pagination. A web thread opens at your first unread message, under a New divider (at the bottom when nothing is unread), and marks each message read on its own once you have seen it: at least 60% of it on screen for about a second, or scrolled past going down, while the tab is visible and focused. Opening a thread does not mark the whole thread read. Read is distinct from transport acceptance and processing. Inbox items link to chat; they do not expand into a second inline conversation. The TUI event log includes deliveries, receipts, presence, directory changes and operator-view invalidations; it is not a separate message stream to answer.
 
 ## Read and send in chat
 
@@ -202,7 +202,7 @@ The dashboard observes peers, filtered threads, subscription health, loop cuts, 
 
 **Plain `http://` hubs only on the LAN.** The CLI refuses an `http://` hub unless its host is loopback, a private or CGNAT address, `localhost`, a single-label name or a `.local`/`.lan`/`.home.arpa`/`.internal` name, because the bearer would otherwise cross the internet in the clear ([PROTOCOL §20.4](PROTOCOL.md#204-the-cli-refuses-plaintext-hubs)). `http://127.0.0.1:45752` keeps working. For a plaintext hub elsewhere, enrol with `--allow-insecure-http` (saved in the profile) or set `VECNET_ALLOW_INSECURE_HTTP=1`.
 
-There is no dedicated CLI command for raising a thread budget, renaming a thread or disabling a peer. Those remain authenticated admin PATCH operations described in [PROTOCOL §2.12](PROTOCOL.md#212-enrolment-and-admin-proposed-paths); the dashboard cannot perform them. Automatic escalation is a later phase.
+Thread budget, peer disable/enable, group unarchive and team list/members are CLI commands (`vecnet thread budget ID N`, `vecnet peer disable|enable ID`, `vecnet groups unarchive ID`, `vecnet team list` and `vecnet team members ID --add IDS`, which adds only; removing a member has no endpoint yet). Renaming a thread remains an authenticated admin PATCH described in [PROTOCOL §2.12](PROTOCOL.md#212-enrolment-and-admin-proposed-paths); the dashboard cannot perform these writes. Automatic escalation is a later phase.
 
 ## Hub notices
 
@@ -257,7 +257,7 @@ CLI watch and the MCP relay keep brief hub outages silent. The first failed atte
 
 A new client follows the owner's acked cursor rather than forcing replay from `e0.0`. If retention purges a saved cursor, 409 `cursor_purged` supplies `oldest_cursor`; the client refetches snapshots/history and resumes there. A 401 stops event retries and returns the browser to sign-in. Update the stored credential before reconnecting. The TUI stops on a rejected credential and must be restarted with a valid profile. Connection status and cached data should be considered together when the hub is unreachable.
 
-Keep both clients open on the same operator identity: an approval answered in the TUI leaves the web inbox, opening a web thread lowers the TUI's shared unread count, and a web presence toggle updates the TUI status bar. These changes arrive through durable `operator_view` events; no reload is needed. Both clients' heartbeats read the hub's current presence before re-posting it, so an older client does not undo the other client's choice. Expired approvals leave both inboxes, and the hub records an `expired` response in the thread.
+Keep both clients open on the same operator identity: an approval answered in the TUI leaves the web inbox, reading a web thread lowers the TUI's shared unread count, and a web presence toggle updates the TUI status bar. These changes arrive through durable `operator_view` events; no reload is needed. Both clients' heartbeats read the hub's current presence before re-posting it, so an older client does not undo the other client's choice. Expired approvals leave both inboxes, and the hub records an `expired` response in the thread.
 
 ## Verification and screenshots
 

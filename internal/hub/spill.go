@@ -121,11 +121,16 @@ func (h *Hub) applySpill(ctx context.Context, tx *sql.Tx, msg *envelope.Message,
 	}
 	sum := sha256.Sum256([]byte(fullText))
 	sha := hex.EncodeToString(sum[:])
+	if h.Blobs.Transfers != nil {
+		if _, err := h.Blobs.PutMessageData(ctx, tx, SpillUploader, "spill", spillMediaType, []byte(fullText)); err != nil {
+			return h.spillError(err)
+		}
+	}
 	ok, err := h.Blobs.Exists(ctx, tx, sha)
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !ok && h.Blobs.Transfers == nil {
 		return &needSpillError{text: fullText}
 	}
 	msg.Attachments = append(msg.Attachments, envelope.Attachment{
@@ -145,6 +150,10 @@ func (h *Hub) applySpill(ctx context.Context, tx *sql.Tx, msg *envelope.Message,
 // transaction. Quota and purge failures map as for PUT /v1/blobs.
 func (h *Hub) putSpill(ctx context.Context, text string) error {
 	_, err := h.Blobs.Put(ctx, SpillUploader, strings.NewReader(text), spillMediaType, 0)
+	return h.spillError(err)
+}
+
+func (h *Hub) spillError(err error) error {
 	switch {
 	case err == nil:
 		return nil
@@ -176,6 +185,16 @@ func (h *Hub) putSpill(ctx context.Context, text string) error {
 func (h *Hub) checkAttachments(ctx context.Context, tx *sql.Tx, snd sender, atts []envelope.Attachment) (hosted map[string]bool, err error) {
 	hosted = map[string]bool{}
 	for i, a := range atts {
+		if a.BlobID != "" {
+			if h.Blobs.Transfers == nil {
+				return nil, &envelope.SchemaError{Path: fmt.Sprintf("/attachments/%d/blob_id", i), Message: "remote attachments are unavailable"}
+			}
+			if err := h.checkR2Attachment(ctx, tx, snd, &atts[i]); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
 		var size int64
 		qerr := tx.QueryRowContext(ctx,
 			`SELECT b.size FROM blobs b WHERE b.sha256 = ?1 AND b.purged_at IS NULL
@@ -186,10 +205,25 @@ func (h *Hub) checkAttachments(ctx context.Context, tx *sql.Tx, snd sender, atts
 			                   JOIN thread_participants tp ON tp.thr_id = m.thr_id
 			                   WHERE br.sha256 = b.sha256 AND tp.peer_id = ?2 AND `+visibleSQL+`))`,
 			a.SHA256, snd.peer, snd.prn).Scan(&size)
+
+		if errors.Is(qerr, sql.ErrNoRows) {
+			qerr = tx.QueryRowContext(ctx, `SELECT length(p.bytes) FROM durable_blob_payloads p
+                WHERE p.sha256=?1 AND NOT EXISTS(SELECT 1 FROM blob_purge_tombstones WHERE sha256=p.sha256)
+                AND EXISTS(SELECT 1 FROM durable_blob_refs br JOIN messages m ON m.msg_id=br.msg_id
+                JOIN threads t ON t.thr_id=m.thr_id JOIN thread_participants tp ON tp.thr_id=m.thr_id
+                WHERE br.sha256=p.sha256 AND br.purpose=p.purpose AND tp.peer_id=?2 AND `+visibleSQL+`) LIMIT 1`, a.SHA256, snd.peer).Scan(&size)
+		}
 		switch {
 		case errors.Is(qerr, sql.ErrNoRows):
+			// PROTOCOL section 11: a reference-only origin remains external even
+			// when its hash coincides with an R2 object. Never probe or fetch it.
 			if a.OriginURL != "" {
 				continue
+			}
+			if h.Blobs.Transfers != nil {
+				// Retained remote transfers still require IDs after disk rollback.
+				// Uniform for known and unknown hashes: presence is not a capability.
+				return nil, E(422, "blob_id_required", "blob_id is required for remote attachments")
 			}
 			e := E(http.StatusUnprocessableEntity, "unknown_blob", "attachment hash not uploaded and no origin_url")
 			e.Details["path"] = fmt.Sprintf("/attachments/%d/sha256", i)
@@ -222,7 +256,7 @@ func (h *Hub) deliveryBlobURLs(msg envelope.Message, recipient string, hosted ma
 	atts := make([]envelope.Attachment, len(msg.Attachments))
 	for i, a := range msg.Attachments {
 		a.BlobURL = ""
-		if hosted[a.SHA256] {
+		if a.BlobID == "" && hosted[a.SHA256] {
 			a.BlobURL = h.Blobs.URL(h.Cfg.PublicURL, recipient, a.SHA256, exp)
 		}
 		atts[i] = a

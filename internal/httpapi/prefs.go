@@ -41,7 +41,7 @@ func (s *server) adminGetPreferences(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, snapshot)
+	s.writePreferencesSnapshot(w, r, snapshot)
 }
 func readPreferencePatch(w http.ResponseWriter, r *http.Request) (string, prefs.Patch, error) {
 	var patch prefs.Patch
@@ -101,7 +101,7 @@ func (s *server) adminPatchPreferences(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("ETag", snapshot.ETag)
-	writeJSON(w, http.StatusOK, snapshot)
+	s.writePreferencesSnapshot(w, r, snapshot)
 }
 func (s *server) adminPreviewPreferences(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")

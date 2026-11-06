@@ -2,10 +2,12 @@
 // read-only like the dashboard. Each section has its own read and fails on its
 // own; nothing here is fetched per row (one admin view per section, threads by
 // participant). Peer-supplied strings become text through h(). Ages use the
-// hub clock.
+// hub clock. The header's message actions open the operator's newest thread
+// with the peer, or New message to it (compose.js prefill).
+import { prefill } from './compose.js';
 import { chip, copyButton, h, idCopy, idText, peerLink } from './dom.js';
 import { ago, fullWhen, kindShort, kindTitle, plural, title as threadTitle, when } from './format.js';
-import { findPeer, peerFacts, peerHealth, peerRoutes, peerSubs, peerThreads, principalFacts, scopeTarget } from './peer-model.js';
+import { findPeer, peerActions, peerFacts, peerHealth, peerRoutes, peerSubs, peerThreads, principalFacts, scopeTarget } from './peer-model.js';
 import { chip as subChip, expiresIn } from './subs-model.js';
 
 const RELOAD_MS = 30000;
@@ -28,6 +30,43 @@ function kv(rows) {
   return h('dl', { class: 'pv-kv' }, rows.filter(Boolean).flatMap(([k, v]) => [h('dt', { text: k }), h('dd', null, v)]));
 }
 const dash = v => (v === null || v === undefined || v === '' ? '—' : String(v));
+const plain = e => e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
+
+// messageActions draws peerActions (peer-model): the quick link, to the
+// operator's newest thread with the peer or else to New message, and New
+// message beside it. A plain click on a New message link hands the composer
+// its draft (prefill) and routes there; a modified click (a new tab) opens
+// the empty composer. o: { name, threadName(thread), age(iso), prefill, nav }.
+export function messageActions(acts, o) {
+  if (!acts) return [];
+  const toCompose = draft => e => {
+    if (!plain(e)) return;
+    e.preventDefault();
+    o.prefill(draft);
+    o.nav('#new');
+  };
+  const btn = (tag, attrs, label, sub, tail) => h(tag, attrs, h('span', { class: 'lb', text: label }), sub ? h('span', { class: 'qt', text: sub }) : null, tail || null);
+  const q = acts.open;
+  let open;
+  if (q.state === 'thread') {
+    const name = o.threadName(q.thread);
+    open = btn('a', { class: 'btn pri pv-open', href: q.href, title: 'Open your newest thread with ' + o.name + ': ' + name },
+      'Open thread', name, q.at ? h('span', { class: 'ago', text: o.age(q.at) }) : null);
+  } else if (q.state === 'compose') {
+    open = btn('a', { class: 'btn pri pv-open', href: q.href, onclick: toCompose(q.draft),
+      title: (q.more ? 'None of the threads with the newest activity has you and ' : 'You have no thread with ') + o.name + (q.more ? '' : ' yet') + '. Opens New message to them.' },
+    'Start thread', q.more ? 'none recent with you' : 'none with you yet');
+  } else {
+    open = btn('button', { type: 'button', class: 'btn pri pv-open', disabled: true, 'aria-busy': q.state === 'loading' ? 'true' : null,
+      title: q.state === 'error' ? 'Threads unavailable: ' + errText(q.error) : 'Looking for your newest thread with ' + o.name },
+    'Open thread', q.state === 'error' ? 'unavailable' : 'checking…');
+  }
+  const d = acts.compose.draft;
+  const compose = btn('a', { class: 'btn pv-new', href: acts.compose.href, onclick: toCompose(d),
+    title: 'New message to ' + o.name + (d.priority === 'wake' ? '' : ', at ' + d.priority) },
+  'New message', null, d.priority === 'wake' ? null : h('span', { class: 'pr', text: d.priority }));
+  return [open, compose];
+}
 
 export function mount(root, ctx) {
   const { api, store } = ctx;
@@ -74,7 +113,13 @@ export function mount(root, ctx) {
     return el;
   }
 
-  const head = h('header', { class: 'pv-head' });
+  // The actions box stays in the header across redraws, and is redrawn only
+  // when what it offers changes, so the 30 s reload never takes keyboard
+  // focus off a button.
+  const headMain = h('div', { class: 'pv-main' });
+  const acts = h('div', { class: 'pv-acts', role: 'group', 'aria-label': 'Message this peer' });
+  let actsKey = '';
+  const head = h('header', { class: 'pv-head' }, headMain, acts);
   root.replaceChildren(
     h('div', { class: 'dash pv' },
       h('p', { class: 'crumb' }, h('a', { href: '#dash', text: 'Dashboard' }), ' / peer'),
@@ -99,11 +144,30 @@ export function mount(root, ctx) {
     s.body.replaceChildren(...kids);
   }
 
+  function renderActs(f) {
+    const a = f && res.threads ? peerActions(f, res.threads.get(), ctx.me, res.threads.error()) : null;
+    const q = a && a.open;
+    const key = JSON.stringify(a && [q.state, q.href || '', q.thread ? threadTitle(q.thread, ctx.me, nameOf) : '', !!q.at, !!q.more, errText(q.error || ''), f.name, a.compose.draft]);
+    if (key === actsKey) {
+      const ago = acts.querySelector('.ago');
+      if (ago && q.at) ago.textContent = age(q.at);
+      return;
+    }
+    actsKey = key;
+    // A new offer (another thread became the newest, say) replaces the
+    // buttons; focus on one moves to its replacement.
+    const had = acts.contains(document.activeElement) ? (document.activeElement.classList.contains('pv-new') ? '.pv-new' : '.pv-open') : '';
+    acts.replaceChildren(...messageActions(a, { name: (f && f.name) || id, threadName: t => threadTitle(t, ctx.me, nameOf), age, prefill, nav: ctx.nav }));
+    const next = had && acts.querySelector(had);
+    if (next && !next.disabled) next.focus({ preventScroll: true });
+  }
+
   function renderHead() {
     const f = facts(), err = res.peers.error();
+    renderActs(f);
     if (!f) {
       const missing = res.peers.get() && !err;
-      head.replaceChildren(...[
+      headMain.replaceChildren(...[
         h('h1', { text: missing ? 'Unknown peer' : nameOf(id) }),
         h('div', { class: 'pv-id' }, h('span', { class: 'mono pid', text: id }), copyButton(id, 'peer id')),
         missing ? h('div', { class: 'empty' }, h('b', { text: 'No peer with this id' }), 'The hub lists no peer or source with this id. It may have been removed, or the link is wrong.') : null,
@@ -111,7 +175,7 @@ export function mount(root, ctx) {
       return;
     }
     head.className = 'pv-head' + (f.disabled ? ' off' : '');
-    head.replaceChildren(...[
+    headMain.replaceChildren(...[
       h('h1', null, h('span', { class: 'nm', text: f.name || '(no name)' }),
         kindPill(f.kind),
         f.disabled ? chip('disabled', 'bad') : null),

@@ -34,6 +34,13 @@ body[data-route=thread] .va .col,body[data-route=matrix] .va .col{max-width:980p
 .va .box{border:1px solid var(--line2);border-radius:8px;padding:10px 12px;margin-top:8px;background:#0e1426;font-size:13px;overflow-wrap:anywhere}
 .va .box .k{font:500 12px var(--mono);color:var(--violet)}
 .va .loading{color:var(--dim);font-size:13px;padding:24px 0}
+/* CoS unread ruling: New sits above the first unread message, in the sidebar's unread
+   tint (base.css .ur); the thread opens with it near the top, the end of what was read above */
+.va .newdiv{display:flex;align-items:center;gap:10px;margin:10px 0 -1px;scroll-margin-top:56px;font:600 10.5px/15px var(--mono);color:var(--wake);letter-spacing:.06em;text-transform:uppercase}
+.va .newdiv::before,.va .newdiv::after{content:'';flex:1;height:1px;background:#fbbf2466}
+.va .newdiv span{border:1px solid #fbbf2466;background:#fbbf241a;border-radius:9px;padding:0 7px}
+/* an unread message not seen yet: a 2px bar just left of it, gone once it is seen */
+.va .msg.unread,.va .sys.unread{box-shadow:-14px 0 0 -12px var(--wake)}
 .va .msg.flash{animation:flash 1.5s ease-out}
 @keyframes flash{0%,25%{background:#a855f733;box-shadow:-12px 0 0 #a855f733,12px 0 0 #a855f733}100%{background:transparent;box-shadow:none}}
 .va .sys{display:flex;align-items:center;gap:10px;justify-content:center;padding:10px 0;border-bottom:1px solid #161d33;font-size:12px;color:var(--dim);min-width:0}

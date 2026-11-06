@@ -225,6 +225,10 @@ try {
     await shot('att04-thread-success');
     await page.keyboard.press('Escape');
     await viewer.waitFor({ state: 'detached' });
+    // Focus returns in the dialog's close event, a task after [open] goes; a
+    // redraw meanwhile (a read receipt reloads the thread) replaces the
+    // thumbnail, and the handler then focuses its replacement.
+    await page.waitForFunction(sha => document.activeElement && document.activeElement.matches(`button.thumb[data-sha="${sha}"]`), sentAtt.sha256, { timeout: 5000 }).catch(() => {});
     const focusInfo = await page.evaluate(sha => { const a = document.activeElement; return { ok: !!a && a.matches(`button.thumb[data-sha="${sha}"]`), tag: a && a.tagName, cls: a && a.className, n: document.querySelectorAll('button.thumb').length }; }, sentAtt.sha256);
     assert(focusInfo.ok, 'focus did not return to the thumbnail: ' + JSON.stringify(focusInfo));
     await ownThumb.click();
