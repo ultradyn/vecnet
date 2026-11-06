@@ -95,7 +95,9 @@ func serverError(w http.ResponseWriter, err error) {
 }
 
 // authRequest is an authorize request that passed validation, sealed into the
-// consent form so that POST trusts exactly what GET checked.
+// consent form so that POST trusts exactly what GET checked. Shown is the
+// consent-cookie subject the page displayed, empty when it showed no
+// returning peer. Cookie-only approval must match it.
 type authRequest struct {
 	Purpose     string `json:"p"`
 	ClientID    string `json:"c"`
@@ -105,7 +107,12 @@ type authRequest struct {
 	Resource    string `json:"a"`
 	State       string `json:"t"`
 	ExpiresMs   int64  `json:"e"`
+	Shown       string `json:"d,omitempty"`
 }
+
+// errConsentChanged means the cookie-only approval would bind a different
+// subject from the one the form displayed.
+var errConsentChanged = errors.New("oauth: displayed consent subject changed")
 
 // consentSubject is the sealed vecnet_oauth_sub value.
 type consentSubject struct {
@@ -277,16 +284,20 @@ func (s *Server) getAuthorize(w http.ResponseWriter, r *http.Request) {
 	// Fresh consent grants the complete dot capability set, including when an
 	// older client still asks only for vecnet. Refresh never adds these scopes.
 	scope = AuthorizationScopes
-	sealed, err := s.seal(authRequest{
-		Purpose: purposeRequest, ClientID: clientID, RedirectURI: redirectURI, Scope: scope,
-		Challenge: q.Get("code_challenge"), Resource: s.resource(), State: state,
-		ExpiresMs: s.now().Add(requestTTL).UnixMilli(),
-	})
+	p, err := s.cookiePrincipal(r.Context(), s.DB, r)
 	if err != nil {
 		serverError(w, err)
 		return
 	}
-	p, err := s.cookiePrincipal(r.Context(), s.DB, r)
+	shown := ""
+	if p != nil {
+		shown = p.Subject
+	}
+	sealed, err := s.seal(authRequest{
+		Purpose: purposeRequest, ClientID: clientID, RedirectURI: redirectURI, Scope: scope,
+		Challenge: q.Get("code_challenge"), Resource: s.resource(), State: state,
+		ExpiresMs: s.now().Add(requestTTL).UnixMilli(), Shown: shown,
+	})
 	if err != nil {
 		serverError(w, err)
 		return
@@ -349,6 +360,13 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if p, err = s.cookiePrincipal(ctx, tx, r); err != nil {
 			return err
+		} else if p == nil || p.Subject != req.Shown {
+			// No cookie and no displayed peer still needs a link code. Any
+			// other mismatch would approve someone the page did not show.
+			if p == nil && req.Shown == "" {
+				return hub.ErrDotLink
+			}
+			return errConsentChanged
 		}
 		if p == nil {
 			return hub.ErrDotLink
@@ -356,6 +374,10 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 		code, err = s.mintCode(ctx, tx, req, p.PrnID)
 		return err
 	})
+	if errors.Is(err, errConsentChanged) {
+		s.refreshConsent(w, r, req)
+		return
+	}
 	if errors.Is(err, hub.ErrDotLink) {
 		s.refuseLink(w, r, req, sealed)
 		return
@@ -441,6 +463,42 @@ func (s *Server) refuseLink(w http.ResponseWriter, r *http.Request, req authRequ
 		}
 	}
 	s.retryPage(w, r, req, sealed)
+}
+
+// refreshConsent refuses a cookie-only approval whose cookie subject is no
+// longer the one the form displayed, and re-seals the form for the subject
+// the browser would approve now. The original expiry is kept.
+func (s *Server) refreshConsent(w http.ResponseWriter, r *http.Request, req authRequest) {
+	c, err := s.storedClient(r.Context(), req.ClientID)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	p, err := s.cookiePrincipal(r.Context(), s.DB, r)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	req.Shown = ""
+	msg := "The peer this browser would approve changed. Enter a link code to continue."
+	if p != nil {
+		req.Shown = p.Subject
+		msg = "The peer this browser would approve changed. Review the peer shown above, then approve again."
+	}
+	sealed, err := s.seal(req)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	oauthReason(w, "consent_changed")
+	pg := page{
+		ClientName: clientLabel(c), RedirectHost: redirectHost(req.RedirectURI), Request: sealed,
+		NeedCode: p == nil, NewClient: p != nil && !p.approved(req.ClientID), Error: msg,
+	}
+	if p != nil {
+		pg.PeerName, pg.PeerID = p.Name, p.PeerID
+	}
+	writePage(w, http.StatusBadRequest, pg, req.RedirectURI)
 }
 
 // retryPage is the 400 for a link code that was refused: the same form again.
