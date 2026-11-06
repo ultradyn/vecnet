@@ -26,6 +26,42 @@ try {
     const comp = page.locator('.composer');
     const selected = () => comp.locator('.seg button.on').getAttribute('value');
     const note = comp.locator('#r-quota');
+    const quotaLine = 'Preselected for Grok Bot · each run spends Grok quota';
+    const plainLine = 'Grok Bot: each run spends Grok quota';
+    const quotaDetail = 'wake_idle pushes now if the Grok Bot is idle or its presence is unknown, otherwise once it goes idle; hold never starts a run. A run that also needs you in chat can start a second one.';
+    // The note is its own line under the controls: one line, never clipped,
+    // left-aligned under the priority control and below every bar control,
+    // and the composer grows by that line only. hint: the keyboard hint is
+    // still shown beside it (fitHint may drop it only where it never fits).
+    const noteFits = async (what, { hint = false } = {}) => {
+      const m = await note.evaluate(el => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => {
+        const box = e => e.getBoundingClientRect();
+        const bar = el.closest('.wrap').querySelector('.bar'), seg = bar.querySelector('.seg'), c = el.closest('.composer');
+        const kids = [...bar.children].filter(k => getComputedStyle(k).display !== 'none').map(box);
+        const n = box(el), cs = getComputedStyle(el), withNote = box(c).height;
+        el.hidden = true;
+        const without = box(c).height;
+        el.hidden = false;
+        const hintEl = bar.querySelector('.hint');
+        r({
+          h: n.height, lh: parseFloat(cs.lineHeight), mt: parseFloat(cs.marginTop), sw: el.scrollWidth, cw: el.clientWidth,
+          left: n.left, top: n.top, segLeft: box(seg).left, barBottom: Math.max(...kids.map(k => k.bottom)), inBar: !!el.closest('.bar'),
+          grow: withNote - without, hint: getComputedStyle(hintEl).display !== 'none' && box(hintEl).width > 0,
+          described: seg.getAttribute('aria-describedby'), more: (document.getElementById('r-quota-more') || {}).textContent,
+          docW: document.documentElement.scrollWidth, vw: innerWidth,
+        });
+      }))));
+      assert(!m.inBar, `${what}: the note is inside the controls row`);
+      assert(m.h <= m.lh + 1, `${what}: the note is ${m.h}px tall, more than one ${m.lh}px line`);
+      assert(m.sw <= m.cw, `${what}: the note is clipped (${m.sw} > ${m.cw})`);
+      assert(Math.abs(m.left - m.segLeft) <= 1, `${what}: the note is not under the priority control (${m.left} vs ${m.segLeft})`);
+      assert(m.top >= m.barBottom - 0.5, `${what}: the note overlaps the controls (${m.top} < ${m.barBottom})`);
+      assert(m.grow <= m.lh + m.mt + 1, `${what}: the note grew the composer by ${m.grow}px`);
+      assert(m.described === 'r-quota r-quota-more' && m.more === quotaDetail, `${what}: describedby ${m.described}`);
+      assert(m.docW <= m.vw, `${what}: scrolls sideways (${m.docW} > ${m.vw})`);
+      if (hint) assert(m.hint, `${what}: the keyboard hint is hidden while the note shows`);
+      return m;
+    };
     // Every resource notify replaces the .msg nodes, so measure the live node
     // by id, and only once two frames apart agree: a detached node measures as
     // all zeros and would read as on screen.
@@ -83,10 +119,10 @@ try {
     assert(await selected() === 'wake_idle', 'a thread with a grokbot participant did not preselect wake_idle');
     await note.waitFor();
     const harkNote = await note.textContent();
-    const quotaLine = 'wake_idle preselected for Grok Bot: pushes now if the bot is idle or unknown, otherwise once it goes idle. Each run spends Grok quota; hold never starts one.';
     assert(harkNote === quotaLine, harkNote);
-    assert(await note.getAttribute('title') === 'A run that also needs you in chat can start a second one.', await note.getAttribute('title'));
-    assert(await note.evaluate(el => el.classList.contains('qnote') && el.parentElement.classList.contains('bar') && el.previousElementSibling.classList.contains('ptips')), 'quota note is not beside the priority control');
+    assert(await note.getAttribute('title') === quotaDetail, await note.getAttribute('title'));
+    assert(await note.evaluate(el => el.classList.contains('qnote') && el.parentElement.classList.contains('wrap') && el.previousElementSibling.classList.contains('bar')), 'quota note is not the line under the controls');
+    await noteFits('hark', { hint: true });
     await quiet();
     await shot('09-thread-initial');
 
@@ -318,6 +354,7 @@ try {
     releaseFacts();
     await note.waitFor();
     assert(await selected() === 'hold', 'participant data overwrote explicit hold');
+    assert(await note.textContent() === plainLine, `after an explicit hold the note says: ${await note.textContent()}`);
     await comp.locator('#r-quota').evaluate(el => el.scrollIntoView({ block: 'center' }));
     await shot('t10-thread-sticky');
     await page.unroute('**/v1/threads?*', stall);
@@ -359,9 +396,11 @@ try {
     releaseLate();
     await note.waitFor();
     assert(await selected() === 'wake', 'an unchanged failed reply adopted wake_idle when the grokbot became known');
+    assert(await note.textContent() === plainLine, `a kept wake retry is described as: ${await note.textContent()}`);
     const editedReply = failedReply + ' Edited.';
     await ta.fill(editedReply);
     assert(await selected() === 'wake_idle', 'editing the failed reply left wake selected');
+    assert(await note.textContent() === quotaLine, `the edited reply's automatic wake_idle note: ${await note.textContent()}`);
     await page.unroute('**/v1/messages');
     await comp.locator('.send').click();
     await page.locator('.msg .txt', { hasText: editedReply }).waitFor();
@@ -382,17 +421,33 @@ try {
     const setupNote = await note.textContent();
     assert(setupNote === quotaLine, setupNote);
     await comp.locator('#r-quota').evaluate(el => el.scrollIntoView({ block: 'center' }));
+    await noteFits('setup', { hint: true });
     await shot('t10-thread-setup');
     await page.mouse.move(0, 0);
     await page.evaluate(() => { const el = document.activeElement; if (el && el.blur) el.blur(); });
+    // Mid widths: half-screen desktop windows, tablets and phones in
+    // landscape. The note stays one line under the controls at each.
+    for (const w of [900, 800, 600, 480]) {
+      await page.setViewportSize({ width: w, height: 900 });
+      await comp.locator('#r-quota').evaluate(el => el.scrollIntoView({ block: 'center' }));
+      await noteFits(`setup at ${w}`);
+      await shot(`t10-thread-w${w}`);
+    }
     await page.setViewportSize({ width: 390, height: 844 });
     await comp.locator('#r-quota').evaluate(el => el.scrollIntoView({ block: 'center' }));
     const setupNarrow = await page.evaluate(() => document.documentElement.scrollWidth);
     assert(setupNarrow <= 390, `setup reply scrolls sideways at 390 (${setupNarrow})`);
+    await noteFits('setup at 390');
     await shot('t10-thread-setup-narrow');
     await page.setViewportSize({ width: 1440, height: 900 });
     await comp.getByRole('button', { name: 'wake', exact: true }).click();
     assert(await selected() === 'wake', 'explicit wake did not stick on the setup thread');
+    const wakeNote = await note.textContent();
+    assert(!/preselected/i.test(wakeNote), `after an explicit wake the note says: ${wakeNote}`);
+    assert(wakeNote === plainLine, wakeNote);
+    await noteFits('explicit wake', { hint: true });
+    await page.mouse.move(0, 0);
+    await comp.locator('.ptip[data-p="wake"]').waitFor({ state: 'hidden' });
     await shot('t10-thread-explicit-wake');
     await comp.locator('.seg button[value="wake"]').focus();
     await page.keyboard.press('Tab');
@@ -406,6 +461,8 @@ try {
     await comp.locator('#r-quota').evaluate(el => el.scrollIntoView({ block: 'center' }));
     const narrowWidth = await page.evaluate(() => document.documentElement.scrollWidth);
     assert(narrowWidth <= 390, `thread scrolls sideways at 390 (${narrowWidth})`);
+    assert(await selected() === 'wake' && await note.textContent() === plainLine, `narrow explicit wake: ${await selected()}, ${await note.textContent()}`);
+    await noteFits('explicit wake at 390');
     await shot('t10-thread-narrow');
     await page.setViewportSize({ width: 1440, height: 900 });
   });

@@ -7,7 +7,7 @@ import { createAttachments } from './attach.js';
 import { avatar, h, idText } from './dom.js';
 import { kindShort } from './format.js';
 import { prioritySeg } from './prio.js';
-import { anyGrokbot, buildSend, canSend, composePriority, counter, eligible, errorText, GROK_QUOTA_TITLE, grokQuotaNote, INITIAL_PRIORITY, keepKey, keyFor, matches, priorityLocked, sendRefusal } from './compose-model.js';
+import { anyGrokbot, buildSend, canSend, composePriority, counter, eligible, errorText, GROK_QUOTA_DETAIL, grokQuotaNote, INITIAL_PRIORITY, keepKey, keyFor, matches, priorityLocked, sendRefusal } from './compose-model.js';
 
 function randKey() {
   const b = crypto.getRandomValues(new Uint8Array(16));
@@ -39,7 +39,12 @@ export function mount(root, ctx) {
     h('option', { value: 'from_join', text: 'from_join: people added later see only what follows' }),
     h('option', { value: 'full', text: 'full: people added later see the whole thread' }));
   const locked = h('input', { type: 'checkbox', id: 'c-locked' });
-  const quota = h('p', { class: 'qnote', id: 'c-quota', hidden: true });
+  // The Grok Bot note: one line under the Priority row whose space is kept
+  // while it is empty (.off), so picking or removing a Grok Bot moves
+  // nothing. The timing and second-run detail are its title and a hidden
+  // element the control's aria-describedby names.
+  const quota = h('p', { class: 'qnote off', id: 'c-quota' });
+  const quotaMore = h('span', { id: 'c-quota-more', hidden: true, text: GROK_QUOTA_DETAIL });
   const err = h('p', { class: 'err', role: 'alert' });
   const send = h('button', { type: 'submit', class: 'btn pri', text: 'Send' });
   const attachBtn = h('button', { type: 'button', class: 'btn', text: 'Attach', title: 'Attach files (or drop them on the form, or paste a screenshot into the message)' });
@@ -50,7 +55,8 @@ export function mount(root, ctx) {
       opts),
     h('div', { class: 'row' },
       h('div', { class: 'field grow' }, h('label', { for: 'c-title', text: 'Title' }), titleIn),
-      h('div', { class: 'field' }, h('span', { class: 'lbl', text: 'Priority' }), prio.el, quota)),
+      h('div', { class: 'field' }, h('span', { class: 'lbl', text: 'Priority' }), prio.el)),
+    quota, quotaMore,
     h('div', { class: 'field' },
       h('label', { for: 'c-text', text: 'Message' }),
       h('div', { class: 'wrap' }, text, att.el, h('div', { class: 'bar' }, count, h('span', { class: 'hint', text: 'Drop or paste files · Ctrl+Enter to send' })))),
@@ -123,11 +129,13 @@ export function mount(root, ctx) {
   function render() {
     if (gone) return;
     syncPriority();
-    const note = grokQuotaNote(anyGrokbot(S.recipients, peers.get()));
-    quota.hidden = !note;
+    // "Preselected" only while wake_idle is the automatic choice; after a
+    // manual pick the note says only what holds for every priority.
+    const note = grokQuotaNote({ addressed: anyGrokbot(S.recipients, peers.get()), manual: S.priorityManual, priority: S.priority });
+    quota.classList.toggle('off', !note);
     quota.textContent = note;
-    quota.title = note ? GROK_QUOTA_TITLE : '';
-    if (note) seg.setAttribute('aria-describedby', 'c-quota');
+    quota.title = note ? GROK_QUOTA_DETAIL : '';
+    if (note) seg.setAttribute('aria-describedby', 'c-quota c-quota-more');
     else seg.removeAttribute('aria-describedby');
     renderPicked();
     renderOpts();

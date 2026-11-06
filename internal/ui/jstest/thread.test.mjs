@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { budgetBanner, budgetOut, canShowFull, clientLabel, CLIENT_LABEL_CAP, clientSuspect, FULL_TEXT_CAP, GROK_QUOTA_NOTE, items, pendingReplyMatches, replyKey, replyPriority, replyPriorityLocked, replyQuotaNote, replySig, sendError, spillOf } from '../static/thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, clientLabel, CLIENT_LABEL_CAP, clientSuspect, FULL_TEXT_CAP, GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, items, pendingReplyMatches, replyKey, replyPriority, replyPriorityLocked, replyQuotaNote, replySig, sendError, spillOf } from '../static/thread-model.js';
 import { SPILL_SLOT } from '../static/attach-model.js';
 
 const OP = 'peer_op', CODEX = 'peer_codex', SLEUTH = 'peer_sleuth', GROK = 'peer_grok';
@@ -301,13 +301,25 @@ test('Grok recipient defaults preserve user choice', () => {
   assert.equal(retry.prio, 'hold');
   assert.equal(retry.text, 'same body');
 
-  const note = replyQuotaNote(setup, kindOf);
+  const auto = replyPriority({ ...base, participants: setup });
+  const note = replyQuotaNote(setup, kindOf, { manual: false, priority: auto });
   assert.equal(note, GROK_QUOTA_NOTE);
-  assert.match(note, /preselected/);
+  assert.match(note, /^Preselected/);
   assert.doesNotMatch(note, /free/i);
   assert.doesNotMatch(note, /guarantee|no wake|never wake|won'?t wake|will not wake|without waking/i);
-  assert.equal(replyQuotaNote(['peer_op', 'peer_c'], kindOf), '');
-  assert.equal(replyQuotaNote(setup, () => ''), '');
+  assert.equal(replyQuotaNote(['peer_op', 'peer_c'], kindOf, { manual: false, priority: 'wake' }), '');
+  assert.equal(replyQuotaNote(setup, () => '', { manual: false, priority: 'wake' }), '');
+
+  // After an explicit wake or hold the note no longer says "preselected".
+  for (const priority of ['wake', 'hold', 'wake_idle']) {
+    const chosen = replyPriority({ manual: true, locked: false, current: priority, participants: setup, kindOf });
+    const line = replyQuotaNote(setup, kindOf, { manual: true, priority: chosen });
+    assert.equal(line, GROK_QUOTA_PLAIN, 'explicit ' + priority);
+    assert.doesNotMatch(line, /preselected/i, 'explicit ' + priority);
+  }
+  // A failed wake reply kept for its retry after the grokbot became known.
+  const kept = replyPriority({ manual: false, locked: true, current: 'wake', participants: setup, kindOf });
+  assert.equal(replyQuotaNote(setup, kindOf, { manual: false, priority: kept }), GROK_QUOTA_PLAIN, 'kept wake retry');
 });
 
 // A lost reply keeps wake and its key while the text is unchanged, even

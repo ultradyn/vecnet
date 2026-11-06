@@ -152,28 +152,58 @@ try {
     const on = () => view.locator('.seg button.on').getAttribute('value');
     const quota = view.locator('#c-quota');
     const center = sel => view.locator(sel).evaluate(el => el.scrollIntoView({ block: 'center' }));
+    const quotaLine = 'Preselected for Grok Bot · each run spends Grok quota';
+    const plainLine = 'Grok Bot: each run spends Grok quota';
+    const quotaDetail = 'wake_idle pushes now if the Grok Bot is idle or its presence is unknown, otherwise once it goes idle; hold never starts a run. A run that also needs you in chat can start a second one.';
+    // Where the form below the Title/Priority row sits, measured from that
+    // row, so a chip wrapping in To does not count: picking or removing a
+    // Grok Bot must not move it (the note's line is always kept).
+    const formTop = () => page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => {
+      const row = document.querySelector('.compose .row').getBoundingClientRect().bottom;
+      const y = sel => document.querySelector(sel).getBoundingClientRect().top - row;
+      r({ text: y('#c-text'), adv: y('.compose .adv'), send: y('.compose .actions') });
+    }))));
+    const sameTop = (a, b, what) => assert(['text', 'adv', 'send'].every(k => Math.abs(a[k] - b[k]) < 0.5), `${what} moved the form: ${JSON.stringify(a)} -> ${JSON.stringify(b)}`);
+    // The note is one line under the control, ending under its right edge,
+    // never clipped at this width, and named by the control's description.
+    const noteFits = async what => {
+      const m = await quota.evaluate(el => {
+        const r = el.getBoundingClientRect(), seg = document.querySelector('.compose .seg').getBoundingClientRect();
+        const lh = parseFloat(getComputedStyle(el).lineHeight);
+        return { h: r.height, lh, sw: el.scrollWidth, cw: el.clientWidth, right: r.right, top: r.top, segRight: seg.right, segBottom: seg.bottom,
+          described: document.querySelector('.compose .seg').getAttribute('aria-describedby'), more: document.getElementById('c-quota-more').textContent };
+      });
+      assert(m.h <= m.lh + 1, `${what}: the note is ${m.h}px tall, more than one ${m.lh}px line`);
+      assert(m.sw <= m.cw, `${what}: the note is clipped (${m.sw} > ${m.cw})`);
+      assert(Math.abs(m.right - m.segRight) <= 1 && m.top >= m.segBottom, `${what}: the note does not end under the priority control ${JSON.stringify(m)}`);
+      assert(m.described === 'c-quota c-quota-more' && m.more === quotaDetail, `${what}: describedby ${m.described}`);
+    };
     await page.evaluate(() => { location.hash = '#new'; });
     await opt(id('codex')).waitFor();
     await pick(id('codex'));
     assert(await on() === 'wake', 'a non-grokbot recipient changed the initial priority');
     assert(await quota.isHidden(), 'quota note shows with no Grok Bot');
+    assert(await view.locator('.seg').getAttribute('aria-describedby') === null, 'the control names a hidden note');
     await center('.seg');
+    const noGrok = await formTop();
     await shot('t10-compose-nongrok');
 
     await pick(id('grok'));
     assert(await on() === 'wake_idle', 'one grokbot among the recipients did not preselect wake_idle');
     await quota.waitFor();
     const mixedNote = await quota.textContent();
-    const quotaLine = 'wake_idle preselected for Grok Bot: pushes now if the bot is idle or unknown, otherwise once it goes idle. Each run spends Grok quota; hold never starts one.';
     assert(mixedNote === quotaLine, mixedNote);
-    assert(await quota.getAttribute('title') === 'A run that also needs you in chat can start a second one.', await quota.getAttribute('title'));
-    assert(await quota.evaluate(el => el.classList.contains('qnote') && !!el.closest('.field') && !el.closest('.wrap')), 'quota note is not under the priority control');
+    assert(await quota.getAttribute('title') === quotaDetail, await quota.getAttribute('title'));
+    assert(await quota.evaluate(el => el.classList.contains('qnote') && !el.closest('.row') && !el.closest('.wrap')), 'quota note is not its own line under the priority row');
+    await noteFits('mixed');
+    sameTop(noGrok, await formTop(), 'adding a Grok Bot');
     await center('#c-quota');
     await shot('t10-compose-mixed');
 
     await view.getByRole('button', { name: 'Remove grok-reviewer' }).click();
     assert(await on() === 'wake', 'removing the grokbot left wake_idle selected');
     assert(await quota.isHidden(), 'quota note stayed after the grokbot was removed');
+    sameTop(noGrok, await formTop(), 'removing the Grok Bot');
     await shot('t10-compose-removed');
 
     await view.getByRole('button', { name: 'Remove codex-hark' }).click();
@@ -184,9 +214,16 @@ try {
 
     await view.getByRole('button', { name: 'wake', exact: true }).click();
     assert(await on() === 'wake', 'explicit wake did not stick');
+    assert(!/preselected/i.test(await quota.textContent()), `after an explicit wake the note says: ${await quota.textContent()}`);
+    assert(await quota.textContent() === plainLine, await quota.textContent());
     await view.getByRole('button', { name: 'Remove grok-reviewer' }).click();
     await pick(id('grok'));
     assert(await on() === 'wake', 'adding the grokbot again overwrote explicit wake');
+    assert(await quota.textContent() === plainLine, `explicit wake, Grok Bot added again: ${await quota.textContent()}`);
+    await noteFits('explicit wake');
+    await page.mouse.move(0, 0);
+    await page.evaluate(() => { const el = document.activeElement; if (el && el.blur) el.blur(); });
+    await view.locator('.ptip[data-p="wake"]').waitFor({ state: 'hidden' });
     await center('.seg');
     await shot('t10-compose-explicit-wake');
 
@@ -196,6 +233,7 @@ try {
     await pick(id('sleuth'));
     await pick(id('grok'));
     assert(await on() === 'hold', 'explicit hold was overwritten when recipients changed');
+    assert(await quota.textContent() === plainLine, `after an explicit hold the note says: ${await quota.textContent()}`);
     await page.mouse.move(0, 0);
     await page.evaluate(() => { const el = document.activeElement; if (el && el.blur) el.blur(); });
     await view.locator('.ptip[data-p="hold"]').waitFor({ state: 'hidden' });
@@ -224,6 +262,7 @@ try {
     await view.locator('.err', { hasText: 'unavailable: try again' }).waitFor();
     assert(await text.inputValue() === retryText, 'the failed send changed the body');
     assert(await on() === 'wake_idle', 'the failed send changed the priority');
+    assert(await quota.textContent() === plainLine, `a keyboard wake_idle is still a manual choice: ${await quota.textContent()}`);
     await center('#c-quota');
     await shot('t10-compose-retry');
     await page.unroute('**/v1/messages');
@@ -256,6 +295,7 @@ try {
     await pick(id('grok'));
     assert(await on() === 'wake_idle', 'swapping in a Grok Bot after the failure left wake selected');
     assert(await quota.isHidden() === false, 'the note did not follow the Grok Bot');
+    assert(await quota.textContent() === quotaLine, `the automatic wake_idle note: ${await quota.textContent()}`);
     await page.unroute('**/v1/messages');
     await send.click();
     await page.waitForFunction(() => location.hash.startsWith('#thread/thr_'));
@@ -268,8 +308,14 @@ try {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.evaluate(() => { location.hash = '#new'; });
     await opt(id('grok')).waitFor();
+    await pick(id('codex'));
+    const narrowNoGrok = await formTop();
     await pick(id('grok'));
     await quota.waitFor();
+    assert(await quota.textContent() === quotaLine, await quota.textContent());
+    await noteFits('narrow');
+    sameTop(narrowNoGrok, await formTop(), 'adding a Grok Bot at 390');
+    await view.getByRole('button', { name: 'Remove codex-hark' }).click();
     await center('#c-quota');
     const narrowWidth = await page.evaluate(() => document.documentElement.scrollWidth);
     assert(narrowWidth <= 390, `compose scrolls sideways at 390 (${narrowWidth})`);

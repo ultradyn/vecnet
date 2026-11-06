@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SPILL, TEXT_CAP, buildSend, canSend, composePriority, counter, eligible, errorText, GROK_QUOTA_NOTE, GROK_QUOTA_TITLE, grokQuotaNote, keepKey, keyFor, matches, pendingMatches, priorityLocked, sendRefusal } from '../static/compose-model.js';
+import { SPILL, TEXT_CAP, anyGrokbot, buildSend, canSend, composePriority, counter, eligible, errorText, GROK_QUOTA_DETAIL, GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, GROK_QUOTA_TITLE, grokQuotaNote, keepKey, keyFor, matches, pendingMatches, priorityLocked, sendRefusal } from '../static/compose-model.js';
 import { SPILL_SLOT } from '../static/attach-model.js';
 
 const peers = [
@@ -254,13 +254,58 @@ test('Grok recipient defaults preserve user choice', () => {
   assert.equal(sent.priority, 'wake_idle');
   assert.equal(typeof sent.priority, 'string');
 
-  const note = grokQuotaNote(true);
+  const note = grokQuotaNote({ addressed: true, manual: false, priority: chosen });
   assert.equal(note, GROK_QUOTA_NOTE);
-  assert.equal(GROK_QUOTA_NOTE, 'wake_idle preselected for Grok Bot: pushes now if the bot is idle or unknown, otherwise once it goes idle. Each run spends Grok quota; hold never starts one.');
+  assert.equal(grokQuotaNote({ addressed: false, manual: false, priority: 'wake' }), '');
+});
+
+// The visible note says why the control shows what it shows, in one short
+// line; the timing and the second-run caveat live in the detail (title and
+// aria-describedby). "Preselected" only while wake_idle is the automatic
+// choice: after an explicit wake or hold it would describe the opposite of
+// what that send does.
+test('Grok quota note follows why the priority is selected', () => {
+  assert.equal(GROK_QUOTA_NOTE, 'Preselected for Grok Bot · each run spends Grok quota');
+  assert.equal(GROK_QUOTA_PLAIN, 'Grok Bot: each run spends Grok quota');
   assert.equal(GROK_QUOTA_TITLE, 'A run that also needs you in chat can start a second one.');
-  assert.doesNotMatch(GROK_QUOTA_NOTE + ' ' + GROK_QUOTA_TITLE, /free/i);
-  assert.doesNotMatch(GROK_QUOTA_NOTE + ' ' + GROK_QUOTA_TITLE, /guarantee|no wake|never wake|won'?t wake|will not wake|without waking/i);
-  assert.equal(grokQuotaNote(false), '');
+  assert.equal(GROK_QUOTA_DETAIL, 'wake_idle pushes now if the Grok Bot is idle or its presence is unknown, otherwise once it goes idle; hold never starts a run. A run that also needs you in chat can start a second one.');
+  // One line at 11.5px in a phone-width composer.
+  for (const line of [GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN]) assert.ok(line.length <= 55, `${line.length} chars: ${line}`);
+  for (const text of [GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, GROK_QUOTA_DETAIL]) {
+    assert.doesNotMatch(text, /free/i);
+    assert.doesNotMatch(text, /guarantee|no wake|never wake|won'?t wake|will not wake|without waking/i);
+    assert.match(text, /Grok/);
+  }
+  assert.match(GROK_QUOTA_PLAIN, /quota/);
+  assert.match(GROK_QUOTA_NOTE, /quota/);
+
+  const grok = { addressed: true };
+  assert.equal(grokQuotaNote({ ...grok, manual: false, priority: 'wake_idle' }), GROK_QUOTA_NOTE, 'automatic wake_idle');
+  // Explicit choices, including choosing wake_idle by hand.
+  for (const priority of ['wake', 'wake_idle', 'hold']) {
+    const line = grokQuotaNote({ ...grok, manual: true, priority });
+    assert.equal(line, GROK_QUOTA_PLAIN, 'explicit ' + priority);
+    assert.doesNotMatch(line, /preselected/i, 'explicit ' + priority);
+  }
+  // A kept retry of wake (sent before the directory named the grokbot) is
+  // not the preselect either.
+  assert.equal(grokQuotaNote({ ...grok, manual: false, priority: 'wake' }), GROK_QUOTA_PLAIN, 'kept wake retry');
+  assert.equal(grokQuotaNote({ ...grok, manual: false, priority: 'hold' }), GROK_QUOTA_PLAIN);
+  for (const priority of ['wake', 'wake_idle', 'hold']) {
+    assert.equal(grokQuotaNote({ addressed: false, manual: false, priority }), '', 'no grokbot, ' + priority);
+    assert.equal(grokQuotaNote({ addressed: false, manual: true, priority }), '');
+  }
+  assert.equal(grokQuotaNote(), '');
+
+  // The composer's flow: preselect, explicit wake, add the grokbot again.
+  const recipients = ['peer_c', 'peer_g'];
+  let current = composePriority({ manual: false, locked: false, current: 'wake', recipients, peers });
+  assert.equal(grokQuotaNote({ addressed: anyGrokbot(recipients, peers), manual: false, priority: current }), GROK_QUOTA_NOTE);
+  current = 'wake';
+  current = composePriority({ manual: true, locked: false, current, recipients, peers });
+  const after = grokQuotaNote({ addressed: anyGrokbot(recipients, peers), manual: true, priority: current });
+  assert.equal(current, 'wake');
+  assert.doesNotMatch(after, /preselected/i, 'the note still says preselected after an explicit wake');
 });
 
 // A 503 keeps the key. Swapping the session peer for a Grok Bot is a new

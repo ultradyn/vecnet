@@ -1,8 +1,8 @@
 // Pure thread logic: what each message renders as. No DOM, no clock.
 import { SPILL_SLOT } from './attach-model.js';
-import { grokQuotaNote, GROK_QUOTA_NOTE, GROK_QUOTA_TITLE, INITIAL_PRIORITY, priorityChoice } from './compose-model.js';
+import { grokQuotaNote, GROK_QUOTA_DETAIL, GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, GROK_QUOTA_TITLE, INITIAL_PRIORITY, priorityChoice } from './compose-model.js';
 
-export { grokQuotaNote, GROK_QUOTA_NOTE, GROK_QUOTA_TITLE, INITIAL_PRIORITY };
+export { grokQuotaNote, GROK_QUOTA_DETAIL, GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, GROK_QUOTA_TITLE, INITIAL_PRIORITY };
 
 export const SPILL_BYTES = 4096, TEXT_CAP = 65536;
 // Show full text reads at most this much, and only text/* (PROTOCOL §2.7).
@@ -173,8 +173,11 @@ export function replyPriority({ manual = false, locked = false, current = INITIA
   return priorityChoice({ manual, locked, current, addressed: participantGrokbot(participants, kindOf) });
 }
 
-export function replyQuotaNote(participants, kindOf) {
-  return grokQuotaNote(participantGrokbot(participants, kindOf));
+// replyQuotaNote is the reply's visible note: "Preselected…" only while the
+// selection is the automatic wake_idle, the quota-only line after a manual
+// choice or a kept retry of another priority, '' with no grokbot.
+export function replyQuotaNote(participants, kindOf, { manual = false, priority = '' } = {}) {
+  return grokQuotaNote({ addressed: participantGrokbot(participants, kindOf), manual, priority });
 }
 
 // replyKey is the reply's pending send: the same one, idempotency key and all,

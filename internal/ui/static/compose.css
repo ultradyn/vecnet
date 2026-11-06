@@ -44,10 +44,12 @@
 .compose .bytes{font:400 11.5px var(--mono);color:var(--dim)}
 .compose .bytes.spill{color:#c4b5fd}.compose .bytes.over{color:var(--bad)}
 .compose .hint{margin-left:auto;font-size:11.5px;color:var(--dim)}
-/* The note sits under the segmented control and wraps to that control's width.
-   width 0 + min-width 100% keeps the line from stretching the row. */
-.compose .row:has(.qnote){align-items:flex-start}
-.compose .qnote{margin:0;width:0;min-width:100%;font-size:11.5px;line-height:1.35;color:var(--dim)}
+/* Grok Bot quota note (compose.js): one line under the Title/Priority row, ending under the
+   priority control. Its line is kept while empty (.off), so picking or removing a Grok Bot
+   moves nothing; the negative margins tuck it into the fieldset's gaps (one ~16px line).
+   nowrap + ellipsis only guards very narrow screens; the full text is in its title. */
+.compose .qnote{margin:-12px 0 -6px;min-height:1.35em;font-size:11.5px;line-height:1.35;color:var(--dim);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.compose .qnote.off{visibility:hidden}
 
 .compose .adv{border:1px solid var(--line);border-radius:9px;padding:9px 13px}
 .compose .adv summary{cursor:pointer;font-size:12.5px;color:var(--muted)}

@@ -15,13 +15,18 @@ export const INITIAL_PRIORITY = 'wake';
 // The send still carries it explicitly (§2.2, §5.2). It is not a default
 // the hub fills in, and it is not a promise that the bot will not wake.
 export const GROK_PRIORITY = 'wake_idle';
-// One line under the control while a Grok Bot is addressed. wake_idle still
-// starts a routine run when presence is idle or unknown (§5.2); it waits
-// until idle otherwise. hold never starts one. The second-run caveat
-// (§13.3) stays on GROK_QUOTA_TITLE, not in this line, and neither text
-// calls the run free or promises it will not wake.
-export const GROK_QUOTA_NOTE = 'wake_idle preselected for Grok Bot: pushes now if the bot is idle or unknown, otherwise once it goes idle. Each run spends Grok quota; hold never starts one.';
+// The visible note is one short line by the control while a Grok Bot is
+// addressed. GROK_QUOTA_NOTE shows only while wake_idle is selected because
+// of the preselect; after a manual choice, or a kept retry of another
+// priority, GROK_QUOTA_PLAIN says only what is true of every priority.
+// GROK_QUOTA_DETAIL is the timing and the second-run caveat (§§5.2, 13.3):
+// the note's title, and a hidden element the control's aria-describedby
+// also names, so keyboard and screen-reader users get it too. No text calls
+// a run free or promises the bot will not wake.
+export const GROK_QUOTA_NOTE = 'Preselected for Grok Bot · each run spends Grok quota';
+export const GROK_QUOTA_PLAIN = 'Grok Bot: each run spends Grok quota';
 export const GROK_QUOTA_TITLE = 'A run that also needs you in chat can start a second one.';
+export const GROK_QUOTA_DETAIL = 'wake_idle pushes now if the Grok Bot is idle or its presence is unknown, otherwise once it goes idle; hold never starts a run. ' + GROK_QUOTA_TITLE;
 const HISTORY = ['from_join', 'full'];
 const ID = /^(peer|team|grp)_[A-Za-z0-9]+$/;
 const enc = new TextEncoder();
@@ -174,9 +179,15 @@ export function composePriority({ manual, locked, current, recipients, peers } =
   return priorityChoice({ manual, locked, current, addressed: anyGrokbot(recipients, peers) });
 }
 
-// grokQuotaNote is the explanatory line, or '' when no Grok Bot is addressed.
-export function grokQuotaNote(addressed) {
-  return addressed ? GROK_QUOTA_NOTE : '';
+// grokQuotaNote is the visible line for why the control shows what it shows:
+// '' when no Grok Bot is addressed; GROK_QUOTA_NOTE while wake_idle is the
+// automatic choice (the preselect, or the retry of a preselected send);
+// GROK_QUOTA_PLAIN once the operator has chosen, or a kept retry holds
+// another priority. A note that said "preselected" beside a manual wake
+// would describe the opposite of what that send does.
+export function grokQuotaNote({ addressed = false, manual = false, priority = '' } = {}) {
+  if (!addressed) return '';
+  return !manual && priority === GROK_PRIORITY ? GROK_QUOTA_NOTE : GROK_QUOTA_PLAIN;
 }
 
 // errorText is the form's error line. Every peer-supplied part is a plain

@@ -9,7 +9,7 @@ import { ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, kindShort, kindTit
 import { markdown } from './md.js';
 import { prioritySeg } from './prio.js';
 import { createReactions } from './react.js';
-import { budgetBanner, budgetOut, canShowFull, clientLabel, clientSuspect, excerpt, FULL_TEXT_CAP, GROK_QUOTA_TITLE, INITIAL_PRIORITY, items, replyKey, replyPriority, replyPriorityLocked, replyQuotaNote, replySig, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, clientLabel, clientSuspect, excerpt, FULL_TEXT_CAP, GROK_QUOTA_DETAIL, INITIAL_PRIORITY, items, replyKey, replyPriority, replyPriorityLocked, replyQuotaNote, replySig, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
 import { createThumbs } from './thumbs.js';
 
 const PAGE = 200, MAX_PAGES = 50, PIN_SLACK = 80;
@@ -282,13 +282,17 @@ export function mount(root, ctx) {
     ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(ta, btn); } });
     ta.addEventListener('input', () => { syncPriority(); counter(ta); gate(); });
     const prio = prioritySeg(p => { S.prio = p; S.prioManual = true; render(); });
+    // The Grok Bot note is its own line under the controls, outside .bar, so
+    // the bar's one-row layout and keyboard hint are unchanged at every width.
     const quota = h('p', { class: 'qnote', id: 'r-quota', hidden: true });
+    const quotaMore = h('span', { id: 'r-quota-more', hidden: true, text: GROK_QUOTA_DETAIL });
     const wrap = h('div', { class: 'wrap' },
       h('div', { class: 'join', hidden: true, text: 'You are not a participant in this thread. Sending adds you to it.' }),
       h('div', { class: 'to', hidden: true }, h('span'), h('button', { type: 'button', title: 'Reply to the thread instead', text: '×', onclick: () => { S.replyTo = ''; render(); } })),
       ta,
       atts.el,
-      h('div', { class: 'bar' }, prio.el, quota, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint' }, h('span', { text: 'Drop or paste files' }), ' · ', h('span', { text: 'Enter to send' }), ' · ', h('span', { text: 'Shift+Enter for a new line' })), pick, btn));
+      h('div', { class: 'bar' }, prio.el, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint' }, h('span', { text: 'Drop or paste files' }), ' · ', h('span', { text: 'Enter to send' }), ' · ', h('span', { text: 'Shift+Enter for a new line' })), pick, btn),
+      quota, quotaMore);
     atts.wire(wrap, ta, pick);
     new ResizeObserver(fitHint).observe(wrap);
     return h('div', { class: 'composer' }, h('div', { class: 'cbanner', role: 'alert', hidden: true }), wrap);
@@ -461,13 +465,15 @@ export function mount(root, ctx) {
     // A matching draft retries the priority it was sent with, not whatever
     // the control showed while the text was temporarily different.
     if (!S.prioManual && locked && S.pending) S.prio = S.pending.prio;
-    const note = replyQuotaNote(participants, kindOf);
+    // "Preselected" only while wake_idle is the automatic choice; after a
+    // manual pick, or a kept retry of another priority, the quota-only line.
+    const note = replyQuotaNote(participants, kindOf, { manual: S.prioManual, priority: S.prio });
     const quota = comp.querySelector('#r-quota');
     quota.hidden = !note;
     quota.textContent = note;
-    quota.title = note ? GROK_QUOTA_TITLE : '';
+    quota.title = note ? GROK_QUOTA_DETAIL : '';
     const seg = comp.querySelector('.seg');
-    if (note) seg.setAttribute('aria-describedby', 'r-quota');
+    if (note) seg.setAttribute('aria-describedby', 'r-quota r-quota-more');
     else seg.removeAttribute('aria-describedby');
     for (const b of seg.querySelectorAll('button')) b.className = b.value === S.prio ? 'on' : '';
     return { ...draft, prio: S.prio };
