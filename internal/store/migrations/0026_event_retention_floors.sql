@@ -32,3 +32,8 @@ ALTER TABLE acks ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1;
 -- rows use the approved seven-day default without retroactive activation.
 INSERT INTO meta(key,value) VALUES('event_retention_initial_high_water',
  CAST(coalesce((SELECT seq FROM sqlite_sequence WHERE name='events'),0) AS TEXT));
+
+-- Cursor replay checks for erased exhausted copies under the writer lock.
+-- Match the guard predicate so unrelated queued callbacks require no scan.
+CREATE INDEX event_outbox_replay_unavailable ON event_outbox(sub_id)
+    WHERE terminal='exhausted' AND body='';
