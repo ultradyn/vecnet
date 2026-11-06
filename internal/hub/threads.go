@@ -194,20 +194,30 @@ func (h *Hub) ReplyThread(ctx context.Context, c auth.Caller, as, msgID string) 
 	return thr, err
 }
 
-// latestMessage returns the newest Message of thread thr, or nil. It is
-// the implicit loop parent of a send into thr that names no in_reply_to
-// (PROTOCOL §6).
+// latestMessage returns the newest non-reaction loop parent of thread thr,
+// or nil. Only its id and loop are populated. Retention may erase its body,
+// but cannot reset the implicit loop parent (PROTOCOL §6). Compare both
+// retained and erased parents by sequence so neither an older pinned body
+// nor an older tombstone can override the latest loop.
 func latestMessage(ctx context.Context, tx *sql.Tx, thr string) (*envelope.Message, error) {
-	var id string
-	err := tx.QueryRowContext(ctx, `SELECT msg_id FROM messages WHERE thr_id = ? AND kind != 'reaction' ORDER BY seq DESC LIMIT 1`, thr).Scan(&id)
+	var id, loop string
+	err := tx.QueryRowContext(ctx, `SELECT msg_id,loop FROM (
+    SELECT msg_id,seq,json_extract(body,'$.loop') AS loop FROM
+      (SELECT msg_id,seq,body FROM messages WHERE thr_id=? AND kind!='reaction' ORDER BY seq DESC LIMIT 1)
+    UNION ALL
+    SELECT msg_id,seq,loop FROM thread_history_loop_parents WHERE thr_id=?
+    ) ORDER BY seq DESC LIMIT 1`, thr, thr).Scan(&id, &loop)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("hub: latest message: %w", err)
 	}
-	m, _, _, err := loadMessage(ctx, tx, id)
-	return m, err
+	m := &envelope.Message{MessageID: id}
+	if err := json.Unmarshal([]byte(loop), &m.Loop); err != nil {
+		return nil, errors.New("hub: invalid_loop_parent")
+	}
+	return m, nil
 }
 
 // isParticipant reports whether peer participates in thread thr.
