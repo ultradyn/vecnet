@@ -125,7 +125,7 @@ func (h *Hub) initR2() error {
 	h.BlobSignDownload = func(ctx context.Context, o blob.R2Object) (blobwire.Request, error) {
 		// Probe metadata only, after the common wrapper admits the mint. Missing
 		// provider bytes must not produce a capability for a completed DB row.
-		if _, err := objects.Head(ctx, o.ObjectKey); err != nil {
+		if _, err := transfers.ProbeObject(ctx, o); err != nil {
 			return blobwire.Request{}, blob.ErrR2Unavailable
 		}
 		return objects.Download(ctx, o.ObjectKey, h.Now(), o.ExpiresAt)
