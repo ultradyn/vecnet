@@ -2,9 +2,9 @@
 // opens the operator's newest thread with the peer, or New message prefilled
 // to the peer when there is none, and New message is always beside it, at
 // wake_idle for a Grok Bot. Also checked: hover and keyboard focus, focus
-// kept while the view redraws, the prefilled composer sending, a later New
-// message starting empty, a modified click handing over no draft, and a
-// source offering neither.
+// kept while the view redraws and when a newer thread replaces the link, the
+// prefilled composer sending, a later New message starting empty, a modified
+// click handing over no draft, and a source offering neither.
 import { assert, cleanBuild, withDemo } from './lib.mjs';
 
 try {
@@ -74,11 +74,18 @@ try {
     await heard;
     await pv.locator('.pv-presence .pd.working').waitFor();
     assert(await compose.evaluate(el => el === document.activeElement), 'a redraw took focus off New message');
+    // A new newest thread replaces the buttons; focus stays on New message.
+    const posted = await asPeer('grok', 'POST', '/v1/messages', { idempotency_key: 'peer-actions-1', recipients: [me], priority: 'hold', thread_title: 'Review follow-up', content: { text: 'Second pass done.' } });
+    assert(posted.ok, `grok send: ${posted.status}`);
+    const follow = (await posted.json()).thread_id;
+    assert((await newestShared(id('grok'))).thread_id === follow, 'the new thread is not the newest shared one');
+    await acts.locator(`a.pv-open[href="#thread/${follow}"]`).waitFor();
+    assert(await compose.evaluate(el => el === document.activeElement && el.matches(':focus-visible')), 'a new newest thread took focus off New message');
     await shot('pv-quick-focus');
 
     // The quick link goes to the thread itself.
     await open.click();
-    await page.waitForFunction(h => location.hash === h && document.body.dataset.route === 'thread', '#thread/' + hark.thread_id);
+    await page.waitForFunction(h => location.hash === h && document.body.dataset.route === 'thread', '#thread/' + follow);
 
     // New message from the Grok Bot's page: prefilled, at wake_idle, the
     // message field focused.

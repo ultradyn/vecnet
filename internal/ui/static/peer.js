@@ -154,7 +154,12 @@ export function mount(root, ctx) {
       return;
     }
     actsKey = key;
+    // A new offer (another thread became the newest, say) replaces the
+    // buttons; focus on one moves to its replacement.
+    const had = acts.contains(document.activeElement) ? (document.activeElement.classList.contains('pv-new') ? '.pv-new' : '.pv-open') : '';
     acts.replaceChildren(...messageActions(a, { name: (f && f.name) || id, threadName: t => threadTitle(t, ctx.me, nameOf), age, prefill, nav: ctx.nav }));
+    const next = had && acts.querySelector(had);
+    if (next && !next.disabled) next.focus({ preventScroll: true });
   }
 
   function renderHead() {
