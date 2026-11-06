@@ -68,8 +68,9 @@ messaging:
        bind the profile's hook to this Claude Code session (run from its Bash tool)
   threads [--limit N]
   thread <id> [--after MESSAGE_ID] [--limit N]
+  thread budget <id> <n>                          set budget_remaining
   peers
-  groups create <peer…> | groups add <grp> <peer…> | groups list
+  groups create <peer…> | groups add <grp> <peer…> | groups list | groups unarchive <grp>
   presence set <idle|working|blocked|offline> [--note T]
   presence subscribe <all|teams|none>
   avatar set <FILE|https://URL> | avatar clear       PNG, JPEG, GIF or WebP, at most 2 MiB;
@@ -103,6 +104,7 @@ admin (operator credential):
   peer rotate <peer>
   peer scope <peer> [--allow IDS] [--deny IDS]        IDS: comma-separated or repeated
   peer limits <peer> --sends-per-min N --threads-per-hour N
+  peer disable <id> | peer enable <id>
   route add --owner ID --url URL | route verify <route_id>
   route add --owner ID --kind grokbot --url URL --key-file PATH
   route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>
@@ -112,6 +114,7 @@ admin (operator credential):
   source list
   subscriptions list | subscriptions pause <id> | subscriptions resume <id>
   team add --name N [--members IDS]
+  team list | team members <id> --add IDS         adds only; IDS: comma-separated or repeated
   dead-letters list | dead-letters retry <dly> | dead-letters discard <dly>
   notify set --url URL --filter F [--url URL --filter F]…
   diag mcp [--peer ID] [--method M] [--limit N] [--follow]
@@ -1134,8 +1137,11 @@ func (a *app) cmdThread(args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(o.pos) > 0 && o.pos[0] == "budget" {
+		return a.threadBudget(o)
+	}
 	if len(o.pos) != 1 {
-		return usageErr("usage: vecnet thread <id> [--after MESSAGE_ID] [--limit N]")
+		return usageErr("usage: vecnet thread <id> [--after MESSAGE_ID] [--limit N] | thread budget <id> <n>")
 	}
 	q := url.Values{}
 	if err := limitQuery(o, q); err != nil {
@@ -1189,6 +1195,23 @@ func (a *app) cmdThread(args []string) error {
 		fmt.Fprintf(a.stderr, "more: vecnet thread %s --after %s\n", o.pos[0], *body.NextAfter)
 	}
 	return nil
+}
+
+// threadBudget is `thread budget <id> <n>`: PATCH /v1/admin/threads/{id}
+// {"budget_remaining": n} (adminPatchThread). n is a non-negative integer.
+func (a *app) threadBudget(o opts) error {
+	const usage = "usage: vecnet thread budget <id> <n>"
+	if len(o.pos) != 3 || o.has("after") || o.has("limit") {
+		return usageErr(usage)
+	}
+	n, err := strconv.Atoi(o.pos[2])
+	if err != nil || n < 0 {
+		return usageErr(usage)
+	}
+	if err := a.call(http.MethodPatch, "/v1/admin/threads/"+pathEscape(o.pos[1]), map[string]int{"budget_remaining": n}, nil); err != nil {
+		return err
+	}
+	return a.ok("budget " + o.pos[1] + " " + strconv.Itoa(n))
 }
 
 func (a *app) cmdPeers(args []string) error {
@@ -1252,6 +1275,12 @@ func (a *app) cmdGroups(args []string) error {
 			return err
 		}
 		return a.ok("ok")
+	case sub == "unarchive" && len(o.pos) == 2:
+		// Operator only: POST /v1/admin/groups/{id}/unarchive (204).
+		if err := a.call(http.MethodPost, "/v1/admin/groups/"+pathEscape(o.pos[1])+"/unarchive", nil, nil); err != nil {
+			return err
+		}
+		return a.ok("unarchived " + o.pos[1])
 	case sub == "list" && len(o.pos) == 1:
 		items, err := a.getList("/v1/groups", nil, "groups")
 		if err != nil {
@@ -1278,7 +1307,7 @@ func (a *app) cmdGroups(args []string) error {
 		}
 		return nil
 	}
-	return usageErr("usage: vecnet groups create <peer…> | groups add <grp> <peer…> | groups list")
+	return usageErr("usage: vecnet groups create <peer…> | groups add <grp> <peer…> | groups list | groups unarchive <grp>")
 }
 
 // call sends one request with the profile's credential.
@@ -1544,9 +1573,20 @@ func (a *app) cmdPeer(args []string) error {
 			return err
 		}
 		return a.ok("limits set for " + o.pos[1])
+	case (sub == "disable" || sub == "enable") && len(o.pos) == 2:
+		// POST /v1/admin/peers/{id}/disable|enable (204).
+		if err := a.call(http.MethodPost, "/v1/admin/peers/"+pathEscape(o.pos[1])+"/"+sub, nil, nil); err != nil {
+			return err
+		}
+		verb := "enabled"
+		if sub == "disable" {
+			verb = "disabled"
+		}
+		return a.ok(verb + " " + o.pos[1])
 	}
 	return usageErr("usage: vecnet peer add --kind K --name N [--principal PRN] | peer invite [--name N] [--ttl 24h] | peer move <peer> --principal PRN | " +
-		"peer link <peer> | peer avatar <peer> (FILE|URL|--clear) | peer rotate <peer> | peer scope <peer> [--allow IDS] [--deny IDS] | peer limits <peer> --sends-per-min N --threads-per-hour N")
+		"peer link <peer> | peer avatar <peer> (FILE|URL|--clear) | peer rotate <peer> | peer scope <peer> [--allow IDS] [--deny IDS] | peer limits <peer> --sends-per-min N --threads-per-hour N | " +
+		"peer disable <id> | peer enable <id>")
 }
 
 func (a *app) cmdRoute(args []string) error {
@@ -1619,19 +1659,70 @@ func (a *app) cmdRoute(args []string) error {
 }
 
 func (a *app) cmdTeam(args []string) error {
-	o, err := parseFlags("team", args, map[string]flagKind{"name": strFlag, "members": multiFlag})
+	const usage = "usage: vecnet team add --name N [--members IDS] | team list | team members <id> --add IDS"
+	o, err := parseFlags("team", args, map[string]flagKind{"name": strFlag, "members": multiFlag, "add": multiFlag})
 	if err != nil {
 		return err
 	}
-	if len(o.pos) != 1 || o.pos[0] != "add" || o.str("name") == "" {
-		return usageErr("usage: vecnet team add --name N [--members IDS]")
+	sub := ""
+	if len(o.pos) > 0 {
+		sub = o.pos[0]
 	}
-	body := map[string]any{"name": o.str("name"), "members": o.list("members")}
-	var out map[string]any
-	if err := a.call(http.MethodPost, "/v1/admin/teams", body, &out); err != nil {
+	switch sub {
+	case "add":
+		if len(o.pos) != 1 || o.str("name") == "" || o.has("add") {
+			return usageErr(usage)
+		}
+		body := map[string]any{"name": o.str("name"), "members": o.list("members")}
+		var out map[string]any
+		if err := a.call(http.MethodPost, "/v1/admin/teams", body, &out); err != nil {
+			return err
+		}
+		return a.emitObject(out, "team_id")
+	case "list":
+		if len(o.pos) != 1 || o.has("name") || o.has("members") || o.has("add") {
+			return usageErr(usage)
+		}
+		return a.teamList()
+	case "members":
+		// POST /v1/admin/teams/{id}/members {"members"} (adminTeamMembers).
+		// The hub adds these peers and leaves existing members in place;
+		// there is no remove or replace-roster endpoint yet. --add matches team
+		// add's --members: comma-separated or repeated.
+		if len(o.pos) != 2 || o.has("name") || o.has("members") || len(o.list("add")) == 0 {
+			return usageErr(usage)
+		}
+		id := o.pos[1]
+		body := map[string][]string{"members": o.list("add")}
+		if err := a.call(http.MethodPost, "/v1/admin/teams/"+pathEscape(id)+"/members", body, nil); err != nil {
+			return err
+		}
+		return a.ok("members added to " + id)
+	}
+	return usageErr(usage)
+}
+
+// teamList is `team list`: GET /v1/admin/teams.
+func (a *app) teamList() error {
+	items, err := a.getList("/v1/admin/teams", nil, "teams")
+	if err != nil {
 		return err
 	}
-	return a.emitObject(out, "team_id")
+	if a.json {
+		return a.emitList(items)
+	}
+	for _, it := range items {
+		var t struct {
+			TeamID  string   `json:"team_id"`
+			Name    string   `json:"name"`
+			Members []string `json:"members"`
+		}
+		if json.Unmarshal(it, &t) != nil {
+			continue
+		}
+		fmt.Fprintf(a.stdout, "%s %s members=%s\n", t.TeamID, flatten(t.Name), strings.Join(t.Members, ","))
+	}
+	return nil
 }
 
 func (a *app) cmdDeadLetters(args []string) error {
