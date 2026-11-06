@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
@@ -22,11 +23,16 @@ const SlowTickEvery = 120
 // presence is now idle or unknown (a report that just went stale counts as
 // unknown, PROTOCOL §5.2, §8); every SlowTickEvery-th tick also
 // ArchiveIdleGroups and Blobs.GC. Errors are logged and the next tick runs.
+// Remote blob cleanup (provider DELETEs) runs on its own goroutine at the
+// same period, so a slow or unavailable provider never delays these timers.
 // Tests pass a short interval and drive the hub's clock.
 func (h *Hub) RunTickers(ctx context.Context, every time.Duration) {
 	if every <= 0 {
 		every = DefaultTickInterval
 	}
+	var cleanup sync.WaitGroup
+	defer cleanup.Wait()
+	cleanup.Go(func() { h.runTransferCleanup(ctx, every) })
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for n := 1; ; n++ {
@@ -39,7 +45,29 @@ func (h *Hub) RunTickers(ctx context.Context, every time.Duration) {
 	}
 }
 
-// Tick runs one round of RunTickers' jobs; slow adds the hourly ones.
+// runTransferCleanup runs Transfers.Tick rounds until ctx ends. Each round is
+// bounded by the transfer layer's cleanup budget; unfinished delete jobs are
+// durable and resume on a later round. Rounds never overlap.
+func (h *Hub) runTransferCleanup(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if h.Blobs.Transfers == nil {
+			continue
+		}
+		if err := h.Blobs.Transfers.Tick(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("hub: tick remote blob cleanup failed")
+		}
+	}
+}
+
+// Tick runs one round of RunTickers' jobs; slow adds the hourly ones. Remote
+// blob cleanup is not part of it (see runTransferCleanup).
 func (h *Hub) Tick(ctx context.Context, slow bool) {
 	now := h.Now()
 	if _, err := h.ExpireNotices(ctx); err != nil && ctx.Err() == nil {
@@ -53,11 +81,6 @@ func (h *Hub) Tick(ctx context.Context, slow bool) {
 	}
 	if err := h.releaseStaleHeld(ctx, now); err != nil && ctx.Err() == nil {
 		slog.Error("hub: tick release held", "err", err)
-	}
-	if h.Blobs.Transfers != nil {
-		if err := h.Blobs.Transfers.Tick(ctx); err != nil && ctx.Err() == nil {
-			slog.Error("hub: tick remote blob cleanup failed")
-		}
 	}
 	if !slow {
 		return

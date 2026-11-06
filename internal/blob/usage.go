@@ -117,8 +117,9 @@ func purgeHash(ctx context.Context, db *store.DB, sha string, now time.Time, req
 }
 
 // Tick makes bounded logical transitions under the writer lock, then performs
-// DELETE outside transactions. A successful early DELETE never frees storage:
-// the persistent job repeats at upload_deadline+60s to defeat PUT recreation.
+// DELETE outside transactions within CleanupBudget. A successful early DELETE
+// never frees storage: the persistent job repeats at upload_deadline+60s to
+// defeat PUT recreation.
 func (s *Transfers) Tick(ctx context.Context) error {
 	now := s.cfg.Now()
 	err := s.cfg.DB.Tx(ctx, func(tx *sql.Tx) error {
@@ -199,10 +200,18 @@ func (s *Transfers) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The DELETE phase has a whole-round budget so a stalled provider cannot
+	// hold this round (and the next logical transitions) for 100 x 30s. A job
+	// cut by the budget backs off like any failure; later jobs are untouched.
+	deleteCtx, cancelDeletes := context.WithTimeout(ctx, s.cfg.CleanupBudget)
+	defer cancelDeletes()
 	for _, job := range jobs {
+		if deleteCtx.Err() != nil {
+			break
+		}
 		key := job.key
 		deleteStarted := s.cfg.Now()
-		deleteErr := s.cfg.Objects.Delete(ctx, key)
+		deleteErr := s.cfg.Objects.Delete(deleteCtx, key)
 		s.observeOperation(job.id, "DELETE", deleteErr)
 		if deleteErr == nil {
 			if err = s.checkpoint("after_delete"); err != nil {

@@ -55,7 +55,15 @@ type TransfersConfig struct {
 	CheckEligible                     func(context.Context, *sql.Tx, string) error
 	Checkpoint                        func(string) error
 	ObserveOperation                  func(TransferOperation)
+	// CleanupBudget bounds the provider-DELETE phase of one Tick round
+	// (DefaultCleanupBudget when <= 0). Jobs not reached stay durable.
+	CleanupBudget time.Duration
 }
+
+// DefaultCleanupBudget keeps one cleanup round within the hub's 30-second
+// ticker period even when the provider stalls (each adapter call may wait 30s).
+const DefaultCleanupBudget = 20 * time.Second
+
 type Transfers struct {
 	cfg   TransfersConfig
 	heads chan struct{}
@@ -70,6 +78,9 @@ func NewTransfers(cfg TransfersConfig) (*Transfers, error) {
 	}
 	if cfg.DailyQuota == 0 {
 		cfg.DailyQuota = DefaultDailyQuota
+	}
+	if cfg.CleanupBudget <= 0 {
+		cfg.CleanupBudget = DefaultCleanupBudget
 	}
 	if cfg.MaxSize < 1 || cfg.MaxSize > DefaultMaxSize || cfg.DailyQuota < 1 {
 		return nil, ErrR2Metadata
