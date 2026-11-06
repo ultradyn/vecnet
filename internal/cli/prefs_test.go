@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/XertroV/vecnet/internal/cli"
 	"github.com/XertroV/vecnet/internal/prefs"
 )
@@ -871,34 +869,6 @@ func runPrefsTTY(t *testing.T, s *prefsScript, u *user, reply string, args ...st
 	return code, out.String(), errs.String()
 }
 
-func prefsPTY(t *testing.T) (master, stdin, stdout *os.File) {
-	t.Helper()
-	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { master.Close() })
-	if err := unix.IoctlSetPointerInt(int(master.Fd()), unix.TIOCSPTLCK, 0); err != nil {
-		t.Fatal(err)
-	}
-	n, err := unix.IoctlGetInt(int(master.Fd()), unix.TIOCGPTN)
-	if err != nil {
-		t.Fatal(err)
-	}
-	slave, err := os.OpenFile("/dev/pts/"+strconv.Itoa(n), os.O_RDWR|unix.O_NOCTTY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { slave.Close() })
-	dup, err := unix.Dup(int(slave.Fd()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout = os.NewFile(uintptr(dup), slave.Name())
-	t.Cleanup(func() { stdout.Close() })
-	return master, slave, stdout
-}
-
 type safeBuf struct {
 	mu sync.Mutex
 	b  bytes.Buffer
@@ -986,14 +956,14 @@ func TestPrefsJSONStructuredErrors(t *testing.T) {
 
 	s.fail = &prefsFail{on: "preview", status: http.StatusConflict, code: prefs.CodeUnavailable, message: "adapter missing", details: map[string]any{"field": "retention.ack_events"}}
 	code, out, errs = u.run("--json", "--net", "p", "prefs", "set", "retention.ack_events", "1d")
-	if code != 2 {
+	if code != 1 {
 		t.Fatalf("unavailable exit %d\n%s\n%s", code, out, errs)
 	}
 	check(t, code, out, errs, prefs.CodeUnavailable, "field", "retention.ack_events")
 
 	s.fail = &prefsFail{on: "preview", status: http.StatusConflict, code: prefs.CodePolicyLocked, message: "hosted policy", details: map[string]any{"field": "blobs.expiry", "constraint": "policy"}}
 	code, out, errs = u.run("--json", "--net", "p", "prefs", "set", "blobs.expiry", "off")
-	if code != 2 {
+	if code != 1 {
 		t.Fatalf("policy lock exit %d\n%s\n%s", code, out, errs)
 	}
 	check(t, code, out, errs, prefs.CodePolicyLocked, "constraint", "policy")
@@ -1023,6 +993,77 @@ func TestPrefsJSONStructuredErrors(t *testing.T) {
 	got, _, details := decodePrefsErr(t, out)
 	if got != "usage" || details == nil {
 		t.Fatalf("usage json %s", out)
+	}
+}
+
+// Nested objects and arrays in hub error details must not carry token or
+// secret fields out through the JSON envelope. Safe siblings stay.
+func TestPrefsNestedDetailsOmitSecrets(t *testing.T) {
+	const (
+		nestedSecret = "nested-secret-value"
+		arraySecret  = "array-secret-value"
+		keySecret    = "key-object-secret"
+		nestedAuth   = "Bearer nested-auth"
+		rawBody      = "raw-hub-body-secret"
+	)
+	s := newPrefsScript(t, "vn_operator_prefs")
+	s.fail = &prefsFail{
+		on: "preview", status: http.StatusConflict, code: prefs.CodePolicyLocked, message: "hosted policy",
+		details: map[string]any{
+			"field":         "blobs.expiry",
+			"constraint":    "policy",
+			"confirm_token": prefsToken,
+			"secret":        "top-secret-value",
+			"authorization": nestedAuth,
+			"body":          rawBody,
+			"nested": map[string]any{
+				"confirm_token": prefsToken,
+				"secret":        nestedSecret,
+				"authorization": nestedAuth,
+				"field":         "retention.history",
+			},
+			"items": []any{
+				map[string]any{"token": prefsToken, "secret": arraySecret, "constraint": "range"},
+				prefsToken,
+			},
+			"keys": []any{"retention.history", map[string]any{"token": keySecret, "secret": arraySecret}},
+		},
+	}
+	srv := startPrefs(t, s)
+	u := prefsUser(t, prefsProfile("p", srv.URL, "vn_operator_prefs"))
+
+	code, out, errs := u.run("--json", "--net", "p", "prefs", "set", "blobs.expiry", "off")
+	if code != 1 {
+		t.Fatalf("policy lock exit %d\n%s\n%s", code, out, errs)
+	}
+	got, _, details := decodePrefsErr(t, out)
+	if got != prefs.CodePolicyLocked || detailString(details, "field") != "blobs.expiry" || detailString(details, "constraint") != "policy" {
+		t.Fatalf("safe details dropped: %#v\n%s", details, out)
+	}
+	keys, _ := details["keys"].([]any)
+	if !jsonListHas(keys, "retention.history") {
+		t.Fatalf("keys = %#v", details["keys"])
+	}
+	if _, ok := details["nested"]; ok {
+		t.Fatalf("nested object survived: %#v", details["nested"])
+	}
+	if _, ok := details["items"]; ok {
+		t.Fatalf("nested array survived: %#v", details["items"])
+	}
+	for _, secret := range []string{prefsToken, "top-secret-value", nestedSecret, arraySecret, keySecret, nestedAuth, rawBody, "confirm_token"} {
+		if strings.Contains(out, secret) || strings.Contains(errs, secret) {
+			t.Fatalf("secret %q leaked\nstdout %s\nstderr %s", secret, out, errs)
+		}
+	}
+
+	code, out, errs = u.run("--net", "p", "prefs", "set", "blobs.expiry", "off")
+	if code != 1 {
+		t.Fatalf("human policy lock exit %d\n%s\n%s", code, out, errs)
+	}
+	for _, secret := range []string{prefsToken, nestedSecret, arraySecret, keySecret, nestedAuth, rawBody, "confirm_token"} {
+		if strings.Contains(out, secret) || strings.Contains(errs, secret) {
+			t.Fatalf("human secret %q leaked\nstdout %s\nstderr %s", secret, out, errs)
+		}
 	}
 }
 

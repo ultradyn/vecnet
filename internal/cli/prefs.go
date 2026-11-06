@@ -453,7 +453,8 @@ func (a *app) exitPrefs(err error) int {
 func prefsOperatorFault(code string) bool {
 	switch code {
 	case prefs.CodeInvalidValue, prefs.CodeUnknownKey, prefs.CodeRevisionConflict,
-		prefs.CodeConfirmationRequired, prefs.CodeConfirmationStale:
+		prefs.CodeConfirmationRequired, prefs.CodeConfirmationStale,
+		prefs.CodeUnavailable, prefs.CodePolicyLocked:
 		return true
 	default:
 		return false
@@ -484,21 +485,68 @@ func (a *app) reportPrefs(code, message string, details map[string]any, hint str
 	fmt.Fprintf(a.stderr, "vecnet: %s\n", message)
 }
 
+// safePrefsDetails projects preference error details onto the closed vocabulary
+// the CLI publishes: field, constraint, keys, and the local missing-risk list.
+// Nested objects, non-string array elements, and every other key are dropped,
+// so a hub cannot smuggle a token or secret through details.
 func safePrefsDetails(in map[string]any) map[string]any {
 	out := map[string]any{}
-	for k, v := range in {
-		lk := strings.ToLower(k)
-		switch {
-		case strings.Contains(lk, "token"), strings.Contains(lk, "secret"), strings.Contains(lk, "authorization"), lk == "body", lk == "raw":
-			continue
-		}
-		if s, ok := v.(string); ok {
-			out[k] = prefText(s)
-			continue
-		}
-		out[k] = v
+	if s, ok := prefsDetailString(in["field"]); ok {
+		out["field"] = s
+	}
+	if s, ok := prefsDetailString(in["constraint"]); ok {
+		out["constraint"] = s
+	}
+	if keys, ok := prefsDetailStrings(in["keys"]); ok {
+		out["keys"] = keys
+	}
+	if missing, ok := prefsDetailStrings(in["missing"]); ok {
+		out["missing"] = missing
 	}
 	return out
+}
+
+func prefsDetailString(v any) (string, bool) {
+	s, ok := v.(string)
+	if !ok {
+		return "", false
+	}
+	s = prefText(s)
+	if s == "" {
+		return "", false
+	}
+	return s, true
+}
+
+func prefsDetailStrings(v any) ([]string, bool) {
+	var raw []string
+	switch x := v.(type) {
+	case []string:
+		raw = x
+	case []any:
+		raw = make([]string, 0, len(x))
+		for _, item := range x {
+			s, ok := item.(string)
+			if !ok {
+				continue
+			}
+			raw = append(raw, s)
+		}
+	default:
+		return nil, false
+	}
+	out := make([]string, 0, len(raw))
+	for _, s := range raw {
+		s = prefText(s)
+		if s == "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
 }
 
 func riskCodes(risks []prefs.Risk) []string {
