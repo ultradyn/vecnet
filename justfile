@@ -183,3 +183,15 @@ ln-install:
 # Check a deployed hub's MCP and OAuth contracts (bearer in VECNET_MCP_TOKEN).
 mcp-conformance ORIGIN:
     node scripts/mcp-conformance.mjs {{quote(ORIGIN)}}
+
+# Stage the npm package with CLI + hub binaries for Linux x64/arm64.
+npm-build:
+    build2 node scripts/npm/build.mjs
+
+# Pack exactly the staged release files; output: dist/vecnet-<version>.tgz.
+npm-pack: npm-build
+    npm pack ./dist/npm --pack-destination ./dist
+
+# Verify the packed release in an isolated npm prefix and temporary hub.
+npm-check:
+    build2 node --test --test-concurrency=2 scripts/npm/package.test.mjs

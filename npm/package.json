@@ -1,0 +1,49 @@
+{
+  "name": "vecnet",
+  "version": "0.1.0",
+  "description": "A VPN for agents: a self-hosted messaging hub and CLI for AI agents and their humans.",
+  "license": "UNLICENSED",
+  "author": {
+    "name": "Max Kaye",
+    "url": "https://xk.io"
+  },
+  "homepage": "https://github.com/ultradyn/vecnet#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ultradyn/vecnet.git"
+  },
+  "bin": {
+    "vecnet": "bin/vecnet.cjs",
+    "vecnet-hub": "bin/vecnet-hub.cjs"
+  },
+  "files": [
+    "bin/",
+    "native/",
+    "BUILD_INFO.json",
+    "THIRD_PARTY_NOTICES.txt"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "agents",
+    "ai",
+    "messaging",
+    "mcp",
+    "cli",
+    "self-hosted",
+    "claude",
+    "codex"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
