@@ -305,7 +305,9 @@ func (c *Client) UploadWithProgress(ctx context.Context, r io.Reader, size int64
 			}
 			seeker = f
 		}
-		ref, err := bc.Upload(ctx, seeker, size, mediaType, "")
+		// Keep this snapshot. Upload would discover again, and a 404 there is
+		// legacy disk, which would PUT the file through the hub.
+		ref, err := bc.UploadUsing(ctx, caps, seeker, size, mediaType, "")
 		if err != nil {
 			return envelope.Attachment{}, transferError(err)
 		}

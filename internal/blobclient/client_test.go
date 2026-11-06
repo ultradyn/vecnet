@@ -236,6 +236,28 @@ func newFixture(t *testing.T) *fixture {
 	f.client.Now = func() time.Time { return f.now }
 	return f
 }
+func TestR2UploadUsingSkipsSecondDiscovery(t *testing.T) {
+	f := newFixture(t)
+	caps, err := f.client.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := f.discovers
+	ref, err := f.client.UploadUsing(context.Background(), caps, strings.NewReader("abc"), 3, "text/plain", "idem")
+	if err != nil || ref.BlobID != testID || f.discovers != seen || f.puts != 1 || f.completes != 1 {
+		t.Fatalf("upload using snapshot failed or rediscovered: %v discovers=%d", err, f.discovers)
+	}
+}
+
+func TestUploadUsingRejectsUnknownBackend(t *testing.T) {
+	f := newFixture(t)
+	_, err := f.client.UploadUsing(context.Background(), Capabilities{Backend: "other", MaxSize: MaxSize}, strings.NewReader("abc"), 3, "text/plain", "idem")
+	var transferErr *Error
+	if !errors.As(err, &transferErr) || transferErr.Code != "bad_response" || f.puts != 0 || f.completes != 0 || f.discovers != 0 {
+		t.Fatal("unknown backend reached a transfer or rediscovered")
+	}
+}
+
 func TestR2UploadTransport(t *testing.T) {
 	f := newFixture(t)
 	ref, err := f.client.Upload(context.Background(), strings.NewReader("abc"), 3, "text/plain", "idem")

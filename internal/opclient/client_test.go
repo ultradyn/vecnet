@@ -782,6 +782,72 @@ func TestR2UploadSeekableAndSpoolCleanup(t *testing.T) {
 	}
 }
 
+func TestR2UploadDoesNotDowngradeWhenCapabilitiesDisappears(t *testing.T) {
+	const sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+	const sum = "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0="
+	const id = "blo_00000000000000000000000001"
+	for _, kind := range []string{"seekable", "spool"} {
+		t.Run(kind, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("TMPDIR", tmp)
+			caps, hubBytes, puts, completes := 0, 0, 0, 0
+			direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				puts++
+				if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+					t.Error("direct credential leak")
+				}
+				b, _ := io.ReadAll(r.Body)
+				if string(b) != "abc" {
+					t.Error("direct body changed")
+				}
+				w.WriteHeader(200)
+			}))
+			defer direct.Close()
+			yes, no := true, false
+			ref := blobwire.Ref{BlobID: id, SHA256: sha, SHA256Verified: &yes, Integrity: &blobwire.Integrity{Algorithm: "sha256", Value: sha, Verified: true}, Size: 3, RetentionClass: "keep"}
+			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/v1/blob-capabilities":
+					caps++
+					if caps > 1 {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					json.NewEncoder(w).Encode(map[string]any{"backend": "r2", "max_size": 25 << 20, "checksum_profile": "sha256", "download_origins": []string{direct.URL}})
+				case r.URL.Path == "/v1/blobs" && r.Method == http.MethodPut:
+					hubBytes++
+					io.Copy(io.Discard, r.Body)
+					w.WriteHeader(http.StatusConflict)
+				case r.URL.Path == "/v1/blobs/uploads":
+					pending := ref
+					pending.SHA256Verified = &no
+					pending.Integrity = &blobwire.Integrity{Algorithm: "sha256", Value: sha}
+					json.NewEncoder(w).Encode(blobwire.UploadGrant{Ref: pending, Upload: blobwire.Request{Method: "PUT", URL: direct.URL + "/object?private=signature", ExpiresAt: time.Now().Add(299 * time.Second).Format(time.RFC3339Nano), Headers: map[string]string{"Content-Length": "3", "Content-Type": "application/octet-stream", "Content-Disposition": "attachment", "Cache-Control": "private, no-store", "If-None-Match": "*", "X-Amz-Checksum-Sha256": sum, "X-Amz-Meta-Vecnet-Checksum-Profile": "sha256", "X-Amz-Meta-Vecnet-Checksum": sum}}})
+				case r.URL.Path == "/v1/blobs/uploads/"+id+"/complete":
+					completes++
+					json.NewEncoder(w).Encode(ref)
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer hub.Close()
+			var r io.Reader = strings.NewReader("abc")
+			if kind == "spool" {
+				r = struct{ io.Reader }{strings.NewReader("abc")}
+			}
+			att, err := New(hub.URL, "fake").UploadWithProgress(context.Background(), r, 3, "text/plain", "report.txt", nil)
+			if err != nil || att.BlobID != id || caps != 1 || hubBytes != 0 || puts != 1 || completes != 1 {
+				t.Fatalf("downgraded or failed: err=%v caps=%d hubBytes=%d puts=%d completes=%d", err, caps, hubBytes, puts, completes)
+			}
+			entries, _ := os.ReadDir(tmp)
+			if len(entries) != 0 {
+				t.Fatal("spool file leaked")
+			}
+		})
+	}
+}
+
 func TestSendPreservesLegacyAttachmentReferences(t *testing.T) {
 	for _, origin := range []string{"", "https://example.invalid/reference.txt"} {
 		t.Run(map[bool]string{true: "external", false: "disk"}[origin != ""], func(t *testing.T) {
