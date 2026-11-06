@@ -23,8 +23,14 @@ import (
 // run id only, never a reply.
 
 // GrokbotURLPattern is what a routine URL must match. Tests relax it to
-// reach an httptest server; production keeps this value.
+// reach an httptest server; production keeps this value. Onboarding uses
+// grokbotOnboardURL instead, which requires UUID groups 8-4-4-4-12.
+// Relaxing this pattern does not relax onboarding.
 var GrokbotURLPattern = regexp.MustCompile(`^https://api2\.cursor\.sh/automations/webhook/[0-9a-f-]{36}$`)
+
+// grokbotOnboardURL is the onboarding rule from Decisions §3. It is stricter
+// than GrokbotURLPattern and is not used by route add or rotate.
+var grokbotOnboardURL = regexp.MustCompile(`^https://api2\.cursor\.sh/automations/webhook/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 const grokbotKeyPrefix = "crsr_"
 
@@ -59,16 +65,7 @@ func (h *Hub) AddGrokbotRoute(ctx context.Context, ownerKind, ownerID, routineUR
 	if ownerKind != "peer" && ownerKind != "principal" {
 		return "", invalidRouteField("owner_kind", "a route is owned by a peer or a principal")
 	}
-	if !GrokbotURLPattern.MatchString(routineURL) {
-		return "", invalidURL("url", errors.New("not a Grok Bot routine webhook URL"))
-	}
-	if _, uerr := h.EgressPolicy().CheckURL(routineURL); uerr != nil {
-		return "", invalidURL("url", uerr)
-	}
-	if !validGrokbotKey(key) {
-		return "", invalidGrokbotKey()
-	}
-	sealed, err := h.Seal([]byte(key))
+	sealed, err := h.prepareGrokbotRoute(routineURL, key, false)
 	if err != nil {
 		return "", err
 	}
@@ -89,6 +86,33 @@ func invalidGrokbotKey() *APIError {
 	e := E(http.StatusUnprocessableEntity, "invalid_key", "a routine key is printable ASCII starting crsr_")
 	e.Details["field"] = "key"
 	return e
+}
+
+// prepareGrokbotRoute checks routineURL and key and returns the key sealed
+// for routes.key_enc. strict selects the onboarding grouped-UUID rule.
+// Route add and rotate pass false and keep GrokbotURLPattern and the raw-key
+// contract. The error never includes the URL or the key.
+func (h *Hub) prepareGrokbotRoute(routineURL, key string, strict bool) (string, error) {
+	if strict {
+		if !grokbotOnboardURL.MatchString(routineURL) {
+			return "", invalidURL("url", errors.New("not a Grok Bot routine webhook URL"))
+		}
+	} else if !GrokbotURLPattern.MatchString(routineURL) {
+		return "", invalidURL("url", errors.New("not a Grok Bot routine webhook URL"))
+	}
+	if _, uerr := h.EgressPolicy().CheckURL(routineURL); uerr != nil {
+		return "", invalidURL("url", uerr)
+	}
+	return h.sealGrokbotKey(key)
+}
+
+// sealGrokbotKey seals a raw crsr_ key. Callers pass the normalized key, not
+// an Authorization header. The error never includes the key.
+func (h *Hub) sealGrokbotKey(key string) (string, error) {
+	if !validGrokbotKey(key) {
+		return "", invalidGrokbotKey()
+	}
+	return h.Seal([]byte(key))
 }
 
 // validGrokbotKey accepts crsr_ plus at least one visible ASCII character,
@@ -112,10 +136,7 @@ func validGrokbotKey(key string) bool {
 // (422 invalid_key, never echoed). An unknown route is 404 not_found; an http
 // route, which has no routine key, is 422 invalid_value.
 func (h *Hub) RotateGrokbotKey(ctx context.Context, routeID, key string) error {
-	if !validGrokbotKey(key) {
-		return invalidGrokbotKey()
-	}
-	sealed, err := h.Seal([]byte(key))
+	sealed, err := h.sealGrokbotKey(key)
 	if err != nil {
 		return err
 	}
