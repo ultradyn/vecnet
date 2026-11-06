@@ -514,7 +514,8 @@ func callThreads(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any
 			return nil, &envelope.SchemaError{Path: "/since", Message: "since must be YYYY-MM-DDTHH:MM:SS.sssZ"}
 		}
 	}
-	threads, next, err := s.Hub.ListThreads(ctx, c, a.Participant, a.Group, since, int(a.Limit), a.Cursor)
+	// The HTTP q= title filter is not an MCP argument; pass no title query.
+	threads, next, err := s.Hub.ListThreads(ctx, c, a.Participant, a.Group, since, int(a.Limit), a.Cursor, "")
 	if err != nil {
 		return nil, err
 	}

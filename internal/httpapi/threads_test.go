@@ -140,6 +140,115 @@ func TestThreadListPagination(t *testing.T) {
 	mustErr(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
 }
 
+// TestListThreadsTitleQuery is GET /v1/threads?q= (PROTOCOL §2.8): a
+// case-insensitive substring of the thread title. Empty q is no filter.
+// Message text is not searched. Paging and participant compose with q.
+func TestListThreadsTitleQuery(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	b, bSec := env.NewPeer("session", "B")
+	c, _ := env.NewPeer("session", "C")
+
+	sendTitled := func(title, key string, recipients ...string) string {
+		t.Helper()
+		body := sendBody(key, recipients...)
+		if title != "" {
+			body["thread_title"] = title
+		}
+		id := postSend(t, env, aSec, body, http.StatusAccepted).ThreadID
+		env.Now.Advance(time.Second)
+		return id
+	}
+
+	alpha := sendTitled("Alpha Project", "alpha", b)
+	zebra := sendTitled("zebra notes", "zebra", c)
+	cafe := sendTitled("Café Menu", "cafe", b)
+	plain := sendTitled("", "plain", b)
+	pct := sendTitled("100% done", "pct", b)
+	under := sendTitled("a_b notes", "under", b)
+	axb := sendTitled("axb notes", "axb", b)
+	pageOld := sendTitled("page old", "pold", b)
+	pageMid := sendTitled("page mid", "pmid", b)
+	pageNew := sendTitled("page new", "pnew", b)
+	other := sendTitled("other newest", "other", b)
+	newest := []string{other, pageNew, pageMid, pageOld, axb, under, pct, plain, cafe, zebra, alpha}
+
+	ids := func(tr threadsResp) []string {
+		t.Helper()
+		out := make([]string, len(tr.Threads))
+		for i, s := range tr.Threads {
+			out[i] = s.ThreadID
+		}
+		return out
+	}
+	esc := func(s string) string { return url.QueryEscape(s) }
+
+	cases := []struct {
+		name   string
+		secret string
+		query  string
+		want   []string
+		field  string // set → 422 invalid_value with details.field
+	}{
+		{name: "substring match", secret: aSec, query: "?q=proj", want: []string{alpha}},
+		{name: "case insensitive", secret: aSec, query: "?q=ALPHA", want: []string{alpha}},
+		{name: "mixed case", secret: aSec, query: "?q=ZeBrA", want: []string{zebra}},
+		{name: "no match", secret: aSec, query: "?q=nope", want: []string{}},
+		{name: "message body is not searched", secret: aSec, query: "?q=hi", want: []string{}},
+		{name: "untitled thread", secret: aSec, query: "?q=plain", want: []string{}},
+		{name: "unicode substring", secret: aSec, query: "?q=" + esc("Café"), want: []string{cafe}},
+		{name: "latin-1 case fold", secret: aSec, query: "?q=" + esc("café"), want: []string{cafe}},
+		{name: "empty q", secret: aSec, query: "?q=", want: newest},
+		{name: "whitespace q", secret: aSec, query: "?q=" + esc(" \t "), want: newest},
+		{name: "whitespace over the cap is still empty", secret: aSec, query: "?q=" + esc(strings.Repeat(" ", 201)), want: newest},
+		{name: "trimmed q", secret: aSec, query: "?q=" + esc("  ZeBra  "), want: []string{zebra}},
+		{name: "percent is literal", secret: aSec, query: "?q=" + esc("%"), want: []string{pct}},
+		{name: "percent phrase", secret: aSec, query: "?q=" + esc("100%"), want: []string{pct}},
+		{name: "underscore is literal", secret: aSec, query: "?q=" + esc("a_b"), want: []string{under}},
+		{name: "axb literal", secret: aSec, query: "?q=axb", want: []string{axb}},
+		{name: "exact cap", secret: aSec, query: "?q=" + strings.Repeat("x", 200), want: []string{}},
+		{name: "exact cap of multibyte runes", secret: aSec, query: "?q=" + esc(strings.Repeat("é", 200)), want: []string{}},
+		{name: "cap measured after trim", secret: aSec, query: "?q=" + esc("  "+strings.Repeat("y", 200)+"  "), want: []string{}},
+		{name: "overlong", secret: aSec, query: "?q=" + strings.Repeat("x", 201), field: "q"},
+		{name: "overlong multibyte runes", secret: aSec, query: "?q=" + esc(strings.Repeat("é", 201)), field: "q"},
+		{name: "participant and q", secret: aSec, query: "?participant=" + b + "&q=alpha", want: []string{alpha}},
+		{name: "participant excludes the other title", secret: aSec, query: "?participant=" + b + "&q=zebra", want: []string{}},
+		{name: "other participant and q", secret: aSec, query: "?participant=" + c + "&q=zebra", want: []string{zebra}},
+		{name: "co-participant sees the match", secret: bSec, query: "?q=alpha", want: []string{alpha}},
+		{name: "stranger's title stays hidden", secret: bSec, query: "?q=zebra", want: []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.field != "" {
+				resp, raw := env.Do(tc.secret, "GET", "/v1/threads"+tc.query, nil)
+				e := mustErr(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
+				if e.Error.Details["field"] != tc.field {
+					t.Fatalf("details.field = %v, want %s; %s", e.Error.Details["field"], tc.field, raw)
+				}
+				return
+			}
+			if got := ids(listThreads(t, env, tc.secret, tc.query)); !sameIDs(got, tc.want) {
+				t.Fatalf("threads = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("pagination with q", func(t *testing.T) {
+		p1 := listThreads(t, env, aSec, "?limit=2&q=page")
+		if !sameIDs(ids(p1), []string{pageNew, pageMid}) || p1.Next == nil {
+			t.Fatalf("page 1 = %v next %v, want [%s %s] and a token", ids(p1), p1.Next, pageNew, pageMid)
+		}
+		p2 := listThreads(t, env, aSec, "?limit=2&q=page&cursor="+url.QueryEscape(*p1.Next))
+		if !sameIDs(ids(p2), []string{pageOld}) || p2.Next != nil {
+			t.Fatalf("page 2 = %v next %v, want [%s] and null", ids(p2), p2.Next, pageOld)
+		}
+		// The newer non-matching thread is not a page slot.
+		if all := listThreads(t, env, aSec, "?limit=1"); !sameIDs(ids(all), []string{other}) {
+			t.Fatalf("unfiltered first = %v, want %s", ids(all), other)
+		}
+	})
+}
+
 func TestHistoryFromJoin(t *testing.T) {
 	env := testhub.Start(t)
 	_, aSec := env.NewPeer("session", "A")

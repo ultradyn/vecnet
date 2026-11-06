@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
@@ -21,6 +22,9 @@ import (
 const (
 	DefaultPageLimit = 50
 	MaxPageLimit     = 200
+	// maxThreadQueryRunes is the longest q= ListThreads accepts. Counted
+	// after trim, in characters, the same cap as a thread title.
+	maxThreadQueryRunes = 200
 )
 
 // visibleSQL is the PROTOCOL §16.3 rule for whether message m of thread t is
@@ -47,6 +51,17 @@ func invalidValue(field, msg string) *APIError {
 	return e
 }
 
+// threadTitleQuery normalises ListThreads' q. Whitespace-only is no filter.
+// A longer value is 422 invalid_value. Matching is a title substring; case
+// folding is SQLite lower (ASCII and Latin-1 letters).
+func threadTitleQuery(q string) (string, error) {
+	q = strings.TrimSpace(q)
+	if utf8.RuneCountInString(q) > maxThreadQueryRunes {
+		return "", invalidValue("q", "q must be at most 200 characters")
+	}
+	return q, nil
+}
+
 // ListThreads lists the threads a peer participates in (PROTOCOL §2.8),
 // newest activity first (last_message_at desc, then thr_id desc).
 //
@@ -57,11 +72,18 @@ func invalidValue(field, msg string) *APIError {
 // operator may name any peer. A peer credential naming another
 // peer lists the caller's threads that peer also participates in. group (a
 // team_ or grp_ id, "" for any) keeps threads whose ThreadSummary.group it
-// is; a non-zero since keeps threads active at or after it. limit ≤ 0 is 50
-// and is capped at 200. pageTok is the next of a previous page; next is ""
-// on the last page.
-func (h *Hub) ListThreads(ctx context.Context, c auth.Caller, participant, group string, since time.Time, limit int, pageTok string) ([]envelope.ThreadSummary, string, error) {
+// is; a non-zero since keeps threads active at or after it. q, trimmed, is
+// a case-insensitive substring of the thread title; empty is no title
+// filter, and more than 200 characters is 422 invalid_value. limit ≤ 0 is
+// 50 and is capped at 200. pageTok is the next of a previous page; next is
+// "" on the last page. q composes with the other filters and does not
+// change the order.
+func (h *Hub) ListThreads(ctx context.Context, c auth.Caller, participant, group string, since time.Time, limit int, pageTok, q string) ([]envelope.ThreadSummary, string, error) {
 	limit = pageLimit(limit)
+	q, err := threadTitleQuery(q)
+	if err != nil {
+		return nil, "", err
+	}
 	if group != "" && !ids.IsGroup(group) {
 		return nil, "", invalidValue("group", "group must be a team_ or grp_ id")
 	}
@@ -78,7 +100,7 @@ func (h *Hub) ListThreads(ctx context.Context, c auth.Caller, participant, group
 	}
 	var out []envelope.ThreadSummary
 	next := ""
-	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		viewer, with, err := threadViewer(ctx, tx, c, participant)
 		if err != nil {
 			return err
@@ -89,10 +111,11 @@ func (h *Hub) ListThreads(ctx context.Context, c auth.Caller, participant, group
 			 WHERE (?2 = '' OR EXISTS (SELECT 1 FROM thread_participants w WHERE w.thr_id = t.thr_id AND w.peer_id = ?2))
 			   AND (?3 = '' OR t.group_id = ?3)
 			   AND (?4 = '' OR t.last_message_at >= ?4)
+			   AND (?7 = '' OR instr(lower(ifnull(t.title, '')), lower(?7)) > 0)
 			   AND (?5 = '' OR t.last_message_at < ?5 OR (t.last_message_at = ?5 AND t.thr_id < ?6))
 			 ORDER BY t.last_message_at DESC, t.thr_id DESC
-			 LIMIT ?7`,
-			viewer, with, group, sinceStr, curAt, curID, limit+1)
+			 LIMIT ?8`,
+			viewer, with, group, sinceStr, curAt, curID, q, limit+1)
 		if err != nil {
 			return fmt.Errorf("hub: list threads: %w", err)
 		}
