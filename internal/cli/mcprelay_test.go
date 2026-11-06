@@ -353,26 +353,14 @@ func TestMCPRelayStdoutIsJSONOnly(t *testing.T) {
 	secret := "relay-test-secret"
 	u := profileUser(t, strings.Replace(closed.URL, "http://", "http://url-user:url-password@", 1), secret)
 	code, out, errs := relayRun(t, u, strings.Join([]string{relayLine(2, "ping", nil), `not json`, relayCall(3, "vecnet_peers", map[string]any{}), `{"jsonrpc":"2.0","method":"notifications/initialized"}`}, "\n"))
-	// Several bounded requests share one outage and may cross the quiet
-	// window. Fake-clock tests pin its timing; here any status stays on stderr.
-	statusOK := errs == "" || (strings.HasPrefix(errs, "vecnet: mcp: hub unreachable for ") &&
-		strings.HasSuffix(errs, "s; reconnecting…\n") && strings.Count(errs, "\n") == 1)
-	if code != 0 || !statusOK {
-		t.Fatalf("exit=%d stderr=%q", code, errs)
+	// Userinfo is refused before the relay reads stdin or talks to the hub.
+	// The refusal names no part of the URL, and neither stream carries it.
+	if code == 0 || out != "" || !strings.Contains(errs, "cannot resolve profile or hub") {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, out, errs)
 	}
-	replies := relayReplies(t, out)
-	if len(replies) != 3 {
-		t.Fatalf("stdout %q", out)
-	}
-	relayError(t, replies[0], -32603, "vecnet relay: hub unreachable")
-	relayError(t, replies[1], -32700, "Parse error")
-	if string(replies[1].ID) != "null" {
-		t.Fatalf("parse-error id=%s", replies[1].ID)
-	}
-	relayError(t, replies[2], -32603, "vecnet relay: hub unreachable")
-	for _, value := range []string{secret, "Authorization", "url-user", "url-password"} {
+	for _, value := range []string{secret, "Authorization", "url-user", "url-password", "127.0.0.1"} {
 		if strings.Contains(out+errs, value) {
-			t.Fatalf("streams exposed %q", value)
+			t.Fatalf("streams exposed %q\nstdout: %s\nstderr: %s", value, out, errs)
 		}
 	}
 	for _, status := range []int{401, 429} {

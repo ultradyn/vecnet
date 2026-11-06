@@ -524,8 +524,8 @@ func TestWhoScrollAndSuspendKey(t *testing.T) {
 	if strings.Contains(frame, "who-peer-00") || !strings.Contains(frame, "who-peer-29") {
 		t.Fatalf("participant pane:\n%s", frame)
 	}
-	if cmd := m.updateKey(keyPress("ctrl+z")); cmd == nil {
-		t.Fatal("ctrl+z produced no command")
+	if _, cmd := m.Update(keyPress("ctrl+z")); !isCmd(cmd, tea.Suspend) {
+		t.Fatal("ctrl+z did not return tea.Suspend")
 	}
 }
 

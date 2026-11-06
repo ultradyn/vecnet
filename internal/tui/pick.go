@@ -51,6 +51,8 @@ func (p *pickModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		p.w, p.h = msg.Width, msg.Height
 	case tea.KeyPressMsg:
 		return p, p.onKey(msg.String())
+	case tea.ResumeMsg:
+		return p, tea.ClearScreen
 	case tea.MouseClickMsg:
 		if !p.mouse || msg.Button != tea.MouseLeft || msg.Mod&tea.ModShift != 0 {
 			return p, nil
@@ -70,9 +72,9 @@ func (p *pickModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (p *pickModel) onKey(key string) tea.Cmd {
+	// Same suspend path as the main TUI. A stop from another process is not handled.
 	if key == "ctrl+z" {
-		disarmStop()
-		return doSuspend
+		return tea.Suspend
 	}
 	if p.confirm {
 		switch key {

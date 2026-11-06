@@ -181,7 +181,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m, m.updateKey(msg)
 	case tea.ResumeMsg:
-		armStop()
+		// Bubble Tea has restored the terminal. ClearScreen forces a full
+		// redraw, which re-applies the mouse mode declared by View.
+		return m, tea.ClearScreen
 	case tea.MouseClickMsg, tea.MouseWheelMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
 		return m, m.updateMouse(msg)
 	case tea.PasteMsg:

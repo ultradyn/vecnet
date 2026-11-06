@@ -99,7 +99,8 @@ func (c *client) newRequest(ctx context.Context, method, path string, q url.Valu
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, r)
 	if err != nil {
-		return nil, usageErr("bad hub URL " + c.base + ": " + err.Error())
+		// err quotes the request URL, which may carry userinfo, a path, or a query.
+		return nil, usageErr("the hub is not a URL like https://hub.example")
 	}
 	if length >= 0 {
 		req.ContentLength = length

@@ -92,6 +92,49 @@ func TestInsecureHubRefused(t *testing.T) {
 	}
 }
 
+// Validation errors and stderr never repeat a hub URL's userinfo, path, or query.
+func TestHubURLSecretsStayOffStderr(t *testing.T) {
+	const (
+		userSecret  = "pwUSERSECRET"
+		pathSecret  = "PATHSECRET"
+		querySecret = "QUERYSECRET"
+		host        = "hidden-host.example"
+	)
+	secrets := []string{userSecret, pathSecret, querySecret, "alice", host}
+	cases := []struct {
+		name string
+		hub  string
+		want string
+		hide bool
+	}{
+		{"malformed", "http://[::1" + userSecret, "the hub is not a URL like https://hub.example", true},
+		{"scheme", "ftp://" + host + "/" + pathSecret + "?token=" + querySecret, "the scheme must be https", false},
+		{"public http", "http://" + host + "/" + pathSecret + "?token=" + querySecret, "plain http on a public host", false},
+		{"userinfo", "https://alice:" + userSecret + "@" + host + "/" + pathSecret + "?token=" + querySecret, "must not include credentials", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := profileUser(t, tc.hub, "vn_peer_x")
+			code, out, errs := u.run("peers")
+			if code == 0 {
+				t.Fatalf("exit 0, stderr %q", errs)
+			}
+			if !strings.Contains(errs, tc.want) {
+				t.Fatalf("stderr %q, want %q", errs, tc.want)
+			}
+			banned := []string{userSecret, pathSecret, querySecret}
+			if tc.hide {
+				banned = secrets
+			}
+			for _, secret := range banned {
+				if strings.Contains(errs, secret) || strings.Contains(out, secret) {
+					t.Fatalf("secret %q reached the terminal\nstdout: %s\nstderr: %s", secret, out, errs)
+				}
+			}
+		})
+	}
+}
+
 // enrol refuses a public http:// hub before sending the token, and
 // --allow-insecure-http both permits it and records the opt-in.
 func TestEnrolInsecureHub(t *testing.T) {
