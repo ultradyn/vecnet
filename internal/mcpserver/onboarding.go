@@ -9,14 +9,29 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 
 	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/onboarding"
 )
+
+// agentRequestIDRE is the request id shape. It is checked before JSON Schema
+// validation: the generic pattern renderer quotes the rejected value, and a
+// request id is free text a caller can fill with a credential.
+var agentRequestIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+
+const agentRequestIDMessage = "request_id must be 1 to 128 characters: letters, digits, and . _ : -"
+
+// defaultEnrolTTLSeconds is the enrolment lifetime Normalize stores when the
+// caller omits enrol_ttl_seconds or sends 0. The fragment omits that default.
+const defaultEnrolTTLSeconds = 86400
 
 // mcpGrokURLPlaceholder and mcpGrokKeyPlaceholder exist only so the registry
 // can check a grokbot name and connector without the model supplying the
@@ -84,23 +99,24 @@ func agentToolSpecs() []toolSpec {
 		input: object(schema{
 			"kind":         schema{"type": "string", "enum": kinds},
 			"spec_version": schema{"type": "string", "minLength": 1},
-			"request_id":   schema{"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+			"request_id":   schema{"type": "string"},
 			"inputs":       object(safeInputs),
 		}, "kind", "spec_version", "request_id", "inputs"),
+		annotations: readAnnotations(),
+		precheck:    precheckAgentRequestID,
 		output: object(schema{
 			"request_id": schema{"type": "string"},
 			"status":     schema{"type": "string", "enum": []string{"needs_human"}},
 			"web_path":   schema{"type": "string"},
 		}, "request_id", "status", "web_path"),
-		annotations: readAnnotations(),
-		call:        callAgentAdd,
+		call: callAgentAdd,
 	}, {
 		name: "vecnet_agent_status",
 		description: "Read-only: safe onboarding status for one request_id. " +
 			"Omits invitation text, link codes, bearers and routine credentials. " +
 			"auth_state is credential readiness on this hub. A connector name is not a connection. A whoami mismatch stays a stop.",
 		input: object(schema{
-			"request_id": schema{"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+			"request_id": schema{"type": "string"},
 		}, "request_id"),
 		output: object(schema{
 			"request_id":     schema{"type": "string"},
@@ -115,12 +131,19 @@ func agentToolSpecs() []toolSpec {
 				"delivery_id": schema{"type": "string"},
 				"state":       schema{"type": "string"},
 			}),
-			"auth_state":    schema{"type": "string", "enum": []string{onboarding.AuthUnlinked, onboarding.AuthPending, onboarding.AuthVerified}},
-			"send_defaults": schema{"type": "object", "additionalProperties": schema{"type": "string"}},
-			"status":        schema{"type": "string"},
-			"web_path":      schema{"type": "string"},
+			"auth_state":           schema{"type": "string", "enum": []string{onboarding.AuthUnlinked, onboarding.AuthPending, onboarding.AuthVerified}},
+			"send_defaults":        schema{"type": "object", "additionalProperties": schema{"type": "string"}},
+			"status":               schema{"type": "string"},
+			"web_path":             schema{"type": "string"},
+			"name":                 schema{"type": "string"},
+			"spec_version":         schema{"type": "string"},
+			"name_open":            schema{"type": "boolean"},
+			"skip_mcp":             schema{"type": "boolean"},
+			"enrol_ttl_seconds":    schema{"type": "integer"},
+			"request_principal_id": schema{"type": "string"},
 		}),
 		annotations: readAnnotations(),
+		precheck:    precheckAgentRequestID,
 		call:        callAgentStatus,
 	}}
 }
@@ -176,21 +199,15 @@ func callAgentAdd(ctx context.Context, s *Server, c auth.Caller, raw []byte) (an
 		if agentAPICode(err) != "not_found" {
 			return nil, err
 		}
-	} else {
-		changed, err := agentRequestChanged(ctx, s, existing, safe)
-		if err != nil {
-			return nil, err
-		}
-		if changed {
-			e := hub.E(http.StatusConflict, "idempotency_conflict", "request_id was already used with a different request")
-			e.Details["request_id"] = safe.requestID
-			return nil, e
-		}
+	} else if agentRequestChanged(existing, safe) {
+		e := hub.E(http.StatusConflict, "idempotency_conflict", "request_id was already used with a different request")
+		e.Details["request_id"] = safe.requestID
+		return nil, e
 	}
 	return map[string]string{
 		"request_id": safe.requestID,
 		"status":     "needs_human",
-		"web_path":   agentWebPath(safe.kind, safe.name, safe.requestID),
+		"web_path":   agentWebPath(safe),
 	}, nil
 }
 
@@ -206,7 +223,9 @@ func requireOperator(c auth.Caller) error {
 }
 
 type agentSafe struct {
-	kind, requestID, name, connector string
+	kind, specVersion, requestID, name, connector, principalID string
+	nameOpen, skipMCP                                          bool
+	enrolTTL                                                   int
 }
 
 // validateAgentAdd checks safe fields with the registry. Human-only inputs
@@ -244,34 +263,72 @@ func validateAgentAdd(req onboarding.SubmitRequest) (agentSafe, error) {
 	if err != nil {
 		return agentSafe{}, agentFieldError(err)
 	}
-	return agentSafe{kind: n.Kind, requestID: n.RequestID, name: n.Name, connector: n.ConnectorName}, nil
+	return agentSafe{
+		kind: n.Kind, specVersion: n.SpecVersion, requestID: n.RequestID,
+		name: n.Name, connector: n.ConnectorName, principalID: n.PrincipalID,
+		nameOpen: n.NameOpen, skipMCP: n.SkipMCP, enrolTTL: n.EnrolTTLSeconds,
+	}, nil
 }
 
-func agentRequestChanged(ctx context.Context, s *Server, existing onboarding.SubmitResult, safe agentSafe) (bool, error) {
-	if existing.Kind != safe.kind || existing.ConnectorName != safe.connector {
-		return true, nil
-	}
-	if safe.name == "" {
-		return false, nil
-	}
-	dir, err := s.Hub.Directory(ctx)
-	if err != nil {
-		return false, err
-	}
-	for _, peer := range dir {
-		if peer.PeerID == existing.PeerID {
-			return peer.Name != safe.name, nil
+// agentRequestChanged reports whether safe differs from the receipt stored
+// on existing. It uses that receipt's original name and options, never the
+// live directory: a peer rename or disable is not a different request.
+func agentRequestChanged(existing onboarding.SubmitResult, safe agentSafe) bool {
+	return existing.Kind != safe.kind ||
+		existing.SpecVersion != safe.specVersion ||
+		existing.Name != safe.name ||
+		existing.ConnectorName != safe.connector ||
+		existing.NameOpen != safe.nameOpen ||
+		existing.SkipMCP != safe.skipMCP ||
+		existing.EnrolTTLSeconds != safe.enrolTTL ||
+		existing.RequestPrincipalID != safe.principalID
+}
+
+// agentWebPath is the Task 9 handoff. kind, name and request_id are always
+// present. Other safe options are included only when the normalized value
+// is not the default, so an accepted option is visible to the form.
+func agentWebPath(safe agentSafe) string {
+	q := url.Values{}
+	q.Set("kind", safe.kind)
+	q.Set("name", safe.name)
+	q.Set("request_id", safe.requestID)
+	if safe.connector != "" {
+		def, err := onboarding.ConnectorName(safe.name, "")
+		if err != nil || safe.connector != def {
+			q.Set("connector_name", safe.connector)
 		}
 	}
-	return true, nil
+	if safe.skipMCP {
+		q.Set("skip_mcp", "true")
+	}
+	if safe.nameOpen {
+		q.Set("name_open", "true")
+	}
+	if safe.enrolTTL != 0 && safe.enrolTTL != defaultEnrolTTLSeconds {
+		q.Set("enrol_ttl_seconds", strconv.Itoa(safe.enrolTTL))
+	}
+	if safe.principalID != "" {
+		q.Set("principal_id", safe.principalID)
+	}
+	return "/ui/#add-agent?" + q.Encode()
 }
 
-func agentWebPath(kind, name, requestID string) string {
-	q := url.Values{}
-	q.Set("kind", kind)
-	q.Set("name", name)
-	q.Set("request_id", requestID)
-	return "/ui/#add-agent?" + q.Encode()
+// precheckAgentRequestID rejects a malformed request id with fixed text.
+// Schema validation would quote the rejected value in the -32602 message.
+func precheckAgentRequestID(raw []byte) error {
+	var body map[string]json.RawMessage
+	if json.Unmarshal(raw, &body) != nil {
+		return nil
+	}
+	idRaw, ok := body["request_id"]
+	if !ok {
+		return nil
+	}
+	var id string
+	if json.Unmarshal(idRaw, &id) != nil || !agentRequestIDRE.MatchString(id) {
+		return &envelope.SchemaError{Path: "/request_id", Message: agentRequestIDMessage}
+	}
+	return nil
 }
 
 func agentAPICode(err error) string {

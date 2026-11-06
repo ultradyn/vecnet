@@ -237,7 +237,7 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 					"status":     "needs_human",
 					"web_path":   wantPath,
 				}) {
-					t.Fatalf("grokbot add = %#v", got)
+					t.Fatal("grokbot add result mismatch")
 				}
 				assertNoSecrets(t, mustRaw(t, got))
 			})
@@ -250,12 +250,12 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 	t.Run("legacy add", func(t *testing.T) {
 		got := mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("session", legacyID, "Legacy One", nil))
 		if got["web_path"] != agentWebPath("session", "Legacy One", legacyID) || got["request_id"] != legacyID {
-			t.Fatalf("legacy add = %#v", got)
+			t.Fatal("legacy add result mismatch")
 		}
 		assertNoSecrets(t, mustRaw(t, got))
 		dot := mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("dot", "dot-human-1", "Dot One", nil))
 		if dot["web_path"] != agentWebPath("dot", "Dot One", "dot-human-1") {
-			t.Fatalf("dot add = %#v", dot)
+			t.Fatal("dot add result mismatch")
 		}
 		assertNoSecrets(t, mustRaw(t, dot))
 		if takeMCPCensus(t, env) != before {
@@ -269,8 +269,12 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 			"skip_mcp":       true,
 		})
 		got := mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", changed)
-		if got["status"] != "needs_human" || got["request_id"] != grokID || got["web_path"] != agentWebPath("grokbot", "Helper Bot Two", grokID) {
-			t.Fatalf("changed add = %#v", got)
+		if got["status"] != "needs_human" || got["request_id"] != grokID {
+			t.Fatal("changed add result mismatch")
+		}
+		changedQuery := addAgentQuery(t, got["web_path"].(string))
+		if changedQuery.Get("kind") != "grokbot" || changedQuery.Get("name") != "Helper Bot Two" || changedQuery.Get("request_id") != grokID || changedQuery.Get("connector_name") != "vecnet-helper-two" || changedQuery.Get("skip_mcp") != "true" {
+			t.Fatal("changed add fragment mismatch")
 		}
 		if takeMCPCensus(t, env) != before {
 			t.Fatal("changed args stored a pending action")
@@ -279,11 +283,11 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 
 	t.Run("status before human submit", func(t *testing.T) {
 		for _, id := range []string{grokID, legacyID} {
-			errBody := mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_status", map[string]any{"request_id": id}, "not_found")
+			errBody, wire := mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_status", map[string]any{"request_id": id}, "not_found")
 			if errBody.Error.Details["request_id"] != id {
 				t.Fatal("status did not name the request")
 			}
-			assertNoSecrets(t, mustRaw(t, errBody))
+			assertNoSecrets(t, wire)
 		}
 		if takeMCPCensus(t, env) != before {
 			t.Fatal("status before submit wrote onboarding state")
@@ -291,7 +295,7 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 	})
 
 	t.Run("no mint on rejected legacy input", func(t *testing.T) {
-		errBody := mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("session", "ttl-bad", "Bad TTL", map[string]any{"enrol_ttl_seconds": 1}), "invalid_value")
+		errBody, _ := mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("session", "ttl-bad", "Bad TTL", map[string]any{"enrol_ttl_seconds": 1}), "invalid_value")
 		if errBody.Error.Details["field"] != "enrol_ttl_seconds" {
 			t.Fatal("details.field mismatch")
 		}
@@ -400,21 +404,21 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 
 	t.Run("changed args and no mint-then-strip", func(t *testing.T) {
 		changed := agentAddArgs("grokbot", grokID, "Helper Bot Two", map[string]any{"connector_name": "vecnet-helper-two"})
-		errBody := mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", changed, "idempotency_conflict")
+		errBody, conflictWire := mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", changed, "idempotency_conflict")
 		if errBody.Error.Details["request_id"] != grokID {
 			t.Fatal("conflict did not name the request")
 		}
-		assertNoSecrets(t, mustRaw(t, errBody), routineURL, routineKey, legacyToken, "Helper Bot Two")
+		assertNoSecrets(t, conflictWire, routineURL, routineKey, legacyToken, "Helper Bot Two")
 		same := mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", grokArgs)
 		if same["status"] != "needs_human" || same["request_id"] != grokID || same["web_path"] != agentWebPath("grokbot", grokName, grokID) {
-			t.Fatalf("same-args add = %#v", same)
+			t.Fatal("same-args add result mismatch")
 		}
 		assertNoSecrets(t, mustRaw(t, same), routineURL, routineKey, legacyToken)
-		legacyChanged := mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("session", legacyID, "Legacy Two", nil), "idempotency_conflict")
-		assertNoSecrets(t, mustRaw(t, legacyChanged), legacyToken, "Legacy Two")
+		_, legacyWire := mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("session", legacyID, "Legacy Two", nil), "idempotency_conflict")
+		assertNoSecrets(t, legacyWire, legacyToken, "Legacy Two")
 		legacySame := mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("session", legacyID, "Legacy One", nil))
 		if legacySame["web_path"] != agentWebPath("session", "Legacy One", legacyID) {
-			t.Fatalf("legacy replay = %#v", legacySame)
+			t.Fatal("legacy replay result mismatch")
 		}
 		assertNoSecrets(t, mustRaw(t, legacySame), legacyToken)
 		if takeMCPCensus(t, env) != afterHuman {
@@ -449,16 +453,267 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 		if status != http.StatusUnauthorized {
 			t.Fatalf("revoked operator status = %d", status)
 		}
+		assertNoSecrets(t, raw, routineURL, routineKey, legacyToken)
 		envBody := decodeEnvelope(t, raw)
 		if envBody.Error.Code != "unauthenticated" {
 			t.Fatal("revoked operator was authenticated")
 		}
-		assertNoSecrets(t, raw, routineURL, routineKey, legacyToken)
 		if takeMCPCensus(t, env) != afterHuman {
 			t.Fatal("a revoked operator credential wrote onboarding state")
 		}
 	})
 	assertNoConductor(t, env)
+}
+
+// TestAgentOnboardMCPSafeRetry covers fix round 1. Invalid request ids must
+// not echo a credential (t7 I1). The browser fragment must carry non-default
+// safe options (t7 I2). A committed request id conflicts when those options
+// change (t7 I3) and does not conflict when only the live peer name changes
+// (t7 I4).
+func TestAgentOnboardMCPSafeRetry(t *testing.T) {
+	env := testhub.Start(t)
+	opHeaders := map[string]map[string]string{}
+	for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
+		opHeaders[era] = mcpEraHeaders(t, env, env.OperatorSecret, era)
+	}
+	prn, _ := env.NewPrincipal("fragment principal")
+
+	t.Run("(t7 I1)", func(t *testing.T) {
+		routineKey := fakeRoutineKey(t)
+		header := "Bearer " + routineKey
+		shaped := routineKey + "/"
+		for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
+			t.Run(era, func(t *testing.T) {
+				for _, id := range []string{header, shaped} {
+					addArgs := agentAddArgs("session", id, "Nope", nil)
+					statusArgs := map[string]any{"request_id": id}
+					for _, tc := range []struct {
+						name string
+						args any
+					}{
+						{name: "vecnet_agent_add", args: addArgs},
+						{name: "vecnet_agent_status", args: statusArgs},
+					} {
+						t.Run(tc.name, func(t *testing.T) {
+							raw := mcpCallRaw(t, env, env.OperatorSecret, opHeaders[era], "tools/call", map[string]any{
+								"name": tc.name, "arguments": tc.args,
+							})
+							assertNoSecrets(t, raw, routineKey, header, shaped)
+							text := string(raw)
+							if !strings.Contains(text, "-32602") || !strings.Contains(text, `"/request_id"`) {
+								t.Fatal("invalid request_id was not rejected as invalid params at the field")
+							}
+						})
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("(t7 I2)", func(t *testing.T) {
+		grok := mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("grokbot", "frag-grok", "Helper Bot", map[string]any{
+			"connector_name": "vecnet-custom-1",
+			"skip_mcp":       true,
+		}))
+		q := addAgentQuery(t, grok["web_path"].(string))
+		if q.Get("kind") != "grokbot" || q.Get("name") != "Helper Bot" || q.Get("request_id") != "frag-grok" {
+			t.Fatal("fragment dropped kind, name, or request_id")
+		}
+		if q.Get("connector_name") != "vecnet-custom-1" || q.Get("skip_mcp") != "true" {
+			t.Fatal("fragment dropped a non-default grok option")
+		}
+		if queryHas(q, "name_open") || queryHas(q, "enrol_ttl_seconds") || queryHas(q, "principal_id") {
+			t.Fatal("fragment included an option the request did not set")
+		}
+
+		legacy := mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("session", "frag-legacy", "Suggested", map[string]any{
+			"name_open":         true,
+			"enrol_ttl_seconds": 3600,
+			"principal_id":      prn,
+		}))
+		lq := addAgentQuery(t, legacy["web_path"].(string))
+		if lq.Get("kind") != "session" || lq.Get("name") != "Suggested" || lq.Get("request_id") != "frag-legacy" {
+			t.Fatal("fragment dropped kind, name, or request_id")
+		}
+		if lq.Get("name_open") != "true" || lq.Get("enrol_ttl_seconds") != "3600" || lq.Get("principal_id") != prn {
+			t.Fatal("fragment dropped a non-default legacy option")
+		}
+		if queryHas(lq, "skip_mcp") || queryHas(lq, "connector_name") {
+			t.Fatal("fragment included an option the request did not set")
+		}
+
+		defaults := mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("grokbot", "frag-default", "Helper Bot", map[string]any{
+			"connector_name": "vecnet-helper-bot",
+			"skip_mcp":       false,
+		}))
+		dq := addAgentQuery(t, defaults["web_path"].(string))
+		if dq.Get("kind") != "grokbot" || dq.Get("name") != "Helper Bot" || dq.Get("request_id") != "frag-default" {
+			t.Fatal("fragment dropped kind, name, or request_id")
+		}
+		if queryHas(dq, "connector_name") || queryHas(dq, "skip_mcp") || queryHas(dq, "name_open") || queryHas(dq, "enrol_ttl_seconds") || queryHas(dq, "principal_id") {
+			t.Fatal("fragment included a default option")
+		}
+	})
+
+	t.Run("(t7 I3)", func(t *testing.T) {
+		routineURL := fakeRoutineURL(t)
+		routineKey := fakeRoutineKey(t)
+		skipID := "i3-skip"
+		skipArgs := agentAddArgs("grokbot", skipID, "Skip Bot", map[string]any{
+			"connector_name": "vecnet-skip-bot",
+			"skip_mcp":       true,
+		})
+		if mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", skipArgs)["status"] != "needs_human" {
+			t.Fatal("add result mismatch")
+		}
+		mustHumanSubmit(t, env, map[string]any{
+			"kind": "grokbot", "spec_version": onboarding.SpecVersion, "request_id": skipID,
+			"inputs": map[string]any{
+				"name": "Skip Bot", "webhook_url": routineURL, "webhook_key": "Bearer " + routineKey,
+				"connector_name": "vecnet-skip-bot", "skip_mcp": true,
+			},
+		})
+		if mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", skipArgs)["status"] != "needs_human" {
+			t.Fatal("identical grok retry conflicted")
+		}
+		skipChanged := agentAddArgs("grokbot", skipID, "Skip Bot", map[string]any{
+			"connector_name": "vecnet-skip-bot",
+			"skip_mcp":       false,
+		})
+		got, skipWire := mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", skipChanged, "idempotency_conflict")
+		assertNoSecrets(t, skipWire, routineKey, routineURL)
+		if got.Error.Details["request_id"] != skipID {
+			t.Fatal("conflict did not name the request")
+		}
+
+		ttlID := "i3-ttl"
+		ttlArgs := agentAddArgs("session", ttlID, "TTL Bot", map[string]any{"enrol_ttl_seconds": 3600})
+		mustHumanSubmit(t, env, map[string]any{
+			"kind": "session", "spec_version": onboarding.SpecVersion, "request_id": ttlID,
+			"inputs": map[string]any{"name": "TTL Bot", "enrol_ttl_seconds": 3600},
+		})
+		if mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", ttlArgs)["status"] != "needs_human" {
+			t.Fatal("identical ttl retry conflicted")
+		}
+		got, _ = mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("session", ttlID, "TTL Bot", map[string]any{"enrol_ttl_seconds": 7200}), "idempotency_conflict")
+		if got.Error.Details["request_id"] != ttlID {
+			t.Fatal("conflict did not name the request")
+		}
+
+		openID := "i3-open"
+		openArgs := agentAddArgs("session", openID, "Suggested", map[string]any{"name_open": true})
+		mustHumanSubmit(t, env, map[string]any{
+			"kind": "session", "spec_version": onboarding.SpecVersion, "request_id": openID,
+			"inputs": map[string]any{"name": "Suggested", "name_open": true},
+		})
+		if mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", openArgs)["status"] != "needs_human" {
+			t.Fatal("identical open-name retry conflicted")
+		}
+		got, _ = mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("session", openID, "Suggested", nil), "idempotency_conflict")
+		if got.Error.Details["request_id"] != openID {
+			t.Fatal("conflict did not name the request")
+		}
+
+		prnID := "i3-prn"
+		prnArgs := agentAddArgs("session", prnID, "Owned Bot", map[string]any{"principal_id": prn})
+		mustHumanSubmit(t, env, map[string]any{
+			"kind": "session", "spec_version": onboarding.SpecVersion, "request_id": prnID,
+			"inputs": map[string]any{"name": "Owned Bot", "principal_id": prn},
+		})
+		if mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", prnArgs)["status"] != "needs_human" {
+			t.Fatal("identical principal retry conflicted")
+		}
+		got, _ = mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("session", prnID, "Owned Bot", nil), "idempotency_conflict")
+		if got.Error.Details["request_id"] != prnID {
+			t.Fatal("conflict did not name the request")
+		}
+	})
+
+	t.Run("(t7 I4)", func(t *testing.T) {
+		id := "i4-rename"
+		args := agentAddArgs("session", id, "Stable Name", nil)
+		created := mustHumanSubmit(t, env, map[string]any{
+			"kind": "session", "spec_version": onboarding.SpecVersion, "request_id": id,
+			"inputs": map[string]any{"name": "Stable Name"},
+		})
+		if _, err := env.Hub.DB.Exec(`UPDATE peers SET name=? WHERE peer_id=?`, "Renamed Peer", created.PeerID); err != nil {
+			t.Fatal(err)
+		}
+		if mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", args)["status"] != "needs_human" {
+			t.Fatal("unchanged request conflicted after a peer rename")
+		}
+		if _, err := env.Hub.DB.Exec(`UPDATE peers SET disabled=1 WHERE peer_id=?`, created.PeerID); err != nil {
+			t.Fatal(err)
+		}
+		if mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", args)["status"] != "needs_human" {
+			t.Fatal("unchanged request conflicted after the peer was disabled")
+		}
+
+		openID := "i4-open"
+		openArgs := agentAddArgs("launcher", openID, "Suggested", map[string]any{"name_open": true})
+		opened := mustHumanSubmit(t, env, map[string]any{
+			"kind": "launcher", "spec_version": onboarding.SpecVersion, "request_id": openID,
+			"inputs": map[string]any{"name": "Suggested", "name_open": true},
+		})
+		if _, err := env.Hub.DB.Exec(`UPDATE peers SET name=? WHERE peer_id=?`, "Chosen Later", opened.PeerID); err != nil {
+			t.Fatal(err)
+		}
+		if mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", openArgs)["status"] != "needs_human" {
+			t.Fatal("unchanged open-name request conflicted after enrolment renamed the peer")
+		}
+	})
+
+	t.Run("(t7 M1)", func(t *testing.T) {
+		routineKey := fakeRoutineKey(t)
+		header := "Bearer " + routineKey
+		raw := mcpCallRaw(t, env, env.OperatorSecret, modern(), "tools/call", map[string]any{
+			"name": "vecnet_agent_add", "arguments": agentAddArgs("session", header, "Nope", nil),
+		})
+		assertNoSecrets(t, raw, routineKey, header)
+		r := decodeOnboardRPC(t, raw)
+		if r.Error == nil || r.Error.Code != mcpserver.ErrInvalidParams {
+			t.Fatal("invalid request_id was not an RPC error")
+		}
+		if strings.Contains(r.Error.Message, routineKey) || strings.Contains(r.Error.Message, "Bearer") {
+			t.Fatal("invalid request_id error quoted the rejected value")
+		}
+	})
+
+	t.Run("(t7 M2)", func(t *testing.T) {
+		_, wire := mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_status", map[string]any{"request_id": "missing-m2"}, "not_found")
+		assertNoSecrets(t, wire)
+		if !strings.Contains(string(wire), `"content"`) || !strings.Contains(string(wire), "not_found:") {
+			t.Fatal("refusal check did not see the complete wire response")
+		}
+	})
+}
+
+func mustHumanSubmit(t *testing.T, env *testhub.Env, body map[string]any) onboarding.SubmitResult {
+	t.Helper()
+	resp, raw := env.Do(env.OperatorSecret, http.MethodPost, "/v1/admin/agents", body)
+	var created onboarding.SubmitResult
+	if resp.StatusCode != http.StatusCreated || json.Unmarshal(raw, &created) != nil || created.PeerID == "" {
+		t.Fatal("human submit did not create the peer")
+	}
+	return created
+}
+
+func addAgentQuery(t *testing.T, webPath string) url.Values {
+	t.Helper()
+	const prefix = "/ui/#add-agent?"
+	if !strings.HasPrefix(webPath, prefix) {
+		t.Fatal("web_path is not an Add agent fragment")
+	}
+	q, err := url.ParseQuery(strings.TrimPrefix(webPath, prefix))
+	if err != nil {
+		t.Fatal("web_path query is not valid")
+	}
+	return q
+}
+
+func queryHas(q url.Values, key string) bool {
+	_, ok := q[key]
+	return ok
 }
 
 func agentWebPath(kind, name, requestID string) string {
@@ -536,9 +791,9 @@ func mcpCallRaw(t *testing.T, env *testhub.Env, secret string, headers map[strin
 func mcpTools(t *testing.T, env *testhub.Env, secret string, headers map[string]string) []map[string]any {
 	t.Helper()
 	raw := mcpCallRaw(t, env, secret, headers, "tools/list", nil)
-	r := decodeRPC(t, raw)
+	r := decodeOnboardRPC(t, raw)
 	if r.Error != nil {
-		t.Fatalf("tools/list: %s", r.Error.Message)
+		t.Fatal("tools/list returned an RPC error")
 	}
 	var listed struct {
 		Tools []map[string]any `json:"tools"`
@@ -582,12 +837,21 @@ func containsAny(list []any, want string) bool {
 	return false
 }
 
+func decodeOnboardRPC(t *testing.T, raw []byte) rpcResp {
+	t.Helper()
+	var r rpcResp
+	if json.Unmarshal(raw, &r) != nil || r.JSONRPC != "2.0" {
+		t.Fatal("response is not a JSON-RPC object")
+	}
+	return r
+}
+
 func mcpToolResult(t *testing.T, env *testhub.Env, secret string, headers map[string]string, name string, args any) (toolResult, []byte) {
 	t.Helper()
 	raw := mcpCallRaw(t, env, secret, headers, "tools/call", map[string]any{"name": name, "arguments": args})
-	r := decodeRPC(t, raw)
+	r := decodeOnboardRPC(t, raw)
 	if r.Error != nil {
-		t.Fatalf("%s: %s", name, r.Error.Message)
+		t.Fatalf("%s: unexpected RPC error", name)
 	}
 	var res toolResult
 	if json.Unmarshal(r.Result, &res) != nil {
@@ -618,26 +882,33 @@ func mcpToolOK(t *testing.T, env *testhub.Env, secret string, headers map[string
 	return fromStruct
 }
 
-func mcpToolError(t *testing.T, env *testhub.Env, secret string, headers map[string]string, name string, args any, code string) toolErrorBody {
+func mcpToolError(t *testing.T, env *testhub.Env, secret string, headers map[string]string, name string, args any, code string) (toolErrorBody, []byte) {
 	t.Helper()
-	res, _ := mcpToolResult(t, env, secret, headers, name, args)
-	if !res.IsError {
+	raw := mcpCallRaw(t, env, secret, headers, "tools/call", map[string]any{"name": name, "arguments": args})
+	assertNoSecrets(t, raw)
+	r := decodeOnboardRPC(t, raw)
+	if r.Error != nil {
+		t.Fatal("tool error path returned an RPC error")
+	}
+	var res toolResult
+	if json.Unmarshal(r.Result, &res) != nil || !res.IsError {
 		t.Fatalf("%s: error = false, want %s", name, code)
+	}
+	if len(res.Content) != 1 || !strings.HasPrefix(res.Content[0].Text, code+": ") {
+		t.Fatal("tool error text does not start with the code")
 	}
 	var e toolErrorBody
 	if json.Unmarshal(res.StructuredContent, &e) != nil || e.Error.Code != code || e.Error.Details == nil {
-		t.Fatalf("%s: error = %s, want %s", name, e.Error.Code, code)
+		t.Fatal("tool error code mismatch")
 	}
-	if len(res.Content) != 1 || !strings.HasPrefix(res.Content[0].Text, code+": ") {
-		t.Fatalf("%s: error text does not start with the code", name)
-	}
-	return e
+	return e, raw
 }
 
 func mcpInvalidPath(t *testing.T, env *testhub.Env, secret string, headers map[string]string, name string, args any) string {
 	t.Helper()
 	raw := mcpCallRaw(t, env, secret, headers, "tools/call", map[string]any{"name": name, "arguments": args})
-	r := decodeRPC(t, raw)
+	assertNoSecrets(t, raw)
+	r := decodeOnboardRPC(t, raw)
 	if r.Error == nil || r.Error.Code != mcpserver.ErrInvalidParams {
 		t.Fatalf("%s: want invalid params", name)
 	}

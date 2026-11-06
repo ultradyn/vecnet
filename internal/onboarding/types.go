@@ -139,6 +139,18 @@ type SubmitResult struct {
 	Status        string            `json:"status,omitempty"`
 	WebPath       string            `json:"web_path,omitempty"`
 	HumanOutput   string            `json:"human_output,omitempty"`
+	// Name, SpecVersion, NameOpen, SkipMCP, EnrolTTLSeconds and
+	// RequestPrincipalID are the receipt's nonsecret request options.
+	// Status fills them so a retry can be compared without reading live
+	// directory state. Zero values are omitted. RequestPrincipalID is the
+	// principal the request named, which is empty when the request omitted
+	// one; PrincipalID remains the peer's principal.
+	Name               string `json:"name,omitempty"`
+	SpecVersion        string `json:"spec_version,omitempty"`
+	NameOpen           bool   `json:"name_open,omitempty"`
+	SkipMCP            bool   `json:"skip_mcp,omitempty"`
+	EnrolTTLSeconds    int    `json:"enrol_ttl_seconds,omitempty"`
+	RequestPrincipalID string `json:"request_principal_id,omitempty"`
 }
 
 // MarshalSafe encodes the result with HumanOutput removed.

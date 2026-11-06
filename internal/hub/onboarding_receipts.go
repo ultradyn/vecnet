@@ -24,21 +24,24 @@ const onboardDigestInfo = "vecnet onboarding.v1 request"
 // digest and nonsecret options. It does not hold a raw request, a routine
 // URL or key, or one-time human output.
 type onboardRecord struct {
-	V               int    `json:"v"`
-	Subject         string `json:"subject"`
-	RequestID       string `json:"request_id"`
-	Kind            string `json:"kind"`
-	SpecVersion     string `json:"spec_version"`
-	Digest          string `json:"digest"`
-	PeerID          string `json:"peer_id"`
-	PrincipalID     string `json:"principal_id"`
-	NameOpen        bool   `json:"name_open"`
-	EnrolTTLSeconds int    `json:"enrol_ttl_seconds,omitempty"`
-	ConnectorName   string `json:"connector_name,omitempty"`
-	RouteID         string `json:"route_id,omitempty"`
-	ThreadID        string `json:"thread_id,omitempty"`
-	MessageID       string `json:"message_id,omitempty"`
-	DeliveryID      string `json:"delivery_id,omitempty"`
+	V                  int    `json:"v"`
+	Subject            string `json:"subject"`
+	RequestID          string `json:"request_id"`
+	Kind               string `json:"kind"`
+	SpecVersion        string `json:"spec_version"`
+	Digest             string `json:"digest"`
+	PeerID             string `json:"peer_id"`
+	PrincipalID        string `json:"principal_id"`
+	Name               string `json:"name,omitempty"`
+	NameOpen           bool   `json:"name_open"`
+	EnrolTTLSeconds    int    `json:"enrol_ttl_seconds,omitempty"`
+	ConnectorName      string `json:"connector_name,omitempty"`
+	SkipMCP            bool   `json:"skip_mcp,omitempty"`
+	RequestPrincipalID string `json:"request_principal_id,omitempty"`
+	RouteID            string `json:"route_id,omitempty"`
+	ThreadID           string `json:"thread_id,omitempty"`
+	MessageID          string `json:"message_id,omitempty"`
+	DeliveryID         string `json:"delivery_id,omitempty"`
 }
 
 // onboardCanonical is the byte string the keyed digest covers, including
@@ -111,8 +114,9 @@ func (h *Hub) loadOnboardReceipt(ctx context.Context, tx *sql.Tx, subject, reque
 func (h *Hub) saveOnboardReceipt(ctx context.Context, tx *sql.Tx, subject string, n onboarding.Normalized, digest string, res onboarding.SubmitResult) error {
 	rec := onboardRecord{
 		V: 1, Subject: subject, RequestID: n.RequestID, Kind: n.Kind, SpecVersion: n.SpecVersion,
-		Digest: digest, PeerID: res.PeerID, PrincipalID: res.PrincipalID, NameOpen: n.NameOpen,
-		EnrolTTLSeconds: n.EnrolTTLSeconds, ConnectorName: n.ConnectorName, RouteID: res.RouteID,
+		Digest: digest, PeerID: res.PeerID, PrincipalID: res.PrincipalID, Name: n.Name, NameOpen: n.NameOpen,
+		EnrolTTLSeconds: n.EnrolTTLSeconds, ConnectorName: n.ConnectorName, SkipMCP: n.SkipMCP,
+		RequestPrincipalID: n.PrincipalID, RouteID: res.RouteID,
 	}
 	if res.Setup != nil {
 		rec.ThreadID = res.Setup.ThreadID
@@ -147,6 +151,8 @@ func (h *Hub) resultFromReceipt(ctx context.Context, tx *sql.Tx, rec onboardReco
 		RequestID: rec.RequestID, Kind: rec.Kind, PeerID: rec.PeerID, PrincipalID: rec.PrincipalID,
 		RouteID: rec.RouteID, ConnectorName: rec.ConnectorName, Setup: setup, AuthState: state,
 		SendDefaults: copyDefaults(spec), Status: status,
+		Name: rec.Name, SpecVersion: rec.SpecVersion, NameOpen: rec.NameOpen, SkipMCP: rec.SkipMCP,
+		EnrolTTLSeconds: rec.EnrolTTLSeconds, RequestPrincipalID: rec.RequestPrincipalID,
 	}, nil
 }
 
