@@ -90,6 +90,39 @@ func (h *Hub) onboardDigest(n onboarding.Normalized) (string, error) {
 	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
+// receiptStringsHold reports whether any stored string contains the
+// normalized routine key or URL. Empty secrets match nothing.
+func receiptStringsHold(rec onboardRecord, key, url string) bool {
+	fields := []string{
+		rec.Subject, rec.RequestID, rec.Kind, rec.SpecVersion, rec.Digest,
+		rec.PeerID, rec.PrincipalID, rec.Name, rec.ConnectorName, rec.RequestPrincipalID,
+		rec.RouteID, rec.ThreadID, rec.MessageID, rec.DeliveryID,
+	}
+	for _, field := range fields {
+		if secretInString(field, key) || secretInString(field, url) {
+			return true
+		}
+	}
+	return false
+}
+
+// receiptTextHolds is the serialized check. It searches the raw text and the
+// strings json.Unmarshal recovers, so an escape of "<" cannot hide the key.
+func receiptTextHolds(text, key, url string) bool {
+	if secretInString(text, key) || secretInString(text, url) {
+		return true
+	}
+	var rec onboardRecord
+	if json.Unmarshal([]byte(text), &rec) != nil {
+		return false
+	}
+	return receiptStringsHold(rec, key, url)
+}
+
+func secretInString(field, secret string) bool {
+	return secret != "" && strings.Contains(field, secret)
+}
+
 func digestEqual(stored, got string) bool {
 	return subtle.ConstantTimeCompare([]byte(stored), []byte(got)) == 1
 }
@@ -125,12 +158,17 @@ func (h *Hub) saveOnboardReceipt(ctx context.Context, tx *sql.Tx, subject string
 		rec.MessageID = res.Setup.MessageID
 		rec.DeliveryID = res.Setup.DeliveryID
 	}
+	// Compare the original strings before encoding. json.Marshal writes "<"
+	// as \u003c, so a search of the serialized text misses a key that contains it.
+	if receiptStringsHold(rec, n.WebhookKey, n.WebhookURL) {
+		return errors.New("hub: onboarding receipt would store a routine secret")
+	}
 	body, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
 	text := string(body)
-	if n.WebhookKey != "" && strings.Contains(text, n.WebhookKey) || n.WebhookURL != "" && strings.Contains(text, n.WebhookURL) {
+	if receiptTextHolds(text, n.WebhookKey, n.WebhookURL) {
 		return errors.New("hub: onboarding receipt would store a routine secret")
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO meta(key, value) VALUES (?, ?)`, onboardMetaKey(subject, n.RequestID), text); err != nil {

@@ -170,12 +170,12 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 			t.Run(era, func(t *testing.T) {
 				for _, tc := range cases {
 					t.Run(tc.name, func(t *testing.T) {
-						got := mcpInvalidPath(t, env, env.OperatorSecret, opHeaders[era], "vecnet_agent_add", tc.args)
+						got := mcpInvalidPath(t, env, env.OperatorSecret, opHeaders[era], "vecnet_agent_add", tc.args, peerSecret, principalSecret)
 						if got != tc.path {
 							t.Fatal("invalid params path mismatch")
 						}
 						raw := mcpCallRaw(t, env, env.OperatorSecret, opHeaders[era], "tools/call", map[string]any{"name": "vecnet_agent_add", "arguments": tc.args})
-						assertNoSecrets(t, raw, routineURL, routineKey, header, filePath)
+						assertNoSecrets(t, raw, routineURL, routineKey, header, filePath, peerSecret, principalSecret)
 					})
 				}
 			})
@@ -192,18 +192,18 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 			{"principal", principalSecret},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				mcpToolError(t, env, tc.secret, modern(), "vecnet_agent_kinds", map[string]any{}, "forbidden")
-				mcpToolError(t, env, tc.secret, modern(), "vecnet_agent_add", args, "forbidden")
-				mcpToolError(t, env, tc.secret, modern(), "vecnet_agent_status", map[string]any{"request_id": "forged-1"}, "forbidden")
+				mcpToolError(t, env, tc.secret, modern(), "vecnet_agent_kinds", map[string]any{}, "forbidden", env.OperatorSecret, peerSecret, principalSecret)
+				mcpToolError(t, env, tc.secret, modern(), "vecnet_agent_add", args, "forbidden", env.OperatorSecret, peerSecret, principalSecret)
+				mcpToolError(t, env, tc.secret, modern(), "vecnet_agent_status", map[string]any{"request_id": "forged-1"}, "forbidden", env.OperatorSecret, peerSecret, principalSecret)
 			})
 		}
-		if got := mcpInvalidPath(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", withTop(args, "as", env.OperatorPeer)); got != "" {
+		if got := mcpInvalidPath(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", withTop(args, "as", env.OperatorPeer), peerSecret, principalSecret); got != "" {
 			t.Fatal("forged as path mismatch")
 		}
-		if got := mcpInvalidPath(t, env, peerSecret, modern(), "vecnet_agent_add", withTop(args, "as", env.OperatorPeer)); got != "" {
+		if got := mcpInvalidPath(t, env, peerSecret, modern(), "vecnet_agent_add", withTop(args, "as", env.OperatorPeer), env.OperatorSecret, principalSecret); got != "" {
 			t.Fatal("peer forged as path mismatch")
 		}
-		if got := mcpInvalidPath(t, env, env.OperatorSecret, modern(), "vecnet_agent_status", map[string]any{"request_id": "forged-1", "as": peerSecret}); got != "" {
+		if got := mcpInvalidPath(t, env, env.OperatorSecret, modern(), "vecnet_agent_status", map[string]any{"request_id": "forged-1", "as": peerSecret}, peerSecret, principalSecret); got != "" {
 			t.Fatal("status forged as path mismatch")
 		}
 		var opWho, peerWho map[string]string
@@ -248,12 +248,21 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 	})
 
 	t.Run("legacy add", func(t *testing.T) {
-		got := mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("session", legacyID, "Legacy One", nil))
-		if got["web_path"] != agentWebPath("session", "Legacy One", legacyID) || got["request_id"] != legacyID {
+		extra := []string{peerSecret, principalSecret}
+		res, raw := mcpToolResult(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("session", legacyID, "Legacy One", nil), extra...)
+		if res.IsError || len(res.Content) != 1 {
+			t.Fatal("legacy add tool error")
+		}
+		var got map[string]any
+		if json.Unmarshal(res.StructuredContent, &got) != nil || got["web_path"] != agentWebPath("session", "Legacy One", legacyID) || got["request_id"] != legacyID {
 			t.Fatal("legacy add result mismatch")
 		}
-		assertNoSecrets(t, mustRaw(t, got))
-		dot := mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("dot", "dot-human-1", "Dot One", nil))
+		assertNoSecrets(t, raw, extra...)
+		mut := withExtraJSONField(t, raw, "leaked", peerSecret)
+		if !wireHasSecret(mut, append([]string{env.OperatorSecret}, extra...)...) {
+			t.Fatal("legacy add mutation was not scanned")
+		}
+		dot := mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("dot", "dot-human-1", "Dot One", nil), extra...)
 		if dot["web_path"] != agentWebPath("dot", "Dot One", "dot-human-1") {
 			t.Fatal("dot add result mismatch")
 		}
@@ -691,6 +700,64 @@ func TestAgentOnboardMCPSafeRetry(t *testing.T) {
 // TestAgentOnboardMCPFixRound2 covers the second review. Unknown property
 // names must not be quoted (t7 r2 I1). Incomplete historical receipts must
 // not treat absent fields as the original request (t7 r2 I2).
+// TestEscapedRoutineKeyName is the R35 receipt leak. A printable routine key
+// that contains "<" must not be stored when that same value is the peer name.
+// json.Marshal writes the bracket as \u003c, so a search of the serialized text
+// misses it. Hub submit rolls back, and MCP status in both eras stays free of
+// the key.
+func TestEscapedRoutineKeyName(t *testing.T) {
+	env := testhub.Start(t)
+	key := "crsr_leak<key"
+	escaped := strings.ReplaceAll(key, "<", `\u003c`)
+	routineURL := fakeRoutineURL(t)
+	const id = "esc-name-1"
+	before := takeMCPCensus(t, env)
+	resp, raw := env.Do(env.OperatorSecret, http.MethodPost, "/v1/admin/agents", map[string]any{
+		"kind": "grokbot", "spec_version": onboarding.SpecVersion, "request_id": id,
+		"inputs": map[string]any{
+			"name": key, "webhook_url": routineURL, "webhook_key": key, "skip_mcp": false,
+		},
+	})
+	if resp.StatusCode == http.StatusCreated || strings.Contains(string(raw), key) || strings.Contains(string(raw), escaped) {
+		t.Fatal("submit stored or echoed a name that is the routine key")
+	}
+	if takeMCPCensus(t, env).receipts != before.receipts || takeMCPCensus(t, env).peers != before.peers {
+		t.Fatal("submit kept a peer or a receipt")
+	}
+	var n int
+	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM peers WHERE name=?`, key).Scan(&n); err != nil || n != 0 {
+		t.Fatal("submit kept a peer named with the routine key")
+	}
+	rows, err := env.Hub.DB.Query(`SELECT value FROM meta WHERE key LIKE 'onboarding.v1/%'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(value, key) || strings.Contains(value, escaped) {
+			t.Fatal("receipt stored the routine key")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
+		t.Run(era, func(t *testing.T) {
+			headers := mcpEraHeaders(t, env, env.OperatorSecret, era)
+			wire := mcpCallRaw(t, env, env.OperatorSecret, headers, "tools/call", map[string]any{
+				"name": "vecnet_agent_status", "arguments": map[string]any{"request_id": id},
+			})
+			if strings.Contains(string(wire), key) || strings.Contains(string(wire), escaped) {
+				t.Fatal("status returned the routine key")
+			}
+		})
+	}
+}
+
 func TestAgentOnboardMCPFixRound2(t *testing.T) {
 	env := testhub.Start(t)
 	opHeaders := map[string]map[string]string{}
@@ -869,6 +936,16 @@ func TestAgentOnboardMCPFixRound2(t *testing.T) {
 		}
 		// The success helper forwards the caller bearer and the extra fixtures.
 		rejectToolWire(t, []byte(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`), env.OperatorSecret, peerBearer, nonhex)
+		escapedKey := "crsr_Zz<not-hex!"
+		escaped := []byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{}"}],"structuredContent":{"status":"needs_human"},"extra":"crsr_Zz\u003cnot-hex!"}}`)
+		if !wireHasSecret(escaped, env.OperatorSecret, peerBearer, escapedKey) {
+			t.Fatal("escaped nonhex fixture was not scanned")
+		}
+		escapedName := []byte(`{"jsonrpc":"2.0","id":1,"result":{"crsr_Zz\u003cnot-hex!":"x"}}`)
+		if !wireHasSecret(escapedName, escapedKey) {
+			t.Fatal("escaped property name was not scanned")
+		}
+		rejectToolWire(t, help, env.OperatorSecret, peerBearer, escapedKey)
 	})
 }
 
@@ -1112,10 +1189,11 @@ func mcpToolOK(t *testing.T, env *testhub.Env, secret string, headers map[string
 	return fromStruct
 }
 
-func mcpToolError(t *testing.T, env *testhub.Env, secret string, headers map[string]string, name string, args any, code string) (toolErrorBody, []byte) {
+func mcpToolError(t *testing.T, env *testhub.Env, secret string, headers map[string]string, name string, args any, code string, extra ...string) (toolErrorBody, []byte) {
 	t.Helper()
 	raw := mcpCallRaw(t, env, secret, headers, "tools/call", map[string]any{"name": name, "arguments": args})
-	assertNoSecrets(t, raw)
+	rejectToolWire(t, raw, append([]string{secret}, extra...)...)
+	assertNoSecrets(t, raw, extra...)
 	r := decodeOnboardRPC(t, raw)
 	if r.Error != nil {
 		t.Fatal("tool error path returned an RPC error")
@@ -1134,10 +1212,11 @@ func mcpToolError(t *testing.T, env *testhub.Env, secret string, headers map[str
 	return e, raw
 }
 
-func mcpInvalidPath(t *testing.T, env *testhub.Env, secret string, headers map[string]string, name string, args any) string {
+func mcpInvalidPath(t *testing.T, env *testhub.Env, secret string, headers map[string]string, name string, args any, extra ...string) string {
 	t.Helper()
 	raw := mcpCallRaw(t, env, secret, headers, "tools/call", map[string]any{"name": name, "arguments": args})
-	assertNoSecrets(t, raw)
+	rejectToolWire(t, raw, append([]string{secret}, extra...)...)
+	assertNoSecrets(t, raw, extra...)
 	r := decodeOnboardRPC(t, raw)
 	if r.Error == nil || r.Error.Code != mcpserver.ErrInvalidParams {
 		t.Fatalf("%s: want invalid params", name)
@@ -1173,7 +1252,17 @@ var liveRoutineKeyRE = regexp.MustCompile(`crsr_[0-9a-fA-F]{16,}`)
 // fixture credential, a live routine key, or human output. Callers use it
 // before they decode or format the body.
 func wireHasSecret(raw []byte, secrets ...string) bool {
-	text := string(raw)
+	if textHasSecret(string(raw), secrets) {
+		return true
+	}
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return false
+	}
+	return valueHasSecret(v, secrets)
+}
+
+func textHasSecret(text string, secrets []string) bool {
 	for _, banned := range []string{"human_output", "vn_enrol_", "api2.cursor.sh"} {
 		if strings.Contains(text, banned) {
 			return true
@@ -1188,6 +1277,46 @@ func wireHasSecret(raw []byte, secrets ...string) bool {
 		}
 	}
 	return false
+}
+
+// valueHasSecret walks decoded JSON, including unknown fields and property
+// names. json.Unmarshal restores escapes such as \u003c before the typed decode.
+func valueHasSecret(v any, secrets []string) bool {
+	switch x := v.(type) {
+	case string:
+		return textHasSecret(x, secrets)
+	case map[string]any:
+		for key, child := range x {
+			if textHasSecret(key, secrets) || valueHasSecret(child, secrets) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range x {
+			if valueHasSecret(child, secrets) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func withExtraJSONField(t *testing.T, raw []byte, key, val string) []byte {
+	t.Helper()
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		t.Fatal("wire is not JSON")
+	}
+	obj, ok := v.(map[string]any)
+	if !ok {
+		t.Fatal("wire is not an object")
+	}
+	obj[key] = val
+	out, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatal("wire mutation could not be encoded")
+	}
+	return out
 }
 
 func assertNoSecrets(t *testing.T, raw []byte, secrets ...string) {
