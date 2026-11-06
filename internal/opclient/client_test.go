@@ -10,10 +10,12 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/blobwire"
@@ -392,6 +394,10 @@ func TestUploadSendsBytesAndType(t *testing.T) {
 				wantType = "application/octet-stream"
 			}
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/blob-capabilities" {
+					w.WriteHeader(404)
+					return
+				}
 				if r.Method != "PUT" || r.URL.RequestURI() != "/v1/blobs?ttl=86400" {
 					t.Errorf("upload request = %s %s", r.Method, r.URL)
 				}
@@ -437,6 +443,10 @@ func TestUploadTooLarge(t *testing.T) {
 
 func TestUploadEmpty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/blob-capabilities" {
+			w.WriteHeader(404)
+			return
+		}
 		if r.ContentLength != 0 || r.Header.Get("Content-Length") != "0" || len(r.TransferEncoding) != 0 {
 			t.Errorf("empty upload length=%d header=%q transfer=%v", r.ContentLength, r.Header.Get("Content-Length"), r.TransferEncoding)
 		}
@@ -457,6 +467,10 @@ func TestUploadEmpty(t *testing.T) {
 
 func TestUploadContextCancellation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/blob-capabilities" {
+			w.WriteHeader(404)
+			return
+		}
 		t.Error("a cancelled upload reached the server")
 	}))
 	defer srv.Close()
@@ -470,6 +484,10 @@ func TestUploadContextCancellation(t *testing.T) {
 
 func TestUploadDoesNotFollowRedirects(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/blob-capabilities" {
+			w.WriteHeader(404)
+			return
+		}
 		if r.URL.Path != "/v1/blobs" {
 			t.Error("upload followed an authenticated redirect")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -613,5 +631,96 @@ func TestTailReportsRestarting(t *testing.T) {
 	}
 	if batches != 1 {
 		t.Errorf("handled %d batches, want only the live page", batches)
+	}
+}
+
+func TestR2UploadSeekableAndSpoolCleanup(t *testing.T) {
+	const sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+	const sum = "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0="
+	const id = "blo_00000000000000000000000001"
+	for _, kind := range []string{"seekable", "spool", "put-failure", "size-mismatch", "canceled", "read-failure"} {
+		t.Run(kind, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("TMPDIR", tmp)
+			completed, puts := 0, 0
+			direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				puts++
+				if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+					t.Error("direct credential leak")
+				}
+				b, _ := io.ReadAll(r.Body)
+				if string(b) != "abc" || r.ContentLength != 3 {
+					t.Error("wrong direct body")
+				}
+				if kind == "put-failure" {
+					w.WriteHeader(500)
+					return
+				}
+				w.WriteHeader(200)
+			}))
+			defer direct.Close()
+			yes, no := true, false
+			ref := blobwire.Ref{BlobID: id, SHA256: sha, SHA256Verified: &yes, Integrity: &blobwire.Integrity{Algorithm: "sha256", Value: sha, Verified: true}, Size: 3, RetentionClass: "keep"}
+			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer fake" {
+					t.Error("missing hub authentication")
+				}
+				switch r.URL.Path {
+				case "/v1/blob-capabilities":
+					json.NewEncoder(w).Encode(map[string]any{"backend": "r2", "max_size": 25 << 20, "checksum_profile": "sha256", "download_origins": []string{direct.URL}})
+				case "/v1/blobs/uploads":
+					pending := ref
+					pending.SHA256Verified = &no
+					pending.Integrity = &blobwire.Integrity{Algorithm: "sha256", Value: sha}
+					json.NewEncoder(w).Encode(blobwire.UploadGrant{Ref: pending, Upload: blobwire.Request{Method: "PUT", URL: direct.URL + "/object?private=signature", ExpiresAt: time.Now().Add(299 * time.Second).Format(time.RFC3339Nano), Headers: map[string]string{"Content-Length": "3", "Content-Type": "application/octet-stream", "Content-Disposition": "attachment", "Cache-Control": "private, no-store", "If-None-Match": "*", "X-Amz-Checksum-Sha256": sum, "X-Amz-Meta-Vecnet-Checksum-Profile": "sha256", "X-Amz-Meta-Vecnet-Checksum": sum}}})
+				case "/v1/blobs/uploads/" + id + "/complete":
+					completed++
+					json.NewEncoder(w).Encode(ref)
+				default:
+					t.Error("R2 fell back to hub byte transfer")
+					w.WriteHeader(500)
+				}
+			}))
+			defer hub.Close()
+			var r io.Reader = strings.NewReader("abc")
+			if kind != "seekable" {
+				r = struct{ io.Reader }{r}
+			}
+			if kind == "size-mismatch" {
+				r = struct{ io.Reader }{strings.NewReader("abcd")}
+			}
+			if kind == "read-failure" {
+				r = iotest.ErrReader(errors.New("private=signature"))
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if kind == "canceled" {
+				cancel()
+			}
+			var progress []int64
+			att, err := New(hub.URL, "fake").UploadWithProgress(ctx, r, 3, "text/plain", "report.txt", func(n int64) { progress = append(progress, n) })
+			if kind == "seekable" || kind == "spool" {
+				if err != nil || att.BlobID != id || att.Integrity == nil || !att.Integrity.Verified || completed != 1 || puts != 1 {
+					t.Fatalf("R2 upload failed: %v", err)
+				}
+				if len(progress) == 0 || progress[len(progress)-1] != 3 {
+					t.Fatal("missing PUT progress")
+				}
+				for _, n := range progress {
+					if n > 3 {
+						t.Fatal("counted hash or spool bytes")
+					}
+				}
+			} else if err == nil || completed != 0 {
+				t.Fatal("unsafe failed completion")
+			}
+			if kind == "read-failure" && strings.Contains(err.Error(), "private=signature") {
+				t.Error("source error leaked transfer information")
+			}
+			entries, _ := os.ReadDir(tmp)
+			if len(entries) != 0 {
+				t.Fatal("spool file leaked")
+			}
+		})
 	}
 }

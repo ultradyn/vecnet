@@ -56,6 +56,8 @@ messaging:
        default priority depends on the emoji: ✅ ❓ ❗ wake_idle, others hold
   mcp                                 stdio MCP relay to the hub's /mcp as this profile [--as X]; needs --net P
   inbox [--since CURSOR] [--ack] [--limit N]
+  blob get SHA [--blob-id ID] --out PATH [--json]
+       URLs are short-lived; call get again whenever you need the file, as long as it hasn't expired.
   ack <cursor>
   watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]
        does not ack; use --auto-ack or vecnet ack <cursor> to avoid replaying
@@ -455,6 +457,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdProfile(args)
 	case "guide":
 		return a.cmdGuide(args)
+	case "blob":
+		return a.cmdBlob(args)
 	case "send":
 		return a.cmdSend(args)
 	case "reply":
@@ -893,7 +897,7 @@ func mediaTypeOf(path string) string {
 	return mt
 }
 
-// upload PUTs one file to /v1/blobs and returns its attachment reference.
+// upload uses the advertised backend and returns a completed attachment reference.
 func (a *app) upload(c *client, path string) (envelope.Attachment, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -907,14 +911,11 @@ func (a *app) upload(c *client, path string) (envelope.Attachment, error) {
 	mt := mediaTypeOf(path)
 	ctx, cancel := context.WithTimeout(a.ctx, uploadTimeout)
 	defer cancel()
-	var out struct {
-		SHA256 string `json:"sha256"`
-		Size   int64  `json:"size"`
+	ref, err := c.blobs().Upload(ctx, f, st.Size(), mt, "")
+	if err != nil {
+		return envelope.Attachment{}, blobError(err)
 	}
-	if err := c.doNoTimeout(ctx, http.MethodPut, "/v1/blobs", nil, rawBody{r: f, contentType: mt, length: st.Size()}, &out); err != nil {
-		return envelope.Attachment{}, err
-	}
-	return envelope.Attachment{SHA256: out.SHA256, Size: out.Size, MediaType: mt, Name: filepath.Base(path)}, nil
+	return envelope.Attachment{BlobID: ref.BlobID, SHA256: ref.SHA256, Size: ref.Size, MediaType: mt, Name: filepath.Base(path), ExpiresAt: ref.ExpiresAt, RetentionClass: ref.RetentionClass, SHA256Verified: ref.SHA256Verified, Integrity: ref.Integrity}, nil
 }
 
 // --- inbox / ack ---
@@ -1152,10 +1153,7 @@ func (a *app) cmdThread(args []string) error {
 	if err := c.do(a.ctx, http.MethodGet, "/v1/threads/"+pathEscape(o.pos[0])+"/messages", q, nil, &raw); err != nil {
 		return err
 	}
-	var body struct {
-		Messages  []envelope.Message `json:"messages"`
-		NextAfter *string            `json:"next_after"`
-	}
+	var body opapi.History
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return &hubError{Code: "bad_response", Message: err.Error()}
 	}
@@ -1177,6 +1175,9 @@ func (a *app) cmdThread(args []string) error {
 			}
 		}
 		fmt.Fprintf(a.stdout, "%s %s %s %s\n", m.MessageID, m.CreatedAt, from, flatten(m.Content.Text))
+		for _, label := range blobLabels(m.Attachments, body.BlobStates) {
+			fmt.Fprintln(a.stdout, label)
+		}
 		if len(m.Reactions) > 0 {
 			groups := make([]string, 0, len(m.Reactions))
 			for _, group := range m.Reactions {

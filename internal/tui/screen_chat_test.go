@@ -22,6 +22,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
@@ -2914,5 +2915,60 @@ func TestChatOperatorCLILabel(t *testing.T) {
 	assertChatInert(t, m.View().Content)
 	for _, size := range [][2]int{{140, 42}, {80, 24}} {
 		assertFrame(t, plainAt(t, m, size[0], size[1]), size[0], size[1])
+	}
+}
+
+func TestChatAttachmentExpired(t *testing.T) {
+	t.Chdir(t.TempDir())
+	a := chatSeed()
+	chatFile(a, "report.txt", "abc")
+	at := envelope.FormatTime(fixedNow.Add(-time.Hour))
+	msg := &a.byID[chatHark].messages[len(a.byID[chatHark].messages)-1]
+	msg.Content.Text = "keep this preview"
+	msg.Attachments[0].BlobID = "blo_00000000000000000000000001"
+	msg.Attachments[0].ExpiresAt = &at
+	msg.Attachments[0].RetentionClass = "1d"
+	m, p := chatModel(t, a, newClock())
+	wantFrame(t, chatFrame(t, m), "[attachment expired: report.txt]", "keep this preview", "3 B", "24-hour retention")
+	p.press("s")
+	p.idle()
+	if a.count("Blob") != 0 {
+		t.Fatal("expired file downloaded")
+	}
+}
+
+func TestChatSpillSurvivesAttachmentExpiry(t *testing.T) {
+	a := chatSeed()
+	chatSpilled(a, envelope.Attachment{SHA256: "sha-long", Size: 9, MediaType: "text/plain", Name: "message.md"})
+	a.blobs["sha-long"] = chatBlob{[]byte("full text"), "text/plain"}
+	a.byID[chatHark].detail.Now = envelope.FormatTime(fixedNow.Add(25 * time.Hour))
+	m, p := chatModel(t, a, newClock())
+	p.press("e")
+	p.until("durable spill", func() bool { return strings.Contains(chatFrame(t, m), "full text") })
+	if a.count("Blob") != 1 {
+		t.Fatal("durable spill did not expand")
+	}
+}
+
+func (a *chatAPI) BlobWithOptions(ctx context.Context, sha string, max int64, opts opclient.BlobOptions) ([]byte, string, error) {
+	return a.Blob(ctx, sha, max)
+}
+
+func TestChatAttachmentKeepsR2Reference(t *testing.T) {
+	a, m, p := chatOpen(t)
+	release := a.hold("Upload")
+	defer release()
+	path := chatAttFile(t, "ref.txt", "abc")
+	chatAttach(p, path)
+	p.until("upload", func() bool { return a.count("Upload") == 1 })
+	att := chatAttsOf(m)[0]
+	yes := true
+	ref := envelope.Attachment{BlobID: "blo_00000000000000000000000001", SHA256: chatSum("abc"), Size: 3, Name: "ref.txt", MediaType: "text/plain", RetentionClass: "keep", SHA256Verified: &yes, Integrity: &blobwire.Integrity{Algorithm: "sha256", Value: chatSum("abc"), Verified: true}}
+	p.send(chatUploadedMsg{thread: m.CurrentThread, id: att.id, att: ref})
+	p.press("i", "enter")
+	p.until("send", func() bool { return len(a.sends()) > 0 })
+	sent := a.sends()[0]
+	if len(sent.Attachments) != 1 || sent.Attachments[0].BlobID != ref.BlobID || sent.Attachments[0].Integrity == nil || !sent.Attachments[0].Integrity.Verified || sent.Attachments[0].RetentionClass != "keep" {
+		t.Fatal("send lost R2 reference")
 	}
 }

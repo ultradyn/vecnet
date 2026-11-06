@@ -204,6 +204,10 @@ func (f *fakeAPI) Blob(ctx context.Context, _ string, _ int64) ([]byte, string, 
 	return f.blob, "application/octet-stream", f.hit(ctx, "Blob")
 }
 
+func (f *fakeAPI) BlobWithOptions(ctx context.Context, sha string, max int64, opts opclient.BlobOptions) ([]byte, string, error) {
+	return f.Blob(ctx, sha, max)
+}
+
 // Upload waits on gate["Upload"] before reading, so a held upload has read
 // nothing, and answers with the sha256 of what it read.
 func (f *fakeAPI) Upload(ctx context.Context, r io.Reader, size int64, mediaType, name string) (envelope.Attachment, error) {
