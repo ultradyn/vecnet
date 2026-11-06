@@ -409,6 +409,35 @@ test('accidental cold resume is undone at once', async t => {
   assert.deepEqual(h.fake.subscribers('thread'), []); await h.wake();
   assert.deepEqual(h.engine.liveness(), { live: false, reason: 'not_loaded' }); assert.equal(h.sends().length, 0);
 });
+test('rejected cold resume cannot use its own idle broadcast to reattach', async t => {
+  let closeBeforeResume: (() => void) | undefined;
+  const h = await harness(t, { wrap: rpc => ({ ...rpc, async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+    if (method === 'thread/resume') closeBeforeResume?.();
+    return rpc.call<T>(method, params, ms);
+  } }) });
+  await h.engine.stop(); h.fake.detachOther('thread');
+  const baseline = h.fake.requests.length;
+  closeBeforeResume = () => {
+    closeBeforeResume = undefined;
+    h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' } });
+    h.fake.notify('thread/closed', { threadId: 'thread' });
+  };
+  await h.restart(); await h.tick(2000); await h.wake();
+  const requests = h.fake.requests.slice(baseline), resume = requests.find(r => r.method === 'thread/resume');
+  assert.ok(resume);
+  assert.ok(requests.some(r => r.method === 'thread/unsubscribe' && r.conn === resume.conn));
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'not_loaded' });
+  assert.equal(requests.filter(r => r.method === 'thread/resume').length, 1);
+  assert.deepEqual(h.fake.subscribers('thread'), []); assert.equal(h.sends().length, 0);
+  await h.tick(2 * minute);
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'not_loaded' });
+  assert.equal(h.fake.requests.slice(baseline).filter(r => r.method === 'thread/resume').length, 1);
+  assert.deepEqual(h.fake.subscribers('thread'), []); assert.equal(h.sends().length, 0);
+  // A later, independent load is still allowed to revive this binding.
+  h.fake.attachOther('thread'); h.fake.setThread({ id: 'thread', status: { type: 'idle' } });
+  await h.sync(); await h.tick(2000);
+  assert.equal(h.sends().length, 1); assert.deepEqual(h.engine.liveness(), { live: true });
+});
 test('re-subscribes when another client reloads the thread', async t => {
   const h = await harness(t, { status: { type: 'notLoaded' } }); assert.equal(h.engine.subscribed(), false);
   h.fake.attachOther('thread'); h.fake.setThread({ id: 'thread', status: { type: 'idle' } }); await h.sync(); await h.wake();
@@ -531,6 +560,36 @@ test('second definite additionalContext fallback rejection releases exactly once
   h.fake.failNext('turn/start', { code: -32602, message: 'additionalContext rejected again' });
   await h.wake(); await eventually(() => h.releases().length === 1);
   assert.equal(h.sends().length, 2); assert.equal((h.sends()[1].params as any).additionalContext, undefined); assert.equal(h.rows().length, 0);
+});
+for (const status of [{ type: 'idle' }, active]) test(`definite ${status.type} rejection retries failed release without another event or reconnect`, async t => {
+  const h = await harness(t, { status }), opens = h.opens;
+  h.fake.failNext(status.type === 'idle' ? 'turn/start' : 'turn/steer', { code: -32602, message: 'invalid input' });
+  h.plan.releaseFailure = true; h.save(); await h.wake();
+  assert.equal(h.rows().length, 1); const rejected = h.rows()[0];
+  assert.ok(h.releases().some(r => r.argv.includes(rejected.claim)));
+  assert.equal(rejected.state, 'sending'); assert.equal(rejected.acceptedAt, null);
+  h.plan.releaseFailure = false; h.save(); await h.tick(1000);
+  assert.equal(h.rows().length, 0, 'successful cleanup must reoffer the original delivery');
+  assert.equal(h.sends().length, 2, 'one rejected attempt and one accepted retry');
+  assert.deepEqual(Object.keys((h.sends()[1].params as any).additionalContext), ['vecnet_w1']);
+  assert.equal((h.sends()[1].params as any).clientUserMessageId, rejected.key);
+  assert.equal(h.releases().filter(r => r.argv.includes(rejected.claim)).length, 2);
+  assert.equal(h.kv.keys('releasing:').length, 0); assert.equal(h.plan.events.length, 1);
+  assert.equal(h.opens, opens); await h.tick(2 * minute); assert.equal(h.sends().length, 2);
+});
+test('definite rejection cleanup survives restart while the target turn remains active', async t => {
+  const h = await harness(t, { status: active });
+  h.fake.failNext('turn/steer', { code: -32602, message: 'invalid input' });
+  h.plan.releaseFailure = true; h.save(); await h.wake();
+  assert.equal(h.rows().length, 1); const rejected = h.rows()[0];
+  await h.engine.stop();
+  assert.equal(h.rows().length, 1, 'cleanup intent must remain durable at shutdown');
+  h.plan.releaseFailure = false; h.save(); await h.restart();
+  assert.equal(h.rows().length, 0, 'definite rejection needs no completed-turn absence scan');
+  assert.equal(h.sends().length, 2); assert.equal((h.sends()[1].params as any).clientUserMessageId, rejected.key);
+  assert.deepEqual(Object.keys((h.sends()[1].params as any).additionalContext), ['vecnet_w1']);
+  assert.equal(h.releases().filter(r => r.argv.includes(rejected.claim)).length, 2);
+  assert.equal(h.kv.keys('releasing:').length, 0); assert.equal(h.plan.events.length, 1);
 });
 test('thread closing rejection makes the binding not loaded', async t => {
   const h = await harness(t); h.fake.failNext('turn/start', { code: -32600, message: 'thread closing' }); await h.wake();

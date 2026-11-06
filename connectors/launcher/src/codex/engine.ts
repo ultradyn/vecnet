@@ -65,7 +65,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     return kv.keys('inflight:').map(key => JSON.parse(kv.get(key)!) as InflightRow).filter(row => row.threadId === b.threadId);
   }
   const write = (r: InflightRow) => kv.set('inflight:' + r.key, JSON.stringify(r));
-  function clear(r: InflightRow) { kv.delete('inflight:' + r.key); kv.delete('diagnostic:unresolved:' + r.key); waitingRetry.delete(r.key); waitForIdle.delete(r.key); receipts.delete(r.key); unresolvedLogged.delete(r.key); pendingLogged.delete(r.key); }
+  function clear(r: InflightRow) { kv.delete('inflight:' + r.key); kv.delete('releasing:' + r.claim); kv.delete('diagnostic:unresolved:' + r.key); waitingRetry.delete(r.key); waitForIdle.delete(r.key); receipts.delete(r.key); unresolvedLogged.delete(r.key); pendingLogged.delete(r.key); }
   function reason(requireSubscription = true): DormantReason | undefined {
     if (identityChanged) return 'identity_changed';
     if (clock.now() >= b.expiresAt) return 'expired';
@@ -114,7 +114,19 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     try { await release(claim); kv.delete('claiming:' + claim); }
     catch { log.warn('codex_claim_release_failed', { threadId: b.threadId }); scheduleClaimRecovery(); }
   }
+  async function releaseInflight(r: InflightRow) {
+    // A definite rejection (or proven absence) needs cleanup, not another
+    // history scan. Persist that fact before invoking the fallible child.
+    kv.set('releasing:' + r.claim, JSON.stringify(r));
+    waitingRetry.delete(r.key); waitForIdle.delete(r.key);
+    try { await release(r.claim); clear(r); }
+    catch { log.warn('codex_claim_release_failed', { threadId: b.threadId }); scheduleClaimRecovery(); }
+  }
   async function recoverClaims() {
+    for (const key of kv.keys('releasing:')) {
+      const r = JSON.parse(kv.get(key)!) as InflightRow;
+      if (r.threadId === b.threadId) await releaseInflight(r);
+    }
     const owned = new Set(rows().map(r => r.claim));
     for (const key of kv.keys('claiming:')) {
       const r = obj(JSON.parse(kv.get(key)!)); if (r.threadId !== b.threadId) continue;
@@ -166,8 +178,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     const before = mapStatus(status); status = value; lastActivity = clock.now();
     const s = mapStatus(status);
     if (s === 'not_loaded') { closedEpoch++; attached = false; }
-    else if (s !== 'unknown') {
-      if (!attaching && clock.now() - resumeAt > 2000) cold = false;
+    // A cold resume emits its own loaded status before its response. That
+    // broadcast cannot authorize recovery from the attachment we reject.
+    else if (s !== 'unknown' && !attaching) {
+      if (clock.now() - resumeAt > 2000) cold = false;
       else if (cold) scheduleWarmCheck();
     }
     if (s === 'waiting_approval' || s === 'waiting_input') {
@@ -256,7 +270,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     return Array.isArray(result.data) ? result.data[0] : undefined;
   }
   async function scan(r: InflightRow) {
-    if (!kv.get('inflight:' + r.key)) return;
+    if (!kv.get('inflight:' + r.key) || kv.get('releasing:' + r.claim)) return;
     let cursor: string | undefined, reached = false, inProgress = false;
     try {
       for (let page = 0; page < 20; page++) {
@@ -281,7 +295,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       }
     } catch { /* A partial scan never proves absence. */ }
     if (!kv.get('inflight:' + r.key) || receipts.has(r.key)) { clear(r); return; }
-    if (reached && !inProgress) { await release(r.claim); clear(r); return; }
+    if (reached && !inProgress) { await releaseInflight(r); return; }
     r.state = 'unresolved'; write(r);
     if (!unresolvedLogged.has(r.key) && !kv.get('diagnostic:unresolved:' + r.key)) {
       unresolvedLogged.add(r.key); kv.set('diagnostic:unresolved:' + r.key, '1'); log.warn('codex_delivery_unresolved', { threadId: b.threadId });
@@ -361,10 +375,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         }
         if (/thread (?:is )?closing|thread not found/.test(e.message)) {
           cold = true; status = { type: 'notLoaded' }; closedEpoch++;
-          await unsubscribe(); await release(r.claim); clear(r); return;
+          await unsubscribe(); await releaseInflight(r); return;
         }
         if (!fallback && /additionalContext/.test(e.message)) { fallback = true; continue; }
-        await release(r.claim); clear(r); return;
+        await releaseInflight(r); return;
       }
     }
   }
