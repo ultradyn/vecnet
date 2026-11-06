@@ -11,7 +11,7 @@ _Drafted 2026-11-07 for CoS review, as the one design job CoS approved for Max's
 - **Unread is amber** (`--wake`), never red. Red (`--bad`) means an error and nothing else.
 - **Colour is never the only signal.** The focused pane gets a heavy border. The selected row gets `>`, plus reverse video when there is no colour. Unread items get bold and their count. Sections get a `▌` bar.
 - **Hostile text is never coloured by what it says.** A role comes from the field and from hub enums, and it wraps text that `Clean` has already sanitised.
-- **Mock frames for every screen group** (section 8), each with a cell-exact paint mask. Inbox and chat also get `NO_COLOR` and 16-colour masks.
+- **Mock frames for every screen group** (section 8), each with a cell-exact paint mask and a rendered colour preview. Inbox and chat also get previews on a light terminal, in 256 colours, in 16 colours and under `NO_COLOR`.
 - **The integrator** stacks `internal/tui/theme` on PR #37 after CoS accepts this design. It must ship ui-shots of every TUI screen in the default theme, plus `NO_COLOR` and 16-colour shots of at least chat and inbox. CoS reviews the shots by eye before merging (section 10).
 
 ## Contents
@@ -378,9 +378,20 @@ Layout, wording and keys stay as they are.
 
 The frames follow PR #37's goldens: the same columns, labels and truncation, with the section 7 changes applied. Inbox, dash, subs, prefs and help are 80 columns wide. Chat is 100 columns wide, so that the sidebar and the who list read properly. The wide header is 140 columns, the shot size. The integrator's ui-shots at real sizes are the final check.
 
+**About the previews.** Each image is a rendering of the mock frame and its paint mask below it, drawn with the role values from section 5. They are **not screenshots of the TUI**, which does not have this theme yet. The rendering follows the ui-shot harness (`scripts/ui/ansi.mjs`):
+
+- JetBrains Mono at 14 px with 18.5 px rows;
+- `#0b0f19` as the dark terminal background and `#ffffff` as the light one;
+- the harness's own ANSI palette for the 16-colour previews;
+- faint drawn at 60 % opacity.
+
+Every glyph is pinned to one cell, as a terminal pins it. The integrator's real ui-shots replace these previews (section 10.3).
+
 ### 8.1 Header and help
 
 The header bar at 140 columns (the shot size), with all segments present. `4:subs 8` is an attention badge.
+
+![Header bar preview, truecolor, dark terminal](tui-color/header-wide-tc-dark.png)
 
 ```text
  vecnet | 1:inbox 2:chat 3:dash 4:subs 8                              home · hub hub.example:8443  live  apr 2  dlq 3  cuts/24h 0  07:41:00
@@ -393,6 +404,8 @@ H bbbbbbbbmmtttttttmmmmmmmmmmmmmmmmmmmmmmu                              mmmmmmmm
 ```
 
 Header states at 80 columns. A loopback hub is marked `local` in `warn` and the connection is retrying (first row). The connection is off (second row).
+
+![Header states preview: local hub retrying, and connection off](tui-color/header-states-tc-dark.png)
 
 ```text
  vecnet | 1:inbox 2:chat 3:dash 4:subs     dev · hub 127.0.0.1:8443 local  retry
@@ -407,6 +420,8 @@ H bbbbbbbbmmtttttttmmmmmmmmmmmmmmmmmmmmm       mmmmmmmmmmmmmmmmmmmmmmmmmmm  eee
 ```
 
 The notice row sits under the header and is not filled. Its kinds are moving, restart and other.
+
+![Notice row preview: moving, restart and other](tui-color/notices-tc-dark.png)
 
 ```text
 ! MOVING in 18h Nov 03 02:00 -> vecnet.xk.io  Moving to Fly tonight  (+1 more)
@@ -423,6 +438,8 @@ Paint (truecolor and 256; codes in section 6.1):
 ```
 
 Help is a full-screen pane, so it is focused (heavy border):
+
+![Help preview, truecolor, dark terminal](tui-color/help-tc-dark.png)
 
 ```text
  vecnet | 1:inbox 2:chat 3:dash 4:subs       home · hub hub.example:8443  live
@@ -475,6 +492,8 @@ H bbbbbbbbmmtttttttmmmmmmmmmmmmmmmmmmmmm       mmmmmmmmmmmmmmmmmmmmmmmmmmm  ssss
 ### 8.2 Inbox
 
 The list is focused and the first approval is selected. `2 unread` in the title is amber and bold. The unread WAKE and HOLD rows are bold, and the read HOLD row is muted. The quote gutter in the detail pane uses `rule`.
+
+![Inbox preview, truecolor, dark terminal](tui-color/inbox-tc-dark.png)
 
 ```text
  vecnet | 1:inbox 2:chat 3:dash 4:subs       home · hub hub.example:8443  live
@@ -590,9 +609,29 @@ S 5RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR5~ 5555555555555555  3333    
   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ```
 
+The same inbox on the other rungs:
+
+- **Light terminal** (truecolor, light set):
+
+  ![Inbox preview, truecolor, light terminal](tui-color/inbox-tc-light.png)
+
+- **256 colours** (dark set, fixed xterm indices):
+
+  ![Inbox preview, 256 colours](tui-color/inbox-256-dark.png)
+
+- **16 colours** (ANSI 1–6, faint for muted, reverse for fills):
+
+  ![Inbox preview, 16 colours](tui-color/inbox-ansi16.png)
+
+- **`NO_COLOR`** (bold, reverse, heavy border, `▌` and `>` only):
+
+  ![Inbox preview, NO_COLOR](tui-color/inbox-nocolor.png)
+
 ### 8.3 Chat and sidebar
 
 The log is focused, and the selected message (pag-hark-sleuth, 06:31) is filled across all its lines. In the sidebar, the current thread's two lines are filled, unread titles are bold with an amber count, and both groups carry `▌` headers. The `■` swatches and sender names use the identity hues. The receipts and priority legends use their state roles.
+
+![Chat and sidebar preview, truecolor, dark terminal](tui-color/chat-tc-dark.png)
 
 ```text
  vecnet | 1:inbox 2:chat 3:dash 4:subs             home · hub hub.example:8443  live  apr 1  dlq 0
@@ -708,9 +747,29 @@ S ~                    ~5RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR5~66666
   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ```
 
+The same chat and sidebar on the other rungs:
+
+- **Light terminal** (truecolor, light set):
+
+  ![Chat and sidebar preview, truecolor, light terminal](tui-color/chat-tc-light.png)
+
+- **256 colours** (dark set, fixed xterm indices):
+
+  ![Chat and sidebar preview, 256 colours](tui-color/chat-256-dark.png)
+
+- **16 colours** (ANSI 1–6, faint for muted, reverse for fills):
+
+  ![Chat and sidebar preview, 16 colours](tui-color/chat-ansi16.png)
+
+- **`NO_COLOR`** (bold, reverse, heavy border, `▌` and `>` only):
+
+  ![Chat and sidebar preview, NO_COLOR](tui-color/chat-nocolor.png)
+
 ### 8.4 Dash
 
 The peers table is focused, with `max` selected. Peer names take their kind colour, presence and reach use the section 5.5 maps, and the quota bar's colour follows its level. The table head is muted and has no fill.
+
+![Dash preview, truecolor, dark terminal](tui-color/dash-tc-dark.png)
 
 ```text
  vecnet | 1:inbox 2:chat 3:dash 4:subs       home · hub hub.example:8443  live
@@ -771,6 +830,8 @@ S fA#AAA##############################SSSSSSSSS####MMMM#################MMMMMM##
 ### 8.5 Subs
 
 `failed-dot` is selected. Health, expiry, the last status and attempts use their maps, and the detail pane opens with the error reason.
+
+![Subs preview, truecolor, dark terminal](tui-color/subs-tc-dark.png)
 
 ```text
  vecnet | 1:inbox 2:chat 3:dash 4:subs 8     home · hub hub.example:8443  live
@@ -842,12 +903,14 @@ The rows below are, in order:
 8. an error toast;
 9. the quit-and-lose-draft question.
 
+![Status line and command line preview, truecolor, dark terminal](tui-color/bars-tc-dark.png)
+
 ```text
  NORMAL   a answer  r retry  x drop  p status  max@vecnet · working · prio wake
 : command  ? help  Shift+drag selects text
  INSERT   enter send  esc normal               max@vecnet · working · prio wake
 hark B196: radio end-ph… › Patched on x-tuf too▏
- COMMAND   tab complete  enter run  esc cancel max@vecnet · working · prio wake
+ COMMAND   tab complete  esc cancel            max@vecnet · working · prio wake
 :retry all▏
 retried 3 dead letters
 unknown command: retyr  (:help lists commands)
@@ -861,7 +924,7 @@ Paint (truecolor and 256; codes in section 6.1):
   mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm
   cccccccc        mmmm      mmmmmm               mmmmmmmmmmmmmmmmmmmmmmmmmmmmwwww
   mmmmmmmmmmmmmmmmmmmmmmmm a
-  ccccccccc      mmmmmmmm        mmm      mmmmmm mmmmmmmmmmmmmmmmmmmmmmmmmmmmwwww
+  ccccccccc      mmmmmmmm      mmmmmm            mmmmmmmmmmmmmmmmmmmmmmmmmmmmwwww
   a
   ssssssssssssssssssssss
   eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
@@ -871,6 +934,8 @@ Paint (truecolor and 256; codes in section 6.1):
 ### 8.7 Prefs
 
 Prefs replaces the active tab with a `prefs` tab chip and fills the body. Group headers use `▌`, and the selected row is filled.
+
+![Prefs preview, truecolor, dark terminal](tui-color/prefs-tc-dark.png)
 
 ```text
  vecnet | 1:inbox 2:chat 3:dash 4:subs prefs       home·hub.example:8443  live
@@ -930,6 +995,8 @@ S fA###########################################MMMMMMM##WWWWWWWWWWW#############
 
 The error state and the unavailable state:
 
+![Prefs error and unavailable states preview](tui-color/prefs-states-tc-dark.png)
+
 ```text
 ┏━ preferences ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃could not load preferences                                                    ┃
@@ -958,6 +1025,8 @@ Paint (truecolor and 256; codes in section 6.1):
 
 The picker is `vecnet tui --pick` (PR #37). It runs before the shell, so it has no header bar: only the brand chip, a selection fill on the chosen row, and `local` in `warn`.
 
+![Profile picker preview, truecolor, dark terminal](tui-color/picker-tc-dark.png)
+
 ```text
  vecnet  choose an operator profile
 
@@ -985,6 +1054,8 @@ S A#######################################################
 ```
 
 The confirm step. The keys are `action`. Neither choice is a warning.
+
+![Picker confirm step preview](tui-color/picker-confirm-tc-dark.png)
 
 ```text
  vecnet  confirm
