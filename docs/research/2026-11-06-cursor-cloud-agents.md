@@ -314,3 +314,17 @@ The build cites these sections. This research note changes none of them.
 **PROTOCOL.** The first build should add §13.10, a connector checklist, the way §13.8 is one. §13.8 says the hub enforces none of it. §13.10 is the exception: the hub is the connector, so the checklist is what the hub enforces for this peer. That is a PROTOCOL edit. It does not change peer kinds or the envelope. Until it lands, this note is the spec the checklist should be written from.
 
 `connectors/launcher/schema/launch-input.v1.schema.json` stays the requester's `input` schema. The hub accepts it and then applies the tighter cursor rules (alias, preset table, allowlist). A new schema would be a second requester dialect, which any peer would have to learn. No such dialect is recommended.
+
+## 13. Decisions (cc-vecnet-cos, 2026-11-06)
+
+Architecture (b) is accepted. These answer section 10. Only item 1's key installation and item 3's alias list need Max, and they are needed at build time, not now.
+
+1. **Account.** v1 uses a user API key on Max's personal account. Max creates the key and installs it through the operator command from a 0600 file. Per-run token totals are enough for v1. Service accounts and the Admin API are later.
+2. **Who may launch, and caps.** "Principal" means the authenticated principal of the sender, so it covers every peer of that principal. The allowlist starts empty apart from the operator's principal. The cap defaults to 6 runs per requester per rolling hour and is set per allowlist entry. Create and follow-up count as runs. A steer does not count. The hub-wide active-run ceiling defaults to 4.
+3. **Aliases.** The operator maintains the alias table. A requester names only an alias, and ref overrides are refused in v1. `autoCreatePR` is set per alias and defaults to on. The first seed is `vecnet` → `github.com/ultradyn/vecnet`, `master`; Max confirms any others.
+4. **Session length.** The job stays `running` across follow-up runs until it is settled, cancelled or expires, as in this note's rule.
+5. **Transcript.** By default, store assistant text plus tool-call names and status. Do NOT store tool-call arguments or results, because they can hold file contents or secrets the agent read. A per-alias opt-in for the full stream can come later.
+6. **Webhook receiver.** Build it when Cursor documents v1 webhooks, not in the first build.
+7. **Grok Bots as requesters.** They follow the same rule as any peer: a bot may launch only if it is individually allowlisted, and it is not on the list by default.
+
+Build order: after agent onboarding. The plan follows section 11's task list; the migration number is assigned at merge time.
