@@ -101,7 +101,11 @@ func (h *Hub) HistoryVisibilitySQL(ctx context.Context, tx *sql.Tx) (string, err
 	if status.ArchiveMode || status.EffectiveSeconds == 0 {
 		return "1", nil
 	}
-	return fmt.Sprintf("(m.history_expired_at IS NULL OR m.history_expired_revision IS NULL OR m.history_expired_revision<>%d)", s.Revision), nil
+	// Expiry marks belong to the persisted history activation, whose revision
+	// changes only when history/archive policy changes. The global snapshot
+	// revision also advances for unrelated preferences and cannot invalidate
+	// history visibility while that activation remains in effect.
+	return fmt.Sprintf("(m.history_expired_at IS NULL OR m.history_expired_revision IS NULL OR m.history_expired_revision<>%d)", a.Revision), nil
 }
 
 type historyQuery interface {
@@ -275,12 +279,12 @@ func (h *Hub) PruneHistorySlice(ctx context.Context) (HistoryRetentionStatus, er
 				continue
 			}
 			if !expired.Valid {
-				if _, err := tx.ExecContext(ctx, `UPDATE messages SET history_expired_at=?,history_expired_revision=?,history_event_seq=? WHERE msg_id=?`, h.nowStr(), snapshot.Revision, born.Int64, id); err != nil {
+				if _, err := tx.ExecContext(ctx, `UPDATE messages SET history_expired_at=?,history_expired_revision=?,history_event_seq=? WHERE msg_id=?`, h.nowStr(), a.Revision, born.Int64, id); err != nil {
 					return err
 				}
 				result.Marked++
 			} else {
-				if _, err := tx.ExecContext(ctx, `UPDATE messages SET history_expired_revision=? WHERE msg_id=?`, snapshot.Revision, id); err != nil {
+				if _, err := tx.ExecContext(ctx, `UPDATE messages SET history_expired_revision=? WHERE msg_id=?`, a.Revision, id); err != nil {
 					return err
 				}
 			}

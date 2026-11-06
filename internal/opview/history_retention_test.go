@@ -54,6 +54,47 @@ func TestHistoryRetentionMatrixFilesAndLocator(t *testing.T) {
 	if err != nil || len(detail.Files) != 0 {
 		t.Fatal("marked attachment history visible")
 	}
+	// An unrelated write advances the global preferences revision without
+	// changing the history activation. Pinned bodies must stay hidden before
+	// any maintenance slice gets a chance to revisit their expiry marks.
+	before, err := e.Hub.Preferences.ReadPreferences(ctx, caller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set(prefs.Patch{Set: map[string]prefs.Value{"agents.thread_budget": prefs.Int(501)}})
+	after, err := e.Hub.Preferences.ReadPreferences(ctx, caller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ETag == after.ETag {
+		t.Fatal("unrelated preference write did not advance revision")
+	}
+	var pinnedExpired int
+	if err := e.Hub.DB.QueryRow(`SELECT count(*) FROM messages WHERE msg_id=? AND history_expired_at IS NOT NULL`, m.MessageID).Scan(&pinnedExpired); err != nil || pinnedExpired != 1 {
+		t.Fatalf("missing pinned expired body: count=%d error=%v", pinnedExpired, err)
+	}
+	assertHidden := func() {
+		t.Helper()
+		history, _, err := e.Hub.ThreadMessages(ctx, caller, m.ThreadID, "", 50)
+		if err != nil || len(history) != 0 {
+			t.Errorf("unrelated preference revealed ThreadMessages: count=%d error=%v", len(history), err)
+		}
+		matrix, err := reader.Matrix(ctx, m.ThreadID, "", 50)
+		if err != nil || len(matrix.Rows) != 0 {
+			t.Errorf("unrelated preference revealed Matrix: count=%d error=%v", len(matrix.Rows), err)
+		}
+		detail, err := reader.Thread(ctx, caller, m.ThreadID)
+		if err != nil || len(detail.Files) != 0 {
+			t.Errorf("unrelated preference revealed Files: count=%d error=%v", len(detail.Files), err)
+		}
+	}
+	assertHidden()
+	// Re-marking under the new global revision must use the same activation
+	// as the readers, rather than replacing a valid mark with a global one.
+	if _, err := e.Hub.PruneHistorySlice(ctx); err != nil {
+		t.Fatal(err)
+	}
+	assertHidden()
 	set(prefs.Patch{Set: map[string]prefs.Value{"retention.archive_mode": prefs.Bool(true)}})
 	matrix, err = reader.Matrix(ctx, m.ThreadID, "", 50)
 	if err != nil || len(matrix.Rows) != 1 {
