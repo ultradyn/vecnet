@@ -180,27 +180,30 @@ func (s *Transfers) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	rows, err := s.cfg.DB.QueryContext(ctx, `SELECT object_key FROM blob_delete_jobs WHERE julianday(next_attempt)<=julianday(?) ORDER BY next_attempt,object_key LIMIT 100`, r2Time(now))
+	rows, err := s.cfg.DB.QueryContext(ctx, `SELECT object_key,blob_id FROM blob_delete_jobs WHERE julianday(next_attempt)<=julianday(?) ORDER BY next_attempt,object_key LIMIT 100`, r2Time(now))
 	if err != nil {
 		return err
 	}
-	var keys []string
+	type deleteJob struct{ key, id string }
+	var jobs []deleteJob
 	for rows.Next() {
-		var key string
-		if err = rows.Scan(&key); err != nil {
+		var job deleteJob
+		if err = rows.Scan(&job.key, &job.id); err != nil {
 			rows.Close()
 			return err
 		}
-		keys = append(keys, key)
+		jobs = append(jobs, job)
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
 		return err
 	}
-	for _, key := range keys {
+	for _, job := range jobs {
+		key := job.key
 		deleteStarted := s.cfg.Now()
 		deleteErr := s.cfg.Objects.Delete(ctx, key)
+		s.observeOperation(job.id, "DELETE", deleteErr)
 		if deleteErr == nil {
 			if err = s.checkpoint("after_delete"); err != nil {
 				return err
@@ -284,4 +287,132 @@ func (s *Transfers) Tick(ctx context.Context) error {
 		}
 		return nil
 	})
+}
+
+// DownloadGrantEvent identifies one issuance or denial. Reuse EventID when
+// retrying its write; distinct explicit gets always allocate fresh IDs. This
+// records zero bytes: direct S3 bodies and capability replays are unobserved.
+type DownloadGrantEvent struct {
+	EventID        string
+	BlobID         string
+	CallerIdentity string
+	Kind           string
+	At             time.Time
+}
+
+// RecordDownloadGrant returns true only for a newly recorded event. Conflicting
+// retries fail closed; no caller-supplied text, URL, or status enters the ledger.
+func (s *Transfers) RecordDownloadGrant(ctx context.Context, event DownloadGrantEvent) (bool, error) {
+	if !ids.Is(ids.Blo, event.EventID) || (!ids.Is(ids.Peer, event.CallerIdentity) && !ids.Is(ids.Prn, event.CallerIdentity)) || event.At.IsZero() || (event.Kind != "download_grant_issued" && event.Kind != "download_grant_rate_limited") {
+		return false, ErrR2Metadata
+	}
+	inserted := false
+	err := s.cfg.DB.Tx(ctx, func(tx *sql.Tx) error {
+		var same bool
+		err := tx.QueryRowContext(ctx, `SELECT blob_id=? AND caller_identity=? AND kind=? AND byte_count=0 AND at=? FROM blob_usage_events WHERE event_id=?`, event.BlobID, event.CallerIdentity, event.Kind, r2Time(event.At), event.EventID).Scan(&same)
+		if err == nil {
+			if !same {
+				return ErrR2Idempotency
+			}
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		o, err := r2ReadObject(ctx, tx, `blob_id=?`, event.BlobID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO blob_usage_events(event_id,blob_id,uploader,day,caller_identity,kind,byte_count,at) VALUES(?,?,?,?,?,?,0,?)`, event.EventID, event.BlobID, o.Uploader, quotaDay(event.At), event.CallerIdentity, event.Kind, r2Time(event.At))
+		inserted = err == nil
+		return err
+	})
+	return inserted, err
+}
+
+// TransferOperation reports an observed metadata request, with no key, URL,
+// provider text, credentials, or downloaded bytes. Exporters must deduplicate
+// EventID on retry. PUT and GET bodies travel directly to S3 and are unobserved.
+type TransferOperation struct {
+	EventID string
+	BlobID  string
+	Method  string
+	Status  string
+	At      time.Time
+}
+
+func (s *Transfers) observeOperation(blobID string, method string, err error) {
+	if s.cfg.ObserveOperation == nil {
+		return
+	}
+	status := "ok"
+	if err != nil {
+		status = "unavailable"
+	}
+	s.cfg.ObserveOperation(TransferOperation{EventID: ids.New(ids.Blo), BlobID: blobID, Method: method, Status: status, At: s.cfg.Now()})
+}
+
+// ProbeObject observes one HEAD without estimating PUTs or downloads. Completion
+// and download probes share it, including failures and repeated provider calls.
+func (s *Transfers) ProbeObject(ctx context.Context, o R2Object) (ObjectProof, error) {
+	proof, err := s.cfg.Objects.Head(ctx, o.ObjectKey)
+	s.observeOperation(o.BlobID, "HEAD", err)
+	return proof, err
+}
+
+// TransferUsage separates requests, verified acceptance, observed occupancy and
+// current durable DB content. Completed objects accrue byte-seconds from verified
+// completion through confirmed deletion, even after logical expiry/purge. This
+// excludes unknown pre-completion PUT time and provider deletion lag, and is not
+// exact provider billing. Historical totals cover the ledger's 90-day retention;
+// live objects still accrue beyond it. No tenant mapping or download estimate is
+// inferred from principals or capability issuance.
+type TransferUsage struct {
+	RequestedBytes      int64
+	VerifiedBytes       int64
+	OccupiedByteSeconds float64
+	DurableBytes        int64
+}
+
+func (s *Transfers) Usage(ctx context.Context) (TransferUsage, error) {
+	var out TransferUsage
+	now := s.cfg.Now()
+	err := s.cfg.DB.Tx(ctx, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `SELECT coalesce(sum(CASE WHEN kind='reserve' THEN byte_count ELSE 0 END),0),coalesce(sum(CASE WHEN kind='verified' THEN byte_count ELSE 0 END),0) FROM blob_usage_events`).Scan(&out.RequestedBytes, &out.VerifiedBytes); err != nil {
+			return err
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT coalesce(sum(length(bytes)),0) FROM durable_blob_payloads`).Scan(&out.DurableBytes); err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT v.byte_count,v.at,d.at FROM blob_usage_events v LEFT JOIN blob_usage_events d ON d.blob_id=v.blob_id AND d.kind='delete_confirmed' WHERE v.kind='verified'
+ UNION ALL SELECT o.size,o.verified_at,o.deletion_confirmed_at FROM blob_objects o WHERE o.sha256_verified=1 AND NOT EXISTS(SELECT 1 FROM blob_usage_events v WHERE v.blob_id=o.blob_id AND v.kind='verified')`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var size int64
+			var start string
+			var end sql.NullString
+			if err := rows.Scan(&size, &start, &end); err != nil {
+				return err
+			}
+			from, err := time.Parse(time.RFC3339Nano, start)
+			if err != nil {
+				return ErrR2Metadata
+			}
+			until := now
+			if end.Valid {
+				until, err = time.Parse(time.RFC3339Nano, end.String)
+				if err != nil {
+					return ErrR2Metadata
+				}
+			}
+			if until.After(from) {
+				out.OccupiedByteSeconds += float64(size) * until.Sub(from).Seconds()
+			}
+		}
+		return rows.Err()
+	})
+	return out, err
 }

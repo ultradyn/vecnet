@@ -54,6 +54,7 @@ type TransfersConfig struct {
 	MaxSize, DailyQuota, StorageQuota int64
 	CheckEligible                     func(context.Context, *sql.Tx, string) error
 	Checkpoint                        func(string) error
+	ObserveOperation                  func(TransferOperation)
 }
 type Transfers struct {
 	cfg   TransfersConfig
@@ -379,7 +380,7 @@ func (s *Transfers) Complete(ctx context.Context, uploader, blobID string) (blob
 	if err = s.checkpoint("after_upload"); err != nil {
 		return blobwire.Ref{}, err
 	}
-	proof, headErr := s.cfg.Objects.Head(ctx, o.ObjectKey)
+	proof, headErr := s.ProbeObject(ctx, o)
 	if headErr != nil {
 		headErr = r2TransferError(headErr)
 	}
@@ -503,13 +504,19 @@ func (s *Transfers) completionCheck(ctx context.Context, tx *sql.Tx, o R2Object,
 // An unverified grant conveys no possession of its claimed hash, so it cannot
 // expose a hash tombstone through this projection either.
 func (s *Transfers) State(ctx context.Context, blobID string) (blobwire.State, error) {
-	o, err := r2ReadObject(ctx, s.cfg.DB, `blob_id=?`, blobID)
+	return ReadR2State(ctx, s.cfg.DB, blobID, s.cfg.Now())
+}
+
+// ReadR2State projects persisted trust and logical deadlines without provider
+// traffic. It also works after rollback when no transfer signer is installed.
+func ReadR2State(ctx context.Context, q querier, blobID string, now time.Time) (blobwire.State, error) {
+	o, err := r2ReadObject(ctx, q, `blob_id=?`, blobID)
 	if err != nil {
 		return blobwire.State{}, err
 	}
 	var p bool
 	if o.SHA256Verified {
-		p, err = r2Tombstone(ctx, s.cfg.DB, o.SHA256)
+		p, err = r2Tombstone(ctx, q, o.SHA256)
 		if err != nil {
 			return blobwire.State{}, err
 		}
@@ -518,7 +525,7 @@ func (s *Transfers) State(ctx context.Context, blobID string) (blobwire.State, e
 	switch {
 	case o.SHA256Verified && (p || o.State == "purged"):
 		state = "purged"
-	case o.State == "expired" || o.ExpiresAt != nil && !s.cfg.Now().Before(*o.ExpiresAt):
+	case o.State == "expired" || o.ExpiresAt != nil && !now.Before(*o.ExpiresAt):
 		state = "expired"
 	case o.State == "complete":
 		state = "available"

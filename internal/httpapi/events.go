@@ -261,6 +261,14 @@ func (s *server) longPoll(w http.ResponseWriter, r *http.Request, prn string, ow
 	if len(evs) > 0 {
 		next = evs[len(evs)-1].Cursor
 	}
+	projected, err := s.Hub.ProjectEventBlobStates(ctx, callerFrom(ctx), evs)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if len(evs) > 0 {
+		evs = projected
+	}
 	writeJSON(w, http.StatusOK, pollBody{Events: evs, NextCursor: next, HubRestarting: restarting})
 }
 
@@ -310,6 +318,11 @@ func (s *server) streamSSE(w http.ResponseWriter, r *http.Request, prn string, o
 	}
 	// emit queues evs and advances cur; false means drop the connection.
 	emit := func(evs []envelope.Event) bool {
+		projected, err := s.Hub.ProjectEventBlobStates(ctx, callerFrom(ctx), evs)
+		if err != nil {
+			return false
+		}
+		evs = projected
 		for _, ev := range evs {
 			f, err := sseFrame(ev)
 			if err != nil || !conn.send(ctx, f) {

@@ -18,6 +18,7 @@ import (
 
 // BlobGrantEvent is a capability event, never a downloaded-byte measurement.
 type BlobGrantEvent struct {
+	EventID        string
 	Kind           string
 	Status         int
 	BlobID         string
@@ -301,16 +302,24 @@ func (h *Hub) BlobStatus(ctx context.Context, c auth.Caller, sha, id string) (bl
 }
 func (h *Hub) meterBlobMint(ctx context.Context, o blob.R2Object, identity, kind string) error {
 	now := h.Now()
-	_, err := h.DB.ExecContext(ctx, `INSERT INTO blob_usage_events(event_id,blob_id,uploader,day,caller_identity,kind,byte_count,at) VALUES(?,?,?,?,?,?,0,?)`, ids.New(ids.Blo), o.BlobID, o.Uploader, now.UTC().Format("2006-01-02"), identity, kind, envelope.FormatTime(now))
-	if err != nil {
-		return E(503, "blob_unavailable", "blob unavailable")
+	if h.Blobs.Transfers == nil {
+		return h.blobTransferError(blob.ErrR2Unavailable)
 	}
+	event := blob.DownloadGrantEvent{EventID: ids.New(ids.Blo), BlobID: o.BlobID, CallerIdentity: identity, Kind: kind, At: now}
+	inserted, err := h.Blobs.Transfers.RecordDownloadGrant(ctx, event)
+	if err != nil {
+		return h.blobTransferError(err)
+	}
+	if !inserted {
+		return nil
+	}
+
 	if h.BlobGrantUsage != nil {
 		status := 200
 		if kind == "download_grant_rate_limited" {
 			status = 429
 		}
-		h.BlobGrantUsage(BlobGrantEvent{Kind: kind, Status: status, BlobID: o.BlobID, CallerIdentity: identity, At: now})
+		h.BlobGrantUsage(BlobGrantEvent{EventID: event.EventID, Kind: kind, Status: status, BlobID: o.BlobID, CallerIdentity: identity, At: now})
 	}
 	return nil
 }

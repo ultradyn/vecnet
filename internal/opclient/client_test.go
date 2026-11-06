@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/testhub"
@@ -35,6 +36,16 @@ func wireFixture(v reflect.Value) {
 	case reflect.Struct:
 		for i := 0; i < v.NumField(); i++ {
 			wireFixture(v.Field(i))
+		}
+		// Keep filling every field, then satisfy the trust-aware wire marshalers.
+		if v.Type() == reflect.TypeFor[blobwire.Integrity]() {
+			v.FieldByName("Algorithm").SetString("sha256")
+			v.FieldByName("Value").SetString(strings.Repeat("a", 64))
+		}
+		if v.Type() == reflect.TypeFor[blobwire.State]() {
+			v.FieldByName("State").SetString("available")
+			v.FieldByName("RetentionClass").SetString("1d")
+			v.FieldByName("ExpiresAt").Elem().SetString("2030-01-02T03:04:05.006Z")
 		}
 	case reflect.String:
 		v.SetString("fixture &/+? ü")
@@ -104,7 +115,9 @@ func TestReadsDecode(t *testing.T) {
 				if tt.wrap != nil {
 					value = tt.wrap(value)
 				}
-				_ = json.NewEncoder(w).Encode(value)
+				if err := json.NewEncoder(w).Encode(value); err != nil {
+					t.Errorf("encode wire fixture: %v", err)
+				}
 			}))
 			defer srv.Close()
 			got, err := tt.call(New(srv.URL+"/", "secret"))

@@ -98,6 +98,7 @@ func (r *Reader) Inbox(ctx context.Context, c auth.Caller, q opapi.InboxQuery) (
 		return out, fmt.Errorf("opview: inbox deliveries: %w", err)
 	}
 	defer rows.Close()
+	var messages []envelope.Message
 	for rows.Next() {
 		var d opapi.InboxDelivery
 		var raw string
@@ -109,6 +110,7 @@ func (r *Reader) Inbox(ctx context.Context, c auth.Caller, q opapi.InboxQuery) (
 		if err := json.Unmarshal([]byte(raw), &m); err != nil {
 			return out, fmt.Errorf("opview: inbox message: %w", err)
 		}
+		messages = append(messages, m)
 		d.Excerpt, d.Attachments, d.SenderInfo = opapi.Excerpt(m), len(m.Attachments), m.SenderInfo
 		d.Section = "held"
 		if d.Priority == "wake" {
@@ -128,6 +130,14 @@ func (r *Reader) Inbox(ctx context.Context, c auth.Caller, q opapi.InboxQuery) (
 		out.NextBefore = &last
 	}
 
+	// Cut the projection to the same page as the visible deliveries.
+	if len(messages) > len(out.Deliveries) {
+		messages = messages[:len(out.Deliveries)]
+	}
+	out.BlobStates, err = r.Hub.ProjectBlobStates(ctx, c, messages)
+	if err != nil {
+		return out, err
+	}
 	dead, err := r.Hub.DeadLetters(ctx)
 	if err != nil {
 		return out, err

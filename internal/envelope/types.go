@@ -246,10 +246,12 @@ type Presence struct {
 // Event is one entry in a durable log ($defs/event). Data is the raw
 // payload whose shape depends on Type.
 type Event struct {
-	Cursor string          `json:"cursor"`
-	Type   string          `json:"type"`
-	At     string          `json:"at"`
-	Data   json.RawMessage `json:"data"`
+	// BlobStates is a read-time projection beside immutable Data.
+	BlobStates map[string]blobwire.State `json:"blob_states,omitempty"`
+	Cursor     string                    `json:"cursor"`
+	Type       string                    `json:"type"`
+	At         string                    `json:"at"`
+	Data       json.RawMessage           `json:"data"`
 }
 
 // SendRequest is the body of POST /v1/messages ($defs/sendRequest).
