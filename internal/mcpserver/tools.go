@@ -1210,7 +1210,7 @@ func buildTools() *toolTable {
 				panic("mcpserver: tool shape " + spec.name + ": " + err.Error())
 			}
 		}
-		t.listed = append(t.listed, listEntry(&mcp.Tool{Name: spec.name, Description: spec.description, InputSchema: input, Annotations: spec.annotations}, spec.meta, spec.output))
+		t.listed = append(t.listed, projectTool(listEntry(&mcp.Tool{Name: spec.name, Description: spec.description, InputSchema: input, Annotations: spec.annotations}, spec.meta, spec.output)))
 		t.byName[spec.name] = &tool{schema: sch, precheck: spec.precheck, call: spec.call}
 	}
 	return t

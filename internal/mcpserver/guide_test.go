@@ -103,7 +103,7 @@ func TestGuide(t *testing.T) {
 					if ann["readOnlyHint"] != true || ann["openWorldHint"] != false || ann["destructiveHint"] != false {
 						t.Fatalf("guide annotations: %v", ann)
 					}
-					if !strings.HasPrefix(entry["description"].(string), "Call this first:") {
+					if !strings.HasPrefix(entry["description"].(string), "Read setup and messaging rules; call first,") {
 						t.Fatalf("guide description: %v", entry["description"])
 					}
 					output, ok := entry["outputSchema"]

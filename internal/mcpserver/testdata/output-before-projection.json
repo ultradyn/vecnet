@@ -1,0 +1,166 @@
+{
+  "vecnet_blob_get": {
+    "additionalProperties": false,
+    "properties": {
+      "data": {
+        "type": "string"
+      },
+      "encoding": {
+        "const": "base64",
+        "type": "string"
+      },
+      "media_type": {
+        "type": "string"
+      },
+      "next_offset": {
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "offset": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "sha256": {
+        "type": "string"
+      },
+      "size": {
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "sha256",
+      "media_type",
+      "size",
+      "offset",
+      "next_offset",
+      "encoding",
+      "data"
+    ],
+    "type": "object"
+  },
+  "vecnet_blob_put": {
+    "additionalProperties": false,
+    "properties": {
+      "sha256": {
+        "type": "string"
+      },
+      "size": {
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "sha256",
+      "size"
+    ],
+    "type": "object"
+  },
+  "vecnet_guide": {
+    "additionalProperties": false,
+    "properties": {
+      "caller_kind": {
+        "enum": [
+          "dot",
+          "grokbot",
+          "peer",
+          "principal",
+          "operator"
+        ],
+        "type": "string"
+      },
+      "steps": {
+        "items": {
+          "type": "string"
+        },
+        "minItems": 1,
+        "type": "array"
+      },
+      "subscribe": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_types": {
+            "items": {
+              "enum": [
+                "delivery",
+                "receipt",
+                "thread_updated",
+                "approval_expired"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "args": {
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+          },
+          "event": {
+            "const": "vecnet.message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "args",
+          "allowed_types"
+        ],
+        "type": "object"
+      },
+      "text": {
+        "type": "string"
+      },
+      "topic": {
+        "default": "start",
+        "enum": [
+          "start",
+          "events",
+          "replying",
+          "etiquette"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "caller_kind",
+      "topic",
+      "steps",
+      "text"
+    ],
+    "type": "object"
+  },
+  "vecnet_whoami": {
+    "additionalProperties": false,
+    "properties": {
+      "id": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "kind": {
+        "enum": [
+          "peer",
+          "principal",
+          "operator"
+        ]
+      },
+      "name": {
+        "type": "string"
+      },
+      "peer_id": {
+        "type": "string"
+      },
+      "principal_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "kind",
+      "id"
+    ],
+    "type": "object"
+  }
+}
