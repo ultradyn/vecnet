@@ -63,9 +63,18 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
   const failures = new Map<string, ({ code: number; message: string } | 'drop')[]>();
   const withheld = new Map<string, { thread: Thread; turn: Turn; item: Item }>();
   const timers = new Set<{ cancel(): void }>();
+  const reservedTurnIds = new Set<string>();
+  // Keep provenance off the wire, including when a receipt is recorded later.
+  const steeredItems = new WeakSet<Item>();
   let version = '0.166.0', connectionId = 0, serverId = 10000, turnId = 0, itemId = 0;
   let holdNext = false, stopped = false;
   const requests: FakeCodex['requests'] = [], replies: unknown[] = [], paths: string[] = [], overrides: FakeCodex['overrides'] = [];
+  function nextTurnId(): string {
+    let id: string;
+    do { id = `turn-${++turnId}`; } while (reservedTurnIds.has(id));
+    reservedTurnIds.add(id);
+    return id;
+  }
   function get(id: string): Thread {
     const t = threads.get(id); if (!t) throw new Error(`unknown fake thread: ${id}`); return t;
   }
@@ -130,7 +139,7 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
       }
       const all = [...t.turns].reverse();
       const data = all.slice(offset, offset + limit).map(turn => ({ ...turn,
-        items: args.itemsView === 'full' ? turn.items : turn.items.slice(0, 1) }));
+        items: args.itemsView === 'full' ? turn.items : turn.items.filter(item => !steeredItems.has(item)) }));
       respond({ data, nextCursor: offset + limit < all.length ? `fake-page:${t.id}:${offset + limit}` : null }); return;
     }
     if (method === 'thread/resume') {
@@ -154,13 +163,15 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
         error(-32600, 'expectedTurnId mismatch'); return;
       }
       let turn = t.turns.find(x => x.id === t.activeTurnId);
+      const starting = typeOf(t.status) !== 'active' || !turn;
       if (typeOf(t.status) !== 'active' || !turn) {
-        turn = { id: `turn-${++turnId}`, items: [], status: 'inProgress', error: null };
+        turn = { id: nextTurnId(), items: [], status: 'inProgress', error: null };
         t.turns.push(turn); t.activeTurnId = turn.id; status(t, { type: 'active', activeFlags: [] });
         subscribers(t.id, 'turn/started', { threadId: t.id, turn });
       }
       const item: Item = { id: `item-${++itemId}`, type: 'userMessage', content: args.input ?? [],
         ...(typeof args.clientUserMessageId === 'string' ? { clientId: args.clientUserMessageId } : {}) };
+      if (!starting) steeredItems.add(item);
       if (holdNext) {
         holdNext = false;
         if (!item.clientId) throw new Error('withheld fake item requires clientUserMessageId');
@@ -221,6 +232,7 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
     socketPath, requests, paths, replies, overrides,
     setVersion(v) { version = v; },
     setThread(input) {
+      if (input.activeTurnId) reservedTurnIds.add(input.activeTurnId);
       let t = threads.get(input.id);
       if (!t) { t = { ...input, turns: [], members: new Set(), other: 0 }; threads.set(t.id, t); }
       else {
@@ -263,7 +275,7 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
     failNext(method, err) { failures.set(method, [...(failures.get(method) ?? []), err]); },
     addTurns(threadId, n) {
       const t = get(threadId);
-      for (let k = 0; k < n; k++) t.turns.push({ id: `turn-${++turnId}`, items: [], status: 'completed', error: null });
+      for (let k = 0; k < n; k++) t.turns.push({ id: nextTurnId(), items: [], status: 'completed', error: null });
     },
     withholdNextItem() { holdNext = true; },
     recordLater(clientId, atMs) {

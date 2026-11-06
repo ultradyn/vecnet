@@ -229,6 +229,67 @@ test('fake pages turns/list newest-first and records a withheld item later', { t
   assert.equal((await stat(join(roots.get(t)!, 'd'))).mode & 0o777, 0o700);
 });
 
+test('fake generated turn IDs skip seeded IDs and steer receipts stay in the new turn', { timeout: 5000 }, async t => {
+  const { f, r } = await fake(t);
+  f.setThread({ id: 't', status: { type: 'active', activeFlags: [] }, activeTurnId: 'turn-1' });
+  f.setThread({ id: 't', status: { type: 'idle' } });
+  const started = await r.call('turn/start', { threadId: 't', input: [], clientUserMessageId: 'vn.start' });
+  const steered = await r.call('turn/steer', { threadId: 't', expectedTurnId: started.turn.id, input: [], clientUserMessageId: 'vn.steer' });
+  const page = await r.call('thread/turns/list', { threadId: 't', itemsView: 'full' });
+  assert.notEqual(started.turn.id, 'turn-1');
+  assert.equal(steered.turnId, started.turn.id);
+  assert.equal(new Set(page.data.map((x: any) => x.id)).size, 2);
+  assert.deepEqual(page.data.map((x: any) => [x.id, x.status, x.items.map((item: any) => item.clientId)]), [
+    [started.turn.id, 'inProgress', ['vn.start', 'vn.steer']], ['turn-1', 'completed', []],
+  ]);
+});
+
+test('fake addTurns shares the allocator and reserves seeded IDs across threads', { timeout: 5000 }, async t => {
+  const { f, r } = await fake(t);
+  f.setThread({ id: 't', status: { type: 'active', activeFlags: [] }, activeTurnId: 'turn-1' });
+  f.setThread({ id: 'other', status: { type: 'active', activeFlags: [] }, activeTurnId: 'turn-3' });
+  f.setThread({ id: 't', status: { type: 'idle' } });
+  f.addTurns('t', 2);
+  const started = await r.call('turn/start', { threadId: 't', input: [] });
+  const page = await r.call('thread/turns/list', { threadId: 't', itemsView: 'full' });
+  const ids = [...page.data.map((x: any) => x.id), 'turn-3'];
+  assert.equal(ids[0], started.turn.id);
+  assert.equal(ids.length, 5);
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+test('fake summary history hides steers on seeded turns including delayed receipts', { timeout: 5000 }, async t => {
+  const { f, r, clock } = await fake(t);
+  f.setThread({ id: 't', status: { type: 'active', activeFlags: [] }, activeTurnId: 'seeded-run' });
+  await r.call('turn/steer', { threadId: 't', expectedTurnId: 'seeded-run', input: [], clientUserMessageId: 'vn.summary-steer' });
+  f.withholdNextItem();
+  await r.call('turn/steer', { threadId: 't', expectedTurnId: 'seeded-run', input: [], clientUserMessageId: 'vn.delayed-steer' });
+  f.recordLater('vn.delayed-steer', clock.now() + 1); clock.advance(1);
+  for (const view of [{}, { itemsView: 'summary' }]) {
+    const page = await r.call('thread/turns/list', { threadId: 't', ...view });
+    assert.deepEqual(page.data[0].items, []);
+  }
+  const full = await r.call('thread/turns/list', { threadId: 't', itemsView: 'full' });
+  assert.deepEqual(full.data[0].items.map((item: any) => item.clientId), ['vn.summary-steer', 'vn.delayed-steer']);
+});
+
+test('fake summary history preserves initial input and hides starts steered into an active turn', { timeout: 5000 }, async t => {
+  const { f, r, clock } = await fake(t);
+  f.setThread({ id: 't', status: { type: 'idle' } });
+  f.withholdNextItem();
+  const started = await r.call('turn/start', { threadId: 't', input: [], clientUserMessageId: 'vn.initial' });
+  await r.call('turn/steer', { threadId: 't', expectedTurnId: started.turn.id, input: [], clientUserMessageId: 'vn.steer' });
+  const raced = await r.call('turn/start', { threadId: 't', input: [], clientUserMessageId: 'vn.raced-start' });
+  assert.equal(raced.turn.id, started.turn.id);
+  f.recordLater('vn.initial', clock.now() + 1); clock.advance(1);
+  for (const view of [{}, { itemsView: 'summary' }]) {
+    const page = await r.call('thread/turns/list', { threadId: 't', ...view });
+    assert.deepEqual(page.data[0].items.map((item: any) => item.clientId), ['vn.initial']);
+  }
+  const full = await r.call('thread/turns/list', { threadId: 't', itemsView: 'full' });
+  assert.deepEqual(full.data[0].items.map((item: any) => item.clientId), ['vn.steer', 'vn.raced-start', 'vn.initial']);
+});
+
 test('handshake failures, cancellation and local close settle promptly', { timeout: 5000 }, async t => {
   for (const mode of ['http', 'silent'] as const) {
     await t.test(mode, async sub => {
