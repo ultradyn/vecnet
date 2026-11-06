@@ -37,7 +37,7 @@ function checkRequests(requests: typeof allRequests) {
   }
 }
 type Item = { id: string; priority: string; value?: string };
-async function harness(t: TestContext, options: { binding?: Partial<Binding>; status?: unknown; wrap?: (rpc: CodexRpc) => CodexRpc; seed?: InflightRow; claiming?: string; unreachable?: boolean; history?: number; coldResumeIdleDelayMs?: number } = {}) {
+async function harness(t: TestContext, options: { binding?: Partial<Binding>; status?: unknown; wrap?: (rpc: CodexRpc) => CodexRpc; seed?: InflightRow; claiming?: string; unreachable?: boolean; refusedVersion?: boolean; releaseFailure?: boolean; history?: number; coldResumeIdleDelayMs?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vn-e-')), clock = fakeClock(), log = memoryLog();
   let activity = 0, pendingRpcs = 0, pendingHooks = 0, watchArms = 0;
   const timer = clock.timer;
@@ -51,6 +51,7 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
     return { cancel() { done(); alarm.cancel(); } };
   };
   const fake = await startFakeCodexAppServer({ dir, clock, coldResumeIdleDelayMs: options.coldResumeIdleDelayMs });
+  if (options.refusedVersion) fake.setVersion('0.0.0');
   fake.setThread({ id: 'thread', status: options.status ?? { type: 'idle' },
     ...((options.status as { type?: string })?.type === 'active' ? { activeTurnId: 'active' } : {}) });
   fake.attachOther('thread');
@@ -58,7 +59,7 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
   const map = new Map<string, string>();
   const kv: KeyValue = { get: k => map.get(k), set: (k, v) => { map.set(k, v); }, delete: k => { map.delete(k); }, keys: (p = '') => [...map.keys()].filter(k => k.startsWith(p)) };
   const config = join(dir, 'plan.json'), trace = join(dir, 'trace.jsonl'), claims = join(dir, 'claims.json');
-  const plan = { trace, claims, stub, items: (options.claiming ? [{ id: 'w1', priority: 'wake' }] : []) as Item[], events: [] as unknown[], refused: '', revision: 0, hookGate: '', hookFailure: '', releaseFailure: false };
+  const plan = { trace, claims, stub, items: (options.claiming ? [{ id: 'w1', priority: 'wake' }] : []) as Item[], events: [] as unknown[], refused: '', revision: 0, hookGate: '', hookFailure: '', releaseFailure: options.releaseFailure ?? false };
   writeFileSync(trace, ''); writeFileSync(claims, '{}');
   const save = () => { plan.revision++; writeFileSync(config + '.next', JSON.stringify(plan)); renameSync(config + '.next', config); }; save();
   const bin = join(dir, 'vecnet');
@@ -130,7 +131,9 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
     rmSync(dir, { recursive: true, force: true });
   });
   engine.start();
-  if (!options.unreachable) await loaded(); else await eventually(() => engine.state() === 'unreachable');
+  if (options.refusedVersion) await eventually(() => engine.state() === 'refused_version');
+  else if (options.unreachable) await eventually(() => engine.state() === 'unreachable');
+  else await loaded();
   return { fake, clock, log, kv, plan, save, binding, deps, records, hooks, releases, sends, rows, tick, wake, loaded, sync,
     get engine() { return engine; }, get opens() { return opens; }, disconnect() { current!.close(); },
     async restart() { await engine.stop(); engine = makeEngine(); watching = true; engine.start(); await loaded(); } };
@@ -209,6 +212,40 @@ test('idle wake sends turn/start with the stub only and untrusted context', asyn
 test('active wake steers with the active turn id', async t => {
   const h = await harness(t, { status: active }); await h.wake(); await eventually(() => h.sends().length === 1);
   assert.equal(h.sends()[0].method, 'turn/steer'); assert.equal((h.sends()[0].params as any).expectedTurnId, 'active');
+});
+for (const state of ['idle', 'active']) for (const failures of [1, 7]) test(`${state} fresh wake survives ${failures} transient history read failures without another trigger`, async t => {
+  const h = await harness(t, { status: state === 'active' ? active : { type: 'idle' } });
+  const opens = h.opens, subscriptions = h.fake.requests.filter(r => r.method === 'thread/resume').length;
+  const reads = () => h.fake.requests.filter(r => r.method === 'thread/turns/list').length;
+  const before = reads(), claims = h.records().filter(r => r.hookClaimed).length;
+  for (let i = 0; i < failures; i++) h.fake.failNext('thread/turns/list', { code: -32603, message: 'temporary history read failure' });
+  await h.wake();
+  assert.equal(reads(), before + 1, 'the original wake fails its first history read');
+  assert.equal(h.sends().length, 0); assert.equal(h.rows().length, 0);
+  assert.equal(h.kv.keys('claiming:').length, 0);
+  assert.equal(h.records().filter(r => r.hookClaimed).length, claims, 'no claim before the checkpoint read succeeds');
+  for (let i = 0; i < failures; i++) {
+    const delayMs = [1000, 2000, 4000, 8000, 15000][Math.min(i, 4)];
+    await h.tick(delayMs - 50);
+    assert.equal(reads(), before + i + 1, 'history retry waits for its backoff');
+    await h.tick(50);
+    if (i + 1 < failures) {
+      assert.equal(reads(), before + i + 2, 'one independent retry at each bounded backoff step');
+      assert.equal(h.sends().length, 0);
+    } else assert.equal(h.sends().length, 1, 'the successful retry delivers the original wake');
+  }
+  await h.tick(2 * minute);
+  assert.equal(h.sends().length, 1, 'original wake delivered exactly once');
+  assert.equal(h.sends()[0].method, state === 'active' ? 'turn/steer' : 'turn/start');
+  assert.deepEqual(Object.keys((h.sends()[0].params as any).additionalContext), ['vecnet_w1']);
+  const claimed = JSON.parse(readFileSync(h.plan.claims, 'utf8')) as Record<string, string[]>;
+  const deliveryClaims = Object.keys(claimed).filter(nonce => claimed[nonce].includes('w1'));
+  assert.equal(deliveryClaims.length, 1, 'one delivery-bearing claim, regardless of empty status-triggered polls');
+  assert.equal(h.records().filter(r => r.hookClaimed === deliveryClaims[0]).length, 1);
+  assert.equal(h.rows().length, 0); assert.equal(h.releases().length, 0);
+  assert.equal(h.opens, opens, 'no reconnect or restart');
+  assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, subscriptions);
+  assert.equal(h.plan.events.length, 1, 'no further watch event or status broadcast');
 });
 test('steer mismatch re-reads once then waits for idle', async t => {
   const h = await harness(t, { status: active });
@@ -361,6 +398,27 @@ test('crash between claim and inflight write releases on restart', async t => {
   assert.deepEqual(h.plan.items, [{ id: 'w1', priority: 'wake' }]); assert.deepEqual(h.plan.events, []);
   await eventually(() => h.sends().length === 1);
   assert.deepEqual(Object.keys((h.sends()[0].params as any).additionalContext), ['vecnet_w1']); await h.tick(); assert.equal(h.sends().length, 1);
+});
+for (const unavailable of ['unreachable', 'refused_version']) for (const releaseFailure of [false, true]) test(`startup orphan cleanup under ${unavailable} with release failure ${releaseFailure}`, async t => {
+  const claim = '123456789012345678901234';
+  const h = await harness(t, { claiming: claim, unreachable: unavailable === 'unreachable', refusedVersion: unavailable === 'refused_version', releaseFailure });
+  await h.sync();
+  assert.equal(h.releases().length, 1, 'release runs without a successful Codex connection');
+  assert.ok(h.releases()[0].argv.includes(claim), 'release uses the exact orphan nonce');
+  if (releaseFailure) {
+    assert.ok(h.kv.get('claiming:' + claim), 'failed release keeps the orphan durable');
+    assert.deepEqual(JSON.parse(readFileSync(h.plan.claims, 'utf8')), { [claim]: ['w1'] });
+    h.plan.releaseFailure = false; h.save();
+    await h.tick(1000);
+    assert.equal(h.releases().length, 2, 'release retries independently of Codex');
+    assert.ok(h.releases()[1].argv.includes(claim));
+  }
+  await h.tick(2 * minute);
+  assert.equal(h.kv.keys('claiming:').length, 0); assert.equal(h.rows().length, 0);
+  assert.deepEqual(JSON.parse(readFileSync(h.plan.claims, 'utf8')), {});
+  assert.equal(h.sends().length, 0); assert.equal(h.engine.state(), unavailable);
+  assert.equal(h.fake.requests.filter(r => r.method === 'thread/read' || r.method === 'thread/turns/list').length, 0);
+  if (unavailable === 'refused_version') assert.equal(h.opens, 1, 'refused version remains terminal');
 });
 for (const failure of ['exit', 'invalid']) test(`hook ${failure} after durable claim is recovered without restarting`, async t => {
   const h = await harness(t), opens = h.opens, baseline = h.records().length;

@@ -433,7 +433,15 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (s !== 'idle' && s !== 'turn_running') return;
     const action = s === 'idle' ? 'start' : 'steer';
     const priorities = (['wake', 'wake_idle'] as const).filter(p => planInput(p, s, { steer: true, queue: 'launcher' }) === action);
-    const turn = await latest();
+    let turn: RecordValue | undefined;
+    try { turn = await latest(); }
+    catch {
+      // No claim exists yet. Retry independently so the original wake stays
+      // eligible even when the watch and thread status remain quiet.
+      log.warn('codex_engine_operation_failed', { threadId: b.threadId });
+      scheduleHistoryRetry(); return;
+    }
+    historyRetry?.cancel(); historyRetry = undefined; historyRetryIndex = 0;
     if (!liveness().live || (action === 'steer' && (turn?.status !== 'inProgress' || typeof turn.id !== 'string'))) return;
     const nonce = randomBytes(12).toString('hex');
     kv.set('claiming:' + nonce, JSON.stringify({ threadId: b.threadId, at: clock.now() }));
@@ -485,7 +493,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   }
   return {
     start() { if (running) { enqueue(async () => { await recover(); arm(0); }); return; }
-      running = true; reconnect = undefined; gap = undefined; claimRecovery = undefined; warmCheck = undefined; historyRetry = undefined; historyRetryIndex = 0; startWatch(); heartbeat(); enqueue(connect); },
+      running = true; reconnect = undefined; gap = undefined; claimRecovery = undefined; warmCheck = undefined; historyRetry = undefined; historyRetryIndex = 0; startWatch(); heartbeat();
+      // Unsent claims need only Go, including when Codex is unreachable or
+      // refused by the version gate. Release them before any RPC recovery.
+      enqueue(async () => { await recoverClaims(); await connect(); }); },
     async stop() {
       if (!running) return;
       running = false; debounce?.cancel(); gap?.cancel(); reconnect?.cancel(); minute?.cancel(); watchRetry?.cancel(); claimRecovery?.cancel(); warmCheck?.cancel(); historyRetry?.cancel();
