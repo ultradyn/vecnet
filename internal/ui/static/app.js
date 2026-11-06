@@ -21,6 +21,7 @@ import { createNotices } from './notice.js';
 import { peerHref } from './peer-model.js';
 import * as peer from './peer.js';
 import * as presence from './presence.js';
+import { createSearchBox, renderResults } from './search.js';
 import { OTHER_PAGE, nextLimit, otherThreads, yourThreads } from './sidebar-model.js';
 import { createStore } from './store.js';
 import * as threadAside from './thread-aside.js';
@@ -85,6 +86,16 @@ function renderNav(s, route) {
   });
   $('threads').replaceChildren(...(yours.rows.length ? yours.rows.map(r => threadLink(r, route, s.nameOf)) : [h('div', { class: 'none', text: yours.note })]));
   renderOthers(s, route, threads, now);
+  // A search in the box replaces the thread lists with its results (search.js).
+  const open = !!(s.search && s.search.state().open);
+  $('lists').hidden = open;
+  $('results').hidden = !open;
+  if (open) {
+    renderResults($('results'), {
+      box: s.search, directory: s.peers.get(), me: s.me, nameOf: s.nameOf, now, unread: head.unread_by_thread,
+      avatarCtx: s.ctx, threadLink: r => threadLink(r, route, s.nameOf),
+    });
+  } else $('results').replaceChildren();
 }
 
 // One sidebar thread row, two lines (sidebar-model threadRow). Peer strings
@@ -185,7 +196,7 @@ function start(secret) {
   const pruneAvatars = () => { const d = peers.get(); if (d) avatars.prune((d.peers || []).map(avatarHash).filter(Boolean)); };
 
   const s = {
-    threads, inboxHead, nameOf, store, mine: null, others: null, otherLimit: OTHER_PAGE,
+    threads, inboxHead, peers, nameOf, store, mine: null, others: null, otherLimit: OTHER_PAGE, search: null,
     me: '', ctx: null, mounted: '', matrixHash: '', unmount: () => {}, offs: [],
     close() {
       stop.abort();
@@ -198,9 +209,15 @@ function start(secret) {
       $('me').replaceChildren();
       $('threads').replaceChildren();
       $('others').replaceChildren();
+      $('results').replaceChildren();
+      $('results').hidden = true;
+      $('lists').hidden = false;
     },
   };
   session = s;
+  // The sidebar search: peer names over this directory, thread titles by the hub.
+  s.search = createSearchBox($('search'), { api, nameOf, onChange: () => { if (session === s) renderNav(s, parseRoute(location.hash)); } });
+  s.offs.push(() => s.search.close());
 
   const ready = () => {
     if (s.ctx) return;

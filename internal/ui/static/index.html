@@ -22,6 +22,7 @@
 <link rel="stylesheet" href="attach.css">
 <link rel="stylesheet" href="react.css">
 <link rel="stylesheet" href="notice.css">
+<link rel="stylesheet" href="search.css">
 <script type="module" src="app.js"></script>
 </head>
 <body>
@@ -51,10 +52,14 @@
     </div>
     <div class="grp">You</div>
     <div id="me" class="me"></div>
-    <div class="grp">Your Threads</div>
-    <div id="threads" class="nav rows"></div>
-    <div class="grp">Other Threads</div>
-    <div id="others" class="nav rows"></div>
+    <div id="search" class="srch" role="search"></div>
+    <div id="lists">
+      <div class="grp">Your Threads</div>
+      <div id="threads" class="nav rows"></div>
+      <div class="grp">Other Threads</div>
+      <div id="others" class="nav rows"></div>
+    </div>
+    <div id="results" class="sr" role="region" aria-label="Search results" hidden></div>
     <div class="foot">
       <div id="conn" class="conn"><i></i><span>connecting</span></div>
       <button id="signout" type="button" class="linkbtn">Sign out</button>

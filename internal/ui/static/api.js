@@ -135,6 +135,12 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     routes: () => get('/v1/admin/routes'),
     inbox: ({ limit, before, unread } = {}) => get('/v1/admin/inbox' + query({ limit, before, unread: unread ? 1 : undefined })),
     myThreads: ({ limit } = {}) => get('/v1/threads' + query({ limit })),
+    // Thread title search (PROTOCOL §2.8): the hub filters by q, a
+    // case-insensitive title substring of at most 128 characters. Without
+    // participant it searches the operator's own threads; with a peer_ id,
+    // that peer's. Empty q and participant are left off. signal lets a newer
+    // search cancel this one.
+    searchThreads: ({ q, participant, limit, cursor, signal } = {}) => get('/v1/threads' + query({ q, participant, limit, cursor }), { signal }),
     threads: ({ participant, excludeParticipant, limit, cursor } = {}) => get('/v1/admin/threads' + query({ participant, exclude_participant: excludeParticipant, limit, cursor })),
     thread: id => get('/v1/admin/threads/' + seg(id)),
     messages: (id, { after, limit } = {}) => get('/v1/threads/' + seg(id) + '/messages' + query({ after, limit })),

@@ -20,8 +20,10 @@ import (
 // 336 KiB on 2026-11-05 for the favicon set, about 9 KiB of it images; to
 // 368 KiB on 2026-11-05 when hub-notices merged with master: its hub notice and
 // restart banners (about 13 KiB) on top of master's sidebar threads, unread
-// counts and composer growth put the merged UI at about 354 KB).
-const uiMaxBytes = 368 << 10
+// counts and composer growth put the merged UI at about 354 KB; to 392 KiB
+// on 2026-11-06 for sidebar search phase A, about 21 KB of search.js,
+// search-model.js and search.css on a master at 376,114 B, 718 B under 368 KiB).
+const uiMaxBytes = 392 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

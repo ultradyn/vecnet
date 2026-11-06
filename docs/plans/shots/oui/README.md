@@ -137,6 +137,19 @@ Sidebar unread screens come from `scripts/ui/sidebar-unread.mjs`. Each Your Thre
 - [sb-unread-narrow.png](sb-unread-narrow.png) — 1000 px, where the sidebar narrows to 220 px: titles ellipsize and the pills keep their place.
 - [sb-unread-phone.png](sb-unread-phone.png) — 390 px, one column: Your Threads at full width with the long title, the pills, the zero rows, and an Other Threads row with no pill.
 
+Sidebar search screens come from `scripts/ui/search.mjs` (Search phase A, CoS ruling). The box above Your Threads replaces both lists with results while it holds text. Peers are matched by name in the browser, over the directory the shell already loaded. Thread titles are matched by the hub with `GET /v1/threads?q=` (PROTOCOL §2.8) 250 ms after typing pauses. They are never filtered in the browser over admin pages. A peer's Threads button adds `participant=`, which narrows the titles to that peer's threads, including threads the operator is not in. The script checks that typing `hark` key by key sends one request, that the peers shown are the directory's matches, and that the threads shown are exactly the hub's answer for `q` (and for `q` plus `participant`). It also checks that no `q` reaches `/v1/admin/threads`, that the box takes at most 128 characters (a 129-character `q` gets 422 from the hub), that `/` focuses the box, and that Backspace in the empty box drops the picked peer. Esc and the clear button restore the lists. Nothing overflows at 1000 or 390 px.
+
+- [sr-idle.png](sr-idle.png) — The empty box, with its `/` hint, between You and Your Threads; the thread lists as before.
+- [sr-peer-hit.png](sr-peer-hit.png) — `hark`: the two peers whose name contains it, each with Threads, then the operator's threads whose title contains it.
+- [sr-thread-hit.png](sr-thread-hit.png) — `release`: no peer name matches; two of the operator's threads match by title (the peer-only `Release checklist for claw-ops` is not the operator's, so it is absent).
+- [sr-miss.png](sr-miss.png) — `zebra crossing`: no peer name and no thread title contain it, each said in its own group.
+- [sr-loading.png](sr-loading.png) — `digest` while the hub has not answered: the peer match is already shown (it needs no request) and the threads group reads Searching….
+- [sr-error.png](sr-error.png) — The title search fails (503): the reason in red, with Retry.
+- [sr-participant.png](sr-participant.png) — Participant + q: grok-reviewer picked from the peer results (the chip under the box, removable), then `release`. Threads with grok-reviewer whose title contains it, including the one the operator is not in.
+- [sr-narrow.png](sr-narrow.png) — `hark` at 1000 px, where the sidebar is 220 px: peer rows keep name over kind beside Threads, and long titles ellipsize.
+- [sr-phone.png](sr-phone.png) — `hark` at 390 px on the inbox, one column: the box and results at full width above the view.
+- [sr-cleared.png](sr-cleared.png) — After Esc (and the clear button): the box is empty and Your Threads and Other Threads are back.
+
 Thread unread screens come from `scripts/ui/thread-unread.mjs` (CoS unread ruling). A thread opens at the operator's first unread message under a New divider in the unread tint, not at the bottom; each unread message has a thin amber bar until it is seen. A message is read on its own, by one read receipt for its delivery (batched over 500 ms), once 60% of it has been on screen for a second or it is scrolled past going down, and only while the page is visible and focused. Opening never marks the whole thread read. The fixture is a fourteen-message thread whose first eight the operator read earlier.
 
 - [tu-open.png](tu-open.png) — Opened (unfocused, so nothing is read yet) with six unread: New sits near the top above the first unread, the end of what was read above it; the sidebar pill reads 6.
