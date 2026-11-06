@@ -50,8 +50,10 @@ var invitePlaceholders = map[string]bool{
 	"expires": true, "open": true, "name": true,
 }
 
+// Authorize is shown before submission. The peer does not exist yet, so
+// peer_id is not a placeholder; the setup message carries the binding.
 var authorizePlaceholders = map[string]bool{
-	"hub_url": true, "peer_id": true, "connector_name": true,
+	"hub_url": true, "connector_name": true,
 }
 
 var setupPlaceholders = map[string]bool{
@@ -148,7 +150,7 @@ func renderAuthorize(values map[string]string) (string, error) {
 	if err := checkPlaceholders(values, authorizePlaceholders); err != nil {
 		return "", err
 	}
-	view, err := grokViewFrom(values, true)
+	view, err := grokViewFrom(values, true, false)
 	if err != nil {
 		return "", err
 	}
@@ -166,7 +168,7 @@ func renderSetup(values map[string]string) (string, error) {
 	if mode != CredentialHostedOAuth && mode != CredentialCLIBearer {
 		return "", fieldErr(CodeInvalidValue, "credential_mode", "credential_mode must be hosted_oauth or cli_bearer")
 	}
-	view, err := grokViewFrom(values, mode == CredentialHostedOAuth)
+	view, err := grokViewFrom(values, mode == CredentialHostedOAuth, true)
 	if err != nil {
 		return "", err
 	}
@@ -180,13 +182,17 @@ func renderSetup(values map[string]string) (string, error) {
 	return execute(setupTmpl, view)
 }
 
-func grokViewFrom(values map[string]string, needConnector bool) (grokView, error) {
+func grokViewFrom(values map[string]string, needConnector, needPeer bool) (grokView, error) {
 	hub, err := safeHubOrigin(values["hub_url"])
 	if err != nil {
 		return grokView{}, err
 	}
-	if !peerIDRE.MatchString(values["peer_id"]) {
-		return grokView{}, fieldErr(CodeInvalidValue, "peer_id", "peer_id must be 1 to 80 letters, digits or underscores")
+	peer := ""
+	if needPeer {
+		if !peerIDRE.MatchString(values["peer_id"]) {
+			return grokView{}, fieldErr(CodeInvalidValue, "peer_id", "peer_id must be 1 to 80 letters, digits or underscores")
+		}
+		peer = values["peer_id"]
 	}
 	var connector string
 	if needConnector || values["connector_name"] != "" {
@@ -199,7 +205,7 @@ func grokViewFrom(values map[string]string, needConnector bool) (grokView, error
 	if thread != "" && !peerIDRE.MatchString(thread) {
 		return grokView{}, fieldErr(CodeInvalidValue, "thread_id", "thread_id must be 1 to 80 letters, digits or underscores")
 	}
-	return grokView{HubURL: hub, PeerID: values["peer_id"], ConnectorName: connector, ThreadID: thread}, nil
+	return grokView{HubURL: hub, PeerID: peer, ConnectorName: connector, ThreadID: thread}, nil
 }
 
 func execute(tmpl *template.Template, data grokView) (string, error) {
