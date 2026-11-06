@@ -17,7 +17,10 @@ func TestRetentionSettledHeldCallbacksReleasePrefix(t *testing.T) {
 	for _, outcome := range []string{"success", "ack"} {
 		t.Run(outcome, func(t *testing.T) {
 			ctx := context.Background()
-			env := testhub.Start(t)
+			env := testhub.StartWith(t, func(cfg *hub.Config) {
+				// This checks settled callback pins, not wall-clock slice limits.
+				cfg.EventRetentionLimits = eventlog.RetentionLimits{Target: time.Minute}
+			})
 			peer, secret := env.NewPeer("session", "recipient")
 			_, sender := env.NewPeer("session", "sender")
 			cb := testhub.NewCallback(t)
