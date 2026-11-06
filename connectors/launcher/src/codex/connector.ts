@@ -1,4 +1,4 @@
-import { closeSync, fstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
 import type { KeyValue } from '../backend.ts';
@@ -44,7 +44,8 @@ function readBindings(path: string | undefined, euid: number): FileState {
   let raw: string;
   try {
     // Check the descriptor we read, so the file cannot be swapped between check and read.
-    const fd = openSync(path, 'r');
+    // O_NONBLOCK: a FIFO at the path must not block the daemon's event loop in open.
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
     try {
       const st = fstatSync(fd);
       if (!st.isFile()) return { state: 'refused', reason: 'not_file' };

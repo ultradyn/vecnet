@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -210,6 +210,17 @@ test('absent bindings file disables quietly; 0644 file is refused', async t => {
   await s.reload();
   await eventually(() => !s.subscribed(id) && s.unsubscribed(id), 'refused again: engine stopped');
   assert.equal(s.logged('codex_bindings_refused').length, 2);
+});
+
+test('a FIFO at the bindings path is refused without blocking', async t => {
+  const id = uuid(25);
+  const s = await setup(t, { threads: [{ id }] });
+  execFileSync('mkfifo', ['-m', '600', s.bindingsPath]);
+  s.start();
+  await s.ready();
+  await s.reload();
+  assert.deepEqual(s.logged('codex_bindings_refused').map(e => e.meta), [{ reason: 'not_file' }]);
+  assert.deepEqual(s.fake.requests, [], 'a FIFO starts nothing');
 });
 
 test('daemon start and stop drive the connector', async t => {
