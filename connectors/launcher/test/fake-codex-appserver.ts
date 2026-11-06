@@ -47,7 +47,9 @@ const typeOf = (status: unknown): unknown => typeof status === 'string' ? status
 const paramsOf = (p: unknown): Params => p !== null && typeof p === 'object' && !Array.isArray(p) ? p as Params : {};
 
 /** A local-only Codex protocol simulator. It never starts a child process. */
-export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; unloadDelayMs?: number; coldResumeIdleDelayMs?: number }): Promise<FakeCodex> {
+export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; unloadDelayMs?: number; coldResumeIdleDelayMs?: number;
+  /** Real (wall-clock) delay before answering thread/unsubscribe: a slow socket or engine shutdown. */
+  unsubscribeDelayMs?: number }): Promise<FakeCodex> {
   // dir is always supplied by the test; there is no real-home fallback.
   const clock: Pick<Clock, 'now' | 'timer'> = o.clock ?? {
     now: () => Date.now(), timer(ms, fn) { const id = setTimeout(fn, ms); return { cancel: () => clearTimeout(id) }; },
@@ -163,7 +165,9 @@ export async function startFakeCodexAppServer(o: { dir: string; clock?: Clock; u
     }
     if (method === 'thread/unsubscribe') {
       const removed = t.members.delete(p.id); schedule(t);
-      respond({ status: typeOf(t.status) === 'notLoaded' ? 'notLoaded' : removed ? 'unsubscribed' : 'notSubscribed' }); return;
+      const answer = () => respond({ status: typeOf(t.status) === 'notLoaded' ? 'notLoaded' : removed ? 'unsubscribed' : 'notSubscribed' });
+      if (o.unsubscribeDelayMs) setTimeout(answer, o.unsubscribeDelayMs); else answer();
+      return;
     }
     if (method === 'turn/start' || method === 'turn/steer') {
       if (typeOf(t.status) === 'notLoaded') { error(-32600, 'thread not found'); return; }

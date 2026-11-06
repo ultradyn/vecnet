@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { startCodexConnector } from '../src/codex/connector.ts';
+import { CODEX_RELOAD_MS, startCodexConnector } from '../src/codex/connector.ts';
 import { startFakeCodexAppServer } from './fake-codex-appserver.ts';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { KeyValue } from '../src/backend.ts';
@@ -28,9 +28,9 @@ async function eventually(fn: () => boolean, what: string, ms = 8000) {
   }
 }
 
-async function setup(t: TestContext, o: { threads?: { id: string; status?: unknown; approvalPolicy?: string }[]; maxBindings?: string; startAt?: number } = {}) {
+async function setup(t: TestContext, o: { threads?: { id: string; status?: unknown; approvalPolicy?: string }[]; maxBindings?: string; startAt?: number; unsubscribeDelayMs?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vn-cc-'));
-  const fake = await startFakeCodexAppServer({ dir: join(dir, 'fake') });
+  const fake = await startFakeCodexAppServer({ dir: join(dir, 'fake'), unsubscribeDelayMs: o.unsubscribeDelayMs });
   const home = join(dir, 'fake', 'home');
   for (const th of o.threads ?? []) {
     fake.setThread({ id: th.id, status: th.status ?? { type: 'idle' }, ...(th.approvalPolicy ? { approvalPolicy: th.approvalPolicy } : {}) });
@@ -61,7 +61,21 @@ esac
   const map = new Map<string, string>();
   const kv: KeyValue = { get: k => map.get(k), set: (k, v) => { map.set(k, v); }, delete: k => { map.delete(k); }, keys: (p = '') => [...map.keys()].filter(k => k.startsWith(p)) };
   const clock = fakeClock(o.startAt ?? T), log = memoryLog();
+  // Count the connector's reload timers. It arms the next one only after a
+  // reload (including engine shutdowns) has finished, so a new registration
+  // is the completion barrier. No engine timer uses CODEX_RELOAD_MS.
+  let reloadsArmed = 0, reloadsPending = 0, reloadsFired = 0;
+  const baseTimer = clock.timer;
+  clock.timer = (ms, fn) => {
+    if (ms !== CODEX_RELOAD_MS) return baseTimer(ms, fn);
+    reloadsArmed++; reloadsPending++;
+    let live = true;
+    const settle = () => { if (live) { live = false; reloadsPending--; } };
+    const alarm = baseTimer(ms, () => { settle(); reloadsFired++; fn(); });
+    return { cancel() { settle(); alarm.cancel(); } };
+  };
   const connectors: Connector[] = [];
+  let live = 0;
   const binding = (id: string, i: number, extra: FileBinding = {}): FileBinding => ({
     profile: `p${i}`, as: '', hub: 'https://hub.invalid', caller: `peer_${i}`, codex_home: home, thread_id: id,
     created_at: new Date(T + i * 1000).toISOString(), expires_at: new Date(T + 24 * hour).toISOString(), ...extra,
@@ -70,13 +84,30 @@ esac
     writeFileSync(bindingsPath, JSON.stringify({ version: 1, bindings: list }, null, 2), { mode });
     chmodSync(bindingsPath, mode);
   };
-  const start = () => { const c = startCodexConnector({ kv, clock, log, env }); connectors.push(c); return c; };
+  const start = () => {
+    const c = startCodexConnector({ kv, clock, log, env }), stop = c.stop;
+    let stopped = false;
+    c.stop = () => { if (!stopped) { stopped = true; live--; } return stop(); };
+    live++; connectors.push(c); return c;
+  };
   const resumed = (id: string) => fake.requests.some(r => r.method === 'thread/resume' && (r.params as { threadId?: string }).threadId === id);
   const unsubscribed = (id: string) => fake.requests.some(r => r.method === 'thread/unsubscribe' && (r.params as { threadId?: string }).threadId === id);
   const subscribed = (id: string) => fake.subscribers(id).length === 1;
   const logged = (msg: string) => log.entries.filter(e => e.msg === msg);
-  /** One 10 s reload of logical time, then a moment for its I/O to settle. */
-  const reload = async () => { clock.advance(10_000); await delay(150); };
+  /** The first reload has run: its successor timer is armed. */
+  const ready = () => eventually(() => live === 0 || reloadsPending > 0, 'connector reload timer armed');
+  /**
+   * One 10 s reload of logical time, waited for by completion, not by a sleep:
+   * every reload that fires must re-arm its timer (it does so only after
+   * retiring and starting engines) before the clock may move on.
+   */
+  const reload = async () => {
+    await ready();
+    const armed = reloadsArmed, fired = reloadsFired;
+    clock.advance(CODEX_RELOAD_MS);
+    const ran = reloadsFired - fired;
+    await eventually(() => live === 0 || reloadsArmed >= armed + ran, 'connector reload completed and re-armed');
+  };
   t.after(async () => {
     for (const c of connectors) await c.stop();
     await fake.close();
@@ -85,7 +116,7 @@ esac
     assert.deepEqual(fake.replies, []);
     rmSync(dir, { recursive: true, force: true });
   });
-  return { dir, fake, home, env, kv, clock, log, bindingsPath, binding, writeBindings, start, resumed, unsubscribed, subscribed, logged, reload, trace };
+  return { dir, fake, home, env, kv, clock, log, bindingsPath, binding, writeBindings, start, resumed, unsubscribed, subscribed, logged, reload, ready, trace };
 }
 
 test('connector starts one engine per binding and stops removed ones', async t => {
@@ -117,6 +148,30 @@ test('connector starts one engine per binding and stops removed ones', async t =
   assert.equal(s.fake.requests.filter(r => r.method === 'initialize').length, 4);
 });
 
+test('reload waits for a slow engine shutdown before the next reload', async t => {
+  // Retiring an engine waits for thread/unsubscribe. With that answer slower
+  // than any fixed settling sleep, a removal, a renewal and a re-bind must
+  // still each take effect at their own reload.
+  const [a, b, c] = [uuid(5), uuid(6), uuid(7)];
+  const s = await setup(t, { threads: [{ id: a }, { id: b }, { id: c }], unsubscribeDelayMs: 400 });
+  s.writeBindings([s.binding(a, 1), s.binding(b, 2), s.binding(c, 3)]);
+  s.start();
+  await eventually(() => [a, b, c].every(s.subscribed), 'all three bound threads subscribed');
+  const connOf = (id: string) => s.fake.subscribers(id)[0];
+  const cc = connOf(c);
+  s.writeBindings([s.binding(a, 1), s.binding(c, 3)]);
+  const started = Date.now();
+  await s.reload();
+  assert.ok(Date.now() - started >= 300, 'the reload waited for the slow unsubscribe');
+  assert.ok(!s.subscribed(b) && s.unsubscribed(b), 'removed binding unsubscribed by the end of its reload');
+  s.writeBindings([s.binding(a, 1, { expires_at: new Date(T + 48 * hour).toISOString() }), s.binding(c, 3)]);
+  await s.reload();
+  s.writeBindings([s.binding(a, 1), s.binding(c, 9)]);
+  await s.reload();
+  await eventually(() => s.subscribed(c) && connOf(c) !== cc, 're-bound thread subscribed by a new engine');
+  assert.equal(s.fake.requests.filter(r => r.method === 'initialize').length, 4);
+});
+
 test('limit groups symlinked codex homes together', async t => {
   const ids = Array.from({ length: 9 }, (_, i) => uuid(10 + i));
   const s = await setup(t, { threads: ids.map(id => ({ id })) });
@@ -138,7 +193,7 @@ test('absent bindings file disables quietly; 0644 file is refused', async t => {
   const id = uuid(20);
   const s = await setup(t, { threads: [{ id }] });
   s.start();
-  await delay(100);
+  await s.ready();
   await s.reload(); await s.reload();
   assert.equal(s.logged('codex_connector_disabled').length, 1, 'disabled is logged once');
   assert.equal(s.log.entries.filter(e => e.level === 'error').length, 0);
