@@ -225,6 +225,71 @@ func TestHookAppServerEligibility(t *testing.T) {
 		t.Fatal("invalid priority changed state or output")
 	}
 }
+
+// Every run reloads the on-disk state through the CLI dispatcher, so ordering
+// must survive nonce changes and independent hook invocations.
+func TestHookAppServerReleasedClaimsKeepLogOrder(t *testing.T) {
+	for _, priorities := range [][]string{
+		{"wake", "wake_idle"},
+		{"wake_idle", "wake", "wake_idle", "wake", "wake_idle"},
+		{"wake", "wake_idle", "wake", "wake_idle", "wake", "wake_idle", "wake", "wake_idle", "wake", "wake_idle", "wake", "wake_idle"},
+	} {
+		t.Run(strings.Join(priorities, ","), func(t *testing.T) {
+			f := newAppHookFixture(t)
+			want := make([]string, len(priorities))
+			for i, p := range priorities {
+				f.add(t, p, p, "")
+				want[i] = fmt.Sprintf("dly_%d", i+1)
+			}
+			f.run(t, "c1", "wake")
+			f.release(t, "c1", len(f.state(t).Claims))
+			s := f.state(t)
+			ids := make([]string, len(s.Replay))
+			for i, r := range s.Replay {
+				ids[i] = r.ID
+			}
+			if !slices.Equal(ids, want) {
+				t.Errorf("released replay order %v, want %v", ids, want)
+			}
+			for batch, remaining := 0, want; len(remaining) > 0; batch++ {
+				n := min(hookMaxItems, len(remaining))
+				got, _, _ := f.run(t, fmt.Sprintf("batch_%d", batch), "wake,wake_idle")
+				appHookIDs(t, got, remaining[:n]...)
+				remaining = remaining[n:]
+			}
+			got, _, _ := f.run(t, "empty", "wake,wake_idle")
+			appHookIDs(t, got)
+			if f.state(t).PollCursor != "e1.0" {
+				t.Fatal("hook cursor moved")
+			}
+		})
+	}
+}
+
+func TestHookAppServerReclaimedClaimsKeepLogOrder(t *testing.T) {
+	f := newAppHookFixture(t)
+	f.add(t, "wake", "older", "")
+	got, _, _ := f.run(t, "c1", "wake")
+	appHookIDs(t, got, "dly_1")
+	f.add(t, "wake", "newer", "")
+	got, _, _ = f.run(t, "c2", "wake")
+	appHookIDs(t, got, "dly_2")
+	f.release(t, "c1", 1)
+	got, _, _ = f.run(t, "c3", "wake")
+	appHookIDs(t, got, "dly_1")
+	s := f.state(t)
+	if len(s.Claims) != 2 || s.Claims[0].ID != "dly_1" || s.Claims[0].Claim != "c3" || s.Claims[1].ID != "dly_2" || s.Claims[1].Claim != "c2" {
+		t.Errorf("reclaimed claims are not in log order: %+v", s.Claims)
+	}
+	// Releasing in either nonce order must give the next batch the same log.
+	f.release(t, "c2", 1)
+	f.release(t, "c3", 1)
+	got, _, _ = f.run(t, "c4", "wake")
+	appHookIDs(t, got, "dly_1", "dly_2")
+	got, _, _ = f.run(t, "c5", "wake")
+	appHookIDs(t, got)
+}
+
 func TestHookAppServerLeavesHookCursor(t *testing.T) {
 	f := newAppHookFixture(t)
 	f.add(t, "wake", "claimed wake", "")

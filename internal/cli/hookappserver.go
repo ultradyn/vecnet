@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -31,9 +32,17 @@ type appServerEntry struct {
 }
 
 // After is the previous event's cursor, or the exact after= used for the page.
-// These lists retain arrival order; no operation interprets a cursor.
-type replayRef struct{ ID, After, Priority string }
-type claimRef struct{ ID, After, Priority, Claim string }
+// Order records local observation order while reading new events. It travels
+// with a delivery through release/reclaim, so the two lists can be merged back
+// into log order without interpreting opaque cursors or delivery ids.
+type replayRef struct {
+	ID, After, Priority string
+	Order               uint64 `json:",omitempty"`
+}
+type claimRef struct {
+	ID, After, Priority, Claim string
+	Order                      uint64 `json:",omitempty"`
+}
 
 func appServerJSON(v any) []byte {
 	var b bytes.Buffer
@@ -61,6 +70,10 @@ func appServerRender(h hookHint, item hookItem) (appServerEntry, bool) {
 	return appServerEntry{}, false
 }
 func (a *app) appServerBound(s *hookState) {
+	// Sort before trimming so overflow always drops the oldest deliveries,
+	// including when an older claim was just released or reclaimed.
+	slices.SortStableFunc(s.Replay, func(a, b replayRef) int { return cmp.Compare(a.Order, b.Order) })
+	slices.SortStableFunc(s.Claims, func(a, b claimRef) int { return cmp.Compare(a.Order, b.Order) })
 	if len(s.Replay) > appServerReplayLimit {
 		for _, r := range s.Replay[:len(s.Replay)-appServerReplayLimit] {
 			fmt.Fprintf(a.stderr, "vecnet: app-server: replay overflow; %s remains in inbox\n", hookSafeID(r.ID))
@@ -151,7 +164,7 @@ func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error
 					continue
 				}
 				s.Shown = slices.DeleteFunc(s.Shown, func(shown string) bool { return shown == r.ID })
-				s.Replay = append(s.Replay, replayRef{ID: r.ID, After: r.After, Priority: r.Priority})
+				s.Replay = append(s.Replay, replayRef{ID: r.ID, After: r.After, Priority: r.Priority, Order: r.Order})
 				n++
 			}
 			s.Claims = claims
@@ -208,6 +221,19 @@ func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error
 		// Count eligible items cut by either the item or encoded pipe cap. A map
 		// avoids counting an id twice when replay and the new page overlap.
 		more := map[string]bool{}
+		// Only outstanding references need ordering. Start after their maximum;
+		// once both lists are empty the local numbering may safely start over.
+		var order uint64
+		for _, r := range s.Replay {
+			order = max(order, r.Order)
+		}
+		for _, r := range s.Claims {
+			order = max(order, r.Order)
+		}
+		nextOrder := func() uint64 {
+			order++
+			return order
+		}
 		claim := func(ev envelope.Event, after, priority string) (bool, error) {
 			item, e := hookItemOf(ev, names)
 			if e != nil {
@@ -235,7 +261,13 @@ func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error
 			candidate.More = 0
 			out = candidate
 			s.claim(item.Delivery)
-			s.Claims = append(s.Claims, claimRef{ID: item.Delivery, After: after, Priority: priority, Claim: nonce})
+			var deliveryOrder uint64
+			if i := slices.IndexFunc(s.Replay, func(r replayRef) bool { return r.ID == item.Delivery }); i >= 0 {
+				deliveryOrder = s.Replay[i].Order
+			} else {
+				deliveryOrder = nextOrder()
+			}
+			s.Claims = append(s.Claims, claimRef{ID: item.Delivery, After: after, Priority: priority, Claim: nonce, Order: deliveryOrder})
 			s.Replay = slices.DeleteFunc(s.Replay, func(r replayRef) bool { return r.ID == item.Delivery })
 			delete(more, item.Delivery)
 			claimed = append(claimed, ev)
@@ -333,7 +365,7 @@ func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error
 						more[delivery] = true
 					}
 				} else if p == "wake_idle" && !cut && !slices.ContainsFunc(s.Replay, func(r replayRef) bool { return r.ID == delivery }) {
-					s.Replay = append(s.Replay, replayRef{ID: delivery, After: after, Priority: p})
+					s.Replay = append(s.Replay, replayRef{ID: delivery, After: after, Priority: p, Order: nextOrder()})
 				}
 			}
 			if !cut {
