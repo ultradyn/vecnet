@@ -14,17 +14,16 @@ job/approval payload details are documented by `vecnet_guide` on demand. The
 base64 character cap stays visible for upload clients. Output schemas retain all
 their original validation keywords. The property-name allowlist has 15 entries.
 
-The peer catalog measured 32,469 compact JSON bytes before and 18,305 after;
-`vecnet_send` fell from 9,654 to 2,689 bytes. The 3,000-byte send target is met;
-the 14,000-byte total target is **not met**. This is the practical minimum selected
-for this change, not a proof of an absolute byte minimum. Further reduction would
-require dropping more calling guidance, supported argument shapes, or client
-metadata; this change retains those rather than claiming the total target passed.
-As a check, retaining the projected shapes and metadata but emptying all 106
-descriptions still takes 13,746 bytes. A 14,000-byte catalog would leave only 254
-bytes of text for 23 tool descriptions and 83 property descriptions. That cannot
-carry the required action selection and calling rules. Property descriptions
-already top out at 38 bytes and the self-explanatory-name allowlist stays small.
+The original peer catalog measured 32,469 compact JSON bytes. Round one reduced
+it to 18,305 bytes; round two uses **19,499 bytes**, within the accepted
+19,500-byte cap, with plain sentences and explicit action and paging guidance.
+`vecnet_send` is 2,816 bytes, below its original 3,000-byte target.
+Keeping the projected shapes and metadata but emptying all 106 descriptions still
+takes 13,746 bytes. The original 14,000-byte target leaves only 254 bytes for 23
+tool descriptions and 83 property descriptions, so its exception remains accepted.
+All tool descriptions are at most 177 bytes. Property descriptions are at most
+70 bytes except the 99-byte priority guidance, which preserves the required
+choice, immediate wake cost, and hold behavior. The explicit allowlist is unchanged.
 The regression budgets freeze the achieved total plus 10% and each tool plus 15%.
 
 Annotations and all four output contracts remain. The minimal OAuth

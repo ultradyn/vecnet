@@ -414,8 +414,8 @@ func TestToolsListNamesAndHints(t *testing.T) {
 		if tool.Description == "" {
 			t.Errorf("%s: no description", tool.Name)
 		}
-		if !readOnly[tool.Name] && !strings.Contains(tool.Description, "operator's bus") {
-			t.Errorf("%s: a write tool's description must say it writes to the operator's bus: %q", tool.Name, tool.Description)
+		if strings.Contains(tool.Description, "operator's bus") {
+			t.Errorf("%s: description contains redundant operator bus wording: %q", tool.Name, tool.Description)
 		}
 		if tool.Name == "vecnet_react" {
 			props := tool.InputSchema["properties"].(map[string]any)

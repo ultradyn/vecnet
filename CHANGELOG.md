@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-06: MCP discovery descriptions use plain sentences with explicit priority, retry, identity, ack and paging guidance within a 19,500-byte catalog cap (internal/mcpserver).
 - 2026-11-06: MCP discovery uses a separate concise schema/wording projection with unchanged call validation; detailed limits move into vecnet_guide, with discovery-size and validation-equivalence guards (internal/mcpserver).
 - 2026-11-06: plan-build workflow — decisions files (statusDir/decisions/task-NN.md), worktree self-heal per agent, plan-over-stale-PROTOCOL rule (docs/plans/vecnet-core-build.workflow.mjs)
 - 2026-11-06: vecnet hook accepts Codex SessionStart; hook install --client codex writes .codex/hooks.json (timeout 5, additionalContextLimit 18000, no lifecycle hooks) (internal/cli/hook*.go, PROTOCOL §13.9, docs/connectors/codex.md)
