@@ -28,8 +28,12 @@ const (
 )
 
 func redactCanaries() []string {
-	return []string{"alice:" + redactUser, redactUser, redactPath, redactQuery}
+	return []string{"alice:" + redactUser, redactUser, redactQuery, "FRAG"}
 }
+
+func checkedPathHub() string { return "https://" + redactHost + "/" + redactPath }
+
+func checkedIPv6Hub() string { return "https://[2001:db8::7]/" + redactPath }
 
 func assertNoCanaries(t *testing.T, label, text string) {
 	t.Helper()
@@ -72,7 +76,7 @@ func TestTransportErrorOmitsHubURL(t *testing.T) {
 	}{
 		{
 			name: "dial",
-			hub:  secretHub(""),
+			hub:  checkedIPv6Hub(),
 			rt: func(r *http.Request) (*http.Response, error) {
 				return nil, &net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("connect %s", r.URL.String())}
 			},
@@ -89,7 +93,7 @@ func TestTransportErrorOmitsHubURL(t *testing.T) {
 		},
 		{
 			name: "tls",
-			hub:  pathQueryHub(),
+			hub:  checkedPathHub(),
 			rt: func(r *http.Request) (*http.Response, error) {
 				return nil, &tls.RecordHeaderError{Msg: "handshake " + r.URL.String()}
 			},
@@ -102,7 +106,7 @@ func TestTransportErrorOmitsHubURL(t *testing.T) {
 		},
 		{
 			name: "timeout",
-			hub:  pathQueryHub(),
+			hub:  checkedPathHub(),
 			rt: func(r *http.Request) (*http.Response, error) {
 				return nil, &net.OpError{Op: "dial", Net: "tcp", Err: timeoutNetError{}}
 			},
@@ -115,7 +119,7 @@ func TestTransportErrorOmitsHubURL(t *testing.T) {
 		},
 		{
 			name: "body",
-			hub:  secretHub(""),
+			hub:  checkedPathHub(),
 			rt: func(r *http.Request) (*http.Response, error) {
 				return &http.Response{
 					StatusCode: 200,
@@ -145,8 +149,11 @@ func TestTransportErrorOmitsHubURL(t *testing.T) {
 				t.Fatalf("exit classification lost, got %T %v", err, err)
 			}
 			assertNoCanaries(t, "returned error", err.Error())
-			if !strings.Contains(err.Error(), "https://"+redactHost) && tc.name != "body" {
-				t.Fatalf("error %q does not keep scheme and host", err.Error())
+			if !strings.Contains(err.Error(), tc.hub) {
+				t.Fatalf("error %q dropped the hub URL", err.Error())
+			}
+			if strings.Contains(tc.hub, "[2001:db8::7]") && !strings.Contains(err.Error(), "[2001:db8::7]") {
+				t.Fatalf("error mangled IPv6: %q", err.Error())
 			}
 			tc.as(t, err)
 		})
@@ -160,7 +167,7 @@ func TestTransportDiagnosticsOmitHubURL(t *testing.T) {
 	})
 	t.Cleanup(func() { http.DefaultTransport = old })
 
-	hub := pathQueryHub()
+	hub := checkedPathHub()
 	_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nsecret = %q\n", hub, "vn_operator_redact"))
 	code, out, errs := pinRun(env, "peers")
 	if code != exitNetwork {
@@ -181,7 +188,7 @@ func TestTransportDiagnosticsOmitHubURL(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	c := newClient(secretHub(""), "vn_peer_x")
+	c := newClient(checkedIPv6Hub(), "vn_peer_x")
 	c.hc.Transport = http.DefaultTransport
 	w := &watcher{
 		identityOff: true, replayed: true, forMonitor: true,
@@ -204,8 +211,11 @@ func TestTransportDiagnosticsOmitHubURL(t *testing.T) {
 	if !strings.Contains(stderr.String(), "connection refused") && !strings.Contains(stderr.String(), "connect ") && !strings.Contains(stderr.String(), "reconnecting") {
 		t.Fatalf("reconnect stderr %q", stderr.String())
 	}
-	if strings.Contains(stderr.String(), redactUser) || strings.Contains(stderr.String(), redactPath) || strings.Contains(stderr.String(), redactQuery) {
+	if strings.Contains(stderr.String(), redactUser) || strings.Contains(stderr.String(), redactQuery) {
 		t.Fatalf("reconnect leaked: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), checkedIPv6Hub()) {
+		t.Fatalf("reconnect dropped the hub URL: %s", stderr.String())
 	}
 }
 
@@ -231,6 +241,9 @@ func TestProfileFollowRefusesBeforeRequest(t *testing.T) {
 		{"https userinfo", secretHub(""), false, false},
 		{"https userinfo allowed env", secretHub(""), true, false},
 		{"https userinfo allowed profile", secretHub(""), false, true},
+		{"query", pathQueryHub(), false, false},
+		{"fragment", "https://" + redactHost + "/" + redactPath + "#FRAG", false, false},
+		{"query allowed", pathQueryHub(), true, false},
 	}
 	for _, tc := range refused {
 		t.Run(tc.name, func(t *testing.T) {
@@ -257,14 +270,18 @@ func TestProfileFollowRefusesBeforeRequest(t *testing.T) {
 		})
 	}
 
-	t.Run("accepted path still dials without echoing it", func(t *testing.T) {
+	t.Run("accepted path dials and keeps the path", func(t *testing.T) {
 		calls = 0
-		_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nsecret = %q\n", pathQueryHub(), "vn_peer_x"))
+		hub := checkedPathHub()
+		_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nsecret = %q\n", hub, "vn_peer_x"))
 		code, out, errs := pinRun(env, "profile", "follow")
 		if code == 0 || calls == 0 {
 			t.Fatalf("exit %d calls %d\n%s\n%s", code, calls, out, errs)
 		}
 		assertNoCanaries(t, "accepted follow", out+"\n"+errs)
+		if !strings.Contains(out+errs, "/"+redactPath) && !strings.Contains(out+errs, "notices") && calls == 0 {
+			t.Fatalf("path hub produced no request\n%s\n%s", out, errs)
+		}
 	})
 }
 
@@ -395,6 +412,7 @@ func TestFollowNoticeOmitsHubURL(t *testing.T) {
 		{"userinfo", secretHub("")},
 		{"path", "https://" + redactHost + "/" + redactPath},
 		{"query", "https://" + redactHost + "?token=" + redactQuery},
+		{"fragment", "https://" + redactHost + "/" + redactPath + "#FRAG"},
 	}
 	for _, mode := range modes {
 		for _, tc := range notices {
@@ -415,9 +433,13 @@ func TestFollowNoticeOmitsHubURL(t *testing.T) {
 				if err == nil {
 					t.Fatal("expected a refusal")
 				}
-				assertNoCanaries(t, "followNotice", out.String()+"\n"+errs.String()+"\n"+err.Error())
+				text := out.String() + "\n" + errs.String() + "\n" + err.Error()
+				assertNoCanaries(t, "followNotice", text)
 				if !strings.Contains(out.String(), "not following") {
 					t.Fatalf("stdout %s", out.String())
+				}
+				if tc.name == "path" && !strings.Contains(text, tc.next) {
+					t.Fatalf("path URL omitted: %s", text)
 				}
 			})
 		}
@@ -464,7 +486,7 @@ func TestFollowSuccessOmitsPath(t *testing.T) {
 		t.Fatalf("config destination %q, want full URL", got)
 	}
 	assertNoCanaries(t, "follow stderr", stderr.String())
-	if !strings.Contains(stderr.String(), "verified") {
+	if !strings.Contains(stderr.String(), "verified") || !strings.Contains(stderr.String(), "/"+pathSecret) {
 		t.Fatalf("stderr %q", stderr.String())
 	}
 	cfg, err = loadConfig(path)
@@ -487,7 +509,7 @@ func TestWatchAnnounceOmitsHubURL(t *testing.T) {
 	for _, mode := range modes {
 		t.Run(mode.name, func(t *testing.T) {
 			var out, errs bytes.Buffer
-			c := newClient(pathQueryHub(), "vn_peer_x")
+			c := newClient(checkedPathHub(), "vn_peer_x")
 			c.hc.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: http.StatusNoContent, Status: "204 No Content", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
 			})
@@ -502,9 +524,128 @@ func TestWatchAnnounceOmitsHubURL(t *testing.T) {
 				t.Fatalf("run: %v\n%s", err, errs.String())
 			}
 			assertNoCanaries(t, "announce", out.String()+"\n"+errs.String())
-			if !strings.Contains(out.String(), "https://"+redactHost) || !strings.Contains(out.String(), "verified") {
+			if !strings.Contains(out.String(), checkedPathHub()) {
+				t.Fatalf("announce %s", out.String())
+			}
+			if !mode.monitor && !strings.Contains(out.String(), "verified") {
 				t.Fatalf("announce %s", out.String())
 			}
 		})
 	}
+}
+
+func TestHubURLBoundaries(t *testing.T) {
+	var calls int
+	old := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("guard: " + r.URL.String())
+	})
+	t.Cleanup(func() { http.DefaultTransport = old })
+
+	canaries := []struct{ name, hub string }{
+		{"userinfo", "https://alice:" + redactUser + "@" + redactHost + "/" + redactPath},
+		{"query", "https://" + redactHost + "/" + redactPath + "?token=" + redactQuery},
+		{"fragment", "https://" + redactHost + "/" + redactPath + "#FRAG"},
+	}
+	for _, tc := range canaries {
+		t.Run("enrol/"+tc.name, func(t *testing.T) {
+			calls = 0
+			_, env := pinTestEnv(t, "")
+			code, out, errs := pinRun(env, "enrol", "--hub", tc.hub, "--token", "vn_enrol_x", "--profile", "p")
+			if code == 0 || calls != 0 {
+				t.Fatalf("exit %d calls %d\n%s\n%s", code, calls, out, errs)
+			}
+			assertNoCanaries(t, "enrol", out+"\n"+errs)
+		})
+		t.Run("stored/"+tc.name, func(t *testing.T) {
+			calls = 0
+			body := fmt.Sprintf("[profiles.bad]\nhub = %q\nsecret = %q\n\n[profiles.ok]\nhub = %q\nsecret = %q\n", tc.hub, "vn_peer_x", checkedPathHub(), "vn_peer_y")
+			_, base := pinTestEnv(t, body)
+			env := func(k string) string {
+				if k == "VECNET_PROFILE" {
+					return "bad"
+				}
+				return base(k)
+			}
+			code, out, errs := pinRun(env, "peers")
+			if code == 0 || calls != 0 {
+				t.Fatalf("bad profile exit %d calls %d\n%s\n%s", code, calls, out, errs)
+			}
+			text := out + "\n" + errs
+			assertNoCanaries(t, "stored", text)
+			if !strings.Contains(errs, "edit the config") {
+				t.Fatalf("stderr %q", errs)
+			}
+			calls = 0
+			envOK := func(k string) string {
+				if k == "VECNET_PROFILE" {
+					return "ok"
+				}
+				return base(k)
+			}
+			code, out, errs = pinRun(envOK, "peers")
+			if calls == 0 {
+				t.Fatalf("good profile made no request\nexit %d\n%s\n%s", code, out, errs)
+			}
+			assertNoCanaries(t, "sibling", out+"\n"+errs)
+		})
+		t.Run("repoint/"+tc.name, func(t *testing.T) {
+			calls = 0
+			_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nsecret = %q\n", checkedPathHub(), "vn_peer_x"))
+			code, out, errs := pinRun(env, "profile", "repoint", tc.hub)
+			if code == 0 || calls != 0 {
+				t.Fatalf("exit %d calls %d\n%s\n%s", code, calls, out, errs)
+			}
+			assertNoCanaries(t, "repoint", out+"\n"+errs)
+		})
+		t.Run("notice/"+tc.name, func(t *testing.T) {
+			calls = 0
+			_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nsecret = %q\n", checkedPathHub(), "vn_operator_x"))
+			code, out, errs := pinRun(env, "notice", "post", "--kind", "moving", "--message", "move", "--new-url", tc.hub)
+			if code == 0 || calls != 0 {
+				t.Fatalf("exit %d calls %d\n%s\n%s", code, calls, out, errs)
+			}
+			assertNoCanaries(t, "notice", out+"\n"+errs)
+		})
+	}
+
+	t.Run("show prints path and ipv6", func(t *testing.T) {
+		calls = 0
+		ipv6 := checkedIPv6Hub()
+		_, env := pinTestEnv(t, fmt.Sprintf("[profiles.p]\nhub = %q\nsecret = %q\n", ipv6, "vn_peer_x"))
+		code, out, errs := pinRun(env, "profile", "show")
+		if code != 0 {
+			t.Fatalf("exit %d\n%s\n%s", code, out, errs)
+		}
+		if calls != 0 {
+			t.Fatal("profile show dialed")
+		}
+		if !strings.Contains(out, ipv6) {
+			t.Fatalf("show dropped the URL: %s", out)
+		}
+	})
+
+	t.Run("picker hides a bad hub", func(t *testing.T) {
+		c := Config{Profiles: map[string]Profile{
+			"ok":  {Hub: checkedPathHub(), Secret: "vn_operator_ok"},
+			"bad": {Hub: "https://alice:" + redactUser + "@" + redactHost + "?token=" + redactQuery + "#FRAG", Secret: "vn_operator_bad"},
+		}}
+		got := operatorProfiles(c, false)
+		text := ""
+		var okHub string
+		for _, choice := range got {
+			text += choice.Name + " " + choice.Hub + "\n"
+			if choice.Name == "ok" {
+				okHub = choice.Hub
+			}
+		}
+		assertNoCanaries(t, "picker", text)
+		if okHub != checkedPathHub() {
+			t.Fatalf("ok hub %q", okHub)
+		}
+		if !strings.Contains(text, "edit the config") {
+			t.Fatalf("bad profile missing a fixed label: %s", text)
+		}
+	})
 }

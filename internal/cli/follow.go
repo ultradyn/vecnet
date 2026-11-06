@@ -33,6 +33,17 @@ func (a *app) follow(ctx context.Context, name string, p Profile, n envelope.Hub
 	refuse := func(reason string) (string, error) {
 		return "", &relocationError{Code: "relocation_unverified", Reason: reason}
 	}
+	allow := p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"
+	// Refuse a secret-bearing URL before any request, and before printing it.
+	if checkHubURL(p.Hub, allow) != nil {
+		return refuse("invalid source hub")
+	}
+	if checkHubURL(n.Hub, allow) != nil || n.Kind != "moving" {
+		return refuse("notice does not describe this hub moving")
+	}
+	if checkHubURL(n.NewURL, allow) != nil {
+		return refuse("invalid or unchanged destination")
+	}
 	old, err := hubid.NormalizeURL(p.Hub)
 	if err != nil {
 		return refuse("invalid source hub")
@@ -47,7 +58,6 @@ func (a *app) follow(ctx context.Context, name string, p Profile, n envelope.Hub
 	}
 	pin, _ := a.effectivePin(name, p)
 	snapshotPin := pin
-	allow := p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"
 	if pin == "" {
 		doc, _, e := verifyHub(ctx, old, "", allow)
 		if e != nil {
@@ -142,9 +152,9 @@ func (a *app) follow(ctx context.Context, name string, p Profile, n envelope.Hub
 		return refuse(err.Error())
 	}
 	fp, _ := hubid.Fingerprint(pin)
-	where := hubid.Endpoint(next)
-	if where == "" {
-		where = "the hub"
+	where := "the hub"
+	if shown, ok := printableHub(next, allow); ok {
+		where = shown
 	}
 	fmt.Fprintf(a.stderr, "%s\n", unbidi(flatten(fmt.Sprintf("profile %s now uses %s (key %s verified)", name, where, fp))))
 	return next, nil

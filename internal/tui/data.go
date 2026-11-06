@@ -209,9 +209,6 @@ func (m *Model) startLoads(tags []string, ack chan<- error) tea.Cmd {
 // onLoad applies a finished load, runs the one load folded behind it if there
 // is one, and otherwise settles whatever waits on this key.
 func (m *Model) onLoad(msg loadMsg) tea.Cmd {
-	if msg.err != nil {
-		msg.err = safeDiag(msg.err)
-	}
 	delete(m.inflight, msg.key)
 	if msg.err == nil {
 		delete(m.Data.Errs, msg.key)
@@ -231,7 +228,7 @@ func (m *Model) onLoad(msg loadMsg) tea.Cmd {
 	case first && isStatus(msg.err, 403):
 		return m.notOperator()
 	case msg.err != nil && msg.key != "prefs" && m.Conn == ConnLive && !errors.Is(msg.err, context.Canceled):
-		m.Toast("reload "+msg.key+": "+diagText(msg.err.Error()), true)
+		m.Toast("reload "+msg.key+": "+msg.err.Error(), true)
 	}
 	var again tea.Cmd
 	if m.dirty[msg.key] && !m.stopped() {

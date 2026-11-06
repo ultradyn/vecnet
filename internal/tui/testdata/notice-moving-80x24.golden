@@ -1,16 +1,16 @@
  vecnet | 1:inbox 2:chat 3:dash 4:subs       home · hub hub.example:8443  live  
 ! MOVING in 18h Nov 03 02:00 -> vecnet.xk.io  Moving to Fly tonight             
-┌─ inbox 12 items · 2 unread · apr 2 · dlq 3 ────┐┌─ detail ───────────────────┐
-│ APR  07:52 dot-rese… Spend about 2… exp 11:39  ││ approval_request  wake     │
-│ APR  07:59 claw-ops  Push classifi… exp 18:59  ││                            │
-│ DLQ  04:11 grok-tri… 503 retries e… 8 tries    ││ from     dot-research dot  │
-│ DLQ  04:30 grok-tri… 410 terminal … 1 try      ││ thread   Hosting cost deep │
-│ DLQ  07:18 dot-rese… --- network    8 tries    ││ message  msg_01JD3S6G8J0M2P│
-│ SUB  07:40 dot-rese… paused_auth               ││                            │
-│ SUB  07:40 dot-rese… paused_token              ││ ? Spend about 20% of my    │
-│ SUB  07:40 dot-rese… paused_failed  r resume   ││ ? weekly quota on a deep-  │
-│ SUB  07:40 dot-rese… paused_operat… r resume   ││ ? research run?            │
-└────────────────────────────────────────────────┘│   [1] yes                  │
+┏━ inbox 12 items · 2 unread · apr 2 · dlq 3 ━━━━┓┌─ detail ───────────────────┐
+┃>APR  07:52 dot-rese… Spend about 2… exp 11:39  ┃│ approval_request  wake     │
+┃ APR  07:59 claw-ops  Push classifi… exp 18:59  ┃│                            │
+┃ DLQ  04:11 grok-tri… 503 retries e… 8 tries    ┃│ from     dot-research dot  │
+┃ DLQ  04:30 grok-tri… 410 terminal … 1 try      ┃│ thread   Hosting cost deep │
+┃ DLQ  07:18 dot-rese… --- network    8 tries    ┃│ message  msg_01JD3S6G8J0M2P│
+┃ SUB  07:40 dot-rese… paused_auth               ┃│                            │
+┃ SUB  07:40 dot-rese… paused_token              ┃│ ? Spend about 20% of my    │
+┃ SUB  07:40 dot-rese… paused_failed  r resume   ┃│ ? weekly quota on a deep-  │
+┃ SUB  07:40 dot-rese… paused_operat… r resume   ┃│ ? research run?            │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│   [1] yes                  │
 ┌─ your event log  GET /v1/events -f · not messag┐│   [2] no                   │
 │ e1.10401  07:41:00 presence          pag-hark-…││                            │
 │ e1.10403  07:41:00 thread_updated    thr_…XP5R…││ expires 07:52, in 11:39    │

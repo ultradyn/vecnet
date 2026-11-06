@@ -61,11 +61,15 @@ func (a *app) cmdProfile(args []string) error {
 	if err != nil {
 		return err
 	}
-	if args[0] == "follow" {
-		allow := p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"
-		if err := checkHubURL(p.Hub, allow); err != nil {
+	allow := p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"
+	if args[0] == "repoint" {
+		if err = checkHubURL(o.pos[0], allow); err != nil {
 			return err
 		}
+	} else if err = a.useStoredHub(name, p); err != nil {
+		return err
+	}
+	if args[0] == "follow" {
 		c := newClient(p.Hub, p.Secret)
 		notices, err := a.activeNotices(c)
 		if err != nil {
@@ -96,6 +100,21 @@ func (a *app) cmdProfile(args []string) error {
 				}
 			}
 		}
+		hub, ok := printableHub(p.Hub, allow)
+		if !ok {
+			return usageErr(fmt.Sprintf("profile %q is unusable; edit the config", name))
+		}
+		if lastMove != nil {
+			from, fromOK := printableHub(lastMove.From, true)
+			to, toOK := printableHub(lastMove.To, true)
+			if fromOK && toOK {
+				copy := *lastMove
+				copy.From, copy.To = from, to
+				lastMove = &copy
+			} else {
+				lastMove = nil
+			}
+		}
 		if a.json {
 			return a.emitValue(struct {
 				Profile     string      `json:"profile"`
@@ -103,9 +122,9 @@ func (a *app) cmdProfile(args []string) error {
 				Fingerprint string      `json:"fingerprint"`
 				How         string      `json:"how"`
 				LastMove    *moveRecord `json:"last_move"`
-			}{name, p.Hub, fp, how, lastMove})
+			}{name, hub, fp, how, lastMove})
 		}
-		fmt.Fprintf(a.stdout, "profile %s\nhub %s\n", flatten(name), flatten(p.Hub))
+		fmt.Fprintf(a.stdout, "profile %s\nhub %s\n", flatten(name), flatten(hub))
 		if pin == "" {
 			fmt.Fprintln(a.stdout, "pin none")
 		} else {
@@ -116,14 +135,13 @@ func (a *app) cmdProfile(args []string) error {
 		}
 		return nil
 	}
-	allow := p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"
 	if args[0] == "repoint" && o.has("force") {
 		if err = checkHubURL(o.pos[0], allow); err != nil {
 			return err
 		}
 		hub, e := hubid.NormalizeURL(o.pos[0])
 		if e != nil {
-			return e
+			return usageErr(hubid.ErrHubForm.Error())
 		}
 		if err = a.editProfileSnapshot(path, name, p, pin, map[string]string{"hub": hub, "hub_pubkey": ""}, func(records map[string]pinRecord) { delete(records, name) }); err != nil {
 			return err
@@ -166,7 +184,7 @@ func (a *app) cmdProfile(args []string) error {
 	if args[0] == "repoint" {
 		edits["hub"], err = hubid.NormalizeURL(hub)
 		if err != nil {
-			return err
+			return usageErr(hubid.ErrHubForm.Error())
 		}
 	}
 	normalized, _ := hubid.NormalizeURL(hub)

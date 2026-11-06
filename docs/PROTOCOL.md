@@ -1545,7 +1545,7 @@ message_sha256=<lower-case hex sha256 of the message's UTF-8 bytes>
 - `kind` is one of the three kinds;
 - `message` is 1–1024 bytes of valid UTF-8;
 - `at`, when given, is a wire timestamp in canonical millisecond form; it may be in the past;
-- `moving` needs a valid `new_url` whose normalised form differs from the hub's own `public_url`; the stored `new_url` is the normalised form; any other kind refuses `new_url`;
+- `moving` needs a valid `new_url` whose normalised form differs from the hub's own `public_url`; the stored `new_url` is the normalised form; any other kind refuses `new_url`. A hub URL, including `new_url`, must not contain credentials, a query or a fragment;
 - `expires_at`, when given, is a future wire timestamp. By default a notice expires 24 hours, and a `moving` notice 30 days, after the later of now and `at`.
 
 The answer is 201 `{notice}`, signed. The hub holds at most one active notice per kind: a post clears the active notice of its kind (`cleared_how: replaced`) in the same transaction.

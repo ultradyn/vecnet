@@ -372,7 +372,7 @@ func (a *app) connect() (*client, string, cache, error) {
 	if err != nil {
 		return nil, "", cache{}, err
 	}
-	if err := checkHubURL(p.Hub, p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"); err != nil {
+	if err := a.useStoredHub(name, p); err != nil {
 		return nil, "", cache{}, err
 	}
 	// MCP runs TOFU after its additional startup refusals in cmdMCP.
@@ -615,7 +615,7 @@ func (a *app) cmdEnrol(args []string) error {
 		// profile to follow yet: point at the new hub instead.
 		if errors.As(err, &he) && he.Status == http.StatusGone && he.Code == "hub_moved" {
 			if raw, ok := he.Details["new_url"].(string); ok {
-				if next, e := hubid.NormalizeURL(raw); e == nil {
+				if next, ok := printableHub(raw, insecure || a.getenv(insecureEnv) == "1"); ok {
 					he.Hint = "hub moved to " + next + "; ask for an invite there"
 				}
 			}

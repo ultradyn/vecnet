@@ -18,6 +18,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 // dashWrites is every API method that changes the hub.
@@ -403,19 +404,20 @@ func TestDashDisabledPeerFlagged(t *testing.T) {
 	dashHas(t, dashRow(t, m, 80, 24, "old-bot"), "disabled")
 }
 
-// A launcher peer's name takes the launcher kind colour (blue, #60a5fa),
-// the same colour the web dashboard gives its kind dot. No state token uses
-// it, so the kind never reads as a status such as amber "working".
+// A launcher peer's name takes the launcher kind hue (identity 5, blue
+// #60a5fa), the same colour the web dashboard gives its kind dot. No state
+// role uses it, so the kind never reads as a status such as amber.
 func TestDashLauncherKindStyled(t *testing.T) {
-	want := lipgloss.NewStyle().Foreground(lipgloss.Color("#60a5fa"))
-	got, ok := styleDashKinds["launcher"]
-	if !ok {
-		t.Fatal("styleDashKinds has no launcher style")
+	th := theme.New(theme.TrueColor, true)
+	want := th.Fg(theme.Ident5)
+	if got := theme.Kind("launcher"); got != theme.Ident5 {
+		t.Fatalf("launcher kind hue = %s, want ident5", got)
 	}
 	sgr := func(st lipgloss.Style) string { r := st.Render("X"); return r[:strings.Index(r, "X")] }
-	if sgr(got) != sgr(want) {
-		t.Fatalf("launcher style %q, want %q", sgr(got), sgr(want))
+	if !strings.Contains(sgr(want), "38;2;96;165;250") {
+		t.Fatalf("launcher hue %q is not #60a5fa", sgr(want))
 	}
+	styleText := th.Fg(theme.Text)
 	f := seededDash()
 	f.peers = append(f.peers, dashPeer("peer_ln", "ln-xsm", "launcher", "working", "connected", 0, map[string]any{"weekly_remaining_pct": 80.0}, "lan:xsm"))
 	m, _ := openDash(t, f, newClock())
@@ -651,7 +653,8 @@ func TestDashMoveKeys(t *testing.T) {
 	marked := func() string {
 		_, rows := dashTable(t, m, 140, 42, len(m.Data.Peers))
 		for _, row := range rows {
-			if strings.Contains(row, "│> ") {
+			// The peer table is the focused pane, so its border is heavy.
+			if strings.Contains(row, "┃> ") {
 				return row
 			}
 		}
@@ -719,7 +722,10 @@ func TestDashPeerStringsAreCleaned(t *testing.T) {
 		for _, size := range [][2]int{{140, 42}, {80, 24}} {
 			plainAt(t, m, size[0], size[1])
 			content := m.View().Content
-			dashLacks(t, content, "\x1b]", "\x07", "\x1b[2J", "\u202e", "\x9b", "\u0080")
+			dashLacks(t, content, "\x1b]", "\x07", "\x1b[2J", "\u202e", "\u009b", "\u0080")
+			if strayByte(content, 0x9b) {
+				t.Errorf("frame holds a raw C1 CSI byte:\n%q", content)
+			}
 			assertFrame(t, plainAt(t, m, size[0], size[1]), size[0], size[1])
 		}
 		dashHas(t, plainAt(t, m, 140, 42), "<img src=x onerror=alert(1)>pwn")
@@ -751,25 +757,12 @@ func TestDashNarrowFoldsReloads(t *testing.T) {
 	}
 }
 
-func dashSecretURL() string {
-	return "https://alice:USERSECRET@hidden-host.example/PATHSECRET?token=QUERYSECRET"
-}
-
-func dashAssertNoHubSecrets(t *testing.T, label, text string) {
-	t.Helper()
-	for _, secret := range []string{"alice:USERSECRET", "USERSECRET", "PATHSECRET", "QUERYSECRET"} {
-		if strings.Contains(text, secret) {
-			t.Fatalf("%s contains %q:\n%s", label, secret, text)
-		}
-	}
-}
-
-func TestDashFailureOmitsHubURL(t *testing.T) {
-	raw := dashSecretURL()
+func TestDashFailurePrintsCheckedHubURL(t *testing.T) {
+	raw := "https://[2001:db8::7]/vecnet"
 	err := &url.Error{Op: "Get", URL: raw, Err: errors.New("dial " + raw)}
-	text := strings.Join(dashFailure("peers", err, 160, dashErrLines, true), "\n")
-	dashAssertNoHubSecrets(t, "pane", text)
-	if !strings.Contains(text, "peers load failed") || !strings.Contains(text, "https://hidden-host.example") {
+	th := theme.New(theme.TrueColor, true)
+	text := strings.Join(dashFailure(th, "peers", err, 160, dashErrLines, true), "\n")
+	if !strings.Contains(text, "peers load failed") || !strings.Contains(text, raw) {
 		t.Fatalf("pane %q", text)
 	}
 
@@ -784,7 +777,9 @@ func TestDashFailureOmitsHubURL(t *testing.T) {
 	if m.Data.Errs["peers"] != nil {
 		stored = m.Data.Errs["peers"].Error()
 	}
-	dashAssertNoHubSecrets(t, "dash", frame+"\n"+m.toast.text+"\n"+stored)
+	if !strings.Contains(frame+"\n"+m.toast.text+"\n"+stored, raw) {
+		t.Fatalf("dashboard dropped the hub URL\nframe %s\ntoast %s\nstored %s", frame, m.toast.text, stored)
+	}
 	var ue *url.Error
 	if !errors.As(m.Data.Errs["peers"], &ue) || ue.URL != raw {
 		t.Fatalf("transport classification lost: %v", m.Data.Errs["peers"])

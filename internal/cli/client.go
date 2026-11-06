@@ -57,9 +57,9 @@ func (e *netError) Error() string {
 	if e == nil || e.err == nil {
 		return "network: unreachable"
 	}
-	// The wrapped error still classifies the failure. Only the public text
-	// drops userinfo, path and query from every URL it quotes.
-	return "network: " + hubid.RedactURLs(e.err.Error())
+	// Unwrap keeps dial, TLS and timeout classification. The hub URL was
+	// checked before the client was built, so the request URL is safe to show.
+	return "network: " + e.err.Error()
 }
 func (e *netError) Unwrap() error { return e.err }
 
@@ -105,10 +105,13 @@ func (c *client) newRequest(ctx context.Context, method, path string, q url.Valu
 		}
 		r, ct, length = bytes.NewReader(j), "application/json", int64(len(j))
 	}
+	if err := hubid.CheckHubURL(c.base); err != nil && !errors.Is(err, hubid.ErrPlainHTTP) {
+		return nil, usageErr(err.Error())
+	}
 	req, err := http.NewRequestWithContext(ctx, method, u, r)
 	if err != nil {
-		// err quotes the request URL, which may carry userinfo, a path, or a query.
-		return nil, usageErr("the hub is not a URL like https://hub.example")
+		// A URL that failed to build is not printed.
+		return nil, usageErr(hubid.ErrHubForm.Error())
 	}
 	if length >= 0 {
 		req.ContentLength = length

@@ -1,26 +1,26 @@
  vecnet | 1:inbox 2:chat 3:dash 4:subs                               home · hub hub.example:8443  live  apr 2  dlq 3  cuts/24h 0  07:41:00  
-┌─ inbox 12 items · 2 unread · apr 2 · dlq 3 ───────────────────────────────┐┌─ detail ────────────────────────────────────────────────────┐
-│ APR  07:52 dot-research    Spend about 20% of my weekly quota… exp 11:39  ││ approval_request  wake                                      │
-│ APR  07:59 claw-ops        Push classifier fix to hark master… exp 18:59  ││                                                             │
-│ DLQ  04:11 grok-triage     503 retries exhausted               8 tries    ││ from     dot-research dot                                   │
-│ DLQ  04:30 grok-triage     410 terminal 4xx                    1 try      ││ thread   Hosting cost deep dive                             │
-│ DLQ  07:18 dot-research    --- network                         8 tries    ││ message  msg_01JD3S6G8J0M2P4R6T8V0X2Z4B                     │
-│ SUB  07:40 dot-research    paused_auth     The peer was disab…            ││                                                             │
-│ SUB  07:40 dot-research    paused_token    Waiting for ChatGP…            ││ ? Spend about 20% of my weekly quota on a deep-research     │
-│ SUB  07:40 dot-research    paused_failed   Fix the callback, … r resume   ││ ? run?                                                      │
-│ SUB  07:40 dot-research    paused_operator You paused this su… r resume   ││   [1] yes                                                   │
-│ WAKE 06:12 codex-hark      The radio listen did not finalize … ◉          ││   [2] no                                                    │
-│ HOLD 07:39 codex-hark      Ticket 18 prototype is up: three v… ›          ││                                                             │
-│ HOLD 06:31 pag-hark-sleuth Reproduced on x-tuf. Root cause is… ✓          ││ expires 07:52, in 11:39                                     │
-│                                                                           ││ answer with 1-2, any other key cancels                      │
-│                                                                           ││                                                             │
-│                                                                           ││ │ A thorough comparison needs a deep-research run. That     │
-│                                                                           ││ │ costs about 20% of my weekly quota (35% left).            │
-│                                                                           ││                                                             │
-│                                                                           ││                                                             │
-│                                                                           ││                                                             │
-│                                                                           ││                                                             │
-└───────────────────────────────────────────────────────────────────────────┘│                                                             │
+┏━ inbox 12 items · 2 unread · apr 2 · dlq 3 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌─ detail ────────────────────────────────────────────────────┐
+┃>APR  07:52 dot-research    Spend about 20% of my weekly quota… exp 11:39  ┃│ approval_request  wake                                      │
+┃ APR  07:59 claw-ops        Push classifier fix to hark master… exp 18:59  ┃│                                                             │
+┃ DLQ  04:11 grok-triage     503 retries exhausted               8 tries    ┃│ from     dot-research dot                                   │
+┃ DLQ  04:30 grok-triage     410 terminal 4xx                    1 try      ┃│ thread   Hosting cost deep dive                             │
+┃ DLQ  07:18 dot-research    --- network                         8 tries    ┃│ message  msg_01JD3S6G8J0M2P4R6T8V0X2Z4B                     │
+┃ SUB  07:40 dot-research    paused_auth     The peer was disab…            ┃│                                                             │
+┃ SUB  07:40 dot-research    paused_token    Waiting for ChatGP…            ┃│ ? Spend about 20% of my weekly quota on a deep-research     │
+┃ SUB  07:40 dot-research    paused_failed   Fix the callback, … r resume   ┃│ ? run?                                                      │
+┃ SUB  07:40 dot-research    paused_operator You paused this su… r resume   ┃│   [1] yes                                                   │
+┃ WAKE 06:12 codex-hark      The radio listen did not finalize … ◉          ┃│   [2] no                                                    │
+┃ HOLD 07:39 codex-hark      Ticket 18 prototype is up: three v… ›          ┃│                                                             │
+┃ HOLD 06:31 pag-hark-sleuth Reproduced on x-tuf. Root cause is… ✓          ┃│ expires 07:52, in 11:39                                     │
+┃                                                                           ┃│ answer with 1-2, any other key cancels                      │
+┃                                                                           ┃│                                                             │
+┃                                                                           ┃│ │ A thorough comparison needs a deep-research run. That     │
+┃                                                                           ┃│ │ costs about 20% of my weekly quota (35% left).            │
+┃                                                                           ┃│                                                             │
+┃                                                                           ┃│                                                             │
+┃                                                                           ┃│                                                             │
+┃                                                                           ┃│                                                             │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                                                             │
 ┌─ your event log  GET /v1/events -f · not messages, never replied to ──────┐│                                                             │
 │ e1.10401  07:41:00 presence          pag-hark-sleuth working lan:x-tuf qu…││                                                             │
 │ e1.10403  07:41:00 thread_updated    thr_…XP5R title "hark B196: radio en…││                                                             │

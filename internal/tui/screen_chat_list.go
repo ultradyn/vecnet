@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/XertroV/vecnet/internal/opapi"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 // chatListLine is one visual line of the chat thread list.
@@ -149,23 +150,24 @@ func chatSelectableIDs(m *Model) []string {
 }
 
 func (s *chatScreen) listLines(m *Model, w int) []chatListLine {
+	th := m.th
 	yours, others := s.groups(m)
 	var lines []chatListLine
 	note := func(text string) {
-		lines = append(lines, chatListLine{text: styleMuted.Render(fit(text, w))})
+		lines = append(lines, chatListLine{text: th.Fg(theme.Muted).Render(fit(text, w))})
 	}
 	rowLines := func(rows []sideRow) {
 		for _, r := range rows {
 			on := r.ID == m.CurrentThread
-			lines = append(lines, chatListLine{text: sideTitleLine(r, w, on), id: r.ID})
-			lines = append(lines, chatListLine{text: sideMetaLine(r, w, on), id: r.ID})
+			lines = append(lines, chatListLine{text: sideTitleLine(th, r, w, on), id: r.ID})
+			lines = append(lines, chatListLine{text: sideMetaLine(th, r, w, on), id: r.ID})
 		}
 	}
 	section := func(label, mark, btn string, n int) {
 		lines = append(lines,
 			chatListLine{text: fit("", w)},
-			chatListLine{text: sectionHead(label, mark, n, w), btn: btn},
-			chatListLine{text: sectionRule(w), btn: btn},
+			chatListLine{text: sectionHead(th, label, mark, n, w), btn: btn},
+			chatListLine{text: sectionRule(th, w), btn: btn},
 		)
 	}
 	section("Your Threads", "", "", len(yours.Rows))
@@ -187,22 +189,22 @@ func (s *chatScreen) listLines(m *Model, w int) []chatListLine {
 		}
 		switch others.More {
 		case "show":
-			lines = append(lines, chatListLine{text: styleAccent.Render(fit("Show more", w)), btn: "other-more"})
+			lines = append(lines, chatListLine{text: th.Fg(theme.Action).Render(fit("Show more", w)), btn: "other-more"})
 		case "dash":
-			lines = append(lines, chatListLine{text: styleMuted.Render(fit("All threads on the dashboard", w)), btn: "other-dash"})
+			lines = append(lines, chatListLine{text: th.Fg(theme.Muted).Render(fit("All threads on the dashboard", w)), btn: "other-dash"})
 		}
 	}
 	return lines
 }
 
 // sectionHead is the accent bar, a bold label, the collapse mark and a
-// right-aligned count. The label gives up cells before the bar, the mark or
-// the count do. Colour is foreground only.
-func sectionHead(label, mark string, n, w int) string {
+// right-aligned muted count (design §6.6). The label gives up cells before the
+// bar, the mark or the count do. Colour is foreground only.
+func sectionHead(th *theme.Theme, label, mark string, n, w int) string {
 	if w < 1 {
 		return ""
 	}
-	bar := fg(colorAccent, false).Render("▌")
+	bar := th.Fg(theme.Accent).Render("▌")
 	count := strconv.Itoa(n)
 	markPart := ""
 	if mark != "" {
@@ -216,70 +218,68 @@ func sectionHead(label, mark string, n, w int) string {
 	if gap < 0 {
 		gap = 0
 	}
-	body := fg(colorText, true).Render(lab + markPart)
-	return bar + " " + body + strings.Repeat(" ", gap) + fg(colorMuted, false).Render(" "+count)
+	body := th.Fg(theme.Bold).Render(lab + markPart)
+	return bar + " " + body + strings.Repeat(" ", gap) + th.Fg(theme.Muted).Render(" "+count)
 }
 
-func sectionRule(w int) string {
+// sectionRule is the light rule under a section head.
+func sectionRule(th *theme.Theme, w int) string {
 	if w < 1 {
 		return ""
 	}
-	return fg(colorMuted, false).Render(strings.Repeat("─", w))
+	return th.Fg(theme.Rule).Render(strings.Repeat("─", w))
 }
 
 // sideTitleLine keeps the unread badge, or else the message count, and
-// truncates the title into whatever room is left.
-func sideTitleLine(r sideRow, w int, on bool) string {
+// truncates the title into whatever room is left. An unread title is bold
+// with its count in unread (design §6.7); the current thread is filled.
+func sideTitleLine(th *theme.Theme, r sideRow, w int, on bool) string {
 	title := Clean(r.Title)
-	titleStyle := fg(colorText, false)
+	titleRole, badgeRole := theme.Text, theme.Muted
 	var badge string
-	badgeStyle := fg(colorMuted, false)
 	switch {
 	case r.Unread > 0 && r.UnreadText != "":
-		titleStyle = fg(colorText, true)
-		badge, badgeStyle = r.UnreadText, fg(colorWake, true)
+		titleRole = theme.Bold
+		badge, badgeRole = r.UnreadText, theme.Unread
 	case r.Count != "":
 		badge = r.Count
 	}
 	if badge == "" {
-		return paintFit(titleStyle, title, w, on)
+		return paintFit(th, titleRole, title, w, on)
 	}
 	bw := lipgloss.Width(badge) + 1
 	if bw >= w {
-		return paintFit(badgeStyle, badge, w, on)
+		return paintFit(th, badgeRole, badge, w, on)
 	}
-	return paintFit(titleStyle, ansi.Truncate(title, w-bw, "…"), w-bw, on) + paintFit(badgeStyle, " "+badge, bw, on)
+	return paintFit(th, titleRole, ansi.Truncate(title, w-bw, "…"), w-bw, on) + paintFit(th, badgeRole, " "+badge, bw, on)
 }
 
 // sideMetaLine reserves the activity time and truncates the participant text
 // into the cells that remain. The message count lives on the title line.
-func sideMetaLine(r sideRow, w int, on bool) string {
+func sideMetaLine(th *theme.Theme, r sideRow, w int, on bool) string {
 	people, active := Clean(r.People), Clean(r.Active)
-	muted := fg(colorMuted, false)
 	if active == "" {
-		return paintFit(muted, people, w, on)
+		return paintFit(th, theme.Muted, people, w, on)
 	}
 	aw := lipgloss.Width(active)
 	if aw >= w {
-		return paintFit(muted, active, w, on)
+		return paintFit(th, theme.Muted, active, w, on)
 	}
 	room := w - aw - 1
 	if people == "" || room < 1 {
-		return paintFit(muted, active, w, on)
+		return paintFit(th, theme.Muted, active, w, on)
 	}
 	shown := ansi.Truncate(people, room, "…")
 	gap := room - lipgloss.Width(shown)
 	if gap < 0 {
 		gap = 0
 	}
-	gapStyle := muted
-	if on {
-		gapStyle = muted.Background(colorPick)
-	}
-	return paintFit(muted, shown, lipgloss.Width(shown), on) + gapStyle.Render(strings.Repeat(" ", gap)) + paintFit(muted, " "+active, aw+1, on)
+	return paintFit(th, theme.Muted, shown, lipgloss.Width(shown), on) + paintFit(th, theme.Muted, strings.Repeat(" ", gap), gap, on) + paintFit(th, theme.Muted, " "+active, aw+1, on)
 }
 
-func paintFit(st lipgloss.Style, text string, w int, on bool) string {
+// paintFit is text in role r, cut or padded to w cells. On the current thread
+// (on) the padding is filled too, so both its lines are filled edge to edge.
+func paintFit(th *theme.Theme, r theme.Role, text string, w int, on bool) string {
 	if w < 1 {
 		return ""
 	}
@@ -289,9 +289,9 @@ func paintFit(st lipgloss.Style, text string, w int, on bool) string {
 		pad = 0
 	}
 	if on {
-		return st.Background(colorPick).Render(text + strings.Repeat(" ", pad))
+		return th.Sel(r).Render(text + strings.Repeat(" ", pad))
 	}
-	return st.Render(text) + strings.Repeat(" ", pad)
+	return th.Fg(r).Render(text) + strings.Repeat(" ", pad)
 }
 
 // renderList draws the thread list and records click and wheel targets for it.

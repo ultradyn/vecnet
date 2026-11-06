@@ -72,6 +72,29 @@ Task 23 runs both clients against one disposable hub. Its assertions verify cros
 - [23-journey-progress.png](23-journey-progress.png) — Approval option prompt in the real TUI.
 - [23-journey-success.png](23-journey-success.png) — Hub-authored expired approval shown in the web thread.
 
+TUI colour theme screens come from `scripts/ui/tui-color.mjs` ([design](../../../design/tui-color.md), §10.3). Every TUI shot uses the semantic theme; these add the screens 17–22 leave out and the other colour rungs. Focused panes are heavy-bordered, and fills are only the header bar, chips and selections.
+
+- [tc01-tui-inbox.png](tc01-tui-inbox.png) — Inbox in the default theme (truecolor, dark): approval and DLQ rows, detail, event log.
+- [tc01-tui-inbox-nocolor.png](tc01-tui-inbox-nocolor.png) — Inbox under `NO_COLOR=1`: bold, reverse, heavy border and `>` only.
+- [tc01-tui-inbox-ansi16.png](tc01-tui-inbox-ansi16.png) — Inbox in 16 colours (`TERM=xterm`): ANSI 1–6, faint, reverse fills.
+- [tc01-tui-inbox-256.png](tc01-tui-inbox-256.png) — Inbox in 256 colours (`TERM=xterm-256color`, no `COLORTERM`).
+- [tc01-tui-inbox-light.png](tc01-tui-inbox-light.png) — Inbox with the light set (`VECNET_TUI_BG=light`) on a white terminal.
+- [tc02-tui-chat.png](tc02-tui-chat.png) — Chat in the default theme: both sidebar groups, a selected message, identity hues.
+- [tc02-tui-chat-nocolor.png](tc02-tui-chat-nocolor.png) — Chat under `NO_COLOR=1`.
+- [tc02-tui-chat-ansi16.png](tc02-tui-chat-ansi16.png) — Chat in 16 colours.
+- [tc02-tui-chat-256.png](tc02-tui-chat-256.png) — Chat in 256 colours.
+- [tc02-tui-chat-light.png](tc02-tui-chat-light.png) — Chat with the light set on a white terminal.
+- [tc03-tui-bars-insert.png](tc03-tui-bars-insert.png) — INSERT chip and the composer while typing.
+- [tc03-tui-bars-command.png](tc03-tui-bars-command.png) — COMMAND chip and the command being typed.
+- [tc03-tui-bars-toast-ok.png](tc03-tui-bars-toast-ok.png) — An ok toast in success.
+- [tc03-tui-bars-toast-error.png](tc03-tui-bars-toast-error.png) — An error toast in error.
+- [tc04-tui-help.png](tc04-tui-help.png) — Help, a full-screen pane and so focused.
+- [tc05-tui-prefs.png](tc05-tui-prefs.png) — Preferences: bold group labels, the selected row filled, source and state roles.
+- [tc05-tui-prefs-error.png](tc05-tui-prefs-error.png) — Preferences after a failed load.
+- [tc06-tui-header-notice.png](tc06-tui-header-notice.png) — A moving notice under the header of a loopback (`local`) hub.
+- [tc07-tui-picker.png](tc07-tui-picker.png) — The operator picker: brand chip, filled selection, `local` in warn.
+- [tc07-tui-picker-confirm.png](tc07-tui-picker-confirm.png) — The picker's confirm step: `y` and `n` are actions, neither a warning.
+
 Attachment screens cover web compose, thread replies and inline images, and the TUI composer. `scripts/ui/att-journey.mjs` checks both clients against one hub without taking screenshots. See [Attachments](../../../OPERATOR.md#attachments).
 
 - [att03-compose-initial.png](att03-compose-initial.png) — New message with an uploaded file and draft text.

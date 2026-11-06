@@ -148,8 +148,10 @@ func setOperatorProfile(path, name string) error {
 }
 
 // operatorProfiles lists profiles that hold an operator credential, by name.
-// The secret never leaves this process: a choice is a name and a hub host.
-func operatorProfiles(c Config) []tui.ProfileChoice {
+// The secret never leaves this process. A hub URL that fails the check is
+// replaced with a fixed label so the picker never prints it. allowEnv is
+// VECNET_ALLOW_INSECURE_HTTP, which does not make a secret-bearing URL printable.
+func operatorProfiles(c Config, allowEnv bool) []tui.ProfileChoice {
 	names := make([]string, 0, len(c.Profiles))
 	for name, p := range c.Profiles {
 		if isOperatorSecret(p.Secret) {
@@ -159,7 +161,12 @@ func operatorProfiles(c Config) []tui.ProfileChoice {
 	sort.Strings(names)
 	out := make([]tui.ProfileChoice, len(names))
 	for i, name := range names {
-		out[i] = tui.ProfileChoice{Name: name, Hub: c.Profiles[name].Hub}
+		p := c.Profiles[name]
+		hub := "unusable; edit the config"
+		if where, ok := printableHub(p.Hub, p.AllowInsecureHTTP || allowEnv); ok {
+			hub = where
+		}
+		out[i] = tui.ProfileChoice{Name: name, Hub: hub}
 	}
 	return out
 }

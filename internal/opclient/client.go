@@ -31,29 +31,18 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("operator API %d %s: %s", e.Status, e.Code, e.Message)
 }
 
-// redactedError is a transport or request-construction failure whose public
-// text has no hub userinfo, path or query. Unwrap keeps errors.Is/As, including
-// dial, TLS and timeout classification.
-type redactedError struct{ err error }
-
-func (e *redactedError) Error() string {
-	if e == nil || e.err == nil {
-		return "hub unreachable"
+// gate refuses a hub base that carries userinfo, a query or a fragment, or
+// that does not parse, before any dial. Plain http on a public host is left
+// to the caller that opted in. The error names the rule and no part of the URL.
+func (c *Client) gate() error {
+	if c == nil {
+		return hubid.ErrHubForm
 	}
-	return hubid.RedactURLs(e.err.Error())
-}
-
-func (e *redactedError) Unwrap() error { return e.err }
-
-func redactTransport(err error) error {
-	if err == nil {
+	err := hubid.CheckHubURL(c.base)
+	if err == nil || errors.Is(err, hubid.ErrPlainHTTP) {
 		return nil
 	}
-	var already *redactedError
-	if errors.As(err, &already) {
-		return err
-	}
-	return &redactedError{err: err}
+	return err
 }
 
 // Client may be shared by callers. Its credential is sent only as a bearer.
@@ -81,6 +70,9 @@ func (c *Client) request(ctx context.Context, method, path string, body any) (*h
 // requestMatch is request with one strong If-Match. An empty tag sends no
 // precondition header. Callers pass the ETag from GET unchanged, quotes included.
 func (c *Client) requestMatch(ctx context.Context, method, path string, body any, ifMatch string) (*http.Response, error) {
+	if err := c.gate(); err != nil {
+		return nil, err
+	}
 	var reader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -91,7 +83,7 @@ func (c *Client) requestMatch(ctx context.Context, method, path string, body any
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
 	if err != nil {
-		return nil, redactTransport(err)
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.secret)
 	req.Header.Set("Accept", "application/json")
@@ -106,7 +98,7 @@ func (c *Client) requestMatch(ctx context.Context, method, path string, body any
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, redactTransport(err)
+		return nil, err
 	}
 	return checkedResponse(resp)
 }
@@ -350,6 +342,9 @@ func (c *Client) Ack(ctx context.Context, cursor string) error {
 // Upload streams bytes under the caller's context, without the short timeout
 // used for JSON requests. Unreferenced uploads expire after one day.
 func (c *Client) Upload(ctx context.Context, r io.Reader, size int64, mediaType, name string) (envelope.Attachment, error) {
+	if err := c.gate(); err != nil {
+		return envelope.Attachment{}, err
+	}
 	if size < 0 {
 		return envelope.Attachment{}, fmt.Errorf("upload size must be nonnegative")
 	}
@@ -361,7 +356,7 @@ func (c *Client) Upload(ctx context.Context, r io.Reader, size int64, mediaType,
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.base+"/v1/blobs?ttl=86400", r)
 	if err != nil {
-		return envelope.Attachment{}, redactTransport(err)
+		return envelope.Attachment{}, err
 	}
 	req.ContentLength = size
 	req.Header.Set("Authorization", "Bearer "+c.secret)
@@ -369,7 +364,7 @@ func (c *Client) Upload(ctx context.Context, r io.Reader, size int64, mediaType,
 	req.Header.Set("Content-Type", mediaType)
 	resp, err := c.uploadHC.Do(req)
 	if err != nil {
-		return envelope.Attachment{}, redactTransport(err)
+		return envelope.Attachment{}, err
 	}
 	resp, err = checkedResponse(resp)
 	if err != nil {
