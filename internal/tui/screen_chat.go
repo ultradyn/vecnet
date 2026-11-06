@@ -609,7 +609,7 @@ func (s *chatScreen) send(m *Model, d *chatDraft) tea.Cmd {
 	d.attempt, d.sending = attempt, true
 	req := envelope.SendRequest{IdempotencyKey: d.key, ThreadID: &id, Priority: attempt.prio, Content: envelope.SendContent{Text: attempt.text}}
 	for _, att := range d.atts {
-		ref := att.ref
+		ref := envelope.Attachment{BlobID: att.ref.BlobID, RetentionClass: att.ref.RetentionClass, ExpiresAt: att.ref.ExpiresAt, OriginURL: att.ref.OriginURL}
 		ref.SHA256, ref.Size, ref.MediaType, ref.Name = att.sha, att.size, att.media, att.name
 		req.Attachments = append(req.Attachments, ref)
 	}
@@ -2181,7 +2181,7 @@ func (s *chatScreen) viewWho(m *Model, st *ThreadState, w, h int) string {
 			for _, msg := range st.Messages {
 				if msg.MessageID == f.MessageID {
 					for _, att := range msg.Attachments {
-						if att.SHA256 == f.SHA256 {
+						if (f.BlobID != "" && att.BlobID == f.BlobID) || (f.BlobID == "" && att.BlobID == "" && att.SHA256 == f.SHA256) {
 							if state := chatAttachmentState(m, st, att); state == "expired" || state == "purged" {
 								size = state
 							}

@@ -217,6 +217,15 @@ func (c *Client) DiscardDeadLetter(ctx context.Context, dly string) error {
 	return c.do(ctx, "POST", "/v1/admin/dead-letters/"+url.PathEscape(dly)+"/discard", nil, nil)
 }
 func (c *Client) Send(ctx context.Context, r envelope.SendRequest) (out opapi.SendResult, err error) {
+	// Send accepts only caller-owned reference metadata; upload proof remains
+	// available to the UI on the original attachment.
+	if r.Attachments != nil {
+		refs := make([]envelope.Attachment, len(r.Attachments))
+		for i, att := range r.Attachments {
+			refs[i] = envelope.Attachment{BlobID: att.BlobID, SHA256: att.SHA256, Size: att.Size, MediaType: att.MediaType, Name: att.Name, OriginURL: att.OriginURL, ExpiresAt: att.ExpiresAt, RetentionClass: att.RetentionClass}
+		}
+		r.Attachments = refs
+	}
 	err = c.do(ctx, "POST", "/v1/messages", r, &out)
 	return
 }

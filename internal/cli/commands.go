@@ -851,7 +851,8 @@ func (a *app) send(req envelope.SendRequest, text string, o opts) error {
 		if err != nil {
 			return err
 		}
-		req.Attachments = append(req.Attachments, att)
+		// Send only immutable reference fields; verification belongs to the hub.
+		req.Attachments = append(req.Attachments, envelope.Attachment{BlobID: att.BlobID, SHA256: att.SHA256, Size: att.Size, MediaType: att.MediaType, Name: att.Name, ExpiresAt: att.ExpiresAt, RetentionClass: att.RetentionClass})
 	}
 	var raw json.RawMessage
 	if err := c.do(a.ctx, http.MethodPost, "/v1/messages", nil, req, &raw); err != nil {

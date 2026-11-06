@@ -21,6 +21,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
@@ -2963,12 +2964,107 @@ func TestChatAttachmentKeepsR2Reference(t *testing.T) {
 	p.until("upload", func() bool { return a.count("Upload") == 1 })
 	att := chatAttsOf(m)[0]
 	yes := true
-	ref := envelope.Attachment{BlobID: "blo_00000000000000000000000001", SHA256: chatSum("abc"), Size: 3, Name: "ref.txt", MediaType: "text/plain", RetentionClass: "keep", SHA256Verified: &yes, Integrity: &blobwire.Integrity{Algorithm: "sha256", Value: chatSum("abc"), Verified: true}}
+	ref := envelope.Attachment{BlobID: "blo_00000000000000000000000001", SHA256: chatSum("abc"), Size: 3, Name: "ref.txt", MediaType: "text/plain", RetentionClass: "keep", BlobURL: "https://invalid.example/object", SHA256Verified: &yes, Integrity: &blobwire.Integrity{Algorithm: "sha256", Value: chatSum("abc"), Verified: true}}
 	p.send(chatUploadedMsg{thread: m.CurrentThread, id: att.id, att: ref})
+	if got := chatAttsOf(m)[0].ref; got.Integrity == nil || got.SHA256Verified == nil {
+		t.Fatal("stored upload proof lost")
+	}
 	p.press("i", "enter")
 	p.until("send", func() bool { return len(a.sends()) > 0 })
 	sent := a.sends()[0]
-	if len(sent.Attachments) != 1 || sent.Attachments[0].BlobID != ref.BlobID || sent.Attachments[0].Integrity == nil || !sent.Attachments[0].Integrity.Verified || sent.Attachments[0].RetentionClass != "keep" {
+	if len(sent.Attachments) != 1 {
+		t.Fatal("send lost attachment")
+	}
+	raw, err := json.Marshal(sent.Attachments[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := envelope.Validate("attachmentReference", raw); err != nil {
+		t.Fatalf("invalid send attachment: %v", err)
+	}
+	if len(sent.Attachments) != 1 || sent.Attachments[0].BlobID != ref.BlobID || sent.Attachments[0].Integrity != nil || sent.Attachments[0].SHA256Verified != nil || sent.Attachments[0].BlobURL != "" || sent.Attachments[0].RetentionClass != "keep" {
 		t.Fatal("send lost R2 reference")
 	}
+}
+
+func TestChatFilesIndependentGenerations(t *testing.T) {
+	t.Chdir(t.TempDir())
+	a := chatSeed()
+	chatFile(a, "old.txt", "abc")
+	deadline := envelope.FormatTime(fixedNow.Add(time.Minute))
+	msg := &a.byID[chatHark].messages[len(a.byID[chatHark].messages)-1]
+	msg.Attachments[0].BlobID = "blo_00000000000000000000000001"
+	msg.Attachments[0].ExpiresAt = &deadline
+	msg.Attachments[0].RetentionClass = "1h"
+	keep := msg.Attachments[0]
+	keep.BlobID, keep.Name, keep.RetentionClass, keep.ExpiresAt = "blo_00000000000000000000000002", "keep.txt", "keep", nil
+	msg.Attachments = append(msg.Attachments, keep)
+	a.byID[chatHark].detail.Files = []opapi.ThreadFile{
+		{BlobID: msg.Attachments[0].BlobID, SHA256: "sha-file", Name: "old.txt", MessageID: msg.MessageID, Size: 3},
+		{BlobID: keep.BlobID, SHA256: "sha-file", Name: "keep.txt", MessageID: msg.MessageID, Size: 3},
+	}
+	clock := newClock()
+	m, _ := chatModel(t, a, clock)
+	capture := &chatBlobCapture{chatAPI: a}
+	m.API = capture
+	st := m.Data.Thread[chatHark]
+	screen := &chatScreen{}
+	wantFrame(t, ansi.Strip(screen.viewWho(m, st, 50, 40)), "old.txt 3 B", "keep.txt 3 B")
+	for i, id := range []string{msg.Attachments[0].BlobID, keep.BlobID} {
+		screen.fileIdx = i
+		cmd := screen.save(m, st)
+		if cmd == nil {
+			t.Fatal("live attachment refused")
+		}
+		cmd()
+		if capture.id != id {
+			t.Fatal("download lost generation identity")
+		}
+	}
+	clock.advance(2 * time.Minute)
+	wantFrame(t, ansi.Strip(screen.viewWho(m, st, 50, 40)), "old.txt expired", "keep.txt 3 B")
+}
+
+func TestChatAttachmentRefusalSynchronous(t *testing.T) {
+	for _, state := range []string{"expired", "purged"} {
+		t.Run(state, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Chdir(dir)
+			a := chatSeed()
+			chatFile(a, "report.txt", "abc")
+			deadline := envelope.FormatTime(fixedNow.Add(time.Minute))
+			msg := &a.byID[chatHark].messages[len(a.byID[chatHark].messages)-1]
+			msg.Attachments[0].BlobID = "blo_00000000000000000000000001"
+			msg.Attachments[0].ExpiresAt = &deadline
+			clock := newClock()
+			m, _ := chatModel(t, a, clock)
+			st := m.Data.Thread[chatHark]
+			screen := &chatScreen{}
+			screen.sel = msg.MessageID
+			if state == "expired" {
+				clock.advance(2 * time.Minute)
+			} else {
+				st.BlobStates = map[string]blobwire.State{msg.Attachments[0].BlobID: {State: "purged"}}
+			}
+			if cmd := screen.save(m, st); cmd != nil {
+				t.Fatal("refusal launched a save command")
+			}
+			wantFrame(t, chatFrame(t, m), "refused: [attachment "+state+": report.txt]")
+			entries, err := os.ReadDir(dir)
+			if err != nil || len(entries) != 0 || a.count("Blob") != 0 {
+				t.Fatal("refused save performed IO")
+			}
+		})
+	}
+}
+
+// Captures the actual TUI download boundary without an asynchronous pump.
+type chatBlobCapture struct {
+	*chatAPI
+	id string
+}
+
+func (a *chatBlobCapture) BlobWithOptions(ctx context.Context, sha string, max int64, opts opclient.BlobOptions) ([]byte, string, error) {
+	a.id = opts.BlobID
+	return a.Blob(ctx, sha, max)
 }

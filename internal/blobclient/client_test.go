@@ -11,6 +11,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,12 +37,15 @@ type fixture struct {
 	mints, puts, completes, redirects, discovers int
 	hubCode                                      string
 	mutate                                       func()
+	capabilities                                 map[string]time.Time
+	accepted                                     []int
+	completion                                   *blobwire.Ref
 	body                                         string
 }
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	f := &fixture{now: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), body: "abc", putStatus: 200, getStatus: 200}
+	f := &fixture{now: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), body: "abc", capabilities: make(map[string]time.Time), putStatus: 200, getStatus: 200}
 	verified := true
 	f.ref = blobwire.Ref{BlobID: testID, SHA256: abcSHA, SHA256Verified: &verified, Integrity: &blobwire.Integrity{Algorithm: "sha256", Value: abcSHA, Verified: true}, Size: 3, RetentionClass: "keep"}
 	f.direct = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +74,14 @@ func newFixture(t *testing.T) *fixture {
 			w.WriteHeader(f.putStatus)
 			return
 		}
+		token := r.URL.Query().Get("capability")
+		deadline, ok := f.capabilities[token]
+		if !ok || !f.now.Before(deadline) {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		mint, _ := strconv.Atoi(token)
+		f.accepted = append(f.accepted, mint)
 		if f.getStatus == 307 {
 			w.Header().Set("Location", f.direct.URL+"/redirected")
 		}
@@ -103,7 +116,11 @@ func newFixture(t *testing.T) *fixture {
 			json.NewEncoder(w).Encode(blobwire.UploadGrant{Ref: ref, Upload: blobwire.Request{Method: "PUT", URL: f.direct.URL + "/object?private=signature", ExpiresAt: f.now.Add(5 * time.Minute).Format(time.RFC3339), Headers: map[string]string{"Content-Length": "3", "Content-Type": "application/octet-stream", "Content-Disposition": "attachment", "Cache-Control": "private, no-store", "If-None-Match": "*", "x-amz-checksum-sha256": base64.StdEncoding.EncodeToString(sum), "x-amz-meta-vecnet-checksum-profile": "sha256", "x-amz-meta-vecnet-checksum": base64.StdEncoding.EncodeToString(sum)}}, CompleteURL: "/v1/blobs/uploads/" + testID + "/complete"})
 		case strings.HasSuffix(r.URL.Path, "/complete"):
 			f.completes++
-			json.NewEncoder(w).Encode(f.ref)
+			ref := f.ref
+			if f.completion != nil {
+				ref = *f.completion
+			}
+			json.NewEncoder(w).Encode(ref)
 		default:
 			f.mints++
 			if f.hubCode != "" {
@@ -117,7 +134,9 @@ func newFixture(t *testing.T) *fixture {
 			}
 			g := f.grant
 			if g.SHA256 == "" {
-				g = blobwire.DownloadGrant{BlobID: testID, SHA256: abcSHA, SHA256Verified: f.ref.SHA256Verified, Integrity: f.ref.Integrity, Size: 3, MediaType: "text/plain", RetentionClass: "keep", Method: "GET", URL: f.direct.URL + "/object?private=signature", ExpiresAt: f.now.Add(600 * time.Second).Format(time.RFC3339)}
+				token := strconv.Itoa(f.mints)
+				f.capabilities[token] = f.now.Add(600 * time.Second)
+				g = blobwire.DownloadGrant{BlobID: testID, SHA256: abcSHA, SHA256Verified: f.ref.SHA256Verified, Integrity: f.ref.Integrity, Size: 3, MediaType: "text/plain", RetentionClass: "keep", Method: "GET", URL: f.direct.URL + "/object?capability=" + token, ExpiresAt: f.now.Add(600 * time.Second).Format(time.RFC3339)}
 			}
 			json.NewEncoder(w).Encode(g)
 		}
@@ -163,14 +182,30 @@ func TestR2UploadRedirectAndMutation(t *testing.T) {
 }
 func TestR2DownloadRepeatableAndBounded(t *testing.T) {
 	f := newFixture(t)
+	var previous string
+	start := f.now
 	for i := 0; i < 3; i++ {
+		f.now = start.Add(time.Duration(i) * 601 * time.Second)
+		if previous != "" {
+			resp, err := http.Get(previous)
+			if err != nil {
+				t.Fatal("expired capability probe failed")
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusForbidden {
+				t.Fatal("expired capability remained usable")
+			}
+		}
 		b, g, err := f.client.Download(context.Background(), abcSHA, testID, 3)
 		if err != nil || string(b) != "abc" || g.BlobID != testID {
 			t.Fatalf("download %d: %v", i, err)
 		}
-		f.now = f.now.Add(601 * time.Second)
+		if g.URL == previous {
+			t.Fatal("mint reused previous capability")
+		}
+		previous = g.URL
 	}
-	if f.mints != 3 || f.discovers != 3 {
+	if f.mints != 3 || f.discovers != 3 || !reflect.DeepEqual(f.accepted, []int{1, 2, 3}) {
 		t.Fatalf("fresh exchanges=%d discovery=%d", f.mints, f.discovers)
 	}
 	for _, body := range []string{"abcd", "xyz", "ab"} {
@@ -246,15 +281,19 @@ func TestR2DownloadExpiredCapabilityRefreshIsBounded(t *testing.T) {
 func TestR2DownloadRefreshSucceeds(t *testing.T) {
 	f := newFixture(t)
 	calls := 0
+	var first string
 	f.client.transfer.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
 		if calls == 1 {
-			return &http.Response{StatusCode: 403, Body: io.NopCloser(strings.NewReader("private signature")), Header: make(http.Header)}, nil
+			first = r.URL.String()
+			f.now = f.now.Add(601 * time.Second)
+		} else if r.URL.String() == first {
+			t.Error("refresh reused expired capability")
 		}
 		return http.DefaultTransport.RoundTrip(r)
 	})
 	b, _, err := f.client.Download(context.Background(), abcSHA, testID, 3)
-	if err != nil || string(b) != "abc" || f.mints != 2 {
+	if err != nil || string(b) != "abc" || f.mints != 2 || calls != 2 || !reflect.DeepEqual(f.accepted, []int{2}) {
 		t.Fatalf("bounded fresh exchange failed: %v", err)
 	}
 }
@@ -280,5 +319,43 @@ func TestR2UploadCapsAndProgress(t *testing.T) {
 	}
 	if f.puts != 1 {
 		t.Fatal("out-of-bounds upload reached provider")
+	}
+}
+
+func TestR2UploadRejectsInvalidCompletion(t *testing.T) {
+	for _, kind := range []string{"missing-verification", "false-verification", "missing-integrity", "unverified-integrity", "integrity-algorithm", "integrity-digest", "identity", "size", "digest"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newFixture(t)
+			ref := f.ref
+			integrity := *ref.Integrity
+			ref.Integrity = &integrity
+			switch kind {
+			case "missing-verification":
+				ref.SHA256Verified = nil
+			case "false-verification":
+				no := false
+				ref.SHA256Verified = &no
+			case "missing-integrity":
+				ref.Integrity = nil
+			case "unverified-integrity":
+				ref.Integrity.Verified = false
+			case "integrity-algorithm":
+				ref.Integrity.Algorithm = "unknown"
+			case "integrity-digest":
+				ref.Integrity.Value = strings.Repeat("0", 64)
+			case "identity":
+				ref.BlobID = "blo_00000000000000000000000002"
+			case "size":
+				ref.Size = 4
+			case "digest":
+				ref.SHA256 = strings.Repeat("0", 64)
+			}
+			f.completion = &ref
+			got, err := f.client.Upload(context.Background(), strings.NewReader("abc"), 3, "text/plain", "idem")
+			var e *Error
+			if !errors.As(err, &e) || e.Code != "bad_response" || !reflect.DeepEqual(got, blobwire.Ref{}) || f.puts != 1 || f.completes != 1 {
+				t.Fatal("invalid completion must fail after PUT and completion with an empty reference")
+			}
+		})
 	}
 }

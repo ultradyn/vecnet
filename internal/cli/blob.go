@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/XertroV/vecnet/internal/envelope"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,7 +13,11 @@ import (
 
 	"github.com/XertroV/vecnet/internal/blobclient"
 	"github.com/XertroV/vecnet/internal/blobwire"
+	"github.com/XertroV/vecnet/internal/envelope"
 )
+
+// blobNow is replaced by deterministic transfer tests before running commands.
+var blobNow = time.Now
 
 type blobHubTransport struct{ c *client }
 
@@ -33,12 +36,18 @@ func (t blobHubTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return rt.RoundTrip(r)
 }
 func (c *client) blobs() *blobclient.Client {
-	return blobclient.New(c.base, blobHubTransport{c}, nil, nil)
+	bc := blobclient.New(c.base, blobHubTransport{c}, nil, nil)
+	bc.Now = blobNow
+	return bc
 }
 func blobError(err error) error {
 	var e *blobclient.Error
 	if errors.As(err, &e) {
-		return &hubError{Status: e.Status, Code: e.Code, Message: e.Error(), Details: map[string]any{"retry_after_seconds": e.RetryAfterSeconds}}
+		details := map[string]any{"retry_after_seconds": e.RetryAfterSeconds}
+		if e.Status == http.StatusGone && e.Code == "hub_moved" && e.MovingNotice != nil {
+			details["notice"] = e.MovingNotice
+		}
+		return &hubError{Status: e.Status, Code: e.Code, Message: e.Error(), Details: details}
 	}
 	return err
 }
@@ -75,6 +84,10 @@ func (a *app) cmdBlob(args []string) error {
 	defer tmp.Close()
 	g, err := c.blobs().DownloadTo(ctx, tmp, o.pos[0], o.str("blob-id"), blobclient.MaxSize)
 	if err != nil {
+		var moved *blobclient.Error
+		if errors.As(err, &moved) && moved.Status == http.StatusGone && moved.Code == "hub_moved" {
+			return blobError(err)
+		}
 		if a.json {
 			var e *blobclient.Error
 			if errors.As(err, &e) {
@@ -110,11 +123,8 @@ func blobLabels(atts []envelope.Attachment, states map[string]blobwire.State) []
 		}
 		name := unbidi(flatten(att.Name))
 		state := states[att.BlobID].State
-		if state != "purged" && att.ExpiresAt != nil {
-			if at, err := time.Parse(time.RFC3339Nano, *att.ExpiresAt); err == nil && !time.Now().Before(at) {
-				state = "expired"
-			}
-		}
+		// Fresh hub projections are authoritative. A local wall clock cannot
+		// establish expiry when a projection is missing either.
 		label := "[attachment: " + name + "]"
 		if state == "expired" || state == "purged" {
 			label = "[attachment " + state + ": " + name + "]"

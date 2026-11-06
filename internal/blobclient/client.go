@@ -25,11 +25,29 @@ import (
 
 const MaxSize int64 = 25 << 20
 
-// Error contains only fixed reason codes and retry metadata, never provider text.
+// MovingNotice carries only the signed relocation contract from a hub error.
+// Callers must verify it against their pinned key before following NewURL.
+// Provider errors never populate this field.
+type MovingNotice struct {
+	NoticeID   string `json:"notice_id"`
+	Kind       string `json:"kind"`
+	Message    string `json:"message"`
+	Hub        string `json:"hub"`
+	IssuedAt   string `json:"issued_at"`
+	At         string `json:"at,omitempty"`
+	ExpiresAt  string `json:"expires_at"`
+	NewURL     string `json:"new_url,omitempty"`
+	Sig        string `json:"sig"`
+	ClearedAt  string `json:"cleared_at,omitempty"`
+	ClearedHow string `json:"cleared_how,omitempty"`
+}
+
+// Error renders only fixed reason codes and retry metadata, never provider text.
 type Error struct {
 	Status            int
 	Code              string
 	RetryAfterSeconds int
+	MovingNotice      *MovingNotice
 }
 
 func (e *Error) Error() string {
@@ -102,13 +120,17 @@ func responseError(resp *http.Response) error {
 		Error struct {
 			Code    string `json:"code"`
 			Details struct {
-				Retry int `json:"retry_after_seconds"`
+				Retry  int           `json:"retry_after_seconds"`
+				Notice *MovingNotice `json:"notice"`
 			} `json:"details"`
 		} `json:"error"`
 	}
 	if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&env) == nil {
 		if reasonCode.MatchString(env.Error.Code) {
 			e.Code = env.Error.Code
+		}
+		if e.Status == http.StatusGone && e.Code == "hub_moved" {
+			e.MovingNotice = env.Error.Details.Notice
 		}
 		if env.Error.Details.Retry > 0 {
 			e.RetryAfterSeconds = env.Error.Details.Retry
