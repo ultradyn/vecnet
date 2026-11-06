@@ -11,7 +11,7 @@ async function until(what, check) {
 }
 
 // The pane title with nothing after the row count: no reload is running.
-const settled = '6 rows ─';
+const settled = '6 rows ━'; // the subs table is the focused pane, so its border is heavy
 
 try {
   await withTui({}, async ({ keys, waitFor, shot, stall, clear, controlStatus, fail, advance, asPeer }) => {
