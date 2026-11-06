@@ -91,8 +91,8 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (!rpc) throw new CodexRpcError(-1, 'unreachable', true);
     return rpc.call<T>(method, params, timeout);
   }
-  function runHook(args: string[]): Promise<unknown> {
-    if (!running) return Promise.reject(new Error('engine_stopped'));
+  function runHook(args: string[], cleanup = false): Promise<unknown> {
+    if (!running && !cleanup) return Promise.reject(new Error('engine_stopped'));
     return new Promise((resolve, reject) => {
       const child = spawn(d.vecnetBin, [...baseArgs, 'hook', ...args], { env, stdio: ['ignore', 'pipe', 'ignore'] });
       children.add(child); let text = '', tooLarge = false;
@@ -108,7 +108,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     });
   }
   async function release(claim: string) {
-    await runHook(['--release', '--claim', claim]);
+    // Releasing known-unsent claims must remain possible while stop drains
+    // the delivery lane, after new claims and turn RPCs have been disabled.
+    await runHook(['--release', '--claim', claim], true);
   }
   function scheduleClaimRecovery() {
     if (!running || claimRecovery) return;
@@ -418,6 +420,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         await releaseInflight(r); return;
       }
     }
+    // The hook or a definite-rejection retry may finish after stop disabled
+    // this lane. No ambiguous or accepted attempt falls through to here.
+    waitingRetry.set(r.key, batch);
   }
   async function push() {
     if (connectionState !== 'ready' || !liveness().live) return;
@@ -524,7 +529,12 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         if (c.exitCode !== null || c.signalCode !== null) { resolve(); return; }
         c.once('close', () => resolve()); c.kill();
       }));
-      await queue; await unsubscribe(); const connection = rpc; rpc = undefined; connection?.close(); await Promise.all(exits);
+      await queue; await Promise.all(exits);
+      // Drain the killed claim before releasing its nonce: Go may still be
+      // committing it. Keep accepted/ambiguous inflight rows for recovery.
+      await recoverClaims();
+      for (const r of rows()) if (waitingRetry.has(r.key)) await releaseInflight(r);
+      await unsubscribe(); const connection = rpc; rpc = undefined; connection?.close();
     },
     state: () => connectionState, liveness, subscribed: () => attached,
     setOverLimit(value) { overLimit = value; enqueue(async () => { await reconcile(); if (!value) arm(0); }); },
