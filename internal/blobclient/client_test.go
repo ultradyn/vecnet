@@ -27,6 +27,83 @@ type transportFunc func(*http.Request) (*http.Response, error)
 
 func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+func TestHubTransportErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, path   string
+		upload, disk bool
+	}{
+		{name: "upload discovery", path: "/v1/blob-capabilities", upload: true},
+		{name: "download discovery", path: "/v1/blob-capabilities"},
+		{name: "upload grant", path: "/v1/blobs/uploads", upload: true},
+		{name: "completion", path: "/v1/blobs/uploads/" + testID + "/complete", upload: true},
+		{name: "download grant", path: "/v1/blobs/" + abcSHA + "/download"},
+		{name: "disk upload", path: "/v1/blobs", upload: true, disk: true},
+		{name: "disk download", path: "/v1/blobs/" + abcSHA, disk: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			original := f.client.hub.Transport
+			cause := errors.New("private-transport-details")
+			failures := 0
+			f.client.hub.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == tc.path {
+					failures++
+					return nil, cause
+				}
+				if tc.disk {
+					status, body := 404, `{}`
+					if r.URL.Path == "/v1/blob-capabilities" {
+						status, body = 200, `{"backend":"disk","max_size":26214400}`
+					}
+					return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+				}
+				return original.RoundTrip(r)
+			})
+			var err error
+			if tc.upload {
+				_, err = f.client.Upload(context.Background(), strings.NewReader("abc"), 3, "text/plain", "idem")
+			} else {
+				id := testID
+				if tc.disk {
+					id = ""
+				}
+				_, _, err = f.client.Download(context.Background(), abcSHA, id, MaxSize)
+			}
+			var transferErr *Error
+			if !errors.As(err, &transferErr) || !transferErr.HubTransport || transferErr.Status != 0 || transferErr.Code != "blob_unavailable" {
+				t.Fatal("hub failure lost its typed transport classification")
+			}
+			if err.Error() != "blob_unavailable" || errors.Is(err, cause) || transferErr.MovingNotice != nil {
+				t.Fatal("hub transport error retained sensitive details")
+			}
+			if failures != 1 {
+				t.Fatal("hub transport failure was retried")
+			}
+		})
+	}
+}
+
+func TestDirectTransportErrorsAreNotHubErrors(t *testing.T) {
+	for _, upload := range []bool{false, true} {
+		t.Run(strconv.FormatBool(upload), func(t *testing.T) {
+			f := newFixture(t)
+			f.client.transfer.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("private-provider-details")
+			})
+			var err error
+			if upload {
+				_, err = f.client.Upload(context.Background(), strings.NewReader("abc"), 3, "text/plain", "idem")
+			} else {
+				_, _, err = f.client.Download(context.Background(), abcSHA, testID, MaxSize)
+			}
+			var transferErr *Error
+			if !errors.As(err, &transferErr) || transferErr.HubTransport || transferErr.Status != 0 || err.Error() != "blob_unavailable" {
+				t.Fatal("direct transport failure must remain sanitized and distinct from a hub failure")
+			}
+		})
+	}
+}
+
 type fixture struct {
 	client                                             *Client
 	now                                                time.Time

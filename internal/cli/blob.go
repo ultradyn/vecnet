@@ -43,6 +43,12 @@ func (c *client) blobs() *blobclient.Client {
 func blobError(err error) error {
 	var e *blobclient.Error
 	if errors.As(err, &e) {
+		if e.HubTransport {
+			return &netError{err: e}
+		}
+		if e.Status == 0 || e.Code == "blob_expired" || e.Code == "blob_purged" {
+			return err
+		}
 		details := map[string]any{"retry_after_seconds": e.RetryAfterSeconds}
 		if e.Status == http.StatusGone && e.Code == "hub_moved" && e.MovingNotice != nil {
 			details["notice"] = e.MovingNotice
@@ -94,12 +100,9 @@ func (a *app) cmdBlob(args []string) error {
 				_ = a.emitValue(map[string]any{"error": map[string]any{"code": e.Code, "retry_after_seconds": e.RetryAfterSeconds}})
 			}
 		}
-		// Hub responses retain the CLI's exit-2 contract. Logical object
-		// expiry/purge and local transfer validation remain exit 1.
-		if e != nil && e.Status != 0 && e.Code != "blob_expired" && e.Code != "blob_purged" {
-			return blobError(err)
-		}
-		return err
+		// Share upload's exit mapping: hub transport 3, HTTP errors 2,
+		// logical expiry/purge and local transfer validation 1.
+		return blobError(err)
 	}
 	if err = tmp.Sync(); err != nil {
 		return err

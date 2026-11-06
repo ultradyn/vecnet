@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,71 @@ import (
 	"testing"
 	"time"
 )
+
+func TestBlobTransfersNetworkErrorExitCode(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := "http://" + ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"get", "send", "reply"} {
+		for _, jsonOutput := range []bool{false, true} {
+			t.Run(command+"/json="+strconv.FormatBool(jsonOutput), func(t *testing.T) {
+				const secret = "vn_peer_private-transfer-secret"
+				u := profileUser(t, dead, secret)
+				dir := t.TempDir()
+				path := filepath.Join(dir, "result")
+				args := []string{"blob", "get", strings.Repeat("a", 64), "--blob-id", "blo_00000000000000000000000001", "--out", path}
+				if command != "get" {
+					path = filepath.Join(t.TempDir(), "attachment")
+					if err := os.WriteFile(path, []byte("abc"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					args = []string{command, "peer_test", "text", "--hold", "--attach", path}
+					if command == "reply" {
+						args[1] = "msg_test"
+						args = append(args, "--thread", "thr_test")
+					}
+				}
+				if jsonOutput {
+					args = append(args, "--json")
+				}
+				// Any output or spool must stay in this private directory and be
+				// removed when the failed command returns.
+				t.Setenv("TMPDIR", dir)
+				code, out, errs := u.run(args...)
+				if code != 3 {
+					t.Errorf("closed hub: exit=%d, want 3", code)
+				}
+				if errs != "vecnet: network: blob_unavailable\n" {
+					t.Error("network error must contain only a sanitized reason")
+				}
+				for _, forbidden := range []string{dead, ln.Addr().String(), secret, "Authorization", "dial tcp", "url"} {
+					if strings.Contains(out+errs, forbidden) {
+						t.Error("network output leaked transport details")
+					}
+				}
+				if command == "get" && jsonOutput {
+					var wire struct {
+						Error struct{ Code string } `json:"error"`
+					}
+					if json.Unmarshal([]byte(out), &wire) != nil || wire.Error.Code != "blob_unavailable" {
+						t.Error("missing sanitized machine-readable network error")
+					}
+				} else if out != "" {
+					t.Error("failed transfer reported output")
+				}
+				entries, err := os.ReadDir(dir)
+				if err != nil || len(entries) != 0 {
+					t.Error("network failure left output or spool")
+				}
+			})
+		}
+	}
+}
 
 func TestBlobGetExpired(t *testing.T) {
 	for _, reason := range []string{"blob_expired", "blob_purged"} {
@@ -41,6 +107,46 @@ func TestBlobGetExpired(t *testing.T) {
 		})
 	}
 }
+
+func TestAttachmentErrorExitCodes(t *testing.T) {
+	for _, command := range []string{"send", "reply"} {
+		for _, tc := range []struct {
+			name, reason string
+			status, exit int
+		}{
+			{name: "http", reason: "blob_unavailable", status: 503, exit: 2},
+			{name: "expired", reason: "blob_expired", status: 410, exit: 1},
+			{name: "purged", reason: "blob_purged", status: 410, exit: 1},
+			{name: "validation", reason: "bad_response", status: 200, exit: 1},
+		} {
+			t.Run(command+"/"+tc.name, func(t *testing.T) {
+				hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(tc.status)
+					json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": tc.reason, "message": "private-transfer-secret"}})
+				}))
+				defer hub.Close()
+				u := profileUser(t, hub.URL, "fake")
+				path := filepath.Join(t.TempDir(), "attachment")
+				if err := os.WriteFile(path, []byte("abc"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				args := []string{command, "peer_test", "text", "--hold", "--attach", path}
+				if command == "reply" {
+					args[1] = "msg_test"
+					args = append(args, "--thread", "thr_test")
+				}
+				code, out, errs := u.run(args...)
+				if code != tc.exit || !strings.Contains(errs, tc.reason) {
+					t.Errorf("exit=%d, want %d and reason %s", code, tc.exit, tc.reason)
+				}
+				if out != "" || strings.Contains(errs, "private-transfer-secret") {
+					t.Error("failure reported output or private hub text")
+				}
+			})
+		}
+	}
+}
+
 func TestBlobGetHubErrors(t *testing.T) {
 	for _, endpoint := range []string{"capabilities", "download"} {
 		for _, status := range []int{401, 403, 429, 503} {

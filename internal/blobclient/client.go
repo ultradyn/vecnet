@@ -48,6 +48,10 @@ type Error struct {
 	Code              string
 	RetryAfterSeconds int
 	MovingNotice      *MovingNotice
+	// HubTransport distinguishes a failed hub request from HTTP responses,
+	// local validation and direct-provider failures. The cause is discarded
+	// because transport errors can contain credentials and capability URLs.
+	HubTransport bool
 }
 
 func (e *Error) Error() string {
@@ -162,7 +166,7 @@ func (c *Client) request(ctx context.Context, method, path string, r io.Reader) 
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, failure("blob_unavailable")
+		return nil, &Error{Code: "blob_unavailable", HubTransport: true}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, responseError(resp)
@@ -194,7 +198,7 @@ func (c *Client) json(ctx context.Context, method, path, idem string, in, out an
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return failure("blob_unavailable")
+		return &Error{Code: "blob_unavailable", HubTransport: true}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return responseError(resp)
@@ -281,7 +285,7 @@ func (c *Client) Upload(ctx context.Context, r io.ReadSeeker, size int64, media,
 			if ctx.Err() != nil {
 				return zero, ctx.Err()
 			}
-			return zero, failure("blob_unavailable")
+			return zero, &Error{Code: "blob_unavailable", HubTransport: true}
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return zero, responseError(resp)
