@@ -10,11 +10,29 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/onboarding"
 )
+
+// onboardDiagnostics are the property names this adapter may repeat in an
+// error. Anything else, including a credential or routine URL used as a
+// JSON name, is replaced before the response is written.
+var onboardDiagnostics = func() map[string]bool {
+	names := map[string]bool{
+		"kind": true, "spec_version": true, "request_id": true, "inputs": true,
+	}
+	for _, spec := range onboarding.Specs() {
+		for _, f := range spec.Fields {
+			names[f.Name] = true
+		}
+	}
+	return names
+}()
 
 // adminAgentKinds is GET /v1/admin/agent-kinds: the hub kind registry.
 // Listing does not grant write authority.
@@ -37,12 +55,12 @@ func (s *server) adminOnboardAgent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	req, err := readOnboardRequest(r)
 	if err != nil {
-		writeError(w, err)
+		writeOnboardError(w, err)
 		return
 	}
 	res, err := s.Hub.OnboardAgent(r.Context(), callerFrom(r.Context()), req)
 	if err != nil {
-		writeError(w, err)
+		writeOnboardError(w, err)
 		return
 	}
 	if res.Status == "created" {
@@ -62,7 +80,7 @@ func (s *server) adminOnboardingStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	res, err := s.Hub.OnboardingStatus(r.Context(), callerFrom(r.Context()), r.PathValue("request_id"))
 	if err != nil {
-		writeError(w, err)
+		writeOnboardError(w, err)
 		return
 	}
 	res.HumanOutput = ""
@@ -106,4 +124,77 @@ func inputsField(raw json.RawMessage) (map[string]any, error) {
 		return nil, &envelope.SchemaError{Path: "/inputs", Message: "inputs must be a JSON object"}
 	}
 	return inputs, nil
+}
+
+// writeOnboardError is writeError after diagnostic names are allowlisted.
+// An unrecognized top-level name becomes the fixed root path. An
+// unrecognized inputs name becomes /inputs. Messages stay the hub's fixed text.
+func writeOnboardError(w http.ResponseWriter, err error) {
+	writeError(w, redactOnboardError(err))
+}
+
+func redactOnboardError(err error) error {
+	var schema *envelope.SchemaError
+	if errors.As(err, &schema) {
+		if onboardTopPath(schema.Path) {
+			return err
+		}
+		cp := *schema
+		cp.Path = ""
+		return &cp
+	}
+	var api *hub.APIError
+	if errors.As(err, &api) {
+		field, _ := api.Details["field"].(string)
+		if field == "" || onboardDiagnostics[field] {
+			return err
+		}
+		cp := *api
+		cp.Details = make(map[string]any, len(api.Details))
+		for k, v := range api.Details {
+			if k != "field" {
+				cp.Details[k] = v
+			}
+		}
+		cp.Details["path"] = "/inputs"
+		return &cp
+	}
+	return err
+}
+
+// onboardNoStore sets Cache-Control: no-store for the three onboarding
+// routes before authentication and the body limit run. Handlers set it
+// again for the responses they write themselves.
+func onboardNoStore(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if onboardRoute(r.URL.Path) {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func onboardRoute(path string) bool {
+	switch path {
+	case "/v1/admin/agent-kinds", "/v1/admin/agents":
+		return true
+	default:
+		return strings.HasPrefix(path, "/v1/admin/agents/onboarding/")
+	}
+}
+
+func onboardTopPath(path string) bool {
+	if path == "" {
+		return true
+	}
+	name, ok := strings.CutPrefix(path, "/")
+	if !ok || name == "" || strings.Contains(name, "/") {
+		return false
+	}
+	switch name {
+	case "kind", "spec_version", "request_id", "inputs":
+		return true
+	default:
+		return false
+	}
 }

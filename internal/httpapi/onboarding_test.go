@@ -1,9 +1,11 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -54,7 +56,7 @@ func TestAgentOnboardAuthorization(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			resp, raw := env.Do(c.secret, c.method, c.path, c.body)
-			mustErr(t, resp, raw, c.status, c.code)
+			onboardMustErr(t, resp, raw, c.status, c.code)
 		})
 	}
 	if takeOnboardCensus(t, env) != before {
@@ -75,9 +77,9 @@ func TestAgentOnboardAuthorization(t *testing.T) {
 
 	t.Run("listing never grants write", func(t *testing.T) {
 		resp, raw := env.Do(peer, http.MethodPost, "/v1/admin/agents", agentBody("session", "after-list", map[string]any{"name": "After List"}))
-		mustErr(t, resp, raw, http.StatusForbidden, "forbidden")
+		onboardMustErr(t, resp, raw, http.StatusForbidden, "forbidden")
 		resp, raw = env.Do(principal, http.MethodPost, "/v1/admin/agents", agentBody("grokbot", "after-list-prn", map[string]any{"name": "Nope"}))
-		mustErr(t, resp, raw, http.StatusForbidden, "forbidden")
+		onboardMustErr(t, resp, raw, http.StatusForbidden, "forbidden")
 		if takeOnboardCensus(t, env) != before {
 			t.Fatal("a peer or principal wrote onboarding state after the operator listed kinds")
 		}
@@ -86,6 +88,7 @@ func TestAgentOnboardAuthorization(t *testing.T) {
 	t.Run("reject before side effects", func(t *testing.T) {
 		for _, c := range []struct {
 			name, field, path string
+			checkPath         bool
 			body              any
 			status            int
 			code              string
@@ -94,23 +97,26 @@ func TestAgentOnboardAuthorization(t *testing.T) {
 			{name: "unsupported kind", body: agentBody("operator", "kind-op", map[string]any{"name": "Nope"}), status: http.StatusBadRequest, code: "unknown_kind", field: "kind"},
 			{name: "infrastructure kind", body: agentBody("source", "kind-src", map[string]any{"name": "Nope"}), status: http.StatusBadRequest, code: "unknown_kind", field: "kind"},
 			{name: "unknown kind", body: agentBody("not-a-kind", "kind-nope", map[string]any{"name": "Nope"}), status: http.StatusBadRequest, code: "unknown_kind", field: "kind"},
-			{name: "client selected action", body: map[string]any{"kind": "session", "spec_version": onboarding.SpecVersion, "request_id": "act-1", "submit_action": "grokbot_setup", "inputs": map[string]any{"name": "Nope"}}, status: http.StatusBadRequest, code: "invalid_body", path: "/submit_action"},
-			{name: "unknown input", body: agentBody("session", "unk-1", map[string]any{"name": "Nope", "submit_action": "drop"}), status: http.StatusBadRequest, code: "unknown_field", field: "submit_action"},
+			{name: "client selected action", body: map[string]any{"kind": "session", "spec_version": onboarding.SpecVersion, "request_id": "act-1", "submit_action": "grokbot_setup", "inputs": map[string]any{"name": "Nope"}}, status: http.StatusBadRequest, code: "invalid_body", path: "", checkPath: true},
+			{name: "unknown input", body: agentBody("session", "unk-1", map[string]any{"name": "Nope", "submit_action": "drop"}), status: http.StatusBadRequest, code: "unknown_field", path: "/inputs", checkPath: true},
 			{name: "bad shape", body: `{"kind":`, status: http.StatusBadRequest, code: "invalid_body"},
-			{name: "kind type", body: `{"kind":1,"spec_version":"` + onboarding.SpecVersion + `","request_id":"bad-type","inputs":{}}`, status: http.StatusBadRequest, code: "invalid_body", path: "/kind"},
-			{name: "inputs type", body: `{"kind":"session","spec_version":"` + onboarding.SpecVersion + `","request_id":"bad-inputs","inputs":[]}`, status: http.StatusBadRequest, code: "invalid_body", path: "/inputs"},
+			{name: "kind type", body: `{"kind":1,"spec_version":"` + onboarding.SpecVersion + `","request_id":"bad-type","inputs":{}}`, status: http.StatusBadRequest, code: "invalid_body", path: "/kind", checkPath: true},
+			{name: "inputs type", body: `{"kind":"session","spec_version":"` + onboarding.SpecVersion + `","request_id":"bad-inputs","inputs":[]}`, status: http.StatusBadRequest, code: "invalid_body", path: "/inputs", checkPath: true},
 		} {
 			t.Run(c.name, func(t *testing.T) {
 				resp, raw := env.Do(env.OperatorSecret, http.MethodPost, "/v1/admin/agents", c.body)
-				e := mustErr(t, resp, raw, c.status, c.code)
+				e := onboardMustErr(t, resp, raw, c.status, c.code)
 				requireNoStore(t, resp)
-				if c.field != "" && e.Error.Details["field"] != c.field {
-					t.Fatalf("details.field = %v, want %s", e.Error.Details["field"], c.field)
+				if c.field != "" && e.field != c.field {
+					t.Fatal("details.field mismatch")
 				}
-				if c.path != "" && e.Error.Details["path"] != c.path {
-					t.Fatalf("details.path = %v, want %s", e.Error.Details["path"], c.path)
+				if c.checkPath && e.path != c.path {
+					t.Fatal("details.path mismatch")
 				}
-				if strings.Contains(string(raw), "Nope") || strings.Contains(string(raw), "drop") || strings.Contains(string(raw), "grokbot_setup") {
+				if c.checkPath && e.field != "" {
+					t.Fatal("unrecognized name remained in details.field")
+				}
+				if strings.Contains(string(raw), "Nope") || strings.Contains(string(raw), "drop") || strings.Contains(string(raw), "grokbot_setup") || strings.Contains(string(raw), "submit_action") {
 					t.Fatal("rejection echoed the submitted value or a client-selected action")
 				}
 				if takeOnboardCensus(t, env) != before {
@@ -149,7 +155,7 @@ func TestAgentOnboardAuthorization(t *testing.T) {
 		} {
 			t.Run(c.name, func(t *testing.T) {
 				resp, raw := env.Do(c.secret, http.MethodGet, onboardingStatusPath("op-only"), nil)
-				mustErr(t, resp, raw, c.status, c.code)
+				onboardMustErr(t, resp, raw, c.status, c.code)
 				if strings.Contains(string(raw), created.PeerID) || strings.Contains(string(raw), token) || strings.Contains(string(raw), "human_output") {
 					t.Fatal("status reached a non-operator")
 				}
@@ -165,17 +171,17 @@ func TestAgentOnboardAuthorization(t *testing.T) {
 			t.Fatal("operator status leaked human output or returned another peer")
 		}
 		resp, raw = env.Do(env.OperatorSecret, http.MethodGet, onboardingStatusPath("missing-request"), nil)
-		e := mustErr(t, resp, raw, http.StatusNotFound, "not_found")
+		e := onboardMustErr(t, resp, raw, http.StatusNotFound, "not_found")
 		requireNoStore(t, resp)
-		if e.Error.Details["request_id"] != "missing-request" {
+		if e.requestID != "missing-request" {
 			t.Fatal("operator status of an unknown id did not reach the onboarding service")
 		}
 		resp, raw = env.Do(peer, http.MethodPost, "/v1/admin/agents", agentBody("session", "peer-write", map[string]any{"name": "Peer Write"}))
-		mustErr(t, resp, raw, http.StatusForbidden, "forbidden")
+		onboardMustErr(t, resp, raw, http.StatusForbidden, "forbidden")
 		resp, raw = env.Do(env.OperatorSecret, http.MethodGet, onboardingStatusPath("bad id"), nil)
-		e = mustErr(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
-		if e.Error.Details["field"] != "request_id" {
-			t.Fatalf("details.field = %v, want request_id", e.Error.Details["field"])
+		e = onboardMustErr(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
+		if e.field != "request_id" {
+			t.Fatal("details.field mismatch")
 		}
 		requireNoStore(t, resp)
 		if takeOnboardCensus(t, env) != after {
@@ -235,10 +241,10 @@ func TestAgentOnboardHTTPRedaction(t *testing.T) {
 
 		changed := agentBody("session", "legacy-1", map[string]any{"name": "Changed Legacy Name"})
 		resp, raw = env.Do(env.OperatorSecret, http.MethodPost, "/v1/admin/agents", changed)
-		e := mustErr(t, resp, raw, http.StatusConflict, "idempotency_conflict")
+		e := onboardMustErr(t, resp, raw, http.StatusConflict, "idempotency_conflict")
 		requireNoStore(t, resp)
-		if e.Error.Details["request_id"] != "legacy-1" {
-			t.Fatalf("details.request_id = %v", e.Error.Details["request_id"])
+		if e.requestID != "legacy-1" {
+			t.Fatal("details.request_id mismatch")
 		}
 		assertNoHuman(t, raw, created.HumanOutput, token)
 		if strings.Contains(string(raw), "Changed Legacy Name") {
@@ -349,10 +355,10 @@ func TestAgentOnboardHTTPRedaction(t *testing.T) {
 		otherURL := fakeRoutineURL(t)
 		changed := agentBody("grokbot", "grok-1", map[string]any{"name": "Helper Bot", "webhook_url": otherURL, "webhook_key": "Bearer " + otherKey})
 		resp, raw = env.Do(env.OperatorSecret, http.MethodPost, "/v1/admin/agents", changed)
-		e := mustErr(t, resp, raw, http.StatusConflict, "idempotency_conflict")
+		e := onboardMustErr(t, resp, raw, http.StatusConflict, "idempotency_conflict")
 		requireNoStore(t, resp)
-		if e.Error.Details["request_id"] != "grok-1" {
-			t.Fatalf("details.request_id = %v", e.Error.Details["request_id"])
+		if e.requestID != "grok-1" {
+			t.Fatal("details.request_id mismatch")
 		}
 		assertAbsent(t, raw, "grok conflict", routineURL, key, pasted, sealed, otherURL, otherKey, "Bearer "+otherKey)
 		if kicks.Load() != beforeKicks+1 {
@@ -369,13 +375,13 @@ func TestAgentOnboardHTTPRedaction(t *testing.T) {
 		resp, raw := env.Do(env.OperatorSecret, http.MethodPost, "/v1/admin/agents", agentBody("grokbot", "grok-bad-url", map[string]any{
 			"name": "Bad URL", "webhook_url": leakedURL, "webhook_key": "Bearer " + key,
 		}))
-		e := mustErr(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
+		e := onboardMustErr(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
 		requireNoStore(t, resp)
-		if e.Error.Details["field"] != "webhook_url" {
-			t.Fatalf("details.field = %v, want webhook_url", e.Error.Details["field"])
+		if e.field != "webhook_url" {
+			t.Fatal("details.field mismatch")
 		}
 		assertAbsent(t, raw, "url field error", leakedURL, routineURL[strings.LastIndex(routineURL, "/")+1:], key, "Bearer "+key)
-		if strings.Contains(e.Error.Message, key) || strings.Contains(e.Error.Message, "leak=1") {
+		if strings.Contains(e.message, key) || strings.Contains(e.message, "leak=1") {
 			t.Fatal("field error message included submitted bytes")
 		}
 
@@ -384,12 +390,12 @@ func TestAgentOnboardHTTPRedaction(t *testing.T) {
 		resp, raw = env.Do(env.OperatorSecret, http.MethodPost, "/v1/admin/agents", agentBody("grokbot", "grok-bad-key", map[string]any{
 			"name": "Bad Key", "webhook_url": validURL, "webhook_key": badKey,
 		}))
-		e = mustErr(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
+		e = onboardMustErr(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
 		requireNoStore(t, resp)
-		if e.Error.Details["field"] != "webhook_key" {
-			t.Fatalf("details.field = %v, want webhook_key", e.Error.Details["field"])
+		if e.field != "webhook_key" {
+			t.Fatal("details.field mismatch")
 		}
-		if e.Error.Message != "a routine key is printable ASCII starting crsr_" {
+		if e.message != "a routine key is printable ASCII starting crsr_" {
 			t.Fatal("webhook_key error text is not the fixed message")
 		}
 		assertAbsent(t, raw, "key field error", badKey, key, validURL)
@@ -397,10 +403,10 @@ func TestAgentOnboardHTTPRedaction(t *testing.T) {
 		resp, raw = env.Do(env.OperatorSecret, http.MethodPost, "/v1/admin/agents", agentBody("session", "session-secret-field", map[string]any{
 			"name": "Session", "webhook_key": key,
 		}))
-		e = mustErr(t, resp, raw, http.StatusBadRequest, "unknown_field")
+		e = onboardMustErr(t, resp, raw, http.StatusBadRequest, "unknown_field")
 		requireNoStore(t, resp)
-		if e.Error.Details["field"] != "webhook_key" {
-			t.Fatalf("details.field = %v, want webhook_key", e.Error.Details["field"])
+		if e.field != "webhook_key" {
+			t.Fatal("details.field mismatch")
 		}
 		assertAbsent(t, raw, "unknown field error", key)
 		if takeOnboardCensus(t, env) != before {
@@ -410,6 +416,172 @@ func TestAgentOnboardHTTPRedaction(t *testing.T) {
 			t.Fatal("a field error kicked the push worker")
 		}
 	})
+}
+
+// (t4 I1) A credential or routine URL used as a JSON property name must not
+// come back in details.path or details.field. Recognized names stay; any
+// other name is a fixed root or /inputs.
+func TestAgentOnboardPropertyNameRedaction(t *testing.T) {
+	env := testhub.Start(t)
+	before := takeOnboardCensus(t, env)
+	key := fakeRoutineKey(t)
+	routineURL := fakeRoutineURL(t)
+
+	t.Run("top-level", func(t *testing.T) {
+		body := map[string]any{
+			"kind": "session", "spec_version": onboarding.SpecVersion, "request_id": "i1-top",
+			"inputs": map[string]any{"name": "Safe"},
+			key:      "1", routineURL: "1",
+		}
+		resp, raw := env.Do(env.OperatorSecret, http.MethodPost, "/v1/admin/agents", body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		requireNoStore(t, resp)
+		path, field := onboardDetailLocators(t, raw, "invalid_body")
+		if path != "" || field != "" || strings.Contains(string(raw), key) || strings.Contains(string(raw), routineURL) {
+			t.Fatal("(t4 I1) top-level error reflects a supplied property name")
+		}
+		if takeOnboardCensus(t, env) != before {
+			t.Fatal("(t4 I1) top-level rejection wrote onboarding state")
+		}
+	})
+
+	t.Run("inputs", func(t *testing.T) {
+		body := agentBody("session", "i1-inputs", map[string]any{"name": "Safe", key: "1", routineURL: "1"})
+		resp, raw := env.Do(env.OperatorSecret, http.MethodPost, "/v1/admin/agents", body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		requireNoStore(t, resp)
+		path, field := onboardDetailLocators(t, raw, "unknown_field")
+		if path != "/inputs" || field != "" || strings.Contains(string(raw), key) || strings.Contains(string(raw), routineURL) {
+			t.Fatal("(t4 I1) inputs error reflects a supplied property name")
+		}
+		if takeOnboardCensus(t, env) != before {
+			t.Fatal("(t4 I1) inputs rejection wrote onboarding state")
+		}
+	})
+}
+
+// (t4 I2) Decisions §2 requires no-store on reads and writes, including the
+// 401, 403 and 413 answers that return before the handlers run.
+func TestAgentOnboardRejectionNoStore(t *testing.T) {
+	env := testhub.Start(t)
+	_, peer := env.NewPeer("session", "cache peer")
+	submit := agentBody("session", "i2-submit", map[string]any{"name": "Blocked"})
+	for _, c := range []struct {
+		name, secret, method, path string
+		body                       any
+		status                     int
+	}{
+		{"anonymous kinds", "", http.MethodGet, "/v1/admin/agent-kinds", nil, http.StatusUnauthorized},
+		{"anonymous submit", "", http.MethodPost, "/v1/admin/agents", submit, http.StatusUnauthorized},
+		{"anonymous status", "", http.MethodGet, onboardingStatusPath("i2-submit"), nil, http.StatusUnauthorized},
+		{"peer kinds", peer, http.MethodGet, "/v1/admin/agent-kinds", nil, http.StatusForbidden},
+		{"peer submit", peer, http.MethodPost, "/v1/admin/agents", submit, http.StatusForbidden},
+		{"peer status", peer, http.MethodGet, onboardingStatusPath("i2-submit"), nil, http.StatusForbidden},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			resp, raw := env.Do(c.secret, c.method, c.path, c.body)
+			if resp.StatusCode != c.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, c.status)
+			}
+			if resp.Header.Get("Cache-Control") != "no-store" {
+				t.Fatal("(t4 I2) required no-store header absent")
+			}
+			if strings.Contains(string(raw), "Blocked") {
+				t.Fatal("(t4 I2) rejection echoed the submitted name")
+			}
+		})
+	}
+	t.Run("oversize submit", func(t *testing.T) {
+		body := bytes.Repeat([]byte("a"), httpapi.MaxBodyBytes+1)
+		resp, _ := env.Do(env.OperatorSecret, http.MethodPost, "/v1/admin/agents", body)
+		if resp.StatusCode != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want 413", resp.StatusCode)
+		}
+		if resp.Header.Get("Cache-Control") != "no-store" {
+			t.Fatal("(t4 I2) required no-store header absent")
+		}
+	})
+}
+
+// (t4 I3) A wrong status or code must be reported with status numbers only.
+// The text must not contain the response body or any detail taken from it.
+func TestAgentOnboardFailureDiagnostic(t *testing.T) {
+	token := "vn_enrol_" + strings.Repeat("c", 24)
+	body := []byte(`{"peer_id":"peer_secret","human_output":"` + token + `","error":{"code":"leaked","message":"` + token + `","details":{"field":"` + token + `"}}}`)
+	assertOnboardDiagnostic(t, onboardFailureText(http.StatusCreated, body, http.StatusUnprocessableEntity, "invalid_value"), token, "201", "422")
+	assertOnboardDiagnostic(t, onboardFailureText(http.StatusUnprocessableEntity, body, http.StatusUnprocessableEntity, "invalid_value"), token, "422", "")
+}
+
+func assertOnboardDiagnostic(t *testing.T, problem, token, wantNum, alsoNum string) {
+	t.Helper()
+	if problem == "" {
+		t.Fatal("(t4 I3) diagnostic accepted a non-error body")
+	}
+	if strings.Contains(problem, token) || strings.Contains(problem, "human_output") || strings.Contains(problem, "peer_secret") || strings.Contains(problem, "leaked") {
+		t.Fatal("(t4 I3) failure diagnostic included response content")
+	}
+	if !strings.Contains(problem, wantNum) || (alsoNum != "" && !strings.Contains(problem, alsoNum)) {
+		t.Fatal("(t4 I3) failure diagnostic omitted status numbers")
+	}
+}
+
+// onboardFailureText reports an onboarding error mismatch using status
+// numbers only. It does not include the body, the received code, or details.
+func onboardFailureText(got int, body []byte, want int, code string) string {
+	if got != want {
+		return fmt.Sprintf("status = %d, want %d", got, want)
+	}
+	var raw map[string]map[string]json.RawMessage
+	if json.Unmarshal(body, &raw) != nil {
+		return fmt.Sprintf("status %d did not return the expected error", want)
+	}
+	d, ok := raw["error"]["details"]
+	trimmed := bytes.TrimSpace(d)
+	if !ok || len(trimmed) == 0 || trimmed[0] != '{' {
+		return fmt.Sprintf("status %d did not return the expected error", want)
+	}
+	var e errBody
+	if json.Unmarshal(body, &e) != nil || e.Error.Code != code || e.Error.Message == "" {
+		return fmt.Sprintf("status %d did not return the expected error", want)
+	}
+	return ""
+}
+
+type onboardErrInfo struct {
+	field, path, requestID, message string
+}
+
+func onboardMustErr(t *testing.T, resp *http.Response, body []byte, status int, code string) onboardErrInfo {
+	t.Helper()
+	if problem := onboardFailureText(resp.StatusCode, body, status, code); problem != "" {
+		t.Fatal(problem)
+	}
+	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json") {
+		t.Fatalf("status %d did not return the expected error", status)
+	}
+	var e errBody
+	_ = json.Unmarshal(body, &e)
+	field, _ := e.Error.Details["field"].(string)
+	path, _ := e.Error.Details["path"].(string)
+	requestID, _ := e.Error.Details["request_id"].(string)
+	return onboardErrInfo{field: field, path: path, requestID: requestID, message: e.Error.Message}
+}
+
+// onboardDetailLocators reads the error code and the diagnostic locators.
+// It reports only the expected code, never the body or a supplied name.
+func onboardDetailLocators(t *testing.T, body []byte, code string) (path, field string) {
+	t.Helper()
+	var e errBody
+	if json.Unmarshal(body, &e) != nil || e.Error.Code != code || e.Error.Message == "" || e.Error.Details == nil {
+		t.Fatalf("status did not return %s", code)
+	}
+	path, _ = e.Error.Details["path"].(string)
+	field, _ = e.Error.Details["field"].(string)
+	return path, field
 }
 
 type onboardCensus struct {

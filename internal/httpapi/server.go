@@ -123,7 +123,9 @@ func New(d Deps) http.Handler {
 	if strings.HasPrefix(d.Hub.Cfg.PublicURL, "https://") {
 		h = hsts(h)
 	}
-	return h
+	// Outside auth and the body limit so 401, 403 and 413 on the onboarding
+	// routes still carry Cache-Control: no-store (Decisions §2).
+	return onboardNoStore(h)
 }
 
 // hsts adds Strict-Transport-Security to every response of a hub served over
