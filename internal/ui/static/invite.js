@@ -7,9 +7,9 @@
 import { copyText, h, toast } from './dom.js';
 import { kindLabel, when } from './format.js';
 import {
-  BEARER_CONFIRM, BEARER_WARN, CODE_STEP, DEFAULT_TTL, DOT_NOTE, DOT_STEPS, GATEWAY_NOTE, QUOTA_NOTE,
+  BEARER_CONFIRM, BEARER_WARN, DEFAULT_TTL, GATEWAY_NOTE, QUOTA_NOTE,
   SKIP_MCP_HELP, SKIP_MCP_LABEL, TTLS, acceptCompletion, authorizePrompt, beginLoad, applyLoad, clientIssues,
-  connectorDefault, connectorOverrideError, emptyRegistry, failLoad, freshRequestId, humanOutput, kindsFrom,
+  connectorDefault, connectorOverrideError, dotInstructions, emptyRegistry, failLoad, firstLinkExpiry, freshRequestId, humanOutput, kindsFrom,
   linkPanel, mustConfirmBearerRevoke, outcomeOf, presentError, specIssue, statusSafe, submitBody, submitGate,
   usableRequestId,
 } from './invite-model.js';
@@ -49,6 +49,12 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   let rendering = false;
   let cancelBearer = () => {};
   const requestId = usableRequestId(prefill && prefill.requestId) || freshRequestId();
+  // pending is the uncertain (or conflicting) submission. Edits do not replace
+  // it, and a newer submit waits until status says it never committed.
+  let pending = null;
+  let statusGen = 0;
+  let statusAbort = new AbortController();
+  let humanHeld = false;
 
   const name = h('input', { id: 'inv-name', 'data-field': 'name', 'aria-required': 'true', maxlength: '128', spellcheck: 'false', autocomplete: 'off', placeholder: 'e.g. web-repo claude' });
   const kind = h('select', { id: 'inv-kind' });
@@ -101,6 +107,9 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     for (const v of [live.webhook_key, live.webhook_url, key.value, url.value]) {
       if (typeof v === 'string' && v.trim().length >= 8) found.push(v);
     }
+    for (const el of dialog.querySelectorAll('[data-secret]')) {
+      if (typeof el.value === 'string' && el.value.trim().length >= 8 && !found.includes(el.value)) found.push(el.value);
+    }
     return found;
   }
   function clearSecrets() {
@@ -118,10 +127,27 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     const active = document.activeElement;
     if (!active || active === document.body || active === dialog || !dialog.contains(active)) focusName();
   }
-  function dropRetry() {
+  function removeRetryRow() {
     const row = dialog.querySelector('.inv-retry');
     if (row) row.remove();
     for (const note of dialog.querySelectorAll('.inv-field-err')) note.remove();
+  }
+  // An unresolved request keeps Check status. Editing must not drop it.
+  function dropRetry() {
+    if (pending) return;
+    removeRetryRow();
+  }
+  function invalidateStatus() {
+    statusGen += 1;
+    statusAbort.abort();
+    statusAbort = new AbortController();
+  }
+  function holdHuman() {
+    humanHeld = true;
+    invalidateStatus();
+  }
+  function statusSignal() {
+    return statusAbort.signal;
   }
 
   function renderFields() {
@@ -129,6 +155,8 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     try { renderFieldsBody(); }
     finally { rendering = false; }
   }
+
+  const LEGACY_FIELDS = new Set(['name', 'name_open', 'enrol_ttl_seconds', 'principal_id', 'webhook_url', 'webhook_key', 'connector_name', 'skip_mcp']);
 
   function renderFieldsBody() {
     const kinds = kindsFrom(registry.specs);
@@ -161,18 +189,20 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     if (action !== 'invite' && openName.checked) openName.checked = false;
     lede.textContent = action === 'oauth_link' ? DOT_LEDE : action === 'grokbot_setup' ? GROK_LEDE : LEDE;
     create.textContent = gate.busy ? 'Creating…' : createLabel();
-    create.disabled = !!gate.busy;
+    create.disabled = !!gate.busy || registry.phase === 'loading';
+    const kindSlot = h('span', null, h('label', { for: 'inv-kind', text: 'Kind' }), kind);
     if (!spec || issue) {
       const why = issue && issue.code === 'unsupported_field'
         ? 'This page cannot enter the field ' + issue.name + '.'
         : 'This page cannot run that submit action.';
-      fieldsHost.replaceChildren(h('p', { class: 'err', role: 'alert', text: why }));
+      fieldsHost.replaceChildren(
+        h('div', { class: 'inv-row' }, kindSlot),
+        h('p', { class: 'err', role: 'alert', text: why }));
       create.disabled = true;
       return;
     }
 
     const kids = [];
-    const kindSlot = h('span', null, h('label', { for: 'inv-kind', text: 'Kind' }), kind);
     const nameLabel = h('label', { for: 'inv-name', text: action === 'invite' && openName.checked ? 'Suggested name (optional)' : 'Name' });
     name.setAttribute('aria-required', action === 'invite' && openName.checked ? 'false' : 'true');
     if (action === 'grokbot_setup') {
@@ -194,7 +224,59 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     if ((spec.fields || []).some(f => f.name === 'principal_id') && action !== 'grokbot_setup') {
       kids.push(h('label', { for: 'inv-principal', text: 'Existing principal (optional)' }), principal);
     }
-    fieldsHost.replaceChildren(...kids);
+    for (const f of spec.fields || []) {
+      if (LEGACY_FIELDS.has(f.name)) continue;
+      kids.push(...renderExtra(f));
+    }
+    fieldsHost.replaceChildren(...kids.filter(c => c != null && c !== false));
+  }
+
+  function helpNote(f) {
+    return f && f.help ? h('p', { class: 'inv-note', 'data-help': f.name, text: f.help }) : null;
+  }
+
+  // renderExtra is one registry field this page does not already lay out.
+  // Defaults, enum options, bounds and help come from that field.
+  function renderExtra(f) {
+    const id = 'inv-x-' + f.name;
+    if (f.type === 'boolean') {
+      const box = h('input', { id, type: 'checkbox', 'data-field': f.name });
+      box.checked = f.default === true;
+      return [h('label', { class: 'inv-chk', for: id }, box, f.name), helpNote(f)];
+    }
+    let control;
+    if (f.type === 'enum') {
+      const options = Array.isArray(f.enum) ? f.enum : (Array.isArray(f.options) ? f.options : []);
+      const hasDefault = f.default !== undefined && f.default !== null && String(f.default) !== '';
+      const opts = [];
+      if (!hasDefault) opts.push(h('option', { value: '', text: 'Choose…' }));
+      for (const opt of options) {
+        opts.push(h('option', {
+          value: String(opt), text: String(opt),
+          selected: hasDefault && String(opt) === String(f.default),
+        }));
+      }
+      control = h('select', { id, 'data-field': f.name }, opts);
+      if (hasDefault) control.value = String(f.default);
+    } else if (f.type === 'integer') {
+      control = h('input', {
+        id, type: 'number', 'data-field': f.name, step: '1',
+        min: f.minimum != null ? String(f.minimum) : false,
+        max: f.maximum != null ? String(f.maximum) : false,
+      });
+      if (f.default != null && f.default !== '') control.value = String(f.default);
+    } else {
+      const secret = f.type === 'secret';
+      control = h('input', {
+        id, type: secret ? 'password' : 'text', 'data-field': f.name,
+        'data-secret': secret || f.human_only ? 'true' : false,
+        spellcheck: 'false', autocomplete: 'off',
+        minlength: f.min_length != null ? String(f.min_length) : false,
+        maxlength: f.max_length != null ? String(f.max_length) : false,
+      });
+      if (!secret && f.default != null && f.default !== '') control.value = String(f.default);
+    }
+    return [h('label', { for: id, text: f.name }), control, helpNote(f)];
   }
 
   function grokFields() {
@@ -229,6 +311,12 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   });
   kind.addEventListener('change', () => {
     if (rendering) return;
+    if (pending) {
+      rendering = true;
+      try { kind.value = pending.body.kind; }
+      finally { rendering = false; }
+      return;
+    }
     clearSecrets();
     err.textContent = '';
     dropRetry();
@@ -238,6 +326,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   async function loadKinds() {
     const ticket = life;
     registry = beginLoad(registry);
+    const generation = registry.generation;
     renderFields();
     restoreOpeningFocus();
     try {
@@ -247,10 +336,10 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       catch { ident = null; }
       if (!acceptCompletion(life, ticket, ac.signal.aborted)) return;
       if (ident && ident.public_url) hubURL = String(ident.public_url).replace(/\/+$/, '');
-      registry = applyLoad(registry, registry.generation, Array.isArray(body.kinds) ? body.kinds : []);
+      registry = applyLoad(registry, generation, Array.isArray(body.kinds) ? body.kinds : []);
     } catch (e) {
       if (!acceptCompletion(life, ticket, ac.signal.aborted)) return;
-      registry = failLoad(registry, registry.generation, presentError(e, hidden()).text);
+      registry = failLoad(registry, generation, presentError(e, hidden()).text);
     }
     if (!acceptCompletion(life, ticket, ac.signal.aborted)) return;
     renderFields();
@@ -266,34 +355,50 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     input.focus();
   }
 
+  function showReconciliation(outcome) {
+    const buttons = [];
+    if (outcome === 'uncertain') {
+      buttons.push(h('button', { type: 'button', class: 'btn', text: 'Retry', onclick: () => send() }));
+    }
+    buttons.push(h('button', { type: 'button', class: 'btn', text: 'Check status', onclick: () => checkStatus() }));
+    err.after(h('div', { class: 'inv-retry' },
+      h('p', { class: 'inv-req mono', text: 'Request ' + requestId }),
+      ...buttons));
+  }
+
   async function send() {
     const next = submitGate(gate);
     if (!next.accepted) return;
     gate = next;
-    dropRetry();
+    removeRetryRow();
+    invalidateStatus();
     const ticket = life;
-    const spec = currentSpec();
+    const spec = pending
+      ? (registry.specs || []).find(s => s && s.kind === pending.body.kind) || null
+      : currentSpec();
     if (!spec || specIssue(spec)) {
       gate = { busy: false };
       err.textContent = 'This page cannot submit that kind.';
       create.disabled = true;
       return;
     }
-    const vals = readValues();
-    const issues = clientIssues(spec, vals);
-    const first = Object.keys(issues)[0];
-    if (first) {
-      gate = { busy: false };
-      err.textContent = issues[first];
-      markField(first, issues[first]);
-      return;
-    }
-    let bodyReq;
-    try { bodyReq = submitBody(spec, vals, requestId); }
-    catch (e) {
-      gate = { busy: false };
-      err.textContent = presentError(e, hidden()).text;
-      return;
+    let vals = pending ? pending.values : readValues();
+    let bodyReq = pending ? pending.body : null;
+    if (!pending) {
+      const issues = clientIssues(spec, vals);
+      const first = Object.keys(issues)[0];
+      if (first) {
+        gate = { busy: false };
+        err.textContent = issues[first];
+        markField(first, issues[first]);
+        return;
+      }
+      try { bodyReq = submitBody(spec, vals, requestId); }
+      catch (e) {
+        gate = { busy: false };
+        err.textContent = presentError(e, hidden()).text;
+        return;
+      }
     }
     err.textContent = '';
     create.disabled = true;
@@ -302,6 +407,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       const res = await ctx.api.agentAdd(bodyReq, { signal: ac.signal });
       if (!acceptCompletion(life, ticket, ac.signal.aborted) || !dialog.isConnected) return;
       const submitted = vals;
+      pending = null;
       clearSecrets();
       if (spec.submit_action === 'oauth_link') showDot(res, submitted);
       else if (spec.submit_action === 'grokbot_setup') showGrok(res, submitted);
@@ -310,9 +416,11 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     } catch (x) {
       if (!acceptCompletion(life, ticket, ac.signal.aborted) || !dialog.isConnected) return;
       gate = { busy: false };
-      create.disabled = false;
+      create.disabled = registry.phase === 'loading' ? true : false;
       create.textContent = createLabel();
-      if (outcomeOf(x) === 'stale') {
+      const outcome = outcomeOf(x);
+      if (outcome === 'stale') {
+        pending = null;
         clearSecrets();
         err.textContent = 'The kind contract changed. Review the form and submit again.';
         await loadKinds();
@@ -321,23 +429,35 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       const shown = presentError(x, hidden());
       err.textContent = shown.text;
       markField(shown.field, shown.text);
-      if (outcomeOf(x) === 'uncertain') {
-        err.after(h('div', { class: 'inv-retry' },
-          h('button', { type: 'button', class: 'btn', text: 'Retry', onclick: () => send() }),
-          h('button', { type: 'button', class: 'btn', text: 'Check status', onclick: () => checkStatus() })));
+      if (outcome === 'uncertain' || outcome === 'conflict') {
+        if (!pending) pending = { body: bodyReq, values: vals };
+        showReconciliation(outcome);
+        return;
       }
+      pending = null;
     }
   }
 
   async function checkStatus() {
     const ticket = life;
+    const mine = statusGen;
     try {
-      const res = await ctx.api.onboardingStatus(requestId, { signal: ac.signal });
+      const res = await ctx.api.onboardingStatus(requestId, { signal: statusSignal() });
+      if (mine !== statusGen || humanHeld) return;
       if (!acceptCompletion(life, ticket, ac.signal.aborted) || !dialog.isConnected) return;
+      pending = null;
       showSafe(statusSafe(res), 'Status for this request. One-time text and routine secrets are not included.');
     } catch (e) {
+      if (mine !== statusGen || humanHeld) return;
       if (!acceptCompletion(life, ticket, ac.signal.aborted) || !dialog.isConnected) return;
-      err.textContent = e && e.code === 'not_found' ? 'No committed request for this id yet.' : presentError(e, hidden()).text;
+      if (e && (e.name === 'AbortError' || e.code === 'aborted')) return;
+      if (e && e.code === 'not_found') {
+        pending = null;
+        removeRetryRow();
+        err.textContent = 'No committed request for this id yet.';
+        return;
+      }
+      err.textContent = presentError(e, hidden()).text;
     }
   }
 
@@ -364,6 +484,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   function showInvite(res, vals) {
     const output = humanOutput(res);
     if (!output) { showSafe(statusSafe(res), 'This request already completed. The one-time invite is not shown again.'); return; }
+    holdHuman();
     const text = h('pre', { class: 'inv-block mono', tabindex: '0', 'aria-label': 'Invite text' });
     text.textContent = output;
     const prof = (output.match(/--profile ([^ \n]+)/) || [])[1] || '';
@@ -385,33 +506,63 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   function showDot(res, vals) {
     const d = linkPanel({ ...res, name: vals.name }, location.origin, hubURL);
     const slot = h('div', { class: 'inv-code', 'aria-live': 'polite' });
-    if (d.code) fillCode(slot, { code: d.code }, d.peerId, false);
-    else slot.append(h('p', { class: 'inv-note', text: 'This request already completed. The one-time link code is not shown again.' }));
+    if (d.code) {
+      holdHuman();
+      fillCode(slot, { code: d.code, ...firstLinkExpiry(res) }, d.peerId, false);
+    } else slot.append(h('p', { class: 'inv-note', text: 'This request already completed. The one-time link code is not shown again.' }));
     paintDot(d, slot);
   }
 
+  // Bold the words a person has to find on the ChatGPT screen, wherever the
+  // hub prompt places them. The sentences themselves stay the hub's.
+  function lineNodes(line) {
+    const marks = ['Add custom MCP server', 'Same chat for every run', 'vecnet.message', 'vecnet_guide', 'Plugins', 'OAuth', '+'];
+    const parts = [];
+    let rest = String(line);
+    while (rest) {
+      let at = -1, which = '';
+      for (const m of marks) {
+        const i = rest.indexOf(m);
+        if (i >= 0 && (at < 0 || i < at || (i === at && m.length > which.length))) { at = i; which = m; }
+      }
+      if (at < 0) { parts.push(rest); break; }
+      if (at > 0) parts.push(rest.slice(0, at));
+      parts.push(h('b', { text: which }));
+      rest = rest.slice(at + which.length);
+    }
+    return parts;
+  }
+
   function paintDot(d, slot) {
-    const steps = DOT_STEPS.map((parts, i) => h('li', null,
-      h('span', null, parts.map(p => typeof p === 'string' ? p : h('b', { text: p.b }))),
-      i === CODE_STEP ? slot : null));
+    const panel = dotInstructions(currentSpec() && currentSpec().prompt_template);
+    const lines = panel.steps.length ? panel.steps : [''];
+    const codeStep = panel.steps.length ? panel.codeStep : 0;
+    const steps = lines.map((line, i) => h('li', null,
+      h('span', null, lineNodes(line)),
+      i === codeStep ? slot : null));
     const urlBtn = copier('Copy URL', d.mcpURL, 'pri');
     lede.textContent = 'Connect ' + (d.name || 'the dot') + ' from ChatGPT.';
-    body.replaceChildren(
+    body.replaceChildren(...[
       h('p', { class: 'inv-warn', role: 'note', text: 'Shown once — the link code binds a ChatGPT login to this dot. Give it only to whoever sets up the plugin.' }),
       h('label', { class: 'inv-sub', for: 'inv-mcp', text: 'MCP server URL' }),
       h('div', { class: 'inv-url-row' }, h('input', { id: 'inv-mcp', class: 'inv-url mono', readonly: true, value: d.mcpURL, spellcheck: 'false', onfocus: e => e.target.select() }), urlBtn),
       h('ol', { class: 'inv-steps' }, steps),
-      h('p', { class: 'inv-note', text: DOT_NOTE }),
+      panel.note ? h('p', { class: 'inv-note', text: panel.note }) : null,
       h('p', { class: 'inv-meta mono', text: 'ChatGPT dot · peer ' + d.peerId }),
-      h('div', { class: 'inv-acts' }, h('button', { type: 'button', class: 'btn', text: 'Done', onclick: () => close() })));
-    if (!slot.querySelector('.inv-code-val')) urlBtn.focus();
-    else urlBtn.focus();
+      h('div', { class: 'inv-acts' }, h('button', { type: 'button', class: 'btn', text: 'Done', onclick: () => close() })),
+    ].filter(Boolean));
+    urlBtn.focus();
   }
 
   function fillCode(slot, link, peerId, refocus) {
     const copy = copier('Copy code', link.code);
+    const expiry = link.expires_at
+      ? [' · expires ', h('time', { datetime: link.expires_at, title: link.expires_at, text: when(link.expires_at) })]
+      : link.lifetime
+        ? [' · expires in ', h('time', { text: link.lifetime })]
+        : null;
     const row = h('p', { class: 'inv-meta mono' }, 'single use',
-      link.expires_at ? [' · expires ', h('time', { datetime: link.expires_at, title: link.expires_at, text: when(link.expires_at) })] : null,
+      expiry,
       ' · ',
       h('button', { type: 'button', class: 'inv-link', text: 'New code', onclick: () => guardedLink(slot, peerId) }));
     slot.replaceChildren(h('div', { class: 'inv-code-row' },
@@ -505,6 +656,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     open = null;
     life += 1;
     ac.abort();
+    statusAbort.abort();
     cancelBearer();
     clearSecrets();
     if (dialog.open) dialog.close();

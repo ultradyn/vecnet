@@ -61,16 +61,35 @@ export function dotLink(res, origin) {
   return { peerId: res.peer_id, name: res.name, mcpURL: String(res.hub_url || origin).replace(/\/+$/, '') + '/mcp' };
 }
 
-// DOT_STEPS are the numbered steps: plain strings, and {b} for a word to find
-// on screen. The link code goes in after step CODE_STEP.
-export const DOT_STEPS = [
-  ['In ChatGPT, open ', { b: 'Plugins' }, ', choose ', { b: '+' }, ', then ', { b: 'Add custom MCP server' }, '.'],
-  ['Paste the MCP server URL, choose ', { b: 'OAuth' }, ', and create it as a plugin.'],
-  ['When the vecnet consent page asks for a link code, enter this one:'],
-  ['Open the vecnet plugin page and click into its card; Rescan if vecnet.message is missing. In the dot, create a task with trigger ', { b: 'vecnet' }, ', event ', { b: 'vecnet.message' }, ' and no settings. Under Advanced, set Runs in: ', { b: 'Same chat for every run' }, '. Call vecnet_guide for the recommended task instruction to paste. One trigger block covers the whole inbox; several blocks are ORed.'],
-];
-export const CODE_STEP = 2;
-export const DOT_NOTE = 'Existing chats keep the tool list they started with: after adding or changing the plugin, start a new chat or rescan the plugin.';
+// LINK_CODE_LIFETIME is the hub's dot-link TTL (PROTOCOL §4.5, §20.1): ten
+// minutes. The first code from onboarding often has no expires_at; the panel
+// says so instead of minting a second code to learn the timestamp.
+export const LINK_CODE_LIFETIME = '10 minutes';
+
+// firstLinkExpiry prefers a safe expires_at on the submit result. It never
+// reads the code itself and never asks the hub for another one.
+export function firstLinkExpiry(res) {
+  const raw = res && typeof res.expires_at === 'string' ? res.expires_at.trim() : '';
+  if (raw) return { expires_at: raw };
+  return { lifetime: LINK_CODE_LIFETIME };
+}
+
+// dotInstructions derives the setup steps from the hub prompt. The last line
+// is the note when the prompt has more than one line; the code sits on the
+// line that asks for it. There is no second copy of the wording here.
+export function dotInstructions(template) {
+  const lines = String(template || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  if (!lines.length) return { steps: [], note: '', codeStep: 0 };
+  let note = '';
+  let steps = lines;
+  if (lines.length >= 2) {
+    note = lines[lines.length - 1];
+    steps = lines.slice(0, -1);
+  }
+  let codeStep = steps.findIndex(s => /link code/i.test(s));
+  if (codeStep < 0) codeStep = Math.max(0, Math.min(2, steps.length - 1));
+  return { steps, note, codeStep };
+}
 
 // Field types and submit actions this page can render. Anything else stays
 // on screen as unsupported; it is not dropped and it is not guessed.

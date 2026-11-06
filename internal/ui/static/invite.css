@@ -38,7 +38,8 @@ dialog.inv::backdrop{background:#05070dcc}
 .inv-derived{margin:4px 0 0;font-size:12px;color:var(--muted)}
 .inv-bearer{margin:12px 0 0;padding:10px 12px;border:1px solid #f8717166;border-radius:8px;background:#f8717114}
 .inv-bearer p{margin:0 0 8px;color:var(--text);font-size:13px;line-height:1.45}
-.inv-retry{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}
+.inv-retry{display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:8px;flex-wrap:wrap}
+.inv-req{flex:1 0 100%;margin:0;font-size:12px;color:var(--dim)}
 .inv :focus-visible{outline:2px solid var(--violet);outline-offset:2px}
 .inv-form input[type=password]{font-family:var(--mono)}
 @media (max-width: 560px){
