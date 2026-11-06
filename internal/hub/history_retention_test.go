@@ -176,7 +176,7 @@ func TestHistoryRetentionDefaultForeverAndConfirmedNightlyLocator(t *testing.T) 
 	if s.Tombstones != 1 {
 		t.Fatalf("locator growth=%d want 1", s.Tombstones)
 	}
-	next := historySend(t, restored, as, "retained", first.ThreadID, b)
+	next := historySend(t, restored, restored.OperatorSecret, "retained", first.ThreadID, b)
 	page := historyMessages(t, restored, first.ThreadID, first.MessageID)
 	if len(page) != 1 || page[0].MessageID != next.MessageID {
 		t.Fatal("purged locator failed to return retained suffix")
@@ -356,7 +356,8 @@ func TestHistoryFromJoinAfterPurgedSuffix(t *testing.T) {
 	historyNight(t, e)
 	historySweep(t, e)
 	historySweep(t, e)
-	m := historySend(t, e, as, "join", old.ThreadID, c)
+	// The original loop expired during retention; the operator revives it.
+	m := historySend(t, e, e.OperatorSecret, "join", old.ThreadID, c)
 	page, _, err := e.Hub.ThreadMessages(context.Background(), auth.Caller{Kind: "peer", PeerID: c}, old.ThreadID, old.MessageID, 50)
 	if err != nil || len(page) != 1 || page[0].MessageID != m.MessageID {
 		t.Fatalf("from_join suffix count=%d err=%v", len(page), err)

@@ -325,6 +325,15 @@ func (h *Hub) PruneHistorySlice(ctx context.Context) (HistoryRetentionStatus, er
 			if _, err := tx.ExecContext(ctx, `DELETE FROM blob_refs WHERE msg_id=?`, id); err != nil {
 				return err
 			}
+			// Body retention must not reset loop control. Keep only the newest
+			// erased non-reaction parent's compact loop block; an older body
+			// swept later cannot replace it. Reactions never become parents.
+			if _, err := tx.ExecContext(ctx, `INSERT INTO thread_history_loop_parents(thr_id,msg_id,seq,loop)
+    SELECT thr_id,msg_id,seq,json_extract(body,'$.loop') FROM messages WHERE msg_id=? AND kind!='reaction'
+    ON CONFLICT(thr_id) DO UPDATE SET msg_id=excluded.msg_id,seq=excluded.seq,loop=excluded.loop
+    WHERE excluded.seq>thread_history_loop_parents.seq`, id); err != nil {
+				return err
+			}
 			if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE msg_id=?`, id); err != nil {
 				return err
 			}

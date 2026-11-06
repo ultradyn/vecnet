@@ -72,7 +72,8 @@ func TestHistoryRetentionMatrixFilesAndLocator(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	retained := threadSend(t, e, as, m.ThreadID, []string{b}, nil)
+	// History GC preserves the expired loop; only the operator revives it.
+	retained := threadSend(t, e, e.OperatorSecret, m.ThreadID, []string{b}, nil)
 	matrix, err = reader.Matrix(ctx, m.ThreadID, m.MessageID, 50)
 	if err != nil || len(matrix.Rows) != 1 || matrix.Rows[0].MessageID != retained.MessageID || matrix.NextAfter != nil {
 		t.Fatal("matrix locator pagination changed response")
