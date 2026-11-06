@@ -1229,7 +1229,16 @@ Depth exists to stop unsupervised bot-to-bot loops. A reply sent by a peer of ki
 
 ### 16.2 Per-peer rate limits [A2, extends §2.2, §6 and §12]
 
-The hub MUST enforce per-peer limits on `POST /v1/messages` and the MCP send tools: default **60 sends per minute** and **20 new threads per hour** per peer (a principal's peers are limited individually). Exceeding either returns **429 `rate_limited`** with `Retry-After`. Limits are operator-adjustable per peer (`vecnet peer limits <peer> --sends-per-min N --threads-per-hour N`), and every rejection is an audit entry and a dashboard counter like a loop cut. Inbound webhook sources have their own per-source limit with the same defaults.
+The hub MUST enforce per-peer limits on `POST /v1/messages` and the MCP send tools: default **60 sends per minute** and **20 new threads per hour** per peer (a principal's peers are limited individually). Exceeding either returns **429 `rate_limited`** with `Retry-After` and `details` `{limit, max, retry_after_seconds}`. Limits are operator-adjustable per peer (`vecnet peer limits <peer> --sends-per-min N --threads-per-hour N`), and every rejection is an audit entry and a dashboard counter like a loop cut. Inbound webhook sources have their own per-source limit with the same defaults and the same error shape.
+
+`message` repeats the tripped limit, so a caller that only reads the text can tell the two caps apart. Its form is `{scope} rate limit exceeded: {limit} {max} ({window}); retry in {when}`:
+
+- `scope` is `per-peer` or `per-source`.
+- `limit` is `sends_per_min` or `threads_per_hour`, the same string as `details.limit`. `max` is that peer or source's cap (`details.max`).
+- `window` is `sends in the last minute` or `new threads in the last hour`.
+- `when` renders `details.retry_after_seconds`: whole seconds under a minute (`41s`), whole minutes rounded up below an hour (`41m`; 61 seconds is `2m`), and hours with leftover minutes rounded up from an hour (`1h`, `1h5m`). The hint is never a shorter wait than `retry_after_seconds`.
+
+A peer that has opened its hourly thread cap therefore reads `per-peer rate limit exceeded: threads_per_hour 2 (new threads in the last hour); retry in 41m`. A `threads_per_hour` refusal refuses only a new thread; a reply in an existing thread still counts against `sends_per_min` only. The CLI prints `rate_limited: ` plus that `message`. An MCP send tool returns the same string as its text content (what the model sees) and the `message` alone in the structured error. `details` is unchanged.
 
 ### 16.3 History access and participant locking [A3, supersedes §2.2 step 3, §7 and §11 in part]
 
