@@ -142,10 +142,13 @@ export function mount(root, ctx) {
       if (!el.isConnected || !el.id.startsWith('m-')) continue;
       const root = e.rootBounds, view = root ? root.height : innerHeight;
       const middle = root ? (root.top + root.bottom) / 2 : innerHeight / 2;
+      const rootTop = root ? root.top : 0;
       reader.view(el.id.slice(2), {
         intersecting: e.isIntersecting,
         enough: e.isIntersecting && enough(e.intersectionRatio, e.intersectionRect.height, view),
         above: e.boundingClientRect.bottom <= middle,
+        // The top has left the root, so only a tail can still be in view.
+        pastTop: e.boundingClientRect.top < rootTop - 0.5,
       });
     }
   }

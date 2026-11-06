@@ -77,7 +77,10 @@ try {
     assert(await unreadIn() === TEXTS.length - READ, 'the fixture is not six unread');
 
     const row = page.locator(`#threads a[href="#thread/${thread}"]`);
-    const pill = async () => (await row.locator('.ur').count()) ? (await row.locator('.ur').textContent()) : '';
+    // One non-waiting read. count() then textContent() races the pill being
+    // removed: textContent waits out the locator timeout on a detached node
+    // and throws, so the poll never sees the empty count.
+    const pill = async () => (await row.locator('.ur').allTextContents())[0] ?? '';
     const pillIs = async (want, why) => {
       const deadline = Date.now() + 30000;
       for (let got = await pill(); got !== want; got = await pill()) {
