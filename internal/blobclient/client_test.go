@@ -348,7 +348,9 @@ func TestR2DownloadRejectsUntrustedGrant(t *testing.T) {
 				g.ExpiresAt = f.now.Format(time.RFC3339)
 				want = "blob_capability_expired"
 			case "too-long":
-				g.ExpiresAt = f.now.Add(601 * time.Second).Format(time.RFC3339)
+				// Past the small clock-skew budget. A client one second behind a
+				// legal 600s grant is covered by TestR2MaxTTLSurvivesClientClockLag.
+				g.ExpiresAt = f.now.Add(603 * time.Second).Format(time.RFC3339)
 				want = "blob_capability_expired"
 			case "unverified":
 				no := false
@@ -395,6 +397,39 @@ func TestR2DownloadRejectsUntrustedGrant(t *testing.T) {
 		})
 	}
 }
+func TestR2MaxTTLSurvivesClientClockLag(t *testing.T) {
+	issued := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	lag := time.Second
+	t.Run("upload", func(t *testing.T) {
+		f := newFixture(t)
+		f.now = issued
+		f.client.Now = func() time.Time { return issued.Add(-lag) }
+		ref, err := f.client.Upload(context.Background(), strings.NewReader("abc"), 3, "text/plain", "idem")
+		if err != nil || ref.BlobID != testID || f.puts != 1 || f.completes != 1 {
+			t.Fatalf("1s-behind client abandoned a 5-minute grant: err=%v puts=%d completes=%d", err, f.puts, f.completes)
+		}
+	})
+	t.Run("download", func(t *testing.T) {
+		f := newFixture(t)
+		f.now = issued
+		f.client.Now = func() time.Time { return issued.Add(-lag) }
+		b, g, err := f.client.Download(context.Background(), abcSHA, testID, 3)
+		if err != nil || string(b) != "abc" || g.URL == "" || f.gets != 1 || f.mints != 1 {
+			t.Fatalf("1s-behind client refused a 10-minute grant: err=%v gets=%d mints=%d", err, f.gets, f.mints)
+		}
+	})
+	t.Run("upload-beyond-budget", func(t *testing.T) {
+		f := newFixture(t)
+		f.now = issued
+		f.client.Now = func() time.Time { return issued.Add(-3 * time.Second) }
+		_, err := f.client.Upload(context.Background(), strings.NewReader("abc"), 3, "text/plain", "idem")
+		var e *Error
+		if !errors.As(err, &e) || e.Code != "blob_capability_expired" || f.puts != 0 || f.completes != 0 {
+			t.Fatalf("grant more than 2s past the PUT cap was used: err=%v puts=%d completes=%d", err, f.puts, f.completes)
+		}
+	})
+}
+
 func TestR2DownloadExpiredCapabilityRefreshIsBounded(t *testing.T) {
 	f := newFixture(t)
 	f.getStatus = 403
