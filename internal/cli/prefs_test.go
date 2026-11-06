@@ -760,6 +760,28 @@ func TestPrefsInteractiveConfirmShowsPreview(t *testing.T) {
 	values := prefsReadValues()
 	values["retention.history"] = prefs.Effective{Value: prefs.Duration(604800), Source: prefs.SourceStored}
 
+	// beforePrompt is every impact and quota figure the operator must see,
+	// plus the risk lines that name what they are approving. runPrefsTTY
+	// writes the reply only after each of these precedes the prompt in the
+	// one terminal stream.
+	beforePrompt := []string{
+		"risk retention_apply_existing:",
+		"Apply this bounded policy",
+		"keys: retention.history",
+		"confirm: retention_apply_existing",
+		"cutoff_at: 2026-11-05T12:00:00.000Z",
+		"high_water: 90",
+		"not_before: 2026-11-06T02:00:00.000Z",
+		"eligible: 4",
+		"pinned: 1",
+		"estimated_bytes: 2048",
+		"retained_bytes: 100",
+		"reserved_bytes: 20",
+		"used_bytes: 120",
+		"limit_bytes: 5000",
+	}
+	const prompt = "type retention_apply_existing to confirm"
+
 	t.Run("accepts the phrase after the preview", func(t *testing.T) {
 		s := newPrefsScript(t, "vn_operator_prefs")
 		s.preview = prefsFullPreview(t, []prefs.Risk{risk}, impact)
@@ -767,15 +789,18 @@ func TestPrefsInteractiveConfirmShowsPreview(t *testing.T) {
 		s.snap = prefsSnapshot(t, prefsReadValues())
 		srv := startPrefs(t, s)
 		u := prefsUser(t, prefsProfile("p", srv.URL, "vn_operator_prefs"))
-		code, out, errs := runPrefsTTY(t, s, u, "retention_apply_existing\n", "--net", "p", "prefs", "set", "retention.history", "7d", "--apply-existing")
+		code, out, errs := runPrefsTTY(t, s, u, "retention_apply_existing\n", beforePrompt, prompt, "--net", "p", "prefs", "set", "retention.history", "7d", "--apply-existing")
 		if code != 0 {
 			t.Fatalf("accept: exit %d\n%s\n%s", code, out, errs)
 		}
 		assertNoToken(t, out, errs)
-		for _, want := range []string{"cutoff_at:", "not_before:", "retained_bytes: 100", "limit_bytes: 5000", "keys: retention.history", "type retention_apply_existing to confirm"} {
-			if !strings.Contains(out+errs, want) {
-				t.Errorf("terminal flow missing %q\nstdout %s\nstderr %s", want, out, errs)
+		for _, want := range beforePrompt {
+			if !strings.Contains(out, want) {
+				t.Errorf("terminal flow missing %q\n%s", want, out)
 			}
+		}
+		if !strings.Contains(out, prompt) {
+			t.Errorf("terminal flow missing %q\n%s", prompt, out)
 		}
 		var patch prefs.Patch
 		if err := json.Unmarshal(s.lastPatch(), &patch); err != nil {
@@ -790,13 +815,15 @@ func TestPrefsInteractiveConfirmShowsPreview(t *testing.T) {
 		s.preview = prefsFullPreview(t, []prefs.Risk{risk}, impact)
 		srv := startPrefs(t, s)
 		u := prefsUser(t, prefsProfile("p", srv.URL, "vn_operator_prefs"))
-		code, out, errs := runPrefsTTY(t, s, u, "no\n", "--net", "p", "prefs", "set", "retention.history", "7d", "--apply-existing")
-		if code != 1 || !strings.Contains(errs, "confirmation refused") {
+		code, out, errs := runPrefsTTY(t, s, u, "no\n", beforePrompt, prompt, "--net", "p", "prefs", "set", "retention.history", "7d", "--apply-existing")
+		if code != 1 || !strings.Contains(out, "confirmation refused") {
 			t.Fatalf("refuse: exit %d\n%s\n%s", code, out, errs)
 		}
 		assertNoToken(t, out, errs)
-		if !strings.Contains(out, "not_before:") || !strings.Contains(out, "limit_bytes: 5000") {
-			t.Fatalf("refused before showing impact\n%s", out)
+		for _, want := range beforePrompt {
+			if !strings.Contains(out, want) {
+				t.Errorf("refused transcript missing %q\n%s", want, out)
+			}
 		}
 		if _, p, w := s.counts(); p != 1 || w != 0 {
 			t.Fatalf("refused phrase wrote: preview %d patch %d", p, w)
@@ -804,13 +831,21 @@ func TestPrefsInteractiveConfirmShowsPreview(t *testing.T) {
 	})
 }
 
-// runPrefsTTY runs prefs with stdin and stdout attached to a terminal and
-// answers the confirmation prompt with reply. It fails if a PATCH lands
-// before the prompt is visible, or if the prompt appears before the impact.
-func runPrefsTTY(t *testing.T, s *prefsScript, u *user, reply string, args ...string) (int, string, string) {
+// runPrefsTTY runs prefs with stdin, stdout, and stderr attached to one
+// pseudoterminal and answers the confirmation prompt with reply.
+//
+// Preview lines and the prompt are writes to that single slave, in program
+// order. The master is read into one buffer. A snapshot that contains prompt
+// therefore already contains every byte written before it; the reply is not
+// written until each beforePrompt entry starts earlier in that snapshot than
+// prompt. There is no second stderr buffer that can show the prompt while the
+// preview is still sitting in the terminal queue. The poll only waits until
+// that snapshot exists. If the prompt is present and a required field is not
+// already before it, the test fails immediately.
+func runPrefsTTY(t *testing.T, s *prefsScript, u *user, reply string, beforePrompt []string, prompt string, args ...string) (int, string, string) {
 	t.Helper()
 	master, stdin, stdout := prefsPTY(t)
-	var out safeBuf
+	var term safeBuf
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
@@ -818,26 +853,29 @@ func runPrefsTTY(t *testing.T, s *prefsScript, u *user, reply string, args ...st
 		for {
 			n, err := master.Read(buf)
 			if n > 0 {
-				_, _ = out.Write(buf[:n])
+				_, _ = term.Write(buf[:n])
 			}
 			if err != nil {
 				return
 			}
 		}
 	}()
-	var errs safeBuf
 	codeCh := make(chan int, 1)
 	go func() {
-		codeCh <- cli.Run(args, stdin, stdout, &errs, u.getenv)
+		// Same slave for stdout and stderr: one ordered terminal stream.
+		codeCh <- cli.Run(args, stdin, stdout, stdout, u.getenv)
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		seenImpact := strings.Contains(out.String(), "not_before:")
-		seenPrompt := strings.Contains(errs.String(), "type ") && strings.Contains(errs.String(), "to confirm")
-		if seenPrompt && !seenImpact {
-			t.Fatalf("confirmation prompt before the preview\nstdout %s\nstderr %s", out.String(), errs.String())
-		}
-		if seenPrompt && seenImpact {
+		seen := term.String()
+		promptAt := strings.Index(seen, prompt)
+		if promptAt >= 0 {
+			for _, want := range beforePrompt {
+				at := strings.Index(seen, want)
+				if at < 0 || at >= promptAt {
+					t.Fatalf("confirmation prompt before %q\n%s", want, seen)
+				}
+			}
 			if _, _, w := s.counts(); w != 0 {
 				t.Fatal("patched before confirmation")
 			}
@@ -845,11 +883,11 @@ func runPrefsTTY(t *testing.T, s *prefsScript, u *user, reply string, args ...st
 		}
 		select {
 		case code := <-codeCh:
-			t.Fatalf("exited %d before confirmation\nstdout %s\nstderr %s", code, out.String(), errs.String())
+			t.Fatalf("exited %d before confirmation\n%s", code, seen)
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for the preview\nstdout %s\nstderr %s", out.String(), errs.String())
+			t.Fatalf("timed out waiting for the preview\n%s", seen)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -862,11 +900,19 @@ func runPrefsTTY(t *testing.T, s *prefsScript, u *user, reply string, args ...st
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out after the confirmation phrase")
 	}
+	// Drop the slave so the master read returns the bytes already written,
+	// including the line printed as the command exits.
 	_ = stdin.Close()
 	_ = stdout.Close()
+	select {
+	case <-readDone:
+	case <-time.After(5 * time.Second):
+		_ = master.Close()
+		<-readDone
+		t.Fatal("timed out draining the terminal")
+	}
 	_ = master.Close()
-	<-readDone
-	return code, out.String(), errs.String()
+	return code, term.String(), ""
 }
 
 type safeBuf struct {
