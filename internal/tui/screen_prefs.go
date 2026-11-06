@@ -15,7 +15,8 @@ import (
 // prefsScreen is the read-only preferences view opened with :prefs.
 // It loads and refreshes through GET and has no write key.
 type prefsScreen struct {
-	sel int
+	sel    int
+	offset int // first visible list line; kept so resize and j/k stay put
 }
 
 func (s *prefsScreen) Title() string { return "prefs" }
@@ -59,20 +60,50 @@ func (s *prefsScreen) View(m *Model, w, h int) string {
 	case len(prefRows(m.Data.Prefs)) == 0:
 		body = styleMuted.Render("no preferences")
 	default:
-		body = s.list(m, w-2)
+		body = s.list(m, w-2, h-2)
 	}
 	return Pane("preferences", w, h, true, body)
 }
 
-func (s *prefsScreen) list(m *Model, width int) string {
+func (s *prefsScreen) list(m *Model, width, height int) string {
 	rows := prefRows(m.Data.Prefs)
-	if s.sel >= len(rows) {
+	if s.sel >= len(rows) || s.sel < 0 {
 		s.sel = 0
+		s.offset = 0
 	}
-	if s.sel < 0 {
-		s.sel = 0
+	if height < 1 || len(rows) == 0 {
+		return ""
 	}
-	lines := make([]string, 0, len(rows)+8)
+	listLines := s.prefListLines(rows)
+	help := s.helpLines(rows, width)
+	lines := make([]string, 0, height)
+	need := len(listLines) + 1 + len(help)
+	if need <= height {
+		lines = append(lines, listLines...)
+		lines = append(lines, "")
+		lines = append(lines, help...)
+	} else {
+		listN, helpN := prefsPaneBudget(height, len(help))
+		selLine := 0
+		if s.sel < len(rows) {
+			selLine = s.rowLine(rows, s.sel)
+		}
+		s.offset = prefsScroll(s.offset, selLine, listN, len(listLines))
+		end := min(s.offset+listN, len(listLines))
+		lines = append(lines, listLines[s.offset:end]...)
+		if helpN > 0 {
+			lines = append(lines, "")
+			lines = append(lines, help[:helpN]...)
+		}
+	}
+	for i, line := range lines {
+		lines[i] = fit(line, width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (s *prefsScreen) prefListLines(rows []prefs.Descriptor) []string {
+	lines := make([]string, 0, len(rows)+4)
 	last := ""
 	for i, d := range rows {
 		if d.Group != last {
@@ -86,12 +117,72 @@ func (s *prefsScreen) list(m *Model, width int) string {
 		line := fmt.Sprintf("%s%-32s %-8s %-8s %s", marker, d.Key, formatTUIPref(d), d.Source, prefLiveLabel(d))
 		lines = append(lines, styleText.Render(line))
 	}
-	lines = append(lines, "")
-	lines = append(lines, s.helpLines(rows, width)...)
-	for i, line := range lines {
-		lines[i] = fit(line, width)
+	return lines
+}
+
+func (s *prefsScreen) rowLine(rows []prefs.Descriptor, sel int) int {
+	line := 0
+	last := ""
+	for i, d := range rows {
+		if d.Group != last {
+			last = d.Group
+			line++
+		}
+		if i == sel {
+			return line
+		}
+		line++
 	}
-	return strings.Join(lines, "\n")
+	return 0
+}
+
+// prefsPaneBudget splits the pane between the grouped list and the selected
+// row's help, keeping at least one list line when there is any height.
+func prefsPaneBudget(height, helpLines int) (listN, helpN int) {
+	const sep = 1
+	if height <= 1 {
+		return height, 0
+	}
+	helpN = helpLines
+	if helpN+sep >= height {
+		helpN = height - sep - 1
+	}
+	listN = height - sep - helpN
+	if listN < 1 {
+		listN = 1
+		helpN = height - sep - listN
+	}
+	if helpN < 0 {
+		helpN = 0
+	}
+	return listN, helpN
+}
+
+// prefsScroll moves the list window so the selected line stays visible.
+func prefsScroll(offset, selLine, window, total int) int {
+	if window < 1 {
+		return 0
+	}
+	maxOff := max(total-window, 0)
+	if offset > maxOff {
+		offset = maxOff
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if selLine < offset {
+		offset = selLine
+	}
+	if selLine >= offset+window {
+		offset = selLine - window + 1
+	}
+	if offset < 0 {
+		return 0
+	}
+	if offset > maxOff {
+		return maxOff
+	}
+	return offset
 }
 
 func (s *prefsScreen) helpLines(rows []prefs.Descriptor, width int) []string {
@@ -109,7 +200,7 @@ func (s *prefsScreen) helpLines(rows []prefs.Descriptor, width int) []string {
 			lines = append(lines, styleMuted.Render(line))
 		}
 	}
-	if r := prefRangeText(d); r != "" {
+	if r := Clean(prefRangeText(d)); r != "" {
 		lines = append(lines, styleMuted.Render(r))
 	}
 	source := "source " + string(d.Source)
@@ -205,14 +296,18 @@ func formatTUIDuration(sec int64) string {
 
 func prefRangeText(d prefs.Descriptor) string {
 	if len(d.AllowedValues) > 0 {
-		return strings.Join(d.AllowedValues, "|")
+		parts := make([]string, len(d.AllowedValues))
+		for i, v := range d.AllowedValues {
+			parts[i] = Clean(v)
+		}
+		return strings.Join(parts, "|")
 	}
 	if d.Min == nil || d.Max == nil {
 		return ""
 	}
 	text := fmt.Sprintf("%d..%d", *d.Min, *d.Max)
-	if d.Unit != "" {
-		text += " " + d.Unit
+	if unit := Clean(d.Unit); unit != "" {
+		text += " " + unit
 	}
 	return text
 }

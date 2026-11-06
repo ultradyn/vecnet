@@ -173,12 +173,18 @@ type app struct {
 	inHook        bool   // hooks never TOFU or rewrite trust state
 	stdinConsumed bool   // a retry cannot consume stdin again
 	inMCP         bool   // stdio relay startup refusals must make no requests
+	prefsCmd      bool   // preferences exit codes and JSON errors
 }
 
-// exit prints err and maps it to an exit code.
+// exit prints err and maps it to an exit code. Preferences commands use the
+// preferences contract (usage 2, validation/conflict/refusal 1); every other
+// command keeps the mapping below.
 func (a *app) exit(err error) int {
 	if err == nil {
 		return exitOK
+	}
+	if a.prefsCmd {
+		return a.exitPrefs(err)
 	}
 	var ue *usageError
 	var he *hubError

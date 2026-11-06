@@ -18,7 +18,12 @@ import (
 
 const prefsUsage = "usage: vecnet prefs list | prefs get KEY | prefs set KEY VALUE [--preview] [--apply-existing] [--confirm-risk CODE]… | prefs set --reset KEY"
 
+// prefsConfirmRefused is the stable JSON code for a local risk refusal.
+// The hub's own confirmation codes are passed through unchanged.
+const prefsConfirmRefused = "prefs_confirmation_refused"
+
 func (a *app) cmdPrefs(args []string) error {
+	a.prefsCmd = true
 	if len(args) == 0 {
 		return usageErr(prefsUsage)
 	}
@@ -159,13 +164,18 @@ func (a *app) prefsSet(args []string) error {
 	if o.has("preview") {
 		return a.printPreview(preview)
 	}
+	// An unnamed risk is part of the hub's signed set. Dropping it and then
+	// accepting the token would approve more than the operator named.
+	if err := a.refuseUnusableRisks(preview.Risks); err != nil {
+		return err
+	}
 	codes := riskCodes(preview.Risks)
 	if len(codes) > 0 {
-		if err := a.authorizeRisks(o.all("confirm-risk"), codes); err != nil {
+		if err := a.authorizeRisks(o.all("confirm-risk"), codes, preview); err != nil {
 			return err
 		}
 		if preview.ConfirmToken == "" {
-			return &refusedError{msg: "prefs: preview did not include a confirmation; no change was written"}
+			return &refusedError{code: prefsConfirmRefused, msg: "prefs: preview did not include a confirmation; no change was written", details: map[string]any{"constraint": "confirm_token"}}
 		}
 		patch.Confirm = []string{preview.ConfirmToken}
 	}
@@ -256,7 +266,6 @@ func (c *client) prefsCall(ctx context.Context, method, path, ifMatch string, bo
 }
 
 func (a *app) printPreview(preview prefs.Preview) error {
-	codes := riskCodes(preview.Risks)
 	view := struct {
 		BaseRevision uint64       `json:"base_revision"`
 		Risks        []prefs.Risk `json:"risks"`
@@ -269,32 +278,71 @@ func (a *app) printPreview(preview prefs.Preview) error {
 	if a.json {
 		return a.emitValue(view)
 	}
-	fmt.Fprintf(a.stdout, "revision: %d\n", preview.BaseRevision)
-	if len(codes) == 0 {
-		fmt.Fprintln(a.stdout, "confirm: none")
-	}
-	for _, risk := range preview.Risks {
-		fmt.Fprintf(a.stdout, "risk %s: %s\n", risk.Code, prefText(risk.Message))
-	}
-	if len(codes) > 0 {
-		fmt.Fprintf(a.stdout, "confirm: %s\n", strings.Join(codes, " "))
-	}
-	if preview.Impact.Eligible != nil {
-		fmt.Fprintf(a.stdout, "eligible: %d\n", *preview.Impact.Eligible)
-	}
-	if preview.Impact.Pinned != nil {
-		fmt.Fprintf(a.stdout, "pinned: %d\n", *preview.Impact.Pinned)
-	}
-	if preview.Impact.EstimatedBytes != nil {
-		fmt.Fprintf(a.stdout, "estimated_bytes: %d\n", *preview.Impact.EstimatedBytes)
-	}
+	a.writePreviewText(preview)
 	return nil
 }
 
+// writePreviewText is the token-free human preview used by --preview and by
+// the interactive confirmation prompt. It shows every safe impact figure the
+// hub signed so the operator can see it before approving.
+func (a *app) writePreviewText(preview prefs.Preview) {
+	fmt.Fprintf(a.stdout, "revision: %d\n", preview.BaseRevision)
+	if len(preview.Risks) == 0 {
+		fmt.Fprintln(a.stdout, "confirm: none")
+	}
+	for _, risk := range preview.Risks {
+		code := prefText(risk.Code)
+		msg := prefText(risk.Message)
+		if code == "" {
+			fmt.Fprintf(a.stdout, "risk: %s\n", msg)
+		} else {
+			fmt.Fprintf(a.stdout, "risk %s: %s\n", code, msg)
+		}
+		if len(risk.Keys) > 0 {
+			keys := make([]string, len(risk.Keys))
+			for i, key := range risk.Keys {
+				keys[i] = prefText(key)
+			}
+			fmt.Fprintf(a.stdout, "keys: %s\n", strings.Join(keys, " "))
+		}
+	}
+	if codes := riskCodes(preview.Risks); len(codes) > 0 {
+		fmt.Fprintf(a.stdout, "confirm: %s\n", strings.Join(codes, " "))
+	}
+	imp := preview.Impact
+	if imp.CutoffAt != "" {
+		fmt.Fprintf(a.stdout, "cutoff_at: %s\n", prefText(imp.CutoffAt))
+	}
+	if imp.HighWater != nil {
+		fmt.Fprintf(a.stdout, "high_water: %d\n", *imp.HighWater)
+	}
+	if imp.NotBefore != "" {
+		fmt.Fprintf(a.stdout, "not_before: %s\n", prefText(imp.NotBefore))
+	}
+	if imp.Eligible != nil {
+		fmt.Fprintf(a.stdout, "eligible: %d\n", *imp.Eligible)
+	}
+	if imp.Pinned != nil {
+		fmt.Fprintf(a.stdout, "pinned: %d\n", *imp.Pinned)
+	}
+	if imp.EstimatedBytes != nil {
+		fmt.Fprintf(a.stdout, "estimated_bytes: %d\n", *imp.EstimatedBytes)
+	}
+	if s := imp.Storage; s != nil {
+		fmt.Fprintf(a.stdout, "retained_bytes: %d\n", s.RetainedBytes)
+		fmt.Fprintf(a.stdout, "reserved_bytes: %d\n", s.ReservedBytes)
+		fmt.Fprintf(a.stdout, "used_bytes: %d\n", s.UsedBytes)
+		fmt.Fprintf(a.stdout, "limit_bytes: %d\n", s.LimitBytes)
+	}
+	if preview.ExpiresAt != "" {
+		fmt.Fprintf(a.stdout, "expires_at: %s\n", prefText(preview.ExpiresAt))
+	}
+}
+
 // authorizeRisks accepts a noninteractive --confirm-risk set that covers every
-// preview risk, or an exact phrase typed at a terminal. Anything else writes
-// nothing. The confirmation token is never printed.
-func (a *app) authorizeRisks(accepted, required []string) error {
+// preview risk, or an exact phrase typed at a terminal after the safe preview
+// is shown. Anything else writes nothing. The confirmation token is never printed.
+func (a *app) authorizeRisks(accepted, required []string, preview prefs.Preview) error {
 	named := make([]string, 0, len(accepted))
 	have := map[string]bool{}
 	for _, code := range accepted {
@@ -312,23 +360,145 @@ func (a *app) authorizeRisks(accepted, required []string) error {
 			}
 		}
 		if len(missing) > 0 {
-			return &refusedError{msg: "prefs: unexpected risk " + strings.Join(missing, ", ") + "; no change was written"}
+			return &refusedError{code: prefsConfirmRefused, msg: "prefs: unexpected risk " + strings.Join(missing, ", ") + "; no change was written", details: map[string]any{"missing": missing}}
 		}
 		return nil
 	}
 	phrase := strings.Join(required, " ")
-	if isTerminal(a.stdin) && isTerminal(a.stdout) {
-		fmt.Fprintf(a.stderr, "type %s to confirm\n", phrase)
-		line, err := bufio.NewReader(a.stdin).ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return err
-		}
-		if strings.TrimSpace(line) != phrase {
-			return &refusedError{msg: "prefs: confirmation refused; no change was written"}
-		}
-		return nil
+	refused := &refusedError{code: prefsConfirmRefused, msg: "prefs: confirmation required (" + phrase + "); re-run with --confirm-risk for each risk", details: map[string]any{"missing": append([]string{}, required...)}}
+	// JSON mode never prompts. A terminal operator sees the full preview first.
+	if a.json || !isTerminal(a.stdin) || !isTerminal(a.stdout) {
+		return refused
 	}
-	return &refusedError{msg: "prefs: confirmation required (" + phrase + "); re-run with --confirm-risk for each risk"}
+	if err := a.printPreview(preview); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.stderr, "type %s to confirm\n", phrase)
+	line, err := bufio.NewReader(a.stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if strings.TrimSpace(line) != phrase {
+		return &refusedError{code: prefsConfirmRefused, msg: "prefs: confirmation refused; no change was written", details: map[string]any{"constraint": "confirmation"}}
+	}
+	return nil
+}
+
+// refuseUnusableRisks rejects an empty or non-identifier risk code before any
+// PATCH. The hub token binds the whole risk set, so an unnamed entry cannot
+// be skipped just because --confirm-risk listed the others.
+func (a *app) refuseUnusableRisks(risks []prefs.Risk) error {
+	for _, risk := range risks {
+		if usableRiskCode(risk.Code) {
+			continue
+		}
+		return &refusedError{code: prefsConfirmRefused, msg: "prefs: preview included an unnamed risk; no change was written", details: map[string]any{"constraint": "risk_code"}}
+	}
+	return nil
+}
+
+func usableRiskCode(code string) bool {
+	if code == "" || len(code) > 64 {
+		return false
+	}
+	for i, r := range code {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case (r == '_' || r >= '0' && r <= '9') && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// exitPrefs maps a preferences failure onto the preferences contract:
+// usage exits 2, validation/conflict/refusal exit 1, and authentication and
+// transport keep the process-wide codes. JSON mode prints one error envelope
+// and never a confirmation token or raw hub body.
+func (a *app) exitPrefs(err error) int {
+	var ue *usageError
+	var he *hubError
+	var ne *netError
+	var re *refusedError
+	switch {
+	case errors.As(err, &ne):
+		a.reportPrefs("network", ne.Error(), nil, "", false)
+		return exitNetwork
+	case errors.As(err, &ue):
+		a.reportPrefs("usage", ue.msg, nil, "", false)
+		return 2
+	case errors.As(err, &re):
+		code := re.code
+		if code == "" {
+			code = prefsConfirmRefused
+		}
+		a.reportPrefs(code, re.msg, re.details, "", false)
+		return 1
+	case errors.As(err, &he):
+		a.reportPrefs(he.Code, he.Message, he.Details, he.Hint, true)
+		if prefsOperatorFault(he.Code) {
+			return 1
+		}
+		return exitHub
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		a.reportPrefs("interrupted", "interrupted", nil, "", false)
+		return exitUsage
+	default:
+		a.reportPrefs("error", err.Error(), nil, "", false)
+		return exitUsage
+	}
+}
+
+func prefsOperatorFault(code string) bool {
+	switch code {
+	case prefs.CodeInvalidValue, prefs.CodeUnknownKey, prefs.CodeRevisionConflict,
+		prefs.CodeConfirmationRequired, prefs.CodeConfirmationStale:
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *app) reportPrefs(code, message string, details map[string]any, hint string, hubFormat bool) {
+	message = prefText(message)
+	hint = prefText(hint)
+	details = safePrefsDetails(details)
+	if a.json {
+		_ = a.emitValue(map[string]any{
+			"error": map[string]any{
+				"code":    code,
+				"message": message,
+				"details": details,
+			},
+		})
+		return
+	}
+	if hubFormat {
+		fmt.Fprintf(a.stderr, "%s: %s\n", code, message)
+		if hint != "" {
+			fmt.Fprintln(a.stderr, hint)
+		}
+		return
+	}
+	fmt.Fprintf(a.stderr, "vecnet: %s\n", message)
+}
+
+func safePrefsDetails(in map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range in {
+		lk := strings.ToLower(k)
+		switch {
+		case strings.Contains(lk, "token"), strings.Contains(lk, "secret"), strings.Contains(lk, "authorization"), lk == "body", lk == "raw":
+			continue
+		}
+		if s, ok := v.(string); ok {
+			out[k] = prefText(s)
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func riskCodes(risks []prefs.Risk) []string {

@@ -247,11 +247,13 @@ func (m *Model) Toast(msg string, bad bool) {
 	m.toast = toast{text: Clean(msg), bad: bad, until: m.Now().Add(d)}
 }
 
-// OpenThread switches to the chat tab, sets m.CurrentThread and loads it.
+// OpenThread leaves any Preferences overlay, switches to the chat tab, sets
+// m.CurrentThread and loads it.
 func (m *Model) OpenThread(id string) tea.Cmd {
 	if id == "" {
 		return nil
 	}
+	m.prefsOn = false
 	m.Tab = tabChat
 	m.CurrentThread = id
 	if m.Data.Thread[id] == nil {

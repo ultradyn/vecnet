@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,7 +12,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"golang.org/x/sys/unix"
+
+	"github.com/XertroV/vecnet/internal/cli"
 	"github.com/XertroV/vecnet/internal/prefs"
 )
 
@@ -31,6 +36,7 @@ type prefsScript struct {
 	conflict       string // "patch" or "preview"
 	conflictLeft   int    // how many of those calls return 412
 	rejectTen      bool
+	fail           *prefsFail
 	mu             sync.Mutex
 	gets           int
 	previews       int
@@ -69,6 +75,9 @@ func (s *prefsScript) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/admin/prefs":
 		s.gets++
+		if s.failNow(w, "get") {
+			return
+		}
 		w.Header().Set("ETag", prefsETag)
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(s.snap)
@@ -76,9 +85,12 @@ func (s *prefsScript) serve(w http.ResponseWriter, r *http.Request) {
 		s.previews++
 		s.ifMatch = append(s.ifMatch, r.Header.Get("If-Match"))
 		s.previewBody = readBody(r)
+		if rejectApplyExisting(w, s.previewBody) || s.failNow(w, "preview") {
+			return
+		}
 		if s.conflict == "preview" && s.conflictLeft > 0 {
 			s.conflictLeft--
-			writePrefsErr(w, http.StatusPreconditionFailed, prefs.CodeRevisionConflict, "Preferences changed; reload and reconcile.")
+			writePrefsErr(w, http.StatusPreconditionFailed, prefs.CodeRevisionConflict, "Preferences changed; reload and reconcile.", nil)
 			return
 		}
 		w.Header().Set("ETag", prefsETag)
@@ -87,13 +99,16 @@ func (s *prefsScript) serve(w http.ResponseWriter, r *http.Request) {
 		s.patches++
 		s.ifMatch = append(s.ifMatch, r.Header.Get("If-Match"))
 		s.patchBody = readBody(r)
+		if rejectApplyExisting(w, s.patchBody) || s.failNow(w, "patch") {
+			return
+		}
 		if s.rejectTen && prefsPatchSets(s.patchBody, "events.refresh_interval", 120) {
-			writePrefsErr(w, http.StatusUnprocessableEntity, prefs.CodeInvalidValue, "Invalid preference value.")
+			writePrefsErr(w, http.StatusUnprocessableEntity, prefs.CodeInvalidValue, "Invalid preference value.", map[string]any{"field": "events.refresh_interval", "constraint": "range"})
 			return
 		}
 		if s.conflict == "patch" && s.conflictLeft > 0 {
 			s.conflictLeft--
-			writePrefsErr(w, http.StatusPreconditionFailed, prefs.CodeRevisionConflict, "Preferences changed; reload and reconcile.")
+			writePrefsErr(w, http.StatusPreconditionFailed, prefs.CodeRevisionConflict, "Preferences changed; reload and reconcile.", nil)
 			return
 		}
 		w.Header().Set("ETag", prefsETag2)
@@ -133,12 +148,65 @@ func readBody(r *http.Request) []byte {
 	return raw
 }
 
-func writePrefsErr(w http.ResponseWriter, status int, code, message string) {
+// prefsFail is one scripted hub error for get, preview, or patch.
+type prefsFail struct {
+	on      string
+	status  int
+	code    string
+	message string
+	details map[string]any
+}
+
+func (s *prefsScript) failNow(w http.ResponseWriter, on string) bool {
+	if s.fail == nil || s.fail.on != on {
+		return false
+	}
+	writePrefsErr(w, s.fail.status, s.fail.code, s.fail.message, s.fail.details)
+	return true
+}
+
+func writePrefsErr(w http.ResponseWriter, status int, code, message string, details map[string]any) {
+	if details == nil {
+		details = map[string]any{}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"error": map[string]any{"code": code, "message": message, "details": map[string]any{}},
+		"error": map[string]any{"code": code, "message": message, "details": details},
 	})
+}
+
+// rejectApplyExisting mimics the hub: retrospective apply is only valid for
+// retention.* keys, and a refusal writes nothing.
+func rejectApplyExisting(w http.ResponseWriter, raw []byte) bool {
+	var body struct {
+		Set           map[string]json.RawMessage `json:"set"`
+		Reset         []string                   `json:"reset"`
+		ApplyExisting bool                       `json:"apply_existing"`
+	}
+	if json.Unmarshal(raw, &body) != nil || !body.ApplyExisting {
+		return false
+	}
+	bad := ""
+	for _, key := range body.Reset {
+		if !strings.HasPrefix(key, "retention.") {
+			bad = key
+			break
+		}
+	}
+	if bad == "" {
+		for key := range body.Set {
+			if !strings.HasPrefix(key, "retention.") {
+				bad = key
+				break
+			}
+		}
+	}
+	if bad == "" {
+		return false
+	}
+	writePrefsErr(w, http.StatusUnprocessableEntity, prefs.CodeInvalidValue, "apply_existing is only supported for retention keys.", map[string]any{"field": bad, "constraint": "apply_existing"})
+	return true
 }
 
 func prefsPatchSets(raw []byte, key string, want int64) bool {
@@ -293,7 +361,7 @@ func TestPrefsProfileAndOperator(t *testing.T) {
 	peer := prefsUser(t, prefsProfile("p", a.URL, "vn_peer_not_operator"))
 	before, _, _ := operator.counts()
 	code, _, errs = peer.run("--net", "p", "prefs", "list")
-	if code != 1 || !strings.Contains(errs, "operator credential") {
+	if code != 2 || !strings.Contains(errs, "operator credential") {
 		t.Fatalf("peer: exit %d stderr %s", code, errs)
 	}
 	if g, p, w := operator.counts(); g != before || p != 0 || w != 0 {
@@ -400,15 +468,15 @@ func TestPrefsSetDurationResetAndExitCodes(t *testing.T) {
 		code int
 		text string
 	}{
-		{[]string{"prefs"}, 1, "usage"},
-		{[]string{"prefs", "set"}, 1, "usage"},
-		{[]string{"prefs", "set", "--reset", "events.refresh_interval", "30m"}, 1, ""},
-		{[]string{"prefs", "set", "events.refresh_interval", "1.5h"}, 1, "duration"},
-		{[]string{"prefs", "set", "events.refresh_interval", "999999999999999d"}, 1, "duration"},
-		{[]string{"prefs", "set", "agents.thread_budget", "10m"}, 1, ""},
-		{[]string{"prefs", "set", "not.a.key", "1"}, 1, ""},
-		{[]string{"prefs", "get"}, 1, ""},
-		{[]string{"--net", "p", "prefs", "set", "events.refresh_interval", "120"}, 2, "prefs_invalid_value"},
+		{[]string{"prefs"}, 2, "usage"},
+		{[]string{"prefs", "set"}, 2, "usage"},
+		{[]string{"prefs", "set", "--reset", "events.refresh_interval", "30m"}, 2, ""},
+		{[]string{"prefs", "set", "events.refresh_interval", "1.5h"}, 2, "duration"},
+		{[]string{"prefs", "set", "events.refresh_interval", "999999999999999d"}, 2, "duration"},
+		{[]string{"prefs", "set", "agents.thread_budget", "10m"}, 2, ""},
+		{[]string{"prefs", "set", "not.a.key", "1"}, 2, ""},
+		{[]string{"prefs", "get"}, 2, ""},
+		{[]string{"--net", "p", "prefs", "set", "events.refresh_interval", "120"}, 1, "prefs_invalid_value"},
 	}
 	for _, tc := range cases {
 		beforeG, beforeP, beforeW := s.counts()
@@ -421,7 +489,7 @@ func TestPrefsSetDurationResetAndExitCodes(t *testing.T) {
 		}
 		g, p, w := s.counts()
 		switch {
-		case tc.code == 1 && (g != beforeG || p != beforeP || w != beforeW):
+		case tc.code == 2 && (g != beforeG || p != beforeP || w != beforeW):
 			t.Errorf("%v: usage contacted the hub (%d/%d/%d -> %d/%d/%d)", tc.args, beforeG, beforeP, beforeW, g, p, w)
 		case tc.args[len(tc.args)-1] == "120" && (w != beforeW+1 || g != beforeG+1):
 			t.Errorf("%v: validation counts %d/%d/%d -> %d/%d/%d", tc.args, beforeG, beforeP, beforeW, g, p, w)
@@ -441,7 +509,7 @@ func TestPrefsConflictDoesNotRetry(t *testing.T) {
 	srv := startPrefs(t, s)
 	u := prefsUser(t, prefsProfile("p", srv.URL, "vn_operator_prefs"))
 	code, out, errs := u.run("--net", "p", "prefs", "set", "events.refresh_interval", "30m")
-	if code != 2 || !strings.Contains(errs, "prefs_revision_conflict") {
+	if code != 1 || !strings.Contains(errs, "prefs_revision_conflict") {
 		t.Fatalf("conflict: exit %d\n%s\n%s", code, out, errs)
 	}
 	assertNoToken(t, out, errs)
@@ -451,7 +519,7 @@ func TestPrefsConflictDoesNotRetry(t *testing.T) {
 
 	s.conflict, s.conflictLeft = "preview", 1
 	code, out, errs = u.run("--net", "p", "prefs", "set", "events.refresh_interval", "30m")
-	if code != 2 || !strings.Contains(errs, "prefs_revision_conflict") {
+	if code != 1 || !strings.Contains(errs, "prefs_revision_conflict") {
 		t.Fatalf("preview conflict: exit %d\n%s\n%s", code, out, errs)
 	}
 	if _, p, w := s.counts(); p != 2 || w != 1 {
@@ -490,15 +558,18 @@ func TestPrefsJSONRedactsConfirmToken(t *testing.T) {
 
 func TestPrefsConfirmRiskAcceptsExactSet(t *testing.T) {
 	s := newPrefsScript(t, "vn_operator_prefs")
-	s.preview = prefsPreviewJSON(t, []prefs.Risk{prefsRisk("presence_shortened", "presence.default_ttl", "Shorter TTL may release held wakes.")})
+	s.preview = prefsFullPreview(t, []prefs.Risk{
+		prefsRisk("retention_shortened", "retention.ack_events", "New or shorter retention affects future rows; existing data needs separate approval."),
+		prefsRisk("retention_apply_existing", "retention.ack_events", "Apply this bounded policy to existing data at the next nightly sweep."),
+	}, retentionImpact())
 	values := prefsReadValues()
-	values["presence.default_ttl"] = prefs.Effective{Value: prefs.Duration(1800), Source: prefs.SourceStored}
+	values["retention.ack_events"] = prefs.Effective{Value: prefs.Duration(86400), Source: prefs.SourceStored}
 	s.after = prefsSnapshot(t, values)
 	srv := startPrefs(t, s)
 	u := prefsUser(t, prefsProfile("p", srv.URL, "vn_operator_prefs"))
 
-	code, out, errs := u.run("--net", "p", "prefs", "set", "presence.default_ttl", "30m", "--confirm-risk", "presence_shortened", "--apply-existing")
-	if code != 0 || !lineHas(out, "presence.default_ttl", "30m", "stored") {
+	code, out, errs := u.run("--net", "p", "prefs", "set", "retention.ack_events", "1d", "--confirm-risk", "retention_shortened", "--confirm-risk", "retention_apply_existing", "--apply-existing")
+	if code != 0 || !lineHas(out, "retention.ack_events", "1d", "stored") {
 		t.Fatalf("confirm: exit %d\n%s\n%s", code, out, errs)
 	}
 	assertNoToken(t, out, errs)
@@ -506,8 +577,8 @@ func TestPrefsConfirmRiskAcceptsExactSet(t *testing.T) {
 	if err := json.Unmarshal(s.lastPatch(), &patch); err != nil {
 		t.Fatal(err)
 	}
-	n, _ := patch.Set["presence.default_ttl"].Int64()
-	if n != 1800 || !patch.ApplyExisting || len(patch.Confirm) != 1 || patch.Confirm[0] != prefsToken {
+	n, _ := patch.Set["retention.ack_events"].Int64()
+	if n != 86400 || !patch.ApplyExisting || len(patch.Confirm) != 1 || patch.Confirm[0] != prefsToken {
 		t.Fatalf("confirmed patch = %+v", patch)
 	}
 	var proposed prefs.Patch
@@ -517,8 +588,18 @@ func TestPrefsConfirmRiskAcceptsExactSet(t *testing.T) {
 	if !proposed.ApplyExisting || len(proposed.Confirm) != 0 {
 		t.Fatalf("preview body = %+v", proposed)
 	}
-	if g, p, w := s.counts(); g != 1 || p != 1 || w != 1 {
+	g, p, w := s.counts()
+	if g != 1 || p != 1 || w != 1 {
 		t.Fatalf("counts = %d/%d/%d", g, p, w)
+	}
+
+	beforeP, beforeW := p, w
+	code, out, errs = u.run("--net", "p", "prefs", "set", "presence.default_ttl", "30m", "--apply-existing", "--confirm-risk", "presence_shortened")
+	if code != 1 || !strings.Contains(errs, "prefs_invalid_value") || !strings.Contains(errs, "apply_existing") {
+		t.Fatalf("non-retention apply_existing: exit %d\n%s\n%s", code, out, errs)
+	}
+	if _, p, w = s.counts(); p != beforeP+1 || w != beforeW {
+		t.Fatalf("rejected apply_existing still patched: preview %d patch %d", p, w)
 	}
 }
 
@@ -532,8 +613,10 @@ func TestPrefsUnexpectedRiskRefuses(t *testing.T) {
 	u := prefsUser(t, prefsProfile("p", srv.URL, "vn_operator_prefs"))
 
 	code, out, errs := u.run("--net", "p", "--json", "prefs", "set", "presence.default_ttl", "30m", "--confirm-risk", "presence_shortened")
-	if code != 2 || !strings.Contains(errs, "archive_disabled") {
-		t.Fatalf("unexpected: exit %d\n%s\n%s", code, out, errs)
+	gotCode, message, details := decodePrefsErr(t, out)
+	missing, _ := details["missing"].([]any)
+	if code != 1 || gotCode != "prefs_confirmation_refused" || !strings.Contains(message, "archive_disabled") || !jsonListHas(missing, "archive_disabled") {
+		t.Fatalf("unexpected: exit %d code %s message %s details %#v\n%s\n%s", code, gotCode, message, details, out, errs)
 	}
 	assertNoToken(t, out, errs)
 	if _, p, w := s.counts(); p != 1 || w != 0 {
@@ -541,12 +624,405 @@ func TestPrefsUnexpectedRiskRefuses(t *testing.T) {
 	}
 
 	code, out, errs = u.run("--net", "p", "prefs", "set", "presence.default_ttl", "30m")
-	if code != 2 || !strings.Contains(errs, "presence_shortened") || !strings.Contains(errs, "archive_disabled") {
+	if code != 1 || !strings.Contains(errs, "presence_shortened") || !strings.Contains(errs, "archive_disabled") {
 		t.Fatalf("noninteractive: exit %d\n%s\n%s", code, out, errs)
 	}
 	assertNoToken(t, out, errs)
 	if _, p, w := s.counts(); p != 2 || w != 0 {
 		t.Fatalf("noninteractive wrote: preview %d patch %d", p, w)
+	}
+}
+
+func prefsFullPreview(t *testing.T, risks []prefs.Risk, impact prefs.Impact) []byte {
+	t.Helper()
+	body := prefs.Preview{
+		BaseRevision: 3,
+		Risks:        risks,
+		Impact:       impact,
+		ConfirmToken: prefsToken,
+		ExpiresAt:    "2026-11-06T00:05:00.000Z",
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func retentionImpact() prefs.Impact {
+	eligible, pinned, bytesN, high := int64(4), int64(1), int64(2048), int64(90)
+	return prefs.Impact{
+		CutoffAt:       "2026-11-05T12:00:00.000Z",
+		HighWater:      &high,
+		NotBefore:      "2026-11-06T02:00:00.000Z",
+		Eligible:       &eligible,
+		Pinned:         &pinned,
+		EstimatedBytes: &bytesN,
+		Storage:        &prefs.StorageUsage{RetainedBytes: 100, ReservedBytes: 20, UsedBytes: 120, LimitBytes: 5000},
+	}
+}
+
+func decodePrefsErr(t *testing.T, out string) (string, string, map[string]any) {
+	t.Helper()
+	var env struct {
+		Error struct {
+			Code    string         `json:"code"`
+			Message string         `json:"message"`
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("error json %q: %v", out, err)
+	}
+	if env.Error.Details == nil {
+		t.Fatalf("details encoded as null: %s", out)
+	}
+	if strings.Contains(out, prefsToken) || strings.Contains(out, "confirm_token") {
+		t.Fatalf("token in error json: %s", out)
+	}
+	return env.Error.Code, env.Error.Message, env.Error.Details
+}
+
+func jsonListHas(items []any, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func detailString(details map[string]any, key string) string {
+	s, _ := details[key].(string)
+	return s
+}
+
+func TestPrefsPreviewShowsImpact(t *testing.T) {
+	s := newPrefsScript(t, "vn_operator_prefs")
+	s.preview = prefsFullPreview(t, []prefs.Risk{
+		prefsRisk("retention_apply_existing", "retention.history", "Apply this bounded policy to existing data at the next nightly sweep."),
+	}, retentionImpact())
+	values := prefsReadValues()
+	values["retention.history"] = prefs.Effective{Value: prefs.Duration(604800), Source: prefs.SourceDefault}
+	s.snap = prefsSnapshot(t, values)
+	srv := startPrefs(t, s)
+	u := prefsUser(t, prefsProfile("p", srv.URL, "vn_operator_prefs"))
+
+	code, out, errs := u.run("--net", "p", "prefs", "set", "retention.history", "7d", "--preview", "--apply-existing")
+	if code != 0 {
+		t.Fatalf("preview: exit %d\n%s\n%s", code, out, errs)
+	}
+	assertNoToken(t, out, errs)
+	for _, want := range []string{
+		"risk retention_apply_existing:", "Apply this bounded policy", "keys: retention.history",
+		"confirm: retention_apply_existing", "cutoff_at: 2026-11-05T12:00:00.000Z", "high_water: 90",
+		"not_before: 2026-11-06T02:00:00.000Z", "eligible: 4", "pinned: 1", "estimated_bytes: 2048",
+		"retained_bytes: 100", "reserved_bytes: 20", "used_bytes: 120", "limit_bytes: 5000",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("human preview missing %q\n%s", want, out)
+		}
+	}
+	if _, p, w := s.counts(); p != 1 || w != 0 {
+		t.Fatalf("preview wrote: preview %d patch %d", p, w)
+	}
+
+	code, out, errs = u.run("--json", "--net", "p", "prefs", "set", "retention.history", "7d", "--preview", "--apply-existing")
+	if code != 0 {
+		t.Fatalf("json preview: exit %d\n%s\n%s", code, out, errs)
+	}
+	assertNoToken(t, out, errs)
+	var view struct {
+		Impact struct {
+			CutoffAt       string `json:"cutoff_at"`
+			HighWater      *int64 `json:"high_water"`
+			NotBefore      string `json:"not_before"`
+			Eligible       *int64 `json:"eligible"`
+			EstimatedBytes *int64 `json:"estimated_bytes"`
+			Storage        *struct {
+				RetainedBytes int64 `json:"retained_bytes"`
+				ReservedBytes int64 `json:"reserved_bytes"`
+				UsedBytes     int64 `json:"used_bytes"`
+				LimitBytes    int64 `json:"limit_bytes"`
+			} `json:"storage"`
+		} `json:"impact"`
+		ConfirmToken string `json:"confirm_token"`
+	}
+	if err := json.Unmarshal([]byte(out), &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.ConfirmToken != "" || view.Impact.CutoffAt == "" || view.Impact.HighWater == nil || *view.Impact.HighWater != 90 || view.Impact.NotBefore == "" || view.Impact.Storage == nil || view.Impact.Storage.LimitBytes != 5000 || view.Impact.Eligible == nil || view.Impact.EstimatedBytes == nil {
+		t.Fatalf("json preview impact = %s", out)
+	}
+}
+
+func TestPrefsInteractiveConfirmShowsPreview(t *testing.T) {
+	impact := retentionImpact()
+	risk := prefsRisk("retention_apply_existing", "retention.history", "Apply this bounded policy to existing data at the next nightly sweep.")
+	values := prefsReadValues()
+	values["retention.history"] = prefs.Effective{Value: prefs.Duration(604800), Source: prefs.SourceStored}
+
+	t.Run("accepts the phrase after the preview", func(t *testing.T) {
+		s := newPrefsScript(t, "vn_operator_prefs")
+		s.preview = prefsFullPreview(t, []prefs.Risk{risk}, impact)
+		s.after = prefsSnapshot(t, values)
+		s.snap = prefsSnapshot(t, prefsReadValues())
+		srv := startPrefs(t, s)
+		u := prefsUser(t, prefsProfile("p", srv.URL, "vn_operator_prefs"))
+		code, out, errs := runPrefsTTY(t, s, u, "retention_apply_existing\n", "--net", "p", "prefs", "set", "retention.history", "7d", "--apply-existing")
+		if code != 0 {
+			t.Fatalf("accept: exit %d\n%s\n%s", code, out, errs)
+		}
+		assertNoToken(t, out, errs)
+		for _, want := range []string{"cutoff_at:", "not_before:", "retained_bytes: 100", "limit_bytes: 5000", "keys: retention.history", "type retention_apply_existing to confirm"} {
+			if !strings.Contains(out+errs, want) {
+				t.Errorf("terminal flow missing %q\nstdout %s\nstderr %s", want, out, errs)
+			}
+		}
+		var patch prefs.Patch
+		if err := json.Unmarshal(s.lastPatch(), &patch); err != nil {
+			t.Fatal(err)
+		}
+		if !patch.ApplyExisting || len(patch.Confirm) != 1 || patch.Confirm[0] != prefsToken {
+			t.Fatalf("patch = %+v", patch)
+		}
+	})
+	t.Run("a wrong phrase writes nothing", func(t *testing.T) {
+		s := newPrefsScript(t, "vn_operator_prefs")
+		s.preview = prefsFullPreview(t, []prefs.Risk{risk}, impact)
+		srv := startPrefs(t, s)
+		u := prefsUser(t, prefsProfile("p", srv.URL, "vn_operator_prefs"))
+		code, out, errs := runPrefsTTY(t, s, u, "no\n", "--net", "p", "prefs", "set", "retention.history", "7d", "--apply-existing")
+		if code != 1 || !strings.Contains(errs, "confirmation refused") {
+			t.Fatalf("refuse: exit %d\n%s\n%s", code, out, errs)
+		}
+		assertNoToken(t, out, errs)
+		if !strings.Contains(out, "not_before:") || !strings.Contains(out, "limit_bytes: 5000") {
+			t.Fatalf("refused before showing impact\n%s", out)
+		}
+		if _, p, w := s.counts(); p != 1 || w != 0 {
+			t.Fatalf("refused phrase wrote: preview %d patch %d", p, w)
+		}
+	})
+}
+
+// runPrefsTTY runs prefs with stdin and stdout attached to a terminal and
+// answers the confirmation prompt with reply. It fails if a PATCH lands
+// before the prompt is visible, or if the prompt appears before the impact.
+func runPrefsTTY(t *testing.T, s *prefsScript, u *user, reply string, args ...string) (int, string, string) {
+	t.Helper()
+	master, stdin, stdout := prefsPTY(t)
+	var out safeBuf
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		buf := make([]byte, 256)
+		for {
+			n, err := master.Read(buf)
+			if n > 0 {
+				_, _ = out.Write(buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	var errs safeBuf
+	codeCh := make(chan int, 1)
+	go func() {
+		codeCh <- cli.Run(args, stdin, stdout, &errs, u.getenv)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		seenImpact := strings.Contains(out.String(), "not_before:")
+		seenPrompt := strings.Contains(errs.String(), "type ") && strings.Contains(errs.String(), "to confirm")
+		if seenPrompt && !seenImpact {
+			t.Fatalf("confirmation prompt before the preview\nstdout %s\nstderr %s", out.String(), errs.String())
+		}
+		if seenPrompt && seenImpact {
+			if _, _, w := s.counts(); w != 0 {
+				t.Fatal("patched before confirmation")
+			}
+			break
+		}
+		select {
+		case code := <-codeCh:
+			t.Fatalf("exited %d before confirmation\nstdout %s\nstderr %s", code, out.String(), errs.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the preview\nstdout %s\nstderr %s", out.String(), errs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := master.Write([]byte(reply)); err != nil {
+		t.Fatal(err)
+	}
+	var code int
+	select {
+	case code = <-codeCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out after the confirmation phrase")
+	}
+	_ = stdin.Close()
+	_ = stdout.Close()
+	_ = master.Close()
+	<-readDone
+	return code, out.String(), errs.String()
+}
+
+func prefsPTY(t *testing.T) (master, stdin, stdout *os.File) {
+	t.Helper()
+	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { master.Close() })
+	if err := unix.IoctlSetPointerInt(int(master.Fd()), unix.TIOCSPTLCK, 0); err != nil {
+		t.Fatal(err)
+	}
+	n, err := unix.IoctlGetInt(int(master.Fd()), unix.TIOCGPTN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slave, err := os.OpenFile("/dev/pts/"+strconv.Itoa(n), os.O_RDWR|unix.O_NOCTTY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { slave.Close() })
+	dup, err := unix.Dup(int(slave.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout = os.NewFile(uintptr(dup), slave.Name())
+	t.Cleanup(func() { stdout.Close() })
+	return master, slave, stdout
+}
+
+type safeBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *safeBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *safeBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func TestPrefsUnnamedRiskRefuses(t *testing.T) {
+	s := newPrefsScript(t, "vn_operator_prefs")
+	s.preview = prefsPreviewJSON(t, []prefs.Risk{{Code: "", Keys: []string{"presence.default_ttl"}, Message: "wipe\x1b[2J"}})
+	srv := startPrefs(t, s)
+	u := prefsUser(t, prefsProfile("p", srv.URL, "vn_operator_prefs"))
+
+	code, out, errs := u.run("--json", "--net", "p", "prefs", "set", "presence.default_ttl", "30m")
+	got, message, details := decodePrefsErr(t, out)
+	if code != 1 || got != "prefs_confirmation_refused" || !strings.Contains(message, "unnamed") || detailString(details, "constraint") != "risk_code" {
+		t.Fatalf("sole unnamed: exit %d code %s message %s details %#v\n%s", code, got, message, details, errs)
+	}
+	if strings.Contains(out+errs, "\x1b") {
+		t.Fatalf("hostile unnamed risk reached the terminal\n%s%s", out, errs)
+	}
+	if _, p, w := s.counts(); p != 1 || w != 0 {
+		t.Fatalf("sole unnamed wrote: preview %d patch %d", p, w)
+	}
+
+	s.preview = prefsPreviewJSON(t, []prefs.Risk{
+		prefsRisk("presence_shortened", "presence.default_ttl", "Shorter TTL may release held wakes."),
+		{Code: "\x1b[31mbad", Keys: []string{"presence.default_ttl"}, Message: "hidden"},
+	})
+	code, out, errs = u.run("--json", "--net", "p", "prefs", "set", "presence.default_ttl", "30m", "--confirm-risk", "presence_shortened")
+	got, message, details = decodePrefsErr(t, out)
+	if code != 1 || got != "prefs_confirmation_refused" || detailString(details, "constraint") != "risk_code" || strings.Contains(message, "presence_shortened") {
+		t.Fatalf("mixed unnamed: exit %d code %s message %s details %#v", code, got, message, details)
+	}
+	if strings.Contains(out+errs, "\x1b") {
+		t.Fatalf("hostile mixed risk reached the terminal\n%s%s", out, errs)
+	}
+	if _, p, w := s.counts(); p != 2 || w != 0 {
+		t.Fatalf("mixed unnamed wrote: preview %d patch %d", p, w)
+	}
+}
+
+func TestPrefsJSONStructuredErrors(t *testing.T) {
+	s := newPrefsScript(t, "vn_operator_prefs")
+	srv := startPrefs(t, s)
+	u := prefsUser(t, prefsProfile("p", srv.URL, "vn_operator_prefs"))
+
+	check := func(t *testing.T, exit int, out, errs, wantCode, detailKey, detailVal string) {
+		t.Helper()
+		got, _, details := decodePrefsErr(t, out)
+		if got != wantCode || detailString(details, detailKey) != detailVal {
+			t.Fatalf("code %s details %#v\nstderr %s", got, details, errs)
+		}
+		assertNoToken(t, out, errs)
+	}
+
+	s.rejectTen = true
+	code, out, errs := u.run("--json", "--net", "p", "prefs", "set", "events.refresh_interval", "120")
+	if code != 1 {
+		t.Fatalf("validation exit %d\n%s\n%s", code, out, errs)
+	}
+	check(t, code, out, errs, prefs.CodeInvalidValue, "constraint", "range")
+	s.rejectTen = false
+
+	s.conflict, s.conflictLeft = "patch", 1
+	code, out, errs = u.run("--json", "--net", "p", "prefs", "set", "events.refresh_interval", "30m")
+	if code != 1 {
+		t.Fatalf("conflict exit %d\n%s\n%s", code, out, errs)
+	}
+	check(t, code, out, errs, prefs.CodeRevisionConflict, "code", "")
+	if !strings.Contains(out, "prefs_revision_conflict") {
+		t.Fatalf("conflict body %s", out)
+	}
+	s.conflict, s.conflictLeft = "", 0
+
+	s.fail = &prefsFail{on: "preview", status: http.StatusConflict, code: prefs.CodeUnavailable, message: "adapter missing", details: map[string]any{"field": "retention.ack_events"}}
+	code, out, errs = u.run("--json", "--net", "p", "prefs", "set", "retention.ack_events", "1d")
+	if code != 2 {
+		t.Fatalf("unavailable exit %d\n%s\n%s", code, out, errs)
+	}
+	check(t, code, out, errs, prefs.CodeUnavailable, "field", "retention.ack_events")
+
+	s.fail = &prefsFail{on: "preview", status: http.StatusConflict, code: prefs.CodePolicyLocked, message: "hosted policy", details: map[string]any{"field": "blobs.expiry", "constraint": "policy"}}
+	code, out, errs = u.run("--json", "--net", "p", "prefs", "set", "blobs.expiry", "off")
+	if code != 2 {
+		t.Fatalf("policy lock exit %d\n%s\n%s", code, out, errs)
+	}
+	check(t, code, out, errs, prefs.CodePolicyLocked, "constraint", "policy")
+
+	s.fail = &prefsFail{on: "patch", status: http.StatusConflict, code: prefs.CodeConfirmationStale, message: "preview again", details: map[string]any{"constraint": "confirm"}}
+	s.preview = prefsPreviewJSON(t, []prefs.Risk{prefsRisk("presence_shortened", "presence.default_ttl", "Shorter TTL may release held wakes.")})
+	code, out, errs = u.run("--json", "--net", "p", "prefs", "set", "presence.default_ttl", "30m", "--confirm-risk", "presence_shortened")
+	if code != 1 {
+		t.Fatalf("stale exit %d\n%s\n%s", code, out, errs)
+	}
+	check(t, code, out, errs, prefs.CodeConfirmationStale, "constraint", "confirm")
+	if _, _, w := s.counts(); w == 0 {
+		t.Fatal("stale confirmation never reached PATCH")
+	}
+
+	s.fail = &prefsFail{on: "get", status: http.StatusUnauthorized, code: "unauthorized", message: "no"}
+	code, out, errs = u.run("--json", "--net", "p", "prefs", "list")
+	if code != 2 {
+		t.Fatalf("auth exit %d\n%s\n%s", code, out, errs)
+	}
+	check(t, code, out, errs, "unauthorized", "code", "")
+
+	code, out, errs = u.run("--json", "prefs", "set")
+	if code != 2 {
+		t.Fatalf("usage exit %d\n%s\n%s", code, out, errs)
+	}
+	got, _, details := decodePrefsErr(t, out)
+	if got != "usage" || details == nil {
+		t.Fatalf("usage json %s", out)
 	}
 }
 

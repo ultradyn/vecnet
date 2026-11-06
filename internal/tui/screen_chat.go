@@ -356,10 +356,11 @@ func (s *chatScreen) track(m *Model) {
 	}
 }
 
-// sync opens the first thread and marks the shown thread read, once the tab is
-// on screen.
+// sync opens the first thread and marks the shown thread read, once this
+// screen is the one on display. A Preferences overlay keeps the chat tab
+// selected underneath, so the tab number alone is not visibility.
 func (s *chatScreen) sync(m *Model) tea.Cmd {
-	if m.Tab != tabChat || m.Help || m.stopped() {
+	if m.active() != s || m.Help || m.stopped() {
 		return nil
 	}
 	if rows := m.Data.Threads.Threads; m.CurrentThread == "" && len(rows) > 0 {
@@ -1157,6 +1158,9 @@ func (s *chatScreen) reopenMsg(m *Model) {
 // showMsgErr moves the toast to the composer row, because an open command line
 // covers the toast. Only the chat tab shows that row; :msg lands there anyway.
 func (s *chatScreen) showMsgErr(m *Model) {
+	// The composer row that carries the failure is on Chat. Leave Preferences
+	// so that navigation is actually visible.
+	m.prefsOn = false
 	m.Tab, s.msgErr, s.overlay = tabChat, m.toast.text, chatNoOverlay
 }
 

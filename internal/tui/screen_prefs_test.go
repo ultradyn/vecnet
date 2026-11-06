@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
 	"github.com/XertroV/vecnet/internal/prefs"
 )
@@ -174,20 +175,221 @@ func TestPrefsHostileText(t *testing.T) {
 		d.Label = "Events \x1b[31mPWN\x1b[0m"
 		d.Description = "cadence \u202ehidden \x1b]52;c;aGk=\x07ok"
 		d.UnavailableReason = "locked \x1b[2J"
+		d.Unit = "sec\x1b]52;c;SECRET\x07onds"
 	})
 	m, _ := prefsOpen(t, f)
 	raw := m.View().Content
-	for _, bad := range []string{"\u202e", "\x1b[31m", "\x1b]52", "aGk=", "\x1b[2J"} {
+	for _, bad := range []string{"\u202e", "\x1b[31m", "\x1b]52", "aGk=", "\x1b[2J", "SECRET"} {
 		if strings.Contains(raw, bad) {
 			t.Fatalf("hostile sequence %q reached the terminal", bad)
 		}
 	}
 	frame := prefsGolden(t, m, "hostile")
-	for _, want := range []string{"PWN", "hidden", "ok", "locked"} {
+	for _, want := range []string{"PWN", "hidden", "ok", "locked", "seconds"} {
 		if !strings.Contains(frame, want) {
 			t.Errorf("cleaned frame lacks %q\n%s", want, frame)
 		}
 	}
+}
+
+func TestPrefsHostileRangeMetadata(t *testing.T) {
+	f := seeded()
+	f.prefs = prefsSnap(t, map[string]prefs.Effective{
+		"events.refresh_interval": {Value: prefs.Duration(1800), Source: prefs.SourceFlag, Origin: "VECNET_EVENTS_REFRESH_INTERVAL"},
+		"blobs.expiry":            {Value: prefs.Enum("1d"), Source: prefs.SourceDefault},
+	}, func(d *prefs.Definition) {
+		switch d.Key {
+		case "events.refresh_interval":
+			d.Unit = "sec\x1b]52;c;SECRET\x07onds\u202e"
+		case "blobs.expiry":
+			d.AllowedValues = append(d.AllowedValues, "\x1b]52;c;SECRET\x07off\u202e")
+		}
+	})
+	m, p := prefsOpen(t, f)
+	rawAllowed := m.View().Content
+	p.press("j")
+	rawUnit := m.View().Content
+	for _, raw := range []string{rawAllowed, rawUnit} {
+		for _, bad := range []string{"\u202e", "\x1b]52", "SECRET"} {
+			if strings.Contains(raw, bad) {
+				t.Fatalf("hostile range text %q reached the terminal", bad)
+			}
+		}
+	}
+	unit := plainAt(t, m, 80, 24)
+	if !strings.Contains(unit, "seconds") {
+		t.Fatalf("cleaned unit missing\n%s", unit)
+	}
+	p.press("k")
+	allowed := plainAt(t, m, 80, 24)
+	for _, want := range []string{"1h", "30d", "off"} {
+		if !strings.Contains(allowed, want) {
+			t.Errorf("allowed value %q missing\n%s", want, allowed)
+		}
+	}
+}
+
+func TestPrefsScrollsFullRegistry(t *testing.T) {
+	t.Run("80x24", func(t *testing.T) { assertPrefsLastRow(t, false) })
+	t.Run("banner", func(t *testing.T) { assertPrefsLastRow(t, true) })
+}
+
+func assertPrefsLastRow(t *testing.T, banner bool) {
+	t.Helper()
+	f := seeded()
+	if banner {
+		f.setNotices(movingNotice())
+	}
+	f.prefs = prefsRegistrySnapshot(t)
+	m, p := prefsOpen(t, f)
+	rows := prefRows(m.Data.Prefs)
+	if len(rows) != 21 {
+		t.Fatalf("registry rows = %d", len(rows))
+	}
+	for i := 0; i < len(rows); i++ {
+		frame := plainAt(t, m, 80, 24)
+		assertFrame(t, frame, 80, 24)
+		assertPrefRowVisible(t, frame, rows[i])
+		if i+1 < len(rows) {
+			p.press("j")
+		}
+	}
+	frame := plainAt(t, m, 80, 24)
+	if banner {
+		if line := strings.Split(frame, "\n")[1]; !strings.HasPrefix(line, "! ") {
+			t.Fatalf("banner missing: %q", line)
+		}
+	}
+	if strings.Contains(frame, "retention.ack_events") {
+		t.Fatalf("list did not scroll the first row off 80x24\n%s", frame)
+	}
+	p.press("k")
+	frame = plainAt(t, m, 80, 24)
+	assertPrefRowVisible(t, frame, rows[len(rows)-2])
+	wide := plainAt(t, m, 120, 40)
+	assertPrefRowVisible(t, wide, rows[len(rows)-2])
+	if !strings.Contains(wide, "retention.ack_events") {
+		t.Fatalf("taller frame still scrolled the first row away\n%s", wide)
+	}
+	back := plainAt(t, m, 80, 24)
+	assertPrefRowVisible(t, back, rows[len(rows)-2])
+}
+
+func assertPrefRowVisible(t *testing.T, frame string, d prefs.Descriptor) {
+	t.Helper()
+	line := ""
+	for _, row := range strings.Split(frame, "\n") {
+		if strings.Contains(row, "> "+d.Key) {
+			line = row
+			break
+		}
+	}
+	if line == "" || !strings.Contains(line, formatTUIPref(d)) || !strings.Contains(line, string(d.Source)) || !strings.Contains(line, prefLiveLabel(d)) {
+		t.Fatalf("selected %s line %q\n%s", d.Key, line, frame)
+	}
+	if !strings.Contains(frame, d.Label) {
+		t.Fatalf("help label for %s missing\n%s", d.Key, frame)
+	}
+	if d.Description != "" {
+		part := d.Description
+		if len(part) > 40 {
+			part = part[:40]
+		}
+		if !strings.Contains(frame, part) {
+			t.Fatalf("help for %s missing %q\n%s", d.Key, part, frame)
+		}
+	}
+	if text := prefRangeText(d); text != "" && !strings.Contains(frame, text) {
+		t.Fatalf("range %q for %s missing\n%s", text, d.Key, frame)
+	}
+}
+
+func prefsRegistrySnapshot(t *testing.T) prefs.Snapshot {
+	t.Helper()
+	defs := prefs.Definitions()
+	values := make(map[string]prefs.Effective, len(defs))
+	for _, d := range defs {
+		values[d.Key] = prefs.Effective{Value: d.Default, Source: prefs.SourceDefault}
+	}
+	snap, err := prefs.NewSnapshot(3, `"prefs-3-abc"`, defs, values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snap
+}
+
+func TestPrefsFromChatDoesNotMarkRead(t *testing.T) {
+	a, m, p := chatOpen(t)
+	p.until("initial read", func() bool { return len(a.reads()) >= 1 && chatOf(m).readTo[chatHark] != "" })
+	p.idle()
+	before := len(a.reads())
+	submit(p, "prefs")
+	p.until("prefs", func() bool { return m.prefsOn && (m.Data.PrefsKnown || m.Data.Errs["prefs"] != nil) })
+	p.idle()
+	if got := len(a.reads()); got != before {
+		t.Fatalf("opening prefs marked read: %d -> %d", before, got)
+	}
+	a.add(chatHark, chatMsg("msg_prefs_hidden", chatCodex, "wake", chatAt(7, 42), "Hidden while preferences is open."))
+	p.press("r")
+	p.idle()
+	p.press("ctrl+l")
+	p.until("the hidden message", func() bool {
+		st := m.Data.Thread[chatHark]
+		return st != nil && len(st.Messages) > 0 && st.Messages[len(st.Messages)-1].MessageID == "msg_prefs_hidden"
+	})
+	if id := chatHark; chatOf(m).readAsk[id] == "msg_prefs_hidden" || chatOf(m).readTo[id] == "msg_prefs_hidden" || len(a.reads()) != before {
+		t.Fatalf("ctrl+l marked a hidden chat read: asks %q to %q reads %d", chatOf(m).readAsk[id], chatOf(m).readTo[id], len(a.reads()))
+	}
+	p.press("r")
+	p.idle()
+	p.send(chatTickMsg{})
+	p.idle()
+	if id := chatHark; chatOf(m).readAsk[id] == "msg_prefs_hidden" || chatOf(m).readTo[id] == "msg_prefs_hidden" || len(a.reads()) != before {
+		t.Fatalf("refresh or tick marked a hidden chat read: asks %q to %q reads %d", chatOf(m).readAsk[id], chatOf(m).readTo[id], len(a.reads()))
+	}
+}
+
+func TestPrefsCommandsOpenTheThreadScreen(t *testing.T) {
+	t.Run("thread", func(t *testing.T) {
+		_, m, p := chatOpen(t)
+		submit(p, "prefs")
+		p.until("prefs", func() bool { return m.prefsOn })
+		p.idle()
+		if m.active().Title() != "prefs" || !strings.Contains(plainAt(t, m, 80, 24), "┌─ preferences") {
+			t.Fatalf("visible %s", m.active().Title())
+		}
+		submit(p, "thread 2")
+		p.idle()
+		frame := plainAt(t, m, 140, 42)
+		if m.active().Title() != "chat" || strings.Contains(frame, "┌─ preferences") || !strings.Contains(frame, "Ticket 18") {
+			t.Fatalf("thread left visible %s prefs %v\n%s", m.active().Title(), m.prefsOn, frame)
+		}
+	})
+	t.Run("msg", func(t *testing.T) {
+		a, m, p := chatOpen(t)
+		a.sendBack = opapi.SendResult{MessageID: "msg_x", ThreadID: chatOther}
+		submit(p, "prefs")
+		p.until("prefs", func() bool { return m.prefsOn })
+		p.idle()
+		submit(p, "msg claw hello from prefs")
+		p.until("opened", func() bool { return m.CurrentThread == chatOther && m.active().Title() == "chat" })
+		frame := plainAt(t, m, 140, 42)
+		if strings.Contains(frame, "┌─ preferences") || !strings.Contains(frame, "Ticket 18") {
+			t.Fatalf("msg left preferences up:\n%s", frame)
+		}
+	})
+	t.Run("msg error", func(t *testing.T) {
+		_, m, p := chatOpen(t)
+		submit(p, "prefs")
+		p.until("prefs", func() bool { return m.prefsOn })
+		p.idle()
+		submit(p, "msg zzz hello")
+		p.until("reason", func() bool { return m.Mode == ModeCommand && strings.Contains(m.Input, "msg zzz") })
+		frame := plainAt(t, m, 140, 42)
+		if m.active().Title() != "chat" || strings.Contains(frame, "┌─ preferences") || !strings.Contains(frame, "no peer matches zzz") {
+			t.Fatalf("error navigation stayed on preferences:\n%s", frame)
+		}
+	})
 }
 
 func TestPrefsNavigationIsReadOnly(t *testing.T) {
