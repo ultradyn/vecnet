@@ -22,6 +22,16 @@ export function eligible(peers, me) {
     .sort((a, b) => String(a.name).localeCompare(String(b.name), 'en', { sensitivity: 'base' }) || (a.peer_id < b.peer_id ? -1 : 1));
 }
 
+// draftOf is a draft another screen hands the composer (the peer view's
+// message actions): its recipients that are ids, once each, and its priority
+// when the form offers it, else wake. null when no recipient is left.
+export function draftOf(v) {
+  if (!v || typeof v !== 'object') return null;
+  const recipients = [...new Set((Array.isArray(v.recipients) ? v.recipients : []).filter(r => typeof r === 'string' && ID.test(r)))];
+  if (!recipients.length) return null;
+  return { recipients, priority: PRIORITIES.includes(v.priority) ? v.priority : 'wake' };
+}
+
 // matches is the picker's search: by display name only, since a name is for
 // finding a peer and its id is what gets sent (PROTOCOL §14.4).
 export function matches(peer, query) {
