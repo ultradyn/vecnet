@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-06: MCP paging descriptions distinguish message IDs, inbox/ack event cursors and opaque thread-list cursors (internal/mcpserver/descriptions.go).
 - 2026-11-06: MCP discovery advertises the existing inbox/thread/threads page limits and blob byte limits without changing validation or clamping (internal/mcpserver).
 - 2026-11-06: MCP discovery descriptions use plain sentences with explicit priority, retry, identity, ack and paging guidance within a 19,500-byte catalog cap (internal/mcpserver).
 - 2026-11-06: MCP discovery uses a separate concise schema/wording projection with unchanged call validation; detailed limits move into vecnet_guide, with discovery-size and validation-equivalence guards (internal/mcpserver).
