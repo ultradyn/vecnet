@@ -5,6 +5,7 @@ import { createApi } from '../static/api.js';
 import { invite, reinvite, slug } from '../static/invite-model.js';
 import { inviteCard, peerFacts } from '../static/peer-model.js';
 import { invitePanel } from '../static/invite.js';
+import { inviteSection } from '../static/peer.js';
 
 // The peer page's Invite card (#67): New invite hands the agent the very
 // paste block Add agent and `vecnet peer invite <peer>` do, pinned by the CLI
@@ -134,4 +135,118 @@ test('invite status, re-issue and revoke: one route each, the id escaped, no tok
   assert.equal(calls[2].init.body, undefined);
   assert.equal(calls[3].init.body, undefined);
   for (const c of calls) assert.equal(c.init.cache, 'no-store');
+});
+
+// A document rich enough for the Invite card's buttons (classList, hidden).
+class CardEl {
+  constructor(tag) {
+    this.tag = tag; this.attrs = {}; this.kids = []; this.className = ''; this.on = {};
+    this.hidden = false; this.disabled = false;
+    const el = this;
+    this.classList = {
+      add(...xs) {
+        const s = new Set(el.className.split(/\s+/).filter(Boolean));
+        for (const x of xs) s.add(x);
+        el.className = [...s].join(' ');
+      },
+      remove(...xs) {
+        const drop = new Set(xs);
+        el.className = el.className.split(/\s+/).filter(t => t && !drop.has(t)).join(' ');
+      },
+      contains(x) { return el.className.split(/\s+/).includes(x); },
+    };
+  }
+  set textContent(v) { this.kids = [String(v)]; }
+  get textContent() { return this.kids.map(k => typeof k === 'string' ? k : k.textContent).join(''); }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  addEventListener(type, fn) { this.on[type] = fn; }
+  focus() {}
+  append(...xs) {
+    for (const x of xs) {
+      if (x == null || x === false) continue;
+      if (typeof x !== 'string' && !(x instanceof CardEl)) throw new Error('append got ' + Object.prototype.toString.call(x));
+      this.kids.push(x);
+    }
+  }
+  replaceChildren(...xs) { this.kids = []; this.append(...xs); }
+}
+const walkCard = (el, out = []) => { if (el instanceof CardEl) { out.push(el); el.kids.forEach(k => walkCard(k, out)); } return out; };
+
+// Fixed sentences the card may show. Anything else from the hub — its
+// message, an unknown code, a credential — must not be rendered.
+const INVITE_KNOWN = {
+  already_enrolled: 'This peer has already enrolled.',
+  not_found: 'No peer with this id.',
+  forbidden: 'Only the operator can change an invite.',
+  rate_limited: 'Too many invite changes. Wait and try again.',
+};
+const INVITE_FALLBACK = {
+  reissue: 'Could not issue a new invite.',
+  revoke: 'Could not revoke the invite.',
+  status: 'Invite status unavailable.',
+};
+const HOSTILE = 'vn_enrol_HOSTILETOKEN vn_peer_HOSTILESECRET demo_failure: Demo failure <script>alert(1)</script>';
+const LEAKS = ['vn_enrol_HOSTILETOKEN', 'vn_peer_HOSTILESECRET', 'demo_failure', 'Demo failure', '<script>', 'alert(1)'];
+
+function hubErr(code) {
+  return Object.assign(new Error(HOSTILE), { status: 500, code, details: { leak: HOSTILE } });
+}
+
+test('invite reissue, revoke and status errors are fixed sentences and never show hub text', async () => {
+  const pending = { state: 'pending', canRevoke: true, expiresAt: '2026-11-08T00:00:00.000Z', revokedAt: null, disabled: false };
+  const loading = { state: 'loading', canRevoke: false, expiresAt: null, revokedAt: null, disabled: false };
+  const cases = [
+    ['reissue', HOSTILE, INVITE_FALLBACK.reissue],
+    ['reissue', hubErr('demo_failure'), INVITE_FALLBACK.reissue],
+    ['reissue', hubErr('vn_enrol_HOSTILETOKEN'), INVITE_FALLBACK.reissue],
+    ['reissue', hubErr('network'), INVITE_FALLBACK.reissue],
+    ['revoke', HOSTILE, INVITE_FALLBACK.revoke],
+    ['revoke', hubErr('demo_failure'), INVITE_FALLBACK.revoke],
+    ['revoke', hubErr('vn_peer_HOSTILESECRET'), INVITE_FALLBACK.revoke],
+    ['status', HOSTILE, INVITE_FALLBACK.status],
+    ['status', hubErr('demo_failure'), INVITE_FALLBACK.status],
+    ['status', hubErr('vn_enrol_HOSTILETOKEN'), INVITE_FALLBACK.status],
+    ['status', new Error(HOSTILE), INVITE_FALLBACK.status],
+  ];
+  for (const code of Object.keys(INVITE_KNOWN)) {
+    cases.push(['reissue', hubErr(code), INVITE_KNOWN[code]]);
+    cases.push(['revoke', hubErr(code), INVITE_KNOWN[code]]);
+    cases.push(['status', hubErr(code), INVITE_KNOWN[code]]);
+  }
+  const prev = globalThis.document;
+  globalThis.document = { createElement: tag => new CardEl(tag) };
+  try {
+    for (const [action, err, want] of cases) {
+      const sec = inviteSection({
+        api: {
+          reissueInvite: async () => { throw err; },
+          revokeInvite: async () => { throw err; },
+        },
+        id: 'peer_1', age: () => '1m ago', until: () => 'in 23h', time: () => '8 Nov 02:04 · in 23h',
+        reload() {}, set() {},
+      });
+      sec.draw(action === 'status' ? loading : pending, action === 'status' ? err : null);
+      if (action === 'reissue') {
+        const btn = walkCard(sec.el).find(e => e.tag === 'button' && e.textContent === 'New invite');
+        assert.ok(btn, 'New invite');
+        btn.on.click();
+        await new Promise(r => setTimeout(r, 0));
+      } else if (action === 'revoke') {
+        const arm = walkCard(sec.el).find(e => e.tag === 'button' && e.textContent === 'Revoke invite');
+        assert.ok(arm, 'Revoke invite');
+        arm.on.click();
+        const go = walkCard(sec.el).find(e => e.tag === 'button' && e.textContent === 'Confirm revoke');
+        assert.ok(go, 'Confirm revoke');
+        go.on.click();
+        await new Promise(r => setTimeout(r, 0));
+      }
+      const node = action === 'status'
+        ? walkCard(sec.el).find(e => e.className === 'bad')
+        : walkCard(sec.el).find(e => e.className === 'err');
+      assert.ok(node, action + ' rendered no error');
+      assert.equal(node.textContent, want, action);
+      const rendered = walkCard(sec.el).flatMap(e => [e.textContent, e.className, ...Object.values(e.attrs)]).join('\n');
+      for (const bit of LEAKS) assert.equal(rendered.includes(bit), false, action + ' shows ' + bit);
+    }
+  } finally { globalThis.document = prev; }
 });

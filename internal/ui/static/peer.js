@@ -34,7 +34,19 @@ function kv(rows) {
   return h('dl', { class: 'pv-kv' }, rows.filter(Boolean).flatMap(([k, v]) => [h('dt', { text: k }), h('dd', null, v)]));
 }
 const dash = v => (v === null || v === undefined || v === '' ? '—' : String(v));
-const apiErr = e => (e && e.code && e.code !== 'network' ? e.code + ': ' : '') + errText(e);
+// Invite-card errors are fixed sentences. The hub's message, an unknown
+// code and a stringified error stay off the page: a credential or a proxy
+// body in the reply must not render here. Only these codes have copy.
+const INVITE_CODE_ERR = {
+  already_enrolled: 'This peer has already enrolled.',
+  not_found: 'No peer with this id.',
+  forbidden: 'Only the operator can change an invite.',
+  rate_limited: 'Too many invite changes. Wait and try again.',
+};
+function inviteFail(fallback, e) {
+  const code = e && typeof e === 'object' && typeof e.code === 'string' ? e.code : '';
+  return Object.hasOwn(INVITE_CODE_ERR, code) ? INVITE_CODE_ERR[code] : fallback;
+}
 const plain = e => e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
 
 // messageActions draws peerActions (peer-model): the quick link, to the
@@ -130,7 +142,7 @@ export function inviteSection(o) {
     } catch (x) {
       if (gone) return;
       busy = '';
-      err.textContent = 'Could not issue a new invite: ' + apiErr(x);
+      err.textContent = inviteFail('Could not issue a new invite.', x);
       paint();
       o.reload();
     }
@@ -155,7 +167,7 @@ export function inviteSection(o) {
     } catch (x) {
       if (gone) return;
       busy = '';
-      err.textContent = 'Could not revoke the invite: ' + apiErr(x);
+      err.textContent = inviteFail('Could not revoke the invite.', x);
       paint();
       o.reload();
     }
@@ -176,7 +188,7 @@ export function inviteSection(o) {
     // The sentence, then when: "expires 8 Nov 02:04 · in 23h 59m".
     const at = (label, iso, rel) => (iso ? h('span', { class: 'pv-inv-when' }, label + ' ', o.time(iso, rel)) : null);
     if (st === 'loading') {
-      line.replaceChildren(statusErr ? h('span', { class: 'bad', text: 'Invite status unavailable: ' + errText(statusErr) }) : 'Checking this peer\'s invite…');
+      line.replaceChildren(statusErr ? h('span', { class: 'bad', text: inviteFail('Invite status unavailable.', statusErr) }) : 'Checking this peer\'s invite…');
     } else if (st === 'pending') {
       line.replaceChildren('Not enrolled yet. Its invite is waiting to be used. ', at('expires', card.expiresAt, o.until(card.expiresAt)));
     } else if (st === 'expired') {

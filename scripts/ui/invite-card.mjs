@@ -143,14 +143,16 @@ try {
       await gone();
       await snap('pvi-3-revoked');
 
-      // ---- A refused re-issue: its code and message, the card unchanged ----
+      // ---- A refused re-issue: a fixed sentence, never the hub's code or message ----
       const refuse = async r => r.request().method() === 'POST'
         ? r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { code: 'demo_failure', message: 'Demo failure', details: {} } }) })
         : r.continue();
       await page.unroute('**/v1/admin/peers/*/enrol-token', swap);
       await page.route('**/v1/admin/peers/*/enrol-token', refuse);
       await newBtn.click();
-      await card.locator(':scope > .err', { hasText: 'Could not issue a new invite: demo_failure: Demo failure' }).waitFor();
+      await card.locator(':scope > .err', { hasText: /^Could not issue a new invite\.$/ }).waitFor();
+      const refused = await card.locator(':scope > .err').innerText();
+      assert(!refused.includes('demo_failure') && !refused.includes('Demo failure'), `refused re-issue shows hub text: ${refused}`);
       assert(await newBtn.isEnabled() && (await newBtn.innerText()) === 'New invite', 'New invite stays busy after an error');
       assert(await card.locator('.pv-inv-fresh').isHidden(), 'an error opened the copy panel');
       await snap('pvi-4-error');

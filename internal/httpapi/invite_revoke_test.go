@@ -1,9 +1,13 @@
 package httpapi_test
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -212,4 +216,113 @@ func TestReissueInvalidatesPriorToken(t *testing.T) {
 		t.Fatalf("unspent tokens = %d, %v", live, err)
 	}
 	enrol(t, env, re.EnrolToken)
+}
+
+// reissueEnrol is one POST …/enrol-token from a racer. It returns the new
+// token and never calls t (a test Fatalf from another goroutine does not
+// fail the test). A non-201 is an error that names the status and code only.
+func reissueEnrol(ctx context.Context, url, secret string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	var body struct {
+		EnrolToken string `json:"enrol_token"`
+		Error      struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(raw, &body)
+	if resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("status %d code %s", resp.StatusCode, body.Error.Code)
+	}
+	if body.EnrolToken == "" {
+		return "", fmt.Errorf("status %d with no enrol token", resp.StatusCode)
+	}
+	return body.EnrolToken, nil
+}
+
+// Concurrent re-issues of one peer, released together, leave exactly one
+// live token. The original and every superseded token are refused
+// (PROTOCOL §2.12: at most one live invite per peer).
+func TestConcurrentReissueOneLiveToken(t *testing.T) {
+	env := testhub.Start(t)
+	p := adminAddPeer(t, env, map[string]any{"kind": "session", "name": "racing"})
+	path := env.URL + "/v1/admin/peers/" + p.PeerID + "/enrol-token"
+	const racers = 8
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	release := make(chan struct{})
+	arrived := make(chan struct{})
+	tokens := make([]string, racers)
+	errs := make([]error, racers)
+	var wg sync.WaitGroup
+	for i := range racers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			arrived <- struct{}{}
+			<-release
+			tokens[i], errs[i] = reissueEnrol(ctx, path, env.OperatorSecret)
+		}(i)
+	}
+	for range racers {
+		select {
+		case <-arrived:
+		case <-ctx.Done():
+			t.Fatal("reissue did not reach the barrier")
+		}
+	}
+	close(release)
+	wg.Wait()
+
+	seen := map[string]struct{}{}
+	for i := range racers {
+		if errs[i] != nil {
+			t.Fatalf("reissue %d: %v", i, errs[i])
+		}
+		if tokens[i] == "" || tokens[i] == p.EnrolToken {
+			t.Fatalf("reissue %d returned no new token", i)
+		}
+		seen[tokens[i]] = struct{}{}
+	}
+	if len(seen) != racers {
+		t.Fatalf("distinct tokens = %d, want %d", len(seen), racers)
+	}
+	var unspent, rows int
+	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM enrol_tokens WHERE peer_id = ? AND used_at IS NULL`, p.PeerID).Scan(&unspent); err != nil || unspent != 1 {
+		t.Fatalf("unspent tokens = %d, %v", unspent, err)
+	}
+	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM enrol_tokens WHERE peer_id = ?`, p.PeerID).Scan(&rows); err != nil || rows != 1+racers {
+		t.Fatalf("enrol token rows = %d, %v; want %d", rows, err, 1+racers)
+	}
+
+	resp, raw := env.Do("", "POST", "/v1/enrol", map[string]string{"token": p.EnrolToken})
+	mustErr(t, resp, raw, http.StatusUnauthorized, "unauthenticated")
+	live := 0
+	for _, tok := range tokens {
+		resp, raw = env.Do("", "POST", "/v1/enrol", map[string]string{"token": tok})
+		if resp.StatusCode == http.StatusOK {
+			live++
+			var got enrolResp
+			if json.Unmarshal(raw, &got) != nil || got.PeerID != p.PeerID || got.Secret == "" {
+				t.Fatal("the live token enrolled as the wrong peer")
+			}
+			continue
+		}
+		mustErr(t, resp, raw, http.StatusUnauthorized, "unauthenticated")
+	}
+	if live != 1 {
+		t.Fatalf("returned tokens that still enrol = %d, want 1", live)
+	}
 }
