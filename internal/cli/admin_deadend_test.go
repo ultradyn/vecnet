@@ -28,7 +28,7 @@ func TestOperatorDeadEndUsage(t *testing.T) {
 		{[]string{"thread", "budget", "thr_x", "nope"}, "thread budget"},
 		{[]string{"team", "members"}, "team members"},
 		{[]string{"team", "members", "team_x"}, "team members"},
-		{[]string{"team", "members", "team_x", "extra", "--set", "peer_x"}, "team members"},
+		{[]string{"team", "members", "team_x", "extra", "--add", "peer_x"}, "team members"},
 		{[]string{"team", "list", "extra"}, "team list"},
 	}
 	for _, tc := range cases {
@@ -44,7 +44,7 @@ func TestOperatorDeadEndUsage(t *testing.T) {
 		"groups unarchive",
 		"thread budget <id> <n>",
 		"team list",
-		"team members <id> --set",
+		"team members <id> --add",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help lacks %q", want)
@@ -112,13 +112,13 @@ func TestOperatorDeadEndCommands(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &added); err != nil || !strings.HasPrefix(added.TeamID, "team_") {
 		t.Fatalf("team add --json = %q, %v", raw, err)
 	}
-	if got := op.mustRun("team", "members", added.TeamID, "--set", b+","+c); got != "members set for "+added.TeamID+"\n" {
-		t.Fatalf("team members --set = %q", got)
+	if got := op.mustRun("team", "members", added.TeamID, "--add", b+","+c); got != "members added to "+added.TeamID+"\n" {
+		t.Fatalf("team members --add = %q", got)
 	}
-	// A second --set of one existing member is the same POST; the hub keeps
+	// A second --add of one existing member is the same POST; the hub keeps
 	// members already on the team.
-	if got := op.mustRun("team", "members", "--set", b, "--set", a, added.TeamID); got != "members set for "+added.TeamID+"\n" {
-		t.Fatalf("team members repeated --set = %q", got)
+	if got := op.mustRun("team", "members", "--add", b, "--add", a, added.TeamID); got != "members added to "+added.TeamID+"\n" {
+		t.Fatalf("team members repeated --add = %q", got)
 	}
 	listed := op.mustRun("team", "list")
 	if !strings.Contains(listed, added.TeamID) || !strings.Contains(listed, "Ops") {
@@ -148,7 +148,7 @@ func TestOperatorDeadEndCommands(t *testing.T) {
 		{"groups", "unarchive", grp},
 		{"thread", "budget", sent.ThreadID, "9"},
 		{"team", "list"},
-		{"team", "members", added.TeamID, "--set", c},
+		{"team", "members", added.TeamID, "--add", c},
 	} {
 		code, _, errs := peer.run(args...)
 		if code != 2 || !strings.HasPrefix(errs, "forbidden: ") {

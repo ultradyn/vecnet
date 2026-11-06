@@ -114,7 +114,7 @@ admin (operator credential):
   source list
   subscriptions list | subscriptions pause <id> | subscriptions resume <id>
   team add --name N [--members IDS]
-  team list | team members <id> --set IDS         IDS: comma-separated or repeated
+  team list | team members <id> --add IDS         adds only; IDS: comma-separated or repeated
   dead-letters list | dead-letters retry <dly> | dead-letters discard <dly>
   notify set --url URL --filter F [--url URL --filter F]…
   diag mcp [--peer ID] [--method M] [--limit N] [--follow]
@@ -1659,8 +1659,8 @@ func (a *app) cmdRoute(args []string) error {
 }
 
 func (a *app) cmdTeam(args []string) error {
-	const usage = "usage: vecnet team add --name N [--members IDS] | team list | team members <id> --set IDS"
-	o, err := parseFlags("team", args, map[string]flagKind{"name": strFlag, "members": multiFlag, "set": multiFlag})
+	const usage = "usage: vecnet team add --name N [--members IDS] | team list | team members <id> --add IDS"
+	o, err := parseFlags("team", args, map[string]flagKind{"name": strFlag, "members": multiFlag, "add": multiFlag})
 	if err != nil {
 		return err
 	}
@@ -1670,7 +1670,7 @@ func (a *app) cmdTeam(args []string) error {
 	}
 	switch sub {
 	case "add":
-		if len(o.pos) != 1 || o.str("name") == "" || o.has("set") {
+		if len(o.pos) != 1 || o.str("name") == "" || o.has("add") {
 			return usageErr(usage)
 		}
 		body := map[string]any{"name": o.str("name"), "members": o.list("members")}
@@ -1680,24 +1680,24 @@ func (a *app) cmdTeam(args []string) error {
 		}
 		return a.emitObject(out, "team_id")
 	case "list":
-		if len(o.pos) != 1 || o.has("name") || o.has("members") || o.has("set") {
+		if len(o.pos) != 1 || o.has("name") || o.has("members") || o.has("add") {
 			return usageErr(usage)
 		}
 		return a.teamList()
 	case "members":
 		// POST /v1/admin/teams/{id}/members {"members"} (adminTeamMembers).
-		// The hub adds these peers and leaves members omitted from --set in
-		// place; there is no replace-roster endpoint. --set matches team
+		// The hub adds these peers and leaves existing members in place;
+		// there is no remove or replace-roster endpoint yet. --add matches team
 		// add's --members: comma-separated or repeated.
-		if len(o.pos) != 2 || o.has("name") || o.has("members") || len(o.list("set")) == 0 {
+		if len(o.pos) != 2 || o.has("name") || o.has("members") || len(o.list("add")) == 0 {
 			return usageErr(usage)
 		}
 		id := o.pos[1]
-		body := map[string][]string{"members": o.list("set")}
+		body := map[string][]string{"members": o.list("add")}
 		if err := a.call(http.MethodPost, "/v1/admin/teams/"+pathEscape(id)+"/members", body, nil); err != nil {
 			return err
 		}
-		return a.ok("members set for " + id)
+		return a.ok("members added to " + id)
 	}
 	return usageErr(usage)
 }

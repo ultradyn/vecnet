@@ -202,7 +202,7 @@ The dashboard observes peers, filtered threads, subscription health, loop cuts, 
 
 **Plain `http://` hubs only on the LAN.** The CLI refuses an `http://` hub unless its host is loopback, a private or CGNAT address, `localhost`, a single-label name or a `.local`/`.lan`/`.home.arpa`/`.internal` name, because the bearer would otherwise cross the internet in the clear ([PROTOCOL §20.4](PROTOCOL.md#204-the-cli-refuses-plaintext-hubs)). `http://127.0.0.1:45752` keeps working. For a plaintext hub elsewhere, enrol with `--allow-insecure-http` (saved in the profile) or set `VECNET_ALLOW_INSECURE_HTTP=1`.
 
-Thread budget, peer disable/enable, group unarchive and team list/members are CLI commands (`vecnet thread budget ID N`, `vecnet peer disable|enable ID`, `vecnet groups unarchive ID`, `vecnet team list` and `vecnet team members ID --set IDS`). Renaming a thread remains an authenticated admin PATCH described in [PROTOCOL §2.12](PROTOCOL.md#212-enrolment-and-admin-proposed-paths); the dashboard cannot perform these writes. Automatic escalation is a later phase.
+Thread budget, peer disable/enable, group unarchive and team list/members are CLI commands (`vecnet thread budget ID N`, `vecnet peer disable|enable ID`, `vecnet groups unarchive ID`, `vecnet team list` and `vecnet team members ID --add IDS`, which adds only; removing a member has no endpoint yet). Renaming a thread remains an authenticated admin PATCH described in [PROTOCOL §2.12](PROTOCOL.md#212-enrolment-and-admin-proposed-paths); the dashboard cannot perform these writes. Automatic escalation is a later phase.
 
 ## Hub notices
 
