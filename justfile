@@ -86,6 +86,11 @@ test-ui:
 codex-smoke: build
     build2 node scripts/codex/hook-smoke.mjs
 
+# Opt-in live Codex app-server connector check: coordinator-run on xsm only, with
+# Max's go-ahead (VECNET_CODEX_APPSERVER_SMOKE=1); otherwise prints `skipped: …`.
+codex-appserver-smoke: build
+    build2 node --disable-warning=ExperimentalWarning scripts/codex-appserver-smoke.mjs
+
 # Screen scripts run serially; helpers are not executable checks.
 ui-shots:
     #!/usr/bin/env bash
