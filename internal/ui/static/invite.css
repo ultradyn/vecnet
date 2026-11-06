@@ -10,10 +10,11 @@ dialog.inv::backdrop{background:#05070dcc}
 .inv-fields>.btn{align-self:flex-start}
 .inv-kind{display:flex;flex-direction:column;min-width:0}
 .inv-kind select{width:100%;min-width:0}
-.inv-foot{position:sticky;bottom:0;z-index:2;background:#0e1426;padding-top:8px}
+.inv-foot{position:sticky;bottom:0;z-index:2;background:#0e1426;padding-top:8px;border-top:1px solid var(--line)}
 .inv-foot .err:empty{min-height:0}
 .inv-foot .inv-acts{position:static;margin-top:8px;padding-top:0;background:transparent}
 .inv-form label{font-size:12px;color:var(--dim);display:block;margin:0 0 4px}
+.inv-form .inv-fields>label:not(.inv-chk){margin:6px 0 -2px}
 .inv-form input,.inv-form select{background:#0b1020;border:1px solid var(--line2);border-radius:7px;padding:8px 10px;font-size:13px;color:var(--text)}
 .inv-form input{font-family:var(--mono)}
 .inv-row{display:flex;gap:14px;margin-top:6px}

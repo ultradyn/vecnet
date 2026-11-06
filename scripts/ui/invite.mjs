@@ -480,6 +480,34 @@ try {
     const quota = await dlg.locator('#inv-quota').innerText();
     assert(/wake_idle/.test(quota) && /not a price quote/i.test(quota), 'quota copy is missing');
     assert(!/stdio|mcp-remote/i.test(await dlg.innerText()), 'the form offers stdio');
+    // V-I7: forward Tab at 390×600 must leave every field above the sticky footer.
+    await page.setViewportSize({ width: 390, height: 600 });
+    await dlg.locator('#inv-kind').focus();
+    const focusWalk = [];
+    for (let i = 0; i < 16; i++) {
+      const hit = await page.evaluate(() => {
+        const active = document.activeElement;
+        const foot = document.querySelector('dialog.inv .inv-foot');
+        const dialog = document.querySelector('dialog.inv');
+        if (!active || !dialog || !dialog.contains(active) || (foot && foot.contains(active))) return { stop: true };
+        const a = active.getBoundingClientRect();
+        const f = foot.getBoundingClientRect();
+        return {
+          stop: false,
+          id: active.id || active.getAttribute('aria-label') || active.tagName,
+          bottom: Math.round(a.bottom),
+          footTop: Math.round(f.top),
+          above: a.height > 0 && a.bottom <= f.top + 0.5,
+        };
+      });
+      if (hit.stop) break;
+      focusWalk.push(hit);
+      await page.keyboard.press('Tab');
+    }
+    const hiddenFocus = focusWalk.filter(hit => !hit.above);
+    assert(focusWalk.some(hit => hit.id === 'inv-key'), `tab walk missed the routine key: ${JSON.stringify(focusWalk)}`);
+    assert(!hiddenFocus.length, `focused controls sit under the footer: ${JSON.stringify(hiddenFocus)}`);
+    await page.setViewportSize({ width: 1440, height: 900 });
     await dlg.getByRole('button', { name: 'Create Grok bot' }).click();
     await dlg.locator('.err', { hasText: 'A name is required.' }).waitFor();
     await dlg.locator('#inv-name').fill('Helper Bot');

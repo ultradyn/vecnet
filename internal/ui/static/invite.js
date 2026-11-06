@@ -684,9 +684,25 @@ export function openInvite(ctx, onCreated, opener, prefill) {
 
   form.addEventListener('submit', e => { e.preventDefault(); send(); });
 
+  // The sticky footer covers the bottom of the scrollport. scroll-padding-bottom
+  // tells Tab to stop the focused field above it. The height follows the
+  // footer, including the error and Retry row. This is a CSSOM write.
+  let footObserver = null;
+  function syncFootPadding() {
+    if (!body.style) return;
+    const rect = typeof foot.getBoundingClientRect === 'function' ? foot.getBoundingClientRect() : null;
+    const height = rect && rect.height ? rect.height : (foot.offsetHeight || 0);
+    body.style.scrollPaddingBottom = (height + 8) + 'px';
+  }
+  if (typeof ResizeObserver === 'function') {
+    footObserver = new ResizeObserver(() => syncFootPadding());
+    footObserver.observe(foot);
+  }
+
   function close() {
     if (open !== close) return;
     open = null;
+    if (footObserver) { footObserver.disconnect(); footObserver = null; }
     life += 1;
     ac.abort();
     statusAbort.abort();
@@ -701,6 +717,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   document.body.append(dialog);
   renderFields();
   dialog.showModal();
+  syncFootPadding();
   focusName();
   loadKinds();
 }
