@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SPILL, TEXT_CAP, buildSend, canSend, composePriority, counter, eligible, errorText, grokQuotaNote, keepKey, keyFor, matches, sendRefusal } from '../static/compose-model.js';
+import { SPILL, TEXT_CAP, buildSend, canSend, composePriority, counter, eligible, errorText, GROK_QUOTA_NOTE, GROK_QUOTA_TITLE, grokQuotaNote, keepKey, keyFor, matches, pendingMatches, priorityLocked, sendRefusal } from '../static/compose-model.js';
 import { SPILL_SLOT } from '../static/attach-model.js';
 
 const peers = [
@@ -255,12 +255,40 @@ test('Grok recipient defaults preserve user choice', () => {
   assert.equal(typeof sent.priority, 'string');
 
   const note = grokQuotaNote(true);
-  assert.match(note, /wake_idle/);
-  assert.match(note, /idle/);
-  assert.match(note, /unknown/);
-  assert.match(note, /hold/);
-  assert.match(note, /quota/);
-  assert.doesNotMatch(note, /free/i);
-  assert.doesNotMatch(note, /guarantee|no wake|never wake|won'?t wake|will not wake|without waking/i);
+  assert.equal(note, GROK_QUOTA_NOTE);
+  assert.equal(GROK_QUOTA_NOTE, 'wake_idle preselected for Grok Bot: pushes now if the bot is idle or unknown, otherwise once it goes idle. Each run spends Grok quota; hold never starts one.');
+  assert.equal(GROK_QUOTA_TITLE, 'A run that also needs you in chat can start a second one.');
+  assert.doesNotMatch(GROK_QUOTA_NOTE + ' ' + GROK_QUOTA_TITLE, /free/i);
+  assert.doesNotMatch(GROK_QUOTA_NOTE + ' ' + GROK_QUOTA_TITLE, /guarantee|no wake|never wake|won'?t wake|will not wake|without waking/i);
   assert.equal(grokQuotaNote(false), '');
+});
+
+// A 503 keeps the key. Swapping the session peer for a Grok Bot is a new
+// draft, so automatic priority is chosen again before that key is minted.
+// The unchanged retry, a manual choice, and an in-flight send stay put.
+test('failure then recipient edit recomputes automatic priority', () => {
+  let n = 0;
+  const mint = () => 'ui-e' + (++n);
+  const session = { recipients: ['peer_c'], title: '', priority: 'wake', text: 'hello', historyAccess: 'from_join', lockedParticipants: false };
+  const pending = keyFor(null, session, mint);
+  const again = { ...session };
+  assert.equal(priorityLocked({ sending: false, pending, form: again }), true);
+  assert.equal(composePriority({ manual: false, locked: priorityLocked({ sending: false, pending, form: again }), current: 'wake', recipients: again.recipients, peers }), 'wake');
+  assert.equal(keyFor(pending, again, mint), pending, 'unchanged retry minted a new key');
+
+  const swapped = { ...session, recipients: ['peer_g'] };
+  assert.equal(pendingMatches(pending, swapped), false);
+  assert.equal(priorityLocked({ sending: false, pending, form: swapped }), false);
+  const priority = composePriority({ manual: false, locked: priorityLocked({ sending: false, pending, form: swapped }), current: 'wake', recipients: swapped.recipients, peers });
+  assert.equal(priority, 'wake_idle');
+  const next = { ...swapped, priority };
+  const minted = keyFor(pending, next, mint);
+  assert.notEqual(minted.key, pending.key, 'a changed draft reused the failed send\'s key');
+  const body = buildSend(next, minted.key);
+  assert.equal(body.priority, 'wake_idle');
+  assert.equal(body.content.text, 'hello');
+  assert.deepEqual(body.recipients, ['peer_g']);
+
+  assert.equal(composePriority({ manual: true, locked: priorityLocked({ sending: false, pending, form: swapped }), current: 'hold', recipients: ['peer_g'], peers }), 'hold', 'manual hold was overwritten');
+  assert.equal(composePriority({ manual: false, locked: priorityLocked({ sending: true, pending, form: swapped }), current: 'wake', recipients: ['peer_g'], peers }), 'wake', 'in-flight send changed priority');
 });

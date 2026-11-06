@@ -1,8 +1,8 @@
 // Pure thread logic: what each message renders as. No DOM, no clock.
 import { SPILL_SLOT } from './attach-model.js';
-import { grokQuotaNote, INITIAL_PRIORITY, priorityChoice } from './compose-model.js';
+import { grokQuotaNote, GROK_QUOTA_NOTE, GROK_QUOTA_TITLE, INITIAL_PRIORITY, priorityChoice } from './compose-model.js';
 
-export { grokQuotaNote, INITIAL_PRIORITY };
+export { grokQuotaNote, GROK_QUOTA_NOTE, GROK_QUOTA_TITLE, INITIAL_PRIORITY };
 
 export const SPILL_BYTES = 4096, TEXT_CAP = 65536;
 // Show full text reads at most this much, and only text/* (PROTOCOL §2.7).
@@ -183,4 +183,17 @@ export function replyQuotaNote(participants, kindOf) {
 export function replyKey(pending, { text, prio, replyTo, sig }, mint) {
   if (pending && pending.text === text && pending.prio === prio && pending.replyTo === replyTo && pending.sig === sig) return pending;
   return { key: mint(), text, prio, replyTo, sig };
+}
+
+// pendingReplyMatches is true when draft would resend pending. The live control
+// value is not part of that: a recompute while the text was edited must not
+// keep a restored draft from reusing the captured priority and key.
+export function pendingReplyMatches(pending, draft) {
+  if (!pending || !draft) return false;
+  return replyKey(pending, { ...draft, prio: pending.prio }, () => (pending.key || '') + '*') === pending;
+}
+
+// replyPriorityLocked matches priorityLocked: in flight, or this same draft.
+export function replyPriorityLocked({ sending = false, pending = null, draft } = {}) {
+  return !!sending || pendingReplyMatches(pending, draft);
 }

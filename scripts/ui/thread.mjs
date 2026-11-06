@@ -11,6 +11,7 @@ try {
     allowConsole(/status of 422/);
     allowConsole(/net::ERR_FAILED/);
     allowConsole(/status of 501/);
+    allowConsole(/status of 503/);
     let dialogs = 0;
     page.on('dialog', d => { dialogs++; d.dismiss().catch(() => {}); });
 
@@ -82,11 +83,12 @@ try {
     assert(await selected() === 'wake_idle', 'a thread with a grokbot participant did not preselect wake_idle');
     await note.waitFor();
     const harkNote = await note.textContent();
-    assert(/quota/.test(harkNote) && /unknown/.test(harkNote) && !/free/i.test(harkNote), harkNote);
+    const quotaLine = 'wake_idle preselected for Grok Bot: pushes now if the bot is idle or unknown, otherwise once it goes idle. Each run spends Grok quota; hold never starts one.';
+    assert(harkNote === quotaLine, harkNote);
+    assert(await note.getAttribute('title') === 'A run that also needs you in chat can start a second one.', await note.getAttribute('title'));
+    assert(await note.evaluate(el => el.classList.contains('qnote') && el.parentElement.classList.contains('bar') && el.previousElementSibling.classList.contains('ptips')), 'quota note is not beside the priority control');
     await quiet();
     await shot('09-thread-initial');
-    await note.evaluate(el => el.scrollIntoView({ block: 'center' }));
-    await shot('t10-thread-mixed');
 
     // live delivery from asPeer appears without reload
     await page.evaluate(() => { window.__noReload = true; });
@@ -309,6 +311,9 @@ try {
     assert(await selected() === 'wake', 'triage reply changed priority before its participants arrived');
     await comp.getByRole('button', { name: 'hold', exact: true }).click();
     assert(await selected() === 'hold', 'explicit hold did not stick');
+    await page.mouse.move(0, 0);
+    await page.evaluate(() => { const el = document.activeElement; if (el && el.blur) el.blur(); });
+    await comp.locator('.ptip[data-p="hold"]').waitFor({ state: 'hidden' });
     await shot('t10-thread-explicit-hold');
     releaseFacts();
     await note.waitFor();
@@ -319,15 +324,73 @@ try {
     await page.unroute('**/v1/admin/threads?*', stall);
     await page.unroute('**/v1/admin/threads/**', detailStall);
 
+    // Failed reply while the grokbot is still unknown, then the directory
+    // arrives. The unchanged text keeps wake and would retry the same key.
+    // Editing it preselects wake_idle under a new key.
+    let releaseLate;
+    const lateGate = new Promise(resolve => { releaseLate = resolve; });
+    const stallLate = async route => { await lateGate; await route.continue(); };
+    await page.route('**/v1/threads?*', stallLate);
+    await page.route('**/v1/admin/threads?*', stallLate);
+    const lateBody = 'Late directory: reply before the Grok Bot is named.';
+    const late = await api('POST', '/v1/messages', {
+      idempotency_key: 't10-late', recipients: [demo.peers.grok.id], thread_title: 'Late grok', priority: 'wake_idle', content: { text: lateBody },
+    });
+    const detailLate = async route => {
+      const path = new URL(route.request().url()).pathname;
+      if (route.request().method() === 'GET' && path === `/v1/admin/threads/${late.thread_id}`) await lateGate;
+      await route.continue();
+    };
+    await page.route('**/v1/admin/threads/**', detailLate);
+    await page.evaluate(id => { location.hash = `#thread/${id}`; }, late.thread_id);
+    await page.locator('.msg .txt', { hasText: lateBody }).waitFor();
+    assert(await selected() === 'wake', `late reply preselected ${await selected()} before its participants arrived`);
+    const failedReply = 'Failed before the bot was known.';
+    await ta.fill(failedReply);
+    const posted = posts.length;
+    await page.route('**/v1/messages', route => route.fulfill({
+      status: 503, contentType: 'application/json',
+      body: JSON.stringify({ error: { code: 'unavailable', message: 'try again' } }),
+    }));
+    await comp.locator('.send').click();
+    await comp.locator('.cbanner', { hasText: 'unavailable: try again' }).waitFor();
+    assert(await selected() === 'wake', 'the failed reply changed priority');
+    assert(await ta.inputValue() === failedReply, 'the failed reply changed the body');
+    releaseLate();
+    await note.waitFor();
+    assert(await selected() === 'wake', 'an unchanged failed reply adopted wake_idle when the grokbot became known');
+    const editedReply = failedReply + ' Edited.';
+    await ta.fill(editedReply);
+    assert(await selected() === 'wake_idle', 'editing the failed reply left wake selected');
+    await page.unroute('**/v1/messages');
+    await comp.locator('.send').click();
+    await page.locator('.msg .txt', { hasText: editedReply }).waitFor();
+    assert(posts.length === posted + 2, `the edited reply sent ${posts.length - posted} times`);
+    assert(posts[posted].priority === 'wake' && posts[posted].content.text === failedReply, `failed body ${JSON.stringify(posts[posted])}`);
+    assert(posts[posted + 1].priority === 'wake_idle' && posts[posted + 1].content.text === editedReply, `edited body ${JSON.stringify(posts[posted + 1])}`);
+    assert(posts[posted].idempotency_key !== posts[posted + 1].idempotency_key, 'the edited reply reused the failed key');
+    await page.locator('#toast.on', { hasText: 'Sent' }).waitFor();
+    await page.locator('#toast.on').waitFor({ state: 'hidden' });
+    await page.unroute('**/v1/threads?*', stallLate);
+    await page.unroute('**/v1/admin/threads?*', stallLate);
+    await page.unroute('**/v1/admin/threads/**', detailLate);
+
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, setup.thread_id);
     await page.locator('.msg .txt', { hasText: setupBody }).waitFor();
     await note.waitFor();
     assert(await selected() === 'wake_idle', `setup reply priority is ${await selected()}`);
     const setupNote = await note.textContent();
-    assert(/wake_idle/.test(setupNote) && /unknown/.test(setupNote) && /quota/.test(setupNote), setupNote);
-    assert(!/free/i.test(setupNote) && !/guarantee|no wake|never wake|won'?t wake|will not wake/i.test(setupNote), setupNote);
+    assert(setupNote === quotaLine, setupNote);
     await comp.locator('#r-quota').evaluate(el => el.scrollIntoView({ block: 'center' }));
     await shot('t10-thread-setup');
+    await page.mouse.move(0, 0);
+    await page.evaluate(() => { const el = document.activeElement; if (el && el.blur) el.blur(); });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await comp.locator('#r-quota').evaluate(el => el.scrollIntoView({ block: 'center' }));
+    const setupNarrow = await page.evaluate(() => document.documentElement.scrollWidth);
+    assert(setupNarrow <= 390, `setup reply scrolls sideways at 390 (${setupNarrow})`);
+    await shot('t10-thread-setup-narrow');
+    await page.setViewportSize({ width: 1440, height: 900 });
     await comp.getByRole('button', { name: 'wake', exact: true }).click();
     assert(await selected() === 'wake', 'explicit wake did not stick on the setup thread');
     await shot('t10-thread-explicit-wake');

@@ -164,8 +164,10 @@ try {
     assert(await on() === 'wake_idle', 'one grokbot among the recipients did not preselect wake_idle');
     await quota.waitFor();
     const mixedNote = await quota.textContent();
-    assert(/wake_idle/.test(mixedNote) && /unknown/.test(mixedNote) && /quota/.test(mixedNote), mixedNote);
-    assert(!/free/i.test(mixedNote) && !/guarantee|no wake|never wake|won'?t wake|will not wake/i.test(mixedNote), mixedNote);
+    const quotaLine = 'wake_idle preselected for Grok Bot: pushes now if the bot is idle or unknown, otherwise once it goes idle. Each run spends Grok quota; hold never starts one.';
+    assert(mixedNote === quotaLine, mixedNote);
+    assert(await quota.getAttribute('title') === 'A run that also needs you in chat can start a second one.', await quota.getAttribute('title'));
+    assert(await quota.evaluate(el => el.classList.contains('qnote') && !!el.closest('.field') && !el.closest('.wrap')), 'quota note is not under the priority control');
     await center('#c-quota');
     await shot('t10-compose-mixed');
 
@@ -194,9 +196,11 @@ try {
     await pick(id('sleuth'));
     await pick(id('grok'));
     assert(await on() === 'hold', 'explicit hold was overwritten when recipients changed');
+    await page.mouse.move(0, 0);
+    await page.evaluate(() => { const el = document.activeElement; if (el && el.blur) el.blur(); });
+    await view.locator('.ptip[data-p="hold"]').waitFor({ state: 'hidden' });
     await center('.seg');
     await shot('t10-compose-explicit-hold');
-    await shot('t10-compose-sticky');
 
     await view.locator('.seg button[value="wake"]').focus();
     await page.keyboard.press('Tab');
@@ -230,6 +234,36 @@ try {
     assert(firstTry.priority === 'wake_idle' && secondTry.priority === 'wake_idle', `priorities ${firstTry && firstTry.priority}, ${secondTry && secondTry.priority}`);
     assert(firstTry.content.text === retryText && secondTry.content.text === retryText, 'retry changed the body');
     assert(firstTry.idempotency_key === secondTry.idempotency_key, 'retry minted a new key');
+
+    // A 503 to a session peer, then swapping in a Grok Bot, is a new draft:
+    // wake_idle is chosen before the new key, and the note agrees with the control.
+    await page.evaluate(() => { location.hash = '#new'; });
+    await opt(id('codex')).waitFor();
+    await pick(id('codex'));
+    assert(await on() === 'wake', 'a fresh composer did not start on wake');
+    const edited = 'Failed to a session peer, then addressed to a Grok Bot.';
+    await text.fill(edited);
+    const at = sends.length;
+    await page.route('**/v1/messages', route => route.fulfill({
+      status: 503, contentType: 'application/json',
+      body: JSON.stringify({ error: { code: 'unavailable', message: 'try again' } }),
+    }));
+    await send.click();
+    await view.locator('.err', { hasText: 'unavailable: try again' }).waitFor();
+    assert(await on() === 'wake', 'the failed session send changed priority');
+    assert(await quota.isHidden(), 'quota note showed for a session peer');
+    await view.getByRole('button', { name: 'Remove codex-hark' }).click();
+    await pick(id('grok'));
+    assert(await on() === 'wake_idle', 'swapping in a Grok Bot after the failure left wake selected');
+    assert(await quota.isHidden() === false, 'the note did not follow the Grok Bot');
+    await page.unroute('**/v1/messages');
+    await send.click();
+    await page.waitForFunction(() => location.hash.startsWith('#thread/thr_'));
+    const [failedSend, swappedSend] = sends.slice(at);
+    assert(failedSend && swappedSend, `recipient edit sent ${sends.length - at} times`);
+    assert(failedSend.priority === 'wake' && swappedSend.priority === 'wake_idle', `priorities ${failedSend && failedSend.priority}, ${swappedSend && swappedSend.priority}`);
+    assert(failedSend.content.text === edited && swappedSend.content.text === edited, 'the edited send changed the body');
+    assert(failedSend.idempotency_key !== swappedSend.idempotency_key, 'a changed draft reused the failed key');
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.evaluate(() => { location.hash = '#new'; });

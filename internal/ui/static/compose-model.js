@@ -15,10 +15,13 @@ export const INITIAL_PRIORITY = 'wake';
 // The send still carries it explicitly (§2.2, §5.2). It is not a default
 // the hub fills in, and it is not a promise that the bot will not wake.
 export const GROK_PRIORITY = 'wake_idle';
-// Shown beside the control while a Grok Bot is addressed. wake_idle still
-// starts a routine run when presence is idle or unknown (§5.2, §13.3);
-// hold does not. A started run spends quota.
-export const GROK_QUOTA_NOTE = 'A Grok Bot is addressed. wake_idle starts a routine run when that bot is idle or its presence is unknown, and holds the push while the bot is busy. hold does not start a run. Each run that starts spends quota, and a run that also needs you in chat can start a second one.';
+// One line under the control while a Grok Bot is addressed. wake_idle still
+// starts a routine run when presence is idle or unknown (§5.2); it waits
+// until idle otherwise. hold never starts one. The second-run caveat
+// (§13.3) stays on GROK_QUOTA_TITLE, not in this line, and neither text
+// calls the run free or promises it will not wake.
+export const GROK_QUOTA_NOTE = 'wake_idle preselected for Grok Bot: pushes now if the bot is idle or unknown, otherwise once it goes idle. Each run spends Grok quota; hold never starts one.';
+export const GROK_QUOTA_TITLE = 'A run that also needs you in chat can start a second one.';
 const HISTORY = ['from_join', 'full'];
 const ID = /^(peer|team|grp)_[A-Za-z0-9]+$/;
 const enc = new TextEncoder();
@@ -111,6 +114,20 @@ export function keyFor(pending, form, mint) {
   const sig = signature(form);
   if (pending && pending.sig === sig) return pending;
   return { key: mint(), sig };
+}
+
+// pendingMatches is true when form would resend pending's body, key and all.
+// A changed draft does not: the next send mints a key (PROTOCOL §5.3).
+export function pendingMatches(pending, form) {
+  if (!pending) return false;
+  return keyFor(pending, form, () => pending.key + '*') === pending;
+}
+
+// priorityLocked keeps automatic priority only while a send is in flight or
+// the draft would still retry that same body. A changed draft is chosen again
+// before its key is minted (Decisions §6).
+export function priorityLocked({ sending = false, pending = null, form } = {}) {
+  return !!sending || pendingMatches(pending, form);
 }
 
 // keepKey is the composer's rule: an unreached hub, a 5xx, 409 or 429 may
