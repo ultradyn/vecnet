@@ -44,9 +44,10 @@ func queryLimit(r *http.Request) (int, error) {
 	return n, nil
 }
 
-// getThreads is GET /v1/threads?participant=&group=&since=&limit=&cursor=
+// getThreads is GET /v1/threads?participant=&group=&q=&since=&limit=&cursor=
 // (PROTOCOL §2.8): the threads the caller participates in, newest activity
-// first, with an opaque next paging token.
+// first, with an opaque next paging token. q is a case-insensitive title
+// substring; empty or omitted applies no title filter.
 func (s *server) getThreads(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, err := queryLimit(r)
@@ -64,7 +65,7 @@ func (s *server) getThreads(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	threads, next, err := s.Hub.ListThreads(r.Context(), callerFrom(r.Context()),
-		q.Get("participant"), q.Get("group"), since, limit, q.Get("cursor"))
+		q.Get("participant"), q.Get("group"), q.Get("q"), since, limit, q.Get("cursor"))
 	if err != nil {
 		writeError(w, err)
 		return
