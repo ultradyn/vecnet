@@ -24,40 +24,31 @@ func TestEventsPushRecordsUsage(t *testing.T) {
 		t.Fatalf("step = %d, want 2", n)
 	}
 	posts := wantPosts(t, cb, 2)
-	got, err := env.Hub.RouteUsages(context.Background(), []string{sub.ID})
+	stats, err := env.Hub.RouteStats(context.Background(), sub.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, ok := got[sub.ID]
-	if !ok || u.Requests != 2 || u.Successes != 2 || u.Failures != 0 {
-		t.Fatalf("usage = %+v ok=%v", u, ok)
+	if len(stats.Routes) != 1 || stats.Routes[0].Requests != 2 || stats.Routes[0].OK != 2 || stats.Routes[0].Kind != hub.RouteKindEvents {
+		t.Fatalf("stats = %+v", stats.Routes)
 	}
-	if u.BodyBytes.Samples != 2 || u.BodyBytes.P99 < u.BodyBytes.P95 {
-		t.Fatalf("body = %+v", u.BodyBytes)
-	}
-	var kind string
-	if err := env.Hub.DB.QueryRow(`SELECT kind FROM route_usage WHERE route_key = ?`, sub.ID).Scan(&kind); err != nil || kind != hub.RouteKindEvents {
-		t.Fatalf("kind = %q %v", kind, err)
+	if stats.Routes[0].Pushed != 2 {
+		t.Fatalf("pushed = %d, want 2", stats.Routes[0].Pushed)
 	}
 	var n int
-	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM route_usage_samples WHERE route_key = ? AND body_bytes IN (?, ?)`,
+	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM route_attempts WHERE route_id = ? AND body_bytes IN (?, ?)`,
 		sub.ID, len(posts[0].Body), len(posts[1].Body)).Scan(&n); err != nil || n != 2 {
-		t.Fatalf("samples matching request sizes = %d, %v (posts %d and %d)", n, err, len(posts[0].Body), len(posts[1].Body))
+		t.Fatalf("attempts matching request sizes = %d, %v (posts %d and %d)", n, err, len(posts[0].Body), len(posts[1].Body))
 	}
-
-	resp, raw := env.Do(env.OperatorSecret, "GET", "/v1/admin/subscriptions", nil)
+	resp, raw := env.Do(env.OperatorSecret, "GET", "/v1/admin/route-stats?id="+dot, nil)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("subscriptions %d %s", resp.StatusCode, raw)
+		t.Fatalf("route-stats %d %s", resp.StatusCode, raw)
 	}
-	var rows []struct {
-		SubID string          `json:"sub_id"`
-		Usage *hub.RouteUsage `json:"usage"`
-	}
-	if err := json.Unmarshal(raw, &rows); err != nil || len(rows) != 1 || rows[0].SubID != sub.ID || rows[0].Usage == nil || rows[0].Usage.Requests != 2 {
-		t.Fatalf("admin usage = %s %v", raw, err)
+	var body hub.RouteStats
+	if err := json.Unmarshal(raw, &body); err != nil || body.Deliveries.Pushed < 2 {
+		t.Fatalf("admin stats = %s %v", raw, err)
 	}
 	_, peerSecret := env.NewPeer("session", "other")
-	if resp, _ := env.Do(peerSecret, "GET", "/v1/admin/subscriptions", nil); resp.StatusCode != http.StatusForbidden {
+	if resp, _ := env.Do(peerSecret, "GET", "/v1/admin/route-stats?id="+dot, nil); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("peer status = %d, want 403", resp.StatusCode)
 	}
 }
@@ -69,10 +60,7 @@ func TestEventsStatsFailureDoesNotFailDelivery(t *testing.T) {
 	cb := testhub.NewCallback(t)
 	subscribe(t, env, cb, dot, nil, time.Time{})
 	dly := send(t, env, senderSecret, dot, "x", "wake", "CANARY-BODY")
-	if _, err := env.Hub.DB.Exec(`DROP TABLE route_usage_samples`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := env.Hub.DB.Exec(`DROP TABLE route_usage`); err != nil {
+	if _, err := env.Hub.DB.Exec(`DROP TABLE route_attempts`); err != nil {
 		t.Fatal(err)
 	}
 	if n := step(t, env); n != 1 {

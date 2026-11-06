@@ -283,7 +283,7 @@ func TestAdminSubscriptionsAdditive(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := rows[0]
-		for _, key := range []string{"health", "health_note", "refresh_before", "usage"} {
+		for _, key := range []string{"health", "health_note", "refresh_before"} {
 			if _, ok := got[key]; !ok {
 				t.Errorf("missing %s", key)
 			}

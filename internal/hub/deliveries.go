@@ -76,6 +76,11 @@ type DueDelivery struct {
 	Keys                                                []string
 	Attempt                                             int    // this attempt's number, 1-based
 	Body                                                []byte // the Delivery JSON (with per-recipient blob_url), as appended to the log
+	// RecordAttempt is set by the push worker once the HTTP client was
+	// handed the request. AttemptBody and AttemptLatency describe that try.
+	RecordAttempt  bool
+	AttemptBody    int
+	AttemptLatency time.Duration
 }
 
 // ClaimDue claims up to limit deliveries due for a push at now and marks
@@ -261,6 +266,7 @@ func (h *Hub) recordPush(ctx context.Context, d DueDelivery, outcome pushOutcome
 	var alert *envelope.Event // dead_letter / push_conflict receipt for the operator's notify routes
 	applied := false
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		h.notePushAttempt(ctx, tx, d, outcome, status, netErr, now)
 		notify, applied, alert = "", false, nil
 		var state, msgID, thr, sender string
 		var attempt, left int

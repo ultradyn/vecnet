@@ -317,13 +317,6 @@ func (st *Store) Delete(ctx context.Context, principalKind, principalID, url, na
 			return fmt.Errorf("events: delete refresh schedule: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM route_usage WHERE route_key IN (
-			   SELECT sub_id FROM event_subscriptions
-			   WHERE principal_kind = ? AND principal_id = ? AND url = ? AND name = ? AND arguments = ?)`,
-			principalKind, principalID, url, name, canon); err != nil {
-			return fmt.Errorf("events: delete route usage: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM event_outbox WHERE sub_id IN (
 			   SELECT sub_id FROM event_subscriptions
 			   WHERE principal_kind = ? AND principal_id = ? AND url = ? AND name = ? AND arguments = ?)`,
@@ -834,7 +827,7 @@ func (st *Store) pending(ctx context.Context, id string, limit int) ([]outboxRow
 // settle closes a row (terminal "" for a delivery) and records the response.
 // status 0 is a network failure and leaves last_status NULL. A settled row's
 // body is never sent again, so it is cleared: a replay reads the log.
-func (st *Store) settle(ctx context.Context, id, eventID, terminal string, status int, now time.Time) error {
+func (st *Store) settle(ctx context.Context, id, eventID, terminal string, status int, now time.Time, posted bool, body int, latency time.Duration, netErr error) error {
 	nowS := envelope.FormatTime(now)
 	var term any
 	if terminal != "" {
@@ -850,6 +843,9 @@ func (st *Store) settle(ctx context.Context, id, eventID, terminal string, statu
 			if err := hub.BumpCounter(ctx, tx, hub.CounterEventsPushFailed, 1); err != nil {
 				return err
 			}
+		}
+		if posted && st.hub != nil {
+			st.hub.NoteEventAttempt(ctx, tx, id, eventID, body, latency, status, netErr, now)
 		}
 		return recordResult(ctx, tx, id, status, 0, nil, nowS)
 	})
@@ -875,7 +871,7 @@ func (st *Store) withdraw(ctx context.Context, id, eventID string, now time.Time
 }
 
 // retryLater records a failed attempt of a row.
-func (st *Store) retryLater(ctx context.Context, id, eventID string, attempts, status int, next, now time.Time) error {
+func (st *Store) retryLater(ctx context.Context, id, eventID string, attempts, status int, next, now time.Time, posted bool, body int, latency time.Duration, netErr error) error {
 	nextS := envelope.FormatTime(next)
 	return st.DB.Tx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
@@ -885,6 +881,9 @@ func (st *Store) retryLater(ctx context.Context, id, eventID string, attempts, s
 		}
 		if err := hub.BumpCounter(ctx, tx, hub.CounterEventsPushFailed, 1); err != nil {
 			return err
+		}
+		if posted && st.hub != nil {
+			st.hub.NoteEventAttempt(ctx, tx, id, eventID, body, latency, status, netErr, now)
 		}
 		return recordResult(ctx, tx, id, status, attempts, nextS, envelope.FormatTime(now))
 	})

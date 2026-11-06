@@ -848,6 +848,12 @@ func toolSpecs(defs schema) []toolSpec {
 		}),
 		annotations: readAnnotations(), call: callInbox,
 	}, {
+		name: "vecnet_route_stats",
+		description: "Read delivery-route usage for one peer, push route, or MCP Events subscription. " +
+			"Operator only. Counts, last error, and body and latency percentiles are computed over the retained attempts.",
+		input:       object(schema{"id": schema{"type": "string", "minLength": 1, "maxLength": 80, "description": "A peer_, route_ or sub_ id."}}, "id"),
+		annotations: readAnnotations(), call: callRouteStats,
+	}, {
 		name:        "vecnet_subscriptions",
 		description: "Read your own peer's active MCP event subscriptions and delivery health. An empty list means event subscription is not active; follow the returned user setup hint and use vecnet_inbox meanwhile. This tool cannot subscribe.",
 		input:       object(schema{}),

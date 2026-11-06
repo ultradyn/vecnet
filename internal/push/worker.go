@@ -161,12 +161,13 @@ func (w *Worker) Push(ctx context.Context, d hub.DueDelivery) {
 		// Shutting down: leave the lease to lapse rather than burn an attempt.
 		return
 	}
+	if sent {
+		d.RecordAttempt = true
+		d.AttemptBody = len(d.Body)
+		d.AttemptLatency = latency
+	}
 	if err := w.Hub.PushResult(context.WithoutCancel(ctx), d, status, retryAfter, netErr, w.now()); err != nil {
 		slog.Error("push: record result", "delivery", d.DeliveryID, "err", err)
-	}
-	if sent {
-		ok := netErr == nil && status >= 200 && status < 300
-		w.noteAttempt(ctx, d.RouteID, d.Kind, len(d.Body), status, latency, netErr, ok, "")
 	}
 	w.Kick()
 }

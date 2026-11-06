@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { idParts, short } from '../static/format.js';
-import { findPeer, peerFacts, peerHealth, peerHref, peerRoutes, peerSubs, peerThreads, principalFacts, routeUsage, scopeTarget, usageSummary } from '../static/peer-model.js';
+import { findPeer, peerFacts, peerHealth, peerHref, peerRoutes, peerSubs, peerThreads, principalFacts, scopeTarget } from '../static/peer-model.js';
 
 const PEER = 'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B';
 const PRN = 'prn_01JD3Q2K8M4N6P8R0T2V4X6Z8C';
@@ -127,27 +127,6 @@ test('peerRoutes keeps the peer\'s own routes and those it inherits from its pri
   // Without the principal (its row not loaded yet), only the peer's own.
   assert.deepEqual(peerRoutes(routes, PEER, '').map(r => r.id), ['rt_1']);
   assert.deepEqual(peerRoutes(null, PEER, PRN), []);
-  assert.equal(got[0].usage, null);
-});
-
-test('routeUsage and usageSummary keep body and latency stats, and a quiet route', () => {
-  assert.equal(routeUsage(null), null);
-  assert.equal(routeUsage({ requests: 'nope' }), null);
-  const u = routeUsage({
-    requests: 3, successes: 2, failures: 1,
-    last_error: 'HTTP 500', last_error_at: '2026-11-06T00:00:00.000Z', last_status: 500,
-    last_used_at: '2026-11-06T00:01:00.000Z', last_success_at: '2026-11-06T00:00:30.000Z',
-    body_bytes: { avg: 1200.4, p95: 4000, p99: 8000, samples: 3 },
-    latency_ms: { avg: 1.25, p95: 40, p99: 90, samples: 3 },
-  });
-  assert.equal(u.failures, 1);
-  assert.equal(u.body.p99, 8000);
-  assert.equal(u.latency.p95, 40);
-  assert.deepEqual(usageSummary(null), ['No requests sent yet.']);
-  const lines = usageSummary(u);
-  assert.equal(lines[0], '3 sent · 2 ok · 1 failed');
-  assert.match(lines[1], /body avg 1\.2 KiB · p95 3\.9 KiB · p99 7\.8 KiB · 3 recent/);
-  assert.match(lines[2], /latency avg 1\.3 ms · p95 40 ms · p99 90 ms/);
 });
 
 test('peerSubs, peerHealth and peerThreads keep only this peer', () => {

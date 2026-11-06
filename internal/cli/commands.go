@@ -105,7 +105,8 @@ admin (operator credential):
   peer limits <peer> --sends-per-min N --threads-per-hour N
   route add --owner ID --url URL | route verify <route_id>
   route add --owner ID --kind grokbot --url URL --key-file PATH
-  route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>
+  route list [--json] | route stats <peer_id|route_id|sub_id> [--json]
+  route rotate <route_id> --key-file PATH | route remove <route_id>
        the crsr_ key is read only from a file, 0600, never from argv
   source add --kind github --name N --route ID [--events A,B] [--priority P]
        prints the ingress URL and the secret, once
@@ -1565,6 +1566,15 @@ func (a *app) cmdRoute(args []string) error {
 			return err
 		}
 		return a.emitObject(out, "route_id", "whsec")
+	case len(o.pos) == 2 && o.pos[0] == "stats":
+		var out routeStats
+		if err := a.call(http.MethodGet, "/v1/admin/route-stats?id="+pathEscape(o.pos[1]), nil, &out); err != nil {
+			return err
+		}
+		if a.json {
+			return a.emitValue(out)
+		}
+		return printRouteStats(a.stdout, out)
 	case len(o.pos) == 1 && o.pos[0] == "list":
 		items, err := a.getList("/v1/admin/routes", nil, "routes")
 		if err != nil {
@@ -1615,7 +1625,7 @@ func (a *app) cmdRoute(args []string) error {
 		return a.ok("verified " + o.pos[1])
 	}
 	return usageErr("usage: vecnet route add --owner ID --url URL | " +
-		"route add --owner ID --kind grokbot --url URL --key-file PATH | route verify <route_id> | route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>")
+		"route add --owner ID --kind grokbot --url URL --key-file PATH | route verify <route_id> | route list [--json] | route stats <peer_id|route_id|sub_id> [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>")
 }
 
 func (a *app) cmdTeam(args []string) error {

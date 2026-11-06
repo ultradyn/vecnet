@@ -45,6 +45,7 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/sources/{id}/disable", s.adminDisableSource)
 	mux.HandleFunc("POST /v1/admin/routes", s.adminAddRoute)
 	mux.HandleFunc("GET /v1/admin/routes", s.adminListRoutes)
+	mux.HandleFunc("GET /v1/admin/route-stats", s.adminRouteStats)
 	mux.HandleFunc("DELETE /v1/admin/routes/{id}", s.adminRemoveRoute)
 	mux.HandleFunc("POST /v1/admin/routes/{id}/rotate", s.adminRotateRoute)
 	mux.HandleFunc("POST /v1/admin/routes/{id}/verify", s.adminVerifyRoute)
@@ -379,6 +380,22 @@ func (s *server) adminAddRoute(w http.ResponseWriter, r *http.Request) {
 	default:
 		invalid("kind", "kind is http or grokbot")
 	}
+}
+
+// adminRouteStats is GET /v1/admin/route-stats?id=peer_|route_|sub_.
+// Operator only, like every /v1/admin path. The window is in the body.
+func (s *server) adminRouteStats(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeError(w, hub.E(http.StatusUnprocessableEntity, "invalid_value", "id is required"))
+		return
+	}
+	stats, err := s.Hub.RouteStats(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
 }
 
 // adminListRoutes is GET /v1/admin/routes: 200 {"routes": [RouteInfo]}. No

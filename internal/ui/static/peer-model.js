@@ -2,7 +2,7 @@
 // Every value comes from an operator view the dashboard already reads
 // (PROTOCOL §2.13); peer-supplied strings stay strings, and the view sets them
 // as text.
-import { bytes, quotaLabel } from './format.js';
+import { quotaLabel } from './format.js';
 
 const str = v => (typeof v === 'string' ? v : '');
 const strs = v => (Array.isArray(v) ? v.filter(x => typeof x === 'string') : []);
@@ -92,56 +92,7 @@ export function peerRoutes(page, peerId, principalId) {
     .map(r => ({
       id: str(r.route_id), via: r.owner_id === peerId ? 'peer' : 'principal', kind: str(r.kind), host: str(r.host),
       verified: str(r.verified_at) || null, created: str(r.created_at) || null, runsPerHour: num(r.runs_per_hour),
-      usage: routeUsage(r.usage),
     }));
-}
-
-function dist(v) {
-  if (!v || typeof v !== 'object') return null;
-  const samples = num(v.samples);
-  if (samples === null) return null;
-  return { avg: num(v.avg), p95: num(v.p95), p99: num(v.p99), samples };
-}
-
-function msLabel(n) {
-  if (!Number.isFinite(n)) return '—';
-  if (n < 10) return (Math.round(n * 10) / 10).toFixed(1) + ' ms';
-  return Math.round(n) + ' ms';
-}
-
-// routeUsage is a GET usage object, or null when the route has never been
-// attempted (the hub sends null). Junk is dropped rather than rendered.
-export function routeUsage(raw) {
-  if (!raw || typeof raw !== 'object') return null;
-  const requests = num(raw.requests);
-  if (requests === null) return null;
-  return {
-    requests,
-    successes: num(raw.successes) ?? 0,
-    failures: num(raw.failures) ?? 0,
-    lastError: str(raw.last_error) || null,
-    lastErrorAt: str(raw.last_error_at) || null,
-    lastStatus: raw.last_status === null || raw.last_status === undefined ? null : num(raw.last_status),
-    lastUsedAt: str(raw.last_used_at) || null,
-    lastSuccessAt: str(raw.last_success_at) || null,
-    body: dist(raw.body_bytes),
-    latency: dist(raw.latency_ms),
-  };
-}
-
-// usageSummary is the lines under a route. Null usage is a route that has
-// not been pushed, which is distinct from the peer's last message.
-export function usageSummary(u) {
-  if (!u) return ['No requests sent yet.'];
-  const lines = [u.requests + ' sent · ' + u.successes + ' ok · ' + u.failures + ' failed'];
-  if (u.body && u.body.samples > 0) {
-    const b = n => bytes(Number.isFinite(n) ? Math.round(n) : 0);
-    lines.push('body avg ' + b(u.body.avg) + ' · p95 ' + b(u.body.p95) + ' · p99 ' + b(u.body.p99) + ' · ' + u.body.samples + ' recent');
-  }
-  if (u.latency && u.latency.samples > 0) {
-    lines.push('latency avg ' + msLabel(u.latency.avg) + ' · p95 ' + msLabel(u.latency.p95) + ' · p99 ' + msLabel(u.latency.p99));
-  }
-  return lines;
 }
 
 // peerSubs is this peer's subscriptions from the bare GET /v1/admin/subscriptions array.

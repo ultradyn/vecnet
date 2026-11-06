@@ -64,15 +64,12 @@ func (w *Worker) pushGrokbot(ctx context.Context, d hub.DueDelivery) {
 		slog.Warn("push: grokbot routine refused the key or is disabled",
 			"delivery", d.DeliveryID, "route", d.RouteID, "status", status)
 	}
-	w.grokbotResult(ctx, d, status, answer.Bytes(), retryAfter, netErr)
 	if sent {
-		ok := netErr == nil && hub.ClassifyGrokbot(status, answer.Bytes()) == hub.GrokbotStarted
-		fail := ""
-		if !ok && netErr == nil && status == http.StatusOK {
-			fail = "routine did not start"
-		}
-		w.noteAttempt(ctx, d.RouteID, d.Kind, len(d.Body), status, latency, netErr, ok, fail)
+		d.RecordAttempt = true
+		d.AttemptBody = len(d.Body)
+		d.AttemptLatency = latency
 	}
+	w.grokbotResult(ctx, d, status, answer.Bytes(), retryAfter, netErr)
 }
 
 // postGrokbot sends one routine POST; the first 4 KiB of the answer go to sink.

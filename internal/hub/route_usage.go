@@ -3,69 +3,92 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"net/http"
+	"net/url"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/store"
 )
 
-// Route usage (PROTOCOL §3, §4.4, §5.2, §13.3).
+// Route attempt stats (PROTOCOL §3, §4.4, §5.2, §13.3).
 //
-// A delivery route is one outbound push target: an http or grokbot row in
-// routes, or a dot's MCP Events callback (event_subscriptions). Pull
-// transports never touch one. Counters are lifetime. Percentiles come from
-// a fixed ring of the most recent RouteUsageSamples attempts, so a read
-// sorts at most that many integers and no request body is stored.
+// An attempt row is written inside the delivery's outcome transaction when
+// that transaction exists. A failed insert is logged and does not fail the
+// delivery. Counts and percentiles are computed at read time over the rows
+// still inside the retention window: the newest 1000 per route, and nothing
+// older than 7 days.
 
+const routeAttemptMaxAge = 7 * 24 * time.Hour
+
+// RouteKindEvents is an MCP Events callback. It is not a routes.kind.
+const RouteKindEvents = "events"
+
+// Attempt outcomes stored on route_attempts.outcome.
 const (
-	// RouteKindEvents is an MCP Events callback. It is not a routes.kind.
-	RouteKindEvents = "events"
-	// RouteUsageSamples is the ring length. 256 keeps a real p99 sample
-	// (nearest-rank of the recent window) without an unbounded history.
-	RouteUsageSamples = 256
-
-	maxUsageBody    = 1 << 20
-	maxUsageLatency = 10 * time.Minute
-	maxUsageError   = 200
+	AttemptOK      = "ok"
+	AttemptFail    = "fail"
+	AttemptRefused = "refused"
 )
 
-// RouteAttempt is one outbound HTTP attempt that was actually handed to the
-// client. Verification challenges and grokbot budget deferrals are not
-// attempts: nothing was a delivery push.
-type RouteAttempt struct {
-	Key        string
-	Kind       string
-	BodyBytes  int
-	Latency    time.Duration
-	HasLatency bool
-	OK         bool
-	Status     int // 0 when the attempt got no HTTP status
-	Error      string
-	At         time.Time
+// RouteStats is the operator readout for one peer or one route.
+type RouteStats struct {
+	Subject    RouteStatsSubject `json:"subject"`
+	Window     RouteStatsWindow  `json:"window"`
+	Deliveries DeliveryTraffic   `json:"deliveries"`
+	Routes     []RouteStat       `json:"routes"`
 }
 
-// RouteUsage is the operator view of one route. Distributions are over the
-// retained ring (Samples says how full it is), not over the lifetime counters.
-type RouteUsage struct {
+// RouteStatsSubject is what the id resolved to.
+type RouteStatsSubject struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
+// RouteStatsWindow is the retention window the numbers were computed over.
+type RouteStatsWindow struct {
+	Since       string `json:"since"`
+	Until       string `json:"until"`
+	MaxRows     int    `json:"max_rows"`
+	MaxAgeHours int    `json:"max_age_hours"`
+}
+
+// DeliveryTraffic counts deliveries to the peer or peers in scope.
+// Pushed is how many a route handed to an outbound attempt. Pulled is how
+// many were accepted from the inbox, MCP or a stream without one.
+type DeliveryTraffic struct {
+	Pushed int `json:"pushed"`
+	Pulled int `json:"pulled"`
+}
+
+// RouteStat is one route's attempt stats over the window.
+type RouteStat struct {
+	RouteID       string         `json:"route_id"`
+	Kind          string         `json:"kind"`
+	Host          string         `json:"host"`
+	OwnerKind     string         `json:"owner_kind"`
+	OwnerID       string         `json:"owner_id"`
 	Requests      int            `json:"requests"`
-	Successes     int            `json:"successes"`
-	Failures      int            `json:"failures"`
+	OK            int            `json:"ok"`
+	Fail          int            `json:"fail"`
+	Refused       int            `json:"refused"`
+	Pushed        int            `json:"pushed"`
 	LastError     *string        `json:"last_error"`
 	LastErrorAt   *string        `json:"last_error_at"`
 	LastStatus    *int           `json:"last_status"`
-	LastUsedAt    string         `json:"last_used_at"`
+	LastUsedAt    *string        `json:"last_used_at"`
 	LastSuccessAt *string        `json:"last_success_at"`
 	BodyBytes     RouteUsageDist `json:"body_bytes"`
 	LatencyMS     RouteUsageDist `json:"latency_ms"`
 }
 
-// RouteUsageDist is avg / nearest-rank p95 / p99 over the retained samples.
+// RouteUsageDist is avg and nearest-rank p95/p99 over the window.
 type RouteUsageDist struct {
 	Avg     float64 `json:"avg"`
 	P95     float64 `json:"p95"`
@@ -73,36 +96,9 @@ type RouteUsageDist struct {
 	Samples int     `json:"samples"`
 }
 
-// RouteAttemptError is a stored failure string: a fixed egress reason, or
-// "HTTP <status>". It never includes a body, URL or header.
-func RouteAttemptError(status int, netErr error) string {
-	if netErr != nil {
-		if msg := EgressErr(netErr); msg != "" {
-			return msg
-		}
-		return "request_failed"
-	}
-	if status >= 200 && status < 300 {
-		return ""
-	}
-	if status >= 100 && status <= 599 {
-		return "HTTP " + strconv.Itoa(status)
-	}
-	return "request_failed"
-}
-
-// NoteRouteAttempt records a. A store error is logged and swallowed: the
-// delivery that prompted the attempt has already been recorded, and this
-// write must not fail it.
-func (h *Hub) NoteRouteAttempt(ctx context.Context, a RouteAttempt) {
-	if err := h.recordRouteAttempt(ctx, a); err != nil {
-		slog.Error("hub: route usage", "route", a.Key, "err", err)
-	}
-}
-
 // PercentileNearestRank is the nearest-rank percentile of an ascending
-// sample. p is in (0, 100]. Rank is ceil(p/100*n), and the value is
-// sorted[rank-1]. An empty sample or a p outside that range returns 0, false.
+// sample. p is in (0, 100]. Rank is ceil(p/100*n). An empty sample returns
+// 0, false.
 func PercentileNearestRank(sorted []int64, p float64) (int64, bool) {
 	n := len(sorted)
 	if n == 0 || p <= 0 || p > 100 || math.IsNaN(p) {
@@ -118,210 +114,375 @@ func PercentileNearestRank(sorted []int64, p float64) (int64, bool) {
 	return sorted[rank-1], true
 }
 
-func (h *Hub) recordRouteAttempt(ctx context.Context, a RouteAttempt) error {
-	switch a.Kind {
-	case RouteKindHTTP, RouteKindGrokbot, RouteKindEvents:
-	default:
-		return fmt.Errorf("hub: route usage: kind %q", a.Kind)
+// notePushAttempt records d's HTTP attempt inside tx. It logs and swallows
+// a store error so the delivery outcome still commits.
+func (h *Hub) notePushAttempt(ctx context.Context, tx *sql.Tx, d DueDelivery, outcome pushOutcome, status int, netErr error, now time.Time) {
+	if !d.RecordAttempt || d.RouteID == "" {
+		return
 	}
-	if a.Key == "" || len(a.Key) > 80 {
-		return fmt.Errorf("hub: route usage: empty or overlong key")
+	row := attemptFromPush(d, outcome, status, netErr, now)
+	if err := store.InsertRouteAttempt(ctx, tx, row); err != nil {
+		slog.Error("hub: route attempt", "route", d.RouteID, "delivery", d.DeliveryID, "err", err)
 	}
-	at := a.At
-	if at.IsZero() {
-		at = h.Now()
-	}
-	atS := envelope.FormatTime(at)
-	body := a.BodyBytes
-	if body < 0 {
-		body = 0
-	}
-	if body > maxUsageBody {
-		body = maxUsageBody
-	}
-	var latency any
-	if a.HasLatency {
-		d := a.Latency
-		if d < 0 {
-			d = 0
-		}
-		if d > maxUsageLatency {
-			d = maxUsageLatency
-		}
-		latency = d.Microseconds()
-	}
-	okN, failN := 0, 1
-	var errText, errAt, successAt any
-	if a.OK {
-		okN, failN = 1, 0
-		successAt = atS
-	} else {
-		msg := clipUsageError(a.Error)
-		if msg == "" {
-			msg = "request_failed"
-		}
-		errText = msg
-		errAt = atS
-	}
-	var status any
-	if a.Status >= 100 && a.Status <= 599 {
-		status = a.Status
-	}
-	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO route_usage(
-				route_key, kind, requests, successes, failures,
-				last_error, last_error_at, last_status, last_used_at, last_success_at, sample_n)
-			VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1)
-			ON CONFLICT(route_key) DO UPDATE SET
-				requests = requests + 1,
-				successes = successes + excluded.successes,
-				failures = failures + excluded.failures,
-				last_error = CASE WHEN excluded.failures = 1 THEN excluded.last_error ELSE route_usage.last_error END,
-				last_error_at = CASE WHEN excluded.failures = 1 THEN excluded.last_error_at ELSE route_usage.last_error_at END,
-				last_status = excluded.last_status,
-				last_used_at = excluded.last_used_at,
-				last_success_at = CASE WHEN excluded.successes = 1 THEN excluded.last_success_at ELSE route_usage.last_success_at END,
-				sample_n = sample_n + 1`,
-			a.Key, a.Kind, okN, failN, errText, errAt, status, atS, successAt); err != nil {
-			return fmt.Errorf("hub: route usage: %w", err)
-		}
-		var n int
-		if err := tx.QueryRowContext(ctx, `SELECT sample_n FROM route_usage WHERE route_key = ?`, a.Key).Scan(&n); err != nil {
-			return fmt.Errorf("hub: route usage: %w", err)
-		}
-		slot := (n - 1) % RouteUsageSamples
-		if slot < 0 {
-			slot = 0
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO route_usage_samples(route_key, slot, body_bytes, latency_us)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(route_key, slot) DO UPDATE SET
-				body_bytes = excluded.body_bytes,
-				latency_us = excluded.latency_us`,
-			a.Key, slot, body, latency); err != nil {
-			return fmt.Errorf("hub: route usage sample: %w", err)
-		}
-		return nil
-	})
 }
 
-func clipUsageError(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= maxUsageError {
-		return s
+// NoteEventAttempt records one MCP Events callback POST inside tx.
+// A store error is logged and swallowed.
+func (h *Hub) NoteEventAttempt(ctx context.Context, tx *sql.Tx, subID, eventID string, body int, latency time.Duration, status int, netErr error, now time.Time) {
+	if subID == "" || eventID == "" {
+		return
 	}
-	s = s[:maxUsageError]
-	for s != "" && !utf8.ValidString(s) {
-		s = s[:len(s)-1]
+	outcome, class := classifyHTTP(status, netErr)
+	row := attemptRow(subID, eventID, outcome, class, status, netErr, body, latency, now)
+	if err := store.InsertRouteAttempt(ctx, tx, row); err != nil {
+		slog.Error("hub: route attempt", "route", subID, "delivery", eventID, "err", err)
+	}
+}
+
+func attemptFromPush(d DueDelivery, outcome pushOutcome, status int, netErr error, now time.Time) store.RouteAttemptInsert {
+	result, class := classifyHTTP(status, netErr)
+	switch outcome {
+	case pushAccepted:
+		result, class = AttemptOK, ""
+	case pushAuthFailed:
+		result, class = AttemptRefused, "routine_auth"
+	case pushConflict:
+		result, class = AttemptRefused, "http_409"
+	case pushTerminal:
+		result = AttemptRefused
+		if d.Kind == RouteKindGrokbot && netErr == nil && status == http.StatusOK {
+			class = "routine_not_started"
+		} else if class == "" {
+			class = httpClass(status, AttemptRefused)
+		}
+	case pushRetry:
+		result = AttemptFail
+		if class == "" {
+			class = httpClass(status, AttemptFail)
+		}
+	}
+	return attemptRow(d.RouteID, d.DeliveryID, result, class, status, netErr, d.AttemptBody, d.AttemptLatency, now)
+}
+
+func classifyHTTP(status int, netErr error) (outcome, class string) {
+	if netErr != nil {
+		return AttemptFail, fixedClass(EgressErr(netErr))
+	}
+	if status >= 200 && status < 300 {
+		return AttemptOK, ""
+	}
+	if status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || (status >= 500 && status < 600) {
+		return AttemptFail, httpClass(status, AttemptFail)
+	}
+	return AttemptRefused, httpClass(status, AttemptRefused)
+}
+
+func httpClass(status int, outcome string) string {
+	switch {
+	case status == http.StatusConflict:
+		return "http_409"
+	case status == http.StatusRequestTimeout:
+		return "http_408"
+	case status == http.StatusTooManyRequests:
+		return "http_429"
+	case status >= 500 && status < 600:
+		return "http_5xx"
+	case status >= 400 && status < 500:
+		return "http_4xx"
+	case status >= 300 && status < 400:
+		return "http_3xx"
+	case outcome == AttemptFail:
+		return "request_failed"
+	default:
+		return "http_status"
+	}
+}
+
+func fixedClass(s string) string {
+	if s == "" {
+		return "request_failed"
+	}
+	for _, r := range s {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' {
+			return "request_failed"
+		}
+	}
+	if len(s) > 64 {
+		return "request_failed"
 	}
 	return s
 }
 
-// RouteUsages returns usage for the keys that have at least one attempt.
-// Keys with none are absent. Missing keys in the result are null on the wire.
-func (h *Hub) RouteUsages(ctx context.Context, keys []string) (map[string]RouteUsage, error) {
-	out := make(map[string]RouteUsage)
-	if len(keys) == 0 {
-		return out, nil
+func attemptRow(routeID, deliveryID, outcome, class string, status int, netErr error, body int, latency time.Duration, now time.Time) store.RouteAttemptInsert {
+	if body < 0 {
+		body = 0
 	}
-	const chunk = 200
-	for i := 0; i < len(keys); i += chunk {
-		end := min(i+chunk, len(keys))
-		if err := h.routeUsagesChunk(ctx, keys[i:end], out); err != nil {
-			return nil, err
+	if body > 1<<20 {
+		body = 1 << 20
+	}
+	ms := int(latency.Round(time.Millisecond) / time.Millisecond)
+	if ms < 0 {
+		ms = 0
+	}
+	if ms > 600000 {
+		ms = 600000
+	}
+	var httpStatus sql.NullInt64
+	if netErr == nil && status >= 100 && status <= 599 {
+		httpStatus = sql.NullInt64{Int64: int64(status), Valid: true}
+	}
+	var errClass sql.NullString
+	if outcome != AttemptOK {
+		if class == "" {
+			class = "request_failed"
 		}
+		errClass = sql.NullString{String: class, Valid: true}
+	}
+	return store.RouteAttemptInsert{
+		RouteID: routeID, DeliveryID: deliveryID,
+		At: envelope.FormatTime(now), Cutoff: envelope.FormatTime(now.Add(-routeAttemptMaxAge)),
+		Outcome: outcome, HTTPStatus: httpStatus, ErrorClass: errClass,
+		BodyBytes: body, LatencyMS: ms,
+	}
+}
+
+// RouteStats reads attempt rows and delivery rows for id, a peer_ id, a
+// route_ id, or a sub_ id. Unknown ids are 404 not_found.
+func (h *Hub) RouteStats(ctx context.Context, id string) (RouteStats, error) {
+	now := h.Now()
+	since := now.Add(-routeAttemptMaxAge)
+	sinceS := envelope.FormatTime(since)
+	report := RouteStats{
+		Window: RouteStatsWindow{
+			Since: sinceS, Until: envelope.FormatTime(now),
+			MaxRows: store.RouteAttemptKeep, MaxAgeHours: int(routeAttemptMaxAge / time.Hour),
+		},
+		Routes: []RouteStat{},
+	}
+	switch {
+	case strings.HasPrefix(id, "peer_"):
+		report.Subject = RouteStatsSubject{Kind: "peer", ID: id}
+		var one int
+		err := h.DB.QueryRowContext(ctx, `SELECT 1 FROM peers WHERE peer_id = ?`, id).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			return RouteStats{}, unknownPeer(id)
+		}
+		if err != nil {
+			return RouteStats{}, fmt.Errorf("hub: route stats: %w", err)
+		}
+		routes, err := h.statsRoutesForPeer(ctx, id)
+		if err != nil {
+			return RouteStats{}, err
+		}
+		report.Routes = routes
+		pushed, pulled, err := h.deliveryTraffic(ctx, []string{id}, sinceS)
+		if err != nil {
+			return RouteStats{}, err
+		}
+		report.Deliveries = DeliveryTraffic{Pushed: pushed, Pulled: pulled}
+		return h.fillRouteStats(ctx, report, sinceS)
+	case strings.HasPrefix(id, "route_"):
+		report.Subject = RouteStatsSubject{Kind: "route", ID: id}
+		route, peers, err := h.statsRoute(ctx, id)
+		if err != nil {
+			return RouteStats{}, err
+		}
+		report.Routes = []RouteStat{route}
+		pushed, pulled, err := h.deliveryTraffic(ctx, peers, sinceS)
+		if err != nil {
+			return RouteStats{}, err
+		}
+		report.Deliveries = DeliveryTraffic{Pushed: pushed, Pulled: pulled}
+		return h.fillRouteStats(ctx, report, sinceS)
+	case strings.HasPrefix(id, "sub_"):
+		report.Subject = RouteStatsSubject{Kind: "route", ID: id}
+		route, peer, err := h.statsSubscription(ctx, id)
+		if err != nil {
+			return RouteStats{}, err
+		}
+		report.Routes = []RouteStat{route}
+		peers := []string{}
+		if peer != "" {
+			peers = []string{peer}
+		}
+		pushed, pulled, err := h.deliveryTraffic(ctx, peers, sinceS)
+		if err != nil {
+			return RouteStats{}, err
+		}
+		report.Deliveries = DeliveryTraffic{Pushed: pushed, Pulled: pulled}
+		return h.fillRouteStats(ctx, report, sinceS)
+	default:
+		return RouteStats{}, invalidRouteField("id", "id is a peer_, route_ or sub_ id")
+	}
+}
+
+func (h *Hub) statsRoutesForPeer(ctx context.Context, peerID string) ([]RouteStat, error) {
+	var prn string
+	if err := h.DB.QueryRowContext(ctx, `SELECT prn_id FROM peers WHERE peer_id = ?`, peerID).Scan(&prn); err != nil {
+		return nil, fmt.Errorf("hub: route stats: %w", err)
+	}
+	rows, err := h.DB.QueryContext(ctx, `
+		SELECT route_id, kind, url, owner_kind, owner_id FROM routes
+		WHERE (owner_kind = 'peer' AND owner_id = ?)
+		   OR (owner_kind = 'principal' AND owner_id = ?)
+		ORDER BY created_at, route_id`, peerID, prn)
+	if err != nil {
+		return nil, fmt.Errorf("hub: route stats: %w", err)
+	}
+	defer rows.Close()
+	var out []RouteStat
+	for rows.Next() {
+		var id, kind, raw, ownerKind, ownerID string
+		if err := rows.Scan(&id, &kind, &raw, &ownerKind, &ownerID); err != nil {
+			return nil, fmt.Errorf("hub: route stats: %w", err)
+		}
+		out = append(out, RouteStat{RouteID: id, Kind: kind, Host: hostOf(raw), OwnerKind: ownerKind, OwnerID: ownerID})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hub: route stats: %w", err)
+	}
+	subs, err := h.DB.QueryContext(ctx, `SELECT sub_id, url FROM event_subscriptions WHERE peer_id = ? ORDER BY sub_id`, peerID)
+	if err != nil {
+		return nil, fmt.Errorf("hub: route stats: %w", err)
+	}
+	defer subs.Close()
+	for subs.Next() {
+		var id, raw string
+		if err := subs.Scan(&id, &raw); err != nil {
+			return nil, fmt.Errorf("hub: route stats: %w", err)
+		}
+		out = append(out, RouteStat{RouteID: id, Kind: RouteKindEvents, Host: hostOf(raw), OwnerKind: "peer", OwnerID: peerID})
+	}
+	if err := subs.Err(); err != nil {
+		return nil, fmt.Errorf("hub: route stats: %w", err)
+	}
+	if out == nil {
+		out = []RouteStat{}
 	}
 	return out, nil
 }
 
-type usageAcc struct {
-	u    RouteUsage
-	body []int64
-	lat  []int64
+func (h *Hub) statsRoute(ctx context.Context, id string) (RouteStat, []string, error) {
+	var kind, raw, ownerKind, ownerID string
+	err := h.DB.QueryRowContext(ctx, `SELECT kind, url, owner_kind, owner_id FROM routes WHERE route_id = ?`, id).
+		Scan(&kind, &raw, &ownerKind, &ownerID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RouteStat{}, nil, unknownRoute(id)
+	}
+	if err != nil {
+		return RouteStat{}, nil, fmt.Errorf("hub: route stats: %w", err)
+	}
+	peers, err := h.routePeers(ctx, id, ownerKind, ownerID)
+	if err != nil {
+		return RouteStat{}, nil, err
+	}
+	return RouteStat{RouteID: id, Kind: kind, Host: hostOf(raw), OwnerKind: ownerKind, OwnerID: ownerID}, peers, nil
 }
 
-func (h *Hub) routeUsagesChunk(ctx context.Context, keys []string, out map[string]RouteUsage) error {
-	ph := "?" + strings.Repeat(",?", len(keys)-1)
-	args := make([]any, len(keys))
-	for i, k := range keys {
-		args[i] = k
+func (h *Hub) routePeers(ctx context.Context, routeID, ownerKind, ownerID string) ([]string, error) {
+	q := `SELECT peer_id FROM peers WHERE route_id = ? ORDER BY peer_id`
+	args := []any{routeID}
+	if ownerKind == "peer" {
+		q = `SELECT peer_id FROM peers WHERE peer_id = ? OR route_id = ? ORDER BY peer_id`
+		args = []any{ownerID, routeID}
 	}
-	q := `SELECT route_key, requests, successes, failures, last_error, last_error_at, last_status, last_used_at, last_success_at
-		FROM route_usage WHERE route_key IN (` + ph + `)`
 	rows, err := h.DB.QueryContext(ctx, q, args...)
 	if err != nil {
-		return fmt.Errorf("hub: route usage: %w", err)
+		return nil, fmt.Errorf("hub: route stats: %w", err)
 	}
 	defer rows.Close()
-	acc := map[string]*usageAcc{}
+	var peers []string
 	for rows.Next() {
-		var key string
-		var u RouteUsage
-		var lastErr, lastErrAt, lastOK sql.NullString
-		var lastStatus sql.NullInt64
-		if err := rows.Scan(&key, &u.Requests, &u.Successes, &u.Failures, &lastErr, &lastErrAt, &lastStatus, &u.LastUsedAt, &lastOK); err != nil {
-			return fmt.Errorf("hub: route usage: %w", err)
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("hub: route stats: %w", err)
 		}
-		u.LastError = nullStr(lastErr)
-		u.LastErrorAt = nullStr(lastErrAt)
-		u.LastSuccessAt = nullStr(lastOK)
-		if lastStatus.Valid {
-			s := int(lastStatus.Int64)
-			u.LastStatus = &s
-		}
-		acc[key] = &usageAcc{u: u}
+		peers = append(peers, id)
 	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("hub: route usage: %w", err)
+	return peers, rows.Err()
+}
+
+func (h *Hub) statsSubscription(ctx context.Context, id string) (RouteStat, string, error) {
+	var peer, raw string
+	err := h.DB.QueryRowContext(ctx, `SELECT peer_id, url FROM event_subscriptions WHERE sub_id = ?`, id).Scan(&peer, &raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RouteStat{}, "", unknownRoute(id)
 	}
-	if len(acc) == 0 {
-		return nil
-	}
-	srows, err := h.DB.QueryContext(ctx, `SELECT route_key, body_bytes, latency_us FROM route_usage_samples WHERE route_key IN (`+ph+`)`, args...)
 	if err != nil {
-		return fmt.Errorf("hub: route usage samples: %w", err)
+		return RouteStat{}, "", fmt.Errorf("hub: route stats: %w", err)
 	}
-	defer srows.Close()
-	for srows.Next() {
-		var key string
-		var body int64
-		var lat sql.NullInt64
-		if err := srows.Scan(&key, &body, &lat); err != nil {
-			return fmt.Errorf("hub: route usage samples: %w", err)
-		}
-		a := acc[key]
-		if a == nil {
-			continue
-		}
-		a.body = append(a.body, body)
-		if lat.Valid {
-			a.lat = append(a.lat, lat.Int64)
-		}
-	}
-	if err := srows.Err(); err != nil {
-		return fmt.Errorf("hub: route usage samples: %w", err)
-	}
-	for key, a := range acc {
-		a.u.BodyBytes = usageDist(a.body, 1)
-		a.u.LatencyMS = usageDist(a.lat, 1000)
-		out[key] = a.u
-	}
-	return nil
+	return RouteStat{RouteID: id, Kind: RouteKindEvents, Host: hostOf(raw), OwnerKind: "peer", OwnerID: peer}, peer, nil
 }
 
-func nullStr(n sql.NullString) *string {
-	if !n.Valid {
-		return nil
+func hostOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
 	}
-	s := n.String
-	return &s
+	return u.Host
 }
 
-// usageDist sorts values and reports avg and nearest-rank p95/p99.
-// scale divides the stored unit into the reported one (1 for bytes,
-// 1000 for microseconds to milliseconds).
+func (h *Hub) fillRouteStats(ctx context.Context, report RouteStats, since string) (RouteStats, error) {
+	for i := range report.Routes {
+		rows, err := store.RouteAttempts(ctx, h.DB.DB, report.Routes[i].RouteID, since, store.RouteAttemptKeep)
+		if err != nil {
+			return RouteStats{}, err
+		}
+		report.Routes[i] = applyAttempts(report.Routes[i], rows)
+		n, err := h.pushedByRoute(ctx, report.Routes[i].RouteID, since)
+		if err != nil {
+			return RouteStats{}, err
+		}
+		report.Routes[i].Pushed = n
+	}
+	return report, nil
+}
+
+func applyAttempts(stat RouteStat, rows []store.RouteAttempt) RouteStat {
+	stat.Requests = len(rows)
+	var body, lat []int64
+	for _, row := range rows {
+		switch row.Outcome {
+		case AttemptOK:
+			stat.OK++
+		case AttemptRefused:
+			stat.Refused++
+		default:
+			stat.Fail++
+		}
+		body = append(body, int64(row.BodyBytes))
+		lat = append(lat, int64(row.LatencyMS))
+	}
+	// rows are newest first.
+	if len(rows) > 0 {
+		used := rows[0].At
+		stat.LastUsedAt = &used
+		if rows[0].HTTPStatus.Valid {
+			s := int(rows[0].HTTPStatus.Int64)
+			stat.LastStatus = &s
+		}
+	}
+	for _, row := range rows {
+		if row.Outcome == AttemptOK {
+			ok := row.At
+			stat.LastSuccessAt = &ok
+			break
+		}
+	}
+	for _, row := range rows {
+		if row.Outcome != AttemptOK && row.ErrorClass.Valid {
+			class := row.ErrorClass.String
+			at := row.At
+			stat.LastError = &class
+			stat.LastErrorAt = &at
+			break
+		}
+	}
+	stat.BodyBytes = usageDist(body, 1)
+	stat.LatencyMS = usageDist(lat, 1)
+	return stat
+}
+
 func usageDist(values []int64, scale float64) RouteUsageDist {
 	if len(values) == 0 || scale == 0 {
 		return RouteUsageDist{}
@@ -346,10 +507,46 @@ func round3(v float64) float64 {
 	return math.Round(v*1000) / 1000
 }
 
-// deleteRouteUsage removes one route's counters and, by cascade, its ring.
-func deleteRouteUsage(ctx context.Context, tx *sql.Tx, key string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM route_usage WHERE route_key = ?`, key); err != nil {
-		return fmt.Errorf("hub: delete route usage: %w", err)
+func (h *Hub) pushedByRoute(ctx context.Context, routeID, since string) (int, error) {
+	var n int
+	err := h.DB.QueryRowContext(ctx, `
+		SELECT count(DISTINCT delivery_id) FROM route_attempts
+		WHERE route_id = ? AND at >= ?`, routeID, since).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("hub: route stats: %w", err)
 	}
-	return nil
+	return n, nil
+}
+
+func (h *Hub) deliveryTraffic(ctx context.Context, peers []string, since string) (pushed, pulled int, err error) {
+	if len(peers) == 0 {
+		return 0, 0, nil
+	}
+	in := "?" + strings.Repeat(",?", len(peers)-1)
+	// since, peers..., since, since, peers..., since
+	args := make([]any, 0, 4+2*len(peers))
+	args = append(args, since)
+	for _, p := range peers {
+		args = append(args, p)
+	}
+	args = append(args, since)
+	args = append(args, since)
+	for _, p := range peers {
+		args = append(args, p)
+	}
+	args = append(args, since)
+	err = h.DB.QueryRowContext(ctx, `
+		SELECT
+		  (SELECT count(*) FROM deliveries
+		    WHERE updated_at >= ? AND recipient IN (`+in+`) AND (
+		      attempt > 0 OR dly_id IN (SELECT delivery_id FROM route_attempts WHERE at >= ?)
+		    )),
+		  (SELECT count(*) FROM deliveries
+		    WHERE updated_at >= ? AND recipient IN (`+in+`) AND state = 'accepted' AND attempt = 0
+		      AND dly_id NOT IN (SELECT delivery_id FROM route_attempts WHERE at >= ?))`,
+		args...).Scan(&pushed, &pulled)
+	if err != nil {
+		return 0, 0, fmt.Errorf("hub: route stats: %w", err)
+	}
+	return pushed, pulled, nil
 }

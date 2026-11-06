@@ -417,7 +417,7 @@ func (w *Worker) drain(ctx context.Context, sub Subscription) (int, error) {
 		LogLifecycle("events.delivery", s, map[string]any{"event_id": r.eventID, "http_status": status, "duration_ms": time.Since(attemptStarted).Milliseconds(), "result": result, "reason": reason, "retry": retry, "dead": dead})
 		var delivered, stop bool
 		if netErr == nil || ctx.Err() == nil {
-			delivered, stop, err = w.record(context.WithoutCancel(ctx), s, r, status, retryAfter, netErr)
+			delivered, stop, err = w.record(context.WithoutCancel(ctx), s, r, status, retryAfter, netErr, posted, latency)
 		}
 		if claimed {
 			if endErr := w.Hub.EndDispatch(ctx, r.eventID, false); err == nil {
@@ -426,18 +426,6 @@ func (w *Worker) drain(ctx context.Context, sub Subscription) (int, error) {
 		}
 		if netErr != nil && ctx.Err() != nil {
 			return sent, err // shutting down: this attempt does not count
-		}
-		if posted {
-			ok := netErr == nil && status >= 200 && status < 300
-			st := 0
-			if netErr == nil {
-				st = status
-			}
-			w.Hub.NoteRouteAttempt(context.WithoutCancel(ctx), hub.RouteAttempt{
-				Key: s.ID, Kind: hub.RouteKindEvents, BodyBytes: len(r.body),
-				Latency: latency, HasLatency: true, OK: ok, Status: st,
-				Error: hub.RouteAttemptError(status, netErr), At: w.now(),
-			})
 		}
 		if err != nil {
 			return sent, err
@@ -545,12 +533,12 @@ func (w *Worker) post(ctx context.Context, s Subscription, r outboxRow) (status 
 // dead_letter would gate. If nothing reaches it, it expires (PROTOCOL §5.1).
 // retryLater and the exhausted settle count each failure in their outbox
 // transaction; pause counts only a transition from an unpaused subscription.
-func (w *Worker) record(ctx context.Context, s Subscription, r outboxRow, status int, retryAfter time.Duration, netErr error) (delivered, stop bool, err error) {
+func (w *Worker) record(ctx context.Context, s Subscription, r outboxRow, status int, retryAfter time.Duration, netErr error, posted bool, latency time.Duration) (delivered, stop bool, err error) {
 	now := w.now()
 	w.Hub.ObservePush(ctx, s.PeerID, netErr == nil && status >= 200 && status < 300)
 	switch {
 	case netErr == nil && status >= 200 && status < 300:
-		if err := w.Store.settle(ctx, s.ID, r.eventID, "", status, now); err != nil {
+		if err := w.Store.settle(ctx, s.ID, r.eventID, "", status, now, posted, len(r.body), latency, netErr); err != nil {
 			return false, true, err
 		}
 		if strings.HasPrefix(r.eventID, deliveryPrefix) {
@@ -560,16 +548,16 @@ func (w *Worker) record(ctx context.Context, s Subscription, r outboxRow, status
 		}
 		return true, false, nil
 	case netErr == nil && (status == http.StatusGone || status == http.StatusRequestEntityTooLarge):
-		return false, false, w.Store.settle(ctx, s.ID, r.eventID, "http_"+strconv.Itoa(status), status, now)
+		return false, false, w.Store.settle(ctx, s.ID, r.eventID, "http_"+strconv.Itoa(status), status, now, posted, len(r.body), latency, netErr)
 	}
 
 	attempts := r.attempts + 1
 	if attempts >= hub.PushAttempts {
-		if err := w.Store.settle(ctx, s.ID, r.eventID, "exhausted", status, now); err != nil {
+		if err := w.Store.settle(ctx, s.ID, r.eventID, "exhausted", status, now, posted, len(r.body), latency, netErr); err != nil {
 			return false, true, err
 		}
 		return false, true, w.Store.pause(ctx, s.ID, PausedDeliveryFailed, now)
 	}
 	next := now.Add(hub.PushBackoff(attempts, retryAfter, nil))
-	return false, true, w.Store.retryLater(ctx, s.ID, r.eventID, attempts, status, next, now)
+	return false, true, w.Store.retryLater(ctx, s.ID, r.eventID, attempts, status, next, now, posted, len(r.body), latency, netErr)
 }

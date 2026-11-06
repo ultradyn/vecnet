@@ -2,12 +2,15 @@ package hub_test
 
 import (
 	"context"
+	"database/sql"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
+	"github.com/XertroV/vecnet/internal/store"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -37,158 +40,152 @@ func TestPercentileNearestRank(t *testing.T) {
 	if v, _ := hub.PercentileNearestRank(samples, 100); v != 100 {
 		t.Fatalf("p100 of 1..100 = %d, want 100", v)
 	}
-	// Unsorted input is not the contract; the read path sorts first.
-	// A two-point sample: p95 is the higher one (ceil(0.95*2)=2).
 	if v, _ := hub.PercentileNearestRank([]int64{10, 40}, 95); v != 40 {
 		t.Fatalf("p95 of {10,40} = %d, want 40", v)
 	}
 }
 
-func TestRouteUsageRingKeepsLifetimeCounters(t *testing.T) {
+func TestRouteAttemptPruneKeepsNewest1000And7Days(t *testing.T) {
 	env := testhub.Start(t)
 	ctx := context.Background()
+	peer, _ := env.NewPeer("session", "p")
+	route, _, err := env.Hub.AddRoute(ctx, "peer", peer, "http://127.0.0.1:9/hook")
+	if err != nil {
+		t.Fatal(err)
+	}
 	base := env.Now.Now()
-	const key = "route_ring"
-	for i := 1; i <= 300; i++ {
-		ok := i%10 != 0
-		status := 503
-		if ok {
-			status = 200
+	// Older than the window: the next insert must drop it even though the route
+	// is nowhere near 1000 rows yet.
+	insertAttempt(t, env, route, "dly_old", base.Add(-8*24*time.Hour), hub.AttemptOK, 200, "", 1, 1)
+	for i := 1; i <= store.RouteAttemptKeep+1; i++ {
+		outcome := hub.AttemptOK
+		class := ""
+		if i%10 == 0 {
+			outcome = hub.AttemptFail
+			class = "http_5xx"
 		}
-		env.Hub.NoteRouteAttempt(ctx, hub.RouteAttempt{
-			Key: key, Kind: hub.RouteKindHTTP, BodyBytes: i,
-			Latency: time.Duration(i) * time.Millisecond, HasLatency: true,
-			OK: ok, Status: status, Error: "HTTP 503",
-			At: base.Add(time.Duration(i) * time.Millisecond),
-		})
+		insertAttempt(t, env, route, "dly_"+strconv.Itoa(i), base.Add(time.Duration(i)*time.Millisecond), outcome, 200, class, i, i)
 	}
-	got, err := env.Hub.RouteUsages(ctx, []string{key, "missing"})
+	var n, minB, maxB int
+	if err := env.Hub.DB.QueryRow(`SELECT count(*), min(body_bytes), max(body_bytes) FROM route_attempts WHERE route_id = ?`, route).Scan(&n, &minB, &maxB); err != nil {
+		t.Fatal(err)
+	}
+	if n != store.RouteAttemptKeep {
+		t.Fatalf("kept %d attempts, want %d", n, store.RouteAttemptKeep)
+	}
+	if minB != 2 || maxB != store.RouteAttemptKeep+1 {
+		t.Fatalf("kept bodies %d..%d, want 2..%d (the oldest recent row and the 8-day row are gone)", minB, maxB, store.RouteAttemptKeep+1)
+	}
+	var old int
+	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM route_attempts WHERE route_id = ? AND delivery_id = 'dly_old'`, route).Scan(&old); err != nil || old != 0 {
+		t.Fatalf("8-day-old attempt still stored: %d %v", old, err)
+	}
+	stats, err := env.Hub.RouteStats(ctx, route)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := got["missing"]; ok {
-		t.Fatal("a route with no attempts should be absent")
+	if stats.Window.MaxRows != store.RouteAttemptKeep || stats.Window.MaxAgeHours != 168 {
+		t.Fatalf("window = %+v", stats.Window)
 	}
-	u, ok := got[key]
-	if !ok {
-		t.Fatal("usage missing")
+	if len(stats.Routes) != 1 || stats.Routes[0].Requests != store.RouteAttemptKeep {
+		t.Fatalf("read-time count = %+v", stats.Routes)
 	}
-	if u.Requests != 300 || u.Successes != 270 || u.Failures != 30 {
-		t.Fatalf("counters = %d ok %d fail %d, want 300/270/30", u.Requests, u.Successes, u.Failures)
-	}
-	if u.BodyBytes.Samples != hub.RouteUsageSamples || u.LatencyMS.Samples != hub.RouteUsageSamples {
-		t.Fatalf("samples body %d latency %d, want %d", u.BodyBytes.Samples, u.LatencyMS.Samples, hub.RouteUsageSamples)
-	}
-	// The ring holds attempts 45..300. avg = 172.5. p95 rank 244 → 288. p99 rank 254 → 298.
-	if u.BodyBytes.Avg != 172.5 || u.BodyBytes.P95 != 288 || u.BodyBytes.P99 != 298 {
-		t.Fatalf("body dist = %+v, want avg 172.5 p95 288 p99 298", u.BodyBytes)
-	}
-	if u.LatencyMS.Avg != 172.5 || u.LatencyMS.P95 != 288 || u.LatencyMS.P99 != 298 {
-		t.Fatalf("latency dist = %+v, want the same numbers in milliseconds", u.LatencyMS)
-	}
-	if u.LastError == nil || *u.LastError != "HTTP 503" || u.LastStatus == nil || *u.LastStatus != 503 {
-		t.Fatalf("last failure = error %v status %v", u.LastError, u.LastStatus)
-	}
-	wantUsed := envelope.FormatTime(base.Add(300 * time.Millisecond))
-	wantOK := envelope.FormatTime(base.Add(299 * time.Millisecond))
-	if u.LastUsedAt != wantUsed || u.LastSuccessAt == nil || *u.LastSuccessAt != wantOK {
-		t.Fatalf("last used %s success %v, want %s and %s", u.LastUsedAt, u.LastSuccessAt, wantUsed, wantOK)
-	}
+}
 
-	// A later success does not erase the last error.
-	later := base.Add(time.Second)
-	env.Hub.NoteRouteAttempt(ctx, hub.RouteAttempt{
-		Key: key, Kind: hub.RouteKindHTTP, BodyBytes: 8,
-		Latency: time.Millisecond, HasLatency: true,
-		OK: true, Status: 200, At: later,
-	})
-	got, err = env.Hub.RouteUsages(ctx, []string{key})
+func TestRouteStatsPercentilesOverTheWindow(t *testing.T) {
+	env := testhub.Start(t)
+	ctx := context.Background()
+	peer, _ := env.NewPeer("grokbot", "g")
+	route, _, err := env.Hub.AddRoute(ctx, "peer", peer, "http://127.0.0.1:9/hook")
 	if err != nil {
 		t.Fatal(err)
 	}
-	u = got[key]
-	if u.Requests != 301 || u.Successes != 271 || u.Failures != 30 {
-		t.Fatalf("after success counters = %d/%d/%d", u.Requests, u.Successes, u.Failures)
+	base := env.Now.Now()
+	for i := 1; i <= 300; i++ {
+		outcome := hub.AttemptOK
+		class := ""
+		status := 200
+		if i%10 == 0 {
+			outcome = hub.AttemptFail
+			class = "http_5xx"
+			status = 503
+		}
+		insertAttempt(t, env, route, "dly_"+strconv.Itoa(i), base.Add(time.Duration(i)*time.Millisecond), outcome, status, class, i, i)
 	}
-	if u.LastError == nil || *u.LastError != "HTTP 503" {
-		t.Fatalf("success cleared last error: %v", u.LastError)
+	stats, err := env.Hub.RouteStats(ctx, peer)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if u.LastStatus == nil || *u.LastStatus != 200 || u.LastSuccessAt == nil || *u.LastSuccessAt != envelope.FormatTime(later) {
-		t.Fatalf("last status %v success %v", u.LastStatus, u.LastSuccessAt)
+	if stats.Subject.Kind != "peer" || len(stats.Routes) != 1 {
+		t.Fatalf("subject %+v routes %d", stats.Subject, len(stats.Routes))
 	}
-
-	var n int
-	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM route_usage_samples WHERE route_key = ?`, key).Scan(&n); err != nil || n != hub.RouteUsageSamples {
-		t.Fatalf("ring rows = %d, %v", n, err)
+	u := stats.Routes[0]
+	if u.Requests != 300 || u.OK != 270 || u.Fail != 30 || u.Refused != 0 {
+		t.Fatalf("counts = %+v", u)
+	}
+	// 1..300: avg 150.5, p95 rank 285, p99 rank 297.
+	if u.BodyBytes.Avg != 150.5 || u.BodyBytes.P95 != 285 || u.BodyBytes.P99 != 297 || u.BodyBytes.Samples != 300 {
+		t.Fatalf("body = %+v", u.BodyBytes)
+	}
+	if u.LatencyMS.P95 != 285 || u.LatencyMS.P99 != 297 {
+		t.Fatalf("latency = %+v", u.LatencyMS)
+	}
+	if u.LastError == nil || *u.LastError != "http_5xx" {
+		t.Fatalf("last error = %v", u.LastError)
+	}
+	insertAttempt(t, env, route, "dly_later", base.Add(time.Second), hub.AttemptOK, 200, "", 8, 1)
+	stats, err = env.Hub.RouteStats(ctx, route)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u = stats.Routes[0]
+	if u.Requests != 301 || u.OK != 271 || u.LastError == nil || *u.LastError != "http_5xx" {
+		t.Fatalf("success cleared the last error: %+v", u)
+	}
+	if u.LastStatus == nil || *u.LastStatus != 200 || u.LastSuccessAt == nil {
+		t.Fatalf("last success = status %v at %v", u.LastStatus, u.LastSuccessAt)
 	}
 	var leaked int
-	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM pragma_table_info('route_usage_samples') WHERE name LIKE '%body%' AND name != 'body_bytes'`).Scan(&leaked); err != nil || leaked != 0 {
-		t.Fatalf("sample table stores something other than a byte count: %d %v", leaked, err)
+	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM route_attempts WHERE error_class LIKE '% %' OR error_class LIKE '%body%'`).Scan(&leaked); err != nil || leaked != 0 {
+		t.Fatalf("error_class stored free text: %d %v", leaked, err)
 	}
 }
 
-func TestNoteRouteAttemptSwallowsBadWrite(t *testing.T) {
+func TestRouteAttemptRejectsBodyText(t *testing.T) {
 	env := testhub.Start(t)
 	ctx := context.Background()
-	env.Hub.NoteRouteAttempt(ctx, hub.RouteAttempt{Key: "route_bad", Kind: "nope", OK: true, Status: 200, At: env.Now.Now()})
-	long := strings.Repeat("e", 500)
-	env.Hub.NoteRouteAttempt(ctx, hub.RouteAttempt{
-		Key: "route_clip", Kind: hub.RouteKindHTTP, BodyBytes: -4, OK: false, Status: 0,
-		Error: long, At: env.Now.Now(), HasLatency: true, Latency: -time.Second,
+	err := env.Hub.DB.Tx(ctx, func(tx *sql.Tx) error {
+		return store.InsertRouteAttempt(ctx, tx, store.RouteAttemptInsert{
+			RouteID: "route_x", DeliveryID: "dly_x",
+			At: envelope.FormatTime(env.Now.Now()), Cutoff: envelope.FormatTime(env.Now.Now().Add(-7 * 24 * time.Hour)),
+			Outcome: hub.AttemptFail, ErrorClass: sql.NullString{String: "peer said " + strings.Repeat("no", 20), Valid: true},
+			BodyBytes: 1, LatencyMS: 1,
+		})
 	})
-	got, err := env.Hub.RouteUsages(ctx, []string{"route_bad", "route_clip"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := got["route_bad"]; ok {
-		t.Fatal("bad kind was stored")
-	}
-	u := got["route_clip"]
-	if u.Requests != 1 || u.Failures != 1 || u.LastError == nil || len(*u.LastError) != 200 {
-		t.Fatalf("clipped failure = %+v", u)
-	}
-	if u.LastStatus != nil {
-		t.Fatalf("status with no HTTP response = %d", *u.LastStatus)
-	}
-	if u.BodyBytes.Avg != 0 || u.LatencyMS.Avg != 0 {
-		t.Fatalf("negative body/latency not clamped: %+v %+v", u.BodyBytes, u.LatencyMS)
+	if err == nil {
+		t.Fatal("error_class accepted response text")
 	}
 }
 
-func TestRemoveRouteDropsUsage(t *testing.T) {
-	env := testhub.Start(t)
-	ctx := context.Background()
-	peer, _ := env.NewPeer("grokbot", "routed")
-	id, _, err := env.Hub.AddRoute(ctx, "peer", peer, "http://127.0.0.1:9/hook")
-	if err != nil {
-		t.Fatal(err)
-	}
-	env.Hub.NoteRouteAttempt(ctx, hub.RouteAttempt{
-		Key: id, Kind: hub.RouteKindHTTP, BodyBytes: 12, HasLatency: true, Latency: 2 * time.Millisecond,
-		OK: true, Status: 200, At: env.Now.Now(),
+func insertAttempt(t *testing.T, env *testhub.Env, route, delivery string, at time.Time, outcome string, status int, class string, body, latency int) {
+	t.Helper()
+	err := env.Hub.DB.Tx(context.Background(), func(tx *sql.Tx) error {
+		var httpStatus sql.NullInt64
+		if status != 0 {
+			httpStatus = sql.NullInt64{Int64: int64(status), Valid: true}
+		}
+		var errClass sql.NullString
+		if class != "" {
+			errClass = sql.NullString{String: class, Valid: true}
+		}
+		return store.InsertRouteAttempt(context.Background(), tx, store.RouteAttemptInsert{
+			RouteID: route, DeliveryID: delivery,
+			At: envelope.FormatTime(at), Cutoff: envelope.FormatTime(at.Add(-7 * 24 * time.Hour)),
+			Outcome: outcome, HTTPStatus: httpStatus, ErrorClass: errClass,
+			BodyBytes: body, LatencyMS: latency,
+		})
 	})
-	routes, err := env.Hub.ListRoutes(ctx)
 	if err != nil {
 		t.Fatal(err)
-	}
-	var saw bool
-	for _, r := range routes {
-		if r.RouteID != id {
-			continue
-		}
-		saw = true
-		if r.Usage == nil || r.Usage.Requests != 1 || r.Usage.Successes != 1 {
-			t.Fatalf("list usage = %+v", r.Usage)
-		}
-	}
-	if !saw {
-		t.Fatal("route missing from list")
-	}
-	if err := env.Hub.RemoveRoute(ctx, id); err != nil {
-		t.Fatal(err)
-	}
-	var n int
-	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM route_usage WHERE route_key = ?`, id).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("usage rows after remove = %d, %v", n, err)
 	}
 }

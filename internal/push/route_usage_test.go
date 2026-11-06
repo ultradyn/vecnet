@@ -9,17 +9,25 @@ import (
 	"github.com/XertroV/vecnet/internal/hub"
 )
 
-func usageOf(t *testing.T, f *fixture, key string) hub.RouteUsage {
+func usageOf(t *testing.T, f *fixture, key string) hub.RouteStat {
 	t.Helper()
-	got, err := f.env.Hub.RouteUsages(context.Background(), []string{key})
+	stats, err := f.env.Hub.RouteStats(context.Background(), key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, ok := got[key]
-	if !ok {
-		t.Fatalf("no usage for %s", key)
+	if len(stats.Routes) != 1 || stats.Routes[0].RouteID != key && key != f.b {
+		// key may be the route id; find it.
 	}
-	return u
+	for _, r := range stats.Routes {
+		if r.RouteID == key {
+			return r
+		}
+	}
+	if len(stats.Routes) == 1 {
+		return stats.Routes[0]
+	}
+	t.Fatalf("no route stat for %s in %+v", key, stats.Routes)
+	return hub.RouteStat{}
 }
 
 func TestPushRecordsBodySizes(t *testing.T) {
@@ -38,7 +46,7 @@ func TestPushRecordsBodySizes(t *testing.T) {
 		t.Fatalf("hits = %d, want 3", len(hits))
 	}
 	u := usageOf(t, f, f.route)
-	if u.Requests != 3 || u.Successes != 3 || u.Failures != 0 || u.LastError != nil {
+	if u.Requests != 3 || u.OK != 3 || u.Fail != 0 || u.LastError != nil {
 		t.Fatalf("usage = %+v", u)
 	}
 	if u.BodyBytes.Samples != 3 || u.LatencyMS.Samples != 3 {
@@ -48,7 +56,7 @@ func TestPushRecordsBodySizes(t *testing.T) {
 		t.Fatalf("percentiles not ordered: %+v", u.BodyBytes)
 	}
 	var sizes []int
-	rows, err := f.env.Hub.DB.Query(`SELECT body_bytes FROM route_usage_samples WHERE route_key = ? ORDER BY slot`, f.route)
+	rows, err := f.env.Hub.DB.Query(`SELECT body_bytes FROM route_attempts WHERE route_id = ? ORDER BY at, id`, f.route)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,22 +83,16 @@ func TestPushRecordsBodySizes(t *testing.T) {
 		}
 	}
 	var leaked int
-	err = f.env.Hub.DB.QueryRow(`SELECT count(*) FROM route_usage WHERE route_key = ? AND ifnull(last_error,'') LIKE '%`+texts[2][:8]+`%'`, f.route).Scan(&leaked)
+	err = f.env.Hub.DB.QueryRow(`SELECT count(*) FROM route_attempts WHERE route_id = ? AND ifnull(error_class,'') LIKE '%`+texts[2][:8]+`%'`, f.route).Scan(&leaked)
 	if err != nil || leaked != 0 {
 		t.Fatalf("usage stored request text: %d %v", leaked, err)
 	}
-	routes, err := f.env.Hub.ListRoutes(context.Background())
+	stats, err := f.env.Hub.RouteStats(context.Background(), f.b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var listed *hub.RouteUsage
-	for i := range routes {
-		if routes[i].RouteID == f.route {
-			listed = routes[i].Usage
-		}
-	}
-	if listed == nil || listed.Requests != 3 {
-		t.Fatalf("GET routes usage = %+v", listed)
+	if stats.Deliveries.Pushed != 3 || len(stats.Routes) != 1 || stats.Routes[0].Requests != 3 || stats.Routes[0].OK != 3 {
+		t.Fatalf("stats = %+v routes %+v", stats.Deliveries, stats.Routes)
 	}
 }
 
@@ -103,12 +105,12 @@ func TestHoldDoesNotUseTheRoute(t *testing.T) {
 	if hits := f.rcv.Hits(); len(hits) != 0 {
 		t.Fatalf("hold pushed %d times", len(hits))
 	}
-	got, err := f.env.Hub.RouteUsages(context.Background(), []string{f.route})
+	stats, err := f.env.Hub.RouteStats(context.Background(), f.b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := got[f.route]; ok {
-		t.Fatal("hold incremented route usage")
+	if len(stats.Routes) != 1 || stats.Routes[0].Requests != 0 || stats.Deliveries.Pushed != 0 {
+		t.Fatalf("hold recorded a push: %+v %+v", stats.Deliveries, stats.Routes)
 	}
 }
 
@@ -117,10 +119,7 @@ func TestPushStatsFailureDoesNotFailDelivery(t *testing.T) {
 	m := f.msg("wake")
 	m["content"] = map[string]any{"text": "CANARY-BODY"}
 	sr := f.send(f.aSec, m)
-	if _, err := f.env.Hub.DB.Exec(`DROP TABLE route_usage_samples`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.env.Hub.DB.Exec(`DROP TABLE route_usage`); err != nil {
+	if _, err := f.env.Hub.DB.Exec(`DROP TABLE route_attempts`); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.step(); n != 1 {
@@ -148,12 +147,12 @@ func TestGrokbotPushRecordsUsage(t *testing.T) {
 		t.Fatalf("step = %d", n)
 	}
 	u := usageOf(t, f, f.route)
-	if u.Requests != 1 || u.Successes != 1 || u.Failures != 0 {
+	if u.Requests != 1 || u.OK != 1 || u.Fail != 0 {
 		t.Fatalf("started usage = %+v", u)
 	}
-	var kind string
-	if err := f.env.Hub.DB.QueryRow(`SELECT kind FROM route_usage WHERE route_key = ?`, f.route).Scan(&kind); err != nil || kind != hub.RouteKindGrokbot {
-		t.Fatalf("kind = %q, %v", kind, err)
+	var oks int
+	if err := f.env.Hub.DB.QueryRow(`SELECT count(*) FROM route_attempts WHERE route_id = ? AND outcome = 'ok'`, f.route).Scan(&oks); err != nil || oks != 1 {
+		t.Fatalf("ok attempts = %d, %v", oks, err)
 	}
 	hits := f.rcv.Hits()
 	if len(hits) != 1 || int(u.BodyBytes.Avg) != len(hits[0].Body) {
@@ -167,7 +166,7 @@ func TestGrokbotPushRecordsUsage(t *testing.T) {
 		t.Fatalf("step = %d", n)
 	}
 	bad := usageOf(t, f2, f2.route)
-	if bad.Requests != 1 || bad.Failures != 1 || bad.Successes != 0 || bad.LastError == nil || *bad.LastError != "HTTP 500" {
+	if bad.Requests != 1 || bad.Fail != 1 || bad.OK != 0 || bad.LastError == nil || *bad.LastError != "http_5xx" {
 		t.Fatalf("failed routine usage = %+v", bad)
 	}
 	if bad.LastSuccessAt != nil {
