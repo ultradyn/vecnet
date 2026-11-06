@@ -139,6 +139,10 @@ test('every method calls its route with the secret only in the header', async ()
     [() => api.audit({ limit: 50, before: 7 }), 'GET', '/v1/admin/audit?limit=50&before=7'],
     [() => api.counters(), 'GET', '/v1/admin/counters'],
     [() => api.blob('abc'), 'GET', '/v1/blobs/abc'],
+    [() => api.agentKinds(), 'GET', '/v1/admin/agent-kinds'],
+    [() => api.agentAdd({ kind: 'session', spec_version: '2026-11-06', request_id: 'req_1', inputs: { name: 'a' } }), 'POST', '/v1/admin/agents'],
+    [() => api.onboardingStatus('req/1'), 'GET', '/v1/admin/agents/onboarding/req%2F1'],
+    [() => api.hubIdentity(), 'GET', '/v1/hub/identity'],
   ];
   for (const [call, method, url] of table) {
     await call();
@@ -222,4 +226,25 @@ test('dotLink asks for a link code for one peer, in the body', async () => {
   const { api, calls } = harness();
   await api.dotLink('peer_dot');
   assert.deepEqual(JSON.parse(calls.at(-1).init.body), { peer_id: 'peer_dot' });
+});
+
+test('agent kinds, submit and status use the operator routes and an abort signal', async () => {
+  const controller = new AbortController();
+  const { api, calls } = harness();
+  await api.agentKinds({ signal: controller.signal });
+  await api.agentAdd({ kind: 'grokbot', spec_version: '2026-11-06', request_id: 'req_1', inputs: { name: 'Helper' } }, { signal: controller.signal });
+  await api.onboardingStatus('req/1', { signal: controller.signal });
+  assert.equal(calls[0].url, '/v1/admin/agent-kinds');
+  assert.equal(calls[0].init.method, 'GET');
+  assert.equal(calls[0].init.signal, controller.signal);
+  assert.equal(calls[0].init.cache, 'no-store');
+  assert.equal(calls[1].url, '/v1/admin/agents');
+  assert.equal(calls[1].init.method, 'POST');
+  assert.deepEqual(JSON.parse(calls[1].init.body), { kind: 'grokbot', spec_version: '2026-11-06', request_id: 'req_1', inputs: { name: 'Helper' } });
+  assert.equal(calls[2].url, '/v1/admin/agents/onboarding/req%2F1');
+  assert.equal(calls[2].init.signal, controller.signal);
+  for (const call of calls) {
+    assert.ok(!call.url.includes('vn_secret'), call.url);
+    assert.equal(call.init.headers.Authorization, 'Bearer vn_secret');
+  }
 });

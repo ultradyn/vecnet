@@ -1,6 +1,6 @@
 /* Add agent dialog (invite.js). It sits on <body>, outside .va. */
 .dash-peers h2 .inv-open{margin-left:auto;font-size:12.5px;padding:4px 11px}
-dialog.inv{width:min(720px,calc(100vw - 48px));padding:20px 22px;border:1px solid var(--line2);border-radius:12px;background:#0e1426;color:var(--text);box-shadow:0 24px 80px #000a}
+dialog.inv{width:min(720px,calc(100vw - 48px));max-height:calc(100vh - 32px);display:flex;flex-direction:column;padding:20px 22px;border:1px solid var(--line2);border-radius:12px;background:#0e1426;color:var(--text);box-shadow:0 24px 80px #000a}
 dialog.inv::backdrop{background:#05070dcc}
 .inv h2{margin:0 0 4px;font-size:15px;font-weight:600}
 .inv .inv-lede{margin:0 0 14px;color:var(--muted);font-size:13px;line-height:1.5}
@@ -10,7 +10,7 @@ dialog.inv::backdrop{background:#05070dcc}
 .inv-form input{font-family:var(--mono)}
 .inv-row{display:flex;gap:14px;margin-top:6px}
 .inv-row>span{display:flex;flex-direction:column}
-.inv-acts{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+.inv-acts{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;position:sticky;bottom:0;background:#0e1426;padding-top:8px}
 .inv-warn{margin:0 0 10px;padding:9px 12px;border:1px solid #fbbf2466;border-radius:8px;background:#fbbf2410;color:var(--wake);font-size:13px}
 .inv-block{margin:0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#080c18;font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;max-height:50vh;overflow:auto;user-select:all}
 .inv-meta{margin:8px 0 0;font-size:11.5px;color:var(--dim);overflow-wrap:anywhere}
@@ -30,4 +30,18 @@ dialog.inv::backdrop{background:#05070dcc}
 .inv-code .err{margin:0 0 6px}
 .inv-pending{font-size:12.5px;color:var(--dim)}
 .inv-link{background:none;border:0;padding:0;color:var(--violet);font:inherit;text-decoration:underline;text-underline-offset:2px}
-.inv-note{margin:12px 0 0;padding:8px 12px;border-left:2px solid var(--line2);font-size:12.5px;line-height:1.5;color:var(--muted)}
+.inv-note{margin:8px 0 0;padding:8px 12px;border-left:2px solid var(--line2);font-size:12.5px;line-height:1.5;color:var(--muted)}
+.inv-body{min-height:0;overflow:auto}
+.inv-prompt{margin:0 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#080c18;font-size:12px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;max-height:180px;overflow:auto}
+.inv-loading{margin:0 0 8px;color:var(--dim);font-size:13px}
+.inv-field-err{color:var(--bad);font-size:12.5px;margin:4px 0 0}
+.inv-derived{margin:4px 0 0;font-size:12px;color:var(--muted)}
+.inv-bearer{margin:12px 0 0;padding:10px 12px;border:1px solid #f8717166;border-radius:8px;background:#f8717114}
+.inv-bearer p{margin:0 0 8px;color:var(--text);font-size:13px;line-height:1.45}
+.inv-retry{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}
+.inv :focus-visible{outline:2px solid var(--violet);outline-offset:2px}
+.inv-form input[type=password]{font-family:var(--mono)}
+@media (max-width: 560px){
+  .inv-row{flex-direction:column}
+  dialog.inv{padding:16px}
+}
