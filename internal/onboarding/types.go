@@ -151,6 +151,10 @@ type SubmitResult struct {
 	SkipMCP            bool   `json:"skip_mcp,omitempty"`
 	EnrolTTLSeconds    int    `json:"enrol_ttl_seconds,omitempty"`
 	RequestPrincipalID string `json:"request_principal_id,omitempty"`
+	// SafeComplete is true when the receipt stored every safe option, so a
+	// zero value is the request's value. Historical receipts leave it false.
+	// Absent fields on those receipts are not evidence the requests match.
+	SafeComplete bool `json:"safe_complete,omitempty"`
 }
 
 // MarshalSafe encodes the result with HumanOutput removed.

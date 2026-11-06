@@ -88,6 +88,7 @@ func agentToolSpecs() []toolSpec {
 			"Listing grants no write. A connector name is not a connection and is not identity. A whoami mismatch stays a stop.",
 		input:       object(schema{}),
 		annotations: readAnnotations(),
+		precheck:    precheckAgentKinds,
 		call:        callAgentKinds,
 	}, {
 		name: "vecnet_agent_add",
@@ -103,7 +104,7 @@ func agentToolSpecs() []toolSpec {
 			"inputs":       object(safeInputs),
 		}, "kind", "spec_version", "request_id", "inputs"),
 		annotations: readAnnotations(),
-		precheck:    precheckAgentRequestID,
+		precheck:    precheckAgentAdd,
 		output: object(schema{
 			"request_id": schema{"type": "string"},
 			"status":     schema{"type": "string", "enum": []string{"needs_human"}},
@@ -141,9 +142,10 @@ func agentToolSpecs() []toolSpec {
 			"skip_mcp":             schema{"type": "boolean"},
 			"enrol_ttl_seconds":    schema{"type": "integer"},
 			"request_principal_id": schema{"type": "string"},
+			"safe_complete":        schema{"type": "boolean"},
 		}),
 		annotations: readAnnotations(),
-		precheck:    precheckAgentRequestID,
+		precheck:    precheckAgentStatus,
 		call:        callAgentStatus,
 	}}
 }
@@ -188,7 +190,7 @@ func callAgentAdd(ctx context.Context, s *Server, c auth.Caller, raw []byte) (an
 	if req.Inputs == nil {
 		req.Inputs = map[string]any{}
 	}
-	safe, err := validateAgentAdd(req)
+	n, safe, err := validateAgentAdd(req)
 	if err != nil {
 		return nil, err
 	}
@@ -199,10 +201,16 @@ func callAgentAdd(ctx context.Context, s *Server, c auth.Caller, raw []byte) (an
 		if agentAPICode(err) != "not_found" {
 			return nil, err
 		}
-	} else if agentRequestChanged(existing, safe) {
-		e := hub.E(http.StatusConflict, "idempotency_conflict", "request_id was already used with a different request")
-		e.Details["request_id"] = safe.requestID
-		return nil, e
+	} else {
+		conflict, err := agentRetryConflict(ctx, s, c, existing, n, safe)
+		if err != nil {
+			return nil, err
+		}
+		if conflict {
+			e := hub.E(http.StatusConflict, "idempotency_conflict", "request_id was already used with a different request")
+			e.Details["request_id"] = safe.requestID
+			return nil, e
+		}
 	}
 	return map[string]string{
 		"request_id": safe.requestID,
@@ -232,10 +240,10 @@ type agentSafe struct {
 // are rejected before Normalize runs, so a routine URL or key is never
 // parsed. Grokbot's required human fields are filled with placeholders for
 // that check only.
-func validateAgentAdd(req onboarding.SubmitRequest) (agentSafe, error) {
+func validateAgentAdd(req onboarding.SubmitRequest) (onboarding.Normalized, agentSafe, error) {
 	spec, ok := onboarding.Lookup(req.Kind)
 	if !ok {
-		return agentSafe{}, agentField(onboarding.CodeUnknownKind, "kind", "unknown peer kind")
+		return onboarding.Normalized{}, agentSafe{}, agentField(onboarding.CodeUnknownKind, "kind", "unknown peer kind")
 	}
 	inputs := make(map[string]any, len(req.Inputs)+2)
 	for k, v := range req.Inputs {
@@ -246,7 +254,7 @@ func validateAgentAdd(req onboarding.SubmitRequest) (agentSafe, error) {
 			continue
 		}
 		if _, present := inputs[f.Name]; present {
-			return agentSafe{}, agentField(onboarding.CodeUnknownField, f.Name, "unknown field")
+			return onboarding.Normalized{}, agentSafe{}, agentField(onboarding.CodeUnknownField, f.Name, "unknown field")
 		}
 		if f.Required && spec.SubmitAction == onboarding.ActionGrokbotSetup {
 			switch f.Name {
@@ -261,18 +269,33 @@ func validateAgentAdd(req onboarding.SubmitRequest) (agentSafe, error) {
 		Kind: req.Kind, SpecVersion: req.SpecVersion, RequestID: req.RequestID, Inputs: inputs,
 	})
 	if err != nil {
-		return agentSafe{}, agentFieldError(err)
+		return onboarding.Normalized{}, agentSafe{}, agentFieldError(err)
 	}
-	return agentSafe{
+	return n, agentSafe{
 		kind: n.Kind, specVersion: n.SpecVersion, requestID: n.RequestID,
 		name: n.Name, connector: n.ConnectorName, principalID: n.PrincipalID,
 		nameOpen: n.NameOpen, skipMCP: n.SkipMCP, enrolTTL: n.EnrolTTLSeconds,
 	}, nil
 }
 
-// agentRequestChanged reports whether safe differs from the receipt stored
-// on existing. It uses that receipt's original name and options, never the
-// live directory: a peer rename or disable is not a different request.
+// agentRetryConflict reports a different request under an existing receipt.
+// A complete receipt compares the stored safe projection. A historical
+// receipt is missing some of those fields; absent fields are not the zero
+// value, so equality comes from the existing keyed digest instead. That
+// compare does not read the directory and does not write a new digest.
+func agentRetryConflict(ctx context.Context, s *Server, c auth.Caller, existing onboarding.SubmitResult, n onboarding.Normalized, safe agentSafe) (bool, error) {
+	if existing.SafeComplete {
+		return agentRequestChanged(existing, safe), nil
+	}
+	match, err := s.Hub.OnboardingDigestMatches(ctx, c, n)
+	if err != nil {
+		return false, err
+	}
+	return !match, nil
+}
+
+// agentRequestChanged reports whether safe differs from a complete receipt.
+// It uses that receipt's original name and options, never the live directory.
 func agentRequestChanged(existing onboarding.SubmitResult, safe agentSafe) bool {
 	return existing.Kind != safe.kind ||
 		existing.SpecVersion != safe.specVersion ||
@@ -311,6 +334,67 @@ func agentWebPath(safe agentSafe) string {
 		q.Set("principal_id", safe.principalID)
 	}
 	return "/ui/#add-agent?" + q.Encode()
+}
+
+var (
+	agentAddKeys = map[string]struct{}{
+		"kind": {}, "spec_version": {}, "request_id": {}, "inputs": {},
+	}
+	agentInputKeys = map[string]struct{}{
+		"name": {}, "name_open": {}, "enrol_ttl_seconds": {}, "principal_id": {},
+		"connector_name": {}, "skip_mcp": {},
+	}
+	agentStatusKeys = map[string]struct{}{"request_id": {}}
+)
+
+func precheckAgentKinds(raw []byte) error {
+	return rejectUnknownKeys(raw, map[string]struct{}{}, "", nil)
+}
+
+func precheckAgentAdd(raw []byte) error {
+	if err := rejectUnknownKeys(raw, agentAddKeys, "inputs", agentInputKeys); err != nil {
+		return err
+	}
+	return precheckAgentRequestID(raw)
+}
+
+func precheckAgentStatus(raw []byte) error {
+	if err := rejectUnknownKeys(raw, agentStatusKeys, "", nil); err != nil {
+		return err
+	}
+	return precheckAgentRequestID(raw)
+}
+
+// rejectUnknownKeys reports an unknown property before JSON Schema rendering.
+// The generic renderer quotes the key in both the message and the path.
+// The path here is the container, and the message does not include the key.
+func rejectUnknownKeys(raw []byte, allowed map[string]struct{}, nested string, nestedAllowed map[string]struct{}) error {
+	var body map[string]json.RawMessage
+	if json.Unmarshal(raw, &body) != nil {
+		return nil
+	}
+	for k := range body {
+		if _, ok := allowed[k]; !ok {
+			return &envelope.SchemaError{Path: "", Message: "unknown property"}
+		}
+	}
+	if nested == "" {
+		return nil
+	}
+	rawNested, ok := body[nested]
+	if !ok {
+		return nil
+	}
+	var child map[string]json.RawMessage
+	if json.Unmarshal(rawNested, &child) != nil {
+		return nil
+	}
+	for k := range child {
+		if _, ok := nestedAllowed[k]; !ok {
+			return &envelope.SchemaError{Path: "/" + nested, Message: "unknown property"}
+		}
+	}
+	return nil
 }
 
 // precheckAgentRequestID rejects a malformed request id with fixed text.

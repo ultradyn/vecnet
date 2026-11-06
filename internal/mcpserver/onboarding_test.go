@@ -49,12 +49,12 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 	t.Run("discovery", func(t *testing.T) {
 		for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
 			t.Run(era, func(t *testing.T) {
-				first := mcpTools(t, env, env.OperatorSecret, opHeaders[era])
-				second := mcpTools(t, env, env.OperatorSecret, opHeaders[era])
+				first := mcpTools(t, env, env.OperatorSecret, opHeaders[era], env.OperatorSecret, peerSecret)
+				second := mcpTools(t, env, env.OperatorSecret, opHeaders[era], env.OperatorSecret, peerSecret)
 				if !reflect.DeepEqual(first, second) {
 					t.Fatal("operator tools/list is not stable")
 				}
-				peerList := mcpTools(t, env, peerSecret, peerHeaders[era])
+				peerList := mcpTools(t, env, peerSecret, peerHeaders[era], env.OperatorSecret, peerSecret)
 				if len(peerList) != 23 {
 					t.Fatalf("ordinary peer tools = %d, want the existing catalogue", len(peerList))
 				}
@@ -74,7 +74,7 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 					tool := toolByName(t, first, name)
 					ann, _ := tool["annotations"].(map[string]any)
 					if ann["readOnlyHint"] != true || ann["destructiveHint"] != false || ann["openWorldHint"] != false {
-						t.Fatalf("%s annotations = %v", name, ann)
+						t.Fatal(discoveryMismatch())
 					}
 					if strings.Contains(strings.ToLower(tool["description"].(string)), "connector is connected") {
 						t.Fatalf("%s description asserts a connector is connected", name)
@@ -103,7 +103,7 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 					}
 					wantSchemes := []any{map[string]any{"type": "oauth2", "scopes": []any{"vecnet"}}}
 					if !reflect.DeepEqual(tool["securitySchemes"], wantSchemes) {
-						t.Fatalf("%s securitySchemes = %v", name, tool["securitySchemes"])
+						t.Fatal(discoveryMismatch())
 					}
 				}
 				add := toolByName(t, first, "vecnet_agent_add")
@@ -111,7 +111,7 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 				required, _ := input["required"].([]any)
 				for _, key := range []string{"kind", "spec_version", "request_id", "inputs"} {
 					if !containsAny(required, key) {
-						t.Fatalf("vecnet_agent_add required = %v, missing %s", required, key)
+						t.Fatal(discoveryMismatch())
 					}
 				}
 				inputs := input["properties"].(map[string]any)["inputs"].(map[string]any)
@@ -157,14 +157,14 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 			args map[string]any
 			path string
 		}{
-			{name: "webhook url", args: withTop(base, "webhook_url", routineURL), path: "/webhook_url"},
-			{name: "webhook key", args: withTop(base, "webhook_key", routineKey), path: "/webhook_key"},
-			{name: "authorization header", args: withTop(base, "authorization", header), path: "/authorization"},
-			{name: "header", args: withInput(base, "header", header), path: "/inputs/header"},
-			{name: "key file", args: withTop(base, "key_file", filePath), path: "/key_file"},
-			{name: "file path", args: withInput(base, "file_path", filePath), path: "/inputs/file_path"},
-			{name: "webhook url in inputs", args: withInput(base, "webhook_url", routineURL), path: "/inputs/webhook_url"},
-			{name: "webhook key in inputs", args: withInput(base, "webhook_key", routineKey), path: "/inputs/webhook_key"},
+			{name: "webhook url", args: withTop(base, "webhook_url", routineURL), path: ""},
+			{name: "webhook key", args: withTop(base, "webhook_key", routineKey), path: ""},
+			{name: "authorization header", args: withTop(base, "authorization", header), path: ""},
+			{name: "header", args: withInput(base, "header", header), path: "/inputs"},
+			{name: "key file", args: withTop(base, "key_file", filePath), path: ""},
+			{name: "file path", args: withInput(base, "file_path", filePath), path: "/inputs"},
+			{name: "webhook url in inputs", args: withInput(base, "webhook_url", routineURL), path: "/inputs"},
+			{name: "webhook key in inputs", args: withInput(base, "webhook_key", routineKey), path: "/inputs"},
 		}
 		for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
 			t.Run(era, func(t *testing.T) {
@@ -172,7 +172,7 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 					t.Run(tc.name, func(t *testing.T) {
 						got := mcpInvalidPath(t, env, env.OperatorSecret, opHeaders[era], "vecnet_agent_add", tc.args)
 						if got != tc.path {
-							t.Fatalf("path = %s", got)
+							t.Fatal("invalid params path mismatch")
 						}
 						raw := mcpCallRaw(t, env, env.OperatorSecret, opHeaders[era], "tools/call", map[string]any{"name": "vecnet_agent_add", "arguments": tc.args})
 						assertNoSecrets(t, raw, routineURL, routineKey, header, filePath)
@@ -197,14 +197,14 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 				mcpToolError(t, env, tc.secret, modern(), "vecnet_agent_status", map[string]any{"request_id": "forged-1"}, "forbidden")
 			})
 		}
-		if got := mcpInvalidPath(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", withTop(args, "as", env.OperatorPeer)); got != "/as" {
-			t.Fatalf("forged as path = %s", got)
+		if got := mcpInvalidPath(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", withTop(args, "as", env.OperatorPeer)); got != "" {
+			t.Fatal("forged as path mismatch")
 		}
-		if got := mcpInvalidPath(t, env, peerSecret, modern(), "vecnet_agent_add", withTop(args, "as", env.OperatorPeer)); got != "/as" {
-			t.Fatalf("peer forged as path = %s", got)
+		if got := mcpInvalidPath(t, env, peerSecret, modern(), "vecnet_agent_add", withTop(args, "as", env.OperatorPeer)); got != "" {
+			t.Fatal("peer forged as path mismatch")
 		}
-		if got := mcpInvalidPath(t, env, env.OperatorSecret, modern(), "vecnet_agent_status", map[string]any{"request_id": "forged-1", "as": peerSecret}); got != "/as" {
-			t.Fatalf("status forged as path = %s", got)
+		if got := mcpInvalidPath(t, env, env.OperatorSecret, modern(), "vecnet_agent_status", map[string]any{"request_id": "forged-1", "as": peerSecret}); got != "" {
+			t.Fatal("status forged as path mismatch")
 		}
 		var opWho, peerWho map[string]string
 		toolOK(t, env, env.OperatorSecret, "vecnet_whoami", map[string]any{}, &opWho)
@@ -688,6 +688,156 @@ func TestAgentOnboardMCPSafeRetry(t *testing.T) {
 	})
 }
 
+// TestAgentOnboardMCPFixRound2 covers the second review. Unknown property
+// names must not be quoted (t7 r2 I1). Incomplete historical receipts must
+// not treat absent fields as the original request (t7 r2 I2).
+func TestAgentOnboardMCPFixRound2(t *testing.T) {
+	env := testhub.Start(t)
+	opHeaders := map[string]map[string]string{}
+	for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
+		opHeaders[era] = mcpEraHeaders(t, env, env.OperatorSecret, era)
+	}
+
+	t.Run("(t7 r2 I1)", func(t *testing.T) {
+		routineKey := fakeRoutineKey(t)
+		header := "Bearer " + routineKey
+		addBase := agentAddArgs("session", "r2-i1", "Nope", map[string]any{"name": "Nope"})
+		for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
+			t.Run(era, func(t *testing.T) {
+				cases := []struct {
+					tool string
+					args map[string]any
+					path string
+				}{
+					{tool: "vecnet_agent_kinds", args: map[string]any{header: "x"}, path: ""},
+					{tool: "vecnet_agent_status", args: map[string]any{"request_id": "r2-i1", header: "x"}, path: ""},
+					{tool: "vecnet_agent_add", args: withTop(addBase, header, "x"), path: ""},
+					{tool: "vecnet_agent_add", args: withInput(addBase, routineKey, "x"), path: "/inputs"},
+				}
+				for _, tc := range cases {
+					t.Run(tc.tool, func(t *testing.T) {
+						raw := mcpCallRaw(t, env, env.OperatorSecret, opHeaders[era], "tools/call", map[string]any{
+							"name": tc.tool, "arguments": tc.args,
+						})
+						assertNoSecrets(t, raw, routineKey, header)
+						if !strings.Contains(string(raw), "-32602") {
+							t.Fatal("unknown property was not invalid params")
+						}
+						if unknownKeyPath(t, raw) != tc.path {
+							t.Fatal("unknown property path was not the container")
+						}
+					})
+				}
+			})
+		}
+	})
+
+	t.Run("(t7 r2 I2)", func(t *testing.T) {
+		prn, _ := env.NewPrincipal("historical principal")
+		openID := "r2-open"
+		mustHumanSubmit(t, env, map[string]any{
+			"kind": "session", "spec_version": onboarding.SpecVersion, "request_id": openID,
+			"inputs": map[string]any{"name_open": true, "principal_id": prn},
+		})
+		ageReceipt(t, env, openID, "name", "request_principal_id", "safe_complete")
+		openRetry := agentAddArgs("session", openID, "", map[string]any{"name_open": true})
+		got, wire := mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", openRetry, "idempotency_conflict")
+		assertNoSecrets(t, wire)
+		if got.Error.Details["request_id"] != openID {
+			t.Fatal("conflict did not name the request")
+		}
+
+		namedID := "r2-named"
+		namedArgs := agentAddArgs("session", namedID, "Stable Hist", nil)
+		mustHumanSubmit(t, env, map[string]any{
+			"kind": "session", "spec_version": onboarding.SpecVersion, "request_id": namedID,
+			"inputs": map[string]any{"name": "Stable Hist"},
+		})
+		ageReceipt(t, env, namedID, "name", "safe_complete")
+		if mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", namedArgs)["status"] != "needs_human" {
+			t.Fatal("unchanged named historical request conflicted")
+		}
+		renamed := agentAddArgs("session", namedID, "Other Hist", nil)
+		_, renamedWire := mcpToolError(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", renamed, "idempotency_conflict")
+		assertNoSecrets(t, renamedWire)
+	})
+
+	t.Run("(t7 r2 M1)", func(t *testing.T) {
+		key := fakeRoutineKey(t)
+		msg := discoveryMismatch()
+		if strings.Contains(msg, key) || strings.Contains(msg, "crsr_") || strings.Contains(msg, "securitySchemes") || strings.Contains(msg, "annotations") {
+			t.Fatal("discovery diagnostic quoted returned metadata")
+		}
+		raw := mcpCallRaw(t, env, env.OperatorSecret, modern(), "tools/list", nil)
+		if wireHasSecret(raw, env.OperatorSecret, key) {
+			t.Fatal("discovery response contains a fixture credential")
+		}
+		leaked := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"securitySchemes":["` + key + `"],"annotations":{"readOnlyHint":"` + key + `"}}]}}`)
+		if !wireHasSecret(leaked, key) {
+			t.Fatal("discovery metadata credential was not scanned")
+		}
+	})
+
+	t.Run("(t7 r2 M2)", func(t *testing.T) {
+		key := fakeRoutineKey(t)
+		header := "Bearer " + key
+		clean := []byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{}"}],"structuredContent":{"status":"needs_human"}}}`)
+		if wireHasSecret(clean, key, header) {
+			t.Fatal("clean wire was reported secret")
+		}
+		unknown := []byte(`{"jsonrpc":"2.0","id":1,"result":{"status":"needs_human","extra":"` + key + `"}}`)
+		if !wireHasSecret(unknown, key) {
+			t.Fatal("unknown field credential was not scanned")
+		}
+		errText := []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid ` + header + `"}}`)
+		if !wireHasSecret(errText, key, header) {
+			t.Fatal("error text credential was not scanned")
+		}
+	})
+}
+
+func unknownKeyPath(t *testing.T, raw []byte) string {
+	t.Helper()
+	r := decodeOnboardRPC(t, raw)
+	if r.Error == nil || r.Error.Data == nil {
+		t.Fatal("unknown property was not an RPC error")
+	}
+	var data struct {
+		Path *string `json:"path"`
+	}
+	if json.Unmarshal(r.Error.Data, &data) != nil || data.Path == nil {
+		t.Fatal("unknown property has no path")
+	}
+	return *data.Path
+}
+
+func ageReceipt(t *testing.T, env *testhub.Env, requestID string, drop ...string) {
+	t.Helper()
+	var prn string
+	if err := env.Hub.DB.QueryRow(`SELECT prn_id FROM peers WHERE peer_id=?`, env.OperatorPeer).Scan(&prn); err != nil || prn == "" {
+		t.Fatal("operator principal is missing")
+	}
+	key := "onboarding.v1/" + prn + "/" + requestID
+	var raw string
+	if err := env.Hub.DB.QueryRow(`SELECT value FROM meta WHERE key=?`, key).Scan(&raw); err != nil {
+		t.Fatal("historical receipt is missing")
+	}
+	var rec map[string]any
+	if json.Unmarshal([]byte(raw), &rec) != nil {
+		t.Fatal("historical receipt is not JSON")
+	}
+	for _, field := range drop {
+		delete(rec, field)
+	}
+	body, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal("historical receipt could not be rewritten")
+	}
+	if _, err := env.Hub.DB.Exec(`UPDATE meta SET value=? WHERE key=?`, string(body), key); err != nil {
+		t.Fatal("historical receipt could not be rewritten")
+	}
+}
+
 func mustHumanSubmit(t *testing.T, env *testhub.Env, body map[string]any) onboarding.SubmitResult {
 	t.Helper()
 	resp, raw := env.Do(env.OperatorSecret, http.MethodPost, "/v1/admin/agents", body)
@@ -788,9 +938,12 @@ func mcpCallRaw(t *testing.T, env *testhub.Env, secret string, headers map[strin
 	return raw
 }
 
-func mcpTools(t *testing.T, env *testhub.Env, secret string, headers map[string]string) []map[string]any {
+func mcpTools(t *testing.T, env *testhub.Env, secret string, headers map[string]string, secrets ...string) []map[string]any {
 	t.Helper()
 	raw := mcpCallRaw(t, env, secret, headers, "tools/list", nil)
+	if wireHasSecret(raw, secrets...) {
+		t.Fatal("response contains a secret or human output")
+	}
 	r := decodeOnboardRPC(t, raw)
 	if r.Error != nil {
 		t.Fatal("tools/list returned an RPC error")
@@ -849,6 +1002,9 @@ func decodeOnboardRPC(t *testing.T, raw []byte) rpcResp {
 func mcpToolResult(t *testing.T, env *testhub.Env, secret string, headers map[string]string, name string, args any) (toolResult, []byte) {
 	t.Helper()
 	raw := mcpCallRaw(t, env, secret, headers, "tools/call", map[string]any{"name": name, "arguments": args})
+	if wireHasSecret(raw) {
+		t.Fatal("response contains a secret or human output")
+	}
 	r := decodeOnboardRPC(t, raw)
 	if r.Error != nil {
 		t.Fatalf("%s: unexpected RPC error", name)
@@ -919,6 +1075,33 @@ func mcpInvalidPath(t *testing.T, env *testhub.Env, secret string, headers map[s
 		t.Fatalf("%s: invalid params have no path", name)
 	}
 	return *data.Path
+}
+
+func discoveryMismatch() string { return "discovery metadata mismatch" }
+
+// liveRoutineKeyRE matches a generated routine key. The public kind help
+// mentions the crsr_ prefix in prose and must not trip this check.
+var liveRoutineKeyRE = regexp.MustCompile(`crsr_[0-9a-fA-F]{16,}`)
+
+// wireHasSecret reports whether raw, the complete response, contains a
+// fixture credential, a live routine key, or human output. Callers use it
+// before they decode or format the body.
+func wireHasSecret(raw []byte, secrets ...string) bool {
+	text := string(raw)
+	for _, banned := range []string{"human_output", "vn_enrol_", "api2.cursor.sh"} {
+		if strings.Contains(text, banned) {
+			return true
+		}
+	}
+	if liveRoutineKeyRE.MatchString(text) {
+		return true
+	}
+	for _, secret := range secrets {
+		if secret != "" && strings.Contains(text, secret) {
+			return true
+		}
+	}
+	return false
 }
 
 func assertNoSecrets(t *testing.T, raw []byte, secrets ...string) {

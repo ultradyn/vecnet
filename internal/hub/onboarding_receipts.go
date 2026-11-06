@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/onboarding"
 )
 
@@ -38,6 +39,7 @@ type onboardRecord struct {
 	ConnectorName      string `json:"connector_name,omitempty"`
 	SkipMCP            bool   `json:"skip_mcp,omitempty"`
 	RequestPrincipalID string `json:"request_principal_id,omitempty"`
+	SafeComplete       bool   `json:"safe_complete,omitempty"`
 	RouteID            string `json:"route_id,omitempty"`
 	ThreadID           string `json:"thread_id,omitempty"`
 	MessageID          string `json:"message_id,omitempty"`
@@ -116,7 +118,7 @@ func (h *Hub) saveOnboardReceipt(ctx context.Context, tx *sql.Tx, subject string
 		V: 1, Subject: subject, RequestID: n.RequestID, Kind: n.Kind, SpecVersion: n.SpecVersion,
 		Digest: digest, PeerID: res.PeerID, PrincipalID: res.PrincipalID, Name: n.Name, NameOpen: n.NameOpen,
 		EnrolTTLSeconds: n.EnrolTTLSeconds, ConnectorName: n.ConnectorName, SkipMCP: n.SkipMCP,
-		RequestPrincipalID: n.PrincipalID, RouteID: res.RouteID,
+		RequestPrincipalID: n.PrincipalID, SafeComplete: true, RouteID: res.RouteID,
 	}
 	if res.Setup != nil {
 		rec.ThreadID = res.Setup.ThreadID
@@ -153,7 +155,39 @@ func (h *Hub) resultFromReceipt(ctx context.Context, tx *sql.Tx, rec onboardReco
 		SendDefaults: copyDefaults(spec), Status: status,
 		Name: rec.Name, SpecVersion: rec.SpecVersion, NameOpen: rec.NameOpen, SkipMCP: rec.SkipMCP,
 		EnrolTTLSeconds: rec.EnrolTTLSeconds, RequestPrincipalID: rec.RequestPrincipalID,
+		SafeComplete: rec.SafeComplete,
 	}, nil
+}
+
+// OnboardingDigestMatches reports whether n is the normalized request stored
+// for the caller's receipt. It reads the existing keyed digest and does not
+// write one. Callers use it for historical receipts whose safe projection is
+// incomplete; a missing field is not treated as the zero value.
+func (h *Hub) OnboardingDigestMatches(ctx context.Context, c auth.Caller, n onboarding.Normalized) (bool, error) {
+	if !requestIDRE.MatchString(n.RequestID) {
+		return false, invalidValue("request_id", "request_id must be 1 to 128 characters: letters, digits, and . _ : -")
+	}
+	var match bool
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		subject, _, err := h.operatorAuthorized(ctx, tx, c)
+		if err != nil {
+			return err
+		}
+		rec, found, err := h.loadOnboardReceipt(ctx, tx, subject, n.RequestID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return onboardNotFound(n.RequestID)
+		}
+		digest, err := h.onboardDigest(n)
+		if err != nil {
+			return err
+		}
+		match = digestEqual(rec.Digest, digest)
+		return nil
+	})
+	return match, err
 }
 
 // deriveAuthState reports this peer's own credential readiness. An OAuth
