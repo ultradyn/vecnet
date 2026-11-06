@@ -89,6 +89,7 @@ func TestReadsDecode(t *testing.T) {
 		}, nil},
 		{"thread", "GET", "/v1/admin/threads/thr_a", "", fixture[opapi.ThreadDetail](), func(c *Client) (any, error) { return c.Thread(ctx, "thr_a") }, nil},
 		{"history", "GET", "/v1/threads/thr_a/messages", "after=msg_a&limit=7", fixture[opapi.History](), func(c *Client) (any, error) { return c.History(ctx, "thr_a", "msg_a", 7) }, nil},
+		{"blob-status", "GET", "/v1/blobs/sha_a/status", "blob_id=blo_a", fixture[blobwire.State](), func(c *Client) (any, error) { return c.BlobStatus(ctx, "sha_a", "blo_a") }, nil},
 		{"matrix", "GET", "/v1/admin/threads/thr_a/deliveries", "after=msg_a&limit=7", fixture[opapi.Matrix](), func(c *Client) (any, error) { return c.Matrix(ctx, "thr_a", "msg_a", 7) }, nil},
 		{"peers", "GET", "/v1/admin/peers", "", fixture[[]opapi.PeerRow](), func(c *Client) (any, error) { return c.Peers(ctx) }, func(v any) any { return map[string]any{"peers": v} }},
 		{"cuts", "GET", "/v1/admin/loop-cuts", "hours=48", fixture[opapi.LoopCuts](), func(c *Client) (any, error) { return c.LoopCuts(ctx, 48) }, nil},

@@ -28,19 +28,19 @@ type transportFunc func(*http.Request) (*http.Response, error)
 func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 type fixture struct {
-	client                                       *Client
-	now                                          time.Time
-	direct                                       *httptest.Server
-	grant                                        blobwire.DownloadGrant
-	ref                                          blobwire.Ref
-	putStatus, getStatus                         int
-	mints, puts, completes, redirects, discovers int
-	hubCode                                      string
-	mutate                                       func()
-	capabilities                                 map[string]time.Time
-	accepted                                     []int
-	completion                                   *blobwire.Ref
-	body                                         string
+	client                                             *Client
+	now                                                time.Time
+	direct                                             *httptest.Server
+	grant                                              blobwire.DownloadGrant
+	ref                                                blobwire.Ref
+	putStatus, getStatus                               int
+	mints, puts, completes, redirects, discovers, gets int
+	hubCode                                            string
+	mutate                                             func()
+	capabilities                                       map[string]time.Time
+	accepted                                           []int
+	completion                                         *blobwire.Ref
+	body                                               string
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -74,6 +74,7 @@ func newFixture(t *testing.T) *fixture {
 			w.WriteHeader(f.putStatus)
 			return
 		}
+		f.gets++
 		token := r.URL.Query().Get("capability")
 		deadline, ok := f.capabilities[token]
 		if !ok || !f.now.Before(deadline) {
@@ -138,7 +139,9 @@ func newFixture(t *testing.T) *fixture {
 				f.capabilities[token] = f.now.Add(600 * time.Second)
 				g = blobwire.DownloadGrant{BlobID: testID, SHA256: abcSHA, SHA256Verified: f.ref.SHA256Verified, Integrity: f.ref.Integrity, Size: 3, MediaType: "text/plain", RetentionClass: "keep", Method: "GET", URL: f.direct.URL + "/object?capability=" + token, ExpiresAt: f.now.Add(600 * time.Second).Format(time.RFC3339)}
 			}
-			json.NewEncoder(w).Encode(g)
+			// Bypass the wire marshaler so malformed metadata reaches the client.
+			type rawGrant blobwire.DownloadGrant
+			json.NewEncoder(w).Encode(rawGrant(g))
 		}
 	}))
 	t.Cleanup(hub.Close)
@@ -239,23 +242,53 @@ func TestR2DownloadStateAndRetry(t *testing.T) {
 	}
 }
 func TestR2DownloadRejectsUntrustedGrant(t *testing.T) {
-	for _, kind := range []string{"origin", "deadline", "too-long", "unverified", "identity", "size", "object-expiry"} {
+	for _, kind := range []string{"valid", "origin", "deadline", "too-long", "unverified", "integrity-unverified", "integrity-algorithm", "integrity-digest", "identity", "hash", "method", "size", "object-expiry"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newFixture(t)
-			g := blobwire.DownloadGrant{BlobID: testID, SHA256: abcSHA, SHA256Verified: f.ref.SHA256Verified, Integrity: f.ref.Integrity, Size: 3, Method: "GET", URL: f.direct.URL + "/object", ExpiresAt: f.now.Add(600 * time.Second).Format(time.RFC3339)}
+			// This registered capability remains usable even when grant metadata
+			// is invalid. Only the validation under test can prevent the GET.
+			f.capabilities["valid"] = f.now.Add(600 * time.Second)
+			g := blobwire.DownloadGrant{BlobID: testID, SHA256: abcSHA, SHA256Verified: f.ref.SHA256Verified, Integrity: f.ref.Integrity, Size: 3, Method: "GET", RetentionClass: "keep", URL: f.direct.URL + "/object?capability=valid", ExpiresAt: f.now.Add(600 * time.Second).Format(time.RFC3339)}
+			// A reachable second origin avoids DNS/external-network errors masking
+			// a missing origin guard and also returns otherwise valid bytes.
+			otherGets := 0
+			other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				otherGets++
+				io.WriteString(w, "abc")
+			}))
+			defer other.Close()
+			want := "bad_response"
 			switch kind {
+			case "valid":
 			case "origin":
-				g.URL = "https://untrusted.invalid/object"
+				g.URL = other.URL + "/object?capability=valid"
 			case "deadline":
 				g.ExpiresAt = f.now.Format(time.RFC3339)
+				want = "blob_capability_expired"
 			case "too-long":
 				g.ExpiresAt = f.now.Add(601 * time.Second).Format(time.RFC3339)
+				want = "blob_capability_expired"
 			case "unverified":
 				no := false
 				g.SHA256Verified = &no
-				g.Integrity = &blobwire.Integrity{Algorithm: "sha256", Value: abcSHA}
+			case "integrity-unverified":
+				i := *g.Integrity
+				i.Verified = false
+				g.Integrity = &i
+			case "integrity-algorithm":
+				i := *g.Integrity
+				i.Algorithm = "unknown"
+				g.Integrity = &i
+			case "integrity-digest":
+				i := *g.Integrity
+				i.Value = strings.Repeat("a", 64)
+				g.Integrity = &i
 			case "identity":
-				g.BlobID = "other"
+				g.BlobID = "blo_00000000000000000000000002"
+			case "hash":
+				g.SHA256 = strings.Repeat("a", 64)
+			case "method":
+				g.Method = "PUT"
 			case "size":
 				g.Size = 4
 			case "object-expiry":
@@ -263,8 +296,19 @@ func TestR2DownloadRejectsUntrustedGrant(t *testing.T) {
 				g.ObjectExpiresAt = &at
 			}
 			f.grant = g
-			if _, _, err := f.client.Download(context.Background(), abcSHA, testID, 3); err == nil {
-				t.Fatal("untrusted grant accepted")
+			b, got, err := f.client.Download(context.Background(), abcSHA, testID, 3)
+			if kind == "valid" {
+				if err != nil || string(b) != "abc" || got.BlobID != testID || f.gets != 1 || otherGets != 0 {
+					t.Fatal("valid control capability failed")
+				}
+				return
+			}
+			var e *Error
+			if !errors.As(err, &e) || e.Status != 0 || e.Code != want || b != nil || got.URL != "" {
+				t.Errorf("grant did not return typed validation reason %s", want)
+			}
+			if f.gets != 0 || otherGets != 0 {
+				t.Errorf("untrusted grant reached a direct endpoint: allowed=%d other=%d", f.gets, otherGets)
 			}
 		})
 	}

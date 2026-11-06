@@ -6,13 +6,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestBlobGetExpired(t *testing.T) {
-	for _, reason := range []string{"blob_expired", "blob_purged", "blob_url_rate_limited"} {
+	for _, reason := range []string{"blob_expired", "blob_purged"} {
 		t.Run(reason, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/v1/blob-capabilities" {
@@ -40,6 +41,58 @@ func TestBlobGetExpired(t *testing.T) {
 		})
 	}
 }
+func TestBlobGetHubErrors(t *testing.T) {
+	for _, endpoint := range []string{"capabilities", "download"} {
+		for _, status := range []int{401, 403, 429, 503} {
+			t.Run(endpoint+"/"+strconv.Itoa(status), func(t *testing.T) {
+				const reason = "blob_unavailable"
+				codeName := reason
+				if status == 429 {
+					codeName = "blob_url_rate_limited"
+				}
+				requests := 0
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if endpoint == "download" && r.URL.Path == "/v1/blob-capabilities" {
+						json.NewEncoder(w).Encode(map[string]any{"backend": "r2", "checksum_profile": "sha256", "max_size": 25 << 20})
+						return
+					}
+					if r.URL.Path != "/v1/blob-capabilities" && !strings.HasSuffix(r.URL.Path, "/download") {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					requests++
+					w.Header().Set("Retry-After", "17")
+					w.WriteHeader(status)
+					json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": codeName, "message": "private-transfer-secret", "details": map[string]any{"retry_after_seconds": 17, "private": "private-transfer-secret"}}})
+				}))
+				defer srv.Close()
+				u := profileUser(t, srv.URL, "fake")
+				path := filepath.Join(t.TempDir(), "result")
+				code, out, errs := u.run("blob", "get", strings.Repeat("a", 64), "--blob-id", "blo_00000000000000000000000001", "--out", path, "--json")
+				var wire struct {
+					Error struct {
+						Code  string `json:"code"`
+						Retry int    `json:"retry_after_seconds"`
+					} `json:"error"`
+				}
+				if json.Unmarshal([]byte(out), &wire) != nil || wire.Error.Code != codeName || wire.Error.Retry != 17 || strings.Contains(out+errs, "private-transfer-secret") {
+					t.Error("hub error lost sanitized machine-readable code/retry metadata")
+				}
+				if code != 2 {
+					t.Errorf("hub status %d: exit=%d, want 2", status, code)
+				}
+				if requests != 1 {
+					t.Errorf("failure retried %d times", requests)
+				}
+				entries, err := os.ReadDir(filepath.Dir(path))
+				if err != nil || len(entries) != 0 {
+					t.Fatal("hub error left output or private spool")
+				}
+			})
+		}
+	}
+}
+
 func TestBlobGetHelp(t *testing.T) {
 	u := newUser(t)
 	out := u.mustRun("--help")

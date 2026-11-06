@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
@@ -160,6 +161,13 @@ func (c *Client) Thread(ctx context.Context, id string) (out opapi.ThreadDetail,
 }
 func (c *Client) History(ctx context.Context, id, after string, limit int) (out opapi.History, err error) {
 	err = c.do(ctx, "GET", queryPath("/v1/threads/"+url.PathEscape(id)+"/messages", pageQuery(limit, "after", after)), nil, &out)
+	return
+}
+
+// BlobStatus refreshes reference metadata without minting a transfer URL or
+// consuming the download grant budget.
+func (c *Client) BlobStatus(ctx context.Context, sha, id string) (out blobwire.State, err error) {
+	err = c.do(ctx, "GET", queryPath("/v1/blobs/"+url.PathEscape(sha)+"/status", url.Values{"blob_id": {id}}), nil, &out)
 	return
 }
 func (c *Client) Matrix(ctx context.Context, id, after string, limit int) (out opapi.Matrix, err error) {

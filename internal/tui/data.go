@@ -312,6 +312,13 @@ func (m *Model) onTick() tea.Cmd {
 	if now.Sub(m.lastSlow) >= m.slowEvery && m.Conn == ConnLive {
 		m.lastSlow = now
 		tags := slices.Clone(slowKeys)
+		for id, st := range m.Data.Thread {
+			if slices.ContainsFunc(st.Messages, func(msg envelope.Message) bool {
+				return slices.ContainsFunc(msg.Attachments, func(att envelope.Attachment) bool { return att.BlobID != "" })
+			}) {
+				tags = append(tags, threadPrefix+id)
+			}
+		}
 		for key := range m.Data.Errs {
 			tags = append(tags, key)
 		}
@@ -408,6 +415,16 @@ func (m *Model) fetchThread(key, id string) tea.Cmd {
 	if from > 0 {
 		after = st.Messages[from-1].MessageID
 	}
+	// Capture references before the command leaves the model goroutine. An
+	// incremental history page cannot project state for older, read messages.
+	refs := map[string]string{}
+	for _, msg := range st.Messages {
+		for _, att := range msg.Attachments {
+			if att.BlobID != "" {
+				refs[att.BlobID] = att.SHA256
+			}
+		}
+	}
 	api, ctx, now := m.API, m.ctx, m.Now
 	return func() tea.Msg {
 		detail, err := api.Thread(ctx, id)
@@ -429,6 +446,16 @@ func (m *Model) fetchThread(key, id string) tea.Cmd {
 				break
 			}
 			cursor = *h.NextAfter
+		}
+		for id, sha := range refs {
+			if _, fresh := states[id]; fresh {
+				continue
+			}
+			state, err := api.BlobStatus(ctx, sha, id)
+			if err != nil {
+				return loadMsg{key: key, err: err}
+			}
+			states[id] = state
 		}
 		var matrix opapi.Matrix
 		for cursor, page := "", 0; page < maxPages; page++ {

@@ -3068,3 +3068,96 @@ func (a *chatBlobCapture) BlobWithOptions(ctx context.Context, sha string, max i
 	a.id = opts.BlobID
 	return a.Blob(ctx, sha, max)
 }
+
+// A read keep attachment has no local deadline and no unread inbox entry.
+// Its projection must refresh even when the message cursor has reached the end.
+func TestChatKeepAttachmentRefreshPurged(t *testing.T) {
+	for _, refresh := range []string{"manual", "timer"} {
+		t.Run(refresh, func(t *testing.T) {
+
+			dir := t.TempDir()
+			t.Chdir(dir)
+			a := chatSeed()
+			chatFile(a, "keep.txt", "abc")
+			msg := &a.byID[chatHark].messages[len(a.byID[chatHark].messages)-1]
+			const id = "blo_00000000000000000000000001"
+			msg.Content.Text = "keep this preview"
+			msg.Attachments[0].BlobID = id
+			msg.Attachments[0].RetentionClass = "keep"
+			clock := newClock()
+			m, p := chatModel(t, a, clock)
+			p.until("thread read", func() bool { return a.count("ReadThread") > 0 })
+			p.idle()
+			st := m.Data.Thread[chatHark]
+			st.BlobStates = map[string]blobwire.State{id: {State: "available"}}
+			before, err := json.Marshal(st.Messages)
+			if err != nil {
+				t.Fatal(err)
+			}
+			probe := &chatStateRefresh{chatAPI: a, sha: msg.Attachments[0].SHA256, id: id}
+			m.API = probe
+			// Both read paths are empty; neither can carry the held attachment.
+			if refresh == "timer" {
+				clock.advance(time.Minute)
+				p.send(tickMsg{})
+				p.until("purged reference refresh", func() bool { return st.BlobStates[id].State == "purged" })
+				p.idle()
+			} else {
+				inbox := m.fetch("inbox")().(loadMsg)
+				if inbox.err != nil {
+					t.Fatal(inbox.err)
+				}
+				inbox.apply(m)
+				refreshed := m.fetchThread(threadPrefix+chatHark, chatHark)().(loadMsg)
+				if refreshed.err != nil {
+					t.Fatal(refreshed.err)
+				}
+				refreshed.apply(m)
+			}
+			if probe.historyMessages != 0 || probe.historyCalls == 0 || probe.inboxCalls == 0 {
+				t.Fatal("refresh unexpectedly returned messages")
+			}
+			wantFrame(t, chatFrame(t, m), "[attachment purged: keep.txt]", "keep this preview")
+			if probe.statusCalls == 0 || refresh == "manual" && probe.statusCalls != 1 {
+				t.Errorf("held reference status calls=%d", probe.statusCalls)
+			}
+			after, err := json.Marshal(st.Messages)
+			if err != nil || string(before) != string(after) {
+				t.Fatal("state refresh changed immutable messages")
+			}
+			screen := &chatScreen{sel: msg.MessageID}
+			if cmd := screen.save(m, st); cmd != nil {
+				t.Fatal("purged attachment launched a save command")
+			}
+			wantFrame(t, chatFrame(t, m), "refused: [attachment purged: keep.txt]")
+			entries, err := os.ReadDir(dir)
+			if err != nil || len(entries) != 0 || a.count("Blob") != 0 {
+				t.Fatal("purged save performed IO")
+			}
+		})
+	}
+}
+
+type chatStateRefresh struct {
+	*chatAPI
+	sha, id                                                string
+	statusCalls, historyMessages, historyCalls, inboxCalls int
+}
+
+func (a *chatStateRefresh) BlobStatus(_ context.Context, sha, id string) (blobwire.State, error) {
+	a.statusCalls++
+	if sha != a.sha || id != a.id {
+		return blobwire.State{}, errors.New("wrong reference status requested")
+	}
+	return blobwire.State{State: "purged"}, nil
+}
+func (a *chatStateRefresh) History(ctx context.Context, id, after string, limit int) (opapi.History, error) {
+	out, err := a.chatAPI.History(ctx, id, after, limit)
+	a.historyCalls++
+	a.historyMessages += len(out.Messages)
+	return out, err
+}
+func (a *chatStateRefresh) Inbox(context.Context, opapi.InboxQuery) (opapi.Inbox, error) {
+	a.inboxCalls++
+	return opapi.Inbox{}, nil
+}

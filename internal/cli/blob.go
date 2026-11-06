@@ -84,8 +84,8 @@ func (a *app) cmdBlob(args []string) error {
 	defer tmp.Close()
 	g, err := c.blobs().DownloadTo(ctx, tmp, o.pos[0], o.str("blob-id"), blobclient.MaxSize)
 	if err != nil {
-		var moved *blobclient.Error
-		if errors.As(err, &moved) && moved.Status == http.StatusGone && moved.Code == "hub_moved" {
+		var e *blobclient.Error
+		if errors.As(err, &e) && e.Status == http.StatusGone && e.Code == "hub_moved" {
 			return blobError(err)
 		}
 		if a.json {
@@ -93,6 +93,11 @@ func (a *app) cmdBlob(args []string) error {
 			if errors.As(err, &e) {
 				_ = a.emitValue(map[string]any{"error": map[string]any{"code": e.Code, "retry_after_seconds": e.RetryAfterSeconds}})
 			}
+		}
+		// Hub responses retain the CLI's exit-2 contract. Logical object
+		// expiry/purge and local transfer validation remain exit 1.
+		if e != nil && e.Status != 0 && e.Code != "blob_expired" && e.Code != "blob_purged" {
+			return blobError(err)
 		}
 		return err
 	}
