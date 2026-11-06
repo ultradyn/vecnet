@@ -46,7 +46,13 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   let running = false, rpc: CodexRpc | undefined, watch: ChildProcess | undefined;
   let connectionState: ReturnType<Engine['state']> = 'connecting';
   let status: unknown = { type: 'notLoaded' }, attached = false, archived = false, overLimit = false;
-  let policyDenied = false, identityChanged = false, lastActivity = clock.now(), lastEnsure = -Infinity;
+  // createdAt changes on a fresh bind, but survives TTL/attendance renewal.
+  // Keep refusals scoped to this Codex home/thread and binding generation.
+  const identityKey = 'identity_changed:' + JSON.stringify([b.codexHome, b.threadId]);
+  const generation = JSON.stringify([b.createdAt, b.profile, b.as ?? null, b.hub, b.caller, b.origin]);
+  const refusedGeneration = kv.get(identityKey);
+  if (refusedGeneration !== undefined && refusedGeneration !== generation) kv.delete(identityKey);
+  let policyDenied = false, identityChanged = refusedGeneration === generation, lastActivity = clock.now(), lastEnsure = -Infinity;
   let lastPush = -Infinity, retryIndex = 0, closedEpoch = 0, resumeAt = -Infinity, attaching = false;
   let cold = false, rejectedResume = false, queue: Promise<void> = Promise.resolve();
   let debounce: { cancel(): void } | undefined, gap: { cancel(): void } | undefined;
@@ -123,6 +129,12 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     try { await release(r.claim); clear(r); }
     catch { log.warn('codex_claim_release_failed', { threadId: b.threadId }); scheduleClaimRecovery(); }
   }
+  async function releaseExpiredRetries() {
+    if (clock.now() < b.expiresAt) return;
+    // Only these batches are known unsent or definitely rejected. Pending and
+    // ambiguous attempts still require receipt/checkpoint recovery after expiry.
+    for (const r of rows()) if (waitingRetry.has(r.key)) await releaseInflight(r);
+  }
   async function recoverClaims() {
     for (const key of kv.keys('releasing:')) {
       const r = JSON.parse(kv.get(key)!) as InflightRow;
@@ -188,6 +200,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       if (!attaching) rejectedResume = false;
     }
     else if (s !== 'unknown' && !attaching) {
+      // A later external unload/load cycle invalidates the old policy verdict.
+      // Resume still checks the current policy before allowing any delivery.
+      if (before === 'not_loaded') policyDenied = false;
       // A cold resume can emit its own idle broadcast even after the guard.
       // Active status (including waiting flags), or turn/started mapped to
       // active, proves independent activity and permits a fresh warm attach.
@@ -237,7 +252,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     });
   }
   async function reconcile() {
-    if (!rpc || !running) return;
+    if (!running) return;
+    await releaseExpiredRetries();
+    if (!rpc) return;
     let r = reason(false);
     if (r === 'not_loaded' && b.origin === 'launcher' && b.ensureLoaded && clock.now() - lastEnsure >= 60_000 &&
       mapStatus(status) === 'not_loaded') {
@@ -350,6 +367,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     let mismatches = 0, fallback = false;
     while (running && rpc) {
       if (!liveness().live) {
+        if (clock.now() >= b.expiresAt) { await releaseInflight(r); return; }
         waitingRetry.set(r.key, batch);
         // An idle claim can contain wake_idle. Deferral must preserve its
         // eligibility even if a waiting flag subsequently clears to active.
@@ -383,14 +401,14 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
           r.state = 'unresolved'; write(r);
           const connection = rpc; rpc = undefined; attached = false; connection?.close(); connectionState = 'unreachable'; retry(); return;
         }
-        if (r.method === 'turn/steer' && e.code === -32600 && /mismatch|expectedTurnId/i.test(e.message)) {
+        if (r.method === 'turn/steer' && e.code === -32600 && /mismatch|expectedTurnId|expected\s+active\s+turn\s+id\b/i.test(e.message)) {
           if (mismatches++ === 0) {
             try {
               const turn = await latest();
               if (turn?.status === 'inProgress' && typeof turn.id === 'string') { r.attemptTurnId = turn.id; continue; }
             } catch { /* The steer was rejected; retain this batch for idle. */ }
           }
-          waitingRetry.set(r.key, batch); waitForIdle.add(r.key); return;
+          waitingRetry.set(r.key, batch); waitForIdle.add(r.key); await releaseExpiredRetries(); return;
         }
         if (/thread (?:is )?closing|thread not found/.test(e.message)) {
           cold = true; status = { type: 'notLoaded' }; closedEpoch++;
@@ -455,7 +473,8 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       await releaseUnsentClaim(nonce); arm(1000); return;
     }
     if (output.refused === 'identity_changed') {
-      kv.delete('claiming:' + nonce); identityChanged = true; await unsubscribe();
+      kv.set(identityKey, generation); identityChanged = true;
+      kv.delete('claiming:' + nonce); await unsubscribe();
       log.warn('codex_binding_identity_changed', { threadId: b.threadId }); return;
     }
     if (!Array.isArray(output.deliveries) || !output.deliveries.every((id: unknown) => typeof id === 'string') ||

@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { execFileSync } from 'node:child_process';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, renameSync } from 'node:fs';
@@ -141,6 +142,131 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
 const active = { type: 'active', activeFlags: [] };
 const row = (patch: Partial<InflightRow> = {}): InflightRow => ({ threadId: 'thread', key: 'vn.seed', claim: '123456789012345678901234', deliveries: ['w1'],
   method: 'turn/steer', attemptTurnId: 'active', priorTurnId: null, acceptedAt: 0, state: 'pending', ...patch });
+
+// Round-three probes, exercised through the fake wire and real hook children.
+for (const failures of [1, 2]) test(`hand2 wire mismatch ${failures} preserves the claim and bounds recovery`, async t => {
+  let h: Awaited<ReturnType<typeof harness>>;
+  let claim: string | undefined;
+  const attempts: InflightRow[] = [];
+  h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      if (method === 'turn/steer') {
+        const inflight = h.rows()[0]; attempts.push({ ...inflight });
+        claim ??= inflight.claim;
+        if (attempts.length === 1) h.fake.setThread({ id: 'thread', status: active, activeTurnId: 'new-active' });
+      }
+      return rpc.call<T>(method, params, ms);
+    },
+  }) });
+  const baseline = h.fake.requests.length, opens = h.opens;
+  for (let i = 0; i < failures; i++) h.fake.failNext('turn/steer', {
+    code: -32600, message: 'expected active turn id `old-turn` but found `new-turn`',
+  });
+  await h.wake(); await h.tick(2 * minute);
+  assert.equal(h.sends().length, 2, 'exactly one re-read and retry before waiting for idle');
+  assert.deepEqual(h.sends().map(r => r.method), ['turn/steer', 'turn/steer']);
+  assert.deepEqual(h.sends().map(r => (r.params as any).expectedTurnId), ['active', 'new-active']);
+  const key = (h.sends()[0].params as any).clientUserMessageId;
+  assert.ok(key); assert.equal((h.sends()[1].params as any).clientUserMessageId, key);
+  assert.ok(attempts.every(r => r.key === key && r.claim === claim));
+  const requests = h.fake.requests.slice(baseline), first = requests.findIndex(r => r.method === 'turn/steer');
+  const second = requests.findIndex((r, i) => i > first && r.method === 'turn/steer');
+  assert.equal(requests.slice(first + 1, second).filter(r => r.method === 'thread/turns/list').length, 1);
+  if (failures === 2) {
+    assert.equal(h.rows()[0].claim, claim);
+    h.fake.setThread({ id: 'thread', status: { type: 'idle' } }); await h.sync(); await h.tick();
+    assert.deepEqual(h.sends().map(r => r.method), ['turn/steer', 'turn/steer', 'turn/start']);
+    assert.equal((h.sends()[2].params as any).clientUserMessageId, key);
+  }
+  assert.equal(h.records().filter(r => r.hookClaimed === claim).length, 1);
+  assert.equal(h.rows().length, 0); assert.equal(h.releases().length, 0);
+  assert.equal(h.opens, opens); assert.equal(h.plan.events.length, 1);
+});
+
+for (const releaseFailure of [false, true]) test(`hand2 expiry after gated claim releases unsent delivery with release failure ${releaseFailure}`, async t => {
+  const h = await harness(t, { binding: { expiresAt: 5000 } });
+  h.plan.hookGate = join(dirname(h.deps.env.VECNET_CONFIG), 'expiry-gate');
+  h.plan.releaseFailure = releaseFailure; h.save();
+  const before = h.records().filter(r => r.hookClaimed).length;
+  const wake = h.wake();
+  await eventually(() => h.records().filter(r => r.hookClaimed).length > before, 'claim committed before expiry');
+  const claim = h.records().filter(r => r.hookClaimed).at(-1)!.hookClaimed!;
+  h.clock.advance(h.binding.expiresAt - h.clock.now() + 1);
+  writeFileSync(h.plan.hookGate, 'open'); await wake;
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'expired' });
+  assert.equal(h.sends().length, 0);
+  assert.equal(h.releases().length, 1, 'expiry initiates release immediately');
+  assert.equal(h.releases()[0].argv[h.releases()[0].argv.indexOf('--claim') + 1], claim);
+  if (releaseFailure) {
+    assert.ok(h.kv.get('releasing:' + claim), 'failed release remains durable');
+    assert.equal(h.rows().length, 1);
+    h.plan.releaseFailure = false; h.save(); await h.restart();
+    assert.equal(h.releases().filter(r => r.argv.includes(claim)).length, 2);
+  }
+  await h.tick(2 * minute);
+  assert.equal(h.rows().length, 0); assert.equal(h.kv.keys('releasing:').length, 0);
+  assert.equal(h.kv.keys('claiming:').length, 0); assert.equal(h.sends().length, 0);
+  const ordinary = JSON.parse(execFileSync(h.deps.vecnetBin, ['--net', 'test', '--as', 'peer', 'hook', '--event', 'user-prompt'], {
+    env: { HOME: h.deps.env.HOME, PATH: h.deps.env.PATH, VECNET_CONFIG: h.deps.env.VECNET_CONFIG }, encoding: 'utf8',
+  }));
+  assert.deepEqual(ordinary.deliveries, ['w1'], 'ordinary hooks can see the original delivery again');
+});
+
+test('hand2 expiry releases a definitely rejected steer waiting for idle', async t => {
+  const h = await harness(t, { status: active, binding: { expiresAt: 5000 } });
+  for (let i = 0; i < 2; i++) h.fake.failNext('turn/steer', { code: -32600, message: 'expectedTurnId mismatch' });
+  await h.wake(); const rejected = h.rows()[0]; assert.ok(rejected);
+  await h.tick(minute);
+  assert.equal(h.releases().length, 1); assert.ok(h.releases()[0].argv.includes(rejected.claim));
+  assert.equal(h.rows().length, 0); assert.equal(h.sends().length, 2);
+});
+
+test('hand2 expiry never releases an accepted steer without a receipt', async t => {
+  const h = await harness(t, { status: active, binding: { expiresAt: 5000 } });
+  h.fake.withholdNextItem(); await h.wake();
+  await h.tick(2 * minute);
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'expired' });
+  assert.equal(h.rows().length, 1); assert.equal(h.releases().length, 0); assert.equal(h.sends().length, 1);
+});
+
+test('hand2 identity refusal survives recreation and renewal until an explicit rebind', async t => {
+  const h = await harness(t);
+  h.plan.refused = 'identity_changed'; h.save(); await h.wake();
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'identity_changed' });
+  h.plan.refused = ''; h.save();
+  const hooks = h.hooks().length, subscriptions = h.fake.requests.filter(r => r.method === 'thread/resume').length;
+  await h.restart(); await h.tick(2 * minute);
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'identity_changed' });
+  h.binding.expiresAt += hour; await h.restart(); await h.tick(2 * minute);
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'identity_changed' }, 'TTL renewal retains the binding generation');
+  assert.equal(h.hooks().length, hooks); assert.equal(h.sends().length, 0);
+  assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, subscriptions);
+  h.binding.createdAt = h.clock.now(); await h.restart(); await h.tick();
+  assert.deepEqual(h.engine.liveness(), { live: true }); assert.equal(h.sends().length, 1);
+  assert.deepEqual(Object.keys((h.sends()[0].params as any).additionalContext), ['vecnet_w1']);
+  assert.equal(h.plan.events.length, 1, 'fresh bind delivers the original queued wake');
+});
+
+for (const policy of ['never', 'on-request']) test(`hand2 independent reload rechecks policy ${policy} without reconnecting`, async t => {
+  const h = await harness(t);
+  h.fake.setThread({ id: 'thread', status: { type: 'idle' }, approvalPolicy: 'on-request' });
+  await h.restart(); await h.wake();
+  assert.deepEqual(h.engine.liveness(), { live: false, reason: 'approval_policy' });
+  const opens = h.opens, subscriptions = h.fake.requests.filter(r => r.method === 'thread/resume').length;
+  // A loaded status alone is not an independent reload and must not loop on resume.
+  h.fake.setThread({ id: 'thread', status: { type: 'idle' }, approvalPolicy: policy });
+  await h.sync(); await h.tick();
+  assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, subscriptions);
+  h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' }, approvalPolicy: policy }); await h.sync();
+  h.fake.setThread({ id: 'thread', status: { type: 'idle' }, approvalPolicy: policy }); await h.sync();
+  await h.tick(2000); await h.tick(2 * minute);
+  assert.equal(h.fake.requests.filter(r => r.method === 'thread/resume').length, subscriptions + 1, 'new policy is read from a guarded warm resume');
+  assert.equal(h.opens, opens);
+  assert.deepEqual(h.engine.liveness(), policy === 'never' ? { live: true } : { live: false, reason: 'approval_policy' });
+  assert.equal(h.engine.subscribed(), policy === 'never'); assert.equal(h.sends().length, policy === 'never' ? 1 : 0);
+  if (policy === 'never') assert.deepEqual(Object.keys((h.sends()[0].params as any).additionalContext), ['vecnet_w1']);
+  assert.equal(h.plan.events.length, 1);
+});
 
 test('ambiguous mismatch-to-idle retry scans history before any retransmission', async t => {
   let h: Awaited<ReturnType<typeof harness>>;
