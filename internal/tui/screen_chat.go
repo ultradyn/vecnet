@@ -707,6 +707,10 @@ func chatSendError(m *Model, id string, err error) string {
 
 // chatSendWhy is what went wrong, with no promise about what a key does.
 func chatSendWhy(m *Model, id string, err error) string {
+	return chatSendWhyText(m, id, err)
+}
+
+func chatSendWhyText(m *Model, id string, err error) string {
 	var e *opclient.Error
 	switch {
 	case !errors.As(err, &e):
@@ -731,6 +735,10 @@ func chatSendWhy(m *Model, id string, err error) string {
 
 // chatUploadWhy is what a chip says about a failed upload.
 func chatUploadWhy(m *Model, err error) string {
+	return chatUploadWhyText(m, err)
+}
+
+func chatUploadWhyText(m *Model, err error) string {
 	var e *opclient.Error
 	switch {
 	case !errors.As(err, &e):

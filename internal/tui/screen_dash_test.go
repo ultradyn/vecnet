@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -753,5 +754,37 @@ func TestDashNarrowFoldsReloads(t *testing.T) {
 	p.idle()
 	if got := f.narrowed("peer_codex"); got != 2 {
 		t.Fatalf("%d requests, want 2: two reloads fold into one", got)
+	}
+}
+
+func TestDashFailurePrintsCheckedHubURL(t *testing.T) {
+	raw := "https://[2001:db8::7]/vecnet"
+	err := &url.Error{Op: "Get", URL: raw, Err: errors.New("dial " + raw)}
+	th := theme.New(theme.TrueColor, true)
+	text := strings.Join(dashFailure(th, "peers", err, 160, dashErrLines, true), "\n")
+	if !strings.Contains(text, "peers load failed") || !strings.Contains(text, raw) {
+		t.Fatalf("pane %q", text)
+	}
+
+	f := seededDash()
+	m, p := openDash(t, f, newClock())
+	f.fail("Peers", err)
+	f.reset()
+	p.press("ctrl+l")
+	p.loaded(f.fakeAPI, "Peers")
+	frame := plainAt(t, m, 160, 42)
+	stored := ""
+	if m.Data.Errs["peers"] != nil {
+		stored = m.Data.Errs["peers"].Error()
+	}
+	if !strings.Contains(frame+"\n"+m.toast.text+"\n"+stored, raw) {
+		t.Fatalf("dashboard dropped the hub URL\nframe %s\ntoast %s\nstored %s", frame, m.toast.text, stored)
+	}
+	var ue *url.Error
+	if !errors.As(m.Data.Errs["peers"], &ue) || ue.URL != raw {
+		t.Fatalf("transport classification lost: %v", m.Data.Errs["peers"])
+	}
+	if !strings.Contains(frame, "peers load failed") || !strings.Contains(m.toast.text, "reload peers") {
+		t.Fatalf("frame %s\ntoast %s", frame, m.toast.text)
 	}
 }

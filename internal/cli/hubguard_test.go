@@ -100,7 +100,7 @@ func TestHubURLSecretsStayOffStderr(t *testing.T) {
 		querySecret = "QUERYSECRET"
 		host        = "hidden-host.example"
 	)
-	secrets := []string{userSecret, pathSecret, querySecret, "alice", host}
+	secrets := []string{userSecret, pathSecret, querySecret, "alice", host, "FRAG"}
 	cases := []struct {
 		name string
 		hub  string
@@ -108,8 +108,10 @@ func TestHubURLSecretsStayOffStderr(t *testing.T) {
 		hide bool
 	}{
 		{"malformed", "http://[::1" + userSecret, "the hub is not a URL like https://hub.example", true},
-		{"scheme", "ftp://" + host + "/" + pathSecret + "?token=" + querySecret, "the scheme must be https", false},
-		{"public http", "http://" + host + "/" + pathSecret + "?token=" + querySecret, "plain http on a public host", false},
+		{"scheme", "ftp://" + host + "/" + pathSecret, "scheme must be https", true},
+		{"query", "https://" + host + "/" + pathSecret + "?token=" + querySecret, "contains a query", true},
+		{"fragment", "https://" + host + "/" + pathSecret + "#FRAG", "contains a fragment", true},
+		{"public http", "http://" + host, "plain http on a public host", true},
 		{"userinfo", "https://alice:" + userSecret + "@" + host + "/" + pathSecret + "?token=" + querySecret, "must not include credentials", true},
 	}
 	for _, tc := range cases {

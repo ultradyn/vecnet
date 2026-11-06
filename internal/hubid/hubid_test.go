@@ -3,6 +3,7 @@ package hubid_test
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 
@@ -196,6 +197,50 @@ func TestNormalizeURL(t *testing.T) {
 				t.Fatalf("normalizing %q again got %q, %v", got, again, err)
 			}
 		})
+	}
+}
+
+func TestCheckHubURL(t *testing.T) {
+	for _, raw := range []string{
+		"https://hub.example/vecnet",
+		"https://[2001:db8::7]/vecnet",
+		"https://[fe80::1%25eth0]:8443/a%2Fb",
+		"http://127.0.0.1:45752",
+		"http://[::1]/vecnet",
+		"http://xsm:1",
+		"http://box.local",
+		"HTTPS://Hub.Example:443/base/",
+	} {
+		if err := hubid.CheckHubURL(raw); err != nil {
+			t.Errorf("CheckHubURL(%q) = %v", raw, err)
+		}
+	}
+	cases := []struct {
+		raw string
+		err error
+	}{
+		{"https://alice:USERSECRET@hub.example/vecnet", hubid.ErrHubPassword},
+		{"https://alice@hub.example", hubid.ErrHubPassword},
+		{"https://hub.example/vecnet?token=QUERYSECRET", hubid.ErrHubQuery},
+		{"https://hub.example?", hubid.ErrHubQuery},
+		{"https://hub.example/vecnet#FRAG", hubid.ErrHubFragment},
+		{"https://hub.example#", hubid.ErrHubFragment},
+		{"ftp://hub.example/vecnet", hubid.ErrHubScheme},
+		{"http://hub.example", hubid.ErrPlainHTTP},
+		{"http://[::1USERSECRET", hubid.ErrHubForm},
+		{"", hubid.ErrHubForm},
+		{"https://hub.example\n", hubid.ErrHubForm},
+	}
+	for _, tc := range cases {
+		err := hubid.CheckHubURL(tc.raw)
+		if !errors.Is(err, tc.err) {
+			t.Errorf("CheckHubURL(%q) = %v, want %v", tc.raw, err, tc.err)
+		}
+		for _, secret := range []string{"USERSECRET", "QUERYSECRET", "FRAG"} {
+			if err != nil && strings.Contains(err.Error(), secret) {
+				t.Errorf("error contains %q: %v", secret, err)
+			}
+		}
 	}
 }
 

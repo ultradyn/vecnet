@@ -165,7 +165,7 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 		if err != nil {
 			return err
 		}
-		if err := checkHubURL(p.Hub, p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"); err != nil {
+		if err := a.useStoredHub(name, p); err != nil {
 			return err
 		}
 		// Bind is a non-hook command: record best-effort first-use trust before

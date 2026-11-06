@@ -332,6 +332,22 @@ func runInit(dataDir, name string, w io.Writer) error {
 	return err
 }
 
+// hubConfigURL runs the operator's public or relocation URL through
+// CheckHubURL. Userinfo, a query, a fragment, a bad scheme and a string that
+// does not parse refuse startup. The message names the rule and no part of
+// raw. Plain http is operator configuration and is allowed here; the CLI's
+// LAN rule is what stops a client sending a bearer in the clear.
+func hubConfigURL(flagName, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	err := hubid.CheckHubURL(raw)
+	if err == nil || errors.Is(err, hubid.ErrPlainHTTP) {
+		return nil
+	}
+	return errors.New(flagName + ": " + err.Error())
+}
+
 // ShutdownGrace bounds restart announcement, drain and http.Server.Shutdown.
 // It stays below fly.toml's kill_timeout so the store closes before the
 // platform kills the process.
@@ -367,17 +383,23 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 		}
 	}
 	publicURL := cfg.PublicURL
+	if err := hubConfigURL("--public-url", publicURL); err != nil {
+		return err
+	}
+	if err := hubConfigURL("--relocated-to", cfg.RelocatedTo); err != nil {
+		return err
+	}
 	var target string
 	if cfg.RelocatedTo != "" {
 		var err error
 		target, err = hubid.NormalizeURL(cfg.RelocatedTo)
 		if err != nil {
-			return fmt.Errorf("--relocated-to: %w", err)
+			return errors.New("--relocated-to: " + hubid.ErrHubForm.Error())
 		}
 		if publicURL != "" {
 			own, err := hubid.NormalizeURL(publicURL)
 			if err != nil {
-				return fmt.Errorf("--public-url: %w", err)
+				return errors.New("--public-url: " + hubid.ErrHubForm.Error())
 			}
 			if target == own {
 				return errors.New("--relocated-to must differ from --public-url")
@@ -393,10 +415,13 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	if publicURL == "" {
 		publicURL = "http://" + addr
 	}
+	if err := hubConfigURL("--public-url", publicURL); err != nil {
+		return err
+	}
 	if target != "" {
 		own, err := hubid.NormalizeURL(publicURL)
 		if err != nil {
-			return fmt.Errorf("--public-url: %w", err)
+			return errors.New("--public-url: " + hubid.ErrHubForm.Error())
 		}
 		if target == own {
 			return errors.New("--relocated-to must differ from --public-url")

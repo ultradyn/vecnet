@@ -84,7 +84,7 @@ func (a *app) chooseTUIProfile(pick bool) error {
 			return bareAgentErr(r)
 		}
 	}
-	choices := operatorProfiles(cfg)
+	choices := operatorProfiles(cfg, a.getenv(insecureEnv) == "1")
 	if len(choices) == 0 {
 		return usageErr("vecnet tui: no operator profile in the config. A profile needs a vn_operator_ credential; pass --net <profile> or enrol one")
 	}

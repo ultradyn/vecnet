@@ -70,7 +70,7 @@ func TestOperatorProfilesHideSecrets(t *testing.T) {
 		"operator": {Hub: "http://127.0.0.1:45752", Secret: "  vn_operator_LOCALSECRET  "},
 		"fly":      {Hub: "https://vecnet.fly.dev", Secret: "vn_operator_FLYSECRET"},
 	}}
-	got := operatorProfiles(c)
+	got := operatorProfiles(c, false)
 	text := strings.ToLower(sprintfChoices(got))
 	if strings.Contains(text, "secret") || strings.Contains(text, "vn_") {
 		t.Fatalf("choices leaked a credential: %#v", got)

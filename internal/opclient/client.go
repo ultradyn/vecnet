@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
 
@@ -27,6 +29,20 @@ type Error struct {
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("operator API %d %s: %s", e.Status, e.Code, e.Message)
+}
+
+// gate refuses a hub base that carries userinfo, a query or a fragment, or
+// that does not parse, before any dial. Plain http on a public host is left
+// to the caller that opted in. The error names the rule and no part of the URL.
+func (c *Client) gate() error {
+	if c == nil {
+		return hubid.ErrHubForm
+	}
+	err := hubid.CheckHubURL(c.base)
+	if err == nil || errors.Is(err, hubid.ErrPlainHTTP) {
+		return nil
+	}
+	return err
 }
 
 // Client may be shared by callers. Its credential is sent only as a bearer.
@@ -54,6 +70,9 @@ func (c *Client) request(ctx context.Context, method, path string, body any) (*h
 // requestMatch is request with one strong If-Match. An empty tag sends no
 // precondition header. Callers pass the ETag from GET unchanged, quotes included.
 func (c *Client) requestMatch(ctx context.Context, method, path string, body any, ifMatch string) (*http.Response, error) {
+	if err := c.gate(); err != nil {
+		return nil, err
+	}
 	var reader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -323,6 +342,9 @@ func (c *Client) Ack(ctx context.Context, cursor string) error {
 // Upload streams bytes under the caller's context, without the short timeout
 // used for JSON requests. Unreferenced uploads expire after one day.
 func (c *Client) Upload(ctx context.Context, r io.Reader, size int64, mediaType, name string) (envelope.Attachment, error) {
+	if err := c.gate(); err != nil {
+		return envelope.Attachment{}, err
+	}
 	if size < 0 {
 		return envelope.Attachment{}, fmt.Errorf("upload size must be nonnegative")
 	}
