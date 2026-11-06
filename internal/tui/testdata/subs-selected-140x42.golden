@@ -1,4 +1,4 @@
- vecnet | 1:inbox 2:chat 3:dash 4:subs 8                                     hub hub.example:8443  live  apr 2  dlq 3  cuts/24h 7  07:41:00 
+ vecnet | 1:inbox 2:chat 3:dash 4:subs 8                             home · hub hub.example:8443  live  apr 2  dlq 3  cuts/24h 7  07:41:00  
 ┌─ subs · 9 rows ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │  peer               host                        health           expires in           last refresh  last status  attempts  cursor        │
 │  fine-dot           fine.chatgpt.example        ok               1h 0m                02/11 07:36   200          0         e0.42         │
@@ -39,4 +39,4 @@
 │                                                                                                                                          │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
  NORMAL   j/k move  read-only                                                                              max@vecnet · working · prio wake 
-: command  ? help                                                                                                                           
+: command  ? help  Shift+drag selects text                                                                                                  

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,8 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/XertroV/vecnet/internal/tui"
 )
 
 // Profile is one [profiles.<name>] table of the config file: a hub origin
@@ -80,7 +84,7 @@ func loadConfig(path string) (Config, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return Config{Profiles: map[string]Profile{}}, nil
 		}
-		return Config{}, fmt.Errorf("read config %s: %w", path, err)
+		return Config{}, configParseErr(path, err)
 	}
 	if c.Profiles == nil {
 		c.Profiles = map[string]Profile{}
@@ -114,6 +118,50 @@ func (c Config) profile(name string) (string, Profile, error) {
 		return "", Profile{}, usageErr(fmt.Sprintf("profile %q needs hub and secret", name))
 	}
 	return name, p, nil
+}
+
+// setOperatorProfile rewrites only the root operator_profile value. Comments,
+// secrets and every other byte stay as they were. A missing assignment is
+// inserted at the top. The named profile has to be in the file read under the
+// lock; a missing file, an empty file, or a config that no longer contains
+// that profile is left untouched.
+//
+// The whole reread, check and replace run under the config lock (the same
+// path+".lock" editProfiles uses). A symlink is refused, and the file is not
+// replaced if its bytes changed under the lock.
+func setOperatorProfile(path, name string) error {
+	if name == "" {
+		return usageErr("operator_profile name is empty")
+	}
+	quoted, err := profileString(name)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	unlock, err := lockPath(ctx, path+".lock")
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return setOperatorProfileLocked(path, name, quoted)
+}
+
+// operatorProfiles lists profiles that hold an operator credential, by name.
+// The secret never leaves this process: a choice is a name and a hub host.
+func operatorProfiles(c Config) []tui.ProfileChoice {
+	names := make([]string, 0, len(c.Profiles))
+	for name, p := range c.Profiles {
+		if isOperatorSecret(p.Secret) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	out := make([]tui.ProfileChoice, len(names))
+	for i, name := range names {
+		out[i] = tui.ProfileChoice{Name: name, Hub: c.Profiles[name].Hub}
+	}
+	return out
 }
 
 // writeFileAtomic writes data to a temp file beside path and renames it
@@ -226,4 +274,41 @@ func (c cache) rememberMessages(pairs map[string]string) error {
 		}
 	}
 	return c.writeJSON("messages.json", m)
+}
+
+// configParseError is a TOML failure that names the file and, when the
+// decoder reported one, the line. Decoder text is never kept: it quotes the
+// bytes being read, and those bytes can be a credential.
+type configParseError struct {
+	file string
+	line int
+}
+
+func (e *configParseError) Error() string {
+	if e.line > 0 {
+		return fmt.Sprintf("%s: parse error at line %d", e.file, e.line)
+	}
+	return e.file + ": parse error"
+}
+
+func configParseErr(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	file := "config.toml"
+	if path != "" {
+		file = filepath.Base(path)
+	}
+	return &configParseError{file: file, line: tomlErrorLine(err)}
+}
+
+func tomlErrorLine(err error) int {
+	var pe toml.ParseError
+	if !errors.As(err, &pe) {
+		return 0
+	}
+	if pe.Position.Line > 0 {
+		return pe.Position.Line
+	}
+	return pe.Line
 }

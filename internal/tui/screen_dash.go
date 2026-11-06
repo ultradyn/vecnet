@@ -61,6 +61,19 @@ type dashScreen struct {
 	focus        dashFocus
 	peer, thread string
 	narrow       *dashNarrow
+	peerVis      []string
+	peerRowAt    int
+	threadVis    []string
+	threadRowAt  int
+	// extra is the unfiltered pages fetched after Data.Threads. extraBase is
+	// the snapshot those pages belong to; a newer snapshot drops them.
+	// pageGen is that snapshot's generation. Cursor requests carry it, and a
+	// response from an older generation is dropped even when extraBase is empty.
+	extra          []opapi.ThreadRow
+	extraNext      *string
+	extraBase      string
+	pageGen        uint64
+	generationSnap string
 }
 
 // dashNarrow is the thread pane narrowed to one peer. The shell's Data.Threads
@@ -87,7 +100,7 @@ func (d *dashScreen) Title() string { return "dash" }
 
 func (d *dashScreen) Hints() string {
 	if d.focus == dashOnThreads {
-		return "j/k thread  enter open  esc peers"
+		return "j/k thread  n page  enter open  esc peers"
 	}
 	return "j/k peer  enter threads  tab pane"
 }
@@ -98,12 +111,24 @@ func (d *dashScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 		return d.onKey(msg.String(), m)
 	case Loaded:
 		if msg.Key == "threads" && msg.Err == nil {
+			d.noteFirstPage(m.Data.Threads)
 			return d.loadNarrow(m)
 		}
 	case dashThreadsMsg:
 		return d.onNarrow(msg, m)
+	case dashPageMsg:
+		d.onPage(msg)
 	}
 	return nil
+}
+
+// dashPageMsg is one more unfiltered cursor page. gen is the first-page
+// generation the request was made for.
+type dashPageMsg struct {
+	base string
+	gen  uint64
+	page opapi.ThreadPage
+	err  error
 }
 
 func (d *dashScreen) onKey(key string, m *Model) tea.Cmd {
@@ -121,6 +146,10 @@ func (d *dashScreen) onKey(key string, m *Model) tea.Cmd {
 	case "esc":
 		d.narrow = nil
 		d.focus = dashOnPeers
+	case "n":
+		if d.focus == dashOnThreads && d.narrow == nil {
+			return d.loadMore(m)
+		}
 	case "enter":
 		if d.focus == dashOnThreads {
 			rows := d.threadRows(m)
@@ -170,12 +199,100 @@ func (d *dashScreen) threadIndex(rows []opapi.ThreadRow) int {
 	return max(slices.IndexFunc(rows, func(r opapi.ThreadRow) bool { return r.Thread.ThreadID == d.thread }), 0)
 }
 
-// threadPage is what the thread pane lists.
+// threadPage is what the thread pane lists. Unfiltered, that is the hub page
+// plus every cursor page `n` has fetched for this snapshot.
 func (d *dashScreen) threadPage(m *Model) opapi.ThreadPage {
 	if d.narrow != nil {
 		return d.narrow.page
 	}
-	return m.Data.Threads
+	page := m.Data.Threads
+	if d.extraBase != threadSnap(page) || len(d.extra) == 0 {
+		return page
+	}
+	out := page
+	out.Threads = append(append([]opapi.ThreadRow{}, page.Threads...), d.extra...)
+	out.Next = d.extraNext
+	return out
+}
+
+func threadSnap(page opapi.ThreadPage) string {
+	id := ""
+	if len(page.Threads) > 0 {
+		id = page.Threads[0].Thread.ThreadID
+	}
+	next := ""
+	if page.Next != nil {
+		next = *page.Next
+	}
+	return fmt.Sprintf("%s/%d/%s", id, len(page.Threads), next)
+}
+
+// loadMore fetches the next unfiltered cursor page. A peer narrowing is a
+// different query and stays on its own load.
+func (d *dashScreen) loadMore(m *Model) tea.Cmd {
+	if d.narrow != nil || m.stopped() {
+		return nil
+	}
+	page := d.threadPage(m)
+	if page.Next == nil || *page.Next == "" {
+		return nil
+	}
+	cursor := *page.Next
+	base := threadSnap(m.Data.Threads)
+	gen := d.pageGen
+	api, ctx := m.API, m.ctx
+	return func() tea.Msg {
+		v, err := api.Threads(ctx, opapi.ThreadQuery{Limit: pageLimit, Cursor: cursor})
+		return dashPageMsg{base: base, gen: gen, page: v, err: err}
+	}
+}
+
+// noteFirstPage starts a generation when the hub's first page is a different
+// snapshot. Extras fetched for the previous one are dropped, including a
+// response that has not arrived yet.
+func (d *dashScreen) noteFirstPage(page opapi.ThreadPage) {
+	snap := threadSnap(page)
+	if d.generationSnap != "" && snap == d.generationSnap {
+		return
+	}
+	if d.generationSnap == "" && (d.extraBase == "" || d.extraBase == snap) {
+		d.generationSnap = snap
+		if d.extraBase == "" {
+			d.extraBase = snap
+		}
+		return
+	}
+	d.pageGen++
+	d.generationSnap = snap
+	d.extra = nil
+	d.extraNext = nil
+	d.extraBase = ""
+}
+
+func (d *dashScreen) onPage(msg dashPageMsg) {
+	if msg.err != nil || msg.gen != d.pageGen {
+		return
+	}
+	// A page fetched for a snapshot this screen has since left is dropped.
+	cur := d.generationSnap
+	if cur == "" {
+		cur = d.extraBase
+	}
+	if cur != "" && msg.base != cur {
+		return
+	}
+	d.extraBase = msg.base
+	seen := map[string]bool{}
+	for _, row := range d.extra {
+		seen[row.Thread.ThreadID] = true
+	}
+	for _, row := range msg.page.Threads {
+		if seen[row.Thread.ThreadID] {
+			continue
+		}
+		d.extra = append(d.extra, row)
+	}
+	d.extraNext = msg.page.Next
 }
 
 func (d *dashScreen) threadRows(m *Model) []opapi.ThreadRow { return d.threadPage(m).Threads }
@@ -284,11 +401,53 @@ func (d *dashScreen) View(m *Model, w, h int) string {
 	top, topH := d.viewPeers(m, w, h)
 	bottomH := h - topH
 	threadsW, healthW, auditW := (w+2)/3, (w+1)/3, w/3
+	threads := d.viewThreads(m, names, threadsW, bottomH)
+	d.noteHits(m, w, topH, threadsW, bottomH)
 	return top + "\n" + lipgloss.JoinHorizontal(lipgloss.Top,
-		d.viewThreads(m, names, threadsW, bottomH),
+		threads,
 		viewDashHealth(m, names, healthW, bottomH),
 		viewDashAudit(m, names, auditW, bottomH),
 	)
+}
+
+func (d *dashScreen) noteHits(m *Model, w, topH, threadsW, bottomH int) {
+	m.addHit(m.hitX, m.hitY, w, topH, hitScroll, "dash.peers")
+	for i, id := range d.peerVis {
+		m.addHit(m.hitX+1, m.hitY+1+d.peerRowAt+i, max(w-2, 1), 1, hitRow, "peer:"+id)
+	}
+	m.addHit(m.hitX, m.hitY+topH, threadsW, bottomH, hitScroll, "dash.threads")
+	for i, id := range d.threadVis {
+		m.addHit(m.hitX+1, m.hitY+topH+1+d.threadRowAt+i, max(threadsW-2, 1), 1, hitRow, "thread:"+id)
+	}
+}
+
+func (d *dashScreen) Click(id string, m *Model) tea.Cmd {
+	if pid, ok := strings.CutPrefix(id, "peer:"); ok {
+		d.peer = pid
+		d.focus = dashOnPeers
+		return nil
+	}
+	if tid, ok := strings.CutPrefix(id, "thread:"); ok {
+		d.thread = tid
+		d.focus = dashOnThreads
+		return nil
+	}
+	return nil
+}
+
+func (d *dashScreen) Wheel(id string, down bool, m *Model) {
+	by := 1
+	if !down {
+		by = -1
+	}
+	switch id {
+	case "dash.peers":
+		d.focus = dashOnPeers
+		d.move(m, by)
+	case "dash.threads":
+		d.focus = dashOnThreads
+		d.move(m, by)
+	}
 }
 
 // dashTitle tags a pane title while one of its resources is loading.
@@ -594,6 +753,7 @@ func (d *dashScreen) viewPeers(m *Model, w, h int) (string, int) {
 	height := min(len(failure)+1+max(len(peers), 1)+2, h*3/5)
 	title := dashTitle(m, fmt.Sprintf("peers · %d", len(peers)), "peers") + " · presence is self-reported, reach is hub-observed"
 	lines := slices.Clone(failure)
+	d.peerVis = d.peerVis[:0]
 	switch {
 	case len(peers) > 0:
 		cols := dashColsFor(inner)
@@ -601,7 +761,9 @@ func (d *dashScreen) viewPeers(m *Model, w, h int) (string, int) {
 		size := max(height-2-len(lines), 1)
 		cursor := d.peerIndex(m)
 		start := dashWindow(cursor, len(peers), size)
+		d.peerRowAt = len(lines)
 		for i := start; i < min(start+size, len(peers)); i++ {
+			d.peerVis = append(d.peerVis, peers[i].Peer.PeerID)
 			lines = append(lines, dashPeerLine(m, cols, peers[i], i == cursor))
 		}
 	case failure == nil:
@@ -649,12 +811,15 @@ func (d *dashScreen) viewThreads(m *Model, names dashNames, w, h int) string {
 		title = label + " · loading"
 	}
 	lines := slices.Clone(failure)
+	d.threadVis = d.threadVis[:0]
 	switch {
 	case len(rows) > 0:
 		size := max(h-2-len(lines), 1)
 		cursor := d.threadIndex(rows)
 		start := dashWindow(cursor, len(rows), size)
+		d.threadRowAt = len(lines)
 		for i := start; i < min(start+size, len(rows)); i++ {
+			d.threadVis = append(d.threadVis, rows[i].Thread.ThreadID)
 			lines = append(lines, d.threadLine(m, names, rows[i], inner, d.focus == dashOnThreads && i == cursor))
 		}
 	case !done && failure == nil:

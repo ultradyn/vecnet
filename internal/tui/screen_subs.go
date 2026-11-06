@@ -65,7 +65,10 @@ type subsScreen struct {
 	// when a reload reorders the table. Empty or gone means the first row.
 	sel string
 	// bad counts rows that are not ok, as the last load left them.
-	bad int
+	bad    int
+	vis    []string
+	rowAt  int
+	tableH int
 }
 
 func newSubsScreen() Screen { return &subsScreen{} }
@@ -128,18 +131,52 @@ func (s *subsScreen) selected(rows []opapi.Subscription) int {
 
 func (s *subsScreen) View(m *Model, w, h int) string {
 	tableH := max(h-subsDetailH, 2)
+	s.tableH = tableH
 	title := fmt.Sprintf("subs · %d rows", len(m.Data.Subs))
 	if m.inflight[subsResource] {
 		title += " · reloading"
 	}
 	table := Pane(title, w, tableH, true, s.viewTable(m, w-2, tableH-2))
+	s.noteHits(m, w)
 	return table + "\n" + s.viewDetail(m, w, h-tableH)
+}
+
+func (s *subsScreen) noteHits(m *Model, w int) {
+	m.addHit(m.hitX, m.hitY, w, s.tableH, hitScroll, "subs.table")
+	for i, id := range s.vis {
+		m.addHit(m.hitX+1, m.hitY+1+s.rowAt+i, max(w-2, 1), 1, hitRow, "sub:"+id)
+	}
+}
+
+func (s *subsScreen) Click(id string, m *Model) tea.Cmd {
+	if sid, ok := strings.CutPrefix(id, "sub:"); ok {
+		s.sel = sid
+	}
+	return nil
+}
+
+func (s *subsScreen) Wheel(id string, down bool, m *Model) {
+	if id != "subs.table" {
+		return
+	}
+	rows := m.Data.Subs
+	if len(rows) == 0 {
+		return
+	}
+	at := s.selected(rows)
+	if down {
+		at = min(at+1, len(rows)-1)
+	} else {
+		at = max(at-1, 0)
+	}
+	s.sel = rows[at].SubID
 }
 
 // viewTable is the header and as many rows as fit, keeping the selection in view.
 func (s *subsScreen) viewTable(m *Model, w, h int) string {
 	var lines []string
 	rows := m.Data.Subs
+	s.vis = s.vis[:0]
 	if err := m.Data.Errs[subsResource]; err != nil {
 		if rows == nil { // a load that succeeded, even empty, leaves a non-nil slice
 			// Nothing ever loaded: there is no last data, and no count to give.
@@ -160,7 +197,9 @@ func (s *subsScreen) viewTable(m *Model, w, h int) string {
 	at := s.selected(rows)
 	room := max(h-len(lines), 1)
 	first := max(at-room+1, 0)
+	s.rowAt = len(lines)
 	for i := first; i < min(first+room, len(rows)); i++ {
+		s.vis = append(s.vis, rows[i].SubID)
 		lines = append(lines, subsTableRow(m, rows[i], i == at, cols, widths, w))
 	}
 	return strings.Join(lines, "\n")

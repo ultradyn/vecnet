@@ -38,7 +38,9 @@ func loaded(t *testing.T, f *fakeAPI, clock *testClock) (*Model, *pump) {
 	m.screens = staticScreens()
 	p := newPump(t, m)
 	p.run(m.Init())
-	p.until("first load", func() bool { return !m.firstLoading() })
+	p.until("first load", func() bool {
+		return !m.firstLoading() && (m.Data.Inbox.Me.PeerID == "" || m.Data.MineKnown)
+	})
 	p.until("live", func() bool { return m.Conn == ConnLive })
 	p.idle()
 	return m, p
@@ -200,8 +202,13 @@ func TestModesAndKeys(t *testing.T) {
 		names := []string{"Inbox", "Threads", "Peers", "Subscriptions", "LoopCuts", "DeliveryHealth", "Audit", "Counters"}
 		p.loaded(f, names...)
 		for _, name := range names {
-			if f.count(name) != 1 {
-				t.Errorf("%s loaded %d times", name, f.count(name))
+			want := 1
+			if name == "Threads" {
+				// The unfiltered page, then Your Threads and Other Threads.
+				want = 3
+			}
+			if f.count(name) != want {
+				t.Errorf("%s loaded %d times, want %d", name, f.count(name), want)
 			}
 		}
 	})
@@ -217,10 +224,19 @@ func TestModesAndKeys(t *testing.T) {
 func TestStatusConn(t *testing.T) {
 	render := func(t *testing.T, m *Model, want string) {
 		t.Helper()
-		for _, size := range [][2]int{{140, 42}, {80, 24}} {
-			if line := strings.Split(plainAt(t, m, size[0], size[1]), "\n")[0]; !strings.Contains(line, want) {
-				t.Errorf("%dx%d top bar lacks %q: %q", size[0], size[1], want, line)
-			}
+		wide := strings.Split(plainAt(t, m, 140, 42), "\n")[0]
+		narrow := strings.Split(plainAt(t, m, 80, 24), "\n")[0]
+		if !strings.Contains(wide, want) || !strings.Contains(wide, profileHubLabel(m.Profile, m.Hub)) {
+			t.Errorf("140x42 top bar lacks %q: %q", want, wide)
+		}
+		// 80 columns keep the profile, the host and the connection state.
+		// A long state uses the short profile·host form.
+		host := hubHost(m.Hub)
+		if i := strings.IndexByte(host, ':'); i > 0 {
+			host = host[:i]
+		}
+		if !strings.Contains(narrow, want) || !strings.Contains(narrow, m.Profile) || !strings.Contains(narrow, host) {
+			t.Errorf("80x24 top bar lacks %q: %q", want, narrow)
 		}
 	}
 	f := seeded()
@@ -428,8 +444,8 @@ func TestTagReloadCoalesced(t *testing.T) {
 	if err := feed(opclient.Batch{Cursor: "e0.3", Events: []envelope.Event{deliveryEvent(t, "e0.1", "thr_a"), deliveryEvent(t, "e0.2", "thr_a"), deliveryEvent(t, "e0.3", "thr_b")}}); err != nil {
 		t.Fatal(err)
 	}
-	if f.count("Inbox") != 1 || f.count("Threads") != 1 {
-		t.Fatalf("delivery batch: Inbox %d Threads %d, want 1 and 1", f.count("Inbox"), f.count("Threads"))
+	if f.count("Inbox") != 1 || f.count("Threads") != 3 {
+		t.Fatalf("delivery batch: Inbox %d Threads %d, want 1 and 3", f.count("Inbox"), f.count("Threads"))
 	}
 	if f.count("Peers") != 0 {
 		t.Fatalf("delivery batch loaded Peers %d times", f.count("Peers"))
@@ -499,8 +515,12 @@ func TestTagReloadCoalesced(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, name := range []string{"Inbox", "Threads", "Peers", "Subscriptions", "LoopCuts", "DeliveryHealth", "Audit", "Counters", "Thread"} {
-			if f.count(name) != 1 {
-				t.Errorf("%s loaded %d times", name, f.count(name))
+			want := 1
+			if name == "Threads" {
+				want = 3 // unfiltered page, then Your Threads and Other Threads
+			}
+			if f.count(name) != want {
+				t.Errorf("%s loaded %d times, want %d", name, f.count(name), want)
 			}
 		}
 	})

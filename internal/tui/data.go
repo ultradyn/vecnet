@@ -18,15 +18,22 @@ import (
 // Data is the last snapshot of everything the hub showed this client. A failed
 // load keeps the old value and records the error under its resource key.
 type Data struct {
-	Inbox    opapi.Inbox
-	Threads  opapi.ThreadPage
-	Peers    []opapi.PeerRow
-	Subs     []opapi.Subscription
-	Cuts     opapi.LoopCuts
-	Health   opapi.DeliveryHealth
-	Audit    opapi.AuditPage
-	Counters map[string]int
-	Notices  []envelope.HubNotice // the hub's active notices, oldest first
+	Inbox   opapi.Inbox
+	Threads opapi.ThreadPage
+	// Mine is GET /v1/admin/threads?participant=<me> (Your Threads). Others is
+	// the same list with exclude_participant=<me> (Other Threads). ThreadsKnown
+	// is set only after a successful unfiltered page, and that page is a
+	// fallback only once the operator's identity is known. The dashboard keeps
+	// Threads.
+	Mine, Others                         opapi.ThreadPage
+	MineKnown, OthersKnown, ThreadsKnown bool
+	Peers                                []opapi.PeerRow
+	Subs                                 []opapi.Subscription
+	Cuts                                 opapi.LoopCuts
+	Health                               opapi.DeliveryHealth
+	Audit                                opapi.AuditPage
+	Counters                             map[string]int
+	Notices                              []envelope.HubNotice // the hub's active notices, oldest first
 	// Prefs is the last successful preferences snapshot. PrefsKnown is set
 	// once a GET has been applied. PrefsNote explains a 404 or 403, which the
 	// preferences screen shows as unavailable rather than as a failed load.
@@ -139,6 +146,10 @@ func (m *Model) expand(tags []string) []string {
 			for _, key := range allKeys {
 				add(key)
 			}
+			if m.Data.Inbox.Me.PeerID != "" {
+				add("mine")
+				add("other")
+			}
 			for id := range m.Data.Thread {
 				add(threadPrefix + id)
 			}
@@ -148,6 +159,13 @@ func (m *Model) expand(tags []string) []string {
 			}
 		default:
 			add(tag)
+			// Your Threads and Other Threads ride with the unfiltered page once
+			// the inbox has named the operator. Before that, the inbox load
+			// starts them once.
+			if tag == "threads" && m.Data.Inbox.Me.PeerID != "" {
+				add("mine")
+				add("other")
+			}
 		}
 	}
 	return keys
@@ -220,7 +238,14 @@ func (m *Model) onLoad(msg loadMsg) tea.Cmd {
 		m.settle(msg.key, msg.err)
 	}
 	delete(m.dirty, msg.key)
-	return tea.Batch(again, m.broadcast(Loaded{Key: msg.key, Err: msg.err}))
+	// The first inbox names the operator after the opening thread page was
+	// already requested. One participant-page load follows it. Later thread
+	// reloads include those pages themselves.
+	var follow tea.Cmd
+	if msg.key == "inbox" && msg.err == nil && m.Data.Inbox.Me.PeerID != "" && !m.Data.MineKnown && !m.inflight["mine"] && !m.stopped() {
+		follow = m.Reload("mine", "other")
+	}
+	return tea.Batch(again, follow, m.broadcast(Loaded{Key: msg.key, Err: msg.err}))
 }
 
 // Loaded reaches every screen after a resource's Data changed or failed.
@@ -336,7 +361,38 @@ func (m *Model) fetch(key string) tea.Cmd {
 	case "threads":
 		return func() tea.Msg {
 			v, err := api.Threads(ctx, opapi.ThreadQuery{Limit: pageLimit})
-			return loadMsg{key: key, err: err, apply: func(m *Model) { m.Data.Threads = v }}
+			return loadMsg{key: key, err: err, apply: func(m *Model) {
+				m.Data.Threads = v
+				m.Data.ThreadsKnown = true
+			}}
+		}
+	case "mine":
+		me := m.Data.Inbox.Me.PeerID
+		if me == "" {
+			return nil
+		}
+		return func() tea.Msg {
+			v, err := api.Threads(ctx, opapi.ThreadQuery{Participant: me, Limit: pageLimit})
+			return loadMsg{key: key, err: err, apply: func(m *Model) {
+				m.Data.Mine = v
+				m.Data.MineKnown = true
+			}}
+		}
+	case "other":
+		me := m.Data.Inbox.Me.PeerID
+		if me == "" {
+			return nil
+		}
+		limit := m.OtherLimit
+		if limit <= 0 {
+			limit = otherPage
+		}
+		return func() tea.Msg {
+			v, err := api.Threads(ctx, opapi.ThreadQuery{ExcludeParticipant: me, Limit: limit})
+			return loadMsg{key: key, err: err, apply: func(m *Model) {
+				m.Data.Others = v
+				m.Data.OthersKnown = true
+			}}
 		}
 	case "peers":
 		return func() tea.Msg {

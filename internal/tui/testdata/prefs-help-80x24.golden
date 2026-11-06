@@ -1,15 +1,15 @@
- vecnet | 1:inbox 2:chat 3:dash 4:subs prefs       live  apr 2  dlq 3  07:41:00 
+ vecnet | 1:inbox 2:chat 3:dash 4:subs prefs       home·hub.example:8443  live  
 ┌─ help ───────────────────────────────────────────────────────────────────────┐
 │global keys                                                                   │
 │  1-4     switch tab                                                          │
 │  q       quit                                                                │
 │  :       command line                                                        │
-│  ?       this help; any key closes it                                        │
+│  ?       help; M releases mouse; Shift+drag selects text                     │
 │  ctrl+l  reload everything                                                   │
-│                                                                              │
 │prefs                                                                         │
 │  j/k move  r refresh                                                         │
 │commands                                                                      │
+│  :mouse on|off                             release; Shift+drag selects text  │
 │  :prefs                                    show read-only hub preferences    │
 │  :presence <idle|working|blocked|offline>  set your presence                 │
 │  :q                                        quit                              │
@@ -21,4 +21,4 @@
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
  NORMAL   j/k move  r refresh                  max@vecnet · working · prio wake 
-: command  ? help                                                               
+: command  ? help  Shift+drag selects text                                      

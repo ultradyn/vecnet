@@ -67,6 +67,7 @@ func builtinCommands() map[string]Command {
 		"retry":    {Help: "all  retry every listed dead letter", Run: runRetry},
 		"thread":   {Help: "<n>  nth thread in the chat list", Run: runThread},
 		"tab":      {Help: "<name>  switch tab", Run: runTab},
+		"mouse":    {Help: "on|off  release; Shift+drag selects text", Run: runMouse},
 	}
 }
 
@@ -332,12 +333,12 @@ func runThread(m *Model, args []string) tea.Cmd {
 	if err != nil {
 		return usage(m, "thread")
 	}
-	rows := m.Data.Threads.Threads
-	if n < 1 || n > len(rows) {
-		m.Toast(fmt.Sprintf("no thread %d: the chat list has %d", n, len(rows)), true)
+	ids := chatSelectableIDs(m)
+	if n < 1 || n > len(ids) {
+		m.Toast(fmt.Sprintf("no thread %d: the chat list has %d", n, len(ids)), true)
 		return nil
 	}
-	return m.OpenThread(rows[n-1].Thread.ThreadID)
+	return m.OpenThread(ids[n-1])
 }
 
 func runTab(m *Model, args []string) tea.Cmd {
@@ -362,7 +363,7 @@ var helpKeys = []helpRow{
 	{"1-4", "switch tab"},
 	{"q", "quit"},
 	{":", "command line"},
-	{"?", "this help; any key closes it"},
+	{"?", "help; M releases mouse; Shift+drag selects text"},
 	{"ctrl+l", "reload everything"},
 }
 
@@ -392,7 +393,7 @@ func viewHelp(m *Model) string {
 	}
 	hints := ansi.Wordwrap(m.active().Hints(), max(m.W-4, minW-4), "")
 	lines := section("global keys", helpKeys)
-	lines = append(lines, "", styleAccent.Render(m.active().Title()))
+	lines = append(lines, styleAccent.Render(m.active().Title()))
 	for _, hint := range strings.Split(hints, "\n") {
 		lines = append(lines, "  "+styleMuted.Render(hint))
 	}

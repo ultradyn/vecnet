@@ -16,23 +16,33 @@ const insecureEnv = "VECNET_ALLOW_INSECURE_HTTP"
 // (PROTOCOL §20.4). LAN means a private, loopback, link-local or CGNAT
 // address, "localhost", a single-label name ("xsm"), or a name under .local,
 // .lan, .home.arpa or .internal. Names are not resolved.
+//
+// Errors never repeat the raw string. A URL with userinfo is refused without
+// naming any part of it. Scheme and public-HTTP refusals name only the scheme
+// and host.
 func checkHubURL(raw string, allow bool) error {
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
-		return usageErr(fmt.Sprintf("hub %q is not a URL like https://hub.example", raw))
+	if err != nil || u.Host == "" || u.Scheme == "" {
+		// The input can carry a secret. Do not echo it.
+		return usageErr("the hub is not a URL like https://hub.example")
+	}
+	if u.User != nil {
+		// A hub URL never takes credentials. Name no part of the URL.
+		return usageErr("a hub URL must not include credentials; put the profile secret in its own field")
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "https":
 		return nil
 	case "http":
 	default:
-		return usageErr(fmt.Sprintf("hub %q: the scheme must be https (or http on the LAN)", raw))
+		// Scheme and host only. Host has no userinfo; path and query stay out.
+		return usageErr(fmt.Sprintf("hub %s://%s: the scheme must be https (or http on the LAN)", u.Scheme, u.Host))
 	}
 	if allow || lanHost(u.Hostname()) {
 		return nil
 	}
-	return usageErr(fmt.Sprintf("hub %s is plain http on a public host, so the credential would cross the internet in the clear; "+
-		"use https://%s, or pass --allow-insecure-http to enrol (or set %s=1) if you mean it", raw, u.Host, insecureEnv))
+	return usageErr(fmt.Sprintf("hub %s://%s is plain http on a public host, so the credential would cross the internet in the clear; "+
+		"use https://%s, or pass --allow-insecure-http to enrol (or set %s=1) if you mean it", u.Scheme, u.Host, u.Host, insecureEnv))
 }
 
 // cgnat is 100.64.0.0/10 (Tailscale and other overlays live here).

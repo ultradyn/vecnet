@@ -95,7 +95,7 @@ func Run(ctx context.Context, o Options) error {
 	if o.Out != nil {
 		opts = append(opts, tea.WithOutput(o.Out))
 	}
-	_, err := tea.NewProgram(m, opts...).Run()
+	_, err := runProgram(m, opts...)
 	switch {
 	case m.fatal != nil:
 		return m.fatal

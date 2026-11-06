@@ -80,6 +80,9 @@ type inboxScreen struct {
 	prompt   *inboxPrompt
 	locks    map[string]*inboxLock
 	nextBeat time.Time
+	logTop   int
+	logN     int // events the log can show
+	logH     int // rows the log pane has
 }
 
 func newInboxScreen() Screen { return &inboxScreen{locks: map[string]*inboxLock{}} }
@@ -91,7 +94,7 @@ func (s *inboxScreen) Hints() string {
 	case s.prompt == nil && s.compact:
 		return "a answer  r retry  x drop  p status"
 	case s.prompt == nil:
-		return "j/k move  a answer  r retry  x discard  p presence  enter open  ? help"
+		return "j/k move  a answer  r retry  x discard  p presence  enter open  ctrl+u/d log  ? help"
 	case s.prompt.answer != nil:
 		return fmt.Sprintf("1-%d answer  any other key cancels", len(s.prompt.answer.Options))
 	}
@@ -179,6 +182,12 @@ func (s *inboxScreen) onKey(msg tea.KeyPressMsg, m *Model) tea.Cmd {
 		return nil
 	case "p":
 		return s.togglePresence(m)
+	case "ctrl+u":
+		s.scrollLog(false)
+		return nil
+	case "ctrl+d":
+		s.scrollLog(true)
+		return nil
 	}
 	if len(rows) == 0 {
 		return nil
@@ -572,8 +581,10 @@ func (s *inboxScreen) View(m *Model, w, h int) string {
 		counts[row.tag]++
 	}
 	title := fmt.Sprintf("inbox %d items · %d unread · apr %d · dlq %d", len(rows), m.Data.Inbox.Unread, counts["APR"], counts["DLQ"])
-	list := Pane(title, leftW, listH, true, s.viewRows(rows, at, peers, m, leftW-2, listH-2))
-	events := Pane("your event log  GET /v1/events -f · not messages, never replied to", leftW, h-listH, false, viewInboxLog(peers, m, leftW-2, h-listH-2))
+	listBody := s.viewRows(rows, at, peers, m, leftW-2, listH-2)
+	s.noteListHits(m, rows, leftW, listH, h)
+	list := Pane(title, leftW, listH, true, listBody)
+	events := Pane("your event log  GET /v1/events -f · not messages, never replied to", leftW, h-listH, false, s.viewInboxLog(peers, m, leftW-2, h-listH-2))
 	var row *inboxRow
 	if at < len(rows) {
 		row = &rows[at]
@@ -595,6 +606,69 @@ func (s *inboxScreen) viewRows(rows []inboxRow, at int, peers inboxPeers, m *Mod
 		lines = append(lines, s.viewRow(rows[i], i == at, peers, m, w))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (s *inboxScreen) noteListHits(m *Model, rows []inboxRow, leftW, listH, h int) {
+	m.addHit(m.hitX, m.hitY, leftW, listH, hitScroll, "inbox.list")
+	innerW, innerH := leftW-2, listH-2
+	for i := 0; i < innerH; i++ {
+		idx := s.top + i
+		if idx < 0 || idx >= len(rows) {
+			break
+		}
+		m.addHit(m.hitX+1, m.hitY+1+i, innerW, 1, hitRow, "in:"+rows[idx].key)
+	}
+	m.addHit(m.hitX, m.hitY+listH, leftW, max(h-listH, 0), hitScroll, "inbox.log")
+}
+
+func (s *inboxScreen) Click(id string, m *Model) tea.Cmd {
+	key, ok := strings.CutPrefix(id, "in:")
+	if !ok {
+		return nil
+	}
+	rows := s.rows(m)
+	for i, row := range rows {
+		if row.key == key {
+			s.moveTo(rows, i)
+			return nil
+		}
+	}
+	return nil
+}
+
+func (s *inboxScreen) Wheel(id string, down bool, m *Model) {
+	by := 1
+	if !down {
+		by = -1
+	}
+	switch id {
+	case "inbox.list":
+		rows := s.rows(m)
+		s.moveTo(rows, s.cursor(rows)+by)
+	case "inbox.log":
+		// Wheel down returns toward the latest events. Wheel up reveals older ones.
+		s.scrollLog(down)
+	}
+}
+
+// scrollLog moves the event log. towardLatest decreases the offset into the
+// newest-first list. The offset stays inside a full or partial window.
+func (s *inboxScreen) scrollLog(towardLatest bool) {
+	if towardLatest {
+		s.logTop--
+	} else {
+		s.logTop++
+	}
+	if s.logTop < 0 {
+		s.logTop = 0
+	}
+	maxTop := 0
+	if s.logH > 0 {
+		maxTop = max(s.logN-s.logH, 0)
+	}
+	if s.logTop > maxTop {
+		s.logTop = maxTop
+	}
 }
 
 type inboxCell struct {
@@ -989,14 +1063,29 @@ func viewInboxDelivery(d opapi.InboxDelivery, peers inboxPeers, m *Model, w, h i
 
 // viewInboxLog is the newest events that fit, oldest first. Deliveries are
 // messages, which the list above already shows.
-func viewInboxLog(peers inboxPeers, m *Model, w, h int) string {
+func (s *inboxScreen) viewInboxLog(peers inboxPeers, m *Model, w, h int) string {
 	const cursorW, typeW = 9, 17
-	lines := make([]string, 0, h)
-	for i := len(m.Data.Events) - 1; i >= 0 && len(lines) < h; i-- {
-		ev := m.Data.Events[i]
-		if ev.Type == "delivery" {
-			continue
+	var evs []envelope.Event
+	for i := len(m.Data.Events) - 1; i >= 0; i-- {
+		if m.Data.Events[i].Type != "delivery" {
+			evs = append(evs, m.Data.Events[i])
 		}
+	}
+	s.logN = len(evs)
+	s.logH = h
+	maxTop := 0
+	if h > 0 {
+		maxTop = max(len(evs)-h, 0)
+	}
+	if s.logTop < 0 {
+		s.logTop = 0
+	}
+	if s.logTop > maxTop {
+		s.logTop = maxTop
+	}
+	lines := make([]string, 0, h)
+	for i := s.logTop; i < len(evs) && len(lines) < h; i++ {
+		ev := evs[i]
 		kind := styleAccent
 		switch ev.Type {
 		case "receipt":

@@ -40,7 +40,7 @@ func editProfilesIf(path string, edits map[string]map[string]string, check func(
 	var before Config
 	beforeMD, err := toml.Decode(string(original), &before)
 	if err != nil {
-		return err
+		return configParseErr(path, err)
 	}
 	if check != nil {
 		if err = check(before); err != nil {
@@ -49,7 +49,7 @@ func editProfilesIf(path string, edits map[string]map[string]string, check func(
 	}
 	var expected map[string]any
 	if _, err = toml.Decode(string(original), &expected); err != nil {
-		return err
+		return configParseErr(path, err)
 	}
 	profiles, ok := expected["profiles"].(map[string]any)
 	if !ok {
@@ -160,7 +160,7 @@ func editProfilesIf(path string, edits map[string]map[string]string, check func(
 		}
 		var decoded map[string]string
 		if _, e := toml.Decode(match[2]+` = ""`, &decoded); e != nil {
-			return e
+			return configParseErr(path, e)
 		}
 		key := ""
 		for name := range decoded {
@@ -205,14 +205,14 @@ func editProfilesIf(path string, edits map[string]map[string]string, check func(
 	var after Config
 	afterMD, err := toml.Decode(string(result), &after)
 	if err != nil {
-		return err
+		return configParseErr(path, err)
 	}
 	if !reflect.DeepEqual(before, after) || !reflect.DeepEqual(beforeMD.Undecoded(), afterMD.Undecoded()) {
 		return fmt.Errorf("profile edit: decoded profiles or unknown keys changed")
 	}
 	var actual map[string]any
 	if _, err = toml.Decode(string(result), &actual); err != nil {
-		return err
+		return configParseErr(path, err)
 	}
 	if !reflect.DeepEqual(expected, actual) {
 		return fmt.Errorf("profile edit: unrelated TOML data changed")
