@@ -19,6 +19,7 @@ import (
 	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
+	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -613,5 +614,85 @@ func TestTailReportsRestarting(t *testing.T) {
 	}
 	if batches != 1 {
 		t.Errorf("handled %d batches, want only the live page", batches)
+	}
+}
+
+func TestPreferencesExchange(t *testing.T) {
+	ctx := context.Background()
+	def, err := prefs.Lookup("events.refresh_interval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := prefs.NewSnapshot(3, `"prefs-3-abc"`, []prefs.Definition{def}, map[string]prefs.Effective{
+		def.Key: {Value: prefs.Duration(1800), Source: prefs.SourceFlag, Origin: "VECNET_EVENTS_REFRESH_INTERVAL"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const etag = `"prefs-3-abc"`
+	const next = `"prefs-4-def"`
+	var gets, previews, patches int
+	var ifMatch []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			t.Errorf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/admin/prefs":
+			gets++
+			w.Header().Set("ETag", etag)
+			_, _ = w.Write(body)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/prefs/preview":
+			previews++
+			ifMatch = append(ifMatch, r.Header.Get("If-Match"))
+			w.Header().Set("ETag", etag)
+			_, _ = w.Write([]byte(`{"base_revision":3,"risks":[],"impact":{},"confirm_token":"tok_prefs_do_not_print","expires_at":"2026-11-06T00:05:00.000Z"}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/admin/prefs":
+			patches++
+			ifMatch = append(ifMatch, r.Header.Get("If-Match"))
+			if patches == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusPreconditionFailed)
+				_, _ = w.Write([]byte(`{"error":{"code":"prefs_revision_conflict","message":"Preferences changed; reload and reconcile.","details":{"field":"events.refresh_interval"}}}`))
+				return
+			}
+			w.Header().Set("ETag", next)
+			_, _ = w.Write(body)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "secret")
+	got, err := c.Preferences(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Revision != 3 || got.ETag != etag || len(got.Descriptors()) != 1 || got.Descriptors()[0].Source != prefs.SourceFlag {
+		t.Fatalf("snapshot = rev %d etag %q rows %d", got.Revision, got.ETag, len(got.Descriptors()))
+	}
+	patch := prefs.Patch{Set: map[string]prefs.Value{def.Key: prefs.Duration(600)}, Reset: []string{}, Confirm: []string{}}
+	preview, err := c.PreviewPreferences(ctx, got.ETag, patch)
+	if err != nil || preview.ConfirmToken != "tok_prefs_do_not_print" || preview.BaseRevision != 3 {
+		t.Fatalf("preview = %+v %v", preview, err)
+	}
+	_, err = c.PatchPreferences(ctx, got.ETag, patch)
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusPreconditionFailed || apiErr.Code != "prefs_revision_conflict" || apiErr.Details["field"] != "events.refresh_interval" {
+		t.Fatalf("conflict = %#v %v", apiErr, err)
+	}
+	if _, err = c.PatchPreferences(ctx, "", patch); err == nil {
+		t.Fatal("missing ETag was sent")
+	}
+	if gets != 1 || previews != 1 || patches != 1 {
+		t.Fatalf("requests get/preview/patch = %d/%d/%d", gets, previews, patches)
+	}
+	if len(ifMatch) != 2 || ifMatch[0] != etag || ifMatch[1] != etag {
+		t.Fatalf("If-Match = %q", ifMatch)
 	}
 }

@@ -9,8 +9,8 @@
 │                                                                                                                                          │
 │inbox                                                                                                                                     │
 │  j/k move  a answer                                                                                                                      │
-│                                                                                                                                          │
 │commands                                                                                                                                  │
+│  :prefs                                    show read-only hub preferences                                                                │
 │  :presence <idle|working|blocked|offline>  set your presence                                                                             │
 │  :q                                        quit                                                                                          │
 │  :refresh                                  reload everything                                                                             │

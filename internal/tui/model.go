@@ -93,6 +93,10 @@ type Model struct {
 	Help bool
 
 	screens []Screen
+	// prefs is the read-only preferences view. It is not a numbered tab:
+	// keys 1–4 stay on the existing screens, and :prefs opens this one.
+	prefs   *prefsScreen
+	prefsOn bool
 	loc     *time.Location
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -139,6 +143,7 @@ func newModel(ctx context.Context, o Options) *Model {
 		Commands:  map[string]Command{},
 		Data:      Data{Thread: map[string]*ThreadState{}, Errs: map[string]error{}},
 		screens:   []Screen{newInboxScreen(), newChatScreen(), newDashScreen(), newSubsScreen()},
+		prefs:     &prefsScreen{},
 		loc:       time.Local,
 		ctx:       ctx,
 		cancel:    cancel,
@@ -196,7 +201,12 @@ func (m *Model) broadcast(msg tea.Msg) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (m *Model) active() Screen { return m.screens[m.Tab] }
+func (m *Model) active() Screen {
+	if m.prefsOn && m.prefs != nil {
+		return m.prefs
+	}
+	return m.screens[m.Tab]
+}
 
 // View draws the full-screen frame.
 func (m *Model) View() tea.View {
@@ -237,11 +247,13 @@ func (m *Model) Toast(msg string, bad bool) {
 	m.toast = toast{text: Clean(msg), bad: bad, until: m.Now().Add(d)}
 }
 
-// OpenThread switches to the chat tab, sets m.CurrentThread and loads it.
+// OpenThread leaves any Preferences overlay, switches to the chat tab, sets
+// m.CurrentThread and loads it.
 func (m *Model) OpenThread(id string) tea.Cmd {
 	if id == "" {
 		return nil
 	}
+	m.prefsOn = false
 	m.Tab = tabChat
 	m.CurrentThread = id
 	if m.Data.Thread[id] == nil {

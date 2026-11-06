@@ -467,6 +467,7 @@ func TestHelpGolden(t *testing.T) {
 	for _, text := range []string{
 		"1-4", "switch tab", "q", "quit", "command line", "ctrl+l", "reload everything", // global keys
 		"j/k move  a answer", // the current screen
+		":prefs", "show read-only hub preferences",
 		":presence <idle|working|blocked|offline>", ":q", ":refresh", ":retry all", ":tab <name>", ":thread <n>",
 	} {
 		if !strings.Contains(frame, text) {
