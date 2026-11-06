@@ -453,7 +453,10 @@ func (m *Model) fetchThread(key, id string) tea.Cmd {
 			}
 			state, err := api.BlobStatus(ctx, sha, id)
 			if err != nil {
-				return loadMsg{key: key, err: err}
+				// One status blip must not drop the history page or the
+				// sibling refs. The row stays, with an unknown projection.
+				states[id] = blobwire.State{State: "unknown"}
+				continue
 			}
 			states[id] = state
 		}

@@ -125,6 +125,7 @@ func (a *app) cmdBlob(args []string) error {
 
 func blobLabels(atts []envelope.Attachment, states map[string]blobwire.State) []string {
 	var labels []string
+	duration := map[string]string{"1h": "1-hour retention", "6h": "6-hour retention", "12h": "12-hour retention", "1d": "24-hour retention", "7d": "7-day retention", "30d": "30-day retention"}
 	for _, att := range atts {
 		if att.BlobID == "" {
 			continue
@@ -133,13 +134,28 @@ func blobLabels(atts []envelope.Attachment, states map[string]blobwire.State) []
 		state := states[att.BlobID].State
 		// Fresh hub projections are authoritative. A local wall clock cannot
 		// establish expiry when a projection is missing either.
-		label := "[attachment: " + name + "]"
-		if state == "expired" || state == "purged" {
-			label = "[attachment " + state + ": " + name + "]"
-		}
-		retention := map[string]string{"1h": "1-hour retention", "6h": "6-hour retention", "12h": "12-hour retention", "1d": "24-hour retention", "7d": "7-day retention", "30d": "30-day retention", "keep": "Kept while referenced"}[att.RetentionClass]
-		if retention != "" {
-			label += " (" + retention + ")"
+		// Decisions §4: expired text is "Attachment expired (<recorded
+		// duration> retention)", including "Attachment expired (24-hour
+		// retention)" for the default. Purge stays a different label.
+		var label string
+		if state == "expired" {
+			label = "Attachment expired"
+			if dur := duration[att.RetentionClass]; dur != "" {
+				label = "Attachment expired (" + dur + ")"
+			}
+			if name != "" {
+				label += " " + name
+			}
+		} else {
+			label = "[attachment: " + name + "]"
+			if state == "purged" {
+				label = "[attachment purged: " + name + "]"
+			}
+			if dur := duration[att.RetentionClass]; dur != "" {
+				label += " (" + dur + ")"
+			} else if att.RetentionClass == "keep" {
+				label += " (Kept while referenced)"
+			}
 		}
 		labels = append(labels, label)
 	}

@@ -61,6 +61,11 @@ type Error struct {
 	// local validation and direct-provider failures. The cause is discarded
 	// because transport errors can contain credentials and capability URLs.
 	HubTransport bool
+	// refresh is set only when this capability's own deadline has already
+	// passed. One download may mint again for that case. A hostile origin,
+	// an over-long TTL, and a capability past the object deadline leave it
+	// unset so the caller fails without a second mint.
+	refresh bool
 }
 
 func (e *Error) Error() string {
@@ -70,6 +75,10 @@ func (e *Error) Error() string {
 	return e.Code
 }
 func failure(code string) error { return &Error{Code: code} }
+
+// newTransferRequest builds the credential-free transfer request. Tests replace
+// it to prove a construction failure is not ignored.
+var newTransferRequest = http.NewRequestWithContext
 
 // Read the bounded body before parsing: a decoder can both hide wire errors
 // behind JSON errors and accept a complete JSON value before a disconnect.
@@ -265,14 +274,23 @@ func (c *Client) directURL(raw, deadline string, ttl time.Duration, origins []st
 	}
 	now := c.now()
 	end, err := time.Parse(time.RFC3339Nano, deadline)
-	if err != nil || !end.After(now) || end.After(now.Add(ttl+capabilitySkew)) {
+	if err != nil {
+		return nil, failure("blob_capability_expired")
+	}
+	// An over-long TTL is not an aged capability. Fail it without a re-mint.
+	if end.After(now.Add(ttl + capabilitySkew)) {
 		return nil, failure("blob_capability_expired")
 	}
 	if objectExpiry != nil {
 		at, err := time.Parse(time.RFC3339Nano, *objectExpiry)
+		// A capability past the object deadline, or an object that has already
+		// ended, is a bad grant. Do not spend another mint on it.
 		if err != nil || end.After(at) || !at.After(now) {
 			return nil, failure("bad_response")
 		}
+	}
+	if !end.After(now) {
+		return nil, &Error{Code: "blob_capability_expired", refresh: true}
 	}
 	return u, nil
 }
@@ -302,7 +320,13 @@ func (c *Client) UploadUsing(ctx context.Context, caps Capabilities, r io.ReadSe
 	if caps.MaxSize <= 0 || caps.MaxSize > MaxSize {
 		caps.MaxSize = MaxSize
 	}
-	if size < 0 || size > caps.MaxSize || caps.Backend == "r2" && size == 0 {
+	// Size outside 1..max is not one code. Zero and negative are invalid
+	// (hub 422 invalid_value). Only a size past the cap is payload_too_large.
+	// Disk still accepts an empty body.
+	if size < 0 || caps.Backend == "r2" && size == 0 {
+		return zero, failure("invalid_value")
+	}
+	if size > caps.MaxSize {
 		return zero, failure("payload_too_large")
 	}
 	if media == "" {
@@ -458,6 +482,11 @@ func (c *Client) DownloadTo(ctx context.Context, w io.Writer, sha, id string, ma
 		if err != nil && !legacy {
 			return zero, err
 		}
+		// An R2 snapshot never accepts a hub-body grant. local_path or an
+		// empty blob id is bad_response whether or not the caller passed an id.
+		if caps.Backend == "r2" && (g.LocalPath != "" || g.BlobID == "") {
+			return zero, failure("bad_response")
+		}
 		var resp *http.Response
 		hubBody := legacy || g.LocalPath != ""
 		if hubBody {
@@ -471,12 +500,16 @@ func (c *Client) DownloadTo(ctx context.Context, w io.Writer, sha, id string, ma
 			}
 			u, uerr := c.directURL(g.URL, g.ExpiresAt, 600*time.Second, caps.DownloadOrigins, g.ObjectExpiresAt)
 			if uerr != nil {
-				if attempt == 0 {
+				var expired *Error
+				if attempt == 0 && errors.As(uerr, &expired) && expired.refresh {
 					continue
 				}
 				return zero, uerr
 			}
-			req, _ := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+			req, reqErr := newTransferRequest(ctx, "GET", u.String(), nil)
+			if reqErr != nil {
+				return zero, failure("bad_response")
+			}
 			resp, err = c.transfer.Do(req)
 			if err == nil && resp.StatusCode == 403 && attempt == 0 {
 				resp.Body.Close()
