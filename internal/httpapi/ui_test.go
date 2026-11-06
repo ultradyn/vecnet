@@ -20,8 +20,10 @@ import (
 // 336 KiB on 2026-11-05 for the favicon set, about 9 KiB of it images; to
 // 368 KiB on 2026-11-05 when hub-notices merged with master: its hub notice and
 // restart banners (about 13 KiB) on top of master's sidebar threads, unread
-// counts and composer growth put the merged UI at about 354 KB).
-const uiMaxBytes = 368 << 10
+// counts and composer growth put the merged UI at about 354 KB; to 480 KiB on
+// 2026-11-06 for hub preferences Task 6: the Settings page, its draft model,
+// stylesheet and local appearance, about 106 KB, put the UI at about 483 KB).
+const uiMaxBytes = 480 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
@@ -262,19 +264,29 @@ func TestUIStaticNoInline(t *testing.T) {
 			t.Fatalf("inline markup the CSP blocks (%s): %.120s", re, page[loc[0]:])
 		}
 	}
+	// Two scripts, both by src with no inline body: the blocking classic
+	// appearance-boot.js, which sets theme and density on <html> before first
+	// paint (hub preferences Task 6: no theme flash on load; a module would
+	// run too late), then the one entry module.
 	scripts := scriptTag.FindAllStringSubmatch(page, -1)
-	if len(scripts) != 1 {
-		t.Fatalf("index.html has %d scripts, want one entry module", len(scripts))
+	want := []struct {
+		src    string
+		module bool
+	}{{"appearance-boot.js", false}, {"app.js", true}}
+	if len(scripts) != len(want) {
+		t.Fatalf("index.html has %d scripts, want the appearance boot script then one entry module", len(scripts))
 	}
-	m := srcAttr.FindStringSubmatch(scripts[0][1])
-	if m == nil || m[1] != "app.js" {
-		t.Fatalf("script %q does not load app.js by src", scripts[0][0])
-	}
-	if !moduleType.MatchString(scripts[0][1]) {
-		t.Fatalf("script %q is not type=module", scripts[0][0])
-	}
-	if strings.TrimSpace(scripts[0][2]) != "" {
-		t.Fatalf("script %q has an inline body", scripts[0][0])
+	for i, w := range want {
+		m := srcAttr.FindStringSubmatch(scripts[i][1])
+		if m == nil || m[1] != w.src {
+			t.Fatalf("script %q does not load %s by src", scripts[i][0], w.src)
+		}
+		if moduleType.MatchString(scripts[i][1]) != w.module {
+			t.Fatalf("script %q: type=module is %v, want %v", scripts[i][0], !w.module, w.module)
+		}
+		if strings.TrimSpace(scripts[i][2]) != "" {
+			t.Fatalf("script %q has an inline body", scripts[i][0])
+		}
 	}
 	sheets := stylesheet.FindAllStringSubmatch(page, -1)
 	if len(sheets) == 0 {

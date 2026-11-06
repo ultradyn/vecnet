@@ -10,7 +10,7 @@
 import { h } from './dom.js';
 import {
   GROUPS, LANES, TICKS, createSettingsStore, durationText, enumLabel, formatValue, laneView, lanePosition, lockOf,
-  rangeText, timingOf, unitOf, visibleRows,
+  previewRefusal, rangeText, timingOf, unitOf, visibleRows,
 } from './settings-model.js';
 
 let current = null;
@@ -415,7 +415,7 @@ function saveBar(store) {
   else if (st.busy === 'previewing') { msg = [h('span', { class: 'st-spin', 'aria-hidden': 'true' }), 'Checking the change with the hub…']; cls = 'is-saving'; }
   else if (st.busy === 'confirming') msg = [h('b', { text: 'Waiting for your confirmation' })];
   else if (errs.length) {
-    msg = [h('b', { text: `${plural(errs.length, 'setting')} need${errs.length === 1 ? 's' : ''} fixing` }), h('button', { type: 'button', class: 'linkbtn st-jump', text: 'Show', onclick: () => { st.focus = errs.sort()[0]; current && current.render(); } })];
+    msg = [h('b', { text: `${plural(errs.length, 'setting')} need${errs.length === 1 ? 's' : ''} fixing` }), h('button', { type: 'button', class: 'linkbtn st-jump', text: 'Show', onclick: () => store.showField(errs.sort()[0]) })];
     cls = 'is-bad';
   } else msg = [h('b', { text: `${plural(n, 'unsaved change')}` }), h('span', { class: 'st-dim', text: 'to hub settings' })];
   return h('div', { class: 'st-bar ' + cls, role: 'region', 'aria-label': 'Unsaved hub changes' },
@@ -444,7 +444,7 @@ function riskText(store, risk, impact) {
     }
     case 'retention_apply_existing': return 'Existing rows older than the fixed cutoff become eligible at the next nightly sweep, not now. Pinned rows are kept. Deleted data cannot be restored by Undo; take a backup first (docs/DEPLOY.md, Backups).';
   }
-  return 'The hub flagged this change as risky.';
+  return 'This page cannot describe this risk, so the change cannot be confirmed here.';
 }
 function impactList(impact) {
   if (!impact) return null;
@@ -456,16 +456,19 @@ function impactList(impact) {
 }
 
 function paintDialog(store, dialog, ui) {
-  const c = store.state.confirm, risks = c.preview.risks || [];
+  const c = store.state.confirm, risks = (c.preview.risks || []).map(r => (r && typeof r === 'object' ? r : {}));
+  // The store refuses a preview it cannot describe before this opens; the
+  // dialog holds the same line, so Confirm stays off whatever it is shown.
+  const refusal = previewRefusal(c.preview);
   // The hub takes apply_existing only when every key in the patch is a
   // retention key, so the choice is offered only then.
   const retention = c.keys.length > 0 && c.keys.every(k => k.startsWith('retention.'));
-  const title = risks.length === 1 ? RISK_TITLE[risks[0].code] || 'Confirm this change?' : c.applyExisting ? RISK_TITLE.retention_apply_existing : `Confirm ${risks.length} risky changes?`;
+  const title = refusal ? 'This change cannot be confirmed here' : risks.length === 1 ? RISK_TITLE[risks[0].code] || 'Confirm this change?' : c.applyExisting ? RISK_TITLE.retention_apply_existing : `Confirm ${risks.length} risky changes?`;
   const ok = h('button', { type: 'button', class: 'btn st-dgr', 'data-cf': 'ok' });
   const typed = h('input', { id: 'st-cf-typed', autocomplete: 'off', spellcheck: 'false', 'aria-describedby': 'st-cf-type-l' });
   const existing = h('input', { type: 'checkbox', id: 'st-cf-existing' });
   const sync = () => {
-    ok.disabled = c.applyExisting && typed.value.trim().toLowerCase() !== 'trim';
+    ok.disabled = !!refusal || (c.applyExisting && typed.value.trim().toLowerCase() !== 'trim');
     ok.textContent = existing.checked && !c.applyExisting ? 'Preview existing data' : c.applyExisting ? 'Apply to existing data' : 'Confirm and save';
   };
   typed.addEventListener('input', sync);
@@ -483,9 +486,10 @@ function paintDialog(store, dialog, ui) {
     h('div', { class: 'st-cf-ic', 'aria-hidden': 'true', text: '!' }),
     h('h2', { id: 'st-cf-title', text: title }),
     changes,
-    ...risks.map(r => h('div', { class: 'st-cf-risk', 'data-risk': r.code }, h('p', { text: riskText(store, r, c.preview.impact) }), h('p', { class: 'st-dim', text: 'Hub: ' + (r.message || r.code) }))),
+    ...risks.map(r => h('div', { class: 'st-cf-risk', 'data-risk': typeof r.code === 'string' && r.code ? r.code : 'unnamed' }, h('p', { text: riskText(store, r, c.preview.impact) }), h('p', { class: 'st-dim', text: 'Hub: ' + String(r.message || r.code || 'a risk with no name') }))),
+    refusal ? h('p', { class: 'st-cf-note', role: 'alert', text: refusal }) : null,
     impactList(c.preview.impact),
-    retention && !c.applyExisting ? h('label', { class: 'st-cf-ch dg' }, existing, h('span', {}, h('b', { text: 'Also apply to data already on the hub' }), h('small', { text: 'Off by default. Needs a second preview with a fixed cutoff, then deletes at the next nightly sweep. Back up first.' }))) : null,
+    !refusal && retention && !c.applyExisting ? h('label', { class: 'st-cf-ch dg' }, existing, h('span', {}, h('b', { text: 'Also apply to data already on the hub' }), h('small', { text: 'Off by default. Needs a second preview with a fixed cutoff, then deletes at the next nightly sweep. Back up first.' }))) : null,
     c.applyExisting ? h('label', { class: 'st-cf-type' }, h('span', { id: 'st-cf-type-l' }, 'Type ', h('code', { text: 'trim' }), ' to delete existing data at the next nightly sweep'), typed) : null,
     h('p', { class: 'st-cf-note', text: 'Cancel keeps your edits and writes nothing. Confirming saves every change listed above in one step.' }),
     h('div', { class: 'st-cf-acts' }, cancel, ok)));
@@ -599,7 +603,7 @@ export function mount(root, ctx) {
   function syncDialog() {
     const c = store.state.confirm;
     if (!c) { ui.sig = ''; if (dialog.open) { ui.closing = true; dialog.close(); } return; }
-    const sig = JSON.stringify([c.keys, c.applyExisting, (c.preview.risks || []).map(r => r.code)]);
+    const sig = JSON.stringify([c.keys, c.applyExisting, (c.preview.risks || []).map(r => (r || {}).code)]);
     if (sig !== ui.sig) { ui.sig = sig; paintDialog(store, dialog, ui); }
     if (!dialog.open) {
       const a = document.activeElement;
