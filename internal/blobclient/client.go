@@ -25,6 +25,15 @@ import (
 
 const MaxSize int64 = 25 << 20
 
+// capabilitySkew is how far a presign deadline may sit past the nominal TTL
+// on this clock. Honest hubs issue exactly a 5-minute PUT or a 10-minute GET,
+// then truncate the wire time to milliseconds or whole seconds. A client one
+// second behind otherwise treats that legal deadline as over-long and abandons
+// a grant the hub has already reserved. Two seconds covers that truncation
+// plus ordinary clock lag, and still rejects a capability that outlives the
+// cap by more than the budget.
+const capabilitySkew = 2 * time.Second
+
 // MovingNotice carries only the signed relocation contract from a hub error.
 // Callers must verify it against their pinned key before following NewURL.
 // Provider errors never populate this field.
@@ -256,7 +265,7 @@ func (c *Client) directURL(raw, deadline string, ttl time.Duration, origins []st
 	}
 	now := c.now()
 	end, err := time.Parse(time.RFC3339Nano, deadline)
-	if err != nil || !end.After(now) || end.After(now.Add(ttl)) {
+	if err != nil || !end.After(now) || end.After(now.Add(ttl+capabilitySkew)) {
 		return nil, failure("blob_capability_expired")
 	}
 	if objectExpiry != nil {
