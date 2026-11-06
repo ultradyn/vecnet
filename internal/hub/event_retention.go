@@ -192,19 +192,38 @@ func (a *EventRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, before
 		// Confirmation describes the actual snapshot transition. Historical
 		// fallback rules below must not hide a real, confirmed archive exit.
 		archiveExit := key == "retention.archive_mode" && old.Value == prefs.Bool(true) && next.Value == prefs.Bool(false)
-		// Effective.Revision changes for every key when any preference changes.
-		// A touched no-op key must not activate or cancel a retention rule.
-		if old.Value == next.Value && old.Source == next.Source && old.Origin == next.Origin && !p.ApplyExisting {
+		// Equal values preserve the same eligibility rule, including when a
+		// Set/Reset changes only provenance. Retag a matching projection while
+		// retaining its original sequence boundary, fixed approval and pending
+		// bootstrap state. Provenance alone grants no deletion authority.
+		if old.Value == next.Value && !p.ApplyExisting {
+			if eventPolicyTag(old) != eventPolicyTag(next) {
+				projectionKey := eventRetentionProjectionKey
+				if key == "retention.archive_mode" {
+					projectionKey += "_archive"
+				}
+				bounds, err := loadEventBoundariesKey(ctx, tx, projectionKey)
+				if err != nil {
+					return err
+				}
+				if len(bounds) > 0 && bounds[len(bounds)-1].PolicyTag == eventPolicyTag(old) {
+					bounds[len(bounds)-1].PolicyTag = eventPolicyTag(next)
+					raw, err := json.Marshal(bounds)
+					if err != nil {
+						return err
+					}
+					if _, err := tx.ExecContext(ctx, `UPDATE meta SET value=? WHERE key=?`, string(raw), projectionKey); err != nil {
+						return err
+					}
+				}
+			}
 			continue
 		}
-		// A source-only Save carries no shared confirmation for a pending
-		// bootstrap transition. Preserve both its pending generation and prior
-		// eligibility ledger; provenance is not deletion authority.
+		// A partial lengthening of a pending bootstrap shortening carries
+		// no shared confirmation. Preserve its pending generation and prior
+		// eligibility ledger until a confirmed transition resolves it.
 		pending := key == "retention.ack_events" && bootstrap.AckPending || key == "retention.archive_mode" && bootstrap.ArchivePending
 		if pending && !p.ApplyExisting {
-			if old.Value == next.Value {
-				continue
-			}
 			if key == "retention.ack_events" {
 				was, _ := old.Value.Int64()
 				seconds, _ := next.Value.Int64()
