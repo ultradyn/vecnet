@@ -37,7 +37,7 @@ function checkRequests(requests: typeof allRequests) {
   }
 }
 type Item = { id: string; priority: string; value?: string };
-async function harness(t: TestContext, options: { binding?: Partial<Binding>; status?: unknown; wrap?: (rpc: CodexRpc) => CodexRpc; seed?: InflightRow; claiming?: string; unreachable?: boolean; history?: number } = {}) {
+async function harness(t: TestContext, options: { binding?: Partial<Binding>; status?: unknown; wrap?: (rpc: CodexRpc) => CodexRpc; seed?: InflightRow; claiming?: string; unreachable?: boolean; history?: number; coldResumeIdleDelayMs?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vn-e-')), clock = fakeClock(), log = memoryLog();
   let activity = 0, pendingRpcs = 0, pendingHooks = 0, watchArms = 0;
   const timer = clock.timer;
@@ -50,7 +50,7 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
     const alarm = timer(ms, () => { done(); fn(); });
     return { cancel() { done(); alarm.cancel(); } };
   };
-  const fake = await startFakeCodexAppServer({ dir, clock });
+  const fake = await startFakeCodexAppServer({ dir, clock, coldResumeIdleDelayMs: options.coldResumeIdleDelayMs });
   fake.setThread({ id: 'thread', status: options.status ?? { type: 'idle' },
     ...((options.status as { type?: string })?.type === 'active' ? { activeTurnId: 'active' } : {}) });
   fake.attachOther('thread');
@@ -218,6 +218,33 @@ test('steer mismatch re-reads once then waits for idle', async t => {
   h.fake.setThread({ id: 'thread', status: { type: 'idle' } }); await h.sync(); await h.tick(); await eventually(() => h.sends().length === 3);
   assert.equal(h.sends()[2].method, 'turn/start'); assert.equal((h.sends()[2].params as any).clientUserMessageId, key);
   assert.ok(h.fake.requests.filter(r => r.method === 'thread/turns/list').length >= 4);
+});
+test('failed mismatch re-read retries the original delivery on idle without restarting', async t => {
+  let h: Awaited<ReturnType<typeof harness>>, failRead = false;
+  h = await harness(t, { status: active, wrap: rpc => ({ ...rpc, async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+    try { return await rpc.call<T>(method, params, ms); }
+    catch (e) {
+      if (method === 'turn/steer' && failRead) {
+        failRead = false;
+        h.fake.failNext('thread/turns/list', { code: -32603, message: 'temporary history read failure' });
+      }
+      throw e;
+    }
+  } }) });
+  const opens = h.opens;
+  failRead = true;
+  h.fake.failNext('turn/steer', { code: -32600, message: 'expectedTurnId mismatch' });
+  await h.wake();
+  const original = h.rows()[0]; assert.ok(original); assert.equal(original.acceptedAt, null);
+  assert.equal(h.sends().length, 1);
+  h.fake.setThread({ id: 'thread', status: { type: 'idle' } }); await h.sync(); await h.tick(2000);
+  await h.wake([{ id: 'w2', priority: 'wake' }]); await h.tick(2 * minute);
+  const originalSends = h.sends().filter(r => Object.hasOwn((r.params as any).additionalContext ?? {}, 'vecnet_w1'));
+  assert.equal(originalSends.length, 2, 'one rejected steer and one accepted start of the original delivery');
+  assert.equal(originalSends[1].method, 'turn/start');
+  assert.equal((originalSends[1].params as any).clientUserMessageId, original.key);
+  assert.equal(h.opens, opens); assert.equal(h.releases().length, 0); assert.equal(h.rows().length, 0);
+  assert.equal(h.plan.events.length, 2, 'no fresh event for the original delivery');
 });
 test('wake_idle on an active thread waits for idle', async t => {
   const h = await harness(t, { status: active }); await h.wake([{ id: 'i1', priority: 'wake_idle' }]);
@@ -409,20 +436,32 @@ test('accidental cold resume is undone at once', async t => {
   assert.deepEqual(h.fake.subscribers('thread'), []); await h.wake();
   assert.deepEqual(h.engine.liveness(), { live: false, reason: 'not_loaded' }); assert.equal(h.sends().length, 0);
 });
-test('rejected cold resume cannot use its own idle broadcast to reattach', async t => {
+for (const idleDelayMs of [0, 1, 3000]) test(`rejected cold resume cannot use its own idle broadcast to reattach (delay ${idleDelayMs} ms)`, async t => {
   let closeBeforeResume: (() => void) | undefined;
-  const h = await harness(t, { wrap: rpc => ({ ...rpc, async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
-    if (method === 'thread/resume') closeBeforeResume?.();
-    return rpc.call<T>(method, params, ms);
-  } }) });
+  const coldOrder: string[] = [];
+  let observing = false;
+  const h = await harness(t, { coldResumeIdleDelayMs: idleDelayMs, wrap: rpc => ({ ...rpc,
+    onNotification(fn) { rpc.onNotification((method, params) => {
+      if (observing && method === 'thread/status/changed' && (params as any).status?.type === 'idle') coldOrder.push('idle');
+      fn(method, params);
+    }); },
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      if (method === 'thread/resume') closeBeforeResume?.();
+      const result = await rpc.call<T>(method, params, ms);
+      if (observing && method === 'thread/resume') coldOrder.push('response');
+      return result;
+    },
+  }) });
   await h.engine.stop(); h.fake.detachOther('thread');
   const baseline = h.fake.requests.length;
   closeBeforeResume = () => {
     closeBeforeResume = undefined;
+    observing = true;
     h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' } });
     h.fake.notify('thread/closed', { threadId: 'thread' });
   };
   await h.restart(); await h.tick(2000); await h.wake();
+  assert.deepEqual(coldOrder.slice(0, 2), idleDelayMs ? ['response', 'idle'] : ['idle', 'response']);
   const requests = h.fake.requests.slice(baseline), resume = requests.find(r => r.method === 'thread/resume');
   assert.ok(resume);
   assert.ok(requests.some(r => r.method === 'thread/unsubscribe' && r.conn === resume.conn));

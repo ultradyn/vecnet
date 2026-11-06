@@ -48,7 +48,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   let status: unknown = { type: 'notLoaded' }, attached = false, archived = false, overLimit = false;
   let policyDenied = false, identityChanged = false, lastActivity = clock.now(), lastEnsure = -Infinity;
   let lastPush = -Infinity, retryIndex = 0, closedEpoch = 0, resumeAt = -Infinity, attaching = false;
-  let cold = false, queue: Promise<void> = Promise.resolve();
+  let cold = false, rejectedResume = false, queue: Promise<void> = Promise.resolve();
   let debounce: { cancel(): void } | undefined, gap: { cancel(): void } | undefined;
   let reconnect: { cancel(): void } | undefined, minute: { cancel(): void } | undefined;
   let claimRecovery: { cancel(): void } | undefined, warmCheck: { cancel(): void } | undefined;
@@ -160,12 +160,12 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     warmCheck = clock.timer(ms, () => {
       warmCheck = undefined;
       enqueue(async () => {
-        if (!rpc || !cold) return;
+        if (!rpc || !cold || rejectedResume) return;
         if (clock.now() - resumeAt <= 2000) { scheduleWarmCheck(); return; }
         const epoch = closedEpoch;
         try {
           const read = await call('thread/read', { threadId: b.threadId });
-          if (closedEpoch !== epoch) return;
+          if (closedEpoch !== epoch || rejectedResume) return;
           const next = obj(read.thread).status, s = mapStatus(next);
           if (s !== 'not_loaded' && s !== 'unknown') cold = false;
           updateStatus(next); archived = obj(read.thread).archived === true;
@@ -177,10 +177,14 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   function updateStatus(value: unknown) {
     const before = mapStatus(status); status = value; lastActivity = clock.now();
     const s = mapStatus(status);
-    if (s === 'not_loaded') { closedEpoch++; attached = false; }
-    // A cold resume emits its own loaded status before its response. That
-    // broadcast cannot authorize recovery from the attachment we reject.
-    else if (s !== 'unknown' && !attaching) {
+    if (s === 'not_loaded') {
+      closedEpoch++; attached = false;
+      if (!attaching) rejectedResume = false;
+    }
+    // A rejected cold resume can emit its own loaded status before or after
+    // its response, even beyond the startup guard. Require a subsequent
+    // unload/load transition before that attachment may recover.
+    else if (s !== 'unknown' && !attaching && !rejectedResume) {
       if (clock.now() - resumeAt > 2000) cold = false;
       else if (cold) scheduleWarmCheck();
     }
@@ -203,7 +207,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (method === 'thread/closed') { updateStatus({ type: 'notLoaded' }); cold = true; }
     if (method === 'thread/archived') archived = true;
     if (method === 'turn/started') { lastActivity = clock.now(); updateStatus({ type: 'active', activeFlags: [] }); }
-    if (method === 'mcpServer/startupStatus/updated' && (attaching || clock.now() - resumeAt <= 2000)) cold = true;
+    if (method === 'mcpServer/startupStatus/updated' && (attaching || clock.now() - resumeAt <= 2000)) {
+      cold = true; rejectedResume = true;
+    }
     if ((method === 'item/started' || method === 'item/completed') && obj(p.item).type === 'userMessage' && typeof p.item.clientId === 'string') {
       const key = p.item.clientId;
       // A receipt may arrive before the RPC's acceptance response.
@@ -231,7 +237,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         const read = await call('thread/read', { threadId: b.threadId });
         // The launcher owns loading; this fresh read establishes a new warm
         // status checkpoint even when an earlier subscription was cold.
-        if (mapStatus(obj(read.thread).status) !== 'not_loaded' && mapStatus(obj(read.thread).status) !== 'unknown') cold = false;
+        if (mapStatus(obj(read.thread).status) !== 'not_loaded' && mapStatus(obj(read.thread).status) !== 'unknown') {
+          cold = false; rejectedResume = false;
+        }
         updateStatus(obj(read.thread).status); archived = obj(read.thread).archived === true;
       }
       r = reason(false);
@@ -244,7 +252,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       try {
         const result = await call('thread/resume', buildThreadResume(b.threadId));
         resumeAt = clock.now(); attached = true; attaching = false;
-        if (closedEpoch !== epoch || cold) { cold = true; await unsubscribe(); return; }
+        if (closedEpoch !== epoch || cold) { cold = true; rejectedResume = true; await unsubscribe(); return; }
         if (parseResumePolicy(result).asks && !b.attended) { policyDenied = true; await unsubscribe(); return; }
       } catch (e) {
         attaching = false;
@@ -307,7 +315,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   }
   async function connect() {
     if (!running || rpc) return;
-    connectionState = 'connecting'; policyDenied = false; cold = false;
+    connectionState = 'connecting'; policyDenied = false; cold = rejectedResume;
     try {
       const connection = await d.openRpc({ codexHome: b.codexHome, euid: d.euid, log, timeoutMs: timeout });
       if (!running) { connection.close(); return; }
@@ -368,8 +376,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         }
         if (r.method === 'turn/steer' && e.code === -32600 && /mismatch|expectedTurnId/i.test(e.message)) {
           if (mismatches++ === 0) {
-            const turn = await latest();
-            if (turn?.status === 'inProgress' && typeof turn.id === 'string') { r.attemptTurnId = turn.id; continue; }
+            try {
+              const turn = await latest();
+              if (turn?.status === 'inProgress' && typeof turn.id === 'string') { r.attemptTurnId = turn.id; continue; }
+            } catch { /* The steer was rejected; retain this batch for idle. */ }
           }
           waitingRetry.set(r.key, batch); waitForIdle.add(r.key); return;
         }
