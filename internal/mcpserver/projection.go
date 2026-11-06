@@ -69,7 +69,8 @@ func projectSchema(node schema, defs schema, tool, property string, output bool)
 		case "description", "$comment", "title":
 			continue
 		case "pattern", "format", "minLength", "maxLength", "minItems", "maxItems", "minimum", "maximum", "maxProperties":
-			if !output && !(property == "data_base64" && k == "maxLength") {
+			pagingBound := property == "limit" && (k == "minimum" || k == "maximum")
+			if !output && !pagingBound && !(property == "data_base64" && k == "maxLength") {
 				continue
 			}
 		case "properties":
