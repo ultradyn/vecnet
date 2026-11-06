@@ -8,6 +8,7 @@
 import { activityAction } from './activity-model.js';
 import { createActivity } from './activity.js';
 import { createApi } from './api.js';
+import { createAppearance } from './appearance.js';
 import { avatarHash, createAvatarCache } from './avatar-model.js';
 import * as compose from './compose.js';
 import { connectionState } from './connection-model.js';
@@ -21,6 +22,7 @@ import { createNotices } from './notice.js';
 import { peerHref } from './peer-model.js';
 import * as peer from './peer.js';
 import * as presence from './presence.js';
+import * as settings from './settings.js';
 import { OTHER_PAGE, nextLimit, otherThreads, yourThreads } from './sidebar-model.js';
 import { createStore } from './store.js';
 import * as threadAside from './thread-aside.js';
@@ -37,11 +39,19 @@ const SCREENS = {
   dash: { screen: dash },
   peer: { screen: peer },
   new: { screen: compose },
+  settings: { screen: settings, aside: settings.mountAside },
 };
+
+// This browser's theme and density (appearance.js): applied before sign-in,
+// kept in step with other tabs and the system scheme. Never sent to the hub.
+let localStore = null;
+try { localStore = window.localStorage; } catch { /* blocked: defaults */ }
+const appearance = createAppearance({ storage: localStore, root: document.documentElement, win: window });
 
 function parseRoute(hash) {
   if (hash === '#dash') return { name: 'dash', view: 'dash' };
   if (hash === '#new') return { name: 'new', view: 'new' };
+  if (hash === '#settings') return { name: 'settings', view: 'settings' };
   const p = hash.match(/^#peer\/([A-Za-z0-9_]+)$/);
   if (p) return { name: 'peer', view: 'peer', id: p[1] };
   const m = hash.match(/^#(thread|matrix)\/([A-Za-z0-9_]+)$/);
@@ -76,6 +86,7 @@ function renderNav(s, route) {
   $('nav-inbox').className = route.name === 'inbox' ? 'on' : '';
   $('nav-new').className = route.name === 'new' ? 'on' : '';
   $('nav-dash').className = route.name === 'dash' ? 'on' : '';
+  $('nav-settings').className = route.name === 'settings' ? 'on' : '';
   $('nav-add').disabled = !s.ctx; // the invite needs the session's api
   const now = s.store.hubNow(), mineRes = s.mine;
   const yours = yourThreads({
@@ -133,6 +144,7 @@ function renderConn(store, activity, notices) {
 function renderRoute(s) {
   const route = parseRoute(location.hash);
   document.body.dataset.route = route.name;
+  s.shownHash = location.hash;
   renderNav(s, route);
   if (!s.ctx) return; // the directory has not named the operator yet
   const key = route.view + (route.id ? '/' + route.id : '');
@@ -187,6 +199,8 @@ function start(secret) {
   const s = {
     threads, inboxHead, nameOf, store, mine: null, others: null, otherLimit: OTHER_PAGE,
     me: '', ctx: null, mounted: '', matrixHash: '', unmount: () => {}, offs: [],
+    // leaveGuard: a screen with unsaved work (Settings) names what leaving loses.
+    leaveGuard: null, shownHash: '',
     close() {
       stop.abort();
       closeInvite(); // a shown token goes with the session
@@ -207,7 +221,11 @@ function start(secret) {
     const op = ((peers.get() || {}).peers || []).find(p => p.kind === 'operator');
     if (!op) return;
     s.me = op.peer_id;
-    s.ctx = { api, store, activity, me: s.me, nameOf, kindOf, avatars, avatarOf, peers, threads, inboxHead, toast, nav: hash => { location.hash = hash; } };
+    s.ctx = {
+      api, store, activity, me: s.me, nameOf, kindOf, avatars, avatarOf, peers, threads, inboxHead, toast, appearance,
+      nav: hash => { location.hash = hash; },
+      setLeaveGuard: fn => { s.leaveGuard = fn || null; },
+    };
     s.offs.push(presence.renderNav($('me'), s.ctx), presence.startHeartbeat(s.ctx));
     // Tagged threads: the operator's own sends and reads re-sort it at once.
     // The activity feed keeps it live otherwise; Your Threads' own threads
@@ -281,7 +299,13 @@ $('login-form').addEventListener('submit', e => {
   const secret = $('secret').value.trim();
   if (secret) signIn(secret);
 });
-$('signout').addEventListener('click', () => signOut(''));
+// leaving reports whether unsaved work may be dropped: true when there is
+// none, or the operator agrees to lose it.
+function leaving(s) {
+  const msg = s && s.leaveGuard ? s.leaveGuard() : '';
+  return !msg || window.confirm(msg);
+}
+$('signout').addEventListener('click', () => { if (leaving(session)) signOut(''); });
 // Add agent from any view: the invite dialog opens over the current screen,
 // which stays mounted. A created peer reloads the shared directory; the
 // dashboard follows the hub's directory_updated event.
@@ -289,7 +313,17 @@ $('nav-add').addEventListener('click', e => {
   const s = session;
   if (s && s.ctx) openInvite(s.ctx, () => s.ctx.peers.reload(), e.currentTarget);
 });
-window.addEventListener('hashchange', () => { if (session) renderRoute(session); });
+window.addEventListener('hashchange', () => {
+  const s = session;
+  if (!s) return;
+  // A dirty Settings page asks before another route unmounts it; staying
+  // puts its hash back without a second render.
+  if (s.shownHash !== undefined && parseRoute(location.hash).view !== parseRoute(s.shownHash).view && !leaving(s)) {
+    history.replaceState(null, '', s.shownHash || '#settings');
+    return;
+  }
+  renderRoute(s);
+});
 // A peer named inside another link (an inbox row, a sidebar row) is a span
 // with data-peer: a plain click on it opens the peer instead of the row.
 // Modified clicks fall through to the row's own link.

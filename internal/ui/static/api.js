@@ -45,7 +45,9 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     return err;
   }
 
-  async function request(method, path, { body, headers, signal, read = 'json' } = {}) {
+  // meta: resolve to { status, etag, body } so a caller can use the ETag; a
+  // 304 (If-None-Match matched) resolves to { status: 304, etag, body: null }.
+  async function request(method, path, { body, headers, signal, read = 'json', meta = false } = {}) {
     const hd = { Authorization: 'Bearer ' + secret, Accept: 'application/json', ...headers };
     if (body !== undefined) hd['Content-Type'] = 'application/json';
     let r;
@@ -57,6 +59,8 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     } catch (e) {
       throw transportError(e, 'hub unreachable');
     }
+    const etag = (meta && r.headers && r.headers.get('ETag')) || '';
+    if (meta && r.status === 304) return { status: 304, etag, body: null };
     // null means 204 and nothing else: the pump reads it as "peer disabled".
     if (r.status === 204) return null;
     if (r.ok && read === 'blob') {
@@ -72,7 +76,7 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     if (r.ok) {
       // The reply was lost on the way, as a dropped connection is.
       if (j === null) throw new APIError(0, 'network', UNREADABLE);
-      return j;
+      return meta ? { status: r.status, etag, body: j } : j;
     }
     throw httpError(r.status, r.statusText, j);
   }
@@ -126,6 +130,13 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
   const get = (path, options) => request('GET', path, options);
   const post = (path, options) => request('POST', path, options);
 
+  // Hub preferences (operator API, plan 2026-11-05 Task 4). GET carries an
+  // ETag; PATCH and preview send it back as the one strong If-Match. A
+  // confirmation token travels only in the JSON body, never in a URL.
+  const prefs = ({ etag, signal } = {}) => get('/v1/admin/prefs', { signal, meta: true, headers: etag ? { 'If-None-Match': etag } : undefined });
+  const patchPrefs = (patch, etag, { signal } = {}) => request('PATCH', '/v1/admin/prefs', { body: patch, signal, meta: true, headers: { 'If-Match': etag } });
+  const previewPrefs = (patch, etag, { signal } = {}) => post('/v1/admin/prefs/preview', { body: patch, signal, headers: { 'If-Match': etag } });
+
   return {
     peers: () => get('/v1/peers'),
     adminPeers: () => get('/v1/admin/peers'),
@@ -159,6 +170,7 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     audit: ({ limit, before } = {}) => get('/v1/admin/audit' + query({ limit, before })),
     counters: () => get('/v1/admin/counters'),
     notices: () => get('/v1/hub/notices'),
+    prefs, patchPrefs, previewPrefs,
     blob: sha => get('/v1/blobs/' + seg(sha), { read: 'blob' }),
     // A peer's avatar PNG (PROTOCOL §8.1), by bearer like a blob.
     avatar: id => get('/v1/peers/' + seg(id) + '/avatar', { read: 'blob' }),

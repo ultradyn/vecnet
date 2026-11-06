@@ -193,10 +193,11 @@ export function demoCloser(child, dir, { signal = signalGroup, killAfterMs = 700
   }
   return { close, closed };
 }
-export async function bootDemo({ scale = false } = {}) {
+// args are extra demo flags (e.g. --pref-flag for a flag-sourced preference).
+export async function bootDemo({ scale = false, args = [] } = {}) {
   const binDir = await binaries();
   const dir = await mkdtemp(join(tmpdir(), 'vecnet-ui-data-'));
-  const child = spawn(join(binDir, 'demo'), ['--listen', '127.0.0.1:0', '--data-dir', dir, '--exit-on-stdin-eof', ...(scale ? ['--scale'] : [])], { cwd: root, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(join(binDir, 'demo'), ['--listen', '127.0.0.1:0', '--data-dir', dir, '--exit-on-stdin-eof', ...(scale ? ['--scale'] : []), ...args], { cwd: root, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
   const { close, closed } = demoCloser(child, dir);
   child.stdin.on('error', () => {}); // The demo may close stdin before its holder.
   // Consume logs, but never echo peer text or credentials into a terminal.
@@ -276,8 +277,8 @@ async function throttle(context, page) {
   console.log(`browser CPU throttled ${rate}x (UI_CPU_THROTTLE)`);
 }
 
-export async function withDemo({ scale = false, signedIn = true } = {}, fn) {
-  const env = await bootDemo({ scale });
+export async function withDemo({ scale = false, signedIn = true, demoArgs = [] } = {}, fn) {
+  const env = await bootDemo({ scale, args: demoArgs });
   let browser;
   const errors = [], allowed = [], held = [];
   try {
