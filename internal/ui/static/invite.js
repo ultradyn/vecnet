@@ -404,7 +404,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     invalidateStatus();
     const ticket = life;
     const spec = pending
-      ? (registry.specs || []).find(s => s && s.kind === pending.body.kind) || null
+      ? pending.spec || (registry.specs || []).find(s => s && s.kind === pending.body.kind) || null
       : currentSpec();
     if (!spec || specIssue(spec)) {
       gate = { busy: false };
@@ -439,7 +439,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       const submitted = vals;
       pending = null;
       clearSecrets();
-      if (spec.submit_action === 'oauth_link') showDot(res, submitted);
+      if (spec.submit_action === 'oauth_link') showDot(res, submitted, spec);
       else if (spec.submit_action === 'grokbot_setup') showGrok(res, submitted);
       else showInvite(res, submitted);
       if (onCreated) onCreated();
@@ -461,7 +461,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       err.textContent = shown.text;
       markField(shown.field, shown.text);
       if (outcome === 'uncertain' || outcome === 'conflict') {
-        if (!pending) pending = { body: bodyReq, values: vals };
+        if (!pending) pending = { body: bodyReq, values: vals, spec };
         showReconciliation(outcome);
         return;
       }
@@ -534,14 +534,14 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     copy.focus();
   }
 
-  function showDot(res, vals) {
+  function showDot(res, vals, submitted) {
     const d = linkPanel({ ...res, name: vals.name }, location.origin, hubURL);
     const slot = h('div', { class: 'inv-code', 'aria-live': 'polite' });
     if (d.code) {
       holdHuman();
       fillCode(slot, { code: d.code, ...firstLinkExpiry(res) }, d.peerId, false);
     } else slot.append(h('p', { class: 'inv-note', text: 'This request already completed. The one-time link code is not shown again.' }));
-    paintDot(d, slot);
+    paintDot(d, slot, submitted);
   }
 
   // Bold the words a person has to find on the ChatGPT screen, wherever the
@@ -564,8 +564,10 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     return parts;
   }
 
-  function paintDot(d, slot) {
-    const panel = dotInstructions(currentSpec() && currentSpec().prompt_template);
+  function paintDot(d, slot, submitted) {
+    // The steps belong to the spec that was submitted. A later kind change,
+    // including one made while the request was in flight, does not replace them.
+    const panel = dotInstructions(submitted && submitted.prompt_template);
     const lines = panel.steps.length ? panel.steps : [''];
     const codeStep = panel.steps.length ? panel.codeStep : 0;
     const steps = lines.map((line, i) => h('li', null,

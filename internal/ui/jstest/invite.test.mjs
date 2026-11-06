@@ -240,7 +240,7 @@ test('grok onboarding identity and skip policy', () => {
   const legacy = submitBody(session, { name: 'web-repo Claude', name_open: false, enrol_ttl_seconds: '3600', principal_id: '' }, 'req_legacy');
   assert.equal(legacy.inputs.name, 'web-repo Claude');
   assert.equal(legacy.inputs.enrol_ttl_seconds, 3600);
-  assert.equal(legacy.inputs.name_open, undefined);
+  assert.equal(legacy.inputs.name_open, false);
   const opened = submitBody(session, { name: 'helper bot', name_open: true, enrol_ttl_seconds: 86400 }, 'req_open');
   assert.equal(opened.inputs.name_open, true);
   const dot = submitBody(catalogue.find(s => s.kind === 'dot'), { name: 'scout' }, 'req_dot');
@@ -999,5 +999,66 @@ test('(t9 V-I6) the authorization prompt has a Copy prompt button', async () => 
     assert.match(domDoc.lastCopied, /vecnet-helper-bot/);
     assert.doesNotMatch(domDoc.lastCopied, /crsr_|webhook/);
     assert.equal(copy.textContent, 'Copied');
+  } finally { restore(); }
+});
+
+test('(t9 I4 boolean) an unchecked default-true boolean is submitted as false', async () => {
+  const session = catalogue.find(s => s.kind === 'session');
+  const extended = {
+    ...session,
+    fields: [...session.fields, { name: 'notify_owner', type: 'boolean', default: true, help: 'Tell the owner' }],
+  };
+  const kinds = catalogue.map(s => s.kind === 'session' ? extended : s);
+  let posted = null;
+  const { dialog, restore } = await openDialog({
+    agentKinds: () => Promise.resolve({ kinds }),
+    agentAdd: body => { posted = body; return new Promise(() => {}); },
+  });
+  try {
+    const box = dialog.querySelector('[data-field="notify_owner"]');
+    assert.ok(box, 'default-true boolean has no control');
+    assert.equal(box.checked, true, 'the declared default is not checked');
+    box.checked = false;
+    setValue(dialog.querySelector('#inv-name'), 'scout');
+    click(buttonNamed(dialog, 'Create invite'));
+    await flush();
+    assert.ok(posted, 'the form did not submit');
+    assert.equal(posted.inputs.notify_owner, false);
+  } finally { restore(); }
+});
+
+test('(t9 I5 inflight kind) a kind change during the dot submit keeps the hub steps and the first code', async () => {
+  const revised = [
+    'Revised hub step alpha.',
+    'Paste the MCP server URL and choose OAuth.',
+    'When the vecnet consent page asks for a link code, enter this one:',
+    'Do the revised trigger step from the hub.',
+    'Revised hub note about rescanning later.',
+  ].join('\n');
+  const dot = { ...catalogue.find(s => s.kind === 'dot'), prompt_template: revised };
+  const kinds = catalogue.map(s => s.kind === 'dot' ? dot : s);
+  let release;
+  let links = 0;
+  const { dialog, restore, ctx } = await openDialog({
+    agentKinds: () => Promise.resolve({ kinds }),
+    agentAdd: () => new Promise(resolve => { release = resolve; }),
+  });
+  ctx.api.dotLink = () => { links += 1; return Promise.reject(httpError(500, 'unexpected', 'minted')); };
+  try {
+    setValue(dialog.querySelector('#inv-kind'), 'dot', 'change');
+    await flush();
+    setValue(dialog.querySelector('#inv-name'), 'scout');
+    click(buttonNamed(dialog, 'Create and link'));
+    await flush();
+    assert.equal(typeof release, 'function', 'the dot submit did not stay in flight');
+    setValue(dialog.querySelector('#inv-kind'), 'grokbot', 'change');
+    await flush();
+    release({ human_output: 'ABCD-EFGH-JKMN', peer_id: 'peer_dot', name: 'scout' });
+    await flush();
+    assert.match(dialog.textContent, /Revised hub step alpha/);
+    assert.match(dialog.textContent, /Revised hub note about rescanning later/);
+    assert.doesNotMatch(dialog.textContent, /Hub origin:/);
+    assert.equal(dialog.querySelector('.inv-code-val').textContent, 'ABCD-EFGH-JKMN');
+    assert.equal(links, 0, 'the in-flight result minted a second code');
   } finally { restore(); }
 });

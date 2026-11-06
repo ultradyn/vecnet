@@ -240,9 +240,10 @@ export function submitBody(spec, values, requestId) {
   const inputs = {};
   for (const f of spec.fields || []) {
     const raw = vals[f.name];
+    // Every declared boolean keeps the value the person left, false included.
+    // Dropping false would hide an unchecked default-true field.
     if (f.type === 'boolean') {
-      if (raw === true) inputs[f.name] = true;
-      else if (f.name === 'skip_mcp') inputs[f.name] = false;
+      if (raw === true || raw === false) inputs[f.name] = raw;
       continue;
     }
     if (f.type === 'integer') {

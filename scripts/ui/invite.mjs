@@ -131,7 +131,7 @@ try {
     const sent = answered.request().postDataJSON();
     const res = await answered.json();
     assert(sent.kind === 'session' && sent.spec_version && sent.request_id && !('submit_action' in sent), `submit ${JSON.stringify(sent)}`);
-    assert(sent.inputs.name === 'web-repo Claude' && sent.inputs.enrol_ttl_seconds === 3600 && !('name_open' in sent.inputs) && !sent.inputs.webhook_key, `inputs ${JSON.stringify(sent.inputs)}`);
+    assert(sent.inputs.name === 'web-repo Claude' && sent.inputs.enrol_ttl_seconds === 3600 && sent.inputs.name_open === false && !sent.inputs.webhook_key, `inputs ${JSON.stringify(sent.inputs)}`);
     const pre = dlg.locator('pre.inv-block');
     await pre.waitFor();
     const text = await pre.textContent();
