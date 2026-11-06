@@ -390,6 +390,7 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 		limits.Target = 50 * time.Millisecond
 	}
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		start := time.Now()
 		result = EventRetentionStatus{}
 		snapshot, err := h.Preferences.LoadSnapshot(ctx, tx)
 		if err != nil {
@@ -507,28 +508,31 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 		if err := tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='event_retention_owner_cursor'`).Scan(&last); err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT DISTINCT owner FROM events ORDER BY (owner<=?),owner LIMIT ?`, last, limits.Rows)
-		if err != nil {
-			return err
-		}
-		var owners []string
-		for rows.Next() {
-			var owner string
-			if err := rows.Scan(&owner); err != nil {
-				rows.Close()
-				return err
-			}
-			owners = append(owners, owner)
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
-		}
-		start := time.Now()
-		for _, owner := range owners {
+		// Seek past each owner in the (owner,seq) index. DISTINCT plus a
+		// computed rotation order traverses the entire retained log, even for
+		// a one-row slice. The original cursor also bounds the wrapped pass,
+		// so a blocked owner is visited at most once per slice.
+		wrapAt := last
+		wrapped := false
+		for result.Owners < limits.Rows {
 			if result.Scanned >= limits.Rows || result.Bytes >= limits.Bytes || result.Owners > 0 && time.Since(start) >= limits.Target {
 				break
+			}
+			var owner string
+			if wrapped {
+				err = tx.QueryRowContext(ctx, `SELECT owner FROM events WHERE owner>? AND owner<=? ORDER BY owner LIMIT 1`, last, wrapAt).Scan(&owner)
+			} else {
+				err = tx.QueryRowContext(ctx, `SELECT owner FROM events WHERE owner>? ORDER BY owner LIMIT 1`, last).Scan(&owner)
+				if errors.Is(err, sql.ErrNoRows) {
+					wrapped = true
+					err = tx.QueryRowContext(ctx, `SELECT owner FROM events WHERE owner<=? ORDER BY owner LIMIT 1`, wrapAt).Scan(&owner)
+				}
+			}
+			if errors.Is(err, sql.ErrNoRows) {
+				break
+			}
+			if err != nil {
+				return err
 			}
 			remaining := limits
 			remaining.Rows -= result.Scanned

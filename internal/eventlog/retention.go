@@ -160,10 +160,31 @@ func (l *Log) PrunePrefix(ctx context.Context, tx *sql.Tx, owner string, now tim
 }
 
 func (l *Log) effectiveAck(ctx context.Context, q execer, owner string) (int64, error) {
+	// Resolve the current principal once, then probe only the three accepted
+	// scopes by their full primary key. An OR/correlated-EXISTS over acks
+	// scans unrelated acknowledgement history while holding the writer lock.
+	var principal string
+	err := q.QueryRowContext(ctx, `SELECT prn_id FROM peers WHERE peer_id=?`, owner).Scan(&principal)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	var high int64
+	if err := q.QueryRowContext(ctx, `SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='events'),0)`).Scan(&high); err != nil {
+		return 0, err
+	}
+	scopes := [][2]string{{owner, "*"}}
+	if err == nil {
+		scopes = append(scopes, [2]string{principal, "*"}, [2]string{principal, owner})
+	}
 	var ack int64
-	err := q.QueryRowContext(ctx, `SELECT coalesce(max(a.seq),0) FROM acks a WHERE a.epoch=? AND a.seq <= coalesce((SELECT seq FROM sqlite_sequence WHERE name='events'),0) AND (
- (a.owner=? AND a.scope='*') OR EXISTS(SELECT 1 FROM peers p WHERE p.peer_id=? AND p.prn_id=a.owner AND a.scope IN ('*',p.peer_id)))`, l.epoch, owner, owner).Scan(&ack)
-	return ack, err
+	for _, scope := range scopes {
+		var seq int64
+		if err := q.QueryRowContext(ctx, `SELECT coalesce(max(seq),0) FROM acks WHERE owner=? AND scope=? AND epoch=? AND seq<=?`, scope[0], scope[1], l.epoch, high).Scan(&seq); err != nil {
+			return 0, err
+		}
+		ack = max(ack, seq)
+	}
+	return ack, nil
 }
 func (l *Log) retentionPinned(ctx context.Context, q execer, owner string, seq int64, now time.Time) (bool, error) {
 	var pinned bool
