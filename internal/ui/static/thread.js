@@ -9,7 +9,7 @@ import { ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, kindShort, kindTit
 import { markdown } from './md.js';
 import { prioritySeg } from './prio.js';
 import { createReactions } from './react.js';
-import { budgetBanner, budgetOut, canShowFull, clientLabel, clientSuspect, excerpt, FULL_TEXT_CAP, items, replyKey, replySig, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, clientLabel, clientSuspect, excerpt, FULL_TEXT_CAP, GROK_QUOTA_DETAIL, INITIAL_PRIORITY, items, replyKey, replyPriority, replyPriorityLocked, replyQuotaNote, replySig, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
 import { createThumbs } from './thumbs.js';
 
 const PAGE = 200, MAX_PAGES = 50, PIN_SLACK = 80;
@@ -73,7 +73,8 @@ export function mount(root, ctx) {
   const scroller = root.closest('main') || root;
   const S = {
     replyTo: null,          // null picks a default; '' is an explicit thread-level reply
-    prio: 'wake',
+    prio: INITIAL_PRIORITY,
+    prioManual: false,      // a click on the control; directory updates must not overwrite it
     pending: null,          // unsent reply: keeps its idempotency_key across retries
     sending: false,
     banner: null,           // { kind, text } from the last failed send
@@ -145,10 +146,13 @@ export function mount(root, ctx) {
       render();
       return;
     }
-    S.pending = replyKey(S.pending, { text, prio: S.prio, replyTo: S.replyTo, sig: replySig(files) }, randKey);
-    const body = { idempotency_key: S.pending.key, thread_id: threadId, priority: S.prio, content: { text } };
-    if (S.replyTo) body.in_reply_to = S.replyTo;
-    if (files.length) body.attachments = files;
+    // Choose again before minting. An unchanged draft keeps the captured
+    // priority and key; an edit after a 503 does not.
+    const draft = syncPriority();
+    S.pending = replyKey(S.pending, draft, randKey);
+    const body = { idempotency_key: S.pending.key, thread_id: threadId, priority: draft.prio, content: { text: draft.text } };
+    if (draft.replyTo) body.in_reply_to = draft.replyTo;
+    if (draft.files.length) body.attachments = draft.files;
     S.sending = true;
     S.banner = null;
     btn.disabled = true;
@@ -276,14 +280,19 @@ export function mount(root, ctx) {
     const pick = h('button', { type: 'button', class: 'btn attach', text: 'Attach', title: 'Attach files (or drop or paste them here)' });
     btn.addEventListener('click', () => send(ta, btn));
     ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(ta, btn); } });
-    ta.addEventListener('input', () => { counter(ta); gate(); });
-    const prio = prioritySeg(p => { S.prio = p; render(); });
+    ta.addEventListener('input', () => { syncPriority(); counter(ta); gate(); });
+    const prio = prioritySeg(p => { S.prio = p; S.prioManual = true; render(); });
+    // The Grok Bot note is its own line under the controls, outside .bar, so
+    // the bar's one-row layout and keyboard hint are unchanged at every width.
+    const quota = h('p', { class: 'qnote', id: 'r-quota', hidden: true });
+    const quotaMore = h('span', { id: 'r-quota-more', hidden: true, text: GROK_QUOTA_DETAIL });
     const wrap = h('div', { class: 'wrap' },
       h('div', { class: 'join', hidden: true, text: 'You are not a participant in this thread. Sending adds you to it.' }),
       h('div', { class: 'to', hidden: true }, h('span'), h('button', { type: 'button', title: 'Reply to the thread instead', text: '×', onclick: () => { S.replyTo = ''; render(); } })),
       ta,
       atts.el,
-      h('div', { class: 'bar' }, prio.el, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint' }, h('span', { text: 'Drop or paste files' }), ' · ', h('span', { text: 'Enter to send' }), ' · ', h('span', { text: 'Shift+Enter for a new line' })), pick, btn));
+      h('div', { class: 'bar' }, prio.el, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint' }, h('span', { text: 'Drop or paste files' }), ' · ', h('span', { text: 'Enter to send' }), ' · ', h('span', { text: 'Shift+Enter for a new line' })), pick, btn),
+      quota, quotaMore);
     atts.wire(wrap, ta, pick);
     new ResizeObserver(fitHint).observe(wrap);
     return h('div', { class: 'composer' }, h('div', { class: 'cbanner', role: 'alert', hidden: true }), wrap);
@@ -429,6 +438,47 @@ export function mount(root, ctx) {
   const head = h('div', { class: 'thead' }), list = h('div', { class: 'msgs' }), comp = composer();
   root.replaceChildren(head, list, comp, R.picker);
 
+  // The draft a reply would send now. Text matches send(): empty text is kept
+  // when there is no attachment, and dropped when attachments carry it.
+  function replyDraft(ta) {
+    const files = atts.toAttachments();
+    const text = (ta.value.trim() || !files.length) ? ta.value : '';
+    return { text, prio: S.prio, replyTo: S.replyTo, sig: replySig(files), files };
+  }
+
+  // Preselect wake_idle once any participant is grokbot (Decisions §6).
+  // Lock only while sending or while this draft would retry the captured
+  // body (PROTOCOL §§2.2, 5.2, 5.3, 16.3). Returns the draft with the
+  // priority the next key is minted under.
+  function syncPriority() {
+    const ta = comp.querySelector('textarea');
+    const draft = replyDraft(ta);
+    const participants = (thread() && thread().participants) || [];
+    const locked = replyPriorityLocked({ sending: S.sending, pending: S.pending, draft });
+    S.prio = replyPriority({
+      manual: S.prioManual,
+      locked,
+      current: draft.prio,
+      participants,
+      kindOf,
+    });
+    // A matching draft retries the priority it was sent with, not whatever
+    // the control showed while the text was temporarily different.
+    if (!S.prioManual && locked && S.pending) S.prio = S.pending.prio;
+    // "Preselected" only while wake_idle is the automatic choice; after a
+    // manual pick, or a kept retry of another priority, the quota-only line.
+    const note = replyQuotaNote(participants, kindOf, { manual: S.prioManual, priority: S.prio });
+    const quota = comp.querySelector('#r-quota');
+    quota.hidden = !note;
+    quota.textContent = note;
+    quota.title = note ? GROK_QUOTA_DETAIL : '';
+    const seg = comp.querySelector('.seg');
+    if (note) seg.setAttribute('aria-describedby', 'r-quota r-quota-more');
+    else seg.removeAttribute('aria-describedby');
+    for (const b of seg.querySelectorAll('button')) b.className = b.value === S.prio ? 'on' : '';
+    return { ...draft, prio: S.prio };
+  }
+
   function render() {
     if (gone) return;
     const t = thread(), all = msgs(), d = detail.get();
@@ -461,8 +511,8 @@ export function mount(root, ctx) {
     to.hidden = !target;
     if (target) to.firstElementChild.textContent = clean('↳ replying to ' + nameOf(target.sender) + ': ' + excerpt(target).slice(0, 60));
     comp.querySelector('textarea').placeholder = 'Message ' + (participants ? participants.filter(p => p !== me).map(nameOf).join(', ') : 'this thread');
+    syncPriority();
     gate();
-    for (const b of comp.querySelectorAll('.seg button')) b.className = b.value === S.prio ? 'on' : '';
     if (S.pinned) scroller.scrollTop = scroller.scrollHeight;
   }
 

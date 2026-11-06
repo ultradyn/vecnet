@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { budgetBanner, budgetOut, canShowFull, clientLabel, CLIENT_LABEL_CAP, clientSuspect, FULL_TEXT_CAP, items, replyKey, replySig, sendError, spillOf } from '../static/thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, clientLabel, CLIENT_LABEL_CAP, clientSuspect, FULL_TEXT_CAP, GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, items, pendingReplyMatches, replyKey, replyPriority, replyPriorityLocked, replyQuotaNote, replySig, sendError, spillOf } from '../static/thread-model.js';
 import { SPILL_SLOT } from '../static/attach-model.js';
 
 const OP = 'peer_op', CODEX = 'peer_codex', SLEUTH = 'peer_sleuth', GROK = 'peer_grok';
@@ -268,4 +268,95 @@ test('clientLabel shows only the hub operator-cli label, as one safe line', () =
   assert.equal(clientSuspect(at({ kind: 'operator-cli', label: 'L' })), false);
   assert.equal(clientSuspect(at({ kind: 'web', label: 'L', agent_suspected: true })), false);
   assert.equal(clientSuspect(msg('m', OP, 'hi')), false);
+});
+
+// Decisions §6, for a thread that already exists (including a setup thread
+// whose participants are the operator and a grokbot). Kinds come from the
+// directory; until it names a participant, the reply keeps the initial
+// priority. PROTOCOL §§2.2, 5.2, 16.3.
+test('Grok recipient defaults preserve user choice', () => {
+  const kinds = { peer_op: 'operator', peer_g: 'grokbot', peer_c: 'session', peer_d: 'dot', peer_s: 'pagchat-bot' };
+  const kindOf = id => kinds[id] || '';
+  const setup = ['peer_op', 'peer_g'];
+  const base = { manual: false, locked: false, current: 'wake', kindOf };
+  assert.equal(replyPriority({ ...base, participants: setup }), 'wake_idle', 'setup thread');
+  assert.equal(replyPriority({ ...base, participants: ['peer_op', 'peer_c', 'peer_g', 'peer_d'] }), 'wake_idle', 'mixed thread, one grokbot');
+  assert.equal(replyPriority({ ...base, participants: ['peer_op', 'peer_c'] }), 'wake', 'no grokbot');
+  assert.equal(replyPriority({ ...base, participants: ['peer_op', 'peer_s'] }), 'wake', 'pagchat-bot is not a grokbot');
+  assert.equal(replyPriority({ ...base, participants: [] }), 'wake', 'thread not loaded');
+  assert.equal(replyPriority({ ...base, participants: null }), 'wake');
+  // Delayed directory: participant ids are known, kinds are not.
+  assert.equal(replyPriority({ ...base, participants: setup, kindOf: () => '' }), 'wake');
+  assert.equal(replyPriority({ ...base, participants: setup, kindOf: id => id === 'peer_g' ? 'grokbot' : '' }), 'wake_idle', 'directory arrives');
+  assert.equal(replyPriority({ manual: true, locked: false, current: 'wake', participants: setup, kindOf }), 'wake', 'explicit wake');
+  assert.equal(replyPriority({ manual: true, locked: false, current: 'hold', participants: setup, kindOf }), 'hold', 'explicit hold');
+  assert.equal(replyPriority({ manual: false, locked: true, current: 'wake', participants: setup, kindOf }), 'wake', 'in-flight reply');
+
+  let n = 0;
+  const mint = () => 'ui-r' + (++n);
+  const prio = replyPriority({ manual: false, locked: true, current: 'hold', participants: setup, kindOf });
+  const first = replyKey(null, { text: 'same body', prio, replyTo: 'msg_1', sig: '' }, mint);
+  const retry = replyKey(first, { text: 'same body', prio, replyTo: 'msg_1', sig: '' }, mint);
+  assert.equal(retry, first, 'idempotent retry minted a new key');
+  assert.equal(retry.prio, 'hold');
+  assert.equal(retry.text, 'same body');
+
+  const auto = replyPriority({ ...base, participants: setup });
+  const note = replyQuotaNote(setup, kindOf, { manual: false, priority: auto });
+  assert.equal(note, GROK_QUOTA_NOTE);
+  assert.match(note, /^Preselected/);
+  assert.doesNotMatch(note, /free/i);
+  assert.doesNotMatch(note, /guarantee|no wake|never wake|won'?t wake|will not wake|without waking/i);
+  assert.equal(replyQuotaNote(['peer_op', 'peer_c'], kindOf, { manual: false, priority: 'wake' }), '');
+  assert.equal(replyQuotaNote(setup, () => '', { manual: false, priority: 'wake' }), '');
+
+  // After an explicit wake or hold the note no longer says "preselected".
+  for (const priority of ['wake', 'hold', 'wake_idle']) {
+    const chosen = replyPriority({ manual: true, locked: false, current: priority, participants: setup, kindOf });
+    const line = replyQuotaNote(setup, kindOf, { manual: true, priority: chosen });
+    assert.equal(line, GROK_QUOTA_PLAIN, 'explicit ' + priority);
+    assert.doesNotMatch(line, /preselected/i, 'explicit ' + priority);
+  }
+  // A failed wake reply kept for its retry after the grokbot became known.
+  const kept = replyPriority({ manual: false, locked: true, current: 'wake', participants: setup, kindOf });
+  assert.equal(replyQuotaNote(setup, kindOf, { manual: false, priority: kept }), GROK_QUOTA_PLAIN, 'kept wake retry');
+});
+
+// A lost reply keeps wake and its key while the text is unchanged, even
+// after a grokbot participant becomes known. Editing that draft is a new
+// send: wake_idle is chosen before the new key is minted. Manual hold stays.
+test('failure then recipient edit recomputes automatic priority', () => {
+  const kinds = { peer_op: 'operator', peer_g: 'grokbot', peer_c: 'session' };
+  const kindOf = id => kinds[id] || '';
+  const setup = ['peer_op', 'peer_g'];
+  let n = 0;
+  const mint = () => 'ui-e' + (++n);
+  const failed = { text: 'hello', prio: 'wake', replyTo: 'msg_1', sig: '' };
+  const pending = replyKey(null, failed, mint);
+  const same = { ...failed };
+  assert.equal(replyPriorityLocked({ sending: false, pending, draft: same }), true);
+  assert.equal(pendingReplyMatches(pending, same), true);
+  assert.equal(replyPriority({ manual: false, locked: replyPriorityLocked({ sending: false, pending, draft: same }), current: 'wake', participants: setup, kindOf }), 'wake');
+  assert.equal(replyKey(pending, same, mint), pending, 'unchanged retry minted a new key');
+
+  const edited = { ...failed, text: 'hello!' };
+  assert.equal(pendingReplyMatches(pending, edited), false);
+  assert.equal(replyPriorityLocked({ sending: false, pending, draft: edited }), false);
+  const priority = replyPriority({ manual: false, locked: replyPriorityLocked({ sending: false, pending, draft: edited }), current: 'wake', participants: setup, kindOf });
+  assert.equal(priority, 'wake_idle');
+  const minted = replyKey(pending, { ...edited, prio: priority }, mint);
+  assert.notEqual(minted.key, pending.key, 'an edited draft reused the failed reply\'s key');
+  assert.equal(minted.prio, 'wake_idle');
+  assert.equal(minted.text, 'hello!');
+
+  // Undoing the edit restores the captured priority, even if the control moved.
+  const restored = { ...failed, prio: 'wake_idle' };
+  assert.equal(pendingReplyMatches(pending, restored), true);
+  assert.equal(replyPriorityLocked({ sending: false, pending, draft: restored }), true);
+  assert.equal(replyKey(pending, { ...restored, prio: pending.prio }, mint), pending, 'restoring the text minted a new key');
+
+  const sessionOnly = replyPriority({ manual: false, locked: replyPriorityLocked({ sending: false, pending, draft: edited }), current: 'wake', participants: ['peer_op', 'peer_c'], kindOf });
+  assert.equal(sessionOnly, 'wake', 'a non-grokbot thread adopted wake_idle');
+  assert.equal(replyPriority({ manual: true, locked: replyPriorityLocked({ sending: false, pending, draft: edited }), current: 'hold', participants: setup, kindOf }), 'hold', 'manual hold was overwritten');
+  assert.equal(replyPriority({ manual: false, locked: replyPriorityLocked({ sending: true, pending, draft: edited }), current: 'wake', participants: setup, kindOf }), 'wake', 'in-flight reply changed priority');
 });
