@@ -42,7 +42,7 @@ function frame(op: number, text: string | Buffer, fin = true) {
   else { head[1] = 127; head.writeBigUInt64BE(BigInt(data.length), 2); }
   return Buffer.concat([head, data]);
 }
-async function wireServer(t: TestContext, handshake: 'good' | 'bad' | 'http' | 'silent' = 'good') {
+async function wireServer(t: TestContext, handshake: 'good' | 'bad' | 'http' | 'silent' = 'good', initialFrames = Buffer.alloc(0)) {
   const path = join(roots.get(t)!, 'raw.sock');
   const paths: string[] = [], keys: string[] = [];
   const frames = queue<{ op: number; data: Buffer; masked: boolean }>();
@@ -60,8 +60,9 @@ async function wireServer(t: TestContext, handshake: 'good' | 'bad' | 'http' | '
         const key = /Sec-WebSocket-Key: (.+)\r\n/i.exec(`${head}\r\n`)![1]; keys.push(key);
         if (handshake === 'silent') return;
         const accept = handshake === 'bad' ? 'wrong' : createHash('sha1').update(key + guid).digest('base64');
-        socket.write(handshake === 'http' ? 'HTTP/1.1 403 Forbidden\r\n\r\n' :
-          `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+        const response = handshake === 'http' ? 'HTTP/1.1 403 Forbidden\r\n\r\n' :
+          `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`;
+        socket.write(Buffer.concat([Buffer.from(response), initialFrames]));
         upgraded = true;
       }
       while (bytes.length >= 2) {
@@ -143,6 +144,28 @@ test('ping is answered with pong; close frame ends the connection', { timeout: 5
   s.write(frame(8, Buffer.from([3, 232])));
   assert.match(await end, /close/i);
   const reply = await s.frames.next(); assert.equal(reply.op, 8); assert.equal(reply.masked, true);
+});
+
+test('coalesced upgrade, text and close deliver text exactly once before close', { timeout: 5000 }, async t => {
+  for (const closeFirst of [false, true]) {
+    await t.test(closeFirst ? 'register close listener first' : 'register message listener first', async sub => {
+      const payload = Buffer.from([3, 232]);
+      const s = await wireServer(sub, 'good', Buffer.concat([frame(1, 'ok'), frame(8, payload)]));
+      const c = await connectUnixWebSocket(s.path, opts); sub.after(() => c.close());
+      const events: string[] = [];
+      const onMessage = (text: string) => events.push(`message:${text}`);
+      const end = new Promise<void>(resolve => {
+        if (!closeFirst) c.onMessage(onMessage);
+        c.onClose(why => { events.push(why); resolve(); });
+        if (closeFirst) c.onMessage(onMessage);
+      });
+      await end;
+      const reply = await s.frames.next();
+      assert.equal(reply.op, 8); assert.equal(reply.masked, true); assert.deepEqual(reply.data, payload);
+      c.onMessage(onMessage); c.close();
+      assert.deepEqual(events, ['message:ok', 'WebSocket peer close']);
+    });
+  }
 });
 
 test('messages over maxMessageBytes close the connection', { timeout: 5000 }, async t => {

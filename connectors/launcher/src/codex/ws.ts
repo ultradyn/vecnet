@@ -43,7 +43,9 @@ export function connectUnixWebSocket(socketPath: string, o: {
     function finish(why: string, closePayload?: Buffer) {
       if (ended !== undefined) return;
       ended = why; clearTimeout(timeout); o.signal?.removeEventListener('abort', abort);
-      bytes = Buffer.alloc(0); fragments = []; queued.length = 0;
+      // Completed messages may precede close in the upgrade chunk, before the
+      // connect caller can attach listeners. Keep them for onMessage to drain.
+      bytes = Buffer.alloc(0); fragments = [];
       if (closePayload && ready && socket.writable) { socket.end(frame(8, closePayload)); socket.destroySoon(); }
       else socket.destroy();
       if (!ready) reject(new Error(why));
