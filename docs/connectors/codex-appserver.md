@@ -1,6 +1,6 @@
 # Codex app-server delivery
 
-The launcher daemon can push wake-priority vecnet messages into Codex sessions that are already running, idle or mid-turn, through the Codex app-server daemon that those sessions already use. This is opt-in per Codex thread. It adds to the [Codex hooks](codex.md): sessions this connector cannot reach still get messages from the hooks and from `vecnet inbox`. The obligations are in [PROTOCOL §13.9](../PROTOCOL.md#139-claude-code-hook-vecnet-hook-2026-11-03-issue-27) (the **Codex app-server** bullet); the runtime facts behind every rule here are in the [research note](../research/2026-11-04-codex-app-server-delivery.md) ([R]), verified on Codex 0.166.0.
+The launcher daemon can push wake-priority vecnet messages into Codex sessions that are already running, idle or mid-turn, through the Codex app-server daemon that those sessions already use. This is opt-in per Codex thread. It adds to the [Codex hooks](codex.md): sessions this connector cannot reach still get messages from the hooks and from `vecnet inbox`. The obligations are in [PROTOCOL §13.9](../PROTOCOL.md#139-claude-code-hook-vecnet-hook-2026-11-03-issue-27) (the **Codex app-server** bullet); the runtime facts behind every rule here are in the [research note](../research/2026-11-04-codex-app-server-delivery.md) ([R]), with connector compatibility re-verified on Codex 0.167.0 in its 2026-11-06 addendum to the original 0.166.0 research.
 
 ## What it reaches
 
@@ -100,7 +100,7 @@ The connector never answers an approval or a question, and never changes a threa
 
 ## Codex versions
 
-Only allowlisted daemon versions are used (`CODEX_APPSERVER_VERSIONS` in `connectors/launcher/src/codex/discover.ts`, now `0.166.0`). Any other version is refused: nothing is sent, and one error is logged per connection. To allow a new version, first re-run [R] §3–§5 and K1–K3 against it on a throwaway thread, then edit the list.
+Only allowlisted daemon versions are used (`CODEX_APPSERVER_VERSIONS` in `connectors/launcher/src/codex/discover.ts`, now `0.166.0`, `0.167.0`). Any other version is refused: nothing is sent, and one error is logged per connection. To allow a new version, first re-run [R] §3–§5 and K1–K3 against it on a throwaway thread, then edit the list.
 
 ## Live smoke
 
