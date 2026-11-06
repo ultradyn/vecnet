@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -229,5 +230,52 @@ func TestWatchSuccessfulPollIsRecovery(t *testing.T) {
 	}
 	if strings.Count(errs.String(), "hub unreachable for 6s") != 1 || strings.Count(errs.String(), "reconnected after 18s") != 1 {
 		t.Fatalf("status=%q", errs.String())
+	}
+}
+
+// TestWatchJSONStopLine: a terminal answer ends `watch --json` with one
+// client-made watch_stopped line carrying the HTTP status, so a supervisor
+// (the Codex connector) can tell re-auth/disabled from a crash. Recoverable
+// failures and other output modes print no such line.
+func TestWatchJSONStopLine(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		json   bool
+	}{{401, true}, {403, true}, {204, true}, {401, false}} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/peers" {
+				fmt.Fprint(w, `{"peers":[]}`)
+				return
+			}
+			w.WriteHeader(tc.status)
+			if tc.status != 204 {
+				fmt.Fprint(w, `{"error":{"code":"unauthorized","message":"<b>bad</b>"}}`)
+			}
+		}))
+		var out, errs bytes.Buffer
+		w := watcher{identityOff: true, a: &app{ctx: context.Background(), stdout: &out, stderr: &errs, json: tc.json}, c: newClient(srv.URL, "test"), replayed: true, connected: true, cursor: "e1.1", seen: newDedupe(1024)}
+		err := w.run()
+		srv.Close()
+		if !terminal(err) {
+			t.Fatalf("status %d: err=%v", tc.status, err)
+		}
+		if !tc.json {
+			if strings.Contains(out.String(), "watch_stopped") {
+				t.Fatalf("plain watch printed %q", out.String())
+			}
+			continue
+		}
+		lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+		var ev struct {
+			Type   string `json:"type"`
+			Cursor string `json:"cursor"`
+			Data   struct {
+				Text   string `json:"text"`
+				Status int    `json:"status"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(lines[len(lines)-1]), &ev); err != nil || ev.Type != "watch_stopped" || ev.Cursor != "" || ev.Data.Status != tc.status || strings.Contains(ev.Data.Text, "<b>") {
+			t.Fatalf("status %d: last line %q (%v)", tc.status, lines[len(lines)-1], err)
+		}
 	}
 }

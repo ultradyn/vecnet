@@ -1,10 +1,13 @@
 // The thread's read tracker (CoS unread ruling). A message is seen once
 // SEEN_RATIO of it (or of the view, if taller) is visible for DWELL_MS, or
 // when scrolled past going down, and only while active() (page visible,
-// window focused). Each seen unread message gets a read receipt (PROTOCOL
-// §2.5), batched over BATCH_MS; a failure is retried once after RETRY_MS,
-// quietly, then left unread. Never a mark-all. No DOM: thread.js feeds it
-// IntersectionObserver entries; tests drive it under mocked timers.
+// window focused). Scrolled past includes a tail that stays in the root:
+// the top has left and what remains is under SEEN_RATIO, which happens when
+// the thread ends before the message can clear the view. Each seen unread
+// message gets a read receipt (PROTOCOL §2.5), batched over BATCH_MS; a
+// failure is retried once after RETRY_MS, quietly, then left unread. Never
+// a mark-all. No DOM: thread.js feeds it IntersectionObserver entries;
+// tests drive it under mocked timers.
 
 export const SEEN_RATIO = 0.6, DWELL_MS = 1000, BATCH_MS = 500, RETRY_MS = 2000;
 
@@ -81,8 +84,10 @@ export function createReader({ api, active, onSeen = () => {}, onLost = () => {}
       for (const id of [...dwell.keys()]) if (!unread.has(id)) stopDwell(id);
       for (const id of shown) startDwell(id);
     },
-    // view: one message's place; leaving the top is a pass going down.
-    view(id, { intersecting, enough: plenty, above }) {
+    // view: one message's place. Leaving through the top is a pass going
+    // down, and so is a tail (pastTop: its top is above the root) after it
+    // was already visible enough. A sliver that never reached enough is not.
+    view(id, { intersecting, enough: plenty, above, pastTop }) {
       const was = inter.has(id);
       if (intersecting) inter.add(id); else inter.delete(id);
       if (intersecting && plenty) {
@@ -93,7 +98,7 @@ export function createReader({ api, active, onSeen = () => {}, onLost = () => {}
       }
       shown.delete(id);
       stopDwell(id);
-      if (was && !intersecting && above && met.has(id)) see(id);
+      if (met.has(id) && ((was && !intersecting && above) || (intersecting && pastTop))) see(id);
     },
     // activeChanged (visibility, focus, a modal): tracking starts over, so
     // nothing moved while away counts.

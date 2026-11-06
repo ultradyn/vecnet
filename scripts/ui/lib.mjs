@@ -86,16 +86,21 @@ export async function scrollMessageIntoView(page, id) { return scrollIntoViewSta
 // down): it scrolls the thread from where it opened to the bottom in steps
 // smaller than the view, so every message passes through it, then waits for
 // unread() (the hub's unread count for the thread) to reach zero. Opening a
-// thread no longer marks it read.
+// thread no longer marks it read. Each position is held for STEP_MS so the
+// thread's IntersectionObserver reports it: on a fast box, two frames per step
+// could carry the first messages out of view before any report, and a message
+// never reported in view is (correctly) not read by passing it.
 export async function readThrough(page, unread, { timeout = 30000 } = {}) {
   await page.evaluate(async () => {
+    const STEP_MS = 120;
     const main = document.getElementById('main');
     const frames = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const hold = () => frames().then(() => new Promise(resolve => setTimeout(resolve, STEP_MS)));
+    await hold(); // where it opened
     for (let i = 0; i < 400; i++) {
       const before = main.scrollTop;
       main.scrollTop = before + Math.max(80, Math.floor(main.clientHeight * 0.4));
-      await frames();
-      await frames();
+      await hold();
       if (main.scrollTop === before) break;
     }
   });
