@@ -52,7 +52,7 @@ func (w *Worker) pushGrokbot(ctx context.Context, d hub.DueDelivery) {
 	}
 
 	var answer bytes.Buffer
-	status, retryAfter, netErr := w.postGrokbot(ctx, d, key, &answer)
+	status, retryAfter, latency, sent, netErr := w.postGrokbot(ctx, d, key, &answer)
 	if ctx.Err() != nil && netErr != nil {
 		// Shutting down: leave the lease to lapse rather than burn an attempt.
 		return
@@ -65,18 +65,27 @@ func (w *Worker) pushGrokbot(ctx context.Context, d hub.DueDelivery) {
 			"delivery", d.DeliveryID, "route", d.RouteID, "status", status)
 	}
 	w.grokbotResult(ctx, d, status, answer.Bytes(), retryAfter, netErr)
+	if sent {
+		ok := netErr == nil && hub.ClassifyGrokbot(status, answer.Bytes()) == hub.GrokbotStarted
+		fail := ""
+		if !ok && netErr == nil && status == http.StatusOK {
+			fail = "routine did not start"
+		}
+		w.noteAttempt(ctx, d.RouteID, d.Kind, len(d.Body), status, latency, netErr, ok, fail)
+	}
 }
 
 // postGrokbot sends one routine POST; the first 4 KiB of the answer go to sink.
-func (w *Worker) postGrokbot(ctx context.Context, d hub.DueDelivery, key string, sink *bytes.Buffer) (int, time.Duration, error) {
+func (w *Worker) postGrokbot(ctx context.Context, d hub.DueDelivery, key string, sink *bytes.Buffer) (status int, retryAfter time.Duration, latency time.Duration, sent bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.URL, bytes.NewReader(d.Body))
 	if err != nil {
-		return 0, 0, fmt.Errorf("push: request: %w", err)
+		return 0, 0, 0, false, fmt.Errorf("push: request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("X-Automation-Key", key) // undocumented; local senders send both (grokbot.md §1a)
-	return w.do(req, sink)
+	status, retryAfter, latency, err = w.do(req, sink)
+	return status, retryAfter, latency, true, err
 }
 
 func (w *Worker) grokbotResult(ctx context.Context, d hub.DueDelivery, status int, body []byte, retryAfter time.Duration, netErr error) {

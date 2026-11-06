@@ -5,7 +5,7 @@
 // hub clock.
 import { chip, copyButton, h, idCopy, idText, peerLink } from './dom.js';
 import { ago, fullWhen, kindShort, kindTitle, plural, title as threadTitle, when } from './format.js';
-import { findPeer, peerFacts, peerHealth, peerRoutes, peerSubs, peerThreads, principalFacts, scopeTarget } from './peer-model.js';
+import { findPeer, peerFacts, peerHealth, peerRoutes, peerSubs, peerThreads, principalFacts, routeUsage, scopeTarget, usageSummary } from './peer-model.js';
 import { chip as subChip, expiresIn } from './subs-model.js';
 
 const RELOAD_MS = 30000;
@@ -202,33 +202,56 @@ export function mount(root, ctx) {
     ])];
   }
 
+  // usageView is the per-route stats under a push route or an Events callback.
+  // shared is a principal route: its counts cover every peer that inherits it.
+  function usageView(u, shared) {
+    const kids = usageSummary(u).map((text, i) => h('div', { class: i ? 'u-line' : 'u-tot', text }));
+    if (u && u.lastUsedAt) {
+      const bits = ['last used ', time(u.lastUsedAt)];
+      if (u.lastSuccessAt) bits.push(' · last success ', time(u.lastSuccessAt));
+      kids.push(h('div', { class: 'u-line' }, ...bits));
+    }
+    if (u && u.lastError) {
+      // last_status is the latest attempt, which may have succeeded after this error.
+      kids.push(h('div', { class: 'u-line bad' }, 'last error: ' + u.lastError, u.lastErrorAt ? ' · ' : null, u.lastErrorAt ? time(u.lastErrorAt) : null));
+    }
+    if (shared) kids.push(h('div', { class: 'u-line', text: 'Counts cover every peer that pushes through this principal route.' }));
+    return h('div', { class: 'usage' }, ...kids);
+  }
+
   function drawRoutes(s) {
     const f = facts();
     const routes = peerRoutes(res.routes.get(), id, f ? f.principalId : '');
     s.count.textContent = String(routes.length);
     if (!routes.length) return [none('No push routes. This peer pulls its deliveries.')];
-    return [table(['Route', 'Owner', 'Kind', 'Host', 'Verified', 'Created'], routes.map(r => h('tr', null,
-      h('td', null, idCopy(r.id, 'route id')),
-      h('td', { class: 'sm', text: r.via === 'peer' ? 'this peer' : 'its principal' }),
-      h('td', { class: 'mono sm', text: r.kind + (r.kind === 'grokbot' && r.runsPerHour ? ' · ' + r.runsPerHour + '/h' : '') }),
-      h('td', { class: 'mono sm', text: r.host || '—' }),
-      h('td', null, r.verified ? time(r.verified) : h('span', { class: 'bad', text: 'unverified' })),
-      h('td', null, time(r.created)))))];
+    return [table(['Route', 'Owner', 'Kind', 'Host', 'Verified', 'Created'], routes.flatMap(r => [
+      h('tr', null,
+        h('td', null, idCopy(r.id, 'route id')),
+        h('td', { class: 'sm', text: r.via === 'peer' ? 'this peer' : 'its principal' }),
+        h('td', { class: 'mono sm', text: r.kind + (r.kind === 'grokbot' && r.runsPerHour ? ' · ' + r.runsPerHour + '/h' : '') }),
+        h('td', { class: 'mono sm', text: r.host || '—' }),
+        h('td', null, r.verified ? time(r.verified) : h('span', { class: 'bad', text: 'unverified' })),
+        h('td', null, time(r.created))),
+      h('tr', { class: 'usage-row' }, h('td', { colspan: '6' }, usageView(r.usage, r.via === 'principal'))),
+    ]))];
   }
 
   function drawSubs(s) {
     const list = peerSubs(res.subs.get(), id);
     s.count.textContent = String(list.length);
     if (!list.length) return [none('No subscriptions.')];
-    return [table(['Subscription', 'Host', 'Health', 'Expires', 'Last delivery', 'Attempts'], list.map(x => {
+    return [table(['Subscription', 'Host', 'Health', 'Expires', 'Last delivery', 'Attempts'], list.flatMap(x => {
       const c = subChip(x.health);
-      return h('tr', { title: x.health_note || null },
-        h('td', null, h('span', { text: x.name || '—' }), idCopy(x.sub_id, 'subscription id', 'sub')),
-        h('td', { class: 'mono sm', text: x.url || '—' }),
-        h('td', null, h('span', { class: 'chip health h-' + c.tone, text: c.label })),
-        h('td', { class: 'sm', text: expiresIn(x.expires_at, nowMs()) || '—', title: x.expires_at || '' }),
-        h('td', { class: 'sm' }, x.last_status === null || x.last_status === undefined ? '—' : String(x.last_status), x.last_delivery_at ? ' · ' + age(x.last_delivery_at) : ''),
-        h('td', { text: String(x.attempts ?? 0) }));
+      return [
+        h('tr', { title: x.health_note || null },
+          h('td', null, h('span', { text: x.name || '—' }), idCopy(x.sub_id, 'subscription id', 'sub')),
+          h('td', { class: 'mono sm', text: x.url || '—' }),
+          h('td', null, h('span', { class: 'chip health h-' + c.tone, text: c.label })),
+          h('td', { class: 'sm', text: expiresIn(x.expires_at, nowMs()) || '—', title: x.expires_at || '' }),
+          h('td', { class: 'sm' }, x.last_status === null || x.last_status === undefined ? '—' : String(x.last_status), x.last_delivery_at ? ' · ' + age(x.last_delivery_at) : ''),
+          h('td', { text: String(x.attempts ?? 0) })),
+        h('tr', { class: 'usage-row' }, h('td', { colspan: '6' }, usageView(routeUsage(x.usage), false))),
+      ];
     }))];
   }
 

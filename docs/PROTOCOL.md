@@ -288,6 +288,8 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `GET /v1/admin/counters` | delivery and loop counters | [T17] |
 | `GET /v1/admin/subscriptions`, `POST …/{id}/pause`, `POST …/{id}/resume` | `subscriptions list\|pause\|resume`: dot subscription health (section 13.4); pause stops one subscription until resume, and a re-subscribe does not lift it | [T02, T19] |
 
+**Route usage (2026-11-06).** `GET /v1/admin/routes` adds `usage` on each push route (section 3, section 13.3), and `GET /v1/admin/subscriptions` adds `usage` on each MCP Events callback (section 4.4). Both stay operator-only. `usage` is `null` until that target has had an outbound delivery HTTP attempt. It carries lifetime `requests`, `successes` and `failures`; `last_error` and `last_error_at` (a fixed egress reason, `HTTP <status>`, or `routine did not start`; never a body, URL or key); `last_status` (`null` when the attempt got no status); `last_used_at` and `last_success_at`; and `body_bytes` and `latency_ms`, each `{avg, p95, p99, samples}`. Distributions are nearest-rank over a fixed ring of the most recent 256 attempts (`samples` is how many of those slots are filled). Latency is the HTTP round trip. A stats write never fails the delivery, and no request body is stored. Verification challenges, a grokbot run held for budget, and pull reads (SSE, long-poll, MCP inbox) are not attempts. Not every message uses a route: a `hold`, a peer with no push route, and a delivery that is only pulled never increment `usage` (section 5.2). `last_used_at` is therefore not the peer's last message. A principal route's `usage` counts every peer that pushes through it. Removing a route or subscription deletes its usage.
+
 **Principals.** `vecnet principal add --name <n>` creates a principal and prints its `prn_` id and credential. `vecnet peer add … --principal <prn_>` enrols a peer under it. `peer add` without `--principal` creates an implicit single-peer principal with the peer's display name. Only the operator reassigns a peer, with `vecnet peer move <peer> --principal <prn_>` [R10] or, for a dot, by issuing the link code whose consumption moves it (section 4.5). Kind `operator` carries the operator powers of section 16, so `peer add --kind operator` is accepted only under the operator principal (otherwise 422 `invalid_value`).
 
 ### 2.13 Operator views
@@ -371,7 +373,8 @@ countdowns. View types are defined in `internal/opapi`:
   delivery id, recipient, thread id, update time, nullable last status/error.
 
 `GET /v1/admin/subscriptions` retains its array response and existing fields
-(section 2.12), adding `health`, `health_note`, and nullable `refresh_before`.
+(section 2.12), adding `health`, `health_note`, nullable `refresh_before`,
+and `usage` (route usage in section 2.12; `null` until the callback is attempted).
 `health` is one of `ok`, `failing`, `late`, `expired`, `paused_token`,
 `paused_failed`, `paused_auth`, `paused_operator`, or `unverified`;
 `health_note` explains that state. `refresh_before` is the recommended refresh

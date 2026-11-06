@@ -408,23 +408,48 @@ func (v DeliveryHealth) MarshalJSON() ([]byte, error) {
 	return json.Marshal(plain(v))
 }
 
+// RouteUsage is one delivery route's outbound usage (PROTOCOL §2.12).
+// Counters are lifetime. Body and latency distributions are the most recent
+// 256 attempts. Null on a route or subscription that has never been attempted.
+type RouteUsage struct {
+	Requests      int            `json:"requests"`
+	Successes     int            `json:"successes"`
+	Failures      int            `json:"failures"`
+	LastError     *string        `json:"last_error"`
+	LastErrorAt   *string        `json:"last_error_at"`
+	LastStatus    *int           `json:"last_status"`
+	LastUsedAt    string         `json:"last_used_at"`
+	LastSuccessAt *string        `json:"last_success_at"`
+	BodyBytes     RouteUsageDist `json:"body_bytes"`
+	LatencyMS     RouteUsageDist `json:"latency_ms"`
+}
+
+// RouteUsageDist is avg, nearest-rank p95 and p99 over Samples recent attempts.
+type RouteUsageDist struct {
+	Avg     float64 `json:"avg"`
+	P95     float64 `json:"p95"`
+	P99     float64 `json:"p99"`
+	Samples int     `json:"samples"`
+}
+
 type Subscription struct {
-	SubID          string  `json:"sub_id"`
-	Principal      string  `json:"principal"`
-	PeerID         string  `json:"peer_id"`
-	URL            string  `json:"url"`
-	Name           string  `json:"name"`
-	Cursor         string  `json:"cursor"`
-	Health         string  `json:"health"`
-	HealthNote     string  `json:"health_note"`
-	ExpiresAt      *string `json:"expires_at"`
-	RefreshBefore  *string `json:"refresh_before"`
-	LastRefreshAt  *string `json:"last_refresh_at"`
-	VerifiedAt     *string `json:"verified_at"`
-	PausedReason   *string `json:"paused_reason"`
-	LastDeliveryAt *string `json:"last_delivery_at"`
-	LastStatus     *int    `json:"last_status"`
-	Attempts       int     `json:"attempts"`
+	SubID          string      `json:"sub_id"`
+	Principal      string      `json:"principal"`
+	PeerID         string      `json:"peer_id"`
+	URL            string      `json:"url"`
+	Name           string      `json:"name"`
+	Cursor         string      `json:"cursor"`
+	Health         string      `json:"health"`
+	HealthNote     string      `json:"health_note"`
+	ExpiresAt      *string     `json:"expires_at"`
+	RefreshBefore  *string     `json:"refresh_before"`
+	LastRefreshAt  *string     `json:"last_refresh_at"`
+	VerifiedAt     *string     `json:"verified_at"`
+	PausedReason   *string     `json:"paused_reason"`
+	LastDeliveryAt *string     `json:"last_delivery_at"`
+	LastStatus     *int        `json:"last_status"`
+	Attempts       int         `json:"attempts"`
+	Usage          *RouteUsage `json:"usage"`
 }
 
 type AuditEntry struct {

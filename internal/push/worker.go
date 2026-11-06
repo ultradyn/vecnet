@@ -156,7 +156,7 @@ func (w *Worker) Push(ctx context.Context, d hub.DueDelivery) {
 		w.pushGrokbot(ctx, d)
 		return
 	}
-	status, retryAfter, netErr := w.post(ctx, d.URL, d.DeliveryID, d.Keys, d.Body, d.Attempt, nil)
+	status, retryAfter, latency, sent, netErr := w.post(ctx, d.URL, d.DeliveryID, d.Keys, d.Body, d.Attempt, nil)
 	if ctx.Err() != nil && netErr != nil {
 		// Shutting down: leave the lease to lapse rather than burn an attempt.
 		return
@@ -164,26 +164,30 @@ func (w *Worker) Push(ctx context.Context, d hub.DueDelivery) {
 	if err := w.Hub.PushResult(context.WithoutCancel(ctx), d, status, retryAfter, netErr, w.now()); err != nil {
 		slog.Error("push: record result", "delivery", d.DeliveryID, "err", err)
 	}
+	if sent {
+		ok := netErr == nil && status >= 200 && status < 300
+		w.noteAttempt(ctx, d.RouteID, d.Kind, len(d.Body), status, latency, netErr, ok, "")
+	}
 	w.Kick()
 }
 
 // post signs and sends one webhook. When sink is non-nil the response body
 // (≤ 4 KiB) is copied into it; otherwise it is discarded.
-func (w *Worker) post(ctx context.Context, url, id string, keys []string, body []byte, attempt int, sink *bytes.Buffer) (status int, retryAfter time.Duration, err error) {
+func (w *Worker) post(ctx context.Context, url, id string, keys []string, body []byte, attempt int, sink *bytes.Buffer) (status int, retryAfter time.Duration, latency time.Duration, sent bool, err error) {
 	if len(body) > hub.MaxPushBody {
-		return 0, 0, &hub.OutboundError{Reason: "body_too_large", Err: fmt.Errorf("push: body is %d bytes, over the %d-byte cap", len(body), hub.MaxPushBody)}
+		return 0, 0, 0, false, &hub.OutboundError{Reason: "body_too_large", Err: fmt.Errorf("push: body is %d bytes, over the %d-byte cap", len(body), hub.MaxPushBody)}
 	}
 	if len(keys) == 0 {
-		return 0, 0, &hub.OutboundError{Reason: "no_active_key", Err: errors.New("push: route has no active key")}
+		return 0, 0, 0, false, &hub.OutboundError{Reason: "no_active_key", Err: errors.New("push: route has no active key")}
 	}
 	now := w.now()
 	sig, err := webhook.SignAll(keys, id, now, body)
 	if err != nil {
-		return 0, 0, fmt.Errorf("push: sign: %w", err)
+		return 0, 0, 0, false, fmt.Errorf("push: sign: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return 0, 0, fmt.Errorf("push: request: %w", err)
+		return 0, 0, 0, false, fmt.Errorf("push: request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(webhook.HeaderID, id)
@@ -192,20 +196,23 @@ func (w *Worker) post(ctx context.Context, url, id string, keys []string, body [
 	if attempt > 0 {
 		req.Header.Set(HeaderAttempt, strconv.Itoa(attempt))
 	}
-	return w.do(req, sink)
+	status, retryAfter, latency, err = w.do(req, sink)
+	return status, retryAfter, latency, true, err
 }
 
 // do sends req on the egress client. When sink is non-nil the response body
 // (≤ 4 KiB) is copied into it; otherwise it is discarded.
-func (w *Worker) do(req *http.Request, sink *bytes.Buffer) (status int, retryAfter time.Duration, err error) {
+func (w *Worker) do(req *http.Request, sink *bytes.Buffer) (status int, retryAfter time.Duration, latency time.Duration, err error) {
+	start := time.Now()
 	resp, err := w.client.Do(req)
 	if err != nil {
+		latency = time.Since(start)
 		if resp != nil && errors.Is(err, egress.ErrRedirect) {
 			// The redirect was refused, not followed; its status is the
 			// result (§3.3: 3xx is terminal). The body is already closed.
-			return resp.StatusCode, 0, nil
+			return resp.StatusCode, 0, latency, nil
 		}
-		return 0, 0, err
+		return 0, 0, latency, err
 	}
 	defer resp.Body.Close()
 	dst := io.Discard
@@ -213,7 +220,8 @@ func (w *Worker) do(req *http.Request, sink *bytes.Buffer) (status int, retryAft
 		dst = sink
 	}
 	io.Copy(dst, io.LimitReader(resp.Body, hub.PushResponseCap))
-	return resp.StatusCode, ParseRetryAfter(resp.Header.Get("Retry-After"), w.now()), nil
+	latency = time.Since(start)
+	return resp.StatusCode, ParseRetryAfter(resp.Header.Get("Retry-After"), w.now()), latency, nil
 }
 
 // Verify sends routeID its verification challenge (PROTOCOL §3.2):
@@ -242,7 +250,7 @@ func (w *Worker) Verify(ctx context.Context, routeID string) error {
 		return fmt.Errorf("push: challenge: %w", err)
 	}
 	var answer bytes.Buffer
-	status, _, err := w.post(ctx, url, ids.New(verifyPrefix), keys, body, 0, &answer)
+	status, _, _, _, err := w.post(ctx, url, ids.New(verifyPrefix), keys, body, 0, &answer)
 	if err != nil {
 		return fmt.Errorf("push: verify %s: %w", routeID, err)
 	}

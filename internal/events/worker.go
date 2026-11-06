@@ -397,7 +397,7 @@ func (w *Worker) drain(ctx context.Context, sub Subscription) (int, error) {
 			}
 		}
 		attemptStarted := time.Now()
-		status, retryAfter, netErr := w.post(ctx, s, r)
+		status, retryAfter, latency, posted, netErr := w.post(ctx, s, r)
 		result, reason := "delivered", ""
 		retry, dead := false, false
 		if netErr != nil || status < 200 || status >= 300 {
@@ -426,6 +426,18 @@ func (w *Worker) drain(ctx context.Context, sub Subscription) (int, error) {
 		}
 		if netErr != nil && ctx.Err() != nil {
 			return sent, err // shutting down: this attempt does not count
+		}
+		if posted {
+			ok := netErr == nil && status >= 200 && status < 300
+			st := 0
+			if netErr == nil {
+				st = status
+			}
+			w.Hub.NoteRouteAttempt(context.WithoutCancel(ctx), hub.RouteAttempt{
+				Key: s.ID, Kind: hub.RouteKindEvents, BodyBytes: len(r.body),
+				Latency: latency, HasLatency: true, OK: ok, Status: st,
+				Error: hub.RouteAttemptError(status, netErr), At: w.now(),
+			})
 		}
 		if err != nil {
 			return sent, err
@@ -492,35 +504,37 @@ func (w *Worker) authorised(ctx context.Context, s Subscription) (bool, error) {
 
 // post signs and sends one row. webhook-timestamp and webhook-signature are
 // fresh on every attempt; the body and webhook-id never change.
-func (w *Worker) post(ctx context.Context, s Subscription, r outboxRow) (status int, retryAfter time.Duration, err error) {
+func (w *Worker) post(ctx context.Context, s Subscription, r outboxRow) (status int, retryAfter time.Duration, latency time.Duration, sent bool, err error) {
 	now := w.now()
 	secrets, err := w.Store.secrets(ctx, s.ID, now)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, false, err
 	}
 	sig, err := webhook.SignAll(secrets, r.eventID, now, []byte(r.body))
 	if err != nil {
-		return 0, 0, fmt.Errorf("events: sign: %w", err)
+		return 0, 0, 0, false, fmt.Errorf("events: sign: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.URL, bytes.NewReader([]byte(r.body)))
 	if err != nil {
-		return 0, 0, errors.New("events: stored callback URL does not parse")
+		return 0, 0, 0, false, errors.New("events: stored callback URL does not parse")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(webhook.HeaderID, r.eventID)
 	req.Header.Set(webhook.HeaderTimestamp, strconv.FormatInt(now.Unix(), 10))
 	req.Header.Set(webhook.HeaderSignature, sig)
 	req.Header.Set(HeaderSubscription, s.ID)
+	start := time.Now()
 	resp, err := w.Client.Do(req)
 	if err != nil {
+		latency = time.Since(start)
 		if resp != nil && errors.Is(err, egress.ErrRedirect) {
-			return resp.StatusCode, 0, nil // refused, not followed; the body is already closed
+			return resp.StatusCode, 0, latency, true, nil // refused, not followed; the body is already closed
 		}
-		return 0, 0, err
+		return 0, 0, latency, true, err
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, hub.PushResponseCap))
-	return resp.StatusCode, push.ParseRetryAfter(resp.Header.Get("Retry-After"), now), nil
+	return resp.StatusCode, push.ParseRetryAfter(resp.Header.Get("Retry-After"), now), time.Since(start), true, nil
 }
 
 // record applies one POST's outcome: 2xx delivers; 410 and 413 are terminal;

@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-06: peer detail shows per-route delivery usage (requests, success/failure, last error, body avg/p95/p99, latency avg/p95/p99, last used, last success) for push routes and MCP Events callbacks; migration `0026_route_usage.sql`; a stats write cannot fail a delivery (PROTOCOL §2.12, §2.13, §3, §4.4, §5.2, §13.3).
 - 2026-11-06: plan-build workflow — decisions files (statusDir/decisions/task-NN.md), worktree self-heal per agent, plan-over-stale-PROTOCOL rule (docs/plans/vecnet-core-build.workflow.mjs)
 - 2026-11-06: vecnet hook accepts Codex SessionStart; hook install --client codex writes .codex/hooks.json (timeout 5, additionalContextLimit 18000, no lifecycle hooks) (internal/cli/hook*.go, PROTOCOL §13.9, docs/connectors/codex.md)
 - 2026-11-06: merge r2-build (R2 blobs plan Tasks 1-2: SigV4 presigner, R2 object adapter, `blo_` random ids, `attachmentReference` envelope gating) with master: its migration is renumbered `0021_r2_blobs.sql` → `0025_r2_blobs.sql` (master owns 0021-0024; next free is 0026); `R2ProviderError` keeps fixed snake_case codes only, no provider text/URLs/signatures (plan docs/plans/2026-11-05-r2-blobs.md).

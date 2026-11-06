@@ -9,6 +9,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/events"
+	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
 
@@ -20,6 +21,14 @@ func (r *Reader) Subscriptions(ctx context.Context) ([]opapi.Subscription, error
 		return nil, err
 	}
 	now := r.Hub.Now()
+	ids := make([]string, len(stored))
+	for i := range stored {
+		ids[i] = stored[i].ID
+	}
+	usage, err := r.Hub.RouteUsages(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]opapi.Subscription, 0, len(stored))
 	for _, h := range stored {
 		host := ""
@@ -53,9 +62,22 @@ func (r *Reader) Subscriptions(ctx context.Context) ([]opapi.Subscription, error
 			refresh = &at
 		}
 		s.Health, s.HealthNote = subscriptionHealth(h, expires, refresh, now)
+		if u, ok := usage[h.ID]; ok {
+			s.Usage = wireUsage(u)
+		}
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+func wireUsage(u hub.RouteUsage) *opapi.RouteUsage {
+	return &opapi.RouteUsage{
+		Requests: u.Requests, Successes: u.Successes, Failures: u.Failures,
+		LastError: u.LastError, LastErrorAt: u.LastErrorAt, LastStatus: u.LastStatus,
+		LastUsedAt: u.LastUsedAt, LastSuccessAt: u.LastSuccessAt,
+		BodyBytes: opapi.RouteUsageDist{Avg: u.BodyBytes.Avg, P95: u.BodyBytes.P95, P99: u.BodyBytes.P99, Samples: u.BodyBytes.Samples},
+		LatencyMS: opapi.RouteUsageDist{Avg: u.LatencyMS.Avg, P95: u.LatencyMS.P95, P99: u.LatencyMS.P99, Samples: u.LatencyMS.Samples},
+	}
 }
 
 func subscriptionHealth(h events.Health, expires, refresh *time.Time, now time.Time) (string, string) {

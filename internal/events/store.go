@@ -317,6 +317,13 @@ func (st *Store) Delete(ctx context.Context, principalKind, principalID, url, na
 			return fmt.Errorf("events: delete refresh schedule: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM route_usage WHERE route_key IN (
+			   SELECT sub_id FROM event_subscriptions
+			   WHERE principal_kind = ? AND principal_id = ? AND url = ? AND name = ? AND arguments = ?)`,
+			principalKind, principalID, url, name, canon); err != nil {
+			return fmt.Errorf("events: delete route usage: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM event_outbox WHERE sub_id IN (
 			   SELECT sub_id FROM event_subscriptions
 			   WHERE principal_kind = ? AND principal_id = ? AND url = ? AND name = ? AND arguments = ?)`,

@@ -12,7 +12,8 @@ import (
 // compaction backfill exceptions) upgrades by applying only 0025 (R2 blob
 // objects, numbered 0021 on the r2-build branch and renumbered at its merge),
 // which adds the R2 tables without touching legacy blob rows, event bytes,
-// the hub identity or the preferences state.
+// the hub identity or the preferences state. Migrate also applies 0026
+// (route usage), which only adds its own tables.
 func TestMigration0025UpgradesFrom0024(t *testing.T) {
 	ctx := context.Background()
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "upgrade.db")+"?"+dsnParams)
@@ -61,8 +62,8 @@ func TestMigration0025UpgradesFrom0024(t *testing.T) {
 	}
 
 	applied, err := Migrate(ctx, db)
-	if err != nil || !reflect.DeepEqual(applied, []string{"0025_r2_blobs.sql"}) {
-		t.Fatalf("upgrade applied %v, %v; want only 0025", applied, err)
+	if err != nil || !reflect.DeepEqual(applied, []string{"0025_r2_blobs.sql", "0026_route_usage.sql"}) {
+		t.Fatalf("upgrade applied %v, %v; want 0025 and 0026", applied, err)
 	}
 	for table, want := range before {
 		if !reflect.DeepEqual(want, r2Snapshot(t, db, table)) {

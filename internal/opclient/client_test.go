@@ -53,6 +53,8 @@ func wireFixture(v reflect.Value) {
 		v.SetBool(true)
 	case reflect.Int, reflect.Int64:
 		v.SetInt(17)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(1.5)
 	case reflect.Slice:
 		v.Set(reflect.MakeSlice(v.Type(), 1, 1))
 		wireFixture(v.Index(0))

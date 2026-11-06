@@ -143,6 +143,9 @@ type RouteInfo struct {
 	VerifiedAt  *string `json:"verified_at"`
 	CreatedAt   string  `json:"created_at"`
 	RunsPerHour int     `json:"runs_per_hour"`
+	// Usage is null until the route has had an outbound delivery attempt.
+	// Counts are for this route, including every peer that inherits it.
+	Usage *RouteUsage `json:"usage"`
 }
 
 // ListRoutes returns every push route, oldest first.
@@ -170,6 +173,22 @@ func (h *Hub) ListRoutes(ctx context.Context) ([]RouteInfo, error) {
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("hub: list routes: %w", err)
 	}
+	if len(out) == 0 {
+		return out, nil
+	}
+	ids := make([]string, len(out))
+	for i := range out {
+		ids[i] = out[i].RouteID
+	}
+	usage, err := h.RouteUsages(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if u, ok := usage[out[i].RouteID]; ok {
+			out[i].Usage = &u
+		}
+	}
 	return out, nil
 }
 
@@ -181,6 +200,9 @@ func (h *Hub) ListRoutes(ctx context.Context) ([]RouteInfo, error) {
 func (h *Hub) RemoveRoute(ctx context.Context, routeID string) error {
 	return h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		if _, err := routeKind(ctx, tx, routeID); err != nil {
+			return err
+		}
+		if err := deleteRouteUsage(ctx, tx, routeID); err != nil {
 			return err
 		}
 		for _, query := range []string{
