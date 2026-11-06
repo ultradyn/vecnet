@@ -119,6 +119,10 @@ admin (operator credential):
   notify set --url URL --filter F [--url URL --filter F]…
   diag mcp [--peer ID] [--method M] [--limit N] [--follow]
   audit [--limit N]
+  prefs list | prefs get KEY | prefs set KEY VALUE [--preview] [--apply-existing]
+       [--confirm-risk CODE]… | prefs set --reset KEY
+       operator preferences; durations are whole seconds or a number plus s/m/h/d;
+       a conflict is not retried, and --confirm-risk names each required risk
   tui                                                 the operator's terminal client
 
 flags may appear anywhere; "--" ends flag parsing, so text that looks like a
@@ -510,6 +514,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdDiag(args)
 	case "audit":
 		return a.cmdAudit(args)
+	case "prefs":
+		return a.cmdPrefs(args)
 	case "tui":
 		return a.cmdTUI(args)
 	case "init-hub", "init":
