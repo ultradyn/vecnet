@@ -31,13 +31,16 @@ const shownWindow = 1024
 // the state, never in it: a vecnet from before binding rewrites the state
 // file with only the fields it knows, which would silently unbind it.
 type hookState struct {
-	Hub              string    `json:"hub,omitempty"`
-	Caller           string    `json:"caller,omitempty"`
-	As               string    `json:"as,omitempty"`
-	Cred             string    `json:"cred,omitempty"`
-	PollCursor       string    `json:"poll_cursor,omitempty"`
-	Shown            []string  `json:"shown"`
-	LastPostToolPoll time.Time `json:"last_post_tool_poll,omitzero"`
+	Hub              string      `json:"hub,omitempty"`
+	Caller           string      `json:"caller,omitempty"`
+	As               string      `json:"as,omitempty"`
+	Cred             string      `json:"cred,omitempty"`
+	AppCursor        string      `json:"app_cursor,omitempty"`
+	Replay           []replayRef `json:"replay,omitempty"`
+	Claims           []claimRef  `json:"claims,omitempty"`
+	PollCursor       string      `json:"poll_cursor,omitempty"`
+	Shown            []string    `json:"shown"`
+	LastPostToolPoll time.Time   `json:"last_post_tool_poll,omitzero"`
 	hookBinding      `json:"-"`
 }
 
@@ -192,6 +195,7 @@ func (s *hookState) bind(id hookIdentity) bool {
 	reset := s.Hub != "" && (s.Hub != id.Hub || s.As != id.As || (s.Caller != "" && id.Caller != "" && s.Caller != id.Caller))
 	if reset {
 		s.PollCursor, s.Shown, s.Caller, s.Cred = "", nil, "", ""
+		s.AppCursor, s.Replay, s.Claims = "", nil, nil
 	}
 	s.Hub, s.As = id.Hub, id.As
 	if id.Caller != "" {
