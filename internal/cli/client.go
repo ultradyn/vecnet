@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubid"
 )
 
 // requestTimeout bounds one ordinary request; uploads and streams set their
@@ -52,7 +53,14 @@ func (e *hubError) Error() string { return e.Code + ": " + e.Message }
 // netError is a transport failure talking to the hub: exit 3.
 type netError struct{ err error }
 
-func (e *netError) Error() string { return "network: " + e.err.Error() }
+func (e *netError) Error() string {
+	if e == nil || e.err == nil {
+		return "network: unreachable"
+	}
+	// The wrapped error still classifies the failure. Only the public text
+	// drops userinfo, path and query from every URL it quotes.
+	return "network: " + hubid.RedactURLs(e.err.Error())
+}
 func (e *netError) Unwrap() error { return e.err }
 
 // client talks HTTP to one hub with one bearer.

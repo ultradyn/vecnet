@@ -722,6 +722,10 @@ func chatSendError(m *Model, id string, err error) string {
 
 // chatSendWhy is what went wrong, with no promise about what a key does.
 func chatSendWhy(m *Model, id string, err error) string {
+	return diagText(chatSendWhyText(m, id, err))
+}
+
+func chatSendWhyText(m *Model, id string, err error) string {
 	var e *opclient.Error
 	switch {
 	case !errors.As(err, &e):
@@ -746,6 +750,10 @@ func chatSendWhy(m *Model, id string, err error) string {
 
 // chatUploadWhy is what a chip says about a failed upload.
 func chatUploadWhy(m *Model, err error) string {
+	return diagText(chatUploadWhyText(m, err))
+}
+
+func chatUploadWhyText(m *Model, err error) string {
 	var e *opclient.Error
 	switch {
 	case !errors.As(err, &e):
@@ -2052,7 +2060,7 @@ func (s *chatScreen) viewLog(m *Model, st *ThreadState, w, h int) string {
 		return styleMuted.Render("loading")
 	}
 	if err := m.Data.Errs[threadPrefix+id]; err != nil && len(st.Messages) == 0 {
-		return styleBad.Render(ansi.Truncate(Clean("could not load: "+err.Error()), w, "…"))
+		return styleBad.Render(ansi.Truncate(Clean("could not load: "+diagText(err.Error())), w, "…"))
 	}
 	if len(st.Messages) == 0 {
 		return styleMuted.Render("no messages yet")

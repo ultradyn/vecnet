@@ -62,6 +62,10 @@ func (a *app) cmdProfile(args []string) error {
 		return err
 	}
 	if args[0] == "follow" {
+		allow := p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"
+		if err := checkHubURL(p.Hub, allow); err != nil {
+			return err
+		}
 		c := newClient(p.Hub, p.Secret)
 		notices, err := a.activeNotices(c)
 		if err != nil {

@@ -142,7 +142,11 @@ func (a *app) follow(ctx context.Context, name string, p Profile, n envelope.Hub
 		return refuse(err.Error())
 	}
 	fp, _ := hubid.Fingerprint(pin)
-	fmt.Fprintf(a.stderr, "%s\n", unbidi(flatten(fmt.Sprintf("profile %s now uses %s (key %s verified)", name, next, fp))))
+	where := hubid.Endpoint(next)
+	if where == "" {
+		where = "the hub"
+	}
+	fmt.Fprintf(a.stderr, "%s\n", unbidi(flatten(fmt.Sprintf("profile %s now uses %s (key %s verified)", name, where, fp))))
 	return next, nil
 }
 

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
 
@@ -464,7 +466,7 @@ func dashFailure(label string, err error, w, limit int, kept bool) []string {
 	if err == nil {
 		return nil
 	}
-	text := label + " load failed: " + Clean(err.Error())
+	text := label + " load failed: " + Clean(diagText(err.Error()))
 	if limit == 1 { // a wrap could end before the word failed
 		return []string{styleBad.Render(ansi.Truncate(text, w, "…"))}
 	}
@@ -478,6 +480,32 @@ func dashFailure(label string, err error, w, limit int, kept bool) []string {
 	}
 	return lines
 }
+
+// diagError is a printable failure whose text has no hub userinfo, path or
+// query. Unwrap preserves opclient, url and network classification.
+type diagError struct{ err error }
+
+func (e *diagError) Error() string {
+	if e == nil || e.err == nil {
+		return ""
+	}
+	return hubid.RedactURLs(e.err.Error())
+}
+
+func (e *diagError) Unwrap() error { return e.err }
+
+func safeDiag(err error) error {
+	if err == nil {
+		return nil
+	}
+	var already *diagError
+	if errors.As(err, &already) {
+		return err
+	}
+	return &diagError{err: err}
+}
+
+func diagText(s string) string { return hubid.RedactURLs(s) }
 
 // dashPad makes clean plain text exactly w cells.
 func dashPad(s string, w int) string {

@@ -262,7 +262,7 @@ func (m *Model) Toast(msg string, bad bool) {
 	if bad {
 		d = toastBad
 	}
-	m.toast = toast{text: Clean(msg), bad: bad, until: m.Now().Add(d)}
+	m.toast = toast{text: Clean(diagText(msg)), bad: bad, until: m.Now().Add(d)}
 }
 
 // OpenThread leaves any Preferences overlay, switches to the chat tab, sets

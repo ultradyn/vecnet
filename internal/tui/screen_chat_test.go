@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -381,6 +382,48 @@ func pressTab(p *pump) { p.send(tea.KeyPressMsg{Code: tea.KeyTab}) }
 func waitToast(t *testing.T, p *pump, m *Model, want string) {
 	t.Helper()
 	p.until("toast "+want, func() bool { return strings.Contains(m.toast.text, want) })
+}
+
+func TestSendAndUploadOmitHubURL(t *testing.T) {
+	raw := "https://alice:USERSECRET@hidden-host.example/PATHSECRET?token=QUERYSECRET"
+	secrets := []string{"alice:USERSECRET", "USERSECRET", "PATHSECRET", "QUERYSECRET"}
+	check := func(t *testing.T, text string) {
+		t.Helper()
+		for _, secret := range secrets {
+			if strings.Contains(text, secret) {
+				t.Fatalf("contains %q:\n%s", secret, text)
+			}
+		}
+	}
+	t.Run("send", func(t *testing.T) {
+		err := &url.Error{Op: "Post", URL: raw, Err: errors.New("dial " + raw)}
+		a, m, p := chatOpen(t)
+		a.fail("Send", err)
+		p.press("i")
+		typeText(p, "hello")
+		p.press("enter")
+		p.until("send settles", func() bool { return !chatOf(m).draft(m.CurrentThread).sending })
+		check(t, m.toast.text+"\n"+chatFrame(t, m))
+		if !strings.Contains(m.toast.text, "send failed") && !strings.Contains(m.toast.text, "dial") {
+			t.Fatalf("toast %q", m.toast.text)
+		}
+		var ue *url.Error
+		if !errors.As(err, &ue) {
+			t.Fatal("send error lost url.Error")
+		}
+	})
+	t.Run("upload", func(t *testing.T) {
+		err := &url.Error{Op: "Put", URL: raw, Err: errors.New("dial " + raw)}
+		a, m, p := chatOpen(t)
+		a.fail("Upload", err)
+		chatAttach(p, chatAttFile(t, "note.txt", "hello"))
+		chatAttsSettled(t, p, m, 1)
+		att := chatAttsOf(m)[0]
+		check(t, m.toast.text+"\n"+att.err+"\n"+att.chip(80)+"\n"+chatFrame(t, m))
+		if att.state != chatAttFailed || !strings.Contains(m.toast.text, "upload") {
+			t.Fatalf("chip %+v toast %q", att, m.toast.text)
+		}
+	})
 }
 
 func TestChatGolden(t *testing.T) {

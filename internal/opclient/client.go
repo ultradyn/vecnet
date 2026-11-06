@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
 
@@ -27,6 +29,31 @@ type Error struct {
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("operator API %d %s: %s", e.Status, e.Code, e.Message)
+}
+
+// redactedError is a transport or request-construction failure whose public
+// text has no hub userinfo, path or query. Unwrap keeps errors.Is/As, including
+// dial, TLS and timeout classification.
+type redactedError struct{ err error }
+
+func (e *redactedError) Error() string {
+	if e == nil || e.err == nil {
+		return "hub unreachable"
+	}
+	return hubid.RedactURLs(e.err.Error())
+}
+
+func (e *redactedError) Unwrap() error { return e.err }
+
+func redactTransport(err error) error {
+	if err == nil {
+		return nil
+	}
+	var already *redactedError
+	if errors.As(err, &already) {
+		return err
+	}
+	return &redactedError{err: err}
 }
 
 // Client may be shared by callers. Its credential is sent only as a bearer.
@@ -64,7 +91,7 @@ func (c *Client) requestMatch(ctx context.Context, method, path string, body any
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
 	if err != nil {
-		return nil, err
+		return nil, redactTransport(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.secret)
 	req.Header.Set("Accept", "application/json")
@@ -79,7 +106,7 @@ func (c *Client) requestMatch(ctx context.Context, method, path string, body any
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactTransport(err)
 	}
 	return checkedResponse(resp)
 }
@@ -334,7 +361,7 @@ func (c *Client) Upload(ctx context.Context, r io.Reader, size int64, mediaType,
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.base+"/v1/blobs?ttl=86400", r)
 	if err != nil {
-		return envelope.Attachment{}, err
+		return envelope.Attachment{}, redactTransport(err)
 	}
 	req.ContentLength = size
 	req.Header.Set("Authorization", "Bearer "+c.secret)
@@ -342,7 +369,7 @@ func (c *Client) Upload(ctx context.Context, r io.Reader, size int64, mediaType,
 	req.Header.Set("Content-Type", mediaType)
 	resp, err := c.uploadHC.Do(req)
 	if err != nil {
-		return envelope.Attachment{}, err
+		return envelope.Attachment{}, redactTransport(err)
 	}
 	resp, err = checkedResponse(resp)
 	if err != nil {

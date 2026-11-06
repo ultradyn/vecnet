@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"strings"
+
+	"github.com/XertroV/vecnet/internal/hubid"
 )
 
 // insecureEnv is the escape hatch for plain http:// hubs off the LAN.
@@ -63,4 +66,24 @@ func lanHost(host string) bool {
 		}
 	}
 	return false
+}
+
+// noticeIDSafe is the canonical notice id. Anything else can carry a secret
+// and is not an identifier a diagnostic may print.
+var noticeIDSafe = regexp.MustCompile(`^ntc_[0-9A-HJKMNP-TV-Z]{26}$`)
+
+// relocationLine is a moving-notice refusal. A URL that normalizes contributes
+// only its scheme and host. Anything else is omitted; a canonical notice id
+// is the only other identifier.
+func relocationLine(noticeID, raw, reason string) string {
+	reason = hubid.RedactURLs(reason)
+	if _, err := hubid.NormalizeURL(raw); err == nil {
+		if where := hubid.Endpoint(raw); where != "" {
+			return "not following " + where + ": " + reason
+		}
+	}
+	if noticeIDSafe.MatchString(noticeID) {
+		return "not following notice " + noticeID + ": " + reason
+	}
+	return "not following: " + reason
 }
