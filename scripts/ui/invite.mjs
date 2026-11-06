@@ -27,6 +27,24 @@ try {
       assert(!filled, 'refusing to shoot a filled secret');
       await shot(name);
     };
+    const assertInFooter = async (locator, label) => {
+      const vis = await locator.evaluate(el => {
+        const foot = el.closest('.inv-foot');
+        const dialog = el.closest('dialog');
+        const r = el.getBoundingClientRect();
+        const d = dialog.getBoundingClientRect();
+        const style = foot ? getComputedStyle(foot) : null;
+        return {
+          inFoot: !!foot,
+          sticky: !!(style && style.position === 'sticky'),
+          visible: r.height > 0 && r.top >= d.top - 1 && r.bottom <= d.bottom + 1,
+          top: Math.round(r.top),
+          bottom: Math.round(r.bottom),
+          dialogBottom: Math.round(d.bottom),
+        };
+      });
+      assert(vis.inFoot && vis.sticky && vis.visible, `${label} is not in the sticky footer: ${JSON.stringify(vis)}`);
+    };
     const formReady = async () => {
       await page.waitForFunction(() => document.querySelectorAll('dialog.inv #inv-kind option').length > 0);
       await page.waitForFunction(() => {
@@ -80,6 +98,19 @@ try {
     await dlg.locator('.err', { hasText: 'A name is required.' }).waitFor();
     await dlg.locator('#inv-name').fill('web-repo Claude');
     await dlg.locator('#inv-ttl').selectOption('3600');
+    const nameWidth = await dlg.locator('#inv-name').evaluate(el => {
+      const host = el.closest('.inv-fields');
+      const style = getComputedStyle(host);
+      return {
+        width: el.getBoundingClientRect().width,
+        host: host.getBoundingClientRect().width,
+        display: style.display,
+        direction: style.flexDirection,
+        gap: parseFloat(style.gap),
+      };
+    });
+    assert(nameWidth.display === 'flex' && nameWidth.direction === 'column' && nameWidth.gap >= 6, `field stack ${JSON.stringify(nameWidth)}`);
+    assert(nameWidth.host > 400 && nameWidth.width >= nameWidth.host - 1, `name is not full width: ${JSON.stringify(nameWidth)}`);
     await shot('inv-2-form');
 
     // A server refusal shows its code and message and keeps the form.
@@ -362,6 +393,8 @@ try {
     await navAdd.click();
     await dlg.locator('.inv-loading', { hasText: 'Loading kinds' }).waitFor();
     assert(await dlg.locator('#inv-kind option').count() === 0, 'kinds rendered before the registry answered');
+    const loadingText = await dlg.locator('.inv-body').innerText();
+    assert(!loadingText.includes('null'), `loading text included null: ${loadingText}`);
     await shotSafe('inv-g-loading');
     releaseKinds();
     await page.unroute('**/v1/admin/agent-kinds', holdKinds);
@@ -418,11 +451,28 @@ try {
 
     await navAdd.click();
     await formReady();
+    await dlg.locator('#inv-kind').focus();
+    for (const value of ['launcher', 'openclaw', 'pagchat-bot', 'grokbot']) {
+      await page.keyboard.press('ArrowDown');
+      const landed = await page.waitForFunction(v => {
+        const kind = document.querySelector('#inv-kind');
+        return kind && kind.value === v && document.activeElement === kind;
+      }, value, { timeout: 4000 }).then(() => true).catch(() => false);
+      const now = await page.evaluate(() => ({
+        value: document.querySelector('#inv-kind')?.value || '',
+        focus: document.activeElement?.id || document.activeElement?.tagName || '',
+      }));
+      assert(landed, `arrow keys did not reach ${value} (at ${now.value}, focus ${now.focus})`);
+    }
     await dlg.locator('#inv-kind').selectOption('grokbot');
     await dlg.locator('#inv-prompt').waitFor();
     const promptBox = await dlg.locator('#inv-prompt').boundingBox();
     const keyBox = await dlg.locator('#inv-key').boundingBox();
+    const kindBox = await dlg.locator('#inv-kind').boundingBox();
+    const nameBox = await dlg.locator('#inv-name').boundingBox();
     assert(promptBox && keyBox && promptBox.y + promptBox.height <= keyBox.y, 'the authorization prompt is not above the key');
+    assert(kindBox && promptBox && nameBox && kindBox.y + kindBox.height <= promptBox.y && promptBox.y <= nameBox.y, 'kind is not above the prompt and name');
+    assert(await dlg.locator('.inv-fields #inv-kind').count() === 0, 'kind is inside the re-rendered fields');
     assert(await dlg.locator('#inv-key').getAttribute('type') === 'password', 'the routine key is not masked');
     const promptText = await dlg.locator('#inv-prompt').innerText();
     assert(/few gateway/.test(promptText) && /Hosted OAuth/.test(promptText) && !/stdio|mcp-remote/i.test(promptText), 'the prompt is missing the gateway policy');
@@ -435,6 +485,27 @@ try {
     await dlg.locator('#inv-name').fill('Helper Bot');
     assert((await dlg.locator('#inv-derived').innerText()).includes('vecnet-helper-bot'), 'the connector was not derived');
     assert((await dlg.locator('#inv-prompt').innerText()).includes('vecnet-helper-bot'), 'the prompt did not pick up the connector');
+    const fieldBox = await dlg.locator('#inv-name, #inv-url, #inv-key, #inv-connector').evaluateAll(els => {
+      const host = document.querySelector('.inv-fields');
+      const name = document.querySelector('#inv-name').getBoundingClientRect();
+      const urlLabel = document.querySelector('label[for="inv-url"]').getBoundingClientRect();
+      return {
+        host: host.getBoundingClientRect().width,
+        gap: urlLabel.top - name.bottom,
+        controls: els.map(el => ({ id: el.id, width: el.getBoundingClientRect().width })),
+      };
+    });
+    assert(fieldBox.host > 400 && fieldBox.gap >= 6, `routine URL label touches the name field: gap ${fieldBox.gap} host ${fieldBox.host}`);
+    for (const control of fieldBox.controls) {
+      assert(control.width >= fieldBox.host - 1, `${control.id} is not full width (${control.width} vs ${fieldBox.host})`);
+    }
+    await dlg.getByRole('button', { name: 'Copy prompt' }).click();
+    await dlg.getByRole('button', { name: 'Copied' }).waitFor();
+    const copiedPrompt = await page.evaluate(() => navigator.clipboard.readText());
+    const shownPrompt = await dlg.locator('#inv-prompt').evaluate(el => el.textContent);
+    assert(copiedPrompt === shownPrompt && copiedPrompt.length > 40, 'Copy prompt did not copy the full authorization prompt');
+    assert(!copiedPrompt.includes(FAKE_KEY) && !copiedPrompt.includes(ROUTINE), 'Copy prompt copied a secret');
+    await dlg.getByRole('button', { name: 'Copy prompt' }).waitFor();
     await dlg.getByRole('button', { name: 'Create Grok bot' }).click();
     await dlg.locator('.err', { hasText: 'A routine URL is required.' }).waitFor();
     await dlg.locator('#inv-url').fill(ROUTINE);
@@ -482,6 +553,8 @@ try {
     await dlg.getByRole('button', { name: 'Create Grok bot' }).click();
     await dlg.getByRole('button', { name: 'Retry' }).waitFor();
     await dlg.getByRole('button', { name: 'Check status' }).waitFor();
+    await assertInFooter(dlg.locator('.inv-retry'), 'uncertain Retry');
+    assert((await page.evaluate(() => document.activeElement && document.activeElement.textContent.trim())) === 'Retry', 'uncertain failure did not focus Retry');
     assert(grokPosts.at(-1).request_id === stableId && grokPosts.at(-1).inputs.webhook_key === 'Bearer ' + FAKE_KEY, 'an uncertain retry minted a new id or rewrote the key');
     grokMode = 'missing';
     await dlg.getByRole('button', { name: 'Check status' }).click();
@@ -523,6 +596,8 @@ try {
       await page.waitForTimeout(50);
     }
     assert(grokPosts.length === postsAtStale + 1, 'stale_spec submitted again on its own');
+    await assertInFooter(dlg.locator('.err', { hasText: 'The kind contract changed' }), 'stale error');
+    await page.waitForFunction(() => document.activeElement && document.activeElement.id === 'inv-url');
     await shotSafe('inv-g-stale');
 
     grokMode = 'hold';

@@ -5,6 +5,14 @@ dialog.inv::backdrop{background:#05070dcc}
 .inv h2{margin:0 0 4px;font-size:15px;font-weight:600}
 .inv .inv-lede{margin:0 0 14px;color:var(--muted);font-size:13px;line-height:1.5}
 .inv-form{display:flex;flex-direction:column;gap:6px}
+.inv-fields{display:flex;flex-direction:column;gap:6px;min-width:0}
+.inv-fields input:not([type=checkbox]),.inv-fields select{width:100%;min-width:0}
+.inv-fields>.btn{align-self:flex-start}
+.inv-kind{display:flex;flex-direction:column;min-width:0}
+.inv-kind select{width:100%;min-width:0}
+.inv-foot{position:sticky;bottom:0;z-index:2;background:#0e1426;padding-top:8px}
+.inv-foot .err:empty{min-height:0}
+.inv-foot .inv-acts{position:static;margin-top:8px;padding-top:0;background:transparent}
 .inv-form label{font-size:12px;color:var(--dim);display:block;margin:0 0 4px}
 .inv-form input,.inv-form select{background:#0b1020;border:1px solid var(--line2);border-radius:7px;padding:8px 10px;font-size:13px;color:var(--text)}
 .inv-form input{font-family:var(--mono)}
@@ -32,7 +40,7 @@ dialog.inv::backdrop{background:#05070dcc}
 .inv-link{background:none;border:0;padding:0;color:var(--violet);font:inherit;text-decoration:underline;text-underline-offset:2px}
 .inv-note{margin:8px 0 0;padding:8px 12px;border-left:2px solid var(--line2);font-size:12.5px;line-height:1.5;color:var(--muted)}
 .inv-body{min-height:0;overflow:auto}
-.inv-prompt{margin:0 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#080c18;font-size:12px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;max-height:180px;overflow:auto}
+.inv-prompt{margin:0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#080c18;font-size:12px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;max-height:180px;overflow:auto;user-select:all}
 .inv-loading{margin:0 0 8px;color:var(--dim);font-size:13px}
 .inv-field-err{color:var(--bad);font-size:12.5px;margin:4px 0 0}
 .inv-derived{margin:4px 0 0;font-size:12px;color:var(--muted)}

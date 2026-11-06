@@ -1,9 +1,9 @@
 // "Add agent" (the sidebar's nav button, the dashboard's Peers heading, and
 // #add-agent?kind=&name=&request_id=). The hub registry supplies kinds,
 // prompts and submit actions. Human output stays in this dialog: the token,
-// the link code and the routine key are never written to storage, the URL,
-// the clipboard (except the invite and the link code, on purpose) or the
-// console. PROTOCOL §§2.12, 4.5–4.6, 12, 13.3 and 20.1.
+// the link code and the routine key are never written to storage, the URL or the
+// console. Copy puts the invite, the link code or the authorization prompt
+// on the clipboard, and nothing else. PROTOCOL §§2.12, 4.5–4.6, 12, 13.3 and 20.1.
 import { copyText, h, toast } from './dom.js';
 import { kindLabel, when } from './format.js';
 import {
@@ -29,7 +29,8 @@ export function inviteButton(ctx, onCreated) {
 
 function copier(label, value, cls) {
   const b = h('button', { type: 'button', class: 'btn' + (cls ? ' ' + cls : ''), text: label, onclick: async () => {
-    if (await copyText(value)) { b.textContent = 'Copied'; setTimeout(() => { b.textContent = label; }, 1500); }
+    const text = typeof value === 'function' ? value() : value;
+    if (await copyText(text)) { b.textContent = 'Copied'; setTimeout(() => { b.textContent = label; }, 1500); }
     else toast('Could not copy. Select the text and copy it instead.', true);
   } });
   return b;
@@ -66,11 +67,12 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   const connector = h('input', { id: 'inv-connector', 'data-field': 'connector_name', spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off', placeholder: 'vecnet-…' });
   const skip = h('input', { id: 'inv-skip', type: 'checkbox', 'data-field': 'skip_mcp' });
   const err = h('p', { class: 'err', role: 'alert' });
+  const kindSlot = h('div', { class: 'inv-kind', hidden: '' }, h('label', { for: 'inv-kind', text: 'Kind' }), kind);
   const fieldsHost = h('div', { class: 'inv-fields' });
   const create = h('button', { type: 'submit', class: 'btn pri', text: 'Create invite', disabled: true });
   const cancel = h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: () => close() });
-  const form = h('form', { class: 'inv-form', autocomplete: 'off' },
-    fieldsHost, err, h('div', { class: 'inv-acts' }, cancel, create));
+  const foot = h('div', { class: 'inv-foot' }, err, h('div', { class: 'inv-acts' }, cancel, create));
+  const form = h('form', { class: 'inv-form', autocomplete: 'off' }, kindSlot, fieldsHost, foot);
   const body = h('div', { class: 'inv-body' }, form);
   const lede = h('p', { class: 'inv-lede', text: LEDE });
   const dialog = h('dialog', { class: 'inv', 'aria-labelledby': 'inv-title' },
@@ -120,6 +122,15 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   function focusName() {
     if (name.isConnected) name.focus();
   }
+  // After a stale contract the routine URL and key are empty again. Focus the
+  // first of those, otherwise the name.
+  function focusReentry() {
+    for (const id of ['inv-url', 'inv-key', 'inv-name']) {
+      const el = dialog.querySelector('#' + id);
+      if (el && el.isConnected && !String(el.value || '').trim()) { el.focus(); return; }
+    }
+    focusName();
+  }
   // The loading render and the registry render share the same inputs. Moving
   // them drops focus onto the body or the opener; put it back on the name
   // unless the person has already moved into the dialog.
@@ -151,9 +162,26 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   }
 
   function renderFields() {
+    const refocusKind = document.activeElement === kind;
     rendering = true;
     try { renderFieldsBody(); }
     finally { rendering = false; }
+    if (refocusKind && kind.isConnected) kind.focus();
+  }
+
+  function kindOptionLabel(k) {
+    const s = (registry.specs || []).find(x => x && x.kind === k);
+    return (s && s.label) || kindLabel(k);
+  }
+
+  // Rebuilding the options on every kind change re-parents the select and
+  // drops the arrow keys. Leave them in place while the catalogue is the same.
+  function paintKindOptions(kinds) {
+    const opts = [...kind.querySelectorAll('option')];
+    const same = opts.length === kinds.length && kinds.every((k, i) => opts[i].value === k && opts[i].textContent === kindOptionLabel(k));
+    if (same) return false;
+    kind.replaceChildren(...kinds.map(k => h('option', { value: k, text: kindOptionLabel(k) })));
+    return true;
   }
 
   const LEGACY_FIELDS = new Set(['name', 'name_open', 'enrol_ttl_seconds', 'principal_id', 'webhook_url', 'webhook_key', 'connector_name', 'skip_mcp']);
@@ -161,25 +189,26 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   function renderFieldsBody() {
     const kinds = kindsFrom(registry.specs);
     const previous = kind.value;
-    kind.replaceChildren(...kinds.map(k => {
-      const s = registry.specs.find(x => x.kind === k);
-      return h('option', { value: k, text: (s && s.label) || kindLabel(k) });
-    }));
+    const rebuilt = paintKindOptions(kinds);
+    if (kinds.length) kindSlot.removeAttribute('hidden');
+    else kindSlot.setAttribute('hidden', '');
     if (!usedPrefill && kinds.length) {
       usedPrefill = true;
       if (prefill && prefill.name && !name.value) name.value = prefill.name;
       if (prefill && prefill.kind && kinds.includes(prefill.kind)) kind.value = prefill.kind;
       else if (prefill && prefill.kind) err.textContent = 'That kind is not in the hub registry.';
       else kind.value = kinds[0];
-    } else if (previous && kinds.includes(previous)) kind.value = previous;
-    else if (kinds[0]) kind.value = kinds[0];
+    } else if (rebuilt && previous && kinds.includes(previous)) kind.value = previous;
+    else if (rebuilt && kinds[0]) kind.value = kinds[0];
 
     if (!kinds.length) {
-      const retry = registry.phase === 'error'
-        ? h('button', { type: 'button', class: 'btn', text: 'Retry', onclick: () => loadKinds() }) : null;
-      fieldsHost.replaceChildren(
+      const kids = [
         h('p', { class: 'inv-loading', text: registry.error || 'Loading kinds…' }),
-        h('label', { for: 'inv-name', text: 'Name' }), name, retry);
+        h('label', { for: 'inv-name', text: 'Name' }),
+        name,
+      ];
+      if (registry.phase === 'error') kids.push(h('button', { type: 'button', class: 'btn', text: 'Retry', onclick: () => loadKinds() }));
+      fieldsHost.replaceChildren(...kids);
       create.disabled = true;
       return;
     }
@@ -190,14 +219,11 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     lede.textContent = action === 'oauth_link' ? DOT_LEDE : action === 'grokbot_setup' ? GROK_LEDE : LEDE;
     create.textContent = gate.busy ? 'Creating…' : createLabel();
     create.disabled = !!gate.busy || registry.phase === 'loading';
-    const kindSlot = h('span', null, h('label', { for: 'inv-kind', text: 'Kind' }), kind);
     if (!spec || issue) {
       const why = issue && issue.code === 'unsupported_field'
         ? 'This page cannot enter the field ' + issue.name + '.'
         : 'This page cannot run that submit action.';
-      fieldsHost.replaceChildren(
-        h('div', { class: 'inv-row' }, kindSlot),
-        h('p', { class: 'err', role: 'alert', text: why }));
+      fieldsHost.replaceChildren(h('p', { class: 'err', role: 'alert', text: why }));
       create.disabled = true;
       return;
     }
@@ -209,6 +235,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       const prompt = h('pre', { id: 'inv-prompt', class: 'inv-prompt mono', tabindex: '0', 'aria-label': 'Authorization prompt' });
       prompt.textContent = authorizePrompt(spec.prompt_template, hubOrigin(), shownConnector());
       kids.push(prompt,
+        copier('Copy prompt', () => prompt.textContent),
         h('p', { id: 'inv-gateway', class: 'inv-note', text: GATEWAY_NOTE }),
         h('p', { id: 'inv-quota', class: 'inv-note', text: QUOTA_NOTE }));
     }
@@ -219,8 +246,8 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     if (action === 'grokbot_setup') kids.push(...grokFields());
     const ttlCell = h('span', null, h('label', { for: 'inv-ttl', text: 'Token valid for' }), ttl);
     if (action === 'invite' && (spec.fields || []).some(f => f.name === 'enrol_ttl_seconds')) {
-      kids.push(h('div', { class: 'inv-row' }, kindSlot, ttlCell));
-    } else kids.push(h('div', { class: 'inv-row' }, kindSlot));
+      kids.push(h('div', { class: 'inv-row' }, ttlCell));
+    }
     if ((spec.fields || []).some(f => f.name === 'principal_id') && action !== 'grokbot_setup') {
       kids.push(h('label', { for: 'inv-principal', text: 'Existing principal (optional)' }), principal);
     }
@@ -361,9 +388,12 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       buttons.push(h('button', { type: 'button', class: 'btn', text: 'Retry', onclick: () => send() }));
     }
     buttons.push(h('button', { type: 'button', class: 'btn', text: 'Check status', onclick: () => checkStatus() }));
-    err.after(h('div', { class: 'inv-retry' },
+    const row = h('div', { class: 'inv-retry' },
       h('p', { class: 'inv-req mono', text: 'Request ' + requestId }),
-      ...buttons));
+      ...buttons);
+    err.after(row);
+    const retry = row.querySelector('button');
+    if (retry) retry.focus();
   }
 
   async function send() {
@@ -424,6 +454,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
         clearSecrets();
         err.textContent = 'The kind contract changed. Review the form and submit again.';
         await loadKinds();
+        focusReentry();
         return;
       }
       const shown = presentError(x, hidden());

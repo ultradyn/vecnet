@@ -372,6 +372,9 @@ class DomEl {
   }
   append(...xs) {
     for (const x of xs) {
+      // Browsers stringify null inside replaceChildren, which is how a missing
+      // retry button becomes the visible text "null".
+      if (x === null) { this.kids.push('null'); continue; }
       if (x == null || x === false) continue;
       if (typeof x !== 'string' && !(x instanceof DomEl)) throw new Error('append got ' + Object.prototype.toString.call(x));
       if (x instanceof DomEl) x.parent = this;
@@ -379,9 +382,21 @@ class DomEl {
     }
   }
   replaceChildren(...xs) {
-    for (const k of this.kids) if (k instanceof DomEl && k.parent === this) k.parent = null;
+    for (const k of this.kids) {
+      if (!(k instanceof DomEl) || k.parent !== this) continue;
+      // Removing a focused control, or a parent of one, drops focus to the body.
+      if (domDoc && k.contains(domDoc.activeElement)) domDoc.activeElement = domDoc.body;
+      k.parent = null;
+    }
     this.kids = [];
     this.append(...xs);
+  }
+  removeAttribute(k) {
+    delete this.attrs[k];
+    if (k === 'id') this.id = '';
+    if (k === 'class') this.className = '';
+    if (k === 'disabled') this._disabled = false;
+    if (k === 'selected') this.selected = false;
   }
   after(node) {
     if (!(node instanceof DomEl) || !this.parent) throw new Error('after needs a mounted node');
@@ -400,6 +415,7 @@ class DomEl {
     return false;
   }
   focus() { domDoc.activeElement = this; }
+  select() {}
   closest(sel) {
     let n = this;
     while (n) {
@@ -486,13 +502,21 @@ function installDom() {
   const prev = globalThis.document;
   const prevLoc = globalThis.location;
   const body = new DomEl('body');
-  domDoc = {
+    domDoc = {
     body,
     activeElement: null,
+    lastCopied: '',
     createElement: tag => new DomEl(tag),
     querySelector: sel => queryAll(body, sel)[0] || null,
     querySelectorAll: sel => queryAll(body, sel),
     getElementById: id => queryAll(body, '#' + id)[0] || null,
+    // copyText's plain-http fallback. A secure clipboard is not available here.
+    execCommand(cmd) {
+      if (cmd !== 'copy') return false;
+      const ta = queryAll(body, 'textarea')[0];
+      this.lastCopied = ta ? ta.value : '';
+      return true;
+    },
   };
   globalThis.document = domDoc;
   globalThis.location = { origin: 'http://127.0.0.1:9' };
@@ -521,6 +545,18 @@ function setValue(el, value, event) {
 }
 function buttonNamed(root, text) {
   return queryAll(root, 'button').find(b => b.textContent.trim() === text) || null;
+}
+function domIndex(root, node) {
+  let i = 0;
+  let found = -1;
+  const walk = el => {
+    if (found >= 0) return;
+    if (el === node) { found = i; return; }
+    i += 1;
+    for (const k of el.kids || []) if (k instanceof DomEl) walk(k);
+  };
+  walk(root);
+  return found;
 }
 function httpError(status, code, message) {
   const err = new Error(message);
@@ -821,4 +857,147 @@ test('(t9 M2) the first dot code shows its lifetime without minting another', as
     assert.equal(time.getAttribute('datetime'), '2026-11-06T12:10:00.000Z');
     assert.doesNotMatch(dialog.querySelector('.inv-code').textContent, /10 minutes/);
   });
+});
+
+test('(t9 V-I1) loading and a failed registry do not print a literal null', async () => {
+  const hanging = await openDialog({ agentKinds: () => new Promise(() => {}) });
+  try {
+    assert.match(hanging.dialog.textContent, /Loading kinds/);
+    assert.equal(hanging.dialog.textContent.includes('null'), false, hanging.dialog.textContent);
+  } finally { hanging.restore(); }
+
+  const failed = await openDialog({
+    agentKinds: () => Promise.reject(httpError(503, 'unavailable', 'the hub is busy')),
+  });
+  try {
+    assert.match(failed.dialog.textContent, /unavailable: the hub is busy/);
+    assert.ok(buttonNamed(failed.dialog, 'Retry'), 'registry failure has no Retry');
+    assert.equal(failed.dialog.textContent.includes('null'), false, failed.dialog.textContent);
+  } finally { failed.restore(); }
+});
+
+test('(t9 V-I2) a form-level error and Retry sit in the sticky footer and take focus', async () => {
+  const css = readFileSync(new URL('../static/invite.css', import.meta.url), 'utf8');
+  const footRule = css.match(/\.inv-foot\{[^}]*\}/);
+  assert.ok(footRule, 'sticky footer rule is missing');
+  assert.match(footRule[0], /position:sticky/);
+  assert.match(footRule[0], /bottom:0/);
+  const { dialog, restore } = await openDialog({
+    agentKinds: () => Promise.resolve({ kinds: catalogue }),
+    agentAdd: () => Promise.reject(httpError(503, 'unavailable', 'the hub is busy')),
+  });
+  try {
+    setValue(dialog.querySelector('#inv-name'), 'scout');
+    click(buttonNamed(dialog, 'Create invite'));
+    await flush();
+    const err = queryAll(dialog, '.err').find(e => /unavailable/.test(e.textContent));
+    assert.ok(err, 'unavailable error is missing');
+    const foot = err.closest('.inv-foot');
+    assert.ok(foot, 'form error is outside the sticky footer');
+    const retry = dialog.querySelector('.inv-retry');
+    const acts = foot.querySelector('.inv-acts');
+    assert.ok(retry && foot.contains(retry), 'Retry is outside the sticky footer');
+    assert.ok(acts, 'actions are outside the sticky footer');
+    assert.ok(domIndex(foot, err) < domIndex(foot, retry), 'Retry is not under the error');
+    assert.ok(domIndex(foot, retry) < domIndex(foot, acts), 'Retry is not above Cancel and Create');
+    assert.equal(domDoc.activeElement, buttonNamed(dialog, 'Retry'));
+  } finally { restore(); }
+});
+
+test('(t9 V-I2) a stale contract focuses the first field that must be re-entered', async () => {
+  const { dialog, restore } = await openDialog({
+    agentKinds: () => Promise.resolve({ kinds: catalogue }),
+    agentAdd: () => Promise.reject(httpError(409, 'stale_spec', 'spec changed')),
+  });
+  try {
+    setValue(dialog.querySelector('#inv-kind'), 'grokbot', 'change');
+    await flush();
+    setValue(dialog.querySelector('#inv-name'), 'Helper Bot');
+    setValue(dialog.querySelector('#inv-url'), ROUTINE);
+    setValue(dialog.querySelector('#inv-key'), FAKE_KEY);
+    click(buttonNamed(dialog, 'Create Grok bot'));
+    await flush();
+    assert.match(dialog.textContent, /The kind contract changed/);
+    assert.equal(dialog.querySelector('#inv-url').value, '');
+    assert.equal(dialog.querySelector('#inv-key').value, '');
+    const err = queryAll(dialog, '.err').find(e => /kind contract changed/.test(e.textContent));
+    assert.ok(err && err.closest('.inv-foot'), 'stale error is outside the sticky footer');
+    assert.equal(domDoc.activeElement && domDoc.activeElement.id, 'inv-url');
+  } finally { restore(); }
+});
+
+test('(t9 V-I3) kind stays first and outside the re-rendered fields', async () => {
+  const { dialog, restore } = await openDialog({
+    agentKinds: () => Promise.resolve({ kinds: catalogue }),
+  });
+  try {
+    const kind = dialog.querySelector('#inv-kind');
+    const fields = dialog.querySelector('.inv-fields');
+    const form = dialog.querySelector('form');
+    assert.equal(fields.contains(kind), false, 'kind is inside the re-rendered fields');
+    assert.ok(domIndex(form, kind) < domIndex(form, fields), 'kind is not before the fields');
+    assert.ok(domIndex(dialog, kind) < domIndex(dialog, dialog.querySelector('#inv-name')), 'kind is not above Name');
+    setValue(kind, 'grokbot', 'change');
+    await flush();
+    const prompt = dialog.querySelector('#inv-prompt');
+    const kindNow = dialog.querySelector('#inv-kind');
+    assert.equal(kindNow, kind, 'choosing Grok replaced the kind select');
+    assert.equal(dialog.querySelector('.inv-fields').contains(kindNow), false);
+    assert.ok(domIndex(dialog, kindNow) < domIndex(dialog, prompt), 'kind is not above the prompt');
+    assert.ok(domIndex(dialog, prompt) < domIndex(dialog, dialog.querySelector('#inv-name')), 'prompt is not above Name');
+    setValue(kindNow, 'dot', 'change');
+    await flush();
+    assert.equal(dialog.querySelector('.inv-fields').contains(dialog.querySelector('#inv-kind')), false);
+    assert.ok(domIndex(dialog, dialog.querySelector('#inv-kind')) < domIndex(dialog, dialog.querySelector('#inv-name')));
+  } finally { restore(); }
+});
+
+test('(t9 V-I4) changing kind with the keyboard keeps focus on the select', async () => {
+  const { dialog, restore } = await openDialog({
+    agentKinds: () => Promise.resolve({ kinds: catalogue }),
+  });
+  try {
+    const kind = dialog.querySelector('#inv-kind');
+    kind.focus();
+    for (const value of ['launcher', 'openclaw', 'pagchat-bot', 'grokbot']) {
+      setValue(kind, value, 'change');
+      await flush();
+      assert.equal(dialog.querySelector('#inv-kind'), kind, 'kind select was replaced');
+      assert.equal(kind.value, value);
+      assert.equal(domDoc.activeElement && domDoc.activeElement.id, 'inv-kind', 'kind change moved focus at ' + value);
+    }
+  } finally { restore(); }
+});
+
+test('(t9 V-I5) field stack is a flex column with a gap and full-width inputs', () => {
+  const css = readFileSync(new URL('../static/invite.css', import.meta.url), 'utf8');
+  const block = css.match(/\.inv-fields\{[^}]*\}/);
+  assert.ok(block, '.inv-fields rule is missing');
+  assert.match(block[0], /display:flex/);
+  assert.match(block[0], /flex-direction:column/);
+  assert.match(block[0], /gap:6px/);
+  assert.match(css, /\.inv-fields input:not\(\[type=checkbox\]\)[^{]*\{[^}]*width:100%/);
+});
+
+test('(t9 V-I6) the authorization prompt has a Copy prompt button', async () => {
+  const { dialog, restore } = await openDialog({
+    agentKinds: () => Promise.resolve({ kinds: catalogue }),
+  });
+  try {
+    setValue(dialog.querySelector('#inv-kind'), 'grokbot', 'change');
+    await flush();
+    const prompt = dialog.querySelector('#inv-prompt');
+    const copy = buttonNamed(dialog, 'Copy prompt');
+    assert.ok(prompt && prompt.textContent.length > 0, 'prompt is missing');
+    assert.ok(copy, 'Copy prompt is missing');
+    assert.ok(domIndex(dialog, prompt) < domIndex(dialog, copy), 'Copy prompt is not under the prompt');
+    assert.ok(domIndex(dialog, copy) < domIndex(dialog, dialog.querySelector('#inv-name')), 'Copy prompt is not above Name');
+    setValue(dialog.querySelector('#inv-name'), 'Helper Bot');
+    click(copy);
+    await flush();
+    assert.equal(domDoc.lastCopied, prompt.textContent);
+    assert.match(domDoc.lastCopied, /vecnet-helper-bot/);
+    assert.doesNotMatch(domDoc.lastCopied, /crsr_|webhook/);
+    assert.equal(copy.textContent, 'Copied');
+  } finally { restore(); }
 });
