@@ -279,19 +279,31 @@ func validateAgentAdd(req onboarding.SubmitRequest) (onboarding.Normalized, agen
 }
 
 // agentRetryConflict reports a different request under an existing receipt.
-// A complete receipt compares the stored safe projection. A historical
-// receipt is missing some of those fields; absent fields are not the zero
-// value, so equality comes from the existing keyed digest instead. That
-// compare does not read the directory and does not write a new digest.
+// A complete receipt, including an f497 grokbot receipt that stored name and
+// the other safe options before safe_complete existed, compares that
+// projection. Older grokbot receipts are missing those options. Their absent
+// fields are not the request, and the MCP placeholder credential is not the
+// human HMAC. Session history still uses the keyed digest, which covers no
+// webhook secret. The compare does not read the directory or write a digest.
 func agentRetryConflict(ctx context.Context, s *Server, c auth.Caller, existing onboarding.SubmitResult, n onboarding.Normalized, safe agentSafe) (bool, error) {
-	if existing.SafeComplete {
+	if existing.SafeComplete || grokHistoricalComplete(existing) {
 		return agentRequestChanged(existing, safe), nil
+	}
+	if existing.Kind == "grokbot" {
+		return true, nil
 	}
 	match, err := s.Hub.OnboardingDigestMatches(ctx, c, n)
 	if err != nil {
 		return false, err
 	}
 	return !match, nil
+}
+
+// grokHistoricalComplete reports a pre-marker grokbot receipt whose safe
+// projection was stored. Grokbot names are required, so a stored name means
+// that writer recorded the options; skip_mcp false was omitted by encoding.
+func grokHistoricalComplete(existing onboarding.SubmitResult) bool {
+	return existing.Kind == "grokbot" && existing.Name != "" && existing.SpecVersion != ""
 }
 
 // agentRequestChanged reports whether safe differs from a complete receipt.

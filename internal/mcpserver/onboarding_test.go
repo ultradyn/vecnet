@@ -49,12 +49,12 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 	t.Run("discovery", func(t *testing.T) {
 		for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
 			t.Run(era, func(t *testing.T) {
-				first := mcpTools(t, env, env.OperatorSecret, opHeaders[era], env.OperatorSecret, peerSecret)
-				second := mcpTools(t, env, env.OperatorSecret, opHeaders[era], env.OperatorSecret, peerSecret)
+				first := mcpTools(t, env, env.OperatorSecret, opHeaders[era], env.OperatorSecret, peerSecret, principalSecret)
+				second := mcpTools(t, env, env.OperatorSecret, opHeaders[era], env.OperatorSecret, peerSecret, principalSecret)
 				if !reflect.DeepEqual(first, second) {
 					t.Fatal("operator tools/list is not stable")
 				}
-				peerList := mcpTools(t, env, peerSecret, peerHeaders[era], env.OperatorSecret, peerSecret)
+				peerList := mcpTools(t, env, peerSecret, peerHeaders[era], env.OperatorSecret, peerSecret, principalSecret)
 				if len(peerList) != 23 {
 					t.Fatalf("ordinary peer tools = %d, want the existing catalogue", len(peerList))
 				}
@@ -98,7 +98,7 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 					}
 					for prop := range props {
 						if strings.Contains(strings.ToLower(prop), "url") || prop == "webhook_key" || prop == "human_output" || prop == "authorization" || prop == "key_file" || prop == "file_path" {
-							t.Fatalf("%s schema exposes %s", name, prop)
+							t.Fatal(schemaExposes())
 						}
 					}
 					wantSchemes := []any{map[string]any{"type": "oauth2", "scopes": []any{"vecnet"}}}
@@ -230,7 +230,7 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 	t.Run("grokbot add creates nothing", func(t *testing.T) {
 		for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
 			t.Run(era, func(t *testing.T) {
-				got := mcpToolOK(t, env, env.OperatorSecret, opHeaders[era], "vecnet_agent_add", grokArgs)
+				got := mcpToolOK(t, env, env.OperatorSecret, opHeaders[era], "vecnet_agent_add", grokArgs, peerSecret, principalSecret)
 				wantPath := agentWebPath("grokbot", grokName, grokID)
 				if !reflect.DeepEqual(got, map[string]any{
 					"request_id": grokID,
@@ -353,7 +353,7 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 	t.Run("status after human submit", func(t *testing.T) {
 		for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
 			t.Run(era, func(t *testing.T) {
-				got := mcpToolOK(t, env, env.OperatorSecret, opHeaders[era], "vecnet_agent_status", map[string]any{"request_id": grokID})
+				got := mcpToolOK(t, env, env.OperatorSecret, opHeaders[era], "vecnet_agent_status", map[string]any{"request_id": grokID}, peerSecret, principalSecret, routineKey, legacyToken)
 				raw := mustRaw(t, got)
 				assertNoSecrets(t, raw, routineURL, routineKey, "Bearer "+routineKey, legacyToken)
 				if got["request_id"] != grokID || got["kind"] != "grokbot" || got["peer_id"] != createdPeer {
@@ -365,7 +365,7 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 				if _, ok := got["human_output"]; ok || strings.Contains(string(raw), "human_output") || strings.Contains(string(raw), "connected") {
 					t.Fatal("grokbot status is not secret-free")
 				}
-				legacy := mcpToolOK(t, env, env.OperatorSecret, opHeaders[era], "vecnet_agent_status", map[string]any{"request_id": legacyID})
+				legacy := mcpToolOK(t, env, env.OperatorSecret, opHeaders[era], "vecnet_agent_status", map[string]any{"request_id": legacyID}, peerSecret, principalSecret, routineKey, legacyToken)
 				legacyRaw := mustRaw(t, legacy)
 				assertNoSecrets(t, legacyRaw, routineURL, routineKey, legacyToken)
 				if legacy["request_id"] != legacyID || legacy["kind"] != "session" || legacy["peer_id"] == "" || legacy["peer_id"] == createdPeer {
@@ -376,7 +376,7 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 				}
 			})
 		}
-		res, _ := mcpToolResult(t, env, env.OperatorSecret, modern(), "vecnet_agent_kinds", map[string]any{})
+		res, _ := mcpToolResult(t, env, env.OperatorSecret, modern(), "vecnet_agent_kinds", map[string]any{}, peerSecret, principalSecret, routineKey, legacyToken)
 		var listed struct {
 			Kinds []onboarding.KindSpec `json:"kinds"`
 		}
@@ -762,6 +762,42 @@ func TestAgentOnboardMCPFixRound2(t *testing.T) {
 		assertNoSecrets(t, renamedWire)
 	})
 
+	t.Run("(t7 r3 I1)", func(t *testing.T) {
+		routineURL := fakeRoutineURL(t)
+		routineKey := fakeRoutineKey(t)
+		const (
+			id        = "r3-grok"
+			name      = "Hist Bot"
+			connector = "vecnet-hist-bot"
+		)
+		same := agentAddArgs("grokbot", id, name, map[string]any{"connector_name": connector})
+		mustHumanSubmit(t, env, map[string]any{
+			"kind": "grokbot", "spec_version": onboarding.SpecVersion, "request_id": id,
+			"inputs": map[string]any{
+				"name": name, "webhook_url": routineURL, "webhook_key": "Bearer " + routineKey,
+				"connector_name": connector, "skip_mcp": false,
+			},
+		})
+		// f497-era receipt: the safe projection is stored, the later marker is not.
+		ageReceipt(t, env, id, "safe_complete")
+		changed := agentAddArgs("grokbot", id, name, map[string]any{
+			"connector_name": connector, "skip_mcp": true,
+		})
+		for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
+			t.Run(era, func(t *testing.T) {
+				got := mcpToolOK(t, env, env.OperatorSecret, opHeaders[era], "vecnet_agent_add", same)
+				if got["status"] != "needs_human" || got["request_id"] != id {
+					t.Fatal("unchanged historical grokbot retry conflicted")
+				}
+				conflict, wire := mcpToolError(t, env, env.OperatorSecret, opHeaders[era], "vecnet_agent_add", changed, "idempotency_conflict")
+				assertNoSecrets(t, wire, routineKey, routineURL)
+				if conflict.Error.Details["request_id"] != id {
+					t.Fatal("conflict did not name the request")
+				}
+			})
+		}
+	})
+
 	t.Run("(t7 r2 M1)", func(t *testing.T) {
 		key := fakeRoutineKey(t)
 		msg := discoveryMismatch()
@@ -793,6 +829,46 @@ func TestAgentOnboardMCPFixRound2(t *testing.T) {
 		if !wireHasSecret(errText, key, header) {
 			t.Fatal("error text credential was not scanned")
 		}
+	})
+
+	t.Run("(t7 r3 M1)", func(t *testing.T) {
+		nonhex := "crsr_Zz-not-hex!"
+		prop := "url_" + nonhex
+		if strings.Contains(schemaExposes(), nonhex) || strings.Contains(schemaExposes(), prop) {
+			t.Fatal("schema diagnostic quoted a property name")
+		}
+		_, peerBearer := env.NewPeer("session", "wire peer")
+		raw := mcpCallRaw(t, env, env.OperatorSecret, modern(), "tools/list", nil)
+		rejectToolWire(t, raw, env.OperatorSecret, peerBearer)
+		captured := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"inputSchema":{"type":"object","properties":{"` + prop + `":{"type":"string"}}}}]}}`)
+		if !wireHasSecret(captured, env.OperatorSecret, peerBearer, nonhex) {
+			t.Fatal("schema property name credential was not scanned")
+		}
+	})
+
+	t.Run("(t7 r3 M2)", func(t *testing.T) {
+		nonhex := "crsr_Zz-not-hex!"
+		_, peerBearer := env.NewPeer("session", "wire peer two")
+		help := []byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Routine key: a raw crsr_ value, or the same value with one leading Bearer prefix."}],"structuredContent":{"help":"Routine key: a raw crsr_ value, or the same value with one leading Bearer prefix."}}}`)
+		rejectToolWire(t, help, env.OperatorSecret, peerBearer)
+		success := []byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{}"}],"structuredContent":{"status":"needs_human"},"extra":"` + nonhex + `"}}`)
+		if !wireHasSecret(success, env.OperatorSecret, peerBearer, nonhex) {
+			t.Fatal("nonhex routine key in a success field was not scanned")
+		}
+		opField := []byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{}"}],"structuredContent":{"status":"needs_human","leaked":"` + env.OperatorSecret + `"}}}`)
+		if !wireHasSecret(opField, env.OperatorSecret, peerBearer, nonhex) {
+			t.Fatal("operator bearer in a success field was not scanned")
+		}
+		peerField := []byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{}"}],"structuredContent":{"status":"needs_human","leaked":"` + peerBearer + `"}}}`)
+		if !wireHasSecret(peerField, env.OperatorSecret, peerBearer, nonhex) {
+			t.Fatal("peer bearer in a success field was not scanned")
+		}
+		errText := []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid ` + nonhex + `","data":{"path":""}}}`)
+		if !wireHasSecret(errText, env.OperatorSecret, peerBearer, nonhex) {
+			t.Fatal("nonhex routine key in error text was not scanned")
+		}
+		// The success helper forwards the caller bearer and the extra fixtures.
+		rejectToolWire(t, []byte(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`), env.OperatorSecret, peerBearer, nonhex)
 	})
 }
 
@@ -999,12 +1075,10 @@ func decodeOnboardRPC(t *testing.T, raw []byte) rpcResp {
 	return r
 }
 
-func mcpToolResult(t *testing.T, env *testhub.Env, secret string, headers map[string]string, name string, args any) (toolResult, []byte) {
+func mcpToolResult(t *testing.T, env *testhub.Env, secret string, headers map[string]string, name string, args any, extra ...string) (toolResult, []byte) {
 	t.Helper()
 	raw := mcpCallRaw(t, env, secret, headers, "tools/call", map[string]any{"name": name, "arguments": args})
-	if wireHasSecret(raw) {
-		t.Fatal("response contains a secret or human output")
-	}
+	rejectToolWire(t, raw, append([]string{secret}, extra...)...)
 	r := decodeOnboardRPC(t, raw)
 	if r.Error != nil {
 		t.Fatalf("%s: unexpected RPC error", name)
@@ -1016,9 +1090,9 @@ func mcpToolResult(t *testing.T, env *testhub.Env, secret string, headers map[st
 	return res, raw
 }
 
-func mcpToolOK(t *testing.T, env *testhub.Env, secret string, headers map[string]string, name string, args any) map[string]any {
+func mcpToolOK(t *testing.T, env *testhub.Env, secret string, headers map[string]string, name string, args any, extra ...string) map[string]any {
 	t.Helper()
-	res, raw := mcpToolResult(t, env, secret, headers, name, args)
+	res, raw := mcpToolResult(t, env, secret, headers, name, args, extra...)
 	if res.IsError {
 		t.Fatalf("%s: tool error", name)
 	}
@@ -1078,6 +1152,18 @@ func mcpInvalidPath(t *testing.T, env *testhub.Env, secret string, headers map[s
 }
 
 func discoveryMismatch() string { return "discovery metadata mismatch" }
+
+func schemaExposes() string { return "schema exposes a banned property" }
+
+// rejectToolWire is the scan mcpToolResult runs before it decodes a success
+// response. secret is the caller bearer; extra carries the other fixture
+// credentials, including nonhex routine keys.
+func rejectToolWire(t *testing.T, raw []byte, secrets ...string) {
+	t.Helper()
+	if wireHasSecret(raw, secrets...) {
+		t.Fatal("response contains a secret or human output")
+	}
+}
 
 // liveRoutineKeyRE matches a generated routine key. The public kind help
 // mentions the crsr_ prefix in prose and must not trip this check.
