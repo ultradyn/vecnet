@@ -942,15 +942,27 @@ for (const startupDelayMs of [0, 1000]) for (const evidence of ['active status',
   assert.equal((h.sends()[0].params as any).expectedTurnId, 'external');
   assert.equal(h.plan.events.length, 0, 'no later watch event or status broadcast needed');
 });
-for (const evidence of ['active status', 'new turn']) test(`independent ${evidence} during the cold-resume guard waits for a fresh warm subscription`, async t => {
+for (const startupDelayMs of [0, 1000]) for (const evidence of ['active status', 'new turn']) test(`independent ${evidence} after unsubscribe survives startup delay ${startupDelayMs} ms and waits for a fresh warm subscription`, async t => {
   let h: Awaited<ReturnType<typeof harness>>;
   let closeBeforeResume: (() => void) | undefined, revive: (() => void) | undefined;
-  let suppressActiveStatus = false;
+  let suppressActiveStatus = false, delayStartup = false;
+  let startupAt: number | undefined, activityAt: number | undefined;
   const resumeTimes: number[] = [];
   h = await harness(t, { wrap: rpc => ({ ...rpc,
     onNotification(fn) { rpc.onNotification((method, params) => {
       if (suppressActiveStatus && method === 'thread/status/changed' && (params as any).status?.type === 'active') return;
+      if (delayStartup && method === 'mcpServer/startupStatus/updated') {
+        delayStartup = false;
+        if (startupDelayMs) {
+          h.clock.timer(startupDelayMs, () => { startupAt = h.clock.now(); fn(method, params); }); return;
+        }
+      }
       fn(method, params);
+      if ((evidence === 'active status' && method === 'thread/status/changed' && (params as any).status?.type === 'active') ||
+          (evidence === 'new turn' && method === 'turn/started')) {
+        assert.equal(h.engine.subscribed(), false, 'activity arrives after the rejected subscription is removed');
+        activityAt = h.clock.now();
+      }
     }); },
     async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
       if (method === 'thread/resume') closeBeforeResume?.();
@@ -963,7 +975,7 @@ for (const evidence of ['active status', 'new turn']) test(`independent ${eviden
   await h.engine.stop(); h.fake.detachOther('thread'); resumeTimes.length = 0;
   h.plan.items.push({ id: 'w1', priority: 'wake' }); h.save();
   closeBeforeResume = () => {
-    closeBeforeResume = undefined;
+    closeBeforeResume = undefined; delayStartup = true;
     h.fake.setThread({ id: 'thread', status: { type: 'notLoaded' } });
     h.fake.notify('thread/closed', { threadId: 'thread' });
     revive = () => {
@@ -973,6 +985,8 @@ for (const evidence of ['active status', 'new turn']) test(`independent ${eviden
     };
   };
   await h.restart();
+  assert.ok(activityAt !== undefined, 'independent activity reached the engine');
+  if (startupDelayMs) assert.ok(startupAt! > activityAt, 'startup arrives after independent activity');
   assert.equal(resumeTimes.length, 2, 'a fresh subscription follows the rejected one');
   assert.ok(resumeTimes[1] - resumeTimes[0] > 2000, 'the rejected resume guard finishes before reattaching');
   assert.equal(h.sends().length, 0, 'the fresh subscription has its own startup guard');
@@ -980,6 +994,10 @@ for (const evidence of ['active status', 'new turn']) test(`independent ${eviden
   assert.deepEqual(h.engine.liveness(), { live: true }); assert.equal(h.engine.subscribed(), true);
   assert.equal(h.sends().length, 1); assert.equal(h.sends()[0].method, 'turn/steer');
   assert.equal((h.sends()[0].params as any).expectedTurnId, 'external');
+  await h.tick(2 * minute);
+  assert.deepEqual(h.engine.liveness(), { live: true }); assert.equal(h.engine.subscribed(), true);
+  assert.equal(h.sends().length, 1, 'quiet thread delivers once without later activity');
+  assert.equal(resumeTimes.length, 2, 'no further resumes after recovery');
   assert.equal(h.plan.events.length, 0, 'no watch event was needed');
 });
 test('re-subscribes when another client reloads the thread', async t => {

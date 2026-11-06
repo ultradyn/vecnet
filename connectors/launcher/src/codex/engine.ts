@@ -54,7 +54,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   if (refusedGeneration !== undefined && refusedGeneration !== generation) kv.delete(identityKey);
   let policyDenied = false, identityChanged = refusedGeneration === generation, lastActivity = clock.now(), lastEnsure = -Infinity;
   let lastPush = -Infinity, retryIndex = 0, closedEpoch = 0, resumeAt = -Infinity, attaching = false;
-  let cold = false, rejectedResume = false, activityWhileAttaching = false, queue: Promise<void> = Promise.resolve();
+  let cold = false, rejectedResume = false, independentResumeActivity = false, queue: Promise<void> = Promise.resolve();
   let debounce: { cancel(): void } | undefined, gap: { cancel(): void } | undefined;
   let reconnect: { cancel(): void } | undefined, minute: { cancel(): void } | undefined;
   let claimRecovery: { cancel(): void } | undefined, warmCheck: { cancel(): void } | undefined;
@@ -199,15 +199,14 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     const before = mapStatus(status); status = value; lastActivity = clock.now();
     const s = mapStatus(status);
     if (s === 'not_loaded') {
-      closedEpoch++; attached = false; activityWhileAttaching = false;
+      closedEpoch++; attached = false; independentResumeActivity = false;
       if (!attaching) rejectedResume = false;
     }
-    else if (attaching) {
-      // Preserve independent activity delivered before resume's continuation.
-      // A cold resume's own idle broadcast is insufficient evidence to revive.
-      if (s === 'turn_running' || s === 'waiting_approval' || s === 'waiting_input') activityWhileAttaching = true;
-    }
-    else if (s !== 'unknown') {
+    // Retain independent activity through the entire resume guard, including
+    // after unsubscribe. A delayed startup must not erase this evidence, and
+    // a cold resume's own idle broadcast must never supply it.
+    if (s === 'turn_running' || s === 'waiting_approval' || s === 'waiting_input') independentResumeActivity = true;
+    if (!attaching && s !== 'not_loaded' && s !== 'unknown') {
       // A later external unload/load cycle invalidates the old policy verdict.
       // Resume still checks the current policy before allowing any delivery.
       if (before === 'not_loaded') policyDenied = false;
@@ -240,9 +239,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (method === 'thread/archived') archived = true;
     if (method === 'turn/started') { lastActivity = clock.now(); updateStatus({ type: 'active', activeFlags: [] }); }
     if (method === 'mcpServer/startupStatus/updated' && (attaching || clock.now() - resumeAt <= 2000)) {
-      cold = true; rejectedResume = !activityWhileAttaching;
+      cold = true; rejectedResume = !independentResumeActivity;
       // A delayed startup notice still rejects the subscription, but must not
-      // erase independent activity already consumed during its pending resume.
+      // erase independent activity consumed during or after its pending resume.
       if (!rejectedResume) scheduleWarmCheck();
     }
     if ((method === 'item/started' || method === 'item/completed') && obj(p.item).type === 'userMessage' && typeof p.item.clientId === 'string') {
@@ -285,12 +284,12 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (!attached) {
       const s = mapStatus(status);
       if (!['idle', 'turn_running', 'waiting_approval', 'waiting_input'].includes(s)) return;
-      const epoch = closedEpoch; attaching = true; activityWhileAttaching = false;
+      const epoch = closedEpoch; attaching = true; independentResumeActivity = false;
       try {
         const result = await call('thread/resume', buildThreadResume(b.threadId));
         resumeAt = clock.now(); attached = true; attaching = false;
         if (closedEpoch !== epoch || cold) {
-          cold = true; rejectedResume = !activityWhileAttaching;
+          cold = true; rejectedResume = !independentResumeActivity;
           await unsubscribe();
           // Re-read only after the rejected resume's guard. Independent active
           // status/turn activity permits a fresh warm attach, even if no later
