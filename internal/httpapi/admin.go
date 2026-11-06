@@ -36,6 +36,8 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/peers/{id}/move", s.adminMovePeer)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/rotate", s.adminRotatePeer)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/enrol-token", s.adminReissueEnrol)
+	mux.HandleFunc("GET /v1/admin/peers/{id}/enrol-token", s.adminInviteStatus)
+	mux.HandleFunc("DELETE /v1/admin/peers/{id}/enrol-token", s.adminRevokeEnrol)
 	mux.HandleFunc("PUT /v1/admin/peers/{id}/scopes", s.adminSetScopes)
 	mux.HandleFunc("PUT /v1/admin/peers/{id}/limits", s.adminSetLimits)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/disable", s.adminDisable(true))

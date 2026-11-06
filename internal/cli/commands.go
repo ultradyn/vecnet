@@ -103,6 +103,9 @@ admin (operator credential):
        max 7d); --copy also puts it on the clipboard; without --name, or with
        --open-name, the agent picks its name at enrol
   peer invite <peer> [--ttl 24h] [--copy]             re-issues a token for a peer not yet enrolled
+  invite status <peer> | invite revoke <peer>         an invite's state (never its token), or withdraw it:
+       the unredeemed token stops enrolling; no-op when none is live; never touches
+       an enrolled peer's secret (peer disable / peer rotate). Also: peer invite status|revoke
   peer move <peer> --principal PRN
   peer link <peer>                                    prints a peer's 12-character OAuth link code
   peer avatar <peer> (FILE|https://URL|--clear)       set or clear any peer's avatar
@@ -512,6 +515,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdPrincipal(args)
 	case "peer":
 		return a.cmdPeer(args)
+	case "invite":
+		return a.cmdInvite(args)
 	case "route":
 		return a.cmdRoute(args)
 	case "source":
