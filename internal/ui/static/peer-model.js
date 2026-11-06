@@ -119,3 +119,35 @@ export function peerThreads(page, peerId) {
     });
   return { rows, more: !!page.next };
 }
+
+// recentThread is the newest-activity thread on that page that both this peer
+// and the operator (me) are in, or null.
+export function recentThread(page, peerId, me) {
+  if (!me) return null;
+  return peerThreads(page, peerId).rows.find(r => (r.thread.participants || []).includes(me) && str(r.thread.thread_id)) || null;
+}
+
+// messageDraft is what New message opens with for this peer: the peer as the
+// one recipient, at wake_idle for a Grok Bot (a wake would start a run while
+// it is busy; wake_idle waits for idle) and at the composer's wake otherwise.
+export function messageDraft(facts) {
+  return { recipients: [facts.id], priority: facts.kind === 'grokbot' ? 'wake_idle' : 'wake' };
+}
+
+// peerActions is the peer header's two message actions, or null when the
+// operator cannot message this id: a source, the operator itself, or a peer
+// row that has not loaded. open is the quick link: the operator's newest
+// thread with the peer (state 'thread'), else New message with the draft
+// (state 'compose'); before the threads page answers it is 'loading', or
+// 'error' when that read failed. compose is New message, always present.
+// more says the page was not the whole list, so "no thread" means none among
+// the newest.
+export function peerActions(facts, page, me, error) {
+  if (!facts || !facts.id || facts.kind === 'source' || facts.kind === 'operator' || facts.id === me) return null;
+  const draft = messageDraft(facts);
+  const compose = { href: '#new', draft };
+  if (!page) return { open: { state: error ? 'error' : 'loading', error: error || null }, compose };
+  const r = recentThread(page, facts.id, me);
+  if (r) return { open: { state: 'thread', href: '#thread/' + r.thread.thread_id, thread: r.thread, at: str(r.last_message_at) || null }, compose };
+  return { open: { state: 'compose', href: '#new', draft, more: !!page.next }, compose };
+}

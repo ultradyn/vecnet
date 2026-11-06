@@ -27,8 +27,13 @@ func (e *usageError) Error() string { return e.msg }
 func usageErr(msg string) error { return &usageError{msg: msg} }
 
 // refusedError is a refusal the CLI makes itself, before contacting the
-// hub: exit 2 like a hub refusal, printed as "vecnet: msg".
-type refusedError struct{ msg string }
+// hub. The default mapping is exit 2, printed as "vecnet: msg". Preferences
+// commands classify it as a confirmation refusal and may set code and details.
+type refusedError struct {
+	msg     string
+	code    string
+	details map[string]any
+}
 
 func (e *refusedError) Error() string { return e.msg }
 

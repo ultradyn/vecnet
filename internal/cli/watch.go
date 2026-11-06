@@ -451,6 +451,7 @@ func (w *watcher) run() error {
 		case errors.As(err, &identityErr):
 			return err
 		case terminal(err):
+			w.stoppedLine(err)
 			return err
 		case w.clock().Before(w.restartUntil):
 			// Within the restart grace, failures neither grow the backoff nor
@@ -657,6 +658,20 @@ func (w *watcher) systemLine(kind, text string) {
 	default:
 		fmt.Fprintln(w.a.stdout, inboxLine(ev, nil))
 	}
+}
+
+// stoppedLine ends `watch --json` after a terminal answer with one
+// client-made watch_stopped Event, data {text, status}: a machine-readable
+// "not reconnecting" for supervisors such as the Codex connector, which must
+// stop on 401/403/204 (§13.1) instead of respawning the watch. Only the HTTP
+// status is carried; hub-supplied code and message text stay on stderr.
+func (w *watcher) stoppedLine(err error) {
+	var he *hubError
+	if !w.a.json || !errors.As(err, &he) {
+		return
+	}
+	data, _ := json.Marshal(map[string]any{"text": fmt.Sprintf("not reconnecting: hub answered HTTP %d", he.Status), "status": he.Status})
+	_ = w.a.emitValue(envelope.Event{Type: "watch_stopped", Data: data})
 }
 
 func (w *watcher) restarting(h restartHint) {

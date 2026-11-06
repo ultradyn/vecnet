@@ -40,6 +40,7 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /v1/admin/peers/{id}/limits", s.adminSetLimits)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/disable", s.adminDisable(true))
 	mux.HandleFunc("POST /v1/admin/peers/{id}/enable", s.adminDisable(false))
+	mux.HandleFunc("PATCH /v1/admin/peers/{id}", s.adminRenamePeer)
 	mux.HandleFunc("POST /v1/admin/sources", s.adminAddSource)
 	mux.HandleFunc("GET /v1/admin/sources", s.adminListSources)
 	mux.HandleFunc("POST /v1/admin/sources/{id}/disable", s.adminDisableSource)
@@ -287,6 +288,28 @@ func (s *server) adminSetLimits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Hub.SetPeerLimits(r.Context(), r.PathValue("id"), perMin, perHour); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminRenamePeer is PATCH /v1/admin/peers/{id} {"name"}: 204. The peer id
+// is unchanged. An empty name, a bad shape, a reserved name and a name that
+// reads as another peer's are the hub's existing name errors; the current
+// name is a no-op.
+func (s *server) adminRenamePeer(w http.ResponseWriter, r *http.Request) {
+	top, err := readObject(r, []string{"name"}, []string{"name"})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	name, err := stringField(top, "name")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.Hub.RenamePeer(r.Context(), r.PathValue("id"), name); err != nil {
 		writeError(w, err)
 		return
 	}

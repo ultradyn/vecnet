@@ -1,0 +1,24 @@
+ vecnet | 1:inbox 2:chat 3:dash 4:subs prefs       live  apr 2  dlq 3  07:41:00 
+┌─ preferences ────────────────────────────────────────────────────────────────┐
+│Retention & storage                                                           │
+│  retention.ack_events             7d       default  unavailable              │
+│Files                                                                         │
+│  blobs.expiry                     1d       default  unavailable              │
+│Notifications/presence                                                        │
+│> events.refresh_interval          30m      flag     live                     │
+│  presence.default_ttl             1h       stored   live                     │
+│Agents defaults                                                               │
+│  agents.thread_budget             500      default  live                     │
+│                                                                              │
+│Events refresh interval                                                       │
+│Refresh cadence for MCP Events subscriptions.                                 │
+│60..86400 seconds                                                             │
+│source flag VECNET_EVENTS_REFRESH_INTERVAL                                    │
+│live                                                                          │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ NORMAL   j/k move  r refresh                  max@vecnet · working · prio wake 
+: command  ? help                                                               

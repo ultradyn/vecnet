@@ -37,6 +37,7 @@ func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "q", "ctrl+c", "ctrl+q":
 		return m.quit()
 	case "1", "2", "3", "4":
+		m.prefsOn = false
 		m.Tab = int(key[0] - '1')
 		return nil
 	case ":":
@@ -67,6 +68,9 @@ func (m *Model) reloadAll() tea.Cmd {
 	if m.stopped() {
 		m.Toast(m.Conn+": restart with a valid profile", true)
 		return nil
+	}
+	if m.prefsOn {
+		return tea.Batch(m.Reload(TagAll), m.Reload("prefs"))
 	}
 	return m.Reload(TagAll)
 }

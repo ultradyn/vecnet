@@ -1,6 +1,6 @@
 // Task 11: the delivery matrix dialog in a real browser. Every wait is on page
 // state, never on elapsed time: the build slice is shared.
-import { assert, cleanBuild, withDemo } from './lib.mjs';
+import { assert, cleanBuild, readThrough, withDemo } from './lib.mjs';
 
 const OPENER = 'mx-opener';
 const TERMINAL = ['processed', 'failed', 'dead_letter', 'expired'];
@@ -49,12 +49,12 @@ try {
     await page.route('**/__keep-interception__', route => route.continue());
 
     const hark = demo.threads.hark;
-    // Opening the thread marks it read; the hub's answer settles the receipt
-    // states the matrix is checked against below.
-    const readDone = page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith(`/v1/admin/threads/${hark}/read`));
+    // Reading the thread through (one read receipt per unread message) settles
+    // the receipt states the matrix is checked against below.
     await page.evaluate(id => { location.hash = '#thread/' + id; }, hark);
-    await readDone;
     await page.locator('.msg').first().waitFor();
+    const unreadIn = async () => (await (await asPeer('operator', 'GET', '/v1/admin/inbox?unread=1&limit=200')).json()).deliveries.filter(d => d.thread_id === hark).length;
+    await readThrough(page, unreadIn);
     await page.locator('#conn.live').waitFor();
     const open = await opener(page, hark);
     assert(await page.locator('dialog.mx').count() === 0, 'the matrix is on the page before anyone opened it');
@@ -75,7 +75,7 @@ try {
     assert(await page.locator('dialog.mx .mx-m').count() === before.rows.length, 'one row per message');
     assert(await page.locator('dialog.mx .mx-grid').evaluate(el => el.style.getPropertyValue('--cols')) === String(before.recipients.length), '--cols is not the recipient count');
     const cells = before.rows.flatMap(r => r.cells);
-    // Opening the thread marks it read, so the hub can be a step ahead of the
+    // Reading the thread posts receipts, so the hub can be a step ahead of the
     // first grid; the open matrix reloads on the thread tag and must catch up.
     // A receipt can also advance between the grid's load and this snapshot
     // (queued → read); then the grid is already right and the snapshot is

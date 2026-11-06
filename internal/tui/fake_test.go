@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -30,22 +31,24 @@ type fakeAPI struct {
 	errs  map[string]error
 	gate  map[string]chan struct{}
 
-	inbox    opapi.Inbox
-	threads  opapi.ThreadPage
-	detail   opapi.ThreadDetail
-	history  opapi.History
-	matrix   opapi.Matrix
-	peers    []opapi.PeerRow
-	subs     []opapi.Subscription
-	cuts     opapi.LoopCuts
-	health   opapi.DeliveryHealth
-	audit    opapi.AuditPage
-	counters map[string]int
-	sent     []envelope.SendRequest
-	blob     []byte
-	uploads  []fakeUpload // uploads whose bytes the fake read in full
-	reacted  []envelope.ReactionRequest
-	notices  []envelope.HubNotice
+	inbox      opapi.Inbox
+	threads    opapi.ThreadPage
+	detail     opapi.ThreadDetail
+	history    opapi.History
+	matrix     opapi.Matrix
+	peers      []opapi.PeerRow
+	subs       []opapi.Subscription
+	cuts       opapi.LoopCuts
+	health     opapi.DeliveryHealth
+	audit      opapi.AuditPage
+	counters   map[string]int
+	sent       []envelope.SendRequest
+	blob       []byte
+	uploads    []fakeUpload // uploads whose bytes the fake read in full
+	reacted    []envelope.ReactionRequest
+	notices    []envelope.HubNotice
+	prefs      opapi.Preferences
+	prefsVerbs []string
 
 	// tail replaces the default Tail, which reports live and blocks.
 	tail func(ctx context.Context, handle func(opclient.Batch) error, status func(string)) error
@@ -87,6 +90,23 @@ func (f *fakeAPI) reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = map[string]int{}
+	f.prefsVerbs = nil
+}
+
+func (f *fakeAPI) counts() map[string]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]int, len(f.calls))
+	for name, n := range f.calls {
+		out[name] = n
+	}
+	return out
+}
+
+func (f *fakeAPI) preferenceVerbs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.prefsVerbs...)
 }
 
 func (f *fakeAPI) fail(name string, err error) {
@@ -129,6 +149,17 @@ func (f *fakeAPI) BlobStatus(ctx context.Context, _, _ string) (blobwire.State, 
 func (f *fakeAPI) Matrix(ctx context.Context, _, _ string, _ int) (opapi.Matrix, error) {
 	return f.matrix, f.hit(ctx, "Matrix")
 }
+func (f *fakeAPI) Preferences(ctx context.Context) (opapi.Preferences, error) {
+	f.mu.Lock()
+	f.prefsVerbs = append(f.prefsVerbs, http.MethodGet)
+	snap := f.prefs
+	f.mu.Unlock()
+	if err := f.hit(ctx, "Preferences"); err != nil {
+		return opapi.Preferences{}, err
+	}
+	return snap, nil
+}
+
 func (f *fakeAPI) Notices(ctx context.Context) ([]envelope.HubNotice, error) {
 	err := f.hit(ctx, "Notices")
 	f.mu.Lock()

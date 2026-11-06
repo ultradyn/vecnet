@@ -16,8 +16,25 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/store"
 )
+
+func TestPrefFlag(t *testing.T) {
+	p := prefFlags{}
+	if err := p.Set("events.refresh_interval=900@VECNET_EVENTS_REFRESH_INTERVAL"); err != nil {
+		t.Fatal(err)
+	}
+	e := p["events.refresh_interval"]
+	if n, _ := e.Value.Int64(); n != 900 || e.Source != prefs.SourceFlag || e.Origin != "VECNET_EVENTS_REFRESH_INTERVAL" {
+		t.Fatalf("got %+v", e)
+	}
+	for _, bad := range []string{"events.refresh_interval=900", "no.such_key=1@X", "events.refresh_interval=x@X", "blobs.expiry=1@X"} {
+		if p.Set(bad) == nil {
+			t.Fatalf("accepted %q", bad)
+		}
+	}
+}
 
 func TestExitOnStdinEOF(t *testing.T) { testStdinEOF(t, true) }
 

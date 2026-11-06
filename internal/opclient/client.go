@@ -52,6 +52,12 @@ func New(base, secret string) *Client {
 }
 
 func (c *Client) request(ctx context.Context, method, path string, body any) (*http.Response, error) {
+	return c.requestMatch(ctx, method, path, body, "")
+}
+
+// requestMatch is request with one strong If-Match. An empty tag sends no
+// precondition header. Callers pass the ETag from GET unchanged, quotes included.
+func (c *Client) requestMatch(ctx context.Context, method, path string, body any, ifMatch string) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -68,6 +74,9 @@ func (c *Client) request(ctx context.Context, method, path string, body any) (*h
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if ifMatch != "" {
+		req.Header.Set("If-Match", ifMatch)
 	}
 	if method == http.MethodPost && (path == "/v1/messages" || path == "/v1/reactions") {
 		req.Header.Set("X-Vecnet-Ingress", "operator_ui")
@@ -184,6 +193,70 @@ func (c *Client) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 
 // Notices lists the hub's active notices (GET /v1/hub/notices), oldest first.
 // Their messages are operator text, untrusted on every surface.
+// Preferences is GET /v1/admin/prefs. ETag is the raw header value, including quotes.
+func (c *Client) Preferences(ctx context.Context) (opapi.Preferences, error) {
+	resp, err := c.request(ctx, http.MethodGet, "/v1/admin/prefs", nil)
+	if err != nil {
+		return opapi.Preferences{}, err
+	}
+	var out opapi.Preferences
+	etag, err := decodeJSON(resp, &out)
+	if err != nil {
+		return opapi.Preferences{}, err
+	}
+	out.ETag = etag
+	return out, nil
+}
+
+func preconditionRequired() error {
+	return &Error{Status: http.StatusPreconditionRequired, Code: "prefs_precondition_required", Message: "If-Match is required; read preferences first."}
+}
+
+// PreviewPreferences is the read-only POST /v1/admin/prefs/preview. It does not
+// follow a stale tag with another request.
+func (c *Client) PreviewPreferences(ctx context.Context, etag string, patch opapi.PreferencesPatch) (opapi.PreferencesPreview, error) {
+	if strings.TrimSpace(etag) == "" {
+		return opapi.PreferencesPreview{}, preconditionRequired()
+	}
+	resp, err := c.requestMatch(ctx, http.MethodPost, "/v1/admin/prefs/preview", patch, etag)
+	if err != nil {
+		return opapi.PreferencesPreview{}, err
+	}
+	var out opapi.PreferencesPreview
+	if _, err := decodeJSON(resp, &out); err != nil {
+		return opapi.PreferencesPreview{}, err
+	}
+	return out, nil
+}
+
+// PatchPreferences is one conditional PATCH /v1/admin/prefs. A 412 is returned
+// as a structured error and is not retried.
+func (c *Client) PatchPreferences(ctx context.Context, etag string, patch opapi.PreferencesPatch) (opapi.Preferences, error) {
+	if strings.TrimSpace(etag) == "" {
+		return opapi.Preferences{}, preconditionRequired()
+	}
+	resp, err := c.requestMatch(ctx, http.MethodPatch, "/v1/admin/prefs", patch, etag)
+	if err != nil {
+		return opapi.Preferences{}, err
+	}
+	var out opapi.Preferences
+	next, err := decodeJSON(resp, &out)
+	if err != nil {
+		return opapi.Preferences{}, err
+	}
+	out.ETag = next
+	return out, nil
+}
+
+func decodeJSON(resp *http.Response, out any) (string, error) {
+	defer resp.Body.Close()
+	etag := resp.Header.Get("ETag")
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return "", err
+	}
+	return etag, nil
+}
+
 func (c *Client) Notices(ctx context.Context) ([]envelope.HubNotice, error) {
 	var out struct {
 		Notices []envelope.HubNotice `json:"notices"`
