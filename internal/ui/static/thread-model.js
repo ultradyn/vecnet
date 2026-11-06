@@ -1,5 +1,8 @@
 // Pure thread logic: what each message renders as. No DOM, no clock.
 import { SPILL_SLOT } from './attach-model.js';
+import { grokQuotaNote, INITIAL_PRIORITY, priorityChoice } from './compose-model.js';
+
+export { grokQuotaNote, INITIAL_PRIORITY };
 
 export const SPILL_BYTES = 4096, TEXT_CAP = 65536;
 // Show full text reads at most this much, and only text/* (PROTOCOL §2.7).
@@ -153,6 +156,25 @@ export function sendError(e) {
 // as 409 idempotency_conflict (PROTOCOL §5.3).
 export function replySig(files) {
   return JSON.stringify((files || []).map(a => [a.sha256, a.size, a.media_type, a.name ?? null]));
+}
+
+// participantGrokbot: kindOf(id) is the directory kind, or '' when the
+// directory has not named that peer. Hub is not a participant (§16.3).
+export function participantGrokbot(participants, kindOf) {
+  const lookup = typeof kindOf === 'function' ? kindOf : () => '';
+  return (participants || []).some(id => lookup(id) === 'grokbot');
+}
+
+// replyPriority is the reply composer's selection. Same rule as a new
+// message (Decisions §6): wake_idle once any participant is grokbot, the
+// existing initial priority otherwise, and a manual or in-flight choice
+// left as it was captured (PROTOCOL §§2.2, 5.2).
+export function replyPriority({ manual = false, locked = false, current = INITIAL_PRIORITY, participants, kindOf } = {}) {
+  return priorityChoice({ manual, locked, current, addressed: participantGrokbot(participants, kindOf) });
+}
+
+export function replyQuotaNote(participants, kindOf) {
+  return grokQuotaNote(participantGrokbot(participants, kindOf));
 }
 
 // replyKey is the reply's pending send: the same one, idempotency key and all,

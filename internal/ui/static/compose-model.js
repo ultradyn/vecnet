@@ -7,6 +7,18 @@ import { bytes } from './format.js';
 
 export const SPILL = 4096, TEXT_CAP = 65536;
 const PRIORITIES = ['wake', 'wake_idle', 'hold'];
+// The composer's existing initial priority when nobody addressed is a
+// grokbot. PROTOCOL §5.2: priority is required on the wire; this is only
+// the control's starting selection.
+export const INITIAL_PRIORITY = 'wake';
+// Preselect when any recipient or participant is grokbot (Decisions §6).
+// The send still carries it explicitly (§2.2, §5.2). It is not a default
+// the hub fills in, and it is not a promise that the bot will not wake.
+export const GROK_PRIORITY = 'wake_idle';
+// Shown beside the control while a Grok Bot is addressed. wake_idle still
+// starts a routine run when presence is idle or unknown (§5.2, §13.3);
+// hold does not. A started run spends quota.
+export const GROK_QUOTA_NOTE = 'A Grok Bot is addressed. wake_idle starts a routine run when that bot is idle or its presence is unknown, and holds the push while the bot is busy. hold does not start a run. Each run that starts spends quota, and a run that also needs you in chat can start a second one.';
 const HISTORY = ['from_join', 'full'];
 const ID = /^(peer|team|grp)_[A-Za-z0-9]+$/;
 const enc = new TextEncoder();
@@ -107,6 +119,47 @@ export function keyFor(pending, form, mint) {
 export function keepKey(err) {
   const s = err.status;
   return !(s >= 400 && s < 500 && s !== 429 && s !== 409);
+}
+
+// directoryPeers is the peer list, or null when the directory has not
+// arrived. A loaded empty list is [], which names no grokbot.
+function directoryPeers(peers) {
+  if (Array.isArray(peers)) return peers;
+  if (peers && Array.isArray(peers.peers)) return peers.peers;
+  return null;
+}
+
+// anyGrokbot is true once the directory shows that any addressed id is kind
+// grokbot. Ids the directory has not named are not grokbot: a name is not
+// an address (§2.2), and a late directory must be allowed to change the
+// preselect only while the operator has not chosen.
+export function anyGrokbot(ids, peers) {
+  const list = directoryPeers(peers);
+  if (!list) return false;
+  const kinds = new Map();
+  for (const p of list) if (p && p.peer_id) kinds.set(p.peer_id, p.kind);
+  return (ids || []).some(id => kinds.get(id) === 'grokbot');
+}
+
+// priorityChoice is the segmented control's value.
+// manual: the operator has used the control. Later directory or presence
+// updates must not overwrite it.
+// locked: an in-flight send, or the retry of that same body, already
+// captured current (§2.2 idempotency, §5.3). Do not change it.
+// addressed: any recipient or participant is grokbot (§16.3 for a thread).
+export function priorityChoice({ manual = false, locked = false, current = INITIAL_PRIORITY, addressed = false } = {}) {
+  if (manual || locked) return current;
+  return addressed ? GROK_PRIORITY : INITIAL_PRIORITY;
+}
+
+// composePriority applies that rule to the new-message recipients.
+export function composePriority({ manual, locked, current, recipients, peers } = {}) {
+  return priorityChoice({ manual, locked, current, addressed: anyGrokbot(recipients, peers) });
+}
+
+// grokQuotaNote is the explanatory line, or '' when no Grok Bot is addressed.
+export function grokQuotaNote(addressed) {
+  return addressed ? GROK_QUOTA_NOTE : '';
 }
 
 // errorText is the form's error line. Every peer-supplied part is a plain

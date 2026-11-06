@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { budgetBanner, budgetOut, canShowFull, clientLabel, CLIENT_LABEL_CAP, clientSuspect, FULL_TEXT_CAP, items, replyKey, replySig, sendError, spillOf } from '../static/thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, clientLabel, CLIENT_LABEL_CAP, clientSuspect, FULL_TEXT_CAP, items, replyKey, replyPriority, replyQuotaNote, replySig, sendError, spillOf } from '../static/thread-model.js';
 import { SPILL_SLOT } from '../static/attach-model.js';
 
 const OP = 'peer_op', CODEX = 'peer_codex', SLEUTH = 'peer_sleuth', GROK = 'peer_grok';
@@ -268,4 +268,45 @@ test('clientLabel shows only the hub operator-cli label, as one safe line', () =
   assert.equal(clientSuspect(at({ kind: 'operator-cli', label: 'L' })), false);
   assert.equal(clientSuspect(at({ kind: 'web', label: 'L', agent_suspected: true })), false);
   assert.equal(clientSuspect(msg('m', OP, 'hi')), false);
+});
+
+// Decisions §6, for a thread that already exists (including a setup thread
+// whose participants are the operator and a grokbot). Kinds come from the
+// directory; until it names a participant, the reply keeps the initial
+// priority. PROTOCOL §§2.2, 5.2, 16.3.
+test('Grok recipient defaults preserve user choice', () => {
+  const kinds = { peer_op: 'operator', peer_g: 'grokbot', peer_c: 'session', peer_d: 'dot', peer_s: 'pagchat-bot' };
+  const kindOf = id => kinds[id] || '';
+  const setup = ['peer_op', 'peer_g'];
+  const base = { manual: false, locked: false, current: 'wake', kindOf };
+  assert.equal(replyPriority({ ...base, participants: setup }), 'wake_idle', 'setup thread');
+  assert.equal(replyPriority({ ...base, participants: ['peer_op', 'peer_c', 'peer_g', 'peer_d'] }), 'wake_idle', 'mixed thread, one grokbot');
+  assert.equal(replyPriority({ ...base, participants: ['peer_op', 'peer_c'] }), 'wake', 'no grokbot');
+  assert.equal(replyPriority({ ...base, participants: ['peer_op', 'peer_s'] }), 'wake', 'pagchat-bot is not a grokbot');
+  assert.equal(replyPriority({ ...base, participants: [] }), 'wake', 'thread not loaded');
+  assert.equal(replyPriority({ ...base, participants: null }), 'wake');
+  // Delayed directory: participant ids are known, kinds are not.
+  assert.equal(replyPriority({ ...base, participants: setup, kindOf: () => '' }), 'wake');
+  assert.equal(replyPriority({ ...base, participants: setup, kindOf: id => id === 'peer_g' ? 'grokbot' : '' }), 'wake_idle', 'directory arrives');
+  assert.equal(replyPriority({ manual: true, locked: false, current: 'wake', participants: setup, kindOf }), 'wake', 'explicit wake');
+  assert.equal(replyPriority({ manual: true, locked: false, current: 'hold', participants: setup, kindOf }), 'hold', 'explicit hold');
+  assert.equal(replyPriority({ manual: false, locked: true, current: 'wake', participants: setup, kindOf }), 'wake', 'in-flight reply');
+
+  let n = 0;
+  const mint = () => 'ui-r' + (++n);
+  const prio = replyPriority({ manual: false, locked: true, current: 'hold', participants: setup, kindOf });
+  const first = replyKey(null, { text: 'same body', prio, replyTo: 'msg_1', sig: '' }, mint);
+  const retry = replyKey(first, { text: 'same body', prio, replyTo: 'msg_1', sig: '' }, mint);
+  assert.equal(retry, first, 'idempotent retry minted a new key');
+  assert.equal(retry.prio, 'hold');
+  assert.equal(retry.text, 'same body');
+
+  const note = replyQuotaNote(setup, kindOf);
+  assert.match(note, /wake_idle/);
+  assert.match(note, /unknown/);
+  assert.match(note, /quota/);
+  assert.doesNotMatch(note, /free/i);
+  assert.doesNotMatch(note, /guarantee|no wake|never wake|won'?t wake|will not wake|without waking/i);
+  assert.equal(replyQuotaNote(['peer_op', 'peer_c'], kindOf), '');
+  assert.equal(replyQuotaNote(setup, () => ''), '');
 });

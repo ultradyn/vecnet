@@ -22,6 +22,9 @@ try {
     const unreadIn = async thread => (await api('GET', '/v1/admin/inbox?unread=1&limit=200')).deliveries.filter(d => d.thread_id === thread).length;
     const isRead = req => req.method() === 'POST' && req.url().endsWith(`/v1/admin/threads/${hark}/read`);
     const msgEl = id => page.locator(`[id="m-${id}"]`);
+    const comp = page.locator('.composer');
+    const selected = () => comp.locator('.seg button.on').getAttribute('value');
+    const note = comp.locator('#r-quota');
     // Every resource notify replaces the .msg nodes, so measure the live node
     // by id, and only once two frames apart agree: a detached node measures as
     // all zeros and would read as on screen.
@@ -75,8 +78,15 @@ try {
     const col = await page.locator('#view').boundingBox();
     assert(col.width > 760, `reading column is only ${col.width}px`);
     assert(countRequests(isRead) === 1, `opening the thread sent ${countRequests(isRead)} read POSTs`);
+    // hark includes grok-reviewer, so the reply composer preselects wake_idle.
+    assert(await selected() === 'wake_idle', 'a thread with a grokbot participant did not preselect wake_idle');
+    await note.waitFor();
+    const harkNote = await note.textContent();
+    assert(/quota/.test(harkNote) && /unknown/.test(harkNote) && !/free/i.test(harkNote), harkNote);
     await quiet();
     await shot('09-thread-initial');
+    await note.evaluate(el => el.scrollIntoView({ block: 'center' }));
+    await shot('t10-thread-mixed');
 
     // live delivery from asPeer appears without reload
     await page.evaluate(() => { window.__noReload = true; });
@@ -149,6 +159,9 @@ try {
     release();
     await page.locator('.composer .cbanner', { hasText: 'network:' }).waitFor();
     assert(await ta.inputValue() === reply, 'the text was lost when the send failed');
+    assert(await selected() === 'wake_idle', 'the failed send changed priority');
+    await comp.locator('.seg').evaluate(el => el.scrollIntoView({ block: 'center' }));
+    await shot('t10-thread-retry');
     assert(await page.locator('.composer .send:disabled').count() === 0, 'Send stayed disabled after the failure');
     // The first attempt did land: wait for its message (and the reload that
     // re-picks the reply target) before retrying, so the same-key assertion
@@ -159,6 +172,8 @@ try {
     await page.unroute('**/v1/messages');
     assert(posts.length === 2, `the held send went out ${posts.length} times`);
     assert(posts[0].idempotency_key === posts[1].idempotency_key, 'the retry minted a new idempotency key');
+    assert(posts[0].priority === 'wake_idle' && posts[1].priority === 'wake_idle', `retry priorities ${posts.map(p => p.priority)}`);
+    assert(posts[0].content.text === reply && posts[1].content.text === reply, 'the retry changed the body');
     const after = (await api('GET', `/v1/threads/${hark}/messages?limit=200`)).messages.filter(m => m.content.text === reply);
     assert(after.length === 1, `the retried send landed ${after.length} times`);
     assert(await ta.inputValue() === '', 'the composer kept the sent text');
@@ -184,6 +199,9 @@ try {
     const quotaRead = page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith(`/v1/admin/threads/${quota}/read`));
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, quota);
     await page.locator('.msg .txt', { hasText: 'exhausted its message budget' }).waitFor();
+    // quota's sender is a grokbot, so the reply preselects wake_idle here too.
+    assert(await selected() === 'wake_idle', 'the quota thread, which a grokbot is in, kept wake');
+    await note.waitFor();
     // Opening marks it read: the receipt moves from accepted to read once the
     // POST lands and the matrix reloads.
     assert((await quotaRead).ok(), 'the quota thread read POST failed');
@@ -211,6 +229,11 @@ try {
     const answersTo = id => posts.filter(p => p.approval_response && p.approval_response.approval_id === id).length;
     const answersIn = thread => posts.filter(p => p.approval_response && p.thread_id === thread).length;
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, hosting);
+    await page.locator('.msg .txt', { hasText: 'Scope the hub hosting cost' }).waitFor();
+    assert(await selected() === 'wake', 'a thread with no grokbot changed the initial priority');
+    assert(await note.isHidden(), 'quota note shows with no Grok Bot');
+    await comp.locator('.seg').evaluate(el => el.scrollIntoView({ block: 'center' }));
+    await shot('t10-thread-nongrok');
     const plan = page.locator('.apr', { hasText: 'Proceed with the hosting plan?' });
     await plan.getByRole('button', { name: 'yes', exact: true }).waitFor();
     assert(await page.locator('.composer .join').isHidden(), 'the join notice shows in a thread the operator is in');
@@ -248,6 +271,80 @@ try {
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, side.thread_id);
     await page.locator('.msg .txt', { hasText: 'a quick side question' }).waitFor();
     await page.locator('.composer .join', { hasText: 'Sending adds you' }).waitFor();
+    assert(await selected() === 'wake', 'the side channel, with no grokbot, preselected wake_idle');
+    await page.locator('#toast.on').waitFor({ state: 'hidden' });
+
+    // Participants arrive after the composer has painted: until then the
+    // reply keeps wake. An explicit hold made in that gap stays hold when
+    // the grokbot participant becomes known. A fresh open of the setup
+    // thread then preselects wake_idle.
+    let releaseFacts;
+    const factsGate = new Promise(resolve => { releaseFacts = resolve; });
+    const stall = async route => { await factsGate; await route.continue(); };
+    await page.route('**/v1/threads?*', stall);
+    await page.route('**/v1/admin/threads?*', stall);
+    const setupBody = 'Setup: this thread is you and the Grok Bot.';
+    const setup = await api('POST', '/v1/messages', {
+      idempotency_key: 't10-setup', recipients: [demo.peers.grok.id], thread_title: 'Grok setup', priority: 'wake_idle', content: { text: setupBody },
+    });
+    const triageBody = 'Triage: choose a priority before this Grok Bot is known.';
+    const triage = await api('POST', '/v1/messages', {
+      idempotency_key: 't10-triage', recipients: [demo.peers.triage.id], thread_title: 'Grok triage', priority: 'wake_idle', content: { text: triageBody },
+    });
+    const detailStall = async route => {
+      const path = new URL(route.request().url()).pathname;
+      if (route.request().method() === 'GET' && (path === `/v1/admin/threads/${setup.thread_id}` || path === `/v1/admin/threads/${triage.thread_id}`)) await factsGate;
+      await route.continue();
+    };
+    await page.route('**/v1/admin/threads/**', detailStall);
+    await page.evaluate(id => { location.hash = `#thread/${id}`; }, setup.thread_id);
+    await page.locator('.msg .txt', { hasText: setupBody }).waitFor();
+    assert(await selected() === 'wake', `setup reply preselected ${await selected()} before its participants arrived`);
+    assert(await note.isHidden(), 'quota note showed before a grokbot participant was known');
+    await comp.locator('.seg').evaluate(el => el.scrollIntoView({ block: 'center' }));
+    await shot('t10-thread-delayed');
+
+    await page.evaluate(id => { location.hash = `#thread/${id}`; }, triage.thread_id);
+    await page.locator('.msg .txt', { hasText: triageBody }).waitFor();
+    assert(await selected() === 'wake', 'triage reply changed priority before its participants arrived');
+    await comp.getByRole('button', { name: 'hold', exact: true }).click();
+    assert(await selected() === 'hold', 'explicit hold did not stick');
+    await shot('t10-thread-explicit-hold');
+    releaseFacts();
+    await note.waitFor();
+    assert(await selected() === 'hold', 'participant data overwrote explicit hold');
+    await comp.locator('#r-quota').evaluate(el => el.scrollIntoView({ block: 'center' }));
+    await shot('t10-thread-sticky');
+    await page.unroute('**/v1/threads?*', stall);
+    await page.unroute('**/v1/admin/threads?*', stall);
+    await page.unroute('**/v1/admin/threads/**', detailStall);
+
+    await page.evaluate(id => { location.hash = `#thread/${id}`; }, setup.thread_id);
+    await page.locator('.msg .txt', { hasText: setupBody }).waitFor();
+    await note.waitFor();
+    assert(await selected() === 'wake_idle', `setup reply priority is ${await selected()}`);
+    const setupNote = await note.textContent();
+    assert(/wake_idle/.test(setupNote) && /unknown/.test(setupNote) && /quota/.test(setupNote), setupNote);
+    assert(!/free/i.test(setupNote) && !/guarantee|no wake|never wake|won'?t wake|will not wake/i.test(setupNote), setupNote);
+    await comp.locator('#r-quota').evaluate(el => el.scrollIntoView({ block: 'center' }));
+    await shot('t10-thread-setup');
+    await comp.getByRole('button', { name: 'wake', exact: true }).click();
+    assert(await selected() === 'wake', 'explicit wake did not stick on the setup thread');
+    await shot('t10-thread-explicit-wake');
+    await comp.locator('.seg button[value="wake"]').focus();
+    await page.keyboard.press('Tab');
+    assert(await page.evaluate(() => document.activeElement && document.activeElement.value) === 'wake_idle', 'Tab did not reach wake_idle');
+    await comp.locator('.ptip[data-p="wake_idle"]').waitFor({ state: 'visible' });
+    await shot('t10-thread-keyboard');
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => { const el = document.activeElement; if (el && el.blur) el.blur(); });
+    await comp.locator('.ptip[data-p="wake_idle"]').waitFor({ state: 'hidden' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await comp.locator('#r-quota').evaluate(el => el.scrollIntoView({ block: 'center' }));
+    const narrowWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    assert(narrowWidth <= 390, `thread scrolls sideways at 390 (${narrowWidth})`);
+    await shot('t10-thread-narrow');
+    await page.setViewportSize({ width: 1440, height: 900 });
   });
-  console.log('Thread passed: read POST, receipts, live delivery, reply jump, literal full text, held retry key, budget banner, inline approvals, join notice');
+  console.log('Thread passed: read POST, receipts, live delivery, reply jump, literal full text, held retry key, budget banner, inline approvals, join notice, grokbot wake_idle preselect stays sticky');
 } finally { await cleanBuild(); }

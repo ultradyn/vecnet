@@ -11,6 +11,7 @@ try {
     allowConsole(/status of 403/);
     allowConsole(/status of 429/);
     allowConsole(/status of 501/);
+    allowConsole(/status of 503/);
     const sends = [];
     page.on('request', req => { if (isSend(req)) sends.push(req.postDataJSON()); });
 
@@ -143,6 +144,110 @@ try {
     assert(sends.length === 4, `expected four sends, saw ${sends.length}`);
     assert(denied.idempotency_key !== limited.idempotency_key, 'a key survived a definite rejection');
     assert(limited.idempotency_key === landed.idempotency_key, 'the key changed across a 429 retry');
+    assert(limited.priority === landed.priority && limited.content.text === landed.content.text, 'the 429 retry changed priority or body');
+
+    // Grok recipient defaults (Decisions §6). A fresh composer: non-grokbot
+    // keeps wake; any grokbot preselects wake_idle; a manual choice sticks;
+    // a failed send retries the same body and priority.
+    const on = () => view.locator('.seg button.on').getAttribute('value');
+    const quota = view.locator('#c-quota');
+    const center = sel => view.locator(sel).evaluate(el => el.scrollIntoView({ block: 'center' }));
+    await page.evaluate(() => { location.hash = '#new'; });
+    await opt(id('codex')).waitFor();
+    await pick(id('codex'));
+    assert(await on() === 'wake', 'a non-grokbot recipient changed the initial priority');
+    assert(await quota.isHidden(), 'quota note shows with no Grok Bot');
+    await center('.seg');
+    await shot('t10-compose-nongrok');
+
+    await pick(id('grok'));
+    assert(await on() === 'wake_idle', 'one grokbot among the recipients did not preselect wake_idle');
+    await quota.waitFor();
+    const mixedNote = await quota.textContent();
+    assert(/wake_idle/.test(mixedNote) && /unknown/.test(mixedNote) && /quota/.test(mixedNote), mixedNote);
+    assert(!/free/i.test(mixedNote) && !/guarantee|no wake|never wake|won'?t wake|will not wake/i.test(mixedNote), mixedNote);
+    await center('#c-quota');
+    await shot('t10-compose-mixed');
+
+    await view.getByRole('button', { name: 'Remove grok-reviewer' }).click();
+    assert(await on() === 'wake', 'removing the grokbot left wake_idle selected');
+    assert(await quota.isHidden(), 'quota note stayed after the grokbot was removed');
+    await shot('t10-compose-removed');
+
+    await view.getByRole('button', { name: 'Remove codex-hark' }).click();
+    await pick(id('grok'));
+    assert(await on() === 'wake_idle', 'a grokbot-only recipient did not preselect wake_idle');
+    await center('#c-quota');
+    await shot('t10-compose-grok');
+
+    await view.getByRole('button', { name: 'wake', exact: true }).click();
+    assert(await on() === 'wake', 'explicit wake did not stick');
+    await view.getByRole('button', { name: 'Remove grok-reviewer' }).click();
+    await pick(id('grok'));
+    assert(await on() === 'wake', 'adding the grokbot again overwrote explicit wake');
+    await center('.seg');
+    await shot('t10-compose-explicit-wake');
+
+    await view.getByRole('button', { name: 'hold', exact: true }).click();
+    assert(await on() === 'hold', 'explicit hold did not stick');
+    await view.getByRole('button', { name: 'Remove grok-reviewer' }).click();
+    await pick(id('sleuth'));
+    await pick(id('grok'));
+    assert(await on() === 'hold', 'explicit hold was overwritten when recipients changed');
+    await center('.seg');
+    await shot('t10-compose-explicit-hold');
+    await shot('t10-compose-sticky');
+
+    await view.locator('.seg button[value="wake"]').focus();
+    await page.keyboard.press('Tab');
+    assert(await page.evaluate(() => document.activeElement && document.activeElement.value) === 'wake_idle', 'Tab did not reach wake_idle');
+    await view.locator('.ptip[data-p="wake_idle"]').waitFor({ state: 'visible' });
+    await shot('t10-compose-keyboard');
+    await page.keyboard.press('Enter');
+    assert(await on() === 'wake_idle', 'keyboard activation did not select wake_idle');
+    await view.getByRole('button', { name: 'Remove grok-reviewer' }).click();
+    assert(await on() === 'wake_idle', 'a keyboard choice was not sticky');
+    await pick(id('grok'));
+
+    const retryText = 'Retry this to the Grok Bot without changing priority.';
+    await text.fill(retryText);
+    const before = sends.length;
+    await page.route('**/v1/messages', route => route.fulfill({
+      status: 503, contentType: 'application/json',
+      body: JSON.stringify({ error: { code: 'unavailable', message: 'try again' } }),
+    }));
+    await send.click();
+    await view.locator('.err', { hasText: 'unavailable: try again' }).waitFor();
+    assert(await text.inputValue() === retryText, 'the failed send changed the body');
+    assert(await on() === 'wake_idle', 'the failed send changed the priority');
+    await center('#c-quota');
+    await shot('t10-compose-retry');
+    await page.unroute('**/v1/messages');
+    await send.click();
+    await page.waitForFunction(() => location.hash.startsWith('#thread/thr_'));
+    const [firstTry, secondTry] = sends.slice(before);
+    assert(firstTry && secondTry, `retry sent ${sends.length - before} times`);
+    assert(firstTry.priority === 'wake_idle' && secondTry.priority === 'wake_idle', `priorities ${firstTry && firstTry.priority}, ${secondTry && secondTry.priority}`);
+    assert(firstTry.content.text === retryText && secondTry.content.text === retryText, 'retry changed the body');
+    assert(firstTry.idempotency_key === secondTry.idempotency_key, 'retry minted a new key');
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => { location.hash = '#new'; });
+    await opt(id('grok')).waitFor();
+    await pick(id('grok'));
+    await quota.waitFor();
+    await center('#c-quota');
+    const narrowWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    assert(narrowWidth <= 390, `compose scrolls sideways at 390 (${narrowWidth})`);
+    await shot('t10-compose-narrow');
+    await view.locator('.seg button[value="wake"]').focus();
+    await page.keyboard.press('Tab');
+    const narrowTip = view.locator('.ptip[data-p="wake_idle"]');
+    await narrowTip.waitFor({ state: 'visible' });
+    const tipBox = await narrowTip.boundingBox();
+    assert(tipBox && tipBox.x >= 0 && tipBox.x + tipBox.width <= 390, `narrow tip off screen ${JSON.stringify(tipBox)}`);
+    await shot('t10-compose-keyboard-narrow');
+    await page.setViewportSize({ width: 1440, height: 900 });
   });
-  console.log('Compose passed: eligible peers, Send gating, search, ids not names, held send, new thread opens, scope_denied and rate_limited keep the form, stable key');
+  console.log('Compose passed: eligible peers, Send gating, search, ids not names, held send, new thread opens, scope_denied and rate_limited keep the form, stable key, grokbot wake_idle preselect stays sticky and retries the same priority');
 } finally { await cleanBuild(); }

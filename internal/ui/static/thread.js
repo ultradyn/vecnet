@@ -9,7 +9,7 @@ import { ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, kindShort, kindTit
 import { markdown } from './md.js';
 import { prioritySeg } from './prio.js';
 import { createReactions } from './react.js';
-import { budgetBanner, budgetOut, canShowFull, clientLabel, clientSuspect, excerpt, FULL_TEXT_CAP, items, replyKey, replySig, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, clientLabel, clientSuspect, excerpt, FULL_TEXT_CAP, INITIAL_PRIORITY, items, replyKey, replyPriority, replyQuotaNote, replySig, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
 import { createThumbs } from './thumbs.js';
 
 const PAGE = 200, MAX_PAGES = 50, PIN_SLACK = 80;
@@ -73,7 +73,8 @@ export function mount(root, ctx) {
   const scroller = root.closest('main') || root;
   const S = {
     replyTo: null,          // null picks a default; '' is an explicit thread-level reply
-    prio: 'wake',
+    prio: INITIAL_PRIORITY,
+    prioManual: false,      // a click on the control; directory updates must not overwrite it
     pending: null,          // unsent reply: keeps its idempotency_key across retries
     sending: false,
     banner: null,           // { kind, text } from the last failed send
@@ -277,10 +278,12 @@ export function mount(root, ctx) {
     btn.addEventListener('click', () => send(ta, btn));
     ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(ta, btn); } });
     ta.addEventListener('input', () => { counter(ta); gate(); });
-    const prio = prioritySeg(p => { S.prio = p; render(); });
+    const prio = prioritySeg(p => { S.prio = p; S.prioManual = true; render(); });
+    const quota = h('p', { class: 'lede', id: 'r-quota', hidden: true });
     const wrap = h('div', { class: 'wrap' },
       h('div', { class: 'join', hidden: true, text: 'You are not a participant in this thread. Sending adds you to it.' }),
       h('div', { class: 'to', hidden: true }, h('span'), h('button', { type: 'button', title: 'Reply to the thread instead', text: '×', onclick: () => { S.replyTo = ''; render(); } })),
+      quota,
       ta,
       atts.el,
       h('div', { class: 'bar' }, prio.el, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint' }, h('span', { text: 'Drop or paste files' }), ' · ', h('span', { text: 'Enter to send' }), ' · ', h('span', { text: 'Shift+Enter for a new line' })), pick, btn));
@@ -461,6 +464,23 @@ export function mount(root, ctx) {
     to.hidden = !target;
     if (target) to.firstElementChild.textContent = clean('↳ replying to ' + nameOf(target.sender) + ': ' + excerpt(target).slice(0, 60));
     comp.querySelector('textarea').placeholder = 'Message ' + (participants ? participants.filter(p => p !== me).map(nameOf).join(', ') : 'this thread');
+    // Preselect wake_idle once any participant is grokbot (Decisions §6).
+    // A manual choice sticks. An in-flight reply or its idempotent retry
+    // keeps the priority already captured (PROTOCOL §§2.2, 5.2, 16.3).
+    S.prio = replyPriority({
+      manual: S.prioManual,
+      locked: S.sending || S.pending !== null,
+      current: S.prio,
+      participants: participants || [],
+      kindOf,
+    });
+    const note = replyQuotaNote(participants || [], kindOf);
+    const quota = comp.querySelector('#r-quota');
+    quota.hidden = !note;
+    quota.textContent = note;
+    const seg = comp.querySelector('.seg');
+    if (note) seg.setAttribute('aria-describedby', 'r-quota');
+    else seg.removeAttribute('aria-describedby');
     gate();
     for (const b of comp.querySelectorAll('.seg button')) b.className = b.value === S.prio ? 'on' : '';
     if (S.pinned) scroller.scrollTop = scroller.scrollHeight;

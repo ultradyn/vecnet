@@ -7,7 +7,7 @@ import { createAttachments } from './attach.js';
 import { avatar, h, idText } from './dom.js';
 import { kindShort } from './format.js';
 import { prioritySeg } from './prio.js';
-import { buildSend, canSend, counter, eligible, errorText, keepKey, keyFor, matches, sendRefusal } from './compose-model.js';
+import { anyGrokbot, buildSend, canSend, composePriority, counter, eligible, errorText, grokQuotaNote, INITIAL_PRIORITY, keepKey, keyFor, matches, sendRefusal } from './compose-model.js';
 
 function randKey() {
   const b = crypto.getRandomValues(new Uint8Array(16));
@@ -18,7 +18,8 @@ export function mount(root, ctx) {
   const { api, store, me, nameOf, kindOf, peers, toast, nav } = ctx;
   const S = {
     recipients: [],
-    priority: 'wake',
+    priority: INITIAL_PRIORITY,
+    priorityManual: false, // a click on the control; directory updates must not overwrite it
     pending: null,   // {key, sig}: the unsent body keeps its idempotency_key across retries
     sending: false,
     error: '',
@@ -31,13 +32,14 @@ export function mount(root, ctx) {
   const picked = h('div', { class: 'picked', 'aria-live': 'polite' });
   const opts = h('div', { class: 'opts', role: 'group', 'aria-label': 'Peers' });
   const titleIn = h('input', { type: 'text', id: 'c-title', maxlength: '200', autocomplete: 'off', placeholder: 'Optional' });
-  const prio = prioritySeg(p => { S.priority = p; render(); }), seg = prio.seg;
+  const prio = prioritySeg(p => { S.priority = p; S.priorityManual = true; render(); }), seg = prio.seg;
   const text = h('textarea', { id: 'c-text', rows: '6', placeholder: 'Write the first message' });
   const count = h('span', { class: 'bytes' });
   const history = h('select', { id: 'c-history' },
     h('option', { value: 'from_join', text: 'from_join: people added later see only what follows' }),
     h('option', { value: 'full', text: 'full: people added later see the whole thread' }));
   const locked = h('input', { type: 'checkbox', id: 'c-locked' });
+  const quota = h('p', { class: 'lede', id: 'c-quota', hidden: true });
   const err = h('p', { class: 'err', role: 'alert' });
   const send = h('button', { type: 'submit', class: 'btn pri', text: 'Send' });
   const attachBtn = h('button', { type: 'button', class: 'btn', text: 'Attach', title: 'Attach files (or drop them on the form, or paste a screenshot into the message)' });
@@ -49,6 +51,7 @@ export function mount(root, ctx) {
     h('div', { class: 'row' },
       h('div', { class: 'field grow' }, h('label', { for: 'c-title', text: 'Title' }), titleIn),
       h('div', { class: 'field' }, h('span', { class: 'lbl', text: 'Priority' }), prio.el)),
+    quota,
     h('div', { class: 'field' },
       h('label', { for: 'c-text', text: 'Message' }),
       h('div', { class: 'wrap' }, text, att.el, h('div', { class: 'bar' }, count, h('span', { class: 'hint', text: 'Drop or paste files · Ctrl+Enter to send' })))),
@@ -103,8 +106,27 @@ export function mount(root, ctx) {
     }
   }
 
+  // Preselect wake_idle once any recipient is grokbot (Decisions §6). A manual
+  // choice sticks. An in-flight send or its idempotent retry keeps the
+  // priority already captured (PROTOCOL §§2.2, 5.2).
+  function syncPriority() {
+    S.priority = composePriority({
+      manual: S.priorityManual,
+      locked: S.sending || S.pending !== null,
+      current: S.priority,
+      recipients: S.recipients,
+      peers: peers.get(),
+    });
+  }
+
   function render() {
     if (gone) return;
+    syncPriority();
+    const note = grokQuotaNote(anyGrokbot(S.recipients, peers.get()));
+    quota.hidden = !note;
+    quota.textContent = note;
+    if (note) seg.setAttribute('aria-describedby', 'c-quota');
+    else seg.removeAttribute('aria-describedby');
     renderPicked();
     renderOpts();
     for (const b of seg.querySelectorAll('button')) b.className = b.value === S.priority ? 'on' : '';
