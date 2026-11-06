@@ -16,6 +16,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 const (
@@ -28,8 +29,6 @@ const (
 	// inboxHintsW is the width from which the status line holds every key.
 	inboxHintsW = 120
 )
-
-var inboxSelBg = lipgloss.Color("#1e293b")
 
 // inboxRow is one line of the typed list. Exactly one of apr, dlq, sub and dly
 // is set. key names the item across reloads.
@@ -580,17 +579,33 @@ func (s *inboxScreen) View(m *Model, w, h int) string {
 	for _, row := range rows {
 		counts[row.tag]++
 	}
-	title := fmt.Sprintf("inbox %d items · %d unread · apr %d · dlq %d", len(rows), m.Data.Inbox.Unread, counts["APR"], counts["DLQ"])
 	listBody := s.viewRows(rows, at, peers, m, leftW-2, listH-2)
 	s.noteListHits(m, rows, leftW, listH, h)
-	list := Pane(title, leftW, listH, true, listBody)
-	events := Pane("your event log  GET /v1/events -f · not messages, never replied to", leftW, h-listH, false, s.viewInboxLog(peers, m, leftW-2, h-listH-2))
+	list := PaneRich(m.th, inboxTitle(m.th, len(rows), m.Data.Inbox.Unread, counts["APR"], counts["DLQ"]), leftW, listH, true, listBody)
+	events := Pane(m.th, "your event log  GET /v1/events -f · not messages, never replied to", leftW, h-listH, false, s.viewInboxLog(peers, m, leftW-2, h-listH-2))
 	var row *inboxRow
 	if at < len(rows) {
 		row = &rows[at]
 	}
-	detail := Pane("detail", w-leftW, h, false, s.viewDetail(row, peers, m, w-leftW-4, h-2))
+	detail := Pane(m.th, "detail", w-leftW, h, false, s.viewDetail(row, peers, m, w-leftW-4, h-2))
 	return lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.JoinVertical(lipgloss.Left, list, events), detail)
+}
+
+// inboxTitle is the list's title: `2 unread` in unread, `apr 2` in warn and
+// `dlq 3` in error when they are above zero, the rest in the title's style.
+func inboxTitle(th *theme.Theme, items, unread, apr, dlq int) string {
+	head := PaneTitle(th, true)
+	count := func(n int, label string, hot theme.Role) string {
+		if n > 0 {
+			return th.Fg(hot).Render(label)
+		}
+		return head.Render(label)
+	}
+	sep := head.Render(" · ")
+	return head.Render(fmt.Sprintf("inbox %d items", items)) + sep +
+		count(unread, fmt.Sprintf("%d unread", unread), theme.Unread) + sep +
+		count(apr, fmt.Sprintf("apr %d", apr), theme.Warn) + sep +
+		count(dlq, fmt.Sprintf("dlq %d", dlq), theme.Error)
 }
 
 func (s *inboxScreen) viewRows(rows []inboxRow, at int, peers inboxPeers, m *Model, w, h int) string {
@@ -672,90 +687,87 @@ func (s *inboxScreen) scrollLog(towardLatest bool) {
 }
 
 type inboxCell struct {
-	style lipgloss.Style
-	text  string
-	w     int
+	role theme.Role
+	text string
+	w    int
 }
 
+// viewRow is one list row. The selected row starts with `>` and is filled
+// across the pane's inner width (design §6.5, §7.3). Roles come from the row's
+// type and hub enums (§5.5): an unread delivery is bold, a read one muted.
 func (s *inboxScreen) viewRow(row inboxRow, selected bool, peers inboxPeers, m *Model, w int) string {
+	th := m.th
 	nameW := max(min(w/5, 15), 8)
 	textW := w - (1 + inboxTagW + 1 + inboxTimeW + 1 + nameW + 1 + 1 + inboxTailW)
-	tagStyle, textStyle := styleMuted, styleText
+	tagRole, textRole := theme.InboxTag(row.tag), theme.Text
 	var when, name string
 	var text []inboxCell
-	tail := inboxCell{style: styleMuted}
+	tail := inboxCell{role: theme.Muted}
 	sending := s.locks[row.key] != nil
 	switch {
 	case row.apr != nil:
 		a := row.apr
-		tagStyle = styleAccent
+		tagRole = theme.Accent
 		// An open approval carries no creation time; its expiry is the time it has.
 		when, name = inboxClock(a.ExpiresAt, "15:04", m), peers.name(a.Requester)
-		text = []inboxCell{{textStyle, Clean(inboxQuestion(*a)), textW}}
+		text = []inboxCell{{textRole, Clean(inboxQuestion(*a)), textW}}
 		if left, gone := inboxLeft(*a, m); gone {
-			tail = inboxCell{style: styleBad, text: left}
+			tail = inboxCell{role: theme.Error, text: left}
 		} else {
-			tail = inboxCell{style: styleWarn, text: "exp " + left}
+			tail = inboxCell{role: theme.Warn, text: "exp " + left}
 		}
 	case row.dlq != nil:
 		d := row.dlq
-		tagStyle = styleBad
+		tagRole = theme.Error
 		when, name = inboxClock(d.UpdatedAt, "15:04", m), peers.name(d.Recipient)
 		status := "---"
 		if d.LastStatus != nil {
 			status = fmt.Sprint(*d.LastStatus)
 		}
-		text = []inboxCell{{styleBad, status, 3}, {styleMuted, inboxClass(d.Class), textW - 4}}
+		text = []inboxCell{{statusRole(d.LastStatus, theme.Muted), status, 3}, {theme.Muted, inboxClass(d.Class), textW - 4}}
 		tail.text = inboxTries(d.Attempt)
 	case row.sub != nil:
 		a := row.sub
 		// One colour per health in every screen: the subs tab's.
-		healthStyle := subsHealthStyle(a.Health)
-		tagStyle = healthStyle
+		health := theme.Health(a.Health)
+		tagRole = health
 		when, name = inboxClock(a.At, "15:04", m), peers.name(a.PeerID)
-		health := Clean(a.Health)
-		text = []inboxCell{{healthStyle, health, textW}}
+		text = []inboxCell{{health, Clean(a.Health), textW}}
 		if textW > 16 {
 			// The name column already says whose it is.
 			summary := strings.TrimPrefix(Clean(a.Summary), name+" · ")
-			text = []inboxCell{{healthStyle, health, 15}, {styleMuted, summary, textW - 16}}
+			text = []inboxCell{{health, Clean(a.Health), 15}, {theme.Muted, summary, textW - 16}}
 		}
 		if a.Action == "resume" {
-			tail = inboxCell{style: styleAccent, text: "r resume"}
+			tail = inboxCell{role: theme.Action, text: "r resume"}
 		}
 	case row.dly != nil:
 		d := row.dly
-		if row.tag == "WAKE" {
-			tagStyle = styleWarn
-		}
+		textRole = theme.Bold
 		if d.ReadAt != nil {
-			textStyle = styleMuted
+			textRole = theme.Muted
 		}
 		when, name = inboxClock(d.CreatedAt, "15:04", m), peers.name(d.Sender)
-		text = []inboxCell{{textStyle, Clean(d.Excerpt), textW}}
-		tail = inboxCell{style: inboxReceiptStyle(inboxState(*d)), text: inboxGlyph(inboxState(*d))}
+		text = []inboxCell{{textRole, Clean(d.Excerpt), textW}}
+		state := inboxState(*d)
+		tail = inboxCell{role: theme.Receipt(state), text: inboxGlyph(state)}
 	}
 	if sending {
-		tail = inboxCell{style: styleAccent, text: "sending"}
+		tail = inboxCell{role: theme.Accent, text: "sending"}
 	}
 	tail.w = inboxTailW
-	cells := append([]inboxCell{{tagStyle, row.tag, inboxTagW}, {styleMuted, when, inboxTimeW}, {styleText, name, nameW}}, text...)
+	cells := append([]inboxCell{{tagRole, row.tag, inboxTagW}, {theme.Muted, when, inboxTimeW}, {theme.Text, name, nameW}}, text...)
 	cells = append(cells, tail)
-	paint := func(st lipgloss.Style, text string) string {
-		if selected {
-			st = st.Background(inboxSelBg)
-		}
-		return st.Render(text)
-	}
+	gap := th.On(selected, theme.Text).Render(" ")
 	var b strings.Builder
-	b.WriteString(paint(lipgloss.NewStyle(), " "))
+	b.WriteString(selMark(th, selected))
 	for i, cell := range cells {
 		if i > 0 {
-			b.WriteString(paint(lipgloss.NewStyle(), " "))
+			b.WriteString(gap)
 		}
-		b.WriteString(paint(cell.style, inboxCut(cell.text, cell.w)))
+		b.WriteString(th.On(selected, cell.role).Render(inboxCut(cell.text, cell.w)))
 	}
-	return b.String()
+	return selPad(th, b.String(), w, selected)
 }
 
 func inboxQuestion(a opapi.OpenApproval) string {
@@ -808,22 +820,18 @@ func inboxGlyph(state string) string {
 	return "?"
 }
 
-func inboxReceiptStyle(state string) lipgloss.Style {
-	switch state {
-	case "processed":
-		return styleGood
-	case "read":
-		return styleText
-	case "accepted":
-		return styleAccent
-	case "failed", "dead_letter":
-		return styleBad
-	}
-	return styleMuted
+func inboxField(th *theme.Theme, label, value string) string {
+	return inboxFieldAs(th, label, value, theme.Text)
 }
 
-func inboxField(label, value string) string {
-	return styleMuted.Render(fmt.Sprintf("%-9s", label)) + styleText.Render(value)
+// inboxFieldAs is a detail field whose value takes role r: an id is dim.
+func inboxFieldAs(th *theme.Theme, label, value string, r theme.Role) string {
+	return th.Fg(theme.Muted).Render(fmt.Sprintf("%-9s", label)) + th.Fg(r).Render(value)
+}
+
+// inboxKind is a peer's kind label after its name, in the kind's hue.
+func inboxKind(th *theme.Theme, kind string) string {
+	return th.Fg(theme.Kind(kind)).Render(kind)
 }
 
 // inboxPara wraps cleaned multi-line text to w, styling each line.
@@ -837,13 +845,13 @@ func inboxPara(st lipgloss.Style, text string, w int) []string {
 
 // inboxQuote is peer text behind a rule, so no line of it can pass for one of
 // the screen's own.
-func inboxQuote(st lipgloss.Style, text string, w int) []string {
+func inboxQuote(th *theme.Theme, st lipgloss.Style, text string, w int) []string {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
 	lines := inboxPara(st, text, w-2)
 	for i, line := range lines {
-		lines[i] = styleBorder.Render("│ ") + line
+		lines[i] = th.Fg(theme.Rule).Render("│") + " " + line
 	}
 	return lines
 }
@@ -868,7 +876,7 @@ func inboxFit(lines []string, w, n int) []string {
 // always shows whole; body, a peer's text, comes after it and gets what is left,
 // so nothing a peer writes can move the prompt or push it off the pane. where
 // finishes the marker on a cut.
-func inboxDetail(fixed, body []string, h int, where string) []string {
+func inboxDetail(th *theme.Theme, fixed, body []string, h int, where string) []string {
 	left := h - len(fixed)
 	if len(body) == 0 || left <= 0 {
 		return fixed
@@ -878,7 +886,7 @@ func inboxDetail(fixed, body []string, h int, where string) []string {
 		left--
 	}
 	if len(body) > left {
-		more := styleMuted.Render(fmt.Sprintf("… %d more lines%s", len(body)-left+1, where))
+		more := th.Fg(theme.Muted).Render(fmt.Sprintf("… %d more lines%s", len(body)-left+1, where))
 		body = append(body[:left-1:left-1], more)
 	}
 	return append(fixed, body...)
@@ -888,7 +896,7 @@ func (s *inboxScreen) viewDetail(row *inboxRow, peers inboxPeers, m *Model, w, h
 	var lines []string
 	switch {
 	case row == nil:
-		lines = []string{styleMuted.Render("nothing waiting on you")}
+		lines = []string{m.th.Fg(theme.Muted).Render("nothing waiting on you")}
 	case row.apr != nil:
 		lines = s.viewApproval(*row.apr, peers, m, w, h)
 	case row.dlq != nil:
@@ -905,27 +913,28 @@ func (s *inboxScreen) viewDetail(row *inboxRow, peers inboxPeers, m *Model, w, h
 }
 
 func (s *inboxScreen) viewApproval(a opapi.OpenApproval, peers inboxPeers, m *Model, w, h int) []string {
+	th := m.th
 	head := []string{
-		styleAccent.Render("approval_request") + "  " + styleWarn.Render("wake"),
+		th.Fg(theme.Accent).Render("approval_request") + "  " + th.Fg(theme.Priority("wake")).Render("wake"),
 		"",
-		inboxField("from", peers.name(a.Requester)+" ") + styleMuted.Render(peers.kind(a.Requester)),
-		inboxField("thread", Clean(a.ThreadTitle)),
-		inboxField("message", Clean(a.MessageID)),
+		inboxField(th, "from", peers.name(a.Requester)+" ") + inboxKind(th, peers.kind(a.Requester)),
+		inboxField(th, "thread", Clean(a.ThreadTitle)),
+		inboxFieldAs(th, "message", Clean(a.MessageID), theme.Dim),
 		"",
 	}
 	left, gone := inboxLeft(a, m)
 	when := inboxClock(a.ExpiresAt, "15:04", m)
-	expires := styleMuted.Render("expires "+when+", in ") + styleWarn.Render(left)
+	expires := th.Fg(theme.Muted).Render("expires "+when+", in ") + th.Fg(theme.Warn).Render(left)
 	var foot []string
 	switch {
 	case gone:
-		foot = []string{styleMuted.Render("expired at " + when), styleBad.Render("expired")}
+		foot = []string{th.Fg(theme.Muted).Render("expired at " + when), th.Fg(theme.Error).Render("expired")}
 	case s.locks["apr:"+a.ApprovalID] != nil:
-		foot = []string{expires, styleAccent.Render("sending your answer")}
+		foot = []string{expires, th.Fg(theme.Accent).Render("sending your answer")}
 	case s.prompt != nil && s.prompt.answer != nil:
-		foot = append([]string{expires}, inboxPara(styleAccent, fmt.Sprintf("answer with 1-%d, any other key cancels", len(a.Options)), w)...)
+		foot = append([]string{expires}, inboxPara(th.Fg(theme.Action), fmt.Sprintf("answer with 1-%d, any other key cancels", len(a.Options)), w)...)
 	default:
-		foot = []string{expires, styleMuted.Render("press a to answer")}
+		foot = []string{expires, th.Fg(theme.Action).Render("press a to answer")}
 	}
 	// What a digit sends comes first. Every option gets an equal share of the
 	// lines left beyond one for the question and one for a marker, which the
@@ -936,11 +945,11 @@ func (s *inboxScreen) viewApproval(a opapi.OpenApproval, peers inboxPeers, m *Mo
 	var options []string
 	for i, option := range a.Options {
 		for j, line := range inboxFit(inboxFold(Clean(option), w-6), w-6, share) {
-			label := "  " + styleBorder.Render("│ ")
+			label := "  " + th.Fg(theme.Rule).Render("│") + " "
 			if j == 0 {
-				label = styleAccent.Render(fmt.Sprintf("[%d]", i+1)) + " "
+				label = th.Fg(theme.Action).Render(fmt.Sprintf("[%d]", i+1)) + " "
 			}
-			options = append(options, "  "+label+styleText.Render(line))
+			options = append(options, "  "+label+th.Fg(theme.Text).Render(line))
 		}
 	}
 	room -= len(options)
@@ -953,7 +962,7 @@ func (s *inboxScreen) viewApproval(a opapi.OpenApproval, peers inboxPeers, m *Mo
 	question := inboxQuestion(a)
 	var body []string
 	if a.Text != question {
-		body = inboxQuote(styleText, CleanBody(a.Text), w)
+		body = inboxQuote(th, th.Fg(theme.Muted), CleanBody(a.Text), w)
 	}
 	// The question has what is left, ahead of the requester's text, less the
 	// line the marker needs if anything will not fit. The pane does not scroll,
@@ -965,9 +974,9 @@ func (s *inboxScreen) viewApproval(a opapi.OpenApproval, peers inboxPeers, m *Mo
 	}
 	ask := slices.Clone(inboxFit(all, w-2, shown))
 	for i, line := range ask {
-		ask[i] = styleAccent.Render("? " + line)
+		ask[i] = th.Fg(theme.Accent).Render("?") + " " + th.Fg(theme.Bold).Render(line)
 	}
-	return inboxDetail(slices.Concat(head, ask, options, gap, foot), slices.Concat(all[shown:], body), h, " in thread")
+	return inboxDetail(th, slices.Concat(head, ask, options, gap, foot), slices.Concat(all[shown:], body), h, " in thread")
 }
 
 func (s *inboxScreen) viewDeadLetter(d opapi.DeadLetter, peers inboxPeers, m *Model, w, h int) []string {
@@ -975,26 +984,27 @@ func (s *inboxScreen) viewDeadLetter(d opapi.DeadLetter, peers inboxPeers, m *Mo
 	if d.LastStatus != nil {
 		status = fmt.Sprint(*d.LastStatus)
 	}
+	th := m.th
 	lines := []string{
-		styleBad.Render("dead_letter") + "  " + styleMuted.Render(inboxClass(d.Class)),
+		th.Fg(theme.Error).Render("dead_letter") + "  " + th.Fg(theme.Muted).Render(inboxClass(d.Class)),
 		"",
-		inboxField("from", peers.name(d.Sender)),
-		inboxField("to", peers.name(d.Recipient)+" ") + styleMuted.Render(peers.kind(d.Recipient)),
-		inboxField("thread", inboxThreadTitle(m, d.ThreadID)),
-		inboxField("message", Clean(d.MessageID)),
-		inboxField("delivery", Clean(d.DeliveryID)),
-		inboxField("attempts", fmt.Sprint(d.Attempt)),
-		inboxField("status", status),
-		inboxField("updated", inboxClock(d.UpdatedAt, "15:04:05", m)),
+		inboxField(th, "from", peers.name(d.Sender)),
+		inboxField(th, "to", peers.name(d.Recipient)+" ") + inboxKind(th, peers.kind(d.Recipient)),
+		inboxField(th, "thread", inboxThreadTitle(m, d.ThreadID)),
+		inboxFieldAs(th, "message", Clean(d.MessageID), theme.Dim),
+		inboxFieldAs(th, "delivery", Clean(d.DeliveryID), theme.Dim),
+		inboxFieldAs(th, "attempts", fmt.Sprint(d.Attempt), theme.Warn),
+		inboxFieldAs(th, "status", status, statusRole(d.LastStatus, theme.Muted)),
+		inboxField(th, "updated", inboxClock(d.UpdatedAt, "15:04:05", m)),
 		"",
 	}
 	switch {
 	case s.locks["dlq:"+d.DeliveryID] != nil:
-		lines = append(lines, styleAccent.Render("sending"))
+		lines = append(lines, th.Fg(theme.Accent).Render("sending"))
 	case s.prompt != nil && s.prompt.discard != nil:
-		lines = append(lines, inboxPara(styleAccent, "press y to discard, any other key cancels", w)...)
+		lines = append(lines, inboxPara(th.Fg(theme.Warn), "press y to discard, any other key cancels", w)...)
 	default:
-		lines = append(lines, inboxPara(styleMuted, "press r to retry, x to discard", w)...)
+		lines = append(lines, inboxPara(th.Fg(theme.Action), "press r to retry, x to discard", w)...)
 	}
 	// Two labelled blocks, the hub's error then the message; the message is
 	// left out when it only repeats the error.
@@ -1003,18 +1013,18 @@ func (s *inboxScreen) viewDeadLetter(d opapi.DeadLetter, peers inboxPeers, m *Mo
 	if d.LastError != nil {
 		lastErr = CleanBody(*d.LastError)
 	}
-	if quoted := inboxQuote(styleBad, lastErr, w); len(quoted) > 0 {
-		body = append(append(body, styleMuted.Render("error")), quoted...)
+	if quoted := inboxQuote(th, th.Fg(theme.Error), lastErr, w); len(quoted) > 0 {
+		body = append(append(body, th.Fg(theme.Muted).Render("error")), quoted...)
 	}
 	if text := CleanBody(d.Excerpt); strings.TrimSpace(text) != strings.TrimSpace(lastErr) {
-		if quoted := inboxQuote(styleText, text, w); len(quoted) > 0 {
+		if quoted := inboxQuote(th, th.Fg(theme.Text), text, w); len(quoted) > 0 {
 			if len(body) > 0 {
 				body = append(body, "")
 			}
-			body = append(append(body, styleMuted.Render("message")), quoted...)
+			body = append(append(body, th.Fg(theme.Muted).Render("message")), quoted...)
 		}
 	}
-	return inboxDetail(lines, body, h, "")
+	return inboxDetail(th, lines, body, h, "")
 }
 
 // inboxThreadTitle is the thread's title, as the web shows it, with the id
@@ -1027,38 +1037,40 @@ func inboxThreadTitle(m *Model, id string) string {
 }
 
 func viewInboxSub(a opapi.Attention, peers inboxPeers, m *Model, w, h int) []string {
+	th := m.th
 	lines := []string{
-		styleWarn.Render("subscription") + "  " + subsHealthStyle(a.Health).Render(Clean(a.Health)),
+		th.Fg(theme.Warn).Render("subscription") + "  " + th.Fg(theme.Health(a.Health)).Render(Clean(a.Health)),
 		"",
-		inboxField("peer", peers.name(a.PeerID)+" ") + styleMuted.Render(peers.kind(a.PeerID)),
-		inboxField("id", Clean(a.ID)),
-		inboxField("seen", inboxClock(a.At, "15:04:05", m)),
+		inboxField(th, "peer", peers.name(a.PeerID)+" ") + inboxKind(th, peers.kind(a.PeerID)),
+		inboxFieldAs(th, "id", Clean(a.ID), theme.Dim),
+		inboxField(th, "seen", inboxClock(a.At, "15:04:05", m)),
 		"",
 	}
 	if a.Action == "resume" {
-		lines = append(lines, styleMuted.Render("press r to resume"))
+		lines = append(lines, th.Fg(theme.Action).Render("press r to resume"))
 	} else {
-		lines = append(lines, styleMuted.Render("resume would not help here"))
+		lines = append(lines, th.Fg(theme.Muted).Render("resume would not help here"))
 	}
-	return inboxDetail(lines, inboxQuote(styleText, CleanBody(a.Summary), w), h, "")
+	return inboxDetail(th, lines, inboxQuote(th, th.Fg(theme.Text), CleanBody(a.Summary), w), h, "")
 }
 
 func viewInboxDelivery(d opapi.InboxDelivery, peers inboxPeers, m *Model, w, h int) []string {
+	th := m.th
 	state := inboxState(d)
 	lines := []string{
-		styleAccent.Render(Clean(d.Kind)) + "  " + styleWarn.Render(Clean(d.Priority)),
+		th.Fg(theme.Accent).Render(Clean(d.Kind)) + "  " + th.Fg(theme.Priority(d.Priority)).Render(Clean(d.Priority)),
 		"",
-		inboxField("from", peers.name(d.Sender)+" ") + styleMuted.Render(peers.kind(d.Sender)),
-		inboxField("thread", Clean(d.ThreadTitle)),
-		inboxField("message", Clean(d.MessageID)),
-		inboxField("at", inboxClock(d.CreatedAt, "15:04:05", m)),
-		inboxField("receipt", "") + inboxReceiptStyle(state).Render(inboxGlyph(state)+" "+state),
+		inboxField(th, "from", peers.name(d.Sender)+" ") + inboxKind(th, peers.kind(d.Sender)),
+		inboxField(th, "thread", Clean(d.ThreadTitle)),
+		inboxFieldAs(th, "message", Clean(d.MessageID), theme.Dim),
+		inboxField(th, "at", inboxClock(d.CreatedAt, "15:04:05", m)),
+		inboxField(th, "receipt", "") + th.Fg(theme.Receipt(state)).Render(inboxGlyph(state)+" "+state),
 	}
 	if d.Attachments > 0 {
-		lines = append(lines, inboxField("files", fmt.Sprintf("⎘ %d", d.Attachments)))
+		lines = append(lines, inboxFieldAs(th, "files", fmt.Sprintf("⎘ %d", d.Attachments), theme.Info))
 	}
-	lines = append(append(lines, ""), inboxPara(styleMuted, "press enter to open the thread", w)...)
-	return inboxDetail(lines, inboxQuote(styleText, CleanBody(d.Excerpt), w), h, "")
+	lines = append(append(lines, ""), inboxPara(th.Fg(theme.Action), "press enter to open the thread", w)...)
+	return inboxDetail(th, lines, inboxQuote(th, th.Fg(theme.Text), CleanBody(d.Excerpt), w), h, "")
 }
 
 // viewInboxLog is the newest events that fit, oldest first. Deliveries are
@@ -1086,17 +1098,11 @@ func (s *inboxScreen) viewInboxLog(peers inboxPeers, m *Model, w, h int) string 
 	lines := make([]string, 0, h)
 	for i := s.logTop; i < len(evs) && len(lines) < h; i++ {
 		ev := evs[i]
-		kind := styleAccent
-		switch ev.Type {
-		case "receipt":
-			kind = styleGood
-		case "presence":
-			kind = styleWarn
-		}
-		lines = append(lines, " "+styleMuted.Render(inboxCut(Clean(ev.Cursor), cursorW))+
-			" "+styleMuted.Render(inboxCut(inboxClock(ev.At, "15:04:05", m), 8))+
-			" "+kind.Render(inboxCut(Clean(ev.Type), typeW))+
-			" "+styleText.Render(inboxCut(inboxEventText(ev, peers), w-1-cursorW-1-8-1-typeW-1)))
+		th := m.th
+		lines = append(lines, " "+th.Fg(theme.Dim).Render(inboxCut(Clean(ev.Cursor), cursorW))+
+			" "+th.Fg(theme.Muted).Render(inboxCut(inboxClock(ev.At, "15:04:05", m), 8))+
+			" "+th.Fg(theme.EventType(ev.Type)).Render(inboxCut(Clean(ev.Type), typeW))+
+			" "+th.Fg(theme.Text).Render(inboxCut(inboxEventText(ev, peers), w-1-cursorW-1-8-1-typeW-1)))
 	}
 	slices.Reverse(lines)
 	return strings.Join(lines, "\n")

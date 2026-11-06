@@ -21,10 +21,12 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 const (
@@ -2584,7 +2586,8 @@ func TestReactionChipsRow(t *testing.T) {
 	if chips < 0 || chips+1 >= len(lines) || !strings.Contains(lines[chips+1], "grok✓✓") || !strings.Contains(lines[chips+1], "max●") {
 		t.Fatalf("the chips row is not right above the root's receipts:\n%s", frame)
 	}
-	if !strings.Contains(lines[chips], "│"+chatIndent+"[+1 2]") && !strings.Contains(lines[chips], " "+chatIndent+"[+1 2]") {
+	// The log is the focused pane, so its border is heavy.
+	if !strings.Contains(lines[chips], "┃"+chatIndent+"[+1 2]") && !strings.Contains(lines[chips], " "+chatIndent+"[+1 2]") {
 		t.Fatalf("chips row is not indented by chatIndent: %q", lines[chips])
 	}
 	refuseFrame(t, frame, "[+1: ", "[check: ")
@@ -2914,5 +2917,26 @@ func TestChatOperatorCLILabel(t *testing.T) {
 	assertChatInert(t, m.View().Content)
 	for _, size := range [][2]int{{140, 42}, {80, 24}} {
 		assertFrame(t, plainAt(t, m, size[0], size[1]), size[0], size[1])
+	}
+}
+
+// The chat title's budget takes the thread budget map, as the dash does: 0 is
+// warn, otherwise muted (design §5.5).
+func TestChatTitleBudgetRole(t *testing.T) {
+	th := theme.New(theme.TrueColor, true)
+	for _, tc := range []struct {
+		budget int
+		role   theme.Role
+	}{{494, theme.Muted}, {0, theme.Warn}} {
+		a := chatSeed()
+		*a.threads.Threads[0].Thread.BudgetRemaining = tc.budget
+		m, _ := chatModel(t, a, newClock())
+		title := strings.Split(frameOf(m, th), "\n")[1]
+		if want := th.Fg(tc.role).Render(fmt.Sprint(tc.budget)); !strings.Contains(title, want) {
+			t.Errorf("budget %d: %q not in %q", tc.budget, want, title)
+		}
+		if plain := ansi.Strip(title); !strings.Contains(plain, fmt.Sprintf("· budget %d ━", tc.budget)) {
+			t.Errorf("budget %d: plain %q", tc.budget, plain)
+		}
 	}
 }

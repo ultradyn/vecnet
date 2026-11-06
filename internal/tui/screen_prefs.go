@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/XertroV/vecnet/internal/prefs"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 // prefsScreen is the read-only preferences view opened with :prefs.
@@ -50,20 +51,22 @@ func (s *prefsScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
 
 func (s *prefsScreen) View(m *Model, w, h int) string {
 	m.addHit(m.hitX, m.hitY, w, h, hitScroll, "prefs.list")
+	th := m.th
+	muted := th.Fg(theme.Muted)
 	var body string
 	switch {
 	case m.Data.PrefsNote != "":
-		body = styleWarn.Render("preferences unavailable") + "\n" + styleMuted.Render(Clean(m.Data.PrefsNote))
+		body = th.Fg(theme.Warn).Render("preferences unavailable") + "\n" + muted.Render(Clean(m.Data.PrefsNote))
 	case m.Data.Errs["prefs"] != nil:
-		body = styleBad.Render("could not load preferences") + "\n" + styleMuted.Render(Clean(m.Data.Errs["prefs"].Error()))
+		body = th.Fg(theme.Error).Render("could not load preferences") + "\n" + muted.Render(Clean(m.Data.Errs["prefs"].Error()))
 	case !m.Data.PrefsKnown:
-		body = styleMuted.Render("loading preferences")
+		body = muted.Render("loading preferences")
 	case len(prefRows(m.Data.Prefs)) == 0:
-		body = styleMuted.Render("no preferences")
+		body = muted.Render("no preferences")
 	default:
 		body = s.list(m, w-2, h-2)
 	}
-	return Pane("preferences", w, h, true, body)
+	return Pane(th, "preferences", w, h, true, body)
 }
 
 func (s *prefsScreen) list(m *Model, width, height int) string {
@@ -75,8 +78,8 @@ func (s *prefsScreen) list(m *Model, width, height int) string {
 	if height < 1 || len(rows) == 0 {
 		return ""
 	}
-	listLines := s.prefListLines(rows)
-	help := s.helpLines(rows, width)
+	listLines := s.prefListLines(m.th, rows, width)
+	help := s.helpLines(m.th, rows, width)
 	lines := make([]string, 0, height)
 	need := len(listLines) + 1 + len(help)
 	from, n := 0, len(listLines)
@@ -158,20 +161,24 @@ func prefLineIndexes(rows []prefs.Descriptor) []int {
 	return out
 }
 
-func (s *prefsScreen) prefListLines(rows []prefs.Descriptor) []string {
+// prefListLines is the grouped list: a bold label per group, then one row per
+// preference. Its source and state take their roles (design §5.5); the
+// selected row has `>` and the selection fill across width.
+func (s *prefsScreen) prefListLines(th *theme.Theme, rows []prefs.Descriptor, width int) []string {
 	lines := make([]string, 0, len(rows)+4)
 	last := ""
 	for i, d := range rows {
 		if d.Group != last {
 			last = d.Group
-			lines = append(lines, styleAccent.Render(prefGroupTitle(d.Group)))
+			lines = append(lines, sectionLabel(th, prefGroupTitle(d.Group)))
 		}
-		marker := "  "
-		if i == s.sel {
-			marker = "> "
-		}
-		line := fmt.Sprintf("%s%-32s %-8s %-8s %s", marker, d.Key, formatTUIPref(d), d.Source, prefLiveLabel(d))
-		lines = append(lines, styleText.Render(line))
+		sel := i == s.sel
+		text := th.On(sel, theme.Text)
+		line := selMark(th, sel) + text.Render(" ") +
+			text.Render(fmt.Sprintf("%-32s %-8s ", d.Key, formatTUIPref(d))) +
+			th.On(sel, theme.PrefSource(string(d.Source))).Render(fmt.Sprintf("%-8s", d.Source)) + text.Render(" ") +
+			th.On(sel, theme.PrefState(prefLiveLabel(d))).Render(prefLiveLabel(d))
+		lines = append(lines, selPad(th, line, width, sel))
 	}
 	return lines
 }
@@ -241,32 +248,35 @@ func prefsScroll(offset, selLine, window, total int) int {
 	return offset
 }
 
-func (s *prefsScreen) helpLines(rows []prefs.Descriptor, width int) []string {
+// helpLines is the selected preference: its label bold, its description in
+// text, then range, source, state and any lock (design §8.7).
+func (s *prefsScreen) helpLines(th *theme.Theme, rows []prefs.Descriptor, width int) []string {
+	muted := th.Fg(theme.Muted)
 	if len(rows) == 0 || s.sel >= len(rows) {
-		return []string{styleMuted.Render("no preferences")}
+		return []string{muted.Render("no preferences")}
 	}
 	d := rows[s.sel]
 	label := Clean(d.Label)
 	if label == "" {
 		label = d.Key
 	}
-	lines := []string{styleAccent.Render(label)}
+	lines := []string{th.Fg(theme.Bold).Render(label)}
 	if desc := Clean(d.Description); desc != "" {
 		for _, line := range strings.Split(ansi.Wordwrap(desc, max(width, 1), ""), "\n") {
-			lines = append(lines, styleMuted.Render(line))
+			lines = append(lines, th.Fg(theme.Text).Render(line))
 		}
 	}
 	if r := Clean(prefRangeText(d)); r != "" {
-		lines = append(lines, styleMuted.Render(r))
+		lines = append(lines, muted.Render(r))
 	}
 	source := "source " + string(d.Source)
 	if d.Origin != "" {
 		source += " " + Clean(d.Origin)
 	}
-	lines = append(lines, styleMuted.Render(source))
-	lines = append(lines, styleMuted.Render(prefLiveLabel(d)))
+	lines = append(lines, muted.Render(source))
+	lines = append(lines, th.Fg(theme.PrefState(prefLiveLabel(d))).Render(prefLiveLabel(d)))
 	if d.UnavailableReason != "" {
-		lines = append(lines, styleMuted.Render("lock: "+Clean(d.UnavailableReason)))
+		lines = append(lines, th.Fg(theme.Warn).Render("lock: "+Clean(d.UnavailableReason)))
 	}
 	return lines
 }

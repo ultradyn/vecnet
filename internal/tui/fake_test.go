@@ -459,8 +459,8 @@ func (s *staticScreen) Update(msg tea.Msg, _ *Model) tea.Cmd {
 	}
 	return nil
 }
-func (s *staticScreen) View(_ *Model, w, h int) string {
-	return Pane(s.title, w, h, true, "body of "+s.title)
+func (s *staticScreen) View(m *Model, w, h int) string {
+	return Pane(m.th, s.title, w, h, true, "body of "+s.title)
 }
 
 func staticScreens() []Screen {

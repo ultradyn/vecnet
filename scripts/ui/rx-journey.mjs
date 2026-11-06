@@ -59,7 +59,7 @@ try {
       await keys(':');
       await waitFor('COMMAND');
       await keys('thread 1', 'Enter');
-      await waitFor('─ Reaction journey');
+      await waitFor('━ Reaction journey');
       await waitFor('Reaction journey agent target');
       const agentCursor = (await events('codex', 'head')).next_cursor;
 

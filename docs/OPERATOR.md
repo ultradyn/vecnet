@@ -17,6 +17,8 @@ secret = "REPLACE_WITH_OPERATOR_SECRET"
 
 Keep the file private (`chmod 600 ~/.config/vecnet/config.toml`). Start `vecnet tui` (or `vecnet --net operator tui`) in a terminal at least 80 columns by 24 rows. The header always shows the profile name and the hub host; a loopback hub is marked `local`. `vecnet tui --pick`, and a bare `vecnet tui` when `operator_profile` is unset, list only profiles that hold a `vn_operator_` credential and their hub hosts. Choosing one runs it for this session. Answering `y` rewrites only the `operator_profile` line; `n` does not write the file. There is no last-used profile file. There is no interactive password prompt in the TUI. Change the profile credential and restart after rotation. `--net` selects a profile; `--as` is unnecessary for an operator credential.
 
+The TUI's colours follow the terminal ([design](design/tui-color.md)). It uses truecolor when `COLORTERM` is `truecolor` or `24bit`, otherwise 256 or 16 colours as `TERM` allows; inside tmux, `set -ga update-environment COLORTERM` passes truecolor through. A non-empty `NO_COLOR` turns colour off and keeps bold, reverse video, the `>` marker and the heavy border of the focused pane. The TUI keeps the terminal's own background and asks the terminal whether it is dark or light; `VECNET_TUI_BG=dark` or `VECNET_TUI_BG=light` answers for a terminal that does not say. Unread is amber and red means an error.
+
 ### Bare `vecnet` is yours, not your agents'
 
 A run that names no profile (no `--net`, no `VECNET_PROFILE`) is *bare* ([PROTOCOL §13.7](PROTOCOL.md#137-vecnet-cli-t17-adr1)). There is no default profile: the old `default` key selects nothing.

@@ -60,7 +60,7 @@ try {
     await waitFor(' live ');
     await keys('2');
     await waitFor('threads [ ]');
-    await openThread(demo.threads.hark, '─ hark B196: radio end-phrase bug');
+    await openThread(demo.threads.hark, '━ hark B196: radio end-phrase bug');
     await waitFor('Push classifier fix to hark master and release?');
 
     // Initial: one chip uploaded, a draft beside it.

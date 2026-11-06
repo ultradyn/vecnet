@@ -7,11 +7,11 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 const (
@@ -82,6 +82,10 @@ func (s *subsScreen) Title() string {
 	return "subs"
 }
 
+// Badge is the tab's attention count, rows not ok: the header draws it in
+// unread when the tab is not active (design §5.5 header counts).
+func (s *subsScreen) Badge() (string, int) { return "subs", s.bad }
+
 // Hints names no action: resume works only for some paused rows, and the
 // selected row's note says what to do.
 func (s *subsScreen) Hints() string { return "j/k move  read-only" }
@@ -136,7 +140,7 @@ func (s *subsScreen) View(m *Model, w, h int) string {
 	if m.inflight[subsResource] {
 		title += " · reloading"
 	}
-	table := Pane(title, w, tableH, true, s.viewTable(m, w-2, tableH-2))
+	table := Pane(m.th, title, w, tableH, true, s.viewTable(m, w-2, tableH-2))
 	s.noteHits(m, w)
 	return table + "\n" + s.viewDetail(m, w, h-tableH)
 }
@@ -174,23 +178,24 @@ func (s *subsScreen) Wheel(id string, down bool, m *Model) {
 
 // viewTable is the header and as many rows as fit, keeping the selection in view.
 func (s *subsScreen) viewTable(m *Model, w, h int) string {
+	th := m.th
 	var lines []string
 	rows := m.Data.Subs
 	s.vis = s.vis[:0]
 	if err := m.Data.Errs[subsResource]; err != nil {
 		if rows == nil { // a load that succeeded, even empty, leaves a non-nil slice
 			// Nothing ever loaded: there is no last data, and no count to give.
-			return styleBad.Render("load failed: " + Clean(err.Error()))
+			return th.Fg(theme.Error).Render("load failed: " + Clean(err.Error()))
 		}
-		lines = append(lines, styleBad.Render("load failed: "+Clean(err.Error())+"; showing the last data"))
+		lines = append(lines, th.Fg(theme.Error).Render("load failed: "+Clean(err.Error())+"; showing the last data"))
 	}
 	if len(rows) == 0 {
-		return strings.Join(append(lines, styleMuted.Render("no subscriptions")), "\n")
+		return strings.Join(append(lines, th.Fg(theme.Muted).Render("no subscriptions")), "\n")
 	}
 	cols, widths := subsLayout(w)
 	head := make([]string, len(cols))
 	for i, col := range cols {
-		head[i] = styleMuted.Render(fit(subsCols[col].head, widths[i]))
+		head[i] = th.Fg(theme.Muted).Render(fit(subsCols[col].head, widths[i]))
 	}
 	lines = append(lines, strings.Repeat(" ", subsMarkW)+strings.Join(head, subsGap))
 
@@ -245,55 +250,52 @@ func subsLayout(w int) (cols, widths []int) {
 	return cols, widths
 }
 
+// subsTableRow is one row. The selected row has `>` and the selection fill
+// across the pane's inner width (design §6.5); its state cells keep their hue.
 func subsTableRow(m *Model, row opapi.Subscription, selected bool, cols, widths []int, w int) string {
-	paint := func(style lipgloss.Style, text string) string {
-		if selected {
-			style = style.Background(colorBorder)
-		}
-		return style.Render(text)
-	}
-	mark := "  "
-	if selected {
-		mark = "> "
-	}
+	th := m.th
 	var b strings.Builder
-	b.WriteString(paint(styleAccent, mark))
+	b.WriteString(selMark(th, selected) + th.On(selected, theme.Text).Render(strings.Repeat(" ", subsMarkW-1)))
 	for i, col := range cols {
 		if i > 0 {
-			b.WriteString(paint(styleText, subsGap))
+			b.WriteString(th.On(selected, theme.Text).Render(subsGap))
 		}
-		text, style := subsCell(m, row, col)
-		b.WriteString(paint(style, fit(text, widths[i])))
+		text, role := subsCell(m, row, col)
+		b.WriteString(th.On(selected, role).Render(fit(text, widths[i])))
 	}
-	if pad := w - lipgloss.Width(b.String()); pad > 0 {
-		b.WriteString(paint(styleText, strings.Repeat(" ", pad)))
-	}
-	return b.String()
+	return selPad(th, b.String(), w, selected)
 }
 
-// subsCell is one cleaned table cell and its style.
-func subsCell(m *Model, row opapi.Subscription, col int) (string, lipgloss.Style) {
+// subsCell is one cleaned table cell and its role (design §5.5): the health
+// map, expiry in error once past and in warn while the row is late, the last
+// status in error outside 2xx.
+func subsCell(m *Model, row opapi.Subscription, col int) (string, theme.Role) {
 	switch col {
 	case subsColPeer:
-		return subsPeer(m, row.PeerID), styleText
+		return subsPeer(m, row.PeerID), theme.Text
 	case subsColHost:
-		return Clean(row.URL), styleMuted
+		return Clean(row.URL), theme.Muted
 	case subsColHealth:
-		return Clean(row.Health), subsHealthStyle(row.Health)
+		return Clean(row.Health), theme.Health(row.Health)
 	case subsColExpires:
 		text := subsExpires(row.ExpiresAt, m.HubNow())
-		if strings.HasPrefix(text, "expired") {
-			return text, styleBad
+		switch {
+		case row.ExpiresAt == nil:
+			return text, theme.Dim
+		case strings.HasPrefix(text, "expired"):
+			return text, theme.Error
+		case row.Health == opapi.HealthLate:
+			return text, theme.Warn
 		}
-		return text, styleText
+		return text, theme.Text
 	case subsColRefresh:
-		return subsWhen(m, row.LastRefreshAt, subsTimeShort), styleMuted
+		return subsWhen(m, row.LastRefreshAt, subsTimeShort), theme.Muted
 	case subsColStatus:
-		return subsStatus(row.LastStatus), subsStatusStyle(row.LastStatus)
+		return subsStatus(row.LastStatus), subsStatusRole(row.LastStatus)
 	case subsColAttempts:
-		return strconv.Itoa(row.Attempts), countStyle(row.Attempts, styleWarn)
+		return strconv.Itoa(row.Attempts), theme.Count(row.Attempts, theme.Warn)
 	}
-	return Clean(row.Cursor), styleMuted
+	return Clean(row.Cursor), theme.Muted
 }
 
 // subsPeer is the peer's name, or its id for a peer this client has no row for.
@@ -304,20 +306,6 @@ func subsPeer(m *Model, id string) string {
 		}
 	}
 	return Clean(id)
-}
-
-// subsHealthStyle colours the nine health values. A value this client does not
-// know stays neutral: it must not read as healthy or as broken.
-func subsHealthStyle(health string) lipgloss.Style {
-	switch health {
-	case opapi.HealthOK:
-		return styleGood
-	case opapi.HealthLate, opapi.HealthUnverified, opapi.HealthPausedOperator:
-		return styleWarn
-	case opapi.HealthFailing, opapi.HealthExpired, opapi.HealthPausedToken, opapi.HealthPausedFailed, opapi.HealthPausedAuth:
-		return styleBad
-	}
-	return styleMuted
 }
 
 // subsExpires is the time left on the hub's clock, or how long ago it ran out.
@@ -368,22 +356,17 @@ func subsStatus(status *int) string {
 	return strconv.Itoa(*status)
 }
 
-func subsStatusStyle(status *int) lipgloss.Style {
-	switch {
-	case status == nil:
-		return styleMuted
-	case *status < 200 || *status >= 300:
-		return styleBad
-	}
-	return styleText
-}
+// subsStatusRole is the last status's role: none attempted is dim, like the
+// table's other empty cells; a code takes the §5.5 map.
+func subsStatusRole(status *int) theme.Role { return statusRole(status, theme.Dim) }
 
 // viewDetail is the selected row's health_note, then every fact the table may
 // have dropped. The note comes first, so a short pane still shows it.
 func (s *subsScreen) viewDetail(m *Model, w, h int) string {
+	th := m.th
 	rows := m.Data.Subs
 	if len(rows) == 0 {
-		return Pane("detail", w, h, false, "")
+		return Pane(th, "detail", w, h, false, "")
 	}
 	row := rows[s.selected(rows)]
 	note := Clean(row.HealthNote)
@@ -392,17 +375,22 @@ func (s *subsScreen) viewDetail(m *Model, w, h int) string {
 	}
 	lines := strings.Split(ansi.Wordwrap(note, w-2, ""), "\n")
 	for i, line := range lines {
-		lines[i] = styleText.Render(line)
+		lines[i] = th.Fg(theme.Text).Render(line)
 	}
 	if row.PausedReason != nil {
-		lines = append(lines, styleBad.Render("paused: "+Clean(*row.PausedReason)))
+		lines = append(lines, th.Fg(theme.Error).Render("paused: "+Clean(*row.PausedReason)))
 	}
+	muted := th.Fg(theme.Muted)
 	fact := func(parts ...string) {
-		lines = append(lines, styleMuted.Render(strings.Join(parts, "  ")))
+		lines = append(lines, muted.Render(strings.Join(parts, "  ")))
 	}
-	fact("status "+subsStatus(row.LastStatus), fmt.Sprintf("attempts %d", row.Attempts), "cursor "+Clean(row.Cursor))
+	lines = append(lines, muted.Render("status ")+th.Fg(subsStatusRole(row.LastStatus)).Render(subsStatus(row.LastStatus))+
+		muted.Render("  attempts ")+th.Fg(theme.Count(row.Attempts, theme.Warn)).Render(strconv.Itoa(row.Attempts))+
+		muted.Render("  cursor "+Clean(row.Cursor)))
 	fact("sub "+Clean(row.SubID), "host "+Clean(row.URL), "name "+Clean(row.Name))
 	fact("expires "+subsWhen(m, row.ExpiresAt, subsTimeFull), "refresh before "+subsWhen(m, row.RefreshBefore, subsTimeFull))
 	fact("verified "+subsWhen(m, row.VerifiedAt, subsTimeFull), "last delivery "+subsWhen(m, row.LastDeliveryAt, subsTimeFull))
-	return Pane(subsPeer(m, row.PeerID)+" · "+Clean(row.Health), w, h, false, strings.Join(lines, "\n"))
+	head := PaneTitle(th, false)
+	title := head.Render(subsPeer(m, row.PeerID)+" · ") + th.Fg(theme.Health(row.Health)).Render(Clean(row.Health))
+	return PaneRich(th, title, w, h, false, strings.Join(lines, "\n"))
 }

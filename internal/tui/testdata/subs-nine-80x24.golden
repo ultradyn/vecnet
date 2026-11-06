@@ -1,16 +1,16 @@
  vecnet | 1:inbox 2:chat 3:dash 4:subs 8     home · hub hub.example:8443  live  
-┌─ subs · 9 rows ──────────────────────────────────────────────────────────────┐
-│  peer         health           expires in           last refresh  last status│
-│  fine-dot     ok               1h 0m                02/11 07:36   200        │
-│  failing-dot  failing          1h 0m                02/11 07:36   503        │
-│  late-dot     late             4m                   02/11 07:36   200        │
-│  expired-dot  expired          expired 2h 5m ago    02/11 07:36   200        │
-│  token-dot    paused_token     expired 1m ago       02/11 07:36   200        │
-│> failed-dot   paused_failed    1h 0m                02/11 07:36   500        │
-│  auth-dot     paused_auth      1h 0m                never         200        │
-│  operator-do  paused_operator  1h 0m                02/11 07:36   200        │
-│  unverified-  unverified       -                    never         -          │
-└──────────────────────────────────────────────────────────────────────────────┘
+┏━ subs · 9 rows ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃  peer         health           expires in           last refresh  last status┃
+┃  fine-dot     ok               1h 0m                02/11 07:36   200        ┃
+┃  failing-dot  failing          1h 0m                02/11 07:36   503        ┃
+┃  late-dot     late             4m                   02/11 07:36   200        ┃
+┃  expired-dot  expired          expired 2h 5m ago    02/11 07:36   200        ┃
+┃  token-dot    paused_token     expired 1m ago       02/11 07:36   200        ┃
+┃> failed-dot   paused_failed    1h 0m                02/11 07:36   500        ┃
+┃  auth-dot     paused_auth      1h 0m                never         200        ┃
+┃  operator-do  paused_operator  1h 0m                02/11 07:36   200        ┃
+┃  unverified-  unverified       -                    never         -          ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 ┌─ failed-dot · paused_failed ─────────────────────────────────────────────────┐
 │One event used all 8 attempts. Fix the callback, then resume. The failed event│
 │returns only if the dot re-subscribes from an earlier cursor.                 │
