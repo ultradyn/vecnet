@@ -60,12 +60,17 @@ messaging:
   watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]
        does not ack; use --auto-ack or vecnet ack <cursor> to avoid replaying
        the log after a restart
-  hook [--event user-prompt|post-tool|session-start] [--profile P] [--auto-ack] [--mcp vecnet-P]
+  hook [--event user-prompt|post-tool|session-start|app-server] [--profile P] [--auto-ack] [--mcp vecnet-P]
        Claude Code / Codex hook: always exits 0; --mcp names the registered MCP server in its hints
+  hook --event app-server --claim NONCE --priorities wake[,wake_idle] --expect-hub URL --expect-caller PEER_ID
+  hook --release --claim NONCE
   hook install [--client claude|codex] [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp] (--mcp: Claude-only)
        --mcp: the hooks name MCP server vecnet-P, and --write registers it (claude mcp add)
   hook rebind [--profile P]
        bind the profile's hook to this Claude Code session (run from its Bash tool)
+  codex bind --thread UUID [--codex-home DIR] [--ttl DUR] [--idle-dormant DUR] [--attended] [--renew]
+       opt in to app-server delivery; ttl defaults to 24h (1h–168h); unattended needs -a never or auto reviewer
+  codex unbind [--thread UUID] | codex bindings [--json]
   threads [--limit N]
   thread <id> [--after MESSAGE_ID] [--limit N]
   thread budget <id> <n>                          set budget_remaining
@@ -104,6 +109,7 @@ admin (operator credential):
   peer rotate <peer>
   peer scope <peer> [--allow IDS] [--deny IDS]        IDS: comma-separated or repeated
   peer limits <peer> --sends-per-min N --threads-per-hour N
+  peer rename <id> <name>
   peer disable <id> | peer enable <id>
   route add --owner ID --url URL | route verify <route_id>
   route add --owner ID --kind grokbot --url URL --key-file PATH
@@ -476,6 +482,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 	case "hook":
 		a.inHook = true
 		return a.cmdHook(args)
+	case "codex":
+		return a.cmdCodex(args, time.Now)
 	case "threads":
 		return a.cmdThreads(args)
 	case "thread":
@@ -1573,6 +1581,13 @@ func (a *app) cmdPeer(args []string) error {
 			return err
 		}
 		return a.ok("limits set for " + o.pos[1])
+	case sub == "rename" && len(o.pos) == 3:
+		// PATCH /v1/admin/peers/{id} {"name"} (204).
+		if err := a.call(http.MethodPatch, "/v1/admin/peers/"+pathEscape(o.pos[1]),
+			map[string]string{"name": o.pos[2]}, nil); err != nil {
+			return err
+		}
+		return a.ok("renamed " + o.pos[1] + " to " + o.pos[2])
 	case (sub == "disable" || sub == "enable") && len(o.pos) == 2:
 		// POST /v1/admin/peers/{id}/disable|enable (204).
 		if err := a.call(http.MethodPost, "/v1/admin/peers/"+pathEscape(o.pos[1])+"/"+sub, nil, nil); err != nil {
@@ -1586,7 +1601,7 @@ func (a *app) cmdPeer(args []string) error {
 	}
 	return usageErr("usage: vecnet peer add --kind K --name N [--principal PRN] | peer invite [--name N] [--ttl 24h] | peer move <peer> --principal PRN | " +
 		"peer link <peer> | peer avatar <peer> (FILE|URL|--clear) | peer rotate <peer> | peer scope <peer> [--allow IDS] [--deny IDS] | peer limits <peer> --sends-per-min N --threads-per-hour N | " +
-		"peer disable <id> | peer enable <id>")
+		"peer rename <id> <name> | peer disable <id> | peer enable <id>")
 }
 
 func (a *app) cmdRoute(args []string) error {
