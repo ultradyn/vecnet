@@ -1030,6 +1030,83 @@ func TestTwoTabStaleConsentRefusesReplacedCookie(t *testing.T) {
 	wantPeer(tokA.AccessToken, peerA)
 }
 
+// TestInvalidCodeRetrySealsThePeerItShows: an invalid-code retry that displays
+// peer B must not keep A's sealed subject. A delayed Set-Cookie that restores
+// A afterwards must not make that B page issue A's authorization.
+func TestInvalidCodeRetrySealsThePeerItShows(t *testing.T) {
+	env := testhub.Start(t)
+	redirect := "https://www.cursor.com/agents/mcp/oauth/callback"
+	peerA, _ := env.NewPeer("grokbot", "bot-a")
+	b := &browser{t: t, env: env, client: register(t, env, redirect), redirect: redirect}
+	tokA := b.exchange(b.code(verifierA, linkCode(t, env, peerA)), verifierA)
+	if tokA.status != http.StatusOK {
+		t.Fatalf("exchange A: %d %s", tokA.status, tokA.Error)
+	}
+
+	resp, page := b.authorize(b.query(verifierB))
+	if resp.StatusCode != http.StatusOK || !strings.Contains(page, "bot-a") || !strings.Contains(page, peerA) {
+		t.Fatalf("A form:\n%s", page)
+	}
+	formA := sealedRequest(t, page)
+
+	// An approval of A whose Set-Cookie has not reached the browser yet.
+	resp, body := b.consent(formA, "")
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("held A approval: %d %s", resp.StatusCode, body)
+	}
+	var delayed *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == cookieName {
+			delayed = c
+		}
+	}
+	if delayed == nil {
+		t.Fatal("held approval set no consent cookie")
+	}
+
+	peerB, _ := env.NewPeer("grokbot", "bot-b")
+	resp, page = b.authorize(b.query(verifierA))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("tab 2 authorize: %d", resp.StatusCode)
+	}
+	resp, body = b.consent(sealedRequest(t, page), linkCode(t, env, peerB))
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("replace cookie with B: %d %s", resp.StatusCode, body)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == cookieName {
+			b.cookie = c
+		}
+	}
+
+	resp, retry := b.consent(formA, "ZZZZZZZZ")
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(retry, "bot-b") || !strings.Contains(retry, peerB) || strings.Contains(retry, peerA) {
+		t.Fatalf("invalid-code retry:\nstatus %d\n%s", resp.StatusCode, retry)
+	}
+	retryForm := sealedRequest(t, retry)
+
+	// The delayed A cookie arrives. Approving the B page must not mint A.
+	b.cookie = delayed
+	var before int
+	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM oauth_codes`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	resp, refused := b.consent(retryForm, "")
+	if resp.StatusCode == http.StatusFound || resp.Header.Get("Location") != "" {
+		t.Fatalf("B page authorized after A's cookie returned: %d location=%q\n%s", resp.StatusCode, resp.Header.Get("Location"), refused)
+	}
+	var after int
+	if err := env.Hub.DB.QueryRow(`SELECT count(*) FROM oauth_codes`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("oauth_codes = %d, want %d", after, before)
+	}
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(refused, "The peer this browser would approve changed.") {
+		t.Fatalf("changed identity: %d\n%s", resp.StatusCode, refused)
+	}
+}
+
 // cimdServer serves client metadata documents over TLS on loopback and points
 // the hub's CIMD egress at it. docs maps a path to a document, in which
 // "{self}" stands for the URL it is served at.

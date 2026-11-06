@@ -345,10 +345,10 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	case worth == linkLocked:
-		s.lockedPage(w, r, req, sealed, s.Hub.DotLinkLocked())
+		s.lockedPage(w, r, req, s.Hub.DotLinkLocked())
 		return
 	case worth == linkRefused:
-		s.refuseLink(w, r, req, sealed)
+		s.refuseLink(w, r, req)
 		return
 	}
 	submitted := strings.TrimSpace(r.PostForm.Get("link_code")) != ""
@@ -379,7 +379,7 @@ func (s *Server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if errors.Is(err, hub.ErrDotLink) {
-		s.refuseLink(w, r, req, sealed)
+		s.refuseLink(w, r, req)
 		return
 	}
 	if err != nil {
@@ -448,7 +448,7 @@ func (s *Server) linkCodeWorth(ctx context.Context, r *http.Request) (linkWorth,
 // cookie is present (PROTOCOL §20.1). A wrong code with a live cookie is
 // refused without falling back to that cookie and without spending the budget.
 // The refusal that spends the budget gets the lockout page instead.
-func (s *Server) refuseLink(w http.ResponseWriter, r *http.Request, req authRequest, sealed string) {
+func (s *Server) refuseLink(w http.ResponseWriter, r *http.Request, req authRequest) {
 	if strings.TrimSpace(r.PostForm.Get("link_code")) != "" {
 		p, err := s.cookiePrincipal(r.Context(), s.DB, r)
 		if err != nil {
@@ -457,12 +457,12 @@ func (s *Server) refuseLink(w http.ResponseWriter, r *http.Request, req authRequ
 		}
 		if p == nil {
 			if locked := s.Hub.DotLinkFailed(); locked > 0 {
-				s.lockedPage(w, r, req, sealed, locked)
+				s.lockedPage(w, r, req, locked)
 				return
 			}
 		}
 	}
-	s.retryPage(w, r, req, sealed)
+	s.retryPage(w, r, req)
 }
 
 // refreshConsent refuses a cookie-only approval whose cookie subject is no
@@ -501,41 +501,55 @@ func (s *Server) refreshConsent(w http.ResponseWriter, r *http.Request, req auth
 	writePage(w, http.StatusBadRequest, pg, req.RedirectURI)
 }
 
-// retryPage is the 400 for a link code that was refused: the same form again.
-func (s *Server) retryPage(w http.ResponseWriter, r *http.Request, req authRequest, sealed string) {
+// retryPage is the 400 for a link code that was refused: the same form again,
+// resealed to the peer it renders.
+func (s *Server) retryPage(w http.ResponseWriter, r *http.Request, req authRequest) {
 	oauthReason(w, "link_invalid")
-	s.formPage(w, r, req, sealed, http.StatusBadRequest, "That link code is not valid. Ask your operator for a new one.")
+	s.formPage(w, r, req, http.StatusBadRequest, "That link code is not valid. Ask your operator for a new one.")
 }
 
 // lockedPage is the 429 while link codes are locked out: too many wrong codes
 // were tried, every live code was cancelled, and a new one from the operator
 // ends the lockout.
-func (s *Server) lockedPage(w http.ResponseWriter, r *http.Request, req authRequest, sealed string, retry time.Duration) {
+func (s *Server) lockedPage(w http.ResponseWriter, r *http.Request, req authRequest, retry time.Duration) {
 	secs := int(retry.Round(time.Second) / time.Second)
 	if secs < 1 {
 		secs = 1
 	}
 	oauthReason(w, "link_locked")
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
-	s.formPage(w, r, req, sealed, http.StatusTooManyRequests,
+	s.formPage(w, r, req, http.StatusTooManyRequests,
 		"Too many wrong link codes were tried, so every link code was cancelled. Ask your operator for a new one.")
 }
 
-func (s *Server) formPage(w http.ResponseWriter, r *http.Request, req authRequest, sealed string, status int, msg string) {
+// formPage renders an error or retry consent form. The sealed subject is the
+// principal this response displays, and the original expiry is kept, so a
+// later cookie cannot make this page approve a different peer.
+func (s *Server) formPage(w http.ResponseWriter, r *http.Request, req authRequest, status int, msg string) {
 	c, err := s.storedClient(r.Context(), req.ClientID)
 	if err != nil {
 		serverError(w, err)
 		return
 	}
-	pg := page{
-		ClientName: clientLabel(c), RedirectHost: redirectHost(req.RedirectURI), Request: sealed, NeedCode: true,
-		Error: msg,
-	}
-	if p, err := s.cookiePrincipal(r.Context(), s.DB, r); err != nil {
+	p, err := s.cookiePrincipal(r.Context(), s.DB, r)
+	if err != nil {
 		serverError(w, err)
 		return
-	} else if p != nil {
-		pg.NeedCode = false
+	}
+	req.Shown = ""
+	if p != nil {
+		req.Shown = p.Subject
+	}
+	sealed, err := s.seal(req)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	pg := page{
+		ClientName: clientLabel(c), RedirectHost: redirectHost(req.RedirectURI), Request: sealed, NeedCode: p == nil,
+		Error: msg,
+	}
+	if p != nil {
 		pg.PeerName, pg.PeerID = p.Name, p.PeerID
 	}
 	writePage(w, status, pg, req.RedirectURI)
