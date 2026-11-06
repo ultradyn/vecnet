@@ -12,7 +12,8 @@ import (
 	"github.com/XertroV/vecnet/internal/prefs"
 )
 
-const eventRetentionProjectionKey = "event_retention_projection_v1"
+const eventRetentionProjectionKey = "event_retention_projection_v2"
+const eventRetentionLegacyProjectionKey = "event_retention_projection_v1"
 const defaultAckSeconds = int64(7 * 24 * 60 * 60)
 
 // RetentionPolicy is a transaction-local projection, never a second preference
@@ -87,6 +88,16 @@ func loadEventBoundariesKey(ctx context.Context, tx *sql.Tx, key string) ([]even
 	if err != nil {
 		return nil, err
 	}
+	if len(raw) > 8192 {
+		return nil, errors.New("retention: projection_upgrade_required")
+	}
+	b, err := decodeEventBoundaries(raw)
+	if err == nil && len(b) > 1 {
+		return nil, errors.New("retention: projection_upgrade_required")
+	}
+	return b, err
+}
+func decodeEventBoundaries(raw string) ([]eventRuleBoundary, error) {
 	var b []eventRuleBoundary
 	if json.Unmarshal([]byte(raw), &b) != nil {
 		return nil, errors.New("retention: invalid_activation_projection")
@@ -240,7 +251,7 @@ func (a *EventRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, before
 			}
 		}
 		// Any policy edit invalidates unused incompatible retrospective approval.
-		if _, err := tx.ExecContext(ctx, `UPDATE hub_preference_activations SET not_before=NULL,cutoff_at=NULL,high_water=NULL WHERE key=?`, key); err != nil {
+		if err := invalidateEventApproval(ctx, tx, key); err != nil {
 			return err
 		}
 		var nb, cutoff, high any
@@ -315,7 +326,6 @@ func (a *EventRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, before
 					return err
 				}
 			}
-			bounds = append(bounds, boundary)
 			// Only a new shared activation (or a protective value change) can
 			// resolve this pending generation, atomically with its boundary.
 			if key == "retention.ack_events" {
@@ -326,11 +336,7 @@ func (a *EventRetentionAdapter) Activate(ctx context.Context, tx *sql.Tx, before
 				bootstrap.ArchivePending = false
 				bootstrap.Archive = seconds != 0
 			}
-			raw, err := json.Marshal(bounds)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, projectionKey, string(raw)); err != nil {
+			if err := saveEventBoundary(ctx, tx, projectionKey, boundary); err != nil {
 				return err
 			}
 		}
@@ -391,6 +397,9 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 	}
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		start := time.Now()
+		if err := collectEventRuleIntervals(ctx, tx, min(limits.Rows, 8)); err != nil {
+			return err
+		}
 		result = EventRetentionStatus{}
 		snapshot, err := h.Preferences.LoadSnapshot(ctx, tx)
 		if err != nil {
@@ -434,7 +443,7 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 		}
 		var nb, cutoff sql.NullString
 		var high sql.NullInt64
-		err = tx.QueryRowContext(ctx, `SELECT not_before,cutoff_at,high_water FROM hub_preference_activations WHERE key='retention.ack_events' ORDER BY revision DESC LIMIT 1`).Scan(&nb, &cutoff, &high)
+		err = tx.QueryRowContext(ctx, `SELECT not_before,cutoff_at,high_water FROM hub_preference_activations WHERE revision=? AND key='retention.ack_events'`, eventBoundaryRevision(bounds)).Scan(&nb, &cutoff, &high)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -448,12 +457,13 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 		}
 		var archiveNB, archiveCutoff sql.NullString
 		var archiveHigh sql.NullInt64
-		err = tx.QueryRowContext(ctx, `SELECT not_before,cutoff_at,high_water FROM hub_preference_activations WHERE key='retention.archive_mode' ORDER BY revision DESC LIMIT 1`).Scan(&archiveNB, &archiveCutoff, &archiveHigh)
+		err = tx.QueryRowContext(ctx, `SELECT not_before,cutoff_at,high_water FROM hub_preference_activations WHERE revision=? AND key='retention.archive_mode'`, eventBoundaryRevision(archiveBounds)).Scan(&archiveNB, &archiveCutoff, &archiveHigh)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
 		now := h.Now()
 		nowStr := envelope.FormatTime(now)
+		var ruleErr error
 		rule := func(seq int64, at time.Time) (time.Duration, bool) {
 			// Pending ack policy must not block independently authorized hard expiry.
 			// A zero age retains acknowledged rows while hardAllowed gates the rest.
@@ -465,21 +475,11 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 				seconds = 0
 			}
 			if len(bounds) > 0 {
-				seconds = bounds[0].BeforeSeconds
-				if seq <= initialHigh {
-					seconds = 0
-				}
-				for _, b := range bounds {
-					// Every boundary's previous rule matters, including an unknown
-					// prior projection (zero means retain indefinitely). Earlier
-					// protective changes cannot be lost at a later shortening.
-					if b.BeforeSeconds == 0 || seconds != 0 && b.BeforeSeconds > seconds {
-						seconds = b.BeforeSeconds
-					}
-					// A protective change applies immediately, including to older rows.
-					if b.AfterSeconds == 0 || seconds != 0 && b.AfterSeconds > seconds || seq > b.FromSeq {
-						seconds = b.AfterSeconds
-					}
+				var err error
+				seconds, err = eventRuleSeconds(ctx, tx, seq)
+				if err != nil {
+					ruleErr = err
+					return 0, false
 				}
 			}
 			if len(bounds) > 0 && bounds[len(bounds)-1].AckCutoffAt != "" && nb.Valid && cutoff.Valid && high.Valid && nowStr >= nb.String && seq <= high.Int64 && envelope.FormatTime(at) <= bounds[len(bounds)-1].AckCutoffAt {
@@ -541,6 +541,9 @@ func (h *Hub) PruneEventSlice(ctx context.Context) (EventRetentionStatus, error)
 			stat, err := h.Log.PrunePrefix(ctx, tx, owner, now, rule, hard, hardAllowed, remaining)
 			if err != nil {
 				return err
+			}
+			if ruleErr != nil {
+				return ruleErr
 			}
 			result.Floor = max(result.Floor, stat.Floor)
 			result.Owners++
@@ -628,6 +631,9 @@ func saveRetentionBootstrap(ctx context.Context, tx *sql.Tx, b eventRetentionBoo
 	return err
 }
 func (h *Hub) initializeEventRetention(ctx context.Context) error {
+	if err := h.upgradeEventRuleIntervals(ctx); err != nil {
+		return err
+	}
 	var generation uint64
 	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		s, err := h.Preferences.LoadSnapshot(ctx, tx)
@@ -670,25 +676,17 @@ func (h *Hub) initializeEventRetention(ctx context.Context) error {
 					// A longer/disabled bootstrap protects existing rows too.
 					// Persist it in the same ordered ledger as runtime activations,
 					// so a subsequent prospective Save retains that historical rule.
-					bounds, err := loadEventBoundaries(ctx, tx)
-					if err != nil {
+					b.Generation++
+					if err := invalidateEventApproval(ctx, tx, "retention.ack_events"); err != nil {
 						return err
 					}
-					b.Generation++
-					bounds = append(bounds, eventRuleBoundary{
+					err := saveEventBoundary(ctx, tx, eventRetentionProjectionKey, eventRuleBoundary{
 						Revision: s.Revision, FromSeq: high,
 						BeforeSeconds: approved, AfterSeconds: seconds,
 						PolicyTag: eventPolicyTag(p.Ack), BootstrapGeneration: b.Generation,
 						BootstrapTransition: true,
 					})
-					raw, err := json.Marshal(bounds)
 					if err != nil {
-						return err
-					}
-					if _, err := tx.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, eventRetentionProjectionKey, string(raw)); err != nil {
-						return err
-					}
-					if _, err := tx.ExecContext(ctx, `UPDATE hub_preference_activations SET not_before=NULL,cutoff_at=NULL,high_water=NULL WHERE key='retention.ack_events'`); err != nil {
 						return err
 					}
 					b.AckPending = false
@@ -728,26 +726,18 @@ func (h *Hub) initializeEventRetention(ctx context.Context) error {
 					// later prospective exits retain the true previous rule, and
 					// cancel retrospective grants from an earlier archive exit.
 					projectionKey := eventRetentionProjectionKey + "_archive"
-					bounds, err := loadEventBoundariesKey(ctx, tx, projectionKey)
-					if err != nil {
-						return err
-					}
 					b.Generation++
 					*b.HardGeneration++
-					bounds = append(bounds, eventRuleBoundary{
+					if err := invalidateEventApproval(ctx, tx, "retention.archive_mode"); err != nil {
+						return err
+					}
+					err := saveEventBoundary(ctx, tx, projectionKey, eventRuleBoundary{
 						Revision: s.Revision, FromSeq: high,
 						BeforeSeconds: 0, AfterSeconds: 1,
 						PolicyTag: eventPolicyTag(p.Archive), BootstrapGeneration: *b.HardGeneration,
 						BootstrapTransition: true,
 					})
-					raw, err := json.Marshal(bounds)
 					if err != nil {
-						return err
-					}
-					if _, err := tx.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, projectionKey, string(raw)); err != nil {
-						return err
-					}
-					if _, err := tx.ExecContext(ctx, `UPDATE hub_preference_activations SET not_before=NULL,cutoff_at=NULL,high_water=NULL WHERE key='retention.archive_mode'`); err != nil {
 						return err
 					}
 				}

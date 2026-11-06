@@ -71,7 +71,7 @@ func TestRetentionPopulatedLookupPlans(t *testing.T) {
 		if err != nil || !pinned {
 			t.Fatalf("lagging subscription without exact copy: pinned=%v err=%v", pinned, err)
 		}
-		ackSeeks, copySeeks := 0, 0
+		ackSeeks, copySeeks, candidateSeeks, liveSeeks := 0, 0, 0, 0
 		// Explain the statements the real helpers executed, rather than SQL
 		// mirrored in a test that could drift away from production.
 		for _, query := range q.queries {
@@ -90,6 +90,12 @@ func TestRetentionPopulatedLookupPlans(t *testing.T) {
 				if strings.Contains(detail, "sqlite_autoindex_acks_1 (owner=? AND scope=?)") {
 					ackSeeks++
 				}
+				if strings.Contains(detail, "event_outbox_retention_candidate (seq=?)") {
+					candidateSeeks++
+				}
+				if strings.Contains(detail, "event_subscriptions_retention_live (peer_id=? AND <expr>>?)") {
+					liveSeeks++
+				}
 				if strings.Contains(detail, "event_outbox_retention_seq (sub_id=? AND seq=?)") {
 					copySeeks++
 				}
@@ -100,8 +106,8 @@ func TestRetentionPopulatedLookupPlans(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if ackSeeks != 3 || copySeeks != 2 {
-			t.Errorf("analyze=%v need three full ack PK seeks and both full exact-copy seeks: ack=%d copy=%d", analyze, ackSeeks, copySeeks)
+		if ackSeeks != 3 || copySeeks != 1 || candidateSeeks != 1 || liveSeeks != 1 {
+			t.Errorf("analyze=%v need three full ack PK seeks and candidate, live-range and full exact-copy seeks: ack=%d copy=%d candidate=%d live=%d", analyze, ackSeeks, copySeeks, candidateSeeks, liveSeeks)
 		}
 	}
 }

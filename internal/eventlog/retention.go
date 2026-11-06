@@ -187,15 +187,18 @@ func (l *Log) effectiveAck(ctx context.Context, q execer, owner string) (int64, 
 	return ack, nil
 }
 func (l *Log) retentionPinned(ctx context.Context, q execer, owner string, seq int64, now time.Time) (bool, error) {
+	// seq is globally unique. Every retained retry copy pins that candidate,
+	// including a copy whose subscription was later rebound or removed. No
+	// historical subscription enumeration is needed to establish this pin.
 	var pinned bool
 	err := q.QueryRowContext(ctx, `SELECT
    EXISTS(SELECT 1 FROM deliveries d WHERE d.event_seq=? AND (d.state IN ('queued','pushed','dead_letter') OR d.held=1 OR d.dispatching>0)) OR
-   EXISTS(SELECT 1 FROM event_outbox o JOIN event_subscriptions s ON s.sub_id=o.sub_id WHERE s.peer_id=? AND o.seq=? AND (o.done_at IS NULL OR o.terminal='exhausted')) OR
-   EXISTS(SELECT 1 FROM event_subscriptions s WHERE s.peer_id=?
+   EXISTS(SELECT 1 FROM event_outbox o INDEXED BY event_outbox_retention_candidate WHERE o.seq=? AND (o.done_at IS NULL OR o.terminal='exhausted')) OR
+   EXISTS(SELECT 1 FROM event_subscriptions s INDEXED BY event_subscriptions_retention_live WHERE s.peer_id=?
      AND s.verified_at IS NOT NULL AND s.paused_reason IS NULL
-     AND (s.expires_at IS NULL OR s.expires_at>?) AND (s.token_expires_at IS NULL OR s.token_expires_at>?)
+     AND min(coalesce(s.expires_at,'9999'),coalesce(s.token_expires_at,'9999'))>?
      AND (s.cursor_epoch!=? OR s.cursor_seq<?)
-     AND NOT EXISTS(SELECT 1 FROM event_outbox o WHERE o.sub_id=s.sub_id AND o.seq=?))`, seq, owner, seq, owner, envelope.FormatTime(now), envelope.FormatTime(now), l.epoch, seq, seq).Scan(&pinned)
+     AND NOT EXISTS(SELECT 1 FROM event_outbox o WHERE o.sub_id=s.sub_id AND o.seq=?))`, seq, seq, owner, envelope.FormatTime(now), l.epoch, seq, seq).Scan(&pinned)
 	return pinned, err
 }
 

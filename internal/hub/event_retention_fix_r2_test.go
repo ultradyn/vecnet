@@ -140,7 +140,7 @@ func TestRetentionBootstrapArchiveConfirmedProspectiveExit(t *testing.T) {
 			retentionConfirm(t, h, prefs.Patch{Set: map[string]prefs.Value{"retention.archive_mode": prefs.Bool(true)}})
 			retentionConfirm(t, h, prefs.Patch{Reset: []string{"retention.archive_mode"}})
 			var priorProjection string
-			if err := h.DB.QueryRow(`SELECT value FROM meta WHERE key='event_retention_projection_v1_archive'`).Scan(&priorProjection); err != nil {
+			if err := h.DB.QueryRow(`SELECT value FROM meta WHERE key='event_retention_projection_v2_archive'`).Scan(&priorProjection); err != nil {
 				t.Fatal(err)
 			}
 			cfg := h.Cfg
@@ -156,7 +156,7 @@ func TestRetentionBootstrapArchiveConfirmedProspectiveExit(t *testing.T) {
 				// Previous binaries saved the bootstrap checkpoint without a
 				// protective archive boundary. A real confirmed exit must work
 				// even when that historical projection differs from the snapshot.
-				if _, err := h.DB.Exec(`UPDATE meta SET value=? WHERE key='event_retention_projection_v1_archive'`, priorProjection); err != nil {
+				if _, err := h.DB.Exec(`UPDATE meta SET value=? WHERE key='event_retention_projection_v2_archive'`, priorProjection); err != nil {
 					t.Fatal(err)
 				}
 			}
