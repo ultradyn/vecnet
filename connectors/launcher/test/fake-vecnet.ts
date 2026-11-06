@@ -1,19 +1,25 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
 
 // Every path comes from the test's private environment; no home defaults.
 const file = process.env.FAKE_VECNET_PLAN;
 if (!file) throw new Error('fake vecnet requires a plan');
 const read = () => JSON.parse(readFileSync(file, 'utf8'));
 const plan = read(), argv = process.argv.slice(2);
+const acknowledge = (data: object) => appendFileSync(plan.trace, JSON.stringify({ ...data, ack: true }) + '\n');
 appendFileSync(plan.trace, JSON.stringify({ argv, env: process.env }) + '\n');
 const flag = (s: string) => argv[argv.indexOf(s) + 1];
 if (argv.includes('watch')) {
-  let seen = 0;
+  let seen = 0, revision = -1;
   const tick = () => {
     const p = read();
     for (const e of (p.events ?? []).slice(seen)) process.stdout.write(JSON.stringify(e) + '\n');
     seen = (p.events ?? []).length;
+    if (revision !== p.revision) {
+      revision = p.revision;
+      const published = revision;
+      process.stdout.write('', () => acknowledge({ watchRevision: published }));
+    }
   };
   tick(); setInterval(tick, 10);
 } else if (argv.includes('hook')) {
@@ -31,8 +37,13 @@ if (argv.includes('watch')) {
     const items = (plan.items ?? []).filter((i: { id: string; priority: string }) => !claimed.has(i.id) && priorities.includes(i.priority)).slice(0, 8);
     claims[nonce] = items.map((i: { id: string }) => i.id);
     writeFileSync(plan.claims, JSON.stringify(claims));
+    acknowledge({ hookClaimed: nonce });
+    if (plan.hookGate) await new Promise<void>(resolve => {
+      const gate = setInterval(() => { if (existsSync(plan.hookGate)) { clearInterval(gate); resolve(); } }, 10);
+    });
     console.log(JSON.stringify({ version: 1, stub: plan.stub, pointer: false,
       deliveries: claims[nonce], entries: items.map((i: { id: string; value?: string }) => ({ key: 'vecnet_' + i.id, value: i.value ?? '<vecnet-inbox untrusted="true">peer</vecnet-inbox>' })),
       more: 0 }));
   }
+  acknowledge({ hook: argv, nonce, released: argv.includes('--release') });
 } else process.exitCode = 2;

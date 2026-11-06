@@ -223,10 +223,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         if (!Array.isArray(result.data)) break;
         for (const turn of result.data) {
           if (Array.isArray(turn.items) && turn.items.some((item: RecordValue) => item.type === 'userMessage' && item.clientId === r.key)) { clear(r); return; }
-          // priorTurnId predates this start; its own inProgress state is outside
-          // the attempted interval. attemptTurnId, by contrast, is included.
-          if (!r.attemptTurnId && r.priorTurnId !== null && turn.id === r.priorTurnId) { reached = true; break; }
+          // A start can race into the turn returned by latest(). Include that
+          // prior turn: an accepted start/steer may still record its item there.
           if (turn.status === 'inProgress') inProgress = true;
+          if (!r.attemptTurnId && r.priorTurnId !== null && turn.id === r.priorTurnId) { reached = true; break; }
           if (r.attemptTurnId !== null && turn.id === r.attemptTurnId) { reached = true; break; }
         }
         if (reached) break;
@@ -281,7 +281,13 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   async function transmit(r: InflightRow, batch: Batch) {
     let mismatches = 0, fallback = false;
     while (running && rpc) {
-      if (!liveness().live) { waitingRetry.set(r.key, batch); return; }
+      if (!liveness().live) {
+        waitingRetry.set(r.key, batch);
+        // An idle claim can contain wake_idle. Deferral must preserve its
+        // eligibility even if a waiting flag subsequently clears to active.
+        if (r.method === 'turn/start') waitForIdle.add(r.key);
+        return;
+      }
       const entries = fallback ? [] : batch.entries;
       const pointer = `vecnet: messages remain available. Run vecnet --net ${b.profile}${b.as ? ' --as ' + b.as : ''} inbox.`;
       const input = { threadId: b.threadId, stub: fallback ? pointer : batch.stub, entries, key: r.key };
@@ -303,6 +309,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         return;
       } catch (e) {
         if (!(e instanceof CodexRpcError) || e.ambiguous) {
+          // This attempt may have been accepted. Only checkpoint recovery may
+          // settle it; a previous definite-rejection retry is no longer safe.
+          waitingRetry.delete(r.key); waitForIdle.delete(r.key);
           r.state = 'unresolved'; write(r);
           const connection = rpc; rpc = undefined; attached = false; connection?.close(); connectionState = 'unreachable'; retry(); return;
         }
