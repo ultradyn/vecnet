@@ -60,8 +60,10 @@ messaging:
   watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]
        does not ack; use --auto-ack or vecnet ack <cursor> to avoid replaying
        the log after a restart
-  hook [--event user-prompt|post-tool|session-start] [--profile P] [--auto-ack] [--mcp vecnet-P]
+  hook [--event user-prompt|post-tool|session-start|app-server] [--profile P] [--auto-ack] [--mcp vecnet-P]
        Claude Code / Codex hook: always exits 0; --mcp names the registered MCP server in its hints
+  hook --event app-server --claim NONCE --priorities wake[,wake_idle] --expect-hub URL --expect-caller PEER_ID
+  hook --release --claim NONCE
   hook install [--client claude|codex] [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp] (--mcp: Claude-only)
        --mcp: the hooks name MCP server vecnet-P, and --write registers it (claude mcp add)
   hook rebind [--profile P]
