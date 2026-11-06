@@ -6,7 +6,23 @@ import { ansiHTML, LINE } from './ansi.mjs';
 import { assert, bootDemo, buildCLI, chromium, registerExitCleanup, run, shotPath } from './lib.mjs';
 
 const quote = s => `'${s.replaceAll("'", "'\\''")}'`;
-export async function withTui({ scale = false, command, env: shared, beatEvery } = {}, fn) {
+// COLOURS are the TUI's colour rungs (docs/design/tui-color.md §4.1, §10.3):
+// the environment each one is started with. 256 and 16 also drop TMUX, so only
+// TERM decides; tmux's own report would lift a TERM=xterm run to 256.
+const COLOURS = {
+  truecolor: 'env -u NO_COLOR COLORTERM=truecolor TERM=xterm-256color',
+  256: 'env -u NO_COLOR -u COLORTERM -u TMUX TERM=xterm-256color',
+  16: 'env -u NO_COLOR -u COLORTERM -u TMUX TERM=xterm',
+  none: 'env NO_COLOR=1 COLORTERM=truecolor TERM=xterm-256color',
+};
+
+// colour picks the rung (truecolor by default); bg sets VECNET_TUI_BG and, for
+// light, a white page; args extend `vecnet tui`; config is appended to the
+// generated config.toml (another profile for the picker, say).
+export async function withTui({ scale = false, command, env: shared, beatEvery, colour = 'truecolor', bg, args = [], config: extra = '' } = {}, fn) {
+  const rung = COLOURS[colour];
+  if (!rung) throw new Error(`withTui: unknown colour ${colour}`);
+  if (bg !== undefined && bg !== 'dark' && bg !== 'light') throw new Error(`withTui: bg must be dark or light, not ${bg}`);
   const env = shared || await bootDemo({ scale });
   const socket = `oui-${process.pid}`;
   const tmux = (...args) => run('tmux', ['-L', socket, ...args], { env: { ...process.env, TMUX: '' } });
@@ -15,15 +31,16 @@ export async function withTui({ scale = false, command, env: shared, beatEvery }
     const config = join(env.dir, 'config.toml');
     // VECNET_PROFILE names the profile: a bare run under an agent harness
     // (CLAUDECODE and friends inherited through tmux) would be refused.
-    await writeFile(config, `[profiles.demo]\nhub = ${JSON.stringify(env.demo.url)}\nsecret = ${JSON.stringify(env.demo.operator_secret)}\npeer_id = ${JSON.stringify(env.demo.operator_peer)}\n`, { mode: 0o600 });
+    await writeFile(config, `[profiles.demo]\nhub = ${JSON.stringify(env.demo.url)}\nsecret = ${JSON.stringify(env.demo.operator_secret)}\npeer_id = ${JSON.stringify(env.demo.operator_peer)}\n${extra}`, { mode: 0o600 });
     const bin = await buildCLI(env.dir);
-    const argv = command || [bin, 'tui'];
+    const argv = command || [bin, 'tui', ...args];
     // An argv-based override lets the Task 2 smoke exercise tmux before TUI
     // lands in Task 17. Real screen scripts always use the default command.
-    // Colour is forced on: a harness that exports NO_COLOR would otherwise
-    // strip it from every shot.
+    // Colour is set by the rung, never inherited: a harness that exports
+    // NO_COLOR would otherwise strip it from every shot.
     const beat = beatEvery === undefined ? '' : ` VECNET_TEST_TUI_BEAT=${quote(beatEvery)}`;
-    const shell = `env -u NO_COLOR COLORTERM=truecolor VECNET_PROFILE=demo VECNET_CONFIG=${quote(config)} XDG_CACHE_HOME=${quote(join(env.dir, 'cache'))} XDG_CONFIG_HOME=${quote(join(env.dir, 'config'))} TERM=xterm-256color${beat} ${argv.map(quote).join(' ')}`;
+    const tuiBg = bg === undefined ? '' : ` VECNET_TUI_BG=${bg}`;
+    const shell = `${rung} VECNET_PROFILE=demo VECNET_CONFIG=${quote(config)} XDG_CACHE_HOME=${quote(join(env.dir, 'cache'))} XDG_CONFIG_HOME=${quote(join(env.dir, 'config'))}${tuiBg}${beat} ${argv.map(quote).join(' ')}`;
     await tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'ui', '-x', '140', '-y', '42', shell);
     started = true;
     unregister = registerExitCleanup(() => {
@@ -32,7 +49,8 @@ export async function withTui({ scale = false, command, env: shared, beatEvery }
     });
     await tmux('set-option', '-g', 'status', 'off');
     browser = await (await chromium()).launch({ headless: true });
-    const page = await browser.newPage({ viewport: { width: 1240, height: Math.ceil(42 * LINE) + 32 }, colorScheme: 'dark' });
+    const light = bg === 'light';
+    const page = await browser.newPage({ viewport: { width: 1240, height: Math.ceil(42 * LINE) + 32 }, colorScheme: light ? 'light' : 'dark' });
     page.setDefaultTimeout(60000);
     const capture = () => tmux('capture-pane', '-t', 'ui:0.0', '-e', '-p', '-N');
     const plainText = output => output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
@@ -55,7 +73,7 @@ export async function withTui({ scale = false, command, env: shared, beatEvery }
       // A toast can expire between a separate wait and the next capture.
       shot: async (name, must) => {
         const output = must ? await waitFor(must) : await capture();
-        await page.setContent(ansiHTML(output), { waitUntil: 'load' });
+        await page.setContent(ansiHTML(output, { light }), { waitUntil: 'load' });
         await page.evaluate(() => document.fonts.ready);
         const size = await page.locator('pre').boundingBox();
         assert(size, 'missing terminal raster');
