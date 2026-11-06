@@ -90,3 +90,36 @@ func (s *server) adminReissueEnrol(w http.ResponseWriter, r *http.Request) {
 	}
 	s.writeInvite(w, r, peer, tok, exp)
 }
+
+// adminInviteStatus is GET /v1/admin/peers/{id}/enrol-token: 200
+// {"peer_id", "state", "expires_at", "revoked_at"}, the invite's state and
+// never its token (hub.InviteStatus); 404 for an unknown peer.
+func (s *server) adminInviteStatus(w http.ResponseWriter, r *http.Request) {
+	st, err := s.Hub.InviteStatus(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, st)
+}
+
+// adminRevokeEnrol is DELETE /v1/admin/peers/{id}/enrol-token, no body: 200
+// {"peer_id", "state", "expires_at", "revoked_at", "revoked"}. It spends the
+// peer's live invite so its token no longer enrols; with none live it is a
+// no-op answering "revoked": false. Redeemed credentials are untouched.
+// Audited as "enrol_revoke" when it spent a token.
+func (s *server) adminRevokeEnrol(w http.ResponseWriter, r *http.Request) {
+	if err := readNoBody(r); err != nil {
+		writeError(w, err)
+		return
+	}
+	st, revoked, err := s.Hub.RevokeEnrolToken(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"peer_id": st.PeerID, "state": st.State,
+		"expires_at": st.ExpiresAt, "revoked_at": st.RevokedAt, "revoked": revoked})
+}
