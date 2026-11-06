@@ -73,7 +73,7 @@ Cursors are opaque strings matching `^e[0-9]+\.[0-9]+$` (`<epoch>.<seq>`, e.g. `
 
 ## 2. HTTP API
 
-All endpoints are under the hub's public HTTPS origin. Bodies are JSON unless stated. Unless noted, auth is `Authorization: Bearer <secret>` carrying a peer, principal or operator credential [T11, T17]. A long-lived secret MUST NOT appear in a URL [SSE].
+All endpoints are under the hub's public HTTPS origin. Bodies are JSON unless stated. Unless noted, auth is `Authorization: Bearer <secret>` carrying a peer, principal or operator credential [T11, T17]. A long-lived secret MUST NOT appear in a URL [SSE]. A browser `GET` or `HEAD` of exactly `/` with no `Authorization` header (`Accept` contains `text/html`, or `User-Agent` starts with `Mozilla/`) is 302 to `/ui/`.
 
 **Errors.** Every non-2xx response carries this body [R01]:
 
