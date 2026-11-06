@@ -11,6 +11,10 @@ import (
 	"github.com/XertroV/vecnet/internal/onboarding"
 )
 
+// peerIDValue is an allocated peer id (peer_ plus a body). The field name
+// "peer_id" in whoami instructions is not one.
+var peerIDValue = regexp.MustCompile(`\bpeer_[A-Za-z0-9]{8,}\b`)
+
 func TestLegacyPromptCompatibility(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "cli", "testdata", "invite.json"))
 	if err != nil {
@@ -93,8 +97,11 @@ func TestGrokbotPromptIdentityStop(t *testing.T) {
 	if !ok {
 		t.Fatal("Lookup grokbot")
 	}
-	if !strings.Contains(spec.PromptTemplate, "{{.PeerID}}") || !strings.Contains(spec.PromptTemplate, "{{.ConnectorName}}") {
-		t.Fatal("authorize template does not name the peer and connector placeholders")
+	if strings.Contains(spec.PromptTemplate, "{{.PeerID}}") {
+		t.Fatal("authorize template binds a peer id before the peer exists")
+	}
+	if !strings.Contains(spec.PromptTemplate, "{{.ConnectorName}}") {
+		t.Fatal("authorize template does not name the connector placeholder")
 	}
 	for _, bad := range []string{"WebhookURL", "WebhookKey", "LinkCode", "{{.Token}}", "{{.Key}}", "stdio", "mcp-remote", "crsr_", "api2.cursor.sh", "conductor", "vecnet-peer", "user-vecnet"} {
 		if strings.Contains(spec.PromptTemplate, bad) {
@@ -103,7 +110,7 @@ func TestGrokbotPromptIdentityStop(t *testing.T) {
 	}
 
 	auth, err := onboarding.RenderPrompt("grokbot", onboarding.PhaseAuthorize, map[string]string{
-		"hub_url": hub, "peer_id": peer, "connector_name": connector,
+		"hub_url": hub, "connector_name": connector,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -114,14 +121,17 @@ func TestGrokbotPromptIdentityStop(t *testing.T) {
 		t.Fatal("authorization prompt is not webhook-first")
 	}
 	for _, need := range []string{
-		"routine page", "deep link", "Never paste", hub, connector, peer,
+		"routine page", "deep link", "Never paste", hub, connector,
 		"vecnet-<slug>", "few gateway", "Hosted OAuth", "default",
-		`kind "peer"`, "peer_id", "user's own chat", "not proof",
+		"setup message", `kind "peer"`, "peer_id", "user's own chat", "not proof",
 		"connected", "receipt", "ack",
 	} {
 		if !strings.Contains(auth, need) {
 			t.Fatalf("authorize prompt missing %q", need)
 		}
+	}
+	if strings.Contains(auth, peer) || peerIDValue.MatchString(auth) {
+		t.Fatal("authorization prompt names a peer id before submission creates one")
 	}
 	assertNoForbidden(t, auth)
 
@@ -179,13 +189,56 @@ func TestGrokbotPromptIdentityStop(t *testing.T) {
 	secret := fakeKey(t)
 	routineURL := "https://api2.cursor.sh/automations/webhook/01234567-89ab-cdef-0123-456789abcdef?q=" + secret
 	_, err = onboarding.RenderPrompt("grokbot", onboarding.PhaseAuthorize, map[string]string{
-		"hub_url": hub, "peer_id": peer, "connector_name": connector, "webhook_key": secret,
+		"hub_url": hub, "connector_name": connector, "webhook_key": secret,
 	})
 	checkFE(t, err, secret, onboarding.CodeUnknownField, "webhook_key")
 	_, err = onboarding.RenderPrompt("grokbot", onboarding.PhaseSetup, map[string]string{
 		"hub_url": routineURL, "peer_id": peer, "connector_name": connector, "thread_id": thread,
 	})
 	checkFE(t, err, secret, onboarding.CodeInvalidValue, "hub_url")
+}
+
+func TestGrokbotAuthorizeBeforePeer(t *testing.T) {
+	const (
+		hub       = "https://hub.example"
+		connector = "vecnet-helper"
+		peer      = "peer_expected"
+		thread    = "thr_setup"
+	)
+	auth, err := onboarding.RenderPrompt("grokbot", onboarding.PhaseAuthorize, map[string]string{
+		"hub_url": hub, "connector_name": connector,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(auth, peer) || peerIDValue.MatchString(auth) {
+		t.Fatal("pre-submit authorization embedded a peer id")
+	}
+	if !strings.Contains(auth, "setup message") || !strings.Contains(auth, "vecnet_whoami") {
+		t.Fatal("authorization does not defer the whoami binding to the setup message")
+	}
+	_, err = onboarding.RenderPrompt("grokbot", onboarding.PhaseAuthorize, map[string]string{
+		"hub_url": hub, "connector_name": connector, "peer_id": peer,
+	})
+	checkFE(t, err, "", onboarding.CodeUnknownField, "peer_id")
+
+	setup, err := onboarding.RenderPrompt("grokbot", onboarding.PhaseSetup, map[string]string{
+		"hub_url": hub, "peer_id": peer, "connector_name": connector, "thread_id": thread,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	who := strings.Index(setup, "vecnet_whoami")
+	if who < 0 {
+		t.Fatal("setup message has no whoami stop")
+	}
+	line := setup[who:]
+	if n := strings.IndexByte(line, '\n'); n >= 0 {
+		line = line[:n]
+	}
+	if !strings.Contains(line, peer) || !strings.Contains(line, `kind "peer"`) || !strings.Contains(line, "peer_id") {
+		t.Fatal("setup whoami stop does not name the created peer")
+	}
 }
 
 func assertNoForbidden(t *testing.T, text string) {
