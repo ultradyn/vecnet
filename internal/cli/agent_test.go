@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/XertroV/vecnet/internal/cli"
 	"github.com/XertroV/vecnet/internal/onboarding"
 )
 
@@ -57,7 +59,7 @@ func TestAgentCLIParity(t *testing.T) {
 			t.Fatalf("grokbot send_defaults = %v", listed.Kinds[4].SendDefaults)
 		}
 		if got := h.paths("/v1/admin/agent-kinds"); len(got) != 1 || got[0].Method != http.MethodGet {
-			t.Fatalf("kinds endpoint = %+v", got)
+			t.Fatalf("kinds endpoint = %s", agentHitDiag(got))
 		}
 
 		code, out, errs = u.run("--json", "agent", "kinds", "--kind", "pagchat-bot")
@@ -328,7 +330,7 @@ func TestAgentCLIParity(t *testing.T) {
 		}
 		got := h.paths("/v1/admin/agents/onboarding/req-queued")
 		if len(got) != 1 || got[0].Method != http.MethodGet {
-			t.Fatalf("status endpoint = %+v", got)
+			t.Fatalf("status endpoint = %s", agentHitDiag(got))
 		}
 
 		code, out, errs = u.run("--json", "agent", "status", "req-connected")
@@ -495,7 +497,7 @@ func TestAgentCLIParity(t *testing.T) {
 				t.Fatalf("peer invite %s: exit %d %s", c.Profile, code, errs)
 			}
 			if out != c.Block {
-				t.Fatalf("invite block for %s changed\n got: %s\nwant: %s", c.Profile, out, c.Block)
+				t.Fatal(inviteBlockDiag(c.Profile, out, c.Block))
 			}
 		}
 	})
@@ -526,6 +528,199 @@ func TestAgentCLIParity(t *testing.T) {
 			t.Fatal("help offers a keep-bearer flag")
 		}
 	})
+}
+
+// (t5 I1) A generated request id has to be visible before the submit POST
+// and again in the exhausted-retry instructions. Two lost responses after a
+// commit must still recover through status and a same-id retry, without a
+// second id on the automatic redispatch.
+func TestAgentCLIRequestIDRecovery(t *testing.T) {
+	t.Run("(t5 I1) committed but unanswered submit recovers with the displayed id", func(t *testing.T) {
+		h := newAgentHub(t, func() []onboarding.KindSpec { return onboarding.Specs() })
+		var mu sync.Mutex
+		var posted []string
+		var committed string
+		var stderrAtPost string
+		lose := true
+		errb := &snapBuf{}
+		h.onPost = func(n int, body map[string]any, w http.ResponseWriter) {
+			id, _ := body["request_id"].(string)
+			seen := errb.String()
+			mu.Lock()
+			if stderrAtPost == "" {
+				stderrAtPost = seen
+			}
+			posted = append(posted, id)
+			if committed == "" {
+				committed = id
+			}
+			nposts := len(posted)
+			stillLose := lose
+			mu.Unlock()
+			if stillLose {
+				writeHubProblem(w, http.StatusServiceUnavailable, "unavailable", "lost response")
+				return
+			}
+			if id != committed || nposts < 3 {
+				writeAgentResult(w, http.StatusCreated, createdResult(body, "peer_second", ""))
+				return
+			}
+			res := createdResult(body, "peer_committed", "")
+			res["status"] = "replayed"
+			writeAgentResult(w, http.StatusOK, res)
+		}
+		h.onStatus = func(id string, w http.ResponseWriter) {
+			mu.Lock()
+			want := committed
+			mu.Unlock()
+			if id == "" || id != want {
+				writeHubProblem(w, http.StatusNotFound, "not_found", "no such request")
+				return
+			}
+			writeJSONMap(w, http.StatusOK, map[string]any{
+				"request_id": id, "kind": "session", "peer_id": "peer_committed",
+				"principal_id": "prn_committed", "auth_state": "unlinked", "status": "replayed",
+			})
+		}
+		u := agentOperator(t, h.srv.URL)
+		var out bytes.Buffer
+		code := cli.Run([]string{"agent", "add", "--kind", "session", "--name", "Lost"}, strings.NewReader(""), &out, errb, u.getenv)
+		mu.Lock()
+		gotPosted := append([]string(nil), posted...)
+		id := committed
+		seenBefore := stderrAtPost
+		mu.Unlock()
+		if code != 2 {
+			t.Fatalf("lost submit: exit %d, want 2", code)
+		}
+		if len(gotPosted) != 2 || gotPosted[0] == "" || gotPosted[0] != gotPosted[1] {
+			t.Fatalf("automatic redispatch ids = %v, want one id on two attempts", gotPosted)
+		}
+		if id != gotPosted[0] {
+			t.Fatalf("committed id = %q, posted %q", id, gotPosted[0])
+		}
+		if !strings.Contains(seenBefore, "request_id "+id) {
+			t.Fatal("generated request id was not exposed before POST")
+		}
+		if strings.Contains(seenBefore, "was not answered") {
+			t.Fatal("recovery instructions were printed before the submit attempt")
+		}
+		errs := errb.String()
+		if out.Len() != 0 {
+			t.Fatal("lost submit wrote a result on stdout")
+		}
+		for _, want := range []string{
+			"request_id " + id,
+			"was not answered",
+			"may already be committed",
+			"vecnet agent status " + id,
+			"--request-id " + id,
+		} {
+			if !strings.Contains(errs, want) {
+				t.Fatalf("recovery instructions missing %q", want)
+			}
+		}
+
+		mu.Lock()
+		lose = false
+		mu.Unlock()
+		code, statusOut, statusErr := u.run("agent", "status", id)
+		if code != 0 {
+			t.Fatalf("status recovery: exit %d %s", code, statusErr)
+		}
+		if !strings.Contains(statusOut, id) || !strings.Contains(statusOut, "peer_committed") {
+			t.Fatal("status recovery did not return the committed receipt")
+		}
+		mu.Lock()
+		postsAfterStatus := len(posted)
+		mu.Unlock()
+		if postsAfterStatus != 2 {
+			t.Fatalf("status recovery issued another submit (%d posts)", postsAfterStatus)
+		}
+
+		code, replayOut, replayErr := u.run("--json", "agent", "add", "--kind", "session", "--name", "Lost", "--request-id", id)
+		if code != 0 {
+			t.Fatalf("same-id retry: exit %d\n%s\n%s", code, replayOut, replayErr)
+		}
+		var replay map[string]any
+		if err := json.Unmarshal([]byte(replayOut), &replay); err != nil {
+			t.Fatalf("replay JSON: %v", err)
+		}
+		if replay["request_id"] != id || replay["peer_id"] != "peer_committed" || replay["status"] != "replayed" {
+			t.Fatal("same-id retry did not recover the committed receipt")
+		}
+		mu.Lock()
+		gotPosted = append([]string(nil), posted...)
+		mu.Unlock()
+		if len(gotPosted) != 3 {
+			t.Fatalf("posts after recovery = %d, want 3", len(gotPosted))
+		}
+		for _, postedID := range gotPosted {
+			if postedID != id {
+				t.Fatalf("recovery invented another request id: %v", gotPosted)
+			}
+		}
+	})
+}
+
+// (t5 M1) Exact assertions stay. Failure output may name the method, path
+// and count, and it must not print Authorization values or enrolment tokens.
+func TestAgentCLIDiagnosticRedaction(t *testing.T) {
+	t.Run("(t5 M1) failure diagnostics omit authorization and enrolment tokens", func(t *testing.T) {
+		hits := []agentHit{{
+			Method: http.MethodPost,
+			Path:   "/v1/admin/agents",
+			Auth:   "Bearer vn_operator_test",
+			Body:   `{"webhook_key":"crsr_diagSecret"}`,
+		}}
+		diag := agentHitDiag(hits)
+		if !strings.Contains(diag, http.MethodPost) || !strings.Contains(diag, "/v1/admin/agents") || !strings.Contains(diag, "count 1") {
+			t.Error("diagnostic lost method, path, or count")
+		}
+		if strings.Contains(diag, "Bearer") || strings.Contains(diag, "vn_operator_test") || strings.Contains(diag, "crsr_diagSecret") || strings.Contains(diag, "webhook_key") {
+			t.Error("diagnostic leaked captured request material")
+		}
+		token := "vn_enrol_Zm9vYmFyYmF6cXV4MDEyMzQ1Njc4OWFiY2RlZmdoaWo"
+		dashed := "vn_enrol_example-token_with-dash"
+		diff := inviteBlockDiag("scout", "got "+token+" "+dashed, "want "+token)
+		if strings.Contains(diff, token) || strings.Contains(diff, dashed) || strings.Contains(diff, "vn_enrol_") {
+			t.Error("invite diagnostic leaked an enrolment token")
+		}
+		if !strings.Contains(diff, "scout") {
+			t.Error("invite diagnostic lost the profile")
+		}
+		raw, err := os.ReadFile("agent_test.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		call := "t.Fatal" + "f"
+		block := "c." + "Block"
+		dump := "%+" + "v"
+		for i, line := range strings.Split(string(raw), "\n") {
+			if strings.Contains(line, call) && (strings.Contains(line, dump) || strings.Contains(line, block)) {
+				t.Errorf("diagnostic at line %d still prints a fixture", i+1)
+			}
+		}
+	})
+}
+
+func agentHitDiag(hits []agentHit) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "count %d\n", len(hits))
+	for _, hit := range hits {
+		fmt.Fprintf(&b, "%s %s\n", hit.Method, hit.Path)
+	}
+	return b.String()
+}
+
+var diagSecretRE = regexp.MustCompile(`(?:Bearer\s+)?vn_[A-Za-z0-9_-]+`)
+
+func redactDiagSecrets(s string) string {
+	return diagSecretRE.ReplaceAllString(s, "[redacted]")
+}
+
+func inviteBlockDiag(profile, got, want string) string {
+	return fmt.Sprintf("invite block for %s changed\n got: %s\nwant: %s", profile, redactDiagSecrets(got), redactDiagSecrets(want))
 }
 
 func TestAgentCLIKeyFileBoundary(t *testing.T) {
@@ -694,7 +889,7 @@ func TestAgentCLIBearerRevoke(t *testing.T) {
 		}
 		links := h.paths("/v1/admin/dot-links")
 		if len(links) != 1 || !strings.Contains(links[0].Body, "peer_live") {
-			t.Fatalf("confirmed link body = %+v", links)
+			t.Fatalf("confirmed link body = %s", agentHitDiag(links))
 		}
 		if !strings.Contains(out+errs, "ABCD-EFGH-JKMN") || !strings.Contains(out+errs, "revoked") {
 			t.Fatalf("confirmed link output:\n%s%s", out, errs)
@@ -882,6 +1077,25 @@ func redactInputs(in map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// snapBuf is a stderr buffer the hub handler can read while the CLI is
+// blocked in a request. The mutex keeps that cross-goroutine read safe.
+type snapBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *snapBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *snapBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
 }
 
 func linePresent(s, line string) bool {

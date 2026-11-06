@@ -129,6 +129,11 @@ func (a *app) agentAdd(o opts) error {
 	body := map[string]any{
 		"kind": spec.Kind, "spec_version": spec.SpecVersion, "request_id": id, "inputs": inputs,
 	}
+	// The id is on stderr before the POST so a committed submit with a lost
+	// response can still be recovered. Automatic redispatch reuses this same id.
+	if err := a.exposeAgentRequestID(id); err != nil {
+		return err
+	}
 	var res onboarding.SubmitResult
 	if err := a.postAgent(body, &res); err != nil {
 		err = redactAgentError(err, key, routine)
@@ -136,7 +141,7 @@ func (a *app) agentAdd(o opts) error {
 		if errors.As(err, &he) && he.Code == onboarding.CodeStaleSpec {
 			return a.reportStaleSpec(spec.Kind, spec.SpecVersion, he)
 		}
-		return err
+		return a.noteLostAgentSubmit(id, err)
 	}
 	if res.Status != "created" {
 		res.HumanOutput = ""
@@ -207,6 +212,21 @@ func (a *app) fetchAgentKinds() ([]onboarding.KindSpec, error) {
 		body.Kinds = []onboarding.KindSpec{}
 	}
 	return body.Kinds, nil
+}
+
+func (a *app) exposeAgentRequestID(id string) error {
+	_, err := fmt.Fprintf(a.stderr, "request_id %s\n", id)
+	return err
+}
+
+// noteLostAgentSubmit tells the operator how to recover one id after the
+// bounded redispatch still has no answer. A definite hub rejection is unchanged.
+func (a *app) noteLostAgentSubmit(id string, err error) error {
+	if err == nil || !retryAgent(err) {
+		return err
+	}
+	fmt.Fprintf(a.stderr, "request_id %s was not answered and may already be committed; recover with `vecnet agent status %s` or the same agent add with --request-id %s\n", id, id, id)
+	return err
 }
 
 func (a *app) postAgent(body, out any) error {
