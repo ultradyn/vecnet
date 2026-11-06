@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/blobwire"
@@ -68,6 +69,32 @@ type R2Objects struct {
 	client                                        *http.Client
 	now                                           func() time.Time
 	lookup                                        func(context.Context, string) (R2Object, error)
+	head, headFailed, del, delFailed              atomic.Int64
+}
+
+// R2RequestCounts counts provider HTTP attempts this process actually sent,
+// including adapter retries. A failure is a transport error, an oversized
+// response or any status other than 200, 204 or 404. Counters are process-lifetime and
+// not persisted; they carry no keys, URLs or bytes. Direct client PUT/GET
+// traffic never passes the hub and is not counted. Not provider billing.
+type R2RequestCounts struct {
+	Head, HeadFailed, Delete, DeleteFailed int64
+}
+
+// RequestCounts reports the attempts sent so far.
+func (s *R2Objects) RequestCounts() R2RequestCounts {
+	return R2RequestCounts{Head: s.head.Load(), HeadFailed: s.headFailed.Load(), Delete: s.del.Load(), DeleteFailed: s.delFailed.Load()}
+}
+
+func (s *R2Objects) countAttempt(method string, failed bool) {
+	total, failures := &s.head, &s.headFailed
+	if method == http.MethodDelete {
+		total, failures = &s.del, &s.delFailed
+	}
+	total.Add(1)
+	if failed {
+		failures.Add(1)
+	}
 }
 
 func NewR2Objects(config R2ObjectsConfig) (*R2Objects, error) {
@@ -312,6 +339,7 @@ func (s *R2Objects) private(ctx context.Context, method, key string) (*http.Resp
 			return nil, err
 		}
 		response, err := s.client.Do(request.WithContext(ctx))
+		s.countAttempt(method, err != nil || !r2BoundedHeaders(response.Header) || !r2AnsweredStatus(response.StatusCode))
 		if err != nil {
 			if response != nil && response.Body != nil {
 				response.Body.Close()
@@ -326,7 +354,7 @@ func (s *R2Objects) private(ctx context.Context, method, key string) (*http.Resp
 			response.Body.Close()
 			return nil, &R2ProviderError{Code: "response_too_large", Status: response.StatusCode}
 		}
-		if (response.StatusCode == 429 || response.StatusCode == 500 || response.StatusCode == 502 || response.StatusCode == 503 || response.StatusCode == 504) && attempt < 2 {
+		if r2RetryableStatus(response.StatusCode) && attempt < 2 {
 			// Read only bounded error XML, never an object body. HEAD success bodies
 			// are never read; successful DELETE bodies are simply closed by the caller.
 			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, r2ResponseLimit))
@@ -336,6 +364,14 @@ func (s *R2Objects) private(ctx context.Context, method, key string) (*http.Resp
 		return response, nil
 	}
 	return nil, &R2ProviderError{Code: "unavailable", Retryable: true}
+}
+
+func r2AnsweredStatus(status int) bool {
+	return status == http.StatusOK || status == http.StatusNoContent || status == http.StatusNotFound
+}
+
+func r2RetryableStatus(status int) bool {
+	return status == 429 || status == 500 || status == 502 || status == 503 || status == 504
 }
 
 func r2BoundedHeaders(headers http.Header) bool {

@@ -381,10 +381,18 @@ type TransferUsage struct {
 	VerifiedBytes       int64
 	OccupiedByteSeconds float64
 	DurableBytes        int64
+	// Requests counts provider HEAD/DELETE attempts when the object adapter
+	// reports them (R2Objects does); see R2RequestCounts for its caveats.
+	Requests R2RequestCounts
 }
+
+type requestCounter interface{ RequestCounts() R2RequestCounts }
 
 func (s *Transfers) Usage(ctx context.Context) (TransferUsage, error) {
 	var out TransferUsage
+	if counter, ok := s.cfg.Objects.(requestCounter); ok {
+		out.Requests = counter.RequestCounts()
+	}
 	now := s.cfg.Now()
 	err := s.cfg.DB.Tx(ctx, func(tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `SELECT coalesce(sum(CASE WHEN kind='reserve' THEN byte_count ELSE 0 END),0),coalesce(sum(CASE WHEN kind='verified' THEN byte_count ELSE 0 END),0) FROM blob_usage_events`).Scan(&out.RequestedBytes, &out.VerifiedBytes); err != nil {
