@@ -19,10 +19,14 @@ export function parseResumePolicy(resp: unknown): ResumePolicy {
   const r = record(resp);
   const approvalPolicy = typeof r.approvalPolicy === 'string' ? r.approvalPolicy : 'unknown';
   const approvalsReviewer = typeof r.approvalsReviewer === 'string' ? r.approvalsReviewer : 'unknown';
-  const validPolicy = ['never', 'on-request', 'untrusted', 'on-failure'].includes(approvalPolicy) ||
-    (typeof r.approvalPolicy === 'object' && r.approvalPolicy !== null && !Array.isArray(r.approvalPolicy) &&
-      Object.hasOwn(r.approvalPolicy, 'granular'));
-  const validReviewer = approvalsReviewer === 'user' || approvalsReviewer === 'auto_review';
+  // Validate the 0.166.0 wire shape before applying the non-asking exception.
+  // Otherwise an auto_review reviewer could admit a malformed policy.
+  const policy = record(r.approvalPolicy), granular = record(policy.granular);
+  const validGranular = Object.keys(policy).length === 1 && Object.hasOwn(policy, 'granular') &&
+    ['mcp_elicitations', 'rules', 'sandbox_approval'].every(key => typeof granular[key] === 'boolean') &&
+    ['request_permissions', 'skill_approval'].every(key => !Object.hasOwn(granular, key) || typeof granular[key] === 'boolean');
+  const validPolicy = ['never', 'on-request', 'untrusted'].includes(approvalPolicy) || validGranular;
+  const validReviewer = ['user', 'auto_review', 'guardian_subagent'].includes(approvalsReviewer);
   return { approvalPolicy, approvalsReviewer,
     asks: !validPolicy || !validReviewer || !(approvalPolicy === 'never' || approvalsReviewer === 'auto_review') };
 }

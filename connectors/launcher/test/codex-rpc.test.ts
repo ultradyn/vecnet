@@ -92,10 +92,16 @@ test('unknown version is refused', { timeout: 5000 }, async t => {
 test('server requests are dropped without a reply', { timeout: 5000 }, async t => {
   const { fake, clock, log, open } = await setup(t), rpc = await open();
   await rpc.call('thread/resume', buildThreadResume('t'), 1000);
+  // Mock client timers only after connecting; the server has its own controlled clock.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   for (const method of ['item/commandExecution/requestApproval', 'item/tool/requestUserInput']) {
     fake.serverRequest('t', method, { secret: 'DO-NOT-LOG', questions: ['peer body'] });
   }
-  await read(rpc); clock.advance(2000); await read(rpc);
+  // The barrier drains the incoming requests and clears its RPC deadline before ticking.
+  await read(rpc);
+  clock.advance(2000); t.mock.timers.tick(2000);
+  // Flush any delayed reply onto the wire before checking the server's observations.
+  await read(rpc);
   assert.deepEqual(fake.replies, []);
   assert.deepEqual(log.entries.map(e => e.meta), [{ method: 'item/commandExecution/requestApproval' }, { method: 'item/tool/requestUserInput' }]);
   assert.doesNotMatch(log.text(), /DO-NOT-LOG|peer body/);

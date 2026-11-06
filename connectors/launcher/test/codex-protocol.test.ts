@@ -92,12 +92,55 @@ test('buildThreadResume emits exactly threadId and excludeTurns', async () => {
 test('parseResumePolicy: never and auto_review do not ask; on-request, untrusted, granular, missing do', () => {
   assert.deepEqual(parseResumePolicy({ approvalPolicy: 'never', approvalsReviewer: 'user' }), { approvalPolicy: 'never', approvalsReviewer: 'user', asks: false });
   assert.equal(parseResumePolicy({ approvalPolicy: 'on-request', approvalsReviewer: 'auto_review' }).asks, false);
-  for (const approvalPolicy of ['on-request', 'untrusted', 'on-failure', { granular: { mcp_tools: true } }]) {
+  for (const approvalPolicy of ['on-request', 'untrusted', { granular: { mcp_elicitations: true, rules: false, sandbox_approval: true } }]) {
     assert.equal(parseResumePolicy({ approvalPolicy, approvalsReviewer: 'user' }).asks, true);
   }
   for (const resp of [null, undefined, [], 'never', {}, { approvalPolicy: 'never' },
     { approvalPolicy: 42, approvalsReviewer: 'auto_review' }, { approvalPolicy: 'never', approvalsReviewer: false }]) {
     assert.equal(parseResumePolicy(resp).asks, true, JSON.stringify(resp));
+  }
+});
+
+test('parseResumePolicy fails closed for malformed policies even with auto_review', () => {
+  const granular = { mcp_elicitations: true, rules: false, sandbox_approval: true };
+  const malformed: unknown[] = [undefined, null, false, 42, [], {}, 'on-failure', 'garbage',
+    { granular: null }, { granular: false }, { granular: [] }, { granular: 'garbage' },
+    { granular: {} }, { granular: { rules: 'garbage' } }, { granular, extra: true }];
+  for (const key of Object.keys(granular)) {
+    const missing: Record<string, unknown> = { ...granular }; delete missing[key];
+    malformed.push({ granular: missing });
+    for (const value of [undefined, null, 0, 1, 'true', [], {}]) {
+      malformed.push({ granular: { ...granular, [key]: value } });
+    }
+  }
+  for (const key of ['request_permissions', 'skill_approval']) {
+    for (const value of [null, 1, 'false', [], {}]) malformed.push({ granular: { ...granular, [key]: value } });
+  }
+  for (const approvalPolicy of malformed) {
+    assert.equal(parseResumePolicy({ approvalPolicy, approvalsReviewer: 'auto_review' }).asks, true,
+      JSON.stringify(approvalPolicy));
+  }
+});
+
+test('parseResumePolicy accepts schema policies and compatibility reviewer with the never-or-auto_review rule', () => {
+  const policies = ['never', 'on-request', 'untrusted'];
+  for (let flags = 0; flags < 8; flags++) {
+    const granular = { mcp_elicitations: !!(flags & 1), rules: !!(flags & 2), sandbox_approval: !!(flags & 4) };
+    for (const approvalPolicy of [{ granular },
+      { granular: { ...granular, request_permissions: false, skill_approval: true } },
+      { granular: { ...granular, request_permissions: true, skill_approval: false } }]) {
+      for (const approvalsReviewer of ['user', 'auto_review', 'guardian_subagent']) {
+        assert.equal(parseResumePolicy({ approvalPolicy, approvalsReviewer }).asks, approvalsReviewer !== 'auto_review',
+          JSON.stringify({ approvalPolicy, approvalsReviewer }));
+      }
+    }
+  }
+  for (const approvalPolicy of policies) for (const approvalsReviewer of ['user', 'auto_review', 'guardian_subagent']) {
+    assert.deepEqual(parseResumePolicy({ approvalPolicy, approvalsReviewer }),
+      { approvalPolicy, approvalsReviewer, asks: !(approvalPolicy === 'never' || approvalsReviewer === 'auto_review') });
+  }
+  for (const approvalsReviewer of [undefined, null, false, {}, 'garbage']) {
+    assert.equal(parseResumePolicy({ approvalPolicy: 'never', approvalsReviewer }).asks, true);
   }
 });
 
