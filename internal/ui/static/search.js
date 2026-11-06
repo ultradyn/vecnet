@@ -8,17 +8,20 @@
 import { avatar, h } from './dom.js';
 import { kindShort, kindTitle } from './format.js';
 import { peerHref } from './peer-model.js';
-import { Q_MAX, createSearch, peerResults, threadResults } from './search-model.js';
+import { createSearch, peerResults, threadResults } from './search-model.js';
 
 const editable = el => !!(el && el.closest && el.closest('input, textarea, select, [contenteditable=""], [contenteditable=true]'));
 
 // createSearchBox draws the box into `field` and returns the search state
 // (createSearch) with focus() and close(). onChange runs on every change, so
 // the shell can redraw the sidebar. nameOf names the picked peer's chip.
-export function createSearchBox(field, { api, nameOf, onChange, options = {} }) {
+// Esc in `results` (a focused result) clears as it does in the box.
+export function createSearchBox(field, { api, nameOf, onChange, results = null, options = {} }) {
   const search = createSearch({ api, ...options });
   const input = h('input', {
-    id: 'search-q', type: 'search', maxlength: String(Q_MAX), placeholder: 'Search peers, threads',
+    // No maxlength: it counts UTF-16 units, the hub counts characters
+    // (Q_MAX); past Q_MAX the model sends nothing and says why.
+    id: 'search-q', type: 'search', placeholder: 'Search peers, threads',
     autocomplete: 'off', spellcheck: 'false', enterkeyhint: 'search', 'aria-label': 'Search peers by name and your threads by title',
     'aria-keyshortcuts': '/',
   });
@@ -66,6 +69,8 @@ export function createSearchBox(field, { api, nameOf, onChange, options = {} }) 
     }
   });
   clear.addEventListener('click', reset);
+  const escResults = e => { if (e.key === 'Escape' && search.state().open) { e.preventDefault(); reset(); } };
+  if (results) results.addEventListener('keydown', escResults);
   const slash = e => {
     if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented || editable(e.target)) return;
     if (document.querySelector('dialog[open]') || field.closest('[hidden]')) return;
@@ -83,6 +88,7 @@ export function createSearchBox(field, { api, nameOf, onChange, options = {} }) 
       off();
       search.close();
       document.removeEventListener('keydown', slash);
+      if (results) results.removeEventListener('keydown', escResults);
       field.replaceChildren();
     },
   };
@@ -91,8 +97,9 @@ export function createSearchBox(field, { api, nameOf, onChange, options = {} }) 
 // renderResults draws the search results into el: the Peers group (absent
 // while a peer is picked, when the text searches that peer's thread titles
 // only) and the Threads group. o: { box, directory, me, nameOf, now, unread,
-// avatarCtx (or null before the shell is ready), threadLink(row) }. Focus on
-// a control that is redrawn moves to its replacement.
+// lastAt(id), avatarCtx (or null before the shell is ready), threadLink(row) }.
+// Focus on a control that is redrawn moves to its replacement, or to the box
+// when the control is gone (Retry, once it is pressed).
 export function renderResults(el, o) {
   const st = o.box.state();
   const focused = el.contains(document.activeElement) ? document.activeElement.dataset.key : '';
@@ -104,17 +111,20 @@ export function renderResults(el, o) {
     if (pv.more) rows.push(h('div', { class: 'none', text: '+' + pv.more + ' more: type more of the name' }));
     parts.push(h('div', { class: 'nav sr-peers' }, rows.length ? rows : h('div', { class: 'none', text: pv.note })));
   }
-  const tv = threadResults(st, { me: o.me, nameOf: o.nameOf, now: o.now, unread: o.unread });
+  const tv = threadResults(st, { me: o.me, nameOf: o.nameOf, now: o.now, unread: o.unread, lastAt: o.lastAt });
   parts.push(h('div', { class: 'grp sr-grp' }, h('span', { text: tv.heading }), tv.rows.length ? h('span', { class: 'n', text: String(tv.rows.length) + (tv.more ? '+' : '') }) : null));
   const list = tv.rows.map(r => { const a = o.threadLink(r); a.dataset.key = 't:' + r.id; return a; });
   if (tv.note) list.push(h('div', { class: 'none' + (tv.state === 'error' ? ' bad' : ''), text: tv.note, 'aria-busy': tv.state === 'loading' ? 'true' : null }));
   if (tv.retry) list.push(h('button', { type: 'button', class: 'linkbtn more', 'data-key': 'retry', text: 'Retry', onclick: () => o.box.retry() }));
-  if (tv.more) list.push(h('button', { type: 'button', class: 'linkbtn more', 'data-key': 'more', text: 'More results', onclick: () => o.box.more() }));
+  // While the next page loads the button stays (aria-disabled, not disabled,
+  // so it keeps focus); more() ignores a press meanwhile.
+  if (tv.more) list.push(h('button', { type: 'button', class: 'linkbtn more', 'data-key': 'more', text: tv.busy ? 'Loading more…' : 'More results', 'aria-disabled': tv.busy ? 'true' : null, onclick: () => o.box.more() }));
   parts.push(h('div', { class: 'nav rows sr-threads' }, list));
   el.replaceChildren(...parts);
   if (focused) {
-    const again = el.querySelector('[data-key="' + focused + '"]');
-    if (again) again.focus();
+    const again = el.querySelector('[data-key="' + CSS.escape(focused) + '"]');
+    if (again) again.focus({ preventScroll: true });
+    else o.box.focus();
   }
 }
 

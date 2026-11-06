@@ -49,7 +49,16 @@ try {
     const asked = [];
     page.on('request', req => { if (isSearch(req.url())) asked.push(new URL(req.url())); });
     const searchUrls = () => asked.slice();
-    const typeSlowly = async text => { for (const ch of text) { await box.press(ch === ' ' ? 'Space' : ch); await page.waitForTimeout(60); } };
+    // Types text one character at a time inside the page, 40 ms apart, so
+    // the gaps stay well under the debounce however slow the driver is.
+    const typeInPage = text => box.evaluate(async (el, text) => {
+      el.focus();
+      for (let i = 1; i <= text.length; i++) {
+        el.value = text.slice(0, i);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise(resolve => setTimeout(resolve, 40));
+      }
+    }, text);
     const settled = async () => { await quiet(); await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); };
     // Shots are taken with the pointer off the sidebar, so no row reads as hovered.
     const snap = async name => { const vp = page.viewportSize(); await page.mouse.move(vp.width - 2, vp.height - 2); await shot(name); };
@@ -79,7 +88,8 @@ try {
     await settled();
 
     // Idle: the box above Your Threads, with its / hint.
-    assert(await box.getAttribute('maxlength') === '128', 'the box does not cap q at 128');
+    // No maxlength: it would count UTF-16 units; the 128-character rule is the model's.
+    assert(await box.getAttribute('maxlength') === null, 'the box has a maxlength');
     assert(await results.isHidden() && await lists.isVisible(), 'results shown with an empty box');
     await snap('sr-idle');
 
@@ -91,7 +101,7 @@ try {
     // Peer hit: typing "hark" asks the hub once, after the pause, for q=hark
     // on /v1/threads; peers are matched in the page.
     const before = searchUrls().length;
-    await typeSlowly('hark');
+    await typeInPage('hark');
     await page.waitForResponse(r => isSearch(r.url()) && new URL(r.url()).searchParams.get('q') === 'hark');
     await settled();
     const typed = searchUrls().slice(before);
@@ -152,6 +162,9 @@ try {
     // Participant + q: pick grok-reviewer from the peer results, then search
     // its threads by title; the peer-only thread is found this way.
     await box.fill('grok');
+    // Let the q=grok answer redraw the results before clicking in them.
+    await page.waitForResponse(r => isSearch(r.url()) && new URL(r.url()).searchParams.get('q') === 'grok');
+    await settled();
     await page.locator('#results .sr-pl', { hasText: 'grok-reviewer' }).waitFor();
     await page.locator('#results .sr-peer', { hasText: 'grok-reviewer' }).locator('.sr-pick').click();
     await page.locator('.sr-scope .sr-with', { hasText: 'grok-reviewer' }).waitFor();
@@ -177,12 +190,19 @@ try {
     await page.locator('.sr-scope').waitFor({ state: 'hidden' });
     assert(await results.isHidden(), 'results stayed with no text and no peer');
 
-    // The hub's 128-character cap: the box takes no more, and a longer q is
-    // refused by the hub, so the UI never sends one.
-    await box.fill('x'.repeat(200));
-    assert((await box.inputValue()).length === 128, 'the box took more than 128 characters');
+    // The hub's 128-character cap (a 129-character q is 422): past it the
+    // UI sends nothing and says why; exactly 128 is sent. The long text
+    // wraps inside the sidebar.
     const refused = await api('operator', 'GET', '/v1/threads?q=' + 'x'.repeat(129));
     assert(refused.status === 422 && refused.body.error.code === 'invalid_value' && refused.body.error.details.field === 'q', `hub took a 129-character q: ${JSON.stringify(refused)}`);
+    const sentBefore = searchUrls().length;
+    await box.fill('x'.repeat(129));
+    await page.locator('#results .none.bad', { hasText: 'Title search takes at most 128 characters' }).waitFor();
+    await settled();
+    assert(searchUrls().length === sentBefore, 'a 129-character q was sent');
+    await fitsSidebar(1440);
+    await box.fill('x'.repeat(128));
+    await page.waitForResponse(r => isSearch(r.url()) && r.ok() && new URL(r.url()).searchParams.get('q') === 'x'.repeat(128));
     await settled();
     assert(searchUrls().every(u => [...(u.searchParams.get('q') || '')].length <= 128), 'the UI sent q over 128 characters');
 
@@ -204,24 +224,32 @@ try {
     await page.setViewportSize({ width: 1440, height: 900 });
     await top();
 
-    // Esc restores the thread lists and empties the box; no request follows.
+    // Esc empties the box and brings the thread lists back, from a focused
+    // result as from the box; so does the clear button. None asks the hub.
+    const listsBack = async how => {
+      assert(await box.inputValue() === '' && await results.isHidden() && await lists.isVisible(), `${how} did not bring the lists back`);
+      await page.locator('#threads a').first().waitFor();
+    };
     const quietCount = searchUrls().length;
-    await box.focus();
-    await box.press('Escape');
-    assert(await box.inputValue() === '' && await results.isHidden() && await lists.isVisible(), 'Esc did not restore the lists');
-    await page.locator('#threads a').first().waitFor();
-    // The clear button does the same.
-    await box.fill('plan');
-    await page.locator('.sr-clear').click();
-    assert(await box.inputValue() === '' && await results.isHidden(), 'clear did not restore the lists');
+    await page.locator('#results .sr-threads a[href^="#thread/"]').first().focus();
+    await page.keyboard.press('Escape');
+    await listsBack('Esc on a result');
+    for (const how of ['Esc in the box', 'the clear button']) {
+      await box.fill('plan');
+      await page.waitForResponse(r => isSearch(r.url()) && new URL(r.url()).searchParams.get('q') === 'plan');
+      await settled();
+      if (how === 'Esc in the box') await box.press('Escape');
+      else await page.locator('.sr-clear').click();
+      await listsBack(how);
+    }
     await settled();
-    assert(searchUrls().length <= quietCount + 1, 'clearing asked the hub');
+    assert(searchUrls().length === quietCount + 2, `clearing asked the hub: ${searchUrls().slice(quietCount).map(String).join(', ')}`);
     await box.blur();
     await settled();
     await snap('sr-cleared');
-    assert(countRequests('/v1/admin/threads?q') === 0, 'q was sent to the admin list');
+    assert(countRequests(req => { const u = new URL(req.url()); return u.pathname.startsWith('/v1/admin/threads') && u.searchParams.has('q'); }) === 0, 'q was sent to the admin list');
   });
-  console.log('Search passed: peer names match the loaded directory in the page; thread titles come from GET /v1/threads?q= once typing pauses, equal to the hub, with participant= when a peer is picked; misses, searching and a failure have their own states; the box caps q at 128; Esc and clear restore the lists; nothing overflows at 1000 or 390 px');
+  console.log('Search passed: peer names match the loaded directory in the page; thread titles come from GET /v1/threads?q= once typing pauses, equal to the hub, with participant= when a peer is picked; misses, searching and a failure have their own states; a q over 128 characters is never sent; Esc (in the box or on a result) and clear bring the lists back; nothing overflows at 1000 or 390 px');
 } finally {
   await cleanBuild();
 }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { APIError, createApi } from '../static/api.js';
-import { DEBOUNCE_MS, PEERS_SHOWN, Q_MAX, SEARCH_PAGE, createSearch, matchPeers, normQuery, peerResults, threadResults, tooLong } from '../static/search-model.js';
+import { DEBOUNCE_MS, PEERS_SHOWN, Q_MAX, SEARCH_PAGE, createSearch, matchPeers, normQuery, peerResults, quoted, threadResults, tooLong } from '../static/search-model.js';
 
 const DIR = { peers: [
   { peer_id: 'peer_op', name: 'max', kind: 'operator' },
@@ -27,16 +27,15 @@ function timers() {
   };
 }
 
-// A searchThreads stand-in: each call parks until the test answers it.
+// A searchThreads stand-in: each call parks until the test answers it. It
+// does not reject on abort, so a cancelled request can still answer late, as
+// one already on the wire can, and the model must drop that answer itself.
 function stubApi() {
   const calls = [];
   return {
     calls,
     api: {
-      searchThreads: params => new Promise((resolve, reject) => {
-        calls.push({ params, resolve, reject });
-        if (params.signal) params.signal.addEventListener('abort', () => reject(new APIError(0, 'aborted', 'request aborted')));
-      }),
+      searchThreads: params => new Promise((resolve, reject) => { calls.push({ params, resolve, reject }); }),
     },
   };
 }
@@ -178,7 +177,9 @@ test('More results asks for the next page with the cursor and appends it', async
   assert.equal(calls.length, 2);
   assert.deepEqual({ q: calls[1].params.q, cursor: calls[1].params.cursor }, { q: 'plan', cursor: 'tok1' });
   const busy = threadResults(s.state(), { me: 'peer_op', nameOf, now: 0 });
-  assert.deepEqual([busy.state, busy.rows.length, busy.more], ['loading', 1, false], 'rows stay while the next page loads');
+  assert.deepEqual([busy.state, busy.rows.length, busy.more, busy.busy], ['loading', 1, true, true], 'rows and the button stay while the next page loads');
+  s.more();
+  assert.equal(calls.length, 2, 'a press while the next page loads asks nothing');
   calls[1].resolve({ threads: [thread('thr_2', 'plan 2')], next: null });
   await flush();
   assert.deepEqual(s.state().page.threads.map(x => x.thread_id), ['thr_1', 'thr_2']);
@@ -296,4 +297,50 @@ test('close stops timers and requests and silences subscribers', async () => {
   calls[0].resolve({ threads: [], next: null });
   await flush();
   assert.equal(changes(), seen);
+});
+
+test('More results is ignored while a typed query waits out the debounce', async () => {
+  const { t, calls, s } = setup();
+  s.setText('plan');
+  t.run();
+  calls[0].resolve({ threads: [thread('thr_1', 'plan 1')], next: 'tok1' });
+  await flush();
+  s.setText('plans');
+  s.more();
+  assert.equal(calls.length, 1, 'the next page of the old query is not asked for');
+  t.run();
+  assert.deepEqual({ q: calls[1].params.q, cursor: calls[1].params.cursor }, { q: 'plans', cursor: undefined });
+});
+
+test('typing back to the query in flight keeps that request and asks nothing new', async () => {
+  const { t, calls, s } = setup();
+  s.setText('rel');
+  t.run();
+  s.setText('rele');
+  s.setText('rel');
+  assert.equal(t.pending().length, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].params.signal.aborted, false);
+  calls[0].resolve({ threads: [thread('thr_1', 'rel')], next: null });
+  await flush();
+  assert.deepEqual(s.state().page.threads.map(x => x.thread_id), ['thr_1']);
+});
+
+test('result rows take last activity from the admin pages the shell holds', async () => {
+  const { t, calls, s } = setup();
+  s.setText('plan');
+  t.run();
+  calls[0].resolve({ threads: [thread('thr_1', 'plan 1'), thread('thr_2', 'plan 2')], next: null });
+  await flush();
+  const now = Date.parse('2026-11-06T10:00:00.000Z');
+  const v = threadResults(s.state(), { me: 'peer_op', nameOf, now, lastAt: id => (id === 'thr_1' ? '2026-11-06T09:55:00.000Z' : '') });
+  assert.deepEqual(v.rows.map(r => r.active), ['5m ago', '']);
+});
+
+test('notes quote a long query cut to 40 characters', () => {
+  assert.equal(quoted('plan'), '“plan”');
+  assert.equal(quoted('x'.repeat(41)), '“' + 'x'.repeat(40) + '…”');
+  assert.equal(quoted('🔎'.repeat(40)), '“' + '🔎'.repeat(40) + '”');
+  const v = peerResults({ directory: DIR, text: 'y'.repeat(129), me: 'peer_op' });
+  assert.equal(v.note, 'No peer name contains “' + 'y'.repeat(40) + '…”');
 });

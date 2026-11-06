@@ -29,6 +29,13 @@ export function tooLong(q) {
   return [...str(q)].length > Q_MAX;
 }
 
+// quoted is a query as a note quotes it, cut to QUOTED characters.
+const QUOTED = 40;
+export function quoted(q) {
+  const cs = [...str(q)];
+  return '“' + (cs.length > QUOTED ? cs.slice(0, QUOTED).join('') + '…' : cs.join('')) + '”';
+}
+
 // matchPeers is the directory's peers whose name contains q, ignoring case:
 // an exact name first, then names that start with q, then the rest, each by
 // name. An empty q is the whole directory. directory is the GET /v1/peers
@@ -61,22 +68,25 @@ export function peerResults({ directory, text, me, shown = PEERS_SHOWN }) {
     const id = p.peer_id;
     return { id, name: str(p.name) || id, kind: str(p.kind), me: id === me, pick: id !== me && PEER.test(id) };
   });
-  if (!rows.length) return { state: 'empty', note: q ? 'No peer name contains “' + q + '”' : 'No peers', rows, more: 0 };
+  if (!rows.length) return { state: 'empty', note: q ? 'No peer name contains ' + quoted(q) : 'No peers', rows, more: 0 };
   return { state: 'ok', note: '', rows, more: all.length - rows.length };
 }
 
 // threadResults is the Threads group: the hub's matches as sidebar rows, in
 // the hub's order and unfiltered here. heading names the scope the hub
 // searched: the operator's own threads, or one peer's. unread is the inbox
-// head's unread_by_thread, as Your Threads shows it.
-export function threadResults(st, { me, nameOf, now, unread }) {
+// head's unread_by_thread, as Your Threads shows it. A ThreadSummary carries
+// no last activity, so lastAt(id) supplies it from the admin pages the shell
+// already holds ('' when none lists the thread). more offers the next page;
+// busy says it is loading, so the button keeps its place (and focus).
+export function threadResults(st, { me, nameOf, now, unread, lastAt = () => '' }) {
   const heading = st.participant ? 'Threads with ' + nameOf(st.participant) : 'Your Threads';
-  const base = { heading, rows: [], more: false, retry: false };
+  const base = { heading, rows: [], more: false, busy: false, retry: false };
   if (st.tooLong) return { ...base, state: 'error', note: 'Title search takes at most ' + Q_MAX + ' characters' };
   // A query still waiting out the debounce shows nothing of the last one.
   if (st.pending) return { ...base, state: 'loading', note: 'Searching…' };
   const page = st.page;
-  const rows = page ? page.threads.filter(t => t && str(t.thread_id)).map(t => threadRow({ thread: t, last_message_at: str(t.last_message_at) }, me, nameOf, now, unreadOf(unread, t.thread_id))) : [];
+  const rows = page ? page.threads.filter(t => t && str(t.thread_id)).map(t => threadRow({ thread: t, last_message_at: str(t.last_message_at) || str(lastAt(t.thread_id)) }, me, nameOf, now, unreadOf(unread, t.thread_id))) : [];
   if (st.error) {
     const e = st.error;
     const refused = e.code === 'invalid_value' && e.details && e.details.field === 'q';
@@ -84,8 +94,8 @@ export function threadResults(st, { me, nameOf, now, unread }) {
   }
   if (!page) return { ...base, state: 'loading', note: 'Searching…' };
   const more = !!page.next;
-  if (st.loading) return { ...base, state: 'loading', note: 'Loading more…', rows };
-  if (!rows.length) return { ...base, state: 'empty', note: st.q ? 'No thread title contains “' + st.q + '”' : 'No threads', more };
+  if (st.loading) return { ...base, state: 'loading', note: '', rows, more, busy: true };
+  if (!rows.length) return { ...base, state: 'empty', note: st.q ? 'No thread title contains ' + quoted(st.q) : 'No threads', more };
   return { ...base, state: 'ok', note: '', rows, more };
 }
 

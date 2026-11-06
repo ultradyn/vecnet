@@ -79,6 +79,19 @@ function renderNav(s, route) {
   $('nav-dash').className = route.name === 'dash' ? 'on' : '';
   $('nav-add').disabled = !s.ctx; // the invite needs the session's api
   const now = s.store.hubNow(), mineRes = s.mine;
+  // A search in the box replaces the thread lists with its results
+  // (search.js); the hidden lists are redrawn when it closes.
+  const open = !!(s.search && s.search.state().open);
+  $('lists').hidden = open;
+  $('results').hidden = !open;
+  if (open) {
+    renderResults($('results'), {
+      box: s.search, directory: s.peers.get(), me: s.me, nameOf: s.nameOf, now, unread: head.unread_by_thread,
+      lastAt: lastActive(s), avatarCtx: s.ctx, threadLink: r => threadLink(r, route, s.nameOf),
+    });
+    return;
+  }
+  $('results').replaceChildren();
   const yours = yourThreads({
     page: mineRes && mineRes.get(), summaries: s.threads.get() ? threads : null,
     error: s.threads.error() || (mineRes && mineRes.error()), me: s.me, nameOf: s.nameOf, now,
@@ -86,16 +99,16 @@ function renderNav(s, route) {
   });
   $('threads').replaceChildren(...(yours.rows.length ? yours.rows.map(r => threadLink(r, route, s.nameOf)) : [h('div', { class: 'none', text: yours.note })]));
   renderOthers(s, route, threads, now);
-  // A search in the box replaces the thread lists with its results (search.js).
-  const open = !!(s.search && s.search.state().open);
-  $('lists').hidden = open;
-  $('results').hidden = !open;
-  if (open) {
-    renderResults($('results'), {
-      box: s.search, directory: s.peers.get(), me: s.me, nameOf: s.nameOf, now, unread: head.unread_by_thread,
-      avatarCtx: s.ctx, threadLink: r => threadLink(r, route, s.nameOf),
-    });
-  } else $('results').replaceChildren();
+}
+
+// lastActive looks a thread's last activity up in the admin pages the
+// sidebar holds (Your Threads' and Other Threads'), for search results.
+function lastActive(s) {
+  const at = new Map();
+  for (const res of [s.mine, s.others]) {
+    for (const r of ((res && res.get()) || {}).threads || []) if (r && r.thread) at.set(r.thread.thread_id, r.last_message_at || '');
+  }
+  return id => at.get(id) || '';
 }
 
 // One sidebar thread row, two lines (sidebar-model threadRow). Peer strings
@@ -216,7 +229,7 @@ function start(secret) {
   };
   session = s;
   // The sidebar search: peer names over this directory, thread titles by the hub.
-  s.search = createSearchBox($('search'), { api, nameOf, onChange: () => { if (session === s) renderNav(s, parseRoute(location.hash)); } });
+  s.search = createSearchBox($('search'), { api, nameOf, results: $('results'), onChange: () => { if (session === s) renderNav(s, parseRoute(location.hash)); } });
   s.offs.push(() => s.search.close());
 
   const ready = () => {

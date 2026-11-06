@@ -22,7 +22,9 @@
 .va .sr .sr-grp{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
 .va .sr .sr-grp>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .va .sr .sr-grp .n{flex:none;font:500 11px var(--mono)}
+.va .sr .none{overflow-wrap:anywhere}
 .va .sr .none.bad{color:var(--bad)}
+.va .sr .more[aria-disabled=true]{cursor:default;font-style:italic}
 .va .sr .none[aria-busy=true]{font-style:italic}
 /* A peer match, two lines like a thread row: avatar, then name over kind,
    linking to the peer; Threads narrows the thread results to its threads. */
