@@ -385,17 +385,17 @@ func viewHelp(m *Model) string {
 		for _, row := range rows {
 			width = max(width, lipgloss.Width(row.key))
 		}
-		lines := []string{styleAccent.Render(title)}
+		lines := []string{sectionHead(m.th, title)}
 		for _, row := range rows {
-			lines = append(lines, "  "+styleText.Render(fit(row.key, width))+"  "+styleMuted.Render(row.text))
+			lines = append(lines, "  "+m.th.Fg(theme.Text).Render(fit(row.key, width))+"  "+m.th.Fg(theme.Muted).Render(row.text))
 		}
 		return lines
 	}
 	hints := ansi.Wordwrap(m.active().Hints(), max(m.W-4, minW-4), "")
 	lines := section("global keys", helpKeys)
-	lines = append(lines, styleAccent.Render(m.active().Title()))
+	lines = append(lines, sectionHead(m.th, m.active().Title()))
 	for _, hint := range strings.Split(hints, "\n") {
-		lines = append(lines, "  "+styleMuted.Render(hint))
+		lines = append(lines, "  "+m.th.Fg(theme.Muted).Render(hint))
 	}
 	lines = append(lines, section("commands", commands)...)
 	return strings.Join(lines, "\n")

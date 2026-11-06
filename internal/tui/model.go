@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 var _ tea.Model = (*Model)(nil)
@@ -85,6 +86,12 @@ type Model struct {
 	Commands      map[string]Command
 
 	Profile, Hub string
+	// th is every colour the frame draws (docs/design/tui-color.md). Run
+	// detects its rung; a tea.BackgroundColorMsg swaps the dark or light set.
+	th *theme.Theme
+	// askBg sends tea.RequestBackgroundColor at start: the rung has a dark
+	// and a light set and VECNET_TUI_BG did not pick one.
+	askBg bool
 	// Prio is the priority a new message from this client would carry.
 	Prio string
 	// mouse is terminal mouse capture. M or :mouse off releases it. Shift+drag
@@ -144,6 +151,7 @@ func newModel(ctx context.Context, o Options) *Model {
 		API:        o.API,
 		Profile:    o.Profile,
 		Hub:        o.Hub,
+		th:         theme.New(theme.TrueColor, true),
 		mouse:      true,
 		OtherLimit: otherPage,
 		Now:        now,
@@ -171,7 +179,11 @@ func (m *Model) Init() tea.Cmd {
 	for _, key := range allKeys {
 		m.first[key] = true
 	}
-	return tea.Batch(m.Reload(TagAll), m.startTail(), m.listenTail(), tick())
+	cmds := []tea.Cmd{m.Reload(TagAll), m.startTail(), m.listenTail(), tick()}
+	if m.askBg {
+		cmds = append(cmds, tea.RequestBackgroundColor)
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update routes one message. Shell messages stop here; anything else reaches
@@ -186,6 +198,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.updatePaste(msg)
 	case tea.WindowSizeMsg:
 		m.W, m.H = msg.Width, msg.Height
+	case tea.BackgroundColorMsg:
+		// Only an asked-for answer counts: VECNET_TUI_BG wins over the terminal.
+		if m.askBg {
+			m.th = theme.New(m.th.Profile(), msg.IsDark())
+		}
+		return m, nil
 	case tickMsg:
 		return m, m.onTick()
 	case reloadMsg:
@@ -219,12 +237,11 @@ func (m *Model) active() Screen {
 	return m.screens[m.Tab]
 }
 
-// View draws the full-screen frame.
+// View draws the full-screen frame. It sets no frame background or
+// foreground: the terminal's own show everywhere but the fills (design C2).
 func (m *Model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
-	v.BackgroundColor = colorBg
-	v.ForegroundColor = colorText
 	if m.mouse {
 		v.MouseMode = tea.MouseModeCellMotion
 	}
