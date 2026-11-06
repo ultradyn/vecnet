@@ -39,14 +39,14 @@ try {
     const title = await paneTitle();
 
     // The hostile thread first: nothing in it may reach the terminal.
-    await openThread(demo.threads.hostile, '─ <img src=x onerror=alert(1)>pwn');
+    await openThread(demo.threads.hostile, '━ <img src=x onerror=alert(1)>pwn');
     await waitFor('<img src=x onerror=alert(1)>pwn');
     const hostile = await pane();
     assert(await paneTitle() === title, 'the pane title changed');
     assert(hostile.includes('vecnet | 1:inbox 2:chat 3:dash 4:subs'), 'the frame did not survive');
     assert(!hostile.includes(']52;') && !hostile.includes('[2J') && !hostile.includes('‮'), 'an escape reached the pane');
 
-    await openThread(demo.threads.hark, '─ hark B196: radio end-phrase bug');
+    await openThread(demo.threads.hark, '━ hark B196: radio end-phrase bug');
     await waitFor('Push classifier fix to hark master and release?');
     await waitFor('[1]yes');
     await waitFor('hark-listen.log');
@@ -96,7 +96,7 @@ try {
     await keys('Escape');
     await waitFor('NORMAL');
 
-    await openThread(demo.threads.quota, '─ Quota exhausted');
+    await openThread(demo.threads.quota, '━ Quota exhausted');
     await keys('i');
     await waitFor('INSERT');
     await keys(refused);
