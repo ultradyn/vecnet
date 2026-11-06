@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { APIError, createApi } from '../static/api.js';
+import { fakeR2, fileOf, settle, until } from './r2-fixture.mjs';
 import {
-  MAX_ATTACHMENTS, MAX_BYTES, SPILL_SLOT, attachmentName, canAdd, errorText, mediaTypeOf, ready, sendRefusal, signature, toAttachments,
+  MAX_ATTACHMENTS, MAX_BYTES, SPILL_SLOT, attachmentName, canAdd, errorText, mediaTypeOf, ready, retryKey, sendRefusal, signature, toAttachments,
 } from '../static/attach-model.js';
 
 const MiB = 1 << 20;
@@ -136,13 +137,19 @@ function fakeXHR() {
   return { made, XHR: FakeXHR };
 }
 const tick = () => new Promise(r => setImmediate(r));
+// An old hub: no /v1/blob-capabilities, so uploads keep the legacy hub PUT.
+const oldHub = async path => {
+  if (String(path) === '/v1/blob-capabilities') return new Response(JSON.stringify({ error: { code: 'not_found', message: 'no such endpoint', details: {} } }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+  throw new Error('a legacy upload fetches nothing but discovery: ' + path);
+};
 
-test('api.upload: PUT /v1/blobs?ttl=86400 with bearer and Content-Type, reports progress, resolves {sha256,size}', async () => {
+test('api.upload on an old hub (capabilities 404): PUT /v1/blobs?ttl=86400 with bearer and Content-Type, reports progress, resolves {sha256,size}', async () => {
   const { made, XHR } = fakeXHR();
-  const api = createApi({ secret: 'vn_secret', fetch: async () => { throw new Error('upload must not use fetch'); }, XHR });
+  const api = createApi({ secret: 'vn_secret', fetch: oldHub, XHR });
   const f = new File(['hello world'], 'shot.png', { type: 'image/png' });
   const seen = [];
   const p = api.upload(f, { onProgress: (loaded, total) => seen.push([loaded, total]) });
+  await settle();
   assert.equal(made.length, 1);
   const x = made[0];
   assert.equal(x.method, 'PUT');
@@ -159,12 +166,14 @@ test('api.upload: PUT /v1/blobs?ttl=86400 with bearer and Content-Type, reports 
 
   // An untyped file goes up as application/octet-stream; no onProgress is fine.
   const q = api.upload(new File(['z'], 'blob'));
+  await settle();
   assert.equal(made[1].headers['Content-Type'], 'application/octet-stream');
   made[1].reply(200, { sha256: sha('d'), size: 1 });
   assert.deepEqual(await q, { sha256: sha('d'), size: 1 });
 
   // A 2xx with an unreadable body is a lost reply.
   const r = api.upload(new File(['z'], 'z'));
+  await settle();
   made[2].reply(200, '<html>');
   const lost = await r.catch(e => e);
   assert.ok(lost instanceof APIError);
@@ -175,9 +184,10 @@ test('api.upload: PUT /v1/blobs?ttl=86400 with bearer and Content-Type, reports 
 test('api.upload: 413 → APIError blob_too_large with details.limit; abort → aborted; 401 fires onUnauthorized once', async () => {
   const { made, XHR } = fakeXHR();
   let signedOut = 0;
-  const api = createApi({ secret: 's', XHR, onUnauthorized: () => { signedOut++; } });
+  const api = createApi({ secret: 's', XHR, fetch: oldHub, onUnauthorized: () => { signedOut++; } });
 
   const big = api.upload(new File(['x'], 'big.iso'));
+  await settle();
   made[0].reply(413, { error: { code: 'blob_too_large', message: 'blob exceeds the per-blob cap', details: { limit: 25 * MiB } } }, 'Payload Too Large');
   const e413 = await big.catch(e => e);
   assert.ok(e413 instanceof APIError);
@@ -188,6 +198,7 @@ test('api.upload: 413 → APIError blob_too_large with details.limit; abort → 
 
   // A proxy page: the status still says what happened, as request() does.
   const proxied = api.upload(new File(['x'], 'p'));
+  await settle();
   made[1].reply(502, '<html>Bad gateway</html>', 'Bad Gateway');
   const e502 = await proxied.catch(e => e);
   assert.equal(e502.status, 502);
@@ -198,6 +209,7 @@ test('api.upload: 413 → APIError blob_too_large with details.limit; abort → 
   // Abort through the signal → status 0 code aborted, and the XHR is aborted.
   const ctrl = new AbortController();
   const gone = api.upload(new File(['x'], 'a'), { signal: ctrl.signal });
+  await settle();
   ctrl.abort();
   const eAbort = await gone.catch(e => e);
   assert.ok(made[2].aborted);
@@ -213,6 +225,7 @@ test('api.upload: 413 → APIError blob_too_large with details.limit; abort → 
 
   // Unreached hub → status 0 code network.
   const off = api.upload(new File(['x'], 'n'));
+  await settle();
   made[3].fail();
   const eNet = await off.catch(e => e);
   assert.equal(eNet.status, 0);
@@ -222,6 +235,7 @@ test('api.upload: 413 → APIError blob_too_large with details.limit; abort → 
   const denied = { error: { code: 'unauthenticated', message: 'no', details: {} } };
   const u1 = api.upload(new File(['x'], '1'));
   const u2 = api.upload(new File(['x'], '2'));
+  await settle();
   made[4].reply(401, denied);
   made[5].reply(401, denied);
   for (const e of await Promise.all([u1.catch(e => e), u2.catch(e => e)])) {
@@ -237,11 +251,13 @@ test('api.upload: 413 → APIError blob_too_large with details.limit; abort → 
     onUnauthorized: () => { fetched++; },
   });
   await shared.peers().catch(() => {});
-  const u3 = shared.upload(new File(['x'], '3'));
-  made[6].reply(401, denied);
-  await u3.catch(() => {});
+  // Discovery is a fetch request too: its 401 shares the once-flag, and a
+  // refused discovery never falls back to a hub PUT.
+  const u3 = await shared.upload(new File(['x'], '3')).catch(e => e);
+  assert.equal(u3.status, 401);
   await tick();
   assert.equal(fetched, 1);
+  assert.equal(made.length, 6, 'no PUT after a refused discovery');
 });
 
 test('errorText: 429 shows the en-AU time from retry_after_seconds; 413 without details.limit says 25 MiB', () => {
@@ -288,4 +304,284 @@ test('ready is false while any chip uploads or failed', () => {
   assert.equal(ready([a, { ...b, state: 'failed', sha256: undefined }]), false);
   // Removing the failed chip makes it ready again.
   assert.equal(ready([a]), true);
+});
+
+// ---------- R2 direct uploads (plan 2026-11-05-r2-blobs Task 7) ----------
+
+const r2Api = (f, extra = {}) => createApi({ secret: 'vn_op', fetch: f.fetch, XHR: f.XHR, now: f.now, ...extra });
+const lower = h => Object.fromEntries(Object.entries(h).map(([k, v]) => [k.toLowerCase(), v]));
+
+test('R2 upload: discover, hash, grant, PUT the exact hashed bytes with no credentials, complete; resolves the verified Ref', async () => {
+  const f = fakeR2();
+  const api = r2Api(f);
+  const phases = [], seen = [];
+  const ref = await api.upload(fileOf('abc', 'report.txt'), { onPhase: p => phases.push(p), onProgress: (l, t, phase) => seen.push([l, t, phase]) });
+  assert.deepEqual(phases, ['hashing', 'uploading', 'verifying']);
+  const [caps, grant, complete] = f.hubCalls();
+  assert.equal(caps.path, '/v1/blob-capabilities');
+  assert.equal(grant.path, '/v1/blobs/uploads');
+  assert.deepEqual(grant.json, { size: 3, sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', media_type: 'text/plain' });
+  assert.match(grant.headers['Idempotency-Key'], /^ui-blob-[0-9a-f]{32}$/);
+  assert.equal(complete.path, '/v1/blobs/uploads/' + ref.blob_id + '/complete');
+  assert.equal(complete.body, '{}');
+  for (const c of f.hubCalls()) assert.equal(c.headers.Authorization, 'Bearer vn_op');
+  const [put] = f.s3Calls('PUT');
+  assert.equal(put.via, 'xhr');
+  assert.equal(put.withCredentials, false, 'no cookies on the provider request');
+  const h = lower(put.headers);
+  assert.equal(h.authorization, undefined, 'no bearer on the provider request');
+  assert.equal(h['content-length'], undefined, 'the browser sets Content-Length from the fixed body');
+  assert.equal(h['content-type'], 'application/octet-stream');
+  assert.equal(h['x-amz-checksum-sha256'], 'ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=');
+  assert.equal(h['if-none-match'], '*');
+  assert.deepEqual([...put.bytes], [97, 98, 99], 'exact body');
+  assert.equal(put.body.size, 3, 'exact length');
+  assert.deepEqual(ref, {
+    blob_id: ref.blob_id, sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', sha256_verified: true,
+    integrity: { algorithm: 'sha256', value: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', verified: true },
+    size: 3, retention_class: '1d', expires_at: '2026-11-07T10:00:00.000Z',
+  });
+  assert.ok(seen.some(([, , p]) => p === 'hashing') && seen.some(([, , p]) => p === 'uploading'));
+  // The signed URL is never part of the result.
+  assert.ok(!JSON.stringify(ref).includes('Signature'));
+});
+
+test('R2 upload: a disk hub or an old hub keeps the hub PUT; a failed discovery never falls back', async () => {
+  for (const backend of ['disk', 'old']) {
+    const f = fakeR2({ backend });
+    f.legacyPut = (x, body) => setImmediate(() => { x.status = 201; x.responseText = JSON.stringify({ sha256: sha('e'), size: body.size }); x.onload(); });
+    const ref = await r2Api(f).upload(fileOf('hello'));
+    assert.deepEqual(ref, { sha256: sha('e'), size: 5 });
+    const put = f.calls.find(c => c.via === 'xhr');
+    assert.equal(put.url, '/v1/blobs?ttl=86400');
+    assert.equal(put.headers.Authorization, 'Bearer vn_op');
+    assert.equal(f.hubCalls('POST').length, 0);
+  }
+  const f = fakeR2();
+  f.capsStatus = 503;
+  const err = await r2Api(f).upload(fileOf('x')).catch(e => e);
+  assert.equal(err.status, 503);
+  assert.equal(f.calls.filter(c => c.via === 'xhr').length, 0);
+});
+
+test('R2 upload: an untrusted grant is refused before any provider request', async () => {
+  const cases = {
+    'foreign origin': g => { g.upload.url = 'https://evil.example/put?x=1'; },
+    'plain http': g => { g.upload.url = g.upload.url.replace('https://', 'http://'); },
+    'userinfo': g => { g.upload.url = g.upload.url.replace('https://', 'https://user:pw@'); },
+    'over-long deadline': g => { g.upload.expires_at = new Date(Date.parse(g.upload.expires_at) + 3600000).toISOString(); },
+    'extra header': g => { g.upload.headers.Authorization = 'Bearer leak'; },
+    'missing header': g => { delete g.upload.headers['If-None-Match']; },
+    'wrong checksum header': g => { g.upload.headers['x-amz-checksum-sha256'] = 'AAAA'; },
+    'wrong digest': g => { g.sha256 = sha('f'); },
+    'wrong size': g => { g.size = 4; },
+    'not a PUT': g => { g.upload.method = 'POST'; },
+  };
+  for (const [name, mutate] of Object.entries(cases)) {
+    const f = fakeR2();
+    const fetch = f.fetch;
+    f.fetch = async (url, init) => {
+      const r = await fetch(url, init);
+      if (String(url) !== '/v1/blobs/uploads') return r;
+      const g = await r.json();
+      mutate(g);
+      return new Response(JSON.stringify(g), { status: 201, headers: { 'Content-Type': 'application/json' } });
+    };
+    const err = await createApi({ secret: 'vn_op', fetch: f.fetch, XHR: f.XHR, now: f.now }).upload(fileOf('abc')).catch(e => e);
+    assert.ok(err instanceof APIError, name);
+    assert.equal(err.code, 'bad_response', name);
+    assert.equal(f.s3Calls().length, 0, name + ': no provider request');
+    assert.equal(f.hubCalls('POST', '/v1/blobs/uploads/').length, 0, name + ': no completion');
+  }
+});
+
+test('R2 upload: abort while hashing, uploading or completing stops there', async () => {
+  // Hashing: no grant is requested.
+  let f = fakeR2(), ctrl = new AbortController();
+  let p = r2Api(f).upload(fileOf('abc'), { signal: ctrl.signal, onPhase: ph => { if (ph === 'hashing') ctrl.abort(); } });
+  let err = await p.catch(e => e);
+  assert.equal(err.code, 'aborted');
+  assert.equal(f.hubCalls('POST').length, 0);
+
+  // Uploading: the PUT is aborted and nothing completes.
+  f = fakeR2(); ctrl = new AbortController();
+  f.nextPut.push('hold');
+  p = r2Api(f).upload(fileOf('abc'), { signal: ctrl.signal });
+  await until(() => f.s3Calls('PUT').length > 0);
+  const put = f.s3Calls('PUT')[0];
+  assert.ok(put, 'the PUT started');
+  ctrl.abort();
+  err = await p.catch(e => e);
+  assert.equal(err.code, 'aborted');
+  assert.ok(put.xhr.aborted);
+  f.release();
+  await settle();
+  assert.equal(f.hubCalls('POST', '/v1/blobs/uploads/').length, 0, 'no completion after an aborted PUT');
+
+  // Completing: the completion's own signal is aborted.
+  f = fakeR2(); ctrl = new AbortController();
+  const fetch = f.fetch;
+  let completeSignal;
+  f.fetch = async (url, init) => {
+    if (String(url).endsWith('/complete')) { completeSignal = init.signal; ctrl.abort(); throw new DOMException('aborted', 'AbortError'); }
+    return fetch(url, init);
+  };
+  err = await r2Api(f).upload(fileOf('abc'), { signal: ctrl.signal }).catch(e => e);
+  assert.equal(err.code, 'aborted');
+  assert.ok(completeSignal, 'completion carries the abort signal');
+});
+
+test('R2 upload: two concurrent uploads get their own keys, grants and bytes', async () => {
+  const f = fakeR2();
+  const api = r2Api(f);
+  const [a, b] = await Promise.all([api.upload(fileOf('first file', 'a.txt')), api.upload(fileOf('second', 'b.txt'))]);
+  assert.notEqual(a.blob_id, b.blob_id);
+  const keys = f.hubCalls('POST', '/v1/blobs/uploads').filter(c => c.path === '/v1/blobs/uploads').map(c => c.headers['Idempotency-Key']);
+  assert.equal(new Set(keys).size, 2);
+  const puts = f.s3Calls('PUT');
+  assert.equal(puts.length, 2);
+  assert.deepEqual(puts.map(p => new TextDecoder().decode(p.bytes)).sort(), ['first file', 'second']);
+  assert.equal(a.size, 10);
+  assert.equal(b.size, 6);
+});
+
+test('R2 upload: a retry after an ambiguous PUT reuses the same grant; 412 means the bytes landed', async () => {
+  const f = fakeR2();
+  const api = r2Api(f);
+  f.nextPut.push('lost'); // stored at the provider, reply lost
+  const first = await api.upload(fileOf('abc'), { idempotencyKey: 'ui-blob-k1' }).catch(e => e);
+  assert.equal(first.status, 0);
+  assert.equal(first.code, 'storage_unreachable');
+  assert.equal(f.hubCalls('POST', '/v1/blobs/uploads/').length, 0, 'an ambiguous PUT is never completed blind');
+  const ref = await api.upload(fileOf('abc'), { idempotencyKey: 'ui-blob-k1' });
+  const grants = f.hubCalls('POST').filter(c => c.path === '/v1/blobs/uploads');
+  assert.deepEqual(grants.map(c => c.headers['Idempotency-Key']), ['ui-blob-k1', 'ui-blob-k1']);
+  assert.equal(f.grants.size, 1, 'the same grant, not a second reservation');
+  assert.equal(ref.sha256_verified, true);
+  // A PUT that never landed is simply sent again under the same grant.
+  const g = fakeR2();
+  g.nextPut.push('network');
+  const k = 'ui-blob-k2';
+  assert.equal((await r2Api(g).upload(fileOf('xyz'), { idempotencyKey: k }).catch(e => e)).code, 'storage_unreachable');
+  const again = await r2Api(g).upload(fileOf('xyz'), { idempotencyKey: k });
+  assert.equal(again.sha256_verified, true);
+  assert.equal(g.grants.size, 1);
+});
+
+test('R2 upload: provider refusals map to fixed codes; nothing completes', async () => {
+  // The PUT body is the hashed bytes themselves, so a provider 400 is a
+  // refused request, never "the file changed".
+  const cases = [['cors', 0, 'storage_unreachable'], ['redirect', 0, 'storage_redirect'], [403, 403, 'blob_capability_expired'], [400, 400, 'storage_refused'], [500, 500, 'blob_unavailable']];
+  for (const [hook, status, code] of cases) {
+    const f = fakeR2();
+    f.nextPut.push(hook);
+    const err = await r2Api(f).upload(fileOf('abc')).catch(e => e);
+    assert.equal(err.code, code, String(hook));
+    assert.equal(err.status, status, String(hook));
+    assert.ok(!String(err.message).includes('Signature') && !String(err.message).includes('<Error'), 'no URL or provider XML in the error');
+    assert.equal(f.hubCalls('POST', '/v1/blobs/uploads/').length, 0, String(hook));
+  }
+});
+
+test('R2 upload: completion must prove verification; quota and busy refusals carry their codes', async () => {
+  let f = fakeR2();
+  f.completeUnverified = true;
+  assert.equal((await r2Api(f).upload(fileOf('abc')).catch(e => e)).code, 'bad_response');
+  f = fakeR2();
+  f.completeError = () => new Response(JSON.stringify({ error: { code: 'upload_incomplete', message: 'object missing', details: {} } }), { status: 409 });
+  assert.equal((await r2Api(f).upload(fileOf('abc')).catch(e => e)).code, 'upload_incomplete');
+  f = fakeR2();
+  f.storage = { used: 100, limit: 101 };
+  const full = await r2Api(f).upload(fileOf('abc')).catch(e => e);
+  assert.equal(full.status, 429);
+  assert.equal(full.code, 'blob_storage_quota_exceeded');
+  assert.equal(f.s3Calls().length, 0);
+});
+
+test('R2 upload: new uploads take the retention in force at grant time; earlier refs keep theirs', async () => {
+  const f = fakeR2({ retention: '1d' });
+  const api = r2Api(f);
+  const before = await api.upload(fileOf('one'));
+  f.retention = 'off';
+  const after = await api.upload(fileOf('two'));
+  assert.equal(before.retention_class, '1d');
+  assert.equal(before.expires_at, '2026-11-07T10:00:00.000Z');
+  assert.equal(after.retention_class, 'keep');
+  assert.equal(after.expires_at, null);
+  // Each upload discovered capabilities afresh.
+  assert.equal(f.hubCalls('GET', '/v1/blob-capabilities').length, 2);
+});
+
+test('R2 model: send references carry blob_id, class and deadline, never verification fields; ready waits for verification', () => {
+  const ref = { blob_id: 'blo_00000000000000000000000001', sha256: sha('a'), sha256_verified: true, integrity: { algorithm: 'sha256', value: sha('a'), verified: true }, size: 3, retention_class: 'keep', expires_at: null };
+  const r2 = { id: 'u1', name: 'a.txt', size: 3, media_type: 'text/plain', state: 'done', ...ref };
+  const timed = { ...r2, id: 'u2', blob_id: 'blo_00000000000000000000000002', retention_class: '1d', expires_at: '2026-11-07T10:00:00.000Z' };
+  assert.deepEqual(toAttachments([r2, timed, done('b')]), [
+    { blob_id: ref.blob_id, sha256: sha('a'), size: 3, media_type: 'text/plain', name: 'a.txt', retention_class: 'keep', expires_at: null },
+    { blob_id: timed.blob_id, sha256: sha('a'), size: 3, media_type: 'text/plain', name: 'a.txt', retention_class: '1d', expires_at: '2026-11-07T10:00:00.000Z' },
+    { sha256: sha('b'), size: 3, media_type: 'text/plain', name: 'b.txt' },
+  ]);
+  assert.equal(ready([r2]), true);
+  for (const state of ['hashing', 'verifying', 'uploading', 'queued']) assert.equal(ready([{ ...r2, state }]), false, state);
+  assert.equal(ready([{ ...r2, sha256_verified: false, integrity: { ...ref.integrity, verified: false } }]), false, 'a pending grant is not sendable');
+  // The same bytes under a new grant are a different attachment.
+  assert.notEqual(signature([r2]), signature([{ ...r2, blob_id: 'blo_00000000000000000000000009' }]));
+});
+
+test('R2 model: retry keeps the grant key unless the hub says it is spent', () => {
+  const it = { idem: 'ui-blob-1' };
+  // Replaying an untrusted grant or a refused request reserves nothing new.
+  for (const code of ['storage_unreachable', 'network', 'aborted', 'upload_incomplete', 'blob_unavailable', 'bad_response', 'storage_refused']) {
+    assert.equal(retryKey(it, new APIError(0, code, '')), 'ui-blob-1', code);
+  }
+  // No bytes landed under an expired link; rejected bytes need a new grant.
+  for (const code of ['upload_grant_expired', 'idempotency_conflict', 'blob_checksum_mismatch', 'blob_capability_expired', 'blob_proof_mismatch', 'blob_storage_quota_exceeded']) {
+    assert.equal(retryKey(it, new APIError(409, code, '')), null, code);
+  }
+});
+
+test('R2 errorText: storage full, busy, expired grant, CORS and integrity read as one line each', () => {
+  const nowMs = new Date(2026, 10, 3, 10, 0, 0).getTime();
+  const lines = [
+    errorText(new APIError(429, 'blob_storage_quota_exceeded', '', {}), nowMs),
+    errorText(new APIError(429, 'upload_busy', '', { retry_after_seconds: 30 }), nowMs),
+    errorText(new APIError(410, 'upload_grant_expired', ''), nowMs),
+    errorText(new APIError(0, 'storage_unreachable', ''), nowMs),
+    errorText(new APIError(400, 'blob_checksum_mismatch', ''), nowMs),
+    errorText(new APIError(403, 'blob_capability_expired', ''), nowMs),
+    errorText(new APIError(409, 'direct_upload_required', ''), nowMs),
+    errorText(new APIError(409, 'upload_incomplete', ''), nowMs),
+    errorText(new APIError(400, 'storage_refused', ''), nowMs),
+    errorText(new APIError(409, 'blob_proof_mismatch', ''), nowMs),
+  ];
+  assert.match(lines[0], /storage is full/i);
+  assert.match(lines[1], /10:00|try again/i);
+  assert.match(lines[2], /expired/i);
+  assert.match(lines[3], /CORS|storage/i);
+  assert.match(lines[4], /changed|checksum/i);
+  assert.match(lines[5], /Retry/);
+  assert.match(lines[6], /reload/i);
+  assert.match(lines[7], /Retry/);
+  assert.match(lines[8], /400/);
+  assert.match(lines[9], /new upload/);
+  assert.equal(new Set(lines).size, lines.length);
+});
+
+test('R2 upload: deadlines are judged on the injected hub clock, not the browser clock', async () => {
+  // The fixture hub runs at 2026-11-06T10:00Z; this machine's clock does not.
+  const f = fakeR2();
+  const skewed = await createApi({ secret: 'vn_op', fetch: f.fetch, XHR: f.XHR, now: () => f.clock - 10000 }).upload(fileOf('abc')).catch(e => e);
+  assert.equal(skewed.code, 'bad_response', 'a client 10 s behind sees an over-long capability');
+  assert.equal(f.s3Calls().length, 0);
+  // The same grant replays under the same key on the hub clock, with no new reservation.
+  const ref = await createApi({ secret: 'vn_op', fetch: f.fetch, XHR: f.XHR, now: f.now }).upload(fileOf('abc'), { idempotencyKey: 'ui-blob-same' });
+  assert.equal(ref.sha256_verified, true);
+});
+
+test('R2 upload: capabilities with no transfer origin are refused before any grant is reserved', async () => {
+  const f = fakeR2();
+  f.capsTamper = c => { c.download_origins = ['https://*.r2.cloudflarestorage.com', 'https://acct.r2.cloudflarestorage.com/path']; };
+  const err = await r2Api(f).upload(fileOf('abc')).catch(e => e);
+  assert.equal(err.code, 'bad_response');
+  assert.equal(f.hubCalls('POST').length, 0, 'no grant, so no reservation');
 });

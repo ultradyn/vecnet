@@ -251,6 +251,52 @@ export function laneStops(row, current, saved) {
     .sort((a, b) => a.seconds - b.seconds);
 }
 
+// ---------- attachment retention and storage (R2 blobs Task 7) ----------
+
+// BLOB_NEW_ONLY sits beside the Attachment expiry row in both views.
+export const BLOB_NEW_ONLY = 'Applies to new uploads only. Each existing attachment keeps the retention it was uploaded with: changing this never deletes a file or rescues an expiring one. Download links stay short-lived (up to 10 minutes) whatever is chosen.';
+
+// bytesText: decimal units, as the hub's storage figures are read.
+export function bytesText(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return '';
+  for (const [u, s] of [['GB', 1e9], ['MB', 1e6], ['KB', 1e3]]) if (n >= s) return (n / s).toFixed(n >= 10 * s ? 0 : 1) + ' ' + u;
+  return n + ' B';
+}
+
+const FIGURES = ['retained_bytes', 'reserved_bytes', 'used_bytes', 'limit_bytes'];
+// validStorage: the operator-only storage figures beside a snapshot, or null.
+// Each is a whole, non-negative byte count and the limit is finite and set.
+export function validStorage(s) {
+  if (!s || typeof s !== 'object') return null;
+  if (!FIGURES.every(k => Number.isSafeInteger(s[k]) && s[k] >= 0) || s.limit_bytes <= 0) return null;
+  return Object.fromEntries(FIGURES.map(k => [k, s[k]]));
+}
+
+// storageView: the meter both views draw. near at 90%, full at the limit;
+// a limit lowered below use reads over the limit, and nothing is deleted.
+export function storageView(storage) {
+  const s = validStorage(storage);
+  if (!s) return null;
+  const used = s.used_bytes, limit = s.limit_bytes, ratio = used / limit;
+  const tone = used >= limit ? 'full' : ratio >= 0.9 ? 'near' : 'ok';
+  const note = used > limit
+    ? 'Storage is over the limit: new uploads are refused until files expire or are purged. Nothing already uploaded is deleted.'
+    : tone === 'full' ? 'Storage is full: new uploads are refused until files expire or are purged. Nothing already uploaded is deleted.'
+      : tone === 'near' ? 'Storage is near its limit: new uploads are refused once it is full.' : '';
+  return {
+    ...s, tone, note, percent: Math.min(100, Math.round(ratio * 100)),
+    text: `${bytesText(used)} used of ${bytesText(limit)}` + (used > limit ? `, over by ${bytesText(used - limit)}` : ''),
+    parts: [['Retained', s.retained_bytes], ['Reserved', s.reserved_bytes], ['Used', used], ['Limit', limit]].map(([label, n]) => ({ label, value: bytesText(n) })),
+  };
+}
+
+// blobOffText: what turning expiry off costs, with the hub's own figures.
+export function blobOffText(storage) {
+  const s = validStorage(storage);
+  return 'New attachments get no automatic expiry, and the storage provider has no disaster expiry for them: storage grows, and costs, until files are purged or their last message reference goes. Existing attachments keep their deadlines.' +
+    (s ? ` The hub reports ${bytesText(s.retained_bytes)} retained and ${bytesText(s.reserved_bytes)} reserved: ${bytesText(s.used_bytes)} used of a ${bytesText(s.limit_bytes)} limit.` : '');
+}
+
 // ---------- the store ----------
 
 const aborted = e => !!e && (e.code === 'aborted' || e.name === 'AbortError');
@@ -304,7 +350,7 @@ export function createSettingsStore({ api, appearance, storage }) {
   let dead = false, offAppearance = () => {};
   const look = appearance ? appearance.get() : { theme: 'system', density: 'comfortable' };
   const st = {
-    phase: 'loading', loadError: null, etag: '', revision: 0, rows: [], draft: new Map(),
+    phase: 'loading', loadError: null, etag: '', revision: 0, rows: [], draft: new Map(), storage: null,
     busy: '', confirm: null, newer: null, saveError: null, serverErrors: {}, focus: '',
     saved: null, announce: { text: '', n: 0 }, view: loadView(storage), q: '', only: 'all', open: '',
     appearance: { saved: { ...look }, draft: { ...look }, note: '' },
@@ -318,6 +364,8 @@ export function createSettingsStore({ api, appearance, storage }) {
     st.rows = body.preferences.slice();
     st.revision = body.revision || 0;
     st.etag = etag || '';
+    // Storage figures come only with an operator's R2 snapshot.
+    st.storage = validStorage(body.storage);
     // A draft for a row that became locked or vanished cannot be saved.
     for (const key of [...st.draft.keys()]) {
       const row = rowOf(key);

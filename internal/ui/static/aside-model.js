@@ -1,4 +1,5 @@
 // Pure helpers for the thread side panel. No DOM: covered by node.
+import { blobView } from './attach-model.js';
 import { bytes } from './format.js';
 
 // PROTOCOL §6: the hub's default thread budget.
@@ -41,21 +42,33 @@ function downloadName(name, sha) {
 }
 
 // files are a thread detail's files (§2.13). label is shown as text and never
-// parsed; download is the safe saved name.
-export function fileRows(files) {
-  return (files || []).map(f => ({
-    sha256: f.sha256,
-    label: f.name || f.media_type || 'file',
-    download: downloadName(f.name, f.sha256),
-    size: bytes(f.size || 0),
-    sender: f.sender,
-    at: f.created_at,
-    messageId: f.message_id,
-    spilled: !!f.spilled,
-    purged: !!f.purged,
-    disabled: !!f.purged,
-    note: f.purged ? 'purged' : f.spilled ? 'spilled' : '',
-  }));
+// parsed; download is the safe saved name. refs (blob_id -> { att, state })
+// carries what the thread's history says of each R2 file: its recorded
+// class, deadline and checksum trust from the message, and its blob_states
+// projection. An R2 row reads its state on nowMs, the hub clock.
+export function fileRows(files, refs = null, nowMs = Date.now()) {
+  return (files || []).map(f => {
+    const row = {
+      sha256: f.sha256,
+      label: f.name || f.media_type || 'file',
+      download: downloadName(f.name, f.sha256),
+      size: bytes(f.size || 0),
+      sender: f.sender,
+      at: f.created_at,
+      messageId: f.message_id,
+      spilled: !!f.spilled,
+      purged: !!f.purged,
+      disabled: !!f.purged,
+      note: f.purged ? 'purged' : f.spilled ? 'spilled' : '',
+    };
+    if (!f.blob_id) return row;
+    const ref = (refs && refs.get(f.blob_id)) || null;
+    const v = blobView({ sha256: f.sha256, ...(ref ? ref.att : {}), blob_id: f.blob_id, purged: !!f.purged }, ref ? ref.state : null, nowMs);
+    return {
+      ...row, blobId: f.blob_id, state: v.state, cls: v.cls, expiresAt: v.expiresAt, kept: v.keep,
+      verified: v.verified, trust: ref ? v.trust : '', purged: v.state === 'purged', disabled: !v.canDownload, note: v.label,
+    };
+  });
 }
 
 // participantEntry is what the panel shows for one participant. Presence and

@@ -22,8 +22,12 @@ import (
 // restart banners (about 13 KiB) on top of master's sidebar threads, unread
 // counts and composer growth put the merged UI at about 354 KB; to 480 KiB on
 // 2026-11-06 for hub preferences Task 6: the Settings page, its draft model,
-// stylesheet and local appearance, about 106 KB, put the UI at about 483 KB).
-const uiMaxBytes = 480 << 10
+// stylesheet and local appearance, about 106 KB, put the UI at about 483 KB;
+// to 528 KiB on 2026-11-06 for R2 blobs Task 7: direct transfers (blob-hash.js,
+// grants and verified downloads in api.js), attachment expiry and trust in
+// chips and the Files panel, and the Settings storage meter, about 41 KB, put
+// the UI at about 525 KB).
+const uiMaxBytes = 528 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

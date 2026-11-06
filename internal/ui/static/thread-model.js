@@ -151,8 +151,13 @@ export function sendError(e) {
 // would keep the key when a chip is replaced by the same bytes under another
 // name or media type, and the hub refuses that changed body under the old key
 // as 409 idempotency_conflict (PROTOCOL §5.3).
+// An R2 reference adds its grant, recorded class and deadline: the same
+// bytes under a new grant are a changed body.
 export function replySig(files) {
-  return JSON.stringify((files || []).map(a => [a.sha256, a.size, a.media_type, a.name ?? null]));
+  return JSON.stringify((files || []).map(a => {
+    const base = [a.sha256, a.size, a.media_type, a.name ?? null];
+    return a.blob_id ? [...base, a.blob_id, a.retention_class ?? null, a.expires_at ?? null] : base;
+  }));
 }
 
 // replyKey is the reply's pending send: the same one, idempotency key and all,

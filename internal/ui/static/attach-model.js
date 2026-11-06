@@ -60,20 +60,44 @@ export function refusalText({ name, reason }) {
   return name + ': ' + (why[reason] || reason);
 }
 
-const isDone = it => it.state === 'done' && !!it.sha256;
+// verified: the hub recorded provider verification for exactly this digest.
+const verified = (sha, r) => !!r && r.sha256_verified === true && !!r.integrity && r.integrity.algorithm === 'sha256' && r.integrity.verified === true && r.integrity.value === sha;
 
-// ready: nothing queued, uploading or failed.
+// A chip is done once its upload resolved; an R2 chip also needs the hub's
+// recorded verification, so a pending grant is never sent.
+const isDone = it => it.state === 'done' && !!it.sha256 && (!it.blob_id || verified(it.sha256, it));
+
+// ready: nothing queued, hashing, uploading, verifying or failed.
 export function ready(items) {
   return (items || []).every(isDone);
 }
 
+// toAttachments: the send's references. An R2 one names its grant, recorded
+// class and deadline (null for keep); the verification fields stay out,
+// since a send reference may not assert them (envelope attachmentReference).
 export function toAttachments(items) {
-  return (items || []).filter(isDone).map(it => ({ sha256: it.sha256, size: it.size, media_type: it.media_type, name: it.name }));
+  return (items || []).filter(isDone).map(it => (it.blob_id
+    ? { blob_id: it.blob_id, sha256: it.sha256, size: it.size, media_type: it.media_type, name: it.name, retention_class: it.retention_class, expires_at: it.expires_at ?? null }
+    : { sha256: it.sha256, size: it.size, media_type: it.media_type, name: it.name }));
 }
 
-// signature is the attachments' part of a send's idempotency signature.
+// signature is the attachments' part of a send's idempotency signature: the
+// same bytes under a new grant are a different attachment.
 export function signature(items) {
-  return toAttachments(items).map(a => a.sha256).join(',');
+  return toAttachments(items).map(a => (a.blob_id ? a.blob_id + ':' : '') + a.sha256).join(',');
+}
+
+// retryKey: the idempotency key a Retry reuses, or null for a fresh grant.
+// A transfer that may have landed retries under the same grant (the hub
+// replays it; the provider answers 412 if the bytes are there). A spent,
+// conflicting or refused grant, or changed bytes, start again.
+// An untrusted grant or a refused request keeps its key: replaying it costs
+// no new reservation. An expired link (no bytes can have landed) or bytes the
+// hub rejected start again.
+const FRESH = new Set(['upload_grant_expired', 'idempotency_conflict', 'blob_checksum_mismatch', 'blob_capability_expired', 'blob_proof_mismatch', 'blob_storage_quota_exceeded', 'upload_quota_exceeded', 'blob_read_failed', 'invalid_value', 'blob_too_large']);
+export function retryKey(item, err) {
+  const code = err && err.code;
+  return item && item.idem && !FRESH.has(code) ? item.idem : null;
 }
 
 // sendRefusal is the spill rule: text over 4096 bytes needs a slot for its
@@ -91,12 +115,111 @@ export function errorText(err, nowMs = Date.now()) {
   const e = err || {}, d = e.details || {};
   if (e.status === 413 && e.code === 'payload_too_large' && d.field === 'attachments') return SPILL_SLOT;
   if (e.status === 413 && e.code === 'blob_too_large') return 'Too large: the hub takes at most ' + limitText(d.limit > 0 ? d.limit : MAX_BYTES) + ' a file.';
+  if (e.status === 429 && e.code === 'blob_storage_quota_exceeded') return 'Hub storage is full: new uploads are refused until files expire or are purged. Nothing already uploaded is deleted.';
   if (e.status === 429) {
-    const what = e.code === 'upload_quota_exceeded' ? 'Daily upload quota reached' : 'Too many uploads';
+    const what = e.code === 'upload_quota_exceeded' ? 'Daily upload quota reached' : e.code === 'upload_busy' ? 'Too many uploads at once' : 'Too many uploads';
     const secs = Number(d.retry_after_seconds);
     return what + (secs > 0 ? '; try again at ' + when(new Date(nowMs + secs * 1000).toISOString(), nowMs) + '.' : '; try again later.');
   }
   if (e.code === 'aborted') return 'Upload cancelled.';
   if (e.code === 'network') return 'Upload failed: the hub could not be reached.';
+  const direct = {
+    storage_unreachable: 'Upload failed: storage could not be reached or refused this page (CORS). Retry sends it again under the same grant.',
+    storage_redirect: 'Upload refused: storage tried to redirect it. Retry, or tell the hub operator.',
+    blob_capability_expired: 'The upload link expired before storage took the file. Retry starts a new upload.',
+    storage_refused: 'Upload refused by storage (400): the signed request did not match. Retry sends it again; if it keeps failing, tell the hub operator.',
+    blob_proof_mismatch: 'The hub rejected what storage holds for this upload. Retry starts a new upload.',
+    blob_checksum_mismatch: 'Upload refused: the file changed after it was hashed. Retry hashes it again.',
+    upload_grant_expired: 'The upload grant expired. Retry starts a new upload.',
+    upload_incomplete: 'The hub did not find the file in storage yet. Retry sends it again.',
+    direct_upload_required: 'This hub now takes uploads directly to storage: reload the page, then retry.',
+    blob_read_failed: 'The file could not be read; it may have changed or moved since it was picked.',
+    hash_unavailable: 'This browser cannot hash files here (Web Crypto needs HTTPS), so it cannot upload to this hub.',
+    bad_response: 'Upload stopped: the hub sent a transfer grant this page does not trust. Retry asks for the same grant again.',
+    blob_unavailable: 'Upload failed: storage is unavailable right now. Retry in a moment.',
+  }[e.code];
+  if (direct) return direct;
   return 'Upload failed: ' + (e.message || e.code || 'unknown error') + (e.status ? ' (' + e.status + ')' : '');
+}
+
+// ---------- R2 attachment state (plan 2026-11-05-r2-blobs §4, Task 7) ----------
+
+// Labels use each file's recorded class, never the hub's current preference.
+export const RETENTION_TEXT = { '1h': '1-hour', '6h': '6-hour', '12h': '12-hour', '1d': '24-hour', '7d': '7-day', '30d': '30-day' };
+export const KEPT_TEXT = 'Kept while referenced';
+export const expiredText = cls => (RETENTION_TEXT[cls] ? `Attachment expired (${RETENTION_TEXT[cls]} retention)` : 'Attachment expired');
+const PURGED_TEXT = 'Attachment purged';
+
+// untilText: a coarse countdown for a chip, "in 30 min", "in 23 h", "in 6 d".
+export function untilText(ms) {
+  if (!(ms > 0)) return 'now';
+  const m = Math.round(ms / 60000);
+  if (m < 1) return 'in under a minute';
+  if (m < 60) return `in ${m} min`;
+  const hrs = Math.round(ms / 3600000);
+  if (hrs <= 48) return `in ${hrs} h`;
+  return `in ${Math.round(ms / 86400000)} d`;
+}
+
+// blobView merges an R2 reference (a message attachment, or a file row's
+// reference) with its hub state projection (blob_states) on the hub clock.
+// null for a legacy disk reference. A recorded deadline that has passed is
+// expired here at once, before the hub's ticker or the next page says so.
+export function blobView(att, state, nowMs = Date.now()) {
+  if (!att || !att.blob_id) return null;
+  const s = state && typeof state === 'object' ? state : {};
+  const cls = att.retention_class || s.retention_class || '';
+  const keep = cls === 'keep';
+  const recorded = att.expires_at !== undefined ? att.expires_at : s.expires_at;
+  const expiresAt = keep ? null : typeof recorded === 'string' && Number.isFinite(Date.parse(recorded)) ? recorded : null;
+  let st = ['available', 'expired', 'purged', 'unavailable'].includes(s.state) ? s.state : 'available';
+  if (att.purged) st = 'purged';
+  if ((st === 'available' || st === 'unavailable') && expiresAt && Date.parse(expiresAt) <= nowMs) st = 'expired';
+  const trusted = verified(att.sha256, s.sha256_verified !== undefined ? s : att);
+  let label;
+  if (st === 'expired') label = expiredText(cls);
+  else if (st === 'purged') label = PURGED_TEXT;
+  else if (st === 'unavailable') label = 'Storage unavailable';
+  else if (keep) label = KEPT_TEXT;
+  else if (expiresAt) label = 'Expires ' + untilText(Date.parse(expiresAt) - nowMs);
+  else label = '';
+  return {
+    blobId: att.blob_id, state: st, cls, keep, expiresAt, verified: trusted, label,
+    trust: trusted ? 'SHA-256 verified by storage' : 'SHA-256 not verified yet (upload pending)',
+    canDownload: st === 'available' || st === 'unavailable',
+  };
+}
+
+// nextExpiry: when the earliest still-available file expires (ms), for a
+// redraw timer; null when none will (keep files never schedule one).
+export function nextExpiry(views, nowMs = Date.now()) {
+  let next = null;
+  for (const v of views || []) {
+    if (!v || v.state !== 'available' || !v.expiresAt) continue;
+    const at = Date.parse(v.expiresAt);
+    if (at > nowMs && (next === null || at < next)) next = at;
+  }
+  return next;
+}
+
+// downloadErrorText: one line for a failed download. Expired and purged
+// differ; a mint-limit refusal says when to try again. No URL is ever shown.
+export function downloadErrorText(err, nowMs = Date.now(), cls = '') {
+  const e = err || {}, d = e.details || {};
+  switch (e.code) {
+    case 'blob_expired': return expiredText(cls);
+    case 'blob_purged': return 'Attachment purged from the hub';
+    case 'blob_url_rate_limited': {
+      const secs = Number(d.retry_after_seconds);
+      return 'Too many download links in the last minute; ' + (secs > 0 ? `try again in ${Math.ceil(secs)} s.` : 'try again shortly.');
+    }
+    case 'blob_checksum_mismatch': return 'Download failed its integrity check (SHA-256 mismatch); nothing was saved.';
+    case 'storage_unreachable': return 'Download failed: storage could not be reached or refused this page (CORS).';
+    case 'blob_capability_expired': return 'The download link expired twice in a row; try again.';
+    case 'blob_unavailable': return 'Storage is unavailable right now; try again in a moment.';
+    case 'bad_response': return 'Download stopped: the hub sent a link this page does not trust.';
+    case 'aborted': return 'Download cancelled.';
+    case 'network': return 'Download failed: the hub could not be reached.';
+  }
+  return 'Download failed: ' + (e.code || 'error') + (e.message ? ': ' + e.message : '');
 }

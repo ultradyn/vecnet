@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   VIEW_KEY, buildPatch, createSettingsStore, describeLoad, durationText, formatDuration, formatValue, laneStops, laneView,
   LANES, loadView, lockOf, parseDuration, parseField, rememberView, timingOf, visibleRows,
+  BLOB_NEW_ONLY, blobOffText, storageView, validStorage,
 } from '../static/settings-model.js';
 import { fakeHub, memStorage, rows } from './settings-fixture.mjs';
 
@@ -714,4 +715,153 @@ test('appearance has its own Apply and Undo and never calls the hub', async () =
   for (const fn of listeners) fn({ theme: 'system', density: 'compact' });
   assert.equal(st.appearance.draft.theme, 'dark', 'a pending local choice is kept');
   assert.equal(st.appearance.saved.theme, 'system');
+});
+
+// ---------- blob retention, hosted off and storage (R2 blobs Task 7) ----------
+
+const GiB = 2 ** 30;
+const r2Rows = (patch = {}) => rows({ installed: true }).map(r => (r.key === 'blobs.expiry' ? { ...r, ...patch } : r));
+const storage = (used, limit = 5 * GiB, reserved = 0) => {
+  [used, limit, reserved] = [used, limit, reserved].map(Math.round);
+  return { retained_bytes: used - reserved, reserved_bytes: reserved, used_bytes: used, limit_bytes: limit };
+};
+
+test('blob expiry: all six durations and off, the built-in 1 day default and its source', async () => {
+  const { st, store } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB) } });
+  const r = row(st, 'blobs.expiry');
+  assert.deepEqual(r.allowed_values, ['1h', '6h', '12h', '1d', '7d', '30d', 'off']);
+  assert.deepEqual(r.allowed_values.map(v => formatValue(r, v)), ['1 hour', '6 hours', '12 hours', '1 day', '7 days', '30 days', 'Off (keep files)']);
+  assert.equal(store.value('blobs.expiry'), '1d');
+  assert.equal(store.source('blobs.expiry'), 'default');
+  assert.equal(lockOf(r), null);
+  assert.match(BLOB_NEW_ONLY, /new uploads only/i);
+  assert.match(BLOB_NEW_ONLY, /keep/i);
+});
+
+test('blob expiry: a duration saves without confirmation and reloads as stored; an invalid value never saves', async () => {
+  const { hub, st, store } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB) } });
+  store.edit('blobs.expiry', '7d');
+  await store.save();
+  const patches = hub.calls.filter(c => c.op === 'patch');
+  assert.deepEqual(patches.map(c => c.patch), [{ set: { 'blobs.expiry': '7d' }, reset: [] }]);
+  // The row is danger-flagged, so the page asks first; a duration carries no
+  // risk, so no confirmation opens and no token is sent.
+  assert.equal(st.confirm, null, 'durations need no cost confirmation');
+  assert.equal(patches[0].patch.confirm, undefined);
+  assert.equal(store.source('blobs.expiry'), 'stored');
+  // A fresh page reads the saved value back.
+  const again = createSettingsStore({ api: hub.api, storage: memStorage(), appearance: null });
+  await again.load();
+  assert.equal(again.value('blobs.expiry'), '7d');
+  assert.equal(again.source('blobs.expiry'), 'stored');
+  store.edit('blobs.expiry', '2d');
+  assert.ok(store.errors()['blobs.expiry']);
+  await store.save();
+  assert.equal(hub.calls.filter(c => c.op === 'patch').length, 1);
+  assert.equal(st.focus, 'blobs.expiry');
+});
+
+test('blob expiry off: preview with the hub storage figures; cancel writes nothing; confirm sends the token once', async () => {
+  const { hub, st, store } = await ready({ hub: { preferences: r2Rows(), storage: storage(3 * GiB, 5 * GiB, GiB / 2) } });
+  store.edit('blobs.expiry', 'off');
+  await store.save();
+  assert.equal(st.busy, 'confirming');
+  assert.equal(st.confirm.preview.risks[0].code, 'blob_expiry_off');
+  assert.deepEqual(st.confirm.preview.impact.storage, storage(3 * GiB, 5 * GiB, GiB / 2));
+  const text = blobOffText(st.confirm.preview.impact.storage);
+  assert.match(text, /no automatic expiry/i);
+  assert.match(text, /3\.2 GB used of a 5\.4 GB limit/);
+  assert.match(text, /2\.7 GB retained/);
+  assert.match(text, /537 MB reserved/);
+  store.cancelConfirm();
+  assert.equal(hub.calls.filter(c => c.op === 'patch').length, 0);
+  assert.equal(store.value('blobs.expiry'), 'off', 'the draft stays');
+  await store.save();
+  await store.confirm();
+  const patches = hub.calls.filter(c => c.op === 'patch');
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0].patch.confirm.length, 1);
+  assert.equal(store.source('blobs.expiry'), 'stored');
+  assert.equal(row(st, 'blobs.expiry').value, 'off');
+});
+
+test('blob expiry off: the fixture refuses an unconfirmed write as the hub does, and a failed confirm keeps the draft', async () => {
+  const { hub, st, store } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB) } });
+  // Fixture contract only: it mirrors the hub, whose server-side enforcement
+  // for every writer is tested in Go (internal/hub/preferences_preview_test.go,
+  // internal/httpapi/prefs_test.go). The page itself never sends this.
+  const direct = await hub.api.patchPrefs({ set: { 'blobs.expiry': 'off' }, reset: [] }, `"prefs-${hub.revision}-g1"`).catch(e => e);
+  assert.equal(direct.code, 'prefs_confirmation_required');
+  store.edit('blobs.expiry', 'off');
+  await store.save();
+  hub.fail = { patch: Object.assign(new Error('x'), { status: 503, code: 'prefs_storage_unavailable', message: 'Preference storage is unavailable.' }) };
+  await store.confirm();
+  assert.equal(st.confirm, null);
+  assert.match(st.saveError.text, /Not saved/);
+  assert.equal(store.value('blobs.expiry'), 'off');
+  assert.deepEqual(store.dirtyKeys(), ['blobs.expiry']);
+});
+
+test('blob expiry: a concurrent change is a conflict that keeps the draft; a clean page takes the change', async () => {
+  const { hub, st, store } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB) } });
+  store.edit('blobs.expiry', '12h');
+  hub.competing('blobs.expiry', '30d');
+  await store.save();
+  assert.equal(st.newer.reason, 'conflict');
+  assert.deepEqual(st.newer.changed, ['blobs.expiry']);
+  assert.equal(store.value('blobs.expiry'), '12h');
+  store.undo();
+  assert.equal(store.value('blobs.expiry'), '30d');
+  // Change notification: a re-read (focus, visibility, Reload) adopts it.
+  hub.competing('blobs.expiry', '6h');
+  await store.refresh();
+  assert.equal(store.value('blobs.expiry'), '6h');
+  assert.match(st.announce.text, /reloaded/);
+});
+
+test('blob expiry: a flag-set value is read-only; a non-operator gets no setting controls', async () => {
+  const flagged = r2Rows({ source: 'flag', origin: 'VECNET_BLOBS_EXPIRY', value: '7d' });
+  const { store, st } = await ready({ hub: { preferences: flagged } });
+  assert.equal(lockOf(row(st, 'blobs.expiry')).kind, 'flag');
+  store.edit('blobs.expiry', '1h');
+  assert.deepEqual(store.dirtyKeys(), []);
+  const hub = fakeHub();
+  hub.fail = { get: Object.assign(new Error('x'), { status: 403, code: 'forbidden', message: 'Operator credential required.' }) };
+  const peer = createSettingsStore({ api: hub.api, storage: memStorage(), appearance: null });
+  await peer.load();
+  assert.equal(peer.state.phase, 'error');
+  assert.equal(peer.state.rows.length, 0, 'no rows, so no controls');
+  assert.match(peer.state.loadError.text, /Only the operator/);
+  assert.equal(peer.state.storage, null);
+});
+
+test('storage: retained, reserved, used and limit from the snapshot; near-limit and full states', async () => {
+  const { st, store, hub } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB, 5 * GiB, GiB / 4) } });
+  assert.deepEqual(st.storage, storage(GiB, 5 * GiB, GiB / 4));
+  let v = storageView(st.storage);
+  assert.equal(v.tone, 'ok');
+  assert.equal(v.percent, 20);
+  assert.match(v.text, /1\.1 GB used of 5\.4 GB/);
+  assert.deepEqual(v.parts.map(p => p.label), ['Retained', 'Reserved', 'Used', 'Limit']);
+  v = storageView(storage(4.7 * GiB, 5 * GiB));
+  assert.equal(v.tone, 'near');
+  assert.match(v.note, /near/i);
+  v = storageView(storage(5 * GiB, 5 * GiB));
+  assert.equal(v.tone, 'full');
+  assert.match(v.note, /new uploads are refused/i);
+  assert.match(v.note, /nothing already uploaded is deleted/i);
+  v = storageView(storage(6 * GiB, 5 * GiB));
+  assert.equal(v.tone, 'full');
+  assert.equal(v.percent, 100, 'the bar never overflows');
+  assert.match(v.note, /over the limit/i);
+  assert.match(v.text, /, over by 1\.1 GB$/);
+  // A refresh after a transition shows the new figures.
+  hub.storage = storage(2 * GiB);
+  hub.revision++;
+  await store.refresh();
+  assert.equal(st.storage.used_bytes, 2 * GiB);
+  // Malformed figures are dropped, not drawn.
+  for (const bad of [null, {}, { retained_bytes: -1, reserved_bytes: 0, used_bytes: 0, limit_bytes: 5 }, { retained_bytes: 1, reserved_bytes: 1, used_bytes: 2, limit_bytes: 0 }, { retained_bytes: '1', reserved_bytes: 0, used_bytes: 1, limit_bytes: 9 }]) {
+    assert.equal(validStorage(bad), null, JSON.stringify(bad));
+  }
 });
