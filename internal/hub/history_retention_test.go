@@ -727,3 +727,97 @@ func TestHistoryProspectiveShorteningKeepsPriorCohortAge(t *testing.T) {
 		t.Fatal("new cohort did not use confirmed shorter age")
 	}
 }
+
+// TestHistoryRetentionR2BlobObjectRefPinsMessage: an R2 blob_object_refs row
+// is a retained blob-reference contract. History GC must report
+// Pins[r2_blob_reference] and leave both the Message and that ref in place.
+// An otherwise identical body with no ref is swept, so a no-op slice cannot pass.
+func TestHistoryRetentionR2BlobObjectRefPinsMessage(t *testing.T) {
+	e := historyEnv(t, nil)
+	_, as := historyPeer(t, e, "a")
+	b, _ := historyPeer(t, e, "b")
+	pinned := historySend(t, e, as, "pinned", "", b)
+	historySettle(t, e, pinned.MessageID)
+	const blobID = "blo_00000000000000000000000004"
+	const hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	historyExec(t, e, `INSERT INTO blob_objects(blob_id,sha256,object_key,uploader,size,media_type,issued_at,upload_deadline,retention_class,expiry_pref_value,expiry_pref_source,expiry_pref_revision,expires_at,checksum_profile,expected_checksum,state) VALUES(?,?,?,'synthetic-uploader',7,'text/plain','2026-11-05T00:00:00.000Z','2026-11-05T00:05:00.000Z','1h','1h','default',0,'2026-11-05T01:00:00.000Z','sha256',?,'pending')`,
+		blobID, hash, "attachments/v1/exp/1h/0123456789abcdef0123456789abcdef/"+blobID, hash)
+	historyExec(t, e, `INSERT INTO blob_object_refs(msg_id,blob_id,sha256) VALUES(?,?,?)`, pinned.MessageID, blobID, hash)
+	other := historySend(t, e, as, "unpinned", pinned.ThreadID, b)
+	historySettle(t, e, other.MessageID)
+	e.Now.Advance(10 * 24 * time.Hour)
+	historyPolicy(t, e, 86400, true)
+	historyNight(t, e)
+	historySweep(t, e)
+	s := historySweep(t, e)
+	if s.Pins["r2_blob_reference"] == 0 {
+		t.Fatalf("pins=%v, want r2_blob_reference", s.Pins)
+	}
+	if count(t, e, `SELECT count(*) FROM messages WHERE msg_id=?`, pinned.MessageID) != 1 {
+		t.Fatal("history GC deleted a message protected by an R2 blob_object_refs row")
+	}
+	if count(t, e, `SELECT count(*) FROM blob_object_refs WHERE msg_id=? AND blob_id=? AND sha256=?`, pinned.MessageID, blobID, hash) != 1 {
+		t.Fatal("history GC dropped the protecting R2 blob_object_refs row")
+	}
+	if count(t, e, `SELECT count(*) FROM messages WHERE msg_id=?`, other.MessageID) != 0 {
+		t.Fatal("history GC left an unpinned body; the R2 pin was not observed on a real sweep")
+	}
+}
+
+// TestHistoryRetentionMarkSweepPreservesThreadCounters deletes the newest
+// body, and separately every body, through mark/sweep. Lifetime message_count,
+// budget_remaining and last_message_at stay at the pre-sweep values.
+func TestHistoryRetentionMarkSweepPreservesThreadCounters(t *testing.T) {
+	for _, all := range []bool{false, true} {
+		name := "newest"
+		if all {
+			name = "all"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := historyEnv(t, nil)
+			_, as := historyPeer(t, e, "a")
+			b, _ := historyPeer(t, e, "b")
+			historyPolicy(t, e, 86400, false)
+			first := historySend(t, e, as, "older", "", b)
+			historySettle(t, e, first.MessageID)
+			e.Now.Advance(time.Minute)
+			newest := historySend(t, e, as, "newest", first.ThreadID, b)
+			historySettle(t, e, newest.MessageID)
+			if historySeq(t, e, newest.MessageID) <= historySeq(t, e, first.MessageID) {
+				t.Fatal("fixture newest message is not the high sequence")
+			}
+			var countBefore, budgetBefore int
+			var atBefore string
+			if err := e.Hub.DB.QueryRow(`SELECT message_count,budget_remaining,last_message_at FROM threads WHERE thr_id=?`, first.ThreadID).Scan(&countBefore, &budgetBefore, &atBefore); err != nil {
+				t.Fatal(err)
+			}
+			// Age only the bodies this case must erase. The older body stays
+			// inside the prospective window unless every body is in scope.
+			stale := envelope.FormatTime(e.Hub.Now().Add(-10 * 24 * time.Hour))
+			historyExec(t, e, `UPDATE messages SET created_at=? WHERE msg_id=?`, stale, newest.MessageID)
+			if all {
+				historyExec(t, e, `UPDATE messages SET created_at=? WHERE msg_id=?`, stale, first.MessageID)
+			}
+			historySweep(t, e)
+			s := historySweep(t, e)
+			if n := count(t, e, `SELECT count(*) FROM messages WHERE msg_id=?`, newest.MessageID); n != 0 {
+				t.Fatalf("mark/sweep left the newest body (deleted=%d remaining=%d)", s.Deleted, n)
+			}
+			wantOlder := 1
+			if all {
+				wantOlder = 0
+			}
+			if n := count(t, e, `SELECT count(*) FROM messages WHERE msg_id=?`, first.MessageID); n != wantOlder {
+				t.Fatalf("older body count=%d want %d", n, wantOlder)
+			}
+			var countAfter, budgetAfter int
+			var atAfter string
+			if err := e.Hub.DB.QueryRow(`SELECT message_count,budget_remaining,last_message_at FROM threads WHERE thr_id=?`, first.ThreadID).Scan(&countAfter, &budgetAfter, &atAfter); err != nil {
+				t.Fatal(err)
+			}
+			if countAfter != countBefore || budgetAfter != budgetBefore || atAfter != atBefore {
+				t.Fatalf("mark/sweep rewrote lifetime counters count %d->%d budget %d->%d activity %q->%q", countBefore, countAfter, budgetBefore, budgetAfter, atBefore, atAfter)
+			}
+		})
+	}
+}
