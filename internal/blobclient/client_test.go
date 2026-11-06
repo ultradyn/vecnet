@@ -480,6 +480,156 @@ func TestR2DownloadRefreshSucceeds(t *testing.T) {
 		t.Fatalf("bounded fresh exchange failed: %v", err)
 	}
 }
+func TestR2DownloadRemintsOnlyExpiredCapability(t *testing.T) {
+	t.Run("expired-then-fresh", func(t *testing.T) {
+		f := newFixture(t)
+		f.grant = r2Grant(f, f.now.Format(time.RFC3339), "")
+		original := f.client.hub.Transport
+		f.client.hub.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+			resp, err := original.RoundTrip(r)
+			if strings.HasSuffix(r.URL.Path, "/download") && f.mints == 1 {
+				f.grant = blobwire.DownloadGrant{}
+			}
+			return resp, err
+		})
+		b, _, err := f.client.Download(context.Background(), abcSHA, testID, 3)
+		if err != nil || string(b) != "abc" || f.mints != 2 || f.gets != 1 {
+			t.Fatalf("expired capability did not refresh once: err=%v mints=%d gets=%d", err, f.mints, f.gets)
+		}
+	})
+	t.Run("expired-stays-expired", func(t *testing.T) {
+		f := newFixture(t)
+		f.grant = r2Grant(f, f.now.Format(time.RFC3339), "")
+		_, _, err := f.client.Download(context.Background(), abcSHA, testID, 3)
+		var e *Error
+		if !errors.As(err, &e) || e.Code != "blob_capability_expired" || f.mints != 2 || f.gets != 0 {
+			t.Fatalf("second expired capability = %v mints=%d gets=%d", err, f.mints, f.gets)
+		}
+	})
+	for _, kind := range []string{"origin", "too-long", "past-object", "object-already-ended"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newFixture(t)
+			otherGets := 0
+			other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				otherGets++
+				io.WriteString(w, "abc")
+			}))
+			defer other.Close()
+			want := "bad_response"
+			g := r2Grant(f, f.now.Add(600*time.Second).Format(time.RFC3339), "")
+			switch kind {
+			case "origin":
+				g.URL = other.URL + "/object"
+			case "too-long":
+				g.ExpiresAt = f.now.Add(603 * time.Second).Format(time.RFC3339)
+				want = "blob_capability_expired"
+			case "past-object":
+				at := f.now.Add(time.Minute).Format(time.RFC3339)
+				g.ObjectExpiresAt = &at
+			case "object-already-ended":
+				at := f.now.Format(time.RFC3339)
+				g.ObjectExpiresAt = &at
+			}
+			f.grant = g
+			b, got, err := f.client.Download(context.Background(), abcSHA, testID, 3)
+			var e *Error
+			if !errors.As(err, &e) || e.Code != want || b != nil || got.URL != "" || f.mints != 1 || f.gets != 0 || otherGets != 0 {
+				t.Fatalf("%s minted again or fetched: err=%v mints=%d gets=%d other=%d", kind, err, f.mints, f.gets, otherGets)
+			}
+		})
+	}
+}
+
+func r2Grant(f *fixture, deadline, local string) blobwire.DownloadGrant {
+	return blobwire.DownloadGrant{
+		BlobID: testID, SHA256: abcSHA, SHA256Verified: f.ref.SHA256Verified, Integrity: f.ref.Integrity,
+		Size: 3, Method: "GET", RetentionClass: "keep", LocalPath: local,
+		URL: f.direct.URL + "/object?capability=held", ExpiresAt: deadline,
+	}
+}
+
+func TestR2UploadEmptyOrNegativeSize(t *testing.T) {
+	f := newFixture(t)
+	posts := 0
+	original := f.client.hub.Transport
+	f.client.hub.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/v1/blobs/uploads" {
+			posts++
+		}
+		return original.RoundTrip(r)
+	})
+	for _, size := range []int64{0, -1} {
+		_, err := f.client.Upload(context.Background(), strings.NewReader("abc"), size, "text/plain", "idem")
+		var e *Error
+		if !errors.As(err, &e) || e.Code != "invalid_value" {
+			t.Fatalf("size %d = %v, want invalid_value", size, err)
+		}
+	}
+	_, err := f.client.Upload(context.Background(), strings.NewReader("abc"), MaxSize+1, "text/plain", "idem")
+	var e *Error
+	if !errors.As(err, &e) || e.Code != "payload_too_large" {
+		t.Fatalf("oversize = %v, want payload_too_large", err)
+	}
+	if posts != 0 || f.puts != 0 {
+		t.Fatalf("invalid size reached the hub or provider: posts=%d puts=%d", posts, f.puts)
+	}
+}
+
+func TestR2CapabilitySnapshotRejectsHubBodyGrant(t *testing.T) {
+	for _, tc := range []struct {
+		name, id, blobID, local string
+	}{
+		{name: "local-path-without-blob-id", local: "/v1/blobs/" + abcSHA},
+		{name: "local-path-with-blob-id", id: testID, blobID: testID, local: "/v1/blobs/" + abcSHA},
+		{name: "empty-blob-id-without-flag"},
+		{name: "empty-blob-id-with-flag", id: testID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			bodyGets := 0
+			original := f.client.hub.Transport
+			grant := r2Grant(f, f.now.Add(600*time.Second).Format(time.RFC3339), tc.local)
+			grant.BlobID = tc.blobID
+			if tc.local != "" {
+				grant.URL = ""
+			}
+			f.client.hub.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/v1/blobs/"+abcSHA+"/download" {
+					f.mints++
+					var buf bytes.Buffer
+					type rawGrant blobwire.DownloadGrant
+					json.NewEncoder(&buf).Encode(rawGrant(grant))
+					return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(&buf), ContentLength: int64(buf.Len())}, nil
+				}
+				if r.URL.Path == "/v1/blobs/"+abcSHA {
+					bodyGets++
+					return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("abc")), ContentLength: 3}, nil
+				}
+				return original.RoundTrip(r)
+			})
+			b, got, err := f.client.Download(context.Background(), abcSHA, tc.id, 3)
+			var e *Error
+			if !errors.As(err, &e) || e.Code != "bad_response" || b != nil || got.URL != "" || bodyGets != 0 || f.gets != 0 || f.mints != 1 {
+				t.Fatalf("hub-body grant accepted: err=%v bodyGets=%d gets=%d mints=%d", err, bodyGets, f.gets, f.mints)
+			}
+		})
+	}
+}
+
+func TestR2DownloadChecksTransferRequestError(t *testing.T) {
+	f := newFixture(t)
+	prev := newTransferRequest
+	t.Cleanup(func() { newTransferRequest = prev })
+	newTransferRequest = func(context.Context, string, string, io.Reader) (*http.Request, error) {
+		return nil, errors.New("rejected request")
+	}
+	b, g, err := f.client.Download(context.Background(), abcSHA, testID, 3)
+	var e *Error
+	if !errors.As(err, &e) || e.Code != "bad_response" || b != nil || g.URL != "" || f.gets != 0 || f.mints != 1 {
+		t.Fatalf("transfer request error = %v gets=%d mints=%d", err, f.gets, f.mints)
+	}
+}
+
 func TestR2UploadCapsAndProgress(t *testing.T) {
 	f := newFixture(t)
 	var progress []int64

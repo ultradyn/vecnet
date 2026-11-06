@@ -2919,6 +2919,63 @@ func TestChatOperatorCLILabel(t *testing.T) {
 	}
 }
 
+func TestOneBlobStatusFailureDoesNotBlockThreadReload(t *testing.T) {
+	a := newChatAPI()
+	const id1 = "blo_00000000000000000000000001"
+	const id2 = "blo_00000000000000000000000002"
+	held := chatMsg("msg_01held", chatOp, "hold", chatAt(7, 0), "held")
+	held.Attachments = []envelope.Attachment{
+		{BlobID: id1, SHA256: strings.Repeat("a", 64), Name: "a.txt", Size: 1, MediaType: "text/plain"},
+		{BlobID: id2, SHA256: strings.Repeat("b", 64), Name: "b.txt", Size: 1, MediaType: "text/plain"},
+	}
+	newer := chatMsg("msg_01new", chatOp, "hold", chatAt(8, 0), "newer")
+	a.byID[chatHark] = &chatThread{
+		detail:   opapi.ThreadDetail{Now: envelope.FormatTime(fixedNow)},
+		messages: []envelope.Message{held, newer},
+	}
+	api := &statusFailAPI{chatAPI: a, failID: id2}
+	m := &Model{
+		API: api,
+		ctx: context.Background(),
+		Now: func() time.Time { return fixedNow },
+		Data: Data{Thread: map[string]*ThreadState{
+			chatHark: {Messages: []envelope.Message{held}},
+		}},
+	}
+	msg := m.fetchThread(threadPrefix+chatHark, chatHark)().(loadMsg)
+	if msg.err != nil || msg.apply == nil {
+		t.Fatalf("one status failure blocked the reload: %v", msg.err)
+	}
+	msg.apply(m)
+	st := m.Data.Thread[chatHark]
+	if st.BlobStates[id2].State != "unknown" {
+		t.Fatalf("failed ref state = %q, want unknown", st.BlobStates[id2].State)
+	}
+	if st.BlobStates[id1].State != "expired" {
+		t.Fatalf("sibling ref state = %q, want expired", st.BlobStates[id1].State)
+	}
+	if len(st.Messages) != 2 || st.Messages[1].Content.Text != "newer" {
+		t.Fatalf("reload did not apply the rest: %+v", st.Messages)
+	}
+	if len(api.calls) != 2 {
+		t.Fatalf("status calls = %v, want both refs", api.calls)
+	}
+}
+
+type statusFailAPI struct {
+	*chatAPI
+	failID string
+	calls  []string
+}
+
+func (a *statusFailAPI) BlobStatus(_ context.Context, _, id string) (blobwire.State, error) {
+	a.calls = append(a.calls, id)
+	if id == a.failID {
+		return blobwire.State{}, &opclient.Error{Status: 404, Code: "unknown_blob", Message: "missing"}
+	}
+	return blobwire.State{State: "expired", RetentionClass: "1d"}, nil
+}
+
 func TestChatAttachmentExpired(t *testing.T) {
 	t.Chdir(t.TempDir())
 	a := chatSeed()

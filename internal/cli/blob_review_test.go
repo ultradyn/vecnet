@@ -261,6 +261,50 @@ func TestR2BlobFollowPinnedHub(t *testing.T) {
 		})
 	}
 }
+func TestBlobLabelsMatchPlanExpiryWording(t *testing.T) {
+	name := "report.txt"
+	cases := []struct{ state, class, want string }{
+		{"expired", "1h", "Attachment expired (1-hour retention) report.txt"},
+		{"expired", "6h", "Attachment expired (6-hour retention) report.txt"},
+		{"expired", "12h", "Attachment expired (12-hour retention) report.txt"},
+		{"expired", "1d", "Attachment expired (24-hour retention) report.txt"},
+		{"expired", "7d", "Attachment expired (7-day retention) report.txt"},
+		{"expired", "30d", "Attachment expired (30-day retention) report.txt"},
+		{"expired", "keep", "Attachment expired report.txt"},
+		{"purged", "1d", "[attachment purged: report.txt] (24-hour retention)"},
+		{"available", "1d", "[attachment: report.txt] (24-hour retention)"},
+		{"available", "keep", "[attachment: report.txt] (Kept while referenced)"},
+	}
+	for _, c := range cases {
+		att := envelope.Attachment{BlobID: reviewID, Name: name, RetentionClass: c.class}
+		got := blobLabels([]envelope.Attachment{att}, map[string]blobwire.State{reviewID: {State: c.state}})
+		if len(got) != 1 || got[0] != c.want {
+			t.Errorf("%s %s = %q, want %q", c.state, c.class, got, c.want)
+		}
+	}
+}
+
+func TestAttachmentNameStripsAndCaps(t *testing.T) {
+	long := strings.Repeat("日", 256)
+	cases := []struct{ path, want string }{
+		{"report.txt", "report.txt"},
+		{filepath.Join("dir", "report.txt"), "report.txt"},
+		{`dir\secret.txt`, "secret.txt"},
+		{`..\..\secret.txt`, "secret.txt"},
+		{"a\u202ebidi.txt", "abidi.txt"},
+		{"a\u2066b\u2069.txt", "ab.txt"},
+		{"note\r\n.txt", "note .txt"},
+		{"\x1b[31mred.txt", "red.txt"},
+		{"\x1b[2J", "file"},
+		{long, strings.Repeat("日", 255)},
+	}
+	for _, c := range cases {
+		if got := attachmentName(c.path); got != c.want {
+			t.Errorf("attachmentName(%q) = %q, want %q", c.path, got, c.want)
+		}
+	}
+}
+
 func TestBlobLabelsHonorAvailableProjection(t *testing.T) {
 	past := "2000-01-01T00:00:00Z" // workstation is later; fresh hub projection wins
 	att := envelope.Attachment{BlobID: reviewID, Name: "file", ExpiresAt: &past}

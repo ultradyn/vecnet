@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/oklog/ulid/v2"
 
@@ -916,7 +917,120 @@ func (a *app) upload(c *client, path string) (envelope.Attachment, error) {
 	if err != nil {
 		return envelope.Attachment{}, blobError(err)
 	}
-	return envelope.Attachment{BlobID: ref.BlobID, SHA256: ref.SHA256, Size: ref.Size, MediaType: mt, Name: filepath.Base(path), ExpiresAt: ref.ExpiresAt, RetentionClass: ref.RetentionClass, SHA256Verified: ref.SHA256Verified, Integrity: ref.Integrity}, nil
+	return envelope.Attachment{BlobID: ref.BlobID, SHA256: ref.SHA256, Size: ref.Size, MediaType: mt, Name: attachmentName(path), ExpiresAt: ref.ExpiresAt, RetentionClass: ref.RetentionClass, SHA256Verified: ref.SHA256Verified, Integrity: ref.Integrity}, nil
+}
+
+// attachmentName is the name stored with an upload. It keeps one path
+// component, strips controls, bidi, ANSI sequences and path separators, and
+// caps the result at 255 code points, matching the TUI and Decisions §3.
+func attachmentName(path string) string {
+	name := cleanStoredName(filepath.Base(strings.ReplaceAll(path, "\\", "/")))
+	if rs := []rune(name); len(rs) > 255 {
+		name = string(rs[:255])
+	}
+	if name == "" {
+		return "file"
+	}
+	return name
+}
+
+// cleanStoredName is the one-line form of the TUI cleaner for a single file
+// component: line breaks become spaces, and controls, bidi and escape
+// sequences are removed.
+func cleanStoredName(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		invalid := r == utf8.RuneError && n <= 1
+		if invalid {
+			r = rune(s[i])
+		}
+		next := i + n
+		switch {
+		case r == 0x1b:
+			i = skipNameEsc(s, next)
+			continue
+		case r == 0x9b:
+			i = skipNameCSI(s, next)
+			continue
+		case r == 0x9d:
+			i = skipNameString(s, next, true)
+			continue
+		case r == 0x90 || r == 0x98 || r == 0x9e || r == 0x9f:
+			i = skipNameString(s, next, false)
+			continue
+		}
+		i = next
+		switch {
+		case invalid:
+		case r == '\n' || r == '\t' || r == '\u2028' || r == '\u2029':
+			b.WriteByte(' ')
+		case r < 0x20 || (r >= 0x7f && r <= 0x9f):
+		case r >= '\u202a' && r <= '\u202e', r >= '\u2066' && r <= '\u2069':
+		case r == '/' || r == '\\':
+		default:
+			b.WriteString(s[i-n : i])
+		}
+	}
+	return b.String()
+}
+
+func skipNameEsc(s string, i int) int {
+	if i >= len(s) {
+		return i
+	}
+	switch b := s[i]; {
+	case b == '[':
+		return skipNameCSI(s, i+1)
+	case b == ']':
+		return skipNameString(s, i+1, true)
+	case b == 'P' || b == 'X' || b == '^' || b == '_':
+		return skipNameString(s, i+1, false)
+	case b >= 0x20 && b <= 0x2f:
+		for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+			i++
+		}
+		if i < len(s) && s[i] >= 0x30 && s[i] <= 0x7e {
+			i++
+		}
+		return i
+	case b >= 0x30 && b <= 0x7e:
+		return i + 1
+	}
+	return i
+}
+
+func skipNameCSI(s string, i int) int {
+	for i < len(s) && s[i] >= 0x30 && s[i] <= 0x3f {
+		i++
+	}
+	for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+		i++
+	}
+	if i < len(s) && s[i] >= 0x40 && s[i] <= 0x7e {
+		i++
+	}
+	return i
+}
+
+func skipNameString(s string, i int, osc bool) int {
+	for j := i; j < len(s); {
+		r, n := utf8.DecodeRuneInString(s[j:])
+		if r == utf8.RuneError && n <= 1 {
+			r = rune(s[j])
+		}
+		switch {
+		case r == 0x07 && osc, r == 0x18, r == 0x1a, r == 0x9c:
+			return j + n
+		case r == 0x1b:
+			if j+1 < len(s) && s[j+1] == '\\' {
+				return j + 2
+			}
+			return j
+		}
+		j += n
+	}
+	return i
 }
 
 // --- inbox / ack ---

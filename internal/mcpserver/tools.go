@@ -1172,7 +1172,7 @@ func blobPutOutput() schema {
 			"url":        schema{"type": "string", "description": "Sensitive short-lived PUT capability. Do not log, store or paste it. Dummy shape only: https://example.invalid/object"},
 			"headers":    schema{"type": "object", "additionalProperties": schema{"type": "string"}, "description": "Sensitive signed headers the host must send, including Content-Length, If-None-Match and x-amz-checksum-sha256."},
 			"expires_at": schema{"type": "string"},
-		}),
+		}, "method", "url", "headers", "expires_at"),
 		"complete_url": schema{"type": "string", "description": "Authenticated completion path. Not a file URL."},
 	}, "sha256", "size")
 	output["if"] = schema{"required": []string{"upload"}}
@@ -1232,7 +1232,15 @@ func callBlobPut(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any
 		}
 		return s.Hub.CompleteBlobUpload(ctx, c, a.BlobID)
 	case "":
-		if a.Data == "" || a.MediaType == "" || size != nil || a.SHA256 != "" || a.Idem != "" || a.BlobID != "" {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(raw, &fields) != nil {
+			return nil, &envelope.SchemaError{Path: "", Message: "arguments must be an object"}
+		}
+		// Presence, not a non-empty string. "" is an empty disk body, and an
+		// empty media_type is stored as application/octet-stream.
+		_, hasData := fields["data_base64"]
+		_, hasType := fields["media_type"]
+		if !hasData || !hasType || size != nil || a.SHA256 != "" || a.Idem != "" || a.BlobID != "" {
 			return nil, &envelope.SchemaError{Path: "/data_base64", Message: "data_base64 and media_type are required"}
 		}
 		data, err := decodeBase64(a.Data)
