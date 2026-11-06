@@ -1,14 +1,14 @@
 # Accounts and scope
 
-> **For agentic workers:** This document is a design. It does not authorize implementation, a migration, or a hub change by itself. CoS recorded D1–D8 on 2026-11-06 in "CoS's record", including amendments 1–6 in the tasks below. Two later rulings the same day amend that record: Q1 (`msg_01M6QZHT65EJH8195GG0NJYC5T`) and the invite flow (`msg_01M6QZNG1SWQHXFQTS07PMZ76Z`). Max's answers 1–3 and the invite-flow note are pasted verbatim under "Max's answers". Question 4 is skipped. Ask questions 5–10 one at a time, in order, and paste each answer verbatim. If a later answer conflicts with a ruling, flag to CoS before editing tasks. Once these docs merge, Tasks 1–3 wait for the DB build to land (`internal/store/migrations`). Task 4 (browser guest) stays deferred until Max asks for a human-only browser guest. Tasks 5, 5b, 6, 8, and 7 follow the dependency map. Task 6 is specified in full and does not merge until CoS confirms the MCP enrol-material exception with Max. Nothing is built until the Max answers that block that task are in. Steps use checkbox (`- [ ]`) syntax. A `---` ends every task.
+> **For agentic workers:** This document is a design. It does not authorize implementation, a migration, or a hub change by itself. CoS recorded D1–D8 on 2026-11-06 in "CoS's record", including amendments 1–6 in the tasks below. Later rulings the same day amend that record: Q1 (`msg_01M6QZHT65EJH8195GG0NJYC5T`), the invite flow (`msg_01M6QZNG1SWQHXFQTS07PMZ76Z`), and Q5 (`msg_01M6R1CPX0Y6R6DRS0VE0ZT632`). Max's answers 1–3 and the invite-flow note are pasted verbatim under "Max's answers". Question 4 is skipped. Question 5 is the Q5 ruling, written into D3, amendment 1, Task 3, and Task 6a. Ask questions 6–10 one at a time, in order, and paste each answer verbatim. If a later answer conflicts with a ruling, flag to CoS before editing tasks. Once these docs merge, Tasks 1–3 wait for the DB build to land (`internal/store/migrations`). Task 4 (browser guest) stays deferred until Max asks for a human-only browser guest. Tasks 5, 5b, 6, 8, and 7 follow the dependency map. Task 6a (Access step in Add agent and Add guest) follows Tasks 1–3 and onboarding Task 9. It does not block onboarding Task 9: that task ships without the step, because grants do not exist until accounts Tasks 1–3. Task 6 is specified in full and does not merge until CoS confirms the MCP enrol-material exception with Max. Nothing is built until the Max answers that block that task are in. The backlog section is queued and is not a build task. Steps use checkbox (`- [ ]`) syntax. A `---` ends every task.
 
 **Goal:** One permission model for the operator, instance admins, colleagues, peers, and a guest, so Max can hand a friend's agent a short prompt that enrols as kind `guest` against one agent or one thread, send and receive files on the threads that guest can see, scope an account to a team or to the whole hub, and let operators and colleagues sign in with Office 365.
 
-**Architecture:** Recorded by CoS on 2026-11-06, and amended the same day by the Q1 and invite-flow rulings. A principal stays the account, a peer stays the address, and a grant is the only authority. The scope wire stays frozen as a cache of those grants. A guest is the friend's agent that pasted the prompt: a principal plus one peer of kind `guest` (a protocol change), created by the same invite registry as agents (`guest_link`, after onboarding Tasks 1, 4, 7, and 9). The browser cookie session and guest web shell are deferred Task 4. Office 365 is a relying-party login for colleagues and admins, using `github.com/coreos/go-oidc/v3/oidc`, with SAML only if Max's question 9 says SAML is the only door. A guest does not use that login. Local ids stay prefixed ULIDs; the external subject is stored on the principal, keyed by the hub fingerprint plus `iss`/`tid`/`oid`. One bootstrap peer keeps kind `operator`. Existing operator-kind peers keep that kind and receive the bootstrap grant set. Everyone else holds grants.
+**Architecture:** Recorded by CoS on 2026-11-06, and amended the same day by the Q1, invite-flow, and Q5 rulings. A principal stays the account, a peer stays the address, and a grant is the only authority. The scope wire stays frozen as a cache of those grants. Q5 (`msg_01M6R1CPX0Y6R6DRS0VE0ZT632`) names the default Global: hub `send` and hub `directory`, which is today's behaviour and the default for agents. Team-scoped is `send` and `directory` on a team resource, expanded at check time, and that account sees no one outside the team. Operators and other special accounts are global. The Add agent and Add guest Access step that chooses Global or a team is Task 6a. A guest is the friend's agent that pasted the prompt: a principal plus one peer of kind `guest` (a protocol change), created by the same invite registry as agents (`guest_link`, after onboarding Tasks 1, 4, 7, and 9). The browser cookie session and guest web shell are deferred Task 4. Office 365 is a relying-party login for colleagues and admins, using `github.com/coreos/go-oidc/v3/oidc`, with SAML only if Max's question 9 says SAML is the only door. A guest does not use that login. Local ids stay prefixed ULIDs; the external subject is stored on the principal, keyed by the hub fingerprint plus `iss`/`tid`/`oid`. One bootstrap peer keeps kind `operator`. Existing operator-kind peers keep that kind and receive the bootstrap grant set. Everyone else holds grants.
 
 **Tech Stack:** The hub's existing Go module (`go 1.26.0` in `go.mod`), SQLite, standard-library HTTP, the existing seal helper, and one new direct dependency for OpenID Connect verification. No second identity server. Builds through `just bb` per `docs/BUILDBOX.md`.
 
-**Spec:** Chief of staff constraints for this design (2026-11-06): absorb admin-parity into one model; cover principals, accounts, peers, guests, team versus global, multi-operator scopes, agent-as-guest, and OIDC/SAML mapped onto principals; keep the hub light; ids safe across hubs; architecture stays an explicit choice; UX questions go to Max one at a time. CoS recorded D1–D8 on 2026-11-06, then the Q1 ruling (`msg_01M6QZHT65EJH8195GG0NJYC5T`) and the invite-flow ruling (`msg_01M6QZNG1SWQHXFQTS07PMZ76Z`). Facts: [`docs/research/2026-11-06-accounts-scope.md`](../research/2026-11-06-accounts-scope.md).
+**Spec:** Chief of staff constraints for this design (2026-11-06): absorb admin-parity into one model; cover principals, accounts, peers, guests, team versus global, multi-operator scopes, agent-as-guest, and OIDC/SAML mapped onto principals; keep the hub light; ids safe across hubs; architecture stays an explicit choice; UX questions go to Max one at a time. CoS recorded D1–D8 on 2026-11-06, then the Q1 ruling (`msg_01M6QZHT65EJH8195GG0NJYC5T`), the invite-flow ruling (`msg_01M6QZNG1SWQHXFQTS07PMZ76Z`), and the Q5 ruling (`msg_01M6R1CPX0Y6R6DRS0VE0ZT632`). Facts: [`docs/research/2026-11-06-accounts-scope.md`](../research/2026-11-06-accounts-scope.md).
 
 **Starts from:** `master` `2574ec4ce7fe0cade2ea4217693e6695fb230191`. `internal/onboarding/` is absent. No Go file contains `admin:peers`. Inventory is this checkout, not a live hub.
 
@@ -28,6 +28,7 @@
 - UI lives at `internal/ui/static/`. There is no top-level `ui/`. The guest web shell (Task 4) is deferred until Max asks for a human-only browser guest. The operator cookie sign-in (Task 5b) is UI work for Claude/Opus and waits until onboarding Task 9 has merged. Amendments 2 and 3 apply to that operator cookie (Task 5 owns the session row and the Origin check; Task 5b is the page). Cookie-authenticated POST, PUT, and DELETE check `Origin` against the hub's public origin in the shared HTTP middleware. Bearer calls do not.
 - Feature B (machine accounts / drop to disk) stays held. A virtual file bucket is not in this build. Resource kind `bucket` is reserved in the closed list and nothing implements it.
 - The invite prompt stays small. Its budget is 600 characters. Each of MCP, the CLI, and raw HTTPS has an early entrypoint that explains the rest of that path, from one hub-owned guide source (Task 8).
+- Default account scope is Global: hub `send` and hub `directory`, with no friction (Q5, `msg_01M6R1CPX0Y6R6DRS0VE0ZT632`). A team is a choice on Task 6a's Access step, not a warning and not a nag. Onboarding Task 9 ships without that step. Task 6a adds it after Tasks 1–3 and onboarding Task 9. The hint line is "Use a team for work or sensitive projects."
 
 ## Verified facts this design relies on
 
@@ -43,7 +44,7 @@ The research note holds the full table. The facts a task will trip on:
 
 ## Decisions for CoS
 
-CoS recorded one option for each decision on 2026-11-06. The option tables stay so the rejected choices remain visible. The recorded letter is in "CoS's record". Amendments 1–6 are part of that record and are written into the named tasks. The Q1 ruling changes what recorded D4 A ships, and adds the guide task, grant expiry, and file attachments through existing message blobs. The invite-flow ruling confirms D8 A, skips question 4, adds resource kind `thread`, reserves resource kind `bucket`, and specifies `vecnet_guest_invite`. Both rulings are written into the named tasks. A later answer from Max that conflicts with a recorded option is flagged to CoS before any task text changes.
+CoS recorded one option for each decision on 2026-11-06. The option tables stay so the rejected choices remain visible. The recorded letter is in "CoS's record". Amendments 1–6 are part of that record and are written into the named tasks. The Q1 ruling changes what recorded D4 A ships, and adds the guide task, grant expiry, and file attachments through existing message blobs. The invite-flow ruling confirms D8 A, skips question 4, adds resource kind `thread`, reserves resource kind `bucket`, and specifies `vecnet_guest_invite`. The Q5 ruling (`msg_01M6R1CPX0Y6R6DRS0VE0ZT632`) fits recorded D3 B and amendment 1, and adds Task 6a. Those rulings are written into the named tasks. A later answer from Max that conflicts with a recorded option is flagged to CoS before any task text changes.
 
 ### D1. What a guest is
 
@@ -76,7 +77,7 @@ Recorded grant: subject is a principal or a peer; capability is from a closed li
 
 Grants carry an optional `expires_at` (Q1 ruling). A one-off invite sets `expires_at` to the invite lifetime: one timestamp, the validity end chosen when the invite is created. CoS asked for the simpler of invite lifetime and first-thread-quiet. Invite lifetime is the one recorded. First-thread-quiet would need a definition of quiet and a watcher, so it is not the build. Until Max sets a one-off duration, that lifetime is 24 hours from creation, the same bound as the unredeemed redeem code, and redeeming does not extend it. An ongoing invite leaves `expires_at` empty and lasts until revoked. An agent-created invite lasts at most 7 days unless an operator raises that cap for the caller. The cap covers both a one-off and an until-revoked invite an agent creates, so an agent's until-revoked invite is stored with `expires_at` seven days out. An operator's until-revoked invite leaves `expires_at` empty. An expired grant denies the way a missing grant denies. The redeem code has its own clock, below in D4, including for an ongoing invite.
 
-Amendment 1, default grants. The backfill gives every existing peer with no scope rows hub `send` and hub `directory`, not `send` alone. A peer created through the operator's invite or onboarding gets hub `send` and hub `directory` unless the invite names a narrower scope. A principal-provisioned peer (PROTOCOL §18.4) inherits its principal's default grants, filled from the frozen default-scopes wire. Only guest and colleague principals start empty. Without those defaults, every agent enrolled after Task 1 would see an empty directory and could send nowhere, which breaks onboarding and pag-chat.
+Amendment 1, default grants. The backfill gives every existing peer with no scope rows hub `send` and hub `directory`, not `send` alone. A peer created through the operator's invite or onboarding gets hub `send` and hub `directory` unless the invite names a narrower scope. A principal-provisioned peer (PROTOCOL §18.4) inherits its principal's default grants, filled from the frozen default-scopes wire. Only guest and colleague principals start empty. Without those defaults, every agent enrolled after Task 1 would see an empty directory and could send nowhere, which breaks onboarding and pag-chat. Q5 names that default Global. Task 6a's team choice is the narrower scope: `send` and `directory` on that team resource, not hub. Omitting the choice, and every create path that has no Access step yet, stays Global. Operators and other special accounts stay on that global default.
 
 ### D3. Team scope, global scope, and the front door
 
@@ -92,7 +93,9 @@ Amendment 1, default grants. The backfill gives every existing peer with no scop
 
 Own agents: peers whose `prn_id` is the colleague's principal, created under existing provisioning (default off until Max turns it on). The grant resource `own principal` covers those peers without listing them.
 
-Q1 ruling on question 2, which fits D3: an agent-scoped guest's directory is that one agent, and its threads are only threads with that agent. Its history grant is the threads it participates in. That participation default is `from_join` on the invite form (invite-flow ruling). Full history is operator-only. A thread-scoped guest is a participant of that one thread only. A locked thread accepts an invite only from the operator. Questions 5–8 still govern colleague team scope, who sees every project, the front door, and whether a colleague adds their own agents.
+Q1 ruling on question 2, which fits D3: an agent-scoped guest's directory is that one agent, and its threads are only threads with that agent. Its history grant is the threads it participates in. That participation default is `from_join` on the invite form (invite-flow ruling). Full history is operator-only. A thread-scoped guest is a participant of that one thread only. A locked thread accepts an invite only from the operator.
+
+Q5 ruling (`msg_01M6R1CPX0Y6R6DRS0VE0ZT632`, 2026-11-06) fits D3 B and amendment 1. Global is hub `send` and hub `directory`: today's behaviour, and the default for agents. Team-scoped is `send` and `directory` grants on a team resource, expanded at check time. That account sees no one outside the team. Operators and other special accounts are global. The default is Global, with no friction. Add agent and Add guest gain one Access step: Global (default) or Team (pick an existing team or create one), plus one line: "Use a team for work or sensitive projects." That line is a hint. It is never a warning and never a nag. The step is Task 6a. It does not block onboarding Task 9. Onboarding Task 9 ships now without the step, because grants do not exist until accounts Tasks 1–3. Changing an existing peer between global and team is an operator action on the peer page, under Task 6a, and it is audited. Questions 6–8 still govern who sees every project, the front door, and whether a colleague adds their own agents.
 
 ### D4. The browser link
 
@@ -166,7 +169,7 @@ The form fields are scope, access, and validity. Scope is one agent or one exist
 
 MCP `vecnet_guest_invite` is in this decision. It returns that same prompt text, which the caller can forward. This is the exception to onboarding's rule that MCP never carries enrol material. CoS is confirming the exception with Max. Build it as specified. Do not merge Task 6 until CoS confirms. Constraints: the caller holds an `invite` grant, which nobody has by default except the bootstrap root; guest grants are a subset of the caller's grants; an agent-created invite lasts at most 7 days unless an operator raises that cap; the create writes an audit row; the redeem code appears once, in the create result only. Status and replay do not return it.
 
-A virtual file bucket is not in this first build. Resource kind `bucket` stays reserved. Questions 5–10 stay open, asked one at a time. Question 4 stays skipped.
+A virtual file bucket is not in this first build. Resource kind `bucket` stays reserved. Question 5 is ruled. Questions 6–10 stay open, asked one at a time. Question 4 stays skipped. The Global-or-team Access step is Task 6a. It is not this form's access-rights field (read/reply and files).
 
 ### CoS's record
 
@@ -174,7 +177,7 @@ A virtual file bucket is not in this first build. Resource kind `bucket` stays r
 |---|---|---|
 | D1 Guest | A. New peer kind `guest`. Q1 ruling: the guest is the friend's agent that pasted the prompt. Kind stays `guest` | 2026-11-06 |
 | D2 Authority | C. Grants are the one authority. The scope wire stays frozen as a cache. Amendment 1: backfill and new agent peers get hub `send` and hub `directory`; only guest and colleague principals start empty. Invite-flow ruling: resource kinds include `thread`. `bucket` is reserved and not implemented. Q1 ruling: optional `expires_at`; one-off uses the invite lifetime; ongoing is empty until revoked | 2026-11-06 |
-| D3 Team, global, front door | B. A team grant expands at check time. Fan-out membership stays separate. Q2 fits: agent-scoped guest directory is that one agent; history is threads it participates in (default `from_join`) | 2026-11-06 |
+| D3 Team, global, front door | B. A team grant expands at check time. Fan-out membership stays separate. Q2 fits: agent-scoped guest directory is that one agent; history is threads it participates in (default `from_join`). Q5 (`msg_01M6R1CPX0Y6R6DRS0VE0ZT632`): Global is hub `send` and hub `directory` (default for agents, today's behaviour). Team-scoped is `send` and `directory` on a team resource and sees no one outside the team. Operators and other special accounts are global. Default is Global, with no friction. Task 6a is the Access step. Onboarding Task 9 does not wait for it | 2026-11-06 |
 | D4 Link mechanics | A. Agent invite (Q1 ruling `msg_01M6QZHT65EJH8195GG0NJYC5T`). Prompt is hub URL + one-time redeem code + one guide line. Redeem reuses the enrol exchange on MCP link-code, `vecnet enrol <code>`, and `POST /v1/enrol`. Browser fragment, cookie session, and guest shell are deferred Task 4. Amendments 2 and 3 still apply to the operator cookie (Tasks 5 and 5b) | 2026-11-06 |
 | D5 IdP library | A. `github.com/coreos/go-oidc/v3/oidc`. B only if Max's question 9 says SAML is the only door. Unchanged. Office 365 is for colleagues and admins, not guests | 2026-11-06 |
 | D6 Ids | A. Keep prefixed ULIDs. The external subject is stored on the principal | 2026-11-06 |
@@ -183,7 +186,7 @@ A virtual file bucket is not in this first build. Resource kind `bucket` stays r
 
 ### Rulings on Max's answers
 
-Both rulings are 2026-11-06. The verbatim answers are under "Max's answers". D2, D3, D6, D7, D8's letter, and amendments 1–6 stand, except where a ruling below moves amendments 2 and 3 onto the operator cookie and off the deferred guest shell.
+The Q1, invite-flow, and Q5 rulings are 2026-11-06. The verbatim answers are under "Max's answers". Question 5's record there is the CoS ruling, because this fold was not given a separate Max paste. D2, D3, D6, D7, D8's letter, and amendments 1–6 stand, except where a ruling below moves amendments 2 and 3 onto the operator cookie and off the deferred guest shell. Q5 fits D3 B and amendment 1 and does not replace them.
 
 **Q1 ruling, `msg_01M6QZHT65EJH8195GG0NJYC5T`.**
 
@@ -207,15 +210,29 @@ Both rulings are 2026-11-06. The verbatim answers are under "Max's answers". D2,
 - A virtual file bucket is not in A's first build. Reserve grant resource kind `bucket` in the closed list. Implement nothing for it.
 - Keep asking Max questions 5–10, one at a time. Question 4 stays skipped.
 
+The invite-flow sentence above is the ruling as recorded. Q5, later the same day, closes question 5 only. Questions 6–10 stay open.
+
+**Q5 ruling, `msg_01M6R1CPX0Y6R6DRS0VE0ZT632`.**
+
+- Fits D3 B and amendment 1. It does not replace either.
+- Global means hub `send` and hub `directory`. That is today's behaviour, and it is the default for agents.
+- Team-scoped means `send` and `directory` grants on a team resource. The grant expands at check time. The account sees no one outside the team.
+- Operators and other special accounts are global. This ruling does not name a further list, and this plan does not invent one.
+- The default is Global, with no friction. Add agent and Add guest get one Access step: Global (default), or Team (pick an existing team or create one). One line of hint: "Use a team for work or sensitive projects." Never a warning. Never a nag.
+- Do not block onboarding Task 9. Onboarding Task 9 ships now without the step. Grants do not exist until accounts Tasks 1–3.
+- New accounts Task 6a, "Access step in Add agent and Add guest", after Tasks 1–3 and onboarding Task 9. The step lives on the registry form. It is a hub-owned field, not hardcoded in the UI. The CLI flag is `--team <id>` or `--global`. The MCP field is the same choice.
+- Changing an existing peer between global and team is an operator action on the peer page, under Task 6a, and it is audited.
+- Questions 6–10 remain open. Ask them one at a time. Question 4 stays skipped.
+
 ## Questions for Max
 
-The conductor asks these one at a time, in order, and pastes each answer into "Max's answers" verbatim. Questions 1–3 are answered. Question 4 is skipped by the invite-flow ruling. Questions 5–10 are outstanding. A later question is not asked in the same message. Nothing is built while an answer that blocks that task is still blank. If an answer conflicts with CoS's record, flag to CoS before editing the task. Docs merge does not wait on these answers.
+The conductor asks these one at a time, in order, and pastes each answer into "Max's answers" verbatim. Questions 1–3 are answered. Question 4 is skipped by the invite-flow ruling. Question 5 is ruled (`msg_01M6R1CPX0Y6R6DRS0VE0ZT632`). Questions 6–10 are outstanding. A later question is not asked in the same message. Nothing is built while an answer that blocks that task is still blank. If an answer conflicts with CoS's record, flag to CoS before editing the task. Docs merge does not wait on these answers. Question 5 does not block Task 6a.
 
 1. The friend who should reach one agent: do they open a link you send them, with no account of their own, or do they sign in with an email or an Office 365 account you name in advance? **Answered.**
 2. Once they are in, what do they see of that agent: only the thread between the two of them, or that agent's other conversations as well? **Answered.**
 3. Can you read that conversation in your existing inbox, and can you reply in it? **Answered.**
 4. When you add someone, is it one screen with a choice of person or agent, or do people and agents stay on different screens? **Skipped.** D8 A is confirmed. Do not ask.
-5. A team on your hub today is a list of agents a message can be sent to, and everyone can still see the whole directory. When an account is "scoped to a team", should that person stop seeing agents outside the team?
+5. A team on your hub today is a list of agents a message can be sent to, and everyone can still see the whole directory. When an account is "scoped to a team", should that person stop seeing agents outside the team? **Answered.** Ruled by CoS (`msg_01M6R1CPX0Y6R6DRS0VE0ZT632`). Yes for a team-scoped account: it sees no one outside the team. Global stays the default and still sees the whole directory.
 6. Who, besides you, should see every project on the hub?
 7. A colleague's starting scope: only the agents they add, or those agents plus one front-door agent that other colleagues can reach? If there is a front door, do you name that agent when you invite them?
 8. Does the colleague add their own agents, or do you add those agents for them?
@@ -224,7 +241,7 @@ The conductor asks these one at a time, in order, and pastes each answer into "M
 
 ## Max's answers
 
-Paste each answer under its question number, verbatim. Questions 5–10 are still blank. Ask them one at a time. They do not block a docs merge. The invite-flow note is Max's, and it is not an answer to question 4.
+Paste each answer under its question number, verbatim. Question 5 is Max's answer, pasted verbatim below; the CoS ruling that applies it is `msg_01M6R1CPX0Y6R6DRS0VE0ZT632`. Questions 6–10 are still blank. Ask them one at a time. They do not block a docs merge. The invite-flow note is Max's, and it is not an answer to question 4.
 
 1. 2026-11-06 19:27 AEDT.
 
@@ -244,7 +261,11 @@ Invite flow, 2026-11-06 19:29 AEDT. Verbatim. Ruled with question 4 skipped; thi
 
 > re friend access: so i like do something on server (similar to adding a bot, but like adding a guest) -> select scope, token/session validity time, access rights for a specific thread or maybe like (virtual) file bucket, erc -> get prompt. Similarly, agents should be able to do that via MCP and get the same text back (which they then forward through you or wahtever).
 
-5.
+5. (2026-11-06 19:59 AEDT, widget + text) yes, hide everyone outside the team. we can tag special accounts (operators, agents) as `global` to give them global access (how it works now). When we add agents, adding them as a team or global should be easy and part of the setup process. It's totally fine for individual devs (like not part of a company) to just use global for everything (we shoudln't discourage it, often it makes more sense) but the teams thing is there if they want it. and if there's any work/sensitive stuff, then we shoudl suggest they use that feature.
+   CoS ruling applying it: `msg_01M6R1CPX0Y6R6DRS0VE0ZT632`.
+
+> Fits D3 B and amendment 1. Global = hub send and directory grants (today's behaviour, default for agents). Team-scoped = send and directory grants on a team resource, expanded at check time; sees no one outside the team. Operators and other special accounts are global. Default is Global, with no friction. Add-agent/add-guest flow gets one Access step: Global (default) or Team: pick or create, plus one-line hint: "Use a team for work or sensitive projects." Never a warning or a nag. Do not block onboarding Task 9. T9 ships now without the step (grants do not exist until accounts Tasks 1–3). Add new accounts Task 6a: "Access step in Add agent and Add guest", after Tasks 1–3 and onboarding T9. Step lives on the registry form (hub-owned field, not hardcoded in the UI), with the same CLI flag (`--team <id>` or `--global`) and MCP field. Changing an existing peer between global and team is an operator action on the peer page under the same task, audited.
+
 6.
 7.
 8.
@@ -270,6 +291,7 @@ A build touches these. This assignment touches none of them.
 | `vecnet_guest_invite` | MCP create result contains the invite prompt once. Exception to the enrol-material boundary. Task 6 does not merge until CoS confirms with Max | `internal/mcpserver` |
 | Per-guest blob limits | Existing message attachments (R2). Guest ceilings on count, bytes, and expiry are lower than the agent ceilings in PROTOCOL §2.7. Feature B stays held | blob quota check on send |
 | Invite registry action | After onboarding. Not a second kind list. Add guest is `guest_link` beside Add agent | `internal/onboarding/`, `internal/httpapi/admin.go`, `internal/ui/static/invite*.js`, `app.js`, `api.js` |
+| Access step, Global or team (Q5, Task 6a) | No new envelope field. Directory hiding is the PROTOCOL §8 change already assigned to Task 7: a team-scoped caller does not see peers outside the team. The choice is a hub-owned registry field. CLI `--team <id>` or `--global`. MCP carries the same field. An operator change on the peer page is audited. Creating a team here does not insert `team_members` | Registry field in `internal/onboarding/`; `vecnet agent add` and the `guest_link` CLI adapter; `vecnet_agent_add` and `vecnet_guest_invite`; the operator peer page under `internal/ui/static/` |
 | whoami | Tool schema if a new credential kind appears. Recommendation: whoami stays `peer` / `principal` / `operator`; a guest is a peer of kind `guest` | `internal/mcpserver/tools.go` |
 | Glossary and product scope | SPEC §15 currently excludes multi-operator tenancy. Amending that sentence is part of the doc task, not a silent edit | `GLOSSARY.md`, `SPEC.md`, `docs/OPERATOR.md`, `CHANGELOG.md` |
 
@@ -281,12 +303,12 @@ Onboarding is in progress from `docs/plans/2026-11-06-agent-onboarding-kinds.md`
 
 | Onboarding task | Files it owns | This plan's task that must wait |
 |---|---|---|
-| 1 Kind registry | `internal/onboarding/` | Task 6 (`guest_link` spec) |
+| 1 Kind registry | `internal/onboarding/` | Task 6 (`guest_link` spec) and Task 6a (the Access-step field) |
 | 2 Hub service | `internal/hub/hub.go`, `internal/hub/admin.go`, `internal/hub/onboarding.go` | Tasks 2 and 3 |
 | 4 HTTP | `internal/httpapi/admin.go` | Tasks 4 and 6 |
 | 6 Consent cookie | `internal/oauth/consent.go`, `consent.html` | Task 4 must not edit these. Guest cookie is a different name and path |
-| 7 MCP | `internal/mcpserver/tools.go` | Task 6 |
-| 9 Add-agent UI | `internal/ui/static/app.js`, `api.js`, `invite.js`, `invite-model.js`, invite CSS and tests | Deferred Task 4 guest shell, Task 5b, and Task 6 |
+| 7 MCP | `internal/mcpserver/tools.go` | Task 6 and Task 6a (the MCP field) |
+| 9 Add-agent UI | `internal/ui/static/app.js`, `api.js`, `invite.js`, `invite-model.js`, invite CSS and tests | Deferred Task 4 guest shell, Task 5b, Task 6, and Task 6a. Onboarding Task 9 does not wait on Task 6a and ships without the Access step |
 | 11 Docs | `docs/PROTOCOL.md`, guides | Tasks 7 and 8 |
 
 Admin-parity Tasks 2–8 assume an operator bypass and a new grant migration. They should be rewritten against recorded D2 C, not implemented in parallel and merged under this work.
@@ -296,10 +318,10 @@ Cookie-authenticated state changes share `internal/httpapi/middleware.go` with o
 ## Dependency map
 
 ```json
-{"0":[],"1":[0],"2":[1],"3":[2],"5":[2],"5b":[5],"6":[3,"5b"],"8":[6],"7":[8],"4":["5b"]}
+{"0":[],"1":[0],"2":[1],"3":[2],"5":[2],"5b":[5],"6":[3,"5b"],"6a":[3],"8":[6],"7":[8],"4":["5b"]}
 ```
 
-Task 0 holds CoS's record, filled on 2026-11-06 and amended the same day by the Q1 and invite-flow rulings. Max's answers 1–3 and the invite-flow note are pasted. Questions 5–10 are still empty. Once these docs merge, Tasks 1–3 wait for the DB build to land (`internal/store/migrations`), then follow this map. Task 4 is deferred: it is not a predecessor of Tasks 5, 5b, 6, 8, or 7. It reuses Task 5's session row if Max later asks for a human-only browser guest. Task 5b still comes before Task 6 because both edit `internal/ui/static/app.js`. Task 5b and Task 6 also wait for onboarding Task 9. Task 6 does not merge until CoS confirms the MCP enrol-material exception with Max. Nothing is built until the Max answers that block that task are in. A conflicting answer is flagged to CoS before the task text changes.
+Task 0 holds CoS's record, filled on 2026-11-06 and amended the same day by the Q1, invite-flow, and Q5 rulings. Max's answers 1–3 and the invite-flow note are pasted. Question 5 is the Q5 ruling. Questions 6–10 are still empty. Once these docs merge, Tasks 1–3 wait for the DB build to land (`internal/store/migrations`), then follow this map. Task 4 is deferred: it is not a predecessor of Tasks 5, 5b, 6, 6a, 8, or 7. It reuses Task 5's session row if Max later asks for a human-only browser guest. Task 5b still comes before Task 6 because both edit `internal/ui/static/app.js`. Task 5b and Task 6 also wait for onboarding Task 9. Task 6a depends on Task 3, so it follows Tasks 1–3, and it also waits for onboarding Task 9. Onboarding Task 9 is not a node in the JSON. Task 6a does not depend on Tasks 4, 5, 5b, 6, 8, or 7, and it is not their predecessor. Onboarding Task 9 does not wait for Task 6a. Task 6 does not merge until CoS confirms the MCP enrol-material exception with Max. Nothing is built until the Max answers that block that task are in. Question 5 does not block Task 6a. Questions 6–10 do not block Task 6a. A conflicting answer is flagged to CoS before the task text changes. The backlog items are not in this map.
 
 ---
 
@@ -307,12 +329,12 @@ Task 0 holds CoS's record, filled on 2026-11-06 and amended the same day by the 
 
 **Files:** this plan only (`docs/plans/2026-11-06-accounts-scope.md`).
 
-**Interfaces:** "CoS's record" is filled, including the Q1 and invite-flow rulings. "Max's answers" holds questions 1–3 and the invite-flow note. Questions 5–10 fill as the conductor receives them. Question 4 stays skipped.
+**Interfaces:** "CoS's record" is filled, including the Q1, invite-flow, and Q5 rulings. "Max's answers" holds questions 1–3, the invite-flow note, and the Q5 ruling text. Questions 6–10 fill as the conductor receives them. Question 4 stays skipped.
 
 - [x] CoS recorded one option letter for D1–D8 on 2026-11-06, including amendments 1–6 in the tasks below.
-- [x] Questions 1–3 and the invite-flow note are pasted verbatim. Question 4 is skipped. The Q1 ruling and the invite-flow ruling are in "CoS's record" and in the tasks they change.
-- [ ] The conductor asks question 5, waits, and pastes the answer verbatim. Continues in order through question 10. A question whose answer cannot be known yet stays blank, and any task that answer blocks stays blocked.
-- [x] Recorded options match the rulings, and amendments 1–6 are in the tasks. D4 A's shipped shape is the agent invite. The browser session remains written under deferred Task 4. If a later Max answer conflicts with a ruling, flag to CoS before editing tasks. Do not leave a conflicting interface in place.
+- [x] Questions 1–3 and the invite-flow note are pasted verbatim. Question 4 is skipped. Question 5 is pasted verbatim, and its ruling is `msg_01M6R1CPX0Y6R6DRS0VE0ZT632`. The Q1 ruling, the invite-flow ruling, and the Q5 ruling are in "CoS's record" and in the tasks they change. Task 6a is in the dependency map after Task 3, and the prose also waits on onboarding Task 9.
+- [ ] The conductor asks question 6, waits, and pastes the answer verbatim. Continues in order through question 10. A question whose answer cannot be known yet stays blank, and any task that answer blocks stays blocked.
+- [x] Recorded options match the rulings, and amendments 1–6 are in the tasks. D4 A's shipped shape is the agent invite. The browser session remains written under deferred Task 4. Q5 fits D3 B and amendment 1. If a later Max answer conflicts with a ruling, flag to CoS before editing tasks. Do not leave a conflicting interface in place.
 
 ---
 
@@ -326,7 +348,7 @@ Task 0 holds CoS's record, filled on 2026-11-06 and amended the same day by the 
 
 Amendment 1. Three create paths, and only two principal kinds start empty:
 - Backfill: every existing peer with no scope rows receives hub `send` and hub `directory`. Not `send` alone. Peers that already have scope rows are not widened.
-- Invite and onboarding: the writer in this task gives that new peer hub `send` and hub `directory` unless the invite names a narrower scope. Task 2's edit of `AddPeerWith` calls this writer.
+- Invite and onboarding: the writer in this task gives that new peer hub `send` and hub `directory` unless the invite names a narrower scope. Task 6a's team choice is that narrower scope (`send` and `directory` on the team resource). A missing Access step stays Global. Task 2's edit of `AddPeerWith` calls this writer. Onboarding Task 9 has no Access step, so peers it creates stay on this Global default until Task 6a.
 - PROTOCOL §18.4: `provision.go` gives the new peer its principal's default grants, filled from the frozen default-scopes wire. Pag-chat's shapes stay.
 - Guest and colleague principals are created with no grants. They deny. Every other new peer uses one of the three paths above, so an agent enrolled after this task can still send and still read the directory.
 
@@ -343,7 +365,7 @@ Amendment 1. Three create paths, and only two principal kinds start empty:
 
 **Files:** Modify `internal/hub/send.go`, `internal/hub/threads.go`, `internal/hub/reactions.go`, `internal/hub/presence.go`, `internal/hub/admin.go`, `internal/hub/groups.go`, `internal/hub/hub.go` (`AddPeerWith`'s operator-kind check and the amendment 1 default-grant call), `internal/httpapi/middleware.go`, `internal/httpapi/admin.go`. Tests beside each.
 
-**Interfaces:** Depth reset, posting into a thread the sender has not joined, adding to a locked thread, replying to a message the sender cannot see, full-history reads, and `/v1/admin/` require a grant, not `peers.kind` and not `Caller.Kind == "operator"` by itself. The bootstrap principal from `EnsureOperator` receives hub-boundary grants for those capabilities, including `invite`, in the same migration as Task 1 or a following next-free migration if Task 1 has already shipped. Amendment 1's defaults still omit `invite`. `AddPeerWith` calls Task 1's invite default (hub `send` and hub `directory`, unless the caller passes a narrower scope). New `peer add --kind operator` returns 422. Existing operator-kind peers keep their kind. Handlers take the caller; deleting the middleware check without the handler check is a failure. Full history stays an operator grant. A guest history grant does not include it (Task 6 defaults the form to `from_join`).
+**Interfaces:** Depth reset, posting into a thread the sender has not joined, adding to a locked thread, replying to a message the sender cannot see, full-history reads, and `/v1/admin/` require a grant, not `peers.kind` and not `Caller.Kind == "operator"` by itself. The bootstrap principal from `EnsureOperator` receives hub-boundary grants for those capabilities, including `invite`, in the same migration as Task 1 or a following next-free migration if Task 1 has already shipped. Amendment 1's defaults still omit `invite`. `AddPeerWith` calls Task 1's invite default (hub `send` and hub `directory`, unless the caller passes a narrower scope). Q5 keeps the bootstrap operator, and other special accounts, on global hub grants. This task does not team-scope them. New `peer add --kind operator` returns 422. Existing operator-kind peers keep their kind. Handlers take the caller; deleting the middleware check without the handler check is a failure. Full history stays an operator grant. A guest history grant does not include it (Task 6 defaults the form to `from_join`).
 
 Amendment 4. Before `--kind operator` is refused, the migration finds every operator-kind peer other than the bootstrap peer. Each of those peers, as subject, receives the bootstrap grant set, so depth reset, inbox, and admin keep working for them. The subject is the peer, not every peer under its principal. The migration records those peer ids for the Task 7 receipt. Max can revoke. The migration does not delete their kind and does not drop the grants it just wrote.
 
@@ -359,7 +381,9 @@ Amendment 4. Before `--kind operator` is refused, the migration finds every oper
 
 **Files:** Modify `internal/hub/directory.go`, `internal/httpapi/peers.go`, the history read in `internal/hub/threads.go`, the MCP peers projection in `internal/mcpserver` (re-inventory the file; onboarding Task 8 may own list assembly), and the existing blob quota on the attachment path (`internal/blob`, PROTOCOL §2.7). Tests.
 
-**Interfaces:** `Directory(ctx, caller)` returns peers the caller's `directory` grant expands to, plus the caller's own peers. A hub `directory` grant returns today's full list. `GET /v1/peers` passes the caller. Send to a peer outside the grant is 403 `scope_denied` as today. Team fan-out is unchanged: a grant on a team does not add `team_members`.
+**Interfaces:** `Directory(ctx, caller)` returns peers the caller's `directory` grant expands to, plus the caller itself. A hub `directory` grant returns today's full list. `GET /v1/peers` passes the caller. Send to a peer outside the grant is 403 `scope_denied` as today. Team fan-out is unchanged: a grant on a team does not add `team_members`.
+
+Q5 (`msg_01M6R1CPX0Y6R6DRS0VE0ZT632`): a team-scoped account holds `send` and `directory` on that team resource. Expansion is current members only. The directory is those members and the caller itself. A peer outside the team is absent, including another peer of the same caller. A Global account holds hub `send` and hub `directory` and sees today's full list. Operators and other special accounts are global, so they are not team-scoped by default. Task 6a is the control that writes the team grants. This task implements the check, not the form.
 
 An agent-scoped guest holds `directory` and `send` on that one peer. Its directory is that peer and itself. Its threads are only threads with that peer. History returns the threads it participates in. The default policy is `from_join` (PROTOCOL §16.3): messages from before it joined are hidden, and a blob is readable only when a visible message references it. A thread-scoped guest is a participant of that one thread. Its directory is the peers on that thread. Full history remains the operator grant from Task 2.
 
@@ -369,7 +393,7 @@ No `directory` grant returns an empty directory, not the full one. That empty re
 
 Question 3 is yes. The operator reads the guest's thread and replies in it, by the operator grants from Task 2. This task does not remove that.
 
-- [ ] Tests: a caller granted one peer id receives a directory of that peer and itself. A team grant follows a membership change. A hub `directory` grant matches the previous full directory. An invite-default peer sees that full directory. A narrowed invite sees only the named peers and itself. A guest principal and a colleague principal, with no grant, see an empty directory. An agent-scoped guest sees that one agent and itself, and a history read returns only threads it participates in with that agent. A thread-scoped guest reads that thread under `from_join`, its directory is the peers on that thread, and it does not read an earlier message or another thread. Full history still requires the operator grant.
+- [ ] Tests: a caller granted one peer id receives a directory of that peer and itself. A team grant follows a membership change. A team-scoped caller sees the current members and itself, and a peer outside the team is absent. A hub `directory` grant matches the previous full directory. An invite-default peer, which is Global, sees that full directory. An operator and any other special account stay on that full directory. A narrowed invite sees only the named peers and itself. A guest principal and a colleague principal, with no grant, see an empty directory. An agent-scoped guest sees that one agent and itself, and a history read returns only threads it participates in with that agent. A thread-scoped guest reads that thread under `from_join`, its directory is the peers on that thread, and it does not read an earlier message or another thread. Full history still requires the operator grant.
 - [ ] Attachment tests: a guest with `send` puts a blob and sends it on a visible thread, and reads a blob a visible message references. A blob on a thread it cannot see is denied. A guest upload at the agent ceiling is refused, and the same upload under an agent credential is still accepted. The guest count ceiling is finite. The test names the guest count, byte, and expiry ceilings and asserts each is strictly lower than the agent's.
 - [ ] Disabled peers stay hidden to non-operators, matching `Directory` today.
 - [ ] Run hub, httpapi, and mcpserver tests through `just bb`.
@@ -432,7 +456,7 @@ Amendment 3. In the shared middleware, a state-changing request (POST, PUT, DELE
 
 ### Task 6: One invite for a guest and for an agent
 
-**Implements:** D8 A, confirmed by the invite-flow ruling (`msg_01M6QZNG1SWQHXFQTS07PMZ76Z`), and D4's agent-invite redeem, and D3's front door. Depends on Tasks 3, 5, and 5b, and on onboarding Tasks 1, 4, 7, and 9 having merged. It does not depend on deferred Task 4. Re-inventory before editing. Questions 7 and 8 block the colleague form fields. The guest form does not wait on them. A conflicting answer is flagged to CoS before this task's interface changes.
+**Implements:** D8 A, confirmed by the invite-flow ruling (`msg_01M6QZNG1SWQHXFQTS07PMZ76Z`), and D4's agent-invite redeem, and D3's front door. Depends on Tasks 3, 5, and 5b, and on onboarding Tasks 1, 4, 7, and 9 having merged. It does not depend on deferred Task 4 or on Task 6a. Re-inventory before editing. Questions 7 and 8 block the colleague form fields. The guest form does not wait on them. A conflicting answer is flagged to CoS before this task's interface changes. The Global or team Access step is Task 6a. This task does not add that control and does not hardcode it. Until Task 6a, an agent kind stays on amendment 1's Global default. Task 6a is the only writer of that registry field. When `guest_link` exists, it reads the field. It does not grow a second copy.
 
 **Merge gate:** MCP `vecnet_guest_invite` returns the invite prompt, redeem code included. That is the exception to onboarding's rule that MCP never carries enrol material. CoS is confirming the exception with Max. Build this task as specified, including the tool. Do not merge this task until CoS confirms.
 
@@ -466,8 +490,32 @@ A virtual file bucket is not built. The form has no bucket field. Resource kind 
 - [ ] Authority tests: a caller without `invite` creates nothing. A guest grant that is not a subset of the caller's grants creates nothing. An agent-created invite longer than 7 days is refused unless an operator raised that caller's cap. The create writes an audit row. The code is absent from logs and from every result except the create result.
 - [ ] A colleague without the front-door field cannot send to other colleagues' agents; adding the front door does not insert a team membership. Those fields stay blocked on questions 7 and 8 until the answers are pasted.
 - [ ] The six existing onboarding kinds keep their tests. `vecnet_agent_add` for those kinds still returns no enrol material.
-- [ ] UI test: one add flow offers the guest kind beside the agent kinds, using the registry, with no second hardcoded list. The guest form posts scope, access, and validity, and shows the prompt once.
+- [ ] UI test: one add flow offers the guest kind beside the agent kinds, using the registry, with no second hardcoded list. The guest form posts scope, access (read/reply and files), and validity, and shows the prompt once. The Global or team Access step is Task 6a and is not this access-rights field.
 - [ ] Run onboarding, httpapi, mcpserver, and UI tests through `just bb`. Do not merge until CoS confirms the MCP exception with Max.
+
+---
+
+### Task 6a: Access step in Add agent and Add guest
+
+**Implements:** Q5 ruling (`msg_01M6R1CPX0Y6R6DRS0VE0ZT632`, 2026-11-06). Fits D3 B and amendment 1. Depends on Task 3, and on onboarding Task 9 having merged. Does not depend on Tasks 4, 5, 5b, 6, 8, or 7. Does not block onboarding Task 9. Onboarding Task 9 ships without this step, because grants do not exist until accounts Tasks 1–3. This task is not a predecessor of Tasks 4, 5, 5b, 6, 8, or 7. Question 5 does not block it. Questions 6–10 do not block it.
+
+**Files:** The hub-owned field on the registry form in `internal/onboarding/`. The CLI flags `--team <id>` and `--global` on `vecnet agent add` (onboarding's add command) and on the `guest_link` CLI adapter. The same choice on MCP `vecnet_agent_add` and `vecnet_guest_invite`. The operator peer page, where an existing peer moves between global and team; re-inventory it under `internal/ui/static/`. The UI renders the registry field. It does not hardcode Global or Team. Do not add a second enrol command. `vecnet enrol` stays the redeem path from Task 6. Do not edit these files until accounts Task 3 has landed and onboarding Task 9 has merged. The registry edit also waits until onboarding Task 1 has merged. The MCP edit also waits until onboarding Task 7 has merged. Re-inventory before editing. If the peer page is `internal/ui/static/app.js`, serialize with Task 5b and Task 6, who also edit that file. This task is the only writer of the Access-step field. Task 6's `guest_link` reads it when that action exists. This task does not create a second guest form.
+
+**Interfaces:** One Access step on Add agent and on Add guest. This is the account's Global or team choice. It is not Task 6's access-rights field (read/reply and files).
+
+- Choices: Global, preselected, or Team. Team means pick an existing team or create one.
+- Hint, one line: "Use a team for work or sensitive projects." The hint is not a warning and not a nag. There is no extra confirmation and no second screen. Submitting without touching the step is Global.
+- Global writes hub `send` and hub `directory` (amendment 1, today's behaviour).
+- Team writes `send` and `directory` on that team resource. Check-time expansion is Task 3. The peer sees no one outside the team. Creating a team uses the existing operator `CreateTeam`. It does not insert `team_members`. Fan-out membership stays the separate operator action from D3 B.
+- Operators and other special accounts stay global. This step does not put them on a team by default, and it does not narrow the bootstrap operator. The ruling does not list the other special accounts. Do not invent that list in the build. A later Max answer that names it is flagged to CoS before the set changes.
+- The field is hub-owned on the registry form. CLI: `--team <id>` selects that existing team; `--global` selects Global. Omitting both is Global. `--team` does not take a display name and does not create a team. Create stays on the form. MCP carries the same choice: global, or a team id.
+- Changing an existing peer between global and team is an operator action on the peer page, in this task, and it writes an audit row. Global to team replaces that peer's hub `send` and hub `directory` with the team grants. Team to global replaces the team grants with hub `send` and hub `directory`. It does not insert or remove `team_members`.
+
+- [ ] Tests: omitting the field, `--global`, and the MCP global value each write hub `send` and hub `directory` and do not write a team resource. `--team <id>` and the MCP team id write `send` and `directory` on that team only. A team-scoped peer's directory is the current members and itself, and a peer outside the team is absent. An operator peer stays on hub grants. A missing team id is refused and creates no peer.
+- [ ] The hint string is the one line above. The form has no warning copy and no nag copy. Global is the preselected choice. A submit that does not touch the step is Global.
+- [ ] UI test: Add agent and Add guest render the choice from the registry field. The page has no hardcoded Global/Team list. The form's create-team action does not insert `team_members`.
+- [ ] Operator change on the peer page from global to team, and from team to global, writes the grants and an audit row, and does not insert or remove `team_members`.
+- [ ] Run onboarding, CLI, mcpserver, and UI tests through `just bb`.
 
 ---
 
@@ -490,7 +538,7 @@ A virtual file bucket is not built. The form has no bucket field. Resource kind 
 
 **Files:** Modify `docs/PROTOCOL.md` (§8 kinds and directory visibility, §12 auth including `POST /v1/enrol` for a guest code and `GET /v1/guide`, §16 operator powers, §2.10 and §2.12 as built), `docs/OPERATOR.md`, `GLOSSARY.md` (account, guest, grant; team stays the recipient list), `SPEC.md` §15 (multi-operator tenancy moves from "out of scope for v1" to a pointer at this plan, only for what actually shipped), `CHANGELOG.md`. Create `docs/plans/receipts/2026-11-06-accounts-scope.md` with commands and results, no secrets.
 
-**Interfaces:** The protocol text matches the recorded decisions and the code. D1 A shipped kind `guest`. D4 A shipped the agent invite. The browser guest session is named as deferred. whoami's enum matches the code. The receipt lists the migration number actually used, the operator-kind peers amendment 4 preserved, and the guest blob ceilings Task 3 chose.
+**Interfaces:** The protocol text matches the recorded decisions and the code. D1 A shipped kind `guest`. D4 A shipped the agent invite. The browser guest session is named as deferred. whoami's enum matches the code. The receipt lists the migration number actually used, the operator-kind peers amendment 4 preserved, and the guest blob ceilings Task 3 chose. Q5 is in §8: a team-scoped directory is that team, and Global stays the full directory. The Access step is Task 6a and is not a new envelope field.
 
 - [ ] `just validate-protocol` and the focused Go and UI suites, through `just bb`.
 - [ ] Acceptance on fixtures: a guest redeem on each of the three paths sees one agent and can send to that agent; a second send to another peer is `scope_denied`; a thread-scoped guest sees that thread under `from_join`; the guest attaches a file and receives a file on a visible thread; an expired grant denies like a missing grant; the operator reads that thread and replies in it (question 3 is yes); a colleague principal lists only its grants; an Office 365 test uses the local signer from Task 5, not a real tenant; revoking the grant ends the operator session's next call, because the call re-reads grants on the server-side session row (amendment 2), and setting `revoked_at` ends it too. A stateless sealed cookie is not the design under test. The guest's credential under test is the peer bearer from Task 6, not a browser cookie.
@@ -500,12 +548,22 @@ A virtual file bucket is not built. The form has no bucket field. Resource kind 
 
 ---
 
+## Backlog / deferred
+
+CoS approved these and queued them. They are absent from the dependency map. They are sequenced notes, not active build tasks. Do not build them from this plan, and do not give them task numbers.
+
+**Sub-agent links. QUEUED.** Lands on the `guest_link` form on accounts feature A (D8 A, Task 6). This note does not add a form field, a grant, or a task. Not build now.
+
+**Session-query.** Max called this "ask an old session". Plan it after [`docs/plans/2026-11-04-codex-appserver.md`](2026-11-04-codex-appserver.md). Build it after accounts Tasks 1–3 and before feature C. No build now. Not in the dependency map.
+
+**Peer-cleanup. QUEUED.** Lifecycle is archived. There is no hard delete. Sequenced after Task 9+#67. This note does not add an archive column, a delete path, or a task. Not build now.
+
 ## Review focus
 
 1. An agent-scoped guest directory contains that one agent. A thread-scoped guest is a participant of that thread only, with history default `from_join`. `GET /v1/peers` for that guest does not return the operator's other peers. Question 2 is the verbatim line under "Max's answers"; this is the recorded fit.
 2. The invite prompt holds the hub URL, a one-time redeem code, and one guide line. It holds no long-lived secret. The code appears once, in the create result. MCP `vecnet_guest_invite` returns that prompt. Task 6 does not merge until CoS confirms the exception with Max. The guest does not use `localStorage`. The browser cookie path is deferred Task 4.
 3. `peers.kind == "operator"` is not sufficient for depth reset or `/v1/admin/` after Task 2. CoS recorded D2 C and D7 B. Existing operator-kind peers other than the bootstrap peer hold the copied bootstrap grant set and are listed in the receipt. New `--kind operator` is refused. Powers are not stripped silently. The bootstrap root grant includes `invite`. Amendment 1 defaults do not.
-4. Team scope does not add `team_members`. CoS recorded D3 B.
+4. Team scope does not add `team_members`. CoS recorded D3 B. Q5 (`msg_01M6R1CPX0Y6R6DRS0VE0ZT632`) fits that record: Global is hub `send` and hub `directory` and is the default; a team-scoped account holds `send` and `directory` on the team and sees no one outside the team; operators and other special accounts stay global. Task 6a is the Access step. Onboarding Task 9 ships without it.
 5. Entra lookup uses `iss` + `tid` + `oid`. Email is not the key. D5 is unchanged. Guests do not sign in with Office 365.
 6. `internal/oauth` is unchanged except where onboarding Task 6 already changed the consent cookie, and except the existing link-code exchange accepting a guest redeem code. The deferred guest cookie cannot satisfy the consent cookie. The operator session cookie is a different name and path.
 7. The migration number in the receipt is the number that was free at integration, not a number from this plan.
@@ -515,12 +573,13 @@ A virtual file bucket is not built. The form has no bucket field. Resource kind 
 11. The guest web shell (Task 4) is deferred until Max asks for a human-only browser guest. The operator cookie sign-in (Task 5b) is Claude/Opus, after onboarding Task 9. `localStorage` remains the break-glass bootstrap login only.
 12. `vecnet_guide`, `vecnet guide [topic]`, and `GET /v1/guide` render one hub-owned source. The invite prompt is at most 600 characters.
 13. A guest with `send` attaches and receives files through existing message blobs, in threads it can see. Guest blob ceilings are lower than the agent's on count, bytes, and expiry. Feature B stays held. Resource kind `bucket` is reserved and not implemented.
-14. Question 3 is yes: the operator reads the guest thread and replies in it. Questions 5–10 are still open. Question 4 stays skipped.
+14. Question 3 is yes: the operator reads the guest thread and replies in it. Question 5 is ruled (`msg_01M6R1CPX0Y6R6DRS0VE0ZT632`). Questions 6–10 are still open, one at a time. Question 4 stays skipped.
+15. Task 6a puts one Access step on Add agent and Add guest: Global (default) or Team (pick or create), with the hint "Use a team for work or sensitive projects." The hint is not a warning and not a nag. The field is hub-owned on the registry. CLI is `--team <id>` or `--global`. MCP carries the same field. Changing an existing peer between global and team is an operator action on the peer page, audited, and it does not touch `team_members`. The backlog items (sub-agent links, session-query, peer-cleanup) are queued and are not build tasks.
 
 ## Self-review
 
-- D1–D8 are recorded on 2026-11-06. Amendments 1–6 are in the tasks. The Q1 ruling (`msg_01M6QZHT65EJH8195GG0NJYC5T`) and the invite-flow ruling (`msg_01M6QZNG1SWQHXFQTS07PMZ76Z`) are in "CoS's record", in D1–D5 and D8, and in Tasks 1, 2, 3, 4, 5, 5b, 6, 8, and 7.
-- Questions 1–3 and the invite-flow note are pasted verbatim. Question 4 is skipped. Questions 5–10 stay blank and are asked one at a time. A conflicting answer is flagged to CoS before a task changes. This docs merge does not wait on Max. Nothing is built until the answers that block that task are in. Tasks 1–3 then wait for the DB build. Task 4 stays deferred. Tasks 5, 5b, 6, 8, and 7 follow the dependency map. Task 6 does not merge until CoS confirms the MCP exception.
-- Guest kind, directory filtering, thread-scoped history, and moving operator powers are marked as protocol changes. Envelope peer-kind enum is not claimed, because `senderInfo.kind` is an open string.
-- Shared files are named per task. Onboarding Tasks 1, 2, 4, 6, 7, 9, and 11 are the overlap set. Deferred Task 4, Task 5b, and Task 6 wait on onboarding Task 9. No migration number is reserved. No virtual bucket is implemented.
-- No sample token, redeem code, cookie, or tenant id. One-off grant expiry is the invite lifetime. The 24-hour and 7-day bounds are the ones CoS already recorded.
+- D1–D8 are recorded on 2026-11-06. Amendments 1–6 are in the tasks. The Q1 ruling (`msg_01M6QZHT65EJH8195GG0NJYC5T`), the invite-flow ruling (`msg_01M6QZNG1SWQHXFQTS07PMZ76Z`), and the Q5 ruling (`msg_01M6R1CPX0Y6R6DRS0VE0ZT632`) are in "CoS's record". Q5 is in D3, amendment 1, Task 3, and Task 6a.
+- Questions 1–3 and the invite-flow note are pasted verbatim. Question 4 is skipped. Question 5 is pasted verbatim with its ruling. Questions 6–10 stay blank and are asked one at a time. A conflicting answer is flagged to CoS before a task changes. This docs merge does not wait on Max. Nothing is built until the answers that block that task are in. Tasks 1–3 then wait for the DB build. Task 4 stays deferred. Tasks 5, 5b, 6, 6a, 8, and 7 follow the dependency map. Task 6a follows Tasks 1–3 and onboarding Task 9, and it does not block Task 9. Task 6 does not merge until CoS confirms the MCP exception. Sub-agent links, session-query, and peer-cleanup stay in "Backlog / deferred".
+- Guest kind, directory filtering, thread-scoped history, team-scoped directory hiding, and moving operator powers are marked as protocol changes. The Access step is not an envelope field. Envelope peer-kind enum is not claimed, because `senderInfo.kind` is an open string.
+- Shared files are named per task. Onboarding Tasks 1, 2, 4, 6, 7, 9, and 11 are the overlap set. Deferred Task 4, Task 5b, Task 6, and Task 6a wait on onboarding Task 9. Onboarding Task 9 does not wait on Task 6a. No migration number is reserved. No virtual bucket is implemented.
+- No sample token, redeem code, cookie, or tenant id. One-off grant expiry is the invite lifetime. The 24-hour and 7-day bounds are the ones CoS already recorded. The Access-step hint is the one line Q5 named.
