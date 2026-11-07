@@ -68,3 +68,17 @@ boolean presence flag. This branch has no `clamp_rewrites`/`original_value`
 builder. Validation error data contains only the path and omits original
 values entirely, including scalars. Regression tests guard against composite
 echoes and ensure nested application metadata is preserved.
+
+Round four integrates the three operator-only lifecycle and invite tools added
+by master. The merged catalog measures **21,255 bytes**, including lifecycle
+634, invite_get 468 and invite_revoke 495 bytes. Each new tool has its own 15%
+allowance; the merged total retains a 10% allowance. The original 23 per-tool
+pins and validation fixture remain frozen. A separate fixture captures the
+three additions' pre-projection call schemas from unprojected master, with
+provenance in `testdata/validation-master-additions.README.md`. Wire tests check
+that shape failures precede authority, authority precedes semantic values, and
+the operator's lifecycle action check precedes target lookup.
+
+Every registered tool must have a nonempty projection description in the catalog
+test. If a future addition misses one in production, discovery safely falls back
+to its full original entry, without making tools/list or tools/call panic.

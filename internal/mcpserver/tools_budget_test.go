@@ -30,9 +30,9 @@ func TestToolsBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("tools/list: %d bytes", len(compact))
-	// Round three adds paging bounds and cursor/timestamp wording. Freeze
-	// only the measured growth; retain the existing regression allowances.
-	const achievedTotal = 19655
+	// Round four integrates master's three added peer tools. Keep the original
+	// 23 per-tool pins and freeze the measured merged catalog independently.
+	const achievedTotal = 21255
 	if budget := achievedTotal * 110 / 100; len(compact) > budget {
 		t.Errorf("tools/list: %d bytes exceeds budget %d (achieved %d + 10%%)", len(compact), budget, achievedTotal)
 	}
@@ -47,6 +47,11 @@ func TestToolsBudget(t *testing.T) {
 		"vecnet_group_create": 627, "vecnet_group_add": 613, "vecnet_whoami": 726,
 		"vecnet_blob_put": 873, "vecnet_blob_get": 1340, "vecnet_set_avatar": 670,
 		"vecnet_clear_avatar": 459, "vecnet_guide": 1534,
+		"vecnet_peer_lifecycle": 634, "vecnet_peer_invite_get": 468,
+		"vecnet_peer_invite_revoke": 495,
+	}
+	if len(result.Tools) != len(achieved) {
+		t.Errorf("tool budget coverage: listed=%d pinned=%d", len(result.Tools), len(achieved))
 	}
 	for _, raw := range result.Tools {
 		var entry struct {

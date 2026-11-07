@@ -28,6 +28,22 @@ func TestProjectionCallValidationEquivalent(t *testing.T) {
 	if err := json.Unmarshal(raw, &before); err != nil {
 		t.Fatal(err)
 	}
+	// Keep the original 23-tool fixture frozen. Master's additions were
+	// independently captured from unprojected 6a3a17e (see testdata README).
+	raw, err = os.ReadFile("testdata/validation-master-additions.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var additions map[string]schema
+	if err := json.Unmarshal(raw, &additions); err != nil {
+		t.Fatal(err)
+	}
+	for name, doc := range additions {
+		if _, exists := before[name]; exists {
+			t.Fatalf("master fixture overwrites frozen baseline for %s", name)
+		}
+		before[name] = doc
+	}
 	const peer = "peer_00000000000000000000000001"
 	const message = "msg_00000000000000000000000001"
 	const thread = "thr_00000000000000000000000001"
@@ -72,6 +88,13 @@ func TestProjectionCallValidationEquivalent(t *testing.T) {
 		"vecnet_peers":              {[]string{`{}`}, []string{`{"as":"` + peer + `"}`}},
 		"vecnet_peer_create":        {[]string{`{"kind":"session","name":"peer","idempotency_key":"new-1"}`, `{"kind":"unknown","name":"","idempotency_key":"bad key"}`}, []string{`{"kind":1,"name":"peer","idempotency_key":"new-1"}`}},
 		"vecnet_peer_set_disabled":  {[]string{`{"peer_id":"` + peer + `","disabled":true}`, `{"peer_id":"bad","disabled":false}`}, []string{`{"peer_id":"` + peer + `","disabled":"true"}`}},
+		"vecnet_peer_lifecycle": {[]string{
+			`{"peer_id":"` + peer + `","action":"disable"}`, `{"peer_id":"` + peer + `","action":"enable"}`,
+			`{"peer_id":"` + peer + `","action":"archive"}`, `{"peer_id":"` + peer + `","action":"unarchive"}`,
+			`{"peer_id":"bad","action":"unknown"}`,
+		}, []string{`{"peer_id":1,"action":"disable"}`, `{"peer_id":"` + peer + `","action":false}`, `{"peer_id":"` + peer + `","action":"disable","unexpected":true}`}},
+		"vecnet_peer_invite_get":    {[]string{`{"peer_id":"` + peer + `"}`, `{"peer_id":"bad"}`}, []string{`{"peer_id":1}`, `{"peer_id":"` + peer + `","unexpected":true}`}},
+		"vecnet_peer_invite_revoke": {[]string{`{"peer_id":"` + peer + `"}`, `{"peer_id":"bad"}`}, []string{`{"peer_id":null}`, `{"peer_id":"` + peer + `","unexpected":true}`}},
 		"vecnet_groups":             {[]string{`{}`}, []string{`{"limit":1}`}},
 		"vecnet_group_create":       {[]string{`{"members":["` + peer + `"]}`}, []string{`{"members":[]}`, `{"members":["bad"]}`}},
 		"vecnet_group_add":          {[]string{`{"group_id":"` + group + `","members":["` + peer + `"]}`}, []string{`{"group_id":"` + group + `","members":[]}`}},
