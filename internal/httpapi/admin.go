@@ -36,6 +36,8 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/peers/{id}/move", s.adminMovePeer)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/rotate", s.adminRotatePeer)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/enrol-token", s.adminReissueEnrol)
+	mux.HandleFunc("GET /v1/admin/peers/{id}/enrol-token", s.adminInviteStatus)
+	mux.HandleFunc("DELETE /v1/admin/peers/{id}/enrol-token", s.adminRevokeEnrol)
 	mux.HandleFunc("PUT /v1/admin/peers/{id}/scopes", s.adminSetScopes)
 	mux.HandleFunc("PUT /v1/admin/peers/{id}/limits", s.adminSetLimits)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/disable", s.adminDisable(true))
@@ -43,6 +45,9 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/agent-kinds", s.adminAgentKinds)
 	mux.HandleFunc("POST /v1/admin/agents", s.adminOnboardAgent)
 	mux.HandleFunc("GET /v1/admin/agents/onboarding/{request_id}", s.adminOnboardingStatus)
+	mux.HandleFunc("POST /v1/admin/peers/{id}/archive", s.adminArchive(true))
+	mux.HandleFunc("POST /v1/admin/peers/{id}/unarchive", s.adminArchive(false))
+	mux.HandleFunc("PATCH /v1/admin/peers/{id}", s.adminRenamePeer)
 	mux.HandleFunc("POST /v1/admin/sources", s.adminAddSource)
 	mux.HandleFunc("GET /v1/admin/sources", s.adminListSources)
 	mux.HandleFunc("POST /v1/admin/sources/{id}/disable", s.adminDisableSource)
@@ -296,14 +301,59 @@ func (s *server) adminSetLimits(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// adminRenamePeer is PATCH /v1/admin/peers/{id} {"name"}: 204. The peer id
+// is unchanged. An empty name, a bad shape, a reserved name and a name that
+// reads as another peer's are the hub's existing name errors; the current
+// name is a no-op.
+func (s *server) adminRenamePeer(w http.ResponseWriter, r *http.Request) {
+	top, err := readObject(r, []string{"name"}, []string{"name"})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	name, err := stringField(top, "name")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.Hub.RenamePeer(r.Context(), r.PathValue("id"), name); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // adminDisable is POST /v1/admin/peers/{id}/disable (or /enable): 204.
 func (s *server) adminDisable(disabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if err := hub.RequirePeerLifecycle(callerFrom(r.Context())); err != nil {
+			writeError(w, err)
+			return
+		}
 		if err := readNoBody(r); err != nil {
 			writeError(w, err)
 			return
 		}
 		if err := s.Hub.SetPeerDisabled(r.Context(), r.PathValue("id"), disabled); err != nil {
+			writeError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// adminArchive is POST /v1/admin/peers/{id}/archive (or /unarchive): 204.
+func (s *server) adminArchive(archived bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := hub.RequirePeerLifecycle(callerFrom(r.Context())); err != nil {
+			writeError(w, err)
+			return
+		}
+		if err := readNoBody(r); err != nil {
+			writeError(w, err)
+			return
+		}
+		if err := s.Hub.SetPeerArchived(r.Context(), r.PathValue("id"), archived); err != nil {
 			writeError(w, err)
 			return
 		}

@@ -1,6 +1,9 @@
 // Task 9: the thread view — reply links, spilled text, receipts, inline
 // approvals, the composer's idempotency key and budget banner, in a real browser.
-import { assert, cleanBuild, withDemo } from './lib.mjs';
+// Reading is per message (CoS unread ruling; thread-unread.mjs covers it in
+// full): the thread opens at its first unread under New and each message is
+// read by its own receipt, never by marking the whole thread.
+import { assert, cleanBuild, readThrough, withDemo } from './lib.mjs';
 
 try {
   await withDemo({}, async ctx => {
@@ -21,7 +24,9 @@ try {
       return r.status === 204 ? null : r.json();
     };
     const unreadIn = async thread => (await api('GET', '/v1/admin/inbox?unread=1&limit=200')).deliveries.filter(d => d.thread_id === thread).length;
-    const isRead = req => req.method() === 'POST' && req.url().endsWith(`/v1/admin/threads/${hark}/read`);
+    // isRead is the retired mark-all route: the view must never post it.
+    const isRead = req => req.method() === 'POST' && /\/v1\/admin\/threads\/[^/]+\/read$/.test(new URL(req.url()).pathname);
+    const isReceipt = req => req.method() === 'POST' && new URL(req.url()).pathname === '/v1/receipts';
     const msgEl = id => page.locator(`[id="m-${id}"]`);
     const comp = page.locator('.composer');
     const selected = () => comp.locator('.seg button.on').getAttribute('value');
@@ -88,19 +93,18 @@ try {
     await page.locator('#threads a', { hasText: 'hark B196' }).waitFor();
     await page.locator('#conn.live').waitFor();
 
-    // opening a thread clears its unread count via one POST
+    // Opening lands on the first unread under New; reading the thread through
+    // clears its count with one read receipt per unread message.
     const before = await unreadIn(hark);
     assert(before > 0, 'the seeded hark thread has no unread deliveries');
     const totalBefore = (await api('GET', '/v1/admin/inbox?limit=1')).unread;
     await page.locator('#inbox-count', { hasText: String(totalBefore) }).waitFor();
-    const readDone = page.waitForResponse(r => isRead(r.request()));
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, hark);
-    const readReply = await readDone;
-    assert(readReply.ok(), `read POST answered ${readReply.status()}`);
-    // marked also counts the open approval's delivery, which the inbox lists apart.
-    assert((await readReply.json()).marked >= before, 'read POST did not mark every unread hark delivery');
-    assert(await unreadIn(hark) === 0, 'hark still has unread deliveries after opening it');
+    await page.locator('#view .newdiv').waitFor();
+    await readThrough(page, () => unreadIn(hark));
     await page.locator('#inbox-count', { hasText: totalBefore - before ? String(totalBefore - before) : /^$/ }).waitFor();
+    // One receipt per message the inbox called unread: the view and the inbox agree.
+    assert(countRequests(isReceipt) === before, `reading hark sent ${countRequests(isReceipt)} receipts for ${before} unread`);
 
     // The view as a-chat.png shows it: history to the bottom, receipts, the open approval.
     const approval = page.locator('.apr.act', { hasText: 'Push classifier fix to hark master and release?' });
@@ -114,7 +118,7 @@ try {
     // The composer and the column fill the space up to the 980 px measure.
     const col = await page.locator('#view').boundingBox();
     assert(col.width > 760, `reading column is only ${col.width}px`);
-    assert(countRequests(isRead) === 1, `opening the thread sent ${countRequests(isRead)} read POSTs`);
+    assert(countRequests(isRead) === 0, `opening the thread sent ${countRequests(isRead)} mark-all POSTs`);
     // hark includes grok-reviewer, so the reply composer preselects wake_idle.
     assert(await selected() === 'wake_idle', 'a thread with a grokbot participant did not preselect wake_idle');
     await note.waitFor();
@@ -130,14 +134,18 @@ try {
     await page.evaluate(() => { window.__noReload = true; });
     const first = (await api('GET', `/v1/threads/${hark}/messages?limit=1`)).messages[0];
     const live = 'Found it: the finalize call is skipped after over.';
-    const readAgain = page.waitForResponse(r => isRead(r.request()) && r.ok());
+    let liveDly = null;
+    const readAgain = page.waitForResponse(r => isReceipt(r.request()) && r.ok() && r.request().postDataJSON().delivery_id === liveDly);
     const sentLive = await api('POST', '/v1/messages', { idempotency_key: 'thread-live', thread_id: hark, in_reply_to: first.message_id, priority: 'wake', content: { text: live } }, 'sleuth');
+    liveDly = sentLive.deliveries.find(d => d.recipient === demo.operator_peer).delivery_id;
     await page.locator('.msg .txt', { hasText: live }).waitFor();
     assert(await page.evaluate(() => window.__noReload === true), 'the page reloaded to show the delivery');
-    // It is a new delivery while the tab is visible, so the thread is read again.
+    // It lands at the bottom the operator is watching, so it is read once seen.
     await readAgain;
-    assert(countRequests(isRead) === 2, `the live delivery led to ${countRequests(isRead) - 1} read POSTs`);
-    assert(await unreadIn(hark) === 0, 'the live delivery stayed unread while the thread was open');
+    assert(countRequests(isRead) === 0, `the live delivery led to ${countRequests(isRead)} mark-all POSTs`);
+    for (const deadline = Date.now() + 15000; await unreadIn(hark) !== 0; await page.waitForTimeout(100)) {
+      assert(Date.now() < deadline, 'the live delivery stayed unread while the thread was open');
+    }
 
     // reply link jumps to parent
     assert(!(await inView(first.message_id)), 'the first message was already on screen');
@@ -234,15 +242,13 @@ try {
     await shot('09-thread-success');
 
     // The quota thread's budget is exhausted: a banner names it, the text stays.
-    const quotaRead = page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith(`/v1/admin/threads/${quota}/read`));
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, quota);
     await page.locator('.msg .txt', { hasText: 'exhausted its message budget' }).waitFor();
     // quota's sender is a grokbot, so the reply preselects wake_idle here too.
     assert(await selected() === 'wake_idle', 'the quota thread, which a grokbot is in, kept wake');
     await note.waitFor();
-    // Opening marks it read: the receipt moves from accepted to read once the
-    // POST lands and the matrix reloads.
-    assert((await quotaRead).ok(), 'the quota thread read POST failed');
+    // Its one message is on screen, so it is read a second later: the receipt
+    // moves from accepted to read once the receipt lands and the matrix reloads.
     await page.locator('.msg .rc .st-read', { hasText: 'max read' }).waitFor();
     // The snapshot already says the budget is spent: the banner shows before a send.
     await page.locator('.composer .cbanner.budget', { hasText: 'you raise the budget' }).waitFor();
@@ -465,6 +471,7 @@ try {
     await noteFits('explicit wake at 390');
     await shot('t10-thread-narrow');
     await page.setViewportSize({ width: 1440, height: 900 });
+    assert(countRequests(isRead) === 0, 'the thread view posted mark-all');
   });
-  console.log('Thread passed: read POST, receipts, live delivery, reply jump, literal full text, held retry key, budget banner, inline approvals, join notice, grokbot wake_idle preselect stays sticky');
+  console.log('Thread passed: opens at New and reads by receipt, receipts, live delivery, reply jump, literal full text, held retry key, budget banner, inline approvals, join notice, grokbot wake_idle preselect stays sticky');
 } finally { await cleanBuild(); }

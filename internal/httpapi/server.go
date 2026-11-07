@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/buildinfo"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/mcpserver"
 	"github.com/XertroV/vecnet/internal/oauth"
@@ -109,7 +110,10 @@ func New(d Deps) http.Handler {
 	s := &server{Deps: d, op: opview.New(d.Hub)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		writeJSON(w, http.StatusOK, struct {
+			OK bool `json:"ok"`
+			buildinfo.Info
+		}{OK: true, Info: buildinfo.Current()})
 	})
 	s.routes(mux)
 	uiHandler := ui.Handler(d.UIDir) // operator inbox; public (isPublic)
@@ -118,7 +122,8 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, hub.E(http.StatusNotFound, "not_found", "no such endpoint"))
 	})
-	h := throttle(d.Limiter, d.TrustFlyClientIP, limitBody(authenticate(d.Hub.Auth, d.Hub.TouchReachability, d.Limiter, d.TrustFlyClientIP, mux)))
+	authed := authenticate(d.Hub.Auth, d.Hub.TouchReachability, d.Limiter, d.TrustFlyClientIP, mux)
+	h := throttle(d.Limiter, d.TrustFlyClientIP, limitBody(redirectBrowserRoot(authed)))
 	h = mcpserver.ObserveHTTP(oauth.ObserveHTTP(h))
 	if strings.HasPrefix(d.Hub.Cfg.PublicURL, "https://") {
 		h = hsts(h)

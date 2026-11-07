@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubid"
 )
 
 // requestTimeout bounds one ordinary request; uploads and streams set their
@@ -27,8 +28,13 @@ func (e *usageError) Error() string { return e.msg }
 func usageErr(msg string) error { return &usageError{msg: msg} }
 
 // refusedError is a refusal the CLI makes itself, before contacting the
-// hub: exit 2 like a hub refusal, printed as "vecnet: msg".
-type refusedError struct{ msg string }
+// hub. The default mapping is exit 2, printed as "vecnet: msg". Preferences
+// commands classify it as a confirmation refusal and may set code and details.
+type refusedError struct {
+	msg     string
+	code    string
+	details map[string]any
+}
 
 func (e *refusedError) Error() string { return e.msg }
 
@@ -47,7 +53,14 @@ func (e *hubError) Error() string { return e.Code + ": " + e.Message }
 // netError is a transport failure talking to the hub: exit 3.
 type netError struct{ err error }
 
-func (e *netError) Error() string { return "network: " + e.err.Error() }
+func (e *netError) Error() string {
+	if e == nil || e.err == nil {
+		return "network: unreachable"
+	}
+	// Unwrap keeps dial, TLS and timeout classification. The hub URL was
+	// checked before the client was built, so the request URL is safe to show.
+	return "network: " + e.err.Error()
+}
 func (e *netError) Unwrap() error { return e.err }
 
 // client talks HTTP to one hub with one bearer.
@@ -92,9 +105,13 @@ func (c *client) newRequest(ctx context.Context, method, path string, q url.Valu
 		}
 		r, ct, length = bytes.NewReader(j), "application/json", int64(len(j))
 	}
+	if err := hubid.CheckHubURL(c.base); err != nil && !errors.Is(err, hubid.ErrPlainHTTP) {
+		return nil, usageErr(err.Error())
+	}
 	req, err := http.NewRequestWithContext(ctx, method, u, r)
 	if err != nil {
-		return nil, usageErr("bad hub URL " + c.base + ": " + err.Error())
+		// A URL that failed to build is not printed.
+		return nil, usageErr(hubid.ErrHubForm.Error())
 	}
 	if length >= 0 {
 		req.ContentLength = length

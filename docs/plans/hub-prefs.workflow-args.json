@@ -1,5 +1,5 @@
 {
-  "_notes": "Slice 1 of the hub-preferences plan (build order step 1: prefs Tasks 1 -> 2 -> 4). vecnet-core-build.workflow.mjs only runs a contiguous startTask..endTask range and has no skipTasks support, so this slice is startTask 1, endTask 2. Task 4 runs as the NEXT slice (startTask 4, endTask 4, new runStamp e.g. 20261105T??-hub-prefs-t4) on the same worktree/branch once Tasks 1-2 are merged into prefs-build; deps outside the range count as merged, so Task 4 needs only Task 2. Caveat: preflight check 4 requires a 'Plan-Task: 03' commit reachable from HEAD before a startTask=4 run; trailer numbers repeat across plans and master already carries older 'Plan-Task: 03' commits, so the check passes vacuously and does not prove prefs Task 3 ran (that is acceptable here: Task 4 must not wait for Task 3). Task 3 core (runtime/presence adapters) is a later slice (startTask 3, endTask 3) that needs a core-only scope override; its DB/R2 adapter parts and Tasks 5-8 are later slices still. Before ANY run: the plan and build-order docs live only on branch plans-1105 (not yet on master), and the workflow reads ${worktree}/docs/plans/2026-11-05-hub-preferences.md, so merge plans-1105 into master (or base prefs-build on it) first. mergeChecks/gateChecks below are for the backend slices (Tasks 1-4); fields starting with '_' are ignored by the script and only record what later slices should change.",
+  "_notes": "Slice 1 of the hub-preferences plan (build order step 1: prefs Tasks 1 -> 2 -> 4). vecnet-core-build.workflow.mjs only runs a contiguous startTask..endTask range and has no skipTasks support, so this slice is startTask 1, endTask 2. Task 4 runs as the NEXT slice (startTask 4, endTask 4, new runStamp e.g. 20261105T??-hub-prefs-t4) on the same worktree/branch once Tasks 1-2 are merged into prefs-build; deps outside the range count as merged, so Task 4 needs only Task 2. Caveat: preflight check 4 requires a 'Plan-Task: 03' commit reachable from HEAD before a startTask=4 run; trailer numbers repeat across plans and master already carries older 'Plan-Task: 03' commits, so the check passes vacuously and does not prove prefs Task 3 ran (that is acceptable here: Task 4 must not wait for Task 3). Task 3 core (runtime/presence adapters) is a later slice (startTask 3, endTask 3) that needs a core-only scope override; its DB/R2 adapter parts and Tasks 5-8 are later slices still. Before ANY run: the plan and build-order docs live only on branch plans-1105 (not yet on master), and the workflow reads ${worktree}/docs/plans/2026-11-05-hub-preferences.md, so merge plans-1105 into master (or base prefs-build on it) first. mergeChecks/gateChecks below are for the backend slices (Tasks 1-4); fields starting with '_' are ignored by the script and only record what later slices should change. | Slice 3 (coordinator, 2026-11-05 22:10): Task 3 CORE only on master 8501b24 (prefs T1/2/4 + hub-notices merged; migration 0022).",
   "_laterSlices": {
     "task3_core": "Run startTask 3, endTask 3 only with an extraRules line restricting it to runtime/presence/request-default/rate/provisioning adapters; DB/R2 adapter slices of Task 3 follow their companion consumers. The workflow cannot split one task: a Plan-Task: 03 commit makes a later Task 3 run return already_done, so the DB/R2 adapter work needs either explicit Plan-Task trailers per slice (coordinator decision) or a hand-driven slice.",
     "ui_slices_tasks_6_7": "Add back to mergeChecks: `just bb build2 node --test --test-concurrency=2 internal/ui/jstest/` and `just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-prefs/merge-shots just ui-shots`. Add to gateChecks: the jstest command, `just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-prefs/gate-shots just ui-shots` exits 0, and 'Every PNG listed in docs/plans/shots/oui/README.md exists, and every PNG in that directory is listed'. Drop the backend-only 'no internal/ui/ or scripts/ui/ changes' gate check.",
@@ -12,17 +12,17 @@
       }
     ]
   },
-  "runStamp": "20261105T15-hub-prefs",
+  "runStamp": "20261106T01-hub-prefs-t3-final",
   "maxFixRounds": 3,
   "planName": "hub-prefs",
   "plan": "docs/plans/2026-11-05-hub-preferences.md",
   "worktree": "/home/xertrov/src/vecnet4/.worktrees/prefs-build",
   "branch": "prefs-build",
-  "baseRef": "master",
+  "baseRef": "d88aa7c",
   "statusDir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-prefs",
   "taskPrefix": "pf",
-  "startTask": 1,
-  "endTask": 2,
+  "startTask": 3,
+  "endTask": 3,
   "finalReview": true,
   "openBrowser": false,
   "solRelay": {
@@ -43,7 +43,10 @@
     "No new Go or JS dependencies. internal/prefs imports the standard library only (database/sql is fine for the narrow reader interface). internal/prefs, internal/opapi, internal/opclient and internal/cli must stay SQLite-free: `go list -deps ./cmd/vecnet` never gains modernc.org/sqlite or internal/store.",
     "The companion plans (db-compaction, r2-blobs, admin-parity) are plans, not code: read them with `git show plan-db-compaction:docs/plans/2026-11-05-db-compaction.md` etc. only where your task cites them, and never implement their work. Build only against merged code on your base.",
     "Branch hub-notices also edits internal/hub/hub.go, cmd/vecnet-hub/main.go, internal/opapi/types.go, internal/httpapi/admin.go and internal/store/migrations/. Keep prefs edits to those files small and additive so a later rebase or merge stays mechanical.",
-    "Never log, audit, print or put in a URL a preview/confirmation token, credential, signed URL or raw rejected request value. audit.Record refuses detail keys text, body, secret and token at any depth, so never name an audit detail key after those."
+    "Never log, audit, print or put in a URL a preview/confirmation token, credential, signed URL or raw rejected request value. audit.Record refuses detail keys text, body, secret and token at any depth, so never name an audit detail key after those.",
+    "Task 3 in this run is the CORE slice only (coordinator decision): install the runtime/presence/request-default/rate/provisioning consumers and preferences_runtime.go per plan Task 3 Steps 1 and 4-onwards. Do NOT implement the DB retention adapter (Task 3 Step 2) or the R2 blob-expiry adapter (Task 3 Step 3); their keys must stay prefs_unavailable (TestPreferencesUninstalledConsumersStayUnavailable keeps covering them). Those adapter slices follow after db-compaction and r2-blobs merge, as hand-driven work with their own trailers. Carry the branch-review findings tests-2 (runtime consumer publication/cancellation acceptance) as a requirement of this slice.",
+    "Master's TestSlowSSEConsumerDoesNotBlockSend is canonical (coordinator decision): per-send 5s watchdog + interleaved no-stream relative check + 30s ceiling. Do not change it.",
+    "Task 3 core is complete on the branch (coordinator hand-fix f652897 merged with Plan-Task: 03 after the round-3 halt); expect already_done and proceed to whole-branch review and the final gate. DB/R2 adapters remain out of scope."
   ],
   "mergeChecks": [
     "just bb just validate-protocol",

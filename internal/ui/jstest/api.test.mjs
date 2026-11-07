@@ -124,6 +124,7 @@ test('every method calls its route with the secret only in the header', async ()
     [() => api.messages('thr_1', { after: 'msg_1', limit: 200 }), 'GET', '/v1/threads/thr_1/messages?after=msg_1&limit=200'],
     [() => api.matrix('thr_1', { after: 'msg_1', limit: 10 }), 'GET', '/v1/admin/threads/thr_1/deliveries?after=msg_1&limit=10'],
     [() => api.readThread('thr_1'), 'POST', '/v1/admin/threads/thr_1/read'],
+    [() => api.receipt('dly_1', 'read'), 'POST', '/v1/receipts'],
     [() => api.events({ wait: 0 }), 'GET', '/v1/events?wait=0'],
     [() => api.events({ after: 'e1.2', wait: 25 }), 'GET', '/v1/events?after=e1.2&wait=25'],
     [() => api.ack('e1.2'), 'POST', '/v1/ack'],
@@ -162,6 +163,9 @@ test('send carries the operator_ui ingress mark; presence posts state and at', a
   assert.deepEqual(JSON.parse(calls[0].init.body), { idempotency_key: 'k', content: { text: 'hi' } });
   await api.presence('working', '2026-11-02T00:00:00.000Z');
   assert.deepEqual(JSON.parse(calls[1].init.body), { state: 'working', at: '2026-11-02T00:00:00.000Z' });
+  await api.receipt('dly_1', 'read');
+  assert.deepEqual(JSON.parse(calls[2].init.body), { delivery_id: 'dly_1', state: 'read' });
+  assert.equal(calls[2].init.headers['Content-Type'], 'application/json');
 });
 
 test('POST with no request body sends no body and no Content-Type', async () => {

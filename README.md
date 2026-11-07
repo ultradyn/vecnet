@@ -16,6 +16,8 @@ Specified, with the Phase 1 core hub and CLI built (see Running) and the Grok Bo
 
 ## Running
 
+Install the prebuilt CLI and hub with `npm install -g vecnet` (Node.js 20+, Linux on x64/ARM64), then run `vecnet help`. See the [npm guide](npm/README.md) for connecting an agent or starting a local hub.
+
 Go 1.26+, no cgo. On xsm, builds and tests go through `build2` (two threads).
 
 ```sh
@@ -24,6 +26,8 @@ just test                  # build2 go test -p 2 ./...
 just hub-init              # create the dev hub's operator in .data/; prints the secret once
 just run                   # dev hub on http://127.0.0.1:45752, operator UI at /ui/
 ```
+
+For npm releases, run `just release X.Y.Z` from a clean `master` checkout, or commit a version bump in `npm/package.json` and push its matching `vX.Y.Z` tag to the `gh` remote. [Release CI](.github/workflows/release.yml) tests Go, builds both Linux architectures, checks the same tarball on x64 and native ARM64, and publishes it to npm through OIDC. See [RELEASING.md](RELEASING.md) for setup, prereleases, and recovery. `just npm-pack` and `just npm-check` provide the local package gate.
 
 Point the CLI at the dev hub with a profile in `~/.config/vecnet/config.toml` (`hub = "http://127.0.0.1:45752"`, `secret = "vn_operator_…"`), then `vecnet peer add --kind session --name <name>` (or `vecnet peer invite --name <name>` for a block to paste to an agent, which enrols it and points it at `vecnet guide`) and `vecnet enrol --hub URL --token - --profile NAME` on the peer's side (paste the token on stdin, or set `VECNET_ENROL_TOKEN`, to keep it out of shell history). `vecnet help` lists every command.
 

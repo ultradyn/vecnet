@@ -72,6 +72,29 @@ Task 23 runs both clients against one disposable hub. Its assertions verify cros
 - [23-journey-progress.png](23-journey-progress.png) — Approval option prompt in the real TUI.
 - [23-journey-success.png](23-journey-success.png) — Hub-authored expired approval shown in the web thread.
 
+TUI colour theme screens come from `scripts/ui/tui-color.mjs` ([design](../../../design/tui-color.md), §10.3). Every TUI shot uses the semantic theme; these add the screens 17–22 leave out and the other colour rungs. Focused panes are heavy-bordered, and fills are only the header bar, chips and selections.
+
+- [tc01-tui-inbox.png](tc01-tui-inbox.png) — Inbox in the default theme (truecolor, dark): approval and DLQ rows, detail, event log.
+- [tc01-tui-inbox-nocolor.png](tc01-tui-inbox-nocolor.png) — Inbox under `NO_COLOR=1`: bold, reverse, heavy border and `>` only.
+- [tc01-tui-inbox-ansi16.png](tc01-tui-inbox-ansi16.png) — Inbox in 16 colours (`TERM=xterm`): ANSI 1–6, faint, reverse fills.
+- [tc01-tui-inbox-256.png](tc01-tui-inbox-256.png) — Inbox in 256 colours (`TERM=xterm-256color`, no `COLORTERM`).
+- [tc01-tui-inbox-light.png](tc01-tui-inbox-light.png) — Inbox with the light set (`VECNET_TUI_BG=light`) on a white terminal.
+- [tc02-tui-chat.png](tc02-tui-chat.png) — Chat in the default theme: both sidebar groups, a selected message, identity hues.
+- [tc02-tui-chat-nocolor.png](tc02-tui-chat-nocolor.png) — Chat under `NO_COLOR=1`.
+- [tc02-tui-chat-ansi16.png](tc02-tui-chat-ansi16.png) — Chat in 16 colours.
+- [tc02-tui-chat-256.png](tc02-tui-chat-256.png) — Chat in 256 colours.
+- [tc02-tui-chat-light.png](tc02-tui-chat-light.png) — Chat with the light set on a white terminal.
+- [tc03-tui-bars-insert.png](tc03-tui-bars-insert.png) — INSERT chip and the composer while typing.
+- [tc03-tui-bars-command.png](tc03-tui-bars-command.png) — COMMAND chip and the command being typed.
+- [tc03-tui-bars-toast-ok.png](tc03-tui-bars-toast-ok.png) — An ok toast in success.
+- [tc03-tui-bars-toast-error.png](tc03-tui-bars-toast-error.png) — An error toast in error.
+- [tc04-tui-help.png](tc04-tui-help.png) — Help, a full-screen pane and so focused.
+- [tc05-tui-prefs.png](tc05-tui-prefs.png) — Preferences: bold group labels, the selected row filled, source and state roles.
+- [tc05-tui-prefs-error.png](tc05-tui-prefs-error.png) — Preferences after a failed load.
+- [tc06-tui-header-notice.png](tc06-tui-header-notice.png) — A moving notice under the header of a loopback (`local`) hub.
+- [tc07-tui-picker.png](tc07-tui-picker.png) — The operator picker: brand chip, filled selection, `local` in warn.
+- [tc07-tui-picker-confirm.png](tc07-tui-picker-confirm.png) — The picker's confirm step: `y` and `n` are actions, neither a warning.
+
 Attachment screens cover web compose, thread replies and inline images, and the TUI composer. `scripts/ui/att-journey.mjs` checks both clients against one hub without taking screenshots. See [Attachments](../../../OPERATOR.md#attachments).
 
 - [att03-compose-initial.png](att03-compose-initial.png) — New message with an uploaded file and draft text.
@@ -137,15 +160,45 @@ Sidebar unread screens come from `scripts/ui/sidebar-unread.mjs`. Each Your Thre
 - [sb-unread-narrow.png](sb-unread-narrow.png) — 1000 px, where the sidebar narrows to 220 px: titles ellipsize and the pills keep their place.
 - [sb-unread-phone.png](sb-unread-phone.png) — 390 px, one column: Your Threads at full width with the long title, the pills, the zero rows, and an Other Threads row with no pill.
 
+Thread unread screens come from `scripts/ui/thread-unread.mjs` (CoS unread ruling). A thread opens at the operator's first unread message under a New divider in the unread tint, not at the bottom; each unread message has a thin amber bar until it is seen. A message is read on its own, by one read receipt for its delivery (batched over 500 ms), once 60% of it has been on screen for a second or it is scrolled past going down, and only while the page is visible and focused. Opening never marks the whole thread read. The fixture is a fourteen-message thread whose first eight the operator read earlier.
+
+- [tu-open.png](tu-open.png) — Opened (unfocused, so nothing is read yet) with six unread: New sits near the top above the first unread, the end of what was read above it; the sidebar pill reads 6.
+- [tu-open-phone.png](tu-open-phone.png) — The same opening at 390 px, where the page scrolls: New at the top.
+- [tu-partial.png](tu-partial.png) — Focused, then scrolled 260 px: what was on screen for a second or scrolled past reads `max read`, the last messages below are still unread, and the pill reads 2.
+- [tu-live.png](tu-live.png) — An arrival while the window was unfocused: unread until seen, New moved above it (the old New was all read), the pill reads 1. An arrival watched at the bottom is read as it lands and keeps New where it was.
+- [tu-none.png](tu-none.png) — Nothing unread: the thread opens at the bottom, as before, with no New.
+
 Peer detail screens come from `scripts/ui/peer.mjs`. A peer name anywhere in the UI (dashboard rows, thread senders and recipients, the thread aside, inbox cards and rows, the sidebar's participants line, subscriptions) opens `#peer/<id>`: everything the operator views already say about that peer, read-only, each section loading and failing on its own. Ids show short (`peer_…X6Z8B`) but keep the whole id in their text, so selecting and copying never yields the `…`; a copy button appears on hover or keyboard focus. The script also checks the copy under plain http (no Clipboard API), an unknown id, and peer links from the thread, its aside, the inbox and the sidebar.
 
 - [pv-dash-hover.png](pv-dash-hover.png) — Dashboard peers: names are links; the hovered row shows its copy button beside the short id.
-- [pv-progress.png](pv-progress.png) — A peer opened from the dashboard while principals, routes and threads are still loading; the rest has drawn.
-- [pv-success.png](pv-success.png) — codex-hark: full id with its copy button, identity, presence with last heartbeat, scopes as peer links, send limits, its principal.
+- [pv-progress.png](pv-progress.png) — A peer opened from the dashboard while principals, routes and threads are still loading; the rest has drawn, and the quick link waits (checking…) beside New message.
+- [pv-success.png](pv-success.png) — codex-hark: Open thread and New message beside the name, full id with its copy button, identity, presence with last heartbeat, scopes as peer links, send limits, its principal.
 - [pv-routes.png](pv-routes.png) — grok-triage: its own push route, blocked and failed deliveries, recent threads with linked participants.
 - [pv-disabled.png](pv-disabled.png) — A disabled peer: dimmed name, disabled chip and note, status disabled.
 - [pv-hostile.png](pv-hostile.png) — The hostile peer's name stays literal text with controls and bidi overrides stripped, in the header and its principal.
 - [pv-error.png](pv-error.png) — The routes read fails: that section shows its error while every other section renders.
+
+Peer message actions come from `scripts/ui/peer-actions.mjs`. Beside a peer's name, the quick link opens the operator's newest-activity thread with that peer (from the peer's `GET /v1/admin/threads?participant=` page), or New message prefilled to the peer when they share none; New message is always beside it, and opens at `wake_idle` for a Grok Bot. The script also checks that a redraw, or a newer thread replacing the link, keeps keyboard focus, that a modified click (a new tab) hands over no draft, that a later New message starts empty, that the prefilled send makes the thread the quick link then finds, and that a source and the operator's own page offer neither action.
+
+- [pv-quick-thread.png](pv-quick-thread.png) — grok-reviewer (a Grok Bot) shares hark B196 with the operator: Open thread names it with its age; New message says `wake_idle`.
+- [pv-quick-hover.png](pv-quick-hover.png) — The pointer on Open thread: the primary action brightens.
+- [pv-quick-focus.png](pv-quick-focus.png) — Keyboard focus on New message after Tab, kept through a presence redraw (presence now working) and when grok-reviewer's new thread, Review follow-up, becomes the one Open thread names.
+- [pv-quick-none.png](pv-quick-none.png) — dot-research shares no thread with the operator: the quick link reads Start thread (none with you yet), beside New message.
+- [pv-quick-compose-grokbot.png](pv-quick-compose-grokbot.png) — New message from grok-reviewer's page: the peer picked, `wake_idle` selected, the message field focused.
+- [pv-quick-compose-none.png](pv-quick-compose-none.png) — Start thread from dot-research's page: the peer picked at `wake`, a first message typed.
+
+Peer Invite card screens come from `scripts/ui/invite-card.mjs` (#67), at 1440 px (`-desk`) and 390 px (`-phone`). A peer that enrols with a token and holds no live credential shows an Invite card under its name: the invite's state from `GET /v1/admin/peers/{id}/enrol-token` (never the token), New invite (re-issue: the previous token stops enrolling) with the token lifetime, and Revoke invite (two clicks; `DELETE …/enrol-token`). New invite opens Add agent's own copy panel with the same paste block byte for byte; the token is only in that block's text, never an attribute, URL, web storage or request, and leaves the page on Done, on a revoke, or when the peer enrols and the card closes. Enrolled peers, dots, sources and the operator have no card and cost no invite read. The shots show a fake token (`vn_enrol_EXAMPLE-not-a-real-token-…`) swapped into the re-issue answer; the script checks the real one is refused once replaced or revoked.
+
+- [pvi-1-pending-desk.png](pvi-1-pending-desk.png) — web-repo claude has not enrolled: Invite `pending` with its expiry, Valid for 24 hours, New invite and Revoke invite; Identity reads Enrolled: not yet · added.
+- [pvi-1-pending-phone.png](pvi-1-pending-phone.png) — The pending card at 390 px.
+- [pvi-2-copied-desk.png](pvi-2-copied-desk.png) — After New invite and Copy invite: "The previous invite no longer works.", the shown-once warning, the paste block (fake token), profile, peer and expiry, Done and Copied.
+- [pvi-2-copied-phone.png](pvi-2-copied-phone.png) — The copy panel at 390 px: the block wraps and nothing scrolls sideways.
+- [pvi-3-revoked-desk.png](pvi-3-revoked-desk.png) — After Revoke invite and Confirm revoke: `revoked`, its token no longer enrols, New invite only, "Invite revoked."
+- [pvi-3-revoked-phone.png](pvi-3-revoked-phone.png) — The revoked card at 390 px.
+- [pvi-4-error-desk.png](pvi-4-error-desk.png) — A refused re-issue: "Could not issue a new invite: demo_failure: Demo failure" under the actions; the card is unchanged and New invite works again.
+- [pvi-4-error-phone.png](pvi-4-error-phone.png) — The refused re-issue at 390 px.
+- [pvi-5-none-desk.png](pvi-5-none-desk.png) — No live invite: late claude's invite `expired` a minute ago, so the card offers New invite and no Revoke.
+- [pvi-5-none-phone.png](pvi-5-none-phone.png) — The expired card at 390 px.
 
 Operator CLI label screens come from `scripts/ui/cli-label.mjs`, which runs the real `vecnet` binary under `env -i` (a pty from script(1) where a terminal is needed). A bare run with no profile is refused without a terminal or with an agent marker set; from a terminal it sends from the operator peer with a hub-set label.
 
@@ -209,3 +262,60 @@ Hub notice web screens come from `scripts/ui/notice.mjs`. Active hub notices tak
 - [nt09-progress-desktop.png](nt09-progress-desktop.png) — The hub announced a restart (`retry_after_ms` 5000) and the reconnects are held: "Hub restarting: reconnecting in 5 s" in amber over the notices.
 - [nt09-progress-phone.png](nt09-progress-phone.png) — The restarting row at phone width.
 - [nt09-error-desktop.png](nt09-error-desktop.png) — A restart followed by an outage (every `/v1/` request 503): past the hint plus 30 s the row reads "Hub unreachable since hh:mm" in red, the connection reads `reconnecting`, and the notices stay.
+
+Settings (hub preferences Task 6) come from `scripts/ui/prefs.mjs` against a real demo hub. Max's selected design: List (variant A, Ledger) is the default and the header toggle selects Policy (variant D); both draw one draft store, so every state below is the same store in two views. Desk is 1440 by 900, phone 390 by 844. Retention and attachment expiry stay "unavailable" until their adapters land. The confirm-archive, confirm-trim and confirm-files states in the plan's Task 7 matrix need those adapters and are deferred to Task 7; the dangerous-change dialog here is the hub's real presence-shortening risk.
+
+- [prefs-list-loading-desk.png](prefs-list-loading-desk.png) — List, desk: GET /v1/admin/prefs held: the header and view toggle are live, hub rows show "Loading hub settings…", and Appearance (local) is already usable.
+- [prefs-list-loading-phone.png](prefs-list-loading-phone.png) — List, phone: GET /v1/admin/prefs held: the header and view toggle are live, hub rows show "Loading hub settings…", and Appearance (local) is already usable.
+- [prefs-policy-loading-desk.png](prefs-policy-loading-desk.png) — Policy, desk: GET /v1/admin/prefs held: the header and view toggle are live, hub rows show "Loading hub settings…", and Appearance (local) is already usable.
+- [prefs-policy-loading-phone.png](prefs-policy-loading-phone.png) — Policy, phone: GET /v1/admin/prefs held: the header and view toggle are live, hub rows show "Loading hub settings…", and Appearance (local) is already usable.
+- [prefs-list-initial-desk.png](prefs-list-initial-desk.png) — List, desk: Loaded: List shows the five sections with wire source badges and the on-page rail; Policy shows the retention lanes and the plain-words paragraphs.
+- [prefs-list-initial-phone.png](prefs-list-initial-phone.png) — List, phone: Loaded: List shows the five sections with wire source badges and the on-page rail; Policy shows the retention lanes and the plain-words paragraphs.
+- [prefs-policy-initial-desk.png](prefs-policy-initial-desk.png) — Policy, desk: Loaded: List shows the five sections with wire source badges and the on-page rail; Policy shows the retention lanes and the plain-words paragraphs.
+- [prefs-policy-initial-phone.png](prefs-policy-initial-phone.png) — Policy, phone: Loaded: List shows the five sections with wire source badges and the on-page rail; Policy shows the retention lanes and the plain-words paragraphs.
+- [prefs-list-unavailable-desk.png](prefs-list-unavailable-desk.png) — List, desk: Retention and attachment expiry have no adapter on this hub: rows, lanes and the archive pill read "unavailable" with the hub's reason, controls disabled; the storage forecast says it has no figures rather than inventing any.
+- [prefs-list-unavailable-phone.png](prefs-list-unavailable-phone.png) — List, phone: Retention and attachment expiry have no adapter on this hub: rows, lanes and the archive pill read "unavailable" with the hub's reason, controls disabled; the storage forecast says it has no figures rather than inventing any.
+- [prefs-policy-unavailable-desk.png](prefs-policy-unavailable-desk.png) — Policy, desk: Retention and attachment expiry have no adapter on this hub: rows, lanes and the archive pill read "unavailable" with the hub's reason, controls disabled; the storage forecast says it has no figures rather than inventing any.
+- [prefs-policy-unavailable-phone.png](prefs-policy-unavailable-phone.png) — Policy, phone: Retention and attachment expiry have no adapter on this hub: rows, lanes and the archive pill read "unavailable" with the hub's reason, controls disabled; the storage forecast says it has no figures rather than inventing any.
+- [prefs-list-flag-desk.png](prefs-list-flag-desk.png) — List, desk: events.refresh_interval set by VECNET_EVENTS_REFRESH_INTERVAL (demo --pref-flag): a teal `flag` badge, the origin named, and the control read-only in both views.
+- [prefs-list-flag-phone.png](prefs-list-flag-phone.png) — List, phone: events.refresh_interval set by VECNET_EVENTS_REFRESH_INTERVAL (demo --pref-flag): a teal `flag` badge, the origin named, and the control read-only in both views.
+- [prefs-policy-flag-desk.png](prefs-policy-flag-desk.png) — Policy, desk: events.refresh_interval set by VECNET_EVENTS_REFRESH_INTERVAL (demo --pref-flag): a teal `flag` badge, the origin named, and the control read-only in both views.
+- [prefs-policy-flag-phone.png](prefs-policy-flag-phone.png) — Policy, phone: events.refresh_interval set by VECNET_EVENTS_REFRESH_INTERVAL (demo --pref-flag): a teal `flag` badge, the origin named, and the control read-only in both views.
+- [prefs-list-dirty-desk.png](prefs-list-dirty-desk.png) — List, desk: Four edits, three made in List and one in a Policy drawer, shown as `edited` in both views; the nav badge and sticky bar count 4.
+- [prefs-list-dirty-phone.png](prefs-list-dirty-phone.png) — List, phone: Four edits, three made in List and one in a Policy drawer, shown as `edited` in both views; the nav badge and sticky bar count 4.
+- [prefs-policy-dirty-desk.png](prefs-policy-dirty-desk.png) — Policy, desk: Four edits, three made in List and one in a Policy drawer, shown as `edited` in both views; the nav badge and sticky bar count 4.
+- [prefs-policy-dirty-phone.png](prefs-policy-dirty-phone.png) — Policy, phone: Four edits, three made in List and one in a Policy drawer, shown as `edited` in both views; the nav badge and sticky bar count 4.
+- [prefs-list-invalid-desk.png](prefs-list-invalid-desk.png) — List, desk: Default maximum depth 99: the hub's bound beside the field, aria-invalid, Save disabled, and "Show" focuses the field.
+- [prefs-list-invalid-phone.png](prefs-list-invalid-phone.png) — List, phone: Default maximum depth 99: the hub's bound beside the field, aria-invalid, Save disabled, and "Show" focuses the field.
+- [prefs-policy-invalid-desk.png](prefs-policy-invalid-desk.png) — Policy, desk: Default maximum depth 99: the hub's bound beside the field, aria-invalid, Save disabled, and "Show" focuses the field.
+- [prefs-policy-invalid-phone.png](prefs-policy-invalid-phone.png) — Policy, phone: Default maximum depth 99: the hub's bound beside the field, aria-invalid, Save disabled, and "Show" focuses the field.
+- [prefs-list-saving-desk.png](prefs-list-saving-desk.png) — List, desk: PATCH held: one atomic patch with If-Match is in flight; the bar reads "Saving 4 changes…" and fields are disabled.
+- [prefs-list-saving-phone.png](prefs-list-saving-phone.png) — List, phone: PATCH held: one atomic patch with If-Match is in flight; the bar reads "Saving 4 changes…" and fields are disabled.
+- [prefs-policy-saving-desk.png](prefs-policy-saving-desk.png) — Policy, desk: PATCH held: one atomic patch with If-Match is in flight; the bar reads "Saving 4 changes…" and fields are disabled.
+- [prefs-policy-saving-phone.png](prefs-policy-saving-phone.png) — Policy, phone: PATCH held: one atomic patch with If-Match is in flight; the bar reads "Saving 4 changes…" and fields are disabled.
+- [prefs-list-saved-desk.png](prefs-list-saved-desk.png) — List, desk: The hub's reply: the four keys now read `stored`, the revision moved on, and the save is announced and toasted.
+- [prefs-list-saved-phone.png](prefs-list-saved-phone.png) — List, phone: The hub's reply: the four keys now read `stored`, the revision moved on, and the save is announced and toasted.
+- [prefs-policy-saved-desk.png](prefs-policy-saved-desk.png) — Policy, desk: The hub's reply: the four keys now read `stored`, the revision moved on, and the save is announced and toasted.
+- [prefs-policy-saved-phone.png](prefs-policy-saved-phone.png) — Policy, phone: The hub's reply: the four keys now read `stored`, the revision moved on, and the save is announced and toasted.
+- [prefs-list-default-desk.png](prefs-list-default-desk.png) — List, desk: Default thread budget saved back to its built-in 500: the page sent the value, the hub dropped the override, and its reply shows `default`.
+- [prefs-list-default-phone.png](prefs-list-default-phone.png) — List, phone: Default thread budget saved back to its built-in 500: the page sent the value, the hub dropped the override, and its reply shows `default`.
+- [prefs-policy-default-desk.png](prefs-policy-default-desk.png) — Policy, desk: Default thread budget saved back to its built-in 500: the page sent the value, the hub dropped the override, and its reply shows `default`.
+- [prefs-policy-default-phone.png](prefs-policy-default-phone.png) — Policy, phone: Default thread budget saved back to its built-in 500: the page sent the value, the hub dropped the override, and its reply shows `default`.
+- [prefs-list-conflict-desk.png](prefs-list-conflict-desk.png) — List, desk: Another operator saved first (a real competing PATCH): 412, nothing of ours written, the latest hub value beside ours, and the draft kept for manual reconciliation.
+- [prefs-list-conflict-phone.png](prefs-list-conflict-phone.png) — List, phone: Another operator saved first (a real competing PATCH): 412, nothing of ours written, the latest hub value beside ours, and the draft kept for manual reconciliation.
+- [prefs-policy-conflict-desk.png](prefs-policy-conflict-desk.png) — Policy, desk: Another operator saved first (a real competing PATCH): 412, nothing of ours written, the latest hub value beside ours, and the draft kept for manual reconciliation.
+- [prefs-policy-conflict-phone.png](prefs-policy-conflict-phone.png) — Policy, phone: Another operator saved first (a real competing PATCH): 412, nothing of ours written, the latest hub value beside ours, and the draft kept for manual reconciliation.
+- [prefs-list-error-desk.png](prefs-list-error-desk.png) — List, desk: PATCH answered 503 prefs_storage_unavailable: "Not saved", every edit kept, retry possible.
+- [prefs-list-error-phone.png](prefs-list-error-phone.png) — List, phone: PATCH answered 503 prefs_storage_unavailable: "Not saved", every edit kept, retry possible.
+- [prefs-policy-error-desk.png](prefs-policy-error-desk.png) — Policy, desk: PATCH answered 503 prefs_storage_unavailable: "Not saved", every edit kept, retry possible.
+- [prefs-policy-error-phone.png](prefs-policy-error-phone.png) — Policy, phone: PATCH answered 503 prefs_storage_unavailable: "Not saved", every edit kept, retry possible.
+- [prefs-list-appearance-desk.png](prefs-list-appearance-desk.png) — List, desk: Theme Light and density Compact applied to this browser only: no hub request, stored as vecnet.ui.appearance.v1, and a second tab follows.
+- [prefs-list-appearance-phone.png](prefs-list-appearance-phone.png) — List, phone: Theme Light and density Compact applied to this browser only: no hub request, stored as vecnet.ui.appearance.v1, and a second tab follows.
+- [prefs-policy-appearance-desk.png](prefs-policy-appearance-desk.png) — Policy, desk: Theme Light and density Compact applied to this browser only: no hub request, stored as vecnet.ui.appearance.v1, and a second tab follows.
+- [prefs-policy-appearance-phone.png](prefs-policy-appearance-phone.png) — Policy, phone: Theme Light and density Compact applied to this browser only: no hub request, stored as vecnet.ui.appearance.v1, and a second tab follows.
+- [prefs-list-empty-desk.png](prefs-list-empty-desk.png) — List, desk: a search that matches nothing, "No settings match."
+- [prefs-list-empty-phone.png](prefs-list-empty-phone.png) — List, phone: a search that matches nothing, "No settings match."
+- [prefs-list-confirm-desk.png](prefs-list-confirm-desk.png) — List, desk: Default presence TTL 1 h → 30 min. The hub's preview names the presence_shortened risk; a focus-trapped dialog shows old and new values with Cancel focused. Escape cancelled the first one with nothing written; the token stays in memory only.
+- [prefs-list-confirm-phone.png](prefs-list-confirm-phone.png) — List, phone: Default presence TTL 1 h → 30 min. The hub's preview names the presence_shortened risk; a focus-trapped dialog shows old and new values with Cancel focused. Escape cancelled the first one with nothing written; the token stays in memory only.
+- [prefs-policy-confirm-desk.png](prefs-policy-confirm-desk.png) — Policy, desk: Default presence TTL 1 h → 30 min. The hub's preview names the presence_shortened risk; a focus-trapped dialog shows old and new values with Cancel focused. Escape cancelled the first one with nothing written; the token stays in memory only.
+- [prefs-policy-confirm-phone.png](prefs-policy-confirm-phone.png) — Policy, phone: Default presence TTL 1 h → 30 min. The hub's preview names the presence_shortened risk; a focus-trapped dialog shows old and new values with Cancel focused. Escape cancelled the first one with nothing written; the token stays in memory only.

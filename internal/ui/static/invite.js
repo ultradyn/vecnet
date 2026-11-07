@@ -19,6 +19,30 @@ const DOT_LEDE = 'Creates a dot peer and a one-time link code, then shows how to
 const GROK_LEDE = 'Show this prompt to the bot first. Then submit the routine URL and key here. Nothing is sent until you submit.';
 const NOT_CONNECTED = 'Queued or accepted does not mean the bot is connected. A webhook response is not a connection.';
 
+// invitePanel is the paste-ready invite, shown once: the warning, the block
+// as is, its profile, peer and expiry, then Done and Copy invite. Add agent
+// and the peer page's Invite card (peer.js) both draw it, so what an agent is
+// handed and the controls around it are the same. inv is invite() or
+// reinvite() (invite-model.js). The token is only in the block's text and the
+// copy closure, never in an attribute. Returns { nodes, copy }.
+export function invitePanel(inv, { onDone }) {
+  const text = h('pre', { class: 'inv-block mono', tabindex: '0', 'aria-label': 'Invite text' });
+  text.textContent = inv.text; // as is: clean() would alter what the agent runs
+  const copy = h('button', { type: 'button', class: 'btn pri', text: 'Copy invite', onclick: async () => {
+    if (await copyText(inv.text)) { copy.textContent = 'Copied'; setTimeout(() => { copy.textContent = 'Copy invite'; }, 1500); }
+    else toast('Could not copy. Select the text and copy it instead.', true);
+  } });
+  return {
+    copy,
+    nodes: [
+      h('p', { class: 'inv-warn', role: 'note', text: 'Shown once — it grants a new identity on your hub. Paste it only to the agent it is for.' }),
+      text,
+      h('p', { class: 'inv-meta mono' }, 'profile ' + inv.profile + (inv.open ? ' · name chosen at enrol' : '') + ' · peer ' + inv.peerId + ' · expires ', h('time', { text: inv.expires })),
+      h('div', { class: 'inv-acts' }, h('button', { type: 'button', class: 'btn', text: 'Done', onclick: () => onDone() }), copy),
+    ],
+  };
+}
+
 let open = null; // the dialog's close(), while one is shown
 
 export function closeInvite() { if (open) open(); }

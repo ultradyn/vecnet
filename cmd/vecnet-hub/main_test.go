@@ -934,3 +934,66 @@ func TestPreferenceBootstrapAllEnabledFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestHubURLRefusedAtStartup(t *testing.T) {
+	const (
+		user  = "USERSECRET"
+		query = "QUERYSECRET"
+		frag  = "FRAG"
+	)
+	cases := []struct {
+		name, flag, value string
+		env               func(string) string
+	}{
+		{name: "public userinfo", flag: "--public-url", value: "https://alice:" + user + "@hub.example/vecnet"},
+		{name: "public query", flag: "--public-url", value: "https://hub.example/vecnet?token=" + query},
+		{name: "public fragment", flag: "--public-url", value: "https://hub.example/vecnet#" + frag},
+		{name: "env public query", env: func(k string) string {
+			if k == "VECNET_PUBLIC_URL" {
+				return "https://hub.example/vecnet?token=" + query
+			}
+			return ""
+		}},
+		{name: "relocated userinfo", flag: "--relocated-to", value: "https://alice:" + user + "@next.example/vecnet"},
+		{name: "env relocated fragment", env: func(k string) string {
+			if k == "VECNET_RELOCATED_TO" {
+				return "https://next.example/vecnet#" + frag
+			}
+			return ""
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "unopened")
+			args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir}
+			if tc.flag != "" {
+				args = append(args, tc.flag, tc.value)
+			}
+			getenv := noEnv
+			if tc.env != nil {
+				getenv = tc.env
+			}
+			err := run(context.Background(), args, io.Discard, getenv)
+			if err == nil {
+				t.Fatal("hub started")
+			}
+			msg := err.Error()
+			for _, secret := range []string{user, query, frag, "alice:"} {
+				if strings.Contains(msg, secret) {
+					t.Fatalf("error contains %q: %s", secret, msg)
+				}
+			}
+			if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+				t.Fatalf("refused hub opened %s: %v", dir, statErr)
+			}
+		})
+	}
+}
+
+func TestHubLogsCheckedPublicURL(t *testing.T) {
+	ipv6 := "https://[2001:db8::7]/vecnet"
+	h := bootHub(t, []string{"--listen", "127.0.0.1:0", "--data-dir", t.TempDir(), "--public-url", ipv6}, noEnv)
+	if !strings.Contains(h.out.String(), "public url "+ipv6) {
+		t.Fatalf("log dropped the public URL: %s", h.out.String())
+	}
+}

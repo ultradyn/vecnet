@@ -4,7 +4,7 @@
 // Each section loads and fails on its own. The page reloads on the `peers` tag
 // and every 30 s while mounted. Ages use the hub clock, never the client's.
 import { activityAction } from './activity-model.js';
-import { allThreads, blockedLine, cutSummary, peerRows } from './dash-model.js';
+import { allThreads, blockedLine, cutSummary, visiblePeers } from './dash-model.js';
 import { principalRows } from './principals-model.js';
 import { chip, h, idCopy, idText, peerLink } from './dom.js';
 import { closeInvite, inviteButton } from './invite.js';
@@ -80,6 +80,10 @@ export function mount(root, ctx) {
   // The audit tail keeps every entry it has shown, so "Load older" pages on
   // from the oldest one and a reload of the head does not drop them.
   const audit = { seen: new Map(), olderNext: undefined, busy: false, err: null, alive: true };
+  // Archived peers stay out of the operator list until this is on. It is
+  // local to the page: a #peer/<id> link still loads that peer from the
+  // unfiltered admin directory.
+  let showArchived = false;
 
   const sections = {};
   function section(key, id, heading) {
@@ -134,14 +138,24 @@ export function mount(root, ctx) {
   }
 
   function drawPeers(value, s) {
-    const rows = peerRows(value.peers);
+    const list = visiblePeers(value.peers, showArchived);
+    const rows = list.shown;
     s.count.textContent = String(rows.length);
-    if (!rows.length) return [none('No peers enrolled.')];
-    return [table(['Peer', 'Kind', 'Presence', 'Reachability', 'Credential', 'Routes', 'Quota', 'Location'], rows.map(p => {
+    const toggle = h('label', { class: 'show-archived' },
+      h('input', {
+        type: 'checkbox',
+        checked: showArchived || null,
+        'aria-label': 'Show archived',
+        onchange: e => { showArchived = !!e.target.checked; render(); },
+      }),
+      h('span', { text: list.archived ? 'Show archived (' + list.archived + ')' : 'Show archived' }));
+    if (!rows.length) return [toggle, none(list.archived ? 'Archived peers are hidden.' : 'No peers enrolled.')];
+    return [toggle, table(['Peer', 'Kind', 'Presence', 'Reachability', 'Credential', 'Routes', 'Quota', 'Location'], rows.map(p => {
       const presenceAge = p.presence === 'n/a' ? '' : p.presenceAt ? age(p.presenceAt) : 'never reported';
       const reachSub = [p.via, p.seen ? age(p.seen) : ''].filter(Boolean).join(', ');
-      return h('tr', { class: p.disabled ? 'off' : null },
-        h('td', null, peerLink(p.id, p.name, { cls: 'pn' }), p.disabled ? [' ', chip('disabled', 'bad')] : null, idCell(p.id, 'peer id')),
+      const mark = p.archivedAt ? chip('archived', 'bad') : (p.disabled ? chip('disabled', 'bad') : null);
+      return h('tr', { class: p.disabled || p.archivedAt ? 'off' : null },
+        h('td', null, peerLink(p.id, p.name, { cls: 'pn' }), mark ? [' ', mark] : null, idCell(p.id, 'peer id')),
         h('td', null, h('span', { class: 'pill', title: kindTitle(p.kind) }, h('i', { class: 'kd k-' + p.kind }), kindShort(p.kind))),
         h('td', null, h('span', { class: 'pill' }, h('i', { class: 'pd ' + p.presence.replace('/', '') }), p.presence),
           h('span', { class: 'sub mono', text: presenceAge })),

@@ -11,9 +11,11 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 func subsTime(d time.Duration) *string {
@@ -457,6 +459,24 @@ func TestTopBarSubsCount(t *testing.T) {
 		m, _ := subsLoaded(t, subsFake(nil), newClock())
 		if line := top(t, m, 140, 42); counted.MatchString(line) {
 			t.Errorf("count shown: %q", line)
+		}
+	})
+
+	// From another tab the count is an attention badge in unread, bold so it
+	// keeps under NO_COLOR (design §5.5 header counts).
+	t.Run("badge in unread", func(t *testing.T) {
+		rows := []opapi.Subscription{subsRow("a", "peer_a", opapi.HealthLate, "Refresh is due."), subsRow("b", "peer_b", opapi.HealthOK, "")}
+		m, p := subsLoaded(t, subsFake(rows), newClock())
+		p.press("1")
+		for _, th := range []*theme.Theme{theme.New(theme.TrueColor, true), theme.New(theme.NoColor, true)} {
+			line := strings.Split(frameOf(m, th), "\n")[0]
+			want := th.OnBar(theme.Unread).Render("1")
+			if !strings.Contains(line, want) {
+				t.Errorf("%s: badge %q not in %q", rungName(th.Profile()), want, line)
+			}
+			if !strings.Contains(ansi.Strip(line), "4:subs 1") {
+				t.Errorf("%s: plain %q", rungName(th.Profile()), ansi.Strip(line))
+			}
 		}
 	})
 }

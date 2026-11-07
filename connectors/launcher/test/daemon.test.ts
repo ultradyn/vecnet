@@ -127,7 +127,7 @@ test('a fatal event stream end stops the daemon: stopped settles, exit code 1, o
   const previous = process.exitCode;
   t.after(() => { process.exitCode = previous; });
   const client: HubApi & { me(): Promise<unknown> } = { ...createHubClient({ baseUrl: h.hub.url, credential: h.hub.bearer }), me: async () => ({ kind: 'peer', peer_id: LAUNCHER }) };
-  const daemon = await startDaemon({ cfg: h.cfg, hub: client, clock: h.clock, log: h.log, backends: new Map([['fake', h.backend]]),
+  const daemon = await startDaemon({ cfg: h.cfg, hub: client, clock: h.clock, log: h.log, env: { VECNET_CODEX_BINDINGS: join(h.dir, 'codex-bindings.json') }, backends: new Map([['fake', h.backend]]),
     stream: { run: async () => ({ reason: 'auth', status: 401 }) } });
   t.after(() => daemon.stop());
   await daemon.stopped;

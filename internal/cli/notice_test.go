@@ -40,7 +40,7 @@ func noticeEvent(message string) envelope.Event {
 	return envelope.Event{Cursor: "c", Type: "hub_notice", Data: raw}
 }
 func TestMonitorLineHubNotice(t *testing.T) {
-	if got := monitorLine(noticeEvent("Moving tonight"), nil); got != "c hub_notice - hub hub: [moving 2026-11-06T02:00:00.000Z -> new.example] Moving tonight" {
+	if got := monitorLine(noticeEvent("Moving tonight"), nil); got != "c hub_notice - hub hub: [moving 2026-11-06T02:00:00.000Z -> https://new.example] Moving tonight" {
 		t.Fatal(got)
 	}
 	got := monitorLine(noticeEvent("a\r\nb\n\x1b\u202e"+strings.Repeat("界", 150)), nil)

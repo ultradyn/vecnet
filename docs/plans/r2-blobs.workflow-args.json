@@ -1,0 +1,295 @@
+{
+  "_notes": "Slice 1 of the R2 blobs plan (build order step 2 'Consumer foundations': R2 Tasks 1-2). Plan Task 0 (spike) is DONE (receipt docs/plans/receipts/2026-11-05-r2-spike.md) and is NOT in tasks[]: vecnet-core-build.workflow.mjs prepends null to args.tasks, so tasks[0] is workflow Task 1, and readTaskCmds greps the plan for `### Task <n>:`, so workflow Task n == plan Task n with no placeholder or offset. The plan's dependency map is {\"0\":[],\"1\":[0],...}; Task 0 is dropped from deps (\"1\":[]) because it is not a workflow task (a dep below startTask would also count as merged). The Global Constraints awk (Global Constraints -> '### Task 1:') also prints Decisions, Review Focus and the Task 0 section, which is why an extraRules line marks Task 0 done/off-limits. Later slices: Task 3 needs Tasks 1-2 plus prefs Tasks 1/2/4 and core publication merged (startTask 3, endTask 3); Tasks 4-5 follow (4 also integrates after DB's shared hub/ticker/history edits); Tasks 6/7/8 run after 4-5 (6/7/8 are mutually independent per the map, but 7 also needs prefs Task 6's Settings store and the UI checks/shots, and 8 owns mcpserver/connectors); Task 9 last. Before a later slice: drop the 'No prefs dependency in Tasks 1-2' extraRules line, widen the connectors/mcpserver/ui scope lines for Tasks 7/8, add the UI mergeChecks/gateChecks from _laterSlices, and use a new runStamp. fields starting with '_' are ignored by the script.",
+  "_ambiguities": [
+    "Ownership table vs Task 1 file list: the table gives R2's parallel slice only new internal/blob/r2sign*/r2meta*/r2store* and internal/blobwire/**, and assigns existing envelope schemas, store tests and migrations to integration commits, but R2 Task 1 creates the migration and edits internal/store/store_test.go, internal/envelope/{types.go,schema.json}, docs/protocol/envelope.schema.json and internal/ids/ids.go. Resolved as: kept in Task 1 but additive, committed separately, preferring a new store test file, with DB integrating to master first. Alternative: split Task 1 so only blobwire/r2sign/r2meta run now and the migration + schema edits wait for DB's merge (would need a hand-driven slice: the workflow cannot split a task).",
+    "Plan Task 1 Step 1 lists '301 refusal' among signer tests; a pure presigner makes no HTTP call, so the hazard interprets it as endpoint validation plus never following redirects, recorded by the implementer.",
+    "The plan's Step commands use bare `just bb` (x-boss default since 2026-11-05); the coordinator chose x-alpha, applied to the runner and every check.",
+    "Task 9 (docs) routed to sol per the 'sol for backend, opus only for UI/taste' rule; Task 7 (web UI with screenshots) is the only opus task.",
+    "Task 7 screenshot names are not fixed by the plan; hazards use docs/plans/shots/oui/r2-<state>-<desk|phone>.png (shots prefix 'r2'). Coordinator may align them with prefs' 32-shot matrix instead."
+  ],
+  "_laterSlices": {
+    "ui_task7": "Add to mergeChecks: `BB_HOST=x-boss BB_JOBS=4 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/` and `BB_HOST=x-boss BB_JOBS=4 just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-r2/merge-shots just ui-shots`. Add to gateChecks: the jstest command, `BB_HOST=x-boss BB_JOBS=4 just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-r2/gate-shots just ui-shots` exits 0, and 'Every PNG listed in docs/plans/shots/oui/README.md exists, and every PNG in that directory is listed'. Drop the backend-only 'no internal/ui/ changes' gate check and add a taste lens (key design, taste true) over the r2-*.png shots beside the prefs Settings shots.",
+    "mcp_task8": "Replace the connectors/mcpserver-untouched merge/gate checks with `just bb just ln-check` and fixture-only `just bb just ln-e2e`, and an extraRules line allowing Task 8's exact mcpserver/connectors files."
+  },
+  "runStamp": "20261106T14-r2-blobs-t6",
+  "maxFixRounds": 3,
+  "planName": "r2-blobs",
+  "plan": "docs/plans/2026-11-05-r2-blobs.md",
+  "worktree": "/home/xertrov/src/vecnet4/.worktrees/r2-build",
+  "branch": "r2-build",
+  "baseRef": "0bf4beb",
+  "statusDir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-r2",
+  "taskPrefix": "r2",
+  "startTask": 6,
+  "endTask": 6,
+  "finalReview": true,
+  "openBrowser": false,
+  "solRelay": {
+    "run": "/home/xertrov/src/vecnet4/scripts/wf/sol-run.sh",
+    "wait": "/home/xertrov/src/vecnet4/scripts/wf/sol-wait.sh",
+    "dir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-r2/ccc",
+    "transcripts": "/home/xertrov/.claude/projects/-home-xertrov-src-vecnet4/*/subagents/workflows/*/agent-*.jsonl"
+  },
+  "extraRules": [
+    "Base is master 0bf4beb: R2 Tasks 1-5, codex hooks, the web/TUI stale-after-ack fixes and the workflow decisions-file support are merged. DB compaction Tasks 5-9 are being built on another branch (event retention floors, migration 0026); do not touch internal/events/** or event retention code. Task 7 (web UI) is deferred until the hub-preferences Settings UI lands; do not build any of it.",
+    "No npm or pnpm install. Node checks run through build2 too: `build2 node ...`. Chromium stays headless. Never run xdg-open or open a window.",
+    "Tests, vet, node tests and screen scripts run on build box x-boss through the runner prefix `BB_HOST=x-boss BB_JOBS=4 just bb` (docs/BUILDBOX.md), never on xsm. Where the plan writes `CGO_ENABLED=0 just bb go test -p 2 ...` or `just bb just validate-protocol`, run it with the runner prefix (`BB_HOST=x-boss BB_JOBS=4 just bb CGO_ENABLED=0 build2 go test -p 2 ...`). Only gofmt, git, `just isa-check` and `go list` run locally.",
+    "Your Global Constraints read (`awk ... /^### Task 1:/{exit}`) already prints Decisions \u00a71-\u00a76, Security, Review Focus, the dependency map and Task 0. Also read `sed -n '/^## Current behavior and implications/,/^## Global Constraints/p' /home/xertrov/src/vecnet4/.worktrees/r2-build/docs/plans/2026-11-05-r2-blobs.md` and `awk '/^## Resolved decisions and remaining release gates/{f=1} /^--- SUMMARY ---/{exit} f' /home/xertrov/src/vecnet4/.worktrees/r2-build/docs/plans/2026-11-05-r2-blobs.md`. The plan header's pointers to superpowers skills and hub-notices' gates are superseded by this workflow.",
+    "Task 0 (the R2 spike) is DONE and owned by the r2-spike follow-up: never run it, never edit internal/tools/r2spike/** or docs/plans/receipts/2026-11-05-r2-spike*, never import internal/tools/r2spike from production code, and never set or read VECNET_R2_SPIKE_CREDENTIALS_FILE or any credential file. docs/plans/receipts/2026-11-05-r2-spike.md and .data.json are read-only provider evidence (checksum enforcement, HEAD completion evidence, error codes, TTL observations); the spike's `//go:build spike` tests may be read for canonical vectors.",
+    "No real provider calls: no code or test contacts Cloudflare, R2 or any network endpoint. All S3 traffic goes to in-process httptest fakes with fake credentials; never configure buckets, CORS, lifecycle rules, wrangler, tokens or Fly secrets. Fake-only success is not provider acceptance: say so where a test stands in for a provider gate.",
+    "Checksum profile is `sha256` only (selected by Task 0). The MD5 fallback is parked: add no md5 profile, Content-MD5 signing, MD5 digest field, profile switch or client MD5 code. A request carrying content_md5 is rejected as an unknown field.",
+    "Migrations: the plan adds exactly ONE R2 migration (Task 1), allocated at the NEXT FREE number at build time. Inspect internal/store/migrations/ in your worktree when you create it: master ends at 0020, hub-notices takes 0021, prefs-build takes the next free after that and db-build adds one or two more; DB integrates to master before R2, so expect a renumber at merge. Name it `<NNNN>_r2_blobs.sql`; tests and receipts locate it by suffix, never by number. Record the actual filename in your step file and deviations. Never reserve a literal number, rename or edit a shipped migration, or change its checksum; additive DDL only; no preference table. If a merge finds the number taken, renumber the unshipped R2 file and its tests in that merge.",
+    "No prefs dependency in Tasks 1-2: the hub preferences store (internal/prefs, *hub.Preferences) is being built concurrently on prefs-build and is NOT on master. Never import, stub, fake or copy it; blob_objects stores expiry_pref_value/source/revision as plain columns only. The narrow prefs reader and blobs.expiry consumption arrive with Tasks 3/4/7 in a later slice, after prefs Tasks 1/2/4 merge.",
+    "File ownership (build order, 'Parallel worktrees and merge ownership'; this build runs alongside prefs-build and db-build): R2 exclusively owns new `internal/blob/r2sign*`, `internal/blob/r2meta*`, `internal/blob/r2store*` and `internal/blobwire/**` (later `internal/blob/{transfers*,durable*,usage*}`). DB owns `internal/eventpayload/**`; prefs owns `internal/prefs/**`: never create or edit those. Task 1's shared-surface edits (the migration, internal/store tests, internal/envelope/{types.go,schema.json}, docs/protocol/envelope.schema.json, internal/ids/ids.go) are integration surfaces: keep them additive and minimal, commit them separately from the new-package commit (same Plan-Task trailer), and prefer a new test file (e.g. internal/store/r2_migration_test.go) over appending to internal/store/store_test.go, which DB Task 2 also edits (record the deviation). Integration order to master is prefs core -> DB -> R2.",
+    "Disk stays the default backend: disk PUT/GET, TTL, dedupe, tokens, pins, GC, spills, avatars and every existing blob test stay unchanged and green. Tasks 1-2 add no hub wiring, HTTP routes, flags, config or backend selection (Task 4 owns them).",
+    "Never touch connectors/**, internal/mcpserver/**, internal/ui/**, scripts/ui/**, docs/plans/shots/, a `cloudflare/` package or any Worker tooling (Tasks 7/8 own UI, MCP and connectors in later slices; the Worker is dropped).",
+    "Never log, print, return in an error, put in a test failure message, or commit credentials, Authorization headers, signatures, X-Amz-* query strings or complete presigned URLs, including on panic and failure paths. Tests assert on parsed URL components and redact before t.Fatalf.",
+    "No new Go module and no AWS SDK: SigV4 uses stdlib crypto/hmac, crypto/sha256, encoding/xml and net/http only. internal/blobwire imports the standard library only; CLI-side packages never import internal/blob, internal/store or SQLite.",
+    "The companion plans (docs/plans/2026-11-05-hub-preferences.md, 2026-11-05-db-compaction.md, 2026-11-05-admin-parity.md) are plans, not code: read them only where your task cites them and never implement their work. Build only against merged code on your base.",
+    "Never read or write ~/.config/vecnet/, ~/.cache/vecnet/, ~/.claude.json, ~/.claude/ or ~/.codex/, `.data/`, `.demo-data/`, the dev hub on 45752, the coordinator's preview on 49575 or the Fly hub. Tests use t.TempDir() databases, the FakeClock, fixed synthetic identities and temp HOME/XDG_CONFIG_HOME/XDG_CACHE_HOME/VECNET_CONFIG dirs through the injected getenv.",
+    "Branch hub-notices edits internal/hub/hub.go, cmd/vecnet-hub/main.go, internal/opapi/types.go, internal/httpapi/admin.go and internal/store/migrations/; branch prefs-build edits internal/hub/hub.go, internal/hub/tickers.go, cmd/vecnet-hub/{main.go,main_test.go}, internal/opapi/types.go and internal/store/migrations/. Keep your edits to those files small and additive so a later rebase or merge stays mechanical.",
+    "R2 Task 0 (the real-bucket spike) is COMPLETE on master (commits e9549b0, c25a0ef, c2b0d23; receipt docs/plans/receipts/2026-11-05-r2-spike.md). It has no 'Plan-Task: 00' trailer by design. Preflight check 4 (earlier tasks reachable) applies only to t >= 1; treat Task 0 as satisfied. This run's startTask is 1.",
+    "Prefs Task 3 core (preferences_runtime.go, runtime consumers) is NOT on master yet (final review on prefs-build). Consume only merged prefs interfaces (prefs.Snapshot/Effective, hub Preferences Subscribe, PreferencePreviewPolicy Check/Preview/Activate seam). Do not install preference adapters for retention.* or blobs.expiry in this run; leave their installation to a later joint slice and record it as a deviation if your task text asks for it.",
+    "Master's TestSlowSSEConsumerDoesNotBlockSend and TestStalledSSEWriterDoesNotBlockSend are canonical; do not modify them.",
+    "Egress/provider errors use fixed reason codes only (hub.OutboundError / HTTPStatusError / blob.R2ProviderError); never surface provider text, URLs, signatures or credentials.",
+    "Known load flakes on the 4-core x-tuf under full-suite contention (coordinator verified both pass 10/10 in isolation): internal/store TestTxImmediateSerialises (SQLITE_BUSY past busy_timeout) and internal/cli TestHookHintUnboundUnchanged (empty hook output). If either fails in a baseline or gate run, rerun that single test once with -count=3 before treating it as a regression, and record it.",
+    "Build box is x-p35 (8 cores, otherwise idle). x-tuf is shared with long-running unrelated CPU load and must not be used for this run.",
+    "Known full-suite load flake (preflight, merge checks and gate alike): internal/hub TestBackfillRealReaderCheckpointPressure (reader relief did not resume; PausedReason=lock_pressure). It passed 5/5 in isolation on x-p35 at r2-build 0420eed. If it is the only failure, rerun just that test with -count=3; if that passes, treat the suite as green and record it as a known flake."
+  ],
+  "mergeChecks": [
+    "BB_HOST=x-p35 BB_JOBS=4 just bb just validate-protocol",
+    "build2 go list -deps ./cmd/vecnet | grep -c -E 'modernc.org/sqlite|github.com/XertroV/vecnet/internal/store' (must print 0)",
+    "build2 go list -f '{{join .Imports \"\\n\"}}' ./internal/blobwire | grep -c '\\.' (must print 0: blobwire imports the standard library only)",
+    "BB_HOST=x-p35 BB_JOBS=4 just bb GOOS=windows CGO_ENABLED=0 go build -o /dev/null ./cmd/vecnet",
+    "git diff --name-only --diff-filter=MDR master...HEAD -- internal/store/migrations/ (must print nothing: shipped migrations are never edited, renamed or deleted)",
+    "ls internal/store/migrations/ | cut -c1-4 | sort | uniq -d (must print nothing: no two migrations share a number)",
+    "git diff --name-only master...HEAD -- connectors/ internal/mcpserver/ internal/ui/ scripts/ui/ docs/plans/shots/ internal/prefs/ internal/eventpayload/ internal/tools/r2spike/ docs/plans/receipts/ (must print nothing)",
+    "git grep -l 'github.com/XertroV/vecnet/internal/prefs' -- '*.go' (must print nothing: this slice never imports the concurrently built prefs package)"
+  ],
+  "gateChecks": [
+    "`just isa-check` prints 0 for both binaries",
+    "`BB_HOST=x-p35 BB_JOBS=4 just bb just validate-protocol`",
+    "`build2 go list -deps ./cmd/vecnet | grep -c -E 'modernc.org/sqlite|github.com/XertroV/vecnet/internal/store'` prints 0",
+    "`build2 go list -f '{{join .Imports \"\\n\"}}' ./internal/blobwire | grep -c '\\.'` prints 0 (blobwire imports the standard library only)",
+    "`build2 go list -deps ./cmd/vecnet-hub | grep -c 'charm.land'` prints 0",
+    "`BB_HOST=x-p35 BB_JOBS=4 just bb GOOS=windows CGO_ENABLED=0 go build -o /dev/null ./cmd/vecnet`",
+    "`git diff --name-only master...HEAD -- internal/tools/r2spike/ docs/plans/receipts/` prints nothing (Task 0 artifacts belong to the r2-spike follow-up)",
+    "`git diff --name-only --diff-filter=MDR master...HEAD -- internal/store/migrations/` prints nothing, `git diff --name-only --diff-filter=A master...HEAD -- internal/store/migrations/` prints at most one file, named `<NNNN>_r2_blobs.sql` with NNNN above the base's highest migration, and `ls internal/store/migrations/ | cut -c1-4 | sort | uniq -d` prints nothing",
+    "`git diff --name-only master...HEAD -- go.mod go.sum` prints nothing (no AWS SDK or other new module)",
+    "`git diff -U0 master...HEAD -- '*.go' | grep -i -E '^\\+.*(md5|content-md5)'` prints nothing, or only lines in _test.go files asserting that content_md5/MD5 is rejected (MD5 fallback is parked)",
+    "`git diff -U0 master...HEAD -- '*_test.go' | grep -E '^\\+.*r2\\.cloudflarestorage\\.com'`: every hit is an endpoint-validation or default-template assertion, or a synthetic provider origin that the test's transport rewrites to an in-process httptest server before any network I/O; no test ever reaches a real provider host",
+    "Backend slices only (endTask <= 2): `git diff --name-only master...HEAD -- internal/ui/ scripts/ui/ docs/plans/shots/ internal/hub/ internal/httpapi/ cmd/` prints nothing (Tasks 1-2 add no hub wiring, routes or flags)",
+    "Task 6 may add internal/blobclient and edit internal/cli/** and internal/tui/**; Task 8 may edit internal/mcpserver/** and connectors/** (these surfaces were frozen only for Tasks 1-5)"
+  ],
+  "lensFocus": {
+    "spec": "This run implements docs/plans/2026-11-05-r2-blobs.md, only the tasks in this invocation's range (slice 1 = Tasks 1-2); Task 0 is done (receipt docs/plans/receipts/2026-11-05-r2-spike.md) and Tasks 3-9 (reservations, hub API, projections, clients, web, MCP, docs) are out of scope, so do not flag their absence. Check: blobwire types, fields, pointer-ness and json tags exactly per the Task 1 Interfaces block, with distinct capability expires_at vs object_expires_at, explicit null keep deadlines in R2 serialization and omission of the additive fields in legacy disk serialization; PresignPUT/PresignGET signatures exactly; SigV4 scope <date>/auto/s3/aws4_request with UNSIGNED-PAYLOAD; PUT signs host, exact Content-Length, If-None-Match *, x-amz-checksum-sha256 as a header (never query), octet-stream type, attachment disposition, private no-store cache control and both x-amz-meta-vecnet-checksum* headers; PUT TTL 300 s; GET floor(min(600 s, remaining)), 600 s for keep, refused under 1 s; sha256 the only profile, no MD5 code; blo_ + 26 Crockford chars from 128 random bits; one next-free migration with exactly the \u00a75 tables, STRICT, CHECK-enforced class/deadline/key-prefix agreement, keep deadlines NULL, no URL column, no preference table, disk rows untouched; envelope schema additive blob_id and identical in internal/envelope and docs/protocol; R2Objects Head/Delete/Download per Task 2 with class-first key validation, HEAD-only completion evidence per the spike receipt and a fresh GET presign per call. Disk behaviour unchanged.",
+    "security": "Presigned URLs, signatures, X-Amz-* query strings, Authorization headers and credentials never appear in errors, logs, test failure output, fixtures or committed files; provider XML/error bodies are bounded and sanitized (no URL echo). Signed headers cannot be dropped or altered without breaking the signature; the checksum header is never query-hoisted; Content-Length is exact; create-only If-None-Match is signed. Endpoint validation allows only https with no userinfo/path/query/fragment and the exact R2 host shape in production; no redirect is ever followed; keys derive only from persisted grant records with class/namespace validation (no request-supplied keys, foreign namespaces or path tricks). The hub never GETs object bodies. Blob IDs use crypto/rand and confer no authority. No real network: every S3 request in tests targets an httptest server with fake credentials. No AWS SDK or new module; blobwire stays stdlib-only and the CLI SQLite-free.",
+    "tests": "Signer tests use a literal known vector (canonical request, string-to-sign, signature) not recomputed with production code, plus escaping (space, plus, slash), query sorting, every required signed header missing/changed, TTL edges (exactly 600 s, floor near a finite deadline, refusal below 1 s, PUT 300 s) and secret-free errors. TestDownloadGrantHasDistinctDeadlines and TestR2MigrationKeepsDiskPins exist as the plan states; keep wire tests prove null object deadlines survive serialization while capability deadlines stay finite; disk-vs-R2 serialization both pinned. Fake-S3 tests cover matching/mismatched provider SHA, size, type and metadata, verification false until completion, foreign namespace, missing object, malicious error bodies, class/prefix mismatch, method/path/header tampering, bounded metadata, and a Download after an earlier URL's deadline succeeding without it; fake counters prove only HEAD/DELETE from the hub. Injected clocks only, no sleeps, no outbound network. Migration tests find the R2 migration by its _r2_blobs.sql suffix. Existing disk blob tests pass unchanged."
+  },
+  "extraLenses": [],
+  "runner": "BB_HOST=x-p35 BB_JOBS=4 just bb ",
+  "deps": {
+    "1": [],
+    "2": [
+      1
+    ],
+    "3": [
+      1,
+      2
+    ],
+    "4": [
+      2,
+      3
+    ],
+    "5": [
+      4
+    ],
+    "6": [
+      4,
+      5
+    ],
+    "7": [
+      4,
+      5
+    ],
+    "8": [
+      4,
+      5
+    ],
+    "9": [
+      6,
+      7,
+      8
+    ]
+  },
+  "tasks": [
+    {
+      "title": "Shared transfer contract (`internal/blobwire`), R2 metadata, stdlib SigV4 signer and the R2 schema migration",
+      "refs": "Plan Decisions \u00a71, \u00a72 (steps 1-3), \u00a73 (GET TTL), \u00a75 (tables); Task 1 Interfaces; Review Focus 2, 5, 6; Global Constraints; PROTOCOL \u00a72.2, \u00a72.7, \u00a711, \u00a714; docs/protocol/envelope.schema.json; docs/plans/receipts/2026-11-05-r2-spike.md",
+      "race": false,
+      "suite": "./internal/blobwire/ ./internal/blob/ ./internal/store/ ./internal/envelope/ ./internal/ids/",
+      "route": "sol",
+      "checks": [
+        "BB_HOST=x-boss BB_JOBS=4 just bb just validate-protocol",
+        "build2 go list -f '{{join .Imports \"\\n\"}}' ./internal/blobwire | grep -c '\\.' (must print 0: blobwire imports the standard library only)"
+      ],
+      "hazards": [
+        "Files exactly: create internal/blobwire/{types.go,types_test.go} and internal/blob/{r2sign.go,r2sign_test.go,r2meta.go,r2meta_test.go}; ONE next-free migration `<NNNN>_r2_blobs.sql` plus its tests in internal/store; edit internal/envelope/{types.go,schema.json}, docs/protocol/envelope.schema.json, internal/ids/ids.go and their schema/ID tests. Nothing in internal/hub, internal/httpapi, cmd/, internal/cli or internal/opclient. Commit the shared-surface edits separately from the new-package commit; the plan's commit message `feat(blob): define direct transfer metadata and R2 signer` heads the package commit.",
+        "blobwire types exactly as the Interfaces block: Integrity{Algorithm,Value,Verified}, Ref{BlobID,SHA256,SHA256Verified *bool,Integrity *Integrity,Size,RetentionClass,ExpiresAt *string}, UploadRequest{Size,SHA256,MediaType}, Request{Method,URL,Headers,ExpiresAt}, UploadGrant{Ref (embedded); Upload Request `upload`; CompleteURL `complete_url`}, DownloadGrant{... ExpiresAt `expires_at` (capability) and ObjectExpiresAt *string `object_expires_at` (object), RetentionClass}, State{State,RetentionClass,ExpiresAt *string,SHA256Verified *bool,Integrity *Integrity}, with the exact json tags. Include TestDownloadGrantHasDistinctDeadlines verbatim.",
+        "R2 serialization emits explicit `null` for keep expires_at/object_expires_at and requires non-null SHA256Verified and Integrity; legacy disk serialization OMITS these additive fields. Plain pointer tags cannot express both: add backend-aware MarshalJSON/serializers and test both. Server-recorded verification fields are authoritative, never accepted from a send request.",
+        "Signer signatures exactly: `PresignPUT(endpoint, bucket, key, accessID, secret string, now time.Time, ttl time.Duration, headers http.Header) (string, error)` and `PresignGET(endpoint, bucket, key, accessID, secret string, now time.Time, ttl time.Duration) (string, error)`. Scope `<date>/auto/s3/aws4_request`, payload `UNSIGNED-PAYLOAD`, injected now, no SDK. PUT must sign host, exact Content-Length, `If-None-Match: *`, `x-amz-checksum-sha256` (base64 raw digest as a SIGNED HEADER, never hoisted to the query), `Content-Type: application/octet-stream`, `Content-Disposition: attachment`, `Cache-Control: private, no-store`, `x-amz-meta-vecnet-checksum-profile` and `x-amz-meta-vecnet-checksum`; a missing required header is an error.",
+        "TTL rules pinned by tests: PUT exactly 300 s in every class; GET `X-Amz-Expires = floor(min(600s, objectExpiry - now))` for finite objects, 600 s for keep, refuse when under 1 s remains. Never issue a GET beyond the logical object deadline.",
+        "Known-vector test with a LITERAL canonical request, string-to-sign and signature that the test does not recompute with production code (take them from the spike's accepted vectors or published SigV4 examples). Also test space/plus/slash escaping, query sorting, changed type/length/checksum, no secret/signature/full URL in any error. '301 refusal' in Step 1: endpoint validation rejects anything but https with no userinfo/path/query/fragment, and the signer's HTTP use never follows redirects; record how you pinned it.",
+        "Migration tables exactly per Decisions \u00a75: blob_objects, blob_upload_requests, blob_object_refs, blob_r2_quota, blob_r2_storage, durable_blob_payloads, durable_blob_refs, blob_purge_tombstones, blob_delete_jobs, blob_usage_events, STRICT, with CHECKs for state/size/hash and class/deadline/key-prefix agreement (keep deadlines NULL, never a far-future sentinel), indexes on uploader+state and state+expiry, no signed-URL column and no preference table. TestR2MigrationKeepsDiskPins: existing blob, uploader, pin and quota rows stay byte-identical, then two objects with the same SHA and different IDs and expiries insert.",
+        "Blob IDs: `blo_` + 26 Crockford base32 characters encoding 128 bits from crypto/rand (first character 0-7); not a ULID, not time-based; IDs confer no authority.",
+        "Envelope schema: additive optional blob_id and R2 reference fields on attachments; internal/envelope/schema.json and docs/protocol/envelope.schema.json stay identical (validate-protocol drift check). Fixtures for a disk attachment and an ID-bearing R2 attachment in every class, keep with explicit nulls. Existing disk attachment fixtures validate unchanged."
+      ]
+    },
+    {
+      "title": "S3 metadata completion adapter and direct GET grants (`internal/blob/r2store`, no Worker)",
+      "refs": "Plan Decisions \u00a72 (steps 4-5: HEAD completion evidence), \u00a73 (signed GET, Range, TTL), \u00a71 (class-first keys); Task 2 Interfaces; Review Focus 2, 5, 6; docs/plans/receipts/2026-11-05-r2-spike.md",
+      "race": false,
+      "suite": "./internal/blob/ ./internal/blobwire/",
+      "route": "sol",
+      "checks": [
+        "build2 go list -f '{{join .Imports \"\\n\"}}' ./internal/blobwire | grep -c '\\.' (must print 0: blobwire imports the standard library only)"
+      ],
+      "hazards": [
+        "Files: create internal/blob/{r2store.go,r2store_test.go} and extend internal/blob/r2sign_test.go. No cloudflare/ package, Wrangler, Worker or edge secret; no hub wiring, routes, config, flags or migration.",
+        "Interfaces exactly: `R2Objects.Head(ctx, key) (ObjectProof, error)`, `Delete(ctx, key) error`, `Download(ctx, key, now, objectExpiry) (blobwire.Request, error)` with objectExpiry optional (nil for keep; record the exact Go type). ObjectProof carries length, ETag, stored metadata, optional provider checksum and the checksum profile.",
+        "Keys come only from persisted grant records: validate the class-first shape `attachments/v1/exp/<1h|6h|12h|1d|7d|30d>/<hub_namespace>/<blob_id>` or `attachments/v1/keep/<hub_namespace>/<blob_id>`; reject foreign namespaces, class/prefix mismatches and anything request-derived.",
+        "HEAD and DELETE are hub-private SigV4 requests through an injected http.Client/RoundTripper whose CheckRedirect refuses every redirect. Bound response headers, XML and error bodies (LimitReader). The hub never GETs object bodies: no verification GET, no full-body buffering or hashing. Fake-S3 counters must prove only HEAD/DELETE reached the fake from the hub.",
+        "Completion evidence per Task 0: prefer the provider-returned SHA-256 checksum on HEAD; otherwise immutable existence plus matching SIGNED checksum metadata, valid only because the spike proved R2 enforces the signed checksum. Mismatched SHA, size, type, disposition or cache policy rejects; verification stays false until a match. If evidence cannot bind the enforced checksum to the immutable key, fail closed and report it.",
+        "Errors are sanitized and typed: map provider XML codes to errors without URLs, query strings, signatures, raw XML or Authorization. Test a malicious provider error body containing a URL and a credential-looking string.",
+        "Download mints a fresh presign on every call from the injected now: floor(min(600s, remaining)) for finite objects, 600 s for keep with a null object deadline, refusal under 1 s. No URL stored or cached; a call after an earlier URL's deadline succeeds without it.",
+        "Authorization and the shared 30/60 s mint limiter belong to Task 4's hub wrapper (BlobDownload), not this adapter; do not add them here."
+      ]
+    },
+    {
+      "title": "Reservation state machine and durable message-content separation (`Transfers`, durable payloads, usage ledger)",
+      "refs": "Plan Decisions \u00a72 (quota and replay), \u00a74 (expiry, durable text, shared preference interface, retained storage bound), \u00a75; Task 3 Interfaces; Review Focus 3, 6, 8; hub-preferences plan Decisions 1",
+      "race": true,
+      "suite": "./internal/blob/ ./internal/hub/",
+      "route": "sol",
+      "checks": [],
+      "hazards": [
+        "LATER SLICE: requires prefs Tasks 1/2/4 and core publication merged on your base; consume them through a narrow stdlib-only reader interface injected into Transfers (internal/blob must not import internal/hub). If absent, return blocked; never stub prefs.",
+        "Files: create internal/blob/{transfers.go,transfers_test.go,durable.go,durable_test.go,usage.go}; modify internal/hub/{spill.go,spill_test.go,sources.go} and related source tests, internal/hub/avatar_test.go, and internal/blob/store.go only at shared token/purge seams. Keep the local disk store intact.",
+        "Interfaces exactly: `(*Transfers).Reserve(ctx, uploader, idem string, in blobwire.UploadRequest) (blobwire.UploadGrant, error)`, `Complete(ctx, uploader, blobID string) (blobwire.Ref, error)`, `State(ctx, blobID string) (blobwire.State, error)`, `Tick(ctx) error`, `PurgeHash(ctx, sha string) error`, `PutDurable(ctx, tx *sql.Tx, purpose, sha, media string, data []byte) error` (hub spill/source only).",
+        "One reservation transaction reads `preferences.LoadSnapshot(ctx, tx)` then `snapshot.Get(\"blobs.expiry\")`, reserves against the issue day's nonrefundable daily quota AND the hub storage quota (`storage_reserved_bytes + retained_bytes + new_size <= limit`), allocates blob_id/class/key and snapshots value/source/revision. Failed preference reads fail the grant closed. Preference changes affect new grants only; idempotent replays return the original snapshot and deadlines.",
+        "Quota CAS: reserved->accepted moves once; abandoned/failed reservations are never refunded that day; issue day survives midnight/restart; storage charge releases only after deletion is confirmed after upload_deadline+60 s; restart reconciliation never double-counts. HTTP HEAD runs outside transactions; recheck expiry, eligibility and purge tombstones after HEAD (purge between check and commit wins).",
+        "Durable spills and source raw JSON go to durable_blob_payloads (purpose spill|source_raw) inside the message transaction where possible; never a presign or the attachment quota; keep the separate text quota and error mapping; remove the R2 path's disk needSpillError retry only for R2 mode. Avatars unchanged.",
+        "Use small byte fixtures and injected limits (never allocate hundreds of MiB); injected crash points after upload, HEAD verification, metadata commit and deletion."
+      ]
+    },
+    {
+      "title": "Hub authorization, HTTP grant API, repeatable BlobDownload and optional R2 backend configuration",
+      "refs": "Plan Decisions \u00a72, \u00a73 (repeatable get, mint limit), \u00a74, \u00a76 (configuration, capabilities); Task 4 Interfaces; Review Focus 1, 3, 4, 5, 8; PROTOCOL \u00a72.7, \u00a711, \u00a714, \u00a715",
+      "race": true,
+      "suite": "./internal/hub/ ./internal/httpapi/ ./internal/blob/ ./cmd/vecnet-hub/ ./internal/testhub/",
+      "route": "sol",
+      "checks": [
+        "just isa-check",
+        "BB_HOST=x-boss BB_JOBS=4 just bb just validate-protocol"
+      ],
+      "hazards": [
+        "LATER SLICE: requires Task 3 and prefs Tasks 1/2/4 merged on your base.",
+        "Files: cmd/vecnet-hub/{main.go,main_test.go}, internal/hub/{hub.go,blobs.go,spill.go,history.go,send.go,tickers.go}, internal/blob/{token.go,token_test.go}, internal/httpapi/{blobs.go,blobs_test.go,server.go,middleware.go,ratelimit.go,admin.go}, internal/testhub/testhub.go; create internal/hub/{blob_transfers.go,blob_transfers_test.go}. Integrate after DB's shared hub/ticker/history edits.",
+        "Wrappers exactly: CreateBlobUpload(ctx,c,idem,in), CompleteBlobUpload(ctx,c,id), BlobDownload(ctx,c,token,sha,id), BlobStatus(ctx,c,sha,id). BlobDownload is the single mint path for HTTP, legacy 307, MCP and clients: recheck auth/state every call, then one concurrency-safe identity-keyed limiter of 30 mints per peer per rolling 60 s (429 blob_url_rate_limited, Retry-After, details.retry_after_seconds, no URL), then sign a fresh <=600 s GET; meter every issuance/denial; never store a URL. ReadBlob stays disk/durable-only and never reads R2 bytes.",
+        "Authorization before any state-specific error: unauthorized callers learn no existence, size, expiry or dedupe outcome; preserve principal and from_join checks; explicit original-uploader read of its own completed object; v2 delivery tokens bound to (recipient, sha256, blob_id), v1 disk tokens never authorize R2.",
+        "Config: --blob-backend disk|r2 (disk default), --r2-account-id, --r2-bucket, --r2-endpoint (exact `<account>.r2.cloudflarestorage.com` host), secret env only for access keys, --r2-checksum-profile sha256 only, --r2-storage-quota-bytes finite positive (default 5 GiB). Invalid R2 config fails startup; never fall back to disk; startup makes no cloud writes; diagnostics never show secrets. `PUT /v1/blobs` under R2 rejects 409 direct_upload_required before reading the body (test Expect: 100-continue).",
+        "Tests use two in-process servers (hub and fake S3) with real signer verification and an injected clock; no test uses real R2."
+      ]
+    },
+    {
+      "title": "Attachment expiry projections and transfer metering hooks",
+      "refs": "Plan Decisions \u00a74 (blob_states projection, error codes), \u00a75 (usage ledger); Task 5 Interfaces; Review Focus 4, 6; PROTOCOL \u00a72.2, \u00a72.7, \u00a711",
+      "race": false,
+      "suite": "./internal/hub/ ./internal/httpapi/ ./internal/blob/ ./internal/opapi/ ./internal/envelope/",
+      "route": "sol",
+      "checks": [
+        "BB_HOST=x-boss BB_JOBS=4 just bb just validate-protocol",
+        "build2 go list -deps ./cmd/vecnet | grep -c -E 'modernc.org/sqlite|github.com/XertroV/vecnet/internal/store' (must print 0)"
+      ],
+      "hazards": [
+        "Files: internal/hub/{history.go,spill.go (delivery decoration)}, internal/httpapi/{threads.go,events.go,op.go}, internal/opapi/types.go, envelope schema fixtures, related tests; create internal/hub/{blob_states.go,blob_states_test.go}; extend internal/blob/usage.go and its tests.",
+        "`ProjectBlobStates(ctx, caller, messages) (map[string]blobwire.State, error)` returns states only for caller-visible attachments, derived from the clock even before the ticker runs; stored Message and event bodies are never edited. New R2 messages carry references only: delivery decoration omits signed URLs and tokenized blob_url for R2 attachments; legacy disk/durable decoration unchanged.",
+        "Authorized reads after expiry return 410 blob_expired, distinct from 410 blob_purged; unauthorized callers get the generic error; 409 upload_incomplete; 503 blob_unavailable for provider loss before expiry. Test duration-1ms/duration/duration+1ms for every class without GC, and keep beyond 30 d while referenced.",
+        "Usage: download_grant_issued once per successful mint with a unique issuance id, download_grant_rate_limited per denial, caller/blob id/status/time only, byte_count 0, never a URL or invented download bytes; retried event writes dedupe, distinct gets do not."
+      ]
+    },
+    {
+      "title": "Shared Go direct-transfer client (`internal/blobclient`), CLI `vecnet blob get` and TUI expiry display",
+      "refs": "Plan Decisions \u00a73 (client transport, repeatable get), \u00a74 (expired labels), \u00a76; Task 6 Interfaces; Review Focus 1, 5, 6; PROTOCOL \u00a713.1, \u00a713.7",
+      "race": false,
+      "suite": "./internal/blobclient/ ./internal/cli/ ./internal/opclient/ ./internal/tui/ ./internal/opapi/",
+      "route": "sol",
+      "checks": [
+        "BB_HOST=x-boss BB_JOBS=4 just bb GOOS=windows CGO_ENABLED=0 go build -o /dev/null ./cmd/vecnet",
+        "build2 go list -deps ./cmd/vecnet | grep -c -E 'modernc.org/sqlite|github.com/XertroV/vecnet/internal/store' (must print 0)"
+      ],
+      "hazards": [
+        "Files: create internal/blobclient/{client.go,client_test.go}, internal/cli/{blob.go,blob_test.go}; modify internal/cli/{commands.go,client.go,cli_test.go,guide.md}, internal/opclient/{client.go,client_test.go}, internal/opapi/types.go, internal/tui/{tui.go (API interface),screen_chat.go,screen_chat_test.go}, TUI goldens and CLI help tests. Coordinate internal/cli/guide.md and opapi DTO edits with prefs Task 5 (serialize).",
+        "blobclient imports blobwire and the standard library only; `go list -deps ./cmd/vecnet` gains no SQLite or internal/store; record stripped CLI size before/after on the build box and explain any increase.",
+        "Upload(ctx, reader io.ReadSeeker, size, media, idem) hashes SHA-256 in one pass, rewinds, issues the grant, PUTs on a separate credential-free transport (no bearer, no cookies, no redirects, fixed Content-Length, signed headers verbatim) and completes. Download(ctx, sha, id, max) calls the authenticated get endpoint anew every time, validates origin against capabilities and the deadline, bounds bytes without Content-Length and verifies full-object SHA-256; Range reads never claim a full digest.",
+        "`vecnet blob get SHA [--blob-id ID] --out PATH [--json]`: refuses to overwrite by default, streams to a private temp file, verifies, atomic rename; expiry/purge exit 1 with machine-readable blob_expired/blob_purged and no output file; blob_url_rate_limited surfaces retry delay without unbounded retries. JSON never contains a transfer URL. Help/guide carries the exact sentence: \"URLs are short-lived; call get again whenever you need the file, as long as it hasn't expired.\"",
+        "Tests never touch the real config: VECNET_CONFIG, XDG_CONFIG_HOME, XDG_CACHE_HOME and HOME point at t.TempDir() through getenv. TUI shows `[attachment expired: <name>]` and keeps preview text. Update only justified goldens."
+      ]
+    },
+    {
+      "title": "Web direct uploads/downloads, retention selector in the shared Settings store and quota UX",
+      "refs": "Plan Decisions \u00a73, \u00a74 (UI labels, hosted off confirmation, storage display), Migration and Settings ownership; Task 7 Interfaces; Review Focus 1, 5, 6, 8; hub-preferences plan Task 6",
+      "race": false,
+      "suite": "./internal/httpapi/ ./internal/ui/...",
+      "route": "opus",
+      "shots": "r2",
+      "checks": [
+        "BB_HOST=x-boss BB_JOBS=4 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
+        "BB_HOST=x-boss BB_JOBS=4 just bb build2 node scripts/ui/r2-blobs.mjs"
+      ],
+      "reviewChecks": [
+        "BB_HOST=x-boss BB_JOBS=4 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
+        "BB_HOST=x-boss BB_JOBS=4 just bb SHOTS_DIR=/home/xertrov/src/vecnet4/.scratch/vecnet/build-r2/review-shots/07 build2 node scripts/ui/r2-blobs.mjs"
+      ],
+      "hazards": [
+        "LATER SLICE: requires R2 Tasks 4-5 and prefs Task 6 (settings.js, settings-model.js, both List/Policy views) merged on your base. prefs owns the Settings store: contribute the blobs.expiry row, hosted off confirmation and storage used/limit display through its draft model; never a second retention panel, store or confirmation modal. Serialize edits to api.js and the settings files.",
+        "Files: internal/ui/static/{api.js,attach.js,attach-model.js,thread.js,thread-aside.js,aside-model.js}, associated CSS, internal/ui/jstest/attach.test.mjs and related thread/aside/API tests; create internal/ui/static/blob-hash.js, its tests and scripts/ui/r2-blobs.mjs; the CSP connect-src gains only the configured exact R2 S3 origin, never `*`.",
+        "External PUT/GET use credentials:'omit' / withCredentials=false, no bearer, refuse redirects and unexpected responseURL; SHA-256 via Web Crypto in a Worker or yielding bounded chunks (no MD5); fetch into a Blob and download as an attachment with a sanitized name; never inline SVG/HTML/untrusted images. Models and localStorage keep references, never signed URLs; each download click re-mints.",
+        "Shots: docs/plans/shots/oui/r2-<state>-<desk|phone>.png at 1440x900 and 390x844 for queued, uploading, verifying, ready, failed, expired, purged, kept, retention selector, off confirmation, quota full and full-text expansion, listed in docs/plans/shots/oui/README.md. Fixture services only; wait on page state, never elapsed time. No live hub or cloud."
+      ]
+    },
+    {
+      "title": "MCP signed-URL put/get/status tools, connectors and source ingress",
+      "refs": "Plan Decisions \u00a73, Security (ephemeral URLs in MCP model context), \u00a76 (MCP option b, connectors); Task 8 Interfaces; Review Focus 1, 5, 6; PROTOCOL \u00a74.3",
+      "race": false,
+      "suite": "./internal/mcpserver/ ./internal/hub/",
+      "route": "sol",
+      "checks": [
+        "BB_HOST=x-boss BB_JOBS=4 just bb just ln-check"
+      ],
+      "hazards": [
+        "LATER SLICE: requires R2 Tasks 4-5 merged. This task owns internal/mcpserver/{tools.go,tools_test.go,inbox_token_test.go}, tool descriptions/schemas, guide/resource/history serializers and guide tests, plus connectors/hub-client/src/{ports.ts,wire.ts,client.ts} and fake/real hub tests, connectors/launcher/src/{session.ts,daemon.ts} and E2E tests, internal/hub/sources.go integration tests and connector setup docs. Rebase on mcp-first/launcher/hub-notices first.",
+        "vecnet_blob_put is phase-discriminated: disk keeps data_base64; R2 `{phase:\"grant\",size,sha256,media_type,idempotency_key}` returns the UploadGrant and `{phase:\"complete\",blob_id}` returns the HEAD completion; data_base64 under R2 is rejected before decoding with direct_upload_required. vecnet_blob_get returns a fresh <=600 s URL via the common BlobDownload path, never base64 for R2; pagination/offset args rejected for R2. vecnet_blob_status is metadata-only.",
+        "URLs appear ONLY in explicit put/get results through one narrow serialization exception; inbox/history/resources/events/delivered messages stay token- and URL-free (keep TestInboxCarriesNoBlobToken). Fly proxy cap stays 0 bytes; the handler never calls R2 file-body routes. Tool text includes \"URLs are short-lived; call get again whenever you need the file, as long as it hasn't expired.\" and never a live sample URL.",
+        "Connectors: credential-free S3 transport, no cookies, no redirects, bounded bytes; fetchBlob builds the get endpoint from the R2 reference or validates a same-origin legacy hub URL; webhook ingress never fetches arbitrary origin_url. Fixture-only ln-e2e: fake object store sees full bytes, fake hub transfer counters stay zero."
+      ]
+    },
+    {
+      "title": "Protocol, operator runbook and whole-surface R2 review",
+      "refs": "Plan Decisions \u00a71-\u00a76, Operator setup runbook, Resolved decisions; Task 9; Review Focus 1-9; PROTOCOL \u00a72.2, \u00a72.7, \u00a74.3, \u00a78.1, \u00a711, \u00a714, \u00a716.3",
+      "race": false,
+      "suite": "./...",
+      "route": "sol",
+      "checks": [
+        "BB_HOST=x-boss BB_JOBS=4 just bb just validate-protocol",
+        "BB_HOST=x-boss BB_JOBS=4 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
+        "BB_HOST=x-boss BB_JOBS=4 just bb just ln-check"
+      ],
+      "hazards": [
+        "Edit only docs/PROTOCOL.md, docs/DEPLOY.md, docs/business/pricing-analysis.md \u00a71.3/\u00a78, docs/connectors/{dots.md,grokbot.md,github.md}, the connector hub-client README, README.md, CHANGELOG.md, fly.toml nonsecret comments, Docker build-context exclusions for spike credential files, and protocol examples/fixtures. Merge PROTOCOL/schema edits by section; never rewrite other plans' sections.",
+        "Docs state disk and R2 contracts separately: immutable object expiry vs fresh <=600 s GET capabilities, PUT 300 s, repeatable get, reference-only messages, 30/60 s per-peer mint limit, blob_url_rate_limited retry details, grandfathered disk files, URL-in-model-context risk, the six class-first lifecycle rules and preserved multipart abort, and that lifecycle/account acceptance is still outstanding. Add a gate that no presign or secret is in tracked fixtures.",
+        "No deployment, bucket configuration or provider call; do not claim provider acceptance beyond the Task 0 receipt."
+      ]
+    }
+  ]
+}

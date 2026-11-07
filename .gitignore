@@ -28,3 +28,7 @@ backups/
 .scratch/vecnet/build-hook-hygiene/
 .scratch/vecnet/bb-lane/
 !scripts/bb/bin/
+!npm/bin/
+__pycache__/
+.playwright-mcp/
+.superpowers/sdd/agent-onboarding/progress.md

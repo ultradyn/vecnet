@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SPILL, TEXT_CAP, anyGrokbot, buildSend, canSend, composePriority, counter, eligible, errorText, GROK_QUOTA_DETAIL, GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, GROK_QUOTA_TITLE, grokQuotaNote, keepKey, keyFor, matches, pendingMatches, priorityLocked, sendRefusal } from '../static/compose-model.js';
+import { SPILL, TEXT_CAP, anyGrokbot, buildSend, canSend, composePriority, counter, draftOf, eligible, errorText, GROK_QUOTA_DETAIL, GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, GROK_QUOTA_TITLE, grokQuotaNote, keepKey, keyFor, matches, pendingMatches, priorityLocked, sendRefusal } from '../static/compose-model.js';
 import { SPILL_SLOT } from '../static/attach-model.js';
 
 const peers = [
@@ -336,4 +336,17 @@ test('failure then recipient edit recomputes automatic priority', () => {
 
   assert.equal(composePriority({ manual: true, locked: priorityLocked({ sending: false, pending, form: swapped }), current: 'hold', recipients: ['peer_g'], peers }), 'hold', 'manual hold was overwritten');
   assert.equal(composePriority({ manual: false, locked: priorityLocked({ sending: true, pending, form: swapped }), current: 'wake', recipients: ['peer_g'], peers }), 'wake', 'in-flight send changed priority');
+});
+
+test('draftOf keeps the id recipients once each and a priority the form offers', () => {
+  assert.deepEqual(draftOf({ recipients: ['peer_a'], priority: 'wake_idle' }), { recipients: ['peer_a'], priority: 'wake_idle' });
+  assert.deepEqual(draftOf({ recipients: ['peer_a', 'peer_a', 'codex', 'peer_x"><img>', 7, 'team_t'] }), { recipients: ['peer_a', 'team_t'], priority: 'wake' });
+  assert.deepEqual(draftOf({ recipients: ['peer_a'], priority: 'urgent' }), { recipients: ['peer_a'], priority: 'wake' });
+  assert.equal(draftOf({ recipients: ['codex'] }), null);
+  assert.equal(draftOf({ recipients: 'peer_a' }), null);
+  assert.equal(draftOf(null), null);
+  assert.equal(draftOf(undefined), null);
+  // What the draft makes is a valid send once there is text.
+  const d = draftOf({ recipients: ['peer_a'], priority: 'wake_idle' });
+  assert.equal(buildSend({ ...d, text: 'hi' }, 'k').priority, 'wake_idle');
 });

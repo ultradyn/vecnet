@@ -16,6 +16,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opclient"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 // noticeAt is a signed-looking notice for the banner tests. The TUI never
@@ -131,18 +132,18 @@ func TestNoticeBanner140x42(t *testing.T) {
 
 	// Priority is moving > restart > maintenance, whatever the list order.
 	restart := noticeAt("ntc_01JD3S6G8J0M2P4R6T8V0X0003", "restart", "Kernel update", 20*time.Minute, "")
-	got := ansi.Strip(viewNotices([]envelope.HubNotice{maintenanceNotice(), restart}, fixedNow, time.UTC, 140))
+	got := ansi.Strip(viewNotices(theme.New(theme.TrueColor, true), []envelope.HubNotice{maintenanceNotice(), restart}, fixedNow, time.UTC, 140))
 	if want := "! RESTART in 20m 08:01  Kernel update  (+1 more)"; strings.TrimRight(got, " ") != want {
 		t.Fatalf("restart banner %q, want %q", got, want)
 	}
-	got = ansi.Strip(viewNotices([]envelope.HubNotice{maintenanceNotice()}, fixedNow, time.UTC, 140))
+	got = ansi.Strip(viewNotices(theme.New(theme.TrueColor, true), []envelope.HubNotice{maintenanceNotice()}, fixedNow, time.UTC, 140))
 	if want := "! MAINTENANCE in 2h 09:41  Database vacuum, expect slow reads"; strings.TrimRight(got, " ") != want {
 		t.Fatalf("maintenance banner %q, want %q", got, want)
 	}
 	// A long message gives way before the count does.
 	long := movingNotice()
 	long.Message = strings.Repeat("word ", 40)
-	got = ansi.Strip(viewNotices([]envelope.HubNotice{maintenanceNotice(), long}, fixedNow, time.UTC, 80))
+	got = ansi.Strip(viewNotices(theme.New(theme.TrueColor, true), []envelope.HubNotice{maintenanceNotice(), long}, fixedNow, time.UTC, 80))
 	if lipgloss.Width(got) != 80 || !strings.HasSuffix(strings.TrimRight(got, " "), "...  (+1 more)") || !strings.HasPrefix(got, "! MOVING in 18h Nov 03 02:00 -> vecnet.xk.io  word word") {
 		t.Fatalf("narrow banner %q", got)
 	}
@@ -161,7 +162,7 @@ func TestNoticeBannerHostile(t *testing.T) {
 	}
 	hostile := noticeAt("ntc_01JD3S6G8J0M2P4R6T8V0X0004", "moving", msg, twoAM, "https://evil‮.example")
 	for _, w := range []int{80, 140, 30} {
-		out := viewNotices([]envelope.HubNotice{hostile}, fixedNow, time.UTC, w)
+		out := viewNotices(theme.New(theme.TrueColor, true), []envelope.HubNotice{hostile}, fixedNow, time.UTC, w)
 		if !sgrOnly.MatchString(out) {
 			t.Fatalf("w=%d: an escape other than SGR reached the terminal: %q", w, out)
 		}
@@ -178,7 +179,7 @@ func TestNoticeBannerHostile(t *testing.T) {
 			t.Fatalf("w=%d: banner is %d cells: %q", w, got, plain)
 		}
 	}
-	if plain := ansi.Strip(viewNotices([]envelope.HubNotice{hostile}, fixedNow, time.UTC, 140)); !strings.Contains(plain, "clear next line") {
+	if plain := ansi.Strip(viewNotices(theme.New(theme.TrueColor, true), []envelope.HubNotice{hostile}, fixedNow, time.UTC, 140)); !strings.Contains(plain, "clear next line") {
 		t.Fatalf("line breaks are not spaces: %q", plain)
 	}
 
@@ -338,7 +339,7 @@ func TestRestartingConnState(t *testing.T) {
 	if ConnRestarting != "restarting" {
 		t.Fatalf("ConnRestarting = %q", ConnRestarting)
 	}
-	if m.connStyle().GetForeground() != styleWarn.GetForeground() {
+	if m.connStyle().GetForeground() != m.th.Fg(theme.Warn).GetForeground() {
 		t.Fatal("restarting is not drawn as a warning")
 	}
 	for _, size := range [][2]int{{140, 42}, {80, 24}} {

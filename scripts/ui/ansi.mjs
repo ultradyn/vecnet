@@ -13,14 +13,19 @@ function color(n) {
 // terminal instead of leaving a gap. tmux.mjs sizes its viewport from it.
 export const LINE = 18.5;
 
-export function ansiHTML(input, { columns = 140, rows = 42 } = {}) {
+// PAGES are the terminal's own colours: the dark default and, for shots with
+// VECNET_TUI_BG=light, a white page (docs/design/tui-color.md §10.3).
+const PAGES = { dark: { fg: '#f3f4f6', bg: '#0b0f19' }, light: { fg: '#111827', bg: '#ffffff' } };
+
+export function ansiHTML(input, { columns = 140, rows = 42, light = false } = {}) {
+  const page = light ? PAGES.light : PAGES.dark;
   const state = {};
   let output = '', pos = 0;
   const text = input.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\|$)/g, '').replace(/\x1b[P^_][\s\S]*?(?:\x1b\\|$)/g, '');
   const tokens = /\x1b\[([0-9;:]*)m|\x1b\[[0-?]*[ -/]*[@-~]|\x1b./g;
   const append = raw => {
     const safe = raw.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');
-    let fg = state.fg || '#f3f4f6', bg = state.bg || '#0b0f19';
+    let fg = state.fg || page.fg, bg = state.bg || page.bg;
     if (state.inverse) [fg, bg] = [bg, fg];
     output += `<span style="color:${fg};background:${bg};font-weight:${state.bold ? 700 : 400};opacity:${state.dim ? .6 : 1};text-decoration:${state.underline ? 'underline' : 'none'}">${escape(safe)}</span>`;
   };
@@ -52,6 +57,6 @@ export function ansiHTML(input, { columns = 140, rows = 42 } = {}) {
     }
   }
   append(text.slice(pos));
-  return `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;background:#0b0f19;color:#f3f4f6;color-scheme:dark}pre{margin:0;padding:16px;width:${columns}ch;height:${rows * LINE}px;font:14px/${LINE}px 'JetBrains Mono',ui-monospace,monospace;white-space:pre;overflow:hidden}</style><pre>${output}</pre>`;
+  return `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;background:${page.bg};color:${page.fg};color-scheme:${light ? 'light' : 'dark'}}pre{margin:0;padding:16px;width:${columns}ch;height:${rows * LINE}px;font:14px/${LINE}px 'JetBrains Mono',ui-monospace,monospace;white-space:pre;overflow:hidden}</style><pre>${output}</pre>`;
 }
 export default ansiHTML;

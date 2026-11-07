@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -62,6 +63,77 @@ func Fingerprint(pubkey string) (string, error) {
 	}
 	hash := sha256.Sum256(pub)
 	return "SHA256:" + base64.RawStdEncoding.EncodeToString(hash[:]), nil
+}
+
+// Refusals from CheckHubURL. The text names the rule and no part of the input.
+var (
+	ErrHubPassword = errors.New("the hub URL contains a password and must not include credentials; put the profile secret in its own field")
+	ErrHubQuery    = errors.New("the hub URL contains a query")
+	ErrHubFragment = errors.New("the hub URL contains a fragment")
+	ErrHubForm     = errors.New("the hub is not a URL like https://hub.example")
+	ErrHubScheme   = errors.New("the hub URL scheme must be https, or http on the LAN")
+	// ErrPlainHTTP is the cleartext-bearer refusal. An explicit opt-in may
+	// bypass it. Userinfo, a query and a fragment may not.
+	ErrPlainHTTP = errors.New("the hub URL is plain http on a public host, so the credential would cross the internet in the clear; use https, or pass --allow-insecure-http to enrol (or set VECNET_ALLOW_INSECURE_HTTP=1) if you mean it")
+)
+
+// CheckHubURL refuses a hub URL that is not absolute https, or http on the
+// LAN, or that carries userinfo, a query or a fragment. A path prefix is
+// allowed. The error is one of the sentinels above and names no part of raw.
+func CheckHubURL(raw string) error {
+	if strings.ContainsAny(raw, "\r\n\t") {
+		return ErrHubForm
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ErrHubForm
+	}
+	if u.User != nil {
+		return ErrHubPassword
+	}
+	if u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "?") {
+		return ErrHubQuery
+	}
+	if u.Fragment != "" || strings.Contains(raw, "#") {
+		return ErrHubFragment
+	}
+	if u.Opaque != "" || u.Host == "" || u.Scheme == "" {
+		return ErrHubForm
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if lanHost(u.Hostname()) {
+			return nil
+		}
+		return ErrPlainHTTP
+	default:
+		return ErrHubScheme
+	}
+}
+
+// cgnat is 100.64.0.0/10 (Tailscale and other overlays live here).
+var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+
+// lanHost is the CLI's plain-http allowance: loopback, private, link-local,
+// CGNAT, localhost, a single-label name, or a name under .local, .lan,
+// .home.arpa or .internal. Names are not resolved.
+func lanHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if a, err := netip.ParseAddr(host); err == nil {
+		a = a.Unmap()
+		return a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || cgnat.Contains(a)
+	}
+	if host == "localhost" || !strings.Contains(host, ".") {
+		return true
+	}
+	for _, suf := range []string{".localhost", ".local", ".lan", ".home.arpa", ".internal"} {
+		if strings.HasSuffix(host, suf) {
+			return true
+		}
+	}
+	return false
 }
 
 // NormalizeURL normalizes an absolute HTTP(S) hub base URL. Credentials,
