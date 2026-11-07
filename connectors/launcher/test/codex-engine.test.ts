@@ -38,6 +38,13 @@ function checkRequests(requests: typeof allRequests) {
   }
 }
 type Item = { id: string; priority: string; value?: string };
+// R35: these older synthetic fixtures explicitly model attempts made by the
+// fixture's binding/source. This is test data, never a production migration.
+function knownFixtureScope(binding: Binding, sourceEnv: Record<string, string>) {
+  const allowed = ['HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR', 'VECNET_CONFIG'];
+  return { profile: binding.profile, ...(binding.as ? { as: binding.as } : {}), hub: binding.hub, caller: binding.caller,
+    env: { ...Object.fromEntries(Object.entries(sourceEnv).filter(([key]) => allowed.includes(key))), VECNET_CODEX_AUTO_DELIVERY: '0' } };
+}
 async function harness(t: TestContext, options: { binding?: Partial<Binding>; status?: unknown; wrap?: (rpc: CodexRpc) => CodexRpc; seed?: InflightRow; claiming?: string; unreachable?: boolean; refusedVersion?: boolean; releaseFailure?: boolean; history?: number; coldResumeIdleDelayMs?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vn-e-')), clock = fakeClock(), log = memoryLog();
   let activity = 0, pendingRpcs = 0, pendingHooks = 0, watchArms = 0;
@@ -72,8 +79,14 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
     CODEX_HOME: join(dir, 'codex-home'), VECNET_CODEX_BINDINGS: join(dir, 'bindings.json'), XDG_RUNTIME_DIR: join(dir, 'runtime-home'), SECRET_TOKEN: 'never-forward' };
   const binding: Binding = { profile: 'test', as: 'peer', hub: 'https://hub.invalid', caller: 'peer_pinned', codexHome: dirname(dirname(fake.socketPath)),
     threadId: 'thread', createdAt: 0, expiresAt: 100 * hour, attended: false, origin: 'explicit', ...options.binding };
-  if (options.seed) kv.set('inflight:' + options.seed.key, JSON.stringify(options.seed));
-  if (options.claiming) { kv.set('claiming:' + options.claiming, JSON.stringify({ threadId: 'thread', at: 0 })); writeFileSync(claims, JSON.stringify({ [options.claiming]: ['w1'] })); }
+  if (options.seed) {
+    kv.set('inflight:' + options.seed.key, JSON.stringify(options.seed));
+    kv.set('attempt:' + options.seed.key, JSON.stringify({ ...knownFixtureScope(binding, env), row: options.seed }));
+  }
+  if (options.claiming) {
+    kv.set('claiming:' + options.claiming, JSON.stringify({ threadId: 'thread', at: 0, scope: knownFixtureScope(binding, env) }));
+    writeFileSync(claims, JSON.stringify({ [options.claiming]: ['w1'] }));
+  }
   let opens = 0, current: CodexRpc | undefined;
   const deps: EngineDeps = { clock, log, kv, vecnetBin: bin, env, euid: process.geteuid!(), debounceMs: 1, minGapMs: 5,
     openRpc: async o => { opens++; if (options.unreachable) throw new CodexRpcError(-1, 'unreachable');
@@ -104,7 +117,9 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
     for (;;) {
       await eventually(() => pendingRpcs === 0 && pendingHooks === 0, 'RPC and hook completion');
       const before = activity;
-      if (current && engine.state() === 'ready') {
+      // Replacement tests keep the retired engine handle but open a new
+      // current connection. The barrier must follow that connection.
+      if (current) {
         try { await current.call('thread/read', { threadId: 'thread' }, 1000); } catch {}
       }
       await Promise.resolve();
@@ -792,6 +807,7 @@ test('stored legacy receipt key survives restart verbatim and settles only from 
   // identities even after new sends switch to hub-scoped hashes.
   const legacy = row({ key: 'vn.06a72d8141763bd4d9a52920' });
   h.kv.set('inflight:' + legacy.key, JSON.stringify(legacy));
+  h.kv.set('attempt:' + legacy.key, JSON.stringify({ ...knownFixtureScope(h.binding, h.deps.env), row: legacy }));
   const rpc = await openCodexRpc({ codexHome: h.binding.codexHome, euid: h.deps.euid, log: h.log, timeoutMs: 1000 });
   h.fake.withholdNextItem();
   try {
@@ -1497,8 +1513,12 @@ for (const response of ['capacity-refusal', 'empty', 'truncated', 'malformed', '
   for (const kind of ['claiming', 'releasing']) test(`ordinary release retains ${kind} after ${response} and progresses after capacity frees`, async t => {
     const h = await harness(t, { status: active });
     const original = row(), privateKey = kind + ':' + original.claim;
-    if (kind === 'claiming') h.kv.set(privateKey, JSON.stringify({ threadId: 'thread', at: 0 }));
-    else { h.kv.set('inflight:' + original.key, JSON.stringify(original)); h.kv.set(privateKey, JSON.stringify(original)); }
+    if (kind === 'claiming') h.kv.set(privateKey, JSON.stringify({ threadId: 'thread', at: 0, scope: knownFixtureScope(h.binding, h.deps.env) }));
+    else {
+      const attempt = { ...knownFixtureScope(h.binding, h.deps.env), row: original };
+      h.kv.set('inflight:' + original.key, JSON.stringify(original)); h.kv.set(privateKey, JSON.stringify({ ...original, attempt }));
+      h.kv.set('attempt:' + original.key, JSON.stringify(attempt));
+    }
     const originalPrivate = h.kv.get(privateKey);
     control(h, { releaseResponse: response }); await h.restart();
     assert.equal(h.kv.get(privateKey), originalPrivate, 'exit zero or arbitrary JSON is not committed release confirmation');
@@ -1738,4 +1758,215 @@ test('a receipt during the fresh history checkpoint prevents a new claim', async
   finish(); await wake; await h.sync();
   assert.equal(h.hooks().filter(r => r.argv.includes('--event')).length, before, 'recheck settlement after the awaited checkpoint before claiming');
   assert.equal(h.sends().length, 0); assert.ok(intent(h, 'vn.seed'));
+});
+
+// Task5a2 fixround1 primary regressions. Replacement happens BEFORE the first
+// receipt/settlement; all paths/configs and app-server requests remain private.
+async function replaceAttemptOwner(h: ReceiptHarness) {
+  await h.engine.stop();
+  const config = join(dirname(h.deps.env.VECNET_CONFIG), 'replacement-plan.json');
+  const claims = config + '.claims'; writeFileSync(claims, '{}');
+  writeFileSync(config, JSON.stringify({ ...h.plan, claims, items: [], events: [],
+    receiptFailure: '', receiptResponse: '', releaseFailure: false, hookFailure: '', hookGate: '', releaseGate: '', receiptGate: '' }));
+  let receiptsSeen = 0;
+  const next = createEngine({ ...h.binding, profile: 'replacement', as: 'replacement-as', caller: 'replacement_caller' },
+    { ...h.deps, env: { ...h.deps.env, VECNET_CONFIG: config }, openRpc: async options => {
+      const rpc = await h.deps.openRpc(options);
+      return { ...rpc, onNotification(fn) { rpc.onNotification((method, params) => {
+        fn(method, params);
+        if (method === 'item/started' || method === 'item/completed') receiptsSeen++;
+      }); } };
+    } });
+  next.start();
+  try { await eventually(() => next.state() === 'ready', 'replacement engine ready'); await h.sync(); }
+  catch (e) { await next.stop(); throw e; }
+  return Object.assign(next, { receiptsSeen: () => receiptsSeen });
+}
+function assertOriginalAttemptScope(h: ReceiptHarness, argv: string[], childEnv: Record<string, string>, r: InflightRow) {
+  assert.equal(arg(argv, '--net'), 'test'); assert.equal(arg(argv, '--as'), 'peer');
+  assert.equal(arg(argv, '--claim'), r.claim);
+  assert.equal(childEnv.VECNET_CONFIG, h.deps.env.VECNET_CONFIG, 'child uses source A config, not replacement source B');
+  assert.equal(childEnv.HOME, h.deps.env.HOME); assert.equal(childEnv.XDG_CONFIG_HOME, h.deps.env.XDG_CONFIG_HOME);
+  assert.equal(childEnv.XDG_RUNTIME_DIR, h.deps.env.XDG_RUNTIME_DIR);
+  assert.equal(childEnv.VECNET_CODEX_AUTO_DELIVERY, '0');
+  assert.equal(childEnv.SECRET_TOKEN, undefined); assert.equal(childEnv.CODEX_HOME, undefined);
+}
+
+test('fix1 immutable attempt provenance exists before the first potentially accepted RPC', async t => {
+  let h: ReceiptHarness, captured: string | undefined;
+  h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      if (method === 'turn/steer') {
+        const key = (params as any).clientUserMessageId;
+        captured = h.kv.get('attempt:' + key);
+        assert.ok(captured, 'durable original send scope must precede the first RPC');
+        const saved = JSON.parse(captured);
+        assert.equal(saved.profile, 'test'); assert.equal(saved.as, 'peer');
+        assert.equal(saved.hub, 'https://hub.invalid'); assert.equal(saved.caller, 'peer_pinned');
+        assert.equal(saved.env.VECNET_CONFIG, h.deps.env.VECNET_CONFIG);
+        assert.equal(saved.env.SECRET_TOKEN, undefined); assert.equal(saved.env.CODEX_HOME, undefined);
+        assert.equal(saved.row.key, key); assert.equal(saved.row.claim, h.rows()[0].claim);
+        assert.deepEqual(saved.row.deliveries, ['w1', 'w2']);
+      }
+      return rpc.call<T>(method, params, ms);
+    },
+  }) });
+  h.fake.withholdNextItem(); await h.wake([{ id: 'w1', priority: 'wake' }, { id: 'w2', priority: 'wake' }]);
+  const r = h.rows()[0]; assert.ok(captured);
+  assert.equal(h.kv.get('attempt:' + r.key), captured, 'acceptance cannot rewrite immutable provenance');
+  await h.restart();
+  assert.equal(h.kv.get('attempt:' + r.key), captured, 'history recovery cannot rewrite immutable provenance');
+  assert.equal(h.sends().length, 1); assert.equal(h.releases().length, 0);
+});
+
+for (const outcome of ['accepted', 'ambiguous']) for (const evidence of ['receipt', 'history']) {
+  test(`fix1 ${outcome} attempt retains source A through replacement before first ${evidence}`, async t => {
+    const h = await harness(t, { wrap: outcome === 'ambiguous' ? ambiguousAfterAccept() : undefined });
+    h.fake.withholdNextItem(); await h.wake([{ id: 'w1', priority: 'wake' }, { id: 'w2', priority: 'wake' }]);
+    const original = structuredClone(h.rows()[0]); assert.ok(original);
+    assert.equal(h.kv.get('settling:' + original.key), undefined, 'no receipt before replacement');
+    await h.engine.stop();
+    if (evidence === 'history') { h.fake.recordLater(original.key, h.clock.now()); h.clock.advance(0); }
+    control(h, { receiptFailure: 'commit-output-lost' });
+    const replacement = await replaceAttemptOwner(h);
+    try {
+      if (evidence === 'receipt') {
+        notifyReceipt(h, original.key);
+        await eventually(() => replacement.receiptsSeen() >= 1, 'replacement consumed first receipt');
+      }
+      await h.sync(); await eventually(() => receiptHooks(h).length === 1, 'first recovered receipt publication');
+      const publication = receiptHooks(h)[0];
+      assertOriginalAttemptScope(h, publication.argv, publication.env, original);
+      assert.equal(arg(publication.argv, '--receipt-key'), original.key);
+      assert.equal(arg(publication.argv, '--expect-hub'), 'https://hub.invalid');
+      assert.equal(arg(publication.argv, '--expect-caller'), 'peer_pinned');
+      assert.deepEqual(arg(publication.argv, '--delivery-ids').split(','), ['w1', 'w2']);
+      const saved = intent(h, original.key); assert.ok(saved, 'source A response loss retains original intent');
+      assert.ok(h.kv.get('attempt:' + original.key)); assert.ok(h.kv.get('inflight:' + original.key));
+      assert.equal(h.sends().length, 1); assert.equal(h.releases().length, 0);
+      control(h, { receiptFailure: '' }); h.clock.advance(1000); await h.sync();
+      assert.equal(receiptHooks(h).length, 2);
+      assert.deepEqual(receiptHooks(h)[1].argv, publication.argv);
+      assert.equal(receiptHooks(h)[1].env.VECNET_CONFIG, h.deps.env.VECNET_CONFIG);
+      assert.equal(intent(h, original.key), undefined); assert.equal(h.kv.get('attempt:' + original.key), undefined);
+      assert.equal(h.rows().length, 0); assert.equal(h.sends().length, 1); assert.equal(h.releases().length, 0);
+    } finally { await replacement.stop(); }
+  });
+}
+
+for (const outcome of ['accepted', 'ambiguous']) for (const evidence of ['receipt', 'history', 'absence']) {
+  test(`fix1 unknown legacy ${outcome} provenance survives replacement with ${evidence}`, async t => {
+    const h = await harness(t, { wrap: outcome === 'ambiguous' ? ambiguousAfterAccept() : undefined });
+    h.fake.withholdNextItem(); await h.wake(); const original = structuredClone(h.rows()[0]);
+    await h.engine.stop();
+    // Emulate the exact pre-provenance row format. Do not seed scope from the
+    // current/replacement binding: uncertainty must be preserved as such.
+    h.kv.delete('attempt:' + original.key);
+    const saved = h.kv.get('inflight:' + original.key);
+    if (evidence === 'history') { h.fake.recordLater(original.key, h.clock.now()); h.clock.advance(0); }
+    if (evidence === 'absence') h.fake.setThread({ id: 'thread', status: { type: 'idle' } });
+    const replacement = await replaceAttemptOwner(h);
+    try {
+      if (evidence === 'receipt') {
+        notifyReceipt(h, original.key);
+        await eventually(() => replacement.receiptsSeen() >= 1, 'replacement consumed unknown legacy receipt');
+      }
+      await h.sync(); h.clock.advance(60_000); await h.sync();
+      assert.equal(h.kv.get('inflight:' + original.key), saved, 'unknown provenance cannot authorize mutation/deletion');
+      assert.equal(h.kv.get('attempt:' + original.key), undefined, 'replacement never invents legacy provenance');
+      assert.equal(intent(h, original.key), undefined, 'replacement must not assert its own scope');
+      assert.equal(receiptHooks(h).length, 0); assert.equal(h.releases().length, 0);
+      assert.equal(h.sends().length, 1, 'legacy uncertainty never authorizes reinjection');
+    } finally { await replacement.stop(); }
+    assert.equal(h.kv.get('inflight:' + original.key), saved, 'stop also preserves unknown legacy state');
+    assert.equal(h.releases().length, 0); assert.equal(h.sends().length, 1);
+  });
+}
+
+for (const phase of ['claiming', 'releasing']) test(`fix1 ${phase} cleanup retains original scope across replacement`, async t => {
+  const h = await harness(t, { status: active });
+  control(h, { releaseFailure: true, ...(phase === 'claiming' ? { hookFailure: 'exit' } : {}) });
+  if (phase === 'releasing') h.fake.failNext('turn/steer', { code: -32602, message: 'invalid input' });
+  await h.wake();
+  const keys = h.kv.keys(phase + ':'); assert.equal(keys.length, 1);
+  const key = keys[0], saved = h.kv.get(key);
+  const nonce = key.slice(phase.length + 1);
+  await h.engine.stop(); const before = h.releases().length;
+  const replacement = await replaceAttemptOwner(h);
+  try {
+    await h.sync(); const attempted = h.releases().slice(before); assert.equal(attempted.length, 1);
+    assert.equal(arg(attempted[0].argv, '--net'), 'test'); assert.equal(arg(attempted[0].argv, '--as'), 'peer');
+    assert.equal(arg(attempted[0].argv, '--claim'), nonce);
+    assert.equal(attempted[0].env.VECNET_CONFIG, h.deps.env.VECNET_CONFIG);
+    assert.equal(h.kv.get(key), saved, 'failed original-scope release retains recovery');
+    control(h, { releaseFailure: false, hookFailure: '' }); h.clock.advance(1000); await h.sync();
+    assert.equal(h.kv.get(key), undefined);
+    assert.equal(h.kv.keys('attempt:').length, 0, 'confirmed original-scope release cleans its provenance');
+    assert.equal(h.sends().length, phase === 'claiming' ? 0 : 1, 'replacement does not inject old work');
+    assert.equal(receiptHooks(h).length, 0, 'ordinary cleanup cannot invent display proof');
+  } finally { await replacement.stop(); }
+});
+
+test('fix1 confirmed settlement deletes attempt provenance before settlement last', async t => {
+  const h = await harness(t, { status: active });
+  h.fake.withholdNextItem(); await h.wake(); const original = h.rows()[0];
+  assert.ok(h.kv.get('attempt:' + original.key), 'original scope is durable while awaiting receipt');
+  const removed: string[] = [], remove = h.kv.delete;
+  h.kv.delete = key => { removed.push(key); remove(key); };
+  notifyReceipt(h, original.key); await h.sync();
+  assert.equal(h.kv.get('attempt:' + original.key), undefined); assert.equal(intent(h, original.key), undefined);
+  const provenance = removed.indexOf('attempt:' + original.key), settlement = removed.indexOf('settling:' + original.key);
+  assert.ok(provenance >= 0 && provenance < settlement, 'retain authoritative settlement through provenance cleanup');
+  assert.equal(removed.at(-1), 'settling:' + original.key);
+  assert.equal(h.sends().length, 1); assert.equal(h.releases().length, 0);
+});
+
+test('fix1 summary provenance survives replacement before the first empty-ID receipt', async t => {
+  const h = await harness(t, { status: active });
+  control(h, { summary: 'private summary fixture' }); h.fake.withholdNextItem();
+  h.fake.notify('thread/status/changed', { threadId: 'thread', status: { type: 'idle' } });
+  await h.tick(2000); const original = h.rows()[0]; assert.ok(original); assert.deepEqual(original.deliveries, []);
+  const replacement = await replaceAttemptOwner(h);
+  try {
+    notifyReceipt(h, original.key);
+    await eventually(() => replacement.receiptsSeen() >= 1, 'replacement consumed summary receipt');
+    await h.sync(); await eventually(() => receiptHooks(h).length === 1, 'summary receipt publication');
+    const publication = receiptHooks(h)[0];
+    assertOriginalAttemptScope(h, publication.argv, publication.env, original);
+    assert.equal(arg(publication.argv, '--receipt-key'), original.key);
+    assert.equal(arg(publication.argv, '--expect-hub'), 'https://hub.invalid');
+    assert.equal(arg(publication.argv, '--expect-caller'), 'peer_pinned');
+    assert.equal(arg(publication.argv, '--delivery-ids'), '');
+    assert.equal(intent(h, original.key), undefined); assert.equal(h.kv.get('attempt:' + original.key), undefined);
+    assert.equal(h.rows().length, 0); assert.equal(h.sends().length, 1); assert.equal(h.releases().length, 0);
+  } finally { await replacement.stop(); }
+});
+
+// Supplemental after focused GREEN: provenance cleanup must not orphan the
+// authoritative ordinary-release intent across a private-store interruption.
+test('fix1 supplemental release cleanup recovers original scope after companion deletion', async t => {
+  const h = await harness(t, { status: active });
+  control(h, { releaseFailure: true });
+  h.fake.failNext('turn/steer', { code: -32602, message: 'invalid input' });
+  await h.wake(); const original = h.rows()[0]; assert.ok(original); await h.engine.stop();
+  let interrupted = false; const remove = h.kv.delete;
+  h.kv.delete = key => {
+    remove(key);
+    if (!interrupted && key === 'attempt:' + original.key) { interrupted = true; throw new Error('fixture_provenance_cleanup_interrupted'); }
+  };
+  control(h, { releaseFailure: false }); h.engine.start(); await h.sync();
+  await eventually(() => interrupted, 'confirmed release reached provenance cleanup');
+  assert.equal(h.kv.get('attempt:' + original.key), undefined);
+  assert.ok(h.kv.get('releasing:' + original.claim), 'release intent must survive companion cleanup interruption');
+  control(h, { releaseFailure: true });
+  const before = h.releases().length; const replacement = await replaceAttemptOwner(h);
+  try {
+    assert.ok(h.kv.get('releasing:' + original.claim));
+    for (const release of h.releases().slice(before)) assertOriginalAttemptScope(h, release.argv, release.env, original);
+    control(h, { releaseFailure: false }); h.clock.advance(1000); await h.sync();
+    assert.equal(h.kv.get('releasing:' + original.claim), undefined);
+    assert.equal(h.kv.get('inflight:' + original.key), undefined);
+    assert.equal(h.kv.get('attempt:' + original.key), undefined);
+    assert.equal(h.sends().length, 1); assert.equal(receiptHooks(h).length, 0);
+  } finally { await replacement.stop(); }
 });
