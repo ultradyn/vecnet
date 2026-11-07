@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -26,6 +27,10 @@ func (a *app) autoCodexAction(cmd string, args []string) {
 	// Supervise local preflight too: a missing runtime or blocked local file
 	// must not spend the ordinary invocation's budget on registration.
 	worker := *a
+	var notice string
+	if !a.inHook && isTerminal(a.stdin) && isTerminal(a.stdout) {
+		worker.codexNotice = &notice
+	}
 	worker.stdout, worker.stderr, worker.stdin = io.Discard, io.Discard, nil
 	ctx, cancel := context.WithTimeout(a.ctx, 150*time.Millisecond)
 	defer cancel()
@@ -44,6 +49,9 @@ func (a *app) autoCodexAction(cmd string, args []string) {
 	}()
 	select {
 	case <-done:
+		if notice != "" {
+			fmt.Fprint(a.stderr, notice)
+		}
 	case <-ctx.Done():
 	}
 }
@@ -176,9 +184,17 @@ func (a *app) registerCodexAuto(thread, home string) error {
 	}
 	probe, err := a.probeCodexDelivery(a.ctx, home, thread, previous)
 	if err != nil || !probe.Loaded {
+		if err != nil {
+			a.persistCodexReason(hub, err)
+		}
 		return errCodexDelivery
 	}
 	if previous != "" && probe.Previous != "gone" {
+		reason := codexInactiveReason("ownership_ambiguous")
+		if probe.Previous == "live" {
+			reason = "other_thread_live"
+		}
+		a.persistCodexReason(hub, reason)
 		return nil
 	}
 	binding := codexBinding{Profile: name, As: a.as, Hub: hub, Caller: caller, CodexHome: home, ThreadID: thread, CreatedAt: time.Now().UTC()}

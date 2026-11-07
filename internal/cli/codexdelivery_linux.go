@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -396,12 +398,12 @@ func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bind
 	r = current
 	lease, err := deliveryPrivateFile(p.Lease, true)
 	if err != nil {
-		return errCodexDelivery
+		return codexInactiveReason("ownership_ambiguous")
 	}
 	defer lease.Close()
 	locked, err := deliveryLock(lease)
 	if err != nil {
-		return errCodexDelivery
+		return codexInactiveReason("ownership_ambiguous")
 	}
 	unit := "vecnet-delivery@" + p.Slug + ".service"
 	// A managed same-generation lease is already in its final lifecycle.
@@ -411,7 +413,7 @@ func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bind
 	sameGenerationOwner := false
 	if !locked {
 		if deliveryRead(p.Owner, &owner) != nil || !deliveryOwnerScope(owner, p) {
-			return errCodexDelivery
+			return codexInactiveReason("ownership_ambiguous")
 		}
 		sameGenerationOwner = deliveryGeneration(owner, p, r) && deliveryOwnerHoldsLease(p, lease, owner)
 	}
@@ -420,25 +422,25 @@ func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bind
 	// live managed owner. All other failed/unknown lookups remain fail closed.
 	if errors.Is(systemdErr, exec.ErrNotFound) {
 		if !locked && owner.Managed && deliveryOwnerRunning(owner) {
-			return errCodexDelivery
+			return codexInactiveReason("ownership_ambiguous")
 		}
 	} else if systemdErr != nil || (state != "loaded" && state != "not-found") {
-		return errCodexDelivery
+		return codexInactiveReason("manager_refused")
 	}
 	installed := false
 	if state == "loaded" {
 		installed, err = a.deliveryManagedCompatible(ctx, p, r, unit)
 		if err != nil {
-			return err
+			return codexInactiveReason("manager_refused")
 		}
 		if !installed && !a.deliveryUnitInactive(ctx, unit) {
-			return errCodexDelivery
+			return codexInactiveReason("ownership_ambiguous")
 		}
 	}
 	// Even a free local lease cannot authorize replacement across manager scopes.
 	// A held managed owner is never demoted because paths/assets/unit changed.
 	if !locked && owner.Managed && !installed {
-		return errCodexDelivery
+		return codexInactiveReason("ownership_ambiguous")
 	}
 	if sameGenerationOwner && owner.Managed && installed {
 		return nil
@@ -457,41 +459,41 @@ func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bind
 			if installed && owner.Managed {
 				unix.Close(pidfd)
 				if _, err := a.deliverySystemctl(ctx, "restart", unit); err != nil {
-					return errCodexDelivery
+					return codexInactiveReason("manager_refused")
 				}
 				return deliveryAwaitOwner(ctx, p, r, lease)
 			}
 			err = unix.PidfdSendSignal(pidfd, unix.SIGTERM, nil, 0)
 			unix.Close(pidfd)
 			if err != nil {
-				return errCodexDelivery
+				return codexInactiveReason("ownership_ambiguous")
 			}
 		}
 		for !locked {
 			if !sleepCtx(ctx, 10*time.Millisecond) {
-				return errCodexDelivery
+				return codexInactiveReason("ownership_ambiguous")
 			}
 			locked, err = deliveryLock(lease)
 			if err != nil {
-				return errCodexDelivery
+				return codexInactiveReason("ownership_ambiguous")
 			}
 		}
 	}
 	// Start serialization is retained while the new process acquires this same
 	// inode. Releasing a lock is closing/unlocking only, never unlinking.
 	if err := unix.Flock(int(lease.Fd()), unix.LOCK_UN); err != nil {
-		return errCodexDelivery
+		return codexInactiveReason("ownership_ambiguous")
 	}
 	if installed {
 		if _, err := a.deliverySystemctl(ctx, "start", unit); err != nil {
-			return errCodexDelivery
+			return codexInactiveReason("manager_refused")
 		}
 	} else {
 		cmd := exec.Command(r.Binary, "codex", "deliver", "--hub", p.Hub)
 		cmd.Env = a.codexDeliveryEnv(r.Binary)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		if err := cmd.Start(); err != nil {
-			return errCodexDelivery
+			return codexInactiveReason("ownership_ambiguous")
 		}
 		// Reap on the normal path without becoming a supervisor; parent exit has
 		// no effect on the execed runner or its inherited lease.
@@ -735,4 +737,156 @@ func (a *app) runCodexDelivery(hub string, managed bool) error {
 		return errCodexDelivery
 	}
 	return nil
+}
+
+func init() {
+	codexNoticeAccess = linuxCodexNoticeAccess
+	codexNoticeBindings = linuxCodexNoticeBindings
+}
+
+// Notice metadata uses its own nonblocking lock, never an owner/registry lock.
+// Walk every component without symlinks and pin the final private directory
+// throughout read/rename, so unsafe replacements cannot redirect writes.
+func linuxCodexNoticeAccess(a *app, hub string, update func(*codexNoticeState) bool) (codexNoticeState, error) {
+	normalized, slug, err := codexDeliveryHub(hub)
+	s := codexNoticeState{Version: 1, Hub: normalized}
+	if err != nil {
+		return s, err
+	}
+	data := a.getenv("XDG_DATA_HOME")
+	if data == "" && a.getenv("HOME") != "" {
+		data = filepath.Join(a.getenv("HOME"), ".local/share")
+	}
+	if !filepath.IsAbs(data) {
+		return s, errCodexDelivery
+	}
+	path := filepath.Join(data, "vecnet", "codex-notices", slug)
+	fd, err := unix.Open("/", unix.O_DIRECTORY|unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return s, err
+	}
+	defer func() { unix.Close(fd) }()
+	parts := strings.Split(strings.TrimPrefix(filepath.Clean(path), "/"), "/")
+	for i, part := range parts {
+		if update != nil {
+			if e := unix.Mkdirat(fd, part, 0700); e != nil && !errors.Is(e, unix.EEXIST) {
+				return s, e
+			}
+		}
+		next, e := unix.Openat(fd, part, unix.O_DIRECTORY|unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if e != nil {
+			return s, e
+		}
+		unix.Close(fd)
+		fd = next
+		if i >= len(parts)-3 {
+			var st unix.Stat_t
+			if unix.Fstat(fd, &st) != nil || st.Uid != uint32(os.Geteuid()) || st.Mode&0777 != 0700 {
+				return s, errCodexDelivery
+			}
+		}
+	}
+	open := func(name string, create bool) (*os.File, error) {
+		flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK
+		if create {
+			flags = unix.O_RDWR | unix.O_CREAT | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK
+		}
+		n, e := unix.Openat(fd, name, flags, 0600)
+		if e != nil {
+			return nil, e
+		}
+		var st unix.Stat_t
+		if unix.Fstat(n, &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&0777 != 0600 || st.Uid != uint32(os.Geteuid()) || st.Nlink != 1 {
+			unix.Close(n)
+			return nil, errCodexDelivery
+		}
+		return os.NewFile(uintptr(n), name), nil
+	}
+	if update != nil {
+		lock, e := open("state.lock", true)
+		if e != nil {
+			return s, e
+		}
+		defer lock.Close()
+		locked, e := deliveryLock(lock)
+		if e != nil || !locked {
+			return s, errCodexDelivery
+		}
+	}
+	file, err := open("state.json", false)
+	if err == nil {
+		raw, e := io.ReadAll(io.LimitReader(file, 4097))
+		file.Close()
+		s = codexNoticeState{}
+		if e != nil || len(raw) > 4096 || json.Unmarshal(raw, &s) != nil || s.Version != 1 || s.Hub != normalized || (s.Reason != "" && s.Reason.action() == "") {
+			return codexNoticeState{}, errCodexDelivery
+		}
+		for reason := range s.Noticed {
+			if reason.action() == "" {
+				return codexNoticeState{}, errCodexDelivery
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) || update == nil {
+		return s, err
+	}
+	if update == nil || !update(&s) {
+		return s, nil
+	}
+	raw, err := json.Marshal(s)
+	if err != nil || len(raw) > 4096 {
+		return s, errCodexDelivery
+	}
+	// Exclusive temporary creation and rename both use the pinned directory.
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return s, err
+	}
+	tmp := ".state-" + hex.EncodeToString(nonce[:])
+	n, err := unix.Openat(fd, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
+	if err != nil {
+		return s, err
+	}
+	defer unix.Unlinkat(fd, tmp, 0)
+	out := os.NewFile(uintptr(n), tmp)
+	_, err = out.Write(append(raw, '\n'))
+	if err == nil {
+		err = out.Sync()
+	}
+	closeErr := out.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = unix.Renameat(fd, tmp, fd, "state.json")
+	}
+	if err == nil {
+		err = unix.Fsync(fd)
+	}
+	return s, err
+}
+
+func linuxCodexNoticeBindings(a *app) (codexBindingsFile, error) {
+	f := codexBindingsFile{Version: 1}
+	path, err := codexBindingsPath(a.getenv)
+	if err != nil {
+		return f, err
+	}
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return f, nil
+	}
+	if err != nil {
+		return f, err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	var st unix.Stat_t
+	if unix.Fstat(fd, &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&0022 != 0 || st.Uid != uint32(os.Geteuid()) || st.Nlink != 1 {
+		return f, errCodexDelivery
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+	if err != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &f) != nil || f.Version != 1 {
+		return f, errCodexDelivery
+	}
+	return f, nil
 }

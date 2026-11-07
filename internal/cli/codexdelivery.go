@@ -28,7 +28,8 @@ var errCodexDelivery = errors.New("codex delivery unavailable or unsafe; using h
 
 // A bounded helper is called by Task 3's background registration, not on the
 // foreground hook budget. No hub connection or credential is needed here.
-func (a *app) ensureCodexDelivery(ctx context.Context, hub, config, bindings string) error {
+func (a *app) ensureCodexDelivery(ctx context.Context, hub, config, bindings string) (err error) {
+	defer func() { a.persistCodexReason(hub, err) }()
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
 	release, err := a.codexDeliveryRelease()
@@ -122,22 +123,22 @@ func (a *app) codexDeliveryRelease() (codexDeliveryRelease, error) {
 		r.Binary, _ = os.Executable()
 	}
 	if !filepath.IsAbs(r.Binary) {
-		return r, errCodexDelivery
+		return r, codexInactiveReason("assets_missing")
 	}
 	var err error
 	r.Binary, err = filepath.EvalSymlinks(r.Binary)
 	if err != nil {
-		return r, errCodexDelivery
+		return r, codexInactiveReason("assets_missing")
 	}
 	file, err := os.Open(r.Binary)
 	if err != nil {
-		return r, errCodexDelivery
+		return r, codexInactiveReason("assets_missing")
 	}
 	h := sha256.New()
 	_, err = io.Copy(h, file)
 	file.Close()
 	if err != nil {
-		return r, errCodexDelivery
+		return r, codexInactiveReason("assets_missing")
 	}
 	r.Digest = hex.EncodeToString(h.Sum(nil))
 	var candidates []string
@@ -164,11 +165,11 @@ func (a *app) codexDeliveryRelease() (codexDeliveryRelease, error) {
 		}
 	}
 	if r.Entry == "" {
-		return r, errCodexDelivery
+		return r, codexInactiveReason("assets_missing")
 	}
 	r.Node, err = a.codexDeliveryExecutable("node")
 	if err != nil {
-		return r, err
+		return r, codexInactiveReason("node_missing")
 	}
 	return r, nil
 }
@@ -195,17 +196,17 @@ func (a *app) checkCodexDeliveryNode(ctx context.Context, r codexDeliveryRelease
 	var out deliveryOutput
 	cmd.Stdout = &out
 	if cmd.Run() != nil {
-		return errCodexDelivery
+		return codexInactiveReason("node_too_old")
 	}
 	version := strings.Split(strings.TrimPrefix(strings.TrimSpace(out.String()), "v"), ".")
 	if len(version) != 3 {
-		return errCodexDelivery
+		return codexInactiveReason("node_too_old")
 	}
 	major, e1 := strconv.Atoi(version[0])
 	minor, e2 := strconv.Atoi(version[1])
 	_, e3 := strconv.Atoi(version[2])
 	if e1 != nil || e2 != nil || e3 != nil || major < 22 || (major == 22 && minor < 18) {
-		return errCodexDelivery
+		return codexInactiveReason("node_too_old")
 	}
 	return nil
 }
