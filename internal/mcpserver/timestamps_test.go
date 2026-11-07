@@ -97,7 +97,7 @@ func TestMCPTimestampsNormalizeBeforeValidation(t *testing.T) {
 			args["message_id"], args["text"] = sent.MessageID, "attachment"
 		}
 		_, response := rpc(t, env, secret, "tools/call", map[string]any{"name": tool, "arguments": args})
-		if response.Error == nil || !strings.Contains(response.Error.Message, "remote attachments are unavailable") || string(response.Error.Data) != `{"path":"/attachments/0/blob_id"}` {
+		if response.Error == nil || response.Error.Code != -32602 || !strings.Contains(response.Error.Message, "value does not satisfy the schema or hub constraint") || string(response.Error.Data) != `{"path":"/attachments/0/blob_id"}` {
 			t.Errorf("%s: want hub's unavailable-backend refusal after timestamp validation, got %+v", tool, response.Error)
 		}
 		args["attachments"].([]any)[0].(map[string]any)["expires_at"] = "malformed"

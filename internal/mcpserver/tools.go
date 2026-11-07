@@ -162,9 +162,11 @@ func invalidArguments(name string, err error) error {
 	if name == "vecnet_send" || name == "vecnet_reply" {
 		hint = guideSendErrorHint
 	}
-	// Report the path only. In particular, never add original_value or the
-	// containing arguments object to error data (including clamp diagnostics).
-	return &RPCError{Code: ErrInvalidParams, Message: "invalid arguments for " + name + ": " + se.Message + hint,
+	// SchemaError.Message may contain rejected values (notably pattern/enum
+	// errors), including arbitrarily long strings. Only structural information
+	// and static wording are safe on this MCP response path, including errors
+	// returned by prechecks and hub handlers. Keep the code/path and guide hint.
+	return &RPCError{Code: ErrInvalidParams, Message: "invalid arguments for " + name + ": value does not satisfy the schema or hub constraint" + hint,
 		Data: map[string]any{"path": se.Path}}
 }
 

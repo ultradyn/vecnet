@@ -2,6 +2,8 @@ package mcpserver_test
 
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -55,6 +57,45 @@ func TestToolArgumentMetadataIsDiscarded(t *testing.T) {
 	}
 	if !found || !strings.Contains(string(ring), `"tool_arguments_meta_present":true`) {
 		t.Error("missing presence-only metadata diagnostic")
+	}
+}
+
+func TestToolValidationErrorsDoNotEchoStrings(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("session", "invalid strings")
+	_, logs := captureDiag(t)
+	for _, tc := range []struct{ tool, field string }{
+		{"vecnet_threads", "since"}, {"vecnet_thread", "id"},
+	} {
+		for _, padding := range []string{"", strings.Repeat("long-canary-", 12)} {
+			value := "private-value-canary-" + padding + "private-tail-canary"
+			response, raw := do(t, env, call{secret: secret, headers: modern(), body: map[string]any{
+				"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+				"params": map[string]any{"name": tc.tool, "arguments": map[string]any{tc.field: value}},
+			}})
+			if response.StatusCode != 200 {
+				t.Fatalf("%s: HTTP %d", tc.tool, response.StatusCode)
+			}
+			// Compare the whole response, including the message and all data.
+			// Prefix/suffix checks below also catch attempted truncation to 64 bytes.
+			var got, want any
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			expected := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":%q,"data":{"path":%q}}}`, "invalid arguments for "+tc.tool+": value does not satisfy the schema or hub constraint", "/"+tc.field)
+			if err := json.Unmarshal([]byte(expected), &want); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("%s: unexpected complete error response: %s", tc.tool, raw)
+			}
+			ring, _ := json.Marshal(mcpdiag.Snapshot(mcpdiag.Filter{Peer: peer}))
+			for _, canary := range []string{"private-value-canary", "long-canary", "private-tail-canary"} {
+				if strings.Contains(string(raw), canary) || strings.Contains(logs.String(), canary) || strings.Contains(string(ring), canary) {
+					t.Errorf("%s: response or diagnostics echoed %s", tc.tool, canary)
+				}
+			}
+		}
 	}
 }
 

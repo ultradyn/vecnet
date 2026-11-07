@@ -82,3 +82,9 @@ the operator's lifecycle action check precedes target lookup.
 Every registered tool must have a nonempty projection description in the catalog
 test. If a future addition misses one in production, discovery safely falls back
 to its full original entry, without making tools/list or tools/call panic.
+
+Validation responses use only the error code, JSON pointer and static constraint
+wording, with the existing sending-guide hint where applicable. They never copy
+`SchemaError.Message`, whose library-generated text can include argument values.
+Whole-response and diagnostic canaries cover malformed timestamp and ID strings
+both below and above 64 bytes, as well as the existing composite-value cases.
