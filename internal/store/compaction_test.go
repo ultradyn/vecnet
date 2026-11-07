@@ -263,13 +263,16 @@ func TestCompactionRejectsUnboundedLimitsAndCancellation(t *testing.T) {
 func TestCompactionPhysicalPageCapAcrossPointerMaps(t *testing.T) {
 	db := openTemp(t)
 	freedPages(t, db)
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1000; i++ {
 		r, err := db.Maintain(context.Background(), store.MaintenanceOptions{ReclaimPages: 1, Target: time.Second})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if r.ReclaimedPages > 1 {
 			t.Fatalf("one-page cap exceeded: %+v", r)
+		}
+		if r.ReclaimedPages == 0 {
+			break
 		}
 	}
 	for i := 0; i < 20; i++ {
