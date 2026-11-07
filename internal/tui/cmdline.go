@@ -12,6 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -19,8 +20,9 @@ const (
 	maxHistory = 100
 	// retryKey and presenceKey name no resource: their commands finish through
 	// loadMsg, the one message whose apply runs on the program's goroutine.
-	retryKey    = "cmd:retry"
-	presenceKey = "cmd:presence"
+	retryKey     = "cmd:retry"
+	presenceKey  = "cmd:presence"
+	lifecycleKey = "cmd:lifecycle"
 	// retryShown keeps the progress line up however slowly the hub answers.
 	// The summary replaces it; this only bounds a run that never reports.
 	retryShown = time.Hour
@@ -61,11 +63,14 @@ func lineOf(m *Model) *cmdline {
 func builtinCommands() map[string]Command {
 	return map[string]Command{
 		"q":        {Help: "quit", Run: func(m *Model, _ []string) tea.Cmd { return m.quit() }},
+		"peer":     {Help: "<disable|enable|archive|unarchive> <peer-id>  change peer lifecycle", Hidden: true, Run: runPeerLifecycle},
+		"prefs":    {Help: "show read-only hub preferences", Run: runPrefs},
 		"refresh":  {Help: "reload everything", Run: func(m *Model, _ []string) tea.Cmd { return m.reloadAll() }},
 		"presence": {Help: "<" + strings.Join(presenceStates, "|") + ">  set your presence", Run: runPresence},
 		"retry":    {Help: "all  retry every listed dead letter", Run: runRetry},
 		"thread":   {Help: "<n>  nth thread in the chat list", Run: runThread},
 		"tab":      {Help: "<name>  switch tab", Run: runTab},
+		"mouse":    {Help: "on|off  release; Shift+drag selects text", Run: runMouse},
 	}
 }
 
@@ -307,6 +312,21 @@ func runRetry(m *Model, args []string) tea.Cmd {
 	}
 }
 
+// runPrefs opens the read-only preferences view and loads it with GET.
+func runPrefs(m *Model, args []string) tea.Cmd {
+	if len(args) != 0 {
+		m.Toast("usage: :prefs", true)
+		return nil
+	}
+	m.prefsOn = true
+	m.Help = false
+	if m.stopped() {
+		m.Toast(m.Conn+": restart with a valid profile", true)
+		return nil
+	}
+	return m.Reload("prefs")
+}
+
 // runThread opens the nth thread of the chat list, counting from 1.
 func runThread(m *Model, args []string) tea.Cmd {
 	if len(args) != 1 {
@@ -316,12 +336,12 @@ func runThread(m *Model, args []string) tea.Cmd {
 	if err != nil {
 		return usage(m, "thread")
 	}
-	rows := m.Data.Threads.Threads
-	if n < 1 || n > len(rows) {
-		m.Toast(fmt.Sprintf("no thread %d: the chat list has %d", n, len(rows)), true)
+	ids := chatSelectableIDs(m)
+	if n < 1 || n > len(ids) {
+		m.Toast(fmt.Sprintf("no thread %d: the chat list has %d", n, len(ids)), true)
 		return nil
 	}
-	return m.OpenThread(rows[n-1].Thread.ThreadID)
+	return m.OpenThread(ids[n-1])
 }
 
 func runTab(m *Model, args []string) tea.Cmd {
@@ -331,6 +351,7 @@ func runTab(m *Model, args []string) tea.Cmd {
 	// Tabs are named by their stable names, never by display titles: the
 	// subs title becomes `subs n` while a subscription needs attention.
 	if i := slices.Index(tabNames, args[0]); i >= 0 && i < len(m.screens) {
+		m.prefsOn = false
 		m.Tab = i
 		return nil
 	}
@@ -345,7 +366,7 @@ var helpKeys = []helpRow{
 	{"1-4", "switch tab"},
 	{"q", "quit"},
 	{":", "command line"},
-	{"?", "this help; any key closes it"},
+	{"?", "help; M releases mouse; Shift+drag selects text"},
 	{"ctrl+l", "reload everything"},
 }
 
@@ -356,6 +377,9 @@ func viewHelp(m *Model) string {
 	lineOf(m)
 	commands := make([]helpRow, 0, len(m.Commands))
 	for _, name := range slices.Sorted(maps.Keys(m.Commands)) {
+		if m.Commands[name].Hidden {
+			continue
+		}
 		key, text := ":"+name, m.Commands[name].Help
 		if syntax, rest, ok := strings.Cut(text, "  "); ok {
 			key, text = key+" "+syntax, rest
@@ -367,19 +391,30 @@ func viewHelp(m *Model) string {
 		for _, row := range rows {
 			width = max(width, lipgloss.Width(row.key))
 		}
-		lines := []string{styleAccent.Render(title)}
+		lines := []string{sectionLabel(m.th, title)}
 		for _, row := range rows {
-			lines = append(lines, "  "+styleText.Render(fit(row.key, width))+"  "+styleMuted.Render(row.text))
+			lines = append(lines, "  "+m.th.Fg(theme.Text).Render(fit(row.key, width))+"  "+m.th.Fg(theme.Muted).Render(row.text))
 		}
 		return lines
 	}
 	hints := ansi.Wordwrap(m.active().Hints(), max(m.W-4, minW-4), "")
 	lines := section("global keys", helpKeys)
-	lines = append(lines, "", styleAccent.Render(m.active().Title()))
+	lines = append(lines, sectionLabel(m.th, m.active().Title()))
 	for _, hint := range strings.Split(hints, "\n") {
-		lines = append(lines, "  "+styleMuted.Render(hint))
+		lines = append(lines, "  "+m.th.Fg(theme.Muted).Render(hint))
 	}
-	lines = append(lines, "")
 	lines = append(lines, section("commands", commands)...)
 	return strings.Join(lines, "\n")
+}
+
+func runPeerLifecycle(m *Model, args []string) tea.Cmd {
+	if len(args) != 2 || !slices.Contains([]string{"disable", "enable", "archive", "unarchive"}, args[0]) {
+		m.Toast("usage: peer <disable|enable|archive|unarchive> <peer-id>", true)
+		return nil
+	}
+	action, id := args[0], args[1]
+	return func() tea.Msg {
+		err := m.API.PeerLifecycle(m.ctx, id, action)
+		return loadMsg{key: lifecycleKey, err: err, apply: func(m *Model) { m.Toast("peer "+action+" complete", false) }}
+	}
 }

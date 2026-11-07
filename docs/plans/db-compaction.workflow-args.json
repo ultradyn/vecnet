@@ -1,0 +1,277 @@
+{
+  "_notes": "Slice 1 of the DB compaction plan (build order step 2 'Consumer foundations': DB Tasks 1-4). vecnet-core-build.workflow.mjs runs only a contiguous startTask..endTask range (no skipTasks), so this slice is startTask 1, endTask 4; tasks[0] is plan Task 1 (the script prepends null and reads `### Task <n>:` headings), so no placeholder is needed. deps copy the plan's dependency map verbatim; in this slice 1->2->3->4 is a strict chain, so the tasks run serially, each in its own db-tNN worktree merged back into db-build. Later slices: Task 5 (startTask 5, endTask 5) needs prefs Tasks 1/2/4 plus the prefs runtime core merged into the base, and its adapter acceptance completes jointly with prefs Task 3; Task 6 needs only Task 3 but the map pins it after 4 and 5 for shared-file order, so it runs in or after the Task 5 slice; Task 7 also needs the prefs activation adapter; Tasks 8-9 last. Before a later slice: re-check extraRules (drop the 'No prefs dependency in Tasks 1-4' line, keep the rest), add `internal/mcpserver/{resources.go,events.go}` to the allowed mcpserver scope for Task 5, and use a new runStamp. Runner is x-boss per the coordinator (x-alpha unreachable); the plan text says x-boss with BB_JOBS=2, and an extraRules line maps that to the runner (bb defaults BB_JOBS to 8 on the box). The plan's Decisions sections sit before Global Constraints, so the script's task-read awk would miss them; an extraRules line adds the exact awk commands. fields starting with '_' are ignored by the script.",
+  "_ambiguities": [
+    "Ownership table vs task file lists: the build-order table gives parallel slices only new internal/eventpayload/** and assigns 'existing envelope schemas, store tests, migrations and hub wiring' to integration commits, but DB Task 2 needs a migration and store tests and Tasks 3-4 are hub wiring. Resolved here as: those edits stay in this build but are additive, in separate commits, preferring new test files, and DB integrates to master before R2 (prefs core -> DB -> R2). Coordinator may instead want Tasks 3-4 held until prefs core merges to master.",
+    "Task 1 is guard-only (tests pass on the inline baseline) but the workflow's implementer step 2 demands failing tests; a hazard asks for a local, uncommitted byte mutation as red evidence.",
+    "Task 1 says 'add a storage-reader inventory to this plan or a companion implementation receipt'; chose a new receipt docs/plans/receipts/2026-11-05-db-compaction-readers.md so the plan file is not edited by the build.",
+    "The plan's runner is x-boss (BB_JOBS=2); the coordinator chose x-alpha (BB_JOBS defaults to 8 there). Task 8 benchmark measurements are pinned back to x-boss for comparability with bench-hub; tests stay on x-alpha.",
+    "Task 9 (docs) routed to sol per the 'sol for backend, opus only for UI/taste' rule; the prefs args routed its docs task to opus. Flip if docs prose quality matters more.",
+    "Task 2's immutable body-update guard: plan says enable it only after reference writes are enabled; hazards ask for a meta-flag-conditioned trigger, recorded as the design choice. Coordinator may prefer the trigger to be created by Task 3 instead."
+  ],
+  "runStamp": "20261107T07-db-compaction-t7b",
+  "maxFixRounds": 3,
+  "planName": "db-compaction",
+  "plan": "docs/plans/2026-11-05-db-compaction.md",
+  "worktree": "/home/xertrov/src/vecnet4/.worktrees/db-build",
+  "branch": "db-build",
+  "baseRef": "f189c2f",
+  "statusDir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-db",
+  "taskPrefix": "db",
+  "startTask": 7,
+  "endTask": 9,
+  "finalReview": true,
+  "openBrowser": false,
+  "solRelay": {
+    "run": "/home/xertrov/src/vecnet4/scripts/wf/sol-run.sh",
+    "wait": "/home/xertrov/src/vecnet4/scripts/wf/sol-wait.sh",
+    "dir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-db/ccc",
+    "transcripts": "/home/xertrov/.claude/projects/-home-xertrov-src-vecnet4/*/subagents/workflows/*/agent-*.jsonl"
+  },
+  "extraRules": [
+    "No npm or pnpm install. Node checks run through build2 too: `build2 node ...`. Chromium stays headless. Never run xdg-open or open a window.",
+    "Tests, vet, node tests and screen scripts run on build box x-boss through the runner prefix `BB_HOST=x-boss BB_JOBS=4 just bb` (docs/BUILDBOX.md), never on xsm. Where the plan writes `BB_HOST=x-boss BB_JOBS=2 just bb GOMAXPROCS=2 CGO_ENABLED=0 go test -p 2 ...`, run the same command with the runner prefix instead; race runs add `CGO_ENABLED=1 CC=/usr/bin/gcc` after the prefix. Task 8's bench-hub comparison measurements are the only exception (see its hazards). Only gofmt, git, `just isa-check` and `go list` run locally.",
+    "The plan's Decisions sections are the contract and sit OUTSIDE the Global Constraints range your task-read command prints. Read them too: `awk '/^## Decisions$/{f=1} /^## Global Constraints/{exit} f' /home/xertrov/src/vecnet4/.worktrees/db-build/docs/plans/2026-11-05-db-compaction.md` (Decisions 1-7: reference format, hydration seam and consumer table, backfill, retention, per-send state, compaction, bytes) and `awk '/^## Decisions \\(2026-11-05\\)/{f=1} /^--- SUMMARY ---/{exit} f' /home/xertrov/src/vecnet4/.worktrees/db-build/docs/plans/2026-11-05-db-compaction.md` (Max's approved decisions and the migration inventory). Also read the dependency map and shared-file order: `awk '/^## Dependency map/{f=1} /^## Decisions$/{exit} f' /home/xertrov/src/vecnet4/.worktrees/db-build/docs/plans/2026-11-05-db-compaction.md`.",
+    "The plan's FIRST Global Constraints bullet describes the earlier planning assignment (change only the plan, commit on plan-db-compaction, do not merge). It does not apply to this build: implement your task on your branch. Its prohibitions still hold: no attn, no secrets, no live-DB reads or writes, no config edits, no background measurement on xsm.",
+    "Migrations: every migration in this plan is allocated at the NEXT FREE number at build time. Inspect internal/store/migrations/ in your worktree when you create one: master ends at 0020, branch hub-notices takes 0021 and branch prefs-build takes the next free after that, so expect 0021 if neither has merged into your base and a higher number otherwise. Name each file `<NNNN>_<unique_descriptive_suffix>.sql` (Task 2 e.g. `_event_payload_refs.sql`); tests and receipts locate it by its suffix, never by number. Record the actual filename in your step file and deviations. Never reserve a literal number, rename or edit a shipped migration, or change its checksum. If a merge finds the number taken, renumber the unshipped db file and its tests in that merge. Additive DDL and short metadata writes only: no whole-table JSON rewrite, UPDATE over existing rows or VACUUM inside a migration.",
+    "No prefs dependency in Tasks 1-4: the hub preferences store (internal/prefs, *hub.Preferences, LoadSnapshot/Subscribe) is being built concurrently on prefs-build and is NOT on master. Never import, stub, fake or copy it, and add no retention preference keys, preference tables, retention flags or retention behaviour. Tasks 5 and 7 consume it in a later slice, after prefs Tasks 1/2/4 merge.",
+    "File ownership (build order, 'Parallel worktrees and merge ownership'; this build runs alongside prefs-build and r2-build): DB exclusively owns new `internal/eventpayload/**` and its own new test files. R2 owns `internal/blob/r2sign*`, `r2meta*`, `r2store*` and `internal/blobwire/**`; prefs owns `internal/prefs/**`: never create or edit those. Existing envelope schemas, store tests, migrations and hub wiring are integration surfaces: touch only the shared files your task's Files list names, keep edits additive, and prefer a new test file (e.g. internal/store/payload_refs_migrate_test.go) over appending to a shared one such as internal/store/store_test.go (record that as a deviation). When a task both creates owned new files and edits shared surfaces, commit the shared-surface edits as a separate commit (same Plan-Task trailer) so serialized integration can rebase them. Integration order to master is prefs core -> DB -> R2.",
+    "Never touch connectors/**. internal/mcpserver/**: Tasks 1 and 3 may add or edit only `_test.go` files and `testdata/` there (guard tests); production MCP files (resources.go, events.go) belong to Task 5. Never touch internal/ui/**, scripts/ui/** or docs/plans/shots/ (backend-only plan; Task 3 runs the existing web model tests read-only).",
+    "No new Go or JS dependencies and no compression codec. internal/eventpayload is hub-only: `go list -deps ./cmd/vecnet` never gains modernc.org/sqlite, internal/store or internal/eventpayload, and CLI/client/TUI packages import neither.",
+    "Never log, print, audit, or put in an error message or diagnostic a Message body, Delivery bytes, blob URL or token, or credential. Diagnostics carry ids, seqs, counts, byte totals and reason codes only. Bodies, URLs and tokens appear only in synthetic test fixtures.",
+    "Task 1's baseline guard fixtures are frozen: later tasks never regenerate, re-bless or edit them (no UPDATE_GOLDEN on them). A guard that fails after your change is a regression to fix in production code, not in the fixture.",
+    "The companion plans (docs/plans/2026-11-05-hub-preferences.md, 2026-11-05-r2-blobs.md, 2026-11-05-admin-parity.md) are plans, not code: read them only where your task cites them and never implement their work. Build only against merged code on your base.",
+    "Never read or write ~/.config/vecnet/, ~/.cache/vecnet/, ~/.claude.json, ~/.claude/ or ~/.codex/, `.data/`, `.demo-data/`, the dev hub on 45752, the coordinator's preview on 49575 or the Fly hub. Tests use t.TempDir() databases, the FakeClock, fixed synthetic identities and temp HOME/XDG_CONFIG_HOME/XDG_CACHE_HOME/VECNET_CONFIG dirs through the injected getenv.",
+    "Branch hub-notices edits internal/hub/hub.go, cmd/vecnet-hub/main.go, internal/opapi/types.go, internal/httpapi/admin.go and internal/store/migrations/; branch prefs-build edits internal/hub/hub.go, internal/hub/tickers.go, cmd/vecnet-hub/{main.go,main_test.go}, internal/opapi/types.go and internal/store/migrations/. Keep your edits to those files small and additive so a later rebase or merge stays mechanical.",
+    "TestSlowSSEConsumerDoesNotBlockSend: master's canonical version (per-send 5s watchdog + interleaved no-stream relative check + 30s ceiling) wins at integration; do not spend review rounds on this branch's variant.",
+    "Master's TestSlowSSEConsumerDoesNotBlockSend and TestStalledSSEWriterDoesNotBlockSend are canonical; do not modify them.",
+    "Egress/provider errors use fixed reason codes only (hub.OutboundError / HTTPStatusError / blob.R2ProviderError); never surface provider text, URLs, signatures or credentials.",
+    "Base is master f189c2f: hub-notices (0021), prefs T1-4 incl. Task 3 CORE runtime (0022, internal/hub/preferences_runtime.go), DB T1-4 (0023-0024), R2 T1-2 (0025) merged. Next free migration at build time is 0026; another branch (R2 T3-5) may claim it concurrently, so allocate next-free and expect renumbering at integration. The prefs Task 3 Step 2 retention adapter is owned jointly with DB Tasks 5 and 7: implement it here against the merged prefs runtime (PreferencePreviewPolicy Check/Preview/Activate, Subscribe) as the plans specify; blobs.expiry stays unavailable (R2 owns it).",
+    "Under -race, internal/hub takes ~13 min on x-tall; always pass -timeout 40m to go test -race for internal/hub (and the full suite under -race).",
+    "Known full-suite load flake: internal/hub TestBackfillRealReaderCheckpointPressure. If it is the only failure, rerun just that test with -count=3; if that passes, treat the suite as green and record it."
+  ],
+  "mergeChecks": [
+    "BB_HOST=x-tall BB_JOBS=4 just bb just validate-protocol",
+    "build2 go list -deps ./cmd/vecnet | grep -c -E 'modernc.org/sqlite|github.com/XertroV/vecnet/internal/(store|eventpayload)' (must print 0)",
+    "BB_HOST=x-tall BB_JOBS=4 just bb GOOS=windows CGO_ENABLED=0 go build -o /dev/null ./cmd/vecnet",
+    "git diff --name-only --diff-filter=MDR master...HEAD -- internal/store/migrations/ (must print nothing: shipped migrations are never edited, renamed or deleted)",
+    "ls internal/store/migrations/ | cut -c1-4 | sort | uniq -d (must print nothing: no two migrations share a number)",
+    "git diff --name-only master...HEAD -- connectors/ internal/ui/ scripts/ui/ docs/plans/shots/ internal/prefs/ internal/blobwire/ (must print nothing)",
+    "git diff --name-only master...HEAD -- internal/mcpserver/ | grep -v -E '_test\\.go$|/testdata/' (must print nothing: Tasks 1-4 add only MCP guard tests)",
+    "git grep -l 'github.com/XertroV/vecnet/internal/prefs' -- '*.go' (must print nothing: this slice never imports the concurrently built prefs package)"
+  ],
+  "gateChecks": [
+    "`just isa-check` prints 0 for both binaries",
+    "`BB_HOST=x-tall BB_JOBS=4 just bb just validate-protocol`",
+    "`build2 go list -deps ./cmd/vecnet | grep -c -E 'modernc.org/sqlite|github.com/XertroV/vecnet/internal/(store|eventpayload)'` prints 0",
+    "`build2 go list -deps ./cmd/vecnet-hub | grep -c 'charm.land'` prints 0",
+    "`BB_HOST=x-tall BB_JOBS=4 just bb GOOS=windows CGO_ENABLED=0 go build -o /dev/null ./cmd/vecnet`",
+    "`BB_HOST=x-tall BB_JOBS=4 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/` (read-only regression check of web models against both storage modes)",
+    "`git diff --name-only master...HEAD -- connectors/` prints nothing, and `git diff --name-only master...HEAD -- internal/mcpserver/ | grep -v -E '_test\\.go$|/testdata/'` prints nothing",
+    "`git diff --name-only --diff-filter=MDR master...HEAD -- internal/store/migrations/` prints nothing; `git diff --name-only --diff-filter=A master...HEAD -- internal/store/migrations/` prints one or two files, each `<NNNN>_<suffix>.sql` numbered above the base's highest migration (Task 2 refs/snapshots, optionally Task 4 backfill exceptions); `ls internal/store/migrations/ | cut -c1-4 | sort | uniq -d` prints nothing",
+    "`git diff --name-only master...HEAD -- go.mod go.sum` prints nothing (no new dependency)",
+    "`git grep -l 'github.com/XertroV/vecnet/internal/prefs' -- '*.go'` prints nothing (no prefs dependency in this slice)",
+    "Backend slices only (endTask <= 4): `git diff --name-only master...HEAD -- internal/ui/ scripts/ui/ docs/plans/shots/` prints nothing",
+    "Task 1's baseline guard fixtures are frozen: read the head_sha in task-01.json, list the testdata/guard files that commit added (`git show --name-only --format= <sha>`), and `git diff --name-only <sha>..HEAD -- <those files>` prints nothing",
+    "`git grep -n -E 'delivery_ref_v1|wire_prefix|wire_suffix' -- internal/httpapi internal/mcpserver internal/events internal/opview internal/tui internal/ui ':!*_test.go'` prints nothing (no storage discriminator in public-surface production code)"
+  ],
+  "lensFocus": {
+    "spec": "This run implements docs/plans/2026-11-05-db-compaction.md, only the tasks in this invocation's range (slice 1 = Tasks 1-4); retention, idempotency expiry, history GC, compaction and docs (Tasks 5-9) are out of scope, so do not flag their absence. Read the plan's Decisions 1-3 (they precede Global Constraints). Check: events.payload_format inline|delivery_ref_v1 with typed msg_id/snapshot_id columns whose CHECKs agree with the stored JSON; event_message_snapshots STRICT with UNIQUE(msg_id, body_sha256); reference record = msg_id, optional snapshot_id, base Message SHA-256, exact wire_prefix/wire_suffix, optional attachments_json, expected full Delivery SHA-256; EncodeDelivery(ctx, tx, msgID, wire) (StoredPayload, error) and HydrateBatch(ctx, q, rows) ([][]byte, error) take the caller's handle; Log.Read, ClaimDue (inside its claim tx) and notifyOperatorDeliveries all hydrate and every raw events.data reader in Task 1's inventory is covered; MCP inbox strips tokens after hydration; event_outbox.body unchanged; reference writes default off with the dual reader always on; backfill is bounded (100 rows / 1 MiB / 50 ms), resumable from a captured high-water in meta, byte-proven per row, never rewrites a hash, records ids-only exceptions and pauses on low disk/WAL pressure or SQLITE_FULL; migrations are additive next-free files with no row rewrite or VACUUM. No preference code exists in this slice.",
+    "security": "No storage discriminator, internal reference field or snapshot id escapes to HTTP, SSE, MCP, Events callbacks, webhooks or operator notifications. Frozen blob URLs and thread summaries cannot change on retry, so recipient-scoped blob tokens are never re-minted or re-scoped at read time; MCP token stripping still applies after hydration (TestInboxCarriesNoBlobToken distinction). Bodies, Delivery bytes, URLs and tokens never appear in logs, errors, audit, backfill diagnostics or status; diagnostics are ids/counts/bytes/reason codes. SQL uses placeholders only, including the <=200-key IN batches. Hydration never reads current peers, directory, reactions, public URL or thread titles. The status path is operator-only. CLI binary stays SQLite- and eventpayload-free.",
+    "tests": "Task 1 guards assert raw bytes or hashes per surface (never JSON-semantic equality), passed on the inline baseline and are never regenerated afterwards; Task 3 replays every guard in both storage modes. Tests use t.TempDir databases, the FakeClock, synthetic identities and no sleeps as synchronisation. Pinned: <=200 keys per query and bounded byte cache, input order preserved, no four-connection-pool deadlock when hydrating inside an open writer tx, deferred read snapshot does not take the writer lock (real modernc driver), missing/corrupt body returns no partial page, send rollback leaves no dangling refs, retries resend identical body/hash, backfill crash before/after commit resumes at the committed checkpoint, captured high-water bounds work under concurrent sends, forced SQLITE_FULL and low-headroom pauses roll back, unconvertible legacy rows stay inline with durable exception ids. Migration tests find the db migrations by name suffix, not number. Review Focus 1, 2 and 5 are each pinned by a test that fails without the behaviour."
+  },
+  "extraLenses": [],
+  "runner": "BB_HOST=x-tall BB_JOBS=4 just bb ",
+  "deps": {
+    "1": [],
+    "2": [
+      1
+    ],
+    "3": [
+      2
+    ],
+    "4": [
+      3
+    ],
+    "5": [
+      4
+    ],
+    "6": [
+      4,
+      5
+    ],
+    "7": [
+      6
+    ],
+    "8": [
+      6,
+      7
+    ],
+    "9": [
+      8
+    ]
+  },
+  "tasks": [
+    {
+      "title": "Freeze baseline delivery/event wire contracts and inventory raw event readers (guards only)",
+      "refs": "Plan Decisions 1, 2 (consumer table); Task 1; Review Focus 1-3; Global Constraints (guards, fixtures); PROTOCOL \u00a71.3, \u00a72.2-\u00a72.4, \u00a72.7, \u00a73.3-\u00a73.4, \u00a74.4, \u00a75",
+      "race": false,
+      "suite": "./internal/eventlog/ ./internal/hub/ ./internal/httpapi/ ./internal/mcpserver/ ./internal/events/ ./internal/opview/",
+      "route": "sol",
+      "checks": [],
+      "hazards": [
+        "Files: only NEW guard tests and synthetic fixtures: internal/eventlog/reference_guard_test.go, internal/hub/delivery_reference_guard_test.go, new `*_guard_test.go` files in internal/httpapi, internal/mcpserver and internal/events (internal/opview only if a reader there needs pinning), their `testdata/` fixtures, and a storage-reader inventory as a new receipt docs/plans/receipts/2026-11-05-db-compaction-readers.md (do not edit the plan). No production code, no edits to existing tests or existing goldens.",
+        "Every test here is a (guard): it must PASS on the unchanged inline implementation. The workflow's red step still applies: prove each guard is not vacuous by temporarily corrupting one expected byte or hash locally, observing the failure (that is your red_evidence), then restoring it before commit. Never commit the mutation.",
+        "Assert exact raw bytes or SHA-256 of bytes per surface, never JSON semantic equality: Log.Read event data, SSE frames and long-poll bodies, ClaimDue DueDelivery.Body plus deliveries.body_sha256, operator notification bodies, vecnet_inbox tool output, inbox resources/notifications, Events callback bodies and event_outbox.body, opview inbox/history projections.",
+        "Cover the Step 1 matrix exactly: plain Unicode and escaped JSON, nil/empty optional values, source/operator/hub-authored messages, reaction Deliveries, receipts and presence, hosted and reference-only attachments, oversized Events previews, held delivery release and webhook retry (same body/hash/webhook-id across attempts, attempt stays 1 in the frozen body). After changing the clock, public URL, peer display names, directory and thread title, retries still carry the original thread summary and blob URLs.",
+        "Keep the TestInboxCarriesNoBlobToken distinction: the MCP inbox strips delivery tokens and blob URLs while the raw HTTP Delivery keeps them; guard both, do not equalise them.",
+        "Step 2 cursor guards: principal, peer and narrowed (?peer=) cursors, mixed event ordering across owners, empty and head streams, equal/future cursors, outbox replay and exhausted-callback suppression.",
+        "Inventory every raw event-data SQL read with `rg -n -g '*.go' \"e\\.data|events\\.data|SELECT[^;]*\\bdata\\b[^;]*FROM events\" internal cmd` (then drop JS DOM hits and test files) and list each call site in the receipt; it MUST include internal/eventlog/log.go Log.Read, internal/hub/deliveries.go ClaimDue (selects e.data) and internal/hub/notify.go notifyOperatorDeliveries (selects e.data). Migration 0018_sender_info.sql rewrote events.data with json_set: include such historical rows in the legacy fixtures. Record fixture provenance (generating test, base commit) in the receipt.",
+        "Fixtures use deterministic ids and times, the FakeClock and synthetic blob keys/tokens; no real credentials, no shared hub, no fixed ports."
+      ]
+    },
+    {
+      "title": "Additive schema and exact-byte hydration module (`internal/eventpayload`)",
+      "refs": "Plan Decisions 1, 2 (hydration seam), 3 (additive migration staging); Task 2 Interfaces; Review Focus 1, 2, 5; Global Constraints (migrations, query handles); PROTOCOL \u00a71.3, \u00a72.3",
+      "race": true,
+      "suite": "./internal/store/ ./internal/eventpayload/ ./internal/eventlog/ ./internal/hub/",
+      "route": "sol",
+      "checks": [
+        "build2 go list -deps ./cmd/vecnet | grep -c -E 'modernc.org/sqlite|github.com/XertroV/vecnet/internal/(store|eventpayload)' (must print 0)"
+      ],
+      "hazards": [
+        "Files: new internal/eventpayload/{payload.go,payload_test.go} (more files inside that package are fine), ONE next-free migration `<NNNN>_event_payload_refs.sql`, migration tests (prefer a new internal/store/*_test.go file; touch internal/store/migrate_sequence_test.go or store_test.go only where an existing list must gain the file), and internal/store/store.go only for a proven deferred read-snapshot/query-handle facility. No writer cutover: internal/eventlog/log.go, internal/hub/{send.go,deliveries.go,notify.go} stay untouched (Task 3). Commit the migration/store edits separately from the eventpayload commit.",
+        "Schema exactly per Decisions 1 on the STRICT events table: `payload_format TEXT NOT NULL DEFAULT 'inline'` with CHECK(payload_format IN ('inline','delivery_ref_v1')); nullable typed reference columns for msg_id and snapshot_id whose CHECKs force agreement with the format (msg_id non-null only for delivery_ref_v1), plus partial indexes WHERE ... IS NOT NULL for dependency queries; STRICT `event_message_snapshots(snapshot_id PRIMARY KEY, msg_id, body_sha256, body TEXT CHECK(json_valid(body)), UNIQUE(msg_id, body_sha256))`. SQLite ALTER TABLE ADD COLUMN cannot carry UNIQUE/PRIMARY KEY: express identity rules as CHECKs and indexes. The ids-only backfill exception table (keyed by seq, with reason) may go in this migration; if so Task 4 adds no migration. Old migration checksums must still verify.",
+        "Interfaces: exported `StoredPayload`; `EncodeDelivery(ctx, tx, msgID string, wire []byte) (StoredPayload, error)`; `HydrateBatch(ctx, q, rows []StoredPayload) ([][]byte, error)`, where tx/q are the CALLER's query handle interfaces (a *sql.Tx or equivalent), never the pool. StoredPayload never crosses HTTP/MCP; eventlog keeps exposing envelope.Event only.",
+        "Reference record fields per Decisions 1: msg_id, optional snapshot_id, SHA-256 of the exact base Message bytes, wire_prefix and wire_suffix (exact Delivery bytes before/after the top-level `message` value, stored as JSON strings), optional attachments_json (exact send-time top-level Message attachments array, only when it differs from the canonical Message), and the expected SHA-256 of the complete Delivery bytes. Never reconstruct prefix/suffix from mutable delivery/thread/peer rows.",
+        "Use a JSON-aware top-level value scanner (escapes, nested objects, duplicate keys) to locate the `message` value and, within it, the `attachments` value; compose by byte splicing. Never regex/string replacement, never unmarshal+remarshal. Duplicate critical keys, unknown shapes or unprovable reconstruction return a typed not-convertible result so the event stays inline; never drop unknown legacy fields.",
+        "Snapshots only when the embedded Message, after removing the frozen attachment override, is not byte-equal to messages.body (or the canonical message is missing but a valid embedded Message exists); dedupe on (msg_id, body_sha256) and verify full bytes on a hash match.",
+        "HydrateBatch: at most 200 bound keys per IN query; 1 event query plus ceil(unique bodies/200) body queries, snapshot queries only when needed, never per recipient; preserve input order; batch-local cache bounded by total body bytes (8 MiB), process larger pages in chunks; no process-wide cache. Close every row iterator before nested lookups: the pool has four connections, so test hydration called inside an open writer transaction and under concurrent readers without deadlock.",
+        "Read snapshots use a deferred/read-only transaction distinct from store.Tx's BEGIN IMMEDIATE; test the real modernc driver's locking with a concurrent writer (the reader takes no writer lock and sees a consistent snapshot during a concurrent delete).",
+        "Missing or corrupt bodies return an internal storage error with no partial page; error text carries ids and hashes only, never bytes.",
+        "The immutable messages.body update guard must not break existing behaviour before cutover: make it inactive until reference writes are enabled (e.g. a trigger conditioned on a meta flag the Task 3 switch sets) and test both states. Record the chosen mechanism. Inline stays the default; no production path writes delivery_ref_v1 in this task."
+      ]
+    },
+    {
+      "title": "Route every raw event reader and new delivery writes through hydration",
+      "refs": "Plan Decisions 1, 2 (full consumer table); Task 3 Interfaces; Review Focus 1, 2, 4; PROTOCOL \u00a72.3, \u00a72.4, \u00a73.3-\u00a73.4, \u00a74.4, \u00a75",
+      "race": true,
+      "suite": "./internal/eventpayload/ ./internal/eventlog/ ./internal/hub/ ./internal/httpapi/ ./internal/mcpserver/ ./internal/events/ ./internal/opview/ ./internal/tui/",
+      "route": "sol",
+      "checks": [
+        "BB_HOST=x-boss BB_JOBS=4 just bb build2 node --test --test-concurrency=2 internal/ui/jstest/",
+        "build2 go list -deps ./cmd/vecnet | grep -c -E 'modernc.org/sqlite|github.com/XertroV/vecnet/internal/(store|eventpayload)' (must print 0)"
+      ],
+      "hazards": [
+        "Files: internal/eventlog/log.go, internal/hub/{send.go,deliveries.go,notify.go}, hub config/construction (internal/hub/hub.go Config) and their tests; new or existing `_test.go` files only in internal/mcpserver, internal/events, internal/httpapi, internal/opview and internal/tui. No production edits in mcpserver/events/httpapi/opview/tui/ui: they keep consuming public envelope.Event and DueDelivery.Body. Use the shared fanOut for hub-authored and reaction call sites; never fork it.",
+        "Hydrate in Log.Read, in ClaimDue INSIDE its existing claim transaction (pass that tx; never open a second transaction or borrow another pool connection), and in notifyOperatorDeliveries (collect rows, close them, hydrate, then call the current renderer; dispatching gates unchanged). Every call site in Task 1's reader inventory is covered; add a test that no `delivery_ref_v1` record or internal key (wire_prefix, wire_suffix, snapshot_id, payload_format) reaches any public surface.",
+        "Reference writes sit behind a hub.Config switch that defaults OFF (deployment stage 1); the dual reader is always on. Its command-line flag belongs to Task 4's cmd/vecnet-hub edits; if you need one now, add it additively and record a deviation.",
+        "With the switch on, one send transaction inserts the Message, every reference event and deliveries.body_sha256 = SHA-256 of the complete frozen Delivery bytes; notify only after commit; a rollback leaves no dangling references and no partial fan-out. Derive the reference from the existing wire renderer's output and discard the full bytes: never store a second full durable copy or cache.",
+        "Hub-authored approval timeout/job/system, source and operator sends hydrate without a peer lookup. Reaction Delivery events use references; standalone reaction add/remove, receipts, presence, directory/thread updates and hub-notice events stay inline and are never hydrated from current state.",
+        "The MCP inbox still strips tokens AFTER hydration (dataWithoutBlobURLs); event_outbox.body stays the exact materialized callback copy across retries and config changes. The attempt number inside the frozen body stays 1.",
+        "Run every Task 1 guard in BOTH storage modes (switch off and on) with raw-byte equality against the frozen inline fixtures; never edit those fixtures. No new public fields, no event serializer changes and no PROTOCOL.md edits to make tests pass.",
+        "The web model tests are a read-only regression check (`build2 node --test ... internal/ui/jstest/`); do not edit internal/ui/**."
+      ]
+    },
+    {
+      "title": "Resumable bounded online backfill with disk-pressure stops",
+      "refs": "Plan Decisions 3 (stages 1-7), 1 (snapshots, exceptions), 6 (WAL and disk headroom); Task 4 Interfaces; Review Focus 5; PROTOCOL \u00a71.3, \u00a712",
+      "race": true,
+      "suite": "./internal/hub/ ./internal/eventpayload/ ./internal/store/ ./cmd/vecnet-hub/",
+      "route": "sol",
+      "checks": [
+        "just isa-check",
+        "build2 go list -deps ./cmd/vecnet | grep -c -E 'modernc.org/sqlite|github.com/XertroV/vecnet/internal/(store|eventpayload)' (must print 0)"
+      ],
+      "hazards": [
+        "Files: new internal/hub/storage_backfill.go and storage_backfill_test.go; internal/hub/tickers.go (slow-ticker slice hook only), hub config, cmd/vecnet-hub/{main.go,main_test.go} (additive flags: backfill enable, slice limits, and Task 3's reference-write switch if not yet exposed), an operator-only ids/counts status path, and an exception-table migration `<NNNN>_backfill_exceptions.sql` ONLY if Task 2 did not create it (next free number). No UI, MCP or CLI command in this task.",
+        "Interface: `BackfillDeliverySlice(ctx, limits)` returns progress, counts and a paused reason; cancellation safe; dry-run reports counts, ids and byte totals only. Backfill enablement is separate from reference writes and from retention, and defaults off. Default limits 100 events, 1 MiB source JSON, 50 ms target writer time; a single larger allowed event may take its own slice.",
+        "Capture the events high-water mark once and persist it with the last processed seq in the existing meta table; scan `seq > last_seq AND seq <= captured_high`, inline delivery rows only; a restart reuses them so work stays bounded; exception rows are rescanned only by an explicit rescan.",
+        "Per row: hydrate(candidate) must equal the original bytes exactly AND match any existing deliveries.body_sha256. A pre-existing hash mismatch becomes a durable ids-only exception (seq, reason) for manual review; never rewrite a hash. Snapshot insert, event update (predicate also checks the original payload_format and data) and checkpoint commit in ONE transaction; transient errors roll back the whole slice; no failed row hides behind an unrecorded checkpoint.",
+        "Disk and WAL gate through injected filesystem-capacity and checkpoint probes: available bytes must exceed max(64 MiB, 4 x slice byte limit) + current WAL bytes, else pause. Catch SQLITE_FULL, roll back, report paused and require capacity relief; never run VACUUM or an automatic shrink.",
+        "Slices run from the existing ticker with the injected clock and yield between slices through it; no long startup rewrite, no real sleeps as synchronisation. Startup recovery still resets dispatching before any maintenance starts.",
+        "The status path is operator-only and returns ids/counts/bytes/paused reason; if it needs internal/opapi/types.go or internal/httpapi/admin.go, keep the edit additive and keep the CLI SQLite-free.",
+        "Step 4's disposable backfill under concurrent sends/reads is a test on the build box in t.TempDir(), never against a live or dev hub; record worst slice duration and required headroom in the step file. Logs carry seqs, counts and bytes only."
+      ]
+    },
+    {
+      "title": "Owner-aware acknowledged-event retention, cursor floors and the retention preferences adapter",
+      "refs": "Plan Decisions 4 (contracts, typed prefs seam, ack eligibility, cursor behaviour, pins); Task 5 Interfaces; Review Focus 3, 4, 7; PROTOCOL \u00a71.3, \u00a72.3, \u00a72.4, \u00a74.4, \u00a75; hub-preferences plan Decisions 1-4",
+      "race": true,
+      "suite": "./internal/eventlog/ ./internal/hub/ ./internal/httpapi/ ./internal/mcpserver/ ./internal/events/",
+      "route": "sol",
+      "checks": [],
+      "hazards": [
+        "LATER SLICE: requires prefs Tasks 1/2/4 and the prefs runtime core merged on your base (internal/prefs and *hub.Preferences with LoadSnapshot/Subscribe). If they are absent, return status blocked; never stub or copy them. Adapter acceptance completes jointly with prefs Task 3.",
+        "Files: next-free `<NNNN>_event_retention_floors.sql` with `event_retention(owner PRIMARY KEY, purged_through_seq NOT NULL, updated_at)` (initial floors 0), internal/eventlog/{log.go,retention.go,tests}, internal/hub/{ack.go,tickers.go,config}, internal/httpapi/events.go, internal/mcpserver/{resources.go,events.go}, internal/events/{store.go,worker.go} and focused tests. This task owns those mcpserver files; never connectors/**.",
+        "Consume exactly: `snapshot, err := preferences.LoadSnapshot(ctx, tx)` then `snapshot.Get(\"retention.ack_events\")` -> prefs.Effective{Value, Source, Origin, Revision}; `preferences.Subscribe(ctx)` wakeups only refresh status/policy. On a read or validation error skip expiry and report it; never fall back to a shorter retention. No preference writer, no prefs.Get/Set/RetentionSnapshot, no second store, table or migration for preferences.",
+        "Add `OldestFor(ctx, owners)` and transaction helpers; the merged principal floor is max(purged_through_seq) over current owners; `after == floor` is valid, `after < floor` returns HTTP 409 cursor_purged with details.oldest_cursor (unchanged shape). Audit every Oldest caller, including MCP tailStart, subscribe validation/replay and pruneDone; global Oldest stays only for diagnostics.",
+        "A peer's effective pull ack is the max valid current-epoch seq of acks(P,'*'), acks(principal,'*') and acks(principal,P); never read_at, receipts, MCP scan cursors or last_seen. Live verified MCP subscriptions also need their cursor past the candidate or an exact durable outbox record.",
+        "Delete only a contiguous eligible prefix per owner, stopping at the first too-young, unacked or pinned event, and advance the floor in the same transaction. Pins: queued/pushed/held wake_idle/dispatching>0 deliveries, in-flight operator notifications, outbox pending/parked/retryable-exhausted rows; terminal suppression tombstones survive until the owning peer's floor passes the event. Bounded slices with a fresh policy snapshot inside each destructive transaction.",
+        "Archive mode suppresses hard unacked expiry while acknowledged pruning continues. Cursor strings, event ordering, epoch/AUTOINCREMENT seq and the MCP truncated response shape stay unchanged. Add lag/pin/oldest-age metrics."
+      ]
+    },
+    {
+      "title": "Bounded idempotency expiry and per-send write guards",
+      "refs": "Plan Decisions 5; Task 6 Interfaces; Review Focus 8; PROTOCOL \u00a72.2, \u00a712",
+      "race": true,
+      "suite": "./internal/hub/ ./internal/store/ ./internal/audit/",
+      "route": "sol",
+      "checks": [],
+      "hazards": [
+        "Files: internal/hub/{send.go,tickers.go,send_test.go}, hub config, next-free `<NNNN>_idempotency_created_at_index.sql` (index on idempotency(created_at)), internal/audit/*_test.go and focused thread/group tests. Integrate after Tasks 4 and 5 for shared files (tickers.go order 4 -> 5 -> 6 -> 7).",
+        "One effective idempotency policy shared by lookup and cleanup: default 24 h, configurable extension (48 h or more), 0 keeps keys forever, any value below 24 h is rejected. Cleanup uses the exact `< cutoff` boundary lookup uses, is bounded and indexed, returns count and cutoff, and is serialized with sends in BEGIN IMMEDIATE transactions.",
+        "Response bytes and request hash are unchanged within the window; replay/conflict behaviour unchanged; reuse after expiry works.",
+        "Audit guard: send/ack/source/admin audit rows carry ids, counts and ingress only; a synthetic content/secret sentinel never appears. Do not change the audit package's production code; audit stays append-only forever.",
+        "Keep the single thread UPDATE in the send transaction; no deferred budget/activity, no count(messages) substitute. Drop no index; record a keep verdict for every index on the merged schema, including parallel additions."
+      ]
+    },
+    {
+      "title": "Opt-in message-history retention with a durable thread sequence high-water",
+      "refs": "Plan Decisions 4 (archive mode, confirmed exit, pins, mark/sweep, locator tombstones); Task 7 Interfaces; Review Focus 4, 6, 7; PROTOCOL \u00a72.8, \u00a72.9, \u00a77, \u00a711; hub-preferences plan Decisions 3",
+      "race": true,
+      "suite": "./internal/hub/ ./internal/opview/ ./internal/events/ ./internal/blob/ ./internal/store/",
+      "route": "sol",
+      "checks": [],
+      "hazards": [
+        "LATER SLICE: requires the prefs confirmation/activation adapter (hub_preference_activations with effective_from, not_before, cutoff_at, high_water) merged on your base; otherwise return blocked. Blob dependencies consume only merged blob_refs (and R2 blob_object_refs if R2 has merged); never implement R2 work.",
+        "Files: next-free `<NNNN>_thread_seq_history_tombstones.sql`, internal/hub/{send.go,reactions.go,history.go,threads.go,tickers.go}, new internal/hub/history_gc.go, opview/history readers, internal/events/store.go, blob dependency/GC tests, config and flags.",
+        "Per-thread `last_allocated_seq`, initialised from the max existing Message seq and never decreased; ordinary, reaction and participant-join paths all allocate from it BEFORE any delete is enabled. message_count, budget_remaining and last_message_at never move backwards; from_join access is unchanged.",
+        "Compact locator tombstones (msg_id, thr_id, seq, expired_at) keep `after=<purged msg_id>` pagination working with the current response shape; a direct reply to an erased Message returns the existing not-found behaviour. Report tombstone growth.",
+        "Read retention.history and retention.archive_mode from one snapshot per run and again inside each destructive slice; archive mode overrides marking, age-based hiding and sweeping, including marks made before it was enabled. Retrospective trim waits for the persisted not_before at the next nightly sweep; no PATCH, confirm or wakeup deletes anything.",
+        "Sweep order per Decisions 4; unsupported dependency classes stay pinned with a reported reason; no broad cascades; recheck pins inside each delete transaction. Audit is never deleted; blob_refs go last, then the existing blob GC decides hosted-byte deletion."
+      ]
+    },
+    {
+      "title": "SQLite compaction controls, bench-hub comparison and storage release gate",
+      "refs": "Plan Decisions 6, 7; Task 8 Interfaces; Review Focus 5, 8; docs/BUILDBOX.md",
+      "race": false,
+      "suite": "./internal/store/ ./internal/hub/",
+      "route": "sol",
+      "checks": [
+        "build2 go list -deps ./cmd/vecnet | grep -c -E 'modernc.org/sqlite|github.com/XertroV/vecnet/internal/(store|eventpayload)' (must print 0)"
+      ],
+      "hazards": [
+        "Files: internal/store/{store.go,store_test.go}, a new bounded maintenance helper and tests, hub diagnostics/config, integration with bench-hub's ACTUAL merged files (discover them; bench-hub merged to master in ec7a125), and a benchmark receipt under docs/business/ or bench-hub's canonical output location. Never invent a benchmark command.",
+        "Measurements (Step 3-5) run on x-boss with `BB_HOST=x-boss BB_JOBS=2 just bb GOMAXPROCS=2 ...` so they are comparable with bench-hub's x-boss baseline; this overrides the x-alpha runner for measurement commands only. Tests and gates still use the runner. Never the Fly volume, a live DB or a dev hub.",
+        "New empty databases: page_size=4096 and auto_vacuum=INCREMENTAL set BEFORE tables are created and verified after init; existing NONE databases keep their mode and page size; per-connection wal_autocheckpoint in the DSN; synchronous FULL retained. incremental_vacuum at most 128 pages per slice and only where INCREMENTAL is active. Never a full VACUUM and no NONE->INCREMENTAL conversion.",
+        "Acceptance numbers are measured physical results, never the plan's logical forecasts; report F=1 even if zero. Drop no index without populated modernc EXPLAIN plus latency evidence on the merged schema."
+      ]
+    },
+    {
+      "title": "Protocol retention clarifications, operator runbook and staged enablement checklist",
+      "refs": "Plan Decisions 3, 4, 6, 7; Task 9; Review Focus 1-8; PROTOCOL \u00a71.3, \u00a72.3, \u00a72.8, \u00a72.9, \u00a75, \u00a711, \u00a712, \u00a717",
+      "race": false,
+      "suite": "./...",
+      "route": "sol",
+      "checks": [
+        "BB_HOST=x-boss BB_JOBS=4 just bb just validate-protocol"
+      ],
+      "hazards": [
+        "Edit only docs/PROTOCOL.md, docs/DEPLOY.md, docs/OPERATOR.md, docs/business/pricing-analysis.md, CHANGELOG.md and an implementation receipt with actual migration filenames and prerequisite commits. No code, no deployment.",
+        "PROTOCOL edits are additive by section: clarify cursor_purged with owner and merged-principal floors, history expiry and locator pagination, Message immutability and pin-delayed GC. Never renumber or rewrite hub-notices', R2's, mcp-first's or prefs' sections.",
+        "Every documented field, flag and status spelling matches the merged code; pricing tables use only measured Task 8 evidence, never logical forecasts. CHANGELOG gets one dated line.",
+        "The rollout checklist never requires or implies a full VACUUM for reference savings, and defers offline NONE->INCREMENTAL conversion."
+      ]
+    }
+  ]
+}

@@ -2,8 +2,9 @@
 // deliveries in that thread (the inbox head's unread_by_thread, PROTOCOL
 // §2.13), so the rows sum to the inbox badge. Zero shows nothing; Other
 // Threads show none. The counts follow the hub live: a new delivery raises
-// one, and opening the thread (from the sidebar, from an inbox item, or in
-// another tab) or a read receipt drops it, with no reload. Shots: the
+// one, and reading the thread (opened from the sidebar, from an inbox item,
+// or in another tab: each message on screen is read by its own receipt, CoS
+// unread ruling) or a receipt from elsewhere drops it, with no reload. Shots: the
 // sidebar with counts, a zero row and a long title at desktop, narrow
 // (220px sidebar) and phone width.
 import { assert, cleanBuild, withDemo } from './lib.mjs';
@@ -144,7 +145,8 @@ try {
     assert(Number(pill(ui, trace.thread_id)) === before + 1 && pill(ui, zero) === '1', `rise ${JSON.stringify(ui.rows)}`);
     const risen = hub.unread;
 
-    // Drop: open the long thread from the sidebar; the thread marks itself read.
+    // Drop: open the long thread from the sidebar; its three messages are all
+    // on screen, so each is read by its own receipt a second later.
     await mineList.locator(`a[href="#thread/${long.thread_id}"]`).click();
     await page.locator('#view .msg', { hasText: 'Backup job scheduled.' }).waitFor();
     ({ ui, hub } = await agrees('after opening a thread', u => pill(u, long.thread_id) === ''));

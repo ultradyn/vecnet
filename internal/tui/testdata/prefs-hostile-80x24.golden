@@ -1,0 +1,24 @@
+ vecnet | 1:inbox 2:chat 3:dash 4:subs prefs       home·hub.example:8443  live  
+┏━ preferences ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃Notifications/presence                                                        ┃
+┃> events.refresh_interval          30m      flag     unavailable              ┃
+┃                                                                              ┃
+┃Events PWN                                                                    ┃
+┃cadence hidden ok                                                             ┃
+┃60..86400 seconds                                                             ┃
+┃source flag VECNET_EVENTS_REFRESH_INTERVAL                                    ┃
+┃unavailable                                                                   ┃
+┃lock: locked                                                                  ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ NORMAL   j/k move  r refresh                  max@vecnet · working · prio wake 
+: command  ? help  Shift+drag selects text                                      

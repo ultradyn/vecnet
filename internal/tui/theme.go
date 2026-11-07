@@ -1,32 +1,49 @@
 package tui
 
-import "charm.land/lipgloss/v2"
-
-// Dark only, in the operator UI's palette.
-var (
-	colorBg      = lipgloss.Color("#0b0f19")
-	colorBar     = lipgloss.Color("#111827")
-	colorText    = lipgloss.Color("#f3f4f6")
-	colorMuted   = lipgloss.Color("#6b7280")
-	colorBorder  = lipgloss.Color("#374151")
-	colorAccent  = lipgloss.Color("#6366f1")
-	colorAccent2 = lipgloss.Color("#a855f7")
-	colorGood    = lipgloss.Color("#22c55e")
-	colorWarn    = lipgloss.Color("#eab308")
-	colorBad     = lipgloss.Color("#ef4444")
+import (
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
-// Shared styles. They hold no state, so screens may use them directly.
-var (
-	styleText     = lipgloss.NewStyle().Foreground(colorText)
-	styleMuted    = lipgloss.NewStyle().Foreground(colorMuted)
-	styleAccent   = lipgloss.NewStyle().Foreground(colorAccent2).Bold(true)
-	styleGood     = lipgloss.NewStyle().Foreground(colorGood)
-	styleWarn     = lipgloss.NewStyle().Foreground(colorWarn)
-	styleBad      = lipgloss.NewStyle().Foreground(colorBad)
-	styleBrand    = lipgloss.NewStyle().Foreground(colorText).Background(colorAccent).Bold(true)
-	styleTabOn    = lipgloss.NewStyle().Foreground(colorText).Background(colorBorder).Bold(true)
-	styleModeChip = lipgloss.NewStyle().Foreground(colorText).Background(colorAccent2).Bold(true)
-	styleBorder   = lipgloss.NewStyle().Foreground(colorBorder)
-	styleFocused  = lipgloss.NewStyle().Foreground(colorAccent)
-)
+// Every colour comes from m.th (internal/tui/theme, docs/design/tui-color.md).
+// This file holds the few drawing helpers more than one screen shares; it
+// holds no colour value of its own.
+
+// sectionLabel is a section label: bold, so it keeps its meaning under
+// NO_COLOR (design §6.3, §6.6).
+func sectionLabel(th *theme.Theme, label string) string {
+	return th.Fg(theme.Bold).Render(label)
+}
+
+// sectionBar is a `▌` section header: the bar in accent, the label bold.
+// Both stay under NO_COLOR (design §6.6).
+func sectionBar(th *theme.Theme, label string) string {
+	return th.Fg(theme.Accent).Render("▌") + sectionLabel(th, label)
+}
+
+// selMark is a list row's marker column: `>` in accent on the selected row
+// (on the selection fill), blanks on any other (design §6.5).
+func selMark(th *theme.Theme, sel bool) string {
+	if sel {
+		return th.Sel(theme.Accent).Render(">")
+	}
+	return " "
+}
+
+// selPad fills the rest of a row to w cells: on the selection fill when sel,
+// so the fill covers the pane's inner width; plain otherwise.
+func selPad(th *theme.Theme, line string, w int, sel bool) string {
+	if !sel {
+		return fit(line, w)
+	}
+	return fitFill(line, w, th.Sel(theme.Text))
+}
+
+// statusRole is an HTTP status cell's role, one map on every screen (design
+// §5.5): 400 and above is error, any other code is text, and none sent takes
+// the cell's none role.
+func statusRole(code *int, none theme.Role) theme.Role {
+	if code == nil {
+		return none
+	}
+	return theme.HTTPStatus(*code)
+}

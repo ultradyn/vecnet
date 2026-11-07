@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -20,8 +19,8 @@ func noticeText(n envelope.HubNotice, cleared bool) string {
 			label += " " + n.At
 		}
 		if n.NewURL != "" {
-			if u, err := url.Parse(n.NewURL); err == nil {
-				label += " -> " + u.Host
+			if where, ok := printableHub(n.NewURL, false); ok {
+				label += " -> " + where
 			}
 		}
 	}
@@ -64,6 +63,11 @@ func (a *app) cmdNotice(args []string) error {
 	}
 	if args[0] == "post" && (o.str("kind") == "" || !o.has("message")) {
 		return usageErr("notice post requires --kind and --message")
+	}
+	if args[0] == "post" && o.has("new-url") {
+		if err = checkHubURL(o.str("new-url"), a.getenv(insecureEnv) == "1"); err != nil {
+			return err
+		}
 	}
 	c, _, _, err := a.connect()
 	if err != nil {

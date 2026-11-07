@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -19,6 +20,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 // API is the subset of *opclient.Client the TUI calls; tests use a fake.
@@ -30,6 +32,7 @@ type API interface {
 	History(ctx context.Context, id, after string, limit int) (opapi.History, error)
 	Matrix(ctx context.Context, id, after string, limit int) (opapi.Matrix, error)
 	Peers(ctx context.Context) ([]opapi.PeerRow, error)
+	PeerLifecycle(ctx context.Context, id, action string) error
 	Notices(ctx context.Context) ([]envelope.HubNotice, error)
 	LoopCuts(ctx context.Context, hours int) (opapi.LoopCuts, error)
 	DeliveryHealth(ctx context.Context) (opapi.DeliveryHealth, error)
@@ -46,6 +49,8 @@ type API interface {
 	Blob(ctx context.Context, sha string, max int64) ([]byte, string, error)
 	Upload(ctx context.Context, r io.Reader, size int64, mediaType, name string) (envelope.Attachment, error)
 	TailWithAck(ctx context.Context, handle func(opclient.Batch) error, status func(string), accepted func(string)) error
+	// Preferences is the read-only GET /v1/admin/prefs. The TUI never patches.
+	Preferences(ctx context.Context) (opapi.Preferences, error)
 }
 
 // Options configures Run. Now, In and Out default to the system clock and the
@@ -77,6 +82,19 @@ func (e notOperatorError) Error() string {
 }
 func (e notOperatorError) Unwrap() error { return opclient.ErrForbidden }
 
+// detectTheme is the theme for this process's environment and out (stdout
+// when nil), and whether to ask the terminal for its background: only on the
+// rungs with two sets, and only when VECNET_TUI_BG has not forced one.
+func detectTheme(out io.Writer) (*theme.Theme, bool) {
+	if out == nil {
+		out = os.Stdout
+	}
+	env := os.Environ()
+	p := theme.Detect(env, out)
+	dark, forced := theme.Background(env)
+	return theme.New(p, dark), !forced && (p == theme.TrueColor || p == theme.ANSI256)
+}
+
 // Run shows the TUI until the operator quits or ctx ends. opclient.ErrForbidden
 // during the first load returns "profile <x> is not the operator credential".
 func Run(ctx context.Context, o Options) error {
@@ -85,15 +103,19 @@ func Run(ctx context.Context, o Options) error {
 	}
 	m := newModel(ctx, o)
 	defer m.cancel()
+	var askBg bool
+	m.th, askBg = detectTheme(o.Out)
+	m.askBg = askBg
 	// ctx, not m.ctx: quitting cancels m.ctx, and that must not read as killed.
-	opts := []tea.ProgramOption{tea.WithContext(ctx)}
+	// The renderer gets the theme's rung, so the two agree on every cell.
+	opts := []tea.ProgramOption{tea.WithContext(ctx), tea.WithColorProfile(m.th.Profile())}
 	if o.In != nil {
 		opts = append(opts, tea.WithInput(o.In))
 	}
 	if o.Out != nil {
 		opts = append(opts, tea.WithOutput(o.Out))
 	}
-	_, err := tea.NewProgram(m, opts...).Run()
+	_, err := runProgram(m, opts...)
 	switch {
 	case m.fatal != nil:
 		return m.fatal

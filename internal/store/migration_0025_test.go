@@ -61,8 +61,8 @@ func TestMigration0025UpgradesFrom0024(t *testing.T) {
 	}
 
 	applied, err := Migrate(ctx, db)
-	if err != nil || !reflect.DeepEqual(applied, []string{"0025_r2_blobs.sql"}) {
-		t.Fatalf("upgrade applied %v, %v; want only 0025", applied, err)
+	if err != nil || !reflect.DeepEqual(applied, []string{"0025_r2_blobs.sql", "0026_peer_archive.sql"}) {
+		t.Fatalf("upgrade applied %v, %v; want 0025 and 0026", applied, err)
 	}
 	for table, want := range before {
 		if !reflect.DeepEqual(want, r2Snapshot(t, db, table)) {

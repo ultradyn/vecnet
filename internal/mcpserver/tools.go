@@ -529,7 +529,8 @@ func callThreads(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any
 			return nil, &envelope.SchemaError{Path: "/since", Message: "since must be YYYY-MM-DDTHH:MM:SS.sssZ"}
 		}
 	}
-	threads, next, err := s.Hub.ListThreads(ctx, c, a.Participant, a.Group, since, int(a.Limit), a.Cursor)
+	// Empty q: title search is GET /v1/threads only until search phase B.
+	threads, next, err := s.Hub.ListThreads(ctx, c, a.Participant, a.Group, "", since, int(a.Limit), a.Cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -600,6 +601,85 @@ func callPeerSetDisabled(ctx context.Context, s *Server, c auth.Caller, raw []by
 		return nil, err
 	}
 	return map[string]any{"peer": peer}, nil
+}
+
+func callPeerLifecycle(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error) {
+	if err := hub.RequirePeerLifecycle(c); err != nil {
+		return nil, err
+	}
+	var a struct {
+		PeerID string `json:"peer_id"`
+		Action string `json:"action"`
+	}
+	if err := decodeArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	switch a.Action {
+	case "disable":
+		if err := s.Hub.SetPeerDisabled(ctx, a.PeerID, true); err != nil {
+			return nil, err
+		}
+	case "enable":
+		if err := s.Hub.SetPeerDisabled(ctx, a.PeerID, false); err != nil {
+			return nil, err
+		}
+	case "archive":
+		if err := s.Hub.SetPeerArchived(ctx, a.PeerID, true); err != nil {
+			return nil, err
+		}
+	case "unarchive":
+		if err := s.Hub.SetPeerArchived(ctx, a.PeerID, false); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, hub.E(http.StatusUnprocessableEntity, "invalid_value", "unknown lifecycle action")
+	}
+	return map[string]any{"peer_id": a.PeerID, "action": a.Action}, nil
+}
+
+// operatorOnly refuses every caller but the operator credential, the same
+// gate the auth middleware puts on /v1/admin/... (PROTOCOL §2.12).
+func operatorOnly(c auth.Caller) error {
+	if c.Kind != "operator" {
+		e := hub.E(http.StatusForbidden, "forbidden", "this tool needs the operator credential")
+		e.Details["required_credential"] = "operator"
+		return e
+	}
+	return nil
+}
+
+// callPeerInviteGet is GET /v1/admin/peers/{id}/enrol-token: an invite's
+// state, never its token.
+func callPeerInviteGet(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error) {
+	if err := operatorOnly(c); err != nil {
+		return nil, err
+	}
+	var a struct {
+		PeerID string `json:"peer_id"`
+	}
+	if err := decodeArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	return s.Hub.InviteStatus(ctx, a.PeerID)
+}
+
+// callPeerInviteRevoke is DELETE /v1/admin/peers/{id}/enrol-token: it spends
+// a live invite's token; with none live it is a no-op, revoked false.
+func callPeerInviteRevoke(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error) {
+	if err := operatorOnly(c); err != nil {
+		return nil, err
+	}
+	var a struct {
+		PeerID string `json:"peer_id"`
+	}
+	if err := decodeArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	st, revoked, err := s.Hub.RevokeEnrolToken(ctx, a.PeerID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"peer_id": st.PeerID, "state": st.State, "expires_at": st.ExpiresAt, "revoked_at": st.RevokedAt, "revoked": revoked}, nil
 }
 
 func callGroups(ctx context.Context, s *Server, c auth.Caller, _ []byte) (any, error) {
@@ -940,6 +1020,32 @@ func toolSpecs(defs schema) []toolSpec {
 		// non-principal callers get its forbidden first.
 		hubValues:   []string{"peer_id"},
 		annotations: writeAnnotations(false), call: callPeerSetDisabled,
+	}, {
+		name:        "vecnet_peer_lifecycle",
+		description: "Write: change peer lifecycle state on the operator's bus; requires the operator credential. Disable and enable preserve credentials; archive revokes all credentials and pending enrolment, and unarchive leaves the peer disabled and requiring a new invite.",
+		input: object(schema{
+			"peer_id": ref("peerId"),
+			"action":  schema{"type": "string", "enum": []string{"disable", "enable", "archive", "unarchive"}},
+		}, "peer_id", "action"),
+		hubValues:   []string{"peer_id", "action"},
+		annotations: writeAnnotations(false), call: callPeerLifecycle,
+	}, {
+		name: "vecnet_peer_invite_get",
+		description: "Read a peer's enrolment invite state: pending (with expires_at), expired, revoked, claimed (enrolled), linked (an OAuth login) or none. " +
+			"Requires the operator credential. Never returns a token or the paste block; a human issues invites from the CLI or web.",
+		input: object(schema{"peer_id": ref("peerId")}, "peer_id"),
+		// Unknown ids, including malformed ones, get HTTP's not_found;
+		// non-operator callers get its forbidden first.
+		hubValues:   []string{"peer_id"},
+		annotations: readAnnotations(), call: callPeerInviteGet,
+	}, {
+		name: "vecnet_peer_invite_revoke",
+		description: "Write: revoke a peer's unredeemed enrolment invite on the operator's bus, so its token no longer enrols. " +
+			"Requires the operator credential. With no live invite it changes nothing and returns revoked false. " +
+			"It never touches an enrolled peer's credential (disable or rotate that peer instead) and never returns a token. Returns {peer_id, state, expires_at, revoked_at, revoked}.",
+		input:       object(schema{"peer_id": ref("peerId")}, "peer_id"),
+		hubValues:   []string{"peer_id"},
+		annotations: writeAnnotations(false), call: callPeerInviteRevoke,
 	}, {
 		name:        "vecnet_groups",
 		description: "List the ad hoc groups you belong to, with their members and archive status.",

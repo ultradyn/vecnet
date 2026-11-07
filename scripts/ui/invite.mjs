@@ -194,7 +194,7 @@ try {
     // draft survives), with focus back on the button when it closes.
     const navAdd = page.locator('#nav-add');
     const navIds = await page.locator('nav.side > .nav').first().locator(':scope > a, :scope > button').evaluateAll(els => els.map(e => e.id));
-    assert(navIds.join() === 'nav-inbox,nav-new,nav-dash,nav-add', `sidebar nav ${navIds}`);
+    assert(navIds.join() === 'nav-inbox,nav-new,nav-dash,nav-settings,nav-add', `sidebar nav ${navIds}`);
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, demo.threads.hark);
     await page.locator('.msg').first().waitFor();
     const draft = page.locator('.composer textarea');

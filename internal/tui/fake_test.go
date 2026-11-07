@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -29,25 +30,33 @@ type fakeAPI struct {
 	errs  map[string]error
 	gate  map[string]chan struct{}
 
-	inbox    opapi.Inbox
-	threads  opapi.ThreadPage
-	detail   opapi.ThreadDetail
-	history  opapi.History
-	matrix   opapi.Matrix
-	peers    []opapi.PeerRow
-	subs     []opapi.Subscription
-	cuts     opapi.LoopCuts
-	health   opapi.DeliveryHealth
-	audit    opapi.AuditPage
-	counters map[string]int
-	sent     []envelope.SendRequest
-	blob     []byte
-	uploads  []fakeUpload // uploads whose bytes the fake read in full
-	reacted  []envelope.ReactionRequest
-	notices  []envelope.HubNotice
+	inbox      opapi.Inbox
+	threads    opapi.ThreadPage
+	detail     opapi.ThreadDetail
+	history    opapi.History
+	matrix     opapi.Matrix
+	peers      []opapi.PeerRow
+	subs       []opapi.Subscription
+	cuts       opapi.LoopCuts
+	health     opapi.DeliveryHealth
+	audit      opapi.AuditPage
+	counters   map[string]int
+	sent       []envelope.SendRequest
+	blob       []byte
+	uploads    []fakeUpload // uploads whose bytes the fake read in full
+	reacted    []envelope.ReactionRequest
+	notices    []envelope.HubNotice
+	prefs      opapi.Preferences
+	prefsVerbs []string
 
 	// tail replaces the default Tail, which reports live and blocks.
 	tail func(ctx context.Context, handle func(opclient.Batch) error, status func(string)) error
+
+	// byCursor, when set, answers Threads by query cursor. An empty cursor is
+	// the first page. threadQueries records every query, including participant
+	// filters, so a handoff can prove it asked for an unfiltered page.
+	byCursor      map[string]opapi.ThreadPage
+	threadQueries []opapi.ThreadQuery
 }
 
 // fakeUpload is one upload the fake took, with the bytes it read.
@@ -86,6 +95,23 @@ func (f *fakeAPI) reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = map[string]int{}
+	f.prefsVerbs = nil
+}
+
+func (f *fakeAPI) counts() map[string]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]int, len(f.calls))
+	for name, n := range f.calls {
+		out[name] = n
+	}
+	return out
+}
+
+func (f *fakeAPI) preferenceVerbs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.prefsVerbs...)
 }
 
 func (f *fakeAPI) fail(name string, err error) {
@@ -113,8 +139,19 @@ func (f *fakeAPI) Inbox(ctx context.Context, _ opapi.InboxQuery) (opapi.Inbox, e
 func (f *fakeAPI) ReadThread(ctx context.Context, _ string) (opapi.ReadResult, error) {
 	return opapi.ReadResult{}, f.hit(ctx, "ReadThread")
 }
-func (f *fakeAPI) Threads(ctx context.Context, _ opapi.ThreadQuery) (opapi.ThreadPage, error) {
-	return f.threads, f.hit(ctx, "Threads")
+func (f *fakeAPI) Threads(ctx context.Context, q opapi.ThreadQuery) (opapi.ThreadPage, error) {
+	if err := f.hit(ctx, "Threads"); err != nil {
+		return opapi.ThreadPage{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.threadQueries = append(f.threadQueries, q)
+	if f.byCursor != nil {
+		if page, ok := f.byCursor[q.Cursor]; ok {
+			return page, nil
+		}
+	}
+	return f.threads, nil
 }
 func (f *fakeAPI) Thread(ctx context.Context, _ string) (opapi.ThreadDetail, error) {
 	return f.detail, f.hit(ctx, "Thread")
@@ -125,6 +162,17 @@ func (f *fakeAPI) History(ctx context.Context, _, _ string, _ int) (opapi.Histor
 func (f *fakeAPI) Matrix(ctx context.Context, _, _ string, _ int) (opapi.Matrix, error) {
 	return f.matrix, f.hit(ctx, "Matrix")
 }
+func (f *fakeAPI) Preferences(ctx context.Context) (opapi.Preferences, error) {
+	f.mu.Lock()
+	f.prefsVerbs = append(f.prefsVerbs, http.MethodGet)
+	snap := f.prefs
+	f.mu.Unlock()
+	if err := f.hit(ctx, "Preferences"); err != nil {
+		return opapi.Preferences{}, err
+	}
+	return snap, nil
+}
+
 func (f *fakeAPI) Notices(ctx context.Context) ([]envelope.HubNotice, error) {
 	err := f.hit(ctx, "Notices")
 	f.mu.Lock()
@@ -136,6 +184,7 @@ func (f *fakeAPI) setNotices(ns ...envelope.HubNotice) {
 	defer f.mu.Unlock()
 	f.notices = ns
 }
+func (f *fakeAPI) PeerLifecycle(context.Context, string, string) error { return nil }
 func (f *fakeAPI) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 	return f.peers, f.hit(ctx, "Peers")
 }
@@ -350,10 +399,12 @@ func (p *pump) until(what string, cond func() bool) {
 	}
 }
 
-// idle waits until no resource is loading.
+// idle waits until no resource is loading and every load result already queued
+// has been applied. A follow-up load is started from the message that finishes
+// the one before it, so the queue has to be empty too.
 func (p *pump) idle() {
 	p.t.Helper()
-	p.until("loads to finish", func() bool { return len(p.m.inflight) == 0 })
+	p.until("loads to finish", func() bool { return len(p.m.inflight) == 0 && len(p.msgs) == 0 })
 }
 
 // loaded waits until each method has been called and its load has landed.
@@ -383,6 +434,12 @@ func keyPress(key string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl}
 	case "ctrl+q":
 		return tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl}
+	case "ctrl+u":
+		return tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl}
+	case "ctrl+d":
+		return tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}
+	case "ctrl+z":
+		return tea.KeyPressMsg{Code: 'z', Mod: tea.ModCtrl}
 	}
 	r := []rune(key)[0]
 	return tea.KeyPressMsg{Code: r, Text: key}
@@ -403,8 +460,8 @@ func (s *staticScreen) Update(msg tea.Msg, _ *Model) tea.Cmd {
 	}
 	return nil
 }
-func (s *staticScreen) View(_ *Model, w, h int) string {
-	return Pane(s.title, w, h, true, "body of "+s.title)
+func (s *staticScreen) View(m *Model, w, h int) string {
+	return Pane(m.th, s.title, w, h, true, "body of "+s.title)
 }
 
 func staticScreens() []Screen {

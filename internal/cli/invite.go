@@ -59,7 +59,7 @@ func renderGuide(profile string, lookup func(string) (Profile, bool)) string {
 	}
 	r := []string{"<profile>", profile}
 	if p, ok := lookup(profile); ok {
-		if hub := strings.TrimRight(p.Hub, "/"); safeURL(hub) {
+		if hub, ok := printableHub(p.Hub, p.AllowInsecureHTTP); ok && safeURL(hub) {
 			r = append(r, "<hub>", hub)
 		}
 		if peerIDRE.MatchString(p.PeerID) {
@@ -170,7 +170,7 @@ func parseTTL(s string) (int, error) {
 }
 
 const peerInviteUsage = "usage: vecnet peer invite [--name N [--open-name]] [--kind K] [--principal PRN] [--ttl 24h] [--profile P] [--copy] | " +
-	"peer invite <peer> [--ttl 24h] [--copy]   (re-issue for a peer that has not enrolled)"
+	"peer invite <peer> [--ttl 24h] [--copy]   (re-issue for a peer that has not enrolled) | peer invite status|revoke <peer>"
 
 // inviteAnswer is the hub's answer to a peer create or a token re-issue.
 type inviteAnswer struct {
@@ -198,6 +198,11 @@ func (a *app) peerInvite(o opts) error {
 	profile := o.str("profile")
 	suggested := false
 	switch {
+	case len(o.pos) >= 2 && (o.pos[1] == "status" || o.pos[1] == "revoke"):
+		if len(o.pos) != 3 || len(o.vals) != 0 {
+			return usageErr(inviteUsage)
+		}
+		return a.inviteState(o.pos[1], o.pos[2])
 	case len(o.pos) == 1:
 		kind := o.str("kind")
 		if kind == "" {
@@ -312,4 +317,75 @@ func lookPath(name, path string) (string, error) {
 		}
 	}
 	return "", exec.ErrNotFound
+}
+
+const inviteUsage = "usage: vecnet invite status <peer> | invite revoke <peer>   (also: vecnet peer invite status|revoke <peer>)"
+
+// inviteStatus is GET or DELETE /v1/admin/peers/{id}/enrol-token: an
+// invite's state, never its token.
+type inviteStatus struct {
+	PeerID    string `json:"peer_id"`
+	State     string `json:"state"`
+	ExpiresAt string `json:"expires_at"`
+	RevokedAt string `json:"revoked_at"`
+	Revoked   *bool  `json:"revoked,omitempty"`
+}
+
+// cmdInvite is `vecnet invite status|revoke <peer>`, the same commands as
+// `vecnet peer invite status|revoke <peer>`.
+func (a *app) cmdInvite(args []string) error {
+	o, err := parseFlags("invite", args, map[string]flagKind{})
+	if err != nil {
+		return err
+	}
+	if len(o.pos) != 2 || (o.pos[0] != "status" && o.pos[0] != "revoke") {
+		return usageErr(inviteUsage)
+	}
+	return a.inviteState(o.pos[0], o.pos[1])
+}
+
+// inviteState reads (status) or withdraws (revoke) peer's invite. A revoke
+// with nothing live is a no-op that says so and exits 0; an enrolled peer's
+// credential is never touched (that is `peer disable` or `peer rotate`).
+func (a *app) inviteState(verb, peer string) error {
+	path := "/v1/admin/peers/" + pathEscape(peer) + "/enrol-token"
+	method := http.MethodGet
+	if verb == "revoke" {
+		method = http.MethodDelete
+	}
+	var st inviteStatus
+	if err := a.call(method, path, nil, &st); err != nil {
+		return err
+	}
+	if a.json {
+		return a.emitValue(st)
+	}
+	if verb == "revoke" {
+		if st.Revoked != nil && *st.Revoked {
+			_, err := fmt.Fprintf(a.stdout, "revoked the invite of %s; its token no longer enrols\n", st.PeerID)
+			return err
+		}
+		_, err := fmt.Fprintf(a.stdout, "%s has no live invite (%s); nothing to revoke\n", st.PeerID, st.State)
+		if err == nil && st.State == "claimed" {
+			fmt.Fprintf(a.stderr, "it has enrolled: stop it with `vecnet peer disable %s` or replace its secret with `vecnet peer rotate %s`\n", st.PeerID, st.PeerID)
+		}
+		return err
+	}
+	line := st.PeerID + "  " + st.State
+	switch st.State {
+	case "pending":
+		line += "  expires " + st.ExpiresAt
+	case "expired":
+		line += "  at " + st.ExpiresAt + "; re-issue with `vecnet peer invite " + st.PeerID + "`"
+	case "revoked":
+		line += "  at " + st.RevokedAt + "; re-issue with `vecnet peer invite " + st.PeerID + "`"
+	case "claimed":
+		line += "  (enrolled)"
+	case "linked":
+		line += "  (an OAuth login; see `vecnet peer link`)"
+	case "none":
+		line += "  (no enrolment token issued)"
+	}
+	_, err := fmt.Fprintln(a.stdout, line)
+	return err
 }

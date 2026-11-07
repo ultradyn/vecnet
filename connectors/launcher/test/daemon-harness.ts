@@ -101,8 +101,10 @@ export interface Harness {
 }
 
 export async function harness(t: TestContext, opts: { cfg?: Record<string, unknown>; peers?: DirectoryEntry[]; backend?: FakeBackend;
-  beforeRecordRef?: (jobId: string) => void } = {}): Promise<Harness> {
+  beforeRecordRef?: (jobId: string) => void; env?: NodeJS.ProcessEnv } = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'launcher-daemon-'));
+  // The Codex connector reads its bindings from this environment: never the real one.
+  const env = opts.env ?? { VECNET_CODEX_BINDINGS: join(dir, 'codex-bindings.json') };
   const clock = fakeClock(T0), log = memoryLog();
   const hub = await startFakeHub();
   hub.setPeers(opts.peers ?? [
@@ -120,7 +122,7 @@ export async function harness(t: TestContext, opts: { cfg?: Record<string, unkno
   const client: HubApi & { me(): Promise<unknown> } = { ...createHubClient({ baseUrl: hub.url, credential: hub.bearer }), me: async () => ({ kind: 'peer', peer_id: LAUNCHER }) };
   const counter = { n: 0 };
   let stream = memoryStream(counter);
-  let daemon = await startDaemon({ cfg, hub: client, stream, clock, log, backends: new Map([['fake', backend]]), beforeRecordRef: opts.beforeRecordRef });
+  let daemon = await startDaemon({ cfg, hub: client, stream, clock, log, env, backends: new Map([['fake', backend]]), beforeRecordRef: opts.beforeRecordRef });
   const bodies = (path: string) => hub.requests.filter(r => r.path === path && r.method === 'POST').map(r => r.body);
   const sends = () => bodies('/v1/messages') as SendRequest[];
   const h: Harness = {
@@ -140,7 +142,7 @@ export async function harness(t: TestContext, opts: { cfg?: Record<string, unkno
     async restart(o = {}) {
       daemon.crash();
       stream = memoryStream(counter);
-      daemon = await startDaemon({ cfg, hub: o.me ? { ...client, me: o.me } as HubApi : client, stream, clock, log, backends: o.backends ?? new Map([['fake', backend]]),
+      daemon = await startDaemon({ cfg, hub: o.me ? { ...client, me: o.me } as HubApi : client, stream, clock, log, env, backends: o.backends ?? new Map([['fake', backend]]),
         beforeRecordRef: o.beforeRecordRef, acceptCursorGap: o.acceptCursorGap });
     },
   };

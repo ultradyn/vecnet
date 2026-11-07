@@ -19,3 +19,10 @@ test('SGR styles include normal, indexed and true colour and reset', () => {
   assert.match(html, /background:rgb\(1,2,3\).*?>D/);
   assert.match(html, /color:#f3f4f6;background:#0b0f19;font-weight:400;opacity:1;text-decoration:none">E/);
 });
+
+test('a light page swaps the default colours, and reverse follows them', () => {
+  const html = ansiHTML('A\x1b[7mB\x1b[0m', { light: true });
+  assert.match(html, /background:#ffffff;color:#111827;color-scheme:light/);
+  assert.match(html, /color:#111827;background:#ffffff;[^>]*>A/);
+  assert.match(html, /color:#ffffff;background:#111827;[^>]*>B/);
+});

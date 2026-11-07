@@ -579,6 +579,127 @@ func (h *Hub) setPeerDisabledTx(ctx context.Context, tx *sql.Tx, peerID string, 
 	return true, nil
 }
 
+// RequirePeerLifecycle is the single authorization check used by every
+// administrative surface for peer lifecycle changes.
+func RequirePeerLifecycle(c auth.Caller) error {
+	if c.Kind != "operator" {
+		return E(http.StatusForbidden, "forbidden", "operator credential required")
+	}
+	return nil
+}
+
+// SetPeerArchived archives or unarchives a peer. Archiving is a soft state:
+// message and audit history remain, while credentials, OAuth tokens, pending
+// enrolment/link codes and open streams are stopped. Unarchive deliberately
+// does not mint or revive any credential.
+func (h *Hub) SetPeerArchived(ctx context.Context, peerID string, archived bool) error {
+	var changed bool
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		var kind string
+		var at sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT kind, archived_at FROM peers WHERE peer_id=?`, peerID).Scan(&kind, &at); errors.Is(err, sql.ErrNoRows) {
+			return unknownPeer(peerID)
+		} else if err != nil {
+			return fmt.Errorf("hub: find peer: %w", err)
+		}
+		if kind == "operator" {
+			return invalidValue("peer_id", "the operator peer cannot be archived")
+		}
+		if at.Valid == archived {
+			return nil
+		}
+		now := h.nowStr()
+		if archived {
+			if _, err := tx.ExecContext(ctx, `UPDATE peers SET archived_at=?, disabled=1 WHERE peer_id=?`, now, peerID); err != nil {
+				return fmt.Errorf("hub: archive peer: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE credentials SET revoked_at=? WHERE subject_id=? AND revoked_at IS NULL`, now, peerID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE enrol_tokens SET used_at=? WHERE peer_id=? AND used_at IS NULL`, now, peerID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE dot_links SET used_at=? WHERE peer_id=? AND used_at IS NULL`, now, peerID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE oauth_tokens SET revoked_at=? WHERE revoked_at IS NULL AND principal_id IN (SELECT prn_id FROM oauth_principals WHERE peer_id=?)`, now, peerID); err != nil {
+				return err
+			}
+			if err := h.DirectoryUpdated(ctx, tx, peerID, "removed", nil); err != nil {
+				return err
+			}
+		} else {
+			if _, err := tx.ExecContext(ctx, `UPDATE peers SET archived_at=NULL, disabled=1, enrolled_at='' WHERE peer_id=?`, peerID); err != nil {
+				return fmt.Errorf("hub: unarchive peer: %w", err)
+			}
+		}
+		action := "peer_unarchive"
+		if archived {
+			action = "peer_archive"
+		}
+		if err := audit.Record(ctx, tx, "operator", action, []string{peerID}, nil); err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if changed {
+		h.notifyEnabled(ctx)
+		h.Log.Notify(peerID)
+	}
+	return nil
+}
+
+// RenamePeer sets peerID's display name. The peer id, threads, routes,
+// scopes and credentials stay. An empty name is 422 invalid_value, the same
+// check as AddPeerWith. Any other name must pass checkAgentName (shape,
+// name_reserved, name_taken). Submitting the current name is a no-op: a
+// free-form operator-set name, including a reserved one, is left as it is.
+// A real change audits peer_rename (old_name, new_name) and appends
+// directory_updated with change "updated" and fields ["name"]. An unknown
+// peer is 404 not_found.
+func (h *Hub) RenamePeer(ctx context.Context, peerID, name string) error {
+	if name == "" {
+		return invalidValue("name", "peer name is required")
+	}
+	var changed bool
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		var cur string
+		err := tx.QueryRowContext(ctx, `SELECT name FROM peers WHERE peer_id = ?`, peerID).Scan(&cur)
+		if errors.Is(err, sql.ErrNoRows) {
+			return unknownPeer(peerID)
+		}
+		if err != nil {
+			return fmt.Errorf("hub: find peer: %w", err)
+		}
+		if cur == name {
+			return nil
+		}
+		if err := checkAgentName(ctx, tx, peerID, name); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE peers SET name = ? WHERE peer_id = ?`, name, peerID); err != nil {
+			return fmt.Errorf("hub: rename peer: %w", err)
+		}
+		if err := h.DirectoryUpdated(ctx, tx, peerID, "updated", []string{"name"}); err != nil {
+			return err
+		}
+		changed = true
+		return audit.Record(ctx, tx, "operator", "peer_rename", []string{peerID},
+			map[string]any{"old_name": cur, "new_name": name})
+	})
+	if err != nil {
+		return err
+	}
+	if changed {
+		h.notifyEnabled(ctx)
+	}
+	return nil
+}
+
 // UnarchiveGroup unarchives ad hoc group grpID (PROTOCOL §7, R21) and marks
 // it active now, so the next idle sweep does not archive it again. An
 // unknown group is 404 not_found; an unarchived one is left as is.
