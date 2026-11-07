@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -523,7 +524,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	names := ch.peerNames()
 	var output string
 	var claimed []envelope.Event
-	var processed string
+	var processed, ackCursor string
 	// Publish the complete output before the transaction commits. An error
 	// (including expiry) aborts the commit, so the next run shows it again.
 	finish := func(s *hookState, id hookIdentity) error {
@@ -565,6 +566,18 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			return ctx.Err()
 		}
 		if s.PollCursor == "" {
+			// The app-server can reserve deliveries before the ordinary hook's
+			// first run. Its summary/head jump must not discard that barrier.
+			var first *claimRef
+			for i := range s.Claims {
+				r := &s.Claims[i]
+				if !slices.Contains(s.Displayed, r.ID) && (first == nil || r.Order < first.Order) {
+					first = r
+				}
+			}
+			if first != nil {
+				s.AckAfter = first.After
+			}
 			head, e := poll("head")
 			if e != nil {
 				return e
@@ -588,10 +601,15 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			// First-run backlog is never acknowledged, even with --auto-ack.
 			return finish(s, id)
 		}
-		body, e := poll(s.PollCursor)
+		after := s.PollCursor
+		if s.AckAfter != "" {
+			after = s.AckAfter
+		}
+		body, e := poll(after)
 		if hookPurged(e) {
 			oldest, _ := oldestCursor(e)
-			s.PollCursor = oldest
+			s.PollCursor, s.AckAfter = oldest, ""
+			after = oldest
 			fmt.Fprintf(a.stderr, "vecnet: hook: cursor purged; resuming from %s\n", hookSafeID(oldest))
 			if oldest == "" || ctx.Err() != nil {
 				return nil
@@ -608,13 +626,20 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		items := []hookItem{}
 		lowerBound := len(body.Events) == hookPageLimit
 		cut := false
+		ackBlocked := false
+		advance := func(cursor string) {
+			processed = cursor
+			if !ackBlocked {
+				ackCursor = cursor
+			}
+		}
 		more := 0
 		for i, ev := range body.Events {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			if ev.Type != "delivery" {
-				processed = ev.Cursor
+				advance(ev.Cursor)
 				continue
 			}
 			item, e := hookItemOf(ev, names)
@@ -622,7 +647,19 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 				return e
 			}
 			if s.has(item.Delivery) {
-				processed = ev.Cursor
+				if !slices.Contains(s.Displayed, item.Delivery) {
+					// Keep rendering unrelated later deliveries, but retain the
+					// first reservation's predecessor for the next hook run.
+					// Neither this page nor a later one may ack across it.
+					if !ackBlocked {
+						s.AckAfter = after
+						if ackCursor != "" {
+							s.AckAfter = ackCursor
+						}
+					}
+					ackBlocked = true
+				}
+				advance(ev.Cursor)
 				continue
 			}
 			// Count after the candidate as though it had been claimed, including
@@ -651,10 +688,13 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			s.claim(item.Delivery)
 			items = append(items, item)
 			claimed = append(claimed, ev)
-			processed = ev.Cursor
+			advance(ev.Cursor)
 		}
 		if !cut {
-			processed = body.NextCursor
+			advance(body.NextCursor)
+		}
+		if !ackBlocked {
+			s.AckAfter = ""
 		}
 		if processed != "" {
 			s.PollCursor = processed
@@ -674,7 +714,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	}
 	result := hookResult{client: c}
 	if o.has("auto-ack") {
-		result.ackCursor = processed
+		result.ackCursor = ackCursor
 	}
 	return result
 }

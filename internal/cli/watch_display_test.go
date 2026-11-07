@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ type displayFixture struct {
 	hub        string
 	mu         sync.Mutex
 	evs        []envelope.Event
+	polls      []string
 	acks       chan string
 	open       chan displayStream
 	unverified atomic.Bool
@@ -88,13 +90,19 @@ func newDisplayFixture(t *testing.T) *displayFixture {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			after := r.URL.Query().Get("after")
+			f.polls = append(f.polls, after)
 			evs := []envelope.Event{}
 			next := "e1.0"
-			for _, ev := range f.evs {
-				next = ev.Cursor
+			if len(f.evs) > 0 {
+				next = f.evs[len(f.evs)-1].Cursor
 			}
-			if after != "head" && after != next {
-				evs = append(evs, f.evs...)
+			if after != "head" {
+				start := slices.IndexFunc(f.evs, func(ev envelope.Event) bool { return ev.Cursor == after }) + 1
+				end := min(start+hookPageLimit, len(f.evs))
+				evs = append(evs, f.evs[start:end]...)
+				if len(evs) > 0 {
+					next = evs[len(evs)-1].Cursor
+				}
 			}
 			hookPage(w, evs, next)
 		default:
@@ -177,6 +185,8 @@ func TestWatchLiveDisplaysAppServerClaim(t *testing.T) {
 	f := newDisplayFixture(t)
 	out := new(hookWatchOutput)
 	stream, stop := f.watch(t, out, true)
+	second := new(hookWatchOutput)
+	secondStream, stopSecond := f.watch(t, second, true)
 	ev := f.delivery()
 	// A connector's durable claim is not evidence that its eventual session
 	// received the context. It can crash before injecting that context.
@@ -194,7 +204,28 @@ func TestWatchLiveDisplaysAppServerClaim(t *testing.T) {
 	}
 	// Releasing the connector's reservation must preserve the monitor's
 	// successful display, so a subsequent Claude hook does not duplicate it.
-	runHook(t, f.env, "--release", "--claim", "pending")
+	released, errs := runHook(t, f.env, "--release", "--claim", "pending")
+	var response struct {
+		Released int `json:"released"`
+	}
+	if err := json.Unmarshal([]byte(released), &response); err != nil || response.Released != 1 {
+		t.Fatalf("release failed: response=%q stderr=%q error=%v", released, errs, err)
+	}
+	s := readHookState(t, f.path)
+	if slices.ContainsFunc(s.Claims, func(r claimRef) bool { return r.ID == "dly_1" || r.Claim == "pending" }) {
+		t.Fatalf("release retained matching claim: %+v", s.Claims)
+	}
+	if !slices.Contains(s.Displayed, "dly_1") || slices.ContainsFunc(s.Replay, func(r replayRef) bool { return r.ID == "dly_1" }) {
+		t.Fatalf("release lost display proof or queued replay: displayed=%v replay=%v", s.Displayed, s.Replay)
+	}
+	secondStream.frames <- []envelope.Event{ev}
+	if cur := f.ack(t); cur != ev.Cursor {
+		t.Fatalf("second live monitor ack=%q", cur)
+	}
+	stopSecond()
+	if second.String() != "" {
+		t.Fatalf("already-connected live monitor duplicated released display: %q", second.String())
+	}
 	if got, _ := runHook(t, f.env, "--event", "user-prompt"); got != "" {
 		t.Fatalf("hook duplicated monitor output after release: %s", got)
 	}
@@ -456,5 +487,227 @@ func TestWatchSecondMonitorAndReconnectDoNotDuplicate(t *testing.T) {
 	stop3()
 	if strings.Count(three.String(), "live delivery") != 1 {
 		t.Fatalf("new --since watch did not replay: %q", three.String())
+	}
+}
+
+// An old reservation must not age a fresh successful monitor display out of
+// the hook's dedupe window after only one subsequent delivery.
+func TestWatchFreshDisplaySurvivesReservationEviction(t *testing.T) {
+	f := newDisplayFixture(t)
+	out := new(hookWatchOutput)
+	stream, stop := f.watch(t, out, true)
+	ev := f.delivery()
+	if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error {
+		s.bind(hookIdentity{Hub: f.hub, Caller: "peer_test"})
+		s.claim("dly_1")
+		for i := 0; i < shownWindow-1; i++ {
+			s.claim(fmt.Sprintf("dly_old_%d", i))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stream.frames <- []envelope.Event{ev, hookEvent(2, "next delivery")}
+	if cur := f.ack(t); cur != "e1.2" {
+		t.Fatalf("ack=%s", cur)
+	}
+	stop()
+	if !strings.Contains(out.String(), "live delivery") || !strings.Contains(out.String(), "next delivery") {
+		t.Fatalf("monitor failed to display both deliveries: %q", out.String())
+	}
+	s := readHookState(t, f.path)
+	if !slices.Contains(s.Displayed, "dly_1") {
+		t.Fatalf("expected fresh display proof: displayed=%v", s.Displayed)
+	}
+	if got, errs := runHook(t, f.env, "--event", "user-prompt", "--auto-ack"); got != "" {
+		t.Fatalf("hook duplicated fresh monitor display after reservation eviction: %q; stderr=%q", got, errs)
+	}
+	if cur := f.ack(t); cur != ev.Cursor {
+		t.Fatalf("hook did not acknowledge verified prior display: %s", cur)
+	}
+}
+
+// The hook must retain its safe poll/ack position before an unsent claim.
+// A later receipt, delivery, or full page must not cumulatively acknowledge it,
+// including on a subsequent hook invocation. Keep the reservation intact.
+func TestHookPendingClaimBlocksCumulativeAck(t *testing.T) {
+	for _, scenario := range []string{"alone", "later-events", "next-page", "safe-prefix", "claim-outlives-shown"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newDisplayFixture(t)
+			failed := &failedDisplay{tried: make(chan struct{})}
+			stream, stop := f.watch(t, failed, true)
+			ev := f.delivery()
+			claimed, errs := runHook(t, f.env, "--event", "app-server", "--claim", "unsent", "--priorities", "wake_idle", "--expect-hub", f.hub, "--expect-caller", "peer_test")
+			if !strings.Contains(claimed, "dly_1") {
+				t.Fatalf("claim failed: %s %s", claimed, errs)
+			}
+			stream.frames <- []envelope.Event{ev}
+			select {
+			case <-stream.closed:
+			case <-time.After(5 * time.Second):
+				t.Fatal("failed monitor did not end")
+			}
+			if code := stop(); code == 0 {
+				t.Fatal("failed monitor unexpectedly succeeded")
+			}
+			select {
+			case cur := <-f.acks:
+				t.Fatalf("failed monitor acknowledged %s", cur)
+			default:
+			}
+			if scenario == "claim-outlives-shown" {
+				if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error {
+					for i := 0; i < shownWindow; i++ {
+						s.claim(fmt.Sprintf("dly_other_%d", i))
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.mu.Lock()
+			if scenario != "alone" {
+				f.evs = append(f.evs, envelope.Event{Cursor: "e1.2", Type: "receipt", Data: json.RawMessage(`{"state":"processed"}`)}, hookEvent(3, "later delivery"))
+			}
+			if scenario == "next-page" {
+				for i := 4; i <= hookPageLimit+1; i++ {
+					f.evs = append(f.evs, envelope.Event{Cursor: fmt.Sprintf("e1.%d", i), Type: "receipt", Data: json.RawMessage(`{"state":"processed"}`)})
+				}
+			}
+			wantPoll := "e1.0"
+			if scenario == "safe-prefix" {
+				wantPoll = "opaque-safe-prefix"
+				f.evs = append([]envelope.Event{{Cursor: wantPoll, Type: "receipt", Data: json.RawMessage(`{"state":"processed"}`)}}, f.evs...)
+			}
+			last := f.evs[len(f.evs)-1].Cursor
+			f.polls = nil
+			f.mu.Unlock()
+			for attempt := 0; attempt < 2; attempt++ {
+				got, errs := runHook(t, f.env, "--event", "user-prompt", "--auto-ack")
+				if strings.Contains(got, "live delivery") {
+					t.Errorf("hook duplicated unsent reservation: %q; stderr=%q", got, errs)
+				}
+				if scenario != "alone" && attempt == 0 && !strings.Contains(got, "later delivery") {
+					t.Errorf("hook suppressed unrelated later delivery: %q; stderr=%q", got, errs)
+				}
+				if attempt == 1 && got != "" {
+					t.Errorf("hook duplicated later display while blocked: %q", got)
+				}
+				if scenario == "safe-prefix" && attempt == 0 {
+					if cur := f.ack(t); cur != wantPoll {
+						t.Errorf("safe prefix ack=%s", cur)
+					}
+				}
+				select {
+				case cur := <-f.acks:
+					t.Errorf("hook acknowledged %s without display of unsent reservation", cur)
+				default:
+				}
+				s := readHookState(t, f.path)
+				if s.AckAfter != wantPoll || slices.Contains(s.Displayed, "dly_1") || len(s.Claims) != 1 || s.Claims[0].Claim != "unsent" {
+					t.Fatalf("hook crossed pending reservation or changed its ownership: safe-after=%s poll=%s displayed=%v claims=%v", s.AckAfter, s.PollCursor, s.Displayed, s.Claims)
+				}
+			}
+			f.mu.Lock()
+			polls := slices.Clone(f.polls)
+			f.mu.Unlock()
+			if len(polls) != 2 || polls[0] != "e1.0" || polls[1] != wantPoll {
+				t.Fatalf("subsequent hook advanced to a later page: polls=%v", polls)
+			}
+			// Verified monitor output unblocks the watermark, but does not
+			// silently cancel the engine's pending claim (integration-owned).
+			good := new(hookWatchOutput)
+			if err := (stateFile{f.path}).displayFor(t.Context(), &hookIdentity{Hub: f.hub, Caller: "peer_test"}, "dly_1", false, func() error {
+				_, err := good.Write([]byte("live delivery"))
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if good.String() != "live delivery" {
+				t.Fatal("no verified replacement display")
+			}
+			for page := 0; page < 2; page++ {
+				got, errs := runHook(t, f.env, "--event", "user-prompt", "--auto-ack")
+				if strings.Contains(got, "live delivery") {
+					t.Fatalf("hook duplicated verified display: %s %s", got, errs)
+				}
+				cur := f.ack(t)
+				if cur == last {
+					if s := readHookState(t, f.path); s.AckAfter != "" || len(s.Claims) != 1 {
+						t.Fatalf("resolved barrier was retained or pending claim cancelled: %+v", s)
+					}
+					break
+				}
+				if page == 1 || cur != fmt.Sprintf("e1.%d", hookPageLimit) {
+					t.Fatalf("unexpected resumed page ack=%s, want final cursor %s within two pages", cur, last)
+				}
+			}
+		})
+	}
+}
+
+// A non-auto-ack invocation must not let a later auto-ack run cross two
+// reservations, even as monitor proof resolves them one at a time.
+func TestHookPendingClaimsKeepEarliestAckBarrier(t *testing.T) {
+	for _, firstRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("first-run=%t", firstRun), func(t *testing.T) {
+			f := newDisplayFixture(t)
+			one := f.delivery()
+			two := hookEvent(2, "second pending delivery")
+			var body map[string]any
+			if err := json.Unmarshal(two.Data, &body); err != nil {
+				t.Fatal(err)
+			}
+			body["message"].(map[string]any)["priority"] = "wake_idle"
+			two.Data, _ = json.Marshal(body)
+			f.mu.Lock()
+			f.evs = []envelope.Event{one, two, {Cursor: "e1.3", Type: "receipt", Data: json.RawMessage(`{"state":"processed"}`)}}
+			f.mu.Unlock()
+			claimed, errs := runHook(t, f.env, "--event", "app-server", "--claim", "two_pending", "--priorities", "wake_idle", "--expect-hub", f.hub, "--expect-caller", "peer_test")
+			if !strings.Contains(claimed, "dly_1") || !strings.Contains(claimed, "dly_2") {
+				t.Fatalf("claims failed: %s %s", claimed, errs)
+			}
+			if firstRun {
+				if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error { s.PollCursor = ""; return nil }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got, _ := runHook(t, f.env, "--event", "user-prompt"); got != "" {
+				t.Fatalf("hook duplicated reservations: %s", got)
+			}
+			for _, delivery := range []string{"dly_1", "dly_2"} {
+				if got, _ := runHook(t, f.env, "--event", "user-prompt", "--auto-ack"); got != "" {
+					t.Fatalf("hook duplicated pending delivery: %s", got)
+				}
+				select {
+				case cur := <-f.acks:
+					t.Fatalf("hook crossed pending %s with ack=%s", delivery, cur)
+				default:
+				}
+				if err := (stateFile{f.path}).displayFor(t.Context(), &hookIdentity{Hub: f.hub, Caller: "peer_test"}, delivery, false, func() error { _, err := io.WriteString(new(bytes.Buffer), delivery); return err }); err != nil {
+					t.Fatal(err)
+				}
+				if got, _ := runHook(t, f.env, "--event", "user-prompt", "--auto-ack"); got != "" {
+					t.Fatalf("hook duplicated monitor proof: %s", got)
+				}
+				want := "e1.1"
+				if delivery == "dly_2" {
+					want = "e1.3"
+				}
+				if cur := f.ack(t); cur != want {
+					t.Fatalf("ack=%s want=%s", cur, want)
+				}
+				s := readHookState(t, f.path)
+				if len(s.Claims) != 2 {
+					t.Fatalf("hook changed engine claim ownership: %+v", s.Claims)
+				}
+				if delivery == "dly_1" && s.AckAfter != "e1.1" {
+					t.Fatalf("lost second barrier: %+v", s)
+				}
+				if delivery == "dly_2" && s.AckAfter != "" {
+					t.Fatalf("retained resolved barrier: %+v", s)
+				}
+			}
+		})
 	}
 }

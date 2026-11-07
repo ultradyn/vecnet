@@ -39,7 +39,11 @@ type hookState struct {
 	Replay     []replayRef `json:"replay,omitempty"`
 	Claims     []claimRef  `json:"claims,omitempty"`
 	PollCursor string      `json:"poll_cursor,omitempty"`
-	Shown      []string    `json:"shown"`
+	// AckAfter retains the predecessor of the first undisplayed reservation.
+	// Hooks reread from it even after displaying later events, so no future
+	// invocation can cumulatively acknowledge past the reservation.
+	AckAfter string   `json:"ack_after,omitempty"`
+	Shown    []string `json:"shown"`
 	// Displayed contains only deliveries successfully written by a hook or
 	// monitor. Shown also contains app-server reservations, and legacy watch
 	// claims made before stdout was written; neither proves display.
@@ -75,7 +79,12 @@ func hookCredential(secret string) string {
 	return fmt.Sprintf("%x", sum[:8])
 }
 
-func (s *hookState) has(deliveryID string) bool { return slices.Contains(s.Shown, deliveryID) }
+// An outstanding app-server claim can outlive its Shown entry. Keep that
+// reservation suppressing duplicate injection until its owner releases it.
+func (s *hookState) has(deliveryID string) bool {
+	return slices.Contains(s.Shown, deliveryID) ||
+		slices.ContainsFunc(s.Claims, func(r claimRef) bool { return r.ID == deliveryID })
+}
 
 // claim retains delivery ids in arrival order; cursors are never compared.
 func (s *hookState) claim(deliveryID string) bool {
@@ -90,7 +99,13 @@ func (s *hookState) claim(deliveryID string) bool {
 }
 
 func (s *hookState) recordDisplay(deliveryID string) {
-	s.claim(deliveryID)
+	// Successful output starts a fresh dedupe window, even if this delivery
+	// was reserved long ago. Keep reservation age from evicting a fresh display.
+	s.Shown = slices.DeleteFunc(s.Shown, func(id string) bool { return id == deliveryID })
+	s.Shown = append(s.Shown, deliveryID)
+	if len(s.Shown) > shownWindow {
+		s.Shown = s.Shown[len(s.Shown)-shownWindow:]
+	}
 	if !slices.Contains(s.Displayed, deliveryID) {
 		s.Displayed = append(s.Displayed, deliveryID)
 		if len(s.Displayed) > shownWindow {
@@ -240,7 +255,7 @@ type hookIdentity struct{ Hub, Caller, As, Cred string }
 func (s *hookState) bind(id hookIdentity) bool {
 	reset := s.Hub != "" && (s.Hub != id.Hub || s.As != id.As || (s.Caller != "" && id.Caller != "" && s.Caller != id.Caller))
 	if reset {
-		s.PollCursor, s.Shown, s.Caller, s.Cred = "", nil, "", ""
+		s.PollCursor, s.AckAfter, s.Shown, s.Caller, s.Cred = "", "", nil, "", ""
 		s.Displayed = nil
 		s.AppCursor, s.Replay, s.Claims = "", nil, nil
 	}
