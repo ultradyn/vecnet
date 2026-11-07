@@ -144,11 +144,12 @@ func (a *app) codexDeliveryRelease() (codexDeliveryRelease, error) {
 	if override := a.getenv("VECNET_CODEX_DELIVERY_ENTRY"); override != "" {
 		candidates = []string{override}
 	} else {
+		// Prefer assets shipped beside npm's native/<platform>/vecnet over an
+		// unrelated launcher release installed under HOME.
+		candidates = append(candidates, filepath.Join(filepath.Dir(r.Binary), "../../connectors/launcher/src/codex/delivery-main.ts"))
 		if home := a.getenv("HOME"); filepath.IsAbs(home) {
 			candidates = append(candidates, filepath.Join(home, ".local/share/vecnet-launcher/current/launcher/src/codex/delivery-main.ts"))
 		}
-		// npm's native/<platform>/vecnet has runtime assets at package root.
-		candidates = append(candidates, filepath.Join(filepath.Dir(r.Binary), "../../connectors/launcher/src/codex/delivery-main.ts"))
 	}
 	for _, path := range candidates {
 		if !filepath.IsAbs(path) {

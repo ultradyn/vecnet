@@ -27,7 +27,39 @@ let revision = null;
 try {
   revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
 } catch { /* Build-box copies do not include .git. */ }
-const info = { version: manifest.version, revision, go: go(['version']), binaries: {} };
+const info = { version: manifest.version, revision, go: go(['version']), binaries: {},
+  delivery: { entry: 'connectors/launcher/src/codex/delivery-main.ts', assets: {} } };
+
+// Follow static runtime imports only. Type-only imports disappear under Node's
+// native stripping; tests, backend plugins, dependencies and local config never
+// enter this release. Preserve ESM boundaries inside the CommonJS npm wrapper.
+const schemas = ['launch-input','launch-permission','launch-question','launch-answers','launch-approval-closed'];
+const pending = [info.delivery.entry, ...schemas.map(name => `connectors/launcher/schema/${name}.v1.schema.json`)], visited = new Set();
+while (pending.length) {
+  const file = pending.pop();
+  if (visited.has(file)) continue;
+  if (!/^connectors\/(launcher|hub-client)\/src\/[A-Za-z0-9_./-]+\.ts$/.test(file) && !schemas.some(name => file === `connectors/launcher/schema/${name}.v1.schema.json`)) throw new Error('delivery import outside runtime sources');
+  visited.add(file);
+  const bytes = await readFile(path.join(root, file));
+  const target = path.join(destination, file);
+  await mkdir(path.dirname(target), { recursive: true });
+  await writeFile(target, bytes);
+  info.delivery.assets[file] = createHash('sha256').update(bytes).digest('hex');
+  if (file.endsWith('.json')) continue;
+  for (const [statement] of bytes.toString('utf8').matchAll(/^import(?!\s+type\b)[^;]+;/gm)) {
+    const specifier = statement.match(/['"]([^'"]+)['"]\s*;$/)?.[1];
+    if (!specifier) throw new Error('unrecognized delivery import');
+    if (specifier.startsWith('node:')) continue;
+    if (!specifier.startsWith('.')) throw new Error('delivery must not need npm dependencies');
+    pending.push(path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier)));
+  }
+}
+for (const project of ['launcher', 'hub-client']) {
+  const file = `connectors/${project}/package.json`, bytes = '{"type":"module"}\n';
+  await writeFile(path.join(destination, file), bytes);
+  info.delivery.assets[file] = createHash('sha256').update(bytes).digest('hex');
+}
+console.log(`Staged ${visited.size} delivery runtime files`);
 
 // Build sequentially so release preparation uses at most two compiler threads.
 for (const [platform, goos, goarch] of [

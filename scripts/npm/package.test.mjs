@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,7 +28,9 @@ test('release contains only runtime files and complete native binaries', async t
     'package.json', 'README.md', 'BUILD_INFO.json', 'THIRD_PARTY_NOTICES.txt',
     'bin/run.cjs', 'bin/vecnet.cjs', 'bin/vecnet-hub.cjs', ...binaries,
   ].map(file => `package/${file}`).sort();
-  assert.deepEqual(packed, expected);
+  const runtime = packed.filter(file => file.startsWith('package/connectors/'));
+  for (const file of runtime) assert.match(file, /^package\/connectors\/(launcher|hub-client)\/(package\.json|src\/[A-Za-z0-9_./-]+\.ts|schema\/launch-(input|permission|question|answers|approval-closed)\.v1\.schema\.json)$/);
+  assert.deepEqual(packed.filter(file => !file.startsWith('package/connectors/')), expected);
   const extracted = await mkdtemp(path.join(os.tmpdir(), 'vecnet-npm-inspect-'));
   t.after(() => rm(extracted, { recursive: true, force: true }));
   execFileSync('tar', ['-xzf', tarball, '-C', extracted]);
@@ -65,6 +67,9 @@ test('packed npm installation runs both commands and exchanges messages through 
   const prefix = path.join(temporary, 'prefix');
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (key.startsWith('VECNET_')) delete env[key];
+  for (const [key, sub] of Object.entries({HOME:'home', XDG_CONFIG_HOME:'config', CODEX_HOME:'codex', XDG_RUNTIME_DIR:'runtime', XDG_DATA_HOME:'data'})) {
+    env[key] = path.join(temporary, sub); await mkdir(env[key], {mode:0o700});
+  }
   env.XDG_CACHE_HOME = path.join(temporary, 'cache');
   env.VECNET_CONFIG = path.join(temporary, 'unused-config.toml');
   execFileSync('npm', [
@@ -154,4 +159,67 @@ test('wrapper preserves failure when a native process is killed by SIGPIPE', asy
     encoding: 'utf8', timeout: 5000,
   });
   assert.ok(result.signal === 'SIGPIPE' || result.status === 141, `unexpected wrapper exit ${result.status}/${result.signal}: ${result.stderr}`);
+});
+
+
+test('npm package includes automatic delivery assets', async t => {
+  const extracted = await mkdtemp(path.join(os.tmpdir(), 'vecnet-npm-assets-'));
+  t.after(() => rm(extracted, {recursive:true,force:true}));
+  execFileSync('tar', ['-xzf',tarball,'-C',extracted]);
+  const contents = path.join(extracted,'package');
+  const entry = 'connectors/launcher/src/codex/delivery-main.ts';
+  assert.ok((await stat(path.join(contents,entry))).isFile(), 'packed release needs the delivery entry');
+  for (const project of ['launcher','hub-client']) assert.equal(JSON.parse(await readFile(path.join(contents,'connectors',project,'package.json'),'utf8')).type,'module');
+  const metadata = JSON.parse(await readFile(path.join(contents,'BUILD_INFO.json'),'utf8'));
+  assert.equal(metadata.delivery.entry,entry);
+  for (const [file,digest] of Object.entries(metadata.delivery.assets)) {
+    const bytes = await readFile(path.join(contents,file));
+    assert.equal(createHash('sha256').update(bytes).digest('hex'),digest,file);
+    if (file.endsWith('.ts')) assert.deepEqual(bytes,await readFile(path.join(root,file)));
+  }
+  assert.equal(JSON.parse(await readFile(path.join(contents,'package.json'),'utf8')).engines.node,'>=20');
+});
+
+test('extracted npm delivery entry executes', {timeout:15000}, async t => {
+  const extracted = await mkdtemp(path.join(os.tmpdir(),'vecnet-npm-delivery-'));
+  let child, exited;
+  t.after(async () => {
+    try {
+      if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+      if (exited) await deadline(exited,5000,'delivery did not drain');
+    } finally { await rm(extracted,{recursive:true,force:true}); }
+  });
+  execFileSync('tar',['-xzf',tarball,'-C',extracted]);
+  const contents = path.join(extracted,'package');
+  const binary = path.join(contents,'native',`linux-${process.arch}`,'vecnet');
+  const env = {PATH:path.dirname(process.execPath)};
+  for (const [key,sub] of Object.entries({HOME:'home',XDG_CONFIG_HOME:'config',CODEX_HOME:'codex',XDG_RUNTIME_DIR:'runtime',XDG_DATA_HOME:'data'})) {
+    env[key]=path.join(extracted,sub); await mkdir(env[key],{mode:0o700});
+  }
+  const hub='https://hub.invalid';
+  const slug=createHash('sha256').update(hub).digest('hex');
+  const stateRoot=path.join(env.XDG_DATA_HOME,'vecnet/codex-delivery');
+  const state=path.join(stateRoot,slug);
+  await mkdir(state,{recursive:true,mode:0o700});
+  await writeFile(path.join(state,'descriptor.json'),JSON.stringify({version:1,hub}),{mode:0o600});
+  await writeFile(path.join(stateRoot,'registry.json'),JSON.stringify({version:1,sources:[{config:path.join(env.XDG_CONFIG_HOME,'fixture.toml'),bindings:path.join(env.XDG_CONFIG_HOME,'absent-bindings.json')}]}),{mode:0o600});
+  child=spawn(binary,['codex','deliver','--hub',hub],{env,stdio:['ignore','pipe','pipe']});
+  exited=new Promise(resolve=>child.once('exit',(code,signal)=>resolve({code,signal})));
+  let stderr=''; child.stderr.on('data',chunk=>{stderr+=chunk;});
+  await deadline((async()=>{
+    const readyBy=Date.now()+4500;
+    while (Date.now()<readyBy) {
+      if (stderr.includes('codex_connector_disabled')) return;
+      assert.ok(child.exitCode===null && child.signalCode===null,`extracted delivery stopped: ${stderr}`);
+      await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    assert.fail('extracted delivery did not reconcile its fixture source: '+stderr);
+  })(),5000,'extracted delivery did not create its ledger');
+  assert.deepEqual(JSON.parse(await readFile(path.join(state,'hub.json'),'utf8')),{version:1,hub});
+  const status=spawnSync(binary,['codex','delivery-status','--hub',hub],{env,encoding:'utf8',timeout:2000});
+  assert.equal(status.status,0,status.stderr);
+  assert.deepEqual(JSON.parse(status.stdout),{hub,running:true});
+  const owner=JSON.parse(await readFile(path.join(env.XDG_RUNTIME_DIR,'vecnet',`delivery-${slug}.json`),'utf8'));
+  assert.equal(owner.launcher,path.join(contents,'connectors/launcher/src/codex/delivery-main.ts'));
+  child.kill('SIGTERM'); assert.equal((await deadline(exited,5000,'delivery did not stop')).code,0,stderr);
 });

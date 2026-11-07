@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -16,6 +17,16 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+// Account lookup is separate from the client environment and replaceable by
+// process fixtures, which must never use the real user's manager paths.
+var deliveryAccountScope = func() (string, string, error) {
+	u, err := user.Current()
+	if err != nil {
+		return "", "", err
+	}
+	return u.HomeDir, "/run/user/" + u.Uid, nil
+}
 
 type deliverySource struct {
 	Config   string `json:"config"`
@@ -30,6 +41,8 @@ type deliveryDescriptor struct {
 	Hub     string `json:"hub"`
 }
 type deliveryOwner struct {
+	StateRoot string    `json:"state_root"`
+	Registry  string    `json:"registry"`
 	Hub       string    `json:"hub"`
 	PID       int       `json:"pid"`
 	Birth     string    `json:"birth"`
@@ -228,8 +241,11 @@ func deliveryRegister(ctx context.Context, p deliveryPaths, config, bindings str
 	}
 	return nil
 }
+func deliveryOwnerScope(m deliveryOwner, p deliveryPaths) bool {
+	return m.Hub == p.Hub && m.StateRoot == p.Root && m.Registry == p.Registry
+}
 func deliveryGeneration(m deliveryOwner, p deliveryPaths, r codexDeliveryRelease) bool {
-	return m.Hub == p.Hub && m.Digest == r.Digest && m.Launcher == r.Entry
+	return deliveryOwnerScope(m, p) && m.Digest == r.Digest && m.Launcher == r.Entry
 }
 func (a *app) deliverySystemctl(ctx context.Context, args ...string) (string, error) {
 	path, err := a.codexDeliveryExecutable("systemctl")
@@ -257,6 +273,101 @@ func (a *app) deliverySystemctl(ctx context.Context, args ...string) (string, er
 	err = cmd.Run()
 	return strings.TrimSpace(out.String()), err
 }
+
+// Installed contract is private metadata, never profile contents or a bearer.
+type deliveryInstallation struct {
+	Version int    `json:"version"`
+	Binary  string `json:"binary"`
+	Entry   string `json:"entry"`
+	Node    string `json:"node"`
+	Path    string `json:"path"`
+}
+
+// Restrict installed paths to unambiguous systemd show tokens. The installer
+// enforces this too; unusual custom paths retain the detached lifecycle.
+var deliveryInstalledPath = regexp.MustCompile(`^/[A-Za-z0-9_./+:-]+$`)
+
+func deliveryProperties(raw string) map[string]string {
+	result := map[string]string{}
+	for _, line := range strings.Split(raw, "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return nil
+		}
+		if _, duplicate := result[key]; duplicate {
+			return nil
+		}
+		result[key] = value
+	}
+	return result
+}
+
+func (a *app) deliveryManagedCompatible(ctx context.Context, p deliveryPaths, r codexDeliveryRelease, unit string) (bool, error) {
+	home, runtime, err := deliveryAccountScope()
+	if err != nil {
+		return false, errCodexDelivery
+	}
+	if a.getenv("HOME") != home || p.Root != filepath.Join(home, ".local/share/vecnet/codex-delivery") || filepath.Dir(filepath.Dir(p.Lease)) != runtime {
+		return false, nil
+	}
+	installationRoot := filepath.Join(home, ".local/share/vecnet-launcher")
+	var installed deliveryInstallation
+	if deliveryPrivateDir(installationRoot) != nil || deliveryRead(filepath.Join(installationRoot, "delivery.json"), &installed) != nil {
+		return false, nil
+	}
+	resolvedNode, nodeErr := filepath.EvalSymlinks(r.Node)
+	if nodeErr != nil {
+		return false, errCodexDelivery
+	}
+	if installed.Version != 1 || installed.Binary != r.Binary || installed.Entry != r.Entry || installed.Node != resolvedNode {
+		return false, nil
+	}
+	for _, value := range []string{home, runtime, installed.Binary, installed.Entry, installed.Node, installed.Path} {
+		if !deliveryInstalledPath.MatchString(value) {
+			return false, nil
+		}
+	}
+	// Read effective manager properties as well as disk metadata: an edited unit
+	// without daemon-reload must not start an older cached release or scope.
+	raw, err := a.deliverySystemctl(ctx, "show", "--property=ExecStart", "--property=Environment", "--property=UMask", unit)
+	if err != nil {
+		return false, errCodexDelivery
+	}
+	properties := deliveryProperties(raw)
+	prefix := "{ path=" + r.Binary + " ; argv[]=" + r.Binary + " codex deliver --hub-id " + p.Slug + " ; ignore_errors=no ;"
+	if !strings.HasPrefix(properties["ExecStart"], prefix) || strings.Count(properties["ExecStart"], "{ path=") != 1 || properties["UMask"] != "0077" {
+		return false, nil
+	}
+	environment := map[string]string{}
+	for _, pair := range strings.Fields(properties["Environment"]) {
+		key, value, ok := strings.Cut(pair, "=")
+		if !ok {
+			return false, nil
+		}
+		if _, duplicate := environment[key]; duplicate {
+			return false, nil
+		}
+		environment[key] = value
+	}
+	expected := map[string]string{"HOME": home, "XDG_DATA_HOME": filepath.Join(home, ".local/share"), "XDG_RUNTIME_DIR": runtime, "VECNET_BIN": r.Binary, "VECNET_CODEX_DELIVERY_ENTRY": r.Entry, "PATH": installed.Path}
+	for key, value := range expected {
+		if environment[key] != value {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (a *app) deliveryUnitInactive(ctx context.Context, unit string) bool {
+	raw, err := a.deliverySystemctl(ctx, "show", "--property=ActiveState", "--property=SubState", "--property=Job", unit)
+	if err != nil {
+		return false
+	}
+	properties := deliveryProperties(raw)
+	job, present := properties["Job"]
+	return present && job == "" && properties["ActiveState"] == "inactive" && properties["SubState"] == "dead"
+}
+
 func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bindings string, r codexDeliveryRelease) error {
 	p, err := a.codexDeliveryPaths(hub)
 	if err != nil {
@@ -299,13 +410,10 @@ func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bind
 	var owner deliveryOwner
 	sameGenerationOwner := false
 	if !locked {
-		if deliveryRead(p.Owner, &owner) != nil || owner.Hub != p.Hub {
+		if deliveryRead(p.Owner, &owner) != nil || !deliveryOwnerScope(owner, p) {
 			return errCodexDelivery
 		}
 		sameGenerationOwner = deliveryGeneration(owner, p, r) && deliveryOwnerHoldsLease(p, lease, owner)
-		if sameGenerationOwner && owner.Managed {
-			return nil
-		}
 	}
 	state, systemdErr := a.deliverySystemctl(ctx, "show", "--property=LoadState", "--value", unit)
 	// Executable absence permits detached lifecycle work, but cannot demote a
@@ -317,7 +425,24 @@ func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bind
 	} else if systemdErr != nil || (state != "loaded" && state != "not-found") {
 		return errCodexDelivery
 	}
-	installed := state == "loaded"
+	installed := false
+	if state == "loaded" {
+		installed, err = a.deliveryManagedCompatible(ctx, p, r, unit)
+		if err != nil {
+			return err
+		}
+		if !installed && !a.deliveryUnitInactive(ctx, unit) {
+			return errCodexDelivery
+		}
+	}
+	// Even a free local lease cannot authorize replacement across manager scopes.
+	// A held managed owner is never demoted because paths/assets/unit changed.
+	if !locked && owner.Managed && !installed {
+		return errCodexDelivery
+	}
+	if sameGenerationOwner && owner.Managed && installed {
+		return nil
+	}
 	if sameGenerationOwner && !installed {
 		return nil
 	}
@@ -427,7 +552,7 @@ func deliveryOwnerPidfd(p deliveryPaths, lease *os.File, m deliveryOwner) (int, 
 	return pidfd, nil
 }
 func deliveryOwnerHoldsLease(p deliveryPaths, lease *os.File, m deliveryOwner) bool {
-	if m.Hub != p.Hub || !deliveryOwnerRunning(m) {
+	if !deliveryOwnerScope(m, p) || !deliveryOwnerRunning(m) {
 		return false
 	}
 	var lockStat, processStat unix.Stat_t
@@ -552,6 +677,12 @@ func (a *app) runCodexDelivery(hub string, managed bool) error {
 	if err != nil {
 		return err
 	}
+	if managed {
+		compatible, e := a.deliveryManagedCompatible(ctx, p, r, "vecnet-delivery@"+p.Slug+".service")
+		if e != nil || !compatible {
+			return errCodexDelivery
+		}
+	}
 	// The descriptor is registered by ensure, never by the Node runner.
 	var desc deliveryDescriptor
 	if deliveryRead(p.Descriptor, &desc) != nil || desc.Version != 1 || desc.Hub != p.Hub {
@@ -581,7 +712,7 @@ func (a *app) runCodexDelivery(hub string, managed bool) error {
 	if birth == "" {
 		return errCodexDelivery
 	}
-	owner := deliveryOwner{Hub: p.Hub, PID: os.Getpid(), Birth: birth, Digest: r.Digest, Launcher: r.Entry, StartedAt: time.Now().UTC(), Managed: managed}
+	owner := deliveryOwner{StateRoot: p.Root, Registry: p.Registry, Hub: p.Hub, PID: os.Getpid(), Birth: birth, Digest: r.Digest, Launcher: r.Entry, StartedAt: time.Now().UTC(), Managed: managed}
 	if err := deliveryPublish(p.Owner, owner); err != nil {
 		return errCodexDelivery
 	}

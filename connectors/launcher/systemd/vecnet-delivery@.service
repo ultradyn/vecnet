@@ -1,0 +1,21 @@
+# Rendered by ln-install with absolute installed assets; registry holds sources.
+[Unit]
+Description=vecnet automatic Codex delivery for hub %i
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment="HOME=%h"
+Environment="XDG_DATA_HOME=%h/.local/share"
+Environment="XDG_RUNTIME_DIR=/run/user/%U"
+Environment="VECNET_BIN=@BINARY@"
+Environment="VECNET_CODEX_DELIVERY_ENTRY=@ENTRY@"
+Environment="PATH=@PATH@"
+ExecStart=@BINARY@ codex deliver --hub-id %i
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

@@ -34,7 +34,7 @@ func newDeliveryFixture(t *testing.T) *deliveryFixture {
 	t.Helper()
 	d := t.TempDir()
 	f := &deliveryFixture{t: t, dir: d, entry: filepath.Join(d, "release", "delivery-main.ts"), config: filepath.Join(d, "v.toml"), bindings: filepath.Join(d, "bindings.json")}
-	for _, sub := range []string{"bin", "release", "run", "data", "codex", "config"} {
+	for _, sub := range []string{"bin", "release", "run", ".local", ".local/share", "codex", "config"} {
 		if err := os.Mkdir(filepath.Join(d, sub), 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -44,10 +44,13 @@ func newDeliveryFixture(t *testing.T) *deliveryFixture {
 		t.Fatal(err)
 	}
 	for name, role := range map[string]string{"vecnet": "cli", "node": "node", "systemctl": "systemctl"} {
-		deliveryWrite(t, filepath.Join(d, "bin", name), "#!/bin/sh\nexport GORACE=atexit_sleep_ms=0\nexec "+deliveryQuote(exe)+" -test.run=^TestCodexDeliveryProcess$ -- delivery-fixture "+role+" \"$@\"\n", 0700)
+		deliveryWrite(t, filepath.Join(d, "bin", name), "#!/bin/sh\nexport GORACE=atexit_sleep_ms=0\nexport VECNET_TEST_MANAGER_ROOT="+deliveryQuote(d)+"\nexec "+deliveryQuote(exe)+" -test.run=^TestCodexDeliveryProcess$ -- delivery-fixture "+role+" \"$@\"\n", 0700)
 	}
 	deliveryWrite(t, f.entry, "fixture release one", 0600)
-	f.env = map[string]string{"HOME": d, "XDG_CONFIG_HOME": filepath.Join(d, "config"), "CODEX_HOME": filepath.Join(d, "codex"), "XDG_DATA_HOME": filepath.Join(d, "data"), "XDG_RUNTIME_DIR": filepath.Join(d, "run"), "PATH": filepath.Join(d, "bin"), "VECNET_BIN": filepath.Join(d, "bin", "vecnet"), "VECNET_CODEX_DELIVERY_ENTRY": f.entry}
+	f.env = map[string]string{"HOME": d, "XDG_CONFIG_HOME": filepath.Join(d, "config"), "CODEX_HOME": filepath.Join(d, "codex"), "XDG_DATA_HOME": filepath.Join(d, ".local/share"), "XDG_RUNTIME_DIR": filepath.Join(d, "run"), "PATH": filepath.Join(d, "bin"), "VECNET_BIN": filepath.Join(d, "bin", "vecnet"), "VECNET_CODEX_DELIVERY_ENTRY": f.entry}
+	prior := deliveryAccountScope
+	deliveryAccountScope = func() (string, string, error) { return d, filepath.Join(d, "run"), nil }
+	t.Cleanup(func() { deliveryAccountScope = prior })
 	f.app = &app{ctx: context.Background(), getenv: func(k string) string { return f.env[k] }, stdout: io.Discard, stderr: io.Discard}
 	t.Cleanup(func() {
 		paths, _ := filepath.Glob(filepath.Join(d, "run", "vecnet", "*.json"))
@@ -65,6 +68,25 @@ func newDeliveryFixture(t *testing.T) *deliveryFixture {
 	})
 	return f
 }
+func (f *deliveryFixture) installManaged() {
+	f.t.Helper()
+	manager := map[string]string{
+		"HOME": f.dir, "XDG_DATA_HOME": filepath.Join(f.dir, ".local/share"),
+		"XDG_RUNTIME_DIR": filepath.Join(f.dir, "run"), "PATH": filepath.Join(f.dir, "bin"),
+		"XDG_CONFIG_HOME": filepath.Join(f.dir, "manager-config"), "CODEX_HOME": filepath.Join(f.dir, "manager-codex"),
+		"VECNET_BIN": f.env["VECNET_BIN"], "VECNET_CODEX_DELIVERY_ENTRY": f.env["VECNET_CODEX_DELIVERY_ENTRY"],
+	}
+	raw, _ := json.Marshal(manager)
+	deliveryWrite(f.t, filepath.Join(f.dir, "manager-env.json"), string(raw), 0600)
+	root := filepath.Join(f.dir, ".local/share/vecnet-launcher")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		f.t.Fatal(err)
+	}
+	raw, _ = json.Marshal(map[string]any{"version": 1, "binary": manager["VECNET_BIN"], "entry": manager["VECNET_CODEX_DELIVERY_ENTRY"], "node": filepath.Join(f.dir, "bin/node"), "path": manager["PATH"]})
+	deliveryWrite(f.t, filepath.Join(root, "delivery.json"), string(raw), 0600)
+	deliveryWrite(f.t, filepath.Join(f.dir, "systemd-installed"), "fixture only", 0600)
+}
+
 func (f *deliveryFixture) environ() []string {
 	var env []string
 	for k, v := range f.env {
@@ -92,7 +114,7 @@ func deliveryWait(t *testing.T, check func() bool) {
 	t.Fatal("delivery process did not reach expected state")
 }
 func (f *deliveryFixture) starts() []string {
-	paths, _ := filepath.Glob(filepath.Join(f.dir, "data", "vecnet", "codex-delivery", "*", "starts"))
+	paths, _ := filepath.Glob(filepath.Join(f.dir, ".local/share", "vecnet", "codex-delivery", "*", "starts"))
 	var lines []string
 	for _, path := range paths {
 		raw, _ := os.ReadFile(path)
@@ -131,6 +153,9 @@ func TestCodexDeliveryProcess(t *testing.T) {
 	}
 	if len(args) == 0 {
 		return
+	}
+	if root := os.Getenv("VECNET_TEST_MANAGER_ROOT"); root != "" {
+		deliveryAccountScope = func() (string, string, error) { return root, filepath.Join(root, "run"), nil }
 	}
 	switch args[0] {
 	case "cli":
@@ -180,12 +205,12 @@ func TestCodexDeliveryProcess(t *testing.T) {
 	case "systemctl":
 		// No installed fixture template by default. Tests opt in by creating a
 		// private marker, so the host service manager is never contacted.
-		if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), "systemd-installed")); err != nil {
+		if _, err := os.Stat(filepath.Join(os.Getenv("VECNET_TEST_MANAGER_ROOT"), "systemd-installed")); err != nil {
 			fmt.Println("not-found")
 			os.Exit(0)
 		}
 		if strings.Contains(strings.Join(args, " "), "show") {
-			failure, _ := os.ReadFile(filepath.Join(os.Getenv("HOME"), "systemd-show-failure"))
+			failure, _ := os.ReadFile(filepath.Join(os.Getenv("VECNET_TEST_MANAGER_ROOT"), "systemd-show-failure"))
 			switch string(failure) {
 			case "error":
 				os.Exit(1)
@@ -196,10 +221,33 @@ func TestCodexDeliveryProcess(t *testing.T) {
 				time.Sleep(10 * time.Second)
 				os.Exit(1)
 			}
+			root := os.Getenv("VECNET_TEST_MANAGER_ROOT")
+			var manager map[string]string
+			raw, _ := os.ReadFile(filepath.Join(root, "manager-env.json"))
+			_ = json.Unmarshal(raw, &manager)
+			joined := strings.Join(args, " ")
+			if strings.Contains(joined, "--property=ExecStart") {
+				if override, err := os.ReadFile(filepath.Join(root, "manager-effective")); err == nil {
+					fmt.Print(string(override))
+					os.Exit(0)
+				}
+				id := strings.TrimSuffix(strings.TrimPrefix(args[len(args)-1], "vecnet-delivery@"), ".service")
+				fmt.Printf("ExecStart={ path=%s ; argv[]=%s codex deliver --hub-id %s ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n", manager["VECNET_BIN"], manager["VECNET_BIN"], id)
+				fmt.Printf("Environment=HOME=%s XDG_DATA_HOME=%s XDG_RUNTIME_DIR=%s VECNET_BIN=%s VECNET_CODEX_DELIVERY_ENTRY=%s PATH=%s\nUMask=0077\n", manager["HOME"], manager["XDG_DATA_HOME"], manager["XDG_RUNTIME_DIR"], manager["VECNET_BIN"], manager["VECNET_CODEX_DELIVERY_ENTRY"], manager["PATH"])
+				os.Exit(0)
+			}
+			if strings.Contains(joined, "--property=ActiveState") {
+				state, _ := os.ReadFile(filepath.Join(root, "manager-state"))
+				if len(state) == 0 {
+					state = []byte("ActiveState=inactive\nSubState=dead\nJob=\n")
+				}
+				fmt.Print(string(state))
+				os.Exit(0)
+			}
 			fmt.Println("loaded")
 			os.Exit(0)
 		}
-		file, _ := os.OpenFile(filepath.Join(os.Getenv("HOME"), "systemctl-calls"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		file, _ := os.OpenFile(filepath.Join(os.Getenv("VECNET_TEST_MANAGER_ROOT"), "systemctl-calls"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		fmt.Fprintln(file, strings.Join(args[1:], " "))
 		file.Close()
 		// Service operation invokes the fixture deliver as an actual process.
@@ -234,8 +282,15 @@ func TestCodexDeliveryProcess(t *testing.T) {
 			}
 		}
 
-		cmd := exec.Command(os.Getenv("VECNET_BIN"), "codex", "deliver", "--hub-id", hubID)
-		cmd.Env = os.Environ()
+		var manager map[string]string
+		raw, _ := os.ReadFile(filepath.Join(os.Getenv("VECNET_TEST_MANAGER_ROOT"), "manager-env.json"))
+		if json.Unmarshal(raw, &manager) != nil {
+			os.Exit(17)
+		}
+		cmd := exec.Command(manager["VECNET_BIN"], "codex", "deliver", "--hub-id", hubID)
+		for key, value := range manager {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		if cmd.Start() != nil {
 			os.Exit(2)
@@ -286,6 +341,11 @@ func TestCodexDeliveryProcess(t *testing.T) {
 		}
 		fmt.Fprintln(file, os.Getpid())
 		file.Close()
+		scope, _ := json.Marshal(map[string]string{
+			"home": os.Getenv("HOME"), "data": os.Getenv("XDG_DATA_HOME"), "runtime": os.Getenv("XDG_RUNTIME_DIR"),
+			"path": os.Getenv("PATH"), "config": os.Getenv("XDG_CONFIG_HOME"), "codex": os.Getenv("CODEX_HOME"),
+		})
+		_ = os.WriteFile(filepath.Join(state, "runner-scope.json"), scope, 0600)
 		// The stable recovery file stands in for Node's independently tested DB.
 		ledger := filepath.Join(state, "ledger.sqlite")
 		file, err = os.OpenFile(ledger, os.O_CREATE|os.O_RDWR, 0600)
@@ -336,7 +396,7 @@ func TestCodexDeliveryConcurrentEnsure(t *testing.T) {
 	if got := f.starts()[0]; got != strconv.Itoa(pid) {
 		t.Fatalf("Go owner did not exec runner in same PID: metadata=%d runner=%s", pid, got)
 	}
-	raw, err := os.ReadFile(filepath.Join(f.dir, "data", "vecnet", "codex-delivery", "registry.json"))
+	raw, err := os.ReadFile(filepath.Join(f.dir, ".local/share", "vecnet", "codex-delivery", "registry.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +427,7 @@ func TestCodexDeliveryTwoHubs(t *testing.T) {
 	if f.starts()[0] == f.starts()[1] {
 		t.Fatal("two hubs share an owner")
 	}
-	paths, _ := filepath.Glob(filepath.Join(f.dir, "data", "vecnet", "codex-delivery", "*", "ledger.sqlite"))
+	paths, _ := filepath.Glob(filepath.Join(f.dir, ".local/share", "vecnet", "codex-delivery", "*", "ledger.sqlite"))
 	if len(paths) != 2 {
 		t.Fatalf("hub state directories=%v", paths)
 	}
@@ -376,7 +436,7 @@ func TestCodexDeliveryTwoHubs(t *testing.T) {
 	if err := f.ensure("https://hub.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := os.ReadFile(filepath.Join(f.dir, "data", "vecnet", "codex-delivery", "registry.json"))
+	raw, _ := os.ReadFile(filepath.Join(f.dir, ".local/share", "vecnet", "codex-delivery", "registry.json"))
 	var r struct{ Sources []any }
 	if json.Unmarshal(raw, &r) != nil || len(r.Sources) != 2 {
 		t.Fatalf("source registry=%s", raw)
@@ -422,7 +482,7 @@ func TestCodexDeliveryUpgrade(t *testing.T) {
 			deliveryWait(t, func() bool { return len(f.starts()) == 1 })
 			pid, meta := f.owner()
 			before, _ := os.Stat(strings.TrimSuffix(meta, ".json") + ".lock")
-			ledgers, _ := filepath.Glob(filepath.Join(f.dir, "data", "vecnet", "codex-delivery", "*", "ledger.sqlite"))
+			ledgers, _ := filepath.Glob(filepath.Join(f.dir, ".local/share", "vecnet", "codex-delivery", "*", "ledger.sqlite"))
 			deliveryWrite(t, ledgers[0], "accepted ambiguous recovery row", 0600)
 			if generation == "launcher" {
 				newEntry := filepath.Join(f.dir, "release-two.ts")
@@ -549,7 +609,7 @@ func TestCodexDeliveryOldNode(t *testing.T) {
 
 func TestCodexDeliveryManagedUpgrade(t *testing.T) {
 	f := newDeliveryFixture(t)
-	deliveryWrite(t, filepath.Join(f.dir, "systemd-installed"), "fixture only", 0600)
+	f.installManaged()
 	if err := f.ensure("https://hub.invalid"); err != nil {
 		t.Fatal(err)
 	}
@@ -557,6 +617,7 @@ func TestCodexDeliveryManagedUpgrade(t *testing.T) {
 	next := filepath.Join(f.dir, "new-release.ts")
 	deliveryWrite(t, next, "next release", 0600)
 	f.env["VECNET_CODEX_DELIVERY_ENTRY"] = next
+	f.installManaged()
 	if err := f.ensure("https://hub.invalid"); err != nil {
 		t.Fatalf("managed generation restart: %v", err)
 	}
@@ -617,7 +678,7 @@ func TestCodexDeliveryManagedLookupFailure(t *testing.T) {
 	for _, failure := range []string{"error", "unexpected", "timeout", "missing"} {
 		t.Run(failure, func(t *testing.T) {
 			f := newDeliveryFixture(t)
-			deliveryWrite(t, filepath.Join(f.dir, "systemd-installed"), "fixture only", 0600)
+			f.installManaged()
 			if err := f.ensure("https://hub.invalid"); err != nil {
 				t.Fatal(err)
 			}
@@ -708,7 +769,7 @@ func TestCodexDeliveryProbe(t *testing.T) {
 	if err != nil || !probe.Loaded || probe.Previous != "gone" {
 		t.Fatalf("read-only probe result=%+v err=%v", probe, err)
 	}
-	if paths, _ := filepath.Glob(filepath.Join(f.dir, "data", "vecnet", "codex-delivery", "*")); len(paths) != 0 {
+	if paths, _ := filepath.Glob(filepath.Join(f.dir, ".local/share", "vecnet", "codex-delivery", "*")); len(paths) != 0 {
 		t.Fatal("probe created delivery state")
 	}
 }
@@ -785,7 +846,7 @@ func TestCodexDeliveryRefreshRegistry(t *testing.T) {
 	if out, err := f.command("codex", "delivery-refresh", "--hub-id", slug).CombinedOutput(); err != nil {
 		t.Fatalf("registered refresh: %v %s", err, out)
 	}
-	raw, err := os.ReadFile(filepath.Join(f.dir, "data", "vecnet", "codex-delivery", "registry.json"))
+	raw, err := os.ReadFile(filepath.Join(f.dir, ".local/share", "vecnet", "codex-delivery", "registry.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -805,11 +866,12 @@ func TestCodexDeliveryInstallTransition(t *testing.T) {
 				t.Fatal(err)
 			}
 			deliveryWait(t, func() bool { return len(f.starts()) == 1 })
-			deliveryWrite(t, filepath.Join(f.dir, "systemd-installed"), "fixture only", 0600)
+			f.installManaged()
 			if generation == "new-generation" {
 				next := filepath.Join(f.dir, "installed-release.ts")
 				deliveryWrite(t, next, "installed generation", 0600)
 				f.env["VECNET_CODEX_DELIVERY_ENTRY"] = next
+				f.installManaged()
 			}
 			if err := f.ensure("https://hub.invalid"); err != nil {
 				t.Fatalf("installed service cannot stop a detached owner: %v", err)
@@ -954,5 +1016,272 @@ func TestCodexDeliveryWrongBirth(t *testing.T) {
 	}
 	if len(f.starts()) != 1 {
 		t.Fatal("wrong-birth metadata caused overlapping replacement")
+	}
+}
+
+func TestCodexDeliveryUnknownOwnerProvenance(t *testing.T) {
+	for _, field := range []string{"state_root", "registry"} {
+		for _, value := range []string{"", "/foreign/private-state"} {
+			t.Run(field+value, func(t *testing.T) {
+				f := newDeliveryFixture(t)
+				if err := f.ensure("https://hub.invalid"); err != nil {
+					t.Fatal(err)
+				}
+				pid, meta := f.owner()
+				raw, _ := os.ReadFile(meta)
+				var owner map[string]any
+				if json.Unmarshal(raw, &owner) != nil {
+					t.Fatal("invalid fixture metadata")
+				}
+				owner[field] = value
+				raw, _ = json.Marshal(owner)
+				deliveryWrite(t, meta, string(raw), 0600)
+				if err := f.ensure("https://hub.invalid"); err == nil {
+					t.Error("unknown owner provenance must refuse replacement or reuse")
+				}
+				if procStart(pid) != owner["birth"] {
+					t.Error("unknown owner was stopped")
+				}
+				if raw, _ := os.ReadFile(filepath.Join(f.dir, "runner-signals")); len(raw) != 0 {
+					t.Error("unknown owner was signaled")
+				}
+			})
+		}
+	}
+}
+
+func TestCodexDeliveryCustomScopeNeverReusesForeignLedger(t *testing.T) {
+	f := newDeliveryFixture(t)
+	if err := f.ensure("https://hub.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	pid, meta := f.owner()
+	before, _ := os.ReadFile(meta)
+	foreign := filepath.Join(f.dir, "other-data")
+	if err := os.Mkdir(foreign, 0700); err != nil {
+		t.Fatal(err)
+	}
+	f.env["XDG_DATA_HOME"] = foreign
+	if err := f.ensure("https://hub.invalid"); err == nil {
+		t.Error("custom scope reused a foreign ledger owner")
+	}
+	after, _ := os.ReadFile(meta)
+	if string(after) != string(before) || procStart(pid) == "" {
+		t.Error("foreign owner changed")
+	}
+}
+
+func TestCodexDeliveryManagedDefaultScopeReachesRegisteredStateAndLease(t *testing.T) {
+	f := newDeliveryFixture(t)
+	f.installManaged()
+	if err := f.ensure("https://hub.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := f.app.codexDeliveryPaths("https://hub.invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var owner map[string]any
+	raw, _ := os.ReadFile(p.Owner)
+	if json.Unmarshal(raw, &owner) != nil || owner["managed"] != true || owner["state_root"] != p.Root || owner["registry"] != p.Registry {
+		t.Fatalf("managed owner missing registered provenance: %s", raw)
+	}
+	var registry deliveryRegistry
+	if deliveryRead(p.Registry, &registry) != nil || len(registry.Sources) != 1 || registry.Sources[0] != (deliverySource{f.config, f.bindings}) {
+		t.Fatal("manager lost private registered sources")
+	}
+	var m deliveryOwner
+	if deliveryRead(p.Owner, &m) != nil {
+		t.Fatal("missing owner")
+	}
+	lease, err := deliveryPrivateFile(p.Lease, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	if !deliveryOwnerHoldsLease(p, lease, m) {
+		t.Fatal("manager uses a different lease")
+	}
+	deliveryWait(t, func() bool { _, err := os.Stat(filepath.Join(p.State, "runner-scope.json")); return err == nil })
+	var scope map[string]string
+	raw, _ = os.ReadFile(filepath.Join(p.State, "runner-scope.json"))
+	_ = json.Unmarshal(raw, &scope)
+	if scope["home"] != f.dir || scope["data"] != f.env["XDG_DATA_HOME"] || scope["runtime"] != f.env["XDG_RUNTIME_DIR"] || scope["config"] != filepath.Join(f.dir, "manager-config") || scope["codex"] != filepath.Join(f.dir, "manager-codex") || scope["path"] != filepath.Join(f.dir, "bin") {
+		t.Fatalf("manager inherited client paths: %v", scope)
+	}
+
+}
+
+func TestCodexDeliveryIncompatibleManagedScope(t *testing.T) {
+	for _, mismatch := range []string{"home", "data", "runtime", "entry", "binary"} {
+		for _, state := range []string{"inactive", "active", "activating", "queued", "unknown"} {
+			t.Run(mismatch+"/"+state, func(t *testing.T) {
+				f := newDeliveryFixture(t)
+				f.installManaged()
+				switch mismatch {
+				case "home", "data", "runtime":
+					path := filepath.Join(f.dir, "custom-"+mismatch)
+					if err := os.Mkdir(path, 0700); err != nil {
+						t.Fatal(err)
+					}
+					key := map[string]string{"home": "HOME", "data": "XDG_DATA_HOME", "runtime": "XDG_RUNTIME_DIR"}[mismatch]
+					f.env[key] = path
+				case "entry":
+					f.env["VECNET_CODEX_DELIVERY_ENTRY"] = filepath.Join(f.dir, "custom-entry.ts")
+					deliveryWrite(t, f.env["VECNET_CODEX_DELIVERY_ENTRY"], "custom release", 0600)
+				case "binary":
+					raw, _ := os.ReadFile(f.env["VECNET_BIN"])
+					f.env["VECNET_BIN"] = filepath.Join(f.dir, "bin/custom-vecnet")
+					deliveryWrite(t, f.env["VECNET_BIN"], string(raw)+"\n# new binary\n", 0700)
+				}
+				states := map[string]string{"inactive": "ActiveState=inactive\nSubState=dead\nJob=\n", "active": "ActiveState=active\nSubState=running\nJob=\n", "activating": "ActiveState=activating\nSubState=auto-restart\nJob=\n", "queued": "ActiveState=inactive\nSubState=dead\nJob=7\n", "unknown": "ActiveState=unknown\n"}
+				deliveryWrite(t, filepath.Join(f.dir, "manager-state"), states[state], 0600)
+				ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+				defer cancel()
+				err := f.app.ensureCodexDelivery(ctx, "https://hub.invalid", f.config, f.bindings)
+				if state == "inactive" {
+					if err != nil {
+						t.Fatalf("known inactive incompatible unit should go detached: %v", err)
+					}
+					p, _ := f.app.codexDeliveryPaths("https://hub.invalid")
+					var owner deliveryOwner
+					if deliveryRead(p.Owner, &owner) != nil || owner.Managed {
+						t.Error("incompatible scope incorrectly started managed")
+					}
+					if owner.PID > 1 {
+						t.Cleanup(func() {
+							if deliveryOwnerRunning(owner) {
+								_ = syscall.Kill(owner.PID, syscall.SIGKILL)
+							}
+						})
+					}
+				} else if err == nil {
+					t.Error("ambiguous or active incompatible unit must refuse")
+				}
+				if calls, _ := os.ReadFile(filepath.Join(f.dir, "systemctl-calls")); len(calls) != 0 {
+					t.Errorf("incompatible scope operated manager: %s", calls)
+				}
+			})
+		}
+	}
+}
+
+func TestCodexDeliveryIncompatibleAssetsPreserveLiveManagedOwner(t *testing.T) {
+	f := newDeliveryFixture(t)
+	f.installManaged()
+	if err := f.ensure("https://hub.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	_, meta := f.owner()
+	var before deliveryOwner
+	if deliveryRead(meta, &before) != nil {
+		t.Fatal("missing managed owner")
+	}
+	f.env["VECNET_CODEX_DELIVERY_ENTRY"] = filepath.Join(f.dir, "foreign-release.ts")
+	deliveryWrite(t, f.env["VECNET_CODEX_DELIVERY_ENTRY"], "foreign release", 0600)
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+	if err := f.app.ensureCodexDelivery(ctx, "https://hub.invalid", f.config, f.bindings); err == nil {
+		t.Error("incompatible assets must refuse live managed replacement")
+	}
+	var after deliveryOwner
+	if deliveryRead(meta, &after) != nil || after != before || !deliveryOwnerRunning(before) {
+		t.Error("incompatible request demoted managed owner")
+	}
+	if raw, _ := os.ReadFile(filepath.Join(f.dir, "runner-signals")); len(raw) != 0 {
+		t.Error("incompatible request signaled managed owner")
+	}
+}
+
+func TestCodexDeliveryNPMPinsSiblingAssets(t *testing.T) {
+	f := newDeliveryFixture(t)
+	binary := filepath.Join(f.dir, "package/native/linux-x64/vecnet")
+	entry := filepath.Join(f.dir, "package/connectors/launcher/src/codex/delivery-main.ts")
+	other := filepath.Join(f.dir, ".local/share/vecnet-launcher/current/launcher/src/codex/delivery-main.ts")
+	for _, file := range []string{binary, entry, other} {
+		if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, _ := os.ReadFile(f.env["VECNET_BIN"])
+	deliveryWrite(t, binary, string(raw), 0700)
+	deliveryWrite(t, entry, "npm-pinned entry", 0600)
+	deliveryWrite(t, other, "unrelated installed entry", 0600)
+	f.env["VECNET_BIN"] = binary
+	f.env["VECNET_CODEX_DELIVERY_ENTRY"] = ""
+	release, err := f.app.codexDeliveryRelease()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if release.Entry != entry {
+		t.Fatalf("npm binary selected unrelated HOME assets: %s", release.Entry)
+	}
+}
+
+func TestCodexDeliveryManagedNodeAlias(t *testing.T) {
+	f := newDeliveryFixture(t)
+	node := filepath.Join(f.dir, "bin/node")
+	realNode := filepath.Join(f.dir, "bin/node-real")
+	if err := os.Rename(node, realNode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realNode, node); err != nil {
+		t.Fatal(err)
+	}
+	f.installManaged()
+	manifest := filepath.Join(f.dir, ".local/share/vecnet-launcher/delivery.json")
+	var metadata map[string]any
+	raw, _ := os.ReadFile(manifest)
+	_ = json.Unmarshal(raw, &metadata)
+	metadata["node"] = realNode
+	raw, _ = json.Marshal(metadata)
+	deliveryWrite(t, manifest, string(raw), 0600)
+	if err := f.ensure("https://hub.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	_, meta := f.owner()
+	var owner deliveryOwner
+	if deliveryRead(meta, &owner) != nil || !owner.Managed {
+		t.Fatal("same installed Node reached through a symlink should remain managed")
+	}
+}
+
+// Supplemental checks of effective cached unit properties, written after the
+// primary incompatible-scope RED/GREEN; the report records that chronology.
+func TestCodexDeliveryEffectiveManagedContract(t *testing.T) {
+	for _, mismatch := range []string{"entry", "exec", "umask", "unknown"} {
+		t.Run(mismatch, func(t *testing.T) {
+			f := newDeliveryFixture(t)
+			f.installManaged()
+			if err := f.ensure("https://hub.invalid"); err != nil {
+				t.Fatal(err)
+			}
+			_, meta := f.owner()
+			var before deliveryOwner
+			if deliveryRead(meta, &before) != nil {
+				t.Fatal("missing owner")
+			}
+			_, slug, _ := codexDeliveryHub("https://hub.invalid")
+			properties := fmt.Sprintf("ExecStart={ path=%s ; argv[]=%s codex deliver --hub-id %s ; ignore_errors=no ; pid=0 }\nEnvironment=HOME=%s XDG_DATA_HOME=%s XDG_RUNTIME_DIR=%s VECNET_BIN=%s VECNET_CODEX_DELIVERY_ENTRY=%s PATH=%s\nUMask=0077\n", f.env["VECNET_BIN"], f.env["VECNET_BIN"], slug, f.dir, f.env["XDG_DATA_HOME"], f.env["XDG_RUNTIME_DIR"], f.env["VECNET_BIN"], f.entry, f.env["PATH"])
+			switch mismatch {
+			case "entry":
+				properties = strings.Replace(properties, "VECNET_CODEX_DELIVERY_ENTRY="+f.entry, "VECNET_CODEX_DELIVERY_ENTRY=/foreign/entry.ts", 1)
+			case "exec":
+				properties = strings.Replace(properties, "argv[]="+f.env["VECNET_BIN"], "argv[]=/foreign/vecnet", 1)
+			case "umask":
+				properties = strings.Replace(properties, "UMask=0077", "UMask=0022", 1)
+			case "unknown":
+				properties = "unrecognized output\n"
+			}
+			deliveryWrite(t, filepath.Join(f.dir, "manager-effective"), properties, 0600)
+			deliveryWrite(t, filepath.Join(f.dir, "manager-state"), "ActiveState=active\nSubState=running\nJob=\n", 0600)
+			if err := f.ensure("https://hub.invalid"); err == nil {
+				t.Error("cached mismatched unit must refuse even a same-generation owner")
+			}
+			var after deliveryOwner
+			if deliveryRead(meta, &after) != nil || before != after || !deliveryOwnerRunning(before) {
+				t.Error("mismatched cached unit changed the owner")
+			}
+		})
 	}
 }
