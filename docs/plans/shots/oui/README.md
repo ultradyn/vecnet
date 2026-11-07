@@ -19,6 +19,20 @@ Task 23 runs both clients against one disposable hub. Its assertions verify cros
 - [09-thread-initial.png](09-thread-initial.png) — Web thread chat and receipts — initial state.
 - [09-thread-progress.png](09-thread-progress.png) — Web thread chat and receipts — progress state.
 - [09-thread-success.png](09-thread-success.png) — Web thread chat and receipts — success state.
+- [t10-thread-retry.png](t10-thread-retry.png) — Reply after a lost network response: the draft stays, wake_idle remains selected, and the network error is shown.
+- [t10-thread-nongrok.png](t10-thread-nongrok.png) — Hosting thread without a Grok Bot: wake selected and the quota note hidden.
+- [t10-thread-delayed.png](t10-thread-delayed.png) — Grok setup thread while participant data is held back: wake remains selected and the quota note is hidden.
+- [t10-thread-explicit-hold.png](t10-thread-explicit-hold.png) — Grok triage thread with hold chosen explicitly before participant data arrives.
+- [t10-thread-sticky.png](t10-thread-sticky.png) — Participant data has arrived: explicit hold stays selected, with the Grok quota note and no preselection claim.
+- [t10-thread-setup.png](t10-thread-setup.png) — Reopened Grok setup thread: wake_idle preselected, with the quota note below the reply controls.
+- [t10-thread-w900.png](t10-thread-w900.png) — Grok setup reply at 900 px: wake_idle preselected and the quota note on one unclipped line below the controls.
+- [t10-thread-w800.png](t10-thread-w800.png) — Grok setup reply at 800 px: wake_idle preselected and the quota note on one unclipped line below the controls.
+- [t10-thread-w600.png](t10-thread-w600.png) — Grok setup reply at 600 px: wake_idle preselected and the quota note on one unclipped line below the controls.
+- [t10-thread-w480.png](t10-thread-w480.png) — Grok setup reply at 480 px: wake_idle preselected and the quota note on one unclipped line below the controls.
+- [t10-thread-setup-narrow.png](t10-thread-setup-narrow.png) — Grok setup reply at 390 px: wake_idle preselected, with a single-line quota note and no horizontal overflow.
+- [t10-thread-explicit-wake.png](t10-thread-explicit-wake.png) — Grok setup reply with wake chosen explicitly: the quota note stays without a preselection claim.
+- [t10-thread-keyboard.png](t10-thread-keyboard.png) — Grok setup reply with wake selected and keyboard focus on wake_idle, showing its tooltip.
+- [t10-thread-narrow.png](t10-thread-narrow.png) — Grok setup reply at 390 px with explicit wake kept and the quota note below the controls, without horizontal overflow.
 - [10-aside-error.png](10-aside-error.png) — Thread participants and files — error state.
 - [10-aside-initial.png](10-aside-initial.png) — Thread participants and files — initial state.
 - [10-aside-progress.png](10-aside-progress.png) — Thread participants and files — progress state.
@@ -43,6 +57,16 @@ Task 23 runs both clients against one disposable hub. Its assertions verify cros
 - [15-compose-initial.png](15-compose-initial.png) — New-message composer — initial state.
 - [15-compose-progress.png](15-compose-progress.png) — New-message composer — progress state.
 - [15-compose-success.png](15-compose-success.png) — New-message composer — success state.
+- [t10-compose-nongrok.png](t10-compose-nongrok.png) — New message to codex-hark: wake selected and the Grok quota note hidden.
+- [t10-compose-mixed.png](t10-compose-mixed.png) — New message to codex-hark and grok-reviewer: wake_idle preselected with the Grok quota note below the priority control.
+- [t10-compose-removed.png](t10-compose-removed.png) — Grok recipient removed, leaving codex-hark: priority returns to wake and the quota note is hidden.
+- [t10-compose-grok.png](t10-compose-grok.png) — New message to grok-reviewer alone: wake_idle preselected with the Grok quota note.
+- [t10-compose-explicit-wake.png](t10-compose-explicit-wake.png) — Explicit wake survives removing and re-adding grok-reviewer; the quota note makes no preselection claim.
+- [t10-compose-explicit-hold.png](t10-compose-explicit-hold.png) — Explicit hold survives changing recipients to pag-hark-sleuth and grok-reviewer, with the Grok quota note kept.
+- [t10-compose-keyboard.png](t10-compose-keyboard.png) — Hold remains selected while keyboard focus reaches wake_idle and shows its tooltip.
+- [t10-compose-retry.png](t10-compose-retry.png) — A 503 unavailable error leaves the draft and manually selected wake_idle ready to retry, with the Grok quota note.
+- [t10-compose-narrow.png](t10-compose-narrow.png) — New message to grok-reviewer alone at 390 px: wake_idle preselected, with a single-line quota note and no horizontal overflow.
+- [t10-compose-keyboard-narrow.png](t10-compose-keyboard-narrow.png) — At 390 px, keyboard focus on wake_idle shows its tooltip within the viewport.
 - [17-tui-error.png](17-tui-error.png) — Terminal shell — error state.
 - [17-tui-initial.png](17-tui-initial.png) — Terminal shell — initial state.
 - [17-tui-progress.png](17-tui-progress.png) — Terminal shell — progress state.
@@ -229,6 +253,17 @@ Add agent screens come from `scripts/ui/invite.mjs`. The sidebar's nav block (un
 - [inv-11-dot-link-error.png](inv-11-dot-link-error.png) — The dot is made but its link code is refused: the MCP URL and steps stay, with the error and Try again in place of the code.
 - [inv-12-dot.png](inv-12-dot.png) — The dot panel: shown-once warning, `<hub>/mcp` URL with Copy URL, ChatGPT steps (Plugins, +, Add custom MCP server; OAuth; the link code large with Copy code, expiry and New code; a task with trigger vecnet, event vecnet.message), and the new-chat-or-rescan note.
 - [inv-13-dot-narrow.png](inv-13-dot-narrow.png) — The dot panel at 390 px: the code stays on one line and nothing overflows.
+- [inv-14-bearer.png](inv-14-bearer.png) — New code for a dot with an active bearer: revocation warning and Revoke bearer and link confirmation, before any link request is posted.
+- [inv-g-loading.png](inv-g-loading.png) — Add agent while the kind registry request is held: Loading kinds, with no kind options yet.
+- [inv-g-kinds-down.png](inv-g-kinds-down.png) — Kind registry returns 503: unavailable: the hub is busy, with Retry and no fallback kind options.
+- [inv-g-form.png](inv-g-form.png) — Grok Bot form for Helper Bot: authorization prompt, derived vecnet-helper-bot connector and quota guidance, with routine URL and key empty after required-field checks.
+- [inv-g-skip.png](inv-g-skip.png) — Grok Bot form with Skip MCP checked and the CLI bearer note shown.
+- [inv-g-error.png](inv-g-error.png) — Grok Bot create returns invalid_value for the routine key: the error redacts the routine details, and the URL and key fields are cleared for capture.
+- [inv-g-queued.png](inv-g-queued.png) — Grok Bot created after retry: setup queued, a warning that this does not mean connected, and a hosted OAuth link action.
+- [inv-g-stale.png](inv-g-stale.png) — Grok Bot create returns stale_spec: The kind contract changed, registry refreshed, routine fields cleared and focus returned to the URL field.
+- [inv-g-deeplink.png](inv-g-deeplink.png) — Add agent deep link prefills Grok Bot and Helper Bot without submitting; routine URL and key remain empty.
+- [inv-g-narrow.png](inv-g-narrow.png) — The deep-linked Grok Bot form at 390 px, with no controls overflowing the viewport.
+- [inv-g-skip-result.png](inv-g-skip-result.png) — Grok Bot created with Skip MCP: setup queued and CLI bearer guidance, with no link-code action or connected badge.
 
 Composer fit screens come from `scripts/ui/composer-fit.mjs`, which sweeps the viewport from 320 to 1600 px with short and spilling text and asserts the control row: Attach and Send share one row at the right edge, nothing leaves the bar, and the keyboard hint is either hidden or at most two unclipped lines (it breaks at its `·` separators and is dropped by `fitHint` before anything else moves). Only at phone width, after the hint has gone, does the priority control take its own full-width row.
 
