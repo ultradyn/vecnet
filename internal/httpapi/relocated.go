@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/XertroV/vecnet/internal/buildinfo"
 	"github.com/XertroV/vecnet/internal/envelope"
 )
 
@@ -17,7 +18,10 @@ func Relocated(d Deps, n envelope.HubNotice) http.Handler {
 	s := &server{Deps: d}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		writeJSON(w, http.StatusOK, struct {
+			OK bool `json:"ok"`
+			buildinfo.Info
+		}{OK: true, Info: buildinfo.Current()})
 	})
 	mux.HandleFunc("GET /v1/hub/identity", s.getHubIdentity)
 	mux.HandleFunc("GET /v1/hub/notices", s.getHubNotices)

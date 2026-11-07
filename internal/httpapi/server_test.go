@@ -61,8 +61,8 @@ func TestHealthzNoAuth(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("decode: %v; %s", err, body)
 	}
-	if got["ok"] != true || len(got) != 1 {
-		t.Fatalf("body = %s, want {\"ok\":true}", body)
+	if got["ok"] != true || got["version"] != "dev" || got["commit"] != "unknown" || got["commit_date"] != "unknown" || len(got) != 4 {
+		t.Fatalf("body = %s, want health and development build metadata", body)
 	}
 }
 
