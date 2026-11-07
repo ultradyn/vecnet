@@ -23,3 +23,30 @@ func TestPeerLifecyclePermissionDenied(t *testing.T) {
 		t.Fatalf("peer changed after refusal: disabled=%d archived=%v err=%v", disabled, archived, err)
 	}
 }
+
+func TestMergedPeerToolsAuthorityAndValueOrder(t *testing.T) {
+	env := testhub.Start(t)
+	_, peerSecret := env.NewPeer("session", "authority caller")
+	_, principalSecret := env.NewPrincipal("authority principal")
+	for _, name := range []string{"vecnet_peer_lifecycle", "vecnet_peer_invite_get", "vecnet_peer_invite_revoke"} {
+		args := map[string]any{"peer_id": "malformed"}
+		if name == "vecnet_peer_lifecycle" {
+			args["action"] = "unknown"
+		}
+		for _, secret := range []string{peerSecret, principalSecret} {
+			toolFails(t, env, secret, name, args, "forbidden")
+		}
+		// Shape errors still precede handler authority checks.
+		args["peer_id"] = 123
+		if path := invalidPath(t, env, peerSecret, name, args); path != "/peer_id" {
+			t.Errorf("%s: shape refusal path %q", name, path)
+		}
+		args["peer_id"] = "malformed"
+		if name == "vecnet_peer_lifecycle" {
+			// Operator checks the action before looking up the target.
+			toolFails(t, env, env.OperatorSecret, name, args, "invalid_value")
+			args["action"] = "disable"
+		}
+		toolFails(t, env, env.OperatorSecret, name, args, "not_found")
+	}
+}

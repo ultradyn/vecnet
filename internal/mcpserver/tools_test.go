@@ -414,16 +414,15 @@ func TestToolsListNamesAndHints(t *testing.T) {
 		if tool.Description == "" {
 			t.Errorf("%s: no description", tool.Name)
 		}
-		if !readOnly[tool.Name] && !strings.Contains(tool.Description, "operator's bus") {
-			t.Errorf("%s: a write tool's description must say it writes to the operator's bus: %q", tool.Name, tool.Description)
+		if strings.Contains(tool.Description, "operator's bus") {
+			t.Errorf("%s: description contains redundant operator bus wording: %q", tool.Name, tool.Description)
 		}
 		if tool.Name == "vecnet_react" {
 			props := tool.InputSchema["properties"].(map[string]any)
 			if got := props["op"].(map[string]any)["enum"]; mustJSON(t, got) != `["add","remove"]` {
 				t.Errorf("reaction op enum = %v", got)
 			}
-			defs := tool.InputSchema["$defs"].(map[string]any)
-			if got := defs["priority"].(map[string]any)["enum"]; mustJSON(t, got) != `["wake","wake_idle","hold"]` {
+			if got := props["priority"].(map[string]any)["enum"]; mustJSON(t, got) != `["wake","wake_idle","hold"]` {
 				t.Errorf("reaction priority enum = %v", got)
 			}
 		}
@@ -451,8 +450,8 @@ func TestToolsListNamesAndHints(t *testing.T) {
 		t.Fatalf("tools = %v, want %v", got, want)
 	}
 
-	// vecnet_send's schema is $defs/sendRequest, with its $refs resolvable
-	// inside the tool's own document.
+	// vecnet_send keeps its required call shape in the MCP projection.
+	// TestProjectedProperties compiles every schema to check ref resolution.
 	i := slices.IndexFunc(tools, func(x listedTool) bool { return x.Name == "vecnet_send" })
 	send := tools[i].InputSchema
 	req, _ := send["required"].([]any)
@@ -461,9 +460,9 @@ func TestToolsListNamesAndHints(t *testing.T) {
 			t.Errorf("vecnet_send required = %v, missing %s", req, k)
 		}
 	}
-	defs, _ := send["$defs"].(map[string]any)
-	if _, ok := defs["peerId"]; !ok {
-		t.Errorf("vecnet_send has no $defs/peerId: %v", send["$defs"])
+	props := send["properties"].(map[string]any)
+	if props["as"].(map[string]any)["type"] != "string" {
+		t.Errorf("vecnet_send acting peer is not a string: %v", props["as"])
 	}
 	// ChatGPT read the top-level anyOf (thread_id | recipients) as making
 	// thread_id required, so a new conversation looked impossible. The rule

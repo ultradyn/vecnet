@@ -53,6 +53,7 @@ type requestDiag struct {
 	method, toolName                                 string
 	code                                             int
 	toolError                                        bool
+	toolArgumentsMetaPresent                         bool
 	subscribe                                        *subscribeDiag
 }
 
@@ -279,6 +280,7 @@ func (d *requestDiag) log(s *Server, w *diagResponse, r *http.Request) {
 	}
 	if d.method == "tools/call" {
 		fields["tool_name"] = d.toolName
+		fields["tool_arguments_meta_present"] = d.toolArgumentsMetaPresent
 	}
 	if sub := d.subscribe; sub != nil {
 		fields["event_name"] = sub.name

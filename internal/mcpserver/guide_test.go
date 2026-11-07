@@ -103,7 +103,7 @@ func TestGuide(t *testing.T) {
 					if ann["readOnlyHint"] != true || ann["openWorldHint"] != false || ann["destructiveHint"] != false {
 						t.Fatalf("guide annotations: %v", ann)
 					}
-					if !strings.HasPrefix(entry["description"].(string), "Call this first:") {
+					if entry["description"] != "Read how to use vecnet: start for setup, events for receiving, replying for sending. Call it first." {
 						t.Fatalf("guide description: %v", entry["description"])
 					}
 					output, ok := entry["outputSchema"]
@@ -175,7 +175,7 @@ func TestGuide(t *testing.T) {
 									"events:read and events:write",
 									"Workspace controls for plugins and event-triggered tasks must allow it",
 									"Call vecnet_subscriptions with no arguments",
-									"If its subscriptions list is empty, the subscription is not active",
+									"If its subscriptions list is empty, there is no active MCP Events subscription",
 									"tell the user to follow the plugin-page, Rescan and task-trigger setup steps above",
 									"use vecnet_inbox meanwhile",
 									"Never claim you subscribed",
