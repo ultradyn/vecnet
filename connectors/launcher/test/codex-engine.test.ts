@@ -93,9 +93,9 @@ async function harness(t: TestContext, options: { binding?: Partial<Binding>; st
     return e;
   };
   let engine = makeEngine();
-  const records = () => readFileSync(trace, 'utf8').trim().split('\n').filter(Boolean).map(s => JSON.parse(s) as { argv: string[]; env: Record<string, string>; ack?: boolean; watchRevision?: number; hookClaimed?: string });
+  const records = () => readFileSync(trace, 'utf8').trim().split('\n').filter(Boolean).map(s => JSON.parse(s) as { argv: string[]; env: Record<string, string>; ack?: boolean; watchRevision?: number; hookClaimed?: string; hookDeliveries?: string[] });
   const hooks = () => records().filter(r => !r.ack && r.argv.includes('hook'));
-  const releases = () => hooks().filter(r => r.argv.includes('--release'));
+  const releases = () => hooks().filter(r => r.argv.includes('--release') && !r.argv.includes('--receipt-key'));
   const sends = () => fake.requests.filter(r => r.method.startsWith('turn/'));
   const rows = () => kv.keys('inflight:').map(k => JSON.parse(kv.get(k)!) as InflightRow);
   // A socket round trip delivers prior notifications. Hook timer cancellation
@@ -502,8 +502,9 @@ for (const state of ['idle', 'active']) for (const failures of [1, 7]) test(`${s
   assert.equal(h.sends().length, 1, 'original wake delivered exactly once');
   assert.equal(h.sends()[0].method, state === 'active' ? 'turn/steer' : 'turn/start');
   assert.deepEqual(Object.keys((h.sends()[0].params as any).additionalContext), ['vecnet_w1']);
-  const claimed = JSON.parse(readFileSync(h.plan.claims, 'utf8')) as Record<string, string[]>;
-  const deliveryClaims = Object.keys(claimed).filter(nonce => claimed[nonce].includes('w1'));
+  // Receipt publication removes the live reservation. Count claim creation,
+  // retaining the original one-nonce/one-attempt assertion after settlement.
+  const deliveryClaims = h.records().filter(r => r.hookClaimed && r.hookDeliveries?.includes('w1')).map(r => r.hookClaimed!);
   assert.equal(deliveryClaims.length, 1, 'one delivery-bearing claim, regardless of empty status-triggered polls');
   assert.equal(h.records().filter(r => r.hookClaimed === deliveryClaims[0]).length, 1);
   assert.equal(h.rows().length, 0); assert.equal(h.releases().length, 0);
@@ -623,11 +624,18 @@ test('two hubs on one thread cannot settle a dropped summary with the other hub 
     writeFileSync(bin, `#!/bin/sh
 case " $* " in
   *" watch "*) exec /bin/sleep 3600 ;;
-  *" --release "*) echo released >> '${releases}'; echo '{"released":true}' ;;
+  *" --receipt-key "*)
+    receipt_key=''
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = '--receipt-key' ]; then shift; receipt_key="$1"; fi
+      shift
+    done
+    printf '{"version":1,"receipt_key":"%s","deliveries":[],"released":0,"lifecycle":"receipt-display-v1"}\\n' "$receipt_key" ;;
+  *" --release "*) echo released >> '${releases}'; echo '{"released":0}' ;;
   *" hook "*)
-    if test -e '${claimed}'; then echo '{"deliveries":[]}'; else
+    if test -e '${claimed}'; then echo '{"deliveries":[],"lifecycle":"receipt-display-v1"}'; else
       /usr/bin/touch '${claimed}'
-      echo '{"deliveries":[],"stub":"summary","entries":[{"key":"vecnet_summary","value":"summary from ${name}"}]}'
+      echo '{"deliveries":[],"lifecycle":"receipt-display-v1","stub":"summary","entries":[{"key":"vecnet_summary","value":"summary from ${name}"}]}'
     fi ;;
 esac
 `, { mode: 0o700 });
@@ -1360,4 +1368,374 @@ createEngine({profile:'p',hub:'https://hub.invalid',caller:'peer_p',codexHome:${
   }
   writeFileSync(release, '');
   await eventually(() => !locked(), 'bounded writer releases ownership');
+});
+
+// Task5a2 primary regressions: real engine, fake wire, durable KV, bounded child.
+type ReceiptHarness = Awaited<ReturnType<typeof harness>>;
+const receiptHooks = (h: ReceiptHarness) => h.hooks().filter(r => r.argv.includes('--receipt-key'));
+const ordinaryReleases = (h: ReceiptHarness) => h.hooks().filter(r => r.argv.includes('--release') && !r.argv.includes('--receipt-key'));
+const control = (h: ReceiptHarness, patch: Record<string, unknown>) => { Object.assign(h.plan, patch); h.save(); };
+const intent = (h: ReceiptHarness, key: string) => h.kv.get('settling:' + key);
+const arg = (argv: string[], flag: string) => { const i = argv.indexOf(flag); assert.ok(i >= 0, flag); return argv[i + 1]; };
+const notifyReceipt = (h: ReceiptHarness, key: string, method = 'item/started') => h.fake.notifySubscribers('thread', method, {
+  threadId: 'thread', turnId: 'active', item: { type: 'userMessage', clientId: key },
+});
+
+for (const method of ['item/started', 'item/completed']) test(`receipt intent survives lost publication for ${method} without another RPC`, async t => {
+  const h = await harness(t, { status: active });
+  h.fake.withholdNextItem();
+  await h.wake([{ id: 'w1', priority: 'wake' }, { id: 'w2', priority: 'wake' }]);
+  const original = structuredClone(h.rows()[0]); assert.ok(original);
+  control(h, { receiptFailure: 'commit-output-lost' });
+  notifyReceipt(h, original.key, method); await h.sync();
+  const saved = intent(h, original.key);
+  assert.ok(saved, 'exact receipt must become durable rather than clearing inflight');
+  assert.deepEqual(h.rows(), [original], 'publication failure retains the immutable original row');
+  assert.equal(receiptHooks(h).length, 1, 'one bounded publication attempt');
+  const args = receiptHooks(h)[0].argv;
+  assert.equal(arg(args, '--claim'), original.claim);
+  assert.equal(arg(args, '--receipt-key'), original.key);
+  assert.deepEqual(arg(args, '--delivery-ids').split(',').sort(), ['w1', 'w2']);
+  assert.equal(arg(args, '--expect-hub'), 'https://hub.invalid');
+  assert.equal(arg(args, '--expect-caller'), 'peer_pinned');
+  assert.equal(arg(args, '--net'), 'test'); assert.equal(arg(args, '--as'), 'peer');
+  assert.equal(receiptHooks(h)[0].env.VECNET_CONFIG, h.deps.env.VECNET_CONFIG);
+  assert.equal(receiptHooks(h)[0].env.VECNET_CODEX_AUTO_DELIVERY, '0');
+  assert.equal(ordinaryReleases(h).length, 0); assert.equal(h.sends().length, 1);
+  control(h, { receiptFailure: '' }); await h.tick(1000);
+  assert.equal(receiptHooks(h).length, 2);
+  assert.deepEqual(receiptHooks(h)[1].argv, args, 'retry preserves original exact assertion');
+  assert.equal(intent(h, original.key), undefined); assert.equal(h.rows().length, 0);
+  assert.equal(h.sends().length, 1, 'settlement retry does not inject again');
+});
+
+for (const outcome of ['accepted', 'ambiguous', 'rejected']) test(`receipt settlement fences a late ${outcome} response`, async t => {
+  let entered = false, finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  t.after(() => finish());
+  const h = await harness(t, { status: active, wrap: rpc => ({ ...rpc,
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      const result = await rpc.call<T>(method, params, ms);
+      if (method === 'turn/steer') {
+        entered = true; await gate;
+        if (outcome === 'ambiguous') throw new CodexRpcError(-1, 'connection_closed', true);
+        if (outcome === 'rejected') throw new CodexRpcError(-32602, 'additionalContext unsupported');
+      }
+      return result;
+    },
+  }) });
+  control(h, { receiptFailure: 'commit-output-lost' }); h.fake.withholdNextItem();
+  const wake = h.wake(); await eventually(() => entered, 'accepted request is gated before response');
+  const original = structuredClone(h.rows()[0]); assert.equal(original.state, 'sending');
+  notifyReceipt(h, original.key);
+  await eventually(() => intent(h, original.key) !== undefined, 'receipt is persisted synchronously while serial queue is occupied');
+  const saved = intent(h, original.key);
+  assert.equal(receiptHooks(h).length, 0, 'intent is durable before queued publication can start');
+  finish(); await wake; await h.sync();
+  assert.equal(intent(h, original.key), saved, 'late continuation cannot overwrite intent');
+  assert.deepEqual(h.rows(), [original], 'late response cannot mutate or erase original row');
+  assert.equal(h.sends().length, 1, 'late rejection cannot trigger fallback or resend');
+  assert.equal(ordinaryReleases(h).length, 0);
+});
+
+test('receipt settlement fences an awaited stale history scan', async t => {
+  let inject = false;
+  let h: ReceiptHarness;
+  h = await harness(t, { status: active, seed: row(), wrap: rpc => ({ ...rpc,
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      const result = await rpc.call<T>(method, params, ms);
+      if (inject && method === 'thread/turns/list' && (params as any).itemsView === 'full') {
+        inject = false; notifyReceipt(h, 'vn.seed');
+        await rpc.call('thread/read', { threadId: 'thread' }, ms);
+        assert.ok(intent(h, 'vn.seed'), 'intent precedes stale scan continuation');
+      }
+      return result;
+    },
+  }) });
+  control(h, { receiptFailure: 'commit-output-lost' });
+  const original = structuredClone(h.rows()[0]); assert.ok(original);
+  h.fake.setThread({ id: 'thread', status: { type: 'idle' } }); inject = true;
+  await h.restart();
+  assert.ok(intent(h, original.key)); assert.deepEqual(h.rows(), [original]);
+  assert.equal(ordinaryReleases(h).length, 0); assert.equal(h.sends().length, 0);
+});
+
+for (const unavailable of ['unreachable', 'refused_version']) test(`pending settlement recovers before ordinary cleanup when Codex is ${unavailable}`, async t => {
+  const h = await harness(t, { status: active });
+  control(h, { receiptFailure: 'commit-output-lost' });
+  h.fake.withholdNextItem(); await h.wake(); const original = structuredClone(h.rows()[0]);
+  notifyReceipt(h, original.key); await h.sync();
+  const saved = intent(h, original.key); assert.ok(saved);
+  await h.engine.stop();
+  assert.equal(intent(h, original.key), saved, 'stop retains unresolved intent');
+  assert.equal(ordinaryReleases(h).length, 0, 'stop never ordinarily releases a settlement');
+  h.kv.set('releasing:' + original.claim, JSON.stringify(original));
+  control(h, { receiptFailure: '' });
+  const replacement = createEngine(h.binding, { ...h.deps,
+    openRpc: async () => { throw new CodexRpcError(-1, unavailable === 'refused_version' ? 'refused_version' : 'unreachable'); },
+  });
+  t.after(() => replacement.stop()); replacement.start();
+  await eventually(() => intent(h, original.key) === undefined, 'receipt publication needs no Codex connection');
+  assert.equal(h.kv.get('inflight:' + original.key), undefined);
+  assert.equal(h.kv.get('releasing:' + original.claim), undefined);
+  assert.equal(ordinaryReleases(h).length, 0); assert.equal(h.sends().length, 1);
+});
+
+for (const marker of ['missing', 'wrong']) for (const status of [{ type: 'idle' }, active]) test(`${marker} lifecycle prevents a fresh ${status.type} turn RPC`, async t => {
+  const h = await harness(t, { status });
+  const before = h.hooks().length;
+  control(h, { claimLifecycle: marker }); await h.wake();
+  assert.equal(h.sends().length, 0, 'incompatible child cannot authorize fresh injection');
+  const claim = h.hooks().slice(before).find(r => r.argv.includes('--event'));
+  assert.ok(claim); const nonce = arg(claim.argv, '--claim');
+  assert.ok(ordinaryReleases(h).some(r => arg(r.argv, '--claim') === nonce), 'known-unsent nonce uses compatible ordinary release');
+  assert.equal(h.kv.get('claiming:' + nonce), undefined);
+  assert.equal(h.rows().length, 0);
+});
+
+for (const response of ['capacity-refusal', 'empty', 'truncated', 'malformed', 'object', 'null', 'array', 'boolean-count', 'string-count', 'negative-count', 'fractional-count', 'refused-count']) {
+  for (const kind of ['claiming', 'releasing']) test(`ordinary release retains ${kind} after ${response} and progresses after capacity frees`, async t => {
+    const h = await harness(t, { status: active });
+    const original = row(), privateKey = kind + ':' + original.claim;
+    if (kind === 'claiming') h.kv.set(privateKey, JSON.stringify({ threadId: 'thread', at: 0 }));
+    else { h.kv.set('inflight:' + original.key, JSON.stringify(original)); h.kv.set(privateKey, JSON.stringify(original)); }
+    const originalPrivate = h.kv.get(privateKey);
+    control(h, { releaseResponse: response }); await h.restart();
+    assert.equal(h.kv.get(privateKey), originalPrivate, 'exit zero or arbitrary JSON is not committed release confirmation');
+    if (kind === 'releasing') assert.deepEqual(h.rows(), [original]);
+    const attempts = ordinaryReleases(h).length; assert.ok(attempts >= 1);
+    control(h, { releaseResponse: 'numeric-zero' }); await h.tick(1000);
+    assert.equal(h.kv.get(privateKey), undefined, 'genuine released:0 differs from capacity refusal');
+    assert.equal(h.kv.get('inflight:' + original.key), undefined);
+    assert.equal(ordinaryReleases(h).length, attempts + 1);
+    assert.equal(h.sends().length, 0);
+  });
+}
+
+for (const response of ['missing-marker', 'wrong-marker', 'missing-key', 'wrong-key', 'missing-ids', 'subset', 'superset', 'duplicate', 'wrong-id-type', 'refused', 'empty', 'truncated', 'malformed', 'wrong-version']) {
+  test(`receipt ${response} confirmation retains immutable original settlement`, async t => {
+    const h = await harness(t, { status: active });
+    h.fake.withholdNextItem(); await h.wake([{ id: 'w1', priority: 'wake' }, { id: 'w2', priority: 'wake' }]);
+    const original = structuredClone(h.rows()[0]);
+    control(h, { receiptResponse: response }); notifyReceipt(h, original.key); await h.sync();
+    const saved = intent(h, original.key); assert.ok(saved, 'invalid confirmation must retain receipt intent');
+    assert.deepEqual(h.rows(), [original]); assert.equal(receiptHooks(h).length, 1);
+    await h.tick(1000);
+    assert.equal(intent(h, original.key), saved); assert.equal(h.sends().length, 1);
+    assert.equal(ordinaryReleases(h).length, 0);
+    control(h, { receiptResponse: 'exact' }); await h.tick(2000);
+    assert.equal(intent(h, original.key), undefined); assert.equal(h.rows().length, 0);
+    assert.equal(h.sends().length, 1);
+  });
+}
+
+test('receipt publication persists intent before child and deletes settlement last', async t => {
+  const h = await harness(t, { status: active });
+  h.fake.withholdNextItem(); await h.wake(); const original = structuredClone(h.rows()[0]);
+  const mutations: { op: string; key: string }[] = [];
+  const set = h.kv.set, remove = h.kv.delete;
+  h.kv.set = (key, value) => { mutations.push({ op: 'set', key }); set(key, value); };
+  h.kv.delete = key => { mutations.push({ op: 'delete', key }); remove(key); };
+  const gate = join(dirname(h.deps.env.VECNET_CONFIG), 'receipt-gate');
+  try {
+    control(h, { receiptGate: gate }); notifyReceipt(h, original.key);
+    await eventually(() => receiptHooks(h).length === 1, 'bounded receipt child started');
+    assert.ok(intent(h, original.key), 'intent exists before child publication');
+    assert.deepEqual(h.rows(), [original], 'inflight survives while publication awaits');
+    assert.equal(mutations.some(m => m.op === 'delete' && m.key === 'inflight:' + original.key), false);
+  } finally { writeFileSync(gate, 'open'); }
+  await h.sync();
+  assert.equal(intent(h, original.key), undefined); assert.equal(h.rows().length, 0);
+  const deletions = mutations.filter(m => m.op === 'delete');
+  const settlement = deletions.findIndex(m => m.key === 'settling:' + original.key);
+  assert.ok(settlement > deletions.findIndex(m => m.key === 'inflight:' + original.key));
+  assert.ok(settlement > deletions.findIndex(m => m.key === 'releasing:' + original.claim));
+  assert.equal(deletions.at(-1)?.key, 'settling:' + original.key);
+});
+
+test('cleanup interruption after inflight deletion recovers the original settlement', async t => {
+  const h = await harness(t, { status: active });
+  h.fake.withholdNextItem(); await h.wake(); const original = structuredClone(h.rows()[0]);
+  const gate = join(dirname(h.deps.env.VECNET_CONFIG), 'cleanup-publication-gate');
+  control(h, { receiptGate: gate }); notifyReceipt(h, original.key);
+  const remove = h.kv.delete; let interrupted = false;
+  try {
+    await eventually(() => intent(h, original.key) !== undefined, 'intent precedes simulated cleanup interruption');
+    h.kv.delete = key => {
+      remove(key);
+      if (!interrupted && key === 'inflight:' + original.key) { interrupted = true; throw new Error('fixture_cleanup_interrupted'); }
+    };
+  } finally { writeFileSync(gate, 'open'); }
+  await h.sync();
+  assert.equal(interrupted, true); assert.equal(h.kv.get('inflight:' + original.key), undefined);
+  assert.ok(intent(h, original.key), 'settlement remains authoritative after inflight is gone');
+  const args = receiptHooks(h)[0]?.argv; assert.ok(args);
+  await h.restart();
+  assert.equal(intent(h, original.key), undefined);
+  assert.deepEqual(receiptHooks(h).at(-1)?.argv, args);
+  assert.equal(h.sends().length, 1); assert.equal(ordinaryReleases(h).length, 0);
+});
+
+test('receipt retry is capped at 1 2 4 8 15 seconds without event-driven busyloop', async t => {
+  const h = await harness(t, { status: active });
+  h.fake.withholdNextItem(); await h.wake(); const original = structuredClone(h.rows()[0]);
+  control(h, { receiptFailure: 'commit-output-lost' }); notifyReceipt(h, original.key); await h.sync();
+  assert.ok(intent(h, original.key)); assert.equal(receiptHooks(h).length, 1);
+  const saved = intent(h, original.key);
+  for (let i = 0; i < 5; i++) notifyReceipt(h, original.key);
+  await h.sync();
+  assert.equal(receiptHooks(h).length, 1, 'duplicate receipt notices do not bypass retry timer');
+  for (const [index, ms] of [1000, 2000, 4000, 8000, 15000, 15000].entries()) {
+    h.clock.advance(ms - 1); await h.sync();
+    assert.equal(receiptHooks(h).length, index + 1, 'no attempt before exact delay');
+    h.clock.advance(1); await h.sync();
+    assert.equal(receiptHooks(h).length, index + 2, 'one retry after bounded delay');
+    assert.equal(intent(h, original.key), saved);
+  }
+  assert.equal(h.sends().length, 1); assert.equal(ordinaryReleases(h).length, 0);
+  control(h, { receiptFailure: '' }); h.clock.advance(15000); await h.sync();
+  assert.equal(intent(h, original.key), undefined);
+  const attempts = receiptHooks(h).length; h.clock.advance(15000); await h.sync();
+  assert.equal(receiptHooks(h).length, attempts, 'confirmation cancels receipt retries');
+});
+
+test('exact history receipt survives publication failure and retries without injection', async t => {
+  const h = await harness(t, { status: active });
+  h.fake.withholdNextItem(); await h.wake(); const original = structuredClone(h.rows()[0]);
+  await h.engine.stop();
+  h.fake.recordLater(original.key, h.clock.now()); h.clock.advance(0);
+  control(h, { receiptFailure: 'commit-output-lost' }); await h.restart();
+  assert.ok(intent(h, original.key), 'history creates durable intent despite no subscription receipt');
+  assert.deepEqual(h.rows(), [original]); assert.equal(h.sends().length, 1);
+  // restart's loaded() advances 2000 ms and consumes the first 1000 ms retry.
+  control(h, { receiptFailure: '' }); await h.tick(2000);
+  assert.equal(intent(h, original.key), undefined); assert.equal(h.rows().length, 0);
+  assert.equal(h.sends().length, 1); assert.equal(ordinaryReleases(h).length, 0);
+});
+
+test('receipt settlement fences an in-progress ordinary release continuation', async t => {
+  const h = await harness(t, { status: active, seed: row() });
+  const original = structuredClone(h.rows()[0]);
+  const gate = join(dirname(h.deps.env.VECNET_CONFIG), 'ordinary-release-gate');
+  control(h, { releaseGate: gate, receiptFailure: 'commit-output-lost' });
+  h.kv.set('releasing:' + original.claim, JSON.stringify(original)); h.engine.start();
+  let saved: string | undefined;
+  try {
+    await eventually(() => ordinaryReleases(h).length === 1, 'absence release is in flight');
+    notifyReceipt(h, original.key);
+    await eventually(() => intent(h, original.key) !== undefined, 'receipt persists while release waits');
+    saved = intent(h, original.key);
+  } finally { writeFileSync(gate, 'open'); }
+  await h.sync();
+  assert.equal(intent(h, original.key), saved, 'late ordinary success cannot erase settlement');
+  assert.deepEqual(h.rows(), [original]); assert.equal(h.sends().length, 0);
+  assert.equal(receiptHooks(h).length, 1);
+  control(h, { receiptFailure: '' }); await h.tick(1000);
+  assert.equal(intent(h, original.key), undefined);
+  assert.equal(ordinaryReleases(h).length, 1, 'settlement never becomes another ordinary release');
+});
+
+test('settlement retries original identity and source after binding mutation', async t => {
+  const h = await harness(t, { status: active });
+  h.fake.withholdNextItem(); await h.wake(); const original = structuredClone(h.rows()[0]);
+  control(h, { receiptFailure: 'commit-output-lost' }); notifyReceipt(h, original.key); await h.sync();
+  const saved = intent(h, original.key); assert.ok(saved);
+  const first = receiptHooks(h)[0]; assert.ok(first);
+  const binding = { ...h.binding };
+  Object.assign(h.binding, { profile: 'changed', as: 'changed', hub: 'https://changed.invalid', caller: 'changed' });
+  t.after(() => Object.assign(h.binding, binding));
+  control(h, { receiptFailure: '' }); await h.tick(1000);
+  const retry = receiptHooks(h).at(-1)!;
+  assert.deepEqual(retry.argv, first.argv); assert.deepEqual(retry.env, first.env);
+  assert.equal(intent(h, original.key), undefined); assert.equal(h.sends().length, 1);
+});
+
+test('zero-ID summary receipt publishes an explicit empty delivery-ids argument', async t => {
+  const h = await harness(t, { status: active });
+  // Proposed fake-only summary control: emit exactly one summary until its
+  // nonce is receipt-published. No individual IDs or synthetic display proof.
+  control(h, { summary: 'private summary fixture' });
+  h.fake.withholdNextItem(); await h.wake([]);
+  // wake([]) does not trigger watch: explicitly provide the existing status
+  // trigger rather than changing engine public API or adding a worker.
+  h.fake.notify('thread/status/changed', { threadId: 'thread', status: { type: 'idle' } });
+  await h.tick(2000); const original = structuredClone(h.rows()[0]); assert.ok(original);
+  assert.deepEqual(original.deliveries, []);
+  notifyReceipt(h, original.key); await h.sync();
+  assert.equal(receiptHooks(h).length, 1);
+  assert.equal(arg(receiptHooks(h)[0].argv, '--delivery-ids'), '');
+  assert.equal(h.rows().length, 0); assert.equal(intent(h, original.key), undefined);
+  assert.equal(h.sends().length, 1); assert.equal(ordinaryReleases(h).length, 0);
+});
+
+test('wrong-thread and wrong-client receipts cannot publish another inflight batch', async t => {
+  const h = await harness(t, { status: active });
+  h.fake.withholdNextItem(); await h.wake(); const original = structuredClone(h.rows()[0]);
+  h.fake.notifySubscribers('thread', 'item/started', { threadId: 'another-thread',
+    item: { type: 'userMessage', clientId: original.key } });
+  notifyReceipt(h, 'vn.someone-else'); await h.sync();
+  assert.equal(h.kv.keys('settling:').length, 0);
+  assert.equal(receiptHooks(h).length, 0); assert.deepEqual(h.rows(), [original]);
+  assert.equal(h.sends().length, 1); assert.equal(ordinaryReleases(h).length, 0);
+});
+
+test('an incompatible child retains known-unsent claiming recovery when ordinary release is ambiguous', async t => {
+  const h = await harness(t, { status: active });
+  control(h, { claimLifecycle: 'missing', releaseResponse: 'capacity-refusal' });
+  const before = h.hooks().length; await h.wake();
+  assert.equal(h.sends().length, 0);
+  const claim = h.hooks().slice(before).find(r => r.argv.includes('--event')); assert.ok(claim);
+  const nonce = arg(claim.argv, '--claim');
+  assert.ok(h.kv.get('claiming:' + nonce), 'failed known-unsent release remains durable');
+  assert.equal(h.rows().length, 0);
+  control(h, { releaseResponse: 'numeric-zero' }); await h.tick(1000);
+  assert.equal(h.kv.get('claiming:' + nonce), undefined);
+  assert.equal(h.sends().length, 0, 'old-child fallback still forbids injection');
+});
+
+test('receipt confirmation accepts the complete unique set in a different order', async t => {
+  const h = await harness(t, { status: active });
+  h.fake.withholdNextItem(); await h.wake([{ id: 'w1', priority: 'wake' }, { id: 'w2', priority: 'wake' }]);
+  const original = structuredClone(h.rows()[0]);
+  control(h, { receiptResponse: 'reverse' }); notifyReceipt(h, original.key); await h.sync();
+  assert.equal(receiptHooks(h).length, 1);
+  assert.equal(intent(h, original.key), undefined); assert.equal(h.rows().length, 0);
+  assert.equal(h.sends().length, 1); assert.equal(ordinaryReleases(h).length, 0);
+});
+
+test('pending settlement blocks fresh claims and RPCs during new watch activity', async t => {
+  const h = await harness(t, { status: active });
+  h.fake.withholdNextItem(); await h.wake(); const original = structuredClone(h.rows()[0]);
+  control(h, { receiptFailure: 'commit-output-lost' }); notifyReceipt(h, original.key); await h.sync();
+  const saved = intent(h, original.key); assert.ok(saved);
+  const claims = h.hooks().filter(r => r.argv.includes('--event')).length;
+  await h.wake([{ id: 'w2', priority: 'wake' }]);
+  assert.equal(h.hooks().filter(r => r.argv.includes('--event')).length, claims, 'no new reservations while original settlement is ambiguous');
+  assert.equal(h.sends().length, 1); assert.equal(intent(h, original.key), saved);
+});
+
+// Supplemental after the first whole focused GREEN: guard the await between
+// push's initial settlement check and its fresh reservation. RED before fix.
+test('a receipt during the fresh history checkpoint prevents a new claim', async t => {
+  let armed = false, entered = false, finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  t.after(() => finish());
+  const h = await harness(t, { status: active, seed: row(), wrap: rpc => ({ ...rpc,
+    async call<T>(method: AllowedMethod, params: unknown, ms: number): Promise<T> {
+      const result = await rpc.call<T>(method, params, ms);
+      if (armed && method === 'thread/turns/list' && (params as any).limit === 1) {
+        armed = false; entered = true; await gate;
+      }
+      return result;
+    },
+  }) });
+  control(h, { receiptFailure: 'commit-output-lost' });
+  const before = h.hooks().filter(r => r.argv.includes('--event')).length;
+  armed = true; const wake = h.wake([{ id: 'w2', priority: 'wake' }]);
+  await eventually(() => entered, 'fresh history checkpoint is awaiting');
+  notifyReceipt(h, 'vn.seed');
+  await eventually(() => intent(h, 'vn.seed') !== undefined, 'receipt wins during checkpoint');
+  finish(); await wake; await h.sync();
+  assert.equal(h.hooks().filter(r => r.argv.includes('--event')).length, before, 'recheck settlement after the awaited checkpoint before claiming');
+  assert.equal(h.sends().length, 0); assert.ok(intent(h, 'vn.seed'));
 });
