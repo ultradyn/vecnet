@@ -33,7 +33,15 @@ func (a *app) startCodexAuto(thread string) {
 		return
 	}
 	if a.codexNotice != nil {
-		*a.codexNotice = a.codexNoticeMessage(p.Hub, time.Now())
+		// Prepare the notice last: unrelated preflight must not commit its
+		// debounce marker and then exhaust the foreground deadline before
+		// the completed worker can return the text for display. Later lease
+		// defers run first; cancelled preflight leaves eligibility untouched.
+		defer func() {
+			if a.ctx.Err() == nil {
+				*a.codexNotice = a.codexNoticeMessage(p.Hub, time.Now())
+			}
+		}()
 	}
 	paths, err := a.codexDeliveryPaths(p.Hub)
 	if err != nil || a.ctx.Err() != nil {
