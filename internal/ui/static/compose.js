@@ -3,11 +3,19 @@
 // rules; this file only draws them. Every peer string goes through h().
 // Attachments (picker, drop onto the form, paste into the text) are
 // attach.js's chip row; the send carries their hashes once all are uploaded.
+// Another screen may open it with a draft (prefill): the peer view's message
+// actions pick the peer and its priority.
 import { createAttachments } from './attach.js';
 import { avatar, h, idText } from './dom.js';
 import { kindShort } from './format.js';
 import { prioritySeg } from './prio.js';
-import { buildSend, canSend, counter, eligible, errorText, keepKey, keyFor, matches, sendRefusal } from './compose-model.js';
+import { buildSend, canSend, counter, draftOf, eligible, errorText, keepKey, keyFor, matches, sendRefusal } from './compose-model.js';
+
+// The draft for the next mount only. The caller sets it and routes to #new in
+// the same click, and that mount takes it, so a later New message (the nav
+// link, a reload) starts empty.
+let handoff = null;
+export function prefill(draft) { handoff = draftOf(draft); }
 
 function randKey() {
   const b = crypto.getRandomValues(new Uint8Array(16));
@@ -16,16 +24,18 @@ function randKey() {
 
 export function mount(root, ctx) {
   const { api, store, me, nameOf, kindOf, peers, toast, nav } = ctx;
+  const draft = handoff;
+  handoff = null;
   const S = {
-    recipients: [],
-    priority: 'wake',
+    recipients: draft ? draft.recipients : [],
+    priority: draft ? draft.priority : 'wake',
     pending: null,   // {key, sig}: the unsent body keeps its idempotency_key across retries
     sending: false,
     error: '',
     denied: '',      // recipient named by the last scope_denied
   };
   let gone = false;
-  const att = createAttachments({ api, onChange: () => render() });
+  const att = createAttachments({ api, onChange: () => render(), now: () => store.hubNow() });
 
   const search = h('input', { type: 'search', id: 'c-search', 'aria-label': 'Search peers', placeholder: 'Search peers by name', autocomplete: 'off', spellcheck: 'false' });
   const picked = h('div', { class: 'picked', 'aria-live': 'polite' });
@@ -173,7 +183,8 @@ export function mount(root, ctx) {
   att.wire(form, text, attachBtn);
 
   render();
-  search.focus();
+  // A draft has picked the recipient, so the message is next.
+  (draft ? text : search).focus();
   const off = peers.subscribe(render);
   return () => {
     gone = true;

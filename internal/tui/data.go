@@ -28,9 +28,15 @@ type Data struct {
 	Audit    opapi.AuditPage
 	Counters map[string]int
 	Notices  []envelope.HubNotice // the hub's active notices, oldest first
-	Thread   map[string]*ThreadState
-	Events   []envelope.Event // newest 200, oldest first, for the raw log
-	Errs     map[string]error
+	// Prefs is the last successful preferences snapshot. PrefsKnown is set
+	// once a GET has been applied. PrefsNote explains a 404 or 403, which the
+	// preferences screen shows as unavailable rather than as a failed load.
+	Prefs      opapi.Preferences
+	PrefsKnown bool
+	PrefsNote  string
+	Thread     map[string]*ThreadState
+	Events     []envelope.Event // newest 200, oldest first, for the raw log
+	Errs       map[string]error
 }
 
 // ThreadState is one opened thread.
@@ -205,7 +211,7 @@ func (m *Model) onLoad(msg loadMsg) tea.Cmd {
 		m.reject(msg.err)
 	case first && isStatus(msg.err, 403):
 		return m.notOperator()
-	case msg.err != nil && m.Conn == ConnLive && !errors.Is(msg.err, context.Canceled):
+	case msg.err != nil && msg.key != "prefs" && m.Conn == ConnLive && !errors.Is(msg.err, context.Canceled):
 		m.Toast("reload "+msg.key+": "+msg.err.Error(), true)
 	}
 	var again tea.Cmd
@@ -389,6 +395,31 @@ func (m *Model) fetch(key string) tea.Cmd {
 				v, err = nil, nil
 			}
 			return loadMsg{key: key, err: err, apply: func(m *Model) { m.Data.Notices = v }}
+		}
+	case "prefs":
+		return func() tea.Msg {
+			v, err := api.Preferences(ctx)
+			// Forbidden and older hubs have no preferences view to edit. Say so
+			// without a reload error, and do not PATCH.
+			switch {
+			case isStatus(err, 404):
+				return loadMsg{key: key, apply: func(m *Model) {
+					m.Data.Prefs = opapi.Preferences{}
+					m.Data.PrefsKnown = true
+					m.Data.PrefsNote = "This hub has no preferences API."
+				}}
+			case isStatus(err, 403):
+				return loadMsg{key: key, apply: func(m *Model) {
+					m.Data.Prefs = opapi.Preferences{}
+					m.Data.PrefsKnown = true
+					m.Data.PrefsNote = "This credential cannot read preferences."
+				}}
+			}
+			return loadMsg{key: key, err: err, apply: func(m *Model) {
+				m.Data.Prefs = v
+				m.Data.PrefsKnown = true
+				m.Data.PrefsNote = ""
+			}}
 		}
 	}
 	if id, ok := strings.CutPrefix(key, threadPrefix); ok {

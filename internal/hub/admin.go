@@ -579,6 +579,53 @@ func (h *Hub) setPeerDisabledTx(ctx context.Context, tx *sql.Tx, peerID string, 
 	return true, nil
 }
 
+// RenamePeer sets peerID's display name. The peer id, threads, routes,
+// scopes and credentials stay. An empty name is 422 invalid_value, the same
+// check as AddPeerWith. Any other name must pass checkAgentName (shape,
+// name_reserved, name_taken). Submitting the current name is a no-op: a
+// free-form operator-set name, including a reserved one, is left as it is.
+// A real change audits peer_rename (old_name, new_name) and appends
+// directory_updated with change "updated" and fields ["name"]. An unknown
+// peer is 404 not_found.
+func (h *Hub) RenamePeer(ctx context.Context, peerID, name string) error {
+	if name == "" {
+		return invalidValue("name", "peer name is required")
+	}
+	var changed bool
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		var cur string
+		err := tx.QueryRowContext(ctx, `SELECT name FROM peers WHERE peer_id = ?`, peerID).Scan(&cur)
+		if errors.Is(err, sql.ErrNoRows) {
+			return unknownPeer(peerID)
+		}
+		if err != nil {
+			return fmt.Errorf("hub: find peer: %w", err)
+		}
+		if cur == name {
+			return nil
+		}
+		if err := checkAgentName(ctx, tx, peerID, name); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE peers SET name = ? WHERE peer_id = ?`, name, peerID); err != nil {
+			return fmt.Errorf("hub: rename peer: %w", err)
+		}
+		if err := h.DirectoryUpdated(ctx, tx, peerID, "updated", []string{"name"}); err != nil {
+			return err
+		}
+		changed = true
+		return audit.Record(ctx, tx, "operator", "peer_rename", []string{peerID},
+			map[string]any{"old_name": cur, "new_name": name})
+	})
+	if err != nil {
+		return err
+	}
+	if changed {
+		h.notifyEnabled(ctx)
+	}
+	return nil
+}
+
 // UnarchiveGroup unarchives ad hoc group grpID (PROTOCOL §7, R21) and marks
 // it active now, so the next idle sweep does not archive it again. An
 // unknown group is 404 not_found; an unarchived one is left as is.

@@ -8,6 +8,7 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -21,6 +22,35 @@ var static embed.FS
 const CSP = "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; " +
 	"img-src 'self' data: blob:; font-src 'self'; object-src 'none'; base-uri 'none'; " +
 	"form-action 'self'; frame-ancestors 'none'"
+
+// Policy is CSP with connect-src widened by exactly the given origins: the
+// hub's configured R2 S3 endpoint, which the page PUTs to and GETs from with
+// short signed URLs (R2 blobs plan, Task 7). Only a bare https origin is
+// accepted, scheme and host with no path, query, credentials or wildcard;
+// anything else is dropped, so the policy can never widen past one host.
+func Policy(connect ...string) string {
+	var extra []string
+	seen := map[string]bool{}
+	for _, origin := range connect {
+		if exactOrigin(origin) && !seen[origin] {
+			seen[origin] = true
+			extra = append(extra, origin)
+		}
+	}
+	if len(extra) == 0 {
+		return CSP
+	}
+	return strings.Replace(CSP, "connect-src 'self';", "connect-src 'self' "+strings.Join(extra, " ")+";", 1)
+}
+
+func exactOrigin(s string) bool {
+	if s == "" || strings.ContainsAny(s, "*'\";, \t\r\n") {
+		return false
+	}
+	u, err := url.Parse(s)
+	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && u.Opaque == "" &&
+		u.Path == "" && u.RawQuery == "" && u.Fragment == "" && !u.ForceQuery && u.Scheme+"://"+u.Host == s
+}
 
 // Files returns the embedded UI files, rooted at the directory holding
 // index.html.
@@ -43,9 +73,11 @@ func notFound(w http.ResponseWriter) {
 
 // Handler serves the UI for requests whose path starts with /ui/. devDir ""
 // serves the embedded files; otherwise files are read from devDir on every
-// request, so edits show on refresh. Every response carries the CSP and
-// no-store caching; directory listings are never served.
-func Handler(devDir string) http.Handler {
+// request, so edits show on refresh. Every response carries the CSP (with
+// connect, the exact direct-transfer origins; see Policy) and no-store
+// caching; directory listings are never served.
+func Handler(devDir string, connect ...string) http.Handler {
+	csp := Policy(connect...)
 	files := Files()
 	if devDir != "" {
 		files = os.DirFS(devDir)
@@ -53,7 +85,7 @@ func Handler(devDir string) http.Handler {
 	fileServer := http.StripPrefix("/ui", http.FileServerFS(files))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", CSP)
+		h.Set("Content-Security-Policy", csp)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cache-Control", "no-store")

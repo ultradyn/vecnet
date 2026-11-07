@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { APIError, createApi } from '../static/api.js';
+import { fakeR2 } from './r2-fixture.mjs';
 
 const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
@@ -124,6 +125,7 @@ test('every method calls its route with the secret only in the header', async ()
     [() => api.messages('thr_1', { after: 'msg_1', limit: 200 }), 'GET', '/v1/threads/thr_1/messages?after=msg_1&limit=200'],
     [() => api.matrix('thr_1', { after: 'msg_1', limit: 10 }), 'GET', '/v1/admin/threads/thr_1/deliveries?after=msg_1&limit=10'],
     [() => api.readThread('thr_1'), 'POST', '/v1/admin/threads/thr_1/read'],
+    [() => api.receipt('dly_1', 'read'), 'POST', '/v1/receipts'],
     [() => api.events({ wait: 0 }), 'GET', '/v1/events?wait=0'],
     [() => api.events({ after: 'e1.2', wait: 25 }), 'GET', '/v1/events?after=e1.2&wait=25'],
     [() => api.ack('e1.2'), 'POST', '/v1/ack'],
@@ -158,6 +160,9 @@ test('send carries the operator_ui ingress mark; presence posts state and at', a
   assert.deepEqual(JSON.parse(calls[0].init.body), { idempotency_key: 'k', content: { text: 'hi' } });
   await api.presence('working', '2026-11-02T00:00:00.000Z');
   assert.deepEqual(JSON.parse(calls[1].init.body), { state: 'working', at: '2026-11-02T00:00:00.000Z' });
+  await api.receipt('dly_1', 'read');
+  assert.deepEqual(JSON.parse(calls[2].init.body), { delivery_id: 'dly_1', state: 'read' });
+  assert.equal(calls[2].init.headers['Content-Type'], 'application/json');
 });
 
 test('POST with no request body sends no body and no Content-Type', async () => {
@@ -222,4 +227,163 @@ test('dotLink asks for a link code for one peer, in the body', async () => {
   const { api, calls } = harness();
   await api.dotLink('peer_dot');
   assert.deepEqual(JSON.parse(calls.at(-1).init.body), { peer_id: 'peer_dot' });
+});
+
+// ---------- R2 direct downloads (plan 2026-11-05-r2-blobs Task 7) ----------
+
+const r2 = (f, extra = {}) => createApi({ secret: 'vn_op', fetch: f.fetch, XHR: f.XHR, now: f.now, ...extra });
+const refOf = o => ({ sha256: o.sha256, blob_id: o.blob_id });
+
+test('R2 download: discovery and a fresh grant by bearer, then a credential-free GET; bytes checked against the verified digest', async () => {
+  const f = fakeR2();
+  const o = f.seed('hello attachment', { cls: '1d' });
+  const blob = await r2(f).download(refOf(o));
+  assert.ok(blob instanceof Blob);
+  assert.equal(blob.type, 'application/octet-stream', 'never the declared type: no inline rendering');
+  assert.equal(await blob.text(), 'hello attachment');
+  const [caps, grant] = f.hubCalls();
+  assert.equal(caps.path, '/v1/blob-capabilities');
+  assert.equal(grant.path, `/v1/blobs/${o.sha256}/download?blob_id=${o.blob_id}`);
+  assert.equal(grant.headers.Authorization, 'Bearer vn_op');
+  const [get] = f.s3Calls('GET');
+  assert.equal(get.credentials, 'omit');
+  assert.equal(get.redirect, 'error');
+  assert.equal(get.referrerPolicy, 'no-referrer');
+  assert.deepEqual(get.headers, {}, 'no bearer, no custom headers on the provider request');
+  // blob(sha, id) is the same path; blob(sha) stays the hub read.
+  const again = await r2(f).blob(o.sha256, o.blob_id);
+  assert.equal(await again.text(), 'hello attachment');
+});
+
+test('R2 download: every click mints anew; an earlier URL expiring never uses up the right to get again', async () => {
+  const f = fakeR2();
+  const o = f.seed('keep me', { cls: 'keep' });
+  const api = r2(f);
+  await api.download(refOf(o));
+  f.advance(601000);
+  await api.download(refOf(o));
+  f.advance(601000);
+  await api.download(refOf(o));
+  const grants = f.hubCalls('GET', '/v1/blobs/' + o.sha256 + '/download');
+  assert.equal(grants.length, 3);
+  const urls = f.s3Calls('GET').map(c => c.url);
+  assert.equal(new Set(urls).size, 3, 'each download used its own fresh URL');
+});
+
+test('R2 download: a capability past its deadline or refused 403 is re-minted once, then fails without looping', async () => {
+  let f = fakeR2();
+  let o = f.seed('abc');
+  // The first grant arrives already past its deadline on this clock.
+  let first = true;
+  f.tamper = () => (first ? (first = false, { deadline: now => now - 1000 }) : null);
+  assert.equal(await (await r2(f).download(refOf(o))).text(), 'abc');
+  assert.equal(f.hubCalls('GET', '/v1/blobs/' + o.sha256 + '/download').length, 2);
+
+  f = fakeR2();
+  o = f.seed('abc');
+  f.nextGet.push(403);
+  assert.equal(await (await r2(f).download(refOf(o))).text(), 'abc');
+  assert.equal(f.hubCalls('GET', '/v1/blobs/' + o.sha256 + '/download').length, 2);
+
+  f = fakeR2();
+  o = f.seed('abc');
+  f.nextGet.push(403, 403);
+  const err = await r2(f).download(refOf(o)).catch(e => e);
+  assert.equal(err.code, 'blob_capability_expired');
+  assert.equal(f.hubCalls('GET', '/v1/blobs/' + o.sha256 + '/download').length, 2, 'bounded: one re-mint per click');
+});
+
+test('R2 download: digest, length and trust are checked before any bytes are handed out', async () => {
+  let f = fakeR2();
+  let o = f.seed('abc');
+  f.nextGet.push({ body: 'abd' });
+  assert.equal((await r2(f).download(refOf(o)).catch(e => e)).code, 'blob_checksum_mismatch');
+  f = fakeR2();
+  o = f.seed('abc');
+  f.nextGet.push({ body: 'abcd' });
+  assert.equal((await r2(f).download(refOf(o)).catch(e => e)).code, 'blob_checksum_mismatch');
+  // A grant that does not claim provider verification is not trusted.
+  f = fakeR2();
+  o = f.seed('abc');
+  f.tamper = () => ({ verified: false });
+  assert.equal((await r2(f).download(refOf(o)).catch(e => e)).code, 'bad_response');
+  assert.equal(f.s3Calls().length, 0);
+});
+
+test('R2 download: expired, purged, unavailable and rate-limited return no URL and fetch nothing', async () => {
+  const f = fakeR2();
+  const api = r2(f);
+  const a = f.seed('a'), b = f.seed('b'), c = f.seed('c'), d = f.seed('d'), e = f.seed('e');
+  f.download.set(a.blob_id, 'expired');
+  f.download.set(b.blob_id, 'purged');
+  f.download.set(c.blob_id, 'unavailable');
+  f.download.set(d.blob_id, { rate: 17 });
+  f.download.set(e.blob_id, { header: 9 });
+  const ea = await api.download(refOf(a)).catch(x => x);
+  const eb = await api.download(refOf(b)).catch(x => x);
+  const ec = await api.download(refOf(c)).catch(x => x);
+  const ed = await api.download(refOf(d)).catch(x => x);
+  const ee = await api.download(refOf(e)).catch(x => x);
+  assert.deepEqual([ea.status, ea.code], [410, 'blob_expired']);
+  assert.deepEqual([eb.status, eb.code], [410, 'blob_purged']);
+  assert.deepEqual([ec.status, ec.code], [503, 'blob_unavailable']);
+  assert.deepEqual([ed.status, ed.code, ed.details.retry_after_seconds], [429, 'blob_url_rate_limited', 17]);
+  assert.equal(ee.details.retry_after_seconds, 9, 'Retry-After fills in a missing detail');
+  assert.equal(f.s3Calls().length, 0);
+  // The logical deadline holds on the hub clock even before any ticker.
+  const g = f.seed('soon', { cls: '1h' });
+  f.advance(3600000);
+  assert.equal((await api.download(refOf(g)).catch(x => x)).code, 'blob_expired');
+});
+
+test('R2 download: hostile grants are refused before the provider is touched', async () => {
+  const cases = {
+    'foreign origin': () => ({ url: 'https://evil.example/x' }),
+    'userinfo': () => ({ url: 'https://u:p@0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/k' }),
+    'javascript scheme': () => ({ url: 'javascript:alert(1)' }),
+    'plain http': () => ({ url: 'http://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/k' }),
+    'past 600s': () => ({ deadline: now => now + 3600000 }),
+    'past the object deadline': g => ({ objectExpires: new Date(Date.parse(g.expires) - 3600000 * 23.99).toISOString() }),
+    'size over the cap': () => ({ size: 26 << 20 }),
+  };
+  for (const [name, t] of Object.entries(cases)) {
+    const f = fakeR2();
+    const o = f.seed('abc');
+    f.tamper = t;
+    const err = await r2(f).download(refOf(o)).catch(e => e);
+    assert.ok(err instanceof APIError, name);
+    assert.equal(err.code, 'bad_response', name);
+    assert.equal(f.s3Calls().length, 0, name);
+  }
+  // keep has no object deadline, yet its URL is still bounded by 600 s.
+  const f = fakeR2();
+  const k = f.seed('kept', { cls: 'keep' });
+  f.tamper = () => ({ deadline: now => now + 601000 + 5000 });
+  assert.equal((await r2(f).download(refOf(k)).catch(e => e)).code, 'bad_response');
+});
+
+test('R2 download: a provider CORS refusal or redirect is storage_unreachable; the URL never appears in an error', async () => {
+  for (const hook of ['cors', 'redirect', 500]) {
+    const f = fakeR2();
+    const o = f.seed('abc');
+    f.nextGet.push(hook);
+    const err = await r2(f).download(refOf(o)).catch(e => e);
+    assert.equal(err.code, hook === 500 ? 'blob_unavailable' : 'storage_unreachable', String(hook));
+    assert.ok(!JSON.stringify({ m: err.message, d: err.details }).includes('Signature'));
+  }
+  // A legacy reference (no blob_id) still reads from the hub with the bearer.
+  const f = fakeR2({ backend: 'disk' });
+  f.legacy = new Map([['a'.repeat(64), { bytes: 'old bytes', type: 'text/plain' }]]);
+  const blob = await r2(f).download({ sha256: 'a'.repeat(64) });
+  assert.equal(await blob.text(), 'old bytes');
+  assert.equal(f.s3Calls().length, 0);
+});
+
+test('blobStatus reads metadata only: no link and no mint', async () => {
+  const f = fakeR2();
+  const calls = [];
+  const api = createApi({ secret: 'vn_op', now: f.now, fetch: async (url, init) => { calls.push(url); return new Response(JSON.stringify({ state: 'available', retention_class: 'keep', expires_at: null, sha256_verified: true, integrity: { algorithm: 'sha256', value: 'a'.repeat(64), verified: true } }), { status: 200, headers: { 'Content-Type': 'application/json' } }); } });
+  const st = await api.blobStatus('a'.repeat(64), 'blo_00000000000000000000000001');
+  assert.equal(st.state, 'available');
+  assert.deepEqual(calls, ['/v1/blobs/' + 'a'.repeat(64) + '/status?blob_id=blo_00000000000000000000000001']);
 });

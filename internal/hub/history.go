@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
@@ -21,6 +22,9 @@ import (
 const (
 	DefaultPageLimit = 50
 	MaxPageLimit     = 200
+	// maxThreadTitleQuery is the longest q substring ListThreads accepts,
+	// counted in runes. A longer q is 422 invalid_value.
+	maxThreadTitleQuery = 128
 )
 
 // visibleSQL is the PROTOCOL §16.3 rule for whether message m of thread t is
@@ -57,13 +61,19 @@ func invalidValue(field, msg string) *APIError {
 // operator may name any peer. A peer credential naming another
 // peer lists the caller's threads that peer also participates in. group (a
 // team_ or grp_ id, "" for any) keeps threads whose ThreadSummary.group it
-// is; a non-zero since keeps threads active at or after it. limit ≤ 0 is 50
-// and is capped at 200. pageTok is the next of a previous page; next is ""
-// on the last page.
-func (h *Hub) ListThreads(ctx context.Context, c auth.Caller, participant, group string, since time.Time, limit int, pageTok string) ([]envelope.ThreadSummary, string, error) {
+// is. q, when non-empty, keeps threads whose title contains that substring,
+// case-insensitively (ASCII, via SQLite lower); it matches the title only,
+// not participants or message text. q longer than maxThreadTitleQuery runes
+// is 422 invalid_value. An empty q applies no title filter. A non-zero since
+// keeps threads active at or after it. limit ≤ 0 is 50 and is capped at 200.
+// pageTok is the next of a previous page; next is "" on the last page.
+func (h *Hub) ListThreads(ctx context.Context, c auth.Caller, participant, group, q string, since time.Time, limit int, pageTok string) ([]envelope.ThreadSummary, string, error) {
 	limit = pageLimit(limit)
 	if group != "" && !ids.IsGroup(group) {
 		return nil, "", invalidValue("group", "group must be a team_ or grp_ id")
+	}
+	if n := utf8.RuneCountInString(q); n > maxThreadTitleQuery {
+		return nil, "", invalidValue("q", fmt.Sprintf("q must be at most %d characters", maxThreadTitleQuery))
 	}
 	var curAt, curID string
 	if pageTok != "" {
@@ -90,9 +100,10 @@ func (h *Hub) ListThreads(ctx context.Context, c auth.Caller, participant, group
 			   AND (?3 = '' OR t.group_id = ?3)
 			   AND (?4 = '' OR t.last_message_at >= ?4)
 			   AND (?5 = '' OR t.last_message_at < ?5 OR (t.last_message_at = ?5 AND t.thr_id < ?6))
+			   AND (?7 = '' OR instr(lower(t.title), lower(?7)) > 0)
 			 ORDER BY t.last_message_at DESC, t.thr_id DESC
-			 LIMIT ?7`,
-			viewer, with, group, sinceStr, curAt, curID, limit+1)
+			 LIMIT ?8`,
+			viewer, with, group, sinceStr, curAt, curID, q, limit+1)
 		if err != nil {
 			return fmt.Errorf("hub: list threads: %w", err)
 		}

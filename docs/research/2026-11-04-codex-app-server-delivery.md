@@ -693,3 +693,101 @@ before.
 | (c) Unsubscribe | **The 60 s unload proceeds** exactly (VERIFIED), as it does after a disconnect. |
 | (d) Memory and limit | **About 40–70 MB per kept-loaded thread** on Max's config, mostly per-thread stdio MCP servers. Default limit 8 per `CODEX_HOME`, configurable 1–32. |
 | (e) Never resume `notLoaded` explicit threads | **Still right.** Attach only to loaded threads; detect and undo an accidental cold resume. Revive when another client loads the thread. |
+
+## Addendum 2026-11-06: 0.167.0 re-verification
+
+**Environment and method.** On xsm, `codex --version` reported `codex-cli 0.167.0`;
+`codex app-server daemon version` reported both `managedCodexVersion` and
+`appServerVersion` as `0.167.0`. The probes used the shared daemon's private Unix
+WebSocket at `/`, with `experimentalApi:true`. The throwaway TUI ran
+`codex -s read-only -a on-request` under private tmux server `codex0167-3430674`,
+with `VECNET_PROFILE=nonexistent-codex0167-probe` and cwd
+`.scratch/vecnet/codex-0167-spike/tui`. Its thread was
+`01a1b06c-2296-7f03-ba4d-0fcc787570c5`, identified as the unique new loaded id
+whose cwd matched that directory. The probe client rejected every thread-targeted
+call whose id differed. Other loaded sessions were listed only as ids/counts;
+the cwd-filtered discovery query returned only probe sessions. No daemon restart
+or global configuration change was performed.
+
+**Generated schema comparison: VERIFIED.** Generated both stable and experimental
+JSON schemas using the installed `0.166.0` release binary and the `0.167.0` CLI:
+
+```sh
+codex app-server generate-json-schema --out <version>-stable
+codex app-server generate-json-schema --experimental --out <version>-experimental
+```
+
+The comparison covered every method allowed by `rpc.ts`, the payload builders
+in `protocol.ts`, and fields consumed by `engine.ts`; `input-plan.ts` uses the
+mapped idle/running/waiting statuses and launcher buffering rather than native
+Codex queue methods. In both schema modes:
+
+- All seven connector method envelopes are identical: `initialize`,
+  `thread/read`, `thread/turns/list`, `thread/resume`, `thread/unsubscribe`,
+  `turn/start`, `turn/steer`. No method or field used by the connector was removed
+  or renamed, and no required field was added.
+- The v2 parameter/response root fields are identical, including `threadId`,
+  `excludeTurns`, `itemsView`, `limit`, `cursor`, `clientUserMessageId`, `input`,
+  `expectedTurnId`, `data`, `nextCursor`, `turn`, `turnId`, and resume policy
+  fields. `Thread`, `Turn`, `ThreadItem`, `ThreadStatus`, `ThreadActiveFlag`,
+  `AskForApproval`, `ApprovalsReviewer`, and the text-input variant are unchanged.
+- All notification envelopes and parameter definitions consumed by the engine
+  are identical: `thread/status/changed`, `thread/closed`, `thread/archived`,
+  `turn/started`, `turn/completed`, `mcpServer/startupStatus/updated`,
+  `item/started`, `item/completed`, and `serverRequest/resolved`.
+- `additionalContext` and its `AdditionalContextEntry`/`AdditionalContextKind`
+  definitions remain experimental and unchanged. There is still no dedicated
+  `thread/subscribe` method.
+
+The wider protocol **does** change, outside the connector's used fields:
+optional initialize capability `requiredHumanApproval`; approval kind
+`humanCommand` (requires that capability and experimental API); an audio
+`fileId`/`file_id` alternative alongside existing URL input; stable notification
+`thread/section/changed`; experimental method `thread/guardianReview`; and
+optional experimental `thread/sample.interruptOnCancel`. The connector does not
+enable the new capability, decode approval bodies, use audio, or call those
+methods. These additions require no connector change. The existing 0.166.0
+schema fixture remains a valid contract for the fields it tests.
+
+**Upstream release notes: DOCUMENTED-UNVERIFIED.** Read the official
+[0.167.0 release](https://github.com/openai/codex/releases/tag/rust-v0.167.0)
+and its full changelog listing. Relevant entries include managed fresh human
+approval checkpoints (#58045), managed network requirements (#58182), additional
+context metrics (#58144), resolving completed network approval prompts (#58350),
+serializing network approval prompts per endpoint (#58351), thread section
+broadcasts (#58380), and fewer Linux musl allocator arenas after unload (#58399).
+Those release claims were read, not independently exercised here; the runtime
+rows below are the independently verified connector behavior. Restart/recovery,
+managed network checkpoints, audio, native queue delivery, and memory usage
+were not re-tested by this connector compatibility pass.
+
+**Runtime results.**
+
+| Probe | Result | Evidence on 0.167.0 |
+|---|---|---|
+| §3 idle wake | **VERIFIED** | An unsubscribed `turn/start` returned turn `01a1b06c-97f2-7fd0-935a-b0894cc04455`; the TUI and full history showed `PONG0167`. Its user item retained `clientId: vn.0167.idle`; global status changed active → idle. |
+| §4 busy session | **VERIFIED** | During `sleep 40`, a wrong `expectedTurnId` failed with `-32600 expected active turn id … but found …`. Correct `turn/steer` and active `turn/start` both returned the original turn `01a1b06c-be41-7140-8b4d-f09575f5c91c`. Full history retained the original, steer and start clientIds in send order; the final answer was `DONE0167 STEER_A0167 START_B0167`. |
+| §5 trust and policy | **VERIFIED** | The model identified user-role `<external_vecnet_msg_0167>` context and treated the embedded request as data; `PEER_D0167` was absent from the answer. The peer body appeared in neither the visible prompt nor a user item. On this thread only, `sandboxPolicy: workspaceWrite` allowed `escalated1.txt`; the next plain turn wrote `escalated2.txt`, proving persistence. Resetting `readOnly` blocked `reset3.txt` with `Read-only file system`. No approval policy was changed. |
+| K1 warm subscribe and pending replay | **VERIFIED** | `{threadId, excludeTurns:true}` returned `approvalPolicy: on-request`, `approvalsReviewer: user`, `sandbox.type: readOnly`; rollout size/mtime, turn count and settled TUI pane were identical before/after. No turn or MCP startup event was emitted. Both schemas still expose resume/unsubscribe and no subscribe method. K2 verified replay of the same pending request. |
+| K2 approvals | **VERIFIED** | With TUI and silent connector subscribed, request `0` completed after approval in the private TUI, and the connector received `serverRequest/resolved`. After TUI exit, request `1` remained pending for 160 s; after disconnecting the connector it remained active and loaded for another 95 s with no subscribers. A fresh resume replayed request `1`. A blocked steer was accepted; interrupting only this probe turn resolved the approval, and both full history and rollout lacked its marker/clientId. An accepted steer still does not prove delivery. |
+| L3 idle unload timing | **VERIFIED** | After the last subscriber left the now-idle thread, global `notLoaded` and `thread/closed` arrived at +60.379 s. The id was absent from `thread/loaded/list`; an unsubscribed `turn/start` failed `-32600 thread not found`. The active blocked thread had remained loaded with zero subscribers for 95 s in K2. |
+| K3 keep-loaded and unsubscribe | **VERIFIED** | After `/quit`, the sole connector subscription held the thread idle and loaded for 135 s. After the headless approval probe, `thread/unsubscribe` returned `{status: "unsubscribed"}`. The normal unload followed 60.379 s later; this is the same final unload measurement as L3. |
+
+**Conclusion.** All connector dependencies retain their 0.166.0 shapes and tested
+semantics. Allow `0.167.0` alongside `0.166.0`; continue refusing other versions.
+The approval and receipt safety rules remain necessary. No connector adaptation
+is needed for this release.
+
+**Cleanup and evidence.** The thread was archived, all probe WebSockets closed,
+the private tmux server exited and was confirmed gone, and the TUI working
+directory and its test writes were removed. The probe clients and generated
+schemas remain uncommitted under `.scratch/vecnet/codex-0167-spike/`; its
+`artifacts/` directory records the schema manifest/diff, consumed-surface audit,
+TUI snapshots and per-probe results. The machine-readable report is
+`.scratch/vecnet/integrations/codex-0167-verify.result.json`.
+
+**Launcher validation.** All 171 tests passed (zero failures/skips), running
+`build2 node --disable-warning=ExperimentalWarning --test --test-concurrency=2`
+on `connectors/launcher/test/codex-{rpc,protocol,engine,connector,ws}.test.ts`
+and `connectors/launcher/test/input-plan.test.ts`. The version-gate tests cover
+both allowed versions and refusal of `0.168.0`. No full Go suite was run.

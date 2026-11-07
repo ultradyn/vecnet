@@ -67,7 +67,9 @@ try {
         assert(before.unread > 0, 'seed must have unread deliveries');
         await waitFor(` · ${before.unread} unread · `);
         const invalidation = operatorView('read', demo.threads.hosting);
-        const read = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === `/v1/admin/threads/${demo.threads.hosting}/read` && response.ok());
+        // The thread's one unread message is on screen, so it is read by its
+        // own receipt a second after opening (CoS unread ruling).
+        const read = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/v1/receipts' && response.ok());
         await page.locator(`#view a.item[href="#thread/${demo.threads.hosting}"]`).first().click();
         await read;
         await invalidation;

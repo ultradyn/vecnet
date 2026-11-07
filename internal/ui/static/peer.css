@@ -4,6 +4,23 @@ body[data-route=peer] .va .col{max-width:1120px}
 .pv .crumb{font-size:12px;color:var(--dim);margin:0 0 10px}
 .pv .crumb a{color:var(--dim)}
 .pv .crumb a:hover{color:var(--text)}
+/* Header: name and id on the left, the message actions on the right. */
+.pv-head{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:20px;align-items:start}
+.pv-main{min-width:0}
+.pv-acts{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;padding-top:2px}
+.pv-acts:empty{display:none}
+.pv-acts .btn{display:inline-flex;align-items:center;gap:8px;min-height:34px;padding:6px 13px;text-decoration:none;white-space:nowrap;color:var(--text)}
+.pv-acts .btn.pri{color:#fff}
+.pv-acts .btn .lb{font-weight:600}
+.pv-acts .qt{font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis;opacity:.82}
+.pv-acts .ago{font:11px var(--mono);opacity:.72}
+.pv-acts .pr{font:500 10.5px/1 var(--mono);color:var(--widle);border:1px solid #38bdf866;border-radius:4px;padding:3px 5px}
+/* .dash a:hover underlines links; these are buttons. */
+.pv-acts a.btn,.pv-acts a.btn:hover{text-decoration:none}
+.pv-acts .btn.pri:not(:disabled):hover{filter:brightness(1.14)}
+.pv-acts .btn.pv-new:hover{background:#1b2441}
+.pv-acts .btn.pri:focus-visible{outline-color:#e9d5ff}
+.pv-acts .btn:disabled .qt{font-style:italic}
 .pv-head h1{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
 .pv-head h1 .nm{overflow-wrap:anywhere}
 .pv-head h1 .pill{font-weight:400;color:var(--muted)}
@@ -26,4 +43,4 @@ body[data-route=peer] .va .col{max-width:1120px}
 .pv td .idc,.pv dd .idc{vertical-align:middle}
 .pv td .idc.sub,.pv td>.idc:not(:first-child){display:flex}
 .pv .pps .plink{white-space:nowrap}
-@media (max-width:1100px){.pv-grid{grid-template-columns:1fr}}
+@media (max-width:1100px){.pv-grid{grid-template-columns:1fr}.pv-head{grid-template-columns:1fr}.pv-acts{justify-content:flex-start;padding:4px 0 0}}

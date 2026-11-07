@@ -112,13 +112,14 @@ func New(d Deps) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
 	s.routes(mux)
-	uiHandler := ui.Handler(d.UIDir) // operator inbox; public (isPublic)
+	uiHandler := ui.Handler(d.UIDir, s.r2Origins()...) // operator inbox; public (isPublic)
 	mux.Handle("GET /ui", uiHandler)
 	mux.Handle("GET /ui/", uiHandler)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, hub.E(http.StatusNotFound, "not_found", "no such endpoint"))
 	})
-	h := throttle(d.Limiter, d.TrustFlyClientIP, limitBody(authenticate(d.Hub.Auth, d.Hub.TouchReachability, d.Limiter, d.TrustFlyClientIP, mux)))
+	authed := authenticate(d.Hub.Auth, d.Hub.TouchReachability, d.Limiter, d.TrustFlyClientIP, mux)
+	h := throttle(d.Limiter, d.TrustFlyClientIP, limitBody(redirectBrowserRoot(authed)))
 	h = mcpserver.ObserveHTTP(oauth.ObserveHTTP(h))
 	if strings.HasPrefix(d.Hub.Cfg.PublicURL, "https://") {
 		h = hsts(h)

@@ -61,6 +61,7 @@ func lineOf(m *Model) *cmdline {
 func builtinCommands() map[string]Command {
 	return map[string]Command{
 		"q":        {Help: "quit", Run: func(m *Model, _ []string) tea.Cmd { return m.quit() }},
+		"prefs":    {Help: "show read-only hub preferences", Run: runPrefs},
 		"refresh":  {Help: "reload everything", Run: func(m *Model, _ []string) tea.Cmd { return m.reloadAll() }},
 		"presence": {Help: "<" + strings.Join(presenceStates, "|") + ">  set your presence", Run: runPresence},
 		"retry":    {Help: "all  retry every listed dead letter", Run: runRetry},
@@ -307,6 +308,21 @@ func runRetry(m *Model, args []string) tea.Cmd {
 	}
 }
 
+// runPrefs opens the read-only preferences view and loads it with GET.
+func runPrefs(m *Model, args []string) tea.Cmd {
+	if len(args) != 0 {
+		m.Toast("usage: :prefs", true)
+		return nil
+	}
+	m.prefsOn = true
+	m.Help = false
+	if m.stopped() {
+		m.Toast(m.Conn+": restart with a valid profile", true)
+		return nil
+	}
+	return m.Reload("prefs")
+}
+
 // runThread opens the nth thread of the chat list, counting from 1.
 func runThread(m *Model, args []string) tea.Cmd {
 	if len(args) != 1 {
@@ -331,6 +347,7 @@ func runTab(m *Model, args []string) tea.Cmd {
 	// Tabs are named by their stable names, never by display titles: the
 	// subs title becomes `subs n` while a subscription needs attention.
 	if i := slices.Index(tabNames, args[0]); i >= 0 && i < len(m.screens) {
+		m.prefsOn = false
 		m.Tab = i
 		return nil
 	}
@@ -379,7 +396,6 @@ func viewHelp(m *Model) string {
 	for _, hint := range strings.Split(hints, "\n") {
 		lines = append(lines, "  "+styleMuted.Render(hint))
 	}
-	lines = append(lines, "")
 	lines = append(lines, section("commands", commands)...)
 	return strings.Join(lines, "\n")
 }

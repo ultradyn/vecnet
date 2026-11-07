@@ -6,7 +6,8 @@
 import { assert, cleanBuild, scrollIntoViewStable, withDemo } from './lib.mjs';
 
 const WRITE = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-const SHELL_WRITES = /\/v1\/(ack|presence)(\?|$)|\/v1\/admin\/threads\/[^/]+\/read$/;
+// The shell's own writes, and the thread view's read receipts as it is read.
+const SHELL_WRITES = /\/v1\/(ack|presence|receipts)(\?|$)/;
 
 try {
   await withDemo({}, async ctx => {
