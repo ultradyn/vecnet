@@ -203,7 +203,8 @@ func main() {
 	serve := flag.Bool("serve", false, "private child hub mode")
 	dir := flag.String("data-dir", "", "child temporary directory")
 	mode := flag.String("mode", "limited", "limited (1 CPU / 512 MiB cgroup) or unconstrained")
-	suite := flag.String("suite", "all", "all, sends, idle, delivery, blobs")
+	suite := flag.String("suite", "all", "all, sends, idle, delivery, blobs, compaction")
+	compactionFocus := flag.String("compaction-focus", "matrix", "compaction matrix or supplement (full query plans and legacy snapshot costs)")
 	out := flag.String("out", "bench/results.json", "output JSON (no credentials)")
 	duration := flag.Duration("duration", 5*time.Second, "minimum send scenario duration")
 	minimum := flag.Int("min-sends", 200, "minimum accepted sends/scenario")
@@ -222,6 +223,13 @@ func main() {
 	if (*mode != "limited" && *mode != "unconstrained") || *workers < 1 || *minimum < 1 || *duration <= 0 || *repeats < 1 || *idleWindow <= 0 {
 		fmt.Fprintln(os.Stderr, "invalid benchmark limits")
 		os.Exit(2)
+	}
+	if *suite == "compaction" {
+		if err := measureCompaction(*minimum, *out, *compactionFocus); err != nil {
+			fmt.Fprintln(os.Stderr, "compaction failed:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if *suite != "all" && *suite != "sends" && *suite != "idle" && *suite != "delivery" && *suite != "blobs" {
 		fmt.Fprintln(os.Stderr, "invalid benchmark suite")

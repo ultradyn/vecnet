@@ -17,6 +17,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
@@ -46,7 +47,9 @@ type API interface {
 	React(ctx context.Context, req envelope.ReactionRequest) (opapi.ReactionResult, error)
 	Answer(ctx context.Context, a opapi.OpenApproval, option int) error
 	SetPresence(ctx context.Context, state string, at time.Time) error
+	BlobStatus(ctx context.Context, sha, id string) (blobwire.State, error)
 	Blob(ctx context.Context, sha string, max int64) ([]byte, string, error)
+	BlobWithOptions(ctx context.Context, sha string, max int64, opts opclient.BlobOptions) ([]byte, string, error)
 	Upload(ctx context.Context, r io.Reader, size int64, mediaType, name string) (envelope.Attachment, error)
 	TailWithAck(ctx context.Context, handle func(opclient.Batch) error, status func(string), accepted func(string)) error
 	// Preferences is the read-only GET /v1/admin/prefs. The TUI never patches.

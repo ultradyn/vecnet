@@ -25,6 +25,7 @@ type DB struct{ *sql.DB }
 const dsnParams = "_txlock=immediate" +
 	"&_pragma=journal_mode(WAL)" +
 	"&_pragma=busy_timeout(5000)" +
+	"&_pragma=wal_autocheckpoint(1000)" +
 	"&_pragma=foreign_keys(ON)"
 
 // synchronousEnv selects the WAL fsync policy. FULL (the default) fsyncs every
@@ -60,6 +61,11 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Initialize only a truly empty SQLite file, before WAL or the first table
+	// allocates pages. An existing NONE database must never be converted here.
+	if err := initializeEmpty(path); err != nil {
+		return nil, err
+	}
 	dsn := "file:" + uriPathEscaper.Replace(path) + "?" + dsnParams + sync
 	sqldb, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -74,7 +80,34 @@ func Open(path string) (*DB, error) {
 		sqldb.Close()
 		return nil, err
 	}
-	return &DB{sqldb}, nil
+	db := &DB{sqldb}
+	if err := db.initializeEventRetention(context.Background()); err != nil {
+		sqldb.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func initializeEmpty(path string) error {
+	db, err := sql.Open("sqlite", "file:"+uriPathEscaper.Replace(path)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return fmt.Errorf("store: initialize empty database: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var pages int
+	if err := db.QueryRow("PRAGMA page_count").Scan(&pages); err != nil {
+		return fmt.Errorf("store: inspect empty database: %w", err)
+	}
+	if pages != 0 {
+		return nil
+	}
+	for _, q := range []string{"PRAGMA page_size=4096", "PRAGMA auto_vacuum=INCREMENTAL"} {
+		if _, err := db.Exec(q); err != nil {
+			return fmt.Errorf("store: initialize empty database: %w", err)
+		}
+	}
+	return nil
 }
 
 // Tx runs fn inside one transaction (BEGIN IMMEDIATE via the DSN). It commits

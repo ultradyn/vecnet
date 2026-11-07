@@ -251,6 +251,62 @@ export function laneStops(row, current, saved) {
     .sort((a, b) => a.seconds - b.seconds);
 }
 
+// ---------- attachment retention and storage (R2 blobs Task 7) ----------
+
+// BLOB_NEW_ONLY sits beside the Attachment expiry row in both views.
+export const BLOB_NEW_ONLY = 'Applies to new uploads only. Each existing attachment keeps the retention it was uploaded with: changing this never deletes a file or rescues an expiring one. Download links stay short-lived (up to 10 minutes) whatever is chosen.';
+
+// bytesText: decimal units, as the hub's storage figures are read.
+export function bytesText(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return '';
+  for (const [u, s] of [['GB', 1e9], ['MB', 1e6], ['KB', 1e3]]) if (n >= s) return (n / s).toFixed(n >= 10 * s ? 0 : 1) + ' ' + u;
+  return n + ' B';
+}
+
+const FIGURES = ['retained_bytes', 'reserved_bytes', 'used_bytes', 'limit_bytes'];
+// validStorage: the operator-only storage figures beside a snapshot, or null.
+// Each is a whole, non-negative byte count and the limit is finite and set.
+export function validStorage(s) {
+  if (!s || typeof s !== 'object') return null;
+  if (!FIGURES.every(k => Number.isSafeInteger(s[k]) && s[k] >= 0) || s.limit_bytes <= 0) return null;
+  return Object.fromEntries(FIGURES.map(k => [k, s[k]]));
+}
+
+// storageView: the meter both views draw. near at 90%, full at the limit;
+// a limit lowered below use reads over the limit, and nothing is deleted.
+export function storageView(storage) {
+  // A failed live read is not "no adapter": both views already draw whatever
+  // this returns, and the Policy forecast's placeholder is the other case.
+  if (storage && storage.unavailable === true) {
+    return {
+      unavailable: true, tone: 'unavailable', percent: 0, text: 'Storage unavailable',
+      note: 'Storage figures could not be read just now. Nothing was changed; reload to try again.',
+      retained_bytes: 0, reserved_bytes: 0, used_bytes: 0, limit_bytes: 1,
+      parts: ['Retained', 'Reserved', 'Used', 'Limit'].map(label => ({ label, value: 'unavailable' })),
+    };
+  }
+  const s = validStorage(storage);
+  if (!s) return null;
+  const used = s.used_bytes, limit = s.limit_bytes, ratio = used / limit;
+  const tone = used >= limit ? 'full' : ratio >= 0.9 ? 'near' : 'ok';
+  const note = used > limit
+    ? 'Storage is over the limit: new uploads are refused until files expire or are purged. Nothing already uploaded is deleted.'
+    : tone === 'full' ? 'Storage is full: new uploads are refused until files expire or are purged. Nothing already uploaded is deleted.'
+      : tone === 'near' ? 'Storage is near its limit: new uploads are refused once it is full.' : '';
+  return {
+    ...s, tone, note, percent: Math.min(100, Math.round(ratio * 100)),
+    text: `${bytesText(used)} used of ${bytesText(limit)}` + (used > limit ? `, over by ${bytesText(used - limit)}` : ''),
+    parts: [['Retained', s.retained_bytes], ['Reserved', s.reserved_bytes], ['Used', used], ['Limit', limit]].map(([label, n]) => ({ label, value: bytesText(n) })),
+  };
+}
+
+// blobOffText: what turning expiry off costs, with the hub's own figures.
+export function blobOffText(storage) {
+  const s = validStorage(storage);
+  return 'New attachments get no automatic expiry, and the storage provider has no disaster expiry for them: storage grows, and costs, until files are purged or their last message reference goes. Existing attachments keep their deadlines.' +
+    (s ? ` The hub reports ${bytesText(s.retained_bytes)} retained and ${bytesText(s.reserved_bytes)} reserved: ${bytesText(s.used_bytes)} used of a ${bytesText(s.limit_bytes)} limit.` : '');
+}
+
 // ---------- the store ----------
 
 const aborted = e => !!e && (e.code === 'aborted' || e.name === 'AbortError');
@@ -304,20 +360,28 @@ export function createSettingsStore({ api, appearance, storage }) {
   let dead = false, offAppearance = () => {};
   const look = appearance ? appearance.get() : { theme: 'system', density: 'comfortable' };
   const st = {
-    phase: 'loading', loadError: null, etag: '', revision: 0, rows: [], draft: new Map(),
+    phase: 'loading', loadError: null, etag: '', revision: 0, rows: [], draft: new Map(), storage: null,
     busy: '', confirm: null, newer: null, saveError: null, serverErrors: {}, focus: '',
     saved: null, announce: { text: '', n: 0 }, view: loadView(storage), q: '', only: 'all', open: '',
     appearance: { saved: { ...look }, draft: { ...look }, note: '' },
   };
-  const emit = () => { if (!dead) for (const fn of [...subs]) fn(st); };
+  const emit = (change = 'settings') => { if (!dead) for (const fn of [...subs]) fn(st, change); };
   const say = text => { st.announce = { text, n: st.announce.n + 1 }; };
   const rowOf = key => st.rows.find(r => r.key === key);
   const live = () => !dead;
+  // The prefs ETag does not cover blob usage. Once a snapshot has shown the
+  // meter, later re-reads ask the live counter even when prefs answers 304.
+  let sawStorage = false;
+  const storageSig = s => !s ? '' : s.unavailable ? 'unavailable' : FIGURES.map(k => s[k]).join(',');
 
   function adopt(body, etag) {
     st.rows = body.preferences.slice();
     st.revision = body.revision || 0;
     st.etag = etag || '';
+    // Storage figures come only with an operator's R2 snapshot.
+    const storage = validStorage(body.storage);
+    st.storage = storage;
+    if (storage) sawStorage = true;
     // A draft for a row that became locked or vanished cannot be saved.
     for (const key of [...st.draft.keys()]) {
       const row = rowOf(key);
@@ -384,12 +448,35 @@ export function createSettingsStore({ api, appearance, storage }) {
     emit();
   }
 
-  // refresh re-reads on focus or Reload. A clean page takes the new values; a
-  // dirty one keeps every typed edit and shows a notice instead.
+  // refreshMeter reads retained/reserved/used/limit on their own. A miss
+  // shows unavailable and does not touch the prefs ETag, the draft or a
+  // confirmation that is already open.
+  async function refreshMeter() {
+    if (!sawStorage || typeof api.blobStorage !== 'function') return;
+    try {
+      const body = await api.blobStorage({ signal: ctl.signal });
+      if (!live()) return;
+      st.storage = validStorage(body && body.storage) || { unavailable: true };
+    } catch (e) {
+      if (!live() || aborted(e)) return;
+      st.storage = { unavailable: true };
+    }
+  }
+
+  // refresh re-reads on focus, visibility, Reload, or a live reconnect
+  // while Settings is mounted. A clean page takes new preference values; a
+  // dirty one keeps every typed edit and shows a notice instead. Prefs 304
+  // is quiet for the rows, and the storage meter is read either way. A busy
+  // confirm or save reads only the meter.
   // quiet: a failed re-read leaves the current message alone.
   async function refresh({ quiet = false } = {}) {
     if (st.phase !== 'ready') return load();
-    if (st.busy) return;
+    if (st.busy) {
+      const before = storageSig(st.storage);
+      await refreshMeter();
+      if (live() && storageSig(st.storage) !== before) emit('storage');
+      return;
+    }
     let r;
     try { r = await api.prefs({ etag: st.etag, signal: ctl.signal }); } catch (e) {
       if (!live() || aborted(e) || quiet) return;
@@ -397,20 +484,27 @@ export function createSettingsStore({ api, appearance, storage }) {
       emit();
       return;
     }
-    if (!live() || r.status === 304 || !r.body || r.etag === st.etag || !validSnapshot(r.body)) return;
-    if (st.busy) return;
-    if (!dirtyKeys().length) {
-      adopt(r.body, r.etag);
-      st.newer = null;
-      say('Settings reloaded from the hub.');
-    } else {
-      // A pending conflict stays a conflict: Save stays blocked until the
-      // operator adopts the latest values or discards the draft.
-      const reason = st.newer && st.newer.reason === 'conflict' ? 'conflict' : 'update';
-      st.newer = { reason, body: r.body, etag: r.etag, changed: changedKeys(st.rows, r.body.preferences) };
-      say('Settings changed on the hub. Your edits are kept until you choose.');
+    if (!live()) return;
+    const unchanged = r.status === 304 || !r.body || r.etag === st.etag || !validSnapshot(r.body);
+    if (!unchanged) {
+      if (st.busy) return;
+      if (!dirtyKeys().length) {
+        adopt(r.body, r.etag);
+        st.newer = null;
+        say('Settings reloaded from the hub.');
+      } else {
+        // A pending conflict stays a conflict: Save stays blocked until the
+        // operator adopts the latest values or discards the draft.
+        const reason = st.newer && st.newer.reason === 'conflict' ? 'conflict' : 'update';
+        st.newer = { reason, body: r.body, etag: r.etag, changed: changedKeys(st.rows, r.body.preferences) };
+        say('Settings changed on the hub. Your edits are kept until you choose.');
+      }
     }
-    emit();
+    const before = storageSig(st.storage);
+    await refreshMeter();
+    if (!live()) return;
+    if (!unchanged) emit();
+    else if (storageSig(st.storage) !== before) emit('storage');
   }
 
   function edit(key, value) {

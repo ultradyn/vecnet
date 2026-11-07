@@ -127,7 +127,7 @@ Every pushed routine run spends Grok quota, including setup and retries that sta
 
 Schema diet is out of this plan. CoS owns it on branch `mcp-schema-diet`. After that branch merges, Task 8 filters `tools/list` by kind and caller. `tools/call` stays authoritative: omission from the list is not the authorization check.
 
-A grokbot caller's `tools/list` contains only `vecnet_whoami`, `vecnet_guide`, `vecnet_inbox`, `vecnet_thread`, `vecnet_threads`, `vecnet_send`, `vecnet_reply`, `vecnet_react`, `vecnet_receipt`, `vecnet_ack`, `vecnet_blob_get` and `vecnet_peers`. Operator-only tools are listed only to callers who can use them (including `vecnet_agent_kinds`, `vecnet_agent_add` and `vecnet_agent_status` for the operator). The grokbot list's compact JSON (`json.Marshal`, no indent) stays under 12 KB. Because Grok Bot fetches schemas on demand, that bound is the fetched list size, not an assumed eager prompt cost.
+A grokbot caller's `tools/list` contains only `vecnet_whoami`, `vecnet_guide`, `vecnet_inbox`, `vecnet_thread`, `vecnet_threads`, `vecnet_send`, `vecnet_reply`, `vecnet_react`, `vecnet_receipt`, `vecnet_ack`, `vecnet_blob_get` and `vecnet_peers`. Operator-only tools are listed only to callers who can use them (including `vecnet_agent_kinds`, `vecnet_agent_add` and `vecnet_agent_status` for the operator). The grokbot list's compact JSON (`json.Marshal`, no indent) stays under 13 KiB (CoS ruling 2026-11-07: measured 12,770 B after schema diet; shared descriptions stay diet-owned). Because Grok Bot fetches schemas on demand, that bound is the fetched list size, not an assumed eager prompt cost.
 
 ## Review Focus
 
@@ -137,7 +137,7 @@ A grokbot caller's `tools/list` contains only `vecnet_whoami`, `vecnet_guide`, `
 4. A browser that still has bot A's consent cookie and submits bot B's link code receives a token for B, and whoami returns B. The page always shows the peer name and id it would approve and always offers a link code; the code wins and replaces the cookie. Pinned in Task 6 (`TestConsentCodePrecedesCookie`).
 5. Operator-only HTTP/web and secret-free MCP do not wait on admin-parity. Grokbot MCP add creates nothing and returns `needs_human` plus the web path; legacy MCP returns a web path and no invite token. A second kind/caller cannot bypass grants or replace normal creation defaults. Pinned in Tasks 2/4/7 (`TestOnboardLegacyKinds`, `TestAgentOnboardAuthorization`, `TestAgentOnboardMCPHumanBoundary`).
 6. Composers preselect `wake_idle` when any recipient or participant is grokbot, send that choice explicitly, and keep a manual selection sticky. CLI and MCP still require `priority`. There is no default-priority route. Guides, send/reply descriptions and the setup message tell agents to use `wake_idle` for grokbots. Pinned in Tasks 10/11 (`Grok recipient defaults preserve user choice`, guide text tests).
-7. A grokbot `tools/list` is the twelve named tools and under 12 KB compact JSON. Operator-only tools appear only for callers who can use them. `tools/call` stays authoritative. Schema diet is out of scope. Pinned in Task 8 (`TestGrokbotToolsListBudget`).
+7. A grokbot `tools/list` is the twelve named tools and under 13 KiB compact JSON. Operator-only tools appear only for callers who can use them. `tools/call` stays authoritative. Schema diet is out of scope. Pinned in Task 8 (`TestGrokbotToolsListBudget`).
 
 ## Dependency map and file ownership
 
@@ -252,9 +252,9 @@ Serialized overlaps: `internal/hub/onboarding.go` is Task 2 then Task 3 action w
 
 **Files:** Modify `internal/mcpserver/tools.go` (list assembly only, after Task 7). Create or modify `internal/mcpserver/projection.go` and `internal/mcpserver/projection_test.go`. `internal/mcpserver/projection.go` is shared with branch `mcp-schema-diet`. Do not start until that branch has merged, then re-inventory the file and keep this task's edit to kind/caller projection. Schema diet itself is out of this plan.
 
-**Interfaces:** Implements Decisions §7. `tools/list` for kind `grokbot` returns only the twelve named tools. Operator-only tools are included only for callers who can use them. `tools/call` is unchanged and remains the authorization authority. Compact JSON of the grokbot list is under 12 KB.
+**Interfaces:** Implements Decisions §7. `tools/list` for kind `grokbot` returns only the twelve named tools. Operator-only tools are included only for callers who can use them. `tools/call` is unchanged and remains the authorization authority. Compact JSON of the grokbot list is under 13 KiB.
 
-- [ ] Add `TestGrokbotToolsListBudget`: a grokbot session's `tools/list` is exactly whoami, guide, inbox, thread, threads, send, reply, react, receipt, ack, blob_get and peers, and `json.Marshal` of that result is under 12 KB. An operator session still sees operator-only tools it can call, including the Task 7 agent tools. A grokbot session does not.
+- [ ] Add `TestGrokbotToolsListBudget`: a grokbot session's `tools/list` is exactly whoami, guide, inbox, thread, threads, send, reply, react, receipt, ack, blob_get and peers, and `json.Marshal` of that result is under 13 KiB. An operator session still sees operator-only tools it can call, including the Task 7 agent tools. A grokbot session does not.
 - [ ] Add a call-authority check: a grokbot `tools/call` to a tool it may already use that is absent from its list still follows the existing handler authorization, and a call it must not make still fails closed. Listing is not a second policy engine.
 - [ ] Implement the projection beside the current static table. Do not shrink schemas, delete tools, or otherwise carry schema-diet work.
 - [ ] Run `BB_JOBS=2 just bb go test -count=1 ./internal/mcpserver`. Review the list sizes and commit.
@@ -321,4 +321,4 @@ CoS decided every item in this revision, including consent-cookie precedence, on
 - Grok human submit atomically creates the default-policy peer, sealed route, per-bot connector descriptor, one credential mode and one hub-authored setup message. Replay receipts and the keyed digest recover retries without a new migration or secret replay.
 - Hosted OAuth is the default (`vecnet peer link`, connector `vecnet-<slug>`, consent code, no peer secret in Cursor, no stdio). CLI bearer is the other mode, never both. Linking revokes a bearer; the wizard warns and confirms; the conductor stays on CLI. Whoami mismatch is a hard stop. Cross-bot connector visibility remains a residual risk, detected by `ingress=mcp_tool` and the caller peer.
 - Composers preselect `wake_idle` when any participant is grokbot and still send explicit priority. Guides and send/reply text say the same. There is no default-priority resolver.
-- Eleven tasks cover the consent-cookie fix, secret-free MCP, and a kind-scoped tool list under 12 KB after schema diet merges. Needs Max is none.
+- Eleven tasks cover the consent-cookie fix, secret-free MCP, and a kind-scoped tool list under 13 KiB after schema diet merges. Needs Max is none.

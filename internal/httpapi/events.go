@@ -168,7 +168,7 @@ func (s *server) startCursor(ctx context.Context, r *http.Request, owners []stri
 			return eventlog.Cursor{}, err
 		}
 		if !ok {
-			if c, err = s.Hub.Log.Oldest(ctx); err != nil {
+			if c, err = s.Hub.Log.OldestFor(ctx, owners); err != nil {
 				return eventlog.Cursor{}, err
 			}
 		}
@@ -447,7 +447,7 @@ func decodeAck(raw []byte) (ackBody, error) {
 	}
 	for k := range top {
 		if k != "cursor" {
-			return ackBody{}, &envelope.SchemaError{Path: "/" + k, Message: "unknown field"}
+			return ackBody{}, &envelope.SchemaError{Path: "/" + envelope.UnknownProperty, Message: "unknown field"}
 		}
 	}
 	c, ok := top["cursor"]

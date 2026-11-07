@@ -44,6 +44,41 @@ func TestProjectionCallValidationEquivalent(t *testing.T) {
 		}
 		before[name] = doc
 	}
+	// Onboarding inputs were captured independently from pre-diet 49e0cd5.
+	raw, err = os.ReadFile("testdata/validation-onboarding-before-projection.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onboarding map[string]schema
+	if err := json.Unmarshal(raw, &onboarding); err != nil {
+		t.Fatal(err)
+	}
+	for name, doc := range onboarding {
+		if _, exists := before[name]; exists {
+			t.Fatalf("onboarding fixture overwrites frozen baseline for %s", name)
+		}
+		before[name] = doc
+	}
+	// R2 changes two existing blob call schemas and adds status. Keep both
+	// historical fixtures frozen and replace only these explicitly named tools.
+	raw, err = os.ReadFile("testdata/validation-r2-transfers.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var transfers map[string]schema
+	if err := json.Unmarshal(raw, &transfers); err != nil {
+		t.Fatal(err)
+	}
+	if len(transfers) != 3 {
+		t.Fatal("R2 fixture must cover exactly three tools")
+	}
+	for _, name := range []string{"vecnet_blob_put", "vecnet_blob_get", "vecnet_blob_status"} {
+		doc, ok := transfers[name]
+		if !ok {
+			t.Fatalf("missing R2 baseline %s", name)
+		}
+		before[name] = doc
+	}
 	const peer = "peer_00000000000000000000000001"
 	const message = "msg_00000000000000000000000001"
 	const thread = "thr_00000000000000000000000001"
@@ -51,6 +86,7 @@ func TestProjectionCallValidationEquivalent(t *testing.T) {
 	const delivery = "dly_00000000000000000000000001"
 	const send = `{"idempotency_key":"key-1","priority":"wake_idle","content":{"text":"hello"},"recipients":["` + peer + `"]}`
 	const reply = `{"message_id":"` + message + `","text":"hello","priority":"hold","idempotency_key":"reply-1"}`
+	const agentAdd = `{"kind":"session","spec_version":"v1","request_id":"setup-1","inputs":{}}`
 	type cases struct{ valid, invalid []string }
 	table := map[string]cases{
 		"vecnet_send": {
@@ -95,16 +131,93 @@ func TestProjectionCallValidationEquivalent(t *testing.T) {
 		}, []string{`{"peer_id":1,"action":"disable"}`, `{"peer_id":"` + peer + `","action":false}`, `{"peer_id":"` + peer + `","action":"disable","unexpected":true}`}},
 		"vecnet_peer_invite_get":    {[]string{`{"peer_id":"` + peer + `"}`, `{"peer_id":"bad"}`}, []string{`{"peer_id":1}`, `{"peer_id":"` + peer + `","unexpected":true}`}},
 		"vecnet_peer_invite_revoke": {[]string{`{"peer_id":"` + peer + `"}`, `{"peer_id":"bad"}`}, []string{`{"peer_id":null}`, `{"peer_id":"` + peer + `","unexpected":true}`}},
-		"vecnet_groups":             {[]string{`{}`}, []string{`{"limit":1}`}},
-		"vecnet_group_create":       {[]string{`{"members":["` + peer + `"]}`}, []string{`{"members":[]}`, `{"members":["bad"]}`}},
-		"vecnet_group_add":          {[]string{`{"group_id":"` + group + `","members":["` + peer + `"]}`}, []string{`{"group_id":"` + group + `","members":[]}`}},
-		"vecnet_whoami":             {[]string{`{}`}, []string{`{"as":"` + peer + `"}`}},
-		"vecnet_blob_put":           {[]string{`{"data_base64":"aGk=","media_type":"text/plain"}`, `{"data_base64":"","media_type":"text/plain","ttl_seconds":0}`}, []string{`{"data_base64":"aGk=","media_type":"text/plain","ttl_seconds":-1}`, `{"data_base64":"aGk=","media_type":"text/plain","ttl_seconds":2147483649}`}},
-		"vecnet_blob_get":           {[]string{`{"sha256":"` + strings.Repeat("a", 64) + `"}`, `{"sha256":"bad","offset":0,"limit":131072}`}, []string{`{"sha256":"bad","offset":-1}`, `{"sha256":"bad","limit":131073}`}},
+		"vecnet_agent_kinds":        {[]string{`{}`}, []string{`{"as":"` + peer + `"}`}},
+		"vecnet_agent_add": {[]string{
+			agentAdd,
+			withField(agentAdd, "kind", `"launcher"`), withField(agentAdd, "kind", `"openclaw"`),
+			withField(agentAdd, "kind", `"pagchat-bot"`), withField(agentAdd, "kind", `"grokbot"`),
+			withField(agentAdd, "kind", `"dot"`),
+			withField(agentAdd, "inputs", `{"name":"Agent","name_open":true,"enrol_ttl_seconds":0,"principal_id":"principal","connector_name":"vecnet-helper","skip_mcp":false}`),
+			withField(agentAdd, "inputs", `{"enrol_ttl_seconds":604800}`),
+			// Semantic checks and request-ID syntax remain in the handler/precheck.
+			withField(agentAdd, "request_id", `"bad request id"`),
+			withField(agentAdd, "spec_version", `"stale"`),
+		}, []string{
+			withField(agentAdd, "kind", `"unknown"`), withField(agentAdd, "spec_version", `""`),
+			withField(agentAdd, "request_id", `false`), withField(agentAdd, "inputs", `null`),
+			withField(agentAdd, "inputs", `{"enrol_ttl_seconds":-1}`),
+			withField(agentAdd, "inputs", `{"enrol_ttl_seconds":604801}`),
+			withField(agentAdd, "inputs", `{"enrol_ttl_seconds":1.5}`),
+			withField(agentAdd, "inputs", `{"name_open":"true"}`),
+			withField(agentAdd, "inputs", `{"name":{}}`),
+			withField(agentAdd, "inputs", `{"principal_id":1}`),
+			withField(agentAdd, "inputs", `{"connector_name":false}`),
+			withField(agentAdd, "inputs", `{"skip_mcp":1}`),
+			withField(agentAdd, "inputs", `{"webhook_key":"forbidden"}`),
+			withField(agentAdd, "as", `"`+peer+`"`),
+		}},
+		"vecnet_agent_status": {[]string{`{"request_id":"setup-1"}`, `{"request_id":"bad request id"}`}, []string{`{"request_id":null}`, `{"request_id":"setup-1","as":"` + peer + `"}`}},
+		"vecnet_groups":       {[]string{`{}`}, []string{`{"limit":1}`}},
+		"vecnet_group_create": {[]string{`{"members":["` + peer + `"]}`}, []string{`{"members":[]}`, `{"members":["bad"]}`}},
+		"vecnet_group_add":    {[]string{`{"group_id":"` + group + `","members":["` + peer + `"]}`}, []string{`{"group_id":"` + group + `","members":[]}`}},
+		"vecnet_whoami":       {[]string{`{}`}, []string{`{"as":"` + peer + `"}`}},
+		"vecnet_blob_put":     {[]string{`{"data_base64":"aGk=","media_type":"text/plain"}`, `{"data_base64":"","media_type":"text/plain","ttl_seconds":0}`}, []string{`{"data_base64":"aGk=","media_type":"text/plain","ttl_seconds":-1}`, `{"data_base64":"aGk=","media_type":"text/plain","ttl_seconds":2147483649}`}},
+		"vecnet_blob_get":     {[]string{`{"sha256":"` + strings.Repeat("a", 64) + `"}`, `{"sha256":"bad","offset":0,"limit":131072}`}, []string{`{"sha256":"bad","offset":-1}`, `{"sha256":"bad","limit":131073}`}},
 		// Exactly-one and base64 decoding are handler/precheck rules as before.
 		"vecnet_set_avatar":   {[]string{`{}`, `{"data_base64":"aGk="}`, `{"url":"https://example.invalid/a.png"}`, `{"data_base64":"aGk=","url":"https://example.invalid/a.png"}`}, []string{`{"url":"http://example.invalid/a.png"}`, `{"data_base64":"` + strings.Repeat("a", 218457) + `"}`}},
 		"vecnet_clear_avatar": {[]string{`{}`, `{"as":"` + peer + `"}`}, []string{`{"as":"bad"}`}},
 		"vecnet_guide":        {[]string{`{}`, `{"topic":"replying"}`}, []string{`{"topic":"unknown"}`, `{"topic":null}`}},
+	}
+	// Keep every original disk case, and extend coverage for R2 calls.
+	const blobID = "blo_00000000000000000000000001"
+	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const grant = `{"phase":"grant","size":1,"sha256":"` + digest + `","media_type":"text/plain","idempotency_key":"upload-1"}`
+	const complete = `{"phase":"complete","blob_id":"` + blobID + `"}`
+	put := table["vecnet_blob_put"]
+	put.valid = append(put.valid, grant, complete,
+		strings.Replace(grant, `"size":1`, `"size":1.0`, 1),
+		strings.Replace(grant, `"size":1`, `"size":26214400`, 1))
+	put.invalid = append(put.invalid,
+		strings.Replace(grant, `"size":1`, `"size":0`, 1),
+		strings.Replace(grant, `"size":1`, `"size":26214401`, 1),
+		strings.Replace(grant, `"size":1`, `"size":1.5`, 1),
+		strings.Replace(grant, `"sha256":"`+digest+`"`, `"sha256":"bad"`, 1),
+		strings.Replace(grant, `"idempotency_key":"upload-1"`, `"idempotency_key":""`, 1),
+		`{"phase":"grant"}`, `{"phase":"complete"}`, `{"phase":"other"}`,
+		withField(grant, "data_base64", `""`), withField(grant, "blob_id", `"`+blobID+`"`),
+		withField(grant, "ttl_seconds", `0`),
+		withField(complete, "size", `1`), withField(complete, "data_base64", `""`),
+		withField(complete, "sha256", `"`+digest+`"`), withField(complete, "media_type", `""`),
+		withField(complete, "idempotency_key", `"key"`), withField(complete, "ttl_seconds", `0`),
+		`{"data_base64":"","media_type":"text/plain","blob_id":"`+blobID+`"}`)
+	// Conditional required fields are not top-level required fields.
+	for _, base := range []string{grant, complete} {
+		var args map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(base), &args); err != nil {
+			t.Fatal(err)
+		}
+		for field := range args {
+			if field == "phase" {
+				continue
+			}
+			missing := make(map[string]json.RawMessage, len(args))
+			for k, v := range args {
+				if k != field {
+					missing[k] = v
+				}
+			}
+			raw, _ := json.Marshal(missing)
+			put.invalid = append(put.invalid, string(raw))
+		}
+	}
+	table["vecnet_blob_put"] = put
+	get := table["vecnet_blob_get"]
+	get.valid = append(get.valid, `{"sha256":"`+digest+`","blob_id":"`+blobID+`"}`)
+	get.invalid = append(get.invalid, `{"sha256":"`+digest+`","blob_id":1}`)
+	table["vecnet_blob_get"] = get
+	table["vecnet_blob_status"] = cases{
+		[]string{`{"sha256":"` + digest + `"}`, `{"sha256":"` + digest + `","blob_id":"` + blobID + `"}`},
+		[]string{`{"sha256":1}`, `{"sha256":"` + digest + `","blob_id":null}`},
 	}
 	if len(table) != len(before) || len(table) != len(tools().byName) {
 		t.Fatalf("tool coverage: cases=%d before=%d after=%d", len(table), len(before), len(tools().byName))

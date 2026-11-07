@@ -1,0 +1,67 @@
+[
+  {
+    "status": 410,
+    "headers": {},
+    "body": {
+      "error": {
+        "code": "blob_expired",
+        "message": "blob_expired",
+        "details": {}
+      }
+    }
+  },
+  {
+    "status": 410,
+    "headers": {},
+    "body": {
+      "error": {
+        "code": "blob_purged",
+        "message": "blob_purged",
+        "details": {}
+      }
+    }
+  },
+  {
+    "status": 429,
+    "headers": {
+      "Retry-After": "60"
+    },
+    "body": {
+      "error": {
+        "code": "blob_url_rate_limited",
+        "message": "blob_url_rate_limited",
+        "details": {
+          "retry_after_seconds": 60
+        }
+      }
+    }
+  },
+  {
+    "status": 429,
+    "headers": {
+      "Retry-After": "60"
+    },
+    "body": {
+      "error": {
+        "code": "blob_storage_quota_exceeded",
+        "message": "blob_storage_quota_exceeded",
+        "details": {
+          "retry_after_seconds": 60
+        }
+      }
+    }
+  },
+  {
+    "status": 409,
+    "headers": {},
+    "body": {
+      "error": {
+        "code": "prefs_confirmation_required",
+        "message": "prefs_confirmation_required",
+        "details": {
+          "field": "blobs.expiry"
+        }
+      }
+    }
+  }
+]

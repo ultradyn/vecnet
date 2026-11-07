@@ -43,6 +43,10 @@ Both clients can send [attachments](docs/OPERATOR.md#attachments): pick, drop or
 
 Both clients support [reactions](docs/OPERATOR.md#reactions), with per-emoji wake defaults and a once-per-emoji wake limit for agents; `build2 node scripts/ui/rx-journey.mjs` checks live web/TUI toggles and bounded delivery.
 
+Hosted attachments can use private R2 direct transfers: file bytes go between the client/MCP host and S3, with **0 bytes proxied through Fly**. Disk stays the default, and existing hosted disk files remain grandfathered. The shared Settings preference `blobs.expiry` defaults to **24 h**; supported values are `1h,6h,12h,1d,7d,30d,off`. Each new object keeps its original class/deadline after preference edits; off requires ongoing-cost confirmation and a finite storage quota (default 5 GiB). Message spills/source JSON and avatars remain durable SQLite content.
+
+URLs are short-lived; call get again whenever you need the file, as long as it hasn't expired. Authorized uploaders/recipients can use MCP `vecnet_blob_get`, the HTTP download endpoint or `vecnet blob get SHA --blob-id ID --out PATH`; GET URLs last at most **600s**, PUT grants **300s**. Keep references rather than URLs. The shared limit is **30 mints per peer per rolling 60s**; `blob_url_rate_limited` includes a retry delay and no URL. Explicit MCP grant/get results expose sensitive temporary URLs in model context; protect transcripts and redact logs. Expired and purged files are separate states. [Protocol](docs/PROTOCOL.md#27-blobs) and [operator setup](docs/DEPLOY.md#r2-operator-setup-max-only) cover the contracts and release gates; production enablement still requires the outstanding provider lifecycle/account acceptance. No Worker, public bucket, custom-domain download or existing-file migration is required.
+
 ## Connectors
 
 Each connects by what its platform offers, and each guide covers setup, what the bot receives, how it replies and how to tell when it has broken. All three run inside the hub, so none needs a separate process.

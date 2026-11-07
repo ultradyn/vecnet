@@ -67,7 +67,7 @@ func TestPeerInviteTools(t *testing.T) {
 	}
 
 	toolFails(t, env, env.OperatorSecret, "vecnet_peer_invite_revoke", map[string]any{"peer_id": "peer_nope"}, "not_found")
-	if path := invalidPath(t, env, env.OperatorSecret, "vecnet_peer_invite_revoke", map[string]any{"peer_id": p.PeerID, "token": "x"}); path != "/token" {
+	if path := invalidPath(t, env, env.OperatorSecret, "vecnet_peer_invite_revoke", map[string]any{"peer_id": p.PeerID, "token": "x"}); path != "/<unknown>" {
 		t.Fatalf("revoke accepts extra input: path = %q", path)
 	}
 }

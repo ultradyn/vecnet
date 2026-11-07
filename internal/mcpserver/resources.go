@@ -211,7 +211,10 @@ func (s *Server) resourcesRead(ctx context.Context, sess *Session, req *Request)
 	if err != nil {
 		return nil, err
 	}
-	// Like vecnet_inbox, an MCP read carries no blob_url token (§4.3).
+	// Like vecnet_inbox, an MCP read carries metadata and no transfer URL (§4.3).
+	if evs, err = s.Hub.ProjectEventBlobStates(ctx, sess.Principal.Caller, evs); err != nil {
+		return nil, err
+	}
 	if evs, err = withoutBlobURLs(evs); err != nil {
 		return nil, err
 	}
@@ -256,7 +259,7 @@ func (s *Server) inboxTail(ctx context.Context, owners []string) ([]envelope.Eve
 // tailStart returns the cursor just before owners' inboxTailSize-th newest
 // event, clamped to the retention floor.
 func (s *Server) tailStart(ctx context.Context, owners []string) (eventlog.Cursor, error) {
-	after, err := s.Hub.Log.Oldest(ctx)
+	after, err := s.Hub.Log.OldestFor(ctx, owners)
 	if err != nil || len(owners) == 0 {
 		return after, err
 	}

@@ -1,0 +1,115 @@
+{
+  "date": "2026-11-07",
+  "task": 8,
+  "status": "passed",
+  "production_head": "e65f4b3c16d74985168bf017def34bf19e77378b",
+  "source_sha256": {
+    "internal/store/maintenance.go": "2b8eb9c9cdd2225e091621a07e5f85847b0a76faee193483f5c4c04c2bb17d5c"
+  },
+  "tests": {
+    "full_suite": {
+      "host": "x-p35",
+      "command": "BB_HOST=x-p35 BB_JOBS=2 just bb GOMAXPROCS=2 CGO_ENABLED=0 just test",
+      "status": "passed",
+      "earlier_pass_seconds": [
+        736.5,
+        751.2,
+        66.8
+      ],
+      "run_seconds": 872.1,
+      "total_seconds": 873,
+      "exit_code": 0
+    },
+    "focused_nonrace": {
+      "host": "x-boss",
+      "command": "BB_HOST=x-boss BB_JOBS=2 just bb GOMAXPROCS=2 CGO_ENABLED=0 go test -p 2 ./internal/store ./internal/hub ./cmd/vecnet-hub -count=1",
+      "status": "passed",
+      "run_seconds": 233.7
+    },
+    "store_race": {
+      "host": "x-boss",
+      "command": "BB_HOST=x-boss BB_JOBS=2 BB_LANE=db-t08-maint just bb GOMAXPROCS=2 CGO_ENABLED=1 CC=/usr/bin/gcc go test -p 2 -race ./internal/store -count=1",
+      "status": "passed",
+      "package_seconds": 85.93
+    },
+    "final_compaction_race": {
+      "host": "x-boss",
+      "command": "BB_HOST=x-boss BB_JOBS=2 BB_LANE=db-t08-maint just bb GOMAXPROCS=2 CGO_ENABLED=1 CC=/usr/bin/gcc go test -p 2 -race ./internal/store -run TestCompaction -count=1",
+      "status": "passed",
+      "package_seconds": 14.499
+    },
+    "focused_hub_http_race": {
+      "host": "x-boss",
+      "command": "BB_HOST=x-boss BB_JOBS=2 just bb GOMAXPROCS=2 CGO_ENABLED=1 CC=/usr/bin/gcc go test -p 2 -race -timeout 20m ./internal/hub ./internal/httpapi -run 'Test(StorageMaintenance|Backfill|HistoryRetention|Idempotency|DeliveryReference)' -count=1",
+      "status": "passed",
+      "packages_seconds": {
+        "internal/hub": 215.5,
+        "internal/httpapi": 8.324
+      }
+    },
+    "other_races": {
+      "host": "x-boss",
+      "status": "passed",
+      "packages_seconds": {
+        "internal/eventpayload": 46.258,
+        "internal/eventlog": 28.915,
+        "internal/events": 106.296,
+        "internal/opview": 77.325
+      }
+    },
+    "web_model": {
+      "host": "x-boss",
+      "command": "BB_HOST=x-boss BB_JOBS=2 BB_LANE=db-t08-maint just bb GOMAXPROCS=2 just test-ui",
+      "status": "passed",
+      "tests": 222
+    },
+    "protocol": {
+      "host": "x-boss",
+      "command": "BB_HOST=x-boss BB_JOBS=2 just bb GOMAXPROCS=2 just validate-protocol",
+      "status": "passed",
+      "positive_examples": 11,
+      "expected_negative_examples": 2
+    },
+    "cli_deps": {
+      "host": "x-boss",
+      "command": "BB_HOST=x-boss BB_JOBS=2 BB_LANE=db-t08-maint just bb GOMAXPROCS=2 CGO_ENABLED=0 python3 bench/compaction_gate.py",
+      "status": "passed",
+      "receipt": "bench/results/2026-11-07-compaction-cli-deps.json"
+    },
+    "superseded": [
+      {
+        "kind": "broad race",
+        "status": "failed",
+        "reason": "Initial store test reproduced pointer-map cap violation before fix 8e3b780; broad hub package reached 10-minute timeout without a reported data race. Full store and focused hub/HTTP race gates above supersede these failures."
+      }
+    ]
+  },
+  "benchmark": {
+    "host": "x-boss",
+    "revision": "8e3b780",
+    "matrix": "bench/results/2026-11-07-compaction-measured.json",
+    "supplement": "bench/results/2026-11-07-compaction-supplement.json",
+    "receipt": "docs/business/db-compaction-bench-2026-11-07.md",
+    "normal_profiles": 40,
+    "repeated_profiles": 4,
+    "legacy_snapshot_profiles": 8,
+    "sends_per_normal_profile": 80,
+    "claimed_delivery_sha256_checks": 23200,
+    "skipped": [
+      "Full repeated/varied x new/reused x subscriptions x attachments Cartesian product; paired shape cohorts plus independent attachment and 1/3-subscription profiles cover the acceptance criteria in bounded time.",
+      "Hub/source/reaction performance matrix; frozen corpus and full/focused suites cover their wire/cursor/retry behavior, and synthetic hub-authored snapshot cohorts measure legacy body costs.",
+      "Cumulative WAL write-traffic counters, hardware CPU profiling, remote webhook network latency, Fly/shared-core capacity, long-running steady state, R2 transfers and compression are unmeasured; WAL allocation/frame counts are not total write amplification.",
+      "Full NONE performance matrix and offline conversion; on-disk x-boss behavior tests cover NONE reuse, backup/restore and preservation. No conversion was performed.",
+      "The original matrix backfill timing field uses a frozen policy clock and is zero, so supplemental external wall-time measurements (maximum 55.682516 ms) are used instead."
+    ]
+  },
+  "notes": [
+    "All builds, tests and benchmarks ran on build boxes. No real database, Fly volume, deployment, full VACUUM, push or merge was used.",
+    "The final x-p35 full-suite source SHA-256 matched the local final production maintenance source before the run. Earlier complete full-suite passes predate the final reserved-locking-page guard.",
+    "The benchmark revision predates the final guard for SQLite reserved locking pages at the 1 GiB boundary. Measured fixtures are below that boundary. The final compaction race and full suite cover the completed implementation.",
+    "Read p95 regressions above 10 percent were investigated and explicitly recorded in the benchmark receipt as the storage-versus-hydration CPU and allocation tradeoff. No latency-neutral rollout or production enablement is claimed.",
+    "The legacy F1 snapshot cohort gets larger; retained snapshot, callback, index and free-page costs remain charged.",
+    "Broad initial race failures are retained in tests.superseded. Subsequent fixed store and focused hub/HTTP race runs passed; a full hub race run is not claimed.",
+    "Final delivery commit contains benchmark/report/gate artifacts and the dated CHANGELOG entry; production implementation and TDD guards are recorded in earlier local commits."
+  ]
+}

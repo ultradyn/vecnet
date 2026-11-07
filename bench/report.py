@@ -2,6 +2,12 @@
 """Render the dated report from committed raw measurements (stdlib only)."""
 import json
 from pathlib import Path
+import sys
+
+if "--compaction" in sys.argv:
+    from compaction_report import main
+    main()
+    raise SystemExit(0)
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = [json.loads((ROOT / f"bench/results/2026-11-05-{mode}.json").read_text())

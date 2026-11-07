@@ -54,8 +54,9 @@ type Preferences struct {
 func preferenceError(code string) error { return &prefs.Error{Code: code} }
 
 // preferenceBootstrapSeconds validates the original duration before conversion.
-// Exactly zero retains Config's unset semantics; truncation must never make a
-// nonzero duration look unset or silently change its effective value.
+// Zero is preserved for the caller to interpret: retention uses it to disable
+// expiry, while older Config fields use it as unset. Truncation must never
+// make a nonzero duration look unset or silently change its effective value.
 func preferenceBootstrapSeconds(key string, value time.Duration, min, max int64) (int64, error) {
 	if value == 0 {
 		return 0, nil
@@ -80,11 +81,15 @@ func preferenceBootstrapSeconds(key string, value time.Duration, min, max int64)
 // startup load accepts their stored rows); every other gated key stays
 // unavailable and writes to it fail closed.
 func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ...string) (*Preferences, error) {
+	return newPreferencesWithPolicy(db, cfg, now, nil, installed...)
+}
+
+func newPreferencesWithPolicy(db *store.DB, cfg Config, now func() time.Time, policy PreferencePreviewPolicy, installed ...string) (*Preferences, error) {
 	maxExpiry, err := preferenceBootstrapSeconds("agents.max_expiry", cfg.MaxExpiry, 1, prefs.MaxExpirySeconds)
 	if err != nil {
 		return nil, err
 	}
-	p := &Preferences{db: db, now: now, bootstrap: map[string]prefs.Effective{}, maxExpiry: maxExpiry, installed: map[string]bool{}, subscribers: map[chan uint64]struct{}{}}
+	p := &Preferences{db: db, now: now, bootstrap: map[string]prefs.Effective{}, maxExpiry: maxExpiry, installed: map[string]bool{}, subscribers: map[chan uint64]struct{}{}, Policy: policy}
 	if err := p.loadPreviewKey(); err != nil {
 		return nil, err
 	}
@@ -111,6 +116,7 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 	configured := map[string]prefs.Value{
 		"agents.default_max_depth":      prefs.Int(int64(cfg.DefaultMaxDepth)),
 		"agents.thread_budget":          prefs.Int(int64(cfg.ThreadBudget)),
+		"retention.archive_mode":        prefs.Bool(cfg.ArchiveMode),
 		"rates.sends_per_minute":        prefs.Int(int64(cfg.SendsPerMin)),
 		"rates.threads_per_hour":        prefs.Int(int64(cfg.ThreadsPerHour)),
 		"provisioning.creates_per_hour": prefs.Int(int64(cfg.CreatesPerHour)),
@@ -121,6 +127,8 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 		key   string
 		value time.Duration
 	}{
+		{"retention.ack_events", cfg.AckedEventRetention},
+		{"retention.history", cfg.MessageHistoryRetention},
 		{"events.refresh_interval", cfg.EventsRefreshInterval},
 		{"presence.default_ttl", cfg.PresenceTTL},
 		{"presence.session_ttl", cfg.SessionPresenceTTL},
@@ -139,7 +147,7 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 	for key, v := range configured {
 		d, _ := prefs.Lookup(key)
 		n, _ := v.Int64()
-		if v != d.Default && n != 0 {
+		if v != d.Default && (n != 0 || key == "retention.archive_mode" || key == "retention.ack_events" && cfg.AckedEventRetentionSet) {
 			p.bootstrap[key] = prefs.Effective{Value: v, Source: prefs.SourceFlag}
 		}
 	}
@@ -148,7 +156,7 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 		if err != nil {
 			return nil, err
 		}
-		if !d.Editable {
+		if !p.editable(d) {
 			return nil, preferenceError(prefs.CodeUnavailable)
 		}
 		if e.Source != prefs.SourceFlag {
@@ -170,13 +178,19 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 		return nil, err
 	}
 	// encoding/json orders map keys, producing a canonical bounded scalar input.
+	consumerGeneration := ""
+	if policy, ok := p.Policy.(interface{ preferenceGeneration() string }); ok {
+		consumerGeneration = policy.preferenceGeneration()
+	}
 	canonical, err := json.Marshal(struct {
-		Bootstrap map[string]prefs.Effective
-		Registry  string
-		Policy    string
-		MaxExpiry int64
-		Installed map[string]bool
-	}{p.bootstrap, prefs.RegistryVersion, cfg.PreferencePolicyGeneration, p.maxExpiry, p.installed})
+		Bootstrap          map[string]prefs.Effective
+		Registry           string
+		Policy             string
+		MaxExpiry          int64
+		Installed          map[string]bool
+		Consumer           string
+		HardEventRetention time.Duration
+	}{p.bootstrap, prefs.RegistryVersion, cfg.PreferencePolicyGeneration, p.maxExpiry, p.installed, consumerGeneration, cfg.UnackedEventRetention})
 	if err != nil {
 		return nil, err
 	}
@@ -188,6 +202,24 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 	}
 	p.current.Store(&snapshot)
 	return p, nil
+}
+
+// bindRetentionGeneration runs only during hub construction, before workers or
+// requests can observe Preferences. Retention's persisted bootstrap generation
+// is part of the shared ETag/confirmation domain; returning to the same flags
+// cannot revive an unused preview from an earlier destructive transition.
+func (p *Preferences) bindRetentionGeneration(ctx context.Context, generation uint64) error {
+	if generation == 0 {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:retention:%d", p.digest, generation)))
+	p.digest = hex.EncodeToString(sum[:])
+	snapshot, err := p.LoadSnapshot(ctx, nil)
+	if err != nil {
+		return err
+	}
+	p.current.Store(&snapshot)
+	return nil
 }
 
 func preferenceStartupError(err error) error {

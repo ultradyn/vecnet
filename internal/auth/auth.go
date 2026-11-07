@@ -33,10 +33,15 @@ import (
 type Caller struct {
 	// CredentialID allows sensitive operations to recheck revocation after waits.
 	CredentialID string `json:"credential_id,omitempty"`
-	Kind         string // "peer" | "principal" | "operator"
-	PrincipalID  string
-	PeerID       string
-	PeerKind     string // peers.kind of PeerID, "" when PeerID is ""
+	// OAuth carries the access-token identity and binding resolved by TokenAuth.
+	// It is distinct from native credentials and never contains a bearer secret.
+	// Keep it a comparable value: MCP sessions compare repeated resolutions of
+	// the same Caller, and native callers use its zero value.
+	OAuth       OAuthCredential `json:"-"`
+	Kind        string          // "peer" | "principal" | "operator"
+	PrincipalID string
+	PeerID      string
+	PeerKind    string // peers.kind of PeerID, "" when PeerID is ""
 }
 
 // ErrUnauthenticated reports an unknown, revoked, expired or used credential,

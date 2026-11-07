@@ -30,6 +30,12 @@ import (
 // Config holds the hub's tunables. DefaultConfig returns the Global
 // Constraints values of the core-hub plan (PROTOCOL §2.2, §6, §16).
 type Config struct {
+	// IdempotencyWindow keeps send keys for at least 24 h; an explicit zero
+	// keeps them forever. DefaultConfig marks the field set so assigning zero
+	// disables expiry. In literal Configs, zero without Set uses the default.
+	IdempotencyWindow    time.Duration
+	IdempotencyWindowSet bool
+
 	// PreferenceBootstrap captures explicit nonsecret flag/env provenance.
 	PreferenceBootstrap        map[string]prefs.Effective
 	PreferencePolicyGeneration string // immutable deployment policy identity
@@ -38,6 +44,25 @@ type Config struct {
 	// DeliveryReferences enables new reference writes; the dual reader is always active.
 	// Leave false for deployment stage 1. Once enabled, replay bodies stay immutable.
 	DeliveryReferences bool
+
+	// Event retention is independently enabled for staged rollout. Explicit
+	// PruneEventSlice calls still execute one bounded slice for maintenance.
+	EventRetentionEnabled   bool
+	AckedEventRetention     time.Duration
+	MessageHistoryRetention time.Duration
+	ArchiveMode             bool
+	UnackedEventRetention   time.Duration
+	EventRetentionLimits    eventlog.RetentionLimits
+	RetentionSweepHourUTC   int // nightly activation schedule; DefaultConfig uses 02:00 UTC
+
+	// DefaultConfig marks AckedEventRetention as set, so assigning zero disables
+	// pruning. Literal Configs can mark an explicit zero here; without this bit
+	// a zero duration is unset. Nonzero durations are always explicit.
+	AckedEventRetentionSet bool
+
+	// Physical maintenance is independently opt-in; zero pages checkpoints only.
+	StorageMaintenanceEnabled bool
+	StorageMaintenance        store.MaintenanceOptions
 
 	// Online backfill is independently opt-in; zero limits use defaults.
 	BackfillEnabled    bool
@@ -76,17 +101,23 @@ type Config struct {
 // DefaultConfig returns the plan's defaults; PublicURL and DataDir are empty.
 func DefaultConfig() Config {
 	return Config{
-		DefaultMaxDepth: 32,
-		CreatesPerHour:  DefaultCreatesPerHour,
-		DefaultTTL:      24 * time.Hour,
-		MaxExpiry:       DefaultMaxExpiry,
-		ThreadBudget:    500,
-		TextCap:         4096,
-		SendsPerMin:     60,
-		ThreadsPerHour:  20,
-		BlobTokenTTL:    7 * 24 * time.Hour,
-		BlobBackend:     "disk",
-		R2:              R2Config{ChecksumProfile: "sha256", StorageQuotaBytes: 5 << 30},
+		IdempotencyWindow:     IdempotencyWindow,
+		IdempotencyWindowSet:  true,
+		DefaultMaxDepth:       32,
+		AckedEventRetention:   7 * 24 * time.Hour,
+		RetentionSweepHourUTC: 2,
+		CreatesPerHour:        DefaultCreatesPerHour,
+		DefaultTTL:            24 * time.Hour,
+		MaxExpiry:             DefaultMaxExpiry,
+		ThreadBudget:          500,
+		TextCap:               4096,
+		SendsPerMin:           60,
+		ThreadsPerHour:        20,
+		BlobTokenTTL:          7 * 24 * time.Hour,
+
+		AckedEventRetentionSet: true,
+		BlobBackend:            "disk",
+		R2:                     R2Config{ChecksumProfile: "sha256", StorageQuotaBytes: 5 << 30},
 
 		AvatarChangesPerHour: DefaultAvatarChangesPerHour,
 
@@ -137,6 +168,13 @@ type Hub struct {
 	// activity (GET /v1/admin/activity). The zero value is ready.
 	Activity ActivityFeed
 
+	retentionMu          sync.Mutex
+	retentionLast        EventRetentionStatus
+	historyRetentionLast HistoryRetentionStatus
+
+	maintenanceMu   sync.Mutex
+	maintenanceLast store.MaintenanceResult
+
 	backfillMu   sync.Mutex
 	backfillLast BackfillProgress
 
@@ -177,6 +215,18 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	if db == nil {
 		return nil, errors.New("hub: nil store")
 	}
+	if err := store.ValidateMaintenanceOptions(cfg.StorageMaintenance); err != nil {
+		return nil, err
+	}
+	if cfg.UnackedEventRetention < 0 || cfg.EventRetentionLimits.Rows < 0 || cfg.EventRetentionLimits.Bytes < 0 || cfg.EventRetentionLimits.Target < 0 || cfg.RetentionSweepHourUTC < 0 || cfg.RetentionSweepHourUTC > 23 {
+		return nil, errors.New("hub: invalid_retention_config")
+	}
+	if cfg.IdempotencyWindow == 0 && !cfg.IdempotencyWindowSet {
+		cfg.IdempotencyWindow = IdempotencyWindow
+	}
+	if cfg.IdempotencyWindow != 0 && cfg.IdempotencyWindow < IdempotencyWindow {
+		return nil, ErrInvalidIdempotencyWindow
+	}
 	if cfg.DataDir == "" {
 		return nil, errors.New("hub: Config.DataDir is required")
 	}
@@ -209,8 +259,14 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	if err := h.loadIdentity(context.Background()); err != nil {
 		return nil, err
 	}
-	h.Preferences, err = newPreferences(db, cfg, now)
+	h.Preferences, err = newProductionPreferences(h)
 	if err != nil {
+		return nil, err
+	}
+	if err := h.initializeEventRetention(context.Background()); err != nil {
+		return nil, err
+	}
+	if err := h.initializeHistoryRetention(context.Background()); err != nil {
 		return nil, err
 	}
 	if err := h.initR2(); err != nil {
@@ -345,66 +401,9 @@ func (h *Hub) AddPeerWith(ctx context.Context, o AddPeerOpts) (peerID, enrolToke
 		return "", "", time.Time{}, e
 	}
 	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		now := h.nowStr()
-		if prnID == "" {
-			prnID = ids.New(ids.Prn)
-			if err := insertPrincipal(ctx, tx, prnID, name, now); err != nil {
-				return err
-			}
-		} else {
-			var one int
-			err := tx.QueryRowContext(ctx, `SELECT 1 FROM principals WHERE prn_id = ?`, prnID).Scan(&one)
-			if errors.Is(err, sql.ErrNoRows) {
-				e := E(http.StatusUnprocessableEntity, "invalid_value", "unknown principal")
-				e.Details["field"] = "principal_id"
-				return e
-			}
-			if err != nil {
-				return fmt.Errorf("hub: find principal: %w", err)
-			}
-		}
-		if kind == "operator" {
-			// Operator powers key on peers.kind (PROTOCOL §16.1, §16.3), so
-			// the kind is reserved to the operator principal: the one holding
-			// an operator credential.
-			var one int
-			err := tx.QueryRowContext(ctx,
-				`SELECT 1 FROM credentials WHERE subject_id = ? AND kind = 'operator' LIMIT 1`, prnID).Scan(&one)
-			if errors.Is(err, sql.ErrNoRows) {
-				e := E(http.StatusUnprocessableEntity, "invalid_value", "kind operator is reserved to the operator principal")
-				e.Details["field"] = "kind"
-				return e
-			}
-			if err != nil {
-				return fmt.Errorf("hub: find operator credential: %w", err)
-			}
-		}
-		if err := h.insertPeer(ctx, tx, peerID, prnID, name, kind, now); err != nil {
-			return err
-		}
-		if o.NameOpen {
-			if _, err := tx.ExecContext(ctx, `UPDATE peers SET name_open = 1 WHERE peer_id = ?`, peerID); err != nil {
-				return fmt.Errorf("hub: open peer name: %w", err)
-			}
-		}
-		// A dot authenticates by OAuth after a link code and never holds a
-		// vecnet secret (PROTOCOL §12), so it gets nothing to enrol with.
-		if kind != "dot" {
-			var err error
-			if enrolToken, expires, err = h.Auth.IssueEnrolToken(ctx, tx, peerID, ttl); err != nil {
-				return err
-			}
-		}
-		// "peer add" is enrolment (PROTOCOL §2.12): the peer is in the
-		// directory from here on.
-		if err := h.DirectoryUpdated(ctx, tx, peerID, "enrolled", enrolledFields); err != nil {
-			return err
-		}
-		detail := map[string]any{"kind": kind}
-		if o.NameOpen {
-			detail["name_open"] = true
-		}
-		return audit.Record(ctx, tx, "operator", "peer_add", []string{peerID, prnID}, detail)
+		var err error
+		prnID, enrolToken, expires, err = h.addPeerTx(ctx, tx, peerID, o, name, "operator", nil)
+		return err
 	})
 	if err != nil {
 		return "", "", time.Time{}, err
@@ -412,6 +411,81 @@ func (h *Hub) AddPeerWith(ctx context.Context, o AddPeerOpts) (peerID, enrolToke
 	h.notifyEnabled(ctx)
 	h.Log.Notify(prnID) // the principal's peer set changed; the new peer's log is empty
 	return peerID, enrolToken, expires, nil
+}
+
+// addPeerTx inserts one peer inside tx. peerID and name are already
+// chosen; name may be the open-invite placeholder, which is not o.Name.
+// actor is the peer_add audit actor. extra is merged into that detail so
+// AddPeerWith's historical detail stays intact when extra is nil. The
+// returned principal is the one whose peer set changed; the caller notifies
+// after commit.
+func (h *Hub) addPeerTx(ctx context.Context, tx *sql.Tx, peerID string, o AddPeerOpts, name, actor string, extra map[string]any) (prnID, enrolToken string, expires time.Time, err error) {
+	prnID = o.PrincipalID
+	now := h.nowStr()
+	if prnID == "" {
+		prnID = ids.New(ids.Prn)
+		if err = insertPrincipal(ctx, tx, prnID, name, now); err != nil {
+			return "", "", time.Time{}, err
+		}
+	} else {
+		var one int
+		err = tx.QueryRowContext(ctx, `SELECT 1 FROM principals WHERE prn_id = ?`, prnID).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			e := E(http.StatusUnprocessableEntity, "invalid_value", "unknown principal")
+			e.Details["field"] = "principal_id"
+			return "", "", time.Time{}, e
+		}
+		if err != nil {
+			return "", "", time.Time{}, fmt.Errorf("hub: find principal: %w", err)
+		}
+	}
+	if o.Kind == "operator" {
+		// Operator powers key on peers.kind (PROTOCOL §16.1, §16.3), so
+		// the kind is reserved to the operator principal: the one holding
+		// an operator credential.
+		var one int
+		err = tx.QueryRowContext(ctx,
+			`SELECT 1 FROM credentials WHERE subject_id = ? AND kind = 'operator' LIMIT 1`, prnID).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			e := E(http.StatusUnprocessableEntity, "invalid_value", "kind operator is reserved to the operator principal")
+			e.Details["field"] = "kind"
+			return "", "", time.Time{}, e
+		}
+		if err != nil {
+			return "", "", time.Time{}, fmt.Errorf("hub: find operator credential: %w", err)
+		}
+	}
+	if err = h.insertPeer(ctx, tx, peerID, prnID, name, o.Kind, now); err != nil {
+		return "", "", time.Time{}, err
+	}
+	if o.NameOpen {
+		if _, err = tx.ExecContext(ctx, `UPDATE peers SET name_open = 1 WHERE peer_id = ?`, peerID); err != nil {
+			return "", "", time.Time{}, fmt.Errorf("hub: open peer name: %w", err)
+		}
+	}
+	// A dot authenticates by OAuth after a link code and never holds a
+	// vecnet secret (PROTOCOL §12), so it gets nothing to enrol with.
+	if o.Kind != "dot" {
+		if enrolToken, expires, err = h.Auth.IssueEnrolToken(ctx, tx, peerID, o.TTL); err != nil {
+			return "", "", time.Time{}, err
+		}
+	}
+	// "peer add" is enrolment (PROTOCOL §2.12): the peer is in the
+	// directory from here on.
+	if err = h.DirectoryUpdated(ctx, tx, peerID, "enrolled", enrolledFields); err != nil {
+		return "", "", time.Time{}, err
+	}
+	detail := map[string]any{"kind": o.Kind}
+	if o.NameOpen {
+		detail["name_open"] = true
+	}
+	for k, v := range extra {
+		detail[k] = v
+	}
+	if err = audit.Record(ctx, tx, actor, "peer_add", []string{peerID, prnID}, detail); err != nil {
+		return "", "", time.Time{}, err
+	}
+	return prnID, enrolToken, expires, nil
 }
 
 func insertPrincipal(ctx context.Context, tx *sql.Tx, prn, name, now string) error {

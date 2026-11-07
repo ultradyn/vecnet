@@ -4,13 +4,13 @@
 // operator sees each unread message) in thread-read.js.
 import { answerBody, countdown } from './approvals.js';
 import { createAttachments } from './attach.js';
-import { sendRefusal } from './attach-model.js';
+import { blobView, nextExpiry, sendRefusal } from './attach-model.js';
 import { avatar, h, idText, peerLink } from './dom.js';
 import { ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, kindShort, kindTitle, plural, short, title, when } from './format.js';
 import { markdown } from './md.js';
 import { prioritySeg } from './prio.js';
 import { createReactions } from './react.js';
-import { budgetBanner, budgetOut, canShowFull, clientLabel, clientSuspect, excerpt, FULL_TEXT_CAP, items, nextDivider, opening, replyKey, replySig, sendError, SPILL_BYTES, TEXT_CAP, unreadOf } from './thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, clientLabel, clientSuspect, excerpt, FULL_TEXT_CAP, GROK_QUOTA_DETAIL, INITIAL_PRIORITY, items, nextDivider, opening, replyKey, replyPriority, replyPriorityLocked, replyQuotaNote, replySig, sendError, SPILL_BYTES, TEXT_CAP, unreadOf } from './thread-model.js';
 import { createReader, enough } from './thread-read.js';
 import { createThumbs } from './thumbs.js';
 
@@ -28,13 +28,16 @@ function randKey() {
 // loadMessages returns the thread's messages and, from the operator's pages'
 // hosted_blobs (PROTOCOL §2.8), message id -> the hashes the hub hosts for
 // it; hosted is null when a page did not say, so thumbnails keep the
-// declared-only rule.
+// declared-only rule. states is every page's blob_states (R2 blob id ->
+// available/expired/purged/unavailable), the hub's projection on its clock.
 async function loadMessages(api, id) {
-  const messages = [];
+  const messages = [], states = new Map();
   let after, hosted = new Map();
   for (let i = 0; i < MAX_PAGES; i++) {
     const page = await api.messages(id, { limit: PAGE, after });
     messages.push(...(page.messages || []));
+    const bs = page.blob_states;
+    if (bs && typeof bs === 'object') for (const [blobId, st] of Object.entries(bs)) if (st && typeof st === 'object') states.set(blobId, st);
     const hb = page.hosted_blobs;
     if (hb && typeof hb === 'object' && hosted) {
       for (const [msgId, shas] of Object.entries(hb)) if (Array.isArray(shas)) hosted.set(msgId, new Set(shas));
@@ -44,7 +47,18 @@ async function loadMessages(api, id) {
     if (!page.next_after || !(page.messages || []).length) break;
     after = page.next_after;
   }
-  return { messages, hosted };
+  return { messages, hosted, states };
+}
+
+// r2Chip: an R2 attachment in a message. Never a thumbnail (its bytes are
+// fetched only to be saved, from the Files panel); its line says how long it
+// lives by its recorded class, and a pending checksum is never shown verified.
+function r2Chip(att, v) {
+  return h('span', { class: 'att r2 s-' + v.state + (v.verified ? '' : ' unv'), title: (att.sha256 || '') + ' · ' + v.trust, 'data-blob': att.blob_id },
+    h('span', { class: 'nm', text: att.name || att.media_type || 'attachment' }),
+    h('span', { class: 'sz', text: bytes(att.size) }),
+    v.label ? h('span', { class: 'ret', text: v.label }) : null,
+    !v.verified && v.state === 'available' ? h('span', { class: 'unv-tag', text: 'unverified' }) : null);
 }
 
 async function loadMatrix(api, id) {
@@ -78,7 +92,8 @@ export function mount(root, ctx) {
   const scroller = root.closest('main') || root;
   const S = {
     replyTo: null,          // null picks a default; '' is an explicit thread-level reply
-    prio: 'wake',
+    prio: INITIAL_PRIORITY,
+    prioManual: false,      // a click on the control; directory updates must not overwrite it
     pending: null,          // unsent reply: keeps its idempotency_key across retries
     sending: false,
     banner: null,           // { kind, text } from the last failed send
@@ -96,8 +111,30 @@ export function mount(root, ctx) {
   let gone = false, ticks = [], agos = [];
   // Reply attachments, and the thread's inline thumbnails: a settled fetch or
   // an upload's change draws again.
-  const atts = createAttachments({ api, onChange: () => render() });
+  const atts = createAttachments({ api, onChange: () => render(), now: () => store.hubNow() });
   const thumbs = createThumbs({ api, onReady: () => render() });
+  // R2 references for the Files panel beside this thread (thread-aside.js):
+  // blob id -> { att, state } from the loaded history. Messages carry the
+  // recorded class, deadline and trust; the hub's projection says the rest.
+  const refSubs = new Set();
+  let refs = new Map(), expiryTimer = 0;
+  ctx.blobRefs = { get: () => refs, loaded: () => !!history.get(), subscribe: fn => { refSubs.add(fn); return () => refSubs.delete(fn); } };
+  const stateOf = blobId => ((history.get() || {}).states || new Map()).get(blobId) || null;
+  function collectRefs() {
+    const next = new Map();
+    for (const m of msgs()) for (const a of m.attachments || []) if (a && a.blob_id) next.set(a.blob_id, { att: a, state: stateOf(a.blob_id) });
+    refs = next;
+    for (const fn of [...refSubs]) fn();
+  }
+  // scheduleExpiry redraws at the earliest recorded deadline, then asks the
+  // hub again: a chip turns expired on time even before the hub's ticker.
+  function scheduleExpiry() {
+    clearTimeout(expiryTimer);
+    const now = store.hubNow();
+    const at = nextExpiry([...refs.values()].map(r => blobView(r.att, r.state, now)), now);
+    if (at === null) return;
+    expiryTimer = setTimeout(() => { if (gone) return; render(); for (const fn of [...refSubs]) fn(); store.invalidate(tag); }, Math.min(at - now + 250, 6 * 3600 * 1000));
+  }
   // Reaction chips and the picker; a reaction's event reloads the thread too.
   const R = createReactions({ api, me, nameOf, onDone: () => store.invalidate(tag), toast });
 
@@ -192,10 +229,13 @@ export function mount(root, ctx) {
       render();
       return;
     }
-    S.pending = replyKey(S.pending, { text, prio: S.prio, replyTo: S.replyTo, sig: replySig(files) }, randKey);
-    const body = { idempotency_key: S.pending.key, thread_id: threadId, priority: S.prio, content: { text } };
-    if (S.replyTo) body.in_reply_to = S.replyTo;
-    if (files.length) body.attachments = files;
+    // Choose again before minting. An unchanged draft keeps the captured
+    // priority and key; an edit after a 503 does not.
+    const draft = syncPriority();
+    S.pending = replyKey(S.pending, draft, randKey);
+    const body = { idempotency_key: S.pending.key, thread_id: threadId, priority: draft.prio, content: { text: draft.text } };
+    if (draft.replyTo) body.in_reply_to = draft.replyTo;
+    if (draft.files.length) body.attachments = draft.files;
     S.sending = true;
     S.banner = null;
     btn.disabled = true;
@@ -323,14 +363,19 @@ export function mount(root, ctx) {
     const pick = h('button', { type: 'button', class: 'btn attach', text: 'Attach', title: 'Attach files (or drop or paste them here)' });
     btn.addEventListener('click', () => send(ta, btn));
     ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(ta, btn); } });
-    ta.addEventListener('input', () => { counter(ta); gate(); });
-    const prio = prioritySeg(p => { S.prio = p; render(); });
+    ta.addEventListener('input', () => { syncPriority(); counter(ta); gate(); });
+    const prio = prioritySeg(p => { S.prio = p; S.prioManual = true; render(); });
+    // The Grok Bot note is its own line under the controls, outside .bar, so
+    // the bar's one-row layout and keyboard hint are unchanged at every width.
+    const quota = h('p', { class: 'qnote', id: 'r-quota', hidden: true });
+    const quotaMore = h('span', { id: 'r-quota-more', hidden: true, text: GROK_QUOTA_DETAIL });
     const wrap = h('div', { class: 'wrap' },
       h('div', { class: 'join', hidden: true, text: 'You are not a participant in this thread. Sending adds you to it.' }),
       h('div', { class: 'to', hidden: true }, h('span'), h('button', { type: 'button', title: 'Reply to the thread instead', text: '×', onclick: () => { S.replyTo = ''; render(); } })),
       ta,
       atts.el,
-      h('div', { class: 'bar' }, prio.el, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint' }, h('span', { text: 'Drop or paste files' }), ' · ', h('span', { text: 'Enter to send' }), ' · ', h('span', { text: 'Shift+Enter for a new line' })), pick, btn));
+      h('div', { class: 'bar' }, prio.el, h('span', { class: 'bytes', text: '0 / ' + SPILL_BYTES + ' B' }), h('span', { class: 'hint' }, h('span', { text: 'Drop or paste files' }), ' · ', h('span', { text: 'Enter to send' }), ' · ', h('span', { text: 'Shift+Enter for a new line' })), pick, btn),
+      quota, quotaMore);
     atts.wire(wrap, ta, pick);
     new ResizeObserver(fitHint).observe(wrap);
     return h('div', { class: 'composer' }, h('div', { class: 'cbanner', role: 'alert', hidden: true }), wrap);
@@ -448,7 +493,7 @@ export function mount(root, ctx) {
     const delta = prev ? deltaLabel(prev.created_at, m.created_at) : '';
     const others = (m.recipients || []).map(nameOf).join(', ');
     // Images show inline from the thumbnail cache; everything else is a chip.
-    const files = (m.attachments || []).filter(a => a !== it.spill).map(a => thumbs.render(a, hostedOf(m.message_id, a.sha256)));
+    const files = (m.attachments || []).filter(a => a !== it.spill).map(a => (a.blob_id ? r2Chip(a, blobView(a, stateOf(a.blob_id), store.hubNow())) : thumbs.render(a, hostedOf(m.message_id, a.sha256))));
     const full = S.full.get(m.message_id), showTxt = m.content && m.content.text && !(full && full.state === 'ok');
     const cls = 'msg' + (m.message_id === S.replyTo ? ' target' : '') + (m.message_id === S.flash ? ' flash' : '');
     return h('div', { class: cls, id: 'm-' + m.message_id, onanimationend: e => { if (e.animationName === 'flash') { S.flash = ''; e.currentTarget.classList.remove('flash'); } } },
@@ -502,6 +547,47 @@ export function mount(root, ctx) {
     return h('div', { class: 'newdiv', role: 'separator', 'aria-label': 'New messages' }, h('span', { text: 'New' }));
   }
 
+  // The draft a reply would send now. Text matches send(): empty text is kept
+  // when there is no attachment, and dropped when attachments carry it.
+  function replyDraft(ta) {
+    const files = atts.toAttachments();
+    const text = (ta.value.trim() || !files.length) ? ta.value : '';
+    return { text, prio: S.prio, replyTo: S.replyTo, sig: replySig(files), files };
+  }
+
+  // Preselect wake_idle once any participant is grokbot (Decisions §6).
+  // Lock only while sending or while this draft would retry the captured
+  // body (PROTOCOL §§2.2, 5.2, 5.3, 16.3). Returns the draft with the
+  // priority the next key is minted under.
+  function syncPriority() {
+    const ta = comp.querySelector('textarea');
+    const draft = replyDraft(ta);
+    const participants = (thread() && thread().participants) || [];
+    const locked = replyPriorityLocked({ sending: S.sending, pending: S.pending, draft });
+    S.prio = replyPriority({
+      manual: S.prioManual,
+      locked,
+      current: draft.prio,
+      participants,
+      kindOf,
+    });
+    // A matching draft retries the priority it was sent with, not whatever
+    // the control showed while the text was temporarily different.
+    if (!S.prioManual && locked && S.pending) S.prio = S.pending.prio;
+    // "Preselected" only while wake_idle is the automatic choice; after a
+    // manual pick, or a kept retry of another priority, the quota-only line.
+    const note = replyQuotaNote(participants, kindOf, { manual: S.prioManual, priority: S.prio });
+    const quota = comp.querySelector('#r-quota');
+    quota.hidden = !note;
+    quota.textContent = note;
+    quota.title = note ? GROK_QUOTA_DETAIL : '';
+    const seg = comp.querySelector('.seg');
+    if (note) seg.setAttribute('aria-describedby', 'r-quota r-quota-more');
+    else seg.removeAttribute('aria-describedby');
+    for (const b of seg.querySelectorAll('button')) b.className = b.value === S.prio ? 'on' : '';
+    return { ...draft, prio: S.prio };
+  }
+
   function render() {
     if (gone) return;
     const t = thread(), all = msgs(), d = detail.get();
@@ -547,8 +633,8 @@ export function mount(root, ctx) {
     to.hidden = !target;
     if (target) to.firstElementChild.textContent = clean('↳ replying to ' + nameOf(target.sender) + ': ' + excerpt(target).slice(0, 60));
     comp.querySelector('textarea').placeholder = 'Message ' + (participants ? participants.filter(p => p !== me).map(nameOf).join(', ') : 'this thread');
+    syncPriority();
     gate();
-    for (const b of comp.querySelectorAll('.seg button')) b.className = b.value === S.prio ? 'on' : '';
     const at = openAt && (list.querySelector('.newdiv') || document.getElementById('m-' + openAt));
     if (at) { at.scrollIntoView({ block: 'start' }); onScroll(); }
     else if (S.pinned) scroller.scrollTop = scroller.scrollHeight;
@@ -571,8 +657,10 @@ export function mount(root, ctx) {
       // event for that very send, which landed though its answer was lost)
       // must not re-pick it, or the retry would mint a new idempotency key.
       if (!S.pending && (S.replyTo === null || (S.replyTo && !list.some(m => m.message_id === S.replyTo)))) S.replyTo = lastFromOther(list) || null;
+      collectRefs();
     }
     render();
+    scheduleExpiry();
   };
   render();
   scroller.addEventListener('scroll', onScroll, { passive: true });
@@ -586,6 +674,9 @@ export function mount(root, ctx) {
   return () => {
     gone = true;
     clearInterval(timer);
+    clearTimeout(expiryTimer);
+    refSubs.clear();
+    if (ctx.blobRefs && ctx.blobRefs.get() === refs) delete ctx.blobRefs;
     scroller.removeEventListener('scroll', onScroll);
     window.removeEventListener('scroll', onScroll);
     document.removeEventListener('visibilitychange', onVisible);

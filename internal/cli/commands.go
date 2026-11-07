@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/oklog/ulid/v2"
 
@@ -56,6 +57,8 @@ messaging:
        default priority depends on the emoji: ✅ ❓ ❗ wake_idle, others hold
   mcp                                 stdio MCP relay to the hub's /mcp as this profile [--as X]; needs --net P
   inbox [--since CURSOR] [--ack] [--limit N]
+  blob get SHA [--blob-id ID] --out PATH [--json]
+       URLs are short-lived; call get again whenever you need the file, as long as it hasn't expired.
   ack <cursor>
   watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]
        does not ack; use --auto-ack or vecnet ack <cursor> to avoid replaying
@@ -108,12 +111,24 @@ admin (operator credential):
        an enrolled peer's secret (peer disable / peer rotate). Also: peer invite status|revoke
   peer move <peer> --principal PRN
   peer link <peer>                                    prints a peer's 12-character OAuth link code
+  agent kinds [--kind KIND]
+       onboarding kinds and prompt templates from the hub
+  agent add --kind KIND [--name N] [--open-name] [--ttl 24h] [--principal PRN]
+       [--url URL] [--key-file PATH] [--connector-name NAME] [--skip-mcp]
+       [--request-id ID] [--confirm-revoke]
+       one hub submit; a routine key is read only from --key-file, never argv or the environment
+       --skip-mcp selects CLI bearer and does not request a link
+       the guided link revokes a live bearer and asks for --confirm-revoke first
+  agent link <peer> [--confirm-revoke]
+       guided link step, with the same bearer warning before peer link
+  agent status REQUEST_ID
+       safe onboarding status; queued is not connected
   peer avatar <peer> (FILE|https://URL|--clear)       set or clear any peer's avatar
   peer rotate <peer>
   peer scope <peer> [--allow IDS] [--deny IDS]        IDS: comma-separated or repeated
   peer limits <peer> --sends-per-min N --threads-per-hour N
   peer rename <id> <name>
-  peer disable <id> | peer enable <id>
+  peer disable <id> | peer enable <id> | peer archive <id> | peer unarchive <id>
   route add --owner ID --url URL | route verify <route_id>
   route add --owner ID --kind grokbot --url URL --key-file PATH
   route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>
@@ -183,7 +198,10 @@ type app struct {
 	inHook        bool   // hooks never TOFU or rewrite trust state
 	stdinConsumed bool   // a retry cannot consume stdin again
 	inMCP         bool   // stdio relay startup refusals must make no requests
-	prefsCmd      bool   // preferences exit codes and JSON errors
+	// retainedRequestID is the agent-add id for this process, generated or
+	// explicit, so a verified hub follow redispatches the same submission.
+	retainedRequestID string
+	prefsCmd          bool // preferences exit codes and JSON errors
 }
 
 // exit prints err and maps it to an exit code. Preferences commands use the
@@ -465,7 +483,28 @@ func (a *app) dispatch(cmd string, args []string) error {
 	if a.stdinConsumed {
 		return usageErr("hub followed; re-run the command (stdin was consumed)")
 	}
-	return a.dispatchOnce(cmd, args)
+	return a.dispatchOnce(cmd, a.withRetainedRequestID(cmd, args))
+}
+
+// withRetainedRequestID puts the id from the first attempt back on a
+// redispatched agent command. Without it, agent add generates a new id
+// after a signed 410 and the follow creates a second peer.
+func (a *app) withRetainedRequestID(cmd string, args []string) []string {
+	if cmd != "agent" || a.retainedRequestID == "" || hasRequestIDFlag(args) {
+		return args
+	}
+	out := make([]string, len(args), len(args)+2)
+	copy(out, args)
+	return append(out, "--request-id", a.retainedRequestID)
+}
+
+func hasRequestIDFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--request-id" || strings.HasPrefix(arg, "--request-id=") {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *app) dispatchOnce(cmd string, args []string) error {
@@ -478,6 +517,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdProfile(args)
 	case "guide":
 		return a.cmdGuide(args)
+	case "blob":
+		return a.cmdBlob(args)
 	case "send":
 		return a.cmdSend(args)
 	case "reply":
@@ -516,6 +557,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdPrincipal(args)
 	case "peer":
 		return a.cmdPeer(args)
+	case "agent":
+		return a.cmdAgent(args)
 	case "invite":
 		return a.cmdInvite(args)
 	case "route":
@@ -876,7 +919,8 @@ func (a *app) send(req envelope.SendRequest, text string, o opts) error {
 		if err != nil {
 			return err
 		}
-		req.Attachments = append(req.Attachments, att)
+		// Send only immutable reference fields; verification belongs to the hub.
+		req.Attachments = append(req.Attachments, envelope.Attachment{BlobID: att.BlobID, SHA256: att.SHA256, Size: att.Size, MediaType: att.MediaType, Name: att.Name, ExpiresAt: att.ExpiresAt, RetentionClass: att.RetentionClass})
 	}
 	var raw json.RawMessage
 	if err := c.do(a.ctx, http.MethodPost, "/v1/messages", nil, req, &raw); err != nil {
@@ -922,7 +966,7 @@ func mediaTypeOf(path string) string {
 	return mt
 }
 
-// upload PUTs one file to /v1/blobs and returns its attachment reference.
+// upload uses the advertised backend and returns a completed attachment reference.
 func (a *app) upload(c *client, path string) (envelope.Attachment, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -936,14 +980,124 @@ func (a *app) upload(c *client, path string) (envelope.Attachment, error) {
 	mt := mediaTypeOf(path)
 	ctx, cancel := context.WithTimeout(a.ctx, uploadTimeout)
 	defer cancel()
-	var out struct {
-		SHA256 string `json:"sha256"`
-		Size   int64  `json:"size"`
+	ref, err := c.blobs().Upload(ctx, f, st.Size(), mt, "")
+	if err != nil {
+		return envelope.Attachment{}, blobError(err)
 	}
-	if err := c.doNoTimeout(ctx, http.MethodPut, "/v1/blobs", nil, rawBody{r: f, contentType: mt, length: st.Size()}, &out); err != nil {
-		return envelope.Attachment{}, err
+	return envelope.Attachment{BlobID: ref.BlobID, SHA256: ref.SHA256, Size: ref.Size, MediaType: mt, Name: attachmentName(path), ExpiresAt: ref.ExpiresAt, RetentionClass: ref.RetentionClass, SHA256Verified: ref.SHA256Verified, Integrity: ref.Integrity}, nil
+}
+
+// attachmentName is the name stored with an upload. It keeps one path
+// component, strips controls, bidi, ANSI sequences and path separators, and
+// caps the result at 255 code points, matching the TUI and Decisions §3.
+func attachmentName(path string) string {
+	name := cleanStoredName(filepath.Base(strings.ReplaceAll(path, "\\", "/")))
+	if rs := []rune(name); len(rs) > 255 {
+		name = string(rs[:255])
 	}
-	return envelope.Attachment{SHA256: out.SHA256, Size: out.Size, MediaType: mt, Name: filepath.Base(path)}, nil
+	if name == "" {
+		return "file"
+	}
+	return name
+}
+
+// cleanStoredName is the one-line form of the TUI cleaner for a single file
+// component: line breaks become spaces, and controls, bidi and escape
+// sequences are removed.
+func cleanStoredName(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		invalid := r == utf8.RuneError && n <= 1
+		if invalid {
+			r = rune(s[i])
+		}
+		next := i + n
+		switch {
+		case r == 0x1b:
+			i = skipNameEsc(s, next)
+			continue
+		case r == 0x9b:
+			i = skipNameCSI(s, next)
+			continue
+		case r == 0x9d:
+			i = skipNameString(s, next, true)
+			continue
+		case r == 0x90 || r == 0x98 || r == 0x9e || r == 0x9f:
+			i = skipNameString(s, next, false)
+			continue
+		}
+		i = next
+		switch {
+		case invalid:
+		case r == '\n' || r == '\t' || r == '\u2028' || r == '\u2029':
+			b.WriteByte(' ')
+		case r < 0x20 || (r >= 0x7f && r <= 0x9f):
+		case r >= '\u202a' && r <= '\u202e', r >= '\u2066' && r <= '\u2069':
+		case r == '/' || r == '\\':
+		default:
+			b.WriteString(s[i-n : i])
+		}
+	}
+	return b.String()
+}
+
+func skipNameEsc(s string, i int) int {
+	if i >= len(s) {
+		return i
+	}
+	switch b := s[i]; {
+	case b == '[':
+		return skipNameCSI(s, i+1)
+	case b == ']':
+		return skipNameString(s, i+1, true)
+	case b == 'P' || b == 'X' || b == '^' || b == '_':
+		return skipNameString(s, i+1, false)
+	case b >= 0x20 && b <= 0x2f:
+		for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+			i++
+		}
+		if i < len(s) && s[i] >= 0x30 && s[i] <= 0x7e {
+			i++
+		}
+		return i
+	case b >= 0x30 && b <= 0x7e:
+		return i + 1
+	}
+	return i
+}
+
+func skipNameCSI(s string, i int) int {
+	for i < len(s) && s[i] >= 0x30 && s[i] <= 0x3f {
+		i++
+	}
+	for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+		i++
+	}
+	if i < len(s) && s[i] >= 0x40 && s[i] <= 0x7e {
+		i++
+	}
+	return i
+}
+
+func skipNameString(s string, i int, osc bool) int {
+	for j := i; j < len(s); {
+		r, n := utf8.DecodeRuneInString(s[j:])
+		if r == utf8.RuneError && n <= 1 {
+			r = rune(s[j])
+		}
+		switch {
+		case r == 0x07 && osc, r == 0x18, r == 0x1a, r == 0x9c:
+			return j + n
+		case r == 0x1b:
+			if j+1 < len(s) && s[j+1] == '\\' {
+				return j + 2
+			}
+			return j
+		}
+		j += n
+	}
+	return i
 }
 
 // --- inbox / ack ---
@@ -1184,10 +1338,7 @@ func (a *app) cmdThread(args []string) error {
 	if err := c.do(a.ctx, http.MethodGet, "/v1/threads/"+pathEscape(o.pos[0])+"/messages", q, nil, &raw); err != nil {
 		return err
 	}
-	var body struct {
-		Messages  []envelope.Message `json:"messages"`
-		NextAfter *string            `json:"next_after"`
-	}
+	var body opapi.History
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return &hubError{Code: "bad_response", Message: err.Error()}
 	}
@@ -1209,6 +1360,9 @@ func (a *app) cmdThread(args []string) error {
 			}
 		}
 		fmt.Fprintf(a.stdout, "%s %s %s %s\n", m.MessageID, m.CreatedAt, from, flatten(m.Content.Text))
+		for _, label := range blobLabels(m.Attachments, body.BlobStates) {
+			fmt.Fprintln(a.stdout, label)
+		}
 		if len(m.Reactions) > 0 {
 			groups := make([]string, 0, len(m.Reactions))
 			for _, group := range m.Reactions {

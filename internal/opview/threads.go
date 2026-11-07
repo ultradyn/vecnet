@@ -162,20 +162,24 @@ func (r *Reader) Thread(ctx context.Context, c auth.Caller, thrID string) (opapi
 		if out.Row, err = readThreadRow(ctx, tx, thrID, now); err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT json_extract(a.value,'$.sha256'),
+		visibility, err := r.Hub.HistoryVisibilitySQL(ctx, tx)
+		if err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT json_extract(a.value,'$.sha256'),coalesce(json_extract(a.value,'$.blob_id'),''),
    coalesce(json_extract(a.value,'$.name'),''),json_extract(a.value,'$.media_type'),
    m.msg_id,m.sender,m.created_at,json_extract(a.value,'$.size'),
    coalesce(json_extract(m.body,'$.metadata."vecnet.spilled"')=1,0),
    b.purged_at IS NOT NULL
    FROM messages m JOIN json_each(m.body,'$.attachments') a
    LEFT JOIN blobs b ON b.sha256=json_extract(a.value,'$.sha256')
-   WHERE m.thr_id=? ORDER BY m.seq DESC,CAST(a.key AS INTEGER)`, thrID)
+   WHERE m.thr_id=? AND `+visibility+` ORDER BY m.seq DESC,CAST(a.key AS INTEGER)`, thrID)
 		if err != nil {
 			return err
 		}
 		for rows.Next() {
 			var f opapi.ThreadFile
-			if err := rows.Scan(&f.SHA256, &f.Name, &f.MediaType, &f.MessageID, &f.Sender, &f.CreatedAt, &f.Size, &f.Spilled, &f.Purged); err != nil {
+			if err := rows.Scan(&f.SHA256, &f.BlobID, &f.Name, &f.MediaType, &f.MessageID, &f.Sender, &f.CreatedAt, &f.Size, &f.Spilled, &f.Purged); err != nil {
 				rows.Close()
 				return err
 			}
@@ -238,7 +242,7 @@ func (r *Reader) Matrix(ctx context.Context, thrID, after string, limit int) (op
 		}
 		from := 0
 		if after != "" {
-			err := tx.QueryRowContext(ctx, `SELECT seq FROM messages WHERE thr_id=? AND msg_id=?`, thrID, after).Scan(&from)
+			err := tx.QueryRowContext(ctx, `SELECT seq FROM messages WHERE thr_id=?1 AND msg_id=?2 UNION ALL SELECT seq FROM message_history_locators WHERE thr_id=?1 AND msg_id=?2 LIMIT 1`, thrID, after).Scan(&from)
 			if errors.Is(err, sql.ErrNoRows) {
 				e := hub.E(422, "not_in_thread", "after is not a message of this thread")
 				e.Details["after"] = after
@@ -266,8 +270,12 @@ func (r *Reader) Matrix(ctx context.Context, thrID, after string, limit int) (op
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		rows, err = tx.QueryContext(ctx, `SELECT msg_id,created_at,sender,body FROM messages
-   WHERE thr_id=? AND seq>? AND kind != 'reaction' ORDER BY seq LIMIT ?`, thrID, from, limit+1)
+		visibility, err := r.Hub.HistoryVisibilitySQL(ctx, tx)
+		if err != nil {
+			return err
+		}
+		rows, err = tx.QueryContext(ctx, `SELECT m.msg_id,m.created_at,m.sender,m.body FROM messages m
+   WHERE m.thr_id=? AND m.seq>? AND m.kind != 'reaction' AND `+visibility+` ORDER BY m.seq LIMIT ?`, thrID, from, limit+1)
 		if err != nil {
 			return err
 		}

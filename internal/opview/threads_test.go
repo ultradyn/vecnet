@@ -68,6 +68,66 @@ func assertThreadAPIError(t *testing.T, err error, status int, code string) {
 	}
 }
 
+func TestThreadsOrderAfterFutureApprovalExpiry(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "sender")
+	// The demo expires an approval one second ahead of its clock, then
+	// posts another message at the current time in the same thread.
+	first := threadSend(t, env, secret, "", []string{env.OperatorPeer}, map[string]any{
+		"kind": "approval_request", "approval_request": map[string]any{
+			"approval_id": ids.New(ids.Apr), "question": "Proceed?",
+			"options":    []string{"yes", "no"},
+			"expires_at": envelope.FormatTime(env.Now.Now().Add(time.Millisecond)),
+		},
+	})
+	future := env.Now.Now().Add(time.Second)
+	if n, err := env.Hub.ExpireApprovals(threadCtx, future); err != nil || n != 1 {
+		t.Fatalf("ExpireApprovals = %d, %v", n, err)
+	}
+	if got := threadDetail(t, env, first.ThreadID).Row.LastMessageAt; got != envelope.FormatTime(future) {
+		t.Fatalf("expiry activity = %s, want %s", got, envelope.FormatTime(future))
+	}
+	threadSend(t, env, secret, first.ThreadID, nil, nil)
+	wantAt := envelope.FormatTime(env.Now.Now())
+	if got := threadDetail(t, env, first.ThreadID).Row.LastMessageAt; got != wantAt {
+		t.Errorf("activity after subsequent send = %s, want last inserted message time %s", got, wantAt)
+	}
+	// Start the journey before wall time catches up with the expiry notice.
+	env.Now.Advance(500 * time.Millisecond)
+	journey := threadSend(t, env, secret, "", []string{env.OperatorPeer}, map[string]any{"thread_title": "Attachment journey"})
+	wantIDs := []string{journey.ThreadID, first.ThreadID}
+	t.Run("threads endpoint", func(t *testing.T) {
+		resp, raw := env.Do(env.OperatorSecret, "GET", "/v1/threads", nil)
+		var page struct {
+			Threads []envelope.ThreadSummary `json:"threads"`
+		}
+		if resp.StatusCode != 200 || json.Unmarshal(raw, &page) != nil {
+			t.Fatalf("threads response: %d %s", resp.StatusCode, raw)
+		}
+		got := []string{}
+		for _, row := range page.Threads {
+			got = append(got, row.ThreadID)
+		}
+		if !reflect.DeepEqual(got, wantIDs) {
+			t.Fatalf("thread order = %v, want journey first: %v", got, wantIDs)
+		}
+	})
+	t.Run("operator threads endpoint", func(t *testing.T) {
+		resp, raw := env.Do(env.OperatorSecret, "GET", "/v1/admin/threads?participant="+env.OperatorPeer, nil)
+		var page opapi.ThreadPage
+		if resp.StatusCode != 200 || json.Unmarshal(raw, &page) != nil {
+			t.Fatalf("operator threads response: %d %s", resp.StatusCode, raw)
+		}
+		got := []string{}
+		for _, row := range page.Threads {
+			got = append(got, row.Thread.ThreadID)
+		}
+		if !reflect.DeepEqual(got, wantIDs) {
+			t.Fatalf("operator thread order = %v, want journey first: %v", got, wantIDs)
+		}
+	})
+}
+
 func TestThreadsAllPeers(t *testing.T) {
 	env := testhub.Start(t)
 	a, asec := env.NewPeer("session", "A")
@@ -537,5 +597,33 @@ func TestMatrixHidesReactionMessages(t *testing.T) {
 	}
 	if len(got.Rows) != 2 || got.Rows[0].MessageID != target.MessageID || got.Rows[1].MessageID != last.MessageID || got.NextAfter != nil {
 		t.Fatalf("matrix=%+v", got)
+	}
+}
+
+// The projection preserves generation identity independently of content hash.
+// Seed retained message JSON directly: transfer/provider acceptance is tested
+// elsewhere, and this test exercises only the SQL read projection.
+func TestThreadDetailFileGenerationIdentity(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "A")
+	peer, _ := env.NewPeer("session", "B")
+	sr := threadSend(t, env, secret, "", []string{peer}, nil)
+	atts := []envelope.Attachment{
+		{BlobID: "blo_00000000000000000000000001", SHA256: strings.Repeat("a", 64), Name: "old.txt", Size: 3, MediaType: "text/plain", RetentionClass: "1h"},
+		{BlobID: "blo_00000000000000000000000002", SHA256: strings.Repeat("a", 64), Name: "keep.txt", Size: 3, MediaType: "text/plain", RetentionClass: "keep"},
+	}
+	raw, err := json.Marshal(atts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadExecFixture(t, env, `UPDATE messages SET body=json_set(body,'$.attachments',json(?)) WHERE msg_id=?`, string(raw), sr.MessageID)
+	d := threadDetail(t, env, sr.ThreadID)
+	if len(d.Files) != 2 {
+		t.Fatal("missing generations")
+	}
+	for i, f := range d.Files {
+		if f.BlobID != atts[i].BlobID || f.SHA256 != atts[i].SHA256 {
+			t.Fatalf("file %d lost generation identity", i)
+		}
 	}
 }

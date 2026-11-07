@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {
   VIEW_KEY, buildPatch, createSettingsStore, describeLoad, durationText, formatDuration, formatValue, laneStops, laneView,
   LANES, loadView, lockOf, parseDuration, parseField, rememberView, timingOf, visibleRows,
+  BLOB_NEW_ONLY, blobOffText, storageView, validStorage,
 } from '../static/settings-model.js';
+import { mount as mountSettings } from '../static/settings.js';
 import { fakeHub, memStorage, rows } from './settings-fixture.mjs';
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -714,4 +716,551 @@ test('appearance has its own Apply and Undo and never calls the hub', async () =
   for (const fn of listeners) fn({ theme: 'system', density: 'compact' });
   assert.equal(st.appearance.draft.theme, 'dark', 'a pending local choice is kept');
   assert.equal(st.appearance.saved.theme, 'system');
+});
+
+// ---------- blob retention, hosted off and storage (R2 blobs Task 7) ----------
+
+const GiB = 2 ** 30;
+const r2Rows = (patch = {}) => rows({ installed: true }).map(r => (r.key === 'blobs.expiry' ? { ...r, ...patch } : r));
+const storage = (used, limit = 5 * GiB, reserved = 0) => {
+  [used, limit, reserved] = [used, limit, reserved].map(Math.round);
+  return { retained_bytes: used - reserved, reserved_bytes: reserved, used_bytes: used, limit_bytes: limit };
+};
+
+test('blob expiry: all six durations and off, the built-in 1 day default and its source', async () => {
+  const { st, store } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB) } });
+  const r = row(st, 'blobs.expiry');
+  assert.deepEqual(r.allowed_values, ['1h', '6h', '12h', '1d', '7d', '30d', 'off']);
+  assert.deepEqual(r.allowed_values.map(v => formatValue(r, v)), ['1 hour', '6 hours', '12 hours', '1 day', '7 days', '30 days', 'Off (keep files)']);
+  assert.equal(store.value('blobs.expiry'), '1d');
+  assert.equal(store.source('blobs.expiry'), 'default');
+  assert.equal(lockOf(r), null);
+  assert.match(BLOB_NEW_ONLY, /new uploads only/i);
+  assert.match(BLOB_NEW_ONLY, /keep/i);
+});
+
+test('blob expiry: a duration saves without confirmation and reloads as stored; an invalid value never saves', async () => {
+  const { hub, st, store } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB) } });
+  store.edit('blobs.expiry', '7d');
+  await store.save();
+  const patches = hub.calls.filter(c => c.op === 'patch');
+  assert.deepEqual(patches.map(c => c.patch), [{ set: { 'blobs.expiry': '7d' }, reset: [] }]);
+  // The row is danger-flagged, so the page asks first; a duration carries no
+  // risk, so no confirmation opens and no token is sent.
+  assert.equal(st.confirm, null, 'durations need no cost confirmation');
+  assert.equal(patches[0].patch.confirm, undefined);
+  assert.equal(store.source('blobs.expiry'), 'stored');
+  // A fresh page reads the saved value back.
+  const again = createSettingsStore({ api: hub.api, storage: memStorage(), appearance: null });
+  await again.load();
+  assert.equal(again.value('blobs.expiry'), '7d');
+  assert.equal(again.source('blobs.expiry'), 'stored');
+  store.edit('blobs.expiry', '2d');
+  assert.ok(store.errors()['blobs.expiry']);
+  await store.save();
+  assert.equal(hub.calls.filter(c => c.op === 'patch').length, 1);
+  assert.equal(st.focus, 'blobs.expiry');
+});
+
+test('blob expiry off: preview with the hub storage figures; cancel writes nothing; confirm sends the token once', async () => {
+  const { hub, st, store } = await ready({ hub: { preferences: r2Rows(), storage: storage(3 * GiB, 5 * GiB, GiB / 2) } });
+  store.edit('blobs.expiry', 'off');
+  await store.save();
+  assert.equal(st.busy, 'confirming');
+  assert.equal(st.confirm.preview.risks[0].code, 'blob_expiry_off');
+  assert.deepEqual(st.confirm.preview.impact.storage, storage(3 * GiB, 5 * GiB, GiB / 2));
+  const text = blobOffText(st.confirm.preview.impact.storage);
+  assert.match(text, /no automatic expiry/i);
+  assert.match(text, /3\.2 GB used of a 5\.4 GB limit/);
+  assert.match(text, /2\.7 GB retained/);
+  assert.match(text, /537 MB reserved/);
+  store.cancelConfirm();
+  assert.equal(hub.calls.filter(c => c.op === 'patch').length, 0);
+  assert.equal(store.value('blobs.expiry'), 'off', 'the draft stays');
+  await store.save();
+  await store.confirm();
+  const patches = hub.calls.filter(c => c.op === 'patch');
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0].patch.confirm.length, 1);
+  assert.equal(store.source('blobs.expiry'), 'stored');
+  assert.equal(row(st, 'blobs.expiry').value, 'off');
+});
+
+test('blob expiry off: the fixture refuses an unconfirmed write as the hub does, and a failed confirm keeps the draft', async () => {
+  const { hub, st, store } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB) } });
+  // Fixture contract only: it mirrors the hub, whose server-side enforcement
+  // for every writer is tested in Go (internal/hub/preferences_preview_test.go,
+  // internal/httpapi/prefs_test.go). The page itself never sends this.
+  const direct = await hub.api.patchPrefs({ set: { 'blobs.expiry': 'off' }, reset: [] }, `"prefs-${hub.revision}-g1"`).catch(e => e);
+  assert.equal(direct.code, 'prefs_confirmation_required');
+  store.edit('blobs.expiry', 'off');
+  await store.save();
+  hub.fail = { patch: Object.assign(new Error('x'), { status: 503, code: 'prefs_storage_unavailable', message: 'Preference storage is unavailable.' }) };
+  await store.confirm();
+  assert.equal(st.confirm, null);
+  assert.match(st.saveError.text, /Not saved/);
+  assert.equal(store.value('blobs.expiry'), 'off');
+  assert.deepEqual(store.dirtyKeys(), ['blobs.expiry']);
+});
+
+test('blob expiry: a concurrent change is a conflict that keeps the draft; a clean page takes the change', async () => {
+  const { hub, st, store } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB) } });
+  store.edit('blobs.expiry', '12h');
+  hub.competing('blobs.expiry', '30d');
+  await store.save();
+  assert.equal(st.newer.reason, 'conflict');
+  assert.deepEqual(st.newer.changed, ['blobs.expiry']);
+  assert.equal(store.value('blobs.expiry'), '12h');
+  store.undo();
+  assert.equal(store.value('blobs.expiry'), '30d');
+  // Change notification: a re-read (focus, visibility, Reload) adopts it.
+  hub.competing('blobs.expiry', '6h');
+  await store.refresh();
+  assert.equal(store.value('blobs.expiry'), '6h');
+  assert.match(st.announce.text, /reloaded/);
+});
+
+test('blob expiry: a flag-set value is read-only; a non-operator gets no setting controls', async () => {
+  const flagged = r2Rows({ source: 'flag', origin: 'VECNET_BLOBS_EXPIRY', value: '7d' });
+  const { store, st } = await ready({ hub: { preferences: flagged } });
+  assert.equal(lockOf(row(st, 'blobs.expiry')).kind, 'flag');
+  store.edit('blobs.expiry', '1h');
+  assert.deepEqual(store.dirtyKeys(), []);
+  const hub = fakeHub();
+  hub.fail = { get: Object.assign(new Error('x'), { status: 403, code: 'forbidden', message: 'Operator credential required.' }) };
+  const peer = createSettingsStore({ api: hub.api, storage: memStorage(), appearance: null });
+  await peer.load();
+  assert.equal(peer.state.phase, 'error');
+  assert.equal(peer.state.rows.length, 0, 'no rows, so no controls');
+  assert.match(peer.state.loadError.text, /Only the operator/);
+  assert.equal(peer.state.storage, null);
+});
+
+test('storage: retained, reserved, used and limit from the snapshot; near-limit and full states', async () => {
+  const { st, store, hub } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB, 5 * GiB, GiB / 4) } });
+  assert.deepEqual(st.storage, storage(GiB, 5 * GiB, GiB / 4));
+  let v = storageView(st.storage);
+  assert.equal(v.tone, 'ok');
+  assert.equal(v.percent, 20);
+  assert.match(v.text, /1\.1 GB used of 5\.4 GB/);
+  assert.deepEqual(v.parts.map(p => p.label), ['Retained', 'Reserved', 'Used', 'Limit']);
+  v = storageView(storage(4.7 * GiB, 5 * GiB));
+  assert.equal(v.tone, 'near');
+  assert.match(v.note, /near/i);
+  v = storageView(storage(5 * GiB, 5 * GiB));
+  assert.equal(v.tone, 'full');
+  assert.match(v.note, /new uploads are refused/i);
+  assert.match(v.note, /nothing already uploaded is deleted/i);
+  v = storageView(storage(6 * GiB, 5 * GiB));
+  assert.equal(v.tone, 'full');
+  assert.equal(v.percent, 100, 'the bar never overflows');
+  assert.match(v.note, /over the limit/i);
+  assert.match(v.text, /, over by 1\.1 GB$/);
+  // A refresh after a transition shows the new figures.
+  hub.storage = storage(2 * GiB);
+  hub.revision++;
+  await store.refresh();
+  assert.equal(st.storage.used_bytes, 2 * GiB);
+  // Malformed figures are dropped, not drawn.
+  for (const bad of [null, {}, { retained_bytes: -1, reserved_bytes: 0, used_bytes: 0, limit_bytes: 5 }, { retained_bytes: 1, reserved_bytes: 1, used_bytes: 2, limit_bytes: 0 }, { retained_bytes: '1', reserved_bytes: 0, used_bytes: 1, limit_bytes: 9 }]) {
+    assert.equal(validStorage(bad), null, JSON.stringify(bad));
+  }
+});
+
+test('storage meter updates on refresh when blob usage changes but the preference ETag does not', async () => {
+  // Focus, visibility and a reconnect all re-read through refresh(). The prefs
+  // ETag is the preference revision plus the bootstrap digest, so a 304 is
+  // normal while retained/reserved/used move. The meter has to follow anyway.
+  const { hub, st, store } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB, 5 * GiB, GiB / 4) } });
+  const etag = st.etag, revision = hub.revision;
+  store.edit('events.refresh_interval', '10m');
+  const next = storage(2 * GiB, 5 * GiB, GiB / 8);
+  hub.storage = next;
+  await store.refresh();
+  assert.equal(hub.revision, revision, 'preference revision stays put');
+  assert.ok(hub.calls.some(c => c.op === 'get' && c.tag === etag), 'prefs re-read is conditional');
+  assert.ok(hub.calls.some(c => c.op === 'storage'), 'the meter reads blob storage on its own');
+  assert.equal(st.etag, etag, 'the prefs ETag is kept');
+  assert.equal(store.input('events.refresh_interval'), '10m');
+  assert.deepEqual(store.dirtyKeys(), ['events.refresh_interval']);
+  assert.equal(st.confirm, null);
+  assert.equal(st.newer, null);
+  assert.deepEqual(st.storage, next);
+  assert.equal(storageView(st.storage).tone, 'ok');
+});
+
+test('a failed storage refresh shows unavailable and leaves the prefs ETag, draft and confirmation', async () => {
+  const { hub, st, store } = await ready({ hub: { preferences: r2Rows(), storage: storage(GiB) } });
+  const etag = st.etag;
+  store.edit('blobs.expiry', 'off');
+  await store.save();
+  assert.equal(st.busy, 'confirming');
+  const confirm = st.confirm;
+  const gets = hub.calls.filter(c => c.op === 'get').length;
+  hub.storage = storage(3 * GiB);
+  hub.fail = { storage: Object.assign(new Error('storage unavailable'), { status: 503, code: 'blob_unavailable' }), sticky: true };
+  await store.refresh();
+  assert.equal(st.etag, etag);
+  assert.equal(st.confirm, confirm, 'the open confirmation is the same one');
+  assert.equal(st.busy, 'confirming');
+  assert.equal(store.value('blobs.expiry'), 'off');
+  assert.deepEqual(store.dirtyKeys(), ['blobs.expiry']);
+  assert.equal(hub.calls.filter(c => c.op === 'get').length, gets, 'a busy page does not re-read prefs');
+  assert.equal(st.storage.unavailable, true);
+  const v = storageView(st.storage);
+  assert.equal(v.unavailable, true);
+  assert.equal(v.tone, 'unavailable');
+  assert.match(v.text, /unavailable/i);
+});
+
+// A document large enough for the mounted Settings screen. Installed only
+// around that test; other files keep their own document shim.
+class StEl {
+  constructor(tag) {
+    this.tag = tag;
+    this.attrs = {};
+    this.kids = [];
+    this.className = '';
+    this.on = {};
+    this.id = '';
+    this.value = '';
+    this.disabled = false;
+    this.checked = false;
+    this.open = false;
+    this.hidden = false;
+    this.parent = null;
+    this.style = {};
+    this.dataset = {};
+  }
+  set textContent(v) { this.kids = [String(v)]; }
+  get textContent() { return this.kids.map(k => typeof k === 'string' ? k : k.textContent).join(''); }
+  setAttribute(k, v) {
+    const s = String(v);
+    this.attrs[k] = s;
+    if (k === 'id') this.id = s;
+    if (k === 'class') this.className = s;
+    if (k === 'disabled') this.disabled = true;
+  }
+  getAttribute(k) { return Object.hasOwn(this.attrs, k) ? this.attrs[k] : null; }
+  addEventListener(type, fn) { (this.on[type] ||= []).push(fn); }
+  append(...xs) {
+    for (const x of xs) {
+      if (x === null || x === undefined || x === false) continue;
+      if (typeof x !== 'string') x.parent = this;
+      this.kids.push(x);
+    }
+  }
+  replaceChildren(...xs) {
+    for (const k of this.kids) if (k && k.parent === this) k.parent = null;
+    this.kids = [];
+    this.append(...xs);
+  }
+  remove() {
+    const p = this.parent;
+    if (!p) return;
+    if (this.contains(document.activeElement)) document.activeElement = document.body;
+    p.kids = p.kids.filter(k => k !== this);
+    this.parent = null;
+  }
+  get children() { return this.kids.filter(k => typeof k !== 'string'); }
+  contains(node) {
+    if (!node) return false;
+    if (node === this) return true;
+    return this.kids.some(k => k === node || (k && k.contains && k.contains(node)));
+  }
+  querySelector(sel) {
+    const acc = [];
+    const walk = el => {
+      if (!(el instanceof StEl)) return;
+      acc.push(el);
+      for (const k of el.kids) walk(k);
+    };
+    for (const k of this.kids) walk(k);
+    const cls = sel.startsWith('.') && !sel.includes(' ') && !sel.includes('[') ? sel.slice(1) : '';
+    if (cls) return acc.find(el => el.className.split(/\s+/).includes(cls)) || null;
+    const attr = sel.match(/^\[([^\s=~]+)="(.*)"\]$/);
+    if (attr) {
+      const val = attr[2].replace(/\\(.)/g, '$1');
+      return acc.find(el => el.attrs[attr[1]] === val) || null;
+    }
+    return null;
+  }
+  before(...nodes) { this.insert(nodes.flat().filter(n => n != null), 0); }
+  after(...nodes) { this.insert(nodes.flat().filter(n => n != null), 1); }
+  insert(nodes, offset) {
+    const p = this.parent;
+    if (!p) throw new Error('insert without parent');
+    const i = p.kids.indexOf(this);
+    for (const n of nodes) if (typeof n !== 'string') n.parent = p;
+    p.kids.splice(i + offset, 0, ...nodes);
+  }
+  replaceWith(node) {
+    const p = this.parent;
+    if (!p) return;
+    const i = p.kids.indexOf(this);
+    if (typeof node !== 'string') node.parent = p;
+    p.kids.splice(i, 1, node);
+    this.parent = null;
+  }
+  focus() { document.activeElement = this; }
+  scrollIntoView() {}
+  showModal() { this.open = true; }
+  close() {
+    if (!this.open) return;
+    this.open = false;
+    for (const fn of this.on.close || []) fn();
+  }
+  classList = {
+    add: (...xs) => {
+      const have = new Set(this.className.split(/\s+/).filter(Boolean));
+      for (const x of xs) have.add(x);
+      this.className = [...have].join(' ');
+    },
+    remove: (...xs) => {
+      const drop = new Set(xs);
+      this.className = this.className.split(/\s+/).filter(c => c && !drop.has(c)).join(' ');
+    },
+    toggle: (token, force) => {
+      const has = this.className.split(/\s+/).includes(token);
+      const on = force === undefined ? !has : !!force;
+      if (on) this.classList.add(token); else this.classList.remove(token);
+      return on;
+    },
+  };
+}
+const walkSt = (el, pred, out = []) => {
+  if (el instanceof StEl) { if (pred(el)) out.push(el); for (const k of el.kids) walkSt(k, pred, out); }
+  return out;
+};
+
+test('mounted settings keeps rows, meter and keyboard focus on storage-only refresh after reload', async () => {
+  const prev = { document: globalThis.document, window: globalThis.window, CSS: globalThis.CSS, location: globalThis.location };
+  const body = new StEl('body'), root = new StEl('div');
+  const listeners = new Map(), conns = new Set();
+  const add = (type, fn) => { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(fn); };
+  const remove = (type, fn) => listeners.get(type)?.delete(fn);
+  globalThis.document = { body, activeElement: body, hidden: false, createElement: tag => new StEl(tag), getElementById: () => null, addEventListener: add, removeEventListener: remove };
+  globalThis.window = { localStorage: memStorage(), addEventListener: add, removeEventListener: remove };
+  globalThis.CSS = { escape: s => String(s).replace(/[^a-zA-Z0-9_-]/g, ch => '\\' + ch) };
+  globalThis.location = { host: 'hub.test' };
+  const hub = fakeHub({ preferences: r2Rows(), storage: storage(GiB) });
+  const ctx = {
+    api: hub.api, toast() {},
+    store: { onConn(fn) { conns.add(fn); return () => conns.delete(fn); } },
+    appearance: { get: () => ({ theme: 'system', density: 'comfortable' }), subscribe: () => () => {} },
+  };
+  const field = fk => walkSt(root, e => e.attrs['data-fk'] === fk)[0];
+  const one = cls => walkSt(root, e => e.className.split(/\s+/).includes(cls))[0];
+  let off = () => {};
+  try {
+    // Remount models a reload: it must discard the old connection listener.
+    for (let reload = 0; reload < 2; reload++) {
+      off = mountSettings(root, ctx);
+      await flush();
+      assert.equal(conns.size, 1);
+      for (const view of ['list', 'policy']) {
+        for (const fn of field('view-' + view).on.click || []) fn();
+        const input = field(view === 'list' ? 'st-events-refresh-interval' : 'lane-blobs.expiry-1d');
+        assert.ok(input, view + ' has a keyboard control');
+        input.focus();
+        if (view === 'list') { input.selectionStart = 1; input.selectionEnd = 3; }
+        const row = walkSt(root, e => e.attrs['data-row'] === 'blobs.expiry')[0];
+        const panel = one('st-sto'), meter = one('st-sto-bar'), page = root.children[0];
+        const children = [...page.children];
+        for (const [trigger, usage, tone] of [['live', 2 * GiB, 'ok'], ['focus', 4.75 * GiB, 'near'], ['visibilitychange', 6 * GiB, 'full'], ['live', null, 'unavailable'], ['focus', GiB, 'ok']]) {
+          const marker = hub.calls.length;
+          hub.storage = storage(usage || GiB);
+          hub.fail = usage === null ? { storage: Object.assign(new Error('storage unavailable'), { status: 503 }) } : null;
+          if (trigger === 'live') {
+            for (const fn of conns) fn('reconnecting');
+            await flush();
+            assert.equal(hub.calls.length, marker, 'reconnecting does not refresh');
+            for (const fn of conns) fn('live');
+          } else for (const fn of listeners.get(trigger) || []) fn();
+          await flush();
+          await flush();
+          assert.deepEqual(hub.calls.slice(marker).map(c => c.op), ['get', 'storage'], 'one refresh per ' + trigger);
+          assert.ok(field(input.attrs['data-fk']) === input, view + ' keeps the focused node');
+          assert.ok(document.activeElement === input, view + ' keeps keyboard focus');
+          if (view === 'list') assert.deepEqual([input.selectionStart, input.selectionEnd], [1, 3], 'selection stays put');
+          assert.ok(walkSt(root, e => e.attrs['data-row'] === 'blobs.expiry')[0] === row, 'row stays attached');
+          assert.ok(one('st-sto') === panel, 'storage panel is updated in place');
+          assert.ok(one('st-sto-bar') === meter, 'meter is updated in place');
+          assert.ok(page.children.length === children.length && children.every((c, i) => c === page.children[i]), 'storage refresh does not rebuild the page');
+          assert.equal(panel.attrs['data-storage'], tone);
+          assert.equal(meter.attrs['aria-valuenow'], String(Math.min(100, Math.round((usage || 0) / (5 * GiB) * 100))));
+          assert.equal(one('st-sto-n').hidden, tone === 'ok', 'storage warning follows the figures');
+        }
+      }
+      off();
+      off = () => {};
+      assert.equal(conns.size, 0, 'reload removes the connection listener');
+    }
+  } finally {
+    off();
+    for (const [key, value] of Object.entries(prev)) globalThis[key] = value;
+  }
+});
+
+test('mounted settings re-reads storage when the connection goes live, with no focus or visibility event', async () => {
+  const hub = fakeHub({ preferences: r2Rows(), storage: storage(GiB, 5 * GiB, GiB / 4) });
+  let previewToken;
+  const previewPrefs = hub.api.previewPrefs;
+  hub.api.previewPrefs = async (...args) => {
+    const preview = await previewPrefs(...args);
+    previewToken = preview.confirm_token;
+    return preview;
+  };
+  const conns = [];
+  const fired = { focus: 0, visibilitychange: 0 };
+  const listeners = { focus: [], visibilitychange: [], beforeunload: [] };
+  const listen = (type, fn) => {
+    const wrapped = (...args) => { fired[type] = (fired[type] || 0) + 1; return fn(...args); };
+    (listeners[type] ||= []).push(wrapped);
+    return wrapped;
+  };
+  const unlisten = (type, fn) => {
+    const bag = listeners[type] || [];
+    const i = bag.indexOf(fn);
+    if (i >= 0) bag.splice(i, 1);
+  };
+  const prevDoc = globalThis.document;
+  const prevWin = globalThis.window;
+  const prevCSS = globalThis.CSS;
+  const prevLoc = globalThis.location;
+  const body = new StEl('body');
+  const doc = {
+    hidden: true,
+    activeElement: null,
+    body,
+    createElement: tag => new StEl(tag),
+    addEventListener: listen,
+    removeEventListener: unlisten,
+    getElementById() { return null; },
+  };
+  const win = {
+    localStorage: memStorage(),
+    addEventListener: listen,
+    removeEventListener: unlisten,
+  };
+  globalThis.document = doc;
+  globalThis.window = win;
+  globalThis.location = { host: 'hub.test' };
+  if (!globalThis.CSS) globalThis.CSS = { escape: s => String(s).replace(/[^a-zA-Z0-9_-]/g, ch => '\\' + ch) };
+  const root = new StEl('div');
+  let off = () => {};
+  try {
+    const conn = {
+      onConn(fn) {
+        conns.push(fn);
+        return () => { const i = conns.indexOf(fn); if (i >= 0) conns.splice(i, 1); };
+      },
+    };
+    const ctx = {
+      api: hub.api,
+      store: conn,
+      appearance: { get: () => ({ theme: 'system', density: 'comfortable' }), set: () => ({ persisted: true }), subscribe: () => () => {} },
+      toast() {},
+      setLeaveGuard() {},
+    };
+    off = mountSettings(root, ctx);
+    await flush();
+    assert.equal(conns.length, 1, 'the mount owns one connection subscription');
+    const field = fk => walkSt(root, e => e.attrs['data-fk'] === fk)[0];
+    const fire = (fk, type, value) => {
+      const el = field(fk);
+      assert.ok(el, fk);
+      for (const fn of el.on[type] || []) fn({ target: { value } });
+    };
+    fire('st-events-refresh-interval', 'input', '10m');
+    fire('st-blobs-expiry', 'change', 'off');
+    for (const fn of field('save').on.click || []) fn();
+    const dialog = () => walkSt(body, e => e.tag === 'dialog')[0];
+    for (let i = 0; i < 10 && !(dialog() && dialog().open); i++) await flush();
+    assert.equal(dialog().open, true, 'confirmation is open');
+    assert.match(dialog().textContent, /Keep new attachments forever/);
+    assert.equal(field('st-events-refresh-interval').value, '10m');
+    assert.equal(field('st-blobs-expiry').value, 'off');
+    const meter = () => walkSt(root, e => e.className.split(/\s+/).includes('st-sto-t'))[0];
+    assert.match(meter().textContent, /1\.1 GB used of 5\.4 GB/);
+    const gets = () => hub.calls.filter(c => c.op === 'get').length;
+    const storages = () => hub.calls.filter(c => c.op === 'storage').length;
+    const etag = `"prefs-${hub.revision}-g1"`;
+    const token = previewToken;
+    assert.ok(token, 'the hub issued a confirmation token');
+    assert.ok(hub.calls.some(c => c.op === 'preview' && c.tag === etag), 'the confirmation is bound to the current ETag');
+    const got = gets(), stored = storages(), revision = hub.revision;
+    const marker = hub.calls.length;
+    assert.equal(fired.focus, 0);
+    assert.equal(fired.visibilitychange, 0);
+    assert.ok(listeners.focus.length >= 1 && listeners.visibilitychange.length >= 1);
+    hub.storage = storage(2 * GiB, 5 * GiB, GiB / 8);
+    for (const fn of conns) fn('reconnecting');
+    await flush();
+    await flush();
+    assert.equal(hub.calls.length, marker, 'reconnecting does not read');
+    assert.match(meter().textContent, /1\.1 GB used of 5\.4 GB/);
+    for (const fn of conns) fn('live');
+    await flush();
+    await flush();
+    assert.deepEqual(hub.calls.slice(marker).map(c => c.op), ['storage'], 'a live transition reads the meter once and does not re-read prefs');
+    assert.equal(gets(), got);
+    assert.equal(storages(), stored + 1);
+    assert.equal(hub.revision, revision);
+    assert.match(meter().textContent, /2\.1 GB used of 5\.4 GB/);
+    assert.equal(dialog().open, true, 'the confirmation stays open');
+    assert.match(dialog().textContent, /Keep new attachments forever/);
+    assert.equal(field('st-events-refresh-interval').value, '10m', 'the draft stays');
+    assert.equal(field('st-blobs-expiry').value, 'off', 'the draft stays');
+    assert.equal(fired.focus, 0, 'focus was not the trigger');
+    assert.equal(fired.visibilitychange, 0, 'visibility was not the trigger');
+    const confirm = walkSt(dialog(), e => e.attrs['data-cf'] === 'ok')[0];
+    assert.ok(confirm && !confirm.disabled, 'the open dialog can still be confirmed');
+    for (const fn of confirm.on.click || []) fn();
+    await flush();
+    const patches = hub.calls.filter(c => c.op === 'patch');
+    assert.equal(patches.length, 1, 'confirmation saves once after reconnect');
+    assert.equal(patches[0].tag, etag, 'patchPrefs receives the original If-Match ETag');
+    assert.deepEqual(patches[0].patch.confirm, [token], 'patchPrefs receives the original preview token');
+    assert.deepEqual(patches[0].patch.set, { 'blobs.expiry': 'off', 'events.refresh_interval': 600 });
+    assert.equal(hub.calls.filter(c => c.op === 'preview').length, 1, 'reconnect and confirmation do not replace the preview');
+    assert.equal(hub.revision, revision + 1, 'the hub accepted the confirmed draft');
+    assert.equal(dialog().open, false, 'saving closes the confirmation');
+    const beforeUnmount = hub.calls.length;
+    off();
+    off = () => {};
+    assert.equal(conns.length, 0, 'unmount drops the connection subscription');
+    for (const fn of conns) fn('live');
+    await flush();
+    assert.equal(hub.calls.length, beforeUnmount, 'a live event after unmount does not read again');
+    off = mountSettings(root, ctx);
+    await flush();
+    assert.equal(conns.length, 1, 'remount owns exactly one active connection subscription');
+    const remounted = hub.calls.length;
+    const remountGets = gets(), remountStorages = storages();
+    hub.storage = storage(3 * GiB, 5 * GiB, GiB / 8);
+    for (const fn of conns) fn('reconnecting');
+    await flush();
+    assert.equal(hub.calls.length, remounted, 'reconnecting after remount does not read');
+    for (const fn of conns) fn('live');
+    await flush();
+    await flush();
+    assert.equal(conns.length, 1);
+    assert.deepEqual(hub.calls.slice(remounted).map(c => c.op), ['get', 'storage'], 'the next live transition runs one refresh after remount');
+    assert.equal(gets(), remountGets + 1);
+    assert.equal(storages(), remountStorages + 1);
+    assert.equal(hub.calls[remounted].tag, `"prefs-${hub.revision}-g1"`, 'the remounted refresh conditionally reads current prefs');
+    assert.match(meter().textContent, /3\.2 GB used of 5\.4 GB/);
+    assert.equal(fired.focus, 0);
+    assert.equal(fired.visibilitychange, 0);
+    off();
+    off = () => {};
+    assert.equal(conns.length, 0, 'the remounted subscription is also removed');
+  } finally {
+    off();
+    globalThis.document = prevDoc;
+    globalThis.window = prevWin;
+    globalThis.CSS = prevCSS;
+    globalThis.location = prevLoc;
+  }
 });

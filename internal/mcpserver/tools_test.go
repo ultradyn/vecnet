@@ -346,7 +346,7 @@ func TestWhoamiIdentity(t *testing.T) {
 			t.Fatalf("OAuth whoami = %v, want %v", got, want)
 		}
 	})
-	if path := invalidPath(t, env, secret, "vecnet_whoami", map[string]any{"as": peer}); path != "/as" {
+	if path := invalidPath(t, env, secret, "vecnet_whoami", map[string]any{"as": peer}); path != "/<unknown>" {
 		t.Fatalf("whoami accepts identity override: path = %q", path)
 	}
 }
@@ -372,12 +372,12 @@ func TestToolsListNamesAndHints(t *testing.T) {
 	}
 
 	want := []string{
-		"vecnet_ack", "vecnet_blob_get", "vecnet_blob_put", "vecnet_clear_avatar", "vecnet_group_add", "vecnet_group_create", "vecnet_groups", "vecnet_guide",
-		"vecnet_inbox", "vecnet_peer_create", "vecnet_peer_invite_get", "vecnet_peer_invite_revoke", "vecnet_peer_lifecycle", "vecnet_peer_set_disabled", "vecnet_peers", "vecnet_presence", "vecnet_presence_subscribe", "vecnet_react", "vecnet_receipt",
+		"vecnet_ack", "vecnet_blob_get", "vecnet_blob_put", "vecnet_blob_status", "vecnet_clear_avatar", "vecnet_group_add", "vecnet_group_create", "vecnet_groups", "vecnet_guide",
+		"vecnet_inbox", "vecnet_peer_create", "vecnet_peer_set_disabled", "vecnet_peers", "vecnet_presence", "vecnet_presence_subscribe", "vecnet_react", "vecnet_receipt",
 		"vecnet_reply", "vecnet_send", "vecnet_set_avatar", "vecnet_subscriptions", "vecnet_thread", "vecnet_threads", "vecnet_whoami",
 	}
 	var got []string
-	readOnly := map[string]bool{"vecnet_guide": true, "vecnet_blob_get": true, "vecnet_groups": true, "vecnet_inbox": true, "vecnet_subscriptions": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true, "vecnet_whoami": true, "vecnet_peer_invite_get": true}
+	readOnly := map[string]bool{"vecnet_guide": true, "vecnet_blob_get": true, "vecnet_blob_status": true, "vecnet_groups": true, "vecnet_inbox": true, "vecnet_subscriptions": true, "vecnet_threads": true, "vecnet_thread": true, "vecnet_peers": true, "vecnet_whoami": true, "vecnet_peer_invite_get": true}
 	for _, tool := range tools {
 		got = append(got, tool.Name)
 		if tool.Annotations == nil {
@@ -846,7 +846,7 @@ func TestAttachmentURLsRejected(t *testing.T) {
 		}
 	}
 	for _, field := range []string{"origin_url", "blob_url"} {
-		want := "/attachments/0/" + field
+		want := "/attachments/0/<unknown>"
 		if p := invalidPath(t, env, aSecret, "vecnet_send", send("s-"+field, att(field))); p != want {
 			t.Errorf("vecnet_send %s: data.path = %q, want %q", field, p, want)
 		}
@@ -1067,8 +1067,8 @@ func TestReadToolsAndPresence(t *testing.T) {
 	}, nil)
 	if p := invalidPath(t, env, aSecret, "vecnet_presence", map[string]any{
 		"peer_id": a, "state": "idle", "at": venv.FormatTime(env.Now.Now()),
-	}); p != "/peer_id" {
-		t.Fatalf("data.path = %q, want /peer_id", p)
+	}); p != "/<unknown>" {
+		t.Fatalf("data.path = %q, want /<unknown>", p)
 	}
 
 	var dir struct {
@@ -1079,8 +1079,8 @@ func TestReadToolsAndPresence(t *testing.T) {
 	if i < 0 || dir.Peers[i]["location"] != "here" {
 		t.Fatalf("peers = %+v, want %s with location here", dir.Peers, a)
 	}
-	if p := invalidPath(t, env, aSecret, "vecnet_peers", map[string]any{"url": "https://example.com"}); p != "/url" {
-		t.Fatalf("data.path = %q, want /url", p)
+	if p := invalidPath(t, env, aSecret, "vecnet_peers", map[string]any{"url": "https://example.com"}); p != "/<unknown>" {
+		t.Fatalf("data.path = %q, want /<unknown>", p)
 	}
 }
 
@@ -2151,17 +2151,28 @@ func TestBlobToolsTakeNoURL(t *testing.T) {
 		if tool.InputSchema["additionalProperties"] != false {
 			t.Fatalf("%s input is not closed", name)
 		}
-		names := map[string]bool{}
-		propertyNames(tool.InputSchema, names)
-		if name != "vecnet_send" {
-			if tool.OutputSchema["additionalProperties"] != false {
-				t.Fatalf("%s output is not closed", name)
-			}
-			propertyNames(tool.OutputSchema, names)
+		if name != "vecnet_send" && tool.OutputSchema["additionalProperties"] != false {
+			t.Fatalf("%s output is not closed", name)
 		}
-		for key := range names {
+		inputNames := map[string]bool{}
+		propertyNames(tool.InputSchema, inputNames)
+		for key := range inputNames {
 			if strings.Contains(strings.ToLower(key), "url") {
-				t.Errorf("%s schema exposes %s", name, key)
+				t.Errorf("%s input schema exposes %s", name, key)
+			}
+		}
+		if name != "vecnet_send" {
+			outputNames := map[string]bool{}
+			propertyNames(tool.OutputSchema, outputNames)
+			for key := range outputNames {
+				if !strings.Contains(strings.ToLower(key), "url") {
+					continue
+				}
+				// Explicit put/get results are the only URL-bearing MCP schemas.
+				if (name == "vecnet_blob_put" || name == "vecnet_blob_get") && (key == "url" || key == "complete_url") {
+					continue
+				}
+				t.Errorf("%s output schema exposes %s", name, key)
 			}
 		}
 		if name == "vecnet_blob_put" {
@@ -2194,7 +2205,7 @@ func TestBlobToolsTakeNoURL(t *testing.T) {
 				args = map[string]any{"data_base64": "aGk=", "media_type": "text/plain"}
 			}
 			args[key] = "https://example.invalid/?t=secret"
-			if path := invalidPath(t, env, secret, name, args); path != "/"+key {
+			if path := invalidPath(t, env, secret, name, args); path != "/<unknown>" {
 				t.Fatalf("%s accepts %s: path %q", name, key, path)
 			}
 		}
@@ -2203,7 +2214,7 @@ func TestBlobToolsTakeNoURL(t *testing.T) {
 		if path := invalidPath(t, env, secret, "vecnet_send", map[string]any{
 			"idempotency_key": "reject-url-" + key, "recipients": []string{env.OperatorPeer}, "priority": "hold", "content": map[string]any{"text": "attached"},
 			"attachments": []any{map[string]any{"sha256": put["sha256"], "size": 2, "media_type": "text/plain", key: "https://example.invalid"}},
-		}); path != "/attachments/0/"+key {
+		}); path != "/attachments/0/<unknown>" {
 			t.Fatalf("send accepts attachment %s: %q", key, path)
 		}
 	}

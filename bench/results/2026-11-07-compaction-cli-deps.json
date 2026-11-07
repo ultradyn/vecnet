@@ -1,0 +1,10 @@
+{
+  "command": "go list -deps ./cmd/vecnet",
+  "host": "x-boss",
+  "dependency_count": 260,
+  "absent": [
+    "modernc.org/sqlite",
+    "internal/store",
+    "internal/eventpayload"
+  ]
+}

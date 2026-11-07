@@ -15,7 +15,7 @@ import (
 const DefaultTickInterval = 30 * time.Second
 
 // SlowTickEvery is how many ticks pass between the slow housekeeping jobs
-// (ArchiveIdleGroups, Blobs.GC): every 120th tick, an hour at 30 s.
+// (idempotency expiry, ArchiveIdleGroups, Blobs.GC): every 120th tick, an hour at 30 s.
 const SlowTickEvery = 120
 
 // RunTickers runs the hub's periodic jobs every `every` (DefaultTickInterval
@@ -23,7 +23,7 @@ const SlowTickEvery = 120
 // hub's now, then OnIdle for every peer holding wake_idle deliveries whose
 // presence is now idle or unknown (a report that just went stale counts as
 // unknown, PROTOCOL §5.2, §8); every SlowTickEvery-th tick also
-// ArchiveIdleGroups and Blobs.GC. Errors are logged and the next tick runs.
+// bounded idempotency expiry, ArchiveIdleGroups and Blobs.GC. Errors are logged and the next tick runs.
 // Remote blob cleanup (provider DELETEs) runs on its own goroutine at the
 // same period, so a slow or unavailable provider never delays these timers.
 // Tests pass a short interval and drive the hub's clock.
@@ -34,6 +34,12 @@ func (h *Hub) RunTickers(ctx context.Context, every time.Duration) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	wake := h.Preferences.Subscribe(ctx)
+	if err := h.refreshHistoryRetentionStatus(ctx); err != nil && ctx.Err() == nil {
+		slog.Error("hub: history retention status", "reason", "policy_read_failed")
+	}
+	if err := h.refreshEventRetentionStatus(ctx); err != nil && ctx.Err() == nil {
+		slog.Error("hub: retention status", "reason", "policy_read_failed")
+	}
 	if err := h.releaseStaleHeld(ctx, h.Now()); err != nil && ctx.Err() == nil {
 		slog.Error("hub: initial release held", "err", err)
 	}
@@ -57,10 +63,16 @@ func (h *Hub) RunTickers(ctx context.Context, every time.Duration) {
 			if !ok {
 				return
 			}
-			// A preference wake only re-evaluates presence. It must never
+			// A preference wake refreshes policy/status and re-evaluates presence. It must never
 			// advance slow housekeeping or run deletion jobs.
 			if err := h.releaseStaleHeld(ctx, h.Now()); err != nil && ctx.Err() == nil {
 				slog.Error("hub: preferences release held", "err", err)
+			}
+			if err := h.refreshHistoryRetentionStatus(ctx); err != nil && ctx.Err() == nil {
+				slog.Error("hub: history retention status", "reason", "policy_read_failed")
+			}
+			if err := h.refreshEventRetentionStatus(ctx); err != nil && ctx.Err() == nil {
+				slog.Error("hub: retention status", "reason", "policy_read_failed")
 			}
 			continue
 		case <-t.C:
@@ -110,15 +122,31 @@ func (h *Hub) Tick(ctx context.Context, slow bool) {
 	if !slow {
 		return
 	}
+	if _, err := h.ExpireIdempotency(ctx, 0); err != nil && ctx.Err() == nil {
+		slog.Error("hub: idempotency expiry", "reason", "slice_failed")
+	}
 	if _, err := h.DB.ExecContext(ctx, `DELETE FROM reaction_ops WHERE at < ?`, envelope.FormatTime(now.Add(-time.Hour))); err != nil && ctx.Err() == nil {
 		slog.Error("hub: tick prune reaction ops", "err", err)
 	}
 	if _, err := h.ArchiveIdleGroups(ctx, now); err != nil && ctx.Err() == nil {
 		slog.Error("hub: tick archive groups", "err", err)
 	}
+	if h.Cfg.EventRetentionEnabled {
+		if _, err := h.PruneEventSlice(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("hub: event retention slice", "reason", "policy_or_slice_failed")
+		}
+	}
+	if _, err := h.PruneHistorySlice(ctx); err != nil && ctx.Err() == nil {
+		slog.Error("hub: history retention slice", "reason", "policy_or_slice_failed")
+	}
 	if h.Cfg.BackfillEnabled {
 		if _, err := h.BackfillDeliverySlice(ctx, h.Cfg.BackfillLimits); err != nil && ctx.Err() == nil {
 			slog.Error("hub: backfill slice", "reason", "slice_failed")
+		}
+	}
+	if h.Cfg.StorageMaintenanceEnabled {
+		if _, err := h.MaintainStorage(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("hub: storage maintenance", "reason", "slice_failed")
 		}
 	}
 	if _, err := h.Blobs.GC(ctx); err != nil && ctx.Err() == nil {

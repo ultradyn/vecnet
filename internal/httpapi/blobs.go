@@ -6,9 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/auth"
@@ -156,7 +154,8 @@ var uploadRequestFields = []blobField{{"size", true}, {"sha256", false}, {"media
 // decodeBlobJSON reads exactly one JSON object whose property names are
 // exactly fields (case-sensitive), each present with its JSON type. A shape
 // violation is 400 invalid_body with details.path (PROTOCOL §15): unknown
-// properties first (sorted), then missing or mistyped fields in order.
+// properties first (with a fixed path token), then missing or mistyped fields
+// in order.
 // Semantic value checks (ranges, formats) stay with the hub (422).
 func decodeBlobJSON(r *http.Request, fields []blobField) (map[string]json.RawMessage, error) {
 	d := json.NewDecoder(r.Body)
@@ -185,14 +184,9 @@ func decodeBlobJSON(r *http.Request, fields []blobField) (map[string]json.RawMes
 	for _, f := range fields {
 		known[f.name] = true
 	}
-	keys := make([]string, 0, len(top))
 	for k := range top {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
 		if !known[k] {
-			return nil, &envelope.SchemaError{Path: "/" + jsonPointerToken(k), Message: "unknown field"}
+			return nil, &envelope.SchemaError{Path: "/" + envelope.UnknownProperty, Message: "unknown field"}
 		}
 	}
 	for _, f := range fields {
@@ -217,11 +211,6 @@ func decodeBlobJSON(r *http.Request, fields []blobField) (map[string]json.RawMes
 		}
 	}
 	return top, nil
-}
-
-// jsonPointerToken escapes one RFC 6901 reference token.
-func jsonPointerToken(s string) string {
-	return strings.NewReplacer("~", "~0", "/", "~1").Replace(s)
 }
 
 func (s *server) completeBlobUpload(w http.ResponseWriter, r *http.Request) {
