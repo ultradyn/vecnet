@@ -59,6 +59,10 @@ type Config struct {
 	// a zero duration is unset. Nonzero durations are always explicit.
 	AckedEventRetentionSet bool
 
+	// Physical maintenance is independently opt-in; zero pages checkpoints only.
+	StorageMaintenanceEnabled bool
+	StorageMaintenance        store.MaintenanceOptions
+
 	// Online backfill is independently opt-in; zero limits use defaults.
 	BackfillEnabled    bool
 	BackfillLimits     BackfillLimits
@@ -158,6 +162,9 @@ type Hub struct {
 	retentionLast        EventRetentionStatus
 	historyRetentionLast HistoryRetentionStatus
 
+	maintenanceMu   sync.Mutex
+	maintenanceLast store.MaintenanceResult
+
 	backfillMu   sync.Mutex
 	backfillLast BackfillProgress
 
@@ -194,6 +201,9 @@ func invalidURL(field string, err error) *APIError {
 func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	if db == nil {
 		return nil, errors.New("hub: nil store")
+	}
+	if err := store.ValidateMaintenanceOptions(cfg.StorageMaintenance); err != nil {
+		return nil, err
 	}
 	if cfg.UnackedEventRetention < 0 || cfg.EventRetentionLimits.Rows < 0 || cfg.EventRetentionLimits.Bytes < 0 || cfg.EventRetentionLimits.Target < 0 || cfg.RetentionSweepHourUTC < 0 || cfg.RetentionSweepHourUTC > 23 {
 		return nil, errors.New("hub: invalid_retention_config")
