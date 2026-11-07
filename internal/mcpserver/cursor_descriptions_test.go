@@ -19,7 +19,7 @@ func TestProjectedCursorKinds(t *testing.T) {
 	}
 	want := map[string]struct{ property, description string }{
 		"vecnet_thread":  {"after", "Message ID: next_after from the previous page."},
-		"vecnet_inbox":   {"after", "Event cursor e<epoch>.<seq> or head. Omit for the last ack cursor."},
+		"vecnet_inbox":   {"after", "Event cursor e<epoch>.<seq>. head skips existing backlog. Omit for last ack."},
 		"vecnet_threads": {"cursor", "Opaque cursor: next from the previous page."},
 		"vecnet_ack":     {"cursor", "Event cursor: next_cursor from the inbox page you have fully handled."},
 	}

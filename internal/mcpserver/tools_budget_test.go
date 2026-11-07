@@ -32,7 +32,7 @@ func TestToolsBudget(t *testing.T) {
 	t.Logf("tools/list: %d bytes", len(compact))
 	// Round four integrates master's three added peer tools. Keep the original
 	// 23 per-tool pins and freeze the measured merged catalog independently.
-	const achievedTotal = 21255
+	const achievedTotal = 21276
 	if budget := achievedTotal * 110 / 100; len(compact) > budget {
 		t.Errorf("tools/list: %d bytes exceeds budget %d (achieved %d + 10%%)", len(compact), budget, achievedTotal)
 	}

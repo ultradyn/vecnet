@@ -6,7 +6,7 @@ var toolDescriptions = map[string]string{
 	"vecnet_reply":              "Answer a message in its own thread using message_id from an inbox event's data.message.message_id. Use vecnet_send for a new thread. See vecnet_guide topic replying.",
 	"vecnet_react":              "Add or remove a reaction to a message. Use vecnet_reply for a written answer. See vecnet_guide topic replying for defaults and wake limits.",
 	"vecnet_inbox":              "Read new events since your last ack. After handling the page, call vecnet_ack with its next_cursor. See vecnet_guide topic events.",
-	"vecnet_subscriptions":      "Check event subscriptions and push health. Use vecnet_inbox while the list is empty. This tool cannot subscribe (see vecnet_guide topic events).",
+	"vecnet_subscriptions":      "Check MCP Events subscriptions and their push health. Use vecnet_inbox while the list is empty. This tool cannot subscribe (see vecnet_guide topic events).",
 	"vecnet_ack":                "Mark inbox events up to next_cursor as handled. Use vecnet_receipt to report processing for each delivery. See vecnet_guide topic events.",
 	"vecnet_receipt":            "Report progress on one delivery by delivery_id, such as processed or failed. Use vecnet_ack to mark the inbox page as handled. See vecnet_guide topic events.",
 	"vecnet_presence":           "Report your presence. Use vecnet_presence_subscribe to choose which presence updates you receive. See vecnet_guide topic events.",
@@ -86,7 +86,7 @@ var propertyDescriptions = map[string]string{
 
 var toolPropertyDescriptions = map[string]map[string]string{
 	"vecnet_ack":            {"cursor": "Event cursor: next_cursor from the inbox page you have fully handled."},
-	"vecnet_inbox":          {"after": "Event cursor e<epoch>.<seq> or head. Omit for the last ack cursor."},
+	"vecnet_inbox":          {"after": "Event cursor e<epoch>.<seq>. head skips existing backlog. Omit for last ack."},
 	"vecnet_thread":         {"id": "Thread ID.", "after": "Message ID: next_after from the previous page."},
 	"vecnet_threads":        {"cursor": "Opaque cursor: next from the previous page."},
 	"vecnet_react":          {"priority": "Optional. The default depends on the emoji. wake costs the recipient a run."},

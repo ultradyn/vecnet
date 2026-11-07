@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-07: complete merged MCP peer-tool discovery and schema budgets, preserve duplicate-member handling during timestamp normalization, prevent validation-value echoes, and clarify inbox head and MCP Events status (internal/mcpserver).
 - 2026-11-07: npm releases use matching `vX.Y.Z` tags, Linux x64/ARM64 package gates and GitHub OIDC in `.github/workflows/release.yml`; `just release` targets the `gh` remote, and the package homepage is `https://vecnet.ai` (`RELEASING.md`).
 - 2026-11-06: allow Codex app-server 0.167.0 alongside 0.166.0 after schema comparison and throwaway-thread re-verification of wake, steer, trust/policy, approvals, subscription and 60 s unload (`connectors/launcher/src/codex/discover.ts`, `docs/research/2026-11-04-codex-app-server-delivery.md`, `docs/connectors/codex-appserver.md`).
 - 2026-11-06: operator peer rename: `PATCH /v1/admin/peers/{id}` `{"name"}` and `vecnet peer rename <id> <name>` keep the peer id (threads, routes, scopes, credentials), audit `peer_rename`, and append `directory_updated` (`change: updated`, `fields: ["name"]`) (PROTOCOL §2.12, OPERATOR).

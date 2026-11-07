@@ -70,10 +70,13 @@ values entirely, including scalars. Regression tests guard against composite
 echoes and ensure nested application metadata is preserved.
 
 Round four integrates the three operator-only lifecycle and invite tools added
-by master. The merged catalog measures **21,255 bytes**, including lifecycle
+by master. The final merged catalog measures **21,276 bytes**, including lifecycle
 634, invite_get 468 and invite_revoke 495 bytes. Each new tool has its own 15%
 allowance; the merged total retains a 10% allowance. The original 23 per-tool
-pins and validation fixture remain frozen. A separate fixture captures the
+pins and validation fixture remain frozen. Inbox head and MCP Events wording
+adds 21 bytes to the initial merged measurement of 21,255 bytes; inbox now uses
+716 bytes and subscriptions 443 bytes, within their original per-tool allowances.
+The total budget is 23,403 bytes. A separate fixture captures the
 three additions' pre-projection call schemas from unprojected master, with
 provenance in `testdata/validation-master-additions.README.md`. Wire tests check
 that shape failures precede authority, authority precedes semantic values, and

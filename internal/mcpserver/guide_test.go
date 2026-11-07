@@ -175,7 +175,7 @@ func TestGuide(t *testing.T) {
 									"events:read and events:write",
 									"Workspace controls for plugins and event-triggered tasks must allow it",
 									"Call vecnet_subscriptions with no arguments",
-									"If its subscriptions list is empty, the subscription is not active",
+									"If its subscriptions list is empty, there is no active MCP Events subscription",
 									"tell the user to follow the plugin-page, Rescan and task-trigger setup steps above",
 									"use vecnet_inbox meanwhile",
 									"Never claim you subscribed",
