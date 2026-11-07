@@ -1,5 +1,7 @@
 # Automatic Codex Delivery Implementation Plan
 
+> **Amendment / CoS ruling 2026-11-08 (R39, monitor review partition):** The Task 5a3 diff exceeds the 2,000-line review threshold. Review the same fixed committed range in two independent seats: watch/state source, and the four affected test files. Each gives spec and quality verdicts for its scope; aggregate both and resolve every accepted Critical or Important finding before integration. Keep first-pass findings independent and prohibit duplicate test/build runs. Cost if wrong: one extra reviewer, with no reduction in coverage.
+
 > **Amendment / CoS ruling 2026-11-08 (R30, history fixtures):** Permit only the history-test final tick 1000→2000 (restart/loaded consumes the first retry) and four legacy claim-count assertions changed to immutable creation traces. Preserve exact nonce/delivery/no-resend/no-release assertions and frozen original evidence; no production backoff change. Subject to independent review, not a retroactive test-first claim.
 
 > **Amendment / CoS ruling 2026-11-08 (R31, Task 5c split):** Stage 5c1 actual-process e2e and 5c2 controller-only live harness in isolated worktrees with disjoint Files. No implementation/executable verification before the final approved receipt+monitor+diagnostics baseline and a new serialized build permit. Diagnostics MarkerDeadline/WriteFailures/ForegroundPipes/ClearReasonCycle belong to separate 5c3, initially process-test-only at approved f400f46; production defects return to their owning slice.
