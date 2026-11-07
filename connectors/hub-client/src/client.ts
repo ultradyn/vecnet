@@ -11,7 +11,7 @@ interface UploadGrant {
   upload: { method: string; url: string; headers?: Record<string, string>; expires_at: string };
   complete_url: string;
 }
-interface DownloadGrant { method?: string; url?: string; headers?: Record<string, string>; expires_at?: string; object_expires_at?: string | null }
+interface DownloadGrant extends BlobRef { method?: string; url?: string; headers?: Record<string, string>; object_expires_at?: string | null }
 
 const UPLOAD_DEADLINE_MS = 300_000;
 const DOWNLOAD_DEADLINE_MS = 600_000;
@@ -98,13 +98,22 @@ export function createHubClient(opts: { baseUrl: string; credential: string; fet
     return {sha256:ref.sha256,size:ref.size,blob_id:ref.blob_id,retention_class:ref.retention_class,expires_at:ref.expires_at,sha256_verified:true,integrity:ref.integrity,media_type:mediaType};
   }
   async function fetchReference(ref: {sha256:string; blob_id:string}, optsBlob: {maxBytes:number; signal?:AbortSignal}, allowRetry: boolean): Promise<Uint8Array> {
+    if (!Number.isSafeInteger(optsBlob.maxBytes) || optsBlob.maxBytes < 0) throw new HubError(0,'too_large');
+    if (!/^[0-9a-f]{64}$/.test(ref.sha256) || !BLOB_ID.test(ref.blob_id)) throw new HubError(0,'blob_unavailable');
     const found = await discover(optsBlob.signal);
     const grant = await request<DownloadGrant>(`/v1/blobs/${ref.sha256}/download?blob_id=${encodeURIComponent(ref.blob_id)}`,'GET',undefined,undefined,optsBlob.signal);
-    if (!grant.url || grant.method !== 'GET') throw new HubError(0,'blob_unavailable');
+    if (!grant || grant.blob_id !== ref.blob_id || grant.sha256 !== ref.sha256 || !grant.url || grant.method !== 'GET' ||
+        !Number.isSafeInteger(grant.size) || grant.size <= 0 || grant.size > optsBlob.maxBytes ||
+        grant.sha256_verified !== true || grant.integrity?.verified !== true ||
+        grant.integrity.algorithm !== 'sha256' || grant.integrity.value !== ref.sha256) throw new HubError(0,'blob_unavailable');
     if (Object.keys(grant.headers ?? {}).length) throw new HubError(0,'blob_unavailable');
     const target = directTarget(grant.url, found.caps.download_origins, grant.expires_at ?? '', DOWNLOAD_DEADLINE_MS, grant.object_expires_at);
-    try { return await readBounded(target, undefined, optsBlob.maxBytes, optsBlob.signal, false); }
-    catch (err) {
+    try {
+      // The recorded size bounds the read as well as the caller's attachment cap.
+      const bytes = await readBounded(target, undefined, grant.size, optsBlob.signal, false);
+      if (bytes.byteLength !== grant.size || createHash('sha256').update(bytes).digest('hex') !== ref.sha256) throw new HubError(409,'blob_proof_mismatch');
+      return bytes;
+    } catch (err) {
       if (allowRetry && err instanceof HubError && err.status === 403) return fetchReference(ref, optsBlob, false);
       throw err;
     }
@@ -125,7 +134,7 @@ export function createHubClient(opts: { baseUrl: string; credential: string; fet
       const response = await fetcher(url,{headers,redirect:'error',signal:signal ? AbortSignal.any([signal,deadline.signal]) : deadline.signal});
       // A provider refusal is status only. Its body must not become too_large
       // and swallow the stale-capability retry. Hub errors stay bounded below.
-      if (!hubErrorBody && !response.ok) {
+      if (!hubErrorBody && response.status !== 200) {
         try { await response.body?.cancel(); } catch { /* Keep the status, drop the provider body. */ }
         throw new HubError(response.status,'blob_unavailable');
       }

@@ -85,6 +85,9 @@ function caps(over: Record<string, unknown> = {}) {
 function proof(sha: string, size: number) {
   return { blob_id: blobID, sha256: sha, sha256_verified: true, integrity: { algorithm: 'sha256', value: sha, verified: true }, size, retention_class: '1d', expires_at: '2026-11-07T00:00:00.000Z', media_type: 'application/octet-stream' };
 }
+function downloadGrant(sha: string, size: number) {
+  return { ...proof(sha, size), method: 'GET', url: `${origin}/o?X-Amz-Signature=download-canary`, expires_at: '2026-11-06T00:10:00.000Z', object_expires_at: '2026-11-07T00:00:00.000Z', headers: {} };
+}
 interface Seen { url: string; method: string; authorization: string | null; cookie: string | null; bodyBytes: number }
 function scripted(handler: (url: URL, init: RequestInit | undefined, seen: Seen[]) => Promise<Response> | Response) {
   const seen: Seen[] = [];
@@ -145,7 +148,7 @@ test('direct upload and download reject unlisted origins, bad metadata, and cred
     const { fetchImpl, seen } = scripted(url => {
       if (url.pathname === '/v1/blob-capabilities') return json(caps());
       if (url.pathname === '/v1/blobs/uploads') return grant(item.upload ?? { method: 'PUT', url: `${origin}/o`, headers: uploadHeaders, expires_at: '2026-11-06T00:05:00.000Z' });
-      if (url.pathname.includes('/download')) return json({ blob_id: blobID, sha256: sha, ...(item.download ?? {}) });
+      if (url.pathname.includes('/download')) return json({ ...downloadGrant(sha, bytes.length), ...(item.download ?? {}) });
       if (url.origin === origin) return new Response(Buffer.from(bytes), { status: 200, headers: { 'Content-Length': '3' } });
       return new Response('foreign', { status: 200 });
     });
@@ -292,7 +295,8 @@ test('a stalled direct PUT is cancelled by the injected clock and does not compl
 });
 
 test('a large provider 403 is reminted once and a persistent 403 stops after that remint', async () => {
-  const sha = 'ab'.repeat(32);
+  const bytes = new Uint8Array([7]);
+  const sha = createHash('sha256').update(bytes).digest('hex');
   const xml = `<Error><Code>AccessDenied</Code><Message>${'x'.repeat(2048)}</Message></Error>`;
   for (const persistent of [false, true]) {
     let mints = 0;
@@ -301,21 +305,176 @@ test('a large provider 403 is reminted once and a persistent 403 stops after tha
       if (url.pathname === '/v1/blob-capabilities') return json(caps());
       if (url.pathname.endsWith('/download')) {
         mints += 1;
-        return json({ method: 'GET', url: `${origin}/o?n=${mints}`, expires_at: '2026-11-06T00:10:00.000Z', object_expires_at: '2026-11-07T00:00:00.000Z', headers: {} });
+        return json({ ...downloadGrant(sha, bytes.length), url: `${origin}/o?n=${mints}` });
       }
       downloads += 1;
       if (persistent || downloads === 1) return new Response(xml, { status: 403, headers: { 'Content-Type': 'application/xml', 'Content-Length': String(Buffer.byteLength(xml)) } });
-      return new Response(Buffer.from([7]), { status: 200, headers: { 'Content-Length': '1' } });
+      return new Response(Buffer.from(bytes), { status: 200, headers: { 'Content-Length': String(bytes.length) } });
     });
     const client = createHubClient({ baseUrl: 'http://hub.invalid', credential: 'hub-bearer-secret', fetch: fetchImpl, clock: fakeClock(startedAt) });
     if (!persistent) {
-      assert.deepEqual(await client.fetchBlob({ sha256: sha, blob_id: blobID }, { maxBytes: 1 }), new Uint8Array([7]));
+      assert.deepEqual(await client.fetchBlob({ sha256: sha, blob_id: blobID }, { maxBytes: 1 }), bytes);
       assert.equal(mints, 2);
+      assert.equal(downloads, 2);
     } else {
       await assert.rejects(client.fetchBlob({ sha256: sha, blob_id: blobID }, { maxBytes: 1 }), e => e instanceof HubError && e.status === 403 && e.code === 'blob_unavailable');
       assert.equal(mints, 2);
       assert.ok(mints <= 2);
+      assert.equal(downloads, 2);
     }
+  }
+});
+
+test('a reminted download grant must still match the requested reference and proof', async () => {
+  const bytes = new Uint8Array([7]);
+  const sha = createHash('sha256').update(bytes).digest('hex');
+  let mints = 0;
+  const { fetchImpl, seen } = scripted(url => {
+    if (url.pathname === '/v1/blob-capabilities') return json(caps());
+    if (url.pathname.endsWith('/download')) {
+      mints += 1;
+      return json({ ...downloadGrant(sha, bytes.length), sha256_verified: mints === 1 });
+    }
+    return new Response('denied', { status: 403 });
+  });
+  const client = createHubClient({ baseUrl: 'http://hub.invalid', credential: 'hub-bearer-secret', fetch: fetchImpl, clock: fakeClock(startedAt) });
+  await assert.rejects(client.fetchBlob({ sha256: sha, blob_id: blobID }, { maxBytes: 1 }), e => e instanceof HubError && e.code === 'blob_unavailable');
+  assert.equal(mints, 2);
+  assert.equal(seen.filter(call => new URL(call.url).origin === origin).length, 1);
+});
+
+test('direct downloads reject malformed requested references and byte caps before making requests', async () => {
+  const sha = 'ab'.repeat(32);
+  const { fetchImpl, seen } = scripted(() => json(caps()));
+  const client = createHubClient({ baseUrl: 'http://hub.invalid', credential: 'hub-bearer-secret', fetch: fetchImpl, clock: fakeClock(startedAt) });
+  for (const ref of [{ sha256: '../other', blob_id: blobID }, { sha256: sha, blob_id: 'other' }]) {
+    await assert.rejects(client.fetchBlob(ref, { maxBytes: 1 }), e => e instanceof HubError && e.code === 'blob_unavailable');
+  }
+  for (const maxBytes of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(client.fetchBlob({ sha256: sha, blob_id: blobID }, { maxBytes }), e => e instanceof HubError && e.code === 'too_large');
+  }
+  assert.equal(seen.length, 0);
+});
+
+test('direct downloads reject missing or mismatched grant identity, size and proof before contacting storage', async () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+  const sha = createHash('sha256').update(bytes).digest('hex');
+  const wrongSha = 'ab'.repeat(32);
+  const valid = downloadGrant(sha, bytes.length);
+  const cases: Array<{ name: string; grant: unknown }> = [
+    { name: 'null grant', grant: null },
+    { name: 'missing reference and proof', grant: { method: valid.method, url: valid.url, expires_at: valid.expires_at } },
+    { name: 'missing blob ID', grant: { ...valid, blob_id: undefined } },
+    { name: 'wrong blob ID', grant: { ...valid, blob_id: 'blo_00000000000000000000000002' } },
+    { name: 'missing SHA', grant: { ...valid, sha256: undefined } },
+    { name: 'wrong SHA', grant: { ...valid, sha256: wrongSha } },
+    { name: 'missing verified SHA', grant: { ...valid, sha256_verified: undefined } },
+    { name: 'unverified SHA', grant: { ...valid, sha256_verified: false } },
+    { name: 'truthy verified SHA', grant: { ...valid, sha256_verified: 'true' } },
+    { name: 'missing integrity', grant: { ...valid, integrity: undefined } },
+    { name: 'null integrity', grant: { ...valid, integrity: null } },
+    { name: 'missing verified integrity', grant: { ...valid, integrity: { algorithm: 'sha256', value: sha } } },
+    { name: 'unverified integrity', grant: { ...valid, integrity: { ...valid.integrity, verified: false } } },
+    { name: 'truthy verified integrity', grant: { ...valid, integrity: { ...valid.integrity, verified: 'true' } } },
+    { name: 'wrong integrity algorithm', grant: { ...valid, integrity: { ...valid.integrity, algorithm: 'md5' } } },
+    { name: 'missing integrity digest', grant: { ...valid, integrity: { algorithm: 'sha256', verified: true } } },
+    { name: 'wrong integrity digest', grant: { ...valid, integrity: { ...valid.integrity, value: wrongSha } } },
+    { name: 'missing size', grant: { ...valid, size: undefined } },
+    { name: 'zero size', grant: { ...valid, size: 0 } },
+    { name: 'negative size', grant: { ...valid, size: -1 } },
+    { name: 'fractional size', grant: { ...valid, size: 1.5 } },
+    { name: 'string size', grant: { ...valid, size: '3' } },
+    { name: 'unsafe size', grant: { ...valid, size: Number.MAX_SAFE_INTEGER + 1 } },
+    { name: 'size over caller cap', grant: { ...valid, size: bytes.length + 1 } },
+  ];
+  for (const item of cases) {
+    const { fetchImpl, seen } = scripted(url => {
+      if (url.pathname === '/v1/blob-capabilities') return json(caps());
+      if (url.pathname.endsWith('/download')) return json(item.grant);
+      return new Response(Buffer.from(bytes));
+    });
+    const client = createHubClient({ baseUrl: 'http://hub.invalid', credential: 'hub-bearer-secret', fetch: fetchImpl, clock: fakeClock(startedAt) });
+    await assert.rejects(client.fetchBlob({ sha256: sha, blob_id: blobID }, { maxBytes: bytes.length }), e => e instanceof HubError && e.code === 'blob_unavailable' && !JSON.stringify(e).includes('download-canary') && !String(e).includes(origin), item.name);
+    assert.equal(seen.length, 2, item.name);
+    assert.equal(seen.some(call => new URL(call.url).origin === origin), false, item.name);
+  }
+});
+
+test('direct full downloads require HTTP 200 and the recorded byte count and SHA', async () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+  const sha = createHash('sha256').update(bytes).digest('hex');
+  const cases: Array<{ name: string; status: number; body: number[] | null; length?: number; error?: string }> = [
+    { name: 'matching body with length', status: 200, body: [1, 2, 3], length: 3 },
+    { name: 'matching body without length', status: 200, body: [1, 2, 3] },
+    { name: 'wrong digest at matching size', status: 200, body: [3, 2, 1], length: 3, error: 'blob_proof_mismatch' },
+    { name: 'truncated body with recorded length', status: 200, body: [1, 2], length: 3, error: 'blob_proof_mismatch' },
+    { name: 'truncated body with short length', status: 200, body: [1, 2], length: 2, error: 'blob_proof_mismatch' },
+    { name: 'truncated body without length', status: 200, body: [1, 2], error: 'blob_proof_mismatch' },
+    { name: 'empty body', status: 200, body: null, error: 'blob_proof_mismatch' },
+    { name: 'body over recorded size', status: 200, body: [1, 2, 3, 4], error: 'too_large' },
+    { name: 'length over recorded size', status: 200, body: [1, 2, 3], length: 4, error: 'too_large' },
+    { name: 'unsolicited partial body', status: 206, body: [1, 2], length: 2, error: 'blob_unavailable' },
+    { name: 'unsolicited 206 with matching whole body', status: 206, body: [1, 2, 3], length: 3, error: 'blob_unavailable' },
+    { name: 'unsolicited no content', status: 204, body: null, error: 'blob_unavailable' },
+    { name: 'unsolicited created', status: 201, body: [1, 2, 3], error: 'blob_unavailable' },
+  ];
+  for (const item of cases) {
+    const { fetchImpl, seen } = scripted((url, init) => {
+      if (url.pathname === '/v1/blob-capabilities') return json(caps());
+      if (url.pathname.endsWith('/download')) return json(downloadGrant(sha, bytes.length));
+      assert.equal(new URL(url).origin, origin);
+      assert.equal(init?.redirect, 'error');
+      assert.equal(new Headers(init?.headers).get('range'), null);
+      return new Response(item.body === null ? null : Buffer.from(item.body), { status: item.status, headers: item.length === undefined ? {} : { 'Content-Length': String(item.length) } });
+    });
+    const client = createHubClient({ baseUrl: 'http://hub.invalid', credential: 'hub-bearer-secret', fetch: fetchImpl, clock: fakeClock(startedAt) });
+    // A larger caller cap must not let an oversized object bypass its recorded size.
+    const pending = client.fetchBlob({ sha256: sha, blob_id: blobID }, { maxBytes: bytes.length + 1 });
+    if (item.error) {
+      await assert.rejects(pending, e => e instanceof HubError && e.code === item.error && !JSON.stringify(e).includes('download-canary') && !String(e).includes(origin), item.name);
+    } else {
+      assert.deepEqual(await pending, bytes, item.name);
+    }
+    assert.equal(seen.filter(call => call.url.includes('/download')).length, 1, item.name);
+    const providerCalls = seen.filter(call => new URL(call.url).origin === origin);
+    assert.equal(providerCalls.length, 1, item.name);
+    assert.equal(providerCalls[0]?.authorization, null, item.name);
+    assert.equal(providerCalls[0]?.cookie, null, item.name);
+  }
+});
+
+test('direct downloads bound chunked reads and cancel after exceeding the recorded size', async () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+  const sha = createHash('sha256').update(bytes).digest('hex');
+  for (const oversized of [false, true]) {
+    let reads = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        reads += 1;
+        if (reads === 1) controller.enqueue(bytes.subarray(0, 1));
+        else if (reads === 2) controller.enqueue(oversized ? new Uint8Array([2, 3, 4]) : bytes.subarray(1));
+        else if (oversized) throw new Error('must stop reading');
+        else controller.close();
+      },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 });
+    const { fetchImpl } = scripted(url => {
+      if (url.pathname === '/v1/blob-capabilities') return json(caps());
+      if (url.pathname.endsWith('/download')) return json(downloadGrant(sha, bytes.length));
+      return new Response(body);
+    });
+    const client = createHubClient({ baseUrl: 'http://hub.invalid', credential: 'hub-bearer-secret', fetch: fetchImpl, clock: fakeClock(startedAt) });
+    const pending = client.fetchBlob({ sha256: sha, blob_id: blobID }, { maxBytes: 100 });
+    if (oversized) {
+      await assert.rejects(pending, e => e instanceof HubError && e.code === 'too_large');
+      assert.equal(reads, 2);
+      assert.equal(cancelled, true);
+    } else {
+      assert.deepEqual(await pending, bytes);
+      assert.equal(reads, 3);
+    }
+    assert.equal(body.locked, false);
   }
 });
 
