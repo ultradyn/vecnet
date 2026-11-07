@@ -1,0 +1,1245 @@
+{
+  "vecnet_ack": {
+    "$defs": {
+      "cursor": {
+        "pattern": "^e[0-9]+\\.[0-9]+$",
+        "type": "string"
+      },
+      "peerId": {
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "cursor": {
+        "$ref": "#/$defs/cursor"
+      },
+      "peer": {
+        "$ref": "#/$defs/peerId"
+      }
+    },
+    "required": [
+      "cursor"
+    ],
+    "type": "object"
+  },
+  "vecnet_blob_get": {
+    "additionalProperties": false,
+    "properties": {
+      "limit": {
+        "default": 131072,
+        "maximum": 131072,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "offset": {
+        "default": 0,
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "sha256": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "sha256"
+    ],
+    "type": "object"
+  },
+  "vecnet_blob_put": {
+    "additionalProperties": false,
+    "properties": {
+      "data_base64": {
+        "maxLength": 218456,
+        "type": "string"
+      },
+      "media_type": {
+        "type": "string"
+      },
+      "ttl_seconds": {
+        "maximum": 2147483648,
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "data_base64",
+      "media_type"
+    ],
+    "type": "object"
+  },
+  "vecnet_clear_avatar": {
+    "$defs": {
+      "peerId": {
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "as": {
+        "$ref": "#/$defs/peerId"
+      }
+    },
+    "type": "object"
+  },
+  "vecnet_group_add": {
+    "$defs": {
+      "groupId": {
+        "pattern": "^(team|grp)_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "peerId": {
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "as": {
+        "$ref": "#/$defs/peerId"
+      },
+      "group_id": {
+        "$ref": "#/$defs/groupId"
+      },
+      "members": {
+        "items": {
+          "$ref": "#/$defs/peerId"
+        },
+        "maxItems": 64,
+        "minItems": 1,
+        "type": "array"
+      }
+    },
+    "required": [
+      "group_id",
+      "members"
+    ],
+    "type": "object"
+  },
+  "vecnet_group_create": {
+    "$defs": {
+      "peerId": {
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "as": {
+        "$ref": "#/$defs/peerId"
+      },
+      "members": {
+        "items": {
+          "$ref": "#/$defs/peerId"
+        },
+        "maxItems": 64,
+        "minItems": 1,
+        "type": "array"
+      }
+    },
+    "required": [
+      "members"
+    ],
+    "type": "object"
+  },
+  "vecnet_groups": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  },
+  "vecnet_guide": {
+    "additionalProperties": false,
+    "properties": {
+      "topic": {
+        "default": "start",
+        "enum": [
+          "start",
+          "events",
+          "replying",
+          "etiquette"
+        ],
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "vecnet_inbox": {
+    "$defs": {
+      "peerId": {
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "after": {
+        "pattern": "^(e[0-9]+\\.[0-9]+|head)$",
+        "type": "string"
+      },
+      "limit": {
+        "maximum": 200,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "peer": {
+        "$ref": "#/$defs/peerId"
+      }
+    },
+    "type": "object"
+  },
+  "vecnet_peer_create": {
+    "$defs": {
+      "idempotencyKey": {
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "idempotency_key": {
+        "type": "string"
+      },
+      "kind": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "kind",
+      "name",
+      "idempotency_key"
+    ],
+    "type": "object"
+  },
+  "vecnet_peer_set_disabled": {
+    "$defs": {
+      "peerId": {
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "disabled": {
+        "type": "boolean"
+      },
+      "peer_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "peer_id",
+      "disabled"
+    ],
+    "type": "object"
+  },
+  "vecnet_peers": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  },
+  "vecnet_presence": {
+    "$defs": {
+      "peerId": {
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "timestamp": {
+        "format": "date-time",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "as": {
+        "$ref": "#/$defs/peerId"
+      },
+      "at": {
+        "$ref": "#/$defs/timestamp"
+      },
+      "capabilities": {
+        "items": {
+          "maxLength": 64,
+          "type": "string"
+        },
+        "maxItems": 64,
+        "type": "array"
+      },
+      "location": {
+        "maxLength": 64,
+        "type": "string"
+      },
+      "note": {
+        "maxLength": 512,
+        "type": "string"
+      },
+      "quota": {
+        "maxProperties": 16,
+        "properties": {
+          "weekly_remaining_pct": {
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "state": {
+        "enum": [
+          "idle",
+          "working",
+          "blocked",
+          "offline"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "state",
+      "at"
+    ],
+    "type": "object"
+  },
+  "vecnet_presence_subscribe": {
+    "additionalProperties": false,
+    "properties": {
+      "subscribe": {
+        "enum": [
+          "all",
+          "teams",
+          "none"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "subscribe"
+    ],
+    "type": "object"
+  },
+  "vecnet_react": {
+    "$defs": {
+      "messageId": {
+        "pattern": "^msg_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "peerId": {
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "priority": {
+        "enum": [
+          "wake",
+          "wake_idle",
+          "hold"
+        ],
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "as": {
+        "$ref": "#/$defs/peerId"
+      },
+      "emoji": {
+        "maxLength": 32,
+        "type": "string"
+      },
+      "message_id": {
+        "$ref": "#/$defs/messageId"
+      },
+      "op": {
+        "type": "string"
+      },
+      "priority": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "message_id",
+      "emoji"
+    ],
+    "type": "object"
+  },
+  "vecnet_receipt": {
+    "$defs": {
+      "deliveryId": {
+        "pattern": "^dly_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "delivery_id": {
+        "$ref": "#/$defs/deliveryId"
+      },
+      "note": {
+        "maxLength": 1024,
+        "type": "string"
+      },
+      "state": {
+        "enum": [
+          "processed",
+          "read",
+          "failed"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "delivery_id",
+      "state"
+    ],
+    "type": "object"
+  },
+  "vecnet_reply": {
+    "$defs": {
+      "attachment": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "blob_id"
+              ]
+            },
+            "then": {
+              "not": {
+                "required": [
+                  "blob_url"
+                ]
+              },
+              "properties": {
+                "size": {
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "retention_class",
+                "expires_at"
+              ]
+            }
+          },
+          {
+            "else": {
+              "properties": {
+                "expires_at": {
+                  "$ref": "#/$defs/timestamp"
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "retention_class": {
+                  "const": "keep"
+                }
+              },
+              "required": [
+                "retention_class"
+              ]
+            },
+            "then": {
+              "properties": {
+                "expires_at": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "anyOf": [
+                {
+                  "required": [
+                    "retention_class"
+                  ]
+                },
+                {
+                  "required": [
+                    "expires_at"
+                  ]
+                },
+                {
+                  "required": [
+                    "sha256_verified"
+                  ]
+                },
+                {
+                  "required": [
+                    "integrity"
+                  ]
+                }
+              ]
+            },
+            "then": {
+              "required": [
+                "blob_id"
+              ]
+            }
+          }
+        ],
+        "properties": {
+          "blob_id": {
+            "pattern": "^blo_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "integrity": {
+            "additionalProperties": false,
+            "properties": {
+              "algorithm": {
+                "const": "sha256"
+              },
+              "value": {
+                "pattern": "^[a-f0-9]{64}$",
+                "type": "string"
+              },
+              "verified": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "algorithm",
+              "value",
+              "verified"
+            ],
+            "type": "object"
+          },
+          "media_type": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 255,
+            "type": "string"
+          },
+          "retention_class": {
+            "enum": [
+              "1h",
+              "6h",
+              "12h",
+              "1d",
+              "7d",
+              "30d",
+              "keep"
+            ]
+          },
+          "sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "type": "string"
+          },
+          "sha256_verified": {
+            "type": "boolean"
+          },
+          "size": {
+            "maximum": 26214400,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sha256",
+          "size",
+          "media_type"
+        ],
+        "type": "object"
+      },
+      "attachmentReference": {
+        "$ref": "#/$defs/attachment",
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "sha256_verified"
+              ]
+            },
+            {
+              "required": [
+                "integrity"
+              ]
+            }
+          ]
+        }
+      },
+      "idempotencyKey": {
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+        "type": "string"
+      },
+      "messageId": {
+        "pattern": "^msg_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "peerId": {
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "priority": {
+        "enum": [
+          "wake",
+          "wake_idle",
+          "hold"
+        ],
+        "type": "string"
+      },
+      "timestamp": {
+        "format": "date-time",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "as": {
+        "$ref": "#/$defs/peerId"
+      },
+      "attachments": {
+        "items": {
+          "$ref": "#/$defs/attachmentReference"
+        },
+        "maxItems": 16,
+        "type": "array"
+      },
+      "expires_at": {
+        "$ref": "#/$defs/timestamp"
+      },
+      "idempotency_key": {
+        "$ref": "#/$defs/idempotencyKey"
+      },
+      "max_depth": {
+        "maximum": 64,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "message_id": {
+        "$ref": "#/$defs/messageId"
+      },
+      "metadata": {
+        "maxProperties": 32,
+        "type": "object"
+      },
+      "priority": {
+        "$ref": "#/$defs/priority"
+      },
+      "text": {
+        "maxLength": 65536,
+        "type": "string"
+      }
+    },
+    "required": [
+      "message_id",
+      "text",
+      "priority",
+      "idempotency_key"
+    ],
+    "type": "object"
+  },
+  "vecnet_send": {
+    "$defs": {
+      "approvalId": {
+        "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "approvalRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "$ref": "#/$defs/approvalId"
+          },
+          "escalate_to_operator": {
+            "default": true,
+            "type": "boolean"
+          },
+          "expires_at": {
+            "$ref": "#/$defs/timestamp"
+          },
+          "options": {
+            "default": [
+              "yes",
+              "no"
+            ],
+            "items": {
+              "maxLength": 64,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "minItems": 2,
+            "type": "array"
+          },
+          "question": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id",
+          "question",
+          "options",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "approvalResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "$ref": "#/$defs/approvalId"
+          },
+          "decision": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 2048,
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id",
+          "decision"
+        ],
+        "type": "object"
+      },
+      "attachment": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "blob_id"
+              ]
+            },
+            "then": {
+              "not": {
+                "required": [
+                  "blob_url"
+                ]
+              },
+              "properties": {
+                "size": {
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "retention_class",
+                "expires_at"
+              ]
+            }
+          },
+          {
+            "else": {
+              "properties": {
+                "expires_at": {
+                  "$ref": "#/$defs/timestamp"
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "retention_class": {
+                  "const": "keep"
+                }
+              },
+              "required": [
+                "retention_class"
+              ]
+            },
+            "then": {
+              "properties": {
+                "expires_at": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "anyOf": [
+                {
+                  "required": [
+                    "retention_class"
+                  ]
+                },
+                {
+                  "required": [
+                    "expires_at"
+                  ]
+                },
+                {
+                  "required": [
+                    "sha256_verified"
+                  ]
+                },
+                {
+                  "required": [
+                    "integrity"
+                  ]
+                }
+              ]
+            },
+            "then": {
+              "required": [
+                "blob_id"
+              ]
+            }
+          }
+        ],
+        "properties": {
+          "blob_id": {
+            "pattern": "^blo_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "integrity": {
+            "additionalProperties": false,
+            "properties": {
+              "algorithm": {
+                "const": "sha256"
+              },
+              "value": {
+                "pattern": "^[a-f0-9]{64}$",
+                "type": "string"
+              },
+              "verified": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "algorithm",
+              "value",
+              "verified"
+            ],
+            "type": "object"
+          },
+          "media_type": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 255,
+            "type": "string"
+          },
+          "retention_class": {
+            "enum": [
+              "1h",
+              "6h",
+              "12h",
+              "1d",
+              "7d",
+              "30d",
+              "keep"
+            ]
+          },
+          "sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "type": "string"
+          },
+          "sha256_verified": {
+            "type": "boolean"
+          },
+          "size": {
+            "maximum": 26214400,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sha256",
+          "size",
+          "media_type"
+        ],
+        "type": "object"
+      },
+      "attachmentReference": {
+        "$ref": "#/$defs/attachment",
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "sha256_verified"
+              ]
+            },
+            {
+              "required": [
+                "integrity"
+              ]
+            }
+          ]
+        }
+      },
+      "groupId": {
+        "pattern": "^(team|grp)_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "idempotencyKey": {
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+        "type": "string"
+      },
+      "jobId": {
+        "pattern": "^job_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "jobRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "input": {},
+          "instructions": {
+            "maxLength": 16384,
+            "minLength": 1,
+            "type": "string"
+          },
+          "job_key": {
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+            "type": "string"
+          },
+          "operation": {
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+            "type": "string"
+          },
+          "version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "version",
+          "job_key",
+          "operation",
+          "instructions",
+          "input"
+        ],
+        "type": "object"
+      },
+      "jobStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "$ref": "#/$defs/jobId"
+          },
+          "output": {},
+          "sequence": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "accepted",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "sequence",
+          "state"
+        ],
+        "type": "object"
+      },
+      "messageId": {
+        "pattern": "^msg_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "origin": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "maxLength": 192,
+            "type": "string"
+          },
+          "message_id": {
+            "maxLength": 192,
+            "type": "string"
+          },
+          "system": {
+            "enum": [
+              "grokbot",
+              "dot",
+              "github",
+              "openclaw",
+              "pagchat",
+              "c2c",
+              "other"
+            ],
+            "type": "string"
+          },
+          "thread_id": {
+            "maxLength": 192,
+            "type": "string"
+          }
+        },
+        "required": [
+          "system",
+          "thread_id"
+        ],
+        "type": "object"
+      },
+      "peerId": {
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "priority": {
+        "enum": [
+          "wake",
+          "wake_idle",
+          "hold"
+        ],
+        "type": "string"
+      },
+      "recipient": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/peerId"
+          },
+          {
+            "$ref": "#/$defs/groupId"
+          }
+        ]
+      },
+      "threadId": {
+        "pattern": "^thr_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "timestamp": {
+        "format": "date-time",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "approval_request": {
+        "$ref": "#/$defs/approvalRequest"
+      },
+      "approval_response": {
+        "$ref": "#/$defs/approvalResponse"
+      },
+      "as": {
+        "$ref": "#/$defs/peerId"
+      },
+      "attachments": {
+        "items": {
+          "$ref": "#/$defs/attachmentReference"
+        },
+        "maxItems": 16,
+        "type": "array"
+      },
+      "content": {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "maxLength": 65536,
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "expires_at": {
+        "$ref": "#/$defs/timestamp"
+      },
+      "history_access": {
+        "enum": [
+          "from_join",
+          "full"
+        ],
+        "type": "string"
+      },
+      "idempotency_key": {
+        "$ref": "#/$defs/idempotencyKey"
+      },
+      "in_reply_to": {
+        "$ref": "#/$defs/messageId"
+      },
+      "job_request": {
+        "$ref": "#/$defs/jobRequest"
+      },
+      "job_status": {
+        "$ref": "#/$defs/jobStatus"
+      },
+      "kind": {
+        "default": "message",
+        "enum": [
+          "message",
+          "approval_request",
+          "approval_response",
+          "job_status"
+        ],
+        "type": "string"
+      },
+      "locked_participants": {
+        "type": "boolean"
+      },
+      "max_depth": {
+        "maximum": 64,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "metadata": {
+        "maxProperties": 32,
+        "type": "object"
+      },
+      "origin": {
+        "$ref": "#/$defs/origin"
+      },
+      "priority": {
+        "$ref": "#/$defs/priority"
+      },
+      "recipients": {
+        "items": {
+          "$ref": "#/$defs/recipient"
+        },
+        "maxItems": 32,
+        "minItems": 1,
+        "type": "array"
+      },
+      "thread_id": {
+        "$ref": "#/$defs/threadId"
+      },
+      "thread_title": {
+        "maxLength": 200,
+        "type": "string"
+      }
+    },
+    "required": [
+      "idempotency_key",
+      "priority",
+      "content"
+    ],
+    "type": "object"
+  },
+  "vecnet_set_avatar": {
+    "$defs": {
+      "peerId": {
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "as": {
+        "$ref": "#/$defs/peerId"
+      },
+      "data_base64": {
+        "maxLength": 218456,
+        "type": "string"
+      },
+      "url": {
+        "maxLength": 2048,
+        "pattern": "^https://",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "vecnet_subscriptions": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  },
+  "vecnet_thread": {
+    "$defs": {
+      "messageId": {
+        "pattern": "^msg_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "threadId": {
+        "pattern": "^thr_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "after": {
+        "$ref": "#/$defs/messageId"
+      },
+      "id": {
+        "$ref": "#/$defs/threadId"
+      },
+      "limit": {
+        "maximum": 200,
+        "minimum": 1,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "type": "object"
+  },
+  "vecnet_threads": {
+    "$defs": {
+      "groupId": {
+        "pattern": "^(team|grp)_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "timestamp": {
+        "format": "date-time",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "cursor": {
+        "maxLength": 512,
+        "type": "string"
+      },
+      "group": {
+        "$ref": "#/$defs/groupId"
+      },
+      "limit": {
+        "maximum": 200,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "participant": {
+        "maxLength": 64,
+        "type": "string"
+      },
+      "since": {
+        "$ref": "#/$defs/timestamp"
+      }
+    },
+    "type": "object"
+  },
+  "vecnet_whoami": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

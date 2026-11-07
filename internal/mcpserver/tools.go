@@ -90,6 +90,19 @@ func (s *Server) toolsCall(ctx context.Context, sess *Session, req *Request) (re
 	if len(raw) == 0 || bytes.Equal(raw, nullID) {
 		raw = []byte("{}")
 	}
+	// Some clients inject protocol metadata into tool arguments. It is never
+	// a vecnet field and must not reach prechecks, validation or handlers.
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) == nil {
+		if _, present := fields["_meta"]; present {
+			delete(fields, "_meta")
+			raw = encodeFields(fields)
+			if d, _ := ctx.Value(diagKey{}).(*requestDiag); d != nil {
+				d.toolArgumentsMetaPresent = true
+			}
+		}
+	}
+	raw = normalizeToolTimestamps(p.Name, raw)
 	if t.precheck != nil {
 		if err := t.precheck(raw); err != nil {
 			return toolOutcome(p.Name, nil, err)
@@ -153,7 +166,11 @@ func invalidArguments(name string, err error) error {
 	if name == "vecnet_send" || name == "vecnet_reply" {
 		hint = guideSendErrorHint
 	}
-	return &RPCError{Code: ErrInvalidParams, Message: "invalid arguments for " + name + ": " + se.Message + hint,
+	// SchemaError.Message may contain rejected values (notably pattern/enum
+	// errors), including arbitrarily long strings. Only structural information
+	// and static wording are safe on this MCP response path, including errors
+	// returned by prechecks and hub handlers. Keep the code/path and guide hint.
+	return &RPCError{Code: ErrInvalidParams, Message: "invalid arguments for " + name + ": value does not satisfy the schema or hub constraint" + hint,
 		Data: map[string]any{"path": se.Path}}
 }
 
@@ -1320,7 +1337,7 @@ func buildTools() *toolTable {
 				panic("mcpserver: tool shape " + spec.name + ": " + err.Error())
 			}
 		}
-		t.listed = append(t.listed, listEntry(&mcp.Tool{Name: spec.name, Description: spec.description, InputSchema: input, Annotations: spec.annotations}, spec.meta, spec.output))
+		t.listed = append(t.listed, projectTool(listEntry(&mcp.Tool{Name: spec.name, Description: spec.description, InputSchema: input, Annotations: spec.annotations}, spec.meta, spec.output)))
 		t.byName[spec.name] = &tool{schema: sch, precheck: spec.precheck, call: spec.call}
 	}
 	return t
