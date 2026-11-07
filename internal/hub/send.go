@@ -645,7 +645,7 @@ func (h *Hub) insertMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg
 		budget = *thr.Budget
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE threads SET message_count = ?, budget_remaining = ?, last_message_at = max(last_message_at,?), last_allocated_seq = ? WHERE thr_id = ?`,
+		`UPDATE threads SET message_count = ?, budget_remaining = ?, last_message_at = ?, last_allocated_seq = ? WHERE thr_id = ?`,
 		thr.MessageCount, budget, msg.CreatedAt, seq, thr.ID); err != nil {
 		return fmt.Errorf("hub: update thread: %w", err)
 	}
