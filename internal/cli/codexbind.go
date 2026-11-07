@@ -303,6 +303,8 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 		}
 		file.Bindings = kept
 	case "bind":
+		// Admission time must include any time spent waiting for the locks.
+		now = nowTime().UTC()
 		for _, b := range other {
 			if b.ThreadID == thread && normalizeHub(b.Hub) == binding.Hub {
 				return usageErr("already bound: Codex thread in another registered source")
@@ -327,16 +329,22 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 		}
 		if existing >= 0 {
 			b := file.Bindings[existing]
-			if o.has("takeover") {
+			if o.has("takeover") || (o.has("renew") && !now.Before(b.ExpiresAt)) {
+				home := b.CodexHome
+				if o.has("takeover") {
+					home = binding.CodexHome
+				}
 				rows := append([]codexBinding{}, other...)
 				for i, row := range file.Bindings {
 					if i != existing {
 						rows = append(rows, row)
 					}
 				}
-				if err := codexBindingLimit(a.getenv, rows, binding.CodexHome, now); err != nil {
+				if err := codexBindingLimit(a.getenv, rows, home, now); err != nil {
 					return err
 				}
+			}
+			if o.has("takeover") {
 				b = binding
 				file.Bindings[existing] = b
 			}

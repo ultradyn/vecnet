@@ -430,11 +430,6 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	if v := strings.TrimSpace(a.getenv("VECNET_PROFILE")); v != "" && v != a.namedProfile() {
 		return hookResult{}
 	}
-	// Oversized whitespace has historically fallen back to a manual hook.
-	// It is not readable hook identity input and cannot opt into automation.
-	if len(raw) <= 1<<20 {
-		a.autoCodexAction("hook", args)
-	}
 	c, name, ch, e := a.connect()
 	if e != nil || ctx.Err() != nil {
 		return hookResult{}
@@ -469,6 +464,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	// reading the cursor, polling and claiming, avoiding stale concurrent
 	// polls moving the cursor backwards.
 	stop := false
+	admitted := false
 	e = f.update(ctx, func(s *hookState) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -506,6 +502,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			// The notice record commits only if the notice was written.
 			return publish(hookOutput(event, notice))
 		case admitBound:
+			admitted = true
 			fmt.Fprintf(a.stderr, "vecnet: hook: profile %s bound to this Claude Code session\n", hint.profile)
 			// An automatic binding claims nothing on its own run, so the
 			// session's other hooks for this event can register first and
@@ -519,12 +516,19 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		case admitRebound:
 			fmt.Fprintf(a.stderr, "vecnet: hook: profile %s rebound to this Claude Code session\n", hint.profile)
 		}
+		admitted = true
 		if event == "post-tool" && !s.LastPostToolPoll.IsZero() && now.Sub(s.LastPostToolPoll) < hookPostToolEvery {
 			return errHookRateLimited
 		}
 		s.LastPostToolPoll = now
 		return nil
 	})
+	// Admission is authoritative, including when polling is rate-limited.
+	// Start only after the state transaction released its lock, reusing the
+	// validated input. Oversized whitespace retains its manual-only fallback.
+	if admitted && (e == nil || errors.Is(e, errHookRateLimited)) && len(raw) <= 1<<20 {
+		a.autoCodexAction("hook", args)
+	}
 	if stop || e != nil {
 		return hookResult{}
 	}

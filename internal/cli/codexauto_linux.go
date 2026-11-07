@@ -79,6 +79,13 @@ func (a *app) startCodexAuto(thread string) {
 }
 
 func (a *app) cmdCodexAuto(args []string) error {
+	// This internal command runs only in the detached helper process. A
+	// context cannot interrupt blocked filesystem I/O, so enforce its lifetime
+	// at the process boundary. Exit kills every potential writer together;
+	// registry, binding and inherited debounce locks stay owned until then.
+	deadline := time.Now().Add(15 * time.Second)
+	watchdog := time.AfterFunc(time.Until(deadline), func() { os.Exit(1) })
+	defer watchdog.Stop()
 	o, err := parseFlags("codex auto-register", args, map[string]flagKind{"thread": strFlag, "codex-home": strFlag, "hook": boolFlag})
 	if err != nil || len(o.pos) != 0 {
 		return errCodexDelivery
@@ -93,7 +100,7 @@ func (a *app) cmdCodexAuto(args []string) error {
 	if st, err := lease.Stat(); err != nil || !st.Mode().IsRegular() {
 		return errCodexDelivery
 	}
-	ctx, cancel := context.WithTimeout(a.ctx, 15*time.Second)
+	ctx, cancel := context.WithDeadline(a.ctx, deadline)
 	defer cancel()
 	worker := *a
 	worker.ctx = ctx
@@ -113,8 +120,8 @@ func (a *app) codexAdmission(ctx context.Context, hub, config, path string, regi
 		data = filepath.Join(a.getenv("HOME"), ".local", "share")
 	}
 	if data == "" {
-		return func() {}, nil, nil
-	} // preserve explicit bind without a home
+		return nil, nil, errCodexDelivery
+	}
 	if !filepath.IsAbs(data) {
 		return nil, nil, errCodexDelivery
 	}
@@ -204,7 +211,8 @@ func (a *app) updateCodexAuto(config, path string, binding codexBinding, old *co
 	if (old == nil) != (current == nil) || (old != nil && *old != *current) {
 		return errCodexDelivery
 	}
-	now := binding.CreatedAt
+	// Evaluate expiry under serialization, after any registry/binding wait.
+	now := time.Now().UTC()
 
 	for _, b := range other {
 		if normalizeHub(b.Hub) == binding.Hub && (b.ThreadID == binding.ThreadID || (b.Profile == binding.Profile && b.As == binding.As)) {
@@ -219,6 +227,18 @@ func (a *app) updateCodexAuto(config, path string, binding codexBinding, old *co
 			return errCodexDelivery
 		}
 	}
+	// Expiry releases a slot. Reviving the same thread is admission too.
+	if current == nil || current.ThreadID != binding.ThreadID || !now.Before(current.ExpiresAt) {
+		rows := append([]codexBinding{}, other...)
+		for _, b := range f.Bindings {
+			if b.Profile != binding.Profile || b.As != binding.As {
+				rows = append(rows, b)
+			}
+		}
+		if err = codexBindingLimit(a.getenv, rows, binding.CodexHome, now); err != nil {
+			return err
+		}
+	}
 	if current != nil && current.ThreadID == binding.ThreadID {
 		if current.ExpiresAt.Before(binding.ExpiresAt) {
 			current.ExpiresAt = binding.ExpiresAt
@@ -229,15 +249,6 @@ func (a *app) updateCodexAuto(config, path string, binding codexBinding, old *co
 			}
 		}
 	} else {
-		rows := append([]codexBinding{}, other...)
-		for _, b := range f.Bindings {
-			if b.Profile != binding.Profile || b.As != binding.As {
-				rows = append(rows, b)
-			}
-		}
-		if err = codexBindingLimit(a.getenv, rows, binding.CodexHome, now); err != nil {
-			return err
-		}
 		if current == nil {
 			f.Bindings = append(f.Bindings, binding)
 		} else {

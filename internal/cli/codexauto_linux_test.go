@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -236,6 +238,34 @@ func TestCodexAutoTwoHubs(t *testing.T) {
 	}
 }
 func TestCodexAutoLimit(t *testing.T) {
+	t.Run("missing authoritative data root", func(t *testing.T) {
+		f := autoFixture(t)
+		f.env["VECNET_CODEX_MAX_BINDINGS"] = "1"
+		f.bind("p", bindT1)
+		root := f.env["HOME"]
+		f.env["VECNET_CONFIG"] = filepath.Join(root, "other", "v.toml")
+		f.path = filepath.Join(root, "other", "codex", "bindings.json")
+		f.config(autoHub(t))
+		// Both sources exist in the shared registry before the omission.
+		f.env["VECNET_CODEX_MAX_BINDINGS"] = "2"
+		f.bind("q", bindT2)
+		f.ok("--net", "q", "unbind")
+		f.env["VECNET_CODEX_MAX_BINDINGS"] = "1"
+		before := f.raw()
+		delete(f.env, "HOME")
+		delete(f.env, "XDG_DATA_HOME")
+		code, _, _ := f.run("--net", "q", "bind", "--thread", bindT2)
+		if code != 1 || !bytes.Equal(before, f.raw()) {
+			t.Fatal("unknown shared capacity admitted a binding or cleared opt-out")
+		}
+		f.env["VECNET_PROFILE"] = "q"
+		_ = autoRegister(f, bindT2)
+		if !bytes.Equal(before, f.raw()) {
+			t.Fatal("automatic unknown-capacity admission mutated opt-out")
+		}
+		f.ok("bindings", "--json")
+		f.ok("--net", "q", "unbind")
+	})
 	for _, combined := range []bool{false, true} {
 		t.Run(fmt.Sprint(combined), func(t *testing.T) {
 			f := autoFixture(t)
@@ -268,6 +298,64 @@ func TestCodexAutoLimit(t *testing.T) {
 			}
 
 		})
+	}
+}
+
+func TestCodexAutoLimitReactivation(t *testing.T) {
+	for _, combined := range []bool{false, true} {
+		for _, manual := range []bool{false, true} {
+			for _, occupied := range []bool{false, true} {
+				t.Run(fmt.Sprintf("combined=%v/manual=%v/occupied=%v", combined, manual, occupied), func(t *testing.T) {
+					f := autoFixture(t)
+					f.env["VECNET_CODEX_MAX_BINDINGS"] = "1"
+					f.now = time.Now().Add(-25 * time.Hour).UTC()
+					f.bind("p", bindT1, "--attended", "--idle-dormant", "6h")
+					beforeRow := autoFile(f).Bindings[0]
+					originalConfig, originalPath, originalHub := f.env["VECNET_CONFIG"], f.path, f.hub
+					if combined {
+						f.env["VECNET_CONFIG"] = filepath.Join(f.env["HOME"], "other", "v.toml")
+						f.path = filepath.Join(f.env["HOME"], "other", "codex", "bindings.json")
+						f.config(autoHub(t))
+					}
+					f.now = time.Now().UTC()
+					if occupied {
+						f.bind("q", bindT2)
+					}
+					f.env["VECNET_CONFIG"], f.path, f.hub = originalConfig, originalPath, originalHub
+					before := f.raw()
+					if manual {
+						// Equality is expired, too: a renewal at the expiry boundary admits anew.
+						f.now = beforeRow.ExpiresAt
+						code, _, errs := f.run("--net", "p", "bind", "--thread", bindT1, "--renew")
+						if occupied && (code != 1 || !strings.Contains(errs, "binding limit 1")) {
+							t.Fatalf("expired manual renewal bypassed cap: exit=%d stderr=%s", code, errs)
+						}
+						if !occupied && code != 0 {
+							t.Fatalf("free-slot renewal refused: %s", errs)
+						}
+					} else {
+						err := autoRegister(f, bindT1)
+						if occupied && err == nil {
+							t.Fatal("expired auto refresh bypassed cap")
+						}
+					}
+					if occupied {
+						if !bytes.Equal(before, f.raw()) {
+							t.Fatal("refused reactivation changed bindings")
+						}
+					} else {
+						after := *codexBindingFor(autoFile(f), "p", "")
+						if !after.ExpiresAt.After(beforeRow.ExpiresAt) {
+							t.Fatal("free-slot reactivation did not extend expiry")
+						}
+						after.ExpiresAt = beforeRow.ExpiresAt
+						if after != beforeRow {
+							t.Fatalf("reactivation changed renewal fields: before=%+v after=%+v", beforeRow, after)
+						}
+					}
+				})
+			}
+		}
 	}
 }
 
@@ -423,5 +511,115 @@ func TestCodexAutoHookInput(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Replace a validated config while the real helper is paused at the external
+// probe boundary. Context cancellation cannot interrupt the ensuing FIFO open.
+func TestCodexAutoBlockedConfigDeadline(t *testing.T) {
+	f := autoFixture(t)
+	root := f.env["HOME"]
+	config := f.env["VECNET_CONFIG"]
+	original, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveryWrite(t, filepath.Join(root, "probe-hold"), "", 0600)
+	a := &app{ctx: context.Background(), getenv: func(k string) string { return f.env[k] }}
+	paths, err := a.codexDeliveryPaths(f.hub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leasePath := filepath.Join(filepath.Dir(paths.Lease), "auto-blocked-config.lock")
+	lease, err := deliveryPrivateFile(leasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	if locked, err := deliveryLock(lease); err != nil || !locked {
+		t.Fatalf("debounce lease: %v %v", locked, err)
+	}
+	cmd := exec.Command(f.env["VECNET_BIN"], "--net", "p", "codex", "auto-register", "--thread", bindT1, "--codex-home", f.home)
+	for k, v := range f.env {
+		if k != "CODEX_THREAD_ID" {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
+	cmd.Env = append(cmd.Env, "VECNET_CODEX_AUTO_DELIVERY=0", "GORACE=atexit_sleep_ms=0")
+	cmd.ExtraFiles = []*os.File{lease}
+	var diagnostics bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &diagnostics, &diagnostics
+	started := time.Now()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	lease.Close() // only the actual helper retains the inherited ownership
+	done := make(chan error, 1)
+	exited := make(chan struct{})
+	go func() { done <- cmd.Wait(); close(exited) }()
+	defer func() { _ = cmd.Process.Kill(); <-exited }()
+	deliveryWait(t, func() bool { _, err := os.Stat(filepath.Join(root, "probe-started")); return err == nil })
+	saved := config + ".saved"
+	if err := os.Rename(config, saved); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(config, 0600); err != nil {
+		t.Fatal(err)
+	}
+	deliveryWrite(t, filepath.Join(root, "probe-release"), "", 0600)
+	lockPaths := []string{filepath.Join(paths.Root, "registry.lock"), f.path + ".lock", leasePath}
+	locked := func(path string) bool {
+		file, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			return false
+		}
+		defer file.Close()
+		ok, err := deliveryLock(file)
+		return err == nil && !ok
+	}
+	deliveryWait(t, func() bool { return locked(lockPaths[0]) && locked(lockPaths[1]) && locked(lockPaths[2]) })
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("blocked helper reported success")
+		}
+	case <-time.After(17 * time.Second):
+		t.Fatal("blocked helper survived its 15-second lifetime with registry/binding/debounce locks")
+	}
+	if elapsed := time.Since(started); elapsed > 17*time.Second {
+		t.Fatalf("deadline exit took %s", elapsed)
+	}
+	t.Logf("blocked helper exited after %s", time.Since(started))
+	for _, path := range lockPaths {
+		file, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ok, err := deliveryLock(file)
+		file.Close()
+		if err != nil || !ok {
+			t.Fatalf("helper retained lock %s: %v", filepath.Base(path), err)
+		}
+	}
+	// Opening the old FIFO cannot revive a late writer after process death.
+	fifo, err := os.OpenFile(config, os.O_RDWR|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fifo.Write(original); err != nil {
+		t.Fatal(err)
+	}
+	fifo.Close()
+	if err := os.Rename(saved, config); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(f.path); !os.IsNotExist(err) {
+		t.Fatal("timed-out helper persisted a binding")
+	}
+	f.bind("q", bindT2)
+	before := f.raw()
+	time.Sleep(100 * time.Millisecond)
+	if !bytes.Equal(before, f.raw()) {
+		t.Fatal("late helper mutation overwrote replacement writer")
 	}
 }

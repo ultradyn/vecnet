@@ -77,6 +77,11 @@ func (a *app) codexAutoInput(thread, home string) (string, Profile, string, stri
 	if err != nil {
 		return "", Profile{}, "", "", err
 	}
+	// Reject non-regular inputs at preflight. A later pathname replacement
+	// or blocked regular-file read is still bounded by the helper's lifetime.
+	if st, err := os.Stat(config); err != nil || !st.Mode().IsRegular() {
+		return "", Profile{}, "", "", errCodexDelivery
+	}
 	cfg, err := loadConfig(config)
 	if err != nil {
 		return "", Profile{}, "", "", err
