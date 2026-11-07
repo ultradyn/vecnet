@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -100,6 +101,9 @@ func newAppHookFixture(t *testing.T) *appHookFixture {
 		hookPage(w, f.events[start:], next)
 	})
 	f.env["CODEX_HOME"] = filepath.Join(filepath.Dir(f.path), "codex")
+	f.env["XDG_RUNTIME_DIR"] = filepath.Join(filepath.Dir(f.path), "runtime")
+	f.env["XDG_DATA_HOME"] = filepath.Join(filepath.Dir(f.path), "data")
+	f.env["VECNET_CODEX_AUTO_DELIVERY"] = "0"
 	f.env["VECNET_CODEX_BINDINGS"] = filepath.Join(filepath.Dir(f.path), "bindings.json")
 	raw, err := os.ReadFile(f.env["VECNET_CONFIG"])
 	if err != nil {
@@ -186,7 +190,7 @@ func (f *appHookFixture) release(t *testing.T, nonce string, n int) {
 func TestHookAppServerEmpty(t *testing.T) {
 	f := newAppHookFixture(t)
 	_, out, _ := f.run(t, "c1", "wake")
-	if out != "{\"version\":1,\"deliveries\":[]}\n" {
+	if out != "{\"version\":1,\"deliveries\":[],\"lifecycle\":\"receipt-display-v1\"}\n" {
 		t.Fatalf("empty output %q", out)
 	}
 }
@@ -630,7 +634,7 @@ func TestHookAppServerBoundedLists(t *testing.T) {
 		f.add(t, "wake_idle", "new", "")
 		_, _, errs := f.run(t, "c1", "wake")
 		s = f.state(t)
-		if len(s.Replay) != 64 || s.Replay[0].ID != "old_1" || s.Replay[63].ID != "dly_1" || !strings.Contains(errs, "old_0") {
+		if len(s.Replay) != 64 || s.Replay[0].ID != "old_0" || s.Replay[63].ID != "old_63" || s.AppCursor != "e1.0" || errs != "" {
 			t.Fatalf("replay bound %+v stderr %q", s, errs)
 		}
 	})
@@ -646,7 +650,7 @@ func TestHookAppServerBoundedLists(t *testing.T) {
 		f.add(t, "wake", "new", "")
 		_, _, errs := f.run(t, "c1", "wake")
 		s = f.state(t)
-		if len(s.Claims) != 256 || s.Claims[0].ID != "old_1" || s.Claims[255].ID != "dly_1" || !strings.Contains(errs, "old_0") {
+		if len(s.Claims) != 256 || s.Claims[0].ID != "old_0" || s.Claims[255].ID != "old_255" || s.AppCursor != "e1.0" || errs != "" {
 			t.Fatalf("claim bound %+v stderr %q", s, errs)
 		}
 	})
@@ -664,5 +668,447 @@ func TestHookAppServerCorruptStateRechecksIdentity(t *testing.T) {
 	}
 	if s := f.state(t); s.AppCursor != "e1.1" || len(s.Shown) != 0 || len(s.Claims) != 0 {
 		t.Fatalf("corrupt state recovery %+v", s)
+	}
+}
+
+// Primary behavioral regressions prepared during the read-only baseline barrier.
+func receiptArgs(f *appHookFixture, nonce, key, ids string) []string {
+	return []string{"--release", "--claim", nonce, "--receipt-key", key, "--delivery-ids", ids, "--expect-hub", f.hub, "--expect-caller", "peer_test"}
+}
+
+func receiptConfirmation(t *testing.T, raw, key string, ids ...string) {
+	t.Helper()
+	var out struct {
+		Version    int      `json:"version"`
+		ReceiptKey string   `json:"receipt_key"`
+		Deliveries []string `json:"deliveries"`
+		Lifecycle  string   `json:"lifecycle"`
+	}
+	if json.Unmarshal([]byte(raw), &out) != nil || out.Version != 1 || out.ReceiptKey != key || out.Deliveries == nil || !slices.Equal(out.Deliveries, ids) || out.Lifecycle != "receipt-display-v1" {
+		t.Fatalf("missing exact committed receipt confirmation: %q", raw)
+	}
+}
+
+func receiptBatchFixture(t *testing.T) *appHookFixture {
+	t.Helper()
+	f := newAppHookFixture(t)
+	f.env["XDG_RUNTIME_DIR"] = filepath.Join(filepath.Dir(f.path), "runtime")
+	f.env["XDG_DATA_HOME"] = filepath.Join(filepath.Dir(f.path), "data")
+	f.env["VECNET_CODEX_AUTO_DELIVERY"] = "0"
+	f.add(t, "wake", "one", "")
+	f.add(t, "wake", "two", "")
+	f.run(t, "batch", "wake")
+	f.add(t, "wake", "other", "")
+	f.run(t, "other", "wake")
+	if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error {
+		s.AckAfter = "opaque-predecessor"
+		s.Replay = []replayRef{{ID: "dly_1", After: "e1.0", Priority: "wake", Order: 1}, {ID: "unrelated", After: "opaque-other", Priority: "wake_idle", Order: 4}}
+		s.recordDisplay("prior")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func TestHookReceiptExactPinnedBatch(t *testing.T) {
+	t.Run("exact", func(t *testing.T) {
+		f := receiptBatchFixture(t)
+		before := readHookState(t, f.path)
+		out, _ := runHook(t, f.env, receiptArgs(f, "batch", "vn.original", "dly_2,dly_1")...)
+		receiptConfirmation(t, out, "vn.original", "dly_2", "dly_1")
+		s := readHookState(t, f.path)
+		if !slices.Equal(s.Displayed, []string{"prior", "dly_2", "dly_1"}) || len(s.Claims) != 1 || s.Claims[0] != before.Claims[2] || len(s.Replay) != 1 || s.Replay[0] != before.Replay[1] || s.AckAfter != before.AckAfter || s.PollCursor != before.PollCursor || s.AppCursor != before.AppCursor || s.Hub != before.Hub || s.Caller != before.Caller || s.As != before.As || s.Cred != before.Cred || !slices.Equal(s.Shown, []string{"dly_3", "prior", "dly_2", "dly_1"}) {
+			t.Fatalf("receipt changed unrelated state or missed positive proof: %+v", s)
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		change func(*appHookFixture, []string) []string
+		state  func(*hookState)
+	}{
+		{name: "wrong hub", change: func(f *appHookFixture, a []string) []string { a[8] = "https://other.invalid"; return a }},
+		{name: "missing hub", change: func(f *appHookFixture, a []string) []string { return append(a[:7], a[9:]...) }},
+		{name: "wrong caller", change: func(f *appHookFixture, a []string) []string { a[10] = "peer_other"; return a }},
+		{name: "missing caller", change: func(f *appHookFixture, a []string) []string { return a[:9] }},
+		{name: "partial", change: func(f *appHookFixture, a []string) []string { a[6] = "dly_1"; return a }},
+		{name: "extra", change: func(f *appHookFixture, a []string) []string { a[6] = "dly_1,dly_2,extra"; return a }},
+		{name: "duplicate", change: func(f *appHookFixture, a []string) []string { a[6] = "dly_1,dly_2,dly_1"; return a }},
+		{name: "conflicting nonce", change: func(f *appHookFixture, a []string) []string { a[2] = "other"; return a }},
+		{name: "reassert overlap", change: func(f *appHookFixture, a []string) []string { a[2] = "absent"; return a }},
+		{name: "empty partial", change: func(f *appHookFixture, a []string) []string { a[6] = ""; return a }},
+		{name: "missing ids", change: func(f *appHookFixture, a []string) []string { return append(a[:5], a[7:]...) }},
+		{name: "missing key", change: func(f *appHookFixture, a []string) []string { return append(a[:3], a[5:]...) }},
+		{name: "empty key", change: func(f *appHookFixture, a []string) []string { a[4] = ""; return a }},
+		{name: "invalid id", change: func(f *appHookFixture, a []string) []string { a[6] = "dly_1,invalid/id"; return a }},
+		{name: "invalid key", change: func(f *appHookFixture, a []string) []string { a[4] = "invalid/key"; return a }},
+		{name: "over batch cap", change: func(f *appHookFixture, a []string) []string { a[6] = "a,b,c,d,e,f,g,h,i"; return a }},
+		{name: "without release", change: func(f *appHookFixture, a []string) []string {
+			return append([]string{"--event", "app-server", "--priorities", "wake"}, a[1:]...)
+		}},
+		{name: "duplicate key flag", change: func(f *appHookFixture, a []string) []string { return append(a, "--receipt-key", "vn.original") }},
+		{name: "duplicate ids flag", change: func(f *appHookFixture, a []string) []string { return append(a, "--delivery-ids", "dly_1,dly_2") }},
+		{name: "state hub mismatch", state: func(s *hookState) { s.Hub = "https://other.invalid" }},
+		{name: "state caller mismatch", state: func(s *hookState) { s.Caller = "peer_other"; s.Cred = "different" }},
+		{name: "state as mismatch", state: func(s *hookState) { s.As = "peer_other" }},
+		{name: "state identity absent", state: func(s *hookState) { s.Hub = ""; s.Caller = ""; s.Cred = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := receiptBatchFixture(t)
+			if tc.state != nil {
+				if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error { tc.state(s); return nil }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			a := receiptArgs(f, "batch", "vn.original", "dly_1,dly_2")
+			if tc.change != nil {
+				a = tc.change(f, a)
+			}
+			before := f.bytes(t)
+			binding, err := os.ReadFile(bindingPath(f.path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, _ := runHook(t, f.env, a...)
+			afterBinding, err := os.ReadFile(bindingPath(f.path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, f.bytes(t)) || !bytes.Equal(binding, afterBinding) || strings.Contains(out, `"receipt_key"`) || strings.Contains(out, `"lifecycle"`) {
+				t.Fatalf("invalid receipt mutated state or confirmed proof: %q", out)
+			}
+		})
+	}
+
+	t.Run("verified credential rotation", func(t *testing.T) {
+		f := receiptBatchFixture(t)
+		if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error { s.Cred = "old-credential"; return nil }); err != nil {
+			t.Fatal(err)
+		}
+		out, _ := runHook(t, f.env, receiptArgs(f, "batch", "vn.original", "dly_1,dly_2")...)
+		receiptConfirmation(t, out, "vn.original", "dly_1", "dly_2")
+	})
+	t.Run("unknown current identity", func(t *testing.T) {
+		f := newDisplayFixture(t)
+		f.env["XDG_RUNTIME_DIR"] = filepath.Join(f.env["HOME"], "runtime")
+		f.env["VECNET_CODEX_AUTO_DELIVERY"] = "0"
+		f.delivery()
+		runHook(t, f.env, "--event", "app-server", "--claim", "batch", "--priorities", "wake_idle", "--expect-hub", f.hub, "--expect-caller", "peer_test")
+		if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error { s.Cred = "old-credential"; return nil }); err != nil {
+			t.Fatal(err)
+		}
+		f.unverified.Store(true)
+		before := readHookState(t, f.path)
+		out, _ := runHook(t, f.env, "--release", "--claim", "batch", "--receipt-key", "vn.original", "--delivery-ids", "dly_1", "--expect-hub", f.hub, "--expect-caller", "peer_test")
+		if !reflect.DeepEqual(before, readHookState(t, f.path)) || strings.Contains(out, `"receipt_key"`) {
+			t.Fatalf("unverified identity authorized receipt proof: %q", out)
+		}
+	})
+	t.Run("receipt lock failure", func(t *testing.T) {
+		f := receiptBatchFixture(t)
+		before := f.bytes(t)
+		unlock, err := lockPath(t.Context(), f.path+".lock")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unlock()
+		out, _ := runHook(t, f.env, receiptArgs(f, "batch", "vn.original", "dly_1,dly_2")...)
+		if !bytes.Equal(before, f.bytes(t)) || strings.Contains(out, `"receipt_key"`) {
+			t.Fatalf("busy state authorized receipt proof: %q", out)
+		}
+	})
+	t.Run("receipt corrupt state", func(t *testing.T) {
+		f := receiptBatchFixture(t)
+		f.seed(t, `{"hub":"partial","shown":42}`)
+		before := f.bytes(t)
+		out, _ := runHook(t, f.env, receiptArgs(f, "batch", "vn.original", "dly_1,dly_2")...)
+		if !bytes.Equal(before, f.bytes(t)) || strings.Contains(out, `"receipt_key"`) {
+			t.Fatalf("corrupt state authorized receipt proof: %q", out)
+		}
+	})
+	t.Run("ordinary release creates no proof", func(t *testing.T) {
+		f := receiptBatchFixture(t)
+		f.release(t, "batch", 2)
+		s := readHookState(t, f.path)
+		if !slices.Equal(s.Displayed, []string{"prior"}) || s.AckAfter != "opaque-predecessor" || len(s.Claims) != 1 {
+			t.Fatalf("ordinary release published proof or erased barrier: %+v", s)
+		}
+	})
+	t.Run("summary zero ids", func(t *testing.T) {
+		f := newAppHookFixture(t)
+		f.add(t, "wake", "backlog", "")
+		f.seed(t, `{"shown":[]}`)
+		got, _, _ := f.run(t, "summary", "wake")
+		if len(got.Deliveries) != 0 || len(got.Entries) != 1 || got.Entries[0].Key != "vecnet_summary" {
+			t.Fatalf("not a real summary batch: %+v", got)
+		}
+		before := f.bytes(t)
+		out, _ := runHook(t, f.env, receiptArgs(f, "summary", "vn.summary", "")...)
+		receiptConfirmation(t, out, "vn.summary")
+		if !bytes.Equal(before, f.bytes(t)) || len(readHookState(t, f.path).Displayed) != 0 {
+			t.Fatal("summary invented delivery proof or moved state")
+		}
+	})
+}
+
+type receiptShortWriter struct{ bytes.Buffer }
+
+func (w *receiptShortWriter) Write(p []byte) (int, error) { return w.Buffer.Write(p[:len(p)/2]) }
+
+func TestHookReceiptCommittedResponseLoss(t *testing.T) {
+	for _, mode := range []string{"error", "short"} {
+		t.Run(mode, func(t *testing.T) {
+			f := receiptBatchFixture(t)
+			var errs bytes.Buffer
+			var short receiptShortWriter
+			var writer io.Writer = hookErrWriter{}
+			if mode == "short" {
+				writer = &short
+			}
+			args := append([]string{"hook"}, receiptArgs(f, "batch", "vn.original", "dly_1,dly_2")...)
+			code := RunContext(t.Context(), args, strings.NewReader(""), writer, &errs, func(k string) string { return f.env[k] })
+			s := readHookState(t, f.path)
+			if code != 0 || !slices.Contains(s.Displayed, "dly_1") || !slices.Contains(s.Displayed, "dly_2") || len(s.Claims) != 1 || s.AckAfter != "opaque-predecessor" {
+				t.Fatalf("proof was not committed before lost response: code=%d state=%+v", code, s)
+			}
+			if mode == "short" && (short.Len() == 0 || json.Valid(short.Bytes())) {
+				t.Fatalf("expected ambiguous truncated response, got %q", short.String())
+			}
+			// Retrying the original trusted assertion must work even after bounded
+			// proof history aged out; absent claims by themselves are not proof.
+			if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error {
+				for i := range shownWindow + 1 {
+					s.recordDisplay(fmt.Sprintf("aged_%d", i))
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			before := readHookState(t, f.path)
+			out, _ := runHook(t, f.env, receiptArgs(f, "batch", "vn.original", "dly_1,dly_2")...)
+			receiptConfirmation(t, out, "vn.original", "dly_1", "dly_2")
+			s = readHookState(t, f.path)
+			if !slices.Contains(s.Displayed, "dly_1") || !slices.Contains(s.Displayed, "dly_2") || !reflect.DeepEqual(s.Claims, before.Claims) || !reflect.DeepEqual(s.Replay, before.Replay) || s.AckAfter != before.AckAfter {
+				t.Fatalf("trusted reassertion failed or erased unrelated state: %+v", s)
+			}
+		})
+	}
+}
+
+func TestHookAppServerLifecycleCapability(t *testing.T) {
+	for _, kind := range []string{"claim", "empty", "summary"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newAppHookFixture(t)
+			if kind != "empty" {
+				f.add(t, "wake", "one", "")
+			}
+			if kind == "summary" {
+				f.seed(t, `{"shown":[]}`)
+			}
+			_, raw, _ := f.run(t, "capability", "wake")
+			var out map[string]json.RawMessage
+			if json.Unmarshal([]byte(raw), &out) != nil || string(out["lifecycle"]) != `"receipt-display-v1"` {
+				t.Fatalf("successful %s lacks lifecycle marker: %q", kind, raw)
+			}
+			if kind == "claim" && len(f.state(t).Claims) != 1 {
+				t.Fatal("advertised capability without durable claim")
+			}
+		})
+	}
+	for _, kind := range []string{"invalid priority", "save failure", "busy lock"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newAppHookFixture(t)
+			f.add(t, "wake", "one", "")
+			priority := "wake"
+			if kind == "invalid priority" {
+				priority = "hold"
+			}
+			if kind == "save failure" {
+				if err := os.Remove(f.path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(f.path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if kind == "busy lock" {
+				unlock, err := lockPath(t.Context(), f.path+".lock")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer unlock()
+			}
+			out, _ := runHook(t, f.env, "--event", "app-server", "--claim", "capability", "--priorities", priority, "--expect-hub", f.hub, "--expect-caller", "peer_test")
+			if strings.Contains(out, `"lifecycle"`) {
+				t.Fatalf("failed transition advertised success: %q", out)
+			}
+		})
+	}
+}
+
+func capacityState(t *testing.T, f *appHookFixture, claims, replay int) {
+	t.Helper()
+	f.run(t, "bind", "wake")
+	if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error {
+		for i := range claims {
+			s.Claims = append(s.Claims, claimRef{ID: fmt.Sprintf("old_claim_%d", i), After: "e1.0", Priority: "wake", Claim: "old", Order: uint64(i + 1)})
+		}
+		var last uint64
+		for _, r := range s.Claims {
+			last = max(last, r.Order)
+		}
+		for i := range replay {
+			s.Replay = append(s.Replay, replayRef{ID: fmt.Sprintf("old_replay_%d", i), After: "e1.0", Priority: "wake_idle", Order: last + uint64(i+1)})
+		}
+		s.AckAfter = "opaque-predecessor"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHookAppServerUnresolvedCapacity(t *testing.T) {
+	t.Run("displayed survives reservation aging", func(t *testing.T) {
+		f := newAppHookFixture(t)
+		f.run(t, "bind", "wake")
+		if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error {
+			s.recordDisplay("dly_1")
+			for i := range shownWindow {
+				s.claim(fmt.Sprintf("reservation_%d", i))
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		f.add(t, "wake", "already displayed", "")
+		got, _, _ := f.run(t, "new", "wake")
+		if len(got.Deliveries) != 0 || len(f.state(t).Claims) != 0 {
+			t.Fatal("retained positive proof did not fence duplicate injection after reservation aging")
+		}
+	})
+	for _, kind := range []string{"claims full", "replay full", "claim one slot", "replay one slot"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newAppHookFixture(t)
+			claims, replay := 0, 0
+			priority := "wake"
+			switch kind {
+			case "claims full":
+				claims = 256
+			case "replay full":
+				replay = 64
+				priority = "wake_idle"
+			case "claim one slot":
+				claims = 255
+			case "replay one slot":
+				replay = 63
+				priority = "wake_idle"
+			}
+			capacityState(t, f, claims, replay)
+			before := readHookState(t, f.path)
+			f.add(t, priority, "one", "")
+			f.add(t, priority, "two", "")
+			got, _, _ := f.run(t, "new", "wake")
+			s := readHookState(t, f.path)
+			added := 0
+			if strings.Contains(kind, "one slot") {
+				added = 1
+			}
+			if priority != "wake" && (len(s.Claims) != claims || len(s.Replay) != replay+added) {
+				t.Fatalf("replay admission erased or overflowed work: claims=%d replay=%d", len(s.Claims), len(s.Replay))
+			}
+			if priority == "wake" && (len(s.Claims) != claims+added || len(got.Deliveries) != added) {
+				t.Fatalf("claim admission erased or overflowed work: claims=%d deliveries=%v", len(s.Claims), got.Deliveries)
+			}
+			if !slices.Equal(s.Claims[:claims], before.Claims) || !slices.Equal(s.Replay[:replay], before.Replay) || s.AckAfter != before.AckAfter || s.PollCursor != before.PollCursor || s.AppCursor != fmt.Sprintf("e1.%d", added) {
+				t.Fatalf("capacity advanced cursor or lost unresolved references: cursor=%s claims=%d replay=%d", s.AppCursor, len(s.Claims), len(s.Replay))
+			}
+		})
+	}
+	t.Run("release atomic refusal and retry", func(t *testing.T) {
+		f := newAppHookFixture(t)
+		f.add(t, "wake", "one", "")
+		f.add(t, "wake", "two", "")
+		f.run(t, "batch", "wake")
+		capacityState(t, f, 0, 63)
+		before := f.bytes(t)
+		out, _ := runHook(t, f.env, "--release", "--claim", "batch")
+		if !bytes.Equal(before, f.bytes(t)) || strings.Contains(out, `"released"`) {
+			t.Fatalf("partial release silently committed at capacity: %q", out)
+		}
+		if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error { s.Replay = s.Replay[1:]; return nil }); err != nil {
+			t.Fatal(err)
+		}
+		f.release(t, "batch", 2)
+		s := readHookState(t, f.path)
+		if len(s.Claims) != 0 || len(s.Replay) != 64 || s.Replay[0].ID != "dly_1" || s.Replay[1].ID != "dly_2" || s.AckAfter != "opaque-predecessor" {
+			t.Fatalf("release retry lost work/order/barrier: %+v", s)
+		}
+	})
+	t.Run("release into full replay", func(t *testing.T) {
+		f := newAppHookFixture(t)
+		f.add(t, "wake", "one", "")
+		f.run(t, "batch", "wake")
+		capacityState(t, f, 0, 64)
+		before := f.bytes(t)
+		out, _ := runHook(t, f.env, "--release", "--claim", "batch")
+		if !bytes.Equal(before, f.bytes(t)) || strings.Contains(out, `"released"`) {
+			t.Fatalf("full replay release discarded ownership: %q", out)
+		}
+	})
+}
+
+func TestHookReceiptAckBarrier(t *testing.T) {
+	f := newDisplayFixture(t)
+	f.env["XDG_RUNTIME_DIR"] = filepath.Join(f.env["HOME"], "runtime")
+	f.env["VECNET_CODEX_AUTO_DELIVERY"] = "0"
+	f.delivery()
+	claim := func(nonce string) {
+		out, errs := runHook(t, f.env, "--event", "app-server", "--claim", nonce, "--priorities", "wake_idle", "--expect-hub", f.hub, "--expect-caller", "peer_test")
+		if !strings.Contains(out, `"dly_`) {
+			t.Fatalf("claim failed: %q %s", out, errs)
+		}
+	}
+	claim("first")
+	two := hookEvent(2, "second pending delivery")
+	var body map[string]any
+	if err := json.Unmarshal(two.Data, &body); err != nil {
+		t.Fatal(err)
+	}
+	body["message"].(map[string]any)["priority"] = "wake_idle"
+	two.Data, _ = json.Marshal(body)
+	f.mu.Lock()
+	f.evs = append(f.evs, two)
+	f.mu.Unlock()
+	claim("second")
+	runHook(t, f.env, "--event", "user-prompt", "--auto-ack")
+	if s := readHookState(t, f.path); s.AckAfter != "e1.0" {
+		t.Fatalf("missing starting fence: %+v", s)
+	}
+	for i, nonce := range []string{"first", "second"} {
+		id := fmt.Sprintf("dly_%d", i+1)
+		before := readHookState(t, f.path)
+		out, _ := runHook(t, f.env, "--release", "--claim", nonce, "--receipt-key", "vn."+nonce, "--delivery-ids", id, "--expect-hub", f.hub, "--expect-caller", "peer_test")
+		receiptConfirmation(t, out, "vn."+nonce, id)
+		if readHookState(t, f.path).AckAfter != before.AckAfter {
+			t.Fatal("receipt moved the opaque ack predecessor")
+		}
+		select {
+		case cursor := <-f.acks:
+			t.Fatalf("settlement posted hub acknowledgement %s", cursor)
+		default:
+		}
+		got, _ := runHook(t, f.env, "--event", "user-prompt", "--auto-ack")
+		if got != "" {
+			t.Fatalf("hook repeated receipted/reserved delivery: %q", got)
+		}
+		if cursor := f.ack(t); cursor != fmt.Sprintf("e1.%d", i+1) {
+			t.Fatalf("hook crossed unresolved claim: ack=%s", cursor)
+		}
+		if i == 0 && readHookState(t, f.path).AckAfter != "e1.1" {
+			t.Fatal("remaining claim lost its safe fence")
+		}
+	}
+	if readHookState(t, f.path).AckAfter != "" {
+		t.Fatal("hook did not reconcile resolved fence")
 	}
 }

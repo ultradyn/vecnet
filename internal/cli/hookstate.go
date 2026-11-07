@@ -44,8 +44,8 @@ type hookState struct {
 	// invocation can cumulatively acknowledge past the reservation.
 	AckAfter string   `json:"ack_after,omitempty"`
 	Shown    []string `json:"shown"`
-	// Displayed contains only deliveries successfully written by a hook or
-	// monitor. Shown also contains app-server reservations, and legacy watch
+	// Displayed contains successful hook/monitor output and trusted receipt
+	// proof. Shown also contains app-server reservations and legacy watch
 	// claims made before stdout was written; neither proves display.
 	Displayed        []string  `json:"displayed,omitempty"`
 	LastPostToolPoll time.Time `json:"last_post_tool_poll,omitzero"`
@@ -79,10 +79,10 @@ func hookCredential(secret string) string {
 	return fmt.Sprintf("%x", sum[:8])
 }
 
-// An outstanding app-server claim can outlive its Shown entry. Keep that
-// reservation suppressing duplicate injection until its owner releases it.
+// Outstanding claims and positive proof can outlive their Shown entries.
+// Both must keep fencing duplicate injection while their references remain.
 func (s *hookState) has(deliveryID string) bool {
-	return slices.Contains(s.Shown, deliveryID) ||
+	return slices.Contains(s.Shown, deliveryID) || slices.Contains(s.Displayed, deliveryID) ||
 		slices.ContainsFunc(s.Claims, func(r claimRef) bool { return r.ID == deliveryID })
 }
 

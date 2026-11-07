@@ -357,8 +357,11 @@ func hookWrite(ctx context.Context, w io.Writer, data []byte) error {
 // the encoded output in bytes as well as the context in UTF-16 units.
 func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(), publish func([]byte) error, limit int) hookResult {
 	ctx := a.ctx
-	o, e := parseFlags("hook", args, map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag, "mcp": strFlag, "release": boolFlag, "claim": strFlag, "priorities": strFlag, "expect-hub": strFlag, "expect-caller": strFlag})
+	o, e := parseFlags("hook", args, map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag, "mcp": strFlag, "release": boolFlag, "claim": strFlag, "priorities": strFlag, "expect-hub": strFlag, "expect-caller": strFlag, "receipt-key": strFlag, "delivery-ids": strFlag})
 	if e != nil || len(o.pos) != 0 {
+		return hookResult{}
+	}
+	if (o.has("receipt-key") || o.has("delivery-ids")) && !o.has("release") {
 		return hookResult{}
 	}
 	// A session launched as another profile runs this profile's hook only
