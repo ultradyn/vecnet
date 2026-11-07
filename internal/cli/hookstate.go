@@ -31,16 +31,24 @@ const shownWindow = 1024
 // the state, never in it: a vecnet from before binding rewrites the state
 // file with only the fields it knows, which would silently unbind it.
 type hookState struct {
-	Hub              string      `json:"hub,omitempty"`
-	Caller           string      `json:"caller,omitempty"`
-	As               string      `json:"as,omitempty"`
-	Cred             string      `json:"cred,omitempty"`
-	AppCursor        string      `json:"app_cursor,omitempty"`
-	Replay           []replayRef `json:"replay,omitempty"`
-	Claims           []claimRef  `json:"claims,omitempty"`
-	PollCursor       string      `json:"poll_cursor,omitempty"`
-	Shown            []string    `json:"shown"`
-	LastPostToolPoll time.Time   `json:"last_post_tool_poll,omitzero"`
+	Hub        string      `json:"hub,omitempty"`
+	Caller     string      `json:"caller,omitempty"`
+	As         string      `json:"as,omitempty"`
+	Cred       string      `json:"cred,omitempty"`
+	AppCursor  string      `json:"app_cursor,omitempty"`
+	Replay     []replayRef `json:"replay,omitempty"`
+	Claims     []claimRef  `json:"claims,omitempty"`
+	PollCursor string      `json:"poll_cursor,omitempty"`
+	// AckAfter retains the predecessor of the first undisplayed reservation.
+	// Hooks reread from it even after displaying later events, so no future
+	// invocation can cumulatively acknowledge past the reservation.
+	AckAfter string   `json:"ack_after,omitempty"`
+	Shown    []string `json:"shown"`
+	// Displayed contains only deliveries successfully written by a hook or
+	// monitor. Shown also contains app-server reservations, and legacy watch
+	// claims made before stdout was written; neither proves display.
+	Displayed        []string  `json:"displayed,omitempty"`
+	LastPostToolPoll time.Time `json:"last_post_tool_poll,omitzero"`
 	hookBinding      `json:"-"`
 }
 
@@ -71,7 +79,12 @@ func hookCredential(secret string) string {
 	return fmt.Sprintf("%x", sum[:8])
 }
 
-func (s *hookState) has(deliveryID string) bool { return slices.Contains(s.Shown, deliveryID) }
+// An outstanding app-server claim can outlive its Shown entry. Keep that
+// reservation suppressing duplicate injection until its owner releases it.
+func (s *hookState) has(deliveryID string) bool {
+	return slices.Contains(s.Shown, deliveryID) ||
+		slices.ContainsFunc(s.Claims, func(r claimRef) bool { return r.ID == deliveryID })
+}
 
 // claim retains delivery ids in arrival order; cursors are never compared.
 func (s *hookState) claim(deliveryID string) bool {
@@ -83,6 +96,54 @@ func (s *hookState) claim(deliveryID string) bool {
 		s.Shown = s.Shown[len(s.Shown)-shownWindow:]
 	}
 	return true
+}
+
+func (s *hookState) recordDisplay(deliveryID string) {
+	// Successful output starts a fresh dedupe window, even if this delivery
+	// was reserved long ago. Keep reservation age from evicting a fresh display.
+	s.Shown = slices.DeleteFunc(s.Shown, func(id string) bool { return id == deliveryID })
+	s.Shown = append(s.Shown, deliveryID)
+	if len(s.Shown) > shownWindow {
+		s.Shown = s.Shown[len(s.Shown)-shownWindow:]
+	}
+	if !slices.Contains(s.Displayed, deliveryID) {
+		s.Displayed = append(s.Displayed, deliveryID)
+		if len(s.Displayed) > shownWindow {
+			s.Displayed = s.Displayed[len(s.Displayed)-shownWindow:]
+		}
+	}
+}
+
+// displayFor serializes the display check, stdout write and proof of success
+// with other consumers. A reservation alone must never suppress a monitor.
+// State I/O fails open, but stdout errors must reach the watch before any ack.
+func (f stateFile) displayFor(ctx context.Context, id *hookIdentity, deliveryID string, replay bool, display func() error) error {
+	if id != nil && id.Caller == "" {
+		// Without a verified caller, neither reuse nor create identity-bound
+		// display proof. In particular, bind keeps the old caller in this case.
+		return display()
+	}
+	attempted := false
+	var outputErr error
+	err := f.update(ctx, func(s *hookState) error {
+		if id != nil {
+			s.bind(*id)
+		}
+		if !replay && slices.Contains(s.Displayed, deliveryID) {
+			return nil
+		}
+		attempted = true
+		outputErr = display()
+		if outputErr != nil {
+			return outputErr
+		}
+		s.recordDisplay(deliveryID)
+		return nil
+	})
+	if err != nil && !attempted {
+		return display()
+	}
+	return outputErr
 }
 
 type stateFile struct{ path string }
@@ -194,7 +255,8 @@ type hookIdentity struct{ Hub, Caller, As, Cred string }
 func (s *hookState) bind(id hookIdentity) bool {
 	reset := s.Hub != "" && (s.Hub != id.Hub || s.As != id.As || (s.Caller != "" && id.Caller != "" && s.Caller != id.Caller))
 	if reset {
-		s.PollCursor, s.Shown, s.Caller, s.Cred = "", nil, "", ""
+		s.PollCursor, s.AckAfter, s.Shown, s.Caller, s.Cred = "", "", nil, "", ""
+		s.Displayed = nil
 		s.AppCursor, s.Replay, s.Claims = "", nil, nil
 	}
 	s.Hub, s.As = id.Hub, id.As

@@ -50,6 +50,10 @@ func runDedupeWatchPages(t *testing.T, pages [][]envelope.Event) (string, chan<-
 	opened := make(chan *http.Request, 1)
 	polls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/peers/me" {
+			fmt.Fprint(w, `{"kind":"peer","peer_id":"peer_test"}`)
+			return
+		}
 		if r.URL.Path == "/v1/peers" {
 			fmt.Fprint(w, `{"peers":[]}`)
 			return
@@ -224,7 +228,7 @@ func TestWatchReplayCancellation(t *testing.T) {
 
 func TestWatchLiveSkipsShown(t *testing.T) {
 	path, frames, out, stop := runDedupeWatch(t, nil)
-	if err := (stateFile{path: path}).update(context.Background(), func(s *hookState) error { s.claim("dly_B"); return nil }); err != nil {
+	if err := (stateFile{path: path}).update(context.Background(), func(s *hookState) error { s.recordDisplay("dly_B"); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	b, c := hookDelivery("dly_B"), hookDelivery("dly_C")

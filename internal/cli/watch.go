@@ -345,6 +345,7 @@ func terminal(err error) bool {
 var errRestarting = errors.New("hub restarting")
 var errMoveDue = errors.New("moving notice due")
 var errMoveUnavailable = errors.New("move destination unavailable")
+var errWatchOutput = errors.New("watch output failed")
 
 func (w *watcher) run() error {
 	ctx := w.a.ctx
@@ -403,6 +404,9 @@ func (w *watcher) run() error {
 		}
 		if verified {
 			w.flushAck()
+		}
+		if errors.Is(err, errWatchOutput) {
+			return err
 		}
 		if ctx.Err() != nil {
 			return nil
@@ -984,7 +988,9 @@ func (w *watcher) stream() error {
 				// Empty data (the hub's priming event) only moves the
 				// cursor; it is not an event (PROTOCOL §13.1).
 				if joined := strings.Join(data, "\n"); hasData && joined != "" {
-					w.handle(evType, joined, false)
+					if err := w.handle(evType, joined, false); err != nil {
+						return err
+					}
 				}
 				w.cursor = idBuf
 				data, hasData, evType = nil, false, ""
@@ -1081,7 +1087,9 @@ func (w *watcher) longPoll() error {
 		if err != nil {
 			continue
 		}
-		w.handle(ev.Type, string(raw), false)
+		if err := w.handle(ev.Type, string(raw), false); err != nil {
+			return err
+		}
 		w.cursor = ev.Cursor
 	}
 	if body.NextCursor != "" {
@@ -1095,7 +1103,7 @@ func (w *watcher) longPoll() error {
 }
 
 // replay prints the unacked backlog even if another consumer showed it.
-// Only the subsequent live stream consults the shared shown set.
+// Only the subsequent live stream consults shared display proof.
 func (w *watcher) replay() error {
 	for {
 		if err := w.a.ctx.Err(); err != nil {
@@ -1110,7 +1118,9 @@ func (w *watcher) replay() error {
 			if err != nil {
 				return err
 			}
-			w.handle(ev.Type, string(raw), true)
+			if err := w.handle(ev.Type, string(raw), true); err != nil {
+				return err
+			}
 		}
 		w.cursor = body.NextCursor
 		if body.HubRestarting != nil {
@@ -1128,11 +1138,11 @@ func (w *watcher) replay() error {
 
 // handle prints one event (deduped on delivery_id), caches its message
 // thread and queues its cursor for --auto-ack.
-func (w *watcher) handle(evType, data string, replay bool) {
+func (w *watcher) handle(evType, data string, replay bool) error {
 	var ev envelope.Event
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
 		fmt.Fprintf(w.a.stderr, "vecnet: watch: undecodable %s event: %v\n", evType, err)
-		return
+		return nil
 	}
 	if ev.Type == "" {
 		ev.Type = evType
@@ -1146,37 +1156,61 @@ func (w *watcher) handle(evType, data string, replay bool) {
 	if ev.Type == "directory_updated" {
 		w.refreshNames()
 	}
-	if w.autoAck && ev.Cursor != "" {
-		w.pendingAck = ev.Cursor
+	queueAck := func() {
+		if w.autoAck && ev.Cursor != "" {
+			w.pendingAck = ev.Cursor
+		}
+	}
+	printEvent := func() error {
+		var line []byte
+		switch {
+		case w.a.json:
+			raw, err := json.Marshal(ev)
+			if err != nil {
+				return fmt.Errorf("%w: %v", errWatchOutput, err)
+			}
+			line = append(raw, '\n')
+		case w.forMonitor:
+			line = []byte(monitorLine(ev, w.names) + "\n")
+		default:
+			line = []byte(inboxLine(ev, w.names) + "\n")
+		}
+		n, err := w.a.stdout.Write(line)
+		if err == nil && n != len(line) {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			return fmt.Errorf("%w: %v", errWatchOutput, err)
+		}
+		return nil
 	}
 	if ev.Type == "delivery" {
 		f := eventFieldsOf(ev)
-		if f.deliveryID != "" && !w.seen.add(f.deliveryID) {
-			return
+		if _, seen := w.seen.set[f.deliveryID]; f.deliveryID != "" && seen {
+			queueAck() // this watch already successfully handled the delivery
+			return nil
 		}
 		if w.forMonitor && !w.a.json && w.shown != nil && f.deliveryID != "" {
 			ctx, cancel := context.WithTimeout(w.a.ctx, 250*time.Millisecond)
-			claimed := w.shown.claimFor(ctx, w.identity, f.deliveryID)
+			err := w.shown.displayFor(ctx, w.identity, f.deliveryID, replay, printEvent)
 			cancel()
-			if !replay && !claimed {
-				return
+			if err != nil {
+				return err
 			}
+		} else if err := printEvent(); err != nil {
+			return err
+		}
+		if f.deliveryID != "" {
+			w.seen.add(f.deliveryID)
 		}
 		w.a.rememberEvents(w.ch, []envelope.Event{ev})
-	} else if w.deliveriesOnly {
-		return
-	}
-	switch {
-	case w.a.json:
-		raw, err := json.Marshal(ev)
-		if err == nil {
-			w.a.stdout.Write(append(raw, '\n'))
+	} else if !w.deliveriesOnly {
+		if err := printEvent(); err != nil {
+			return err
 		}
-	case w.forMonitor:
-		fmt.Fprintln(w.a.stdout, monitorLine(ev, w.names))
-	default:
-		fmt.Fprintln(w.a.stdout, inboxLine(ev, w.names))
 	}
+	queueAck()
+	return nil
 }
 
 // flushAck acks the newest handled cursor (one ack per batch).
