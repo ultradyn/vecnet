@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-07: resolve the build-box lane base physically before deriving private HOME, temporary, XDG and cache paths, including symlinked `/work/bb-src` volumes (`scripts/bb/remote.sh`).
+
 - 2026-11-07: complete merged MCP peer-tool discovery and schema budgets, preserve duplicate-member handling during timestamp normalization, prevent validation-value echoes, and clarify inbox head and MCP Events status (internal/mcpserver).
 - 2026-11-07: npm releases use matching `vX.Y.Z` tags, Linux x64/ARM64 package gates and GitHub OIDC in `.github/workflows/release.yml`; `just release` targets the `gh` remote, and the package homepage is `https://vecnet.ai` (`RELEASING.md`).
 - 2026-11-06: allow Codex app-server 0.167.0 alongside 0.166.0 after schema comparison and throwaway-thread re-verification of wake, steer, trust/policy, approvals, subscription and 60 s unload (`connectors/launcher/src/codex/discover.ts`, `docs/research/2026-11-04-codex-app-server-delivery.md`, `docs/connectors/codex-appserver.md`).
