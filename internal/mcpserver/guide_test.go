@@ -16,6 +16,7 @@ import (
 	"github.com/XertroV/vecnet/internal/auth"
 	venv "github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/mcpserver"
+	"github.com/XertroV/vecnet/internal/onboarding"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -36,6 +37,117 @@ type guideAuth struct{ principal mcpserver.Principal }
 
 func (a guideAuth) Authenticate(context.Context, *http.Request) (mcpserver.Principal, error) {
 	return a.principal, nil
+}
+
+// Check the policy on the served tool and prompt, not just source constants.
+// Both credential modes must agree with the registry's setup contract, and
+// every topic must stop before connected/receipt/ack on a mismatched identity.
+func TestGrokGuideIdentityAndCredentialModes(t *testing.T) {
+	env := testhub.Start(t)
+	peer, bearer := env.NewPeer("grokbot", "guide gateway")
+	owner, err := env.Hub.PeerPrincipal(context.Background(), peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oauth := eventsFront(t, env, guideAuth{mcpserver.Principal{
+		Caller: auth.Caller{Kind: "peer", PeerID: peer, PrincipalID: owner, PeerKind: "grokbot"},
+		OAuth:  &mcpserver.OAuthInfo{PrincipalID: owner, Expires: env.Now.Now().Add(time.Hour)},
+	}}, nil)
+	for _, tc := range []struct {
+		mode, secret, callerKind string
+		front                    *testhub.Env
+		want, absent             string
+	}{
+		{onboarding.CredentialHostedOAuth, "oauth-token", "grokbot", oauth,
+			"This bot uses hosted OAuth", "This bot uses CLI bearer"},
+		{onboarding.CredentialCLIBearer, bearer, "peer", env,
+			"This bot uses CLI bearer", "This bot uses hosted OAuth"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			setup, err := onboarding.RenderPrompt("grokbot", onboarding.PhaseSetup, map[string]string{
+				"hub_url": "https://hub.example", "peer_id": peer, "thread_id": "thr_guide",
+				"connector_name": "vecnet-guide-gateway", "profile": "guide-gateway", "credential_mode": tc.mode,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
+				headers := mcpEraHeaders(t, tc.front, tc.secret, era)
+				for _, topic := range []string{"start", "events", "replying", "etiquette"} {
+					var guide guideWire
+					tool := decodeRPC(t, mcpCallRaw(t, tc.front, tc.secret, headers, "tools/call", map[string]any{
+						"name": "vecnet_guide", "arguments": map[string]any{"topic": topic},
+					}))
+					var result toolResult
+					if tool.Error != nil || json.Unmarshal(tool.Result, &result) != nil || json.Unmarshal(result.StructuredContent, &guide) != nil {
+						t.Fatal("guide response failed")
+					}
+					if guide.CallerKind != tc.callerKind || len(guide.Steps) < 2 || !strings.Contains(guide.Steps[1], tc.want) || strings.Contains(guide.Text, tc.absent) {
+						t.Errorf("%s %s: credential mode split changed", era, topic)
+					}
+					for _, needle := range []string{"vecnet_whoami", "kind peer", "id and peer_id", "expected peer id", "not proof of identity", "mismatch", "stop", "user's own chat", "Do not send connected, record a receipt, or ack", "leftover and unlinked", "pending deliveries"} {
+						if !strings.Contains(guide.Steps[0], needle) {
+							t.Errorf("%s %s: identity gate lacks %q", era, topic, needle)
+						}
+					}
+					if tc.mode == onboarding.CredentialHostedOAuth {
+						for _, needle := range []string{"vecnet peer link", "vecnet-<slug>", "consent code", "No peer secret", "revokes", "confirmation", "no keep-bearer", "precedence", "user level", "ingress=mcp_tool", "caller peer"} {
+							if !strings.Contains(guide.Steps[1], needle) {
+								t.Errorf("hosted guide lacks %q", needle)
+							}
+						}
+					} else if !strings.Contains(guide.Steps[1], "own verified CLI profile") || !strings.Contains(guide.Steps[1], "Do not also link") {
+						t.Error("CLI guide lost its profile or no-link rule")
+					}
+					if topic != "etiquette" {
+						if !strings.Contains(guide.Text, "Pass wake_idle for grokbot recipients") || !strings.Contains(guide.Text, "CLI, MCP and HTTP") || !strings.Contains(guide.Text, "composers preselect") {
+							t.Error("guide lost required priority/preselect policy")
+						}
+						for _, needle := range []string{"wake_idle", "processed", "ack", "expected peer"} {
+							if !strings.Contains(strings.ToLower(setup), needle) || !strings.Contains(guide.Text, needle) {
+								t.Errorf("registry and guide must both cover %q", needle)
+							}
+						}
+					}
+					prompt := decodeRPC(t, mcpCallRaw(t, tc.front, tc.secret, headers, "prompts/get", map[string]any{
+						"name": "vecnet_setup", "arguments": map[string]any{"topic": topic},
+					}))
+					var got struct {
+						Messages []struct {
+							Content struct{ Text string } `json:"content"`
+						} `json:"messages"`
+					}
+					if prompt.Error != nil || json.Unmarshal(prompt.Result, &got) != nil || len(got.Messages) != 1 || got.Messages[0].Content.Text != guide.Text {
+						t.Error("prompt and tool policies differ")
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestSendReplyDiscoveryGrokPriority(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("grokbot", "priority guidance")
+	for _, era := range []string{mcpserver.ProtoCurrent, mcpserver.ProtoLegacy} {
+		entries := mcpTools(t, env, secret, mcpEraHeaders(t, env, secret, era))
+		for _, name := range []string{"vecnet_send", "vecnet_reply"} {
+			entry := toolByName(t, entries, name)
+			description, _ := entry["description"].(string)
+			if !strings.Contains(description, "wake_idle") || !strings.Contains(description, "grokbot") {
+				t.Errorf("%s %s: discovery lacks grokbot priority guidance", era, name)
+			}
+			input, _ := entry["inputSchema"].(map[string]any)
+			required, _ := input["required"].([]any)
+			found := false
+			for _, field := range required {
+				found = found || field == "priority"
+			}
+			if !found {
+				t.Errorf("%s %s: priority must remain required", era, name)
+			}
+		}
+	}
 }
 
 func TestGuide(t *testing.T) {
@@ -263,6 +375,11 @@ func TestGuideDiscoveryAndValidation(t *testing.T) {
 		}
 		if result.Capabilities["prompts"] == nil || !strings.Contains(result.Instructions, "vecnet_guide") {
 			t.Fatalf("%s: %s", method, r.Result)
+		}
+		identity := strings.Index(result.Instructions, "vecnet_whoami")
+		guide := strings.Index(result.Instructions, "vecnet_guide")
+		if identity < 0 || identity > guide || !strings.Contains(result.Instructions, "stop on an unexpected identity") {
+			t.Errorf("%s: identity must be proved before guide/setup", method)
 		}
 	}
 	_, r := rpc(t, env, secret, "prompts/list", nil)

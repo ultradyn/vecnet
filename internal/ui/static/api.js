@@ -396,6 +396,12 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     adminPeers: () => get('/v1/admin/peers'),
     addPeer: body => post('/v1/admin/peers', { body }),
     dotLink: peerId => post('/v1/admin/dot-links', { body: { peer_id: peerId } }),
+    // Operator onboarding (PROTOCOL §§2.12, 4.5, 12, 20.1). signal aborts a
+    // fetch when the dialog closes; a committed request stays on the hub.
+    agentKinds: ({ signal } = {}) => get('/v1/admin/agent-kinds', { signal }),
+    agentAdd: (body, { signal } = {}) => post('/v1/admin/agents', { body, signal }),
+    onboardingStatus: (requestId, { signal } = {}) => get('/v1/admin/agents/onboarding/' + seg(requestId), { signal }),
+    hubIdentity: ({ signal } = {}) => get('/v1/hub/identity', { signal }),
     // A peer's invite (PROTOCOL §2.12): its state, never a token; a new one,
     // whose answer carries the one-time token for the copy panel only; and
     // revoke, a no-op answer when nothing is live.

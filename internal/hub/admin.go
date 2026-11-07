@@ -189,31 +189,39 @@ func (h *Hub) DotLink(ctx context.Context, peerID string) (string, error) {
 		return "", err
 	}
 	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		_, kind, disabled, err := peerRow(ctx, tx, peerID)
-		if err != nil {
-			return err
-		}
-		if !oauthLinkKind(kind) {
-			return invalidValue("peer_id", "only a dot or grokbot peer can be linked")
-		}
-		if disabled {
-			return invalidValue("peer_id", "the peer is disabled")
-		}
-		now := h.Now()
-		if _, err := tx.ExecContext(ctx, `DELETE FROM dot_links WHERE expires_at <= ?`, envelope.FormatTime(now)); err != nil {
-			return fmt.Errorf("hub: prune link codes: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO dot_links(code_hash, peer_id, expires_at) VALUES (?, ?, ?)`,
-			auth.HashSecret(code), peerID, envelope.FormatTime(now.Add(DotLinkTTL))); err != nil {
-			return fmt.Errorf("hub: insert link code: %w", err)
-		}
-		return audit.Record(ctx, tx, "operator", "dot_link", []string{peerID}, nil)
+		return h.insertDotLinkTx(ctx, tx, peerID, code, "operator", nil)
 	})
 	if err != nil {
 		return "", err
 	}
 	h.linkGuard.unlock()
 	return shown, nil
+}
+
+// insertDotLinkTx stores the hash of code for peerID inside tx. code is the
+// ungrouped secret; the caller shows the grouped form and, after commit,
+// ends a link-code lockout. actor is the dot_link audit actor. extra is the
+// audit detail (nil for DotLink's historical empty detail).
+func (h *Hub) insertDotLinkTx(ctx context.Context, tx *sql.Tx, peerID, code, actor string, extra map[string]any) error {
+	_, kind, disabled, err := peerRow(ctx, tx, peerID)
+	if err != nil {
+		return err
+	}
+	if !oauthLinkKind(kind) {
+		return invalidValue("peer_id", "only a dot or grokbot peer can be linked")
+	}
+	if disabled {
+		return invalidValue("peer_id", "the peer is disabled")
+	}
+	now := h.Now()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM dot_links WHERE expires_at <= ?`, envelope.FormatTime(now)); err != nil {
+		return fmt.Errorf("hub: prune link codes: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO dot_links(code_hash, peer_id, expires_at) VALUES (?, ?, ?)`,
+		auth.HashSecret(code), peerID, envelope.FormatTime(now.Add(DotLinkTTL))); err != nil {
+		return fmt.Errorf("hub: insert link code: %w", err)
+	}
+	return audit.Record(ctx, tx, actor, "dot_link", []string{peerID}, extra)
 }
 
 // ConsumeDotLink spends code and returns the peer it names. Any code that

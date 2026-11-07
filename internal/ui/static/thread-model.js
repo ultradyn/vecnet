@@ -1,5 +1,8 @@
 // Pure thread logic: what each message renders as. No DOM, no clock.
 import { SPILL_SLOT } from './attach-model.js';
+import { grokQuotaNote, GROK_QUOTA_DETAIL, GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, GROK_QUOTA_TITLE, INITIAL_PRIORITY, priorityChoice } from './compose-model.js';
+
+export { grokQuotaNote, GROK_QUOTA_DETAIL, GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, GROK_QUOTA_TITLE, INITIAL_PRIORITY };
 
 export const SPILL_BYTES = 4096, TEXT_CAP = 65536;
 // Show full text reads at most this much, and only text/* (PROTOCOL §2.7).
@@ -160,12 +163,47 @@ export function replySig(files) {
   }));
 }
 
+// participantGrokbot: kindOf(id) is the directory kind, or '' when the
+// directory has not named that peer. Hub is not a participant (§16.3).
+export function participantGrokbot(participants, kindOf) {
+  const lookup = typeof kindOf === 'function' ? kindOf : () => '';
+  return (participants || []).some(id => lookup(id) === 'grokbot');
+}
+
+// replyPriority is the reply composer's selection. Same rule as a new
+// message (Decisions §6): wake_idle once any participant is grokbot, the
+// existing initial priority otherwise, and a manual or in-flight choice
+// left as it was captured (PROTOCOL §§2.2, 5.2).
+export function replyPriority({ manual = false, locked = false, current = INITIAL_PRIORITY, participants, kindOf } = {}) {
+  return priorityChoice({ manual, locked, current, addressed: participantGrokbot(participants, kindOf) });
+}
+
+// replyQuotaNote is the reply's visible note: "Preselected…" only while the
+// selection is the automatic wake_idle, the quota-only line after a manual
+// choice or a kept retry of another priority, '' with no grokbot.
+export function replyQuotaNote(participants, kindOf, { manual = false, priority = '' } = {}) {
+  return grokQuotaNote({ addressed: participantGrokbot(participants, kindOf), manual, priority });
+}
+
 // replyKey is the reply's pending send: the same one, idempotency key and all,
 // while its text, priority, target and attachments' signature are unchanged
 // (PROTOCOL §5.3), else a new one under a fresh key from mint.
 export function replyKey(pending, { text, prio, replyTo, sig }, mint) {
   if (pending && pending.text === text && pending.prio === prio && pending.replyTo === replyTo && pending.sig === sig) return pending;
   return { key: mint(), text, prio, replyTo, sig };
+}
+
+// pendingReplyMatches is true when draft would resend pending. The live control
+// value is not part of that: a recompute while the text was edited must not
+// keep a restored draft from reusing the captured priority and key.
+export function pendingReplyMatches(pending, draft) {
+  if (!pending || !draft) return false;
+  return replyKey(pending, { ...draft, prio: pending.prio }, () => (pending.key || '') + '*') === pending;
+}
+
+// replyPriorityLocked matches priorityLocked: in flight, or this same draft.
+export function replyPriorityLocked({ sending = false, pending = null, draft } = {}) {
+  return !!sending || pendingReplyMatches(pending, draft);
 }
 
 // unreadOf lists { message_id, delivery_id } for each message whose

@@ -7,6 +7,26 @@ import { bytes } from './format.js';
 
 export const SPILL = 4096, TEXT_CAP = 65536;
 const PRIORITIES = ['wake', 'wake_idle', 'hold'];
+// The composer's existing initial priority when nobody addressed is a
+// grokbot. PROTOCOL §5.2: priority is required on the wire; this is only
+// the control's starting selection.
+export const INITIAL_PRIORITY = 'wake';
+// Preselect when any recipient or participant is grokbot (Decisions §6).
+// The send still carries it explicitly (§2.2, §5.2). It is not a default
+// the hub fills in, and it is not a promise that the bot will not wake.
+export const GROK_PRIORITY = 'wake_idle';
+// The visible note is one short line by the control while a Grok Bot is
+// addressed. GROK_QUOTA_NOTE shows only while wake_idle is selected because
+// of the preselect; after a manual choice, or a kept retry of another
+// priority, GROK_QUOTA_PLAIN says only what is true of every priority.
+// GROK_QUOTA_DETAIL is the timing and the second-run caveat (§§5.2, 13.3):
+// the note's title, and a hidden element the control's aria-describedby
+// also names, so keyboard and screen-reader users get it too. No text calls
+// a run free or promises the bot will not wake.
+export const GROK_QUOTA_NOTE = 'Preselected for Grok Bot · each run spends Grok quota';
+export const GROK_QUOTA_PLAIN = 'Grok Bot: each run spends Grok quota';
+export const GROK_QUOTA_TITLE = 'A run that also needs you in chat can start a second one.';
+export const GROK_QUOTA_DETAIL = 'wake_idle pushes now if the Grok Bot is idle or its presence is unknown, otherwise once it goes idle; hold never starts a run. ' + GROK_QUOTA_TITLE;
 const HISTORY = ['from_join', 'full'];
 const ID = /^(peer|team|grp)_[A-Za-z0-9]+$/;
 const enc = new TextEncoder();
@@ -111,12 +131,73 @@ export function keyFor(pending, form, mint) {
   return { key: mint(), sig };
 }
 
+// pendingMatches is true when form would resend pending's body, key and all.
+// A changed draft does not: the next send mints a key (PROTOCOL §5.3).
+export function pendingMatches(pending, form) {
+  if (!pending) return false;
+  return keyFor(pending, form, () => pending.key + '*') === pending;
+}
+
+// priorityLocked keeps automatic priority only while a send is in flight or
+// the draft would still retry that same body. A changed draft is chosen again
+// before its key is minted (Decisions §6).
+export function priorityLocked({ sending = false, pending = null, form } = {}) {
+  return !!sending || pendingMatches(pending, form);
+}
+
 // keepKey is the composer's rule: an unreached hub, a 5xx, 409 or 429 may
 // have a different answer next time under the same key; any other 4xx is a
 // definite rejection, and the next attempt is a new send.
 export function keepKey(err) {
   const s = err.status;
   return !(s >= 400 && s < 500 && s !== 429 && s !== 409);
+}
+
+// directoryPeers is the peer list, or null when the directory has not
+// arrived. A loaded empty list is [], which names no grokbot.
+function directoryPeers(peers) {
+  if (Array.isArray(peers)) return peers;
+  if (peers && Array.isArray(peers.peers)) return peers.peers;
+  return null;
+}
+
+// anyGrokbot is true once the directory shows that any addressed id is kind
+// grokbot. Ids the directory has not named are not grokbot: a name is not
+// an address (§2.2), and a late directory must be allowed to change the
+// preselect only while the operator has not chosen.
+export function anyGrokbot(ids, peers) {
+  const list = directoryPeers(peers);
+  if (!list) return false;
+  const kinds = new Map();
+  for (const p of list) if (p && p.peer_id) kinds.set(p.peer_id, p.kind);
+  return (ids || []).some(id => kinds.get(id) === 'grokbot');
+}
+
+// priorityChoice is the segmented control's value.
+// manual: the operator has used the control. Later directory or presence
+// updates must not overwrite it.
+// locked: an in-flight send, or the retry of that same body, already
+// captured current (§2.2 idempotency, §5.3). Do not change it.
+// addressed: any recipient or participant is grokbot (§16.3 for a thread).
+export function priorityChoice({ manual = false, locked = false, current = INITIAL_PRIORITY, addressed = false } = {}) {
+  if (manual || locked) return current;
+  return addressed ? GROK_PRIORITY : INITIAL_PRIORITY;
+}
+
+// composePriority applies that rule to the new-message recipients.
+export function composePriority({ manual, locked, current, recipients, peers } = {}) {
+  return priorityChoice({ manual, locked, current, addressed: anyGrokbot(recipients, peers) });
+}
+
+// grokQuotaNote is the visible line for why the control shows what it shows:
+// '' when no Grok Bot is addressed; GROK_QUOTA_NOTE while wake_idle is the
+// automatic choice (the preselect, or the retry of a preselected send);
+// GROK_QUOTA_PLAIN once the operator has chosen, or a kept retry holds
+// another priority. A note that said "preselected" beside a manual wake
+// would describe the opposite of what that send does.
+export function grokQuotaNote({ addressed = false, manual = false, priority = '' } = {}) {
+  if (!addressed) return '';
+  return !manual && priority === GROK_PRIORITY ? GROK_QUOTA_NOTE : GROK_QUOTA_PLAIN;
 }
 
 // errorText is the form's error line. Every peer-supplied part is a plain

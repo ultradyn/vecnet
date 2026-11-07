@@ -12,7 +12,7 @@ import (
 
 func TestProjectionPreservesOutputContracts(t *testing.T) {
 	env := testhub.Start(t)
-	_, secret := env.NewPeer("session", "output contracts")
+	secret := env.OperatorSecret
 	status, r := rpc(t, env, secret, "tools/list", nil)
 	if status != 200 || r.Error != nil {
 		t.Fatalf("tools/list: %d %+v", status, r.Error)
@@ -30,6 +30,20 @@ func TestProjectionPreservesOutputContracts(t *testing.T) {
 	var before map[string]any
 	if err := json.Unmarshal(raw, &before); err != nil {
 		t.Fatal(err)
+	}
+	raw, err = os.ReadFile("testdata/output-onboarding-before-projection.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onboarding map[string]any
+	if err := json.Unmarshal(raw, &onboarding); err != nil {
+		t.Fatal(err)
+	}
+	for name, doc := range onboarding {
+		if _, exists := before[name]; exists {
+			t.Fatalf("duplicate output baseline for %s", name)
+		}
+		before[name] = doc
 	}
 	// Overlay only R2 outputs independently captured from unprojected r2-build.
 	raw, err = os.ReadFile("testdata/output-r2-transfers.json")

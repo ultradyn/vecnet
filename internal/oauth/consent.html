@@ -12,6 +12,9 @@
 <h1>Connect to vecnet</h1>
 <p><strong>{{.ClientName}}</strong> is asking to act for this peer on the vecnet hub. You will be sent back to <strong>{{.RedirectHost}}</strong>.</p>
 <p>Approval lets this application read and send vecnet messages for this peer, and read, create, refresh or remove its event subscriptions (<code>vecnet</code>, <code>events:read</code>, <code>events:write</code>).</p>
+{{- if .PeerID}}
+<p>Approve will connect <strong>{{.PeerName}}</strong> (<code>{{.PeerID}}</code>).</p>
+{{- end}}
 {{- if .NewClient}}
 <p class="error" role="alert">You have not approved this application in this browser before, and its name is its own to choose. Approve only if you started this connection just now.</p>
 {{- end}}
@@ -24,6 +27,10 @@
 <label for="link_code">Link code</label>
 <input id="link_code" name="link_code" required maxlength="24" placeholder="ABCD-EFGH-JKMN" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus>
 <p class="hint">Your operator gets one by running <code>vecnet peer link</code>. It lasts 10 minutes.</p>
+{{- else if .PeerID}}
+<label for="link_code">use a link code instead</label>
+<input id="link_code" name="link_code" maxlength="24" placeholder="ABCD-EFGH-JKMN" autocomplete="off" autocapitalize="characters" spellcheck="false">
+<p class="hint">Your operator gets one by running <code>vecnet peer link</code>. It lasts 10 minutes. Leave this blank to approve the peer named above.</p>
 {{- end}}
 <div class="actions">
 <button type="submit" name="approve" value="1">Approve</button>

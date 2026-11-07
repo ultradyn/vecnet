@@ -17,6 +17,7 @@ import * as dash from './dash.js';
 import { h, peerLink, toast } from './dom.js';
 import { short } from './format.js';
 import * as inbox from './inbox.js';
+import { addAgentPrefill } from './invite-model.js';
 import { closeInvite, openInvite } from './invite.js';
 import * as matrix from './matrix.js';
 import { createNotices } from './notice.js';
@@ -50,6 +51,10 @@ try { localStore = window.localStorage; } catch { /* blocked: defaults */ }
 const appearance = createAppearance({ storage: localStore, root: document.documentElement, win: window });
 
 function parseRoute(hash) {
+  // #add-agent?kind=&name=&request_id= opens the dialog. The query is a
+  // prefill, not a credential (PROTOCOL §4.5, §20.1).
+  const add = addAgentPrefill(hash);
+  if (add) return { name: 'add-agent', view: 'inbox', prefill: add };
   if (hash === '#dash') return { name: 'dash', view: 'dash' };
   if (hash === '#new') return { name: 'new', view: 'new' };
   if (hash === '#settings') return { name: 'settings', view: 'settings' };
@@ -173,6 +178,10 @@ function renderRoute(s) {
   }
   if (route.name === 'matrix' && location.hash !== s.matrixHash) matrix.openMatrix(route.id, s.ctx);
   s.matrixHash = route.name === 'matrix' ? location.hash : '';
+  if (route.name === 'add-agent' && location.hash !== s.addAgentHash) {
+    s.addAgentHash = location.hash;
+    openInvite(s.ctx, () => s.ctx.peers.reload(), $('nav-add'), route.prefill);
+  } else if (route.name !== 'add-agent') s.addAgentHash = '';
 }
 
 function start(secret) {
@@ -215,7 +224,7 @@ function start(secret) {
 
   const s = {
     threads, inboxHead, nameOf, store, mine: null, others: null, otherLimit: OTHER_PAGE,
-    me: '', ctx: null, mounted: '', matrixHash: '', unmount: () => {}, offs: [],
+    me: '', ctx: null, mounted: '', matrixHash: '', addAgentHash: '', unmount: () => {}, offs: [],
     // leaveGuard: a screen with unsaved work (Settings) names what leaving loses.
     leaveGuard: null, shownHash: '',
     close() {

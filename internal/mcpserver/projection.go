@@ -4,7 +4,49 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/hub"
 )
+
+// projectTools filters the already projected catalogue. It never changes an
+// entry or the compiled call table: discovery is guidance, not authorization.
+func projectTools(c auth.Caller, listed []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(listed))
+	for _, entry := range listed {
+		name, _ := entry["name"].(string)
+		switch name {
+		case "vecnet_agent_kinds", "vecnet_agent_add", "vecnet_agent_status":
+			if requireOperator(c) != nil {
+				continue
+			}
+		case "vecnet_peer_lifecycle":
+			if hub.RequirePeerLifecycle(c) != nil {
+				continue
+			}
+		case "vecnet_peer_invite_get", "vecnet_peer_invite_revoke":
+			if operatorOnly(c) != nil {
+				continue
+			}
+		}
+		if c.PeerKind == "grokbot" && !grokListedTool(name) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func grokListedTool(name string) bool {
+	switch name {
+	case "vecnet_whoami", "vecnet_guide", "vecnet_inbox", "vecnet_thread",
+		"vecnet_threads", "vecnet_send", "vecnet_reply", "vecnet_react",
+		"vecnet_receipt", "vecnet_ack", "vecnet_blob_get", "vecnet_peers":
+		return true
+	default:
+		return false
+	}
+}
 
 // projectTool is discovery-only. buildTools has already compiled the original
 // input (including its hubValues exceptions); nothing here can reach tools/call.

@@ -401,66 +401,9 @@ func (h *Hub) AddPeerWith(ctx context.Context, o AddPeerOpts) (peerID, enrolToke
 		return "", "", time.Time{}, e
 	}
 	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		now := h.nowStr()
-		if prnID == "" {
-			prnID = ids.New(ids.Prn)
-			if err := insertPrincipal(ctx, tx, prnID, name, now); err != nil {
-				return err
-			}
-		} else {
-			var one int
-			err := tx.QueryRowContext(ctx, `SELECT 1 FROM principals WHERE prn_id = ?`, prnID).Scan(&one)
-			if errors.Is(err, sql.ErrNoRows) {
-				e := E(http.StatusUnprocessableEntity, "invalid_value", "unknown principal")
-				e.Details["field"] = "principal_id"
-				return e
-			}
-			if err != nil {
-				return fmt.Errorf("hub: find principal: %w", err)
-			}
-		}
-		if kind == "operator" {
-			// Operator powers key on peers.kind (PROTOCOL §16.1, §16.3), so
-			// the kind is reserved to the operator principal: the one holding
-			// an operator credential.
-			var one int
-			err := tx.QueryRowContext(ctx,
-				`SELECT 1 FROM credentials WHERE subject_id = ? AND kind = 'operator' LIMIT 1`, prnID).Scan(&one)
-			if errors.Is(err, sql.ErrNoRows) {
-				e := E(http.StatusUnprocessableEntity, "invalid_value", "kind operator is reserved to the operator principal")
-				e.Details["field"] = "kind"
-				return e
-			}
-			if err != nil {
-				return fmt.Errorf("hub: find operator credential: %w", err)
-			}
-		}
-		if err := h.insertPeer(ctx, tx, peerID, prnID, name, kind, now); err != nil {
-			return err
-		}
-		if o.NameOpen {
-			if _, err := tx.ExecContext(ctx, `UPDATE peers SET name_open = 1 WHERE peer_id = ?`, peerID); err != nil {
-				return fmt.Errorf("hub: open peer name: %w", err)
-			}
-		}
-		// A dot authenticates by OAuth after a link code and never holds a
-		// vecnet secret (PROTOCOL §12), so it gets nothing to enrol with.
-		if kind != "dot" {
-			var err error
-			if enrolToken, expires, err = h.Auth.IssueEnrolToken(ctx, tx, peerID, ttl); err != nil {
-				return err
-			}
-		}
-		// "peer add" is enrolment (PROTOCOL §2.12): the peer is in the
-		// directory from here on.
-		if err := h.DirectoryUpdated(ctx, tx, peerID, "enrolled", enrolledFields); err != nil {
-			return err
-		}
-		detail := map[string]any{"kind": kind}
-		if o.NameOpen {
-			detail["name_open"] = true
-		}
-		return audit.Record(ctx, tx, "operator", "peer_add", []string{peerID, prnID}, detail)
+		var err error
+		prnID, enrolToken, expires, err = h.addPeerTx(ctx, tx, peerID, o, name, "operator", nil)
+		return err
 	})
 	if err != nil {
 		return "", "", time.Time{}, err
@@ -468,6 +411,81 @@ func (h *Hub) AddPeerWith(ctx context.Context, o AddPeerOpts) (peerID, enrolToke
 	h.notifyEnabled(ctx)
 	h.Log.Notify(prnID) // the principal's peer set changed; the new peer's log is empty
 	return peerID, enrolToken, expires, nil
+}
+
+// addPeerTx inserts one peer inside tx. peerID and name are already
+// chosen; name may be the open-invite placeholder, which is not o.Name.
+// actor is the peer_add audit actor. extra is merged into that detail so
+// AddPeerWith's historical detail stays intact when extra is nil. The
+// returned principal is the one whose peer set changed; the caller notifies
+// after commit.
+func (h *Hub) addPeerTx(ctx context.Context, tx *sql.Tx, peerID string, o AddPeerOpts, name, actor string, extra map[string]any) (prnID, enrolToken string, expires time.Time, err error) {
+	prnID = o.PrincipalID
+	now := h.nowStr()
+	if prnID == "" {
+		prnID = ids.New(ids.Prn)
+		if err = insertPrincipal(ctx, tx, prnID, name, now); err != nil {
+			return "", "", time.Time{}, err
+		}
+	} else {
+		var one int
+		err = tx.QueryRowContext(ctx, `SELECT 1 FROM principals WHERE prn_id = ?`, prnID).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			e := E(http.StatusUnprocessableEntity, "invalid_value", "unknown principal")
+			e.Details["field"] = "principal_id"
+			return "", "", time.Time{}, e
+		}
+		if err != nil {
+			return "", "", time.Time{}, fmt.Errorf("hub: find principal: %w", err)
+		}
+	}
+	if o.Kind == "operator" {
+		// Operator powers key on peers.kind (PROTOCOL §16.1, §16.3), so
+		// the kind is reserved to the operator principal: the one holding
+		// an operator credential.
+		var one int
+		err = tx.QueryRowContext(ctx,
+			`SELECT 1 FROM credentials WHERE subject_id = ? AND kind = 'operator' LIMIT 1`, prnID).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			e := E(http.StatusUnprocessableEntity, "invalid_value", "kind operator is reserved to the operator principal")
+			e.Details["field"] = "kind"
+			return "", "", time.Time{}, e
+		}
+		if err != nil {
+			return "", "", time.Time{}, fmt.Errorf("hub: find operator credential: %w", err)
+		}
+	}
+	if err = h.insertPeer(ctx, tx, peerID, prnID, name, o.Kind, now); err != nil {
+		return "", "", time.Time{}, err
+	}
+	if o.NameOpen {
+		if _, err = tx.ExecContext(ctx, `UPDATE peers SET name_open = 1 WHERE peer_id = ?`, peerID); err != nil {
+			return "", "", time.Time{}, fmt.Errorf("hub: open peer name: %w", err)
+		}
+	}
+	// A dot authenticates by OAuth after a link code and never holds a
+	// vecnet secret (PROTOCOL §12), so it gets nothing to enrol with.
+	if o.Kind != "dot" {
+		if enrolToken, expires, err = h.Auth.IssueEnrolToken(ctx, tx, peerID, o.TTL); err != nil {
+			return "", "", time.Time{}, err
+		}
+	}
+	// "peer add" is enrolment (PROTOCOL §2.12): the peer is in the
+	// directory from here on.
+	if err = h.DirectoryUpdated(ctx, tx, peerID, "enrolled", enrolledFields); err != nil {
+		return "", "", time.Time{}, err
+	}
+	detail := map[string]any{"kind": o.Kind}
+	if o.NameOpen {
+		detail["name_open"] = true
+	}
+	for k, v := range extra {
+		detail[k] = v
+	}
+	if err = audit.Record(ctx, tx, actor, "peer_add", []string{peerID, prnID}, detail); err != nil {
+		return "", "", time.Time{}, err
+	}
+	return prnID, enrolToken, expires, nil
 }
 
 func insertPrincipal(ctx context.Context, tx *sql.Tx, prn, name, now string) error {

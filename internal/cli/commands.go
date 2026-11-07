@@ -111,12 +111,24 @@ admin (operator credential):
        an enrolled peer's secret (peer disable / peer rotate). Also: peer invite status|revoke
   peer move <peer> --principal PRN
   peer link <peer>                                    prints a peer's 12-character OAuth link code
+  agent kinds [--kind KIND]
+       onboarding kinds and prompt templates from the hub
+  agent add --kind KIND [--name N] [--open-name] [--ttl 24h] [--principal PRN]
+       [--url URL] [--key-file PATH] [--connector-name NAME] [--skip-mcp]
+       [--request-id ID] [--confirm-revoke]
+       one hub submit; a routine key is read only from --key-file, never argv or the environment
+       --skip-mcp selects CLI bearer and does not request a link
+       the guided link revokes a live bearer and asks for --confirm-revoke first
+  agent link <peer> [--confirm-revoke]
+       guided link step, with the same bearer warning before peer link
+  agent status REQUEST_ID
+       safe onboarding status; queued is not connected
   peer avatar <peer> (FILE|https://URL|--clear)       set or clear any peer's avatar
   peer rotate <peer>
   peer scope <peer> [--allow IDS] [--deny IDS]        IDS: comma-separated or repeated
   peer limits <peer> --sends-per-min N --threads-per-hour N
   peer rename <id> <name>
-  peer disable <id> | peer enable <id>
+  peer disable <id> | peer enable <id> | peer archive <id> | peer unarchive <id>
   route add --owner ID --url URL | route verify <route_id>
   route add --owner ID --kind grokbot --url URL --key-file PATH
   route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>
@@ -185,7 +197,10 @@ type app struct {
 	inHook        bool   // hooks never TOFU or rewrite trust state
 	stdinConsumed bool   // a retry cannot consume stdin again
 	inMCP         bool   // stdio relay startup refusals must make no requests
-	prefsCmd      bool   // preferences exit codes and JSON errors
+	// retainedRequestID is the agent-add id for this process, generated or
+	// explicit, so a verified hub follow redispatches the same submission.
+	retainedRequestID string
+	prefsCmd          bool // preferences exit codes and JSON errors
 }
 
 // exit prints err and maps it to an exit code. Preferences commands use the
@@ -467,7 +482,28 @@ func (a *app) dispatch(cmd string, args []string) error {
 	if a.stdinConsumed {
 		return usageErr("hub followed; re-run the command (stdin was consumed)")
 	}
-	return a.dispatchOnce(cmd, args)
+	return a.dispatchOnce(cmd, a.withRetainedRequestID(cmd, args))
+}
+
+// withRetainedRequestID puts the id from the first attempt back on a
+// redispatched agent command. Without it, agent add generates a new id
+// after a signed 410 and the follow creates a second peer.
+func (a *app) withRetainedRequestID(cmd string, args []string) []string {
+	if cmd != "agent" || a.retainedRequestID == "" || hasRequestIDFlag(args) {
+		return args
+	}
+	out := make([]string, len(args), len(args)+2)
+	copy(out, args)
+	return append(out, "--request-id", a.retainedRequestID)
+}
+
+func hasRequestIDFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--request-id" || strings.HasPrefix(arg, "--request-id=") {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *app) dispatchOnce(cmd string, args []string) error {
@@ -520,6 +556,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdPrincipal(args)
 	case "peer":
 		return a.cmdPeer(args)
+	case "agent":
+		return a.cmdAgent(args)
 	case "invite":
 		return a.cmdInvite(args)
 	case "route":

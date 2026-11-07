@@ -1,0 +1,75 @@
+{
+  "vecnet_agent_add": {
+    "additionalProperties": false,
+    "properties": {
+      "inputs": {
+        "additionalProperties": false,
+        "properties": {
+          "connector_name": {
+            "type": "string"
+          },
+          "enrol_ttl_seconds": {
+            "maximum": 604800,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_open": {
+            "type": "boolean"
+          },
+          "principal_id": {
+            "type": "string"
+          },
+          "skip_mcp": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "kind": {
+        "enum": [
+          "session",
+          "launcher",
+          "openclaw",
+          "pagchat-bot",
+          "grokbot",
+          "dot"
+        ],
+        "type": "string"
+      },
+      "request_id": {
+        "type": "string"
+      },
+      "spec_version": {
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "kind",
+      "spec_version",
+      "request_id",
+      "inputs"
+    ],
+    "type": "object"
+  },
+  "vecnet_agent_kinds": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  },
+  "vecnet_agent_status": {
+    "additionalProperties": false,
+    "properties": {
+      "request_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "request_id"
+    ],
+    "type": "object"
+  }
+}

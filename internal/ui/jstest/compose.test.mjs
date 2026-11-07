@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SPILL, TEXT_CAP, buildSend, canSend, counter, draftOf, eligible, errorText, keepKey, keyFor, matches, sendRefusal } from '../static/compose-model.js';
+import { SPILL, TEXT_CAP, anyGrokbot, buildSend, canSend, composePriority, counter, draftOf, eligible, errorText, GROK_QUOTA_DETAIL, GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, GROK_QUOTA_TITLE, grokQuotaNote, keepKey, keyFor, matches, pendingMatches, priorityLocked, sendRefusal } from '../static/compose-model.js';
 import { SPILL_SLOT } from '../static/attach-model.js';
 
 const peers = [
@@ -210,6 +210,132 @@ test('keyFor: same text, different attachments → new key', () => {
   assert.equal(keyFor(a, { ...form, attachments: [] }, mint).key, 'ui-5', 'dropping every attachment mints a new key');
   // uploadsReady is not part of the body.
   assert.equal(keyFor(a, { ...form, uploadsReady: false }, mint), a);
+});
+
+// Decisions §6. priority stays on the wire (PROTOCOL §§2.2, 5.2). A grokbot
+// among the recipients preselects wake_idle; everyone else keeps the
+// existing initial priority. A manual choice and an in-flight or idempotent
+// retry are left alone, including when the directory arrives late.
+test('Grok recipient defaults preserve user choice', () => {
+  const open = { manual: false, locked: false, current: 'wake', peers };
+  assert.equal(composePriority({ ...open, recipients: [] }), 'wake', 'empty composer');
+  assert.equal(composePriority({ ...open, recipients: ['peer_c'] }), 'wake', 'session recipient');
+  assert.equal(composePriority({ ...open, recipients: ['peer_d'] }), 'wake', 'dot recipient');
+  assert.equal(composePriority({ ...open, recipients: ['peer_g'] }), 'wake_idle', 'selecting a grokbot');
+  assert.equal(composePriority({ ...open, current: 'wake_idle', recipients: ['peer_c', 'peer_g'] }), 'wake_idle', 'mixed destination, one grokbot');
+  assert.equal(composePriority({ ...open, current: 'wake_idle', recipients: ['peer_c'] }), 'wake', 'removing the grokbot restores the initial priority');
+
+  // The directory is not in yet: a recipient id is not treated as grokbot.
+  assert.equal(composePriority({ ...open, recipients: ['peer_g'], peers: null }), 'wake', 'delayed directory');
+  assert.equal(composePriority({ ...open, recipients: ['peer_g'], peers: undefined }), 'wake');
+  assert.equal(composePriority({ ...open, recipients: ['peer_g'], peers: { peers } }), 'wake_idle', 'directory object arrives');
+  // A later directory or presence reload must not overwrite wake or hold.
+  assert.equal(composePriority({ manual: true, locked: false, current: 'wake', recipients: ['peer_g'], peers }), 'wake', 'explicit wake');
+  assert.equal(composePriority({ manual: true, locked: false, current: 'hold', recipients: ['peer_g'], peers }), 'hold', 'explicit hold');
+  assert.equal(composePriority({ manual: true, locked: false, current: 'wake', recipients: ['peer_c'], peers }), 'wake', 'explicit wake with no grokbot');
+  assert.equal(composePriority({ manual: true, locked: false, current: 'wake_idle', recipients: ['peer_c'], peers }), 'wake_idle', 'manual wake_idle stays after the grokbot is gone');
+
+  // In flight, and the retry of that same body, keep the priority already captured.
+  const captured = composePriority({ manual: false, locked: true, current: 'wake', recipients: ['peer_g'], peers });
+  assert.equal(captured, 'wake', 'in-flight send changed priority');
+  let n = 0;
+  const mint = () => 'ui-g' + (++n);
+  const form = { recipients: ['peer_g', 'peer_c'], title: '', priority: captured, text: 'same body', historyAccess: 'from_join', lockedParticipants: false };
+  const pending = keyFor(null, form, mint);
+  const retry = keyFor(pending, { ...form }, mint);
+  assert.equal(retry, pending, 'idempotent retry minted a new key');
+  const body = buildSend(form, retry.key);
+  assert.equal(body.priority, 'wake');
+  assert.equal(body.content.text, 'same body');
+  assert.deepEqual(body.recipients, ['peer_g', 'peer_c']);
+  // The preselect is still an explicit field. Nothing omits it.
+  const chosen = composePriority({ ...open, recipients: ['peer_g'] });
+  const sent = buildSend({ recipients: ['peer_g'], priority: chosen, text: 'hello' }, 'ui-g-send');
+  assert.equal(sent.priority, 'wake_idle');
+  assert.equal(typeof sent.priority, 'string');
+
+  const note = grokQuotaNote({ addressed: true, manual: false, priority: chosen });
+  assert.equal(note, GROK_QUOTA_NOTE);
+  assert.equal(grokQuotaNote({ addressed: false, manual: false, priority: 'wake' }), '');
+});
+
+// The visible note says why the control shows what it shows, in one short
+// line; the timing and the second-run caveat live in the detail (title and
+// aria-describedby). "Preselected" only while wake_idle is the automatic
+// choice: after an explicit wake or hold it would describe the opposite of
+// what that send does.
+test('Grok quota note follows why the priority is selected', () => {
+  assert.equal(GROK_QUOTA_NOTE, 'Preselected for Grok Bot · each run spends Grok quota');
+  assert.equal(GROK_QUOTA_PLAIN, 'Grok Bot: each run spends Grok quota');
+  assert.equal(GROK_QUOTA_TITLE, 'A run that also needs you in chat can start a second one.');
+  assert.equal(GROK_QUOTA_DETAIL, 'wake_idle pushes now if the Grok Bot is idle or its presence is unknown, otherwise once it goes idle; hold never starts a run. A run that also needs you in chat can start a second one.');
+  // One line at 11.5px in a phone-width composer.
+  for (const line of [GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN]) assert.ok(line.length <= 55, `${line.length} chars: ${line}`);
+  for (const text of [GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, GROK_QUOTA_DETAIL]) {
+    assert.doesNotMatch(text, /free/i);
+    assert.doesNotMatch(text, /guarantee|no wake|never wake|won'?t wake|will not wake|without waking/i);
+    assert.match(text, /Grok/);
+  }
+  assert.match(GROK_QUOTA_PLAIN, /quota/);
+  assert.match(GROK_QUOTA_NOTE, /quota/);
+
+  const grok = { addressed: true };
+  assert.equal(grokQuotaNote({ ...grok, manual: false, priority: 'wake_idle' }), GROK_QUOTA_NOTE, 'automatic wake_idle');
+  // Explicit choices, including choosing wake_idle by hand.
+  for (const priority of ['wake', 'wake_idle', 'hold']) {
+    const line = grokQuotaNote({ ...grok, manual: true, priority });
+    assert.equal(line, GROK_QUOTA_PLAIN, 'explicit ' + priority);
+    assert.doesNotMatch(line, /preselected/i, 'explicit ' + priority);
+  }
+  // A kept retry of wake (sent before the directory named the grokbot) is
+  // not the preselect either.
+  assert.equal(grokQuotaNote({ ...grok, manual: false, priority: 'wake' }), GROK_QUOTA_PLAIN, 'kept wake retry');
+  assert.equal(grokQuotaNote({ ...grok, manual: false, priority: 'hold' }), GROK_QUOTA_PLAIN);
+  for (const priority of ['wake', 'wake_idle', 'hold']) {
+    assert.equal(grokQuotaNote({ addressed: false, manual: false, priority }), '', 'no grokbot, ' + priority);
+    assert.equal(grokQuotaNote({ addressed: false, manual: true, priority }), '');
+  }
+  assert.equal(grokQuotaNote(), '');
+
+  // The composer's flow: preselect, explicit wake, add the grokbot again.
+  const recipients = ['peer_c', 'peer_g'];
+  let current = composePriority({ manual: false, locked: false, current: 'wake', recipients, peers });
+  assert.equal(grokQuotaNote({ addressed: anyGrokbot(recipients, peers), manual: false, priority: current }), GROK_QUOTA_NOTE);
+  current = 'wake';
+  current = composePriority({ manual: true, locked: false, current, recipients, peers });
+  const after = grokQuotaNote({ addressed: anyGrokbot(recipients, peers), manual: true, priority: current });
+  assert.equal(current, 'wake');
+  assert.doesNotMatch(after, /preselected/i, 'the note still says preselected after an explicit wake');
+});
+
+// A 503 keeps the key. Swapping the session peer for a Grok Bot is a new
+// draft, so automatic priority is chosen again before that key is minted.
+// The unchanged retry, a manual choice, and an in-flight send stay put.
+test('failure then recipient edit recomputes automatic priority', () => {
+  let n = 0;
+  const mint = () => 'ui-e' + (++n);
+  const session = { recipients: ['peer_c'], title: '', priority: 'wake', text: 'hello', historyAccess: 'from_join', lockedParticipants: false };
+  const pending = keyFor(null, session, mint);
+  const again = { ...session };
+  assert.equal(priorityLocked({ sending: false, pending, form: again }), true);
+  assert.equal(composePriority({ manual: false, locked: priorityLocked({ sending: false, pending, form: again }), current: 'wake', recipients: again.recipients, peers }), 'wake');
+  assert.equal(keyFor(pending, again, mint), pending, 'unchanged retry minted a new key');
+
+  const swapped = { ...session, recipients: ['peer_g'] };
+  assert.equal(pendingMatches(pending, swapped), false);
+  assert.equal(priorityLocked({ sending: false, pending, form: swapped }), false);
+  const priority = composePriority({ manual: false, locked: priorityLocked({ sending: false, pending, form: swapped }), current: 'wake', recipients: swapped.recipients, peers });
+  assert.equal(priority, 'wake_idle');
+  const next = { ...swapped, priority };
+  const minted = keyFor(pending, next, mint);
+  assert.notEqual(minted.key, pending.key, 'a changed draft reused the failed send\'s key');
+  const body = buildSend(next, minted.key);
+  assert.equal(body.priority, 'wake_idle');
+  assert.equal(body.content.text, 'hello');
+  assert.deepEqual(body.recipients, ['peer_g']);
+
+  assert.equal(composePriority({ manual: true, locked: priorityLocked({ sending: false, pending, form: swapped }), current: 'hold', recipients: ['peer_g'], peers }), 'hold', 'manual hold was overwritten');
+  assert.equal(composePriority({ manual: false, locked: priorityLocked({ sending: true, pending, form: swapped }), current: 'wake', recipients: ['peer_g'], peers }), 'wake', 'in-flight send changed priority');
 });
 
 test('draftOf keeps the id recipients once each and a priority the form offers', () => {

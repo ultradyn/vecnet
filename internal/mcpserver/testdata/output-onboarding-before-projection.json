@@ -1,0 +1,108 @@
+{
+  "vecnet_agent_add": {
+    "additionalProperties": false,
+    "properties": {
+      "request_id": {
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "needs_human"
+        ],
+        "type": "string"
+      },
+      "web_path": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "request_id",
+      "status",
+      "web_path"
+    ],
+    "type": "object"
+  },
+  "vecnet_agent_status": {
+    "additionalProperties": false,
+    "properties": {
+      "auth_state": {
+        "enum": [
+          "unlinked",
+          "pending",
+          "verified"
+        ],
+        "type": "string"
+      },
+      "connector_name": {
+        "type": "string"
+      },
+      "enrol_ttl_seconds": {
+        "type": "integer"
+      },
+      "kind": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "name_open": {
+        "type": "boolean"
+      },
+      "peer_id": {
+        "type": "string"
+      },
+      "principal_id": {
+        "type": "string"
+      },
+      "request_id": {
+        "type": "string"
+      },
+      "request_principal_id": {
+        "type": "string"
+      },
+      "route_id": {
+        "type": "string"
+      },
+      "safe_complete": {
+        "type": "boolean"
+      },
+      "send_defaults": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "setup": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery_id": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "skip_mcp": {
+        "type": "boolean"
+      },
+      "spec_version": {
+        "type": "string"
+      },
+      "status": {
+        "type": "string"
+      },
+      "web_path": {
+        "type": "string"
+      }
+    },
+    "type": "object"
+  }
+}
