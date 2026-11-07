@@ -187,8 +187,12 @@ func TestR2MCPHostTransfersWithoutFlyFileProxy(t *testing.T) {
 	if err != nil || err2 != nil || getDeadline.After(objectDeadline) || getDeadline.Sub(env.Now.Now()) > 600*time.Second {
 		t.Fatalf("GET deadlines url=%s object=%s", got["expires_at"], got["object_expires_at"])
 	}
-	if _, r := rpc(t, env, reader, "tools/call", map[string]any{"name": "vecnet_blob_get", "arguments": map[string]any{"sha256": sha, "blob_id": done["blob_id"], "offset": 0}}); r.Error == nil || !strings.Contains(r.Error.Message, "Range") {
-		t.Fatalf("pagination fallback: %+v", r.Error)
+	// Master intentionally returns static validation text. The structural
+	// path still identifies the rejected paging field without reflecting values.
+	for _, field := range []string{"offset", "limit"} {
+		if path := invalidPath(t, env, reader, "vecnet_blob_get", map[string]any{"sha256": sha, "blob_id": done["blob_id"], field: 1}); path != "/"+field {
+			t.Fatalf("R2 pagination refusal path %q, want /%s", path, field)
+		}
 	}
 	if !bytes.Equal(f.hostGet(t, getURL), payload) || f.hubFileBytes() != 0 {
 		t.Fatal("host GET did not see the object, or the hub proxied it")
