@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { statSync, fstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
@@ -50,6 +50,18 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   // scrubEnv removes credential-bearing names; intersect separately because the
   // launcher's helper intentionally preserves ordinary non-secret variables.
   const env = Object.fromEntries(Object.entries(scrubEnv(d.env, envKeys)).filter(([k]) => envKeys.includes(k)));
+  env.VECNET_CODEX_AUTO_DELIVERY = '0';
+  // Only the private runner, after acquiring its lifetime flock, sets this
+  // indicator. Standalone launcher engines need no inherited descriptor.
+  let leaseFd: number | undefined;
+  if (d.env.VECNET_CODEX_DELIVERY_LEASE_FD === '3') {
+    const lease = fstatSync(3);
+    if (!lease.isFile() || lease.uid !== d.euid || (lease.mode & 0o777) !== 0o600 ||
+        !/^lock:\s+\d+: FLOCK\s+ADVISORY\s+WRITE\s/m.test(readFileSync('/proc/self/fdinfo/3', 'utf8'))) {
+      throw new Error('delivery requires inherited lease');
+    }
+    leaseFd = 3;
+  }
   const baseArgs = ['--net', b.profile, ...(b.as ? ['--as', b.as] : [])];
   const configPath = vecnetConfigPath(env);
   let running = false, rpc: CodexRpc | undefined, watch: ChildProcess | undefined;
@@ -103,7 +115,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   function runHook(args: string[], cleanup = false): Promise<unknown> {
     if (!running && !cleanup) return Promise.reject(new Error('engine_stopped'));
     return new Promise((resolve, reject) => {
-      const child = spawn(d.vecnetBin, [...baseArgs, 'hook', ...args], { env, stdio: ['ignore', 'pipe', 'ignore'] });
+      const child = spawn(d.vecnetBin, [...baseArgs, 'hook', ...args], { env, stdio: leaseFd === undefined ? ['ignore', 'pipe', 'ignore'] : ['ignore', 'pipe', 'ignore', leaseFd] });
       children.add(child); let text = '', tooLarge = false;
       child.stdout!.setEncoding('utf8');
       child.stdout!.on('data', (part: string) => { text += part; if (Buffer.byteLength(text) > 1_048_576) { tooLarge = true; child.kill(); } });

@@ -38,9 +38,15 @@ type codexBinding struct {
 	IdleDormantHours float64   `json:"idle_dormant_hours,omitempty"`
 	Attended         bool      `json:"attended,omitempty"`
 }
+type codexDisabled struct {
+	Profile string `json:"profile"`
+	As      string `json:"as"`
+}
+
 type codexBindingsFile struct {
-	Version  int            `json:"version"`
-	Bindings []codexBinding `json:"bindings"`
+	Version  int             `json:"version"`
+	Bindings []codexBinding  `json:"bindings"`
+	Disabled []codexDisabled `json:"disabled,omitempty"`
 }
 
 var codexThreadID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -94,10 +100,12 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	}
 	var spec map[string]flagKind
 	switch args[0] {
+	case "auto-register":
+		return a.cmdCodexAuto(args[1:])
 	case "deliver", "delivery-status", "delivery-refresh":
 		return a.cmdCodexDelivery(args)
 	case "bind":
-		spec = map[string]flagKind{"thread": strFlag, "codex-home": strFlag, "ttl": strFlag, "idle-dormant": strFlag, "attended": boolFlag, "renew": boolFlag}
+		spec = map[string]flagKind{"thread": strFlag, "codex-home": strFlag, "ttl": strFlag, "idle-dormant": strFlag, "attended": boolFlag, "renew": boolFlag, "takeover": boolFlag}
 	case "unbind":
 		spec = map[string]flagKind{"thread": strFlag}
 	case "bindings":
@@ -119,6 +127,9 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	now := nowTime().UTC()
 	var binding codexBinding
 	if args[0] == "bind" {
+		if o.has("renew") && o.has("takeover") {
+			return usageErr("--renew and --takeover are mutually exclusive")
+		}
 		ttl, err := codexBindDuration(o, "ttl", 24*time.Hour)
 		if err != nil {
 			return err
@@ -190,6 +201,31 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	if err != nil {
 		return err
 	}
+
+	var other []codexBinding
+	if args[0] == "bind" {
+		config, err := configPath(a.getenv)
+		if err != nil {
+			return err
+		}
+		config, err = filepath.Abs(config)
+		if err != nil {
+			return err
+		}
+		path, err = filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		if _, err := loadCodexBindings(path); err != nil {
+			return err
+		}
+		release, external, err := a.codexAdmission(a.ctx, binding.Hub, config, path, true)
+		if err != nil {
+			return err
+		}
+		defer release()
+		other = external
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
@@ -244,34 +280,66 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 		}
 		return nil
 	case "unbind":
+		if thread == "" && a.namedProfile() != "" {
+			file.disable(a.namedProfile(), a.as)
+		}
+		removed := false
 		kept := make([]codexBinding, 0, len(file.Bindings))
 		for _, b := range file.Bindings {
 			remove := b.Profile == a.namedProfile() && b.As == a.as
 			if thread != "" {
 				remove = b.ThreadID == thread
 			}
+			if remove {
+				removed = true
+				file.disable(b.Profile, b.As)
+			}
 			if !remove {
 				kept = append(kept, b)
 			}
 		}
+		if !removed && a.namedProfile() != "" {
+			file.disable(a.namedProfile(), a.as)
+		}
 		file.Bindings = kept
 	case "bind":
+		for _, b := range other {
+			if b.ThreadID == thread && normalizeHub(b.Hub) == binding.Hub {
+				return usageErr("already bound: Codex thread in another registered source")
+			}
+			if b.Profile == binding.Profile && b.As == binding.As && normalizeHub(b.Hub) == binding.Hub {
+				return usageErr("already bound: profile in another registered source")
+			}
+		}
 		existing := -1
 		for i, b := range file.Bindings {
 			sameProfile := b.Profile == binding.Profile && b.As == binding.As
-			if sameProfile && b.ThreadID == thread {
+			if sameProfile && (b.ThreadID == thread || o.has("takeover")) {
 				existing = i
 				continue
 			}
 			if sameProfile {
 				return usageErr("already bound: " + binding.Profile + " to Codex thread " + b.ThreadID)
 			}
-			if b.ThreadID == thread {
+			if b.ThreadID == thread && normalizeHub(b.Hub) == binding.Hub {
 				return usageErr("already bound: Codex thread " + thread + " to " + b.Profile)
 			}
 		}
 		if existing >= 0 {
 			b := file.Bindings[existing]
+			if o.has("takeover") {
+				rows := append([]codexBinding{}, other...)
+				for i, row := range file.Bindings {
+					if i != existing {
+						rows = append(rows, row)
+					}
+				}
+				if err := codexBindingLimit(a.getenv, rows, binding.CodexHome, now); err != nil {
+					return err
+				}
+				b = binding
+				file.Bindings[existing] = b
+			}
 			if o.has("renew") {
 				if b.Hub != binding.Hub || b.Caller != binding.Caller {
 					return usageErr("identity changed since bind; unbind and bind again")
@@ -290,36 +358,13 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 			if o.has("renew") {
 				return usageErr("no existing binding to renew")
 			}
-			limit, err := strconv.Atoi(a.getenv("VECNET_CODEX_MAX_BINDINGS"))
-			if err != nil || limit < 1 || limit > 32 {
-				limit = 8
+			if err := codexBindingLimit(a.getenv, append(append([]codexBinding{}, file.Bindings...), other...), binding.CodexHome, now); err != nil {
+				return err
 			}
-			// Stored homes were canonical at bind time but may since have become
-			// symlinks (a moved home), so resolve both sides. A stored home that
-			// no longer resolves keeps its slot: it might be this home.
-			count, unresolved := 0, 0
-			for _, b := range file.Bindings {
-				if !now.Before(b.ExpiresAt) {
-					continue
-				}
-				home, err := filepath.EvalSymlinks(b.CodexHome)
-				switch {
-				case err != nil:
-					count++
-					unresolved++
-				case filepath.Clean(home) == binding.CodexHome:
-					count++
-				}
-			}
-			if count >= limit {
-				msg := fmt.Sprintf("binding limit %d reached for %s; unbind one or raise VECNET_CODEX_MAX_BINDINGS", limit, binding.CodexHome)
-				if unresolved > 0 {
-					msg += fmt.Sprintf(" (%d counted binding(s) have a codex_home that no longer resolves; see `vecnet codex bindings`)", unresolved)
-				}
-				return usageErr(msg)
-			}
+
 			file.Bindings = append(file.Bindings, binding)
 		}
+		file.enable(binding.Profile, binding.As)
 	}
 	encoded, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
@@ -338,4 +383,58 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	}
 	fmt.Fprintf(a.stdout, "bound %s to Codex thread %s; the launcher connector picks it up within 10 s%s\n", binding.Profile, binding.ThreadID, hint)
 	return nil
+}
+
+func (f *codexBindingsFile) disable(profile, as string) {
+	for _, d := range f.Disabled {
+		if d.Profile == profile && d.As == as {
+			return
+		}
+	}
+	f.Disabled = append(f.Disabled, codexDisabled{profile, as})
+}
+func (f *codexBindingsFile) enable(profile, as string) {
+	kept := f.Disabled[:0]
+	for _, d := range f.Disabled {
+		if d.Profile != profile || d.As != as {
+			kept = append(kept, d)
+		}
+	}
+	f.Disabled = kept
+}
+func (f codexBindingsFile) disabled(profile, as string) bool {
+	for _, d := range f.Disabled {
+		if d.Profile == profile && d.As == as {
+			return true
+		}
+	}
+	return false
+}
+
+func codexBindingLimit(getenv func(string) string, rows []codexBinding, home string, now time.Time) error {
+	limit, err := strconv.Atoi(getenv("VECNET_CODEX_MAX_BINDINGS"))
+	if err != nil || limit < 1 || limit > 32 {
+		limit = 8
+	}
+	count, unresolved := 0, 0
+	for _, b := range rows {
+		if !now.Before(b.ExpiresAt) {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(b.CodexHome)
+		if err != nil {
+			count++
+			unresolved++
+		} else if filepath.Clean(resolved) == home {
+			count++
+		}
+	}
+	if count < limit {
+		return nil
+	}
+	msg := fmt.Sprintf("binding limit %d reached for %s; unbind one or raise VECNET_CODEX_MAX_BINDINGS", limit, home)
+	if unresolved > 0 {
+		msg += fmt.Sprintf(" (%d counted binding(s) have a codex_home that no longer resolves; see `vecnet codex bindings`)", unresolved)
+	}
+	return usageErr(msg)
 }

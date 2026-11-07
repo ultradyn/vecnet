@@ -608,3 +608,43 @@ func TestCodexBindCallerKinds(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexBindTakeover(t *testing.T) {
+	f := newBindFixture(t)
+	f.bind("p", bindT1)
+	f.rejected("already bound:", "bind", "--thread", bindT2)
+	f.bind("p", bindT2, "--takeover")
+	if len(f.entries()) != 1 || bindValue[string](t, f.entries()[0], "thread_id") != bindT2 {
+		t.Fatal("takeover did not replace binding")
+	}
+	f.rejected("already bound:", "--net", "q", "bind", "--thread", bindT2, "--takeover")
+}
+
+func TestCodexAutoOptOut(t *testing.T) {
+	f := newBindFixture(t)
+	f.ok("unbind")
+	var file struct {
+		Disabled []struct{ Profile, As string }
+	}
+	if err := json.Unmarshal(f.raw(), &file); err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Disabled) != 1 || file.Disabled[0].Profile != "p" {
+		t.Fatalf("unbind without a row must disable p: %s", f.raw())
+	}
+	f.bind("p", bindT1)
+	file.Disabled = nil
+	if err := json.Unmarshal(f.raw(), &file); err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Disabled) != 0 {
+		t.Fatalf("explicit bind must clear opt-out: %s", f.raw())
+	}
+	f.ok("unbind", "--thread", bindT1)
+	if err := json.Unmarshal(f.raw(), &file); err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Disabled) != 1 || file.Disabled[0].Profile != "p" {
+		t.Fatalf("thread unbind must disable its profile: %s", f.raw())
+	}
+}

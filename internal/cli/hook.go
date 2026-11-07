@@ -427,6 +427,14 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	if a.namedProfile() == "" {
 		return hookResult{} // a hook never makes a bare run (operator.go)
 	}
+	if v := strings.TrimSpace(a.getenv("VECNET_PROFILE")); v != "" && v != a.namedProfile() {
+		return hookResult{}
+	}
+	// Oversized whitespace has historically fallen back to a manual hook.
+	// It is not readable hook identity input and cannot opt into automation.
+	if len(raw) <= 1<<20 {
+		a.autoCodexAction("hook", args)
+	}
 	c, name, ch, e := a.connect()
 	if e != nil || ctx.Err() != nil {
 		return hookResult{}

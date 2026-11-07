@@ -1,5 +1,5 @@
 import { test } from 'node:test';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, renameSync, existsSync } from 'node:fs';
@@ -1290,4 +1290,74 @@ test('terminal watch exit stops respawning until the config or binding changes',
   await eventually(() => stopped().length === 3, 'stopped again');
   for (let i = 0; i < 3; i++) await h.tick(minute);
   assert.equal(watches(), 4);
+});
+
+
+test('hook and watch children disable automation without broadening their environment', async t => {
+  const h = await harness(t);
+  await h.wake();
+  const children = h.records().filter(r => !r.ack);
+  assert.ok(children.some(r => r.argv.includes('watch')));
+  assert.ok(children.some(r => r.argv.includes('hook')));
+  for (const r of children) {
+    assert.equal(r.env.VECNET_CODEX_AUTO_DELIVERY, '0');
+    assert.deepEqual(Object.keys(r.env).filter(k => !['FAKE_VECNET_PLAN', 'PWD', 'SHLVL', '_'].includes(k)).sort(),
+      ['HOME', 'PATH', 'VECNET_CONFIG', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR', 'VECNET_CODEX_AUTO_DELIVERY'].sort());
+  }
+});
+
+for (const pendingClaim of [true, false]) test(pendingClaim
+  ? 'a pending claim child retains ownership after runner death'
+  : 'a lingering watch child does not retain ownership', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'vn-lease-'));
+  const fake = await startFakeCodexAppServer({ dir: join(dir, 'server') });
+  fake.setThread({ id: 'thread', status: { type: 'idle' } }); fake.attachOther('thread');
+  const lease = join(dir, 'lease'), bin = join(dir, 'vecnet');
+  const hookReady = join(dir, 'hook-ready'), watchReady = join(dir, 'watch-ready'), release = join(dir, 'release');
+  writeFileSync(lease, '', { mode: 0o600 });
+  writeFileSync(bin, `#!/bin/sh
+case " $* " in
+  *" watch "*)
+    echo $$ > '${watchReady}'
+    ${pendingClaim ? `echo '{"type":"delivery","data":{"delivery_id":"d1","message":{"priority":"wake"}}}'` : ':'}
+    while [ ! -f '${release}' ]; do /bin/sleep 0.01; done ;;
+  *" hook "*)
+    echo $$ > '${hookReady}'
+    while [ ! -f '${release}' ]; do /bin/sleep 0.01; done
+    echo '{"version":1,"deliveries":[]}' ;;
+esac
+`, { mode: 0o700 });
+  const moduleUrl = new URL('../src/codex/engine.ts', import.meta.url).href;
+  const daemonUrl = new URL('../src/daemon.ts', import.meta.url).href;
+  const rpcUrl = new URL('../src/codex/rpc.ts', import.meta.url).href;
+  const script = `import {createEngine} from ${JSON.stringify(moduleUrl)};
+import {systemClock} from ${JSON.stringify(daemonUrl)};
+import {openCodexRpc} from ${JSON.stringify(rpcUrl)};
+const rows = new Map();
+const kv = {get:k=>rows.get(k),set:(k,v)=>rows.set(k,v),delete:k=>rows.delete(k),keys:(p='')=>[...rows.keys()].filter(k=>k.startsWith(p))};
+const log = {info(){},warn(){},error(){}};
+createEngine({profile:'p',hub:'https://hub.invalid',caller:'peer_p',codexHome:${JSON.stringify(dirname(dirname(fake.socketPath)))},threadId:'thread',createdAt:Date.now(),expiresAt:Date.now()+3600000,attended:false,origin:'explicit'},
+{clock:systemClock,log,kv,vecnetBin:${JSON.stringify(bin)},env:{HOME:${JSON.stringify(dir)},PATH:'/usr/bin:/bin',VECNET_CODEX_DELIVERY_LEASE_FD:'3'},openRpc:openCodexRpc,euid:process.geteuid(),debounceMs:1,minGapMs:1}).start();`;
+  const runner = spawn('bash', ['-c', 'exec 3>"$1"; flock -x 3; exec "$2" --disable-warning=ExperimentalWarning --input-type=module -e "$3"',
+    'lease-fixture', lease, process.execPath, script], { env: { HOME: dir, PATH: '/usr/bin:/bin' }, stdio: ['ignore', 'ignore', 'ignore', 'ignore'] });
+  const exited = new Promise<void>((resolve, reject) => { runner.once('error', reject); runner.once('exit', () => resolve()); });
+  t.after(async () => {
+    writeFileSync(release, '');
+    if (runner.exitCode === null && runner.signalCode === null) runner.kill('SIGKILL');
+    await exited; await fake.close();
+    // Wait for both bounded fixture children to consume the release marker.
+    await delay(100); rmSync(dir, { recursive: true, force: true });
+  });
+  const locked = () => { try { execFileSync('flock', ['-n', lease, 'true'], { stdio: 'ignore' }); return false; } catch { return true; } };
+  await eventually(() => existsSync(pendingClaim ? hookReady : watchReady), 'engine child started');
+  assert.equal(locked(), true, 'runner owns the real lifetime flock');
+  const watchPid = Number(readFileSync(watchReady, 'utf8'));
+  runner.kill('SIGKILL'); await exited;
+  if (pendingClaim) assert.equal(locked(), true, 'orphan claim must fence a replacement owner');
+  else {
+    process.kill(watchPid, 0);
+    assert.equal(locked(), false, 'a still running watch cannot fence replacement');
+  }
+  writeFileSync(release, '');
+  await eventually(() => !locked(), 'bounded writer releases ownership');
 });

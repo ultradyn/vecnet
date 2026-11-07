@@ -126,9 +126,9 @@ export function startDeliveryRunner(o: { hub: string; stateDir: string; registry
   for (const key of ['HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR', 'XDG_DATA_HOME', 'VECNET_BIN', 'VECNET_CODEX_MAX_BINDINGS']) {
     if (inherited[key] !== undefined) env[key] = inherited[key];
   }
-  // Task 3 must add this control to engine.ts's child env allowlist before
-  // enabling Go next-action automation. The current engine drops this name.
   env.VECNET_CODEX_AUTO_DELIVERY = '0';
+  // Private engine control: never forwarded into a hook/watch environment.
+  if (!o.fixture?.allowMissingLeaseFd) env.VECNET_CODEX_DELIVERY_LEASE_FD = '3';
   const connector = startCodexConnector({ kv, clock, log, env, hub: o.hub, sources: () => {
     try { return readDeliveryRegistry(o.registry); }
     catch { log.warn('codex_delivery_registry_refused'); return []; }
