@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func (a *app) startCodexAuto(thread string) {
@@ -79,12 +81,29 @@ func (a *app) startCodexAuto(thread string) {
 }
 
 func (a *app) cmdCodexAuto(args []string) error {
-	// This internal command runs only in the detached helper process. A
-	// context cannot interrupt blocked filesystem I/O, so enforce its lifetime
-	// at the process boundary. Exit kills every potential writer together;
-	// registry, binding and inherited debounce locks stay owned until then.
+	// The launcher creates a private session/group. Refuse other invocation
+	// shapes before starting work: only this live leader's own group is safe
+	// to signal, never a PID read from disk or the caller's shared group.
+	pid := os.Getpid()
+	privateGroup := func() bool {
+		sid, err := unix.Getsid(0)
+		return err == nil && pid > 1 && sid == pid && syscall.Getpgrp() == pid
+	}
+	if !privateGroup() {
+		return errCodexDelivery
+	}
+	// Context cancellation reaps temporary exec.CommandContext children on
+	// the normal path. At the hard boundary, kill the verified private group
+	// together so neither blocked Go writers nor an active probe can survive.
+	// Detached delivery owners create their own session; managed owners are
+	// started by their manager. Both keep their separate lifetime/lease.
 	deadline := time.Now().Add(15 * time.Second)
-	watchdog := time.AfterFunc(time.Until(deadline), func() { os.Exit(1) })
+	watchdog := time.AfterFunc(time.Until(deadline), func() {
+		if privateGroup() {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+		os.Exit(1)
+	})
 	defer watchdog.Stop()
 	o, err := parseFlags("codex auto-register", args, map[string]flagKind{"thread": strFlag, "codex-home": strFlag, "hook": boolFlag})
 	if err != nil || len(o.pos) != 0 {
@@ -97,6 +116,11 @@ func (a *app) cmdCodexAuto(args []string) error {
 		return errCodexDelivery
 	}
 	defer lease.Close()
+	// Keep ownership in this helper until its writers stop, but never pass
+	// the debounce description to probe/version/manager or delivery execs.
+	if _, err := unix.FcntlInt(lease.Fd(), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+		return errCodexDelivery
+	}
 	if st, err := lease.Stat(); err != nil || !st.Mode().IsRegular() {
 		return errCodexDelivery
 	}

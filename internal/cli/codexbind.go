@@ -333,6 +333,20 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 				home := b.CodexHome
 				if o.has("takeover") {
 					home = binding.CodexHome
+				} else {
+					// Stored renewal fields stay intact, but admission uses the
+					// home's current identity under registry/binding serialization.
+					if !filepath.IsAbs(home) {
+						return usageErr("cannot resolve stored codex-home for renewal")
+					}
+					resolved, err := filepath.EvalSymlinks(home)
+					if err != nil {
+						return usageErr("cannot resolve stored codex-home for renewal")
+					}
+					if st, err := os.Stat(resolved); err != nil || !st.IsDir() {
+						return usageErr("stored codex-home must resolve to a directory for renewal")
+					}
+					home = filepath.Clean(resolved)
 				}
 				rows := append([]codexBinding{}, other...)
 				for i, row := range file.Bindings {

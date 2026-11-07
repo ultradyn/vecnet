@@ -12,10 +12,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // An actual detached CLI child, with a private environment and fake read-only
@@ -23,6 +26,28 @@ import (
 func TestCodexAutoProcess(t *testing.T) {
 	for i, arg := range os.Args {
 		if arg == "auto-fixture" {
+			if os.Getenv("VECNET_TEST_AUTO_SINGLE_CPU") == "1" {
+				// Pin before exec so every Go runtime thread and subsequent
+				// probe inherits one CPU, not just the helper's initial thread.
+				runtime.LockOSThread()
+				var allowed, single unix.CPUSet
+				if unix.SchedGetaffinity(0, &allowed) != nil {
+					os.Exit(97)
+				}
+				for cpu := 0; cpu < 1024; cpu++ {
+					if allowed.IsSet(cpu) {
+						single.Set(cpu)
+						break
+					}
+				}
+				if unix.SchedSetaffinity(0, &single) != nil {
+					os.Exit(97)
+				}
+				os.Unsetenv("VECNET_TEST_AUTO_SINGLE_CPU")
+				exe, _ := os.Executable()
+				_ = unix.Exec(exe, os.Args, os.Environ())
+				os.Exit(97)
+			}
 			if os.Getenv("CODEX_THREAD_ID") != "" || os.Getenv("VECNET_CODEX_AUTO_DELIVERY") != "0" {
 				os.Exit(98)
 			}
@@ -303,6 +328,62 @@ func TestCodexAutoLimit(t *testing.T) {
 
 func TestCodexAutoLimitReactivation(t *testing.T) {
 	for _, combined := range []bool{false, true} {
+		for _, scenario := range []string{"occupied", "free", "unresolved"} {
+			t.Run(fmt.Sprintf("alias_change/combined=%v/%s", combined, scenario), func(t *testing.T) {
+				f := autoFixture(t)
+				f.env["VECNET_CODEX_MAX_BINDINGS"] = "1"
+				f.now = time.Now().Add(-25 * time.Hour).UTC()
+				f.bind("p", bindT1, "--attended", "--idle-dormant", "6h")
+				beforeRow := autoFile(f).Bindings[0]
+				moved := f.home + "-moved"
+				if err := os.Rename(f.home, moved); err != nil {
+					t.Fatal(err)
+				}
+				if scenario != "unresolved" {
+					if err := os.Symlink(moved, f.home); err != nil {
+						t.Fatal(err)
+					}
+				}
+				// The invocation's valid home is B. Admission must resolve the
+				// preserved row's historical A under the writer locks, too.
+				f.env["CODEX_HOME"] = moved
+				originalConfig, originalPath, originalHub := f.env["VECNET_CONFIG"], f.path, f.hub
+				if combined {
+					f.env["VECNET_CONFIG"] = filepath.Join(f.env["HOME"], "other", "v.toml")
+					f.path = filepath.Join(f.env["HOME"], "other", "codex", "bindings.json")
+					f.config(autoHub(t))
+				}
+				f.now = time.Now().UTC()
+				if scenario == "occupied" {
+					f.bind("q", bindT2)
+				}
+				f.env["VECNET_CONFIG"], f.path, f.hub = originalConfig, originalPath, originalHub
+				before := f.raw()
+				code, _, errs := f.run("--net", "p", "bind", "--thread", bindT1, "--renew")
+				if scenario != "free" {
+					if !bytes.Equal(before, f.raw()) {
+						t.Error("refused alias-change renewal changed persisted fields")
+					}
+					if code != 1 || (scenario == "occupied" && !strings.Contains(errs, "binding limit 1")) {
+						t.Fatalf("alias-change renewal admitted %s home: exit=%d stderr=%s", scenario, code, errs)
+					}
+					return
+				}
+				if code != 0 {
+					t.Fatalf("free alias-change renewal refused: %s", errs)
+				}
+				after := *codexBindingFor(autoFile(f), "p", "")
+				if !after.ExpiresAt.After(beforeRow.ExpiresAt) {
+					t.Fatal("free alias-change renewal did not extend expiry")
+				}
+				after.ExpiresAt = beforeRow.ExpiresAt
+				if after != beforeRow {
+					t.Fatalf("alias-change renewal changed preserved fields: before=%+v after=%+v", beforeRow, after)
+				}
+			})
+		}
+	}
+	for _, combined := range []bool{false, true} {
 		for _, manual := range []bool{false, true} {
 			for _, occupied := range []bool{false, true} {
 				t.Run(fmt.Sprintf("combined=%v/manual=%v/occupied=%v", combined, manual, occupied), func(t *testing.T) {
@@ -547,6 +628,7 @@ func TestCodexAutoBlockedConfigDeadline(t *testing.T) {
 	}
 	cmd.Env = append(cmd.Env, "VECNET_CODEX_AUTO_DELIVERY=0", "GORACE=atexit_sleep_ms=0")
 	cmd.ExtraFiles = []*os.File{lease}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	var diagnostics bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &diagnostics, &diagnostics
 	started := time.Now()
@@ -621,5 +703,250 @@ func TestCodexAutoBlockedConfigDeadline(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if !bytes.Equal(before, f.raw()) {
 		t.Fatal("late helper mutation overwrote replacement writer")
+	}
+}
+
+// Only the fake external Node/systemctl boundary executes this fixture. It
+// records its own identity before hanging, without creating any descendants.
+func TestCodexAutoDeadlineChild(t *testing.T) {
+	for i, arg := range os.Args {
+		if arg != "auto-deadline-child" {
+			continue
+		}
+		mode := os.Args[i+1]
+		sid, _ := unix.Getsid(0)
+		var cpus unix.CPUSet
+		_ = unix.SchedGetaffinity(0, &cpus)
+		fd, _ := os.Readlink("/proc/self/fd/3")
+		info, _ := os.ReadFile("/proc/self/fdinfo/3")
+		m := autoDeadlineChild{PID: os.Getpid(), Parent: os.Getppid(), Group: syscall.Getpgrp(), Session: sid, CPUs: cpus.Count(), Birth: procStart(os.Getpid()), RegistrationLease: strings.HasPrefix(filepath.Base(fd), "auto-") && strings.Contains(string(info), "FLOCK")}
+		raw, _ := json.Marshal(m)
+		if os.WriteFile(filepath.Join(os.Getenv("HOME"), mode+".json"), raw, 0600) != nil {
+			os.Exit(97)
+		}
+		if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), "hang-"+mode)); err == nil || mode == "run" {
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
+		switch mode {
+		case "version":
+			fmt.Println("v22.20.0")
+		case "probe":
+			fmt.Println(`{"loaded":true,"previous":"live"}`)
+		case "manager":
+			fmt.Println("not-found")
+		}
+		os.Exit(0)
+	}
+}
+
+type autoDeadlineChild struct {
+	PID, Parent, Group, Session int
+	CPUs                        int
+	Birth                       string
+	RegistrationLease           bool
+}
+
+func autoDeadlineRecord(t *testing.T, root, mode string) autoDeadlineChild {
+	t.Helper()
+	var m autoDeadlineChild
+	deliveryWait(t, func() bool {
+		raw, err := os.ReadFile(filepath.Join(root, mode+".json"))
+		return err == nil && json.Unmarshal(raw, &m) == nil
+	})
+	return m
+}
+
+// Bind cleanup to a kernel process handle before checking birth/executable.
+// Never signal a PID read from a fixture file without this verification.
+func autoDeadlinePidfd(t *testing.T, m autoDeadlineChild) int {
+	t.Helper()
+	fd, err := unix.PidfdOpen(m.PID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified := false
+	defer func() {
+		if !verified {
+			unix.Close(fd)
+		}
+	}()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Stat(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.Stat(fmt.Sprintf("/proc/%d/exe", m.PID))
+	if err != nil || !os.SameFile(want, got) || m.Birth == "" || procStart(m.PID) != m.Birth {
+		t.Fatal("fixture process identity changed before pidfd verification")
+	}
+	verified = true
+	t.Cleanup(func() {
+		_ = unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0)
+		_, _ = unix.Poll([]unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}, 1000)
+		unix.Close(fd)
+	})
+	return fd
+}
+
+func TestCodexAutoActiveProbeDeadline(t *testing.T) {
+	// Three pinned single-CPU trials reproduce the named watchdog/context
+	// scheduling race. The normal timeout separately requires child reaping.
+	for _, scenario := range []string{"hard_trial_1_with_durable_owner", "hard_trial_2", "hard_trial_3", "normal_probe_timeout"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := autoFixture(t)
+			root := f.env["HOME"]
+			exe, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			script := "#!/bin/sh\nexport GORACE=atexit_sleep_ms=0\ncase \"$1\" in\n--version) mode=version ;;\n--user) mode=manager ;;\n*) mode=\"$3\" ;;\nesac\nexec " + deliveryQuote(exe) + " -test.run=^TestCodexAutoDeadlineChild$ -- auto-deadline-child \"$mode\"\n"
+			deliveryWrite(t, filepath.Join(f.env["PATH"], "node"), script, 0700)
+			deliveryWrite(t, filepath.Join(f.env["PATH"], "systemctl"), script, 0700)
+			var durableFD int = -1
+			if strings.Contains(scenario, "durable_owner") {
+				// Exercise real ensure/deliver: the new owner gets its own session
+				// and delivery lease, then outlives both successful and timed-out
+				// registration helpers.
+				code, _, errs := autoRun(f, "", "peers")
+				if code != 0 {
+					t.Fatalf("initial action: %s", errs)
+				}
+				autoDone(f)
+				owner := autoDeadlineRecord(t, root, "run")
+				durableFD = autoDeadlinePidfd(t, owner)
+				if owner.Group != owner.PID || owner.Session != owner.PID || owner.RegistrationLease {
+					t.Fatal("durable owner lacks its separate session/lease contract")
+				}
+				for _, mode := range []string{"version", "probe", "manager"} {
+					if autoDeadlineRecord(t, root, mode).RegistrationLease {
+						t.Errorf("%s subprocess inherited registration debounce lease", mode)
+					}
+				}
+				if err := os.Remove(filepath.Join(root, "probe.json")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.ReadFile(f.path)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			deliveryWrite(t, filepath.Join(root, "hang-probe"), "", 0600)
+			hard := strings.HasPrefix(scenario, "hard_")
+			var fifo *os.File
+			if hard {
+				// Controlled local-I/O delay in release fingerprinting, before
+				// the probe's own five-second timer. No production pause hook.
+				f.env["VECNET_BIN"] = filepath.Join(root, "digest-fifo")
+				if err := syscall.Mkfifo(f.env["VECNET_BIN"], 0600); err != nil {
+					t.Fatal(err)
+				}
+				fifo, err = os.OpenFile(f.env["VECNET_BIN"], os.O_RDWR|syscall.O_NONBLOCK, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer fifo.Close()
+			}
+			leasePath := filepath.Join(root, "auto-deadline.lock")
+			lease, err := deliveryPrivateFile(leasePath, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lease.Close()
+			if ok, err := deliveryLock(lease); err != nil || !ok {
+				t.Fatalf("debounce setup: locked=%v err=%v", ok, err)
+			}
+			cmd := exec.Command(exe, "-test.run=^TestCodexAutoProcess$", "--", "auto-fixture", "--net", "p", "codex", "auto-register", "--thread", bindT1, "--codex-home", f.home)
+			for k, v := range f.env {
+				if k != "CODEX_THREAD_ID" {
+					cmd.Env = append(cmd.Env, k+"="+v)
+				}
+			}
+			cmd.Env = append(cmd.Env, "VECNET_CODEX_AUTO_DELIVERY=0", "GOMAXPROCS=1", "VECNET_TEST_AUTO_SINGLE_CPU=1", "GORACE=atexit_sleep_ms=0")
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+			cmd.ExtraFiles = []*os.File{lease}
+			var diagnostics bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &diagnostics, &diagnostics
+			started := time.Now()
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			lease.Close()
+			done := make(chan struct{})
+			var waitErr error
+			go func() { waitErr = cmd.Wait(); close(done) }()
+			defer func() { _ = cmd.Process.Kill(); <-done }()
+			if hard {
+				time.Sleep(time.Until(started.Add(11500 * time.Millisecond)))
+				if _, err := fifo.Write([]byte("fixture-release")); err != nil {
+					t.Fatal(err)
+				}
+				fifo.Close()
+			}
+			child := autoDeadlineRecord(t, root, "probe")
+			childFD := autoDeadlinePidfd(t, child)
+			if child.Parent != cmd.Process.Pid || child.Group != cmd.Process.Pid || child.Session != cmd.Process.Pid {
+				t.Fatal("probe is not owned by the helper's private session/group")
+			}
+			if child.CPUs != 1 {
+				t.Fatalf("probe inherited %d CPUs, want one", child.CPUs)
+			}
+			if child.RegistrationLease {
+				t.Error("active probe inherited registration debounce lease")
+			}
+			t.Logf("owned probe active at %s; hard=%v", time.Since(started), hard)
+			select {
+			case <-done:
+			case <-time.After(time.Until(started.Add(17 * time.Second))):
+				t.Fatal("active-probe helper exceeded hard deadline")
+			}
+			if waitErr == nil {
+				t.Error("hung probe helper reported success")
+			}
+			t.Logf("helper exited at %s", time.Since(started))
+			// Observe actual death via the verified pidfd, not kill(pid,0),
+			// which also succeeds for an unreaped zombie.
+			events := []unix.PollFd{{Fd: int32(childFD), Events: unix.POLLIN}}
+			if n, err := unix.Poll(events, 1000); err != nil || n != 1 {
+				t.Errorf("RPC child survived helper exit: poll=%d err=%v", n, err)
+			}
+			if !hard {
+				if _, err := os.Stat(fmt.Sprintf("/proc/%d", child.PID)); !os.IsNotExist(err) {
+					t.Error("normal cancellation did not reap probe child")
+				}
+			}
+			retry, err := deliveryPrivateFile(leasePath, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ok, err := deliveryLock(retry)
+			retry.Close()
+			if err != nil || !ok {
+				t.Errorf("debounce lock unavailable after helper exit: locked=%v err=%v", ok, err)
+			}
+			if durableFD >= 0 {
+				if n, err := unix.Poll([]unix.PollFd{{Fd: int32(durableFD), Events: unix.POLLIN}}, 0); err != nil || n != 0 {
+					t.Errorf("desired durable delivery owner died with registration helper: poll=%d err=%v", n, err)
+				}
+			}
+			after, err := os.ReadFile(f.path)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("timed-out helper mutated bindings")
+			}
+			// A later explicit writer must remain authoritative after timeout.
+			f.bind("q", bindT2)
+			replacement := f.raw()
+			time.Sleep(100 * time.Millisecond)
+			if !bytes.Equal(replacement, f.raw()) {
+				t.Fatal("late registration mutation overwrote replacement writer")
+			}
+		})
 	}
 }
