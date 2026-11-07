@@ -3,9 +3,12 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/XertroV/vecnet/internal/store"
 )
@@ -105,5 +108,154 @@ func TestCompactionExistingNoneAndBackupKeepPageSize(t *testing.T) {
 	var value string
 	if err := restored.QueryRow("SELECT value FROM legacy").Scan(&value); err != nil || value != "preserved" {
 		t.Fatalf("restored fixture: %v", err)
+	}
+}
+
+// Free whole overflow pages in a private on-disk fixture; no production tables.
+func freedPages(t *testing.T, db *store.DB) int64 {
+	t.Helper()
+	if _, err := db.Exec("CREATE TABLE reclaim_fixture(id INTEGER PRIMARY KEY, body BLOB)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Tx(context.Background(), func(tx *sql.Tx) error {
+		for i := 0; i < 400; i++ {
+			if _, err := tx.Exec("INSERT INTO reclaim_fixture(body) VALUES (zeroblob(8192))"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("DELETE FROM reclaim_fixture"); err != nil {
+		t.Fatal(err)
+	}
+	n := pragmaInt(t, db, "freelist_count")
+	if n < 128 {
+		t.Fatalf("fixture freed only %d pages", n)
+	}
+	return n
+}
+func TestCompactionBoundedReclaimAndDiskPressure(t *testing.T) {
+	db := openTemp(t)
+	free := freedPages(t, db)
+	pages := pragmaInt(t, db, "page_count")
+	opts := store.MaintenanceOptions{ReclaimPages: 7, Target: time.Second, AvailableBytes: func(context.Context) (int64, error) { return 1 << 40, nil }}
+	r, err := db.Maintain(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.ReclaimedPages < 1 || r.ReclaimedPages > 7 || pages-r.After.PageCount != r.ReclaimedPages || free-r.After.FreelistCount < 1 {
+		t.Fatalf("bounded reclaim: %+v", r)
+	}
+	if r.Before.Synchronous != 2 || r.After.AutoVacuum != 2 || r.After.PageSize != 4096 {
+		t.Fatalf("settings lost: %+v", r)
+	}
+	if r.After.DBBytes != r.After.PageCount*4096 {
+		t.Fatalf("checkpointed physical bytes: %+v", r)
+	}
+	opts.AvailableBytes = func(context.Context) (int64, error) { return 0, nil }
+	r, err = db.Maintain(context.Background(), opts)
+	if err != nil || r.PausedReason != "low_headroom" || r.ReclaimedPages != 0 || r.Before.PageCount != r.After.PageCount {
+		t.Fatalf("disk pressure: %+v %v", r, err)
+	}
+	// Probe between vacuum steps, not only at entry.
+	probes := 0
+	opts.AvailableBytes = func(context.Context) (int64, error) {
+		probes++
+		if probes > 2 {
+			return 0, nil
+		}
+		return 1 << 40, nil
+	}
+	r, err = db.Maintain(context.Background(), opts)
+	if err != nil || r.PausedReason != "low_headroom" || r.ReclaimedPages > 1 {
+		t.Fatalf("mid-slice pressure: %+v %v", r, err)
+	}
+	b, err := json.Marshal(r)
+	if err != nil || strings.Contains(string(b), "reclaim_fixture") || strings.Contains(string(b), "hub.db") {
+		t.Fatalf("diagnostic exposes SQL or paths: %s %v", b, err)
+	}
+}
+func TestCompactionPinnedReaderYieldsAndResumes(t *testing.T) {
+	db := openTemp(t)
+	freedPages(t, db)
+	ready, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- db.ReadSnapshot(context.Background(), func(c *sql.Conn) error {
+			var n int
+			if err := c.QueryRowContext(context.Background(), "SELECT count(*) FROM reclaim_fixture").Scan(&n); err != nil {
+				return err
+			}
+			close(ready)
+			<-release
+			return nil
+		})
+	}()
+	<-ready
+	defer func() {
+		close(release)
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	if _, err := db.Exec("INSERT INTO reclaim_fixture(body) VALUES ('reader-pinned')"); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	r, err := db.Maintain(context.Background(), store.MaintenanceOptions{ReclaimPages: 128})
+	if err != nil || r.PausedReason != "reader_pinned" || r.Checkpoint.LogPages <= r.Checkpoint.CheckpointedPages || r.ReclaimedPages != 0 {
+		t.Fatalf("reader pin: %+v %v", r, err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("PASSIVE checkpoint waited for pinned reader")
+	}
+}
+func TestCompactionNoneReusesPagesWithoutConversion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "none.db")
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("CREATE TABLE legacy(id INTEGER PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	freedPages(t, db)
+	r, err := db.Maintain(context.Background(), store.MaintenanceOptions{ReclaimPages: 128})
+	if err != nil || r.ReclaimedPages != 0 || r.After.AutoVacuum != 0 || r.Before.PageCount != r.After.PageCount {
+		t.Fatalf("NONE maintenance: %+v %v", r, err)
+	}
+	before := r.After.PageCount
+	if err := db.Tx(context.Background(), func(tx *sql.Tx) error {
+		for i := 0; i < 300; i++ {
+			if _, err := tx.Exec("INSERT INTO reclaim_fixture(body) VALUES(zeroblob(8192))"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pragmaInt(t, db, "page_count"); got > before {
+		t.Fatalf("freed pages not reused: %d -> %d", before, got)
+	}
+}
+func TestCompactionRejectsUnboundedLimitsAndCancellation(t *testing.T) {
+	db := openTemp(t)
+	for _, o := range []store.MaintenanceOptions{{ReclaimPages: 129}, {ReclaimPages: -1}, {Target: -1}, {MinFreeBytes: -1}} {
+		if _, err := db.Maintain(context.Background(), o); err == nil {
+			t.Fatalf("invalid limits accepted: %+v", o)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := db.Maintain(ctx, store.MaintenanceOptions{}); err == nil {
+		t.Fatal("canceled maintenance succeeded")
 	}
 }
