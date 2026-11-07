@@ -11,6 +11,15 @@ kill_timeout = 15
 
 [env]
   VECNET_PUBLIC_URL = "https://vecnet.xk.io"
+  # Optional R2, only after docs/DEPLOY.md acceptance; disk remains the default.
+  # VECNET_BLOB_BACKEND = "r2"
+  # VECNET_R2_ACCOUNT_ID = "<account-id>"
+  # VECNET_R2_BUCKET = "<private-bucket>"
+  # Endpoint defaults to that account's exact private S3 origin; no custom domain.
+  # VECNET_R2_CHECKSUM_PROFILE = "sha256"
+  # VECNET_R2_STORAGE_QUOTA_BYTES = "5368709120"
+  # blobs.expiry defaults to 1d; change it in shared Settings for new grants only.
+  # Credentials belong in Fly secrets, never this file. No Worker configuration.
   # Fly's proxy sets Fly-Client-IP; the per-client rate limit keys on it
   # (PROTOCOL §20.2). Never set this where clients reach the hub directly.
   VECNET_TRUST_FLY_CLIENT_IP = "1"

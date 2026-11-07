@@ -136,3 +136,7 @@ The first place to look is **Recent Deliveries** on the webhook page, which show
 After any fix, use **Redeliver** in Recent Deliveries. It reuses `X-GitHub-Delivery`, so redelivering something already accepted is safe.
 
 Once a message exists, failures are the recipient's, not GitHub's: check `vecnet dead-letters list` for a push route that failed. `GET /v1/admin/counters` reports `rate_limited` and `loop_cut`, and `vecnet audit` holds the matching entries.
+
+## Durable webhook data and R2 files
+
+On R2-enabled hubs, the `github-event.json` raw webhook attachment is durable SQLite message content, outside R2 attachment expiry, alongside auto-spilled summaries; it remains available through the disk/durable base64 read path. It is API message data, not a route for arbitrary file uploads. Ordinary R2 files use metadata-only references and host-side direct transfers as [protocol §2.7](../PROTOCOL.md#27-blobs) specifies. Default file expiry is 24 h, separate from durable webhook/history retention. Existing disk files are grandfathered without migration; provider lifecycle/account acceptance remains required before R2 enablement.

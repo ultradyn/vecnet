@@ -21,3 +21,11 @@ backups/
 **/*.db-wal
 **/*.db-shm
 connectors/
+
+# Operator-only spike inputs must never enter git or a remote build context.
+**/r2-test.env
+**/r2-spike*.env
+**/r2-credentials*
+**/*.pem
+**/*.key
+**/credentials*
