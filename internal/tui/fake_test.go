@@ -184,6 +184,7 @@ func (f *fakeAPI) setNotices(ns ...envelope.HubNotice) {
 	defer f.mu.Unlock()
 	f.notices = ns
 }
+func (f *fakeAPI) PeerLifecycle(context.Context, string, string) error { return nil }
 func (f *fakeAPI) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 	return f.peers, f.hit(ctx, "Peers")
 }

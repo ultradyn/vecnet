@@ -28,8 +28,18 @@ export function peerRows(rows) {
       quota: quotaLabel(p.quota),
       location: str(p.location),
       disabled: !!r.disabled,
+      archivedAt: str(r.archived_at) || null,
     };
   });
+}
+
+// visiblePeers is the operator peer table. Archived peers stay out unless
+// showArchived is on. The admin page itself is unfiltered, so a peer-page
+// link to an archived id still resolves.
+export function visiblePeers(rows, showArchived = false) {
+  const all = peerRows(rows);
+  const archived = all.filter(p => p.archivedAt).length;
+  return { shown: showArchived ? all : all.filter(p => !p.archivedAt), archived };
 }
 
 // blockedLine is one PROTOCOL §16.4 note: a peer's push queue for a thread is

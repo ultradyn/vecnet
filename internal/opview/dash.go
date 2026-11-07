@@ -98,7 +98,7 @@ func (r *Reader) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 	}
 
 	rows, err = r.Hub.DB.QueryContext(ctx, `SELECT p.created_by, p.peer_id, p.prn_id, p.name, p.kind, p.disabled,
-  p.capabilities, p.quota, p.location, p.presence_state, p.presence_at,
+  p.archived_at, p.capabilities, p.quota, p.location, p.presence_state, p.presence_at,
   p.reachability, p.reach_via, p.last_seen, p.enrolled_at, p.sends_per_min, p.threads_per_hour,
   CASE
    WHEN EXISTS (SELECT 1 FROM credentials c WHERE c.subject_id IN (p.peer_id, p.prn_id) AND c.revoked_at IS NULL) THEN 'active'
@@ -117,7 +117,7 @@ func (r *Reader) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 		var state *string
 		var limits opapi.PeerLimits
 		p := &row.Peer
-		if err := rows.Scan(&p.CreatedBy, &p.PeerID, &row.PrincipalID, &p.Name, &p.Kind, &row.Disabled,
+		if err := rows.Scan(&p.CreatedBy, &p.PeerID, &row.PrincipalID, &p.Name, &p.Kind, &row.Disabled, &row.ArchivedAt,
 			&caps, &quota, &p.Location, &state, &row.PresenceAt, &reach, &row.ReachVia, &p.LastSeen, &p.EnrolledAt,
 			&limits.SendsPerMin, &limits.ThreadsPerHour, &row.Credential); err != nil {
 			rows.Close()

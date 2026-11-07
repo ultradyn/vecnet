@@ -32,6 +32,7 @@ type API interface {
 	History(ctx context.Context, id, after string, limit int) (opapi.History, error)
 	Matrix(ctx context.Context, id, after string, limit int) (opapi.Matrix, error)
 	Peers(ctx context.Context) ([]opapi.PeerRow, error)
+	PeerLifecycle(ctx context.Context, id, action string) error
 	Notices(ctx context.Context) ([]envelope.HubNotice, error)
 	LoopCuts(ctx context.Context, hours int) (opapi.LoopCuts, error)
 	DeliveryHealth(ctx context.Context) (opapi.DeliveryHealth, error)

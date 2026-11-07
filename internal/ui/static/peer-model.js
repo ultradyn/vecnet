@@ -45,6 +45,7 @@ export function peerFacts(row) {
     name: str(p.name),
     kind,
     disabled: !!r.disabled,
+    archivedAt: str(r.archived_at) || null,
     credential: str(r.credential) || 'none',
     principalId: str(r.principal_id),
     createdBy: str(p.created_by),

@@ -1605,20 +1605,17 @@ func (a *app) cmdPeer(args []string) error {
 			return err
 		}
 		return a.ok("renamed " + o.pos[1] + " to " + o.pos[2])
-	case (sub == "disable" || sub == "enable") && len(o.pos) == 2:
+	case (sub == "disable" || sub == "enable" || sub == "archive" || sub == "unarchive") && len(o.pos) == 2:
 		// POST /v1/admin/peers/{id}/disable|enable (204).
 		if err := a.call(http.MethodPost, "/v1/admin/peers/"+pathEscape(o.pos[1])+"/"+sub, nil, nil); err != nil {
 			return err
 		}
-		verb := "enabled"
-		if sub == "disable" {
-			verb = "disabled"
-		}
+		verb := map[string]string{"disable": "disabled", "enable": "enabled", "archive": "archived", "unarchive": "unarchived"}[sub]
 		return a.ok(verb + " " + o.pos[1])
 	}
 	return usageErr("usage: vecnet peer add --kind K --name N [--principal PRN] | peer invite [--name N] [--ttl 24h] | peer move <peer> --principal PRN | " +
 		"peer link <peer> | peer avatar <peer> (FILE|URL|--clear) | peer rotate <peer> | peer scope <peer> [--allow IDS] [--deny IDS] | peer limits <peer> --sends-per-min N --threads-per-hour N | " +
-		"peer rename <id> <name> | peer disable <id> | peer enable <id>")
+		"peer rename <id> <name> | peer disable <id> | peer enable <id> | peer archive <id> | peer unarchive <id>")
 }
 
 func (a *app) cmdRoute(args []string) error {

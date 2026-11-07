@@ -1635,3 +1635,18 @@ Any failure is exit 1 `relocation_unverified` with the reason.
 | `profile_changed` | client, exit 1 (`watch`) | The watched profile's hub or secret changed while it ran | Re-run `watch` |
 
 Posting and clearing notices use the existing `invalid_value`, `invalid_body`, `forbidden` and `not_found`.
+
+### Peer lifecycle administration
+
+The operator capability is exposed consistently by HTTP, CLI, TUI, web UI and
+MCP. `POST /v1/admin/peers/{id}/disable`, `/enable`, `/archive`, and
+`/unarchive` return 204. The MCP equivalent is `vecnet_peer_lifecycle` with
+`peer_id` and action `disable`, `enable`, `archive`, or `unarchive`.
+
+Archive is a reversible soft state: the peer row and all message/thread history
+remain, but credentials, OAuth tokens, unused enrolment tokens and link codes
+are revoked immediately. An archived peer is disabled and absent from the
+public directory. Unarchive never revives credentials: it leaves the peer
+disabled and it must receive a new invite before use. The operator/bootstrap
+peer cannot be disabled or archived. Actions audit as `peer_disable`,
+`peer_enable`, `peer_archive`, and `peer_unarchive`.

@@ -148,6 +148,7 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     inviteStatus: peerId => get('/v1/admin/peers/' + seg(peerId) + '/enrol-token'),
     reissueInvite: (peerId, ttl) => post('/v1/admin/peers/' + seg(peerId) + '/enrol-token', { body: ttl ? { enrol_ttl_seconds: ttl } : undefined }),
     revokeInvite: peerId => request('DELETE', '/v1/admin/peers/' + seg(peerId) + '/enrol-token'),
+    peerLifecycle: (peerId, action) => post('/v1/admin/peers/' + seg(peerId) + '/' + action),
     principals: () => get('/v1/admin/principals'),
     routes: () => get('/v1/admin/routes'),
     inbox: ({ limit, before, unread } = {}) => get('/v1/admin/inbox' + query({ limit, before, unread: unread ? 1 : undefined })),

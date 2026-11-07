@@ -46,6 +46,17 @@ const row = (over = {}) => ({
   ...over,
 });
 
+test('findPeer still returns an archived peer, so a deep link can open it', () => {
+  const at = '2026-11-07T01:00:00.000Z';
+  const page = { peers: [row({ archived_at: at, disabled: true })] };
+  const found = findPeer(page, PEER);
+  assert.equal(found.peer.peer_id, PEER);
+  const f = peerFacts(found);
+  assert.equal(f.id, PEER);
+  assert.equal(f.archivedAt, at);
+  assert.equal(f.disabled, true);
+});
+
 test('findPeer finds a row by peer id, and tolerates a missing page', () => {
   const page = { peers: [row(), row({ peer: { peer_id: 'peer_other', name: 'o', kind: 'dot' } })] };
   assert.equal(findPeer(page, PEER).peer.name, 'codex-hark');
