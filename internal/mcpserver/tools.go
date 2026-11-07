@@ -171,7 +171,9 @@ func invalidArguments(name string, err error) error {
 	// SchemaError.Message may contain rejected values (notably pattern/enum
 	// errors), including arbitrarily long strings. Only structural information
 	// and static wording are safe on this MCP response path, including errors
-	// returned by prechecks and hub handlers. Keep the code/path and guide hint.
+	// returned by prechecks and hub handlers. The validator builds paths from
+	// trusted schema names and fixed unknown-property tokens; keep that path,
+	// the code and the guide hint.
 	return &RPCError{Code: ErrInvalidParams, Message: "invalid arguments for " + name + ": value does not satisfy the schema or hub constraint" + hint,
 		Data: map[string]any{"path": se.Path}}
 }

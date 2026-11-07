@@ -346,7 +346,7 @@ func TestWhoamiIdentity(t *testing.T) {
 			t.Fatalf("OAuth whoami = %v, want %v", got, want)
 		}
 	})
-	if path := invalidPath(t, env, secret, "vecnet_whoami", map[string]any{"as": peer}); path != "/as" {
+	if path := invalidPath(t, env, secret, "vecnet_whoami", map[string]any{"as": peer}); path != "/<unknown>" {
 		t.Fatalf("whoami accepts identity override: path = %q", path)
 	}
 }
@@ -846,7 +846,7 @@ func TestAttachmentURLsRejected(t *testing.T) {
 		}
 	}
 	for _, field := range []string{"origin_url", "blob_url"} {
-		want := "/attachments/0/" + field
+		want := "/attachments/0/<unknown>"
 		if p := invalidPath(t, env, aSecret, "vecnet_send", send("s-"+field, att(field))); p != want {
 			t.Errorf("vecnet_send %s: data.path = %q, want %q", field, p, want)
 		}
@@ -1067,8 +1067,8 @@ func TestReadToolsAndPresence(t *testing.T) {
 	}, nil)
 	if p := invalidPath(t, env, aSecret, "vecnet_presence", map[string]any{
 		"peer_id": a, "state": "idle", "at": venv.FormatTime(env.Now.Now()),
-	}); p != "/peer_id" {
-		t.Fatalf("data.path = %q, want /peer_id", p)
+	}); p != "/<unknown>" {
+		t.Fatalf("data.path = %q, want /<unknown>", p)
 	}
 
 	var dir struct {
@@ -1079,8 +1079,8 @@ func TestReadToolsAndPresence(t *testing.T) {
 	if i < 0 || dir.Peers[i]["location"] != "here" {
 		t.Fatalf("peers = %+v, want %s with location here", dir.Peers, a)
 	}
-	if p := invalidPath(t, env, aSecret, "vecnet_peers", map[string]any{"url": "https://example.com"}); p != "/url" {
-		t.Fatalf("data.path = %q, want /url", p)
+	if p := invalidPath(t, env, aSecret, "vecnet_peers", map[string]any{"url": "https://example.com"}); p != "/<unknown>" {
+		t.Fatalf("data.path = %q, want /<unknown>", p)
 	}
 }
 
@@ -2205,7 +2205,7 @@ func TestBlobToolsTakeNoURL(t *testing.T) {
 				args = map[string]any{"data_base64": "aGk=", "media_type": "text/plain"}
 			}
 			args[key] = "https://example.invalid/?t=secret"
-			if path := invalidPath(t, env, secret, name, args); path != "/"+key {
+			if path := invalidPath(t, env, secret, name, args); path != "/<unknown>" {
 				t.Fatalf("%s accepts %s: path %q", name, key, path)
 			}
 		}
@@ -2214,7 +2214,7 @@ func TestBlobToolsTakeNoURL(t *testing.T) {
 		if path := invalidPath(t, env, secret, "vecnet_send", map[string]any{
 			"idempotency_key": "reject-url-" + key, "recipients": []string{env.OperatorPeer}, "priority": "hold", "content": map[string]any{"text": "attached"},
 			"attachments": []any{map[string]any{"sha256": put["sha256"], "size": 2, "media_type": "text/plain", key: "https://example.invalid"}},
-		}); path != "/attachments/0/"+key {
+		}); path != "/attachments/0/<unknown>" {
 			t.Fatalf("send accepts attachment %s: %q", key, path)
 		}
 	}
