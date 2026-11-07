@@ -373,7 +373,7 @@ func TestToolsListNamesAndHints(t *testing.T) {
 
 	want := []string{
 		"vecnet_ack", "vecnet_blob_get", "vecnet_blob_put", "vecnet_clear_avatar", "vecnet_group_add", "vecnet_group_create", "vecnet_groups", "vecnet_guide",
-		"vecnet_inbox", "vecnet_peer_create", "vecnet_peer_invite_get", "vecnet_peer_invite_revoke", "vecnet_peer_lifecycle", "vecnet_peer_set_disabled", "vecnet_peers", "vecnet_presence", "vecnet_presence_subscribe", "vecnet_react", "vecnet_receipt",
+		"vecnet_inbox", "vecnet_peer_create", "vecnet_peer_set_disabled", "vecnet_peers", "vecnet_presence", "vecnet_presence_subscribe", "vecnet_react", "vecnet_receipt",
 		"vecnet_reply", "vecnet_send", "vecnet_set_avatar", "vecnet_subscriptions", "vecnet_thread", "vecnet_threads", "vecnet_whoami",
 	}
 	var got []string

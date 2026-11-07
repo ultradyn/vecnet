@@ -55,7 +55,7 @@ func (s *Server) registerTools() {
 		if sess != nil {
 			c = sess.Principal.Caller
 		}
-		return map[string]any{"tools": listedTools(c)}, nil
+		return map[string]any{"tools": projectTools(c, listedTools(c))}, nil
 	})
 	s.Register("tools/call", s.toolsCall)
 }

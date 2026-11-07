@@ -44,6 +44,8 @@ func testToolsBudget(t *testing.T, operator bool) {
 	// Keep the peer total fixed and pin the operator additions separately.
 	if operator {
 		achievedTotal += 5066 // Three tool entries and their array separators.
+	} else {
+		achievedTotal -= 634 + 468 + 495 + 3 // Operator lifecycle/invite entries.
 	}
 	if budget := achievedTotal * 110 / 100; len(compact) > budget {
 		t.Errorf("tools/list: %d bytes exceeds budget %d (achieved %d + 10%%)", len(compact), budget, achievedTotal)
@@ -66,6 +68,12 @@ func testToolsBudget(t *testing.T, operator bool) {
 		achieved["vecnet_agent_kinds"] = 471
 		achieved["vecnet_agent_add"] = 1977
 		achieved["vecnet_agent_status"] = 2615
+	}
+	if !operator {
+		// Lifecycle and invite administration require operator authority.
+		delete(achieved, "vecnet_peer_lifecycle")
+		delete(achieved, "vecnet_peer_invite_get")
+		delete(achieved, "vecnet_peer_invite_revoke")
 	}
 	if len(result.Tools) != len(achieved) {
 		t.Errorf("tool budget coverage: listed=%d pinned=%d", len(result.Tools), len(achieved))
