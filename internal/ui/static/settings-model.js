@@ -365,7 +365,7 @@ export function createSettingsStore({ api, appearance, storage }) {
     saved: null, announce: { text: '', n: 0 }, view: loadView(storage), q: '', only: 'all', open: '',
     appearance: { saved: { ...look }, draft: { ...look }, note: '' },
   };
-  const emit = () => { if (!dead) for (const fn of [...subs]) fn(st); };
+  const emit = (change = 'settings') => { if (!dead) for (const fn of [...subs]) fn(st, change); };
   const say = text => { st.announce = { text, n: st.announce.n + 1 }; };
   const rowOf = key => st.rows.find(r => r.key === key);
   const live = () => !dead;
@@ -474,7 +474,7 @@ export function createSettingsStore({ api, appearance, storage }) {
     if (st.busy) {
       const before = storageSig(st.storage);
       await refreshMeter();
-      if (live() && storageSig(st.storage) !== before) emit();
+      if (live() && storageSig(st.storage) !== before) emit('storage');
       return;
     }
     let r;
@@ -503,7 +503,8 @@ export function createSettingsStore({ api, appearance, storage }) {
     const before = storageSig(st.storage);
     await refreshMeter();
     if (!live()) return;
-    if (!unchanged || storageSig(st.storage) !== before) emit();
+    if (!unchanged) emit();
+    else if (storageSig(st.storage) !== before) emit('storage');
   }
 
   function edit(key, value) {

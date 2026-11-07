@@ -61,8 +61,29 @@ function storagePanel(storage) {
     h('div', { class: 'st-sto-h' }, h('b', { text: 'Attachment storage' }), h('span', { class: 'st-sto-t', text: `${v.text} · ${v.percent}%` })),
     h('div', { class: 'st-sto-bar', role: 'meter', 'aria-label': 'Attachment storage used', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(v.percent), 'aria-valuetext': v.text }, ret, res),
     h('dl', { class: 'st-sto-f' }, ...v.parts.flatMap(p => [h('dt', { text: p.label }), h('dd', { text: p.value })])),
-    v.note ? h('p', { class: 'st-sto-n', text: v.note }) : null,
+    h('p', { class: 'st-sto-n', text: v.note, hidden: !v.note }),
     h('p', { class: 'st-dim st-sto-d', text: 'Counts every retention class, kept files included. Reserved is space held for uploads in flight. Purging an attachment (POST /v1/admin/blobs/{sha256}/purge) frees its space; nothing is deleted to make room.' }));
+}
+
+// A meter-only refresh must leave controls (including an open native select)
+// attached. Re-focusing a replacement cannot preserve that browser state.
+function updateStoragePanel(panel, storage) {
+  const v = storageView(storage);
+  if (!panel || !v) return;
+  panel.className = 'st-sto t-' + v.tone;
+  panel.setAttribute('data-storage', v.tone);
+  panel.querySelector('.st-sto-t').textContent = `${v.text} · ${v.percent}%`;
+  const meter = panel.querySelector('.st-sto-bar');
+  meter.setAttribute('aria-valuenow', String(v.percent));
+  meter.setAttribute('aria-valuetext', v.text);
+  const share = n => Math.max(0, Math.min(100, (n / Math.max(v.limit_bytes, v.used_bytes)) * 100)) + '%';
+  meter.querySelector('.ret').style.width = share(v.retained_bytes);
+  meter.querySelector('.res').style.width = share(v.reserved_bytes);
+  const figures = panel.querySelector('.st-sto-f').children;
+  v.parts.forEach((p, i) => { figures[i * 2 + 1].textContent = p.value; });
+  const note = panel.querySelector('.st-sto-n');
+  note.textContent = v.note;
+  note.hidden = !v.note;
 }
 
 // control: the editor for one hub row, shared by List rows and Policy drawers.
@@ -629,7 +650,10 @@ export function mount(root, ctx) {
     }
   }
 
-  const off = store.subscribe(render);
+  const off = store.subscribe((_st, change) => {
+    if (change === 'storage') updateStoragePanel(page.querySelector('.st-sto'), store.state.storage);
+    else render();
+  });
   const onFocus = () => store.refresh();
   const onVisible = () => { if (!document.hidden) store.refresh(); };
   const onBefore = e => { if (store.dirtyKeys().length) { e.preventDefault(); e.returnValue = ''; } };

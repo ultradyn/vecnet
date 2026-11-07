@@ -958,6 +958,7 @@ class StEl {
   remove() {
     const p = this.parent;
     if (!p) return;
+    if (this.contains(document.activeElement)) document.activeElement = document.body;
     p.kids = p.kids.filter(k => k !== this);
     this.parent = null;
   }
@@ -1001,7 +1002,7 @@ class StEl {
     p.kids.splice(i, 1, node);
     this.parent = null;
   }
-  focus() {}
+  focus() { document.activeElement = this; }
   scrollIntoView() {}
   showModal() { this.open = true; }
   close() {
@@ -1031,6 +1032,75 @@ const walkSt = (el, pred, out = []) => {
   if (el instanceof StEl) { if (pred(el)) out.push(el); for (const k of el.kids) walkSt(k, pred, out); }
   return out;
 };
+
+test('mounted settings keeps rows, meter and keyboard focus on storage-only refresh after reload', async () => {
+  const prev = { document: globalThis.document, window: globalThis.window, CSS: globalThis.CSS, location: globalThis.location };
+  const body = new StEl('body'), root = new StEl('div');
+  const listeners = new Map(), conns = new Set();
+  const add = (type, fn) => { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(fn); };
+  const remove = (type, fn) => listeners.get(type)?.delete(fn);
+  globalThis.document = { body, activeElement: body, hidden: false, createElement: tag => new StEl(tag), getElementById: () => null, addEventListener: add, removeEventListener: remove };
+  globalThis.window = { localStorage: memStorage(), addEventListener: add, removeEventListener: remove };
+  globalThis.CSS = { escape: s => String(s).replace(/[^a-zA-Z0-9_-]/g, ch => '\\' + ch) };
+  globalThis.location = { host: 'hub.test' };
+  const hub = fakeHub({ preferences: r2Rows(), storage: storage(GiB) });
+  const ctx = {
+    api: hub.api, toast() {},
+    store: { onConn(fn) { conns.add(fn); return () => conns.delete(fn); } },
+    appearance: { get: () => ({ theme: 'system', density: 'comfortable' }), subscribe: () => () => {} },
+  };
+  const field = fk => walkSt(root, e => e.attrs['data-fk'] === fk)[0];
+  const one = cls => walkSt(root, e => e.className.split(/\s+/).includes(cls))[0];
+  let off = () => {};
+  try {
+    // Remount models a reload: it must discard the old connection listener.
+    for (let reload = 0; reload < 2; reload++) {
+      off = mountSettings(root, ctx);
+      await flush();
+      assert.equal(conns.size, 1);
+      for (const view of ['list', 'policy']) {
+        for (const fn of field('view-' + view).on.click || []) fn();
+        const input = field(view === 'list' ? 'st-events-refresh-interval' : 'lane-blobs.expiry-1d');
+        assert.ok(input, view + ' has a keyboard control');
+        input.focus();
+        if (view === 'list') { input.selectionStart = 1; input.selectionEnd = 3; }
+        const row = walkSt(root, e => e.attrs['data-row'] === 'blobs.expiry')[0];
+        const panel = one('st-sto'), meter = one('st-sto-bar'), page = root.children[0];
+        const children = [...page.children];
+        for (const [trigger, usage, tone] of [['live', 2 * GiB, 'ok'], ['focus', 4.75 * GiB, 'near'], ['visibilitychange', 6 * GiB, 'full'], ['live', null, 'unavailable'], ['focus', GiB, 'ok']]) {
+          const marker = hub.calls.length;
+          hub.storage = storage(usage || GiB);
+          hub.fail = usage === null ? { storage: Object.assign(new Error('storage unavailable'), { status: 503 }) } : null;
+          if (trigger === 'live') {
+            for (const fn of conns) fn('reconnecting');
+            await flush();
+            assert.equal(hub.calls.length, marker, 'reconnecting does not refresh');
+            for (const fn of conns) fn('live');
+          } else for (const fn of listeners.get(trigger) || []) fn();
+          await flush();
+          await flush();
+          assert.deepEqual(hub.calls.slice(marker).map(c => c.op), ['get', 'storage'], 'one refresh per ' + trigger);
+          assert.ok(field(input.attrs['data-fk']) === input, view + ' keeps the focused node');
+          assert.ok(document.activeElement === input, view + ' keeps keyboard focus');
+          if (view === 'list') assert.deepEqual([input.selectionStart, input.selectionEnd], [1, 3], 'selection stays put');
+          assert.ok(walkSt(root, e => e.attrs['data-row'] === 'blobs.expiry')[0] === row, 'row stays attached');
+          assert.ok(one('st-sto') === panel, 'storage panel is updated in place');
+          assert.ok(one('st-sto-bar') === meter, 'meter is updated in place');
+          assert.ok(page.children.length === children.length && children.every((c, i) => c === page.children[i]), 'storage refresh does not rebuild the page');
+          assert.equal(panel.attrs['data-storage'], tone);
+          assert.equal(meter.attrs['aria-valuenow'], String(Math.min(100, Math.round((usage || 0) / (5 * GiB) * 100))));
+          assert.equal(one('st-sto-n').hidden, tone === 'ok', 'storage warning follows the figures');
+        }
+      }
+      off();
+      off = () => {};
+      assert.equal(conns.size, 0, 'reload removes the connection listener');
+    }
+  } finally {
+    off();
+    for (const [key, value] of Object.entries(prev)) globalThis[key] = value;
+  }
+});
 
 test('mounted settings re-reads storage when the connection goes live, with no focus or visibility event', async () => {
   const hub = fakeHub({ preferences: r2Rows(), storage: storage(GiB, 5 * GiB, GiB / 4) });
