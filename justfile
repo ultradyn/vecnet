@@ -7,7 +7,7 @@ default:
 
 # Build both binaries into bin/
 build:
-    CGO_ENABLED=0 build2 go build -p 2 -ldflags "-X github.com/XertroV/vecnet/internal/mcpserver.Version=$(just version)" -o bin/ ./cmd/...
+    CGO_ENABLED=0 build2 go build -p 2 -ldflags "-X github.com/XertroV/vecnet/internal/mcpserver.Version=$(just version) -X github.com/XertroV/vecnet/internal/buildinfo.Version=$(just version) -X github.com/XertroV/vecnet/internal/buildinfo.CommitDate=$(git show -s --format=%cI HEAD)" -o bin/ ./cmd/...
 
 # Build version (MCP serverInfo.version): UTC date.time + short commit (+dirty)
 version:
@@ -37,7 +37,7 @@ hub-init NAME="Max":
 
 # Deploy to Fly (builds the image remotely from Dockerfile; Max runs this, tests never do)
 fly-deploy:
-    ~/.fly/bin/flyctl deploy --remote-only -a vecnet --yes --build-arg VECNET_VERSION=$(just version)
+    ~/.fly/bin/flyctl deploy --remote-only -a vecnet --yes --build-arg VECNET_VERSION=$(just version) --build-arg VECNET_COMMIT_DATE=$(git show -s --format=%cI HEAD)
 
 # Create the operator on the deployed hub (prints the secret once)
 fly-init:
