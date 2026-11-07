@@ -1,0 +1,145 @@
+{
+  "runStamp": "20261106T17-codex-appserver-t5c",
+  "maxFixRounds": 3,
+  "planName": "codex-appserver",
+  "plan": "docs/plans/2026-11-04-codex-appserver.md",
+  "worktree": "/home/xertrov/src/vecnet4/.worktrees/codex-appserver",
+  "branch": "codex-appserver",
+  "baseRef": "89223b7",
+  "statusDir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-codex-appserver",
+  "taskPrefix": "ca",
+  "startTask": 5,
+  "endTask": 6,
+  "finalReview": true,
+  "openBrowser": false,
+  "runner": "BB_HOST=x-boss BB_JOBS=4 just bb ",
+  "deps": {
+    "1": [],
+    "2": [],
+    "3": [],
+    "4": [
+      3
+    ],
+    "5": [
+      1,
+      2,
+      4
+    ],
+    "6": [
+      5
+    ]
+  },
+  "tasks": [
+    {
+      "title": "`vecnet hook --event app-server` and `--release`",
+      "refs": "Task 1; Global Constraints; Review Focus; Amendment items 1, 2, 3, 7",
+      "race": true,
+      "suite": "./internal/cli/",
+      "route": "sol",
+      "hazards": [
+        "Edit only the files your task lists (plan Files block). If you truly need a one-line hook in a file another task owns, say so in deviations.",
+        "Never read, write or lock the real ~/.config/vecnet, ~/.cache/vecnet, ~/.codex or any real Codex app-server socket/daemon: every test sets VECNET_CONFIG, XDG_CONFIG_HOME, XDG_CACHE_HOME, CODEX_HOME and VECNET_CODEX_BINDINGS under a temp dir and talks only to the fake app-server. This host runs live vecnet peers and Max's Codex sessions, which must not change.",
+        "Never invoke a real `codex` binary or any model. Peer text stays inert: internal/cli/testdata/hook-hostile.golden must stay byte-identical; the connector never answers approvals, never changes a session's policy, never sends collaborationMode.",
+        "The hooks' PollCursor must never move during an app-server run (separate AppCursor + bounded Replay list). Claude/Codex hook output bytes unchanged."
+      ]
+    },
+    {
+      "title": "`vecnet codex bind | unbind | bindings`",
+      "refs": "Task 2; Global Constraints; Amendment items 7, 8",
+      "race": true,
+      "suite": "./internal/cli/",
+      "route": "sol",
+      "hazards": [
+        "Edit only the files your task lists (plan Files block). If you truly need a one-line hook in a file another task owns, say so in deviations.",
+        "Never read, write or lock the real ~/.config/vecnet, ~/.cache/vecnet, ~/.codex or any real Codex app-server socket/daemon: every test sets VECNET_CONFIG, XDG_CONFIG_HOME, XDG_CACHE_HOME, CODEX_HOME and VECNET_CODEX_BINDINGS under a temp dir and talks only to the fake app-server. This host runs live vecnet peers and Max's Codex sessions, which must not change.",
+        "Never invoke a real `codex` binary or any model. Peer text stays inert: internal/cli/testdata/hook-hostile.golden must stay byte-identical; the connector never answers approvals, never changes a session's policy, never sends collaborationMode."
+      ]
+    },
+    {
+      "title": "WebSocket over a unix socket, and the fake Codex app-server",
+      "refs": "Task 3; Global Constraints",
+      "race": false,
+      "suite": "connectors/launcher (just ln-test)",
+      "route": "sol",
+      "hazards": [
+        "Edit only the files your task lists (plan Files block). If you truly need a one-line hook in a file another task owns, say so in deviations.",
+        "Never read, write or lock the real ~/.config/vecnet, ~/.cache/vecnet, ~/.codex or any real Codex app-server socket/daemon: every test sets VECNET_CONFIG, XDG_CONFIG_HOME, XDG_CACHE_HOME, CODEX_HOME and VECNET_CODEX_BINDINGS under a temp dir and talks only to the fake app-server. This host runs live vecnet peers and Max's Codex sessions, which must not change.",
+        "Never invoke a real `codex` binary or any model. Peer text stays inert: internal/cli/testdata/hook-hostile.golden must stay byte-identical; the connector never answers approvals, never changes a session's policy, never sends collaborationMode."
+      ]
+    },
+    {
+      "title": "Discovery, version gate, JSON-RPC client, protocol subset",
+      "refs": "Task 4; Global Constraints; Amendment item 5",
+      "race": false,
+      "suite": "connectors/launcher (just ln-test)",
+      "route": "sol",
+      "hazards": [
+        "Edit only the files your task lists (plan Files block). If you truly need a one-line hook in a file another task owns, say so in deviations.",
+        "Never read, write or lock the real ~/.config/vecnet, ~/.cache/vecnet, ~/.codex or any real Codex app-server socket/daemon: every test sets VECNET_CONFIG, XDG_CONFIG_HOME, XDG_CACHE_HOME, CODEX_HOME and VECNET_CODEX_BINDINGS under a temp dir and talks only to the fake app-server. This host runs live vecnet peers and Max's Codex sessions, which must not change.",
+        "Never invoke a real `codex` binary or any model. Peer text stays inert: internal/cli/testdata/hook-hostile.golden must stay byte-identical; the connector never answers approvals, never changes a session's policy, never sends collaborationMode."
+      ]
+    },
+    {
+      "title": "Delivery engine per binding",
+      "refs": "Task 5; Global Constraints (Dedupe, Liveness); Review Focus; Amendment items 1, 3, 4, 5, 7",
+      "race": false,
+      "suite": "connectors/launcher (just ln-test)",
+      "route": "sol",
+      "hazards": [
+        "Edit only the files your task lists (plan Files block). If you truly need a one-line hook in a file another task owns, say so in deviations.",
+        "Never read, write or lock the real ~/.config/vecnet, ~/.cache/vecnet, ~/.codex or any real Codex app-server socket/daemon: every test sets VECNET_CONFIG, XDG_CONFIG_HOME, XDG_CACHE_HOME, CODEX_HOME and VECNET_CODEX_BINDINGS under a temp dir and talks only to the fake app-server. This host runs live vecnet peers and Max's Codex sessions, which must not change.",
+        "Never invoke a real `codex` binary or any model. Peer text stays inert: internal/cli/testdata/hook-hostile.golden must stay byte-identical; the connector never answers approvals, never changes a session's policy, never sends collaborationMode."
+      ]
+    },
+    {
+      "title": "Wiring, docs, opt-in live smoke, gate",
+      "refs": "Task 6; Global Constraints; Amendment items 6, 8",
+      "race": false,
+      "suite": "connectors/launcher (just ln-test) + ./internal/cli/",
+      "route": "opus",
+      "hazards": [
+        "Edit only the files your task lists (plan Files block). If you truly need a one-line hook in a file another task owns, say so in deviations.",
+        "Never read, write or lock the real ~/.config/vecnet, ~/.cache/vecnet, ~/.codex or any real Codex app-server socket/daemon: every test sets VECNET_CONFIG, XDG_CONFIG_HOME, XDG_CACHE_HOME, CODEX_HOME and VECNET_CODEX_BINDINGS under a temp dir and talks only to the fake app-server. This host runs live vecnet peers and Max's Codex sessions, which must not change.",
+        "Never invoke a real `codex` binary or any model. Peer text stays inert: internal/cli/testdata/hook-hostile.golden must stay byte-identical; the connector never answers approvals, never changes a session's policy, never sends collaborationMode.",
+        "Write scripts/codex-appserver-smoke.mjs and the `codex-appserver-smoke` recipe and verify only their skip/refusal paths with stubs. Do NOT run the live smoke: it is coordinator-run later on xsm with Max's go-ahead. Document it as opt-in and coordinator-run."
+      ]
+    }
+  ],
+  "solRelay": {
+    "run": "/home/xertrov/src/vecnet4/scripts/wf/sol-run.sh",
+    "wait": "/home/xertrov/src/vecnet4/scripts/wf/sol-wait.sh",
+    "dir": "/home/xertrov/src/vecnet4/.scratch/vecnet/build-hook-hygiene/ccc",
+    "transcripts": "/home/xertrov/.claude-p/projects/-home-xertrov-src-vecnet4/*/subagents/workflows/*/agent-*.jsonl"
+  },
+  "extraRules": [
+    "Base is master 89223b7 (later than the plan was written): codex-hooks Tasks 1-4 are merged (SessionStart, hook install --client codex, just codex-smoke), plus hub-notices, prefs T1-4, DB compaction T1-4, R2 T1-2, the web/TUI stale-after-ack fixes and the launcher. Rebase-check every cited signature (hookRun, hookState, usageText, src/daemon.ts startDaemon, ledger/KeyValue/Clock/Log types, launcher Tasks 6/8/9/11/17 surfaces) against this base and record drift as a deviation.",
+    "Build box: x-boss for every Go/Node/TS command (`BB_HOST=x-boss BB_JOBS=4 just bb ...`; TypeScript via `just bb bash -c 'just ln-setup && just ln-test <files>'` or `... && just ln-check'`). This overrides any other host in the plan. Never build or test on xsm. Only gofmt, git, just isa-check and go list run locally.",
+    "No migrations, no new Go dependencies, no edits to internal/hub/**, internal/store/**, internal/events/**, internal/mcpserver/** or internal/ui/** (other builds own them).",
+    "Coordinator rulings may appear in the statusDir decisions files; read them as the workflow instructs.",
+    "Known full-suite load flakes: internal/store TestTxImmediateSerialises and internal/hub TestBackfillRealReaderCheckpointPressure. If one is the only failure, rerun just that test with -count=3; if it passes, treat the suite as green and record it."
+  ],
+  "mergeChecks": [
+    "BB_HOST=x-boss BB_JOBS=4 just bb go test -count=1 ./internal/cli/",
+    "BB_HOST=x-boss BB_JOBS=4 just bb bash -c 'just ln-setup && just ln-test && just ln-check'",
+    "BB_HOST=x-boss BB_JOBS=4 just bb go vet ./..."
+  ],
+  "gateChecks": [
+    "`BB_HOST=x-boss BB_JOBS=4 just bb go test -count=1 ./...` passes",
+    "`BB_HOST=x-boss BB_JOBS=4 just bb go test -race -count=1 ./internal/cli/` passes",
+    "`BB_HOST=x-boss BB_JOBS=4 just bb bash -c 'just ln-setup && just ln-test && just ln-check'` passes",
+    "`BB_HOST=x-boss just bb go vet ./...` clean and local `gofmt -l .` empty",
+    "`just isa-check` prints 0 for both binaries",
+    "`BB_HOST=x-boss BB_JOBS=4 just bb GOOS=windows CGO_ENABLED=0 go build -o /dev/null ./cmd/vecnet` succeeds",
+    "`BB_HOST=x-boss BB_JOBS=4 just bb just validate-protocol` passes",
+    "internal/cli/testdata/hook-hostile.golden is byte-identical to baseRef",
+    "No changes under internal/hub/, internal/store/, internal/events/, internal/mcpserver/, internal/ui/ or internal/store/migrations/",
+    "The live smoke was not run; `just codex-appserver-smoke` with no codex on PATH prints a skipped line and exits 0",
+    "The worktree has no tracked or untracked changes; each task commit carries its Plan-Task trailer"
+  ],
+  "lensFocus": {
+    "spec": "This branch implements docs/plans/2026-11-04-codex-appserver.md Tasks 1-6 including all eight amendment items at the top of the plan (per-delivery eligibility, replayable release via AppCursor/Replay, crash-safe claim nonce, checkpoint-settled receipts, waiting_input dormancy, positive context canary in the smoke, identity pin --expect-hub/--expect-caller, canonical codex_home). The live smoke is intentionally not run.",
+    "security": "Peer text stays inert in the stub prompt (hostile goldens byte-identical). The connector never answers approvals or questions, never changes policy/collaborationMode, refuses group/world-readable bindings files, enforces the per-home binding limit on canonical paths, refuses claims on hub/caller mismatch, and never touches real ~/.codex or Max's sessions in tests.",
+    "tests": "Every named plan test exists and fails without its fix; fake app-server covers idle, mid-turn, approval-pending, waitingOnUserInput, crash/restart claim recovery and replay; tests never touch real ~/.config/vecnet, ~/.codex or a real daemon."
+  },
+  "extraLenses": []
+}
