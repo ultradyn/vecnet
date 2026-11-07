@@ -13,8 +13,16 @@ import (
 // Measure the compact tools/list result a peer actually receives, including
 // annotations, output schemas, security schemes and the tools array wrapper.
 func TestToolsBudget(t *testing.T) {
+	t.Run("peer", func(t *testing.T) { testToolsBudget(t, false) })
+	t.Run("operator", func(t *testing.T) { testToolsBudget(t, true) })
+}
+
+func testToolsBudget(t *testing.T, operator bool) {
 	env := testhub.Start(t)
 	_, secret := env.NewPeer("session", "schema budget")
+	if operator {
+		secret = env.OperatorSecret
+	}
 	status, r := rpc(t, env, secret, "tools/list", nil)
 	if status != 200 || r.Error != nil {
 		t.Fatalf("tools/list: HTTP %d, error %+v", status, r.Error)
@@ -30,10 +38,18 @@ func TestToolsBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("tools/list: %d bytes", len(compact))
-	// Keep master's total and every per-tool pin unchanged. R2 has separate
-	// pins because its two transfer schemas grow and status is a new tool.
-	const achievedTotal = 21276
-	const achievedR2Total = 28051
+	// 2026-11-07: merging master's R2 blob tools and agent onboarding gives
+	// 25,348 bytes for peers and 32,014 for operators after the shared wording
+	// diet. Keep every per-tool pin and the +15% / +10% rules unchanged.
+	// The separate legacy guard still excludes only the explicit R2 growth.
+	achievedTotal := 21276
+	achievedR2Total := 25348
+	if operator {
+		achievedTotal += 5066 // Three onboarding entries and their separators.
+		achievedR2Total = 32014
+	} else {
+		achievedTotal -= 634 + 468 + 495 + 3 // Operator lifecycle/invite entries.
+	}
 	if budget := achievedR2Total * 110 / 100; len(compact) > budget {
 		t.Errorf("R2 tools/list: %d bytes exceeds budget %d (achieved %d + 10%%)", len(compact), budget, achievedR2Total)
 	}
@@ -50,6 +66,15 @@ func TestToolsBudget(t *testing.T) {
 		"vecnet_clear_avatar": 459, "vecnet_guide": 1534,
 		"vecnet_peer_lifecycle": 634, "vecnet_peer_invite_get": 468,
 		"vecnet_peer_invite_revoke": 495,
+	}
+	if operator {
+		achieved["vecnet_agent_kinds"] = 471
+		achieved["vecnet_agent_add"] = 1977
+		achieved["vecnet_agent_status"] = 2615
+	} else {
+		delete(achieved, "vecnet_peer_lifecycle")
+		delete(achieved, "vecnet_peer_invite_get")
+		delete(achieved, "vecnet_peer_invite_revoke")
 	}
 	r2Achieved := map[string]int{
 		"vecnet_blob_put": 4676, "vecnet_blob_get": 2753, "vecnet_blob_status": 1558,
@@ -101,8 +126,16 @@ var selfExplanatoryProperties = map[string]bool{
 }
 
 func TestProjectedProperties(t *testing.T) {
+	t.Run("peer", func(t *testing.T) { testProjectedProperties(t, false) })
+	t.Run("operator", func(t *testing.T) { testProjectedProperties(t, true) })
+}
+
+func testProjectedProperties(t *testing.T, operator bool) {
 	env := testhub.Start(t)
 	_, secret := env.NewPeer("session", "schema wording")
+	if operator {
+		secret = env.OperatorSecret
+	}
 	status, r := rpc(t, env, secret, "tools/list", nil)
 	if status != 200 || r.Error != nil {
 		t.Fatalf("tools/list: HTTP %d, error %+v", status, r.Error)

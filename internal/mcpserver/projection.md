@@ -91,3 +91,41 @@ wording, with the existing sending-guide hint where applicable. They never copy
 `SchemaError.Message`, whose library-generated text can include argument values.
 Whole-response and diagnostic canaries cover malformed timestamp and ID strings
 both below and above 64 bytes, as well as the existing composite-value cases.
+
+Onboarding adds three tools to operator discovery only. The peer catalog stays
+at **21,276 bytes** with its existing **23,403-byte** total budget, and all
+existing per-tool pins remain unchanged. The operator catalog measures
+**26,342 bytes**, pinned with a 10% allowance at **28,976 bytes**. Its additions
+have independent 15% allowances:
+
+| Tool | Achieved bytes | Budget bytes | Description bytes |
+| --- | ---: | ---: | ---: |
+| `vecnet_agent_kinds` | 471 | 541 | 185 |
+| `vecnet_agent_add` | 1,977 | 2,273 | 210 |
+| `vecnet_agent_status` | 2,615 | 3,007 | 207 |
+
+Onboarding property descriptions are at most 64 bytes and stay scoped to these
+tools. The projection preserves operator-only discovery and calls, read-only
+annotations, the browser handoff without state changes, secret-free results,
+and the identity and connector cautions. No onboarding call validator or
+handler changes. The independently captured pre-diet input and output fixtures
+are documented in `testdata/validation-onboarding-before-projection.README.md`.
+Both catalog views receive property and schema checks. Current and legacy
+protocol wire canaries check full validation responses and diagnostics,
+including unknown property names, malformed request IDs, scalar and composite
+schema failures, stale specs and connector field errors.
+
+2026-11-07 merge of master R2 blobs and agent onboarding: both sets of tools,
+input fixtures, output fixtures and description entries remain. Shared discovery
+prose is tightened to keep the unchanged twelve-tool Grok allowlist under its
+**13 KiB** ceiling: **13,281 bytes**, with identical descriptors in the operator
+catalog and both protocol eras. Cursor wording, guide topics, priority and
+identity checks, R2 direct transfers and sensitive URL rules remain explicit.
+No call schema or output validation contract changes.
+
+The combined catalog now has **24 peer tools / 25,348 bytes** and **30 operator
+tools / 32,014 bytes**, pinned at those measured totals with the existing 10%
+allowance (**27,882 / 35,215 bytes**). Existing per-tool pins retain their 15%
+allowance, including master's separate R2 pins and onboarding's three pins.
+The original total guard also remains, after subtracting only R2 growth and
+accounting for authority filtering and the operator onboarding additions.

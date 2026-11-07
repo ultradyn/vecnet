@@ -60,7 +60,12 @@ try {
     let copied = await clip();
     assert(copied === id('codex') && !copied.includes('…'), `Ctrl+C copied ${JSON.stringify(copied)}`);
     // A drag across the whole row also copies whole ids.
-    const rowText = await codexRow.evaluate(tr => { const r = document.createRange(); r.selectNodeContents(tr); const s = getSelection(); s.removeAllRanges(); s.addRange(r); return s.toString(); });
+    // Live redraws can replace the row mid-check, so select the current row and retry briefly.
+    let rowText = '';
+    for (let i = 0; i < 20 && !rowText.includes(id('codex')); i++) {
+      if (i) await page.waitForTimeout(100);
+      rowText = await codexRow.evaluate(tr => { const r = document.createRange(); r.selectNodeContents(tr); const s = getSelection(); s.removeAllRanges(); s.addRange(r); return s.toString(); });
+    }
     assert(rowText.includes(id('codex')) && !rowText.includes('…'), `row selection: ${JSON.stringify(rowText)}`);
     await page.evaluate(() => getSelection().removeAllRanges());
 
