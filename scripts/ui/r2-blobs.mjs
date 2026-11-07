@@ -16,7 +16,7 @@
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { assert, cleanBuild, withDemo } from './lib.mjs';
+import { assert, cleanBuild, scrollIntoViewStable, withDemo } from './lib.mjs';
 
 const SIZES = { 1440: { width: 1440, height: 900 }, 390: { width: 390, height: 844 } };
 const GiB = 2 ** 30;
@@ -88,7 +88,11 @@ async function fakeS3(hubOrigin) {
 let s3;
 try {
   await withDemo({}, async ctx => {
-    const { page, shot, demo, allowConsole } = ctx;
+    const { page, shot, demo, allowConsole, quiet, ignore } = ctx;
+    // Drain the initial document before installing interception or reloading;
+    // requests left behind by that navigation cannot prepare these shots.
+    await page.locator('#conn.live').waitFor();
+    await quiet();
     // Refusals this script provokes on purpose: storage full, a CORS-refused
     // bucket, held completions, expired and purged files, the mint limit.
     // 412 is the provider's create-only answer to a repeated PUT of bytes that
@@ -241,6 +245,10 @@ try {
     });
 
     // ---------- Settings: the R2 expiry adapter installed, with storage ----------
+    await page.route(u => new URL(u).pathname === '/v1/admin/blobs/storage', route => {
+      assert(authed(route), 'storage without the operator bearer');
+      return json(route, 200, { storage: { ...R.storage } });
+    });
     await page.route(u => new URL(u).pathname === '/v1/admin/prefs', async route => {
       if (route.request().method() !== 'GET') return route.continue();
       const response = await route.fetch();
@@ -269,7 +277,9 @@ try {
     const both = async (name, prep) => {
       for (const [w, vp] of Object.entries(SIZES)) {
         await page.setViewportSize(vp);
+        await quiet();
         if (prep) await prep(w);
+        await quiet();
         await frames();
         const sideways = await page.evaluate(() => document.documentElement.scrollWidth);
         assert(sideways <= vp.width, `${name}: scrolls sideways at ${vp.width} px (${sideways})`);
@@ -285,7 +295,11 @@ try {
     // page alone, for the fixture.
     await page.context().grantPermissions(['local-network-access'], { origin: hubOrigin });
     await page.reload({ waitUntil: 'load' });
-    const csp = await page.evaluate(() => fetch('/ui/', { cache: 'no-store' }).then(r => r.headers.get('content-security-policy')));
+    const csp = await page.evaluate(async () => {
+      const r = await fetch('/ui/', { cache: 'no-store' });
+      await r.text();
+      return r.headers.get('content-security-policy');
+    });
     assert(csp.includes(`connect-src 'self' ${s3.origin};`) && !csp.includes('*'), 'CSP carries exactly the fixture origin: ' + csp);
     await page.locator('#conn.live').waitFor();
 
@@ -304,22 +318,26 @@ try {
     // B's PUT is held at the provider (uploading), C and D wait (queued).
     R.completeGate = deferred();
     const releaseB = s3.hold(sha(upB.buffer));
+    // These transfers are deliberately parked for the progress shots. All
+    // snapshots still need to settle before either viewport is captured.
+    const watchUploads = ignore(req => (req.method() === 'PUT' && new URL(req.url()).origin === s3.origin) || /^\/v1\/blobs\/uploads\/[^/]+\/complete$/.test(new URL(req.url()).pathname));
     await picker.setInputFiles([upA, upB, upC, upD]);
     await page.locator('.up-chip.up-verifying', { hasText: 'release-notes.md' }).waitFor({ timeout: 20000 }).catch(async e => { await ctx.diagnose(); throw e; });
     await page.locator('.up-chip.up-uploading', { hasText: 'screenshot-1440.png' }).waitFor();
     await page.locator('.up-chip.up-queued').nth(1).waitFor();
-    await both('compose-progress', async () => { await page.locator('.composer').scrollIntoViewIfNeeded(); });
+    await both('compose-progress', () => scrollIntoViewStable(page, '.composer'));
     // Then: A and B ready; C refused (storage full), D refused by the bucket's CORS.
     releaseB();
     R.completeGate.open();
     R.completeGate = null;
+    watchUploads();
     await page.locator('.up-chip.up-failed').nth(1).waitFor();
     await page.locator('.up-chip.up-done').nth(1).waitFor();
     const chips = await page.locator('.up-chip').allTextContents();
     assert(chips.some(t => /expires in 24 h/.test(t)), 'a ready chip says how long its file lives: ' + chips.join(' | '));
     assert(chips.some(t => /Hub storage is full/.test(t)), 'storage full failure shown');
     assert(chips.some(t => /CORS/.test(t)), 'CORS refusal shown');
-    await both('compose-done', async () => { await page.locator('.composer').scrollIntoViewIfNeeded(); });
+    await both('compose-done', () => scrollIntoViewStable(page, '.composer'));
 
     // The provider saw the browser's own requests: no bearer, no cookies, exact lengths.
     const puts = s3.log.filter(r => r.method === 'PUT');
@@ -344,7 +362,7 @@ try {
     assert(await msg.locator('img').count() === 0, 'no R2 attachment renders inline, the SVG included');
     await both('thread-states', async w => {
       if (w === '390') await page.locator('.aside-toggle').evaluate(b => { if (b.getAttribute('aria-expanded') === 'true') b.click(); });
-      await msg.scrollIntoViewIfNeeded();
+      await scrollIntoViewStable(page, `[id="m-${MSG}"]`);
     });
     const filesPanel = page.locator('aside .files');
     await filesPanel.locator('.file.r2').nth(3).waitFor();
@@ -375,7 +393,7 @@ try {
         const t = page.locator('.aside-toggle');
         if (await t.getAttribute('aria-expanded') !== 'true') await t.click();
       }
-      await filesPanel.scrollIntoViewIfNeeded();
+      await scrollIntoViewStable(page, 'aside .files');
     });
 
     // A refusal toast stays 6 s; later screens are shot without it.
@@ -387,7 +405,7 @@ try {
     await show.waitFor();
     await show.click();
     await page.locator('.full').first().waitFor();
-    await both('fulltext', async () => { await page.locator('.full').first().scrollIntoViewIfNeeded(); });
+    await both('fulltext', () => scrollIntoViewStable(page, '.full'));
 
     // The same thread, reloaded with a durable spill plus an R2 attachment
     // whose deadline is a few seconds out. After it crosses, download is
@@ -417,13 +435,14 @@ try {
 
     // ---------- Settings: retention selector, off confirmation, quota full ----------
     await go('#settings');
-    const row = page.locator('[data-row="blobs.expiry"]').first();
-    await row.waitFor();
-    const opts = await row.locator('select option').allTextContents();
+    const row = '[data-row="blobs.expiry"]';
+    await page.locator(row).first().waitFor();
+    await quiet();
+    const opts = await page.locator(row).first().locator('select option').allTextContents();
     assert(opts.join(',') === '1 hour,6 hours,12 hours,1 day,7 days,30 days,Off (keep files)', 'six durations and off: ' + opts);
-    assert(/new uploads only/i.test(await row.innerText()), 'new-uploads-only explained');
-    await both('settings-retention', async () => { await row.scrollIntoViewIfNeeded(); });
-    await row.locator('select').selectOption('off');
+    assert(/new uploads only/i.test(await page.locator(row).first().innerText()), 'new-uploads-only explained');
+    await both('settings-retention', () => scrollIntoViewStable(page, row));
+    await page.locator(row).first().locator('select').selectOption('off');
     await page.locator('[data-fk=save]').click();
     const dlg = page.locator('dialog.st-cf[open]');
     await dlg.waitFor();
@@ -435,9 +454,11 @@ try {
     await page.locator('[data-fk=undo]').click();
     R.storage = { retained_bytes: 5 * GiB - 52428800, reserved_bytes: 104857600, used_bytes: 5 * GiB + 52428800, limit_bytes: 5 * GiB };
     await page.reload({ waitUntil: 'load' });
+    await page.locator('#conn.live').waitFor();
+    await quiet();
     await page.locator('[data-storage=full]').first().waitFor();
     assert(/over the limit/i.test(await page.locator('[data-storage=full]').first().innerText()), 'quota over the limit explained');
-    await both('settings-quota-full', async () => { await page.locator('[data-row="blobs.expiry"]').first().scrollIntoViewIfNeeded(); });
+    await both('settings-quota-full', () => scrollIntoViewStable(page, row));
   });
   console.log('r2-blobs: ok; provider saw ' + s3.log.map(r => r.method + ' ' + r.status).join(', '));
 } finally {
