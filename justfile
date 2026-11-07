@@ -96,6 +96,10 @@ codex-smoke: build
 codex-appserver-smoke: build
     build2 node --disable-warning=ExperimentalWarning scripts/codex-appserver-smoke.mjs
 
+# Controller-only acceptance; no implicit build, activation requires opt-in/private manifest.
+codex-auto-delivery-smoke +ARGS:
+    node scripts/codex-auto-delivery-smoke.mjs "$@"
+
 # Screen scripts run serially; helpers are not executable checks.
 ui-shots:
     #!/usr/bin/env bash
