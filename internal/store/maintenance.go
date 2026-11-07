@@ -178,6 +178,29 @@ func (db *DB) Maintain(ctx context.Context, o MaintenanceOptions) (r Maintenance
 		return r, nil
 	}
 	if r.Before.AutoVacuum == 2 && o.ReclaimPages > 0 {
+		// Pin the writer lock across page accounting and reclaim. Concurrent
+		// sends cannot grow the file between the budget check and vacuum.
+		if _, err = c.ExecContext(slice, "BEGIN IMMEDIATE"); err != nil {
+			return r, err
+		}
+		active := true
+		defer func() {
+			if active {
+				cleanup, stop := context.WithTimeout(context.Background(), time.Second)
+				defer stop()
+				if _, e := c.ExecContext(cleanup, "ROLLBACK"); e != nil {
+					_ = c.Raw(func(any) error { return driver.ErrBadConn })
+				}
+			}
+		}()
+		var vacuumStart int64
+		if err = c.QueryRowContext(slice, "PRAGMA page_count").Scan(&vacuumStart); err != nil {
+			return r, err
+		}
+		reserve, e := sqliteReservedBytes(path)
+		if e != nil {
+			return r, e
+		}
 		for i := 0; i < o.ReclaimPages; i++ {
 			if time.Since(start) >= o.Target {
 				r.PausedReason = "time_budget"
@@ -196,22 +219,50 @@ func (db *DB) Maintain(ctx context.Context, o MaintenanceOptions) (r Maintenance
 			if s.FreelistCount == 0 {
 				break
 			}
-			// Pointer-map boundary removal can free an extra physical page. Leave
-			// one page of budget in that case rather than exceeding the slice cap.
-			if r.Before.PageCount-s.PageCount >= int64(o.ReclaimPages-1) && o.ReclaimPages > 1 {
+			// Removing the last page may also remove the pointer-map page just
+			// below it (e.g. page_count 823 -> 821 at 4096 bytes). Budget both
+			// physical pages. SQLite files created by this driver reserve zero
+			// bytes per page; query the header for existing reserved-byte files.
+			mapStride := (s.PageSize-reserve)/5 + 1
+			nextPages := int64(1)
+			if s.PageCount > 3 && (s.PageCount-3)%mapStride == 0 {
+				nextPages = 2
+			}
+			if vacuumStart-s.PageCount+nextPages > int64(o.ReclaimPages) {
 				break
 			}
 			if _, err = c.ExecContext(slice, "PRAGMA incremental_vacuum(1)"); err != nil {
 				return r, err
 			}
 		}
+		var vacuumEnd int64
+		if err = c.QueryRowContext(slice, "PRAGMA page_count").Scan(&vacuumEnd); err != nil {
+			return r, err
+		}
+		if _, err = c.ExecContext(slice, "COMMIT"); err != nil {
+			return r, err
+		}
+		active = false
+		r.ReclaimedPages = max(int64(0), vacuumStart-vacuumEnd)
 	}
 	if err = checkpoint(); err != nil {
 		return r, err
 	}
 	r.After, err = maintenanceStats(slice, c, path, o)
-	if err == nil {
-		r.ReclaimedPages = max(int64(0), r.Before.PageCount-r.After.PageCount)
-	}
 	return r, err
+}
+
+// The SQLite header's reserved-byte count defines pointer-map page spacing.
+// Read only this one header byte, never any operational payload.
+func sqliteReservedBytes(path string) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, errors.New("maintenance: header_probe")
+	}
+	defer f.Close()
+	var b [1]byte
+	if _, err = f.ReadAt(b[:], 20); err != nil {
+		return 0, errors.New("maintenance: header_probe")
+	}
+	return int64(b[0]), nil
 }
