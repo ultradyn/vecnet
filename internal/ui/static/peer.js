@@ -339,7 +339,20 @@ export function mount(root, ctx) {
     // A new offer (another thread became the newest, say) replaces the
     // buttons; focus on one moves to its replacement.
     const had = acts.contains(document.activeElement) ? (document.activeElement.classList.contains('pv-new') ? '.pv-new' : '.pv-open') : '';
-    acts.replaceChildren(...messageActions(a, { name: (f && f.name) || id, threadName: t => threadTitle(t, ctx.me, nameOf), age, prefill, nav: ctx.nav }));
+    const life = [];
+    if (f && f.kind !== 'operator' && f.kind !== 'source') {
+      const run = async action => {
+        try { await api.peerLifecycle(id, action); toast('Peer ' + (action === 'enable' ? 'enabled' : action + 'd') + '.'); res.peers.reload(); }
+        catch (e) { toast('Could not ' + action + ' peer: ' + errText(e), true); }
+      };
+      if (f.archivedAt) life.push(h('button', {type: 'button', class: 'btn', text: 'Unarchive', onclick: () => run('unarchive')}));
+      else {
+        life.push(h('button', {type: 'button', class: 'btn', text: f.disabled ? 'Re-enable' : 'Disable', onclick: () => run(f.disabled ? 'enable' : 'disable')}));
+        const archive = confirmButton('Archive', 'Confirm archive', () => run('archive'));
+        archive.classList.add('bad'); life.push(archive);
+      }
+    }
+    acts.replaceChildren(...messageActions(a, { name: (f && f.name) || id, threadName: t => threadTitle(t, ctx.me, nameOf), age, prefill, nav: ctx.nav }), ...life);
     const next = had && acts.querySelector(had);
     if (next && !next.disabled) next.focus({ preventScroll: true });
   }
@@ -360,9 +373,9 @@ export function mount(root, ctx) {
     headMain.replaceChildren(...[
       h('h1', null, h('span', { class: 'nm', text: f.name || '(no name)' }),
         kindPill(f.kind),
-        f.disabled ? chip('disabled', 'bad') : null),
+        f.archivedAt ? chip('archived', 'bad') : (f.disabled ? chip('disabled', 'bad') : null)),
       h('div', { class: 'pv-id' }, h('span', { class: 'mono pid', text: f.id }), copyButton(f.id, 'peer id')),
-      f.disabled ? h('p', { class: 'note bad', text: 'Disabled: this peer cannot use the hub until an operator enables it.' }) : null,
+      f.archivedAt ? h('p', { class: 'note bad', text: 'Archived: credentials were revoked. Unarchive leaves this peer disabled and requires a new invite.' }) : (f.disabled ? h('p', { class: 'note bad', text: 'Disabled: this peer cannot use the hub until an operator enables it.' }) : null),
     ].filter(Boolean));
   }
 

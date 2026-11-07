@@ -588,6 +588,40 @@ func callPeerSetDisabled(ctx context.Context, s *Server, c auth.Caller, raw []by
 	return map[string]any{"peer": peer}, nil
 }
 
+func callPeerLifecycle(ctx context.Context, s *Server, c auth.Caller, raw []byte) (any, error) {
+	if err := hub.RequirePeerLifecycle(c); err != nil {
+		return nil, err
+	}
+	var a struct {
+		PeerID string `json:"peer_id"`
+		Action string `json:"action"`
+	}
+	if err := decodeArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	switch a.Action {
+	case "disable":
+		if err := s.Hub.SetPeerDisabled(ctx, a.PeerID, true); err != nil {
+			return nil, err
+		}
+	case "enable":
+		if err := s.Hub.SetPeerDisabled(ctx, a.PeerID, false); err != nil {
+			return nil, err
+		}
+	case "archive":
+		if err := s.Hub.SetPeerArchived(ctx, a.PeerID, true); err != nil {
+			return nil, err
+		}
+	case "unarchive":
+		if err := s.Hub.SetPeerArchived(ctx, a.PeerID, false); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, hub.E(http.StatusUnprocessableEntity, "invalid_value", "unknown lifecycle action")
+	}
+	return map[string]any{"peer_id": a.PeerID, "action": a.Action}, nil
+}
+
 // operatorOnly refuses every caller but the operator credential, the same
 // gate the auth middleware puts on /v1/admin/... (PROTOCOL §2.12).
 func operatorOnly(c auth.Caller) error {
@@ -971,6 +1005,15 @@ func toolSpecs(defs schema) []toolSpec {
 		// non-principal callers get its forbidden first.
 		hubValues:   []string{"peer_id"},
 		annotations: writeAnnotations(false), call: callPeerSetDisabled,
+	}, {
+		name:        "vecnet_peer_lifecycle",
+		description: "Write: change peer lifecycle state on the operator's bus; requires the operator credential. Disable and enable preserve credentials; archive revokes all credentials and pending enrolment, and unarchive leaves the peer disabled and requiring a new invite.",
+		input: object(schema{
+			"peer_id": ref("peerId"),
+			"action":  schema{"type": "string", "enum": []string{"disable", "enable", "archive", "unarchive"}},
+		}, "peer_id", "action"),
+		hubValues:   []string{"peer_id", "action"},
+		annotations: writeAnnotations(false), call: callPeerLifecycle,
 	}, {
 		name: "vecnet_peer_invite_get",
 		description: "Read a peer's enrolment invite state: pending (with expires_at), expired, revoked, claimed (enrolled), linked (an OAuth login) or none. " +

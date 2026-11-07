@@ -62,8 +62,9 @@ var tabNames = []string{"inbox", "chat", "dash", "subs"}
 
 // Command is one entry of the command line.
 type Command struct {
-	Help string
-	Run  func(m *Model, args []string) tea.Cmd
+	Help   string
+	Hidden bool
+	Run    func(m *Model, args []string) tea.Cmd
 }
 
 type toast struct {

@@ -199,6 +199,11 @@ func (c *Client) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 	return out.Peers, err
 }
 
+// PeerLifecycle applies an operator lifecycle action to a peer.
+func (c *Client) PeerLifecycle(ctx context.Context, id, action string) error {
+	return c.do(ctx, "POST", "/v1/admin/peers/"+url.PathEscape(id)+"/"+action, nil, nil)
+}
+
 // Notices lists the hub's active notices (GET /v1/hub/notices), oldest first.
 // Their messages are operator text, untrusted on every surface.
 // Preferences is GET /v1/admin/prefs. ETag is the raw header value, including quotes.

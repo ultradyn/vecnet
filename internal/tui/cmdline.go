@@ -20,8 +20,9 @@ const (
 	maxHistory = 100
 	// retryKey and presenceKey name no resource: their commands finish through
 	// loadMsg, the one message whose apply runs on the program's goroutine.
-	retryKey    = "cmd:retry"
-	presenceKey = "cmd:presence"
+	retryKey     = "cmd:retry"
+	presenceKey  = "cmd:presence"
+	lifecycleKey = "cmd:lifecycle"
 	// retryShown keeps the progress line up however slowly the hub answers.
 	// The summary replaces it; this only bounds a run that never reports.
 	retryShown = time.Hour
@@ -62,6 +63,7 @@ func lineOf(m *Model) *cmdline {
 func builtinCommands() map[string]Command {
 	return map[string]Command{
 		"q":        {Help: "quit", Run: func(m *Model, _ []string) tea.Cmd { return m.quit() }},
+		"peer":     {Help: "<disable|enable|archive|unarchive> <peer-id>  change peer lifecycle", Hidden: true, Run: runPeerLifecycle},
 		"prefs":    {Help: "show read-only hub preferences", Run: runPrefs},
 		"refresh":  {Help: "reload everything", Run: func(m *Model, _ []string) tea.Cmd { return m.reloadAll() }},
 		"presence": {Help: "<" + strings.Join(presenceStates, "|") + ">  set your presence", Run: runPresence},
@@ -375,6 +377,9 @@ func viewHelp(m *Model) string {
 	lineOf(m)
 	commands := make([]helpRow, 0, len(m.Commands))
 	for _, name := range slices.Sorted(maps.Keys(m.Commands)) {
+		if m.Commands[name].Hidden {
+			continue
+		}
 		key, text := ":"+name, m.Commands[name].Help
 		if syntax, rest, ok := strings.Cut(text, "  "); ok {
 			key, text = key+" "+syntax, rest
@@ -400,4 +405,16 @@ func viewHelp(m *Model) string {
 	}
 	lines = append(lines, section("commands", commands)...)
 	return strings.Join(lines, "\n")
+}
+
+func runPeerLifecycle(m *Model, args []string) tea.Cmd {
+	if len(args) != 2 || !slices.Contains([]string{"disable", "enable", "archive", "unarchive"}, args[0]) {
+		m.Toast("usage: peer <disable|enable|archive|unarchive> <peer-id>", true)
+		return nil
+	}
+	action, id := args[0], args[1]
+	return func() tea.Msg {
+		err := m.API.PeerLifecycle(m.ctx, id, action)
+		return loadMsg{key: lifecycleKey, err: err, apply: func(m *Model) { m.Toast("peer "+action+" complete", false) }}
+	}
 }
