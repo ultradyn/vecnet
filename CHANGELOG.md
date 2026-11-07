@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-07: project R2 blob tools with concise discovery wording, preserve transfer call and output contracts in independent fixtures, and pin R2 budgets without changing existing tool limits (internal/mcpserver).
 - 2026-11-07: complete merged MCP peer-tool discovery and schema budgets, preserve duplicate-member handling during timestamp normalization, prevent validation-value echoes, and clarify inbox head and MCP Events status (internal/mcpserver).
 - 2026-11-07: npm releases use matching `vX.Y.Z` tags, Linux x64/ARM64 package gates and GitHub OIDC in `.github/workflows/release.yml`; `just release` targets the `gh` remote, and the package homepage is `https://vecnet.ai` (`RELEASING.md`).
 - 2026-11-07: document R2 immutable retention, direct HTTP/MCP/CLI transfers (600s GET/300s PUT), quota/confirmation and operator lifecycle/CORS setup; add redacted protocol fixtures and CLI dependency gate (PROTOCOL, DEPLOY, pricing-analysis, connector guides, validate-protocol).

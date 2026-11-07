@@ -30,11 +30,12 @@ func TestToolsBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("tools/list: %d bytes", len(compact))
-	// Round four integrates master's three added peer tools. Keep the original
-	// 23 per-tool pins and freeze the measured merged catalog independently.
+	// Keep master's total and every per-tool pin unchanged. R2 has separate
+	// pins because its two transfer schemas grow and status is a new tool.
 	const achievedTotal = 21276
-	if budget := achievedTotal * 110 / 100; len(compact) > budget {
-		t.Errorf("tools/list: %d bytes exceeds budget %d (achieved %d + 10%%)", len(compact), budget, achievedTotal)
+	const achievedR2Total = 28051
+	if budget := achievedR2Total * 110 / 100; len(compact) > budget {
+		t.Errorf("R2 tools/list: %d bytes exceeds budget %d (achieved %d + 10%%)", len(compact), budget, achievedR2Total)
 	}
 	// Freeze each achieved size independently so one tool cannot silently
 	// consume another's savings. A new tool needs an explicit baseline.
@@ -50,9 +51,13 @@ func TestToolsBudget(t *testing.T) {
 		"vecnet_peer_lifecycle": 634, "vecnet_peer_invite_get": 468,
 		"vecnet_peer_invite_revoke": 495,
 	}
-	if len(result.Tools) != len(achieved) {
-		t.Errorf("tool budget coverage: listed=%d pinned=%d", len(result.Tools), len(achieved))
+	r2Achieved := map[string]int{
+		"vecnet_blob_put": 4676, "vecnet_blob_get": 2753, "vecnet_blob_status": 1558,
 	}
+	if len(result.Tools) != len(achieved)+1 {
+		t.Errorf("tool budget coverage: listed=%d pinned=%d", len(result.Tools), len(achieved)+1)
+	}
+	legacyTotal := len(compact)
 	for _, raw := range result.Tools {
 		var entry struct {
 			Name string `json:"name"`
@@ -62,6 +67,15 @@ func TestToolsBudget(t *testing.T) {
 		}
 		t.Logf("%s: %d bytes", entry.Name, len(raw))
 		baseline, ok := achieved[entry.Name]
+		if r2Baseline, isR2 := r2Achieved[entry.Name]; isR2 {
+			// Remove only the explicit R2 additions when applying master's total
+			// budget. All unchanged tools still use their original per-tool pins.
+			legacyTotal += baseline - len(raw)
+			if !ok {
+				legacyTotal-- // remove the new tool's array separator
+			}
+			baseline, ok = r2Baseline, true
+		}
 		if !ok {
 			t.Errorf("%s: %d bytes; missing achieved-size budget", entry.Name, len(raw))
 			continue
@@ -69,6 +83,9 @@ func TestToolsBudget(t *testing.T) {
 		if budget := baseline * 115 / 100; len(raw) > budget {
 			t.Errorf("%s: %d bytes exceeds budget %d (achieved %d + 15%%)", entry.Name, len(raw), budget, baseline)
 		}
+	}
+	if budget := achievedTotal * 110 / 100; legacyTotal > budget {
+		t.Errorf("catalog excluding R2 growth: %d bytes exceeds original budget %d", legacyTotal, budget)
 	}
 }
 

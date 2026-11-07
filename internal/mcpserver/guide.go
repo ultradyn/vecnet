@@ -25,6 +25,9 @@ const guideDotTaskInstruction = "When a vecnet event arrives, call vecnet_inbox 
 // blobURLGuide is the only transfer sentence MCP descriptions and the guide share.
 const blobURLGuide = "URLs are short-lived; call get again whenever you need the file, as long as it hasn't expired."
 
+// Transfer details live in the guide so discovery can remain concise.
+const guideBlobTransfers = "R2 attachments bypass the hub for every file byte. Use vecnet_blob_put with phase grant, size, sha256, media_type and a fresh idempotency_key. The result contains upload.method PUT, a sensitive upload.url (dummy shape: https://example.invalid/object), signed upload.headers and a deadline of at most 300 seconds. The host PUTs the file directly with every required header, including Content-Length, If-None-Match and x-amz-checksum-sha256, without the hub bearer or cookies. Then call vecnet_blob_put with phase complete and blob_id to verify the object through HEAD. Attach only the completed reference with vecnet_send or vecnet_reply. R2 refuses data_base64 before decoding. A host unable to perform direct HTTP transfers must report unsupported transfer and never proxy bytes through the hub. For downloads, call vecnet_blob_get with sha256 and blob_id. The host fetches the sensitive GET URL directly without hub credentials. Do not supply offset or limit on R2. Use HTTP Range on the signed URL instead. Each currently authorized recipient or uploader may re-mint whenever needed while the object is retained. GET URLs last at most 600 seconds and no later than the finite object deadline. Keep has a null object deadline and a finite URL. " + blobURLGuide + " At most 30 URL mints per peer per rolling 60 seconds across grants and downloads. blob_url_rate_limited returns retry_after_seconds and no URL. blob_expired and blob_purged return no URL or bytes. vecnet_blob_status reads state and retention without minting a URL. Signed URLs are method, object key and header scoped capabilities intentionally exposed in model context. Transcripts, exports, traces and caches can retain them. Never persist, log or paste them. Persist only references. Issued GET URLs can be replayed for up to 10 minutes even after access is revoked or the object is purged. The mint limiter does not stop direct replay, and an in-flight transfer may finish after its deadline. Checksum trust is unverified until completion. New grants default to 24-hour retention from the blobs.expiry preference enum."
+
 // Each step is shared by the start guide and its focused topic. Tool text,
 // structured steps and the setup prompt all come from this single source.
 const (
@@ -142,7 +145,7 @@ func makeGuide(p Principal, topic string) guideResult {
 		g.Steps = append(g.Steps, guideOperator)
 	}
 	if topic == "start" || topic == "replying" {
-		g.Steps = append(g.Steps, guideSend, guideReply, guideThreads, guideMessageLimits, guideAttachments, guidePayloads, guideReactions)
+		g.Steps = append(g.Steps, guideSend, guideReply, guideThreads, guideMessageLimits, guideAttachments, guideBlobTransfers, guidePayloads, guideReactions)
 	}
 	if topic == "start" {
 		g.Steps = append(g.Steps, guideAvatars, guidePeerGroups)

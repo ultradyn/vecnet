@@ -57,19 +57,21 @@ func TestR2BlobToolDescriptions(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing %s", name)
 		}
-		if !strings.Contains(tool.Description, r2GuideSentence) || !strings.Contains(tool.Description, "blob_url_rate_limited") || !strings.Contains(tool.Description, "30") || !strings.Contains(strings.ToLower(tool.Description), "sensitive") {
-			t.Fatalf("%s description missing repeatable-get contract: %s", name, tool.Description)
+		if len(tool.Description) > 220 || !strings.Contains(tool.Description, "See vecnet_guide topic replying") {
+			t.Fatalf("%s description missing concise guide pointer: %s", name, tool.Description)
 		}
+		checkR2DescriptionBudget(t, tool.InputSchema)
+		checkR2DescriptionBudget(t, tool.OutputSchema)
 		if strings.Contains(tool.Description, "X-Amz-Signature=") || strings.Contains(tool.Description, "r2.cloudflarestorage.com/") {
 			t.Fatalf("%s description contains a live-looking URL", name)
 		}
 	}
 	put := byName["vecnet_blob_put"]
-	if !strings.Contains(put.Description, "phase") || !strings.Contains(put.Description, "grant") || !strings.Contains(put.Description, "complete") || !strings.Contains(put.Description, "https://example.invalid/") {
+	if !strings.Contains(put.Description, "phase") || !strings.Contains(put.Description, "grant") || !strings.Contains(put.Description, "complete") || !strings.Contains(put.Description, "host PUT") {
 		t.Fatalf("put description: %s", put.Description)
 	}
 	get := byName["vecnet_blob_get"]
-	if !strings.Contains(get.Description, "Range") || !strings.Contains(get.Description, "blob_expired") || !strings.Contains(get.Description, "blob_purged") {
+	if !strings.Contains(get.Description, "Range") || !strings.Contains(get.Description, "600-second GET URL") || !strings.Contains(get.Description, "sensitive") {
 		t.Fatalf("get description: %s", get.Description)
 	}
 	names := map[string]bool{}
@@ -79,9 +81,30 @@ func TestR2BlobToolDescriptions(t *testing.T) {
 			t.Fatalf("status schema exposes %s", key)
 		}
 	}
-	guide := callTool(t, env, secret, "vecnet_guide", map[string]any{"topic": "start"})
-	if guide.IsError || !strings.Contains(guide.Content[0].Text, r2GuideSentence) || !strings.Contains(guide.Content[0].Text, "blob_url_rate_limited") {
+	guide := callTool(t, env, secret, "vecnet_guide", map[string]any{"topic": "replying"})
+	if guide.IsError || !strings.Contains(guide.Content[0].Text, r2GuideSentence) || !strings.Contains(guide.Content[0].Text, "blob_url_rate_limited") || !strings.Contains(guide.Content[0].Text, "30 URL mints") || !strings.Contains(guide.Content[0].Text, "sensitive") || !strings.Contains(guide.Content[0].Text, "https://example.invalid/") {
 		t.Fatal("guide omits the repeatable-get sentence")
+	}
+}
+
+// R2 wording follows the discovery diet's tighter phrase budget. Keep the
+// existing generic catalog limit unchanged for historically pinned wording.
+func checkR2DescriptionBudget(t *testing.T, value any) {
+	t.Helper()
+	switch node := value.(type) {
+	case map[string]any:
+		if description, ok := node["description"].(string); ok {
+			if len(description) > 70 || strings.ContainsAny(description, ";/") {
+				t.Errorf("R2 property description exceeds the wording budget: %q", description)
+			}
+		}
+		for _, child := range node {
+			checkR2DescriptionBudget(t, child)
+		}
+	case []any:
+		for _, child := range node {
+			checkR2DescriptionBudget(t, child)
+		}
 	}
 }
 

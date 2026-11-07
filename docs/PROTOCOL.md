@@ -553,7 +553,7 @@ The inbox is the resource `vecnet://peer/<peer_id>/inbox`; a principal-level sub
 
 ### 4.3 Tools
 
-The hub exposes exactly these twenty-five tools [R13, §17.2, §8.1, §18.4, §2.12]:
+The hub exposes exactly these twenty-seven tools [R13, §17.2, §8.1, §18.4, §2.12]:
 
 | Tool | Args | Effect | Source |
 |---|---|---|---|
@@ -578,10 +578,12 @@ The hub exposes exactly these twenty-five tools [R13, §17.2, §8.1, §18.4, §2
 | `vecnet_group_add` | `group_id`, `members` (1–64), `as?` | Same as `POST /v1/groups/{id}/members` | §2.9 |
 | `vecnet_peer_create` | `kind`, `name`, `idempotency_key` | Same as `POST /v1/peers`: principal credential only, same checks, replay and limits; returns `{peer, idempotency_key}` and never a credential | §18.4 |
 | `vecnet_peer_set_disabled` | `peer_id`, `disabled` | Same as `PATCH /v1/peers/{id}`: principal credential only, for a peer it created and still owns; returns `{peer}` | §18.4 |
+| `vecnet_peer_lifecycle` | `peer_id`, `action` (`disable`, `enable`, `archive`, `unarchive`) | Operator-only peer lifecycle change as §2.12; archive revokes credentials and pending invites, and unarchive leaves the peer disabled | §2.12 |
 | `vecnet_peer_invite_get` | `peer_id` | Same as `GET /v1/admin/peers/{id}/enrol-token`: operator credential only (any other caller, an OAuth login included, is the tool error `forbidden`); returns the invite state `{peer_id, state, expires_at, revoked_at}`, never a token. Read-only, `readOnlyHint` | §2.12 |
 | `vecnet_peer_invite_revoke` | `peer_id` | Same as `DELETE /v1/admin/peers/{id}/enrol-token`: operator credential only; spends a live invite's token (`revoked: true`, audited `enrol_revoke`) or changes nothing (`revoked: false`). Never touches a credential and never returns a token; issuing an invite stays on the human CLI and web | §2.12 |
 | `vecnet_blob_put` | Disk: `data_base64`, `media_type`, `ttl_seconds?`; R2 grant: `phase:"grant",size,sha256,media_type,idempotency_key`; complete: `phase:"complete",blob_id` | Disk `{sha256,size}`; R2 grant/verified reference as §2.7. Host performs PUT, hub performs HEAD only; discriminated schemas | §2.7, §11 |
 | `vecnet_blob_get` | Disk/durable: `sha256,offset?,limit?`; R2: `sha256,blob_id` | Disk/durable base64 pages; R2 fresh GET capability as §2.7, at most 600s; no offset/limit (host uses Range). Read-only with outputSchema | §2.7, §11 |
+| `vecnet_blob_status` | `sha256`, `blob_id?` | Read attachment state, retention, object deadline and checksum evidence without minting or returning a URL. Read-only with outputSchema | §2.7, §11 |
 
 `vecnet_send`, `vecnet_reply` and `vecnet_peer_create` require an `idempotency_key`. Write tools accept no model-supplied URL [DOTS], except `vecnet_set_avatar` (§8.1/§14). Disk send/reply attachments are `{sha256,size,media_type,name?}`; R2 adds `blob_id,retention_class,expires_at` from completion, never URLs or server-owned integrity assertions. Discovery chooses disk base64 versus R2 metadata grants. In R2 mode the host must support direct HTTP I/O: grant → host PUT → complete; get → host GET. A host lacking that capability reports unsupported transfer; it MUST NOT proxy file bytes through the hub. `data_base64` on R2 put is refused before decoding. Disk/durable GETs retain base64 pagination.
 

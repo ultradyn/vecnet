@@ -31,6 +31,25 @@ func TestProjectionPreservesOutputContracts(t *testing.T) {
 	if err := json.Unmarshal(raw, &before); err != nil {
 		t.Fatal(err)
 	}
+	// Overlay only R2 outputs independently captured from unprojected r2-build.
+	raw, err = os.ReadFile("testdata/output-r2-transfers.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var transfers map[string]any
+	if err := json.Unmarshal(raw, &transfers); err != nil {
+		t.Fatal(err)
+	}
+	if len(transfers) != 3 {
+		t.Fatal("R2 output fixture must cover exactly three tools")
+	}
+	for _, name := range []string{"vecnet_blob_put", "vecnet_blob_get", "vecnet_blob_status"} {
+		doc, ok := transfers[name]
+		if !ok {
+			t.Fatalf("missing R2 output baseline %s", name)
+		}
+		before[name] = doc
+	}
 	after := map[string]any{}
 	for _, tool := range result.Tools {
 		if tool.OutputSchema != nil {
@@ -91,7 +110,7 @@ func TestGuideCoversProjectedDetails(t *testing.T) {
 	env := testhub.Start(t)
 	_, secret := env.NewPeer("session", "guide limits")
 	for topic, needles := range map[string][]string{
-		"replying": {"auto-spills", "history_access", "locked_participants", "max_depth_exceeded", "60 sends/minute", "quota on providers billed per run", "sha256_verified", "blob_id", "job_key", "sequence", "escalate_to_operator", "removing/re-adding", "origin is ignored", "24h", "4096", "64 KiB"},
+		"replying": {"auto-spills", "history_access", "locked_participants", "max_depth_exceeded", "60 sends/minute", "quota on providers billed per run", "sha256_verified", "blob_id", "job_key", "sequence", "escalate_to_operator", "removing/re-adding", "origin is ignored", "24h", "4096", "64 KiB", "phase grant", "phase complete", "300 seconds", "600 seconds", "HTTP Range", "model context", "30 URL mints", "blob_url_rate_limited", "blob_expired", "blob_purged", "24-hour retention", "blobs.expiry", "Content-Length", "If-None-Match", "x-amz-checksum-sha256", "10 minutes"},
 		"events":   {"weekly_remaining_pct", "Presence is self-reported", "Receipt note is at most 1024", "limit is an integer 1-200"},
 		"start":    {"SVG is refused", "10-second fetch", "changes/hour", "active-peer limit", "not idempotent"},
 	} {

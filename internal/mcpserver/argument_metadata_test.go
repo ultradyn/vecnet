@@ -122,3 +122,59 @@ func TestToolValidationErrorsDoNotEchoCompositeValues(t *testing.T) {
 		}
 	}
 }
+
+// R2 adds conditional schemas and capability arguments. Refusals must keep
+// rejected values out of the entire wire response and both diagnostic sinks.
+func TestR2BlobValidationErrorsDoNotEchoCapabilities(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("session", "private blob arguments")
+	_, logs := captureDiag(t)
+	const marker = "private-transfer-canary"
+	const capability = "https://example.invalid/object?X-Amz-Signature=" + marker
+	grant := map[string]any{
+		"phase": "grant", "size": 1, "sha256": strings.Repeat("a", 64),
+		"media_type": "text/plain", "idempotency_key": "private-grant",
+	}
+	cases := []struct {
+		tool string
+		args map[string]any
+	}{
+		{"vecnet_blob_put", map[string]any{"phase": capability}},
+		{"vecnet_blob_get", map[string]any{"sha256": capability}},
+		{"vecnet_blob_status", map[string]any{"sha256": capability}},
+		{"vecnet_blob_get", map[string]any{"sha256": strings.Repeat("a", 64), "blob_id": map[string]any{"url": capability}}},
+		{"vecnet_blob_status", map[string]any{"sha256": strings.Repeat("a", 64), "blob_id": []any{capability}}},
+		{"vecnet_blob_put", map[string]any{"phase": "complete", "blob_id": capability}},
+		{"vecnet_blob_put", map[string]any{capability: "unexpected"}},
+	}
+	for _, field := range []string{"size", "sha256"} {
+		args := map[string]any{}
+		for k, v := range grant {
+			args[k] = v
+		}
+		args[field] = capability
+		cases = append(cases, struct {
+			tool string
+			args map[string]any
+		}{"vecnet_blob_put", args})
+	}
+	for i, tc := range cases {
+		_, response := rpc(t, env, secret, "tools/call", map[string]any{"name": tc.tool, "arguments": tc.args})
+		raw, err := json.Marshal(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.Error == nil && !strings.Contains(string(response.Result), `"isError":true`) {
+			t.Fatalf("case %d accepted invalid capability argument", i)
+		}
+		ring, err := json.Marshal(mcpdiag.Snapshot(mcpdiag.Filter{Peer: peer}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{marker, "X-Amz-Signature", "example.invalid"} {
+			if strings.Contains(string(raw), forbidden) || strings.Contains(logs.String(), forbidden) || strings.Contains(string(ring), forbidden) {
+				t.Fatalf("case %d echoed capability data", i)
+			}
+		}
+	}
+}
