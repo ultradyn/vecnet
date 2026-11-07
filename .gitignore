@@ -40,3 +40,4 @@ backups/
 __pycache__/
 .playwright-mcp/
 .superpowers/sdd/agent-onboarding/progress.md
+.tmp/
