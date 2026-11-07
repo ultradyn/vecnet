@@ -121,3 +121,26 @@ func TestMCPTimestampsNormalizeBeforeValidation(t *testing.T) {
 	args := json.RawMessage(fmt.Sprintf(`{"since":%q,"limit":5.0}`, offsetExpiry))
 	toolOK(t, env, secret, "vecnet_threads", args, nil)
 }
+
+func TestMCPTimestampNormalizationPreservesDuplicateHandling(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "duplicate sender")
+	peer, _ := env.NewPeer("session", "duplicate recipient")
+	for i, timestamp := range []string{
+		`2030-01-02T03:04:05.000Z`,
+		`2030-01-02T03:04:05.\u0030\u0030\u0030Z`,
+		`2030-01-02T13:04:05+10:00`,
+	} {
+		args := fmt.Sprintf(`{"idempotency_key":"duplicate-%d","priority":"hold","recipients":[%q],"kind":"approval_request","content":{"text":"approve"},"approval_request":{"approval_id":"apr_00000000000000000000000001","question":"first","question":"last","options":["yes","no"],"expires_at":"%s"}}`, i, peer, timestamp)
+		status, response := rpcVerbatim(t, env, secret, "vecnet_send", args)
+		if status != 200 || response.Error == nil || response.Error.Code != -32602 || string(response.Error.Data) != `{"path":"/approval_request/question"}` {
+			t.Errorf("timestamp %d: nested duplicate must be refused: HTTP %d, %+v", i, status, response)
+		}
+	}
+	// Top-level duplicates intentionally keep the last value, even if the
+	// earlier value is invalid. Timestamp conversion must not change that.
+	args := fmt.Sprintf(`{"idempotency_key":"top-duplicate","priority":"invalid","priority":"hold","recipients":[%q],"content":{"text":"ok"},"expires_at":"invalid","expires_at":%q}`, peer, env.Now.Now().Add(time.Hour).Format(time.RFC3339))
+	if result := verbatimResult(t, env, secret, "vecnet_send", args); result.IsError {
+		t.Fatalf("top-level duplicates lost last-value behavior: %s", result.StructuredContent)
+	}
+}

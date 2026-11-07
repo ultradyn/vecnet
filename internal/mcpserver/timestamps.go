@@ -46,42 +46,46 @@ func normalizeTimestampPath(raw []byte, path []string) []byte {
 		canonical, _ := json.Marshal(envelope.FormatTime(parsed))
 		return canonical
 	}
-	if path[0] == "*" {
-		var items []json.RawMessage
-		if json.Unmarshal(raw, &items) != nil {
+	// Walk raw child spans with decoder offsets. Replacing only the matching
+	// value tokens preserves whitespace, member order and duplicate members.
+	// Nested duplicates must still reach the hub's repeated-name check; the
+	// existing validatedArgs step alone gives top-level keys last-value semantics.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	array := path[0] == "*"
+	if err != nil || (array && tok != json.Delim('[')) || (!array && tok != json.Delim('{')) {
+		return raw
+	}
+	var out bytes.Buffer
+	copied := 0
+	for dec.More() {
+		match := array
+		if !array {
+			key, err := dec.Token()
+			if err != nil {
+				return raw
+			}
+			match = key == path[0]
+		}
+		var value json.RawMessage
+		if dec.Decode(&value) != nil {
 			return raw
 		}
-		changed := false
-		for i, item := range items {
-			updated := normalizeTimestampPath(item, path[1:])
-			changed = changed || !bytes.Equal(item, updated)
-			items[i] = updated
+		if !match {
+			continue
 		}
-		if changed {
-			// Preserve raw values, including Unicode and number spellings.
-			var out bytes.Buffer
-			out.WriteByte('[')
-			for i, item := range items {
-				if i > 0 {
-					out.WriteByte(',')
-				}
-				out.Write(item)
-			}
-			out.WriteByte(']')
-			return out.Bytes()
-		}
-		return raw
-	}
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil {
-		return raw
-	}
-	if value, ok := fields[path[0]]; ok {
 		updated := normalizeTimestampPath(value, path[1:])
 		if !bytes.Equal(value, updated) {
-			fields[path[0]] = updated
-			return encodeFields(fields)
+			end := int(dec.InputOffset())
+			start := end - len(value)
+			out.Write(raw[copied:start])
+			out.Write(updated)
+			copied = end
 		}
 	}
-	return raw
+	if copied == 0 || !json.Valid(raw) {
+		return raw
+	}
+	out.Write(raw[copied:])
+	return out.Bytes()
 }
