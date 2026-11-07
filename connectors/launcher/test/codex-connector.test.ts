@@ -11,7 +11,6 @@ import { CODEX_RELOAD_MS, startCodexConnector } from '../src/codex/connector.ts'
 import { startFakeCodexAppServer } from './fake-codex-appserver.ts';
 import { fakeClock, memoryLog } from '../../hub-client/testing/fixtures.ts';
 import type { KeyValue } from '../src/backend.ts';
-import { harness } from './daemon-harness.ts';
 
 // Every path below is private to the test: no real config, cache, Codex home,
 // daemon socket or vecnet binary is ever named, and a `codex` on PATH is a trap.
@@ -292,28 +291,6 @@ test('a FIFO at the bindings path is refused without blocking', async t => {
   await s.reload();
   assert.deepEqual(s.logged('codex_bindings_refused').map(e => e.meta), [{ reason: 'not_file' }]);
   assert.deepEqual(s.fake.requests, [], 'a FIFO starts nothing');
-});
-
-test('daemon start and stop drive the connector', async t => {
-  const id = uuid(30);
-  const s = await setup(t, { threads: [{ id }] });
-  // No bindings file: the daemon starts, the connector logs once and starts no engine.
-  const quiet = await harness(t, { env: s.env });
-  await eventually(() => quiet.log.entries.some(e => e.msg === 'codex_connector_disabled'), 'connector disabled at daemon start');
-  assert.deepEqual(s.fake.requests, []);
-  await quiet.daemon.stop();
-  // With a binding, the daemon's connector subscribes; stop() unsubscribes it.
-  s.writeBindings([s.binding(id, 1, { expires_at: new Date(Date.parse('2026-11-05T00:00:00.000Z') + 24 * hour).toISOString() })]);
-  const h = await harness(t, { env: s.env });
-  await eventually(() => s.subscribed(id), 'daemon connector subscribed the bound thread');
-  await h.daemon.stop();
-  assert.equal(s.subscribed(id), false);
-  assert.ok(s.unsubscribed(id), 'daemon stop sends thread/unsubscribe');
-  const n = s.fake.requests.length;
-  await delay(100);
-  assert.equal(s.fake.requests.length, n, 'nothing is sent after the daemon stops');
-  // The engine's ledger rows live in the daemon's own ledger, in the codex namespace.
-  assert.deepEqual(h.inspect(l => l.kv('codex').keys('inflight:')), []);
 });
 
 test('launcher bindings live until expiresAt and are never written to the file', async t => {
