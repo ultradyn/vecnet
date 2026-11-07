@@ -21,6 +21,8 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	"github.com/XertroV/vecnet/internal/eventlog"
+
 	"github.com/XertroV/vecnet/internal/blob"
 	venv "github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hub"
@@ -259,8 +261,17 @@ func TestR2MCPHostTransfersWithoutFlyFileProxy(t *testing.T) {
 }
 
 func TestR2SharedMintLimitAndMetadataSurfaces(t *testing.T) {
+	for _, references := range []bool{false, true} {
+		t.Run(fmt.Sprintf("references=%v", references), func(t *testing.T) {
+			testR2SharedMintLimitAndMetadataSurfaces(t, references)
+		})
+	}
+}
+
+func testR2SharedMintLimitAndMetadataSurfaces(t *testing.T, references bool) {
 	f := newR2MCP(t)
 	env := f.env
+	env.Hub.Cfg.DeliveryReferences = references
 	_, sender := env.NewPeer("session", "sender")
 	recipient, reader := env.NewPeer("session", "recipient")
 	payload := []byte("abc")
@@ -279,6 +290,43 @@ func TestR2SharedMintLimitAndMetadataSurfaces(t *testing.T) {
 	var threadID string
 	if err := env.Hub.DB.QueryRow(`SELECT thr_id FROM messages ORDER BY rowid DESC LIMIT 1`).Scan(&threadID); err != nil {
 		t.Fatal(err)
+	}
+	var format string
+	if err := env.Hub.DB.QueryRow(`SELECT payload_format FROM events WHERE type='delivery' AND owner=?`, recipient).Scan(&format); err != nil {
+		t.Fatal(err)
+	}
+	if references && format == "inline" || !references && format != "inline" {
+		t.Fatal("delivery did not use requested storage format")
+	}
+	evs, err := env.Hub.Log.Read(context.Background(), []string{recipient}, eventlog.Cursor{Epoch: env.Hub.Log.Epoch()}, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, ev := range evs {
+		if ev.Type != "delivery" {
+			continue
+		}
+		var delivery struct {
+			Message struct {
+				Attachments []struct {
+					BlobID         string `json:"blob_id"`
+					RetentionClass string `json:"retention_class"`
+					ExpiresAt      string `json:"expires_at"`
+				} `json:"attachments"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(ev.Data, &delivery); err != nil {
+			t.Fatal(err)
+		}
+		for _, att := range delivery.Message.Attachments {
+			if att.BlobID == id && att.RetentionClass == done["retention_class"] && att.ExpiresAt == done["expires_at"] {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("stored delivery hydration lost R2 attachment metadata")
 	}
 	latePeer, lateSecret := env.NewPeer("session", "from-join")
 	if _, err := env.Hub.DB.Exec(`INSERT INTO thread_participants(thr_id,peer_id,joined_at,joined_after_seq) VALUES(?,?,?,5)`, threadID, latePeer, env.Now.Now().Format(time.RFC3339Nano)); err != nil {

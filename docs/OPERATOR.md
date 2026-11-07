@@ -152,7 +152,7 @@ The web dashboard and TUI subscriptions tab show the callback host (not its path
 | `late` (refresh due) | — | Ask ChatGPT to re-subscribe before expiry. |
 | `expired` | — | Check the ChatGPT task trigger; if renewal is missing or permissions fail, disconnect and reconnect vecnet in plugin settings to grant event scopes ([dot setup](connectors/dots.md#set-up)). Queued events resume from the saved subscription cursor. |
 | `paused_token` | `token_expired` | ChatGPT must re-subscribe with a fresh token. Resume would immediately pause again. |
-| `paused_failed` | `delivery_failed` | Fix the callback, then Resume in the inbox. The event that exhausted eight attempts returns only if the dot re-subscribes from an earlier cursor. |
+| `paused_failed` | `delivery_failed` | Fix the callback, then Resume in the inbox for queued work. To retry the exhausted callback, the holder must re-subscribe using the returned replay cursor (normally before that event). Parked or floor-protected copies can rearm at the reported cursor; their delivery gate still applies. Legacy erased bytes require the recovery below. |
 | `paused_auth` | `unauthorized` | Enable the peer or link the correct account, then check the ChatGPT task trigger (Trigger vecnet, Event `vecnet.message`, no Settings; [dot setup](connectors/dots.md#set-up)). A Resume button cannot repair this. |
 | `paused_auth` | `credential_rotated` | The new bearer holder must subscribe again to establish a new callback association. Do not resume the old callback. |
 | `paused_operator` | `operator` | Your intentional pause survives re-subscription. Resume in the inbox when ready. |
@@ -160,6 +160,87 @@ The web dashboard and TUI subscriptions tab show the callback host (not its path
 | Unknown health or pause reason | Other raw value | Read the hub's health note and inspect the subscription. Do not assume healthy or force a resume. |
 
 Subscription health never changes the peer's presence. The TUI subs tab and web dashboard are read-only; actionable Resume controls live in the inbox.
+
+An upgrade can expose `events/subscribe` error `replay_unavailable`: an older binary erased the frozen callback body after exhausting retries. The hub preserves that outbox row and its event-retention pin and refuses to report successful resumption, including for `cursor: head`. Resume cannot recover those bytes. Keep the subscription while investigating; never reconstruct its callback from the current event without proof that the bytes match the original. If no exact copy can be recovered, explicitly re-sync the affected thread history in the client and record its receipt of the missing information. Only then have the subscription holder unsubscribe that subscription and subscribe again from the agreed cursor. Unsubscribe discards its durable queue, so record and reconcile all outstanding events before doing so; this is an explicit recovery with possible loss of original callback bytes, not an automatic retry.
+
+## Storage and retention
+
+Master's deployed migrations remain `0025_r2_blobs.sql` and `0026_peer_archive.sql`. Unpublished DB compaction migrations follow as 0027-0034, with unchanged SQL bytes; a fresh database applies 0001-0034 and a master-0026 database applies only 0027-0034. See the [merged migration inventory](plans/2026-11-05-db-compaction.md) for exact filenames.
+
+Message history, unacknowledged events and append-only audit are retained indefinitely by default on upgrade and on new hubs. Idempotency keys default to 24 hours (configured extensions must be ≥24 hours; zero means forever); acknowledged event prefixes become eligible after seven days **when their independent worker is enabled**. Delivery/loop TTL is not history expiry. A 1 GB volume needs capacity alerts and external backups even with reference storage. Hosted 90-day history is a later explicit choice, not this release's default. See [backup/restore and staged rollout](DEPLOY.md#storage-compaction-rollout).
+
+### Typed runtime policy
+
+The shared [preferences plan](plans/2026-11-05-hub-preferences.md) owns the store, validation, atomic audit and preview/confirmation flow; its web UI and admin adapters have separate ownership. The shipped operator HTTP API is `GET /v1/admin/prefs`, `POST /v1/admin/prefs/preview` and `PATCH /v1/admin/prefs`; do not assume a `vecnet storage` or preferences CLI command exists. Check each returned descriptor's `editable`, `runtime` and `unavailable_reason` before proposing a change.
+
+| Key | JSON type / built-in value | Validation / effect |
+|---|---|---|
+| `retention.ack_events` | integer seconds / `604800` | `0` or 3600..31536000; zero disables acknowledged pruning. Prefix and retry pins can extend retention. |
+| `retention.history` | integer seconds / `0` | `0` or 86400..315360000; zero keeps history forever. Optional 90 days is `7776000`. Archive/activation bounds override finite expiry. |
+| `retention.archive_mode` | boolean / `false` | Strict boolean. Preserve message history and readable dependencies; suppress marking, hiding, sweeping and hard unacked-event expiry. |
+| `blobs.expiry` (prefs-owned, R2 consumer) | enum / `"1d"` | `1h\|6h\|12h\|1d\|7d\|30d\|off`; only `"off"` disables expiry, never numeric zero. Remains unavailable until its verified R2 adapter is installed. This task does not enable it. |
+
+`hub.Config.IdempotencyWindow` and the optional hard `hub.Config.UnackedEventRetention` are ordinary config, not runtime preference keys or newly supplied CLI flags. Hard expiry is disabled by default and cannot bypass archive, activation or retry pins.
+
+Stored values win over explicit flags, then environment, then built-ins, including explicit zero/false. Bootstrap flags are `--retention-ack-events`, `--retention-history`, `--retention-archive-mode`, with `VECNET_RETENTION_ACK_EVENTS`, `VECNET_RETENTION_HISTORY`, `VECNET_RETENTION_ARCHIVE_MODE`. Duration flags/env use Go duration strings such as `168h`, `2160h` or `0s`; HTTP duration values are whole integer seconds. Environment provenance uses `source: "flag"` with its env name in `origin`; effective sources are `default|flag|stored`. GET returns top-level `revision`, `preferences[]` descriptors with `key`, `value`, `source`, `origin`, update actor/time, and an HTTP `ETag`. Resetting to bootstrap is a policy change, not an escape from confirmation.
+
+Unknown keys, invalid enum/type, fractional/negative/overflowing durations or invalid complete policies fail validation. Successful values, revision, activation and audit commit atomically before notifications; failed/stale approval cannot partially change policy. Audit contains actor, typed old/new value/source and confirmation outcome without message content or credentials. Consumers reread a consistent snapshot per run and recheck it within each destructive slice. Preference wakes refresh status but never delete; read/validation errors skip expiry with `policy_read_failed` rather than choosing a shorter fallback. No restart is required for stored preference changes. A bootstrap/restart cannot bypass pending destructive activation.
+
+Archive mode masks a configured finite history duration without erasing it, preserves old marked rows too, and cannot resurrect already swept content. Acknowledged events can still prune: set `retention.ack_events=0` as well if indefinite event-cursor replay is required. Message archive preserves attachment metadata/frozen URLs, **not permanent hosted blob bytes**. R2 owns object deadlines/keep storage/quota, and a missing object is not restored by restoring message metadata. Audit remains forever; idempotency cleanup is independent.
+
+### Inspect, preview, pause and resume
+
+The following are operator-run HTTP command templates, not commands executed by this task. `HUB_URL` is the chosen hub origin; `OPERATOR_CURL_CONFIG` is an operator-provided private curl configuration containing authentication. Keep it and response artifacts private and out of transcripts. Use the operator identity without `?as=`.
+
+```sh
+curl --fail-with-body --silent --show-error --config "$OPERATOR_CURL_CONFIG" --dump-header prefs.headers --output prefs.json "$HUB_URL/v1/admin/prefs"
+curl --fail-with-body --silent --show-error --config "$OPERATOR_CURL_CONFIG" --output backfill.json "$HUB_URL/v1/admin/storage/backfill"
+curl --fail-with-body --silent --show-error --config "$OPERATOR_CURL_CONFIG" --output maintenance.json "$HUB_URL/v1/admin/storage/maintenance"
+```
+
+GET storage endpoints are operator-only and `Cache-Control: no-store`. Backfill reports `enabled`, `high_seq`, `last_seq`, `done`, `total_converted`, `total_skipped`, `total_failed`, `exception_count`, bounded `exceptions[{seq,reason}]`, `required_headroom_bytes`, `available_bytes`, `wal_bytes`, `last_slice_nanos` and `paused_reason`; rescan fields and `exception_count_pending` describe incomplete reconciliation. `bytes_removed` is JSON delta, excluding snapshot/index/WAL costs: it is not physical disk savings. `done` with exceptions is a completed scan with unresolved inline rows, not a full conversion.
+
+Maintenance reports `before`/`after` stats (`page_size`, `page_count`, `freelist_count`, `auto_vacuum`, `synchronous`, `wal_autocheckpoint`, `live_bytes`, `db_bytes`, `wal_bytes`, `available_bytes`), `checkpoint.{busy,log_pages,checkpointed_pages}`, `reclaimed_pages`, `elapsed_nanos`, `paused_reason`. It is the latest **in-process** slice, not a fresh disk probe or durable monitoring history; zero-valued stats before a run do not prove an empty DB. A missing complete `after` sample cannot establish reclaim success.
+
+Use a local `patch.json` containing the exact proposed typed patch, for example this **prospective** hosted-history proposal (it does not authorize trimming existing rows):
+
+```json
+{"set":{"retention.history":7776000},"apply_existing":false}
+```
+
+Copy the single strong ETag from `prefs.headers` into `PREFS_ETAG`, including its double quotes, then preview:
+
+```sh
+curl --fail-with-body --silent --show-error --config "$OPERATOR_CURL_CONFIG" -H 'Content-Type: application/json' -H "If-Match: $PREFS_ETAG" --data-binary @patch.json --output preview.json "$HUB_URL/v1/admin/prefs/preview"
+```
+
+Review `base_revision`, `risks`, `impact` and `expires_at` with the human. `eligible`, `pinned` and `estimated_bytes` are estimates (history preview samples at most 100 candidates), not exact whole-database counts or promised reclaimed pages. For an approved change, put the returned `confirm_token` in `confirm: [<returned token>]` of the **same** JSON patch saved as `confirmed-patch.json`. Then apply using the same ETag:
+
+```sh
+curl --fail-with-body --silent --show-error --config "$OPERATOR_CURL_CONFIG" -X PATCH -H 'Content-Type: application/json' -H "If-Match: $PREFS_ETAG" --data-binary @confirmed-patch.json --dump-header applied.headers --output applied.json "$HUB_URL/v1/admin/prefs"
+```
+
+Preview tokens expire after five minutes and bind caller, exact proposal, revision, deployment generation, risk set and fixed bounds. On 412 `prefs_revision_conflict` or 409 `prefs_confirmation_stale`, reread/reconcile and preview again; never blindly retry a stale destructive approval. Missing `If-Match` returns 428 `prefs_precondition_required`; an unconfirmed risky mutation returns 409 `prefs_confirmation_required`. A descriptor without its verified consumer rejects mutation as `prefs_unavailable`; it does not silently install that consumer.
+
+Archive exit **always** needs preview/explicit confirmation even with all expiry disabled. New/shorter expiry also needs confirmation. Default `apply_existing:false` preserves pre-change rows under their prior policy. Retrospective trim requires a separate explicit `apply_existing:true` proposal approved for its exact cutoff/high-water and backup guidance. No PATCH/confirm/wakeup deletes; approved old-data trim first becomes eligible at the persisted next nightly sweep bound (default 02:00 UTC), then proceeds on bounded slow ticks. Protective changes cancel incompatible unconsumed approvals; pins are rechecked each slice. Fail-safe policy interactions can keep rows longer and require a fresh confirmation; do not force cleanup around them.
+
+| Operation | Supported control |
+|---|---|
+| Pause/resume new reference writes | Restart the sole writer with `--delivery-references=false` / `true`; dual reader is always present. Existing references remain. |
+| Pause/resume online backfill | Restart with `--storage-backfill=false` / `true`; durable `high_seq`/`last_seq` resume automatically. Caps: `--storage-backfill-rows=100 --storage-backfill-bytes=1048576 --storage-backfill-target=50ms`. |
+| Dry-run conversion / exception rescan | Build-box internal harness: `Hub.BackfillDeliverySlice` with `BackfillLimits.DryRun=true` / `RescanExceptions=true`; requires `BackfillEnabled`. No public mutation/rescan endpoint or CLI is shipped. |
+| Pause/resume acknowledged pruning | PATCH `retention.ack_events` to `0` / the reviewed duration through the flow above. Ticker execution also requires internal `hub.Config.EventRetentionEnabled=true`; the shipped CLI has no enable flag and leaves it off. Changing a duration alone cannot enable the ticker. |
+| Pause/resume finite history | Enable archive or set history to zero through prefs; resume a finite policy/archive exit only through preview/confirm and the applicable activation bounds. No switch can restore already deleted data. |
+| Dry-run retention | The preferences preview above; it estimates impact without deletion. There is no public `storage/retention/dry-run` endpoint. |
+| Pause/resume checkpoint/reclaim | Restart with `--storage-maintenance=false` / `true`; `--storage-reclaim-pages=0` pauses reclaim alone, allowed 0..128. `--storage-maintenance-target=50ms` is cooperative. |
+
+Internal `EventRetentionStatus()` exposes policy, slice counts/floor/bytes/reason and errors; `HistoryRetentionStatus()` adds `configured_seconds`, `effective_seconds`, `archive_mode`, `pending_confirmation`, `scanned`, `marked`, `deleted`, `pinned`, `pins`, `bytes`, `tombstones`, `reason`, `error_reason`. These methods are **not** public HTTP endpoints or an implemented dashboard. Obtain receipts through an isolated build-box harness/authorized diagnostics integration; do not invent routes. Save missing telemetry as unavailable. The two shipped GET storage routes are the backfill/maintenance receipts above.
+
+Pending/held/in-flight deliveries, retained event/snapshot/outbox/receipt dependencies, active or conservatively retained jobs/approvals/reactions and R2/durable blob refs can keep bodies beyond finite history. Legacy blob refs are handled only after other dependencies settle and within the dependency budget. Terminal callback tombstones stay until the owning peer's floor passes their event. Never delete pins or durable queues merely to meet a capacity target. Expand storage and reconcile the blocked work. Paused/expired subscriptions do not independently guarantee permanent replay of an otherwise acknowledged prefix; default unacknowledged retention and durable pending/parked/exhausted bodies protect their outstanding work. Explicit hard retention can yield `truncated` replay; recover through a narrowed stream/thread history, respecting finite history and `from_join` access.
+
+### Hub preferences recovery
+
+If startup reports `prefs_storage_unavailable`, preserve the DB and stop destructive work. Do not drop preference tables, reset revisions or edit activation/confirmation records to force a start. Retain the failed revision/schema receipt without content, compare it with a verified external backup and reproduce on an isolated restored copy with the matching dual reader. Restore only through the [coordinated restore procedure](DEPLOY.md#mixed-format-backup-export-and-restore); obtain a reviewed repair if consistency cannot be verified. At runtime, policy-read failures preserve history and skip deletion; repair the storage error before resuming maintenance.
 
 ## TUI keys
 

@@ -257,14 +257,15 @@ func TestPreferencesETagsAuthorityAndPolicy(t *testing.T) {
 			t.Fatal("patch auth bypass")
 		}
 	}
-	for _, key := range []string{"retention.history", "agents.max_expiry"} {
+	for _, key := range []string{"blobs.expiry", "agents.max_expiry"} {
 		_, err := h.Preferences.PatchPreferences(context.Background(), prefsOperator, s.ETag, prefs.Patch{Reset: []string{key}})
 		prefsCode(t, err, prefs.CodeUnavailable)
 	}
 	_, err := h.Preferences.PatchPreferences(context.Background(), prefsOperator, s.ETag, prefs.Patch{Set: map[string]prefs.Value{"agents.thread_budget": prefs.Int(10001)}})
 	prefsCode(t, err, prefs.CodeInvalidValue)
 	_, err = h.Preferences.PatchPreferences(context.Background(), prefsOperator, s.ETag, prefs.Patch{ApplyExisting: true, Set: p.Set})
-	prefsCode(t, err, prefs.CodeUnavailable)
+	// A verified DB adapter is now installed; non-retention work remains invalid.
+	prefsCode(t, err, prefs.CodeInvalidValue)
 	prefsAuditCount(t, h, 0)
 }
 func TestPreferencesInvalidPersistedStateFailsStartupWithoutExposure(t *testing.T) {
@@ -274,7 +275,7 @@ func TestPreferencesInvalidPersistedStateFailsStartupWithoutExposure(t *testing.
 		{"agents.thread_budget", "10001", prefs.CodeInvalidValue, "agents.thread_budget"},
 		{"agents.thread_budget", `"synthetic-secret"`, prefs.CodeInvalidValue, "agents.thread_budget"},
 		{"synthetic-secret", "1", prefs.CodeUnknownKey, ""},
-		{"retention.history", "0", prefs.CodeUnavailable, "retention.history"},
+		{"blobs.expiry", `"1d"`, prefs.CodeUnavailable, "blobs.expiry"},
 	} {
 		t.Run(tc.code+tc.key, func(t *testing.T) {
 			h, _ := preferencesHub(t, hub.DefaultConfig())

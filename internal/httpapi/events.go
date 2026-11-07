@@ -168,7 +168,7 @@ func (s *server) startCursor(ctx context.Context, r *http.Request, owners []stri
 			return eventlog.Cursor{}, err
 		}
 		if !ok {
-			if c, err = s.Hub.Log.Oldest(ctx); err != nil {
+			if c, err = s.Hub.Log.OldestFor(ctx, owners); err != nil {
 				return eventlog.Cursor{}, err
 			}
 		}

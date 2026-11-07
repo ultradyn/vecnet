@@ -84,6 +84,9 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	mcpLegacy := fs.String("mcp-legacy-sessions", envOr(getenv, "VECNET_MCP_LEGACY_SESSIONS", "on"), "legacy MCP sessions: on, off-for-oauth, off ($VECNET_MCP_LEGACY_SESSIONS)")
 	oauthRedirects := fs.String("oauth-redirects", getenv("VECNET_OAUTH_REDIRECTS"), "extra OAuth redirect patterns, comma-separated, appended to defaults ($VECNET_OAUTH_REDIRECTS)")
 	references := fs.Bool("delivery-references", false, "enable reference writes (rollback requires a dual reader)")
+	maintenance := fs.Bool("storage-maintenance", false, "enable bounded PASSIVE checkpoint on slow ticks")
+	reclaimPages := fs.Int("storage-reclaim-pages", 0, "incremental reclaim pages per slow tick, 0 disables reclaim, maximum 128")
+	maintenanceTarget := fs.Duration("storage-maintenance-target", 50*time.Millisecond, "cooperative maintenance slice time budget")
 	backfill := fs.Bool("storage-backfill", false, "enable bounded legacy Delivery backfill on slow ticks")
 	defaults := hub.DefaultBackfillLimits()
 	backfillRows := fs.Int("storage-backfill-rows", defaults.Rows, "maximum events per backfill slice")
@@ -119,7 +122,10 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unknown subcommand %q", fs.Arg(0))
 	}
-	storage := storageOptions{references: *references, backfill: *backfill, limits: hub.BackfillLimits{Rows: *backfillRows, Bytes: *backfillBytes, Target: *backfillTarget}}
+	storage := storageOptions{references: *references, backfill: *backfill, limits: hub.BackfillLimits{Rows: *backfillRows, Bytes: *backfillBytes, Target: *backfillTarget}, maintenance: *maintenance, maintenanceLimits: store.MaintenanceOptions{ReclaimPages: *reclaimPages, Target: *maintenanceTarget}}
+	if err := store.ValidateMaintenanceOptions(storage.maintenanceLimits); err != nil {
+		return err
+	}
 	if err := hub.ValidateBackfillLimits(storage.limits); err != nil {
 		return err
 	}
@@ -164,9 +170,11 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 // storageOptions are the DB-compaction switches: reference writes and the
 // bounded online backfill. They are deployment flags, not preferences.
 type storageOptions struct {
-	references bool
-	backfill   bool
-	limits     hub.BackfillLimits
+	references        bool
+	backfill          bool
+	maintenance       bool
+	maintenanceLimits store.MaintenanceOptions
+	limits            hub.BackfillLimits
 }
 
 // runIdentity reads identity metadata or rotates the database-backed key offline.
@@ -437,6 +445,8 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	bootstrap.DeliveryReferences = cfg.Storage.references
 	bootstrap.BackfillEnabled = cfg.Storage.backfill
 	bootstrap.BackfillLimits = cfg.Storage.limits
+	bootstrap.StorageMaintenanceEnabled = cfg.Storage.maintenance
+	bootstrap.StorageMaintenance = cfg.Storage.maintenanceLimits
 	h, db, err := openHub(cfg.DataDir, publicURL, cfg.AllowPrivateEgress, bootstrap)
 	if err != nil {
 		ln.Close()
@@ -534,6 +544,9 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 		key, flag, env string
 	}
 	bindings := []binding{
+		{key: "retention.ack_events", flag: "retention-ack-events"},
+		{key: "retention.history", flag: "retention-history"},
+		{key: "retention.archive_mode", flag: "retention-archive-mode"},
 		{key: "blobs.expiry", flag: "blobs-expiry"},
 		{key: "events.refresh_interval", flag: "events-refresh-interval"},
 		{key: "presence.default_ttl", flag: "presence-ttl"},
@@ -552,6 +565,9 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 		d, _ := prefs.Lookup(b.key)
 		n, _ := d.Default.Int64()
 		def := strconv.FormatInt(n, 10)
+		if d.Type == prefs.TypeBool {
+			def = "false"
+		}
 		if d.Type == prefs.TypeDuration {
 			def = (time.Duration(n) * time.Second).String()
 		} else if d.Type == prefs.TypeEnum {
@@ -587,6 +603,12 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 					return cfg, &prefs.Error{Code: prefs.CodeInvalidValue, Details: prefs.ErrorDetails{Field: b.key, Constraint: "whole_seconds"}}
 				}
 				n = int64(duration / time.Second)
+			} else if d.Type == prefs.TypeBool {
+				if raw == "true" {
+					n = 1
+				} else if raw != "false" {
+					return cfg, &prefs.Error{Code: prefs.CodeInvalidValue, Details: prefs.ErrorDetails{Field: b.key, Constraint: "boolean"}}
+				}
 			} else if d.Type != prefs.TypeEnum {
 				n, err = strconv.ParseInt(raw, 10, 64)
 			}
@@ -594,6 +616,9 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 				return cfg, &prefs.Error{Code: prefs.CodeInvalidValue, Details: prefs.ErrorDetails{Field: b.key, Constraint: "integer"}}
 			}
 			value := prefs.Int(n)
+			if d.Type == prefs.TypeBool {
+				value = prefs.Bool(n == 1)
+			}
 			if d.Type == prefs.TypeDuration {
 				value = prefs.Duration(n)
 			} else if d.Type == prefs.TypeEnum {
@@ -606,6 +631,12 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 				cfg.PreferenceBootstrap[b.key] = prefs.Effective{Value: value, Source: prefs.SourceFlag, Origin: origin}
 			}
 			switch b.key {
+			case "retention.ack_events":
+				cfg.AckedEventRetention = time.Duration(n) * time.Second
+			case "retention.history":
+				cfg.MessageHistoryRetention = time.Duration(n) * time.Second
+			case "retention.archive_mode":
+				cfg.ArchiveMode = n == 1
 			case "events.refresh_interval":
 				cfg.EventsRefreshInterval = time.Duration(n) * time.Second
 			case "presence.default_ttl":

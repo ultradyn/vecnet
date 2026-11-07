@@ -9,10 +9,11 @@ import (
 )
 
 // TestMigration0025UpgradesFrom0024: a database at master's 0024 (DB
-// compaction backfill exceptions) upgrades by applying only 0025 (R2 blob
+// compaction backfill exceptions) upgrades by applying 0025 (R2 blob
 // objects, numbered 0021 on the r2-build branch and renumbered at its merge),
 // which adds the R2 tables without touching legacy blob rows, event bytes,
-// the hub identity or the preferences state.
+// the hub identity or the preferences state. Later migrations also apply;
+// never assume this migration remains the last shipped migration.
 func TestMigration0025UpgradesFrom0024(t *testing.T) {
 	ctx := context.Background()
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "upgrade.db")+"?"+dsnParams)
@@ -60,9 +61,15 @@ func TestMigration0025UpgradesFrom0024(t *testing.T) {
 		before[table] = r2Snapshot(t, db, table)
 	}
 
+	var wantApplied []string
+	for _, m := range migs {
+		if m.name > last {
+			wantApplied = append(wantApplied, m.name)
+		}
+	}
 	applied, err := Migrate(ctx, db)
-	if err != nil || !reflect.DeepEqual(applied, []string{"0025_r2_blobs.sql", "0026_peer_archive.sql"}) {
-		t.Fatalf("upgrade applied %v, %v; want 0025 and 0026", applied, err)
+	if err != nil || !reflect.DeepEqual(applied, wantApplied) {
+		t.Fatalf("upgrade applied %v, %v; want all pending migrations %v", applied, err, wantApplied)
 	}
 	for table, want := range before {
 		if !reflect.DeepEqual(want, r2Snapshot(t, db, table)) {

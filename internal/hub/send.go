@@ -42,7 +42,7 @@ type DeliveryRef struct {
 	State      string  `json:"state"`
 }
 
-// IdempotencyWindow is how long an idempotency_key is remembered per sender
+// IdempotencyWindow is the default and minimum lifetime of a send key per sender
 // (PROTOCOL §2.2, R03).
 const IdempotencyWindow = 24 * time.Hour
 
@@ -514,7 +514,7 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 		}
 	}
 	var lastSeq int
-	if err := tx.QueryRowContext(ctx, `SELECT coalesce(max(seq), 0) FROM messages WHERE thr_id = ?`, thr.ID).Scan(&lastSeq); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT max(last_allocated_seq,coalesce((SELECT max(seq) FROM messages WHERE thr_id=threads.thr_id),0)) FROM threads WHERE thr_id = ?`, thr.ID).Scan(&lastSeq); err != nil {
 		return nil, false, nil, fmt.Errorf("hub: last seq: %w", err)
 	}
 	if err := addParticipants(ctx, tx, thr.ID, joiners, lastSeq, now); err != nil {
@@ -625,7 +625,7 @@ const maxMessageRecipients = 32
 // thr's counters are updated in place so its summary reflects the message.
 func (h *Hub) insertMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envelope.Message, msgJSON []byte, jobID, aprID string, countBudget bool) error {
 	var seq int
-	if err := tx.QueryRowContext(ctx, `SELECT coalesce(max(seq), 0) + 1 FROM messages WHERE thr_id = ?`, thr.ID).Scan(&seq); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT max(last_allocated_seq,coalesce((SELECT max(seq) FROM messages WHERE thr_id=threads.thr_id),0))+1 FROM threads WHERE thr_id = ?`, thr.ID).Scan(&seq); err != nil {
 		return fmt.Errorf("hub: next seq: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -645,8 +645,8 @@ func (h *Hub) insertMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg
 		budget = *thr.Budget
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE threads SET message_count = ?, budget_remaining = ?, last_message_at = ? WHERE thr_id = ?`,
-		thr.MessageCount, budget, msg.CreatedAt, thr.ID); err != nil {
+		`UPDATE threads SET message_count = ?, budget_remaining = ?, last_message_at = ?, last_allocated_seq = ? WHERE thr_id = ?`,
+		thr.MessageCount, budget, msg.CreatedAt, seq, thr.ID); err != nil {
 		return fmt.Errorf("hub: update thread: %w", err)
 	}
 	return nil
@@ -754,6 +754,13 @@ func (h *Hub) fanOut(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envel
 		refs = append(refs, DeliveryRef{DeliveryID: dly, Recipient: t.peer, Via: t.via, State: "queued"})
 		notify = append(notify, t.peer)
 	}
+	// A message's final fan-out sequence is its immutable position in the
+	// shared preview high-water domain, including inline legacy writes.
+	if len(refs) > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE messages SET history_event_seq=(SELECT seq FROM sqlite_sequence WHERE name='events') WHERE msg_id=? AND history_event_seq IS NULL`, msg.MessageID); err != nil {
+			return nil, nil, err
+		}
+	}
 	return refs, notify, nil
 }
 
@@ -795,6 +802,57 @@ func resolveSender(ctx context.Context, tx *sql.Tx, c auth.Caller, as string) (s
 	return s, nil
 }
 
+// ErrInvalidIdempotencyWindow rejects finite send-key lifetimes below 24 h.
+var ErrInvalidIdempotencyWindow = errors.New("hub: invalid_idempotency_window")
+
+// IdempotencyExpiry reports only maintenance metadata. A zero Cutoff means
+// keys are retained forever. Deleted is returned only after a successful commit.
+type IdempotencyExpiry struct {
+	Deleted int64
+	Cutoff  time.Time
+}
+
+// idempotencyCutoff is shared by lookup and cleanup. Persisted timestamps have
+// millisecond precision, so both paths compare against the same normalized time.
+// Only keys strictly older than this cutoff expire; equality still replays.
+func (h *Hub) idempotencyCutoff(now time.Time) time.Time {
+	if h.Cfg.IdempotencyWindow == 0 {
+		return time.Time{}
+	}
+	return now.Add(-h.Cfg.IdempotencyWindow).UTC().Truncate(time.Millisecond)
+}
+
+// ExpireIdempotency removes one indexed, bounded slice of expired send keys.
+// limit <= 0 uses 100 rows; larger requests are capped at 1000. The same
+// BEGIN IMMEDIATE writer path as Send serializes pruning with replay/reuse.
+func (h *Hub) ExpireIdempotency(ctx context.Context, limit int) (IdempotencyExpiry, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	var result IdempotencyExpiry
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		result.Cutoff = h.idempotencyCutoff(h.Now())
+		if result.Cutoff.IsZero() {
+			return nil
+		}
+		deleted, err := tx.ExecContext(ctx, `DELETE FROM idempotency WHERE rowid IN (
+			SELECT rowid FROM idempotency WHERE created_at < ? ORDER BY created_at LIMIT ?
+		)`, envelope.FormatTime(result.Cutoff), limit)
+		if err != nil {
+			return fmt.Errorf("hub: idempotency cleanup: %w", err)
+		}
+		result.Deleted, err = deleted.RowsAffected()
+		return err
+	})
+	if err != nil {
+		return IdempotencyExpiry{}, err
+	}
+	return result, nil
+}
+
 // idempotencyLookup returns the stored response for (sender, key) when the
 // body matches (ok true), 409 idempotency_conflict when it differs, and
 // (nil, false, nil) when the key is unused or its row is older than the
@@ -809,7 +867,7 @@ func (h *Hub) idempotencyLookup(ctx context.Context, tx *sql.Tx, sender, key, bo
 	if err != nil {
 		return nil, false, fmt.Errorf("hub: idempotency lookup: %w", err)
 	}
-	if at, perr := envelope.ParseTime(created); perr != nil || now.Sub(at) >= IdempotencyWindow {
+	if cutoff := h.idempotencyCutoff(now); !cutoff.IsZero() && created < envelope.FormatTime(cutoff) {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM idempotency WHERE sender = ? AND key = ?`, sender, key); err != nil {
 			return nil, false, fmt.Errorf("hub: idempotency expire: %w", err)
 		}

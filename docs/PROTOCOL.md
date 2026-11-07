@@ -175,6 +175,8 @@ The hub MUST:
 
 ### 2.3 `GET /v1/events`
 
+Implementation migration inventory: R2 blobs is `0025_r2_blobs.sql`, peer archive is the deployed `0026_peer_archive.sql`, and DB compaction follows as 0027-0034 (SQL unchanged by renumbering). Both fresh and master-0026 upgrades are supported; see [the plan inventory](plans/2026-11-05-db-compaction.md).
+
 One URL, two pull styles chosen by `Accept` [T06, SSE]:
 
 | `Accept` | Mode | Response |
@@ -182,7 +184,7 @@ One URL, two pull styles chosen by `Accept` [T06, SSE]:
 | `text/event-stream` | SSE | Stream of frames: `id: <cursor>`, `event: <Event.type>`, `data: <Event JSON>` [SCH] |
 | `application/json` | Long-poll | `{events: [Event…], next_cursor}` [EX06]; returns at once when events exist, else holds up to `wait` seconds (research uses `wait=25`, kept under 30 s for proxies; `wait=0` is plain poll) [SSE]. A poll held when the hub begins a restart answers `{events: [], next_cursor: <the request's cursor>, hub_restarting: {retry_after_ms}}`; the field is absent otherwise (§21.3) |
 
-Cursor selection, in priority order: `Last-Event-ID` header, then `?after=`, then the stream owner's last acked cursor. `after=head` means "from now". With nothing acked yet for the owner and scope, the stream starts at the oldest retained event (a full replay), so a first connection never skips Deliveries queued before it. The hub replays every entry with seq > cursor in order, then tails [SSE]. Clients MUST NOT send `Last-Event-ID` and `?after=` with different values [SSE].
+Cursor selection, in priority order: `Last-Event-ID` header, then `?after=`, then the stream owner's last acked cursor. `after=head` means "from now". With nothing acked yet for the owner and scope, the stream starts at its owner-aware retention floor, replaying retained events strictly above that floor, then tails [SSE]. Before any purge this gives a full replay of queued Deliveries. A merged principal stream has the conservative recovery limit described below. Clients MUST NOT send `Last-Event-ID` and `?after=` with different values [SSE].
 
 SSE stream behaviour [SSE]:
 
@@ -207,12 +209,18 @@ Status codes [SSE]:
 |---|---|---|
 | 401 / 403 | Bad or insufficient credential | Stop, re-auth |
 | 204 | Peer disabled | Stop reconnecting |
-| 409 | Cursor from unknown epoch or below retention; the error `details` name the oldest valid cursor | Re-sync thread history explicitly, then resume |
+| 409 `cursor_purged` | Cursor from an unavailable epoch or below the current owners' retention floor; `details.oldest_cursor` is the safe resume cursor | Re-sync affected thread history explicitly, then resume after that opaque cursor |
 | 410 `hub_moved` | The hub runs in relocated mode; `details` carry `new_url` and the signed moving `notice` | Follow per §21.5, or stop and tell the operator |
 
 A clean end, unexpected EOF, HTTP/2 stream reset, refused/reset connection or proxy 502/503/504 is a reconnectable outage. Retain the cursor and pending ack across retries; the terminal statuses above still take precedence. Client status and retry timing are specified in section 13.1.
 
 A principal credential receives events for all its peers by default; `?peer=<peer_id>` narrows the stream to one of them [ENV, R05]. The acked cursor is per stream owner and scope: one for the principal-wide stream, one per narrowed peer. Several consumers MAY connect concurrently to the same owner and scope; they receive the same events and share one acked cursor. There are no per-consumer cursors [R05].
+
+**Retention and recovery (2026-11-07).** The hub maintains a monotonic purge floor for each peer and removes only a contiguous eligible prefix of that peer's log. The floor is the highest removed sequence, not the first surviving event; resuming exactly at the returned floor is valid. Interleaved global sequence gaps from other owners are not evidence of loss. Event deletion and floor advancement commit atomically. Reads resolve event metadata, immutable bodies and floors in one consistent snapshot; an already-running read may finish from its pre-purge snapshot.
+
+A principal-wide stream uses the maximum floor over its current peers. This scalar cursor safely resumes **above the combined floor**; it cannot replay every older event still retained for a peer with a lower floor. For example, if A has purged through sequence 100 and B through 20, the merged safe floor is 100 even if B still has events 21–100. Recover B with `?peer=<B>` at B's returned floor, or read accessible thread history (§2.8). These numbers explain server ordering only: clients MUST use the returned opaque cursors, never construct them or compare their numeric parts. A stale saved ack receives the same `cursor_purged` error rather than silently rewinding. `after=head` deliberately starts from now; it is not recovery of missed events.
+
+Acknowledged event retention defaults to a minimum age of seven days when pruning is enabled. Zero disables pruning. Unacknowledged events are kept indefinitely by default; an explicitly authorized hard policy can truncate old backlog, but retry, held and in-flight pins still win. Pull acceptance uses valid current-epoch peer/principal acknowledgements; read markers, receipts and MCP scan cursors are not pull acknowledgements. Acknowledgement is shared within the owner/scope, not proof that every independent consumer processed the event. An unacknowledged or pinned event blocks removal of later events in that owner's prefix.
 
 Sending a frame is not a receipt; the hub's undelivered and dead-letter timers key off the acked cursor [SSE].
 
@@ -258,6 +266,10 @@ New R2 attachment bytes MUST bypass Fly in both directions, including MCP/legacy
 `GET /v1/threads?participant=me|<peer_id>&group=<grp_id>&q=<substring>&since=<timestamp>&limit=<n≤200>`: threads the caller participates in. `q`, when non-empty, keeps threads whose title contains that substring, case-insensitively (ASCII case folding); it matches the title only, not participants or message text. A `q` longer than 128 characters is 422 `invalid_value` with `details.field` `q`. Omitted or empty `q` applies no title filter. `q` combines with the other parameters; paging is unchanged. Returns `{threads: [ThreadSummary…], next}`; `next` is an opaque paging token [R08].
 
 `GET /v1/threads/{id}/messages?after=<message_id>&limit=<n≤200>`: history for late joiners and cursor re-sync [ENV §5]. `after` is a `msg_` id, exclusive; omitted means from the thread's start. Returns `{messages: [Message…], next_after}`; `next_after` is the `msg_` id to pass next, or `null` at the end [R08]. Participants only; others get 403 `not_participant` [T09, R08, R24]. The operator credential is the exception: it reads any thread in full, whatever its `history_access`, and may list any peer's threads with `participant=<peer_id>` (the operator inbox needs both). The operator's page also carries `hosted_blobs`: an object from `message_id` to the `sha256`s of that message's attachments whose bytes the hub hosts (referenced at send time and not purged), in attachment order; `{}` when none. A stored Message never holds a `blob_url`, so this is how the operator UI tells hosted bytes that also name an informational `origin_url` from reference-only ones (section 11). R2 pages additionally carry authorized `blob_states` keyed by blob_id with state/class/deadline/checksum trust (§11.2), beside the unchanged Message JSON. Other callers' pages otherwise retain `{messages, next_after}`. Each Message MAY carry `reactions` as specified in §17.3; reaction Messages never appear in history (§17.3). Each Message carries its stored `sender_info` (§8.2).
+
+History retention is independent of Delivery/loop expiry. Existing and self-hosted hubs keep message history indefinitely by default; hosted 90-day retention is an explicit operator policy choice, not an upgrade default. Finite retention first marks eligible history expired, which can hide it from history reads, then physically sweeps only unpinned bodies. Replay dependencies may keep an expired body's bytes longer than its configured history age. The operator's full-history authority above bypasses participant restrictions, not history expiry. Returned `ThreadSummary` values and lifetime message count, budget, activity time and thread sequence high-water survive body deletion; sequence numbers are never reused, including for reactions and later participant joins.
+
+After a body is swept, its compact `(msg_id, thr_id, seq)` locator remains while the thread exists. `after=<expired msg_id>` still resolves to its original position and returns the visible retained suffix with ordinary `next_after` pagination. It does not recreate expired content. An unknown or wrong-thread `after` returns 422 `not_in_thread`. `from_join` restrictions continue to apply.
 
 ### 2.9 Groups *(proposed paths)*
 
@@ -748,8 +760,14 @@ Priority SHOULD NOT change dedupe or retry semantics [W2M §5].
 ### 5.3 Dedupe and idempotency
 
 - **Recipient side:** `delivery_id` is the dedupe key. Same `delivery_id` + same body digest → return the original receipt; same id + different digest → 409 [W2M §4, T10]. Receivers MUST durably commit before answering 2xx [W2M §4].
-- **Sender side:** `idempotency_key` per sender, 24 h window (section 2.2).
+- **Sender side:** `idempotency_key` per sender, 24 h window (section 2.2). Configured extensions must be at least 24 h; zero retains keys indefinitely. Expiry lookup and bounded cleanup share the policy; only rows strictly older than the millisecond-normalized cutoff expire; equality still replays. After expiry, reuse is a new send even if the old row has not yet been physically cleaned up.
 - **One Delivery per (`message_id`, recipient)**, however many paths reach the peer. `Delivery.via` names the first group that resolved to the recipient; any other groups are listed in `Delivery.also_via` (a Delivery-level field, so the Message stays byte-identical) [R17].
+
+**Immutable replay storage.** An internal Delivery reference resolves an immutable send-time Message plus frozen recipient envelope, thread summary and attachment overrides. It preserves the original event id, cursor, time, hash and exact Delivery bytes, including retry `attempt: 1`; it never regenerates a token or consults current peer/thread state. Legacy byte variants can use deduplicated immutable snapshots; uncertain conversions remain inline. Each surface retains its own representation, including MCP's existing token stripping and preview rules. A missing/corrupt replay dependency fails the whole read/claim; no partial page or cursor advancement is returned. Reaction overlays do not edit the stored Message body. Future edits need a new revision retaining referenced originals; this release adds no privacy-erasure operation.
+
+Pending/held/in-flight direct deliveries and operator dispatches, retained events and snapshots, durable callback copies, approvals/jobs/reactions and blob-reference contracts can delay GC. MCP outbox bodies remain exact durable copies for pending, parked and retryable exhausted callbacks; terminal suppression tombstones follow the owning peer's floor. Blob expiry/purge does not change an existing Delivery's frozen URL bytes or imply that the URL will still fetch bytes. Pin-delayed expiry is reported as retained storage, never as completed reclamation. See [operator retention controls](OPERATOR.md#storage-and-retention) and the [backup and rollout runbook](DEPLOY.md#storage-compaction-rollout).
+
+Archive mode preserves message/history records and their readable dependencies, suppresses history marking/hiding/sweeping and hard unacked-event expiry, and does not restore already erased content. Acknowledged-event pruning can continue; indefinite event-cursor replay additionally requires `retention.ack_events=0`. Message archival does not promise permanent hosted blob bytes (§11). Leaving archive mode always requires the shared preferences preview/confirmation flow; retrospective expiry needs its own explicit approval and cannot run before the persisted next-nightly-sweep bound. Audit remains append-only and is kept indefinitely.
 
 ### 5.4 Ordering
 

@@ -387,11 +387,18 @@ func TestPreferencesApplyExistingFixedBoundsAndAtomicActivation(t *testing.T) {
 }
 func TestPreferencesUninstalledConsumersStayUnavailable(t *testing.T) {
 	h, _ := preferencesHub(t, hub.DefaultConfig())
-	s := readPrefs(t, h)
+	p, err := hub.NewPreferences(h.DB, h.Cfg, h.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := p.ReadPreferences(context.Background(), prefsOperator)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, patch := range []prefs.Patch{{Set: map[string]prefs.Value{"retention.history": prefs.Duration(0)}, ApplyExisting: true}, {Set: map[string]prefs.Value{"blobs.expiry": prefs.Enum("off")}}} {
-		_, err := h.Preferences.PreviewPreferences(context.Background(), prefsOperator, s.ETag, patch)
+		_, err := p.PreviewPreferences(context.Background(), prefsOperator, s.ETag, patch)
 		prefsCode(t, err, prefs.CodeUnavailable)
-		_, err = h.Preferences.PatchPreferences(context.Background(), prefsOperator, s.ETag, patch)
+		_, err = p.PatchPreferences(context.Background(), prefsOperator, s.ETag, patch)
 		prefsCode(t, err, prefs.CodeUnavailable)
 	}
 }

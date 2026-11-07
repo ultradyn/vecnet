@@ -4,25 +4,86 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/store"
 )
 
-// Install the R2 new-grant consumer and its policy together, before loading
-// stored overrides. ValidateBlobConfig accepts only the supported SHA-256
-// adapter and a finite positive quota. No provider call is needed for Settings.
-// Retained R2 support stays installed when new uploads roll back to disk.
-func newProductionPreferences(db *store.DB, cfg Config, now func() time.Time) (*Preferences, error) {
-	if cfg.BlobBackend != "r2" && cfg.R2.AccountID == "" {
-		return newPreferences(db, cfg, now)
+// Install all production consumers and their policy before loading stored
+// overrides. Retained R2 support stays installed when uploads roll back to disk.
+func newProductionPreferences(h *Hub) (*Preferences, error) {
+	policy := &productionPreferencePolicy{retention: &HistoryRetentionAdapter{Hub: h}}
+	installed := []string{"retention.ack_events", "retention.archive_mode", "retention.history"}
+	if h.Cfg.BlobBackend == "r2" || h.Cfg.R2.AccountID != "" {
+		if err := ValidateBlobConfig(h.Cfg); err != nil {
+			return nil, err
+		}
+		policy.blobs = &r2PreferencePolicy{db: h.DB, quota: h.Cfg.R2.StorageQuotaBytes}
+		installed = append(installed, "blobs.expiry")
 	}
-	if err := ValidateBlobConfig(cfg); err != nil {
-		return nil, err
+	return newPreferencesWithPolicy(h.DB, h.Cfg, h.Now, policy, installed...)
+}
+
+// Each consumer receives only its own keys. Shared preferences still owns
+// validation, confirmation and the one transaction for all activation metadata.
+type productionPreferencePolicy struct {
+	retention *HistoryRetentionAdapter
+	blobs     *r2PreferencePolicy
+}
+
+func (p *productionPreferencePolicy) preferenceGeneration() string {
+	generation := "db-retention-v1"
+	if p.blobs != nil {
+		generation += ":" + p.blobs.preferenceGeneration()
 	}
-	policy := &r2PreferencePolicy{db: db, quota: cfg.R2.StorageQuotaBytes}
-	return newPreferencesWithPolicy(db, cfg, now, policy, "blobs.expiry")
+	return generation
+}
+
+func dbRetentionPatch(p prefs.Patch) prefs.Patch {
+	out := p
+	out.Set = map[string]prefs.Value{}
+	out.Reset = nil
+	for key, value := range p.Set {
+		if key != "blobs.expiry" {
+			out.Set[key] = value
+		}
+	}
+	for _, key := range p.Reset {
+		if key != "blobs.expiry" {
+			out.Reset = append(out.Reset, key)
+		}
+	}
+	return out
+}
+
+func (p *productionPreferencePolicy) Check(ctx context.Context, before, after prefs.Snapshot, patch prefs.Patch) error {
+	if err := p.retention.Check(ctx, before, after, dbRetentionPatch(patch)); err != nil {
+		return err
+	}
+	if p.blobs != nil {
+		return p.blobs.Check(ctx, before, after, patch)
+	}
+	return nil
+}
+
+func (p *productionPreferencePolicy) Preview(ctx context.Context, before, after prefs.Snapshot, patch prefs.Patch) (prefs.Impact, error) {
+	impact, err := p.retention.Preview(ctx, before, after, dbRetentionPatch(patch))
+	if err != nil || p.blobs == nil {
+		return impact, err
+	}
+	blobs, err := p.blobs.Preview(ctx, before, after, patch)
+	impact.Storage = blobs.Storage
+	return impact, err
+}
+
+func (p *productionPreferencePolicy) Activate(ctx context.Context, tx *sql.Tx, before, after prefs.Snapshot, patch prefs.Patch, impact prefs.Impact, digest string) error {
+	if err := p.retention.Activate(ctx, tx, before, after, dbRetentionPatch(patch), impact, digest); err != nil {
+		return err
+	}
+	if p.blobs != nil {
+		return p.blobs.Activate(ctx, tx, before, after, patch, impact, digest)
+	}
+	return nil
 }
 
 type r2PreferencePolicy struct {

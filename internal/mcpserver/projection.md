@@ -92,6 +92,13 @@ wording, with the existing sending-guide hint where applicable. They never copy
 Whole-response and diagnostic canaries cover malformed timestamp and ID strings
 both below and above 64 bytes, as well as the existing composite-value cases.
 
+DB compaction merge (2026-11-07): inbox discovery names the owner retention
+floor used before the first ack; thread discovery explains retained history and
+expired message-ID locators. No tool arguments or schema constraints change.
+The existing equivalence fixtures and per-tool +15% / total +10% budgets stay
+in force. R2 metadata-surface tests run with both inline and reference delivery
+storage, verifying hydrated attachment metadata and URL-free MCP reads.
+
 Onboarding adds three tools to operator discovery only. The peer catalog stays
 at **21,276 bytes** with its existing **23,403-byte** total budget, and all
 existing per-tool pins remain unchanged. The operator catalog measures
@@ -129,3 +136,9 @@ allowance (**27,882 / 35,215 bytes**). Existing per-tool pins retain their 15%
 allowance, including master's separate R2 pins and onboarding's three pins.
 The original total guard also remains, after subtracting only R2 growth and
 accounting for authority filtering and the operator onboarding additions.
+
+2026-11-07 DB/master merge: retaining owner retention-floor and expired
+message-locator guidance measures **13,308 bytes** for the same twelve Grok
+tools in both protocol eras, **25,375 bytes** for peers and **32,041 bytes**
+for operators. All original per-tool 15% and total 10% budget pins remain
+unchanged, and Grok discovery remains below the 13 KiB ceiling.

@@ -34,7 +34,8 @@ try {
         }
       };
       assert(terminalDemo.url === demo.url, 'both clients must share one demo hub');
-      await waitFor(' live ');
+      // tmux may capture the padding after "live" as a tab.
+      await waitFor(/\slive\s/);
       await waitFor('Share screenshots here.');
       await keys(':');
       await waitFor('COMMAND');

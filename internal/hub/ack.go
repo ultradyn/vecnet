@@ -100,6 +100,13 @@ func (h *Hub) Ack(ctx context.Context, c auth.Caller, peerFilter string, cur eve
 	var notify []string
 	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		notify = nil
+		if cur.Epoch != h.Log.Epoch() {
+			floor, err := h.Log.OldestForTx(ctx, tx, owners)
+			if err != nil {
+				return err
+			}
+			return eventlog.ErrCursorPurged{Oldest: floor}
+		}
 		if cur.Epoch == h.Log.Epoch() {
 			var high int64
 			if err := tx.QueryRowContext(ctx,

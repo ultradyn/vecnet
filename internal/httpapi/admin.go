@@ -27,6 +27,7 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /v1/admin/prefs", s.adminPatchPreferences)
 	mux.HandleFunc("POST /v1/admin/prefs/preview", s.adminPreviewPreferences)
 	mux.HandleFunc("GET /v1/admin/storage/backfill", s.adminBackfillStatus)
+	mux.HandleFunc("GET /v1/admin/storage/maintenance", s.adminMaintenanceStatus)
 	mux.HandleFunc("POST /v1/admin/principals", s.adminAddPrincipal)
 	mux.HandleFunc("GET /v1/admin/principals", s.adminListPrincipals)
 	mux.HandleFunc("PUT /v1/admin/principals/{id}/limits", s.adminPrincipalLimits)
@@ -868,4 +869,15 @@ func (s *server) adminBackfillStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, p)
+}
+
+// adminMaintenanceStatus exposes only the last bounded slice's numeric metrics.
+func (s *server) adminMaintenanceStatus(w http.ResponseWriter, r *http.Request) {
+	result, err := s.Hub.StorageMaintenanceStatus(callerFrom(r.Context()))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, result)
 }

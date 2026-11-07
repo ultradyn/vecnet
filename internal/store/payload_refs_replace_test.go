@@ -18,9 +18,9 @@ func TestPayloadReferenceReplacementGuards(t *testing.T) {
 		name, query string
 		snapshot    bool
 	}{
-		{"message_primary", `INSERT OR REPLACE INTO messages SELECT msg_id,thr_id,seq,sender,kind,created_at,'{}',job_id,approval_id FROM messages WHERE msg_id='msg_test'`, false},
-		{"message_alternate", `INSERT OR REPLACE INTO messages SELECT 'msg_other',thr_id,seq,sender,kind,created_at,body,job_id,approval_id FROM messages WHERE msg_id='msg_test'`, false},
-		{"message_both_unique_keys", `INSERT OR REPLACE INTO messages SELECT 'msg_other',thr_id,seq,sender,kind,created_at,'{}',job_id,approval_id FROM messages WHERE msg_id='msg_test'`, false},
+		{"message_primary", `INSERT OR REPLACE INTO messages(msg_id,thr_id,seq,sender,kind,created_at,body,job_id,approval_id) SELECT msg_id,thr_id,seq,sender,kind,created_at,'{}',job_id,approval_id FROM messages WHERE msg_id='msg_test'`, false},
+		{"message_alternate", `INSERT OR REPLACE INTO messages(msg_id,thr_id,seq,sender,kind,created_at,body,job_id,approval_id) SELECT 'msg_other',thr_id,seq,sender,kind,created_at,body,job_id,approval_id FROM messages WHERE msg_id='msg_test'`, false},
+		{"message_both_unique_keys", `INSERT OR REPLACE INTO messages(msg_id,thr_id,seq,sender,kind,created_at,body,job_id,approval_id) SELECT 'msg_other',thr_id,seq,sender,kind,created_at,'{}',job_id,approval_id FROM messages WHERE msg_id='msg_test'`, false},
 		{"message_update_primary", `UPDATE OR REPLACE messages SET msg_id='msg_test' WHERE msg_id='msg_other'`, false},
 		{"message_update_alternate", `UPDATE OR REPLACE messages SET seq=1 WHERE msg_id='msg_other'`, false},
 		{"snapshot_primary_body", `INSERT OR REPLACE INTO event_message_snapshots SELECT snapshot_id,msg_id,body_sha256,'{}' FROM event_message_snapshots`, true},
@@ -115,7 +115,7 @@ func TestMessageReplacementGuardCutoverAndIdenticalBytes(t *testing.T) {
 			if _, err := db.Exec(`INSERT OR REPLACE INTO messages SELECT * FROM messages`); err != nil {
 				t.Fatal("identical replacement rejected", err)
 			}
-			_, err = db.Exec(`INSERT OR REPLACE INTO messages SELECT msg_id,thr_id,seq,sender,kind,created_at,' { } ',job_id,approval_id FROM messages`)
+			_, err = db.Exec(`INSERT OR REPLACE INTO messages(msg_id,thr_id,seq,sender,kind,created_at,body,job_id,approval_id) SELECT msg_id,thr_id,seq,sender,kind,created_at,' { } ',job_id,approval_id FROM messages`)
 			if (err != nil) != enabled {
 				t.Fatal("replacement guard did not follow cutover flag")
 			}

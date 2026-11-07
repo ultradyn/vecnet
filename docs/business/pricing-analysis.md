@@ -1,10 +1,10 @@
 # Hosted vecnet: pricing analysis and candidate models
 
-Analysis date: **2026-11-05**. Informative only: every vecnet price below is a candidate, not a decision or offer. Self-hosting/local use remains free and is expected to be common. All monthly financial scenarios are **estimates in USD, excluding tax**, unless another currency is explicit. Vendor links were accessed **2026-11-05**; access dates appear with the source tables. No customer data, production measurements, deployment, or cloud resources were used.
+Analysis date: **2026-11-05**, storage/retention evidence updated **2026-11-07**. Informative only: every vecnet price below is a candidate, not a decision or offer. Self-hosting/local use remains free and is expected to be common. All monthly financial scenarios are **estimates in USD, excluding tax**, unless another currency is explicit. Vendor links were accessed **2026-11-05**; access dates appear with the source tables. No customer data, production measurements, deployment, or cloud resources were used.
 
 | Candidate | Example monthly price | Estimated service cost/account, before payment fees | Surplus at 5 / 20 paying accounts, after $20 fixed overhead | Main condition |
 |---|---:|---:|---:|---|
-| A. Flat hosted hub | $19 solo / $49 team / $199 heavy | $12 / $24 / $100 | Solo: **$10 / $100**; team: **$95 / $439** | Bounded usage; R2 blob path and retention work required for modeled costs |
+| A. Flat hosted hub | $19 solo / $49 team / $199 heavy | $12 / $24 / $100 | Solo: **$10 / $100**; team: **$95 / $439** | Bounded usage; verified R2 path, explicit retention activation and measured operating costs required |
 | B. Human seats, agents free | $9/human, $19 account minimum | $24 for five humans | **$75 / $362** for five-human accounts | Human identity must be billable; machine-heavy solo use needs quotas |
 | C. Metered hosted service | $19 minimum + usage; $25 illustrative bill | $12 at solo usage | **$39 / $216** | Bill accepted sends with fan-out bounds, storage byte-hours and download bytes |
 | D. Permanent storage add-ons | +$5/50 GB; +$15/250 GB | $1.50 / $6 incremental | 50 GB alone: **−$5 / $40**; 250 GB alone: **$21 / $143** | Attach to a paid base; one-week transfers need separate expiry semantics |
@@ -21,13 +21,13 @@ Grounding: [README](../../README.md), [protocol](../PROTOCOL.md), [deployment](.
 - Claude Code/watch uses streams and hooks; dots use public MCP, built-in OAuth and outbound MCP Events; Grok Bots use routine webhooks and MCP; GitHub ingress produces messages but never posts back. See [Claude Code](../connectors/claude-code.md), [dots](../connectors/dots.md), [Grok](../connectors/grokbot.md), [GitHub](../connectors/github.md). Agent model subscriptions and token inference are customer costs, not hub COGS. Paid relay features would not include model execution.
 - The demo plan describes a **separate**, immutable in-memory replay service, without a hub database or attachments. It is neither a free hosted customer hub nor evidence of tenant capacity. Any demo hosting/marketing cost belongs in fixed overhead separately.
 - A principal is an authorization/ownership concept within one hub, **not an implemented SaaS tenant boundary**. A hub has one operator administration surface, directory, SQLite store and identity. Sharing the existing hub among unrelated customers needs a security/product design before its economic savings can be claimed.
-- [Deployment backups](../DEPLOY.md#backups) are currently a manual, best-effort copy of `hub.db`; uncheckpointed WAL is omitted and copying during writes can be inconsistent. Nightly automation is documented, not implemented. Managed backups would need a consistent SQLite backup/replication method, encryption/access controls, restore checks and an explicit recovery objective.
+- [Deployment backups](../DEPLOY.md#backups) now require online SQLite backup or a verified stopped consistent DB/WAL set plus coordinated attachments, external storage and a restore drill. The existing `just fly-backup` main-file copy is not a valid live-WAL backup. Nightly consistent automation and a managed recovery objective remain operating work; include encryption/access controls, backup retention and restore cost.
 
 ### 1.1 Message and SQLite measurements
 
 [Schema](../../internal/store/migrations/0001_init.sql), [later migrations](../../internal/store/migrations/), [send pipeline](../../internal/hub/send.go), [event log](../../internal/eventlog/log.go), [spill](../../internal/hub/spill.go), [blob store](../../internal/blob/store.go):
 
-`messages.body` stores JSON once; `fanOut` embeds that JSON into one durable delivery event **per recipient**, plus delivery/index rows. Send also writes an idempotency response, audit entry and thread state. Receipts, presence, thread summaries, notifications and MCP outbox work add more rows/traffic. A message is not one tiny text row and one HTTP request.
+The original inline baseline stores JSON in `messages.body` once and embeds it in one durable delivery event **per recipient**. The 2026-11-07 dual reader supports opt-in references to that immutable body, frozen recipient envelope/attachment overrides and rare legacy snapshots; delivery/index rows still scale with fan-out. Send also writes an idempotency response, audit entry and thread state. Receipts, presence, thread summaries, notifications and MCP outbox work add more rows/traffic. A message is not one tiny text row and one HTTP request.
 
 A local **synthetic, in-memory schema experiment**, using Python SQLite 3.54.0, applied all 17 SQL migrations to a fresh `:memory:` database. For each profile it inserted 1,000 unique messages, F deliveries/events per message, an idempotency response and a send audit row. IDs used the normal prefixes and 26-character suffixes; timestamps were 24 characters; JSON used compact separators. `delta(page_count × page_size)/1000` includes allocated B-tree/index pages. No live DB, Go build or production load test was used.
 
@@ -41,7 +41,25 @@ Reproduction recipe: apply migrations in filename order; insert `messages(msg_id
 
 Current default inline preview is 4,096 bytes; send text allows 65,536 bytes, with larger previews spilled into a blob; whole request cap is 256 KiB, metadata 8 KiB, attachments at most 16. JSON escaping and attachment metadata can enlarge envelopes. Do not price on a fixed text size without a body-byte and recipient cap.
 
-**Retention is a cost multiplier.** Delivery expiry/loop TTL does not delete message history. No scheduled general message/event/history retention was found in `RunTickers`. At the planning allowances, one month of solo/team/heavy sends adds **0.164 / 2.458 / 49.152 decimal GB**; twelve months adds **1.97 / 29.49 / 589.82 GB**, before extra lifecycle state. The 30-day working sets below require new retention/archive behavior. An unchanged hub must provision for cumulative history instead.
+**Measured modernc update (2026-11-07).** [Task 8 receipt](db-compaction-bench-2026-11-07.md) compares 80 accepted sends per fixture on x-boss with FULL durability, identical seeds and inline/reference lifecycle pairs. Live B/send subtracts each fixture's empty-schema baseline from `(page_count − freelist_count) × page_size`, including tables/indexes. It is not allocated DB file size, cumulative WAL traffic or a production capacity forecast.
+
+| Representative profile | Measured inline live B/send | Measured reference live B/send | Measured reduction |
+|---|---:|---:|---:|
+| F1, 2048 text, repeated/new thread | 11,059.2 | 7,731.2 | 30.1% |
+| F2, 2048 text, repeated/new thread | 16,896.0 | 10,598.4 | 37.3% |
+| F5, 4096 text, varied/reused thread | 53,964.8 | 17,766.4 | 67.1% |
+| F20, 4096 text, varied/reused thread | 196,915.2 | 72,396.8 | 63.2% |
+| F2, 2048 varied/new, hosted attachment | 17,561.6 | 11,929.6 | 32.1% |
+
+These are selected paired cohorts, not replacements for every workload below. Hosted attachment metadata and recipient overrides are included in the SQLite figures. The cohort reuses one synthetic hosted blob: its actual `BlobBytes` are reported separately in the raw receipt, outside this SQLite live-page table. R2 transfer/cost is unmeasured. Callback outbox copies still count, and the full receipt reports one/three-subscription cohorts. Legacy byte variants can retain an additional deduplicated snapshot; the F1 legacy cohort grows. Measured reference JSON grows with frozen participant metadata (roughly 724–1,373 B per reference across normal fan-outs); the plan's R=650 and C/B/I arithmetic remain **logical assumptions**, not measured distributions or page savings.
+
+For the F5/4096 varied/reused reference fixture, live storage after backfill is **2,310,144 B**; idempotency expiry brings live storage to **2,220,032 B**, settled acknowledged-event expiry to **1,777,664 B**, and explicit finite-history cleanup to **929,792 B**. The main file remains **2,310,144 B** through those deletion stages; bounded incremental reclaim finally reduces it to **929,792 B** in this fixture. These are whole-fixture measured lifecycle totals, including its baseline, with pins/tails left visible in the raw receipt. They are not a universal steady-state size or proof that an existing NONE file shrinks.
+
+**Accepted performance cost:** reference hydration raises read p95 from roughly **0.5 ms to 3–13 ms** in representative cohorts, with some profiles/repeats around **14–16 ms**. The receipt investigates immutable-body loading, reconstruction/hash validation and added CPU/allocations; send/push tails also have regressions/variance. Keep those byte guards and explicitly accept the storage/latency tradeoff; a faster-hydration follow-up will be filed. Do not turn these build-host timings into a shared-core Fly SLA or revise compute budgets downward on storage evidence alone.
+
+**Retention is a cost multiplier.** Delivery expiry/loop TTL does not delete history. Defaults keep messages, unacked events and audit indefinitely; acknowledged prefixes have a seven-day age with independent worker enablement and pins, and idempotency uses 24 hours. Finite history/archival controls are implemented, but hosted 90 days requires a separate operator policy, preview/confirmation and activation. The shipped CLI does not expose the internal acknowledged-pruning enable switch; a duration preference alone is not activation. Acknowledged cleanup/archive do not bound lifetime message growth or hosted blob bytes. A **1 GB volume is not an unlimited plan**.
+
+At the **older inline planning allowances**, one month of solo/team/heavy sends adds **0.164 / 2.458 / 49.152 decimal GB**; twelve months adds **1.97 / 29.49 / 589.82 GB**, before extra lifecycle state. These remain arithmetic forecasts, not measured reference growth. The 30-day working sets below are **commercial modeling assumptions**, not approved retention defaults. A hosted 90-day policy would need a new working-set/cost calculation, plus pinned tails, metadata, attachments, WAL headroom and separately retained external backups. Reference savings and free-page reuse do not by themselves justify a lower provisioned volume or unlimited retention.
 
 ### 1.2 Price evidence and infrastructure alternatives
 
@@ -129,7 +147,7 @@ Backup reserve uses a working assumption of about two DB copies plus WAL/operati
 
 These are **future remote-blob/direct-transfer + bounded-history estimates**. Present local-volume deployment sensitivity, including all blob ingress forwarded only locally, one additional remote blob backup and its upload, and approximate disk headroom: V=4/32/320 GB; add local blob download egress, replace R2 primary storage with disk, retain one R2 blob backup. The same arithmetic gives approximately **$11.48/$31.03/$220.83** service cost before rounding; budget **$13/$32/$225**. The heavy $199 example would lose money in that architecture. A proxy-to-R2 implementation also needs to add forwarding uploads `.04×U`: **$0.20/$2/$20** per month, plus download egress if proxied.
 
-With twelve months of retained history, D grows about 12×. Re-size volume, backups and replication accordingly; the current application has no automatic 30-day deletion policy to hold these costs flat. Blob growth can be unbounded too if every referenced attachment remains permanent.
+With twelve months of retained history, D grows about 12× under this worksheet's assumptions. Re-size volume, backups and replication accordingly; no automatic 30-day policy is enabled by default to hold these costs flat. Blob growth can be unbounded too if every referenced attachment remains permanent.
 
 **Marginal message cost differs from v/M.** For solo-sized messages, 16 KiB on Fly is approximately **$0.00000246 per retained message-month**, and the traffic formula costs **$0.000000576/send**. Two R2 backup copies add approximately **$0.000000492/message-month** before WAL amplification/PUTs. Compute cost is initially a VM step, not an observed per-message price. Use v/M for a whole-account allocation and the byte/write model for marginal scenarios; do not infer that a nearly idle dedicated hub costs $0.000003/message in total.
 
@@ -303,7 +321,7 @@ Cloudflare Tunnel is a reachability alternative to operating a public origin ([T
 
 No model is selected. The shortlist preserves different hypotheses worth testing:
 
-1. **A: bounded managed hubs**, with optional D storage packs. Most directly follows the current binary/DB/hub boundary and can cover a lean fixed floor with five paid accounts. The $19 example has little support cushion; a $25–29 Solo experiment would leave more room. An initial current-code offer would need cumulative storage caps and honest backup/recovery scope with R2 production use gated by the outstanding provider/account acceptance, alongside explicit cumulative DB and backup budgets.
+1. **A: bounded managed hubs**, with optional D storage packs. Most directly follows the current binary/DB/hub boundary and can cover a lean fixed floor with five paid accounts. The $19 example has little support cushion; a $25–29 Solo experiment would leave more room. An initial offer needs cumulative storage caps, verified object-store/expiry activation and honest backup/recovery scope; implemented opt-ins do not establish deployed capacity or the modeled 30-day retention policy. R2 production use remains gated by provider/account acceptance, alongside explicit cumulative DB and backup budgets.
 2. **B: human seats with a hub minimum**, if five-human teams value managed coordination enough to sustain $45–49 bills. It avoids per-agent friction while keeping aggregate usage controls; validate human identity semantics and support demand before treating seats as the billing record.
 3. **E: BYOH plus optional network services**, as a later network product. It aligns strongly with common self-hosting, but requires federation/relay/OAuth design and actual service usage before the low v assumption is credible. D and sponsorship can complement it without making core operation dependent on payment.
 
@@ -339,7 +357,7 @@ Minimum evidence before setting commercial quotas: measure distributions of enve
 --- SUMMARY ---
 
 - Free self-hosting stays central. Hosted value is convenience, public HTTPS/MCP/OAuth operation, reliable delivery, restoreable backups and managed storage; a future network can add optional reachability and discovery.
-- Synthetic schema allocation was about 14.7/19.6/35.2 KB per send at fan-out 2/3/5. Planning allowances are higher; unpruned history and referenced blobs keep accumulating.
+- The original synthetic schema probe and logical allowances remain labeled as such; the 2026-11-07 modernc pairs measure 30.1% to 67.1% live-page savings in selected normal cohorts, with snapshot/callback costs and increased read latency disclosed. Indefinite history and pinned bytes still accumulate.
 - Small dedicated hubs have low infrastructure bills but support/idle capacity set the floor. Remote blobs/direct serving can change heavy-transfer economics; R2 is not integrated today and Fly proxy egress remains chargeable.
 - Strict one-week transfer deletion is new work: existing blob TTL/token expiry does not delete pinned attachments. Permanent 50/250 GB packs need paid-retention and transfer policies.
 - Under the estimated $20 fixed cash floor, bounded hosted Solo/Team, seat and metered examples cover costs at 5–20 customers. Two fixed founder hours raise the floor to $140 and remove several five-customer profit claims.

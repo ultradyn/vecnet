@@ -30,6 +30,12 @@ import (
 // Config holds the hub's tunables. DefaultConfig returns the Global
 // Constraints values of the core-hub plan (PROTOCOL §2.2, §6, §16).
 type Config struct {
+	// IdempotencyWindow keeps send keys for at least 24 h; an explicit zero
+	// keeps them forever. DefaultConfig marks the field set so assigning zero
+	// disables expiry. In literal Configs, zero without Set uses the default.
+	IdempotencyWindow    time.Duration
+	IdempotencyWindowSet bool
+
 	// PreferenceBootstrap captures explicit nonsecret flag/env provenance.
 	PreferenceBootstrap        map[string]prefs.Effective
 	PreferencePolicyGeneration string // immutable deployment policy identity
@@ -38,6 +44,25 @@ type Config struct {
 	// DeliveryReferences enables new reference writes; the dual reader is always active.
 	// Leave false for deployment stage 1. Once enabled, replay bodies stay immutable.
 	DeliveryReferences bool
+
+	// Event retention is independently enabled for staged rollout. Explicit
+	// PruneEventSlice calls still execute one bounded slice for maintenance.
+	EventRetentionEnabled   bool
+	AckedEventRetention     time.Duration
+	MessageHistoryRetention time.Duration
+	ArchiveMode             bool
+	UnackedEventRetention   time.Duration
+	EventRetentionLimits    eventlog.RetentionLimits
+	RetentionSweepHourUTC   int // nightly activation schedule; DefaultConfig uses 02:00 UTC
+
+	// DefaultConfig marks AckedEventRetention as set, so assigning zero disables
+	// pruning. Literal Configs can mark an explicit zero here; without this bit
+	// a zero duration is unset. Nonzero durations are always explicit.
+	AckedEventRetentionSet bool
+
+	// Physical maintenance is independently opt-in; zero pages checkpoints only.
+	StorageMaintenanceEnabled bool
+	StorageMaintenance        store.MaintenanceOptions
 
 	// Online backfill is independently opt-in; zero limits use defaults.
 	BackfillEnabled    bool
@@ -76,17 +101,23 @@ type Config struct {
 // DefaultConfig returns the plan's defaults; PublicURL and DataDir are empty.
 func DefaultConfig() Config {
 	return Config{
-		DefaultMaxDepth: 32,
-		CreatesPerHour:  DefaultCreatesPerHour,
-		DefaultTTL:      24 * time.Hour,
-		MaxExpiry:       DefaultMaxExpiry,
-		ThreadBudget:    500,
-		TextCap:         4096,
-		SendsPerMin:     60,
-		ThreadsPerHour:  20,
-		BlobTokenTTL:    7 * 24 * time.Hour,
-		BlobBackend:     "disk",
-		R2:              R2Config{ChecksumProfile: "sha256", StorageQuotaBytes: 5 << 30},
+		IdempotencyWindow:     IdempotencyWindow,
+		IdempotencyWindowSet:  true,
+		DefaultMaxDepth:       32,
+		AckedEventRetention:   7 * 24 * time.Hour,
+		RetentionSweepHourUTC: 2,
+		CreatesPerHour:        DefaultCreatesPerHour,
+		DefaultTTL:            24 * time.Hour,
+		MaxExpiry:             DefaultMaxExpiry,
+		ThreadBudget:          500,
+		TextCap:               4096,
+		SendsPerMin:           60,
+		ThreadsPerHour:        20,
+		BlobTokenTTL:          7 * 24 * time.Hour,
+
+		AckedEventRetentionSet: true,
+		BlobBackend:            "disk",
+		R2:                     R2Config{ChecksumProfile: "sha256", StorageQuotaBytes: 5 << 30},
 
 		AvatarChangesPerHour: DefaultAvatarChangesPerHour,
 
@@ -137,6 +168,13 @@ type Hub struct {
 	// activity (GET /v1/admin/activity). The zero value is ready.
 	Activity ActivityFeed
 
+	retentionMu          sync.Mutex
+	retentionLast        EventRetentionStatus
+	historyRetentionLast HistoryRetentionStatus
+
+	maintenanceMu   sync.Mutex
+	maintenanceLast store.MaintenanceResult
+
 	backfillMu   sync.Mutex
 	backfillLast BackfillProgress
 
@@ -177,6 +215,18 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	if db == nil {
 		return nil, errors.New("hub: nil store")
 	}
+	if err := store.ValidateMaintenanceOptions(cfg.StorageMaintenance); err != nil {
+		return nil, err
+	}
+	if cfg.UnackedEventRetention < 0 || cfg.EventRetentionLimits.Rows < 0 || cfg.EventRetentionLimits.Bytes < 0 || cfg.EventRetentionLimits.Target < 0 || cfg.RetentionSweepHourUTC < 0 || cfg.RetentionSweepHourUTC > 23 {
+		return nil, errors.New("hub: invalid_retention_config")
+	}
+	if cfg.IdempotencyWindow == 0 && !cfg.IdempotencyWindowSet {
+		cfg.IdempotencyWindow = IdempotencyWindow
+	}
+	if cfg.IdempotencyWindow != 0 && cfg.IdempotencyWindow < IdempotencyWindow {
+		return nil, ErrInvalidIdempotencyWindow
+	}
 	if cfg.DataDir == "" {
 		return nil, errors.New("hub: Config.DataDir is required")
 	}
@@ -209,8 +259,14 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	if err := h.loadIdentity(context.Background()); err != nil {
 		return nil, err
 	}
-	h.Preferences, err = newProductionPreferences(db, cfg, now)
+	h.Preferences, err = newProductionPreferences(h)
 	if err != nil {
+		return nil, err
+	}
+	if err := h.initializeEventRetention(context.Background()); err != nil {
+		return nil, err
+	}
+	if err := h.initializeHistoryRetention(context.Background()); err != nil {
 		return nil, err
 	}
 	if err := h.initR2(); err != nil {

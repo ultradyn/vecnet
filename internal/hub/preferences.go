@@ -54,8 +54,9 @@ type Preferences struct {
 func preferenceError(code string) error { return &prefs.Error{Code: code} }
 
 // preferenceBootstrapSeconds validates the original duration before conversion.
-// Exactly zero retains Config's unset semantics; truncation must never make a
-// nonzero duration look unset or silently change its effective value.
+// Zero is preserved for the caller to interpret: retention uses it to disable
+// expiry, while older Config fields use it as unset. Truncation must never
+// make a nonzero duration look unset or silently change its effective value.
 func preferenceBootstrapSeconds(key string, value time.Duration, min, max int64) (int64, error) {
 	if value == 0 {
 		return 0, nil
@@ -115,6 +116,7 @@ func newPreferencesWithPolicy(db *store.DB, cfg Config, now func() time.Time, po
 	configured := map[string]prefs.Value{
 		"agents.default_max_depth":      prefs.Int(int64(cfg.DefaultMaxDepth)),
 		"agents.thread_budget":          prefs.Int(int64(cfg.ThreadBudget)),
+		"retention.archive_mode":        prefs.Bool(cfg.ArchiveMode),
 		"rates.sends_per_minute":        prefs.Int(int64(cfg.SendsPerMin)),
 		"rates.threads_per_hour":        prefs.Int(int64(cfg.ThreadsPerHour)),
 		"provisioning.creates_per_hour": prefs.Int(int64(cfg.CreatesPerHour)),
@@ -125,6 +127,8 @@ func newPreferencesWithPolicy(db *store.DB, cfg Config, now func() time.Time, po
 		key   string
 		value time.Duration
 	}{
+		{"retention.ack_events", cfg.AckedEventRetention},
+		{"retention.history", cfg.MessageHistoryRetention},
 		{"events.refresh_interval", cfg.EventsRefreshInterval},
 		{"presence.default_ttl", cfg.PresenceTTL},
 		{"presence.session_ttl", cfg.SessionPresenceTTL},
@@ -143,7 +147,7 @@ func newPreferencesWithPolicy(db *store.DB, cfg Config, now func() time.Time, po
 	for key, v := range configured {
 		d, _ := prefs.Lookup(key)
 		n, _ := v.Int64()
-		if v != d.Default && n != 0 {
+		if v != d.Default && (n != 0 || key == "retention.archive_mode" || key == "retention.ack_events" && cfg.AckedEventRetentionSet) {
 			p.bootstrap[key] = prefs.Effective{Value: v, Source: prefs.SourceFlag}
 		}
 	}
@@ -179,13 +183,14 @@ func newPreferencesWithPolicy(db *store.DB, cfg Config, now func() time.Time, po
 		consumerGeneration = policy.preferenceGeneration()
 	}
 	canonical, err := json.Marshal(struct {
-		Bootstrap map[string]prefs.Effective
-		Registry  string
-		Policy    string
-		MaxExpiry int64
-		Installed map[string]bool
-		Consumer  string
-	}{p.bootstrap, prefs.RegistryVersion, cfg.PreferencePolicyGeneration, p.maxExpiry, p.installed, consumerGeneration})
+		Bootstrap          map[string]prefs.Effective
+		Registry           string
+		Policy             string
+		MaxExpiry          int64
+		Installed          map[string]bool
+		Consumer           string
+		HardEventRetention time.Duration
+	}{p.bootstrap, prefs.RegistryVersion, cfg.PreferencePolicyGeneration, p.maxExpiry, p.installed, consumerGeneration, cfg.UnackedEventRetention})
 	if err != nil {
 		return nil, err
 	}
@@ -197,6 +202,24 @@ func newPreferencesWithPolicy(db *store.DB, cfg Config, now func() time.Time, po
 	}
 	p.current.Store(&snapshot)
 	return p, nil
+}
+
+// bindRetentionGeneration runs only during hub construction, before workers or
+// requests can observe Preferences. Retention's persisted bootstrap generation
+// is part of the shared ETag/confirmation domain; returning to the same flags
+// cannot revive an unused preview from an earlier destructive transition.
+func (p *Preferences) bindRetentionGeneration(ctx context.Context, generation uint64) error {
+	if generation == 0 {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:retention:%d", p.digest, generation)))
+	p.digest = hex.EncodeToString(sum[:])
+	snapshot, err := p.LoadSnapshot(ctx, nil)
+	if err != nil {
+		return err
+	}
+	p.current.Store(&snapshot)
+	return nil
 }
 
 func preferenceStartupError(err error) error {
