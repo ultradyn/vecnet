@@ -62,8 +62,9 @@ try {
       await waitFor('retrying dead letters: 3');
       await shot('22-tui-cmd-progress');
     } finally { await clear('stall'); }
-    await waitFor('3 ok, 0 failed');
-    await shot('22-tui-cmd-success');
+    // The completion toast expires on the TUI clock. Capture the frame that
+    // satisfies the wait, before browser rendering can outlast the toast.
+    await shot('22-tui-cmd-success', '3 ok, 0 failed');
   });
   console.log('TUI command line passed: help, completion, history, presence, retry all, unknown command');
 } finally { await cleanBuild(); }

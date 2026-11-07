@@ -143,7 +143,7 @@ async function setup(t: TestContext, o: { idle?: Record<string, string>; clockOf
     hub, dir, stateFile, repo, cfg, clock, log, launcher, requester, bystander, operator,
     get daemon() { return daemon!; },
     fake: () => fakeFor(stateFile),
-    async start(s = {}) { daemon = await startDaemon({ cfg, clock, log, beforeRecordRef: s.beforeRecordRef }); },
+    async start(s = {}) { daemon = await startDaemon({ cfg, clock, log, env: { VECNET_CODEX_BINDINGS: join(dir, 'codex-bindings.json') }, beforeRecordRef: s.beforeRecordRef }); },
     inspect(fn) {
       const ledger = openLedger(join(cfg.state_dir, 'ledger.sqlite'), clock);
       try { return fn(ledger); } finally { ledger.close(); }

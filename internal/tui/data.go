@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
@@ -18,26 +19,40 @@ import (
 // Data is the last snapshot of everything the hub showed this client. A failed
 // load keeps the old value and records the error under its resource key.
 type Data struct {
-	Inbox    opapi.Inbox
-	Threads  opapi.ThreadPage
-	Peers    []opapi.PeerRow
-	Subs     []opapi.Subscription
-	Cuts     opapi.LoopCuts
-	Health   opapi.DeliveryHealth
-	Audit    opapi.AuditPage
-	Counters map[string]int
-	Notices  []envelope.HubNotice // the hub's active notices, oldest first
-	Thread   map[string]*ThreadState
-	Events   []envelope.Event // newest 200, oldest first, for the raw log
-	Errs     map[string]error
+	Inbox   opapi.Inbox
+	Threads opapi.ThreadPage
+	// Mine is GET /v1/admin/threads?participant=<me> (Your Threads). Others is
+	// the same list with exclude_participant=<me> (Other Threads). ThreadsKnown
+	// is set only after a successful unfiltered page, and that page is a
+	// fallback only once the operator's identity is known. The dashboard keeps
+	// Threads.
+	Mine, Others                         opapi.ThreadPage
+	MineKnown, OthersKnown, ThreadsKnown bool
+	Peers                                []opapi.PeerRow
+	Subs                                 []opapi.Subscription
+	Cuts                                 opapi.LoopCuts
+	Health                               opapi.DeliveryHealth
+	Audit                                opapi.AuditPage
+	Counters                             map[string]int
+	Notices                              []envelope.HubNotice // the hub's active notices, oldest first
+	// Prefs is the last successful preferences snapshot. PrefsKnown is set
+	// once a GET has been applied. PrefsNote explains a 404 or 403, which the
+	// preferences screen shows as unavailable rather than as a failed load.
+	Prefs      opapi.Preferences
+	PrefsKnown bool
+	PrefsNote  string
+	Thread     map[string]*ThreadState
+	Events     []envelope.Event // newest 200, oldest first, for the raw log
+	Errs       map[string]error
 }
 
 // ThreadState is one opened thread.
 type ThreadState struct {
-	Detail   opapi.ThreadDetail
-	Messages []envelope.Message
-	Matrix   opapi.Matrix
-	Loading  bool
+	BlobStates map[string]blobwire.State
+	Detail     opapi.ThreadDetail
+	Messages   []envelope.Message
+	Matrix     opapi.Matrix
+	Loading    bool
 
 	// rewind is one past the oldest held message whose reactions changed
 	// since the last load (0: none), and rewinds counts the reaction events
@@ -87,6 +102,7 @@ type (
 		batch opclient.Batch
 		ack   chan<- error
 	}
+	tailAckMsg  struct{}
 	tailDoneMsg struct{ err error }
 )
 
@@ -132,6 +148,10 @@ func (m *Model) expand(tags []string) []string {
 			for _, key := range allKeys {
 				add(key)
 			}
+			if m.Data.Inbox.Me.PeerID != "" {
+				add("mine")
+				add("other")
+			}
 			for id := range m.Data.Thread {
 				add(threadPrefix + id)
 			}
@@ -141,6 +161,13 @@ func (m *Model) expand(tags []string) []string {
 			}
 		default:
 			add(tag)
+			// Your Threads and Other Threads ride with the unfiltered page once
+			// the inbox has named the operator. Before that, the inbox load
+			// starts them once.
+			if tag == "threads" && m.Data.Inbox.Me.PeerID != "" {
+				add("mine")
+				add("other")
+			}
 		}
 	}
 	return keys
@@ -202,7 +229,7 @@ func (m *Model) onLoad(msg loadMsg) tea.Cmd {
 		m.reject(msg.err)
 	case first && isStatus(msg.err, 403):
 		return m.notOperator()
-	case msg.err != nil && m.Conn == ConnLive && !errors.Is(msg.err, context.Canceled):
+	case msg.err != nil && msg.key != "prefs" && m.Conn == ConnLive && !errors.Is(msg.err, context.Canceled):
 		m.Toast("reload "+msg.key+": "+msg.err.Error(), true)
 	}
 	var again tea.Cmd
@@ -213,7 +240,14 @@ func (m *Model) onLoad(msg loadMsg) tea.Cmd {
 		m.settle(msg.key, msg.err)
 	}
 	delete(m.dirty, msg.key)
-	return tea.Batch(again, m.broadcast(Loaded{Key: msg.key, Err: msg.err}))
+	// The first inbox names the operator after the opening thread page was
+	// already requested. One participant-page load follows it. Later thread
+	// reloads include those pages themselves.
+	var follow tea.Cmd
+	if msg.key == "inbox" && msg.err == nil && m.Data.Inbox.Me.PeerID != "" && !m.Data.MineKnown && !m.inflight["mine"] && !m.stopped() {
+		follow = m.Reload("mine", "other")
+	}
+	return tea.Batch(again, follow, m.broadcast(Loaded{Key: msg.key, Err: msg.err}))
 }
 
 // Loaded reaches every screen after a resource's Data changed or failed.
@@ -309,6 +343,13 @@ func (m *Model) onTick() tea.Cmd {
 	if now.Sub(m.lastSlow) >= m.slowEvery && m.Conn == ConnLive {
 		m.lastSlow = now
 		tags := slices.Clone(slowKeys)
+		for id, st := range m.Data.Thread {
+			if slices.ContainsFunc(st.Messages, func(msg envelope.Message) bool {
+				return slices.ContainsFunc(msg.Attachments, func(att envelope.Attachment) bool { return att.BlobID != "" })
+			}) {
+				tags = append(tags, threadPrefix+id)
+			}
+		}
 		for key := range m.Data.Errs {
 			tags = append(tags, key)
 		}
@@ -324,12 +365,53 @@ func (m *Model) fetch(key string) tea.Cmd {
 	case "inbox":
 		return func() tea.Msg {
 			v, err := api.Inbox(ctx, opapi.InboxQuery{Limit: pageLimit})
-			return loadMsg{key: key, err: err, hubNow: v.Now, at: now(), apply: func(m *Model) { m.Data.Inbox = v }}
+			return loadMsg{key: key, err: err, hubNow: v.Now, at: now(), apply: func(m *Model) {
+				m.Data.Inbox = v
+				for _, st := range m.Data.Thread {
+					if st.BlobStates == nil {
+						st.BlobStates = map[string]blobwire.State{}
+					}
+					for id, state := range v.BlobStates {
+						st.BlobStates[id] = state
+					}
+				}
+			}}
 		}
 	case "threads":
 		return func() tea.Msg {
 			v, err := api.Threads(ctx, opapi.ThreadQuery{Limit: pageLimit})
-			return loadMsg{key: key, err: err, apply: func(m *Model) { m.Data.Threads = v }}
+			return loadMsg{key: key, err: err, apply: func(m *Model) {
+				m.Data.Threads = v
+				m.Data.ThreadsKnown = true
+			}}
+		}
+	case "mine":
+		me := m.Data.Inbox.Me.PeerID
+		if me == "" {
+			return nil
+		}
+		return func() tea.Msg {
+			v, err := api.Threads(ctx, opapi.ThreadQuery{Participant: me, Limit: pageLimit})
+			return loadMsg{key: key, err: err, apply: func(m *Model) {
+				m.Data.Mine = v
+				m.Data.MineKnown = true
+			}}
+		}
+	case "other":
+		me := m.Data.Inbox.Me.PeerID
+		if me == "" {
+			return nil
+		}
+		limit := m.OtherLimit
+		if limit <= 0 {
+			limit = otherPage
+		}
+		return func() tea.Msg {
+			v, err := api.Threads(ctx, opapi.ThreadQuery{ExcludeParticipant: me, Limit: limit})
+			return loadMsg{key: key, err: err, apply: func(m *Model) {
+				m.Data.Others = v
+				m.Data.OthersKnown = true
+			}}
 		}
 	case "peers":
 		return func() tea.Msg {
@@ -370,6 +452,31 @@ func (m *Model) fetch(key string) tea.Cmd {
 			}
 			return loadMsg{key: key, err: err, apply: func(m *Model) { m.Data.Notices = v }}
 		}
+	case "prefs":
+		return func() tea.Msg {
+			v, err := api.Preferences(ctx)
+			// Forbidden and older hubs have no preferences view to edit. Say so
+			// without a reload error, and do not PATCH.
+			switch {
+			case isStatus(err, 404):
+				return loadMsg{key: key, apply: func(m *Model) {
+					m.Data.Prefs = opapi.Preferences{}
+					m.Data.PrefsKnown = true
+					m.Data.PrefsNote = "This hub has no preferences API."
+				}}
+			case isStatus(err, 403):
+				return loadMsg{key: key, apply: func(m *Model) {
+					m.Data.Prefs = opapi.Preferences{}
+					m.Data.PrefsKnown = true
+					m.Data.PrefsNote = "This credential cannot read preferences."
+				}}
+			}
+			return loadMsg{key: key, err: err, apply: func(m *Model) {
+				m.Data.Prefs = v
+				m.Data.PrefsKnown = true
+				m.Data.PrefsNote = ""
+			}}
+		}
 	}
 	if id, ok := strings.CutPrefix(key, threadPrefix); ok {
 		return m.fetchThread(key, id)
@@ -395,23 +502,50 @@ func (m *Model) fetchThread(key, id string) tea.Cmd {
 	if from > 0 {
 		after = st.Messages[from-1].MessageID
 	}
+	// Capture references before the command leaves the model goroutine. An
+	// incremental history page cannot project state for older, read messages.
+	refs := map[string]string{}
+	for _, msg := range st.Messages {
+		for _, att := range msg.Attachments {
+			if att.BlobID != "" {
+				refs[att.BlobID] = att.SHA256
+			}
+		}
+	}
 	api, ctx, now := m.API, m.ctx, m.Now
 	return func() tea.Msg {
 		detail, err := api.Thread(ctx, id)
 		if err != nil {
 			return loadMsg{key: key, err: err}
 		}
+		states := map[string]blobwire.State{}
 		var messages []envelope.Message
 		for cursor, page := after, 0; page < maxPages; page++ {
 			h, err := api.History(ctx, id, cursor, pageLimit)
 			if err != nil {
 				return loadMsg{key: key, err: err}
 			}
+			for id, state := range h.BlobStates {
+				states[id] = state
+			}
 			messages = append(messages, h.Messages...)
 			if h.NextAfter == nil || *h.NextAfter == "" {
 				break
 			}
 			cursor = *h.NextAfter
+		}
+		for id, sha := range refs {
+			if _, fresh := states[id]; fresh {
+				continue
+			}
+			state, err := api.BlobStatus(ctx, sha, id)
+			if err != nil {
+				// One status blip must not drop the history page or the
+				// sibling refs. The row stays, with an unknown projection.
+				states[id] = blobwire.State{State: "unknown"}
+				continue
+			}
+			states[id] = state
 		}
 		var matrix opapi.Matrix
 		for cursor, page := "", 0; page < maxPages; page++ {
@@ -430,6 +564,12 @@ func (m *Model) fetchThread(key, id string) tea.Cmd {
 		return loadMsg{key: key, hubNow: detail.Now, at: now(), apply: func(m *Model) {
 			st := m.Data.Thread[id]
 			st.Detail, st.Matrix, st.Loading = detail, matrix, false
+			if st.BlobStates == nil {
+				st.BlobStates = map[string]blobwire.State{}
+			}
+			for id, state := range states {
+				st.BlobStates[id] = state
+			}
 			if st.rewinds == rewinds {
 				st.rewind = 0
 			}
@@ -481,7 +621,8 @@ func (m *Model) startTail() tea.Cmd {
 			}
 		}
 		status := func(s string) { send(tailStatusMsg{status: s}) }
-		return tailDoneMsg{err: api.Tail(ctx, handle, status)}
+		accepted := func(string) { send(tailAckMsg{}) }
+		return tailDoneMsg{err: api.TailWithAck(ctx, handle, status, accepted)}
 	}
 }
 
@@ -523,7 +664,15 @@ func (m *Model) onTailStatus(status string) tea.Cmd {
 func (m *Model) onTailBatch(msg tailBatchMsg) tea.Cmd {
 	tags := []string{}
 	for _, ev := range msg.batch.Events {
-		tags = append(tags, opapi.Tags(ev)...)
+		eventTags := opapi.Tags(ev)
+		tags = append(tags, eventTags...)
+		if ev.Type == "delivery" {
+			for _, tag := range eventTags {
+				if strings.HasPrefix(tag, threadPrefix) {
+					m.accepting[tag] = true
+				}
+			}
+		}
 		m.remember(ev)
 		switch ev.Type {
 		case "reaction":
@@ -552,6 +701,18 @@ func (m *Model) onTailBatch(msg tailBatchMsg) tea.Cmd {
 		tags = append(tags, TagAll)
 	}
 	return m.startLoads(tags, msg.ack)
+}
+
+// onTailAck corrects snapshots loaded before the ack accepted our deliveries.
+// The hub sends us no event for our own ack. Keep tags across refused acks:
+// the next successful one covers all earlier deliveries too.
+func (m *Model) onTailAck() tea.Cmd {
+	tags := make([]string, 0, len(m.accepting))
+	for tag := range m.accepting {
+		tags = append(tags, tag)
+	}
+	clear(m.accepting)
+	return m.startLoads(tags, nil)
 }
 
 // rewindTo marks a held message whose reactions changed, so the thread's next
@@ -585,6 +746,14 @@ func (st *ThreadState) rewindFrom(i int) {
 
 // remember keeps the newest events. A replay after a failed ack is not news.
 func (m *Model) remember(ev envelope.Event) {
+	for _, st := range m.Data.Thread {
+		if st.BlobStates == nil {
+			st.BlobStates = map[string]blobwire.State{}
+		}
+		for id, state := range ev.BlobStates {
+			st.BlobStates[id] = state
+		}
+	}
 	if slices.ContainsFunc(m.Data.Events, func(have envelope.Event) bool { return have.Cursor == ev.Cursor }) {
 		return
 	}

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { HubError } from '../../hub-client/src/errors.ts';
 import type { Clock, HubApi, Log } from '../../hub-client/src/ports.ts';
 import type { Delivery, SendRequest } from '../../hub-client/src/wire.ts';
 import { MAX_TURN_INPUT_BYTES } from './backend.ts';
@@ -325,7 +326,16 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
       if (!store.get(`turn:${hash(ev.turnId)}`) && reply.fullText !== undefined) {
         try {
           const blob = await deps.hub.putBlob(Buffer.from(reply.fullText), 'text/markdown', controller?.signal);
-          reply.req.attachments = [{ ...blob, media_type: 'text/markdown', name: `turn-${n}.md` }];
+          // SendRequest attachments omit server-owned proof. sha256_verified and integrity stay on the BlobRef only.
+          const attachment: NonNullable<SendRequest['attachments']>[number] = {
+            sha256: blob.sha256, size: blob.size, media_type: 'text/markdown', name: `turn-${n}.md`,
+          };
+          if (blob.blob_id) {
+            attachment.blob_id = blob.blob_id;
+            attachment.expires_at = blob.expires_at ?? null;
+          }
+          if (blob.retention_class) attachment.retention_class = blob.retention_class;
+          reply.req.attachments = [attachment];
         } catch { log.warn('turn text attachment upload failed', { jobId }); }
       }
       let fresh = false;
@@ -548,10 +558,17 @@ export function createLane(initial: JobRow, deps: LaneDeps): SessionLane {
           // The hub appends its spill after user attachments; prefer the last
           // matching name so a requester cannot shadow it with a same-name file.
           const spill = attachments.findLast(a => a.name === 'message.md' && a.media_type === 'text/markdown');
-          if (!spill?.blob_url) throw new Error('spilled input attachment missing');
-          const bytes = await deps.hub.fetchBlob(spill.blob_url, { maxBytes: 256 * 1024, signal: controller?.signal });
-          if (bytes.length > 256 * 1024) throw new Error('spilled input exceeds limit');
-          text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+          try {
+            let bytes: Uint8Array;
+            if (spill?.blob_id) bytes = await deps.hub.fetchBlob({ sha256: spill.sha256, blob_id: spill.blob_id }, { maxBytes: 256 * 1024, signal: controller?.signal });
+            else if (spill?.blob_url) bytes = await deps.hub.fetchBlob(spill.blob_url, { maxBytes: 256 * 1024, signal: controller?.signal });
+            else throw new Error('spilled input attachment missing');
+            if (bytes.length > 256 * 1024) throw new Error('spilled input exceeds limit');
+            text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+          } catch (err) {
+            if (!(err instanceof HubError) || (err.code !== 'blob_expired' && err.code !== 'blob_purged')) throw err;
+            text = `${m.content.text}\n\n[attachment ${err.code}]`;
+          }
           attachments = attachments.filter(a => a !== spill);
         }
         const formatted = formatRelayed({ role: decision.role, name: m.sender_info?.name ?? deps.dir.name(m.sender), peerId: m.sender, messageId: m.message_id, text, attachments });

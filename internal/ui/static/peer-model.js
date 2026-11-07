@@ -45,6 +45,7 @@ export function peerFacts(row) {
     name: str(p.name),
     kind,
     disabled: !!r.disabled,
+    archivedAt: str(r.archived_at) || null,
     credential: str(r.credential) || 'none',
     principalId: str(r.principal_id),
     createdBy: str(p.created_by),
@@ -118,4 +119,63 @@ export function peerThreads(page, peerId) {
       return at === bt ? 0 : at < bt ? 1 : -1;
     });
   return { rows, more: !!page.next };
+}
+
+// recentThread is the newest-activity thread on that page that both this peer
+// and the operator (me) are in, or null.
+export function recentThread(page, peerId, me) {
+  if (!me) return null;
+  return peerThreads(page, peerId).rows.find(r => (r.thread.participants || []).includes(me) && str(r.thread.thread_id)) || null;
+}
+
+// messageDraft is what New message opens with for this peer: the peer as the
+// one recipient, at wake_idle for a Grok Bot (a wake would start a run while
+// it is busy; wake_idle waits for idle) and at the composer's wake otherwise.
+export function messageDraft(facts) {
+  return { recipients: [facts.id], priority: facts.kind === 'grokbot' ? 'wake_idle' : 'wake' };
+}
+
+// peerActions is the peer header's two message actions, or null when the
+// operator cannot message this id: a source, the operator itself, or a peer
+// row that has not loaded. open is the quick link: the operator's newest
+// thread with the peer (state 'thread'), else New message with the draft
+// (state 'compose'); before the threads page answers it is 'loading', or
+// 'error' when that read failed. compose is New message, always present.
+// more says the page was not the whole list, so "no thread" means none among
+// the newest.
+export function peerActions(facts, page, me, error) {
+  if (!facts || !facts.id || facts.kind === 'source' || facts.kind === 'operator' || facts.id === me) return null;
+  const draft = messageDraft(facts);
+  const compose = { href: '#new', draft };
+  if (!page) return { open: { state: error ? 'error' : 'loading', error: error || null }, compose };
+  const r = recentThread(page, facts.id, me);
+  if (r) return { open: { state: 'thread', href: '#thread/' + r.thread.thread_id, thread: r.thread, at: str(r.last_message_at) || null }, compose };
+  return { open: { state: 'compose', href: '#new', draft, more: !!page.next }, compose };
+}
+
+// INVITE_STATES are the invite states the card shows (GET
+// /v1/admin/peers/{id}/enrol-token); claimed and linked mean no card.
+const INVITE_STATES = ['pending', 'expired', 'revoked', 'none'];
+// NO_TOKEN_KINDS never hold an enrolment token: a dot links with a code, the
+// operator and a source are not invited.
+const NO_TOKEN_KINDS = ['dot', 'operator', 'source'];
+
+// inviteCard is the peer page's Invite card, or null for none. It shows only
+// while a peer that enrols with a token holds no live credential (its own or
+// its principal's: facts.credential), and never for a kind that holds no
+// token, nor for a Grok Bot reached by its route (it links instead; routes
+// is peerRoutes, null until loaded). status is the invite-status answer, or
+// null before it lands ({state: 'loading'}). canRevoke: only a pending
+// invite has a live token to withdraw.
+export function inviteCard(facts, status, routes) {
+  if (!facts || !facts.id || NO_TOKEN_KINDS.includes(facts.kind) || facts.credential === 'active') return null;
+  if (facts.kind === 'grokbot' && (!Array.isArray(routes) || routes.some(r => r && r.kind === 'grokbot'))) return null;
+  const card = { state: 'loading', canRevoke: false, expiresAt: null, revokedAt: null, disabled: !!facts.disabled };
+  if (!status || status.peer_id !== facts.id) return card;
+  if (!INVITE_STATES.includes(status.state)) return null;
+  card.state = status.state;
+  card.canRevoke = status.state === 'pending';
+  if (status.state === 'pending' || status.state === 'expired') card.expiresAt = str(status.expires_at) || null;
+  if (status.state === 'revoked') card.revokedAt = str(status.revoked_at) || null;
+  return card;
 }

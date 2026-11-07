@@ -11,8 +11,6 @@ import (
 	"time"
 )
 
-var errHookOutputTooLarge = errors.New("hook output exceeds the atomic pipe write size")
-
 // hookAtomicPipe returns an all-or-nothing writer when w is a native pipe.
 // A blocking write larger than PIPE_BUF can emit a prefix and then stall on
 // a reader that stopped; the hook would exit at its deadline and leave a

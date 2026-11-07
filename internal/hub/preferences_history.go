@@ -16,7 +16,7 @@ const historyProjection = "history_retention_v1"
 
 // HistoryRetentionAdapter composes the existing event adapter with the history
 // consumer. The shared service alone validates, signs and commits confirmations.
-// R2's blob policy remains unavailable until its own adapter is installed.
+// Production composes this with R2's independently installed blob policy.
 type HistoryRetentionAdapter struct{ Hub *Hub }
 
 func historyEventPatch(p prefs.Patch) prefs.Patch {

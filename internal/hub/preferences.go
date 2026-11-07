@@ -81,11 +81,15 @@ func preferenceBootstrapSeconds(key string, value time.Duration, min, max int64)
 // startup load accepts their stored rows); every other gated key stays
 // unavailable and writes to it fail closed.
 func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ...string) (*Preferences, error) {
+	return newPreferencesWithPolicy(db, cfg, now, nil, installed...)
+}
+
+func newPreferencesWithPolicy(db *store.DB, cfg Config, now func() time.Time, policy PreferencePreviewPolicy, installed ...string) (*Preferences, error) {
 	maxExpiry, err := preferenceBootstrapSeconds("agents.max_expiry", cfg.MaxExpiry, 1, prefs.MaxExpirySeconds)
 	if err != nil {
 		return nil, err
 	}
-	p := &Preferences{db: db, now: now, bootstrap: map[string]prefs.Effective{}, maxExpiry: maxExpiry, installed: map[string]bool{}, subscribers: map[chan uint64]struct{}{}}
+	p := &Preferences{db: db, now: now, bootstrap: map[string]prefs.Effective{}, maxExpiry: maxExpiry, installed: map[string]bool{}, subscribers: map[chan uint64]struct{}{}, Policy: policy}
 	if err := p.loadPreviewKey(); err != nil {
 		return nil, err
 	}
@@ -152,7 +156,7 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 		if err != nil {
 			return nil, err
 		}
-		if !d.Editable && !p.installed[key] {
+		if !p.editable(d) {
 			return nil, preferenceError(prefs.CodeUnavailable)
 		}
 		if e.Source != prefs.SourceFlag {
@@ -174,14 +178,19 @@ func newPreferences(db *store.DB, cfg Config, now func() time.Time, installed ..
 		return nil, err
 	}
 	// encoding/json orders map keys, producing a canonical bounded scalar input.
+	consumerGeneration := ""
+	if policy, ok := p.Policy.(interface{ preferenceGeneration() string }); ok {
+		consumerGeneration = policy.preferenceGeneration()
+	}
 	canonical, err := json.Marshal(struct {
 		Bootstrap          map[string]prefs.Effective
 		Registry           string
 		Policy             string
 		MaxExpiry          int64
 		Installed          map[string]bool
+		Consumer           string
 		HardEventRetention time.Duration
-	}{p.bootstrap, prefs.RegistryVersion, cfg.PreferencePolicyGeneration, p.maxExpiry, p.installed, cfg.UnackedEventRetention})
+	}{p.bootstrap, prefs.RegistryVersion, cfg.PreferencePolicyGeneration, p.maxExpiry, p.installed, consumerGeneration, cfg.UnackedEventRetention})
 	if err != nil {
 		return nil, err
 	}

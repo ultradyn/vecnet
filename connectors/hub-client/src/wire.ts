@@ -1,6 +1,10 @@
 export type Priority = "wake" | "wake_idle" | "hold";
 export type MessageKind = "message" | "approval_request" | "approval_response" | "job_status";
-export interface Attachment { sha256: string; size: number; media_type: string; name?: string; origin_url?: string; blob_url?: string }
+export interface Attachment {
+  sha256: string; size: number; media_type: string; name?: string; origin_url?: string; blob_url?: string;
+  blob_id?: string; retention_class?: string; expires_at?: string | null;
+  sha256_verified?: boolean; integrity?: { algorithm: string; value: string; verified: boolean };
+}
 export interface Loop { depth: number; max_depth: number; expires_at: string; sender_chain: string[] }
 export interface ApprovalRequest { approval_id: string; question: string; options: string[]; expires_at: string; escalate_to_operator?: boolean }
 export interface ApprovalResponse { approval_id: string; decision: string; reason?: string }

@@ -10,14 +10,18 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
+	"github.com/XertroV/vecnet/internal/prefs"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -35,6 +39,16 @@ func wireFixture(v reflect.Value) {
 	case reflect.Struct:
 		for i := 0; i < v.NumField(); i++ {
 			wireFixture(v.Field(i))
+		}
+		// Keep filling every field, then satisfy the trust-aware wire marshalers.
+		if v.Type() == reflect.TypeFor[blobwire.Integrity]() {
+			v.FieldByName("Algorithm").SetString("sha256")
+			v.FieldByName("Value").SetString(strings.Repeat("a", 64))
+		}
+		if v.Type() == reflect.TypeFor[blobwire.State]() {
+			v.FieldByName("State").SetString("available")
+			v.FieldByName("RetentionClass").SetString("1d")
+			v.FieldByName("ExpiresAt").Elem().SetString("2030-01-02T03:04:05.006Z")
 		}
 	case reflect.String:
 		v.SetString("fixture &/+? ü")
@@ -76,6 +90,7 @@ func TestReadsDecode(t *testing.T) {
 		}, nil},
 		{"thread", "GET", "/v1/admin/threads/thr_a", "", fixture[opapi.ThreadDetail](), func(c *Client) (any, error) { return c.Thread(ctx, "thr_a") }, nil},
 		{"history", "GET", "/v1/threads/thr_a/messages", "after=msg_a&limit=7", fixture[opapi.History](), func(c *Client) (any, error) { return c.History(ctx, "thr_a", "msg_a", 7) }, nil},
+		{"blob-status", "GET", "/v1/blobs/sha_a/status", "blob_id=blo_a", fixture[blobwire.State](), func(c *Client) (any, error) { return c.BlobStatus(ctx, "sha_a", "blo_a") }, nil},
 		{"matrix", "GET", "/v1/admin/threads/thr_a/deliveries", "after=msg_a&limit=7", fixture[opapi.Matrix](), func(c *Client) (any, error) { return c.Matrix(ctx, "thr_a", "msg_a", 7) }, nil},
 		{"peers", "GET", "/v1/admin/peers", "", fixture[[]opapi.PeerRow](), func(c *Client) (any, error) { return c.Peers(ctx) }, func(v any) any { return map[string]any{"peers": v} }},
 		{"cuts", "GET", "/v1/admin/loop-cuts", "hours=48", fixture[opapi.LoopCuts](), func(c *Client) (any, error) { return c.LoopCuts(ctx, 48) }, nil},
@@ -104,7 +119,9 @@ func TestReadsDecode(t *testing.T) {
 				if tt.wrap != nil {
 					value = tt.wrap(value)
 				}
-				_ = json.NewEncoder(w).Encode(value)
+				if err := json.NewEncoder(w).Encode(value); err != nil {
+					t.Errorf("encode wire fixture: %v", err)
+				}
 			}))
 			defer srv.Close()
 			got, err := tt.call(New(srv.URL+"/", "secret"))
@@ -379,6 +396,10 @@ func TestUploadSendsBytesAndType(t *testing.T) {
 				wantType = "application/octet-stream"
 			}
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/blob-capabilities" {
+					w.WriteHeader(404)
+					return
+				}
 				if r.Method != "PUT" || r.URL.RequestURI() != "/v1/blobs?ttl=86400" {
 					t.Errorf("upload request = %s %s", r.Method, r.URL)
 				}
@@ -424,6 +445,10 @@ func TestUploadTooLarge(t *testing.T) {
 
 func TestUploadEmpty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/blob-capabilities" {
+			w.WriteHeader(404)
+			return
+		}
 		if r.ContentLength != 0 || r.Header.Get("Content-Length") != "0" || len(r.TransferEncoding) != 0 {
 			t.Errorf("empty upload length=%d header=%q transfer=%v", r.ContentLength, r.Header.Get("Content-Length"), r.TransferEncoding)
 		}
@@ -444,6 +469,10 @@ func TestUploadEmpty(t *testing.T) {
 
 func TestUploadContextCancellation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/blob-capabilities" {
+			w.WriteHeader(404)
+			return
+		}
 		t.Error("a cancelled upload reached the server")
 	}))
 	defer srv.Close()
@@ -457,6 +486,10 @@ func TestUploadContextCancellation(t *testing.T) {
 
 func TestUploadDoesNotFollowRedirects(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/blob-capabilities" {
+			w.WriteHeader(404)
+			return
+		}
 		if r.URL.Path != "/v1/blobs" {
 			t.Error("upload followed an authenticated redirect")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -600,5 +633,323 @@ func TestTailReportsRestarting(t *testing.T) {
 	}
 	if batches != 1 {
 		t.Errorf("handled %d batches, want only the live page", batches)
+	}
+}
+
+type spoolCancelReader struct {
+	read func([]byte) (int, error)
+}
+
+func (r spoolCancelReader) Read(p []byte) (int, error) { return r.read(p) }
+
+func TestR2UploadSeekableAndSpoolCleanup(t *testing.T) {
+	const sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+	const sum = "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0="
+	const id = "blo_00000000000000000000000001"
+	for _, kind := range []string{"seekable", "spool", "put-failure", "size-mismatch", "canceled", "read-failure"} {
+		t.Run(kind, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("TMPDIR", tmp)
+			completed, puts, sends := 0, 0, 0
+			direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				puts++
+				if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+					t.Error("direct credential leak")
+				}
+				b, _ := io.ReadAll(r.Body)
+				if string(b) != "abc" || r.ContentLength != 3 {
+					t.Error("wrong direct body")
+				}
+				if kind == "put-failure" {
+					w.WriteHeader(500)
+					return
+				}
+				w.WriteHeader(200)
+			}))
+			defer direct.Close()
+			yes, no := true, false
+			ref := blobwire.Ref{BlobID: id, SHA256: sha, SHA256Verified: &yes, Integrity: &blobwire.Integrity{Algorithm: "sha256", Value: sha, Verified: true}, Size: 3, RetentionClass: "keep"}
+			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer fake" {
+					t.Error("missing hub authentication")
+				}
+				switch r.URL.Path {
+				case "/v1/blob-capabilities":
+					json.NewEncoder(w).Encode(map[string]any{"backend": "r2", "max_size": 25 << 20, "checksum_profile": "sha256", "download_origins": []string{direct.URL}})
+				case "/v1/blobs/uploads":
+					pending := ref
+					pending.SHA256Verified = &no
+					pending.Integrity = &blobwire.Integrity{Algorithm: "sha256", Value: sha}
+					json.NewEncoder(w).Encode(blobwire.UploadGrant{Ref: pending, Upload: blobwire.Request{Method: "PUT", URL: direct.URL + "/object?private=signature", ExpiresAt: time.Now().Add(299 * time.Second).Format(time.RFC3339Nano), Headers: map[string]string{"Content-Length": "3", "Content-Type": "application/octet-stream", "Content-Disposition": "attachment", "Cache-Control": "private, no-store", "If-None-Match": "*", "X-Amz-Checksum-Sha256": sum, "X-Amz-Meta-Vecnet-Checksum-Profile": "sha256", "X-Amz-Meta-Vecnet-Checksum": sum}}})
+				case "/v1/messages":
+					sends++
+					raw, err := io.ReadAll(r.Body)
+					if err != nil || envelope.Validate("sendRequest", raw) != nil {
+						w.WriteHeader(http.StatusBadRequest)
+						io.WriteString(w, `{"error":{"code":"invalid_body","message":"invalid send reference"}}`)
+						return
+					}
+					var req envelope.SendRequest
+					if json.Unmarshal(raw, &req) != nil || len(req.Attachments) != 1 {
+						t.Error("missing send attachment")
+					} else {
+						want := envelope.Attachment{BlobID: id, SHA256: sha, Size: 3, MediaType: "text/plain", Name: "report.txt", RetentionClass: "keep"}
+						if !reflect.DeepEqual(req.Attachments[0], want) {
+							t.Error("send reference fields changed")
+						}
+					}
+					io.WriteString(w, `{}`)
+				case "/v1/blobs/uploads/" + id + "/complete":
+					completed++
+					json.NewEncoder(w).Encode(ref)
+				default:
+					t.Error("R2 fell back to hub byte transfer")
+					w.WriteHeader(500)
+				}
+			}))
+			defer hub.Close()
+			var r io.Reader = strings.NewReader("abc")
+			if kind != "seekable" {
+				r = struct{ io.Reader }{r}
+			}
+			if kind == "size-mismatch" {
+				r = struct{ io.Reader }{strings.NewReader("abcd")}
+			}
+			if kind == "read-failure" {
+				r = iotest.ErrReader(errors.New("private=signature"))
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if kind == "canceled" {
+				reads := 0
+				r = spoolCancelReader{read: func(p []byte) (int, error) {
+					entries, err := os.ReadDir(tmp)
+					if err != nil || len(entries) != 1 {
+						t.Fatal("cancellation did not reach an existing spool")
+					}
+					info, err := entries[0].Info()
+					if err != nil || info.Mode().Perm() != 0600 {
+						t.Fatal("spool is not private")
+					}
+					reads++
+					if reads == 1 {
+						return copy(p, "a"), nil
+					}
+					if info.Size() != 1 {
+						t.Fatal("cancellation must occur after bytes are spooled")
+					}
+					cancel()
+					return 0, ctx.Err()
+				}}
+			}
+			var progress []int64
+			att, err := New(hub.URL, "fake").UploadWithProgress(ctx, r, 3, "text/plain", "report.txt", func(n int64) { progress = append(progress, n) })
+			if kind == "seekable" || kind == "spool" {
+				if err != nil || att.BlobID != id || att.Integrity == nil || !att.Integrity.Verified || completed != 1 || puts != 1 {
+					t.Fatalf("R2 upload failed: %v", err)
+				}
+				// Send the verified upload result, also carrying legacy display metadata.
+				att.BlobURL = "/v1/blobs/" + sha
+				attachments := []envelope.Attachment{att}
+				_, sendErr := New(hub.URL, "fake").Send(ctx, envelope.SendRequest{IdempotencyKey: "r2-send", Recipients: []string{"peer_00000000000000000000000001"}, Priority: "hold", Content: envelope.SendContent{Text: "file"}, Attachments: attachments})
+				if sendErr != nil || sends != 1 {
+					t.Fatalf("schema-validating send failed: %v", sendErr)
+				}
+				if !reflect.DeepEqual(attachments[0], att) || att.SHA256Verified == nil || !*att.SHA256Verified || att.Integrity == nil || !att.Integrity.Verified {
+					t.Fatal("Send mutated upload proof")
+				}
+				if len(progress) == 0 || progress[len(progress)-1] != 3 {
+					t.Fatal("missing PUT progress")
+				}
+				for _, n := range progress {
+					if n > 3 {
+						t.Fatal("counted hash or spool bytes")
+					}
+				}
+			} else if err == nil || completed != 0 {
+				t.Fatal("unsafe failed completion")
+			}
+			if kind == "canceled" && (!errors.Is(err, context.Canceled) || puts != 0 || completed != 0) {
+				t.Fatal("canceled spool reached transfer or lost cancellation")
+			}
+			if kind == "read-failure" && strings.Contains(err.Error(), "private=signature") {
+				t.Error("source error leaked transfer information")
+			}
+			entries, _ := os.ReadDir(tmp)
+			if len(entries) != 0 {
+				t.Fatal("spool file leaked")
+			}
+		})
+	}
+}
+
+func TestR2UploadDoesNotDowngradeWhenCapabilitiesDisappears(t *testing.T) {
+	const sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+	const sum = "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0="
+	const id = "blo_00000000000000000000000001"
+	for _, kind := range []string{"seekable", "spool"} {
+		t.Run(kind, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("TMPDIR", tmp)
+			caps, hubBytes, puts, completes := 0, 0, 0, 0
+			direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				puts++
+				if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+					t.Error("direct credential leak")
+				}
+				b, _ := io.ReadAll(r.Body)
+				if string(b) != "abc" {
+					t.Error("direct body changed")
+				}
+				w.WriteHeader(200)
+			}))
+			defer direct.Close()
+			yes, no := true, false
+			ref := blobwire.Ref{BlobID: id, SHA256: sha, SHA256Verified: &yes, Integrity: &blobwire.Integrity{Algorithm: "sha256", Value: sha, Verified: true}, Size: 3, RetentionClass: "keep"}
+			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/v1/blob-capabilities":
+					caps++
+					if caps > 1 {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					json.NewEncoder(w).Encode(map[string]any{"backend": "r2", "max_size": 25 << 20, "checksum_profile": "sha256", "download_origins": []string{direct.URL}})
+				case r.URL.Path == "/v1/blobs" && r.Method == http.MethodPut:
+					hubBytes++
+					io.Copy(io.Discard, r.Body)
+					w.WriteHeader(http.StatusConflict)
+				case r.URL.Path == "/v1/blobs/uploads":
+					pending := ref
+					pending.SHA256Verified = &no
+					pending.Integrity = &blobwire.Integrity{Algorithm: "sha256", Value: sha}
+					json.NewEncoder(w).Encode(blobwire.UploadGrant{Ref: pending, Upload: blobwire.Request{Method: "PUT", URL: direct.URL + "/object?private=signature", ExpiresAt: time.Now().Add(299 * time.Second).Format(time.RFC3339Nano), Headers: map[string]string{"Content-Length": "3", "Content-Type": "application/octet-stream", "Content-Disposition": "attachment", "Cache-Control": "private, no-store", "If-None-Match": "*", "X-Amz-Checksum-Sha256": sum, "X-Amz-Meta-Vecnet-Checksum-Profile": "sha256", "X-Amz-Meta-Vecnet-Checksum": sum}}})
+				case r.URL.Path == "/v1/blobs/uploads/"+id+"/complete":
+					completes++
+					json.NewEncoder(w).Encode(ref)
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer hub.Close()
+			var r io.Reader = strings.NewReader("abc")
+			if kind == "spool" {
+				r = struct{ io.Reader }{strings.NewReader("abc")}
+			}
+			att, err := New(hub.URL, "fake").UploadWithProgress(context.Background(), r, 3, "text/plain", "report.txt", nil)
+			if err != nil || att.BlobID != id || caps != 1 || hubBytes != 0 || puts != 1 || completes != 1 {
+				t.Fatalf("downgraded or failed: err=%v caps=%d hubBytes=%d puts=%d completes=%d", err, caps, hubBytes, puts, completes)
+			}
+			entries, _ := os.ReadDir(tmp)
+			if len(entries) != 0 {
+				t.Fatal("spool file leaked")
+			}
+		})
+	}
+}
+
+func TestSendPreservesLegacyAttachmentReferences(t *testing.T) {
+	for _, origin := range []string{"", "https://example.invalid/reference.txt"} {
+		t.Run(map[bool]string{true: "external", false: "disk"}[origin != ""], func(t *testing.T) {
+			want := envelope.Attachment{SHA256: strings.Repeat("a", 64), Size: 3, MediaType: "text/plain", Name: "reference.txt", OriginURL: origin}
+			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, err := io.ReadAll(r.Body)
+				if err != nil || envelope.Validate("sendRequest", raw) != nil {
+					t.Error("legacy reference failed published schema")
+					w.WriteHeader(400)
+					return
+				}
+				var req envelope.SendRequest
+				if json.Unmarshal(raw, &req) != nil || len(req.Attachments) != 1 || !reflect.DeepEqual(req.Attachments[0], want) {
+					t.Error("legacy reference metadata changed")
+				}
+				io.WriteString(w, `{}`)
+			}))
+			defer hub.Close()
+			if _, err := New(hub.URL, "fake").Send(context.Background(), envelope.SendRequest{IdempotencyKey: "legacy-send", Recipients: []string{"peer_00000000000000000000000001"}, Priority: "hold", Content: envelope.SendContent{Text: "reference"}, Attachments: []envelope.Attachment{want}}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestPreferencesExchange(t *testing.T) {
+	ctx := context.Background()
+	def, err := prefs.Lookup("events.refresh_interval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := prefs.NewSnapshot(3, `"prefs-3-abc"`, []prefs.Definition{def}, map[string]prefs.Effective{
+		def.Key: {Value: prefs.Duration(1800), Source: prefs.SourceFlag, Origin: "VECNET_EVENTS_REFRESH_INTERVAL"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const etag = `"prefs-3-abc"`
+	const next = `"prefs-4-def"`
+	var gets, previews, patches int
+	var ifMatch []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			t.Errorf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/admin/prefs":
+			gets++
+			w.Header().Set("ETag", etag)
+			_, _ = w.Write(body)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/prefs/preview":
+			previews++
+			ifMatch = append(ifMatch, r.Header.Get("If-Match"))
+			w.Header().Set("ETag", etag)
+			_, _ = w.Write([]byte(`{"base_revision":3,"risks":[],"impact":{},"confirm_token":"tok_prefs_do_not_print","expires_at":"2026-11-06T00:05:00.000Z"}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/admin/prefs":
+			patches++
+			ifMatch = append(ifMatch, r.Header.Get("If-Match"))
+			if patches == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusPreconditionFailed)
+				_, _ = w.Write([]byte(`{"error":{"code":"prefs_revision_conflict","message":"Preferences changed; reload and reconcile.","details":{"field":"events.refresh_interval"}}}`))
+				return
+			}
+			w.Header().Set("ETag", next)
+			_, _ = w.Write(body)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "secret")
+	got, err := c.Preferences(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Revision != 3 || got.ETag != etag || len(got.Descriptors()) != 1 || got.Descriptors()[0].Source != prefs.SourceFlag {
+		t.Fatalf("snapshot = rev %d etag %q rows %d", got.Revision, got.ETag, len(got.Descriptors()))
+	}
+	patch := prefs.Patch{Set: map[string]prefs.Value{def.Key: prefs.Duration(600)}, Reset: []string{}, Confirm: []string{}}
+	preview, err := c.PreviewPreferences(ctx, got.ETag, patch)
+	if err != nil || preview.ConfirmToken != "tok_prefs_do_not_print" || preview.BaseRevision != 3 {
+		t.Fatalf("preview = %+v %v", preview, err)
+	}
+	_, err = c.PatchPreferences(ctx, got.ETag, patch)
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusPreconditionFailed || apiErr.Code != "prefs_revision_conflict" || apiErr.Details["field"] != "events.refresh_interval" {
+		t.Fatalf("conflict = %#v %v", apiErr, err)
+	}
+	if _, err = c.PatchPreferences(ctx, "", patch); err == nil {
+		t.Fatal("missing ETag was sent")
+	}
+	if gets != 1 || previews != 1 || patches != 1 {
+		t.Fatalf("requests get/preview/patch = %d/%d/%d", gets, previews, patches)
+	}
+	if len(ifMatch) != 2 || ifMatch[0] != etag || ifMatch[1] != etag {
+		t.Fatalf("If-Match = %q", ifMatch)
 	}
 }

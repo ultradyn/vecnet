@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { idParts, short } from '../static/format.js';
-import { findPeer, peerFacts, peerHealth, peerHref, peerRoutes, peerSubs, peerThreads, principalFacts, scopeTarget } from '../static/peer-model.js';
+import { findPeer, messageDraft, peerActions, peerFacts, peerHealth, peerHref, peerRoutes, peerSubs, peerThreads, principalFacts, recentThread, scopeTarget } from '../static/peer-model.js';
 
 const PEER = 'peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B';
 const PRN = 'prn_01JD3Q2K8M4N6P8R0T2V4X6Z8C';
@@ -44,6 +44,17 @@ const row = (over = {}) => ({
   principal_id: PRN, credential: 'active', disabled: false, presence_at: '2026-11-04T00:59:00.000Z', reach_via: 'call',
   routes: [], scopes: { allow: ['peer_b'], deny: ['team_x'] }, limits: { sends_per_min: 60, threads_per_hour: 20 },
   ...over,
+});
+
+test('findPeer still returns an archived peer, so a deep link can open it', () => {
+  const at = '2026-11-07T01:00:00.000Z';
+  const page = { peers: [row({ archived_at: at, disabled: true })] };
+  const found = findPeer(page, PEER);
+  assert.equal(found.peer.peer_id, PEER);
+  const f = peerFacts(found);
+  assert.equal(f.id, PEER);
+  assert.equal(f.archivedAt, at);
+  assert.equal(f.disabled, true);
 });
 
 test('findPeer finds a row by peer id, and tolerates a missing page', () => {
@@ -151,4 +162,70 @@ test('peerSubs, peerHealth and peerThreads keep only this peer', () => {
   assert.deepEqual(t.rows.map(r => r.thread.thread_id), ['thr_c', 'thr_a']);
   assert.equal(t.more, true);
   assert.deepEqual(peerThreads(null, PEER), { rows: [], more: false });
+});
+
+// The header's message actions (PROTOCOL §2.13 threads by participant).
+const ME = 'peer_01JD3Q2K8M4N6P8R0T2V4X60PS';
+const thr = (id, parts, at) => ({ thread: { thread_id: id, title: id, participants: parts }, last_message_at: at });
+const facts = over => peerFacts(row({ peer: { ...row().peer, ...over } }));
+
+test('recentThread is the newest thread both the peer and the operator are in', () => {
+  const page = { threads: [
+    thr('thr_old', [PEER, ME], '2026-11-04T00:00:00.000Z'),
+    thr('thr_peers', [PEER, 'peer_b'], '2026-11-04T03:00:00.000Z'), // newer, but the operator is not in it
+    thr('thr_new', [ME, 'peer_b', PEER], '2026-11-04T02:00:00.000Z'),
+    thr('thr_stray', [ME], '2026-11-04T04:00:00.000Z'),            // slipped past the hub's filter
+  ] };
+  assert.equal(recentThread(page, PEER, ME).thread.thread_id, 'thr_new');
+  assert.equal(recentThread({ threads: [thr('thr_peers', [PEER, 'peer_b'], 'x')] }, PEER, ME), null);
+  assert.equal(recentThread(page, PEER, ''), null);
+  assert.equal(recentThread(null, PEER, ME), null);
+  assert.equal(recentThread({ threads: [{ thread: { participants: [PEER, ME] } }] }, PEER, ME), null, 'a row without an id is no link');
+});
+
+test('messageDraft picks the peer, at wake_idle for a Grok Bot and wake otherwise', () => {
+  assert.deepEqual(messageDraft(facts({})), { recipients: [PEER], priority: 'wake' });
+  assert.deepEqual(messageDraft(facts({ kind: 'grokbot' })), { recipients: [PEER], priority: 'wake_idle' });
+  for (const kind of ['launcher', 'openclaw', 'pagchat-bot', 'dot', '']) assert.equal(messageDraft(facts({ kind })).priority, 'wake', kind);
+});
+
+test('peerActions: a shared thread is opened; New message is always offered', () => {
+  const page = { threads: [thr('thr_x', [PEER, ME], '2026-11-04T02:00:00.000Z')] };
+  const a = peerActions(facts({}), page, ME, null);
+  assert.equal(a.open.state, 'thread');
+  assert.equal(a.open.href, '#thread/thr_x');
+  assert.equal(a.open.thread.thread_id, 'thr_x');
+  assert.equal(a.open.at, '2026-11-04T02:00:00.000Z');
+  assert.deepEqual(a.compose, { href: '#new', draft: { recipients: [PEER], priority: 'wake' } });
+});
+
+test('peerActions: no shared thread opens New message with the same draft', () => {
+  const none = { threads: [thr('thr_peers', [PEER, 'peer_b'], '2026-11-04T02:00:00.000Z')] };
+  const a = peerActions(facts({}), none, ME, null);
+  assert.deepEqual(a.open, { state: 'compose', href: '#new', draft: { recipients: [PEER], priority: 'wake' }, more: false });
+  assert.deepEqual(a.compose.draft, a.open.draft);
+  // A Grok Bot defaults to wake_idle on both.
+  const g = peerActions(facts({ kind: 'grokbot' }), { threads: [] }, ME, null);
+  assert.equal(g.open.state, 'compose');
+  assert.equal(g.open.draft.priority, 'wake_idle');
+  assert.equal(g.compose.draft.priority, 'wake_idle');
+  // A later page may hold one: "none" is only among the newest.
+  assert.equal(peerActions(facts({}), { threads: [], next: 'c' }, ME, null).open.more, true);
+});
+
+test('peerActions waits for the thread page, shows its error, and keeps a page it already has', () => {
+  const err = new Error('boom');
+  assert.deepEqual(peerActions(facts({}), null, ME, null).open, { state: 'loading', error: null });
+  const failed = peerActions(facts({}), null, ME, err);
+  assert.equal(failed.open.state, 'error');
+  assert.equal(failed.open.error, err);
+  assert.equal(failed.compose.href, '#new', 'New message stays while threads fail');
+  assert.equal(peerActions(facts({}), { threads: [thr('thr_x', [PEER, ME], 'x')] }, ME, err).open.state, 'thread');
+});
+
+test('peerActions offers nothing for a source, the operator, or no peer row', () => {
+  assert.equal(peerActions(facts({ kind: 'source' }), { threads: [] }, ME, null), null);
+  assert.equal(peerActions(facts({ kind: 'operator' }), { threads: [] }, ME, null), null);
+  assert.equal(peerActions(facts({ peer_id: ME }), { threads: [] }, ME, null), null);
+  assert.equal(peerActions(null, { threads: [] }, ME, null), null);
 });

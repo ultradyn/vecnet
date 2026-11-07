@@ -1,3 +1,8 @@
+// Coordinator rulings live in <statusDir>/decisions/all.md (optional shared rules)
+// and <statusDir>/decisions/task-NN.md (two-digit task number, task-specific wins).
+// Agents read these files if present at runtime; rulings override conflicting
+// plan/review guidance. Edit the files, not args/prompts, to preserve the cached
+// prefix on resume. Already-cached agents do not reread them until run live.
 export const meta = {
   name: 'vecnet-plan-build',
   description: 'Execute the vecnet core-hub plan task by task: implement (TDD), independent review, bounded fix loop, then whole-branch review and a final gate',
@@ -184,7 +189,7 @@ const NTASKS = TASKS.length - 1
 if (END > NTASKS) throw new Error(`endTask ${END} exceeds ${NTASKS} tasks`)
 const routed = (n, preset) => (TASKS[n].route === 'sol' ? preset : undefined)
 const checkList = cmds => cmds.map(c => `\`${c}\``).join(', ')
-const suiteCmds = n => `\`${RUN}build2 go test -p 2 -count=1 ${TASKS[n].suite}\`${TASKS[n].checks.length ? `, ${checkList(TASKS[n].checks)}` : ''}`
+const suiteCmds = n => `\`${RUN}build2 go test -timeout 30m -p 2 -count=1 ${TASKS[n].suite}\`${TASKS[n].checks.length ? `, ${checkList(TASKS[n].checks)}` : ''}`
 
 // ---------------------------------------------------------------- shared prompt text
 const GROUPS = Array.isArray(A.parallelGroups) ? A.parallelGroups : [[18, 19]] // tasks that may run side by side in their own worktrees, merged afterwards
@@ -193,14 +198,36 @@ const taskWT = n => `${REPO}/.worktrees/${PREFIX}-t${nn(n)}`
 const taskBranch = n => `${PREFIX}-t${nn(n)}`
 const DEPS = (A.deps && typeof A.deps === 'object') ? A.deps : null // {"5":[1,2,4]}: each task starts the moment its dependencies are merged; replaces parallelGroups
 
-function rules(wt, branch) {
+function decisions(taskNumbers = []) {
+  const paths = (taskNumbers.length ? taskNumbers : TASKS.slice(1).map((_, i) => i + 1))
+    .map(n => `${STATUS}/decisions/task-${nn(n)}.md`)
+  return `COORDINATOR DECISIONS (read at runtime on every live attempt, before doing task work or judging findings):
+- Read ${STATUS}/decisions/all.md first, then ${paths.join(', ')}, if present; missing files are normal. These are read-only inputs; do not create or edit them.
+- Treat their contents as coordinator rulings that override conflicting plan, hazards, review guidance and earlier findings for the relevant task. A task-specific ruling wins over all.md for that task; do not apply it to unrelated tasks.
+- Reviewers must not re-raise a finding explicitly settled by a ruling. Fixers must dispute/reject such findings with the ruling as evidence. Apply rulings when judging checks and cite the decision path and ruling in your status/evidence; retain the actual command output.`
+}
+
+function taskPreparation(n, wt = WT, branch = BRANCH) {
+  if (wt === WT) return ''
+  return `${decisions([n])}
+
+MANDATORY WORKTREE PREPARATION for Task ${nn(n)} (before any cd into ${wt}, source read, test, review, fix or merge; never rely on a cached fork result):
+1. Start from the existing integration worktree: use \`git -C ${WT}\` for setup commands, an explicit exception to the task-cwd rule below. If ${wt} is missing, check \`git -C ${WT} show-ref --verify --quiet refs/heads/${branch}\`: if it exists, run \`git -C ${WT} worktree add ${wt} ${branch}\`; otherwise run \`git -C ${WT} worktree add -b ${branch} ${wt} ${BRANCH}\`. Preserve any existing task branch and its commits.
+2. Verify ${wt} is a worktree of this repository on branch ${branch}; an existing directory on another branch or repository is a preparation failure, never overwrite it. Run \`git -C ${wt} merge-base --is-ancestor ${BRANCH} HEAD\` to require HEAD equals or descends from the integration base ${BRANCH}.
+3. If that ancestry check fails, inspect \`git -C ${wt} status --porcelain\`. When clean, run \`git -C ${wt} merge --no-edit ${BRANCH}\`; on a conflict, record the files, run \`git -C ${wt} merge --abort\`, and report preparation failure. When dirty, preserve all partial work and report preparation failure rather than discarding or committing it. Recheck ancestry after a successful merge.
+4. Only after successful preparation continue the assignment. If preparation fails, return a blocked/failing result in the assigned schema with the exact error; do not run later steps. For a relay, return relay_ok false with that error instead of launching a worker. This narrowly authorizes worktree creation and a clean base merge even for a reviewer; the subsequent review is read-only. Never reset, rebase, delete a branch, force a worktree add, or discard changes.`
+}
+
+function rules(wt, branch, taskNumbers = []) {
   return `RULES (apply to every command you run):
 - Work only in the worktree ${wt} on branch ${branch}. Your shell cwd resets between calls, so start every Bash command with \`cd ${wt} && \`.
-- Builds via build2, two threads: \`${RUN}build2 go test -p 2 ...\`, \`CGO_ENABLED=0 build2 go build -p 2 ...\`, \`${RUN}build2 go vet ./...\`. Never a bare \`go test\` or \`go build\`.${RUN ? ` Tests, vet and mod checks run on the build box: prefix them with \`${RUN.trim()}\` exactly as written in these instructions (env assignments go after it; use \`${RUN.trim()} bash -c '…'\` for compound commands). Builds for the ISA check, \`go list\` checks, git, gofmt and file reads stay local.` : ''}
+- Builds via build2, two threads: \`${RUN}build2 go test -timeout 30m -p 2 ...\`, \`CGO_ENABLED=0 build2 go build -p 2 ...\`, \`${RUN}build2 go vet ./...\`. Never a bare \`go test\` or \`go build\`.${RUN ? ` Tests, vet and mod checks run on the build box: prefix them with \`${RUN.trim()}\` exactly as written in these instructions (env assignments go after it; use \`${RUN.trim()} bash -c '…'\` for compound commands). Builds for the ISA check, \`go list\` checks, git, gofmt and file reads stay local.` : ''}
 - Never use attn. You report only through your return value and the status files.
 - Never run destructive git (reset --hard, checkout -- ., restore on others' files, clean, stash drop, rebase, push, branch -D) and never modify the main checkout at ${REPO} except files under ${STATUS}.
 - Network: only \`go get\` / \`go mod download\` of modules the plan names. No docker, no fly, no other downloads.
-- Commits: \`git -c commit.gpgsign=false commit -m "<msg>" --trailer "Plan-Task: <NN>"\`. Stage files explicitly (no \`git add -A\` of unknown files); after committing, \`git status --porcelain\` must be empty.${EXTRA_RULES.map(r => `\n- ${r}`).join('')}`
+- Commits: \`git -c commit.gpgsign=false commit -m "<msg>" --trailer "Plan-Task: <NN>"\`. Stage files explicitly (no \`git add -A\` of unknown files); after committing, \`git status --porcelain\` must be empty.${EXTRA_RULES.map(r => `\n- ${r}`).join('')}
+
+${decisions(taskNumbers)}`
 }
 const RULES = rules(WT, BRANCH)
 
@@ -214,11 +241,14 @@ function readTaskCmds(n) {
 - Global Constraints, Review Focus and File structure: \`awk '/^## Global Constraints/{f=1} /^### Task 1:/{exit} f' ${PLAN}\`
 - Your task: \`awk '/^### Task ${n}:/{f=1} f&&/^---$/{exit} f' ${PLAN}\`
 - The PROTOCOL.md sections your task cites (${TASKS[n].refs}): find them with \`grep -n '^#' ${PROTO}\` and read them with sed -n.
-- Existing code from earlier tasks as needed for the interfaces you consume.`
+- Existing code from earlier tasks as needed for the interfaces you consume.
+- Inspect the plan's complete task list and file ownership to identify any later task that owns rewriting contradictory PROTOCOL/docs text; this inspection does not expand your implementation scope.
+
+PLAN / DOCS PRECEDENCE (after coordinator rulings): if this task's plan contradicts current PROTOCOL.md or other docs AND a later task in this plan owns rewriting that text (verify its task number and file ownership), follow the plan now, leave those docs to the later task, and record the stale text as a deviation naming that later task in your step file and returned evidence. Do not refuse the task or implement the old documented behaviour for this reason. Reviewers must not flag that deliberately deferred stale text as a finding for Task ${n}; fixers must dispute such findings with the later task's ownership as evidence. Otherwise PROTOCOL.md retains precedence and unresolved contradictions are recorded as deviations.`
 }
 
 function hazardText(n) {
-  return `KNOWN HAZARDS for this task (found when the workflow was drafted and already folded into the plan text; treat as requirements unless they contradict PROTOCOL.md, in which case PROTOCOL.md wins and you record a deviation):
+  return `KNOWN HAZARDS for this task (found when the workflow was drafted and already folded into the plan text; treat as requirements subject to coordinator rulings and PLAN / DOCS PRECEDENCE above):
 ${TASKS[n].hazards.map(h => `- ${h.replace('<status dir>', STATUS)}`).join('\n')}`
 }
 
@@ -361,13 +391,15 @@ function relayCopyPrompt(base) {
 3. If step 1 prints anything else, return {relay_ok: false, detail: <that line>} with no result field.`
 }
 
-function relayPrompt(prompt, schema, cwd, preset, base) {
-  return `You are a thin relay to Codex, not a worker. Do not solve, implement, review or judge anything yourself, do not read the code, and do not copy the assignment anywhere: the helper below reads it from your transcript. Never use attn. Your first action is step 1.
+function relayPrompt(prompt, schema, cwd, preset, base, prepare) {
+  return `You are a thin relay to Codex, not a worker. Do not solve, implement, review or judge anything yourself, do not read the code, and do not copy the assignment anywhere: the helper below reads it from your transcript. Never use attn. ${prepare ? 'Your first action is the mandatory preparation below; then immediately delegate with step 1.' : 'Your first action is step 1.'}
+
+${prepare || ''}
 
 1. Run with Bash: \`${SOL.run} ${preset} ${cwd} ${base} '${SOL.transcripts}'\`. It returns at once. A failure here is a relay failure: go to step 4.
 2. Run with Bash, passing timeout 600000: \`${SOL.wait} ${base}\`. It prints RUNNING, or a line starting DONE. Repeat this step while it prints RUNNING. A long wait is normal; some runs take more than an hour. Never start a second run while one is going.
 3. If the line is DONE 0 RESULT_OK <sum>: read ${base}.slim.json and return {relay_ok: true, detail: "", check: "<sum>", result: <that object>}. ${COPY_RULE}
-4. On any other outcome: run step 1 and step 2 once more. If that also fails, return {relay_ok: false, detail: <the DONE line or error, and the last 20 lines of ${base}.log>} with no result field. Never invent or fill in a result. A wrong result is far worse than relay_ok false.
+4. On any other outcome: repeat the mandatory preparation if supplied, then run step 1 and step 2 once more. If that also fails, return {relay_ok: false, detail: <the DONE line or error, and the last 20 lines of ${base}.log>} with no result field. Never invent or fill in a result. A wrong result is far worse than relay_ok false.
 
 ASSIGNMENT-BEGIN ${base}
 ${prompt}
@@ -379,12 +411,12 @@ ASSIGNMENT-END ${base}`
 }
 
 // A schema-forced agent returns something even when it failed, so failure is a field, and the checksum proves the copy.
-async function relayed(prompt, opts, cwd, preset, label) {
+async function relayed(prompt, opts, cwd, preset, label, prepare) {
   const schema = { type: 'object', properties: { relay_ok: { type: 'boolean' }, detail: { type: 'string' }, check: { type: 'string' }, result: opts.schema }, required: ['relay_ok', 'detail'] }
   const base = `${SOL.dir}/${STAMP}-${slug(label)}`
   // A bad copy retries the copy, not the Codex run. The last attempt is on Opus: it does no work, and it copies reliably.
   for (let copy = 0; copy < 3; copy++) {
-    const r = await agent(copy ? relayCopyPrompt(base) : relayPrompt(prompt, opts.schema, cwd, preset, base),
+    const r = await agent(copy ? relayCopyPrompt(base) : relayPrompt(prompt, opts.schema, cwd, preset, base, prepare),
       { ...opts, label: copy ? `${label} copy ${copy}` : label, schema, model: copy === 2 ? MODEL : RELAY_MODEL, effort: 'low' })
     if (!r || !r.relay_ok || !r.result) { log(`${label}: relay failed: ${r ? r.detail : 'no result'}`); return null }
     if (fnv1a(canon(r.result)) === r.check) return r.result
@@ -397,12 +429,13 @@ const slug = t => t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, 
 // RELAY-END
 
 async function call(prompt, rawOpts) {
-  const { sol, cwd, ...opts } = rawOpts
+  const { sol, cwd, prepare = '', ...opts } = rawOpts
+  const assignment = prepare ? `${prepare}\n\n${prompt}` : prompt
   for (let attempt = 1; attempt <= 2; attempt++) {
     const label = attempt === 1 ? opts.label : `${opts.label} (retry)`
     const r = (SOL && sol)
-      ? await relayed(prompt, opts, cwd || WT, sol, label)
-      : await agent(prompt, { model: MODEL, ...opts, label })
+      ? await relayed(assignment, opts, cwd || WT, sol, label, prepare)
+      : await agent(assignment, { model: MODEL, ...opts, label })
     if (r) return r
     log(`${opts.label}: no result on attempt ${attempt}`)
   }
@@ -433,7 +466,7 @@ function implPrompt(n, wt = WT, branch = BRANCH) {
   const N = nn(n)
   return `You are implementing Task ${n} ("${TASKS[n].title}") of the vecnet ${PLAN_NAME} plan, test-first.
 
-${rules(wt, branch)}
+${rules(wt, branch, [n])}
 
 ${readTaskCmds(n)}
 
@@ -447,12 +480,12 @@ PROCEDURE
    - Record base_sha = HEAD before you change anything.
 1. Write the tests listed in the task's Step 1. The plan writes many test bodies as /* comments */: turn every one into real assertions of exactly the behaviour the comment states. No t.Skip, no empty bodies, no assertion weaker than the comment. Same test names as the plan.
 2. Run the task's package tests with ${RUN}build2 and confirm they FAIL for the reason the plan expects. Record the failing line(s) as red_evidence.
-3. Implement the Interfaces block exactly: same package, names, signatures, error values and reason codes. Where a signature is ambiguous, pick the reading that matches PROTOCOL.md and record a deviation. Where your task names a later task's hook, leave a nil-able seam; do not build the later task.
+3. Implement the Interfaces block exactly: same package, names, signatures, error values and reason codes. Where a signature is ambiguous, apply coordinator rulings and PLAN / DOCS PRECEDENCE, then pick the reading that matches PROTOCOL.md and record a deviation. Where your task names a later task's hook, leave a nil-able seam; do not build the later task.
 4. Run the task's package tests until they pass, then ${suiteCmds(n)}, \`${RUN}build2 go vet ./...\` and \`gofmt -l .\` (must print nothing). Earlier tasks' tests must still pass; the merge runs the full suite.
 5. Commit with the plan's commit message for this task and the trailer Plan-Task: ${N}.
 6. Step file: task-${N}.impl.json. Status for task-${N}.json: "implemented" (or "blocked").
 
-If you hit a contradiction between the plan and PROTOCOL.md that you cannot resolve safely, follow PROTOCOL.md and record a deviation. Return status "blocked" only when no reasonable reading lets you finish; say exactly what decision unblocks it.
+Resolve contradictions using coordinator rulings and PLAN / DOCS PRECEDENCE first. If neither settles a contradiction safely, follow PROTOCOL.md and record a deviation. Return status "blocked" only when no reasonable reading lets you finish; say exactly what decision unblocks it.
 
 ${STATUS_DOC}
 
@@ -468,8 +501,8 @@ ${JSON.stringify(history, null, 1)}`
     : 'This is the first review of this task.'
   return `You are an independent reviewer for Task ${n} ("${TASKS[n].title}") of the vecnet ${PLAN_NAME} plan. Review round ${round}. You did not write this code; assume nothing the implementer claimed.
 
-${rules(wt, branch)}
-- You are READ-ONLY on the worktree: do not edit, stage, commit or format any file there. You write only your status files.
+${rules(wt, branch, [n])}
+- After mandatory worktree preparation, you are READ-ONLY on the worktree: do not edit, stage, commit or format any file there. You write only your status files.
 
 ${readTaskCmds(n)}
 
@@ -479,12 +512,12 @@ The work under review is \`git -C ${wt} diff ${impl.base_sha}..HEAD\` (commits w
 
 CHECKS
 1. Run, yourself, and record each command in commands_run:
-   - \`${RUN}build2 go test -p 2 -count=1 ${TASKS[n].suite}\`${TASKS[n].reviewChecks.length ? `, ${checkList(TASKS[n].reviewChecks)}` : ''} (tests_passed: every one must pass)
-${TASKS[n].reviewChecks.length ? `   - Run the last of those commands a second time; a failure on the second run sets repeat_runs_passed false.\n` : ''}   - \`${RUN}build2 go test -p 2 -count=3 <packages with changed _test.go files>\` (if no _test.go changed, skip this command)${TASKS[n].race ? ` and \`${RUN}CGO_ENABLED=1 CC=/usr/bin/gcc build2 go test -race -p 2 <same packages>\` (if cgo is unavailable, say so in test_output_tail and judge repeat_runs_passed on -count=3 alone)` : ''} (repeat_runs_passed)
+   - \`${RUN}build2 go test -timeout 30m -p 2 -count=1 ${TASKS[n].suite}\`${TASKS[n].reviewChecks.length ? `, ${checkList(TASKS[n].reviewChecks)}` : ''} (tests_passed: every one must pass)
+${TASKS[n].reviewChecks.length ? `   - Run the last of those commands a second time; a failure on the second run sets repeat_runs_passed false.\n` : ''}   - \`${RUN}build2 go test -timeout 30m -p 2 -count=3 <packages with changed _test.go files>\` (if no _test.go changed, skip this command)${TASKS[n].race ? ` and \`${RUN}CGO_ENABLED=1 CC=/usr/bin/gcc build2 go test -race -timeout 40m -p 2 <same packages>\` (if cgo is unavailable, say so in test_output_tail and judge repeat_runs_passed on -count=3 alone)` : ''} (repeat_runs_passed)
    - \`${RUN}build2 go vet ./...\` (vet_clean) and \`gofmt -l .\` (gofmt_clean: prints nothing)
 2. Interfaces: every item in the task's Interfaces block exists with the stated package, name, signature, status code and reason code. Use \`go doc -all ./internal/<pkg>\` and the source.
 3. Tests: every test named in Step 1 exists under that name, is not a stub, and asserts the full behaviour its plan comment describes. Flag sleeps used as synchronisation, real clocks where the FakeClock is meant, fixed ports, writes outside t.TempDir(), and goroutine leaks.
-4. Spec: behaviour matches the cited PROTOCOL.md sections (${TASKS[n].refs}) and envelope.schema.json; the Global Constraints hold (byte caps, defaults, error envelope, id and time formats, CGO_ENABLED=0, secrets never in logs, URLs or audit).
+4. Spec: subject to coordinator rulings and PLAN / DOCS PRECEDENCE, behaviour matches the cited PROTOCOL.md sections (${TASKS[n].refs}) and envelope.schema.json; the Global Constraints hold (byte caps, defaults, error envelope, id and time formats, CGO_ENABLED=0, secrets never in logs, URLs or audit).
 5. Review Focus items this task pins are genuinely pinned by a test that would fail without the fix.
 6. Hygiene: Plan-Task: ${N} trailer present, tree clean, go.mod/go.sum tidy (\`${RUN}build2 go mod tidy -diff\` prints nothing; if your go lacks -diff, skip and say so), no unrelated changes.${TASKS[n].shots ? `\n7. Visual: Read every committed PNG matching docs/plans/shots/oui/${TASKS[n].shots}-*.png with the Read tool and compare it with the prototype shot the task names. A missing or blank state, clipped or overlapping text, a light background, or a shot that does not show the state its name claims is major.` : ''}
 
@@ -507,7 +540,7 @@ function fixPrompt(n, impl, round, review, history, wt = WT, branch = BRANCH) {
   const minors = review.findings.filter(f => !isSerious(f))
   return `You are fixing review findings for Task ${n} ("${TASKS[n].title}") of the vecnet ${PLAN_NAME} plan. Fix round ${round} of at most ${MAX_FIX_ROUNDS}.
 
-${rules(wt, branch)}
+${rules(wt, branch, [n])}
 
 ${readTaskCmds(n)}
 
@@ -551,7 +584,7 @@ Check and report:
 3. \`go version\` is at least 1.26; \`command -v build2\` succeeds; ${PLAN} and ${PROTO} exist.
 4. For every task number t < ${START}: a commit with trailer \`Plan-Task: NN\` (two-digit) is reachable from HEAD (\`git log HEAD --grep '^Plan-Task: NN$'\`; earlier tasks may already be merged into ${BASE_REF}, so search the whole history, not only ${BASE_REF}..HEAD). A missing one sets ok=false: the base would be incomplete.
 5. passed_tasks: every t in ${START}..${END} whose ${STATUS}/task-NN.json has status "passed" AND whose Plan-Task commit is on the branch.
-6. Baseline: if go.mod exists, run \`${RUN}build2 go test -p 2 -count=1 ./...\`. Failure sets ok=false (never build on a red base). If go.mod does not exist, report "no-module-yet" (only valid when ${START} == 1).
+6. Baseline: if go.mod exists, run \`${RUN}build2 go test -timeout 30m -p 2 -count=1 ./...\`. Failure sets ok=false (never build on a red base). If go.mod does not exist, report "no-module-yet" (only valid when ${START} == 1).
 
 Write the JSON you return to ${STATUS}/preflight-${STAMP}.json (mkdir -p first).
 Return the JSON described by the output schema.`, { label: 'Preflight', phase: 'Preflight', schema: PREFLIGHT_SCHEMA, effort: 'low', sol: 'sol-coder' })
@@ -572,7 +605,8 @@ if (passedBefore.size) log(`Skipping tasks already passed: ${[...passedBefore].s
 async function runTask(n, wt, branch) {
   const N = nn(n)
   const P = `Task ${N}`
-  const impl = await call(implPrompt(n, wt, branch), { label: `T${N} implement`, phase: P, schema: IMPL_SCHEMA, sol: routed(n, 'sol-coder'), cwd: wt })
+  const prepare = taskPreparation(n, wt, branch)
+  const impl = await call(implPrompt(n, wt, branch), { label: `T${N} implement`, phase: P, schema: IMPL_SCHEMA, sol: routed(n, 'sol-coder'), cwd: wt, prepare })
   if (!impl) return halt(n, 'implementer returned no result twice')
   if (impl.status === 'blocked') return halt(n, `implementer blocked: ${impl.blocker || 'no reason given'}`, { deviations: impl.deviations })
   if (impl.status === 'done' && (!impl.commits || impl.commits.length === 0)) return halt(n, 'implementer reported done without a commit')
@@ -583,7 +617,7 @@ async function runTask(n, wt, branch) {
   let passed = false
   for (let round = 0; round <= MAX_FIX_ROUNDS; round++) {
     review = await call(reviewPrompt(n, impl, round, history, wt, branch), {
-      label: `T${N} review r${round}`, phase: P, schema: REVIEW_SCHEMA, effort: 'high', model: REVIEW_MODEL, sol: routed(n, 'sol-reviewer'), cwd: wt,
+      label: `T${N} review r${round}`, phase: P, schema: REVIEW_SCHEMA, effort: 'high', model: REVIEW_MODEL, sol: routed(n, 'sol-reviewer'), cwd: wt, prepare,
     })
     if (!review) break
     const serious = review.findings.filter(isSerious)
@@ -592,7 +626,7 @@ async function runTask(n, wt, branch) {
     if (review.verdict === 'pass') log(`T${N} r${round}: reviewer said pass but evidence fields disagree; treating as fail`)
     if (round === MAX_FIX_ROUNDS) break
 
-    const fix = await call(fixPrompt(n, impl, round + 1, review, history, wt, branch), { label: `T${N} fix r${round + 1}`, phase: P, schema: FIX_SCHEMA, sol: routed(n, 'sol-coder'), cwd: wt })
+    const fix = await call(fixPrompt(n, impl, round + 1, review, history, wt, branch), { label: `T${N} fix r${round + 1}`, phase: P, schema: FIX_SCHEMA, sol: routed(n, 'sol-coder'), cwd: wt, prepare })
     if (!fix) { review = null; break }
     if (fix.status === 'blocked') log(`T${N} fixer blocked; one more review will judge the state`)
     history.push({
@@ -648,11 +682,11 @@ For each task number NN in [${unit.map(nn).join(', ')}]: if ${REPO}/.worktrees/$
 async function mergeUnit(unit) {
   const label = unit.map(nn).join('+')
   const merge = await call(`Merge the parallel group ${label} back into ${BRANCH} for the vecnet ${PLAN_NAME} build.
-${RULES}
+${rules(WT, BRANCH, unit)}
 Branches to merge, in this order: ${unit.map(taskBranch).join(', ')} (worktrees ${unit.map(taskWT).join(', ')}).
-Procedure: cd ${WT}; for each branch run \`git merge --no-ff <branch>\`; resolve any conflict by keeping BOTH tasks' behaviour (typical conflicts: route registration in internal/httpapi/server.go, justfile recipes, go.mod/go.sum, README). Never drop a test or an endpoint to make a merge clean. After all merges run \`${RUN}build2 go test -p 2 -count=1 ./...\`, \`${RUN}build2 go vet ./...\`, \`gofmt -l .\`${MERGE_CHECKS.length ? `, ${checkList(MERGE_CHECKS)}` : ''}; fix merge-induced failures with a follow-up commit carrying trailer "Plan-Task: merge". Then, only after \`git -C <path> status --porcelain\` is empty, remove each task worktree with \`git -C ${REPO} worktree remove <path>\`. Leave the task branches in place; the coordinator deletes them.
+Procedure: cd ${WT}; for each branch run \`git merge --no-ff <branch>\`; resolve any conflict by keeping BOTH tasks' behaviour (typical conflicts: route registration in internal/httpapi/server.go, justfile recipes, go.mod/go.sum, README). Never drop a test or an endpoint to make a merge clean. After all merges run \`${RUN}build2 go test -timeout 30m -p 2 -count=1 ./...\`, \`${RUN}build2 go vet ./...\`, \`gofmt -l .\`${MERGE_CHECKS.length ? `, ${checkList(MERGE_CHECKS)}` : ''}; fix merge-induced failures with a follow-up commit carrying trailer "Plan-Task: merge". Then, only after \`git -C <path> status --porcelain\` is empty, remove each task worktree with \`git -C ${REPO} worktree remove <path>\`. Leave the task branches in place; the coordinator deletes them.
 Return {ok, head_sha, merged:[task numbers], conflicts_resolved:[files], tests_passed, notes}. ok is true only when every branch merged and the suite passed.`,
-    { label: `merge ${label}`, phase: `Task ${nn(unit[unit.length - 1])}`, schema: MERGE_SCHEMA, sol: 'sol-coder' })
+    { label: `merge ${label}`, phase: `Task ${nn(unit[unit.length - 1])}`, schema: MERGE_SCHEMA, sol: 'sol-coder', prepare: unit.map(n => taskPreparation(n, taskWT(n), taskBranch(n))).join('\n\n') })
   if (!merge || !merge.ok || !merge.tests_passed) { halt(unit[unit.length - 1], `merge of ${label} failed: ${merge ? merge.notes : 'no result'}`); return false }
   log(`merged ${label} at ${merge.head_sha}; conflicts resolved: ${merge.conflicts_resolved.length}`)
   return true
@@ -718,7 +752,7 @@ const LENSES = [
   { key: 'security', title: 'Security invariants',
     focus: `PROTOCOL.md §14 (all eight invariants), §12 and the plan's Global Constraints, across every handler: sender always from the credential plus as; names never resolved as addresses; vecnet.* metadata rejected; secrets hashed, compared safely, never in URLs, logs (grep every log/slog/fmt.Print call site) or audit rows; blob tokens scoped to one recipient and one sha with expiry; no redirect following in push and notify clients; body limits on every route; authz on every handler (operator-only admin, not_recipient, not_participant, not_your_peer, not_member, scopes); SQL built only with placeholders; blob paths immune to traversal; the operator UI's CSP and secret handling. Note SSRF exposure of push routes as a finding with the right severity for a single-operator hub. Do not run the test suite.` },
   { key: 'tests', title: 'Test quality and flakiness',
-    focus: `Test quality across the branch. Run \`${RUN}build2 go test -p 2 -count=2 ./...\` and \`${RUN}CGO_ENABLED=1 CC=/usr/bin/gcc build2 go test -race -p 2 ./...\` (report if cgo is unavailable). Find: plan tests left as stubs or asserting less than their plan comment; sleeps used as synchronisation; real clocks where the FakeClock is meant; fixed ports; writes outside t.TempDir(), especially the CLI touching ~/.config or ~/.cache; goroutine or server leaks; tests that pass vacuously. Confirm Review Focus 1-5 in ${PLAN} are each pinned by a test that would fail if the behaviour regressed (reason it through or mutate locally WITHOUT saving: you are read-only).` },
+    focus: `Test quality across the branch. Run \`${RUN}build2 go test -timeout 30m -p 2 -count=2 ./...\` and \`${RUN}CGO_ENABLED=1 CC=/usr/bin/gcc build2 go test -race -timeout 40m -p 2 ./...\` (report if cgo is unavailable). Find: plan tests left as stubs or asserting less than their plan comment; sleeps used as synchronisation; real clocks where the FakeClock is meant; fixed ports; writes outside t.TempDir(), especially the CLI touching ~/.config or ~/.cache; goroutine or server leaks; tests that pass vacuously. Confirm Review Focus 1-5 in ${PLAN} are each pinned by a test that would fail if the behaviour regressed (reason it through or mutate locally WITHOUT saving: you are read-only).` },
 ]
 if (Array.isArray(A.extraLenses)) LENSES.push(...A.extraLenses) // {key, title, focus, taste}: taste lenses stay on Opus
 
@@ -769,7 +803,7 @@ ${JSON.stringify(minorBranch.concat(deferredWithIds), null, 1)}
 PROCEDURE
 1. For each finding, confirm it is real before changing code. For behaviour bugs, write a failing test first, then fix. A finding that is wrong goes in rejected with evidence.
 2. Every id above appears exactly once in fixed or rejected.
-3. Run \`${RUN}build2 go test -p 2 -count=1 ./...\`, \`${RUN}build2 go vet ./...\`, \`gofmt -l .\`.
+3. Run \`${RUN}build2 go test -timeout 30m -p 2 -count=1 ./...\`, \`${RUN}build2 go vet ./...\`, \`gofmt -l .\`.
 4. Commit in small logical commits, each with trailer "Plan-Task: review".
 5. Write the JSON you return to ${STATUS}/branch-fix-${STAMP}.json.
 
@@ -792,7 +826,7 @@ ${RULES}
 - You are READ-ONLY on the worktree: do not edit, stage or commit anything.
 
 Run each check yourself and record it in checks:
-1. \`${RUN}build2 go test -p 2 -count=1 ./...\`
+1. \`${RUN}build2 go test -timeout 30m -p 2 -count=1 ./...\`
 2. \`${RUN}build2 go vet ./...\`
 3. \`gofmt -l .\` prints nothing
 4. \`${RUN}build2 go mod tidy -diff\` prints nothing (skip with a note if unsupported)

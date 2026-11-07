@@ -12,6 +12,7 @@ import (
 	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/mcpserver"
+	"github.com/XertroV/vecnet/internal/store"
 )
 
 // ResolveDotPeer names the dot peer principalID is bound to, "" when it has
@@ -52,33 +53,26 @@ func (a *TokenAuth) Authenticate(ctx context.Context, r *http.Request) (mcpserve
 		return mcpserver.Principal{}, auth.ErrUnauthenticated
 	}
 	s := a.S
-	var clientID, prn, peer, peerKind, scope, resource, expires string
 	hash := auth.HashSecret(tok)
-	err := s.DB.QueryRowContext(ctx,
-		`SELECT t.client_id, o.prn_id, o.peer_id, p.kind, t.scope, t.resource, t.expires_at
-		 FROM oauth_tokens t
-		 JOIN oauth_principals o ON o.prn_id = t.principal_id
-		 JOIN peers p ON p.peer_id = o.peer_id
-		 WHERE t.token_hash = ? AND t.kind = 'access' AND t.revoked_at IS NULL
-		   AND p.disabled = 0 AND p.prn_id = o.prn_id`, hash).
-		Scan(&clientID, &prn, &peer, &peerKind, &scope, &resource, &expires)
+	token, err := store.ReadOAuthAccessToken(ctx, s.DB, hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return mcpserver.Principal{}, auth.ErrUnauthenticated
 	}
 	if err != nil {
 		return mcpserver.Principal{}, fmt.Errorf("oauth: find token: %w", err)
 	}
-	exp, err := envelope.ParseTime(expires)
+	exp, err := envelope.ParseTime(token.ExpiresAt)
 	if err != nil {
 		return mcpserver.Principal{}, fmt.Errorf("oauth: token expiry: %w", err)
 	}
-	scopes := strings.Fields(scope)
-	if resource != s.resource() || !slices.Contains(scopes, Scope) {
+	scopes := strings.Fields(token.Scope)
+	if token.Resource != s.resource() || !slices.Contains(scopes, Scope) {
 		return mcpserver.Principal{}, auth.ErrUnauthenticated
 	}
 	p := mcpserver.Principal{
-		Caller: auth.Caller{Kind: "principal", PrincipalID: prn, PeerID: peer, PeerKind: peerKind},
-		OAuth:  &mcpserver.OAuthInfo{PrincipalID: prn, ClientID: clientID, Scopes: scopes, Expires: exp, TokenHash: hash},
+		Caller: auth.Caller{Kind: "principal", PrincipalID: token.PrincipalID, PeerID: token.PeerID, PeerKind: token.PeerKind,
+			OAuth: auth.OAuthCredential{TokenHash: hash, ClientID: token.ClientID, Resource: token.Resource, Scope: token.Scope, RequiredScope: Scope, ExpiresAt: exp}},
+		OAuth: &mcpserver.OAuthInfo{PrincipalID: token.PrincipalID, ClientID: token.ClientID, Scopes: scopes, Expires: exp, TokenHash: hash},
 	}
 	if !s.now().Before(exp) {
 		return p, mcpserver.ErrExpiredToken

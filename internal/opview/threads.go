@@ -166,7 +166,7 @@ func (r *Reader) Thread(ctx context.Context, c auth.Caller, thrID string) (opapi
 		if err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT json_extract(a.value,'$.sha256'),
+		rows, err := tx.QueryContext(ctx, `SELECT json_extract(a.value,'$.sha256'),coalesce(json_extract(a.value,'$.blob_id'),''),
    coalesce(json_extract(a.value,'$.name'),''),json_extract(a.value,'$.media_type'),
    m.msg_id,m.sender,m.created_at,json_extract(a.value,'$.size'),
    coalesce(json_extract(m.body,'$.metadata."vecnet.spilled"')=1,0),
@@ -179,7 +179,7 @@ func (r *Reader) Thread(ctx context.Context, c auth.Caller, thrID string) (opapi
 		}
 		for rows.Next() {
 			var f opapi.ThreadFile
-			if err := rows.Scan(&f.SHA256, &f.Name, &f.MediaType, &f.MessageID, &f.Sender, &f.CreatedAt, &f.Size, &f.Spilled, &f.Purged); err != nil {
+			if err := rows.Scan(&f.SHA256, &f.BlobID, &f.Name, &f.MediaType, &f.MessageID, &f.Sender, &f.CreatedAt, &f.Size, &f.Spilled, &f.Purged); err != nil {
 				rows.Close()
 				return err
 			}

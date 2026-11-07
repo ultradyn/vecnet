@@ -77,6 +77,7 @@ span,b,time,code,a{unicode-bidi:isolate}
 .va .side{border-right:1px solid var(--line);padding:20px 10px 0;overflow:auto;background:#0c1120;display:flex;flex-direction:column}
 /* conn and Sign out stay in view */
 .va .side .foot{margin-top:auto;position:sticky;bottom:0;padding:8px 0 24px;background:#0c1120;display:flex;flex-direction:column}
+.va .build-info{padding:8px 9px 0;color:var(--dim);font:400 9.5px/1.45 var(--mono);overflow-wrap:anywhere}
 .va .side .brand{padding:2px 8px 18px}
 .va .brand .hub{margin-left:auto;font:400 11px var(--mono);color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}
 .va .nav a{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:6px 9px;border-radius:6px;color:var(--muted);text-decoration:none;font-size:13.5px}
@@ -163,3 +164,17 @@ a.plink:hover,span.plink:hover{color:var(--violet);border-bottom-color:var(--vio
 @media (min-width:1101px){body[data-route=dash] .va,body[data-route=new] .va,body[data-route=peer] .va{grid-template-columns:240px minmax(0,1fr)}}
 @media (max-width:1100px){.va{grid-template-columns:220px minmax(0,1fr)}.va aside{display:none}}
 @media (max-width:720px){.va{grid-template-columns:1fr;height:auto;min-height:100vh}.va .side{border-right:0;border-bottom:1px solid var(--line)}.va main{padding:24px 16px}}
+
+/* This browser's appearance (appearance.js; set before first paint by
+   appearance-boot.js). Light inverts the dark palette, hue kept, until a
+   dedicated light palette exists; pictures, the logo, emoji reactions and the
+   top-layer dialogs (which the root filter does not reach) are put back. */
+:root[data-theme=light]{filter:invert(1) hue-rotate(180deg)}
+:root[data-theme=light] :is(img,video,canvas,.logo,.rx-chip,.rx-e){filter:invert(1) hue-rotate(180deg)}
+:root[data-theme=light] dialog[open]{filter:invert(1) hue-rotate(180deg)}
+/* Compact density: tighter rows in the shell and lists (Settings has its own). */
+:root[data-density=compact] .va .nav a{padding:4px 9px}
+:root[data-density=compact] .va .nav.rows a{padding:3px 9px}
+:root[data-density=compact] .va .grp{padding:14px 9px 4px}
+:root[data-density=compact] .va main{padding-top:28px}
+:root[data-density=compact] .va .item{padding:8px 12px;margin-bottom:5px}

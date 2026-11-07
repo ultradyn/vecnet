@@ -142,3 +142,36 @@ func TestOursHookExactForms(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexContextLimitCoversCaps(t *testing.T) {
+	if hookCodexContextLimit < 3*hookMaxUnits || hookCodexContextLimit < hookPipeAtomicBytes {
+		t.Fatalf("Codex context limit %d does not cover UTF-8 cap %d or pipe cap %d", hookCodexContextLimit, 3*hookMaxUnits, hookPipeAtomicBytes)
+	}
+}
+
+func TestMergeHookSettingsMatchesClaudeEvents(t *testing.T) {
+	for _, fixture := range []string{"nohooks.json", "mixed.json", "tabs.json"} {
+		t.Run(fixture, func(t *testing.T) {
+			src, err := os.ReadFile(filepath.Join("testdata", "settings", fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, mcp := range []string{"", "vecnet-p"} {
+				want, wantChanged, wantErr := mergeHookSettings(src, "vecnet", "p", true, mcp)
+				got, changed, err := mergeHooks(src, "vecnet", "p", true, mcp, claudeHookEvents)
+				if wantErr != nil || err != nil {
+					t.Fatalf("merge errors: %v %v", wantErr, err)
+				}
+				if !bytes.Equal(got, want) || changed != wantChanged {
+					t.Fatalf("Claude delegation differs:\n%s\nwant:\n%s", got, want)
+				}
+				if bytes.Contains(got, []byte("additionalContextLimit")) {
+					t.Fatal("Claude gained additionalContextLimit")
+				}
+				if mcp != "" && !bytes.Contains(got, []byte(" --auto-ack --mcp vecnet-p")) {
+					t.Fatalf("MCP suffix missing: %s", got)
+				}
+			}
+		})
+	}
+}

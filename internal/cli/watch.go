@@ -195,6 +195,9 @@ func inboxLine(ev envelope.Event, names map[string]string) string {
 		from = name + "(" + f.sender + ")"
 	}
 	text := unbidi(flatten(f.text))
+	if labels := eventBlobLabels(ev); labels != "" {
+		text += " " + labels
+	}
 	if f.attachments > 0 {
 		text += fmt.Sprintf(" [+%d attachment(s)]", f.attachments)
 	}
@@ -369,7 +372,11 @@ func (w *watcher) run() error {
 			if w.announceMove {
 				w.announceMove = false
 				fp, _ := hubid.Fingerprint(w.pin)
-				w.systemLine("hub_moved", fmt.Sprintf("profile %s now uses %s (key %s verified)", w.name, w.c.base, fp))
+				where := "the hub"
+				if shown, ok := printableHub(w.c.base, w.profile.AllowInsecureHTTP || w.a.getenv(insecureEnv) == "1"); ok {
+					where = shown
+				}
+				w.systemLine("hub_moved", fmt.Sprintf("profile %s now uses %s (key %s verified)", w.name, where, fp))
 			}
 			if !w.initialized {
 				if w.shown != nil {
@@ -448,6 +455,7 @@ func (w *watcher) run() error {
 		case errors.As(err, &identityErr):
 			return err
 		case terminal(err):
+			w.stoppedLine(err)
 			return err
 		case w.clock().Before(w.restartUntil):
 			// Within the restart grace, failures neither grow the backoff nor
@@ -656,6 +664,20 @@ func (w *watcher) systemLine(kind, text string) {
 	}
 }
 
+// stoppedLine ends `watch --json` after a terminal answer with one
+// client-made watch_stopped Event, data {text, status}: a machine-readable
+// "not reconnecting" for supervisors such as the Codex connector, which must
+// stop on 401/403/204 (§13.1) instead of respawning the watch. Only the HTTP
+// status is carried; hub-supplied code and message text stay on stderr.
+func (w *watcher) stoppedLine(err error) {
+	var he *hubError
+	if !w.a.json || !errors.As(err, &he) {
+		return
+	}
+	data, _ := json.Marshal(map[string]any{"text": fmt.Sprintf("not reconnecting: hub answered HTTP %d", he.Status), "status": he.Status})
+	_ = w.a.emitValue(envelope.Event{Type: "watch_stopped", Data: data})
+}
+
 func (w *watcher) restarting(h restartHint) {
 	// Bound untrusted transport delays to §21.3's 0-60000 ms before
 	// converting milliseconds to a duration.
@@ -713,28 +735,39 @@ func (w *watcher) refreshMoving() {
 	// and ignored: the hub still serves, and if it does relocate, the 410
 	// runs the full follow checks and a refusal then ends the watch (§13.7).
 	pin, _ := w.a.effectivePin(w.name, w.profile)
+	allow := w.profile.AllowInsecureHTTP || w.a.getenv(insecureEnv) == "1"
 	if pin == "" {
 		// verifyConnection pins every hub that first use can pin, so an
 		// unpinned profile here names an alias or a pre-§21 hub: follow
 		// could not pin the old hub either (§21.5 step 2).
-		w.systemLine("relocation_unverified", "not following "+moving.NewURL+": this hub is not pinned")
+		w.systemLine("relocation_unverified", relocationLine(moving.NoticeID, moving.NewURL, "this hub is not pinned", allow))
 		return
 	}
 	if hubid.VerifyNotice(pin, *moving) != nil {
-		w.systemLine("relocation_unverified", "not following "+moving.NewURL+": invalid moving notice signature")
+		w.systemLine("relocation_unverified", relocationLine(moving.NoticeID, moving.NewURL, "invalid moving notice signature", allow))
 		return
 	}
 	source, e := hubid.NormalizeURL(moving.Hub)
 	if e != nil || source != own {
 		if e != nil {
-			w.systemLine("relocation_unverified", "not following "+moving.NewURL+": notice does not describe this hub moving")
+			w.systemLine("relocation_unverified", relocationLine(moving.NoticeID, moving.NewURL, "notice does not describe this hub moving", allow))
 			return
 		}
 		// Signed by the pinned key: the profile names an alias of the hub's
-		// public_url (DEPLOY.md), which a follow never accepts.
-		w.systemLine("relocation_unverified", "not following "+moving.NewURL+": notice names hub "+source)
-		fmt.Fprintf(w.a.stderr, "vecnet: watch: profile %s uses an alias of %s; run `vecnet --net %s profile repoint %s` to follow its moves\n",
-			peerName(w.name), source, peerName(w.name), source)
+		// public_url (DEPLOY.md), which a follow never accepts. The hint
+		// names the URL only after CheckHubURL accepts it.
+		shown, ok := printableHub(source, allow)
+		if !ok {
+			shown = "the hub"
+		}
+		w.systemLine("relocation_unverified", relocationLine(moving.NoticeID, moving.NewURL, "notice names hub "+shown, allow))
+		if ok {
+			fmt.Fprintf(w.a.stderr, "vecnet: watch: profile %s uses an alias of %s; run `vecnet --net %s profile repoint %s` to follow its moves\n",
+				peerName(w.name), shown, peerName(w.name), shown)
+		} else {
+			fmt.Fprintf(w.a.stderr, "vecnet: watch: profile %s uses an alias of its hub; run `vecnet --net %s profile repoint` to follow its moves\n",
+				peerName(w.name), peerName(w.name))
+		}
 		return
 	}
 	at, e := envelope.ParseTime(moving.At)
@@ -772,7 +805,8 @@ func (w *watcher) followNotice(n envelope.HubNotice, scheduled bool) error {
 		}
 		transient := re != nil && (re.Reason == "hub identity unavailable" || re.Reason == "hub did not serve an identity")
 		if !transient || w.followWarned != n.NoticeID {
-			w.systemLine("relocation_unverified", "not following "+n.NewURL+": "+reason)
+			allow := w.profile.AllowInsecureHTTP || w.a.getenv(insecureEnv) == "1"
+			w.systemLine("relocation_unverified", relocationLine(n.NoticeID, n.NewURL, reason, allow))
 		}
 		if !transient {
 			return err

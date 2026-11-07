@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/blob"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/eventlog"
 	"github.com/XertroV/vecnet/internal/eventpayload"
@@ -119,6 +121,11 @@ func (h *Hub) SendVia(ctx context.Context, c auth.Caller, raw []byte, ingress st
 	}
 	if !ingresses[ingress] {
 		return nil, false, fmt.Errorf("hub: send: unknown ingress %q", ingress)
+	}
+	// Every later check reads one value per member name; a repeated name
+	// would let the struct decoder merge an unchecked earlier value back in.
+	if err := checkRepeatedNames(raw); err != nil {
+		return nil, false, err
 	}
 	if err := PrecheckSend(raw); err != nil {
 		return nil, false, err
@@ -478,6 +485,17 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 	if err != nil {
 		return nil, false, nil, err
 	}
+
+	sourceRawSHA := ""
+	if act.src != nil && h.Blobs.Transfers != nil {
+		meta, err := h.Blobs.PutMessageData(ctx, tx, act.src.id, "source_raw", act.src.durableMedia, act.src.durableRaw)
+		if err != nil {
+			return nil, false, nil, h.sourceDataError(err)
+		}
+		sourceRawSHA = meta.SHA256
+		msg.Attachments = append(msg.Attachments, envelope.Attachment{SHA256: meta.SHA256, Size: meta.Size, MediaType: meta.MediaType, Name: fmt.Sprint(msg.Metadata["vecnet.source_kind"]) + "-event.json"})
+		hosted[meta.SHA256] = true
+	}
 	if err := h.applySpill(ctx, tx, &msg, req.Content.Text); err != nil {
 		return nil, false, nil, err
 	}
@@ -511,7 +529,44 @@ func (h *Hub) sendTx(ctx context.Context, tx *sql.Tx, act actor, req *envelope.S
 			return nil, false, nil, err
 		}
 	}
+
+	if h.Blobs.Transfers != nil {
+		if sourceRawSHA != "" {
+			if err := blob.PinDurable(ctx, tx, "source_raw", sourceRawSHA, msg.MessageID); err != nil {
+				return nil, false, nil, err
+			}
+		}
+		if msg.Content.Truncated {
+			sha := msg.Attachments[len(msg.Attachments)-1].SHA256
+			if err := blob.PinDurable(ctx, tx, "spill", sha, msg.MessageID); err != nil {
+				return nil, false, nil, err
+			}
+		}
+	}
+	for _, a := range msg.Attachments {
+		if a.BlobID != "" {
+			if err := h.Blobs.Transfers.AddReference(ctx, tx, a.BlobID, a.SHA256, msg.MessageID); err != nil {
+				return nil, false, nil, h.blobTransferError(err)
+			}
+		}
+	}
 	for sha := range hosted {
+		if h.Blobs.Transfers != nil && (sourceRawSHA == sha || msg.Content.Truncated && msg.Attachments[len(msg.Attachments)-1].SHA256 == sha) {
+			continue
+		}
+		// Persist purpose-aware refs for visible durable payloads reused by a
+		// later Message. Remote blob IDs remain Task 4's authorized send seam.
+		res, err := tx.ExecContext(ctx, `INSERT INTO durable_blob_refs(msg_id,sha256,purpose) SELECT ?1,p.sha256,p.purpose FROM durable_blob_payloads p WHERE p.sha256=?2 AND EXISTS(SELECT 1 FROM durable_blob_refs br JOIN messages m ON m.msg_id=br.msg_id JOIN threads t ON t.thr_id=m.thr_id JOIN thread_participants tp ON tp.thr_id=m.thr_id WHERE br.sha256=p.sha256 AND br.purpose=p.purpose AND tp.peer_id=?3 AND `+visibleSQL+`) ON CONFLICT DO NOTHING`, msg.MessageID, sha, snd.peer)
+		if err != nil {
+			return nil, false, nil, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, false, nil, err
+		}
+		if n > 0 {
+			continue
+		}
 		if err := h.Blobs.Pin(ctx, tx, sha, msg.MessageID); err != nil {
 			return nil, false, nil, err
 		}
@@ -984,6 +1039,62 @@ func checkRecipientNames(raw []byte) error {
 		if prefix == ids.Src {
 			return unknownRecipient(s) // sources cannot receive messages (§10)
 		}
+	}
+	return nil
+}
+
+// pointerEscape escapes one JSON Pointer reference token (RFC 6901).
+var pointerEscape = strings.NewReplacer("~", "~0", "/", "~1")
+
+// checkRepeatedNames refuses a body that repeats a member name in any
+// object. The byte caps, the schema and the idempotency hash see a repeated
+// name's last value, but encoding/json's struct decoder merges an earlier
+// object's map entries and fields into the result, so oversized or extra
+// metadata could pass the checks and still be stored. A body that is not
+// JSON is left to the checks that follow.
+func checkRepeatedNames(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var walk func(path string) error
+	walk = func(path string) error {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch tok {
+		case json.Delim('{'):
+			seen := map[string]bool{}
+			for dec.More() {
+				key, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				name, _ := key.(string)
+				member := path + "/" + pointerEscape.Replace(name)
+				if seen[name] {
+					return &envelope.SchemaError{Path: member, Message: fmt.Sprintf("member name %q is repeated", name)}
+				}
+				seen[name] = true
+				if err := walk(member); err != nil {
+					return err
+				}
+			}
+			_, err = dec.Token()
+			return err
+		case json.Delim('['):
+			for i := 0; dec.More(); i++ {
+				if err := walk(path + "/" + strconv.Itoa(i)); err != nil {
+					return err
+				}
+			}
+			_, err = dec.Token()
+			return err
+		}
+		return nil
+	}
+	var schemaErr *envelope.SchemaError
+	if err := walk(""); errors.As(err, &schemaErr) {
+		return err
 	}
 	return nil
 }

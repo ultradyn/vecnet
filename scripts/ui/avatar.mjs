@@ -88,7 +88,10 @@ try {
     await page.locator('#conn.live').waitFor();
     await page.evaluate(id => { location.hash = `#thread/${id}`; }, demo.threads.hark);
     const grokMsg = page.locator('.msg', { hasText: 'Reviewed the classifier diff' });
-    await grokMsg.locator('.av.pic img').waitFor();
+    // Images are inserted only after their individual downloads finish.
+    // Checking the images already present can miss a peer still loading.
+    const sleuthMsg = page.locator('.msg', { hasText: 'Traced it: the end phrase' });
+    await Promise.all([grokMsg, sleuthMsg].map(msg => msg.locator('.av.pic img').waitFor()));
     await page.locator('.msg .av:not(.pic)').first().waitFor(); // codex keeps its letter
     await page.waitForFunction(() => [...document.querySelectorAll('.av.pic img')].every(i => i.complete && i.naturalWidth > 0));
     const shown = await pics();

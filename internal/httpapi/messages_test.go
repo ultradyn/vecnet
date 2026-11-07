@@ -352,3 +352,39 @@ func TestOperatorCLIClientMetadata(t *testing.T) {
 		t.Fatalf("sender vecnet.client = %d %s, want 422 reserved_metadata", resp.StatusCode, raw)
 	}
 }
+
+// A repeated member name must not smuggle a value past the checks: the
+// byte caps and the schema see the last value, while a struct decoder
+// merges an earlier object's map entries and fields back in. Repeated
+// names anywhere in the body are refused and nothing is stored
+// (PROTOCOL §2.2 step 9: metadata at most 8 KiB and 32 properties).
+func TestSendRefusesRepeatedMemberNames(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	b, _ := env.NewPeer("session", "B")
+	many := make([]string, 33)
+	for i := range many {
+		many[i] = fmt.Sprintf(`"k%02d":"v"`, i)
+	}
+	head := fmt.Sprintf(`"recipients":[%q],"priority":"hold"`, b)
+	for name, body := range map[string]string{
+		"metadata over 8 KiB": `{"idempotency_key":"dup-1",` + head + `,"content":{"text":"x"},"metadata":{"big":"` + strings.Repeat("m", 9000) + `"},"metadata":{}}`,
+		"metadata 33 keys":    `{"idempotency_key":"dup-2",` + head + `,"content":{"text":"x"},"metadata":{` + strings.Join(many, ",") + `},"metadata":{}}`,
+		"content over cap":    `{"idempotency_key":"dup-3",` + head + `,"content":{"text":"` + strings.Repeat("t", 70000) + `"},"content":{}}`,
+		"nested repeat":       `{"idempotency_key":"dup-4",` + head + `,"content":{"text":"x","text":"y"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			before := rowCount(t, env, `SELECT count(*) FROM messages`)
+			resp, raw := env.Do(aSec, "POST", "/v1/messages", body)
+			e := mustErr(t, resp, raw, http.StatusBadRequest, "invalid_body")
+			if p, _ := e.Error.Details["path"].(string); p == "" {
+				t.Fatalf("details = %v, want the repeated member's path", e.Error.Details)
+			}
+			if n := rowCount(t, env, `SELECT count(*) FROM messages`); n != before {
+				t.Fatalf("a repeated-name body stored a message: %d rows, was %d", n, before)
+			}
+		})
+	}
+	// The same body without the repeat is still accepted.
+	postSend(t, env, aSec, map[string]any{"idempotency_key": "dup-ok", "recipients": []string{b}, "priority": "hold", "content": map[string]any{"text": "x"}, "metadata": map[string]any{}}, http.StatusAccepted)
+}

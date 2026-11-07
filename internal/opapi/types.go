@@ -6,6 +6,7 @@ package opapi
 import (
 	"encoding/json"
 
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/prefs"
 )
@@ -88,13 +89,14 @@ type InboxDelivery struct {
 }
 
 type Inbox struct {
-	Now         string          `json:"now"`
-	Me          Me              `json:"me"`
-	Approvals   []OpenApproval  `json:"approvals"`
-	DeadLetters []DeadLetter    `json:"dead_letters"`
-	Attention   []Attention     `json:"attention"`
-	Deliveries  []InboxDelivery `json:"deliveries"`
-	Unread      int             `json:"unread"`
+	BlobStates  map[string]blobwire.State `json:"blob_states,omitempty"`
+	Now         string                    `json:"now"`
+	Me          Me                        `json:"me"`
+	Approvals   []OpenApproval            `json:"approvals"`
+	DeadLetters []DeadLetter              `json:"dead_letters"`
+	Attention   []Attention               `json:"attention"`
+	Deliveries  []InboxDelivery           `json:"deliveries"`
+	Unread      int                       `json:"unread"`
 	// UnreadByThread splits Unread by thread id: only threads with unread
 	// deliveries appear, and its values sum to Unread.
 	UnreadByThread map[string]int `json:"unread_by_thread"`
@@ -163,6 +165,7 @@ func (v ThreadPage) MarshalJSON() ([]byte, error) {
 }
 
 type ThreadFile struct {
+	BlobID    string `json:"blob_id,omitempty"`
 	SHA256    string `json:"sha256"`
 	Name      string `json:"name"`
 	MediaType string `json:"media_type"`
@@ -300,6 +303,7 @@ type PeerRow struct {
 	PrincipalID string      `json:"principal_id"`
 	Credential  string      `json:"credential"`
 	Disabled    bool        `json:"disabled"`
+	ArchivedAt  *string     `json:"archived_at"`
 	PresenceAt  *string     `json:"presence_at"`
 	ReachVia    *string     `json:"reach_via"`
 	Routes      []RouteInfo `json:"routes"`
@@ -461,8 +465,9 @@ func (v AuditPage) MarshalJSON() ([]byte, error) {
 }
 
 type History struct {
-	Messages  []envelope.Message `json:"messages"`
-	NextAfter *string            `json:"next_after"`
+	BlobStates map[string]blobwire.State `json:"blob_states,omitempty"`
+	Messages   []envelope.Message        `json:"messages"`
+	NextAfter  *string                   `json:"next_after"`
 }
 
 // MarshalJSON keeps empty collections in History non-null.

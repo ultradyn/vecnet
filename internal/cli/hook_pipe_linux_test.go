@@ -15,33 +15,6 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 )
 
-// fillPipe fills a pipe's buffer completely through its write deadline.
-func fillPipe(t *testing.T, writer *os.File) int {
-	t.Helper()
-	filled := 0
-	until := time.Now().Add(5 * time.Second)
-	for {
-		if err := writer.SetWriteDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
-			t.Skipf("pipe deadlines unavailable: %v", err)
-		}
-		n, err := writer.Write(bytes.Repeat([]byte("x"), 1<<20))
-		filled += n
-		if !os.IsTimeout(err) {
-			t.Fatalf("prefill: n=%d err=%v", filled, err)
-		}
-		if n == 0 && filled > 0 {
-			break
-		}
-		if time.Now().After(until) {
-			t.Fatal("could not fill output pipe")
-		}
-	}
-	if err := writer.SetWriteDeadline(time.Time{}); err != nil {
-		t.Fatal(err)
-	}
-	return filled
-}
-
 // A native stdout pipe that accepts a prefix and then stalls must receive
 // either nothing or one complete JSON object, never a truncated prefix.
 // Freeing exactly one page leaves room for 4096 bytes: an eight-item CJK

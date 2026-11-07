@@ -140,6 +140,174 @@ func TestThreadListPagination(t *testing.T) {
 	mustErr(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
 }
 
+// TestThreadTitleQuery: q= is a case-insensitive substring of the thread
+// title only. It composes with participant= and the existing keyset page,
+// and an empty q leaves the list unfiltered.
+func TestThreadTitleQuery(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	b, _ := env.NewPeer("session", "B")
+	c, _ := env.NewPeer("session", "C")
+
+	sendTitled := func(key, title, text string, to ...string) string {
+		t.Helper()
+		body := sendBody(key, to...)
+		if title != "" {
+			body["thread_title"] = title
+		}
+		if text != "" {
+			body["content"] = map[string]any{"text": text}
+		}
+		id := postSend(t, env, aSec, body, http.StatusAccepted).ThreadID
+		env.Now.Advance(time.Second)
+		return id
+	}
+
+	// Oldest first. Activity order is the reverse.
+	alphaOld := sendTitled("q1", "alpha old", "", b)
+	noise := sendTitled("q2", "weekly sync", "", b)
+	alphaMid := sendTitled("q3", "The ALPHA release", "", b)
+	bodyOnly := sendTitled("q4", "plain notes", "please read alpha", b)
+	alphaNew := sendTitled("q5", "xxALPHAyy", "", b)
+	alphaC := sendTitled("q6", "alphabet soup", "", c)
+	pct := sendTitled("q7", "100% done", "", b)
+	under := sendTitled("q8", "a_b score", "", b)
+
+	idsOf := func(tr threadsResp) []string {
+		t.Helper()
+		return threadIDs(tr.Threads)
+	}
+	query := func(vals url.Values) string {
+		t.Helper()
+		return "?" + vals.Encode()
+	}
+
+	// Case-insensitive title substring, and only threads B is also in.
+	withB := url.Values{}
+	withB.Set("q", "aLpHa")
+	withB.Set("participant", b)
+	if got := listThreads(t, env, aSec, query(withB)); !sameIDs(idsOf(got), []string{alphaNew, alphaMid, alphaOld}) || got.Next != nil {
+		t.Fatalf("q=aLpHa participant=B = %v next %v, want [%s %s %s] null", idsOf(got), got.Next, alphaNew, alphaMid, alphaOld)
+	}
+	// Without participant, C's matching thread is included; the body hit is not.
+	titleOnly := url.Values{}
+	titleOnly.Set("q", "ALPHA")
+	if got := listThreads(t, env, aSec, query(titleOnly)); !sameIDs(idsOf(got), []string{alphaC, alphaNew, alphaMid, alphaOld}) {
+		t.Fatalf("q=ALPHA = %v, want [%s %s %s %s] (not %s or %s)", idsOf(got), alphaC, alphaNew, alphaMid, alphaOld, noise, bodyOnly)
+	}
+
+	// The filter is inside the keyset query: a non-match newer than a match
+	// must not consume a page slot or hide the older match.
+	page := url.Values{}
+	page.Set("q", "alpha")
+	page.Set("participant", b)
+	page.Set("limit", "2")
+	p1 := listThreads(t, env, aSec, query(page))
+	if !sameIDs(idsOf(p1), []string{alphaNew, alphaMid}) || p1.Next == nil {
+		t.Fatalf("filtered page 1 = %v next %v, want [%s %s] and a token", idsOf(p1), p1.Next, alphaNew, alphaMid)
+	}
+	page.Set("cursor", *p1.Next)
+	p2 := listThreads(t, env, aSec, query(page))
+	if !sameIDs(idsOf(p2), []string{alphaOld}) || p2.Next != nil {
+		t.Fatalf("filtered page 2 = %v next %v, want [%s] null", idsOf(p2), p2.Next, alphaOld)
+	}
+
+	// Empty q is today's unfiltered list (A's threads; participant narrows).
+	empty := url.Values{}
+	empty.Set("q", "")
+	empty.Set("participant", b)
+	if got := listThreads(t, env, aSec, query(empty)); !sameIDs(idsOf(got), []string{under, pct, alphaNew, bodyOnly, alphaMid, noise, alphaOld}) {
+		t.Fatalf("empty q participant=B = %v, want every thread B shares", idsOf(got))
+	}
+
+	// '%' and '_' are literal characters, not a match-all pattern.
+	literal := url.Values{}
+	literal.Set("q", "%")
+	if got := listThreads(t, env, aSec, query(literal)); !sameIDs(idsOf(got), []string{pct}) {
+		t.Fatalf("q=%% = %v, want only %s", idsOf(got), pct)
+	}
+	literal.Set("q", "_")
+	if got := listThreads(t, env, aSec, query(literal)); !sameIDs(idsOf(got), []string{under}) {
+		t.Fatalf("q=_ = %v, want only %s", idsOf(got), under)
+	}
+}
+
+func TestThreadTitleQueryBound(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	b, _ := env.NewPeer("session", "B")
+	postSend(t, env, aSec, sendBody("bound", b), http.StatusAccepted)
+
+	over := strings.Repeat("z", 129)
+	resp, raw := env.Do(aSec, "GET", "/v1/threads?q="+url.QueryEscape(over), nil)
+	e := mustErr(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
+	if e.Error.Details["field"] != "q" {
+		t.Fatalf("details.field = %v, want q", e.Error.Details["field"])
+	}
+
+	// 128 characters is accepted and simply matches nothing here. The cap
+	// counts characters, so 128 non-ASCII characters are still in range.
+	ok := url.Values{}
+	ok.Set("q", strings.Repeat("z", 128))
+	if got := listThreads(t, env, aSec, "?"+ok.Encode()); len(got.Threads) != 0 || got.Next != nil {
+		t.Fatalf("q of 128 z's = %+v, want an empty page", got)
+	}
+	ok.Set("q", strings.Repeat("é", 128))
+	if got := listThreads(t, env, aSec, "?"+ok.Encode()); len(got.Threads) != 0 || got.Next != nil {
+		t.Fatalf("q of 128 é's = %+v, want an empty page", got)
+	}
+	resp, raw = env.Do(aSec, "GET", "/v1/threads?q="+url.QueryEscape(strings.Repeat("é", 129)), nil)
+	e = mustErr(t, resp, raw, http.StatusUnprocessableEntity, "invalid_value")
+	if e.Error.Details["field"] != "q" {
+		t.Fatalf("details.field = %v, want q", e.Error.Details["field"])
+	}
+}
+
+// TestThreadTitleQueryWithGroupAndSince: q stays inside the same list query
+// as group and since, so both still narrow the page.
+func TestThreadTitleQueryWithGroupAndSince(t *testing.T) {
+	env := testhub.Start(t)
+	_, aSec := env.NewPeer("session", "A")
+	b, _ := env.NewPeer("session", "B")
+	c, _ := env.NewPeer("session", "C")
+	g := createGroup(t, env, aSec, b)
+	other := createGroup(t, env, aSec, c)
+
+	send := func(key, title, to string) string {
+		t.Helper()
+		body := sendBody(key, to)
+		body["thread_title"] = title
+		id := postSend(t, env, aSec, body, http.StatusAccepted).ThreadID
+		env.Now.Advance(time.Second)
+		return id
+	}
+	early := send("gs1", "alpha in group", g)
+	cutoff := envelope.FormatTime(env.Now.Now())
+	env.Now.Advance(time.Second)
+	later := send("gs2", "ALPHA later", g)
+	send("gs3", "alpha other group", other)
+	send("gs4", "beta in group", g)
+
+	q := url.Values{}
+	q.Set("q", "alpha")
+	q.Set("group", g)
+	if got := listThreads(t, env, aSec, "?"+q.Encode()); !sameIDs(threadIDs(got.Threads), []string{later, early}) || got.Next != nil {
+		t.Fatalf("q+group = %v next %v, want [%s %s] null", threadIDs(got.Threads), got.Next, later, early)
+	}
+	q.Set("since", cutoff)
+	if got := listThreads(t, env, aSec, "?"+q.Encode()); !sameIDs(threadIDs(got.Threads), []string{later}) || got.Next != nil {
+		t.Fatalf("q+group+since = %v next %v, want [%s] null", threadIDs(got.Threads), got.Next, later)
+	}
+}
+
+func threadIDs(ts []envelope.ThreadSummary) []string {
+	out := make([]string, len(ts))
+	for i, s := range ts {
+		out[i] = s.ThreadID
+	}
+	return out
+}
+
 func TestHistoryFromJoin(t *testing.T) {
 	env := testhub.Start(t)
 	_, aSec := env.NewPeer("session", "A")

@@ -147,6 +147,10 @@ func hookInboxTool(h hookHint) string {
 }
 
 func hookContext(h hookHint, items []hookItem, more int, lowerBound bool) string {
+	return hookContextN(h, items, more, lowerBound, hookTextRunes)
+}
+
+func hookContextN(h hookHint, items []hookItem, more int, lowerBound bool, textRunes int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "vecnet: %d new message(s) for profile %s. %s %s%s\n<vecnet-inbox untrusted=\"true\">\n", len(items), h.profile, hookTrust, hookReplyClause(h), h.config)
 	for _, item := range items {
@@ -165,7 +169,7 @@ func hookContext(h hookHint, items []hookItem, more int, lowerBound bool) string
 		if item.Attachments > 0 {
 			fmt.Fprintf(&b, " attachments=%d", item.Attachments)
 		}
-		fmt.Fprintf(&b, " text=\"%s\"\n", inert(item.Text, hookTextRunes))
+		fmt.Fprintf(&b, " text=\"%s\"\n", inert(item.Text, textRunes))
 	}
 	b.WriteString("</vecnet-inbox>")
 	if more > 0 {
@@ -222,6 +226,8 @@ func hookOutput(event, context string) []byte {
 	name := "UserPromptSubmit"
 	if event == "post-tool" {
 		name = "PostToolUse"
+	} else if event == "session-start" {
+		name = "SessionStart"
 	}
 	var raw bytes.Buffer
 	encoder := json.NewEncoder(&raw)
@@ -350,7 +356,7 @@ func hookWrite(ctx context.Context, w io.Writer, data []byte) error {
 // the encoded output in bytes as well as the context in UTF-16 units.
 func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(), publish func([]byte) error, limit int) hookResult {
 	ctx := a.ctx
-	o, e := parseFlags("hook", args, map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag, "mcp": strFlag})
+	o, e := parseFlags("hook", args, map[string]flagKind{"event": strFlag, "profile": strFlag, "auto-ack": boolFlag, "mcp": strFlag, "release": boolFlag, "claim": strFlag, "priorities": strFlag, "expect-hub": strFlag, "expect-caller": strFlag})
 	if e != nil || len(o.pos) != 0 {
 		return hookResult{}
 	}
@@ -362,6 +368,9 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	if o.has("profile") {
 		a.net = o.str("profile")
 	}
+	if o.has("release") || o.str("event") == "app-server" {
+		return a.hookAppServer(o, afterPoll, publish, limit)
+	}
 	event := o.str("event")
 	// Claude Code sends JSON on stdin even when --event names the event; its
 	// session_id binds the profile to one session. A terminal is not read.
@@ -372,10 +381,14 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	}
 	raw, e := hookStdin(a.stdin)
 	if e != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &input) != nil {
-		if !o.has("event") {
+		// Only --event with no input at all (a terminal or empty stdin) is
+		// a manual run without a session id. Nonempty input that cannot be
+		// read or decoded, such as a tool_response over the cap, carried an
+		// identity this run cannot see (a foreign session_id or a
+		// subagent's agent_id): claim nothing and touch no state.
+		if !o.has("event") || e != nil || len(bytes.TrimSpace(raw)) != 0 {
 			return hookResult{}
 		}
-		// --event without usable input (a manual run): no session id.
 		input.HookEventName, input.SessionID, input.AgentID = "", "", ""
 	}
 	// A subagent or teammate shares its parent's session_id, so its tool
@@ -399,11 +412,13 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			event = "user-prompt"
 		case "PostToolUse":
 			event = "post-tool"
+		case "SessionStart":
+			event = "session-start"
 		default:
 			return hookResult{}
 		}
 	}
-	if event != "user-prompt" && event != "post-tool" {
+	if event != "user-prompt" && event != "post-tool" && event != "session-start" {
 		return hookResult{}
 	}
 	fits := func(context string) bool {

@@ -35,6 +35,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -99,6 +100,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 	relocatedTo := fs.String("relocated-to", getenv("VECNET_RELOCATED_TO"), "answer hub_moved without workers at the old hub ($VECNET_RELOCATED_TO)")
 	restartRetry := fs.String("restart-retry-ms", envOr(getenv, "VECNET_RESTART_RETRY_MS", "5000"), "restart reconnect delay in milliseconds, 0..60000 ($VECNET_RESTART_RETRY_MS)")
 	resolvePreferences := registerPreferenceFlags(fs, getenv)
+	resolveBlobs := registerBlobFlags(fs, getenv)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -140,6 +142,9 @@ func run(ctx context.Context, args []string, stdout io.Writer, getenv func(strin
 		if errors.As(err, &pe) && pe.Details.Field == "events.refresh_interval" {
 			return fmt.Errorf("events refresh interval must be a whole-second Go duration between 1m and 24h: %w", err)
 		}
+		return err
+	}
+	if err := resolveBlobs(&preferenceConfig); err != nil {
 		return err
 	}
 	origins, err := mcpserver.ParseAllowedOrigins(*mcpOrigins)
@@ -262,7 +267,35 @@ func openStore(dataDir string) (*store.DB, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
+	if err := privateDataDir(dataDir); err != nil {
+		return nil, err
+	}
 	return store.Open(filepath.Join(dataDir, "hub.db"))
+}
+
+// privateDataDir makes dir private before hub.db is opened: the database
+// holds plaintext signing keys (hub_key, route and notify whsec_ keys)
+// protected only by the 0700 data directory (PROTOCOL §12, Secrets at
+// rest). MkdirAll keeps an existing directory's mode, such as a volume
+// mount's 0755, so group and other bits are cleared here; a directory this
+// process cannot chmod is refused. Windows has no such mode bits.
+func privateDataDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("data dir: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("data dir %s is not a directory", dir)
+	}
+	perm := info.Mode().Perm()
+	if runtime.GOOS == "windows" || perm&0o077 == 0 {
+		return nil
+	}
+	if err := os.Chmod(dir, perm&^0o077); err != nil {
+		return fmt.Errorf("data dir %s is %v, readable beyond its owner, and cannot be made private (%w); chmod 700 it", dir, perm, err)
+	}
+	slog.Warn("vecnet-hub: data dir was readable beyond its owner; made it private", "dir", dir, "was", perm.String(), "now", (perm &^ 0o077).String())
+	return nil
 }
 
 // openHub opens <dataDir>/hub.db (creating dataDir) and builds the Hub.
@@ -307,6 +340,22 @@ func runInit(dataDir, name string, w io.Writer) error {
 	return err
 }
 
+// hubConfigURL runs the operator's public or relocation URL through
+// CheckHubURL. Userinfo, a query, a fragment, a bad scheme and a string that
+// does not parse refuse startup. The message names the rule and no part of
+// raw. Plain http is operator configuration and is allowed here; the CLI's
+// LAN rule is what stops a client sending a bearer in the clear.
+func hubConfigURL(flagName, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	err := hubid.CheckHubURL(raw)
+	if err == nil || errors.Is(err, hubid.ErrPlainHTTP) {
+		return nil
+	}
+	return errors.New(flagName + ": " + err.Error())
+}
+
 // ShutdownGrace bounds restart announcement, drain and http.Server.Shutdown.
 // It stays below fly.toml's kill_timeout so the store closes before the
 // platform kills the process.
@@ -336,18 +385,29 @@ type serveConfig struct {
 // development-only egress override (hub.Config.AllowPrivateEgress).
 // trustFly keys the per-client limiter on Fly-Client-IP (Deps.TrustFlyClientIP).
 func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
+	if cfg.Bootstrap != nil {
+		if err := hub.ValidateBlobConfig(*cfg.Bootstrap); err != nil {
+			return err
+		}
+	}
 	publicURL := cfg.PublicURL
+	if err := hubConfigURL("--public-url", publicURL); err != nil {
+		return err
+	}
+	if err := hubConfigURL("--relocated-to", cfg.RelocatedTo); err != nil {
+		return err
+	}
 	var target string
 	if cfg.RelocatedTo != "" {
 		var err error
 		target, err = hubid.NormalizeURL(cfg.RelocatedTo)
 		if err != nil {
-			return fmt.Errorf("--relocated-to: %w", err)
+			return errors.New("--relocated-to: " + hubid.ErrHubForm.Error())
 		}
 		if publicURL != "" {
 			own, err := hubid.NormalizeURL(publicURL)
 			if err != nil {
-				return fmt.Errorf("--public-url: %w", err)
+				return errors.New("--public-url: " + hubid.ErrHubForm.Error())
 			}
 			if target == own {
 				return errors.New("--relocated-to must differ from --public-url")
@@ -363,10 +423,13 @@ func serve(ctx context.Context, cfg serveConfig, stdout io.Writer) error {
 	if publicURL == "" {
 		publicURL = "http://" + addr
 	}
+	if err := hubConfigURL("--public-url", publicURL); err != nil {
+		return err
+	}
 	if target != "" {
 		own, err := hubid.NormalizeURL(publicURL)
 		if err != nil {
-			return fmt.Errorf("--public-url: %w", err)
+			return errors.New("--public-url: " + hubid.ErrHubForm.Error())
 		}
 		if target == own {
 			return errors.New("--relocated-to must differ from --public-url")
@@ -484,6 +547,7 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 		{key: "retention.ack_events", flag: "retention-ack-events"},
 		{key: "retention.history", flag: "retention-history"},
 		{key: "retention.archive_mode", flag: "retention-archive-mode"},
+		{key: "blobs.expiry", flag: "blobs-expiry"},
 		{key: "events.refresh_interval", flag: "events-refresh-interval"},
 		{key: "presence.default_ttl", flag: "presence-ttl"},
 		{key: "presence.session_ttl", flag: "session-presence-ttl"},
@@ -506,6 +570,8 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 		}
 		if d.Type == prefs.TypeDuration {
 			def = (time.Duration(n) * time.Second).String()
+		} else if d.Type == prefs.TypeEnum {
+			def, _ = d.Default.Enum()
 		}
 		// Usage can run before validation (help or any parser error). Only safe
 		// built-in defaults may enter flag metadata; resolve the environment below.
@@ -543,7 +609,7 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 				} else if raw != "false" {
 					return cfg, &prefs.Error{Code: prefs.CodeInvalidValue, Details: prefs.ErrorDetails{Field: b.key, Constraint: "boolean"}}
 				}
-			} else {
+			} else if d.Type != prefs.TypeEnum {
 				n, err = strconv.ParseInt(raw, 10, 64)
 			}
 			if err != nil {
@@ -555,6 +621,8 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 			}
 			if d.Type == prefs.TypeDuration {
 				value = prefs.Duration(n)
+			} else if d.Type == prefs.TypeEnum {
+				value = prefs.Enum(raw)
 			}
 			if err := prefs.Validate(d, value); err != nil {
 				return cfg, err

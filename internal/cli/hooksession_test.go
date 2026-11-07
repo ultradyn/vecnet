@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -587,6 +588,76 @@ func TestHookSubagentClaimsNothing(t *testing.T) {
 	}
 }
 
+// failingReader returns its bytes, then a read error.
+type failingReader struct{ data []byte }
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, errors.New("stdin read failed")
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+// Installed hooks always pass --event. Nonempty stdin that cannot be read
+// or decoded (a Codex tool_response over the 1 MiB cap, truncated JSON, a
+// read error) is not a manual run: the identity it carried, including a
+// foreign session_id or a subagent's agent_id, is unknown, so the run
+// claims nothing, prints nothing, polls nothing and leaves state, binding
+// and registry alone.
+func TestHookUnusableStdinClaimsNothing(t *testing.T) {
+	big, err := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": "S2", "agent_id": "agent-7f3a", "tool_name": "shell_command", "tool_response": strings.Repeat("x", 1<<20)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := map[string]func() io.Reader{
+		"oversized": func() io.Reader { return bytes.NewReader(big) },
+		"truncated": func() io.Reader {
+			return strings.NewReader(`{"hook_event_name":"PostToolUse","session_id":"S2","agent_id":"agent-7f3a"`)
+		},
+		"not json": func() io.Reader { return strings.NewReader("session S2\n") },
+		"read error": func() io.Reader {
+			return &failingReader{data: []byte(`{"hook_event_name":"PostToolUse","session_id":"S2"`)}
+		},
+	}
+	for name, input := range inputs {
+		t.Run(name, func(t *testing.T) {
+			env, path, polls := sessionHub(t)
+			noVecnetProfile(env)
+			seedSession(t, path, boundTo("S1"))
+			before, _ := os.ReadFile(path)
+			beforeBinding, _ := os.ReadFile(bindingPath(path))
+			for _, event := range []string{"post-tool", "user-prompt", "session-start"} {
+				var out, errs bytes.Buffer
+				if code := RunContext(context.Background(), []string{"hook", "--profile", "p", "--event", event}, input(), &out, &errs, func(k string) string { return env[k] }); code != 0 || out.Len() != 0 || errs.Len() != 0 {
+					t.Fatalf("%s: exit=%d out=%q errs=%q", event, code, out.String(), errs.String())
+				}
+			}
+			if after, _ := os.ReadFile(bindingPath(path)); !bytes.Equal(beforeBinding, after) {
+				t.Fatal("unusable stdin changed the binding")
+			}
+			if after, _ := os.ReadFile(path); !bytes.Equal(before, after) || polls.Load() != 0 {
+				t.Fatalf("unusable stdin changed state (%t) or polled (%d)", !bytes.Equal(before, after), polls.Load())
+			}
+			if _, err := os.Stat(sessionsPath(path)); !os.IsNotExist(err) {
+				t.Fatalf("unusable stdin wrote the registry: %v", err)
+			}
+		})
+	}
+	// Empty or whitespace-only stdin is still a manual run without a session.
+	for _, stdin := range []string{"", " \n"} {
+		env, path, _ := sessionHub(t)
+		noVecnetProfile(env)
+		seedSession(t, path, boundTo("S1"))
+		var out, errs bytes.Buffer
+		RunContext(context.Background(), []string{"hook", "--profile", "p", "--event", "user-prompt"}, strings.NewReader(stdin), &out, &errs, func(k string) string { return env[k] })
+		if !strings.Contains(contextOf(t, out.String()), "secret text") {
+			t.Fatalf("manual run %q missed the delivery: out=%q errs=%q", stdin, out.String(), errs.String())
+		}
+	}
+}
+
 // oldWriter rewrites path as a vecnet from before session binding would
 // (a long-running watch --for-monitor, or a stanza naming an older
 // binary): it knows only the pre-binding fields.
@@ -788,5 +859,170 @@ func TestHookNamesSenderFromSenderInfo(t *testing.T) {
 	item, _ = hookItemOf(hookEvent(2, "x"), map[string]string{"peer_h": "Cached"})
 	if item.Name != "Cached" {
 		t.Fatalf("fallback name=%q", item.Name)
+	}
+}
+
+func TestHookSessionStartAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name                                           string
+		declared, existing, foreign, ambiguous, rebind bool
+	}{
+		{name: "fresh unbound"}, {name: "existing unbound", existing: true},
+		{name: "declared prompt binding", declared: true, existing: true},
+		{name: "automatic prompt binding", existing: true},
+		{name: "foreign", existing: true, foreign: true},
+		{name: "ambiguous", existing: true, ambiguous: true},
+		{name: "explicit rebind window", existing: true, foreign: true, rebind: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, path, polls := sessionHub(t)
+			env["CODEX_HOME"] = filepath.Join(t.TempDir(), "codex")
+			if !tc.declared {
+				noVecnetProfile(env)
+			}
+			if tc.existing {
+				seedSession(t, path, func(s *hookState) {
+					if tc.foreign {
+						boundTo("other")(s)
+					}
+				})
+			}
+			if tc.ambiguous {
+				if _, err := registerSession(context.Background(), sessionsPath(path), "s1", "q", hookNow()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.rebind {
+				if code, out, errs := runCLI(env, "hook", "rebind", "--profile", "p"); code != 0 {
+					t.Fatalf("rebind: exit=%d out=%q stderr=%q", code, out, errs)
+				}
+			}
+			before, beforeErr := os.ReadFile(path)
+			beforeBinding, _ := os.ReadFile(bindingPath(path))
+			out, errs := runHookStdin(t, env, `{"hook_event_name":"SessionStart","session_id":"s1","source":"startup"}`, "hook", "--profile", "p")
+			if tc.rebind {
+				if !strings.Contains(contextOf(t, out), `text="secret text"`) || polls.Load() != 1 {
+					t.Fatalf("rebound start: out=%q stderr=%q polls=%d", out, errs, polls.Load())
+				}
+				if s := readHookState(t, path); s.Session != "s1" || s.SessionHow != bindRebind || !s.RebindUntil.IsZero() {
+					t.Fatalf("binding=%+v", s.hookBinding)
+				}
+				return
+			}
+			if out != "" || errs != "" || polls.Load() != 0 {
+				t.Fatalf("unadmitted start: out=%q stderr=%q polls=%d", out, errs, polls.Load())
+			}
+			after, afterErr := os.ReadFile(path)
+			afterBinding, _ := os.ReadFile(bindingPath(path))
+			if !bytes.Equal(before, after) || !bytes.Equal(beforeBinding, afterBinding) || errors.Is(beforeErr, os.ErrNotExist) != errors.Is(afterErr, os.ErrNotExist) {
+				t.Fatal("unadmitted start changed state or binding")
+			}
+			if tc.foreign || tc.ambiguous {
+				return
+			}
+			// Only a prompt may establish the binding. Declared prompts claim at
+			// once; automatic prompts on an existing cursor defer the first claim.
+			prompt, _ := runHookAs(t, env, "s1", "p")
+			s := readHookState(t, path)
+			wantHow := bindAuto
+			if tc.declared {
+				wantHow = bindDeclared
+			}
+			if s.Session != "s1" || s.SessionHow != wantHow {
+				t.Fatalf("prompt binding=%+v", s.hookBinding)
+			}
+			if tc.declared {
+				if !strings.Contains(contextOf(t, prompt), `text="secret text"`) || polls.Load() != 1 {
+					t.Fatalf("declared prompt failed to claim: %q polls=%d", prompt, polls.Load())
+				}
+				// Leave a new delivery for the already admitted SessionStart.
+				seedSession(t, path, func(s *hookState) { s.Shown = nil; s.PollCursor = "e1.0" })
+			} else if tc.existing && (prompt != "" || polls.Load() != 0) {
+				t.Fatalf("automatic prompt claimed too early: %q polls=%d", prompt, polls.Load())
+			}
+			beforePolls := polls.Load()
+			out, _ = runHookStdin(t, env, `{"hook_event_name":"SessionStart","session_id":"s1","source":"resume"}`, "hook", "--profile", "p")
+			if !strings.Contains(contextOf(t, out), `text="secret text"`) || !strings.Contains(out, `"hookEventName":"SessionStart"`) || polls.Load() != beforePolls+1 {
+				t.Fatalf("admitted start: out=%q polls=%d", out, polls.Load())
+			}
+		})
+	}
+}
+
+func TestHookSessionStartAgentIDSkip(t *testing.T) {
+	for _, bound := range []bool{false, true} {
+		t.Run(strconv.FormatBool(bound), func(t *testing.T) {
+			var requests atomic.Int32
+			env, path := hookFixtureRaw(t, func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				t.Errorf("unexpected request: %s", r.URL)
+				w.WriteHeader(500)
+			})
+			env["CODEX_HOME"] = filepath.Join(t.TempDir(), "codex")
+			if bound {
+				seedSession(t, path, boundTo("s1"))
+			}
+			before, _ := os.ReadFile(path)
+			binding, _ := os.ReadFile(bindingPath(path))
+			for _, args := range [][]string{{"hook", "--profile", "p"}, {"hook", "--profile", "p", "--event", "session-start"}} {
+				out, errs := runHookStdin(t, env, `{"hook_event_name":"SessionStart","session_id":"s1","agent_id":"agent-7","source":"resume"}`, args...)
+				if out != "" || errs != "" || requests.Load() != 0 {
+					t.Fatalf("out=%q stderr=%q requests=%d", out, errs, requests.Load())
+				}
+			}
+			if after, _ := os.ReadFile(path); !bytes.Equal(before, after) {
+				t.Fatal("agent changed state")
+			}
+			if after, _ := os.ReadFile(bindingPath(path)); !bytes.Equal(binding, after) {
+				t.Fatal("agent changed binding")
+			}
+			if _, err := os.Stat(sessionsPath(path)); !os.IsNotExist(err) {
+				t.Fatalf("agent touched registry: %v", err)
+			}
+			if !bound {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("agent created state: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestHookSessionStartMCPHints(t *testing.T) {
+	for _, summary := range []bool{false, true} {
+		for _, mcp := range []string{"", "vecnet-p", "vecnet-q"} {
+			t.Run(strconv.FormatBool(summary)+"/"+mcp, func(t *testing.T) {
+				var want string
+				for _, event := range []string{"user-prompt", "session-start"} {
+					env, path := hookFixture(t, func(w http.ResponseWriter, r *http.Request) {
+						if r.URL.Query().Get("after") == "head" {
+							hookPage(w, nil, "e1.0")
+						} else {
+							hookPage(w, []envelope.Event{hookEvent(1, "secret text")}, "e1.1")
+						}
+					})
+					env["CODEX_HOME"] = filepath.Join(t.TempDir(), "codex")
+					seedSession(t, path, func(s *hookState) {
+						boundTo("s1")(s)
+						if summary {
+							s.PollCursor = ""
+						}
+					})
+					out, _ := runHookStdin(t, env, `{"session_id":"s1"}`, "hook", "--profile", "p", "--event", event, "--mcp", mcp)
+					ctx := contextOf(t, out)
+					if (mcp == "vecnet-p") != strings.Contains(ctx, "MCP server vecnet-p") {
+						t.Fatalf("mcp=%q context=%q", mcp, ctx)
+					}
+					if !strings.Contains(ctx, "vecnet --net p ") || !strings.Contains(ctx, "Commands need the same VECNET_CONFIG (v.toml).") {
+						t.Fatalf("qualification lost: %q", ctx)
+					}
+					if want == "" {
+						want = ctx
+					} else if ctx != want {
+						t.Fatalf("start context=%q, prompt context=%q", ctx, want)
+					}
+				}
+			})
+		}
 	}
 }

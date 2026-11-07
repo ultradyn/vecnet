@@ -39,7 +39,7 @@ try {
       await keys(':');
       await waitFor('COMMAND');
       await keys('thread 1', 'Enter');
-      await waitFor('─ Attachment journey');
+      await waitFor('━ Attachment journey');
       await waitFor('Share screenshots here.');
 
       // A synthetic clipboard image exercises the real paste handler and upload.

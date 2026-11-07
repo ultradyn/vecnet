@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -154,12 +153,8 @@ func TestHookHintsQualifiedWithProfile(t *testing.T) {
 	env["VECNET_PROFILE"] = "q" // a session launched as q (a mismatch would silence the hook)
 	run := func(env map[string]string) string {
 		t.Helper()
-		var out, errs bytes.Buffer
-		code := RunContext(context.Background(), []string{"--as", "peer_1", "hook", "--profile", "q", "--event", "user-prompt"}, strings.NewReader(""), &out, &errs, func(k string) string { return env[k] })
-		if code != 0 {
-			t.Fatalf("exit=%d stderr=%q", code, errs.String())
-		}
-		return contextOf(t, out.String())
+		out, _ := runHookFormatting(t, env, "--as", "peer_1", "hook", "--profile", "q", "--event", "user-prompt")
+		return contextOf(t, out)
 	}
 	const cmd = "vecnet --net q --as peer_1 "
 	bare := regexp.MustCompile(`vecnet (reply|ack|inbox)`)

@@ -72,7 +72,7 @@ func TestSubscriptionsEmptyAndStrictInput(t *testing.T) {
 		}
 	}
 	for _, field := range []string{"peer", "peer_id", "as"} {
-		if path := invalidPath(t, env, env.OperatorSecret, "vecnet_subscriptions", map[string]any{field: peer}); path != "/"+field {
+		if path := invalidPath(t, env, env.OperatorSecret, "vecnet_subscriptions", map[string]any{field: peer}); path != "/<unknown>" {
 			t.Errorf("identity override %s: path = %q", field, path)
 		}
 	}

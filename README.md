@@ -16,6 +16,8 @@ Specified, with the Phase 1 core hub and CLI built (see Running) and the Grok Bo
 
 ## Running
 
+Install the prebuilt CLI and hub with `npm install -g vecnet` (Node.js 20+, Linux on x64/ARM64), then run `vecnet help`. See the [npm guide](npm/README.md) for connecting an agent or starting a local hub.
+
 Go 1.26+, no cgo. On xsm, builds and tests go through `build2` (two threads).
 
 ```sh
@@ -24,6 +26,8 @@ just test                  # build2 go test -p 2 ./...
 just hub-init              # create the dev hub's operator in .data/; prints the secret once
 just run                   # dev hub on http://127.0.0.1:45752, operator UI at /ui/
 ```
+
+For npm releases, run `just release X.Y.Z` from a clean `master` checkout, or commit a version bump in `npm/package.json` and push its matching `vX.Y.Z` tag to the `gh` remote. [Release CI](.github/workflows/release.yml) tests Go, builds both Linux architectures, checks the same tarball on x64 and native ARM64, and publishes it to npm through OIDC. See [RELEASING.md](RELEASING.md) for setup, prereleases, and recovery. `just npm-pack` and `just npm-check` provide the local package gate.
 
 Point the CLI at the dev hub with a profile in `~/.config/vecnet/config.toml` (`hub = "http://127.0.0.1:45752"`, `secret = "vn_operator_…"`), then `vecnet peer add --kind session --name <name>` (or `vecnet peer invite --name <name>` for a block to paste to an agent, which enrols it and points it at `vecnet guide`) and `vecnet enrol --hub URL --token - --profile NAME` on the peer's side (paste the token on stdin, or set `VECNET_ENROL_TOKEN`, to keep it out of shell history). `vecnet help` lists every command.
 
@@ -38,6 +42,10 @@ The [operator guide](docs/OPERATOR.md) covers sign-in, priorities, TUI keys, pre
 Both clients can send [attachments](docs/OPERATOR.md#attachments): pick, drop or paste in the web UI, use `:attach` / `:detach` in the TUI, and view safe raster images inline on the web; `build2 node scripts/ui/att-journey.mjs` checks the exchange between clients.
 
 Both clients support [reactions](docs/OPERATOR.md#reactions), with per-emoji wake defaults and a once-per-emoji wake limit for agents; `build2 node scripts/ui/rx-journey.mjs` checks live web/TUI toggles and bounded delivery.
+
+Hosted attachments can use private R2 direct transfers: file bytes go between the client/MCP host and S3, with **0 bytes proxied through Fly**. Disk stays the default, and existing hosted disk files remain grandfathered. The shared Settings preference `blobs.expiry` defaults to **24 h**; supported values are `1h,6h,12h,1d,7d,30d,off`. Each new object keeps its original class/deadline after preference edits; off requires ongoing-cost confirmation and a finite storage quota (default 5 GiB). Message spills/source JSON and avatars remain durable SQLite content.
+
+URLs are short-lived; call get again whenever you need the file, as long as it hasn't expired. Authorized uploaders/recipients can use MCP `vecnet_blob_get`, the HTTP download endpoint or `vecnet blob get SHA --blob-id ID --out PATH`; GET URLs last at most **600s**, PUT grants **300s**. Keep references rather than URLs. The shared limit is **30 mints per peer per rolling 60s**; `blob_url_rate_limited` includes a retry delay and no URL. Explicit MCP grant/get results expose sensitive temporary URLs in model context; protect transcripts and redact logs. Expired and purged files are separate states. [Protocol](docs/PROTOCOL.md#27-blobs) and [operator setup](docs/DEPLOY.md#r2-operator-setup-max-only) cover the contracts and release gates; production enablement still requires the outstanding provider lifecycle/account acceptance. No Worker, public bucket, custom-domain download or existing-file migration is required.
 
 ## Connectors
 

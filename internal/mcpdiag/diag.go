@@ -49,7 +49,7 @@ var codes = words("ok error none invalid expired insufficient_scope success reje
 // Body-supplied names are fixed protocol vocabulary, never free-form text.
 var eventNames = words("vecnet.message")
 var deliveryModes = words("webhook")
-var toolNames = words("vecnet_guide vecnet_send vecnet_reply vecnet_react vecnet_inbox vecnet_subscriptions vecnet_ack vecnet_receipt vecnet_presence vecnet_presence_subscribe vecnet_threads vecnet_thread vecnet_peers vecnet_peer_create vecnet_peer_set_disabled vecnet_groups vecnet_group_create vecnet_group_add vecnet_whoami vecnet_blob_put vecnet_blob_get vecnet_set_avatar vecnet_clear_avatar")
+var toolNames = words("vecnet_guide vecnet_send vecnet_reply vecnet_react vecnet_inbox vecnet_subscriptions vecnet_ack vecnet_receipt vecnet_presence vecnet_presence_subscribe vecnet_threads vecnet_thread vecnet_peers vecnet_peer_create vecnet_peer_invite_get vecnet_peer_invite_revoke vecnet_peer_set_disabled vecnet_groups vecnet_group_create vecnet_group_add vecnet_whoami vecnet_blob_put vecnet_blob_get vecnet_set_avatar vecnet_clear_avatar")
 
 func words(s string) map[string]bool {
 	m := map[string]bool{}
@@ -185,7 +185,7 @@ func sanitize(in map[string]any) map[string]any {
 			case float64:
 				out[k] = n
 			}
-		case "session_present", "origin_present", "secret_present", "secret_valid_shape", "cursor_present", "cursor_null", "retry", "dead":
+		case "session_present", "origin_present", "secret_present", "secret_valid_shape", "cursor_present", "cursor_null", "retry", "dead", "tool_arguments_meta_present":
 			if x, ok := v.(bool); ok {
 				out[k] = x
 			}

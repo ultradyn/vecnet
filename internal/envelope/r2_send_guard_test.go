@@ -14,10 +14,9 @@ import (
 )
 
 // TestSendRejectsR2ReferenceOnDiskPipeline preserves the send regression at
-// the envelope integration boundary. The disk-only send schema rejects R2
+// the backend authorization boundary. The disk-only pipeline rejects R2
 // references before SHA lookup or origin_url fallback, creates no Message or
-// Event, and continues to admit ordinary disk references. Grant-aware sends
-// are deferred to Task 4; the future reference contract is tested separately.
+// Event, and continues to admit ordinary disk references.
 func TestSendRejectsR2ReferenceOnDiskPipeline(t *testing.T) {
 	env := testhub.Start(t)
 	_, aSec := env.NewPeer("session", "A")

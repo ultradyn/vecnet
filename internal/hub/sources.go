@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/XertroV/vecnet/internal/audit"
+	"github.com/XertroV/vecnet/internal/blob"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/ids"
 )
@@ -72,6 +73,8 @@ type SourceMessage struct {
 type sourceActor struct {
 	id, target, name   string
 	providerID, origin string
+	durableRaw         []byte
+	durableMedia       string
 }
 
 func unknownSource(srcID string) *APIError {
@@ -404,6 +407,17 @@ func (h *Hub) IngestSource(ctx context.Context, m SourceMessage) (msgID string, 
 	if media == "" {
 		media = "application/json"
 	}
+
+	if h.Blobs.Transfers != nil {
+		if len(m.Raw) > blob.DurableSourceMaxSize {
+			return "", false, E(http.StatusRequestEntityTooLarge, "blob_too_large", "source payload exceeds ingress cap")
+		}
+		resp, _, err := h.sendAs(ctx, actor{src: &sourceActor{id: src.id, target: src.target, name: src.name, providerID: m.ProviderDeliveryID, origin: m.OriginThreadID, durableRaw: m.Raw, durableMedia: media}}, "inbound_webhook", req, "")
+		if err != nil {
+			return "", false, err
+		}
+		return resp.MessageID, false, nil
+	}
 	meta, err := h.putBlobAs(ctx, src.id, bytes.NewReader(m.Raw), media, 0)
 	if err != nil {
 		return "", false, err
@@ -533,4 +547,20 @@ func recordSourceSend(ctx context.Context, tx *sql.Tx, src *sourceActor, thr *th
 		return fmt.Errorf("hub: record source thread: %w", err)
 	}
 	return nil
+}
+
+func (h *Hub) sourceDataError(err error) error {
+	switch {
+	case errors.Is(err, blob.ErrR2Metadata):
+		return invalidValue("content_type", "Content-Type is not a valid source media type")
+	case errors.Is(err, blob.ErrQuota):
+		e := E(http.StatusTooManyRequests, "upload_quota_exceeded", "source daily payload quota exceeded")
+		e.Details["retry_after_seconds"] = secondsToUTCMidnight(h.Now())
+		return e
+	case errors.Is(err, blob.ErrTooLarge):
+		return E(http.StatusRequestEntityTooLarge, "blob_too_large", "source payload exceeds ingress cap")
+	case errors.Is(err, blob.ErrPurged):
+		return E(http.StatusGone, "blob_purged", "source payload was purged")
+	}
+	return err
 }

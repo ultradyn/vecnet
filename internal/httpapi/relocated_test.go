@@ -73,7 +73,7 @@ func TestRelocatedServesIdentityAndNotices(t *testing.T) {
 	_, peer := e.NewPeer("session", "reader")
 	n := e.Relocate(t, "https://next.example")
 	resp, raw := e.Do("", "GET", "/healthz", nil)
-	if resp.StatusCode != 200 || string(raw) != "{\"ok\":true}\n" {
+	if resp.StatusCode != 200 || string(raw) != "{\"ok\":true,\"version\":\"dev\",\"commit\":\"unknown\",\"commit_date\":\"unknown\"}\n" {
 		t.Fatalf("health: %d %s", resp.StatusCode, raw)
 	}
 	challenge := identityChallenge()

@@ -298,6 +298,28 @@ func TestRetryAll(t *testing.T) {
 	})
 }
 
+// A non-operator hub refusal on :peer archive must surface as an error and
+// must not toast success. The fake stands in for the hub's RequirePeerLifecycle.
+func TestPeerLifecycleForbidden(t *testing.T) {
+	m, p, api := cmdModel(t, newClock())
+	m.API = &lifecycleFailAPI{fakeAPI: api.fakeAPI, err: &opclient.Error{Status: 403, Code: "forbidden", Message: "operator credential required"}}
+	submit(p, "peer archive peer_target")
+	p.until("the refusal", func() bool { return strings.Contains(m.toast.text, "forbidden") })
+	if !m.toast.bad || strings.Contains(m.toast.text, "complete") {
+		t.Fatalf("toast = %q bad=%v, want a forbidden error and no success", m.toast.text, m.toast.bad)
+	}
+	if m.Conn != ConnLive {
+		t.Fatalf("Conn = %q, want live: a lifecycle 403 is not a rejected operator credential", m.Conn)
+	}
+}
+
+type lifecycleFailAPI struct {
+	*fakeAPI
+	err error
+}
+
+func (a *lifecycleFailAPI) PeerLifecycle(context.Context, string, string) error { return a.err }
+
 func TestCompletionAndHistory(t *testing.T) {
 	t.Run("tab completes a unique name", func(t *testing.T) {
 		m, p, _ := cmdModel(t, newClock())
@@ -332,7 +354,7 @@ func TestCompletionAndHistory(t *testing.T) {
 	t.Run("tab finds every registered command", func(t *testing.T) {
 		m, p, _ := cmdModel(t, newClock())
 		m.Commands["msg"] = Command{Help: "<peer> <text>  new thread"}
-		p.press(":", "m")
+		p.press(":", "m", "s")
 		keyTab(p)
 		wantInput(t, m, "msg ")
 		if _, ok := m.Commands["msg"]; !ok {
@@ -467,6 +489,7 @@ func TestHelpGolden(t *testing.T) {
 	for _, text := range []string{
 		"1-4", "switch tab", "q", "quit", "command line", "ctrl+l", "reload everything", // global keys
 		"j/k move  a answer", // the current screen
+		":prefs", "show read-only hub preferences",
 		":presence <idle|working|blocked|offline>", ":q", ":refresh", ":retry all", ":tab <name>", ":thread <n>",
 	} {
 		if !strings.Contains(frame, text) {

@@ -56,6 +56,19 @@ export function invite(res, origin, suggested) {
   };
 }
 
+// PLACEHOLDER starts the name the hub gives an open invite with no
+// suggestion (hub.AddPeerWith; the CLI's placeholderPrefix).
+export const PLACEHOLDER = 'invited-';
+
+// reinvite is invite() for a re-issue (POST /v1/admin/peers/{id}/enrol-token,
+// the peer page's New invite): the operator typed no name now, so an open
+// name is a suggestion unless it is still the hub's placeholder, exactly as
+// `vecnet peer invite <peer>` decides. The text is Add agent's, byte for byte.
+export function reinvite(res, origin) {
+  const name = typeof res.name === 'string' ? res.name : '';
+  return invite(res, origin, !!res.name_open && !name.startsWith(PLACEHOLDER));
+}
+
 // dotLink is the web-only panel for a dot (the CLI prints `vecnet peer link`
 // instead): the MCP URL to add in ChatGPT, from the hub's public URL like an
 // invite, and the setup steps. res: the POST /v1/admin/peers answer.

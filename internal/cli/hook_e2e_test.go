@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -194,5 +195,71 @@ func TestHookAndWatchShowOnce(t *testing.T) {
 		if n := strings.Count(combined, fmt.Sprintf("m%d", i)); n != 1 {
 			t.Errorf("m%d appears %d times across watch and hook: %q", i, n, combined)
 		}
+	}
+}
+
+func TestHookCodexStdinShapes(t *testing.T) {
+	env := testhub.Start(t)
+	aID, aSec := env.NewPeer("session", "A")
+	_, bSec := env.NewPeer("session", "B")
+	a, b := hookUser(t, env.URL, aSec), hookUser(t, env.URL, bSec)
+	for _, u := range []*user{a, b} {
+		u.env["CODEX_HOME"] = filepath.Join(t.TempDir(), "codex")
+	}
+	run := func(input string) string {
+		t.Helper()
+		var out, errs bytes.Buffer
+		if code := cli.RunContext(context.Background(), []string{"hook"}, strings.NewReader(input), &out, &errs, a.getenv); code != 0 {
+			t.Fatalf("exit=%d stderr=%q", code, errs.String())
+		}
+		return out.String()
+	}
+	if out := run(`{"hook_event_name":"UserPromptSubmit","session_id":"s1"}`); out != "" {
+		t.Fatalf("seed printed %q", out)
+	}
+	b.send(aID, "codex hello", "--wake")
+	out := run(`{"session_id":"s1","transcript_path":"/x","cwd":"/w","hook_event_name":"SessionStart","model":"m","source":"resume","permission_mode":"default"}`)
+	ctx := hookE2EContext(t, out, "SessionStart")
+	for _, want := range []string{`text="codex hello"`, "vecnet --net "} {
+		if !strings.Contains(ctx, want) {
+			t.Fatalf("missing %q in %q", want, ctx)
+		}
+	}
+	raw, err := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "shell_command", "tool_input": map[string]any{}, "tool_response": strings.Repeat("x", 900*1024)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) >= 1<<20 {
+		t.Fatalf("fixture exceeds stdin cap: %d", len(raw))
+	}
+	// SessionStart just recorded a post-tool poll; clear it so the large
+	// input must be accepted and reach the poll, not the five-second rate
+	// limit. A second canary proves delivery; the first must not repeat.
+	statePath := filepath.Join(filepath.Dir(a.conf), "state", "p.json")
+	state, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(state, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["last_post_tool_poll"]; !ok {
+		t.Fatalf("SessionStart recorded no post-tool poll: %s", state)
+	}
+	delete(fields, "last_post_tool_poll")
+	if state, err = json.Marshal(fields); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.send(aID, "codex second", "--wake")
+	ctx = hookE2EContext(t, run(string(raw)), "PostToolUse")
+	if !strings.Contains(ctx, `text="codex second"`) || strings.Contains(ctx, "codex hello") {
+		t.Fatalf("large post-tool context %q", ctx)
+	}
+	if out := run(string(raw)); out != "" {
+		t.Fatalf("post-tool repeated delivery: %q", out)
 	}
 }

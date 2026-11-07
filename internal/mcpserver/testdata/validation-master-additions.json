@@ -1,0 +1,60 @@
+{
+  "vecnet_peer_invite_get": {
+    "$defs": {
+      "peerId": {
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "peer_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "peer_id"
+    ],
+    "type": "object"
+  },
+  "vecnet_peer_invite_revoke": {
+    "$defs": {
+      "peerId": {
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "peer_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "peer_id"
+    ],
+    "type": "object"
+  },
+  "vecnet_peer_lifecycle": {
+    "$defs": {
+      "peerId": {
+        "pattern": "^peer_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "type": "string"
+      },
+      "peer_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "peer_id",
+      "action"
+    ],
+    "type": "object"
+  }
+}

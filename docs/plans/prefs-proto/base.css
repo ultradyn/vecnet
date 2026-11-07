@@ -1,0 +1,163 @@
+/* vecnet operator UI: shell, tokens and parts every screen shares. No inline
+   style anywhere (CSP). Screens own their stylesheet. */
+:root{
+  --bg:#0b0f19;--panel:#10162a;--panel2:#151c33;--line:#222b45;--line2:#2c3756;
+  --text:#f3f4f6;--muted:#9aa4b8;--dim:#5f6a84;
+  --grad:linear-gradient(135deg,#6366f1 0%,#a855f7 100%);
+  --wake:#fbbf24;--widle:#38bdf8;--hold:#8391ad;--ok:#34d399;--bad:#fb7185;--violet:#a5b4fc;
+  --sans:'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+/* scrollbars: thin, slate thumb on a clear track, everywhere (Chrome 121+ and Firefox use
+   these standard properties; older WebKit falls back to the pseudo-elements below) */
+*{scrollbar-width:thin;scrollbar-color:var(--line2) transparent}
+*:hover{scrollbar-color:#3d4a73 transparent}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track,::-webkit-scrollbar-corner{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--line2);border-radius:8px;border:2px solid transparent;background-clip:padding-box}
+::-webkit-scrollbar-thumb:hover{background:#3d4a73;background-clip:padding-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--sans);-webkit-font-smoothing:antialiased}
+button,input,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+a{color:inherit}
+[hidden]{display:none!important}
+/* Each inline run is its own bidi island: a right-to-left peer name cannot
+   reorder the UI words or the other peer strings beside it (§14.2). */
+span,b,time,code,a{unicode-bidi:isolate}
+:focus-visible{outline:2px solid #a855f7;outline-offset:2px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+.nojs{padding:40px;color:var(--muted)}
+.mono{font-family:var(--mono)}
+
+/* chips */
+.prio{font:500 10.5px/1 var(--mono);padding:3px 6px;border-radius:4px;border:1px solid;white-space:nowrap}
+.prio.wake{color:var(--wake);border-color:#fbbf2450;background:#fbbf2412}
+.prio.wake_idle{color:var(--widle);border-color:#38bdf850;background:#38bdf812}
+.prio.hold{color:var(--hold);border-color:#8391ad50;background:#8391ad12}
+/* priority tips (prio.js, issue 21): shown on hover or keyboard focus, hidden by Escape */
+.ptips{position:relative;display:inline-flex;align-self:flex-start}
+.ptip{display:none;position:absolute;left:0;bottom:calc(100% + 8px);z-index:40;width:max-content;max-width:min(300px,calc(100vw - 32px));padding:8px 11px;border:1px solid var(--line2);border-radius:7px;background:#1a2139;color:#dfe3ea;font:400 12px/1.5 var(--sans);text-align:left;white-space:normal;box-shadow:0 12px 30px #000a;pointer-events:none}
+.ptip b{display:block;margin-bottom:3px;font:500 11px var(--mono);color:var(--c)}
+.seg button:focus-visible{outline-offset:-2px;border-radius:6px}
+.ptip[data-p=wake]{--c:var(--wake)}.ptip[data-p=wake_idle]{--c:var(--widle)}.ptip[data-p=hold]{--c:var(--hold)}
+.ptips:not(.quiet):has(button[value=wake]:is(:hover,:focus-visible)) .ptip[data-p=wake],
+.ptips:not(.quiet):has(button[value=wake_idle]:is(:hover,:focus-visible)) .ptip[data-p=wake_idle],
+.ptips:not(.quiet):has(button[value=hold]:is(:hover,:focus-visible)) .ptip[data-p=hold]{display:block}
+.att{display:inline-flex;align-items:center;gap:6px;font:500 12px var(--mono);padding:4px 8px;border-radius:6px;border:1px solid var(--line2);background:#0d1325;color:#cbd5e1}
+.att .sz{color:var(--dim)}
+.att.spill{border-style:dashed;border-color:#a855f780}
+.st-queued{--c:#64748b}.st-pushed{--c:#38bdf8}.st-accepted{--c:#818cf8}.st-processed{--c:#34d399}.st-read{--c:#e2e8f0}
+.st-failed,.st-dead_letter{--c:#fb7185}.st-expired{--c:#a1a1aa}
+.btn{border:1px solid var(--line2);background:#151c33;border-radius:7px;padding:6px 12px;font-size:13px}
+.btn:hover{border-color:#6366f1}
+.btn.pri{background:var(--grad);border-color:transparent;color:#fff}
+.btn:disabled{opacity:.45;cursor:default}
+.linkbtn{border:0;background:none;color:var(--dim);font-size:12px;padding:6px 9px;text-align:left}
+.linkbtn:hover{color:var(--text)}
+#toast{position:fixed;top:18px;left:50%;transform:translateX(-50%) translateY(-90px);z-index:70;background:#1e2640;border:1px solid var(--line2);color:var(--text);padding:9px 14px;border-radius:8px;font-size:13px;transition:transform .25s ease;box-shadow:0 10px 30px #0008;max-width:80vw}
+#toast.on{transform:translateX(-50%) translateY(0)}
+#toast.bad{border-color:#fb718580}
+
+/* login */
+.login{min-height:100%;display:grid;place-items:center;padding:24px}
+.card{width:min(420px,100%);border:1px solid var(--line);border-radius:12px;background:#0e1426;padding:28px;display:flex;flex-direction:column;gap:10px}
+.card h1{font-size:21px;font-weight:600;margin:8px 0 0}
+.card .lede{color:var(--muted);font-size:13.5px;line-height:1.6;margin:0 0 6px}
+.card label{font-size:12px;color:var(--dim)}
+.card input{background:#0b1020;border:1px solid var(--line2);border-radius:7px;padding:9px 11px;font-family:var(--mono);font-size:13px}
+.card .btn{padding:9px 12px;margin-top:4px}
+.err{color:var(--bad);font-size:13px;min-height:1em;margin:0}
+.brand{display:flex;align-items:center;gap:9px;font-weight:600;font-size:14.5px}
+.logo{width:22px;height:22px;background:url(logo.svg) center/contain no-repeat;flex:none}
+
+/* layout */
+.va{display:grid;grid-template-columns:240px minmax(0,1fr) 300px;height:100vh}
+.va .side{border-right:1px solid var(--line);padding:20px 10px 24px;overflow:auto;background:#0c1120;display:flex;flex-direction:column}
+.va .side .brand{padding:2px 8px 18px}
+.va .brand .hub{margin-left:auto;font:400 11px var(--mono);color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}
+.va .nav a{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:6px 9px;border-radius:6px;color:var(--muted);text-decoration:none;font-size:13.5px}
+.va .nav a:hover{background:#141a2e;color:var(--text)}
+.va .nav a.on{background:#1a2139;color:var(--text)}
+.va .nav a.unread .tt{color:var(--text);font-weight:600}
+.va .nav .tt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.va .nav .cnt{font:500 11px var(--mono);color:var(--dim);flex:none}
+.va .nav .cnt.hot{color:#0b0f19;background:var(--wake);border-radius:9px;padding:1px 6px}
+/* Add agent (invite.js): an action, not a route, so a quiet dashed button
+   under the route links. It opens the dialog over whatever view is showing. */
+.va .nav .nav-add{display:flex;align-items:center;gap:8px;width:100%;margin:6px 0 0;padding:6px 9px;border:1px dashed var(--line2);border-radius:6px;background:none;color:var(--muted);font-size:13.5px;text-align:left}
+.va .nav .nav-add:hover:not(:disabled){border-style:solid;border-color:#6366f1;background:#141a2e;color:var(--text)}
+.va .nav .nav-add:disabled{opacity:.45;cursor:default}
+.nav-add .plus{width:16px;height:16px;flex:none;border-radius:4px;background:linear-gradient(#fff,#fff) center/8px 1.5px no-repeat,linear-gradient(#fff,#fff) center/1.5px 8px no-repeat,var(--grad)}
+.va .nav .none{font-size:12.5px;color:var(--dim);padding:4px 9px}
+.va .grp{font-size:12px;color:var(--dim);padding:20px 9px 6px}
+/* Thread rows (Your Threads and Other Threads): title and count, then
+   participants and last activity. An untitled thread's stand-in is dim italic. */
+.va .nav.rows a{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:8px;row-gap:1px;align-items:baseline;padding:5px 9px}
+.va .nav.rows .tt.un{color:var(--dim);font-style:italic}
+.va .nav.rows a:hover .tt.un,.va .nav.rows a.on .tt.un{color:var(--muted)}
+.va .nav.rows .pp{font-size:11.5px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.va .nav.rows .nums,.va .nav.rows .ago{justify-self:end}
+/* A row's unread count: the inbox badge's shape and font, tinted rather than
+   filled, so the two never read as one another. It takes the message count's
+   place (still in the row's tip), so a narrow sidebar keeps the title. */
+.va .nav.rows .nums{display:flex;align-items:baseline;gap:6px}
+.va .nav.rows a.unread .cnt{display:none}
+.va .nav.rows .ur{font:600 10.5px/15px var(--mono);color:var(--wake);background:#fbbf241a;border:1px solid #fbbf2466;border-radius:9px;padding:0 5px;flex:none}
+.va .nav.rows a.unread .tt.un{color:var(--muted)}
+.va .nav.rows .ago{font:400 11px var(--mono);color:var(--dim)}
+.va .nav.rows a:hover .pp,.va .nav.rows a.on .pp{color:var(--muted)}
+.va .nav .more{display:block;color:var(--dim);font-size:12px;padding:6px 9px;text-decoration:none}
+.va .nav .more:hover{color:var(--text)}
+.va .me{display:flex;align-items:center;gap:8px;padding:6px 9px;font-size:13px;color:var(--muted)}
+.conn{display:flex;align-items:center;gap:7px;padding:4px 9px;font:400 11.5px var(--mono);color:var(--dim);margin-top:auto}
+.conn i{width:7px;height:7px;border-radius:50%;background:#64748b}
+.conn.live i{background:var(--ok)}
+.conn.retry i{background:var(--wake)}
+.conn.off i{background:var(--bad)}
+.dot{width:7px;height:7px;border-radius:50%;background:#64748b;flex:none;display:inline-block}
+.dot.idle{background:var(--ok)}.dot.working{background:var(--wake)}.dot.blocked{background:var(--bad)}.dot.offline{background:none;border:1.5px solid #64748b}
+.va main{overflow:auto;padding:40px 48px 40px}
+.va .col{max-width:740px;margin:0 auto}
+.va h1{font-size:23px;font-weight:600;letter-spacing:-.015em;margin:0 0 8px;overflow-wrap:anywhere}
+.va .lede{color:var(--muted);font-size:14px;line-height:1.65;margin:0 0 8px;max-width:64ch}
+.va h2{font-size:14.5px;font-weight:600;margin:32px 0 12px;display:flex;gap:8px;align-items:baseline}
+.va h2 .n{color:var(--dim);font-weight:400;font-size:13px}
+.empty{border:1px dashed var(--line2);border-radius:9px;padding:28px 22px;color:var(--muted);font-size:13.5px;line-height:1.6;margin-top:24px}
+.empty b{color:var(--text);font-weight:600;display:block;margin-bottom:4px}
+.va aside{border-left:1px solid var(--line);padding:40px 22px;overflow:auto;font-size:13px;color:var(--muted);line-height:1.6}
+.va .av{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;font:600 12.5px var(--sans);color:#0b0f19;background:#818cf8}
+.va .av.pic{overflow:hidden}.va .av.pic>img{display:block;width:100%;height:100%;object-fit:cover;border-radius:inherit}
+.va .av.k1{background:#fbbf24}.va .av.k2{background:#34d399}.va .av.k3{background:#38bdf8}.va .av.k4{background:#f472b6}.va .av.k5{background:#fb923c}.va .av.op{background:var(--grad);color:#fff}
+body[data-route=dash] aside,body[data-route=new] aside,body[data-route=peer] aside{display:none}
+.chip{font:500 10.5px/1 var(--mono);padding:3px 6px;border-radius:4px;border:1px solid var(--line2);color:var(--muted);white-space:nowrap}
+.btn.armed{border-color:#fb718580;color:var(--bad)}
+
+/* ids (dom.js idText): the whole id is in the text and the middle is a
+   zero-size run, so a selection copies the full id. The ellipsis is
+   generated content, which is never selected or copied. */
+.idv{font-family:var(--mono);white-space:nowrap;user-select:all;-webkit-user-select:all;cursor:text}
+.idv .im{font-size:0;letter-spacing:0}
+.idv .it::before{content:'\2026'}
+/* copy buttons: quiet until the row is hovered or the button has focus */
+.idc{display:inline-flex;align-items:center;gap:4px;max-width:100%}
+.cpy{position:relative;flex:none;width:20px;height:18px;padding:0;border:1px solid transparent;border-radius:4px;background:none;color:var(--dim);opacity:0;transition:opacity .12s}
+.cpy::before,.cpy::after{content:'';position:absolute;width:7px;height:8px;border:1.3px solid currentColor;border-radius:2px}
+.cpy::before{left:5px;top:3px}
+.cpy::after{left:8px;top:6px;background:var(--bg)}
+.cpy:hover{color:var(--text);border-color:var(--line2)}
+.idc:hover .cpy,.pv-id .cpy,.cpy:focus-visible,.cpy.done{opacity:1}
+.cpy.done{color:var(--ok)}
+.cpy.done::before{left:6px;top:2px;width:5px;height:9px;border-width:0 1.6px 1.6px 0;border-radius:0;transform:rotate(45deg)}
+.cpy.done::after{display:none}
+@media (hover:none){.cpy{opacity:.7}}
+.copybuf{position:fixed;top:0;left:-9999px;opacity:0}
+/* peer links (dom.js peerLink): the name, underlined only on hover */
+a.plink,span.plink{color:inherit;text-decoration:none;cursor:pointer;border-bottom:1px dotted #a5b4fc66}
+a.plink:hover,span.plink:hover{color:var(--violet);border-bottom-color:var(--violet)}
+.empty.error{border-color:#fb718580}
+
+@media (min-width:1101px){body[data-route=dash] .va,body[data-route=new] .va,body[data-route=peer] .va{grid-template-columns:240px minmax(0,1fr)}}
+@media (max-width:1100px){.va{grid-template-columns:220px minmax(0,1fr)}.va aside{display:none}}
+@media (max-width:720px){.va{grid-template-columns:1fr;height:auto;min-height:100vh}.va .side{border-right:0;border-bottom:1px solid var(--line)}.va main{padding:24px 16px}}

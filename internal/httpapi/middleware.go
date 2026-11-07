@@ -68,7 +68,7 @@ func isPublic(r *http.Request) bool {
 		return true
 	case p == "/ui" || strings.HasPrefix(p, "/ui/"):
 		return true
-	case strings.HasPrefix(p, "/v1/blobs/") && r.URL.Query().Has("t"):
+	case (r.Method == http.MethodGet || r.Method == http.MethodHead) && strings.HasPrefix(p, "/v1/blobs/") && !strings.HasPrefix(p, "/v1/blobs/uploads/") && r.URL.Query().Has("t"):
 		return true
 	}
 	return false
@@ -77,6 +77,46 @@ func isPublic(r *http.Request) bool {
 // isOperatorOnly reports the admin paths (PROTOCOL §2.12).
 func isOperatorOnly(p string) bool {
 	return p == "/v1/admin" || strings.HasPrefix(p, "/v1/admin/")
+}
+
+// redirectBrowserRoot sends a browser that opens the hub root to the
+// operator UI (PROTOCOL §2). It sits outside authenticate and inside
+// throttle. GET or HEAD of exactly "/", with no Authorization header, and
+// an Accept containing "text/html" or a User-Agent starting with "Mozilla/",
+// answers 302 with Location /ui/. Every other request continues, so an API
+// client still gets the JSON error.
+func redirectBrowserRoot(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if browserRootRedirect(r) {
+			http.Redirect(w, r, "/ui/", http.StatusFound)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// browserRootRedirect reports a browser navigation of the hub root.
+func browserRootRedirect(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if r.URL.Path != "/" {
+		return false
+	}
+	if _, ok := r.Header["Authorization"]; ok {
+		return false
+	}
+	for _, v := range r.Header.Values("Accept") {
+		if strings.Contains(v, "text/html") {
+			return true
+		}
+	}
+	for _, v := range r.Header.Values("User-Agent") {
+		if strings.HasPrefix(v, "Mozilla/") {
+			return true
+		}
+	}
+	return false
 }
 
 // bearer extracts the secret from "Authorization: Bearer <secret>".

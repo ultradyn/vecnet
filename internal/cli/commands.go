@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/oklog/ulid/v2"
 
@@ -56,20 +57,28 @@ messaging:
        default priority depends on the emoji: ✅ ❓ ❗ wake_idle, others hold
   mcp                                 stdio MCP relay to the hub's /mcp as this profile [--as X]; needs --net P
   inbox [--since CURSOR] [--ack] [--limit N]
+  blob get SHA [--blob-id ID] --out PATH [--json]
+       URLs are short-lived; call get again whenever you need the file, as long as it hasn't expired.
   ack <cursor>
   watch [--for-monitor] [--since CURSOR] [--auto-ack] [--deliveries-only]
        does not ack; use --auto-ack or vecnet ack <cursor> to avoid replaying
        the log after a restart
-  hook [--event user-prompt|post-tool] [--profile P] [--auto-ack] [--mcp vecnet-P]
-       Claude Code hook: always exits 0; --mcp names the registered MCP server in its hints
-  hook install [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp]
+  hook [--event user-prompt|post-tool|session-start|app-server] [--profile P] [--auto-ack] [--mcp vecnet-P]
+       Claude Code / Codex hook: always exits 0; --mcp names the registered MCP server in its hints
+  hook --event app-server --claim NONCE --priorities wake[,wake_idle] --expect-hub URL --expect-caller PEER_ID
+  hook --release --claim NONCE
+  hook install [--client claude|codex] [--profile P] [--write] [--settings PATH] [--auto-ack] [--mcp] (--mcp: Claude-only)
        --mcp: the hooks name MCP server vecnet-P, and --write registers it (claude mcp add)
   hook rebind [--profile P]
        bind the profile's hook to this Claude Code session (run from its Bash tool)
+  codex bind --thread UUID [--codex-home DIR] [--ttl DUR] [--idle-dormant DUR] [--attended] [--renew]
+       opt in to app-server delivery; ttl defaults to 24h (1h–168h); unattended needs -a never or auto reviewer
+  codex unbind [--thread UUID] | codex bindings [--json]
   threads [--limit N]
   thread <id> [--after MESSAGE_ID] [--limit N]
+  thread budget <id> <n>                          set budget_remaining
   peers
-  groups create <peer…> | groups add <grp> <peer…> | groups list
+  groups create <peer…> | groups add <grp> <peer…> | groups list | groups unarchive <grp>
   presence set <idle|working|blocked|offline> [--note T]
   presence subscribe <all|teams|none>
   avatar set <FILE|https://URL> | avatar clear       PNG, JPEG, GIF or WebP, at most 2 MiB;
@@ -97,12 +106,17 @@ admin (operator credential):
        max 7d); --copy also puts it on the clipboard; without --name, or with
        --open-name, the agent picks its name at enrol
   peer invite <peer> [--ttl 24h] [--copy]             re-issues a token for a peer not yet enrolled
+  invite status <peer> | invite revoke <peer>         an invite's state (never its token), or withdraw it:
+       the unredeemed token stops enrolling; no-op when none is live; never touches
+       an enrolled peer's secret (peer disable / peer rotate). Also: peer invite status|revoke
   peer move <peer> --principal PRN
   peer link <peer>                                    prints a peer's 12-character OAuth link code
   peer avatar <peer> (FILE|https://URL|--clear)       set or clear any peer's avatar
   peer rotate <peer>
   peer scope <peer> [--allow IDS] [--deny IDS]        IDS: comma-separated or repeated
   peer limits <peer> --sends-per-min N --threads-per-hour N
+  peer rename <id> <name>
+  peer disable <id> | peer enable <id>
   route add --owner ID --url URL | route verify <route_id>
   route add --owner ID --kind grokbot --url URL --key-file PATH
   route list [--json] | route rotate <route_id> --key-file PATH | route remove <route_id>
@@ -112,10 +126,15 @@ admin (operator credential):
   source list
   subscriptions list | subscriptions pause <id> | subscriptions resume <id>
   team add --name N [--members IDS]
+  team list | team members <id> --add IDS         adds only; IDS: comma-separated or repeated
   dead-letters list | dead-letters retry <dly> | dead-letters discard <dly>
   notify set --url URL --filter F [--url URL --filter F]…
   diag mcp [--peer ID] [--method M] [--limit N] [--follow]
   audit [--limit N]
+  prefs list | prefs get KEY | prefs set KEY VALUE [--preview] [--apply-existing]
+       [--confirm-risk CODE]… | prefs set --reset KEY
+       operator preferences; durations are whole seconds or a number plus s/m/h/d;
+       a conflict is not retried, and --confirm-risk names each required risk
   tui                                                 the operator's terminal client
 
 flags may appear anywhere; "--" ends flag parsing, so text that looks like a
@@ -166,12 +185,18 @@ type app struct {
 	inHook        bool   // hooks never TOFU or rewrite trust state
 	stdinConsumed bool   // a retry cannot consume stdin again
 	inMCP         bool   // stdio relay startup refusals must make no requests
+	prefsCmd      bool   // preferences exit codes and JSON errors
 }
 
-// exit prints err and maps it to an exit code.
+// exit prints err and maps it to an exit code. Preferences commands use the
+// preferences contract (usage 2, validation/conflict/refusal 1); every other
+// command keeps the mapping below.
 func (a *app) exit(err error) int {
 	if err == nil {
 		return exitOK
+	}
+	if a.prefsCmd {
+		return a.exitPrefs(err)
 	}
 	var ue *usageError
 	var he *hubError
@@ -353,7 +378,7 @@ func (a *app) connect() (*client, string, cache, error) {
 	if err != nil {
 		return nil, "", cache{}, err
 	}
-	if err := checkHubURL(p.Hub, p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"); err != nil {
+	if err := a.useStoredHub(name, p); err != nil {
 		return nil, "", cache{}, err
 	}
 	// MCP runs TOFU after its additional startup refusals in cmdMCP.
@@ -455,6 +480,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdProfile(args)
 	case "guide":
 		return a.cmdGuide(args)
+	case "blob":
+		return a.cmdBlob(args)
 	case "send":
 		return a.cmdSend(args)
 	case "reply":
@@ -473,6 +500,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 	case "hook":
 		a.inHook = true
 		return a.cmdHook(args)
+	case "codex":
+		return a.cmdCodex(args, time.Now)
 	case "threads":
 		return a.cmdThreads(args)
 	case "thread":
@@ -491,6 +520,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdPrincipal(args)
 	case "peer":
 		return a.cmdPeer(args)
+	case "invite":
+		return a.cmdInvite(args)
 	case "route":
 		return a.cmdRoute(args)
 	case "source":
@@ -507,6 +538,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdDiag(args)
 	case "audit":
 		return a.cmdAudit(args)
+	case "prefs":
+		return a.cmdPrefs(args)
 	case "tui":
 		return a.cmdTUI(args)
 	case "init-hub", "init":
@@ -592,7 +625,7 @@ func (a *app) cmdEnrol(args []string) error {
 		// profile to follow yet: point at the new hub instead.
 		if errors.As(err, &he) && he.Status == http.StatusGone && he.Code == "hub_moved" {
 			if raw, ok := he.Details["new_url"].(string); ok {
-				if next, e := hubid.NormalizeURL(raw); e == nil {
+				if next, ok := printableHub(raw, insecure || a.getenv(insecureEnv) == "1"); ok {
 					he.Hint = "hub moved to " + next + "; ask for an invite there"
 				}
 			}
@@ -847,7 +880,8 @@ func (a *app) send(req envelope.SendRequest, text string, o opts) error {
 		if err != nil {
 			return err
 		}
-		req.Attachments = append(req.Attachments, att)
+		// Send only immutable reference fields; verification belongs to the hub.
+		req.Attachments = append(req.Attachments, envelope.Attachment{BlobID: att.BlobID, SHA256: att.SHA256, Size: att.Size, MediaType: att.MediaType, Name: att.Name, ExpiresAt: att.ExpiresAt, RetentionClass: att.RetentionClass})
 	}
 	var raw json.RawMessage
 	if err := c.do(a.ctx, http.MethodPost, "/v1/messages", nil, req, &raw); err != nil {
@@ -893,7 +927,7 @@ func mediaTypeOf(path string) string {
 	return mt
 }
 
-// upload PUTs one file to /v1/blobs and returns its attachment reference.
+// upload uses the advertised backend and returns a completed attachment reference.
 func (a *app) upload(c *client, path string) (envelope.Attachment, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -907,14 +941,124 @@ func (a *app) upload(c *client, path string) (envelope.Attachment, error) {
 	mt := mediaTypeOf(path)
 	ctx, cancel := context.WithTimeout(a.ctx, uploadTimeout)
 	defer cancel()
-	var out struct {
-		SHA256 string `json:"sha256"`
-		Size   int64  `json:"size"`
+	ref, err := c.blobs().Upload(ctx, f, st.Size(), mt, "")
+	if err != nil {
+		return envelope.Attachment{}, blobError(err)
 	}
-	if err := c.doNoTimeout(ctx, http.MethodPut, "/v1/blobs", nil, rawBody{r: f, contentType: mt, length: st.Size()}, &out); err != nil {
-		return envelope.Attachment{}, err
+	return envelope.Attachment{BlobID: ref.BlobID, SHA256: ref.SHA256, Size: ref.Size, MediaType: mt, Name: attachmentName(path), ExpiresAt: ref.ExpiresAt, RetentionClass: ref.RetentionClass, SHA256Verified: ref.SHA256Verified, Integrity: ref.Integrity}, nil
+}
+
+// attachmentName is the name stored with an upload. It keeps one path
+// component, strips controls, bidi, ANSI sequences and path separators, and
+// caps the result at 255 code points, matching the TUI and Decisions §3.
+func attachmentName(path string) string {
+	name := cleanStoredName(filepath.Base(strings.ReplaceAll(path, "\\", "/")))
+	if rs := []rune(name); len(rs) > 255 {
+		name = string(rs[:255])
 	}
-	return envelope.Attachment{SHA256: out.SHA256, Size: out.Size, MediaType: mt, Name: filepath.Base(path)}, nil
+	if name == "" {
+		return "file"
+	}
+	return name
+}
+
+// cleanStoredName is the one-line form of the TUI cleaner for a single file
+// component: line breaks become spaces, and controls, bidi and escape
+// sequences are removed.
+func cleanStoredName(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		invalid := r == utf8.RuneError && n <= 1
+		if invalid {
+			r = rune(s[i])
+		}
+		next := i + n
+		switch {
+		case r == 0x1b:
+			i = skipNameEsc(s, next)
+			continue
+		case r == 0x9b:
+			i = skipNameCSI(s, next)
+			continue
+		case r == 0x9d:
+			i = skipNameString(s, next, true)
+			continue
+		case r == 0x90 || r == 0x98 || r == 0x9e || r == 0x9f:
+			i = skipNameString(s, next, false)
+			continue
+		}
+		i = next
+		switch {
+		case invalid:
+		case r == '\n' || r == '\t' || r == '\u2028' || r == '\u2029':
+			b.WriteByte(' ')
+		case r < 0x20 || (r >= 0x7f && r <= 0x9f):
+		case r >= '\u202a' && r <= '\u202e', r >= '\u2066' && r <= '\u2069':
+		case r == '/' || r == '\\':
+		default:
+			b.WriteString(s[i-n : i])
+		}
+	}
+	return b.String()
+}
+
+func skipNameEsc(s string, i int) int {
+	if i >= len(s) {
+		return i
+	}
+	switch b := s[i]; {
+	case b == '[':
+		return skipNameCSI(s, i+1)
+	case b == ']':
+		return skipNameString(s, i+1, true)
+	case b == 'P' || b == 'X' || b == '^' || b == '_':
+		return skipNameString(s, i+1, false)
+	case b >= 0x20 && b <= 0x2f:
+		for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+			i++
+		}
+		if i < len(s) && s[i] >= 0x30 && s[i] <= 0x7e {
+			i++
+		}
+		return i
+	case b >= 0x30 && b <= 0x7e:
+		return i + 1
+	}
+	return i
+}
+
+func skipNameCSI(s string, i int) int {
+	for i < len(s) && s[i] >= 0x30 && s[i] <= 0x3f {
+		i++
+	}
+	for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+		i++
+	}
+	if i < len(s) && s[i] >= 0x40 && s[i] <= 0x7e {
+		i++
+	}
+	return i
+}
+
+func skipNameString(s string, i int, osc bool) int {
+	for j := i; j < len(s); {
+		r, n := utf8.DecodeRuneInString(s[j:])
+		if r == utf8.RuneError && n <= 1 {
+			r = rune(s[j])
+		}
+		switch {
+		case r == 0x07 && osc, r == 0x18, r == 0x1a, r == 0x9c:
+			return j + n
+		case r == 0x1b:
+			if j+1 < len(s) && s[j+1] == '\\' {
+				return j + 2
+			}
+			return j
+		}
+		j += n
+	}
+	return i
 }
 
 // --- inbox / ack ---
@@ -1134,8 +1278,11 @@ func (a *app) cmdThread(args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(o.pos) > 0 && o.pos[0] == "budget" {
+		return a.threadBudget(o)
+	}
 	if len(o.pos) != 1 {
-		return usageErr("usage: vecnet thread <id> [--after MESSAGE_ID] [--limit N]")
+		return usageErr("usage: vecnet thread <id> [--after MESSAGE_ID] [--limit N] | thread budget <id> <n>")
 	}
 	q := url.Values{}
 	if err := limitQuery(o, q); err != nil {
@@ -1152,10 +1299,7 @@ func (a *app) cmdThread(args []string) error {
 	if err := c.do(a.ctx, http.MethodGet, "/v1/threads/"+pathEscape(o.pos[0])+"/messages", q, nil, &raw); err != nil {
 		return err
 	}
-	var body struct {
-		Messages  []envelope.Message `json:"messages"`
-		NextAfter *string            `json:"next_after"`
-	}
+	var body opapi.History
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return &hubError{Code: "bad_response", Message: err.Error()}
 	}
@@ -1177,6 +1321,9 @@ func (a *app) cmdThread(args []string) error {
 			}
 		}
 		fmt.Fprintf(a.stdout, "%s %s %s %s\n", m.MessageID, m.CreatedAt, from, flatten(m.Content.Text))
+		for _, label := range blobLabels(m.Attachments, body.BlobStates) {
+			fmt.Fprintln(a.stdout, label)
+		}
 		if len(m.Reactions) > 0 {
 			groups := make([]string, 0, len(m.Reactions))
 			for _, group := range m.Reactions {
@@ -1189,6 +1336,23 @@ func (a *app) cmdThread(args []string) error {
 		fmt.Fprintf(a.stderr, "more: vecnet thread %s --after %s\n", o.pos[0], *body.NextAfter)
 	}
 	return nil
+}
+
+// threadBudget is `thread budget <id> <n>`: PATCH /v1/admin/threads/{id}
+// {"budget_remaining": n} (adminPatchThread). n is a non-negative integer.
+func (a *app) threadBudget(o opts) error {
+	const usage = "usage: vecnet thread budget <id> <n>"
+	if len(o.pos) != 3 || o.has("after") || o.has("limit") {
+		return usageErr(usage)
+	}
+	n, err := strconv.Atoi(o.pos[2])
+	if err != nil || n < 0 {
+		return usageErr(usage)
+	}
+	if err := a.call(http.MethodPatch, "/v1/admin/threads/"+pathEscape(o.pos[1]), map[string]int{"budget_remaining": n}, nil); err != nil {
+		return err
+	}
+	return a.ok("budget " + o.pos[1] + " " + strconv.Itoa(n))
 }
 
 func (a *app) cmdPeers(args []string) error {
@@ -1252,6 +1416,12 @@ func (a *app) cmdGroups(args []string) error {
 			return err
 		}
 		return a.ok("ok")
+	case sub == "unarchive" && len(o.pos) == 2:
+		// Operator only: POST /v1/admin/groups/{id}/unarchive (204).
+		if err := a.call(http.MethodPost, "/v1/admin/groups/"+pathEscape(o.pos[1])+"/unarchive", nil, nil); err != nil {
+			return err
+		}
+		return a.ok("unarchived " + o.pos[1])
 	case sub == "list" && len(o.pos) == 1:
 		items, err := a.getList("/v1/groups", nil, "groups")
 		if err != nil {
@@ -1278,7 +1448,7 @@ func (a *app) cmdGroups(args []string) error {
 		}
 		return nil
 	}
-	return usageErr("usage: vecnet groups create <peer…> | groups add <grp> <peer…> | groups list")
+	return usageErr("usage: vecnet groups create <peer…> | groups add <grp> <peer…> | groups list | groups unarchive <grp>")
 }
 
 // call sends one request with the profile's credential.
@@ -1544,9 +1714,24 @@ func (a *app) cmdPeer(args []string) error {
 			return err
 		}
 		return a.ok("limits set for " + o.pos[1])
+	case sub == "rename" && len(o.pos) == 3:
+		// PATCH /v1/admin/peers/{id} {"name"} (204).
+		if err := a.call(http.MethodPatch, "/v1/admin/peers/"+pathEscape(o.pos[1]),
+			map[string]string{"name": o.pos[2]}, nil); err != nil {
+			return err
+		}
+		return a.ok("renamed " + o.pos[1] + " to " + o.pos[2])
+	case (sub == "disable" || sub == "enable" || sub == "archive" || sub == "unarchive") && len(o.pos) == 2:
+		// POST /v1/admin/peers/{id}/disable|enable (204).
+		if err := a.call(http.MethodPost, "/v1/admin/peers/"+pathEscape(o.pos[1])+"/"+sub, nil, nil); err != nil {
+			return err
+		}
+		verb := map[string]string{"disable": "disabled", "enable": "enabled", "archive": "archived", "unarchive": "unarchived"}[sub]
+		return a.ok(verb + " " + o.pos[1])
 	}
 	return usageErr("usage: vecnet peer add --kind K --name N [--principal PRN] | peer invite [--name N] [--ttl 24h] | peer move <peer> --principal PRN | " +
-		"peer link <peer> | peer avatar <peer> (FILE|URL|--clear) | peer rotate <peer> | peer scope <peer> [--allow IDS] [--deny IDS] | peer limits <peer> --sends-per-min N --threads-per-hour N")
+		"peer link <peer> | peer avatar <peer> (FILE|URL|--clear) | peer rotate <peer> | peer scope <peer> [--allow IDS] [--deny IDS] | peer limits <peer> --sends-per-min N --threads-per-hour N | " +
+		"peer rename <id> <name> | peer disable <id> | peer enable <id> | peer archive <id> | peer unarchive <id>")
 }
 
 func (a *app) cmdRoute(args []string) error {
@@ -1619,19 +1804,70 @@ func (a *app) cmdRoute(args []string) error {
 }
 
 func (a *app) cmdTeam(args []string) error {
-	o, err := parseFlags("team", args, map[string]flagKind{"name": strFlag, "members": multiFlag})
+	const usage = "usage: vecnet team add --name N [--members IDS] | team list | team members <id> --add IDS"
+	o, err := parseFlags("team", args, map[string]flagKind{"name": strFlag, "members": multiFlag, "add": multiFlag})
 	if err != nil {
 		return err
 	}
-	if len(o.pos) != 1 || o.pos[0] != "add" || o.str("name") == "" {
-		return usageErr("usage: vecnet team add --name N [--members IDS]")
+	sub := ""
+	if len(o.pos) > 0 {
+		sub = o.pos[0]
 	}
-	body := map[string]any{"name": o.str("name"), "members": o.list("members")}
-	var out map[string]any
-	if err := a.call(http.MethodPost, "/v1/admin/teams", body, &out); err != nil {
+	switch sub {
+	case "add":
+		if len(o.pos) != 1 || o.str("name") == "" || o.has("add") {
+			return usageErr(usage)
+		}
+		body := map[string]any{"name": o.str("name"), "members": o.list("members")}
+		var out map[string]any
+		if err := a.call(http.MethodPost, "/v1/admin/teams", body, &out); err != nil {
+			return err
+		}
+		return a.emitObject(out, "team_id")
+	case "list":
+		if len(o.pos) != 1 || o.has("name") || o.has("members") || o.has("add") {
+			return usageErr(usage)
+		}
+		return a.teamList()
+	case "members":
+		// POST /v1/admin/teams/{id}/members {"members"} (adminTeamMembers).
+		// The hub adds these peers and leaves existing members in place;
+		// there is no remove or replace-roster endpoint yet. --add matches team
+		// add's --members: comma-separated or repeated.
+		if len(o.pos) != 2 || o.has("name") || o.has("members") || len(o.list("add")) == 0 {
+			return usageErr(usage)
+		}
+		id := o.pos[1]
+		body := map[string][]string{"members": o.list("add")}
+		if err := a.call(http.MethodPost, "/v1/admin/teams/"+pathEscape(id)+"/members", body, nil); err != nil {
+			return err
+		}
+		return a.ok("members added to " + id)
+	}
+	return usageErr(usage)
+}
+
+// teamList is `team list`: GET /v1/admin/teams.
+func (a *app) teamList() error {
+	items, err := a.getList("/v1/admin/teams", nil, "teams")
+	if err != nil {
 		return err
 	}
-	return a.emitObject(out, "team_id")
+	if a.json {
+		return a.emitList(items)
+	}
+	for _, it := range items {
+		var t struct {
+			TeamID  string   `json:"team_id"`
+			Name    string   `json:"name"`
+			Members []string `json:"members"`
+		}
+		if json.Unmarshal(it, &t) != nil {
+			continue
+		}
+		fmt.Fprintf(a.stdout, "%s %s members=%s\n", t.TeamID, flatten(t.Name), strings.Join(t.Members, ","))
+	}
+	return nil
 }
 
 func (a *app) cmdDeadLetters(args []string) error {

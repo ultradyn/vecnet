@@ -1,0 +1,324 @@
+{
+  "vecnet_blob_get": {
+    "additionalProperties": false,
+    "properties": {
+      "blob_id": {
+        "type": "string"
+      },
+      "data": {
+        "type": "string"
+      },
+      "encoding": {
+        "const": "base64",
+        "type": "string"
+      },
+      "expires_at": {
+        "type": "string"
+      },
+      "integrity": {
+        "additionalProperties": false,
+        "properties": {
+          "algorithm": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "algorithm",
+          "value",
+          "verified"
+        ],
+        "type": "object"
+      },
+      "local_path": {
+        "type": "string"
+      },
+      "media_type": {
+        "type": "string"
+      },
+      "method": {
+        "const": "GET",
+        "type": "string"
+      },
+      "next_offset": {
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "object_expires_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "offset": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "retention_class": {
+        "type": "string"
+      },
+      "sha256": {
+        "type": "string"
+      },
+      "sha256_verified": {
+        "type": "boolean"
+      },
+      "size": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "url": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "sha256"
+    ],
+    "type": "object"
+  },
+  "vecnet_blob_put": {
+    "additionalProperties": false,
+    "else": {
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "blob_id"
+              ]
+            },
+            {
+              "required": [
+                "upload"
+              ]
+            },
+            {
+              "required": [
+                "complete_url"
+              ]
+            },
+            {
+              "required": [
+                "sha256_verified"
+              ]
+            },
+            {
+              "required": [
+                "integrity"
+              ]
+            },
+            {
+              "required": [
+                "retention_class"
+              ]
+            },
+            {
+              "required": [
+                "expires_at"
+              ]
+            }
+          ]
+        },
+        "required": [
+          "sha256",
+          "size"
+        ]
+      },
+      "if": {
+        "required": [
+          "blob_id"
+        ]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "upload"
+              ]
+            },
+            {
+              "required": [
+                "complete_url"
+              ]
+            }
+          ]
+        },
+        "required": [
+          "blob_id",
+          "sha256",
+          "sha256_verified",
+          "integrity",
+          "size",
+          "retention_class",
+          "expires_at"
+        ]
+      }
+    },
+    "if": {
+      "required": [
+        "upload"
+      ]
+    },
+    "properties": {
+      "blob_id": {
+        "type": "string"
+      },
+      "complete_url": {
+        "type": "string"
+      },
+      "expires_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "integrity": {
+        "additionalProperties": false,
+        "properties": {
+          "algorithm": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "algorithm",
+          "value",
+          "verified"
+        ],
+        "type": "object"
+      },
+      "retention_class": {
+        "enum": [
+          "1h",
+          "6h",
+          "12h",
+          "1d",
+          "7d",
+          "30d",
+          "keep"
+        ],
+        "type": "string"
+      },
+      "sha256": {
+        "type": "string"
+      },
+      "sha256_verified": {
+        "type": "boolean"
+      },
+      "size": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "upload": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "type": "string"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "method": {
+            "const": "PUT",
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "method",
+          "url",
+          "headers",
+          "expires_at"
+        ],
+        "type": "object"
+      }
+    },
+    "required": [
+      "sha256",
+      "size"
+    ],
+    "then": {
+      "required": [
+        "blob_id",
+        "sha256",
+        "sha256_verified",
+        "integrity",
+        "size",
+        "retention_class",
+        "expires_at",
+        "upload",
+        "complete_url"
+      ]
+    },
+    "type": "object"
+  },
+  "vecnet_blob_status": {
+    "additionalProperties": false,
+    "properties": {
+      "expires_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "integrity": {
+        "additionalProperties": false,
+        "properties": {
+          "algorithm": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "algorithm",
+          "value",
+          "verified"
+        ],
+        "type": "object"
+      },
+      "retention_class": {
+        "type": "string"
+      },
+      "sha256_verified": {
+        "type": "boolean"
+      },
+      "state": {
+        "enum": [
+          "available",
+          "expired",
+          "purged",
+          "unavailable"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "state"
+    ],
+    "type": "object"
+  }
+}

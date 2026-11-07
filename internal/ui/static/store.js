@@ -196,6 +196,12 @@ export function createStore({ api, now = Date.now, sleep = waitFor, random = Mat
   // batch would never reach accepted. A batch is acked only once every
   // snapshot it invalidated has loaded ("accepted once shown"): a load that
   // fails in a way that may pass holds the cursor, backs off and tries again.
+  //
+  // That order means a snapshot a batch reloaded shows the operator's own
+  // deliveries in it as they were before the ack moved them to accepted (one
+  // already read still displays queued, not read), and the hub logs no event
+  // to the operator for its own ack. So a paid ack reloads the threads of the
+  // delivery events it covered; nothing else would ever correct them.
   async function pump(signal) {
     const aborted = () => !!signal && signal.aborted;
     const interrupted = new Promise(resolve => {
@@ -205,6 +211,7 @@ export function createStore({ api, now = Date.now, sleep = waitFor, random = Mat
     const resync = () => Promise.race([settled(), interrupted]);
     let after, first = true, owed, backoff = BACKOFF_FIRST, quietUntil = 0;
     let unshown; // { cursor, rs }: a batch whose snapshots have not all loaded
+    const accepting = new Set(); // thread tags of delivery events no paid ack covers yet
     while (!aborted()) {
       try {
         if (unshown) {
@@ -216,7 +223,12 @@ export function createStore({ api, now = Date.now, sleep = waitFor, random = Mat
           owed = unshown.cursor;
           unshown = undefined;
         }
-        if (owed) { await api.ack(owed); owed = undefined; }
+        if (owed) {
+          await api.ack(owed);
+          owed = undefined;
+          invalidate(...accepting);
+          accepting.clear();
+        }
         const page = await api.events(first ? { wait: 0, signal } : { after, wait: WAIT, signal });
         if (aborted()) break;
         if (page === null) break; // 204: peer disabled
@@ -238,6 +250,11 @@ export function createStore({ api, now = Date.now, sleep = waitFor, random = Mat
           continue;
         }
         const rs = invalidate(...events.flatMap(tagsFor));
+        // A refused or skipped ack leaves these for the next one: an ack
+        // accepts every delivery at or before its cursor.
+        for (const ev of events) {
+          if (ev && ev.type === 'delivery') for (const t of tagsFor(ev)) if (t.startsWith('thread:')) accepting.add(t);
+        }
         await resync();
         if (aborted()) break;
         const e = unshownError(rs);

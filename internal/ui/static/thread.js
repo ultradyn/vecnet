@@ -1,18 +1,23 @@
 // One thread: history with receipts, spilled text and inline approvals, and
 // the reply composer. ctx.threadId names the thread (see app.js). The pure
-// rules live in thread-model.js.
+// rules live in thread-model.js; reading (per-message read receipts as the
+// operator sees each unread message) in thread-read.js.
 import { answerBody, countdown } from './approvals.js';
 import { createAttachments } from './attach.js';
-import { sendRefusal } from './attach-model.js';
+import { blobView, nextExpiry, sendRefusal } from './attach-model.js';
 import { avatar, h, idText, peerLink } from './dom.js';
 import { ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, kindShort, kindTitle, plural, short, title, when } from './format.js';
 import { markdown } from './md.js';
 import { prioritySeg } from './prio.js';
 import { createReactions } from './react.js';
-import { budgetBanner, budgetOut, canShowFull, clientLabel, clientSuspect, excerpt, FULL_TEXT_CAP, items, replyKey, replySig, sendError, SPILL_BYTES, TEXT_CAP } from './thread-model.js';
+import { budgetBanner, budgetOut, canShowFull, clientLabel, clientSuspect, excerpt, FULL_TEXT_CAP, items, nextDivider, opening, replyKey, replySig, sendError, SPILL_BYTES, TEXT_CAP, unreadOf } from './thread-model.js';
+import { createReader, enough } from './thread-read.js';
 import { createThumbs } from './thumbs.js';
 
 const PAGE = 200, MAX_PAGES = 50, PIN_SLACK = 80;
+// Observer steps: every 5%, geometric below, so even a message hundreds of
+// views tall reports once it fills 60% of the view.
+const STEPS = [0, ...Array.from({ length: 13 }, (_, i) => 0.002 * 1.5 ** i), ...Array.from({ length: 20 }, (_, i) => (i + 1) / 20)];
 const enc = new TextEncoder();
 
 function randKey() {
@@ -23,13 +28,16 @@ function randKey() {
 // loadMessages returns the thread's messages and, from the operator's pages'
 // hosted_blobs (PROTOCOL §2.8), message id -> the hashes the hub hosts for
 // it; hosted is null when a page did not say, so thumbnails keep the
-// declared-only rule.
+// declared-only rule. states is every page's blob_states (R2 blob id ->
+// available/expired/purged/unavailable), the hub's projection on its clock.
 async function loadMessages(api, id) {
-  const messages = [];
+  const messages = [], states = new Map();
   let after, hosted = new Map();
   for (let i = 0; i < MAX_PAGES; i++) {
     const page = await api.messages(id, { limit: PAGE, after });
     messages.push(...(page.messages || []));
+    const bs = page.blob_states;
+    if (bs && typeof bs === 'object') for (const [blobId, st] of Object.entries(bs)) if (st && typeof st === 'object') states.set(blobId, st);
     const hb = page.hosted_blobs;
     if (hb && typeof hb === 'object' && hosted) {
       for (const [msgId, shas] of Object.entries(hb)) if (Array.isArray(shas)) hosted.set(msgId, new Set(shas));
@@ -39,7 +47,18 @@ async function loadMessages(api, id) {
     if (!page.next_after || !(page.messages || []).length) break;
     after = page.next_after;
   }
-  return { messages, hosted };
+  return { messages, hosted, states };
+}
+
+// r2Chip: an R2 attachment in a message. Never a thumbnail (its bytes are
+// fetched only to be saved, from the Files panel); its line says how long it
+// lives by its recorded class, and a pending checksum is never shown verified.
+function r2Chip(att, v) {
+  return h('span', { class: 'att r2 s-' + v.state + (v.verified ? '' : ' unv'), title: (att.sha256 || '') + ' · ' + v.trust, 'data-blob': att.blob_id },
+    h('span', { class: 'nm', text: att.name || att.media_type || 'attachment' }),
+    h('span', { class: 'sz', text: bytes(att.size) }),
+    v.label ? h('span', { class: 'ret', text: v.label }) : null,
+    !v.verified && v.state === 'available' ? h('span', { class: 'unv-tag', text: 'unverified' }) : null);
 }
 
 async function loadMatrix(api, id) {
@@ -84,14 +103,37 @@ export function mount(root, ctx) {
     full: new Map(),        // message id -> { state: loading|ok|error, text }
     flash: '',
     pinned: true,
+    divider: null,          // message id the New divider sits above, or null
   };
   // ticks: live approval countdowns; agos: the relative times on the right
   // of each header. The one-second tick refreshes both.
   let gone = false, ticks = [], agos = [];
   // Reply attachments, and the thread's inline thumbnails: a settled fetch or
   // an upload's change draws again.
-  const atts = createAttachments({ api, onChange: () => render() });
+  const atts = createAttachments({ api, onChange: () => render(), now: () => store.hubNow() });
   const thumbs = createThumbs({ api, onReady: () => render() });
+  // R2 references for the Files panel beside this thread (thread-aside.js):
+  // blob id -> { att, state } from the loaded history. Messages carry the
+  // recorded class, deadline and trust; the hub's projection says the rest.
+  const refSubs = new Set();
+  let refs = new Map(), expiryTimer = 0;
+  ctx.blobRefs = { get: () => refs, loaded: () => !!history.get(), subscribe: fn => { refSubs.add(fn); return () => refSubs.delete(fn); } };
+  const stateOf = blobId => ((history.get() || {}).states || new Map()).get(blobId) || null;
+  function collectRefs() {
+    const next = new Map();
+    for (const m of msgs()) for (const a of m.attachments || []) if (a && a.blob_id) next.set(a.blob_id, { att: a, state: stateOf(a.blob_id) });
+    refs = next;
+    for (const fn of [...refSubs]) fn();
+  }
+  // scheduleExpiry redraws at the earliest recorded deadline, then asks the
+  // hub again: a chip turns expired on time even before the hub's ticker.
+  function scheduleExpiry() {
+    clearTimeout(expiryTimer);
+    const now = store.hubNow();
+    const at = nextExpiry([...refs.values()].map(r => blobView(r.att, r.state, now)), now);
+    if (at === null) return;
+    expiryTimer = setTimeout(() => { if (gone) return; render(); for (const fn of [...refSubs]) fn(); store.invalidate(tag); }, Math.min(at - now + 250, 6 * 3600 * 1000));
+  }
   // Reaction chips and the picker; a reaction's event reloads the thread too.
   const R = createReactions({ api, me, nameOf, onDone: () => store.invalidate(tag), toast });
 
@@ -110,19 +152,60 @@ export function mount(root, ctx) {
     return list.length ? list[list.length - 1].message_id : '';
   }
 
-  // Reading: the hub marks the operator's deliveries in this thread read.
-  let owedRead = false;
-  function markRead() {
-    if (document.visibilityState !== 'visible') { owedRead = true; return; }
-    owedRead = false;
-    api.readThread(threadId).then(r => {
-      if (!gone && r && r.marked) store.invalidate('inbox', 'threads', tag);
-    }, () => {});
-  }
+  // Reading (CoS unread ruling): open at the first unread under New; each
+  // unread message gets its own read receipt once seen (thread-read.js), never
+  // a mark-all. Sidebar counts follow the receipts via the hub's events.
+  // A modal (image viewer, matrix, invite) hides the thread: nothing is seen under it.
+  const active = () => document.visibilityState === 'visible' && document.hasFocus() && !document.querySelector('dialog[open]');
+  const styled = on => id => { const el = document.getElementById('m-' + id); if (el) el.classList.toggle('unread', on); };
+  const reader = createReader({ api, active, onSeen: styled(false), onLost: styled(true) });
+  // opened: the first full snapshot placed the view; considered: unread
+  // messages already placed, so any other is a live arrival.
+  let unread = [], opened = false, considered = new Set();
+  const onActive = () => { reader.activeChanged(); if (io) observe(); };
   const onVisible = () => {
+    onActive();
     if (document.visibilityState !== 'visible') return;
-    if (owedRead) markRead();
     tick(); // relative times caught up at once, not on the next second
+  };
+
+  // The observer's view is the viewport less the composer floating over its
+  // bottom (nothing under it is seen); rebuilt when the composer resizes.
+  let io = null, ioQueued = false;
+  function onIntersect(entries) {
+    for (const e of entries) {
+      const el = e.target;
+      if (!el.isConnected || !el.id.startsWith('m-')) continue;
+      const root = e.rootBounds, view = root ? root.height : innerHeight;
+      const middle = root ? (root.top + root.bottom) / 2 : innerHeight / 2;
+      const rootTop = root ? root.top : 0;
+      reader.view(el.id.slice(2), {
+        intersecting: e.isIntersecting,
+        enough: e.isIntersecting && enough(e.intersectionRatio, e.intersectionRect.height, view),
+        above: e.boundingClientRect.bottom <= middle,
+        // The top has left the root, so only a tail can still be in view.
+        pastTop: e.boundingClientRect.top < rootTop - 0.5,
+      });
+    }
+  }
+  function observe() {
+    if (io) io.disconnect();
+    io = new IntersectionObserver(onIntersect, { threshold: STEPS, rootMargin: '0px 0px -' + Math.round(comp.offsetHeight) + 'px 0px' });
+    watch();
+  }
+  // watch observes the unread messages not yet seen; the others need nothing.
+  function watch() {
+    if (!io) return;
+    for (const u of unread) {
+      if (reader.seen(u.message_id)) continue;
+      const el = document.getElementById('m-' + u.message_id);
+      if (el) io.observe(el);
+    }
+  }
+  const coverChanged = () => {
+    if (ioQueued) return;
+    ioQueued = true;
+    requestAnimationFrame(() => { ioQueued = false; if (!gone) observe(); });
   };
 
   async function send(ta, btn) {
@@ -401,7 +484,7 @@ export function mount(root, ctx) {
     const delta = prev ? deltaLabel(prev.created_at, m.created_at) : '';
     const others = (m.recipients || []).map(nameOf).join(', ');
     // Images show inline from the thumbnail cache; everything else is a chip.
-    const files = (m.attachments || []).filter(a => a !== it.spill).map(a => thumbs.render(a, hostedOf(m.message_id, a.sha256)));
+    const files = (m.attachments || []).filter(a => a !== it.spill).map(a => (a.blob_id ? r2Chip(a, blobView(a, stateOf(a.blob_id), store.hubNow())) : thumbs.render(a, hostedOf(m.message_id, a.sha256))));
     const full = S.full.get(m.message_id), showTxt = m.content && m.content.text && !(full && full.state === 'ok');
     const cls = 'msg' + (m.message_id === S.replyTo ? ' target' : '') + (m.message_id === S.flash ? ' flash' : '');
     return h('div', { class: cls, id: 'm-' + m.message_id, onanimationend: e => { if (e.animationName === 'flash') { S.flash = ''; e.currentTarget.classList.remove('flash'); } } },
@@ -428,6 +511,32 @@ export function mount(root, ctx) {
 
   const head = h('div', { class: 'thead' }), list = h('div', { class: 'msgs' }), comp = composer();
   root.replaceChildren(head, list, comp, R.picker);
+  const cover = new ResizeObserver(coverChanged);
+  cover.observe(comp);
+
+  // place reads unread from a full snapshot. The first one places the view
+  // and returns the message to open at; later ones may move New for arrivals.
+  function place(all, d) {
+    unread = unreadOf(all, matrix.get(), { me, now: store.hubNow(), openApprovals: (d && d.open_approvals) || [], answered: [...S.answered.keys()] });
+    reader.setUnread(unread);
+    if (!opened) {
+      opened = true;
+      considered = new Set(unread.map(u => u.message_id));
+      const o = opening(unread);
+      S.divider = o.divider;
+      if (o.at === 'bottom') return null;
+      S.pinned = false;
+      return o.at;
+    }
+    const fresh = unread.filter(u => !considered.has(u.message_id));
+    for (const u of fresh) considered.add(u.message_id);
+    S.divider = nextDivider({ divider: S.divider, unread, fresh, seen: reader.seen, watching: active() && S.pinned });
+    return null;
+  }
+
+  function newDivider() {
+    return h('div', { class: 'newdiv', role: 'separator', 'aria-label': 'New messages' }, h('span', { text: 'New' }));
+  }
 
   function render() {
     if (gone) return;
@@ -436,17 +545,30 @@ export function mount(root, ctx) {
       h('div', { class: 'ids', text: threadId + (t ? ' · ' + plural(t.message_count, 'message') : '') }));
     ticks = [];
     agos = [];
+    // Unread needs my deliveries (the matrix); if it fails, history shows
+    // and the view is placed once it loads.
+    const ready = !!history.get() && !!matrix.get();
+    const openAt = ready ? place(all, d) : null;
+    if (io) io.disconnect(); // the old nodes are going; watch() takes the new ones
     if (history.error() && !history.get()) {
       list.replaceChildren(h('div', { class: 'empty error' }, h('b', { text: 'Thread unavailable' }), history.error().message));
-    } else if (history.loading() && !all.length) {
+    } else if ((history.loading() && !all.length) || (!opened && !history.error() && !matrix.error())) {
+      // The first draw waits for unread, to open there, not jump from the bottom.
       list.replaceChildren(h('div', { class: 'loading', text: 'Loading thread…' }));
     } else {
       // A rebuild replaces every node: a focused thumbnail keeps its focus.
       const f = document.activeElement, keep = f && list.contains(f) && f.matches('button.thumb') && f.closest('.msg');
-      list.replaceChildren(...items(all, matrix.get() || null, (d && d.open_approvals) || []).map((it, i, all) => message(it, i ? all[i - 1].message : null)));
+      const its = items(all, matrix.get() || null, (d && d.open_approvals) || []);
+      const isUnread = new Set(unread.map(u => u.message_id));
+      list.replaceChildren(...its.flatMap((it, i) => {
+        const id = it.message.message_id, el = message(it, i ? its[i - 1].message : null);
+        if (isUnread.has(id) && !reader.seen(id)) el.classList.add('unread');
+        return id === S.divider ? [newDivider(), el] : [el];
+      }));
       const again = keep && document.getElementById(keep.id);
       const thumb = again && again.querySelector('button.thumb[data-sha="' + f.dataset.sha + '"]');
       if (thumb) thumb.focus({ preventScroll: true });
+      if (io) watch(); else observe();
     }
     tick();
 
@@ -463,15 +585,20 @@ export function mount(root, ctx) {
     comp.querySelector('textarea').placeholder = 'Message ' + (participants ? participants.filter(p => p !== me).map(nameOf).join(', ') : 'this thread');
     gate();
     for (const b of comp.querySelectorAll('.seg button')) b.className = b.value === S.prio ? 'on' : '';
-    if (S.pinned) scroller.scrollTop = scroller.scrollHeight;
+    const at = openAt && (list.querySelector('.newdiv') || document.getElementById('m-' + openAt));
+    if (at) { at.scrollIntoView({ block: 'start' }); onScroll(); }
+    else if (S.pinned) scroller.scrollTop = scroller.scrollHeight;
   }
 
-  const onScroll = () => { S.pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < PIN_SLACK; };
+  // pinned: at the bottom of the column (of the page at phone width).
+  function onScroll() {
+    const el = scroller.scrollHeight > scroller.clientHeight + 1 ? scroller : document.scrollingElement;
+    S.pinned = el.scrollHeight - el.scrollTop - el.clientHeight < PIN_SLACK;
+  }
 
   // Pick a default on first load or if a selected message disappears. An
-  // explicit dismissal ('') survives reloads as well as renders. A load that
-  // brings another peer's message marks the thread read again.
-  let loaded, seen = null;
+  // explicit dismissal ('') survives reloads as well as renders.
+  let loaded;
   const onHistory = () => {
     if (history.get() !== loaded) {
       loaded = history.get();
@@ -480,22 +607,35 @@ export function mount(root, ctx) {
       // event for that very send, which landed though its answer was lost)
       // must not re-pick it, or the retry would mint a new idempotency key.
       if (!S.pending && (S.replyTo === null || (S.replyTo && !list.some(m => m.message_id === S.replyTo)))) S.replyTo = lastFromOther(list) || null;
-      if (seen && list.some(m => !seen.has(m.message_id) && m.sender !== me)) markRead();
-      if (loaded) seen = new Set(list.map(m => m.message_id));
+      collectRefs();
     }
     render();
+    scheduleExpiry();
   };
   render();
-  markRead();
   scroller.addEventListener('scroll', onScroll, { passive: true });
+  window.addEventListener('scroll', onScroll, { passive: true });
   document.addEventListener('visibilitychange', onVisible);
+  document.addEventListener('close', onActive, true); // a modal closed
+  window.addEventListener('focus', onActive);
+  window.addEventListener('blur', onActive);
   const timer = setInterval(tick, 1000);
   const off = [history.subscribe(onHistory), detail.subscribe(render), matrix.subscribe(render), ctx.threads.subscribe(render), ctx.peers.subscribe(render)];
   return () => {
     gone = true;
     clearInterval(timer);
+    clearTimeout(expiryTimer);
+    refSubs.clear();
+    if (ctx.blobRefs && ctx.blobRefs.get() === refs) delete ctx.blobRefs;
     scroller.removeEventListener('scroll', onScroll);
+    window.removeEventListener('scroll', onScroll);
     document.removeEventListener('visibilitychange', onVisible);
+    document.removeEventListener('close', onActive, true);
+    window.removeEventListener('focus', onActive);
+    window.removeEventListener('blur', onActive);
+    cover.disconnect();
+    if (io) io.disconnect();
+    reader.destroy();
     off.forEach(fn => fn());
     atts.destroy();
     thumbs.release();

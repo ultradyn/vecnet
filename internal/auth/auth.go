@@ -31,7 +31,14 @@ import (
 // operator peer (peers.kind = 'operator'), so the operator is addressable
 // like any peer; PeerID is "" when no operator peer exists yet.
 type Caller struct {
-	Kind        string // "peer" | "principal" | "operator"
+	// CredentialID allows sensitive operations to recheck revocation after waits.
+	CredentialID string `json:"credential_id,omitempty"`
+	// OAuth carries the access-token identity and binding resolved by TokenAuth.
+	// It is distinct from native credentials and never contains a bearer secret.
+	// Keep it a comparable value: MCP sessions compare repeated resolutions of
+	// the same Caller, and native callers use its zero value.
+	OAuth       OAuthCredential `json:"-"`
+	Kind        string          // "peer" | "principal" | "operator"
 	PrincipalID string
 	PeerID      string
 	PeerKind    string // peers.kind of PeerID, "" when PeerID is ""
@@ -112,10 +119,10 @@ func (r *Resolver) Resolve(ctx context.Context, bearer string) (Caller, error) {
 	if bearer == "" {
 		return Caller{}, ErrUnauthenticated
 	}
-	var kind, subject string
+	var kind, subject, credentialID string
 	err := r.DB.QueryRowContext(ctx,
-		`SELECT kind, subject_id FROM credentials WHERE secret_hash = ? AND revoked_at IS NULL`,
-		HashSecret(bearer)).Scan(&kind, &subject)
+		`SELECT kind, subject_id, cred_id FROM credentials WHERE secret_hash = ? AND revoked_at IS NULL`,
+		HashSecret(bearer)).Scan(&kind, &subject, &credentialID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Caller{}, ErrUnauthenticated
 	}
@@ -138,7 +145,7 @@ func (r *Resolver) Resolve(ctx context.Context, bearer string) (Caller, error) {
 		if disabled != 0 {
 			return Caller{}, ErrPeerDisabled
 		}
-		return Caller{Kind: "peer", PrincipalID: prn, PeerID: subject, PeerKind: peerKind}, nil
+		return Caller{CredentialID: credentialID, Kind: "peer", PrincipalID: prn, PeerID: subject, PeerKind: peerKind}, nil
 
 	case "principal", "operator":
 		var one int
@@ -149,7 +156,7 @@ func (r *Resolver) Resolve(ctx context.Context, bearer string) (Caller, error) {
 		if err != nil {
 			return Caller{}, fmt.Errorf("auth: resolve principal: %w", err)
 		}
-		c := Caller{Kind: kind, PrincipalID: subject}
+		c := Caller{CredentialID: credentialID, Kind: kind, PrincipalID: subject}
 		if kind == "operator" {
 			var peer string
 			err := r.DB.QueryRowContext(ctx,
