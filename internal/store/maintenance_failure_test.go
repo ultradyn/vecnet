@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 type maintenanceConnector struct {
 	driver driver.Driver
 	dsn    string
+	before func(context.Context, string) error
 	after  func(context.Context, string) error
 }
 
@@ -30,7 +32,7 @@ func (c maintenanceConnector) Connect(context.Context) (driver.Conn, error) {
 	return &maintenanceConn{
 		Conn: conn, ExecerContext: conn.(driver.ExecerContext),
 		QueryerContext: conn.(driver.QueryerContext), ConnBeginTx: conn.(driver.ConnBeginTx),
-		after: c.after,
+		before: c.before, after: c.after,
 	}, nil
 }
 
@@ -39,15 +41,86 @@ type maintenanceConn struct {
 	driver.ExecerContext
 	driver.QueryerContext
 	driver.ConnBeginTx
-	after func(context.Context, string) error
+	before func(context.Context, string) error
+	after  func(context.Context, string) error
 }
 
 func (c *maintenanceConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if c.before != nil {
+		if err := c.before(ctx, query); err != nil {
+			return nil, err
+		}
+	}
 	result, err := c.ExecerContext.ExecContext(ctx, query, args)
-	if err == nil {
+	if err == nil && c.after != nil {
 		err = c.after(ctx, query)
 	}
 	return result, err
+}
+
+func TestCompactionRollbackDoesNotPublishUncommittedStats(t *testing.T) {
+	for _, failure := range []string{"capacity_probe", "commit"} {
+		t.Run(failure, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "hub.db")
+			independent, err := store.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer independent.Close()
+			free := freedPages(t, independent)
+			pages := pragmaInt(t, independent, "page_count")
+			vacuumSteps, probes := 0, 0
+			injected := false
+			pool := sql.OpenDB(maintenanceConnector{
+				driver: independent.Driver(),
+				dsn:    "file:" + path + "?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)",
+				before: func(_ context.Context, query string) error {
+					if failure == "commit" && query == "COMMIT" {
+						injected = true
+						return errors.New("injected commit failure")
+					}
+					return nil
+				},
+				after: func(_ context.Context, query string) error {
+					if query == "PRAGMA incremental_vacuum(1)" {
+						vacuumSteps++
+					}
+					return nil
+				},
+			})
+			defer pool.Close()
+			pool.SetMaxOpenConns(1)
+			db := &store.DB{DB: pool}
+			result, err := db.Maintain(context.Background(), store.MaintenanceOptions{
+				ReclaimPages: 3, Target: time.Second,
+				AvailableBytes: func(context.Context) (int64, error) {
+					probes++
+					if failure == "capacity_probe" && probes == 4 {
+						injected = true
+						return 0, errors.New("injected capacity probe failure")
+					}
+					return 1 << 40, nil
+				},
+			})
+			if !injected || vacuumSteps < 2 || err == nil {
+				t.Fatalf("failure missed in-flight reclaim: injected=%v vacuumSteps=%d result=%+v err=%v", injected, vacuumSteps, result, err)
+			}
+			if result.Before.PageCount != pages || result.Before.FreelistCount != free || result.ReclaimedPages != 0 {
+				t.Fatalf("rolled-back reclaim reported progress: %+v", result)
+			}
+			for _, reader := range []*store.DB{independent, db} {
+				if got := pragmaInt(t, reader, "page_count"); got != pages {
+					t.Errorf("rollback page_count=%d want %d", got, pages)
+				}
+				if got := pragmaInt(t, reader, "freelist_count"); got != free {
+					t.Errorf("rollback freelist_count=%d want %d", got, free)
+				}
+			}
+			if result.After != (store.StorageStats{}) {
+				t.Fatalf("rolled-back After must be unavailable: %+v", result.After)
+			}
+		})
+	}
 }
 
 func TestCompactionCancellationAtBeginCompletionReleasesWriter(t *testing.T) {

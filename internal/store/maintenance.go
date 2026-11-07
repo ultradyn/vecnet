@@ -51,7 +51,8 @@ type CheckpointProgress struct {
 	CheckpointedPages int64 `json:"checkpointed_pages"`
 }
 type MaintenanceResult struct {
-	Before         StorageStats       `json:"before"`
+	Before StorageStats `json:"before"`
+	// After is zero if reclaim was attempted without a complete committed sample.
 	After          StorageStats       `json:"after"`
 	Checkpoint     CheckpointProgress `json:"checkpoint"`
 	ReclaimedPages int64              `json:"reclaimed_pages"`
@@ -178,6 +179,9 @@ func (db *DB) Maintain(ctx context.Context, o MaintenanceOptions) (r Maintenance
 		return r, nil
 	}
 	if r.Before.AutoVacuum == 2 && o.ReclaimPages > 0 {
+		// Transactional probes are only for budgeting. Publish After once
+		// reclaim commits and a complete post-transaction sample is available.
+		r.After = StorageStats{}
 		// Pin the writer lock across page accounting and reclaim. Concurrent
 		// sends cannot grow the file between the budget check and vacuum.
 		if _, err = c.ExecContext(slice, "BEGIN IMMEDIATE"); err != nil {
@@ -214,7 +218,6 @@ func (db *DB) Maintain(ctx context.Context, o MaintenanceOptions) (r Maintenance
 			if err != nil {
 				return r, err
 			}
-			r.After = s
 			if lowHeadroom(s, o) {
 				r.PausedReason = "low_headroom"
 				break
@@ -261,7 +264,11 @@ func (db *DB) Maintain(ctx context.Context, o MaintenanceOptions) (r Maintenance
 	if err = checkpoint(); err != nil {
 		return r, err
 	}
-	r.After, err = maintenanceStats(slice, c, path, o)
+	var after StorageStats
+	after, err = maintenanceStats(slice, c, path, o)
+	if err == nil {
+		r.After = after
+	}
 	return r, err
 }
 
