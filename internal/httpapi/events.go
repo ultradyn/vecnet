@@ -447,7 +447,7 @@ func decodeAck(raw []byte) (ackBody, error) {
 	}
 	for k := range top {
 		if k != "cursor" {
-			return ackBody{}, &envelope.SchemaError{Path: "/" + k, Message: "unknown field"}
+			return ackBody{}, &envelope.SchemaError{Path: "/" + envelope.UnknownProperty, Message: "unknown field"}
 		}
 	}
 	c, ok := top["cursor"]

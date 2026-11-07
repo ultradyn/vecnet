@@ -29,10 +29,12 @@ export function rows({ installed = false } = {}) {
   return list.sort((a, b) => (a.key < b.key ? -1 : 1));
 }
 
-export function fakeHub({ preferences = rows(), revision = 3 } = {}) {
-  const hub = { revision, preferences: preferences.map(r => ({ ...r })), calls: [], fail: null, gen: 'g1' };
+// storage, when set, is the operator-only R2 figures the hub adds beside the
+// preferences (internal/httpapi/blob_capabilities.go writePreferencesSnapshot).
+export function fakeHub({ preferences = rows(), revision = 3, storage = null } = {}) {
+  const hub = { revision, preferences: preferences.map(r => ({ ...r })), calls: [], fail: null, gen: 'g1', storage };
   const etag = () => `"prefs-${hub.revision}-${hub.gen}"`;
-  const snapshot = () => ({ revision: hub.revision, preferences: hub.preferences.map(r => ({ ...r })) });
+  const snapshot = () => ({ revision: hub.revision, preferences: hub.preferences.map(r => ({ ...r })), ...(hub.storage ? { storage: { ...hub.storage } } : {}) });
   const err = (status, code, details = {}) => Object.assign(new Error(code), { status, code, details });
   // Risks compare before and after, as preferenceRisks does: a reset that
   // shortens a presence TTL is as risky as a set.
@@ -49,6 +51,7 @@ export function fakeHub({ preferences = rows(), revision = 3 } = {}) {
       if (v === row.value) continue;
       if (row.key.startsWith('presence.') && v < row.value) out.push({ code: 'presence_shortened', keys: [row.key], message: 'Shorter presence TTL may release held wakes.' });
       if (row.key === 'retention.archive_mode' && row.value === true && v === false) out.push({ code: 'archive_disabled', keys: [row.key], message: 'Disabling archive protection permits future history expiry.' });
+      if (row.key === 'blobs.expiry' && v === 'off') out.push({ code: 'blob_expiry_off', keys: [row.key], message: 'New attachments have no disaster expiry; retained and reserved storage incurs cost within the verified finite quota.' });
     }
     if (patch.apply_existing) out.push({ code: 'retention_apply_existing', keys: [...Object.keys(patch.set || {}), ...(patch.reset || [])], message: 'Apply to existing data.' });
     return out.concat(hub.extraRisks ? hub.extraRisks(patch) : []);
@@ -65,7 +68,18 @@ export function fakeHub({ preferences = rows(), revision = 3 } = {}) {
       hub.calls.push({ op: 'preview', patch: structuredClone(patch), tag });
       if (hub.fail && hub.fail.preview) throw hub.fail.preview;
       if (tag !== etag()) throw err(412, 'prefs_revision_conflict');
-      return { base_revision: hub.revision, risks: risks(patch), impact: {}, confirm_token: 'tok:' + digest(patch), expires_at: '2026-11-06T10:00:00.000Z' };
+      const r = risks(patch);
+      const impact = r.some(x => x && x.code === 'blob_expiry_off') && hub.storage ? { storage: { ...hub.storage } } : {};
+      return { base_revision: hub.revision, risks: r, impact, confirm_token: 'tok:' + digest(patch), expires_at: '2026-11-06T10:00:00.000Z' };
+    },
+    async blobStorage() {
+      hub.calls.push({ op: 'storage' });
+      if (hub.fail && hub.fail.storage) {
+        const f = hub.fail.storage;
+        if (!hub.fail.sticky) hub.fail = null;
+        throw f;
+      }
+      return { storage: hub.storage ? { ...hub.storage } : null };
     },
     async patchPrefs(patch, tag) {
       hub.calls.push({ op: 'patch', patch: structuredClone(patch), tag });

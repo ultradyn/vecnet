@@ -38,9 +38,10 @@ func newUser(t *testing.T) *user {
 	dir := t.TempDir()
 	u := &user{t: t, conf: filepath.Join(dir, "config", "vecnet.toml")}
 	u.env = map[string]string{
-		"VECNET_CONFIG":  u.conf,
-		"XDG_CACHE_HOME": filepath.Join(dir, "cache"),
-		"HOME":           filepath.Join(dir, "home"),
+		"VECNET_CONFIG":   u.conf,
+		"XDG_CACHE_HOME":  filepath.Join(dir, "cache"),
+		"XDG_CONFIG_HOME": filepath.Join(dir, "config"),
+		"HOME":            filepath.Join(dir, "home"),
 	}
 	return u
 }

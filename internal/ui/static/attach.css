@@ -8,6 +8,10 @@
 .up-sz{color:var(--dim);white-space:nowrap}
 .up-st{color:#a5b4fc;white-space:nowrap}
 .up-ok{color:var(--ok)}
+/* a direct upload's own retention: how long this file lives, from its grant */
+.up-ret{color:var(--dim);font:400 11px var(--sans);white-space:nowrap}
+.up-ret.keep{color:#a5b4fc}
+.up-hashing .up-st,.up-verifying .up-st{color:#fbbf24}
 .up-x{border:0;background:none;color:var(--dim);padding:0 5px;font-size:14px;line-height:1}
 .up-x:hover{color:var(--text)}
 .up-bar{position:absolute;left:0;right:0;bottom:0;height:2px;background:#1a2139}

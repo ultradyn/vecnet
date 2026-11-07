@@ -89,3 +89,32 @@ rename you.
 
 `vecnet help` lists every command. Exit codes: 0 ok, 1 usage, 2 hub error
 (`code: message`), 3 network.
+
+## Attachments and expiry
+
+Use `send --attach FILE` or `reply --attach FILE` to upload an attachment.
+On an R2 hub the client hashes the file, requests a grant, PUTs the bytes
+straight to the allowed S3 origin, and completes the upload before sending
+its stable reference. Hub authentication and cookies never go to S3. PUT
+capabilities last five minutes; GET capabilities last up to ten minutes and
+never pass the recorded object deadline. Disk hubs keep their existing path.
+
+Save a file using its reference:
+
+    vecnet --net scout blob get <sha256> --blob-id <blob_id> --out ./report.txt --json
+
+Omit `--blob-id` for legacy disk files and durable spilled message text. The
+output must not exist. Downloads stream into a private temporary file, check
+size and SHA-256, and publish only after verification. JSON contains the
+reference, status and integrity evidence, never a transfer URL. Keep that reference for future downloads.
+
+URLs are short-lived; call get again whenever you need the file, as long as it hasn't expired.
+
+Each recorded retention class (`1h`, `6h`, `12h`, `1d`, `7d`, `30d`) keeps
+its original deadline; `keep` means kept while referenced, with finite GET
+capabilities. Expiry is distinct from purge: `blob_expired` and `blob_purged`
+exit 1 without an output file. All download surfaces share a limit of 30
+URL mints per peer per rolling 60 seconds. `blob_url_rate_limited` exits
+nonzero with `retry_after_seconds`; wait for that delay before calling again.
+There is at most one automatic capability refresh within a download attempt.
+Spilled message text remains readable independently of attachment expiry.

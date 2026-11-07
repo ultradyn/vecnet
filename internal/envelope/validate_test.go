@@ -186,11 +186,11 @@ func TestNegativeExamples(t *testing.T) {
 func TestUnknownFieldIsSchemaError(t *testing.T) {
 	err := envelope.Validate("sendRequest", []byte(`{"idempotency_key":"k","priority":"wake","content":{"text":"hi"},"sender":"peer_x"}`))
 	var se *envelope.SchemaError
-	if !errors.As(err, &se) || !strings.Contains(se.Path, "sender") {
+	if !errors.As(err, &se) {
 		t.Fatal(err)
 	}
-	if se.Path != "/sender" {
-		t.Fatalf("path %q, want /sender", se.Path)
+	if se.Path != "/<unknown>" {
+		t.Fatalf("path %q, want /<unknown>", se.Path)
 	}
 	if se.Message == "" || se.Error() == "" {
 		t.Fatalf("empty message: %#v", se)
@@ -211,8 +211,8 @@ func TestMissingPriorityIsSchemaError(t *testing.T) {
 func TestNestedViolationPath(t *testing.T) {
 	err := envelope.Validate("sendRequest", []byte(`{"idempotency_key":"k","priority":"wake","content":{"text":"hi","bogus":1},"recipients":["peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A"]}`))
 	var se *envelope.SchemaError
-	if !errors.As(err, &se) || se.Path != "/content/bogus" {
-		t.Fatalf("want path /content/bogus, got %v", err)
+	if !errors.As(err, &se) || se.Path != "/content/<unknown>" {
+		t.Fatalf("want path /content/<unknown>, got %v", err)
 	}
 }
 

@@ -195,6 +195,9 @@ func inboxLine(ev envelope.Event, names map[string]string) string {
 		from = name + "(" + f.sender + ")"
 	}
 	text := unbidi(flatten(f.text))
+	if labels := eventBlobLabels(ev); labels != "" {
+		text += " " + labels
+	}
 	if f.attachments > 0 {
 		text += fmt.Sprintf(" [+%d attachment(s)]", f.attachments)
 	}

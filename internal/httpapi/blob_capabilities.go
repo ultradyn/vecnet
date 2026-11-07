@@ -18,8 +18,8 @@ func (s *server) blobCapabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	result := map[string]any{"backend": backend, "upload_mode": "legacy", "max_size": s.Hub.Blobs.MaxSize, "daily_quota": s.Hub.Blobs.DailyQuota, "mcp_transfer_mode": "base64", "mcp_remote_bytes": false}
 	// Retained remote references remain readable when new uploads use disk.
-	if s.Hub.Blobs.Transfers != nil {
-		result["download_origins"] = []string{"https://" + s.Hub.Cfg.R2.AccountID + ".r2.cloudflarestorage.com"}
+	if origins := s.r2Origins(); origins != nil {
+		result["download_origins"] = origins
 	}
 	if backend == "r2" {
 		snapshot, err := s.Hub.Preferences.LoadSnapshot(r.Context(), nil)
@@ -86,4 +86,15 @@ func (s *server) writePreferencesSnapshot(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, 200, map[string]any{"revision": snapshot.Revision, "preferences": snapshot.Descriptors(), "storage": storage})
+}
+
+// r2Origins is the exact R2 S3 origin clients transfer with, while R2
+// transfers are installed (retained remote references stay readable after a
+// switch back to disk). Capabilities advertise it, and the operator UI's
+// CSP connect-src allows exactly it (internal/ui.Policy).
+func (s *server) r2Origins() []string {
+	if s.Hub == nil || s.Hub.Blobs == nil || s.Hub.Blobs.Transfers == nil {
+		return nil
+	}
+	return []string{"https://" + s.Hub.Cfg.R2.AccountID + ".r2.cloudflarestorage.com"}
 }

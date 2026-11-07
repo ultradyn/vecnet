@@ -3,11 +3,13 @@ package mcpserver_test
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/XertroV/vecnet/internal/mcpdiag"
+	"github.com/XertroV/vecnet/internal/mcpserver"
 	"github.com/XertroV/vecnet/internal/testhub"
 )
 
@@ -117,6 +119,113 @@ func TestToolValidationErrorsDoNotEchoCompositeValues(t *testing.T) {
 			for _, forbidden := range []string{"original_value", "private-field-canary", "private-object-canary", "private-array-canary", "private-nested-canary"} {
 				if strings.Contains(string(raw), forbidden) {
 					t.Errorf("%s error echoed %s", tool.name, forbidden)
+				}
+			}
+		}
+	}
+}
+
+// R2 adds conditional schemas and capability arguments. Refusals must keep
+// rejected values out of the entire wire response and both diagnostic sinks.
+func TestR2BlobValidationErrorsDoNotEchoCapabilities(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("session", "private blob arguments")
+	_, logs := captureDiag(t)
+	const marker = "private-transfer-canary"
+	const capability = "https://example.invalid/object?X-Amz-Signature=" + marker
+	grant := map[string]any{
+		"phase": "grant", "size": 1, "sha256": strings.Repeat("a", 64),
+		"media_type": "text/plain", "idempotency_key": "private-grant",
+	}
+	cases := []struct {
+		tool string
+		args map[string]any
+	}{
+		{"vecnet_blob_put", map[string]any{"phase": capability}},
+		{"vecnet_blob_get", map[string]any{"sha256": capability}},
+		{"vecnet_blob_status", map[string]any{"sha256": capability}},
+		{"vecnet_blob_get", map[string]any{"sha256": strings.Repeat("a", 64), "blob_id": map[string]any{"url": capability}}},
+		{"vecnet_blob_status", map[string]any{"sha256": strings.Repeat("a", 64), "blob_id": []any{capability}}},
+		{"vecnet_blob_put", map[string]any{"phase": "complete", "blob_id": capability}},
+		{"vecnet_blob_put", map[string]any{capability: "unexpected"}},
+	}
+	for _, field := range []string{"size", "sha256"} {
+		args := map[string]any{}
+		for k, v := range grant {
+			args[k] = v
+		}
+		args[field] = capability
+		cases = append(cases, struct {
+			tool string
+			args map[string]any
+		}{"vecnet_blob_put", args})
+	}
+	for i, tc := range cases {
+		_, raw := do(t, env, call{secret: secret, headers: modern(), body: map[string]any{
+			"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+			"params": map[string]any{"name": tc.tool, "arguments": tc.args},
+		}})
+		response := decodeRPC(t, raw)
+		if response.Error == nil && !strings.Contains(string(response.Result), `"isError":true`) {
+			t.Fatalf("case %d accepted invalid capability argument", i)
+		}
+		ring, err := json.Marshal(mcpdiag.Snapshot(mcpdiag.Filter{Peer: peer}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{marker, "X-Amz-Signature", "example.invalid"} {
+			if strings.Contains(string(raw), forbidden) || strings.Contains(logs.String(), forbidden) || strings.Contains(string(ring), forbidden) {
+				t.Fatalf("case %d echoed capability data", i)
+			}
+		}
+	}
+}
+
+func TestR2BlobUnknownPropertyNamesDoNotEchoCapabilities(t *testing.T) {
+	env := testhub.Start(t)
+	peer, secret := env.NewPeer("session", "private blob property names")
+	_, logs := captureDiag(t)
+	const capability = "https://private-property.invalid/object?X-Amz-Signature=property-canary&token=tail-canary"
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+	}{
+		{"vecnet_blob_get", map[string]any{"sha256": strings.Repeat("a", 64)}},
+		{"vecnet_blob_status", map[string]any{"sha256": strings.Repeat("a", 64)}},
+		{"vecnet_blob_put", map[string]any{
+			"phase": "grant", "size": 1, "sha256": strings.Repeat("a", 64),
+			"media_type": "text/plain", "idempotency_key": "unknown-property-grant",
+		}},
+		{"vecnet_blob_put", map[string]any{"phase": "complete", "blob_id": "blo_00000000000000000000000001"}},
+	} {
+		// Every surrounding request satisfies its schema. Only the unknown
+		// property causes rejection; missing fields cannot mask its location.
+		for _, key := range []string{capability, "private-property-canary", "0"} {
+			args := maps.Clone(tc.args)
+			args[key] = "unexpected"
+			resp, raw := do(t, env, call{secret: secret, headers: modern(), body: map[string]any{
+				"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+				"params": map[string]any{"name": tc.name, "arguments": args},
+			}})
+			response := decodeRPC(t, raw)
+			if resp.StatusCode != 200 || response.Error == nil || response.Error.Code != mcpserver.ErrInvalidParams {
+				t.Fatalf("%s did not reject unknown property with invalid params", tc.name)
+			}
+			var data struct {
+				Path string `json:"path"`
+			}
+			if json.Unmarshal(response.Error.Data, &data) != nil || data.Path != "/<unknown>" {
+				t.Fatalf("%s did not return the fixed unknown-property path", tc.name)
+			}
+			ring, err := json.Marshal(mcpdiag.Snapshot(mcpdiag.Filter{Peer: peer}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, sink := range []string{string(raw), logs.String(), string(ring)} {
+				for _, forbidden := range []string{"private-property.invalid", "X-Amz-Signature", "property-canary", "tail-canary", "private-property-canary"} {
+					if strings.Contains(sink, forbidden) {
+						t.Fatalf("%s response or diagnostics retained private property name", tc.name)
+					}
 				}
 			}
 		}

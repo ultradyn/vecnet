@@ -68,10 +68,12 @@ func TestRequestAndUploadKeepCheckedHubURL(t *testing.T) {
 		refused.uploadHC.Transport = refused.hc.Transport
 		_, err = refused.Peers(context.Background())
 		_, err2 := refused.Upload(context.Background(), strings.NewReader("hi"), 2, "text/plain", "hi.txt")
+		_, err3 := refused.UploadWithProgress(context.Background(), strings.NewReader("hi"), 2, "text/plain", "hi.txt", nil)
+		_, _, err4 := refused.BlobWithOptions(context.Background(), strings.Repeat("a", 64), 10, BlobOptions{BlobID: "blo_00000000000000000000000001"})
 		if calls != before {
 			t.Fatalf("%q made a request", raw)
 		}
-		for _, got := range []error{err, err2} {
+		for _, got := range []error{err, err2, err3, err4} {
 			if got == nil {
 				t.Fatalf("%q accepted", raw)
 			}

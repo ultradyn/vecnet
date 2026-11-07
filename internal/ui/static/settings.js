@@ -9,8 +9,8 @@
 // Apply; it never sends a request.
 import { h } from './dom.js';
 import {
-  GROUPS, LANES, TICKS, createSettingsStore, durationText, enumLabel, formatValue, laneView, lanePosition, lockOf,
-  previewRefusal, rangeText, timingOf, unitOf, visibleRows,
+  BLOB_NEW_ONLY, GROUPS, LANES, TICKS, blobOffText, bytesText, createSettingsStore, durationText, enumLabel, formatValue, laneView, lanePosition, lockOf,
+  previewRefusal, rangeText, storageView, timingOf, unitOf, visibleRows,
 } from './settings-model.js';
 
 let current = null;
@@ -45,10 +45,45 @@ function chip(source) {
 function lockChip(lock) {
   return lock && LOCK_CHIP[lock.kind] ? h('span', { class: 'st-src s-' + lock.kind, text: LOCK_CHIP[lock.kind] }) : null;
 }
-function bytes(n) {
-  if (typeof n !== 'number') return '';
-  for (const [u, s] of [['GB', 1e9], ['MB', 1e6], ['KB', 1e3]]) if (n >= s) return (n / s).toFixed(n >= 10 * s ? 0 : 1) + ' ' + u;
-  return n + ' B';
+const bytes = bytesText;
+
+// storagePanel: the hub's R2 attachment storage, operator-only figures from
+// the Settings snapshot (retained + reserved = used, against a finite limit).
+// Full or over the limit stops new uploads; nothing is deleted to make room.
+function storagePanel(storage) {
+  const v = storageView(storage);
+  if (!v) return null;
+  const share = n => Math.max(0, Math.min(100, (n / Math.max(v.limit_bytes, v.used_bytes)) * 100)) + '%';
+  const ret = h('i', { class: 'ret' }), res = h('i', { class: 'res' });
+  ret.style.width = share(v.retained_bytes);
+  res.style.width = share(v.reserved_bytes);
+  return h('div', { class: 'st-sto t-' + v.tone, 'data-storage': v.tone },
+    h('div', { class: 'st-sto-h' }, h('b', { text: 'Attachment storage' }), h('span', { class: 'st-sto-t', text: `${v.text} · ${v.percent}%` })),
+    h('div', { class: 'st-sto-bar', role: 'meter', 'aria-label': 'Attachment storage used', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(v.percent), 'aria-valuetext': v.text }, ret, res),
+    h('dl', { class: 'st-sto-f' }, ...v.parts.flatMap(p => [h('dt', { text: p.label }), h('dd', { text: p.value })])),
+    h('p', { class: 'st-sto-n', text: v.note, hidden: !v.note }),
+    h('p', { class: 'st-dim st-sto-d', text: 'Counts every retention class, kept files included. Reserved is space held for uploads in flight. Purging an attachment (POST /v1/admin/blobs/{sha256}/purge) frees its space; nothing is deleted to make room.' }));
+}
+
+// A meter-only refresh must leave controls (including an open native select)
+// attached. Re-focusing a replacement cannot preserve that browser state.
+function updateStoragePanel(panel, storage) {
+  const v = storageView(storage);
+  if (!panel || !v) return;
+  panel.className = 'st-sto t-' + v.tone;
+  panel.setAttribute('data-storage', v.tone);
+  panel.querySelector('.st-sto-t').textContent = `${v.text} · ${v.percent}%`;
+  const meter = panel.querySelector('.st-sto-bar');
+  meter.setAttribute('aria-valuenow', String(v.percent));
+  meter.setAttribute('aria-valuetext', v.text);
+  const share = n => Math.max(0, Math.min(100, (n / Math.max(v.limit_bytes, v.used_bytes)) * 100)) + '%';
+  meter.querySelector('.ret').style.width = share(v.retained_bytes);
+  meter.querySelector('.res').style.width = share(v.reserved_bytes);
+  const figures = panel.querySelector('.st-sto-f').children;
+  v.parts.forEach((p, i) => { figures[i * 2 + 1].textContent = p.value; });
+  const note = panel.querySelector('.st-sto-n');
+  note.textContent = v.note;
+  note.hidden = !v.note;
 }
 
 // control: the editor for one hub row, shared by List rows and Policy drawers.
@@ -102,6 +137,7 @@ function details(store, row, id) {
   const danger = (row.danger || []).map(c => DANGER_NOTE[c]).filter(Boolean)[0];
   return [
     h('p', { class: 'st-h', id: id + '-h', text: row.description || '' }),
+    row.key === 'blobs.expiry' ? h('p', { class: 'st-blob-new', text: BLOB_NEW_ONLY }) : null,
     h('p', { class: 'st-meta', text: metaText(row) }),
     lock ? h('p', { class: 'st-lock ' + lock.kind, id: id + '-l', text: lock.text }) : null,
     d && d.op === 'reset' ? h('p', { class: 'st-pend', text: `Removes the stored override on Save. The hub's start-up value returns: built-in ${formatValue(row, row.default)}, unless a hub flag or environment variable sets it.` }) : null,
@@ -117,7 +153,9 @@ function listRow(store, row, flash) {
     h('div', { class: 'st-l' },
       h('div', { class: 'st-t' }, h('label', { for: id, class: 'st-lbl', text: row.label }), chip(src), lockChip(lock)),
       ...details(store, row, id)),
-    h('div', { class: 'st-c' }, control(store, row, id), resetLink(store, row), h('span', { class: 'st-key', text: row.key })));
+    h('div', { class: 'st-c' }, control(store, row, id), resetLink(store, row), h('span', { class: 'st-key', text: row.key })),
+    // The storage meter spans the row, under the label and its selector.
+    row.key === 'blobs.expiry' ? storagePanel(store.state.storage) : null);
 }
 
 // ---------- appearance (local) ----------
@@ -263,7 +301,10 @@ function archivePill(store) {
   chip(src), lockChip(lock));
 }
 
-function forecast() {
+function forecast(store) {
+  // With R2 figures, the hub's own storage; otherwise no estimate at all.
+  const panel = storagePanel(store.state.storage);
+  if (panel) return h('div', { class: 'st-fc has-sto' }, panel);
   return h('div', { class: 'st-fc' },
     h('div', { class: 'st-fc-h' }, h('span', { text: 'Storage forecast' }), h('span', { class: 'st-src s-unavailable', text: 'unavailable' })),
     h('div', { class: 'st-fc-bar', 'aria-hidden': 'true' }),
@@ -331,7 +372,7 @@ function policyBody(store, focusFor) {
       axis,
       ...LANES.map(l => laneEl(store, l, focusFor)),
       h('p', { class: 'st-dim st-lane-note', text: 'Archive mode pauses the Messages lane only. Acknowledged events keep pruning; set their retention to 0 to keep them too.' }),
-      forecast()),
+      forecast(store)),
     h('section', { class: 'st-words', 'aria-labelledby': 'st-words-h' },
       h('h2', { id: 'st-words-h', text: 'Everything else, in plain words' }),
       para(store, 1, 'Files', off
@@ -437,11 +478,7 @@ function riskText(store, risk, impact) {
     case 'presence_shortened': return 'Agents turn unknown sooner after their last presence report. Wakes held for an agent whose presence is now stale may be released.';
     case 'archive_disabled': return `Message history becomes eligible for expiry under History retention (${val('retention.history')}) for messages from now on. Messages already here stay protected unless you also approve applying the policy to existing data. Acknowledged events keep pruning at their own retention either way.`;
     case 'retention_shortened': return 'The new limit applies to rows created from now on. Existing rows keep their previous rule unless you also approve applying it to existing data.';
-    case 'blob_expiry_off': {
-      const s = impact && impact.storage;
-      return 'New attachments get no expiry, so storage grows until files are deleted or expiry is turned back on. Existing attachments keep their deadlines.' +
-        (s ? ` The hub reports ${bytes(s.retained_bytes)} retained and ${bytes(s.reserved_bytes)} reserved: ${bytes(s.used_bytes)} used of a ${bytes(s.limit_bytes)} limit (estimates).` : '');
-    }
+    case 'blob_expiry_off': return blobOffText((impact && impact.storage) || store.state.storage) + ' Figures are estimates. Turning expiry back on later does not delete kept files.';
     case 'retention_apply_existing': return 'Existing rows older than the fixed cutoff become eligible at the next nightly sweep, not now. Pinned rows are kept. Deleted data cannot be restored by Undo; take a backup first (docs/DEPLOY.md, Backups).';
   }
   return 'This page cannot describe this risk, so the change cannot be confirmed here.';
@@ -613,10 +650,20 @@ export function mount(root, ctx) {
     }
   }
 
-  const off = store.subscribe(render);
+  const off = store.subscribe((_st, change) => {
+    if (change === 'storage') updateStoragePanel(page.querySelector('.st-sto'), store.state.storage);
+    else render();
+  });
   const onFocus = () => store.refresh();
   const onVisible = () => { if (!document.hidden) store.refresh(); };
   const onBefore = e => { if (store.dirtyKeys().length) { e.preventDefault(); e.returnValue = ''; } };
+  // Focus and visibility are not a reconnect. While this screen is mounted,
+  // the shared connection's transition to live re-reads through refresh(),
+  // including the meter-only path when a confirmation or save is busy.
+  let offConn = () => {};
+  if (ctx.store && typeof ctx.store.onConn === 'function') {
+    offConn = ctx.store.onConn(state => { if (state === 'live') store.refresh(); });
+  }
   window.addEventListener('focus', onFocus);
   document.addEventListener('visibilitychange', onVisible);
   window.addEventListener('beforeunload', onBefore);
@@ -626,6 +673,7 @@ export function mount(root, ctx) {
 
   return () => {
     off();
+    offConn();
     store.destroy();
     window.removeEventListener('focus', onFocus);
     document.removeEventListener('visibilitychange', onVisible);

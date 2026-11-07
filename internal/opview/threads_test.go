@@ -539,3 +539,31 @@ func TestMatrixHidesReactionMessages(t *testing.T) {
 		t.Fatalf("matrix=%+v", got)
 	}
 }
+
+// The projection preserves generation identity independently of content hash.
+// Seed retained message JSON directly: transfer/provider acceptance is tested
+// elsewhere, and this test exercises only the SQL read projection.
+func TestThreadDetailFileGenerationIdentity(t *testing.T) {
+	env := testhub.Start(t)
+	_, secret := env.NewPeer("session", "A")
+	peer, _ := env.NewPeer("session", "B")
+	sr := threadSend(t, env, secret, "", []string{peer}, nil)
+	atts := []envelope.Attachment{
+		{BlobID: "blo_00000000000000000000000001", SHA256: strings.Repeat("a", 64), Name: "old.txt", Size: 3, MediaType: "text/plain", RetentionClass: "1h"},
+		{BlobID: "blo_00000000000000000000000002", SHA256: strings.Repeat("a", 64), Name: "keep.txt", Size: 3, MediaType: "text/plain", RetentionClass: "keep"},
+	}
+	raw, err := json.Marshal(atts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadExecFixture(t, env, `UPDATE messages SET body=json_set(body,'$.attachments',json(?)) WHERE msg_id=?`, string(raw), sr.MessageID)
+	d := threadDetail(t, env, sr.ThreadID)
+	if len(d.Files) != 2 {
+		t.Fatal("missing generations")
+	}
+	for i, f := range d.Files {
+		if f.BlobID != atts[i].BlobID || f.SHA256 != atts[i].SHA256 {
+			t.Fatalf("file %d lost generation identity", i)
+		}
+	}
+}

@@ -23,9 +23,9 @@ import (
 // counts and composer growth put the merged UI at about 354 KB; to 480 KiB on
 // 2026-11-06 for hub preferences Task 6: the Settings page, its draft model,
 // stylesheet and local appearance, about 106 KB, put the UI at about 483 KB;
-// to 512 KiB on 2026-11-07 for the peer page's Invite card (#67), about 13 KB,
-// which put the UI at about 496 KB).
-const uiMaxBytes = 512 << 10
+// to 544 KiB on 2026-11-07, merge of r2-build with master: R2 direct
+// transfers and retention plus the peer Invite card put the UI at 554,222 bytes).
+const uiMaxBytes = 544 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

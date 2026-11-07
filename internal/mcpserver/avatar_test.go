@@ -87,7 +87,7 @@ func TestSetAvatarToolArguments(t *testing.T) {
 	if p := invalidPath(t, env, aSec, "vecnet_set_avatar", map[string]any{"url": "http://example.com/a.png"}); p != "/url" {
 		t.Fatalf("http url: path %q", p)
 	}
-	if p := invalidPath(t, env, aSec, "vecnet_set_avatar", map[string]any{"data_base64": img, "media_type": "image/png"}); p != "" && p != "/media_type" {
+	if p := invalidPath(t, env, aSec, "vecnet_set_avatar", map[string]any{"data_base64": img, "media_type": "image/png"}); p != "/<unknown>" {
 		t.Fatalf("extra property: path %q", p)
 	}
 }
