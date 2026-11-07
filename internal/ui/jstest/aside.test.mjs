@@ -259,13 +259,18 @@ const findEl = (el, pred, out = []) => {
 const tick = () => new Promise(r => setTimeout(r, 0));
 function loaded(value) {
   const subs = new Set();
+  const notify = () => { for (const fn of [...subs]) fn(); };
   return {
     get: () => value, error: () => null,
     subscribe(fn) { subs.add(fn); return () => subs.delete(fn); },
+    notify,
     reload() {
-      // A real reload replaces the snapshot, which is what makes the panel redraw.
+      // Match the resource lifecycle: load start, a new snapshot, then the
+      // completion-only notification after the running load is cleared.
+      notify();
       if (value && typeof value === 'object') value = { ...value };
-      for (const fn of [...subs]) fn();
+      notify();
+      notify();
     },
   };
 }
@@ -367,16 +372,18 @@ test('file metadata retries on refresh and reconnect, once per signal, and can r
   const id = 'blo_0000000000000000000000000c';
   const sha = 'd'.repeat(64);
   let started = 0;
-  let open;
-  const pending = new Promise(r => { open = r; });
+  const reads = [];
   const api = {
     blobStatus() {
       started++;
-      // The first read stays in flight so a redraw cannot start a second one.
-      if (started === 1) return pending.then(() => { throw new APIError(503, 'blob_unavailable', 'storage unavailable'); });
-      if (started < 5) return Promise.reject(new APIError(503, 'blob_unavailable', 'storage unavailable'));
-      return Promise.resolve({ state: 'available', retention_class: 'keep', expires_at: null, sha256_verified: true, integrity: { algorithm: 'sha256', value: sha, verified: true } });
+      // Keep every attempt deferred so completion-only notifications arrive
+      // while it is in flight, before either rejection or recovery.
+      return new Promise((resolve, reject) => reads.push({ resolve, reject }));
     },
+  };
+  const fail = async () => {
+    reads.at(-1).reject(new APIError(503, 'blob_unavailable', 'storage unavailable'));
+    await tick();
   };
   const prev = globalThis.document;
   globalThis.document = { createElement: tag => new AsideEl(tag) };
@@ -387,8 +394,7 @@ test('file metadata retries on refresh and reconnect, once per signal, and can r
     assert.equal(row().attrs.disabled, '');
     world.detail.reload();
     assert.equal(started, 1, 'an in-flight read is not asked twice');
-    open();
-    await tick();
+    await fail();
     assert.equal(started, 1, 'the failure is cached rather than retried on its own redraw');
     assert.match(row().textContent, /Status unknown/);
     assert.equal(row().attrs.disabled, '', 'a failed read is not an available download');
@@ -396,28 +402,34 @@ test('file metadata retries on refresh and reconnect, once per signal, and can r
     await tick();
     assert.equal(started, 1, 'reconnecting does not retry');
     for (const fn of world.conns) fn('live');
-    await tick();
     assert.equal(started, 2, 'a live connection retries the failed read');
+    world.detail.notify();
+    await fail();
+    assert.equal(started, 2, 'completion during a reconnect attempt does not arm another read');
     world.detail.reload();
-    await tick();
     assert.equal(started, 3);
-    await tick();
+    await fail();
     assert.equal(started, 3, 'the third failure does not ask again by itself');
     assert.match(row().className, /s-unknown/);
     // The old three-try ceiling must not stick for the rest of the mount.
     // Each later refresh or live reconnect is one attempt, and a rejection
     // does not chain into the next one.
     world.detail.reload();
-    await tick();
     assert.equal(started, 4, 'a later refresh retries once after three failures');
-    await tick();
+    await fail();
     assert.equal(started, 4, 'that failure does not chain into another read');
+    world.detail.notify();
+    await tick();
+    assert.equal(started, 4, 'completion alone is not a refresh opportunity');
     for (const fn of world.conns) fn('reconnecting');
     await tick();
     assert.equal(started, 4, 'reconnecting is not a retry');
     for (const fn of world.conns) fn('live');
-    await tick();
     assert.equal(started, 5, 'a later live reconnect retries once');
+    world.detail.notify();
+    assert.match(row().className, /s-pending/);
+    reads.at(-1).resolve({ state: 'available', retention_class: 'keep', expires_at: null, sha256_verified: true, integrity: { algorithm: 'sha256', value: sha, verified: true } });
+    await tick();
     const after = row();
     assert.match(after.textContent, /Kept while referenced/);
     assert.equal(after.attrs.disabled, undefined, 'a recovered file is downloadable');

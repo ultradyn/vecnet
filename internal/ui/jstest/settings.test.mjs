@@ -1034,6 +1034,13 @@ const walkSt = (el, pred, out = []) => {
 
 test('mounted settings re-reads storage when the connection goes live, with no focus or visibility event', async () => {
   const hub = fakeHub({ preferences: r2Rows(), storage: storage(GiB, 5 * GiB, GiB / 4) });
+  let previewToken;
+  const previewPrefs = hub.api.previewPrefs;
+  hub.api.previewPrefs = async (...args) => {
+    const preview = await previewPrefs(...args);
+    previewToken = preview.confirm_token;
+    return preview;
+  };
   const conns = [];
   const fired = { focus: 0, visibilitychange: 0 };
   const listeners = { focus: [], visibilitychange: [], beforeunload: [] };
@@ -1079,14 +1086,16 @@ test('mounted settings re-reads storage when the connection goes live, with no f
         return () => { const i = conns.indexOf(fn); if (i >= 0) conns.splice(i, 1); };
       },
     };
-    off = mountSettings(root, {
+    const ctx = {
       api: hub.api,
       store: conn,
       appearance: { get: () => ({ theme: 'system', density: 'comfortable' }), set: () => ({ persisted: true }), subscribe: () => () => {} },
       toast() {},
       setLeaveGuard() {},
-    });
+    };
+    off = mountSettings(root, ctx);
     await flush();
+    assert.equal(conns.length, 1, 'the mount owns one connection subscription');
     const field = fk => walkSt(root, e => e.attrs['data-fk'] === fk)[0];
     const fire = (fk, type, value) => {
       const el = field(fk);
@@ -1107,6 +1116,8 @@ test('mounted settings re-reads storage when the connection goes live, with no f
     const gets = () => hub.calls.filter(c => c.op === 'get').length;
     const storages = () => hub.calls.filter(c => c.op === 'storage').length;
     const etag = `"prefs-${hub.revision}-g1"`;
+    const token = previewToken;
+    assert.ok(token, 'the hub issued a confirmation token');
     assert.ok(hub.calls.some(c => c.op === 'preview' && c.tag === etag), 'the confirmation is bound to the current ETag');
     const got = gets(), stored = storages(), revision = hub.revision;
     const marker = hub.calls.length;
@@ -1133,12 +1144,48 @@ test('mounted settings re-reads storage when the connection goes live, with no f
     assert.equal(field('st-blobs-expiry').value, 'off', 'the draft stays');
     assert.equal(fired.focus, 0, 'focus was not the trigger');
     assert.equal(fired.visibilitychange, 0, 'visibility was not the trigger');
+    const confirm = walkSt(dialog(), e => e.attrs['data-cf'] === 'ok')[0];
+    assert.ok(confirm && !confirm.disabled, 'the open dialog can still be confirmed');
+    for (const fn of confirm.on.click || []) fn();
+    await flush();
+    const patches = hub.calls.filter(c => c.op === 'patch');
+    assert.equal(patches.length, 1, 'confirmation saves once after reconnect');
+    assert.equal(patches[0].tag, etag, 'patchPrefs receives the original If-Match ETag');
+    assert.deepEqual(patches[0].patch.confirm, [token], 'patchPrefs receives the original preview token');
+    assert.deepEqual(patches[0].patch.set, { 'blobs.expiry': 'off', 'events.refresh_interval': 600 });
+    assert.equal(hub.calls.filter(c => c.op === 'preview').length, 1, 'reconnect and confirmation do not replace the preview');
+    assert.equal(hub.revision, revision + 1, 'the hub accepted the confirmed draft');
+    assert.equal(dialog().open, false, 'saving closes the confirmation');
+    const beforeUnmount = hub.calls.length;
     off();
     off = () => {};
     assert.equal(conns.length, 0, 'unmount drops the connection subscription');
     for (const fn of conns) fn('live');
     await flush();
-    assert.equal(storages(), stored + 1, 'a live event after unmount does not read again');
+    assert.equal(hub.calls.length, beforeUnmount, 'a live event after unmount does not read again');
+    off = mountSettings(root, ctx);
+    await flush();
+    assert.equal(conns.length, 1, 'remount owns exactly one active connection subscription');
+    const remounted = hub.calls.length;
+    const remountGets = gets(), remountStorages = storages();
+    hub.storage = storage(3 * GiB, 5 * GiB, GiB / 8);
+    for (const fn of conns) fn('reconnecting');
+    await flush();
+    assert.equal(hub.calls.length, remounted, 'reconnecting after remount does not read');
+    for (const fn of conns) fn('live');
+    await flush();
+    await flush();
+    assert.equal(conns.length, 1);
+    assert.deepEqual(hub.calls.slice(remounted).map(c => c.op), ['get', 'storage'], 'the next live transition runs one refresh after remount');
+    assert.equal(gets(), remountGets + 1);
+    assert.equal(storages(), remountStorages + 1);
+    assert.equal(hub.calls[remounted].tag, `"prefs-${hub.revision}-g1"`, 'the remounted refresh conditionally reads current prefs');
+    assert.match(meter().textContent, /3\.2 GB used of 5\.4 GB/);
+    assert.equal(fired.focus, 0);
+    assert.equal(fired.visibilitychange, 0);
+    off();
+    off = () => {};
+    assert.equal(conns.length, 0, 'the remounted subscription is also removed');
   } finally {
     off();
     globalThis.document = prevDoc;
