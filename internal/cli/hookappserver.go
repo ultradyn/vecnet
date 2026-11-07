@@ -163,8 +163,12 @@ func (a *app) hookAppServer(o opts, afterPoll func(), publish func([]byte) error
 					claims = append(claims, r)
 					continue
 				}
-				s.Shown = slices.DeleteFunc(s.Shown, func(shown string) bool { return shown == r.ID })
-				s.Replay = append(s.Replay, replayRef{ID: r.ID, After: r.After, Priority: r.Priority, Order: r.Order})
+				// A monitor may have displayed a pending reservation. Releasing
+				// the reservation must not undo that display or replay it again.
+				if !slices.Contains(s.Displayed, r.ID) {
+					s.Shown = slices.DeleteFunc(s.Shown, func(shown string) bool { return shown == r.ID })
+					s.Replay = append(s.Replay, replayRef{ID: r.ID, After: r.After, Priority: r.Priority, Order: r.Order})
+				}
 				n++
 			}
 			s.Claims = claims

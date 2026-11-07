@@ -526,11 +526,19 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 	var processed string
 	// Publish the complete output before the transaction commits. An error
 	// (including expiry) aborts the commit, so the next run shows it again.
-	finish := func() error {
+	finish := func(s *hookState, id hookIdentity) error {
 		if output == "" {
 			return ctx.Err()
 		}
-		return publish(hookOutput(event, output))
+		if err := publish(hookOutput(event, output)); err != nil {
+			return err
+		}
+		if id.Caller != "" {
+			for _, ev := range claimed {
+				s.recordDisplay(eventFieldsOf(ev).deliveryID)
+			}
+		}
+		return nil
 	}
 	poll := func(after string) (pollBody, error) {
 		body, e := a.poll(c, after, 0)
@@ -549,7 +557,8 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			return errHookForeign
 		}
 		// Never read one identity's stream with another's cursor or shown ids.
-		if s.bind(a.resolveIdentity(c, s)) {
+		id := a.resolveIdentity(c, s)
+		if s.bind(id) {
 			fmt.Fprintf(a.stderr, "vecnet: hook: state belonged to another hub or peer; starting afresh\n")
 		}
 		if ctx.Err() != nil {
@@ -577,7 +586,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 			}
 			s.PollCursor = head.NextCursor
 			// First-run backlog is never acknowledged, even with --auto-ack.
-			return finish()
+			return finish(s, id)
 		}
 		body, e := poll(s.PollCursor)
 		if hookPurged(e) {
@@ -658,7 +667,7 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		if len(claimed) > 0 {
 			a.rememberEvents(ch, claimed)
 		}
-		return finish()
+		return finish(s, id)
 	})
 	if e != nil {
 		return hookResult{}
