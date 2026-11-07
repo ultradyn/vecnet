@@ -406,3 +406,90 @@ test('fake cold resume broadcasts startup and disconnect releases keep-loaded su
   await r3.call('thread/unsubscribe', { threadId: 't' }); clock.advance(60_000); await flush(r);
   assert.equal((await r.call('thread/read', { threadId: 't' })).thread.status.type, 'notLoaded');
 });
+
+// Task5c1 primary tests, prepared at integrated f1f10c7 before fixture changes.
+// Missing R17 is an intentional behavioral assertion, not an import/type error.
+// Never await rpc().call on a dropped socket: that older helper stays pending.
+function acceptedResponseLoss(f: Awaited<ReturnType<typeof fake>>['f']) {
+  const control = (f as typeof f & { acceptThenDropNextTurn?: () => void }).acceptThenDropNextTurn;
+  assert.equal(typeof control, 'function', 'R17 accepted-then-response-loss control is required');
+  control!.call(f);
+}
+for (const method of ['turn/start', 'turn/steer'] as const) {
+  test(`fake accepts ${method} before losing its response and later records one original receipt`, { timeout: 5000 }, async t => {
+    const { f, c, r, clock } = await fake(t);
+    const seed = 'seeded-active-turn';
+    f.setThread(method === 'turn/start' ? { id: 't', status: { type: 'idle' } } :
+      { id: 't', status: { type: 'active', activeFlags: [] }, activeTurnId: seed });
+    f.attachOther('t');
+    await r.call('thread/resume', { threadId: 't', excludeTurns: true });
+    const observer = await connectUnixWebSocket(f.socketPath, opts);
+    t.after(() => observer.close());
+    const observe = rpc(observer);
+    await observe.call('thread/resume', { threadId: 't', excludeTurns: true });
+    const wireReplies: { id?: number }[] = [];
+    c.onMessage(text => wireReplies.push(JSON.parse(text)));
+    const key = `vn.r17.${method === 'turn/start' ? 'start' : 'steer'}`;
+    f.withholdNextItem(); acceptedResponseLoss(f);
+    const gone = closed(c);
+    // Do not await rpc().call here: the existing helper does not reject on close.
+    c.send(JSON.stringify({ id: 7001, method, params: { threadId: 't', input: [],
+      clientUserMessageId: key, ...(method === 'turn/steer' ? { expectedTurnId: seed } : {}) } }));
+    await gone;
+    assert.equal(wireReplies.some(reply => reply.id === 7001), false);
+    const accepted = await observe.call('thread/read', { threadId: 't' });
+    assert.equal(accepted.thread.status.type, 'active');
+    const turn = accepted.thread.turns.find((x: any) => x.status === 'inProgress');
+    assert.ok(turn, 'accepted turn must exist independently of the lost response');
+    if (method === 'turn/steer') assert.equal(turn.id, seed);
+    assert.deepEqual(turn.items, []);
+    assert.equal(observe.notices.some(x => x.method === 'item/started'), false);
+    assert.equal(f.requests.filter(x => x.method === method &&
+      (x.params as { clientUserMessageId?: string }).clientUserMessageId === key).length, 1);
+    f.recordLater(key, clock.now() + 1); clock.advance(1); await flush(observe);
+    const page = await observe.call('thread/turns/list', { threadId: 't', itemsView: 'full' });
+    const receipts = page.data.flatMap((x: any) => x.items).filter((x: any) => x.clientId === key);
+    assert.equal(receipts.length, 1);
+    assert.equal(page.data.find((x: any) => x.id === turn.id).items[0].clientId, key);
+    assert.equal(observe.notices.filter(x => x.method === 'item/started' && x.params.item.clientId === key).length, 1);
+    assert.throws(() => f.recordLater(key, clock.now()), /no withheld item/);
+    // The observer survived; the response-loss control is one-shot.
+    const next = await observe.call('turn/steer', { threadId: 't', expectedTurnId: turn.id,
+      input: [], clientUserMessageId: key + '.next' });
+    assert.equal(next.turnId, turn.id);
+  });
+}
+
+for (const rejection of ['invalid-steer', 'preaccept-drop'] as const) {
+  test(`fake accepted-response-loss control survives ${rejection} before actual acceptance`, { timeout: 5000 }, async t => {
+    const { f, c, r } = await fake(t);
+    f.setThread({ id: 't', status: { type: 'idle' } }); f.attachOther('t');
+    acceptedResponseLoss(f);
+    const observer = await connectUnixWebSocket(f.socketPath, opts);
+    t.after(() => observer.close()); const inspect = rpc(observer);
+    if (rejection === 'invalid-steer') {
+      await assert.rejects(r.call('turn/steer', { threadId: 't', expectedTurnId: 'not-active', input: [] }));
+    } else {
+      f.failNext('turn/start', 'drop'); const gone = closed(c);
+      c.send(JSON.stringify({ id: 7002, method: 'turn/start', params: { threadId: 't', input: [] } }));
+      await gone;
+    }
+    const before = await inspect.call('thread/read', { threadId: 't' });
+    assert.deepEqual(before.thread.turns, [], 'preaccept failure created an accepted turn');
+    const replies: { id?: number }[] = [];
+    observer.onMessage(text => replies.push(JSON.parse(text)));
+    const gone = closed(observer);
+    observer.send(JSON.stringify({ id: 7003, method: 'turn/start', params: {
+      threadId: 't', input: [], clientUserMessageId: 'vn.after-reject' } }));
+    await gone;
+    assert.equal(replies.some(x => x.id === 7003), false, 'preaccept error consumed the armed after-accept control');
+    const survivor = await connectUnixWebSocket(f.socketPath, opts);
+    t.after(() => survivor.close()); const read = rpc(survivor);
+    const accepted = await read.call('thread/read', { threadId: 't' });
+    assert.equal(accepted.thread.turns.length, 1);
+    assert.equal(accepted.thread.turns[0].items[0].clientId, 'vn.after-reject');
+    // Default behavior is preserved after the one-shot loss was consumed.
+    assert.ok((await read.call('turn/steer', { threadId: 't', expectedTurnId: accepted.thread.turns[0].id,
+      input: [], clientUserMessageId: 'vn.normal-after-reject' })).turnId);
+  });
+}
