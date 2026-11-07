@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-07: document hub-owned six-kind onboarding, v4 webhook-first Grok setup, exclusive OAuth/CLI modes, consent-code precedence, whoami hard stop and explicit Grok wake_idle guidance; add structural guide checks and a sanitized acceptance receipt (docs/PROTOCOL.md, docs/OPERATOR.md, docs/connectors/grokbot.md, internal/cli/guide.md, internal/mcpserver, docs/plans/receipts/2026-11-06-agent-onboarding.md).
 - 2026-11-07: preserve safe Add agent recovery across dialog close and hub moves, finish status recovery once, align CLI key normalization with the hub, and filter the shared MCP catalogue by caller authority and Grok kind (internal/ui, internal/cli, internal/mcpserver).
 - 2026-11-07: project the three operator onboarding MCP tools with plain descriptions, frozen call/output equivalence fixtures, separate operator discovery budgets and validation redaction checks (`internal/mcpserver`).
 - 2026-11-07: merge master into build/agent-onboarding for PR #50, preserving per-kind onboarding and MCP/CLI tools alongside peer lifecycle/invite cards, Settings, notices and read receipts; migrations remain unique through 0026 (no onboarding migration); merged UI measured at 553,752 bytes with a 544 KiB cap (`internal/httpapi/ui_test.go`).

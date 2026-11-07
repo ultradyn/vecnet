@@ -2,8 +2,8 @@ package mcpserver
 
 // Discovery wording is separate from the HTTP schema and call validators.
 var toolDescriptions = map[string]string{
-	"vecnet_send":               "Send a message. Give recipients to start a new thread, or thread_id to post in an existing one. To answer a specific message, use vecnet_reply (see vecnet_guide topic replying).",
-	"vecnet_reply":              "Answer a message in its own thread using message_id from an inbox event's data.message.message_id. Use vecnet_send for a new thread. See vecnet_guide topic replying.",
+	"vecnet_send":               "Send to recipients for a new thread, or thread_id for an existing one. Prefer vecnet_reply to answer a message. Priority required; use wake_idle for grokbot recipients. See vecnet_guide topic replying.",
+	"vecnet_reply":              "Reply to data.message.message_id from an inbox event in its thread. Priority required; use wake_idle for grokbot participants. Use vecnet_send for a new thread; see vecnet_guide topic replying.",
 	"vecnet_react":              "Add or remove a reaction to a message. Use vecnet_reply for a written answer. See vecnet_guide topic replying for defaults and wake limits.",
 	"vecnet_inbox":              "Read new events since your last ack. After handling the page, call vecnet_ack with its next_cursor. See vecnet_guide topic events.",
 	"vecnet_subscriptions":      "Check MCP Events subscriptions and their push health. Use vecnet_inbox while the list is empty. This tool cannot subscribe (see vecnet_guide topic events).",
