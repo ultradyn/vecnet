@@ -259,3 +259,45 @@ func TestMonitorLineStripsBidi(t *testing.T) {
 		t.Errorf("peerName=%q", got)
 	}
 }
+
+// Task5a3 primary compatibility tests, prepared before product changes.
+func TestWatchDeferredPreservesExplicitReplay(t *testing.T) {
+	h := newDeferredWatch(t, "replay", false, 0)
+	if err := (stateFile{h.f.path}).update(t.Context(), func(s *hookState) error {
+		s.recordDisplay("dly_1")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	go func() { h.done <- h.w.run() }()
+	t.Cleanup(func() { h.stop(t) })
+	h.complete(t, "opaque-y-A")
+	if strings.Count(h.out.String(), "retained A") != 1 {
+		t.Fatal("deliberate initial replay no longer prints a previously displayed delivery")
+	}
+}
+
+func TestWatchDeferredLeavesOtherModesUnchanged(t *testing.T) {
+	for _, mode := range []string{"json-monitor", "plain-watch", "daemon-trigger"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newDeferredWatch(t, "sse", true, 1)
+			switch mode {
+			case "json-monitor":
+				h.w.a.json = true
+			case "plain-watch":
+				h.w.forMonitor = false
+			case "daemon-trigger":
+				h.w.forMonitor, h.w.a.json, h.w.deliveriesOnly = false, true, true
+			}
+			go func() { h.done <- h.w.run() }()
+			t.Cleanup(func() { h.stop(t) })
+			h.complete(t, "opaque-a-suffix-2")
+			if strings.Count(h.out.String(), "retained A") != 1 || strings.Count(h.out.String(), "suffix 2") != 1 {
+				t.Fatal("monitor deferral changed a non-monitor/JSON transport")
+			}
+			if s := readHookState(t, h.f.path); len(s.Claims) != 1 || len(s.Displayed) != 0 {
+				t.Fatal("non-monitor transport changed shared delivery ownership/proof")
+			}
+		})
+	}
+}

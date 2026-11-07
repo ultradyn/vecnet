@@ -58,6 +58,9 @@ func monitorOutput(t *testing.T, name, text string) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/v1/peers/me":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"kind":"peer","peer_id":"peer_watch"}`)
 		case "/v1/peers":
 			w.Header().Set("Content-Type", "application/json")
 			peers := []map[string]string{}
@@ -362,9 +365,9 @@ func TestWatchPlainIgnoresShownState(t *testing.T) {
 	}
 }
 
-// A shown-set bound to another identity (a re-pointed profile) must not hide
-// this identity's live deliveries: watch resets it before claiming.
-func TestWatchMismatchedStateDoesNotSuppressLive(t *testing.T) {
+// Foreign state cannot authorize output or suppress a correctly scoped live
+// delivery. Only explicit trusted repair permits the retained event to resume.
+func TestWatchMismatchedStateDefersUntilRepair(t *testing.T) {
 	ev := map[string]any{
 		"cursor": "e1.1", "type": "delivery",
 		"data": map[string]any{"delivery_id": "dly_X", "message": map[string]any{
@@ -372,6 +375,8 @@ func TestWatchMismatchedStateDoesNotSuppressLive(t *testing.T) {
 			"content": map[string]string{"text": "live for the new identity"},
 		}},
 	}
+	blocked := make(chan struct{}, 1)
+	resumes := make(chan string, 4)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -382,6 +387,13 @@ func TestWatchMismatchedStateDoesNotSuppressLive(t *testing.T) {
 		case r.URL.Path == "/v1/events" && r.Header.Get("Accept") != "text/event-stream":
 			fmt.Fprint(w, `{"events":[],"next_cursor":"e1.0"}`)
 		case r.URL.Path == "/v1/events":
+			resumes <- r.Header.Get("Last-Event-ID")
+			defer func() {
+				select {
+				case blocked <- struct{}{}:
+				default:
+				}
+			}()
 			w.Header().Set("Content-Type", "text/event-stream")
 			raw, _ := json.Marshal(ev)
 			fmt.Fprintf(w, "id: e1.1\nevent: delivery\ndata: %s\n\n", raw)
@@ -397,11 +409,42 @@ func TestWatchMismatchedStateDoesNotSuppressLive(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	stale := `{"hub":"http://other-hub.example","caller":"peer_OTHER","cred":"0123456789abcdef","poll_cursor":"e9.9","shown":["dly_X"]}`
+	stale := `{"hub":"http://other-hub.example","caller":"peer_OTHER","cred":"0123456789abcdef","poll_cursor":"e9.9","shown":["dly_X"],"displayed":["dly_X"]}`
 	if err := os.WriteFile(state, []byte(stale), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out, stop := startWatch(t, u, "watch", "--for-monitor")
+	select {
+	case <-blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("foreign state did not defer and close transport")
+	}
+	if strings.Contains(out.String(), "live for the new identity") {
+		t.Fatal("foreign proof authorized monitor output")
+	}
+	if raw, err := os.ReadFile(state); err != nil || string(raw) != stale {
+		t.Fatal("monitor automatically overwrote foreign proof/cursor")
+	}
+	if first := <-resumes; first != "" {
+		t.Fatalf("first stream unexpectedly resumed from %q", first)
+	}
+	select {
+	case <-resumes:
+		t.Fatal("monitor advanced transport past foreign state")
+	default:
+	}
+	// This explicit fixture repair is trusted; the monitor must not do it.
+	// Atomic replacement leaves every reader a complete state object.
+	repaired, err := json.Marshal(map[string]any{"hub": srv.URL, "caller": "peer_A", "shown": []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state+".repair", repaired, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(state+".repair", state); err != nil {
+		t.Fatal(err)
+	}
 	waitLine(t, out, regexp.MustCompile(`live for the new identity$`), 5*time.Second)
 	stop()
 	raw, err := os.ReadFile(state)
@@ -410,6 +453,13 @@ func TestWatchMismatchedStateDoesNotSuppressLive(t *testing.T) {
 	}
 	var got map[string]any
 	if err := json.Unmarshal(raw, &got); err != nil || got["caller"] != "peer_A" || got["poll_cursor"] != nil || len(got["shown"].([]any)) != 1 {
-		t.Fatalf("watch did not rebind the state: %s", raw)
+		t.Fatalf("watch did not retain the trusted repaired identity: %s", raw)
+	}
+	if strings.Count(out.String(), "live for the new identity") != 1 {
+		t.Fatal("trusted repair skipped or duplicated the retained delivery")
+	}
+	proof, ok := got["displayed"].([]any)
+	if !ok || len(proof) != 1 || proof[0] != "dly_X" {
+		t.Fatal("trusted repair lost exact successful display proof")
 	}
 }

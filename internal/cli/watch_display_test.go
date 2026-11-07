@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -27,15 +29,16 @@ type displayStream struct {
 }
 
 type displayFixture struct {
-	env        map[string]string
-	path       string
-	hub        string
-	mu         sync.Mutex
-	evs        []envelope.Event
-	polls      []string
-	acks       chan string
-	open       chan displayStream
-	unverified atomic.Bool
+	env          map[string]string
+	path         string
+	hub          string
+	mu           sync.Mutex
+	evs          []envelope.Event
+	polls        []string
+	acks         chan string
+	open         chan displayStream
+	unverified   atomic.Bool
+	identityJSON atomic.Pointer[string] // nil keeps the fixture's verified peer
 }
 
 func newDisplayFixture(t *testing.T) *displayFixture {
@@ -46,6 +49,10 @@ func newDisplayFixture(t *testing.T) *displayFixture {
 		case "/v1/peers/me":
 			if f.unverified.Load() {
 				http.Error(w, "identity unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if raw := f.identityJSON.Load(); raw != nil {
+				fmt.Fprint(w, *raw)
 				return
 			}
 			fmt.Fprint(w, `{"kind":"peer","peer_id":"peer_test"}`)
@@ -112,6 +119,8 @@ func newDisplayFixture(t *testing.T) *displayFixture {
 	})
 	f.env["CODEX_HOME"] = filepath.Join(f.env["HOME"], ".codex")
 	f.env["XDG_DATA_HOME"] = filepath.Join(f.env["HOME"], ".local", "share")
+	f.env["XDG_RUNTIME_DIR"] = filepath.Join(f.env["HOME"], "runtime")
+	f.env["VECNET_CODEX_AUTO_DELIVERY"] = "0"
 	// Resolve the fake URL from the temporary configuration only.
 	a := &app{ctx: t.Context(), getenv: func(k string) string { return f.env[k] }}
 	c, _, _, err := a.connect()
@@ -198,15 +207,9 @@ func TestWatchLiveDisplaysAppServerClaim(t *testing.T) {
 		t.Fatalf("claim failed: %s %s", claimed, errs)
 	}
 	stream.frames <- []envelope.Event{ev}
-	if cur := f.ack(t); cur != ev.Cursor {
-		t.Fatalf("ack = %q", cur)
-	}
-	stop()
-	if !strings.Contains(out.String(), "live delivery") {
-		t.Fatalf("RED: cursor %s acked without printing delivery; output=%q; app-server claim remains pending", ev.Cursor, out.String())
-	}
-	// Releasing the connector's reservation must preserve the monitor's
-	// successful display, so a subsequent Claude hook does not duplicate it.
+	waitDisplayBlocked(t, f, stream, out)
+	// A known-unsent ordinary release permits exactly one eventual display.
+	// Releasing again after display must preserve that positive proof.
 	released, errs := runHook(t, f.env, "--release", "--claim", "pending")
 	var response struct {
 		Released int `json:"released"`
@@ -214,6 +217,14 @@ func TestWatchLiveDisplaysAppServerClaim(t *testing.T) {
 	if err := json.Unmarshal([]byte(released), &response); err != nil || response.Released != 1 {
 		t.Fatalf("release failed: response=%q stderr=%q error=%v", released, errs, err)
 	}
+	if cur := f.ack(t); cur != ev.Cursor {
+		t.Fatalf("ack = %q", cur)
+	}
+	stop()
+	if !strings.Contains(out.String(), "live delivery") {
+		t.Fatalf("released cursor %s acked without printing delivery; output=%q", ev.Cursor, out.String())
+	}
+	deferredRelease(t, f, "pending", 0)
 	s := readHookState(t, f.path)
 	if slices.ContainsFunc(s.Claims, func(r claimRef) bool { return r.ID == "dly_1" || r.Claim == "pending" }) {
 		t.Fatalf("release retained matching claim: %+v", s.Claims)
@@ -316,6 +327,7 @@ func TestWatchDisplayProofBelongsToIdentity(t *testing.T) {
 			out := new(hookWatchOutput)
 			stream, stop := f.watch(t, out, true)
 			ev := f.delivery()
+			before := readHookState(t, f.path)
 			if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error {
 				id := hookIdentity{Hub: f.hub, Caller: "peer_test"}
 				switch different {
@@ -333,6 +345,12 @@ func TestWatchDisplayProofBelongsToIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			stream.frames <- []envelope.Event{ev}
+			waitDisplayBlocked(t, f, stream, out)
+			// Foreign state cannot be rebound as permission to print. A
+			// repaired matching state can resume the same retained event.
+			if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error { *s = before; return nil }); err != nil {
+				t.Fatal(err)
+			}
 			f.ack(t)
 			stop()
 			if strings.Count(out.String(), "live delivery") != 1 {
@@ -342,7 +360,7 @@ func TestWatchDisplayProofBelongsToIdentity(t *testing.T) {
 	}
 }
 
-func TestWatchDisplayStateBusyFailsOpen(t *testing.T) {
+func TestWatchDisplayStateBusyDefers(t *testing.T) {
 	f := newDisplayFixture(t)
 	out := new(hookWatchOutput)
 	stream, stop := f.watch(t, out, true)
@@ -351,8 +369,12 @@ func TestWatchDisplayStateBusyFailsOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer unlock()
+	var once sync.Once
+	release := func() { once.Do(unlock) }
+	defer release()
 	stream.frames <- []envelope.Event{ev}
+	waitDisplayBlocked(t, f, stream, out)
+	release()
 	f.ack(t)
 	stop()
 	if strings.Count(out.String(), "live delivery") != 1 {
@@ -374,10 +396,13 @@ func TestWatchUnverifiedIdentityCannotUseDisplayProof(t *testing.T) {
 	stream, stop := f.watch(t, out, true)
 	ev := f.delivery()
 	stream.frames <- []envelope.Event{ev}
-	f.ack(t)
+	waitDisplayBlocked(t, f, stream, out)
 	stop()
-	if strings.Count(out.String(), "live delivery") != 1 {
-		t.Fatalf("unverified identity reused another caller's display proof: %q", out.String())
+	if out.String() != "" {
+		t.Fatalf("unverified identity authorized monitor output: %q", out.String())
+	}
+	if s := readHookState(t, f.path); s.Caller != "peer_other" || !slices.Contains(s.Displayed, "dly_1") {
+		t.Fatal("unverified monitor changed foreign display proof")
 	}
 }
 
@@ -540,10 +565,6 @@ func TestHookPendingClaimBlocksCumulativeAck(t *testing.T) {
 			failed := &failedDisplay{tried: make(chan struct{})}
 			stream, stop := f.watch(t, failed, true)
 			ev := f.delivery()
-			claimed, errs := runHook(t, f.env, "--event", "app-server", "--claim", "unsent", "--priorities", "wake_idle", "--expect-hub", f.hub, "--expect-caller", "peer_test")
-			if !strings.Contains(claimed, "dly_1") {
-				t.Fatalf("claim failed: %s %s", claimed, errs)
-			}
 			stream.frames <- []envelope.Event{ev}
 			select {
 			case <-stream.closed:
@@ -557,6 +578,10 @@ func TestHookPendingClaimBlocksCumulativeAck(t *testing.T) {
 			case cur := <-f.acks:
 				t.Fatalf("failed monitor acknowledged %s", cur)
 			default:
+			}
+			claimed, errs := runHook(t, f.env, "--event", "app-server", "--claim", "unsent", "--priorities", "wake_idle", "--expect-hub", f.hub, "--expect-caller", "peer_test")
+			if !strings.Contains(claimed, "dly_1") {
+				t.Fatalf("claim failed: %s %s", claimed, errs)
 			}
 			if scenario == "claim-outlives-shown" {
 				if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error {
@@ -620,7 +645,7 @@ func TestHookPendingClaimBlocksCumulativeAck(t *testing.T) {
 			// Verified monitor output unblocks the watermark, but does not
 			// silently cancel the engine's pending claim (integration-owned).
 			good := new(hookWatchOutput)
-			if err := (stateFile{f.path}).displayFor(t.Context(), &hookIdentity{Hub: f.hub, Caller: "peer_test"}, "dly_1", false, func() error {
+			if err := seedPriorWatchDisplay(t.Context(), stateFile{f.path}, "dly_1", func() error {
 				_, err := good.Write([]byte("live delivery"))
 				return err
 			}); err != nil {
@@ -687,7 +712,7 @@ func TestHookPendingClaimsKeepEarliestAckBarrier(t *testing.T) {
 					t.Fatalf("hook crossed pending %s with ack=%s", delivery, cur)
 				default:
 				}
-				if err := (stateFile{f.path}).displayFor(t.Context(), &hookIdentity{Hub: f.hub, Caller: "peer_test"}, delivery, false, func() error { _, err := io.WriteString(new(bytes.Buffer), delivery); return err }); err != nil {
+				if err := seedPriorWatchDisplay(t.Context(), stateFile{f.path}, delivery, func() error { _, err := io.WriteString(new(bytes.Buffer), delivery); return err }); err != nil {
 					t.Fatal(err)
 				}
 				if got, _ := runHook(t, f.env, "--event", "user-prompt", "--auto-ack"); got != "" {
@@ -745,11 +770,6 @@ func TestHookClaimCreatedAfterFirstRunKeepsAckBarrier(t *testing.T) {
 				t.Fatalf("first-run summary acknowledged %s", cur)
 			default:
 			}
-			claimed, errs := runHook(t, f.env, "--event", "app-server", "--claim", "unsent", "--priorities", "wake_idle", "--expect-hub", f.hub, "--expect-caller", "peer_test")
-			s = readHookState(t, f.path)
-			if !strings.Contains(claimed, "dly_1") || len(s.Claims) != 1 || s.Claims[0].After != "e1.0" || s.Claims[0].Claim != "unsent" || s.PollCursor != ev.Cursor {
-				t.Fatalf("late claim failed: output=%s stderr=%s state=%+v", claimed, errs, s)
-			}
 			stream.frames <- []envelope.Event{ev}
 			select {
 			case <-stream.closed:
@@ -763,6 +783,11 @@ func TestHookClaimCreatedAfterFirstRunKeepsAckBarrier(t *testing.T) {
 			case cur := <-f.acks:
 				t.Fatalf("failed monitor acknowledged %s", cur)
 			default:
+			}
+			claimed, errs := runHook(t, f.env, "--event", "app-server", "--claim", "unsent", "--priorities", "wake_idle", "--expect-hub", f.hub, "--expect-caller", "peer_test")
+			s = readHookState(t, f.path)
+			if !strings.Contains(claimed, "dly_1") || len(s.Claims) != 1 || s.Claims[0].After != "e1.0" || s.Claims[0].Claim != "unsent" || s.PollCursor != ev.Cursor {
+				t.Fatalf("late claim failed: output=%s stderr=%s state=%+v", claimed, errs, s)
 			}
 			f.mu.Lock()
 			if scenario != "empty-page" {
@@ -794,7 +819,7 @@ func TestHookClaimCreatedAfterFirstRunKeepsAckBarrier(t *testing.T) {
 				}
 			}
 			good := new(bytes.Buffer)
-			if err := (stateFile{f.path}).displayFor(t.Context(), &hookIdentity{Hub: f.hub, Caller: "peer_test"}, "dly_1", false, func() error { _, err := io.WriteString(good, "live delivery"); return err }); err != nil {
+			if err := seedPriorWatchDisplay(t.Context(), stateFile{f.path}, "dly_1", func() error { _, err := io.WriteString(good, "live delivery"); return err }); err != nil {
 				t.Fatal(err)
 			}
 			if good.String() != "live delivery" {
@@ -869,7 +894,7 @@ func TestHookLateReplayClaimReconcilesAckBarrier(t *testing.T) {
 				}
 			}
 			for i, delivery := range []string{"dly_1", "dly_3"} {
-				if err := (stateFile{f.path}).displayFor(t.Context(), &hookIdentity{Hub: f.hub, Caller: "peer_test"}, delivery, false, func() error { _, err := io.WriteString(new(bytes.Buffer), delivery); return err }); err != nil {
+				if err := seedPriorWatchDisplay(t.Context(), stateFile{f.path}, delivery, func() error { _, err := io.WriteString(new(bytes.Buffer), delivery); return err }); err != nil {
 					t.Fatal(err)
 				}
 				runHook(t, f.env, "--event", "user-prompt", "--auto-ack")
@@ -926,7 +951,7 @@ func TestHookLateClaimBeyondPageRetainsEarlierAckBarrier(t *testing.T) {
 		}
 	}
 	for _, delivery := range []string{"dly_1", fmt.Sprintf("dly_%d", hookPageLimit+2)} {
-		if err := (stateFile{f.path}).displayFor(t.Context(), &hookIdentity{Hub: f.hub, Caller: "peer_test"}, delivery, false, func() error { _, err := io.WriteString(new(bytes.Buffer), delivery); return err }); err != nil {
+		if err := seedPriorWatchDisplay(t.Context(), stateFile{f.path}, delivery, func() error { _, err := io.WriteString(new(bytes.Buffer), delivery); return err }); err != nil {
 			t.Fatal(err)
 		}
 		for _, want := range map[string][]string{
@@ -941,5 +966,777 @@ func TestHookLateClaimBeyondPageRetainsEarlierAckBarrier(t *testing.T) {
 	}
 	if s := readHookState(t, f.path); s.AckAfter != "" || len(s.Claims) != 1 {
 		t.Fatalf("resolved barrier retained or ownership lost: %+v", s)
+	}
+}
+
+func waitDisplayBlocked(t *testing.T, f *displayFixture, stream displayStream, out *hookWatchOutput) {
+	t.Helper()
+	select {
+	case <-stream.closed:
+	case cur := <-f.acks:
+		t.Fatalf("missing deferral: acknowledged %q before reservation/state resolved", cur)
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocked monitor did not close its transport")
+	}
+	if out.String() != "" {
+		t.Fatal("unresolved reservation/state authorized monitor output")
+	}
+	select {
+	case cur := <-f.acks:
+		t.Fatalf("blocked monitor acknowledged %q", cur)
+	default:
+	}
+}
+
+// seedPriorWatchDisplay supplies the retained positive-proof/active-claim
+// combination that the hook barrier regressions have always exercised. Strict
+// monitors cannot create it from a pending reservation; older persisted proof
+// still has to reconcile the hook's original opaque predecessor correctly.
+func seedPriorWatchDisplay(ctx context.Context, f stateFile, delivery string, display func() error) error {
+	return f.update(ctx, func(s *hookState) error {
+		if err := display(); err != nil {
+			return err
+		}
+		s.recordDisplay(delivery)
+		return nil
+	})
+}
+
+// Task5a3 primary tests: written before product changes or executable checks.
+// The only fake boundaries are hub HTTP/SSE and time. Claims, releases and
+// receipts use the real CLI and the same on-disk Go transaction as the monitor.
+const deferredBefore = "opaque-z-before"
+
+type deferredRequest struct {
+	after string
+	sse   bool
+}
+
+type deferredTick struct {
+	delay    time.Duration
+	resume   chan struct{}
+	cursor   string
+	ack      string
+	seen     int
+	replayed bool
+	requests []deferredRequest
+}
+
+type deferredWatch struct {
+	f             *displayFixture
+	w             *watcher
+	out           *hookWatchOutput
+	errs          *hookWatchOutput
+	ticks         chan deferredTick
+	acked         chan string
+	done          chan error
+	cancel        context.CancelFunc
+	requests      []deferredRequest // accessed by the watcher, or while it is paused
+	closed        atomic.Int32
+	mode          string
+	outputFailure bool
+}
+
+// The body remains open after its initial frames. Closing a deferred stream
+// must cancel that transport, rather than leave its reader or a suffix alive.
+type deferredSSEBody struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	head   *strings.Reader
+	closed *atomic.Int32
+}
+
+func (b *deferredSSEBody) Read(p []byte) (int, error) {
+	if b.head.Len() != 0 {
+		return b.head.Read(p)
+	}
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (b *deferredSSEBody) Close() error {
+	b.closed.Add(1)
+	b.cancel()
+	return nil
+}
+
+func deferredEvent(n int, text, cursor string) envelope.Event {
+	ev := hookEvent(n, text)
+	ev.Cursor = cursor
+	var body map[string]any
+	_ = json.Unmarshal(ev.Data, &body)
+	body["message"].(map[string]any)["priority"] = "wake_idle"
+	ev.Data, _ = json.Marshal(body)
+	return ev
+}
+
+func deferredClaim(t *testing.T, f *displayFixture, nonce string) {
+	t.Helper()
+	raw, errs := runHook(t, f.env, "--event", "app-server", "--claim", nonce,
+		"--priorities", "wake_idle", "--expect-hub", f.hub, "--expect-caller", "peer_test")
+	if !strings.Contains(raw, `"dly_1"`) || !strings.Contains(raw, `"lifecycle":"receipt-display-v1"`) {
+		t.Fatalf("real Go reservation failed: output=%q stderr=%q", raw, errs)
+	}
+}
+
+func deferredReceipt(t *testing.T, f *displayFixture, nonce string) {
+	t.Helper()
+	raw, _ := runHook(t, f.env, "--release", "--claim", nonce,
+		"--receipt-key", "vn.original", "--delivery-ids", "dly_1",
+		"--expect-hub", f.hub, "--expect-caller", "peer_test")
+	receiptConfirmation(t, raw, "vn.original", "dly_1")
+}
+
+func deferredRelease(t *testing.T, f *displayFixture, nonce string, want int) {
+	t.Helper()
+	raw, errs := runHook(t, f.env, "--release", "--claim", nonce)
+	var result struct {
+		Released *int `json:"released"`
+	}
+	if json.Unmarshal([]byte(raw), &result) != nil || result.Released == nil || *result.Released != want {
+		t.Fatalf("ordinary release: output=%q stderr=%q, want released=%d", raw, errs, want)
+	}
+}
+
+func newDeferredWatch(t *testing.T, mode string, claimed bool, suffix int) *deferredWatch {
+	t.Helper()
+	f := newDisplayFixture(t)
+	one := deferredEvent(1, "retained A", "opaque-y-A")
+	f.evs = []envelope.Event{one}
+	if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error {
+		s.PollCursor, s.AppCursor = deferredBefore, deferredBefore
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		// The real Go child has durably reserved A; the engine is paused
+		// before any RPC. Nothing in this fixture accepts or displays it.
+		deferredClaim(t, f, "pending")
+	}
+	for n := 2; n < suffix+2; n++ {
+		f.evs = append(f.evs, deferredEvent(n, fmt.Sprintf("suffix %d", n), fmt.Sprintf("opaque-a-suffix-%d", n)))
+	}
+	return deferredWatchFor(t, f, mode)
+}
+
+func deferredWatchFor(t *testing.T, f *displayFixture, mode string) *deferredWatch {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	h := &deferredWatch{f: f, out: new(hookWatchOutput), errs: new(hookWatchOutput),
+		ticks: make(chan deferredTick), acked: make(chan string, 32), done: make(chan error, 1), cancel: cancel, mode: mode}
+	a := &app{ctx: ctx, stdin: strings.NewReader(""), stdout: h.out, stderr: h.errs,
+		getenv: func(k string) string { return f.env[k] }}
+	c, name, ch, err := a.connect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := a.resolveIdentity(c, nil)
+	if id.Caller != "peer_test" {
+		t.Fatal("fixture caller is not verified")
+	}
+	// Bind fresh fixture state through the same writer, before introducing
+	// any corrupt/foreign/busy state in the individual tests.
+	if err := (stateFile{f.path}).update(ctx, func(s *hookState) error { s.bind(id); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	h.w = &watcher{a: a, c: c, ch: ch, name: name, names: map[string]string{},
+		forMonitor: true, autoAck: true, identityOff: true, initialized: true,
+		identity: &id, shown: &stateFile{f.path}, cursor: deferredBefore,
+		replayed: mode != "replay", seen: newDedupe(dedupeWindow), retry: time.Second}
+	h.w.sleep = func(ctx context.Context, d time.Duration) bool {
+		step := deferredTick{delay: d, resume: make(chan struct{}), cursor: h.w.cursor,
+			ack: h.w.pendingAck, seen: len(h.w.seen.set), replayed: h.w.replayed,
+			requests: slices.Clone(h.requests)}
+		select {
+		case h.ticks <- step:
+		case <-ctx.Done():
+			return false
+		}
+		select {
+		case <-step.resume:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	transport := c.hc.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	sseAttempts := 0
+	c.hc.Transport = relayRoundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/v1/ack" {
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				return nil, err
+			}
+			r.Body.Close()
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+			var ack struct{ Cursor string }
+			if err := json.Unmarshal(raw, &ack); err != nil {
+				return nil, err
+			}
+			resp, err := transport.RoundTrip(r)
+			if err == nil && resp.StatusCode == http.StatusNoContent {
+				h.acked <- ack.Cursor
+			}
+			return resp, err
+		}
+		if r.URL.Path != "/v1/events" {
+			return transport.RoundTrip(r)
+		}
+		sse := r.Header.Get("Accept") == "text/event-stream"
+		after := r.URL.Query().Get("after")
+		if sse && r.Header.Get("Last-Event-ID") != "" {
+			after = r.Header.Get("Last-Event-ID")
+		}
+		h.requests = append(h.requests, deferredRequest{after, sse})
+		if mode == "poll" && sse && sseAttempts < watchSSEFailures {
+			sseAttempts++
+			return &http.Response{StatusCode: 503, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("unavailable"))}, nil
+		}
+		f.mu.Lock()
+		events := slices.Clone(f.evs)
+		f.mu.Unlock()
+		if after == "opaque-page-tail" {
+			events = nil
+		} else if at := slices.IndexFunc(events, func(ev envelope.Event) bool { return ev.Cursor == after }); at >= 0 {
+			events = events[at+1:]
+		} else if after != deferredBefore {
+			return nil, fmt.Errorf("unexpected opaque resume position %q", after)
+		}
+		if !sse {
+			raw, _ := json.Marshal(pollBody{Events: events, NextCursor: "opaque-page-tail"})
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(bytes.NewReader(raw))}, nil
+		}
+		var frames strings.Builder
+		if len(events) == 0 {
+			fmt.Fprintf(&frames, "id: %s\n\n", after)
+		}
+		for _, ev := range events {
+			raw, _ := json.Marshal(ev)
+			fmt.Fprintf(&frames, "id: %s\nevent: %s\ndata: %s\n\n", ev.Cursor, ev.Type, raw)
+		}
+		bodyCtx, bodyCancel := context.WithCancel(r.Context())
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}},
+			Body: &deferredSSEBody{bodyCtx, bodyCancel, strings.NewReader(frames.String()), &h.closed}}, nil
+	})
+	t.Cleanup(func() { cancel() })
+	return h
+}
+
+func (h *deferredWatch) start(t *testing.T) deferredTick {
+	t.Helper()
+	go func() { h.done <- h.w.run() }()
+	t.Cleanup(func() { h.stop(t) })
+	if h.mode == "poll" {
+		// Reach the real fallback, rather than calling a mocked poll helper.
+		for i := 0; i < watchSSEFailures; i++ {
+			step := h.next(t)
+			close(step.resume)
+		}
+	}
+	return h.next(t)
+}
+
+func (h *deferredWatch) next(t *testing.T) deferredTick {
+	t.Helper()
+	select {
+	case step := <-h.ticks:
+		return step
+	case cur := <-h.f.acks:
+		t.Fatalf("missing deferral: monitor cumulatively acknowledged %q while A remained unresolved (output bytes=%d)", cur, len(h.out.String()))
+	case err := <-h.done:
+		h.done <- err
+		t.Fatalf("monitor ended instead of retaining unresolved A: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("missing local deferred retry (output bytes=%d)", len(h.out.String()))
+	}
+	return deferredTick{}
+}
+
+func (h *deferredWatch) blocked(t *testing.T, step deferredTick, delay time.Duration) {
+	t.Helper()
+	if step.delay != delay || step.cursor != deferredBefore || step.ack != "" || step.seen != 0 || (h.mode == "replay" && step.replayed) {
+		t.Fatalf("crossed blocked opaque position: delay=%s want=%s cursor=%q ack=%q seen=%d replayed=%t",
+			step.delay, delay, step.cursor, step.ack, step.seen, step.replayed)
+	}
+	if h.out.String() != "" {
+		t.Fatalf("pending/uncertain state authorized monitor output (%d bytes)", len(h.out.String()))
+	}
+	select {
+	case cur := <-h.f.acks:
+		t.Fatalf("crossed unresolved A with cumulative ack %q", cur)
+	default:
+	}
+}
+
+func (h *deferredWatch) finish(t *testing.T, step deferredTick, wantCursor string, printsA bool) {
+	t.Helper()
+	close(step.resume)
+	h.complete(t, wantCursor)
+	if got := strings.Count(h.out.String(), "retained A"); got != boolCount(printsA) {
+		t.Fatalf("retained A prints=%d want=%d", got, boolCount(printsA))
+	}
+}
+
+func (h *deferredWatch) complete(t *testing.T, wantCursor string) {
+	t.Helper()
+	for {
+		select {
+		case cur := <-h.acked:
+			if cur == wantCursor {
+				h.stop(t)
+				return
+			}
+			if cur != "opaque-y-A" {
+				t.Fatalf("unexpected resume acknowledgement %q", cur)
+			}
+		case next := <-h.ticks:
+			// A transport reconnect may use its ordinary timing after A is
+			// handled; no later retry may retain the blocked predecessor.
+			if next.cursor == deferredBefore {
+				t.Fatalf("settled retained event did not progress: delay=%s stderr=%s", next.delay, h.errs.String())
+			}
+			close(next.resume)
+		case err := <-h.done:
+			h.done <- err
+			t.Fatalf("monitor stopped before completion: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("retained event did not complete locally after state settlement")
+		}
+	}
+}
+
+func boolCount(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func (h *deferredWatch) stop(t *testing.T) {
+	t.Helper()
+	h.cancel()
+	select {
+	case err := <-h.done:
+		h.done <- err // permit explicit stop and Cleanup to share the result
+		if err != nil && !(h.outputFailure && errors.Is(err, errWatchOutput)) {
+			t.Errorf("monitor stopped with error: %v (stderr=%s)", err, h.errs.String())
+		}
+	case <-time.After(time.Second):
+		t.Error("cancellation did not drain deferred timer/transport promptly")
+	}
+}
+
+func TestWatchDeferredReceipt(t *testing.T) {
+	for _, mode := range []string{"sse", "poll", "replay"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newDeferredWatch(t, mode, true, 1)
+			step := h.start(t)
+			h.blocked(t, step, time.Second)
+			if s := readHookState(t, h.f.path); len(s.Claims) != 1 || slices.Contains(s.Displayed, "dly_1") || s.Claims[0].After != deferredBefore {
+				t.Fatalf("reservation before RPC was mistaken for receipt proof: %+v", s)
+			}
+			if mode == "sse" && h.closed.Load() == 0 {
+				t.Fatal("blocked SSE transport was left open")
+			}
+			deferredReceipt(t, h.f, "pending")
+			// Even an initially replayed A waited for live ownership and must
+			// now honor its exact receipt, rather than deliberately replay it.
+			h.finish(t, step, "opaque-a-suffix-2", false)
+			if strings.Count(h.out.String(), "suffix 2") != 1 {
+				t.Fatal("suffix was skipped or duplicated after receipt")
+			}
+			for _, req := range h.requests[len(step.requests):] {
+				if req.after == deferredBefore {
+					t.Fatal("receipt recovery refetched A instead of resuming its exact cursor")
+				}
+			}
+		})
+	}
+}
+
+func TestWatchDeferredReleaseWithoutNotification(t *testing.T) {
+	for _, mode := range []string{"sse", "poll", "replay"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newDeferredWatch(t, mode, true, 0)
+			step := h.start(t)
+			h.blocked(t, step, time.Second)
+			deferredRelease(t, h.f, "pending", 1)
+			// No hub frame, new event or notification is produced here.
+			h.finish(t, step, "opaque-y-A", true)
+			if s := readHookState(t, h.f.path); !slices.Contains(s.Displayed, "dly_1") || len(s.Claims) != 0 {
+				t.Fatal("released retained output did not publish positive proof")
+			}
+			if got, _ := runHook(t, h.f.env, "--event", "user-prompt"); got != "" {
+				t.Fatal("ordinary hook duplicated monitor output after release")
+			}
+		})
+	}
+}
+
+func TestWatchDeferredReleaseRefusalAndReclaim(t *testing.T) {
+	h := newDeferredWatch(t, "sse", true, 0)
+	step := h.start(t)
+	h.blocked(t, step, time.Second)
+	deferredRelease(t, h.f, "wrong_nonce", 0)
+	close(step.resume)
+	step = h.next(t)
+	h.blocked(t, step, 2*time.Second)
+	if err := (stateFile{h.f.path}).update(t.Context(), func(s *hookState) error {
+		for n := 0; n < appServerReplayLimit; n++ {
+			s.Replay = append(s.Replay, replayRef{ID: fmt.Sprintf("capacity_%d", n), After: deferredBefore, Priority: "wake_idle", Order: uint64(n + 10)})
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(h.f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := runHook(t, h.f.env, "--release", "--claim", "pending"); raw != "" {
+		t.Fatal("capacity-refused release incorrectly confirmed success")
+	}
+	after, _ := os.ReadFile(h.f.path)
+	if !bytes.Equal(before, after) {
+		t.Fatal("failed release changed durable ownership")
+	}
+	close(step.resume)
+	step = h.next(t)
+	h.blocked(t, step, 4*time.Second)
+	if err := (stateFile{h.f.path}).update(t.Context(), func(s *hookState) error { s.Replay = nil; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	deferredRelease(t, h.f, "pending", 1)
+	deferredClaim(t, h.f, "reclaimed")
+	close(step.resume)
+	step = h.next(t)
+	h.blocked(t, step, 8*time.Second)
+	if len(step.requests) != 1 {
+		t.Fatal("unresolved release/reclaim resumed the transport")
+	}
+	deferredReceipt(t, h.f, "reclaimed")
+	h.finish(t, step, "opaque-y-A", false)
+}
+
+func TestWatchDeferredUncertainState(t *testing.T) {
+	for _, problem := range []string{"lock", "corrupt", "read-error", "missing", "hub", "caller", "as", "credential", "unverified", "no-identity", "no-state"} {
+		t.Run(problem, func(t *testing.T) {
+			h := newDeferredWatch(t, "sse", false, 0)
+			raw, err := os.ReadFile(h.f.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restore := func() {
+				if err := os.WriteFile(h.f.path, raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			switch problem {
+			case "lock":
+				unlock, err := lockPath(t.Context(), h.f.path+".lock")
+				if err != nil {
+					t.Fatal(err)
+				}
+				var once sync.Once
+				restore = func() { once.Do(unlock) }
+				t.Cleanup(restore)
+			case "corrupt":
+				if err := os.WriteFile(h.f.path, []byte("{broken"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "read-error":
+				if err := os.Remove(h.f.path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(h.f.path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				restore = func() {
+					if err := os.Remove(h.f.path); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(h.f.path, raw, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "missing":
+				if err := os.Remove(h.f.path); err != nil {
+					t.Fatal(err)
+				}
+			case "unverified", "no-identity":
+				id := h.w.identity
+				restore = func() { h.w.identity = id }
+				if problem == "unverified" {
+					h.w.identity = &hookIdentity{Hub: id.Hub, Cred: id.Cred}
+				} else {
+					h.w.identity = nil
+				}
+			case "no-state":
+				shown := h.w.shown
+				restore = func() { h.w.shown = shown }
+				h.w.shown = nil
+			default:
+				if err := (stateFile{h.f.path}).update(t.Context(), func(s *hookState) error {
+					switch problem {
+					case "hub":
+						s.Hub += "/foreign"
+					case "caller":
+						s.Caller = "peer_foreign"
+					case "as":
+						s.As = "peer_foreign"
+					case "credential":
+						s.Cred = "foreign"
+					}
+					s.recordDisplay("dly_1")
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			uncertain, _ := os.ReadFile(h.f.path)
+			step := h.start(t)
+			h.blocked(t, step, time.Second)
+			got, _ := os.ReadFile(h.f.path)
+			if !bytes.Equal(uncertain, got) {
+				t.Fatal("uncertain state was reset/rebound to authorize output")
+			}
+			restore()
+			h.finish(t, step, "opaque-y-A", true)
+		})
+	}
+}
+
+func TestWatchDeferredRetryCapAndCancellation(t *testing.T) {
+	h := newDeferredWatch(t, "sse", true, hookPageLimit)
+	step := h.start(t)
+	for n, seconds := range []int{1, 2, 4, 8, 15, 15, 15} {
+		if n > 0 {
+			step = h.next(t)
+		}
+		h.blocked(t, step, time.Duration(seconds)*time.Second)
+		if len(step.requests) != 1 {
+			t.Fatal("deferred retry reopened transport or accumulated more envelopes")
+		}
+		if n < 6 {
+			close(step.resume)
+		}
+	}
+	h.stop(t) // cancellation interrupts the capped wait without a clock tick
+	s := readHookState(t, h.f.path)
+	if len(s.Claims) != 1 || s.Claims[0].Claim != "pending" || len(s.Displayed) != 0 {
+		t.Fatal("cancel released another engine's ownership or created display proof")
+	}
+	if raw, _ := os.ReadFile(h.f.path); bytes.Contains(raw, []byte("retained A")) || bytes.Contains(raw, []byte("suffix 2")) {
+		t.Fatal("deferred peer bodies were persisted")
+	}
+}
+
+func TestWatchDeferredConcurrentReleasePrintsOnce(t *testing.T) {
+	one := newDeferredWatch(t, "sse", true, 0)
+	two := deferredWatchFor(t, one.f, "sse")
+	first, second := one.start(t), two.start(t)
+	one.blocked(t, first, time.Second)
+	two.blocked(t, second, time.Second)
+	deferredRelease(t, one.f, "pending", 1)
+	close(first.resume)
+	close(second.resume)
+	// Both connected monitors observed the reservation before release and
+	// race the same shared lock when their local timers fire.
+	one.complete(t, "opaque-y-A")
+	two.complete(t, "opaque-y-A")
+	if got := strings.Count(one.out.String()+two.out.String(), "retained A"); got != 1 {
+		t.Fatalf("competing retained monitors printed A %d times", got)
+	}
+}
+
+func TestWatchDeferredReleaseOutputFailure(t *testing.T) {
+	for _, mode := range []string{"sse", "poll", "replay"} {
+		for _, short := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/short=%t", mode, short), func(t *testing.T) {
+				h := newDeferredWatch(t, mode, true, 1)
+				h.outputFailure = true
+				failed := &failedDisplay{short: short, tried: make(chan struct{})}
+				h.w.a.stdout = failed
+				step := h.start(t)
+				h.blocked(t, step, time.Second)
+				deferredRelease(t, h.f, "pending", 1)
+				close(step.resume)
+				select {
+				case <-failed.tried:
+				case <-time.After(5 * time.Second):
+					t.Fatal("release never retried retained output")
+				}
+				select {
+				case err := <-h.done:
+					if !errors.Is(err, errWatchOutput) {
+						t.Fatalf("failed retained output: %v", err)
+					}
+					h.done <- err
+				case <-time.After(time.Second):
+					t.Fatal("failed output did not stop transport")
+				}
+				select {
+				case cur := <-h.f.acks:
+					t.Fatalf("ack %q crossed failed retained output", cur)
+				default:
+				}
+				if s := readHookState(t, h.f.path); len(s.Displayed) != 0 {
+					t.Fatal("failed/short retained output published proof")
+				}
+			})
+		}
+	}
+}
+
+// Task5a3 R34 tests: prepared after the original primary GREEN, before the
+// operator correction. These are a separate RED/GREEN tranche, not original
+// primary coverage. HTTP identity, CLI output/ack and real shared state are the
+// observation seams; no identity/display helper return is mocked.
+func setDisplayIdentity(f *displayFixture, raw string) {
+	f.identityJSON.Store(&raw)
+}
+
+func TestWatchR34KnownOperatorDisplaysAndDedupes(t *testing.T) {
+	f := newDisplayFixture(t)
+	setDisplayIdentity(f, `{"kind":"operator"}`)
+	one := new(hookWatchOutput)
+	stream, stop := f.watch(t, one, true)
+	two := new(hookWatchOutput)
+	second, stopSecond := f.watch(t, two, true)
+	ev := f.delivery()
+	stream.frames <- []envelope.Event{ev}
+	if cur := f.ack(t); cur != ev.Cursor {
+		t.Fatalf("operator ack=%q", cur)
+	}
+	stop()
+	if strings.Count(one.String(), "live delivery") != 1 {
+		t.Fatal("authenticated operator did not display exactly once")
+	}
+	s := readHookState(t, f.path)
+	if s.Caller == "" || hookID.MatchString(s.Caller) || s.Hub != normalizeHub(f.hub) || s.Cred != hookCredential("vn_peer_test") || !slices.Contains(s.Displayed, "dly_1") {
+		t.Fatal("operator proof lacks a distinct private subject and existing hub/credential scope")
+	}
+	second.frames <- []envelope.Event{ev}
+	if cur := f.ack(t); cur != ev.Cursor {
+		t.Fatalf("second operator ack=%q", cur)
+	}
+	stopSecond()
+	if two.String() != "" {
+		t.Fatal("already-connected operator monitor duplicated successful display")
+	}
+
+	// A private monitor role must not become a cached peer/principal pin
+	// that authorizes the app-server claim/receipt consumer.
+	ev2 := deferredEvent(2, "operator unrelated", "opaque-operator-next")
+	f.mu.Lock()
+	f.evs = append(f.evs, ev2)
+	f.mu.Unlock()
+	before, err := os.ReadFile(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, _ := runHook(t, f.env, "--event", "app-server", "--claim", "operator_nonce", "--priorities", "wake_idle", "--expect-hub", f.hub, "--expect-caller", s.Caller)
+	if !strings.Contains(claimed, `"refused":"identity_changed"`) {
+		t.Fatal("private operator monitor role authorized an app-server claim")
+	}
+	receipt, _ := runHook(t, f.env, "--release", "--claim", "operator_nonce", "--receipt-key", "vn.operator", "--delivery-ids", "dly_2", "--expect-hub", f.hub, "--expect-caller", s.Caller)
+	if !strings.Contains(receipt, `"refused":"identity_changed"`) {
+		t.Fatal("private operator monitor role authorized receipt settlement")
+	}
+	after, err := os.ReadFile(f.path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("refused operator lifecycle request changed shared state")
+	}
+}
+
+func TestWatchR34UnknownRoleDefersUntilKnownOperator(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		outage     bool
+	}{
+		{"missing-role", `{}`, false},
+		{"empty-body", ``, false},
+		{"malformed", `{"kind":`, false},
+		{"unknown-role", `{"kind":"unrecognized"}`, false},
+		{"malformed-role", `{"kind":7}`, false},
+		{"missing-peer", `{"kind":"peer"}`, false},
+		{"missing-principal", `{"kind":"principal"}`, false},
+		{"operator-role-as-peer-id", `{"kind":"peer","peer_id":"role:operator"}`, false},
+		{"operator-outage", `{"kind":"operator"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDisplayFixture(t)
+			setDisplayIdentity(f, tc.body)
+			f.unverified.Store(tc.outage)
+			out := new(hookWatchOutput)
+			stream, stop := f.watch(t, out, true)
+			ev := f.delivery()
+			before, err := os.ReadFile(f.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream.frames <- []envelope.Event{ev}
+			waitDisplayBlocked(t, f, stream, out)
+			after, err := os.ReadFile(f.path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("unknown identity created or rebound display proof")
+			}
+			// No new event/notification: only a positive authenticated role
+			// response can let the retained event complete on its local retry.
+			setDisplayIdentity(f, `{"kind":"operator"}`)
+			f.unverified.Store(false)
+			if cur := f.ack(t); cur != ev.Cursor {
+				t.Fatalf("recovered operator ack=%q", cur)
+			}
+			stop()
+			if strings.Count(out.String(), "live delivery") != 1 {
+				t.Fatal("known-role recovery skipped or duplicated the retained event")
+			}
+		})
+	}
+}
+
+func TestWatchR34OperatorStillHonorsClaimAndLock(t *testing.T) {
+	for _, block := range []string{"claim", "lock"} {
+		t.Run(block, func(t *testing.T) {
+			f := newDisplayFixture(t)
+			setDisplayIdentity(f, `{"kind":"operator"}`)
+			out := new(hookWatchOutput)
+			stream, stop := f.watch(t, out, true)
+			ev := f.delivery()
+			var release func()
+			if block == "claim" {
+				if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error {
+					s.claim("dly_1")
+					s.Claims = append(s.Claims, claimRef{ID: "dly_1", Claim: "operator_pending", After: "e1.0", Priority: "wake_idle", Order: 1})
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				release = func() { deferredRelease(t, f, "operator_pending", 1) }
+			} else {
+				unlock, err := lockPath(t.Context(), f.path+".lock")
+				if err != nil {
+					t.Fatal(err)
+				}
+				var once sync.Once
+				release = func() { once.Do(unlock) }
+				t.Cleanup(release)
+			}
+			stream.frames <- []envelope.Event{ev}
+			waitDisplayBlocked(t, f, stream, out)
+			release()
+			if cur := f.ack(t); cur != ev.Cursor {
+				t.Fatalf("unblocked operator ack=%q", cur)
+			}
+			stop()
+			if strings.Count(out.String(), "live delivery") != 1 {
+				t.Fatal("operator bypassed ownership/lock or lost local retry")
+			}
+		})
 	}
 }
