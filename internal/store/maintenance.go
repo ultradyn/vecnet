@@ -181,6 +181,9 @@ func (db *DB) Maintain(ctx context.Context, o MaintenanceOptions) (r Maintenance
 		// Pin the writer lock across page accounting and reclaim. Concurrent
 		// sends cannot grow the file between the budget check and vacuum.
 		if _, err = c.ExecContext(slice, "BEGIN IMMEDIATE"); err != nil {
+			// Cancellation can be reported after SQLite acquired the writer lock.
+			// A failed BEGIN is ambiguous: never return this connection to the pool.
+			_ = c.Raw(func(any) error { return driver.ErrBadConn })
 			return r, err
 		}
 		active := true
