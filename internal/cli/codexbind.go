@@ -96,10 +96,12 @@ func (a *app) codexBindCaller(c *client) (string, error) {
 // deterministic without changing the clock used by other CLI commands.
 func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	if len(args) == 0 {
-		return usageErr("codex: expected bind, unbind or bindings")
+		return usageErr("codex: expected bind, unbind, bindings or status")
 	}
 	var spec map[string]flagKind
 	switch args[0] {
+	case "status":
+		return a.cmdCodexStatus(args[1:])
 	case "auto-register":
 		return a.cmdCodexAuto(args[1:])
 	case "deliver", "delivery-status", "delivery-refresh":
@@ -111,7 +113,7 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	case "bindings":
 		spec = map[string]flagKind{}
 	default:
-		return usageErr("codex: expected bind, unbind or bindings")
+		return usageErr("codex: expected bind, unbind, bindings or status")
 	}
 	o, err := parseFlags("codex "+args[0], args[1:], spec)
 	if err != nil {

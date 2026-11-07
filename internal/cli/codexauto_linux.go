@@ -32,6 +32,9 @@ func (a *app) startCodexAuto(thread string) {
 	if err != nil || f.disabled(name, a.as) {
 		return
 	}
+	if a.codexNotice != nil {
+		*a.codexNotice = a.codexNoticeMessage(p.Hub, time.Now())
+	}
 	paths, err := a.codexDeliveryPaths(p.Hub)
 	if err != nil || a.ctx.Err() != nil {
 		return

@@ -40,6 +40,9 @@ export function vecnetConfigPath(env: Record<string, string | undefined>): strin
 }
 type RecordValue = Record<string, any>;
 type Batch = { stub: string; entries: { key: string; value: string }[]; deliveries: string[] };
+type SendScope = { profile: string; as?: string; hub: string; caller: string; env: Record<string, string> };
+type Attempt = SendScope & { row: InflightRow };
+type Settlement = Attempt & { origin: 'receipt' | 'history'; attempt: Attempt };
 const obj = (x: unknown): RecordValue => x !== null && typeof x === 'object' && !Array.isArray(x) ? x as RecordValue : {};
 const timeout = 5000, blockedMs = 600_000;
 
@@ -51,6 +54,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   // launcher's helper intentionally preserves ordinary non-secret variables.
   const env = Object.fromEntries(Object.entries(scrubEnv(d.env, envKeys)).filter(([k]) => envKeys.includes(k)));
   env.VECNET_CODEX_AUTO_DELIVERY = '0';
+  const sendScope: SendScope = { profile: b.profile, ...(b.as ? { as: b.as } : {}), hub: b.hub, caller: b.caller, env: { ...env } };
   // Only the private runner, after acquiring its lifetime flock, sets this
   // indicator. Standalone launcher engines need no inherited descriptor.
   let leaseFd: number | undefined;
@@ -80,9 +84,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   let reconnect: { cancel(): void } | undefined, minute: { cancel(): void } | undefined;
   let claimRecovery: { cancel(): void } | undefined, warmCheck: { cancel(): void } | undefined;
   let historyRetry: { cancel(): void } | undefined, historyRetryIndex = 0;
+  let settlementRetryAt = -Infinity, settlementRetryIndex = 0;
   const children = new Set<ChildProcess>();
   const unresolvedLogged = new Set<string>(), pendingLogged = new Set<string>();
-  const receipts = new Set<string>(), waitingRetry = new Map<string, Batch>(), waitForIdle = new Set<string>();
+  const waitingRetry = new Map<string, Batch>(), waitForIdle = new Set<string>();
   const blockedRequests = new Map<string | number, { method: string; at: number; logged: boolean }>();
   let waitingSince: number | undefined, blockedLogged = false;
 
@@ -92,8 +97,72 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   function rows(): InflightRow[] {
     return kv.keys('inflight:').map(key => JSON.parse(kv.get(key)!) as InflightRow).filter(row => row.threadId === b.threadId);
   }
-  const write = (r: InflightRow) => kv.set('inflight:' + r.key, JSON.stringify(r));
-  function clear(r: InflightRow) { kv.delete('inflight:' + r.key); kv.delete('releasing:' + r.claim); kv.delete('diagnostic:unresolved:' + r.key); waitingRetry.delete(r.key); waitForIdle.delete(r.key); receipts.delete(r.key); unresolvedLogged.delete(r.key); pendingLogged.delete(r.key); }
+  const settling = (key: string) => kv.get('settling:' + key) !== undefined;
+  function settlements(): Settlement[] {
+    return kv.keys('settling:').map(key => JSON.parse(kv.get(key)!) as Settlement).filter(s => s.row.threadId === b.threadId);
+  }
+  function validScope(value: unknown): value is SendScope {
+    const s = obj(value), savedEnv = obj(s.env);
+    return typeof s.profile === 'string' && s.profile !== '' && typeof s.hub === 'string' && s.hub !== '' &&
+      typeof s.caller === 'string' && s.caller !== '' && (s.as === undefined || typeof s.as === 'string') &&
+      savedEnv.VECNET_CODEX_AUTO_DELIVERY === '0' && Object.entries(savedEnv).every(([key, value]) =>
+        (envKeys.includes(key) || key === 'VECNET_CODEX_AUTO_DELIVERY') && typeof value === 'string');
+  }
+  function verifiedAttempt(value: unknown, r: InflightRow): Attempt | undefined {
+    const a = obj(value), original = obj(a.row), ids: unknown = original.deliveries;
+    if (!validScope(a) || original.threadId !== r.threadId || original.key !== r.key || original.claim !== r.claim ||
+        !Array.isArray(ids) || ids.length !== r.deliveries.length || new Set(ids).size !== ids.length ||
+        !ids.every(id => typeof id === 'string' && r.deliveries.includes(id))) return;
+    return a as Attempt;
+  }
+  function attemptFor(r: InflightRow): Attempt | undefined {
+    try {
+      const attempt = verifiedAttempt(JSON.parse(kv.get('attempt:' + r.key) ?? 'null'), r);
+      if (attempt) return attempt;
+    } catch { /* Unknown companion cannot supply authority. */ }
+    try { return verifiedAttempt(obj(JSON.parse(kv.get('releasing:' + r.claim) ?? 'null')).attempt, r); }
+    catch { return undefined; }
+  }
+  const unknownProvenance = new Set<string>();
+  function preserveUnknown(key: string) {
+    if (unknownProvenance.has(key)) return;
+    unknownProvenance.add(key); log.warn('codex_attempt_provenance_unknown', { threadId: b.threadId });
+  }
+  const write = (r: InflightRow) => { if (!settling(r.key)) kv.set('inflight:' + r.key, JSON.stringify(r)); };
+  function sameGeneration(value: unknown, r: InflightRow) {
+    const saved = obj(value);
+    return saved.threadId === r.threadId && saved.key === r.key && saved.claim === r.claim;
+  }
+  function clear(r: InflightRow, confirmed = false) {
+    if (settling(r.key) && !confirmed) return;
+    const current = JSON.parse(kv.get('inflight:' + r.key) ?? 'null');
+    const companion = obj(JSON.parse(kv.get('attempt:' + r.key) ?? 'null')).row;
+    // Retained release authority can outlive these records. A confirmation
+    // for its nonce must never clear a newer generation using the same key.
+    if (sameGeneration(current, r)) kv.delete('inflight:' + r.key);
+    if (sameGeneration(companion, r)) kv.delete('attempt:' + r.key);
+    if ((current === null || sameGeneration(current, r)) && (companion === undefined || sameGeneration(companion, r))) {
+      kv.delete('diagnostic:unresolved:' + r.key);
+      waitingRetry.delete(r.key); waitForIdle.delete(r.key); unresolvedLogged.delete(r.key); pendingLogged.delete(r.key);
+    }
+    kv.delete('releasing:' + r.claim); // Last ordinary-release recovery record.
+  }
+  function beginSettlement(r: InflightRow, origin: Settlement['origin']) {
+    // Notifications run outside the serial queue, including while acceptance,
+    // history or release is awaiting I/O. Persist the original row first.
+    if (!settling(r.key)) {
+      const original = kv.get('inflight:' + r.key);
+      if (!original) return;
+      const attempt = attemptFor(r);
+      if (!attempt) { preserveUnknown(r.key); return; }
+      // This scope was persisted before the attempt's first RPC, not inferred
+      // from whichever binding/source happens to discover its first receipt.
+      const s: Settlement = { ...attempt, row: JSON.parse(original), origin, attempt };
+      kv.set('settling:' + r.key, JSON.stringify(s));
+    }
+    waitingRetry.delete(r.key); waitForIdle.delete(r.key);
+    enqueue(recoverClaims);
+  }
   function reason(requireSubscription = true): DormantReason | undefined {
     if (identityChanged) return 'identity_changed';
     if (clock.now() >= b.expiresAt) return 'expired';
@@ -112,10 +181,11 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     if (!rpc) throw new CodexRpcError(-1, 'unreachable', true);
     return rpc.call<T>(method, params, timeout);
   }
-  function runHook(args: string[], cleanup = false): Promise<unknown> {
+  function runHook(args: string[], cleanup = false, scope?: SendScope): Promise<unknown> {
     if (!running && !cleanup) return Promise.reject(new Error('engine_stopped'));
     return new Promise((resolve, reject) => {
-      const child = spawn(d.vecnetBin, [...baseArgs, 'hook', ...args], { env, stdio: leaseFd === undefined ? ['ignore', 'pipe', 'ignore'] : ['ignore', 'pipe', 'ignore', leaseFd] });
+      const pins = scope ? ['--net', scope.profile, ...(scope.as ? ['--as', scope.as] : [])] : baseArgs;
+      const child = spawn(d.vecnetBin, [...pins, 'hook', ...args], { env: scope?.env ?? env, stdio: leaseFd === undefined ? ['ignore', 'pipe', 'ignore'] : ['ignore', 'pipe', 'ignore', leaseFd] });
       children.add(child); let text = '', tooLarge = false;
       child.stdout!.setEncoding('utf8');
       child.stdout!.on('data', (part: string) => { text += part; if (Buffer.byteLength(text) > 1_048_576) { tooLarge = true; child.kill(); } });
@@ -128,28 +198,79 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       });
     });
   }
-  async function release(claim: string) {
+  async function release(claim: string, scope: SendScope) {
     // Releasing known-unsent claims must remain possible while stop drains
     // the delivery lane, after new claims and turn RPCs have been disabled.
-    await runHook(['--release', '--claim', claim], true);
+    const output = obj(await runHook(['--release', '--claim', claim], true, scope));
+    if (output.refused !== undefined || !Number.isSafeInteger(output.released) || output.released < 0) throw new Error('release_unconfirmed');
   }
-  function scheduleClaimRecovery() {
+  async function settlePending() {
+    if (!running) return;
+    if (clock.now() < settlementRetryAt) { scheduleClaimRecovery(settlementRetryAt - clock.now()); return; }
+    for (const s of settlements()) {
+      const r = s.row;
+      // The embedded attempt keeps provenance authoritative if cleanup already
+      // removed the companion. Old unproven intents are retained, not migrated.
+      const attempt = verifiedAttempt(s.attempt, r) ?? attemptFor(r);
+      if (!attempt) { preserveUnknown(r.key); return; }
+      try {
+        const out = obj(await runHook(['--release', '--claim', r.claim, '--receipt-key', r.key,
+          '--delivery-ids', r.deliveries.join(','), '--expect-hub', attempt.hub, '--expect-caller', attempt.caller], false, attempt));
+        const ids: unknown = out.deliveries;
+        if (out.refused !== undefined || out.version !== 1 || out.lifecycle !== 'receipt-display-v1' || out.receipt_key !== r.key ||
+            !Number.isSafeInteger(out.released) || out.released < 0 || !Array.isArray(ids) || ids.length !== r.deliveries.length ||
+            new Set(ids).size !== ids.length || !ids.every(id => typeof id === 'string' && r.deliveries.includes(id))) {
+          throw new Error('receipt_unconfirmed');
+        }
+        // Do not finish a stopped lane, even if a child committed just before
+        // stop killed/drained it. The immutable assertion remains retryable.
+        if (!running) return;
+        clear(r, true); kv.delete('claiming:' + r.claim);
+        kv.delete('settling:' + r.key); // LAST: also recovers a crash during clear.
+      } catch {
+        log.warn('codex_receipt_publish_failed', { threadId: b.threadId });
+        const ms = [1000, 2000, 4000, 8000, 15000][Math.min(settlementRetryIndex++, 4)];
+        settlementRetryAt = clock.now() + ms; scheduleClaimRecovery(ms); return;
+      }
+    }
+    settlementRetryAt = -Infinity; settlementRetryIndex = 0;
+  }
+  function scheduleClaimRecovery(ms = 1000) {
     if (!running || claimRecovery) return;
-    claimRecovery = clock.timer(1000, () => {
+    claimRecovery = clock.timer(ms, () => {
       claimRecovery = undefined;
       enqueue(async () => { await recoverClaims(); arm(0); });
     });
   }
   async function releaseUnsentClaim(claim: string) {
-    try { await release(claim); kv.delete('claiming:' + claim); }
+    if (settlements().some(s => s.row.claim === claim)) return;
+    try {
+      const scope = obj(JSON.parse(kv.get('claiming:' + claim) ?? 'null')).scope;
+      if (!validScope(scope)) { preserveUnknown(claim); return; }
+      await release(claim, scope);
+      if (!settlements().some(s => s.row.claim === claim)) {
+        // A crash between companion and inflight persistence is known unsent:
+        // claiming is deleted only after both, before the first possible RPC.
+        for (const key of kv.keys('attempt:')) {
+          const a = obj(JSON.parse(kv.get(key)!)), r = obj(a.row) as InflightRow;
+          if (r.threadId === b.threadId && r.claim === claim && !kv.get('inflight:' + r.key) && !settling(r.key) && verifiedAttempt(a, r)) kv.delete(key);
+        }
+        kv.delete('claiming:' + claim); // Keep original scope until cleanup ends.
+      }
+    }
     catch { log.warn('codex_claim_release_failed', { threadId: b.threadId }); scheduleClaimRecovery(); }
   }
   async function releaseInflight(r: InflightRow) {
+    if (settling(r.key)) return;
+    const attempt = attemptFor(r);
+    if (!attempt) { preserveUnknown(r.key); return; }
     // A definite rejection (or proven absence) needs cleanup, not another
     // history scan. Persist that fact before invoking the fallible child.
-    kv.set('releasing:' + r.claim, JSON.stringify(r));
-    waitingRetry.delete(r.key); waitForIdle.delete(r.key);
-    try { await release(r.claim); clear(r); }
+    kv.set('releasing:' + r.claim, JSON.stringify({ ...r, attempt }));
+    if (sameGeneration(JSON.parse(kv.get('inflight:' + r.key) ?? 'null'), r)) {
+      waitingRetry.delete(r.key); waitForIdle.delete(r.key);
+    }
+    try { await release(r.claim, attempt); clear(r); }
     catch { log.warn('codex_claim_release_failed', { threadId: b.threadId }); scheduleClaimRecovery(); }
   }
   async function releaseDormantRetries() {
@@ -160,15 +281,21 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     for (const r of rows()) if (waitingRetry.has(r.key)) await releaseInflight(r);
   }
   async function recoverClaims() {
+    await settlePending();
+    if (settlements().length) return;
+    // Startup also calls recovery after connecting. A failed release already
+    // has a timer; do not issue it twice before that timer fires. Stop still
+    // drains once with running=false.
+    if (running && claimRecovery) return;
     for (const key of kv.keys('releasing:')) {
       const r = JSON.parse(kv.get(key)!) as InflightRow;
       if (r.threadId === b.threadId) await releaseInflight(r);
     }
-    const owned = new Set(rows().map(r => r.claim));
+    const owned = new Map(rows().map(r => [r.claim, r]));
     for (const key of kv.keys('claiming:')) {
       const r = obj(JSON.parse(kv.get(key)!)); if (r.threadId !== b.threadId) continue;
       const claim = key.slice('claiming:'.length);
-      if (owned.has(claim)) kv.delete(key);
+      if (owned.has(claim)) { if (attemptFor(owned.get(claim)!)) kv.delete(key); }
       else await releaseUnsentClaim(claim);
     }
   }
@@ -269,9 +396,8 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       const key = p.item.clientId;
       // A receipt may arrive before the RPC's acceptance response.
       if (kv.get('inflight:' + key)) {
-        receipts.add(key);
         const r = JSON.parse(kv.get('inflight:' + key)!) as InflightRow;
-        if (r.state !== 'sending') clear(r);
+        beginSettlement(r, 'receipt');
       }
     }
     enqueue(async () => {
@@ -343,16 +469,19 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     return Array.isArray(result.data) ? result.data[0] : undefined;
   }
   async function scan(r: InflightRow) {
-    if (!kv.get('inflight:' + r.key) || kv.get('releasing:' + r.claim)) return;
+    if (!kv.get('inflight:' + r.key) || settling(r.key) || kv.get('releasing:' + r.claim)) return;
+    if (!attemptFor(r)) { preserveUnknown(r.key); return; }
     let cursor: string | undefined, reached = false, inProgress = false;
     try {
       for (let page = 0; page < 20; page++) {
         const result = await call('thread/turns/list', buildTurnsPage(b.threadId, cursor));
         // A subscription receipt can settle this row while the scan awaits I/O.
-        if (!kv.get('inflight:' + r.key) || receipts.has(r.key)) { clear(r); return; }
+        if (!kv.get('inflight:' + r.key) || settling(r.key)) return;
         if (!Array.isArray(result.data)) break;
         for (const turn of result.data) {
-          if (Array.isArray(turn.items) && turn.items.some((item: RecordValue) => item.type === 'userMessage' && item.clientId === r.key)) { clear(r); return; }
+          if (Array.isArray(turn.items) && turn.items.some((item: RecordValue) => item.type === 'userMessage' && item.clientId === r.key)) {
+            beginSettlement(r, 'history'); await settlePending(); return;
+          }
           // A start can race into the turn returned by latest(). Include that
           // prior turn: an accepted start/steer may still record its item there.
           if (turn.status === 'inProgress') inProgress = true;
@@ -367,7 +496,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         cursor = result.nextCursor;
       }
     } catch { /* A partial scan never proves absence. */ }
-    if (!kv.get('inflight:' + r.key) || receipts.has(r.key)) { clear(r); return; }
+    if (!kv.get('inflight:' + r.key) || settling(r.key)) return;
     if (reached && !inProgress) { await releaseInflight(r); return; }
     r.state = 'unresolved'; write(r);
     if (!unresolvedLogged.has(r.key) && !kv.get('diagnostic:unresolved:' + r.key)) {
@@ -405,6 +534,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   async function transmit(r: InflightRow, batch: Batch) {
     let mismatches = 0, fallback = false;
     while (running && rpc) {
+      if (settling(r.key) || !kv.get('inflight:' + r.key)) return;
+      const attempt = attemptFor(r);
+      if (!attempt) { preserveUnknown(r.key); return; }
       if (!liveness().live) {
         waitingRetry.set(r.key, batch);
         // An idle claim can contain wake_idle. Deferral must preserve its
@@ -413,13 +545,14 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
         await releaseDormantRetries(); return;
       }
       const entries = fallback ? [] : batch.entries;
-      const pointer = `vecnet: messages remain available. Run vecnet --net ${b.profile}${b.as ? ' --as ' + b.as : ''} inbox.`;
+      const pointer = `vecnet: messages remain available. Run vecnet --net ${attempt.profile}${attempt.as ? ' --as ' + attempt.as : ''} inbox.`;
       const input = { threadId: b.threadId, stub: fallback ? pointer : batch.stub, entries, key: r.key };
       write(r);
       try {
         lastPush = clock.now();
         const result = r.method === 'turn/steer' ? await call('turn/steer', buildTurnSteer({ ...input, expectedTurnId: r.attemptTurnId! })) :
           await call('turn/start', buildTurnStart(input));
+        if (settling(r.key) || !kv.get('inflight:' + r.key)) return;
         r.acceptedAt = clock.now(); r.state = 'pending';
         if (r.method === 'turn/start') {
           const id = obj(result.turn).id;
@@ -429,9 +562,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
           }
         }
         waitingRetry.delete(r.key);
-        if (receipts.has(r.key)) clear(r); else write(r);
+        write(r);
         return;
       } catch (e) {
+        if (settling(r.key) || !kv.get('inflight:' + r.key)) return;
         if (!(e instanceof CodexRpcError) || e.ambiguous) {
           // This attempt may have been accepted. Only checkpoint recovery may
           // settle it; a previous definite-rejection retry is no longer safe.
@@ -446,6 +580,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
               if (turn?.status === 'inProgress' && typeof turn.id === 'string') { r.attemptTurnId = turn.id; continue; }
             } catch { /* The steer was rejected; retain this batch for idle. */ }
           }
+          if (settling(r.key) || !kv.get('inflight:' + r.key)) return;
           waitingRetry.set(r.key, batch); waitForIdle.add(r.key); await releaseDormantRetries(); return;
         }
         if (/thread (?:is )?closing|thread not found/.test(e.message)) {
@@ -461,7 +596,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     waitingRetry.set(r.key, batch);
   }
   async function push() {
-    if (connectionState !== 'ready' || !liveness().live) return;
+    if (connectionState !== 'ready' || !liveness().live || settlements().length || rows().some(r => !attemptFor(r))) return;
     const wait = Math.max(lastPush + (d.minGapMs ?? 5000), resumeAt + 2000) - clock.now();
     if (wait > 0) {
       if (!gap) gap = clock.timer(wait, () => { gap = undefined; enqueue(push); });
@@ -481,7 +616,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
           scheduleHistoryRetry(); return;
         }
         historyRetry?.cancel(); historyRetry = undefined; historyRetryIndex = 0;
-        if (!liveness().live) return;
+        if (!liveness().live || settlements().length || rows().some(r => !attemptFor(r)) || !kv.get('inflight:' + r.key)) return;
         if (state === 'turn_running' && turn?.status !== 'inProgress') return;
         r.method = state === 'idle' ? 'turn/start' : 'turn/steer';
         r.attemptTurnId = state === 'idle' ? null : turn!.id; r.priorTurnId = state === 'idle' ? turn?.id ?? null : null;
@@ -501,12 +636,12 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       scheduleHistoryRetry(); return;
     }
     historyRetry?.cancel(); historyRetry = undefined; historyRetryIndex = 0;
-    if (!liveness().live || (action === 'steer' && (turn?.status !== 'inProgress' || typeof turn.id !== 'string'))) return;
+    if (!liveness().live || settlements().length || rows().some(r => !attemptFor(r)) || (action === 'steer' && (turn?.status !== 'inProgress' || typeof turn.id !== 'string'))) return;
     const nonce = randomBytes(12).toString('hex');
-    kv.set('claiming:' + nonce, JSON.stringify({ threadId: b.threadId, at: clock.now() }));
+    kv.set('claiming:' + nonce, JSON.stringify({ threadId: b.threadId, at: clock.now(), scope: sendScope }));
     let output: RecordValue;
     try {
-      output = obj(await runHook(['--event', 'app-server', '--claim', nonce, '--priorities', priorities.join(','), '--expect-hub', b.hub, '--expect-caller', b.caller]));
+      output = obj(await runHook(['--event', 'app-server', '--claim', nonce, '--priorities', priorities.join(','), '--expect-hub', sendScope.hub, '--expect-caller', sendScope.caller]));
     } catch {
       // Go may have committed the claim before its output was lost. No turn
       // RPC can have happened yet, so this exact nonce is safe to release.
@@ -518,6 +653,12 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
       kv.delete('claiming:' + nonce); await unsubscribe();
       log.warn('codex_binding_identity_changed', { threadId: b.threadId }); return;
     }
+    if (output.lifecycle !== 'receipt-display-v1') {
+      await releaseUnsentClaim(nonce); return;
+    }
+    // Another previously accepted batch may have received proof while this
+    // bounded claim child was running. Keep this unsent nonce for recovery.
+    if (settlements().length) { scheduleClaimRecovery(); return; }
     if (!Array.isArray(output.deliveries) || !output.deliveries.every((id: unknown) => typeof id === 'string') ||
       !Array.isArray(output.entries ?? []) || (output.entries ?? []).some((e: unknown) => typeof obj(e).key !== 'string' || typeof obj(e).value !== 'string' || Buffer.byteLength(obj(e).value) > 1000)) {
       await releaseUnsentClaim(nonce); return;
@@ -527,8 +668,11 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     const key = 'vn.' + createHash('sha256').update(JSON.stringify([b.hub, b.threadId, [...batch.deliveries].sort()])).digest('hex').slice(0, 24);
     const row: InflightRow = { threadId: b.threadId, key, claim: nonce, deliveries: batch.deliveries, method: action === 'start' ? 'turn/start' : 'turn/steer',
       attemptTurnId: action === 'steer' ? turn!.id : null, priorTurnId: action === 'start' ? turn?.id ?? null : null, acceptedAt: null, state: 'sending' };
-    // Do not overwrite an unresolved attempt if a summary produces its key again.
-    if (kv.get('inflight:' + key)) { await releaseUnsentClaim(nonce); return; }
+    // Ordinary cleanup reserves its key until the final releasing deletion,
+    // including a crash after inflight and companion have already been deleted.
+    if (kv.get('inflight:' + key) || kv.get('attempt:' + key) || settling(key) ||
+        kv.keys('releasing:').some(k => obj(JSON.parse(kv.get(k)!)).key === key)) { await releaseUnsentClaim(nonce); return; }
+    kv.set('attempt:' + key, JSON.stringify({ ...sendScope, row } satisfies Attempt));
     write(row); kv.delete('claiming:' + nonce); await transmit(row, batch);
   }
   function configSignature(): string {
@@ -583,7 +727,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
   }
   return {
     start() { if (running) { enqueue(async () => { await recover(); arm(0); }); return; }
-      running = true; reconnect = undefined; gap = undefined; claimRecovery = undefined; warmCheck = undefined; historyRetry = undefined; historyRetryIndex = 0; watchStopped = undefined; startWatch(); heartbeat();
+      running = true; reconnect = undefined; gap = undefined; claimRecovery = undefined; settlementRetryAt = -Infinity; settlementRetryIndex = 0; warmCheck = undefined; historyRetry = undefined; historyRetryIndex = 0; watchStopped = undefined; startWatch(); heartbeat();
       // Unsent claims need only Go, including when Codex is unreachable or
       // refused by the version gate. Release them before any RPC recovery.
       enqueue(async () => { await recoverClaims(); await connect(); }); },
