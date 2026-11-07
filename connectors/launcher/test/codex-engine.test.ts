@@ -614,6 +614,55 @@ function ambiguousAfterAccept(after?: (rpc: CodexRpc, key: string) => Promise<vo
     return result;
   } });
 }
+test('two hubs on one thread cannot settle a dropped summary with the other hub receipt or history', async t => {
+  const h = await harness(t, { status: active });
+  await h.engine.stop();
+  const dir = dirname(h.deps.env.VECNET_CONFIG), releases = join(dir, 'summary-releases');
+  const make = (name: string, kv: KeyValue) => {
+    const bin = join(dir, 'summary-' + name), claimed = bin + '.claimed';
+    writeFileSync(bin, `#!/bin/sh
+case " $* " in
+  *" watch "*) exec /bin/sleep 3600 ;;
+  *" --release "*) echo released >> '${releases}'; echo '{"released":true}' ;;
+  *" hook "*)
+    if test -e '${claimed}'; then echo '{"deliveries":[]}'; else
+      /usr/bin/touch '${claimed}'
+      echo '{"deliveries":[],"stub":"summary","entries":[{"key":"vecnet_summary","value":"summary from ${name}"}]}'
+    fi ;;
+esac
+`, { mode: 0o700 });
+    return () => createEngine({ ...h.binding, hub: `https://${name}.invalid` }, { ...h.deps, kv, vecnetBin: bin });
+  };
+  const map = new Map<string, string>();
+  const kvB: KeyValue = { get: k => map.get(k), set: (k, v) => { map.set(k, v); }, delete: k => { map.delete(k); },
+    keys: (p = '') => [...map.keys()].filter(k => k.startsWith(p)) };
+  const makeA = make('hub-a', h.kv), makeB = make('hub-b', kvB);
+  const a = makeA(); let b = makeB();
+  const rowsB = () => kvB.keys('inflight:').map(k => JSON.parse(kvB.get(k)!) as InflightRow);
+  try {
+    h.fake.failNext('turn/steer', 'drop');
+    b.start(); await eventually(() => b.subscribed(), 'hub B subscription'); await h.tick(2000);
+    await eventually(() => h.sends().length === 1, 'hub B dropped summary send'); await h.sync();
+    const missing = rowsB()[0]; assert.ok(missing); assert.deepEqual(missing.deliveries, []);
+    h.fake.withholdNextItem();
+    a.start(); await eventually(() => a.subscribed(), 'hub A subscription'); await h.tick(2000);
+    await eventually(() => h.sends().length === 2, 'hub A accepted summary send'); await h.sync();
+    const accepted = h.rows()[0]; assert.ok(accepted); assert.deepEqual(accepted.deliveries, []);
+    assert.deepEqual(h.sends().map(r => (r.params as any).additionalContext.vecnet_summary.value), ['summary from hub-b', 'summary from hub-a']);
+    await h.tick(1000); await eventually(() => b.subscribed(), 'hub B reconnect'); await h.sync();
+    assert.ok(kvB.get('inflight:' + missing.key), 'missing summary survives recovery without a receipt');
+    h.fake.recordLater(accepted.key, h.clock.now()); await h.tick();
+    assert.equal(h.rows().length, 0, 'hub A settles its own summary');
+    assert.ok(kvB.get('inflight:' + missing.key), 'hub A receipt must not settle hub B summary');
+    assert.notEqual(missing.key, accepted.key);
+    for (const key of [missing.key, accepted.key]) assert.match(key, /^vn\.[a-f0-9]{24}$/);
+    await b.stop(); b = makeB(); b.start();
+    await eventually(() => b.subscribed(), 'hub B restart'); await h.tick();
+    assert.deepEqual(rowsB().map(r => r.key), [missing.key], 'hub A history must not settle hub B summary');
+    assert.equal(h.sends().length, 2, 'ambiguous summary is never blindly resent');
+    assert.equal(existsSync(releases), false, 'unresolved summary is never released on a guess');
+  } finally { await a.stop(); await b.stop(); }
+});
 test('ambiguous send is resolved by clientId without resending', async t => {
   let h: Awaited<ReturnType<typeof harness>>;
   h = await harness(t, { wrap: ambiguousAfterAccept(async (rpc, key) => {
@@ -728,6 +777,29 @@ test('additionalContext rejection falls back to the pointer stub once', async t 
   assert.deepEqual(b.input, [{ type: 'text', text: 'vecnet: messages remain available. Run vecnet --net test --as peer inbox.' }]);
   assert.equal(b.additionalContext, undefined); assert.equal(b.clientUserMessageId, a.clientUserMessageId);
   await h.tick(2 * minute); assert.equal(h.sends().length, 2); assert.equal(h.releases().length, 0);
+});
+test('stored legacy receipt key survives restart verbatim and settles only from its own history', async t => {
+  const h = await harness(t, { status: active }); await h.engine.stop();
+  // Pre-hub hash for thread + newline + w1. Stored keys are opaque recovery
+  // identities even after new sends switch to hub-scoped hashes.
+  const legacy = row({ key: 'vn.06a72d8141763bd4d9a52920' });
+  h.kv.set('inflight:' + legacy.key, JSON.stringify(legacy));
+  const rpc = await openCodexRpc({ codexHome: h.binding.codexHome, euid: h.deps.euid, log: h.log, timeoutMs: 1000 });
+  h.fake.withholdNextItem();
+  try {
+    await rpc.call('turn/steer', { threadId: 'thread', expectedTurnId: 'active', clientUserMessageId: legacy.key,
+      input: [{ type: 'text', text: stub }] }, 1000);
+  } finally { rpc.close(); }
+  await h.restart();
+  assert.deepEqual(h.rows().map(r => [r.key, r.claim]), [[legacy.key, legacy.claim]]);
+  assert.equal(h.releases().length, 0, 'missing receipt must preserve the legacy claim');
+  await h.engine.stop();
+  h.fake.recordLater(legacy.key, h.clock.now()); h.clock.advance(0);
+  assert.deepEqual(h.kv.keys('inflight:'), ['inflight:' + legacy.key]);
+  await h.restart();
+  assert.equal(h.rows().length, 0, 'history matches the stored legacy key verbatim');
+  assert.equal(h.sends().length, 1, 'recovery never resends the legacy claim');
+  assert.equal(h.releases().length, 0);
 });
 test('restart with an inflight key recovers once', async t => {
   const h = await harness(t, { status: active }); h.fake.withholdNextItem(); await h.wake(); await eventually(() => h.rows().length === 1);

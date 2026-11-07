@@ -512,7 +512,7 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     }
     const batch: Batch = { deliveries: output.deliveries, stub: typeof output.stub === 'string' ? output.stub : '', entries: output.entries ?? [] };
     if (!batch.deliveries.length && !batch.entries.some(e => e.key === 'vecnet_summary')) { kv.delete('claiming:' + nonce); return; }
-    const key = 'vn.' + createHash('sha256').update(b.threadId + '\n' + [...batch.deliveries].sort().join(',')).digest('hex').slice(0, 24);
+    const key = 'vn.' + createHash('sha256').update(JSON.stringify([b.hub, b.threadId, [...batch.deliveries].sort()])).digest('hex').slice(0, 24);
     const row: InflightRow = { threadId: b.threadId, key, claim: nonce, deliveries: batch.deliveries, method: action === 'start' ? 'turn/start' : 'turn/steer',
       attemptTurnId: action === 'steer' ? turn!.id : null, priorTurnId: action === 'start' ? turn?.id ?? null : null, acceptedAt: null, state: 'sending' };
     // Do not overwrite an unresolved attempt if a summary produces its key again.

@@ -3,7 +3,7 @@ import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -112,6 +112,67 @@ test('delivery runner retains KV across reopen', async t => {
   assert.equal(second.kv.get('hub:"https://hub.invalid":inflight:ambiguous'), '{"state":"unresolved"}');
   assert.equal(statSync(join(f.stateDir, 'ledger.sqlite')).mode & 0o777, 0o600);
   assert.equal(statSync(f.stateDir).mode & 0o777, 0o700);
+});
+
+test('interrupted first identity write can restart under the same lifetime lease', async t => {
+  const f = await fixture(t), lease = join(f.dir, 'lease'), paused = join(f.dir, 'paused.json');
+  const id = uuid(6);
+  f.fake.setThread({ id, status: { type: 'idle' } }); f.fake.attachOther(id); f.bind(id);
+  const preload = join(f.dir, 'pause-identity.mjs'), identity = join(f.stateDir, 'hub.json');
+  writeFileSync(lease, '', { mode: 0o600 });
+  // Pause real filesystem I/O after exclusive creation but before contents are
+  // written. The old final-name writer and an atomic temporary writer both hit
+  // this same crash window; no production test hook is needed.
+  writeFileSync(preload, `import fs from 'node:fs';
+import { dirname } from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
+const open = fs.openSync, write = fs.writeFileSync, created = new Map();
+fs.openSync = function(path, flags, ...args) {
+  const fd = open.call(this, path, flags, ...args);
+  if (typeof path === 'string' && dirname(path) === ${JSON.stringify(f.stateDir)} &&
+      typeof flags === 'number' && (flags & fs.constants.O_CREAT)) created.set(fd, path);
+  return fd;
+};
+fs.writeFileSync = function(file, ...args) {
+  if (created.has(file)) {
+    write(${JSON.stringify(paused)}, JSON.stringify({ path: created.get(file) }), { mode: 0o600 });
+    process.kill(process.pid, 'SIGSTOP');
+  }
+  return write.call(this, file, ...args);
+};
+syncBuiltinESMExports();
+`, { mode: 0o600 });
+  const launch = (pause: boolean) => {
+    const child = spawn('bash', ['-c',
+      'exec 3>"$1"; flock -x 3; shift; exec "$@"', 'fixture-holder', lease, process.execPath,
+      '--disable-warning=ExperimentalWarning', ...(pause ? ['--import', preload] : []), entry,
+      'run', '--hub', 'https://hub.invalid', '--state-dir', f.stateDir, '--registry', f.registry],
+    { env: f.env, stdio: ['ignore', 'pipe', 'pipe', 'ignore'] });
+    const output = collect(child);
+    t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await output.done; });
+    return { child, output };
+  };
+  const first = launch(true);
+  await eventually(() => existsSync(paused) || first.child.exitCode !== null, 'identity writer paused before contents');
+  assert.equal(first.child.exitCode, null, first.output.stderr());
+  const pending = JSON.parse(readFileSync(paused, 'utf8')).path as string;
+  assert.equal(statSync(pending).size, 0, 'writer really stopped between create and write');
+  assert.equal(statSync(pending).mode & 0o777, 0o600);
+  const publishedBeforeWrite = existsSync(identity);
+  first.child.kill('SIGKILL');
+  assert.equal(await first.output.done, null); assert.equal(first.child.signalCode, 'SIGKILL');
+  const second = launch(false);
+  await eventually(() => f.fake.subscribers(id).length === 1 || second.child.exitCode !== null, 'replacement runner startup');
+  assert.equal(second.child.exitCode, null, `replacement must recover interrupted identity creation: ${second.output.stderr()}`);
+  assert.equal(publishedBeforeWrite, false, 'incomplete identity must never appear at the final name');
+  assert.deepEqual(JSON.parse(readFileSync(identity, 'utf8')), { version: 1, hub: 'https://hub.invalid' });
+  assert.equal(statSync(identity).mode & 0o777, 0o600);
+  second.child.kill('SIGTERM'); assert.equal(await second.output.done, 0, second.output.stderr());
+  const { startDeliveryRunner } = await import('../src/codex/delivery.ts');
+  const before = readFileSync(identity, 'utf8');
+  assert.throws(() => startDeliveryRunner({ hub: 'https://other-hub.invalid', stateDir: f.stateDir,
+    registry: f.registry, env: f.env, fixture: { allowMissingLeaseFd: true } }), /hub identity mismatch/);
+  assert.equal(readFileSync(identity, 'utf8'), before, 'conflicting hub must never replace the established identity');
 });
 
 test('SIGTERM drains engines before closing the inherited lease', async t => {

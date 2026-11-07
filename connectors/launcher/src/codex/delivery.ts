@@ -1,4 +1,5 @@
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { closeSync, constants, fsyncSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import type { Clock, Log } from '../../../hub-client/src/ports.ts';
 import { systemClock, stderrLog } from '../daemon.ts';
@@ -88,11 +89,32 @@ export function startDeliveryRunner(o: { hub: string; stateDir: string; registry
   const dir = lstatSync(o.stateDir);
   if (!dir.isDirectory() || dir.uid !== euid() || (dir.mode & 0o777) !== 0o700) throw new Error('unsafe delivery state directory');
   const identityPath = join(o.stateDir, 'hub.json');
+  let metadata: unknown;
   try {
-    const fd = openSync(identityPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    try { writeFileSync(fd, JSON.stringify({ version: 1, hub: o.hub }) + '\n'); } finally { closeSync(fd); }
-  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-  const identity = readMetadata(identityPath) as { version?: unknown; hub?: unknown } | null;
+    metadata = readMetadata(identityPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    // The lifetime lease fences initialization. A crash may leave a private
+    // temporary file, but never a partial identity at the authoritative name.
+    const temporary = join(o.stateDir, 'hub.json.' + randomBytes(12).toString('hex') + '.tmp');
+    const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    try {
+      try {
+        writeFileSync(fd, JSON.stringify({ version: 1, hub: o.hub }) + '\n');
+        fsyncSync(fd);
+      } finally { closeSync(fd); }
+      // Link publishes the complete inode atomically without replacing any
+      // identity that already exists; the full-hub check below still applies.
+      try { linkSync(temporary, identityPath); }
+      catch (publishError) { if ((publishError as NodeJS.ErrnoException).code !== 'EEXIST') throw publishError; }
+    } finally {
+      unlinkSync(temporary);
+      const directory = openSync(o.stateDir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { fsyncSync(directory); } finally { closeSync(directory); }
+    }
+    metadata = readMetadata(identityPath);
+  }
+  const identity = metadata as { version?: unknown; hub?: unknown } | null;
   if (identity?.version !== 1 || identity.hub !== o.hub) throw new Error('delivery hub identity mismatch');
   const ledgerPath = join(o.stateDir, 'ledger.sqlite');
   closeSync(privateFile(ledgerPath, true));

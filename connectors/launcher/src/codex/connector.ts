@@ -126,7 +126,7 @@ export function startCodexConnector(o: { kv: KeyValue; clock: Clock; log: Log; e
   }
   function launch(b: SourcedBinding, over: boolean): Entry {
     // New owners fence recovery by hub. Legacy callers keep their existing KV
-    // keys until the installer migrates them; never discard recovery rows here.
+    // key format until that delivery path is retired; preserve recovery rows.
     const prefix = 'hub:' + JSON.stringify(b.hub) + ':';
     const scopedKv: KeyValue = o.hub !== undefined || o.sources !== undefined ? {
       get: key => kv.get(prefix + key), set: (key, value) => kv.set(prefix + key, value),
