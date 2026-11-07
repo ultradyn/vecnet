@@ -439,7 +439,7 @@ func normalizeOnboardingKey(raw string) (string, error) {
 	}
 	const prefix = "bearer "
 	if len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix) {
-		s = strings.TrimSpace(s[len(prefix):])
+		s = s[len(prefix):]
 		if len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix) {
 			return "", usageErr("key file does not hold a routine key")
 		}

@@ -1345,6 +1345,23 @@ func TestAgentCLIKeyFileBoundary(t *testing.T) {
 	t.Run("nested bearer", func(t *testing.T) {
 		refused(t, base("--key-file", writeModeFile(t, "nest", "Bearer Bearer "+secret+"\n", 0o600)), nil)
 	})
+	for _, c := range []struct{ name, gap string }{
+		{"space", " "}, {"tab", "\t"}, {"newline", "\n"},
+		{"carriage return", "\r"}, {"nul", "\x00"}, {"delete", "\x7f"},
+		{"unicode space", "\u00a0"},
+	} {
+		t.Run("header gap "+c.name, func(t *testing.T) {
+			raw := "Bearer " + c.gap + secret
+			_, err := onboarding.Normalize(onboarding.SubmitRequest{
+				Kind: "grokbot", SpecVersion: onboarding.SpecVersion, RequestID: "key-parity",
+				Inputs: map[string]any{"name": "Gateway", "webhook_url": routine, "webhook_key": raw},
+			})
+			if err == nil {
+				t.Fatal("hub accepted embedded header whitespace or control")
+			}
+			refused(t, base("--key-file", writeModeFile(t, "gap", raw, 0o600)), nil)
+		})
+	}
 	t.Run("no secret flag", func(t *testing.T) {
 		refused(t, append(base(), "--key", secret), nil)
 		refused(t, append(base(), "--webhook-key="+secret), nil)
