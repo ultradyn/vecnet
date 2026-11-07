@@ -565,17 +565,18 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if s.PollCursor == "" {
-			// The app-server can reserve deliveries before the ordinary hook's
-			// first run. Its summary/head jump must not discard that barrier.
-			var first *claimRef
-			for i := range s.Claims {
-				r := &s.Claims[i]
-				if !slices.Contains(s.Displayed, r.ID) && (first == nil || r.Order < first.Order) {
-					first = r
-				}
+		// Claims can arrive behind an already saved hook cursor, including
+		// after a first-run head jump or through app-server replay. Import
+		// their predecessor on every run, without replacing an older barrier.
+		var first *claimRef
+		for i := range s.Claims {
+			r := &s.Claims[i]
+			if !slices.Contains(s.Displayed, r.ID) && (first == nil || r.Order < first.Order) {
+				first = r
 			}
-			if first != nil {
+		}
+		if s.PollCursor == "" {
+			if first != nil && s.AckAfter == "" {
 				s.AckAfter = first.After
 			}
 			head, e := poll("head")
@@ -607,6 +608,9 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		}
 		body, e := poll(after)
 		if hookPurged(e) {
+			if first != nil {
+				return e // cannot establish a safe predecessor for this claim
+			}
 			oldest, _ := oldestCursor(e)
 			s.PollCursor, s.AckAfter = oldest, ""
 			after = oldest
@@ -622,6 +626,35 @@ func (a *app) hookRun(args []string, nowTime func() time.Time, afterPoll func(),
 		}
 		if e != nil {
 			return e
+		}
+		if first != nil {
+			// Keep the current barrier if the claim is still ahead of it.
+			// Look through later pages before deciding: absence from just this
+			// page says nothing about opaque cursor order. If the claim is
+			// behind it, rewind to the claim's exact predecessor instead.
+			probe, probeAfter := body, after
+			for !slices.ContainsFunc(probe.Events, func(ev envelope.Event) bool {
+				return ev.Type == "delivery" && eventFieldsOf(ev).deliveryID == first.ID
+			}) {
+				if len(probe.Events) == 0 || probe.NextCursor == "" || probe.NextCursor == probeAfter {
+					if after == first.After {
+						return errors.New("vecnet: hook: pending claim not found after its predecessor")
+					}
+					after = first.After
+					s.AckAfter = after
+					body, e = poll(after)
+					if e != nil {
+						return e
+					}
+					probe, probeAfter = body, after
+					continue
+				}
+				probeAfter = probe.NextCursor
+				probe, e = poll(probeAfter)
+				if e != nil {
+					return e
+				}
+			}
 		}
 		items := []hookItem{}
 		lowerBound := len(body.Events) == hookPageLimit

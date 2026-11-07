@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -109,6 +110,8 @@ func newDisplayFixture(t *testing.T) *displayFixture {
 			http.NotFound(w, r)
 		}
 	})
+	f.env["CODEX_HOME"] = filepath.Join(f.env["HOME"], ".codex")
+	f.env["XDG_DATA_HOME"] = filepath.Join(f.env["HOME"], ".local", "share")
 	// Resolve the fake URL from the temporary configuration only.
 	a := &app{ctx: t.Context(), getenv: func(k string) string { return f.env[k] }}
 	c, _, _, err := a.connect()
@@ -709,5 +712,234 @@ func TestHookPendingClaimsKeepEarliestAckBarrier(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// An ordinary first-run summary can jump past A before an app-server with
+// an older independent cursor claims it. Neither the summary nor that claim
+// proves individual display, including when the claim comes from replay.
+func TestHookClaimCreatedAfterFirstRunKeepsAckBarrier(t *testing.T) {
+	for _, scenario := range []string{"later-events", "next-page", "empty-page", "replay"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newDisplayFixture(t)
+			failed := &failedDisplay{tried: make(chan struct{})}
+			stream, stop := f.watch(t, failed, true)
+			if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error { s.PollCursor = ""; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			ev := f.delivery()
+			if scenario == "replay" {
+				got, errs := runHook(t, f.env, "--event", "app-server", "--claim", "defer_idle", "--priorities", "wake", "--expect-hub", f.hub, "--expect-caller", "peer_test")
+				s := readHookState(t, f.path)
+				if len(s.Replay) != 1 || s.Replay[0].ID != "dly_1" || len(s.Claims) != 0 {
+					t.Fatalf("did not defer A to replay: state=%+v output=%s stderr=%s", s, got, errs)
+				}
+			}
+			got, errs := runHook(t, f.env, "--event", "user-prompt", "--auto-ack")
+			s := readHookState(t, f.path)
+			if !strings.Contains(got, "1 unacked deliveries waiting") || strings.Contains(got, "live delivery") || s.PollCursor != ev.Cursor || slices.Contains(s.Displayed, "dly_1") {
+				t.Fatalf("first hook did not summarize without individual display: output=%q stderr=%s state=%+v", got, errs, s)
+			}
+			select {
+			case cur := <-f.acks:
+				t.Fatalf("first-run summary acknowledged %s", cur)
+			default:
+			}
+			claimed, errs := runHook(t, f.env, "--event", "app-server", "--claim", "unsent", "--priorities", "wake_idle", "--expect-hub", f.hub, "--expect-caller", "peer_test")
+			s = readHookState(t, f.path)
+			if !strings.Contains(claimed, "dly_1") || len(s.Claims) != 1 || s.Claims[0].After != "e1.0" || s.Claims[0].Claim != "unsent" || s.PollCursor != ev.Cursor {
+				t.Fatalf("late claim failed: output=%s stderr=%s state=%+v", claimed, errs, s)
+			}
+			stream.frames <- []envelope.Event{ev}
+			select {
+			case <-stream.closed:
+			case <-time.After(5 * time.Second):
+				t.Fatal("failed monitor did not end")
+			}
+			if code := stop(); code == 0 {
+				t.Fatal("failed monitor unexpectedly succeeded")
+			}
+			select {
+			case cur := <-f.acks:
+				t.Fatalf("failed monitor acknowledged %s", cur)
+			default:
+			}
+			f.mu.Lock()
+			if scenario != "empty-page" {
+				f.evs = append(f.evs, envelope.Event{Cursor: "e1.2", Type: "receipt", Data: json.RawMessage(`{"state":"processed"}`)}, hookEvent(3, "later delivery"))
+			}
+			if scenario == "next-page" {
+				for i := 4; i <= hookPageLimit+1; i++ {
+					f.evs = append(f.evs, envelope.Event{Cursor: fmt.Sprintf("e1.%d", i), Type: "receipt", Data: json.RawMessage(`{"state":"processed"}`)})
+				}
+			}
+			last := f.evs[len(f.evs)-1].Cursor
+			f.mu.Unlock()
+			for attempt := 0; attempt < 2; attempt++ {
+				got, errs := runHook(t, f.env, "--event", "user-prompt", "--auto-ack")
+				if strings.Contains(got, "live delivery") || (attempt == 1 && got != "") {
+					t.Errorf("hook duplicated a reservation or later output: %q stderr=%s", got, errs)
+				}
+				if scenario != "empty-page" && attempt == 0 && !strings.Contains(got, "later delivery") {
+					t.Errorf("hook suppressed unrelated later output: %q stderr=%s", got, errs)
+				}
+				select {
+				case cur := <-f.acks:
+					t.Errorf("hook acknowledged %s across late unsent claim A", cur)
+				default:
+				}
+				s = readHookState(t, f.path)
+				if s.AckAfter != "e1.0" || slices.Contains(s.Displayed, "dly_1") || len(s.Claims) != 1 || s.Claims[0].Claim != "unsent" {
+					t.Errorf("lost durable predecessor, claimed display, or changed ownership: %+v", s)
+				}
+			}
+			good := new(bytes.Buffer)
+			if err := (stateFile{f.path}).displayFor(t.Context(), &hookIdentity{Hub: f.hub, Caller: "peer_test"}, "dly_1", false, func() error { _, err := io.WriteString(good, "live delivery"); return err }); err != nil {
+				t.Fatal(err)
+			}
+			if good.String() != "live delivery" {
+				t.Fatal("no verified replacement display")
+			}
+			for page := 0; page < 2; page++ {
+				if got, errs := runHook(t, f.env, "--event", "user-prompt", "--auto-ack"); got != "" {
+					t.Fatalf("hook repeated verified output: %s stderr=%s", got, errs)
+				}
+				cur := f.ack(t)
+				if cur == last {
+					s = readHookState(t, f.path)
+					if s.AckAfter != "" || len(s.Claims) != 1 || s.Claims[0].Claim != "unsent" {
+						t.Fatalf("resolved barrier retained or ownership changed: %+v", s)
+					}
+					break
+				}
+				if page == 1 || cur != fmt.Sprintf("e1.%d", hookPageLimit) {
+					t.Fatalf("resumed ack=%s want=%s within two pages", cur, last)
+				}
+			}
+		})
+	}
+}
+
+// Replay can introduce a claim on either side of an existing barrier. Merge
+// by stream order, keeping the older safe position even with opaque cursors.
+func TestHookLateReplayClaimReconcilesAckBarrier(t *testing.T) {
+	for _, lateEarlier := range []bool{false, true} {
+		t.Run(fmt.Sprintf("late-claim-earlier=%t", lateEarlier), func(t *testing.T) {
+			f := newDisplayFixture(t)
+			one := f.delivery()
+			one.Cursor = "opaque-z-first"
+			two := hookEvent(3, "second pending delivery")
+			two.Cursor = "opaque-b-second"
+			for i, ev := range []*envelope.Event{&one, &two} {
+				priority := "wake"
+				if (i == 0) == lateEarlier {
+					priority = "wake_idle"
+				}
+				var body map[string]any
+				if err := json.Unmarshal(ev.Data, &body); err != nil {
+					t.Fatal(err)
+				}
+				body["message"].(map[string]any)["priority"] = priority
+				ev.Data, _ = json.Marshal(body)
+			}
+			f.mu.Lock()
+			f.evs = []envelope.Event{one, {Cursor: "opaque-a-between", Type: "receipt", Data: json.RawMessage(`{"state":"processed"}`)}, two, hookEvent(4, "unrelated later delivery")}
+			f.mu.Unlock()
+			if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error { s.PollCursor = ""; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			// The first app-server claims just the wake item and retains the
+			// wake_idle item in replay, preserving its original log order.
+			runHook(t, f.env, "--event", "app-server", "--claim", "first", "--priorities", "wake", "--expect-hub", f.hub, "--expect-caller", "peer_test")
+			runHook(t, f.env, "--event", "user-prompt", "--auto-ack")
+			runHook(t, f.env, "--event", "app-server", "--claim", "late", "--priorities", "wake_idle", "--expect-hub", f.hub, "--expect-caller", "peer_test")
+			for attempt := 0; attempt < 2; attempt++ {
+				got, errs := runHook(t, f.env, "--event", "user-prompt", "--auto-ack")
+				if strings.Contains(got, "live delivery") || strings.Contains(got, "second pending delivery") || (attempt == 0 && !strings.Contains(got, "unrelated later delivery")) || (attempt == 1 && got != "") {
+					t.Errorf("incorrect hook output: %s stderr=%s", got, errs)
+				}
+				select {
+				case cur := <-f.acks:
+					t.Errorf("hook acknowledged %s across pending claim", cur)
+				default:
+				}
+				s := readHookState(t, f.path)
+				if s.AckAfter != "e1.0" || len(s.Claims) != 2 || len(s.Displayed) != 1 || s.Displayed[0] != "dly_4" {
+					t.Errorf("lost earlier barrier, claim ownership, or display identity: %+v", s)
+				}
+			}
+			for i, delivery := range []string{"dly_1", "dly_3"} {
+				if err := (stateFile{f.path}).displayFor(t.Context(), &hookIdentity{Hub: f.hub, Caller: "peer_test"}, delivery, false, func() error { _, err := io.WriteString(new(bytes.Buffer), delivery); return err }); err != nil {
+					t.Fatal(err)
+				}
+				runHook(t, f.env, "--event", "user-prompt", "--auto-ack")
+				want := "opaque-a-between"
+				if i == 1 {
+					want = "e1.4"
+				}
+				if cur := f.ack(t); cur != want {
+					t.Fatalf("resumed ack=%s want=%s", cur, want)
+				}
+				if s := readHookState(t, f.path); len(s.Claims) != 2 || (i == 1 && s.AckAfter != "") {
+					t.Fatalf("resumption changed ownership or retained resolved barrier: %+v", s)
+				}
+			}
+		})
+	}
+}
+
+func TestHookLateClaimBeyondPageRetainsEarlierAckBarrier(t *testing.T) {
+	f := newDisplayFixture(t)
+	f.delivery()
+	// An earlier legacy reservation is a barrier even without a Claims row.
+	if err := (stateFile{f.path}).update(t.Context(), func(s *hookState) error { s.claim("dly_1"); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	runHook(t, f.env, "--event", "user-prompt", "--auto-ack")
+	f.mu.Lock()
+	for i := 2; i <= hookPageLimit+1; i++ {
+		f.evs = append(f.evs, envelope.Event{Cursor: fmt.Sprintf("e1.%d", i), Type: "receipt", Data: json.RawMessage(`{"state":"processed"}`)})
+	}
+	late := hookEvent(hookPageLimit+2, "later pending delivery")
+	var body map[string]any
+	if err := json.Unmarshal(late.Data, &body); err != nil {
+		t.Fatal(err)
+	}
+	body["message"].(map[string]any)["priority"] = "wake_idle"
+	late.Data, _ = json.Marshal(body)
+	f.evs = append(f.evs, late, hookEvent(hookPageLimit+3, "unrelated delivery"))
+	f.mu.Unlock()
+	for page := 0; page < 2; page++ {
+		runHook(t, f.env, "--event", "app-server", "--claim", "late", "--priorities", "wake_idle", "--expect-hub", f.hub, "--expect-caller", "peer_test")
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if got, errs := runHook(t, f.env, "--event", "user-prompt", "--auto-ack"); got != "" {
+			t.Errorf("hook duplicated reservation or jumped a page: %s stderr=%s", got, errs)
+		}
+		select {
+		case cur := <-f.acks:
+			t.Errorf("later claim discarded earlier barrier: ack=%s", cur)
+		default:
+		}
+		if s := readHookState(t, f.path); s.AckAfter != "e1.0" || len(s.Claims) != 1 || s.Claims[0].ID != fmt.Sprintf("dly_%d", hookPageLimit+2) {
+			t.Fatalf("earlier barrier or later claim lost: %+v", s)
+		}
+	}
+	for _, delivery := range []string{"dly_1", fmt.Sprintf("dly_%d", hookPageLimit+2)} {
+		if err := (stateFile{f.path}).displayFor(t.Context(), &hookIdentity{Hub: f.hub, Caller: "peer_test"}, delivery, false, func() error { _, err := io.WriteString(new(bytes.Buffer), delivery); return err }); err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range map[string][]string{
+			"dly_1":                                {fmt.Sprintf("e1.%d", hookPageLimit), fmt.Sprintf("e1.%d", hookPageLimit+1)},
+			fmt.Sprintf("dly_%d", hookPageLimit+2): {fmt.Sprintf("e1.%d", hookPageLimit+3)},
+		}[delivery] {
+			runHook(t, f.env, "--event", "user-prompt", "--auto-ack")
+			if cur := f.ack(t); cur != want {
+				t.Fatalf("resumed ack=%s want=%s", cur, want)
+			}
+		}
+	}
+	if s := readHookState(t, f.path); s.AckAfter != "" || len(s.Claims) != 1 {
+		t.Fatalf("resolved barrier retained or ownership lost: %+v", s)
 	}
 }
