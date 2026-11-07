@@ -1,7 +1,7 @@
 // Opt-in controller-only xsm acceptance harness. No activation from worker runs.
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { constants, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { constants, closeSync, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -110,7 +110,7 @@ function readPrivate(p, limit = 262144) {
 }
 function atomic(p, bytes, mode = 0o600, temp = p + '.' + randomBytes(12).toString('hex') + '.tmp') {
   const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
-  try { writeFileSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
+  try { writeFileSync(fd, bytes); fchmodSync(fd, mode); fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(temp, p); const dir = openSync(dirname(p), constants.O_RDONLY | constants.O_DIRECTORY); try { fsyncSync(dir); } finally { closeSync(dir); }
 }
 export function treeHash(root) {

@@ -202,6 +202,7 @@ test('real fake-manager process installs exact contract and restores prior bytes
   mkdirSync(join(f.m.approval.home, '.config/systemd/user'), { recursive: true, mode: 0o700 });
   mkdirSync(p.share, { recursive: true, mode: 0o700 });
   writeFileSync(p.template, 'prior template\n', { mode: 0o640 });
+  chmodSync(p.template, 0o640); // Establish the original restoration precondition under private umask 077.
   writeFileSync(p.installation, '{"prior":true}\n', { mode: 0o600 });
   symlinkSync('/prior/release', p.current);
   const h = f.harness();
@@ -253,6 +254,15 @@ test('cleanup and rollback preserve existing lock inodes and disclose remaining 
   await f.harness().cleanup(); const result = await f.harness().rollback();
   assert.equal(lstatSync(lock).ino, ino); assert.equal(result.code, 'rollback_residuals');
 });
+function retainUntilFiniteStop(f, started) {
+  f.beforeRemove.push(async () => {
+    if (!existsSync(started)) return;
+    const own = JSON.parse(readFileSync(started)), deadline = Date.now() + 3000;
+    const stopped = () => { try { const raw = readFileSync(`/proc/${own.pid}/stat`, 'utf8'), fields = raw.slice(raw.lastIndexOf(')') + 2).split(' '); return fields[19] !== own.birth || ['Z', 'X'].includes(fields[0]); } catch (e) { if (e.code === 'ENOENT') return true; throw e; } };
+    while (!stopped() && Date.now() < deadline) await new Promise(r => setTimeout(r, 10));
+    assert.ok(stopped(), 'actual finite fixture PID/birth must retire before private root removal');
+  });
+}
 async function flowRehearsal(t, options = {}) {
   const f = rehearsal(t), flow = join(f.m.runRoot, 'flow.json'), plan = planHarness(f.m);
   f.beforeRemove.push(async () => {
@@ -262,6 +272,9 @@ async function flowRehearsal(t, options = {}) {
     const deadline = Date.now() + 1000; while (same() && Date.now() < deadline) await new Promise(r => setTimeout(r, 10));
     if (same()) { process.kill(server.pid, 'SIGKILL'); while (same() && Date.now() < deadline + 1000) await new Promise(r => setTimeout(r, 10)); }
     assert.equal(same(), false, 'owned fixture server completely stopped');
+    const paneStopped = () => { try { const raw = readFileSync(`/proc/${server.pane}/stat`, 'utf8'), fields = raw.slice(raw.lastIndexOf(')') + 2).split(' '); return fields[19] !== server.paneBirth || ['Z', 'X'].includes(fields[0]); } catch (e) { if (e.code === 'ENOENT') return true; throw e; } };
+    const paneDeadline = Date.now() + 3000; while (!paneStopped() && Date.now() < paneDeadline) await new Promise(r => setTimeout(r, 10));
+    assert.ok(paneStopped(), 'owned fixture pane PID/birth also stopped before private root removal');
   });
   writeFileSync(flow, JSON.stringify({ peers: f.m.peers, sessions: {}, turns: {}, counter: 0, corruption: options.corruption ?? '' }), { mode: 0o600 });
   const prologue = `#!${process.execPath}
@@ -275,10 +288,10 @@ const s=read(),session=args[args.indexOf('-t')+1],part=()=>s.sessions[session];
 if(args.includes('new-session')){if(!s.server){const socket=args[args.indexOf('-S')+1],program="const net=require('node:net'),fs=require('node:fs'),cp=require('node:child_process');const pane=cp.spawn(process.execPath,['-e','setTimeout(()=>process.exit(0),90000)'],{stdio:'ignore'});fs.writeFileSync(process.argv[1]+'.pane',String(pane.pid));const server=net.createServer();server.listen(process.argv[1]);process.on('SIGTERM',()=>{pane.once('exit',()=>process.exit(0));pane.kill('SIGTERM');server.close();});";
 const server=cp.spawn(process.execPath,['-e',program,socket],{detached:true,stdio:'ignore'});server.unref();const deadline=Date.now()+2000;
 while(!fs.existsSync(socket)&&Date.now()<deadline)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);if(!fs.existsSync(socket))process.exit(91);
-const stat=fs.readFileSync('/proc/'+server.pid+'/stat','utf8');s.server={pid:server.pid,pane:Number(fs.readFileSync(socket+'.pane','utf8')),birth:stat.slice(stat.lastIndexOf(')')+2).split(' ')[19]};}
+const stat=fs.readFileSync('/proc/'+server.pid+'/stat','utf8'),pane=Number(fs.readFileSync(socket+'.pane','utf8')),paneStat=fs.readFileSync('/proc/'+pane+'/stat','utf8');s.server={pid:server.pid,pane,paneBirth:paneStat.slice(paneStat.lastIndexOf(')')+2).split(' ')[19],birth:stat.slice(stat.lastIndexOf(')')+2).split(' ')[19]};}
 if(s.corruption==='extra-handoff'){
  const marker=path.join(path.dirname(file),'handoff-extra');
- const program="const fs=require('node:fs');fs.writeFileSync(process.argv[1]+'.started','started');setTimeout(()=>{fs.writeFileSync(process.argv[1]+'.ended','ended');process.exit(0)},1800)";
+ const program="const fs=require('node:fs'),raw=fs.readFileSync('/proc/self/stat','utf8');fs.writeFileSync(process.argv[1]+'.started',JSON.stringify({pid:process.pid,birth:raw.slice(raw.lastIndexOf(')')+2).split(' ')[19]}));setTimeout(()=>{fs.writeFileSync(process.argv[1]+'.ended','ended');process.exit(0)},1800)";
  cp.spawn(process.execPath,['-e',program,marker],{detached:true,stdio:'ignore'}).unref();
  const deadline=Date.now()+1000;while(!fs.existsSync(marker+'.started')&&Date.now()<deadline)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);
 }
@@ -433,7 +446,8 @@ test('R52 FM3 private profile 64 accepted 65 and 80 rejected before effects', t 
 for (const inherited of [false, true]) test(`R53 FI5 setsid ${inherited ? 'inherited' : 'ignored'} writer retains refusal across every active mode`, async t => {
   const f = rehearsal(t); await f.harness().install();
   const ready = join(f.root, 'setsid-started'), ended = join(f.root, 'setsid-ended'), late = join(f.root, 'setsid-late');
-  const writer = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(ready)},'started');setTimeout(()=>fs.writeFileSync(${JSON.stringify(late)},'late'),700);setTimeout(()=>{fs.writeFileSync(${JSON.stringify(ended)},'ended');process.exit(0)},1000)`;
+  retainUntilFiniteStop(f, ready);
+  const writer = `const fs=require('node:fs'),raw=fs.readFileSync('/proc/self/stat','utf8');fs.writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:process.pid,birth:raw.slice(raw.lastIndexOf(')')+2).split(' ')[19]}));setTimeout(()=>fs.writeFileSync(${JSON.stringify(late)},'late'),700);setTimeout(()=>{fs.writeFileSync(${JSON.stringify(ended)},'ended');process.exit(0)},1000)`;
   const leader = `const cp=require('node:child_process'),fs=require('node:fs');cp.spawn(process.execPath,['-e',${JSON.stringify(writer)}],{detached:true,stdio:${JSON.stringify(inherited ? ['ignore', 'inherit', 'inherit'] : 'ignore')}}).unref();const poll=setInterval(()=>{if(fs.existsSync(${JSON.stringify(ready)})){clearInterval(poll);process.exit(0)}},5);setTimeout(()=>process.exit(9),1500).unref();`;
   const run = f.ports.run; let introduced = false, laterCalls = 0;
   f.ports.run = async (command, args, options) => {
@@ -496,6 +510,7 @@ test('R53 actual supervisor death retains intent and finite writer retirement', 
 
 test('R53 tmux handoff refuses unmatched ancestry without killing the proved private server', async t => {
   const f = await flowRehearsal(t, { corruption: 'extra-handoff' });
+  retainUntilFiniteStop(f, join(f.m.runRoot, 'handoff-extra.started'));
   await f.harness().install(); const began = Date.now();
   await assert.rejects(f.harness().run(), { code: 'child_drain_unproved' });
   const server = JSON.parse(readFileSync(join(f.m.runRoot, 'flow.json'))).server;
@@ -569,7 +584,7 @@ try{const value=await createHarness(m,ports)[process.argv[2]]();process.stdout.w
 for (const mode of ['publication', 'restore']) for (const kind of ['new-binary', 'prior-template']) for (const edge of ['before', 'after']) {
   test(`fix1 I3 ${edge} ${mode} of ${kind} reconciles interruption and rolls back`, async t => {
     const f = rehearsal(t), paths = planHarness(f.m).paths;
-    if (kind === 'prior-template') { mkdirSync(dirname(paths.template), { recursive: true, mode: 0o700 }); writeFileSync(paths.template, 'prior template\n', { mode: 0o640 }); }
+    if (kind === 'prior-template') { mkdirSync(dirname(paths.template), { recursive: true, mode: 0o700 }); writeFileSync(paths.template, 'prior template\n', { mode: 0o640 }); chmodSync(paths.template, 0o640); }
     const invoke = fixtureDriver(f), target = kind === 'new-binary' ? f.m.generations.a.binary : paths.template;
     if (mode === 'restore') { assert.equal((await invoke('install').done).code, 0); assert.equal((await invoke('cleanup').done).code, 0); }
     const interrupted = await invoke(mode === 'publication' ? 'install' : 'rollback', 'crash', { FIXTURE_CRASH_TARGET: target, FIXTURE_CRASH_EDGE: edge }).done;
