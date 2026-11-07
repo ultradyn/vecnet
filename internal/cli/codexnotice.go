@@ -1,13 +1,32 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// Only known bounded memory writers and independently nonblocking OS sinks
+// qualify. An arbitrary io.Writer or regular filesystem can block forever.
+var codexNoticeWriteFD = func(*os.File, string) {}
+
+func writeCodexNotice(w io.Writer, message string) {
+	if len(message) > 4096 {
+		return
+	}
+	switch sink := w.(type) {
+	case *bytes.Buffer:
+		_, _ = sink.WriteString(message)
+	case *os.File:
+		codexNoticeWriteFD(sink, message)
+	}
+}
 
 // Reasons contain no upstream error text. Wrapping preserves the existing
 // fallback error and control flow at the narrow refusal sites.
@@ -135,7 +154,18 @@ func (a *app) codexNoticeMessage(hub string, now time.Time) string {
 	if err != nil || !announced {
 		return ""
 	}
-	return fmt.Sprintf("vecnet: Codex auto-delivery inactive for %s: %s; run `vecnet codex status`\n", codexNoticeHubDisplay(s.Hub), string(s.Reason))
+	guidance := "select --net and --as explicitly before running `vecnet codex status`"
+	name := a.namedProfile()
+	profile, profileOK := shellQuote(name)
+	as, asOK := shellQuote(a.as)
+	if name != "" && profileOK && asOK && len(profile)+len(as) <= 192 {
+		command := "vecnet --net " + profile
+		if a.as != "" {
+			command += " --as " + as
+		}
+		guidance = "run `" + command + " codex status`"
+	}
+	return fmt.Sprintf("vecnet: Codex auto-delivery inactive for %s: %s; %s\n", codexNoticeHubDisplay(s.Hub), string(s.Reason), guidance)
 }
 
 // Presentation is escaped and bounded independently of the full hub identity

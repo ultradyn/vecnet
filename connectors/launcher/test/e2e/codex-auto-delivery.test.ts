@@ -348,7 +348,7 @@ async function fixture(t: TestContext, options: { hubs?: number; cap?: number } 
   const barrier = (point: string) => until(() => trace().find(x => x.kind === 'barrier' && x.point === point), point);
   const resume = (point: string) => privateFile(join(root, 'resume-' + point), '1');
   const inspect = <T>(path: string, fn: (db: DatabaseSync) => T): T => {
-    const db = new DatabaseSync(path, { readOnly: true }); try { return fn(db); } finally { db.close(); }
+    const db = new DatabaseSync(path, { readOnly: true }); try { db.exec('PRAGMA busy_timeout=1000'); return fn(db); } finally { db.close(); }
   };
   const rows = (hub: RealHub = hubs[0]): Map<string, string> => {
     const path = paths(hub).ledger; if (!existsSync(path)) return new Map();

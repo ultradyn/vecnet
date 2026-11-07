@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -50,7 +49,7 @@ func (a *app) autoCodexAction(cmd string, args []string) {
 	select {
 	case <-done:
 		if notice != "" {
-			fmt.Fprint(a.stderr, notice)
+			writeCodexNotice(a.stderr, notice)
 		}
 	case <-ctx.Done():
 	}

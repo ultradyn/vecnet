@@ -23,6 +23,66 @@ import (
 
 const noticeHub = "https://hub.invalid"
 
+func TestCodexNoticeSelectedStatusGuidance(t *testing.T) {
+	for _, ambient := range []string{"", "q"} {
+		for _, profile := range []string{"p", "p 'quoted' $HOME; `false`"} {
+			t.Run(ambient+profile, func(t *testing.T) {
+				f := newDeliveryFixture(t)
+				noticeConfig(t, f)
+				f.env["VECNET_PROFILE"] = ambient
+				f.app.net, f.app.as = profile, "peer_selected"
+				if err := saveConfig(f.config, Config{Profiles: map[string]Profile{
+					profile: {Hub: noticeHub, Secret: "vn_fixture"}, "q": {Hub: "https://other.invalid", Secret: "vn_other"},
+				}}); err != nil {
+					t.Fatal(err)
+				}
+				path, _ := codexBindingsPath(f.app.getenv)
+				raw, _ := json.Marshal(codexBindingsFile{Version: 1, Disabled: []codexDisabled{{Profile: profile, As: ""}}})
+				deliveryWrite(t, path, string(raw), 0600)
+				noticeSeed(t, f, noticeHub, "node_missing")
+				message := f.app.codexNoticeMessage(noticeHub, time.Now())
+				_, command, found := strings.Cut(message, "; run `")
+				command = strings.TrimSuffix(command, "`\n")
+				if !found {
+					t.Fatalf("no executable guidance: %q", message)
+				}
+				cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", "vecnet() { printf '%s\\000' \"$@\"; }; "+command)
+				cmd.Env = []string{"HOME=" + f.dir, "PATH=/nonexistent"}
+				decoded, err := cmd.Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				argv := strings.Split(strings.TrimSuffix(string(decoded), "\x00"), "\x00")
+				check := func(disabled bool) {
+					var out, errs bytes.Buffer
+					code := Run(argv, strings.NewReader(""), &out, &errs, f.app.getenv)
+					if code != 0 || !strings.Contains(out.String(), noticeHub) || strings.Contains(out.String(), "other.invalid") || strings.Contains(out.String(), "disabled by explicit opt-out") != disabled {
+						t.Errorf("guidance lost selected profile/as: exit=%d output=%q errors=%q", code, out.String(), errs.String())
+					}
+				}
+				check(false)
+				raw, _ = json.Marshal(codexBindingsFile{Version: 1, Disabled: []codexDisabled{{Profile: profile, As: ""}, {Profile: profile, As: "peer_selected"}}})
+				deliveryWrite(t, path, string(raw), 0600)
+				check(true)
+				if message := f.app.codexNoticeMessage(noticeHub, time.Now()); message != "" {
+					t.Fatal("guidance defeated debounce")
+				}
+			})
+		}
+	}
+}
+
+func TestCodexNoticeUnquotableGuidance(t *testing.T) {
+	f := newDeliveryFixture(t)
+	noticeConfig(t, f)
+	f.app.net = "p\ncontrol"
+	noticeSeed(t, f, noticeHub, "node_missing")
+	message := f.app.codexNoticeMessage(noticeHub, time.Now())
+	if !strings.Contains(message, "select") || strings.Contains(message, "; run `vecnet codex status`") || strings.Contains(message, "p\ncontrol") {
+		t.Fatalf("untruthful/unescaped guidance: %q", message)
+	}
+}
+
 func TestCodexStatusEscapedHub(t *testing.T) {
 	for _, path := range []string{"/base%0Aextra", "/base%0Dextra", "/%1B%5B31mextra", "/ordinary%20path", "/" + strings.Repeat("long", 200)} {
 		t.Run(path[:min(len(path), 32)], func(t *testing.T) {
@@ -475,7 +535,7 @@ func noticeForeground(t *testing.T) (*deliveryFixture, *os.File) {
 func TestCodexNoticeDebounced(t *testing.T) {
 	f, tty := noticeForeground(t)
 	first := noticeAction(f, tty)
-	if first != "vecnet: Codex auto-delivery inactive for https://hub.invalid: node_missing; run `vecnet codex status`\n" {
+	if first != "vecnet: Codex auto-delivery inactive for https://hub.invalid: node_missing; run `vecnet --net 'p' codex status`\n" {
 		t.Fatalf("foreground notice=%q", first)
 	}
 	if again := noticeAction(f, tty); again != "" {
@@ -602,7 +662,7 @@ func TestCodexNoticePreservesCommandOutput(t *testing.T) {
 			}
 			delete(f.env, "VECNET_CODEX_AUTO_DELIVERY")
 			code, out, errs := noticeTerminalRun(t, f, args...)
-			line := "vecnet: Codex auto-delivery inactive for " + f.hub + ": node_missing; run `vecnet codex status`\n"
+			line := "vecnet: Codex auto-delivery inactive for " + f.hub + ": node_missing; run `vecnet --net 'p' codex status`\n"
 			if code != wantCode || out != wantOut || errs != line+wantErr {
 				t.Fatalf("command result exit=%d/%d out=%q/%q err=%q want=%q", code, wantCode, out, wantOut, errs, line+wantErr)
 			}

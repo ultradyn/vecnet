@@ -29,16 +29,17 @@ type displayStream struct {
 }
 
 type displayFixture struct {
-	env          map[string]string
-	path         string
-	hub          string
-	mu           sync.Mutex
-	evs          []envelope.Event
-	polls        []string
-	acks         chan string
-	open         chan displayStream
-	unverified   atomic.Bool
-	identityJSON atomic.Pointer[string] // nil keeps the fixture's verified peer
+	env            map[string]string
+	path           string
+	hub            string
+	mu             sync.Mutex
+	evs            []envelope.Event
+	polls          []string
+	acks           chan string
+	open           chan displayStream
+	unverified     atomic.Bool
+	identityJSON   atomic.Pointer[string] // nil keeps the fixture's verified peer
+	expectedBearer atomic.Pointer[string]
 }
 
 func newDisplayFixture(t *testing.T) *displayFixture {
@@ -47,6 +48,10 @@ func newDisplayFixture(t *testing.T) *displayFixture {
 	f.env, f.path = hookFixtureRaw(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/peers/me":
+			if bearer := f.expectedBearer.Load(); bearer != nil && r.Header.Get("Authorization") != "Bearer "+*bearer {
+				http.Error(w, "rotated credential", http.StatusUnauthorized)
+				return
+			}
 			if f.unverified.Load() {
 				http.Error(w, "identity unavailable", http.StatusServiceUnavailable)
 				return
@@ -147,12 +152,15 @@ func (f *displayFixture) delivery() envelope.Event {
 	return ev
 }
 
-func (f *displayFixture) watch(t *testing.T, output io.Writer, autoAck bool) (displayStream, func() int) {
+func (f *displayFixture) watch(t *testing.T, output io.Writer, autoAck bool, selectedAs ...string) (displayStream, func() int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	errs := new(hookWatchOutput)
 	done := make(chan int, 1)
 	args := []string{"watch", "--for-monitor", "--since", "e1.0"}
+	if len(selectedAs) != 0 && selectedAs[0] != "" {
+		args = append([]string{"--as", selectedAs[0]}, args...)
+	}
 	if autoAck {
 		args = append(args, "--auto-ack")
 	}
@@ -1598,6 +1606,84 @@ func TestWatchDeferredReleaseOutputFailure(t *testing.T) {
 // observation seams; no identity/display helper return is mocked.
 func setDisplayIdentity(f *displayFixture, raw string) {
 	f.identityJSON.Store(&raw)
+}
+
+func TestWatchMonitorCredentialRotation(t *testing.T) {
+	for _, as := range []string{"", "peer_selected"} {
+		t.Run("as="+as, func(t *testing.T) { testWatchMonitorCredentialRotation(t, as) })
+	}
+}
+
+func testWatchMonitorCredentialRotation(t *testing.T, as string) {
+	f := newDisplayFixture(t)
+	if as != "" {
+		setDisplayIdentity(f, `{"kind":"principal","principal_id":"principal_fixture"}`)
+		var err error
+		f.path, err = statePath(func(k string) string { return f.env[k] }, "p", as)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldSecret := "vn_peer_test"
+	f.expectedBearer.Store(&oldSecret)
+	_, stop := f.watch(t, new(hookWatchOutput), false, as)
+	stop() // positively authenticate the original token before actual rotation
+	file := stateFile{f.path}
+	if err := file.update(t.Context(), func(s *hookState) error {
+		s.Claims = []claimRef{{ID: "dly_pending", After: "opaque-predecessor", Priority: "wake_idle", Claim: "held", Order: 3}}
+		s.Replay = []replayRef{{ID: "dly_replay", After: "opaque-replay", Priority: "wake_idle", Order: 2}}
+		s.Displayed, s.Shown = []string{"dly_1"}, []string{"dly_1", "dly_pending"}
+		s.AckAfter, s.PollCursor, s.AppCursor = "opaque-fence", "opaque-poll", "e1.0"
+		s.LastPostToolPoll = time.Now().UTC()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := readHookState(t, f.path)
+	session, _ := json.Marshal(hookBinding{Session: "fixture-retained", SessionHow: bindDeclared, SessionAt: before.LastPostToolPoll, RebindUntil: before.LastPostToolPoll.Add(time.Minute), Noticed: []string{"fixture-foreign"}})
+	if err := os.WriteFile(bindingPath(f.path), session, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(f.env["VECNET_CONFIG"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.Profiles["p"]
+	p.Secret = "vn_peer_rotated"
+	cfg.Profiles["p"] = p
+	if err := saveConfig(f.env["VECNET_CONFIG"], cfg); err != nil {
+		t.Fatal(err)
+	}
+	f.expectedBearer.Store(&p.Secret) // A now fails actual /peers/me; B identifies the same caller.
+	out := new(hookWatchOutput)
+	stream, stopRotated := f.watch(t, out, false, as)
+	refreshed := readHookState(t, f.path)
+	want := before
+	want.Cred = hookCredential(p.Secret)
+	wantRaw, _ := json.Marshal(want)
+	gotRaw, _ := json.Marshal(refreshed)
+	if !bytes.Equal(wantRaw, gotRaw) {
+		t.Errorf("authenticated rotation did not change only credential provenance: before=%s after=%s", wantRaw, gotRaw)
+	}
+	// One already-proved and one fresh event, supplied once on this stream.
+	// No other consumer, state repair or later event can release deferral.
+	ev := f.delivery()
+	stream.frames <- []envelope.Event{ev, deferredEvent(2, "credential payload", "opaque-rotation")}
+	deadline := time.Now().Add(2500 * time.Millisecond)
+	for !strings.Contains(out.String(), "credential payload") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	stopRotated()
+	if strings.Count(out.String(), "credential payload") != 1 || strings.Contains(out.String(), "live delivery") {
+		t.Errorf("rotation failed receipt suppression/resume: %q", out.String())
+	}
+	after := readHookState(t, f.path)
+	if len(after.Claims) != 1 || after.Claims[0] != before.Claims[0] || after.AckAfter != before.AckAfter || !slices.Contains(after.Displayed, "dly_1") {
+		t.Fatal("rotation discarded unresolved ownership or retained display proof")
+	}
+	if raw, err := os.ReadFile(bindingPath(f.path)); err != nil || !bytes.Equal(raw, session) {
+		t.Fatal("rotation changed session sidecar")
+	}
 }
 
 func TestWatchR34KnownOperatorDisplaysAndDedupes(t *testing.T) {

@@ -117,6 +117,7 @@ func (s *hookState) recordDisplay(deliveryID string) {
 // errDisplayDeferred means neither output nor acknowledgement is authorized.
 // Ownership and positive proof must be checked again under the shared lock.
 var errDisplayDeferred = errors.New("monitor display deferred")
+var hookCredentialPattern = regexp.MustCompile(`^[a-f0-9]{16}$`)
 
 // This monitor-only subject is outside hookID's peer/principal grammar.
 const monitorOperatorCaller = "role:operator"
@@ -150,6 +151,18 @@ func (f stateFile) prepareDisplay(ctx context.Context, id *hookIdentity, fresh b
 	return f.update(ctx, func(s *hookState) error {
 		if err := f.displayState(s, id, fresh); err == nil {
 			return nil
+		}
+		// Preparation follows positive /peers/me authentication. A rotated
+		// bearer for the exact same bound identity may refresh provenance,
+		// never reset delivery ownership/proof, cursors or session fields.
+		if id != nil && id.Caller != "" && s.Caller == id.Caller && s.Hub == id.Hub && s.As == id.As &&
+			hookCredentialPattern.MatchString(s.Cred) {
+			prior := *id
+			prior.Cred = s.Cred
+			if err := f.displayState(s, &prior, false); err == nil {
+				s.Cred = id.Cred
+				return nil
+			}
 		}
 		// The existing follow path has verified the destination before this
 		// preparation. Carry only its exact previous authenticated scope, keeping

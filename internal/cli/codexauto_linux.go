@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,41 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+func init() {
+	codexNoticeWriteFD = func(file *os.File, message string) {
+		conn, err := file.SyscallConn()
+		if err != nil {
+			return
+		}
+		_ = conn.Control(func(original uintptr) {
+			var before, reopened unix.Stat_t
+			if unix.Fstat(int(original), &before) != nil {
+				return
+			}
+			kind := before.Mode & unix.S_IFMT
+			if kind != unix.S_IFIFO {
+				if kind != unix.S_IFCHR {
+					return
+				}
+				if _, err := unix.IoctlGetTermios(int(original), unix.TCGETS); err != nil {
+					return
+				}
+			}
+			// Reopening creates a separate open-file description. F_SETFL on
+			// a dup would alter the invoking parent's shared descriptor flags.
+			fd, err := unix.Open(fmt.Sprintf("/proc/self/fd/%d", original), unix.O_WRONLY|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
+			if err != nil {
+				return
+			}
+			defer unix.Close(fd)
+			if unix.Fstat(fd, &reopened) != nil || before.Dev != reopened.Dev || before.Ino != reopened.Ino || before.Rdev != reopened.Rdev || before.Mode != reopened.Mode {
+				return
+			}
+			_, _ = unix.Write(fd, []byte(message)) // one best-effort write, including EAGAIN/partial output
+		})
+	}
+}
 
 func (a *app) startCodexAuto(thread string) {
 	name, p, home, config, err := a.codexAutoInput(thread, "")

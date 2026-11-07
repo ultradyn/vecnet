@@ -646,7 +646,7 @@ func TestCodexNoticeMarkerDeadline(t *testing.T) {
 		}
 		retry := noticeProcessRun(t, f, true, "", "cli", noticeProcessInvalidPeers...)
 		repeat := noticeProcessRun(t, f, true, "", "cli", noticeProcessInvalidPeers...)
-		line := "vecnet: Codex auto-delivery inactive for " + noticeHub + ": node_missing; run `vecnet codex status`\n"
+		line := "vecnet: Codex auto-delivery inactive for " + noticeHub + ": node_missing; run `vecnet --net 'p' codex status`\n"
 		if retry.code != baseline.code || retry.out != baseline.out || retry.err != line+baseline.err || repeat.code != baseline.code || repeat.out != baseline.out || repeat.err != baseline.err {
 			t.Fatal("deadline/retry/repeat did not preserve stdout/exit and display exactly once")
 		}
@@ -836,7 +836,7 @@ func TestCodexNoticeForegroundPipes(t *testing.T) {
 			}
 			wantErr := baseline.err
 			if mode == "interactive" {
-				wantErr = "vecnet: Codex auto-delivery inactive for " + normalizeHub(bf.hub) + ": node_missing; run `vecnet codex status`\n" + wantErr
+				wantErr = "vecnet: Codex auto-delivery inactive for " + normalizeHub(bf.hub) + ": node_missing; run `vecnet --net 'p' codex status`\n" + wantErr
 			}
 			if got.err != wantErr || (mode == "hook" && (got.out != "" || got.err != "")) {
 				t.Fatalf("unexpected notice/hook output: %+v", got)
@@ -850,6 +850,155 @@ func TestCodexNoticeForegroundPipes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCodexNoticeFullStderrPipe(t *testing.T) {
+	bf := autoFixture(t)
+	f := &deliveryFixture{t: t, dir: bf.env["HOME"], env: bf.env}
+	// No detached helper is needed: relative binary refusal still prepares the
+	// persisted foreground notice. The only live child is the actual CLI.
+	f.env["VECNET_BIN"] = "relative"
+	f.env["VECNET_CODEX_AUTO_DELIVERY"] = "0"
+	baseline := noticeProcessRun(t, f, true, "", "cli", "peers")
+	delete(f.env, "VECNET_CODEX_AUTO_DELIVERY")
+	noticeSeed(t, f, bf.hub, "node_missing")
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer errR.Close()
+	defer errW.Close()
+	fd := int(errW.Fd())
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.SetNonblock(fd, true); err != nil {
+		t.Fatal(err)
+	}
+	filled := 0
+	for {
+		n, err := unix.Write(fd, bytes.Repeat([]byte("P"), 4096))
+		if n > 0 {
+			filled += n
+		}
+		if errors.Is(err, unix.EAGAIN) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if filled < 4096 {
+		t.Fatal("OS pipe was not filled")
+	}
+	if err := unix.SetNonblock(fd, false); err != nil {
+		t.Fatal(err)
+	}
+	master, slave := noticePTY(t)
+	term, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TCGETS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	term.Oflag &^= unix.OPOST
+	if err := unix.IoctlSetTermios(int(slave.Fd()), unix.TCSETS, term); err != nil {
+		t.Fatal(err)
+	}
+	c := noticeProcessCommand(t, f, "cli", "peers")
+	c.Stdin, c.Stdout, c.Stderr = slave, slave, errW
+	started := time.Now()
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = slave.Close()
+	output := make(chan []byte, 1)
+	go func() { raw, _ := io.ReadAll(master); output <- raw }()
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	var waitErr error
+	select {
+	case waitErr = <-done:
+	case <-time.After(600 * time.Millisecond):
+		t.Error("actual full stderr pipe blocked ordinary foreground dispatch")
+		_ = c.Process.Kill()
+		waitErr = <-done
+	}
+	elapsed := time.Since(started)
+	if elapsed-baseline.elapsed > 200*time.Millisecond {
+		t.Errorf("notice added %s", elapsed-baseline.elapsed)
+	}
+	if waitErr != nil || baseline.code != 0 {
+		t.Errorf("ordinary exit changed: %v baseline=%d", waitErr, baseline.code)
+	}
+	after, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+	if err != nil || after != flags {
+		t.Errorf("parent shared flags changed: %d -> %d (%v)", flags, after, err)
+	}
+	_ = errW.Close()
+	// Drain only AFTER the foreground deadline, then require actual EOF. A
+	// still-blocked inherited writer must not be hidden by cmd.WaitDelay.
+	drained := make(chan []byte, 1)
+	go func() { raw, _ := io.ReadAll(errR); drained <- raw }()
+	select {
+	case raw := <-drained:
+		if len(raw) != filled || bytes.Count(raw, []byte("P")) != filled {
+			t.Error("full-pipe notice corrupted parent bytes")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stderr did not reach actual EOF")
+	}
+	select {
+	case out := <-output:
+		if string(out) != baseline.out {
+			t.Errorf("ordinary stdout changed: %q vs %q", out, baseline.out)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PTY did not reach actual EOF")
+	}
+}
+
+func TestCodexNoticeTerminalSink(t *testing.T) {
+	bf := autoFixture(t)
+	f := &deliveryFixture{t: t, dir: bf.env["HOME"], env: bf.env}
+	f.env["VECNET_BIN"] = "relative"
+	noticeSeed(t, f, bf.hub, "node_missing")
+	master, slave := noticePTY(t)
+	flags, err := unix.FcntlInt(slave.Fd(), unix.F_GETFL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := noticeProcessCommand(t, f, "cli", "peers")
+	c.Stdin, c.Stdout, c.Stderr = slave, slave, slave
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("terminal command failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		_ = c.Process.Kill()
+		<-done
+		t.Fatal("terminal sink blocked foreground")
+	}
+	after, err := unix.FcntlInt(slave.Fd(), unix.F_GETFL, 0)
+	if err != nil || after != flags {
+		t.Fatal("terminal reopening changed parent shared flags")
+	}
+	_ = slave.Close()
+	read := make(chan []byte, 1)
+	go func() { raw, _ := io.ReadAll(master); read <- raw }()
+	select {
+	case raw := <-read:
+		if bytes.Count(raw, []byte("vecnet: Codex auto-delivery inactive for ")) != 1 || !bytes.Contains(raw, []byte("node_missing; run `vecnet --net 'p' codex status`")) {
+			t.Errorf("working terminal notice lost: %q", raw)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("actual terminal sink did not reach EOF")
 	}
 }
 
