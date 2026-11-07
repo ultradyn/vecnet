@@ -331,10 +331,14 @@ func reactionGroups(ctx context.Context, tx *sql.Tx, msgIDs []string) (map[strin
 // insertReactionMessage assigns a sequence without changing activity or budget.
 func insertReactionMessage(ctx context.Context, tx *sql.Tx, thr *threadRow, msg *envelope.Message, msgJSON []byte) error {
 	var seq int
-	if err := tx.QueryRowContext(ctx, `SELECT coalesce(max(seq),0)+1 FROM messages WHERE thr_id=?`, thr.ID).Scan(&seq); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT max(last_allocated_seq,coalesce((SELECT max(seq) FROM messages WHERE thr_id=threads.thr_id),0))+1 FROM threads WHERE thr_id=?`, thr.ID).Scan(&seq); err != nil {
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO messages(msg_id,thr_id,seq,sender,kind,created_at,body) VALUES(?,?,?,?,?,?,?)`, msg.MessageID, thr.ID, seq, msg.Sender, msg.Kind, msg.CreatedAt, string(msgJSON))
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE threads SET last_allocated_seq=? WHERE thr_id=?`, seq, thr.ID)
 	return err
 }
 

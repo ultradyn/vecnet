@@ -31,6 +31,9 @@ func (h *Hub) RunTickers(ctx context.Context, every time.Duration) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	wake := h.Preferences.Subscribe(ctx)
+	if err := h.refreshHistoryRetentionStatus(ctx); err != nil && ctx.Err() == nil {
+		slog.Error("hub: history retention status", "reason", "policy_read_failed")
+	}
 	if err := h.refreshEventRetentionStatus(ctx); err != nil && ctx.Err() == nil {
 		slog.Error("hub: retention status", "reason", "policy_read_failed")
 	}
@@ -58,6 +61,9 @@ func (h *Hub) RunTickers(ctx context.Context, every time.Duration) {
 			// advance slow housekeeping or run deletion jobs.
 			if err := h.releaseStaleHeld(ctx, h.Now()); err != nil && ctx.Err() == nil {
 				slog.Error("hub: preferences release held", "err", err)
+			}
+			if err := h.refreshHistoryRetentionStatus(ctx); err != nil && ctx.Err() == nil {
+				slog.Error("hub: history retention status", "reason", "policy_read_failed")
 			}
 			if err := h.refreshEventRetentionStatus(ctx); err != nil && ctx.Err() == nil {
 				slog.Error("hub: retention status", "reason", "policy_read_failed")
@@ -101,6 +107,9 @@ func (h *Hub) Tick(ctx context.Context, slow bool) {
 		if _, err := h.PruneEventSlice(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("hub: event retention slice", "reason", "policy_or_slice_failed")
 		}
+	}
+	if _, err := h.PruneHistorySlice(ctx); err != nil && ctx.Err() == nil {
+		slog.Error("hub: history retention slice", "reason", "policy_or_slice_failed")
 	}
 	if h.Cfg.BackfillEnabled {
 		if _, err := h.BackfillDeliverySlice(ctx, h.Cfg.BackfillLimits); err != nil && ctx.Err() == nil {

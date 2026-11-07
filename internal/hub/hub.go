@@ -46,11 +46,13 @@ type Config struct {
 
 	// Event retention is independently enabled for staged rollout. Explicit
 	// PruneEventSlice calls still execute one bounded slice for maintenance.
-	EventRetentionEnabled bool
-	AckedEventRetention   time.Duration
-	UnackedEventRetention time.Duration
-	EventRetentionLimits  eventlog.RetentionLimits
-	RetentionSweepHourUTC int // nightly activation schedule; DefaultConfig uses 02:00 UTC
+	EventRetentionEnabled   bool
+	AckedEventRetention     time.Duration
+	MessageHistoryRetention time.Duration
+	ArchiveMode             bool
+	UnackedEventRetention   time.Duration
+	EventRetentionLimits    eventlog.RetentionLimits
+	RetentionSweepHourUTC   int // nightly activation schedule; DefaultConfig uses 02:00 UTC
 
 	// DefaultConfig marks AckedEventRetention as set, so assigning zero disables
 	// pruning. Literal Configs can mark an explicit zero here; without this bit
@@ -152,8 +154,9 @@ type Hub struct {
 	// activity (GET /v1/admin/activity). The zero value is ready.
 	Activity ActivityFeed
 
-	retentionMu   sync.Mutex
-	retentionLast EventRetentionStatus
+	retentionMu          sync.Mutex
+	retentionLast        EventRetentionStatus
+	historyRetentionLast HistoryRetentionStatus
 
 	backfillMu   sync.Mutex
 	backfillLast BackfillProgress
@@ -233,12 +236,15 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	if err := h.loadIdentity(context.Background()); err != nil {
 		return nil, err
 	}
-	h.Preferences, err = newPreferences(db, cfg, now, "retention.ack_events", "retention.archive_mode")
+	h.Preferences, err = newPreferences(db, cfg, now, "retention.ack_events", "retention.archive_mode", "retention.history")
 	if err != nil {
 		return nil, err
 	}
-	h.Preferences.Policy = &EventRetentionAdapter{Hub: h}
+	h.Preferences.Policy = &HistoryRetentionAdapter{Hub: h}
 	if err := h.initializeEventRetention(context.Background()); err != nil {
+		return nil, err
+	}
+	if err := h.initializeHistoryRetention(context.Background()); err != nil {
 		return nil, err
 	}
 	h.IdleHook = h.OnIdle // release held wake_idle deliveries (PROTOCOL §5.2)
