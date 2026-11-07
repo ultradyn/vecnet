@@ -1,0 +1,208 @@
+{
+  "vecnet_blob_get": {
+    "additionalProperties": false,
+    "properties": {
+      "blob_id": {
+        "type": "string"
+      },
+      "limit": {
+        "default": 131072,
+        "maximum": 131072,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "offset": {
+        "default": 0,
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "sha256": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "sha256"
+    ],
+    "type": "object"
+  },
+  "vecnet_blob_put": {
+    "additionalProperties": false,
+    "else": {
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "size"
+              ]
+            },
+            {
+              "required": [
+                "sha256"
+              ]
+            },
+            {
+              "required": [
+                "idempotency_key"
+              ]
+            },
+            {
+              "required": [
+                "blob_id"
+              ]
+            }
+          ]
+        },
+        "required": [
+          "data_base64",
+          "media_type"
+        ]
+      },
+      "if": {
+        "properties": {
+          "phase": {
+            "const": "complete"
+          }
+        },
+        "required": [
+          "phase"
+        ]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "data_base64"
+              ]
+            },
+            {
+              "required": [
+                "size"
+              ]
+            },
+            {
+              "required": [
+                "sha256"
+              ]
+            },
+            {
+              "required": [
+                "media_type"
+              ]
+            },
+            {
+              "required": [
+                "idempotency_key"
+              ]
+            },
+            {
+              "required": [
+                "ttl_seconds"
+              ]
+            }
+          ]
+        },
+        "required": [
+          "blob_id"
+        ]
+      }
+    },
+    "if": {
+      "properties": {
+        "phase": {
+          "const": "grant"
+        }
+      },
+      "required": [
+        "phase"
+      ]
+    },
+    "properties": {
+      "blob_id": {
+        "maxLength": 64,
+        "minLength": 1,
+        "type": "string"
+      },
+      "data_base64": {
+        "maxLength": 218456,
+        "type": "string"
+      },
+      "idempotency_key": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "media_type": {
+        "type": "string"
+      },
+      "phase": {
+        "enum": [
+          "grant",
+          "complete"
+        ],
+        "type": "string"
+      },
+      "sha256": {
+        "maxLength": 64,
+        "minLength": 64,
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "size": {
+        "maximum": 26214400,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "ttl_seconds": {
+        "maximum": 2147483648,
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "then": {
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "data_base64"
+            ]
+          },
+          {
+            "required": [
+              "blob_id"
+            ]
+          },
+          {
+            "required": [
+              "ttl_seconds"
+            ]
+          }
+        ]
+      },
+      "required": [
+        "size",
+        "sha256",
+        "media_type",
+        "idempotency_key"
+      ]
+    },
+    "type": "object"
+  },
+  "vecnet_blob_status": {
+    "additionalProperties": false,
+    "properties": {
+      "blob_id": {
+        "type": "string"
+      },
+      "sha256": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "sha256"
+    ],
+    "type": "object"
+  }
+}

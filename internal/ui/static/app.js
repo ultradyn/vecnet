@@ -186,11 +186,16 @@ function renderRoute(s) {
 
 function start(secret) {
   const stop = new AbortController();
+  // Transfer deadlines are judged on the hub's clock (store.hubNow), so an
+  // operator clock a few seconds off cannot refuse honest R2 grants.
+  let hubClock = Date.now;
   const api = createApi({
     secret,
     onUnauthorized: () => { if (session === s) signOut('The hub rejected that secret.'); },
+    now: () => hubClock(),
   });
   const store = createStore({ api });
+  hubClock = () => store.hubNow();
   // The operator activity feed (PROTOCOL §2.13): one stream per tab, shared
   // by the sidebar and the dashboard. Activity in threads the operator is not
   // in reaches it only this way.

@@ -38,17 +38,20 @@ func testToolsBudget(t *testing.T, operator bool) {
 		t.Fatal(err)
 	}
 	t.Logf("tools/list: %d bytes", len(compact))
-	// Round four integrates master's three added peer tools. Keep the original
-	// 23 per-tool pins and freeze the measured merged catalog independently.
+	// 2026-11-07: merging master's R2 blob tools and agent onboarding gives
+	// 25,348 bytes for peers and 32,014 for operators after the shared wording
+	// diet. Keep every per-tool pin and the +15% / +10% rules unchanged.
+	// The separate legacy guard still excludes only the explicit R2 growth.
 	achievedTotal := 21276
-	// Keep the peer total fixed and pin the operator additions separately.
+	achievedR2Total := 25348
 	if operator {
-		achievedTotal += 5066 // Three tool entries and their array separators.
+		achievedTotal += 5066 // Three onboarding entries and their separators.
+		achievedR2Total = 32014
 	} else {
 		achievedTotal -= 634 + 468 + 495 + 3 // Operator lifecycle/invite entries.
 	}
-	if budget := achievedTotal * 110 / 100; len(compact) > budget {
-		t.Errorf("tools/list: %d bytes exceeds budget %d (achieved %d + 10%%)", len(compact), budget, achievedTotal)
+	if budget := achievedR2Total * 110 / 100; len(compact) > budget {
+		t.Errorf("R2 tools/list: %d bytes exceeds budget %d (achieved %d + 10%%)", len(compact), budget, achievedR2Total)
 	}
 	// Freeze each achieved size independently so one tool cannot silently
 	// consume another's savings. A new tool needs an explicit baseline.
@@ -68,16 +71,18 @@ func testToolsBudget(t *testing.T, operator bool) {
 		achieved["vecnet_agent_kinds"] = 471
 		achieved["vecnet_agent_add"] = 1977
 		achieved["vecnet_agent_status"] = 2615
-	}
-	if !operator {
-		// Lifecycle and invite administration require operator authority.
+	} else {
 		delete(achieved, "vecnet_peer_lifecycle")
 		delete(achieved, "vecnet_peer_invite_get")
 		delete(achieved, "vecnet_peer_invite_revoke")
 	}
-	if len(result.Tools) != len(achieved) {
-		t.Errorf("tool budget coverage: listed=%d pinned=%d", len(result.Tools), len(achieved))
+	r2Achieved := map[string]int{
+		"vecnet_blob_put": 4676, "vecnet_blob_get": 2753, "vecnet_blob_status": 1558,
 	}
+	if len(result.Tools) != len(achieved)+1 {
+		t.Errorf("tool budget coverage: listed=%d pinned=%d", len(result.Tools), len(achieved)+1)
+	}
+	legacyTotal := len(compact)
 	for _, raw := range result.Tools {
 		var entry struct {
 			Name string `json:"name"`
@@ -87,6 +92,15 @@ func testToolsBudget(t *testing.T, operator bool) {
 		}
 		t.Logf("%s: %d bytes", entry.Name, len(raw))
 		baseline, ok := achieved[entry.Name]
+		if r2Baseline, isR2 := r2Achieved[entry.Name]; isR2 {
+			// Remove only the explicit R2 additions when applying master's total
+			// budget. All unchanged tools still use their original per-tool pins.
+			legacyTotal += baseline - len(raw)
+			if !ok {
+				legacyTotal-- // remove the new tool's array separator
+			}
+			baseline, ok = r2Baseline, true
+		}
 		if !ok {
 			t.Errorf("%s: %d bytes; missing achieved-size budget", entry.Name, len(raw))
 			continue
@@ -94,6 +108,9 @@ func testToolsBudget(t *testing.T, operator bool) {
 		if budget := baseline * 115 / 100; len(raw) > budget {
 			t.Errorf("%s: %d bytes exceeds budget %d (achieved %d + 15%%)", entry.Name, len(raw), budget, baseline)
 		}
+	}
+	if budget := achievedTotal * 110 / 100; legacyTotal > budget {
+		t.Errorf("catalog excluding R2 growth: %d bytes exceeds original budget %d", legacyTotal, budget)
 	}
 }
 

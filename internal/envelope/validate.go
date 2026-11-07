@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -49,13 +50,17 @@ func init() {
 }
 
 // SchemaError is a schema violation (or unparseable JSON) in a wire body.
-// Path is the JSON pointer (RFC 6901) of the violating value: for an
-// unknown or missing property it names that property, e.g. "/sender" or
-// "/priority"; "" is the document root.
+// Path is a JSON pointer (RFC 6901) made from trusted schema property names
+// and array indices. An untrusted property is replaced with UnknownProperty;
+// "" is the document root.
 type SchemaError struct {
 	Path    string
 	Message string
 }
+
+// UnknownProperty is the fixed path token for a caller-controlled property
+// name. Such names may themselves contain credentials or signed URLs.
+const UnknownProperty = "<unknown>"
 
 func (e *SchemaError) Error() string {
 	p := e.Path
@@ -100,7 +105,7 @@ func ValidateValue(sch *jsonschema.Schema, v any) error {
 	if !ok {
 		return &SchemaError{Path: "", Message: err.Error()}
 	}
-	return firstViolation(verr)
+	return firstViolation(verr, sch, v)
 }
 
 // candidate is one reportable violation.
@@ -113,11 +118,12 @@ type candidate struct {
 // firstViolation picks one violation deterministically. jsonschema/v6
 // collects errors while iterating Go maps, so sibling order is unstable;
 // candidates are ranked direct-before-anyOf/oneOf, then by path.
-func firstViolation(root *jsonschema.ValidationError) *SchemaError {
+func firstViolation(root *jsonschema.ValidationError, sch *jsonschema.Schema, v any) *SchemaError {
+	path := func(loc []string) string { return trustedPointer(sch, v, loc) }
 	var cands []candidate
-	collect(root, &cands)
+	collect(root, &cands, path, nil)
 	if len(cands) == 0 { // not expected; keep a usable answer
-		return &SchemaError{Path: pointer(root.InstanceLocation), Message: root.ErrorKind.LocalizedString(printer)}
+		return &SchemaError{Path: path(root.InstanceLocation), Message: root.ErrorKind.LocalizedString(printer)}
 	}
 	sort.SliceStable(cands, func(i, j int) bool {
 		if cands[i].branchy != cands[j].branchy {
@@ -131,41 +137,49 @@ func firstViolation(root *jsonschema.ValidationError) *SchemaError {
 	return &SchemaError{Path: cands[0].path, Message: cands[0].msg}
 }
 
-func collect(e *jsonschema.ValidationError, out *[]candidate) {
+func collect(e *jsonschema.ValidationError, out *[]candidate, path func([]string) string, parentLoc []string) {
 	switch k := e.ErrorKind.(type) {
 	case *kind.AnyOf, *kind.OneOf:
 		// Report the failed alternative at its own location rather than
 		// guessing which branch the sender meant.
-		*out = append(*out, candidate{branchy: true, path: pointer(e.InstanceLocation), msg: branchMessage(e)})
+		*out = append(*out, candidate{branchy: true, path: path(e.InstanceLocation), msg: branchMessage(e, path)})
 		return
 	case *kind.AdditionalProperties:
-		// v6 reports these at the parent object; point at each offender.
-		for _, p := range k.Properties {
-			*out = append(*out, candidate{path: pointer(append(clone(e.InstanceLocation), p)), msg: fmt.Sprintf("unknown property %q", p)})
-		}
+		// v6 reports these at the parent object. Never retain the raw names
+		// in either the path or message, even if another schema names them.
+		*out = append(*out, candidate{path: path(append(clone(e.InstanceLocation), UnknownProperty)), msg: "unknown property"})
 		return
 	case *kind.Required:
 		for _, p := range k.Missing {
-			*out = append(*out, candidate{path: pointer(append(clone(e.InstanceLocation), p)), msg: fmt.Sprintf("missing required property %q", p)})
+			*out = append(*out, candidate{path: path(append(clone(e.InstanceLocation), p)), msg: fmt.Sprintf("missing required property %q", p)})
 		}
+		return
+	case *kind.PropertyNames:
+		// Its child pattern/enum errors validate the property name as a
+		// value and may echo it in their messages. v6.0.3 also assigns this
+		// error's InstanceLocation without cloning the validator's shared
+		// slice, so later sibling checks can overwrite it. Use the enclosing
+		// error's copied location (the same object for a reference, or its
+		// nearest enclosing instance) instead of trusting that mutable path.
+		*out = append(*out, candidate{path: path(append(clone(parentLoc), UnknownProperty)), msg: "invalid property name"})
 		return
 	}
 	if len(e.Causes) == 0 {
-		*out = append(*out, candidate{path: pointer(e.InstanceLocation), msg: e.ErrorKind.LocalizedString(printer)})
+		*out = append(*out, candidate{path: path(e.InstanceLocation), msg: e.ErrorKind.LocalizedString(printer)})
 		return
 	}
 	for _, c := range e.Causes {
-		collect(c, out)
+		collect(c, out, path, e.InstanceLocation)
 	}
 }
 
 // branchMessage summarises why every alternative of an anyOf/oneOf failed.
-func branchMessage(e *jsonschema.ValidationError) string {
+func branchMessage(e *jsonschema.ValidationError, path func([]string) string) string {
 	msg := e.ErrorKind.LocalizedString(printer)
 	var parts []string
 	for _, c := range e.Causes {
 		var sub []candidate
-		collect(c, &sub)
+		collect(c, &sub, path, e.InstanceLocation)
 		for _, s := range sub {
 			parts = append(parts, s.msg)
 		}
@@ -177,6 +191,97 @@ func branchMessage(e *jsonschema.ValidationError) string {
 }
 
 func clone(s []string) []string { return append([]string(nil), s...) }
+
+// trustedPointer walks only explicit schema properties at each object level.
+// Free-form map keys (including numeric keys) are not schema field names.
+// Stop at the first such key rather than disclose its value or descendants.
+func trustedPointer(sch *jsonschema.Schema, v any, loc []string) string {
+	schemas := []*jsonschema.Schema{sch}
+	var safe []string
+	for _, tok := range loc {
+		var next []*jsonschema.Schema
+		switch value := v.(type) {
+		case []any:
+			i, err := strconv.Atoi(tok)
+			if err != nil || i < 0 || i >= len(value) || strconv.Itoa(i) != tok {
+				return pointer(append(safe, UnknownProperty))
+			}
+			for _, s := range schemaAlternatives(schemas) {
+				if s.Items2020 != nil {
+					next = append(next, s.Items2020)
+				}
+				if i < len(s.PrefixItems) {
+					next = append(next, s.PrefixItems[i])
+				}
+				switch items := s.Items.(type) {
+				case *jsonschema.Schema:
+					next = append(next, items)
+				case []*jsonschema.Schema:
+					if i < len(items) {
+						next = append(next, items[i])
+					}
+				}
+			}
+			v = value[i]
+		default:
+			known := false
+			for _, s := range schemaAlternatives(schemas) {
+				if child, ok := s.Properties[tok]; ok {
+					known = true
+					next = append(next, child)
+				}
+				for _, name := range s.Required {
+					if name == tok {
+						known = true
+					}
+				}
+			}
+			if !known {
+				return pointer(append(safe, UnknownProperty))
+			}
+			if obj, ok := v.(map[string]any); ok {
+				v = obj[tok]
+			} else {
+				v = nil
+			}
+		}
+		safe = append(safe, tok)
+		schemas = next
+	}
+	return pointer(safe)
+}
+
+// schemaAlternatives follows schema links that describe the same instance
+// location. References may be cyclic; visit each schema only once per level.
+func schemaAlternatives(roots []*jsonschema.Schema) []*jsonschema.Schema {
+	var out []*jsonschema.Schema
+	seen := map[*jsonschema.Schema]bool{}
+	var visit func(*jsonschema.Schema)
+	visit = func(s *jsonschema.Schema) {
+		if s == nil || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+		visit(s.Ref)
+		visit(s.RecursiveRef)
+		if s.DynamicRef != nil {
+			visit(s.DynamicRef.Ref)
+		}
+		for _, group := range [][]*jsonschema.Schema{s.AllOf, s.AnyOf, s.OneOf} {
+			for _, child := range group {
+				visit(child)
+			}
+		}
+		visit(s.If)
+		visit(s.Then)
+		visit(s.Else)
+	}
+	for _, s := range roots {
+		visit(s)
+	}
+	return out
+}
 
 // pointer renders an instance location as an RFC 6901 JSON pointer.
 func pointer(loc []string) string {

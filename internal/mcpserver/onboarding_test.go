@@ -56,7 +56,8 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 					t.Fatal("operator tools/list is not stable")
 				}
 				peerList := mcpTools(t, env, peerSecret, peerHeaders[era], env.OperatorSecret, peerSecret, principalSecret)
-				if len(peerList) != 23 {
+				// 2026-11-07: R2 adds blob_status to the 23 peer / 29 operator tools.
+				if len(peerList) != 24 {
 					t.Fatalf("ordinary peer tools = %d, want the non-operator catalogue", len(peerList))
 				}
 				names := toolNameSet(t, first)
@@ -68,7 +69,7 @@ func TestAgentOnboardMCPHumanBoundary(t *testing.T) {
 						t.Fatalf("ordinary peer tools/list includes %s", name)
 					}
 				}
-				if len(first) != 29 {
+				if len(first) != 30 {
 					t.Fatalf("operator tools = %d, want the catalogue plus the three agent tools", len(first))
 				}
 				for _, name := range []string{"vecnet_agent_kinds", "vecnet_agent_add", "vecnet_agent_status"} {

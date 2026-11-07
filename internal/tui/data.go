@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
@@ -47,10 +48,11 @@ type Data struct {
 
 // ThreadState is one opened thread.
 type ThreadState struct {
-	Detail   opapi.ThreadDetail
-	Messages []envelope.Message
-	Matrix   opapi.Matrix
-	Loading  bool
+	BlobStates map[string]blobwire.State
+	Detail     opapi.ThreadDetail
+	Messages   []envelope.Message
+	Matrix     opapi.Matrix
+	Loading    bool
 
 	// rewind is one past the oldest held message whose reactions changed
 	// since the last load (0: none), and rewinds counts the reaction events
@@ -341,6 +343,13 @@ func (m *Model) onTick() tea.Cmd {
 	if now.Sub(m.lastSlow) >= m.slowEvery && m.Conn == ConnLive {
 		m.lastSlow = now
 		tags := slices.Clone(slowKeys)
+		for id, st := range m.Data.Thread {
+			if slices.ContainsFunc(st.Messages, func(msg envelope.Message) bool {
+				return slices.ContainsFunc(msg.Attachments, func(att envelope.Attachment) bool { return att.BlobID != "" })
+			}) {
+				tags = append(tags, threadPrefix+id)
+			}
+		}
 		for key := range m.Data.Errs {
 			tags = append(tags, key)
 		}
@@ -356,7 +365,17 @@ func (m *Model) fetch(key string) tea.Cmd {
 	case "inbox":
 		return func() tea.Msg {
 			v, err := api.Inbox(ctx, opapi.InboxQuery{Limit: pageLimit})
-			return loadMsg{key: key, err: err, hubNow: v.Now, at: now(), apply: func(m *Model) { m.Data.Inbox = v }}
+			return loadMsg{key: key, err: err, hubNow: v.Now, at: now(), apply: func(m *Model) {
+				m.Data.Inbox = v
+				for _, st := range m.Data.Thread {
+					if st.BlobStates == nil {
+						st.BlobStates = map[string]blobwire.State{}
+					}
+					for id, state := range v.BlobStates {
+						st.BlobStates[id] = state
+					}
+				}
+			}}
 		}
 	case "threads":
 		return func() tea.Msg {
@@ -483,23 +502,50 @@ func (m *Model) fetchThread(key, id string) tea.Cmd {
 	if from > 0 {
 		after = st.Messages[from-1].MessageID
 	}
+	// Capture references before the command leaves the model goroutine. An
+	// incremental history page cannot project state for older, read messages.
+	refs := map[string]string{}
+	for _, msg := range st.Messages {
+		for _, att := range msg.Attachments {
+			if att.BlobID != "" {
+				refs[att.BlobID] = att.SHA256
+			}
+		}
+	}
 	api, ctx, now := m.API, m.ctx, m.Now
 	return func() tea.Msg {
 		detail, err := api.Thread(ctx, id)
 		if err != nil {
 			return loadMsg{key: key, err: err}
 		}
+		states := map[string]blobwire.State{}
 		var messages []envelope.Message
 		for cursor, page := after, 0; page < maxPages; page++ {
 			h, err := api.History(ctx, id, cursor, pageLimit)
 			if err != nil {
 				return loadMsg{key: key, err: err}
 			}
+			for id, state := range h.BlobStates {
+				states[id] = state
+			}
 			messages = append(messages, h.Messages...)
 			if h.NextAfter == nil || *h.NextAfter == "" {
 				break
 			}
 			cursor = *h.NextAfter
+		}
+		for id, sha := range refs {
+			if _, fresh := states[id]; fresh {
+				continue
+			}
+			state, err := api.BlobStatus(ctx, sha, id)
+			if err != nil {
+				// One status blip must not drop the history page or the
+				// sibling refs. The row stays, with an unknown projection.
+				states[id] = blobwire.State{State: "unknown"}
+				continue
+			}
+			states[id] = state
 		}
 		var matrix opapi.Matrix
 		for cursor, page := "", 0; page < maxPages; page++ {
@@ -518,6 +564,12 @@ func (m *Model) fetchThread(key, id string) tea.Cmd {
 		return loadMsg{key: key, hubNow: detail.Now, at: now(), apply: func(m *Model) {
 			st := m.Data.Thread[id]
 			st.Detail, st.Matrix, st.Loading = detail, matrix, false
+			if st.BlobStates == nil {
+				st.BlobStates = map[string]blobwire.State{}
+			}
+			for id, state := range states {
+				st.BlobStates[id] = state
+			}
 			if st.rewinds == rewinds {
 				st.rewind = 0
 			}
@@ -694,6 +746,14 @@ func (st *ThreadState) rewindFrom(i int) {
 
 // remember keeps the newest events. A replay after a failed ack is not news.
 func (m *Model) remember(ev envelope.Event) {
+	for _, st := range m.Data.Thread {
+		if st.BlobStates == nil {
+			st.BlobStates = map[string]blobwire.State{}
+		}
+		for id, state := range ev.BlobStates {
+			st.BlobStates[id] = state
+		}
+	}
 	if slices.ContainsFunc(m.Data.Events, func(have envelope.Event) bool { return have.Cursor == ev.Cursor }) {
 		return
 	}

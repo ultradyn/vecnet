@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { budgetBanner, budgetOut, canShowFull, clientLabel, CLIENT_LABEL_CAP, clientSuspect, FULL_TEXT_CAP, GROK_QUOTA_NOTE, GROK_QUOTA_PLAIN, items, pendingReplyMatches, replyKey, replyPriority, replyPriorityLocked, replyQuotaNote, replySig, sendError, spillOf } from '../static/thread-model.js';
-import { SPILL_SLOT } from '../static/attach-model.js';
+import { SPILL_SLOT, blobView } from '../static/attach-model.js';
 
 const OP = 'peer_op', CODEX = 'peer_codex', SLEUTH = 'peer_sleuth', GROK = 'peer_grok';
 
@@ -359,4 +359,26 @@ test('failure then recipient edit recomputes automatic priority', () => {
   assert.equal(sessionOnly, 'wake', 'a non-grokbot thread adopted wake_idle');
   assert.equal(replyPriority({ manual: true, locked: replyPriorityLocked({ sending: false, pending, draft: edited }), current: 'hold', participants: setup, kindOf }), 'hold', 'manual hold was overwritten');
   assert.equal(replyPriority({ manual: false, locked: replyPriorityLocked({ sending: true, pending, draft: edited }), current: 'wake', participants: setup, kindOf }), 'wake', 'in-flight reply changed priority');
+});
+
+test('replySig covers R2 reference fields: the same bytes under a new grant mint a new key', () => {
+  const a = { blob_id: 'blo_00000000000000000000000001', sha256: 'a'.repeat(64), size: 3, media_type: 'text/plain', name: 'a.txt', retention_class: '1d', expires_at: '2026-11-07T10:00:00.000Z' };
+  assert.notEqual(replySig([a]), replySig([{ ...a, blob_id: 'blo_00000000000000000000000002' }]));
+  assert.notEqual(replySig([a]), replySig([{ ...a, retention_class: 'keep', expires_at: null }]));
+  assert.equal(replySig([a]), replySig([{ ...a }]));
+  // A legacy reference keeps its old signature.
+  assert.equal(replySig([{ sha256: 'b'.repeat(64), size: 1, media_type: 'text/plain', name: 'b' }]), JSON.stringify([['b'.repeat(64), 1, 'text/plain', 'b']]));
+});
+
+test('message chips use the recorded class and the projection: expired, purged, kept and trust', () => {
+  const now = Date.parse('2026-11-06T10:00:00.000Z');
+  const att = { blob_id: 'blo_00000000000000000000000003', sha256: 'c'.repeat(64), size: 9, name: 'x.bin', retention_class: '7d', expires_at: '2026-11-06T09:00:00.000Z', sha256_verified: true, integrity: { algorithm: 'sha256', value: 'c'.repeat(64), verified: true } };
+  assert.equal(blobView(att, { state: 'expired', retention_class: '7d', expires_at: att.expires_at }, now).label, 'Attachment expired (7-day retention)');
+  assert.equal(blobView(att, { state: 'purged' }, now).label, 'Attachment purged');
+  assert.equal(blobView({ ...att, retention_class: 'keep', expires_at: null }, { state: 'available' }, now).label, 'Kept while referenced');
+  assert.equal(blobView({ ...att, retention_class: '1d', expires_at: '2026-11-07T10:00:00.000Z' }, { state: 'available' }, now).label, 'Expires in 24 h');
+  assert.equal(blobView({ ...att, retention_class: '30d', expires_at: '2026-12-06T10:00:00.000Z' }, null, now).label, 'Expires in 30 d');
+  const live = { ...att, expires_at: '2026-11-08T10:00:00.000Z' };
+  assert.equal(blobView(live, { state: 'unavailable' }, now).label, 'Storage unavailable');
+  assert.equal(blobView(live, { state: 'unavailable' }, now).canDownload, true, 'unavailable is retryable');
 });

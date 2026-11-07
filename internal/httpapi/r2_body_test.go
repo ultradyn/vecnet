@@ -1,12 +1,18 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/XertroV/vecnet/internal/blobwire"
+	"github.com/XertroV/vecnet/internal/mcpdiag"
 )
 
 // PROTOCOL §15: a body that is not JSON or violates the shape (unknown field,
@@ -47,14 +53,14 @@ func TestR2HTTPBodyShapeErrors(t *testing.T) {
 		{"fractional size", "/v1/blobs/uploads", `{"size":3.5,"sha256":"` + sha + `","media_type":"text/plain"}`, "/size"},
 		{"null sha256", "/v1/blobs/uploads", `{"size":3,"sha256":null,"media_type":"text/plain"}`, "/sha256"},
 		{"numeric media_type", "/v1/blobs/uploads", `{"size":3,"sha256":"` + sha + `","media_type":7}`, "/media_type"},
-		{"case variant", "/v1/blobs/uploads", `{"Size":3,"sha256":"` + sha + `","media_type":"text/plain"}`, "/Size"},
-		{"case variant sha", "/v1/blobs/uploads", `{"size":3,"SHA256":"` + sha + `","media_type":"text/plain"}`, "/SHA256"},
-		{"parked md5", "/v1/blobs/uploads", `{"size":3,"sha256":"` + sha + `","media_type":"text/plain","content_md5":"x"}`, "/content_md5"},
+		{"case variant", "/v1/blobs/uploads", `{"Size":3,"sha256":"` + sha + `","media_type":"text/plain"}`, "/<unknown>"},
+		{"case variant sha", "/v1/blobs/uploads", `{"size":3,"SHA256":"` + sha + `","media_type":"text/plain"}`, "/<unknown>"},
+		{"parked md5", "/v1/blobs/uploads", `{"size":3,"sha256":"` + sha + `","media_type":"text/plain","content_md5":"x"}`, "/<unknown>"},
 		{"array", "/v1/blobs/uploads", `[]`, ""},
 		{"null grant", "/v1/blobs/uploads", `null`, ""},
 		{"trailing", "/v1/blobs/uploads", `{"size":3,"sha256":"` + sha + `","media_type":"text/plain"} {}`, ""},
 		{"not json", "/v1/blobs/uploads", `{`, ""},
-		{"completion field", g.CompleteURL, `{"url":"https://foreign.invalid"}`, "/url"},
+		{"completion field", g.CompleteURL, `{"url":"https://foreign.invalid"}`, "/<unknown>"},
 		{"completion null", g.CompleteURL, `null`, ""},
 		{"completion array", g.CompleteURL, `[]`, ""},
 	}
@@ -88,4 +94,60 @@ func TestR2HTTPBodyShapeErrors(t *testing.T) {
 		t.Fatalf("zero size status %d, want 422", status)
 	}
 	requireCode(t, raw, "invalid_value")
+}
+
+func TestR2HTTPUnknownPropertyNamesDoNotEchoCapabilities(t *testing.T) {
+	f := newR2HTTP(t)
+	_, secret := f.env.NewPeer("session", "private HTTP property names")
+	const capability = "https://private-http-property.invalid/object?X-Amz-Signature=http-property-canary&token=http-tail-canary"
+	grantBody := map[string]any{"size": 1, "sha256": shaOf("x"), "media_type": "text/plain"}
+	// Obtain a real pending grant in the fake-provider fixture so completion
+	// has a valid surrounding route and object identity.
+	resp, raw := f.request(t, secret, "POST", "/v1/blobs/uploads", grantBody, "private-property-grant")
+	var grant blobwire.UploadGrant
+	if resp.StatusCode != 201 || json.Unmarshal(raw, &grant) != nil || grant.CompleteURL == "" {
+		t.Fatal("could not create pending test grant")
+	}
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	for _, tc := range []struct {
+		endpoint string
+		body     map[string]any
+	}{
+		{"/v1/blobs/uploads", grantBody},
+		{grant.CompleteURL, map[string]any{}},
+	} {
+		for _, key := range []string{capability, "private-http-field-canary", "0"} {
+			body := maps.Clone(tc.body)
+			body[key] = "unexpected"
+			resp, raw := f.request(t, secret, "POST", tc.endpoint, body, "invalid-property-grant")
+			if resp.StatusCode != 400 {
+				t.Fatal("unknown property was not rejected before transfer handling")
+			}
+			var response struct {
+				Error struct {
+					Code    string `json:"code"`
+					Details struct {
+						Path string `json:"path"`
+					} `json:"details"`
+				} `json:"error"`
+			}
+			if json.Unmarshal(raw, &response) != nil || response.Error.Code != "invalid_body" || response.Error.Details.Path != "/<unknown>" {
+				t.Fatal("unknown property did not produce the fixed invalid_body path")
+			}
+			ring, err := json.Marshal(mcpdiag.Snapshot(mcpdiag.Filter{}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, sink := range []string{string(raw), logs.String(), string(ring)} {
+				for _, forbidden := range []string{"private-http-property.invalid", "X-Amz-Signature", "http-property-canary", "http-tail-canary", "private-http-field-canary"} {
+					if strings.Contains(sink, forbidden) {
+						t.Fatal("HTTP response or diagnostics retained private property name")
+					}
+				}
+			}
+		}
+	}
 }

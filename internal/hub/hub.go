@@ -209,7 +209,7 @@ func New(db *store.DB, cfg Config, now func() time.Time) (*Hub, error) {
 	if err := h.loadIdentity(context.Background()); err != nil {
 		return nil, err
 	}
-	h.Preferences, err = newPreferences(db, cfg, now)
+	h.Preferences, err = newProductionPreferences(db, cfg, now)
 	if err != nil {
 		return nil, err
 	}

@@ -27,8 +27,11 @@ import (
 // which put the UI at about 496 KB; to 544 KiB on 2026-11-07 for the
 // merge of build/agent-onboarding with master, measured at 553,752 bytes;
 // to 560 KiB on 2026-11-07 for validated MCP handoff prefill, measured at
-// 559,020 bytes).
-const uiMaxBytes = 560 << 10
+// 559,020 bytes; independently to 544 KiB on 2026-11-07 for master's R2
+// transfers and retention, measured at 554,222 bytes; to 608 KiB on
+// 2026-11-07 merging R2 blobs and agent onboarding, measured at
+// 612,715 bytes).
+const uiMaxBytes = 608 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

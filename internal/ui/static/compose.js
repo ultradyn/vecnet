@@ -36,7 +36,7 @@ export function mount(root, ctx) {
     denied: '',      // recipient named by the last scope_denied
   };
   let gone = false;
-  const att = createAttachments({ api, onChange: () => render() });
+  const att = createAttachments({ api, onChange: () => render(), now: () => store.hubNow() });
 
   const search = h('input', { type: 'search', id: 'c-search', 'aria-label': 'Search peers', placeholder: 'Search peers by name', autocomplete: 'off', spellcheck: 'false' });
   const picked = h('div', { class: 'picked', 'aria-live': 'polite' });

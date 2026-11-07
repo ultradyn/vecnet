@@ -68,6 +68,8 @@ func TestGrokbotToolsListBudget(t *testing.T) {
 			// landed. 2026-11-07: the twelve allowed tools, unchanged from the
 			// shared projected catalogue, measure 12,770 B; CoS ruling pins
 			// 13 KiB and keeps shared descriptions owned by the diet.
+			// 2026-11-07: merging R2 blobs and onboarding measures 13,281 B
+			// after tightening shared prose. All descriptions and contracts remain.
 			if len(compact) >= 13*1024 {
 				t.Errorf("Grok tools/list: %d bytes, must be under 13 KiB", len(compact))
 			}

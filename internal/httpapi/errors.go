@@ -64,7 +64,9 @@ func writeError(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusConflict, "cursor_purged", "cursor is from another epoch or below retention",
 			map[string]any{"oldest_cursor": purged.Oldest.String()})
 	case errors.As(err, &schemaErr):
-		writeErr(w, http.StatusBadRequest, "invalid_body", schemaErr.Message, map[string]any{"path": schemaErr.Path})
+		// Library messages can contain rejected values. Paths are constructed
+		// from schema fields and fixed unknown-property tokens at validation.
+		writeErr(w, http.StatusBadRequest, "invalid_body", "value does not satisfy the schema or hub constraint", map[string]any{"path": schemaErr.Path})
 	case errors.Is(err, auth.ErrUnauthenticated):
 		writeErr(w, http.StatusUnauthorized, "unauthenticated", "missing, unknown or revoked credential", nil)
 	case errors.As(err, &maxErr):

@@ -59,6 +59,9 @@ func (b *blobMintBudget) take(identity string, now time.Time) int {
 // callerActive rechecks current enrollment even for callers resolved before a
 // provider wait. Credential resolution stays at the transport authentication seam.
 func (h *Hub) callerActive(ctx context.Context, q blobQuery, c auth.Caller) bool {
+	if c.OAuth != (auth.OAuthCredential{}) {
+		return auth.OAuthCallerActive(ctx, q, c, h.Now())
+	}
 	var n int
 	if c.CredentialID != "" {
 		subject := c.PrincipalID
@@ -103,6 +106,9 @@ func (h *Hub) CreateBlobUpload(ctx context.Context, c auth.Caller, idem string, 
 		return blobwire.UploadGrant{}, E(409, "direct_upload_unavailable", "direct uploads are unavailable")
 	}
 	g, err := h.Blobs.Transfers.Reserve(context.WithValue(ctx, blobTransferCallerKey{}, c), blobUploader(c), idem, in)
+	if err == nil && !h.callerActive(ctx, h.DB, c) {
+		return blobwire.UploadGrant{}, E(403, "forbidden", "not authorised")
+	}
 	return g, h.blobTransferError(err)
 }
 func (h *Hub) CompleteBlobUpload(ctx context.Context, c auth.Caller, id string) (blobwire.Ref, error) {

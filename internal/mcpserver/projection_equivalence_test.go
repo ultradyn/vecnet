@@ -59,6 +59,26 @@ func TestProjectionCallValidationEquivalent(t *testing.T) {
 		}
 		before[name] = doc
 	}
+	// R2 changes two existing blob call schemas and adds status. Keep both
+	// historical fixtures frozen and replace only these explicitly named tools.
+	raw, err = os.ReadFile("testdata/validation-r2-transfers.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var transfers map[string]schema
+	if err := json.Unmarshal(raw, &transfers); err != nil {
+		t.Fatal(err)
+	}
+	if len(transfers) != 3 {
+		t.Fatal("R2 fixture must cover exactly three tools")
+	}
+	for _, name := range []string{"vecnet_blob_put", "vecnet_blob_get", "vecnet_blob_status"} {
+		doc, ok := transfers[name]
+		if !ok {
+			t.Fatalf("missing R2 baseline %s", name)
+		}
+		before[name] = doc
+	}
 	const peer = "peer_00000000000000000000000001"
 	const message = "msg_00000000000000000000000001"
 	const thread = "thr_00000000000000000000000001"
@@ -147,6 +167,57 @@ func TestProjectionCallValidationEquivalent(t *testing.T) {
 		"vecnet_set_avatar":   {[]string{`{}`, `{"data_base64":"aGk="}`, `{"url":"https://example.invalid/a.png"}`, `{"data_base64":"aGk=","url":"https://example.invalid/a.png"}`}, []string{`{"url":"http://example.invalid/a.png"}`, `{"data_base64":"` + strings.Repeat("a", 218457) + `"}`}},
 		"vecnet_clear_avatar": {[]string{`{}`, `{"as":"` + peer + `"}`}, []string{`{"as":"bad"}`}},
 		"vecnet_guide":        {[]string{`{}`, `{"topic":"replying"}`}, []string{`{"topic":"unknown"}`, `{"topic":null}`}},
+	}
+	// Keep every original disk case, and extend coverage for R2 calls.
+	const blobID = "blo_00000000000000000000000001"
+	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const grant = `{"phase":"grant","size":1,"sha256":"` + digest + `","media_type":"text/plain","idempotency_key":"upload-1"}`
+	const complete = `{"phase":"complete","blob_id":"` + blobID + `"}`
+	put := table["vecnet_blob_put"]
+	put.valid = append(put.valid, grant, complete,
+		strings.Replace(grant, `"size":1`, `"size":1.0`, 1),
+		strings.Replace(grant, `"size":1`, `"size":26214400`, 1))
+	put.invalid = append(put.invalid,
+		strings.Replace(grant, `"size":1`, `"size":0`, 1),
+		strings.Replace(grant, `"size":1`, `"size":26214401`, 1),
+		strings.Replace(grant, `"size":1`, `"size":1.5`, 1),
+		strings.Replace(grant, `"sha256":"`+digest+`"`, `"sha256":"bad"`, 1),
+		strings.Replace(grant, `"idempotency_key":"upload-1"`, `"idempotency_key":""`, 1),
+		`{"phase":"grant"}`, `{"phase":"complete"}`, `{"phase":"other"}`,
+		withField(grant, "data_base64", `""`), withField(grant, "blob_id", `"`+blobID+`"`),
+		withField(grant, "ttl_seconds", `0`),
+		withField(complete, "size", `1`), withField(complete, "data_base64", `""`),
+		withField(complete, "sha256", `"`+digest+`"`), withField(complete, "media_type", `""`),
+		withField(complete, "idempotency_key", `"key"`), withField(complete, "ttl_seconds", `0`),
+		`{"data_base64":"","media_type":"text/plain","blob_id":"`+blobID+`"}`)
+	// Conditional required fields are not top-level required fields.
+	for _, base := range []string{grant, complete} {
+		var args map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(base), &args); err != nil {
+			t.Fatal(err)
+		}
+		for field := range args {
+			if field == "phase" {
+				continue
+			}
+			missing := make(map[string]json.RawMessage, len(args))
+			for k, v := range args {
+				if k != field {
+					missing[k] = v
+				}
+			}
+			raw, _ := json.Marshal(missing)
+			put.invalid = append(put.invalid, string(raw))
+		}
+	}
+	table["vecnet_blob_put"] = put
+	get := table["vecnet_blob_get"]
+	get.valid = append(get.valid, `{"sha256":"`+digest+`","blob_id":"`+blobID+`"}`)
+	get.invalid = append(get.invalid, `{"sha256":"`+digest+`","blob_id":1}`)
+	table["vecnet_blob_get"] = get
+	table["vecnet_blob_status"] = cases{
+		[]string{`{"sha256":"` + digest + `"}`, `{"sha256":"` + digest + `","blob_id":"` + blobID + `"}`},
+		[]string{`{"sha256":1}`, `{"sha256":"` + digest + `","blob_id":null}`},
 	}
 	if len(table) != len(before) || len(table) != len(tools().byName) {
 		t.Fatalf("tool coverage: cases=%d before=%d after=%d", len(table), len(before), len(tools().byName))

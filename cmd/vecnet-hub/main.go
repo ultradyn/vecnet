@@ -534,6 +534,7 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 		key, flag, env string
 	}
 	bindings := []binding{
+		{key: "blobs.expiry", flag: "blobs-expiry"},
 		{key: "events.refresh_interval", flag: "events-refresh-interval"},
 		{key: "presence.default_ttl", flag: "presence-ttl"},
 		{key: "presence.session_ttl", flag: "session-presence-ttl"},
@@ -553,6 +554,8 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 		def := strconv.FormatInt(n, 10)
 		if d.Type == prefs.TypeDuration {
 			def = (time.Duration(n) * time.Second).String()
+		} else if d.Type == prefs.TypeEnum {
+			def, _ = d.Default.Enum()
 		}
 		// Usage can run before validation (help or any parser error). Only safe
 		// built-in defaults may enter flag metadata; resolve the environment below.
@@ -584,7 +587,7 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 					return cfg, &prefs.Error{Code: prefs.CodeInvalidValue, Details: prefs.ErrorDetails{Field: b.key, Constraint: "whole_seconds"}}
 				}
 				n = int64(duration / time.Second)
-			} else {
+			} else if d.Type != prefs.TypeEnum {
 				n, err = strconv.ParseInt(raw, 10, 64)
 			}
 			if err != nil {
@@ -593,6 +596,8 @@ func registerPreferenceFlags(fs *flag.FlagSet, getenv func(string) string) func(
 			value := prefs.Int(n)
 			if d.Type == prefs.TypeDuration {
 				value = prefs.Duration(n)
+			} else if d.Type == prefs.TypeEnum {
+				value = prefs.Enum(raw)
 			}
 			if err := prefs.Validate(d, value); err != nil {
 				return cfg, err

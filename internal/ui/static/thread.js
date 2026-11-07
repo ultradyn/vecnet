@@ -4,7 +4,7 @@
 // operator sees each unread message) in thread-read.js.
 import { answerBody, countdown } from './approvals.js';
 import { createAttachments } from './attach.js';
-import { sendRefusal } from './attach-model.js';
+import { blobView, nextExpiry, sendRefusal } from './attach-model.js';
 import { avatar, h, idText, peerLink } from './dom.js';
 import { ago, bytes, clean, deltaLabel, deltaTitle, fullWhen, kindShort, kindTitle, plural, short, title, when } from './format.js';
 import { markdown } from './md.js';
@@ -28,13 +28,16 @@ function randKey() {
 // loadMessages returns the thread's messages and, from the operator's pages'
 // hosted_blobs (PROTOCOL §2.8), message id -> the hashes the hub hosts for
 // it; hosted is null when a page did not say, so thumbnails keep the
-// declared-only rule.
+// declared-only rule. states is every page's blob_states (R2 blob id ->
+// available/expired/purged/unavailable), the hub's projection on its clock.
 async function loadMessages(api, id) {
-  const messages = [];
+  const messages = [], states = new Map();
   let after, hosted = new Map();
   for (let i = 0; i < MAX_PAGES; i++) {
     const page = await api.messages(id, { limit: PAGE, after });
     messages.push(...(page.messages || []));
+    const bs = page.blob_states;
+    if (bs && typeof bs === 'object') for (const [blobId, st] of Object.entries(bs)) if (st && typeof st === 'object') states.set(blobId, st);
     const hb = page.hosted_blobs;
     if (hb && typeof hb === 'object' && hosted) {
       for (const [msgId, shas] of Object.entries(hb)) if (Array.isArray(shas)) hosted.set(msgId, new Set(shas));
@@ -44,7 +47,18 @@ async function loadMessages(api, id) {
     if (!page.next_after || !(page.messages || []).length) break;
     after = page.next_after;
   }
-  return { messages, hosted };
+  return { messages, hosted, states };
+}
+
+// r2Chip: an R2 attachment in a message. Never a thumbnail (its bytes are
+// fetched only to be saved, from the Files panel); its line says how long it
+// lives by its recorded class, and a pending checksum is never shown verified.
+function r2Chip(att, v) {
+  return h('span', { class: 'att r2 s-' + v.state + (v.verified ? '' : ' unv'), title: (att.sha256 || '') + ' · ' + v.trust, 'data-blob': att.blob_id },
+    h('span', { class: 'nm', text: att.name || att.media_type || 'attachment' }),
+    h('span', { class: 'sz', text: bytes(att.size) }),
+    v.label ? h('span', { class: 'ret', text: v.label }) : null,
+    !v.verified && v.state === 'available' ? h('span', { class: 'unv-tag', text: 'unverified' }) : null);
 }
 
 async function loadMatrix(api, id) {
@@ -97,8 +111,30 @@ export function mount(root, ctx) {
   let gone = false, ticks = [], agos = [];
   // Reply attachments, and the thread's inline thumbnails: a settled fetch or
   // an upload's change draws again.
-  const atts = createAttachments({ api, onChange: () => render() });
+  const atts = createAttachments({ api, onChange: () => render(), now: () => store.hubNow() });
   const thumbs = createThumbs({ api, onReady: () => render() });
+  // R2 references for the Files panel beside this thread (thread-aside.js):
+  // blob id -> { att, state } from the loaded history. Messages carry the
+  // recorded class, deadline and trust; the hub's projection says the rest.
+  const refSubs = new Set();
+  let refs = new Map(), expiryTimer = 0;
+  ctx.blobRefs = { get: () => refs, loaded: () => !!history.get(), subscribe: fn => { refSubs.add(fn); return () => refSubs.delete(fn); } };
+  const stateOf = blobId => ((history.get() || {}).states || new Map()).get(blobId) || null;
+  function collectRefs() {
+    const next = new Map();
+    for (const m of msgs()) for (const a of m.attachments || []) if (a && a.blob_id) next.set(a.blob_id, { att: a, state: stateOf(a.blob_id) });
+    refs = next;
+    for (const fn of [...refSubs]) fn();
+  }
+  // scheduleExpiry redraws at the earliest recorded deadline, then asks the
+  // hub again: a chip turns expired on time even before the hub's ticker.
+  function scheduleExpiry() {
+    clearTimeout(expiryTimer);
+    const now = store.hubNow();
+    const at = nextExpiry([...refs.values()].map(r => blobView(r.att, r.state, now)), now);
+    if (at === null) return;
+    expiryTimer = setTimeout(() => { if (gone) return; render(); for (const fn of [...refSubs]) fn(); store.invalidate(tag); }, Math.min(at - now + 250, 6 * 3600 * 1000));
+  }
   // Reaction chips and the picker; a reaction's event reloads the thread too.
   const R = createReactions({ api, me, nameOf, onDone: () => store.invalidate(tag), toast });
 
@@ -457,7 +493,7 @@ export function mount(root, ctx) {
     const delta = prev ? deltaLabel(prev.created_at, m.created_at) : '';
     const others = (m.recipients || []).map(nameOf).join(', ');
     // Images show inline from the thumbnail cache; everything else is a chip.
-    const files = (m.attachments || []).filter(a => a !== it.spill).map(a => thumbs.render(a, hostedOf(m.message_id, a.sha256)));
+    const files = (m.attachments || []).filter(a => a !== it.spill).map(a => (a.blob_id ? r2Chip(a, blobView(a, stateOf(a.blob_id), store.hubNow())) : thumbs.render(a, hostedOf(m.message_id, a.sha256))));
     const full = S.full.get(m.message_id), showTxt = m.content && m.content.text && !(full && full.state === 'ok');
     const cls = 'msg' + (m.message_id === S.replyTo ? ' target' : '') + (m.message_id === S.flash ? ' flash' : '');
     return h('div', { class: cls, id: 'm-' + m.message_id, onanimationend: e => { if (e.animationName === 'flash') { S.flash = ''; e.currentTarget.classList.remove('flash'); } } },
@@ -621,8 +657,10 @@ export function mount(root, ctx) {
       // event for that very send, which landed though its answer was lost)
       // must not re-pick it, or the retry would mint a new idempotency key.
       if (!S.pending && (S.replyTo === null || (S.replyTo && !list.some(m => m.message_id === S.replyTo)))) S.replyTo = lastFromOther(list) || null;
+      collectRefs();
     }
     render();
+    scheduleExpiry();
   };
   render();
   scroller.addEventListener('scroll', onScroll, { passive: true });
@@ -636,6 +674,9 @@ export function mount(root, ctx) {
   return () => {
     gone = true;
     clearInterval(timer);
+    clearTimeout(expiryTimer);
+    refSubs.clear();
+    if (ctx.blobRefs && ctx.blobRefs.get() === refs) delete ctx.blobRefs;
     scroller.removeEventListener('scroll', onScroll);
     window.removeEventListener('scroll', onScroll);
     document.removeEventListener('visibilitychange', onVisible);

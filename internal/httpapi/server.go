@@ -116,7 +116,7 @@ func New(d Deps) http.Handler {
 		}{OK: true, Info: buildinfo.Current()})
 	})
 	s.routes(mux)
-	uiHandler := ui.Handler(d.UIDir) // operator inbox; public (isPublic)
+	uiHandler := ui.Handler(d.UIDir, s.r2Origins()...) // operator inbox; public (isPublic)
 	mux.Handle("GET /ui", uiHandler)
 	mux.Handle("GET /ui/", uiHandler)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

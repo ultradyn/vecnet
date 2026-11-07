@@ -114,3 +114,18 @@ Both catalog views receive property and schema checks. Current and legacy
 protocol wire canaries check full validation responses and diagnostics,
 including unknown property names, malformed request IDs, scalar and composite
 schema failures, stale specs and connector field errors.
+
+2026-11-07 merge of master R2 blobs and agent onboarding: both sets of tools,
+input fixtures, output fixtures and description entries remain. Shared discovery
+prose is tightened to keep the unchanged twelve-tool Grok allowlist under its
+**13 KiB** ceiling: **13,281 bytes**, with identical descriptors in the operator
+catalog and both protocol eras. Cursor wording, guide topics, priority and
+identity checks, R2 direct transfers and sensitive URL rules remain explicit.
+No call schema or output validation contract changes.
+
+The combined catalog now has **24 peer tools / 25,348 bytes** and **30 operator
+tools / 32,014 bytes**, pinned at those measured totals with the existing 10%
+allowance (**27,882 / 35,215 bytes**). Existing per-tool pins retain their 15%
+allowance, including master's separate R2 pins and onboarding's three pins.
+The original total guard also remains, after subtracting only R2 growth and
+accounting for authority filtering and the operator onboarding additions.

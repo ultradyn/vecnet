@@ -13,6 +13,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
@@ -159,6 +160,9 @@ func (f *fakeAPI) Thread(ctx context.Context, _ string) (opapi.ThreadDetail, err
 func (f *fakeAPI) History(ctx context.Context, _, _ string, _ int) (opapi.History, error) {
 	return f.history, f.hit(ctx, "History")
 }
+func (f *fakeAPI) BlobStatus(ctx context.Context, _, _ string) (blobwire.State, error) {
+	return blobwire.State{State: "available"}, f.hit(ctx, "BlobStatus")
+}
 func (f *fakeAPI) Matrix(ctx context.Context, _, _ string, _ int) (opapi.Matrix, error) {
 	return f.matrix, f.hit(ctx, "Matrix")
 }
@@ -251,6 +255,10 @@ func (f *fakeAPI) SetPresence(ctx context.Context, _ string, _ time.Time) error 
 }
 func (f *fakeAPI) Blob(ctx context.Context, _ string, _ int64) ([]byte, string, error) {
 	return f.blob, "application/octet-stream", f.hit(ctx, "Blob")
+}
+
+func (f *fakeAPI) BlobWithOptions(ctx context.Context, sha string, max int64, opts opclient.BlobOptions) ([]byte, string, error) {
+	return f.Blob(ctx, sha, max)
 }
 
 // Upload waits on gate["Upload"] before reading, so a held upload has read

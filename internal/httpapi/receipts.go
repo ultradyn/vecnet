@@ -23,7 +23,7 @@ func decodeObject(raw []byte, allowed, required []string) (map[string]json.RawMe
 	}
 	for k := range top {
 		if !ok[k] {
-			return nil, &envelope.SchemaError{Path: "/" + k, Message: "unknown field"}
+			return nil, &envelope.SchemaError{Path: "/" + envelope.UnknownProperty, Message: "unknown field"}
 		}
 	}
 	for _, k := range required {
