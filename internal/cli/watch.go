@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"mime"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -238,6 +239,14 @@ func (a *app) cmdWatch(args []string) error {
 	return w.run()
 }
 
+// monitorDeferred retains only the blocked event, never its transport suffix
+// or an unverified page tail. resume is the exact transport position for it.
+type monitorDeferred struct {
+	kind, data    string
+	after, resume string
+	hub           string
+}
+
 // watcher holds one `watch` session: an SSE stream that reconnects per
 // PROTOCOL §13.1, falling back to long-poll after repeated SSE failures.
 type watcher struct {
@@ -262,6 +271,7 @@ type watcher struct {
 	shown        *stateFile
 	identity     *hookIdentity // binds shown to this run's hub and caller
 	replayed     bool
+	deferred     *monitorDeferred
 	name         string
 	profile      Profile
 	move         *envelope.HubNotice
@@ -271,12 +281,16 @@ type watcher struct {
 	restartUntil time.Time     // restart grace: failures until then neither back off nor fall back
 	restartDelay time.Duration // the hub's jittered retry_after_ms hint
 
-	initialized      bool   // names, notices and hook identity fetched from the current hub
-	announceMove     bool   // print the hub_moved line after the next verified connection
-	pin              string // the key the current hub last proved ("" while unpinned)
-	unverifiedWarned bool   // the unpinned-identity warning is printed once per watch
-	followWarned     string // the notice whose unreachable destination was reported
-	followAttempts   int    // consecutive scheduled follows that found the destination unreachable
+	bootstrapDisplay      bool // initial absence only; cleared after the first successful locked preparation
+	displayStarted        bool // a followed hub cannot renew initial bootstrap permission
+	prepareDisplayPending bool
+	displayMovedFrom      *hookIdentity // exact scope before an existing verified follow transition
+	initialized           bool          // names, notices and hook identity fetched from the current hub
+	announceMove          bool          // print the hub_moved line after the next verified connection
+	pin                   string        // the key the current hub last proved ("" while unpinned)
+	unverifiedWarned      bool          // the unpinned-identity warning is printed once per watch
+	followWarned          string        // the notice whose unreachable destination was reported
+	followAttempts        int           // consecutive scheduled follows that found the destination unreachable
 
 	// Reconnect reporting (PROTOCOL §13.1): quiet for brief outages.
 	now       func() time.Time
@@ -350,6 +364,7 @@ var errWatchOutput = errors.New("watch output failed")
 func (w *watcher) run() error {
 	ctx := w.a.ctx
 	defer w.stopMoveTimer()
+	defer func() { w.deferred = nil }()
 	w.outage = reconnectStatus{out: w.a.stderr, name: "watch", now: w.now}
 	if !w.forMonitor && !w.a.json {
 		fmt.Fprintln(w.a.stdout, inboxHeader)
@@ -381,8 +396,15 @@ func (w *watcher) run() error {
 			}
 			if !w.initialized {
 				if w.shown != nil {
-					id := w.a.resolveIdentity(w.c, nil)
+					id := w.resolveDisplayIdentity()
 					w.identity = &id
+					if !w.displayStarted {
+						_, stateErr := os.Stat(w.shown.path)
+						w.bootstrapDisplay = errors.Is(stateErr, os.ErrNotExist)
+						w.displayStarted = true
+					}
+					w.prepareDisplayPending = true
+					w.prepareDisplayState()
 				}
 				w.refreshNames()
 				if !w.identityOff {
@@ -404,6 +426,13 @@ func (w *watcher) run() error {
 		}
 		if verified {
 			w.flushAck()
+		}
+		if errors.Is(err, errDisplayDeferred) {
+			err = w.retryDeferred()
+			if err == nil {
+				failures = 0
+				continue
+			}
 		}
 		if errors.Is(err, errWatchOutput) {
 			return err
@@ -632,6 +661,10 @@ func (w *watcher) adoptFollowed(n *envelope.HubNotice) bool {
 // identity are refetched, and the move announced, only after the next
 // verified connection.
 func (w *watcher) switchHub(hub string) {
+	if w.deferred == nil && w.identity != nil && w.identity.Caller != "" && w.identity.Hub == normalizeHub(w.c.base) {
+		old := *w.identity
+		w.displayMovedFrom = &old
+	}
 	w.c.base = strings.TrimRight(hub, "/")
 	w.stopMoveTimer()
 	w.move = nil
@@ -939,10 +972,11 @@ func (w *watcher) stream() error {
 	idle := time.NewTimer(watchSilence)
 	defer idle.Stop()
 	var (
-		data    []string
-		hasData bool
-		idBuf   = w.cursor
-		evType  string
+		data      []string
+		hasData   bool
+		idBuf     = w.cursor
+		evType    string
+		dataBytes int
 	)
 	for {
 		select {
@@ -989,11 +1023,15 @@ func (w *watcher) stream() error {
 				// cursor; it is not an event (PROTOCOL §13.1).
 				if joined := strings.Join(data, "\n"); hasData && joined != "" {
 					if err := w.handle(evType, joined, false); err != nil {
+						if errors.Is(err, errDisplayDeferred) && w.deferred != nil {
+							w.deferred.resume = idBuf
+						}
 						return err
 					}
 				}
 				w.cursor = idBuf
 				data, hasData, evType = nil, false, ""
+				dataBytes = 0
 				if len(lines) == 0 {
 					w.flushAck()
 				}
@@ -1009,6 +1047,10 @@ func (w *watcher) stream() error {
 			case "event":
 				evType = value
 			case "data":
+				dataBytes += len(value) + 1
+				if w.sharedDisplay() && dataBytes > maxSSELine {
+					return fmt.Errorf("%w: monitor event exceeds size limit", errWatchOutput)
+				}
 				data, hasData = append(data, value), true
 			case "id":
 				if !strings.ContainsRune(value, 0) {
@@ -1121,6 +1163,7 @@ func (w *watcher) replay() error {
 			if err := w.handle(ev.Type, string(raw), true); err != nil {
 				return err
 			}
+			w.cursor = ev.Cursor
 		}
 		w.cursor = body.NextCursor
 		if body.HubRestarting != nil {
@@ -1136,9 +1179,103 @@ func (w *watcher) replay() error {
 	return nil
 }
 
+// resolveDisplayIdentity recognizes the authenticated operator role for
+// monitor output only. Its reserved subject cannot be supplied as a peer or
+// principal ID. Ordinary hook/binding identity resolution remains separate.
+func (w *watcher) resolveDisplayIdentity() hookIdentity {
+	id := hookIdentity{Hub: normalizeHub(w.c.base), As: w.a.as, Cred: hookCredential(w.c.secret)}
+	ctx, cancel := context.WithTimeout(w.a.ctx, 2*time.Second)
+	defer cancel()
+	var me struct {
+		Kind        string `json:"kind"`
+		PeerID      string `json:"peer_id"`
+		PrincipalID string `json:"principal_id"`
+	}
+	if w.c.do(ctx, http.MethodGet, "/v1/peers/me", nil, nil, &me) != nil {
+		return id
+	}
+	switch me.Kind {
+	case "operator":
+		id.Caller = monitorOperatorCaller
+	case "peer":
+		if hookID.MatchString(me.PeerID) {
+			id.Caller = me.PeerID
+		}
+	case "principal":
+		if hookID.MatchString(me.PrincipalID) {
+			id.Caller = me.PrincipalID
+		}
+	}
+	return id
+}
+
+func (w *watcher) prepareDisplayState() {
+	if !w.prepareDisplayPending || w.shown == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(w.a.ctx, 250*time.Millisecond)
+	defer cancel()
+	if w.shown.prepareDisplay(ctx, w.identity, w.bootstrapDisplay, w.displayMovedFrom) == nil {
+		w.prepareDisplayPending, w.bootstrapDisplay = false, false
+		w.displayMovedFrom = nil
+	}
+}
+
+func (w *watcher) sharedDisplay() bool {
+	return w.forMonitor && !w.a.json && (w.shown != nil || w.identity != nil || w.name != "")
+}
+
+// retryDeferred runs without a transport. It never releases ownership and
+// always rechecks shared state, so receipt, release and reclaim races serialize
+// with the eventual print. A replay that waited must honor subsequent proof.
+func (w *watcher) retryDeferred() error {
+	d := w.deferred
+	if d == nil {
+		return errDisplayDeferred
+	}
+	for delay := time.Second; ; delay = min(delay*2, 15*time.Second) {
+		if !w.pause(delay) {
+			return w.a.ctx.Err()
+		}
+		if !w.moveDue.IsZero() && !time.Now().Before(w.moveDue) {
+			return &relocationError{Code: "display_pending_move", Reason: "monitor delivery pending during hub move; re-run the command"}
+		}
+		if !w.identityOff {
+			if err := w.verifyConnection(); err != nil {
+				var identityErr *relocationError
+				if errors.As(err, &identityErr) {
+					return err
+				}
+				continue // identity/network uncertainty retains the envelope
+			}
+		}
+		if normalizeHub(w.c.base) != d.hub {
+			return &relocationError{Code: "profile_changed", Reason: "monitor delivery belongs to the previous hub; re-run the command"}
+		}
+		if w.identity == nil || w.identity.Caller == "" {
+			id := w.resolveDisplayIdentity()
+			w.identity = &id
+		}
+		w.prepareDisplayState()
+		if err := w.handle(d.kind, d.data, false); err != nil {
+			if errors.Is(err, errDisplayDeferred) {
+				continue
+			}
+			return err
+		}
+		w.cursor = d.resume
+		w.deferred = nil
+		w.flushAck()
+		return nil
+	}
+}
+
 // handle prints one event (deduped on delivery_id), caches its message
 // thread and queues its cursor for --auto-ack.
 func (w *watcher) handle(evType, data string, replay bool) error {
+	if w.sharedDisplay() && len(data) > maxSSELine {
+		return fmt.Errorf("%w: monitor event exceeds size limit", errWatchOutput)
+	}
 	var ev envelope.Event
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
 		fmt.Fprintf(w.a.stderr, "vecnet: watch: undecodable %s event: %v\n", evType, err)
@@ -1190,11 +1327,18 @@ func (w *watcher) handle(evType, data string, replay bool) error {
 			queueAck() // this watch already successfully handled the delivery
 			return nil
 		}
-		if w.forMonitor && !w.a.json && w.shown != nil && f.deliveryID != "" {
-			ctx, cancel := context.WithTimeout(w.a.ctx, 250*time.Millisecond)
-			err := w.shown.displayFor(ctx, w.identity, f.deliveryID, replay, printEvent)
-			cancel()
+		if w.sharedDisplay() && f.deliveryID != "" {
+			err := errDisplayDeferred
+			if w.shown != nil {
+				ctx, cancel := context.WithTimeout(w.a.ctx, 250*time.Millisecond)
+				err = w.shown.displayFor(ctx, w.identity, f.deliveryID, replay, printEvent)
+				cancel()
+			}
 			if err != nil {
+				if errors.Is(err, errDisplayDeferred) && w.deferred == nil {
+					w.deferred = &monitorDeferred{kind: evType, data: data,
+						after: w.cursor, resume: ev.Cursor, hub: normalizeHub(w.c.base)}
+				}
 				return err
 			}
 		} else if err := printEvent(); err != nil {
