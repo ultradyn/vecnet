@@ -193,10 +193,13 @@ func TestCompactionPinnedReaderYieldsAndResumes(t *testing.T) {
 		})
 	}()
 	<-ready
+	released := false
 	defer func() {
-		close(release)
-		if err := <-done; err != nil {
-			t.Error(err)
+		if !released {
+			close(release)
+			if err := <-done; err != nil {
+				t.Error(err)
+			}
 		}
 	}()
 	if _, err := db.Exec("INSERT INTO reclaim_fixture(body) VALUES ('reader-pinned')"); err != nil {
@@ -209,6 +212,30 @@ func TestCompactionPinnedReaderYieldsAndResumes(t *testing.T) {
 	}
 	if time.Since(start) > time.Second {
 		t.Fatal("PASSIVE checkpoint waited for pinned reader")
+	}
+	close(release)
+	released = true
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := db.Maintain(context.Background(), store.MaintenanceOptions{ReclaimPages: 7, Target: time.Second})
+	if err != nil || resumed.ReclaimedPages < 1 || resumed.Checkpoint.LogPages != resumed.Checkpoint.CheckpointedPages {
+		t.Fatalf("reclaim did not resume after reader exit: %+v %v", resumed, err)
+	}
+	// All four pool connections retain writer settings after maintenance.
+	var conns []*sql.Conn
+	for i := 0; i < 4; i++ {
+		c, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, c)
+		if got := pragmaInt(t, c, "busy_timeout"); got != 5000 {
+			t.Errorf("busy_timeout leaked: %d", got)
+		}
+	}
+	for _, c := range conns {
+		c.Close()
 	}
 }
 func TestCompactionNoneReusesPagesWithoutConversion(t *testing.T) {
