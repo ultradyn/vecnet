@@ -50,8 +50,12 @@ var tools = sync.OnceValue(buildTools)
 
 // registerTools adds tools/list and tools/call.
 func (s *Server) registerTools() {
-	s.Register("tools/list", func(context.Context, *Session, *Request) (any, error) {
-		return map[string]any{"tools": tools().listed}, nil
+	s.Register("tools/list", func(_ context.Context, sess *Session, _ *Request) (any, error) {
+		var c auth.Caller
+		if sess != nil {
+			c = sess.Principal.Caller
+		}
+		return map[string]any{"tools": listedTools(c)}, nil
 	})
 	s.Register("tools/call", s.toolsCall)
 }
@@ -1193,7 +1197,7 @@ func buildTools() *toolTable {
 	}
 	narrowAttachments(doc.Defs)
 	t := &toolTable{byName: map[string]*tool{}}
-	for _, spec := range append(toolSpecs(doc.Defs), guideSpec()) {
+	for _, spec := range append(append(toolSpecs(doc.Defs), guideSpec()), agentToolSpecs()...) {
 		input, sch, err := compileInput(spec.name, spec.input, doc.Defs)
 		if err != nil {
 			panic("mcpserver: tool " + spec.name + ": " + err.Error())
