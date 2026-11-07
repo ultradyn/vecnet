@@ -112,6 +112,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   let statusGen = 0;
   let statusAbort = new AbortController();
   let humanHeld = false;
+  let createdNotified = false;
 
   const name = h('input', { id: 'inv-name', 'data-field': 'name', 'aria-required': 'true', maxlength: '128', spellcheck: 'false', autocomplete: 'off', placeholder: 'e.g. web-repo claude' });
   const kind = h('select', { id: 'inv-kind' });
@@ -208,6 +209,17 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     statusGen += 1;
     statusAbort.abort();
     statusAbort = new AbortController();
+  }
+  function finishCreated(render) {
+    invalidateStatus();
+    pending = null;
+    forget();
+    clearSecrets();
+    render();
+    if (!createdNotified) {
+      createdNotified = true;
+      if (onCreated) onCreated();
+    }
   }
   function holdHuman() {
     humanHeld = true;
@@ -500,13 +512,11 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       const res = await ctx.api.agentAdd(bodyReq, { signal: ac.signal });
       if (!acceptCompletion(life, ticket, ac.signal.aborted) || !dialog.isConnected) return;
       const submitted = vals;
-      forget();
-      pending = null;
-      clearSecrets();
-      if (spec.submit_action === 'oauth_link') showDot(res, submitted, spec);
-      else if (spec.submit_action === 'grokbot_setup') showGrok(res, submitted);
-      else showInvite(res, submitted);
-      if (onCreated) onCreated();
+      finishCreated(() => {
+        if (spec.submit_action === 'oauth_link') showDot(res, submitted, spec);
+        else if (spec.submit_action === 'grokbot_setup') showGrok(res, submitted);
+        else showInvite(res, submitted);
+      });
     } catch (x) {
       if (!acceptCompletion(life, ticket, ac.signal.aborted) || !dialog.isConnected) return;
       gate = { busy: false };
@@ -536,15 +546,14 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   }
 
   async function checkStatus() {
+    invalidateStatus();
     const ticket = life;
     const mine = statusGen;
     try {
       const res = await ctx.api.onboardingStatus(requestId, { signal: statusSignal() });
       if (mine !== statusGen || humanHeld) return;
       if (!acceptCompletion(life, ticket, ac.signal.aborted) || !dialog.isConnected) return;
-      forget();
-      pending = null;
-      showSafe(statusSafe(res), 'Status for this request. One-time text and routine secrets are not included.');
+      finishCreated(() => showSafe(statusSafe(res), 'Status for this request. One-time text and routine secrets are not included.'));
     } catch (e) {
       if (mine !== statusGen || humanHeld) return;
       if (!acceptCompletion(life, ticket, ac.signal.aborted) || !dialog.isConnected) return;
