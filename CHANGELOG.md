@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-07: document owner-scoped cursor recovery, immutable/pinned replay, typed retention/archive policy, verified mixed-format backups and staged opt-in compaction with measured storage/latency costs and CLI activation limits ([protocol](docs/PROTOCOL.md#23-get-v1events), [runbook](docs/DEPLOY.md#storage-compaction-rollout), [operator controls](docs/OPERATOR.md#storage-and-retention), [pricing evidence](docs/business/pricing-analysis.md#11-message-and-sqlite-measurements)).
+
 - 2026-11-07: initialize new SQLite databases with 4096-byte pages and INCREMENTAL reclaim; preserve existing modes and FULL durability, add opt-in bounded maintenance and operator metrics, and measure reference-storage savings and latency costs ([Task 8 receipt](docs/business/db-compaction-bench-2026-11-07.md)).
 
 - 2026-11-06: Task 5 retention preserves protective bootstrap history and explicit Config zero; legacy exhausted callbacks with erased bytes return `replay_unavailable` and retain pins until explicit recovery (`internal/hub`, `internal/events`, `internal/mcpserver`, docs/OPERATOR.md).
