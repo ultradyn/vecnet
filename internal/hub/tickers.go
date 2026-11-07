@@ -116,6 +116,11 @@ func (h *Hub) Tick(ctx context.Context, slow bool) {
 			slog.Error("hub: backfill slice", "reason", "slice_failed")
 		}
 	}
+	if h.Cfg.StorageMaintenanceEnabled {
+		if _, err := h.MaintainStorage(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("hub: storage maintenance", "reason", "slice_failed")
+		}
+	}
 	if _, err := h.Blobs.GC(ctx); err != nil && ctx.Err() == nil {
 		slog.Error("hub: tick blob gc", "err", err)
 	}
