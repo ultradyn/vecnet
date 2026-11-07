@@ -6,6 +6,8 @@
 
 > **Amendment / CoS ruling 2026-11-07 (build-box baseline):** Task 4 also makes the verified physical-path correction permanent in `scripts/bb/remote.sh`: resolve the created lane base with `pwd -P` before deriving HOME/TMPDIR/XDG paths. Cover the symlinked-base case, document it in `docs/BUILDBOX.md` and add one CHANGELOG line. Keep this repair in its own `fix(bb): resolve lane paths physically` commit. Delivery lifecycle work retains priority.
 
+> **Amendment / CoS ruling 2026-11-07 (Task 2 independent review, R11):** revalidate the current desired binary/launcher generation under start serialization before a destructive replacement decision, and use that same generation for launch and wait. An older pending ensure must never roll back a completed upgrade. Distinguish explicit service absence from unknown/error lookup results: preserve a live known managed owner on lookup failure and return a bounded fallback error. Retain detached fallback when manager/unit absence is established. Pin both regressions with real fixture processes; share the orphan/upgrade lease-release wait loop. Baseline cancellation/proxy error noise in `TestWatchRestartGraceNoFallback` is recorded in the final receipt and deferred for later test-output capture cleanup.
+
 > For agentic workers: use ultra-code-workflows, sequential implement/review/fix gates in `.worktrees/codex-auto-delivery`. Record evidence in `.superpowers/sdd/2026-11-07-codex-auto-delivery/`. No production code precedes the coordinator design summary.
 
 **Goal:** the next vecnet action registers an eligible existing Codex session and ensures one durable delivery owner per hub, including after upgrades.
