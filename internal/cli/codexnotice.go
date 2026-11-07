@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +19,8 @@ func (r codexInactiveReason) action() string {
 	switch r {
 	case "node_missing", "node_too_old":
 		return "install Node.js 22.18 or newer, then retry a normal vecnet action"
+	case "node_unavailable":
+		return "check that Node.js can run and report its version, then retry a normal vecnet action"
 	case "assets_missing":
 		return "reinstall the vecnet launcher assets, then retry a normal vecnet action"
 	case "manager_refused":
@@ -38,16 +43,20 @@ type codexNoticeState struct {
 
 // Unsupported platforms fail closed without needing Linux ownership helpers.
 // Linux installs descriptor-relative, private, bounded metadata access.
-var codexNoticeAccess = func(a *app, hub string, update func(*codexNoticeState) bool) (codexNoticeState, error) {
+var codexNoticeAccess = func(a *app, hub string, ctx context.Context, update func(*codexNoticeState) bool) (codexNoticeState, error) {
 	return codexNoticeState{}, errCodexDelivery
 }
 
-func (a *app) persistCodexReason(hub string, err error) {
+func (a *app) persistCodexReason(ctx context.Context, hub string, err error) {
 	var reason codexInactiveReason
 	if err != nil && (!errors.As(err, &reason) || reason.action() == "") {
 		return
 	}
-	_, _ = codexNoticeAccess(a, hub, func(s *codexNoticeState) bool {
+	// Background writers may wait briefly for ordinary marker contention,
+	// within the caller's remaining lifetime. Foreground acquisition never waits.
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	_, _ = codexNoticeAccess(a, hub, ctx, func(s *codexNoticeState) bool {
 		if s.Reason == reason {
 			return false
 		}
@@ -98,17 +107,17 @@ func (a *app) cmdCodexStatus(args []string) error {
 	if a.getenv("VECNET_CODEX_AUTO_DELIVERY") == "0" || (bindErr == nil && bindings.disabled(name, a.as)) {
 		state, action = "disabled by explicit opt-out", "enable automatic delivery when desired"
 	} else if bindErr == nil {
-		if s, err := codexNoticeAccess(a, hub, nil); err == nil && s.Reason.action() != "" {
+		if s, err := codexNoticeAccess(a, hub, nil, nil); err == nil && s.Reason.action() != "" {
 			state, action = string(s.Reason), s.Reason.action()
 		}
 	}
-	_, err = fmt.Fprintf(a.stdout, "Codex auto-delivery for %s: %s\nAction: %s\n", hub, state, action)
+	_, err = fmt.Fprintf(a.stdout, "Codex auto-delivery for %s: %s\nAction: %s\n", codexNoticeHubDisplay(hub), state, action)
 	return err
 }
 
 func (a *app) codexNoticeMessage(hub string, now time.Time) string {
 	announced := false
-	s, err := codexNoticeAccess(a, hub, func(s *codexNoticeState) bool {
+	s, err := codexNoticeAccess(a, hub, nil, func(s *codexNoticeState) bool {
 		if a.ctx.Err() != nil || s.Reason.action() == "" {
 			return false
 		}
@@ -126,5 +135,21 @@ func (a *app) codexNoticeMessage(hub string, now time.Time) string {
 	if err != nil || !announced {
 		return ""
 	}
-	return fmt.Sprintf("vecnet: Codex auto-delivery inactive for %s: %s; run `vecnet codex status`\n", s.Hub, string(s.Reason))
+	return fmt.Sprintf("vecnet: Codex auto-delivery inactive for %s: %s; run `vecnet codex status`\n", codexNoticeHubDisplay(s.Hub), string(s.Reason))
+}
+
+// Presentation is escaped and bounded independently of the full hub identity
+// used for hashing, ownership and metadata comparisons.
+func codexNoticeHubDisplay(hub string) string {
+	var out strings.Builder
+	for _, r := range hub {
+		quoted := strconv.QuoteToASCII(string(r))
+		part := quoted[1 : len(quoted)-1]
+		if out.Len()+len(part) > 192 {
+			out.WriteString("...")
+			break
+		}
+		out.WriteString(part)
+	}
+	return out.String()
 }

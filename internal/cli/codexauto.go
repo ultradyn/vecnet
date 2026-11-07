@@ -185,7 +185,7 @@ func (a *app) registerCodexAuto(thread, home string) error {
 	probe, err := a.probeCodexDelivery(a.ctx, home, thread, previous)
 	if err != nil || !probe.Loaded {
 		if err != nil {
-			a.persistCodexReason(hub, err)
+			a.persistCodexReason(a.ctx, hub, err)
 		}
 		return errCodexDelivery
 	}
@@ -194,7 +194,7 @@ func (a *app) registerCodexAuto(thread, home string) error {
 		if probe.Previous == "live" {
 			reason = "other_thread_live"
 		}
-		a.persistCodexReason(hub, reason)
+		a.persistCodexReason(a.ctx, hub, reason)
 		return nil
 	}
 	binding := codexBinding{Profile: name, As: a.as, Hub: hub, Caller: caller, CodexHome: home, ThreadID: thread, CreatedAt: time.Now().UTC()}

@@ -29,9 +29,9 @@ var errCodexDelivery = errors.New("codex delivery unavailable or unsafe; using h
 // A bounded helper is called by Task 3's background registration, not on the
 // foreground hook budget. No hub connection or credential is needed here.
 func (a *app) ensureCodexDelivery(ctx context.Context, hub, config, bindings string) (err error) {
-	defer func() { a.persistCodexReason(hub, err) }()
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
+	defer func() { a.persistCodexReason(ctx, hub, err) }()
 	release, err := a.codexDeliveryRelease()
 	if err != nil {
 		return err
@@ -196,16 +196,24 @@ func (a *app) checkCodexDeliveryNode(ctx context.Context, r codexDeliveryRelease
 	var out deliveryOutput
 	cmd.Stdout = &out
 	if cmd.Run() != nil {
-		return codexInactiveReason("node_too_old")
+		return codexInactiveReason("node_unavailable")
 	}
 	version := strings.Split(strings.TrimPrefix(strings.TrimSpace(out.String()), "v"), ".")
 	if len(version) != 3 {
-		return codexInactiveReason("node_too_old")
+		return codexInactiveReason("node_unavailable")
+	}
+	for _, component := range version {
+		if component == "" || strings.Trim(component, "0123456789") != "" {
+			return codexInactiveReason("node_unavailable")
+		}
 	}
 	major, e1 := strconv.Atoi(version[0])
 	minor, e2 := strconv.Atoi(version[1])
 	_, e3 := strconv.Atoi(version[2])
-	if e1 != nil || e2 != nil || e3 != nil || major < 22 || (major == 22 && minor < 18) {
+	if e1 != nil || e2 != nil || e3 != nil {
+		return codexInactiveReason("node_unavailable")
+	}
+	if major < 22 || (major == 22 && minor < 18) {
 		return codexInactiveReason("node_too_old")
 	}
 	return nil

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,6 +22,245 @@ import (
 )
 
 const noticeHub = "https://hub.invalid"
+
+func TestCodexStatusEscapedHub(t *testing.T) {
+	for _, path := range []string{"/base%0Aextra", "/base%0Dextra", "/%1B%5B31mextra", "/ordinary%20path", "/" + strings.Repeat("long", 200)} {
+		t.Run(path[:min(len(path), 32)], func(t *testing.T) {
+			f := newDeliveryFixture(t)
+			noticeConfig(t, f)
+			hub := noticeHub + path
+			if err := saveConfig(f.config, Config{Profiles: map[string]Profile{"p": {Hub: hub, Secret: "vn_peer_private-error-text"}}}); err != nil {
+				t.Fatal(err)
+			}
+			code, out, errs := noticeRun(f, "codex", "status")
+			if code != 0 || errs != "" {
+				t.Fatalf("public status exit=%d stderr=%q", code, errs)
+			}
+			check := func(label, output string, lines int) {
+				t.Helper()
+				if strings.Count(output, "\n") != lines || strings.ContainsAny(output, "\r\x1b\t") || strings.Contains(output, "vn_peer") || strings.Contains(output, "private-error-text") || len(output) > 512 {
+					t.Errorf("%s unsafe/unbounded output=%q", label, output)
+				}
+				if path == "/ordinary%20path" && !strings.Contains(output, "ordinary path") {
+					t.Errorf("%s lost ordinary decoded path: %q", label, output)
+				}
+			}
+			check("status", out, 2)
+			noticeSeed(t, f, hub, "node_missing")
+			message := f.app.codexNoticeMessage(hub, time.Now())
+			if message == "" {
+				t.Fatal("notice fixture did not emit")
+			}
+			check("notice", message, 1)
+		})
+	}
+}
+
+func TestCodexNoticeReasonWriterContention(t *testing.T) {
+	for _, activation := range []bool{false, true} {
+		name := "refusal"
+		if activation {
+			name = "verified-activation"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newDeliveryFixture(t)
+			if activation {
+				if err := f.ensure(noticeHub); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Remove(filepath.Join(f.dir, "bin/node")); err != nil {
+				t.Fatal(err)
+			}
+			noticeSeed(t, f, noticeHub, "manager_refused")
+			if f.app.codexNoticeMessage(noticeHub, time.Now()) == "" {
+				t.Fatal("missing initial reason notice")
+			}
+			lock, err := deliveryPrivateFile(filepath.Join(filepath.Dir(noticePath(f, noticeHub)), "state.lock"), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Close()
+			if locked, err := deliveryLock(lock); err != nil || !locked {
+				t.Fatal("cannot hold marker lock")
+			}
+			done := make(chan error, 1)
+			go func() {
+				done <- f.app.ensureCodexDelivery(context.Background(), noticeHub, f.config, f.bindings+"-other-registration")
+			}()
+			var result error
+			completed := false
+			select {
+			case result = <-done:
+				completed = true
+			case <-time.After(300 * time.Millisecond):
+			}
+			if err := unix.Flock(int(lock.Fd()), unix.LOCK_UN); err != nil {
+				t.Fatal(err)
+			}
+			if !completed {
+				select {
+				case result = <-done:
+				case <-time.After(2 * time.Second):
+					t.Fatal("reason writer exceeded bounded lifetime")
+				}
+			}
+			if (result == nil) != activation {
+				t.Fatalf("ensure activation=%v error=%v", activation, result)
+			}
+			want := "node_missing"
+			if activation {
+				want = ""
+			}
+			noticeReason(t, f, want)
+			if !activation && f.app.codexNoticeMessage(noticeHub, time.Now()) == "" {
+				t.Fatal("changed reason did not emit")
+			}
+			if message := f.app.codexNoticeMessage(noticeHub, time.Now()); message != "" {
+				t.Fatalf("repeated or stale notice=%q", message)
+			}
+			if err := f.ensure(noticeHub); (err == nil) != activation {
+				t.Fatalf("repeat ensure=%v", err)
+			}
+			if message := f.app.codexNoticeMessage(noticeHub, time.Now()); message != "" {
+				t.Fatalf("reason history was lost: %q", message)
+			}
+		})
+	}
+}
+
+func TestCodexNoticeOwnershipRefusalSites(t *testing.T) {
+	t.Run("live-older-owner-without-lease-proof", func(t *testing.T) {
+		f := newDeliveryFixture(t)
+		if err := f.ensure(noticeHub); err != nil {
+			t.Fatal(err)
+		}
+		pid, meta := f.owner()
+		raw, err := os.ReadFile(meta)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer deliveryWrite(t, meta, string(raw), 0600)
+		// This live process has valid birth evidence but no delivery lease FD.
+		child := exec.Command("/bin/sleep", "10")
+		child.Env = f.environ()
+		if err := child.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = child.Process.Kill(); _ = child.Wait() }()
+		var owner deliveryOwner
+		if err := json.Unmarshal(raw, &owner); err != nil {
+			t.Fatal(err)
+		}
+		owner.PID, owner.Birth = child.Process.Pid, procStart(child.Process.Pid)
+		changed, _ := json.Marshal(owner)
+		deliveryWrite(t, meta, string(changed), 0600)
+		next := filepath.Join(f.dir, "next-release.ts")
+		deliveryWrite(t, next, "new generation", 0600)
+		f.env["VECNET_CODEX_DELIVERY_ENTRY"] = next
+		noticeSeed(t, f, noticeHub, "assets_missing")
+		if err := f.ensure(noticeHub); err == nil {
+			t.Fatal("unprovable live owner accepted")
+		}
+		if !deliveryOwnerRunning(owner) || procStart(pid) == "" {
+			t.Fatal("owner or unproven process was signaled")
+		}
+		if signals, _ := os.ReadFile(filepath.Join(f.dir, "runner-signals")); len(signals) != 0 {
+			t.Fatal("existing delivery owner was signaled")
+		}
+		noticeReason(t, f, "ownership_ambiguous")
+	})
+	t.Run("child-never-proves-ownership", func(t *testing.T) {
+		f := newDeliveryFixture(t)
+		deliveryWrite(t, f.env["VECNET_BIN"], "#!/bin/sh\nexit 0\n", 0700)
+		noticeSeed(t, f, noticeHub, "assets_missing")
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		if err := f.app.ensureCodexDelivery(ctx, noticeHub, f.config, f.bindings); err == nil {
+			t.Fatal("unverified child accepted")
+		}
+		noticeReason(t, f, "ownership_ambiguous")
+		if len(f.starts()) != 0 {
+			t.Fatal("unexpected delivery activation")
+		}
+	})
+}
+
+func TestCodexNoticeReasonWriterDeadline(t *testing.T) {
+	f := newDeliveryFixture(t)
+	if err := os.Remove(filepath.Join(f.dir, "bin/node")); err != nil {
+		t.Fatal(err)
+	}
+	noticeSeed(t, f, noticeHub, "manager_refused")
+	lock, err := deliveryPrivateFile(filepath.Join(filepath.Dir(noticePath(f, noticeHub)), "state.lock"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if locked, err := deliveryLock(lock); err != nil || !locked {
+		t.Fatal("cannot hold marker lock")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := f.app.ensureCodexDelivery(ctx, noticeHub, f.config, f.bindings); err == nil {
+		t.Fatal("missing node must refuse")
+	}
+	if time.Since(start) > 250*time.Millisecond {
+		t.Fatal("reason serialization ignored caller deadline")
+	}
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	noticeReason(t, f, "manager_refused")
+}
+
+func TestCodexNoticeNodeProbeFailureClassification(t *testing.T) {
+	for _, shape := range []string{"supported", "old", "sleep", "execution-failure", "malformed", "malformed-numeric", "cancelled"} {
+		t.Run(shape, func(t *testing.T) {
+			f := newDeliveryFixture(t)
+			noticeConfig(t, f)
+			noticeSeed(t, f, noticeHub, "assets_missing")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			script := ""
+			switch shape {
+			case "old":
+				script = "#!/bin/sh\necho v20.1.0\n"
+			case "sleep":
+				script = "#!/bin/sh\nexec /bin/sleep 5\n"
+			case "execution-failure":
+				script = "#!/missing-test-interpreter\n"
+			case "malformed":
+				script = "#!/bin/sh\necho private-error-text\n"
+			case "malformed-numeric":
+				script = "#!/bin/sh\necho v22.x.0\n"
+			case "cancelled":
+				cancel()
+			}
+			if script != "" {
+				deliveryWrite(t, filepath.Join(f.dir, "bin/node"), script, 0700)
+			}
+			start := time.Now()
+			err := f.app.ensureCodexDelivery(ctx, noticeHub, f.config, f.bindings)
+			if time.Since(start) > 2*time.Second || (err == nil) != (shape == "supported") {
+				t.Fatalf("probe classification shape=%s error=%v elapsed=%s", shape, err, time.Since(start))
+			}
+			want := "node_unavailable"
+			if shape == "supported" {
+				want = ""
+			} else if shape == "old" {
+				want = "node_too_old"
+			}
+			noticeReason(t, f, want)
+			if want == "node_unavailable" {
+				code, out, errs := noticeRun(f, "codex", "status")
+				if code != 0 || errs != "" || !strings.Contains(out, want) || !strings.Contains(out, "Action:") || strings.Contains(out, "install Node") || strings.Contains(out, "private-error-text") {
+					t.Fatalf("dishonest probe status: exit=%d out=%q err=%q", code, out, errs)
+				}
+			}
+		})
+	}
+}
 
 func noticePath(f *deliveryFixture, hub string) string {
 	_, slug, _ := codexDeliveryHub(hub)

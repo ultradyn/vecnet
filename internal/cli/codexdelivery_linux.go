@@ -454,7 +454,7 @@ func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bind
 		if deliveryOwnerRunning(owner) {
 			pidfd, err := deliveryOwnerPidfd(p, lease, owner)
 			if err != nil {
-				return err
+				return codexInactiveReason("ownership_ambiguous")
 			}
 			if installed && owner.Managed {
 				unix.Close(pidfd)
@@ -504,7 +504,7 @@ func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bind
 func deliveryAwaitOwner(ctx context.Context, p deliveryPaths, r codexDeliveryRelease, lease *os.File) error {
 	for {
 		if ctx.Err() != nil {
-			return errCodexDelivery
+			return codexInactiveReason("ownership_ambiguous")
 		}
 		// Do not take a free lease while waiting for a child to acquire it:
 		// that would turn our own starter into a successful busy contender.
@@ -515,7 +515,7 @@ func deliveryAwaitOwner(ctx context.Context, p deliveryPaths, r codexDeliveryRel
 			}
 		}
 		if !sleepCtx(ctx, 10*time.Millisecond) {
-			return errCodexDelivery
+			return codexInactiveReason("ownership_ambiguous")
 		}
 	}
 }
@@ -744,10 +744,12 @@ func init() {
 	codexNoticeBindings = linuxCodexNoticeBindings
 }
 
-// Notice metadata uses its own nonblocking lock, never an owner/registry lock.
+// Notice metadata uses its own lock, never an owner/registry lock. A nil
+// context keeps foreground updates nonblocking; background writers retry only
+// within their bounded caller context.
 // Walk every component without symlinks and pin the final private directory
 // throughout read/rename, so unsafe replacements cannot redirect writes.
-func linuxCodexNoticeAccess(a *app, hub string, update func(*codexNoticeState) bool) (codexNoticeState, error) {
+func linuxCodexNoticeAccess(a *app, hub string, ctx context.Context, update func(*codexNoticeState) bool) (codexNoticeState, error) {
 	normalized, slug, err := codexDeliveryHub(hub)
 	s := codexNoticeState{Version: 1, Hub: normalized}
 	if err != nil {
@@ -808,9 +810,17 @@ func linuxCodexNoticeAccess(a *app, hub string, update func(*codexNoticeState) b
 			return s, e
 		}
 		defer lock.Close()
-		locked, e := deliveryLock(lock)
-		if e != nil || !locked {
-			return s, errCodexDelivery
+		for {
+			locked, e := deliveryLock(lock)
+			if e != nil {
+				return s, errCodexDelivery
+			}
+			if locked {
+				break
+			}
+			if ctx == nil || !sleepCtx(ctx, 10*time.Millisecond) {
+				return s, errCodexDelivery
+			}
 		}
 	}
 	file, err := open("state.json", false)
