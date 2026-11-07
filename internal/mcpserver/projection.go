@@ -21,8 +21,11 @@ func projectTool(entry map[string]any) map[string]any {
 	}
 	name := out["name"].(string)
 	description, ok := toolDescriptions[name]
-	if !ok {
-		panic("mcpserver: missing MCP description for " + name)
+	if !ok || strings.TrimSpace(description) == "" {
+		// Keep the original discovery entry usable if a catalog addition misses
+		// the projection table. TestProjectionCatalogDescriptions fails loudly
+		// for that omission without taking down tools/list and tools/call.
+		return out
 	}
 	out["description"] = description
 	input := out["inputSchema"].(schema)

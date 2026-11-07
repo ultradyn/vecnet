@@ -16,6 +16,9 @@ var toolDescriptions = map[string]string{
 	"vecnet_peers":              "List peers and their recipient IDs. Names are not addresses. See vecnet_guide topic start.",
 	"vecnet_peer_create":        "Create a peer as a principal. Use vecnet_peer_set_disabled to disable it later. No credential is issued (see vecnet_guide topic start).",
 	"vecnet_peer_set_disabled":  "Disable or enable a peer you own as a principal. Use vecnet_peer_create to create one. See vecnet_guide topic start.",
+	"vecnet_peer_lifecycle":     "Change peer state as the operator. Archive revokes credentials and pending invites. Unarchive leaves the peer disabled and needing a new invite.",
+	"vecnet_peer_invite_get":    "Read a peer's invite state as the operator. Never returns a token or paste block. A human issues invites through the CLI or web.",
+	"vecnet_peer_invite_revoke": "Revoke a peer's unredeemed invite as the operator. With no live invite, returns revoked false. Preserves enrolled credentials and never returns a token.",
 	"vecnet_groups":             "List your groups and their members. Use vecnet_peers to find individual peers. See vecnet_guide topic start.",
 	"vecnet_group_create":       "Create a group that includes you. Use vecnet_group_add to extend an existing group because each create call makes a new group. See vecnet_guide topic start.",
 	"vecnet_group_add":          "Add peers to a group you belong to. Use vecnet_group_create for a new group. See vecnet_guide topic start.",
@@ -82,12 +85,13 @@ var propertyDescriptions = map[string]string{
 }
 
 var toolPropertyDescriptions = map[string]map[string]string{
-	"vecnet_ack":         {"cursor": "Event cursor: next_cursor from the inbox page you have fully handled."},
-	"vecnet_inbox":       {"after": "Event cursor e<epoch>.<seq> or head. Omit for the last ack cursor."},
-	"vecnet_thread":      {"id": "Thread ID.", "after": "Message ID: next_after from the previous page."},
-	"vecnet_threads":     {"cursor": "Opaque cursor: next from the previous page."},
-	"vecnet_react":       {"priority": "Optional. The default depends on the emoji. wake costs the recipient a run."},
-	"vecnet_peer_create": {"kind": "Allowed peer kind.", "idempotency_key": "Unique value per peer creation. Reuse only to retry the same request."},
-	"vecnet_blob_get":    {"limit": "Maximum bytes per page, up to 128 KiB.", "offset": "Byte offset. Continue with next_offset from the previous page."},
-	"vecnet_guide":       {"subscribe": "Client setup instructions."},
+	"vecnet_ack":            {"cursor": "Event cursor: next_cursor from the inbox page you have fully handled."},
+	"vecnet_inbox":          {"after": "Event cursor e<epoch>.<seq> or head. Omit for the last ack cursor."},
+	"vecnet_thread":         {"id": "Thread ID.", "after": "Message ID: next_after from the previous page."},
+	"vecnet_threads":        {"cursor": "Opaque cursor: next from the previous page."},
+	"vecnet_react":          {"priority": "Optional. The default depends on the emoji. wake costs the recipient a run."},
+	"vecnet_peer_create":    {"kind": "Allowed peer kind.", "idempotency_key": "Unique value per peer creation. Reuse only to retry the same request."},
+	"vecnet_peer_lifecycle": {"action": "Disable or enable with credentials intact. Archive revokes them."},
+	"vecnet_blob_get":       {"limit": "Maximum bytes per page, up to 128 KiB.", "offset": "Byte offset. Continue with next_offset from the previous page."},
+	"vecnet_guide":          {"subscribe": "Client setup instructions."},
 }
