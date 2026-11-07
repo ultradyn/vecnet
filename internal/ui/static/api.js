@@ -396,6 +396,13 @@ export function createApi({ secret, fetch = globalThis.fetch, onUnauthorized = (
     adminPeers: () => get('/v1/admin/peers'),
     addPeer: body => post('/v1/admin/peers', { body }),
     dotLink: peerId => post('/v1/admin/dot-links', { body: { peer_id: peerId } }),
+    // A peer's invite (PROTOCOL §2.12): its state, never a token; a new one,
+    // whose answer carries the one-time token for the copy panel only; and
+    // revoke, a no-op answer when nothing is live.
+    inviteStatus: peerId => get('/v1/admin/peers/' + seg(peerId) + '/enrol-token'),
+    reissueInvite: (peerId, ttl) => post('/v1/admin/peers/' + seg(peerId) + '/enrol-token', { body: ttl ? { enrol_ttl_seconds: ttl } : undefined }),
+    revokeInvite: peerId => request('DELETE', '/v1/admin/peers/' + seg(peerId) + '/enrol-token'),
+    peerLifecycle: (peerId, action) => post('/v1/admin/peers/' + seg(peerId) + '/' + action),
     principals: () => get('/v1/admin/principals'),
     routes: () => get('/v1/admin/routes'),
     inbox: ({ limit, before, unread } = {}) => get('/v1/admin/inbox' + query({ limit, before, unread: unread ? 1 : undefined })),

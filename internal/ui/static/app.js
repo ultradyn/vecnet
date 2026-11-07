@@ -9,6 +9,7 @@ import { activityAction } from './activity-model.js';
 import { createActivity } from './activity.js';
 import { createApi } from './api.js';
 import { createAppearance } from './appearance.js';
+import { showBuildInfo } from './build-info.js';
 import { avatarHash, createAvatarCache } from './avatar-model.js';
 import * as compose from './compose.js';
 import { connectionState } from './connection-model.js';
@@ -347,6 +348,8 @@ document.addEventListener('click', e => {
 
 // The local read list was replaced by the hub's read state.
 localStorage.removeItem('vecnet.ui.read');
+
+showBuildInfo($('build-info'));
 
 const stored = localStorage.getItem(SECRET_KEY);
 if (stored) start(stored);

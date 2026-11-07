@@ -293,6 +293,8 @@ Admin endpoints require the operator credential [T17]. Each mirrors a CLI comman
 | `GET /v1/admin/principals` | `principal list [--json]`: `{principals: […]}`, one row per principal with its limits, created-peer counts and default scopes | §18.4 |
 | `POST /v1/admin/peers` | `peer add --kind --name [--principal]`, `peer invite [--name [--open-name]] [--kind] [--principal] [--ttl]`: body `{kind, name?, principal_id?, enrol_ttl_seconds?, name_open?}` (`name` required unless `name_open`) → 201 `{peer_id, name, name_open, enrol_token, enrol_expires_at, principal_id, hub_url, hub_owner}`. `enrol_ttl_seconds` defaults to 86400 (24 h) and must be 60–604800 (7 d), else 422 `invalid_value`; `hub_url` is the hub's configured public URL, for the invite; a dot's `enrol_token` and `enrol_expires_at` are `""` | [T11, T17, R10] |
 | `POST /v1/admin/peers/{id}/enrol-token` | `peer invite <peer> [--ttl]`: optional body `{enrol_ttl_seconds?}` → 201, the same body as `POST /v1/admin/peers`. Re-issues the token of a peer that has not enrolled (an expired or leaked invite): its unused tokens are spent first. A peer holding a live credential is 409 `already_enrolled` (rotate it instead); a dot is 422 `invalid_value`. Audited as `enrol_reissue` | 2026-11-04 |
+| `GET /v1/admin/peers/{id}/enrol-token` | `invite status <peer>` (also `peer invite status <peer>`), MCP `vecnet_peer_invite_get`: 200 `{peer_id, state, expires_at, revoked_at}`, `Cache-Control: no-store`, never a token. A peer has at most one live invite, and its state is derived from the enrolment rows (no stored state): `pending` (an unspent token not yet expired; `expires_at` is its expiry), `expired` (unspent, past `expires_at`), `revoked` (every token spent and the peer never held a credential; `revoked_at` is when the last was spent), `claimed` (the peer holds or held a peer credential: it enrolled, or was rotated), `linked` (an OAuth login is bound to it: a dot or Grok Bot, section 4.5) or `none` (no token was ever issued: an unlinked dot). `expires_at` and `revoked_at` are `""` when they do not apply. An unknown peer is 404 `not_found` | 2026-11-07 |
+| `DELETE /v1/admin/peers/{id}/enrol-token` | `invite revoke <peer>` (also `peer invite revoke <peer>`), MCP `vecnet_peer_invite_revoke`: no body → 200, the status above plus `revoked`. Spends the peer's live (`pending`) token, so it no longer enrols (`POST /v1/enrol` answers 401 `unauthenticated`); `revoked: true`, state `revoked`, audited as `enrol_revoke` (actor `operator`, subject the peer, no detail, never the token). With no live invite it is a no-op: `revoked: false`, the unchanged state, no audit; an expired token still answers 410 `enrol_token_expired`. It never touches a credential: an enrolled peer is stopped with `POST …/disable` or replaced with `…/rotate`. A new invite (`POST …/enrol-token`) after a revoke works as usual. An unknown peer is 404 `not_found` | 2026-11-07 |
 | `PATCH /v1/admin/peers/{id}` | `peer rename <id> <name>`: body `{"name"}` → 204. The peer id is unchanged, and so are its threads, routes, scopes and credentials. `name` is required (empty is 422 `invalid_value`, field `name`) and then follows the agent-name rules above: bad shape is 422 `invalid_value`, a reserved skeleton is 422 `name_reserved`, and a skeleton equal to another peer's name is 409 `name_taken`. The peer's current name is a no-op (no audit, no directory event), including a free-form name that would not pass those rules as a new one. A real change is audited as `peer_rename` (actor `operator`, subject the peer id, detail `old_name` and `new_name`) and appends `directory_updated` (`change: updated`, `fields: ["name"]`). An unknown peer is 404 `not_found` | 2026-11-06 |
 | `POST /v1/admin/peers/{id}/move` | `peer move <peer> --principal <prn_>` | [R10] |
 | `POST /v1/admin/peers/{id}/rotate` | `peer rotate`; also spends the peer's unused enrolment tokens, since a rotation answers a leak | [T11, T17] |
@@ -551,7 +553,7 @@ The inbox is the resource `vecnet://peer/<peer_id>/inbox`; a principal-level sub
 
 ### 4.3 Tools
 
-The hub exposes exactly these twenty-three tools [R13, §17.2, §8.1, §18.4]:
+The hub exposes exactly these twenty-five tools [R13, §17.2, §8.1, §18.4, §2.12]:
 
 | Tool | Args | Effect | Source |
 |---|---|---|---|
@@ -576,6 +578,8 @@ The hub exposes exactly these twenty-three tools [R13, §17.2, §8.1, §18.4]:
 | `vecnet_group_add` | `group_id`, `members` (1–64), `as?` | Same as `POST /v1/groups/{id}/members` | §2.9 |
 | `vecnet_peer_create` | `kind`, `name`, `idempotency_key` | Same as `POST /v1/peers`: principal credential only, same checks, replay and limits; returns `{peer, idempotency_key}` and never a credential | §18.4 |
 | `vecnet_peer_set_disabled` | `peer_id`, `disabled` | Same as `PATCH /v1/peers/{id}`: principal credential only, for a peer it created and still owns; returns `{peer}` | §18.4 |
+| `vecnet_peer_invite_get` | `peer_id` | Same as `GET /v1/admin/peers/{id}/enrol-token`: operator credential only (any other caller, an OAuth login included, is the tool error `forbidden`); returns the invite state `{peer_id, state, expires_at, revoked_at}`, never a token. Read-only, `readOnlyHint` | §2.12 |
+| `vecnet_peer_invite_revoke` | `peer_id` | Same as `DELETE /v1/admin/peers/{id}/enrol-token`: operator credential only; spends a live invite's token (`revoked: true`, audited `enrol_revoke`) or changes nothing (`revoked: false`). Never touches a credential and never returns a token; issuing an invite stays on the human CLI and web | §2.12 |
 | `vecnet_blob_put` | Disk: `data_base64`, `media_type`, `ttl_seconds?`; R2 grant: `phase:"grant",size,sha256,media_type,idempotency_key`; complete: `phase:"complete",blob_id` | Disk `{sha256,size}`; R2 grant/verified reference as §2.7. Host performs PUT, hub performs HEAD only; discriminated schemas | §2.7, §11 |
 | `vecnet_blob_get` | Disk/durable: `sha256,offset?,limit?`; R2: `sha256,blob_id` | Disk/durable base64 pages; R2 fresh GET capability as §2.7, at most 600s; no offset/limit (host uses Range). Read-only with outputSchema | §2.7, §11 |
 
@@ -888,7 +892,7 @@ When R2 transfers are installed, auto-spilled full message text and raw source w
 - **Dots never hold a vecnet secret** [T11]. The hub enforces this (section 2.12), and a link code revokes any peer credential or enrolment token left on the dot from before it did.
 - **CLI profiles:** `~/.config/vecnet/config.toml` holds named profiles, each a hub URL plus a peer, principal or operator credential; `--net` selects; `--as <peer>` picks a principal's peer [T17]. One peer per long-lived agent identity; sessions reuse that identity's stored credential [T17].
 - **Send scopes:** default allow-all among enrolled peers and teams; per-peer allow/deny lists set by the operator; ad hoc group creation respects the same scopes [T11]. Scopes gate sends and group creation only: every peer MAY read the directory, and thread history is readable by participants only [R24] (and by the operator, section 2.8). A send to a team or group is checked per member as if each were addressed directly: a deny on the group or on any member refuses the whole send (403 `scope_denied`, `details.recipient` the member, `details.via` the group); under allow-list scopes each member must be allowed unless the group or team itself is. Group membership is not required to address a group.
-- **Audit:** append-only table of actor (the sending peer id; `operator` for an admin action taken with the operator credential; `hub` for a hub-initiated action; the principal's `prn_` id for a principal's own peer provisioning, §18.4), action (`send`, `ack`, `enrol`, `enrol_reissue`, `rotate`, group create/change, `purge`, scope change, `event_subscribe` with the callback host only, `subscription_pause`, `oauth_token_reuse`), target ids, timestamp [T11]; loop cuts are also audited [T16].
+- **Audit:** append-only table of actor (the sending peer id; `operator` for an admin action taken with the operator credential; `hub` for a hub-initiated action; the principal's `prn_` id for a principal's own peer provisioning, §18.4), action (`send`, `ack`, `enrol`, `enrol_reissue`, `enrol_revoke`, `rotate`, group create/change, `purge`, scope change, `event_subscribe` with the callback host only, `subscription_pause`, `oauth_token_reuse`), target ids, timestamp [T11]; loop cuts are also audited [T16].
 - **Logging:** Message bodies and secrets MUST NOT enter logs or audit rows; redaction lives in the logger [T11]. MCP transport diagnostics log each parsed `initialize` and other requests with an allowed foreign Origin at INFO, and Origin/version/session/Accept refusals at WARN, using only client name/version (64 runes each), requested and negotiated protocol versions, Origin presence and normalized foreign origin (100 runes), Accept (100 runes), session-id presence, caller kind and authenticated peer id. They omit Authorization, cookies, bodies and session id values; Origin checks still precede authentication.
 - **Secrets at rest:** bearer, principal, operator and enrolment secrets are stored only as SHA-256 hashes. Signing keys (route and notify `whsec_`, the blob-token `hub_key`) must be usable for HMAC and so are stored in plaintext, protected by the 0700 data directory. Before opening `hub.db` the hub clears group and other permission bits on an existing data directory (a volume mount is often 0755), and refuses to start when it cannot.
 
@@ -1588,7 +1592,7 @@ message_sha256=<lower-case hex sha256 of the message's UTF-8 bytes>
 - `kind` is one of the three kinds;
 - `message` is 1–1024 bytes of valid UTF-8;
 - `at`, when given, is a wire timestamp in canonical millisecond form; it may be in the past;
-- `moving` needs a valid `new_url` whose normalised form differs from the hub's own `public_url`; the stored `new_url` is the normalised form; any other kind refuses `new_url`;
+- `moving` needs a valid `new_url` whose normalised form differs from the hub's own `public_url`; the stored `new_url` is the normalised form; any other kind refuses `new_url`. A hub URL, including `new_url`, must not contain credentials, a query or a fragment;
 - `expires_at`, when given, is a future wire timestamp. By default a notice expires 24 hours, and a `moving` notice 30 days, after the later of now and `at`.
 
 The answer is 201 `{notice}`, signed. The hub holds at most one active notice per kind: a post clears the active notice of its kind (`cleared_how: replaced`) in the same transaction.
@@ -1674,3 +1678,18 @@ Any failure is exit 1 `relocation_unverified` with the reason.
 | `profile_changed` | client, exit 1 (`watch`) | The watched profile's hub or secret changed while it ran | Re-run `watch` |
 
 Posting and clearing notices use the existing `invalid_value`, `invalid_body`, `forbidden` and `not_found`.
+
+### Peer lifecycle administration
+
+The operator capability is exposed consistently by HTTP, CLI, TUI, web UI and
+MCP. `POST /v1/admin/peers/{id}/disable`, `/enable`, `/archive`, and
+`/unarchive` return 204. The MCP equivalent is `vecnet_peer_lifecycle` with
+`peer_id` and action `disable`, `enable`, `archive`, or `unarchive`.
+
+Archive is a reversible soft state: the peer row and all message/thread history
+remain, but credentials, OAuth tokens, unused enrolment tokens and link codes
+are revoked immediately. An archived peer is disabled and absent from the
+public directory. Unarchive never revives credentials: it leaves the peer
+disabled and it must receive a new invite before use. The operator/bootstrap
+peer cannot be disabled or archived. Actions audit as `peer_disable`,
+`peer_enable`, `peer_archive`, and `peer_unarchive`.

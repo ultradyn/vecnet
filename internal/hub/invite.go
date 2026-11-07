@@ -10,6 +10,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/audit"
 	"github.com/XertroV/vecnet/internal/auth"
+	"github.com/XertroV/vecnet/internal/envelope"
 )
 
 // MinEnrolTTL is the shortest enrolment-token lifetime an operator may ask
@@ -64,6 +65,114 @@ func (h *Hub) ReissueEnrolToken(ctx context.Context, peerID string, ttl time.Dur
 		return "", time.Time{}, err
 	}
 	return token, expires, nil
+}
+
+// InviteStatus is what the operator may read about a peer's invite: its
+// state, never its token (PROTOCOL §2.12). There is no state column: the
+// state is derived from the enrolment rows, so a peer has at most one live
+// invite (a re-issue spends the previous token).
+//
+//   - pending: an unspent token that has not expired; ExpiresAt is its expiry
+//   - expired: an unspent token past its expiry; ExpiresAt is when
+//   - revoked: every token spent and the peer never held a credential, so
+//     none was redeemed; RevokedAt is when the last one was spent
+//   - claimed: the peer holds (or held) a peer credential: it enrolled
+//   - linked: an OAuth login is bound to the peer (a dot or a Grok Bot)
+//   - none: no enrolment token was ever issued (an unlinked dot)
+type InviteStatus struct {
+	PeerID    string `json:"peer_id"`
+	State     string `json:"state"`
+	ExpiresAt string `json:"expires_at"`
+	RevokedAt string `json:"revoked_at"`
+}
+
+// rowQuerier is a *sql.DB or a *sql.Tx.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// inviteStatus derives peerID's InviteStatus, which must exist, at now.
+func inviteStatus(ctx context.Context, q rowQuerier, peerID string, now time.Time) (InviteStatus, error) {
+	st := InviteStatus{PeerID: peerID}
+	// One statement, so one snapshot: a re-issue or revoke landing between
+	// two reads cannot mix states.
+	var live, ever, linked int
+	var unspent, spent sql.NullString
+	if err := q.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM credentials WHERE kind = 'peer' AND subject_id = ?1 AND revoked_at IS NULL),
+		(SELECT count(*) FROM credentials WHERE kind = 'peer' AND subject_id = ?1),
+		(SELECT count(*) FROM oauth_principals WHERE peer_id = ?1),
+		(SELECT max(expires_at) FROM enrol_tokens WHERE peer_id = ?1 AND used_at IS NULL),
+		(SELECT max(used_at) FROM enrol_tokens WHERE peer_id = ?1 AND used_at IS NOT NULL)`, peerID).Scan(&live, &ever, &linked, &unspent, &spent); err != nil {
+		return st, fmt.Errorf("hub: invite status: %w", err)
+	}
+	switch {
+	case live > 0:
+		st.State = "claimed"
+	case linked > 0:
+		st.State = "linked"
+	case unspent.Valid:
+		st.State, st.ExpiresAt = "pending", unspent.String
+		if unspent.String <= envelope.FormatTime(now) { // fixed-width UTC: text order is time order
+			st.State = "expired"
+		}
+	case ever > 0:
+		st.State = "claimed"
+	case spent.Valid:
+		st.State, st.RevokedAt = "revoked", spent.String
+	default:
+		st.State = "none"
+	}
+	return st, nil
+}
+
+// InviteStatus reads peerID's invite state; 404 not_found for an unknown
+// peer. It never returns a token.
+func (h *Hub) InviteStatus(ctx context.Context, peerID string) (InviteStatus, error) {
+	// A read alone: the peer page asks every 30 s, so it never queues on
+	// the store's write lock.
+	var one int
+	err := h.DB.QueryRowContext(ctx, `SELECT 1 FROM peers WHERE peer_id = ?`, peerID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return InviteStatus{}, unknownPeer(peerID)
+	}
+	if err != nil {
+		return InviteStatus{}, fmt.Errorf("hub: invite status: %w", err)
+	}
+	return inviteStatus(ctx, h.DB, peerID, h.Now())
+}
+
+// RevokeEnrolToken withdraws peerID's live invite: its unspent, unexpired
+// enrolment token is spent, so it can no longer enrol. revoked says whether
+// there was one; a peer with no live invite (expired, revoked, claimed, a
+// dot) is a no-op that changes and audits nothing. Credentials are never
+// touched: stopping an enrolled peer is disable or rotate. Audited as
+// "enrol_revoke", with no detail and never the token. 404 not_found for an
+// unknown peer.
+func (h *Hub) RevokeEnrolToken(ctx context.Context, peerID string) (st InviteStatus, revoked bool, err error) {
+	err = h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		if _, _, _, err := peerRow(ctx, tx, peerID); err != nil {
+			return err
+		}
+		now := envelope.FormatTime(h.Now())
+		res, err := tx.ExecContext(ctx,
+			`UPDATE enrol_tokens SET used_at = ? WHERE peer_id = ? AND used_at IS NULL AND expires_at > ?`, now, peerID, now)
+		if err != nil {
+			return fmt.Errorf("hub: revoke enrol token: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			revoked = true
+			if err := audit.Record(ctx, tx, "operator", "enrol_revoke", []string{peerID}, nil); err != nil {
+				return err
+			}
+		}
+		st, err = inviteStatus(ctx, tx, peerID, h.Now())
+		return err
+	})
+	if err != nil {
+		return InviteStatus{}, false, err
+	}
+	return st, revoked, nil
 }
 
 // InviteInfo is what an invite says about its peer besides the token.

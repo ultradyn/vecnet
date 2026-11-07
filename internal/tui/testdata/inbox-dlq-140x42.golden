@@ -1,26 +1,26 @@
- vecnet | 1:inbox 2:chat 3:dash 4:subs                                       hub hub.example:8443  live  apr 2  dlq 3  cuts/24h 0  07:41:00 
-┌─ inbox 12 items · 2 unread · apr 2 · dlq 3 ───────────────────────────────┐┌─ detail ────────────────────────────────────────────────────┐
-│ APR  07:52 dot-research    Spend about 20% of my weekly quota… exp 11:39  ││ dead_letter  retries exhausted                              │
-│ APR  07:59 claw-ops        Push classifier fix to hark master… exp 18:59  ││                                                             │
-│ DLQ  04:11 grok-triage     503 retries exhausted               8 tries    ││ from     Max                                                │
-│ DLQ  04:30 grok-triage     410 terminal 4xx                    1 try      ││ to       grok-triage grokbot                                │
-│ DLQ  07:18 dot-research    --- network                         8 tries    ││ thread   thr_d1                                             │
-│ SUB  07:40 dot-research    paused_auth     The peer was disab…            ││ message  msg_d1                                             │
-│ SUB  07:40 dot-research    paused_token    Waiting for ChatGP…            ││ delivery dly_1                                              │
-│ SUB  07:40 dot-research    paused_failed   Fix the callback, … r resume   ││ attempts 8                                                  │
-│ SUB  07:40 dot-research    paused_operator You paused this su… r resume   ││ status   503                                                │
-│ WAKE 06:12 codex-hark      The radio listen did not finalize … ◉          ││ updated  04:11:00                                           │
-│ HOLD 07:39 codex-hark      Ticket 18 prototype is up: three v… ›          ││                                                             │
-│ HOLD 06:31 pag-hark-sleuth Reproduced on x-tuf. Root cause is… ✓          ││ press r to retry, x to discard                              │
-│                                                                           ││                                                             │
-│                                                                           ││ error                                                       │
-│                                                                           ││ │ HTTP 503 after 8/8 attempts                               │
-│                                                                           ││                                                             │
-│                                                                           ││ message                                                     │
-│                                                                           ││ │ Scan the overnight tickets.                               │
-│                                                                           ││                                                             │
-│                                                                           ││                                                             │
-└───────────────────────────────────────────────────────────────────────────┘│                                                             │
+ vecnet | 1:inbox 2:chat 3:dash 4:subs                               home · hub hub.example:8443  live  apr 2  dlq 3  cuts/24h 0  07:41:00  
+┏━ inbox 12 items · 2 unread · apr 2 · dlq 3 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌─ detail ────────────────────────────────────────────────────┐
+┃ APR  07:52 dot-research    Spend about 20% of my weekly quota… exp 11:39  ┃│ dead_letter  retries exhausted                              │
+┃ APR  07:59 claw-ops        Push classifier fix to hark master… exp 18:59  ┃│                                                             │
+┃>DLQ  04:11 grok-triage     503 retries exhausted               8 tries    ┃│ from     Max                                                │
+┃ DLQ  04:30 grok-triage     410 terminal 4xx                    1 try      ┃│ to       grok-triage grokbot                                │
+┃ DLQ  07:18 dot-research    --- network                         8 tries    ┃│ thread   thr_d1                                             │
+┃ SUB  07:40 dot-research    paused_auth     The peer was disab…            ┃│ message  msg_d1                                             │
+┃ SUB  07:40 dot-research    paused_token    Waiting for ChatGP…            ┃│ delivery dly_1                                              │
+┃ SUB  07:40 dot-research    paused_failed   Fix the callback, … r resume   ┃│ attempts 8                                                  │
+┃ SUB  07:40 dot-research    paused_operator You paused this su… r resume   ┃│ status   503                                                │
+┃ WAKE 06:12 codex-hark      The radio listen did not finalize … ◉          ┃│ updated  04:11:00                                           │
+┃ HOLD 07:39 codex-hark      Ticket 18 prototype is up: three v… ›          ┃│                                                             │
+┃ HOLD 06:31 pag-hark-sleuth Reproduced on x-tuf. Root cause is… ✓          ┃│ press r to retry, x to discard                              │
+┃                                                                           ┃│                                                             │
+┃                                                                           ┃│ error                                                       │
+┃                                                                           ┃│ │ HTTP 503 after 8/8 attempts                               │
+┃                                                                           ┃│                                                             │
+┃                                                                           ┃│ message                                                     │
+┃                                                                           ┃│ │ Scan the overnight tickets.                               │
+┃                                                                           ┃│                                                             │
+┃                                                                           ┃│                                                             │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                                                             │
 ┌─ your event log  GET /v1/events -f · not messages, never replied to ──────┐│                                                             │
 │ e1.10401  07:41:00 presence          pag-hark-sleuth working lan:x-tuf qu…││                                                             │
 │ e1.10403  07:41:00 thread_updated    thr_…XP5R title "hark B196: radio en…││                                                             │
@@ -38,5 +38,5 @@
 │                                                                           ││                                                             │
 │                                                                           ││                                                             │
 └───────────────────────────────────────────────────────────────────────────┘└─────────────────────────────────────────────────────────────┘
- NORMAL   j/k move  a answer  r retry  x discard  p presence  enter open  ? help                           max@vecnet · working · prio wake 
-: command  ? help                                                                                                                           
+ NORMAL   j/k move  a answer  r retry  x discard  p presence  enter open  ctrl+u/d log  ? help             max@vecnet · working · prio wake 
+: command  ? help  Shift+drag selects text                                                                                                  

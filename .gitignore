@@ -36,3 +36,7 @@ backups/
 **/*.pem
 **/*.key
 **/credentials*
+!npm/bin/
+__pycache__/
+.playwright-mcp/
+.superpowers/sdd/agent-onboarding/progress.md

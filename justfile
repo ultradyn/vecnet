@@ -7,7 +7,7 @@ default:
 
 # Build both binaries into bin/
 build:
-    CGO_ENABLED=0 build2 go build -p 2 -ldflags "-X github.com/XertroV/vecnet/internal/mcpserver.Version=$(just version)" -o bin/ ./cmd/...
+    CGO_ENABLED=0 build2 go build -p 2 -ldflags "-X github.com/XertroV/vecnet/internal/mcpserver.Version=$(just version) -X github.com/XertroV/vecnet/internal/buildinfo.Version=$(just version) -X github.com/XertroV/vecnet/internal/buildinfo.CommitDate=$(git show -s --format=%cI HEAD)" -o bin/ ./cmd/...
 
 # Build version (MCP serverInfo.version): UTC date.time + short commit (+dirty)
 version:
@@ -37,7 +37,7 @@ hub-init NAME="Max":
 
 # Deploy to Fly (builds the image remotely from Dockerfile; Max runs this, tests never do)
 fly-deploy:
-    ~/.fly/bin/flyctl deploy --remote-only -a vecnet --yes --build-arg VECNET_VERSION=$(just version)
+    ~/.fly/bin/flyctl deploy --remote-only -a vecnet --yes --build-arg VECNET_VERSION=$(just version) --build-arg VECNET_COMMIT_DATE=$(git show -s --format=%cI HEAD)
 
 # Create the operator on the deployed hub (prints the secret once)
 fly-init:
@@ -188,3 +188,39 @@ ln-install:
 # Check a deployed hub's MCP and OAuth contracts (bearer in VECNET_MCP_TOKEN).
 mcp-conformance ORIGIN:
     node scripts/mcp-conformance.mjs {{quote(ORIGIN)}}
+
+# Stage the npm package with CLI + hub binaries for Linux x64/arm64.
+npm-build:
+    build2 node scripts/npm/build.mjs
+
+# Pack exactly the staged release files; output: dist/vecnet-<version>.tgz.
+npm-pack: npm-build
+    npm pack ./dist/npm --pack-destination ./dist
+
+# Verify the packed release in an isolated npm prefix and temporary hub.
+npm-check:
+    build2 node --test --test-concurrency=2 scripts/npm/*.test.mjs
+
+# Bump the npm version on a clean master checkout, then push a release tag to GitHub.
+release VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "$(git status --porcelain)" ] || [ "$(git branch --show-current)" != master ]; then
+        echo "run releases from a clean master checkout" >&2
+        exit 1
+    fi
+    release_version={{quote(VERSION)}}
+    node --input-type=module - "$release_version" <<'JS'
+    import {releaseInfo} from './scripts/npm/release.mjs';
+    releaseInfo({name: 'vecnet', version: process.argv[2]});
+    JS
+    remote_tag=$(git ls-remote gh "refs/tags/v$release_version")
+    if git show-ref --verify --quiet "refs/tags/v$release_version" || [ -n "$remote_tag" ]; then
+        echo "release tag v$release_version already exists" >&2
+        exit 1
+    fi
+    npm --prefix npm version "$release_version" --no-git-tag-version --ignore-scripts --package-lock=false
+    git add npm/package.json
+    git commit -m "chore: release v$release_version"
+    git tag "v$release_version"
+    git push --atomic gh HEAD:refs/heads/master "refs/tags/v$release_version"

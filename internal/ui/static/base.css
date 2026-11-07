@@ -77,6 +77,7 @@ span,b,time,code,a{unicode-bidi:isolate}
 .va .side{border-right:1px solid var(--line);padding:20px 10px 0;overflow:auto;background:#0c1120;display:flex;flex-direction:column}
 /* conn and Sign out stay in view */
 .va .side .foot{margin-top:auto;position:sticky;bottom:0;padding:8px 0 24px;background:#0c1120;display:flex;flex-direction:column}
+.va .build-info{padding:8px 9px 0;color:var(--dim);font:400 9.5px/1.45 var(--mono);overflow-wrap:anywhere}
 .va .side .brand{padding:2px 8px 18px}
 .va .brand .hub{margin-left:auto;font:400 11px var(--mono);color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}
 .va .nav a{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:6px 9px;border-radius:6px;color:var(--muted);text-decoration:none;font-size:13.5px}

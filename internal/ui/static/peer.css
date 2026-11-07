@@ -43,4 +43,26 @@ body[data-route=peer] .va .col{max-width:1120px}
 .pv td .idc,.pv dd .idc{vertical-align:middle}
 .pv td .idc.sub,.pv td>.idc:not(:first-child){display:flex}
 .pv .pps .plink{white-space:nowrap}
+/* The Invite card (#67): only while a peer that enrols by token has not.
+   Its copy panel reuses Add agent's .inv-* rules (invite.css). */
+.pv-invite{margin:18px 0 0;border:1px solid var(--line);border-left:3px solid var(--line2);border-radius:9px;background:#0c1120;padding:4px 16px 14px}
+.pv-invite.st-pending{border-left-color:var(--wake)}
+.pv-invite.st-expired,.pv-invite.st-revoked{border-left-color:#fb718599}
+.pv-invite h2{display:flex;align-items:center;gap:8px;margin:10px 0 6px}
+.pv-invite .inv-st{font-weight:500}
+.pv-invite .inv-st.pending{color:var(--wake);border-color:#fbbf2466}
+.pv-invite .inv-st.expired,.pv-invite .inv-st.revoked{color:var(--bad);border-color:#fb718566}
+.pv-inv-line{margin:0;font-size:13px;line-height:1.55;color:var(--muted)}
+.pv-inv-when{color:var(--dim);white-space:nowrap}
+.pv-inv-line time{color:var(--text)}
+.pv-invite .pv-inv-off{margin:6px 0 0}
+.pv-inv-acts{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px}
+.pv-inv-ttl{display:inline-flex;align-items:center;gap:7px;margin-right:4px;font-size:12px;color:var(--dim)}
+.pv-inv-ttl select{background:#0b1020;border:1px solid var(--line2);border-radius:7px;padding:6px 8px;font-size:12.5px;color:var(--text)}
+.pv-inv-acts .btn{min-height:32px;white-space:nowrap}
+.pv-inv-msg{margin:10px 0 0;font-size:12.5px;color:var(--muted)}
+.pv-inv-msg:empty,.pv-invite>.err:empty{display:none}
+.pv-invite>.err{margin:10px 0 0}
+.pv-inv-fresh{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+.pv-inv-fresh>.pv-inv-msg{margin:0 0 10px;color:var(--wake)}
 @media (max-width:1100px){.pv-grid{grid-template-columns:1fr}.pv-head{grid-template-columns:1fr}.pv-acts{justify-content:flex-start;padding:4px 0 0}}

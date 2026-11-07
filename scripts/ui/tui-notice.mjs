@@ -13,7 +13,7 @@ async function until(what, check) {
 }
 
 // The pane's top border straight under the top bar: no banner row between.
-const noBanner = /1:inbox[^\n]*\n┌─ inbox/;
+const noBanner = /1:inbox[^\n]*\n┏━ inbox/;
 const moving = { kind: 'moving', message: 'Moving to Fly tonight', new_url: 'https://vecnet.xk.io' };
 const maintenance = { kind: 'maintenance', message: 'Database vacuum, expect slow reads' };
 
@@ -30,7 +30,7 @@ try {
     await waitFor(' live ');
     await waitFor('max@vecnet');
     await waitFor(noBanner);
-    await shot('nt08-tui-initial', '┌─ inbox');
+    await shot('nt08-tui-initial', '┏━ inbox');
 
     // A notice whose fetch fails draws no banner, and the command line says so.
     await fail('/v1/hub/notices', 500, '1h');

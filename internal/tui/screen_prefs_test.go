@@ -355,13 +355,13 @@ func TestPrefsCommandsOpenTheThreadScreen(t *testing.T) {
 		submit(p, "prefs")
 		p.until("prefs", func() bool { return m.prefsOn })
 		p.idle()
-		if m.active().Title() != "prefs" || !strings.Contains(plainAt(t, m, 80, 24), "┌─ preferences") {
+		if m.active().Title() != "prefs" || !strings.Contains(plainAt(t, m, 80, 24), "┏━ preferences") {
 			t.Fatalf("visible %s", m.active().Title())
 		}
 		submit(p, "thread 2")
 		p.idle()
 		frame := plainAt(t, m, 140, 42)
-		if m.active().Title() != "chat" || strings.Contains(frame, "┌─ preferences") || !strings.Contains(frame, "Ticket 18") {
+		if m.active().Title() != "chat" || strings.Contains(frame, "┏━ preferences") || !strings.Contains(frame, "Ticket 18") {
 			t.Fatalf("thread left visible %s prefs %v\n%s", m.active().Title(), m.prefsOn, frame)
 		}
 	})
@@ -374,7 +374,7 @@ func TestPrefsCommandsOpenTheThreadScreen(t *testing.T) {
 		submit(p, "msg claw hello from prefs")
 		p.until("opened", func() bool { return m.CurrentThread == chatOther && m.active().Title() == "chat" })
 		frame := plainAt(t, m, 140, 42)
-		if strings.Contains(frame, "┌─ preferences") || !strings.Contains(frame, "Ticket 18") {
+		if strings.Contains(frame, "┏━ preferences") || !strings.Contains(frame, "Ticket 18") {
 			t.Fatalf("msg left preferences up:\n%s", frame)
 		}
 	})
@@ -386,7 +386,7 @@ func TestPrefsCommandsOpenTheThreadScreen(t *testing.T) {
 		submit(p, "msg zzz hello")
 		p.until("reason", func() bool { return m.Mode == ModeCommand && strings.Contains(m.Input, "msg zzz") })
 		frame := plainAt(t, m, 140, 42)
-		if m.active().Title() != "chat" || strings.Contains(frame, "┌─ preferences") || !strings.Contains(frame, "no peer matches zzz") {
+		if m.active().Title() != "chat" || strings.Contains(frame, "┏━ preferences") || !strings.Contains(frame, "no peer matches zzz") {
 			t.Fatalf("error navigation stayed on preferences:\n%s", frame)
 		}
 	})

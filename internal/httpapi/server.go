@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/buildinfo"
 	"github.com/XertroV/vecnet/internal/hub"
 	"github.com/XertroV/vecnet/internal/mcpserver"
 	"github.com/XertroV/vecnet/internal/oauth"
@@ -109,7 +110,10 @@ func New(d Deps) http.Handler {
 	s := &server{Deps: d, op: opview.New(d.Hub)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		writeJSON(w, http.StatusOK, struct {
+			OK bool `json:"ok"`
+			buildinfo.Info
+		}{OK: true, Info: buildinfo.Current()})
 	})
 	s.routes(mux)
 	uiHandler := ui.Handler(d.UIDir, s.r2Origins()...) // operator inbox; public (isPublic)

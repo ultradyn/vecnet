@@ -36,10 +36,14 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/peers/{id}/move", s.adminMovePeer)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/rotate", s.adminRotatePeer)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/enrol-token", s.adminReissueEnrol)
+	mux.HandleFunc("GET /v1/admin/peers/{id}/enrol-token", s.adminInviteStatus)
+	mux.HandleFunc("DELETE /v1/admin/peers/{id}/enrol-token", s.adminRevokeEnrol)
 	mux.HandleFunc("PUT /v1/admin/peers/{id}/scopes", s.adminSetScopes)
 	mux.HandleFunc("PUT /v1/admin/peers/{id}/limits", s.adminSetLimits)
 	mux.HandleFunc("POST /v1/admin/peers/{id}/disable", s.adminDisable(true))
 	mux.HandleFunc("POST /v1/admin/peers/{id}/enable", s.adminDisable(false))
+	mux.HandleFunc("POST /v1/admin/peers/{id}/archive", s.adminArchive(true))
+	mux.HandleFunc("POST /v1/admin/peers/{id}/unarchive", s.adminArchive(false))
 	mux.HandleFunc("PATCH /v1/admin/peers/{id}", s.adminRenamePeer)
 	mux.HandleFunc("POST /v1/admin/sources", s.adminAddSource)
 	mux.HandleFunc("GET /v1/admin/sources", s.adminListSources)
@@ -319,11 +323,34 @@ func (s *server) adminRenamePeer(w http.ResponseWriter, r *http.Request) {
 // adminDisable is POST /v1/admin/peers/{id}/disable (or /enable): 204.
 func (s *server) adminDisable(disabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if err := hub.RequirePeerLifecycle(callerFrom(r.Context())); err != nil {
+			writeError(w, err)
+			return
+		}
 		if err := readNoBody(r); err != nil {
 			writeError(w, err)
 			return
 		}
 		if err := s.Hub.SetPeerDisabled(r.Context(), r.PathValue("id"), disabled); err != nil {
+			writeError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// adminArchive is POST /v1/admin/peers/{id}/archive (or /unarchive): 204.
+func (s *server) adminArchive(archived bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := hub.RequirePeerLifecycle(callerFrom(r.Context())); err != nil {
+			writeError(w, err)
+			return
+		}
+		if err := readNoBody(r); err != nil {
+			writeError(w, err)
+			return
+		}
+		if err := s.Hub.SetPeerArchived(r.Context(), r.PathValue("id"), archived); err != nil {
 			writeError(w, err)
 			return
 		}

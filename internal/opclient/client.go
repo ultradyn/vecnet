@@ -19,6 +19,7 @@ import (
 
 	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
+	"github.com/XertroV/vecnet/internal/hubid"
 	"github.com/XertroV/vecnet/internal/opapi"
 )
 
@@ -31,6 +32,20 @@ type Error struct {
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("operator API %d %s: %s", e.Status, e.Code, e.Message)
+}
+
+// gate refuses a hub base that carries userinfo, a query or a fragment, or
+// that does not parse, before any dial. Plain http on a public host is left
+// to the caller that opted in. The error names the rule and no part of the URL.
+func (c *Client) gate() error {
+	if c == nil {
+		return hubid.ErrHubForm
+	}
+	err := hubid.CheckHubURL(c.base)
+	if err == nil || errors.Is(err, hubid.ErrPlainHTTP) {
+		return nil
+	}
+	return err
 }
 
 // Client may be shared by callers. Its credential is sent only as a bearer.
@@ -58,6 +73,9 @@ func (c *Client) request(ctx context.Context, method, path string, body any) (*h
 // requestMatch is request with one strong If-Match. An empty tag sends no
 // precondition header. Callers pass the ETag from GET unchanged, quotes included.
 func (c *Client) requestMatch(ctx context.Context, method, path string, body any, ifMatch string) (*http.Response, error) {
+	if err := c.gate(); err != nil {
+		return nil, err
+	}
 	var reader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -189,6 +207,11 @@ func (c *Client) Peers(ctx context.Context) ([]opapi.PeerRow, error) {
 	}
 	err := c.do(ctx, "GET", "/v1/admin/peers", nil, &out)
 	return out.Peers, err
+}
+
+// PeerLifecycle applies an operator lifecycle action to a peer.
+func (c *Client) PeerLifecycle(ctx context.Context, id, action string) error {
+	return c.do(ctx, "POST", "/v1/admin/peers/"+url.PathEscape(id)+"/"+action, nil, nil)
 }
 
 // Notices lists the hub's active notices (GET /v1/hub/notices), oldest first.
@@ -343,11 +366,17 @@ func (c *Client) Ack(ctx context.Context, cursor string) error {
 // Upload transfers under the caller's context. Disk uploads retain their
 // one-day unreferenced TTL; R2 grants record their own retention class.
 func (c *Client) Upload(ctx context.Context, r io.Reader, size int64, mediaType, name string) (envelope.Attachment, error) {
+	if err := c.gate(); err != nil {
+		return envelope.Attachment{}, err
+	}
 	return c.UploadWithProgress(ctx, r, size, mediaType, name, nil)
 }
 
 // UploadWithProgress reports PUT bytes only, excluding hashing and spooling.
 func (c *Client) UploadWithProgress(ctx context.Context, r io.Reader, size int64, mediaType, name string, progress func(int64)) (envelope.Attachment, error) {
+	if err := c.gate(); err != nil {
+		return envelope.Attachment{}, err
+	}
 	bc := c.blobs()
 	bc.Progress = progress
 	caps, err := bc.Discover(ctx)

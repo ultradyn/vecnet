@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,6 +28,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 const (
@@ -383,6 +385,40 @@ func pressTab(p *pump) { p.send(tea.KeyPressMsg{Code: tea.KeyTab}) }
 func waitToast(t *testing.T, p *pump, m *Model, want string) {
 	t.Helper()
 	p.until("toast "+want, func() bool { return strings.Contains(m.toast.text, want) })
+}
+
+func TestSendAndUploadPrintCheckedHubURL(t *testing.T) {
+	raw := "https://[2001:db8::7]/vecnet"
+	t.Run("send", func(t *testing.T) {
+		err := &url.Error{Op: "Post", URL: raw, Err: errors.New("dial " + raw)}
+		a, m, p := chatOpen(t)
+		a.fail("Send", err)
+		p.press("i")
+		typeText(p, "hello")
+		p.press("enter")
+		p.until("send settles", func() bool { return !chatOf(m).draft(m.CurrentThread).sending })
+		if !strings.Contains(m.toast.text, raw) {
+			t.Fatalf("toast %q", m.toast.text)
+		}
+		var ue *url.Error
+		if !errors.As(err, &ue) || ue.URL != raw {
+			t.Fatal("send error lost url.Error")
+		}
+	})
+	t.Run("upload", func(t *testing.T) {
+		err := &url.Error{Op: "Put", URL: raw, Err: errors.New("dial " + raw)}
+		a, m, p := chatOpen(t)
+		a.fail("Upload", err)
+		chatAttach(p, chatAttFile(t, "note.txt", "hello"))
+		chatAttsSettled(t, p, m, 1)
+		att := chatAttsOf(m)[0]
+		if !strings.Contains(m.toast.text+"\n"+att.err, raw) {
+			t.Fatalf("chip %+v toast %q", att, m.toast.text)
+		}
+		if att.state != chatAttFailed || !strings.Contains(m.toast.text, "upload") {
+			t.Fatalf("chip %+v toast %q", att, m.toast.text)
+		}
+	})
 }
 
 func TestChatGolden(t *testing.T) {
@@ -2586,7 +2622,8 @@ func TestReactionChipsRow(t *testing.T) {
 	if chips < 0 || chips+1 >= len(lines) || !strings.Contains(lines[chips+1], "grok✓✓") || !strings.Contains(lines[chips+1], "max●") {
 		t.Fatalf("the chips row is not right above the root's receipts:\n%s", frame)
 	}
-	if !strings.Contains(lines[chips], "│"+chatIndent+"[+1 2]") && !strings.Contains(lines[chips], " "+chatIndent+"[+1 2]") {
+	// The log is the focused pane, so its border is heavy.
+	if !strings.Contains(lines[chips], "┃"+chatIndent+"[+1 2]") && !strings.Contains(lines[chips], " "+chatIndent+"[+1 2]") {
 		t.Fatalf("chips row is not indented by chatIndent: %q", lines[chips])
 	}
 	refuseFrame(t, frame, "[+1: ", "[check: ")
@@ -3217,4 +3254,25 @@ func (a *chatStateRefresh) History(ctx context.Context, id, after string, limit 
 func (a *chatStateRefresh) Inbox(context.Context, opapi.InboxQuery) (opapi.Inbox, error) {
 	a.inboxCalls++
 	return opapi.Inbox{}, nil
+}
+
+// The chat title's budget takes the thread budget map, as the dash does: 0 is
+// warn, otherwise muted (design §5.5).
+func TestChatTitleBudgetRole(t *testing.T) {
+	th := theme.New(theme.TrueColor, true)
+	for _, tc := range []struct {
+		budget int
+		role   theme.Role
+	}{{494, theme.Muted}, {0, theme.Warn}} {
+		a := chatSeed()
+		*a.threads.Threads[0].Thread.BudgetRemaining = tc.budget
+		m, _ := chatModel(t, a, newClock())
+		title := strings.Split(frameOf(m, th), "\n")[1]
+		if want := th.Fg(tc.role).Render(fmt.Sprint(tc.budget)); !strings.Contains(title, want) {
+			t.Errorf("budget %d: %q not in %q", tc.budget, want, title)
+		}
+		if plain := ansi.Strip(title); !strings.Contains(plain, fmt.Sprintf("· budget %d ━", tc.budget)) {
+			t.Errorf("budget %d: plain %q", tc.budget, plain)
+		}
+	}
 }

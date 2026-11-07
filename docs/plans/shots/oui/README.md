@@ -72,6 +72,29 @@ Task 23 runs both clients against one disposable hub. Its assertions verify cros
 - [23-journey-progress.png](23-journey-progress.png) — Approval option prompt in the real TUI.
 - [23-journey-success.png](23-journey-success.png) — Hub-authored expired approval shown in the web thread.
 
+TUI colour theme screens come from `scripts/ui/tui-color.mjs` ([design](../../../design/tui-color.md), §10.3). Every TUI shot uses the semantic theme; these add the screens 17–22 leave out and the other colour rungs. Focused panes are heavy-bordered, and fills are only the header bar, chips and selections.
+
+- [tc01-tui-inbox.png](tc01-tui-inbox.png) — Inbox in the default theme (truecolor, dark): approval and DLQ rows, detail, event log.
+- [tc01-tui-inbox-nocolor.png](tc01-tui-inbox-nocolor.png) — Inbox under `NO_COLOR=1`: bold, reverse, heavy border and `>` only.
+- [tc01-tui-inbox-ansi16.png](tc01-tui-inbox-ansi16.png) — Inbox in 16 colours (`TERM=xterm`): ANSI 1–6, faint, reverse fills.
+- [tc01-tui-inbox-256.png](tc01-tui-inbox-256.png) — Inbox in 256 colours (`TERM=xterm-256color`, no `COLORTERM`).
+- [tc01-tui-inbox-light.png](tc01-tui-inbox-light.png) — Inbox with the light set (`VECNET_TUI_BG=light`) on a white terminal.
+- [tc02-tui-chat.png](tc02-tui-chat.png) — Chat in the default theme: both sidebar groups, a selected message, identity hues.
+- [tc02-tui-chat-nocolor.png](tc02-tui-chat-nocolor.png) — Chat under `NO_COLOR=1`.
+- [tc02-tui-chat-ansi16.png](tc02-tui-chat-ansi16.png) — Chat in 16 colours.
+- [tc02-tui-chat-256.png](tc02-tui-chat-256.png) — Chat in 256 colours.
+- [tc02-tui-chat-light.png](tc02-tui-chat-light.png) — Chat with the light set on a white terminal.
+- [tc03-tui-bars-insert.png](tc03-tui-bars-insert.png) — INSERT chip and the composer while typing.
+- [tc03-tui-bars-command.png](tc03-tui-bars-command.png) — COMMAND chip and the command being typed.
+- [tc03-tui-bars-toast-ok.png](tc03-tui-bars-toast-ok.png) — An ok toast in success.
+- [tc03-tui-bars-toast-error.png](tc03-tui-bars-toast-error.png) — An error toast in error.
+- [tc04-tui-help.png](tc04-tui-help.png) — Help, a full-screen pane and so focused.
+- [tc05-tui-prefs.png](tc05-tui-prefs.png) — Preferences: bold group labels, the selected row filled, source and state roles.
+- [tc05-tui-prefs-error.png](tc05-tui-prefs-error.png) — Preferences after a failed load.
+- [tc06-tui-header-notice.png](tc06-tui-header-notice.png) — A moving notice under the header of a loopback (`local`) hub.
+- [tc07-tui-picker.png](tc07-tui-picker.png) — The operator picker: brand chip, filled selection, `local` in warn.
+- [tc07-tui-picker-confirm.png](tc07-tui-picker-confirm.png) — The picker's confirm step: `y` and `n` are actions, neither a warning.
+
 Attachment screens cover web compose, thread replies and inline images, and the TUI composer. `scripts/ui/att-journey.mjs` checks both clients against one hub without taking screenshots. See [Attachments](../../../OPERATOR.md#attachments).
 
 - [att03-compose-initial.png](att03-compose-initial.png) — New message with an uploaded file and draft text.
@@ -163,6 +186,19 @@ Peer message actions come from `scripts/ui/peer-actions.mjs`. Beside a peer's na
 - [pv-quick-none.png](pv-quick-none.png) — dot-research shares no thread with the operator: the quick link reads Start thread (none with you yet), beside New message.
 - [pv-quick-compose-grokbot.png](pv-quick-compose-grokbot.png) — New message from grok-reviewer's page: the peer picked, `wake_idle` selected, the message field focused.
 - [pv-quick-compose-none.png](pv-quick-compose-none.png) — Start thread from dot-research's page: the peer picked at `wake`, a first message typed.
+
+Peer Invite card screens come from `scripts/ui/invite-card.mjs` (#67), at 1440 px (`-desk`) and 390 px (`-phone`). A peer that enrols with a token and holds no live credential shows an Invite card under its name: the invite's state from `GET /v1/admin/peers/{id}/enrol-token` (never the token), New invite (re-issue: the previous token stops enrolling) with the token lifetime, and Revoke invite (two clicks; `DELETE …/enrol-token`). New invite opens Add agent's own copy panel with the same paste block byte for byte; the token is only in that block's text, never an attribute, URL, web storage or request, and leaves the page on Done, on a revoke, or when the peer enrols and the card closes. Enrolled peers, dots, sources and the operator have no card and cost no invite read. The shots show a fake token (`vn_enrol_EXAMPLE-not-a-real-token-…`) swapped into the re-issue answer; the script checks the real one is refused once replaced or revoked.
+
+- [pvi-1-pending-desk.png](pvi-1-pending-desk.png) — web-repo claude has not enrolled: Invite `pending` with its expiry, Valid for 24 hours, New invite and Revoke invite; Identity reads Enrolled: not yet · added.
+- [pvi-1-pending-phone.png](pvi-1-pending-phone.png) — The pending card at 390 px.
+- [pvi-2-copied-desk.png](pvi-2-copied-desk.png) — After New invite and Copy invite: "The previous invite no longer works.", the shown-once warning, the paste block (fake token), profile, peer and expiry, Done and Copied.
+- [pvi-2-copied-phone.png](pvi-2-copied-phone.png) — The copy panel at 390 px: the block wraps and nothing scrolls sideways.
+- [pvi-3-revoked-desk.png](pvi-3-revoked-desk.png) — After Revoke invite and Confirm revoke: `revoked`, its token no longer enrols, New invite only, "Invite revoked."
+- [pvi-3-revoked-phone.png](pvi-3-revoked-phone.png) — The revoked card at 390 px.
+- [pvi-4-error-desk.png](pvi-4-error-desk.png) — A refused re-issue: "Could not issue a new invite: demo_failure: Demo failure" under the actions; the card is unchanged and New invite works again.
+- [pvi-4-error-phone.png](pvi-4-error-phone.png) — The refused re-issue at 390 px.
+- [pvi-5-none-desk.png](pvi-5-none-desk.png) — No live invite: late claude's invite `expired` a minute ago, so the card offers New invite and no Revoke.
+- [pvi-5-none-phone.png](pvi-5-none-phone.png) — The expired card at 390 px.
 
 Operator CLI label screens come from `scripts/ui/cli-label.mjs`, which runs the real `vecnet` binary under `env -i` (a pty from script(1) where a terminal is needed). A bare run with no profile is refused without a terminal or with an agent marker set; from a terminal it sends from the operator peer with a hub-set label.
 

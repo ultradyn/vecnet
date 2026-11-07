@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { allThreads, blockedLine, cutSummary, peerRows } from '../static/dash-model.js';
+import { allThreads, blockedLine, cutSummary, peerRows, visiblePeers } from '../static/dash-model.js';
 
 function row(peer, extra = {}) {
   return {
@@ -55,6 +55,35 @@ test('peerRows: dot reachable + unknown presence; disabled flagged; source shows
   assert.equal(src.disabled, false);
 
   assert.deepEqual(peerRows(undefined), []);
+});
+
+test('visiblePeers hides archived peers unless show archived is on', () => {
+  const raw = [
+    row({ peer_id: 'peer_live', name: 'live' }),
+    row({ peer_id: 'peer_off', name: 'paused' }, { disabled: true }),
+    row({ peer_id: 'peer_old', name: 'retired' }, { disabled: true, archived_at: '2026-11-07T01:00:00.000Z' }),
+    row({ peer_id: 'peer_junk', name: 'junk' }, { archived_at: 1 }),
+  ];
+  const rows = peerRows(raw);
+  assert.equal(rows[0].archivedAt, null);
+  assert.equal(rows[1].archivedAt, null);
+  assert.equal(rows[2].archivedAt, '2026-11-07T01:00:00.000Z');
+  // A non-string archived_at is not an archive stamp.
+  assert.equal(rows[3].archivedAt, null);
+
+  const hidden = visiblePeers(raw, false);
+  assert.deepEqual(hidden.shown.map(p => p.id), ['peer_live', 'peer_off', 'peer_junk']);
+  assert.equal(hidden.archived, 1);
+  assert.equal(hidden.shown.some(p => p.archivedAt), false);
+
+  const shown = visiblePeers(raw, true);
+  assert.deepEqual(shown.shown.map(p => p.id), ['peer_live', 'peer_off', 'peer_old', 'peer_junk']);
+  assert.equal(shown.shown[2].archivedAt, '2026-11-07T01:00:00.000Z');
+  assert.equal(shown.archived, 1);
+
+  // The toggle defaults off: omitting it hides archived rows.
+  assert.deepEqual(visiblePeers(raw).shown.map(p => p.id), hidden.shown.map(p => p.id));
+  assert.deepEqual(visiblePeers(undefined), { shown: [], archived: 0 });
 });
 
 test('blockedLine names recipient, delivery and waiting count', () => {

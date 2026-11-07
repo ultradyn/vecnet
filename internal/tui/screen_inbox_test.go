@@ -20,6 +20,7 @@ import (
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/opapi"
 	"github.com/XertroV/vecnet/internal/opclient"
+	"github.com/XertroV/vecnet/internal/tui/theme"
 )
 
 // inboxAPI is the shared fake plus a record of what each write was called with.
@@ -1300,9 +1301,16 @@ func TestInboxHostile(t *testing.T) {
 		if strings.ContainsRune(rest, 0x1b) {
 			t.Fatalf("%s: ESC outside SGR: %q", what, rest)
 		}
-		for _, bad := range []string{"\x07", "\u202e", "\u009b", "\u009d", "\u009c", "\x9b", "\x9d", "pwned", "aGk=", "evil.example"} {
+		for _, bad := range []string{"\x07", "\u202e", "\u009b", "\u009d", "\u009c", "pwned", "aGk=", "evil.example"} {
 			if strings.Contains(raw, bad) {
 				t.Fatalf("%s: frame contains %q: %q", what, bad, raw)
+			}
+		}
+		// A raw C1 byte is checked outside valid UTF-8: 0x9b is also the last
+		// byte of the heavy corner ┛ (U+251B).
+		for _, b := range []byte{0x9b, 0x9d} {
+			if strayByte(raw, b) {
+				t.Fatalf("%s: frame contains a raw %#x byte: %q", what, b, raw)
 			}
 		}
 		assertFrame(t, plainAt(t, m, 140, 42), 140, 42)
@@ -1648,7 +1656,8 @@ func TestInboxSubHealthColour(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 140, Height: 42})
 	frame := m.View().Content
 	sgr := func(st lipgloss.Style) string { r := st.Render("X"); return r[:strings.Index(r, "X")] }
-	for health, st := range map[string]lipgloss.Style{"paused_auth": styleBad, "paused_token": styleBad, "paused_failed": styleBad, "paused_operator": styleWarn} {
+	th := m.th
+	for health, st := range map[string]lipgloss.Style{"paused_auth": th.Fg(theme.Error), "paused_token": th.Fg(theme.Error), "paused_failed": th.Fg(theme.Error), "paused_operator": th.Fg(theme.Warn)} {
 		if !strings.Contains(frame, sgr(st)+health) {
 			t.Errorf("%s is not drawn in its subs colour", health)
 		}

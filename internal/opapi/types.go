@@ -303,6 +303,7 @@ type PeerRow struct {
 	PrincipalID string      `json:"principal_id"`
 	Credential  string      `json:"credential"`
 	Disabled    bool        `json:"disabled"`
+	ArchivedAt  *string     `json:"archived_at"`
 	PresenceAt  *string     `json:"presence_at"`
 	ReachVia    *string     `json:"reach_via"`
 	Routes      []RouteInfo `json:"routes"`

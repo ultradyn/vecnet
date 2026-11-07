@@ -106,6 +106,9 @@ admin (operator credential):
        max 7d); --copy also puts it on the clipboard; without --name, or with
        --open-name, the agent picks its name at enrol
   peer invite <peer> [--ttl 24h] [--copy]             re-issues a token for a peer not yet enrolled
+  invite status <peer> | invite revoke <peer>         an invite's state (never its token), or withdraw it:
+       the unredeemed token stops enrolling; no-op when none is live; never touches
+       an enrolled peer's secret (peer disable / peer rotate). Also: peer invite status|revoke
   peer move <peer> --principal PRN
   peer link <peer>                                    prints a peer's 12-character OAuth link code
   peer avatar <peer> (FILE|https://URL|--clear)       set or clear any peer's avatar
@@ -375,7 +378,7 @@ func (a *app) connect() (*client, string, cache, error) {
 	if err != nil {
 		return nil, "", cache{}, err
 	}
-	if err := checkHubURL(p.Hub, p.AllowInsecureHTTP || a.getenv(insecureEnv) == "1"); err != nil {
+	if err := a.useStoredHub(name, p); err != nil {
 		return nil, "", cache{}, err
 	}
 	// MCP runs TOFU after its additional startup refusals in cmdMCP.
@@ -517,6 +520,8 @@ func (a *app) dispatchOnce(cmd string, args []string) error {
 		return a.cmdPrincipal(args)
 	case "peer":
 		return a.cmdPeer(args)
+	case "invite":
+		return a.cmdInvite(args)
 	case "route":
 		return a.cmdRoute(args)
 	case "source":
@@ -620,7 +625,7 @@ func (a *app) cmdEnrol(args []string) error {
 		// profile to follow yet: point at the new hub instead.
 		if errors.As(err, &he) && he.Status == http.StatusGone && he.Code == "hub_moved" {
 			if raw, ok := he.Details["new_url"].(string); ok {
-				if next, e := hubid.NormalizeURL(raw); e == nil {
+				if next, ok := printableHub(raw, insecure || a.getenv(insecureEnv) == "1"); ok {
 					he.Hint = "hub moved to " + next + "; ask for an invite there"
 				}
 			}
@@ -1716,20 +1721,17 @@ func (a *app) cmdPeer(args []string) error {
 			return err
 		}
 		return a.ok("renamed " + o.pos[1] + " to " + o.pos[2])
-	case (sub == "disable" || sub == "enable") && len(o.pos) == 2:
+	case (sub == "disable" || sub == "enable" || sub == "archive" || sub == "unarchive") && len(o.pos) == 2:
 		// POST /v1/admin/peers/{id}/disable|enable (204).
 		if err := a.call(http.MethodPost, "/v1/admin/peers/"+pathEscape(o.pos[1])+"/"+sub, nil, nil); err != nil {
 			return err
 		}
-		verb := "enabled"
-		if sub == "disable" {
-			verb = "disabled"
-		}
+		verb := map[string]string{"disable": "disabled", "enable": "enabled", "archive": "archived", "unarchive": "unarchived"}[sub]
 		return a.ok(verb + " " + o.pos[1])
 	}
 	return usageErr("usage: vecnet peer add --kind K --name N [--principal PRN] | peer invite [--name N] [--ttl 24h] | peer move <peer> --principal PRN | " +
 		"peer link <peer> | peer avatar <peer> (FILE|URL|--clear) | peer rotate <peer> | peer scope <peer> [--allow IDS] [--deny IDS] | peer limits <peer> --sends-per-min N --threads-per-hour N | " +
-		"peer rename <id> <name> | peer disable <id> | peer enable <id>")
+		"peer rename <id> <name> | peer disable <id> | peer enable <id> | peer archive <id> | peer unarchive <id>")
 }
 
 func (a *app) cmdRoute(args []string) error {
