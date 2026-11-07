@@ -4,6 +4,8 @@
 
 > **Amendment / CoS ruling 2026-11-07 (Task 1 independent review):** actual `clientUserMessageId` generation includes normalized hub as well as thread and sorted delivery ids. Hub-scoped KV alone cannot distinguish summary-only sends from two hubs into one thread. Preserve all previously stored inflight client IDs verbatim during recovery. Task 1 may modify only this receipt-key generation and its regression tests in engine.ts/codex-engine.test.ts. Publish initial hub.json atomically so a killed first start cannot strand an incomplete final identity. Task 3 also propagates the inherited lease to bounded Go claim/release children, never long-lived watch children, and pins both crash cases.
 
+> **Amendment / CoS ruling 2026-11-07 (build-box baseline):** Task 4 also makes the verified physical-path correction permanent in `scripts/bb/remote.sh`: resolve the created lane base with `pwd -P` before deriving HOME/TMPDIR/XDG paths. Cover the symlinked-base case, document it in `docs/BUILDBOX.md` and add one CHANGELOG line. Keep this repair in its own `fix(bb): resolve lane paths physically` commit. Delivery lifecycle work retains priority.
+
 > For agentic workers: use ultra-code-workflows, sequential implement/review/fix gates in `.worktrees/codex-auto-delivery`. Record evidence in `.superpowers/sdd/2026-11-07-codex-auto-delivery/`. No production code precedes the coordinator design summary.
 
 **Goal:** the next vecnet action registers an eligible existing Codex session and ensures one durable delivery owner per hub, including after upgrades.
@@ -80,6 +82,7 @@ The ordinary launcher reads a bearer and has no per-hub fence. A rewrite discard
 ### Task 4: Installed lifecycle and release assets
 
 **Files:** Modify `connectors/launcher/src/daemon.ts`, `connectors/launcher/test/daemon.test.ts`, `justfile`, `scripts/npm/build.mjs`, `scripts/npm/package.test.mjs`, `npm/package.json`; create `connectors/launcher/systemd/vecnet-delivery@.service` and a focused installer test if needed.
+Ancillary build-box correction: modify `scripts/bb/remote.sh`, `docs/BUILDBOX.md`, `CHANGELOG.md`; add a focused shell fixture if needed. Preserve the delivery installation commit separately from this wrapper repair.
 **Interfaces:** Installs pinned delivery assets, dedicated template and release manifest. Systemd entry invokes installed Go codex deliver with a hub id; metadata comes from private registry, never a bearer. Existing ordinary launcher retains job functionality but no longer consumes explicit Codex bindings. `ln-install` daemon-reloads and refreshes active delivery owners; do not newly enable ordinary launcher. No legacy ledger migration, because old launcher was never enabled/deployed (CoS ruling). npm stages the minimal launcher/hub-client runtime sources and discovers them relative to native binary without copying secrets/node_modules; if large, return NEEDS_CONTEXT for a scope ruling and preserve clean missing-assets fallback.
 - [ ] RED: `legacy explicit connector is retired before delivery activation`; `installer refreshes active delivery generations`; `npm package includes automatic delivery assets`. Test fixtures only, fake systemctl.
 - [ ] Implement, run ln-check and npm packaging checks through bb. Keep existing launcher-job behavior; no migration or new launcher activation.
