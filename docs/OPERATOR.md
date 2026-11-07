@@ -165,6 +165,8 @@ An upgrade can expose `events/subscribe` error `replay_unavailable`: an older bi
 
 ## Storage and retention
 
+Master's deployed migrations remain `0025_r2_blobs.sql` and `0026_peer_archive.sql`. Unpublished DB compaction migrations follow as 0027-0034, with unchanged SQL bytes; a fresh database applies 0001-0034 and a master-0026 database applies only 0027-0034. See the [merged migration inventory](plans/2026-11-05-db-compaction.md) for exact filenames.
+
 Message history, unacknowledged events and append-only audit are retained indefinitely by default on upgrade and on new hubs. Idempotency keys default to 24 hours (configured extensions must be ≥24 hours; zero means forever); acknowledged event prefixes become eligible after seven days **when their independent worker is enabled**. Delivery/loop TTL is not history expiry. A 1 GB volume needs capacity alerts and external backups even with reference storage. Hosted 90-day history is a later explicit choice, not this release's default. See [backup/restore and staged rollout](DEPLOY.md#storage-compaction-rollout).
 
 ### Typed runtime policy

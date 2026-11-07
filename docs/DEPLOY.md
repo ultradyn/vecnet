@@ -241,6 +241,8 @@ A downgrade to an inline-only reader needs a separately implemented and verified
 
 ## Storage compaction rollout
 
+Master's deployed migrations remain `0025_r2_blobs.sql` and `0026_peer_archive.sql`. Unpublished DB compaction migrations follow as 0027-0034, with unchanged SQL bytes; a fresh database applies 0001-0034 and a master-0026 database applies only 0027-0034. See the [merged migration inventory](plans/2026-11-05-db-compaction.md) for exact filenames.
+
 This is an operator-reviewable checklist; Task 9 performs no deployment or production switch changes. Use the [measured receipt](business/db-compaction-bench-2026-11-07.md) and [operator controls](OPERATOR.md#storage-and-retention). Reference storage saves physical live pages while hydration costs CPU/allocations and increases read p95 (roughly 0.5 ms inline to 3–13 ms in representative cohorts; some profiles/repeats reach 14–16 ms). The accepted storage/latency tradeoff is explicit; production needs an operator latency budget and a faster-hydration follow-up. These build-host measurements are not a Fly SLA.
 
 At **every stage**, save UTC time, binary revision, preference revision/value/source/archive state, DB/WAL allocated bytes, filesystem available bytes, page size/count/freelist/live bytes, checkpoint busy/log/copied pages, per-class pin counts, owner floors, exception counts and send/read/push latency/error counts. Use ids/counts only. Note unavailable observations explicitly; the shipped status endpoints do not expose a complete pin census or retention dashboard (see OPERATOR). Do not represent missing telemetry as zero. Each stage can pause independently; do not advance while byte guards fail or capacity/latency exceeds the operator's recorded budget.

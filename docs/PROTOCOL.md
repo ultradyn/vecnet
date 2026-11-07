@@ -175,6 +175,8 @@ The hub MUST:
 
 ### 2.3 `GET /v1/events`
 
+Implementation migration inventory: R2 blobs is `0025_r2_blobs.sql`, peer archive is the deployed `0026_peer_archive.sql`, and DB compaction follows as 0027-0034 (SQL unchanged by renumbering). Both fresh and master-0026 upgrades are supported; see [the plan inventory](plans/2026-11-05-db-compaction.md).
+
 One URL, two pull styles chosen by `Accept` [T06, SSE]:
 
 | `Accept` | Mode | Response |

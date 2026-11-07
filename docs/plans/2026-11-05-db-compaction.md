@@ -429,16 +429,16 @@ Documentation-only implementation on `db-t09`, starting from merged Tasks 1–8 
 | Strict idempotency cutoff and shared lookup/cleanup policy | `internal/hub/idempotency_expiry_test.go`: `TestIdempotencyExactCutoff`, `TestIdempotencyPolicyConfiguration`, `TestIdempotencyBoundedIndexedExpiry` |
 | Existing NONE reuse, mixed representation guards and bounded physical reclaim | Task 8 [benchmark/gate receipt](../business/db-compaction-bench-2026-11-07.md), `internal/store/compaction_test.go`, `internal/httpapi/delivery_hydration_test.go` and the frozen reader corpus linked in the Task 1 receipt |
 
-**Actual merged migrations (inventory only; none changed):**
+**Actual merged migrations (filenames renumbered after master 0026; SQL bytes unchanged):**
 
 | Owner / purpose | Shipped filenames |
 |---|---|
 | Hub notices / preferences (separate owners) | `0021_hub_identity_notices.sql`, `0022_hub_preferences.sql` |
 | DB Tasks 2/4 | `0023_event_payload_refs.sql`, `0024_backfill_exceptions.sql` |
-| R2 (separate owner) | `0025_r2_blobs.sql` |
-| DB Task 5 | `0026_event_retention_floors.sql`, `0027_event_outbox_retention_seq.sql`, `0028_callback_retention_lookups.sql`, `0029_event_retention_rule_intervals.sql`, `0030_callback_retention_identity.sql` |
-| DB Task 6 | `0031_idempotency_created_at_index.sql` |
-| DB Task 7 | `0032_thread_seq_history_tombstones.sql`, `0033_thread_history_loop_parent.sql` |
+| R2 / peer archive (master; already deployed) | `0025_r2_blobs.sql`, `0026_peer_archive.sql` |
+| DB Task 5 | `0027_event_retention_floors.sql`, `0028_event_outbox_retention_seq.sql`, `0029_callback_retention_lookups.sql`, `0030_event_retention_rule_intervals.sql`, `0031_callback_retention_identity.sql` |
+| DB Task 6 | `0032_idempotency_created_at_index.sql` |
+| DB Task 7 | `0033_thread_seq_history_tombstones.sql`, `0034_thread_history_loop_parent.sql` |
 | DB Task 8 | No migration; new empty-file pragmas and opt-in maintenance preserve existing modes. |
 
 **Task 9 validation — documentation committed; acceptance blocked by the full-suite gate:** All execution below used the x-tuf build box with `BB_JOBS=2`. No real database, code fix, push, merge, deployment or `attn` was used. The requested result JSON records every attempt and the final commit. Step 3 stays unchecked until the required full suite ends with `bb: exit=0`.
