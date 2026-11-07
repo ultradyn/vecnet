@@ -1,7 +1,7 @@
 # Changelog
 
+- 2026-11-08: add a short ChatGPT Dot incoming-message setup prompt and Copy prompt button to onboarding after the plugin connection steps (`internal/ui/static/invite.js`).
 - 2026-11-07: resolve the build-box lane base physically before deriving private HOME, temporary, XDG and cache paths, including symlinked `/work/bb-src` volumes (`scripts/bb/remote.sh`).
-
 - 2026-11-07: merge per-kind onboarding into DB compaction, retaining kind-scoped MCP discovery, wake_idle and history/cursor guidance within existing budgets; verify setup delivery hydration and retention through restart and ack in inline/reference modes; confirm migrations 0027-0034 and the measured 612,715-byte UI cap of 608 KiB.
 - 2026-11-07: renumber unpublished compaction migrations 0026-0033 to 0027-0034 after master's deployed 0026 peer archive, preserving SQL bytes; test fresh migration and upgrade from master 0026, update migration inventories and historical receipt filename metadata.
 - 2026-11-07: merge master R2 blobs, peer archive and MCP projection with DB compaction; install both production preference policies before stored overrides load, preserve R2 delivery metadata through reference hydration, and describe owner retention floors and history locators in MCP discovery.
