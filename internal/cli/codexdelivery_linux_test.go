@@ -570,6 +570,49 @@ func TestCodexDeliveryManagedUpgrade(t *testing.T) {
 	}
 }
 
+func TestCodexDeliveryNoManager(t *testing.T) {
+	for _, lifecycle := range []string{"initial", "upgrade"} {
+		t.Run(lifecycle, func(t *testing.T) {
+			f := newDeliveryFixture(t)
+			var before deliveryOwner
+			if lifecycle == "upgrade" {
+				if err := f.ensure("https://hub.invalid"); err != nil {
+					t.Fatalf("detached control start: %v", err)
+				}
+				deliveryWait(t, func() bool { return len(f.starts()) == 1 })
+				_, meta := f.owner()
+				if err := deliveryRead(meta, &before); err != nil || before.Managed || !deliveryOwnerRunning(before) {
+					t.Fatalf("expected live detached owner: %+v %v", before, err)
+				}
+				next := filepath.Join(f.dir, "new-release.ts")
+				deliveryWrite(t, next, "next generation", 0600)
+				f.env["VECNET_CODEX_DELIVERY_ENTRY"] = next
+			}
+			// PATH contains only this fixture's bin directory. Moving its fake
+			// manager out leaves no executable and cannot reach a host manager.
+			if err := os.Rename(filepath.Join(f.dir, "bin", "systemctl"), filepath.Join(f.dir, "systemctl-unavailable")); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.ensure("https://hub.invalid"); err != nil {
+				t.Fatalf("detached %s without manager executable: %v", lifecycle, err)
+			}
+			wantStarts := 1
+			if lifecycle == "upgrade" {
+				wantStarts = 2
+			}
+			deliveryWait(t, func() bool { return len(f.starts()) == wantStarts })
+			_, meta := f.owner()
+			var after deliveryOwner
+			if err := deliveryRead(meta, &after); err != nil || after.Managed || after.Launcher != f.env["VECNET_CODEX_DELIVERY_ENTRY"] || !deliveryOwnerRunning(after) {
+				t.Fatalf("expected current live detached owner: %+v %v", after, err)
+			}
+			if lifecycle == "upgrade" && (after.PID == before.PID || deliveryOwnerRunning(before)) {
+				t.Fatal("missing-manager upgrade did not drain and replace the detached owner")
+			}
+		})
+	}
+}
+
 func TestCodexDeliveryManagedLookupFailure(t *testing.T) {
 	for _, failure := range []string{"error", "unexpected", "timeout", "missing"} {
 		t.Run(failure, func(t *testing.T) {

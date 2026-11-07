@@ -234,7 +234,18 @@ func deliveryGeneration(m deliveryOwner, p deliveryPaths, r codexDeliveryRelease
 func (a *app) deliverySystemctl(ctx context.Context, args ...string) (string, error) {
 	path, err := a.codexDeliveryExecutable("systemctl")
 	if err != nil {
-		return "", err
+		// The shared executable lookup intentionally hides failure details.
+		// Establish absence only when every controlled PATH candidate is missing;
+		// inaccessible or present-but-unusable candidates remain unknown.
+		for _, dir := range filepath.SplitList(a.getenv("PATH")) {
+			if !filepath.IsAbs(dir) {
+				continue
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, "systemctl")); !errors.Is(statErr, os.ErrNotExist) {
+				return "", err
+			}
+		}
+		return "", exec.ErrNotFound
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -297,10 +308,13 @@ func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bind
 		}
 	}
 	state, systemdErr := a.deliverySystemctl(ctx, "show", "--property=LoadState", "--value", unit)
-	// Failed lookups and unexpected states cannot establish unit absence.
-	// In particular, never turn a managed owner into a detached runner when
-	// its service manager is temporarily unavailable.
-	if systemdErr != nil || (state != "loaded" && state != "not-found") {
+	// Executable absence permits detached lifecycle work, but cannot demote a
+	// live managed owner. All other failed/unknown lookups remain fail closed.
+	if errors.Is(systemdErr, exec.ErrNotFound) {
+		if !locked && owner.Managed && deliveryOwnerRunning(owner) {
+			return errCodexDelivery
+		}
+	} else if systemdErr != nil || (state != "loaded" && state != "not-found") {
 		return errCodexDelivery
 	}
 	installed := state == "loaded"
