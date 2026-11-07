@@ -259,6 +259,19 @@ func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bind
 		return err
 	}
 	defer start.Close()
+	// Preflight may have selected an older retained binary before another
+	// ensure completed an upgrade. Only decide ownership with the current
+	// release under start serialization, and use it for both launch and wait.
+	current, err := a.codexDeliveryRelease()
+	if err != nil {
+		return err
+	}
+	if current != r {
+		if err := a.checkCodexDeliveryNode(ctx, current); err != nil {
+			return err
+		}
+	}
+	r = current
 	lease, err := deliveryPrivateFile(p.Lease, true)
 	if err != nil {
 		return errCodexDelivery
@@ -269,7 +282,6 @@ func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bind
 		return errCodexDelivery
 	}
 	unit := "vecnet-delivery@" + p.Slug + ".service"
-	installed := false
 	// A managed same-generation lease is already in its final lifecycle.
 	// Detached owners also check whether installation made a unit available.
 	// Metadata is a generation hint, never proof for signaling.
@@ -285,24 +297,20 @@ func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bind
 		}
 	}
 	state, systemdErr := a.deliverySystemctl(ctx, "show", "--property=LoadState", "--value", unit)
-	installed = systemdErr == nil && state == "loaded"
+	// Failed lookups and unexpected states cannot establish unit absence.
+	// In particular, never turn a managed owner into a detached runner when
+	// its service manager is temporarily unavailable.
+	if systemdErr != nil || (state != "loaded" && state != "not-found") {
+		return errCodexDelivery
+	}
+	installed := state == "loaded"
 	if sameGenerationOwner && !installed {
 		return nil
 	}
 	if !locked {
 		// A crashed leader can leave a bounded claim child holding its open-file
 		// description. Wait, never signal a guessed PID or bypass that fence.
-		if !deliveryOwnerRunning(owner) {
-			for !locked {
-				if !sleepCtx(ctx, 10*time.Millisecond) {
-					return errCodexDelivery
-				}
-				locked, err = deliveryLock(lease)
-				if err != nil {
-					return errCodexDelivery
-				}
-			}
-		} else {
+		if deliveryOwnerRunning(owner) {
 			pidfd, err := deliveryOwnerPidfd(p, lease, owner)
 			if err != nil {
 				return err
@@ -319,14 +327,14 @@ func (a *app) ensureCodexDeliveryPlatform(ctx context.Context, hub, config, bind
 			if err != nil {
 				return errCodexDelivery
 			}
-			for !locked {
-				if !sleepCtx(ctx, 10*time.Millisecond) {
-					return errCodexDelivery
-				}
-				locked, err = deliveryLock(lease)
-				if err != nil {
-					return errCodexDelivery
-				}
+		}
+		for !locked {
+			if !sleepCtx(ctx, 10*time.Millisecond) {
+				return errCodexDelivery
+			}
+			locked, err = deliveryLock(lease)
+			if err != nil {
+				return errCodexDelivery
 			}
 		}
 	}

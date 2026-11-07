@@ -135,6 +135,36 @@ func TestCodexDeliveryProcess(t *testing.T) {
 	switch args[0] {
 	case "cli":
 		os.Exit(Run(args[1:], strings.NewReader(""), os.Stdout, os.Stderr, os.Getenv))
+	case "delayed-ensure":
+		// Pause release discovery after the binary has been resolved and
+		// fingerprinted, before start serialization. The launcher stays fixed.
+		paused := false
+		getenv := func(key string) string {
+			if key == "VECNET_CODEX_DELIVERY_ENTRY" && !paused {
+				paused = true
+				ready := filepath.Join(os.Getenv("HOME"), "old-ensure-paused")
+				if os.WriteFile(ready, []byte("binary selected"), 0600) != nil {
+					os.Exit(14)
+				}
+				until := time.Now().Add(5 * time.Second)
+				for {
+					if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), "resume-old-ensure")); err == nil {
+						break
+					}
+					if time.Now().After(until) {
+						os.Exit(15)
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+			return os.Getenv(key)
+		}
+		a := &app{ctx: context.Background(), getenv: getenv, stdout: os.Stdout, stderr: os.Stderr}
+		if err := a.ensureCodexDelivery(a.ctx, args[1], args[2], args[3]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(16)
+		}
+		os.Exit(0)
 	case "claim":
 		birth := procStart(os.Getpid())
 		raw, _ := json.Marshal(map[string]any{"pid": os.Getpid(), "birth": birth})
@@ -152,9 +182,20 @@ func TestCodexDeliveryProcess(t *testing.T) {
 		// private marker, so the host service manager is never contacted.
 		if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), "systemd-installed")); err != nil {
 			fmt.Println("not-found")
-			os.Exit(1)
+			os.Exit(0)
 		}
 		if strings.Contains(strings.Join(args, " "), "show") {
+			failure, _ := os.ReadFile(filepath.Join(os.Getenv("HOME"), "systemd-show-failure"))
+			switch string(failure) {
+			case "error":
+				os.Exit(1)
+			case "unexpected":
+				fmt.Println("unknown-state")
+				os.Exit(0)
+			case "timeout":
+				time.Sleep(10 * time.Second)
+				os.Exit(1)
+			}
 			fmt.Println("loaded")
 			os.Exit(0)
 		}
@@ -266,6 +307,9 @@ func TestCodexDeliveryProcess(t *testing.T) {
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 		<-stop
+		file, _ = os.OpenFile(filepath.Join(os.Getenv("HOME"), "runner-signals"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		fmt.Fprintln(file, os.Getpid())
+		file.Close()
 		lease.Close()
 		os.Exit(0)
 	}
@@ -526,6 +570,60 @@ func TestCodexDeliveryManagedUpgrade(t *testing.T) {
 	}
 }
 
+func TestCodexDeliveryManagedLookupFailure(t *testing.T) {
+	for _, failure := range []string{"error", "unexpected", "timeout", "missing"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newDeliveryFixture(t)
+			deliveryWrite(t, filepath.Join(f.dir, "systemd-installed"), "fixture only", 0600)
+			if err := f.ensure("https://hub.invalid"); err != nil {
+				t.Fatal(err)
+			}
+			deliveryWait(t, func() bool { return len(f.starts()) == 1 })
+			_, meta := f.owner()
+			var owner deliveryOwner
+			if err := deliveryRead(meta, &owner); err != nil || !owner.Managed {
+				t.Fatalf("expected managed owner: %+v %v", owner, err)
+			}
+			next := filepath.Join(f.dir, "new-release.ts")
+			deliveryWrite(t, next, "next generation", 0600)
+			f.env["VECNET_CODEX_DELIVERY_ENTRY"] = next
+			if failure == "missing" {
+				if err := os.Rename(filepath.Join(f.dir, "bin", "systemctl"), filepath.Join(f.dir, "systemctl-unavailable")); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				deliveryWrite(t, filepath.Join(f.dir, "systemd-show-failure"), failure, 0600)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+			defer cancel()
+			started := time.Now()
+			err := f.app.ensureCodexDelivery(ctx, "https://hub.invalid", f.config, f.bindings)
+			if err == nil {
+				t.Error("unknown service manager must return hooks fallback")
+			}
+			if elapsed := time.Since(started); elapsed > time.Second {
+				t.Errorf("manager failure exceeded caller bound: %s", elapsed)
+			}
+			// Observe signals processed asynchronously after ensure returns.
+			time.Sleep(100 * time.Millisecond)
+			if raw, _ := os.ReadFile(filepath.Join(f.dir, "runner-signals")); len(raw) != 0 {
+				t.Errorf("manager lookup failure directly signaled the managed runner: %s", raw)
+			}
+			if !deliveryOwnerRunning(owner) {
+				t.Error("manager lookup failure stopped the managed owner")
+			}
+			var after deliveryOwner
+			if deliveryRead(meta, &after) != nil || after != owner || len(f.starts()) != 1 {
+				t.Errorf("manager lookup failure started a detached replacement: owner=%+v starts=%v", after, f.starts())
+			}
+			raw, err := os.ReadFile(filepath.Join(f.dir, "systemctl-calls"))
+			if err != nil || strings.Count(string(raw), " start ") != 1 || strings.Contains(string(raw), " restart ") {
+				t.Errorf("failed lookup changed the service: %s %v", raw, err)
+			}
+		})
+	}
+}
+
 func TestCodexDeliveryOrphanClaim(t *testing.T) {
 	f := newDeliveryFixture(t)
 	deliveryWrite(t, filepath.Join(f.dir, "spawn-claim"), "fixture only", 0600)
@@ -707,6 +805,80 @@ func TestCodexDeliveryConcurrentUpgrade(t *testing.T) {
 	deliveryWait(t, func() bool { return len(f.starts()) == 2 })
 	if len(f.starts()) != 2 {
 		t.Fatal("competing upgrades created redundant senders")
+	}
+}
+
+func TestCodexDeliveryPendingUpgrade(t *testing.T) {
+	f := newDeliveryFixture(t)
+	stable := f.env["VECNET_BIN"]
+	oldBinary := filepath.Join(f.dir, "bin", "vecnet-old")
+	if err := os.Rename(stable, oldBinary); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(oldBinary, stable); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ensure("https://hub.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	deliveryWait(t, func() bool { return len(f.starts()) == 1 })
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := exec.Command(exe, "-test.run=^TestCodexDeliveryProcess$", "--", "delivery-fixture", "delayed-ensure", "https://hub.invalid", f.config, f.bindings)
+	pending.Env = append(f.environ(), "GORACE=atexit_sleep_ms=0")
+	if err := pending.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- pending.Wait() }()
+	t.Cleanup(func() { _ = pending.Process.Kill() })
+	deliveryWait(t, func() bool { _, err := os.Stat(filepath.Join(f.dir, "old-ensure-paused")); return err == nil })
+	newBinary := filepath.Join(f.dir, "bin", "vecnet-new")
+	raw, err := os.ReadFile(oldBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveryWrite(t, newBinary, string(raw)+"# retained binary generation two\n", 0700)
+	nextLink := stable + ".next"
+	if err := os.Symlink(newBinary, nextLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(nextLink, stable); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := f.command("codex", "delivery-refresh", "--hub", "https://hub.invalid", "--config", f.config, "--bindings", f.bindings).CombinedOutput(); err != nil {
+		t.Fatalf("new-generation ensure: %v %s", err, out)
+	}
+	deliveryWait(t, func() bool { return len(f.starts()) == 2 })
+	current, meta := f.owner()
+	before, err := os.ReadFile(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveryWrite(t, filepath.Join(f.dir, "resume-old-ensure"), "resume", 0600)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("pending ensure: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("pending ensure did not finish")
+	}
+	after, err := os.ReadFile(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) || len(f.starts()) != 2 {
+		t.Fatalf("pending old-generation ensure replaced the completed upgrade: starts=%v", f.starts())
+	}
+	var owner deliveryOwner
+	if err := json.Unmarshal(after, &owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner.PID != current || !deliveryOwnerRunning(owner) {
+		t.Fatal("completed upgrade lost its live owner")
 	}
 }
 
