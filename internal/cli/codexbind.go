@@ -94,6 +94,8 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	}
 	var spec map[string]flagKind
 	switch args[0] {
+	case "deliver", "delivery-status", "delivery-refresh":
+		return a.cmdCodexDelivery(args)
 	case "bind":
 		spec = map[string]flagKind{"thread": strFlag, "codex-home": strFlag, "ttl": strFlag, "idle-dormant": strFlag, "attended": boolFlag, "renew": boolFlag}
 	case "unbind":
