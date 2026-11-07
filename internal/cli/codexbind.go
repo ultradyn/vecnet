@@ -405,7 +405,17 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	if !binding.Attended {
 		hint = " (needs -a never or the auto reviewer; pass --attended if a human answers approvals)"
 	}
-	fmt.Fprintf(a.stdout, "bound %s to Codex thread %s; run `vecnet codex status` to inspect delivery state%s\n", binding.Profile, binding.ThreadID, hint)
+	status := "select the bound --net profile and --as identity explicitly before running `vecnet codex status` to inspect delivery state"
+	profile, profileOK := shellQuote(binding.Profile)
+	as, asOK := shellQuote(binding.As)
+	if profileOK && asOK {
+		command := "vecnet --net " + profile
+		if binding.As != "" {
+			command += " --as " + as
+		}
+		status = "run `" + command + " codex status` to inspect delivery state"
+	}
+	fmt.Fprintf(a.stdout, "bound %s to Codex thread %s; %s%s\n", binding.Profile, binding.ThreadID, status, hint)
 	return nil
 }
 
