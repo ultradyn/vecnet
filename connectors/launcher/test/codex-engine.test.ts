@@ -1970,3 +1970,96 @@ test('fix1 supplemental release cleanup recovers original scope after companion 
     assert.equal(h.sends().length, 1); assert.equal(receiptHooks(h).length, 0);
   } finally { await replacement.stop(); }
 });
+
+// Task5a2 fixround2: exercise the retained ordinary-release authority after
+// inflight/companion deletion. All prior case/helper bodies remain unchanged.
+async function interruptedOrdinaryCleanup(t: TestContext, wrap?: (rpc: CodexRpc) => CodexRpc) {
+  const h = await harness(t, { status: active, wrap });
+  control(h, { releaseFailure: true });
+  h.fake.failNext('turn/steer', { code: -32602, message: 'invalid input' });
+  await h.wake(); const original = structuredClone(h.rows()[0]); assert.ok(original);
+  const provenance = h.kv.get('attempt:' + original.key); assert.ok(provenance);
+  await h.engine.stop();
+  let interrupted = false; const remove = h.kv.delete;
+  h.kv.delete = key => {
+    remove(key);
+    if (!interrupted && key === 'attempt:' + original.key) {
+      interrupted = true; throw new Error('fixture_fix2_cleanup_interrupted');
+    }
+  };
+  control(h, { releaseFailure: false }); h.engine.start();
+  await eventually(() => interrupted, 'confirmed ordinary release interrupted after companion deletion');
+  await h.sync(); control(h, { releaseFailure: true }); await h.engine.stop(); h.kv.delete = remove;
+  assert.equal(h.kv.get('inflight:' + original.key), undefined);
+  assert.equal(h.kv.get('attempt:' + original.key), undefined);
+  const releasing = h.kv.get('releasing:' + original.claim); assert.ok(releasing);
+  assert.deepEqual(JSON.parse(releasing).attempt, JSON.parse(provenance));
+  assert.equal(JSON.parse(readFileSync(h.plan.claims, 'utf8'))[original.claim], undefined, 'N1 was already released');
+  // Publish the same eligible delivery through a fresh watch event after the
+  // restarted engine has completed its normal resume/gap guard.
+  h.plan.items = []; h.plan.events = []; h.save();
+  return { h, original, releasing };
+}
+
+test('fix2 interrupted ordinary cleanup reserves its deterministic key through a fresh eligible watch wake', async t => {
+  const { h, original, releasing } = await interruptedOrdinaryCleanup(t);
+  h.fake.withholdNextItem(); await h.restart();
+  const before = h.records().filter(r => r.hookClaimed).length;
+  await h.wake();
+  assert.ok(h.records().filter(r => r.hookClaimed).slice(before).some(r => r.hookDeliveries?.includes('w1')),
+    'normal watch/resume/gap path reached a same-batch reservation');
+  assert.equal(h.sends().length, 1, 'pending N1 cleanup must reserve K even without inflight or companion');
+  assert.equal(h.kv.get('inflight:' + original.key), undefined);
+  assert.equal(h.kv.get('attempt:' + original.key), undefined);
+  assert.equal(h.kv.get('releasing:' + original.claim), releasing);
+  assert.equal(receiptHooks(h).length, 0);
+  const beforeCleanup = h.releases().length;
+  control(h, { releaseFailure: false, releaseResponse: 'numeric-zero' }); await h.tick(1000);
+  assert.equal(h.kv.get('releasing:' + original.claim), undefined, 'confirmed released:0 ends only the old reservation');
+  const cleanup = h.releases().slice(beforeCleanup).filter(r => arg(r.argv, '--claim') === original.claim);
+  assert.ok(cleanup.length); for (const r of cleanup) assertOriginalAttemptScope(h, r.argv, r.env, original);
+  h.fake.notify('thread/status/changed', { threadId: 'thread', status: active }); await h.tick(2000);
+  assert.equal(h.sends().length, 2, 'the batch becomes eligible once old cleanup finishes');
+  const newer = h.rows()[0]; assert.ok(newer); assert.equal(newer.key, original.key);
+  assert.notEqual(newer.claim, original.claim); assert.equal(newer.state, 'pending');
+  assert.ok(h.kv.get('attempt:' + newer.key)); assert.equal(receiptHooks(h).length, 0);
+});
+
+for (const outcome of ['accepted', 'ambiguous']) test(`fix2 stale released:0 cleanup preserves a newer ${outcome} same-key attempt and provenance`, async t => {
+  const { h, original, releasing } = await interruptedOrdinaryCleanup(t, outcome === 'ambiguous' ? ambiguousAfterAccept() : undefined);
+  await h.restart();
+  assert.equal(h.kv.get('releasing:' + original.claim), releasing, 'old confirmation remains unavailable after restart');
+  await h.engine.stop();
+  // Explicit supporting recovery fixture: temporarily lift the old reservation
+  // to create a real accepted N2 through the engine. Restore N1 afterward to
+  // model overlap persisted by the pre-fix engine, independently of admission.
+  h.kv.delete('releasing:' + original.claim);
+  h.binding.profile = 'newer'; h.binding.as = 'newer-as'; h.binding.caller = 'newer_caller';
+  h.fake.setThread({ id: 'thread', status: { type: 'idle' } });
+  await h.restart(); h.fake.withholdNextItem(); await h.wake();
+  const newer = structuredClone(h.rows()[0]); assert.ok(newer);
+  assert.equal(newer.key, original.key); assert.notEqual(newer.claim, original.claim);
+  assert.equal(newer.state, outcome === 'accepted' ? 'pending' : 'unresolved');
+  assert.equal(h.sends().length, 2); assert.equal(receiptHooks(h).length, 0);
+  const inflight = h.kv.get('inflight:' + newer.key), provenance = h.kv.get('attempt:' + newer.key);
+  assert.ok(inflight); assert.ok(provenance);
+  assert.equal(JSON.parse(provenance).row.claim, newer.claim);
+  assert.equal(JSON.parse(provenance).profile, 'newer'); assert.equal(JSON.parse(provenance).caller, 'newer_caller');
+  assert.deepEqual(JSON.parse(readFileSync(h.plan.claims, 'utf8'))[newer.claim], ['w1']);
+  h.kv.set('releasing:' + original.claim, releasing);
+  const before = h.releases().length;
+  control(h, { releaseFailure: false, releaseResponse: 'numeric-zero' });
+  await h.engine.stop(); // Public stop drains ordinary recovery without a scan.
+  assert.equal(h.kv.get('inflight:' + newer.key), inflight, 'N1 released:0 cannot delete the newer recovery generation');
+  assert.equal(h.kv.get('attempt:' + newer.key), provenance, 'N1 cleanup cannot delete newer immutable provenance');
+  assert.equal(h.kv.get('releasing:' + original.claim), undefined);
+  const cleanup = h.releases().slice(before); assert.equal(cleanup.length, 1);
+  assertOriginalAttemptScope(h, cleanup[0].argv, cleanup[0].env, original);
+  // Ordinary release uses the saved source scope; receipt publication alone
+  // carries explicit --expect-* flags. Check the retained original pins here.
+  assert.equal(JSON.parse(releasing).attempt.hub, 'https://hub.invalid');
+  assert.equal(JSON.parse(releasing).attempt.caller, 'peer_pinned');
+  assert.deepEqual(JSON.parse(readFileSync(h.plan.claims, 'utf8'))[newer.claim], ['w1']);
+  assert.equal(h.kv.keys('settling:').length, 0); assert.equal(receiptHooks(h).length, 0);
+  assert.equal(h.sends().length, 2, 'old cleanup never reinjects the accepted batch');
+});

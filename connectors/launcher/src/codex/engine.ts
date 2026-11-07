@@ -129,10 +129,22 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     unknownProvenance.add(key); log.warn('codex_attempt_provenance_unknown', { threadId: b.threadId });
   }
   const write = (r: InflightRow) => { if (!settling(r.key)) kv.set('inflight:' + r.key, JSON.stringify(r)); };
+  function sameGeneration(value: unknown, r: InflightRow) {
+    const saved = obj(value);
+    return saved.threadId === r.threadId && saved.key === r.key && saved.claim === r.claim;
+  }
   function clear(r: InflightRow, confirmed = false) {
     if (settling(r.key) && !confirmed) return;
-    kv.delete('inflight:' + r.key); kv.delete('diagnostic:unresolved:' + r.key); kv.delete('attempt:' + r.key);
-    waitingRetry.delete(r.key); waitForIdle.delete(r.key); unresolvedLogged.delete(r.key); pendingLogged.delete(r.key);
+    const current = JSON.parse(kv.get('inflight:' + r.key) ?? 'null');
+    const companion = obj(JSON.parse(kv.get('attempt:' + r.key) ?? 'null')).row;
+    // Retained release authority can outlive these records. A confirmation
+    // for its nonce must never clear a newer generation using the same key.
+    if (sameGeneration(current, r)) kv.delete('inflight:' + r.key);
+    if (sameGeneration(companion, r)) kv.delete('attempt:' + r.key);
+    if ((current === null || sameGeneration(current, r)) && (companion === undefined || sameGeneration(companion, r))) {
+      kv.delete('diagnostic:unresolved:' + r.key);
+      waitingRetry.delete(r.key); waitForIdle.delete(r.key); unresolvedLogged.delete(r.key); pendingLogged.delete(r.key);
+    }
     kv.delete('releasing:' + r.claim); // Last ordinary-release recovery record.
   }
   function beginSettlement(r: InflightRow, origin: Settlement['origin']) {
@@ -255,7 +267,9 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     // A definite rejection (or proven absence) needs cleanup, not another
     // history scan. Persist that fact before invoking the fallible child.
     kv.set('releasing:' + r.claim, JSON.stringify({ ...r, attempt }));
-    waitingRetry.delete(r.key); waitForIdle.delete(r.key);
+    if (sameGeneration(JSON.parse(kv.get('inflight:' + r.key) ?? 'null'), r)) {
+      waitingRetry.delete(r.key); waitForIdle.delete(r.key);
+    }
     try { await release(r.claim, attempt); clear(r); }
     catch { log.warn('codex_claim_release_failed', { threadId: b.threadId }); scheduleClaimRecovery(); }
   }
@@ -654,8 +668,10 @@ export function createEngine(b: Binding, d: EngineDeps): Engine {
     const key = 'vn.' + createHash('sha256').update(JSON.stringify([b.hub, b.threadId, [...batch.deliveries].sort()])).digest('hex').slice(0, 24);
     const row: InflightRow = { threadId: b.threadId, key, claim: nonce, deliveries: batch.deliveries, method: action === 'start' ? 'turn/start' : 'turn/steer',
       attemptTurnId: action === 'steer' ? turn!.id : null, priorTurnId: action === 'start' ? turn?.id ?? null : null, acceptedAt: null, state: 'sending' };
-    // Do not overwrite an unresolved attempt if a summary produces its key again.
-    if (kv.get('inflight:' + key) || kv.get('attempt:' + key) || settling(key)) { await releaseUnsentClaim(nonce); return; }
+    // Ordinary cleanup reserves its key until the final releasing deletion,
+    // including a crash after inflight and companion have already been deleted.
+    if (kv.get('inflight:' + key) || kv.get('attempt:' + key) || settling(key) ||
+        kv.keys('releasing:').some(k => obj(JSON.parse(kv.get(k)!)).key === key)) { await releaseUnsentClaim(nonce); return; }
     kv.set('attempt:' + key, JSON.stringify({ ...sendScope, row } satisfies Attempt));
     write(row); kv.delete('claiming:' + nonce); await transmit(row, batch);
   }
