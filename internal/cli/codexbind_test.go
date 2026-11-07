@@ -145,7 +145,7 @@ func TestCodexBindWritesFile(t *testing.T) {
 	if bindValue[string](t, b, "profile") != "p" || bindValue[string](t, b, "as") != "" || bindValue[string](t, b, "thread_id") != bindT1 || bindValue[string](t, b, "codex_home") != f.home {
 		t.Fatalf("entry=%s", f.raw())
 	}
-	if !strings.Contains(out.String(), "bound p to Codex thread "+bindT1+"; the launcher connector picks it up within 10 s") {
+	if !strings.Contains(out.String(), "bound p to Codex thread "+bindT1+"; run `vecnet codex status` to inspect delivery state") {
 		t.Fatalf("output=%q", out.String())
 	}
 }
