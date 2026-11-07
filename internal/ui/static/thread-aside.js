@@ -25,7 +25,6 @@ export function mountAside(root, ctx) {
   // A metadata miss is not a cached answer. Refresh and a live reconnect
   // each ask once more, including after earlier failures, and an in-flight
   // read is not asked twice. The rejection itself never starts another read.
-  let retryMeta = false;
   const urls = new Set();
   let gone = false, expiryTimer = 0;
   // The thread view's R2 references (thread.js), when it is mounted beside us.
@@ -60,11 +59,9 @@ export function mountAside(root, ctx) {
   // A failure waits for the next refresh or live reconnect: one attempt
   // per signal, with no ceiling that sticks for the rest of the mount,
   // and the rejection itself does not count as that signal.
-  function statusFor(files) {
+  function statusFor(files, retry) {
     if (refsFeed && !refsFeed.loaded()) return;
     const known = (refsFeed && refsFeed.get()) || new Map();
-    const retry = retryMeta;
-    retryMeta = false;
     for (const f of files) {
       if (!f.blob_id || known.has(f.blob_id)) continue;
       const cur = S.meta.get(f.blob_id);
@@ -88,8 +85,7 @@ export function mountAside(root, ctx) {
     }
   }
   function askAgain() {
-    retryMeta = true;
-    render(true);
+    render(true, true);
   }
 
   const toggle = h('button', { type: 'button', class: 'aside-toggle btn', 'aria-expanded': 'false', 'aria-controls': 'aside-body', text: 'Details' });
@@ -206,10 +202,13 @@ export function mountAside(root, ctx) {
   // The store notifies on every load start and end; redraw only on news, so
   // a focused file button is not replaced under the operator's keyboard.
   let shown = {};
-  function render(force) {
+  function render(force, retryMeta = false) {
     if (gone) return;
     const d = detail.get(), err = detail.error(), a = admin.get(), p = ctx.peers.get();
     if (force !== true && d === shown.d && err === shown.err && a === shown.a && p === shown.p) return;
+    // Retry permission belongs to this snapshot or reconnect only. A load's
+    // completion notification must not arm a later metadata rejection.
+    const retry = retryMeta || d !== shown.d;
     shown = { d, err, a, p };
     const kids = [];
     if (!d) {
@@ -217,7 +216,7 @@ export function mountAside(root, ctx) {
         ? h('div', { class: 'empty error' }, h('b', { text: 'Details unavailable' }), detail.error().message)
         : h('div', { class: 'loading', text: 'Loading details…' }));
     } else {
-      statusFor(d.files || []);
+      statusFor(d.files || [], retry);
       const now = store.hubNow(), t = d.row.thread, files = fileRows(d.files, refsNow(), now);
       // Redraw when the next file reaches its recorded deadline.
       clearTimeout(expiryTimer);
@@ -243,7 +242,7 @@ export function mountAside(root, ctx) {
   // A new thread snapshot is a refresh: failed metadata may be asked again.
   // render() itself still skips a notification that carries no new value, so
   // a load's start does not rebuild a focused file button.
-  const off = [detail.subscribe(() => { retryMeta = true; render(); }), admin.subscribe(redraw), ctx.peers.subscribe(redraw)];
+  const off = [detail.subscribe(redraw), admin.subscribe(redraw), ctx.peers.subscribe(redraw)];
   if (store.onConn) off.push(store.onConn(state => { if (state === 'live') askAgain(); }));
   // New history: the projection is current again, so local 410s give way.
   if (refsFeed) off.push(refsFeed.subscribe(() => { S.ended.clear(); render(true); }));
