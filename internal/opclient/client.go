@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/XertroV/vecnet/internal/blobclient"
 	"io"
 	"net/http"
 	"net/url"
@@ -17,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XertroV/vecnet/internal/blobclient"
 	"github.com/XertroV/vecnet/internal/blobwire"
 	"github.com/XertroV/vecnet/internal/envelope"
 	"github.com/XertroV/vecnet/internal/hubid"
@@ -366,9 +366,6 @@ func (c *Client) Ack(ctx context.Context, cursor string) error {
 // Upload transfers under the caller's context. Disk uploads retain their
 // one-day unreferenced TTL; R2 grants record their own retention class.
 func (c *Client) Upload(ctx context.Context, r io.Reader, size int64, mediaType, name string) (envelope.Attachment, error) {
-	if err := c.gate(); err != nil {
-		return envelope.Attachment{}, err
-	}
 	return c.UploadWithProgress(ctx, r, size, mediaType, name, nil)
 }
 
@@ -377,11 +374,11 @@ func (c *Client) UploadWithProgress(ctx context.Context, r io.Reader, size int64
 	if err := c.gate(); err != nil {
 		return envelope.Attachment{}, err
 	}
-	bc := c.blobs()
+	bc, transport := c.blobs()
 	bc.Progress = progress
 	caps, err := bc.Discover(ctx)
 	if err != nil {
-		return envelope.Attachment{}, transferError(err)
+		return envelope.Attachment{}, transport.outcome(err)
 	}
 	if caps.Backend == "r2" {
 		if size <= 0 || size > blobclient.MaxSize || size > caps.MaxSize {
@@ -411,7 +408,7 @@ func (c *Client) UploadWithProgress(ctx context.Context, r io.Reader, size int64
 		// legacy disk, which would PUT the file through the hub.
 		ref, err := bc.UploadUsing(ctx, caps, seeker, size, mediaType, "")
 		if err != nil {
-			return envelope.Attachment{}, transferError(err)
+			return envelope.Attachment{}, transport.outcome(err)
 		}
 		if mediaType == "" {
 			mediaType = "application/octet-stream"
@@ -492,26 +489,49 @@ func (c *Client) Blob(ctx context.Context, sha string, max int64) ([]byte, strin
 type BlobOptions struct{ BlobID string }
 
 func (c *Client) BlobWithOptions(ctx context.Context, sha string, max int64, opts BlobOptions) ([]byte, string, error) {
+	if err := c.gate(); err != nil {
+		return nil, "", err
+	}
 	if opts.BlobID == "" {
 		return c.Blob(ctx, sha, max)
 	}
-	b, g, err := c.blobs().Download(ctx, sha, opts.BlobID, max)
-	return b, g.MediaType, transferError(err)
+	bc, transport := c.blobs()
+	b, g, err := bc.Download(ctx, sha, opts.BlobID, max)
+	return b, g.MediaType, transport.outcome(err)
 }
 
-type blobTransport struct{ c *Client }
+// A transport belongs to one transfer operation. It retains only checked hub
+// transport errors so callers keep errors.As classification from the operator
+// client. Direct-provider errors never pass through this transport.
+type blobTransport struct {
+	c       *Client
+	failure error
+}
 
-func (t blobTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (t *blobTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r := req.Clone(req.Context())
 	r.Header.Set("Authorization", "Bearer "+t.c.secret)
 	rt := t.c.uploadHC.Transport
 	if rt == nil {
 		rt = http.DefaultTransport
 	}
-	return rt.RoundTrip(r)
+	resp, err := rt.RoundTrip(r)
+	t.failure = nil
+	if err != nil {
+		t.failure = &url.Error{Op: r.Method, URL: t.c.base, Err: err}
+	}
+	return resp, err
 }
-func (c *Client) blobs() *blobclient.Client {
-	return blobclient.New(c.base, blobTransport{c}, nil, nil)
+func (t *blobTransport) outcome(err error) error {
+	var e *blobclient.Error
+	if errors.As(err, &e) && e.HubTransport && t.failure != nil {
+		return t.failure
+	}
+	return transferError(err)
+}
+func (c *Client) blobs() (*blobclient.Client, *blobTransport) {
+	transport := &blobTransport{c: c}
+	return blobclient.New(c.base, transport, nil, nil), transport
 }
 func transferError(err error) error {
 	var e *blobclient.Error
