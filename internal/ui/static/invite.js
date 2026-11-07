@@ -44,6 +44,21 @@ export function invitePanel(inv, { onDone }) {
 }
 
 let open = null; // the dialog's close(), while one is shown
+// Only safe reconciliation metadata survives a dialog. API identity scopes it
+// to the signed-in caller; neither form values nor one-time output live here.
+const recoveries = new WeakMap();
+let moveRecovery = null;
+
+// Called only when following the hub's moving notice. Keep the destination
+// unchanged except for a safe fragment; following it never submits anything.
+export function onboardingMoveURL(target) {
+  if (!moveRecovery) return target;
+  const dest = new URL(target);
+  if (!/^https?:$/.test(dest.protocol) || dest.username || dest.password) return target;
+  const q = new URLSearchParams({ kind: moveRecovery.kind, request_id: moveRecovery.requestId, recover: '1' });
+  dest.hash = 'add-agent?' + q;
+  return dest.href;
+}
 
 export function closeInvite() { if (open) open(); }
 
@@ -73,7 +88,24 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   let usedPrefill = false;
   let rendering = false;
   let cancelBearer = () => {};
-  const requestId = usableRequestId(prefill && prefill.requestId) || freshRequestId();
+  const saved = recoveries.get(ctx.api);
+  const suppliedId = usableRequestId(prefill && prefill.requestId);
+  const restored = saved && (!suppliedId || suppliedId === saved.requestId) ? saved : null;
+  let recovering = !!restored || !!(suppliedId && prefill.recover);
+  const requestId = suppliedId || (restored && restored.requestId) || freshRequestId();
+  if (restored) prefill = { ...prefill, kind: restored.kind };
+  moveRecovery = restored || null;
+  function remember(kind) {
+    const safe = { requestId, kind };
+    recoveries.set(ctx.api, safe);
+    moveRecovery = safe;
+  }
+  function forget() {
+    if (recoveries.get(ctx.api)?.requestId === requestId) recoveries.delete(ctx.api);
+    if (moveRecovery?.requestId === requestId) moveRecovery = null;
+    recovering = false;
+  }
+  if (recovering) remember(prefill.kind);
   // pending is the uncertain (or conflicting) submission. Edits do not replace
   // it, and a newer submit waits until status says it never committed.
   let pending = null;
@@ -169,7 +201,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   }
   // An unresolved request keeps Check status. Editing must not drop it.
   function dropRetry() {
-    if (pending) return;
+    if (pending || recovering) return;
     removeRetryRow();
   }
   function invalidateStatus() {
@@ -242,7 +274,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     if (action !== 'invite' && openName.checked) openName.checked = false;
     lede.textContent = action === 'oauth_link' ? DOT_LEDE : action === 'grokbot_setup' ? GROK_LEDE : LEDE;
     create.textContent = gate.busy ? 'Creating…' : createLabel();
-    create.disabled = !!gate.busy || registry.phase === 'loading';
+    create.disabled = recovering || !!gate.busy || registry.phase === 'loading';
     if (!spec || issue) {
       const why = issue && issue.code === 'unsupported_field'
         ? 'This page cannot enter the field ' + issue.name + '.'
@@ -362,9 +394,9 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   });
   kind.addEventListener('change', () => {
     if (rendering) return;
-    if (pending) {
+    if (pending || recovering) {
       rendering = true;
-      try { kind.value = pending.body.kind; }
+      try { kind.value = pending ? pending.body.kind : prefill.kind; }
       finally { rendering = false; }
       return;
     }
@@ -394,6 +426,11 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     }
     if (!acceptCompletion(life, ticket, ac.signal.aborted)) return;
     renderFields();
+    if (recovering) {
+      removeRetryRow();
+      err.textContent = 'Check the previous request before creating another agent.';
+      showReconciliation('recovery');
+    }
     restoreOpeningFocus();
   }
 
@@ -421,6 +458,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
   }
 
   async function send() {
+    if (recovering) return;
     const next = submitGate(gate);
     if (!next.accepted) return;
     gate = next;
@@ -457,10 +495,12 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     err.textContent = '';
     create.disabled = true;
     create.textContent = 'Creating…';
+    remember(bodyReq.kind);
     try {
       const res = await ctx.api.agentAdd(bodyReq, { signal: ac.signal });
       if (!acceptCompletion(life, ticket, ac.signal.aborted) || !dialog.isConnected) return;
       const submitted = vals;
+      forget();
       pending = null;
       clearSecrets();
       if (spec.submit_action === 'oauth_link') showDot(res, submitted, spec);
@@ -474,6 +514,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       create.textContent = createLabel();
       const outcome = outcomeOf(x);
       if (outcome === 'stale') {
+        forget();
         pending = null;
         clearSecrets();
         err.textContent = 'The kind contract changed. Review the form and submit again.';
@@ -489,6 +530,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
         showReconciliation(outcome);
         return;
       }
+      forget();
       pending = null;
     }
   }
@@ -500,6 +542,7 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       const res = await ctx.api.onboardingStatus(requestId, { signal: statusSignal() });
       if (mine !== statusGen || humanHeld) return;
       if (!acceptCompletion(life, ticket, ac.signal.aborted) || !dialog.isConnected) return;
+      forget();
       pending = null;
       showSafe(statusSafe(res), 'Status for this request. One-time text and routine secrets are not included.');
     } catch (e) {
@@ -507,7 +550,11 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       if (!acceptCompletion(life, ticket, ac.signal.aborted) || !dialog.isConnected) return;
       if (e && (e.name === 'AbortError' || e.code === 'aborted')) return;
       if (e && e.code === 'not_found') {
+        // A closed POST may still be committing. Keep the id across another
+        // close/reopen, and reuse it if the human re-enters the form.
+        recovering = false;
         pending = null;
+        create.disabled = false;
         removeRetryRow();
         err.textContent = 'No committed request for this id yet.';
         return;

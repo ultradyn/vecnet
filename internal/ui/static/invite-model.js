@@ -163,7 +163,9 @@ export function addAgentPrefill(hash) {
   const m = /^#add-agent(?:\?(.*))?$/.exec(String(hash || ''));
   if (!m) return null;
   const q = new URLSearchParams(m[1] || '');
-  return { kind: q.get('kind') || '', name: q.get('name') || '', requestId: q.get('request_id') || '' };
+  const prefill = { kind: q.get('kind') || '', name: q.get('name') || '', requestId: q.get('request_id') || '' };
+  if (q.get('recover') === '1') prefill.recover = true;
+  return prefill;
 }
 
 export function usableRequestId(id) {
@@ -332,7 +334,7 @@ export function connectedBadge(result) {
 
 export function outcomeOf(error) {
   if (!error) return 'ok';
-  if (error.code === 'aborted' || error.code === 'network' || error.status === 0 || (typeof error.status === 'number' && error.status >= 500)) return 'uncertain';
+  if (error.code === 'hub_moved' || error.code === 'aborted' || error.code === 'network' || error.status === 0 || (typeof error.status === 'number' && error.status >= 500)) return 'uncertain';
   if (error.code === 'stale_spec') return 'stale';
   if (error.code === 'idempotency_conflict') return 'conflict';
   return 'invalid';

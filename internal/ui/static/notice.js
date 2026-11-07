@@ -3,6 +3,7 @@
 // textContent. Dismiss hides a notice id for this browser session; the hub
 // keeps it.
 import { h } from './dom.js';
+import { onboardingMoveURL } from './invite.js';
 import { bannerItems, restartLine, restartState } from './notice-model.js';
 
 const KEY = 'vecnet.ui.dismissed';
@@ -46,7 +47,7 @@ function noticeRow(it, sig, onDismiss) {
     h('div', { class: 'nb' },
       h('span', { class: 'chip lb', text: it.label }),
       it.when ? h('span', { class: 'wh' }, rel, rel && hid(' · '), it.abs) : null,
-      it.host ? h('span', { class: 'to' }, '→\u00a0', h('a', { href: it.url, rel: 'noopener noreferrer', target: '_blank', text: it.host })) : null,
+      it.host ? h('span', { class: 'to' }, '→\u00a0', h('a', { href: it.url, onclick: e => e.currentTarget.setAttribute('href', onboardingMoveURL(it.url)), rel: 'noopener noreferrer', target: '_blank', text: it.host })) : null,
       h('span', { class: 'tx', text: it.text })),
     h('button', { type: 'button', class: 'x', 'aria-label': 'Dismiss notice', title: 'Hide for this session', text: '×', onclick: () => onDismiss(it.id) }));
   return { el, sig, rel };

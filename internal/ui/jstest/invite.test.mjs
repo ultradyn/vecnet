@@ -11,6 +11,7 @@ import {
 } from '../static/invite-model.js';
 import { KIND_LABELS, kindLabel } from '../static/format.js';
 import { closeInvite, openInvite } from '../static/invite.js';
+import { renderBanner } from '../static/notice.js';
 
 // The golden the Go CLI is tested against too (internal/cli/invite_internal_test.go).
 const fx = JSON.parse(readFileSync(new URL('../../cli/testdata/invite.json', import.meta.url), 'utf8'));
@@ -274,6 +275,7 @@ test('key clearing, no persistence, stable request id, no double-submit, stale c
   assert.equal(outcomeOf({ code: 'network', status: 0 }), 'uncertain');
   assert.equal(outcomeOf({ code: 'http_503', status: 503 }), 'uncertain');
   assert.equal(outcomeOf({ code: 'aborted', status: 0 }), 'uncertain');
+  assert.equal(outcomeOf({ code: 'hub_moved', status: 410 }), 'uncertain');
   assert.equal(outcomeOf({ code: 'stale_spec', status: 409 }), 'stale');
   assert.equal(outcomeOf({ code: 'idempotency_conflict', status: 409 }), 'conflict');
   assert.equal(outcomeOf({ code: 'invalid_value', status: 422 }), 'invalid');
@@ -1060,5 +1062,84 @@ test('(t9 I5 inflight kind) a kind change during the dot submit keeps the hub st
     assert.doesNotMatch(dialog.textContent, /Hub origin:/);
     assert.equal(dialog.querySelector('.inv-code-val').textContent, 'ABCD-EFGH-JKMN');
     assert.equal(links, 0, 'the in-flight result minted a second code');
+  } finally { restore(); }
+});
+
+
+test('closing a committed submit keeps safe recovery on reopen without another creation', async () => {
+  let resolveAdd, submitted;
+  let adds = 0;
+  const { dialog, restore, ctx } = await openDialog({
+    agentKinds: async () => ({ kinds: catalogue }),
+    agentAdd: body => { adds++; submitted = body; return new Promise(r => { resolveAdd = r; }); },
+    onboardingStatus: async id => {
+      assert.equal(id, submitted.request_id);
+      return { request_id: id, kind: 'grokbot', peer_id: 'peer_original', route_id: 'route_original', setup: { state: 'processed' } };
+    },
+  });
+  try {
+    setValue(dialog.querySelector('#inv-kind'), 'grokbot', 'change');
+    setValue(dialog.querySelector('#inv-name'), 'Gateway');
+    setValue(dialog.querySelector('#inv-url'), ROUTINE);
+    setValue(dialog.querySelector('#inv-key'), FAKE_KEY);
+    click(buttonNamed(dialog, 'Create Grok bot'));
+    await flush();
+    closeInvite();
+    assert.equal(dialog.querySelector('#inv-key').value, '');
+    assert.equal(dialog.querySelector('#inv-url').value, '');
+    resolveAdd({ request_id: submitted.request_id, peer_id: 'peer_original' });
+    await flush();
+    assert.equal(dialog.isConnected, false);
+    openInvite(ctx, () => {}, null, null);
+    await flush();
+    const reopened = domDoc.body.querySelector('dialog.inv');
+    assert.equal(reopened.querySelector('#inv-kind').value, 'grokbot');
+    assert.ok(buttonNamed(reopened, 'Check status'));
+    assert.equal(reopened.querySelector('#inv-key').value, '');
+    assert.equal(reopened.querySelector('#inv-url').value, '');
+    assert.match(reopened.textContent, new RegExp(submitted.request_id));
+    click(buttonNamed(reopened, 'Check status'));
+    await flush();
+    assert.match(reopened.textContent, /peer_original/);
+    assert.match(reopened.textContent, /processed/);
+    assert.equal(adds, 1);
+  } finally { restore(); }
+});
+
+test('a hub move link hands off only the original request id and kind for recovery', async () => {
+  let submitted;
+  const { dialog, restore, ctx } = await openDialog({
+    agentKinds: async () => ({ kinds: catalogue }),
+    agentAdd: async body => { submitted = body; throw httpError(410, 'hub_moved', 'hub moved'); },
+    onboardingStatus: async id => ({ request_id: id, kind: 'grokbot', peer_id: 'peer_moved' }),
+  });
+  try {
+    const banner = new DomEl('div');
+    renderBanner(banner, { items: [{ id: 'move', kind: 'moving', host: 'moved.example', url: 'https://moved.example/base', text: 'Hub moving' }] });
+    setValue(dialog.querySelector('#inv-kind'), 'grokbot', 'change');
+    setValue(dialog.querySelector('#inv-name'), 'Gateway');
+    setValue(dialog.querySelector('#inv-url'), ROUTINE);
+    setValue(dialog.querySelector('#inv-key'), FAKE_KEY);
+    click(buttonNamed(dialog, 'Create Grok bot'));
+    await flush();
+    closeInvite();
+    const link = banner.querySelector('a');
+    click(link);
+    const dest = new URL(link.attrs.href);
+    assert.equal(dest.origin, 'https://moved.example');
+    assert.equal(dest.pathname, '/base');
+    const prefill = addAgentPrefill(dest.hash);
+    assert.equal(prefill.requestId, submitted.request_id);
+    assert.equal(prefill.kind, 'grokbot');
+    assert.equal(prefill.recover, true);
+    assert.equal(dest.href.includes(FAKE_KEY) || dest.href.includes(encodeURIComponent(ROUTINE)), false);
+    // A new API object models a fresh page at the destination hub.
+    openInvite({ api: { ...ctx.api } }, () => {}, null, prefill);
+    await flush();
+    const moved = domDoc.body.querySelector('dialog.inv');
+    assert.ok(buttonNamed(moved, 'Check status'));
+    click(buttonNamed(moved, 'Check status'));
+    await flush();
+    assert.match(moved.textContent, /peer_moved/);
   } finally { restore(); }
 });
