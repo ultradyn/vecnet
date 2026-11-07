@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/XertroV/vecnet/internal/auth"
 	"github.com/XertroV/vecnet/internal/onboarding"
 )
 
@@ -24,21 +25,25 @@ const onboardDigestInfo = "vecnet onboarding.v1 request"
 // digest and nonsecret options. It does not hold a raw request, a routine
 // URL or key, or one-time human output.
 type onboardRecord struct {
-	V               int    `json:"v"`
-	Subject         string `json:"subject"`
-	RequestID       string `json:"request_id"`
-	Kind            string `json:"kind"`
-	SpecVersion     string `json:"spec_version"`
-	Digest          string `json:"digest"`
-	PeerID          string `json:"peer_id"`
-	PrincipalID     string `json:"principal_id"`
-	NameOpen        bool   `json:"name_open"`
-	EnrolTTLSeconds int    `json:"enrol_ttl_seconds,omitempty"`
-	ConnectorName   string `json:"connector_name,omitempty"`
-	RouteID         string `json:"route_id,omitempty"`
-	ThreadID        string `json:"thread_id,omitempty"`
-	MessageID       string `json:"message_id,omitempty"`
-	DeliveryID      string `json:"delivery_id,omitempty"`
+	V                  int    `json:"v"`
+	Subject            string `json:"subject"`
+	RequestID          string `json:"request_id"`
+	Kind               string `json:"kind"`
+	SpecVersion        string `json:"spec_version"`
+	Digest             string `json:"digest"`
+	PeerID             string `json:"peer_id"`
+	PrincipalID        string `json:"principal_id"`
+	Name               string `json:"name,omitempty"`
+	NameOpen           bool   `json:"name_open"`
+	EnrolTTLSeconds    int    `json:"enrol_ttl_seconds,omitempty"`
+	ConnectorName      string `json:"connector_name,omitempty"`
+	SkipMCP            bool   `json:"skip_mcp,omitempty"`
+	RequestPrincipalID string `json:"request_principal_id,omitempty"`
+	SafeComplete       bool   `json:"safe_complete,omitempty"`
+	RouteID            string `json:"route_id,omitempty"`
+	ThreadID           string `json:"thread_id,omitempty"`
+	MessageID          string `json:"message_id,omitempty"`
+	DeliveryID         string `json:"delivery_id,omitempty"`
 }
 
 // onboardCanonical is the byte string the keyed digest covers, including
@@ -85,6 +90,39 @@ func (h *Hub) onboardDigest(n onboarding.Normalized) (string, error) {
 	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
+// receiptStringsHold reports whether any stored string contains the
+// normalized routine key or URL. Empty secrets match nothing.
+func receiptStringsHold(rec onboardRecord, key, url string) bool {
+	fields := []string{
+		rec.Subject, rec.RequestID, rec.Kind, rec.SpecVersion, rec.Digest,
+		rec.PeerID, rec.PrincipalID, rec.Name, rec.ConnectorName, rec.RequestPrincipalID,
+		rec.RouteID, rec.ThreadID, rec.MessageID, rec.DeliveryID,
+	}
+	for _, field := range fields {
+		if secretInString(field, key) || secretInString(field, url) {
+			return true
+		}
+	}
+	return false
+}
+
+// receiptTextHolds is the serialized check. It searches the raw text and the
+// strings json.Unmarshal recovers, so an escape of "<" cannot hide the key.
+func receiptTextHolds(text, key, url string) bool {
+	if secretInString(text, key) || secretInString(text, url) {
+		return true
+	}
+	var rec onboardRecord
+	if json.Unmarshal([]byte(text), &rec) != nil {
+		return false
+	}
+	return receiptStringsHold(rec, key, url)
+}
+
+func secretInString(field, secret string) bool {
+	return secret != "" && strings.Contains(field, secret)
+}
+
 func digestEqual(stored, got string) bool {
 	return subtle.ConstantTimeCompare([]byte(stored), []byte(got)) == 1
 }
@@ -111,20 +149,26 @@ func (h *Hub) loadOnboardReceipt(ctx context.Context, tx *sql.Tx, subject, reque
 func (h *Hub) saveOnboardReceipt(ctx context.Context, tx *sql.Tx, subject string, n onboarding.Normalized, digest string, res onboarding.SubmitResult) error {
 	rec := onboardRecord{
 		V: 1, Subject: subject, RequestID: n.RequestID, Kind: n.Kind, SpecVersion: n.SpecVersion,
-		Digest: digest, PeerID: res.PeerID, PrincipalID: res.PrincipalID, NameOpen: n.NameOpen,
-		EnrolTTLSeconds: n.EnrolTTLSeconds, ConnectorName: n.ConnectorName, RouteID: res.RouteID,
+		Digest: digest, PeerID: res.PeerID, PrincipalID: res.PrincipalID, Name: n.Name, NameOpen: n.NameOpen,
+		EnrolTTLSeconds: n.EnrolTTLSeconds, ConnectorName: n.ConnectorName, SkipMCP: n.SkipMCP,
+		RequestPrincipalID: n.PrincipalID, SafeComplete: true, RouteID: res.RouteID,
 	}
 	if res.Setup != nil {
 		rec.ThreadID = res.Setup.ThreadID
 		rec.MessageID = res.Setup.MessageID
 		rec.DeliveryID = res.Setup.DeliveryID
 	}
+	// Compare the original strings before encoding. json.Marshal writes "<"
+	// as \u003c, so a search of the serialized text misses a key that contains it.
+	if receiptStringsHold(rec, n.WebhookKey, n.WebhookURL) {
+		return errors.New("hub: onboarding receipt would store a routine secret")
+	}
 	body, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
 	text := string(body)
-	if n.WebhookKey != "" && strings.Contains(text, n.WebhookKey) || n.WebhookURL != "" && strings.Contains(text, n.WebhookURL) {
+	if receiptTextHolds(text, n.WebhookKey, n.WebhookURL) {
 		return errors.New("hub: onboarding receipt would store a routine secret")
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO meta(key, value) VALUES (?, ?)`, onboardMetaKey(subject, n.RequestID), text); err != nil {
@@ -147,7 +191,41 @@ func (h *Hub) resultFromReceipt(ctx context.Context, tx *sql.Tx, rec onboardReco
 		RequestID: rec.RequestID, Kind: rec.Kind, PeerID: rec.PeerID, PrincipalID: rec.PrincipalID,
 		RouteID: rec.RouteID, ConnectorName: rec.ConnectorName, Setup: setup, AuthState: state,
 		SendDefaults: copyDefaults(spec), Status: status,
+		Name: rec.Name, SpecVersion: rec.SpecVersion, NameOpen: rec.NameOpen, SkipMCP: rec.SkipMCP,
+		EnrolTTLSeconds: rec.EnrolTTLSeconds, RequestPrincipalID: rec.RequestPrincipalID,
+		SafeComplete: rec.SafeComplete,
 	}, nil
+}
+
+// OnboardingDigestMatches reports whether n is the normalized request stored
+// for the caller's receipt. It reads the existing keyed digest and does not
+// write one. Callers use it for historical receipts whose safe projection is
+// incomplete; a missing field is not treated as the zero value.
+func (h *Hub) OnboardingDigestMatches(ctx context.Context, c auth.Caller, n onboarding.Normalized) (bool, error) {
+	if !requestIDRE.MatchString(n.RequestID) {
+		return false, invalidValue("request_id", "request_id must be 1 to 128 characters: letters, digits, and . _ : -")
+	}
+	var match bool
+	err := h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		subject, _, err := h.operatorAuthorized(ctx, tx, c)
+		if err != nil {
+			return err
+		}
+		rec, found, err := h.loadOnboardReceipt(ctx, tx, subject, n.RequestID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return onboardNotFound(n.RequestID)
+		}
+		digest, err := h.onboardDigest(n)
+		if err != nil {
+			return err
+		}
+		match = digestEqual(rec.Digest, digest)
+		return nil
+	})
+	return match, err
 }
 
 // deriveAuthState reports this peer's own credential readiness. An OAuth
