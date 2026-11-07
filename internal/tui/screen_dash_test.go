@@ -232,6 +232,26 @@ func TestDashGolden(t *testing.T) {
 	}
 }
 
+func TestDashArchivedPeerVisibility(t *testing.T) {
+	f := seededDash()
+	archived := dashPeer("peer_archived", "retired", "session", "offline", "unknown", 48*time.Hour, nil, "lan:old")
+	archived.ArchivedAt = dashBefore(time.Hour)
+	f.peers = append(f.peers, archived)
+	m, p := openDash(t, f, newClock())
+
+	// Archived peers are absent initially, while an independently disabled peer
+	// remains in the table.
+	frame := plainAt(t, m, 140, 42)
+	dashLacks(t, frame, "retired")
+	dashHas(t, frame, "old-bot", "disabled")
+
+	// The dashboard's archived toggle reveals the peer and labels its lifecycle
+	// state, so an archived+disabled peer would not be mistaken for merely disabled.
+	p.press("a")
+	frame = plainAt(t, m, 140, 42)
+	dashHas(t, frame, "retired", "archived", "archived shown")
+}
+
 func TestDashReadOnly(t *testing.T) {
 	f := seededDash()
 	m, p := openDash(t, f, newClock())

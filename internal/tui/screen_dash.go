@@ -43,6 +43,7 @@ const (
 type dashScreen struct {
 	focus        dashFocus
 	peer, thread string
+	showArchived bool
 	narrow       *dashNarrow
 	peerVis      []string
 	peerRowAt    int
@@ -85,7 +86,7 @@ func (d *dashScreen) Hints() string {
 	if d.focus == dashOnThreads {
 		return "j/k thread  n page  enter open  esc peers"
 	}
-	return "j/k peer  enter threads  tab pane"
+	return "j/k peer  enter threads  a archived  tab pane"
 }
 
 func (d *dashScreen) Update(msg tea.Msg, m *Model) tea.Cmd {
@@ -133,6 +134,16 @@ func (d *dashScreen) onKey(key string, m *Model) tea.Cmd {
 		if d.focus == dashOnThreads && d.narrow == nil {
 			return d.loadMore(m)
 		}
+	case "a":
+		d.showArchived = !d.showArchived
+		// If the selected archived row just disappeared, select the first
+		// visible peer rather than retaining a hidden cursor target.
+		peers := d.peerRows(m)
+		if len(peers) == 0 {
+			d.peer = ""
+		} else if slices.IndexFunc(peers, func(r opapi.PeerRow) bool { return r.Peer.PeerID == d.peer }) < 0 {
+			d.peer = peers[0].Peer.PeerID
+		}
 	case "enter":
 		if d.focus == dashOnThreads {
 			rows := d.threadRows(m)
@@ -141,10 +152,11 @@ func (d *dashScreen) onKey(key string, m *Model) tea.Cmd {
 			}
 			return m.OpenThread(rows[d.threadIndex(rows)].Thread.ThreadID)
 		}
-		if len(m.Data.Peers) == 0 {
+		peers := d.peerRows(m)
+		if len(peers) == 0 {
 			return nil
 		}
-		row := m.Data.Peers[d.peerIndex(m)].Peer
+		row := peers[d.peerIndex(peers)].Peer
 		if row.Kind == "source" { // never a recipient; the hub refuses a src_ participant
 			m.Toast(row.Name+" is a source and has no threads", false)
 			return nil
@@ -169,13 +181,20 @@ func (d *dashScreen) move(m *Model, by int) {
 		}
 		return
 	}
-	if peers := m.Data.Peers; len(peers) > 0 {
-		d.peer = peers[min(max(d.peerIndex(m)+by, 0), len(peers)-1)].Peer.PeerID
+	if peers := d.peerRows(m); len(peers) > 0 {
+		d.peer = peers[min(max(d.peerIndex(peers)+by, 0), len(peers)-1)].Peer.PeerID
 	}
 }
 
-func (d *dashScreen) peerIndex(m *Model) int {
-	return max(slices.IndexFunc(m.Data.Peers, func(r opapi.PeerRow) bool { return r.Peer.PeerID == d.peer }), 0)
+func (d *dashScreen) peerRows(m *Model) []opapi.PeerRow {
+	if d.showArchived {
+		return m.Data.Peers
+	}
+	return slices.DeleteFunc(slices.Clone(m.Data.Peers), func(r opapi.PeerRow) bool { return r.ArchivedAt != nil })
+}
+
+func (d *dashScreen) peerIndex(peers []opapi.PeerRow) int {
+	return max(slices.IndexFunc(peers, func(r opapi.PeerRow) bool { return r.Peer.PeerID == d.peer }), 0)
 }
 
 func (d *dashScreen) threadIndex(rows []opapi.ThreadRow) int {
@@ -558,6 +577,8 @@ func dashCellPeer(_ *Model, r opapi.PeerRow, p dashRowPaint, w int) string {
 	}
 	tag := ""
 	switch {
+	case r.ArchivedAt != nil:
+		tag = "archived"
 	case r.Disabled:
 		tag = "disabled"
 	case r.Credential == "revoked":
@@ -718,11 +739,15 @@ func dashShort(id string) string {
 func (d *dashScreen) viewPeers(m *Model, w, h int) (string, int) {
 	th := m.th
 	inner := w - 2
-	peers := m.Data.Peers
+	peers := d.peerRows(m)
 	failure := dashFailure(th, "peers", m.Data.Errs["peers"], inner, dashErrLines, len(peers) > 0)
 	height := min(len(failure)+1+max(len(peers), 1)+2, h*3/5)
 	focused := d.focus == dashOnPeers
-	title := PaneTitle(th, focused).Render(dashTitle(m, fmt.Sprintf("peers · %d", len(peers)), "peers")+" · ") +
+	label := fmt.Sprintf("peers · %d", len(peers))
+	if d.showArchived {
+		label += " · archived shown"
+	}
+	title := PaneTitle(th, focused).Render(dashTitle(m, label, "peers")+" · ") +
 		th.Fg(theme.Muted).Render("presence is self-reported, reach is hub-observed")
 	lines := slices.Clone(failure)
 	d.peerVis = d.peerVis[:0]
@@ -731,7 +756,7 @@ func (d *dashScreen) viewPeers(m *Model, w, h int) (string, int) {
 		cols := dashColsFor(inner)
 		lines = append(lines, dashPeerHeader(th, cols))
 		size := max(height-2-len(lines), 1)
-		cursor := d.peerIndex(m)
+		cursor := d.peerIndex(peers)
 		start := dashWindow(cursor, len(peers), size)
 		d.peerRowAt = len(lines)
 		for i := start; i < min(start+size, len(peers)); i++ {
@@ -755,7 +780,7 @@ func dashPeerHeader(th *theme.Theme, cols []dashCol) string {
 }
 
 func dashPeerLine(m *Model, cols []dashCol, row opapi.PeerRow, cursor bool) string {
-	paint := dashRowPaint{th: m.th, cursor: cursor, dim: row.Disabled}
+	paint := dashRowPaint{th: m.th, cursor: cursor, dim: row.Disabled || row.ArchivedAt != nil}
 	var line strings.Builder
 	line.WriteString(paint.gutter())
 	for i, c := range cols {
