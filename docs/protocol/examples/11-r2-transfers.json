@@ -1,0 +1,320 @@
+{
+  "$comment": "Synthetic one-byte examples. REDACTED URLs are inert placeholders, never presigns. Each get_at applies to MCP, HTTP and CLI independently.",
+  "request": {
+    "size": 1,
+    "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+    "media_type": "text/plain"
+  },
+  "checksum_base64": "LXEWQrcmsEQBYnyp+6wy9chTD7GQPMTbAiWHF5IaSIE=",
+  "finite": {
+    "issued_at": "2026-11-07T00:00:00.000Z",
+    "grant": {
+      "blob_id": "blo_00000000000000000000000001",
+      "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+      "sha256_verified": false,
+      "integrity": {
+        "algorithm": "sha256",
+        "value": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "verified": false
+      },
+      "size": 1,
+      "retention_class": "1d",
+      "expires_at": "2026-11-08T00:00:00.000Z",
+      "upload": {
+        "method": "PUT",
+        "url": "https://r2.example.invalid/REDACTED-PUT",
+        "headers": {
+          "Content-Length": "1",
+          "Content-Type": "application/octet-stream",
+          "Content-Disposition": "attachment",
+          "Cache-Control": "private, no-store",
+          "If-None-Match": "*",
+          "X-Amz-Checksum-Sha256": "LXEWQrcmsEQBYnyp+6wy9chTD7GQPMTbAiWHF5IaSIE=",
+          "X-Amz-Meta-Vecnet-Checksum-Profile": "sha256",
+          "X-Amz-Meta-Vecnet-Checksum": "LXEWQrcmsEQBYnyp+6wy9chTD7GQPMTbAiWHF5IaSIE="
+        },
+        "expires_at": "2026-11-07T00:05:00.000Z"
+      },
+      "complete_url": "/v1/blobs/uploads/blo_00000000000000000000000001/complete"
+    },
+    "complete": {
+      "blob_id": "blo_00000000000000000000000001",
+      "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+      "sha256_verified": true,
+      "integrity": {
+        "algorithm": "sha256",
+        "value": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "verified": true
+      },
+      "size": 1,
+      "retention_class": "1d",
+      "expires_at": "2026-11-08T00:00:00.000Z"
+    },
+    "attachment": {
+      "blob_id": "blo_00000000000000000000000001",
+      "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+      "sha256_verified": true,
+      "integrity": {
+        "algorithm": "sha256",
+        "value": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "verified": true
+      },
+      "size": 1,
+      "retention_class": "1d",
+      "expires_at": "2026-11-08T00:00:00.000Z",
+      "media_type": "text/plain",
+      "name": "x.txt"
+    },
+    "get_at": [
+      "2026-11-07T00:01:00.000Z",
+      "2026-11-07T00:12:00.000Z"
+    ],
+    "downloads": [
+      {
+        "blob_id": "blo_00000000000000000000000001",
+        "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "sha256_verified": true,
+        "integrity": {
+          "algorithm": "sha256",
+          "value": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+          "verified": true
+        },
+        "size": 1,
+        "retention_class": "1d",
+        "url": "https://r2.example.invalid/REDACTED-GET",
+        "method": "GET",
+        "media_type": "text/plain",
+        "expires_at": "2026-11-07T00:11:00.000Z",
+        "object_expires_at": "2026-11-08T00:00:00.000Z"
+      },
+      {
+        "blob_id": "blo_00000000000000000000000001",
+        "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "sha256_verified": true,
+        "integrity": {
+          "algorithm": "sha256",
+          "value": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+          "verified": true
+        },
+        "size": 1,
+        "retention_class": "1d",
+        "url": "https://r2.example.invalid/REDACTED-GET",
+        "method": "GET",
+        "media_type": "text/plain",
+        "expires_at": "2026-11-07T00:22:00.000Z",
+        "object_expires_at": "2026-11-08T00:00:00.000Z"
+      }
+    ],
+    "surfaces": [
+      "MCP",
+      "HTTP",
+      "CLI"
+    ],
+    "preference_after_grant": "7d",
+    "state": {
+      "retention_class": "1d",
+      "expires_at": "2026-11-08T00:00:00.000Z",
+      "sha256_verified": true,
+      "integrity": {
+        "algorithm": "sha256",
+        "value": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "verified": true
+      },
+      "state": "available"
+    }
+  },
+  "keep": {
+    "issued_at": "2026-11-07T00:00:00.000Z",
+    "grant": {
+      "blob_id": "blo_00000000000000000000000002",
+      "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+      "sha256_verified": false,
+      "integrity": {
+        "algorithm": "sha256",
+        "value": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "verified": false
+      },
+      "size": 1,
+      "retention_class": "keep",
+      "expires_at": null,
+      "upload": {
+        "method": "PUT",
+        "url": "https://r2.example.invalid/REDACTED-PUT",
+        "headers": {
+          "Content-Length": "1",
+          "Content-Type": "application/octet-stream",
+          "Content-Disposition": "attachment",
+          "Cache-Control": "private, no-store",
+          "If-None-Match": "*",
+          "X-Amz-Checksum-Sha256": "LXEWQrcmsEQBYnyp+6wy9chTD7GQPMTbAiWHF5IaSIE=",
+          "X-Amz-Meta-Vecnet-Checksum-Profile": "sha256",
+          "X-Amz-Meta-Vecnet-Checksum": "LXEWQrcmsEQBYnyp+6wy9chTD7GQPMTbAiWHF5IaSIE="
+        },
+        "expires_at": "2026-11-07T00:05:00.000Z"
+      },
+      "complete_url": "/v1/blobs/uploads/blo_00000000000000000000000002/complete"
+    },
+    "complete": {
+      "blob_id": "blo_00000000000000000000000002",
+      "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+      "sha256_verified": true,
+      "integrity": {
+        "algorithm": "sha256",
+        "value": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "verified": true
+      },
+      "size": 1,
+      "retention_class": "keep",
+      "expires_at": null
+    },
+    "attachment": {
+      "blob_id": "blo_00000000000000000000000002",
+      "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+      "sha256_verified": true,
+      "integrity": {
+        "algorithm": "sha256",
+        "value": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "verified": true
+      },
+      "size": 1,
+      "retention_class": "keep",
+      "expires_at": null,
+      "media_type": "text/plain",
+      "name": "x.txt"
+    },
+    "get_at": [
+      "2026-11-07T00:01:00.000Z",
+      "2026-11-07T00:12:00.000Z"
+    ],
+    "downloads": [
+      {
+        "blob_id": "blo_00000000000000000000000002",
+        "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "sha256_verified": true,
+        "integrity": {
+          "algorithm": "sha256",
+          "value": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+          "verified": true
+        },
+        "size": 1,
+        "retention_class": "keep",
+        "url": "https://r2.example.invalid/REDACTED-GET",
+        "method": "GET",
+        "media_type": "text/plain",
+        "expires_at": "2026-11-07T00:11:00.000Z",
+        "object_expires_at": null
+      },
+      {
+        "blob_id": "blo_00000000000000000000000002",
+        "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "sha256_verified": true,
+        "integrity": {
+          "algorithm": "sha256",
+          "value": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+          "verified": true
+        },
+        "size": 1,
+        "retention_class": "keep",
+        "url": "https://r2.example.invalid/REDACTED-GET",
+        "method": "GET",
+        "media_type": "text/plain",
+        "expires_at": "2026-11-07T00:22:00.000Z",
+        "object_expires_at": null
+      }
+    ],
+    "surfaces": [
+      "MCP",
+      "HTTP",
+      "CLI"
+    ],
+    "preference_after_grant": "7d",
+    "state": {
+      "retention_class": "keep",
+      "expires_at": null,
+      "sha256_verified": true,
+      "integrity": {
+        "algorithm": "sha256",
+        "value": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "verified": true
+      },
+      "state": "available"
+    }
+  },
+  "message": {
+    "schema_version": 1,
+    "message_id": "msg_01JD3Q5H0X2Z4B6D8F0H2K4M6P",
+    "thread_id": "thr_01JD3Q5G9Z1B3D5F7H9K1M3P5R",
+    "in_reply_to": null,
+    "origin": null,
+    "kind": "message",
+    "sender": "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C",
+    "sender_info": {
+      "name": "codex-hark",
+      "kind": "session"
+    },
+    "recipients": [
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8A",
+      "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8B"
+    ],
+    "priority": "wake",
+    "created_at": "2026-11-07T00:01:00.000Z",
+    "content": {
+      "text": "The radio listen did not finalize on \"over\" in session d211530e. I suspect the end-phrase classifier. Can one of you reproduce on a second machine? Log attached.",
+      "truncated": false
+    },
+    "attachments": [
+      {
+        "blob_id": "blo_00000000000000000000000001",
+        "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "sha256_verified": true,
+        "integrity": {
+          "algorithm": "sha256",
+          "value": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+          "verified": true
+        },
+        "size": 1,
+        "retention_class": "1d",
+        "expires_at": "2026-11-08T00:00:00.000Z",
+        "media_type": "text/plain",
+        "name": "x.txt"
+      }
+    ],
+    "metadata": {
+      "repo": "ultradyn/hark",
+      "bl": "B196"
+    },
+    "loop": {
+      "depth": 0,
+      "max_depth": 8,
+      "expires_at": "2026-11-02T06:12:03.412Z",
+      "sender_chain": [
+        "peer_01JD3Q2K8M4N6P8R0T2V4X6Z8C"
+      ]
+    }
+  },
+  "near_deadline": {
+    "get_at": "2026-11-07T23:59:58.250Z",
+    "download": {
+      "blob_id": "blo_00000000000000000000000001",
+      "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+      "sha256_verified": true,
+      "integrity": {
+        "algorithm": "sha256",
+        "value": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "verified": true
+      },
+      "size": 1,
+      "retention_class": "1d",
+      "url": "https://r2.example.invalid/REDACTED-GET",
+      "method": "GET",
+      "media_type": "text/plain",
+      "expires_at": "2026-11-07T23:59:59.000Z",
+      "object_expires_at": "2026-11-08T00:00:00.000Z"
+    }
+  },
+  "subsecond_deadline": {
+    "get_at": "2026-11-07T23:59:59.250Z",
+    "status": 410,
+    "code": "blob_expired"
+  }
+}

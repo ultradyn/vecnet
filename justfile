@@ -69,6 +69,11 @@ frontier:
 validate-protocol:
     diff -u docs/protocol/envelope.schema.json internal/envelope/schema.json || { echo "internal/envelope/schema.json has drifted from docs/protocol/envelope.schema.json" >&2; exit 1; }
     if python3 -I -c 'import jsonschema' 2>/dev/null; then python3 -I scripts/validate_examples.py docs/protocol; else echo "skip: python3 jsonschema not installed (examples are also checked by go test ./internal/envelope)"; fi
+    just validate-blob-fixtures
+
+# R2 worked examples, reference schema and CLI dependency boundary (build box only).
+validate-blob-fixtures:
+    python3 -I scripts/validate_blob_examples.py
 
 # Show every ticket with status and type
 tickets:

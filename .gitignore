@@ -28,3 +28,11 @@ backups/
 .scratch/vecnet/build-hook-hygiene/
 .scratch/vecnet/bb-lane/
 !scripts/bb/bin/
+
+# Operator-only spike inputs must never enter git or a remote build context.
+**/r2-test.env
+**/r2-spike*.env
+**/r2-credentials*
+**/*.pem
+**/*.key
+**/credentials*
