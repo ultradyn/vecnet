@@ -575,12 +575,71 @@ func TestR2UploadEmptyOrNegativeSize(t *testing.T) {
 	}
 }
 
+func TestR2HubLocalDownloads(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, media string
+	}{
+		{name: "grandfathered-disk", body: "old attachment", media: "application/octet-stream"},
+		{name: "durable-text", body: strings.Repeat("durable message text\n", 100), media: "text/plain; charset=utf-8"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sum := sha256.Sum256([]byte(tc.body))
+			sha := hex.EncodeToString(sum[:])
+			path := "/v1/blobs/" + sha
+			mints, gets := 0, 0
+			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer fake-hub" {
+					t.Error("local grant and bytes require hub authentication")
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				switch r.URL.Path {
+				case "/v1/blob-capabilities":
+					json.NewEncoder(w).Encode(Capabilities{Backend: "r2", MaxSize: MaxSize, ChecksumProfile: "sha256"})
+				case path + "/download":
+					mints++
+					if r.URL.Query().Get("blob_id") != "" {
+						t.Error("local reference acquired an R2 blob id")
+					}
+					json.NewEncoder(w).Encode(blobwire.DownloadGrant{LocalPath: path, SHA256: sha, Size: int64(len(tc.body)), MediaType: tc.media})
+				case path:
+					gets++
+					w.Header().Set("Content-Type", tc.media)
+					io.WriteString(w, tc.body)
+				default:
+					t.Error("unexpected hub path")
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer hub.Close()
+			auth := transportFunc(func(r *http.Request) (*http.Response, error) {
+				r.Header.Set("Authorization", "Bearer fake-hub")
+				return http.DefaultTransport.RoundTrip(r)
+			})
+			direct := transportFunc(func(*http.Request) (*http.Response, error) {
+				t.Error("local download reached provider transport")
+				return nil, errors.New("unexpected provider request")
+			})
+			client := New(hub.URL, auth, direct, nil)
+			b, grant, err := client.Download(context.Background(), sha, "", MaxSize)
+			if err != nil || string(b) != tc.body || grant.LocalPath != path || grant.SHA256 != sha || grant.Size != int64(len(tc.body)) || grant.MediaType != tc.media || grant.URL != "" || mints != 1 || gets != 1 {
+				t.Fatalf("R2 hub local download failed: err=%v mints=%d gets=%d", err, mints, gets)
+			}
+		})
+	}
+}
+
 func TestR2CapabilitySnapshotRejectsHubBodyGrant(t *testing.T) {
 	for _, tc := range []struct {
 		name, id, blobID, local string
+		sha, directURL          string
 	}{
-		{name: "local-path-without-blob-id", local: "/v1/blobs/" + abcSHA},
 		{name: "local-path-with-blob-id", id: testID, blobID: testID, local: "/v1/blobs/" + abcSHA},
+		{name: "local-path-for-requested-blob-id", id: testID, local: "/v1/blobs/" + abcSHA},
+		{name: "local-path-with-unrequested-blob-id", blobID: testID, local: "/v1/blobs/" + abcSHA},
+		{name: "local-path-wrong-hash", local: "/v1/blobs/" + strings.Repeat("0", 64)},
+		{name: "local-grant-wrong-hash", local: "/v1/blobs/" + abcSHA, sha: strings.Repeat("0", 64)},
+		{name: "local-grant-with-url", local: "/v1/blobs/" + abcSHA, directURL: "https://untrusted.invalid/object?signature=canary"},
 		{name: "empty-blob-id-without-flag"},
 		{name: "empty-blob-id-with-flag", id: testID},
 	} {
@@ -591,7 +650,10 @@ func TestR2CapabilitySnapshotRejectsHubBodyGrant(t *testing.T) {
 			grant := r2Grant(f, f.now.Add(600*time.Second).Format(time.RFC3339), tc.local)
 			grant.BlobID = tc.blobID
 			if tc.local != "" {
-				grant.URL = ""
+				grant.URL = tc.directURL
+			}
+			if tc.sha != "" {
+				grant.SHA256 = tc.sha
 			}
 			f.client.hub.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 				if r.URL.Path == "/v1/blobs/"+abcSHA+"/download" {

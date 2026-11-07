@@ -482,14 +482,12 @@ func (c *Client) DownloadTo(ctx context.Context, w io.Writer, sha, id string, ma
 		if err != nil && !legacy {
 			return zero, err
 		}
-		// An R2 snapshot never accepts a hub-body grant. local_path or an
-		// empty blob id is bad_response whether or not the caller passed an id.
-		if caps.Backend == "r2" && (g.LocalPath != "" || g.BlobID == "") {
-			return zero, failure("bad_response")
-		}
 		var resp *http.Response
 		hubBody := legacy || g.LocalPath != ""
 		if hubBody {
+			// Discovery selects the backend for new uploads. Grandfathered disk
+			// attachments and durable text still use authenticated local grants.
+			// An explicit R2 reference can never be downgraded to hub bytes.
 			if !legacy && (id != "" || g.LocalPath != path || g.BlobID != "" || g.SHA256 != sha || g.URL != "") {
 				return zero, failure("bad_response")
 			}
