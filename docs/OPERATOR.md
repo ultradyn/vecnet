@@ -51,6 +51,29 @@ The detection is a guard against mistakes, not a security boundary: anything tha
 
 For an isolated example, `just ui-demo` starts a seeded hub on port 49575 using `.demo-data`; its startup output supplies demo credentials. This fixture contains fake failures and hostile text deliberately. `just tui` starts the repository's CLI against your configured profile; it does not select the demo profile for you. Leave existing development instances and their data alone.
 
+## Automatic delivery to Codex
+
+On Linux, a named-profile vecnet action inside an eligible running Codex session registers its loaded thread from `CODEX_THREAD_ID` and ensures a delivery owner. `CODEX_HOME` (else `HOME/.codex`) selects the existing daemon; registration may complete after the action returns. It never starts Codex, loads a cold thread, answers approvals or changes thread policy. See the [connector guide](connectors/codex-appserver.md) for supported daemon versions, approval/attendance rules and priority behavior.
+
+Use one peer per live thread on each hub. The same thread can bind to separate profiles on different hubs. Automatic registration preserves hub/caller pins and refuses a live or unknown competing thread. The default limit is 8 bindings per canonical Codex home across registered sources and hubs (`VECNET_CODEX_MAX_BINDINGS`, 1..32); unresolved homes count conservatively.
+
+```sh
+vecnet --net P inbox                  # ordinary action: starts best-effort registration
+vecnet --net P codex bindings
+vecnet --net P codex status
+vecnet --net P codex unbind
+vecnet --net P codex bind --thread <lowercase-uuid>
+vecnet --net P codex bind --thread <lowercase-uuid> --takeover
+```
+
+`unbind` durably disables the selected profile/as even if no row exists. Explicit bind enables it again. Inspect before using `--takeover`; it deliberately replaces the selected binding. `VECNET_CODEX_AUTO_DELIVERY=0` disables automation for that process without stopping an existing delivery owner.
+
+The owner requires safe private runtime/state paths, Node.js 22.18 or newer and installed delivery assets. The installed systemd template supports the default account home/data/runtime scope; custom roots use detached execution only when safe absence is established, otherwise delivery refuses and hooks/inbox remain available. There is one owner per hub within a per-user runtime scope, with no global cross-namespace coordination. The ordinary launcher does not consume these explicit bindings.
+
+`codex status` reports persisted reasons and an action, without a fresh delivery probe. A missing trusted reason means unknown; it does not prove an active owner. Interactive non-hook actions may print a short stderr notice from known state, debounced per hub/reason for 24 h. A missing notice does not prove activation: status remains the inspection path when a notice is lost or suppressed. Hooks stay silent and command stdout/exit behavior is preserved. After fixing Node/assets or inspecting a refused owner, retry a normal action; only verified activation clears the inactive reason.
+
+Installed asset refresh drains verified owners in order and reuses their stable ledger. Preserve source registry, identity pins and unresolved attempts during recovery. An exact client receipt publishes shared display proof; RPC acceptance alone does not. Pending work can defer monitor output and auto-ack until proof or safe release. Never delete recovery rows or force a resend to clear a wait. Dedupe has bounded history/display windows and stdout/crash limits; receipt evidence does not establish model attention or completed side effects.
+
 ## Work through the inbox
 
 | Section / TUI tag | What it means | What an action does |

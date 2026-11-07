@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-08: Linux Codex next-action registration adds durable opt-out/takeover, fenced hub owners with stable recovery across installed generations, exact client-receipt publication shared with hooks/monitor ack barriers, and persisted inactive reasons (`internal/cli`, `connectors/launcher`, `docs/connectors/codex-appserver.md`, `docs/OPERATOR.md`, `docs/PROTOCOL.md`).
 - 2026-11-08: add a short ChatGPT Dot incoming-message setup prompt and Copy prompt button to onboarding after the plugin connection steps (`internal/ui/static/invite.js`).
 - 2026-11-07: resolve the build-box lane base physically before deriving private HOME, temporary, XDG and cache paths, including symlinked `/work/bb-src` volumes (`scripts/bb/remote.sh`).
 - 2026-11-07: monitor watches dedupe and auto-ack only after successful hook/watch output, keeping app-server reservations separate from display proof and preserving unprinted deliveries on stdout failure; hooks retain fresh display proof across reservation eviction and keep cumulative auto-ack before undisplayed reservations, including across subsequent runs/pages (`internal/cli`).

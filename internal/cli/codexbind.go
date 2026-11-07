@@ -405,7 +405,7 @@ func (a *app) cmdCodex(args []string, nowTime func() time.Time) error {
 	if !binding.Attended {
 		hint = " (needs -a never or the auto reviewer; pass --attended if a human answers approvals)"
 	}
-	fmt.Fprintf(a.stdout, "bound %s to Codex thread %s; the launcher connector picks it up within 10 s%s\n", binding.Profile, binding.ThreadID, hint)
+	fmt.Fprintf(a.stdout, "bound %s to Codex thread %s; run `vecnet codex status` to inspect delivery state%s\n", binding.Profile, binding.ThreadID, hint)
 	return nil
 }
 
