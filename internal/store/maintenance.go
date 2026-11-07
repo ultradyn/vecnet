@@ -224,10 +224,20 @@ func (db *DB) Maintain(ctx context.Context, o MaintenanceOptions) (r Maintenance
 			// physical pages. SQLite files created by this driver reserve zero
 			// bytes per page; query the header for existing reserved-byte files.
 			mapStride := (s.PageSize-reserve)/5 + 1
-			nextPages := int64(1)
-			if s.PageCount > 3 && (s.PageCount-3)%mapStride == 0 {
-				nextPages = 2
+			// The locking byte also reserves a page at the 1 GiB boundary.
+			// SQLite skips it while truncating, just like a pointer-map page.
+			pendingPage := int64(0x40000000)/s.PageSize + 1
+			nextLast := s.PageCount - 1
+			for nextLast > 1 {
+				pointerMap := (nextLast-2)%mapStride == 0 && nextLast != pendingPage
+				// A pointer map coinciding with the locking page shifts by one.
+				pointerMap = pointerMap || nextLast == pendingPage+1 && (pendingPage-2)%mapStride == 0
+				if nextLast != pendingPage && !pointerMap {
+					break
+				}
+				nextLast--
 			}
+			nextPages := s.PageCount - nextLast
 			if vacuumStart-s.PageCount+nextPages > int64(o.ReclaimPages) {
 				break
 			}
