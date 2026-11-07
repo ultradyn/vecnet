@@ -771,10 +771,17 @@ func (s *Server) sweepLocked(now time.Time) {
 }
 
 func samePrincipal(a, b Principal) bool {
-	if a.Caller != b.Caller || (a.OAuth == nil) != (b.OAuth == nil) {
+	if (a.OAuth == nil) != (b.OAuth == nil) {
 		return false
 	}
-	return a.OAuth == nil || (a.OAuth.PrincipalID == b.OAuth.PrincipalID && a.OAuth.ClientID == b.OAuth.ClientID)
+	ac, bc := a.Caller, b.Caller
+	if a.OAuth != nil {
+		// OAuth sessions belong to the principal/client and enrollment, so
+		// refreshing an access token preserves ownership. Each request still
+		// authorizes tool calls with its own current credential (toolsCall).
+		ac.OAuth, bc.OAuth = auth.OAuthCredential{}, auth.OAuthCredential{}
+	}
+	return ac == bc && (a.OAuth == nil || (a.OAuth.PrincipalID == b.OAuth.PrincipalID && a.OAuth.ClientID == b.OAuth.ClientID))
 }
 
 // newSessionID is 26 Crockford base32 characters of crypto randomness (the

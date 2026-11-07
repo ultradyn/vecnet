@@ -121,7 +121,7 @@ func (s *Server) toolsCall(ctx context.Context, sess *Session, req *Request) (re
 	if err != nil {
 		return nil, fmt.Errorf("mcp: encode validated arguments: %w", err)
 	}
-	res, err := t.call(ctx, s, sess.Principal.Caller, validated)
+	res, err := t.call(ctx, s, PrincipalFromContext(ctx).Caller, validated)
 	return toolOutcome(p.Name, res, err)
 }
 
