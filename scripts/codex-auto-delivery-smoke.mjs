@@ -24,7 +24,7 @@ export function validateManifest(m, manifestPath = join(m.runRoot, 'manifest.jso
   keys(m.approval, ['host', 'uid', 'home', 'codexHome', 'maxApproved']);
   if (m.approval.host !== 'xsm' || !Number.isSafeInteger(m.approval.uid) || m.approval.uid < 0 || typeof m.approval.maxApproved !== 'boolean') fail('invalid_manifest');
   path(m.approval.home); path(m.approval.codexHome);
-  keys(m.tools, ['node', 'codex', 'tmux', 'systemctl', 'flock', 'script']); Object.values(m.tools).forEach(path);
+  keys(m.tools, ['node', 'codex', 'tmux', 'systemctl', 'flock', 'script', 'python', 'childSupervisor']); Object.values(m.tools).forEach(path);
   keys(m.actor, ['mode', 'uuidSource']); if (m.actor.mode !== 'owned-tui-command' || m.actor.uuidSource !== 'status') fail('actor_unproved');
   keys(m.generations, ['a', 'b']);
   for (const g of Object.values(m.generations)) {
@@ -43,7 +43,7 @@ export function validateManifest(m, manifestPath = join(m.runRoot, 'manifest.jso
   if (!Array.isArray(m.peers) || m.peers.length !== 5) fail('invalid_manifest');
   for (const p of m.peers) {
     keys(p, ['hub', 'profile', 'role', 'session', 'peerId', 'config']);
-    if (!Object.hasOwn(hubs, p.hub) || typeof p.profile !== 'string' || typeof p.peerId !== 'string' || !id.test(p.profile) || !id.test(p.peerId) || !['receiver', 'sender'].includes(p.role)) fail('invalid_manifest');
+    if (!Object.hasOwn(hubs, p.hub) || typeof p.profile !== 'string' || typeof p.peerId !== 'string' || !id.test(p.profile) || p.profile.length > 64 || !id.test(p.peerId) || !['receiver', 'sender'].includes(p.role)) fail('invalid_manifest');
     if (p.role === 'receiver' ? !['a', 'b'].includes(p.session) : p.session !== '') fail('invalid_manifest'); inside(m.runRoot, p.config);
   }
   const routes = m.peers.map(p => [p.hub, p.role, p.session].join(':')).sort();
@@ -158,44 +158,53 @@ function signalOwnedGroup(child, original, signal) {
     (p.pid === child.pid && p.birth !== original.birth))) fail('child_drain_unproved');
   try { process.kill(-child.pid, signal); } catch (e) { if (e.code !== 'ESRCH') throw e; }
 }
-export function runBounded(command, args, { env, cwd, input = '', timeoutMs = 10000, maxBytes = 262144, okay = [0] } = {}) {
+const childSupervisor = fileURLToPath(new URL('./codex-auto-delivery-child.py', import.meta.url));
+const childSupervisorHash = '62f20c755c2577775d56d3f98cb9a5a26e7aea9523fbf86e82d10b747ebf1e01';
+function containmentTools(python, helper) {
+  if (realpathSync(python) !== python || !statSync(python).isFile() || realpathSync(helper) !== helper ||
+      !statSync(helper).isFile() || hash(readFileSync(helper)) !== childSupervisorHash) fail('containment_unavailable');
+}
+export function runBounded(command, args, { env, cwd, input = '', timeoutMs = 10000, maxBytes = 262144, okay = [0],
+  python = realpathSync('/usr/bin/python3'), helper = childSupervisor, handoff } = {}) {
+  containmentTools(python, helper);
   return new Promise((resolve, reject) => {
-    // A private session owns only this temporary command group. Daemonized tmux/systemd
-    // owners have separate sessions and must be proved through their durable journals.
-    const child = spawn(command, args, { env, cwd, shell: false, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    let original, stdout = '', stderr = '', bytes = 0, error, closed = false, exited = false, exitCode, settling = false;
-    try { if (child.pid) original = processIdentity(child.pid); } catch { error = 'child_drain_unproved'; }
-    async function finish(reason) {
-      error ??= reason;
-      if (settling) return; settling = true; clearTimeout(timer);
-      let drained = false;
-      try {
-        if (child.pid) {
-          if (groupMembers(child.pid).length) { error ??= 'child_ambiguous'; signalOwnedGroup(child, original, 'SIGTERM'); }
-          const deadline = Date.now() + 500, killAt = Date.now() + 150;
-          while (Date.now() < deadline) {
-            const remaining = groupMembers(child.pid);
-            if (!remaining.length && closed && exited) { drained = true; break; }
-            if (remaining.length && Date.now() >= killAt) signalOwnedGroup(child, original, 'SIGKILL');
-            await pause(10);
-          }
-          if (!drained) error = 'child_drain_unproved';
-        } else drained = true;
-      } catch { error = 'child_drain_unproved'; }
-      child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
-      if (error || !okay.includes(exitCode)) {
-        const code = error ?? 'child_failed'; reject(Object.assign(new Error(code), { code, ambiguous: Boolean(error), drained }));
-      } else resolve({ code: exitCode, stdout, stderr });
-    }
-    const timer = setTimeout(() => { void finish('child_timeout'); }, timeoutMs);
-    for (const [stream, name] of [[child.stdout, 'stdout'], [child.stderr, 'stderr']]) stream.on('data', data => {
-      bytes += data.length; if (bytes > maxBytes) { void finish('child_output_limit'); return; }
-      if (name === 'stdout') stdout += data.toString(); else stderr += data.toString();
+    const child = spawn(python, [helper], { env, cwd, shell: false, detached: true, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] });
+    let raw = '', controls = '', stderrBytes = 0, ended = false, proofError, released = false;
+    const refuse = code => {
+      if (ended) return; ended = true; clearTimeout(timer);
+      child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.stdio[3].destroy();
+      reject(Object.assign(new Error(code), { code, ambiguous: true, drained: false }));
+    };
+    // A stuck/dead supervisor cannot authorize the next operation. Its intent
+    // survives; do not claim that destroying our pipes terminates descendants.
+    const timer = setTimeout(() => refuse('child_drain_unproved'), timeoutMs + 1000);
+    child.stdout.on('data', data => { raw += data.toString(); if (raw.length > maxBytes * 2 + 4096) refuse('child_output_limit'); });
+    child.stderr.on('data', data => { stderrBytes += data.length; if (stderrBytes > 65536) refuse('child_output_limit'); });
+    child.stdin.on('error', () => {});
+    child.stdio[3].on('data', data => {
+      controls += data.toString(); if (controls.length > 65536) { refuse('child_drain_unproved'); return; }
+      if (!controls.includes('\n')) return;
+      let message; try { message = JSON.parse(controls.trim()); } catch { refuse('child_drain_unproved'); return; }
+      if (!handoff || message.event !== 'handoff' || !Array.isArray(message.children)) { refuse('child_drain_unproved'); return; }
+      Promise.resolve().then(() => handoff(message.children)).then(release => {
+        if (!Array.isArray(release) || !release.length) fail('child_drain_unproved');
+        released = true; child.stdin.write(JSON.stringify({ release }) + '\n');
+      }).catch(e => { proofError = e.code ?? 'child_drain_unproved'; child.stdin.write('{"release":[]}\n'); });
     });
-    child.stdin.on('error', () => {}); child.stdin.end(input);
-    child.once('error', () => { exited = true; void finish('child_failed'); });
-    child.once('exit', code => { exited = true; exitCode = code; void finish(); });
-    child.once('close', () => { closed = true; });
+    child.once('error', () => refuse('containment_unavailable'));
+    child.once('close', status => {
+      if (ended) return; ended = true; clearTimeout(timer); child.stdin.destroy();
+      let result; try { result = JSON.parse(raw); } catch { result = {}; }
+      const proved = result.drained === true || (result.released === true && released && !proofError);
+      const code = proofError ?? result.error ?? (status !== 0 || !proved ? 'child_drain_unproved' : undefined);
+      if (code || !okay.includes(result.code)) {
+        const reason = code ?? 'child_failed';
+        reject(Object.assign(new Error(reason), { code: reason, ambiguous: Boolean(code), drained: result.drained === true }));
+      } else resolve({ code: result.code, stdout: Buffer.from(result.stdout, 'base64').toString(), stderr: Buffer.from(result.stderr, 'base64').toString() });
+    });
+    const request = JSON.stringify({ argv: [command, ...args], env, cwd, input: Buffer.from(input).toString('base64'), timeoutMs, maxBytes, handoff: Boolean(handoff) });
+    if (Buffer.byteLength(request) > 1048576) { refuse('child_output_limit'); return; }
+    child.stdin.write(request + '\n');
   });
 }
 
@@ -289,7 +298,7 @@ export function createHarness(raw, ports = {}) {
     XDG_CONFIG_HOME: join(m.runRoot, 'xdg'), CODEX_HOME: m.approval.codexHome, PATH: `${dirname(m.tools.node)}:/usr/local/bin:/usr/bin:/bin`, VECNET_CODEX_AUTO_DELIVERY: '0' };
   baseEnv.XDG_RUNTIME_DIR = dirname(plan.paths.runtime);
   const journalPath = join(m.runRoot, 'journal.json');
-  let journal, lifecycle, heldResources, lifecycleGuard, resourceGuard;
+  let journal, lifecycle, heldResources, lifecycleGuard, resourceGuard, initialTools;
   const configPaths = [...new Set([...m.peers.map(p => p.config), ...Object.values(m.operators).map(p => p.config)])];
   const inputLocks = [...new Set([...configPaths.map(p => p + '.lock'), ...m.peers.map(p => join(dirname(p.config), 'codex/bindings.json.lock'))])].sort();
   const manifestHash = hash(JSON.stringify(m)), scriptHash = hash(readFileSync(self));
@@ -301,11 +310,28 @@ export function createHarness(raw, ports = {}) {
     if (!ports.machine && (!m.runRoot.startsWith('/home/xertrov/src/vecnet4/.scratch/vecnet/auto-delivery-') || m.approval.uid !== 1000)) fail('approval_required');
   }
   const credentials = () => [...new Set([...m.peers.map(p => p.config), ...Object.values(m.operators).flatMap(p => [p.config, p.credentialFile]), m.rotationFile])];
+  const toolsOwned = () => {
+    containmentTools(m.tools.python, m.tools.childSupervisor);
+    const current = Object.fromEntries(Object.values(m.tools).map(tool => {
+      if (realpathSync(tool) !== tool || !statSync(tool).isFile()) fail('runtime_changed');
+      return [tool, hash(readFileSync(tool))];
+    }));
+    if (initialTools && !equal(current, initialTools)) fail('runtime_changed');
+    initialTools ??= current; return current;
+  };
   const call = async (command, args, options = {}) => {
-    if (journal) checkLifecycle();
-    try { return await run(command, args, { env: baseEnv, ...options }); }
-    catch (e) {
-      if (journal && e.ambiguous) { (journal.childAmbiguities ??= []).push({ commandHash: hash(JSON.stringify([command, args])), code: e.code, drained: e.drained === true }); save(); }
+    toolsOwned();
+    const intent = { id: randomBytes(8).toString('hex'), commandHash: hash(JSON.stringify([command, args])) };
+    if (journal) { checkLifecycle(); (journal.children ??= []).push(intent); save(); }
+    try {
+      const result = await run(command, args, { env: baseEnv, python: m.tools.python, helper: m.tools.childSupervisor, ...options });
+      if (journal) { journal.children = journal.children.filter(row => row.id !== intent.id); save(); }
+      return result;
+    } catch (e) {
+      if (journal) {
+        if (e.drained === true) journal.children = journal.children.filter(row => row.id !== intent.id);
+        (journal.childAmbiguities ??= []).push({ ...intent, code: e.code ?? 'child_failed', drained: e.drained === true }); save();
+      }
       throw e;
     }
   };
@@ -329,7 +355,8 @@ export function createHarness(raw, ports = {}) {
   async function serialized(fn) {
     privatePath(m.runRoot, { directory: true });
     for (const p of credentials()) if (present(p)) privatePath(p);
-    authorize(); privateDirectories();
+    authorize(); privateDirectories(); toolsOwned();
+    await runBounded('/usr/bin/true', [], { env: baseEnv, python: m.tools.python, helper: m.tools.childSupervisor });
     try { const fd = openSync(lifecyclePath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600); closeSync(fd); }
     catch (e) { if (e.code !== 'EEXIST') throw e; }
     const expected = privatePath(lifecyclePath);
@@ -371,7 +398,8 @@ export function createHarness(raw, ports = {}) {
     authorize();
     journal = JSON.parse(readPrivate(journalPath, 4 * 1024 * 1024)); const s = privatePath(m.runRoot, { directory: true });
     if (journal.version !== 1 || !equal(journal.lifecycle, lifecycle) || journal.manifestPath !== manifestPath || journal.manifestHash !== manifestHash || journal.scriptHash !== scriptHash || journal.root.dev !== s.dev || journal.root.ino !== s.ino || journal.root.uid !== s.uid) fail('ownership_changed');
-    if (journal.childAmbiguities?.some(row => !row.drained)) fail('child_drain_unproved');
+    if (journal.children?.length || journal.childAmbiguities?.some(row => !row.drained)) fail('child_drain_unproved');
+    if (journal.diagnosticIntent) fail('interrupted_diagnostics');
     for (const [tool, expected] of Object.entries(journal.tools)) if (realpathSync(tool) !== tool || hash(readFileSync(tool)) !== expected) fail('ownership_changed');
     for (const [p, row] of Object.entries(journal.files)) if (row.intent) {
       const current = snapshot(p);
@@ -467,6 +495,31 @@ export function createHarness(raw, ports = {}) {
     sourcesOwned();
     for (const [p, expected] of Object.entries(journal.locks ?? {})) { const s = privatePath(p); if (s.dev !== expected.dev || s.ino !== expected.ino) fail('ownership_changed'); }
   }
+  async function diagnosticAction(p, own, env, shell) {
+    installedUnchanged();
+    const before = structuredClone(journal.inputs), started = Date.now();
+    journal.diagnosticIntent = { profile: p.profile, thread: own.id, started, beforeHash: hash(JSON.stringify(before)) }; save();
+    const result = await call(m.tools.script, ['-q', '-e', '-c', shell, '/dev/null'], { env, timeoutMs: 20000 });
+    const auto = join(plan.paths.runtime, 'auto-' + hash(p.config + '\0' + p.profile + '\0\0' + own.id) + '.lock');
+    const locks = [auto, join(plan.paths.data, 'registry.lock'), join(plan.paths.runtime, 'start-' + hubs[p.hub].slug + '.lock'),
+      p.config + '.lock', join(dirname(p.config), 'codex/bindings.json.lock'), join(plan.paths.notices, hubs[p.hub].slug, 'state.lock')].filter(present);
+    await locked(locks, async () => {
+      const next = sourceSnapshot(), file = join(dirname(p.config), 'codex/bindings.json');
+      const prior = before.bindings[file], after = next.bindings[file];
+      if (!prior || !after || !equal(prior.disabled, after.disabled) || prior.bindings.length !== after.bindings.length) fail('ownership_changed');
+      const expected = structuredClone(before), row = expected.bindings[file].bindings.find(b => b.profile === p.profile), fresh = after.bindings.find(b => b.profile === p.profile);
+      if (!row || !fresh || row.thread_id !== own.id || row.as !== '' || row.hub !== hubs[p.hub].url || row.caller !== p.peerId || row.codex_home !== m.approval.codexHome) fail('ownership_changed');
+      if (fresh.expires_at !== row.expires_at) {
+        const expiry = Date.parse(fresh.expires_at);
+        if (!Number.isFinite(expiry) || expiry < Date.parse(row.expires_at) || expiry < started + 86400000 - 2000 || expiry > Date.now() + 86400000 + 1000) fail('ownership_changed');
+        row.expires_at = fresh.expires_at;
+      }
+      expected.bindings[file].hash = after.hash;
+      if (!equal(next, expected)) fail('ownership_changed');
+      journal.inputs = next; delete journal.diagnosticIntent; save();
+    });
+    return result;
+  }
   function mutate(p, next) {
     safeAncestors(p);
     if (!journal.files[p]) { const before = snapshot(p); journal.files[p] = { before };
@@ -511,7 +564,7 @@ export function createHarness(raw, ports = {}) {
   async function initialize() {
     await preflight(); if (journal) return;
     const s = privatePath(m.runRoot, { directory: true });
-    journal = { version: 1, lifecycle: { ...lifecycle }, manifestPath, manifestHash, scriptHash, tools: Object.fromEntries(Object.values(m.tools).map(tool => [tool, hash(readFileSync(tool))])), root: { dev: s.dev, ino: s.ino, uid: s.uid }, states: await states(), files: {}, dirs: [], locks: {},
+    journal = { version: 1, lifecycle: { ...lifecycle }, manifestPath, manifestHash, scriptHash, tools: toolsOwned(), root: { dev: s.dev, ino: s.ino, uid: s.uid }, states: await states(), files: {}, dirs: [], locks: {},
       inventory: Object.fromEntries(plan.inventory.map(p => { if (!present(p)) return [p, { absent: true }]; const s = lstatSync(p); return [p, { dev: s.dev, ino: s.ino, mode: s.mode, uid: s.uid }]; })),
       generation: { binary: 'a', assets: 'a' }, peers: m.peers.map(p => ({ hub: p.hub, id: p.peerId, disabled: false })), threads: {}, owners: {}, proofs: [], completed: [], phase: 'install' };
     journal.inputs = sourceSnapshot(); save();
@@ -760,8 +813,25 @@ export function createHarness(raw, ports = {}) {
     if (present(join(m.runRoot, 'ws-' + session))) fail('preexisting_consumer');
     const cwd = join(m.runRoot, 'ws-' + session), marker = 'OWN-' + randomBytes(16).toString('hex'); mkdirPrivate(cwd, journal.dirs);
     journal.threadIntent = { session, cwd, marker, newServer: !journal.tmux }; save();
+    const handoff = journal.tmux ? undefined : async children => {
+      const socket = lstatSync(socketPath);
+      if (!socket.isSocket() || socket.uid !== uid()) fail('ownership_changed');
+      const pid = Number((await call(m.tools.tmux, ['-S', socketPath, 'display-message', '-p', '#{pid}'])).stdout.trim());
+      const own = children.find(row => row.pid === pid && row.uid === uid() && row.birth === birth(pid));
+      if (!own || children.length !== 1) fail('child_drain_unproved');
+      const sessions = (await call(m.tools.tmux, ['-S', socketPath, 'list-sessions', '-F', '#{session_name}'])).stdout.trim().split('\n');
+      if (!equal(sessions, [session])) fail('ownership_changed');
+      const pane = Number((await call(m.tools.tmux, ['-S', socketPath, 'list-panes', '-t', session, '-F', '#{pane_pid}'])).stdout.trim());
+      let at = pane; const seen = new Set();
+      while (at !== pid && at > 1 && !seen.has(at) && seen.size < 64) {
+        seen.add(at); const raw = readFileSync(`/proc/${at}/stat`, 'utf8'); at = Number(raw.slice(raw.lastIndexOf(')') + 2).split(' ')[1]);
+      }
+      if (at !== pid || birth(pid) !== own.birth) fail('ownership_changed');
+      journal.tmux = { dev: socket.dev, ino: socket.ino, pid, birth: own.birth }; save();
+      return [{ pid, birth: own.birth }];
+    };
     await call(m.tools.tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', session, '-x', '220', '-y', '50', '-c', cwd, m.tools.codex, '-s', 'read-only', '-a', 'never'],
-      { env: { ...baseEnv, VECNET_PROFILE: 'smoke-none' } });
+      { env: { ...baseEnv, VECNET_PROFILE: 'smoke-none' }, handoff });
     if (!journal.tmux) {
       const socket = lstatSync(socketPath);
       if (!socket.isSocket() || socket.uid !== uid()) fail('ownership_changed');
@@ -836,7 +906,47 @@ export function createHarness(raw, ports = {}) {
       const inbox = JSON.parse((await vecnet(p, ['--json', 'inbox'])).stdout);
       return proveDelivery({ threadId: own.id, clientId, deliveryId: pending.deliveryId, nonce: match[1], turns, historyComplete: true, inboxUnacked: inbox.events?.some(e => e.type === 'delivery' && e.data?.delivery_id === pending.deliveryId), controlBeforeNonce: journal.completed.includes('control-' + p.session), hookBytes: Buffer.byteLength(hook.stdout), trustPreserved: !answers.some(a => a.trim() === 'EXECUTED'), display,
         expectedHub: hubs[p.hub].url, expectedCaller: p.peerId }); }, 180000);
+    const route = { profile: p.profile, hub: hubs[p.hub].url, caller: p.peerId, thread: own.id, deliveryId: pending.deliveryId, clientId, nonceHash: pending.nonceHash };
+    const deliveries = [...(journal.deliveries ?? []), route];
+    if (deliveries.length > 32) fail('route_isolation_unproved');
+    await checkRoutes(deliveries);
+    journal.deliveries = deliveries;
     journal.proofs.push({ stage: label, ...receipt }); journal.completed.push(label); delete journal.pending; save();
+  }
+  async function checkRoutes(deliveries = journal.deliveries ?? []) {
+    const histories = new Map();
+    for (const own of Object.values(journal.threads)) if (!histories.has(own.id)) histories.set(own.id, (await history(own)).flatMap(t => t.items ?? []));
+    const states = new Map();
+    for (const p of m.peers.filter(p => p.role === 'receiver')) {
+      const file = join(dirname(p.config), 'state', p.profile + '.json');
+      if (!present(file)) continue;
+      const state = JSON.parse(readPrivate(file));
+      if (state.hub !== hubs[p.hub].url || state.caller !== p.peerId || (state.as ?? '') !== '' || !Array.isArray(state.displayed) ||
+        state.displayed.some(v => typeof v !== 'string') || (state.shown !== undefined && (!Array.isArray(state.shown) || state.shown.some(v => typeof v !== 'string'))) ||
+        (state.claims !== undefined && (!Array.isArray(state.claims) || state.claims.some(c => !record(c) || !c.ID ||
+          Object.keys(c).some(k => !['ID', 'After', 'Priority', 'Claim', 'Order'].includes(k)) || ['ID', 'After', 'Priority', 'Claim'].some(k => typeof c[k] !== 'string') ||
+          (c.Order !== undefined && (!Number.isSafeInteger(c.Order) || c.Order < 0)))))) fail('route_isolation_unproved');
+      states.set(p.profile, state);
+    }
+    for (const d of deliveries) {
+      if (!histories.has(d.thread)) fail('route_isolation_unproved');
+      for (const [thread, items] of histories) {
+        const users = items.filter(i => i.type === 'userMessage' && i.clientId === d.clientId);
+        const answers = items.filter(i => i.type === 'agentMessage' && textOf(i).trim().startsWith('FACT ' + d.deliveryId + ' '));
+        const nonce = item => (textOf(item).match(/NONCE-[a-f0-9]+/g) ?? []).some(n => hash(n) === d.nonceHash);
+        if (thread === d.thread) {
+          if (users.length !== 1 || answers.length !== 1 || hash(textOf(answers[0]).trim().split(' ')[2] ?? '') !== d.nonceHash ||
+            items.some(i => (i.type === 'userMessage' && i !== users[0] || i.type === 'agentMessage' && i !== answers[0]) && nonce(i))) fail('route_isolation_unproved');
+        } else if (users.length || answers.length || items.some(i => nonce(i) || (textOf(i).match(/[A-Za-z0-9_.-]+/g) ?? []).includes(d.deliveryId))) fail('route_isolation_unproved');
+      }
+      for (const p of m.peers.filter(p => p.role === 'receiver')) {
+        const state = states.get(p.profile), intended = p.profile === d.profile && hubs[p.hub].url === d.hub && p.peerId === d.caller;
+        if (!state) { if (intended) fail('route_isolation_unproved'); continue; }
+        const displayed = state.displayed.filter(id => id === d.deliveryId).length;
+        const reserved = state.claims?.some(c => c.ID === d.deliveryId);
+        if (intended ? displayed !== 1 || reserved : displayed || reserved || state.shown?.includes(d.deliveryId)) fail('route_isolation_unproved');
+      }
+    }
   }
   async function runAcceptance() {
     load(); installedUnchanged(); if (journal.phase !== 'installed' && journal.phase !== 'running') fail('install_required');
@@ -891,7 +1001,7 @@ export function createHarness(raw, ports = {}) {
       else {
         const b = receivers.find(p => p.session === 'b'), own = journal.threads.b, notice = join(plan.paths.notices, hubs.fly.slug, 'state.json');
         const shell = `${generation().binary} --net ${b.profile} --json peers`;
-        const tty = env => call(m.tools.script, ['-q', '-e', '-c', shell, '/dev/null'], { env });
+        const tty = env => diagnosticAction(b, own, env, shell);
         const bad = { ...peerEnv(b), CODEX_THREAD_ID: own.id, VECNET_CODEX_AUTO_DELIVERY: '1', VECNET_CODEX_DELIVERY_ENTRY: join(m.runRoot, 'deliberately-absent.ts') };
         const outputs = [await tty(bad)];
         await until(async () => existsSync(notice) && JSON.parse(readPrivate(notice)).reason === 'assets_missing');
@@ -903,7 +1013,8 @@ export function createHarness(raw, ports = {}) {
         await until(async () => JSON.parse(readPrivate(notice)).reason === '');
         journal.proofs.push({ stage: 'diagnostics', actor: 'controller_pty_probe', notices: notices.length });
       }
-      journal.completed.push('diagnostics'); save(); return { stage: 'run', code: 'evidence_complete', count: journal.proofs.length };
+      await checkRoutes();
+      journal.completed.push('diagnostics', 'evidence_complete'); save(); return { stage: 'run', code: 'evidence_complete', count: journal.proofs.length };
     } finally { if (!ports.rpc) rpc?.close(); }
   }
   return { preflight: () => serialized(preflight), install: () => serialized(install), run: () => serialized(runAcceptance),

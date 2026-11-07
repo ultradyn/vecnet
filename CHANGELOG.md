@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-08: bound Linux foreground Codex notices with independent nonblocking pipe/terminal writes and selected profile/as guidance; refresh only authenticated same-caller monitor credential provenance; make native replacement E2E build its second generation; strengthen the private acceptance harness with subreaper containment, pinned handoffs, diagnostic-renewal reconciliation and aggregate route checks. Unsupported notice sinks are best effort; private harness ambiguity remains a retained refusal.
+
 - 2026-11-08: Linux Codex next-action registration adds durable opt-out/takeover, fenced hub owners with stable recovery across installed generations, exact client-receipt publication shared with hooks/monitor ack barriers, and persisted inactive reasons (`internal/cli`, `connectors/launcher`, `docs/connectors/codex-appserver.md`, `docs/OPERATOR.md`, `docs/PROTOCOL.md`).
 - 2026-11-08: add a short ChatGPT Dot incoming-message setup prompt and Copy prompt button to onboarding after the plugin connection steps (`internal/ui/static/invite.js`).
 - 2026-11-07: resolve the build-box lane base physically before deriving private HOME, temporary, XDG and cache paths, including symlinked `/work/bb-src` volumes (`scripts/bb/remote.sh`).

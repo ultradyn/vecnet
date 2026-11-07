@@ -173,7 +173,10 @@ ln-test *ARGS:
 ln-check: ln-typecheck ln-test
 
 # launcher: end to end against a real hub and fake backend
-ln-e2e: build
+ln-e2e-native-b:
+    CGO_ENABLED=0 build2 go build -p 2 -ldflags "-X github.com/XertroV/vecnet/internal/buildinfo.Version=codex-auto-delivery-e2e-b" -o bin/vecnet-5c-b ./cmd/vecnet
+
+ln-e2e: build ln-e2e-native-b
     build2 node --disable-warning=ExperimentalWarning --test --test-concurrency=1 connectors/launcher/test/e2e/*.test.ts
 
 ln-run *ARGS:

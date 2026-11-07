@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, renameSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +13,7 @@ import { validateManifest, planHarness, proveActor, proveDelivery, sanitizeOutco
 
 const cli = fileURLToPath(new URL('./codex-auto-delivery-smoke.mjs', import.meta.url));
 test.before(t => {
-  for (const p of [cli, fileURLToPath(import.meta.url), join(dirname(dirname(cli)), 'justfile')]) {
+  for (const p of [cli, fileURLToPath(import.meta.url), join(dirname(dirname(cli)), 'justfile'), fileURLToPath(new URL('./codex-auto-delivery-child.py', import.meta.url))]) {
     t.diagnostic('source-sha256 ' + createHash('sha256').update(readFileSync(p)).digest('hex') + ' ' + p);
   }
 });
@@ -23,7 +23,7 @@ function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'vn-auto-smoke-'));
   chmodSync(root, 0o700);
   const beforeRemove = [];
-  t.after(async () => { try { for (const close of beforeRemove) await close(); } finally { rmSync(root, { recursive: true, force: true }); } });
+  t.after(async () => { for (const close of beforeRemove) await close(); rmSync(root, { recursive: true, force: true }); });
   const runRoot = join(root, 'run'), home = join(root, 'home');
   for (const path of [runRoot, home, join(root, 'runtime'), join(root, 'codex')]) mkdirSync(path, { mode: 0o700 });
   const m = { version: 1, runId: 'fixture', runRoot, base: '69df47b10bd0fb0d2137bf2c41c5bd91237b55af', scriptHash: createHash('sha256').update(readFileSync(cli)).digest('hex'),
@@ -42,6 +42,8 @@ function fixture(t) {
     writeFileSync(p, 'PRIVATE-CREDENTIAL-CANARY', { mode: 0o600 });
   }
   m.tools.node = process.execPath;
+  m.tools.python = realpathSync('/usr/bin/python3');
+  m.tools.childSupervisor = fileURLToPath(new URL('./codex-auto-delivery-child.py', import.meta.url));
   const manifest = join(runRoot, 'manifest.json');
   const save = () => writeFileSync(manifest, JSON.stringify(m), { mode: 0o600 });
   save();
@@ -251,7 +253,7 @@ test('cleanup and rollback preserve existing lock inodes and disclose remaining 
   await f.harness().cleanup(); const result = await f.harness().rollback();
   assert.equal(lstatSync(lock).ino, ino); assert.equal(result.code, 'rollback_residuals');
 });
-async function flowRehearsal(t) {
+async function flowRehearsal(t, options = {}) {
   const f = rehearsal(t), flow = join(f.m.runRoot, 'flow.json'), plan = planHarness(f.m);
   f.beforeRemove.push(async () => {
     if (!existsSync(flow)) return; const server = JSON.parse(readFileSync(flow)).server; if (!server) return;
@@ -261,7 +263,7 @@ async function flowRehearsal(t) {
     if (same()) { process.kill(server.pid, 'SIGKILL'); while (same() && Date.now() < deadline + 1000) await new Promise(r => setTimeout(r, 10)); }
     assert.equal(same(), false, 'owned fixture server completely stopped');
   });
-  writeFileSync(flow, JSON.stringify({ peers: f.m.peers, sessions: {}, turns: {}, counter: 0 }), { mode: 0o600 });
+  writeFileSync(flow, JSON.stringify({ peers: f.m.peers, sessions: {}, turns: {}, counter: 0, corruption: options.corruption ?? '' }), { mode: 0o600 });
   const prologue = `#!${process.execPath}
 const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process'),crypto=require('node:crypto');
 const file=process.env.FIXTURE_FLOW,args=process.argv.slice(2),read=()=>JSON.parse(fs.readFileSync(file)),save=s=>fs.writeFileSync(file,JSON.stringify(s));
@@ -270,15 +272,21 @@ const put=(p,v)=>{fs.mkdirSync(path.dirname(p),{recursive:true,mode:448});fs.wri
 `;
   const tmuxProgram = prologue + `
 const s=read(),session=args[args.indexOf('-t')+1],part=()=>s.sessions[session];
-if(args.includes('new-session')){if(!s.server){const socket=args[args.indexOf('-S')+1],program="const net=require('node:net');const server=net.createServer();server.listen(process.argv[1]);process.on('SIGTERM',()=>server.close(()=>process.exit(0)));";
+if(args.includes('new-session')){if(!s.server){const socket=args[args.indexOf('-S')+1],program="const net=require('node:net'),fs=require('node:fs'),cp=require('node:child_process');const pane=cp.spawn(process.execPath,['-e','setTimeout(()=>process.exit(0),90000)'],{stdio:'ignore'});fs.writeFileSync(process.argv[1]+'.pane',String(pane.pid));const server=net.createServer();server.listen(process.argv[1]);process.on('SIGTERM',()=>{pane.once('exit',()=>process.exit(0));pane.kill('SIGTERM');server.close();});";
 const server=cp.spawn(process.execPath,['-e',program,socket],{detached:true,stdio:'ignore'});server.unref();const deadline=Date.now()+2000;
 while(!fs.existsSync(socket)&&Date.now()<deadline)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);if(!fs.existsSync(socket))process.exit(91);
-const stat=fs.readFileSync('/proc/'+server.pid+'/stat','utf8');s.server={pid:server.pid,birth:stat.slice(stat.lastIndexOf(')')+2).split(' ')[19]};}
+const stat=fs.readFileSync('/proc/'+server.pid+'/stat','utf8');s.server={pid:server.pid,pane:Number(fs.readFileSync(socket+'.pane','utf8')),birth:stat.slice(stat.lastIndexOf(')')+2).split(' ')[19]};}
+if(s.corruption==='extra-handoff'){
+ const marker=path.join(path.dirname(file),'handoff-extra');
+ const program="const fs=require('node:fs');fs.writeFileSync(process.argv[1]+'.started','started');setTimeout(()=>{fs.writeFileSync(process.argv[1]+'.ended','ended');process.exit(0)},1800)";
+ cp.spawn(process.execPath,['-e',program,marker],{detached:true,stdio:'ignore'}).unref();
+ const deadline=Date.now()+1000;while(!fs.existsSync(marker+'.started')&&Date.now()<deadline)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);
+}
 const name=args[args.indexOf('-s')+1];s.sessions[name]={id:name==='a'?${JSON.stringify(uuid(1))}:${JSON.stringify(uuid(2))},cwd:args[args.indexOf('-c')+1]};s.turns[s.sessions[name].id]=[];save(s);}
 else if(args.includes('display-message'))process.stdout.write(String(s.server.pid));
 else if(args.includes('kill-server')){const raw=fs.readFileSync('/proc/'+s.server.pid+'/stat','utf8');if(raw.slice(raw.lastIndexOf(')')+2).split(' ')[19]!==s.server.birth)process.exit(92);process.kill(s.server.pid,'SIGTERM');}
 else if(args.includes('capture-pane'))process.stdout.write('Thread ID: '+part().id+'\\n›');
-else if(args.includes('list-panes'))process.stdout.write(process.env.FIXTURE_TUI_PID+'\\n');
+else if(args.includes('list-panes'))process.stdout.write(s.server.pane+'\\n');
 else if(args.includes('list-sessions'))process.stdout.write(Object.keys(s.sessions).join('\\n')+'\\n');
 else if(args.includes('send-keys')){if(args.includes('-l')){s.sessions[session].input=args.at(-1);save(s);}
 else {const text=part().input;if(text==='/status'||text==='/quit')process.exit(0);
@@ -295,14 +303,38 @@ const s=read(),profile=args[args.indexOf('--net')+1],p=s.peers.find(p=>p.profile
 function owner(hub){const slug=slugs[hub];put(path.join(runtime,'delivery-'+slug+'.json'),{hub:urls[hub],state_root:data,registry:path.join(data,'registry.json'),managed:true,binary_digest:crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex'),launcher:process.env.VECNET_CODEX_DELIVERY_ENTRY,pid:12345,birth:'fixture'});fs.writeFileSync(path.join(runtime,'delivery-'+slug+'.lock'),'',{mode:384});fs.writeFileSync(path.join(runtime,slug+'.active'),'');
 put(path.join(data,slug,'descriptor.json'),{version:1,hub:urls[hub]});put(path.join(data,slug,'hub.json'),{version:1,hub:urls[hub]});const ledger=path.join(data,slug,'ledger.sqlite');if(!fs.existsSync(ledger)){const db=new (require('node:sqlite').DatabaseSync)(ledger);db.exec('CREATE TABLE kv(ns TEXT,key TEXT,value TEXT)');db.close();fs.chmodSync(ledger,384);}}
 if(args.includes('peers')&&process.env.VECNET_CODEX_AUTO_DELIVERY==='1'){
+if(process.env.VECNET_CODEX_DELIVERY_ENTRY.endsWith('deliberately-absent.ts')){
+const notice=path.join(process.env.XDG_DATA_HOME,'vecnet/codex-notices',slugs[p.hub],'state.json');
+const n=fs.existsSync(notice)?JSON.parse(fs.readFileSync(notice)):{version:1,hub:urls[p.hub],reason:'assets_missing',noticed:{}};
+n.reason='assets_missing';if(!n.noticed.assets_missing&&fs.existsSync(notice)){process.stderr.write('vecnet: Codex auto-delivery inactive for fixture: assets_missing\\n');n.noticed.assets_missing=new Date().toISOString();}put(notice,n);process.stdout.write('{}');process.exit(0);}
 const binding=path.join(root,'codex/bindings.json'),b=fs.existsSync(binding)?JSON.parse(fs.readFileSync(binding)):{version:1,bindings:[],disabled:[]};
-if(!b.disabled.some(d=>d.profile===p.profile)){b.bindings=b.bindings.filter(r=>r.profile!==p.profile);b.bindings.push({profile:p.profile,as:'',codex_home:process.env.CODEX_HOME,thread_id:process.env.CODEX_THREAD_ID,hub:urls[p.hub],caller:p.peerId,created_at:new Date().toISOString(),expires_at:new Date(Date.now()+3600000).toISOString()});put(binding,b);
+const diagnostic=path.join(process.env.XDG_DATA_HOME,'vecnet/codex-notices',slugs[p.hub],'state.json');
+if(fs.existsSync(diagnostic)&&!process.env.FIXTURE_DIAG_CHILD&&s.corruption!=='diagnostic-interrupted'){
+ const ready=path.join(root,'diagnostic-child-started');if(fs.existsSync(ready))fs.unlinkSync(ready);
+ const auto=path.join(runtime,'auto-'+crypto.createHash('sha256').update(p.config+'\\0'+p.profile+'\\0\\0'+process.env.CODEX_THREAD_ID).digest('hex')+'.lock');fs.writeFileSync(auto,'',{mode:384});
+ cp.spawn('/usr/bin/flock',['--exclusive',auto,'/usr/bin/flock','--exclusive',binding+'.lock',process.execPath,__filename,...args],{detached:true,stdio:'ignore',env:{...process.env,FIXTURE_DIAG_CHILD:'1',FIXTURE_LOCKED:'1'}}).unref();
+ const deadline=Date.now()+2000;while(!fs.existsSync(ready)&&Date.now()<deadline)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);if(!fs.existsSync(ready))process.exit(95);process.exit(0);}
+if(process.env.FIXTURE_DIAG_CHILD){fs.writeFileSync(path.join(root,'diagnostic-child-started'),'started');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,100);}
+if(!b.disabled.some(d=>d.profile===p.profile)){const index=b.bindings.findIndex(r=>r.profile===p.profile),old=b.bindings[index],row={...old,profile:p.profile,as:'',codex_home:process.env.CODEX_HOME,thread_id:process.env.CODEX_THREAD_ID,hub:urls[p.hub],caller:p.peerId,created_at:old?.created_at??new Date().toISOString(),expires_at:new Date(Date.now()+86400000).toISOString()};if(index<0)b.bindings.push(row);else b.bindings[index]=row;put(binding,b);
+const notice=path.join(process.env.XDG_DATA_HOME,'vecnet/codex-notices',slugs[p.hub],'state.json');if(fs.existsSync(notice)){
+ const field={ 'diagnostic-caller':'caller','diagnostic-as':'as','diagnostic-home':'codex_home','diagnostic-thread':'thread_id','diagnostic-hub':'hub' }[s.corruption];
+ if(field){row[field]=field==='thread_id'?'00000000-0000-4000-8000-000000000099':'foreign';put(binding,b);}
+ if(s.corruption==='diagnostic-config')fs.appendFileSync(p.config,'\\n# foreign config bytes\\n');
+ if(s.corruption==='diagnostic-credential')fs.writeFileSync(p.config,fs.readFileSync(p.config,'utf8').replace('vn_fixture_old','vn_foreign_changed'));
+ const n=JSON.parse(fs.readFileSync(notice));n.reason='';put(notice,n);
+ if(s.corruption==='diagnostic-interrupted')process.exit(17);
+}
 const reg=path.join(data,'registry.json'),r=fs.existsSync(reg)?JSON.parse(fs.readFileSync(reg)):{version:1,sources:[]};if(!r.sources.some(r=>r.config===p.config))r.sources.push({config:p.config,bindings:binding});put(reg,r);owner(p.hub);}}
 if(args.includes('delivery-refresh'))owner(Object.keys(slugs).find(h=>slugs[h]===args.at(-1)));
 if(args.includes('send')){const target=s.peers.find(p=>p.peerId===args[args.indexOf('send')+1]),body=fs.readFileSync(0,'utf8'),nonce=/codeword (NONCE-[a-f0-9]+)/.exec(body)[1],d='dly_'+(++s.counter),thread=s.sessions[target.session].id;
 const key='vn.'+crypto.createHash('sha256').update(JSON.stringify([urls[target.hub],thread,[d]])).digest('hex').slice(0,24);
-s.turns[thread].push({id:'t'+s.counter,status:'completed',items:[{type:'userMessage',clientId:key},{type:'agentMessage',text:'FACT '+d+' '+nonce}]});save(s);put(path.join(root,'state',target.profile+'.json'),{hub:urls[target.hub],caller:target.peerId,displayed:[d],claims:[]});process.stdout.write(JSON.stringify({deliveries:[{recipient:target.peerId,delivery_id:d}]}));}
+s.turns[thread].push({id:'t'+s.counter,status:'completed',items:[{type:'userMessage',clientId:key},{type:'agentMessage',text:'FACT '+d+' '+nonce}]});
+if(s.corruption==='foreign-history'&&!s.copied){const foreign=Object.values(s.sessions).find(v=>v.id!==thread);s.turns[foreign.id].push(s.turns[thread].at(-1));s.copied=true;}
+save(s);const state=path.join(root,'state',target.profile+'.json'),prior=fs.existsSync(state)?JSON.parse(fs.readFileSync(state)):{displayed:[]};put(state,{hub:urls[target.hub],caller:target.peerId,displayed:[...prior.displayed,d],claims:[]});
+if(s.corruption==='foreign-state'&&!s.stateCopied){const foreign=s.peers.find(v=>v.role==='receiver'&&v.profile!==target.profile);put(path.join(root,'state',foreign.profile+'.json'),{hub:urls[foreign.hub],caller:foreign.peerId,displayed:[d],claims:[]});s.stateCopied=true;save(s);}
+process.stdout.write(JSON.stringify({deliveries:[{recipient:target.peerId,delivery_id:d}]}));}
 else if(args.includes('unbind')){const file=path.join(root,'codex/bindings.json'),b=JSON.parse(fs.readFileSync(file));b.bindings=b.bindings.filter(r=>r.profile!==p.profile);b.disabled.push({profile:p.profile,as:''});put(file,b);process.stdout.write('{}');}
+else if(args.includes('status')){const file=path.join(process.env.XDG_DATA_HOME,'vecnet/codex-notices',slugs[p.hub],'state.json');process.stdout.write(JSON.parse(fs.readFileSync(file)).reason);}
 else if(args.includes('inbox'))process.stdout.write(JSON.stringify({events:s.turns[s.sessions[p.session].id].flatMap(t=>t.items??[]).filter(i=>i.type==='agentMessage'&&i.text.startsWith('FACT dly_')).map(i=>({type:'delivery',data:{delivery_id:i.text.split(' ')[1]}}))}));
 else if(args.includes('rotate'))process.stdout.write(JSON.stringify({secret:'vn_fixture_rotated'}));
 else if(args.includes('disable')){const peers=JSON.parse(fs.readFileSync(process.env.FIXTURE_PEERS));peers[args.at(-1)]=true;put(process.env.FIXTURE_PEERS,peers);process.stdout.write('{}');}
@@ -329,6 +361,16 @@ else if(!args.includes('hook'))process.stdout.write('{}');
     return { data: all.slice(offset, offset + 5), nextCursor: offset + 5 < all.length ? String(offset + 5) : null };
   } };
   f.ports.diagnostics = async ({ journal }) => { journal.proofs.push({ stage: 'diagnostics', actor: 'fixture-only', notices: 1 }); };
+  if (options.corruption === 'late-history') {
+    f.ports.diagnostics = async ({ journal }) => {
+      const s = JSON.parse(readFileSync(flow)), ids = Object.values(s.sessions).map(v => v.id);
+      const early = s.turns[ids[0]].find(t => t.items?.some(i => i.clientId?.startsWith('vn.')) && t.items?.some(i => i.text?.startsWith('FACT dly_')));
+      assert.ok(early, 'an earlier valid delivery exists before the late foreign copy');
+      s.turns[ids[1]].push(early); writeFileSync(flow, JSON.stringify(s));
+      journal.proofs.push({ stage: 'diagnostics', actor: 'fixture-only', notices: 1 });
+    };
+  }
+  if (options.diagnostics) { delete f.ports.diagnostics; f.m.tools.script = '/usr/bin/script'; }
   f.save(); return f;
 }
 test('fake TUI, CLI and separate manager processes rehearse the full sequence without native acceptance claims', async t => {
@@ -339,6 +381,131 @@ test('fake TUI, CLI and separate manager processes rehearse the full sequence wi
   assert.equal(Object.keys(journal.owners).length, 2);
   await h.cleanup(); const rolled = await h.rollback(); assert.equal(rolled.code, 'rollback_residuals');
   // Owner FD verification and diagnostics are explicitly fixture ports. No real native/managed/model proof follows.
+});
+
+test('R52 FI6 actual diagnostics renews B then fresh cleanup and rollback', async t => {
+  const f = await flowRehearsal(t, { diagnostics: true });
+  await f.harness().install();
+  assert.equal((await f.harness().run()).code, 'evidence_complete');
+  const journal = JSON.parse(readFileSync(join(f.m.runRoot, 'journal.json')));
+  assert.equal(journal.proofs.find(p => p.stage === 'diagnostics').actor, 'controller_pty_probe');
+  const binding = join(f.m.runRoot, 'codex/bindings.json'), actual = JSON.parse(readFileSync(binding));
+  assert.equal(actual.bindings.find(b => b.profile === 'b').expires_at,
+    journal.inputs.bindings[binding].bindings.find(b => b.profile === 'b').expires_at, 'native diagnostic renewal must be reconciled before evidence_complete');
+  assert.equal((await f.harness().cleanup()).code, 'cleaned');
+  assert.equal((await f.harness().rollback()).code, 'rollback_residuals');
+});
+
+for (const corruption of ['foreign-history', 'late-history', 'foreign-state']) test(`R52 FI7 valid target plus ${corruption} refuses full flow`, async t => {
+  const f = await flowRehearsal(t, { corruption });
+  await f.harness().install();
+  await assert.rejects(f.harness().run(), { code: 'route_isolation_unproved' });
+  const journal = JSON.parse(readFileSync(join(f.m.runRoot, 'journal.json')));
+  assert.ok(journal.threads.a.uuidFromOwnTui && journal.threads.b.uuidFromOwnTui);
+  assert.ok(!journal.completed.includes('evidence_complete'));
+  await f.harness().cleanup(); await f.harness().rollback();
+});
+
+for (const field of ['caller', 'as', 'home', 'thread', 'hub', 'config', 'credential', 'interrupted']) test(`R53 FI6 diagnostic ${field} delta remains refused`, async t => {
+  const f = await flowRehearsal(t, { diagnostics: true, corruption: 'diagnostic-' + field });
+  await f.harness().install();
+  await assert.rejects(f.harness().run(), { code: field === 'interrupted' ? 'child_failed' : 'ownership_changed' });
+  const journal = JSON.parse(readFileSync(join(f.m.runRoot, 'journal.json')));
+  assert.equal(journal.diagnosticIntent.profile, 'b');
+  assert.ok(!journal.completed.includes('evidence_complete'));
+  assert.equal(journal.inputs.bindings[join(f.m.runRoot, 'codex/bindings.json')].bindings.find(b => b.profile === 'b').caller, 'peer_1');
+  await assert.rejects(f.harness().cleanup(), { code: 'interrupted_diagnostics' });
+  await assert.rejects(f.harness().rollback(), { code: 'interrupted_diagnostics' });
+  assert.deepEqual(JSON.parse(readFileSync(f.peers)), {}, 'refused diagnostic recovery never disables a peer');
+});
+
+test('R52 FM3 private profile 64 accepted 65 and 80 rejected before effects', t => {
+  const f = fixture(t), before = snapshot(f.root);
+  for (const length of [64, 65, 80]) {
+    const m = structuredClone(f.m); m.peers[0].profile = 'p'.repeat(length);
+    const nativeComponent = length <= 64 ? m.peers[0].profile : 'x-' + createHash('sha256').update(m.peers[0].profile).digest('hex').slice(0, 16);
+    if (length === 64) { assert.equal(validateManifest(m).peers[0].profile, nativeComponent); }
+    else { assert.notEqual(nativeComponent, m.peers[0].profile); assert.throws(() => validateManifest(m), { code: 'invalid_manifest' }); }
+  }
+  assert.deepEqual(snapshot(f.root), before);
+});
+
+for (const inherited of [false, true]) test(`R53 FI5 setsid ${inherited ? 'inherited' : 'ignored'} writer retains refusal across every active mode`, async t => {
+  const f = rehearsal(t); await f.harness().install();
+  const ready = join(f.root, 'setsid-started'), ended = join(f.root, 'setsid-ended'), late = join(f.root, 'setsid-late');
+  const writer = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(ready)},'started');setTimeout(()=>fs.writeFileSync(${JSON.stringify(late)},'late'),700);setTimeout(()=>{fs.writeFileSync(${JSON.stringify(ended)},'ended');process.exit(0)},1000)`;
+  const leader = `const cp=require('node:child_process'),fs=require('node:fs');cp.spawn(process.execPath,['-e',${JSON.stringify(writer)}],{detached:true,stdio:${JSON.stringify(inherited ? ['ignore', 'inherit', 'inherit'] : 'ignore')}}).unref();const poll=setInterval(()=>{if(fs.existsSync(${JSON.stringify(ready)})){clearInterval(poll);process.exit(0)}},5);setTimeout(()=>process.exit(9),1500).unref();`;
+  const run = f.ports.run; let introduced = false, laterCalls = 0;
+  f.ports.run = async (command, args, options) => {
+    laterCalls++;
+    if (!introduced) { introduced = true; return runBounded(process.execPath, ['-e', leader], { ...options, timeoutMs: 200 }); }
+    return run(command, args, options);
+  };
+  const start = Date.now();
+  await assert.rejects(f.harness().cleanup(), { code: 'child_drain_unproved', ambiguous: true, drained: false });
+  assert.ok(Date.now() - start < 1500); assert.ok(existsSync(ready));
+  const journal = JSON.parse(readFileSync(join(f.m.runRoot, 'journal.json')));
+  assert.equal(journal.children.length, 1); assert.equal(journal.childAmbiguities.at(-1).drained, false);
+  const before = laterCalls;
+  for (const mode of ['preflight', 'install', 'run', 'cleanup', 'rollback']) await assert.rejects(f.harness()[mode](), { code: 'child_drain_unproved' });
+  assert.equal(laterCalls, before, 'no conflicting command may follow an unaccounted temporary writer');
+  await delay(Math.max(0, 1300 - (Date.now() - start)));
+  assert.ok(existsSync(late)); assert.ok(existsSync(ended), 'finite separate-session fixture retired before root removal');
+});
+
+test('R53 helper/interpreter provenance refuses before journal or installation effects', async t => {
+  for (const tool of ['python', 'childSupervisor']) {
+    const f = rehearsal(t), plan = planHarness(f.m);
+    f.m.tools[tool] = join(f.root, 'missing-' + tool); f.save();
+    await assert.rejects(f.harness().install());
+    assert.equal(existsSync(join(f.m.runRoot, 'journal.json')), false);
+    assert.equal(existsSync(plan.paths.installation), false);
+    assert.deepEqual(JSON.parse(readFileSync(f.trace)), []);
+  }
+});
+
+test('R53 actual supervisor death retains intent and finite writer retirement', async t => {
+  const f = rehearsal(t); await f.harness().install();
+  const ended = join(f.root, 'orphan-ended'), started = join(f.root, 'orphan-started'), interpreter = join(f.root, 'self-killing-python');
+  writeFileSync(interpreter, `#!/bin/sh\nexec '${f.m.tools.python}' -c 'import os,runpy,signal,sys,threading;threading.Timer(0.3,lambda:os.kill(os.getpid(),signal.SIGKILL)).start();runpy.run_path(sys.argv[1],run_name="__main__")' "$@"\n`, { mode: 0o700 });
+  const body = `const fs=require('node:fs');const raw=fs.readFileSync('/proc/self/stat','utf8');fs.writeFileSync(${JSON.stringify(started)},JSON.stringify({pid:process.pid,birth:raw.slice(raw.lastIndexOf(')')+2).split(' ')[19]}));setTimeout(()=>{fs.writeFileSync(${JSON.stringify(ended)},'ended');process.exit(0)},1000)`;
+  const run = f.ports.run; let injected = false;
+  f.ports.run = (command, args, options) => {
+    if (!injected) { injected = true; return runBounded(process.execPath, ['-e', body], { ...options, python: interpreter }); }
+    return run(command, args, options);
+  };
+  f.beforeRemove.push(async () => {
+    if (!existsSync(started)) return;
+    const own = JSON.parse(readFileSync(started)), deadline = Date.now() + 3000;
+    const stopped = () => { try { const raw = readFileSync(`/proc/${own.pid}/stat`, 'utf8'), fields = raw.slice(raw.lastIndexOf(')') + 2).split(' '); return fields[19] !== own.birth || ['Z', 'X'].includes(fields[0]); } catch (e) { if (e.code === 'ENOENT') return true; throw e; } };
+    while (!stopped() && Date.now() < deadline) await delay(10);
+    assert.ok(stopped(), 'retain the private root if an actual orphan cannot be proved stopped');
+  });
+  await assert.rejects(f.harness().cleanup(), { code: 'child_drain_unproved', drained: false });
+  assert.ok(existsSync(started));
+  const journal = JSON.parse(readFileSync(join(f.m.runRoot, 'journal.json')));
+  assert.equal(journal.children.length, 1); assert.equal(journal.childAmbiguities.at(-1).drained, false);
+  await assert.rejects(f.harness().install(), { code: 'child_drain_unproved' });
+  const deadlineEnd = Date.now() + 3000; while (!existsSync(ended) && Date.now() < deadlineEnd) await delay(10);
+  assert.ok(existsSync(ended), 'actual orphan must retire before private root removal');
+  const own = JSON.parse(readFileSync(started));
+  const alive = () => { try { const raw = readFileSync(`/proc/${own.pid}/stat`, 'utf8'), fields = raw.slice(raw.lastIndexOf(')') + 2).split(' '); return fields[19] === own.birth && !['Z', 'X'].includes(fields[0]); } catch (e) { if (e.code === 'ENOENT') return false; throw e; } };
+  const deadline = Date.now() + 1000; while (alive() && Date.now() < deadline) await delay(10);
+  assert.equal(alive(), false, 'actual orphan process is stopped, not just a written marker');
+});
+
+test('R53 tmux handoff refuses unmatched ancestry without killing the proved private server', async t => {
+  const f = await flowRehearsal(t, { corruption: 'extra-handoff' });
+  await f.harness().install(); const began = Date.now();
+  await assert.rejects(f.harness().run(), { code: 'child_drain_unproved' });
+  const server = JSON.parse(readFileSync(join(f.m.runRoot, 'flow.json'))).server;
+  const raw = readFileSync(`/proc/${server.pid}/stat`, 'utf8'), fields = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
+  assert.equal(fields[19], server.birth); assert.ok(!['Z', 'X'].includes(fields[0]), 'durable candidate is preserved on failed handoff');
+  const journal = JSON.parse(readFileSync(join(f.m.runRoot, 'journal.json')));
+  assert.equal(journal.children.length, 1); assert.ok(journal.threadIntent);
+  await assert.rejects(f.harness().cleanup(), { code: 'child_drain_unproved' });
+  await delay(Math.max(0, 2300 - (Date.now() - began)));
+  assert.ok(existsSync(join(f.m.runRoot, 'handoff-extra.ended')), 'unmatched finite descendant retired before fixture cleanup');
 });
 
 // Fix round 1: prepare only; execution needs the new fix1 build-box permit.
