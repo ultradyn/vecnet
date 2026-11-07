@@ -213,7 +213,11 @@ function mkdirPrivate(p, made) {
 }
 function properties(raw) {
   const result = {};
-  for (const block of raw.trim().split(/\n\n+/)) { const row = Object.fromEntries(block.split('\n').map(s => { const at = s.indexOf('='); return [s.slice(0, at), s.slice(at + 1)]; })); if (!row.Id || result[row.Id]) fail('manager_unknown'); result[row.Id] = row; }
+  for (const block of raw.trim().split(/\n\n+/)) {
+    const pairs = block.split('\n').map(s => { const at = s.indexOf('='); if (at < 1) fail('manager_unknown'); return [s.slice(0, at), s.slice(at + 1)]; });
+    if (!unique(pairs.map(([key]) => key))) fail('manager_unknown');
+    const row = Object.fromEntries(pairs); if (!row.Id || result[row.Id]) fail('manager_unknown'); result[row.Id] = row;
+  }
   return result;
 }
 function birth(pid) {
@@ -306,7 +310,7 @@ export function createHarness(raw, ports = {}) {
     }
   };
   const system = async (...args) => call(m.tools.systemctl, ['--user', ...args]);
-  const states = async () => properties((await system('show', '--property=Id', '--property=MainPID', '--property=LoadState', '--property=ActiveState', '--property=SubState', '--property=UnitFileState', '--property=DropInPaths', ...plan.units, 'vecnet-launcher.service')).stdout);
+  const states = async () => properties((await system('show', '--property=Id', '--property=MainPID', '--property=LoadState', '--property=ActiveState', '--property=SubState', '--property=UnitFileState', '--property=Job', '--property=DropInPaths', ...plan.units, 'vecnet-launcher.service')).stdout);
   const lifecyclePath = join(m.runRoot, 'lifecycle.lock');
   function checkLifecycle() {
     lifecycleGuard?.(); resourceGuard?.();
@@ -492,7 +496,11 @@ export function createHarness(raw, ports = {}) {
       if (present(dir) && readdirSync(dir).length) fail('preexisting_consumer');
     }
     const units = await states();
-    for (const unit of plan.units) { const s = units[unit]; if (!s || s.ActiveState !== 'inactive' || !['disabled', 'static', 'not-found'].includes(s.UnitFileState) || s.DropInPaths) fail('preexisting_consumer'); }
+    for (const unit of plan.units) {
+      const s = units[unit], absent = s?.LoadState === 'not-found' && s.UnitFileState === '';
+      const prior = s?.LoadState === 'loaded' && ['disabled', 'static'].includes(s.UnitFileState);
+      if ((!absent && !prior) || s.ActiveState !== 'inactive' || s.SubState !== 'dead' || s.MainPID !== '0' || s.Job !== '' || s.DropInPaths !== '') fail('preexisting_consumer');
+    }
     for (const g of Object.values(m.generations)) if (present(g.binary) || present(g.root)) fail('install_collision');
     for (const p of plan.inventory.filter(p => p !== lifecyclePath && p.endsWith('.lock') && present(p))) { privatePath(p); if ((await call(m.tools.flock, ['--nonblock', p, '/usr/bin/true'], { okay: [0, 1] })).code !== 0) fail('preexisting_consumer'); }
     for (const p of [plan.paths.template, plan.paths.installation, plan.paths.current]) {

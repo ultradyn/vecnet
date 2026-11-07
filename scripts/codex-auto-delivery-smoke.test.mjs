@@ -178,7 +178,7 @@ fs.writeFileSync(p.join(process.env.HOME,'receipt.json'),JSON.stringify({home:pr
 const share=p.join(home,'.local/share/vecnet-launcher'), manifest=p.join(share,'delivery.json');
 if(args.includes('show')) for(const unit of args.filter(a=>a.endsWith('.service'))){
  const loaded=fs.existsSync(p.join(home,'.config/systemd/user/vecnet-delivery@.service'));
- const row={Id:unit,MainPID:'0',LoadState:loaded?'loaded':'not-found',ActiveState:'inactive',SubState:'dead',UnitFileState:loaded?'disabled':'not-found',DropInPaths:''};
+ const row={Id:unit,MainPID:'0',LoadState:loaded?'loaded':'not-found',ActiveState:'inactive',SubState:'dead',UnitFileState:loaded?'disabled':'',Job:'',DropInPaths:''};
  if(args.includes('--property=ExecStart')){const m=JSON.parse(fs.readFileSync(manifest)),slug=unit.slice('vecnet-delivery@'.length,-'.service'.length);
  row.ExecStart='{ path='+m.binary+' ; argv[]='+m.binary+' codex deliver --hub-id '+slug+' ; ignore_errors=no ; }';row.UMask='0077';
  row.Environment='HOME='+home+' XDG_DATA_HOME='+p.join(home,'.local/share')+' XDG_RUNTIME_DIR='+process.env.FIXTURE_CLIENT_RUNTIME+' VECNET_BIN='+m.binary+' VECNET_CODEX_DELIVERY_ENTRY='+m.entry+' PATH='+m.path;}
@@ -518,4 +518,54 @@ test('fix1 I10 existing share mode 0755 refuses before private metadata or manag
   const before = exceptLifecycle(f.root); await assert.rejects(f.harness().install(), { code: 'unsafe_path' });
   assert.deepEqual(exceptLifecycle(f.root), before); assert.equal(lstatSync(share).mode & 0o777, 0o755);
   assert.ok(!existsSync(join(share, 'delivery.json'))); assert.ok(!existsSync(join(f.m.runRoot, 'journal.json')));
+});
+
+// R50 controller-xsm-manager-metadata.json (SHA256 143a2fa59304f3fe5cdb65896f3775e7b4bdb44dee46eb7eb30d8d7cf0cd4f9f):
+// both selected delivery units have this exact five-property tuple. MainPID and
+// DropInPaths below are explicit private-fixture additions, not new live evidence.
+const absentManagerState = { LoadState: 'not-found', ActiveState: 'inactive', SubState: 'dead', UnitFileState: '', Job: '' };
+function actualManagerFixture(f, edit = () => {}, duplicate = '') {
+  const units = [...planHarness(f.m).units, 'vecnet-launcher.service'];
+  const rows = units.map(Id => ({ Id, MainPID: '0', ...absentManagerState, DropInPaths: '' })); edit(rows);
+  const calls = join(f.manager, 'selected-argv.json');
+  writeFileSync(f.m.tools.systemctl, `#!${process.execPath}
+const fs=require('node:fs'),args=process.argv.slice(2),rows=${JSON.stringify(rows)};
+fs.writeFileSync(${JSON.stringify(calls)},JSON.stringify(args),{mode:384});
+for(const unit of args.filter(a=>a.endsWith('.service'))){const row=rows.find(r=>r.Id===unit);if(!row)continue;
+process.stdout.write(Object.entries(row).map(([k,v])=>k+'='+v).join('\\n')+${JSON.stringify(duplicate ? '\n' + duplicate : '')}+'\\n\\n');}
+`, { mode: 0o700 });
+  return calls;
+}
+test('fix1 N1 real absent manager unit accepts empty UnitFileState', async t => {
+  const f = rehearsal(t), calls = actualManagerFixture(f), h = f.harness();
+  assert.deepEqual(await h.preflight(), { stage: 'preflight', code: 'ready' });
+  const argv = JSON.parse(readFileSync(calls));
+  assert.ok(argv.includes('--property=Job')); assert.ok(argv.includes('--property=DropInPaths'));
+  assert.deepEqual(argv.filter(a => a.endsWith('.service')), [...planHarness(f.m).units, 'vecnet-launcher.service']);
+  assert.ok(!existsSync(join(f.m.runRoot, 'journal.json')));
+  assert.ok(!existsSync(planHarness(f.m).paths.template)); assert.deepEqual(JSON.parse(readFileSync(f.trace)), []);
+});
+test('fix1 N1 absent-manager allowance refuses unknown live dropin job and ambiguous states', async t => {
+  const cases = [
+    ['unknown load', r => { r[0].LoadState = 'error'; }], ['missing load', r => { delete r[0].LoadState; }],
+    ['loaded empty file state', r => { r[0].LoadState = 'loaded'; }], ['transient file state', r => { r[0].UnitFileState = 'transient'; }],
+    ['invented not-found file state', r => { r[0].UnitFileState = 'not-found'; }], ['missing file state', r => { delete r[0].UnitFileState; }],
+    ['live active', r => { r[0].ActiveState = 'active'; }], ['missing active', r => { delete r[0].ActiveState; }],
+    ['unknown substate', r => { r[0].SubState = 'exited'; }], ['missing substate', r => { delete r[0].SubState; }],
+    ['live PID', r => { r[0].MainPID = '12345'; }], ['dropin', r => { r[0].DropInPaths = '/fixture/foreign.conf'; }],
+    ['missing dropins', r => { delete r[0].DropInPaths; }], ['queued job', r => { r[0].Job = '17 /org/freedesktop/systemd1/job/17'; }],
+    ['missing job', r => { delete r[0].Job; }], ['missing selected unit', r => { r.splice(1, 1); }],
+    ['loaded disabled queued job', r => { Object.assign(r[0], { LoadState: 'loaded', UnitFileState: 'disabled', Job: '17 /org/freedesktop/systemd1/job/17' }); }],
+    ['loaded disabled unknown load', r => { Object.assign(r[0], { LoadState: 'unknown', UnitFileState: 'disabled' }); }],
+    ['loaded disabled unknown substate', r => { Object.assign(r[0], { LoadState: 'loaded', UnitFileState: 'disabled', SubState: 'unknown' }); }],
+  ];
+  for (const [name, edit] of cases) await t.test(name, async t => {
+    const f = rehearsal(t); actualManagerFixture(f, edit);
+    await assert.rejects(f.harness().preflight(), { code: 'preexisting_consumer' });
+    assert.ok(!existsSync(join(f.m.runRoot, 'journal.json'))); assert.deepEqual(JSON.parse(readFileSync(f.trace)), []);
+  });
+  await t.test('duplicate property is ambiguous', async t => {
+    const f = rehearsal(t); actualManagerFixture(f, () => {}, 'Job=');
+    await assert.rejects(f.harness().preflight(), { code: 'manager_unknown' });
+  });
 });
