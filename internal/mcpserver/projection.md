@@ -91,3 +91,26 @@ wording, with the existing sending-guide hint where applicable. They never copy
 `SchemaError.Message`, whose library-generated text can include argument values.
 Whole-response and diagnostic canaries cover malformed timestamp and ID strings
 both below and above 64 bytes, as well as the existing composite-value cases.
+
+Onboarding adds three tools to operator discovery only. The peer catalog stays
+at **21,276 bytes** with its existing **23,403-byte** total budget, and all
+existing per-tool pins remain unchanged. The operator catalog measures
+**26,342 bytes**, pinned with a 10% allowance at **28,976 bytes**. Its additions
+have independent 15% allowances:
+
+| Tool | Achieved bytes | Budget bytes | Description bytes |
+| --- | ---: | ---: | ---: |
+| `vecnet_agent_kinds` | 471 | 541 | 185 |
+| `vecnet_agent_add` | 1,977 | 2,273 | 210 |
+| `vecnet_agent_status` | 2,615 | 3,007 | 207 |
+
+Onboarding property descriptions are at most 64 bytes and stay scoped to these
+tools. The projection preserves operator-only discovery and calls, read-only
+annotations, the browser handoff without state changes, secret-free results,
+and the identity and connector cautions. No onboarding call validator or
+handler changes. The independently captured pre-diet input and output fixtures
+are documented in `testdata/validation-onboarding-before-projection.README.md`.
+Both catalog views receive property and schema checks. Current and legacy
+protocol wire canaries check full validation responses and diagnostics,
+including unknown property names, malformed request IDs, scalar and composite
+schema failures, stale specs and connector field errors.

@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-07: project the three operator onboarding MCP tools with plain descriptions, frozen call/output equivalence fixtures, separate operator discovery budgets and validation redaction checks (`internal/mcpserver`).
 - 2026-11-07: merge master into build/agent-onboarding for PR #50, preserving per-kind onboarding and MCP/CLI tools alongside peer lifecycle/invite cards, Settings, notices and read receipts; migrations remain unique through 0026 (no onboarding migration); merged UI measured at 553,752 bytes with a 544 KiB cap (`internal/httpapi/ui_test.go`).
 - 2026-11-07: complete merged MCP peer-tool discovery and schema budgets, preserve duplicate-member handling during timestamp normalization, prevent validation-value echoes, and clarify inbox head and MCP Events status (internal/mcpserver).
 - 2026-11-07: npm releases use matching `vX.Y.Z` tags, Linux x64/ARM64 package gates and GitHub OIDC in `.github/workflows/release.yml`; `just release` targets the `gh` remote, and the package homepage is `https://vecnet.ai` (`RELEASING.md`).

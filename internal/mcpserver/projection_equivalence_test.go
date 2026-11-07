@@ -44,6 +44,21 @@ func TestProjectionCallValidationEquivalent(t *testing.T) {
 		}
 		before[name] = doc
 	}
+	// Onboarding inputs were captured independently from pre-diet 49e0cd5.
+	raw, err = os.ReadFile("testdata/validation-onboarding-before-projection.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onboarding map[string]schema
+	if err := json.Unmarshal(raw, &onboarding); err != nil {
+		t.Fatal(err)
+	}
+	for name, doc := range onboarding {
+		if _, exists := before[name]; exists {
+			t.Fatalf("onboarding fixture overwrites frozen baseline for %s", name)
+		}
+		before[name] = doc
+	}
 	const peer = "peer_00000000000000000000000001"
 	const message = "msg_00000000000000000000000001"
 	const thread = "thr_00000000000000000000000001"
@@ -51,6 +66,7 @@ func TestProjectionCallValidationEquivalent(t *testing.T) {
 	const delivery = "dly_00000000000000000000000001"
 	const send = `{"idempotency_key":"key-1","priority":"wake_idle","content":{"text":"hello"},"recipients":["` + peer + `"]}`
 	const reply = `{"message_id":"` + message + `","text":"hello","priority":"hold","idempotency_key":"reply-1"}`
+	const agentAdd = `{"kind":"session","spec_version":"v1","request_id":"setup-1","inputs":{}}`
 	type cases struct{ valid, invalid []string }
 	table := map[string]cases{
 		"vecnet_send": {
@@ -95,12 +111,38 @@ func TestProjectionCallValidationEquivalent(t *testing.T) {
 		}, []string{`{"peer_id":1,"action":"disable"}`, `{"peer_id":"` + peer + `","action":false}`, `{"peer_id":"` + peer + `","action":"disable","unexpected":true}`}},
 		"vecnet_peer_invite_get":    {[]string{`{"peer_id":"` + peer + `"}`, `{"peer_id":"bad"}`}, []string{`{"peer_id":1}`, `{"peer_id":"` + peer + `","unexpected":true}`}},
 		"vecnet_peer_invite_revoke": {[]string{`{"peer_id":"` + peer + `"}`, `{"peer_id":"bad"}`}, []string{`{"peer_id":null}`, `{"peer_id":"` + peer + `","unexpected":true}`}},
-		"vecnet_groups":             {[]string{`{}`}, []string{`{"limit":1}`}},
-		"vecnet_group_create":       {[]string{`{"members":["` + peer + `"]}`}, []string{`{"members":[]}`, `{"members":["bad"]}`}},
-		"vecnet_group_add":          {[]string{`{"group_id":"` + group + `","members":["` + peer + `"]}`}, []string{`{"group_id":"` + group + `","members":[]}`}},
-		"vecnet_whoami":             {[]string{`{}`}, []string{`{"as":"` + peer + `"}`}},
-		"vecnet_blob_put":           {[]string{`{"data_base64":"aGk=","media_type":"text/plain"}`, `{"data_base64":"","media_type":"text/plain","ttl_seconds":0}`}, []string{`{"data_base64":"aGk=","media_type":"text/plain","ttl_seconds":-1}`, `{"data_base64":"aGk=","media_type":"text/plain","ttl_seconds":2147483649}`}},
-		"vecnet_blob_get":           {[]string{`{"sha256":"` + strings.Repeat("a", 64) + `"}`, `{"sha256":"bad","offset":0,"limit":131072}`}, []string{`{"sha256":"bad","offset":-1}`, `{"sha256":"bad","limit":131073}`}},
+		"vecnet_agent_kinds":        {[]string{`{}`}, []string{`{"as":"` + peer + `"}`}},
+		"vecnet_agent_add": {[]string{
+			agentAdd,
+			withField(agentAdd, "kind", `"launcher"`), withField(agentAdd, "kind", `"openclaw"`),
+			withField(agentAdd, "kind", `"pagchat-bot"`), withField(agentAdd, "kind", `"grokbot"`),
+			withField(agentAdd, "kind", `"dot"`),
+			withField(agentAdd, "inputs", `{"name":"Agent","name_open":true,"enrol_ttl_seconds":0,"principal_id":"principal","connector_name":"vecnet-helper","skip_mcp":false}`),
+			withField(agentAdd, "inputs", `{"enrol_ttl_seconds":604800}`),
+			// Semantic checks and request-ID syntax remain in the handler/precheck.
+			withField(agentAdd, "request_id", `"bad request id"`),
+			withField(agentAdd, "spec_version", `"stale"`),
+		}, []string{
+			withField(agentAdd, "kind", `"unknown"`), withField(agentAdd, "spec_version", `""`),
+			withField(agentAdd, "request_id", `false`), withField(agentAdd, "inputs", `null`),
+			withField(agentAdd, "inputs", `{"enrol_ttl_seconds":-1}`),
+			withField(agentAdd, "inputs", `{"enrol_ttl_seconds":604801}`),
+			withField(agentAdd, "inputs", `{"enrol_ttl_seconds":1.5}`),
+			withField(agentAdd, "inputs", `{"name_open":"true"}`),
+			withField(agentAdd, "inputs", `{"name":{}}`),
+			withField(agentAdd, "inputs", `{"principal_id":1}`),
+			withField(agentAdd, "inputs", `{"connector_name":false}`),
+			withField(agentAdd, "inputs", `{"skip_mcp":1}`),
+			withField(agentAdd, "inputs", `{"webhook_key":"forbidden"}`),
+			withField(agentAdd, "as", `"`+peer+`"`),
+		}},
+		"vecnet_agent_status": {[]string{`{"request_id":"setup-1"}`, `{"request_id":"bad request id"}`}, []string{`{"request_id":null}`, `{"request_id":"setup-1","as":"` + peer + `"}`}},
+		"vecnet_groups":       {[]string{`{}`}, []string{`{"limit":1}`}},
+		"vecnet_group_create": {[]string{`{"members":["` + peer + `"]}`}, []string{`{"members":[]}`, `{"members":["bad"]}`}},
+		"vecnet_group_add":    {[]string{`{"group_id":"` + group + `","members":["` + peer + `"]}`}, []string{`{"group_id":"` + group + `","members":[]}`}},
+		"vecnet_whoami":       {[]string{`{}`}, []string{`{"as":"` + peer + `"}`}},
+		"vecnet_blob_put":     {[]string{`{"data_base64":"aGk=","media_type":"text/plain"}`, `{"data_base64":"","media_type":"text/plain","ttl_seconds":0}`}, []string{`{"data_base64":"aGk=","media_type":"text/plain","ttl_seconds":-1}`, `{"data_base64":"aGk=","media_type":"text/plain","ttl_seconds":2147483649}`}},
+		"vecnet_blob_get":     {[]string{`{"sha256":"` + strings.Repeat("a", 64) + `"}`, `{"sha256":"bad","offset":0,"limit":131072}`}, []string{`{"sha256":"bad","offset":-1}`, `{"sha256":"bad","limit":131073}`}},
 		// Exactly-one and base64 decoding are handler/precheck rules as before.
 		"vecnet_set_avatar":   {[]string{`{}`, `{"data_base64":"aGk="}`, `{"url":"https://example.invalid/a.png"}`, `{"data_base64":"aGk=","url":"https://example.invalid/a.png"}`}, []string{`{"url":"http://example.invalid/a.png"}`, `{"data_base64":"` + strings.Repeat("a", 218457) + `"}`}},
 		"vecnet_clear_avatar": {[]string{`{}`, `{"as":"` + peer + `"}`}, []string{`{"as":"bad"}`}},

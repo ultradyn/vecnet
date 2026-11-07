@@ -13,8 +13,16 @@ import (
 // Measure the compact tools/list result a peer actually receives, including
 // annotations, output schemas, security schemes and the tools array wrapper.
 func TestToolsBudget(t *testing.T) {
+	t.Run("peer", func(t *testing.T) { testToolsBudget(t, false) })
+	t.Run("operator", func(t *testing.T) { testToolsBudget(t, true) })
+}
+
+func testToolsBudget(t *testing.T, operator bool) {
 	env := testhub.Start(t)
 	_, secret := env.NewPeer("session", "schema budget")
+	if operator {
+		secret = env.OperatorSecret
+	}
 	status, r := rpc(t, env, secret, "tools/list", nil)
 	if status != 200 || r.Error != nil {
 		t.Fatalf("tools/list: HTTP %d, error %+v", status, r.Error)
@@ -32,7 +40,11 @@ func TestToolsBudget(t *testing.T) {
 	t.Logf("tools/list: %d bytes", len(compact))
 	// Round four integrates master's three added peer tools. Keep the original
 	// 23 per-tool pins and freeze the measured merged catalog independently.
-	const achievedTotal = 21276
+	achievedTotal := 21276
+	// Keep the peer total fixed and pin the operator additions separately.
+	if operator {
+		achievedTotal += 5066 // Three tool entries and their array separators.
+	}
 	if budget := achievedTotal * 110 / 100; len(compact) > budget {
 		t.Errorf("tools/list: %d bytes exceeds budget %d (achieved %d + 10%%)", len(compact), budget, achievedTotal)
 	}
@@ -49,6 +61,11 @@ func TestToolsBudget(t *testing.T) {
 		"vecnet_clear_avatar": 459, "vecnet_guide": 1534,
 		"vecnet_peer_lifecycle": 634, "vecnet_peer_invite_get": 468,
 		"vecnet_peer_invite_revoke": 495,
+	}
+	if operator {
+		achieved["vecnet_agent_kinds"] = 471
+		achieved["vecnet_agent_add"] = 1977
+		achieved["vecnet_agent_status"] = 2615
 	}
 	if len(result.Tools) != len(achieved) {
 		t.Errorf("tool budget coverage: listed=%d pinned=%d", len(result.Tools), len(achieved))
@@ -84,8 +101,16 @@ var selfExplanatoryProperties = map[string]bool{
 }
 
 func TestProjectedProperties(t *testing.T) {
+	t.Run("peer", func(t *testing.T) { testProjectedProperties(t, false) })
+	t.Run("operator", func(t *testing.T) { testProjectedProperties(t, true) })
+}
+
+func testProjectedProperties(t *testing.T, operator bool) {
 	env := testhub.Start(t)
 	_, secret := env.NewPeer("session", "schema wording")
+	if operator {
+		secret = env.OperatorSecret
+	}
 	status, r := rpc(t, env, secret, "tools/list", nil)
 	if status != 200 || r.Error != nil {
 		t.Fatalf("tools/list: HTTP %d, error %+v", status, r.Error)
