@@ -1,0 +1,4 @@
+{
+  "grok": "/ui/#add-agent?connector_name=vecnet-custom-1&kind=grokbot&name=Helper+Bot&request_id=frag-grok&skip_mcp=true",
+  "legacy": "/ui/#add-agent?enrol_ttl_seconds=3600&kind=session&name=Suggested&name_open=true&principal_id=prn_handoff&request_id=frag-legacy"
+}

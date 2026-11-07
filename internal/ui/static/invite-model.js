@@ -158,14 +158,58 @@ export function specIssue(spec) {
   return null;
 }
 
-// addAgentPrefill reads #add-agent?kind=&name=&request_id=. It never submits.
+// Only the safe inputs emitted by MCP's agentWebPath may cross the fragment
+// boundary. The selected hub spec must also accept them before they are used.
+const PREFILL_TYPES = {
+  name: 'string', connector_name: 'string', skip_mcp: 'boolean',
+  name_open: 'boolean', enrol_ttl_seconds: 'integer', principal_id: 'string',
+};
+
+// addAgentPrefill reads #add-agent and typed safe options. It never submits.
 export function addAgentPrefill(hash) {
   const m = /^#add-agent(?:\?(.*))?$/.exec(String(hash || ''));
   if (!m) return null;
   const q = new URLSearchParams(m[1] || '');
   const prefill = { kind: q.get('kind') || '', name: q.get('name') || '', requestId: q.get('request_id') || '' };
+  for (const [name, type] of Object.entries(PREFILL_TYPES)) {
+    if (!q.has(name)) continue;
+    const raw = q.get(name);
+    if (type === 'boolean') {
+      if (raw === 'true' || raw === 'false') prefill[name] = raw === 'true';
+    } else if (type === 'integer') {
+      if (/^-?\d+$/.test(raw) && Number.isSafeInteger(Number(raw))) prefill[name] = Number(raw);
+    } else prefill[name] = raw;
+  }
   if (q.get('recover') === '1') prefill.recover = true;
   return prefill;
+}
+
+// Ignore unknown, human-only, mistyped or out-of-contract values without
+// turning an untrusted link into a form error. No defaults come from the URL.
+export function prefillValues(spec, prefill) {
+  const out = {};
+  if (!spec || !prefill || (prefill.kind && prefill.kind !== spec.kind)) return out;
+  for (const f of spec.fields || []) {
+    if (!Object.hasOwn(PREFILL_TYPES, f.name) || f.human_only || f.type !== PREFILL_TYPES[f.name]) continue;
+    const value = prefill[f.name];
+    if (f.type === 'boolean') {
+      if (typeof value === 'boolean') out[f.name] = value;
+    } else if (f.type === 'integer') {
+      if (!Number.isSafeInteger(value)) continue;
+      if (f.minimum != null && value < f.minimum) continue;
+      if (f.maximum != null && value > f.maximum) continue;
+      out[f.name] = value;
+    } else if (typeof value === 'string') {
+      const text = value.trim();
+      if (f.min_length != null && [...text].length < f.min_length) continue;
+      if (f.max_length != null && [...text].length > f.max_length) continue;
+      if (f.pattern && !matchesPattern(f.pattern, text)) continue;
+      if (f.enum && !f.enum.includes(text)) continue;
+      if (f.name === 'connector_name' && connectorOverrideError(text)) continue;
+      out[f.name] = text;
+    }
+  }
+  return out;
 }
 
 export function usableRequestId(id) {

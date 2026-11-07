@@ -10,7 +10,7 @@ import {
   BEARER_CONFIRM, BEARER_WARN, DEFAULT_TTL, GATEWAY_NOTE, QUOTA_NOTE,
   SKIP_MCP_HELP, SKIP_MCP_LABEL, TTLS, acceptCompletion, authorizePrompt, beginLoad, applyLoad, clientIssues,
   connectorDefault, connectorOverrideError, dotInstructions, emptyRegistry, failLoad, firstLinkExpiry, freshRequestId, humanOutput, kindsFrom,
-  linkPanel, mustConfirmBearerRevoke, outcomeOf, presentError, specIssue, statusSafe, submitBody, submitGate,
+  linkPanel, mustConfirmBearerRevoke, outcomeOf, prefillValues, presentError, specIssue, statusSafe, submitBody, submitGate,
   usableRequestId,
 } from './invite-model.js';
 
@@ -260,11 +260,10 @@ export function openInvite(ctx, onCreated, opener, prefill) {
     const rebuilt = paintKindOptions(kinds);
     if (kinds.length) kindSlot.removeAttribute('hidden');
     else kindSlot.setAttribute('hidden', '');
-    if (!usedPrefill && kinds.length) {
+    const applyPrefill = !usedPrefill && kinds.length;
+    if (applyPrefill) {
       usedPrefill = true;
-      if (prefill && prefill.name && !name.value) name.value = prefill.name;
       if (prefill && prefill.kind && kinds.includes(prefill.kind)) kind.value = prefill.kind;
-      else if (prefill && prefill.kind) err.textContent = 'That kind is not in the hub registry.';
       else kind.value = kinds[0];
     } else if (rebuilt && previous && kinds.includes(previous)) kind.value = previous;
     else if (rebuilt && kinds[0]) kind.value = kinds[0];
@@ -294,6 +293,22 @@ export function openInvite(ctx, onCreated, opener, prefill) {
       fieldsHost.replaceChildren(h('p', { class: 'err', role: 'alert', text: why }));
       create.disabled = true;
       return;
+    }
+
+    if (applyPrefill) {
+      const controls = { name, name_open: openName, enrol_ttl_seconds: ttl, principal_id: principal, connector_name: connector, skip_mcp: skip };
+      for (const [field, value] of Object.entries(prefillValues(spec, prefill))) {
+        const control = controls[field];
+        if (control.type === 'checkbox') control.checked = value;
+        else if (field !== 'name' || !name.value) {
+          // MCP accepts any lifetime within the hub bounds, including ones
+          // outside the three convenient choices in the ordinary form.
+          if (field === 'enrol_ttl_seconds' && ![...ttl.querySelectorAll('option')].some(o => o.value === String(value))) {
+            ttl.append(h('option', { value: String(value), text: value + ' seconds' }));
+          }
+          control.value = String(value);
+        }
+      }
     }
 
     const kids = [];

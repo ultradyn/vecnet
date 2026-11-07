@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"regexp"
 	"strings"
@@ -520,10 +521,23 @@ func TestAgentOnboardMCPSafeRetry(t *testing.T) {
 	})
 
 	t.Run("(t7 I2)", func(t *testing.T) {
+		// Shared with the Node form/POST regressions, so they consume paths
+		// verified against actual vecnet_agent_add results, not a URL builder.
+		raw, err := os.ReadFile("testdata/agent-web-handoff.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var paths map[string]string
+		if err := json.Unmarshal(raw, &paths); err != nil {
+			t.Fatal(err)
+		}
 		grok := mcpToolOK(t, env, env.OperatorSecret, modern(), "vecnet_agent_add", agentAddArgs("grokbot", "frag-grok", "Helper Bot", map[string]any{
 			"connector_name": "vecnet-custom-1",
 			"skip_mcp":       true,
 		}))
+		if grok["web_path"] != paths["grok"] {
+			t.Fatal("MCP Grok handoff differs from the web form fixture")
+		}
 		q := addAgentQuery(t, grok["web_path"].(string))
 		if q.Get("kind") != "grokbot" || q.Get("name") != "Helper Bot" || q.Get("request_id") != "frag-grok" {
 			t.Fatal("fragment dropped kind, name, or request_id")
@@ -540,6 +554,9 @@ func TestAgentOnboardMCPSafeRetry(t *testing.T) {
 			"enrol_ttl_seconds": 3600,
 			"principal_id":      prn,
 		}))
+		if legacy["web_path"] != strings.ReplaceAll(paths["legacy"], "prn_handoff", url.QueryEscape(prn)) {
+			t.Fatal("MCP legacy handoff differs from the web form fixture")
+		}
 		lq := addAgentQuery(t, legacy["web_path"].(string))
 		if lq.Get("kind") != "session" || lq.Get("name") != "Suggested" || lq.Get("request_id") != "frag-legacy" {
 			t.Fatal("fragment dropped kind, name, or request_id")

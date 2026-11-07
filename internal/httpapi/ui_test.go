@@ -25,8 +25,10 @@ import (
 // stylesheet and local appearance, about 106 KB, put the UI at about 483 KB;
 // to 512 KiB on 2026-11-07 for the peer page's Invite card (#67), about 13 KB,
 // which put the UI at about 496 KB; to 544 KiB on 2026-11-07 for the
-// merge of build/agent-onboarding with master, measured at 553,752 bytes).
-const uiMaxBytes = 544 << 10
+// merge of build/agent-onboarding with master, measured at 553,752 bytes;
+// to 560 KiB on 2026-11-07 for validated MCP handoff prefill, measured at
+// 559,020 bytes).
+const uiMaxBytes = 560 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)

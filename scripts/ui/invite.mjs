@@ -647,13 +647,16 @@ try {
     assert(!(await page.content()).includes(FAKE_KEY) && !(await page.content()).includes(ROUTINE), 'a late response left a secret on the page');
 
     const postsAtLink = agentPosts();
-    await page.evaluate(() => { location.hash = '#add-agent?kind=grokbot&name=Helper%20Bot&request_id=req-deep-1'; });
+    await page.evaluate(() => { location.hash = '#add-agent?kind=grokbot&name=Helper%20Bot&request_id=req-deep-1&connector_name=vecnet-custom-1&skip_mcp=true'; });
     await dlg.waitFor();
     await formReady();
     await page.waitForFunction(() => document.querySelector('#inv-kind')?.value === 'grokbot' && document.querySelector('#inv-name')?.value === 'Helper Bot');
     await page.waitForTimeout(400);
     assert(agentPosts() === postsAtLink, 'the deep link submitted on its own');
     assert(await dlg.locator('#inv-key').inputValue() === '' && await dlg.locator('#inv-url').inputValue() === '', 'the deep link filled a secret');
+    assert(await dlg.locator('#inv-skip').isChecked(), 'the deep link dropped Skip MCP');
+    assert(await dlg.locator('#inv-connector').inputValue() === 'vecnet-custom-1', 'the deep link dropped the connector override');
+    assert((await dlg.locator('#inv-prompt').innerText()).includes('vecnet-custom-1'), 'the deep link prompt used the default connector');
     await shotSafe('inv-g-deeplink');
     await page.setViewportSize({ width: 390, height: 844 });
     const grokWide = await dlg.evaluate(el => [...el.querySelectorAll('*')].filter(e => { const r = e.getBoundingClientRect(); return r.width && (r.left < 0 || r.right > 390); }).map(e => e.className || e.tagName));
@@ -663,11 +666,10 @@ try {
     grokMode = 'ok';
     await dlg.locator('#inv-url').fill(ROUTINE);
     await dlg.locator('#inv-key').fill(FAKE_KEY);
-    await dlg.locator('#inv-skip').check();
     const postsAtSkip = grokPosts.length;
     await dlg.getByRole('button', { name: 'Create Grok bot' }).click();
     await dlg.locator('.inv-status', { hasText: 'setup queued' }).waitFor();
-    assert(grokPosts.length === postsAtSkip + 1 && grokPosts.at(-1).request_id === 'req-deep-1' && grokPosts.at(-1).inputs.skip_mcp === true, `deep link submit ${JSON.stringify(grokPosts.at(-1))}`);
+    assert(grokPosts.length === postsAtSkip + 1 && grokPosts.at(-1).request_id === 'req-deep-1' && grokPosts.at(-1).inputs.skip_mcp === true && grokPosts.at(-1).inputs.connector_name === 'vecnet-custom-1', `deep link submit ${JSON.stringify(grokPosts.at(-1))}`);
     assert(/CLI bearer/.test(await dlg.innerText()) && await dlg.locator('#inv-start-link').count() === 0, 'Skip MCP still offered a link code');
     assert(await dlg.locator('.inv-connected').count() === 0, 'skip rendered a connected badge');
     assert(!(await page.content()).includes(FAKE_KEY), 'the skip result kept the key');
