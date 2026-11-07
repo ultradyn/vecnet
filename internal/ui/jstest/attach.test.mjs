@@ -620,11 +620,14 @@ const walk = (el, pred, out = []) => {
   return out;
 };
 
-test('a draft crosses its deadline on the hub clock: Send loses the ref and Re-upload starts a fresh grant', async () => {
-  // The hub clock runs three minutes ahead of this machine. A check against
-  // Date.now() would still see the file as live after the timer fires.
-  const skew = 180000;
-  const clock = () => Date.now() + skew;
+test('a draft crosses its deadline on the hub clock: Send loses the ref and Re-upload starts a fresh grant', async t => {
+  // Both clocks are fixed; the hub stays three minutes ahead of the browser.
+  // Advancing timers alone must not replace the hub's deadline check.
+  const browserNow = Date.parse('2026-11-06T10:00:00Z');
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: browserNow });
+  let hubNow = browserNow + 180000;
+  const clock = () => hubNow;
+  const advance = ms => { hubNow += ms; t.mock.timers.tick(ms); };
   const prev = globalThis.document;
   globalThis.document = { createElement: tag => new ChipEl(tag) };
   const file = { name: 'notes.txt', size: 4, type: 'text/plain' };
@@ -643,28 +646,34 @@ test('a draft crosses its deadline on the hub clock: Send loses the ref and Re-u
     },
   };
   let changes = 0;
+  let atts;
   try {
-    const atts = createAttachments({ api, now: clock, onChange: () => { changes++; } });
+    atts = createAttachments({ api, now: clock, onChange: () => { changes++; } });
     atts.add([file]);
-    await new Promise(r => setTimeout(r, 30));
+    await settle();
     assert.equal(atts.ready(), true, 'the upload is sendable before its deadline');
     assert.equal(atts.toAttachments().length, 1);
     const sentBefore = changes;
-    await new Promise(r => setTimeout(r, 900));
+    advance(249);
+    assert.equal(changes, sentBefore, 'the expiry timer has not fired before the deadline');
+    assert.equal(atts.ready(), true);
+    assert.equal(atts.toAttachments().length, 1);
+    advance(1);
     assert.ok(changes > sentBefore, 'crossing the deadline redraws the composer');
+    assert.ok(Date.now() < Date.parse(atts.items()[0].expires_at), 'the browser clock is still before expiry');
     assert.equal(atts.ready(), false, 'Send is blocked for the expired ref');
     assert.deepEqual(atts.toAttachments(), [], 'the expired ref is not sent');
     const [again] = walk(atts.el, e => e.tag === 'button' && e.textContent === 'Re-upload');
     assert.ok(again, 'the chip offers re-upload from the file it still holds');
     again.on.click.forEach(fn => fn());
-    await new Promise(r => setTimeout(r, 30));
+    await settle();
     assert.equal(files.length, 2);
     assert.equal(files[0], files[1], 're-upload uses the retained File');
     assert.ok(keys[0] && keys[1] && keys[0] !== keys[1], 'the new grant gets a fresh idempotency key');
     assert.equal(atts.ready(), true);
     assert.equal(atts.toAttachments()[0].blob_id.endsWith('2'), true);
-    atts.destroy();
   } finally {
+    if (atts) atts.destroy();
     globalThis.document = prev;
   }
 });
