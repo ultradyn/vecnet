@@ -878,7 +878,22 @@ func TestCodexAutoDeadlineChild(t *testing.T) {
 		case "probe":
 			fmt.Println(`{"loaded":true,"previous":"live"}`)
 		case "manager":
-			fmt.Println("not-found")
+			args := os.Args[i+2:]
+			if len(args) != 5 && len(args) != 6 {
+				os.Exit(98)
+			}
+			unit := args[len(args)-1]
+			if !strings.HasPrefix(unit, "vecnet-delivery@") || !strings.HasSuffix(unit, ".service") {
+				os.Exit(98)
+			}
+			switch {
+			case len(args) == 5 && strings.Join(args[:4], " ") == "--user show --property=LoadState --value":
+				fmt.Println("not-found")
+			case len(args) == 6 && strings.Join(args[:5], " ") == "--user show --property=ActiveState --property=SubState --property=Job":
+				fmt.Print("ActiveState=inactive\nSubState=dead\nJob=\n")
+			default:
+				os.Exit(98)
+			}
 		}
 		os.Exit(0)
 	}
@@ -949,7 +964,7 @@ func TestCodexAutoActiveProbeDeadline(t *testing.T) {
 			}
 			script := "#!/bin/sh\nexport GORACE=atexit_sleep_ms=0\ncase \"$1\" in\n--version) mode=version ;;\n--user) mode=manager ;;\n*) mode=\"$3\" ;;\nesac\nexec " + deliveryQuote(exe) + " -test.run=^TestCodexAutoDeadlineChild$ -- auto-deadline-child \"$mode\"\n"
 			deliveryWrite(t, filepath.Join(f.env["PATH"], "node"), script, 0700)
-			deliveryWrite(t, filepath.Join(f.env["PATH"], "systemctl"), script, 0700)
+			deliveryWrite(t, filepath.Join(f.env["PATH"], "systemctl"), "#!/bin/sh\nexport GORACE=atexit_sleep_ms=0\nexec "+deliveryQuote(exe)+" -test.run=^TestCodexAutoDeadlineChild$ -- auto-deadline-child manager \"$@\"\n", 0700)
 			var durableFD int = -1
 			if strings.Contains(scenario, "durable_owner") {
 				// Exercise real ensure/deliver: the new owner gets its own session

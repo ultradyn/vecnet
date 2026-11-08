@@ -265,7 +265,16 @@ async function fixture(t: TestContext, options: { hubs?: number; cap?: number } 
     assert.equal(failures.length, 0, 'owned fixture cleanup failed; private root retained');
   });
   // No real manager executable is ever delegated to, including unsupported calls.
-  privateFile(join(dirs.shims, 'systemctl'), '#!/bin/sh\ncase "$*" in *show*--value*) echo not-found; exit 0;; *) exit 1;; esac\n', 0o700);
+  // An absent unit also needs explicit inactivity proof before detached start.
+  privateFile(join(dirs.shims, 'systemctl'), `#!/bin/sh
+case "$#:$*" in
+  '5:--user show --property=LoadState --value vecnet-delivery@'*.service)
+    printf '%s\\n' not-found; exit 0;;
+  '6:--user show --property=ActiveState --property=SubState --property=Job vecnet-delivery@'*.service)
+    printf '%s\\n' ActiveState=inactive SubState=dead Job=; exit 0;;
+  *) exit 1;;
+esac
+`, 0o700);
   const preloadPath = join(root, 'preload.mjs'); privateFile(preloadPath, preload(root));
   privateFile(join(dirs.shims, 'node'), `#!/bin/sh\nexport XDG_CACHE_HOME=${sh(dirs.cache)} TMPDIR=${sh(dirs.tmp)}\nfor arg in "$@"; do\n if [ "$arg" = run ]; then exec ${sh(realpathSync(globalThis.process.execPath))} --import ${sh(preloadPath)} "$@"; fi\ndone\nexec ${sh(realpathSync(globalThis.process.execPath))} "$@"\n`, 0o700);
   fake = await startFakeCodexAppServer({ dir: join(root, 'f') });
