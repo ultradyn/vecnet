@@ -31,8 +31,10 @@ import (
 // transfers and retention, measured at 554,222 bytes; to 608 KiB on
 // 2026-11-07 merging R2 blobs and agent onboarding, measured at
 // 612,715 bytes); confirmed on 2026-11-07 after the DB/master merge,
-// measured at 612,715 bytes (smallest 16 KiB step above it: 608 KiB).
-const uiMaxBytes = 608 << 10
+// measured at 612,715 bytes (smallest 16 KiB step above it: 608 KiB);
+// to 624 KiB on 2026-11-08 for the sidebar search A refresh, about 21 KB
+// of search modules and CSS plus shell wiring.
+const uiMaxBytes = 624 << 10
 
 var (
 	scriptTag   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
