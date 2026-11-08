@@ -68,7 +68,7 @@ func (a *app) cmdLauncher(args []string) error {
 	spec := map[string]flagKind{}
 	switch args[0] {
 	case "setup":
-		spec = map[string]flagKind{"project": strFlag, "repo": strFlag, "base-ref": strFlag, "codex-home": strFlag, "model": strFlag, "effort": strFlag, "write": boolFlag, "force": boolFlag}
+		spec = map[string]flagKind{"backend": strFlag, "acp-command": strFlag, "acp-arg": multiFlag, "acp-provider": strFlag, "acp-mode": strFlag, "project": strFlag, "repo": strFlag, "base-ref": strFlag, "codex-home": strFlag, "model": strFlag, "effort": strFlag, "write": boolFlag, "force": boolFlag}
 	case "install":
 		spec = map[string]flagKind{"source": strFlag, "node": strFlag, "vecnet-bin": strFlag, "write": boolFlag, "enable": boolFlag, "start": boolFlag}
 	case "status", "check":
@@ -143,6 +143,52 @@ func (a *app) launcherSetup(p launcherPaths, o opts) error {
 	if !launcherAlias.MatchString(o.str("project")) {
 		return usageErr("--project must be an alias containing letters, numbers, dots, underscores or hyphens")
 	}
+	backendID := o.str("backend")
+	if backendID == "" {
+		backendID = "codex-app-server"
+	}
+	if backendID != "codex-app-server" && backendID != "acp" {
+		return usageErr("--backend must be codex-app-server or acp")
+	}
+	var acpPreset map[string]any
+	if backendID == "acp" {
+		for _, flag := range []string{"codex-home", "model", "effort"} {
+			if o.has(flag) {
+				return usageErr("--" + flag + " applies only to codex-app-server")
+			}
+		}
+		command := o.str("acp-command")
+		provider, mode := o.str("acp-provider"), o.str("acp-mode")
+		if provider == "" {
+			provider = "claude"
+		}
+		if mode == "" {
+			mode = "default"
+		}
+		if !filepath.IsAbs(command) || strings.ContainsAny(command, "\x00\r\n") || strings.Contains(strings.ToLower(provider+" "+filepath.Base(command)), "codex") || regexp.MustCompile(`(?i)bypass|full.access|accept.?edits|auto`).MatchString(mode) {
+			return usageErr("ACP requires an absolute non-Codex executable and an interactive ask mode")
+		}
+		command, err := launcherExecutable(command, a.getenv("PATH"))
+		if err != nil {
+			return usageErr("--acp-command must name an installed executable")
+		}
+		if strings.Contains(strings.ToLower(filepath.Base(command)), "codex") {
+			return usageErr("ACP must not use a Codex executable")
+		}
+		argv := append([]string{command}, o.all("acp-arg")...)
+		for _, arg := range argv {
+			if arg == "" || strings.ContainsRune(arg, 0) {
+				return usageErr("ACP arguments must be nonempty and contain no NUL")
+			}
+		}
+		acpPreset = map[string]any{"argv": argv, "provider": provider, "mode_id": mode}
+	} else {
+		for _, flag := range []string{"acp-command", "acp-arg", "acp-provider", "acp-mode"} {
+			if o.has(flag) {
+				return usageErr("--" + flag + " requires --backend acp")
+			}
+		}
+	}
 	repo, err := launcherDir(o.str("repo"), "--repo")
 	if err != nil {
 		return err
@@ -162,9 +208,11 @@ func (a *app) launcherSetup(p launcherPaths, o opts) error {
 	if home == "" {
 		home = filepath.Join(a.getenv("HOME"), ".codex")
 	}
-	home, err = launcherDir(home, "--codex-home")
-	if err != nil {
-		return err
+	if backendID == "codex-app-server" {
+		home, err = launcherDir(home, "--codex-home")
+		if err != nil {
+			return err
+		}
 	}
 	path, err := configPath(a.getenv)
 	if err != nil {
@@ -242,11 +290,17 @@ func (a *app) launcherSetup(p launcherPaths, o opts) error {
 	if o.str("project") == scratchAlias {
 		scratchAlias = "vecnet-scratch"
 	}
+	backendConfig := map[string]any{"codex_home": home, "workspace_root": filepath.Join(p.Data, "workspaces"), "presets": map[string]any{"default": preset}}
+	permissionModes := []string{"read-only", "ask", "auto", "full-access"}
+	if backendID == "acp" {
+		backendConfig = map[string]any{"workspace_root": filepath.Join(p.Data, "workspaces"), "presets": map[string]any{"default": acpPreset}}
+		permissionModes = []string{"ask"}
+	}
 	config := map[string]any{
 		"host": host, "hub": map[string]string{"url": profile.Hub, "credential_file": p.Credential}, "state_dir": p.State,
-		"backends": []any{map[string]any{"id": "codex-app-server", "module": "./backends/codex-app-server/index.ts", "config": map[string]any{"codex_home": home, "workspace_root": filepath.Join(p.Data, "workspaces"), "presets": map[string]any{"default": preset}}}},
+		"backends": []any{map[string]any{"id": backendID, "module": "./backends/" + backendID + "/index.ts", "config": backendConfig}},
 		"projects": map[string]any{o.str("project"): map[string]string{"repo_root": repo, "base_ref": ref}, scratchAlias: map[string]any{"repo_root": p.Data, "base_ref": "HEAD", "scratch": true}},
-		"policies": map[string]any{"default": map[string]any{"backends": []string{"codex-app-server"}, "projects": []string{o.str("project"), scratchAlias}, "permission_modes": []string{"read-only", "ask", "auto", "full-access"}}},
+		"policies": map[string]any{"default": map[string]any{"backends": []string{backendID}, "projects": []string{o.str("project"), scratchAlias}, "permission_modes": permissionModes}},
 	}
 	if !o.has("write") {
 		return a.emitValue(map[string]any{"write": false, "profile": p.Name, "peer_id": me.PeerID, "config_path": p.Config, "credential_file": p.Credential, "config": config})

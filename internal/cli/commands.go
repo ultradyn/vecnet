@@ -74,7 +74,8 @@ messaging:
   codex bind --thread UUID [--codex-home DIR] [--ttl DUR] [--idle-dormant DUR] [--attended] [--renew|--takeover]
        opt in to app-server delivery; ttl defaults to 24h (1h–168h); unattended needs -a never or auto reviewer
   codex unbind [--thread UUID] | codex bindings [--json] | codex status
-  launcher setup --project ALIAS --repo PATH --base-ref REF [--codex-home DIR] [--model M] [--effort E] [--write] [--force]
+  launcher setup --project ALIAS --repo PATH --base-ref REF [--backend codex-app-server|acp] [--write] [--force]
+       native: [--codex-home DIR] [--model M] [--effort E]; ACP: --acp-command PATH [--acp-arg ARG]… [--acp-provider claude] [--acp-mode default]
   launcher install [--source CHECKOUT] [--node PATH] [--vecnet-bin PATH] [--write] [--enable] [--start]
   launcher status | launcher check                 selected --net profile; setup/install preview unless --write
   threads [--limit N]

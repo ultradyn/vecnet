@@ -4,12 +4,18 @@ import { isAbsolute, basename } from 'node:path';
 import { definePlugin, MAX_TURN_INPUT_BYTES } from '../../backend.ts';
 import type { ActivityReport, Backend, BackendCapabilities, LaunchSpec, PluginContext, SessionHandle, SessionHooks,
   SessionRef, SessionState, TurnCursor, TurnEvent, TurnInput, SendMode, SendResult, SettleMode, SettleResult } from '../../backend.ts';
-import { scrubEnv } from '../../redact.ts';
 import { AcpRpc, object } from './rpc.ts';
 import type { RpcId } from './rpc.ts';
 import { CANCEL_OPTION, permissionRequest } from './permission.ts';
 import { allocate, workspaceModes, workspaceRoot } from './workspace.ts';
 import type { AcpLaunchSpec, Workspace } from './workspace.ts';
+
+// Plugins depend only on backend.ts and their own modules. Keep the process
+// environment fence local to this stdio owner rather than importing internals.
+function scrubEnv(env: Readonly<Record<string, string | undefined>>): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter(([key, value]) => value !== undefined &&
+    !/^(?:VECNET_.*|.*_(?:API_KEY|AUTH_TOKEN|BASE_URL|SECRET|TOKEN|PASSWORD))$/i.test(key))) as Record<string, string>;
+}
 
 export interface AcpPreset {
   /** Operator-pinned ACP executable and arguments, never a shell command. */
@@ -113,7 +119,7 @@ class AcpBackend implements Backend {
       owned.workspace = await allocate(spec, this.root, this.ctx, signal); this.save(owned);
       const preset = this.config.presets[spec.preset];
       if (signal?.aborted) throw new Error('acp_launch_aborted');
-      rpc = new AcpRpc(preset.argv, owned.workspace.path, scrubEnv({ ...process.env, ...spec.env }, []), this.ctx);
+      rpc = new AcpRpc(preset.argv, owned.workspace.path, scrubEnv({ ...process.env, ...spec.env }), this.ctx);
       const h = new AcpSession(owned, rpc, hooks, this);
       this.handles.set(spec.tag, h);
       const timeout = this.config.request_timeout_ms ?? 15000;
