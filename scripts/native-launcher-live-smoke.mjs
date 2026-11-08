@@ -103,6 +103,8 @@ try {
       const first = await until(async () => (await history()).find(m => m.sender === added.peer_id && m.kind === 'message' && m.content?.text?.trim() === 'VN_WEB_LAUNCH_OK'), 'first model reply');
       const session = running.job_status.output.session_ref;
       assert(session.backend === 'codex-app-server', 'wrong backend');
+      assert(session.extra.permission_mode === 'read-only', 'native permission mode differs from selection');
+      assert(typeof session.extra.model === 'string' && session.extra.model, 'native effective model was not reported');
       const rpc = await openCodexRpc({ codexHome: home, euid: process.geteuid(), log, timeoutMs: 5000 });
       try {
         const read = await rpc.call('thread/read', { threadId: session.id, includeTurns: false }, 5000);
@@ -127,7 +129,9 @@ try {
       await page.getByText('VN_WEB_FOLLOWUP_OK', { exact: true }).first().waitFor();
       await shot('launcher-native-live-thread');
       receipt = { pass: true, job: job.job_id, thread: job.thread_id, backend: session.backend, codex_thread: session.id,
-        workspace: session.extra.workspace, workspace_mode: workspaceMode, branch: session.extra.branch, statuses, service_restart: true, first: first.message_id, followup: second.message_id };
+        workspace: session.extra.workspace, workspace_mode: workspaceMode, branch: session.extra.branch,
+        model: session.extra.model, provider: session.extra.model_provider, effort: session.extra.effort, permission_mode: session.extra.permission_mode,
+        statuses, service_restart: true, first: first.message_id, followup: second.message_id };
     } finally {
       if (job) {
         const ended = (await history()).some(m => m.sender === launcherId && ['failed', 'succeeded', 'cancelled'].includes(m.job_status?.state));

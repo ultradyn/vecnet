@@ -300,7 +300,14 @@ export default definePlugin<CodexConfig>({
       presets: Object.entries(config.presets).map(([id, p]) => ({ id, provider: 'codex', model: p.model ?? 'configured default', ...(p.effort ? { effort: p.effort } : {}) })) };
     const backend: Backend = {
       id: 'codex-app-server', async capabilities() { return caps; },
-      async health() { try { const r = await rpc(); return { ok: true, version: r.version }; } catch { return { ok: false, version: 'unknown', degraded: ['Codex background daemon unreachable or unsupported'] }; } },
+      async health() {
+        // A standalone `launcher check` must not retain an idle socket and
+        // keep its CLI alive. Never close the shared session connection here.
+        let probe: CodexRpc | undefined;
+        try { probe = await openCodexRpc({ codexHome: home, euid: process.geteuid?.() ?? -1, log: ctx.log, timeoutMs: 5000 }); return { ok: true, version: probe.version }; }
+        catch { return { ok: false, version: 'unknown', degraded: ['Codex background daemon unreachable or unsupported'] }; }
+        finally { probe?.close(); }
+      },
       async launch(spec: LaunchSpec, hooks: SessionHooks, signal?: AbortSignal) {
         if (!/^vl-job_[A-Za-z0-9_]+$/.test(spec.tag) || spec.tag !== 'vl-' + spec.jobId || spec.branch !== 'launch/' + spec.jobId) throw new Error('Invalid launcher job identity');
         if (!Object.hasOwn(config.presets, spec.preset)) throw new Error('Unknown Codex preset');

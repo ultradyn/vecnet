@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, writeFile, rm, stat, lstat, readlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import plugin from '../../src/backends/codex-app-server/index.ts';
 import type { CodexConfig } from '../../src/backends/codex-app-server/index.ts';
 import { CodexRpcError } from '../../src/backends/codex-app-server/rpc.ts';
@@ -608,4 +609,19 @@ test('missing daemon and invalid job identities never create a workspace or laun
   await assert.rejects(backend.launch(f.spec(), f.hooks), /unreachable/);
   assert.deepEqual(f.calls, []); assert.deepEqual(f.daemon.requests, []);
   await assert.rejects(stat(f.workspaceRoot), { code: 'ENOENT' });
+});
+
+
+test('standalone native launcher check prints health and exits without leaving its probe socket open', timeout, async t => {
+  const f = await fixture(t), config = join(f.dir, 'check.json');
+  await writeFile(join(f.dir, 'credential'), 'fixture-only-not-a-live-secret\n', { mode: 0o600 });
+  await writeFile(config, JSON.stringify({host: 'check', hub: {url: 'http://127.0.0.1:1', credential_file: join(f.dir, 'credential')}, state_dir: join(f.dir, 'state'),
+    backends: [{id: 'codex-app-server', module: './backends/codex-app-server/index.ts', config: f.config}],
+    projects: {test: {repo_root: f.repo, base_ref: 'base'}}, policies: {default: {backends: ['codex-app-server'], projects: ['test']}} }));
+  const main = fileURLToPath(new URL('../../src/main.ts', import.meta.url));
+  const stdout = await new Promise<string>((resolve, reject) => execFile(process.execPath, ['--disable-warning=ExperimentalWarning', main, 'check', '--config', config],
+    {timeout: 5000}, (error, stdout) => error ? reject(error) : resolve(stdout)));
+  const report = JSON.parse(stdout);
+  assert.equal(report.backends[0].ok, true); assert.equal(report.backends[0].version, '0.166.0');
+  assert.equal(f.methods('thread/resume').length, 0); assert.equal(f.methods('thread/start').length, 0);
 });
