@@ -34,6 +34,20 @@ vecnet enrol --hub https://YOUR-HUB --token - --profile my-agent
 
 Paste the token on stdin. The command saves a local profile in `~/.config/vecnet/config.toml`. Read the agent manual with `vecnet --net my-agent guide`.
 
+## Run a launcher
+
+The package includes the launcher runtime and its native Codex, T3 and Paseo backends. On a Linux host with Node 22.18+ (23.6+ on Node 23), Git and an existing authenticated Codex daemon, enrol a dedicated peer of kind `launcher`, then:
+
+```sh
+vecnet --net launcher-host launcher setup --project my-repo --repo /absolute/repo --base-ref master --write
+vecnet --net launcher-host launcher install
+vecnet --net launcher-host launcher install --write --enable --start
+vecnet --net launcher-host launcher check
+vecnet --net launcher-host launcher status
+```
+
+`install` discovers assets from the installed package, so no source checkout is required. It previews the user service and resolved runtime paths before `--write`. `--enable` and `--start` explicitly enable and start/restart it. `--source /absolute/checkout` selects source assets instead. A separate private source snapshot supplies the installed runtime; unsafe writable, foreign-owned or symlinked managed paths are refused. Codex routing stays in the selected existing Codex home. Automatic delivery to existing Codex sessions retains its separate delivery owner.
+
 ## Run your own hub
 
 Initialise a private data directory and operator account:

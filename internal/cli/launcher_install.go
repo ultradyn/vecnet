@@ -3,10 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -72,6 +75,25 @@ func launcherSource(raw string) (string, error) {
 	if raw != "" {
 		return launcherDir(raw, "--source")
 	}
+	// npm wrappers exec the native binary inside their package. Start from that
+	// actual executable, so installed assets work outside any source checkout.
+	if executable, err := os.Executable(); err == nil {
+		if executable, err = filepath.EvalSymlinks(executable); err == nil {
+			for dir := filepath.Dir(executable); ; dir = filepath.Dir(dir) {
+				var metadata struct {
+					Launcher struct {
+						Entry string `json:"entry"`
+					} `json:"launcher"`
+				}
+				if launcherReadJSON(filepath.Join(dir, "BUILD_INFO.json"), &metadata) == nil && metadata.Launcher.Entry == "connectors/launcher/src/main.ts" {
+					return dir, nil
+				}
+				if filepath.Dir(dir) == dir {
+					break
+				}
+			}
+		}
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
@@ -89,6 +111,14 @@ func launcherSource(raw string) (string, error) {
 
 // Collect runtime sources, schemas and the unit, excluding tests and state.
 func launcherAssets(source string) (map[string][]byte, string, error) {
+	// Source is explicitly selected (or belongs to the installed executable).
+	// Copy it into a separately validated private namespace; never repair source
+	// ownership or mode. Package digests below bind its complete runtime graph.
+	trusted, err := os.OpenRoot(source)
+	if err != nil {
+		return nil, "", err
+	}
+	defer trusted.Close()
 	files := map[string][]byte{}
 	for _, root := range []string{"connectors/launcher/src", "connectors/launcher/schema", "connectors/launcher/package.json", "connectors/hub-client/src", "connectors/hub-client/package.json", "connectors/launcher/systemd/vecnet-launcher-profile.service.in"} {
 		err := filepath.WalkDir(filepath.Join(source, filepath.FromSlash(root)), func(path string, d fs.DirEntry, err error) error {
@@ -116,6 +146,27 @@ func launcherAssets(source string) (map[string][]byte, string, error) {
 			return nil, "", err
 		}
 	}
+	// Packaged assets carry a complete digest inventory. A checkout has no
+	// BUILD_INFO; an installed package must match its recorded runtime exactly.
+	if raw, err := trusted.ReadFile("BUILD_INFO.json"); err == nil {
+		var metadata struct {
+			Launcher struct {
+				Entry  string            `json:"entry"`
+				Assets map[string]string `json:"assets"`
+			} `json:"launcher"`
+		}
+		if json.Unmarshal(raw, &metadata) != nil || metadata.Launcher.Entry != "connectors/launcher/src/main.ts" || len(metadata.Launcher.Assets) != len(files) {
+			return nil, "", usageErr("incomplete packaged launcher asset inventory")
+		}
+		for name, data := range files {
+			digest := sha256.Sum256(data)
+			if metadata.Launcher.Assets[name] != hex.EncodeToString(digest[:]) {
+				return nil, "", usageErr("packaged launcher asset digest mismatch: " + name)
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, "", err
+	}
 	for _, required := range []string{"connectors/launcher/src/main.ts", "connectors/launcher/src/backends/codex-app-server/index.ts", "connectors/hub-client/src/client.ts"} {
 		if _, ok := files[required]; !ok {
 			return nil, "", usageErr("launcher source is missing " + required)
@@ -134,50 +185,218 @@ func launcherAssets(source string) (map[string][]byte, string, error) {
 	return files, hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func launcherSnapshot(root string, files map[string][]byte) error {
-	if st, err := os.Lstat(root); err == nil {
-		if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
-			return usageErr("unsafe launcher snapshot directory")
-		}
-		for name, want := range files {
-			path := filepath.Join(root, filepath.FromSlash(name))
-			st, err := os.Lstat(path)
-			if err != nil {
-				return err
-			}
-			if !st.Mode().IsRegular() {
-				return usageErr("launcher snapshot contains a non-regular file")
-			}
-			got, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			if !bytes.Equal(got, want) {
-				return usageErr("installed launcher snapshot was modified; remove that snapshot before reinstalling")
-			}
-		}
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+func launcherSafeInfo(info os.FileInfo, directory, managed bool) error {
+	uid, links, ok := launcherFileIdentity(info)
+	if !ok || (directory && !info.IsDir()) || (!directory && !info.Mode().IsRegular()) || info.Mode()&os.ModeSymlink != 0 {
+		return usageErr("unsafe launcher path type")
 	}
-	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
-		return err
+	if uid != os.Geteuid() && (managed || uid != 0) {
+		return usageErr("unsafe launcher path owner")
 	}
-	tmp, err := os.MkdirTemp(filepath.Dir(root), ".snapshot-")
+	// A root-owned sticky system temp directory can contain our private fixture
+	// or HOME; writable directories anywhere inside a managed tree cannot.
+	stickyAncestor := directory && !managed && uid == 0 && info.Mode()&os.ModeSticky != 0
+	if info.Mode().Perm()&0o022 != 0 && !stickyAncestor {
+		return usageErr("unsafe writable launcher path")
+	}
+	if !directory && links != 1 {
+		return usageErr("unsafe linked launcher file")
+	}
+	return nil
+}
+
+// Pin each directory while traversing from /. No component is followed through
+// a symlink or traversed below an untrusted writable parent. Existing unsafe
+// paths are refused, never repaired with chmod/chown.
+func launcherOpenDir(path, managed string, create bool) (*os.Root, error) {
+	if !filepath.IsAbs(path) {
+		return nil, usageErr("launcher path must be absolute")
+	}
+	root, err := os.OpenRoot(string(filepath.Separator))
+	if err != nil {
+		return nil, err
+	}
+	prefix := string(filepath.Separator)
+	for _, part := range strings.Split(strings.TrimPrefix(filepath.Clean(path), prefix), string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		prefix = filepath.Join(prefix, part)
+		info, e := root.Lstat(part)
+		if errors.Is(e, os.ErrNotExist) && create {
+			e = root.Mkdir(part, 0o700)
+			if e == nil || errors.Is(e, os.ErrExist) {
+				info, e = root.Lstat(part)
+			}
+		}
+		strict := managed != "" && (prefix == managed || strings.HasPrefix(prefix, managed+string(filepath.Separator)))
+		if e == nil {
+			e = launcherSafeInfo(info, true, strict)
+		}
+		if e != nil {
+			root.Close()
+			return nil, usageErr(fmt.Sprintf("launcher directory %s: %v", prefix, e))
+		}
+		next, e := root.OpenRoot(part)
+		if e != nil {
+			root.Close()
+			return nil, e
+		}
+		pinned, e := next.Stat(".")
+		if e == nil && !os.SameFile(info, pinned) {
+			e = usageErr("launcher directory changed during validation")
+		}
+		if e == nil {
+			e = launcherSafeInfo(pinned, true, strict)
+		}
+		root.Close()
+		root = next
+		if e != nil {
+			root.Close()
+			return nil, usageErr(fmt.Sprintf("launcher pinned directory %s: %v", prefix, e))
+		}
+	}
+	return root, nil
+}
+
+func launcherReadOwned(root *os.Root, name string, managed bool) ([]byte, error) {
+	info, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if err = launcherSafeInfo(info, false, managed); err != nil {
+		return nil, err
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	pinned, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(info, pinned) {
+		return nil, usageErr("launcher file changed during validation")
+	}
+	return io.ReadAll(file)
+}
+
+func launcherValidateSnapshot(parent *os.Root, name string, files map[string][]byte) error {
+	info, err := parent.Lstat(name)
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmp)
-	for name, data := range files {
-		path := filepath.Join(tmp, filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err = launcherSafeInfo(info, true, true); err != nil {
+		return err
+	}
+	root, err := parent.OpenRoot(name)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	seen := map[string]bool{}
+	err = fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(path, data, 0o600); err != nil {
+		info, err := root.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if err = launcherSafeInfo(info, entry.IsDir(), true); err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		want, ok := files[path]
+		if !ok {
+			return usageErr("unexpected file in launcher snapshot")
+		}
+		got, err := launcherReadOwned(root, path, true)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(got, want) {
+			return usageErr("installed launcher snapshot was modified; remove that snapshot before reinstalling")
+		}
+		seen[path] = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if len(seen) != len(files) {
+		return usageErr("incomplete launcher snapshot")
+	}
+	return nil
+}
+
+func launcherTempName(prefix string) string {
+	var value [12]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		panic(err)
+	}
+	return prefix + hex.EncodeToString(value[:])
+}
+
+func launcherSnapshot(parent *os.Root, name string, files map[string][]byte) error {
+	if _, err := parent.Lstat(name); err == nil {
+		return launcherValidateSnapshot(parent, name, files)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	tmp := launcherTempName(".snapshot-")
+	if err := parent.Mkdir(tmp, 0o700); err != nil {
+		return err
+	}
+	defer parent.RemoveAll(tmp)
+	root, err := parent.OpenRoot(tmp)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	for path, data := range files {
+		if !filepath.IsLocal(filepath.FromSlash(path)) {
+			return usageErr("invalid launcher asset path")
+		}
+		if err = root.MkdirAll(filepath.Dir(filepath.FromSlash(path)), 0o700); err != nil {
+			return err
+		}
+		if err = root.WriteFile(filepath.FromSlash(path), data, 0o600); err != nil {
 			return err
 		}
 	}
-	return os.Rename(tmp, root)
+	if err = parent.Rename(tmp, name); err != nil {
+		// Another profile may concurrently install the identical content hash.
+		if _, exists := parent.Lstat(name); exists == nil {
+			return launcherValidateSnapshot(parent, name, files)
+		}
+		return err
+	}
+	return launcherValidateSnapshot(parent, name, files)
+}
+
+func launcherAtomicWrite(root *os.Root, name string, data []byte) error {
+	if _, err := launcherReadOwned(root, name, true); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	tmp := launcherTempName("." + name + "-")
+	file, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer root.Remove(tmp)
+	_, err = file.Write(data)
+	closeErr := file.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return root.Rename(tmp, name)
 }
 
 // systemd expands percent specifiers everywhere and dollars in ExecStart.
@@ -288,26 +507,70 @@ func (a *app) launcherInstall(p launcherPaths, o opts) error {
 	if !o.has("write") {
 		return a.emitValue(plan)
 	}
-	if err = os.MkdirAll(filepath.Dir(p.Manifest), 0o700); err != nil {
-		return err
-	}
-	unlock, err := lockPath(a.ctx, p.Manifest+".lock")
+	manifestRoot, err := launcherOpenDir(filepath.Dir(p.Manifest), filepath.Dir(p.Manifest), false)
 	if err != nil {
 		return err
 	}
-	defer unlock()
-	if existing, e := os.ReadFile(p.Unit); e == nil && !bytes.HasPrefix(existing, []byte("# Managed by vecnet launcher install.")) {
+	defer manifestRoot.Close()
+	unitRoot, err := launcherOpenDir(filepath.Dir(p.Unit), filepath.Dir(p.Unit), true)
+	if err != nil {
+		return err
+	}
+	defer unitRoot.Close()
+	snapshots, err := launcherOpenDir(filepath.Dir(snapshot), p.Data, true)
+	if err != nil {
+		return err
+	}
+	defer snapshots.Close()
+	lockName := filepath.Base(p.Manifest) + ".lock"
+	if _, e := launcherReadOwned(manifestRoot, lockName, true); e != nil && !errors.Is(e, os.ErrNotExist) {
+		return e
+	}
+	lock, err := manifestRoot.OpenFile(lockName, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	info, err := lock.Stat()
+	if err != nil {
+		return err
+	}
+	if err = launcherSafeInfo(info, false, true); err != nil {
+		return err
+	}
+	for {
+		locked, e := launcherTryLock(lock)
+		if e != nil {
+			return e
+		}
+		if locked {
+			break
+		}
+		if !sleepCtx(a.ctx, 10*time.Millisecond) {
+			return errStateBusy
+		}
+	}
+	// Validate every existing publication target before replacing either one.
+	// Equal unit bytes still constitute a publication when its inode changes.
+	if _, e := launcherReadOwned(manifestRoot, filepath.Base(p.Manifest), true); e != nil && !errors.Is(e, os.ErrNotExist) {
+		return e
+	}
+	if existing, e := launcherReadOwned(unitRoot, filepath.Base(p.Unit), true); e == nil && !bytes.HasPrefix(existing, []byte("# Managed by vecnet launcher install.")) {
 		return usageErr("launcher unit already exists and is not managed by vecnet; review it before installing")
 	} else if e != nil && !errors.Is(e, os.ErrNotExist) {
 		return e
 	}
-	if err = launcherSnapshot(snapshot, files); err != nil {
+	if err = launcherSnapshot(snapshots, filepath.Base(snapshot), files); err != nil {
 		return err
 	}
-	if err = writeFileAtomic(p.Unit, []byte(unit)); err != nil {
+	if err = launcherAtomicWrite(unitRoot, filepath.Base(p.Unit), []byte(unit)); err != nil {
 		return err
 	}
-	if err = launcherJSON(p.Manifest, m); err != nil {
+	raw, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err = launcherAtomicWrite(manifestRoot, filepath.Base(p.Manifest), append(raw, '\n')); err != nil {
 		return err
 	}
 	if err = a.launcherRun("systemctl", "--user", "daemon-reload"); err != nil {

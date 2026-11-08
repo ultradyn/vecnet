@@ -25,6 +25,11 @@ type launcherFixture struct {
 func newLauncherFixture(t *testing.T, kind string) launcherFixture {
 	t.Helper()
 	dir := t.TempDir()
+	// testing.TempDir's numbered child uses 0777 before umask. Our fixture is
+	// explicitly a private HOME, independent of the caller's cooperative umask.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" || r.Header.Get("Authorization") != "Bearer vn_peer_LAUNCHER_TEST" {
 			t.Errorf("unexpected launcher request %s %s", r.Method, r.URL.Path)
@@ -166,6 +171,39 @@ func TestLauncherSetupRejectsInvalidEffort(t *testing.T) {
 	}
 }
 
+func TestLauncherSetupTemporaryProjectKeepsScratchDistinct(t *testing.T) {
+	f := newLauncherFixture(t, "launcher")
+	args := append([]string{}, f.setup...)
+	for i, arg := range args {
+		if arg == "--project" {
+			args[i+1] = "temporary"
+		}
+	}
+	code, out, errs := f.run(t, args...)
+	if code != 0 {
+		t.Fatal(errs)
+	}
+	var plan struct {
+		Config struct {
+			Projects map[string]struct {
+				Repo    string `json:"repo_root"`
+				Scratch bool   `json:"scratch"`
+			} `json:"projects"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatal(err)
+	}
+	ordinary, ok := plan.Config.Projects["temporary"]
+	if !ok || ordinary.Scratch || ordinary.Repo == f.paths.Data {
+		t.Fatal("ordinary temporary alias became scratch")
+	}
+	scratch, ok := plan.Config.Projects["vecnet-scratch"]
+	if !ok || !scratch.Scratch || scratch.Repo != f.paths.Data {
+		t.Fatal("missing distinct generated scratch alias")
+	}
+}
+
 func launcherTestSource(t *testing.T) string {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "checkout")
@@ -297,5 +335,157 @@ func TestLauncherNodeVersionsAndUnitEscaping(t *testing.T) {
 	}
 	if _, err = launcherSystemdQuote("a\nb", false); err == nil {
 		t.Fatal("newline accepted in unit value")
+	}
+}
+
+// Exercise install itself so unsafe reuse cannot publish a unit/manifest or
+// invoke the service manager, even when every source byte still matches.
+func TestLauncherInstallRejectsUnsafeSnapshotReuse(t *testing.T) {
+	cases := map[string]func(*testing.T, launcherFixture, launcherInstall){
+		"snapshot writable": func(t *testing.T, _ launcherFixture, m launcherInstall) { launcherTestChmod(t, m.Snapshot, 0o770) },
+		"runtime directory writable": func(t *testing.T, _ launcherFixture, m launcherInstall) {
+			launcherTestChmod(t, filepath.Dir(m.Entry), 0o702)
+		},
+		"runtime file writable":   func(t *testing.T, _ launcherFixture, m launcherInstall) { launcherTestChmod(t, m.Entry, 0o620) },
+		"managed parent writable": func(t *testing.T, f launcherFixture, _ launcherInstall) { launcherTestChmod(t, f.paths.Data, 0o770) },
+		"data ancestor writable": func(t *testing.T, f launcherFixture, _ launcherInstall) {
+			launcherTestChmod(t, f.env["XDG_DATA_HOME"], 0o777)
+		},
+		"manifest parent writable": func(t *testing.T, f launcherFixture, _ launcherInstall) {
+			launcherTestChmod(t, filepath.Dir(f.paths.Manifest), 0o770)
+		},
+		"unit parent writable": func(t *testing.T, f launcherFixture, _ launcherInstall) {
+			launcherTestChmod(t, filepath.Dir(f.paths.Unit), 0o770)
+		},
+		"manifest file writable": func(t *testing.T, f launcherFixture, _ launcherInstall) {
+			launcherTestChmod(t, f.paths.Manifest, 0o620)
+		},
+		"unit file writable": func(t *testing.T, f launcherFixture, _ launcherInstall) { launcherTestChmod(t, f.paths.Unit, 0o620) },
+		"runtime intermediate symlink": func(t *testing.T, _ launcherFixture, m launcherInstall) {
+			launcherTestMoveToSymlink(t, filepath.Dir(m.Entry))
+		},
+		"snapshot parent symlink": func(t *testing.T, _ launcherFixture, m launcherInstall) {
+			launcherTestMoveToSymlink(t, filepath.Dir(m.Snapshot))
+		},
+		"manifest parent symlink": func(t *testing.T, f launcherFixture, _ launcherInstall) {
+			launcherTestMoveToSymlink(t, filepath.Dir(f.paths.Manifest))
+		},
+		"unit parent symlink": func(t *testing.T, f launcherFixture, _ launcherInstall) {
+			launcherTestMoveToSymlink(t, filepath.Dir(f.paths.Unit))
+		},
+		"foreign runtime owner": func(t *testing.T, _ launcherFixture, m launcherInstall) {
+			if err := os.Chown(m.Entry, os.Geteuid()+1, -1); err != nil {
+				t.Skip("foreign-owner fixture is unavailable without privileges")
+			}
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			f, args, log := launcherInstalledFixture(t)
+			var m launcherInstall
+			if err := launcherReadJSON(f.paths.Manifest, &m); err != nil {
+				t.Fatal(err)
+			}
+			beforeUnit, err := os.ReadFile(f.paths.Unit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeManifest, err := os.ReadFile(f.paths.Manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeLog, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeUnitInfo, err := os.Lstat(f.paths.Unit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeManifestInfo, err := os.Lstat(f.paths.Manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutate(t, f, m)
+			if code, _, errs := f.run(t, append(args, "--write", "--enable", "--start")...); code == 0 {
+				t.Fatalf("unsafe snapshot accepted: %s", errs)
+			}
+			for _, item := range []struct {
+				path string
+				want []byte
+			}{{f.paths.Unit, beforeUnit}, {f.paths.Manifest, beforeManifest}, {log, beforeLog}} {
+				got, err := os.ReadFile(item.path)
+				if err != nil || !bytes.Equal(got, item.want) {
+					t.Fatalf("unsafe install changed %s: %v", item.path, err)
+				}
+			}
+			for _, item := range []struct {
+				path   string
+				before os.FileInfo
+			}{{f.paths.Unit, beforeUnitInfo}, {f.paths.Manifest, beforeManifestInfo}} {
+				after, err := os.Lstat(item.path)
+				if err != nil || !os.SameFile(item.before, after) {
+					t.Fatalf("unsafe install republished %s: %v", item.path, err)
+				}
+			}
+		})
+	}
+}
+
+func launcherTestChmod(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func launcherTestMoveToSymlink(t *testing.T, path string) {
+	t.Helper()
+	elsewhere := filepath.Join(t.TempDir(), "matching-runtime")
+	if err := os.Rename(path, elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func launcherInstalledFixture(t *testing.T) (launcherFixture, []string, string) {
+	t.Helper()
+	f := newLauncherFixture(t, "launcher")
+	if code, _, errs := f.run(t, append(f.setup, "--write")...); code != 0 {
+		t.Fatal(errs)
+	}
+	source := launcherTestSource(t)
+	binDir := t.TempDir()
+	log := filepath.Join(t.TempDir(), "manager.log")
+	for name, body := range map[string]string{"node": "#!/bin/sh\necho v22.23.3\n", "vecnet": "#!/bin/sh\nexit 0\n", "systemctl": fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> '%s'\n", strings.ReplaceAll(log, "'", "'\\''"))} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.env["PATH"] = binDir
+	args := []string{"install", "--source", source, "--vecnet-bin", filepath.Join(binDir, "vecnet")}
+	if code, _, errs := f.run(t, append(args, "--write")...); code != 0 {
+		t.Fatal(errs)
+	}
+	return f, args, log
+}
+
+func TestLauncherInstallReusesPrivateSnapshot(t *testing.T) {
+	f, args, _ := launcherInstalledFixture(t)
+	var first launcherInstall
+	if err := launcherReadJSON(f.paths.Manifest, &first); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errs := f.run(t, append(args, "--write")...); code != 0 {
+		t.Fatalf("valid private reuse refused: %s", errs)
+	}
+	var second launcherInstall
+	if err := launcherReadJSON(f.paths.Manifest, &second); err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatal("repeat install changed the snapshot")
 	}
 }

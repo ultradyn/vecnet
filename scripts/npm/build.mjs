@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { releaseInfo } from './release.mjs';
@@ -21,7 +21,11 @@ for (const command of ['vecnet', 'vecnet-hub']) {
   await chmod(path.join(destination, 'bin', `${command}.cjs`), 0o755);
 }
 
-const env = { ...process.env, CGO_ENABLED: '0', GOMAXPROCS: '2' };
+// The integration coordinator can reserve one worker without a hidden second
+// compiler. Builds remain sequential across both platform targets.
+const workers = process.env.GOMAXPROCS || '2';
+if (!/^[12]$/.test(workers)) throw new Error('npm build requires GOMAXPROCS=1 or 2');
+const env = { ...process.env, CGO_ENABLED: '0', GOMAXPROCS: workers };
 const go = args => execFileSync('go', args, { cwd: root, env, encoding: 'utf8' }).trim();
 let revision = null;
 try {
@@ -30,9 +34,8 @@ try {
 const info = { version: manifest.version, revision, go: go(['version']), binaries: {},
   delivery: { entry: 'connectors/launcher/src/codex/delivery-main.ts', assets: {} } };
 
-// Follow static runtime imports only. Type-only imports disappear under Node's
-// native stripping; tests, backend plugins, dependencies and local config never
-// enter this release. Preserve ESM boundaries inside the CommonJS npm wrapper.
+// Preserve the delivery entry's existing static closure and digest inventory.
+// Job-launcher assets are staged separately below, including dynamic plugins.
 const schemas = ['launch-input','launch-permission','launch-question','launch-answers','launch-approval-closed'];
 const pending = [info.delivery.entry, ...schemas.map(name => `connectors/launcher/schema/${name}.v1.schema.json`)], visited = new Set();
 while (pending.length) {
@@ -61,7 +64,42 @@ for (const project of ['launcher', 'hub-client']) {
 }
 console.log(`Staged ${visited.size} delivery runtime files`);
 
-// Build sequentially so release preparation uses at most two compiler threads.
+// The launcher loads builtins dynamically from config, so an import walk rooted
+// at main.ts alone is incomplete. Include all implementation modules and only
+// allowlisted builtin directories; ACP enters automatically when integrated.
+const builtinAllowlist = new Set(['t3','paseo','codex-app-server','acp']);
+const backendRoot = 'connectors/launcher/src/backends';
+const builtins = (await readdir(path.join(root,backendRoot),{withFileTypes:true})).map(entry=>{
+  if (!entry.isDirectory() || !builtinAllowlist.has(entry.name)) throw new Error('unrecognized packaged backend '+entry.name);
+  return entry.name;
+}).sort();
+for (const required of ['t3','paseo','codex-app-server']) if (!builtins.includes(required)) throw new Error('missing packaged backend '+required);
+info.launcher = {entry:'connectors/launcher/src/main.ts',backends:builtins,assets:{}};
+async function stageLauncher(file) {
+  const bytes = await readFile(path.join(root,file));
+  await mkdir(path.dirname(path.join(destination,file)),{recursive:true});
+  await writeFile(path.join(destination,file),bytes);
+  info.launcher.assets[file] = createHash('sha256').update(bytes).digest('hex');
+}
+async function stageModules(directory) {
+  for (const entry of await readdir(path.join(root,directory),{withFileTypes:true})) {
+    const file=path.posix.join(directory,entry.name);
+    if (entry.isDirectory()) await stageModules(file);
+    else if (entry.isFile() && /^[A-Za-z0-9_.-]+\.ts$/.test(entry.name)) await stageLauncher(file);
+    else throw new Error('non-runtime file in launcher module tree: '+file);
+  }
+}
+for (const project of ['launcher','hub-client']) {
+  await stageModules(`connectors/${project}/src`);
+  const file=`connectors/${project}/package.json`;
+  // Keep the exact minimal ESM boundary already used by delivery.
+  info.launcher.assets[file]=createHash('sha256').update(await readFile(path.join(destination,file))).digest('hex');
+}
+for (const name of schemas) await stageLauncher(`connectors/launcher/schema/${name}.v1.schema.json`);
+await stageLauncher('connectors/launcher/systemd/vecnet-launcher-profile.service.in');
+console.log(`Staged ${Object.keys(info.launcher.assets).length} launcher runtime files (${builtins.join(', ')})`);
+
+// Build sequentially within the caller's reserved worker budget.
 for (const [platform, goos, goarch] of [
   ['linux-x64', 'linux', 'amd64'],
   ['linux-arm64', 'linux', 'arm64'],
@@ -70,7 +108,7 @@ for (const [platform, goos, goarch] of [
   await mkdir(directory, { recursive: true });
   console.log(`Building vecnet ${manifest.version} for ${platform}`);
   execFileSync('go', [
-    'build', '-mod=readonly', '-p', '2', '-trimpath', '-buildvcs=false',
+    'build', '-mod=readonly', '-p', workers, '-trimpath', '-buildvcs=false',
     '-ldflags', `-s -w -X github.com/XertroV/vecnet/internal/mcpserver.Version=${manifest.version}`,
     '-o', `${directory}${path.sep}`, './cmd/vecnet', './cmd/vecnet-hub',
   ], {
@@ -86,6 +124,6 @@ for (const [platform, goos, goarch] of [
 }
 
 const { writeNotices } = await import('./notices.mjs');
-await writeNotices({ root, destination: path.join(destination, 'THIRD_PARTY_NOTICES.txt') });
+await writeNotices({ root, destination: path.join(destination, 'THIRD_PARTY_NOTICES.txt'), workers });
 await writeFile(path.join(destination, 'BUILD_INFO.json'), `${JSON.stringify(info, null, 2)}\n`);
 console.log(`Staged ${manifest.name}@${manifest.version} in ${destination}`);

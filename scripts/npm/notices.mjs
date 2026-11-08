@@ -3,8 +3,8 @@ import { readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 // Include the union of modules linked on both supported Linux architectures.
-export async function writeNotices({ root, destination }) {
-  const env = { ...process.env, CGO_ENABLED: '0', GOMAXPROCS: '2' };
+export async function writeNotices({ root, destination, workers = '2' }) {
+  const env = { ...process.env, CGO_ENABLED: '0', GOMAXPROCS: workers, GOFLAGS: `${process.env.GOFLAGS || ''} -p=${workers}`.trim() };
   const go = (args, targetEnv = {}) => execFileSync('go', args, {
     cwd: root, env: { ...env, ...targetEnv }, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
   }).trim();

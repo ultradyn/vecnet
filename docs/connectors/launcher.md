@@ -25,12 +25,12 @@ vecnet --net launcher-host launcher setup --project my-repo --repo /absolute/rep
 vecnet --net launcher-host launcher setup --project my-repo --repo /absolute/repo --base-ref master --write
 
 # Preview the source snapshot, resolved runtime paths and complete service unit:
-vecnet --net launcher-host launcher install --source /absolute/vecnet-checkout
-vecnet --net launcher-host launcher install --source /absolute/vecnet-checkout --write
+vecnet --net launcher-host launcher install
+vecnet --net launcher-host launcher install --write
 vecnet --net launcher-host launcher check
 
 # Enable on user login and start (or restart) only when requested:
-vecnet --net launcher-host launcher install --source /absolute/vecnet-checkout --write --enable --start
+vecnet --net launcher-host launcher install --write --enable --start
 vecnet --net launcher-host launcher status
 ```
 
@@ -47,7 +47,7 @@ The generated backend is `codex-app-server`, module `./backends/codex-app-server
 
 Each preset may contain `model` and `effort`. Backend config also accepts optional `workspace_root` (absolute path) and `poll_ms` (100–60000). All four permission modes are supported: `read-only`, `ask`, `auto`, `full-access`. Generated policy permits only the configured project and native backend, with these four modes; narrow it as needed. Existing Codex threads are never claimed as launcher jobs.
 
-The launch form offers **New worktree**, **Existing project root**, and **Temporary directory** when the backend advertises them. New worktree is the default. Project root uses the configured checkout and its current branch without creating or deleting either. No project selects a fresh temporary Git directory under the host’s persistent launcher data directory, outside `/tmp`. Setup configures the reserved `temporary` project alias and its policy; requesters send that alias plus `workspace_mode: "temp"`, never a host path. Hosts may remove that alias from policy to disable temporary launches. Legacy backends advertise only their existing worktree behavior. A lost native start response in a shared project root stays unresolved rather than adopting another client’s thread by cwd.
+The launch form offers **New worktree**, **Existing project root**, and **Temporary directory** when the backend advertises them. New worktree is the default. Project root uses the configured checkout and its current branch without creating or deleting either. No project selects a fresh temporary Git directory under the host’s persistent launcher data directory, outside `/tmp`. Setup marks a generated project alias with `scratch: true` (`temporary`, or `vecnet-scratch` when the ordinary project is named `temporary`) and includes it in policy. Presence advertises `scratch:ALIAS` alongside `project:ALIAS`; requesters send that alias plus `workspace_mode: "temp"`, never a host path. Only explicit scratch projects grant temp mode, and ordinary aliases retain repository behavior. Hosts may remove the scratch alias from policy to disable temporary launches. Legacy backends advertise only their existing worktree behavior. A lost native start response stays unresolved until all native listing pages prove a unique same-workspace thread with its persisted per-launch ownership nonce; cwd alone never proves ownership. Start and every resume must return the selected effective sandbox, reviewer and confined workspace roots before the launcher sends instructions.
 
 The native adapter uses the existing host account and background Codex daemon. It verifies the rendezvous symlink, owner-private socket directory, socket owner and allowlisted daemon version (0.166.0 or 0.167.0). It does not provision the future dedicated-user/egress-isolated runtime described in the design. Each job gets a new named thread and an isolated Git worktree based on the allowlisted repository/ref. `running` reports the actual thread id, workspace, branch, model/provider and link; the job continues to speak through its authenticated launcher identity, rather than a synthetic per-session peer.
 
@@ -55,13 +55,30 @@ New native threads receive explicit spawn policy: `read-only` uses the read-only
 
 The opt-in `scripts/native-launcher-live-smoke.mjs` exercises web creation, host setup/install, a real native Codex worktree launch, exact-request retry, an owned service restart, a model follow-up reply, and run-owned cancellation/service teardown against a local demo hub. Set `VECNET_NATIVE_LAUNCHER_SMOKE=1`, a built `VECNET_BIN` and `VECNET_UI_DEMO_BIN`; `VECNET_SMOKE_WORKSPACE` selects `worktree` (default), `project-root`, or `temp`; it uses the existing authenticated `CODEX_HOME` but only creates fresh run-owned threads. Unit/fake-backend results do not substitute for this live check.
 
-`install` requires Linux with `systemd --user` and Node 22.18+ with default TypeScript support (23.6+ on Node 23). It resolves Node from the caller's `PATH` or `--node /absolute/node`, and resolves vecnet from `--vecnet-bin /absolute/vecnet`, `$VECNET_BIN`, or the running executable. The unit records absolute executables and the caller's `PATH`, `HOME` and vecnet config path; there is no `/usr/bin/node` assumption. `--source` may be omitted when running inside a vecnet checkout.
+`install` requires Linux with `systemd --user` and Node 22.18+ with default TypeScript support (23.6+ on Node 23). It resolves Node from the caller's `PATH` or `--node /absolute/node`, and resolves vecnet from `--vecnet-bin /absolute/vecnet`, `$VECNET_BIN`, or the running executable. The unit records absolute executables and the caller's `PATH`, `HOME` and vecnet config path; there is no `/usr/bin/node` assumption. The public npm package ships the complete runtime, including the dynamic native Codex, T3 and Paseo modules and the service template. `install` discovers those assets from its installed executable even outside a checkout; it verifies the packaged asset digest inventory before snapshotting. `--source /absolute/vecnet-checkout` explicitly selects a checkout, and running inside a checkout remains a fallback for standalone binaries.
 
-Runtime sources, package manifests and schemas are copied to `$XDG_DATA_HOME/vecnet-launcher/snapshots/<content hash>/` (default `~/.local/share/vecnet-launcher/`). Jobs use `$XDG_STATE_HOME/vecnet-launcher/p-<id>/`. The unit is `$XDG_CONFIG_HOME/systemd/user/vecnet-launcher-p-<id>.service` (default `~/.config/systemd/user/`). Installation records public runtime paths in `install.json` beside `config.json`. Changes to the checkout do not change an installed snapshot; installing changed sources selects a new snapshot. Old snapshots remain available, and a snapshot whose files were edited is refused on reuse.
+Runtime sources, package manifests and schemas are copied to `$XDG_DATA_HOME/vecnet-launcher/snapshots/<content hash>/` (default `~/.local/share/vecnet-launcher/`). Jobs use `$XDG_STATE_HOME/vecnet-launcher/p-<id>/`. The unit is `$XDG_CONFIG_HOME/systemd/user/vecnet-launcher-p-<id>.service` (default `~/.config/systemd/user/`). Installation records public runtime paths in `install.json` beside `config.json`. Changes to the checkout do not change an installed snapshot; installing changed sources selects a new snapshot. Old snapshots remain available, and a snapshot whose files were edited is refused on reuse. Reused snapshots and all managed path components must have the installing user as owner and no group/other write bits; symlink components and shared hard-linked files are refused. Parent paths are validated and pinned during publication, and existing unsafe paths are rejected without chmod or chown repair. Standard root-owned sticky temporary ancestors may contain an owned private home, but writable managed directories are never accepted.
 
 Setup and installation print JSON plans unless `--write` is present, without exposing credentials. `install --write` writes assets and reloads the user manager. `--enable` enables the unit, and `--start` starts or restarts it; both require `--write`. Without those flags installation leaves the service's enabled/running state as it was. `status` reports configuration, installed paths and systemd state; `check` runs backend health and capability checks from the installed snapshot. Use the unit name shown by `status` with `journalctl --user -u UNIT` and `systemctl --user stop UNIT`. User services run after logout only if the account already has lingering enabled.
 
 The launcher unit handles launch jobs only. Automatic delivery to existing Codex threads uses the separate hub-scoped [Codex delivery owner](codex-appserver.md), installed through its existing workflow; `launcher install` neither enables nor replaces it.
+
+## Set up Claude through ACP
+
+A host may instead select the ACP backend with an operator-pinned executable. The launcher starts that executable directly; arguments are separate repeatable flags, never a shell command. Claude ACP exposes only ask permissions. Its executable health check does not prove authentication or model availability; use the intended service account's existing approved Claude authentication. Setup never creates or copies credentials.
+
+```sh
+vecnet --net PROFILE launcher setup --backend acp \
+  --acp-command /absolute/versioned/claude-agent-acp \
+  --acp-provider claude --acp-mode default \
+  --project PROJECT --repo /absolute/repository --base-ref master --write
+vecnet --net PROFILE launcher install --source /absolute/vecnet-checkout --write --enable --start
+vecnet --net PROFILE launcher check
+```
+
+The integrated tested runtime is `@agentclientprotocol/claude-agent-acp@0.101.0`; the x-boss installation uses `/work/package-cache/xertrov/fleet/vecnet-acp/claude-agent-acp-0.101.0/bin/claude-agent-acp`. Use a versioned absolute path on each host. Optional `--acp-arg ARG` flags preserve exact argv entries. Native `--codex-home`, `--model` and `--effort` flags are rejected for ACP; the agent retains its configured model. A configured ACP launcher appears in the existing web launch form with its actual preset, ask policy, projects and workspace choices.
+
+ACP stdio sessions remain attached to the launcher process. Hub reconnect preserves the live process, but a launcher process restart cannot resume it: recovery remains outcome unknown and never spawns a replacement for the same job. This backend advertises `resume: none`; persistent native Codex restart continuity is separate.
 
 ## Legacy T3 installation on xsm
 
