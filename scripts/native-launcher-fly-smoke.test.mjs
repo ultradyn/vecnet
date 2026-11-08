@@ -83,6 +83,10 @@ async function fixture(t, fault, { unrelatedSetupFailure = false } = {}) {
       return '';
     }
     if (command === 'systemctl') {
+      if (fault === 'unproved-child' && args.includes('restart')) {
+        reached.set(fault, { args, traceIndex: trace.length - 1 });
+        throw Object.assign(new Error('child_drain_unproved'), { code: 'child_drain_unproved', ambiguous: true, drained: false });
+      }
       if (fault === 'signal' && args.includes('restart')) { reached.set(fault, { args, message: 'host command failed: signal' }); throw new Error('host command failed: signal'); }
       if (fault === 'stop' && args.includes('stop')) { reached.set(fault, { args, message: 'synthetic stop refused' }); throw new Error('synthetic stop refused'); }
       if (args.includes('show')) {
@@ -116,14 +120,22 @@ async function fixture(t, fault, { unrelatedSetupFailure = false } = {}) {
     followup = true; return { message_id: 'msg_followup' };
   };
   const options = { dir, source, bin, demoBin, approvalPath, handoffPath, codexHome: join(base, 'synthetic-codex-home'), launcherProfile: 'fly-launcher', senderProfile: 'fly-sender' };
-  const ports = { run, api, openRpc: async () => ({ version: fault === 'runtime-identity' ? 'unapproved-native' : 'fixture-native-1', close() {}, async call(method, params) {
+  const ports = { run: async (...args) => {
+    try { return await run(...args); }
+    catch (error) {
+      // These ports never create an OS child. Preserve an explicitly injected
+      // unproved-child failure; other synthetic failures have no live writer.
+      if (error.drained === undefined) error.drained = true;
+      throw error;
+    }
+  }, api, openRpc: async () => ({ version: fault === 'runtime-identity' ? 'unapproved-native' : 'fixture-native-1', close() {}, async call(method, params) {
     assert.equal(method, 'thread/read'); assert.equal(params.threadId, 'native_owned'); return { thread: { cwd: workspace } };
   } }), until: async (fn, label) => { for (let i = 0; i < 3; i++) { const value = await fn(); if (value) return value; } throw new Error('timed out: ' + label); } };
   const execute = async () => (await import('./native-launcher-fly-smoke.mjs')).runFlySmoke(options, ports);
   return { execute, trace, requests, journals, journal, dir, config, unit, historyReads, cancels, reached, installed: () => installed };
 }
 
-const faults = ['lost-response', 'partial-install', 'signal', 'stop', 'active', 'retry-thread', 'wrong-job', 'foreign-terminal', 'provider'];
+const faults = ['lost-response', 'partial-install', 'signal', 'stop', 'active', 'retry-thread', 'wrong-job', 'foreign-terminal', 'provider', 'unproved-child'];
 async function assertFaultOracle(f, fault) {
   let failure;
   await assert.rejects(f.execute(), error => { failure = error; return error.code !== 'ERR_MODULE_NOT_FOUND'; });
@@ -179,6 +191,18 @@ async function assertFaultOracle(f, fault) {
     assert.match(failure.message, /^host command failed: signal$/);
     assert.equal(journal.phase, 'restarting-owned-service'); assert.equal(journal.native_session.id, 'native_owned');
     cancelledProof();
+  }
+  if (fault === 'unproved-child') {
+    ownedCommand(supplied.args, 'restart');
+    assert.deepEqual(journal.accepted, accepted);
+    assert.equal(journal.host_command.state, 'unresolved'); assert.equal(journal.host_command.drained, false);
+    assert.equal(journal.host_command.command, 'systemctl'); assert.match(journal.host_command.arguments_sha256, /^[a-f0-9]{64}$/);
+    assert.deepEqual(f.requests, [journal.request, journal.request], 'exact replay settled before the uncertain host operation');
+    assert.equal(f.cancels.length, 0, 'unproved host writer cannot race a cancellation');
+    assert.equal(f.trace.slice(supplied.traceIndex + 1).length, 0, 'no host command or API operation follows uncertain retirement');
+    assert.equal(await readFile(f.unit, 'utf8'), 'exact owned service');
+    assert.equal(await exists(join(f.dir, 'launcher', 'config.json')), true);
+    assert.notEqual(journal.teardown?.complete, true);
   }
   if (fault === 'stop' || fault === 'active') {
     cancelledProof(); assert.equal(await exists(f.unit), true);

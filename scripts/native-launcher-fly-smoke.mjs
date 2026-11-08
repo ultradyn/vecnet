@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { openCodexRpc } from '../connectors/launcher/src/codex/rpc.ts';
 import { createHubClient } from '../connectors/hub-client/src/client.ts';
 import { cleanupNativeSmoke } from './native-launcher-cleanup.mjs';
-import { runHost, createSmokeJournal, verifySmokeApproval, verifyInstalledSnapshot, probeSmokeRuntime,
+import { runHost, createSmokeHostRunner, createSmokeJournal, verifySmokeApproval, verifyInstalledSnapshot, probeSmokeRuntime,
   repositoryState, verifySmokeWorkspace, settleSmokeJob, finalizeSmokeReceipt } from './native-launcher-smoke-support.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -66,7 +66,7 @@ export async function runFlySmoke(options, ports = {}) {
   const launcherProfile = options.launcherProfile || 'fly-launcher-' + suffix, senderProfile = options.senderProfile || 'fly-sender-' + suffix;
   check(launcherProfile !== senderProfile && /^[a-z0-9-]+$/.test(launcherProfile) && /^[a-z0-9-]+$/.test(senderProfile), 'fresh distinct profile names required');
   const commandEnv = { ...process.env, VECNET_CONFIG: config, VECNET_CODEX_AUTO_DELIVERY: '0' };
-  const run = (command, args, opts = {}) => (ports.run || runHost)(command, args, { ...opts, commandEnv });
+  const run = createSmokeHostRunner({ getJournal: () => journal, commandEnv, run: ports.run || runHost });
   const cli = args => run(bin, ['--json', '--net', launcherProfile, ...args]);
   const until = ports.until || poll;
   const openRpc = ports.openRpc || (() => openCodexRpc({ codexHome, euid: process.geteuid(), log: { info() {}, warn() {}, error() {} }, timeoutMs: 5000 }));
@@ -170,6 +170,7 @@ export async function runFlySmoke(options, ports = {}) {
     try {
       if (installationAttempted) {
         teardown = await cleanupNativeSmoke({ installationAttempted, installationConfirmed, launchAttempted, jobResolved: !!job && !unresolved }, {
+          assertHostRetired: run.assertRetired,
           async settleJob() {
             const cancelBody = { idempotency_key: journal.snapshot().request.idempotency_key + '-cancel', recipients: [launcherId], thread_id: job.thread_id, in_reply_to: job.message_id,
               kind: 'job_status', priority: 'wake', content: { text: 'End the run-owned disposable smoke job.' }, job_status: { job_id: job.job_id, sequence: 100, state: 'cancelled' } };

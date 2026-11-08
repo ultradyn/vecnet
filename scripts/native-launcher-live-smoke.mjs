@@ -1,6 +1,5 @@
 // Opt-in: real native Codex or ACP model + run-owned systemd unit on a local demo
 // hub. Existing sessions/profiles/units are never reused. Not a fake PASS.
-import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
@@ -8,7 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { withDemo, assert, root } from './ui/lib.mjs';
 import { openCodexRpc } from '../connectors/launcher/src/codex/rpc.ts';
 import { cleanupNativeSmoke } from './native-launcher-cleanup.mjs';
-import { runHost, createSmokeJournal, verifySmokeApproval, verifyInstalledSnapshot, probeSmokeRuntime, repositoryState, verifySmokeWorkspace, settleSmokeJob, finalizeSmokeReceipt } from './native-launcher-smoke-support.mjs';
+import { runHost, createSmokeHostRunner, createSmokeJournal, verifySmokeApproval, verifyInstalledSnapshot, probeSmokeRuntime, repositoryState, verifySmokeWorkspace, settleSmokeJob, finalizeSmokeReceipt } from './native-launcher-smoke-support.mjs';
 
 if (process.env.VECNET_NATIVE_LAUNCHER_SMOKE !== '1') {
   console.log('skipped: set VECNET_NATIVE_LAUNCHER_SMOKE=1 for a real launcher backend check');
@@ -28,10 +27,8 @@ const env = { ...process.env, VECNET_CONFIG: join(dir, 'config.toml'), VECNET_CO
 const log = { info() {}, warn() {}, error() {} };
 let unit, unitBytes, installation, launcherId, job, safeToRemove = false, receipt;
 let journal, identity, before, workspaceProof, cancellation, evidence, disposalAuthorized = false;
-let installationAttempted = false, installationConfirmed = false, launchAttempted = false;
-async function run(command, args, { input, commandEnv = env } = {}) {
-  return runHost(command, args, { spawn, commandEnv, input });
-}
+let installationAttempted = false, installationConfirmed = false, launchAttempted = false, unresolved = false;
+const run = createSmokeHostRunner({ getJournal: () => journal, commandEnv: env, run: runHost });
 const cli = args => run(bin, ['--net', profile, ...args]);
 async function until(fn, what, ms = 120000) {
   const end = Date.now() + ms;
@@ -112,22 +109,29 @@ try {
       await page.route('**/v1/messages', async route => {
         const request = route.request();
         if (isLaunch(request)) {
-          launchAttempted = true;
+          launchAttempted = true; unresolved = true;
           journal.request(request.postDataJSON()); // fsync before allowing dispatch
+          journal.update({ launch_unresolved: true, phase: 'launch-dispatched' });
         }
         await route.continue();
       });
       const sent = page.waitForResponse(r => isLaunch(r.request())).then(async response => {
         const accepted = journal.accepted(await response.json()); // before another wait/restart
-        job = accepted; return accepted;
+        job = accepted;
+        journal.update({ launch_unresolved: false });
+        unresolved = false;
+        return accepted;
       });
       sent.catch(() => {}); // click may reject while this independent response settles
       await page.locator('#pv-launch').getByRole('button', { name: 'Launch job', exact: true }).click();
       job = await sent;
       const body = journal.snapshot().request;
       safeToRemove = false;
+      unresolved = true;
+      journal.update({ launch_unresolved: true, phase: 'retry-dispatched' });
       const repeated = await api('POST', '/v1/messages', body);
       journal.accepted(repeated); // all three ids must agree, including launch message
+      journal.update({ launch_unresolved: false }); unresolved = false;
       const running = await until(async () => {
         const messages = await history();
         const failed = messages.find(m => m.sender === added.peer_id && m.job_status?.state === 'failed');
@@ -178,7 +182,8 @@ try {
         model: session.extra.model ?? null, provider: session.extra.model_provider ?? null, effort: session.extra.effort ?? null, permission_mode: session.extra.permission_mode,
         statuses, service_restart: native, ...(native ? {} : { runtime: acpCommand, resume: 'none' }), first: first.message_id, followup: second.message_id };
     } finally {
-      safeToRemove = await cleanupNativeSmoke({ installationAttempted, installationConfirmed, launchAttempted, jobResolved: !!job }, {
+      safeToRemove = await cleanupNativeSmoke({ installationAttempted, installationConfirmed, launchAttempted, jobResolved: !!job && !unresolved }, {
+        assertHostRetired: run.assertRetired,
         async settleJob() {
           cancellation = await settleSmokeJob({ job, launcherId, history, until, cancel: () => api('POST', '/v1/messages', { idempotency_key: profile + '-cancel', recipients: [launcherId],
             thread_id: job.thread_id, in_reply_to: job.message_id, kind: 'job_status', priority: 'wake', content: { text: 'End the run-owned smoke job.' },

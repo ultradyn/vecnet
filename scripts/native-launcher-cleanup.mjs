@@ -3,15 +3,16 @@
 export async function cleanupNativeSmoke(state, ops) {
   let safe = false;
   try {
+    await ops.assertHostRetired?.();
     if (state.installationAttempted && !state.installationConfirmed) throw new Error('installation unconfirmed; preserve recovery files');
     if (state.launchAttempted && !state.jobResolved) throw new Error('launch outcome unresolved; preserve recovery files');
     if (!state.installationConfirmed) throw new Error('installation unconfirmed; preserve recovery files');
-    if (state.jobResolved) await ops.settleJob();
-    await ops.verifyUnit();
-    await ops.stopUnit();
-    await ops.verifyStopped();
-    await ops.removeUnit();
-    await ops.reloadManager();
+    for (const operation of [...(state.jobResolved ? ['settleJob'] : []),
+      'verifyUnit', 'stopUnit', 'verifyStopped', 'removeUnit', 'reloadManager']) {
+      await ops.assertHostRetired?.();
+      await ops[operation]();
+    }
+    await ops.assertHostRetired?.();
     safe = true;
   } finally {
     if (safe) await ops.removePrivateFiles();
