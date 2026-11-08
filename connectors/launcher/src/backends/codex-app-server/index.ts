@@ -170,7 +170,7 @@ export default definePlugin<CodexConfig>({
       private current: SessionState = { kind: 'starting' };
       private activeTurn?: string;
       private lastActivity = ctx.now().toISOString();
-      private pending = new Map<string, AbortController>();
+      private pending = new Map<number | string, AbortController>();
       private subscribedTo?: CodexRpc;
       private verified = false;
       private changes = new Map<string, Obj[]>();
@@ -183,7 +183,7 @@ export default definePlugin<CodexConfig>({
         const s = obj(t.status);
         if (s.type === 'active') {
           const flags = Array.isArray(s.activeFlags) ? s.activeFlags : [];
-          if (flags.includes('waitingOnApproval') || flags.includes('waitingOnUserInput')) this.current = { kind: 'waiting_approval', requestIds: [...this.pending.keys()] };
+          if (flags.includes('waitingOnApproval') || flags.includes('waitingOnUserInput')) this.current = { kind: 'waiting_approval', requestIds: [...this.pending.keys()].map(String) };
           else this.current = { kind: 'turn_running', turnId: this.activeTurn ?? '', since: this.lastActivity };
         } else if (s.type === 'idle') this.current = { kind: 'idle', since: this.lastActivity };
         else if (s.type === 'notLoaded') this.current = { kind: 'parked', since: this.lastActivity };
@@ -211,14 +211,19 @@ export default definePlugin<CodexConfig>({
       }
       private async refresh() { await this.ensure(false); const r = await call('thread/read', { threadId: this.ref.id, includeTurns: false }); this.update(obj(r.thread)); }
       async request(id: number | string, method: string, p: Obj, r: CodexRpc) {
-        const key = String(id); if (this.pending.has(key)) return;
-        const controller = new AbortController(); this.pending.set(key, controller);
+        const key = String(id); if (this.pending.has(id)) return;
+        const controller = new AbortController(); this.pending.set(id, controller);
         try {
           if (!this.verified) { r.respond(id, method === 'item/tool/requestUserInput' ? { answers: {} } : { decision: 'decline' }); return; }
           if (method === 'item/tool/requestUserInput') {
             const questions = (Array.isArray(p.questions) ? p.questions : []).map((q: Obj) => ({ id: String(q.id), header: q.header, text: String(q.question ?? ''),
               options: q.options, allowOther: q.isOther === true, secret: q.isSecret === true }));
-            const answer = await this.hooks.onQuestion({ requestId: key, blocking: true, questions }, controller.signal);
+            // Wire ids can be reused for a different question, including after
+            // reconnect. Bind durable bridge deduplication to the typed id,
+            // logical context and all supported question/option semantics.
+            const questionId = createHash('sha256').update(JSON.stringify([id, method, p.threadId, p.turnId, p.itemId,
+              questions.map(q => [q.id, q.header, q.text, q.options?.map((o: Obj) => [o.label, o.description]), q.allowOther, q.secret])])).digest('hex');
+            const answer = await this.hooks.onQuestion({ requestId: questionId, blocking: true, questions }, controller.signal);
             r.respond(id, { answers: Object.fromEntries(Object.entries(answer.answers).map(([k, value]) => [k, { answers: [value] }])) });
           } else if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
             const edit = method === 'item/fileChange/requestApproval';
@@ -262,7 +267,7 @@ export default definePlugin<CodexConfig>({
             r.respond(id, { decision: decision.optionId === 'accept' ? 'accept' : 'decline' });
           } else { r.respond(id, { decision: 'decline' }); ctx.log.warn('codex_launcher_request_refused', { method }); }
         } catch { try { r.respond(id, method === 'item/tool/requestUserInput' ? { answers: {} } : { decision: 'decline' }); } catch { /* connection closed */ } }
-        finally { if (this.pending.get(key) === controller) this.pending.delete(key); }
+        finally { if (this.pending.get(id) === controller) this.pending.delete(id); }
       }
       async startInitial() {
         if (this.o.initialSent) return;
