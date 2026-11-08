@@ -15,6 +15,13 @@ export function assert(cond, msg = 'assertion failed') { if (!cond) throw new Er
 // Each demo owns its process group. Keep this registry at module scope so
 // normal exit and uncaught ESM errors share the same synchronous backstop.
 const live = new Map();
+// Opt-in only: a smoke may stop its hub while retaining its private database
+// and separately journaled authority. Process closure never supplies proof.
+const recoveryDirs = new Map();
+function mayDisposeDemo(dir) {
+  const recovery = recoveryDirs.get(dir);
+  try { return !recovery || recovery.canDispose() === true; } catch { return false; }
+}
 const exitCleanups = new Set();
 export function registerExitCleanup(fn) {
   exitCleanups.add(fn);
@@ -30,7 +37,7 @@ process.on('exit', () => {
   }
   for (const dir of live.values()) {
     const prefix = join(tmpdir(), 'vecnet-ui-data-');
-    if (dir.startsWith(prefix) && /^[A-Za-z0-9]+$/.test(dir.slice(prefix.length))) {
+    if (mayDisposeDemo(dir) && dir.startsWith(prefix) && /^[A-Za-z0-9]+$/.test(dir.slice(prefix.length))) {
       try { rmSync(dir, { recursive: true, force: true }); } catch {}
     }
   }
@@ -179,7 +186,8 @@ export async function buildCLI(dir) {
 // has exited, its numeric PGID may already name an unrelated group, so a
 // late close() or delayed KILL must not reuse it. Node sets exitCode or
 // signalCode in the same callback that reaps the child, before any other JS.
-export function demoCloser(child, dir, { signal = signalGroup, killAfterMs = 7000 } = {}) {
+export function demoCloser(child, dir, { signal = signalGroup, killAfterMs = 7000, recovery } = {}) {
+  if (recovery) recoveryDirs.set(dir, recovery);
   live.set(child.pid, dir);
   child.once('exit', () => live.delete(child.pid));
   const closed = new Promise(resolve => child.once('close', resolve));
@@ -194,17 +202,17 @@ export function demoCloser(child, dir, { signal = signalGroup, killAfterMs = 700
     clearTimeout(timer);
     await closed;
     if (live.get(child.pid) === dir) live.delete(child.pid);
-    await rm(dir, { recursive: true, force: true });
+    if (mayDisposeDemo(dir)) { await rm(dir, { recursive: true, force: true }); recoveryDirs.delete(dir); }
   }
   return { close, closed };
 }
 // args are extra demo flags (e.g. --pref-flag for a flag-sourced preference).
 // binary uses a caller-built demo without invoking the shared build helper.
-export async function bootDemo({ scale = false, args = [], binary } = {}) {
+export async function bootDemo({ scale = false, args = [], binary, recovery } = {}) {
   const binDir = binary ? dirname(resolve(binary)) : await binaries();
   const dir = await mkdtemp(join(tmpdir(), 'vecnet-ui-data-'));
   const child = spawn(binary ? resolve(binary) : join(binDir, 'demo'), ['--listen', '127.0.0.1:0', '--data-dir', dir, '--exit-on-stdin-eof', ...(scale ? ['--scale'] : []), ...args], { cwd: root, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
-  const { close, closed } = demoCloser(child, dir);
+  const { close, closed } = demoCloser(child, dir, { recovery });
   child.stdin.on('error', () => {}); // The demo may close stdin before its holder.
   // Consume logs, but never echo peer text or credentials into a terminal.
   child.stderr.resume();
@@ -214,6 +222,7 @@ export async function bootDemo({ scale = false, args = [], binary } = {}) {
     const first = once(lines, 'line');
     const line = await Promise.race([first.then(([line]) => line), closed.then(() => { throw new Error('demo exited before readiness'); }), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('demo startup timed out')), 60000); })]);
     const demo = JSON.parse(line);
+    await recovery?.onReady?.({ demo, dir, pid: child.pid });
     const control = async (name, body) => {
       const response = await fetch(`${demo.url}/__demo/${name}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       assert(response.ok, `demo ${name}: ${response.status}`);
@@ -283,8 +292,8 @@ async function throttle(context, page) {
   console.log(`browser CPU throttled ${rate}x (UI_CPU_THROTTLE)`);
 }
 
-export async function withDemo({ scale = false, signedIn = true, demoArgs = [], demoBinary } = {}, fn) {
-  const env = await bootDemo({ scale, args: demoArgs, binary: demoBinary });
+export async function withDemo({ scale = false, signedIn = true, demoArgs = [], demoBinary, recovery } = {}, fn) {
+  const env = await bootDemo({ scale, args: demoArgs, binary: demoBinary, recovery });
   let browser;
   const errors = [], allowed = [], held = [];
   try {
