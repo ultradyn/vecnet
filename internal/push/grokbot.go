@@ -52,7 +52,11 @@ func (w *Worker) pushGrokbot(ctx context.Context, d hub.DueDelivery) {
 	}
 
 	var answer bytes.Buffer
-	status, retryAfter, netErr := w.postGrokbot(ctx, d, key, &answer)
+	observation := hub.RouteAttemptObservation{RouteID: d.RouteID, DeliveryID: d.DeliveryID, Kind: hub.RouteKindGrokbot, BodyBytes: len(d.Body)}
+	status, retryAfter, netErr := w.postGrokbot(ctx, d, key, &answer, &observation)
+	observation.HTTPStatus, observation.NetError = status, netErr
+	observation.GrokClassification = hub.ClassifyGrokbot(status, answer.Bytes())
+	defer func() { w.Hub.NoteRouteAttempt(ctx, observation) }()
 	if ctx.Err() != nil && netErr != nil {
 		// Shutting down: leave the lease to lapse rather than burn an attempt.
 		return
@@ -68,7 +72,7 @@ func (w *Worker) pushGrokbot(ctx context.Context, d hub.DueDelivery) {
 }
 
 // postGrokbot sends one routine POST; the first 4 KiB of the answer go to sink.
-func (w *Worker) postGrokbot(ctx context.Context, d hub.DueDelivery, key string, sink *bytes.Buffer) (int, time.Duration, error) {
+func (w *Worker) postGrokbot(ctx context.Context, d hub.DueDelivery, key string, sink *bytes.Buffer, observation *hub.RouteAttemptObservation) (int, time.Duration, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.URL, bytes.NewReader(d.Body))
 	if err != nil {
 		return 0, 0, fmt.Errorf("push: request: %w", err)
@@ -76,7 +80,7 @@ func (w *Worker) postGrokbot(ctx context.Context, d hub.DueDelivery, key string,
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("X-Automation-Key", key) // undocumented; local senders send both (grokbot.md §1a)
-	return w.do(req, sink)
+	return w.do(req, sink, observation)
 }
 
 func (w *Worker) grokbotResult(ctx context.Context, d hub.DueDelivery, status int, body []byte, retryAfter time.Duration, netErr error) {
