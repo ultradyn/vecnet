@@ -34,7 +34,7 @@ vecnet codex bindings
 vecnet --net P codex status
 ```
 
-Manual bind writes the binding; it does not itself start an owner. Follow it with an ordinary action such as `vecnet --net P inbox` to ensure delivery, then inspect status.
+Manual bind writes the binding; it does not itself start an owner. Follow it with an ordinary action such as `vecnet --net P inbox` inside the same eligible, loaded Codex session being bound, with its real `CODEX_THREAD_ID`, the same profile, `--as` selection and `VECNET_CONFIG`, and automation enabled. That action starts best-effort registration and ensures delivery when runtime and ownership checks succeed; then inspect status. An ordinary operator shell without that session environment does not start an owner.
 
 - The full thread id is in the TUI footer when the terminal is at least 200 columns wide ([R] addendum), and in `codex resume`'s picker.
 - A binding lasts 24 h by default; `--ttl` takes 1 h to 168 h, and `--renew` extends it (at most 168 h from now). An action from the same thread extends expiry without changing creation time, identity pins or attendance settings. One peer identity must have one live thread: use distinct peers/profiles for distinct sessions on one hub. A thread may bind once per normalized hub, so the same thread can use profiles on two different hubs.
@@ -52,7 +52,7 @@ The private registry records config/bindings source paths, not credentials. Owne
 
 Managed execution uses `vecnet-delivery@<hub hash>.service` only when installed assets and paths match the default account home, data root and `/run/user/<uid>` contract. Custom roots/assets use detached execution only after absence of an incompatible managed owner is established. Unknown manager state or a live incompatible managed owner is preserved/refused. Uniqueness is within one per-user runtime scope; independent runtime namespaces are outside this guarantee. There is no global cross-namespace manager or legacy-ledger migration.
 
-The runner needs Node.js 22.18 or newer and the shipped launcher/hub-client runtime assets. Discovery prefers assets beside an npm native binary, then the installed launcher `current` tree; `VECNET_CODEX_DELIVERY_ENTRY` is an explicit entry override. Missing/unsupported Node, missing assets, an unsafe socket or an unreachable daemon leave hooks and inbox available. The ordinary launcher no longer consumes explicit Codex bindings.
+The runner needs a supported Node.js version (22.18+ on 22.x, 23.6+ on 23.x, or 24+) and the shipped launcher/hub-client runtime assets. Discovery prefers assets beside an npm native binary, then the installed launcher `current` tree; `VECNET_CODEX_DELIVERY_ENTRY` is an explicit entry override. Missing/unsupported Node, missing assets, an unsafe socket or an unreachable daemon leave hooks and inbox available. The ordinary launcher no longer consumes explicit Codex bindings.
 
 `just ln-install` installs versioned assets and the delivery template, reloads the user manager and refreshes active owners without enabling the ordinary launcher. Later actions also ensure the current binary/entry generation. Replacement verifies the old owner, drains it and reacquires the same lease before starting the new generation against the same recovery ledger. Preserve the registry, ledger and unresolved attempts during recovery or rollback; an older incompatible consumer is unsupported.
 

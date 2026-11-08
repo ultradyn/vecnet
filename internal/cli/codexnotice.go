@@ -37,7 +37,7 @@ func (r codexInactiveReason) Unwrap() error { return errCodexDelivery }
 func (r codexInactiveReason) action() string {
 	switch r {
 	case "node_missing", "node_too_old":
-		return "install Node.js 22.18 or newer, then retry a normal vecnet action"
+		return "install Node.js 22.18+ (22.x), 23.6+ (23.x), or 24+, then retry a normal vecnet action"
 	case "node_unavailable":
 		return "check that Node.js can run and report its version, then retry a normal vecnet action"
 	case "assets_missing":

@@ -213,7 +213,7 @@ func (a *app) checkCodexDeliveryNode(ctx context.Context, r codexDeliveryRelease
 	if e1 != nil || e2 != nil || e3 != nil {
 		return codexInactiveReason("node_unavailable")
 	}
-	if major < 22 || (major == 22 && minor < 18) {
+	if major < 22 || (major == 22 && minor < 18) || (major == 23 && minor < 6) {
 		return codexInactiveReason("node_too_old")
 	}
 	return nil
