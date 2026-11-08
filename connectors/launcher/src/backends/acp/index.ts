@@ -10,13 +10,6 @@ import { CANCEL_OPTION, permissionRequest } from './permission.ts';
 import { allocate, workspaceModes, workspaceRoot } from './workspace.ts';
 import type { AcpLaunchSpec, Workspace } from './workspace.ts';
 
-// Plugins depend only on backend.ts and their own modules. Keep the process
-// environment fence local to this stdio owner rather than importing internals.
-function scrubEnv(env: Readonly<Record<string, string | undefined>>): Record<string, string> {
-  return Object.fromEntries(Object.entries(env).filter(([key, value]) => value !== undefined &&
-    !/^(?:VECNET_.*|.*_(?:API_KEY|AUTH_TOKEN|BASE_URL|SECRET|TOKEN|PASSWORD))$/i.test(key))) as Record<string, string>;
-}
-
 export interface AcpPreset {
   /** Operator-pinned ACP executable and arguments, never a shell command. */
   argv: string[];
@@ -28,9 +21,9 @@ export interface AcpPreset {
 export interface AcpConfig { presets: Record<string, AcpPreset>; workspace_root?: string; request_timeout_ms?: number }
 interface Owned {
   tag: string; host: string; owner: string; jobId: string; preset: string;
-  phase: 'intent' | 'live' | 'lost' | 'settled'; id?: string; workspace?: Workspace; exitConfirmed?: boolean; fingerprint: string;
+  phase: 'intent' | 'live' | 'lost' | 'settled'; id?: string; workspace?: Workspace; exitConfirmed?: boolean; noProcessConfirmed?: boolean; fingerprint: string;
 }
-interface Active { id: string; consumed: string[]; text: string; messageId?: string; afterTool: boolean; cancelSent: boolean; done: Promise<void> }
+interface Active { id: string; consumed: string[]; text: string; messageId?: string; cancelSent: boolean; done: Promise<void> }
 const configSchema = {
   type: 'object', additionalProperties: false, required: ['presets'], properties: {
     workspace_root: { type: 'string', minLength: 1 }, request_timeout_ms: { type: 'integer', minimum: 100, maximum: 60000 },
@@ -42,6 +35,12 @@ const configSchema = {
     } },
   },
 };
+// Plugin boundary permits only backend.ts, own modules and node builtins.
+// Keep the existing deny filter verbatim; never allow credential/route names.
+function agentEnv(env: Readonly<Record<string, string | undefined>>): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter(([key, value]) => value !== undefined &&
+    !/^(?:VECNET_.*|.*_(?:API_KEY|AUTH_TOKEN|BASE_URL|SECRET|TOKEN|PASSWORD))$/i.test(key))) as Record<string, string>;
+}
 const cancelled = () => ({ outcome: { outcome: 'cancelled' } });
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
@@ -114,12 +113,13 @@ class AcpBackend implements Backend {
     if (signal?.aborted) throw new Error('acp_launch_aborted');
     const owned: Owned = { tag: spec.tag, jobId: spec.jobId, preset: spec.preset, host: this.ctx.host, owner: this.owner, phase: 'intent', fingerprint: hash(spec) };
     this.save(owned); // Crash fence is durable BEFORE allocation, spawn or session/new.
-    let rpc: AcpRpc | undefined;
+    let rpc: AcpRpc | undefined, spawnAttempted = false;
     try {
       owned.workspace = await allocate(spec, this.root, this.ctx, signal); this.save(owned);
       const preset = this.config.presets[spec.preset];
       if (signal?.aborted) throw new Error('acp_launch_aborted');
-      rpc = new AcpRpc(preset.argv, owned.workspace.path, scrubEnv({ ...process.env, ...spec.env }), this.ctx);
+      spawnAttempted = true;
+      rpc = new AcpRpc(preset.argv, owned.workspace.path, agentEnv({ ...process.env, ...spec.env }), this.ctx);
       const h = new AcpSession(owned, rpc, hooks, this);
       this.handles.set(spec.tag, h);
       const timeout = this.config.request_timeout_ms ?? 15000;
@@ -138,6 +138,7 @@ class AcpBackend implements Backend {
       return h;
     } catch {
       owned.phase = 'lost';
+      if (!spawnAttempted) owned.noProcessConfirmed = true;
       // Teardown is mandatory even when a ledger write fails.
       try { this.save(owned); } finally { if (rpc) await rpc.stop(); }
       throw new Error('acp_launch_failed: workspace retained; launch fence forbids respawn');
@@ -146,7 +147,7 @@ class AcpBackend implements Backend {
   async reattach(ref: SessionRef, hooks: SessionHooks) {
     if (ref.backend !== 'acp' || ref.host !== this.ctx.host || typeof ref.extra?.tag !== 'string') return { found: 'none' } as const;
     const owned = this.saved(ref.extra.tag);
-    if (!owned || owned.host !== this.ctx.host || owned.id !== ref.id || owned.phase === 'settled') return { found: 'none' } as const;
+    if (!owned || owned.host !== this.ctx.host || owned.id !== ref.id || owned.phase === 'settled' || owned.phase === 'lost' && (owned.exitConfirmed || owned.noProcessConfirmed)) return { found: 'none' } as const;
     const h = this.handles.get(owned.tag);
     if (owned.owner === this.owner && h?.live && owned.phase === 'live') { h.hooks = hooks; return { found: 'live', handle: h } as const; }
     // A PID or saved session id cannot establish surviving stdio ownership.
@@ -155,7 +156,7 @@ class AcpBackend implements Backend {
   }
   async findByTag(tag: string): Promise<SessionRef | null> {
     const o = this.saved(tag);
-    if (!o || o.host !== this.ctx.host || o.phase === 'settled') return null;
+    if (!o || o.host !== this.ctx.host || o.phase === 'settled' || o.phase === 'lost' && (o.exitConfirmed || o.noProcessConfirmed)) return null;
     const h = this.handles.get(tag);
     if (o.owner === this.owner && h?.live && o.phase === 'live') return h.ref;
     throw new Error('acp_launch_outcome_unknown: cannot discover a prior stdio process');
@@ -163,7 +164,7 @@ class AcpBackend implements Backend {
   async listOwned(): Promise<SessionRef[]> {
     const live: SessionRef[] = [];
     for (const o of this.records()) {
-      if (o.host !== this.ctx.host || o.phase === 'settled' || o.phase === 'lost' && o.exitConfirmed) continue;
+      if (o.host !== this.ctx.host || o.phase === 'settled' || o.phase === 'lost' && (o.exitConfirmed || o.noProcessConfirmed)) continue;
       const h = this.handles.get(o.tag);
       if (o.owner !== this.owner || !h?.live || o.phase !== 'live') throw new Error('acp_ownership_unknown');
       live.push(h.ref);
@@ -182,6 +183,7 @@ class AcpSession implements SessionHandle {
   private closing = false;
   private lastActivity: string;
   private sequence = 0;
+  private processExited = false;
   private readonly approvals = new Map<string, { controller: AbortController; cancel(): void }>();
   private readonly wakes = new Set<() => void>();
   private settling?: Promise<SettleResult>;
@@ -194,7 +196,7 @@ class AcpSession implements SessionHandle {
       if (!this.closing) { this.owned.phase = 'lost'; this.backend.save(this.owned); this.stateTo({ kind: 'ended', reason: 'lost', resumable: false }); }
       this.wake();
     };
-    rpc.onExit = code => { this.owned.exitConfirmed = true; this.backend.save(this.owned); this.emit({ type: 'process_exited', at: this.now(), code, resumable: false }); this.wake(); };
+    rpc.onExit = code => { this.owned.exitConfirmed = true; this.backend.save(this.owned); this.emit({ type: 'process_exited', at: this.now(), code, resumable: false }); this.processExited = true; this.wake(); };
   }
   get live() { return this.rpc.alive && !this.closing; }
   get ref(): SessionRef {
@@ -224,7 +226,7 @@ class AcpSession implements SessionHandle {
     const receipt = JSON.stringify({ payloadHash, consumed, result });
     this.backend.ctx.store.set('sent:' + this.owned.tag + ':' + inputId, receipt);
     for (const delivery of consumed) this.backend.ctx.store.set('delivery:' + this.owned.tag + ':' + delivery, receipt);
-    const active: Active = { id, consumed, text: '', afterTool: false, cancelSent: false, done: Promise.resolve() };
+    const active: Active = { id, consumed, text: '', cancelSent: false, done: Promise.resolve() };
     this.active = active;
     try {
       this.stateTo({ kind: 'turn_running', turnId: id, since: this.now() });
@@ -290,15 +292,17 @@ class AcpSession implements SessionHandle {
       const content = object(u.content);
       if (content.type !== 'text' || typeof content.text !== 'string') return;
       const messageId = typeof u.messageId === 'string' ? u.messageId : undefined;
-      if (active.afterTool || messageId && active.messageId && active.messageId !== messageId) active.text = '';
-      active.afterTool = false; active.messageId = messageId;
+      // Only a known message id transition establishes a new message. Plan
+      // and tool status are independent progress; missing ids cannot justify
+      // deleting text already received. Keep the last known id through gaps.
+      if (messageId !== undefined && active.messageId !== undefined && active.messageId !== messageId) active.text = '';
+      if (messageId !== undefined) active.messageId = messageId;
       if (Buffer.byteLength(active.text) + Buffer.byteLength(content.text) > 4 * 1024 * 1024) throw new Error('acp_output_limit');
       active.text += content.text;
       // Progress contains the actual streamed text; thoughts and raw tool
       // arguments are not copied into finalText or logs.
       this.emit({ type: 'progress', turnId: active.id, summary: content.text });
     } else if (u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update' || u.sessionUpdate === 'plan') {
-      active.afterTool = true;
       this.emit({ type: 'progress', turnId: active.id, summary: u.sessionUpdate === 'plan' ? 'ACP plan updated' : 'ACP tool ' + (typeof u.status === 'string' ? u.status : 'pending') });
     }
   }
@@ -351,11 +355,11 @@ class AcpSession implements SessionHandle {
         if (!raw) throw new Error('acp_event_history_gap');
         yield { cursor: { value: JSON.stringify({ tag: this.owned.tag, n: position }) }, event: JSON.parse(raw) as TurnEvent };
       }
-      if (this.current.kind === 'ended' || signal?.aborted) return;
+      if (this.current.kind === 'ended' && this.processExited || signal?.aborted) return;
       await new Promise<void>(resolve => {
         const done = () => { this.wakes.delete(done); signal?.removeEventListener('abort', done); resolve(); };
         this.wakes.add(done); signal?.addEventListener('abort', done, { once: true });
-        if (signal?.aborted || position < this.sequence || this.current.kind === 'ended') done();
+        if (signal?.aborted || position < this.sequence || this.current.kind === 'ended' && this.processExited) done();
       });
     }
   }

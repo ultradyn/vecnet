@@ -1,8 +1,9 @@
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import plugin from '../src/backends/acp/index.ts';
 import type { AcpConfig } from '../src/backends/acp/index.ts';
@@ -14,9 +15,11 @@ const fixturePath = fileURLToPath(new URL('./fixtures/fake-acp-agent.mjs', impor
 const input = (text = 'follow-up', id = 'dly_one'): TurnInput => ({ items: [{ deliveryId: id, messageId: 'msg_one', from: 'peer_one', text, attachments: [] }] });
 async function fixture(t: TestContext, scenario = 'normal') {
   // Explicit build-cache root; never create test artifacts under /tmp.
-  const parent = process.env.ACP_TEST_ROOT ?? process.env.TMPDIR ?? '/mnt/build-cache/tmp';
+  const parent = process.env.ACP_TEST_ROOT ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache'), 'vecnet-launcher', 'acp-tests');
   assert.ok(parent.startsWith('/') && parent !== '/tmp' && !parent.startsWith('/tmp/'));
   await mkdir(parent, { recursive: true });
+  const canonicalParent = await realpath(parent);
+  assert.ok(canonicalParent !== '/tmp' && !canonicalParent.startsWith('/tmp/'));
   const dir = await mkdtemp(join(parent, 'vecnet-acp-'));
   const values = new Map<string, string>(), execs: string[][] = [], log = join(dir, 'wire.jsonl');
   const ctx: PluginContext = {
@@ -168,7 +171,8 @@ for (const scenario of ['bad-stdout', 'exit', 'mode-change']) test(`transport or
   const events = await eventsUntil(h, e => e.type === 'state' && e.state.kind === 'ended');
   assert.equal(events.some(e => e.type === 'turn_finished'), false);
   assert.equal(h.state().kind, 'ended');
-  await assert.rejects(f.backend.reattach(h.ref, f.hooks), /outcome_unknown/);
+  await eventsUntil(h, e => e.type === 'process_exited');
+  assert.equal((await f.backend.reattach(h.ref, f.hooks)).found, 'none');
   await assert.rejects(f.launch(), /outcome_unknown/);
 });
 
@@ -239,4 +243,44 @@ test('permission mode change while idle also closes the session before any new i
   await eventsUntil(h, e => e.type === 'state' && e.state.kind === 'ended');
   await assert.rejects(h.send(input(), 'start'), /unsupported/);
   assert.equal((await f.calls()).filter(c => c.method === 'session/prompt').length, 1);
+});
+
+
+for (const scenario of ['interleave-same-id-plan', 'interleave-same-id-tool', 'interleave-no-id-plan', 'interleave-no-id-tool']) {
+  test(`I3 preserves a complete assistant message across ${scenario}`, async t => {
+    const f = await fixture(t, scenario), h = await f.launch();
+    const final = (await eventsUntil(h, finished)).find(finished);
+    assert.equal(final?.type === 'turn_finished' && final.finalText, 'First half second half');
+    assert.equal(final?.type === 'turn_finished' && final.outcome, 'completed');
+  });
+}
+
+
+test('I4 child environment preserves safe inputs and denies launcher/credential/route variables', async t => {
+  const f = await fixture(t, 'env-oracle');
+  const safe = { HOME: join(f.dir, 'synthetic-home'), PATH: '/synthetic/path', LANG: 'C.UTF-8', TMPDIR: f.dir, SAFE_CONFIG: 'fixture-only' };
+  const denied = { VECNET_CREDENTIAL: 'fixture-only', VECNET_URL: 'fixture-only', OPENAI_API_KEY: 'fixture-only', ANTHROPIC_AUTH_TOKEN: 'fixture-only',
+    ANTHROPIC_BASE_URL: 'fixture-only', OTHER_SECRET: 'fixture-only', lower_password: 'fixture-only' };
+  const h = await f.launch({ env: { ...safe, ...denied } });
+  const final = (await eventsUntil(h, finished)).find(finished); assert.ok(final?.type === 'turn_finished');
+  assert.deepEqual(JSON.parse(final.finalText), { ...safe, ...Object.fromEntries(Object.keys(denied).map(k => [k, null])) });
+});
+
+
+test('I5 default test root uses the synthetic user persistent cache rather than a host-specific mount', async t => {
+  if (process.env.ACP_TEST_ROOT) { t.skip('explicit root supplied'); return; }
+  const f = await fixture(t);
+  const expected = join(process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache'), 'vecnet-launcher', 'acp-tests');
+  assert.ok(f.dir.startsWith(expected + '/'), 'default ACP fixtures must use the user persistent cache');
+});
+
+
+test('C1 completed inbound identity tracking has a finite connection budget and never evicts identities', async t => {
+  const f = await fixture(t, 'request-budget'), h = await f.launch();
+  const events = await eventsUntil(h, e => e.type === 'state' && e.state.kind === 'ended' || e.type === 'turn_finished');
+  assert.equal(events.some(e => e.type === 'turn_finished'), false, 'request identity budget must close rather than evict and continue');
+  await eventsUntil(h, e => e.type === 'process_exited');
+  const responses = (await f.calls()).filter(c => typeof c.id === 'string' && c.id.startsWith('budget-'));
+  assert.equal(responses.length, 4096);
+  assert.ok(responses.every(c => c.error?.code === -32601));
 });

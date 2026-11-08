@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { PluginContext } from '../../backend.ts';
@@ -9,6 +10,7 @@ export function object(value: unknown): ObjectValue {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as ObjectValue : {};
 }
 const MAX_FRAME = 4 * 1024 * 1024;
+const MAX_INCOMING_IDS = 4096;
 interface Pending { resolve(value: unknown): void; reject(error: Error): void; cleanup(): void }
 
 /** ACP v1 stdio: UTF-8 JSON-RPC 2.0, one JSON object per newline. No shell,
@@ -18,6 +20,10 @@ export class AcpRpc {
   private readonly ctx: PluginContext;
   private readonly pending = new Map<number, Pending>();
   private readonly incoming = new Set<RpcId>();
+  // Keep completed identities for the entire connection. Never evict/reuse an
+  // approval identity: close on exhaustion. Fixed-size digests bound storage
+  // even when an agent supplies a frame-sized string id.
+  private readonly seenIncoming = new Set<string>();
   private nextId = 1;
   private dead = false;
   private exited = false;
@@ -60,7 +66,7 @@ export class AcpRpc {
     if (this.dead) return;
     this.dead = true;
     for (const p of this.pending.values()) { p.cleanup(); p.reject(new Error('acp_connection_lost: request outcome may be unknown')); }
-    this.pending.clear(); this.incoming.clear();
+    this.pending.clear(); this.incoming.clear(); this.seenIncoming.clear();
     try { this.onLost(); } catch { /* A full ledger must not prevent process teardown. */ }
     // A broken pipe must not leave an uncontrolled agent running.
     this.kill('SIGKILL');
@@ -84,8 +90,10 @@ export class AcpRpc {
       if (!Object.hasOwn(m, 'id')) { this.onNotification(m.method, m.params); return; }
       if (!(typeof m.id === 'string' || typeof m.id === 'number' && Number.isSafeInteger(m.id))) throw new Error('invalid_id');
       const id = m.id;
-      if (this.incoming.has(id)) throw new Error('duplicate_request');
-      if (this.incoming.size >= 128) throw new Error('too_many_requests');
+      const identity = createHash('sha256').update(JSON.stringify([typeof id, id])).digest('hex');
+      if (this.seenIncoming.has(identity)) throw new Error('reused_request_identity');
+      if (this.seenIncoming.size >= MAX_INCOMING_IDS || this.incoming.size >= 128) throw new Error('too_many_requests');
+      this.seenIncoming.add(identity);
       this.incoming.add(id);
       void Promise.resolve().then(() => this.onRequest(m.method as string, m.params, id)).then(
         result => { if (this.alive) this.write({ jsonrpc: '2.0', id, result }); },
