@@ -76,6 +76,33 @@ test('matchPeers: sigma variants match alone and in word-final names', () => {
   assert.deepEqual(matchPeers([{ peer_id: 'peer_accent', name: 'café' }], 'cafe'), [], 'accents stay distinct');
 });
 
+for (const [name, query] of [
+  ['ẞeta', 'ß'], ['ßeta', 'ẞ'],
+  ['Kate', 'kate'], ['kate', 'Kate'],
+  ['K', 'k'], ['k', 'K'],
+]) {
+  test(`matchPeers: name ${name} matches case-equivalent query ${query}`, () => {
+    const peer = { peer_id: 'peer_match', name };
+    assert.deepEqual(ids(matchPeers([peer], query)), ['peer_match']);
+  });
+}
+
+for (const { label, names, queries } of [
+  { label: 'sharp-S', names: ['aẞ', 'ßeta', 'ẞ', 'ß', 'ẞeta', 'ẞalpha', 'zß', 'aß'], queries: ['ß', 'ẞ'] },
+  { label: 'Kelvin', names: ['aK', 'kate', 'K', 'k', 'Kate', 'Kalpha', 'zk', 'ak'], queries: ['k', 'K'] },
+]) {
+  test(`matchPeers: ${label} variants share exact, prefix and substring ranking`, () => {
+    const peers = names.map((name, i) => ({ peer_id: 'peer_' + i, name }));
+    for (const query of queries) {
+      assert.deepEqual(ids(matchPeers(peers, query)), [
+        'peer_2', 'peer_3', // Exact names, tied by peer id.
+        'peer_5', 'peer_1', 'peer_4', // Prefix names, alphabetically then by id.
+        'peer_0', 'peer_7', 'peer_6', // Substrings, alphabetically then by id.
+      ], query);
+    }
+  });
+}
+
 test('matchPeers: an empty query is the full directory; bad input is no peers', () => {
   assert.equal(matchPeers(DIR, '').length, DIR.peers.length);
   assert.equal(matchPeers(DIR, '   ').length, DIR.peers.length);

@@ -43,12 +43,12 @@ export function quoted(q) {
 // from that public directory; thread participants can still name them.
 export function matchPeers(directory, q) {
   const list = Array.isArray(directory) ? directory : directory && Array.isArray(directory.peers) ? directory.peers : [];
-  // Uppercase gives every sigma form the same key, including word-final ς.
-  const needle = normQuery(q).toUpperCase();
+  // Lowercase unifies sharp-S and Kelvin; uppercase then unifies sigma.
+  const needle = normQuery(q).toLowerCase().toUpperCase();
   const ranked = [];
   for (const p of list) {
     if (!p || !str(p.peer_id)) continue;
-    const name = str(p.name).toUpperCase();
+    const name = str(p.name).toLowerCase().toUpperCase();
     const at = needle ? name.indexOf(needle) : 0;
     if (at < 0) continue;
     ranked.push({ p, name, rank: !needle ? 0 : name === needle ? 0 : at === 0 ? 1 : 2 });
