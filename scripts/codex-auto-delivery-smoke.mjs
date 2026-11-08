@@ -163,7 +163,9 @@ export function observeActorTurn({ owned, command, requestText, beforeTurnIds, s
   if (turns.some(t => t.status === 'inProgress' || t.items.some(i => i.status === 'inProgress'))) return { status: 'pending' };
   if (fresh.length !== 1) fail('actor_unproved');
   if (commands.length) return { status: 'executed', proof: proveActor(owned, [turn], command) };
-  return { status: 'terminal-no-execution', proof: { kind: 'owned-actor-not-executed', threadId: owned.id, turnId: turn.id,
+  // Code Mode can omit a subprocess from this projection. Missing native
+  // evidence cannot establish that the correlated request was never attempted.
+  return { status: 'terminal-execution-unproved', proof: { kind: 'owned-actor-execution-unproved', threadId: owned.id, turnId: turn.id,
     commandHash: hash(command), requestHash: hash(requestText), actorIntentHash: digestObject(actorIntent), sourceIntentHash: digestObject(sourceIntent),
     historyHash: digestObject(turns), beforeTurnIdsHash: digestObject(beforeTurnIds) } };
 }
@@ -917,6 +919,9 @@ export function createHarness(raw, ports = {}) {
   }
   async function cleanup() {
     load(); installedUnchanged();
+    // A successful capability sample cannot prove complete execution coverage
+    // for another turn. Preserve unresolved intent before any retirement write.
+    if (journal.actorIntent) fail('actor_unproved');
     const pending = journal.threadIntent;
     if (pending && !pending.launch) fail('unproved_thread_remaining');
     if (pending && (!['a', 'b'].includes(pending.session) || journal.threads[pending.session] ||
@@ -1291,7 +1296,7 @@ export function createHarness(raw, ports = {}) {
       if (attempted.some(i => i.status === 'completed' && i.exitCode !== 0)) fail('actor_sandbox_denied');
       const observed = observeActorTurn({ owned: own, command, requestText, beforeTurnIds, actorIntent: journal.actorIntent,
         sourceIntent: journal.sourceIntent, historyThreadId: own.id, historyComplete: true, turns });
-      if (observed.status === 'terminal-no-execution') { journal.actorIntent.failure = observed.proof; save(); fail('actor_not_executed'); }
+      if (observed.status === 'terminal-execution-unproved') { journal.actorIntent.failure = observed.proof; save(); fail('actor_execution_unproved'); }
       return observed.status === 'executed' ? observed.proof : undefined; }, 180000);
     const owner = await until(async () => { try { return readOwner(p.hub); } catch (e) { if (e.code === 'ENOENT') return; throw e; } });
     if (journal.owners[p.hub] && ['dev', 'ino', 'ledgerDev', 'ledgerIno'].some(k => owner[k] !== journal.owners[p.hub][k])) fail('lease_changed');
