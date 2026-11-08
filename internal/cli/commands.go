@@ -253,10 +253,16 @@ func (a *app) exit(err error) int {
 }
 
 // parseGlobal pulls --net, --as, --json and --help out of args wherever
-// they appear (before a "--"), returning the rest in order.
+// they appear (before a "--"), returning the rest in order. Launcher setup's
+// --acp-arg operand is opaque child argv, including global-looking values.
 func (a *app) parseGlobal(args []string) (rest []string, help bool, err error) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		if arg == "--acp-arg" && len(rest) >= 2 && rest[0] == "launcher" && rest[1] == "setup" && i+1 < len(args) {
+			rest = append(rest, arg, args[i+1])
+			i++
+			continue
+		}
 		if arg == "--" {
 			rest = append(rest, args[i:]...)
 			break

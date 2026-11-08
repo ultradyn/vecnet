@@ -76,7 +76,9 @@ vecnet --net PROFILE launcher install --source /absolute/vecnet-checkout --write
 vecnet --net PROFILE launcher check
 ```
 
-The integrated tested runtime is `@agentclientprotocol/claude-agent-acp@0.101.0`; the x-boss installation uses `/work/package-cache/xertrov/fleet/vecnet-acp/claude-agent-acp-0.101.0/bin/claude-agent-acp`. Use a versioned absolute path on each host. Optional `--acp-arg ARG` flags preserve exact argv entries. Native `--codex-home`, `--model` and `--effort` flags are rejected for ACP; the agent retains its configured model. A configured ACP launcher appears in the existing web launch form with its actual preset, ask policy, projects and workspace choices.
+The integrated tested runtime is `@agentclientprotocol/claude-agent-acp@0.101.0`; the x-boss installation uses `/work/package-cache/xertrov/fleet/vecnet-acp/claude-agent-acp-0.101.0/bin/claude-agent-acp`. Use a versioned absolute path on each host. Native `--codex-home`, `--model` and `--effort` flags are rejected for ACP; the agent retains its configured model. A configured ACP launcher appears in the existing web launch form with its actual preset, ask policy, projects and workspace choices.
+
+Repeat `--acp-arg=VALUE` for exact, ordered argv entries, for example `--acp-arg=--json --acp-arg='two words'`. The separate form also consumes exactly the next shell argument as child data: `--acp-arg -h`, `--acp-arg --help`, `--acp-arg --json`, and `--acp-arg --net=other` preserve those literal values. Vecnet global flags outside these operands retain their usual meaning. A `--` used as an ACP operand is literal child data; a standalone `--` ends vecnet flag parsing, so put setup flags such as `--write` before it. Setup writes only with its own `--write`; `--acp-arg=--write` passes a child argument and does not authorize writing.
 
 ACP stdio sessions remain attached to the launcher process. Hub reconnect preserves the live process, but a launcher process restart cannot resume it: recovery remains outcome unknown and never spawns a replacement for the same job. This backend advertises `resume: none`; persistent native Codex restart continuity is separate.
 
