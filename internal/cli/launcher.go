@@ -140,7 +140,7 @@ func launcherDir(path, label string) (string, error) {
 }
 
 func (a *app) launcherSetup(p launcherPaths, o opts) error {
-	if !launcherAlias.MatchString(o.str("project")) || o.str("project") == "temporary" {
+	if !launcherAlias.MatchString(o.str("project")) {
 		return usageErr("--project must be an alias containing letters, numbers, dots, underscores or hyphens")
 	}
 	repo, err := launcherDir(o.str("repo"), "--repo")
@@ -238,11 +238,15 @@ func (a *app) launcherSetup(p launcherPaths, o opts) error {
 	if err != nil {
 		return err
 	}
+	scratchAlias := "temporary"
+	if o.str("project") == scratchAlias {
+		scratchAlias = "vecnet-scratch"
+	}
 	config := map[string]any{
 		"host": host, "hub": map[string]string{"url": profile.Hub, "credential_file": p.Credential}, "state_dir": p.State,
 		"backends": []any{map[string]any{"id": "codex-app-server", "module": "./backends/codex-app-server/index.ts", "config": map[string]any{"codex_home": home, "workspace_root": filepath.Join(p.Data, "workspaces"), "presets": map[string]any{"default": preset}}}},
-		"projects": map[string]any{o.str("project"): map[string]string{"repo_root": repo, "base_ref": ref}, "temporary": map[string]string{"repo_root": p.Data, "base_ref": "HEAD"}},
-		"policies": map[string]any{"default": map[string]any{"backends": []string{"codex-app-server"}, "projects": []string{o.str("project"), "temporary"}, "permission_modes": []string{"read-only", "ask", "auto", "full-access"}}},
+		"projects": map[string]any{o.str("project"): map[string]string{"repo_root": repo, "base_ref": ref}, scratchAlias: map[string]any{"repo_root": p.Data, "base_ref": "HEAD", "scratch": true}},
+		"policies": map[string]any{"default": map[string]any{"backends": []string{"codex-app-server"}, "projects": []string{o.str("project"), scratchAlias}, "permission_modes": []string{"read-only", "ask", "auto", "full-access"}}},
 	}
 	if !o.has("write") {
 		return a.emitValue(map[string]any{"write": false, "profile": p.Name, "peer_id": me.PeerID, "config_path": p.Config, "credential_file": p.Credential, "config": config})

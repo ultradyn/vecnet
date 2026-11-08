@@ -4,7 +4,7 @@ import type { PermissionMode, WorkspaceMode } from './backend.ts';
 
 export interface PresenceSnapshot {
   running: number; open: number; max: number; perRequester: number;
-  backends: Record<string, 'ok' | 'degraded' | 'down'>; modes: PermissionMode[]; presets: string[]; projects?: string[];
+  backends: Record<string, 'ok' | 'degraded' | 'down'>; modes: PermissionMode[]; presets: string[]; projects?: string[]; scratchProjects?: string[];
   backendModes?: Record<string, PermissionMode[]>;
   backendWorkspaces?: Record<string, WorkspaceMode[]>;
 }
@@ -18,7 +18,7 @@ export function presenceBody(s: PresenceSnapshot, host: string): Omit<PresenceBo
     // Self-reported tags: requesters use them to choose, they authorise nothing (PROTOCOL 14.1).
     capabilities: [...ids.map(id => `launch:${id}`), ...s.presets.map(p => `preset:${p}`), `host:${host}`, ...s.modes.map(m => `mode:${m}`),
       ...ids.flatMap(id => (s.backendModes?.[id] ?? []).map(m => `mode:${id}/${m}`)),
-      ...ids.flatMap(id => (s.backendWorkspaces?.[id] ?? []).map(m => `workspace:${id}/${m}`)), ...(s.projects ?? []).map(p => `project:${p}`)],
+      ...ids.flatMap(id => (s.backendWorkspaces?.[id] ?? []).map(m => `workspace:${id}/${m}`)), ...(s.projects ?? []).map(p => `project:${p}`), ...(s.scratchProjects ?? []).filter(p => s.projects?.includes(p)).map(p => `scratch:${p}`)],
     quota: { max_sessions: s.max, running: s.running, open: s.open, per_requester: s.perRequester, backends: { ...s.backends } },
   };
 }

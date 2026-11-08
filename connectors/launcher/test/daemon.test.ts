@@ -381,3 +381,15 @@ test('requesters retired while the daemon was down are found by the first succes
   h.clock.advance(10 * 60_000);
   await until(() => h.statuses(jobId).some(s => s.state === 'cancelled'), 'cancelled requester_retired');
 });
+
+
+test('scoped backend modes honor the same configured policy union as global discovery', async t => {
+  const h = await harness(t, { cfg: { policies: { default: { backends: ['fake'], permission_modes: ['read-only'], projects: ['repo'] } } },
+    backend: createFakeBackend({ caps: { permissionModes: ['read-only', 'ask', 'auto', 'full-access'] } }) });
+  await until(() => h.presence().length > 0, 'first discovery report');
+  const tags = h.presence()[0].capabilities as string[];
+  assert.deepEqual(tags.filter(x => x.startsWith('mode:')).sort(), ['mode:fake/read-only','mode:read-only']);
+  const d = launch(h.clock.now(), { permission_mode: 'read-only' });
+  await h.push('delivery', d);
+  await until(() => h.launches() === 1, 'advertised read-only launch accepted');
+});

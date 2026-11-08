@@ -88,3 +88,12 @@ test('presence scopes native and T3 permission modes while preserving legacy glo
   assert.ok(body.capabilities!.includes('mode:read-only'));
   assert.ok(!body.capabilities!.includes('mode:t3/read-only'));
 });
+
+
+test('scratch discovery advertises only explicitly configured project aliases', () => {
+  const body = presenceBody({running:0,open:0,max:2,perRequester:1,backends:{'codex-app-server':'ok'},modes:['ask'],presets:[],projects:['temporary','scratch'],scratchProjects:['scratch','not-configured']},'host');
+  assert.ok(body.capabilities?.includes('project:temporary'));
+  assert.ok(body.capabilities?.includes('scratch:scratch'));
+  assert.ok(!body.capabilities?.includes('scratch:temporary'));
+  assert.ok(!body.capabilities?.includes('scratch:not-configured'));
+});

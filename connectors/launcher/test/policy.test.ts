@@ -36,7 +36,7 @@ function permission(patch: Partial<LaunchPermission> = {}): LaunchPermission {
 }
 function denied(reason: string) { return {ok:false,error:'policy_denied',reason}; }
 
-test('workspace choices require backend support and the configured temporary project policy', async () => {
+test('workspace choices require backend support and explicit scratch metadata, preserving ordinary temporary aliases', async () => {
   const a = await setup();
   a.req.input.workspace_mode = 'project-root';
   assert.deepEqual(gateLaunch(a), denied('workspace_mode'));
@@ -49,9 +49,42 @@ test('workspace choices require backend support and the configured temporary pro
   a.cfg.projects.temporary = { repo_root: '/host/cache', base_ref: 'HEAD' };
   assert.deepEqual(gateLaunch(a), denied('project'));
   a.cfg.policies.default.projects = [...a.cfg.policies.default.projects ?? [], 'temporary'];
+  assert.deepEqual(gateLaunch(a), denied('workspace_project'));
+  a.req.input.workspace_mode = 'project-root';
+  assert.equal(gateLaunch(a).ok, true, 'legacy ordinary temporary alias supports its repository');
+  a.req.input.workspace_mode = 'worktree';
   assert.equal(gateLaunch(a).ok, true);
+  a.cfg.projects['vecnet-scratch'] = {repo_root:'/host/cache',base_ref:'HEAD',scratch:true};
+  a.cfg.policies.default.projects!.push('vecnet-scratch');
+  a.req.input.project = 'vecnet-scratch';
+  assert.deepEqual(gateLaunch(a), denied('workspace_project'));
+  a.req.input.workspace_mode = 'temp';
+  const accepted = gateLaunch(a);
+  assert.equal(accepted.ok, true);
+  if (accepted.ok) assert.equal(accepted.project.scratch, true);
   a.req.input.workspace_mode = 'project-root';
   assert.deepEqual(gateLaunch(a), denied('workspace_project'));
+});
+
+test('legacy T3 and Paseo allowlisted temporary repositories retain omitted and explicit worktree modes', async () => {
+  for (const id of ['t3','paseo']) {
+    const a = await setup();
+    const info = a.backends.get('t3')!;
+    a.backends = new Map([[id, info]]);
+    a.cfg.backends = [{id,module:`./backends/${id}/index.ts`,config:{}}];
+    a.cfg.projects = {temporary:{repo_root:'/fake/ordinary-repo',base_ref:'master'}};
+    a.cfg.policies.default.projects = ['temporary'];
+    a.req.input.backend = id; a.req.input.project = 'temporary';
+    for (const workspace of [undefined,'worktree'] as const) {
+      if (workspace === undefined) delete a.req.input.workspace_mode;
+      else a.req.input.workspace_mode = workspace;
+      const accepted = gateLaunch(a);
+      assert.equal(accepted.ok,true,`${id}/${workspace ?? 'omitted'}`);
+      if (accepted.ok) assert.equal(accepted.project.repoRoot,'/fake/ordinary-repo');
+    }
+    a.cfg.policies.default.projects = [];
+    assert.deepEqual(gateLaunch(a),denied('project'));
+  }
 });
 
 test('policyKeyFor: peer entry beats principal entry; principal entry matches a new peer by created_by with no config change; default otherwise', async () => {

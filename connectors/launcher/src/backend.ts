@@ -46,7 +46,7 @@ export interface LaunchSpec {
   env: Readonly<Record<string, string>>; // already scrubbed; never contains vecnet credentials
 }
 
-export interface ResolvedProject { alias: string; repoRoot: string; baseRef: string }
+export interface ResolvedProject { alias: string; repoRoot: string; baseRef: string; scratch?: boolean }
 export interface LocalFile { path: string; name: string; mediaType: string; sha256: string }
 
 /** Opaque, JSON-serialisable; persisted in the ledger and given back to reattach(). */

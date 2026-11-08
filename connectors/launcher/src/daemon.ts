@@ -254,7 +254,7 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
     const projects = (job: JobRow) => {
       const p = Object.hasOwn(cfg.projects, job.project) ? cfg.projects[job.project] : undefined;
       if (!p) throw new Error('project alias is not configured');
-      return { alias: job.project, repoRoot: p.repo_root, baseRef: job.input.base_ref ?? p.base_ref };
+      return { alias: job.project, repoRoot: p.repo_root, baseRef: job.input.base_ref ?? p.base_ref, ...(p.scratch === undefined ? {} : {scratch:p.scratch}) };
     };
     const launchDeps: LaunchDeps = {
       ledger, jobs, backends, clock, log, host: cfg.host, cfg, projects, beforeRecordRef: o.beforeRecordRef, kick: () => outbox.kick(),
@@ -453,7 +453,8 @@ export async function startDaemon(o: { cfg: LauncherConfig; hub?: HubApi; stream
         })),
         modes: modes(), presets: [...info].flatMap(([id, i]) => i.caps.presets.map(p => `${id}/${p.id}`)),
         projects: Object.keys(cfg.projects),
-        backendModes: Object.fromEntries([...info].map(([id, i]) => [id, [...i.caps.permissionModes]])),
+        scratchProjects: Object.keys(cfg.projects).filter(alias => cfg.projects[alias].scratch === true),
+        backendModes: Object.fromEntries([...info].map(([id, i]) => [id, i.caps.permissionModes.filter(m => modes().includes(m))])),
         backendWorkspaces: Object.fromEntries([...info].map(([id, i]) => [id, [...i.caps.workspaceModes ?? ['worktree']]])),
       };
     };

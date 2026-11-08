@@ -18,6 +18,9 @@ export interface NativeThread {
   archived: boolean;
   name?: string;
   turns: NativeTurn[];
+  /** Effective settings survive resume independently of subsequent requests. */
+  effective?: Params;
+  threadSource?: string;
 }
 type Peer = { socket: Socket; connection: number; send(value: unknown): void };
 type Failure = 'drop' | 'accept-drop' | { code: number; message: string };
@@ -48,9 +51,17 @@ export async function startFakeNativeCodex(dir: string) {
   const replies: { id: number | string; result?: Params; error?: unknown }[] = [];
   const paths: string[] = [];
   const failures = new Map<string, Failure[]>();
+  const responses = new Map<string, ((result: Params) => Params)[]>();
   let connection = 0, threadId = 0, turnId = 0, requestId = 10000;
   let listVisible = true, pageSize = 100;
-  const snapshot = (t: NativeThread, turns = true) => ({ ...t, turns: turns ? t.turns : [] });
+  let threadPages: Params[] | undefined;
+  const snapshot = (t: NativeThread, turns = true) => {
+    const { effective: _, ...thread } = t;
+    return { cliVersion: '0.166.0', createdAt: 1794096000, updatedAt: 1794096000,
+      ephemeral: false, modelProvider: 'native-default-provider', preview: '', projectId: null,
+      sessionId: t.id, source: 'appServer', ...thread, turns: turns ? t.turns : [] };
+  };
+  const effective = (t: NativeThread) => ({ ...t.effective, thread: snapshot(t, false) });
   function notice(method: string, params: Params) {
     for (const peer of peers) peer.send({ method, params });
   }
@@ -62,9 +73,9 @@ export async function startFakeNativeCodex(dir: string) {
     const method = message.method, params = message.params ?? {};
     requests.push({ method, params, connection: peer.connection });
     const fail = failures.get(method)?.shift();
-    const respond = (result: unknown) => {
+    const respond = (result: Params) => {
       if (fail === 'accept-drop') peer.socket.destroy();
-      else peer.send({ id: message.id, result });
+      else peer.send({ id: message.id, result: responses.get(method)?.shift()?.(structuredClone(result)) ?? result });
     };
     const error = (code: number, text: string) => peer.send({ id: message.id, error: { code, message: text } });
     if (fail === 'drop') { peer.socket.destroy(); return; }
@@ -73,12 +84,23 @@ export async function startFakeNativeCodex(dir: string) {
     if (method === 'initialized') return;
     if (method === 'thread/start') {
       const t: NativeThread = { id: `native-${++threadId}`, cwd: params.cwd,
-        status: { type: 'idle' }, archived: false, turns: [] };
+        status: { type: 'idle' }, archived: false, turns: [], threadSource: params.threadSource };
+      t.effective = { cwd: t.cwd, model: params.model ?? 'native-default-model', modelProvider: 'native-default-provider',
+        reasoningEffort: params.config?.model_reasoning_effort ?? 'medium',
+        approvalPolicy: params.approvalPolicy, approvalsReviewer: params.approvalsReviewer,
+        runtimeWorkspaceRoots: params.runtimeWorkspaceRoots ?? [t.cwd],
+        sandbox: params.sandbox === 'danger-full-access' ? { type: 'dangerFullAccess' } :
+          params.sandbox === 'read-only' ? { type: 'readOnly', networkAccess: false } :
+            { type: 'workspaceWrite', writableRoots: [t.cwd], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } };
       threads.set(t.id, t);
-      respond({ thread: snapshot(t), model: params.model ?? 'native-default-model',
-        modelProvider: 'native-default-provider', reasoningEffort: params.config?.model_reasoning_effort ?? 'medium' }); return;
+      respond(effective(t)); return;
     }
     if (method === 'thread/list') {
+      if (threadPages) {
+        const offset = params.cursor === undefined ? 0 : Number(String(params.cursor).replace('native-threads:', ''));
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset >= threadPages.length) { error(-32602, 'bad thread cursor'); return; }
+        respond({ nextCursor: offset + 1 < threadPages.length ? `native-threads:${offset + 1}` : null, ...threadPages[offset] }); return;
+      }
       const data = listVisible ? [...threads.values()].filter(t => !t.archived && (!params.cwd || params.cwd === t.cwd)) : [];
       respond({ data: data.map(t => snapshot(t, false)), nextCursor: null }); return;
     }
@@ -87,7 +109,8 @@ export async function startFakeNativeCodex(dir: string) {
     if (method === 'thread/name/set') { t.name = params.name; respond({}); return; }
     if (method === 'thread/read' || method === 'thread/resume') {
       if (method === 'thread/resume' && t.status.type === 'notLoaded') t.status = { type: 'idle' };
-      respond({ thread: snapshot(t, method === 'thread/read' ? params.includeTurns === true : params.excludeTurns !== true) }); return;
+      respond({ ...(method === 'thread/resume' ? effective(t) : {}),
+        thread: snapshot(t, method === 'thread/read' ? params.includeTurns === true : params.excludeTurns !== true) }); return;
     }
     if (method === 'thread/turns/list') {
       const offset = params.cursor ? Number(String(params.cursor).replace('native-page:', '')) : 0;
@@ -96,9 +119,8 @@ export async function startFakeNativeCodex(dir: string) {
       respond({ data: all.slice(offset, offset + limit), nextCursor: offset + limit < all.length ? `native-page:${offset + limit}` : null }); return;
     }
     if (method === 'turn/start' || method === 'turn/steer') {
-      // Native clientUserMessageId receipts let the backend reconcile accepted inputs.
-      const previous = t.turns.find(turn => turn.items.some(item => item.clientId === params.clientUserMessageId));
-      if (previous) { respond(method === 'turn/start' ? { turn: previous } : { turnId: previous.id }); return; }
+      // clientUserMessageId identifies a receipt; the real server does NOT
+      // deduplicate it. Every accepted start must remain visible as a new turn.
       let turn = method === 'turn/steer' ? t.turns.find(turn => turn.id === params.expectedTurnId && turn.status === 'inProgress') : undefined;
       if (method === 'turn/steer' && !turn) { error(-32602, 'no matching active turn'); return; }
       if (!turn) {
@@ -150,7 +172,7 @@ export async function startFakeNativeCodex(dir: string) {
         if (!(bytes[0] & 0x80) || !(bytes[1] & 0x80)) { socket.destroy(); return; }
         let length = bytes[1] & 127, at = 2;
         if (length === 126) { if (bytes.length < 4) return; length = bytes.readUInt16BE(2); at = 4; }
-        if (length === 127) {
+        else if (length === 127) {
           if (bytes.length < 10) return;
           const big = bytes.readBigUInt64BE(2);
           if (big > 4n * 1024n * 1024n) { socket.destroy(); return; }
@@ -173,6 +195,15 @@ export async function startFakeNativeCodex(dir: string) {
     home, socketPath, target, requests, replies, paths, threads,
     failNext(method: string, failure: Failure) { failures.set(method, [...(failures.get(method) ?? []), failure]); },
     setListVisible(value: boolean) { listVisible = value; },
+    setThreadListPages(pages: Params[] | undefined) { threadPages = pages; },
+    threadView(id: string) {
+      const thread = threads.get(id); if (!thread) throw new Error('unknown fake thread');
+      return snapshot(thread, false);
+    },
+    notify: notice,
+    nextResponse(method: string, transform: (result: Params) => Params) {
+      responses.set(method, [...(responses.get(method) ?? []), transform]);
+    },
     setPageSize(value: number) { pageSize = value; },
     disconnect() { for (const p of peers) p.socket.destroy(); },
     serverRequest(method: string, params: Params) {
