@@ -127,7 +127,9 @@ export function renderResults(el, o) {
   parts.push(h('div', { class: 'nav rows sr-threads' }, list));
   el.replaceChildren(...parts);
   if (focused) {
-    const again = el.querySelector('[data-key="' + CSS.escape(focused) + '"]');
+    // A failed page replaces More with Retry, the keyboard recovery action.
+    const again = el.querySelector('[data-key="' + CSS.escape(focused) + '"]') ||
+      (focused === 'more' ? el.querySelector('[data-key="retry"]') : null);
     if (again) again.focus({ preventScroll: true });
     else o.box.focus();
   }

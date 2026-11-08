@@ -13,8 +13,6 @@ const isSearch = url => { const u = new URL(url); return u.pathname === '/v1/thr
 // Route matchers for one title query.
 const titled = q => u => u.pathname === '/v1/threads' && u.searchParams.get('q') === q;
 
-const focusFailures = [];
-
 try {
   await withDemo({}, async ctx => {
     const { page, shot, demo, asPeer, hold, fail, allowConsole, countRequests, quiet, ignore } = ctx;
@@ -333,8 +331,40 @@ try {
     assert(JSON.stringify((await shown()).threads) === JSON.stringify([plan.thread_id, notes.thread_id]), 'More did not append the hub summaries');
     await page.keyboard.press('Enter');
     await page.locator('#results .none.bad', { hasText: hostile }).waitFor();
-    if (await focusedKey() !== 'more') focusFailures.push('More focus after hostile page error: ' + await focusedKey());
+    assert(await focusedKey() === 'retry', 'More page error did not transfer focus to Retry: ' + await focusedKey());
     assert(await page.locator('#results img:not(.av), #results script').count() === 0 && !await page.evaluate(() => window.searchExecuted), 'hostile title/error created markup or ran code');
+
+    // Recover from that page error using only the keyboard. Retry starts
+    // over at page one, retaining focus while held and on repeated failure.
+    const recoveryQuery = u => releaseQuery(u) && !u.searchParams.has('cursor');
+    let releaseRecovery;
+    const recoveryGate = new Promise(resolve => { releaseRecovery = resolve; });
+    const recoveryFailure = async route => {
+      await recoveryGate;
+      await json(route, { error: { code: 'unavailable', message: hostile, details: {} } }, 503);
+    };
+    await page.route(recoveryQuery, recoveryFailure);
+    const watchRecovery = ignore(req => recoveryQuery(new URL(req.url())));
+    const recoveryAsked = page.waitForRequest(req => recoveryQuery(new URL(req.url())));
+    await page.keyboard.press('Enter');
+    await recoveryAsked;
+    assert(await focusedKey() === 'retry' && await retry.getAttribute('aria-disabled') === 'true', 'page-error Retry lost focus while held');
+    const beforeRecoveryDuplicate = searchUrls().length;
+    await page.keyboard.press('Enter');
+    await settled();
+    assert(searchUrls().length === beforeRecoveryDuplicate, 'page-error Retry sent a duplicate request');
+    releaseRecovery();
+    watchRecovery();
+    await page.unroute(recoveryQuery, recoveryFailure);
+    await page.locator('#results .none.bad', { hasText: hostile }).waitFor();
+    assert(await focusedKey() === 'retry', 'page-error Retry lost focus after repeated failure');
+    const recoverySucceeded = page.waitForResponse(r => recoveryQuery(new URL(r.url())) && r.ok());
+    await page.keyboard.press('Enter');
+    await recoverySucceeded;
+    await more.waitFor();
+    await settled();
+    assert(JSON.stringify((await shown()).threads) === JSON.stringify([plan.thread_id]), 'page-error Retry did not restart from page one');
+    assert(await focusedKey() === 'search-q', 'successful Retry did not retain the existing input fallback');
 
     // Hold an actual More reply, change the query or participant, and release
     // the obsolete page only after the current result has rendered.
@@ -440,7 +470,6 @@ try {
     await page.locator('#login').waitFor();
     assert(await page.locator('#search-q').count() === 0 && await results.isHidden(), 'sign-out kept the search UI');
   });
-  assert(!focusFailures.length, focusFailures.join('; '));
   console.log('Search passed: peer names match the loaded directory in the page; thread titles come from GET /v1/threads?q= once typing pauses, equal to the hub, with participant= when a peer is picked; misses, searching and a failure have their own states; a q over 128 characters is never sent; Esc (in the box or on a result) and clear bring the lists back; nothing overflows at 1000 or 390 px; Settings keeps its leave guard and slash input; sign-out removes search');
 } finally {
   await cleanBuild();
