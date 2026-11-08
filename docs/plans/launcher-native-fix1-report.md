@@ -19,9 +19,9 @@ Production changes preceded execution of the new native regressions while the so
 Commands (absolute Node on x-boss: `/home/xertrov/.local/opt/node-v22.23.3-linux-x64/bin/node`):
 
 ```sh
-node --disable-warning=ExperimentalWarning --import /tmp/vecnet-native-red-xlF2sp/baseline-loader.mjs --test --test-concurrency=1 connectors/launcher/test/backends/codex-app-server.test.ts
-node --disable-warning=ExperimentalWarning --test --test-concurrency=1 connectors/launcher/test/backends/codex-app-server.test.ts
-node connectors/launcher/node_modules/typescript/bin/tsc -p connectors/launcher/tsconfig.json
+node --import /tmp/vecnet-native-red-xlF2sp/baseline-loader.mjs --test --test-concurrency=1 connectors/launcher/test/backends/codex-app-server.test.ts
+node --test --test-concurrency=1 connectors/launcher/test/backends/codex-app-server.test.ts
+(cd connectors/launcher && node node_modules/typescript/lib/tsc.js --noEmit -p tsconfig.json)
 node --disable-warning=ExperimentalWarning --test --test-concurrency=1 connectors/launcher/test/config.test.ts connectors/launcher/test/policy.test.ts connectors/launcher/test/presence.test.ts connectors/launcher/test/daemon.test.ts
 ```
 
