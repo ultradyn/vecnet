@@ -16,6 +16,13 @@ const actorRecoveryFiles = ['actor-recovery-evidence.json', 'actor-recovery-plan
 const actorRecoveryOpenPath = runRoot => runRoot + '.actor-recovery-open.jsonl';
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const record = x => x !== null && typeof x === 'object' && !Array.isArray(x);
+const nativeShell = '/usr/bin/bash';
+// This is the reviewed narrow shlex_join envelope, not a parser of model output.
+// All generated scripts contain spaces and use printable ASCII without apostrophes.
+function nativeEventCommand(script) {
+  if (typeof script !== 'string' || !script.includes(' ') || script.length > 65536 || /[\x00-\x1f\x7f-\uffff']/.test(script)) fail('actor_unproved');
+  return `${nativeShell} -c '${script}'`;
+}
 function keys(value, names) { if (!record(value) || Object.keys(value).some(k => !names.includes(k)) || names.some(k => !Object.hasOwn(value, k))) fail('invalid_manifest'); }
 function path(value) { if (typeof value !== 'string' || !/^\/[A-Za-z0-9_./+:-]+$/.test(value) || resolve(value) !== value || value === '/') fail('unsafe_path'); return value; }
 function inside(root, value) { path(value); if (!value.startsWith(root + '/')) fail('unsafe_path'); return value; }
@@ -27,7 +34,9 @@ export function validateManifest(m, manifestPath = join(m.runRoot, 'manifest.jso
   if (m.approval.host !== 'xsm' || !Number.isSafeInteger(m.approval.uid) || m.approval.uid < 0 || typeof m.approval.maxApproved !== 'boolean') fail('invalid_manifest');
   path(m.approval.home); path(m.approval.codexHome);
   keys(m.tools, ['node', 'codex', 'tmux', 'systemctl', 'flock', 'script', 'python', 'childSupervisor']); Object.values(m.tools).forEach(path);
-  keys(m.actor, ['mode', 'uuidSource']); if (m.actor.mode !== 'owned-tui-command' || m.actor.uuidSource !== 'status') fail('actor_unproved');
+  keys(m.actor, ['mode', 'uuidSource', 'permission']);
+  if (m.actor.permission !== 'scoped-vecnet-network') fail('invalid_manifest');
+  if (m.actor.mode !== 'owned-tui-command' || m.actor.uuidSource !== 'status') fail('actor_unproved');
   keys(m.generations, ['a', 'b']);
   for (const g of Object.values(m.generations)) {
     keys(g, ['binarySource', 'binary', 'binaryHash', 'assetSource', 'root', 'treeHash']);
@@ -63,6 +72,15 @@ export function validateManifest(m, manifestPath = join(m.runRoot, 'manifest.jso
   if (controls.slice(1).some(c => overlaps(manifestPath, c)) || resources.some((p, i) => controls.some(c => overlaps(p, c)) || resources.some((q, j) => i < j && overlaps(p, q)))) fail('path_collision');
   return structuredClone(m);
 }
+function nativeWriteDirectories(m, runtime = `/run/user/${m.approval.uid}/vecnet`) {
+  return [...new Set([...m.peers.filter(p => p.role === 'receiver').flatMap(p => [join(dirname(p.config), 'codex'), join(dirname(p.config), 'state')]),
+    runtime, join(m.approval.home, '.local/share/vecnet/codex-delivery'), join(m.approval.home, '.local/share/vecnet/codex-notices')])].sort();
+}
+function nativeTuiLaunch(m, session, runtime) {
+  // Controller HOLD: root Codex0.167 rejects -P, and the default_permissions
+  // candidate merges ambient rules. No supported isolated launch is approved.
+  fail('native_policy_unproved');
+}
 export function planHarness(input, manifestPath = join(input.runRoot, 'manifest.json')) {
   const m = validateManifest(input, manifestPath), home = m.approval.home, share = join(home, '.local/share/vecnet-launcher');
   const paths = { share, template: join(home, '.config/systemd/user/vecnet-delivery@.service'), installation: join(share, 'delivery.json'), current: join(share, 'current'), notices: join(home, '.local/share/vecnet/codex-notices'),
@@ -80,7 +98,7 @@ export function planHarness(input, manifestPath = join(input.runRoot, 'manifest.
     operations: { binaries: Object.values(m.generations).map(g => ({ source: g.binarySource, destination: g.binary, sha256: g.binaryHash, mode: '0700' })),
       assets: Object.values(m.generations).map(g => ({ source: g.assetSource, destination: g.root, treeHash: g.treeHash })),
       managerReload: [m.tools.systemctl, '--user', 'daemon-reload'], managerStop: [m.tools.systemctl, '--user', 'stop', ...Object.values(hubs).map(h => `vecnet-delivery@${h.slug}.service`)],
-      tuis: ['a', 'b'].map(session => [m.tools.tmux, '-f', '/dev/null', '-S', join(m.runRoot, 'tmux.sock'), 'new-session', '-d', '-s', session, '-x', '220', '-y', '50', '-c', join(m.runRoot, 'ws-' + session), m.tools.codex, '-s', 'read-only', '-a', 'never']),
+      tuis: ['a', 'b'].map(session => nativeTuiLaunch(m, session, paths.runtime)),
       actorCommands: m.peers.filter(p => p.role === 'receiver').map(p => ({ session: p.session, argv: [m.generations.a.binary, '--net', p.profile, '--json', 'peers'], config: p.config, threadIdentity: 'inherited-from-own-tui' })),
       peerDisables: m.peers.map(p => ({ hub: hubs[p.hub].url, argv: [m.generations.b.binary, '--net', m.operators[p.hub].profile, 'peer', 'disable', p.peerId], config: m.operators[p.hub].config,
         verification: { url: hubs[p.hub].url + '/v1/admin/peers', exactPeerId: p.peerId, credentialFile: m.operators[p.hub].credentialFile } })) },
@@ -105,6 +123,22 @@ function safeAncestors(p) {
     at = join(at, part); try { const s = lstatSync(at); if (s.isSymbolicLink() || !s.isDirectory()) fail('unsafe_path'); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
   }
 }
+function nativeShellIdentity() {
+  for (const p of ['/', '/usr', '/usr/bin', nativeShell]) {
+    const s = lstatSync(p);
+    if (s.isSymbolicLink() || s.uid !== 0 || (s.mode & 0o022) || (p !== nativeShell && !s.isDirectory())) fail('runtime_changed');
+  }
+  if (realpathSync(nativeShell) !== nativeShell) fail('runtime_changed');
+  const identity = s => ({ dev: s.dev, ino: s.ino, uid: s.uid, mode: s.mode, size: s.size, nlink: s.nlink });
+  const fd = openSync(nativeShell, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const s = fstatSync(fd);
+    if (!s.isFile() || s.nlink !== 1 || !(s.mode & 0o111) || s.size > 16 * 1024 * 1024) fail('runtime_changed');
+    const shellHash = hash(readFileSync(fd));
+    if (!equal(identity(s), identity(fstatSync(fd))) || !equal(identity(s), identity(lstatSync(nativeShell)))) fail('runtime_changed');
+    return { shell: nativeShell, shellHash, ...identity(s) };
+  } finally { closeSync(fd); }
+}
 const present = p => { try { lstatSync(p); return true; } catch (e) { if (e.code === 'ENOENT') return false; throw e; } };
 function readPrivate(p, limit = 262144) {
   privatePath(p); const fd = openSync(p, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
@@ -127,18 +161,20 @@ export function treeHash(root) {
 }
 export function proveActor(owned, turns, command) {
   if (!owned?.uuidFromOwnTui || !uuid.test(owned.id) || !owned.cwd || !owned.firstMarker) fail('actor_unproved');
-  const items = turns.flatMap(t => t.items ?? []).filter(i => i.type === 'commandExecution' && i.command === command && i.cwd === owned.cwd && i.exitCode === 0 && i.status === 'completed');
-  if (items.length !== 1) fail('actor_unproved'); return { kind: 'owned-tui-command', commandHash: hash(command), threadId: owned.id };
+  const expectedEventCommand = nativeEventCommand(command), items = turns.flatMap(t => t.items ?? []).filter(i => i.type === 'commandExecution');
+  if (items.length !== 1 || items[0].command !== expectedEventCommand || items[0].cwd !== owned.cwd || items[0].exitCode !== 0 || items[0].status !== 'completed') fail('actor_unproved');
+  return { kind: 'owned-tui-command', commandHash: hash(command), eventCommandHash: hash(expectedEventCommand), threadId: owned.id };
 }
 const textOf = item => typeof item?.text === 'string' ? item.text : (item?.content ?? []).filter(p => p.type === 'text').map(p => p.text).join('');
 const digestObject = value => hash(JSON.stringify(value));
-const actorRequest = command => `Run exactly this local command once, without changing sandbox/policy and without requesting approvals: ${command}`;
+const actorRequest = (command, cwd) => `Run exactly this local command once, without changing sandbox/policy and without requesting approvals: ${command}\nUse exec_command with shell=${nativeShell}, login=false, workdir=${path(cwd)}. Execute the exact script above once; do not change these settings.`;
 // Observation carries no authority to clear an intent. In particular, an idle
 // thread or conversational promise cannot stand in for a correlated user turn.
 export function observeActorTurn({ owned, command, requestText, beforeTurnIds, sourceIntent, actorIntent, historyThreadId, historyComplete, turns }) {
+  const expectedEventCommand = nativeEventCommand(command);
   if (owned?.uuidFromOwnTui !== true || !uuid.test(owned.id) || typeof owned.cwd !== 'string' || !isAbsolute(owned.cwd) ||
       typeof owned.firstMarker !== 'string' || !/^OWN-[a-f0-9]{32}$/.test(owned.firstMarker) ||
-      historyThreadId !== owned.id || historyComplete !== true || typeof command !== 'string' || !command || requestText !== actorRequest(command) ||
+      historyThreadId !== owned.id || historyComplete !== true || typeof command !== 'string' || !command || requestText !== actorRequest(command, owned.cwd) ||
       !record(sourceIntent) || sourceIntent.threadId !== owned.id || !record(actorIntent) || !['a', 'b'].includes(actorIntent.session) ||
       actorIntent.threadId !== owned.id || actorIntent.ownedHash !== digestObject(owned) || actorIntent.commandHash !== hash(command) ||
       actorIntent.requestHash !== hash(requestText) || actorIntent.sourceIntentHash !== digestObject(sourceIntent) ||
@@ -152,13 +188,15 @@ export function observeActorTurn({ owned, command, requestText, beforeTurnIds, s
   if (!textOf(baseline.flatMap(t => t.items).find(i => i.type === 'userMessage')).startsWith(owned.firstMarker) ||
       (actorIntent.beforeHistoryHashes && actorIntent.beforeHistoryHashes[owned.id] !== digestObject(baseline)) ||
       (actorIntent.command !== undefined && actorIntent.command !== command) ||
+      (actorIntent.expectedEventCommand !== undefined && actorIntent.expectedEventCommand !== expectedEventCommand) ||
+      (actorIntent.eventCommandHash !== undefined && actorIntent.eventCommandHash !== hash(expectedEventCommand)) ||
       (actorIntent.requestText !== undefined && actorIntent.requestText !== requestText) ||
       (actorIntent.beforeTurnIds !== undefined && !equal(actorIntent.beforeTurnIds, beforeTurnIds))) fail('actor_unproved');
   const matches = fresh.flatMap(turn => turn.items.filter(i => i.type === 'userMessage' && textOf(i) === requestText).map(() => turn));
   if (matches.length > 1 || turns.some(t => t.items.some(i => !['userMessage', 'agentMessage', 'reasoning', 'commandExecution'].includes(i.type)))) fail('actor_unproved');
   if (!matches.length) return { status: 'pending' };
   const turn = matches[0], commands = fresh.flatMap(t => t.items.filter(i => i.type === 'commandExecution').map(item => ({ turn: t, item })));
-  if (commands.length > 1 || commands.some(c => c.turn !== turn || c.item.command !== command || c.item.cwd !== owned.cwd ||
+  if (commands.length > 1 || commands.some(c => c.turn !== turn || c.item.command !== expectedEventCommand || c.item.cwd !== owned.cwd ||
       !['completed', 'inProgress'].includes(c.item.status) || (c.item.status === 'completed' && c.item.exitCode !== 0))) fail('actor_unproved');
   if (turns.some(t => t.status === 'inProgress' || t.items.some(i => i.status === 'inProgress'))) return { status: 'pending' };
   if (fresh.length !== 1) fail('actor_unproved');
@@ -358,10 +396,12 @@ export function createHarness(raw, ports = {}) {
   const credentials = () => [...new Set([...m.peers.map(p => p.config), ...Object.values(m.operators).flatMap(p => [p.config, p.credentialFile]), m.rotationFile])];
   const toolsOwned = () => {
     containmentTools(m.tools.python, m.tools.childSupervisor);
+    const shell = nativeShellIdentity();
     const current = Object.fromEntries(Object.values(m.tools).map(tool => {
       if (realpathSync(tool) !== tool || !statSync(tool).isFile()) fail('runtime_changed');
       return [tool, hash(readFileSync(tool))];
     }));
+    current[nativeShell] = shell.shellHash;
     if (initialTools && !equal(current, initialTools)) fail('runtime_changed');
     initialTools ??= current; return current;
   };
@@ -668,6 +708,14 @@ export function createHarness(raw, ports = {}) {
     for (const p of locks) { mkdirPrivate(dirname(p), journal.dirs); privatePath(dirname(p), { directory: true });
       if (!present(p)) { const fd = openSync(p, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600); closeSync(fd); }
       const s = privatePath(p); journal.locks[p] = { dev: s.dev, ino: s.ino }; save(); }
+    if (!journal.nativeDirectories) {
+      journal.nativeDirectories = {};
+      for (const root of nativeWriteDirectories(m, plan.paths.runtime)) {
+        mkdirPrivate(root, journal.dirs); const s = privatePath(root, { directory: true });
+        journal.nativeDirectories[root] = { dev: s.dev, ino: s.ino }; save();
+      }
+    }
+    checkNativeDirectories();
     await locked(locks, async () => {
       const current = await states(); if (plan.units.some(unit => current[unit]?.ActiveState !== 'inactive') || present(plan.paths.registry)) fail('preexisting_consumer');
       await publish(); });
@@ -698,15 +746,6 @@ export function createHarness(raw, ports = {}) {
     const own = rows.filter(row => row.peer?.peer_id === p.id); return own.length === 1 && own[0].disabled === true;
   }
   const recoveryPath = name => join(m.runRoot, 'actor-recovery-' + name + '.json');
-  function writeActorEvidence(name, bytes) {
-    checkLifecycle(); privatePath(m.runRoot, { directory: true });
-    const p = recoveryPath(name); safeAncestors(p);
-    const fd = openSync(p, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-    try { writeFileSync(fd, bytes); fchmodSync(fd, 0o600); fsyncSync(fd); } finally { closeSync(fd); }
-    const dir = openSync(m.runRoot, constants.O_RDONLY | constants.O_DIRECTORY);
-    try { fsyncSync(dir); } finally { closeSync(dir); }
-    if (readPrivate(p, 32 * 1024 * 1024) !== bytes) fail('ownership_changed');
-  }
   const publicIdentity = s => ({ dev: s.dev, ino: s.ino, uid: s.uid, mode: s.mode });
   function actorPublicParent() {
     const p = plan.paths.actorRecoveryOpen; safeAncestors(p);
@@ -729,37 +768,6 @@ export function createHarness(raw, ports = {}) {
           !equal(publicIdentity(privatePath(plan.paths.actorRecoveryOpen)), state.file) || !equal(actorPublicParent(), state.parent)) fail('actor_recovery_publication_open');
     } catch { fail('actor_recovery_publication_open'); }
   }
-  function publishActorOpen(before, evidence, planBytes, previous) {
-    let fd, directory;
-    try {
-      checkLifecycle();
-      const parent = actorPublicParent(), p = plan.paths.actorRecoveryOpen;
-      if (previous) checkActorOpen(previous);
-      directory = openSync(dirname(p), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-      if (!equal(publicIdentity(fstatSync(directory)), parent)) fail('actor_recovery_publication_open');
-      fd = openSync(p, constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK |
-        (previous ? constants.O_APPEND : constants.O_CREAT | constants.O_EXCL), 0o600);
-      if (!previous) fchmodSync(fd, 0o600);
-      const s = fstatSync(fd), file = publicIdentity(s);
-      if (!s.isFile() || s.uid !== uid() || s.nlink !== 1 || (s.mode & 0o7777) !== 0o600 ||
-          s.size !== Buffer.byteLength(previous?.bytes ?? '') || (previous && !equal(file, previous.file)) ||
-          readPrivate(journalPath, 4 * 1024 * 1024) !== before) fail('actor_recovery_publication_open');
-      if (previous) checkActorOpen(previous);
-      const line = actorOpenLine(before, evidence, planBytes, previous?.bytes), state = { parent, file, bytes: (previous?.bytes ?? '') + line };
-      writeFileSync(fd, line); fsyncSync(fd);
-      checkActorOpen(state);
-      if (!equal(publicIdentity(fstatSync(fd)), file) || !equal(publicIdentity(fstatSync(directory)), parent)) fail('actor_recovery_publication_open');
-      fsyncSync(directory);
-      checkActorOpen(state);
-      if (readPrivate(journalPath, 4 * 1024 * 1024) !== before) fail('actor_recovery_publication_open');
-      return state;
-    } catch { fail('actor_recovery_publication_open'); }
-    finally {
-      let uncertain = false;
-      for (const descriptor of [fd, directory]) if (descriptor !== undefined) { try { closeSync(descriptor); } catch { uncertain = true; } }
-      if (uncertain) fail('actor_recovery_publication_open');
-    }
-  }
   function validateActorArchive() {
     const r = journal.actorRecovery;
     if (journal.actorIntent || r.status !== 'aborted_without_command' || r.reason !== 'owned_actor_terminated_without_command' ||
@@ -780,142 +788,6 @@ export function createHarness(raw, ports = {}) {
     const publicBytes = firstLine + lastLine;
     if (!record(r.publicOpen) || r.publicOpen.hash !== hash(publicBytes)) fail('actor_recovery_publication_open');
     checkActorOpen({ ...r.publicOpen, bytes: publicBytes });
-  }
-  function failedActorLocalState() {
-    installedUnchanged();
-    const first = m.peers.find(p => p.role === 'receiver' && p.hub === 'fly' && p.session === 'a');
-    const failed = journal.actorIntent, own = journal.threads.a;
-    if (!record(failed) || failed.failure?.kind !== 'owned-actor-not-executed' || journal.actorRecovery ||
-        journal.phase !== 'running' || journal.generation.binary !== 'a' || journal.generation.assets !== 'a' ||
-        !equal(Object.keys(journal.threads).sort(), ['a', 'b']) || Object.values(journal.threads).some(t => !t.launch) ||
-        journal.threadIntent || journal.intent || journal.pending || journal.deliveries !== undefined || journal.diagnosticIntent || journal.retiring || journal.credentialRemovals ||
-        journal.children?.length || journal.childAmbiguities?.length || journal.proofs.length || Object.keys(journal.owners).length ||
-        !unique(journal.completed) || !['a', 'b'].every(s => journal.completed.includes('control-' + s)) ||
-        journal.completed.some(s => !['control-a', 'control-b', 'close-a', 'close-b'].includes(s)) ||
-        journal.inputs.sources.length || Object.values(journal.inputs.bindings).some(v => v !== null) ||
-        !equal(journal.sourceIntent, actorSourceIntent(first)) || !record(failed.beforeHistoryHashes) ||
-        !equal(Object.keys(failed.beforeHistoryHashes).sort(), Object.values(journal.threads).map(t => t.id).sort()) ||
-        Object.values(failed.beforeHistoryHashes).some(v => typeof v !== 'string' || !sha.test(v)) ||
-        !Array.isArray(failed.beforeTurnIds) || !failed.beforeTurnIds.length) fail('ownership_changed');
-    for (const g of Object.values(m.generations)) if (hash(readFileSync(g.binarySource)) !== g.binaryHash || treeHash(g.assetSource) !== g.treeHash) fail('ownership_changed');
-    const { failure, ...intent } = failed, command = actorCommand(first), requestText = actorRequest(command);
-    if (!equal(intent, { session: 'a', command, requestText, commandHash: hash(command), requestHash: hash(requestText), threadId: own.id,
-      ownedHash: digestObject(own), beforeTurnIds: intent.beforeTurnIds, beforeTurnIdsHash: digestObject(intent.beforeTurnIds),
-      beforeHistoryHashes: intent.beforeHistoryHashes, sourceIntentHash: digestObject(journal.sourceIntent) })) fail('actor_unproved');
-    const required = [...inputLocks, join(plan.paths.data, 'registry.lock'), ...Object.values(hubs).flatMap(h =>
-      [join(plan.paths.runtime, `start-${h.slug}.lock`), join(plan.paths.runtime, `delivery-${h.slug}.lock`)])];
-    if (required.some(p => !journal.locks[p] || !heldResources?.has(p)) || present(plan.paths.registry) || Object.values(hubs).some(h =>
-      present(join(plan.paths.data, h.slug)) || present(join(plan.paths.notices, h.slug)) || present(join(plan.paths.runtime, `delivery-${h.slug}.json`)))) fail('ownership_changed');
-    for (const p of m.peers.filter(p => p.role === 'receiver')) {
-      const auto = join(plan.paths.runtime, 'auto-' + hash(p.config + '\0' + p.profile + '\0\0' + journal.threads[p.session].id) + '.lock');
-      if (present(auto)) fail('ownership_changed');
-    }
-    for (const dir of new Set([join(m.runRoot, 'state'), ...m.peers.map(p => join(dirname(p.config), 'state'))])) {
-      if (present(dir) && readdirSync(dir).length) fail('ownership_changed');
-    }
-    return { intent, failure, own, command, requestText };
-  }
-  async function failedActorHistory() {
-    const p = failedActorLocalState(), histories = {};
-    for (const owned of Object.values(journal.threads)) {
-      const turns = await history(owned); histories[owned.id] = turns;
-      if (!textOf(turns.flatMap(t => t.items ?? []).find(i => i.type === 'userMessage')).startsWith(owned.firstMarker) ||
-          !unique(turns.map(t => t.id)) || turns.some(t => typeof t.id !== 'string' || !t.id || t.status !== 'completed' || !Array.isArray(t.items) ||
-          t.items.some(i => !record(i) || !['userMessage', 'agentMessage', 'reasoning'].includes(i.type) ||
-            (i.status !== undefined && i.status !== 'completed')))) fail('actor_unproved');
-      if (owned.id !== p.own.id && digestObject(turns) !== p.intent.beforeHistoryHashes[owned.id]) fail('actor_unproved');
-    }
-    const observed = observeActorTurn({ owned: p.own, command: p.command, requestText: p.requestText, beforeTurnIds: p.intent.beforeTurnIds,
-      actorIntent: p.intent, sourceIntent: journal.sourceIntent, historyThreadId: p.own.id, historyComplete: true, turns: histories[p.own.id] });
-    if (observed.status !== 'terminal-no-execution' || !equal(observed.proof, p.failure)) fail('actor_unproved');
-    return histories;
-  }
-  function actorProcessInventory(rows, prior = []) {
-    const expected = new Map();
-    for (const { owned } of rows) for (const p of [owned.launch, ...owned.launch.parents]) {
-      const value = { pid: p.pid, birth: p.birth, uid: p.uid };
-      if (expected.has(p.pid) && !equal(expected.get(p.pid), value)) fail('ownership_changed'); expected.set(p.pid, value);
-    }
-    const live = readdirSync('/proc').filter(p => /^\d+$/.test(p)).map(processIdentity).filter(Boolean), byPid = new Map(live.map(p => [p.pid, p]));
-    const priorByPid = new Map(prior.map(p => [p.pid, p])), groups = new Set(), sessions = new Set();
-    const inventory = [...expected.values()].map(p => {
-      const scope = byPid.get(p.pid) ?? priorByPid.get(p.pid);
-      if (!scope || !Number.isSafeInteger(scope.group) || scope.group <= 1 || !Number.isSafeInteger(scope.session) || scope.session <= 1) fail('ownership_changed');
-      groups.add(scope.group); sessions.add(scope.session); return { ...p, group: scope.group, session: scope.session };
-    });
-    for (const p of live) {
-      if (!expected.has(p.pid) && (groups.has(p.group) || sessions.has(p.session))) fail('child_drain_unproved');
-      let at = p; const seen = new Set();
-      while (at && !seen.has(at.pid)) {
-        seen.add(at.pid);
-        if (expected.has(at.pid)) { if (!expected.has(p.pid)) fail('child_drain_unproved'); break; }
-        at = byPid.get(at.parent);
-      }
-      const own = expected.get(p.pid);
-      if (own && (p.uid !== own.uid || p.birth !== own.birth || ['Z', 'X'].includes(p.state))) fail('ownership_changed');
-    }
-    return inventory;
-  }
-  function requireFailedActorUnits(current) {
-    for (const unit of plan.units) {
-      const s = current[unit];
-      const known = s?.LoadState === 'not-found' ? s.UnitFileState === '' : s?.LoadState === 'loaded' && ['disabled', 'static'].includes(s.UnitFileState);
-      if (!known || s.ActiveState !== 'inactive' || s.SubState !== 'dead' ||
-          s.MainPID !== '0' || s.Job !== '' || s.DropInPaths !== '') fail('ownership_changed');
-    }
-  }
-  async function failedActorUnits() { requireFailedActorUnits(await states()); }
-  async function prepareActorRetirement(rows) {
-    failedActorLocalState();
-    if (present(plan.paths.actorRecoveryOpen) || actorRecoveryFiles.some(name => present(join(m.runRoot, name)))) fail('ownership_changed');
-    // Check failed-action/history evidence before any call can publish child or
-    // close intents. Unknown evidence must leave the original bytes untouched.
-    await openRpc();
-    const histories = await failedActorHistory(), processes = actorProcessInventory(rows);
-    await failedActorUnits();
-    const original = readPrivate(journalPath, 4 * 1024 * 1024), intent = structuredClone(journal.actorIntent);
-    const inputs = structuredClone(journal.inputs), sourceIntent = structuredClone(journal.sourceIntent);
-    const evidence = JSON.stringify({ originalJournal: original, histories }) + '\n';
-    const planned = { status: 'FAILED_ACTOR_ABORT_PLANNED', runFailure: 'actor_not_executed', manifestHash, scriptHash,
-      beforeJournalHash: hash(original), actorIntentHash: digestObject(intent), sourceIntentHash: digestObject(sourceIntent),
-      evidenceHash: hash(evidence), historyHash: digestObject(histories), processesHash: digestObject(processes) };
-    const planBytes = JSON.stringify(planned) + '\n';
-    failedActorLocalState();
-    if (readPrivate(journalPath, 4 * 1024 * 1024) !== original) fail('ownership_changed');
-    writeActorEvidence('evidence', evidence); writeActorEvidence('plan', planBytes);
-    const publicOpen = publishActorOpen(original, evidence, planBytes);
-    return { intent, inputs, sourceIntent, histories, processes, planBytes, evidence, publicOpen };
-  }
-  async function finishActorRetirement(prepared, rows, absent, socketOwned) {
-    if (!prepared || !rows.every(r => journal.completed.includes(r.key) && absent(r.owned.launch.pid)) ||
-        !absent(journal.tmux.pid) || prepared.processes.some(p => !absent(p.pid))) fail('ownership_changed');
-    socketOwned(); failedActorLocalState(); actorProcessInventory(rows, prepared.processes);
-    if (!equal(journal.actorIntent, prepared.intent) || !equal(journal.inputs, prepared.inputs) || !equal(journal.sourceIntent, prepared.sourceIntent) ||
-        !equal(await failedActorHistory(), prepared.histories)) fail('actor_unproved');
-    await failedActorUnits();
-    failedActorLocalState(); socketOwned();
-    if (prepared.processes.some(p => !absent(p.pid)) || readPrivate(recoveryPath('plan')) !== prepared.planBytes ||
-        readPrivate(recoveryPath('evidence'), 32 * 1024 * 1024) !== prepared.evidence) fail('ownership_changed');
-    const before = readPrivate(journalPath, 4 * 1024 * 1024);
-    if (!equal(JSON.parse(before), journal)) fail('ownership_changed');
-    writeActorEvidence('before', before);
-    failedActorLocalState(); socketOwned();
-    if (prepared.processes.some(p => !absent(p.pid)) || readPrivate(journalPath, 4 * 1024 * 1024) !== before) fail('ownership_changed');
-    const publicOpen = publishActorOpen(before, prepared.evidence, prepared.planBytes, prepared.publicOpen);
-    checkActorOpen(publicOpen);
-    failedActorLocalState(); socketOwned();
-    if (prepared.processes.some(p => !absent(p.pid)) || readPrivate(journalPath, 4 * 1024 * 1024) !== before) fail('ownership_changed');
-    checkActorOpen(publicOpen);
-    journal.actorRecovery = { status: 'aborted_without_command', reason: 'owned_actor_terminated_without_command', runFailure: 'actor_not_executed',
-      intent: prepared.intent, sourceIntentHash: digestObject(prepared.sourceIntent), beforeJournalHash: hash(before),
-      planHash: hash(prepared.planBytes), evidenceHash: hash(prepared.evidence),
-      publicOpen: { file: publicOpen.file, parent: publicOpen.parent, hash: hash(publicOpen.bytes) } };
-    delete journal.actorIntent; save();
-    const after = readPrivate(journalPath, 4 * 1024 * 1024);
-    if (after !== JSON.stringify(journal) + '\n') fail('ownership_changed');
-    writeActorEvidence('receipt', JSON.stringify({ status: 'FAILED_ACTOR_ABORTED_ORIGINAL_CLEANUP_PENDING',
-      beforeJournalHash: hash(before), afterJournalHash: hash(after), planHash: hash(prepared.planBytes), archiveHash: digestObject(journal.actorRecovery) }) + '\n');
-    validateActorArchive();
   }
   async function cleanup() {
     load(); installedUnchanged();
@@ -952,7 +824,6 @@ export function createHarness(raw, ports = {}) {
       if (row.pending && Boolean(row.owned.closed) !== closed(row)) fail('ownership_changed');
     }
     if (journal.phase === 'rolled_back') return { stage: 'cleanup', code: 'cleaned', count: journal.peers.length };
-    const actorRetirement = journal.actorIntent ? await prepareActorRetirement(rows) : undefined;
     if (journal.intent?.startsWith('close-')) {
       const row = rows.find(row => row.key === journal.intent); if (!row) fail('ownership_changed');
       if (absent(panePid(row))) {
@@ -972,7 +843,6 @@ export function createHarness(raw, ports = {}) {
       if (rows.some(row => !absent(panePid(row)))) fail('ownership_changed');
       const p = socketOwned();
       if (!absent(journal.tmux.pid)) { if (allowLive) return false; fail('ownership_changed'); }
-      if (journal.actorIntent) await finishActorRetirement(actorRetirement, rows, absent, socketOwned);
       if (journal.actorIntent) fail('ownership_changed');
       // Only ENOENT/ESRCH above proves absence. A changed birth or zombie is not absence.
       if (present(p)) {
@@ -1003,7 +873,6 @@ export function createHarness(raw, ports = {}) {
     await locked(locks, async () => {
       installedUnchanged();
       const current = await states();
-      if (actorRetirement) { requireFailedActorUnits(current); failedActorLocalState(); }
       for (const [name, h] of Object.entries(hubs)) if (current[`vecnet-delivery@${h.slug}.service`]?.ActiveState === 'active' && !journal.owners[name]) {
         if (!m.peers.some(p => p.hub === name && p.role === 'receiver' && journal.threads[p.session]?.uuidFromOwnTui)) fail('ownership_changed');
         journal.owners[name] = readOwner(name); save();
@@ -1022,18 +891,12 @@ export function createHarness(raw, ports = {}) {
     });
     for (const row of rows) {
       if (closed(row)) continue;
-      if (actorRetirement) {
-        checkActorOpen(actorRetirement.publicOpen);
-        if (!equal(await failedActorHistory(), actorRetirement.histories)) fail('actor_unproved');
-        actorProcessInventory(rows, actorRetirement.processes);
-      }
       const { session, owned } = row;
       const verify = async () => {
         if (owned.launch) await verifyLaunch(session, owned);
         else { const pane = (await tmux('list-panes', '-t', session, '-F', '#{pane_pid}')).stdout.trim(); if (Number(pane) !== owned.pid || birth(owned.pid) !== owned.birth) fail('ownership_changed'); }
       };
       await verify();
-      if (actorRetirement) checkActorOpen(actorRetirement.publicOpen);
       journal.intent = row.key; save();
       await call(m.tools.tmux, ['-S', join(m.runRoot, 'tmux.sock'), 'send-keys', '-t', session, '-l', '/quit']);
       await pause(1000);
@@ -1050,7 +913,6 @@ export function createHarness(raw, ports = {}) {
         await tmux('kill-server');
         await until(() => !present(join(m.runRoot, 'tmux.sock')) && absent(journal.tmux.pid)); }
       else fail('ownership_changed');
-      if (journal.actorIntent) await finishActorRetirement(actorRetirement, rows, absent, socketOwned);
       journal.completed.push('tmux-closed'); save();
     }
     for (const p of journal.peers) {
@@ -1213,6 +1075,7 @@ export function createHarness(raw, ports = {}) {
     await new Promise(r => setTimeout(r, 1000)); await tmux('send-keys', '-t', session, 'Enter');
   }
   async function makeThread(session) {
+    checkNativeDirectories();
     if (journal.threads[session]) { await checkTmux(); return journal.threads[session]; }
     const socketPath = join(m.runRoot, 'tmux.sock');
     if (journal.tmux) await checkTmux(); else if (present(socketPath)) fail('preexisting_consumer');
@@ -1236,7 +1099,7 @@ export function createHarness(raw, ports = {}) {
       journal.tmux = { dev: socket.dev, ino: socket.ino, pid, birth: own.birth, uid: socket.uid }; save();
       return [{ pid, birth: own.birth }];
     };
-    await call(m.tools.tmux, ['-f', '/dev/null', '-S', socketPath, 'new-session', '-d', '-s', session, '-x', '220', '-y', '50', '-c', cwd, m.tools.codex, '-s', 'read-only', '-a', 'never'],
+    await call(m.tools.tmux, nativeTuiLaunch(m, session, plan.paths.runtime).slice(1),
       { env: { ...baseEnv, VECNET_PROFILE: 'smoke-none' }, handoff });
     if (!journal.tmux) {
       const socket = lstatSync(socketPath);
@@ -1276,9 +1139,82 @@ export function createHarness(raw, ports = {}) {
     await until(async () => (await history(owned)).some(t => t.status === 'completed' && t.items?.some(i => i.clientId === key) && t.items?.some(i => i.type === 'agentMessage' && textOf(i).trim() === 'FACT none')), 180000);
     journal.completed.push('control-' + session); save();
   }
+  function checkNativeDirectories() {
+    const roots = nativeWriteDirectories(m, plan.paths.runtime);
+    if (!record(journal.nativeDirectories) || !equal(Object.keys(journal.nativeDirectories).sort(), roots)) fail('ownership_changed');
+    for (const root of roots) {
+      const s = privatePath(root, { directory: true }), expected = journal.nativeDirectories[root];
+      if (s.dev !== expected.dev || s.ino !== expected.ino) fail('ownership_changed');
+    }
+  }
+  async function checkNativeCapabilities(sessions = ['a', 'b']) {
+    checkNativeDirectories();
+    toolsOwned();
+    const shell = nativeShellIdentity();
+    for (const session of sessions) {
+      const own = journal.threads[session], cap = journal.nativeCapabilities?.[session];
+      if (!own || !record(cap) || cap.threadId !== own.id || cap.ownedHash !== digestObject(own) || cap.cwd !== own.cwd ||
+          cap.shell !== nativeShell || cap.login !== false || !equal(cap.shellIdentity, shell) || cap.shellHash !== shell.shellHash ||
+          cap.toolHash !== journal.tools[m.tools.codex] || cap.launchHash !== digestObject(nativeTuiLaunch(m, session, plan.paths.runtime)) ||
+          cap.requestedScript !== `printf VECNET_NATIVE_COMMAND_${own.id}` || cap.commandHash !== hash(cap.requestedScript) ||
+          cap.expectedEventCommand !== nativeEventCommand(cap.requestedScript) || cap.eventCommandHash !== hash(cap.expectedEventCommand) ||
+          cap.requestText !== actorRequest(cap.requestedScript, own.cwd) || cap.requestHash !== hash(cap.requestText) ||
+          !Array.isArray(cap.beforeTurnIds) || !cap.beforeTurnIds.length || !unique(cap.beforeTurnIds)) fail('native_tool_unproved');
+      const turns = await history(own), baseline = turns.slice(0, cap.beforeTurnIds.length);
+      const matches = turns.filter(turn => turn.id === cap.turnId);
+      if (!equal(baseline.map(turn => turn.id), cap.beforeTurnIds) || digestObject(baseline) !== cap.beforeHistoryHash ||
+          matches.length !== 1 || cap.beforeTurnIds.includes(cap.turnId) || matches[0].status !== 'completed' ||
+          matches[0].items.filter(item => item.type === 'userMessage').length !== 1 ||
+          !matches[0].items.some(item => item.type === 'userMessage' && textOf(item) === cap.requestText) ||
+          !equal(proveActor(own, matches, cap.requestedScript), cap.proof)) fail('native_tool_unproved');
+    }
+  }
+  async function nativeCapability(session) {
+    if (journal.nativeCapabilities?.[session]) { await checkNativeCapabilities([session]); return; }
+    if (journal.nativeCapabilityIntent) fail('native_tool_unproved');
+    installedUnchanged();
+    const own = journal.threads[session], requestedScript = `printf VECNET_NATIVE_COMMAND_${own.id}`;
+    const expectedEventCommand = nativeEventCommand(requestedScript), requestText = actorRequest(requestedScript, own.cwd);
+    const before = await history(own), shellIdentity = nativeShellIdentity();
+    const intent = { session, requestedScript, expectedEventCommand, commandHash: hash(requestedScript), eventCommandHash: hash(expectedEventCommand),
+      requestText, requestHash: hash(requestText), threadId: own.id, ownedHash: digestObject(own), cwd: own.cwd,
+      shell: nativeShell, shellHash: shellIdentity.shellHash, shellIdentity, login: false,
+      toolHash: journal.tools[m.tools.codex], launchHash: digestObject(nativeTuiLaunch(m, session, plan.paths.runtime)),
+      beforeTurnIds: before.map(turn => turn.id), beforeHistoryHash: digestObject(before) };
+    journal.nativeCapabilityIntent = intent; save();
+    try {
+      await submit(session, requestText);
+      const observed = await until(async () => {
+        const turns = await history(own), baseline = turns.slice(0, before.length), fresh = turns.slice(before.length);
+        if (!equal(baseline, before) || !unique(turns.map(turn => turn.id)) || fresh.length > 1) fail('native_tool_unproved');
+        if (!fresh.length) return;
+        const turn = fresh[0], items = turn.items;
+        if (!Array.isArray(items) || typeof turn.id !== 'string' || !turn.id || !['completed', 'inProgress'].includes(turn.status) ||
+            items.some(item => !record(item) || !['userMessage', 'agentMessage', 'reasoning', 'commandExecution'].includes(item.type) ||
+              (item.status !== undefined && !['completed', 'inProgress'].includes(item.status))) ||
+            items.filter(item => item.type === 'userMessage').length !== 1 ||
+            !items.some(item => item.type === 'userMessage' && textOf(item) === requestText)) fail('native_tool_unproved');
+        const commands = items.filter(item => item.type === 'commandExecution');
+        if (commands.length > 1 || commands.some(item => item.command !== expectedEventCommand || item.cwd !== own.cwd ||
+            !['completed', 'inProgress'].includes(item.status) || (item.status === 'completed' && item.exitCode !== 0))) fail('native_tool_unproved');
+        if (turn.status === 'inProgress' || items.some(item => item.status === 'inProgress')) return;
+        if (commands.length !== 1) fail('native_tool_unproved');
+        return { turnId: turn.id, proof: proveActor(own, fresh, requestedScript) };
+      }, 60000);
+      (journal.nativeCapabilities ??= {})[session] = { ...intent, ...observed };
+      delete journal.nativeCapabilityIntent; save();
+      await checkNativeCapabilities([session]);
+    } catch (e) {
+      if (!['native_tool_unproved', 'actor_unproved', 'history_incomplete', 'deadline'].includes(e.code)) throw e;
+      if (journal.nativeCapabilityIntent) { journal.nativeCapabilityIntent.failure = 'native_tool_unproved'; save(); }
+      fail('native_tool_unproved');
+    }
+  }
   async function actor(p, { race = false, override = {}, requireBinding = true } = {}) {
     installedUnchanged();
-    const own = journal.threads[p.session], command = actorCommand(p, { race, override }), requestText = actorRequest(command);
+    await checkNativeCapabilities();
+    const own = journal.threads[p.session], command = actorCommand(p, { race, override }), requestText = actorRequest(command, own.cwd);
+    const expectedEventCommand = nativeEventCommand(command);
     const auto = join(plan.paths.runtime, 'auto-' + hash(p.config + '\0' + p.profile + '\0\0' + own.id) + '.lock');
     if (present(auto) && !journal.locks[auto]) fail('preexisting_consumer');
     const beforeHistoryHashes = {}; let beforeTurnIds;
@@ -1287,13 +1223,19 @@ export function createHarness(raw, ports = {}) {
       if (thread.id === own.id) beforeTurnIds = turns.map(t => t.id);
     }
     journal.sourceIntent = actorSourceIntent(p, requireBinding);
-    journal.actorIntent = { session: p.session, command, requestText, commandHash: hash(command), requestHash: hash(requestText),
+    journal.actorIntent = { session: p.session, command, requestedScript: command, requestText, commandHash: hash(command), requestHash: hash(requestText),
+      expectedEventCommand, eventCommandHash: hash(expectedEventCommand),
       threadId: own.id, ownedHash: digestObject(own), beforeTurnIds, beforeTurnIdsHash: digestObject(beforeTurnIds), beforeHistoryHashes,
       sourceIntentHash: digestObject(journal.sourceIntent) }; save();
     await submit(p.session, requestText);
     const evidence = await until(async () => { const turns = await history(own);
-      const attempted = turns.filter(t => !beforeTurnIds.includes(t.id)).flatMap(t => t.items ?? []).filter(i => i.type === 'commandExecution' && i.command === command);
-      if (attempted.some(i => i.status === 'completed' && i.exitCode !== 0)) fail('actor_sandbox_denied');
+      const fresh = turns.filter(t => !beforeTurnIds.includes(t.id));
+      const attempted = fresh.flatMap(t => t.items ?? []).filter(i => i.type === 'commandExecution');
+      if (fresh.length === 1 && fresh[0].status === 'completed' &&
+          fresh[0].items.filter(i => i.type === 'userMessage').length === 1 &&
+          fresh[0].items.some(i => i.type === 'userMessage' && textOf(i) === requestText) && attempted.length === 1 &&
+          attempted[0].command === expectedEventCommand && attempted[0].cwd === own.cwd && attempted[0].status === 'completed' &&
+          Number.isInteger(attempted[0].exitCode) && attempted[0].exitCode !== 0) fail('actor_sandbox_denied');
       const observed = observeActorTurn({ owned: own, command, requestText, beforeTurnIds, actorIntent: journal.actorIntent,
         sourceIntent: journal.sourceIntent, historyThreadId: own.id, historyComplete: true, turns });
       if (observed.status === 'terminal-execution-unproved') { journal.actorIntent.failure = observed.proof; save(); fail('actor_execution_unproved'); }
@@ -1374,6 +1316,7 @@ export function createHarness(raw, ports = {}) {
     journal.phase = 'running'; save();
     try {
       for (const session of ['a', 'b']) await control(session, await makeThread(session));
+      for (const session of ['a', 'b']) await nativeCapability(session);
       const receivers = m.peers.filter(p => p.role === 'receiver');
       for (const p of receivers) { const step = 'actor-' + p.profile; if (!journal.completed.includes(step)) { await actor(p, { race: p.session === 'b' }); journal.completed.push(step); save(); } await wake(p, 'initial-' + p.profile); }
       const a = receivers.find(p => p.hub === 'fly' && p.session === 'a');

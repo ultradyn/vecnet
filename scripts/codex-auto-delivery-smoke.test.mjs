@@ -35,7 +35,7 @@ function fixture(t) {
     generations: Object.fromEntries(['a', 'b'].map((g, i) => [g, { binarySource: join(runRoot, `artifact-${g}`),
       binary: join(home, `.local/share/vecnet-codex-acceptance/${g}/vecnet`), binaryHash: i ? hashB : hash,
       assetSource: join(runRoot, `assets-${g}`), root: join(home, `.local/share/vecnet-launcher/${g}`), treeHash: i ? hashB : hash }])),
-    actor: { mode: 'owned-tui-command', uuidSource: 'status' }, rotationFile: join(runRoot, 'rotation.json'),
+    actor: { mode: 'owned-tui-command', uuidSource: 'status', permission: 'scoped-vecnet-network' }, rotationFile: join(runRoot, 'rotation.json'),
     operators: { fly: { profile: 'fly-operator', config: join(runRoot, 'fly-operator.toml'), credentialFile: join(runRoot, 'fly-operator.json') },
       dev: { profile: 'operator', config: join(runRoot, 'dev-operator.toml'), credentialFile: join(runRoot, 'dev-operator.json') } },
     peers: [ ['fly', 'a', 'receiver', 'a'], ['fly', 'b', 'receiver', 'b'], ['dev', 'a-dev', 'receiver', 'a'],
@@ -1095,7 +1095,8 @@ const actorDigest = value => createHash('sha256').update(typeof value === 'strin
 function actorObservationInput() {
   const owned = { id: uuid(1), cwd: '/fixture/ws-a', firstMarker: 'OWN-' + '1'.repeat(32), uuidFromOwnTui: true };
   const command = 'env VECNET_CODEX_AUTO_DELIVERY=1 /fixture/vecnet --net a --json peers';
-  const requestText = 'Run exactly this local command once, without changing sandbox/policy and without requesting approvals: ' + command;
+  const requestText = 'Run exactly this local command once, without changing sandbox/policy and without requesting approvals: ' + command +
+    '\nUse exec_command with shell=/usr/bin/bash, login=false, workdir=' + owned.cwd + '. Execute the exact script above once; do not change these settings.';
   const beforeTurnIds = ['seed'];
   const sourceIntent = { kind: 'bind', profile: 'a', as: '', config: '/fixture/a.toml', home: '/fixture/codex',
     hub: 'https://vecnet.xk.io', caller: 'peer_owned', threadId: owned.id, priorInputsHash: actorDigest({ sources: [], bindings: [] }) };
@@ -1133,7 +1134,7 @@ for (const [name, edit] of Object.entries({
   'only agent text repeats the request': p => { p.turns[1].items[0].type = 'agentMessage'; },
   'different operator request': p => { p.turns[1].items[0].text += ' extra'; },
   'another asynchronous turn still in progress': p => { p.turns.push({ id: 'async-turn', status: 'inProgress', items: [] }); },
-  'native command still running': p => { p.turns[1].status = 'inProgress'; p.turns[1].items.push({ type: 'commandExecution', command: p.command, cwd: p.owned.cwd, status: 'inProgress', exitCode: null }); },
+  'native command still running': p => { p.turns[1].status = 'inProgress'; p.turns[1].items.push({ type: 'commandExecution', command: fixtureNativeEvent(p.command), cwd: p.owned.cwd, status: 'inProgress', exitCode: null }); },
 })) test('L-A1 observation remains pending: ' + name, () => {
   const p = actorObservationInput(); edit(p);
   assert.deepEqual(observeActor(p), { status: 'pending' });
@@ -1154,12 +1155,12 @@ for (const [name, edit] of Object.entries({
   'duplicate exact user turns': p => { p.turns.push({ ...structuredClone(p.turns[1]), id: 'duplicate-request' }); },
   'unknown completed tool item': p => { p.turns[1].items.push({ type: 'unknownToolCall', status: 'completed' }); },
   'different executed command': p => { p.turns[1].items.push({ type: 'commandExecution', command: '/bin/true', cwd: p.owned.cwd, exitCode: 0, status: 'completed' }); },
-  'command in another completed turn': p => { p.turns.push({ id: 'other-command', status: 'completed', items: [{ type: 'commandExecution', command: '/bin/true', cwd: p.owned.cwd, exitCode: 0, status: 'completed' }] }); },
-  'exact command wrong cwd': p => { p.turns[1].items.push({ type: 'commandExecution', command: p.command, cwd: '/foreign', exitCode: 0, status: 'completed' }); },
-  'exact command nonzero exit': p => { p.turns[1].items.push({ type: 'commandExecution', command: p.command, cwd: p.owned.cwd, exitCode: 1, status: 'completed' }); },
-  'exact command missing exit': p => { p.turns[1].items.push({ type: 'commandExecution', command: p.command, cwd: p.owned.cwd, status: 'completed' }); },
+  'command in another completed turn': p => { p.turns.push({ id: 'other-command', status: 'completed', items: [{ type: 'commandExecution', command: fixtureNativeEvent(p.command), cwd: p.owned.cwd, exitCode: 0, status: 'completed' }] }); },
+  'exact command wrong cwd': p => { p.turns[1].items.push({ type: 'commandExecution', command: fixtureNativeEvent(p.command), cwd: '/foreign', exitCode: 0, status: 'completed' }); },
+  'exact command nonzero exit': p => { p.turns[1].items.push({ type: 'commandExecution', command: fixtureNativeEvent(p.command), cwd: p.owned.cwd, exitCode: 1, status: 'completed' }); },
+  'exact command missing exit': p => { p.turns[1].items.push({ type: 'commandExecution', command: fixtureNativeEvent(p.command), cwd: p.owned.cwd, status: 'completed' }); },
   'unknown completed turn status': p => { p.turns[1].status = 'unknown'; },
-  'duplicate exact command items': p => { const command = { type: 'commandExecution', command: p.command, cwd: p.owned.cwd, exitCode: 0, status: 'completed' }; p.turns[1].items.push(command, { ...command }); },
+  'duplicate exact command items': p => { const command = { type: 'commandExecution', command: fixtureNativeEvent(p.command), cwd: p.owned.cwd, exitCode: 0, status: 'completed' }; p.turns[1].items.push(command, { ...command }); },
 })) test('L-A1 observation refuses unproved actor history: ' + name, () => {
   const p = actorObservationInput(); edit(p);
   assert.throws(() => observeActor(p), { code: 'actor_unproved' });
@@ -1295,11 +1296,12 @@ function assertActorOpen(f, row, stage, journalBytes, previous) {
 async function observeActorRecoveryFs(f, options, work) {
   const names = ['openSync', 'closeSync', 'fsyncSync', 'renameSync'];
   const original = Object.fromEntries(names.map(name => [name, fs[name]])), descriptors = new Map();
-  const probe = { fileSyncs: [], directorySyncs: [], archives: [], receiptStops: [], fault: false };
+  const probe = { fileSyncs: [], directorySyncs: [], archives: [], receiptStops: [], journalReads: 0, fault: false };
   const capture = phase => ({ phase, journal: actorJournalBytes(f), rows: publicOpenRows(f),
     fileSyncCount: probe.fileSyncs.length, directorySyncCount: probe.directorySyncs.length });
   fs.openSync = function(p, flags, ...rest) {
     const target = String(p), writing = typeof flags === 'number' ? Boolean(flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) : /[wa+]/.test(flags);
+    if (target === join(f.m.runRoot, 'journal.json') && !writing) options.atJournalRead?.(++probe.journalReads);
     if (target === actorOpenPath(f) && writing && options.fault === 'open') {
       probe.fault = true; throw Object.assign(Error('fixture public open refused'), { code: 'EACCES' });
     }
@@ -1358,154 +1360,59 @@ test('review1 I1 preflight refuses an existing adjacent public record without ov
   assert.equal(readFileSync(actorOpenPath(f), 'utf8'), prior); assert.equal(existsSync(join(f.m.runRoot, 'journal.json')), false);
   assert.deepEqual(readFileSync(f.peers), peers); assert.deepEqual(readFileSync(f.trace), trace);
 });
-test('review1 I1 durable public OPEN precedes close and binds the exact before journal before intent retirement', async t => {
-  const { f } = await noExecutionActorFixture(t), run = f.ports.run, closes = [];
-  await observeActorRecoveryFs(f, {}, async probe => {
-    f.ports.run = async (command, args, settings) => {
-      if (command === f.m.tools.tmux && args.includes('send-keys') && args.includes('-l') && args.at(-1) === '/quit')
-        closes.push({ journal: actorJournalBytes(f), rows: publicOpenRows(f), durable: probe.directorySyncs.length });
-      return run(command, args, settings);
-    };
-    assert.equal((await f.harness().cleanup()).code, 'cleaned');
-    assert.equal(closes.length, 2); assert.ok(closes.every(v => v.rows.length >= 1 && v.durable >= 1 && JSON.parse(v.journal).actorIntent));
-    assert.equal(probe.fileSyncs.length, 2); assert.equal(probe.directorySyncs.length, 2); assert.equal(probe.archives.length, 1);
-    const first = probe.directorySyncs[0], last = probe.directorySyncs[1], archive = probe.archives[0];
-    assertActorOpen(f, first.rows[0], 'FAILED_ACTOR_ABORT_PLANNED', first.journal);
-    assert.equal(last.rows.length, 2); assert.equal(last.rows[0].line, first.rows[0].line, 'the first public record is never overwritten');
-    assertActorOpen(f, last.rows[1], 'FAILED_ACTOR_RETIREMENT_PLANNED', last.journal, first.rows[0]);
-    assert.equal(last.rows[1].value.beforeJournalHash, actorDigest(readFileSync(actorPrivatePath(f, 'before'), 'utf8')));
-    assert.equal(archive.journal, last.journal); assert.equal(archive.directorySyncCount, 2); assert.equal(archive.rows.length, 2);
-  });
-  await restoredStartup(f);
-});
-for (const fault of ['open', 'directory-fsync']) test('review1 I1 public publication ' + fault + ' retains authority before close', async t => {
+// R-C65: absence-only retirement is forbidden. Preserve the five historical
+// publication boundaries as explicit assertions that none is reached.
+for (const [name, options] of [
+  ['unresolved actor refuses before public planning, close and archive', {}],
+  ['unresolved actor never reaches publication open', { fault: 'open' }],
+  ['unresolved actor never reaches publication directory-fsync', { fault: 'directory-fsync' }],
+  ['unresolved actor refuses before final OPEN publication can begin', { fault: 'retirement-directory-fsync' }],
+  ['unresolved actor refuses before any final receipt or archive', { stopBeforeReceipt: true }],
+]) test('review1 R-C65 ' + name, async t => {
   const { f } = await noExecutionActorFixture(t), before = actorCleanupEffects(f);
-  await observeActorRecoveryFs(f, { fault }, async probe => {
-    await assert.rejects(f.harness().cleanup(), { code: 'actor_recovery_publication_open' });
-    assert.equal(probe.fault, true, 'the actual public publication boundary was reached');
-    assert.equal(probe.archives.length, 0); assert.equal(probe.directorySyncs.length, 0);
-    if (fault === 'directory-fsync') { assert.equal(probe.fileSyncs.length, 1); assert.equal(publicOpenRows(f)[0].value.status, 'OPEN'); }
-    assertActorAuthorityRetained(f, before); assert.equal(existsSync(actorPrivatePath(f, 'before')), false);
+  await observeActorRecoveryFs(f, options, async probe => {
+    await assert.rejects(f.harness().cleanup(), { code: 'actor_unproved' });
+    assert.equal(probe.fault, false, 'the obsolete publication boundary is never reached');
+    assert.equal(probe.fileSyncs.length, 0); assert.equal(probe.directorySyncs.length, 0);
+    assert.equal(probe.receiptStops.length, 0); assert.equal(probe.archives.length, 0);
   });
+  assertActorAuthorityRetained(f, before); assertNoUnknownRetirement(f);
 });
-test('review1 I1 uncertain final OPEN publication retains failed intent after close without archive', async t => {
-  const { f, intent, sourceIntent, inputs } = await noExecutionActorFixture(t);
-  const before = actorCleanupEffects(f);
-  await observeActorRecoveryFs(f, { fault: 'retirement-directory-fsync' }, async probe => {
-    await assert.rejects(f.harness().cleanup(), { code: 'actor_recovery_publication_open' });
-    assert.equal(probe.fault, true); assert.equal(probe.fileSyncs.length, 2); assert.equal(probe.directorySyncs.length, 1);
-    assert.equal(probe.archives.length, 0); assert.equal(publicOpenRows(f).length, 2);
-    const journal = startupJournal(f); assert.deepEqual(journal.actorIntent, intent); assert.equal(journal.actorRecovery, undefined);
-    assert.deepEqual(journal.sourceIntent, sourceIntent); assert.deepEqual(journal.inputs, inputs); assert.deepEqual(journal.owners, {});
-    assert.ok(journal.completed.includes('close-a') && journal.completed.includes('close-b'));
-    assert.equal(journal.completed.includes('evidence_complete'), false); assert.equal(existsSync(actorPrivatePath(f, 'receipt')), false);
-    assert.deepEqual(readFileSync(f.peers), before.peers);
-  });
-});
-test('review1 I1 stop before final receipt leaves durable public OPEN and preserves the failed archive without replay', async t => {
-  const { f, intent, sourceIntent, inputs } = await noExecutionActorFixture(t);
-  await observeActorRecoveryFs(f, { stopBeforeReceipt: true }, async probe => {
-    await assert.rejects(f.harness().cleanup(), { code: 'fixture_before_final_receipt' });
-    assert.equal(probe.receiptStops.length, 1); assert.equal(probe.archives.length, 1); assert.equal(probe.directorySyncs.length, 2);
-    const last = probe.receiptStops[0]; assert.equal(last.rows.length, 2); assert.equal(last.rows[1].value.status, 'OPEN');
-    const journal = startupJournal(f); assert.equal(journal.actorIntent, undefined); assert.deepEqual(journal.actorRecovery.intent, intent);
-    assert.equal(journal.actorRecovery.runFailure, 'actor_not_executed'); assert.deepEqual(journal.sourceIntent, sourceIntent); assert.deepEqual(journal.inputs, inputs);
-    assert.equal(journal.completed.includes('evidence_complete'), false); assert.deepEqual(journal.owners, {});
-    assert.equal(existsSync(actorPrivatePath(f, 'receipt')), false);
-    const retained = actorJournalBytes(f), publicBytes = readFileSync(actorOpenPath(f), 'utf8');
-    await assert.rejects(f.harness().cleanup());
-    assert.equal(actorJournalBytes(f), retained); assert.equal(readFileSync(actorOpenPath(f), 'utf8'), publicBytes, 'no automatic publication or retirement replay');
-  });
-});
-
-const cleanupUnitFaults = {
-  'unknown LoadState': { LoadState: 'unknown' }, 'missing LoadState': { LoadState: undefined },
-  'unknown UnitFileState': { UnitFileState: 'unknown' }, 'missing UnitFileState': { UnitFileState: undefined },
-  'unknown ActiveState': { ActiveState: 'unknown' }, 'missing ActiveState': { ActiveState: undefined },
-  'unknown SubState': { SubState: 'unknown' }, 'missing SubState': { SubState: undefined },
-  'unknown MainPID': { MainPID: 'unknown' }, 'missing MainPID': { MainPID: undefined },
-  'missing Job': { Job: undefined }, 'pending Job': { Job: '71/start' },
-  'missing DropInPaths': { DropInPaths: undefined }, 'foreign drop-in': { DropInPaths: '/fixture/foreign.conf' },
-  'activating unit': { ActiveState: 'activating', SubState: 'start' }, 'active unit': { ActiveState: 'active', SubState: 'running' },
-  'nonzero MainPID': { MainPID: '12345' },
-};
-function corruptCleanupUnit(stdout, unit, changes) {
-  let changed = false;
-  const output = stdout.trim().split(/\n\n+/).map(block => {
-    const rows = block.split('\n').map(line => { const at = line.indexOf('='); assert.ok(at > 0); return [line.slice(0, at), line.slice(at + 1)]; });
-    const value = Object.fromEntries(rows); if (value.Id !== unit) return block;
-    assert.equal(changed, false); changed = true;
-    for (const [key, next] of Object.entries(changes)) { if (next === undefined) delete value[key]; else value[key] = next; }
-    return Object.entries(value).map(([key, next]) => key + '=' + next).join('\n');
-  }).join('\n\n') + '\n\n';
-  assert.equal(changed, true, 'the actual owned cleanup unit query was observed'); return output;
-}
-for (const [name, changes] of Object.entries(cleanupUnitFaults)) test('review1 I2 cleanup initial unit observation refuses ' + name + ' before effects', async t => {
+test('review1 R-C65 unresolved actor refuses before any unit query or owner adoption', async t => {
   const { f } = await noExecutionActorFixture(t), before = actorCleanupEffects(f), run = f.ports.run;
   let queries = 0;
-  f.ports.run = async (command, args, settings) => {
-    const result = await run(command, args, settings);
-    if (command === f.m.tools.systemctl && args.includes('show')) {
-      queries++; return { ...result, stdout: corruptCleanupUnit(result.stdout, planHarness(f.m).units[0], changes) };
-    }
-    return result;
+  f.ports.run = async (command, args, options) => {
+    if (command === f.m.tools.systemctl) queries++;
+    return run(command, args, options);
   };
-  await assert.rejects(f.harness().cleanup(), { code: 'ownership_changed' }); assert.equal(queries, 1);
-  assertActorAuthorityRetained(f, before); assert.equal(existsSync(actorOpenPath(f)), false); assert.equal(existsSync(actorPrivatePath(f, 'before')), false);
+  await assert.rejects(f.harness().cleanup(), { code: 'actor_unproved' }); assert.equal(queries, 0);
+  assertActorAuthorityRetained(f, before); assertNoUnknownRetirement(f);
 });
-for (const name of ['active unit', 'activating unit', 'pending Job', 'missing Job']) test('review1 I2 cleanup later unit observation refuses ' + name + ' before close or owner adoption', async t => {
-  const { f } = await noExecutionActorFixture(t), before = actorCleanupEffects(f), run = f.ports.run; let queries = 0;
-  f.ports.run = async (command, args, settings) => {
-    const result = await run(command, args, settings);
-    if (command === f.m.tools.systemctl && args.includes('show') && ++queries === 2)
-      return { ...result, stdout: corruptCleanupUnit(result.stdout, planHarness(f.m).units[0], cleanupUnitFaults[name]) };
-    return result;
-  };
-  await assert.rejects(f.harness().cleanup(), { code: 'ownership_changed' }); assert.equal(queries, 2);
-  assertActorAuthorityRetained(f, before); assert.equal(existsSync(actorPrivatePath(f, 'before')), false);
-});
-test('review1 I2 final unit drift retains active failed intent after close and prevents retirement', async t => {
-  const { f, intent, sourceIntent, inputs } = await noExecutionActorFixture(t), run = f.ports.run; let queries = 0;
-  const before = actorCleanupEffects(f);
-  f.ports.run = async (command, args, settings) => {
-    const result = await run(command, args, settings);
-    if (command === f.m.tools.systemctl && args.includes('show') && ++queries === 3)
-      return { ...result, stdout: corruptCleanupUnit(result.stdout, planHarness(f.m).units[0], { Job: '72/start' }) };
-    return result;
-  };
-  await assert.rejects(f.harness().cleanup(), { code: 'ownership_changed' }); assert.equal(queries, 3);
-  const journal = startupJournal(f); assert.deepEqual(journal.actorIntent, intent); assert.equal(journal.actorRecovery, undefined);
-  assert.deepEqual(journal.sourceIntent, sourceIntent); assert.deepEqual(journal.inputs, inputs); assert.deepEqual(journal.owners, {});
-  assert.ok(journal.completed.includes('close-a') && journal.completed.includes('close-b')); assert.equal(journal.completed.includes('evidence_complete'), false);
-  assert.deepEqual(readFileSync(f.peers), before.peers);
-  assert.equal(existsSync(actorPrivatePath(f, 'before')), false); assert.equal(existsSync(actorPrivatePath(f, 'receipt')), false);
-});
-test('review1 I2 both delivery leases stay held on the same inode through close and archive and release afterwards', async t => {
-  const { f } = await noExecutionActorFixture(t), plan = planHarness(f.m), run = f.ports.run, checkpoints = [];
-  const leases = plan.units.map(unit => join(f.ports.runtime, 'delivery-' + unit.slice(16, -8) + '.lock'));
-  const identities = leases.map(path => ({ path, dev: lstatSync(path).dev, ino: lstatSync(path).ino }));
-  const compete = (phase, expected) => {
+test('review1 R-C65 both delivery leases stay held on their original inodes through refusal and release afterwards', async t => {
+  const { f } = await noExecutionActorFixture(t), before = actorCleanupEffects(f), plan = planHarness(f.m);
+  const identities = plan.units.map(unit => {
+    const path = join(f.ports.runtime, 'delivery-' + unit.slice(16, -8) + '.lock'), s = lstatSync(path);
+    return { path, dev: s.dev, ino: s.ino };
+  });
+  const compete = expected => {
     for (const identity of identities) {
-      const before = lstatSync(identity.path); assert.equal(before.dev, identity.dev); assert.equal(before.ino, identity.ino);
-      // --no-fork execs only /usr/bin/true; spawnSync waits for the finite owned
-      // contender and bounds it at 2s. No untracked persistent holder is made.
+      const s = lstatSync(identity.path); assert.equal(s.dev, identity.dev); assert.equal(s.ino, identity.ino);
       const result = spawnSync('/usr/bin/flock', ['--exclusive', '--nonblock', '--no-fork', identity.path, '/usr/bin/true'],
         { env: f.env, stdio: 'pipe', timeout: 2000 });
-      assert.equal(result.error, undefined); assert.equal(result.signal, null); assert.equal(result.status, expected, phase + ': actual competing lease acquisition');
+      assert.equal(result.error, undefined); assert.equal(result.signal, null); assert.equal(result.status, expected);
       const after = lstatSync(identity.path); assert.equal(after.dev, identity.dev); assert.equal(after.ino, identity.ino);
     }
-    checkpoints.push(phase);
   };
-  f.ports.run = async (command, args, settings) => {
-    if (command === f.m.tools.tmux && args.includes('send-keys') && args.includes('-l') && args.at(-1) === '/quit')
-      compete('close-' + args[args.indexOf('-t') + 1], 1);
-    return run(command, args, settings);
-  };
-  await observeActorRecoveryFs(f, { atArchive: () => compete('archive', 1) }, async probe => {
-    assert.equal((await f.harness().cleanup()).code, 'cleaned'); assert.equal(probe.archives.length, 1);
+  let held = false;
+  await observeActorRecoveryFs(f, { atJournalRead: n => {
+    // resourceMode loads before locking; cleanup's second load is inside BOTH
+    // actual held leases, immediately before the unconditional actor refusal.
+    if (n === 2) { compete(1); held = true; }
+  } }, async probe => {
+    await assert.rejects(f.harness().cleanup(), { code: 'actor_unproved' });
+    assert.equal(held, true); assert.ok(probe.journalReads >= 2); assert.equal(probe.archives.length, 0);
   });
-  compete('after-release', 0); assert.deepEqual(checkpoints, ['close-a', 'close-b', 'archive', 'after-release']);
-  await restoredStartup(f);
+  compete(0); assertActorAuthorityRetained(f, before); assertNoUnknownRetirement(f);
 });
 
 // NAP / R-C64 TESTS ONLY. These are source-contract regressions, not native
@@ -1620,26 +1527,41 @@ test('NAP actor permission is explicit, fixed and cannot contain caller-supplied
   assert.throws(() => validateManifest(bad), { code: 'invalid_manifest' });
 });
 function assertNativeLaunchPolicy(m, launch, runtime = planHarness(m).paths.runtime) {
-  const argv = launch.slice(launch.indexOf(m.tools.codex) + 1), profileAt = argv.indexOf('-P');
-  assert.ok(profileAt >= 0, 'an explicit scoped permission profile must override inherited sandbox_mode');
-  const profile = argv[profileAt + 1]; assert.match(profile, /^[a-z][a-z0-9_-]+$/);
-  assert.equal(argv.includes('-s'), false); assert.equal(argv.includes('--sandbox'), false);
-  assert.equal(argv[argv.indexOf('-a') + 1], 'never');
-  assert.deepEqual(argv.flatMap((value, i) => value === '--disable' ? [argv[i + 1]] : []).sort(), ['code_mode', 'code_mode_host']);
-  const configs = new Map(argv.flatMap((value, i) => value === '-c' ? [argv[i + 1]] : []).map(value => {
-    const at = value.indexOf('='); assert.ok(at > 0); return [value.slice(0, at), JSON.parse(value.slice(at + 1))];
-  }));
+  assert.equal(launch.filter(value => value === m.tools.codex).length, 1);
+  const argv = launch.slice(launch.indexOf(m.tools.codex) + 1);
+  const selected = argv.find(value => value.startsWith('default_permissions='));
+  assert.equal(typeof selected, 'string', 'root CLI uses default_permissions, never sandbox-only -P');
+  const profile = JSON.parse(selected.slice('default_permissions='.length));
+  assert.match(profile, /^[a-z][a-z0-9_-]+$/);
   const base = 'permissions.' + profile;
-  assert.equal(configs.get(base + '.extends'), ':read-only'); assert.equal(configs.get(base + '.network.enabled'), true);
-  const actual = [...configs].filter(([key]) => key.startsWith(base + '.filesystem.')).map(([key, value]) => {
-    assert.equal(value, 'write'); return JSON.parse(key.slice((base + '.filesystem.').length));
-  }).sort();
   const receivers = m.peers.filter(p => p.role === 'receiver');
-  const expected = [...new Set([...receivers.map(p => p.config + '.lock'), ...receivers.flatMap(p => [join(dirname(p.config), 'codex'), join(dirname(p.config), 'state')]),
+  const expected = [...new Set([...receivers.flatMap(p => [join(dirname(p.config), 'codex'), join(dirname(p.config), 'state')]),
     runtime, join(m.approval.home, '.local/share/vecnet/codex-delivery'), join(m.approval.home, '.local/share/vecnet/codex-notices')])].sort();
-  assert.deepEqual(actual, expected, 'only exact derived writes; no whole HOME/RUN/CODEX_HOME or installation/operator roots');
-  assert.equal(configs.size, expected.length + 2, 'no hidden policy override or workspace grant');
+  const filesystem = '{' + expected.map(root => JSON.stringify(root) + '="write"').join(',') + '}';
+  const canonical = ['-a', 'never', '--disable', 'code_mode_host', '--disable', 'code_mode',
+    '-c', 'default_permissions=' + JSON.stringify(profile), '-c', base + '.extends=":read-only"', '-c', base + '.network.enabled=true',
+    '-c', base + '.filesystem=' + filesystem];
+  assert.deepEqual(argv, canonical, 'consume the ENTIRE canonical argv: no aliases, unparsed grants, duplicate options or duplicate keys');
 }
+test('NAP launch oracle rejects extra aliases, duplicate options and broad grants in identical vectors', t => {
+  const f = fixture(t), launch = planHarness(f.m).operations.tuis[0];
+  assertNativeLaunchPolicy(f.m, launch);
+  const profile = JSON.parse(launch.find(value => value.startsWith('default_permissions=')).slice('default_permissions='.length));
+  const broad = 'permissions.' + profile + '.filesystem."/"="write"';
+  const existing = launch[launch.indexOf('-c', launch.indexOf(f.m.tools.codex)) + 1];
+  for (const extra of [['--config', broad], ['--config=' + broad], ['-c', broad],
+    ['--config', 'permissions.' + profile + '.filesystem.' + JSON.stringify(f.m.approval.home) + '="write"'],
+    ['--config', 'permissions.' + profile + '.filesystem.' + JSON.stringify(f.m.runRoot) + '="write"'],
+    ['-c', 'permissions.' + profile + '.filesystem.' + JSON.stringify(f.m.peers[0].config + '.lock') + '="write"'],
+    ['-c', 'permissions.' + profile + '.filesystem.' + JSON.stringify(f.m.peers[0].config) + '="write"'],
+    ['-c', 'permissions.' + profile + '.filesystem.' + JSON.stringify(dirname(f.m.operators.fly.credentialFile)) + '="write"'],
+    ['-c', existing], ['-P', profile], ['-a', 'always'], ['--sandbox', 'danger-full-access'], ['--add-dir', f.m.runRoot]]) {
+    const planned = [...launch, ...extra], dispatched = [...planned];
+    assert.deepEqual(planned, dispatched);
+    assert.throws(() => assertNativeLaunchPolicy(f.m, planned));
+    assert.throws(() => assertNativeLaunchPolicy(f.m, dispatched));
+  }
+});
 test('NAP dry-run declares invocation-only exact write scopes and never approvals', t => {
   const f = fixture(t), before = snapshot(f.root), plan = planHarness(f.m);
   for (const launch of plan.operations.tuis) assertNativeLaunchPolicy(f.m, launch);

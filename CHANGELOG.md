@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-11-09: Keep unresolved Codex acceptance actors as failed obligations, require exact pinned native shell events and per-TUI capability probes, and refuse native launch while its scoped permission policy is unproved.
+
 - 2026-11-09: Show send/reply destination names beside full peer IDs and compact CLI/MCP inbox ancestry by default, with explicit sender-chain opt-in; preserve canonical envelopes and delivery semantics.
 
 - 2026-11-09: Preserve live dashboard activity charts and operator activity stats alongside launcher recovery; documented in docs/OPERATOR.md.
