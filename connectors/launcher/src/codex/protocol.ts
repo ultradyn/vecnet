@@ -1,4 +1,4 @@
-export type AllowedMethod = 'initialize' | 'thread/read' | 'thread/turns/list' | 'thread/resume' |
+export type AllowedMethod = 'initialize' | 'configRequirements/read' | 'thread/read' | 'thread/turns/list' | 'thread/resume' |
   'thread/unsubscribe' | 'turn/start' | 'turn/steer';
 export const CODEX_OPT_OUT_NOTIFICATIONS: readonly string[] = Object.freeze([
   'item/agentMessage/delta', 'item/plan/delta', 'item/reasoning/textDelta', 'item/reasoning/summaryTextDelta',

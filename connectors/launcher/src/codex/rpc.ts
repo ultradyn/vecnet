@@ -22,7 +22,7 @@ export class CodexRpcError extends Error {
   }
 }
 const allowed: ReadonlySet<string> = new Set<AllowedMethod>([
-  'initialize', 'thread/read', 'thread/turns/list', 'thread/resume', 'thread/unsubscribe', 'turn/start', 'turn/steer',
+  'initialize', 'configRequirements/read', 'thread/read', 'thread/turns/list', 'thread/resume', 'thread/unsubscribe', 'turn/start', 'turn/steer',
 ]);
 type Pending = { resolve(value: unknown): void; reject(error: CodexRpcError): void; timer: ReturnType<typeof setTimeout> };
 
