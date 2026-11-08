@@ -51,7 +51,11 @@ export async function startFakeNativeCodex(dir: string) {
   const replies: { id: number | string; result?: Params; error?: unknown }[] = [];
   const paths: string[] = [];
   const failures = new Map<string, Failure[]>();
+  const unavailable = new Map<string, { code: number; message: string }>();
   const responses = new Map<string, ((result: Params) => Params)[]>();
+  const noRolloutResumeFailures: string[] = [], acceptedResumes: string[] = [];
+  let startPolicy: ((policy: Params) => void) | undefined;
+  let rejectZeroInputResumes = false;
   let connection = 0, threadId = 0, turnId = 0, requestId = 10000;
   let listVisible = true, pageSize = 100;
   let threadPages: Params[] | undefined;
@@ -72,7 +76,7 @@ export async function startFakeNativeCodex(dir: string) {
     }
     const method = message.method, params = message.params ?? {};
     requests.push({ method, params, connection: peer.connection });
-    const fail = failures.get(method)?.shift();
+    const fail = failures.get(method)?.shift() ?? unavailable.get(method);
     const respond = (result: Params) => {
       if (fail === 'accept-drop') peer.socket.destroy();
       else peer.send({ id: message.id, result: responses.get(method)?.shift()?.(structuredClone(result)) ?? result });
@@ -92,6 +96,9 @@ export async function startFakeNativeCodex(dir: string) {
         sandbox: params.sandbox === 'danger-full-access' ? { type: 'dangerFullAccess' } :
           params.sandbox === 'read-only' ? { type: 'readOnly', networkAccess: false } :
             { type: 'workspaceWrite', writableRoots: [t.cwd], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } };
+      // Unlike nextResponse(), this mutates the durable fake thread settings:
+      // later resumes must keep reporting the same policy until changed.
+      startPolicy?.(t.effective);
       threads.set(t.id, t);
       respond(effective(t)); return;
     }
@@ -108,6 +115,11 @@ export async function startFakeNativeCodex(dir: string) {
     if (!t) { error(-32602, 'unknown thread'); return; }
     if (method === 'thread/name/set') { t.name = params.name; respond({}); return; }
     if (method === 'thread/read' || method === 'thread/resume') {
+      if (method === 'thread/resume' && rejectZeroInputResumes && t.turns.length === 0) {
+        noRolloutResumeFailures.push(t.id);
+        error(-32600, 'thread has no persisted rollout before its first input'); return;
+      }
+      if (method === 'thread/resume') acceptedResumes.push(t.id);
       if (method === 'thread/resume' && t.status.type === 'notLoaded') t.status = { type: 'idle' };
       respond({ ...(method === 'thread/resume' ? effective(t) : {}),
         thread: snapshot(t, method === 'thread/read' ? params.includeTurns === true : params.excludeTurns !== true) }); return;
@@ -192,8 +204,13 @@ export async function startFakeNativeCodex(dir: string) {
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(target, resolve); });
   await symlink(target, socketPath);
   return {
-    home, socketPath, target, requests, replies, paths, threads,
+    home, socketPath, target, requests, replies, paths, threads, noRolloutResumeFailures, acceptedResumes,
     failNext(method: string, failure: Failure) { failures.set(method, [...(failures.get(method) ?? []), failure]); },
+    setMethodUnavailable(method: string, failure?: { code: number; message: string }) {
+      if (failure) unavailable.set(method, failure); else unavailable.delete(method);
+    },
+    retainStartPolicy(alter: (policy: Params) => void) { startPolicy = alter; },
+    rejectZeroInputResume(value: boolean) { rejectZeroInputResumes = value; },
     setListVisible(value: boolean) { listVisible = value; },
     setThreadListPages(pages: Params[] | undefined) { threadPages = pages; },
     threadView(id: string) {

@@ -422,6 +422,26 @@ export default definePlugin<CodexConfig>({
         if (!o || o.settled) return { found: 'none' };
         const h = await attach(o, hooks); return { found: h.state().kind === 'parked' ? 'parked' : 'live', handle: h };
       },
+      async settleOwned(r, _mode) {
+        if (r.backend !== 'codex-app-server' || r.host !== ctx.host) throw new Error('Codex cleanup ownership mismatch');
+        const o = owned().find(x => x.id === r.id && x.tag === r.extra?.tag);
+        if (!o || !o.id || !o.threadSource?.startsWith('vecnet-launcher:') ||
+            !['identified', 'settled'].includes(o.phase ?? '')) throw new Error('Codex cleanup provenance unresolved');
+        const expected = ref(o).extra!;
+        if (Object.keys(r.extra ?? {}).length !== Object.keys(expected).length ||
+            Object.entries(expected).some(([key, value]) => r.extra?.[key] !== value)) throw new Error('Codex cleanup reference mismatch');
+        if (o.settled) return;
+        // Before initial dispatch there is no rollout to resume (or necessarily
+        // to read). Archive that exact recorded id directly. An uncertain input
+        // dispatch instead requires history and interruption before archiving.
+        if (o.initialSent || o.initialSending) {
+          const active = (await history(o.id)).findLast(t => t.status === 'inProgress');
+          if (active) await call('turn/interrupt', { threadId: o.id, turnId: active.id });
+        }
+        await call('thread/archive', { threadId: o.id });
+        save({ ...o, settled: true, phase: 'settled' });
+        handles.get(o.id)?.disconnected(); handles.delete(o.id);
+      },
       async findByTag(tag) { const o = owned().find(x => x.tag === tag && !x.settled); if (!o) return null; const found = await recover(o); return found ? ref(found) : null; },
       async listOwned() {
         const result: SessionRef[] = [];

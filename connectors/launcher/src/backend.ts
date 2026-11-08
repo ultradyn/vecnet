@@ -143,6 +143,10 @@ export type ReattachResult =
 
 export interface Backend {
   cleanupWorkspace?(ref: SessionRef): Promise<{ removed: boolean; reason?: string }>;
+  /** Failed-launch cleanup only: prove exact owned settlement without obtaining
+   * an input-capable attachment. Reject uncertain ownership or cleanup; persist
+   * settlement before resolving. Backends without this retain reattach+settle. */
+  settleOwned?(ref: SessionRef, mode: SettleMode): Promise<void>;
   readonly id: BackendId;
   capabilities(): Promise<BackendCapabilities>;
   health(signal?: AbortSignal): Promise<BackendHealth>;

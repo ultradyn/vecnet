@@ -21,6 +21,7 @@ import { createParentBridge } from '../../src/parent-bridge.ts';
 import { routeApproval } from '../../src/policy.ts';
 import type { Directory } from '../../src/directory.ts';
 import type { LaunchPermission } from '../../src/backend.ts';
+import type { SessionRef, SettleMode } from '../../src/backend.ts';
 import type { SendRequest } from '../../../hub-client/src/wire.ts';
 import { threadDelivery } from '../fixtures.ts';
 import type { LaunchSpec, PluginContext, SessionHooks, SessionHandle, TurnCursor, TurnInput, PermissionMode, PermissionRequest, AgentQuestion } from '../../src/backend.ts';
@@ -761,6 +762,138 @@ test('a Git allocation failure before native dispatch is safely absent and its c
   f.clock.advance(2);
   assert.equal((await h.sweep()).workspacesRemoved.length, 1);
   await assert.rejects(stat(join(f.workspaceRoot, h.job().jobId)), { code: 'ENOENT' });
+});
+
+for (const failure of ['retained-broader-policy', 'zero-input-no-rollout'] as const) {
+  for (const archiveAvailable of [true, false]) {
+    test(`fix2 ${failure}: exact owned cleanup ${archiveAvailable ? 'available' : 'unavailable then retried'} through launcher recovery`, timeout, async t => {
+      const f = await fixture(t), h = await launchHarness(t, f);
+      const workspace = join(f.workspaceRoot, h.job().jobId);
+      const foreign = { id: 'foreign-fix2-thread', cwd: workspace, name: 'untouched foreign thread',
+        threadSource: 'foreign-provenance', status: { type: 'idle' }, archived: false, turns: [] };
+      f.daemon.threads.set(foreign.id, foreign);
+      if (failure === 'retained-broader-policy') f.daemon.retainStartPolicy(policy => { policy.approvalPolicy = 'never'; });
+      else {
+        f.daemon.rejectZeroInputResume(true);
+        // Lose naming's response before any input. This forces the old cleanup
+        // path to reconnect, where a zero-input thread has no rollout to resume.
+        f.daemon.failNext('thread/name/set', 'drop');
+      }
+      if (!archiveAvailable) f.daemon.setMethodUnavailable('thread/archive', { code: -32001, message: 'archive temporarily unavailable' });
+      let approvalCalls = 0, questionCalls = 0, settlementChecks = 0;
+      h.deps.hooks = () => ({ onEvent() {}, async onPermissionRequest() { approvalCalls++; throw new Error('no approval during cleanup'); },
+        async onQuestion() { questionCalls++; throw new Error('no question during cleanup'); } });
+      function guardTerminalReport() {
+        const report = h.deps.jobs.report.bind(h.deps.jobs);
+        h.deps.jobs.report = (jobId, state, output, text) => {
+          if (state === 'failed') {
+            assert.equal(h.owned().settled, true, 'persist exact backend settlement before reporting failure');
+            assert.equal(h.owned().phase, 'settled'); settlementChecks++;
+          }
+          report(jobId, state, output, text);
+        };
+      }
+      function assertNoInputOrForeignOperations() {
+        assert.equal(f.methods('turn/start').length, 0); assert.equal(f.methods('turn/steer').length, 0);
+        assert.equal(approvalCalls, 0); assert.equal(questionCalls, 0); assert.deepEqual(f.daemon.replies, []);
+        assert.deepEqual(h.deps.ledger.openApprovals(), []); assert.deepEqual(h.deps.ledger.openQuestions(), []);
+        assert.equal(foreign.archived, false); assert.equal(foreign.name, 'untouched foreign thread');
+        assert.deepEqual(foreign.turns, []);
+        for (const request of f.daemon.requests.filter(request => Object.hasOwn(request.params, 'threadId'))) {
+          assert.equal(request.params.threadId, h.owned().id, request.method);
+        }
+      }
+      guardTerminalReport();
+      assert.deepEqual(await startLaunch(h.job(), h.deps), { ok: false, error: 'backend_error' });
+      const id = h.owned().id; assert.equal(typeof id, 'string'); assert.notEqual(id, foreign.id);
+      const thread = f.daemon.threads.get(id)!;
+      assert.equal(thread.turns.length, 0);
+      if (failure === 'retained-broader-policy') assert.equal(thread.effective!.approvalPolicy, 'never');
+      if (!archiveAvailable) {
+        assert.equal(h.job().state, 'launching'); assert.equal(h.job().terminal, null);
+        assert.equal(h.job().reattachPending, true); assert.equal(h.deps.ledger.counts().open, 1);
+        assert.notEqual(h.owned().settled, true); assert.equal(thread.archived, false);
+        assert.deepEqual(h.reports(), ['accepted']);
+        await h.restart(); guardTerminalReport();
+        // Verify the refusal persists across a real backend/SQLite restart;
+        // the fixture never supplies a successful policy-approved attachment.
+        if (failure === 'zero-input-no-rollout') {
+          await assert.rejects(h.backend().reattach(h.job().sessionRef!, f.hooks), error =>
+            error instanceof CodexRpcError && error.code === -32600 && !error.ambiguous);
+          assert.ok(f.daemon.noRolloutResumeFailures.includes(id));
+          assert.deepEqual(f.daemon.acceptedResumes, []);
+        }
+        assert.equal((await reattachAll(h.deps))[0].outcome, 'unreachable');
+        f.clock.advance(8 * 86400000);
+        assert.equal((await retryPending(h.deps))[0].outcome, 'unreachable');
+        assert.equal(h.job().terminal, null); assert.equal(h.job().reattachPending, true);
+        assert.notEqual(h.owned().settled, true); assert.equal(thread.archived, false);
+        assert.deepEqual((await h.sweep()).workspacesRemoved, []);
+        assert.equal((await stat(workspace)).isDirectory(), true);
+        assert.ok(h.backend().cleanupWorkspace);
+        assert.equal((await h.backend().cleanupWorkspace!(h.job().sessionRef!)).removed, false);
+        assertNoInputOrForeignOperations();
+        f.daemon.setMethodUnavailable('thread/archive'); f.clock.advance(600001);
+        assert.equal((await retryPending(h.deps))[0].outcome, 'lost');
+      }
+      assert.equal(h.job().terminal, 'failed'); assert.equal(h.job().state, 'ended');
+      assert.equal(h.job().reattachPending, false); assert.equal(h.deps.ledger.counts().open, 0);
+      assert.equal(h.deps.ledger.counts().unparked, 0); assert.deepEqual(h.reports(), ['accepted', 'failed']);
+      assert.equal(settlementChecks, 1); assert.equal(h.owned().settled, true); assert.equal(h.owned().phase, 'settled');
+      assert.equal(h.job().sessionRef?.id, id); assert.equal(thread.archived, true);
+      const archiveCount = f.methods('thread/archive').length;
+      assert.ok(archiveCount > 0);
+      if (archiveAvailable) assert.equal(archiveCount, 1);
+      assert.ok(f.methods('thread/archive').every(request => request.params.threadId === id));
+      assertNoInputOrForeignOperations();
+      await h.restart();
+      assert.equal(h.owned().settled, true); assert.equal(h.owned().phase, 'settled');
+      assert.equal(h.job().terminal, 'failed'); assert.deepEqual(await reattachAll(h.deps), []);
+      assert.deepEqual(await retryPending(h.deps), []);
+      f.clock.advance(2);
+      assert.deepEqual((await h.sweep()).workspacesRemoved, [workspace]);
+      await assert.rejects(stat(workspace), { code: 'ENOENT' });
+      assert.equal(f.methods('thread/start').length, 1); assert.equal(f.methods('thread/archive').length, archiveCount);
+      assertNoInputOrForeignOperations();
+    });
+  }
+}
+
+test('fix2 settleOwned refuses tampered refs before RPC and settles only exact durable provenance without resume', timeout, async t => {
+  const f = await fixture(t), backend = await f.create();
+  f.daemon.retainStartPolicy(policy => { policy.approvalPolicy = 'never'; });
+  f.daemon.rejectZeroInputResume(true);
+  await assert.rejects(backend.launch(f.spec(), f.hooks));
+  const ref = await backend.findByTag(f.spec().tag); assert.ok(ref);
+  await assert.rejects(backend.reattach(ref, f.hooks), error => error instanceof CodexRpcError && error.code === -32600 && !error.ambiguous);
+  const cleanup = (backend as typeof backend & { settleOwned?: (ref: SessionRef, mode: SettleMode) => Promise<void> }).settleOwned;
+  assert.equal(typeof cleanup, 'function'); assert.ok(cleanup);
+  const foreign = { id: 'foreign-fix2-direct', cwd: String(ref.extra!.workspace), name: 'foreign-direct',
+    threadSource: 'foreign-provenance', status: { type: 'idle' }, archived: false, turns: [] };
+  f.daemon.threads.set(foreign.id, foreign);
+  const tampered: SessionRef[] = [
+    { ...ref, backend: 'foreign-backend' }, { ...ref, host: 'foreign-host' }, { ...ref, id: foreign.id },
+    { ...ref, extra: { ...ref.extra, tag: 'vl-job_foreign' } },
+    { ...ref, extra: { ...ref.extra, workspace: f.repo } },
+    { ...ref, extra: { ...ref.extra, branch: 'foreign-branch' } },
+  ];
+  const before = f.daemon.requests.length;
+  for (const forged of tampered) await assert.rejects(cleanup.call(backend, forged, 'lost'));
+  const saved = f.store.get('session:' + f.spec().tag)!;
+  const missingProvenance = JSON.parse(saved); delete missingProvenance.threadSource;
+  f.store.set('session:' + f.spec().tag, JSON.stringify(missingProvenance));
+  try { await assert.rejects(cleanup.call(backend, ref, 'lost')); }
+  finally { f.store.set('session:' + f.spec().tag, saved); }
+  assert.equal(f.daemon.requests.length, before, 'invalid identity never reaches native RPC');
+  const resumes = f.methods('thread/resume').length;
+  await cleanup.call(backend, ref, 'lost');
+  assert.equal(f.owned().settled, true); assert.equal(f.owned().phase, 'settled');
+  await cleanup.call(backend, ref, 'lost');
+  assert.deepEqual(f.methods('thread/archive').map(request => request.params.threadId), [ref.id]);
+  assert.equal(f.methods('thread/resume').length, resumes); assert.deepEqual(f.daemon.acceptedResumes, []);
+  assert.equal(f.methods('turn/start').length, 0); assert.equal(f.methods('turn/steer').length, 0);
+  assert.deepEqual(f.permissions, []); assert.deepEqual(f.questions, []); assert.equal(foreign.archived, false);
+  assert.equal(foreign.name, 'foreign-direct'); assert.deepEqual(foreign.turns, []);
 });
 
 test('the fake accepts duplicate clientUserMessageId starts as distinct turns like the real native API', timeout, async t => {
