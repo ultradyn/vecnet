@@ -1,22 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, rm, writeFile, readFile, symlink } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import type { PluginContext } from '../src/backend.ts';
 import { allocate, workspaceRoot } from '../src/backends/acp/workspace.ts';
 import type { AcpLaunchSpec } from '../src/backends/acp/workspace.ts';
+import { acpTestDir } from './fixtures/acp-test-root.ts';
 
 const base = 'a'.repeat(40);
 test('workspace allocation owns worktree creation; root mode never changes branch/files; temp needs no alias repo', async t => {
-  const parent = process.env.ACP_TEST_ROOT ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache'), 'vecnet-launcher', 'acp-tests');
-  assert.ok(parent.startsWith('/') && parent !== '/tmp' && !parent.startsWith('/tmp/'));
-  await mkdir(parent, { recursive: true });
-  const canonicalParent = await realpath(parent);
-  assert.ok(canonicalParent !== '/tmp' && !canonicalParent.startsWith('/tmp/'));
-  const dir = await realpath(await mkdtemp(join(parent, 'vecnet-acp-workspace-')));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  const dir = await acpTestDir(t, 'vecnet-acp-workspace-');
   const repo = join(dir, 'repo'), root = join(dir, 'allocated'); await mkdir(repo);
   const marker = join(repo, 'existing.txt'); await writeFile(marker, 'keep existing checkout');
   const calls: string[][] = [];
@@ -44,13 +38,7 @@ test('workspace allocation owns worktree creation; root mode never changes branc
 
 
 test('real disposable Git: worktree branch/base and project-root preservation', async t => {
-  const parent = process.env.ACP_TEST_ROOT ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache'), 'vecnet-launcher', 'acp-tests');
-  assert.ok(parent.startsWith('/') && parent !== '/tmp' && !parent.startsWith('/tmp/'));
-  await mkdir(parent, { recursive: true });
-  const canonicalParent = await realpath(parent);
-  assert.ok(canonicalParent !== '/tmp' && !canonicalParent.startsWith('/tmp/'));
-  const dir = await realpath(await mkdtemp(join(parent, 'vecnet-acp-git-')));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  const dir = await acpTestDir(t, 'vecnet-acp-git-');
   const repo = join(dir, 'repo'), root = join(dir, 'jobs'); await mkdir(repo);
   const exec = (argv: string[]): Promise<string> => new Promise((resolve, reject) => {
     execFile(argv[0], argv.slice(1), { timeout: 5000, env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } }, (error, stdout) => {
@@ -78,13 +66,7 @@ test('real disposable Git: worktree branch/base and project-root preservation', 
 
 
 test('scratch flag, not alias spelling, gates temp and ordinary modes; canonical /tmp roots are refused before creation', async t => {
-  const parent = process.env.ACP_TEST_ROOT ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache'), 'vecnet-launcher', 'acp-tests');
-  assert.ok(parent.startsWith('/') && parent !== '/tmp' && !parent.startsWith('/tmp/'));
-  await mkdir(parent, { recursive: true });
-  const canonicalParent = await realpath(parent);
-  assert.ok(canonicalParent !== '/tmp' && !canonicalParent.startsWith('/tmp/'));
-  const dir = await realpath(await mkdtemp(join(parent, 'vecnet-acp-scratch-')));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  const dir = await acpTestDir(t, 'vecnet-acp-scratch-');
   const repo = join(dir, 'repo'), root = join(dir, 'jobs'); await mkdir(repo);
   const calls: string[][] = [];
   const ctx = { exec: async (argv: string[]) => { calls.push(argv); return { code: 0, stdout: argv.includes('rev-parse') ? base : 'existing', stderr: '' }; } } as unknown as PluginContext;

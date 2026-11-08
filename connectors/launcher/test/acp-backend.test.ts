@@ -1,26 +1,24 @@
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, realpath, symlink, writeFile, readdir, lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import plugin from '../src/backends/acp/index.ts';
 import type { AcpConfig } from '../src/backends/acp/index.ts';
 import type { AcpLaunchSpec } from '../src/backends/acp/workspace.ts';
 import type { PluginContext, SessionHandle, SessionHooks, TurnEvent, TurnInput } from '../src/backend.ts';
 import { redactText } from '../src/redact.ts';
+import { acpTestDir, acpTestParent } from './fixtures/acp-test-root.ts';
 
 const fixturePath = fileURLToPath(new URL('./fixtures/fake-acp-agent.mjs', import.meta.url));
 const input = (text = 'follow-up', id = 'dly_one'): TurnInput => ({ items: [{ deliveryId: id, messageId: 'msg_one', from: 'peer_one', text, attachments: [] }] });
 async function fixture(t: TestContext, scenario = 'normal') {
-  // Explicit build-cache root; never create test artifacts under /tmp.
-  const parent = process.env.ACP_TEST_ROOT ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache'), 'vecnet-launcher', 'acp-tests');
-  assert.ok(parent.startsWith('/') && parent !== '/tmp' && !parent.startsWith('/tmp/'));
-  await mkdir(parent, { recursive: true });
-  const canonicalParent = await realpath(parent);
-  assert.ok(canonicalParent !== '/tmp' && !canonicalParent.startsWith('/tmp/'));
-  const dir = await mkdtemp(join(parent, 'vecnet-acp-'));
+  const handles = new Set<SessionHandle>();
+  const dir = await acpTestDir(t, 'vecnet-acp-', async () => { for (const h of handles) await h.settle('cancel'); });
   const values = new Map<string, string>(), execs: string[][] = [], log = join(dir, 'wire.jsonl');
   const ctx: PluginContext = {
     host: 'test-host', now: () => new Date(), redact: text => redactText(text).text,
@@ -41,9 +39,8 @@ async function fixture(t: TestContext, scenario = 'normal') {
   const spec = (over: Partial<AcpLaunchSpec> = {}): AcpLaunchSpec => ({ jobId: 'job_test', tag: 'vl-job_test', title: 'test', prompt: 'Hello',
     project: { alias: 'any-scratch-name', repoRoot: '/not/preallocated', baseRef: '', scratch: true }, branch: 'launch/job_test', workspaceMode: 'temp',
     preset: 'fake', permissionMode: 'ask', attachments: [], env: { VECNET_CREDENTIAL: 'test-secret-must-be-scrubbed' }, ...over });
-  const backend = await plugin.create(config, ctx), handles = new Set<SessionHandle>();
+  const backend = await plugin.create(config, ctx);
   const launch = async (over: Partial<AcpLaunchSpec> = {}, useHooks = hooks) => { const h = await backend.launch(spec(over), useHooks); handles.add(h); return h; };
-  t.after(async () => { for (const h of handles) await h.settle('cancel'); await rm(dir, { recursive: true, force: true }); });
   const calls = async (): Promise<Array<Record<string, any>>> => (await readFile(log, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
   return { dir, ctx, config, hooks, backend, spec, launch, calls, values, execs };
 }
@@ -270,7 +267,7 @@ test('I4 child environment preserves safe inputs and denies launcher/credential/
 test('I5 default test root uses the synthetic user persistent cache rather than a host-specific mount', async t => {
   if (process.env.ACP_TEST_ROOT) { t.skip('explicit root supplied'); return; }
   const f = await fixture(t);
-  const expected = join(process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache'), 'vecnet-launcher', 'acp-tests');
+  const expected = await acpTestParent();
   assert.ok(f.dir.startsWith(expected + '/'), 'default ACP fixtures must use the user persistent cache');
 });
 
@@ -283,4 +280,85 @@ test('C1 completed inbound identity tracking has a finite connection budget and 
   const responses = (await f.calls()).filter(c => typeof c.id === 'string' && c.id.startsWith('budget-'));
   assert.equal(responses.length, 4096);
   assert.ok(responses.every(c => c.error?.code === -32601));
+});
+
+
+// Each regression owns its outer sandbox independently of the allocator under
+// test, so the RED run can clean a child even if fixture setup itself throws.
+async function rootSandbox(t: TestContext) {
+  const control = await realpath(process.env.ACP_FIX2_CONTROL_ROOT ?? homedir());
+  assert.ok(control.startsWith('/') && control !== '/tmp' && !control.startsWith('/tmp/'));
+  const dir = await mkdtemp(join(control, 'acp-fix2-root-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  return dir;
+}
+async function withRootEnv<T>(t: TestContext, root: string, explicit: boolean, run: () => Promise<T>): Promise<T> {
+  const saved = { HOME: process.env.HOME, XDG_CACHE_HOME: process.env.XDG_CACHE_HOME, ACP_TEST_ROOT: process.env.ACP_TEST_ROOT };
+  process.env.HOME = join(root, 'synthetic-home');
+  process.env.XDG_CACHE_HOME = root;
+  if (explicit) process.env.ACP_TEST_ROOT = join(root, 'override', 'missing'); else delete process.env.ACP_TEST_ROOT;
+  try { return await run(); }
+  finally { for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } }
+}
+for (const explicit of [false, true]) {
+  test(`fix2 persistent symlink fixture launches from canonical child (${explicit ? 'override' : 'default'})`, async t => {
+    const sandbox = await rootSandbox(t), target = join(sandbox, 'persistent-target'), link = join(sandbox, 'cache-link');
+    await mkdir(target); await symlink(target, link);
+    await withRootEnv(t, link, explicit, async () => {
+      const f = await fixture(t);
+      assert.equal(f.dir, await realpath(f.dir), 'fixture must supply canonical cwd/workspace paths');
+      const h = await f.launch(); await eventsUntil(h, finished);
+      assert.equal(h.ref.extra?.workspace, await realpath(String(h.ref.extra?.workspace)));
+    });
+  });
+  test(`fix2 /tmp ancestor refused before mkdir (${explicit ? 'override' : 'default'})`, async t => {
+    const sandbox = await rootSandbox(t), link = join(sandbox, 'cache-link');
+    await symlink('/tmp', link);
+    const forbiddenName = 'acp-fix2-never-create-' + sandbox.split('/').at(-1);
+    const root = join(link, forbiddenName);
+    const originalMkdir = fsPromises.mkdir;
+    const attempted: string[] = [];
+    const mock = t.mock.method(fsPromises, 'mkdir', async (...args: Parameters<typeof fsPromises.mkdir>) => {
+      const path = String(args[0]);
+      if (path === root || path.startsWith(root + '/') || path === '/tmp/' + forbiddenName || path.startsWith('/tmp/' + forbiddenName + '/')) {
+        attempted.push(path); throw new Error('test intercepted forbidden mkdir before any /tmp artifact');
+      }
+      return Reflect.apply(originalMkdir, fsPromises, args);
+    });
+    syncBuiltinESMExports();
+    try {
+      await withRootEnv(t, root, explicit, async () => { await assert.rejects(fixture(t)); });
+      assert.deepEqual(attempted, [], 'prospective canonical ancestry must be checked before any recursive mkdir');
+      await assert.rejects(lstat('/tmp/' + forbiddenName), { code: 'ENOENT' });
+    } finally { mock.mock.restore(); syncBuiltinESMExports(); }
+  });
+}
+test('fix2 fixture cleanup owns only its unique child, preserving canonical parent and siblings', async t => {
+  const sandbox = await rootSandbox(t), target = join(sandbox, 'persistent-target'), link = join(sandbox, 'cache-link');
+  await mkdir(target); await symlink(target, link);
+  const callbacks: Array<() => Promise<unknown> | unknown> = [];
+  const scoped = { after(fn: () => Promise<unknown> | unknown) { callbacks.push(fn); } } as TestContext;
+  await withRootEnv(t, target, false, async () => {
+    const f = await fixture(scoped), parent = await realpath(join(f.dir, '..'));
+    const sibling = join(parent, 'unrelated-sibling'); await mkdir(sibling); await writeFile(join(sibling, 'keep'), 'sibling');
+    const marker = join(parent, 'keep-parent'); await writeFile(marker, 'parent');
+    const h = await f.launch(); await eventsUntil(h, finished);
+    for (const fn of callbacks.reverse()) await fn();
+    await assert.rejects(lstat(f.dir), { code: 'ENOENT' });
+    assert.equal(await readFile(marker, 'utf8'), 'parent'); assert.equal(await readFile(join(sibling, 'keep'), 'utf8'), 'sibling');
+    assert.equal(await realpath(link), target);
+  });
+});
+test('fix2 registers unique-child cleanup before a later awaited fixture initialization fails', async t => {
+  const sandbox = await rootSandbox(t), callbacks: Array<() => Promise<unknown> | unknown> = [];
+  const scoped = { after(fn: () => Promise<unknown> | unknown) { callbacks.push(fn); } } as TestContext;
+  const mock = t.mock.method(plugin, 'create', async () => { throw new Error('synthetic later initialization failure'); });
+  try {
+    await withRootEnv(t, sandbox, false, async () => {
+      await assert.rejects(fixture(scoped), /synthetic later initialization failure/);
+      assert.ok(callbacks.length > 0, 'owned child cleanup must be registered before plugin.create can reject');
+      for (const fn of callbacks.reverse()) await fn();
+      assert.deepEqual(await readdir(join(sandbox, 'vecnet-launcher', 'acp-tests')), []);
+    });
+  } finally { mock.mock.restore(); }
 });
